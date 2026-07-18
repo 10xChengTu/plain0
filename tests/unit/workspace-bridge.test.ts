@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { createBrowserMockBridge } from "../../app/platform/tauri/browser-mock";
+import {
+	createBrowserMockBridge,
+	type BrowserMockSymlinkCopyObservation,
+} from "../../app/platform/tauri/browser-mock";
 
 describe("browser mock workspace bridge", () => {
 	it("isolates each instance and preserves revisions for cancellation and duplicates", async () => {
@@ -543,13 +546,7 @@ describe("browser mock workspace bridge", () => {
 			message: "The workspace copy conflicts with the source path.",
 		});
 
-		for (const sourcePath of [
-			"src",
-			"fixtures/dangling-link",
-			"fixtures/file-link",
-			"fixtures/directory-link",
-			"fixtures/other",
-		]) {
+		for (const sourcePath of ["src", "fixtures/other"]) {
 			await expect(
 				bridge.workspaceCopy(rootId, sourcePath, rootId, "copy-target"),
 			).rejects.toEqual({
@@ -585,6 +582,297 @@ describe("browser mock workspace bridge", () => {
 			code: "ROOT_NOT_AUTHORIZED",
 			message: "The workspace root is not authorized.",
 		});
+	});
+
+	it("copies raw symlink payloads and reclassifies them at each location", async () => {
+		const observations: BrowserMockSymlinkCopyObservation[] = [];
+		const bridge = createBrowserMockBridge({
+			onSymlinkCopyForTest: (observation) => observations.push(observation),
+		});
+		const added = await bridge.workspacePickRoots("add");
+		const [workspaceRoot, libraryRoot] = added.snapshot.roots;
+		const utf8 = (value: string): readonly number[] => [
+			...new TextEncoder().encode(value),
+		];
+		const fixtures = [
+			{
+				name: "binary-link",
+				kind: "symlink",
+				payload: [0xff, 0x80, 0x2f, 0x2e],
+			},
+			{
+				name: "dangling-link",
+				kind: "symlink",
+				payload: utf8("missing-target"),
+			},
+			{
+				name: "directory-link",
+				kind: "symlinkDirectory",
+				payload: utf8("../src"),
+			},
+			{
+				name: "external-link",
+				kind: "symlink",
+				payload: utf8("../../outside-sentinel"),
+			},
+			{
+				name: "file-link",
+				kind: "symlinkFile",
+				payload: utf8("../README.md"),
+			},
+			{
+				name: "loop-link",
+				kind: "symlink",
+				payload: utf8("loop-link"),
+			},
+			{
+				name: "maximum-link",
+				kind: "symlink",
+				payload: utf8("x".repeat(4 * 1_024)),
+			},
+		] as const;
+
+		for (const { name, kind, payload } of fixtures) {
+			const sourcePath = `fixtures/${name}`;
+			const sameParentPath = `fixtures/same-parent-${name}`;
+			const crossRootPath = `packages/cross-root-${name}`;
+			const sourceStat = await bridge.workspaceStat(
+				workspaceRoot!.rootId,
+				sourcePath,
+			);
+			expect(sourceStat.kind).toBe(kind);
+
+			await bridge.workspaceCopy(
+				workspaceRoot!.rootId,
+				sourcePath,
+				workspaceRoot!.rootId,
+				sameParentPath,
+			);
+			expect(
+				await bridge.workspaceStat(workspaceRoot!.rootId, sameParentPath),
+			).toMatchObject({ kind, size: sourceStat.size });
+
+			await bridge.workspaceCopy(
+				workspaceRoot!.rootId,
+				sourcePath,
+				libraryRoot!.rootId,
+				crossRootPath,
+			);
+			const crossRootStat = await bridge.workspaceStat(
+				libraryRoot!.rootId,
+				crossRootPath,
+			);
+			expect(crossRootStat).toMatchObject({
+				kind: "symlink",
+				size: payload.length,
+			});
+			await expect(
+				bridge.workspaceReadFile(libraryRoot!.rootId, crossRootPath),
+			).rejects.toMatchObject({ code: "ENTRY_TYPE_MISMATCH" });
+
+			const [sameParentObservation, crossRootObservation] = observations.filter(
+				(observation) => observation.sourcePath === sourcePath,
+			);
+			expect(sameParentObservation?.targetPath).toBe(sameParentPath);
+			expect(crossRootObservation?.targetPath).toBe(crossRootPath);
+			expect(sameParentObservation?.payload).toEqual(payload);
+			expect(crossRootObservation?.payload).toEqual(payload);
+			expect(sameParentObservation?.payload).not.toBe(
+				crossRootObservation?.payload,
+			);
+			expect(Object.isFrozen(sameParentObservation)).toBe(true);
+			expect(Object.isFrozen(sameParentObservation?.payload)).toBe(true);
+		}
+
+		const sourceEntries = (
+			await bridge.workspaceReadDirectory(workspaceRoot!.rootId, "fixtures")
+		).entries;
+		expect(sourceEntries).toContainEqual({
+			name: "directory-link",
+			kind: "symlinkDirectory",
+		});
+		expect(sourceEntries).toContainEqual({
+			name: "file-link",
+			kind: "symlinkFile",
+		});
+		const crossRootEntries = (
+			await bridge.workspaceReadDirectory(libraryRoot!.rootId, "packages")
+		).entries;
+		for (const { name } of fixtures) {
+			expect(crossRootEntries).toContainEqual({
+				name: `cross-root-${name}`,
+				kind: "symlink",
+			});
+		}
+		expect(observations).toHaveLength(fixtures.length * 2);
+		expect(
+			observations.find(
+				(observation) =>
+					observation.sourcePath === "fixtures/binary-link" &&
+					observation.targetPath === "fixtures/same-parent-binary-link",
+			)?.payload,
+		).toEqual([0xff, 0x80, 0x2f, 0x2e]);
+		expect(
+			(
+				await bridge.workspaceStat(
+					libraryRoot!.rootId,
+					"packages/cross-root-maximum-link",
+				)
+			).size,
+		).toBe(4 * 1_024);
+	});
+
+	it("copies symlinks without clobbering or creating parent directories", async () => {
+		const bridge = createBrowserMockBridge();
+		const selected = await bridge.workspacePickRoots("replace");
+		const rootId = selected.snapshot.roots[0]!.rootId;
+		const originalLink = await bridge.workspaceStat(
+			rootId,
+			"fixtures/dangling-link",
+		);
+
+		for (const targetPath of ["README.md", "src", "fixtures/dangling-link"]) {
+			await expect(
+				bridge.workspaceCopy(rootId, "fixtures/file-link", rootId, targetPath),
+			).rejects.toEqual({
+				code: "ENTRY_ALREADY_EXISTS",
+				message: "The workspace entry already exists.",
+			});
+		}
+		await expect(
+			bridge.workspaceCopy(
+				rootId,
+				"fixtures/file-link",
+				rootId,
+				"missing/copied-link",
+			),
+		).rejects.toEqual({
+			code: "ENTRY_NOT_FOUND",
+			message: "The workspace entry does not exist.",
+		});
+		await expect(
+			bridge.workspaceCopy(
+				rootId,
+				"fixtures/file-link",
+				rootId,
+				"README.md/copied-link",
+			),
+		).rejects.toEqual({
+			code: "ENTRY_TYPE_MISMATCH",
+			message: "The workspace entry has an incompatible type.",
+		});
+		await expect(
+			bridge.workspaceCopy(
+				rootId,
+				"fixtures/oversized-link",
+				rootId,
+				"missing/copied-link",
+			),
+		).rejects.toEqual({
+			code: "FILE_TOO_LARGE",
+			message: "The workspace symbolic link exceeds the supported copy limit.",
+		});
+
+		expect(
+			await bridge.workspaceStat(rootId, "fixtures/dangling-link"),
+		).toEqual(originalLink);
+		await expect(
+			bridge.workspaceStat(rootId, "missing/copied-link"),
+		).rejects.toMatchObject({ code: "ENTRY_NOT_FOUND" });
+	});
+
+	it("does not publish a mock symlink when its test observer rejects the copy", async () => {
+		const bridge = createBrowserMockBridge({
+			onSymlinkCopyForTest: () => {
+				throw new Error("observer rejected copy");
+			},
+		});
+		const selected = await bridge.workspacePickRoots("replace");
+		const rootId = selected.snapshot.roots[0]!.rootId;
+
+		await expect(
+			bridge.workspaceCopy(
+				rootId,
+				"fixtures/dangling-link",
+				rootId,
+				"empty/rejected-link",
+			),
+		).rejects.toThrow("observer rejected copy");
+		await expect(
+			bridge.workspaceStat(rootId, "empty/rejected-link"),
+		).rejects.toMatchObject({ code: "ENTRY_NOT_FOUND" });
+	});
+
+	it("keeps exact copied symlink payload bytes isolated across paths and mocks", async () => {
+		const observations: BrowserMockSymlinkCopyObservation[] = [];
+		const first = createBrowserMockBridge({
+			onSymlinkCopyForTest: (observation) => observations.push(observation),
+		});
+		const second = createBrowserMockBridge();
+		const firstRoots = (await first.workspacePickRoots("add")).snapshot.roots;
+		const secondRoots = (await second.workspacePickRoots("add")).snapshot.roots;
+		const firstSource = firstRoots[0]!;
+		const firstTarget = firstRoots[1]!;
+		const sourceStat = await first.workspaceStat(
+			firstSource.rootId,
+			"fixtures/binary-link",
+		);
+
+		await first.workspaceCopy(
+			firstSource.rootId,
+			"fixtures/binary-link",
+			firstTarget.rootId,
+			"packages/copied-binary-link",
+		);
+		await first.workspaceRename(
+			firstSource.rootId,
+			"fixtures/binary-link",
+			"fixtures/binary-link-renamed",
+		);
+		await first.workspaceCopy(
+			firstTarget.rootId,
+			"packages/copied-binary-link",
+			firstSource.rootId,
+			"empty/copied-again",
+		);
+		expect(observations).toHaveLength(2);
+		for (const observation of observations) {
+			expect(observation.payload).toEqual([0xff, 0x80, 0x2f, 0x2e]);
+			expect(Object.isFrozen(observation)).toBe(true);
+			expect(Object.isFrozen(observation.payload)).toBe(true);
+		}
+		expect(observations[0]!.payload).not.toBe(observations[1]!.payload);
+		expect(() => {
+			(observations[0]!.payload as number[]).push(0);
+		}).toThrow(TypeError);
+
+		for (const [rootId, path] of [
+			[firstTarget.rootId, "packages/copied-binary-link"],
+			[firstSource.rootId, "empty/copied-again"],
+		] as const) {
+			expect(await first.workspaceStat(rootId, path)).toMatchObject({
+				kind: "symlink",
+				size: sourceStat.size,
+			});
+		}
+		expect(
+			await second.workspaceStat(
+				secondRoots[0]!.rootId,
+				"fixtures/binary-link",
+			),
+		).toMatchObject({ kind: "symlink", size: sourceStat.size });
+		await expect(
+			second.workspaceStat(
+				secondRoots[1]!.rootId,
+				"packages/copied-binary-link",
+			),
+		).rejects.toMatchObject({ code: "ENTRY_NOT_FOUND" });
+		await expect(
+			second.workspaceStat(
+				secondRoots[0]!.rootId,
+				"fixtures/binary-link-renamed",
+			),
+		).rejects.toMatchObject({ code: "ENTRY_NOT_FOUND" });
 	});
 
 	it("checks both root leases before copy path semantics", async () => {

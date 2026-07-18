@@ -29,9 +29,15 @@ const runtimeInfo: RuntimeInfo = Object.freeze({
 
 const MOCK_WORKSPACE_ID = "00000000-0000-4000-8000-000000000001";
 const MAX_FILE_BYTES = 8 * 1_024 * 1_024;
+const MAX_SYMLINK_PAYLOAD_BYTES = 4 * 1_024;
+const MAX_MOCK_SYMLINK_DEPTH = 256;
 const MOCK_MTIME = 1_700_000_000_000;
 const MOCK_CTIME = 1_699_999_000_000;
 const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder("utf-8", {
+	fatal: true,
+	ignoreBOM: true,
+});
 const mockRoots = Object.freeze([
 	Object.freeze({
 		rootId: "00000000-0000-4000-8000-000000000101",
@@ -56,11 +62,22 @@ interface MockDirectoryNode {
 	readonly entries: Map<string, MockNode>;
 }
 
-interface MockUnsupportedNode {
-	readonly kind: Exclude<WorkspaceEntryKind, "file" | "directory">;
+interface MockImmutableBytes {
+	readonly byteLength: number;
+	readonly copy: () => Uint8Array;
 }
 
-type MockNode = MockFileNode | MockDirectoryNode | MockUnsupportedNode;
+interface MockSymlinkNode {
+	readonly kind: "symlink";
+	readonly payload: MockImmutableBytes;
+}
+
+interface MockUnsupportedNode {
+	readonly kind: "other";
+}
+
+type MockNode =
+	MockFileNode | MockDirectoryNode | MockSymlinkNode | MockUnsupportedNode;
 
 function mockFile(contents: string | readonly number[]): MockFileNode {
 	const bytes =
@@ -78,10 +95,148 @@ function oversizedMockFile(): MockFileNode {
 	});
 }
 
-function mockUnsupportedNode(
-	kind: MockUnsupportedNode["kind"],
-): MockUnsupportedNode {
-	return Object.freeze({ kind });
+function immutableMockBytes(
+	contents: string | readonly number[] | Uint8Array,
+): MockImmutableBytes {
+	const bytes =
+		typeof contents === "string"
+			? textEncoder.encode(contents)
+			: Uint8Array.from(contents);
+	return Object.freeze({
+		byteLength: bytes.byteLength,
+		copy: () => bytes.slice(),
+	});
+}
+
+function mockSymlink(
+	payload: string | readonly number[] | Uint8Array,
+): MockSymlinkNode {
+	return Object.freeze({
+		kind: "symlink",
+		payload: immutableMockBytes(payload),
+	});
+}
+
+function mockUnsupportedNode(): MockUnsupportedNode {
+	return Object.freeze({ kind: "other" });
+}
+
+function isMockSymlinkNode(node: MockNode): node is MockSymlinkNode {
+	return node.kind === "symlink";
+}
+
+function mockSymlinkTargetSegments(
+	linkParentSegments: readonly string[],
+	link: MockSymlinkNode,
+): readonly string[] | undefined {
+	let target: string;
+	try {
+		target = textDecoder.decode(link.payload.copy());
+	} catch {
+		return undefined;
+	}
+	if (
+		target.length === 0 ||
+		target.startsWith("/") ||
+		target.startsWith("\\") ||
+		target.includes("\0") ||
+		/^[A-Za-z]:/u.test(target)
+	) {
+		return undefined;
+	}
+
+	const resolved = [...linkParentSegments];
+	for (const segment of target.split("/")) {
+		if (segment.length === 0 || segment === ".") {
+			continue;
+		}
+		if (segment === "..") {
+			if (resolved.length === 0) {
+				return undefined;
+			}
+			resolved.pop();
+			continue;
+		}
+		resolved.push(segment);
+	}
+	return Object.freeze(resolved);
+}
+
+function resolveMockNodeFollowingSymlinks(
+	root: MockDirectoryNode,
+	segments: readonly string[],
+	seen: ReadonlySet<MockSymlinkNode> = new Set(),
+	depth = 0,
+): MockNode | undefined {
+	if (depth > MAX_MOCK_SYMLINK_DEPTH) {
+		return undefined;
+	}
+
+	let node: MockNode = root;
+	const traversed: string[] = [];
+	for (let index = 0; index < segments.length; index += 1) {
+		if (node.kind !== "directory") {
+			return undefined;
+		}
+		const segment = segments[index]!;
+		const child = node.entries.get(segment);
+		if (child === undefined) {
+			return undefined;
+		}
+		if (isMockSymlinkNode(child)) {
+			if (seen.has(child)) {
+				return undefined;
+			}
+			const targetSegments = mockSymlinkTargetSegments(traversed, child);
+			if (targetSegments === undefined) {
+				return undefined;
+			}
+			const nextSeen = new Set(seen);
+			nextSeen.add(child);
+			return resolveMockNodeFollowingSymlinks(
+				root,
+				[...targetSegments, ...segments.slice(index + 1)],
+				nextSeen,
+				depth + 1,
+			);
+		}
+		node = child;
+		traversed.push(segment);
+	}
+	return node;
+}
+
+function classifyMockNode(
+	root: MockDirectoryNode,
+	relativePath: string,
+	node: MockNode,
+): Readonly<{ kind: WorkspaceEntryKind; size: number }> {
+	if (node.kind === "file") {
+		return Object.freeze({ kind: "file", size: node.size });
+	}
+	if (!isMockSymlinkNode(node)) {
+		return Object.freeze({ kind: node.kind, size: 0 });
+	}
+
+	const linkSegments = workspaceRelativePathSegments(relativePath);
+	if (linkSegments === undefined || linkSegments.length === 0) {
+		return Object.freeze({ kind: "symlink", size: node.payload.byteLength });
+	}
+	const targetSegments = mockSymlinkTargetSegments(
+		linkSegments.slice(0, -1),
+		node,
+	);
+	const target =
+		targetSegments === undefined
+			? undefined
+			: resolveMockNodeFollowingSymlinks(root, targetSegments, new Set([node]));
+	if (target?.kind === "file") {
+		return Object.freeze({ kind: "symlinkFile", size: target.size });
+	}
+	if (target?.kind === "directory") {
+		return Object.freeze({ kind: "symlinkDirectory", size: 0 });
+	}
+	return Object.freeze({ kind: "symlink", size: node.payload.byteLength });
 }
 
 function mockDirectory(
@@ -106,11 +261,18 @@ const mockTreeTemplates = new Map<string, MockDirectoryNode>([
 			"binary.bin": mockFile([0, 255, 128, 1, 0, 42]),
 			empty: mockDirectory({}),
 			fixtures: mockDirectory({
-				"dangling-link": mockUnsupportedNode("symlink"),
-				"directory-link": mockUnsupportedNode("symlinkDirectory"),
-				"file-link": mockUnsupportedNode("symlinkFile"),
-				other: mockUnsupportedNode("other"),
+				"binary-link": mockSymlink([0xff, 0x80, 0x2f, 0x2e]),
+				"dangling-link": mockSymlink("missing-target"),
+				"directory-link": mockSymlink("../src"),
+				"external-link": mockSymlink("../../outside-sentinel"),
+				"file-link": mockSymlink("../README.md"),
+				"loop-link": mockSymlink("loop-link"),
+				"maximum-link": mockSymlink("x".repeat(MAX_SYMLINK_PAYLOAD_BYTES)),
+				other: mockUnsupportedNode(),
 				"oversized.bin": oversizedMockFile(),
+				"oversized-link": mockSymlink(
+					"x".repeat(MAX_SYMLINK_PAYLOAD_BYTES + 1),
+				),
 			}),
 			src: mockDirectory({
 				"main.ts": mockFile('export const editor = "Plain";\n'),
@@ -142,7 +304,10 @@ function cloneMockNode(node: MockNode): MockNode {
 			),
 		});
 	}
-	return mockUnsupportedNode(node.kind);
+	if (isMockSymlinkNode(node)) {
+		return mockSymlink(node.payload.copy());
+	}
+	return mockUnsupportedNode();
 }
 
 function cloneMockTrees(): Map<string, MockDirectoryNode> {
@@ -156,8 +321,20 @@ function cloneMockTrees(): Map<string, MockDirectoryNode> {
 
 export type BrowserMockWorkspacePick = "selected" | "cancelled";
 
+export interface BrowserMockSymlinkCopyObservation {
+	readonly sourceRootId: string;
+	readonly sourcePath: string;
+	readonly targetRootId: string;
+	readonly targetPath: string;
+	readonly payload: readonly number[];
+}
+
 export interface BrowserMockBridgeOptions {
 	readonly workspacePicks?: readonly BrowserMockWorkspacePick[];
+	/** Browser-mock test seam; receives a frozen, detached payload copy. */
+	readonly onSymlinkCopyForTest?: (
+		observation: BrowserMockSymlinkCopyObservation,
+	) => void;
 }
 
 function commandError(code: string, message: string): CommandError {
@@ -214,6 +391,13 @@ function copyFileTooLarge(): CommandError {
 	return commandError(
 		"FILE_TOO_LARGE",
 		"The workspace file exceeds the supported copy limit.",
+	);
+}
+
+function symlinkTooLarge(): CommandError {
+	return commandError(
+		"FILE_TOO_LARGE",
+		"The workspace symbolic link exceeds the supported copy limit.",
 	);
 }
 
@@ -372,11 +556,19 @@ export function createBrowserMockBridge(
 		}
 
 		const source = resolveNode(request.sourceRootId, request.sourcePath);
-		if (source.kind !== "file") {
+		let copied: MockNode;
+		if (source.kind === "file") {
+			if (source.size > MAX_FILE_BYTES) {
+				throw copyFileTooLarge();
+			}
+			copied = cloneMockNode(source);
+		} else if (isMockSymlinkNode(source)) {
+			if (source.payload.byteLength > MAX_SYMLINK_PAYLOAD_BYTES) {
+				throw symlinkTooLarge();
+			}
+			copied = cloneMockNode(source);
+		} else {
 			throw entryTypeMismatch();
-		}
-		if (source.size > MAX_FILE_BYTES) {
-			throw copyFileTooLarge();
 		}
 
 		const target = resolveCreateTarget(
@@ -386,7 +578,18 @@ export function createBrowserMockBridge(
 		if (target.parent.entries.has(target.name)) {
 			throw entryAlreadyExists();
 		}
-		target.parent.entries.set(target.name, cloneMockNode(source));
+		if (isMockSymlinkNode(copied)) {
+			options.onSymlinkCopyForTest?.(
+				Object.freeze({
+					sourceRootId: request.sourceRootId,
+					sourcePath: request.sourcePath,
+					targetRootId: request.targetRootId,
+					targetPath: request.targetPath,
+					payload: Object.freeze([...copied.payload.copy()]),
+				}),
+			);
+		}
+		target.parent.entries.set(target.name, copied);
 	};
 
 	return {
@@ -455,9 +658,14 @@ export function createBrowserMockBridge(
 		},
 		async workspaceStat(rootId, relativePath) {
 			const node = resolveNode(rootId, relativePath);
+			const root = trees.get(rootId);
+			if (root === undefined) {
+				throw rootNotAuthorized();
+			}
+			const classified = classifyMockNode(root, relativePath, node);
 			return frozenWorkspaceEntryStat(
-				node.kind,
-				node.kind === "file" ? node.size : 0,
+				classified.kind,
+				classified.size,
 				MOCK_MTIME,
 				MOCK_CTIME,
 			);
@@ -467,11 +675,19 @@ export function createBrowserMockBridge(
 			if (node.kind !== "directory") {
 				throw entryTypeMismatch();
 			}
+			const root = trees.get(rootId);
+			if (root === undefined) {
+				throw rootNotAuthorized();
+			}
 			const entries = [...node.entries].map(
-				([name, child]): WorkspaceDirectoryEntry => ({
-					name,
-					kind: child.kind,
-				}),
+				([name, child]): WorkspaceDirectoryEntry => {
+					const childPath =
+						relativePath.length === 0 ? name : `${relativePath}/${name}`;
+					return {
+						name,
+						kind: classifyMockNode(root, childPath, child).kind,
+					};
+				},
 			);
 			entries.sort((left, right) =>
 				compareWorkspaceEntryNames(left.name, right.name),

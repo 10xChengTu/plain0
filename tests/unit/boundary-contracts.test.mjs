@@ -167,6 +167,14 @@ fn windows_identity(path: &std::path::Path) {
 		relativePath: "src-tauri/src/workspace/writer.rs",
 		source: `
 use rustix::fs::{renameat_with, RenameFlags};
+const MAX_COPY_SYMLINK_BYTES: usize = 4 * 1_024;
+fn read_symlink(parent: &cap_std::fs::Dir) {
+  let mut buffer = [0_u8; MAX_COPY_SYMLINK_BYTES + 1];
+  let _ = rustix::fs::readlinkat_raw(parent, "source", &mut buffer);
+}
+fn stage_symlink(parent: &cap_std::fs::Dir) {
+  let _ = rustix::fs::symlinkat(b"payload", parent, "staging");
+}
 fn rename_exclusive(source: &cap_std::fs::Dir, target: &cap_std::fs::Dir) {
   let _ = renameat_with(source, "old", target, "new", RenameFlags::NOREPLACE);
 }
@@ -331,6 +339,125 @@ describe("Plain workspace Rust boundary contracts", () => {
 				),
 			).toContain(
 				"Cargo metadata must contain exactly one unrenamed runtime cap-fs-ext =4.0.2 dependency",
+			);
+		}
+	});
+
+	it("rejects broad and alternate symlink helpers across production Rust", () => {
+		const hostileSources = [
+			...workspaceSources,
+			{
+				relativePath: "src-tauri/src/workspace/copier.rs",
+				source: `
+use std::os::unix::fs::symlink;
+fn bypass(directory: &cap_std::fs::Dir) {
+  let _ = std::fs::read_link("source");
+  let _ = directory.read_link("source");
+  let _ = directory.read_link_contents("source");
+  let _ = symlink("payload", "target");
+  let _ = directory.symlink("payload", "target");
+}
+`,
+			},
+			{
+				relativePath: "src-tauri/src/syscalls.rs",
+				source: `
+pub(crate) use libc::{readlink, readlinkat};
+pub(crate) use rustix::fs::readlinkat;
+pub(crate) use std::os::unix::fs::symlink;
+`,
+			},
+		];
+		expect(
+			validateWorkspaceRustBoundary(workspaceCargo, hostileSources),
+		).toEqual(
+			expect.arrayContaining([
+				"src-tauri/src/workspace/copier.rs must not use broad or alternate symlink read helpers in production Rust",
+				"src-tauri/src/workspace/copier.rs must not use broad symlink creation helpers in production Rust",
+				"src-tauri/src/syscalls.rs must not use broad or alternate symlink read helpers in production Rust",
+				"src-tauri/src/syscalls.rs must not use broad symlink creation helpers in production Rust",
+			]),
+		);
+	});
+
+	it("keeps symlink syscalls direct, writer-local and bounded by a +1 probe", () => {
+		const writer = workspaceSources.find(
+			({ relativePath }) =>
+				relativePath === "src-tauri/src/workspace/writer.rs",
+		);
+		const viaReexport = [
+			...workspaceSources.map((entry) =>
+				entry.relativePath === writer.relativePath
+					? {
+							...entry,
+							source: `use crate::syscalls::{readlinkat_raw, symlinkat};\n${entry.source
+								.replace("rustix::fs::readlinkat_raw", "readlinkat_raw")
+								.replace("rustix::fs::symlinkat", "symlinkat")}`,
+						}
+					: entry,
+			),
+			{
+				relativePath: "src-tauri/src/syscalls.rs",
+				source: "pub(crate) use rustix::fs::{readlinkat_raw, symlinkat};",
+			},
+		];
+		expect(validateWorkspaceRustBoundary(workspaceCargo, viaReexport)).toEqual(
+			expect.arrayContaining([
+				"src-tauri/src/syscalls.rs must not alias or re-export rustix::fs::readlinkat_raw",
+				"src-tauri/src/syscalls.rs must not use rustix::fs::readlinkat_raw outside the workspace writer",
+				"src-tauri/src/workspace/writer.rs must not alias or re-export rustix::fs::symlinkat",
+			]),
+		);
+
+		for (const [source, failure] of [
+			[
+				writer.source.replace("4 * 1_024", "8 * 1_024"),
+				"workspace writer must cap raw symlink payloads at MAX_COPY_SYMLINK_BYTES = 4096",
+			],
+			[
+				writer.source.replace(
+					"MAX_COPY_SYMLINK_BYTES + 1",
+					"MAX_COPY_SYMLINK_BYTES",
+				),
+				"workspace writer must probe symlink payloads with a MAX_COPY_SYMLINK_BYTES + 1 buffer",
+			],
+			[
+				writer.source.replace(
+					"let mut buffer = [0_u8; MAX_COPY_SYMLINK_BYTES + 1];",
+					`let mut dead_probe = [0_u8; MAX_COPY_SYMLINK_BYTES + 1];
+  let _ = &mut dead_probe;
+  let mut buffer = [0_u8; MAX_COPY_SYMLINK_BYTES];`,
+				),
+				"workspace writer must probe symlink payloads with a MAX_COPY_SYMLINK_BYTES + 1 buffer",
+			],
+		]) {
+			const sources = workspaceSources.map((entry) =>
+				entry.relativePath === writer.relativePath
+					? { ...entry, source }
+					: entry,
+			);
+			expect(validateWorkspaceRustBoundary(workspaceCargo, sources)).toContain(
+				failure,
+			);
+		}
+
+		for (const expression of [
+			"4096",
+			"4_096",
+			"1 << 12",
+			"2 * 2 * 1_024",
+			"0x1000",
+		]) {
+			const source = writer.source.replace("4 * 1_024", expression);
+			const sources = workspaceSources.map((entry) =>
+				entry.relativePath === writer.relativePath
+					? { ...entry, source }
+					: entry,
+			);
+			expect(
+				validateWorkspaceRustBoundary(workspaceCargo, sources),
+			).not.toContain(
+				"workspace writer must cap raw symlink payloads at MAX_COPY_SYMLINK_BYTES = 4096",
 			);
 		}
 	});

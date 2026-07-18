@@ -956,10 +956,13 @@ fn rename_winning_the_gate_completes_before_window_close() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn copies_are_isolated_by_window_and_both_root_ids() {
+    use std::os::unix::fs::symlink;
+
     let temp = TempDir::new().unwrap();
     let source_root = create_directory(&temp, "source-root");
     let target_root = create_directory(&temp, "target-root");
     std::fs::write(source_root.join("source"), b"source").unwrap();
+    symlink("missing-payload", source_root.join("source-link")).unwrap();
     let service = WorkspaceService::new();
     let selected = block_on(service.pick_roots(
         "main",
@@ -985,6 +988,19 @@ fn copies_are_isolated_by_window_and_both_root_ids() {
     assert_eq!(
         std::fs::read(source_root.join("source")).unwrap(),
         b"source"
+    );
+
+    block_on(service.copy_entry(
+        "main",
+        source_id,
+        relative("source-link"),
+        target_id,
+        relative("target-link"),
+    ))
+    .unwrap();
+    assert_eq!(
+        std::fs::read_link(target_root.join("target-link")).unwrap(),
+        PathBuf::from("missing-payload")
     );
 
     let wrong_window = block_on(service.copy_entry(
@@ -1014,10 +1030,12 @@ fn copies_are_isolated_by_window_and_both_root_ids() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn target_revocation_winning_the_gate_prevents_dual_root_copy() {
+    use std::os::unix::fs::symlink;
+
     let temp = TempDir::new().unwrap();
     let source_root = create_directory(&temp, "source-root");
     let target_root = create_directory(&temp, "target-root");
-    std::fs::write(source_root.join("source"), b"source").unwrap();
+    symlink("source-payload", source_root.join("source")).unwrap();
     let service = Arc::new(WorkspaceService::new());
     let selected = block_on(service.pick_roots(
         "main",
@@ -1043,7 +1061,7 @@ fn target_revocation_winning_the_gate_prevents_dual_root_copy() {
                     pending_release.wait();
                 },
                 move |source_lease, target_lease| {
-                    crate::workspace::writer::copy_regular_file(
+                    crate::workspace::writer::copy_entry(
                         &source_lease,
                         &relative("source"),
                         &target_lease,
@@ -1062,7 +1080,7 @@ fn target_revocation_winning_the_gate_prevents_dual_root_copy() {
         block_on(pending).unwrap().unwrap_err().code(),
         "ROOT_NOT_AUTHORIZED"
     );
-    assert!(!target_root.join("target").exists());
+    assert_entry_absent(&target_root.join("target"));
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1725,6 +1743,13 @@ fn create_directory(temp: &TempDir, name: &str) -> PathBuf {
     let path = temp.path().join(name);
     std::fs::create_dir(&path).unwrap();
     path
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn assert_entry_absent(path: &std::path::Path) {
+    let error =
+        std::fs::symlink_metadata(path).expect_err("entry must not exist, including as a symlink");
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

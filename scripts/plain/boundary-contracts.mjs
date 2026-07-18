@@ -381,6 +381,119 @@ function auditExclusiveRenameBindings(source) {
 	return { calls, hasForbiddenBinding, referenceCount: references.length };
 }
 
+function auditDirectRustixFsFunction(source, functionName) {
+	const identifier = new RegExp(
+		`\\b${escapeRegularExpression(functionName)}\\b`,
+		"g",
+	);
+	const references = [...source.matchAll(identifier)];
+	const calls = extractCallArguments(source, functionName).filter(
+		(call) => !/\bfn\s*$/.test(source.slice(0, call.index)),
+	);
+	let directBindingCount = 0;
+	let hasForbiddenBinding = false;
+	for (const match of source.matchAll(
+		/\b((?:pub(?:\s*\([^)]*\))?\s+)?)use\s+([^;]+);/g,
+	)) {
+		const visibility = match[1].trim();
+		const clause = match[2];
+		const mentionsFunction = new RegExp(
+			`\\b${escapeRegularExpression(functionName)}\\b`,
+		).test(clause);
+		if (!mentionsFunction) {
+			continue;
+		}
+		const isDirectRustixBinding =
+			visibility.length === 0 &&
+			/^(?:::)?rustix\s*::\s*fs\s*::/.test(clause.trim()) &&
+			!/(?:\bas\b|\*|\bself\b)/.test(clause);
+		if (!isDirectRustixBinding) {
+			hasForbiddenBinding = true;
+		} else {
+			directBindingCount += [...clause.matchAll(identifier)].length;
+		}
+	}
+	if (directBindingCount > 1) {
+		hasForbiddenBinding = true;
+	}
+	for (const call of calls) {
+		const prefix = source.slice(0, call.index);
+		const isQualifiedRustixCall = /(?:::)?rustix\s*::\s*fs\s*::\s*$/.test(
+			prefix,
+		);
+		const isUnqualifiedCall = !/::\s*$/.test(prefix);
+		if (
+			!isQualifiedRustixCall &&
+			!(isUnqualifiedCall && directBindingCount === 1)
+		) {
+			hasForbiddenBinding = true;
+		}
+	}
+	if (references.length !== calls.length + directBindingCount) {
+		hasForbiddenBinding = true;
+	}
+	return { calls, hasForbiddenBinding, referenceCount: references.length };
+}
+
+function evaluateSmallRustIntegerExpression(expression) {
+	const normalized = expression.replaceAll("_", "").replaceAll(/\s+/g, "");
+	const literal = "(?:0x[0-9a-fA-F]+|0o[0-7]+|0b[01]+|[0-9]+)(?:usize)?";
+	const parseLiteral = (value) => {
+		const withoutSuffix = value.replace(/usize$/, "");
+		return Number(withoutSuffix);
+	};
+	if (
+		new RegExp(
+			`^${literal}(?:\\*${literal})*(?:\\+${literal}(?:\\*${literal})*)*$`,
+		).test(normalized)
+	) {
+		return normalized
+			.split("+")
+			.map((term) =>
+				term
+					.split("*")
+					.reduce((product, value) => product * parseLiteral(value), 1),
+			)
+			.reduce((sum, value) => sum + value, 0);
+	}
+	const shift = new RegExp(`^(${literal})<<(${literal})$`).exec(normalized);
+	return shift === null
+		? undefined
+		: parseLiteral(shift[1]) * 2 ** parseLiteral(shift[2]);
+}
+
+function readlinkCallUsesBoundedProbe(source) {
+	const [call] = extractCallArguments(source, "readlinkat_raw").filter(
+		(candidate) => !/\bfn\s*$/.test(source.slice(0, candidate.index)),
+	);
+	if (call === undefined) {
+		return false;
+	}
+	const argument = /,\s*&\s*mut\s+([A-Za-z_]\w*)\s*$/.exec(call.arguments);
+	if (argument === null) {
+		return false;
+	}
+	const declarations = [
+		...source.matchAll(
+			/\blet\s+mut\s+([A-Za-z_]\w*)\s*=\s*\[\s*0_u8\s*;\s*([^\]]+)\]\s*;/g,
+		),
+	].filter((match) => match[1] === argument[1] && match.index < call.index);
+	const declaration = declarations.at(-1);
+	if (
+		declaration === undefined ||
+		declaration[2].replaceAll(/\s+/g, "") !== "MAX_COPY_SYMLINK_BYTES+1"
+	) {
+		return false;
+	}
+	const between = source.slice(
+		declaration.index + declaration[0].length,
+		call.index,
+	);
+	return !new RegExp(`\\b${escapeRegularExpression(argument[1])}\\s*=`).test(
+		between,
+	);
+}
+
 export function validateWorkspaceRustBoundary(
 	cargoSource,
 	rustSources,
@@ -440,6 +553,11 @@ export function validateWorkspaceRustBoundary(
 	let ambientCanonicalizeCount = 0;
 	let exclusiveRenameCount = 0;
 	let invalidExclusiveRenameCount = 0;
+	const symlinkSyscallCounts = new Map([
+		["readlinkat_raw", 0],
+		["symlinkat", 0],
+	]);
+	let writerExecutableSource;
 	for (const { relativePath, source } of rustSources) {
 		const normalizedPath = relativePath.replaceAll("\\", "/");
 		if (
@@ -448,34 +566,74 @@ export function validateWorkspaceRustBoundary(
 		) {
 			continue;
 		}
-		const exclusiveRenameAudit = auditExclusiveRenameBindings(
-			stripRustCommentsAndLiterals(source),
-		);
+		const executableSource = stripRustCommentsAndLiterals(source);
+		if (
+			/\b(?:read_link|read_link_contents|readlink|readlinkat)\b/.test(
+				executableSource,
+			)
+		) {
+			failures.push(
+				`${normalizedPath} must not use broad or alternate symlink read helpers in production Rust`,
+			);
+		}
+		if (
+			/\b(?:symlink|symlink_file|symlink_dir|symlink_contents)\b/.test(
+				executableSource,
+			)
+		) {
+			failures.push(
+				`${normalizedPath} must not use broad symlink creation helpers in production Rust`,
+			);
+		}
+		const exclusiveRenameAudit = auditExclusiveRenameBindings(executableSource);
+		if (normalizedPath === "src-tauri/src/workspace/writer.rs") {
+			writerExecutableSource = executableSource;
+		}
 		if (exclusiveRenameAudit.hasForbiddenBinding) {
 			failures.push(
 				`${normalizedPath} must not alias or re-export rustix or renameat_with`,
 			);
 		}
-		if (exclusiveRenameAudit.referenceCount === 0) {
-			continue;
+		if (exclusiveRenameAudit.referenceCount > 0) {
+			if (normalizedPath !== "src-tauri/src/workspace/writer.rs") {
+				failures.push(
+					`${normalizedPath} must not use the exclusive rename syscall outside the workspace writer`,
+				);
+			} else {
+				exclusiveRenameCount += exclusiveRenameAudit.calls.length;
+				invalidExclusiveRenameCount += exclusiveRenameAudit.calls.filter(
+					(call) => {
+						const flagCount = [
+							...call.arguments.matchAll(/\bRenameFlags\s*::\s*NOREPLACE\b/g),
+						].length;
+						return (
+							!call.closed ||
+							flagCount !== 1 ||
+							!/,\s*RenameFlags\s*::\s*NOREPLACE\s*,?\s*$/.test(call.arguments)
+						);
+					},
+				).length;
+			}
 		}
-		if (normalizedPath !== "src-tauri/src/workspace/writer.rs") {
-			failures.push(
-				`${normalizedPath} must not use the exclusive rename syscall outside the workspace writer`,
-			);
-			continue;
+
+		for (const functionName of symlinkSyscallCounts.keys()) {
+			const audit = auditDirectRustixFsFunction(executableSource, functionName);
+			if (audit.hasForbiddenBinding) {
+				failures.push(
+					`${normalizedPath} must not alias or re-export rustix::fs::${functionName}`,
+				);
+			}
+			if (audit.referenceCount === 0) {
+				continue;
+			}
+			if (normalizedPath !== "src-tauri/src/workspace/writer.rs") {
+				failures.push(
+					`${normalizedPath} must not use rustix::fs::${functionName} outside the workspace writer`,
+				);
+				continue;
+			}
+			symlinkSyscallCounts.set(functionName, audit.calls.length);
 		}
-		exclusiveRenameCount += exclusiveRenameAudit.calls.length;
-		invalidExclusiveRenameCount += exclusiveRenameAudit.calls.filter((call) => {
-			const flagCount = [
-				...call.arguments.matchAll(/\bRenameFlags\s*::\s*NOREPLACE\b/g),
-			].length;
-			return (
-				!call.closed ||
-				flagCount !== 1 ||
-				!/,\s*RenameFlags\s*::\s*NOREPLACE\s*,?\s*$/.test(call.arguments)
-			);
-		}).length;
 	}
 
 	for (const { relativePath, source } of rustSources) {
@@ -487,7 +645,6 @@ export function validateWorkspaceRustBoundary(
 			continue;
 		}
 		const executableSource = stripRustCommentsAndLiterals(source);
-
 		if (/\bcopy\b/.test(executableSource)) {
 			failures.push(
 				`${normalizedPath} must not use an unaudited copy primitive; use workspace_copy/copy_entry helpers`,
@@ -583,6 +740,34 @@ export function validateWorkspaceRustBoundary(
 	if (invalidExclusiveRenameCount > 0) {
 		failures.push(
 			"every workspace writer renameat_with call must pass exactly one direct RenameFlags::NOREPLACE flag",
+		);
+	}
+	for (const [functionName, count] of symlinkSyscallCounts) {
+		if (count !== 1) {
+			failures.push(
+				`workspace writer must contain exactly one audited rustix::fs::${functionName} call`,
+			);
+		}
+	}
+	const symlinkBoundDeclarations =
+		writerExecutableSource?.matchAll(
+			/^\s*const\s+MAX_COPY_SYMLINK_BYTES\s*:\s*usize\s*=\s*([^;]+);/gm,
+		) ?? [];
+	const symlinkBounds = [...symlinkBoundDeclarations];
+	if (
+		symlinkBounds.length !== 1 ||
+		evaluateSmallRustIntegerExpression(symlinkBounds[0][1]) !== 4_096
+	) {
+		failures.push(
+			"workspace writer must cap raw symlink payloads at MAX_COPY_SYMLINK_BYTES = 4096",
+		);
+	}
+	if (
+		writerExecutableSource === undefined ||
+		!readlinkCallUsesBoundedProbe(writerExecutableSource)
+	) {
+		failures.push(
+			"workspace writer must probe symlink payloads with a MAX_COPY_SYMLINK_BYTES + 1 buffer",
 		);
 	}
 

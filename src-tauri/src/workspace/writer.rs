@@ -17,6 +17,8 @@ use super::WorkspaceRootLease;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const MAX_COPY_FILE_BYTES: usize = 8 * 1_024 * 1_024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+const MAX_COPY_SYMLINK_BYTES: usize = 4 * 1_024;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const COPY_BUFFER_BYTES: usize = 64 * 1_024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const MAX_STAGING_ATTEMPTS: usize = 16;
@@ -77,6 +79,7 @@ pub(crate) fn rename(
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn copy_regular_file(
     source_lease: &WorkspaceRootLease,
     source_path: &RelativePath,
@@ -92,6 +95,58 @@ pub(crate) fn copy_regular_file(
         target_path,
         &mut hooks,
     )
+}
+
+pub(crate) fn copy_entry(
+    source_lease: &WorkspaceRootLease,
+    source_path: &RelativePath,
+    target_lease: &WorkspaceRootLease,
+    target_path: &RelativePath,
+) -> Result<(), CommandError> {
+    validate_copy_paths(source_lease, source_path, target_lease, target_path)?;
+    dispatch_copy(source_lease, source_path, target_lease, target_path)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn dispatch_copy(
+    source_lease: &WorkspaceRootLease,
+    source_path: &RelativePath,
+    target_lease: &WorkspaceRootLease,
+    target_path: &RelativePath,
+) -> Result<(), CommandError> {
+    let (source_parent_path, source_name) = split_entry_path(source_path)?;
+    let source_parent = open_copy_parent(source_lease.directory(), &source_parent_path)?;
+    let source_metadata = source_parent
+        .symlink_metadata(&source_name)
+        .map_err(map_workspace_copy_error)?;
+
+    if source_metadata.is_file() {
+        return copy_regular_file(source_lease, source_path, target_lease, target_path);
+    }
+    if !source_metadata.file_type().is_symlink() {
+        return Err(entry_type_mismatch());
+    }
+
+    let source_before = SymlinkSnapshot::from_metadata(&source_metadata)?;
+    let mut hooks = NoopSymlinkTransferHooks;
+    transfer_symlink(
+        &source_parent,
+        &source_name,
+        source_before,
+        target_lease,
+        target_path,
+        &mut hooks,
+    )
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn dispatch_copy(
+    _source_lease: &WorkspaceRootLease,
+    _source_path: &RelativePath,
+    _target_lease: &WorkspaceRootLease,
+    _target_path: &RelativePath,
+) -> Result<(), CommandError> {
+    Err(copy_unsupported())
 }
 
 fn validate_copy_paths(
@@ -114,6 +169,7 @@ fn validate_copy_paths(
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 trait TransferHooks {
     fn before_source_open(&mut self) {}
     fn after_source_open(&mut self) {}
@@ -121,9 +177,23 @@ trait TransferHooks {
     fn after_stage_sync(&mut self) {}
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 struct NoopTransferHooks;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl TransferHooks for NoopTransferHooks {}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+trait SymlinkTransferHooks {
+    fn after_source_read(&mut self) {}
+    fn after_stage_create(&mut self) {}
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct NoopSymlinkTransferHooks;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl SymlinkTransferHooks for NoopSymlinkTransferHooks {}
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn transfer_regular_file<H: TransferHooks>(
@@ -198,15 +268,32 @@ fn transfer_regular_file<H: TransferHooks>(
     Ok(())
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn transfer_regular_file<H: TransferHooks>(
-    _source_lease: &WorkspaceRootLease,
-    _source_path: &RelativePath,
-    _target_lease: &WorkspaceRootLease,
-    _target_path: &RelativePath,
-    _hooks: &mut H,
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn transfer_symlink<H: SymlinkTransferHooks>(
+    source_parent: &Dir,
+    source_name: &Path,
+    source_before: SymlinkSnapshot,
+    target_lease: &WorkspaceRootLease,
+    target_path: &RelativePath,
+    hooks: &mut H,
 ) -> Result<(), CommandError> {
-    Err(copy_unsupported())
+    let source_payload =
+        read_source_symlink_stably(source_parent, source_name, source_before, hooks)?;
+
+    let (target_parent_path, target_name) = split_entry_path(target_path)?;
+    let target_parent = open_copy_parent(target_lease.directory(), &target_parent_path)?;
+    let mut staged = StagedSymlink::create(&target_parent, &target_name, source_payload.clone())?;
+    hooks.after_stage_create();
+
+    if let Err(error) =
+        ensure_source_symlink_unchanged(source_parent, source_name, source_before, &source_payload)
+    {
+        return fail_with_symlink_stage_cleanup(&mut staged, error);
+    }
+    if let Err(error) = staged.publish(&target_name) {
+        return fail_with_symlink_stage_cleanup(&mut staged, error);
+    }
+    Ok(())
 }
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
@@ -297,6 +384,59 @@ where
     )
 }
 
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+fn copy_symlink_with_hooks<A, B>(
+    source_lease: &WorkspaceRootLease,
+    source_path: &RelativePath,
+    target_lease: &WorkspaceRootLease,
+    target_path: &RelativePath,
+    after_source_read: A,
+    after_stage_create: B,
+) -> Result<(), CommandError>
+where
+    A: FnOnce(),
+    B: FnOnce(),
+{
+    struct TestHooks<A, B> {
+        after_source_read: Option<A>,
+        after_stage_create: Option<B>,
+    }
+
+    impl<A: FnOnce(), B: FnOnce()> SymlinkTransferHooks for TestHooks<A, B> {
+        fn after_source_read(&mut self) {
+            if let Some(hook) = self.after_source_read.take() {
+                hook();
+            }
+        }
+
+        fn after_stage_create(&mut self) {
+            if let Some(hook) = self.after_stage_create.take() {
+                hook();
+            }
+        }
+    }
+
+    validate_copy_paths(source_lease, source_path, target_lease, target_path)?;
+    let (source_parent_path, source_name) = split_entry_path(source_path)?;
+    let source_parent = open_copy_parent(source_lease.directory(), &source_parent_path)?;
+    let source_metadata = source_parent
+        .symlink_metadata(&source_name)
+        .map_err(map_workspace_copy_error)?;
+    let source_before = SymlinkSnapshot::from_metadata(&source_metadata)?;
+    let mut hooks = TestHooks {
+        after_source_read: Some(after_source_read),
+        after_stage_create: Some(after_stage_create),
+    };
+    transfer_symlink(
+        &source_parent,
+        &source_name,
+        source_before,
+        target_lease,
+        target_path,
+        &mut hooks,
+    )
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FileIdentity {
@@ -354,6 +494,39 @@ impl SourceSnapshot {
         data_and_mode_are_stable
             && (!source_name_still_identifies_handle
                 || (self.ctime == after.ctime && self.ctime_nsec == after.ctime_nsec))
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SymlinkSnapshot {
+    identity: FileIdentity,
+    len: u64,
+    mtime: i64,
+    mtime_nsec: i64,
+    ctime: i64,
+    ctime_nsec: i64,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl SymlinkSnapshot {
+    fn from_metadata(metadata: &Metadata) -> Result<Self, CommandError> {
+        use cap_std::fs::MetadataExt;
+
+        if !metadata.file_type().is_symlink() {
+            return Err(entry_type_mismatch());
+        }
+        if metadata.len() > MAX_COPY_SYMLINK_BYTES as u64 {
+            return Err(symlink_too_large());
+        }
+        Ok(Self {
+            identity: FileIdentity::from_metadata(metadata),
+            len: metadata.len(),
+            mtime: metadata.mtime(),
+            mtime_nsec: metadata.mtime_nsec(),
+            ctime: metadata.ctime(),
+            ctime_nsec: metadata.ctime_nsec(),
+        })
     }
 }
 
@@ -518,6 +691,223 @@ fn fail_with_stage_cleanup(
         Ok(()) => Err(original),
         Err(_) => Err(stage_cleanup_failed()),
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+/// A newly created symlink stage before its pathname identity is proven.
+///
+/// There is intentionally no Drop cleanup here: without a captured identity,
+/// removing the pathname could delete a replacement created by another actor.
+struct UnidentifiedStagedSymlink<'parent> {
+    parent: &'parent Dir,
+    name: PathBuf,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl<'parent> UnidentifiedStagedSymlink<'parent> {
+    fn identify(self, payload: Vec<u8>) -> Result<StagedSymlink<'parent>, CommandError> {
+        let before =
+            symlink_snapshot_at(self.parent, &self.name).map_err(|_| stage_identity_failed())?;
+        let observed = read_symlink_payload(self.parent, &self.name, map_stage_symlink_read_error)
+            .map_err(|_| stage_identity_failed())?;
+        let after =
+            symlink_snapshot_at(self.parent, &self.name).map_err(|_| stage_identity_failed())?;
+        if before != after || observed != payload {
+            return Err(stage_identity_failed());
+        }
+        Ok(StagedSymlink {
+            parent: self.parent,
+            name: self.name,
+            identity: before.identity,
+            payload,
+            active: true,
+        })
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct StagedSymlink<'parent> {
+    parent: &'parent Dir,
+    name: PathBuf,
+    identity: FileIdentity,
+    payload: Vec<u8>,
+    active: bool,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl<'parent> StagedSymlink<'parent> {
+    fn create(
+        parent: &'parent Dir,
+        target_name: &Path,
+        payload: Vec<u8>,
+    ) -> Result<Self, CommandError> {
+        use rustix::fs::symlinkat;
+
+        for _ in 0..MAX_STAGING_ATTEMPTS {
+            let name = PathBuf::from(format!("{STAGING_PREFIX}{}.tmp", Uuid::new_v4().simple()));
+            if name == target_name {
+                continue;
+            }
+            match symlinkat(payload.as_slice(), parent, &name) {
+                Ok(()) => {
+                    return UnidentifiedStagedSymlink { parent, name }.identify(payload);
+                }
+                Err(rustix::io::Errno::EXIST) => continue,
+                Err(error) => return Err(map_symlink_stage_create_error(error)),
+            }
+        }
+        Err(copy_failed())
+    }
+
+    fn publish(&mut self, target_name: &Path) -> Result<(), CommandError> {
+        self.ensure_owned_name()?;
+        publish_no_replace(self.parent, &self.name, target_name)?;
+        self.active = false;
+        Ok(())
+    }
+
+    fn cleanup(&mut self) -> Result<(), CommandError> {
+        if !self.active {
+            return Ok(());
+        }
+        let before_metadata = match self.parent.symlink_metadata(&self.name) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                self.active = false;
+                return Ok(());
+            }
+            Err(_) => return Err(stage_cleanup_failed()),
+        };
+        let before =
+            SymlinkSnapshot::from_metadata(&before_metadata).map_err(|_| stage_cleanup_failed())?;
+        if before.identity != self.identity {
+            return Err(stage_cleanup_failed());
+        }
+        let payload = read_symlink_payload(self.parent, &self.name, map_stage_symlink_read_error)
+            .map_err(|_| stage_cleanup_failed())?;
+        let after =
+            symlink_snapshot_at(self.parent, &self.name).map_err(|_| stage_cleanup_failed())?;
+        if before != after || payload != self.payload {
+            return Err(stage_cleanup_failed());
+        }
+        self.parent
+            .remove_file(&self.name)
+            .map_err(|_| stage_cleanup_failed())?;
+        self.active = false;
+        Ok(())
+    }
+
+    fn ensure_owned_name(&self) -> Result<(), CommandError> {
+        let before = symlink_snapshot_at(self.parent, &self.name).map_err(|_| copy_failed())?;
+        if before.identity != self.identity {
+            return Err(copy_failed());
+        }
+        let payload = read_symlink_payload(self.parent, &self.name, map_stage_symlink_read_error)
+            .map_err(|_| copy_failed())?;
+        let after = symlink_snapshot_at(self.parent, &self.name).map_err(|_| copy_failed())?;
+        if before == after && payload == self.payload {
+            Ok(())
+        } else {
+            Err(copy_failed())
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Drop for StagedSymlink<'_> {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn fail_with_symlink_stage_cleanup(
+    staged: &mut StagedSymlink<'_>,
+    original: CommandError,
+) -> Result<(), CommandError> {
+    match staged.cleanup() {
+        Ok(()) => Err(original),
+        Err(_) => Err(stage_cleanup_failed()),
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn read_source_symlink_stably<H: SymlinkTransferHooks>(
+    parent: &Dir,
+    name: &Path,
+    source_before: SymlinkSnapshot,
+    hooks: &mut H,
+) -> Result<Vec<u8>, CommandError> {
+    let payload = read_symlink_payload(parent, name, map_source_symlink_read_error)?;
+    hooks.after_source_read();
+    let source_after = current_source_symlink_snapshot(parent, name)?;
+    if source_before != source_after {
+        return Err(copy_conflict());
+    }
+
+    let confirmed_payload = read_symlink_payload(parent, name, map_source_symlink_read_error)?;
+    let source_confirmed = current_source_symlink_snapshot(parent, name)?;
+    if source_after != source_confirmed || payload != confirmed_payload {
+        return Err(copy_conflict());
+    }
+    Ok(payload)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn ensure_source_symlink_unchanged(
+    parent: &Dir,
+    name: &Path,
+    expected_snapshot: SymlinkSnapshot,
+    expected_payload: &[u8],
+) -> Result<(), CommandError> {
+    let before = current_source_symlink_snapshot(parent, name)?;
+    if before != expected_snapshot {
+        return Err(copy_conflict());
+    }
+    let payload = read_symlink_payload(parent, name, map_source_symlink_read_error)?;
+    let after = current_source_symlink_snapshot(parent, name)?;
+    if before == after && payload == expected_payload {
+        Ok(())
+    } else {
+        Err(copy_conflict())
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn current_source_symlink_snapshot(
+    parent: &Dir,
+    name: &Path,
+) -> Result<SymlinkSnapshot, CommandError> {
+    let metadata = parent.symlink_metadata(name).map_err(|_| copy_conflict())?;
+    SymlinkSnapshot::from_metadata(&metadata).map_err(|_| copy_conflict())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn symlink_snapshot_at(parent: &Dir, name: &Path) -> Result<SymlinkSnapshot, CommandError> {
+    let metadata = parent
+        .symlink_metadata(name)
+        .map_err(map_workspace_copy_error)?;
+    SymlinkSnapshot::from_metadata(&metadata)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn read_symlink_payload<F>(parent: &Dir, name: &Path, map_error: F) -> Result<Vec<u8>, CommandError>
+where
+    F: FnOnce(rustix::io::Errno) -> CommandError,
+{
+    use rustix::fs::readlinkat_raw;
+
+    let mut buffer = [0_u8; MAX_COPY_SYMLINK_BYTES + 1];
+    let length = readlinkat_raw(parent, name, &mut buffer).map_err(map_error)?;
+    bounded_symlink_payload(&buffer, length)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn bounded_symlink_payload(buffer: &[u8], length: usize) -> Result<Vec<u8>, CommandError> {
+    if length > MAX_COPY_SYMLINK_BYTES || length > buffer.len() {
+        return Err(symlink_too_large());
+    }
+    Ok(buffer[..length].to_vec())
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -765,6 +1155,32 @@ fn map_copy_publish_error(error: rustix::io::Errno) -> CommandError {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn map_source_symlink_read_error(error: rustix::io::Errno) -> CommandError {
+    use rustix::io::Errno;
+
+    match error {
+        Errno::NOENT | Errno::NOTDIR | Errno::INVAL => copy_conflict(),
+        Errno::ACCESS | Errno::PERM | Errno::ROFS => permission_denied(),
+        _ => copy_failed(),
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn map_stage_symlink_read_error(_error: rustix::io::Errno) -> CommandError {
+    copy_failed()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn map_symlink_stage_create_error(error: rustix::io::Errno) -> CommandError {
+    use rustix::io::Errno;
+
+    match error {
+        Errno::ACCESS | Errno::PERM | Errno::ROFS => permission_denied(),
+        _ => copy_failed(),
+    }
+}
+
 fn path_outside_root() -> CommandError {
     CommandError::new(
         "PATH_OUTSIDE_ROOT",
@@ -820,6 +1236,14 @@ fn file_too_large() -> CommandError {
     CommandError::new(
         "FILE_TOO_LARGE",
         "The workspace file exceeds the supported copy limit.",
+    )
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn symlink_too_large() -> CommandError {
+    CommandError::new(
+        "FILE_TOO_LARGE",
+        "The workspace symbolic link exceeds the supported copy limit.",
     )
 }
 

@@ -144,7 +144,7 @@ impl WorkspaceService {
             source_root_id,
             target_root_id,
             move |source_lease, target_lease| {
-                writer::copy_regular_file(&source_lease, &source_path, &target_lease, &target_path)
+                writer::copy_entry(&source_lease, &source_path, &target_lease, &target_path)
             },
         )
         .await

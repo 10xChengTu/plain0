@@ -5,12 +5,13 @@ use std::sync::{Arc, Barrier};
 
 use tempfile::TempDir;
 
-use super::{copy_regular_file, create_directory, create_file, rename as rename_entry};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::{
-    copy_regular_file_with_hooks, copy_regular_file_with_pre_open_hook, MAX_COPY_FILE_BYTES,
-    STAGING_PREFIX,
+    bounded_symlink_payload, copy_regular_file, copy_regular_file_with_hooks,
+    copy_regular_file_with_pre_open_hook, copy_symlink_with_hooks, MAX_COPY_FILE_BYTES,
+    MAX_COPY_SYMLINK_BYTES, STAGING_PREFIX,
 };
+use super::{copy_entry, create_directory, create_file, rename as rename_entry};
 use crate::path_policy::RelativePath;
 use crate::workspace::{WorkspaceRootLease, WorkspaceScope};
 
@@ -605,6 +606,109 @@ fn staged_copy_supports_same_and_cross_root_files_and_preserves_basic_mode() {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
+fn staged_copy_preserves_raw_symlink_payloads_within_and_across_roots() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    let source_root = temp.path().join("source-root");
+    let target_root = temp.path().join("target-root");
+    let outside = temp.path().join("outside");
+    fs::create_dir(&source_root).unwrap();
+    fs::create_dir_all(target_root.join("nested")).unwrap();
+    fs::create_dir(&outside).unwrap();
+    fs::write(source_root.join("inside.txt"), b"inside").unwrap();
+    fs::write(outside.join("sentinel"), b"outside").unwrap();
+
+    symlink("inside.txt", source_root.join("internal-link")).unwrap();
+    symlink("missing.txt", source_root.join("dangling-link")).unwrap();
+    symlink("loop-link", source_root.join("loop-link")).unwrap();
+    symlink(outside.join("sentinel"), source_root.join("external-link")).unwrap();
+    symlink("/plain/absolute/target", source_root.join("absolute-link")).unwrap();
+    let non_utf8 = OsStr::from_bytes(b"non-utf8-\xff-target");
+    symlink(non_utf8, source_root.join("non-utf8-link")).unwrap();
+
+    let mut scope = WorkspaceScope::new();
+    let ids = scope
+        .authorize_roots_atomically(&[source_root.clone(), target_root.clone()])
+        .unwrap();
+    let source_lease = scope.lease(ids[0]).unwrap();
+    let same_root_target = scope.lease(ids[0]).unwrap();
+    let cross_root_target = scope.lease(ids[1]).unwrap();
+
+    copy_entry(
+        &source_lease,
+        &path("internal-link"),
+        &same_root_target,
+        &path("internal-copy"),
+    )
+    .unwrap();
+    for source in [
+        "dangling-link",
+        "loop-link",
+        "external-link",
+        "absolute-link",
+        "non-utf8-link",
+    ] {
+        copy_entry(
+            &source_lease,
+            &path(source),
+            &cross_root_target,
+            &path(&format!("nested/{source}")),
+        )
+        .unwrap();
+    }
+
+    assert_eq!(
+        fs::read_link(source_root.join("internal-copy")).unwrap(),
+        path("inside.txt").as_path()
+    );
+    for source in [
+        "dangling-link",
+        "loop-link",
+        "external-link",
+        "absolute-link",
+        "non-utf8-link",
+    ] {
+        let expected = fs::read_link(source_root.join(source)).unwrap();
+        let copied = fs::read_link(target_root.join("nested").join(source)).unwrap();
+        assert_eq!(
+            copied.as_os_str().as_bytes(),
+            expected.as_os_str().as_bytes()
+        );
+        assert!(
+            fs::symlink_metadata(target_root.join("nested").join(source))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+    assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"outside");
+    assert_no_staging_entries(&source_root);
+    assert_no_staging_entries(&target_root.join("nested"));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn symlink_payload_bound_accepts_4096_bytes_and_rejects_the_probe_byte() {
+    let buffer = vec![b'x'; MAX_COPY_SYMLINK_BYTES + 1];
+    assert_eq!(
+        bounded_symlink_payload(&buffer, MAX_COPY_SYMLINK_BYTES)
+            .unwrap()
+            .len(),
+        MAX_COPY_SYMLINK_BYTES
+    );
+    let error = bounded_symlink_payload(&buffer, MAX_COPY_SYMLINK_BYTES + 1).unwrap_err();
+    assert_eq!(error.code(), "FILE_TOO_LARGE");
+    assert_eq!(
+        error.message(),
+        "The workspace symbolic link exceeds the supported copy limit."
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
 fn staged_copy_rejects_invalid_paths_types_and_missing_target_parents() {
     let temp = TempDir::new().unwrap();
     let root = create_root(&temp);
@@ -681,6 +785,72 @@ fn staged_copy_rejects_symlinks_special_files_and_every_existing_target_kind() {
     ] {
         assert_eq!(
             copy_regular_file(&lease, &path("source"), &lease, &path(target))
+                .unwrap_err()
+                .code(),
+            "ENTRY_ALREADY_EXISTS"
+        );
+    }
+
+    assert_eq!(fs::read(root.join("target-file")).unwrap(), b"target");
+    assert!(root.join("target-dir").is_dir());
+    assert_eq!(
+        fs::read_link(root.join("target-link")).unwrap(),
+        path("target-file").as_path()
+    );
+    assert_eq!(
+        fs::read_link(root.join("target-dangling-link")).unwrap(),
+        path("missing").as_path()
+    );
+    assert!(fs::symlink_metadata(root.join("target-fifo"))
+        .unwrap()
+        .file_type()
+        .is_fifo());
+    assert!(fs::symlink_metadata(root.join("target-socket"))
+        .unwrap()
+        .file_type()
+        .is_socket());
+    assert_no_staging_entries(&root);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn symlink_dispatch_rejects_directories_and_special_files_without_clobbering_any_target_kind() {
+    use std::os::unix::fs::{symlink, FileTypeExt};
+    use std::os::unix::net::UnixDatagram;
+
+    let temp = TempDir::new().unwrap();
+    let root = create_root(&temp);
+    symlink("raw-payload", root.join("source-link")).unwrap();
+    fs::create_dir(root.join("source-dir")).unwrap();
+    create_fifo(&root.join("source-fifo"));
+    let _source_socket = UnixDatagram::bind(root.join("source-socket")).unwrap();
+
+    fs::write(root.join("target-file"), b"target").unwrap();
+    fs::create_dir(root.join("target-dir")).unwrap();
+    symlink("target-file", root.join("target-link")).unwrap();
+    symlink("missing", root.join("target-dangling-link")).unwrap();
+    create_fifo(&root.join("target-fifo"));
+    let _target_socket = UnixDatagram::bind(root.join("target-socket")).unwrap();
+    let lease = authorize(&root);
+
+    for source in ["source-dir", "source-fifo", "source-socket"] {
+        assert_eq!(
+            copy_entry(&lease, &path(source), &lease, &path("unused"))
+                .unwrap_err()
+                .code(),
+            "ENTRY_TYPE_MISMATCH"
+        );
+    }
+    for target in [
+        "target-file",
+        "target-dir",
+        "target-link",
+        "target-dangling-link",
+        "target-fifo",
+        "target-socket",
+    ] {
+        assert_eq!(
+            copy_entry(&lease, &path("source-link"), &lease, &path(target))
                 .unwrap_err()
                 .code(),
             "ENTRY_ALREADY_EXISTS"
@@ -941,6 +1111,132 @@ fn same_length_rewrite_of_renamed_source_with_restored_mtime_returns_conflict() 
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
+fn symlink_source_swap_before_and_after_staging_never_publishes() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    let root = create_root(&temp);
+    symlink("stable-payload", root.join("source-before")).unwrap();
+    symlink("stable-payload", root.join("source-after")).unwrap();
+    let lease = authorize(&root);
+
+    let before_source = root.join("source-before");
+    let before_error = copy_symlink_with_hooks(
+        &lease,
+        &path("source-before"),
+        &lease,
+        &path("target-before"),
+        move || {
+            fs::remove_file(&before_source).unwrap();
+            symlink("stable-payload", &before_source).unwrap();
+        },
+        || {},
+    )
+    .unwrap_err();
+    assert_eq!(before_error.code(), "WORKSPACE_CONFLICT");
+    assert_entry_absent(&root.join("target-before"));
+
+    let after_source = root.join("source-after");
+    let after_error = copy_symlink_with_hooks(
+        &lease,
+        &path("source-after"),
+        &lease,
+        &path("target-after"),
+        || {},
+        move || {
+            fs::remove_file(&after_source).unwrap();
+            symlink("changed-payload", &after_source).unwrap();
+        },
+    )
+    .unwrap_err();
+    assert_eq!(after_error.code(), "WORKSPACE_CONFLICT");
+    assert_entry_absent(&root.join("target-after"));
+    assert_no_staging_entries(&root);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn symlink_stage_swap_never_publishes_or_deletes_the_replacement() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    let root = create_root(&temp);
+    symlink("source-payload", root.join("source")).unwrap();
+    let lease = authorize(&root);
+    let hook_root = root.clone();
+
+    let error = copy_symlink_with_hooks(
+        &lease,
+        &path("source"),
+        &lease,
+        &path("target"),
+        || {},
+        move || {
+            let staging = staging_paths(&hook_root).pop().unwrap();
+            fs::remove_file(&staging).unwrap();
+            symlink("replacement-stage", &staging).unwrap();
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "IO_FAILED");
+    assert_entry_absent(&root.join("target"));
+    let artifacts = staging_paths(&root);
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(
+        fs::read_link(&artifacts[0]).unwrap(),
+        path("replacement-stage").as_path()
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn opened_symlink_source_and_target_parents_do_not_jump_during_swaps() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    let root = create_root(&temp);
+    let outside = temp.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::create_dir(root.join("inside-source")).unwrap();
+    fs::create_dir(root.join("inside-target")).unwrap();
+    symlink("inside-payload", root.join("inside-source/source")).unwrap();
+    fs::write(outside.join("sentinel"), b"outside").unwrap();
+    symlink("inside-source", root.join("source-parent")).unwrap();
+    symlink("inside-target", root.join("target-parent")).unwrap();
+    let lease = authorize(&root);
+    let source_parent_link = root.join("source-parent");
+    let target_parent_link = root.join("target-parent");
+    let outside_for_source = outside.clone();
+    let outside_for_target = outside.clone();
+
+    copy_symlink_with_hooks(
+        &lease,
+        &path("source-parent/source"),
+        &lease,
+        &path("target-parent/target"),
+        move || {
+            fs::remove_file(&source_parent_link).unwrap();
+            symlink(&outside_for_source, &source_parent_link).unwrap();
+        },
+        move || {
+            fs::remove_file(&target_parent_link).unwrap();
+            symlink(&outside_for_target, &target_parent_link).unwrap();
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        fs::read_link(root.join("inside-target/target")).unwrap(),
+        path("inside-payload").as_path()
+    );
+    assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"outside");
+    assert_entry_absent(&outside.join("target"));
+    assert_no_staging_entries(&root.join("inside-target"));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
 fn source_growth_after_transfer_returns_conflict_and_removes_its_stage() {
     let temp = TempDir::new().unwrap();
     let root = create_root(&temp);
@@ -1136,6 +1432,53 @@ fn concurrent_staged_copies_to_one_target_have_exactly_one_winner() {
     assert_no_staging_entries(&root);
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn concurrent_symlink_copies_to_one_target_have_exactly_one_winner() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    let root = create_root(&temp);
+    symlink("first-payload", root.join("first")).unwrap();
+    symlink("second-payload", root.join("second")).unwrap();
+    let mut scope = WorkspaceScope::new();
+    let root_id = scope.authorize_root(&root).unwrap();
+    let first_source = scope.lease(root_id).unwrap();
+    let first_target = scope.lease(root_id).unwrap();
+    let second_source = scope.lease(root_id).unwrap();
+    let second_target = scope.lease(root_id).unwrap();
+    let barrier = Arc::new(Barrier::new(3));
+
+    let spawn = |source_lease: WorkspaceRootLease,
+                 target_lease: WorkspaceRootLease,
+                 source: &'static str| {
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            copy_entry(&source_lease, &path(source), &target_lease, &path("target"))
+        })
+    };
+    let first = spawn(first_source, first_target, "first");
+    let second = spawn(second_source, second_target, "second");
+    barrier.wait();
+    let results = [first.join().unwrap(), second.join().unwrap()];
+
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .filter(|error| error.code() == "ENTRY_ALREADY_EXISTS")
+            .count(),
+        1
+    );
+    let target = fs::read_link(root.join("target")).unwrap();
+    assert!(
+        target == path("first-payload").as_path() || target == path("second-payload").as_path()
+    );
+    assert_no_staging_entries(&root);
+}
+
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[test]
 fn atomic_rename_fails_closed_on_unsupported_platforms() {
@@ -1163,7 +1506,7 @@ fn atomic_copy_fails_closed_on_unsupported_platforms() {
     let lease = authorize(&root);
 
     assert_eq!(
-        copy_regular_file(&lease, &path("source"), &lease, &path("target"))
+        copy_entry(&lease, &path("source"), &lease, &path("target"))
             .unwrap_err()
             .code(),
         "IO_FAILED"
@@ -1456,6 +1799,13 @@ fn assert_no_staging_entries(directory: &std::path::Path) {
         staging_paths(directory).is_empty(),
         "copy staging entries must be cleaned up"
     );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn assert_entry_absent(path: &std::path::Path) {
+    let error =
+        fs::symlink_metadata(path).expect_err("entry must not exist, including as a symlink");
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
