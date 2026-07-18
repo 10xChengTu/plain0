@@ -28,8 +28,16 @@ const runtimeInfo: RuntimeInfo = Object.freeze({
 });
 
 const MOCK_WORKSPACE_ID = "00000000-0000-4000-8000-000000000001";
+const MAX_DIRECTORY_COPY_DESCENDANTS = 10_000;
+const MAX_DIRECTORY_COPY_NAME_BYTES = 1_024;
+const MAX_DIRECTORY_COPY_NAME_PAYLOAD_BYTES = 2 * 1_024 * 1_024;
+const MAX_DIRECTORY_COPY_DEPTH = 256;
 const MAX_FILE_BYTES = 8 * 1_024 * 1_024;
+const MAX_DIRECTORY_COPY_FILE_BYTES = 256 * 1_024 * 1_024;
 const MAX_SYMLINK_PAYLOAD_BYTES = 4 * 1_024;
+const MAX_DIRECTORY_COPY_SYMLINK_BYTES = 2 * 1_024 * 1_024;
+const MAX_DIRECTORY_COPY_PATH_BYTES = 4 * 1_024;
+const MAX_DIRECTORY_COPY_PATH_SEGMENTS = 256;
 const MAX_MOCK_SYMLINK_DEPTH = 256;
 const MOCK_MTIME = 1_700_000_000_000;
 const MOCK_CTIME = 1_699_999_000_000;
@@ -78,6 +86,32 @@ interface MockUnsupportedNode {
 
 type MockNode =
 	MockFileNode | MockDirectoryNode | MockSymlinkNode | MockUnsupportedNode;
+
+interface DirectoryCopyLimits {
+	readonly descendants: number;
+	readonly entryNameBytes: number;
+	readonly namePayloadBytes: number;
+	readonly depth: number;
+	readonly fileBytes: number;
+	readonly totalFileBytes: number;
+	readonly symlinkBytes: number;
+	readonly totalSymlinkBytes: number;
+	readonly pathBytes: number;
+	readonly pathSegments: number;
+}
+
+const DIRECTORY_COPY_LIMITS = Object.freeze({
+	descendants: MAX_DIRECTORY_COPY_DESCENDANTS,
+	entryNameBytes: MAX_DIRECTORY_COPY_NAME_BYTES,
+	namePayloadBytes: MAX_DIRECTORY_COPY_NAME_PAYLOAD_BYTES,
+	depth: MAX_DIRECTORY_COPY_DEPTH,
+	fileBytes: MAX_FILE_BYTES,
+	totalFileBytes: MAX_DIRECTORY_COPY_FILE_BYTES,
+	symlinkBytes: MAX_SYMLINK_PAYLOAD_BYTES,
+	totalSymlinkBytes: MAX_DIRECTORY_COPY_SYMLINK_BYTES,
+	pathBytes: MAX_DIRECTORY_COPY_PATH_BYTES,
+	pathSegments: MAX_DIRECTORY_COPY_PATH_SEGMENTS,
+} satisfies DirectoryCopyLimits);
 
 function mockFile(contents: string | readonly number[]): MockFileNode {
 	const bytes =
@@ -321,6 +355,72 @@ function cloneMockTrees(): Map<string, MockDirectoryNode> {
 
 export type BrowserMockWorkspacePick = "selected" | "cancelled";
 
+export interface BrowserMockDirectoryCopyLimitsForTest {
+	readonly descendants?: number;
+	readonly entryNameBytes?: number;
+	readonly namePayloadBytes?: number;
+	readonly depth?: number;
+	readonly fileBytes?: number;
+	readonly totalFileBytes?: number;
+	readonly symlinkBytes?: number;
+	readonly totalSymlinkBytes?: number;
+	readonly pathBytes?: number;
+	readonly pathSegments?: number;
+}
+
+interface BrowserMockDirectoryFixtureEntryBaseForTest {
+	readonly path: readonly string[];
+}
+
+export type BrowserMockDirectoryFixtureEntryForTest =
+	| (BrowserMockDirectoryFixtureEntryBaseForTest & {
+			readonly kind: "directory";
+	  })
+	| (BrowserMockDirectoryFixtureEntryBaseForTest & {
+			readonly kind: "other";
+	  })
+	| (BrowserMockDirectoryFixtureEntryBaseForTest & {
+			readonly kind: "file";
+			readonly bytes: readonly number[] | Uint8Array;
+	  })
+	| (BrowserMockDirectoryFixtureEntryBaseForTest & {
+			readonly kind: "symlink";
+			readonly payload: readonly number[] | Uint8Array;
+	  });
+
+export interface BrowserMockDirectoryFixtureForTest {
+	/** A direct child of the first deterministic mock root. */
+	readonly name: string;
+	/** Flat, parent-before-child-independent descendants of the fixture root. */
+	readonly entries: readonly BrowserMockDirectoryFixtureEntryForTest[];
+}
+
+export interface BrowserMockDirectoryCopyManifestEntrySummary {
+	readonly relativePath: string;
+	readonly kind: "directory" | "file" | "symlink";
+	readonly depth: number;
+	readonly size: number;
+	readonly payload?: readonly number[];
+}
+
+export interface BrowserMockDirectoryCopyManifestSummary {
+	readonly descendants: number;
+	readonly maximumDepth: number;
+	readonly namePayloadBytes: number;
+	readonly logicalFileBytes: number;
+	readonly actualFileBytes: number;
+	readonly symlinkPayloadBytes: number;
+	readonly entries: readonly BrowserMockDirectoryCopyManifestEntrySummary[];
+}
+
+export interface BrowserMockDirectoryCopyObservation {
+	readonly sourceRootId: string;
+	readonly sourcePath: string;
+	readonly targetRootId: string;
+	readonly targetPath: string;
+	readonly manifest: BrowserMockDirectoryCopyManifestSummary;
+}
+
 export interface BrowserMockSymlinkCopyObservation {
 	readonly sourceRootId: string;
 	readonly sourcePath: string;
@@ -331,6 +431,14 @@ export interface BrowserMockSymlinkCopyObservation {
 
 export interface BrowserMockBridgeOptions {
 	readonly workspacePicks?: readonly BrowserMockWorkspacePick[];
+	/** Browser-mock only bounded tree injected below the first mock root. */
+	readonly directoryCopyFixtureForTest?: BrowserMockDirectoryFixtureForTest;
+	/** May only lower production directory-copy budgets. */
+	readonly directoryCopyLimitsForTest?: BrowserMockDirectoryCopyLimitsForTest;
+	/** Browser-mock test seam; runs before the single target-map publication. */
+	readonly onDirectoryCopyForTest?: (
+		observation: BrowserMockDirectoryCopyObservation,
+	) => void;
 	/** Browser-mock test seam; receives a frozen, detached payload copy. */
 	readonly onSymlinkCopyForTest?: (
 		observation: BrowserMockSymlinkCopyObservation,
@@ -401,6 +509,356 @@ function symlinkTooLarge(): CommandError {
 	);
 }
 
+function directoryCopyTooLarge(): CommandError {
+	return commandError(
+		"DIRECTORY_TOO_LARGE",
+		"The workspace directory exceeds the supported copy limits.",
+	);
+}
+
+function pathEncodingUnsupported(): CommandError {
+	return commandError(
+		"PATH_ENCODING_UNSUPPORTED",
+		"The workspace entry name cannot be represented safely.",
+	);
+}
+
+function resolveDirectoryCopyLimits(
+	overrides: BrowserMockDirectoryCopyLimitsForTest | undefined,
+): DirectoryCopyLimits {
+	if (overrides === undefined) {
+		return DIRECTORY_COPY_LIMITS;
+	}
+
+	const resolved = { ...DIRECTORY_COPY_LIMITS };
+	const keys = Object.keys(
+		DIRECTORY_COPY_LIMITS,
+	) as (keyof DirectoryCopyLimits)[];
+	const allowed = new Set<string>(keys);
+	if (
+		Reflect.ownKeys(overrides).some(
+			(key) => typeof key !== "string" || !allowed.has(key),
+		)
+	) {
+		throw new Error("Invalid browser mock directory-copy limits.");
+	}
+	for (const key of keys) {
+		const value = overrides[key];
+		if (value === undefined) {
+			continue;
+		}
+		if (
+			!Number.isSafeInteger(value) ||
+			value < 0 ||
+			value > DIRECTORY_COPY_LIMITS[key]
+		) {
+			throw new Error("Invalid browser mock directory-copy limits.");
+		}
+		resolved[key] = value;
+	}
+	return Object.freeze(resolved);
+}
+
+function fixtureNodeForTest(
+	entry: BrowserMockDirectoryFixtureEntryForTest,
+): MockNode {
+	if (entry.kind === "directory") {
+		return mockDirectory({});
+	}
+	if (entry.kind === "other") {
+		return mockUnsupportedNode();
+	}
+	if (entry.kind === "symlink") {
+		return mockSymlink(entry.payload);
+	}
+
+	if (
+		!Number.isSafeInteger(entry.bytes.length) ||
+		entry.bytes.length < 0 ||
+		entry.bytes.length > MAX_FILE_BYTES
+	) {
+		throw new Error("Invalid browser mock directory-copy fixture.");
+	}
+	const bytes = Uint8Array.from(entry.bytes);
+	return Object.freeze({ kind: "file", size: bytes.byteLength, bytes });
+}
+
+function installDirectoryCopyFixtureForTest(
+	trees: Map<string, MockDirectoryNode>,
+	fixture: BrowserMockDirectoryFixtureForTest | undefined,
+): void {
+	if (fixture === undefined) {
+		return;
+	}
+	const root = trees.get(mockRoots[0]!.rootId);
+	if (
+		root === undefined ||
+		!isPortableWorkspaceEntryName(fixture.name) ||
+		root.entries.has(fixture.name)
+	) {
+		throw new Error("Invalid browser mock directory-copy fixture.");
+	}
+
+	const fixtureRoot = mockDirectory({});
+	const entries = fixture.entries
+		.map((entry, index) => {
+			if (
+				!Array.isArray(entry.path) ||
+				entry.path.length === 0 ||
+				entry.path.some((segment) => typeof segment !== "string")
+			) {
+				throw new Error("Invalid browser mock directory-copy fixture.");
+			}
+			return Object.freeze({ entry, index, path: [...entry.path] });
+		})
+		.sort(
+			(left, right) =>
+				left.path.length - right.path.length || left.index - right.index,
+		);
+
+	for (const { entry, path } of entries) {
+		let parent = fixtureRoot;
+		for (const segment of path.slice(0, -1)) {
+			const child = parent.entries.get(segment);
+			if (child?.kind !== "directory") {
+				throw new Error("Invalid browser mock directory-copy fixture.");
+			}
+			parent = child;
+		}
+		const name = path.at(-1)!;
+		if (parent.entries.has(name)) {
+			throw new Error("Invalid browser mock directory-copy fixture.");
+		}
+		parent.entries.set(name, fixtureNodeForTest(entry));
+	}
+	root.entries.set(fixture.name, fixtureRoot);
+}
+
+function checkedDirectoryCopyTotal(
+	current: number,
+	increment: number,
+	limit: number,
+): number {
+	if (
+		!Number.isSafeInteger(current) ||
+		!Number.isSafeInteger(increment) ||
+		current < 0 ||
+		increment < 0
+	) {
+		throw directoryCopyTooLarge();
+	}
+	const next = current + increment;
+	if (!Number.isSafeInteger(next) || next > limit) {
+		throw directoryCopyTooLarge();
+	}
+	return next;
+}
+
+function directoryCopyNameBytes(name: string, limit: number): number {
+	const bytes = textEncoder.encode(name).byteLength;
+	if (bytes > limit) {
+		throw directoryCopyTooLarge();
+	}
+	if (!isPortableWorkspaceEntryName(name)) {
+		throw pathEncodingUnsupported();
+	}
+	return bytes;
+}
+
+function assertDirectoryCopyWirePath(
+	topSegments: readonly string[],
+	descendantSegments: readonly string[],
+	limits: DirectoryCopyLimits,
+): void {
+	const segments = [...topSegments, ...descendantSegments];
+	if (segments.length > limits.pathSegments) {
+		throw pathEncodingUnsupported();
+	}
+	const path = segments.join("/");
+	if (
+		textEncoder.encode(path).byteLength > limits.pathBytes ||
+		workspaceRelativePathSegments(path) === undefined
+	) {
+		throw pathEncodingUnsupported();
+	}
+}
+
+interface DirectoryCloneFrame {
+	readonly source: MockDirectoryNode;
+	readonly targetParent: MockDirectoryNode;
+	readonly parentSegments: readonly string[];
+	readonly depth: number;
+	readonly entries: IterableIterator<[string, MockNode]>;
+}
+
+function boundedDirectoryClone(
+	source: MockDirectoryNode,
+	sourceSegments: readonly string[],
+	targetSegments: readonly string[],
+	limits: DirectoryCopyLimits,
+): Readonly<{
+	node: MockDirectoryNode;
+	manifest: BrowserMockDirectoryCopyManifestSummary;
+}> {
+	directoryCopyNameBytes(sourceSegments.at(-1)!, limits.entryNameBytes);
+	directoryCopyNameBytes(targetSegments.at(-1)!, limits.entryNameBytes);
+
+	const clone = mockDirectory({});
+	const manifestEntries: BrowserMockDirectoryCopyManifestEntrySummary[] = [];
+	let descendants = 0;
+	let maximumDepth = 0;
+	let namePayloadBytes = 0;
+	let logicalFileBytes = 0;
+	let actualFileBytes = 0;
+	let symlinkPayloadBytes = 0;
+	const boundedSortedEntries = (
+		directory: MockDirectoryNode,
+		remainingDescendants: number,
+	): IterableIterator<[string, MockNode]> => {
+		const entries: [string, MockNode][] = [];
+		for (const entry of directory.entries) {
+			if (entries.length >= remainingDescendants) {
+				throw directoryCopyTooLarge();
+			}
+			entries.push(entry);
+		}
+		entries.sort(([left], [right]) => compareWorkspaceEntryNames(left, right));
+		return entries[Symbol.iterator]();
+	};
+	const frames: DirectoryCloneFrame[] = [
+		Object.freeze({
+			source,
+			targetParent: clone,
+			parentSegments: Object.freeze([]),
+			depth: 0,
+			entries: boundedSortedEntries(source, limits.descendants),
+		}),
+	];
+
+	while (frames.length > 0) {
+		const frame = frames.at(-1)!;
+		const next = frame.entries.next();
+		if (next.done) {
+			frames.pop();
+			continue;
+		}
+		const [name, sourceNode] = next.value;
+		const depth = frame.depth + 1;
+		if (!Number.isSafeInteger(depth) || depth > limits.depth) {
+			throw directoryCopyTooLarge();
+		}
+		const relativeSegments = Object.freeze([...frame.parentSegments, name]);
+		const nameBytes = directoryCopyNameBytes(name, limits.entryNameBytes);
+		descendants = checkedDirectoryCopyTotal(descendants, 1, limits.descendants);
+		namePayloadBytes = checkedDirectoryCopyTotal(
+			namePayloadBytes,
+			nameBytes,
+			limits.namePayloadBytes,
+		);
+		maximumDepth = Math.max(maximumDepth, depth);
+		assertDirectoryCopyWirePath(sourceSegments, relativeSegments, limits);
+		assertDirectoryCopyWirePath(targetSegments, relativeSegments, limits);
+
+		const relativePath = relativeSegments.join("/");
+		if (sourceNode.kind === "file") {
+			if (!Number.isSafeInteger(sourceNode.size) || sourceNode.size < 0) {
+				throw directoryCopyTooLarge();
+			}
+			if (sourceNode.size > limits.fileBytes) {
+				throw copyFileTooLarge();
+			}
+			logicalFileBytes = checkedDirectoryCopyTotal(
+				logicalFileBytes,
+				sourceNode.size,
+				limits.totalFileBytes,
+			);
+			actualFileBytes = checkedDirectoryCopyTotal(
+				actualFileBytes,
+				sourceNode.bytes.byteLength,
+				limits.totalFileBytes,
+			);
+			const bytes = sourceNode.bytes.slice();
+			frame.targetParent.entries.set(
+				name,
+				Object.freeze({ kind: "file", size: sourceNode.size, bytes }),
+			);
+			manifestEntries.push(
+				Object.freeze({
+					relativePath,
+					kind: "file",
+					depth,
+					size: sourceNode.size,
+				}),
+			);
+			continue;
+		}
+
+		if (isMockSymlinkNode(sourceNode)) {
+			if (sourceNode.payload.byteLength > limits.symlinkBytes) {
+				throw symlinkTooLarge();
+			}
+			symlinkPayloadBytes = checkedDirectoryCopyTotal(
+				symlinkPayloadBytes,
+				sourceNode.payload.byteLength,
+				limits.totalSymlinkBytes,
+			);
+			const payload = sourceNode.payload.copy();
+			frame.targetParent.entries.set(name, mockSymlink(payload));
+			manifestEntries.push(
+				Object.freeze({
+					relativePath,
+					kind: "symlink",
+					depth,
+					size: payload.byteLength,
+					payload: Object.freeze([...payload]),
+				}),
+			);
+			continue;
+		}
+
+		if (sourceNode.kind === "directory") {
+			const childClone = mockDirectory({});
+			frame.targetParent.entries.set(name, childClone);
+			manifestEntries.push(
+				Object.freeze({
+					relativePath,
+					kind: "directory",
+					depth,
+					size: 0,
+				}),
+			);
+			frames.push(
+				Object.freeze({
+					source: sourceNode,
+					targetParent: childClone,
+					parentSegments: relativeSegments,
+					depth,
+					entries: boundedSortedEntries(
+						sourceNode,
+						limits.descendants - descendants,
+					),
+				}),
+			);
+			continue;
+		}
+
+		throw entryTypeMismatch();
+	}
+
+	return Object.freeze({
+		node: clone,
+		manifest: Object.freeze({
+			descendants,
+			maximumDepth,
+			namePayloadBytes,
+			logicalFileBytes,
+			actualFileBytes,
+			symlinkPayloadBytes,
+			entries: Object.freeze(manifestEntries),
+		}),
+	});
+}
+
 export function createBrowserMockBridge(
 	options: BrowserMockBridgeOptions = {},
 ): PlainBridge {
@@ -408,6 +866,13 @@ export function createBrowserMockBridge(
 	const scriptedPicks = [...(options.workspacePicks ?? [])];
 	const roots = new Map<string, WorkspaceRoot>();
 	const trees = cloneMockTrees();
+	const directoryCopyLimits = resolveDirectoryCopyLimits(
+		options.directoryCopyLimitsForTest,
+	);
+	installDirectoryCopyFixtureForTest(
+		trees,
+		options.directoryCopyFixtureForTest,
+	);
 	let revision = 0;
 
 	const snapshot = () =>
@@ -557,6 +1022,7 @@ export function createBrowserMockBridge(
 
 		const source = resolveNode(request.sourceRootId, request.sourcePath);
 		let copied: MockNode;
+		let directoryManifest: BrowserMockDirectoryCopyManifestSummary | undefined;
 		if (source.kind === "file") {
 			if (source.size > MAX_FILE_BYTES) {
 				throw copyFileTooLarge();
@@ -567,6 +1033,15 @@ export function createBrowserMockBridge(
 				throw symlinkTooLarge();
 			}
 			copied = cloneMockNode(source);
+		} else if (source.kind === "directory") {
+			const detached = boundedDirectoryClone(
+				source,
+				sourceSegments,
+				targetSegments,
+				directoryCopyLimits,
+			);
+			copied = detached.node;
+			directoryManifest = detached.manifest;
 		} else {
 			throw entryTypeMismatch();
 		}
@@ -578,6 +1053,17 @@ export function createBrowserMockBridge(
 		if (target.parent.entries.has(target.name)) {
 			throw entryAlreadyExists();
 		}
+		if (directoryManifest !== undefined) {
+			options.onDirectoryCopyForTest?.(
+				Object.freeze({
+					sourceRootId: request.sourceRootId,
+					sourcePath: request.sourcePath,
+					targetRootId: request.targetRootId,
+					targetPath: request.targetPath,
+					manifest: directoryManifest,
+				}),
+			);
+		}
 		if (isMockSymlinkNode(copied)) {
 			options.onSymlinkCopyForTest?.(
 				Object.freeze({
@@ -588,6 +1074,9 @@ export function createBrowserMockBridge(
 					payload: Object.freeze([...copied.payload.copy()]),
 				}),
 			);
+		}
+		if (target.parent.entries.has(target.name)) {
+			throw entryAlreadyExists();
 		}
 		target.parent.entries.set(target.name, copied);
 	};

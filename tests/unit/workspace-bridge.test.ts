@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
 	createBrowserMockBridge,
+	type BrowserMockDirectoryCopyLimitsForTest,
+	type BrowserMockDirectoryCopyObservation,
+	type BrowserMockDirectoryFixtureEntryForTest,
 	type BrowserMockSymlinkCopyObservation,
 } from "../../app/platform/tauri/browser-mock";
 
@@ -546,14 +549,12 @@ describe("browser mock workspace bridge", () => {
 			message: "The workspace copy conflicts with the source path.",
 		});
 
-		for (const sourcePath of ["src", "fixtures/other"]) {
-			await expect(
-				bridge.workspaceCopy(rootId, sourcePath, rootId, "copy-target"),
-			).rejects.toEqual({
-				code: "ENTRY_TYPE_MISMATCH",
-				message: "The workspace entry has an incompatible type.",
-			});
-		}
+		await expect(
+			bridge.workspaceCopy(rootId, "fixtures/other", rootId, "copy-target"),
+		).rejects.toEqual({
+			code: "ENTRY_TYPE_MISMATCH",
+			message: "The workspace entry has an incompatible type.",
+		});
 		await expect(
 			bridge.workspaceCopy(
 				rootId,
@@ -582,6 +583,457 @@ describe("browser mock workspace bridge", () => {
 			code: "ROOT_NOT_AUTHORIZED",
 			message: "The workspace root is not authorized.",
 		});
+	});
+
+	it("copies bounded mixed directories within and across roots as detached trees", async () => {
+		const observations: BrowserMockDirectoryCopyObservation[] = [];
+		const fixtureEntries = [
+			{ path: ["empty"], kind: "directory" },
+			{ path: ["data.bin"], kind: "file", bytes: [0, 255, 128, 1] },
+			{ path: ["nested"], kind: "directory" },
+			{
+				path: ["nested", "message.txt"],
+				kind: "file",
+				bytes: [111, 107],
+			},
+			{
+				path: ["binary-link"],
+				kind: "symlink",
+				payload: [0xff, 0x80, 0x2f, 0x2e],
+			},
+			{
+				path: ["readme-link"],
+				kind: "symlink",
+				payload: [...new TextEncoder().encode("../README.md")],
+			},
+			{
+				path: ["nested-link"],
+				kind: "symlink",
+				payload: [...new TextEncoder().encode("nested")],
+			},
+		] satisfies readonly BrowserMockDirectoryFixtureEntryForTest[];
+		const bridge = createBrowserMockBridge({
+			directoryCopyFixtureForTest: {
+				name: "copy-tree",
+				entries: fixtureEntries,
+			},
+			onDirectoryCopyForTest: (observation) => observations.push(observation),
+		});
+		const [workspaceRoot, libraryRoot] = (
+			await bridge.workspacePickRoots("add")
+		).snapshot.roots;
+
+		await bridge.workspaceCopy(
+			workspaceRoot!.rootId,
+			"copy-tree",
+			workspaceRoot!.rootId,
+			"tree-copy",
+		);
+		await bridge.workspaceCopy(
+			workspaceRoot!.rootId,
+			"copy-tree",
+			libraryRoot!.rootId,
+			"packages/tree-copy",
+		);
+
+		for (const [rootId, path] of [
+			[workspaceRoot!.rootId, "tree-copy/data.bin"],
+			[libraryRoot!.rootId, "packages/tree-copy/data.bin"],
+		] as const) {
+			const first = (await bridge.workspaceReadFile(rootId, path)).copy();
+			expect([...first]).toEqual([0, 255, 128, 1]);
+			first[0] = 99;
+			expect([
+				...(await bridge.workspaceReadFile(rootId, path)).copy(),
+			]).toEqual([0, 255, 128, 1]);
+		}
+		expect(
+			(
+				await bridge.workspaceReadDirectory(
+					workspaceRoot!.rootId,
+					"tree-copy/empty",
+				)
+			).entries,
+		).toEqual([]);
+		expect(
+			await bridge.workspaceStat(
+				workspaceRoot!.rootId,
+				"tree-copy/readme-link",
+			),
+		).toMatchObject({ kind: "symlinkFile" });
+		expect(
+			await bridge.workspaceStat(
+				libraryRoot!.rootId,
+				"packages/tree-copy/readme-link",
+			),
+		).toMatchObject({ kind: "symlink" });
+		expect(
+			await bridge.workspaceStat(
+				libraryRoot!.rootId,
+				"packages/tree-copy/nested-link",
+			),
+		).toMatchObject({ kind: "symlinkDirectory" });
+
+		await bridge.workspaceRename(
+			workspaceRoot!.rootId,
+			"copy-tree/data.bin",
+			"copy-tree/source-renamed.bin",
+		);
+		expect([
+			...(
+				await bridge.workspaceReadFile(
+					workspaceRoot!.rootId,
+					"tree-copy/data.bin",
+				)
+			).copy(),
+		]).toEqual([0, 255, 128, 1]);
+
+		expect(observations).toHaveLength(2);
+		for (const observation of observations) {
+			expect(Object.isFrozen(observation)).toBe(true);
+			expect(Object.isFrozen(observation.manifest)).toBe(true);
+			expect(Object.isFrozen(observation.manifest.entries)).toBe(true);
+			expect(observation.manifest).toMatchObject({
+				descendants: fixtureEntries.length,
+				maximumDepth: 2,
+				logicalFileBytes: 6,
+				actualFileBytes: 6,
+			});
+			const rawLink = observation.manifest.entries.find(
+				(entry) => entry.relativePath === "binary-link",
+			);
+			expect(rawLink).toMatchObject({
+				kind: "symlink",
+				payload: [0xff, 0x80, 0x2f, 0x2e],
+			});
+			expect(Object.isFrozen(rawLink)).toBe(true);
+			expect(Object.isFrozen(rawLink?.payload)).toBe(true);
+		}
+		expect(
+			observations[0]!.manifest.entries.find(
+				(entry) => entry.relativePath === "binary-link",
+			)?.payload,
+		).not.toBe(
+			observations[1]!.manifest.entries.find(
+				(entry) => entry.relativePath === "binary-link",
+			)?.payload,
+		);
+
+		await expect(
+			bridge.workspaceCopy(
+				workspaceRoot!.rootId,
+				"copy-tree",
+				workspaceRoot!.rootId,
+				"copy-tree/nested/descendant",
+			),
+		).rejects.toEqual({
+			code: "WORKSPACE_CONFLICT",
+			message: "The workspace copy conflicts with the source path.",
+		});
+		await expect(
+			bridge.workspaceCopy(
+				workspaceRoot!.rootId,
+				"copy-tree",
+				workspaceRoot!.rootId,
+				"README.md",
+			),
+		).rejects.toMatchObject({ code: "ENTRY_ALREADY_EXISTS" });
+		await expect(
+			bridge.workspaceCopy(
+				workspaceRoot!.rootId,
+				"copy-tree",
+				workspaceRoot!.rootId,
+				"missing/tree-copy",
+			),
+		).rejects.toMatchObject({ code: "ENTRY_NOT_FOUND" });
+	});
+
+	it("enforces every directory manifest budget at exact and plus-one boundaries", async () => {
+		const copyFixture = async (
+			entries: readonly BrowserMockDirectoryFixtureEntryForTest[],
+			limits: BrowserMockDirectoryCopyLimitsForTest,
+			options: Readonly<{
+				fixtureName?: string;
+				targetPath?: string;
+				expectedError?: string;
+			}> = {},
+		): Promise<void> => {
+			const bridge = createBrowserMockBridge({
+				directoryCopyFixtureForTest: {
+					name: options.fixtureName ?? "box",
+					entries,
+				},
+				directoryCopyLimitsForTest: limits,
+			});
+			const rootId = (await bridge.workspacePickRoots("replace")).snapshot
+				.roots[0]!.rootId;
+			const targetPath = options.targetPath ?? "out";
+			const copy = bridge.workspaceCopy(
+				rootId,
+				options.fixtureName ?? "box",
+				rootId,
+				targetPath,
+			);
+			if (options.expectedError === undefined) {
+				await copy;
+				expect((await bridge.workspaceStat(rootId, targetPath)).kind).toBe(
+					"directory",
+				);
+				return;
+			}
+			const message =
+				options.expectedError === "DIRECTORY_TOO_LARGE"
+					? "The workspace directory exceeds the supported copy limits."
+					: "The workspace entry name cannot be represented safely.";
+			await expect(copy).rejects.toEqual({
+				code: options.expectedError,
+				message,
+			});
+			await expect(
+				bridge.workspaceStat(rootId, targetPath),
+			).rejects.toMatchObject({ code: "ENTRY_NOT_FOUND" });
+		};
+		const directoryTooLarge = Object.freeze({
+			expectedError: "DIRECTORY_TOO_LARGE",
+		});
+
+		await copyFixture([], { descendants: 0 });
+		await copyFixture(
+			[
+				{ path: ["a"], kind: "directory" },
+				{ path: ["a", "b"], kind: "file", bytes: [] },
+			],
+			{ descendants: 2 },
+		);
+		await copyFixture(
+			[
+				{ path: ["a"], kind: "directory" },
+				{ path: ["a", "b"], kind: "file", bytes: [] },
+				{ path: ["c"], kind: "file", bytes: [] },
+			],
+			{ descendants: 2 },
+			directoryTooLarge,
+		);
+
+		await copyFixture([{ path: ["abc"], kind: "file", bytes: [] }], {
+			entryNameBytes: 3,
+			namePayloadBytes: 3,
+		});
+		await copyFixture(
+			[{ path: ["abcd"], kind: "file", bytes: [] }],
+			{ entryNameBytes: 3 },
+			directoryTooLarge,
+		);
+		await copyFixture(
+			[
+				{ path: ["ab"], kind: "file", bytes: [] },
+				{ path: ["cd"], kind: "file", bytes: [] },
+			],
+			{ namePayloadBytes: 3 },
+			directoryTooLarge,
+		);
+
+		await copyFixture(
+			[
+				{ path: ["a"], kind: "directory" },
+				{ path: ["a", "b"], kind: "file", bytes: [] },
+			],
+			{ depth: 2 },
+		);
+		await copyFixture(
+			[
+				{ path: ["a"], kind: "directory" },
+				{ path: ["a", "b"], kind: "directory" },
+				{ path: ["a", "b", "c"], kind: "file", bytes: [] },
+			],
+			{ depth: 2 },
+			directoryTooLarge,
+		);
+
+		await copyFixture([{ path: ["a"], kind: "file", bytes: [1, 2, 3] }], {
+			fileBytes: 3,
+			totalFileBytes: 3,
+		});
+		await copyFixture(
+			[
+				{ path: ["a"], kind: "file", bytes: [1, 2] },
+				{ path: ["b"], kind: "file", bytes: [3, 4] },
+			],
+			{ fileBytes: 3, totalFileBytes: 3 },
+			directoryTooLarge,
+		);
+		await copyFixture([{ path: ["a"], kind: "symlink", payload: [1, 2, 3] }], {
+			symlinkBytes: 3,
+			totalSymlinkBytes: 3,
+		});
+		await copyFixture(
+			[
+				{ path: ["a"], kind: "symlink", payload: [1, 2] },
+				{ path: ["b"], kind: "symlink", payload: [3, 4] },
+			],
+			{ symlinkBytes: 3, totalSymlinkBytes: 3 },
+			directoryTooLarge,
+		);
+
+		await copyFixture([{ path: ["a"], kind: "file", bytes: [] }], {
+			pathBytes: 5,
+			pathSegments: 2,
+		});
+		await copyFixture(
+			[{ path: ["ab"], kind: "file", bytes: [] }],
+			{ pathBytes: 5 },
+			{ expectedError: "PATH_ENCODING_UNSUPPORTED" },
+		);
+		await copyFixture(
+			[
+				{ path: ["a"], kind: "directory" },
+				{ path: ["a", "b"], kind: "file", bytes: [] },
+			],
+			{ pathSegments: 2 },
+			{ expectedError: "PATH_ENCODING_UNSUPPORTED" },
+		);
+
+		await copyFixture([], { entryNameBytes: 3 });
+		await copyFixture(
+			[],
+			{ entryNameBytes: 3 },
+			{
+				...directoryTooLarge,
+				fixtureName: "four",
+			},
+		);
+		await copyFixture(
+			[],
+			{ entryNameBytes: 3 },
+			{
+				...directoryTooLarge,
+				targetPath: "four",
+			},
+		);
+	});
+
+	it("rejects unsafe or unsupported directory descendants without publication", async () => {
+		const rejectFixture = async (
+			entries: readonly BrowserMockDirectoryFixtureEntryForTest[],
+			limits: BrowserMockDirectoryCopyLimitsForTest,
+			code: string,
+			message: string,
+		): Promise<void> => {
+			const bridge = createBrowserMockBridge({
+				directoryCopyFixtureForTest: { name: "copy-box", entries },
+				directoryCopyLimitsForTest: limits,
+			});
+			const rootId = (await bridge.workspacePickRoots("replace")).snapshot
+				.roots[0]!.rootId;
+			await expect(
+				bridge.workspaceCopy(rootId, "copy-box", rootId, "out"),
+			).rejects.toEqual({ code, message });
+			await expect(bridge.workspaceStat(rootId, "out")).rejects.toMatchObject({
+				code: "ENTRY_NOT_FOUND",
+			});
+		};
+
+		await rejectFixture(
+			[
+				{ path: ["nested"], kind: "directory" },
+				{ path: ["nested", "socket"], kind: "other" },
+			],
+			{},
+			"ENTRY_TYPE_MISMATCH",
+			"The workspace entry has an incompatible type.",
+		);
+		await rejectFixture(
+			[{ path: ["\ud800"], kind: "file", bytes: [] }],
+			{},
+			"PATH_ENCODING_UNSUPPORTED",
+			"The workspace entry name cannot be represented safely.",
+		);
+		await rejectFixture(
+			[{ path: ["large"], kind: "file", bytes: [1, 2, 3, 4] }],
+			{ fileBytes: 3 },
+			"FILE_TOO_LARGE",
+			"The workspace file exceeds the supported copy limit.",
+		);
+		await rejectFixture(
+			[{ path: ["large"], kind: "symlink", payload: [1, 2, 3, 4] }],
+			{ symlinkBytes: 3 },
+			"FILE_TOO_LARGE",
+			"The workspace symbolic link exceeds the supported copy limit.",
+		);
+
+		expect(() =>
+			createBrowserMockBridge({
+				directoryCopyLimitsForTest: { descendants: Number.NaN },
+			}),
+		).toThrow("Invalid browser mock directory-copy limits.");
+		expect(() =>
+			createBrowserMockBridge({
+				directoryCopyLimitsForTest: {
+					descendants: Number.MAX_SAFE_INTEGER,
+				},
+			}),
+		).toThrow("Invalid browser mock directory-copy limits.");
+	});
+
+	it("publishes no directory when its frozen detached observer rejects", async () => {
+		let observation: BrowserMockDirectoryCopyObservation | undefined;
+		const bridge = createBrowserMockBridge({
+			directoryCopyFixtureForTest: {
+				name: "copy-box",
+				entries: [
+					{ path: ["file"], kind: "file", bytes: [1] },
+					{ path: ["link"], kind: "symlink", payload: [0xff] },
+				],
+			},
+			onDirectoryCopyForTest: (candidate) => {
+				observation = candidate;
+				throw new Error("observer rejected directory copy");
+			},
+		});
+		const rootId = (await bridge.workspacePickRoots("replace")).snapshot
+			.roots[0]!.rootId;
+
+		await expect(
+			bridge.workspaceCopy(rootId, "copy-box", rootId, "empty/rejected"),
+		).rejects.toThrow("observer rejected directory copy");
+		await expect(
+			bridge.workspaceStat(rootId, "empty/rejected"),
+		).rejects.toMatchObject({ code: "ENTRY_NOT_FOUND" });
+		expect(Object.isFrozen(observation)).toBe(true);
+		expect(Object.isFrozen(observation?.manifest)).toBe(true);
+		expect(Object.isFrozen(observation?.manifest.entries)).toBe(true);
+		const payload = observation?.manifest.entries.find(
+			(entry) => entry.kind === "symlink",
+		)?.payload;
+		expect(payload).toEqual([0xff]);
+		expect(Object.isFrozen(payload)).toBe(true);
+		expect(() => (payload as number[]).push(0)).toThrow(TypeError);
+	});
+
+	it("does not clobber a target published by the directory observer seam", async () => {
+		let rootId = "";
+		let bridge: ReturnType<typeof createBrowserMockBridge>;
+		bridge = createBrowserMockBridge({
+			directoryCopyFixtureForTest: {
+				name: "copy-box",
+				entries: [{ path: ["file"], kind: "file", bytes: [1] }],
+			},
+			onDirectoryCopyForTest: () => {
+				void bridge.workspaceCreateFile(rootId, "empty/raced-target");
+			},
+		});
+		rootId = (await bridge.workspacePickRoots("replace")).snapshot.roots[0]!
+			.rootId;
+
+		await expect(
+			bridge.workspaceCopy(rootId, "copy-box", rootId, "empty/raced-target"),
+		).rejects.toEqual({
+			code: "ENTRY_ALREADY_EXISTS",
+			message: "The workspace entry already exists.",
+		});
+		expect(
+			await bridge.workspaceStat(rootId, "empty/raced-target"),
+		).toMatchObject({ kind: "file", size: 0 });
 	});
 
 	it("copies raw symlink payloads and reclassifies them at each location", async () => {

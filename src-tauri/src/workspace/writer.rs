@@ -15,9 +15,9 @@ use crate::path_policy::RelativePath;
 use super::WorkspaceRootLease;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-const MAX_COPY_FILE_BYTES: usize = 8 * 1_024 * 1_024;
+pub(super) const MAX_COPY_FILE_BYTES: usize = 8 * 1_024 * 1_024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-const MAX_COPY_SYMLINK_BYTES: usize = 4 * 1_024;
+pub(super) const MAX_COPY_SYMLINK_BYTES: usize = 4 * 1_024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const COPY_BUFFER_BYTES: usize = 64 * 1_024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -122,6 +122,14 @@ fn dispatch_copy(
 
     if source_metadata.is_file() {
         return copy_regular_file(source_lease, source_path, target_lease, target_path);
+    }
+    if source_metadata.is_dir() {
+        return super::directory_copy::copy_directory(
+            source_lease,
+            source_path,
+            target_lease,
+            target_path,
+        );
     }
     if !source_metadata.file_type().is_symlink() {
         return Err(entry_type_mismatch());
@@ -439,14 +447,14 @@ where
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct FileIdentity {
-    device: u64,
-    inode: u64,
+pub(super) struct FileIdentity {
+    pub(super) device: u64,
+    pub(super) inode: u64,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl FileIdentity {
-    fn from_metadata(metadata: &Metadata) -> Self {
+    pub(super) fn from_metadata(metadata: &Metadata) -> Self {
         use cap_std::fs::MetadataExt;
 
         Self {
@@ -458,19 +466,19 @@ impl FileIdentity {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SourceSnapshot {
-    identity: FileIdentity,
-    len: u64,
-    mode: u32,
-    mtime: i64,
-    mtime_nsec: i64,
-    ctime: i64,
-    ctime_nsec: i64,
+pub(super) struct SourceSnapshot {
+    pub(super) identity: FileIdentity,
+    pub(super) len: u64,
+    pub(super) mode: u32,
+    pub(super) mtime: i64,
+    pub(super) mtime_nsec: i64,
+    pub(super) ctime: i64,
+    pub(super) ctime_nsec: i64,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl SourceSnapshot {
-    fn from_metadata(metadata: &Metadata) -> Result<Self, CommandError> {
+    pub(super) fn from_metadata(metadata: &Metadata) -> Result<Self, CommandError> {
         use cap_std::fs::MetadataExt;
 
         validate_copy_source(metadata)?;
@@ -499,18 +507,18 @@ impl SourceSnapshot {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SymlinkSnapshot {
-    identity: FileIdentity,
-    len: u64,
-    mtime: i64,
-    mtime_nsec: i64,
-    ctime: i64,
-    ctime_nsec: i64,
+pub(super) struct SymlinkSnapshot {
+    pub(super) identity: FileIdentity,
+    pub(super) len: u64,
+    pub(super) mtime: i64,
+    pub(super) mtime_nsec: i64,
+    pub(super) ctime: i64,
+    pub(super) ctime_nsec: i64,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl SymlinkSnapshot {
-    fn from_metadata(metadata: &Metadata) -> Result<Self, CommandError> {
+    pub(super) fn from_metadata(metadata: &Metadata) -> Result<Self, CommandError> {
         use cap_std::fs::MetadataExt;
 
         if !metadata.file_type().is_symlink() {
@@ -741,19 +749,17 @@ impl<'parent> StagedSymlink<'parent> {
         target_name: &Path,
         payload: Vec<u8>,
     ) -> Result<Self, CommandError> {
-        use rustix::fs::symlinkat;
-
         for _ in 0..MAX_STAGING_ATTEMPTS {
             let name = PathBuf::from(format!("{STAGING_PREFIX}{}.tmp", Uuid::new_v4().simple()));
             if name == target_name {
                 continue;
             }
-            match symlinkat(payload.as_slice(), parent, &name) {
+            match create_symlink_exact(parent, &name, payload.as_slice()) {
                 Ok(()) => {
                     return UnidentifiedStagedSymlink { parent, name }.identify(payload);
                 }
-                Err(rustix::io::Errno::EXIST) => continue,
-                Err(error) => return Err(map_symlink_stage_create_error(error)),
+                Err(error) if stage_name_already_exists(&error) => continue,
+                Err(error) => return Err(error),
             }
         }
         Err(copy_failed())
@@ -891,7 +897,11 @@ fn symlink_snapshot_at(parent: &Dir, name: &Path) -> Result<SymlinkSnapshot, Com
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn read_symlink_payload<F>(parent: &Dir, name: &Path, map_error: F) -> Result<Vec<u8>, CommandError>
+pub(super) fn read_symlink_payload<F>(
+    parent: &Dir,
+    name: &Path,
+    map_error: F,
+) -> Result<Vec<u8>, CommandError>
 where
     F: FnOnce(rustix::io::Errno) -> CommandError,
 {
@@ -903,6 +913,22 @@ where
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn create_symlink_exact(
+    parent: &Dir,
+    name: &Path,
+    payload: &[u8],
+) -> Result<(), CommandError> {
+    use rustix::fs::symlinkat;
+
+    symlinkat(payload, parent, name).map_err(map_symlink_stage_create_error)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn stage_name_already_exists(error: &CommandError) -> bool {
+    error.code() == "ENTRY_ALREADY_EXISTS"
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn bounded_symlink_payload(buffer: &[u8], length: usize) -> Result<Vec<u8>, CommandError> {
     if length > MAX_COPY_SYMLINK_BYTES || length > buffer.len() {
         return Err(symlink_too_large());
@@ -911,7 +937,7 @@ fn bounded_symlink_payload(buffer: &[u8], length: usize) -> Result<Vec<u8>, Comm
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn open_copy_source(parent: &Dir, name: &Path) -> Result<File, CommandError> {
+pub(super) fn open_copy_source(parent: &Dir, name: &Path) -> Result<File, CommandError> {
     use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
 
     let mut options = OpenOptions::new();
@@ -934,23 +960,46 @@ fn validate_copy_source(metadata: &Metadata) -> Result<(), CommandError> {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn transfer_bounded(source: &mut File, target: &mut File) -> Result<(), CommandError> {
+    transfer_bounded_count(source, target, MAX_COPY_FILE_BYTES as u64).map(|_| ())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn transfer_bounded_count(
+    source: &mut File,
+    target: &mut File,
+    aggregate_remaining: u64,
+) -> Result<u64, CommandError> {
     let mut buffer = [0u8; COPY_BUFFER_BYTES];
     let mut transferred = 0usize;
+    let aggregate_probe = aggregate_remaining
+        .checked_add(1)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(directory_too_large)?;
+    let maximum_probe = MAX_COPY_FILE_BYTES
+        .checked_add(1)
+        .ok_or_else(file_too_large)?
+        .min(aggregate_probe);
     loop {
-        let remaining_probe = MAX_COPY_FILE_BYTES
-            .checked_add(1)
-            .and_then(|limit| limit.checked_sub(transferred))
-            .ok_or_else(file_too_large)?;
+        let remaining_probe = maximum_probe.checked_sub(transferred).ok_or_else(|| {
+            if transferred > MAX_COPY_FILE_BYTES {
+                file_too_large()
+            } else {
+                directory_too_large()
+            }
+        })?;
         let read_len = remaining_probe.min(buffer.len());
         let read = source
             .read(&mut buffer[..read_len])
             .map_err(map_workspace_copy_error)?;
         if read == 0 {
-            return Ok(());
+            return u64::try_from(transferred).map_err(|_| file_too_large());
         }
         transferred = transferred.checked_add(read).ok_or_else(file_too_large)?;
         if transferred > MAX_COPY_FILE_BYTES {
             return Err(file_too_large());
+        }
+        if transferred as u64 > aggregate_remaining {
+            return Err(directory_too_large());
         }
         target
             .write_all(&buffer[..read])
@@ -959,7 +1008,10 @@ fn transfer_bounded(source: &mut File, target: &mut File) -> Result<(), CommandE
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn verify_staged_contents(source: &mut File, staged: &mut File) -> Result<(), CommandError> {
+pub(super) fn verify_staged_contents(
+    source: &mut File,
+    staged: &mut File,
+) -> Result<(), CommandError> {
     source
         .seek(SeekFrom::Start(0))
         .map_err(map_workspace_copy_error)?;
@@ -1014,7 +1066,7 @@ fn verify_staged_contents(source: &mut File, staged: &mut File) -> Result<(), Co
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn publish_no_replace(
+pub(super) fn publish_no_replace(
     parent: &Dir,
     staging_name: &Path,
     target_name: &Path,
@@ -1031,7 +1083,9 @@ fn publish_no_replace(
     .map_err(map_copy_publish_error)
 }
 
-fn split_entry_path(relative_path: &RelativePath) -> Result<(PathBuf, PathBuf), CommandError> {
+pub(super) fn split_entry_path(
+    relative_path: &RelativePath,
+) -> Result<(PathBuf, PathBuf), CommandError> {
     let path = relative_path.as_path();
     let parent = path.parent().ok_or_else(entry_type_mismatch)?;
     let name = path.file_name().ok_or_else(entry_type_mismatch)?;
@@ -1048,7 +1102,7 @@ fn open_parent(root: &Dir, relative_parent: &Path) -> Result<Dir, CommandError> 
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn open_copy_parent(root: &Dir, relative_parent: &Path) -> Result<Dir, CommandError> {
+pub(super) fn open_copy_parent(root: &Dir, relative_parent: &Path) -> Result<Dir, CommandError> {
     let path = if relative_parent.as_os_str().is_empty() {
         Path::new(".")
     } else {
@@ -1116,7 +1170,7 @@ fn map_workspace_rename_error(error: io::Error) -> CommandError {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn map_workspace_copy_error(error: io::Error) -> CommandError {
+pub(super) fn map_workspace_copy_error(error: io::Error) -> CommandError {
     map_workspace_error(error, copy_failed)
 }
 
@@ -1176,6 +1230,7 @@ fn map_symlink_stage_create_error(error: rustix::io::Errno) -> CommandError {
     use rustix::io::Errno;
 
     match error {
+        Errno::EXIST => entry_already_exists(),
         Errno::ACCESS | Errno::PERM | Errno::ROFS => permission_denied(),
         _ => copy_failed(),
     }
@@ -1199,7 +1254,7 @@ fn entry_already_exists() -> CommandError {
     )
 }
 
-fn entry_type_mismatch() -> CommandError {
+pub(super) fn entry_type_mismatch() -> CommandError {
     CommandError::new(
         "ENTRY_TYPE_MISMATCH",
         "The workspace entry has an incompatible type.",
@@ -1224,7 +1279,7 @@ fn workspace_conflict() -> CommandError {
     )
 }
 
-fn copy_conflict() -> CommandError {
+pub(super) fn copy_conflict() -> CommandError {
     CommandError::new(
         "WORKSPACE_CONFLICT",
         "The workspace copy conflicts with the source path.",
@@ -1232,7 +1287,7 @@ fn copy_conflict() -> CommandError {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn file_too_large() -> CommandError {
+pub(super) fn file_too_large() -> CommandError {
     CommandError::new(
         "FILE_TOO_LARGE",
         "The workspace file exceeds the supported copy limit.",
@@ -1240,7 +1295,7 @@ fn file_too_large() -> CommandError {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn symlink_too_large() -> CommandError {
+pub(super) fn symlink_too_large() -> CommandError {
     CommandError::new(
         "FILE_TOO_LARGE",
         "The workspace symbolic link exceeds the supported copy limit.",
@@ -1248,15 +1303,23 @@ fn symlink_too_large() -> CommandError {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn copy_failed() -> CommandError {
+pub(super) fn copy_failed() -> CommandError {
     CommandError::new("IO_FAILED", "The workspace entry could not be copied.")
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn stage_cleanup_failed() -> CommandError {
+pub(super) fn stage_cleanup_failed() -> CommandError {
     CommandError::new(
         "IO_FAILED",
         "The workspace staging entry could not be cleaned up safely.",
+    )
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn directory_too_large() -> CommandError {
+    CommandError::new(
+        "DIRECTORY_TOO_LARGE",
+        "The workspace directory exceeds the supported copy limits.",
     )
 }
 

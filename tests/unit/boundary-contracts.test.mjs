@@ -167,6 +167,7 @@ fn windows_identity(path: &std::path::Path) {
 		relativePath: "src-tauri/src/workspace/writer.rs",
 		source: `
 use rustix::fs::{renameat_with, RenameFlags};
+const MAX_COPY_FILE_BYTES: usize = 8 * 1_024 * 1_024;
 const MAX_COPY_SYMLINK_BYTES: usize = 4 * 1_024;
 fn read_symlink(parent: &cap_std::fs::Dir) {
   let mut buffer = [0_u8; MAX_COPY_SYMLINK_BYTES + 1];
@@ -178,8 +179,76 @@ fn stage_symlink(parent: &cap_std::fs::Dir) {
 fn rename_exclusive(source: &cap_std::fs::Dir, target: &cap_std::fs::Dir) {
   let _ = renameat_with(source, "old", target, "new", RenameFlags::NOREPLACE);
 }
-fn publish_exclusive(parent: &cap_std::fs::Dir) {
-  let _ = renameat_with(parent, "staging", parent, "target", RenameFlags::NOREPLACE);
+fn publish_no_replace(
+  parent: &Dir,
+  staging_name: &Path,
+  target_name: &Path,
+) -> Result<(), CommandError> {
+  renameat_with(
+    parent,
+    staging_name,
+    parent,
+    target_name,
+    RenameFlags::NOREPLACE,
+  )
+  .map_err(map_copy_publish_error)
+}
+`,
+	},
+	{
+		relativePath: "src-tauri/src/workspace/directory_copy.rs",
+		source: `
+const MAX_COPY_TREE_ENTRIES: usize = 10_000;
+const MAX_COPY_ENTRY_NAME_BYTES: usize = 1_024;
+const MAX_COPY_TREE_NAME_BYTES: usize = 2 * 1_024 * 1_024;
+const MAX_COPY_TREE_DEPTH: usize = 256;
+const MAX_COPY_TREE_SYMLINK_BYTES: u64 = 2 * 1_024 * 1_024;
+const MAX_COPY_TREE_BYTES: u64 = 256 * 1_024 * 1_024;
+const DIRECTORY_COPY_LIMITS: DirectoryCopyLimits = DirectoryCopyLimits {
+  descendants: MAX_COPY_TREE_ENTRIES,
+  name_bytes: MAX_COPY_ENTRY_NAME_BYTES,
+  name_aggregate_bytes: MAX_COPY_TREE_NAME_BYTES,
+  depth: MAX_COPY_TREE_DEPTH,
+  link_bytes: MAX_COPY_SYMLINK_BYTES,
+  link_aggregate_bytes: MAX_COPY_TREE_SYMLINK_BYTES,
+  file_bytes: MAX_COPY_FILE_BYTES as u64,
+  file_aggregate_bytes: MAX_COPY_TREE_BYTES,
+};
+fn copy_directory(
+  source_lease: &Lease,
+  source_path: &Path,
+  target_lease: &Lease,
+  target_path: &Path,
+) {
+  let mut hooks = NoopHooks;
+  copy_directory_with_limits_and_hooks(
+    source_lease,
+    source_path,
+    target_lease,
+    target_path,
+    DIRECTORY_COPY_LIMITS,
+    &mut hooks,
+  );
+}
+fn open_source_root(parent: &Dir) {
+  let _ = parent.open_dir_nofollow("source");
+}
+fn scan_directory(parent: &Dir) {
+  let _ = parent.open_dir_nofollow("child");
+}
+fn open_source_parent(parent: &Dir) {
+  let _ = parent.open_dir_nofollow("parent");
+}
+fn build(stage_parent: &Dir, name: &Path) {
+  let mut options = OpenOptions::new();
+  options.read(true).write(true).create_new(true);
+  options.mode(0o600);
+  let _staged_file = stage_parent.open_with(name, &options);
+}
+impl StagedTree {
+  fn open_receipted_directory(&self, relative: &Path) {
+    let _ = self.root.open_dir_nofollow(relative);
+  }
 }
 `,
 	},
@@ -217,11 +286,250 @@ fn run() {
 	},
 ];
 
+function mutateWorkspaceSource(sources, relativePath, transform) {
+	return sources.map((entry) =>
+		entry.relativePath === relativePath
+			? { ...entry, source: transform(entry.source) }
+			: entry,
+	);
+}
+
+const workspaceCopyLimits = Object.freeze([
+	{
+		path: "src-tauri/src/workspace/writer.rs",
+		name: "MAX_COPY_FILE_BYTES",
+		integerType: "usize",
+		expression: "8 * 1_024 * 1_024",
+		value: 8_388_608,
+		equivalent: "(1 << 23)",
+	},
+	{
+		path: "src-tauri/src/workspace/writer.rs",
+		name: "MAX_COPY_SYMLINK_BYTES",
+		integerType: "usize",
+		expression: "4 * 1_024",
+		value: 4_096,
+		equivalent: "0x1000usize",
+	},
+	{
+		path: "src-tauri/src/workspace/directory_copy.rs",
+		name: "MAX_COPY_TREE_ENTRIES",
+		integerType: "usize",
+		expression: "10_000",
+		value: 10_000,
+		equivalent: "5 * (1_000 + 1_000)",
+	},
+	{
+		path: "src-tauri/src/workspace/directory_copy.rs",
+		name: "MAX_COPY_ENTRY_NAME_BYTES",
+		integerType: "usize",
+		expression: "1_024",
+		value: 1_024,
+		equivalent: "1 << 10",
+	},
+	{
+		path: "src-tauri/src/workspace/directory_copy.rs",
+		name: "MAX_COPY_TREE_NAME_BYTES",
+		integerType: "usize",
+		expression: "2 * 1_024 * 1_024",
+		value: 2_097_152,
+		equivalent: "2_097_152usize",
+	},
+	{
+		path: "src-tauri/src/workspace/directory_copy.rs",
+		name: "MAX_COPY_TREE_DEPTH",
+		integerType: "usize",
+		expression: "256",
+		value: 256,
+		equivalent: "0x100",
+	},
+	{
+		path: "src-tauri/src/workspace/directory_copy.rs",
+		name: "MAX_COPY_TREE_SYMLINK_BYTES",
+		integerType: "u64",
+		expression: "2 * 1_024 * 1_024",
+		value: 2_097_152,
+		equivalent: "1 << 21",
+	},
+	{
+		path: "src-tauri/src/workspace/directory_copy.rs",
+		name: "MAX_COPY_TREE_BYTES",
+		integerType: "u64",
+		expression: "256 * 1_024 * 1_024",
+		value: 268_435_456,
+		equivalent: "1 << (8 + 20)",
+	},
+]);
+
+function workspaceCopyLimitFailure(name, value, integerType) {
+	return `workspace copy limits must define exactly one ${name}: ${integerType} = ${value}`;
+}
+
 describe("Plain workspace Rust boundary contracts", () => {
 	it("accepts one capability root authorizer and ignores test fixtures", () => {
 		expect(
 			validateWorkspaceRustBoundary(workspaceCargo, workspaceSources),
 		).toEqual([]);
+	});
+
+	it("locks every file, symlink and tree budget to one typed semantic declaration", () => {
+		for (const {
+			path,
+			name,
+			integerType,
+			expression,
+			value,
+		} of workspaceCopyLimits) {
+			const failure = workspaceCopyLimitFailure(name, value, integerType);
+			const declaration = `const ${name}: ${integerType} = ${expression};`;
+
+			const missing = mutateWorkspaceSource(workspaceSources, path, (source) =>
+				source.replace(declaration, ""),
+			);
+			expect(validateWorkspaceRustBoundary(workspaceCargo, missing)).toContain(
+				failure,
+			);
+
+			const wrong = mutateWorkspaceSource(workspaceSources, path, (source) =>
+				source.replace(
+					declaration,
+					`const ${name}: ${integerType} = (${expression}) + 1;`,
+				),
+			);
+			expect(validateWorkspaceRustBoundary(workspaceCargo, wrong)).toContain(
+				failure,
+			);
+
+			const wrongType = mutateWorkspaceSource(
+				workspaceSources,
+				path,
+				(source) =>
+					source.replace(
+						declaration,
+						`const ${name}: ${integerType === "usize" ? "u64" : "usize"} = ${expression};`,
+					),
+			);
+			expect(
+				validateWorkspaceRustBoundary(workspaceCargo, wrongType),
+			).toContain(failure);
+
+			const renamed = mutateWorkspaceSource(workspaceSources, path, (source) =>
+				source.replace(name, `${name}_ALIAS`),
+			);
+			expect(validateWorkspaceRustBoundary(workspaceCargo, renamed)).toContain(
+				failure,
+			);
+
+			const deadDuplicate = mutateWorkspaceSource(
+				workspaceSources,
+				path,
+				(source) =>
+					`${source}\n#[cfg(any())]\nconst ${name}: ${integerType} = ${expression};`,
+			);
+			expect(
+				validateWorkspaceRustBoundary(workspaceCargo, deadDuplicate),
+			).toContain(failure);
+		}
+	});
+
+	it("accepts safe equivalent integer expressions for every copy budget", () => {
+		for (const {
+			path,
+			name,
+			integerType,
+			expression,
+			value,
+			equivalent,
+		} of workspaceCopyLimits) {
+			const sources = mutateWorkspaceSource(workspaceSources, path, (source) =>
+				source.replace(
+					`const ${name}: ${integerType} = ${expression};`,
+					`const ${name}: ${integerType} = ${equivalent};`,
+				),
+			);
+			expect(
+				validateWorkspaceRustBoundary(workspaceCargo, sources),
+			).not.toContain(workspaceCopyLimitFailure(name, value, integerType));
+		}
+	});
+
+	it("binds every DirectoryCopyLimits field to its audited MAX_COPY constant", () => {
+		const path = "src-tauri/src/workspace/directory_copy.rs";
+		const failure =
+			"workspace/directory_copy.rs must map every DirectoryCopyLimits field to its audited MAX_COPY constant";
+		for (const [field, expression] of [
+			["descendants", "MAX_COPY_TREE_ENTRIES"],
+			["name_bytes", "MAX_COPY_ENTRY_NAME_BYTES"],
+			["name_aggregate_bytes", "MAX_COPY_TREE_NAME_BYTES"],
+			["depth", "MAX_COPY_TREE_DEPTH"],
+			["link_bytes", "MAX_COPY_SYMLINK_BYTES"],
+			["link_aggregate_bytes", "MAX_COPY_TREE_SYMLINK_BYTES"],
+			["file_bytes", "MAX_COPY_FILE_BYTES as u64"],
+			["file_aggregate_bytes", "MAX_COPY_TREE_BYTES"],
+		]) {
+			const sources = mutateWorkspaceSource(workspaceSources, path, (source) =>
+				source.replace(`${field}: ${expression},`, `${field}: u64::MAX,`),
+			);
+			expect(validateWorkspaceRustBoundary(workspaceCargo, sources)).toContain(
+				failure,
+			);
+		}
+	});
+
+	it("routes production directory copy through DIRECTORY_COPY_LIMITS directly", () => {
+		const path = "src-tauri/src/workspace/directory_copy.rs";
+		const failure =
+			"workspace/directory_copy.rs production copy_directory must pass DIRECTORY_COPY_LIMITS directly";
+		for (const replacement of [
+			"UNBOUNDED_LIMITS",
+			`DirectoryCopyLimits {
+      descendants: usize::MAX,
+      name_bytes: usize::MAX,
+      name_aggregate_bytes: usize::MAX,
+      depth: usize::MAX,
+      link_bytes: usize::MAX,
+      link_aggregate_bytes: u64::MAX,
+      file_bytes: u64::MAX,
+      file_aggregate_bytes: u64::MAX,
+    }`,
+		]) {
+			const sources = mutateWorkspaceSource(workspaceSources, path, (source) =>
+				source.replace(
+					"    DIRECTORY_COPY_LIMITS,\n    &mut hooks,",
+					`    ${replacement},\n    &mut hooks,`,
+				),
+			);
+			expect(validateWorkspaceRustBoundary(workspaceCargo, sources)).toContain(
+				failure,
+			);
+		}
+
+		const injectedTestLimits = mutateWorkspaceSource(
+			workspaceSources,
+			path,
+			(source) => `${source}
+fn copy_directory_for_test(limits: DirectoryCopyLimits, hooks: &mut Hooks) {
+  copy_directory_with_limits_and_hooks(a, b, c, d, limits, hooks);
+}`,
+		);
+		expect(
+			validateWorkspaceRustBoundary(workspaceCargo, injectedTestLimits),
+		).not.toContain(failure);
+	});
+
+	it("ignores budget bait in comments, literals and longer identifiers", () => {
+		const bait = workspaceCopyLimits
+			.map(
+				({ name, integerType }) =>
+					`// const ${name}: ${integerType} = 1;\nconst ${name}_NOTE: &str = "const ${name}: ${integerType} = 1;";`,
+			)
+			.join("\n");
+		const sources = mutateWorkspaceSource(
+			workspaceSources,
+			"src-tauri/src/workspace/directory_copy.rs",
+			(source) => `${source}\n${bait}`,
+		);
+		expect(validateWorkspaceRustBoundary(workspaceCargo, sources)).toEqual([]);
 	});
 
 	it("requires the reviewed capability, exclusive-rename and opaque-id versions", () => {
@@ -343,6 +651,266 @@ describe("Plain workspace Rust boundary contracts", () => {
 		}
 	});
 
+	it("rejects every forbidden recursive-directory dependency even when renamed", () => {
+		for (const dependency of [
+			"walkdir",
+			"jwalk",
+			"globwalk",
+			"fs_extra",
+			"dircpy",
+			"copy_dir",
+		]) {
+			const failure = `Cargo metadata must not contain direct recursive-directory dependency ${dependency}, including renamed dependencies`;
+			for (const kind of [null, "dev", "build"]) {
+				expect(
+					validateWorkspaceRustBoundary(workspaceCargo, workspaceSources, [
+						{
+							name: dependency,
+							req: "^99",
+							kind,
+							rename: `bounded_${dependency}`,
+						},
+					]),
+				).toContain(failure);
+			}
+		}
+	});
+
+	it("rejects recursive-directory crate aliases and re-exports across production", () => {
+		for (const [dependency, binding] of [
+			["walkdir", "pub(crate) use walkdir::WalkDir as BoundedWalk;"],
+			["jwalk", "use jwalk as bounded_walk;"],
+			["globwalk", "pub use {globwalk as bounded_walk};"],
+			["fs_extra", "pub(super) use fs_extra::dir as bounded_dir;"],
+			["dircpy", "extern crate dircpy;"],
+			["copy_dir", "pub(crate) use copy_dir::copy_dir as bounded_copy;"],
+		]) {
+			const relativePath = "src-tauri/src/directory_reexports.rs";
+			expect(
+				validateWorkspaceRustBoundary(workspaceCargo, [
+					...workspaceSources,
+					{ relativePath, source: binding },
+				]),
+			).toContain(
+				`${relativePath} must not bind, alias or re-export recursive-directory crate ${dependency}`,
+			);
+		}
+	});
+
+	it("allows ignore as a direct search dependency but rejects its walkers in workspace", () => {
+		const ignoreDependency = {
+			name: "ignore",
+			req: "^99",
+			kind: null,
+			rename: "search_ignore",
+		};
+		for (const source of [
+			"use ignore::WalkBuilder; fn search() {}",
+			'extern crate ignore as ig; fn search() { ig::WalkBuilder::new("."); }',
+			'use ignore::{self as ig}; fn search() { ig::Walk::new("."); }',
+			"use search_ignore::WalkBuilder; fn search() {}",
+		]) {
+			expect(
+				validateWorkspaceRustBoundary(
+					workspaceCargo,
+					[
+						...workspaceSources,
+						{ relativePath: "src-tauri/src/search.rs", source },
+					],
+					[ignoreDependency],
+				),
+			).toEqual([]);
+		}
+
+		const relativePath = "src-tauri/src/workspace/directory_helpers.rs";
+		const failure = `${relativePath} must not use or re-export ignore::Walk or ignore::WalkBuilder for workspace traversal`;
+		for (const source of [
+			"use ignore::Walk; fn walk() {}",
+			"pub(crate) use ignore::{WalkBuilder as BoundedWalk};",
+			'use ignore as walker; fn walk() { walker::WalkBuilder::new("."); }',
+			"pub(super) use {ignore as walker};",
+			'extern crate ignore as ig; fn walk() { ig::WalkBuilder::new("."); }',
+			'use ignore::{self as ig}; fn walk() { ig::Walk::new("."); }',
+			'use search_ignore::{self as ig}; fn walk() { ig::WalkBuilder::new("."); }',
+		]) {
+			expect(
+				validateWorkspaceRustBoundary(
+					workspaceCargo,
+					[...workspaceSources, { relativePath, source }],
+					[ignoreDependency],
+				),
+			).toContain(failure);
+		}
+
+		const pathPolicy = "src-tauri/src/path_policy.rs";
+		expect(
+			validateWorkspaceRustBoundary(
+				workspaceCargo,
+				[
+					...workspaceSources,
+					{
+						relativePath: pathPolicy,
+						source:
+							'use ignore::{self as ig}; fn policy() { ig::WalkBuilder::new("."); }',
+					},
+				],
+				[ignoreDependency],
+			),
+		).toContain(
+			`${pathPolicy} must not use or re-export ignore::Walk or ignore::WalkBuilder for workspace traversal`,
+		);
+	});
+
+	it("does not mistake comments, literals or internal modules for walker crates", () => {
+		const harmless = {
+			relativePath: "src-tauri/src/workspace/names.rs",
+			source: `
+// use walkdir::WalkDir;
+const NOTE: &str = "ignore::WalkBuilder fs_extra copy_dir";
+use crate::walkdir as internal_walkdir;
+use self::jwalk::State;
+fn names() {
+  let walkdir = "label";
+  let copy_dir_name = walkdir;
+  let _ = copy_dir_name;
+}
+`,
+		};
+		expect(
+			validateWorkspaceRustBoundary(workspaceCargo, [
+				...workspaceSources,
+				harmless,
+			]),
+		).toEqual([]);
+	});
+
+	it("rejects unbounded recursive helpers and link-following traversal", () => {
+		const cases = [
+			[
+				'fn wide(directory: &cap_std::fs::Dir) { directory.create_dir_all("nested"); }',
+				"must not use unbounded recursive directory create/remove helpers",
+			],
+			[
+				'fn wide(directory: &cap_std::fs::Dir) { directory.remove_dir_all("nested"); }',
+				"must not use unbounded recursive directory create/remove helpers",
+			],
+			[
+				"fn follow(builder: Walker) { builder.follow_links(((true))); }",
+				"must not enable link-following directory traversal",
+			],
+			[
+				"use cap_fs_ext::FollowSymlinks::{Yes as Follow};",
+				"must keep capability directory opens nofollow",
+			],
+		];
+		for (const [source, suffix] of cases) {
+			const relativePath = "src-tauri/src/workspace/directory_helpers.rs";
+			expect(
+				validateWorkspaceRustBoundary(workspaceCargo, [
+					...workspaceSources,
+					{ relativePath, source },
+				]),
+			).toContain(`${relativePath} ${suffix}`);
+		}
+
+		for (const source of [
+			"pub(crate) use std::fs::create_dir_all as create_tree;",
+			"pub(super) use cap_fs_ext::FollowSymlinks::{Yes as Follow};",
+		]) {
+			const relativePath = "src-tauri/src/directory_reexports.rs";
+			expect(
+				validateWorkspaceRustBoundary(workspaceCargo, [
+					...workspaceSources,
+					{ relativePath, source },
+				]),
+			).toContain(
+				`${relativePath} must not re-export a forbidden recursive-directory operation`,
+			);
+		}
+	});
+
+	it("ignores forbidden recursive words in inert text and allows nofollow choices", () => {
+		const harmless = {
+			relativePath: "src-tauri/src/workspace/directory_helpers.rs",
+			source: `
+// create_dir_all remove_dir_all follow_links(true) FollowSymlinks::Yes
+const NOTE: &str = "walkdir::WalkDir ignore::WalkBuilder";
+fn safe(builder: Walker, options: Options) {
+  builder.follow_links(false);
+  options.follow(FollowSymlinks::No);
+}
+`,
+		};
+		expect(
+			validateWorkspaceRustBoundary(workspaceCargo, [
+				...workspaceSources,
+				harmless,
+			]),
+		).toEqual([]);
+	});
+
+	it("requires dedicated directory copy traversal to use open_dir_nofollow", () => {
+		const path = "src-tauri/src/workspace/directory_copy.rs";
+		const narrowFailure =
+			"workspace/directory_copy.rs must not use follow-capable directory open/conversion APIs outside its one staged-file open_with";
+		const traversalFailure =
+			"workspace/directory_copy.rs source and stage traversal helpers must call open_dir_nofollow directly";
+		const linkFollowing = mutateWorkspaceSource(
+			workspaceSources,
+			path,
+			(source) =>
+				source.replace(
+					'parent.open_dir_nofollow("child")',
+					'parent.open_dir("child")',
+				),
+		);
+		expect(
+			validateWorkspaceRustBoundary(workspaceCargo, linkFollowing),
+		).toEqual(expect.arrayContaining([narrowFailure, traversalFailure]));
+
+		for (const call of [
+			'parent.open_dir_nofollow("source")',
+			'parent.open_dir_nofollow("child")',
+			'parent.open_dir_nofollow("parent")',
+			"self.root.open_dir_nofollow(relative)",
+		]) {
+			const commentOnly = mutateWorkspaceSource(
+				workspaceSources,
+				path,
+				(source) => source.replace(`let _ = ${call};`, `// let _ = ${call};`),
+			);
+			expect(
+				validateWorkspaceRustBoundary(workspaceCargo, commentOnly),
+			).toContain(traversalFailure);
+		}
+
+		for (const bypass of [
+			'fn bypass(parent: &Dir) { let _ = parent.open("child"); }',
+			'fn bypass(parent: &Dir, options: &OpenOptions) { let _ = Dir::open_with(parent, "child", options); }',
+			"fn bypass(file: File) { let _ = Dir::from_std_file(file); }",
+			"fn bypass(fd: i32) { let _ = Dir::from_raw_fd(fd); }",
+		]) {
+			const sources = mutateWorkspaceSource(
+				workspaceSources,
+				path,
+				(source) => `${source}\n${bypass}`,
+			);
+			expect(validateWorkspaceRustBoundary(workspaceCargo, sources)).toContain(
+				narrowFailure,
+			);
+		}
+
+		const ordinaryFileHelper = mutateWorkspaceSource(
+			workspaceSources,
+			path,
+			(source) =>
+				`${source}\nfn open_expected_file(parent: &Dir, name: &Path) { let _ = open_copy_source(parent, name); }`,
+		);
+		expect(
+			validateWorkspaceRustBoundary(workspaceCargo, ordinaryFileHelper),
+		).not.toContain(narrowFailure);
+	});
+
 	it("rejects broad and alternate symlink helpers across production Rust", () => {
 		const hostileSources = [
 			...workspaceSources,
@@ -411,8 +979,11 @@ pub(crate) use std::os::unix::fs::symlink;
 
 		for (const [source, failure] of [
 			[
-				writer.source.replace("4 * 1_024", "8 * 1_024"),
-				"workspace writer must cap raw symlink payloads at MAX_COPY_SYMLINK_BYTES = 4096",
+				writer.source.replace(
+					"const MAX_COPY_SYMLINK_BYTES: usize = 4 * 1_024;",
+					"const MAX_COPY_SYMLINK_BYTES: usize = 8 * 1_024;",
+				),
+				"workspace copy limits must define exactly one MAX_COPY_SYMLINK_BYTES: usize = 4096",
 			],
 			[
 				writer.source.replace(
@@ -448,7 +1019,10 @@ pub(crate) use std::os::unix::fs::symlink;
 			"2 * 2 * 1_024",
 			"0x1000",
 		]) {
-			const source = writer.source.replace("4 * 1_024", expression);
+			const source = writer.source.replace(
+				"const MAX_COPY_SYMLINK_BYTES: usize = 4 * 1_024;",
+				`const MAX_COPY_SYMLINK_BYTES: usize = ${expression};`,
+			);
 			const sources = workspaceSources.map((entry) =>
 				entry.relativePath === writer.relativePath
 					? { ...entry, source }
@@ -457,7 +1031,7 @@ pub(crate) use std::os::unix::fs::symlink;
 			expect(
 				validateWorkspaceRustBoundary(workspaceCargo, sources),
 			).not.toContain(
-				"workspace writer must cap raw symlink payloads at MAX_COPY_SYMLINK_BYTES = 4096",
+				"workspace copy limits must define exactly one MAX_COPY_SYMLINK_BYTES: usize = 4096",
 			);
 		}
 	});
@@ -628,6 +1202,48 @@ fn publish_exclusive(parent: &cap_std::fs::Dir) {
 		).toContain(
 			"every workspace writer renameat_with call must pass exactly one direct RenameFlags::NOREPLACE flag",
 		);
+	});
+
+	it("binds publish_no_replace arguments and forbids every target pre-delete", () => {
+		const writerPath = "src-tauri/src/workspace/writer.rs";
+		const writer = workspaceSources.find(
+			({ relativePath }) => relativePath === writerPath,
+		).source;
+		const failure =
+			"workspace writer publish_no_replace must publish staging_name to target_name with one direct NOREPLACE call and no pre-delete";
+		for (const source of [
+			writer.replace(
+				"  renameat_with(\n    parent,\n    staging_name,",
+				"  parent.remove_file(target_name)?;\n  renameat_with(\n    parent,\n    staging_name,",
+			),
+			writer.replace(
+				"    parent,\n    target_name,\n    RenameFlags::NOREPLACE,",
+				"    parent,\n    staging_name,\n    RenameFlags::NOREPLACE,",
+			),
+			writer.replaceAll("target_name", "destination_name"),
+		]) {
+			const sources = mutateWorkspaceSource(
+				workspaceSources,
+				writerPath,
+				() => source,
+			);
+			expect(validateWorkspaceRustBoundary(workspaceCargo, sources)).toContain(
+				failure,
+			);
+		}
+
+		const inertDeleteWords = mutateWorkspaceSource(
+			workspaceSources,
+			writerPath,
+			(source) =>
+				source.replace(
+					"  renameat_with(\n    parent,\n    staging_name,",
+					'  // parent.remove_file(target_name);\n  const NOTE: &str = "remove_dir(target_name)";\n  renameat_with(\n    parent,\n    staging_name,',
+				),
+		);
+		expect(
+			validateWorkspaceRustBoundary(workspaceCargo, inertDeleteWords),
+		).not.toContain(failure);
 	});
 
 	it("rejects renameat_with aliases, re-exports and rustix namespace aliases", () => {

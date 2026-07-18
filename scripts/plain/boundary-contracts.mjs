@@ -201,6 +201,26 @@ const WORKSPACE_RUST_SOURCE_PATTERN =
 const RUST_PRODUCTION_SOURCE_PATTERN = /^src-tauri\/src\/.*\.rs$/;
 const WORKSPACE_TEST_SOURCE_PATTERN = /(?:^|\/)tests\.rs$/;
 const RUSTIX_TARGET = 'cfg(any(target_os = "linux", target_os = "macos"))';
+const FOLLOW_SYMLINKS_YES_PATTERN =
+	/\bFollowSymlinks\s*::\s*(?:Yes\b|\{[^}]*\bYes\b)/;
+const FORBIDDEN_DIRECTORY_DEPENDENCIES = Object.freeze([
+	"copy_dir",
+	"dircpy",
+	"fs_extra",
+	"globwalk",
+	"jwalk",
+	"walkdir",
+]);
+const WORKSPACE_COPY_LIMITS = Object.freeze([
+	["MAX_COPY_FILE_BYTES", 8 * 1_024 * 1_024, "usize"],
+	["MAX_COPY_SYMLINK_BYTES", 4 * 1_024, "usize"],
+	["MAX_COPY_TREE_ENTRIES", 10_000, "usize"],
+	["MAX_COPY_ENTRY_NAME_BYTES", 1_024, "usize"],
+	["MAX_COPY_TREE_NAME_BYTES", 2 * 1_024 * 1_024, "usize"],
+	["MAX_COPY_TREE_DEPTH", 256, "usize"],
+	["MAX_COPY_TREE_SYMLINK_BYTES", 2 * 1_024 * 1_024, "u64"],
+	["MAX_COPY_TREE_BYTES", 256 * 1_024 * 1_024, "u64"],
+]);
 
 function escapeRegularExpression(value) {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -437,29 +457,431 @@ function auditDirectRustixFsFunction(source, functionName) {
 
 function evaluateSmallRustIntegerExpression(expression) {
 	const normalized = expression.replaceAll("_", "").replaceAll(/\s+/g, "");
-	const literal = "(?:0x[0-9a-fA-F]+|0o[0-7]+|0b[01]+|[0-9]+)(?:usize)?";
-	const parseLiteral = (value) => {
-		const withoutSuffix = value.replace(/usize$/, "");
-		return Number(withoutSuffix);
-	};
-	if (
-		new RegExp(
-			`^${literal}(?:\\*${literal})*(?:\\+${literal}(?:\\*${literal})*)*$`,
-		).test(normalized)
-	) {
-		return normalized
-			.split("+")
-			.map((term) =>
-				term
-					.split("*")
-					.reduce((product, value) => product * parseLiteral(value), 1),
-			)
-			.reduce((sum, value) => sum + value, 0);
+	const tokens = normalized.match(
+		/(?:0x[0-9a-fA-F]+|0o[0-7]+|0b[01]+|[0-9]+)(?:u(?:8|16|32|64|128)|usize)?|<<|[+*()]/g,
+	);
+	if (tokens === null || tokens.join("") !== normalized) {
+		return undefined;
 	}
-	const shift = new RegExp(`^(${literal})<<(${literal})$`).exec(normalized);
-	return shift === null
-		? undefined
-		: parseLiteral(shift[1]) * 2 ** parseLiteral(shift[2]);
+
+	let cursor = 0;
+	const checked = (value) =>
+		Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+	const parsePrimary = () => {
+		const token = tokens[cursor];
+		if (token === "(") {
+			cursor += 1;
+			const value = parseShift();
+			if (value === undefined || tokens[cursor] !== ")") {
+				return undefined;
+			}
+			cursor += 1;
+			return value;
+		}
+		if (
+			token === undefined ||
+			!/^(?:0x[0-9a-fA-F]+|0o[0-7]+|0b[01]+|[0-9]+)(?:u(?:8|16|32|64|128)|usize)?$/.test(
+				token,
+			)
+		) {
+			return undefined;
+		}
+		cursor += 1;
+		return checked(Number(token.replace(/(?:u(?:8|16|32|64|128)|usize)$/, "")));
+	};
+	const parseProduct = () => {
+		let value = parsePrimary();
+		while (value !== undefined && tokens[cursor] === "*") {
+			cursor += 1;
+			const right = parsePrimary();
+			value = right === undefined ? undefined : checked(value * right);
+		}
+		return value;
+	};
+	const parseSum = () => {
+		let value = parseProduct();
+		while (value !== undefined && tokens[cursor] === "+") {
+			cursor += 1;
+			const right = parseProduct();
+			value = right === undefined ? undefined : checked(value + right);
+		}
+		return value;
+	};
+	function parseShift() {
+		let value = parseSum();
+		while (value !== undefined && tokens[cursor] === "<<") {
+			cursor += 1;
+			const right = parseSum();
+			value =
+				right === undefined || right > 52
+					? undefined
+					: checked(value * 2 ** right);
+		}
+		return value;
+	}
+
+	const value = parseShift();
+	return cursor === tokens.length ? value : undefined;
+}
+
+function workspaceCopyLimitFailure(name, value, integerType) {
+	return `workspace copy limits must define exactly one ${name}: ${integerType} = ${value}`;
+}
+
+function findWorkspaceCopyLimitDeclarations(
+	executableSource,
+	name,
+	integerType,
+) {
+	const pattern = new RegExp(
+		`^\\s*(?:pub(?:\\s*\\([^)]*\\))?\\s+)?const\\s+${escapeRegularExpression(name)}\\s*:\\s*${escapeRegularExpression(integerType)}\\s*=\\s*([^;]+);`,
+		"gm",
+	);
+	return [...executableSource.matchAll(pattern)].map((match) => match[1]);
+}
+
+function forbiddenDirectoryCrates(executableSource) {
+	const crates = new Set();
+	for (const dependency of FORBIDDEN_DIRECTORY_DEPENDENCIES) {
+		const escapedDependency = escapeRegularExpression(dependency);
+		const directUse = new RegExp(`^(?:::)?${escapedDependency}\\b`);
+		const rootGroupUse = new RegExp(
+			`(?:^|,)\\s*(?:::)?${escapedDependency}\\b`,
+		);
+		let hasReference = new RegExp(
+			`\\bextern\\s+crate\\s+${escapedDependency}\\b`,
+		).test(executableSource);
+		for (const match of executableSource.matchAll(
+			/\b(?:pub(?:\s*\([^)]*\))?\s+)?use\s+([^;]+);/g,
+		)) {
+			const clause = match[1].trim();
+			if (
+				directUse.test(clause) ||
+				(clause.startsWith("{") && rootGroupUse.test(clause.slice(1)))
+			) {
+				hasReference = true;
+			}
+		}
+		const qualified = new RegExp(`\\b${escapedDependency}\\s*::`, "g");
+		for (const match of executableSource.matchAll(qualified)) {
+			const prefix = executableSource.slice(0, match.index);
+			if (!/\b(?:crate|self|super|[A-Za-z_]\w*)\s*::\s*$/.test(prefix)) {
+				hasReference = true;
+			}
+		}
+		if (hasReference) {
+			crates.add(dependency);
+		}
+	}
+	return crates;
+}
+
+function usesIgnoreWalker(executableSource, crateNames) {
+	for (const crateName of new Set(crateNames)) {
+		const escapedCrate = escapeRegularExpression(crateName);
+		const directWalker = new RegExp(
+			`\\b${escapedCrate}\\s*::\\s*(?:\\{[^}]*\\b(?:WalkBuilder|Walk)\\b|(?:WalkBuilder|Walk)\\b)`,
+			"g",
+		);
+		for (const match of executableSource.matchAll(directWalker)) {
+			const prefix = executableSource.slice(0, match.index);
+			if (!/\b(?:crate|self|super|[A-Za-z_]\w*)\s*::\s*$/.test(prefix)) {
+				return true;
+			}
+		}
+
+		const aliases = [];
+		const externPattern = new RegExp(
+			`\\b(pub(?:\\s*\\([^)]*\\))?\\s+)?extern\\s+crate\\s+${escapedCrate}(?:\\s+as\\s+([A-Za-z_]\\w*))?\\s*;`,
+			"g",
+		);
+		for (const match of executableSource.matchAll(externPattern)) {
+			if (match[1] !== undefined) {
+				return true;
+			}
+			aliases.push(match[2] ?? crateName);
+		}
+
+		for (const match of executableSource.matchAll(
+			/\b(pub(?:\s*\([^)]*\))?\s+)?use\s+([^;]+);/g,
+		)) {
+			const clause = match[2].trim();
+			const foundAliases = [];
+			const directAlias = new RegExp(
+				`^(?:::)?${escapedCrate}\\s+as\\s+([A-Za-z_]\\w*)\\b`,
+			).exec(clause);
+			if (directAlias !== null) {
+				foundAliases.push(directAlias[1]);
+			}
+			const selfAlias = new RegExp(
+				`^(?:::)?${escapedCrate}\\s*::\\s*\\{[^}]*\\bself\\s+as\\s+([A-Za-z_]\\w*)\\b`,
+			).exec(clause);
+			if (selfAlias !== null) {
+				foundAliases.push(selfAlias[1]);
+			}
+			if (clause.startsWith("{")) {
+				const groupedAlias = new RegExp(
+					`(?:^|,)\\s*(?:::)?${escapedCrate}\\s+as\\s+([A-Za-z_]\\w*)\\b`,
+					"g",
+				);
+				for (const alias of clause.slice(1).matchAll(groupedAlias)) {
+					foundAliases.push(alias[1]);
+				}
+				const groupedSelfAlias = new RegExp(
+					`(?:^|,)\\s*(?:::)?${escapedCrate}\\s*::\\s*\\{[^}]*\\bself\\s+as\\s+([A-Za-z_]\\w*)\\b`,
+					"g",
+				);
+				for (const alias of clause.slice(1).matchAll(groupedSelfAlias)) {
+					foundAliases.push(alias[1]);
+				}
+			}
+			if (foundAliases.length > 0 && match[1] !== undefined) {
+				return true;
+			}
+			aliases.push(...foundAliases);
+		}
+
+		for (const alias of aliases) {
+			if (
+				new RegExp(
+					`\\b${escapeRegularExpression(alias)}\\s*::\\s*(?:WalkBuilder|Walk)\\b`,
+				).test(executableSource)
+			) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+function extractRustFunctions(source, functionName) {
+	const functions = [];
+	const pattern = new RegExp(
+		`\\bfn\\s+${escapeRegularExpression(functionName)}\\b`,
+		"g",
+	);
+	for (const match of source.matchAll(pattern)) {
+		const parameterOpen = source.indexOf("(", match.index + match[0].length);
+		const firstBoundary = source.slice(match.index).search(/[;{]/);
+		if (
+			parameterOpen < 0 ||
+			(firstBoundary >= 0 && match.index + firstBoundary < parameterOpen)
+		) {
+			continue;
+		}
+		const parameterClose = findMatchingDelimiter(
+			source,
+			parameterOpen,
+			"(",
+			")",
+		);
+		if (parameterClose === undefined) {
+			continue;
+		}
+		const bodyOpen = source.indexOf("{", parameterClose + 1);
+		const declarationEnd = source.indexOf(";", parameterClose + 1);
+		if (bodyOpen < 0 || (declarationEnd >= 0 && declarationEnd < bodyOpen)) {
+			continue;
+		}
+		const bodyClose = findMatchingDelimiter(source, bodyOpen, "{", "}");
+		if (bodyClose === undefined) {
+			continue;
+		}
+		functions.push({
+			parameters: source.slice(parameterOpen + 1, parameterClose),
+			returnType: source.slice(parameterClose + 1, bodyOpen),
+			body: source.slice(bodyOpen + 1, bodyClose),
+		});
+	}
+	return functions;
+}
+
+function splitTopLevelComma(source) {
+	const parts = [];
+	let start = 0;
+	const depths = { "(": 0, "[": 0, "{": 0 };
+	const matchingOpen = { ")": "(", "]": "[", "}": "{" };
+	for (let index = 0; index < source.length; index += 1) {
+		const character = source[index];
+		if (Object.hasOwn(depths, character)) {
+			depths[character] += 1;
+		} else if (Object.hasOwn(matchingOpen, character)) {
+			depths[matchingOpen[character]] -= 1;
+		} else if (
+			character === "," &&
+			Object.values(depths).every((depth) => depth === 0)
+		) {
+			parts.push(source.slice(start, index));
+			start = index + 1;
+		}
+	}
+	parts.push(source.slice(start));
+	return parts.filter((part) => part.trim().length > 0);
+}
+
+function directoryCopyLimitsAreExact(source) {
+	const declarations = [
+		...source.matchAll(
+			/\bconst\s+DIRECTORY_COPY_LIMITS\s*:\s*DirectoryCopyLimits\s*=\s*DirectoryCopyLimits\s*\{/g,
+		),
+	];
+	if (declarations.length !== 1) {
+		return false;
+	}
+	const open = declarations[0].index + declarations[0][0].lastIndexOf("{");
+	const close = findMatchingDelimiter(source, open, "{", "}");
+	if (close === undefined) {
+		return false;
+	}
+	const fields = new Map();
+	for (const part of splitTopLevelComma(source.slice(open + 1, close))) {
+		const field = /^\s*([A-Za-z_]\w*)\s*:\s*([\s\S]+?)\s*$/.exec(part);
+		if (field === null || fields.has(field[1])) {
+			return false;
+		}
+		fields.set(field[1], field[2].replaceAll(/\s+/g, ""));
+	}
+	const expected = new Map([
+		["descendants", "MAX_COPY_TREE_ENTRIES"],
+		["name_bytes", "MAX_COPY_ENTRY_NAME_BYTES"],
+		["name_aggregate_bytes", "MAX_COPY_TREE_NAME_BYTES"],
+		["depth", "MAX_COPY_TREE_DEPTH"],
+		["link_bytes", "MAX_COPY_SYMLINK_BYTES"],
+		["link_aggregate_bytes", "MAX_COPY_TREE_SYMLINK_BYTES"],
+		["file_bytes", "MAX_COPY_FILE_BYTESasu64"],
+		["file_aggregate_bytes", "MAX_COPY_TREE_BYTES"],
+	]);
+	return (
+		fields.size === expected.size &&
+		[...expected].every(
+			([field, expression]) => fields.get(field) === expression,
+		)
+	);
+}
+
+function productionDirectoryCopyUsesAuditedLimits(source) {
+	const functions = extractRustFunctions(source, "copy_directory");
+	if (functions.length !== 1) {
+		return false;
+	}
+	const calls = extractCallArguments(
+		functions[0].body,
+		"copy_directory_with_limits_and_hooks",
+	);
+	if (calls.length !== 1 || !calls[0].closed) {
+		return false;
+	}
+	const argumentsList = splitTopLevelComma(calls[0].arguments);
+	return (
+		argumentsList.length === 6 &&
+		argumentsList[4].replaceAll(/\s+/g, "") === "DIRECTORY_COPY_LIMITS"
+	);
+}
+
+function directoryTraversalHelpersUseNofollow(source) {
+	for (const functionName of [
+		"open_source_root",
+		"scan_directory",
+		"open_source_parent",
+		"open_receipted_directory",
+	]) {
+		const functions = extractRustFunctions(source, functionName);
+		if (functions.length !== 1) {
+			return false;
+		}
+		const calls = extractCallArguments(functions[0].body, "open_dir_nofollow");
+		if (
+			calls.length === 0 ||
+			calls.some(
+				(call) => !/\.\s*$/.test(functions[0].body.slice(0, call.index)),
+			)
+		) {
+			return false;
+		}
+	}
+	return true;
+}
+
+function directoryOpenOperationsAreNarrow(source) {
+	if (
+		/\bopen_dir\s*\(/.test(source) ||
+		/(?:\.|::)\s*open\s*\(/.test(source) ||
+		/\b(?:from_std_file|from_raw_fd|from_raw_handle|from_raw_socket)\s*\(/.test(
+			source,
+		) ||
+		/\bfn\s+open_dir_nofollow\b/.test(source)
+	) {
+		return false;
+	}
+
+	const allOpenWithCalls = extractCallArguments(source, "open_with").filter(
+		(call) => !/\bfn\s*$/.test(source.slice(0, call.index)),
+	);
+	if (allOpenWithCalls.length === 0) {
+		return true;
+	}
+	const buildFunctions = extractRustFunctions(source, "build");
+	if (allOpenWithCalls.length !== 1 || buildFunctions.length !== 1) {
+		return false;
+	}
+	const build = buildFunctions[0].body;
+	const buildCalls = extractCallArguments(build, "open_with");
+	if (buildCalls.length !== 1) {
+		return false;
+	}
+	const [call] = buildCalls;
+	return (
+		/\bstage_parent\s*\.\s*$/.test(build.slice(0, call.index)) &&
+		call.arguments.replaceAll(/\s+/g, "") === "name,&options" &&
+		/\boptions\s*\.\s*read\s*\(\s*true\s*\)\s*\.\s*write\s*\(\s*true\s*\)\s*\.\s*create_new\s*\(\s*true\s*\)/.test(
+			build,
+		) &&
+		/\boptions\s*\.\s*mode\s*\(\s*0o600\s*\)/.test(build)
+	);
+}
+
+function publishNoReplaceIsExact(source) {
+	const functions = extractRustFunctions(source, "publish_no_replace");
+	if (functions.length !== 1) {
+		return false;
+	}
+	const [publish] = functions;
+	const parameters = publish.parameters
+		.replaceAll(/\s+/g, "")
+		.replace(/,$/, "");
+	const returnType = publish.returnType.replaceAll(/\s+/g, "");
+	const renameCalls = extractCallArguments(publish.body, "renameat_with");
+	if (
+		parameters !== "parent:&Dir,staging_name:&Path,target_name:&Path" ||
+		returnType !== "->Result<(),CommandError>" ||
+		renameCalls.length !== 1
+	) {
+		return false;
+	}
+	const renameArguments = renameCalls[0].arguments
+		.replaceAll(/\s+/g, "")
+		.replace(/,$/, "");
+	const countIdentifier = (identifier) =>
+		[
+			...publish.body.matchAll(
+				new RegExp(`\\b${escapeRegularExpression(identifier)}\\b`, "g"),
+			),
+		].length;
+	return (
+		renameArguments ===
+			"parent,staging_name,parent,target_name,RenameFlags::NOREPLACE" &&
+		countIdentifier("parent") === 2 &&
+		countIdentifier("staging_name") === 1 &&
+		countIdentifier("target_name") === 1 &&
+		!/\b(?:remove_file|remove_dir|remove_dir_all|unlink|unlinkat)\b/.test(
+			publish.body,
+		) &&
+		[
+			...publish.body.matchAll(
+				/\.\s*map_err\s*\(\s*map_copy_publish_error\s*\)/g,
+			),
+		].length === 1
+	);
 }
 
 function readlinkCallUsesBoundedProbe(source) {
@@ -547,6 +969,19 @@ export function validateWorkspaceRustBoundary(
 			"Cargo metadata must contain exactly one unrenamed runtime rustix =1.1.4 dependency for the audited Linux/macOS target",
 		);
 	}
+	for (const dependency of FORBIDDEN_DIRECTORY_DEPENDENCIES) {
+		if (cargoDependencies.some(({ name }) => name === dependency)) {
+			failures.push(
+				`Cargo metadata must not contain direct recursive-directory dependency ${dependency}, including renamed dependencies`,
+			);
+		}
+	}
+	const ignoreCrateNames = [
+		"ignore",
+		...cargoDependencies
+			.filter(({ name }) => name === "ignore")
+			.map(({ name, rename }) => rename ?? name),
+	];
 
 	let ambientOpenCount = 0;
 	let ambientAuthorityCallCount = 0;
@@ -557,6 +992,9 @@ export function validateWorkspaceRustBoundary(
 		["readlinkat_raw", 0],
 		["symlinkat", 0],
 	]);
+	const copyLimitDeclarations = new Map(
+		WORKSPACE_COPY_LIMITS.map(([name]) => [name, []]),
+	);
 	let writerExecutableSource;
 	for (const { relativePath, source } of rustSources) {
 		const normalizedPath = relativePath.replaceAll("\\", "/");
@@ -567,6 +1005,23 @@ export function validateWorkspaceRustBoundary(
 			continue;
 		}
 		const executableSource = stripRustCommentsAndLiterals(source);
+		for (const dependency of forbiddenDirectoryCrates(executableSource)) {
+			failures.push(
+				`${normalizedPath} must not bind, alias or re-export recursive-directory crate ${dependency}`,
+			);
+		}
+		for (const match of executableSource.matchAll(
+			/\b(pub(?:\s*\([^)]*\))?\s+)use\s+([^;]+);/g,
+		)) {
+			if (
+				/\b(?:create_dir_all|remove_dir_all)\b/.test(match[2]) ||
+				FOLLOW_SYMLINKS_YES_PATTERN.test(match[2])
+			) {
+				failures.push(
+					`${normalizedPath} must not re-export a forbidden recursive-directory operation`,
+				);
+			}
+		}
 		if (
 			/\b(?:read_link|read_link_contents|readlink|readlinkat)\b/.test(
 				executableSource,
@@ -645,6 +1100,59 @@ export function validateWorkspaceRustBoundary(
 			continue;
 		}
 		const executableSource = stripRustCommentsAndLiterals(source);
+		for (const [name, , integerType] of WORKSPACE_COPY_LIMITS) {
+			copyLimitDeclarations
+				.get(name)
+				.push(
+					...findWorkspaceCopyLimitDeclarations(
+						executableSource,
+						name,
+						integerType,
+					),
+				);
+		}
+		if (usesIgnoreWalker(executableSource, ignoreCrateNames)) {
+			failures.push(
+				`${normalizedPath} must not use or re-export ignore::Walk or ignore::WalkBuilder for workspace traversal`,
+			);
+		}
+		if (/\b(?:create_dir_all|remove_dir_all)\b/.test(executableSource)) {
+			failures.push(
+				`${normalizedPath} must not use unbounded recursive directory create/remove helpers`,
+			);
+		}
+		if (/\bfollow_links\s*\(\s*\(*\s*true\s*\)*\s*\)/.test(executableSource)) {
+			failures.push(
+				`${normalizedPath} must not enable link-following directory traversal`,
+			);
+		}
+		if (FOLLOW_SYMLINKS_YES_PATTERN.test(executableSource)) {
+			failures.push(
+				`${normalizedPath} must keep capability directory opens nofollow`,
+			);
+		}
+		if (normalizedPath === "src-tauri/src/workspace/directory_copy.rs") {
+			if (!directoryCopyLimitsAreExact(executableSource)) {
+				failures.push(
+					"workspace/directory_copy.rs must map every DirectoryCopyLimits field to its audited MAX_COPY constant",
+				);
+			}
+			if (!productionDirectoryCopyUsesAuditedLimits(executableSource)) {
+				failures.push(
+					"workspace/directory_copy.rs production copy_directory must pass DIRECTORY_COPY_LIMITS directly",
+				);
+			}
+			if (!directoryOpenOperationsAreNarrow(executableSource)) {
+				failures.push(
+					"workspace/directory_copy.rs must not use follow-capable directory open/conversion APIs outside its one staged-file open_with",
+				);
+			}
+			if (!directoryTraversalHelpersUseNofollow(executableSource)) {
+				failures.push(
+					"workspace/directory_copy.rs source and stage traversal helpers must call open_dir_nofollow directly",
+				);
+			}
+		}
 		if (/\bcopy\b/.test(executableSource)) {
 			failures.push(
 				`${normalizedPath} must not use an unaudited copy primitive; use workspace_copy/copy_entry helpers`,
@@ -749,18 +1257,14 @@ export function validateWorkspaceRustBoundary(
 			);
 		}
 	}
-	const symlinkBoundDeclarations =
-		writerExecutableSource?.matchAll(
-			/^\s*const\s+MAX_COPY_SYMLINK_BYTES\s*:\s*usize\s*=\s*([^;]+);/gm,
-		) ?? [];
-	const symlinkBounds = [...symlinkBoundDeclarations];
-	if (
-		symlinkBounds.length !== 1 ||
-		evaluateSmallRustIntegerExpression(symlinkBounds[0][1]) !== 4_096
-	) {
-		failures.push(
-			"workspace writer must cap raw symlink payloads at MAX_COPY_SYMLINK_BYTES = 4096",
-		);
+	for (const [name, value, integerType] of WORKSPACE_COPY_LIMITS) {
+		const declarations = copyLimitDeclarations.get(name);
+		if (
+			declarations.length !== 1 ||
+			evaluateSmallRustIntegerExpression(declarations[0]) !== value
+		) {
+			failures.push(workspaceCopyLimitFailure(name, value, integerType));
+		}
 	}
 	if (
 		writerExecutableSource === undefined ||
@@ -768,6 +1272,14 @@ export function validateWorkspaceRustBoundary(
 	) {
 		failures.push(
 			"workspace writer must probe symlink payloads with a MAX_COPY_SYMLINK_BYTES + 1 buffer",
+		);
+	}
+	if (
+		writerExecutableSource === undefined ||
+		!publishNoReplaceIsExact(writerExecutableSource)
+	) {
+		failures.push(
+			"workspace writer publish_no_replace must publish staging_name to target_name with one direct NOREPLACE call and no pre-delete",
 		);
 	}
 

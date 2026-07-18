@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：暂无；有界目录 manifest/staged tree 方案已冻结，下一项为目录 copy 落地。
+- 当前最小工作项：暂无；有界目录 manifest/staged tree copy 已完成，下一项为显式跨 root move 的补充调研与方案冻结。
 - 当前 Code OSS 基线：1.130.0，Electron 42.6.0，约 16,555 个跟踪文件。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
 
@@ -41,10 +41,12 @@
 - [x] 完成原样 symlink staged no-clobber copy：固定 4 KiB + 1 原始字节探针，不解引用内部、外部、dangling、loop、absolute 与非 UTF-8 payload；source/stage identity、metadata 与 payload 在发布和安全清理前复核，16 次高熵 `symlinkat` staging 后复用 `NOREPLACE`，目录与特殊文件仍拒绝，provider 继续只读。Browser mock 按复制后位置动态重算 `symlinkFile`/`symlinkDirectory`，不把解析结果误当成链接固有类型。
 - [x] symlink copy 切片通过完整 `pnpm check`：116 个 TypeScript/JavaScript 单元测试（含 26 个 Harness 边界合同）、117 个 Rust 测试、架构/排除面 guard 与 bundle 债务基线全部通过；测试覆盖 raw 非 UTF-8 payload、4 KiB + 1、跨 root 动态分类、source/stage/parent swap、现有目标各类型、双 root 撤销、并发单胜者和 dangling link 目录项不存在语义。
 - [x] 完成有界目录 copy 的 GitHub/固定依赖补充调研与方案冻结：排除 `remove_dir_all`、第三方 walker 和 Code OSS 边遍历边创建 fallback；明确 source-first manifest、descendant 精确预算、target-parent directory identity 冲突、0700 staged tree、发布前 source/stage 双重验收、receipt-only 有界清理、目录 mode 收尾和外部竞态边界。现有四字段 command、双 root mutation gate 与只读 provider 保持不变。
+- [x] 完成有界目录 manifest/staged tree copy：Rust 以显式 DFS 建立并重验完整 source manifest，执行 10,000 条目、1 KiB 单名、2 MiB 名称、256 层、4 KiB/2 MiB symlink、8 MiB/256 MiB 文件预算；目录逐层 nofollow，raw symlink 原样复制，特殊文件拒绝。目标树在 0700 高熵 staging 中按 identity/payload receipt 构建，所有测试竞态窗口结束后再次精确核对成员、文件字节、raw link 与 source manifest，再应用目录 mode 并仅用 `NOREPLACE` 发布；未知或 replacement 成员只安全遗留，不做无界递归删除。Browser mock 同步实现有界 detached tree 和跨 root 语义，provider 继续只读。
+- [x] 目录 copy 切片通过完整局部验收：134 个 TypeScript/JavaScript 单元测试（含 39 个 Harness 边界合同）、144 个 Rust 测试、格式、类型、lint 与架构 guard 均通过；独立审查额外复现并修复了最终 member-set 后新增未知成员、同 inode staged file 改写、staged symlink 替换和嵌套 source 变化的发布窗口。
 
 ## 下一步
 
-1. 实现有界目录 manifest/staged tree；随后实现显式跨 root move（copy receipt + verified delete）与确认删除。每项单独提交，期间 provider 保持只读。
+1. 先对显式跨 root move（copy receipt + verified delete）和确认删除做 GitHub/固定依赖补充调研与方案冻结，再分别落地并单独提交；期间 provider 保持只读。
 2. 全部 CRUD 后先实现 opaque version、有界原子写入和 Workbench 期望版本透传，再在 provider 注册前读取严格 `workspace_capabilities` DTO，增加 copy 同路径/overwrite/自动 mkdirp/cross-scheme 防绕过 patch，并按 Rust 平台能力激活写能力与 Browser E2E；不支持原子 no-replace rename 的平台继续只读。随后实现 watcher/rescan，最后运行真实 Tauri 文件树总验收并写回 `F020` evidence。
 
 ## 当前验收命令

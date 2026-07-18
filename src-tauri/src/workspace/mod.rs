@@ -13,6 +13,8 @@ use crate::error::CommandError;
 use crate::path_policy::RelativePath;
 
 pub(crate) mod commands;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod directory_copy;
 pub mod dto;
 pub mod picker;
 pub(crate) mod reader;

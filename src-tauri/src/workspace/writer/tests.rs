@@ -814,7 +814,7 @@ fn staged_copy_rejects_symlinks_special_files_and_every_existing_target_kind() {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn symlink_dispatch_rejects_directories_and_special_files_without_clobbering_any_target_kind() {
+fn copy_dispatch_accepts_directories_and_rejects_special_files_without_clobbering_targets() {
     use std::os::unix::fs::{symlink, FileTypeExt};
     use std::os::unix::net::UnixDatagram;
 
@@ -833,7 +833,10 @@ fn symlink_dispatch_rejects_directories_and_special_files_without_clobbering_any
     let _target_socket = UnixDatagram::bind(root.join("target-socket")).unwrap();
     let lease = authorize(&root);
 
-    for source in ["source-dir", "source-fifo", "source-socket"] {
+    copy_entry(&lease, &path("source-dir"), &lease, &path("copied-dir")).unwrap();
+    assert!(root.join("copied-dir").is_dir());
+
+    for source in ["source-fifo", "source-socket"] {
         assert_eq!(
             copy_entry(&lease, &path(source), &lease, &path("unused"))
                 .unwrap_err()
