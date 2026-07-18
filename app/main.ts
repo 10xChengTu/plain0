@@ -32,6 +32,10 @@ async function bootstrap(): Promise<void> {
 			nameShort: "Plain",
 			nameLong: "Plain",
 		},
+		configurationDefaults: {
+			"window.menuBarVisibility": "hidden",
+			"workbench.startupEditor": "none",
+		},
 	});
 
 	document.body.dataset.plainReady = "true";

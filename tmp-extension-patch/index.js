@@ -35,8 +35,6 @@ import { IRemoteExplorerService } from '@codingame/monaco-vscode-api/vscode/vs/w
 import '@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensionDescriptionRegistry';
 import { ExtensionResourceLoaderService } from './vscode/src/vs/platform/extensionResourceLoader/browser/extensionResourceLoaderService.js';
 import { IExtensionResourceLoaderService } from '@codingame/monaco-vscode-api/vscode/vs/platform/extensionResourceLoader/common/extensionResourceLoader.service';
-import { ExtensionBisectService } from './vscode/src/vs/workbench/services/extensionManagement/browser/extensionBisect.js';
-import { IExtensionBisectService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensionManagement/browser/extensionBisect.service';
 import { CustomSchemas } from '@codingame/monaco-vscode-files-service-override';
 import { getBuiltinExtensions } from '@codingame/monaco-vscode-api/extensions';
 import { WebExtensionsScannerService } from './vscode/src/vs/workbench/services/extensionManagement/browser/webExtensionsScannerService.js';
@@ -130,7 +128,6 @@ function getServiceOverride() {
         [IExtensionService.toString()]: new SyncDescriptor(ExtensionServiceOverride, [false], false),
         [IExtensionManifestPropertiesService.toString()]: new SyncDescriptor(ExtensionManifestPropertiesService, [], true),
         [IExtensionResourceLoaderService.toString()]: new SyncDescriptor(ExtensionResourceLoaderServiceOverride, [], true),
-        [IExtensionBisectService.toString()]: new SyncDescriptor(ExtensionBisectService, [], true),
         [IWebExtensionsScannerService.toString()]: new SyncDescriptor(WebExtensionsScannerService, [], true),
         [IBuiltinExtensionsScannerService.toString()]: new SyncDescriptor(CustomBuiltinExtensionsScannerService, [], true)
     };

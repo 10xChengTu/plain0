@@ -1,0 +1,110 @@
+import { GroupIdentifier, ISaveOptions, IRevertOptions, IUntypedEditorInput } from "../../../common/editor.js";
+import { EditorInput } from "../../../common/editor/editorInput.js";
+import { IEditorGroup } from "./editorGroupsService.js";
+import { IGroupModelChangeEvent } from "../../../common/editor/editorGroupModel.js";
+/**
+ * Open an editor in the currently active group.
+ */
+export declare const ACTIVE_GROUP = -1;
+export type ACTIVE_GROUP_TYPE = typeof ACTIVE_GROUP;
+/**
+ * Open an editor to the side of the active group.
+ */
+export declare const SIDE_GROUP = -2;
+export type SIDE_GROUP_TYPE = typeof SIDE_GROUP;
+/**
+ * Open an editor in a new auxiliary window.
+ */
+export declare const AUX_WINDOW_GROUP = -3;
+export type AUX_WINDOW_GROUP_TYPE = typeof AUX_WINDOW_GROUP;
+/**
+ * Open an editor in a modal overlay on top of the workbench.
+ */
+export declare const MODAL_GROUP = -4;
+export type MODAL_GROUP_TYPE = typeof MODAL_GROUP;
+/**
+ * Setting that controls whether editors open in a modal editor part.
+ */
+export declare const USE_MODAL_EDITOR_SETTING = "workbench.editor.useModal";
+/**
+ * Possible values for the `workbench.editor.useModal` setting:
+ * - `'off'`: never open editors modal (user opt-out, honored over `RequiresModal`)
+ * - `'some'`: open modal only for editors that request it (e.g. `RequiresModal`)
+ * - `'all'`: open all editors modal (the default in the Agents window)
+ */
+export type UseModalEditorMode = "off" | "some" | "all";
+export type PreferredGroup = IEditorGroup | GroupIdentifier | SIDE_GROUP_TYPE | ACTIVE_GROUP_TYPE | AUX_WINDOW_GROUP_TYPE | MODAL_GROUP_TYPE;
+export declare function isPreferredGroup(obj: unknown): obj is PreferredGroup;
+export interface ISaveEditorsOptions extends ISaveOptions {
+    /**
+     * If true, will ask for a location of the editor to save to.
+     */
+    readonly saveAs?: boolean;
+}
+export interface ISaveEditorsResult {
+    /**
+     * Whether the save operation was successful.
+     */
+    readonly success: boolean;
+    /**
+     * Resulting editors after the save operation.
+     */
+    readonly editors: Array<EditorInput | IUntypedEditorInput>;
+}
+export interface IUntypedEditorReplacement {
+    /**
+     * The editor to replace.
+     */
+    readonly editor: EditorInput;
+    /**
+     * The replacement for the editor.
+     */
+    readonly replacement: IUntypedEditorInput;
+    /**
+     * Skips asking the user for confirmation and doesn't
+     * save the document. Only use this if you really need to!
+    */
+    forceReplaceDirty?: boolean;
+}
+export interface IBaseSaveRevertAllEditorOptions {
+    /**
+     * Whether to include untitled editors as well.
+     */
+    readonly includeUntitled?: {
+        /**
+         * Whether to include scratchpad editors.
+         * Scratchpads are not included if not specified.
+         */
+        readonly includeScratchpad: boolean;
+    } | boolean;
+    /**
+     * Whether to exclude sticky editors.
+     */
+    readonly excludeSticky?: boolean;
+}
+export interface ISaveAllEditorsOptions extends ISaveEditorsOptions, IBaseSaveRevertAllEditorOptions {
+}
+export interface IRevertAllEditorsOptions extends IRevertOptions, IBaseSaveRevertAllEditorOptions {
+}
+export interface IOpenEditorsOptions {
+    /**
+     * Whether to validate trust when opening editors
+     * that are potentially not inside the workspace.
+     */
+    readonly validateTrust?: boolean;
+}
+export interface IEditorsChangeEvent {
+    /**
+     * The group which had the editor change
+     */
+    groupId: GroupIdentifier;
+    event: IGroupModelChangeEvent;
+}
+export interface IVisibleEditorsChangeEvent {
+    /**
+     * Indicates whether the visibility change is the result of an explicit
+     * user action (`true`) or happened automatically as a side effect
+     * (e.g. the chat agent opening files it has edited).
+     */
+    readonly isExplicit: boolean;
+}

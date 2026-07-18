@@ -1,0 +1,42 @@
+import type { URI } from "../common/state.js";
+import type { BaseParams } from "../common/commands.js";
+import type { Message } from "./state.js";
+/**
+ * Identifies a source chat and turn to fork from.
+ */
+export interface ChatForkSource {
+    /** URI of the existing chat to fork from */
+    chat: URI;
+    /** Turn ID in the source chat; content up to and including this turn's response is copied */
+    turnId: string;
+}
+/**
+ * Creates a new chat within a session.
+ *
+ * @category Commands
+ * @method createChat
+ * @direction Client → Server
+ * @messageType Request
+ * @version 1
+ */
+export interface CreateChatParams extends BaseParams {
+    /** Session URI containing the new chat. */
+    channel: URI;
+    /** Chat URI (client-chosen, e.g. `ahp-chat:/<uuid>`). */
+    chat: URI;
+    /** Optional initial message for the new chat. */
+    initialMessage?: Message;
+    /** Optional source chat and turn to fork from. */
+    source?: ChatForkSource;
+}
+/**
+ * Disposes a chat and cleans up server-side resources.
+ *
+ * @category Commands
+ * @method disposeChat
+ * @direction Client → Server
+ * @messageType Request
+ * @version 1
+ */
+export interface DisposeChatParams extends BaseParams {
+}

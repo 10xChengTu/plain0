@@ -1,5 +1,5 @@
 diff --git a/index.js b/index.js
-index 0750755e93896afef3a9737a13c2eacbba900d3d..15d775bd31285599371d38c52734b67b08c28c69 100644
+index 0750755e93896afef3a9737a13c2eacbba900d3d..ab6f52480ed11ee9e6a588a58503bdf5d9ca974c 100644
 --- a/index.js
 +++ b/index.js
 @@ -2,7 +2,6 @@
@@ -10,7 +10,7 @@ index 0750755e93896afef3a9737a13c2eacbba900d3d..15d775bd31285599371d38c52734b67b
  import { IExtensionService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions.service';
  import { ILogService } from '@codingame/monaco-vscode-api/vscode/vs/platform/log/common/log.service';
  import '@codingame/monaco-vscode-api/vscode/vs/platform/extensions/common/extensions';
-@@ -24,15 +23,12 @@ import { IBrowserWorkbenchEnvironmentService } from '@codingame/monaco-vscode-ap
+@@ -24,208 +23,42 @@ import { IBrowserWorkbenchEnvironmentService } from '@codingame/monaco-vscode-ap
  import { SyncDescriptor } from '@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors';
  import { IUserDataInitializationService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/userData/browser/userDataInit.service';
  import { ExtensionsProposedApi } from './vscode/src/vs/workbench/services/extensions/common/extensionsProposedApi.js';
@@ -27,10 +27,11 @@ index 0750755e93896afef3a9737a13c2eacbba900d3d..15d775bd31285599371d38c52734b67b
  import { IUserDataProfileService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/userDataProfile/common/userDataProfile.service';
  import { IWorkspaceTrustManagementService } from '@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspaceTrust.service';
  import { IRemoteExplorerService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/remote/common/remoteExplorerService.service';
-@@ -41,191 +37,30 @@ import { ExtensionResourceLoaderService } from './vscode/src/vs/platform/extensi
+ import '@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensionDescriptionRegistry';
+ import { ExtensionResourceLoaderService } from './vscode/src/vs/platform/extensionResourceLoader/browser/extensionResourceLoaderService.js';
  import { IExtensionResourceLoaderService } from '@codingame/monaco-vscode-api/vscode/vs/platform/extensionResourceLoader/common/extensionResourceLoader.service';
- import { ExtensionBisectService } from './vscode/src/vs/workbench/services/extensionManagement/browser/extensionBisect.js';
- import { IExtensionBisectService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensionManagement/browser/extensionBisect.service';
+-import { ExtensionBisectService } from './vscode/src/vs/workbench/services/extensionManagement/browser/extensionBisect.js';
+-import { IExtensionBisectService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensionManagement/browser/extensionBisect.service';
 -import { changeUrlDomain } from '@codingame/monaco-vscode-api/service-override/tools/url';
  import { CustomSchemas } from '@codingame/monaco-vscode-files-service-override';
 -import { registerAssets } from '@codingame/monaco-vscode-api/assets';
@@ -231,7 +232,7 @@ index 0750755e93896afef3a9737a13c2eacbba900d3d..15d775bd31285599371d38c52734b67b
      }
      async deltaExtensions(toAdd, toRemove) {
          await this._handleDeltaExtensions(new DeltaExtensionsQueueItem(toAdd, toRemove));
-@@ -290,16 +125,9 @@ CustomBuiltinExtensionsScannerService = __decorate([
+@@ -290,22 +123,14 @@ CustomBuiltinExtensionsScannerService = __decorate([
      __param(1, IExtensionResourceLoaderService),
      __param(2, ILogService)
  ], CustomBuiltinExtensionsScannerService);
@@ -249,13 +250,48 @@ index 0750755e93896afef3a9737a13c2eacbba900d3d..15d775bd31285599371d38c52734b67b
 +        [IExtensionService.toString()]: new SyncDescriptor(ExtensionServiceOverride, [false], false),
          [IExtensionManifestPropertiesService.toString()]: new SyncDescriptor(ExtensionManifestPropertiesService, [], true),
          [IExtensionResourceLoaderService.toString()]: new SyncDescriptor(ExtensionResourceLoaderServiceOverride, [], true),
-         [IExtensionBisectService.toString()]: new SyncDescriptor(ExtensionBisectService, [], true),
-@@ -308,4 +136,4 @@ function getServiceOverride({ enableWorkerExtensionHost, iframeAlternateDomain:
+-        [IExtensionBisectService.toString()]: new SyncDescriptor(ExtensionBisectService, [], true),
+         [IWebExtensionsScannerService.toString()]: new SyncDescriptor(WebExtensionsScannerService, [], true),
+         [IBuiltinExtensionsScannerService.toString()]: new SyncDescriptor(CustomBuiltinExtensionsScannerService, [], true)
      };
  }
  
 -export { CustomBuiltinExtensionsScannerService, ExtensionServiceOverride, getServiceOverride as default, setLocalExtensionHost };
 +export { CustomBuiltinExtensionsScannerService, ExtensionServiceOverride, getServiceOverride as default };
+diff --git a/vscode/src/vs/workbench/services/extensionManagement/browser/extensionBisect.js b/vscode/src/vs/workbench/services/extensionManagement/browser/extensionBisect.js
+index dc6af31ed9899a53995e11f6625d50c207a146c6..27359aa057f0ae4a59070f7ffb5b87f7388ab5ea 100644
+--- a/vscode/src/vs/workbench/services/extensionManagement/browser/extensionBisect.js
++++ b/vscode/src/vs/workbench/services/extensionManagement/browser/extensionBisect.js
+@@ -195,6 +195,8 @@ let ExtensionBisectUi = class ExtensionBisectUi {
+     }
+ };
+ ExtensionBisectUi = ExtensionBisectUi_1 = ( __decorate([( __param(0, IContextKeyService)), ( __param(1, IExtensionBisectService)), ( __param(2, INotificationService)), ( __param(3, ICommandService))], ExtensionBisectUi));
++const PLAIN_EXTENSION_HOST_DISABLED = true;
++if (!PLAIN_EXTENSION_HOST_DISABLED) {
+ ( Registry.as(Extensions.Workbench)).registerWorkbenchContribution(ExtensionBisectUi, LifecyclePhase.Restored);
+ registerAction2(class extends Action2 {
+     constructor() {
+@@ -351,5 +353,6 @@ registerAction2(class extends Action2 {
+         hostService.reload();
+     }
+ });
++}
+ 
+ export { ExtensionBisectService };
+diff --git a/vscode/src/vs/workbench/services/extensionManagement/browser/webExtensionsScannerService.js b/vscode/src/vs/workbench/services/extensionManagement/browser/webExtensionsScannerService.js
+index 380fb53751e509b1555e710526ba0c73aa55847c..4a07798e02e48801535fe74dadb046492835088a 100644
+--- a/vscode/src/vs/workbench/services/extensionManagement/browser/webExtensionsScannerService.js
++++ b/vscode/src/vs/workbench/services/extensionManagement/browser/webExtensionsScannerService.js
+@@ -1041,7 +1041,8 @@ let WebExtensionsScannerService = class WebExtensionsScannerService extends Disp
+     }
+ };
+ WebExtensionsScannerService = ( __decorate([( __param(0, IBrowserWorkbenchEnvironmentService)), ( __param(1, IBuiltinExtensionsScannerService)), ( __param(2, IFileService)), ( __param(3, ILogService)), ( __param(4, IExtensionGalleryService)), ( __param(5, IExtensionManifestPropertiesService)), ( __param(6, IExtensionResourceLoaderService)), ( __param(7, IExtensionStorageService)), ( __param(8, IStorageService)), ( __param(9, IProductService)), ( __param(10, IUserDataProfilesService)), ( __param(11, IUriIdentityService)), ( __param(12, ILifecycleService))], WebExtensionsScannerService));
+-if (isWeb) {
++const PLAIN_EXTENSION_HOST_DISABLED = true;
++if (isWeb && !PLAIN_EXTENSION_HOST_DISABLED) {
+     registerAction2(class extends Action2 {
+         constructor() {
+             super({
 diff --git a/vscode/src/vs/workbench/services/extensions/browser/extensionService.js b/vscode/src/vs/workbench/services/extensions/browser/extensionService.js
 index c6eaab78aad20a98fd6f448a2fc283c38294d4ba..ec061cc1487d2b00c466150ca63b9fb96c4077d1 100644
 --- a/vscode/src/vs/workbench/services/extensions/browser/extensionService.js
@@ -372,3 +408,23 @@ index c6eaab78aad20a98fd6f448a2fc283c38294d4ba..ec061cc1487d2b00c466150ca63b9fb9
      }
  };
  BrowserExtensionHostFactory = ( __decorate([( __param(3, IInstantiationService)), ( __param(4, IRemoteAgentService)), ( __param(5, IRemoteAuthorityResolverService)), ( __param(6, IWorkbenchExtensionEnablementService)), ( __param(7, ILogService))], BrowserExtensionHostFactory));
+diff --git a/vscode/src/vs/workbench/services/extensions/common/extensionHostManager.js b/vscode/src/vs/workbench/services/extensions/common/extensionHostManager.js
+index 98c12f88dd388c857ce0570fffcfa0c9f999b88b..dfef843a241193883d9d761126e4c4633320efa1 100644
+--- a/vscode/src/vs/workbench/services/extensions/common/extensionHostManager.js
++++ b/vscode/src/vs/workbench/services/extensions/common/extensionHostManager.js
+@@ -481,6 +481,8 @@ function registerLatencyTestProvider(provider) {
+ function getLatencyTestProviders() {
+     return providers.slice(0);
+ }
++const PLAIN_EXTENSION_HOST_DISABLED = true;
++if (!PLAIN_EXTENSION_HOST_DISABLED) {
+ registerAction2(class MeasureExtHostLatencyAction extends Action2 {
+     constructor() {
+         super({
+@@ -517,5 +519,6 @@ registerAction2(class MeasureExtHostLatencyAction extends Action2 {
+         return `${(n / 1024 / 1024).toFixed(1)} Mbps`;
+     }
+ });
++}
+ 
+ export { ExtensionHostManager, friendlyExtHostName };

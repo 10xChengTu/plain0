@@ -481,6 +481,8 @@ function registerLatencyTestProvider(provider) {
 function getLatencyTestProviders() {
     return providers.slice(0);
 }
+const PLAIN_EXTENSION_HOST_DISABLED = true;
+if (!PLAIN_EXTENSION_HOST_DISABLED) {
 registerAction2(class MeasureExtHostLatencyAction extends Action2 {
     constructor() {
         super({
@@ -517,5 +519,6 @@ registerAction2(class MeasureExtHostLatencyAction extends Action2 {
         return `${(n / 1024 / 1024).toFixed(1)} Mbps`;
     }
 });
+}
 
 export { ExtensionHostManager, friendlyExtHostName };

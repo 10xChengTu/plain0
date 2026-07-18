@@ -23,6 +23,7 @@
     "typecheck": "tsc --project tsconfig.json --noEmit && tsc --project tsconfig.tools.json --noEmit",
     "lint": "oxlint --deny-warnings app tests scripts/plain vite.config.ts playwright.config.ts vitest.config.ts",
     "check:architecture": "node scripts/plain/check-boundaries.mjs",
+    "check:bundle": "node scripts/plain/check-bundle.mjs",
     "check:features": "node scripts/plain/check-features.mjs",
     "test": "pnpm test:unit",
     "test:unit": "vitest run",
@@ -30,10 +31,11 @@
     "rust:fmt": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
     "rust:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
     "rust:test": "cargo test --manifest-path src-tauri/Cargo.toml",
-    "check": "pnpm format:check && pnpm typecheck && pnpm lint && pnpm check:features && pnpm test:unit && pnpm build:frontend && pnpm check:architecture && pnpm rust:fmt && pnpm rust:clippy && pnpm rust:test"
+    "check": "pnpm format:check && pnpm typecheck && pnpm lint && pnpm check:features && pnpm test:unit && pnpm build:frontend && pnpm check:architecture && pnpm check:bundle && pnpm rust:fmt && pnpm rust:clippy && pnpm rust:test"
   },
   "dependencies": {
     "@codingame/monaco-vscode-api": "35.0.1",
+    "@codingame/monaco-vscode-configuration-service-override": "35.0.1",
     "@codingame/monaco-vscode-textmate-service-override": "35.0.1",
     "@codingame/monaco-vscode-theme-defaults-default-extension": "35.0.1",
     "@codingame/monaco-vscode-theme-service-override": "35.0.1",

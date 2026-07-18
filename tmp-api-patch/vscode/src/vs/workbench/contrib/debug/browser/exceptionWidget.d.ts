@@ -1,0 +1,25 @@
+import { ZoneWidget } from "../../../../editor/contrib/zoneWidget/browser/zoneWidget.js";
+import { ICodeEditor } from "../../../../editor/browser/editorBrowser.js";
+import { IExceptionInfo, IDebugSession } from "../common/debug.js";
+import { IThemeService } from "../../../../platform/theme/common/themeService.service.js";
+import { IInstantiationService } from "../../../../platform/instantiation/common/instantiation.js";
+import { Range } from "../../../../editor/common/core/range.js";
+import { IClipboardService } from "../../../../platform/clipboard/common/clipboardService.service.js";
+export declare class ExceptionWidget extends ZoneWidget {
+    private exceptionInfo;
+    private debugSession;
+    private readonly shouldScroll;
+    private readonly instantiationService;
+    private readonly clipboardService;
+    private backgroundColor;
+    constructor(editor: ICodeEditor, exceptionInfo: IExceptionInfo, debugSession: IDebugSession | undefined, shouldScroll: () => boolean, themeService: IThemeService, instantiationService: IInstantiationService, clipboardService: IClipboardService);
+    private applyTheme;
+    protected _applyStyles(): void;
+    protected _fillContainer(container: HTMLElement): void;
+    protected _doLayout(_heightInPixel: number | undefined, _widthInPixel: number | undefined): void;
+    protected revealRange(range: Range, isLastLine: boolean): void;
+    private buildExceptionText;
+    focus(): void;
+    hasFocus(): boolean;
+    getWhitespaceHeight(): number;
+}

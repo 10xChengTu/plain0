@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "dependencyVersion": "35.0.1",
+  "mode": "F010-transitional",
+  "sourceCount": 2077,
+  "debtSourceCount": 203,
+  "categoryCounts": {
+    "chatAgent": 121,
+    "mcp": 16,
+    "authAccount": 11,
+    "syncEditSessions": 8,
+    "extensionRuntime": 47
+  },
+  "debtSourceSha256": "03208818d455dabc60ddc6d2185e54bb8427303f7bd0ac111ac4d29d43c02b8b",
+  "strictModeFeature": "F110",
+  "note": "Only unreachable compatibility stubs and the hostless static theme registry may remain before F110."
+}

@@ -1,17 +1,22 @@
 lockfileVersion: '9.0'
 
 settings:
-  autoInstallPeers: true
+  autoInstallPeers: false
   excludeLinksFromLockfile: false
 
 patchedDependencies:
-  '@codingame/monaco-vscode-extensions-service-override@35.0.1': 064ee5b78ed46cd96244e9fea63d48498f4a14f648bdb1cd0e93b13356f49b29
+  '@codingame/monaco-vscode-api@35.0.1': 473ddff1444e1cf43f58b34db90314438be4be5fe3ad373fb98d8fdf3e1d14f2
+  '@codingame/monaco-vscode-extensions-service-override@35.0.1': 1e3fa68b2e618e1d8031ed3adb95f73be80654854d3607b37cab6ba3b1e0113c
+  '@codingame/monaco-vscode-theme-service-override@35.0.1': 2f03277b14543f1e3bc2f723ca214543b1b0d2ca1c893a78287ccc34d071a9b5
 
 importers:
 
   .:
     dependencies:
       '@codingame/monaco-vscode-api':
+        specifier: 35.0.1
+        version: 35.0.1(patch_hash=473ddff1444e1cf43f58b34db90314438be4be5fe3ad373fb98d8fdf3e1d14f2)
+      '@codingame/monaco-vscode-configuration-service-override':
         specifier: 35.0.1
         version: 35.0.1
       '@codingame/monaco-vscode-textmate-service-override':
@@ -22,7 +27,7 @@ importers:
         version: 35.0.1
       '@codingame/monaco-vscode-theme-service-override':
         specifier: 35.0.1
-        version: 35.0.1
+        version: 35.0.1(patch_hash=2f03277b14543f1e3bc2f723ca214543b1b0d2ca1c893a78287ccc34d071a9b5)
       '@codingame/monaco-vscode-workbench-service-override':
         specifier: 35.0.1
         version: 35.0.1
@@ -68,6 +73,9 @@ packages:
 
   '@codingame/monaco-vscode-bulk-edit-service-override@35.0.1':
     resolution: {integrity: sha512-4pLqH3KRUU0IevwRFBUPvHkiP9+wkWHIsPNXq/BVwulvEAgR69bjmpXkRHXXGOUilYdq1LCoICFGIyAtmyrTdg==}
+
+  '@codingame/monaco-vscode-configuration-service-override@35.0.1':
+    resolution: {integrity: sha512-ndOt5a9jok43KSunXygHg/enZ19jHhxxsyzNg+T3ymSi3dpBNRHB30sJ7zeh+Ogz3a4y35gx8rlLSlwqB9ZoXQ==}
 
   '@codingame/monaco-vscode-editor-api@35.0.1':
     resolution: {integrity: sha512-/mCv1YThBj6SV0/MSnm9LsS1TiyobHGd2ngBAT/6IXu0YYCi+JMXoHv9GRy68ziSLahHB4RpooSgiEaF6Qcvjw==}
@@ -817,11 +825,11 @@ packages:
 
 snapshots:
 
-  '@codingame/monaco-vscode-api@35.0.1':
+  '@codingame/monaco-vscode-api@35.0.1(patch_hash=473ddff1444e1cf43f58b34db90314438be4be5fe3ad373fb98d8fdf3e1d14f2)':
     dependencies:
       '@codingame/monaco-vscode-base-service-override': 35.0.1
       '@codingame/monaco-vscode-environment-service-override': 35.0.1
-      '@codingame/monaco-vscode-extensions-service-override': 35.0.1(patch_hash=064ee5b78ed46cd96244e9fea63d48498f4a14f648bdb1cd0e93b13356f49b29)
+      '@codingame/monaco-vscode-extensions-service-override': 35.0.1(patch_hash=1e3fa68b2e618e1d8031ed3adb95f73be80654854d3607b37cab6ba3b1e0113c)
       '@codingame/monaco-vscode-files-service-override': 35.0.1
       '@codingame/monaco-vscode-host-service-override': 35.0.1
       '@codingame/monaco-vscode-layout-service-override': 35.0.1
@@ -834,80 +842,85 @@ snapshots:
 
   '@codingame/monaco-vscode-base-service-override@35.0.1':
     dependencies:
-      '@codingame/monaco-vscode-api': 35.0.1
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=473ddff1444e1cf43f58b34db90314438be4be5fe3ad373fb98d8fdf3e1d14f2)
 
   '@codingame/monaco-vscode-bulk-edit-service-override@35.0.1':
     dependencies:
-      '@codingame/monaco-vscode-api': 35.0.1
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=473ddff1444e1cf43f58b34db90314438be4be5fe3ad373fb98d8fdf3e1d14f2)
+
+  '@codingame/monaco-vscode-configuration-service-override@35.0.1':
+    dependencies:
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=473ddff1444e1cf43f58b34db90314438be4be5fe3ad373fb98d8fdf3e1d14f2)
+      '@codingame/monaco-vscode-files-service-override': 35.0.1
 
   '@codingame/monaco-vscode-editor-api@35.0.1':
     dependencies:
-      '@codingame/monaco-vscode-api': 35.0.1
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=473ddff1444e1cf43f58b34db90314438be4be5fe3ad373fb98d8fdf3e1d14f2)
 
   '@codingame/monaco-vscode-environment-service-override@35.0.1':
     dependencies:
-      '@codingame/monaco-vscode-api': 35.0.1
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=473ddff1444e1cf43f58b34db90314438be4be5fe3ad373fb98d8fdf3e1d14f2)
 
-  '@codingame/monaco-vscode-extensions-service-override@35.0.1(patch_hash=064ee5b78ed46cd96244e9fea63d48498f4a14f648bdb1cd0e93b13356f49b29)':
+  '@codingame/monaco-vscode-extensions-service-override@35.0.1(patch_hash=1e3fa68b2e618e1d8031ed3adb95f73be80654854d3607b37cab6ba3b1e0113c)':
     dependencies:
-      '@codingame/monaco-vscode-api': 35.0.1
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=473ddff1444e1cf43f58b34db90314438be4be5fe3ad373fb98d8fdf3e1d14f2)
       '@codingame/monaco-vscode-files-service-override': 35.0.1
 
   '@codingame/monaco-vscode-files-service-override@35.0.1':
     dependencies:
-      '@codingame/monaco-vscode-api': 35.0.1
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=473ddff1444e1cf43f58b34db90314438be4be5fe3ad373fb98d8fdf3e1d14f2)
 
   '@codingame/monaco-vscode-host-service-override@35.0.1':
     dependencies:
-      '@codingame/monaco-vscode-api': 35.0.1
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=473ddff1444e1cf43f58b34db90314438be4be5fe3ad373fb98d8fdf3e1d14f2)
 
   '@codingame/monaco-vscode-keybindings-service-override@35.0.1':
     dependencies:
-      '@codingame/monaco-vscode-api': 35.0.1
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=473ddff1444e1cf43f58b34db90314438be4be5fe3ad373fb98d8fdf3e1d14f2)
       '@codingame/monaco-vscode-files-service-override': 35.0.1
 
   '@codingame/monaco-vscode-layout-service-override@35.0.1':
     dependencies:
-      '@codingame/monaco-vscode-api': 35.0.1
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=473ddff1444e1cf43f58b34db90314438be4be5fe3ad373fb98d8fdf3e1d14f2)
 
   '@codingame/monaco-vscode-quickaccess-service-override@35.0.1':
     dependencies:
-      '@codingame/monaco-vscode-api': 35.0.1
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=473ddff1444e1cf43f58b34db90314438be4be5fe3ad373fb98d8fdf3e1d14f2)
 
   '@codingame/monaco-vscode-textmate-service-override@35.0.1':
     dependencies:
-      '@codingame/monaco-vscode-api': 35.0.1
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=473ddff1444e1cf43f58b34db90314438be4be5fe3ad373fb98d8fdf3e1d14f2)
       '@codingame/monaco-vscode-files-service-override': 35.0.1
 
   '@codingame/monaco-vscode-theme-defaults-default-extension@35.0.1':
     dependencies:
-      '@codingame/monaco-vscode-api': 35.0.1
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=473ddff1444e1cf43f58b34db90314438be4be5fe3ad373fb98d8fdf3e1d14f2)
 
-  '@codingame/monaco-vscode-theme-service-override@35.0.1':
+  '@codingame/monaco-vscode-theme-service-override@35.0.1(patch_hash=2f03277b14543f1e3bc2f723ca214543b1b0d2ca1c893a78287ccc34d071a9b5)':
     dependencies:
-      '@codingame/monaco-vscode-api': 35.0.1
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=473ddff1444e1cf43f58b34db90314438be4be5fe3ad373fb98d8fdf3e1d14f2)
       '@codingame/monaco-vscode-files-service-override': 35.0.1
 
   '@codingame/monaco-vscode-view-banner-service-override@35.0.1':
     dependencies:
-      '@codingame/monaco-vscode-api': 35.0.1
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=473ddff1444e1cf43f58b34db90314438be4be5fe3ad373fb98d8fdf3e1d14f2)
 
   '@codingame/monaco-vscode-view-common-service-override@35.0.1':
     dependencies:
-      '@codingame/monaco-vscode-api': 35.0.1
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=473ddff1444e1cf43f58b34db90314438be4be5fe3ad373fb98d8fdf3e1d14f2)
       '@codingame/monaco-vscode-bulk-edit-service-override': 35.0.1
 
   '@codingame/monaco-vscode-view-status-bar-service-override@35.0.1':
     dependencies:
-      '@codingame/monaco-vscode-api': 35.0.1
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=473ddff1444e1cf43f58b34db90314438be4be5fe3ad373fb98d8fdf3e1d14f2)
 
   '@codingame/monaco-vscode-view-title-bar-service-override@35.0.1':
     dependencies:
-      '@codingame/monaco-vscode-api': 35.0.1
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=473ddff1444e1cf43f58b34db90314438be4be5fe3ad373fb98d8fdf3e1d14f2)
 
   '@codingame/monaco-vscode-workbench-service-override@35.0.1':
     dependencies:
-      '@codingame/monaco-vscode-api': 35.0.1
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=473ddff1444e1cf43f58b34db90314438be4be5fe3ad373fb98d8fdf3e1d14f2)
       '@codingame/monaco-vscode-keybindings-service-override': 35.0.1
       '@codingame/monaco-vscode-quickaccess-service-override': 35.0.1
       '@codingame/monaco-vscode-view-banner-service-override': 35.0.1

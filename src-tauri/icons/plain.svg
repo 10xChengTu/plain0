@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Plain editor icon">
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#202631" />
+      <stop offset="1" stop-color="#11151c" />
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#56d4c4" />
+      <stop offset="1" stop-color="#4ba3ff" />
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="224" fill="url(#background)" />
+  <path
+    fill="#f4f6f8"
+    d="M286 180h300l152 152v494c0 43-35 78-78 78H286c-43 0-78-35-78-78V258c0-43 35-78 78-78Z"
+  />
+  <path fill="url(#accent)" d="M586 180v116c0 20 16 36 36 36h116L586 180Z" />
+  <rect x="320" y="438" width="384" height="40" rx="20" fill="#27313d" />
+  <rect x="320" y="542" width="272" height="40" rx="20" fill="#4ba3ff" />
+  <rect x="320" y="646" width="336" height="40" rx="20" fill="#27313d" />
+  <rect x="320" y="750" width="160" height="40" rx="20" fill="#56d4c4" />
+</svg>

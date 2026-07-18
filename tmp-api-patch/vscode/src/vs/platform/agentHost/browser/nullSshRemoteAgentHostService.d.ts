@@ -1,0 +1,21 @@
+import { Event } from "../../../base/common/event.js";
+import { URI } from "../../../base/common/uri.js";
+import type { ISSHAgentHostConnection, ISSHAgentHostConfig, ISSHConnectProgress, ISSHResolvedConfig } from "../common/sshRemoteAgentHost.js";
+import { ISSHRemoteAgentHostService } from "../common/sshRemoteAgentHost.service.js";
+/**
+ * Null implementation of {@link ISSHRemoteAgentHostService} for browser contexts
+ * where SSH is not available.
+ */
+export declare class NullSSHRemoteAgentHostService implements ISSHRemoteAgentHostService {
+    readonly _serviceBrand: undefined;
+    readonly onDidChangeConnections: Event<any>;
+    readonly onDidReportConnectProgress: Event<ISSHConnectProgress>;
+    readonly connections: readonly ISSHAgentHostConnection[];
+    connect(_config: ISSHAgentHostConfig): Promise<ISSHAgentHostConnection>;
+    disconnect(_host: string): Promise<void>;
+    listSSHConfigHosts(): Promise<string[]>;
+    ensureUserSSHConfig(): Promise<URI>;
+    listSSHConfigFiles(): Promise<URI[]>;
+    resolveSSHConfig(_host: string): Promise<ISSHResolvedConfig>;
+    reconnect(_sshConfigHost: string, _name: string): Promise<ISSHAgentHostConnection>;
+}

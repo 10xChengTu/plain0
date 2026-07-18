@@ -195,6 +195,8 @@ let ExtensionBisectUi = class ExtensionBisectUi {
     }
 };
 ExtensionBisectUi = ExtensionBisectUi_1 = ( __decorate([( __param(0, IContextKeyService)), ( __param(1, IExtensionBisectService)), ( __param(2, INotificationService)), ( __param(3, ICommandService))], ExtensionBisectUi));
+const PLAIN_EXTENSION_HOST_DISABLED = true;
+if (!PLAIN_EXTENSION_HOST_DISABLED) {
 ( Registry.as(Extensions.Workbench)).registerWorkbenchContribution(ExtensionBisectUi, LifecyclePhase.Restored);
 registerAction2(class extends Action2 {
     constructor() {
@@ -351,5 +353,6 @@ registerAction2(class extends Action2 {
         hostService.reload();
     }
 });
+}
 
 export { ExtensionBisectService };

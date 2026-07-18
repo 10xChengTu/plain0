@@ -1,3 +1,4 @@
+import getConfigurationServiceOverride from "@codingame/monaco-vscode-configuration-service-override";
 import getTextmateServiceOverride from "@codingame/monaco-vscode-textmate-service-override";
 import getThemeServiceOverride from "@codingame/monaco-vscode-theme-service-override";
 import getWorkbenchServiceOverride from "@codingame/monaco-vscode-workbench-service-override";
@@ -8,6 +9,7 @@ import getWorkbenchServiceOverride from "@codingame/monaco-vscode-workbench-serv
  */
 export function createServiceOverrides() {
 	return {
+		...getConfigurationServiceOverride(),
 		...getWorkbenchServiceOverride(),
 		...getThemeServiceOverride(),
 		...getTextmateServiceOverride(),

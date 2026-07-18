@@ -1,0 +1,96 @@
+import { IMarkdownString } from "../../../../base/common/htmlContent.js";
+import { URI } from "../../../../base/common/uri.js";
+import { IFileDialogService } from "../../../../platform/dialogs/common/dialogs.service.js";
+import { IInstantiationService } from "../../../../platform/instantiation/common/instantiation.js";
+import { IThemeService } from "../../../../platform/theme/common/themeService.service.js";
+import { IUndoRedoService } from "../../../../platform/undoRedo/common/undoRedo.service.js";
+import { EditorInputCapabilities, GroupIdentifier, IResourceDiffEditorInput, IRevertOptions, ISaveOptions, IUntypedEditorInput, Verbosity } from "../../../common/editor.js";
+import { EditorInput, IUntypedEditorOptions } from "../../../common/editor/editorInput.js";
+import { IEditorGroup } from "../../../services/editor/common/editorGroupsService.js";
+import { IFilesConfigurationService } from "../../../services/filesConfiguration/common/filesConfigurationService.service.js";
+import { ICustomEditorService } from "../common/customEditor.service.js";
+import { IOverlayWebview } from "../../webview/browser/webview.js";
+import { LazilyResolvedWebviewEditorInput } from "../../webviewPanel/browser/webviewWorkbenchService.js";
+import { IWebviewWorkbenchService } from "../../webviewPanel/browser/webviewWorkbenchService.service.js";
+import { WebviewIconPath } from "../../webviewPanel/browser/webviewEditorInput.js";
+interface CustomEditorDiffInputInitInfo {
+    readonly originalResource: URI;
+    readonly modifiedResource: URI;
+    readonly viewType: string;
+    readonly label: string | undefined;
+    readonly description: string | undefined;
+    readonly iconPath: WebviewIconPath | undefined;
+}
+interface CustomEditorSideBySideDiffInputInitInfo extends CustomEditorDiffInputInitInfo {
+    readonly diffId: string;
+    readonly side: CustomEditorSideBySideDiffSide;
+}
+export type CustomEditorSideBySideDiffSide = "original" | "modified";
+export declare class CustomEditorDiffInput extends LazilyResolvedWebviewEditorInput {
+    private readonly init;
+    private readonly instantiationService;
+    private readonly customEditorService;
+    private readonly filesConfigurationService;
+    private readonly fileDialogService;
+    private readonly undoRedoService;
+    private readonly _modelRef;
+    static create(instantiationService: IInstantiationService, init: CustomEditorDiffInputInitInfo, group: IEditorGroup | undefined): CustomEditorDiffInput;
+    static readonly typeId = "workbench.editors.customDiffEditor";
+    constructor(init: CustomEditorDiffInputInitInfo, webview: IOverlayWebview, themeService: IThemeService, webviewWorkbenchService: IWebviewWorkbenchService, instantiationService: IInstantiationService, customEditorService: ICustomEditorService, filesConfigurationService: IFilesConfigurationService, fileDialogService: IFileDialogService, undoRedoService: IUndoRedoService);
+    get typeId(): string;
+    get editorId(): string;
+    get capabilities(): EditorInputCapabilities;
+    get resource(): URI;
+    get originalResource(): URI;
+    get modifiedResource(): URI;
+    getName(): string;
+    getDescription(_verbosity?: Verbosity): string | undefined;
+    getTitle(verbosity?: Verbosity): string;
+    isReadonly(): boolean | IMarkdownString;
+    isDirty(): boolean;
+    matches(otherInput: EditorInput | IUntypedEditorInput): boolean;
+    copy(): EditorInput;
+    save(groupId: GroupIdentifier, options?: ISaveOptions): Promise<EditorInput | IUntypedEditorInput | undefined>;
+    saveAs(groupId: GroupIdentifier, options?: ISaveOptions): Promise<EditorInput | IUntypedEditorInput | undefined>;
+    revert(group: GroupIdentifier, options?: IRevertOptions): Promise<void>;
+    resolve(): Promise<null>;
+    undo(): void | Promise<void>;
+    redo(): void | Promise<void>;
+    toUntyped(_options?: IUntypedEditorOptions): IResourceDiffEditorInput;
+    private toUntypedWithModifiedResource;
+}
+export declare class CustomEditorSideBySideDiffInput extends LazilyResolvedWebviewEditorInput {
+    private readonly init;
+    private readonly instantiationService;
+    private readonly customEditorService;
+    private readonly filesConfigurationService;
+    private readonly fileDialogService;
+    private readonly undoRedoService;
+    private readonly _modelRef;
+    static create(instantiationService: IInstantiationService, init: CustomEditorSideBySideDiffInputInitInfo, group: IEditorGroup | undefined): CustomEditorSideBySideDiffInput;
+    static readonly typeId = "workbench.editors.customSideBySideDiffEditor";
+    constructor(init: CustomEditorSideBySideDiffInputInitInfo, webview: IOverlayWebview, themeService: IThemeService, webviewWorkbenchService: IWebviewWorkbenchService, instantiationService: IInstantiationService, customEditorService: ICustomEditorService, filesConfigurationService: IFilesConfigurationService, fileDialogService: IFileDialogService, undoRedoService: IUndoRedoService);
+    get typeId(): string;
+    get editorId(): string;
+    get capabilities(): EditorInputCapabilities;
+    get resource(): URI;
+    get originalResource(): URI;
+    get modifiedResource(): URI;
+    get side(): CustomEditorSideBySideDiffSide;
+    get diffId(): string;
+    getName(): string;
+    getDescription(_verbosity?: Verbosity): string | undefined;
+    getTitle(verbosity?: Verbosity): string;
+    isReadonly(): boolean | IMarkdownString;
+    isDirty(): boolean;
+    matches(otherInput: EditorInput | IUntypedEditorInput): boolean;
+    copy(): EditorInput;
+    save(groupId: GroupIdentifier, options?: ISaveOptions): Promise<EditorInput | IUntypedEditorInput | undefined>;
+    saveAs(groupId: GroupIdentifier, options?: ISaveOptions): Promise<EditorInput | IUntypedEditorInput | undefined>;
+    revert(group: GroupIdentifier, options?: IRevertOptions): Promise<void>;
+    resolve(): Promise<null>;
+    undo(): void | Promise<void>;
+    redo(): void | Promise<void>;
+    toUntyped(_options?: IUntypedEditorOptions): IUntypedEditorInput;
+}
+export {};

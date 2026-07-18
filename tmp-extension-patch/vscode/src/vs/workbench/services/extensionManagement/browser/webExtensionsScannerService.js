@@ -1041,7 +1041,8 @@ let WebExtensionsScannerService = class WebExtensionsScannerService extends Disp
     }
 };
 WebExtensionsScannerService = ( __decorate([( __param(0, IBrowserWorkbenchEnvironmentService)), ( __param(1, IBuiltinExtensionsScannerService)), ( __param(2, IFileService)), ( __param(3, ILogService)), ( __param(4, IExtensionGalleryService)), ( __param(5, IExtensionManifestPropertiesService)), ( __param(6, IExtensionResourceLoaderService)), ( __param(7, IExtensionStorageService)), ( __param(8, IStorageService)), ( __param(9, IProductService)), ( __param(10, IUserDataProfilesService)), ( __param(11, IUriIdentityService)), ( __param(12, ILifecycleService))], WebExtensionsScannerService));
-if (isWeb) {
+const PLAIN_EXTENSION_HOST_DISABLED = true;
+if (isWeb && !PLAIN_EXTENSION_HOST_DISABLED) {
     registerAction2(class extends Action2 {
         constructor() {
             super({

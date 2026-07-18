@@ -1,0 +1,21 @@
+diff --git a/vscode/src/vs/workbench/contrib/themes/browser/themes.contribution.js b/vscode/src/vs/workbench/contrib/themes/browser/themes.contribution.js
+index f82861055e7ee56f350db59132eef3e595f50739..c58627fc3a9244596ddfcbd6a2cc77d1589e423d 100644
+--- a/vscode/src/vs/workbench/contrib/themes/browser/themes.contribution.js
++++ b/vscode/src/vs/workbench/contrib/themes/browser/themes.contribution.js
+@@ -828,6 +828,8 @@ registerAction2(class extends Action2 {
+     }
+ });
+ const browseColorThemesInMarketplaceCommandId = "workbench.action.browseColorThemesInMarketplace";
++const PLAIN_MARKETPLACE_DISABLED = true;
++if (!PLAIN_MARKETPLACE_DISABLED) {
+ registerAction2(class extends Action2 {
+     constructor() {
+         super({
+@@ -871,6 +873,7 @@ registerAction2(class extends Action2 {
+         await marketplaceThemePicker.openQuickPick("", themeService.getColorTheme(), selectTheme).then(undefined, onUnexpectedError);
+     }
+ });
++}
+ const ThemesSubMenu = ( new MenuId("ThemesSubMenu"));
+ MenuRegistry.appendMenuItem(MenuId.GlobalActivity, {
+     title: ( localize(16242, "Themes")),

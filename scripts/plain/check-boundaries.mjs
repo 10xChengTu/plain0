@@ -11,6 +11,7 @@ const fail = (message) => failures.push(message);
 
 const allowedDependencies = new Map([
 	["@codingame/monaco-vscode-api", "35.0.1"],
+	["@codingame/monaco-vscode-configuration-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-textmate-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-theme-defaults-default-extension", "35.0.1"],
 	["@codingame/monaco-vscode-theme-service-override", "35.0.1"],
@@ -33,6 +34,44 @@ const allowedDevDependencies = new Set([
 const packageDocument = JSON.parse(
 	await readFile(path.join(root, "package.json"), "utf8"),
 );
+
+const requiredPatches = new Map([
+	[
+		"@codingame/monaco-vscode-api@35.0.1",
+		{
+			file: "patches/@codingame__monaco-vscode-api@35.0.1.patch",
+			marker: "Plain intentionally has no accounts surface",
+		},
+	],
+	[
+		"@codingame/monaco-vscode-extensions-service-override@35.0.1",
+		{
+			file: "patches/@codingame__monaco-vscode-extensions-service-override@35.0.1.patch",
+			marker: "DisabledExtensionHostFactory",
+		},
+	],
+	[
+		"@codingame/monaco-vscode-theme-service-override@35.0.1",
+		{
+			file: "patches/@codingame__monaco-vscode-theme-service-override@35.0.1.patch",
+			marker: "PLAIN_MARKETPLACE_DISABLED",
+		},
+	],
+]);
+
+const workspaceManifest = await readFile(
+	path.join(root, "pnpm-workspace.yaml"),
+	"utf8",
+);
+for (const [dependency, patch] of requiredPatches) {
+	if (!workspaceManifest.includes(`'${dependency}': ${patch.file}`)) {
+		fail(`pnpm-workspace.yaml must apply the audited patch for ${dependency}`);
+	}
+	const patchSource = await readFile(path.join(root, patch.file), "utf8");
+	if (!patchSource.includes(patch.marker)) {
+		fail(`${patch.file} is missing security marker ${patch.marker}`);
+	}
+}
 
 for (const [dependency, version] of Object.entries(
 	packageDocument.dependencies ?? {},

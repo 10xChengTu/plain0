@@ -1,0 +1,14 @@
+import { IRange } from "../../../../editor/common/core/range.js";
+import { IStringDictionary } from "../../../../base/common/collections.js";
+export interface ConfigureLanguageModelsOptions {
+    group: ILanguageModelsProviderGroup;
+    snippet?: string;
+    snippetTarget?: "group" | "models";
+}
+export interface ILanguageModelsProviderGroup extends IStringDictionary<unknown> {
+    readonly name: string;
+    readonly vendor: string;
+    readonly range?: IRange;
+    readonly modelsRange?: IRange;
+    readonly settings?: IStringDictionary<IStringDictionary<unknown>>;
+}

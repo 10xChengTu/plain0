@@ -1,0 +1,38 @@
+import { DeferredPromise } from "../../../../../../base/common/async.js";
+import { IMarkdownString } from "../../../../../../base/common/htmlContent.js";
+import { IChatQuestion, IChatQuestionAnswers, IChatQuestionCarousel } from "../../chatService/chatService.js";
+import { ToolDataSource } from "../../tools/languageModelToolsService.js";
+/**
+ * Runtime representation of a question carousel with a {@link DeferredPromise}
+ * that is resolved when the user submits answers. {@link toJSON} strips the
+ * completion so only serialisable data is persisted.
+ */
+export declare class ChatQuestionCarouselData implements IChatQuestionCarousel {
+    questions: IChatQuestion[];
+    allowSkip: boolean;
+    resolveId?: string | undefined;
+    data?: IChatQuestionAnswers | undefined;
+    isUsed?: boolean | undefined;
+    message?: (string | IMarkdownString) | undefined;
+    source?: ToolDataSource | undefined;
+    terminalId?: string | undefined;
+    readonly kind: "questionCarousel";
+    readonly completion: DeferredPromise<{
+        answers: IChatQuestionAnswers | undefined;
+    }>;
+    draftAnswers: IChatQuestionAnswers | undefined;
+    draftCurrentIndex: number | undefined;
+    draftCollapsed: boolean | undefined;
+    /**
+     * Set to `true` when the carousel was dismissed because the user typed
+     * directly in the associated terminal instead of using the carousel UI.
+     */
+    dismissedByTerminalInput?: boolean;
+    /**
+     * Marks the carousel as dismissed with the given answers and clears draft
+     * state. Safe to call multiple times — subsequent calls are no-ops.
+     */
+    dismiss(answers: IChatQuestionAnswers | undefined): void;
+    constructor(questions: IChatQuestion[], allowSkip: boolean, resolveId?: string | undefined, data?: IChatQuestionAnswers | undefined, isUsed?: boolean | undefined, message?: (string | IMarkdownString) | undefined, source?: ToolDataSource | undefined, terminalId?: string | undefined);
+    toJSON(): IChatQuestionCarousel;
+}

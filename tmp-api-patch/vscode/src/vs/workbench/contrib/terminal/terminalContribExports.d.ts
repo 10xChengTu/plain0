@@ -1,0 +1,39 @@
+import type { IConfigurationNode } from "../../../platform/configuration/common/configurationRegistry.js";
+import { TerminalAccessibilityCommandId } from "../terminalContrib/accessibility/common/terminal.accessibility.js";
+export declare enum TerminalContribCommandId {
+    A11yFocusAccessibleBuffer = "workbench.action.terminal.focusAccessibleBuffer",
+    DeveloperRestartPtyHost = "workbench.action.terminal.restartPtyHost",
+    OpenTerminalSettingsLink = "workbench.action.terminal.chat.openTerminalSettingsLink",
+    DisableSessionAutoApproval = "workbench.action.terminal.chat.disableSessionAutoApproval",
+    FocusMostRecentChatTerminalOutput = "workbench.action.terminal.chat.focusMostRecentChatTerminalOutput",
+    FocusMostRecentChatTerminal = "workbench.action.terminal.chat.focusMostRecentChatTerminal",
+    ToggleChatTerminalOutput = "workbench.action.terminal.chat.toggleChatTerminalOutput",
+    FocusChatInstanceAction = "workbench.action.terminal.chat.focusChatInstance",
+    ContinueInBackground = "workbench.action.terminal.chat.continueInBackground"
+}
+export declare enum TerminalContribSettingId {
+    StickyScrollEnabled = "terminal.integrated.stickyScroll.enabled",
+    SuggestEnabled = "terminal.integrated.suggest.enabled",
+    AutoApprove = "chat.tools.terminal.autoApprove",
+    EnableAutoApprove = "chat.tools.terminal.enableAutoApprove",
+    ShellIntegrationTimeout = "chat.tools.terminal.shellIntegrationTimeout",
+    OutputLocation = "chat.tools.terminal.outputLocation",
+    AgentSandboxEnabled = "chat.agent.sandbox.enabled",
+    AgentSandboxWindowsEnabled = "chat.agent.sandbox.enabledWindows",
+    AgentSandboxAllowNetwork = "chat.agent.sandbox.allowNetwork",
+    AgentSandboxAllowUnsandboxedCommands = "chat.agent.sandbox.allowUnsandboxedCommands",
+    AgentSandboxRetryWithAllowNetworkRequests = "chat.agent.sandbox.retryWithAllowNetworkRequests",
+    AgentSandboxAllowAutoApprove = "chat.agent.sandbox.allowAutoApprove",
+    DeprecatedAgentSandboxEnabled = "chat.agent.sandbox",
+    DeprecatedAgentSandboxLinuxFileSystem = "chat.agent.sandboxFileSystem.linux",
+    DeprecatedAgentSandboxMacFileSystem = "chat.agent.sandboxFileSystem.mac",
+    AgentSandboxLinuxFileSystem = "chat.agent.sandbox.fileSystem.linux",
+    AgentSandboxMacFileSystem = "chat.agent.sandbox.fileSystem.mac",
+    AgentSandboxWindowsFileSystem = "chat.agent.sandbox.fileSystem.windows"
+}
+export declare enum TerminalContribContextKeyStrings {
+    ChatHasTerminals = "hasChatTerminals",
+    ChatHasHiddenTerminals = "hasHiddenChatTerminals"
+}
+export declare const terminalContribConfiguration: IConfigurationNode["properties"];
+export declare const defaultTerminalContribCommandsToSkipShell: (TerminalAccessibilityCommandId | import("../terminalContrib/find/common/terminal.find.js").TerminalFindCommandId | import("../terminalContrib/history/common/terminal.history.js").TerminalHistoryCommandId | import("../terminalContrib/suggest/common/terminal.suggest.js").TerminalSuggestCommandId)[];

@@ -1,0 +1,105 @@
+import * as DOM from "../../../../base/browser/dom.js";
+import { IActionViewItem } from "../../../../base/browser/ui/actionbar/actionbar.js";
+import { IAction } from "../../../../base/common/actions.js";
+import { CancellationToken } from "../../../../base/common/cancellation.js";
+import { Emitter, Event } from "../../../../base/common/event.js";
+import { ITextResourceConfigurationService } from "../../../../editor/common/services/textResourceConfiguration.service.js";
+import { IContextKeyService } from "../../../../platform/contextkey/common/contextkey.service.js";
+import { IDialogService } from "../../../../platform/dialogs/common/dialogs.service.js";
+import { IFileService } from "../../../../platform/files/common/files.service.js";
+import { IInstantiationService } from "../../../../platform/instantiation/common/instantiation.js";
+import { IStorageService } from "../../../../platform/storage/common/storage.service.js";
+import { ITelemetryService } from "../../../../platform/telemetry/common/telemetry.service.js";
+import { IThemeService } from "../../../../platform/theme/common/themeService.service.js";
+import { EditorPane } from "../../../browser/parts/editor/editorPane.js";
+import { IEditorOpenContext, IEditorPane, IEditorPaneScrollPosition, IEditorPaneSelection, IEditorPaneSelectionChangeEvent, IEditorPaneWithScrolling } from "../../../common/editor.js";
+import { INotebookEditorOptions, INotebookEditorPane, INotebookEditorViewState } from "./notebookBrowser.js";
+import { INotebookEditorService } from "./services/notebookEditorService.service.js";
+import { NotebookEditorWidget } from "./notebookEditorWidget.js";
+import { NotebookTextModel } from "@codingame/monaco-vscode-notebook-service-override/vscode/vs/workbench/contrib/notebook/common/model/notebookTextModel";
+import { NotebookEditorInput } from "../common/notebookEditorInput.js";
+import { IEditorGroup } from "../../../services/editor/common/editorGroupsService.js";
+import { IEditorGroupsService } from "../../../services/editor/common/editorGroupsService.service.js";
+import { IEditorService } from "../../../services/editor/common/editorService.service.js";
+import { IWorkbenchEnvironmentService } from "../../../services/environment/common/environmentService.service.js";
+import { IEditorProgressService } from "../../../../platform/progress/common/progress.service.js";
+import { INotebookService } from "../common/notebookService.service.js";
+import { IExtensionsWorkbenchService } from "../../extensions/common/extensions.service.js";
+import { IWorkingCopyBackupService } from "../../../services/workingCopy/common/workingCopyBackup.service.js";
+import { ILogService } from "../../../../platform/log/common/log.service.js";
+import { IPreferencesService } from "../../../services/preferences/common/preferences.service.js";
+import { IActionViewItemOptions } from "../../../../base/browser/ui/actionbar/actionViewItems.js";
+import { ICodeEditor } from "../../../../editor/browser/editorBrowser.js";
+export declare class NotebookEditor extends EditorPane implements INotebookEditorPane, IEditorPaneWithScrolling {
+    private readonly _instantiationService;
+    private readonly _storageService;
+    private readonly _editorService;
+    private readonly _editorGroupService;
+    private readonly _notebookWidgetService;
+    private readonly _contextKeyService;
+    private readonly _fileService;
+    private readonly _editorProgressService;
+    private readonly _notebookService;
+    private readonly _extensionsWorkbenchService;
+    private readonly _workingCopyBackupService;
+    private readonly logService;
+    private readonly _preferencesService;
+    private readonly _dialogService;
+    private readonly _environmentService;
+    static readonly ID: string;
+    private readonly _editorMemento;
+    private readonly _groupListener;
+    private readonly _widgetDisposableStore;
+    private _widget;
+    private _rootElement;
+    private _pagePosition?;
+    private readonly _inputListener;
+    private readonly _onDidFocusWidget;
+    get onDidFocus(): Event<void>;
+    private readonly _onDidBlurWidget;
+    get onDidBlur(): Event<void>;
+    private readonly _onDidChangeModel;
+    readonly onDidChangeModel: Event<void>;
+    private readonly _onDidChangeSelection;
+    readonly onDidChangeSelection: Event<IEditorPaneSelectionChangeEvent>;
+    protected readonly _onDidChangeScroll: Emitter<void>;
+    readonly onDidChangeScroll: Event<void>;
+    constructor(group: IEditorGroup, telemetryService: ITelemetryService, themeService: IThemeService, _instantiationService: IInstantiationService, _storageService: IStorageService, _editorService: IEditorService, _editorGroupService: IEditorGroupsService, _notebookWidgetService: INotebookEditorService, _contextKeyService: IContextKeyService, _fileService: IFileService, configurationService: ITextResourceConfigurationService, _editorProgressService: IEditorProgressService, _notebookService: INotebookService, _extensionsWorkbenchService: IExtensionsWorkbenchService, _workingCopyBackupService: IWorkingCopyBackupService, logService: ILogService, _preferencesService: IPreferencesService, _dialogService: IDialogService, _environmentService: IWorkbenchEnvironmentService);
+    private _onDidChangeFileSystemProvider;
+    private _onDidChangeInputCapabilities;
+    private _updateReadonly;
+    get textModel(): NotebookTextModel | undefined;
+    get minimumWidth(): number;
+    get maximumWidth(): number;
+    set minimumWidth(value: number);
+    set maximumWidth(value: number);
+    get scopedContextKeyService(): IContextKeyService | undefined;
+    protected createEditor(parent: HTMLElement): void;
+    getActionViewItem(action: IAction, options: IActionViewItemOptions): IActionViewItem | undefined;
+    getControl(): NotebookEditorWidget | undefined;
+    setVisible(visible: boolean): void;
+    protected setEditorVisible(visible: boolean): void;
+    focus(): void;
+    hasFocus(): boolean;
+    /**
+     * When running serverless on the web (i.e. in the browser with no remote server
+     * connected), prompt the user to confirm that they really want to open the notebook.
+     * The confirmation is only shown the first time a given notebook is opened in the
+     * session (so switching back to an already-open notebook does not re-prompt), and the
+     * choice can be remembered for the whole workspace via a "Don't ask again" checkbox.
+     */
+    private _confirmOpenOnWebHost;
+    setInput(input: NotebookEditorInput, options: INotebookEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken, noRetry?: boolean): Promise<void>;
+    private _handlePerfMark;
+    clearInput(): void;
+    setOptions(options: INotebookEditorOptions | undefined): void;
+    protected saveState(): void;
+    getViewState(): INotebookEditorViewState | undefined;
+    getSelection(): IEditorPaneSelection | undefined;
+    getScrollPosition(): IEditorPaneScrollPosition;
+    setScrollPosition(scrollPosition: IEditorPaneScrollPosition): void;
+    private _saveEditorViewState;
+    private _loadNotebookEditorViewState;
+    layout(dimension: DOM.Dimension, position: DOM.IDomPosition): void;
+}
+export declare function isNotebookContainingCellEditor(editor: IEditorPane | undefined, codeEditor: ICodeEditor): boolean;

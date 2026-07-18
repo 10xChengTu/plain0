@@ -1,2 +1,9 @@
+packages: []
+autoInstallPeers: false
+engineStrict: true
+saveExact: true
+verifyDepsBeforeRun: false
 patchedDependencies:
+  '@codingame/monaco-vscode-api@35.0.1': patches/@codingame__monaco-vscode-api@35.0.1.patch
   '@codingame/monaco-vscode-extensions-service-override@35.0.1': patches/@codingame__monaco-vscode-extensions-service-override@35.0.1.patch
+  '@codingame/monaco-vscode-theme-service-override@35.0.1': patches/@codingame__monaco-vscode-theme-service-override@35.0.1.patch

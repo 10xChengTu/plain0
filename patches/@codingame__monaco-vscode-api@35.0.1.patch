@@ -1,0 +1,112 @@
+diff --git a/services.js b/services.js
+index 018691b598a8aa41da826da3e6a1100fa4929b97..ac7d4eb9521ed4c2d7ce38cb13060d904a47b6d4 100644
+--- a/services.js
++++ b/services.js
+@@ -24,7 +24,6 @@ import './vscode/src/vs/workbench/contrib/inlayHints/browser/inlayHintsAccessibi
+ import './vscode/src/vs/workbench/contrib/codeActions/browser/codeActions.contribution.js';
+ import './vscode/src/vs/workbench/contrib/list/browser/list.contribution.js';
+ import './vscode/src/vs/workbench/contrib/codeEditor/browser/editorFeatures.js';
+-import './vscode/src/vs/workbench/browser/actions/developerActions.js';
+ import './vscode/src/vs/workbench/contrib/dropOrPasteInto/browser/dropOrPasteInto.contribution.js';
+ import './vscode/src/vs/workbench/contrib/meteredConnection/browser/meteredConnection.contribution.js';
+ import './vscode/src/vs/workbench/contrib/inlineCompletions/browser/inlineCompletions.contribution.js';
+diff --git a/vscode/src/vs/workbench/browser/parts/globalCompositeBar.js b/vscode/src/vs/workbench/browser/parts/globalCompositeBar.js
+index dbf2cd589ee4f869b69ffa850d0b8a11f1e656b4..a94a5a349e647b6b900e055c930c88828a8c238b 100644
+--- a/vscode/src/vs/workbench/browser/parts/globalCompositeBar.js
++++ b/vscode/src/vs/workbench/browser/parts/globalCompositeBar.js
+@@ -117,15 +117,7 @@ let GlobalCompositeBar = class GlobalCompositeBar extends Disposable {
+         this.registerListeners();
+     }
+     registerListeners() {
+-        this.extensionService.whenInstalledExtensionsRegistered().then(() => {
+-            if (!this._store.isDisposed) {
+-                this._register(this.storageService.onDidChangeValue(
+-                    StorageScope.PROFILE,
+-                    AccountsActivityActionViewItem.ACCOUNTS_VISIBILITY_PREFERENCE_KEY,
+-                    this._store
+-                )(() => this.toggleAccountsActivity()));
+-            }
+-        });
++        // Plain intentionally has no accounts surface.
+     }
+     create(parent) {
+         parent.appendChild(this.element);
+@@ -137,30 +129,16 @@ let GlobalCompositeBar = class GlobalCompositeBar extends Disposable {
+         return this.globalActivityActionBar.viewItems.length;
+     }
+     getContextMenuActions() {
+-        return [toAction({
+-            id: "toggleAccountsVisibility",
+-            label: ( localize(3789, "Accounts")),
+-            checked: this.accountsVisibilityPreference,
+-            run: () => this.accountsVisibilityPreference = !this.accountsVisibilityPreference
+-        })];
++        return [];
+     }
+     toggleAccountsActivity() {
+-        if (this.globalActivityActionBar.length() === 2 && this.accountsVisibilityPreference) {
+-            return;
+-        }
+-        if (this.globalActivityActionBar.length() === 2) {
+-            this.globalActivityActionBar.pull(GlobalCompositeBar_1.ACCOUNTS_ACTION_INDEX);
+-        } else {
+-            this.globalActivityActionBar.push(this.accountAction, {
+-                index: GlobalCompositeBar_1.ACCOUNTS_ACTION_INDEX
+-            });
+-        }
++        // Plain intentionally has no accounts surface.
+     }
+     get accountsVisibilityPreference() {
+-        return isAccountsActionVisible(this.storageService);
++        return false;
+     }
+     set accountsVisibilityPreference(value) {
+-        setAccountsActionVisible(this.storageService, value);
++        // Plain intentionally has no accounts surface.
+     }
+ };
+ GlobalCompositeBar = GlobalCompositeBar_1 = ( __decorate([( __param(3, IConfigurationService)), ( __param(4, IInstantiationService)), ( __param(5, IStorageService)), ( __param(6, IExtensionService))], GlobalCompositeBar));
+@@ -732,20 +710,7 @@ let SimpleGlobalActivityActionViewItem = class SimpleGlobalActivityActionViewIte
+ };
+ SimpleGlobalActivityActionViewItem = ( __decorate([( __param(2, IUserDataProfileService)), ( __param(3, IThemeService)), ( __param(4, IHoverService)), ( __param(5, IMenuService)), ( __param(6, IContextMenuService)), ( __param(7, IContextKeyService)), ( __param(8, IConfigurationService)), ( __param(9, IWorkbenchEnvironmentService)), ( __param(10, IKeybindingService)), ( __param(11, IInstantiationService)), ( __param(12, IActivityService)), ( __param(13, IStorageService))], SimpleGlobalActivityActionViewItem));
+ function simpleActivityContextMenuActions(storageService, isAccount) {
+-    const currentElementContextMenuActions = [];
+-    if (isAccount) {
+-        currentElementContextMenuActions.push(toAction({
+-            id: "hideAccounts",
+-            label: ( localize(3787, "Hide Accounts")),
+-            run: () => setAccountsActionVisible(storageService, false)
+-        }), ( new Separator()));
+-    }
+-    return [...currentElementContextMenuActions, toAction({
+-        id: "toggle.hideAccounts",
+-        label: ( localize(3789, "Accounts")),
+-        checked: isAccountsActionVisible(storageService),
+-        run: () => setAccountsActionVisible(storageService, !isAccountsActionVisible(storageService))
+-    }), toAction({
++    return [toAction({
+         id: "toggle.hideManage",
+         label: ( localize(3788, "Manage")),
+         checked: true,
+@@ -756,19 +721,10 @@ function simpleActivityContextMenuActions(storageService, isAccount) {
+     })];
+ }
+ function isAccountsActionVisible(storageService) {
+-    return storageService.getBoolean(
+-        AccountsActivityActionViewItem.ACCOUNTS_VISIBILITY_PREFERENCE_KEY,
+-        StorageScope.PROFILE,
+-        true
+-    );
++    return false;
+ }
+ function setAccountsActionVisible(storageService, visible) {
+-    storageService.store(
+-        AccountsActivityActionViewItem.ACCOUNTS_VISIBILITY_PREFERENCE_KEY,
+-        visible,
+-        StorageScope.PROFILE,
+-        StorageTarget.USER
+-    );
++    // Plain intentionally has no accounts surface.
+ }
+ 
+ export { AccountsActivityActionViewItem, GlobalActivityActionViewItem, GlobalCompositeBar, SimpleAccountActivityActionViewItem, SimpleGlobalActivityActionViewItem, isAccountsActionVisible };
