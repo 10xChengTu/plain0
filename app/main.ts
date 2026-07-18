@@ -2,6 +2,8 @@ import "@codingame/monaco-vscode-theme-defaults-default-extension";
 
 import { initialize } from "@codingame/monaco-vscode-api";
 
+import { EXCLUDED_SURFACE_GUARD_MARKER } from "./excluded-surface-policy";
+import { enforceExcludedWorkbenchSurfaces } from "./excluded-surfaces";
 import { configureMonacoEnvironment } from "./monaco-environment";
 import { createBridge, normalizeCommandError } from "./platform/tauri";
 import { createServiceOverrides } from "./services";
@@ -37,6 +39,11 @@ async function bootstrap(): Promise<void> {
 			"workbench.startupEditor": "none",
 		},
 	});
+	const surfaceSnapshot = enforceExcludedWorkbenchSurfaces();
+	document.body.dataset.plainSurfaceGuard = EXCLUDED_SURFACE_GUARD_MARKER;
+	if (import.meta.env.DEV) {
+		window.__PLAIN_WORKBENCH_SURFACES__ = Object.freeze(surfaceSnapshot);
+	}
 
 	document.body.dataset.plainReady = "true";
 }

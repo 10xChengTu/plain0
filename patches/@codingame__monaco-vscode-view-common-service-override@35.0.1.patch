@@ -1,0 +1,22 @@
+diff --git a/vscode/src/vs/workbench/api/browser/viewsExtensionPoint.js b/vscode/src/vs/workbench/api/browser/viewsExtensionPoint.js
+index fa191a992dca775f34b74619230ecbb7334048b9..29d3f3f852cd2f1f216371464c00aa816c7d6343 100644
+--- a/vscode/src/vs/workbench/api/browser/viewsExtensionPoint.js
++++ b/vscode/src/vs/workbench/api/browser/viewsExtensionPoint.js
+@@ -19,13 +19,16 @@ import { registerWorkbenchContribution2, WorkbenchPhase } from '@codingame/monac
+ import { Extensions, ViewContainerLocation } from '@codingame/monaco-vscode-api/vscode/vs/workbench/common/views';
+ import { VIEWLET_ID as VIEWLET_ID$3 } from '@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/debug/common/debug';
+ import { VIEWLET_ID as VIEWLET_ID$1 } from '@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/files/common/files';
+-import { VIEWLET_ID } from '@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/remote/browser/remoteExplorer';
+ import { VIEWLET_ID as VIEWLET_ID$2 } from '@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/scm/common/scm';
+ import { WebviewViewPane } from '../../contrib/webviewView/browser/webviewViewPane.js';
+ import { Extensions as Extensions$2 } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensionManagement/common/extensionFeatures';
+ import { isProposedApiEnabled } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions';
+ import { ExtensionsRegistry } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensionsRegistry';
+ 
++// Plain keeps the contribution schema constant without importing Remote Explorer,
++// whose module evaluation registers tunnel commands outside the product scope.
++const VIEWLET_ID = "workbench.view.remote";
++
+ const viewsContainerSchema = {
+     type: "object",
+     properties: {

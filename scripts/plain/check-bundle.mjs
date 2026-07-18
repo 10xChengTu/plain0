@@ -10,6 +10,7 @@ const root = path.resolve(
 const distRoot = path.join(root, "dist");
 const failures = [];
 const fail = (message) => failures.push(message);
+const requiredRuntimeGuard = "PLAIN_EXCLUDED_SURFACE_GUARD_V1";
 
 async function walk(directory) {
 	const files = [];
@@ -101,6 +102,11 @@ const javascript = (
 			.map((file) => readFile(file, "utf8")),
 	)
 ).join("\n");
+if (!javascript.includes(requiredRuntimeGuard)) {
+	fail(
+		`final bundle is missing runtime surface guard: ${requiredRuntimeGuard}`,
+	);
+}
 for (const command of forbiddenCommandIds) {
 	if (javascript.includes(command)) {
 		fail(`final bundle registers excluded command: ${command}`);

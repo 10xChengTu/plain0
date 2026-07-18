@@ -64,6 +64,13 @@ const requiredPatches = new Map([
 			marker: "PLAIN_MARKETPLACE_DISABLED",
 		},
 	],
+	[
+		"@codingame/monaco-vscode-view-common-service-override@35.0.1",
+		{
+			file: "patches/@codingame__monaco-vscode-view-common-service-override@35.0.1.patch",
+			marker: "Plain keeps the contribution schema constant",
+		},
+	],
 ]);
 
 const workspaceManifest = await readFile(
