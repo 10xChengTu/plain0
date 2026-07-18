@@ -169,6 +169,57 @@ fn duplicate_directory_identities_reuse_the_first_root_and_revision() {
 }
 
 #[test]
+fn root_limit_counts_existing_and_deduplicated_selections_atomically() {
+    let temp = TempDir::new().unwrap();
+    let initial_roots = (0..255)
+        .map(|index| create_directory(&temp, &format!("initial-{index}")))
+        .collect::<Vec<_>>();
+    let existing_duplicate = initial_roots[0].clone();
+    let boundary_root = create_directory(&temp, "boundary-root");
+    let overflow_root = create_directory(&temp, "private-overflow-root");
+    let service = WorkspaceService::new();
+
+    let initial =
+        block_on(service.pick_roots("main", FakePicker::selected(initial_roots), true)).unwrap();
+    assert_eq!(initial.snapshot().revision(), 1);
+    assert_eq!(initial.snapshot().roots().len(), 255);
+
+    let boundary = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![
+            existing_duplicate.clone(),
+            boundary_root.clone(),
+            boundary_root,
+        ]),
+        true,
+    ))
+    .unwrap();
+    assert_eq!(boundary.snapshot().revision(), 2);
+    assert_eq!(boundary.snapshot().roots().len(), 256);
+    let before_overflow = boundary.snapshot().clone();
+
+    let error = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![
+            existing_duplicate,
+            overflow_root.clone(),
+            overflow_root,
+        ]),
+        true,
+    ))
+    .unwrap_err();
+    assert_eq!(error.code(), "WORKSPACE_ROOT_LIMIT_EXCEEDED");
+    assert_eq!(
+        error.message(),
+        "The workspace root limit has been exceeded."
+    );
+    let serialized = serde_json::to_string(&error).unwrap();
+    assert!(!serialized.contains("private-overflow-root"));
+    assert!(!serialized.contains(temp.path().to_str().unwrap()));
+    assert_eq!(service.snapshot("main").unwrap(), before_overflow);
+}
+
+#[test]
 fn windows_have_independent_scopes_and_revocation() {
     let temp = TempDir::new().unwrap();
     let root = create_directory(&temp, "shared-root");

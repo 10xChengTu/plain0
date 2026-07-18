@@ -19,6 +19,8 @@ pub mod service;
 
 use dto::{WorkspaceRootSnapshot, WorkspaceSnapshot};
 
+const MAX_WORKSPACE_ROOTS: usize = 256;
+
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RootId(Uuid);
 
@@ -201,6 +203,15 @@ impl WorkspaceScope {
             let root_id = RootId::new();
             selected_ids.push(root_id);
             additions.push((root_id, candidate));
+        }
+
+        let resulting_root_count = self
+            .roots
+            .len()
+            .checked_add(additions.len())
+            .ok_or_else(workspace_root_limit_exceeded)?;
+        if resulting_root_count > MAX_WORKSPACE_ROOTS {
+            return Err(workspace_root_limit_exceeded());
         }
 
         if additions.is_empty() {
@@ -415,6 +426,13 @@ fn workspace_conflict() -> CommandError {
     CommandError::new(
         "WORKSPACE_CONFLICT",
         "The workspace changed while the operation was in progress.",
+    )
+}
+
+fn workspace_root_limit_exceeded() -> CommandError {
+    CommandError::new(
+        "WORKSPACE_ROOT_LIMIT_EXCEEDED",
+        "The workspace root limit has been exceeded.",
     )
 }
 
