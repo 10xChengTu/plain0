@@ -7,9 +7,9 @@ export interface RuntimeInfo {
 }
 
 export interface CommandError {
-	code: string;
-	message: string;
-	details?: unknown;
+	readonly code: string;
+	readonly message: string;
+	readonly details?: unknown;
 }
 
 export interface WorkspaceRoot {
@@ -31,6 +31,39 @@ export interface WorkspacePickResult {
 
 export type WorkspacePickMode = "replace" | "add";
 
+export type WorkspaceEntryKind =
+	| "file"
+	| "directory"
+	| "symlink"
+	| "symlinkFile"
+	| "symlinkDirectory"
+	| "other";
+
+export interface WorkspaceEntryStat {
+	readonly kind: WorkspaceEntryKind;
+	readonly size: number;
+	readonly mtime: number;
+	readonly ctime: number;
+}
+
+export interface WorkspaceDirectoryEntry {
+	readonly name: string;
+	readonly kind: WorkspaceEntryKind;
+}
+
+export interface WorkspaceReadDirectoryResult {
+	readonly entries: readonly WorkspaceDirectoryEntry[];
+}
+
+/**
+ * Immutable file payload. The backing bytes are closure-private; each call to
+ * copy returns a new Uint8Array that the caller may mutate independently.
+ */
+export interface WorkspaceFileData {
+	readonly byteLength: number;
+	readonly copy: () => Uint8Array;
+}
+
 export type Unlisten = () => void | Promise<void>;
 
 export interface PlainBridge {
@@ -39,4 +72,16 @@ export interface PlainBridge {
 	workspaceSnapshot(): Promise<WorkspaceSnapshot>;
 	workspacePickRoots(mode: WorkspacePickMode): Promise<WorkspacePickResult>;
 	workspaceRemoveRoot(rootId: string): Promise<WorkspaceSnapshot>;
+	workspaceStat(
+		rootId: string,
+		relativePath: string,
+	): Promise<WorkspaceEntryStat>;
+	workspaceReadDirectory(
+		rootId: string,
+		relativePath: string,
+	): Promise<WorkspaceReadDirectoryResult>;
+	workspaceReadFile(
+		rootId: string,
+		relativePath: string,
+	): Promise<WorkspaceFileData>;
 }

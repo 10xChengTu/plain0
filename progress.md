@@ -23,11 +23,12 @@
 - [x] `pnpm check`、浏览器 E2E、Tauri debug bundle 和 macOS Computer Use 原生窗口验收通过。
 - [x] 完成 Rust `workspace_stat`/`workspace_read_dir` capability reader：锁外 I/O、撤销后重验、symlink swap、目录/编码/JS 数值边界均有测试。
 - [x] 完成 8 MiB 有界 `workspace_read_file`：raw bytes、增长上限、symlink/FIFO TOCTOU、错误隔离和 root 撤销均有测试。
+- [x] 完成 TypeScript 文件数据 bridge 与 browser mock：严格 DTO/path/UTF-8 codec、冻结字节隔离和授权撤销语义均有测试。
 
 ## 下一步
 
-1. 接入 TypeScript 严格 codec 与 browser mock 文件数据面，并单独提交。
-2. 接入 `plain-workspace:` provider 与 Workbench files/model/explorer；依赖与 UI 各自通过最小验证后提交。
+1. 安装并审计 files/model/explorer service overrides，注册只读 `plain-workspace:` provider，并单独提交。
+2. 投影 picker snapshot 到 Workbench workspace，完成 Explorer 展开与只读文件打开 Browser E2E，再单独提交。
 3. 依次实现新建/重命名、复制/移动、确认删除和 watcher/rescan；每个可独立回滚的切片单独提交。
 4. 最后分别运行 browser mock 和真实 Tauri 文件树验收，再写回 `F020` evidence。
 

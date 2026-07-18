@@ -2,11 +2,19 @@ import type {
 	CommandError,
 	PlainBridge,
 	RuntimeInfo,
+	WorkspaceDirectoryEntry,
 	WorkspaceRoot,
 } from "./contracts";
 import {
+	compareWorkspaceEntryNames,
+	frozenWorkspaceEntryStat,
+	frozenWorkspaceEntryRequest,
+	frozenWorkspaceFileData,
 	frozenWorkspacePickResult,
+	frozenWorkspaceReadDirectory,
 	frozenWorkspaceSnapshot,
+	isPortableWorkspaceEntryName,
+	workspaceRelativePathSegments,
 } from "./workspace-codec";
 
 const runtimeInfo: RuntimeInfo = Object.freeze({
@@ -16,6 +24,10 @@ const runtimeInfo: RuntimeInfo = Object.freeze({
 });
 
 const MOCK_WORKSPACE_ID = "00000000-0000-4000-8000-000000000001";
+const MAX_FILE_BYTES = 8 * 1_024 * 1_024;
+const MOCK_MTIME = 1_700_000_000_000;
+const MOCK_CTIME = 1_699_999_000_000;
+const textEncoder = new TextEncoder();
 const mockRoots = Object.freeze([
 	Object.freeze({
 		rootId: "00000000-0000-4000-8000-000000000101",
@@ -29,17 +41,113 @@ const mockRoots = Object.freeze([
 	}),
 ] satisfies readonly WorkspaceRoot[]);
 
+interface MockFileNode {
+	readonly kind: "file";
+	readonly size: number;
+	readonly bytes: Uint8Array;
+}
+
+interface MockDirectoryNode {
+	readonly kind: "directory";
+	readonly entries: ReadonlyMap<string, MockNode>;
+}
+
+type MockNode = MockFileNode | MockDirectoryNode;
+
+function mockFile(contents: string | readonly number[]): MockFileNode {
+	const bytes =
+		typeof contents === "string"
+			? textEncoder.encode(contents)
+			: Uint8Array.from(contents);
+	return Object.freeze({ kind: "file", size: bytes.byteLength, bytes });
+}
+
+function oversizedMockFile(): MockFileNode {
+	return Object.freeze({
+		kind: "file",
+		size: MAX_FILE_BYTES + 1,
+		bytes: new Uint8Array(),
+	});
+}
+
+function mockDirectory(
+	entries: Readonly<Record<string, MockNode>>,
+): MockDirectoryNode {
+	const pairs = Object.entries(entries);
+	if (
+		pairs.length > 10_000 ||
+		pairs.some(([name]) => !isPortableWorkspaceEntryName(name))
+	) {
+		throw new Error("Invalid bounded browser mock workspace tree.");
+	}
+	return Object.freeze({ kind: "directory", entries: new Map(pairs) });
+}
+
+const mockTrees = new Map<string, MockDirectoryNode>([
+	[
+		mockRoots[0]!.rootId,
+		mockDirectory({
+			".plainrc": mockFile('{"editor":"plain"}\n'),
+			"README.md": mockFile("# Plain browser workspace\n"),
+			"binary.bin": mockFile([0, 255, 128, 1, 0, 42]),
+			empty: mockDirectory({}),
+			fixtures: mockDirectory({
+				"oversized.bin": oversizedMockFile(),
+			}),
+			src: mockDirectory({
+				"main.ts": mockFile('export const editor = "Plain";\n'),
+			}),
+		}),
+	],
+	[
+		mockRoots[1]!.rootId,
+		mockDirectory({
+			"notes.txt": mockFile("Library root\n"),
+			packages: mockDirectory({}),
+		}),
+	],
+]);
+
 export type BrowserMockWorkspacePick = "selected" | "cancelled";
 
 export interface BrowserMockBridgeOptions {
 	readonly workspacePicks?: readonly BrowserMockWorkspacePick[];
 }
 
+function commandError(code: string, message: string): CommandError {
+	return Object.freeze({ code, message });
+}
+
 function rootNotAuthorized(): CommandError {
-	return {
-		code: "ROOT_NOT_AUTHORIZED",
-		message: "The workspace root is not authorized.",
-	};
+	return commandError(
+		"ROOT_NOT_AUTHORIZED",
+		"The workspace root is not authorized.",
+	);
+}
+
+function invalidRelativePath(): CommandError {
+	return commandError(
+		"INVALID_RELATIVE_PATH",
+		"The workspace-relative path is invalid.",
+	);
+}
+
+function entryNotFound(): CommandError {
+	return commandError("ENTRY_NOT_FOUND", "The workspace entry does not exist.");
+}
+
+function entryTypeMismatch(): CommandError {
+	return commandError(
+		"ENTRY_TYPE_MISMATCH",
+		"The workspace entry has an incompatible type.",
+	);
+}
+
+function fileTooLarge(): CommandError {
+	return commandError(
+		"FILE_TOO_LARGE",
+		"The workspace file exceeds the supported read limit.",
+	);
 }
 
 export function createBrowserMockBridge(
@@ -52,6 +160,33 @@ export function createBrowserMockBridge(
 
 	const snapshot = () =>
 		frozenWorkspaceSnapshot(MOCK_WORKSPACE_ID, revision, [...roots.values()]);
+	const resolveNode = (rootId: string, relativePath: string): MockNode => {
+		const request = frozenWorkspaceEntryRequest(rootId, relativePath);
+		if (!roots.has(request.rootId)) {
+			throw rootNotAuthorized();
+		}
+		const root = mockTrees.get(request.rootId);
+		if (root === undefined) {
+			throw rootNotAuthorized();
+		}
+		const segments = workspaceRelativePathSegments(request.relativePath);
+		if (segments === undefined) {
+			throw invalidRelativePath();
+		}
+
+		let node: MockNode = root;
+		for (const segment of segments) {
+			if (node.kind !== "directory") {
+				throw entryTypeMismatch();
+			}
+			const child = node.entries.get(segment);
+			if (child === undefined) {
+				throw entryNotFound();
+			}
+			node = child;
+		}
+		return node;
+	};
 
 	return {
 		async runtimeInfo() {
@@ -104,6 +239,41 @@ export function createBrowserMockBridge(
 			}
 			revision += 1;
 			return snapshot();
+		},
+		async workspaceStat(rootId, relativePath) {
+			const node = resolveNode(rootId, relativePath);
+			return frozenWorkspaceEntryStat(
+				node.kind,
+				node.kind === "file" ? node.size : 0,
+				MOCK_MTIME,
+				MOCK_CTIME,
+			);
+		},
+		async workspaceReadDirectory(rootId, relativePath) {
+			const node = resolveNode(rootId, relativePath);
+			if (node.kind !== "directory") {
+				throw entryTypeMismatch();
+			}
+			const entries = [...node.entries].map(
+				([name, child]): WorkspaceDirectoryEntry => ({
+					name,
+					kind: child.kind,
+				}),
+			);
+			entries.sort((left, right) =>
+				compareWorkspaceEntryNames(left.name, right.name),
+			);
+			return frozenWorkspaceReadDirectory(entries, relativePath);
+		},
+		async workspaceReadFile(rootId, relativePath) {
+			const node = resolveNode(rootId, relativePath);
+			if (node.kind !== "file") {
+				throw entryTypeMismatch();
+			}
+			if (node.size > MAX_FILE_BYTES) {
+				throw fileTooLarge();
+			}
+			return frozenWorkspaceFileData(node.bytes);
 		},
 	};
 }

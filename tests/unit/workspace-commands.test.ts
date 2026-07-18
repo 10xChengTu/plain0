@@ -24,6 +24,9 @@ describe("workspace Workbench command overrides", () => {
 			workspaceSnapshot: vi.fn(),
 			workspacePickRoots,
 			workspaceRemoveRoot: vi.fn(),
+			workspaceStat: vi.fn(),
+			workspaceReadDirectory: vi.fn(),
+			workspaceReadFile: vi.fn(),
 		};
 		const contextValues = new Map<string, unknown>([
 			["openFolderWorkspaceSupport", false],

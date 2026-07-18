@@ -78,4 +78,107 @@ describe("browser mock workspace bridge", () => {
 		const unchanged = await bridge.workspacePickRoots("replace");
 		expect(unchanged.snapshot).toEqual(replaced.snapshot);
 	});
+
+	it("serves a deterministic immutable bounded file tree", async () => {
+		const bridge = createBrowserMockBridge();
+		const selected = await bridge.workspacePickRoots("replace");
+		const rootId = selected.snapshot.roots[0]!.rootId;
+
+		const rootStat = await bridge.workspaceStat(rootId, "");
+		const fileStat = await bridge.workspaceStat(rootId, "binary.bin");
+		const root = await bridge.workspaceReadDirectory(rootId, "");
+		const source = await bridge.workspaceReadDirectory(rootId, "src");
+		const file = await bridge.workspaceReadFile(rootId, "binary.bin");
+
+		expect(rootStat).toMatchObject({ kind: "directory", size: 0 });
+		expect(fileStat).toMatchObject({ kind: "file", size: 6 });
+		expect(root.entries.map(({ name }) => name)).toEqual([
+			".plainrc",
+			"README.md",
+			"binary.bin",
+			"empty",
+			"fixtures",
+			"src",
+		]);
+		expect(source.entries).toEqual([{ name: "main.ts", kind: "file" }]);
+		expect(Object.isFrozen(rootStat)).toBe(true);
+		expect(Object.isFrozen(root)).toBe(true);
+		expect(Object.isFrozen(root.entries)).toBe(true);
+		expect(Object.isFrozen(file)).toBe(true);
+		const first = file.copy();
+		const second = file.copy();
+		expect([...first]).toEqual([0, 255, 128, 1, 0, 42]);
+		expect(first).not.toBe(second);
+		first[0] = 99;
+		expect([...second]).toEqual([0, 255, 128, 1, 0, 42]);
+		expect([...file.copy()]).toEqual([0, 255, 128, 1, 0, 42]);
+	});
+
+	it("returns frozen stable file errors with Rust-compatible precedence", async () => {
+		const bridge = createBrowserMockBridge();
+		const knownRootId = "00000000-0000-4000-8000-000000000101";
+
+		const invalidBeforeAuthorization = await bridge
+			.workspaceStat(knownRootId, "../private-secret")
+			.catch((error: unknown) => error);
+		expect(invalidBeforeAuthorization).toEqual({
+			code: "INVALID_RELATIVE_PATH",
+			message: "The workspace-relative path is invalid.",
+		});
+		expect(Object.isFrozen(invalidBeforeAuthorization)).toBe(true);
+		await expect(
+			bridge.workspaceStat(knownRootId, "README.md"),
+		).rejects.toEqual({
+			code: "ROOT_NOT_AUTHORIZED",
+			message: "The workspace root is not authorized.",
+		});
+
+		const selected = await bridge.workspacePickRoots("replace");
+		const rootId = selected.snapshot.roots[0]!.rootId;
+		await expect(
+			bridge.workspaceStat(rootId, "missing.txt"),
+		).rejects.toMatchObject({ code: "ENTRY_NOT_FOUND" });
+		await expect(
+			bridge.workspaceReadDirectory(rootId, "README.md"),
+		).rejects.toMatchObject({ code: "ENTRY_TYPE_MISMATCH" });
+		await expect(bridge.workspaceReadFile(rootId, "src")).rejects.toMatchObject(
+			{
+				code: "ENTRY_TYPE_MISMATCH",
+			},
+		);
+		await expect(
+			bridge.workspaceReadFile(rootId, "fixtures/oversized.bin"),
+		).rejects.toEqual({
+			code: "FILE_TOO_LARGE",
+			message: "The workspace file exceeds the supported read limit.",
+		});
+
+		await bridge.workspaceRemoveRoot(rootId);
+		const revoked = await bridge
+			.workspaceReadFile(rootId, "README.md")
+			.catch((error: unknown) => error);
+		expect(revoked).toMatchObject({ code: "ROOT_NOT_AUTHORIZED" });
+		expect(Object.isFrozen(revoked)).toBe(true);
+		expect(JSON.stringify(revoked)).not.toContain("private-secret");
+	});
+
+	it("keeps added roots isolated while exposing their deterministic trees", async () => {
+		const bridge = createBrowserMockBridge();
+		const added = await bridge.workspacePickRoots("add");
+		const [workspaceRoot, libraryRoot] = added.snapshot.roots;
+
+		expect(
+			(await bridge.workspaceReadDirectory(workspaceRoot!.rootId, "src"))
+				.entries,
+		).toEqual([{ name: "main.ts", kind: "file" }]);
+		expect(
+			(await bridge.workspaceReadDirectory(libraryRoot!.rootId, "")).entries,
+		).toEqual([
+			{ name: "notes.txt", kind: "file" },
+			{ name: "packages", kind: "directory" },
+		]);
+		await expect(
+			bridge.workspaceStat(libraryRoot!.rootId, "src/main.ts"),
+		).rejects.toMatchObject({ code: "ENTRY_NOT_FOUND" });
+	});
 });

@@ -4,8 +4,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { RUNTIME_READY_EVENT, type PlainBridge } from "./contracts";
 import {
 	decodeRuntimeInfo,
+	decodeWorkspaceEntryStat,
+	decodeWorkspaceFileData,
 	decodeWorkspacePickResult,
+	decodeWorkspaceReadDirectory,
 	decodeWorkspaceSnapshot,
+	frozenWorkspaceEntryRequest,
 } from "./workspace-codec";
 
 export function createNativeBridge(): PlainBridge {
@@ -33,5 +37,24 @@ export function createNativeBridge(): PlainBridge {
 					request: { rootId },
 				}),
 			),
+		workspaceStat: async (rootId, relativePath) => {
+			const request = frozenWorkspaceEntryRequest(rootId, relativePath);
+			return decodeWorkspaceEntryStat(
+				await invoke<unknown>("workspace_stat", { request }),
+			);
+		},
+		workspaceReadDirectory: async (rootId, relativePath) => {
+			const request = frozenWorkspaceEntryRequest(rootId, relativePath);
+			return decodeWorkspaceReadDirectory(
+				await invoke<unknown>("workspace_read_dir", { request }),
+				request.relativePath,
+			);
+		},
+		workspaceReadFile: async (rootId, relativePath) => {
+			const request = frozenWorkspaceEntryRequest(rootId, relativePath);
+			return decodeWorkspaceFileData(
+				await invoke<unknown>("workspace_read_file", { request }),
+			);
+		},
 	};
 }

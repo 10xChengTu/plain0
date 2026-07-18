@@ -66,6 +66,81 @@ describe("native Plain bridge", () => {
 		expect(Object.isFrozen(snapshot.roots[0])).toBe(true);
 	});
 
+	it("invokes the bounded file commands with frozen owned requests", async () => {
+		const rawBytes = new Uint8Array([0, 255, 128, 42]);
+		tauri.invoke
+			.mockResolvedValueOnce({
+				kind: "file",
+				size: 4,
+				mtime: 1_700_000_000_000,
+				ctime: 0,
+			})
+			.mockResolvedValueOnce({
+				entries: [
+					{ name: "%2F", kind: "file" },
+					{ name: "%2e%2e", kind: "directory" },
+				],
+			})
+			.mockResolvedValueOnce(rawBytes.buffer);
+		const bridge = createNativeBridge();
+
+		const stat = await bridge.workspaceStat(rootId, "%2e%2e/file.bin");
+		const directory = await bridge.workspaceReadDirectory(rootId, "%2e%2e");
+		const file = await bridge.workspaceReadFile(rootId, "%2F");
+
+		expect(tauri.invoke.mock.calls).toEqual([
+			[
+				"workspace_stat",
+				{ request: { rootId, relativePath: "%2e%2e/file.bin" } },
+			],
+			["workspace_read_dir", { request: { rootId, relativePath: "%2e%2e" } }],
+			["workspace_read_file", { request: { rootId, relativePath: "%2F" } }],
+		]);
+		for (const [, arguments_] of tauri.invoke.mock.calls) {
+			expect(Object.isFrozen(arguments_?.request)).toBe(true);
+		}
+		expect(stat).toEqual({
+			kind: "file",
+			size: 4,
+			mtime: 1_700_000_000_000,
+			ctime: 0,
+		});
+		expect(Object.isFrozen(stat)).toBe(true);
+		expect(directory.entries.map(({ name }) => name)).toEqual([
+			"%2F",
+			"%2e%2e",
+		]);
+		expect(Object.isFrozen(directory.entries)).toBe(true);
+		rawBytes[0] = 99;
+		expect([...file.copy()]).toEqual([0, 255, 128, 42]);
+	});
+
+	it("supports strict number-array fallback bytes and rejects invalid requests before invoke", async () => {
+		tauri.invoke.mockResolvedValueOnce([1, 2, 3]);
+		const bridge = createNativeBridge();
+		expect([
+			...(await bridge.workspaceReadFile(rootId, "binary.bin")).copy(),
+		]).toEqual([1, 2, 3]);
+
+		tauri.invoke.mockClear();
+		await expect(
+			bridge.workspaceStat(rootId, "../private-secret"),
+		).rejects.toEqual({
+			code: "INVALID_RELATIVE_PATH",
+			message: "The workspace-relative path is invalid.",
+		});
+		await expect(
+			bridge.workspaceReadFile(
+				"00000000-0000-4000-8000-000000000ABC",
+				"binary.bin",
+			),
+		).rejects.toEqual({
+			code: "ROOT_NOT_AUTHORIZED",
+			message: "The workspace root is not authorized.",
+		});
+		expect(tauri.invoke).not.toHaveBeenCalled();
+	});
+
 	it.each([
 		["non-object", "private-non-object"],
 		[
