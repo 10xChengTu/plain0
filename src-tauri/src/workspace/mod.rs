@@ -156,8 +156,7 @@ impl WorkspaceScope {
         Self::default()
     }
 
-    /// Opens and validates every selected path before changing the scope. This
-    /// is the sole ambient filesystem authorization entry point in production.
+    /// Opens and validates every selected path before changing the scope.
     pub(crate) fn authorize_roots_atomically(
         &mut self,
         ambient_paths: &[PathBuf],
@@ -168,18 +167,7 @@ impl WorkspaceScope {
 
         let prepared = ambient_paths
             .iter()
-            .map(|ambient_path| {
-                let display_name = root_display_name(ambient_path)?;
-                let directory = Dir::open_ambient_dir(ambient_path, ambient_authority())
-                    .map_err(map_root_authorization_error)?;
-                let identity = directory_identity(&directory, ambient_path)
-                    .map_err(map_root_authorization_error)?;
-                Ok(PreparedWorkspaceRoot {
-                    directory,
-                    display_name,
-                    identity,
-                })
-            })
+            .map(|ambient_path| prepare_workspace_root(ambient_path))
             .collect::<Result<Vec<_>, CommandError>>()?;
 
         let mut additions = Vec::new();
@@ -235,6 +223,50 @@ impl WorkspaceScope {
         }
         self.revision = next_revision;
         Ok(selected_ids)
+    }
+
+    /// Opens and validates the selected path before replacing the scope. An
+    /// already-authorized directory keeps its root id, display name and held
+    /// capability; every other capability is revoked in the same mutation.
+    pub(crate) fn replace_root_atomically(
+        &mut self,
+        ambient_path: &Path,
+    ) -> Result<RootId, CommandError> {
+        let candidate = prepare_workspace_root(ambient_path)?;
+        if let Some(root_id) = self
+            .roots
+            .iter()
+            .find(|(_, root)| root.identity == candidate.identity)
+            .map(|(root_id, _)| *root_id)
+        {
+            if self.roots.len() == 1 && self.order.as_slice() == [root_id] {
+                return Ok(root_id);
+            }
+
+            let next_revision = next_revision(self.revision)?;
+            self.roots
+                .retain(|candidate_id, _| *candidate_id == root_id);
+            self.order.clear();
+            self.order.push(root_id);
+            self.revision = next_revision;
+            return Ok(root_id);
+        }
+
+        let next_revision = next_revision(self.revision)?;
+        let root_id = RootId::new();
+        self.roots.clear();
+        self.order.clear();
+        self.roots.insert(
+            root_id,
+            WorkspaceRoot {
+                directory: candidate.directory,
+                display_name: candidate.display_name,
+                identity: candidate.identity,
+            },
+        );
+        self.order.push(root_id);
+        self.revision = next_revision;
+        Ok(root_id)
     }
 
     #[cfg(test)]
@@ -367,6 +399,19 @@ fn root_display_name(ambient_path: &Path) -> Result<String, CommandError> {
             .ok_or_else(path_encoding_unsupported),
         None => Ok("Workspace Root".to_owned()),
     }
+}
+
+fn prepare_workspace_root(ambient_path: &Path) -> Result<PreparedWorkspaceRoot, CommandError> {
+    let display_name = root_display_name(ambient_path)?;
+    let directory = Dir::open_ambient_dir(ambient_path, ambient_authority())
+        .map_err(map_root_authorization_error)?;
+    let identity =
+        directory_identity(&directory, ambient_path).map_err(map_root_authorization_error)?;
+    Ok(PreparedWorkspaceRoot {
+        directory,
+        display_name,
+        identity,
+    })
 }
 
 fn next_revision(current: u64) -> Result<u64, CommandError> {

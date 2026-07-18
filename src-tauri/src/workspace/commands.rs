@@ -27,7 +27,7 @@ pub(crate) async fn workspace_pick_roots(
 ) -> Result<WorkspacePickRootsResult, CommandError> {
     let picker = TauriDirectoryPicker::new(window.clone());
     service
-        .pick_roots(window.label(), picker, request.allow_multiple())
+        .pick_roots(window.label(), picker, request.mode())
         .await
 }
 

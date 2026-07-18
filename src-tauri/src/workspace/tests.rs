@@ -61,6 +61,80 @@ fn rejects_unknown_and_revoked_roots() {
     );
 }
 
+#[test]
+fn replace_is_atomic_reuses_existing_identity_and_revokes_old_capabilities() {
+    let temp = TempDir::new().unwrap();
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    let third = temp.path().join("third");
+    fs::create_dir(&first).unwrap();
+    fs::create_dir(&second).unwrap();
+    fs::create_dir(&third).unwrap();
+    fs::write(first.join("identity.txt"), b"first").unwrap();
+    fs::write(second.join("identity.txt"), b"second").unwrap();
+
+    let mut scope = WorkspaceScope::new();
+    let ids = scope
+        .authorize_roots_atomically(&[first.clone(), second.clone()])
+        .unwrap();
+    let first_id = ids[0];
+    let second_id = ids[1];
+
+    let selected = scope.replace_root_atomically(&first).unwrap();
+    assert_eq!(selected, first_id);
+    assert_eq!(scope.snapshot().revision(), 2);
+    assert_eq!(scope.snapshot().roots().len(), 1);
+    assert_eq!(scope.snapshot().roots()[0].root_id(), first_id);
+    let root_path = RelativePath::parse_wire("").unwrap();
+    assert_eq!(
+        scope.resolve(second_id, &root_path).unwrap_err().code(),
+        "ROOT_NOT_AUTHORIZED"
+    );
+
+    let unchanged = scope.snapshot();
+    assert_eq!(scope.replace_root_atomically(&first).unwrap(), first_id);
+    assert_eq!(scope.snapshot(), unchanged);
+
+    let third_id = scope.replace_root_atomically(&third).unwrap();
+    assert_ne!(third_id, first_id);
+    assert_eq!(scope.snapshot().revision(), 3);
+    assert_eq!(
+        scope.resolve(first_id, &root_path).unwrap_err().code(),
+        "ROOT_NOT_AUTHORIZED"
+    );
+
+    let before_failure = scope.snapshot();
+    let error = scope
+        .replace_root_atomically(&temp.path().join("private-missing"))
+        .unwrap_err();
+    assert_eq!(error.code(), "ROOT_UNAVAILABLE");
+    assert_eq!(scope.snapshot(), before_failure);
+}
+
+#[cfg(unix)]
+#[test]
+fn replace_through_an_alias_preserves_the_original_display_name() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    let original = temp.path().join("original-name");
+    let other = temp.path().join("other");
+    let alias = temp.path().join("alias-name");
+    fs::create_dir(&original).unwrap();
+    fs::create_dir(&other).unwrap();
+    symlink(&original, &alias).unwrap();
+
+    let mut scope = WorkspaceScope::new();
+    let ids = scope
+        .authorize_roots_atomically(&[original, other])
+        .unwrap();
+    assert_eq!(scope.replace_root_atomically(&alias).unwrap(), ids[0]);
+    let snapshot = scope.snapshot();
+    assert_eq!(snapshot.roots().len(), 1);
+    assert_eq!(snapshot.roots()[0].root_id(), ids[0]);
+    assert_eq!(snapshot.roots()[0].display_name(), "original-name");
+}
+
 #[cfg(unix)]
 #[test]
 fn held_directory_handle_does_not_jump_when_the_ambient_root_is_replaced() {

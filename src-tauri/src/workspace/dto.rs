@@ -105,12 +105,25 @@ impl WorkspaceSnapshotRequest {
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspacePickRootsRequest {
-    allow_multiple: bool,
+    mode: WorkspacePickRootsMode,
 }
 
 impl WorkspacePickRootsRequest {
-    pub const fn allow_multiple(self) -> bool {
-        self.allow_multiple
+    pub const fn mode(self) -> WorkspacePickRootsMode {
+        self.mode
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspacePickRootsMode {
+    Replace,
+    Add,
+}
+
+impl WorkspacePickRootsMode {
+    pub const fn allows_multiple(self) -> bool {
+        matches!(self, Self::Add)
     }
 }
 
@@ -123,5 +136,35 @@ pub struct WorkspaceRemoveRootRequest {
 impl WorkspaceRemoveRootRequest {
     pub const fn root_id(self) -> RootId {
         self.root_id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WorkspacePickRootsMode, WorkspacePickRootsRequest};
+
+    #[test]
+    fn pick_roots_mode_is_a_closed_lowercase_wire_enum() {
+        let replace: WorkspacePickRootsRequest =
+            serde_json::from_str(r#"{"mode":"replace"}"#).unwrap();
+        assert_eq!(replace.mode(), WorkspacePickRootsMode::Replace);
+        assert!(!replace.mode().allows_multiple());
+
+        let add: WorkspacePickRootsRequest = serde_json::from_str(r#"{"mode":"add"}"#).unwrap();
+        assert_eq!(add.mode(), WorkspacePickRootsMode::Add);
+        assert!(add.mode().allows_multiple());
+
+        for invalid in [
+            r#"{"mode":"Replace"}"#,
+            r#"{"mode":"multiple"}"#,
+            r#"{"allowMultiple":true}"#,
+            r#"{"mode":"add","unknown":true}"#,
+            r#"{}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<WorkspacePickRootsRequest>(invalid).is_err(),
+                "request must reject {invalid}"
+            );
+        }
     }
 }

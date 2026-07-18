@@ -3,7 +3,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::error::CommandError;
 
-use super::dto::{WorkspacePickRootsResult, WorkspacePickRootsStatus, WorkspaceSnapshot};
+use super::dto::{
+    WorkspacePickRootsMode, WorkspacePickRootsResult, WorkspacePickRootsStatus, WorkspaceSnapshot,
+};
 use super::picker::{DirectoryPicker, DirectoryPickerResult};
 use super::{RootId, WorkspaceScope};
 
@@ -25,11 +27,11 @@ impl WorkspaceService {
         &self,
         window_label: &str,
         picker: P,
-        allow_multiple: bool,
+        mode: WorkspacePickRootsMode,
     ) -> Result<WorkspacePickRootsResult, CommandError> {
         let workspace = self.scope_for_window(window_label)?;
         let picker_token = workspace.begin_picker()?;
-        let selection = match picker.pick_directories(allow_multiple).await {
+        let selection = match picker.pick_directories(mode.allows_multiple()).await {
             Ok(selection) => selection,
             Err(error) => {
                 workspace.abort_picker(picker_token)?;
@@ -38,7 +40,7 @@ impl WorkspaceService {
         };
 
         tauri::async_runtime::spawn_blocking(move || {
-            workspace.finish_picker(picker_token, selection)
+            workspace.finish_picker(picker_token, mode, selection)
         })
         .await
         .map_err(|_| workspace_operation_failed())?
@@ -118,6 +120,7 @@ impl WindowWorkspace {
     fn finish_picker(
         &self,
         token: u64,
+        mode: WorkspacePickRootsMode,
         selection: DirectoryPickerResult,
     ) -> Result<WorkspacePickRootsResult, CommandError> {
         let mut state = lock(&self.state)?;
@@ -128,7 +131,15 @@ impl WindowWorkspace {
                 WorkspacePickRootsStatus::Cancelled
             }
             DirectoryPickerResult::Selected(paths) => {
-                let authorization = state.scope.authorize_roots_atomically(&paths);
+                let authorization = match mode {
+                    WorkspacePickRootsMode::Add => {
+                        state.scope.authorize_roots_atomically(&paths).map(|_| ())
+                    }
+                    WorkspacePickRootsMode::Replace => match paths.as_slice() {
+                        [path] => state.scope.replace_root_atomically(path).map(|_| ()),
+                        _ => Err(invalid_picker_selection()),
+                    },
+                };
                 state.active_picker = None;
                 authorization?;
                 return Ok(WorkspacePickRootsResult::new(
@@ -214,6 +225,13 @@ fn workspace_operation_failed() -> CommandError {
     CommandError::new(
         "WORKSPACE_CONFLICT",
         "The workspace operation could not be completed.",
+    )
+}
+
+fn invalid_picker_selection() -> CommandError {
+    CommandError::new(
+        "WORKSPACE_PICK_INVALID_SELECTION",
+        "The workspace folder picker returned an invalid selection.",
     )
 }
 

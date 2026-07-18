@@ -7,7 +7,7 @@ use tempfile::TempDir;
 
 use super::WorkspaceService;
 use crate::error::CommandError;
-use crate::workspace::dto::WorkspacePickRootsStatus;
+use crate::workspace::dto::{WorkspacePickRootsMode, WorkspacePickRootsStatus};
 use crate::workspace::picker::{DirectoryPicker, DirectoryPickerFuture, DirectoryPickerResult};
 use crate::workspace::MAX_WORKSPACE_ROOTS;
 
@@ -31,6 +31,28 @@ impl FakePicker {
         Self {
             outcomes: Mutex::new(VecDeque::from([FakeOutcome::Cancelled])),
         }
+    }
+}
+
+struct ModeCheckingPicker {
+    expected_allow_multiple: bool,
+    paths: Vec<PathBuf>,
+}
+
+impl ModeCheckingPicker {
+    fn new(expected_allow_multiple: bool, paths: Vec<PathBuf>) -> Self {
+        Self {
+            expected_allow_multiple,
+            paths,
+        }
+    }
+}
+
+impl DirectoryPicker for ModeCheckingPicker {
+    fn pick_directories(&self, allow_multiple: bool) -> DirectoryPickerFuture<'_> {
+        assert_eq!(allow_multiple, self.expected_allow_multiple);
+        let paths = self.paths.clone();
+        Box::pin(async move { Ok(DirectoryPickerResult::Selected(paths)) })
     }
 }
 
@@ -79,11 +101,34 @@ impl DirectoryPicker for GatedPicker {
 fn cancellation_preserves_the_exact_snapshot() {
     let service = WorkspaceService::new();
     let before = service.snapshot("main").unwrap();
-    let result = block_on(service.pick_roots("main", FakePicker::cancelled(), true)).unwrap();
+    let result =
+        block_on(service.pick_roots("main", FakePicker::cancelled(), WorkspacePickRootsMode::Add))
+            .unwrap();
 
     assert_eq!(result.status(), WorkspacePickRootsStatus::Cancelled);
     assert_eq!(result.snapshot(), &before);
     assert_eq!(service.snapshot("main").unwrap(), before);
+}
+
+#[test]
+fn picker_multiplicity_is_derived_from_the_explicit_mode() {
+    let temp = TempDir::new().unwrap();
+    let first = create_directory(&temp, "first");
+    let second = create_directory(&temp, "second");
+    let service = WorkspaceService::new();
+
+    block_on(service.pick_roots(
+        "main",
+        ModeCheckingPicker::new(false, vec![first]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    block_on(service.pick_roots(
+        "main",
+        ModeCheckingPicker::new(true, vec![second]),
+        WorkspacePickRootsMode::Add,
+    ))
+    .unwrap();
 }
 
 #[test]
@@ -93,9 +138,12 @@ fn multi_selection_registers_roots_in_stable_authorization_order() {
     let second = create_directory(&temp, "second");
     let service = WorkspaceService::new();
 
-    let result =
-        block_on(service.pick_roots("main", FakePicker::selected(vec![first, second]), true))
-            .unwrap();
+    let result = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![first, second]),
+        WorkspacePickRootsMode::Add,
+    ))
+    .unwrap();
 
     assert_eq!(result.status(), WorkspacePickRootsStatus::Selected);
     assert_eq!(result.snapshot().revision(), 1);
@@ -114,7 +162,7 @@ fn a_failed_multi_selection_registers_none_of_its_roots() {
     let error = block_on(service.pick_roots(
         "main",
         FakePicker::selected(vec![valid.clone(), missing]),
-        true,
+        WorkspacePickRootsMode::Add,
     ))
     .unwrap_err();
     assert_eq!(error.code(), "ROOT_UNAVAILABLE");
@@ -126,8 +174,12 @@ fn a_failed_multi_selection_registers_none_of_its_roots() {
     assert_eq!(unchanged.revision(), 0);
     assert!(unchanged.roots().is_empty());
 
-    let retried =
-        block_on(service.pick_roots("main", FakePicker::selected(vec![valid]), false)).unwrap();
+    let retried = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![valid]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
     assert_eq!(retried.snapshot().revision(), 1);
     assert_eq!(retried.snapshot().roots().len(), 1);
 }
@@ -138,7 +190,7 @@ fn picker_paths_must_be_absolute_native_selections() {
     let error = block_on(service.pick_roots(
         "main",
         FakePicker::selected(vec![PathBuf::from("relative-root")]),
-        false,
+        WorkspacePickRootsMode::Replace,
     ))
     .unwrap_err();
 
@@ -155,18 +207,175 @@ fn duplicate_directory_identities_reuse_the_first_root_and_revision() {
     let first = block_on(service.pick_roots(
         "main",
         FakePicker::selected(vec![root.clone(), root.clone()]),
-        true,
+        WorkspacePickRootsMode::Add,
     ))
     .unwrap();
     assert_eq!(first.snapshot().revision(), 1);
     assert_eq!(first.snapshot().roots().len(), 1);
     let root_id = first.snapshot().roots()[0].root_id();
 
-    let duplicate =
-        block_on(service.pick_roots("main", FakePicker::selected(vec![root]), false)).unwrap();
+    let duplicate = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
     assert_eq!(duplicate.status(), WorkspacePickRootsStatus::Selected);
     assert_eq!(duplicate.snapshot().revision(), 1);
     assert_eq!(duplicate.snapshot().roots()[0].root_id(), root_id);
+}
+
+#[test]
+fn replace_with_an_existing_root_revokes_others_and_reuses_identity() {
+    let temp = TempDir::new().unwrap();
+    let first = create_directory(&temp, "first");
+    let second = create_directory(&temp, "second");
+    let service = WorkspaceService::new();
+
+    let added = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![first.clone(), second]),
+        WorkspacePickRootsMode::Add,
+    ))
+    .unwrap();
+    let first_id = added.snapshot().roots()[0].root_id();
+    let second_id = added.snapshot().roots()[1].root_id();
+
+    let replaced = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![first.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    assert_eq!(replaced.snapshot().revision(), 2);
+    assert_eq!(replaced.snapshot().roots().len(), 1);
+    assert_eq!(replaced.snapshot().roots()[0].root_id(), first_id);
+    assert_eq!(replaced.snapshot().roots()[0].display_name(), "first");
+    assert_eq!(
+        service.remove_root("main", second_id).unwrap_err().code(),
+        "ROOT_NOT_AUTHORIZED"
+    );
+
+    let reopened = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![first]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    assert_eq!(reopened.snapshot(), replaced.snapshot());
+}
+
+#[test]
+fn replace_with_a_new_root_revokes_the_old_root_atomically() {
+    let temp = TempDir::new().unwrap();
+    let first = create_directory(&temp, "first");
+    let second = create_directory(&temp, "second");
+    let service = WorkspaceService::new();
+
+    let initial = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![first]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let first_id = initial.snapshot().roots()[0].root_id();
+
+    let replaced = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![second]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    assert_eq!(replaced.snapshot().revision(), 2);
+    assert_eq!(replaced.snapshot().roots().len(), 1);
+    assert_ne!(replaced.snapshot().roots()[0].root_id(), first_id);
+    assert_eq!(
+        service.remove_root("main", first_id).unwrap_err().code(),
+        "ROOT_NOT_AUTHORIZED"
+    );
+}
+
+#[test]
+fn replace_cancel_empty_and_authorization_failure_preserve_the_exact_snapshot() {
+    let temp = TempDir::new().unwrap();
+    let existing = create_directory(&temp, "existing");
+    let missing = temp.path().join("private-missing-root");
+    let service = WorkspaceService::new();
+    block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![existing]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let before = service.snapshot("main").unwrap();
+
+    let cancelled = block_on(service.pick_roots(
+        "main",
+        FakePicker::cancelled(),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    assert_eq!(cancelled.status(), WorkspacePickRootsStatus::Cancelled);
+    assert_eq!(cancelled.snapshot(), &before);
+
+    let empty = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(Vec::new()),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    assert_eq!(empty.status(), WorkspacePickRootsStatus::Cancelled);
+    assert_eq!(empty.snapshot(), &before);
+
+    let error = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![missing]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap_err();
+    assert_eq!(error.code(), "ROOT_UNAVAILABLE");
+    assert_eq!(service.snapshot("main").unwrap(), before);
+}
+
+#[test]
+fn replace_rejects_multiple_picker_paths_without_state_or_path_disclosure() {
+    let temp = TempDir::new().unwrap();
+    let existing = create_directory(&temp, "existing");
+    let private_first = create_directory(&temp, "private-first");
+    let private_second = create_directory(&temp, "private-second");
+    let service = WorkspaceService::new();
+    block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![existing.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let before = service.snapshot("main").unwrap();
+
+    let error = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![private_first, private_second]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap_err();
+    assert_eq!(error.code(), "WORKSPACE_PICK_INVALID_SELECTION");
+    assert_eq!(
+        error.message(),
+        "The workspace folder picker returned an invalid selection."
+    );
+    let serialized = serde_json::to_string(&error).unwrap();
+    assert!(!serialized.contains("private-first"));
+    assert!(!serialized.contains("private-second"));
+    assert!(!serialized.contains(temp.path().to_str().unwrap()));
+    assert_eq!(service.snapshot("main").unwrap(), before);
+
+    let retry = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![existing]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    assert_eq!(retry.snapshot(), &before);
 }
 
 #[test]
@@ -180,8 +389,12 @@ fn root_limit_counts_existing_and_deduplicated_selections_atomically() {
     let overflow_root = create_directory(&temp, "private-overflow-root");
     let service = WorkspaceService::new();
 
-    let initial =
-        block_on(service.pick_roots("main", FakePicker::selected(initial_roots), true)).unwrap();
+    let initial = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(initial_roots),
+        WorkspacePickRootsMode::Add,
+    ))
+    .unwrap();
     assert_eq!(initial.snapshot().revision(), 1);
     assert_eq!(initial.snapshot().roots().len(), 255);
 
@@ -192,7 +405,7 @@ fn root_limit_counts_existing_and_deduplicated_selections_atomically() {
             boundary_root.clone(),
             boundary_root,
         ]),
-        true,
+        WorkspacePickRootsMode::Add,
     ))
     .unwrap();
     assert_eq!(boundary.snapshot().revision(), 2);
@@ -206,7 +419,7 @@ fn root_limit_counts_existing_and_deduplicated_selections_atomically() {
             overflow_root.clone(),
             overflow_root,
         ]),
-        true,
+        WorkspacePickRootsMode::Add,
     ))
     .unwrap_err();
     assert_eq!(error.code(), "WORKSPACE_ROOT_LIMIT_EXCEEDED");
@@ -230,7 +443,7 @@ fn root_limit_rejects_oversized_picker_results_before_authorization() {
     let error = block_on(service.pick_roots(
         "main",
         FakePicker::selected(vec![duplicate; MAX_WORKSPACE_ROOTS + 1]),
-        true,
+        WorkspacePickRootsMode::Add,
     ))
     .unwrap_err();
 
@@ -247,16 +460,19 @@ fn windows_have_independent_scopes_and_revocation() {
     let first = block_on(service.pick_roots(
         "first-window",
         FakePicker::selected(vec![root.clone()]),
-        false,
+        WorkspacePickRootsMode::Replace,
     ))
     .unwrap()
     .snapshot()
     .clone();
-    let second =
-        block_on(service.pick_roots("second-window", FakePicker::selected(vec![root]), false))
-            .unwrap()
-            .snapshot()
-            .clone();
+    let second = block_on(service.pick_roots(
+        "second-window",
+        FakePicker::selected(vec![root]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap()
+    .snapshot()
+    .clone();
 
     assert_ne!(first.workspace_id(), second.workspace_id());
     assert_ne!(first.roots()[0].root_id(), second.roots()[0].root_id());
@@ -283,12 +499,18 @@ fn only_one_picker_can_be_active_per_window() {
 
     let first_service = Arc::clone(&service);
     let first = tauri::async_runtime::spawn(async move {
-        first_service.pick_roots("main", picker, false).await
+        first_service
+            .pick_roots("main", picker, WorkspacePickRootsMode::Replace)
+            .await
     });
     entered.wait();
 
-    let conflict =
-        block_on(service.pick_roots("main", FakePicker::cancelled(), false)).unwrap_err();
+    let conflict = block_on(service.pick_roots(
+        "main",
+        FakePicker::cancelled(),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap_err();
     assert_eq!(conflict.code(), "WORKSPACE_CONFLICT");
     release.wait();
     let completed = block_on(first).unwrap().unwrap();
@@ -310,10 +532,11 @@ fn a_picker_result_arriving_after_window_close_is_discarded() {
     };
 
     let pick_service = Arc::clone(&service);
-    let pending =
-        tauri::async_runtime::spawn(
-            async move { pick_service.pick_roots("main", picker, false).await },
-        );
+    let pending = tauri::async_runtime::spawn(async move {
+        pick_service
+            .pick_roots("main", picker, WorkspacePickRootsMode::Replace)
+            .await
+    });
     entered.wait();
     service.close_window("main");
     release.wait();
@@ -331,8 +554,12 @@ fn serialized_snapshots_contain_only_owned_opaque_root_fields() {
     let temp = TempDir::new().unwrap();
     let root = create_directory(&temp, "private-root-name");
     let service = WorkspaceService::new();
-    let result =
-        block_on(service.pick_roots("main", FakePicker::selected(vec![root]), false)).unwrap();
+    let result = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
 
     let value = serde_json::to_value(&result).unwrap();
     let serialized = serde_json::to_string(&value).unwrap();
@@ -359,8 +586,12 @@ fn non_utf8_selected_paths_fail_with_a_sanitized_encoding_error() {
         .join(OsString::from_vec(b"private-\xFF-root".to_vec()));
     let service = WorkspaceService::new();
 
-    let error =
-        block_on(service.pick_roots("main", FakePicker::selected(vec![root]), false)).unwrap_err();
+    let error = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap_err();
     assert_eq!(error.code(), "PATH_ENCODING_UNSUPPORTED");
     let serialized = serde_json::to_string(&error).unwrap();
     assert!(!serialized.contains("private"));
