@@ -7,6 +7,7 @@ import {
 	validateMainCapability,
 	validateTauriApiBoundary,
 	validateTauriConfiguration,
+	validateWorkspaceRustBoundary,
 } from "./boundary-contracts.mjs";
 
 const root = path.resolve(
@@ -240,6 +241,18 @@ for (const plugin of [
 	}
 }
 
+const rustRoot = path.join(root, "src-tauri/src");
+const rustFiles = (await walk(rustRoot)).filter((file) => file.endsWith(".rs"));
+const rustSources = await Promise.all(
+	rustFiles.map(async (file) => ({
+		relativePath: path.relative(root, file),
+		source: await readFile(file, "utf8"),
+	})),
+);
+for (const failure of validateWorkspaceRustBoundary(cargo, rustSources)) {
+	fail(failure);
+}
+
 const distRoot = path.join(root, "dist");
 try {
 	const distFiles = await walk(distRoot);
@@ -260,6 +273,6 @@ if (failures.length > 0) {
 	process.exitCode = 1;
 } else {
 	console.log(
-		`architecture: ${appFiles.length} app sources, ${allowedDependencies.size} pinned runtime dependencies, minimum Tauri capability`,
+		`architecture: ${appFiles.length} app sources, ${rustSources.length} Rust sources, ${allowedDependencies.size} pinned runtime dependencies, minimum Tauri capability`,
 	);
 }

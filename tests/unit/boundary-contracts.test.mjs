@@ -5,6 +5,7 @@ import {
 	validateMainCapability,
 	validateTauriApiBoundary,
 	validateTauriConfiguration,
+	validateWorkspaceRustBoundary,
 } from "../../scripts/plain/boundary-contracts.mjs";
 
 const baselineConfig = {
@@ -107,6 +108,103 @@ describe("Plain Tauri boundary contracts", () => {
 				"main capability contains fields outside the minimum contract",
 				"main capability permissions differ from the minimum contract",
 			]),
+		);
+	});
+});
+
+const workspaceCargo = `
+cap-std = "4.0.2"
+uuid = { version = "1.24.0", features = ["v4"] }
+`;
+
+const workspaceSources = [
+	{
+		relativePath: "src-tauri/src/workspace/mod.rs",
+		source: `
+use cap_std::ambient_authority;
+use cap_std::fs::Dir;
+
+fn authorize(path: &std::path::Path) {
+  let _root = Dir::open_ambient_dir(path, ambient_authority());
+}
+
+#[cfg(windows)]
+fn windows_identity(path: &std::path::Path) {
+  let _ = std::fs::canonicalize(path);
+}
+`,
+	},
+	{
+		relativePath: "src-tauri/src/workspace/tests.rs",
+		source: `use std::fs; fn fixture() { fs::write("outside", "test"); }`,
+	},
+];
+
+describe("Plain workspace Rust boundary contracts", () => {
+	it("accepts one capability root authorizer and ignores test fixtures", () => {
+		expect(
+			validateWorkspaceRustBoundary(workspaceCargo, workspaceSources),
+		).toEqual([]);
+	});
+
+	it("requires the reviewed capability and opaque-id versions", () => {
+		expect(
+			validateWorkspaceRustBoundary(
+				'cap-std = "4"\nuuid = "1.24"',
+				workspaceSources,
+			),
+		).toEqual(
+			expect.arrayContaining([
+				"Cargo.toml must pin cap-std to 4.0.2",
+				"Cargo.toml must pin uuid to 1.24.0",
+			]),
+		);
+	});
+
+	it("rejects ambient I/O aliases, lossy paths and extra authorizers", () => {
+		const hostileSources = [
+			...workspaceSources,
+			{
+				relativePath: "src-tauri/src/workspace/service.rs",
+				source: `
+use std::fs as host_fs;
+use cap_std::ambient_authority;
+use cap_std::fs::Dir;
+fn bypass(path: &std::path::Path) {
+  host_fs::write(path, "escape");
+  let _ = path.to_string_lossy();
+  let _ = Dir::open_ambient_dir(path, ambient_authority());
+  let _ = std::fs::remove_file(path);
+}
+`,
+			},
+		];
+		const failures = validateWorkspaceRustBoundary(
+			workspaceCargo,
+			hostileSources,
+		);
+		expect(failures).toEqual(
+			expect.arrayContaining([
+				"src-tauri/src/workspace/service.rs must not alias ambient std::fs in workspace production code",
+				"src-tauri/src/workspace/service.rs must not create an operable path with lossy conversion",
+				"src-tauri/src/workspace/service.rs uses forbidden ambient std::fs operation remove_file",
+				"src-tauri/src/workspace/service.rs opens ambient paths outside the sole root authorizer",
+				"workspace production code must contain exactly one ambient root authorizer",
+			]),
+		);
+	});
+
+	it("rejects extra ambient canonicalize fallbacks", () => {
+		const source = `${workspaceSources[0].source}
+fn fallback_one(path: &std::path::Path) { let _ = std::fs::canonicalize(path); }
+fn fallback_two(path: &std::path::Path) { let _ = std::fs::canonicalize(path); }
+`;
+		expect(
+			validateWorkspaceRustBoundary(workspaceCargo, [
+				{ ...workspaceSources[0], source },
+			]),
+		).toContain(
+			"workspace root identity may use at most two platform canonicalize fallbacks",
 		);
 	});
 });

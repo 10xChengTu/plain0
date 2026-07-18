@@ -157,3 +157,101 @@ export function validateMainCapability(capability) {
 
 	return failures;
 }
+
+const WORKSPACE_RUST_SOURCE_PATTERN =
+	/^src-tauri\/src\/(?:path_policy\.rs|workspace\/.*\.rs)$/;
+const WORKSPACE_TEST_SOURCE_PATTERN = /(?:^|\/)tests\.rs$/;
+
+function escapeRegularExpression(value) {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function validateWorkspaceRustBoundary(cargoSource, rustSources) {
+	const failures = [];
+	for (const [dependency, version] of [
+		["cap-std", "4.0.2"],
+		["uuid", "1.24.0"],
+	]) {
+		const escapedDependency = escapeRegularExpression(dependency);
+		const escapedVersion = escapeRegularExpression(version);
+		const declaration = new RegExp(
+			`^${escapedDependency}\\s*=\\s*(?:"${escapedVersion}"|\\{[^}\\n]*\\bversion\\s*=\\s*"${escapedVersion}"[^}\\n]*\\})\\s*$`,
+			"m",
+		);
+		if (!declaration.test(cargoSource)) {
+			failures.push(`Cargo.toml must pin ${dependency} to ${version}`);
+		}
+	}
+
+	let ambientOpenCount = 0;
+	let ambientAuthorityCallCount = 0;
+	let ambientCanonicalizeCount = 0;
+
+	for (const { relativePath, source } of rustSources) {
+		const normalizedPath = relativePath.replaceAll("\\", "/");
+		if (
+			!WORKSPACE_RUST_SOURCE_PATTERN.test(normalizedPath) ||
+			WORKSPACE_TEST_SOURCE_PATTERN.test(normalizedPath)
+		) {
+			continue;
+		}
+
+		if (/\bto_string_lossy\s*\(/.test(source)) {
+			failures.push(
+				`${normalizedPath} must not create an operable path with lossy conversion`,
+			);
+		}
+		if (
+			/\b(?:use\s+std\s*::\s*fs\b|use\s+std\s*::\s*\{[^;]*\bfs\b|use\s+std\s+as\b|extern\s+crate\s+std\b)/s.test(
+				source,
+			)
+		) {
+			failures.push(
+				`${normalizedPath} must not alias ambient std::fs in workspace production code`,
+			);
+		}
+
+		for (const match of source.matchAll(
+			/\bstd\s*::\s*fs\s*::\s*([A-Za-z_]\w*)/g,
+		)) {
+			const operation = match[1];
+			if (
+				operation !== "canonicalize" ||
+				normalizedPath !== "src-tauri/src/workspace/mod.rs"
+			) {
+				failures.push(
+					`${normalizedPath} uses forbidden ambient std::fs operation ${operation}`,
+				);
+			} else {
+				ambientCanonicalizeCount += 1;
+			}
+		}
+
+		const openCount = [...source.matchAll(/\bopen_ambient_dir\b/g)].length;
+		const authorityCallCount = [...source.matchAll(/\bambient_authority\s*\(/g)]
+			.length;
+		if (
+			(openCount > 0 || authorityCallCount > 0) &&
+			normalizedPath !== "src-tauri/src/workspace/mod.rs"
+		) {
+			failures.push(
+				`${normalizedPath} opens ambient paths outside the sole root authorizer`,
+			);
+		}
+		ambientOpenCount += openCount;
+		ambientAuthorityCallCount += authorityCallCount;
+	}
+
+	if (ambientOpenCount !== 1 || ambientAuthorityCallCount !== 1) {
+		failures.push(
+			"workspace production code must contain exactly one ambient root authorizer",
+		);
+	}
+	if (ambientCanonicalizeCount > 2) {
+		failures.push(
+			"workspace root identity may use at most two platform canonicalize fallbacks",
+		);
+	}
+
+	return failures;
+}
