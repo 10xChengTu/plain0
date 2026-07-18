@@ -7,6 +7,7 @@ import {
 	validateMainCapability,
 	validateTauriApiBoundary,
 	validateTauriConfiguration,
+	validateWorkspaceProviderBootstrap,
 	validateWorkspaceRustBoundary,
 } from "./boundary-contracts.mjs";
 
@@ -20,6 +21,9 @@ const fail = (message) => failures.push(message);
 const allowedDependencies = new Map([
 	["@codingame/monaco-vscode-api", "35.0.1"],
 	["@codingame/monaco-vscode-configuration-service-override", "35.0.1"],
+	["@codingame/monaco-vscode-explorer-service-override", "35.0.1"],
+	["@codingame/monaco-vscode-files-service-override", "35.0.1"],
+	["@codingame/monaco-vscode-model-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-textmate-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-theme-defaults-default-extension", "35.0.1"],
 	["@codingame/monaco-vscode-theme-service-override", "35.0.1"],
@@ -180,6 +184,12 @@ const forbiddenSourcePatterns = [
 	[/ExtensionHostKind/, "ExtensionHostKind"],
 	[/enableWorkerExtensionHost\s*:\s*true/, "enabled worker Extension Host"],
 	[/setLocalExtensionHost/, "local Extension Host registration"],
+	[/\bregisterFileSystemOverlay\b/, "filesystem overlay registration"],
+	[/\bregisterHTMLFileSystemProvider\b/, "HTML filesystem registration"],
+	[
+		/\bregisterCustomProvider\s*\(\s*["']file["']\s*,/,
+		"ambient file-scheme provider registration",
+	],
 	[
 		/monaco-vscode-(?:ai|chat|auth|sync|gallery|remote|task|testing|notebook|telemetry|speech|mcp)[^'"]*/,
 		"excluded service override",
@@ -198,6 +208,12 @@ for (const file of appFiles) {
 		fail(failure);
 	}
 	if (
+		relative.replaceAll("\\", "/") !== "app/main.ts" &&
+		/\bregisterCustomProvider\s*\(/.test(source)
+	) {
+		fail(`${relative} registers a custom provider outside app/main.ts`);
+	}
+	if (
 		source.includes("@codingame/monaco-vscode-api/extensions") &&
 		!relative.startsWith(`app${path.sep}features${path.sep}themes${path.sep}`)
 	) {
@@ -205,6 +221,11 @@ for (const file of appFiles) {
 			`${relative} registers extension contributions outside the theme importer`,
 		);
 	}
+}
+
+const mainSource = await readFile(path.join(appRoot, "main.ts"), "utf8");
+for (const failure of validateWorkspaceProviderBootstrap(mainSource)) {
+	fail(failure);
 }
 
 const tauriConfig = JSON.parse(

@@ -5,10 +5,15 @@ import {
 	IContextKeyService,
 	initialize,
 } from "@codingame/monaco-vscode-api";
+import { registerCustomProvider } from "@codingame/monaco-vscode-files-service-override";
 
 import { EXCLUDED_SURFACE_GUARD_MARKER } from "./excluded-surface-policy";
 import { enforceExcludedWorkbenchSurfaces } from "./excluded-surfaces";
 import { registerWorkspaceCommands } from "./features/workspace/commands";
+import {
+	createPlainWorkspaceFileSystemProvider,
+	PLAIN_WORKSPACE_SCHEME,
+} from "./features/workspace/file-system-provider";
 import { configureMonacoEnvironment } from "./monaco-environment";
 import { createBridge, normalizeCommandError } from "./platform/tauri";
 import { createServiceOverrides } from "./services";
@@ -23,6 +28,9 @@ async function bootstrap(): Promise<void> {
 	}
 
 	const bridge = createBridge();
+	const workspaceFileSystemProvider =
+		createPlainWorkspaceFileSystemProvider(bridge);
+	registerCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);
 	const stopListening = await bridge.onRuntimeReady((payload) => {
 		document.body.dataset.plainRuntimeEvent = payload.runtime;
 	});

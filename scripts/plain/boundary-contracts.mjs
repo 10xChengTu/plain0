@@ -69,6 +69,37 @@ export function validateTauriApiBoundary(source, relativePath) {
 		: [`${normalizedPath} bypasses the sole Tauri bridge directory`];
 }
 
+export function validateWorkspaceProviderBootstrap(source) {
+	const failures = [];
+	const registrations = [...source.matchAll(/\bregisterCustomProvider\s*\(/g)];
+	if (registrations.length !== 1) {
+		failures.push(
+			"app/main.ts must register exactly one custom workspace provider",
+		);
+	}
+	if (
+		!/\bregisterCustomProvider\s*\(\s*PLAIN_WORKSPACE_SCHEME\s*,/.test(source)
+	) {
+		failures.push(
+			"app/main.ts must register only the plain-workspace provider scheme",
+		);
+	}
+
+	const registrationOffset = source.search(/\bregisterCustomProvider\s*\(/);
+	const initializeOffset = source.search(/\bawait\s+initialize\s*\(/);
+	if (
+		initializeOffset < 0 ||
+		registrationOffset < 0 ||
+		registrationOffset > initializeOffset
+	) {
+		failures.push(
+			"the plain-workspace provider must be registered before initialize",
+		);
+	}
+
+	return failures;
+}
+
 export function validateTauriConfiguration(config) {
 	const failures = [];
 	const app = config?.app;

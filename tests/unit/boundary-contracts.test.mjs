@@ -5,6 +5,7 @@ import {
 	validateMainCapability,
 	validateTauriApiBoundary,
 	validateTauriConfiguration,
+	validateWorkspaceProviderBootstrap,
 	validateWorkspaceRustBoundary,
 } from "../../scripts/plain/boundary-contracts.mjs";
 
@@ -213,6 +214,63 @@ fn fallback_two(path: &std::path::Path) { let _ = std::fs::canonicalize(path); }
 			]),
 		).toContain(
 			"workspace root identity may use at most two platform canonicalize fallbacks",
+		);
+	});
+});
+
+describe("Plain workspace provider bootstrap contract", () => {
+	const bootstrap = `
+const bridge = createBridge();
+const provider = createPlainWorkspaceFileSystemProvider(bridge);
+registerCustomProvider(PLAIN_WORKSPACE_SCHEME, provider);
+await initialize(createServiceOverrides(), container, {});
+`;
+
+	it("requires one plain-workspace registration before service initialization", () => {
+		expect(validateWorkspaceProviderBootstrap(bootstrap)).toEqual([]);
+		expect(
+			validateWorkspaceProviderBootstrap(
+				bootstrap.replace(
+					"registerCustomProvider(PLAIN_WORKSPACE_SCHEME, provider);\n",
+					"",
+				),
+			),
+		).toEqual(
+			expect.arrayContaining([
+				"app/main.ts must register exactly one custom workspace provider",
+				"app/main.ts must register only the plain-workspace provider scheme",
+				"the plain-workspace provider must be registered before initialize",
+			]),
+		);
+	});
+
+	it("rejects a different scheme, duplicate registration or late registration", () => {
+		expect(
+			validateWorkspaceProviderBootstrap(
+				bootstrap.replace("PLAIN_WORKSPACE_SCHEME", '"file"'),
+			),
+		).toContain(
+			"app/main.ts must register only the plain-workspace provider scheme",
+		);
+		expect(
+			validateWorkspaceProviderBootstrap(
+				bootstrap.replace(
+					"await initialize",
+					"registerCustomProvider(PLAIN_WORKSPACE_SCHEME, provider);\nawait initialize",
+				),
+			),
+		).toContain(
+			"app/main.ts must register exactly one custom workspace provider",
+		);
+		expect(
+			validateWorkspaceProviderBootstrap(
+				bootstrap.replace(
+					"registerCustomProvider(PLAIN_WORKSPACE_SCHEME, provider);\nawait initialize",
+					"await initialize(createServiceOverrides(), container, {});\nregisterCustomProvider(PLAIN_WORKSPACE_SCHEME, provider);\nvoid",
+				),
+			),
+		).toContain(
+			"the plain-workspace provider must be registered before initialize",
 		);
 	});
 });
