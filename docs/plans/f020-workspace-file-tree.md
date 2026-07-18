@@ -73,6 +73,39 @@ provider 激活使用显式能力合同：`workspace_capabilities() -> { create,
 
 版本化写入是 F020 的底层传输合同，不是 F030 的冲突 UI。Rust stat 增加 opaque version token；`workspace_write_file` 必须同时接收期望 version 与有界 bytes，在 mutation gate 内重验版本、写同目录临时文件并原子替换。由于 upstream `FileService` 不把 `mtime/etag` 继续传给 provider，Plain 需要一份可审计的窄 pnpm patch，把已经用于 dirty-write 校验的期望版本附加到 `IFileWriteOptions`；provider 不维护全局“最近 stat”缓存，也不接受缺少期望版本的覆盖写。
 
+### 目录 manifest 与 staged tree 冻结合同
+
+目录 copy 不增加 IPC 字段、命令或 provider 方法，继续复用四字段 `workspace_copy`、双 root mutation gate 和现有类型 dispatch。Rust 新增独立 `workspace/directory_copy.rs`；raw `readlinkat_raw`/`symlinkat`、leaf staged transfer 与两处 `renameat_with(NOREPLACE)` 继续集中在 `writer.rs`，目录模块只经窄 helper 复用，避免第二套安全实现。
+
+manifest header 记录被复制根目录的 identity、`mode`、`mtime` 与 `ctime`，但根本身不计入 descendant 预算。所有计数先 `checked_add` 再比较：
+
+- descendants 最多 10,000；每个目录、普通文件或 symlink 各计 1，hardlink 每个路径重复计数。
+- 根 depth 为 0、直接 child 为 1，最大 depth 为 256。
+- basename 必须无损 UTF-8、通过 portable segment policy，单名最多 1 KiB。2 MiB 聚合名称只计 descendant basename bytes，不计 `/`；source 根和正式 target basename 不计入 aggregate，但两者都单独受 1 KiB 限制。
+- 单 symlink payload 最多 4 KiB，整树 payload 最多 2 MiB；payload 不做 UTF-8、绝对路径或目标存在性解释。
+- 单普通文件最多 8 MiB，全树逻辑文件字节最多 256 MiB；hardlink 按路径重复累计，稀疏文件按 metadata logical length 计。
+- source 与 target 的每个完整后代 wire path 仍必须满足 4 KiB、256 段，否则返回 `PATH_ENCODING_UNSUPPORTED`，不得创建不可再次寻址的节点。
+
+单文件或单 link payload 超限返回 `FILE_TOO_LARGE`；条目、深度、聚合名称、聚合 link、聚合逻辑字节或 checked arithmetic 超限返回 `DIRECTORY_TOO_LARGE`；名称编码/portable policy 失败返回 `PATH_ENCODING_UNSUPPORTED`；发布前 source/stage 不一致返回 `WORKSPACE_CONFLICT`。这些错误继续使用清洗后的固定消息，不携带成员名称或绝对路径。
+
+执行顺序固定为：
+
+1. 从 source parent 对末级目录 lstat，再用 `open_dir_nofollow` 打开并比较 pathname/handle identity；显式 DFS frame 同时持有的目录 handle 不超过 depth + 1。
+2. 在完全不触碰目标的前提下建立排序 manifest。目录逐层 nofollow；symlink 复用 raw 4 KiB + 1 probe；普通文件记录安全 snapshot；FIFO、socket、设备与未知类型立即 `ENTRY_TYPE_MISMATCH`。
+3. 从已打开 source root 重建 manifest 并精确比较成员、类型、identity、mode、size/time 和 link payload；source 根 basename 也必须仍指向该 handle，否则 `WORKSPACE_CONFLICT`。
+4. 打开 target parent 并比较 identity；它命中任一 source directory identity 时拒绝，覆盖 lexical descendant、内部 symlink alias 和重叠授权 root。
+5. 最多 16 次在 target parent 里 exclusive 创建高熵顶层 staging directory，初始 mode `0700`；pathname 与 opened handle identity 必须一致。
+6. 按 manifest 构建完全 detached 的 staging tree。每个 leaf 在产生自己的目标副作用前，都必须 nofollow 打开/读取 source 并精确匹配 manifest snapshot 或 raw payload；普通文件 transfer 和 symlink create 还消费共享 checked actual-byte accumulator，实际文件写入总量不得超过 256 MiB、实际 link payload 不得超过 2 MiB。内部目录只做单级 exclusive create 后 nofollow 打开；普通文件复用 8 MiB bounded transfer、双遍 source/stage byte verify、`mode & 0o777` 与 `sync_all`；symlink 复用 raw staged transfer。窄 helper 接收 expected snapshot/payload 与共享 budget，不能把独立 leaf 上限误当成整树上限。
+7. 发布前再次重验 source 和 staging：实际成员集合不得缺失或多出，source file 重新 nofollow/nonblock 打开并与 staged file 有界逐字节比较，symlink 重读 raw payload，所有 receipt identity 必须匹配。
+8. 验证完成后，每个 staged directory 都必须通过 pathname `open_dir_nofollow`，并让 opened handle metadata 精确匹配 receipt identity，才能逆深度把 mode 设为 `source mode & 0o777`，根最后处理；任何不匹配都停止且不得 chmod replacement。成功发布前不保留时间戳、owner、ACL 或 xattr。
+9. 只用既有 `publish_no_replace` 把顶层 staging directory 原子改名到正式 basename；成功之后没有仍可能失败的后处理。
+
+`StagedTree` 维护平行 receipt。普通失败先确认顶层 pathname identity；包括嵌套目录在内，每个目录都必须逐层 `open_dir_nofollow` 并匹配 receipt identity 后，才可按前序恢复 `0700`。随后逆序删除已验证 leaf/空目录，每次删除前都重验类型与 identity，symlink 还重验 payload。未知成员、replacement、非空目录或任何身份不确定都升级为安全 cleanup error 并留下 artifact；禁止 `remove_dir_all`、第三方 walker 和跟随 symlink 的递归 helper。显式 `Drop` 仅 best effort，不能把清理失败伪装成原错误。
+
+Browser mock 同样先做完整有界预检与 detached clone，最后只执行一次 target map publication；symlink 类型仍按新位置动态解析。测试 observer 只能收到 frozen、detached manifest summary，observer 抛错不得留下目标。provider 继续精确 `Readonly`，不声明 `FileFolderCopy`，直到 move/delete/versioned write 与上游防绕过 patch 全部完成。
+
+验收必须同时覆盖 exact/+1 预算、同/跨 root mixed tree、空目录、raw symlink、非 UTF-8 名称、嵌套特殊文件、同树 alias、source/stage/parent swap、未知 stage 成员、目标竞争和双 root 撤销。大预算用可注入小 limits 与纯 accumulator 证明，不在常规测试实际生成 256 MiB；产品常量由 Harness 锁定，manifest/stage 行为由真实 Rust 测试证明。
+
 ## 提交级落地顺序
 
 每项完成最小验证后立即提交，WIP 始终保持为 F020：

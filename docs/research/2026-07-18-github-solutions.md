@@ -96,6 +96,18 @@ Code OSS 的 `IFileSystemProvider.copy` 是由 `FileFolderCopy` capability 控�
 
 调研最终把 copy 拆成可单独验收的切片。第一项只复制不超过现有 8 MiB 上限的普通文件：wire request 从一开始携带 `sourceRootId/sourcePath/targetRootId/targetPath`，两端在同一 mutation gate 内重验；源以 nofollow/nonblocking 方式打开并在句柄上确认类型，在目标父目录写入高熵 `create_new` staging，完成有界复制、稳定性复核和基础权限设置后再用现有原子 `NOREPLACE` 发布。成功复制定义为已打开 source handle 上观察到的完整数据，basename 在打开后被替换不会把读取重定向到新文件；同一 inode 在复制期间的可检测变化则返回冲突。目录、symlink 和特殊文件在此切片稳定拒绝；provider 保持只读。后续先独立实现原样 symlink copy，再实现目录 manifest/staging：全树最多 10,000 条目、1 KiB 单名、2 MiB 聚合名称 payload、256 层相对深度、4 KiB 单 link payload、2 MiB 聚合 link payload、8 MiB 单文件和 256 MiB 总逻辑字节；拒绝 FIFO/socket/device，并在发布前重验 manifest。跨 root move 必须消费 copy receipt 并再次验证当前源路径；检测到变化时不删除，但 receipt 校验与路径删除之间仍存在外部 rename/swap 竞争，因此继续作为明确的非原子状态机和失败结果暴露，不能宣称条件删除是原子的。
 
+### F020 有界目录复制方案冻结
+
+目录切片继续以固定源码而不是第三方整包为依据。[`cap-fs-ext 4.0.2` 的 `open_dir_nofollow`](https://github.com/bytecodealliance/cap-std/blob/715e4ed607ae9a93c7446b0fa63296f7898831c2/cap-fs-ext/src/dir_ext.rs#L85-L89) 可以从已经授权的父目录 handle 打开真实子目录而拒绝末级 symlink，适合 manifest 的逐层遍历。[`cap-std 4.0.2` 的 `remove_dir_all` 与 `remove_open_dir_all`](https://github.com/bytecodealliance/cap-std/blob/715e4ed607ae9a93c7446b0fa63296f7898831c2/cap-std/src/fs/dir.rs#L340-L376) 虽然在 Unix 实现中以 nofollow 方式递归，但 API 自身无条目、深度或总量预算，也明确不保证与并发 rename 原子；它无法证明删除的仍是 Plain 创建的 staging 成员，因此不用于失败清理。
+
+[systemd 固定版本的 `copy.c`](https://github.com/systemd/systemd/blob/215ad044d337bf54c37b5d965773c2c5c038b32f/src/shared/copy.c) 再次确认可参考的组合是：父目录 fd 相对遍历、目录 nofollow 打开、symlink payload 原样重建、特殊文件按策略拒绝、失败时清理本次目标。它同时支持设备、所有权、xattr、稀疏文件、reflink 和大量策略 flag，递归/删除合同也不是 Plain 的固定预算与 identity receipt，不能整体移植。Code OSS 固定版本的 [`FileService.copy`](https://github.com/microsoft/vscode/blob/fc3def6774c76082adf699d366f31a557ce5573f/src/vs/platform/files/common/fileService.ts#L803-L954) 仍会在 provider 调用前处理 overwrite、`mkdirp`，缺少 native copy 时还会边遍历边创建目标；这证明 manifest/staged tree 必须完全留在 Rust command 内，不能复用前端 fallback。
+
+最终方案不引入 `walkdir`、`jwalk`、`globwalk`、`fs_extra`、`dircpy` 或 `copy_dir`。source 根先以 nofollow handle 打开，显式有界 DFS 只收集无损、portable 的 UTF-8 basename；symlink 只读取已有 4 KiB + 1 raw probe，目录逐层 nofollow，普通文件只记录并复核既有安全 snapshot，特殊文件立即失败。manifest header 单独记录 source 根；10,000 条目预算只统计 descendants，根 depth 为 0、直接 child 为 1，2 MiB 聚合名称只计 descendant basename UTF-8 bytes 且不计分隔符。source 根和正式 target basename 不进入聚合值，但都单独受 1 KiB 限制，避免发布后父目录无法列出。hardlink 每条路径分别计条目与逻辑字节；每个 source/target 后代还必须满足完整 wire path 的 4 KiB/256 段上限。
+
+目标写入只在 source manifest 完成并重验后开始。目标父目录 identity 若等于 source manifest 中任一目录 identity，则拒绝 lexical path 无法识别的同树/重叠 root/symlink alias descendant。顶层 staging 目录最多 16 次高熵 exclusive create，初始 mode 为 `0700`；内部目录单级创建并 nofollow 打开。每个 file/link 在产生自己的 staging 副作用前必须再次匹配 manifest snapshot/payload，实际传输还消费共享 checked 聚合预算，源并发增长不能把磁盘写入放大到 256 MiB/2 MiB 上限之外。发布前再次精确比较 source manifest、staging 成员集合、identity、文件 bytes 与 raw link payload；随后每个目录都经 nofollow handle 与 receipt identity 绑定后才能逆深度应用 `source mode & 0o777`，最后只调用既有 `NOREPLACE` 发布。失败清理禁止 `remove_dir_all`：恢复 `0700`、删除 leaf 或删除空目录前都必须 nofollow 打开/查询并匹配该成员 receipt；发现 replacement 或额外成员时宁可留下高熵 artifact，也不修改或删除未验证对象。
+
+该设计承诺 capability 不逃逸、正式目标 no-clobber 且只完整出现或完全不存在；不承诺断电持久化，也无法消除同 UID 外部进程在最终 identity 检查与 rename/unlink 之间的竞争。首版不保留 hardlink 关系、稀疏洞、ACL、xattr、owner、时间戳、resource fork 或 ADS。macOS/Linux 继续使用固定 `NOREPLACE`；其他平台 fail closed，provider 在全部 CRUD 和版本化写入完成前继续 `Readonly`。
+
 ## 调试
 
 [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) 当前规范 1.71。DAP 使用 `Content-Length` frame 和 JSON，但不是 JSON-RPC。

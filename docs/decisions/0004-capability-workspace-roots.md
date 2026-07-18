@@ -17,6 +17,8 @@ Tauri `plugin-fs` 的 scope 适合限制通用前端文件 API，但其核心仍
 - 所有 stat、read、create、rename、copy、move 和 delete 都通过 root `Dir` 或从它打开的子目录 handle 执行。canonical path 只作为 Rust 私有的显示、文件身份去重和 watcher 元数据。
 - 普通 rename 只允许同 root 且默认 no-clobber；跨 root move 是两个明确授权根之间的 copy + verified delete，并公开非原子失败状态。
 - copy 使用两个显式 rootId，并在同一窗口 mutation gate 内重验两个 lease；不接受 overwrite。普通文件先写目标父目录内由应用创建的高熵命名 staging，再以原子 no-replace 发布。目录 copy 必须先完成有界 manifest，symlink 按链接本身复制，特殊文件拒绝；跨 root move 只有在 copy receipt 再次验证当前源路径未变化后才尝试删除源，检测到变化则保留源。receipt 校验与路径删除之间仍可能发生外部 rename/swap，因此跨 root move 明确是可报告中间状态的非原子操作。
+- 目录 manifest header 单独记录 source 根；descendants 最多 10,000，根 depth 为 0、最大 256，单名 1 KiB、descendant 聚合名称 2 MiB，单 link 4 KiB、聚合 link 2 MiB，单文件 8 MiB、聚合逻辑文件字节 256 MiB。source 根和正式 target basename 不计聚合名称，但各自仍受 1 KiB 限制。所有累计使用 checked arithmetic；非 UTF-8/portable-invalid 名称失败，symlink 不跟随，特殊文件失败。
+- 目录目标副作用只在 source manifest 完成并重验后开始。目标父目录 identity 不得命中 source 的任何目录；顶层 staging 目录为高熵、exclusive、初始 `0700`，完整 staged tree 与 source 在发布前再次核对，最后只复用既有 `NOREPLACE`。清理只按 identity/payload receipt 有界逆序删除，禁止 `remove_dir_all`；发现 replacement 或未知成员时宁可留下 artifact。
 - 每窗口写操作与 root replace/remove/window close 共享 mutation gate，并统一按 `mutation gate -> workspace state` 获取锁。写操作拿到 gate 后必须重验 lease；不得复用读取的事后撤销校验，因为已经发生的磁盘副作用无法丢弃。
 - symlink 可列出；只有能力解析确认仍在当前 root 内的相对链接可跟随。删除 symlink 删除链接自身，递归扫描/删除不跟随最终链接。
 - 非 UTF-8 名称不做 lossy conversion。首版返回 `PATH_ENCODING_UNSUPPORTED`，以后可增加无损 opaque entry handle。
