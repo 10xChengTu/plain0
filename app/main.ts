@@ -1,9 +1,14 @@
 import "@codingame/monaco-vscode-theme-defaults-default-extension";
 
-import { initialize } from "@codingame/monaco-vscode-api";
+import {
+	getService,
+	IContextKeyService,
+	initialize,
+} from "@codingame/monaco-vscode-api";
 
 import { EXCLUDED_SURFACE_GUARD_MARKER } from "./excluded-surface-policy";
 import { enforceExcludedWorkbenchSurfaces } from "./excluded-surfaces";
+import { registerWorkspaceCommands } from "./features/workspace/commands";
 import { configureMonacoEnvironment } from "./monaco-environment";
 import { createBridge, normalizeCommandError } from "./platform/tauri";
 import { createServiceOverrides } from "./services";
@@ -21,10 +26,16 @@ async function bootstrap(): Promise<void> {
 	const stopListening = await bridge.onRuntimeReady((payload) => {
 		document.body.dataset.plainRuntimeEvent = payload.runtime;
 	});
-	window.addEventListener("pagehide", () => void stopListening(), {
-		once: true,
-	});
-
+	let workspaceCommands:
+		ReturnType<typeof registerWorkspaceCommands> | undefined;
+	window.addEventListener(
+		"pagehide",
+		() => {
+			void stopListening();
+			workspaceCommands?.dispose();
+		},
+		{ once: true },
+	);
 	const runtime = await bridge.runtimeInfo();
 	document.body.dataset.plainRuntime = runtime.runtime;
 	document.body.dataset.plainIpcVersion = String(runtime.ipcVersion);
@@ -39,6 +50,10 @@ async function bootstrap(): Promise<void> {
 			"workbench.startupEditor": "none",
 		},
 	});
+	workspaceCommands = registerWorkspaceCommands(
+		bridge,
+		await getService(IContextKeyService),
+	);
 	const surfaceSnapshot = enforceExcludedWorkbenchSurfaces();
 	document.body.dataset.plainSurfaceGuard = EXCLUDED_SURFACE_GUARD_MARKER;
 	if (import.meta.env.DEV) {

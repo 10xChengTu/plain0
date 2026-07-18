@@ -1,19 +1,37 @@
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 
+import { RUNTIME_READY_EVENT, type PlainBridge } from "./contracts";
 import {
-	RUNTIME_READY_EVENT,
-	type PlainBridge,
-	type RuntimeInfo,
-} from "./contracts";
+	decodeRuntimeInfo,
+	decodeWorkspacePickResult,
+	decodeWorkspaceSnapshot,
+} from "./workspace-codec";
 
 export function createNativeBridge(): PlainBridge {
 	return {
-		runtimeInfo: () => invoke<RuntimeInfo>("runtime_info"),
+		runtimeInfo: async () =>
+			decodeRuntimeInfo(await invoke<unknown>("runtime_info")),
 		onRuntimeReady: async (listener) => {
-			return listen<RuntimeInfo>(RUNTIME_READY_EVENT, (event) =>
-				listener(event.payload),
+			return listen<unknown>(RUNTIME_READY_EVENT, (event) =>
+				listener(decodeRuntimeInfo(event.payload)),
 			);
 		},
+		workspaceSnapshot: async () =>
+			decodeWorkspaceSnapshot(
+				await invoke<unknown>("workspace_snapshot", { request: {} }),
+			),
+		workspacePickRoots: async (mode) =>
+			decodeWorkspacePickResult(
+				await invoke<unknown>("workspace_pick_roots", {
+					request: { mode },
+				}),
+			),
+		workspaceRemoveRoot: async (rootId) =>
+			decodeWorkspaceSnapshot(
+				await invoke<unknown>("workspace_remove_root", {
+					request: { rootId },
+				}),
+			),
 	};
 }
