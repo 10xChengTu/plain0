@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：暂无；同 root 原子重命名已完成，下一项为 capability copy。
+- 当前最小工作项：暂无；有界 capability copy 方案已冻结，下一项为双 root 普通文件 staged copy。
 - 当前 Code OSS 基线：1.130.0，Electron 42.6.0，约 16,555 个跟踪文件。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
 
@@ -35,12 +35,13 @@
 - [x] 创建切片通过完整 `pnpm check`：85 个 TypeScript 测试、76 个 Rust 测试、架构/排除面 guard 与 bundle 债务基线全部通过；Tauri `Result<(), CommandError>` 成功响应另有 JSON `null` 合同测试。
 - [x] 完成同 root 原子 no-clobber 重命名：父目录先由 `cap_std` 打开为 capability，同父目录复用句柄，macOS/Linux 只对 basename 调用固定 `rustix 1.1.4` `NOREPLACE`；其他平台和不支持的文件系统安全失败，不存在普通 rename fallback。严格 Rust/TypeScript DTO、native bridge、每实例 browser mock、mutation gate 竞态与 Harness 边界 guard 均已覆盖，provider 继续保持只读。
 - [x] 重命名切片通过完整 `pnpm check`：90 个 TypeScript 测试、91 个 Rust 测试、架构/排除面 guard 与 bundle 债务基线全部通过。
+- [x] 完成 capability copy 的 GitHub 补充调研与方案冻结：排除会覆盖目标的 `Dir::copy`/`std::fs::copy`、无界且可留半成品的 VS Code fallback，以及 ambient/overwrite 导向的第三方整包方案；确定双 root、无 overwrite、普通文件 8 MiB staged copy 先行，目录 manifest 与原样 symlink copy 后续独立提交，provider 期间继续只读。
 
 ## 下一步
 
-1. 实现有界 capability copy 并单独提交；provider 暂时保持只读。
-2. 实现显式跨 root move（copy + verified delete）并单独提交，再实现确认删除并单独提交；期间 provider 保持只读。
-3. 全部 CRUD 后先实现 opaque version、有界原子写入和 Workbench 期望版本透传，再在 provider 注册前读取严格 `workspace_capabilities` DTO，按 Rust 平台能力激活写能力与 Browser E2E；不支持原子 no-replace rename 的平台继续只读。随后实现 watcher/rescan，最后运行真实 Tauri 文件树总验收并写回 `F020` evidence。
+1. 实现双 root、8 MiB、仅普通文件的 staged no-clobber copy，并单独提交；目录、symlink 与特殊文件稳定拒绝，provider 暂时保持只读。
+2. 先实现原样、有界、不解引用的 symlink staged copy，再实现有界目录 manifest/staged tree；随后实现显式跨 root move（copy receipt + verified delete）与确认删除。每项单独提交，期间 provider 保持只读。
+3. 全部 CRUD 后先实现 opaque version、有界原子写入和 Workbench 期望版本透传，再在 provider 注册前读取严格 `workspace_capabilities` DTO，增加 copy 同路径/overwrite/自动 mkdirp/cross-scheme 防绕过 patch，并按 Rust 平台能力激活写能力与 Browser E2E；不支持原子 no-replace rename 的平台继续只读。随后实现 watcher/rescan，最后运行真实 Tauri 文件树总验收并写回 `F020` evidence。
 
 ## 当前验收命令
 

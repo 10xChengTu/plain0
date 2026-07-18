@@ -58,12 +58,18 @@ service 在窗口 mutex 内验证窗口/root 并 clone `Dir` lease，释放锁�
 
 - 新建和重命名是两个独立提交。`workspace_create_file` 与 `workspace_create_directory` 只提供空文件与单级目录：文件使用 `write(true).create_new(true)`，目录使用 capability-relative `create_dir`；root 空路径、缺失父目录、类型冲突和任何已存在目标都返回稳定清洗错误。
 - 重命名请求只携带一个 `rootId`，从 wire contract 上禁止跨 root；不提供 `overwrite`。源与目标父目录必须先经 `cap_std::Dir::open_dir` 取得 capability，再对 basename 执行原子 no-replace。Linux/macOS 固定 `rustix 1.1.4`；不支持的平台或文件系统 fail closed，不做预检查加普通 rename 的 fallback。
+- 复制请求从第一版就携带 `{ sourceRootId, sourcePath, targetRootId, targetPath }`，显式允许两个已授权 root，不接收 `overwrite`、`recursive`、URI 或任意 scheme。两端 lease 在同一窗口 mutation gate 内重新验证；同 root 同路径返回 `ENTRY_ALREADY_EXISTS`，同 root 的严格后代关系返回 `WORKSPACE_CONFLICT`，目标父目录必须已存在。
+- 普通文件 copy 是第一个独立切片：只接受末级 nofollow 后确认的普通文件，复用 8 MiB 上限；源以 nonblocking 方式打开，目标父目录中最多尝试 16 次高熵 `create_new`、初始模式 `0600` 的命名 staging。成功语义绑定到已打开的 source handle：basename 在打开后被替换不会重定向读取；同一 inode 在复制期间可由 size/mtime/ctime 检出的变化则返回 `WORKSPACE_CONFLICT`。复制仍按 `8 MiB + 1` 检查增长，完成后设置 `mode & 0o777`、`sync_all`。发布和清理前都重新解析 staging basename 并核对其 identity；匹配时才以已有 `NOREPLACE` syscall 发布或尝试删除，不匹配时宁可留下 artifact 并返回清洗错误。外部进程仍可在 identity 检查与 rename/unlink 之间竞争，这不构成 capability 逃逸，但不能伪装成跨进程事务。不支持 exclusive publish 的平台或文件系统 fail closed。原子只承诺可见性，不宣称目录项已达到断电持久化；崩溃/竞争残留 staging 的 journal/恢复是后续独立合同。
+- symlink copy 在普通文件之后单独提交：只读取并重建原始 link payload，绝不解引用、规范化或重写；内部、外部、dangling 和 loop link 均只是数据。单 link payload 最大 4 KiB，整树聚合上限 2 MiB。
+- 目录 copy 再作为独立切片：先以显式栈建立完整 manifest，再产生任何目标写入；10,000 条目、2 MiB 名称 payload 和 2 MiB link payload 都是整棵 manifest 的聚合上限，单名仍为 1 KiB，最大相对深度明确为 256，单文件 8 MiB、全树总逻辑字节 256 MiB。manifest 记录目录 identity，用于检测同 root 或重叠 root alias 下目标父目录落入源树，并在发布前重验成员关系。FIFO、socket、字符/块设备和未知类型使整次操作失败。首版不保留 hardlink 关系、稀疏洞、ACL、xattr、owner、resource fork 或 ADS。
 - create/rename 的 Rust command、严格 codec、native bridge 和每实例隔离的 browser mock 先分别落地；provider 在此期间继续声明 `Readonly`，所有未支持写调用稳定拒绝，已有但不可用的 Workbench 命令不获得写权限。
 - F020 在 provider 激活前增加有界内容写入、版本前置条件和临时文件原子替换切片，提前建立编辑器最小安全保存主链；F030 仍负责 preview/pin/split、外部冲突交互、热退出和恢复。这样 F020 不循环等待后续 feature，也不产生“可以编辑但不能安全保存”的中间态。
 - create、rename、copy/move、delete 和安全内容写入全部可用后，独立提交移除 provider 的 `Readonly` capability/permission，接入精确文件事件与 Browser E2E。Rust 同时暴露可审计的平台写能力；缺少原子 no-replace rename 的 Windows/其他平台继续保持 provider 只读，直至 F120/F130 的安全实现与真机矩阵完成。
 - `ENTRY_ALREADY_EXISTS` 映射为 Workbench `FileExists`。所有写错误不得包含绝对路径、用户名、原始 OS 错误或目标名称。
 
 provider 激活使用显式能力合同：`workspace_capabilities() -> { create, renameNoReplace, copyMove, delete, versionedWrite }`。`main.ts` 必须在注册 provider 前经严格 codec 读取并冻结该 DTO，provider 构造时只有五项全为 `true` 才移除 `Readonly`；能力在一个窗口生命周期内不可升级。macOS/Linux 的安全实现可返回全 true，Windows 在 handle-relative exclusive rename 落地前返回 `renameNoReplace: false`，因此仍为只读。
+
+激活 copy 还必须同时声明并真正实现 `FileFolderCopy`，确保同一 `plain-workspace:` provider 的跨 root copy 的唯一写副作用只进入一个 Rust `workspace_copy` command；前后的 stat/resolve 仍是只读调用。Plain 不接受 Workbench 同路径 no-op、`overwrite` 或自动创建目标父目录：激活工作项必须增加窄 patch，在任何写副作用前返回与 Rust 一致的错误，阻断预删除和 `mkdirp`。任何涉及 Plain 的跨 scheme copy 也必须阻断通用 `mkdir/writeFile` fallback，另走以后明确授权的 import/export 合同。仅在 provider 内拒绝这些选项已经太迟，因为 upstream 可能先删除或创建文件系统项。
 
 版本化写入是 F020 的底层传输合同，不是 F030 的冲突 UI。Rust stat 增加 opaque version token；`workspace_write_file` 必须同时接收期望 version 与有界 bytes，在 mutation gate 内重验版本、写同目录临时文件并原子替换。由于 upstream `FileService` 不把 `mtime/etag` 继续传给 provider，Plain 需要一份可审计的窄 pnpm patch，把已经用于 dirty-write 校验的期望版本附加到 `IFileWriteOptions`；provider 不维护全局“最近 stat”缓存，也不接受缺少期望版本的覆盖写。
 
@@ -77,10 +83,13 @@ provider 激活使用显式能力合同：`workspace_capabilities() -> { create,
 4. files/explorer service overrides、只读 provider、workspace 投影和浏览器 E2E。
 5. 原子空文件/单级目录创建：Rust command、mutation gate、严格 bridge/browser mock 合同；provider 保持只读。
 6. 同 root 原子 no-clobber 重命名：父目录 capability、目标平台系统调用与严格 bridge/browser mock 合同；不支持平台安全失败。
-7. 复制/移动与确认删除各自单独提交；不能借 Workbench 的 overwrite 预删除绕过 no-clobber。
-8. 有界内容写入、opaque version、上游期望版本透传 patch 与临时文件原子替换单独提交，形成 provider 所需的安全写传输。
-9. 增加严格 `workspace_capabilities` DTO，并按 Rust 平台能力激活 provider 写能力、精确文件事件与 Explorer Browser E2E；不支持安全 rename 的平台继续只读。
-10. watcher 的有界 dirty/rescan 状态机、浏览器 mock 收敛测试与真实 Tauri 文件树验收。
+7. 双 root、8 MiB、普通文件 staged copy：nofollow source、双 lease mutation、严格 bridge/browser mock 合同；目录/symlink 稳定拒绝，provider 保持只读。
+8. 原样 symlink staged copy：link payload 有界且不解引用；内部、外部、dangling 和 loop 行为单独提交。
+9. 有界目录 manifest 与 staged tree：聚合预算、特殊文件拒绝、失败清理与 source 变化重验单独提交。
+10. 跨 root move receipt/verified delete 与确认删除各自单独提交；检测到源变化时不删，并公开外部 TOCTOU 下的非原子结果；不能借 Workbench 的 overwrite 预删除绕过 no-clobber。
+11. 有界内容写入、opaque version、上游期望版本透传 patch 与临时文件原子替换单独提交，形成 provider 所需的安全写传输。
+12. 增加严格 `workspace_capabilities` DTO、copy 同路径/overwrite/mkdirp/cross-scheme 窄 patch，并按 Rust 平台能力激活 provider 写能力、精确文件事件与 Explorer Browser E2E；不支持安全 rename 的平台继续只读。
+13. watcher 的有界 dirty/rescan 状态机、浏览器 mock 收敛测试与真实 Tauri 文件树验收。
 
 ## 验收矩阵
 
@@ -91,4 +100,6 @@ provider 激活使用显式能力合同：`workspace_capabilities() -> { create,
 - 读取期间 root replace/remove、窗口关闭和目标删除/重命名只产生成功快照或清洗错误，不 panic、不泄露路径。
 - 同名文件/目录/symlink 创建不覆盖；并发同名创建恰好一个成功；外部/dangling/loop symlink 父目录和 swap race 不触碰外部 sentinel。
 - 文件、目录和 symlink 的同 root rename 不覆盖任何既有目标；并发竞争最多一个成功；父目录 capability 与 mutation/revoke 两种线性顺序均有测试。
+- 普通文件 copy 覆盖同 root/双 root、exact 8 MiB/增长一字节、打开后 basename 替换仍复制原 handle、同 inode 增长/截断冲突、最终 symlink/FIFO/special file、目标各种既有类型、source/target parent swap、staging identity/清理竞争和并发单胜者；正式目标只完整出现或完全不存在。
+- symlink 与目录 manifest 覆盖全树聚合条目/名称/link payload/深度/总逻辑字节、稀疏大文件、内部/外部/dangling/loop link、重叠 root alias 后代、源树并发增删改和特殊文件；失败不得发布 staging。
 - Browser mock 验证 Explorer 展开、文本打开和排除 surface；真实 Tauri 验证原生 picker、文件树展开、取消和外部变化收敛。
