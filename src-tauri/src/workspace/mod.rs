@@ -12,6 +12,13 @@ use uuid::Uuid;
 use crate::error::CommandError;
 use crate::path_policy::RelativePath;
 
+pub(crate) mod commands;
+pub mod dto;
+pub mod picker;
+pub mod service;
+
+use dto::{WorkspaceRootSnapshot, WorkspaceSnapshot};
+
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RootId(Uuid);
 
@@ -22,6 +29,37 @@ impl RootId {
 
     pub fn as_wire(self) -> String {
         self.0.hyphenated().to_string()
+    }
+}
+
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct WorkspaceId(Uuid);
+
+impl WorkspaceId {
+    fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub fn as_wire(self) -> String {
+        self.0.hyphenated().to_string()
+    }
+}
+
+impl fmt::Debug for WorkspaceId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("WorkspaceId")
+            .field(&self.as_wire())
+            .finish()
+    }
+}
+
+impl Serialize for WorkspaceId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.as_wire())
     }
 }
 
@@ -63,29 +101,6 @@ impl<'de> Deserialize<'de> for RootId {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceRootSnapshot {
-    root_id: RootId,
-}
-
-impl WorkspaceRootSnapshot {
-    pub const fn root_id(&self) -> RootId {
-        self.root_id
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct WorkspaceSnapshot {
-    roots: Vec<WorkspaceRootSnapshot>,
-}
-
-impl WorkspaceSnapshot {
-    pub fn roots(&self) -> &[WorkspaceRootSnapshot] {
-        &self.roots
-    }
-}
-
 pub struct ResolvedWorkspacePath<'scope> {
     root_id: RootId,
     directory: &'scope Dir,
@@ -116,10 +131,22 @@ impl ResolvedWorkspacePath<'_> {
     }
 }
 
-#[derive(Default)]
 pub struct WorkspaceScope {
+    workspace_id: WorkspaceId,
+    revision: u64,
     roots: HashMap<RootId, WorkspaceRoot>,
     order: Vec<RootId>,
+}
+
+impl Default for WorkspaceScope {
+    fn default() -> Self {
+        Self {
+            workspace_id: WorkspaceId::new(),
+            revision: 0,
+            roots: HashMap::new(),
+            order: Vec::new(),
+        }
+    }
 }
 
 impl WorkspaceScope {
@@ -127,57 +154,105 @@ impl WorkspaceScope {
         Self::default()
     }
 
-    /// This ambient path entry point is intentionally crate-private. A future
-    /// native picker adapter is the only layer allowed to call it.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "the native picker adapter lands in the next vertical slice"
-        )
-    )]
-    pub(crate) fn authorize_root(&mut self, ambient_path: &Path) -> Result<RootId, CommandError> {
-        let directory = Dir::open_ambient_dir(ambient_path, ambient_authority())
-            .map_err(map_root_authorization_error)?;
-        let identity =
-            directory_identity(&directory, ambient_path).map_err(map_root_authorization_error)?;
-
-        if let Some((root_id, _)) = self
-            .roots
+    /// Opens and validates every selected path before changing the scope. This
+    /// is the sole ambient filesystem authorization entry point in production.
+    pub(crate) fn authorize_roots_atomically(
+        &mut self,
+        ambient_paths: &[PathBuf],
+    ) -> Result<Vec<RootId>, CommandError> {
+        let prepared = ambient_paths
             .iter()
-            .find(|(_, root)| root.identity == identity)
-        {
-            return Ok(*root_id);
+            .map(|ambient_path| {
+                let display_name = root_display_name(ambient_path)?;
+                let directory = Dir::open_ambient_dir(ambient_path, ambient_authority())
+                    .map_err(map_root_authorization_error)?;
+                let identity = directory_identity(&directory, ambient_path)
+                    .map_err(map_root_authorization_error)?;
+                Ok(PreparedWorkspaceRoot {
+                    directory,
+                    display_name,
+                    identity,
+                })
+            })
+            .collect::<Result<Vec<_>, CommandError>>()?;
+
+        let mut additions = Vec::new();
+        let mut selected_ids = Vec::with_capacity(prepared.len());
+        for candidate in prepared {
+            if let Some(root_id) = self
+                .roots
+                .iter()
+                .find(|(_, root)| root.identity == candidate.identity)
+                .map(|(root_id, _)| *root_id)
+            {
+                selected_ids.push(root_id);
+                continue;
+            }
+            if let Some(root_id) = additions
+                .iter()
+                .find(|(_, root): &&(RootId, PreparedWorkspaceRoot)| {
+                    root.identity == candidate.identity
+                })
+                .map(|(root_id, _)| *root_id)
+            {
+                selected_ids.push(root_id);
+                continue;
+            }
+            let root_id = RootId::new();
+            selected_ids.push(root_id);
+            additions.push((root_id, candidate));
         }
 
-        let root_id = RootId::new();
-        self.roots.insert(
-            root_id,
-            WorkspaceRoot {
-                directory,
-                identity,
-            },
-        );
-        self.order.push(root_id);
-        Ok(root_id)
+        if additions.is_empty() {
+            return Ok(selected_ids);
+        }
+        let next_revision = next_revision(self.revision)?;
+        for (root_id, candidate) in additions {
+            self.roots.insert(
+                root_id,
+                WorkspaceRoot {
+                    directory: candidate.directory,
+                    display_name: candidate.display_name,
+                    identity: candidate.identity,
+                },
+            );
+            self.order.push(root_id);
+        }
+        self.revision = next_revision;
+        Ok(selected_ids)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authorize_root(&mut self, ambient_path: &Path) -> Result<RootId, CommandError> {
+        self.authorize_roots_atomically(&[ambient_path.to_path_buf()])?
+            .into_iter()
+            .next()
+            .ok_or_else(workspace_conflict)
     }
 
     pub fn snapshot(&self) -> WorkspaceSnapshot {
-        WorkspaceSnapshot {
-            roots: self
-                .order
+        WorkspaceSnapshot::new(
+            self.workspace_id,
+            self.revision,
+            self.order
                 .iter()
-                .copied()
-                .map(|root_id| WorkspaceRootSnapshot { root_id })
+                .filter_map(|root_id| {
+                    self.roots
+                        .get(root_id)
+                        .map(|root| WorkspaceRootSnapshot::new(*root_id, root.display_name.clone()))
+                })
                 .collect(),
-        }
+        )
     }
 
     pub fn remove(&mut self, root_id: RootId) -> Result<(), CommandError> {
-        if self.roots.remove(&root_id).is_none() {
+        if !self.roots.contains_key(&root_id) {
             return Err(root_not_authorized());
         }
+        let next_revision = next_revision(self.revision)?;
+        self.roots.remove(&root_id);
         self.order.retain(|candidate| *candidate != root_id);
+        self.revision = next_revision;
         Ok(())
     }
 
@@ -209,6 +284,13 @@ impl WorkspaceScope {
 
 struct WorkspaceRoot {
     directory: Dir,
+    display_name: String,
+    identity: DirectoryIdentity,
+}
+
+struct PreparedWorkspaceRoot {
+    directory: Dir,
+    display_name: String,
     identity: DirectoryIdentity,
 }
 
@@ -256,16 +338,33 @@ fn is_capability_relative(path: &Path) -> bool {
             .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
 }
 
+fn root_display_name(ambient_path: &Path) -> Result<String, CommandError> {
+    if ambient_path.as_os_str().is_empty() || !ambient_path.is_absolute() {
+        return Err(root_unavailable());
+    }
+    if ambient_path.to_str().is_none() {
+        return Err(path_encoding_unsupported());
+    }
+    match ambient_path.file_name() {
+        Some(name) => name
+            .to_str()
+            .map(ToOwned::to_owned)
+            .ok_or_else(path_encoding_unsupported),
+        None => Ok("Workspace Root".to_owned()),
+    }
+}
+
+fn next_revision(current: u64) -> Result<u64, CommandError> {
+    current.checked_add(1).ok_or_else(workspace_conflict)
+}
+
 fn map_root_authorization_error(error: io::Error) -> CommandError {
     match error.kind() {
         io::ErrorKind::PermissionDenied => CommandError::new(
             "PERMISSION_DENIED",
             "The selected workspace root cannot be opened.",
         ),
-        _ => CommandError::new(
-            "ROOT_UNAVAILABLE",
-            "The selected workspace root is unavailable.",
-        ),
+        _ => root_unavailable(),
     }
 }
 
@@ -291,10 +390,31 @@ fn root_not_authorized() -> CommandError {
     )
 }
 
+fn root_unavailable() -> CommandError {
+    CommandError::new(
+        "ROOT_UNAVAILABLE",
+        "The selected workspace root is unavailable.",
+    )
+}
+
 fn path_outside_root() -> CommandError {
     CommandError::new(
         "PATH_OUTSIDE_ROOT",
         "The workspace path is outside the authorized root.",
+    )
+}
+
+fn path_encoding_unsupported() -> CommandError {
+    CommandError::new(
+        "PATH_ENCODING_UNSUPPORTED",
+        "The selected workspace path cannot be represented safely.",
+    )
+}
+
+fn workspace_conflict() -> CommandError {
+    CommandError::new(
+        "WORKSPACE_CONFLICT",
+        "The workspace changed while the operation was in progress.",
     )
 }
 
