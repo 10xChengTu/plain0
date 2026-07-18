@@ -1,9 +1,9 @@
 use std::ffi::OsString;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use cap_std::fs::{FileType, Metadata};
+use cap_std::fs::{FileType, Metadata, OpenOptions};
 
 use crate::error::CommandError;
 use crate::path_policy::RelativePath;
@@ -16,6 +16,7 @@ use super::WorkspaceRootLease;
 const MAX_DIRECTORY_ENTRIES: usize = 10_000;
 const MAX_ENTRY_NAME_BYTES: usize = 1_024;
 const MAX_DIRECTORY_NAME_PAYLOAD_BYTES: usize = 2 * 1_024 * 1_024;
+const MAX_FILE_BYTES: usize = 8 * 1_024 * 1_024;
 const MAX_JS_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Copy)]
@@ -54,6 +55,100 @@ pub(crate) fn read_directory(
     relative_path: &RelativePath,
 ) -> Result<WorkspaceReadDirectoryResult, CommandError> {
     read_directory_with_limits(lease, relative_path, READER_LIMITS)
+}
+
+pub(crate) fn read_file(
+    lease: &WorkspaceRootLease,
+    relative_path: &RelativePath,
+) -> Result<Vec<u8>, CommandError> {
+    read_file_with_limit(lease, relative_path, MAX_FILE_BYTES)
+}
+
+fn read_file_with_limit(
+    lease: &WorkspaceRootLease,
+    relative_path: &RelativePath,
+    max_bytes: usize,
+) -> Result<Vec<u8>, CommandError> {
+    read_file_with_limit_and_hook(lease, relative_path, max_bytes, || {})
+}
+
+fn read_file_with_limit_and_hook<F>(
+    lease: &WorkspaceRootLease,
+    relative_path: &RelativePath,
+    max_bytes: usize,
+    before_open: F,
+) -> Result<Vec<u8>, CommandError>
+where
+    F: FnOnce(),
+{
+    if relative_path.is_root() {
+        return Err(entry_type_mismatch());
+    }
+
+    let directory = lease.directory();
+    let metadata = directory
+        .metadata(relative_path.as_path())
+        .map_err(map_workspace_io_error)?;
+    validate_readable_file(&metadata, max_bytes)?;
+
+    before_open();
+    let mut file = open_file_for_bounded_read(directory, relative_path.as_path())?;
+    let opened_metadata = file.metadata().map_err(map_handle_io_error)?;
+    validate_readable_file(&opened_metadata, max_bytes)?;
+    read_bounded(&mut file, opened_metadata.len(), max_bytes)
+}
+
+fn open_file_for_bounded_read(
+    directory: &cap_std::fs::Dir,
+    path: &Path,
+) -> Result<cap_std::fs::File, CommandError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    directory
+        .open_with(path, &options)
+        .map_err(map_workspace_io_error)
+}
+
+fn validate_readable_file(metadata: &Metadata, max_bytes: usize) -> Result<(), CommandError> {
+    if !metadata.is_file() {
+        return Err(entry_type_mismatch());
+    }
+    if metadata.len() > max_bytes as u64 {
+        return Err(file_too_large());
+    }
+    Ok(())
+}
+
+fn read_bounded<R: Read>(
+    reader: &mut R,
+    prechecked_size: u64,
+    max_bytes: usize,
+) -> Result<Vec<u8>, CommandError> {
+    if prechecked_size > max_bytes as u64 {
+        return Err(file_too_large());
+    }
+    let read_limit = u64::try_from(max_bytes)
+        .ok()
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(file_too_large)?;
+    let capacity = usize::try_from(prechecked_size)
+        .unwrap_or(max_bytes)
+        .min(max_bytes);
+    let mut bytes = Vec::with_capacity(capacity);
+    reader
+        .take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(map_handle_io_error)?;
+    if bytes.len() > max_bytes {
+        return Err(file_too_large());
+    }
+    Ok(bytes)
 }
 
 fn read_directory_with_limits(
@@ -251,6 +346,13 @@ fn map_workspace_io_error(error: io::Error) -> CommandError {
     }
 }
 
+fn map_handle_io_error(error: io::Error) -> CommandError {
+    match error.kind() {
+        io::ErrorKind::PermissionDenied => permission_denied(),
+        _ => io_failed(),
+    }
+}
+
 fn path_encoding_unsupported() -> CommandError {
     CommandError::new(
         "PATH_ENCODING_UNSUPPORTED",
@@ -287,6 +389,13 @@ fn directory_too_large() -> CommandError {
     CommandError::new(
         "DIRECTORY_TOO_LARGE",
         "The workspace directory exceeds the supported listing limits.",
+    )
+}
+
+fn file_too_large() -> CommandError {
+    CommandError::new(
+        "FILE_TOO_LARGE",
+        "The workspace file exceeds the supported read limit.",
     )
 }
 

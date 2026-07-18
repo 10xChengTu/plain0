@@ -2,7 +2,7 @@ use std::fs;
 
 use tempfile::TempDir;
 
-use super::{read_directory_with_limits, stat, ReaderLimits};
+use super::{read_directory_with_limits, read_file_with_limit, stat, ReaderLimits};
 use crate::path_policy::RelativePath;
 use crate::workspace::dto::WorkspaceEntryKind;
 use crate::workspace::{WorkspaceRootLease, WorkspaceScope};
@@ -65,6 +65,223 @@ fn read_directory_rejects_missing_and_non_directory_entries() {
         stat(&lease, &path("missing.txt")).unwrap_err().code(),
         "ENTRY_NOT_FOUND"
     );
+}
+
+#[test]
+fn read_file_preserves_binary_bytes_and_rejects_non_files() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("root");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(root.join("directory")).unwrap();
+    let binary = [0, 255, 128, 1, 0, 42];
+    fs::write(root.join("binary.bin"), binary).unwrap();
+    fs::write(root.join("empty.bin"), []).unwrap();
+    let lease = authorize(&root);
+
+    assert_eq!(
+        super::read_file(&lease, &path("binary.bin")).unwrap(),
+        binary
+    );
+    assert!(super::read_file(&lease, &path("empty.bin"))
+        .unwrap()
+        .is_empty());
+    for relative_path in ["", "directory"] {
+        assert_eq!(
+            super::read_file(&lease, &path(relative_path))
+                .unwrap_err()
+                .code(),
+            "ENTRY_TYPE_MISMATCH"
+        );
+    }
+    assert_eq!(
+        super::read_file(&lease, &path("missing.bin"))
+            .unwrap_err()
+            .code(),
+        "ENTRY_NOT_FOUND"
+    );
+}
+
+#[test]
+fn read_file_accepts_the_exact_limit_and_rejects_one_byte_more() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("root");
+    fs::create_dir(&root).unwrap();
+    let exact_path = root.join("exact.bin");
+    let oversized_path = root.join("oversized.bin");
+    fs::File::create(&exact_path)
+        .unwrap()
+        .set_len(super::MAX_FILE_BYTES as u64)
+        .unwrap();
+    fs::File::create(&oversized_path)
+        .unwrap()
+        .set_len(super::MAX_FILE_BYTES as u64 + 1)
+        .unwrap();
+    let lease = authorize(&root);
+
+    let exact = super::read_file(&lease, &path("exact.bin")).unwrap();
+    assert_eq!(exact.len(), super::MAX_FILE_BYTES);
+    assert!(exact.iter().all(|byte| *byte == 0));
+    assert_eq!(
+        super::read_file(&lease, &path("oversized.bin"))
+            .unwrap_err()
+            .code(),
+        "FILE_TOO_LARGE"
+    );
+
+    fs::write(root.join("small-boundary.bin"), b"12345").unwrap();
+    assert_eq!(
+        read_file_with_limit(&lease, &path("small-boundary.bin"), 5).unwrap(),
+        b"12345"
+    );
+    assert_eq!(
+        read_file_with_limit(&lease, &path("small-boundary.bin"), 4)
+            .unwrap_err()
+            .code(),
+        "FILE_TOO_LARGE"
+    );
+}
+
+#[test]
+fn bounded_read_detects_growth_after_metadata_and_stops_at_limit_plus_one() {
+    use std::io::Cursor;
+
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("root");
+    fs::create_dir(&root).unwrap();
+    let growing_path = root.join("growing.bin");
+    fs::write(&growing_path, b"1234").unwrap();
+    let lease = authorize(&root);
+    let mut opened = lease.directory().open("growing.bin").unwrap();
+    let prechecked_size = opened.metadata().unwrap().len();
+    assert_eq!(prechecked_size, 4);
+    fs::write(&growing_path, b"12345").unwrap();
+
+    assert_eq!(
+        super::read_bounded(&mut opened, prechecked_size, 4)
+            .unwrap_err()
+            .code(),
+        "FILE_TOO_LARGE"
+    );
+
+    let mut unbounded_source = Cursor::new(vec![7; 1_024]);
+    assert_eq!(
+        super::read_bounded(&mut unbounded_source, 4, 4)
+            .unwrap_err()
+            .code(),
+        "FILE_TOO_LARGE"
+    );
+    assert_eq!(unbounded_source.position(), 5);
+}
+
+#[cfg(unix)]
+#[test]
+fn read_file_rejects_special_files_before_opening_them() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("root");
+    fs::create_dir(&root).unwrap();
+    create_fifo(&root.join("private.fifo"));
+    let lease = authorize(&root);
+    let error = super::read_file(&lease, &path("private.fifo")).unwrap_err();
+    assert_eq!(error.code(), "ENTRY_TYPE_MISMATCH");
+    assert!(!serde_json::to_string(&error)
+        .unwrap()
+        .contains("private.fifo"));
+}
+
+#[cfg(unix)]
+#[test]
+fn read_file_does_not_block_when_a_regular_file_is_swapped_for_a_fifo() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("root");
+    fs::create_dir(&root).unwrap();
+    let target = root.join("racing-entry");
+    fs::write(&target, b"regular").unwrap();
+    let lease = authorize(&root);
+    let reader_target = target.clone();
+    let (result_tx, result_rx) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let result =
+            super::read_file_with_limit_and_hook(&lease, &path("racing-entry"), 64, || {
+                fs::remove_file(&reader_target).unwrap();
+                create_fifo(&reader_target);
+            });
+        result_tx.send(result).unwrap();
+    });
+
+    let first_result = result_rx.recv_timeout(Duration::from_secs(2));
+    let timed_out = first_result.is_err();
+    let recovered_result = match first_result {
+        Ok(result) => Some(result),
+        Err(_) => {
+            let _rescue = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&target)
+                .ok();
+            result_rx.recv_timeout(Duration::from_secs(2)).ok()
+        }
+    };
+    let result = match recovered_result {
+        Some(result) => {
+            reader
+                .join()
+                .expect("FIFO reader thread must exit after cleanup");
+            result
+        }
+        None => {
+            drop(reader);
+            panic!("FIFO rescue must release a blocking reader");
+        }
+    };
+    assert!(!timed_out, "capability file open must set O_NONBLOCK");
+    let error = result.unwrap_err();
+    assert_eq!(error.code(), "ENTRY_TYPE_MISMATCH");
+}
+
+#[cfg(unix)]
+#[test]
+fn read_file_rejects_a_symlink_swapped_outside_after_metadata_precheck() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("root");
+    let outside = temp.path().join("private-outside");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(&outside).unwrap();
+    fs::write(root.join("inside.txt"), b"inside").unwrap();
+    let outside_file = outside.join("secret.txt");
+    fs::write(&outside_file, b"secret sentinel").unwrap();
+    let link = root.join("racing-link");
+    symlink("inside.txt", &link).unwrap();
+    let lease = authorize(&root);
+
+    let result = super::read_file_with_limit_and_hook(&lease, &path("racing-link"), 64, || {
+        fs::remove_file(&link).unwrap();
+        symlink(&outside_file, &link).unwrap();
+    });
+    let error = match result {
+        Ok(_) => panic!("an external symlink target must never be returned"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "PATH_OUTSIDE_ROOT");
+    assert!(!serde_json::to_string(&error)
+        .unwrap()
+        .contains(temp.path().to_str().unwrap()));
+}
+
+#[cfg(unix)]
+fn create_fifo(path: &std::path::Path) {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let native = CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: `native` is a NUL-terminated path owned for the duration of the
+    // call, and the mode contains only ordinary permission bits.
+    let result = unsafe { libc::mkfifo(native.as_ptr(), 0o600) };
+    assert_eq!(result, 0);
 }
 
 #[test]
@@ -239,6 +456,34 @@ fn symlinks_are_classified_without_following_targets_outside_the_root() {
     assert_eq!(kind("dangling-link"), WorkspaceEntryKind::Symlink);
     assert_eq!(kind("loop-link"), WorkspaceEntryKind::Symlink);
 
+    assert_eq!(
+        super::read_file(&lease, &path("inside-file-link")).unwrap(),
+        b"inside"
+    );
+    assert_eq!(
+        super::read_file(&lease, &path("inside-dir-link"))
+            .unwrap_err()
+            .code(),
+        "ENTRY_TYPE_MISMATCH"
+    );
+    let external_read = super::read_file(&lease, &path("outside-file-link")).unwrap_err();
+    assert_eq!(external_read.code(), "PATH_OUTSIDE_ROOT");
+    assert!(!serde_json::to_string(&external_read)
+        .unwrap()
+        .contains(temp.path().to_str().unwrap()));
+    assert_eq!(
+        super::read_file(&lease, &path("dangling-link"))
+            .unwrap_err()
+            .code(),
+        "ENTRY_NOT_FOUND"
+    );
+    assert_eq!(
+        super::read_file(&lease, &path("loop-link"))
+            .unwrap_err()
+            .code(),
+        "IO_FAILED"
+    );
+
     let link_stat = stat(&lease, &path("inside-file-link")).unwrap();
     assert_eq!(link_stat.kind(), WorkspaceEntryKind::SymlinkFile);
     assert_eq!(link_stat.size(), 6);
@@ -365,6 +610,25 @@ fn filesystem_errors_are_mapped_to_stable_sanitized_codes() {
         assert_eq!(error.code(), "PERMISSION_DENIED");
         assert!(!serde_json::to_string(&error).unwrap().contains("denied"));
     }
+}
+
+#[test]
+fn opened_handle_errors_never_claim_a_capability_path_escape() {
+    for source in [
+        std::io::Error::new(std::io::ErrorKind::PermissionDenied, "private handle"),
+        std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+    ] {
+        let error = super::map_handle_io_error(source);
+        assert_eq!(error.code(), "PERMISSION_DENIED");
+        assert!(!serde_json::to_string(&error).unwrap().contains("private"));
+    }
+
+    let error = super::map_handle_io_error(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "private handle",
+    ));
+    assert_eq!(error.code(), "IO_FAILED");
+    assert!(!serde_json::to_string(&error).unwrap().contains("private"));
 }
 
 #[test]

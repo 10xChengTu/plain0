@@ -652,9 +652,63 @@ fn readers_are_isolated_by_window_and_root_id() {
 }
 
 #[test]
-fn blocking_reader_releases_the_window_lock_and_discards_a_revoked_root_result() {
+fn read_file_returns_binary_bytes_and_rejects_wrong_or_revoked_roots() {
     let temp = TempDir::new().unwrap();
     let root = create_directory(&temp, "root");
+    let binary = [0, 255, 128, 1, 0, 42];
+    std::fs::write(root.join("binary.bin"), binary).unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+
+    let bytes = block_on(service.read_file(
+        "main",
+        root_id,
+        RelativePath::parse_wire("binary.bin").unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(bytes, binary);
+
+    let wrong_window = block_on(service.read_file(
+        "other-window",
+        root_id,
+        RelativePath::parse_wire("binary.bin").unwrap(),
+    ))
+    .unwrap_err();
+    assert_eq!(wrong_window.code(), "ROOT_NOT_AUTHORIZED");
+
+    let unknown_root: crate::workspace::RootId =
+        serde_json::from_str(r#""00000000-0000-4000-8000-000000000000""#).unwrap();
+    let wrong_root = block_on(service.read_file(
+        "main",
+        unknown_root,
+        RelativePath::parse_wire("binary.bin").unwrap(),
+    ))
+    .unwrap_err();
+    assert_eq!(wrong_root.code(), "ROOT_NOT_AUTHORIZED");
+
+    service.remove_root("main", root_id).unwrap();
+    let error = match block_on(service.read_file(
+        "main",
+        root_id,
+        RelativePath::parse_wire("binary.bin").unwrap(),
+    )) {
+        Ok(_) => panic!("revoked roots must not remain readable"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "ROOT_NOT_AUTHORIZED");
+}
+
+#[test]
+fn blocking_read_file_releases_the_window_lock_and_discards_a_revoked_root_result() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::write(root.join("identity.txt"), b"plain").unwrap();
     let service = Arc::new(WorkspaceService::new());
     let selected = block_on(service.pick_roots(
         "main",
@@ -670,10 +724,13 @@ fn blocking_reader_releases_the_window_lock_and_discards_a_revoked_root_result()
     let pending_release = Arc::clone(&release);
     let pending = tauri::async_runtime::spawn(async move {
         pending_service
-            .run_reader("main", root_id, move |_lease| {
+            .run_reader("main", root_id, move |lease| {
                 pending_entered.wait();
                 pending_release.wait();
-                Ok(())
+                crate::workspace::reader::read_file(
+                    &lease,
+                    &RelativePath::parse_wire("identity.txt").unwrap(),
+                )
             })
             .await
     });

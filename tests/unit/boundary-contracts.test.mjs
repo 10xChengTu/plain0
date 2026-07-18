@@ -114,6 +114,7 @@ describe("Plain Tauri boundary contracts", () => {
 
 const workspaceCargo = `
 cap-std = "4.0.2"
+libc = "0.2.186"
 uuid = { version = "1.24.0", features = ["v4"] }
 `;
 
@@ -147,7 +148,7 @@ describe("Plain workspace Rust boundary contracts", () => {
 		).toEqual([]);
 	});
 
-	it("requires the reviewed capability and opaque-id versions", () => {
+	it("requires the reviewed capability, nonblocking-open and opaque-id versions", () => {
 		expect(
 			validateWorkspaceRustBoundary(
 				'cap-std = "4"\nuuid = "1.24"',
@@ -156,9 +157,16 @@ describe("Plain workspace Rust boundary contracts", () => {
 		).toEqual(
 			expect.arrayContaining([
 				"Cargo.toml must pin cap-std to 4.0.2",
+				"Cargo.toml must pin libc to 0.2.186",
 				"Cargo.toml must pin uuid to 1.24.0",
 			]),
 		);
+		expect(
+			validateWorkspaceRustBoundary(
+				workspaceCargo.replace('libc = "0.2.186"', 'libc = "0.2"'),
+				workspaceSources,
+			),
+		).toContain("Cargo.toml must pin libc to 0.2.186");
 	});
 
 	it("rejects ambient I/O aliases, lossy paths and extra authorizers", () => {

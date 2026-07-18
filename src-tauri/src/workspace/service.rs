@@ -81,6 +81,18 @@ impl WorkspaceService {
         .await
     }
 
+    pub async fn read_file(
+        &self,
+        window_label: &str,
+        root_id: RootId,
+        relative_path: RelativePath,
+    ) -> Result<Vec<u8>, CommandError> {
+        self.run_reader(window_label, root_id, move |lease| {
+            reader::read_file(&lease, &relative_path)
+        })
+        .await
+    }
+
     pub fn close_window(&self, window_label: &str) {
         let Ok(mut windows) = self.windows.lock() else {
             return;

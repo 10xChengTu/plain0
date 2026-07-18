@@ -170,6 +170,7 @@ export function validateWorkspaceRustBoundary(cargoSource, rustSources) {
 	const failures = [];
 	for (const [dependency, version] of [
 		["cap-std", "4.0.2"],
+		["libc", "0.2.186"],
 		["uuid", "1.24.0"],
 	]) {
 		const escapedDependency = escapeRegularExpression(dependency);

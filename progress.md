@@ -22,11 +22,12 @@
 - [x] 建立精确 Tauri 安全合同、最终 bundle 债务基线、运行时命令/视图排除面审计和 browser mock。
 - [x] `pnpm check`、浏览器 E2E、Tauri debug bundle 和 macOS Computer Use 原生窗口验收通过。
 - [x] 完成 Rust `workspace_stat`/`workspace_read_dir` capability reader：锁外 I/O、撤销后重验、symlink swap、目录/编码/JS 数值边界均有测试。
+- [x] 完成 8 MiB 有界 `workspace_read_file`：raw bytes、增长上限、symlink/FIFO TOCTOU、错误隔离和 root 撤销均有测试。
 
 ## 下一步
 
-1. 增加 Rust 有界 `readFile` 并单独提交。
-2. 接入 TypeScript 严格 codec、browser mock、`plain-workspace:` provider 与 Workbench Explorer；bridge 与 UI 各自通过最小验证后提交。
+1. 接入 TypeScript 严格 codec 与 browser mock 文件数据面，并单独提交。
+2. 接入 `plain-workspace:` provider 与 Workbench files/model/explorer；依赖与 UI 各自通过最小验证后提交。
 3. 依次实现新建/重命名、复制/移动、确认删除和 watcher/rescan；每个可独立回滚的切片单独提交。
 4. 最后分别运行 browser mock 和真实 Tauri 文件树验收，再写回 `F020` evidence。
 
