@@ -4,10 +4,10 @@
 
 ## 当前状态
 
-- 阶段：1 — Tauri 最小闭环。
-- WIP：`F010` Tauri application and IPC foundation。
+- 阶段：1 — Tauri 最小闭环已完成。
+- WIP：无；下一个工作项为 `F020` Workspace path policy and file tree。
 - 当前 Code OSS 基线：1.130.0，Electron 42.6.0，约 16,555 个跟踪文件。
-- 工作树在本工作项开始时干净；SideX 与 monaco-vscode-api 的临时浅克隆均已删除且未纳入版本管理。
+- `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
 
 ## 已完成
 
@@ -17,29 +17,32 @@
 - [x] 明确主题只读、系统 Git、通用 DAP 和不内置语言环境的产品边界。
 - [x] 创建架构、范围、ADR、实施和测试文档。
 - [x] 完成独立 Harness 验收并修复目标路径、工作项状态和 Git workspace trust 合同。
+- [x] 建立 Tauri 2 应用、Plain 品牌窗口、显式 CSP/capability 和版本化 command/event IPC。
+- [x] 以显式 allowlist 启动模块化 Workbench，并通过四份可审计 pnpm patch 禁用 Extension Host、Accounts、Marketplace 主题浏览和 Remote tunnel 副作用。
+- [x] 建立精确 Tauri 安全合同、最终 bundle 债务基线、运行时命令/视图排除面审计和 browser mock。
+- [x] `pnpm check`、浏览器 E2E、Tauri debug bundle 和 macOS Computer Use 原生窗口验收通过。
 
 ## 下一步
 
-1. 核实现行 Tauri 2 与 `monaco-vscode-api` packages 的稳定版本和最小组合。
-2. 搭建 Tauri 2 最小应用、允许的 Workbench service 组合、类型化 IPC 和统一检查入口。
-3. 建立 service/import denylist、CSP/capability、feature evidence schema 和 browser mock。
-4. 在不依赖 Electron/Extension Host 的情况下启动实际 Tauri 窗口并完成最小 E2E。
+1. 将 `F020` 标记为唯一在制工作项，并固化 workspace root/path-policy 合同与威胁测试。
+2. 实现 Rust canonical root 授权、`(rootId, relativePath)` DTO 和越界/符号链接拒绝。
+3. 接入文件树读取、CRUD 与 watcher/rescan 的最小垂直闭环。
+4. 分别运行 Rust 合同、browser mock 和真实 Tauri 文件树验收后提交。
 
 ## 当前验收命令
 
 ```bash
-node -e "JSON.parse(require('node:fs').readFileSync('features.json', 'utf8'))"
-git diff --check
-git status --short
+pnpm check
+pnpm test:e2e:browser
+pnpm tauri build --debug --bundles app
 ```
-
-Tauri 骨架完成前不运行旧 Code OSS 全量编译；它不能验证新架构。
 
 ## 已知风险
 
 - 当前 Code OSS 1.130、`monaco-vscode-api` 对应的 Code OSS 1.128.0（upstream commit `fc3def6774c76082adf699d366f31a557ce5573f`）和 SideX 约 1.96/1.110 的接口存在漂移；旧源码只作 oracle，Rust/TS 实现都不能直接套用。
 - SideX 源码审计发现路径逃逸、宽泛 Git 执行、DAP Unicode framing、watcher 无界队列、主题格式和 CSP/capability 问题；只保留失败模式和纯逻辑参考。
-- Workbench 保留域仍混有 Chat/Agent 引用，必须按切片去耦后删除。
+- `monaco-vscode-api` 的 `missing-services.js` 仍让 bundle source map 含 203 个 Chat/Agent/MCP/Auth/Sync/Extension Runtime 债务源；运行时 guard 保证当前不可达，`F110` 必须物理清零。
+- 当前排除面 guard 在 Workbench `initialize` 后审计已注册贡献；未来引入延迟 contribution 时，必须扩展为生命周期恢复后或持续审计。
 - VSIX 主题和 GitLens-like 功能有独立许可边界，第三方资源不得未经审计打包。
 - macOS 的 WKWebView 不能由普通浏览器 E2E 代替，最终必须真实启动应用。
 

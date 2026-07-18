@@ -42,7 +42,7 @@
 			"id": "F010",
 			"name": "Tauri application and IPC foundation",
 			"phase": 1,
-			"status": "in_progress",
+			"status": "complete",
 			"acceptance": [
 				"Tauri window renders the allowlisted modular Workbench without Electron",
 				"Typed command and event bridge has stable error DTOs",
@@ -50,7 +50,29 @@
 				"Architecture checks reject AI, Auth, Sync, Gallery and Extension Host entrypoints or enablement",
 				"Feature completion evidence shape is validated automatically",
 				"One command runs TypeScript and Rust checks"
-			]
+			],
+			"evidence": {
+				"commands": [
+					"pnpm check",
+					"pnpm test:e2e:browser",
+					"pnpm tauri build --debug --bundles app"
+				],
+				"results": [
+					"pnpm check passed on 2026-07-18: formatting, TypeScript, lint, feature schema, 20 unit tests, frontend build, architecture and bundle checks, Rust fmt/clippy and 2 Rust tests",
+					"Browser E2E passed 1/1 and directly audited the registered command, view-container and view IDs against the excluded surface policy",
+					"macOS debug Plain.app bundle built successfully with the minimum Tauri capability and explicit CSP",
+					"The bundle gate records 203 transitional source-map debt files while rejecting reachable excluded commands, hosts and workers"
+				],
+				"nativeScenarios": [
+					"Computer Use opened Plain.app at tauri://localhost and observed the Plain window, Workbench editor group, Open File and Open Recent actions without Accounts",
+					"The native command palette returned 0 Results for Chat and Extensions; Plain then quit and reported isRunning=false"
+				],
+				"platformGaps": [
+					"F010 native rendering was accepted on macOS; Windows and Linux packaging remains F120",
+					"The full filesystem, search, theme, PTY, Git and DAP native matrix remains F130",
+					"The inert monaco-vscode-api missing-services debt must be physically retired before F110 can complete"
+				]
+			}
 		},
 		{
 			"id": "F020",
