@@ -1,5 +1,11 @@
 use tauri::Emitter;
 
+pub mod error;
+pub mod path_policy;
+pub mod workspace;
+
+use error::CommandError;
+
 const RUNTIME_READY_EVENT: &str = "plain://runtime-ready";
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
@@ -8,12 +14,6 @@ struct RuntimeInfo {
     application: &'static str,
     ipc_version: u16,
     runtime: &'static str,
-}
-
-#[derive(Debug, PartialEq, serde::Serialize)]
-struct CommandError {
-    code: &'static str,
-    message: String,
 }
 
 fn runtime_info_payload() -> RuntimeInfo {
@@ -28,10 +28,7 @@ fn runtime_info_payload() -> RuntimeInfo {
 fn runtime_info(app: tauri::AppHandle) -> Result<RuntimeInfo, CommandError> {
     let payload = runtime_info_payload();
     app.emit(RUNTIME_READY_EVENT, payload.clone())
-        .map_err(|error| CommandError {
-            code: "EVENT_EMIT_FAILED",
-            message: error.to_string(),
-        })?;
+        .map_err(|error| CommandError::new("EVENT_EMIT_FAILED", error.to_string()))?;
     Ok(payload)
 }
 
@@ -45,7 +42,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{runtime_info_payload, CommandError};
+    use super::runtime_info_payload;
 
     #[test]
     fn runtime_info_contract_is_camel_case_and_versioned() {
@@ -54,16 +51,5 @@ mod tests {
         assert_eq!(value["ipcVersion"], 1);
         assert_eq!(value["runtime"], "tauri");
         assert!(value.get("ipc_version").is_none());
-    }
-
-    #[test]
-    fn command_error_contract_has_stable_fields() {
-        let value = serde_json::to_value(CommandError {
-            code: "TEST_ERROR",
-            message: "failure".to_owned(),
-        })
-        .expect("command error serializes");
-        assert_eq!(value["code"], "TEST_ERROR");
-        assert_eq!(value["message"], "failure");
     }
 }
