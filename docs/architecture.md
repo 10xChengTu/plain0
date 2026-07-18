@@ -127,9 +127,13 @@ Workbench model ← Plain feature service ← typed bridge/events
 
 ### Workspace 与文件
 
-- 一个窗口拥有一个 workspace scope；它包含一个或多个经目录选择器授权的 canonical root，并为每个 root 分配稳定 id。
-- 所有路径请求采用 `(rootId, relativePath)` 或经过授权的 opaque handle，禁止跨 root 相对跳转。
-- watcher 事件只是可能合并/丢失的提示；溢出、睡眠恢复和目录重命名触发 rescan。
+- 一个窗口拥有一个独立 workspace scope；它包含一个或多个只经 Rust 原生目录选择器授权的 root，并为每个 root 分配稳定 opaque id。目录选择只授予文件访问，不等于授予 Git、PTY 或 DAP 外部进程执行信任。
+- 每个 root 在 Rust 中持有已打开的 `cap_std::fs::Dir` capability；canonical path 是仅供显示、文件身份去重和 watcher 使用的私有元数据，不是 I/O 授权依据。
+- 所有路径请求采用 `(rootId, relativePath)` 或经过授权的 opaque handle。wire path 固定使用 `/`，拒绝 absolute、prefix、`.`、`..`、NUL、空组件和平台歧义；WebView 不接收或提交原生绝对路径。
+- 读取与 CRUD 必须相对 root capability 执行，禁止先 `canonicalize`/`starts_with` 再用 ambient `std::fs`。跨 root 操作必须显式携带两个已授权 root；普通 rename 默认不覆盖。
+- symlink 可以显示；只有 capability 解析后仍位于同一 root 内的相对链接可跟随。删除链接只删除目录项，递归扫描与删除不得跟随越界链接。
+- 非 UTF-8 名称不得通过 lossy conversion 变成后续可操作路径；在无损 opaque handle 落地前返回明确的不支持状态。
+- watcher 使用每 root 一个 `notify::RecommendedWatcher`；回调只写入 dirty/rescan 状态和有界唤醒队列。事件只是可能合并、乱序或丢失的提示，队列满、watch error、睡眠恢复和 root rename/delete 都触发 capability-based rescan。
 - 保存使用临时文件加原子替换；保存前比较版本/mtime，避免静默覆盖外部修改。
 - Rust provider 实现 Workbench 文件 service 所需的窄接口，不给 WebView 全局 fs scope。
 
@@ -201,3 +205,4 @@ Workbench model ← Plain feature service ← typed bridge/events
 - `docs/decisions/0001-tauri-workbench-port.md`
 - `docs/decisions/0002-theme-only-extension-boundary.md`
 - `docs/decisions/0003-native-git-and-generic-dap.md`
+- `docs/decisions/0004-capability-workspace-roots.md`

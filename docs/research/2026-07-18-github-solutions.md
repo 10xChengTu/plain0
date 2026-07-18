@@ -64,6 +64,16 @@ Git 后端首期统一调用系统 Git CLI，使用 porcelain v2/NUL 等机器�
 - 搜索：[ripgrep](https://github.com/BurntSushi/ripgrep) 15.2 sidecar，解析 `--json`；文件遍历使用 `ignore`。
 - 文件监听：[notify](https://github.com/notify-rs/notify) 8.2；事件丢失/合并时重扫。
 
+## F020 工作区路径与文件树专项调研
+
+专项审计排除了把 Tauri `plugin-fs` scope 直接当作编辑器安全边界：Tauri core 的 [fs scope](https://github.com/tauri-apps/tauri/blob/3f62c70d6b9a9eeeb7c302b010c858405a1bb761/crates/tauri/src/scope/fs.rs) 采用 glob、allow/deny 和 canonicalize，不存在目标会退回词法匹配；[plugin-fs commands](https://github.com/tauri-apps/plugins-workspace/blob/57ac98645324c04ab2b4c969538f5d55569bf43d/plugins/fs/src/commands.rs) 在 scope 检查后继续使用 ambient `std::fs`。这类检查/使用分离无法消除 symlink swap/TOCTOU，也会迫使 WebView 接触绝对路径或宽泛 scope。
+
+采用 [cap-std](https://github.com/bytecodealliance/cap-std/blob/715e4ed607ae9a93c7446b0fa63296f7898831c2/README.md) 的目录 capability 模型：每个用户选择的 root 只在授权入口调用一次 `Dir::open_ambient_dir`，后续所有 [Dir CRUD](https://github.com/bytecodealliance/cap-std/blob/715e4ed607ae9a93c7446b0fa63296f7898831c2/cap-std/src/fs/dir.rs) 都相对已打开句柄执行。它明确拒绝 `..`、absolute path 和越界 symlink；Linux 使用 `openat2`/`RESOLVE_BENEATH`，其他支持平台逐组件解析。canonical path 因此只负责显示、去重和 watcher，不再承担权限证明。
+
+[notify 的已知限制](https://github.com/notify-rs/notify/blob/bc257049798e17029051eed24bcf5ae8a0f8cb85/notify/src/lib.rs) 包括网络文件系统可能不发事件、编辑器保存事件形态不同、父目录删除/重命名差异、超大目录可能丢事件和 Linux watch 数量限制。[notify-debouncer-full](https://github.com/notify-rs/notify/blob/bc257049798e17029051eed24bcf5ae8a0f8cb85/notify-debouncer-full/src/lib.rs) 的 rename/file-id/`need_rescan` 处理可作参考，但首版不引入其递归 file-id cache。Plain 直接使用稳定版 `notify::RecommendedWatcher`，回调只设置 dirty/rescan 并尝试写入有界唤醒队列；worker 始终通过 root capability 重扫。
+
+对应威胁合同包括：多 root 与多窗口隔离，POSIX/Windows/UNC/device/ADS/traversal 输入，中间与末端 symlink、dangling link 和 loop，不存在写目标的父目录逃逸，symlink swap 压测，非覆盖 rename，递归删除不跟随链接，以及 watcher overflow/error/乱序/丢失后的收敛。非 UTF-8 名称禁止 `to_string_lossy()` 后继续寻址；无损 opaque entry handle 延后但错误必须明确。
+
 ## 调试
 
 [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) 当前规范 1.71。DAP 使用 `Content-Length` frame 和 JSON，但不是 JSON-RPC。

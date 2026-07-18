@@ -4,8 +4,8 @@
 
 ## 当前状态
 
-- 阶段：1 — Tauri 最小闭环已完成。
-- WIP：无；下一个工作项为 `F020` Workspace path policy and file tree。
+- 阶段：2 — 编辑主链。
+- WIP：`F020` Workspace path policy and file tree。
 - 当前 Code OSS 基线：1.130.0，Electron 42.6.0，约 16,555 个跟踪文件。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
 
@@ -24,17 +24,17 @@
 
 ## 下一步
 
-1. 将 `F020` 标记为唯一在制工作项，并固化 workspace root/path-policy 合同与威胁测试。
-2. 实现 Rust canonical root 授权、`(rootId, relativePath)` DTO 和越界/符号链接拒绝。
-3. 接入文件树读取、CRUD 与 watcher/rescan 的最小垂直闭环。
-4. 分别运行 Rust 合同、browser mock 和真实 Tauri 文件树验收后提交。
+1. 实现每窗口隔离的 Rust workspace scope、原生目录选择授权和 opaque root id。
+2. 固化 `(rootId, relativePath)` 路径合同，以目录 capability 拒绝 traversal、越界 symlink 和 TOCTOU。
+3. 依次接入只读文件树、新建/重命名、复制/移动/确认删除和 watcher/rescan；每个切片独立提交。
+4. 最后分别运行 browser mock 和真实 Tauri 文件树验收，再写回 `F020` evidence。
 
 ## 当前验收命令
 
 ```bash
 pnpm check
-pnpm test:e2e:browser
-pnpm tauri build --debug --bundles app
+cargo test --manifest-path src-tauri/Cargo.toml workspace
+pnpm test:e2e:browser -- workspace.spec.ts
 ```
 
 ## 已知风险
@@ -43,6 +43,7 @@ pnpm tauri build --debug --bundles app
 - SideX 源码审计发现路径逃逸、宽泛 Git 执行、DAP Unicode framing、watcher 无界队列、主题格式和 CSP/capability 问题；只保留失败模式和纯逻辑参考。
 - `monaco-vscode-api` 的 `missing-services.js` 仍让 bundle source map 含 203 个 Chat/Agent/MCP/Auth/Sync/Extension Runtime 债务源；运行时 guard 保证当前不可达，`F110` 必须物理清零。
 - 当前排除面 guard 在 Workbench `initialize` 后审计已注册贡献；未来引入延迟 contribution 时，必须扩展为生命周期恢复后或持续审计。
+- 工作区安全依赖已打开的 Rust 目录 capability；canonical path 只允许用于显示、去重与 watcher，不能退化为 `starts_with` 后调用 ambient `std::fs`。
 - VSIX 主题和 GitLens-like 功能有独立许可边界，第三方资源不得未经审计打包。
 - macOS 的 WKWebView 不能由普通浏览器 E2E 代替，最终必须真实启动应用。
 

@@ -1,7 +1,7 @@
 {
 	"schemaVersion": 2,
 	"updatedAt": "2026-07-18",
-	"currentPhase": 1,
+	"currentPhase": 2,
 	"wipLimit": 1,
 	"completionEvidenceFields": [
 		"commands",
@@ -78,7 +78,7 @@
 			"id": "F020",
 			"name": "Workspace path policy and file tree",
 			"phase": 2,
-			"status": "planned",
+			"status": "in_progress",
 			"acceptance": [
 				"Open folder and file tree CRUD work in a scoped workspace",
 				"A workspace can hold multiple independently authorized canonical roots",
