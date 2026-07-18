@@ -6,6 +6,8 @@ import {
 	validateTauriApiBoundary,
 	validateTauriConfiguration,
 	validateWorkspaceCopyCommandRegistration,
+	validateWorkspaceMoveBoundary,
+	validateWorkspaceMoveCommandRegistration,
 	validateWorkspaceProviderBootstrap,
 	validateWorkspaceProviderCopyBoundary,
 	validateWorkspaceRustBoundary as validateWorkspaceRustBoundaryContract,
@@ -120,6 +122,7 @@ const workspaceCargo = `
 cap-std = "4.0.2"
 libc = "0.2.186"
 rustix = { version = "=1.1.4", features = ["fs"] }
+sha2 = { version = "=0.10.9", default-features = false, features = [] }
 uuid = { version = "1.24.0", features = ["v4"] }
 `;
 
@@ -131,15 +134,29 @@ const exactRustixDependency = Object.freeze({
 	target: 'cfg(any(target_os = "linux", target_os = "macos"))',
 });
 
+const exactSha2Dependency = Object.freeze({
+	name: "sha2",
+	req: "=0.10.9",
+	kind: null,
+	rename: null,
+	target: null,
+	optional: false,
+	uses_default_features: false,
+	features: [],
+});
+
 function validateWorkspaceRustBoundary(
 	cargoSource,
 	rustSources,
 	cargoDependencies = [],
+	resolvedSha2Features = ["default", "std"],
 ) {
-	return validateWorkspaceRustBoundaryContract(cargoSource, rustSources, [
-		exactRustixDependency,
-		...cargoDependencies,
-	]);
+	return validateWorkspaceRustBoundaryContract(
+		cargoSource,
+		rustSources,
+		[exactRustixDependency, exactSha2Dependency, ...cargoDependencies],
+		resolvedSha2Features,
+	);
 }
 
 const workspaceSources = [
@@ -214,14 +231,32 @@ const DIRECTORY_COPY_LIMITS: DirectoryCopyLimits = DirectoryCopyLimits {
   file_bytes: MAX_COPY_FILE_BYTES as u64,
   file_aggregate_bytes: MAX_COPY_TREE_BYTES,
 };
+struct PublishedDirectoryReceipt {
+  source_directories: BTreeMap<PathBuf, DirectorySnapshot>,
+  member_sets: BTreeMap<PathBuf, BTreeSet<OsString>>,
+  removed_aliases: BTreeMap<FileIdentity, u64>,
+}
 fn copy_directory(
   source_lease: &Lease,
   source_path: &Path,
   target_lease: &Lease,
   target_path: &Path,
 ) {
+	copy_directory_with_receipt(
+		source_lease,
+		source_path,
+		target_lease,
+		target_path,
+	);
+}
+fn copy_directory_with_receipt(
+	source_lease: &Lease,
+	source_path: &Path,
+	target_lease: &Lease,
+	target_path: &Path,
+) {
   let mut hooks = NoopHooks;
-  copy_directory_with_limits_and_hooks(
+  copy_directory_with_limits_and_hooks_receipt(
     source_lease,
     source_path,
     target_lease,
@@ -229,6 +264,27 @@ fn copy_directory(
     DIRECTORY_COPY_LIMITS,
     &mut hooks,
   );
+}
+fn copy_directory_with_limits_and_hooks_receipt(
+  source_lease: &Lease,
+  source_path: &Path,
+  target_lease: &Lease,
+  target_path: &Path,
+  limits: DirectoryCopyLimits,
+  hooks: &mut Hooks,
+) -> Result<PublishedDirectoryReceipt, CommandError> {
+  let source_directories = manifest.owned_directory_map()?;
+  let member_sets = prepare_member_sets(&manifest)?;
+  let removed_aliases = prepare_alias_groups(&manifest);
+  let prepared = PublishedDirectoryReceipt {
+    source_directories,
+    member_sets,
+    removed_aliases,
+  };
+  if let Err(error) = staged.publish(&target_name) {
+    return staged.fail_with_cleanup(error);
+  }
+  Ok(prepared)
 }
 fn open_source_root(parent: &Dir) {
   let _ = parent.open_dir_nofollow("source");
@@ -293,6 +349,220 @@ function mutateWorkspaceSource(sources, relativePath, transform) {
 			: entry,
 	);
 }
+
+const workspaceMoveSources = [
+	...mutateWorkspaceSource(
+		mutateWorkspaceSource(
+			mutateWorkspaceSource(
+				mutateWorkspaceSource(
+					workspaceSources,
+					"src-tauri/src/workspace/writer.rs",
+					(source) => `${source}
+impl StagedFile {
+  fn cleanup(&mut self) { let _ = self.parent.remove_file(&self.name); }
+  fn publish(&mut self, target_name: &Path) -> Result<(), CommandError> {
+    publish_no_replace(self.parent, &self.name, target_name)?;
+    self.active = false;
+    Ok(())
+  }
+}
+impl StagedSymlink {
+  fn cleanup(&mut self) { let _ = self.parent.remove_file(&self.name); }
+  fn publish(&mut self, target_name: &Path) -> Result<(), CommandError> {
+    publish_no_replace(self.parent, &self.name, target_name)?;
+    self.active = false;
+    Ok(())
+  }
+}
+fn transfer_regular_file() -> Result<PublishedFileReceipt, CommandError> {
+  let digest = [0_u8; 32];
+  let prepared = PublishedFileReceipt { digest };
+  if let Err(error) = staged.publish(&target_name) {
+    return fail_with_stage_cleanup(&mut staged, error);
+  }
+  Ok(prepared)
+}
+fn transfer_symlink() -> Result<PublishedSymlinkReceipt, CommandError> {
+  let prepared = PublishedSymlinkReceipt { payload };
+  if let Err(error) = staged.publish(&target_name) {
+    return fail_with_symlink_stage_cleanup(&mut staged, error);
+  }
+  Ok(prepared)
+}`,
+				),
+				"src-tauri/src/workspace/directory_copy.rs",
+				(source) => `${source}
+impl StagedTree {
+  fn cleanup(&mut self, parent: &Dir, name: &Path) {
+    let _ = parent.remove_file(name);
+    let _ = parent.remove_dir(name);
+    let _ = self.parent.remove_dir(&self.name);
+  }
+  fn publish(&mut self, target_name: &Path) -> Result<(), CommandError> {
+    publish_no_replace(self.parent, &self.name, target_name)?;
+    self.active = false;
+    Ok(())
+  }
+}
+fn consume_directory_move_receipt() {
+  let mut removed_entries = 0_u32;
+  for index in indexes {
+    let next_removed_entries = match removed_entries.checked_add(1) {
+      Some(count) => count,
+      None => return incomplete(),
+    };
+    let result = delete_manifest_entry(index);
+    if let Err(reason) = result { return incomplete(reason); }
+    removed_entries = next_removed_entries;
+  }
+  let next_removed_entries = removed_entries.checked_add(1).unwrap_or(removed_entries);
+  let _ = next_removed_entries;
+  let _ = remove_verified_source_directory(&source_parent, source_basename);
+}
+fn delete_manifest_entry() {
+  match kind {
+    File => {
+      let next = removed.checked_add(1).ok_or(WorkspaceMoveIncompleteReason::SourceUnverifiable)?;
+      let alias_count = removed_aliases.get_mut(&identity).ok_or(WorkspaceMoveIncompleteReason::SourceUnverifiable)?;
+      *alias_count = next;
+      if remove_verified_source_file(&source_parent, source_basename).is_err() {
+        *alias_count = removed;
+        return Err(WorkspaceMoveIncompleteReason::DeleteFailed);
+      }
+    }
+    Symlink => {
+      let next = removed.checked_add(1).ok_or(WorkspaceMoveIncompleteReason::SourceUnverifiable)?;
+      let alias_count = removed_aliases.get_mut(&identity).ok_or(WorkspaceMoveIncompleteReason::SourceUnverifiable)?;
+      *alias_count = next;
+      if remove_verified_source_file(&source_parent, source_basename).is_err() {
+        *alias_count = removed;
+        return Err(WorkspaceMoveIncompleteReason::DeleteFailed);
+      }
+    }
+    Directory => {
+      remove_verified_source_directory(&source_parent, source_basename)
+        .map_err(|_| WorkspaceMoveIncompleteReason::DeleteFailed)?;
+    }
+  }
+  Ok(())
+}
+fn verify_directory_preflight() {}
+fn verify_source_tree() {}
+fn verify_target_tree() {}
+fn verify_source_member_sets() {}
+fn source_root_for_delete() {}
+fn target_root_current() {}
+fn verify_target_entry() {}
+fn open_source_parent_prepared() {}
+fn open_source_directory_prepared() {}
+fn open_published_parent() {}
+fn verify_published_member_sets() {}
+fn verify_published_directory_members() {}
+fn verify_exact_members() {}
+fn ensure_directory_empty() {}`,
+			),
+			"src-tauri/src/workspace/commands.rs",
+			(source) => `${source}
+#[tauri::command]
+pub(crate) async fn workspace_move(
+  window: WebviewWindow,
+  service: State<'_, WorkspaceService>,
+  request: WorkspaceMoveRequest,
+) -> Result<WorkspaceMoveResult, CommandError> {
+  let (source_root_id, source_path, target_root_id, target_path) = request.into_parts()?;
+  WorkspaceService::move_entry(
+    service.inner(),
+    window.label(),
+    source_root_id,
+    source_path,
+    target_root_id,
+    target_path,
+  ).await
+}`,
+		),
+		"src-tauri/src/lib.rs",
+		(source) =>
+			source.replace(
+				"workspace::commands::workspace_copy,",
+				"workspace::commands::workspace_copy,\n      workspace::commands::workspace_move,",
+			),
+	),
+	{
+		relativePath: "src-tauri/src/workspace/dto.rs",
+		source: `
+struct WorkspaceMoveRequest {
+  source_root_id: String,
+  source_path: String,
+  target_root_id: String,
+  target_path: String,
+}
+impl WorkspaceMoveRequest {
+  fn into_parts(self) -> Result<Parts, CommandError> {
+    if self.source_root_id == self.target_root_id { return Err(invalid_request()); }
+    Ok(parse_parts(self))
+  }
+}
+`,
+	},
+	{
+		relativePath: "src-tauri/src/workspace/service.rs",
+		source: `
+impl WorkspaceService {
+  async fn move_entry(
+    &self,
+    source_root_id: String,
+    target_root_id: String,
+  ) -> Result<WorkspaceMoveResult, CommandError> {
+    if source_root_id == target_root_id { return Err(invalid_request()); }
+    self.run_dual_root_mutation(source_root_id, target_root_id).await
+  }
+}
+`,
+	},
+	{
+		relativePath: "src-tauri/src/workspace/move_entry.rs",
+		source: `
+pub(super) enum PublishedCopyReceipt { File, Directory }
+
+fn remove_verified_source_file(
+  parent: &Dir,
+  basename: &Path,
+) -> std::io::Result<()> {
+  parent.remove_file(basename)
+}
+
+fn remove_verified_source_directory(
+  parent: &Dir,
+  basename: &Path,
+) -> std::io::Result<()> {
+  parent.remove_dir(basename)
+}
+
+fn consume_published_copy_receipt(
+  receipt: PublishedCopyReceipt,
+) -> WorkspaceMoveResult {
+  match receipt {
+    PublishedCopyReceipt::File => WorkspaceMoveResult::Moved,
+    PublishedCopyReceipt::Directory => WorkspaceMoveResult::Moved,
+  }
+}
+
+fn consume_file_receipt() {
+  let _ = remove_verified_source_file(&source_parent, &receipt.source_name);
+}
+
+fn consume_symlink_receipt() {
+  let _ = remove_verified_source_file(&source_parent, &receipt.source_name);
+}
+
+fn finish_move(
+  receipt: PublishedCopyReceipt,
+) -> Result<WorkspaceMoveResult, CommandError> {
+  Ok(consume_published_copy_receipt(receipt))
+}
+`,
+	},
+];
 
 const workspaceCopyLimits = Object.freeze([
 	{
@@ -585,6 +855,117 @@ fn copy_directory_for_test(limits: DirectoryCopyLimits, hooks: &mut Hooks) {
 					dependencies,
 				),
 			).toContain(failure);
+		}
+	});
+
+	it("locks the sole direct sha2 edge and every Cargo metadata field", () => {
+		const dependencies = [exactRustixDependency, exactSha2Dependency];
+		expect(
+			validateWorkspaceRustBoundaryContract(
+				workspaceCargo,
+				workspaceSources,
+				dependencies,
+				["default", "std"],
+			),
+		).toEqual([]);
+
+		const cases = [
+			[
+				[exactRustixDependency],
+				"Cargo metadata must contain exactly one direct sha2 dependency",
+			],
+			[
+				[exactRustixDependency, exactSha2Dependency, exactSha2Dependency],
+				"Cargo metadata must contain exactly one direct sha2 dependency",
+			],
+			[
+				[exactRustixDependency, { ...exactSha2Dependency, req: "^0.10.9" }],
+				"the direct sha2 dependency must require exactly =0.10.9",
+			],
+			[
+				[exactRustixDependency, { ...exactSha2Dependency, rename: "digest" }],
+				"the direct sha2 dependency must remain unrenamed",
+			],
+			[
+				[exactRustixDependency, { ...exactSha2Dependency, kind: "dev" }],
+				"the direct sha2 dependency must be a normal runtime edge",
+			],
+			[
+				[exactRustixDependency, { ...exactSha2Dependency, kind: "build" }],
+				"the direct sha2 dependency must be a normal runtime edge",
+			],
+			[
+				[
+					exactRustixDependency,
+					{ ...exactSha2Dependency, target: "cfg(unix)" },
+				],
+				"the direct sha2 dependency must not be target-specific",
+			],
+			[
+				[exactRustixDependency, { ...exactSha2Dependency, optional: true }],
+				"the direct sha2 dependency must not be optional",
+			],
+			[
+				[
+					exactRustixDependency,
+					{ ...exactSha2Dependency, uses_default_features: true },
+				],
+				"the direct sha2 dependency must disable default features",
+			],
+			[
+				[exactRustixDependency, { ...exactSha2Dependency, features: ["asm"] }],
+				"the direct sha2 dependency must enable no explicit features",
+			],
+		];
+		for (const [hostileDependencies, failure] of cases) {
+			expect(
+				validateWorkspaceRustBoundaryContract(
+					workspaceCargo,
+					workspaceSources,
+					hostileDependencies,
+					["default", "std"],
+				),
+			).toContain(failure);
+		}
+	});
+
+	it("locks the exact sha2 manifest declaration and resolved feature set", () => {
+		const declarationFailure =
+			'Cargo.toml must declare exactly one sha2 = { version = "=0.10.9", default-features = false, features = [] } dependency';
+		for (const hostileDeclaration of [
+			'sha2 = "0.10.9"',
+			'sha2 = { version = "0.10.9", default-features = false, features = [] }',
+			'sha2 = { version = "=0.10.9", default-features = true, features = [] }',
+			'sha2 = { version = "=0.10.9", default-features = false }',
+			'sha2 = { version = "=0.10.9", default-features = false, features = ["std"] }',
+		]) {
+			expect(
+				validateWorkspaceRustBoundary(
+					workspaceCargo.replace(
+						'sha2 = { version = "=0.10.9", default-features = false, features = [] }',
+						hostileDeclaration,
+					),
+					workspaceSources,
+				),
+			).toContain(declarationFailure);
+		}
+
+		for (const features of [
+			[],
+			["std"],
+			["default"],
+			["asm", "default", "std"],
+		]) {
+			expect(
+				validateWorkspaceRustBoundary(
+					workspaceCargo,
+					workspaceSources,
+					[],
+					features,
+				),
+			).toContain(
+				"resolved sha2@0.10.9 features must remain exactly default and std",
+			);
 		}
 	});
 
@@ -1461,6 +1842,495 @@ pub(crate) async fn workspace_copy() {}
 		);
 		expect(validateWorkspaceCopyCommandRegistration(bypassedRoute)).toContain(
 			"workspace_copy must route exactly once through WorkspaceService::copy_entry",
+		);
+	});
+
+	it("requires the unique workspace_move command, result and service route", () => {
+		expect(
+			validateWorkspaceMoveCommandRegistration(workspaceMoveSources),
+		).toEqual([]);
+
+		const mutations = [
+			[
+				"src-tauri/src/workspace/commands.rs",
+				(source) =>
+					source.replace(
+						"#[tauri::command]\npub(crate) async fn workspace_move",
+						"pub(crate) async fn workspace_move",
+					),
+				"workspace/commands.rs must define exactly one audited workspace_move Tauri command",
+			],
+			[
+				"src-tauri/src/workspace/commands.rs",
+				(source) =>
+					source.replace(
+						"request: WorkspaceMoveRequest",
+						"request: WorkspaceCopyRequest",
+					),
+				"workspace_move must accept request: WorkspaceMoveRequest and return Result<WorkspaceMoveResult, CommandError>",
+			],
+			[
+				"src-tauri/src/workspace/commands.rs",
+				(source) =>
+					source.replace(
+						"Result<WorkspaceMoveResult, CommandError>",
+						"Result<(), CommandError>",
+					),
+				"workspace_move must accept request: WorkspaceMoveRequest and return Result<WorkspaceMoveResult, CommandError>",
+			],
+			[
+				"src-tauri/src/workspace/commands.rs",
+				(source) =>
+					source.replace(
+						"WorkspaceService::move_entry(",
+						"writer::move_entry(",
+					),
+				"workspace_move must route exactly once through WorkspaceService::move_entry",
+			],
+			[
+				"src-tauri/src/lib.rs",
+				(source) =>
+					source.replace(
+						"workspace::commands::workspace_move,",
+						"registered_move,",
+					),
+				"src-tauri/src/lib.rs must register workspace::commands::workspace_move exactly once in generate_handler",
+			],
+		];
+		for (const [relativePath, transform, failure] of mutations) {
+			const hostile = mutateWorkspaceSource(
+				workspaceMoveSources,
+				relativePath,
+				transform,
+			);
+			expect(validateWorkspaceMoveCommandRegistration(hostile)).toContain(
+				failure,
+			);
+		}
+	});
+
+	it("keeps PublishedCopyReceipt Rust-only and consumes publication as a structured terminal state", () => {
+		expect(validateWorkspaceMoveBoundary(workspaceMoveSources)).toEqual([]);
+
+		const receiptCases = [
+			[
+				"src-tauri/src/workspace/move_entry.rs",
+				(source) =>
+					source.replace(
+						"pub(super) enum PublishedCopyReceipt",
+						"#[derive(serde::Serialize)]\npub(super) enum PublishedCopyReceipt",
+					),
+				"PublishedCopyReceipt must not implement Serde",
+			],
+			[
+				"src-tauri/src/workspace/move_entry.rs",
+				(source) =>
+					`${source}\nimpl serde::Deserialize for PublishedCopyReceipt {}`,
+				"PublishedCopyReceipt must not implement Serde",
+			],
+			[
+				"src-tauri/src/workspace/writer.rs",
+				(source) =>
+					`${source}\nimpl serde::Serialize for PublishedCopyReceipt {}`,
+				"PublishedCopyReceipt must not implement Serde",
+			],
+			[
+				"src-tauri/src/workspace/dto.rs",
+				(source) => `${source}\nstruct WireReceipt(PublishedCopyReceipt);`,
+				"src-tauri/src/workspace/dto.rs must not expose PublishedCopyReceipt across DTO or IPC boundaries",
+			],
+			[
+				"src-tauri/src/workspace/commands.rs",
+				(source) => `${source}\nfn leak(receipt: PublishedCopyReceipt) {}`,
+				"src-tauri/src/workspace/commands.rs must not expose PublishedCopyReceipt across DTO or IPC boundaries",
+			],
+			[
+				"src-tauri/src/workspace/move_entry.rs",
+				(source) =>
+					source.replace(
+						"receipt: PublishedCopyReceipt,",
+						"receipt: &PublishedCopyReceipt,",
+					),
+				"consume_published_copy_receipt must consume PublishedCopyReceipt by value and return WorkspaceMoveResult directly",
+			],
+			[
+				"src-tauri/src/workspace/move_entry.rs",
+				(source) =>
+					source.replace(
+						") -> WorkspaceMoveResult {\n  match receipt",
+						") -> Result<WorkspaceMoveResult, CommandError> {\n  match receipt",
+					),
+				"consume_published_copy_receipt must consume PublishedCopyReceipt by value and return WorkspaceMoveResult directly",
+			],
+			[
+				"src-tauri/src/workspace/move_entry.rs",
+				(source) =>
+					source.replace(
+						"  match receipt {",
+						"  verify_target()?;\n  match receipt {",
+					),
+				"consume_published_copy_receipt must not surface an ordinary error or panic after publication",
+			],
+			[
+				"src-tauri/src/workspace/move_entry.rs",
+				(source) =>
+					source.replace(
+						"  Ok(consume_published_copy_receipt(receipt))",
+						"  let result = consume_published_copy_receipt(receipt);\n  verify_target()?;\n  Ok(result)",
+					),
+				"the published receipt consumer must be the final successful expression with no fallible post-publication gap",
+			],
+		];
+		for (const [relativePath, transform, failure] of receiptCases) {
+			const hostile = mutateWorkspaceSource(
+				workspaceMoveSources,
+				relativePath,
+				transform,
+			);
+			expect(validateWorkspaceMoveBoundary(hostile)).toContain(failure);
+		}
+	});
+
+	it("prepares every receipt before publication and leaves no fallible success tail", () => {
+		const preparationFailure =
+			"file, symlink and directory receipts must be fully prepared before their sole publication call";
+		for (const [relativePath, transform] of [
+			[
+				"src-tauri/src/workspace/writer.rs",
+				(source) =>
+					source.replace(
+						"  let prepared = PublishedFileReceipt { digest };\n  if let Err(error) = staged.publish(&target_name) {",
+						"  if let Err(error) = staged.publish(&target_name) {",
+					),
+			],
+			[
+				"src-tauri/src/workspace/writer.rs",
+				(source) =>
+					source.replace(
+						"  }\n  Ok(prepared)\n}\nfn transfer_symlink",
+						"  }\n  verify_target()?;\n  Ok(prepared)\n}\nfn transfer_symlink",
+					),
+			],
+			[
+				"src-tauri/src/workspace/directory_copy.rs",
+				(source) =>
+					source.replace(
+						"  let prepared = PublishedDirectoryReceipt {",
+						"  let prepared = UnpublishedDirectoryReceipt {",
+					),
+			],
+		]) {
+			const hostile = mutateWorkspaceSource(
+				workspaceMoveSources,
+				relativePath,
+				transform,
+			);
+			expect(validateWorkspaceMoveBoundary(hostile)).toContain(
+				preparationFailure,
+			);
+		}
+
+		const fallibleTail = mutateWorkspaceSource(
+			workspaceMoveSources,
+			"src-tauri/src/workspace/writer.rs",
+			(source) =>
+				source.replace(
+					"publish_no_replace(self.parent, &self.name, target_name)?;\n    self.active = false;",
+					"publish_no_replace(self.parent, &self.name, target_name)?;\n    self.sync_all()?;\n    self.active = false;",
+				),
+		);
+		expect(validateWorkspaceMoveBoundary(fallibleTail)).toContain(
+			"staging publish methods must have no fallible operation after NOREPLACE succeeds",
+		);
+	});
+
+	it("prepares directory move collections and makes post-delete accounting infallible", () => {
+		const preparedFailure =
+			"PublishedDirectoryReceipt must prepare directory maps, member sets and alias groups before publication";
+		for (const transform of [
+			(source) =>
+				source.replace(
+					"  source_directories: BTreeMap<PathBuf, DirectorySnapshot>,",
+					"  directories_after_publish: BTreeMap<PathBuf, DirectorySnapshot>,",
+				),
+			(source) =>
+				source.replace(
+					"  let member_sets = prepare_member_sets(&manifest)?;",
+					"  let member_sets = late_member_sets(&manifest)?;",
+				),
+			(source) =>
+				source.replace(
+					"  let removed_aliases = prepare_alias_groups(&manifest);",
+					"  let removed_aliases = late_alias_groups(&manifest);",
+				),
+		]) {
+			const hostile = mutateWorkspaceSource(
+				workspaceMoveSources,
+				"src-tauri/src/workspace/directory_copy.rs",
+				transform,
+			);
+			expect(validateWorkspaceMoveBoundary(hostile)).toContain(preparedFailure);
+		}
+
+		for (const allocation of [
+			"let _ = build_manifest(source);",
+			"let _ = receipt.manifest.directory_map();",
+			"let _ = BTreeSet::new();",
+			"receipt.member_sets.insert(path, set);",
+			"let _ = entry.clone();",
+		]) {
+			const hostile = mutateWorkspaceSource(
+				workspaceMoveSources,
+				"src-tauri/src/workspace/directory_copy.rs",
+				(source) =>
+					source.replace(
+						"fn verify_target_tree() {}",
+						`fn verify_target_tree() { ${allocation} }`,
+					),
+			);
+			expect(validateWorkspaceMoveBoundary(hostile)).toContain(
+				"directory move must not build, clone or grow receipt collections after publication",
+			);
+		}
+
+		const accountingFailure =
+			"directory move must prepare counters before removal and perform only infallible bookkeeping after a successful source delete";
+		for (const transform of [
+			(source) =>
+				source.replace(
+					"    removed_entries = next_removed_entries;",
+					"    verify_receipt()?;\n    removed_entries = next_removed_entries;",
+				),
+			(source) =>
+				source.replace(
+					"      *alias_count = next;\n      if remove_verified_source_file(&source_parent, source_basename).is_err() {",
+					"      if remove_verified_source_file(&source_parent, source_basename).is_err() {",
+				),
+			(source) =>
+				source.replace(
+					"        return Err(WorkspaceMoveIncompleteReason::DeleteFailed);\n      }",
+					"        return Err(WorkspaceMoveIncompleteReason::DeleteFailed);\n      }\n      alias_count.checked_add(1)?;",
+				),
+		]) {
+			const hostile = mutateWorkspaceSource(
+				workspaceMoveSources,
+				"src-tauri/src/workspace/directory_copy.rs",
+				transform,
+			);
+			expect(validateWorkspaceMoveBoundary(hostile)).toContain(
+				accountingFailure,
+			);
+		}
+	});
+
+	it("rejects same-root move paths before mutation at both DTO and service layers", () => {
+		for (const relativePath of [
+			"src-tauri/src/workspace/dto.rs",
+			"src-tauri/src/workspace/service.rs",
+		]) {
+			const hostile = mutateWorkspaceSource(
+				workspaceMoveSources,
+				relativePath,
+				(source) =>
+					source
+						.replace(
+							"source_root_id == target_root_id",
+							"source_root_id != target_root_id",
+						)
+						.replace(
+							"self.source_root_id == self.target_root_id",
+							"self.source_root_id != self.target_root_id",
+						),
+			);
+			expect(validateWorkspaceMoveBoundary(hostile)).toContain(
+				relativePath.endsWith("dto.rs")
+					? "WorkspaceMoveRequest::into_parts must directly reject equal source and target roots"
+					: "WorkspaceService::move_entry must reject equal roots before entering the mutation/copy route",
+			);
+		}
+		for (const relativePath of [
+			"src-tauri/src/workspace/dto.rs",
+			"src-tauri/src/workspace/service.rs",
+		]) {
+			const noRejection = mutateWorkspaceSource(
+				workspaceMoveSources,
+				relativePath,
+				(source) =>
+					source.replace(
+						"return Err(invalid_request());",
+						"let _same_root_was_observed = true;",
+					),
+			);
+			expect(validateWorkspaceMoveBoundary(noRejection)).toContain(
+				relativePath.endsWith("dto.rs")
+					? "WorkspaceMoveRequest::into_parts must directly reject equal source and target roots"
+					: "WorkspaceService::move_entry must reject equal roots before entering the mutation/copy route",
+			);
+		}
+
+		const tooLate = mutateWorkspaceSource(
+			workspaceMoveSources,
+			"src-tauri/src/workspace/service.rs",
+			(source) =>
+				source.replace(
+					"if source_root_id == target_root_id { return Err(invalid_request()); }\n    self.run_dual_root_mutation(source_root_id, target_root_id).await",
+					"let result = self.run_dual_root_mutation(source_root_id, target_root_id).await;\n    if source_root_id == target_root_id { return Err(invalid_request()); }\n    result",
+				),
+		);
+		expect(validateWorkspaceMoveBoundary(tooLate)).toContain(
+			"WorkspaceService::move_entry must reject equal roots before entering the mutation/copy route",
+		);
+	});
+
+	it("allows only audited staging cleanup and move parent-handle basename deletion", () => {
+		const helperFailure =
+			"source deletion must use the two audited move_entry parent-handle plus basename helpers";
+		for (const hostileCall of [
+			'parent.remove_file(Path::new("nested/source"))',
+			"target_parent.remove_file(basename)",
+			'parent.remove_dir(Path::new("nested/source"))',
+		]) {
+			const hostile = mutateWorkspaceSource(
+				workspaceMoveSources,
+				"src-tauri/src/workspace/move_entry.rs",
+				(source) =>
+					source.replace(
+						hostileCall.includes("remove_dir")
+							? "parent.remove_dir(basename)"
+							: "parent.remove_file(basename)",
+						hostileCall,
+					),
+			);
+			expect(validateWorkspaceMoveBoundary(hostile)).toContain(helperFailure);
+		}
+
+		for (const [relativePath, original, replacement] of [
+			[
+				"src-tauri/src/workspace/writer.rs",
+				"self.parent.remove_file(&self.name)",
+				"self.parent.remove_file(target_name)",
+			],
+			[
+				"src-tauri/src/workspace/directory_copy.rs",
+				"parent.remove_file(name)",
+				"parent.remove_file(other_name)",
+			],
+			[
+				"src-tauri/src/workspace/directory_copy.rs",
+				"self.parent.remove_dir(&self.name)",
+				"self.parent.remove_dir(target_name)",
+			],
+		]) {
+			const hostile = mutateWorkspaceSource(
+				workspaceMoveSources,
+				relativePath,
+				(source) => source.replace(original, replacement),
+			);
+			expect(validateWorkspaceMoveBoundary(hostile)).toContain(
+				`${relativePath} contains source deletion outside the exact staging cleanup allowlist`,
+			);
+		}
+
+		const ufcs = mutateWorkspaceSource(
+			workspaceMoveSources,
+			"src-tauri/src/workspace/move_entry.rs",
+			(source) =>
+				`${source}\nfn bypass(parent: &Dir, basename: &Path) { let _ = Dir::remove_file(parent, basename); }`,
+		);
+		expect(validateWorkspaceMoveBoundary(ufcs)).toContain(
+			"src-tauri/src/workspace/move_entry.rs must not alias, re-export or call source deletion through UFCS",
+		);
+
+		const targetRollback = mutateWorkspaceSource(
+			workspaceMoveSources,
+			"src-tauri/src/workspace/move_entry.rs",
+			(source) =>
+				source.replace(
+					"remove_verified_source_file(&source_parent, &receipt.source_name)",
+					"remove_verified_source_file(&target_parent, &receipt.target_name)",
+				),
+		);
+		expect(validateWorkspaceMoveBoundary(targetRollback)).toContain(
+			"verified source deletion helpers must be called only from the audited source receipt consumers",
+		);
+	});
+
+	it("rejects recursive, open-dir, unlink, process, shell, walker and ambient-fs deletion bypasses", () => {
+		const relativePath = "src-tauri/src/workspace/move_entry.rs";
+		const cases = [
+			[
+				'fn bypass(parent: &Dir) { parent.remove_dir_all("source"); }',
+				"must not use broad, open-directory or direct unlink deletion",
+			],
+			[
+				"fn bypass(parent: &Dir) { parent.remove_open_dir_all(opened); }",
+				"must not use broad, open-directory or direct unlink deletion",
+			],
+			[
+				'fn bypass(parent: &Dir) { rustix::fs::unlinkat(parent, "source", AtFlags::empty()); }',
+				"must not use broad, open-directory or direct unlink deletion",
+			],
+			[
+				'use std::process::Command; fn bypass() { Command::new("rm"); }',
+				"must not use process or shell deletion bypasses",
+			],
+			[
+				"use tauri_plugin_shell::ShellExt; fn bypass() { Shell::new(); }",
+				"must not use process or shell deletion bypasses",
+			],
+			[
+				'use async_process as runner; fn bypass() { runner::Command::new("rm"); }',
+				"must not use process or shell deletion bypasses",
+			],
+			[
+				"fn bypass(command: *const i8) { libc::system(command); }",
+				"must not use process or shell deletion bypasses",
+			],
+		];
+		for (const [injection, suffix] of cases) {
+			const hostile = mutateWorkspaceSource(
+				workspaceMoveSources,
+				relativePath,
+				(source) => `${source}\n${injection}`,
+			);
+			expect(validateWorkspaceMoveBoundary(hostile)).toContain(
+				`${relativePath} ${suffix}`,
+			);
+		}
+
+		const followingOpen = mutateWorkspaceSource(
+			workspaceMoveSources,
+			relativePath,
+			(source) =>
+				`${source}\nfn bypass(root: &Dir, parent: &Path) { let _ = root.open_dir(parent); }`,
+		);
+		expect(validateWorkspaceMoveBoundary(followingOpen)).toContain(
+			"workspace/move_entry.rs must reopen directory chains only with capability-relative nofollow operations",
+		);
+
+		const walker = mutateWorkspaceSource(
+			workspaceMoveSources,
+			relativePath,
+			(source) => `${source}\nuse walkdir::WalkDir;`,
+		);
+		expect(
+			validateWorkspaceRustBoundary(workspaceCargo, walker, [
+				{ name: "walkdir", req: "^2", kind: null, rename: null },
+			]),
+		).toEqual(
+			expect.arrayContaining([
+				"Cargo metadata must not contain direct recursive-directory dependency walkdir, including renamed dependencies",
+				`${relativePath} must not bind, alias or re-export recursive-directory crate walkdir`,
+			]),
+		);
+
+		const ambient = mutateWorkspaceSource(
+			workspaceMoveSources,
+			relativePath,
+			(source) => `${source}\nfn bypass() { std::fs::remove_file("source"); }`,
+		);
+		expect(validateWorkspaceRustBoundary(workspaceCargo, ambient)).toContain(
+			`${relativePath} uses forbidden ambient std::fs operation remove_file`,
 		);
 	});
 });

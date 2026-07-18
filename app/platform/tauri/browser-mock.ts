@@ -4,6 +4,8 @@ import type {
 	RuntimeInfo,
 	WorkspaceDirectoryEntry,
 	WorkspaceEntryKind,
+	WorkspaceMoveIncompleteReason,
+	WorkspaceMoveResult,
 	WorkspaceRoot,
 } from "./contracts";
 import {
@@ -13,6 +15,8 @@ import {
 	frozenWorkspaceCreateEntryRequest,
 	frozenWorkspaceEntryRequest,
 	frozenWorkspaceFileData,
+	frozenWorkspaceMoveRequest,
+	frozenWorkspaceMoveResult,
 	frozenWorkspacePickResult,
 	frozenWorkspaceReadDirectory,
 	frozenWorkspaceRenameRequest,
@@ -429,6 +433,36 @@ export interface BrowserMockSymlinkCopyObservation {
 	readonly payload: readonly number[];
 }
 
+export interface BrowserMockWorkspaceMoveObservation {
+	readonly sourceRootId: string;
+	readonly sourcePath: string;
+	readonly targetRootId: string;
+	readonly targetPath: string;
+	readonly sourceKind: "file" | "directory" | "symlink";
+	readonly removedEntries: number;
+}
+
+export interface BrowserMockWorkspaceMoveDeletedEntryObservation extends BrowserMockWorkspaceMoveObservation {
+	readonly relativePath: string;
+	readonly kind: "file" | "directory" | "symlink";
+}
+
+export interface BrowserMockWorkspaceMoveDeleteObservation extends BrowserMockWorkspaceMoveObservation {
+	/** Empty for the top-level source entry. */
+	readonly relativePath: string;
+	readonly kind: "file" | "directory" | "symlink";
+}
+
+export type BrowserMockWorkspaceMoveSeamResult = Exclude<
+	WorkspaceMoveIncompleteReason,
+	"deleteFailed"
+> | void;
+
+export interface BrowserMockWorkspaceMoveMutationsForTest {
+	rewriteSourceFile(relativePath: string, bytes: readonly number[]): void;
+	rewriteTargetFile(relativePath: string, bytes: readonly number[]): void;
+}
+
 export interface BrowserMockBridgeOptions {
 	readonly workspacePicks?: readonly BrowserMockWorkspacePick[];
 	/** Browser-mock only bounded tree injected below the first mock root. */
@@ -443,6 +477,63 @@ export interface BrowserMockBridgeOptions {
 	readonly onSymlinkCopyForTest?: (
 		observation: BrowserMockSymlinkCopyObservation,
 	) => void;
+	/** Runs after the detached target is published and before receipt checks. */
+	readonly onWorkspaceMoveAfterPublicationForTest?: (
+		observation: BrowserMockWorkspaceMoveObservation,
+		mutations: BrowserMockWorkspaceMoveMutationsForTest,
+	) => BrowserMockWorkspaceMoveSeamResult;
+	/** Runs after source-first dual receipt checks and before source deletion. */
+	readonly onWorkspaceMoveBeforeDeleteForTest?: (
+		observation: BrowserMockWorkspaceMoveObservation,
+		mutations: BrowserMockWorkspaceMoveMutationsForTest,
+	) => BrowserMockWorkspaceMoveSeamResult;
+	/** Runs after each successfully deleted directory descendant. */
+	readonly onWorkspaceMoveAfterDeleteEntryForTest?: (
+		observation: BrowserMockWorkspaceMoveDeletedEntryObservation,
+		mutations: BrowserMockWorkspaceMoveMutationsForTest,
+	) => BrowserMockWorkspaceMoveSeamResult;
+	/** Throws only at the simulated remove syscall to inject deleteFailed. */
+	readonly onWorkspaceMoveDeleteForTest?: (
+		observation: BrowserMockWorkspaceMoveDeleteObservation,
+	) => void;
+	/** Counts private receipt-node comparisons for complexity assertions only. */
+	readonly onWorkspaceMoveReceiptVisitForTest?: () => void;
+}
+
+interface CapturedBrowserMockWorkspaceMoveSeams {
+	readonly afterPublication: BrowserMockBridgeOptions["onWorkspaceMoveAfterPublicationForTest"];
+	readonly beforeDelete: BrowserMockBridgeOptions["onWorkspaceMoveBeforeDeleteForTest"];
+	readonly afterDeleteEntry: BrowserMockBridgeOptions["onWorkspaceMoveAfterDeleteEntryForTest"];
+	readonly deleteEntry: BrowserMockBridgeOptions["onWorkspaceMoveDeleteForTest"];
+	readonly receiptVisit: BrowserMockBridgeOptions["onWorkspaceMoveReceiptVisitForTest"];
+}
+
+function captureBrowserMockWorkspaceMoveSeams(
+	options: BrowserMockBridgeOptions,
+): CapturedBrowserMockWorkspaceMoveSeams {
+	const afterPublication = options.onWorkspaceMoveAfterPublicationForTest;
+	const beforeDelete = options.onWorkspaceMoveBeforeDeleteForTest;
+	const afterDeleteEntry = options.onWorkspaceMoveAfterDeleteEntryForTest;
+	const deleteEntry = options.onWorkspaceMoveDeleteForTest;
+	const receiptVisit = options.onWorkspaceMoveReceiptVisitForTest;
+	for (const seam of [
+		afterPublication,
+		beforeDelete,
+		afterDeleteEntry,
+		deleteEntry,
+		receiptVisit,
+	]) {
+		if (seam !== undefined && typeof seam !== "function") {
+			throw new TypeError("Invalid browser mock workspace-move seam.");
+		}
+	}
+	return Object.freeze({
+		afterPublication,
+		beforeDelete,
+		afterDeleteEntry,
+		deleteEntry,
+		receiptVisit,
+	});
 }
 
 function commandError(code: string, message: string): CommandError {
@@ -859,9 +950,221 @@ function boundedDirectoryClone(
 	});
 }
 
+interface MockMoveReceiptEntry {
+	readonly name: string;
+	readonly relativePath: string;
+	readonly depth: number;
+	readonly receipt: MockMoveReceipt;
+}
+
+interface MockMoveFileReceipt {
+	readonly kind: "file";
+	readonly identity: MockFileNode;
+	readonly size: number;
+	readonly bytes: MockImmutableBytes;
+}
+
+interface MockMoveSymlinkReceipt {
+	readonly kind: "symlink";
+	readonly identity: MockSymlinkNode;
+	readonly payload: MockImmutableBytes;
+}
+
+interface MockMoveDirectoryReceipt {
+	readonly kind: "directory";
+	readonly identity: MockDirectoryNode;
+	readonly entries: readonly MockMoveReceiptEntry[];
+}
+
+type MockMoveReceipt =
+	MockMoveFileReceipt | MockMoveSymlinkReceipt | MockMoveDirectoryReceipt;
+
+interface MockMoveDirectoryDeletionPlan {
+	readonly targetReceipt: MockMoveDirectoryReceipt;
+	readonly leaves: readonly MockMoveReceiptEntry[];
+	readonly directories: readonly MockMoveReceiptEntry[];
+	readonly targetReceipts: ReadonlyMap<string, MockMoveReceipt>;
+}
+
+function captureMockMoveReceipt(
+	node: MockNode,
+	parentPath = "",
+	depth = 0,
+): MockMoveReceipt {
+	if (node.kind === "file") {
+		return Object.freeze({
+			kind: node.kind,
+			identity: node,
+			size: node.size,
+			bytes: immutableMockBytes(node.bytes),
+		});
+	}
+	if (isMockSymlinkNode(node)) {
+		return Object.freeze({
+			kind: node.kind,
+			identity: node,
+			payload: immutableMockBytes(node.payload.copy()),
+		});
+	}
+	if (node.kind !== "directory") {
+		throw entryTypeMismatch();
+	}
+
+	const entries = [...node.entries]
+		.sort(([left], [right]) => compareWorkspaceEntryNames(left, right))
+		.map(([name, child]) => {
+			const relativePath =
+				parentPath.length === 0 ? name : `${parentPath}/${name}`;
+			return Object.freeze({
+				name,
+				relativePath,
+				depth: depth + 1,
+				receipt: captureMockMoveReceipt(child, relativePath, depth + 1),
+			});
+		});
+	return Object.freeze({
+		kind: node.kind,
+		identity: node,
+		entries: Object.freeze(entries),
+	});
+}
+
+function mockBytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+	if (left.byteLength !== right.byteLength) {
+		return false;
+	}
+	for (let index = 0; index < left.byteLength; index += 1) {
+		if (left[index] !== right[index]) {
+			return false;
+		}
+	}
+	return true;
+}
+
+function matchesMockMoveReceipt(
+	node: MockNode,
+	receipt: MockMoveReceipt,
+	visit?: () => void,
+): boolean {
+	visit?.();
+	if (node !== receipt.identity || node.kind !== receipt.kind) {
+		return false;
+	}
+	if (receipt.kind === "file") {
+		return (
+			node.kind === "file" &&
+			node.size === receipt.size &&
+			mockBytesEqual(node.bytes, receipt.bytes.copy())
+		);
+	}
+	if (receipt.kind === "symlink") {
+		return (
+			isMockSymlinkNode(node) &&
+			mockBytesEqual(node.payload.copy(), receipt.payload.copy())
+		);
+	}
+	if (
+		node.kind !== "directory" ||
+		node.entries.size !== receipt.entries.length
+	) {
+		return false;
+	}
+	return receipt.entries.every((entry) => {
+		const child = node.entries.get(entry.name);
+		return (
+			child !== undefined && matchesMockMoveReceipt(child, entry.receipt, visit)
+		);
+	});
+}
+
+function flattenMockMoveReceipt(
+	receipt: MockMoveDirectoryReceipt,
+): readonly MockMoveReceiptEntry[] {
+	const flattened: MockMoveReceiptEntry[] = [];
+	const pending = [...receipt.entries].reverse();
+	while (pending.length > 0) {
+		const entry = pending.pop()!;
+		flattened.push(entry);
+		if (entry.receipt.kind === "directory") {
+			for (const child of [...entry.receipt.entries].reverse()) {
+				pending.push(child);
+			}
+		}
+	}
+	return Object.freeze(flattened);
+}
+
+function prepareMockMoveDirectoryDeletionPlan(
+	sourceReceipt: MockMoveReceipt,
+	targetReceipt: MockMoveReceipt,
+): MockMoveDirectoryDeletionPlan | undefined {
+	if (sourceReceipt.kind !== "directory") {
+		return undefined;
+	}
+	if (targetReceipt.kind !== "directory") {
+		throw entryTypeMismatch();
+	}
+
+	const flattened = flattenMockMoveReceipt(sourceReceipt);
+	const leaves = flattened
+		.filter((entry) => entry.receipt.kind !== "directory")
+		.sort(
+			(left, right) =>
+				right.depth - left.depth ||
+				compareWorkspaceEntryNames(left.relativePath, right.relativePath),
+		);
+	const directories = flattened
+		.filter((entry) => entry.receipt.kind === "directory")
+		.sort(
+			(left, right) =>
+				right.depth - left.depth ||
+				compareWorkspaceEntryNames(left.relativePath, right.relativePath),
+		);
+	const targetReceipts = new Map(
+		flattenMockMoveReceipt(targetReceipt).map((entry) => [
+			entry.relativePath,
+			entry.receipt,
+		]),
+	);
+	return Object.freeze({
+		targetReceipt,
+		leaves: Object.freeze(leaves),
+		directories: Object.freeze(directories),
+		targetReceipts,
+	});
+}
+
+type MockMoveObserverReason = Exclude<
+	WorkspaceMoveIncompleteReason,
+	"deleteFailed"
+>;
+
+const WORKSPACE_MOVE_OBSERVER_REASONS = new Set<MockMoveObserverReason>([
+	"sourceChanged",
+	"targetChanged",
+	"sourceUnverifiable",
+	"targetUnverifiable",
+]);
+
+function mockMoveResolutionFailure(
+	error: unknown,
+	changedReason: "sourceChanged" | "targetChanged",
+	unverifiableReason: "sourceUnverifiable" | "targetUnverifiable",
+): WorkspaceMoveIncompleteReason {
+	try {
+		const code = (error as { readonly code?: unknown })?.code;
+		return code === "ENTRY_NOT_FOUND" || code === "ENTRY_TYPE_MISMATCH"
+			? changedReason
+			: unverifiableReason;
+	} catch {
+		return unverifiableReason;
+	}
+}
+
 export function createBrowserMockBridge(
 	options: BrowserMockBridgeOptions = {},
 ): PlainBridge {
+	const workspaceMoveSeams = captureBrowserMockWorkspaceMoveSeams(options);
 	const listeners = new Set<(payload: RuntimeInfo) => void>();
 	const scriptedPicks = [...(options.workspacePicks ?? [])];
 	const roots = new Map<string, WorkspaceRoot>();
@@ -976,18 +1279,22 @@ export function createBrowserMockBridge(
 		sourceTarget.parent.entries.delete(sourceTarget.name);
 		target.parent.entries.set(target.name, source);
 	};
-	const copyEntry = (
-		sourceRootId: string,
-		sourcePath: string,
-		targetRootId: string,
-		targetPath: string,
-	): void => {
-		const request = frozenWorkspaceCopyRequest(
-			sourceRootId,
-			sourcePath,
-			targetRootId,
-			targetPath,
-		);
+	type MockCopyRequest = ReturnType<typeof frozenWorkspaceCopyRequest>;
+	interface PreparedMockCopy {
+		readonly request: MockCopyRequest;
+		readonly source: MockNode;
+		readonly sourceTarget: Readonly<{
+			parent: MockDirectoryNode;
+			name: string;
+		}>;
+		readonly target: Readonly<{
+			parent: MockDirectoryNode;
+			name: string;
+		}>;
+		readonly copied: MockNode;
+		readonly directoryManifest?: BrowserMockDirectoryCopyManifestSummary;
+	}
+	const prepareCopyEntry = (request: MockCopyRequest): PreparedMockCopy => {
 		if (
 			!roots.has(request.sourceRootId) ||
 			!trees.has(request.sourceRootId) ||
@@ -1020,7 +1327,14 @@ export function createBrowserMockBridge(
 			throw copyConflict();
 		}
 
-		const source = resolveNode(request.sourceRootId, request.sourcePath);
+		const sourceTarget = resolveCreateTarget(
+			request.sourceRootId,
+			request.sourcePath,
+		);
+		const source = sourceTarget.parent.entries.get(sourceTarget.name);
+		if (source === undefined) {
+			throw entryNotFound();
+		}
 		let copied: MockNode;
 		let directoryManifest: BrowserMockDirectoryCopyManifestSummary | undefined;
 		if (source.kind === "file") {
@@ -1053,6 +1367,36 @@ export function createBrowserMockBridge(
 		if (target.parent.entries.has(target.name)) {
 			throw entryAlreadyExists();
 		}
+		return Object.freeze({
+			request,
+			source,
+			sourceTarget,
+			target,
+			copied,
+			...(directoryManifest === undefined ? {} : { directoryManifest }),
+		});
+	};
+	const publishPreparedCopy = (prepared: PreparedMockCopy): void => {
+		if (prepared.target.parent.entries.has(prepared.target.name)) {
+			throw entryAlreadyExists();
+		}
+		prepared.target.parent.entries.set(prepared.target.name, prepared.copied);
+	};
+	const copyEntry = (
+		sourceRootId: string,
+		sourcePath: string,
+		targetRootId: string,
+		targetPath: string,
+	): void => {
+		const prepared = prepareCopyEntry(
+			frozenWorkspaceCopyRequest(
+				sourceRootId,
+				sourcePath,
+				targetRootId,
+				targetPath,
+			),
+		);
+		const { request, copied, directoryManifest } = prepared;
 		if (directoryManifest !== undefined) {
 			options.onDirectoryCopyForTest?.(
 				Object.freeze({
@@ -1075,10 +1419,739 @@ export function createBrowserMockBridge(
 				}),
 			);
 		}
-		if (target.parent.entries.has(target.name)) {
-			throw entryAlreadyExists();
+		publishPreparedCopy(prepared);
+	};
+	const moveObservation = (
+		prepared: PreparedMockCopy,
+		removedEntries: number,
+	): BrowserMockWorkspaceMoveObservation =>
+		Object.freeze({
+			sourceRootId: prepared.request.sourceRootId,
+			sourcePath: prepared.request.sourcePath,
+			targetRootId: prepared.request.targetRootId,
+			targetPath: prepared.request.targetPath,
+			sourceKind: prepared.source.kind as "file" | "directory" | "symlink",
+			removedEntries,
+		});
+	const joinedMovePath = (top: string, relativePath: string): string =>
+		relativePath.length === 0 ? top : `${top}/${relativePath}`;
+	interface MockMoveMutationJournal {
+		sourceChanged: boolean;
+		targetChanged: boolean;
+	}
+	const moveMutationsForTest = (
+		prepared: PreparedMockCopy,
+	): Readonly<{
+		mutations: BrowserMockWorkspaceMoveMutationsForTest;
+		journal: MockMoveMutationJournal;
+	}> => {
+		const journal: MockMoveMutationJournal = {
+			sourceChanged: false,
+			targetChanged: false,
+		};
+		const rewriteFile = (
+			side: "source" | "target",
+			rootId: string,
+			top: string,
+			relativePath: string,
+			bytes: readonly number[],
+		): void => {
+			const node = resolveNode(rootId, joinedMovePath(top, relativePath));
+			if (node.kind !== "file" || node.bytes.byteLength !== bytes.length) {
+				throw new Error("Invalid browser mock workspace-move file rewrite.");
+			}
+			let changed = false;
+			for (let index = 0; index < bytes.length; index += 1) {
+				if (node.bytes[index] !== bytes[index]) {
+					changed = true;
+					break;
+				}
+			}
+			node.bytes.set(bytes);
+			if (changed) {
+				journal[side === "source" ? "sourceChanged" : "targetChanged"] = true;
+			}
+		};
+		const mutations = Object.freeze({
+			rewriteSourceFile: (relativePath: string, bytes: readonly number[]) =>
+				rewriteFile(
+					"source",
+					prepared.request.sourceRootId,
+					prepared.request.sourcePath,
+					relativePath,
+					bytes,
+				),
+			rewriteTargetFile: (relativePath: string, bytes: readonly number[]) =>
+				rewriteFile(
+					"target",
+					prepared.request.targetRootId,
+					prepared.request.targetPath,
+					relativePath,
+					bytes,
+				),
+		});
+		return Object.freeze({ mutations, journal });
+	};
+	const invokeMoveObserver = <Observation>(
+		seam:
+			| ((
+					observation: Observation,
+					mutations: BrowserMockWorkspaceMoveMutationsForTest,
+			  ) => BrowserMockWorkspaceMoveSeamResult)
+			| undefined,
+		observation: Observation,
+		mutations: BrowserMockWorkspaceMoveMutationsForTest,
+		journal: MockMoveMutationJournal,
+	): MockMoveObserverReason | undefined => {
+		journal.sourceChanged = false;
+		journal.targetChanged = false;
+		if (seam === undefined) {
+			return undefined;
 		}
-		target.parent.entries.set(target.name, copied);
+		try {
+			const result = seam(observation, mutations);
+			if (result === undefined) {
+				return undefined;
+			}
+			return WORKSPACE_MOVE_OBSERVER_REASONS.has(result)
+				? (result as MockMoveObserverReason)
+				: "sourceUnverifiable";
+		} catch {
+			return "sourceUnverifiable";
+		}
+	};
+	const moveDeleteObservation = (
+		prepared: PreparedMockCopy,
+		removedEntries: number,
+		relativePath: string,
+		kind: "file" | "directory" | "symlink",
+	): BrowserMockWorkspaceMoveDeleteObservation =>
+		Object.freeze({
+			...moveObservation(prepared, removedEntries),
+			relativePath,
+			kind,
+		});
+	const moveDeleteFailed = (
+		prepared: PreparedMockCopy,
+		removedEntries: number,
+		relativePath: string,
+		kind: "file" | "directory" | "symlink",
+	): boolean => {
+		if (workspaceMoveSeams.deleteEntry === undefined) {
+			return false;
+		}
+		try {
+			workspaceMoveSeams.deleteEntry(
+				moveDeleteObservation(prepared, removedEntries, relativePath, kind),
+			);
+			return false;
+		} catch {
+			return true;
+		}
+	};
+	const incompleteMoveResult = (
+		reason: WorkspaceMoveIncompleteReason,
+		removedEntries: number,
+	): WorkspaceMoveResult =>
+		frozenWorkspaceMoveResult(
+			removedEntries === 0
+				? { status: "targetPublishedSourceRetained", reason }
+				: {
+						status: "targetPublishedSourcePartiallyDeleted",
+						reason,
+						removedEntries,
+					},
+		);
+	const verifyMoveReceiptAt = (
+		rootId: string,
+		path: string,
+		receipt: MockMoveReceipt,
+		changedReason: "sourceChanged" | "targetChanged",
+		unverifiableReason: "sourceUnverifiable" | "targetUnverifiable",
+	): WorkspaceMoveIncompleteReason | undefined => {
+		try {
+			return matchesMockMoveReceipt(
+				resolveNode(rootId, path),
+				receipt,
+				workspaceMoveSeams.receiptVisit,
+			)
+				? undefined
+				: changedReason;
+		} catch (error) {
+			return mockMoveResolutionFailure(
+				error,
+				changedReason,
+				unverifiableReason,
+			);
+		}
+	};
+	const verifyMoveTopLevelIdentity = (
+		rootId: string,
+		path: string,
+		receipt: MockMoveReceipt,
+		changedReason: "sourceChanged" | "targetChanged",
+		unverifiableReason: "sourceUnverifiable" | "targetUnverifiable",
+	): WorkspaceMoveIncompleteReason | undefined => {
+		try {
+			const node = resolveNode(rootId, path);
+			return node === receipt.identity && node.kind === receipt.kind
+				? undefined
+				: changedReason;
+		} catch (error) {
+			return mockMoveResolutionFailure(
+				error,
+				changedReason,
+				unverifiableReason,
+			);
+		}
+	};
+	const verifyMoveEndpoints = (
+		prepared: PreparedMockCopy,
+		sourceReceipt: MockMoveReceipt,
+		targetReceipt: MockMoveReceipt,
+	): WorkspaceMoveIncompleteReason | undefined => {
+		let reason = verifyMoveReceiptAt(
+			prepared.request.sourceRootId,
+			prepared.request.sourcePath,
+			sourceReceipt,
+			"sourceChanged",
+			"sourceUnverifiable",
+		);
+		if (reason !== undefined) {
+			return reason;
+		}
+		reason = verifyMoveReceiptAt(
+			prepared.request.targetRootId,
+			prepared.request.targetPath,
+			targetReceipt,
+			"targetChanged",
+			"targetUnverifiable",
+		);
+		return reason;
+	};
+	const adjudicateMoveObserver = (
+		verifySource: () => WorkspaceMoveIncompleteReason | undefined,
+		verifyTarget: () => WorkspaceMoveIncompleteReason | undefined,
+		journal: MockMoveMutationJournal,
+		observerReason: MockMoveObserverReason | undefined,
+	): WorkspaceMoveIncompleteReason | undefined => {
+		let reason = verifySource();
+		if (reason !== undefined) {
+			return reason;
+		}
+		if (journal.sourceChanged) {
+			return "sourceChanged";
+		}
+		if (
+			observerReason === "sourceChanged" ||
+			observerReason === "sourceUnverifiable"
+		) {
+			return observerReason;
+		}
+		reason = verifyTarget();
+		if (reason !== undefined) {
+			return reason;
+		}
+		if (journal.targetChanged) {
+			return "targetChanged";
+		}
+		return observerReason;
+	};
+	const adjudicateFullMoveObserver = (
+		prepared: PreparedMockCopy,
+		sourceReceipt: MockMoveReceipt,
+		targetReceipt: MockMoveReceipt,
+		journal: MockMoveMutationJournal,
+		observerReason: MockMoveObserverReason | undefined,
+	): WorkspaceMoveIncompleteReason | undefined =>
+		adjudicateMoveObserver(
+			() =>
+				verifyMoveReceiptAt(
+					prepared.request.sourceRootId,
+					prepared.request.sourcePath,
+					sourceReceipt,
+					"sourceChanged",
+					"sourceUnverifiable",
+				),
+			() =>
+				verifyMoveReceiptAt(
+					prepared.request.targetRootId,
+					prepared.request.targetPath,
+					targetReceipt,
+					"targetChanged",
+					"targetUnverifiable",
+				),
+			journal,
+			observerReason,
+		);
+	const verifyMoveLocalReceiptAt = (
+		rootId: string,
+		path: string,
+		receipt: MockMoveReceipt,
+		directoryMustBeEmpty: boolean,
+		changedReason: "sourceChanged" | "targetChanged",
+		unverifiableReason: "sourceUnverifiable" | "targetUnverifiable",
+	): WorkspaceMoveIncompleteReason | undefined => {
+		try {
+			const node = resolveNode(rootId, path);
+			if (receipt.kind === "directory") {
+				workspaceMoveSeams.receiptVisit?.();
+				return node === receipt.identity &&
+					node.kind === "directory" &&
+					(!directoryMustBeEmpty || node.entries.size === 0)
+					? undefined
+					: changedReason;
+			}
+			return matchesMockMoveReceipt(
+				node,
+				receipt,
+				workspaceMoveSeams.receiptVisit,
+			)
+				? undefined
+				: changedReason;
+		} catch (error) {
+			return mockMoveResolutionFailure(
+				error,
+				changedReason,
+				unverifiableReason,
+			);
+		}
+	};
+	const verifyRemovedSourceEntry = (
+		prepared: PreparedMockCopy,
+		sourceEntryPath: string,
+		previousTarget: Readonly<{
+			parent: MockDirectoryNode;
+			name: string;
+		}>,
+	): WorkspaceMoveIncompleteReason | undefined => {
+		try {
+			const currentTarget = resolveCreateTarget(
+				prepared.request.sourceRootId,
+				sourceEntryPath,
+			);
+			return currentTarget.parent === previousTarget.parent &&
+				currentTarget.name === previousTarget.name &&
+				!currentTarget.parent.entries.has(currentTarget.name)
+				? undefined
+				: "sourceChanged";
+		} catch (error) {
+			return mockMoveResolutionFailure(
+				error,
+				"sourceChanged",
+				"sourceUnverifiable",
+			);
+		}
+	};
+	const verifyDirectoryStepSource = (
+		prepared: PreparedMockCopy,
+		sourceReceipt: MockMoveDirectoryReceipt,
+		entry: MockMoveReceiptEntry,
+		sourceTarget: Readonly<{
+			parent: MockDirectoryNode;
+			name: string;
+		}>,
+		sourceState: "present" | "removed",
+	): WorkspaceMoveIncompleteReason | undefined => {
+		let reason = verifyMoveTopLevelIdentity(
+			prepared.request.sourceRootId,
+			prepared.request.sourcePath,
+			sourceReceipt,
+			"sourceChanged",
+			"sourceUnverifiable",
+		);
+		if (reason !== undefined) {
+			return reason;
+		}
+		const sourceEntryPath = joinedMovePath(
+			prepared.request.sourcePath,
+			entry.relativePath,
+		);
+		reason =
+			sourceState === "present"
+				? verifyMoveLocalReceiptAt(
+						prepared.request.sourceRootId,
+						sourceEntryPath,
+						entry.receipt,
+						true,
+						"sourceChanged",
+						"sourceUnverifiable",
+					)
+				: verifyRemovedSourceEntry(prepared, sourceEntryPath, sourceTarget);
+		if (reason !== undefined) {
+			return reason;
+		}
+		return undefined;
+	};
+	const verifyDirectoryStepTarget = (
+		prepared: PreparedMockCopy,
+		targetReceipt: MockMoveDirectoryReceipt,
+		entry: MockMoveReceiptEntry,
+		targetEntryReceipt: MockMoveReceipt,
+	): WorkspaceMoveIncompleteReason | undefined => {
+		const reason = verifyMoveTopLevelIdentity(
+			prepared.request.targetRootId,
+			prepared.request.targetPath,
+			targetReceipt,
+			"targetChanged",
+			"targetUnverifiable",
+		);
+		if (reason !== undefined) {
+			return reason;
+		}
+		return verifyMoveLocalReceiptAt(
+			prepared.request.targetRootId,
+			joinedMovePath(prepared.request.targetPath, entry.relativePath),
+			targetEntryReceipt,
+			false,
+			"targetChanged",
+			"targetUnverifiable",
+		);
+	};
+	const verifyDirectoryStep = (
+		prepared: PreparedMockCopy,
+		sourceReceipt: MockMoveDirectoryReceipt,
+		targetReceipt: MockMoveDirectoryReceipt,
+		entry: MockMoveReceiptEntry,
+		targetEntryReceipt: MockMoveReceipt,
+		sourceTarget: Readonly<{
+			parent: MockDirectoryNode;
+			name: string;
+		}>,
+		sourceState: "present" | "removed",
+	): WorkspaceMoveIncompleteReason | undefined => {
+		const reason = verifyDirectoryStepSource(
+			prepared,
+			sourceReceipt,
+			entry,
+			sourceTarget,
+			sourceState,
+		);
+		return reason === undefined
+			? verifyDirectoryStepTarget(
+					prepared,
+					targetReceipt,
+					entry,
+					targetEntryReceipt,
+				)
+			: reason;
+	};
+	const verifyFinalDirectoryEndpoints = (
+		prepared: PreparedMockCopy,
+		sourceReceipt: MockMoveDirectoryReceipt,
+		targetReceipt: MockMoveDirectoryReceipt,
+	): WorkspaceMoveIncompleteReason | undefined => {
+		try {
+			const sourceRoot = resolveNode(
+				prepared.request.sourceRootId,
+				prepared.request.sourcePath,
+			);
+			workspaceMoveSeams.receiptVisit?.();
+			if (
+				sourceRoot !== sourceReceipt.identity ||
+				sourceRoot.kind !== "directory" ||
+				sourceRoot.entries.size !== 0
+			) {
+				return "sourceChanged";
+			}
+		} catch (error) {
+			return mockMoveResolutionFailure(
+				error,
+				"sourceChanged",
+				"sourceUnverifiable",
+			);
+		}
+		return verifyMoveReceiptAt(
+			prepared.request.targetRootId,
+			prepared.request.targetPath,
+			targetReceipt,
+			"targetChanged",
+			"targetUnverifiable",
+		);
+	};
+	const moveEntry = (
+		sourceRootId: string,
+		sourcePath: string,
+		targetRootId: string,
+		targetPath: string,
+	): WorkspaceMoveResult => {
+		const prepared = prepareCopyEntry(
+			frozenWorkspaceMoveRequest(
+				sourceRootId,
+				sourcePath,
+				targetRootId,
+				targetPath,
+			),
+		);
+		const sourceReceipt = captureMockMoveReceipt(prepared.source);
+		const targetReceipt = captureMockMoveReceipt(prepared.copied);
+		const directoryDeletionPlan = prepareMockMoveDirectoryDeletionPlan(
+			sourceReceipt,
+			targetReceipt,
+		);
+		const { mutations, journal } = moveMutationsForTest(prepared);
+		let removedEntries = 0;
+		publishPreparedCopy(prepared);
+
+		try {
+			let observerReason = invokeMoveObserver(
+				workspaceMoveSeams.afterPublication,
+				moveObservation(prepared, 0),
+				mutations,
+				journal,
+			);
+			let reason = adjudicateFullMoveObserver(
+				prepared,
+				sourceReceipt,
+				targetReceipt,
+				journal,
+				observerReason,
+			);
+			if (reason !== undefined) {
+				return incompleteMoveResult(reason, 0);
+			}
+			observerReason = invokeMoveObserver(
+				workspaceMoveSeams.beforeDelete,
+				moveObservation(prepared, 0),
+				mutations,
+				journal,
+			);
+			reason = adjudicateFullMoveObserver(
+				prepared,
+				sourceReceipt,
+				targetReceipt,
+				journal,
+				observerReason,
+			);
+			if (reason !== undefined) {
+				return incompleteMoveResult(reason, 0);
+			}
+
+			if (sourceReceipt.kind !== "directory") {
+				reason = verifyMoveEndpoints(prepared, sourceReceipt, targetReceipt);
+				if (reason !== undefined) {
+					return incompleteMoveResult(reason, 0);
+				}
+				let sourceTarget: Readonly<{
+					parent: MockDirectoryNode;
+					name: string;
+				}>;
+				try {
+					sourceTarget = resolveCreateTarget(
+						prepared.request.sourceRootId,
+						prepared.request.sourcePath,
+					);
+				} catch (error) {
+					return incompleteMoveResult(
+						mockMoveResolutionFailure(
+							error,
+							"sourceChanged",
+							"sourceUnverifiable",
+						),
+						0,
+					);
+				}
+				const current = sourceTarget.parent.entries.get(sourceTarget.name);
+				if (current !== sourceReceipt.identity) {
+					return incompleteMoveResult("sourceChanged", 0);
+				}
+				const deleteFailed = moveDeleteFailed(
+					prepared,
+					0,
+					"",
+					sourceReceipt.kind,
+				);
+				reason = verifyMoveEndpoints(prepared, sourceReceipt, targetReceipt);
+				if (reason !== undefined) {
+					return incompleteMoveResult(reason, 0);
+				}
+				if (deleteFailed) {
+					return incompleteMoveResult("deleteFailed", 0);
+				}
+				if (!sourceTarget.parent.entries.delete(sourceTarget.name)) {
+					return incompleteMoveResult("deleteFailed", 0);
+				}
+				return frozenWorkspaceMoveResult({ status: "moved" });
+			}
+
+			if (directoryDeletionPlan === undefined) {
+				return incompleteMoveResult("targetChanged", 0);
+			}
+			const {
+				targetReceipt: targetDirectoryReceipt,
+				leaves,
+				directories,
+				targetReceipts,
+			} = directoryDeletionPlan;
+			for (const entry of [...leaves, ...directories]) {
+				const sourceEntryPath = joinedMovePath(
+					prepared.request.sourcePath,
+					entry.relativePath,
+				);
+				const targetEntryReceipt = targetReceipts.get(entry.relativePath);
+				if (targetEntryReceipt === undefined) {
+					return incompleteMoveResult("targetChanged", removedEntries);
+				}
+				let sourceTarget: Readonly<{
+					parent: MockDirectoryNode;
+					name: string;
+				}>;
+				try {
+					sourceTarget = resolveCreateTarget(
+						prepared.request.sourceRootId,
+						sourceEntryPath,
+					);
+				} catch (error) {
+					return incompleteMoveResult(
+						mockMoveResolutionFailure(
+							error,
+							"sourceChanged",
+							"sourceUnverifiable",
+						),
+						removedEntries,
+					);
+				}
+				reason = verifyDirectoryStep(
+					prepared,
+					sourceReceipt,
+					targetDirectoryReceipt,
+					entry,
+					targetEntryReceipt,
+					sourceTarget,
+					"present",
+				);
+				if (reason !== undefined) {
+					return incompleteMoveResult(reason, removedEntries);
+				}
+				if (
+					sourceTarget.parent.entries.get(sourceTarget.name) !==
+					entry.receipt.identity
+				) {
+					return incompleteMoveResult("sourceChanged", removedEntries);
+				}
+				if (workspaceMoveSeams.deleteEntry !== undefined) {
+					const deleteFailed = moveDeleteFailed(
+						prepared,
+						removedEntries,
+						entry.relativePath,
+						entry.receipt.kind,
+					);
+					reason = verifyDirectoryStep(
+						prepared,
+						sourceReceipt,
+						targetDirectoryReceipt,
+						entry,
+						targetEntryReceipt,
+						sourceTarget,
+						"present",
+					);
+					if (reason !== undefined) {
+						return incompleteMoveResult(reason, removedEntries);
+					}
+					if (deleteFailed) {
+						return incompleteMoveResult("deleteFailed", removedEntries);
+					}
+				}
+				if (!sourceTarget.parent.entries.delete(sourceTarget.name)) {
+					return incompleteMoveResult("deleteFailed", removedEntries);
+				}
+				removedEntries += 1;
+				if (workspaceMoveSeams.afterDeleteEntry !== undefined) {
+					const observation = Object.freeze({
+						...moveObservation(prepared, removedEntries),
+						relativePath: entry.relativePath,
+						kind: entry.receipt.kind,
+					}) satisfies BrowserMockWorkspaceMoveDeletedEntryObservation;
+					observerReason = invokeMoveObserver(
+						workspaceMoveSeams.afterDeleteEntry,
+						observation,
+						mutations,
+						journal,
+					);
+					reason = adjudicateMoveObserver(
+						() =>
+							verifyDirectoryStepSource(
+								prepared,
+								sourceReceipt,
+								entry,
+								sourceTarget,
+								"removed",
+							),
+						() =>
+							verifyDirectoryStepTarget(
+								prepared,
+								targetDirectoryReceipt,
+								entry,
+								targetEntryReceipt,
+							),
+						journal,
+						observerReason,
+					);
+					if (reason !== undefined) {
+						return incompleteMoveResult(reason, removedEntries);
+					}
+				}
+			}
+
+			reason = verifyFinalDirectoryEndpoints(
+				prepared,
+				sourceReceipt,
+				targetDirectoryReceipt,
+			);
+			if (reason !== undefined) {
+				return incompleteMoveResult(reason, removedEntries);
+			}
+			let sourceTarget: Readonly<{
+				parent: MockDirectoryNode;
+				name: string;
+			}>;
+			try {
+				sourceTarget = resolveCreateTarget(
+					prepared.request.sourceRootId,
+					prepared.request.sourcePath,
+				);
+			} catch (error) {
+				return incompleteMoveResult(
+					mockMoveResolutionFailure(
+						error,
+						"sourceChanged",
+						"sourceUnverifiable",
+					),
+					removedEntries,
+				);
+			}
+			if (
+				sourceTarget.parent.entries.get(sourceTarget.name) !==
+				sourceReceipt.identity
+			) {
+				return incompleteMoveResult("sourceChanged", removedEntries);
+			}
+			if (workspaceMoveSeams.deleteEntry !== undefined) {
+				const deleteFailed = moveDeleteFailed(
+					prepared,
+					removedEntries,
+					"",
+					"directory",
+				);
+				reason = verifyFinalDirectoryEndpoints(
+					prepared,
+					sourceReceipt,
+					targetDirectoryReceipt,
+				);
+				if (reason !== undefined) {
+					return incompleteMoveResult(reason, removedEntries);
+				}
+				if (deleteFailed) {
+					return incompleteMoveResult("deleteFailed", removedEntries);
+				}
+			}
+			if (!sourceTarget.parent.entries.delete(sourceTarget.name)) {
+				return incompleteMoveResult("deleteFailed", removedEntries);
+			}
+			return frozenWorkspaceMoveResult({ status: "moved" });
+		} catch {
+			return incompleteMoveResult("sourceUnverifiable", removedEntries);
+		}
 	};
 
 	return {
@@ -1144,6 +2217,9 @@ export function createBrowserMockBridge(
 		},
 		async workspaceCopy(sourceRootId, sourcePath, targetRootId, targetPath) {
 			copyEntry(sourceRootId, sourcePath, targetRootId, targetPath);
+		},
+		async workspaceMove(sourceRootId, sourcePath, targetRootId, targetPath) {
+			return moveEntry(sourceRootId, sourcePath, targetRootId, targetPath);
 		},
 		async workspaceStat(rootId, relativePath) {
 			const node = resolveNode(rootId, relativePath);

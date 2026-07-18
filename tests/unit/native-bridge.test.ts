@@ -184,6 +184,224 @@ describe("native Plain bridge", () => {
 		).rejects.toMatchObject({ code: "IPC_CONTRACT_VIOLATION" });
 	});
 
+	it.each([
+		[{ status: "moved" }],
+		[
+			{
+				status: "targetPublishedSourceRetained",
+				reason: "sourceChanged",
+			},
+		],
+		[
+			{
+				status: "targetPublishedSourcePartiallyDeleted",
+				reason: "targetUnverifiable",
+				removedEntries: 1,
+			},
+		],
+		[
+			{
+				status: "targetPublishedSourcePartiallyDeleted",
+				reason: "deleteFailed",
+				removedEntries: 10_000,
+			},
+		],
+	] as const)(
+		"invokes workspace_move and freezes its strict result: %j",
+		async (payload) => {
+			tauri.invoke.mockResolvedValueOnce(payload);
+			const result = await createNativeBridge().workspaceMove(
+				rootId,
+				"source",
+				targetRootId,
+				"target",
+			);
+
+			expect(tauri.invoke).toHaveBeenCalledWith("workspace_move", {
+				request: {
+					sourceRootId: rootId,
+					sourcePath: "source",
+					targetRootId,
+					targetPath: "target",
+				},
+			});
+			expect(Object.isFrozen(tauri.invoke.mock.calls[0]?.[1]?.request)).toBe(
+				true,
+			);
+			expect(result).toEqual(payload);
+			expect(Object.isFrozen(result)).toBe(true);
+		},
+	);
+
+	it.each([
+		"sourceChanged",
+		"targetChanged",
+		"sourceUnverifiable",
+		"targetUnverifiable",
+		"deleteFailed",
+	] as const)("accepts the move incomplete reason %s", async (reason) => {
+		tauri.invoke.mockResolvedValueOnce({
+			status: "targetPublishedSourceRetained",
+			reason,
+		});
+
+		await expect(
+			createNativeBridge().workspaceMove(
+				rootId,
+				"source",
+				targetRootId,
+				"target",
+			),
+		).resolves.toEqual({ status: "targetPublishedSourceRetained", reason });
+	});
+
+	it.each([
+		["non-object", "moved"],
+		[
+			"class prototype",
+			Object.assign(new (class MoveResult {})(), { status: "moved" }),
+		],
+		["moved extra key", { status: "moved", reason: "sourceChanged" }],
+		["retained missing reason", { status: "targetPublishedSourceRetained" }],
+		[
+			"retained unknown reason",
+			{
+				status: "targetPublishedSourceRetained",
+				reason: "cancelled",
+			},
+		],
+		[
+			"partial zero removals",
+			{
+				status: "targetPublishedSourcePartiallyDeleted",
+				reason: "deleteFailed",
+				removedEntries: 0,
+			},
+		],
+		[
+			"partial removal overflow",
+			{
+				status: "targetPublishedSourcePartiallyDeleted",
+				reason: "deleteFailed",
+				removedEntries: 10_001,
+			},
+		],
+		[
+			"partial fractional removals",
+			{
+				status: "targetPublishedSourcePartiallyDeleted",
+				reason: "deleteFailed",
+				removedEntries: 1.5,
+			},
+		],
+		[
+			"partial extra key",
+			{
+				status: "targetPublishedSourcePartiallyDeleted",
+				reason: "deleteFailed",
+				removedEntries: 1,
+				nativePath: "/private/source",
+			},
+		],
+		["unknown status", { status: "copied" }],
+	] as const)(
+		"rejects malformed workspace move results: %s",
+		async (_name, payload) => {
+			tauri.invoke.mockResolvedValueOnce(payload);
+
+			await expect(
+				createNativeBridge().workspaceMove(
+					rootId,
+					"source",
+					targetRootId,
+					"target",
+				),
+			).rejects.toMatchObject({ code: "IPC_CONTRACT_VIOLATION" });
+		},
+	);
+
+	it("rejects move-result accessors, proxies, and symbol keys from one data snapshot", async () => {
+		let accessorReads = 0;
+		const accessorPayload = Object.create(null) as Record<string, unknown>;
+		Object.defineProperties(accessorPayload, {
+			status: {
+				enumerable: true,
+				value: "targetPublishedSourceRetained",
+			},
+			reason: {
+				enumerable: true,
+				get() {
+					accessorReads += 1;
+					return "sourceChanged";
+				},
+			},
+		});
+
+		let proxyReads = 0;
+		let promiseAssimilationReads = 0;
+		const proxyPayload = new Proxy(
+			{ status: "moved" },
+			{
+				get(target, property, receiver) {
+					if (property === "then") {
+						promiseAssimilationReads += 1;
+						return undefined;
+					}
+					proxyReads += 1;
+					return Reflect.get(target, property, receiver);
+				},
+			},
+		);
+		const symbolPayload = { status: "moved", [Symbol("private")]: true };
+		let nestedAccessorReads = 0;
+		const nestedStatus = Object.defineProperty({}, "private", {
+			enumerable: true,
+			get() {
+				nestedAccessorReads += 1;
+				return "secret";
+			},
+		});
+		tauri.invoke
+			.mockResolvedValueOnce(accessorPayload)
+			.mockResolvedValueOnce(proxyPayload)
+			.mockResolvedValueOnce(symbolPayload)
+			.mockResolvedValueOnce({ status: nestedStatus });
+		const bridge = createNativeBridge();
+
+		for (let index = 0; index < 4; index += 1) {
+			await expect(
+				bridge.workspaceMove(
+					rootId,
+					`source-${index}`,
+					targetRootId,
+					`target-${index}`,
+				),
+			).rejects.toMatchObject({ code: "IPC_CONTRACT_VIOLATION" });
+		}
+		expect(accessorReads).toBe(0);
+		expect(proxyReads).toBe(0);
+		expect(promiseAssimilationReads).toBe(1);
+		expect(nestedAccessorReads).toBe(0);
+	});
+
+	it("rejects same-root and malformed move requests before native invoke", async () => {
+		const bridge = createNativeBridge();
+
+		await expect(
+			bridge.workspaceMove(rootId, "source", rootId, "target"),
+		).rejects.toEqual({
+			code: "WORKSPACE_CONFLICT",
+			message: "The workspace move requires distinct workspace roots.",
+		});
+		await expect(
+			bridge.workspaceMove(rootId, "../source", targetRootId, "target"),
+		).rejects.toEqual({
+			code: "INVALID_RELATIVE_PATH",
+			message: "The workspace-relative path is invalid.",
+		});
+		expect(tauri.invoke).not.toHaveBeenCalled();
+	});
+
 	it("supports strict number-array fallback bytes and rejects invalid requests before invoke", async () => {
 		tauri.invoke.mockResolvedValueOnce([1, 2, 3]);
 		const bridge = createNativeBridge();

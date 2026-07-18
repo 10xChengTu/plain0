@@ -62,6 +62,32 @@ export interface WorkspaceCopyRequest {
 	readonly targetPath: string;
 }
 
+export interface WorkspaceMoveRequest {
+	readonly sourceRootId: string;
+	readonly sourcePath: string;
+	readonly targetRootId: string;
+	readonly targetPath: string;
+}
+
+export type WorkspaceMoveIncompleteReason =
+	| "sourceChanged"
+	| "targetChanged"
+	| "sourceUnverifiable"
+	| "targetUnverifiable"
+	| "deleteFailed";
+
+export type WorkspaceMoveResult =
+	| Readonly<{ status: "moved" }>
+	| Readonly<{
+			status: "targetPublishedSourceRetained";
+			reason: WorkspaceMoveIncompleteReason;
+	  }>
+	| Readonly<{
+			status: "targetPublishedSourcePartiallyDeleted";
+			reason: WorkspaceMoveIncompleteReason;
+			removedEntries: number;
+	  }>;
+
 /**
  * Immutable file payload. The backing bytes are closure-private; each call to
  * copy returns a new Uint8Array that the caller may mutate independently.
@@ -92,6 +118,12 @@ export interface PlainBridge {
 		targetRootId: string,
 		targetPath: string,
 	): Promise<void>;
+	workspaceMove(
+		sourceRootId: string,
+		sourcePath: string,
+		targetRootId: string,
+		targetPath: string,
+	): Promise<WorkspaceMoveResult>;
 	workspaceStat(
 		rootId: string,
 		relativePath: string,

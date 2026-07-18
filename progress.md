@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：暂无；显式跨 root move 方案已冻结，下一项为 receipt/verified delete 落地。
+- 当前最小工作项：暂无；显式跨 root move 已完成，下一项为确认删除的补充调研与方案冻结；provider 保持只读。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -45,10 +45,12 @@
 - [x] 完成有界目录 manifest/staged tree copy：Rust 以显式 DFS 建立并重验完整 source manifest，执行 10,000 条目、1 KiB 单名、2 MiB 名称、256 层、4 KiB/2 MiB symlink、8 MiB/256 MiB 文件预算；目录逐层 nofollow，raw symlink 原样复制，特殊文件拒绝。目标树在 0700 高熵 staging 中按 identity/payload receipt 构建，所有测试竞态窗口结束后再次精确核对成员、文件字节、raw link 与 source manifest，再应用目录 mode 并仅用 `NOREPLACE` 发布；未知或 replacement 成员只安全遗留，不做无界递归删除。Browser mock 同步实现有界 detached tree 和跨 root 语义，provider 继续只读。
 - [x] 目录 copy 切片通过完整局部验收：134 个 TypeScript/JavaScript 单元测试（含 39 个 Harness 边界合同）、144 个 Rust 测试、格式、类型、lint 与架构 guard 均通过；独立审查额外复现并修复了最终 member-set 后新增未知成员、同 inode staged file 改写、staged symlink 替换和嵌套 source 变化的发布窗口。
 - [x] 完成显式跨 root move 的 GitHub/固定源码补充调研与方案冻结：对照 Code OSS 1.130/实际依赖 1.128.1、GNU coreutils 9.11、systemd、cap-std 4.0.2、rustix 1.1.4 与 RustCrypto sha2 0.10.9，确认没有 expected-inode conditional unlink 或能表达 partial 的现成方案。确定四字段 different-root command、同 gate 内 Rust-only `PublishedCopyReceipt`、publication 前 file SHA-256/raw-link 基线、发布后 source/target 双端独立重验、manifest 驱动有界 verified delete、hardlink nlink 跟踪，以及 `moved`/source-retained/source-partial 结构化非原子结果；正式 target 一旦发布绝不回滚，provider 继续只读。
+- [x] 完成显式跨 root move：Rust command/service 在同一双 root mutation gate 内消费不可序列化的 publication 前 receipt，file 以 SHA-256、symlink 以 raw payload、directory 以完整 manifest/member receipt 独立重验 source 与 published target；source 只按 capability-relative 有界逆序计划删除，hardlink alias、未知成员、删除失败和双端变化返回精确 retained/partial 状态且永不回滚 target。严格 TypeScript bridge、线性 Browser mock、失败注入和 Harness 删除边界同步落地，provider 继续保持只读。
+- [x] 跨 root move 切片通过完整验收：188 个 TypeScript/JavaScript 单元测试（含 48 个 Harness 边界合同）、164 个 Rust 测试、格式、类型、lint、架构/排除面 guard 与 bundle 债务基线全部通过；独立攻击审查额外修复了 target-pass source-first、observer/delete failure 分类、IPC accessor/Proxy TOCTOU、root 撤权、发布后异常收口、Browser mock O(N²)/partial-count 漂移和 observer mutation journal 优先级。
 
 ## 下一步
 
-1. 落地显式跨 root move（copy receipt + verified delete）并单独提交；随后对确认删除做补充调研、方案冻结与独立实现提交。期间 provider 保持只读。
+1. 对确认删除做补充调研、方案冻结与独立实现提交。期间 provider 保持只读。
 2. 全部 CRUD 后先实现 opaque version、有界原子写入和 Workbench 期望版本透传，再在 provider 注册前读取严格 `workspace_capabilities` DTO，增加 copy/move 同路径、overwrite、自动 mkdirp、generic fallback 与 cross-scheme 防绕过 patch，并按 Rust 平台能力激活写能力与 Browser E2E；不支持原子 no-replace rename 的平台继续只读。随后实现 watcher/rescan，最后运行真实 Tauri 文件树总验收并写回 `F020` evidence。
 
 ## 当前验收命令

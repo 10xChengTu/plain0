@@ -7,11 +7,15 @@ use cap_std::fs::{Dir, OpenOptions};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use cap_std::fs::{File, Metadata, Permissions};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+use sha2::{Digest, Sha256};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use uuid::Uuid;
 
 use crate::error::CommandError;
 use crate::path_policy::RelativePath;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::move_entry::{PublishedCopyReceipt, PublishedFileReceipt, PublishedSymlinkReceipt};
 use super::WorkspaceRootLease;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -26,6 +30,57 @@ const MAX_STAGING_ATTEMPTS: usize = 16;
 const MAX_STAGE_IDENTITY_ATTEMPTS: usize = 3;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const STAGING_PREFIX: &str = ".plain-copy-";
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PublishedFileSnapshot {
+    pub(super) identity: FileIdentity,
+    pub(super) len: u64,
+    pub(super) mode: u32,
+    pub(super) mtime: i64,
+    pub(super) mtime_nsec: i64,
+    pub(super) nlink: u64,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PublishedSymlinkSnapshot {
+    pub(super) identity: FileIdentity,
+    pub(super) len: u64,
+    pub(super) mtime: i64,
+    pub(super) mtime_nsec: i64,
+    pub(super) nlink: u64,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl PublishedSymlinkSnapshot {
+    pub(super) const fn from_source(snapshot: SymlinkSnapshot) -> Self {
+        Self {
+            identity: snapshot.identity,
+            len: snapshot.len,
+            mtime: snapshot.mtime,
+            mtime_nsec: snapshot.mtime_nsec,
+            nlink: snapshot.nlink,
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl PublishedFileSnapshot {
+    pub(super) fn from_metadata(metadata: &Metadata) -> Result<Self, CommandError> {
+        use cap_std::fs::MetadataExt;
+
+        validate_copy_source(metadata)?;
+        Ok(Self {
+            identity: FileIdentity::from_metadata(metadata),
+            len: metadata.len(),
+            mode: metadata.mode(),
+            mtime: metadata.mtime(),
+            mtime_nsec: metadata.mtime_nsec(),
+            nlink: metadata.nlink(),
+        })
+    }
+}
 
 pub(crate) fn create_file(
     lease: &WorkspaceRootLease,
@@ -79,7 +134,7 @@ pub(crate) fn rename(
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn copy_regular_file(
     source_lease: &WorkspaceRootLease,
     source_path: &RelativePath,
@@ -95,6 +150,7 @@ pub(crate) fn copy_regular_file(
         target_path,
         &mut hooks,
     )
+    .map(drop)
 }
 
 pub(crate) fn copy_entry(
@@ -104,11 +160,18 @@ pub(crate) fn copy_entry(
     target_path: &RelativePath,
 ) -> Result<(), CommandError> {
     validate_copy_paths(source_lease, source_path, target_lease, target_path)?;
-    dispatch_copy(source_lease, source_path, target_lease, target_path)
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        dispatch_copy_without_receipt(source_lease, source_path, target_lease, target_path)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        dispatch_copy(source_lease, source_path, target_lease, target_path)
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn dispatch_copy(
+fn dispatch_copy_without_receipt(
     source_lease: &WorkspaceRootLease,
     source_path: &RelativePath,
     target_lease: &WorkspaceRootLease,
@@ -119,17 +182,56 @@ fn dispatch_copy(
     let source_metadata = source_parent
         .symlink_metadata(&source_name)
         .map_err(map_workspace_copy_error)?;
+    if source_metadata.is_dir() {
+        super::directory_copy::copy_directory(source_lease, source_path, target_lease, target_path)
+    } else {
+        dispatch_copy(source_lease, source_path, target_lease, target_path).map(drop)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn copy_entry_with_receipt(
+    source_lease: &WorkspaceRootLease,
+    source_path: &RelativePath,
+    target_lease: &WorkspaceRootLease,
+    target_path: &RelativePath,
+) -> Result<PublishedCopyReceipt, CommandError> {
+    validate_copy_paths(source_lease, source_path, target_lease, target_path)?;
+    dispatch_copy(source_lease, source_path, target_lease, target_path)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn dispatch_copy(
+    source_lease: &WorkspaceRootLease,
+    source_path: &RelativePath,
+    target_lease: &WorkspaceRootLease,
+    target_path: &RelativePath,
+) -> Result<PublishedCopyReceipt, CommandError> {
+    let (source_parent_path, source_name) = split_entry_path(source_path)?;
+    let source_parent = open_copy_parent(source_lease.directory(), &source_parent_path)?;
+    let source_metadata = source_parent
+        .symlink_metadata(&source_name)
+        .map_err(map_workspace_copy_error)?;
 
     if source_metadata.is_file() {
-        return copy_regular_file(source_lease, source_path, target_lease, target_path);
-    }
-    if source_metadata.is_dir() {
-        return super::directory_copy::copy_directory(
+        let mut hooks = NoopTransferHooks;
+        return transfer_regular_file(
             source_lease,
             source_path,
             target_lease,
             target_path,
-        );
+            &mut hooks,
+        )
+        .map(PublishedCopyReceipt::File);
+    }
+    if source_metadata.is_dir() {
+        return super::directory_copy::copy_directory_with_receipt(
+            source_lease,
+            source_path,
+            target_lease,
+            target_path,
+        )
+        .map(PublishedCopyReceipt::Directory);
     }
     if !source_metadata.file_type().is_symlink() {
         return Err(entry_type_mismatch());
@@ -140,11 +242,13 @@ fn dispatch_copy(
     transfer_symlink(
         &source_parent,
         &source_name,
+        source_parent_path,
         source_before,
         target_lease,
         target_path,
         &mut hooks,
     )
+    .map(PublishedCopyReceipt::Symlink)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -210,7 +314,7 @@ fn transfer_regular_file<H: TransferHooks>(
     target_lease: &WorkspaceRootLease,
     target_path: &RelativePath,
     hooks: &mut H,
-) -> Result<(), CommandError> {
+) -> Result<PublishedFileReceipt, CommandError> {
     let (source_parent_path, source_name) = split_entry_path(source_path)?;
     let source_parent = open_copy_parent(source_lease.directory(), &source_parent_path)?;
     let source_preflight = source_parent
@@ -254,7 +358,7 @@ fn transfer_regular_file<H: TransferHooks>(
         if !source_before.is_stable_after(verification_before, source_name_before_verification) {
             return Err(copy_conflict());
         }
-        verify_staged_contents(&mut source, staged.file_mut())?;
+        let digest = verify_staged_contents_digest(&mut source, staged.file_mut())?;
         let verification_after =
             SourceSnapshot::from_metadata(&source.metadata().map_err(map_workspace_copy_error)?)?;
         let source_name_after_verification =
@@ -264,27 +368,60 @@ fn transfer_regular_file<H: TransferHooks>(
         {
             return Err(copy_conflict());
         }
-        Ok(())
+        let source_parent_identity = FileIdentity::from_metadata(
+            &source_parent
+                .dir_metadata()
+                .map_err(map_workspace_copy_error)?,
+        );
+        let target_parent_identity = FileIdentity::from_metadata(
+            &target_parent
+                .dir_metadata()
+                .map_err(map_workspace_copy_error)?,
+        );
+        let target_file = staged.file.try_clone().map_err(map_workspace_copy_error)?;
+        let target_snapshot = PublishedFileSnapshot::from_metadata(
+            &target_file.metadata().map_err(map_workspace_copy_error)?,
+        )?;
+        let target_parent_receipt = target_parent
+            .try_clone()
+            .map_err(map_workspace_copy_error)?;
+        Ok(PublishedFileReceipt {
+            source_parent_path,
+            source_name,
+            source_parent,
+            source_parent_identity,
+            source_file: source,
+            source_snapshot: source_before,
+            target_parent_path,
+            target_name: target_name.clone(),
+            target_parent: target_parent_receipt,
+            target_parent_identity,
+            target_file,
+            target_snapshot,
+            digest,
+        })
     })();
 
-    if let Err(error) = prepared {
-        return fail_with_stage_cleanup(&mut staged, error);
-    }
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => return fail_with_stage_cleanup(&mut staged, error).map(|()| unreachable!()),
+    };
     if let Err(error) = staged.publish(&target_name) {
-        return fail_with_stage_cleanup(&mut staged, error);
+        return fail_with_stage_cleanup(&mut staged, error).map(|()| unreachable!());
     }
-    Ok(())
+    Ok(prepared)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn transfer_symlink<H: SymlinkTransferHooks>(
     source_parent: &Dir,
     source_name: &Path,
+    source_parent_path: PathBuf,
     source_before: SymlinkSnapshot,
     target_lease: &WorkspaceRootLease,
     target_path: &RelativePath,
     hooks: &mut H,
-) -> Result<(), CommandError> {
+) -> Result<PublishedSymlinkReceipt, CommandError> {
     let source_payload =
         read_source_symlink_stably(source_parent, source_name, source_before, hooks)?;
 
@@ -296,12 +433,53 @@ fn transfer_symlink<H: SymlinkTransferHooks>(
     if let Err(error) =
         ensure_source_symlink_unchanged(source_parent, source_name, source_before, &source_payload)
     {
-        return fail_with_symlink_stage_cleanup(&mut staged, error);
+        return fail_with_symlink_stage_cleanup(&mut staged, error).map(|()| unreachable!());
     }
+    let prepared = (|| {
+        let source_parent_receipt = source_parent
+            .try_clone()
+            .map_err(map_workspace_copy_error)?;
+        let source_parent_identity = FileIdentity::from_metadata(
+            &source_parent
+                .dir_metadata()
+                .map_err(map_workspace_copy_error)?,
+        );
+        let target_parent_receipt = target_parent
+            .try_clone()
+            .map_err(map_workspace_copy_error)?;
+        let target_parent_identity = FileIdentity::from_metadata(
+            &target_parent
+                .dir_metadata()
+                .map_err(map_workspace_copy_error)?,
+        );
+        let target_snapshot = PublishedSymlinkSnapshot::from_source(symlink_snapshot_at(
+            &target_parent,
+            &staged.name,
+        )?);
+        Ok(PublishedSymlinkReceipt {
+            source_parent_path,
+            source_name: source_name.to_owned(),
+            source_parent: source_parent_receipt,
+            source_parent_identity,
+            source_snapshot: source_before,
+            payload: source_payload,
+            target_parent_path,
+            target_name: target_name.clone(),
+            target_parent: target_parent_receipt,
+            target_parent_identity,
+            target_snapshot,
+        })
+    })();
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return fail_with_symlink_stage_cleanup(&mut staged, error).map(|()| unreachable!());
+        }
+    };
     if let Err(error) = staged.publish(&target_name) {
-        return fail_with_symlink_stage_cleanup(&mut staged, error);
+        return fail_with_symlink_stage_cleanup(&mut staged, error).map(|()| unreachable!());
     }
-    Ok(())
+    Ok(prepared)
 }
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
@@ -358,6 +536,7 @@ where
         target_path,
         &mut hooks,
     )
+    .map(drop)
 }
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
@@ -390,6 +569,7 @@ where
         target_path,
         &mut hooks,
     )
+    .map(drop)
 }
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
@@ -438,15 +618,17 @@ where
     transfer_symlink(
         &source_parent,
         &source_name,
+        source_parent_path,
         source_before,
         target_lease,
         target_path,
         &mut hooks,
     )
+    .map(drop)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct FileIdentity {
     pub(super) device: u64,
     pub(super) inode: u64,
@@ -474,6 +656,7 @@ pub(super) struct SourceSnapshot {
     pub(super) mtime_nsec: i64,
     pub(super) ctime: i64,
     pub(super) ctime_nsec: i64,
+    pub(super) nlink: u64,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -490,15 +673,21 @@ impl SourceSnapshot {
             mtime_nsec: metadata.mtime_nsec(),
             ctime: metadata.ctime(),
             ctime_nsec: metadata.ctime_nsec(),
+            nlink: metadata.nlink(),
         })
     }
 
-    fn is_stable_after(self, after: Self, source_name_still_identifies_handle: bool) -> bool {
+    pub(super) fn is_stable_after(
+        self,
+        after: Self,
+        source_name_still_identifies_handle: bool,
+    ) -> bool {
         let data_and_mode_are_stable = self.identity == after.identity
             && self.len == after.len
             && self.mode == after.mode
             && self.mtime == after.mtime
-            && self.mtime_nsec == after.mtime_nsec;
+            && self.mtime_nsec == after.mtime_nsec
+            && self.nlink == after.nlink;
         data_and_mode_are_stable
             && (!source_name_still_identifies_handle
                 || (self.ctime == after.ctime && self.ctime_nsec == after.ctime_nsec))
@@ -514,6 +703,7 @@ pub(super) struct SymlinkSnapshot {
     pub(super) mtime_nsec: i64,
     pub(super) ctime: i64,
     pub(super) ctime_nsec: i64,
+    pub(super) nlink: u64,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -534,6 +724,7 @@ impl SymlinkSnapshot {
             mtime_nsec: metadata.mtime_nsec(),
             ctime: metadata.ctime(),
             ctime_nsec: metadata.ctime_nsec(),
+            nlink: metadata.nlink(),
         })
     }
 }
@@ -1008,10 +1199,10 @@ pub(super) fn transfer_bounded_count(
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(super) fn verify_staged_contents(
+pub(super) fn verify_staged_contents_digest(
     source: &mut File,
     staged: &mut File,
-) -> Result<(), CommandError> {
+) -> Result<[u8; 32], CommandError> {
     source
         .seek(SeekFrom::Start(0))
         .map_err(map_workspace_copy_error)?;
@@ -1021,6 +1212,8 @@ pub(super) fn verify_staged_contents(
 
     let mut source_buffer = [0u8; COPY_BUFFER_BYTES];
     let mut staged_buffer = [0u8; COPY_BUFFER_BYTES];
+    let mut source_hasher = Sha256::new();
+    let mut staged_hasher = Sha256::new();
     let mut compared = 0usize;
     loop {
         let remaining_probe = MAX_COPY_FILE_BYTES
@@ -1036,7 +1229,13 @@ pub(super) fn verify_staged_contents(
                 .read(&mut staged_buffer[..1])
                 .map_err(map_workspace_copy_error)?;
             return if staged_read == 0 {
-                Ok(())
+                let source_digest: [u8; 32] = source_hasher.finalize().into();
+                let staged_digest: [u8; 32] = staged_hasher.finalize().into();
+                if source_digest == staged_digest {
+                    Ok(source_digest)
+                } else {
+                    Err(copy_conflict())
+                }
             } else {
                 Err(copy_conflict())
             };
@@ -1062,6 +1261,8 @@ pub(super) fn verify_staged_contents(
         if source_buffer[..source_read] != staged_buffer[..source_read] {
             return Err(copy_conflict());
         }
+        source_hasher.update(&source_buffer[..source_read]);
+        staged_hasher.update(&staged_buffer[..source_read]);
     }
 }
 

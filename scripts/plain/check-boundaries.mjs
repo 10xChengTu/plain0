@@ -9,6 +9,8 @@ import {
 	validateTauriApiBoundary,
 	validateTauriConfiguration,
 	validateWorkspaceCopyCommandRegistration,
+	validateWorkspaceMoveBoundary,
+	validateWorkspaceMoveCommandRegistration,
 	validateWorkspaceProviderBootstrap,
 	validateWorkspaceProviderCopyBoundary,
 	validateWorkspaceRustBoundary,
@@ -270,20 +272,25 @@ for (const failure of validateMainCapability(capability)) {
 
 const cargo = await readFile(path.join(root, "src-tauri/Cargo.toml"), "utf8");
 let cargoDependencies = [];
+let resolvedSha2Features = [];
 try {
 	const cargoMetadata = JSON.parse(
 		execFileSync(
 			"cargo",
 			[
 				"metadata",
-				"--no-deps",
 				"--locked",
 				"--format-version",
 				"1",
 				"--manifest-path",
 				"src-tauri/Cargo.toml",
 			],
-			{ cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+			{
+				cwd: root,
+				encoding: "utf8",
+				maxBuffer: 16 * 1_024 * 1_024,
+				stdio: ["ignore", "pipe", "pipe"],
+			},
 		),
 	);
 	const plainPackage = cargoMetadata.packages?.find(
@@ -293,14 +300,43 @@ try {
 		throw new Error("plain package dependency metadata is missing");
 	}
 	cargoDependencies = plainPackage.dependencies.map(
-		({ name, req, kind, rename, target }) => ({
+		({
 			name,
 			req,
 			kind,
 			rename,
 			target,
+			optional,
+			uses_default_features,
+			features,
+		}) => ({
+			name,
+			req,
+			kind,
+			rename,
+			target,
+			optional,
+			uses_default_features,
+			features,
 		}),
 	);
+	const sha2Packages = cargoMetadata.packages?.filter(
+		(packageMetadata) =>
+			packageMetadata.name === "sha2" && packageMetadata.version === "0.10.9",
+	);
+	if (
+		sha2Packages?.length !== 1 ||
+		!Array.isArray(cargoMetadata.resolve?.nodes)
+	) {
+		throw new Error("resolved sha2@0.10.9 metadata is missing");
+	}
+	const sha2Node = cargoMetadata.resolve.nodes.find(
+		(node) => node.id === sha2Packages[0].id,
+	);
+	if (!Array.isArray(sha2Node?.features)) {
+		throw new Error("resolved sha2@0.10.9 feature metadata is missing");
+	}
+	resolvedSha2Features = sha2Node.features;
 } catch {
 	fail("cargo metadata --locked must describe the Plain dependency graph");
 }
@@ -326,10 +362,17 @@ for (const failure of validateWorkspaceRustBoundary(
 	cargo,
 	rustSources,
 	cargoDependencies,
+	resolvedSha2Features,
 )) {
 	fail(failure);
 }
 for (const failure of validateWorkspaceCopyCommandRegistration(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateWorkspaceMoveCommandRegistration(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateWorkspaceMoveBoundary(rustSources)) {
 	fail(failure);
 }
 
@@ -353,6 +396,6 @@ if (failures.length > 0) {
 	process.exitCode = 1;
 } else {
 	console.log(
-		`architecture: ${appFiles.length} app sources, ${rustSources.length} Rust sources, ${allowedDependencies.size} pinned runtime dependencies, audited bounded directory/file/symlink copy boundaries, minimum Tauri capability`,
+		`architecture: ${appFiles.length} app sources, ${rustSources.length} Rust sources, ${allowedDependencies.size} pinned runtime dependencies, audited bounded directory/file/symlink copy and cross-root move boundaries, minimum Tauri capability`,
 	);
 }

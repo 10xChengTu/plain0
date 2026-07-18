@@ -193,6 +193,74 @@ impl WorkspaceCopyRequest {
     }
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceMoveRequest {
+    source_root_id: RootId,
+    source_path: String,
+    target_root_id: RootId,
+    target_path: String,
+}
+
+impl WorkspaceMoveRequest {
+    pub fn into_parts(self) -> Result<(RootId, RelativePath, RootId, RelativePath), CommandError> {
+        if self.source_root_id == self.target_root_id {
+            return Err(CommandError::new(
+                "WORKSPACE_CONFLICT",
+                "A cross-root move requires two different workspace roots.",
+            ));
+        }
+        let source_path = RelativePath::parse_wire(&self.source_path)?;
+        let target_path = RelativePath::parse_wire(&self.target_path)?;
+        Ok((
+            self.source_root_id,
+            source_path,
+            self.target_root_id,
+            target_path,
+        ))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkspaceMoveIncompleteReason {
+    SourceChanged,
+    TargetChanged,
+    SourceUnverifiable,
+    TargetUnverifiable,
+    DeleteFailed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum WorkspaceMoveResult {
+    Moved,
+    TargetPublishedSourceRetained {
+        reason: WorkspaceMoveIncompleteReason,
+    },
+    TargetPublishedSourcePartiallyDeleted {
+        reason: WorkspaceMoveIncompleteReason,
+        #[serde(rename = "removedEntries")]
+        removed_entries: u32,
+    },
+}
+
+impl WorkspaceMoveResult {
+    pub(super) const fn incomplete(
+        reason: WorkspaceMoveIncompleteReason,
+        removed_entries: u32,
+    ) -> Self {
+        if removed_entries == 0 {
+            Self::TargetPublishedSourceRetained { reason }
+        } else {
+            Self::TargetPublishedSourcePartiallyDeleted {
+                reason,
+                removed_entries,
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum WorkspaceEntryKind {
@@ -279,8 +347,9 @@ impl WorkspaceReadDirectoryResult {
 #[cfg(test)]
 mod tests {
     use super::{
-        WorkspaceCopyRequest, WorkspaceEntryKind, WorkspaceEntryRequest, WorkspacePickRootsMode,
-        WorkspacePickRootsRequest, WorkspaceRenameRequest,
+        WorkspaceCopyRequest, WorkspaceEntryKind, WorkspaceEntryRequest,
+        WorkspaceMoveIncompleteReason, WorkspaceMoveRequest, WorkspaceMoveResult,
+        WorkspacePickRootsMode, WorkspacePickRootsRequest, WorkspaceRenameRequest,
     };
 
     #[test]
@@ -415,6 +484,66 @@ mod tests {
                 "INVALID_RELATIVE_PATH"
             );
         }
+    }
+
+    #[test]
+    fn move_request_requires_exactly_two_different_roots_and_validated_paths() {
+        let request: WorkspaceMoveRequest = serde_json::from_str(
+            r#"{"sourceRootId":"00000000-0000-4000-8000-000000000000","sourcePath":"src/old.rs","targetRootId":"00000000-0000-4000-8000-000000000001","targetPath":"backup/new.rs"}"#,
+        )
+        .unwrap();
+        let (source_root_id, source_path, target_root_id, target_path) =
+            request.into_parts().unwrap();
+        assert_ne!(source_root_id, target_root_id);
+        assert_eq!(source_path.as_wire(), "src/old.rs");
+        assert_eq!(target_path.as_wire(), "backup/new.rs");
+
+        let same_root: WorkspaceMoveRequest = serde_json::from_str(
+            r#"{"sourceRootId":"00000000-0000-4000-8000-000000000000","sourcePath":"old","targetRootId":"00000000-0000-4000-8000-000000000000","targetPath":"new"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            same_root.into_parts().unwrap_err().code(),
+            "WORKSPACE_CONFLICT"
+        );
+
+        for invalid in [
+            r#"{"sourceRootId":"00000000-0000-4000-8000-000000000000","sourcePath":"old","targetRootId":"00000000-0000-4000-8000-000000000001","targetPath":"new","overwrite":false}"#,
+            r#"{"sourceRootId":"00000000-0000-4000-8000-000000000000","sourcePath":"old","targetRootId":"00000000-0000-4000-8000-000000000001"}"#,
+            r#"{"sourceRootId":"00000000-0000-4000-8000-000000000000","targetRootId":"00000000-0000-4000-8000-000000000001","targetPath":"new"}"#,
+        ] {
+            assert!(serde_json::from_str::<WorkspaceMoveRequest>(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn move_result_is_a_strict_camel_case_structured_terminal_state() {
+        assert_eq!(
+            serde_json::to_value(WorkspaceMoveResult::Moved).unwrap(),
+            serde_json::json!({ "status": "moved" })
+        );
+        assert_eq!(
+            serde_json::to_value(WorkspaceMoveResult::TargetPublishedSourceRetained {
+                reason: WorkspaceMoveIncompleteReason::TargetUnverifiable,
+            })
+            .unwrap(),
+            serde_json::json!({
+                "status": "targetPublishedSourceRetained",
+                "reason": "targetUnverifiable",
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(WorkspaceMoveResult::TargetPublishedSourcePartiallyDeleted {
+                reason: WorkspaceMoveIncompleteReason::DeleteFailed,
+                removed_entries: 7,
+            })
+            .unwrap(),
+            serde_json::json!({
+                "status": "targetPublishedSourcePartiallyDeleted",
+                "reason": "deleteFailed",
+                "removedEntries": 7,
+            })
+        );
     }
 
     #[test]

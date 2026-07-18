@@ -5,6 +5,9 @@ import type {
 	WorkspaceEntryKind,
 	WorkspaceEntryStat,
 	WorkspaceFileData,
+	WorkspaceMoveIncompleteReason,
+	WorkspaceMoveRequest,
+	WorkspaceMoveResult,
 	WorkspacePickResult,
 	WorkspaceReadDirectoryResult,
 	WorkspaceRoot,
@@ -19,6 +22,7 @@ const MAX_DIRECTORY_ENTRIES = 10_000;
 const MAX_ENTRY_NAME_BYTES = 1_024;
 const MAX_DIRECTORY_NAME_PAYLOAD_BYTES = 2 * 1_024 * 1_024;
 const MAX_FILE_BYTES = 8 * 1_024 * 1_024;
+const MAX_MOVE_REMOVED_ENTRIES = 10_000;
 const MAX_RELATIVE_PATH_BYTES = 4_096;
 const MAX_RELATIVE_PATH_SEGMENTS = 256;
 const CONTRACT_ERROR_MESSAGE =
@@ -31,6 +35,14 @@ const WORKSPACE_ENTRY_KINDS = new Set<WorkspaceEntryKind>([
 	"symlinkDirectory",
 	"other",
 ]);
+const WORKSPACE_MOVE_INCOMPLETE_REASONS =
+	new Set<WorkspaceMoveIncompleteReason>([
+		"sourceChanged",
+		"targetChanged",
+		"sourceUnverifiable",
+		"targetUnverifiable",
+		"deleteFailed",
+	]);
 const utf8Encoder = new TextEncoder();
 
 class IpcContractViolation extends Error {
@@ -59,10 +71,66 @@ function hasExactKeys(
 	expected: readonly string[],
 ): boolean {
 	const keys = Reflect.ownKeys(value);
-	return (
-		keys.length === expected.length &&
-		keys.every((key) => typeof key === "string" && expected.includes(key))
-	);
+	if (keys.length !== expected.length) {
+		return false;
+	}
+	for (const key of keys) {
+		if (typeof key !== "string") {
+			return false;
+		}
+		let expectedKey = false;
+		for (let index = 0; index < expected.length; index += 1) {
+			if (expected[index] === key) {
+				expectedKey = true;
+				break;
+			}
+		}
+		if (!expectedKey) {
+			return false;
+		}
+	}
+	return true;
+}
+
+function ownPlainDataSnapshot(
+	value: unknown,
+): Readonly<Record<string, unknown>> {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return violation();
+	}
+
+	const prototype = Object.getPrototypeOf(value);
+	if (prototype !== Object.prototype && prototype !== null) {
+		return violation();
+	}
+	const descriptors = Object.getOwnPropertyDescriptors(value);
+	const keys = Reflect.ownKeys(descriptors);
+
+	const snapshot: Record<string, unknown> = Object.create(null);
+	for (const key of keys) {
+		if (typeof key !== "string") {
+			return violation();
+		}
+		const descriptor = descriptors[key];
+		if (
+			descriptor === undefined ||
+			!("value" in descriptor) ||
+			descriptor.get !== undefined ||
+			descriptor.set !== undefined
+		) {
+			return violation();
+		}
+		snapshot[key] = descriptor.value;
+	}
+
+	return Object.freeze(snapshot);
+}
+
+function rejectProxyObject(value: object): void {
+	// The caller has already proved every accepted field is a scalar own data
+	// property. Structured clone can therefore serve only as a Proxy brand check
+	// and cannot traverse attacker-controlled nested payloads or accessors.
+	structuredClone(value);
 }
 
 function isUuidV4(value: unknown): value is string {
@@ -256,6 +324,27 @@ export function frozenWorkspaceCopyRequest(
 		targetRootId: target.rootId,
 		targetPath: target.relativePath,
 	});
+}
+
+export function frozenWorkspaceMoveRequest(
+	sourceRootId: unknown,
+	sourcePath: unknown,
+	targetRootId: unknown,
+	targetPath: unknown,
+): Readonly<WorkspaceMoveRequest> {
+	const request = frozenWorkspaceCopyRequest(
+		sourceRootId,
+		sourcePath,
+		targetRootId,
+		targetPath,
+	);
+	if (request.sourceRootId === request.targetRootId) {
+		return requestViolation(
+			"WORKSPACE_CONFLICT",
+			"The workspace move requires distinct workspace roots.",
+		);
+	}
+	return Object.freeze({ ...request });
 }
 
 function compareUtf8(left: Uint8Array, right: Uint8Array): number {
@@ -524,6 +613,63 @@ export function decodeWorkspaceVoid(value: unknown): void {
 	});
 }
 
+function isWorkspaceMoveIncompleteReason(
+	value: unknown,
+): value is WorkspaceMoveIncompleteReason {
+	return (
+		typeof value === "string" &&
+		WORKSPACE_MOVE_INCOMPLETE_REASONS.has(
+			value as WorkspaceMoveIncompleteReason,
+		)
+	);
+}
+
+export function decodeWorkspaceMoveResult(value: unknown): WorkspaceMoveResult {
+	return sanitizedDecode(() => {
+		const snapshot = ownPlainDataSnapshot(value);
+		if (typeof snapshot.status !== "string") {
+			return violation();
+		}
+		if (snapshot.status === "moved") {
+			if (!hasExactKeys(snapshot, ["status"])) {
+				return violation();
+			}
+			rejectProxyObject(value as object);
+			return Object.freeze({ status: snapshot.status });
+		}
+		if (snapshot.status === "targetPublishedSourceRetained") {
+			if (
+				!hasExactKeys(snapshot, ["status", "reason"]) ||
+				!isWorkspaceMoveIncompleteReason(snapshot.reason)
+			) {
+				return violation();
+			}
+			rejectProxyObject(value as object);
+			return Object.freeze({
+				status: snapshot.status,
+				reason: snapshot.reason,
+			});
+		}
+		if (
+			snapshot.status !== "targetPublishedSourcePartiallyDeleted" ||
+			!hasExactKeys(snapshot, ["status", "reason", "removedEntries"]) ||
+			!isWorkspaceMoveIncompleteReason(snapshot.reason) ||
+			typeof snapshot.removedEntries !== "number" ||
+			!Number.isSafeInteger(snapshot.removedEntries) ||
+			snapshot.removedEntries < 1 ||
+			snapshot.removedEntries > MAX_MOVE_REMOVED_ENTRIES
+		) {
+			return violation();
+		}
+		rejectProxyObject(value as object);
+		return Object.freeze({
+			status: snapshot.status,
+			reason: snapshot.reason,
+			removedEntries: snapshot.removedEntries,
+		});
+	});
+}
+
 export function frozenWorkspaceSnapshot(
 	workspaceId: string,
 	revision: number,
@@ -562,4 +708,10 @@ export function frozenWorkspaceFileData(
 		return frozenWorkspaceFileDataFromBytes(bytes);
 	}
 	return decodeWorkspaceFileData(bytes);
+}
+
+export function frozenWorkspaceMoveResult(
+	result: WorkspaceMoveResult,
+): WorkspaceMoveResult {
+	return decodeWorkspaceMoveResult(result);
 }

@@ -16,6 +16,8 @@ pub(crate) mod commands;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod directory_copy;
 pub mod dto;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod move_entry;
 pub mod picker;
 pub(crate) mod reader;
 pub mod service;

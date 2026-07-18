@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
 	createBrowserMockBridge,
+	type BrowserMockBridgeOptions,
 	type BrowserMockDirectoryCopyLimitsForTest,
 	type BrowserMockDirectoryCopyObservation,
 	type BrowserMockDirectoryFixtureEntryForTest,
@@ -1421,5 +1422,872 @@ describe("browser mock workspace bridge", () => {
 		await expect(
 			bridge.workspaceStat(libraryRoot!.rootId, "src/main.ts"),
 		).rejects.toMatchObject({ code: "ENTRY_NOT_FOUND" });
+	});
+
+	it("moves detached files, raw symlinks, and directories across roots", async () => {
+		const bridge = createBrowserMockBridge();
+		const added = await bridge.workspacePickRoots("add");
+		const [sourceRoot, targetRoot] = added.snapshot.roots;
+		const sourceRootId = sourceRoot!.rootId;
+		const targetRootId = targetRoot!.rootId;
+
+		const file = await bridge.workspaceMove(
+			sourceRootId,
+			"README.md",
+			targetRootId,
+			"packages/README.md",
+		);
+		const symlink = await bridge.workspaceMove(
+			sourceRootId,
+			"fixtures/binary-link",
+			targetRootId,
+			"packages/binary-link",
+		);
+		const directory = await bridge.workspaceMove(
+			sourceRootId,
+			"src",
+			targetRootId,
+			"packages/src",
+		);
+
+		for (const result of [file, symlink, directory]) {
+			expect(result).toEqual({ status: "moved" });
+			expect(Object.isFrozen(result)).toBe(true);
+		}
+		expect(
+			(
+				await bridge.workspaceReadFile(targetRootId, "packages/README.md")
+			).copy(),
+		).toEqual(new TextEncoder().encode("# Plain browser workspace\n"));
+		expect(
+			await bridge.workspaceStat(targetRootId, "packages/binary-link"),
+		).toMatchObject({ kind: "symlink", size: 4 });
+		expect(
+			(
+				await bridge.workspaceReadFile(targetRootId, "packages/src/main.ts")
+			).copy(),
+		).toEqual(new TextEncoder().encode('export const editor = "Plain";\n'));
+		for (const path of ["README.md", "fixtures/binary-link", "src"]) {
+			await expect(
+				bridge.workspaceStat(sourceRootId, path),
+			).rejects.toMatchObject({
+				code: "ENTRY_NOT_FOUND",
+			});
+		}
+	});
+
+	it("keeps directory move receipt verification linear in manifest size", async () => {
+		const entryCount = 256;
+		let receiptVisits = 0;
+		const bridge = createBrowserMockBridge({
+			directoryCopyFixtureForTest: {
+				name: "linear-tree",
+				entries: Array.from({ length: entryCount }, (_, index) => ({
+					path: [`file-${index.toString().padStart(3, "0")}.bin`],
+					kind: "file" as const,
+					bytes: [index % 256],
+				})),
+			},
+			onWorkspaceMoveReceiptVisitForTest() {
+				receiptVisits += 1;
+			},
+		});
+		const added = await bridge.workspacePickRoots("add");
+		const [sourceRoot, targetRoot] = added.snapshot.roots;
+
+		await expect(
+			bridge.workspaceMove(
+				sourceRoot!.rootId,
+				"linear-tree",
+				targetRoot!.rootId,
+				"packages/linear-tree",
+			),
+		).resolves.toEqual({ status: "moved" });
+		expect(receiptVisits).toBeGreaterThan(entryCount);
+		expect(receiptVisits).toBeLessThanOrEqual(entryCount * 8 + 16);
+	});
+
+	it("rejects same-root move before publishing or deleting anything", async () => {
+		const bridge = createBrowserMockBridge();
+		const selected = await bridge.workspacePickRoots("replace");
+		const rootId = selected.snapshot.roots[0]!.rootId;
+
+		await expect(
+			bridge.workspaceMove(rootId, "README.md", rootId, "moved.md"),
+		).rejects.toEqual({
+			code: "WORKSPACE_CONFLICT",
+			message: "The workspace move requires distinct workspace roots.",
+		});
+		expect((await bridge.workspaceStat(rootId, "README.md")).kind).toBe("file");
+		await expect(
+			bridge.workspaceStat(rootId, "moved.md"),
+		).rejects.toMatchObject({
+			code: "ENTRY_NOT_FOUND",
+		});
+	});
+
+	it("captures and validates every move seam exactly once before publication", async () => {
+		const seamNames = [
+			"onWorkspaceMoveAfterPublicationForTest",
+			"onWorkspaceMoveBeforeDeleteForTest",
+			"onWorkspaceMoveAfterDeleteEntryForTest",
+			"onWorkspaceMoveDeleteForTest",
+			"onWorkspaceMoveReceiptVisitForTest",
+		] as const;
+		const reads = new Map<PropertyKey, number>();
+		const options = new Proxy({} as BrowserMockBridgeOptions, {
+			get(target, property, receiver) {
+				if (seamNames.some((name) => name === property)) {
+					const count = (reads.get(property) ?? 0) + 1;
+					reads.set(property, count);
+					if (count > 1) {
+						throw new Error("move seam was read after capture");
+					}
+					return property === "onWorkspaceMoveAfterPublicationForTest"
+						? () => undefined
+						: undefined;
+				}
+				return Reflect.get(target, property, receiver);
+			},
+		});
+		const bridge = createBrowserMockBridge(options);
+		const added = await bridge.workspacePickRoots("add");
+		const [sourceRoot, targetRoot] = added.snapshot.roots;
+
+		await expect(
+			bridge.workspaceMove(
+				sourceRoot!.rootId,
+				"README.md",
+				targetRoot!.rootId,
+				"packages/captured.md",
+			),
+		).resolves.toEqual({ status: "moved" });
+		for (const name of seamNames) {
+			expect(reads.get(name)).toBe(1);
+		}
+
+		const throwingAccessor = {} as BrowserMockBridgeOptions;
+		Object.defineProperty(
+			throwingAccessor,
+			"onWorkspaceMoveBeforeDeleteForTest",
+			{
+				get() {
+					throw new Error("seam capture failed");
+				},
+			},
+		);
+		expect(() => createBrowserMockBridge(throwingAccessor)).toThrow(
+			"seam capture failed",
+		);
+		expect(() =>
+			createBrowserMockBridge({
+				onWorkspaceMoveAfterDeleteEntryForTest: "invalid",
+			} as unknown as BrowserMockBridgeOptions),
+		).toThrow("Invalid browser mock workspace-move seam.");
+	});
+
+	it("uses a private pre-publication content receipt and attributes coordinated rewrites source-first", async () => {
+		let replacement: readonly number[] = [];
+		let observationFrozen = false;
+		const bridge = createBrowserMockBridge({
+			onWorkspaceMoveAfterPublicationForTest(observation, mutations) {
+				observationFrozen =
+					Object.isFrozen(observation) && !("receipt" in observation);
+				mutations.rewriteSourceFile("", replacement);
+				mutations.rewriteTargetFile("", replacement);
+			},
+		});
+		const added = await bridge.workspacePickRoots("add");
+		const [sourceRoot, targetRoot] = added.snapshot.roots;
+		const original = (
+			await bridge.workspaceReadFile(sourceRoot!.rootId, "README.md")
+		).copy();
+		replacement = [...original].map((byte) => byte ^ 0xff);
+
+		const result = await bridge.workspaceMove(
+			sourceRoot!.rootId,
+			"README.md",
+			targetRoot!.rootId,
+			"packages/rewritten.md",
+		);
+
+		expect(result).toEqual({
+			status: "targetPublishedSourceRetained",
+			reason: "sourceChanged",
+		});
+		expect(observationFrozen).toBe(true);
+		expect([
+			...(
+				await bridge.workspaceReadFile(sourceRoot!.rootId, "README.md")
+			).copy(),
+		]).toEqual(replacement);
+		expect([
+			...(
+				await bridge.workspaceReadFile(
+					targetRoot!.rootId,
+					"packages/rewritten.md",
+				)
+			).copy(),
+		]).toEqual(replacement);
+	});
+
+	it("attributes a post-publication target content rewrite without deleting source", async () => {
+		let replacement: readonly number[] = [];
+		const bridge = createBrowserMockBridge({
+			onWorkspaceMoveAfterPublicationForTest(_observation, mutations) {
+				mutations.rewriteTargetFile("", replacement);
+			},
+		});
+		const added = await bridge.workspacePickRoots("add");
+		const [sourceRoot, targetRoot] = added.snapshot.roots;
+		const original = (
+			await bridge.workspaceReadFile(sourceRoot!.rootId, "README.md")
+		).copy();
+		replacement = [...original].map((byte) => byte ^ 0xaa);
+
+		await expect(
+			bridge.workspaceMove(
+				sourceRoot!.rootId,
+				"README.md",
+				targetRoot!.rootId,
+				"packages/target-rewritten.md",
+			),
+		).resolves.toEqual({
+			status: "targetPublishedSourceRetained",
+			reason: "targetChanged",
+		});
+		expect(
+			(await bridge.workspaceStat(sourceRoot!.rootId, "README.md")).kind,
+		).toBe("file");
+	});
+
+	it("turns observer failures into unverifiable outcomes instead of delete failures", async () => {
+		const bridge = createBrowserMockBridge({
+			onWorkspaceMoveAfterPublicationForTest() {
+				throw new Error("simulated observer failure");
+			},
+		});
+		const added = await bridge.workspacePickRoots("add");
+		const [sourceRoot, targetRoot] = added.snapshot.roots;
+
+		const result = await bridge.workspaceMove(
+			sourceRoot!.rootId,
+			"README.md",
+			targetRoot!.rootId,
+			"packages/published.md",
+		);
+
+		expect(result).toEqual({
+			status: "targetPublishedSourceRetained",
+			reason: "sourceUnverifiable",
+		});
+		expect(
+			(await bridge.workspaceStat(sourceRoot!.rootId, "README.md")).kind,
+		).toBe("file");
+		expect(
+			(await bridge.workspaceStat(targetRoot!.rootId, "packages/published.md"))
+				.kind,
+		).toBe("file");
+	});
+
+	it("revalidates source before applying a thrown observer outcome", async () => {
+		let replacement: readonly number[] = [];
+		const bridge = createBrowserMockBridge({
+			onWorkspaceMoveAfterPublicationForTest(_observation, mutations) {
+				mutations.rewriteSourceFile("", replacement);
+				throw new Error("observer failed after mutating source");
+			},
+		});
+		const added = await bridge.workspacePickRoots("add");
+		const [sourceRoot, targetRoot] = added.snapshot.roots;
+		const original = (
+			await bridge.workspaceReadFile(sourceRoot!.rootId, "README.md")
+		).copy();
+		replacement = [...original].map((byte) => byte ^ 0x55);
+
+		await expect(
+			bridge.workspaceMove(
+				sourceRoot!.rootId,
+				"README.md",
+				targetRoot!.rootId,
+				"packages/source-first.md",
+			),
+		).resolves.toEqual({
+			status: "targetPublishedSourceRetained",
+			reason: "sourceChanged",
+		});
+	});
+
+	it("honors a frozen before-delete seam without removing the published source", async () => {
+		let beforeDeleteCalled = false;
+		const bridge = createBrowserMockBridge({
+			onWorkspaceMoveBeforeDeleteForTest(observation) {
+				beforeDeleteCalled = Object.isFrozen(observation);
+				return "targetUnverifiable";
+			},
+		});
+		const added = await bridge.workspacePickRoots("add");
+		const [sourceRoot, targetRoot] = added.snapshot.roots;
+
+		await expect(
+			bridge.workspaceMove(
+				sourceRoot!.rootId,
+				"README.md",
+				targetRoot!.rootId,
+				"packages/unverifiable.md",
+			),
+		).resolves.toEqual({
+			status: "targetPublishedSourceRetained",
+			reason: "targetUnverifiable",
+		});
+		expect(beforeDeleteCalled).toBe(true);
+		expect(
+			(await bridge.workspaceStat(sourceRoot!.rootId, "README.md")).kind,
+		).toBe("file");
+		expect(
+			(
+				await bridge.workspaceStat(
+					targetRoot!.rootId,
+					"packages/unverifiable.md",
+				)
+			).kind,
+		).toBe("file");
+	});
+
+	it("checks both receipts source-first before applying an observer reason", async () => {
+		let replacement: readonly number[] = [];
+		const bridge = createBrowserMockBridge({
+			onWorkspaceMoveBeforeDeleteForTest(_observation, mutations) {
+				mutations.rewriteSourceFile("", replacement);
+				mutations.rewriteTargetFile("", replacement);
+				return "targetUnverifiable";
+			},
+		});
+		const added = await bridge.workspacePickRoots("add");
+		const [sourceRoot, targetRoot] = added.snapshot.roots;
+		const original = (
+			await bridge.workspaceReadFile(sourceRoot!.rootId, "README.md")
+		).copy();
+		replacement = [...original].map((byte) => byte ^ 0x33);
+
+		await expect(
+			bridge.workspaceMove(
+				sourceRoot!.rootId,
+				"README.md",
+				targetRoot!.rootId,
+				"packages/source-first-reason.md",
+			),
+		).resolves.toEqual({
+			status: "targetPublishedSourceRetained",
+			reason: "sourceChanged",
+		});
+	});
+
+	it("preserves source rewrite history before a target-side observer reason", async () => {
+		let original: readonly number[] = [];
+		let replacement: readonly number[] = [];
+		const bridge = createBrowserMockBridge({
+			onWorkspaceMoveBeforeDeleteForTest(_observation, mutations) {
+				mutations.rewriteSourceFile("", replacement);
+				mutations.rewriteSourceFile("", original);
+				return "targetUnverifiable";
+			},
+		});
+		const added = await bridge.workspacePickRoots("add");
+		const [sourceRoot, targetRoot] = added.snapshot.roots;
+		original = [
+			...(
+				await bridge.workspaceReadFile(sourceRoot!.rootId, "README.md")
+			).copy(),
+		];
+		replacement = original.map((byte) => byte ^ 0x77);
+
+		await expect(
+			bridge.workspaceMove(
+				sourceRoot!.rootId,
+				"README.md",
+				targetRoot!.rootId,
+				"packages/rewrite-history.md",
+			),
+		).resolves.toEqual({
+			status: "targetPublishedSourceRetained",
+			reason: "sourceChanged",
+		});
+	});
+
+	it("applies a source-side observer reason before a concrete target mutation", async () => {
+		let replacement: readonly number[] = [];
+		const bridge = createBrowserMockBridge({
+			onWorkspaceMoveAfterPublicationForTest(_observation, mutations) {
+				mutations.rewriteTargetFile("", replacement);
+				return "sourceUnverifiable";
+			},
+		});
+		const added = await bridge.workspacePickRoots("add");
+		const [sourceRoot, targetRoot] = added.snapshot.roots;
+		const original = (
+			await bridge.workspaceReadFile(sourceRoot!.rootId, "README.md")
+		).copy();
+		replacement = [...original].map((byte) => byte ^ 0x66);
+
+		await expect(
+			bridge.workspaceMove(
+				sourceRoot!.rootId,
+				"README.md",
+				targetRoot!.rootId,
+				"packages/source-reason-first.md",
+			),
+		).resolves.toEqual({
+			status: "targetPublishedSourceRetained",
+			reason: "sourceUnverifiable",
+		});
+	});
+
+	it("reports deleteFailed only from the simulated remove syscall", async () => {
+		const bridge = createBrowserMockBridge({
+			onWorkspaceMoveDeleteForTest() {
+				throw new Error("simulated remove syscall failure");
+			},
+		});
+		const added = await bridge.workspacePickRoots("add");
+		const [sourceRoot, targetRoot] = added.snapshot.roots;
+
+		await expect(
+			bridge.workspaceMove(
+				sourceRoot!.rootId,
+				"README.md",
+				targetRoot!.rootId,
+				"packages/delete-failed.md",
+			),
+		).resolves.toEqual({
+			status: "targetPublishedSourceRetained",
+			reason: "deleteFailed",
+		});
+		expect(
+			(await bridge.workspaceStat(sourceRoot!.rootId, "README.md")).kind,
+		).toBe("file");
+		expect(
+			(
+				await bridge.workspaceStat(
+					targetRoot!.rootId,
+					"packages/delete-failed.md",
+				)
+			).kind,
+		).toBe("file");
+	});
+
+	it("contains unexpected post-publication exceptions with the exact removal count", async () => {
+		const originalDelete = Map.prototype.delete;
+		let patched = false;
+		const bridge = createBrowserMockBridge({
+			directoryCopyFixtureForTest: {
+				name: "move-tree",
+				entries: [
+					{ path: ["a.bin"], kind: "file", bytes: [1] },
+					{ path: ["b.bin"], kind: "file", bytes: [2] },
+				],
+			},
+			onWorkspaceMoveAfterDeleteEntryForTest(observation) {
+				if (observation.removedEntries === 1) {
+					Map.prototype.delete = function () {
+						throw new Error("simulated post-publication intrinsic failure");
+					};
+					patched = true;
+				}
+			},
+		});
+		const added = await bridge.workspacePickRoots("add");
+		const [sourceRoot, targetRoot] = added.snapshot.roots;
+
+		try {
+			await expect(
+				bridge.workspaceMove(
+					sourceRoot!.rootId,
+					"move-tree",
+					targetRoot!.rootId,
+					"packages/move-tree",
+				),
+			).resolves.toEqual({
+				status: "targetPublishedSourcePartiallyDeleted",
+				reason: "sourceUnverifiable",
+				removedEntries: 1,
+			});
+		} finally {
+			if (patched) {
+				Map.prototype.delete = originalDelete;
+			}
+		}
+	});
+
+	it("returns an exact partial count when deletion is interrupted", async () => {
+		const observations: unknown[] = [];
+		const bridge = createBrowserMockBridge({
+			directoryCopyFixtureForTest: {
+				name: "move-tree",
+				entries: [
+					{ path: ["a.bin"], kind: "file", bytes: [1] },
+					{ path: ["nested"], kind: "directory" },
+					{ path: ["nested", "b.bin"], kind: "file", bytes: [2] },
+				],
+			},
+			onWorkspaceMoveAfterDeleteEntryForTest(observation) {
+				observations.push(observation);
+			},
+			onWorkspaceMoveDeleteForTest(observation) {
+				if (observation.removedEntries === 1) {
+					throw new Error("simulated remove failure");
+				}
+			},
+		});
+		const added = await bridge.workspacePickRoots("add");
+		const [sourceRoot, targetRoot] = added.snapshot.roots;
+
+		const result = await bridge.workspaceMove(
+			sourceRoot!.rootId,
+			"move-tree",
+			targetRoot!.rootId,
+			"packages/move-tree",
+		);
+
+		expect(result).toEqual({
+			status: "targetPublishedSourcePartiallyDeleted",
+			reason: "deleteFailed",
+			removedEntries: 1,
+		});
+		expect(observations).toHaveLength(1);
+		expect(Object.isFrozen(observations[0])).toBe(true);
+		expect(observations[0]).toMatchObject({
+			removedEntries: 1,
+			relativePath: "nested/b.bin",
+			kind: "file",
+		});
+		expect(
+			(
+				await bridge.workspaceReadFile(
+					targetRoot!.rootId,
+					"packages/move-tree/a.bin",
+				)
+			).byteLength,
+		).toBe(1);
+		await expect(
+			bridge.workspaceStat(sourceRoot!.rootId, "move-tree/nested/b.bin"),
+		).rejects.toMatchObject({ code: "ENTRY_NOT_FOUND" });
+		expect(
+			(await bridge.workspaceStat(sourceRoot!.rootId, "move-tree/a.bin")).kind,
+		).toBe("file");
+	});
+
+	it("revalidates the complete target after the last descendant deletion", async () => {
+		const bridge = createBrowserMockBridge({
+			directoryCopyFixtureForTest: {
+				name: "move-tree",
+				entries: [{ path: ["only.bin"], kind: "file", bytes: [1] }],
+			},
+			onWorkspaceMoveAfterDeleteEntryForTest(_observation, mutations) {
+				mutations.rewriteTargetFile("only.bin", [2]);
+			},
+		});
+		const added = await bridge.workspacePickRoots("add");
+		const [sourceRoot, targetRoot] = added.snapshot.roots;
+
+		await expect(
+			bridge.workspaceMove(
+				sourceRoot!.rootId,
+				"move-tree",
+				targetRoot!.rootId,
+				"packages/move-tree",
+			),
+		).resolves.toEqual({
+			status: "targetPublishedSourcePartiallyDeleted",
+			reason: "targetChanged",
+			removedEntries: 1,
+		});
+		expect(
+			(await bridge.workspaceStat(sourceRoot!.rootId, "move-tree")).kind,
+		).toBe("directory");
+	});
+
+	it("revalidates a partial source first after each deletion observer", async () => {
+		const bridge = createBrowserMockBridge({
+			directoryCopyFixtureForTest: {
+				name: "move-tree",
+				entries: [
+					{ path: ["a.bin"], kind: "file", bytes: [1] },
+					{ path: ["b.bin"], kind: "file", bytes: [2] },
+				],
+			},
+			onWorkspaceMoveAfterDeleteEntryForTest(observation, mutations) {
+				if (observation.removedEntries === 1) {
+					mutations.rewriteSourceFile("b.bin", [3]);
+					mutations.rewriteTargetFile("b.bin", [3]);
+					return "targetUnverifiable";
+				}
+			},
+		});
+		const added = await bridge.workspacePickRoots("add");
+		const [sourceRoot, targetRoot] = added.snapshot.roots;
+
+		await expect(
+			bridge.workspaceMove(
+				sourceRoot!.rootId,
+				"move-tree",
+				targetRoot!.rootId,
+				"packages/move-tree",
+			),
+		).resolves.toEqual({
+			status: "targetPublishedSourcePartiallyDeleted",
+			reason: "sourceChanged",
+			removedEntries: 1,
+		});
+	});
+
+	it("applies an after-delete source reason before a target mutation", async () => {
+		const bridge = createBrowserMockBridge({
+			directoryCopyFixtureForTest: {
+				name: "move-tree",
+				entries: [
+					{ path: ["a.bin"], kind: "file", bytes: [1] },
+					{ path: ["b.bin"], kind: "file", bytes: [2] },
+				],
+			},
+			onWorkspaceMoveAfterDeleteEntryForTest(observation, mutations) {
+				if (observation.removedEntries === 1) {
+					mutations.rewriteTargetFile("b.bin", [3]);
+					return "sourceUnverifiable";
+				}
+			},
+		});
+		const added = await bridge.workspacePickRoots("add");
+		const [sourceRoot, targetRoot] = added.snapshot.roots;
+
+		await expect(
+			bridge.workspaceMove(
+				sourceRoot!.rootId,
+				"move-tree",
+				targetRoot!.rootId,
+				"packages/move-tree",
+			),
+		).resolves.toEqual({
+			status: "targetPublishedSourcePartiallyDeleted",
+			reason: "sourceUnverifiable",
+			removedEntries: 1,
+		});
+	});
+
+	it("does not mark an identical observer rewrite as a receipt change", async () => {
+		const bridge = createBrowserMockBridge({
+			directoryCopyFixtureForTest: {
+				name: "move-tree",
+				entries: [
+					{ path: ["a.bin"], kind: "file", bytes: [1] },
+					{ path: ["b.bin"], kind: "file", bytes: [2] },
+				],
+			},
+			onWorkspaceMoveAfterDeleteEntryForTest(observation, mutations) {
+				if (observation.removedEntries === 1) {
+					mutations.rewriteSourceFile("b.bin", [2]);
+					mutations.rewriteTargetFile("b.bin", [2]);
+					return "targetUnverifiable";
+				}
+			},
+		});
+		const added = await bridge.workspacePickRoots("add");
+		const [sourceRoot, targetRoot] = added.snapshot.roots;
+
+		await expect(
+			bridge.workspaceMove(
+				sourceRoot!.rootId,
+				"move-tree",
+				targetRoot!.rootId,
+				"packages/move-tree",
+			),
+		).resolves.toEqual({
+			status: "targetPublishedSourcePartiallyDeleted",
+			reason: "targetUnverifiable",
+			removedEntries: 1,
+		});
+	});
+
+	it("detects an unknown source member at directory removal without deleting it", async () => {
+		let injected: Promise<void> | undefined;
+		let bridge!: ReturnType<typeof createBrowserMockBridge>;
+		bridge = createBrowserMockBridge({
+			directoryCopyFixtureForTest: {
+				name: "move-tree",
+				entries: [
+					{ path: ["a.bin"], kind: "file", bytes: [1] },
+					{ path: ["b.bin"], kind: "file", bytes: [2] },
+				],
+			},
+			onWorkspaceMoveAfterDeleteEntryForTest(observation) {
+				if (observation.removedEntries === 1) {
+					injected = bridge.workspaceCreateFile(
+						observation.sourceRootId,
+						`${observation.sourcePath}/unknown.txt`,
+					);
+				}
+			},
+		});
+		const added = await bridge.workspacePickRoots("add");
+		const [sourceRoot, targetRoot] = added.snapshot.roots;
+
+		const result = await bridge.workspaceMove(
+			sourceRoot!.rootId,
+			"move-tree",
+			targetRoot!.rootId,
+			"packages/move-tree",
+		);
+		await injected;
+
+		expect(result).toEqual({
+			status: "targetPublishedSourcePartiallyDeleted",
+			reason: "sourceChanged",
+			removedEntries: 2,
+		});
+		expect(
+			(await bridge.workspaceStat(sourceRoot!.rootId, "move-tree/unknown.txt"))
+				.kind,
+		).toBe("file");
+		expect(
+			(
+				await bridge.workspaceStat(
+					targetRoot!.rootId,
+					"packages/move-tree/a.bin",
+				)
+			).kind,
+		).toBe("file");
+	});
+
+	it.each(["source", "target"] as const)(
+		"classifies a revoked %s root as unverifiable after a partial deletion",
+		async (side) => {
+			let revocation: Promise<unknown> | undefined;
+			let bridge!: ReturnType<typeof createBrowserMockBridge>;
+			bridge = createBrowserMockBridge({
+				directoryCopyFixtureForTest: {
+					name: "move-tree",
+					entries: [
+						{ path: ["a.bin"], kind: "file", bytes: [1] },
+						{ path: ["b.bin"], kind: "file", bytes: [2] },
+					],
+				},
+				onWorkspaceMoveAfterDeleteEntryForTest(observation) {
+					if (observation.removedEntries === 1) {
+						revocation = bridge.workspaceRemoveRoot(
+							side === "source"
+								? observation.sourceRootId
+								: observation.targetRootId,
+						);
+					}
+				},
+			});
+			const added = await bridge.workspacePickRoots("add");
+			const [sourceRoot, targetRoot] = added.snapshot.roots;
+
+			const result = await bridge.workspaceMove(
+				sourceRoot!.rootId,
+				"move-tree",
+				targetRoot!.rootId,
+				"packages/move-tree",
+			);
+			await revocation;
+
+			expect(result).toEqual({
+				status: "targetPublishedSourcePartiallyDeleted",
+				reason: side === "source" ? "sourceUnverifiable" : "targetUnverifiable",
+				removedEntries: 1,
+			});
+		},
+	);
+
+	it("classifies a missing partial source path as changed", async () => {
+		let rename: Promise<void> | undefined;
+		let bridge!: ReturnType<typeof createBrowserMockBridge>;
+		bridge = createBrowserMockBridge({
+			directoryCopyFixtureForTest: {
+				name: "move-tree",
+				entries: [
+					{ path: ["a.bin"], kind: "file", bytes: [1] },
+					{ path: ["b.bin"], kind: "file", bytes: [2] },
+				],
+			},
+			onWorkspaceMoveAfterDeleteEntryForTest(observation) {
+				if (observation.removedEntries === 1) {
+					rename = bridge.workspaceRename(
+						observation.sourceRootId,
+						observation.sourcePath,
+						"move-tree-away",
+					);
+				}
+			},
+		});
+		const added = await bridge.workspacePickRoots("add");
+		const [sourceRoot, targetRoot] = added.snapshot.roots;
+
+		const result = await bridge.workspaceMove(
+			sourceRoot!.rootId,
+			"move-tree",
+			targetRoot!.rootId,
+			"packages/move-tree",
+		);
+		await rename;
+
+		expect(result).toEqual({
+			status: "targetPublishedSourcePartiallyDeleted",
+			reason: "sourceChanged",
+			removedEntries: 1,
+		});
+	});
+
+	it("stops a partial directory move when the published target changes", async () => {
+		let targetRootId = "";
+		let targetRename: Promise<void> | undefined;
+		let bridge!: ReturnType<typeof createBrowserMockBridge>;
+		bridge = createBrowserMockBridge({
+			directoryCopyFixtureForTest: {
+				name: "move-tree",
+				entries: [
+					{ path: ["a.bin"], kind: "file", bytes: [1] },
+					{ path: ["b.bin"], kind: "file", bytes: [2] },
+				],
+			},
+			onWorkspaceMoveAfterDeleteEntryForTest(observation) {
+				if (observation.removedEntries === 1) {
+					targetRename = bridge.workspaceRename(
+						targetRootId,
+						"packages/move-tree",
+						"packages/move-tree-away",
+					);
+				}
+			},
+		});
+		const added = await bridge.workspacePickRoots("add");
+		const [sourceRoot, targetRoot] = added.snapshot.roots;
+		targetRootId = targetRoot!.rootId;
+
+		const result = await bridge.workspaceMove(
+			sourceRoot!.rootId,
+			"move-tree",
+			targetRootId,
+			"packages/move-tree",
+		);
+		await targetRename;
+
+		expect(result).toEqual({
+			status: "targetPublishedSourcePartiallyDeleted",
+			reason: "targetChanged",
+			removedEntries: 1,
+		});
+		expect(
+			(
+				await bridge.workspaceStat(
+					targetRootId,
+					"packages/move-tree-away/b.bin",
+				)
+			).kind,
+		).toBe("file");
+		expect(
+			(await bridge.workspaceStat(sourceRoot!.rootId, "move-tree/b.bin")).kind,
+		).toBe("file");
 	});
 });

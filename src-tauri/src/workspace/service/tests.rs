@@ -1029,6 +1029,52 @@ fn copies_are_isolated_by_window_and_both_root_ids() {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
+fn moves_require_different_authorized_roots_and_return_the_terminal_state() {
+    use crate::workspace::dto::WorkspaceMoveResult;
+
+    let temp = TempDir::new().unwrap();
+    let source_root = create_directory(&temp, "move-source-root");
+    let target_root = create_directory(&temp, "move-target-root");
+    std::fs::write(source_root.join("source"), b"source").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![source_root.clone(), target_root.clone()]),
+        WorkspacePickRootsMode::Add,
+    ))
+    .unwrap();
+    let source_id = selected.snapshot().roots()[0].root_id();
+    let target_id = selected.snapshot().roots()[1].root_id();
+
+    let same_root = block_on(service.move_entry(
+        "main",
+        source_id,
+        relative("source"),
+        source_id,
+        relative("same-root"),
+    ))
+    .unwrap_err();
+    assert_eq!(same_root.code(), "WORKSPACE_CONFLICT");
+    assert!(!source_root.join("same-root").exists());
+
+    let moved = block_on(service.move_entry(
+        "main",
+        source_id,
+        relative("source"),
+        target_id,
+        relative("target"),
+    ))
+    .unwrap();
+    assert_eq!(moved, WorkspaceMoveResult::Moved);
+    assert!(!source_root.join("source").exists());
+    assert_eq!(
+        std::fs::read(target_root.join("target")).unwrap(),
+        b"source"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
 fn target_revocation_winning_the_gate_prevents_dual_root_copy() {
     use std::os::unix::fs::symlink;
 

@@ -5,8 +5,8 @@ use crate::error::CommandError;
 use crate::path_policy::RelativePath;
 
 use super::dto::{
-    WorkspaceEntryStat, WorkspacePickRootsMode, WorkspacePickRootsResult, WorkspacePickRootsStatus,
-    WorkspaceReadDirectoryResult, WorkspaceSnapshot,
+    WorkspaceEntryStat, WorkspaceMoveResult, WorkspacePickRootsMode, WorkspacePickRootsResult,
+    WorkspacePickRootsStatus, WorkspaceReadDirectoryResult, WorkspaceSnapshot,
 };
 use super::picker::{DirectoryPicker, DirectoryPickerResult};
 use super::reader;
@@ -145,6 +145,47 @@ impl WorkspaceService {
             target_root_id,
             move |source_lease, target_lease| {
                 writer::copy_entry(&source_lease, &source_path, &target_lease, &target_path)
+            },
+        )
+        .await
+    }
+
+    pub async fn move_entry(
+        &self,
+        window_label: &str,
+        source_root_id: RootId,
+        source_path: RelativePath,
+        target_root_id: RootId,
+        target_path: RelativePath,
+    ) -> Result<WorkspaceMoveResult, CommandError> {
+        if source_root_id == target_root_id {
+            return Err(CommandError::new(
+                "WORKSPACE_CONFLICT",
+                "A cross-root move requires two different workspace roots.",
+            ));
+        }
+        self.run_dual_root_mutation(
+            window_label,
+            source_root_id,
+            target_root_id,
+            move |source_lease, target_lease| {
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                {
+                    super::move_entry::move_entry(
+                        &source_lease,
+                        &source_path,
+                        &target_lease,
+                        &target_path,
+                    )
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                {
+                    let _ = (source_lease, source_path, target_lease, target_path);
+                    Err(CommandError::new(
+                        "IO_FAILED",
+                        "Cross-root workspace move is not supported on this platform.",
+                    ))
+                }
             },
         )
         .await

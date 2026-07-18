@@ -201,6 +201,9 @@ const WORKSPACE_RUST_SOURCE_PATTERN =
 const RUST_PRODUCTION_SOURCE_PATTERN = /^src-tauri\/src\/.*\.rs$/;
 const WORKSPACE_TEST_SOURCE_PATTERN = /(?:^|\/)tests\.rs$/;
 const RUSTIX_TARGET = 'cfg(any(target_os = "linux", target_os = "macos"))';
+const SHA2_VERSION = "0.10.9";
+const SHA2_REQUIREMENT = `=${SHA2_VERSION}`;
+const SHA2_RESOLVED_FEATURES = Object.freeze(["default", "std"]);
 const FOLLOW_SYMLINKS_YES_PATTERN =
 	/\bFollowSymlinks\s*::\s*(?:Yes\b|\{[^}]*\bYes\b)/;
 const FORBIDDEN_DIRECTORY_DEPENDENCIES = Object.freeze([
@@ -337,6 +340,7 @@ function extractCallArguments(source, functionName) {
 		}
 		calls.push({
 			index: match.index,
+			end: cursor,
 			arguments: source.slice(
 				openParenthesis + 1,
 				depth === 0 ? cursor - 1 : source.length,
@@ -688,12 +692,23 @@ function extractRustFunctions(source, functionName) {
 			continue;
 		}
 		functions.push({
+			name: functionName,
+			start: match.index,
+			bodyStart: bodyOpen + 1,
+			bodyEnd: bodyClose,
 			parameters: source.slice(parameterOpen + 1, parameterClose),
 			returnType: source.slice(parameterClose + 1, bodyOpen),
 			body: source.slice(bodyOpen + 1, bodyClose),
 		});
 	}
 	return functions;
+}
+
+function extractAllRustFunctions(source) {
+	const names = new Set(
+		[...source.matchAll(/\bfn\s+([A-Za-z_]\w*)\b/g)].map((match) => match[1]),
+	);
+	return [...names].flatMap((name) => extractRustFunctions(source, name));
 }
 
 function splitTopLevelComma(source) {
@@ -760,13 +775,37 @@ function directoryCopyLimitsAreExact(source) {
 }
 
 function productionDirectoryCopyUsesAuditedLimits(source) {
-	const functions = extractRustFunctions(source, "copy_directory");
-	if (functions.length !== 1) {
+	const copyFunctions = extractRustFunctions(source, "copy_directory");
+	const receiptFunctions = extractRustFunctions(
+		source,
+		"copy_directory_with_receipt",
+	);
+	if (copyFunctions.length !== 1 || receiptFunctions.length !== 1) {
+		return false;
+	}
+	const copyCalls = extractCallArguments(
+		copyFunctions[0].body,
+		"copy_directory_with_receipt",
+	);
+	if (copyCalls.length !== 1 || !copyCalls[0].closed) {
+		return false;
+	}
+	const copyArguments = splitTopLevelComma(copyCalls[0].arguments).map(
+		(argument) => argument.replaceAll(/\s+/g, ""),
+	);
+	if (
+		!sameArray(copyArguments, [
+			"source_lease",
+			"source_path",
+			"target_lease",
+			"target_path",
+		])
+	) {
 		return false;
 	}
 	const calls = extractCallArguments(
-		functions[0].body,
-		"copy_directory_with_limits_and_hooks",
+		receiptFunctions[0].body,
+		"copy_directory_with_limits_and_hooks_receipt",
 	);
 	if (calls.length !== 1 || !calls[0].closed) {
 		return false;
@@ -920,6 +959,7 @@ export function validateWorkspaceRustBoundary(
 	cargoSource,
 	rustSources,
 	cargoDependencies = [],
+	resolvedSha2Features = [],
 ) {
 	const failures = [];
 	for (const [dependency, version] of [
@@ -931,6 +971,58 @@ export function validateWorkspaceRustBoundary(
 		if (!cargoDependencyDeclaration(dependency, version).test(cargoSource)) {
 			failures.push(`Cargo.toml must pin ${dependency} to ${version}`);
 		}
+	}
+	const sha2Declarations = [
+		...cargoSource.matchAll(
+			/^sha2 = \{ version = "=0\.10\.9", default-features = false, features = \[\] \}$/gm,
+		),
+	];
+	if (sha2Declarations.length !== 1) {
+		failures.push(
+			'Cargo.toml must declare exactly one sha2 = { version = "=0.10.9", default-features = false, features = [] } dependency',
+		);
+	}
+
+	const sha2Dependencies = cargoDependencies.filter(
+		({ name }) => name === "sha2",
+	);
+	if (sha2Dependencies.length !== 1) {
+		failures.push(
+			"Cargo metadata must contain exactly one direct sha2 dependency",
+		);
+	} else {
+		const [sha2Dependency] = sha2Dependencies;
+		if (sha2Dependency.req !== SHA2_REQUIREMENT) {
+			failures.push("the direct sha2 dependency must require exactly =0.10.9");
+		}
+		if (sha2Dependency.rename !== null) {
+			failures.push("the direct sha2 dependency must remain unrenamed");
+		}
+		if (sha2Dependency.kind !== null) {
+			failures.push("the direct sha2 dependency must be a normal runtime edge");
+		}
+		if (sha2Dependency.target !== null) {
+			failures.push("the direct sha2 dependency must not be target-specific");
+		}
+		if (sha2Dependency.optional !== false) {
+			failures.push("the direct sha2 dependency must not be optional");
+		}
+		if (sha2Dependency.uses_default_features !== false) {
+			failures.push("the direct sha2 dependency must disable default features");
+		}
+		if (!sameArray(sha2Dependency.features, [])) {
+			failures.push(
+				"the direct sha2 dependency must enable no explicit features",
+			);
+		}
+	}
+	const normalizedSha2Features = Array.isArray(resolvedSha2Features)
+		? [...new Set(resolvedSha2Features)].sort()
+		: [];
+	if (!sameArray(normalizedSha2Features, SHA2_RESOLVED_FEATURES)) {
+		failures.push(
+			"resolved sha2@0.10.9 features must remain exactly default and std",
+		);
 	}
 
 	const usesCapFsExt = rustSources.some(({ relativePath, source }) => {
@@ -1411,6 +1503,958 @@ export function validateWorkspaceCopyCommandRegistration(rustSources) {
 		if (registrations.length !== 1 || !registeredInHandler) {
 			failures.push(
 				"src-tauri/src/lib.rs must register workspace::commands::workspace_copy exactly once in generate_handler",
+			);
+		}
+	}
+
+	return failures;
+}
+
+function extractWorkspaceMoveCommands(source) {
+	const commands = [];
+	const definitionPattern =
+		/#\s*\[\s*tauri\s*::\s*command\s*\]\s*pub\s*\(\s*crate\s*\)\s+async\s+fn\s+workspace_move\s*\(/g;
+	for (const match of source.matchAll(definitionPattern)) {
+		const parameterOpen = match.index + match[0].lastIndexOf("(");
+		const parameterClose = findMatchingDelimiter(
+			source,
+			parameterOpen,
+			"(",
+			")",
+		);
+		if (parameterClose === undefined) {
+			commands.push({ parameters: "", returnType: "", body: "" });
+			continue;
+		}
+		const bodyOpen = source.indexOf("{", parameterClose + 1);
+		if (bodyOpen < 0) {
+			commands.push({
+				parameters: source.slice(parameterOpen + 1, parameterClose),
+				returnType: source.slice(parameterClose + 1),
+				body: "",
+			});
+			continue;
+		}
+		const bodyClose = findMatchingDelimiter(source, bodyOpen, "{", "}");
+		commands.push({
+			parameters: source.slice(parameterOpen + 1, parameterClose),
+			returnType: source.slice(parameterClose + 1, bodyOpen),
+			body: source.slice(
+				bodyOpen + 1,
+				bodyClose === undefined ? source.length : bodyClose,
+			),
+		});
+	}
+	return commands;
+}
+
+export function validateWorkspaceMoveCommandRegistration(rustSources) {
+	const failures = [];
+	const commandsSource = findRustSource(
+		rustSources,
+		"src-tauri/src/workspace/commands.rs",
+	);
+	const libSource = findRustSource(rustSources, "src-tauri/src/lib.rs");
+
+	if (commandsSource === undefined) {
+		failures.push("workspace move boundary requires workspace/commands.rs");
+	} else {
+		const executableCommands = stripRustCommentsAndLiterals(commandsSource);
+		const commands = extractWorkspaceMoveCommands(executableCommands);
+		if (commands.length !== 1) {
+			failures.push(
+				"workspace/commands.rs must define exactly one audited workspace_move Tauri command",
+			);
+		} else {
+			const [command] = commands;
+			const requestParameters = [
+				...command.parameters.matchAll(
+					/(?:^|,)\s*request\s*:\s*WorkspaceMoveRequest\s*(?=,|$)/g,
+				),
+			];
+			if (
+				requestParameters.length !== 1 ||
+				!/^\s*->\s*Result\s*<\s*WorkspaceMoveResult\s*,\s*CommandError\s*>\s*$/.test(
+					command.returnType,
+				)
+			) {
+				failures.push(
+					"workspace_move must accept request: WorkspaceMoveRequest and return Result<WorkspaceMoveResult, CommandError>",
+				);
+			}
+			const routedCalls = [
+				...command.body.matchAll(
+					/(?<![:A-Za-z0-9_])WorkspaceService\s*::\s*move_entry\s*\(/g,
+				),
+			];
+			if (routedCalls.length !== 1) {
+				failures.push(
+					"workspace_move must route exactly once through WorkspaceService::move_entry",
+				);
+			}
+		}
+	}
+
+	if (libSource === undefined) {
+		failures.push("workspace move boundary requires src-tauri/src/lib.rs");
+	} else {
+		const executableLib = stripRustCommentsAndLiterals(libSource);
+		const commandPath = /\bworkspace\s*::\s*commands\s*::\s*workspace_move\b/g;
+		const registrations = [...executableLib.matchAll(commandPath)];
+		const handlerBodies = [
+			...executableLib.matchAll(
+				/\.invoke_handler\s*\(\s*tauri\s*::\s*generate_handler\s*!\s*\[([\s\S]*?)\]\s*\)/g,
+			),
+		];
+		const registeredInHandler =
+			handlerBodies.length === 1 &&
+			/\bworkspace\s*::\s*commands\s*::\s*workspace_move\b/.test(
+				handlerBodies[0][1],
+			);
+		if (registrations.length !== 1 || !registeredInHandler) {
+			failures.push(
+				"src-tauri/src/lib.rs must register workspace::commands::workspace_move exactly once in generate_handler",
+			);
+		}
+	}
+
+	return failures;
+}
+
+function extractNamedImplBodies(source, typeName) {
+	const bodies = [];
+	const pattern = new RegExp(
+		`\\bimpl(?:\\s*<[^>{}]*>)?\\s+${escapeRegularExpression(typeName)}\\b[^{}]*\\{`,
+		"g",
+	);
+	for (const match of source.matchAll(pattern)) {
+		const open = match.index + match[0].lastIndexOf("{");
+		const close = findMatchingDelimiter(source, open, "{", "}");
+		if (close !== undefined) {
+			bodies.push(source.slice(open + 1, close));
+		}
+	}
+	return bodies;
+}
+
+function hasDirectDifferentRootRejection(body) {
+	const comparisonPatterns = [
+		/\bsource_root_id\s*==\s*target_root_id\b/g,
+		/\btarget_root_id\s*==\s*source_root_id\b/g,
+		/\bself\s*\.\s*source_root_id\s*==\s*self\s*\.\s*target_root_id\b/g,
+		/\bself\s*\.\s*target_root_id\s*==\s*self\s*\.\s*source_root_id\b/g,
+	];
+	for (const pattern of comparisonPatterns) {
+		for (const comparison of body.matchAll(pattern)) {
+			const prefix = body.slice(0, comparison.index);
+			const ifMatch = /\bif\s*$/.exec(prefix);
+			if (ifMatch === null) {
+				continue;
+			}
+			const open = body.indexOf("{", comparison.index + comparison[0].length);
+			if (open < 0) {
+				continue;
+			}
+			const close = findMatchingDelimiter(body, open, "{", "}");
+			if (
+				close !== undefined &&
+				/\breturn\s+Err\s*\(/.test(body.slice(open + 1, close))
+			) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+function methodCalls(source, methodName) {
+	return extractCallArguments(source, methodName).filter((call) =>
+		/\.\s*$/.test(source.slice(0, call.index)),
+	);
+}
+
+function exactMethodCall(source, call, receiverPattern, argument) {
+	return (
+		call.closed &&
+		receiverPattern.test(source.slice(0, call.index)) &&
+		call.arguments.replaceAll(/\s+/g, "") === argument
+	);
+}
+
+function stageCleanupCallsAreExact(relativePath, source) {
+	const removeFileCalls = methodCalls(source, "remove_file");
+	const removeDirectoryCalls = methodCalls(source, "remove_dir");
+	if (relativePath === "src-tauri/src/workspace/writer.rs") {
+		return (
+			removeFileCalls.length === 2 &&
+			removeFileCalls.every((call) =>
+				exactMethodCall(
+					source,
+					call,
+					/\bself\s*\.\s*parent\s*\.\s*$/,
+					"&self.name",
+				),
+			) &&
+			removeDirectoryCalls.length === 0
+		);
+	}
+	if (relativePath === "src-tauri/src/workspace/directory_copy.rs") {
+		return (
+			removeFileCalls.length === 1 &&
+			exactMethodCall(
+				source,
+				removeFileCalls[0],
+				/\bparent\s*\.\s*$/,
+				"name",
+			) &&
+			removeDirectoryCalls.length === 2 &&
+			removeDirectoryCalls.some((call) =>
+				exactMethodCall(source, call, /\bparent\s*\.\s*$/, "name"),
+			) &&
+			removeDirectoryCalls.some((call) =>
+				exactMethodCall(
+					source,
+					call,
+					/\bself\s*\.\s*parent\s*\.\s*$/,
+					"&self.name",
+				),
+			)
+		);
+	}
+	return removeFileCalls.length === 0 && removeDirectoryCalls.length === 0;
+}
+
+function verifiedSourceDeleteHelperIsExact(source, functionName, methodName) {
+	const functions = extractRustFunctions(source, functionName);
+	if (functions.length !== 1) {
+		return false;
+	}
+	const [helper] = functions;
+	const parameters = helper.parameters.replaceAll(/\s+/g, "").replace(/,$/, "");
+	const calls = methodCalls(helper.body, methodName);
+	return (
+		parameters === "parent:&Dir,basename:&Path" &&
+		calls.length === 1 &&
+		exactMethodCall(helper.body, calls[0], /\bparent\s*\.\s*$/, "basename") &&
+		methodCalls(
+			helper.body,
+			methodName === "remove_file" ? "remove_dir" : "remove_file",
+		).length === 0
+	);
+}
+
+function publishedReceiptPreparedBeforePublish(
+	source,
+	functionName,
+	receiptConstructor,
+) {
+	const functions = extractRustFunctions(source, functionName);
+	if (functions.length !== 1) {
+		return false;
+	}
+	const [operation] = functions;
+	const publishCalls = methodCalls(operation.body, "publish");
+	if (publishCalls.length !== 1) {
+		return false;
+	}
+	const [publish] = publishCalls;
+	const before = operation.body.slice(0, publish.index);
+	const after = operation.body.slice(publish.end);
+	const constructor = new RegExp(
+		`\\b${escapeRegularExpression(receiptConstructor)}\\s*\\{`,
+	);
+	return (
+		constructor.test(before) &&
+		/\blet\s+prepared\b/.test(before) &&
+		/\bif\s+let\s+Err\s*\(\s*error\s*\)\s*=\s*staged\s*\.\s*$/.test(before) &&
+		publish.arguments.replaceAll(/\s+/g, "") === "&target_name" &&
+		/^\s*\{\s*return\b[\s\S]*?\}\s*Ok\s*\(\s*prepared\s*\)\s*$/.test(after)
+	);
+}
+
+function stagedPublishSuccessPathsAreInfallible(rustSources) {
+	const expected = new Map([
+		["src-tauri/src/workspace/writer.rs", 2],
+		["src-tauri/src/workspace/directory_copy.rs", 1],
+	]);
+	for (const [relativePath, expectedCount] of expected) {
+		const source = findRustSource(rustSources, relativePath);
+		if (source === undefined) {
+			return false;
+		}
+		const executableSource = stripRustCommentsAndLiterals(source);
+		const publishFunctions = extractRustFunctions(
+			executableSource,
+			"publish",
+		).filter((fn) => /\bpublish_no_replace\s*\(/.test(fn.body));
+		if (publishFunctions.length !== expectedCount) {
+			return false;
+		}
+		for (const publishFunction of publishFunctions) {
+			const calls = extractCallArguments(
+				publishFunction.body,
+				"publish_no_replace",
+			).filter(
+				(call) => !/\bfn\s*$/.test(publishFunction.body.slice(0, call.index)),
+			);
+			if (calls.length !== 1) {
+				return false;
+			}
+			const successTail = publishFunction.body
+				.slice(calls[0].end)
+				.replaceAll(/\s+/g, "");
+			if (successTail !== "?;self.active=false;Ok(())") {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+function auditedSourceDeleteCallsitesAreExact(rustSources) {
+	const expected = new Map([
+		[
+			"src-tauri/src/workspace/move_entry.rs",
+			new Map([
+				[
+					"remove_verified_source_file",
+					new Map([
+						["consume_file_receipt", 1],
+						["consume_symlink_receipt", 1],
+					]),
+				],
+				["remove_verified_source_directory", new Map()],
+			]),
+		],
+		[
+			"src-tauri/src/workspace/directory_copy.rs",
+			new Map([
+				[
+					"remove_verified_source_file",
+					new Map([["delete_manifest_entry", 2]]),
+				],
+				[
+					"remove_verified_source_directory",
+					new Map([
+						["consume_directory_move_receipt", 1],
+						["delete_manifest_entry", 1],
+					]),
+				],
+			]),
+		],
+	]);
+	for (const [relativePath, expectedHelpers] of expected) {
+		const source = findRustSource(rustSources, relativePath);
+		if (source === undefined) {
+			return false;
+		}
+		const executableSource = stripRustCommentsAndLiterals(source);
+		const functions = extractAllRustFunctions(executableSource);
+		for (const [helperName, expectedFunctions] of expectedHelpers) {
+			const observedFunctions = new Map();
+			const calls = extractCallArguments(executableSource, helperName).filter(
+				(call) => !/\bfn\s*$/.test(executableSource.slice(0, call.index)),
+			);
+			for (const call of calls) {
+				const containingFunction = functions
+					.filter((fn) => fn.bodyStart <= call.index && call.index < fn.bodyEnd)
+					.sort((left, right) => right.bodyStart - left.bodyStart)[0];
+				if (containingFunction === undefined) {
+					return false;
+				}
+				const argumentsList = splitTopLevelComma(call.arguments).map(
+					(argument) => argument.replaceAll(/\s+/g, ""),
+				);
+				if (
+					argumentsList.length !== 2 ||
+					argumentsList[0] !== "&source_parent" ||
+					!/^(?:&receipt\.source(?:_name|\.name)|source_basename|name)$/.test(
+						argumentsList[1],
+					) ||
+					/target/.test(call.arguments)
+				) {
+					return false;
+				}
+				observedFunctions.set(
+					containingFunction.name,
+					(observedFunctions.get(containingFunction.name) ?? 0) + 1,
+				);
+			}
+			if (
+				observedFunctions.size !== expectedFunctions.size ||
+				[...expectedFunctions].some(
+					([name, count]) => observedFunctions.get(name) !== count,
+				)
+			) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+function extractNamedStructBody(source, typeName) {
+	const pattern = new RegExp(
+		`\\bstruct\\s+${escapeRegularExpression(typeName)}\\b[^{}]*\\{`,
+		"g",
+	);
+	const bodies = [];
+	for (const match of source.matchAll(pattern)) {
+		const open = match.index + match[0].lastIndexOf("{");
+		const close = findMatchingDelimiter(source, open, "{", "}");
+		if (close !== undefined) {
+			bodies.push(source.slice(open + 1, close));
+		}
+	}
+	return bodies;
+}
+
+function directoryReceiptCollectionsArePreparedBeforePublication(source) {
+	const receiptBodies = extractNamedStructBody(
+		source,
+		"PublishedDirectoryReceipt",
+	);
+	if (receiptBodies.length !== 1) {
+		return false;
+	}
+	const fields = receiptBodies[0].replaceAll(/\s+/g, "");
+	if (
+		!fields.includes(
+			"source_directories:BTreeMap<PathBuf,DirectorySnapshot>",
+		) ||
+		!fields.includes("member_sets:BTreeMap<PathBuf,BTreeSet<OsString>>") ||
+		!fields.includes("removed_aliases:BTreeMap<FileIdentity,u64>")
+	) {
+		return false;
+	}
+	const functions = extractRustFunctions(
+		source,
+		"copy_directory_with_limits_and_hooks_receipt",
+	);
+	if (functions.length !== 1) {
+		return false;
+	}
+	const [operation] = functions;
+	const publishCalls = methodCalls(operation.body, "publish");
+	if (publishCalls.length !== 1) {
+		return false;
+	}
+	const beforePublish = operation.body.slice(0, publishCalls[0].index);
+	return [
+		/\bmanifest\s*\.\s*owned_directory_map\s*\(\s*\)/,
+		/\bprepare_member_sets\s*\(\s*&\s*manifest\s*\)/,
+		/\bprepare_alias_groups\s*\(\s*&\s*manifest\s*\)/,
+		/\bsource_directories\s*,/,
+		/\bmember_sets\s*,/,
+		/\bremoved_aliases\s*,/,
+	].every((pattern) => pattern.test(beforePublish));
+}
+
+function directoryPostPublicationUsesOnlyPreparedCollections(source) {
+	const postPublicationFunctions = [
+		"consume_directory_move_receipt",
+		"verify_directory_preflight",
+		"verify_source_tree",
+		"verify_target_tree",
+		"verify_source_member_sets",
+		"delete_manifest_entry",
+		"source_root_for_delete",
+		"target_root_current",
+		"verify_target_entry",
+		"open_source_parent_prepared",
+		"open_source_directory_prepared",
+		"open_published_parent",
+		"verify_published_member_sets",
+		"verify_published_directory_members",
+		"verify_exact_members",
+		"ensure_directory_empty",
+	];
+	const bodies = [];
+	for (const functionName of postPublicationFunctions) {
+		const functions = extractRustFunctions(source, functionName);
+		if (functions.length !== 1) {
+			return false;
+		}
+		bodies.push(functions[0].body);
+	}
+	const executable = bodies.join("\n");
+	return !(
+		/\bbuild_manifest\s*\(/.test(executable) ||
+		/\.\s*directory_map\s*\(/.test(executable) ||
+		/\bprepare_(?:member_sets|alias_groups)\s*\(/.test(executable) ||
+		/\b(?:BTreeMap|BTreeSet)\s*(?:::\s*<[^;=]*>)?\s*::\s*new\s*\(/.test(
+			executable,
+		) ||
+		/\.\s*(?:clone|insert|collect|to_owned)\s*\(/.test(executable)
+	);
+}
+
+function innermostBraceBodyAt(source, index) {
+	const stack = [];
+	for (let cursor = 0; cursor < index; cursor += 1) {
+		if (source[cursor] === "{") {
+			stack.push(cursor);
+		} else if (source[cursor] === "}") {
+			stack.pop();
+		}
+	}
+	const open = stack.at(-1);
+	if (open === undefined) {
+		return undefined;
+	}
+	const close = findMatchingDelimiter(source, open, "{", "}");
+	return close === undefined
+		? undefined
+		: {
+				before: source.slice(open + 1, index),
+				afterClose: close,
+			};
+}
+
+function directoryDeleteAccountingIsInfallibleAfterRemoval(source) {
+	const deleteFunctions = extractRustFunctions(source, "delete_manifest_entry");
+	const consumerFunctions = extractRustFunctions(
+		source,
+		"consume_directory_move_receipt",
+	);
+	if (deleteFunctions.length !== 1 || consumerFunctions.length !== 1) {
+		return false;
+	}
+	const deleteBody = deleteFunctions[0].body;
+	const fileCalls = extractCallArguments(
+		deleteBody,
+		"remove_verified_source_file",
+	);
+	const directoryCalls = extractCallArguments(
+		deleteBody,
+		"remove_verified_source_directory",
+	);
+	if (fileCalls.length !== 2 || directoryCalls.length !== 1) {
+		return false;
+	}
+	for (const call of fileCalls) {
+		const arm = innermostBraceBodyAt(deleteBody, call.index);
+		if (arm === undefined) {
+			return false;
+		}
+		const before = arm.before;
+		const checked = before.lastIndexOf(".checked_add(");
+		const lookup = before.lastIndexOf(".get_mut(");
+		const recorded = before.lastIndexOf("*alias_count = next;");
+		const after = deleteBody.slice(call.end, arm.afterClose);
+		if (
+			checked < 0 ||
+			lookup < checked ||
+			recorded < lookup ||
+			!/^\s*\.\s*is_err\s*\(\s*\)\s*\{\s*\*\s*alias_count\s*=\s*removed\s*;\s*return\s+Err\s*\(\s*WorkspaceMoveIncompleteReason\s*::\s*DeleteFailed\s*\)\s*;\s*\}\s*$/.test(
+				after,
+			)
+		) {
+			return false;
+		}
+	}
+	const directoryArm = innermostBraceBodyAt(
+		deleteBody,
+		directoryCalls[0].index,
+	);
+	if (directoryArm === undefined) {
+		return false;
+	}
+	const directoryAfter = deleteBody.slice(
+		directoryCalls[0].end,
+		directoryArm.afterClose,
+	);
+	if (
+		!/^\s*\.\s*map_err\s*\(\s*\|_\|\s*WorkspaceMoveIncompleteReason\s*::\s*DeleteFailed\s*\)\s*\?\s*;\s*$/.test(
+			directoryAfter,
+		)
+	) {
+		return false;
+	}
+
+	const consumerBody = consumerFunctions[0].body;
+	const deleteCalls = extractCallArguments(
+		consumerBody,
+		"delete_manifest_entry",
+	);
+	if (deleteCalls.length !== 1) {
+		return false;
+	}
+	const deleteOffset = deleteCalls[0].index;
+	const checkedOffset = consumerBody.lastIndexOf(
+		"removed_entries.checked_add(1)",
+		deleteOffset,
+	);
+	const recordedOffset = consumerBody.indexOf(
+		"removed_entries = next_removed_entries;",
+		deleteCalls[0].end,
+	);
+	const nextDeleteOffset = consumerBody.indexOf(
+		"remove_verified_source_directory",
+		deleteCalls[0].end,
+	);
+	return (
+		checkedOffset >= 0 &&
+		checkedOffset < deleteOffset &&
+		recordedOffset > deleteCalls[0].end &&
+		(nextDeleteOffset < 0 || recordedOffset < nextDeleteOffset) &&
+		!/[?]|\.\s*(?:checked_add|insert|push|reserve)\s*\(/.test(
+			consumerBody.slice(deleteCalls[0].end, recordedOffset),
+		)
+	);
+}
+
+export function validateWorkspaceMoveBoundary(rustSources) {
+	const failures = [];
+	const movePath = "src-tauri/src/workspace/move_entry.rs";
+	const moveSource = findRustSource(rustSources, movePath);
+	const dtoSource = findRustSource(
+		rustSources,
+		"src-tauri/src/workspace/dto.rs",
+	);
+	const serviceSource = findRustSource(
+		rustSources,
+		"src-tauri/src/workspace/service.rs",
+	);
+	const writerSource = findRustSource(
+		rustSources,
+		"src-tauri/src/workspace/writer.rs",
+	);
+	const directoryCopySource = findRustSource(
+		rustSources,
+		"src-tauri/src/workspace/directory_copy.rs",
+	);
+
+	if (moveSource === undefined) {
+		failures.push("workspace move boundary requires workspace/move_entry.rs");
+		return failures;
+	}
+	const executableMove = stripRustCommentsAndLiterals(moveSource);
+	if (
+		/\.\s*open_dir\s*\(/.test(executableMove) ||
+		/\bDir\s*::\s*(?:open|from_std_file|from_raw_fd|from_raw_handle)\s*\(/.test(
+			executableMove,
+		)
+	) {
+		failures.push(
+			"workspace/move_entry.rs must reopen directory chains only with capability-relative nofollow operations",
+		);
+	}
+	const executableWriter =
+		writerSource === undefined
+			? ""
+			: stripRustCommentsAndLiterals(writerSource);
+	const executableDirectoryCopy =
+		directoryCopySource === undefined
+			? ""
+			: stripRustCommentsAndLiterals(directoryCopySource);
+	if (
+		!publishedReceiptPreparedBeforePublish(
+			executableWriter,
+			"transfer_regular_file",
+			"PublishedFileReceipt",
+		) ||
+		!publishedReceiptPreparedBeforePublish(
+			executableWriter,
+			"transfer_symlink",
+			"PublishedSymlinkReceipt",
+		) ||
+		!publishedReceiptPreparedBeforePublish(
+			executableDirectoryCopy,
+			"copy_directory_with_limits_and_hooks_receipt",
+			"PublishedDirectoryReceipt",
+		)
+	) {
+		failures.push(
+			"file, symlink and directory receipts must be fully prepared before their sole publication call",
+		);
+	}
+	if (!stagedPublishSuccessPathsAreInfallible(rustSources)) {
+		failures.push(
+			"staging publish methods must have no fallible operation after NOREPLACE succeeds",
+		);
+	}
+	if (
+		!directoryReceiptCollectionsArePreparedBeforePublication(
+			executableDirectoryCopy,
+		)
+	) {
+		failures.push(
+			"PublishedDirectoryReceipt must prepare directory maps, member sets and alias groups before publication",
+		);
+	}
+	if (
+		!directoryPostPublicationUsesOnlyPreparedCollections(
+			executableDirectoryCopy,
+		)
+	) {
+		failures.push(
+			"directory move must not build, clone or grow receipt collections after publication",
+		);
+	}
+	if (
+		!directoryDeleteAccountingIsInfallibleAfterRemoval(executableDirectoryCopy)
+	) {
+		failures.push(
+			"directory move must prepare counters before removal and perform only infallible bookkeeping after a successful source delete",
+		);
+	}
+
+	const receiptDefinitions = [];
+	let receiptSerdeImplementation = false;
+	for (const { relativePath, source } of rustSources) {
+		const normalizedPath = relativePath.replaceAll("\\", "/");
+		if (
+			!RUST_PRODUCTION_SOURCE_PATTERN.test(normalizedPath) ||
+			WORKSPACE_TEST_SOURCE_PATTERN.test(normalizedPath)
+		) {
+			continue;
+		}
+		const executableSource = stripRustCommentsAndLiterals(source);
+		if (
+			/\bimpl(?:\s*<[^>]*>)?\s+(?:(?:serde\s*::\s*)?(?:Serialize|Deserialize))\s+for\s+PublishedCopyReceipt\b/.test(
+				executableSource,
+			)
+		) {
+			receiptSerdeImplementation = true;
+		}
+		for (const match of executableSource.matchAll(
+			/\b(?:struct|enum)\s+PublishedCopyReceipt\b/g,
+		)) {
+			receiptDefinitions.push({
+				relativePath: normalizedPath,
+				index: match.index,
+			});
+		}
+	}
+	if (
+		receiptDefinitions.length !== 1 ||
+		receiptDefinitions[0]?.relativePath !== movePath
+	) {
+		failures.push(
+			"PublishedCopyReceipt must have exactly one production definition in workspace/move_entry.rs",
+		);
+	}
+	if (
+		/#\s*\[\s*derive\s*\([^\]]*\b(?:Serialize|Deserialize)\b[^\]]*\)\s*\]\s*(?:pub(?:\s*\([^)]*\))?\s+)?(?:struct|enum)\s+PublishedCopyReceipt\b/s.test(
+			executableMove,
+		) ||
+		receiptSerdeImplementation ||
+		/#\s*\[\s*serde\b[^\]]*\]\s*(?:pub(?:\s*\([^)]*\))?\s+)?(?:struct|enum)\s+PublishedCopyReceipt\b/s.test(
+			executableMove,
+		)
+	) {
+		failures.push("PublishedCopyReceipt must not implement Serde");
+	}
+	for (const relativePath of [
+		"src-tauri/src/workspace/dto.rs",
+		"src-tauri/src/workspace/commands.rs",
+		"src-tauri/src/lib.rs",
+	]) {
+		const source = findRustSource(rustSources, relativePath);
+		if (
+			source !== undefined &&
+			/\bPublishedCopyReceipt\b/.test(stripRustCommentsAndLiterals(source))
+		) {
+			failures.push(
+				`${relativePath} must not expose PublishedCopyReceipt across DTO or IPC boundaries`,
+			);
+		}
+	}
+
+	const consumers = extractRustFunctions(
+		executableMove,
+		"consume_published_copy_receipt",
+	);
+	if (consumers.length !== 1) {
+		failures.push(
+			"workspace/move_entry.rs must define exactly one consume_published_copy_receipt typestate consumer",
+		);
+	} else {
+		const [consumer] = consumers;
+		if (
+			!/(?:^|,)\s*receipt\s*:\s*PublishedCopyReceipt\s*(?=,|$)/.test(
+				consumer.parameters,
+			) ||
+			consumer.returnType.replaceAll(/\s+/g, "") !== "->WorkspaceMoveResult"
+		) {
+			failures.push(
+				"consume_published_copy_receipt must consume PublishedCopyReceipt by value and return WorkspaceMoveResult directly",
+			);
+		}
+		if (
+			/\?|\b(?:Err|CommandError|panic|unreachable)\b|\.\s*(?:unwrap|expect|map_err)\s*\(/.test(
+				consumer.body,
+			)
+		) {
+			failures.push(
+				"consume_published_copy_receipt must not surface an ordinary error or panic after publication",
+			);
+		}
+	}
+
+	const consumerCalls = extractCallArguments(
+		executableMove,
+		"consume_published_copy_receipt",
+	).filter((call) => !/\bfn\s*$/.test(executableMove.slice(0, call.index)));
+	if (consumerCalls.length !== 1) {
+		failures.push(
+			"PublishedCopyReceipt must enter its post-publication consumer exactly once",
+		);
+	} else {
+		const [call] = consumerCalls;
+		const containingFunctions = extractAllRustFunctions(executableMove).filter(
+			(fn) => fn.bodyStart <= call.index && call.index < fn.bodyEnd,
+		);
+		const containingFunction = containingFunctions.sort(
+			(left, right) => right.bodyStart - left.bodyStart,
+		)[0];
+		const before =
+			containingFunction === undefined
+				? ""
+				: executableMove.slice(containingFunction.bodyStart, call.index);
+		const after =
+			containingFunction === undefined
+				? ""
+				: executableMove.slice(call.end, containingFunction.bodyEnd);
+		if (!/\bOk\s*\(\s*$/.test(before) || !/^\s*\)\s*;?\s*$/.test(after)) {
+			failures.push(
+				"the published receipt consumer must be the final successful expression with no fallible post-publication gap",
+			);
+		}
+	}
+
+	if (
+		!verifiedSourceDeleteHelperIsExact(
+			executableMove,
+			"remove_verified_source_file",
+			"remove_file",
+		) ||
+		!verifiedSourceDeleteHelperIsExact(
+			executableMove,
+			"remove_verified_source_directory",
+			"remove_dir",
+		)
+	) {
+		failures.push(
+			"source deletion must use the two audited move_entry parent-handle plus basename helpers",
+		);
+	}
+	if (!auditedSourceDeleteCallsitesAreExact(rustSources)) {
+		failures.push(
+			"verified source deletion helpers must be called only from the audited source receipt consumers",
+		);
+	}
+
+	if (dtoSource === undefined) {
+		failures.push("workspace move boundary requires workspace/dto.rs");
+	} else {
+		const executableDto = stripRustCommentsAndLiterals(dtoSource);
+		const moveRequestImpls = extractNamedImplBodies(
+			executableDto,
+			"WorkspaceMoveRequest",
+		);
+		const intoParts = moveRequestImpls.flatMap((body) =>
+			extractRustFunctions(body, "into_parts"),
+		);
+		if (
+			intoParts.length !== 1 ||
+			!hasDirectDifferentRootRejection(intoParts[0].body)
+		) {
+			failures.push(
+				"WorkspaceMoveRequest::into_parts must directly reject equal source and target roots",
+			);
+		}
+	}
+	if (serviceSource === undefined) {
+		failures.push("workspace move boundary requires workspace/service.rs");
+	} else {
+		const executableService = stripRustCommentsAndLiterals(serviceSource);
+		const moveEntries = extractRustFunctions(executableService, "move_entry");
+		if (moveEntries.length !== 1) {
+			failures.push(
+				"WorkspaceService must define exactly one move_entry route",
+			);
+		} else {
+			const [moveEntry] = moveEntries;
+			const equalityOffset = moveEntry.body.search(
+				/\b(?:source_root_id\s*==\s*target_root_id|target_root_id\s*==\s*source_root_id)\b/,
+			);
+			const mutationOffset = moveEntry.body.search(
+				/\b(?:run_dual_root_mutation|copy_entry_with_receipt|move_entry_with_receipt)\b/,
+			);
+			if (
+				!hasDirectDifferentRootRejection(moveEntry.body) ||
+				equalityOffset < 0 ||
+				(mutationOffset >= 0 && equalityOffset > mutationOffset)
+			) {
+				failures.push(
+					"WorkspaceService::move_entry must reject equal roots before entering the mutation/copy route",
+				);
+			}
+		}
+	}
+
+	for (const { relativePath, source } of rustSources) {
+		const normalizedPath = relativePath.replaceAll("\\", "/");
+		if (
+			!RUST_PRODUCTION_SOURCE_PATTERN.test(normalizedPath) ||
+			WORKSPACE_TEST_SOURCE_PATTERN.test(normalizedPath)
+		) {
+			continue;
+		}
+		const executableSource = stripRustCommentsAndLiterals(source);
+		const removeFileCalls = methodCalls(executableSource, "remove_file");
+		const removeDirectoryCalls = methodCalls(executableSource, "remove_dir");
+		const removeFileReferences = [
+			...executableSource.matchAll(/\bremove_file\b/g),
+		].length;
+		const removeDirectoryReferences = [
+			...executableSource.matchAll(/\bremove_dir\b/g),
+		].length;
+		if (
+			removeFileReferences !== removeFileCalls.length ||
+			removeDirectoryReferences !== removeDirectoryCalls.length
+		) {
+			failures.push(
+				`${normalizedPath} must not alias, re-export or call source deletion through UFCS`,
+			);
+		}
+		if (
+			/\b(?:remove_open_dir|remove_open_dir_all|remove_dir_all|unlink|unlinkat)\b/.test(
+				executableSource,
+			)
+		) {
+			failures.push(
+				`${normalizedPath} must not use broad, open-directory or direct unlink deletion`,
+			);
+		}
+		if (
+			/\b(?:std|tokio|async_process)\s*::\s*(?:\{[^;}]*\bprocess\b|process\b)|\btauri_plugin_shell\b|\b(?:Command|Shell)\s*::\s*new\s*\(/s.test(
+				executableSource,
+			) ||
+			/\b(?:async_process|duct|subprocess|xshell)\b/.test(executableSource) ||
+			/\b(?:libc|nix)\s*::(?:\s*[A-Za-z_]\w*\s*::)*\s*(?:remove|rmdir|system|posix_spawn|execv|execve|fork)\b/.test(
+				executableSource,
+			) ||
+			/\bextern\s+"C"\s*\{[^}]*\bfn\s+(?:remove|rmdir|system|posix_spawn|execv|execve|fork)\b/s.test(
+				executableSource,
+			) ||
+			/\b(?:use\s+std\s+as\b|extern\s+crate\s+std\b)/.test(executableSource)
+		) {
+			failures.push(
+				`${normalizedPath} must not use process or shell deletion bypasses`,
+			);
+		}
+		if (normalizedPath === movePath) {
+			if (removeFileCalls.length !== 1 || removeDirectoryCalls.length !== 1) {
+				failures.push(
+					"workspace/move_entry.rs may contain only the two audited source removal calls",
+				);
+			}
+		} else if (!stageCleanupCallsAreExact(normalizedPath, executableSource)) {
+			failures.push(
+				`${normalizedPath} contains source deletion outside the exact staging cleanup allowlist`,
 			);
 		}
 	}

@@ -16,12 +16,19 @@ use uuid::Uuid;
 use crate::error::CommandError;
 use crate::path_policy::RelativePath;
 
+use super::dto::{WorkspaceMoveIncompleteReason, WorkspaceMoveResult};
+use super::move_entry::{
+    classify_command_error, classify_io, remove_verified_source_directory,
+    remove_verified_source_file, reopen_parent, source_reason, target_reason, verify_source_file,
+    verify_symlink, verify_target_file, verify_target_symlink, MoveHooks, MoveSideFailure,
+};
 use super::writer::{
     copy_conflict, copy_failed, create_symlink_exact, entry_type_mismatch, file_too_large,
     map_workspace_copy_error, open_copy_parent, open_copy_source, publish_no_replace,
     read_symlink_payload, split_entry_path, stage_cleanup_failed, symlink_too_large,
-    transfer_bounded_count, verify_staged_contents, FileIdentity, SourceSnapshot, SymlinkSnapshot,
-    MAX_COPY_FILE_BYTES, MAX_COPY_SYMLINK_BYTES,
+    transfer_bounded_count, verify_staged_contents_digest, FileIdentity, PublishedFileSnapshot,
+    PublishedSymlinkSnapshot, SourceSnapshot, SymlinkSnapshot, MAX_COPY_FILE_BYTES,
+    MAX_COPY_SYMLINK_BYTES,
 };
 use super::WorkspaceRootLease;
 
@@ -160,6 +167,22 @@ impl DirectoryManifest {
         }
         Ok(directories)
     }
+
+    fn owned_directory_map(&self) -> Result<BTreeMap<PathBuf, DirectorySnapshot>, CommandError> {
+        let mut directories = BTreeMap::new();
+        directories.insert(PathBuf::new(), self.root);
+        for entry in &self.entries {
+            if let ManifestEntryKind::Directory(snapshot) = entry.kind {
+                if directories
+                    .insert(entry.relative.clone(), snapshot)
+                    .is_some()
+                {
+                    return Err(copy_failed());
+                }
+            }
+        }
+        Ok(directories)
+    }
 }
 
 struct OpenSourceRoot {
@@ -182,6 +205,28 @@ struct StageReceipt {
     identity: FileIdentity,
     kind: ReceiptKind,
     symlink_payload: Option<Vec<u8>>,
+    symlink_snapshot: Option<PublishedSymlinkSnapshot>,
+    file_snapshot: Option<PublishedFileSnapshot>,
+    file_digest: Option<[u8; 32]>,
+}
+
+pub(super) struct PublishedDirectoryReceipt {
+    source: OpenSourceRoot,
+    source_path: RelativePath,
+    source_parent_path: PathBuf,
+    source_parent_identity: FileIdentity,
+    manifest: DirectoryManifest,
+    source_directories: BTreeMap<PathBuf, DirectorySnapshot>,
+    member_sets: BTreeMap<PathBuf, BTreeSet<OsString>>,
+    removed_aliases: BTreeMap<FileIdentity, u64>,
+    target_path: RelativePath,
+    target_parent_path: PathBuf,
+    target_parent: Dir,
+    target_parent_identity: FileIdentity,
+    target_name: PathBuf,
+    target_root: Dir,
+    receipts: Vec<StageReceipt>,
+    receipt_index: BTreeMap<PathBuf, usize>,
 }
 
 struct StagedTree<'parent> {
@@ -214,8 +259,17 @@ pub(crate) fn copy_directory(
     target_lease: &WorkspaceRootLease,
     target_path: &RelativePath,
 ) -> Result<(), CommandError> {
+    copy_directory_with_receipt(source_lease, source_path, target_lease, target_path).map(drop)
+}
+
+pub(super) fn copy_directory_with_receipt(
+    source_lease: &WorkspaceRootLease,
+    source_path: &RelativePath,
+    target_lease: &WorkspaceRootLease,
+    target_path: &RelativePath,
+) -> Result<Box<PublishedDirectoryReceipt>, CommandError> {
     let mut hooks = NoopDirectoryCopyHooks;
-    copy_directory_with_limits_and_hooks(
+    copy_directory_with_limits_and_hooks_receipt(
         source_lease,
         source_path,
         target_lease,
@@ -225,6 +279,7 @@ pub(crate) fn copy_directory(
     )
 }
 
+#[cfg(test)]
 fn copy_directory_with_limits_and_hooks<H: DirectoryCopyHooks>(
     source_lease: &WorkspaceRootLease,
     source_path: &RelativePath,
@@ -233,6 +288,25 @@ fn copy_directory_with_limits_and_hooks<H: DirectoryCopyHooks>(
     limits: DirectoryCopyLimits,
     hooks: &mut H,
 ) -> Result<(), CommandError> {
+    copy_directory_with_limits_and_hooks_receipt(
+        source_lease,
+        source_path,
+        target_lease,
+        target_path,
+        limits,
+        hooks,
+    )
+    .map(drop)
+}
+
+fn copy_directory_with_limits_and_hooks_receipt<H: DirectoryCopyHooks>(
+    source_lease: &WorkspaceRootLease,
+    source_path: &RelativePath,
+    target_lease: &WorkspaceRootLease,
+    target_path: &RelativePath,
+    limits: DirectoryCopyLimits,
+    hooks: &mut H,
+) -> Result<Box<PublishedDirectoryReceipt>, CommandError> {
     validate_root_basename(source_path, limits.name_bytes)?;
     validate_root_basename(target_path, limits.name_bytes)?;
 
@@ -273,16 +347,730 @@ fn copy_directory_with_limits_and_hooks<H: DirectoryCopyHooks>(
         ensure_manifest_unchanged(&source, source_path, target_path, limits, &manifest)?;
         staged.apply_directory_modes()?;
         staged.ensure_root_identity()?;
-        Ok(())
+        let source_parent_identity = FileIdentity::from_metadata(
+            &source
+                .parent
+                .dir_metadata()
+                .map_err(map_workspace_copy_error)?,
+        );
+        let target_parent_receipt = target_parent
+            .try_clone()
+            .map_err(map_workspace_copy_error)?;
+        let target_root = staged.root.try_clone().map_err(map_workspace_copy_error)?;
+        let source_directories = manifest.owned_directory_map()?;
+        let member_sets = prepare_member_sets(&manifest)?;
+        let removed_aliases = prepare_alias_groups(&manifest);
+        Ok(Box::new(PublishedDirectoryReceipt {
+            source,
+            source_path: source_path.clone(),
+            source_parent_path: split_entry_path(source_path)?.0,
+            source_parent_identity,
+            manifest,
+            source_directories,
+            member_sets,
+            removed_aliases,
+            target_path: target_path.clone(),
+            target_parent_path,
+            target_parent: target_parent_receipt,
+            target_parent_identity,
+            target_name: target_name.clone(),
+            target_root,
+            receipts: staged.receipts.clone(),
+            receipt_index: staged.receipt_index.clone(),
+        }))
     })();
 
-    if let Err(error) = prepared {
-        return staged.fail_with_cleanup(error);
-    }
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => return staged.fail_with_cleanup(error).map(|()| unreachable!()),
+    };
     if let Err(error) = staged.publish(&target_name) {
-        return staged.fail_with_cleanup(error);
+        return staged.fail_with_cleanup(error).map(|()| unreachable!());
+    }
+    Ok(prepared)
+}
+
+pub(super) fn consume_directory_move_receipt<H: MoveHooks>(
+    mut receipt: PublishedDirectoryReceipt,
+    source_lease: &WorkspaceRootLease,
+    target_lease: &WorkspaceRootLease,
+    hooks: &mut H,
+) -> WorkspaceMoveResult {
+    if let Err(reason) = verify_directory_preflight(&receipt, source_lease, target_lease, hooks) {
+        return WorkspaceMoveResult::incomplete(reason, 0);
+    }
+    hooks.before_delete();
+    if let Err(reason) = verify_directory_preflight(&receipt, source_lease, target_lease, hooks) {
+        return WorkspaceMoveResult::incomplete(reason, 0);
+    }
+
+    let mut removed_entries = 0_u32;
+    let mut removed_aliases = std::mem::take(&mut receipt.removed_aliases);
+    for index in (0..receipt.manifest.entries.len()).rev() {
+        let next_removed_entries = match removed_entries.checked_add(1) {
+            Some(count) => count,
+            None => {
+                return WorkspaceMoveResult::incomplete(
+                    WorkspaceMoveIncompleteReason::SourceUnverifiable,
+                    removed_entries,
+                );
+            }
+        };
+        let result = delete_manifest_entry(
+            &receipt,
+            index,
+            source_lease,
+            target_lease,
+            &mut removed_aliases,
+            hooks,
+            next_removed_entries,
+        );
+        if let Err(reason) = result {
+            return WorkspaceMoveResult::incomplete(reason, removed_entries);
+        }
+        removed_entries = next_removed_entries;
+        hooks.after_delete_entry(removed_entries);
+    }
+
+    let (source_parent, source_root) = match source_root_for_delete(&receipt, source_lease) {
+        Ok(value) => value,
+        Err(failure) => {
+            return WorkspaceMoveResult::incomplete(source_reason(failure), removed_entries);
+        }
+    };
+    if let Err(failure) = ensure_directory_empty(&source_root) {
+        return WorkspaceMoveResult::incomplete(source_reason(failure), removed_entries);
+    }
+    if let Err(failure) = verify_target_tree(&receipt, target_lease) {
+        return WorkspaceMoveResult::incomplete(target_reason(failure), removed_entries);
+    }
+    let next_removed_entries = match removed_entries.checked_add(1) {
+        Some(count) => count,
+        None => {
+            return WorkspaceMoveResult::incomplete(
+                WorkspaceMoveIncompleteReason::SourceUnverifiable,
+                removed_entries,
+            );
+        }
+    };
+    let source_basename = receipt.source.name.as_path();
+    hooks.before_remove_entry(next_removed_entries);
+    match remove_verified_source_directory(&source_parent, source_basename) {
+        Ok(()) => {
+            hooks.after_delete_entry(next_removed_entries);
+            WorkspaceMoveResult::Moved
+        }
+        Err(_) => WorkspaceMoveResult::incomplete(
+            WorkspaceMoveIncompleteReason::DeleteFailed,
+            removed_entries,
+        ),
+    }
+}
+
+fn verify_directory_preflight<H: MoveHooks>(
+    receipt: &PublishedDirectoryReceipt,
+    source_lease: &WorkspaceRootLease,
+    target_lease: &WorkspaceRootLease,
+    hooks: &mut H,
+) -> Result<(), WorkspaceMoveIncompleteReason> {
+    let _bound_request_paths = (&receipt.source_path, &receipt.target_path);
+    verify_source_tree(receipt, source_lease).map_err(source_reason)?;
+    verify_target_tree_during_preflight(receipt, source_lease, target_lease, hooks)?;
+    verify_source_tree(receipt, source_lease).map_err(source_reason)
+}
+
+fn verify_source_tree(
+    receipt: &PublishedDirectoryReceipt,
+    source_lease: &WorkspaceRootLease,
+) -> Result<(), MoveSideFailure> {
+    verify_source_root_strict(receipt, source_lease)?;
+    verify_source_member_sets(receipt)?;
+    for entry in &receipt.manifest.entries {
+        verify_source_entry_strict(receipt, entry)?;
     }
     Ok(())
+}
+
+fn verify_source_root_strict(
+    receipt: &PublishedDirectoryReceipt,
+    source_lease: &WorkspaceRootLease,
+) -> Result<(), MoveSideFailure> {
+    let parent = reopen_parent(
+        source_lease.directory(),
+        &receipt.source_parent_path,
+        receipt.source_parent_identity,
+        &receipt.source.parent,
+    )?;
+    let pathname = parent
+        .symlink_metadata(&receipt.source.name)
+        .map_err(|error| classify_io(&error))?;
+    let pathname =
+        DirectorySnapshot::from_metadata(&pathname).map_err(|_| MoveSideFailure::Changed)?;
+    let handle = DirectorySnapshot::from_metadata(
+        &receipt
+            .source
+            .directory
+            .dir_metadata()
+            .map_err(|error| classify_io(&error))?,
+    )
+    .map_err(|_| MoveSideFailure::Changed)?;
+    if pathname != receipt.manifest.root || handle != receipt.manifest.root {
+        return Err(MoveSideFailure::Changed);
+    }
+    Ok(())
+}
+
+fn verify_source_entry_strict(
+    receipt: &PublishedDirectoryReceipt,
+    entry: &ManifestEntry,
+) -> Result<(), MoveSideFailure> {
+    let stage = published_receipt(receipt, &entry.relative)?;
+    let source_parent = open_source_parent_prepared(
+        &receipt.source.directory,
+        &receipt.source_directories,
+        &entry.relative,
+        true,
+    )?;
+    let name = entry.relative.file_name().ok_or(MoveSideFailure::Changed)?;
+    match &entry.kind {
+        ManifestEntryKind::File(expected) => {
+            let digest = stage.file_digest.ok_or(MoveSideFailure::Unverifiable)?;
+            let mut retained = open_copy_source(&source_parent, Path::new(name))
+                .map_err(|error| classify_command_error(&error))?;
+            verify_source_file(
+                &source_parent,
+                Path::new(name),
+                &mut retained,
+                *expected,
+                digest,
+                0,
+            )
+        }
+        ManifestEntryKind::Symlink { snapshot, payload } => {
+            verify_symlink(&source_parent, Path::new(name), *snapshot, payload, 0)
+        }
+        ManifestEntryKind::Directory(_) => {
+            let directory = open_source_directory_prepared(
+                &receipt.source.directory,
+                &receipt.source_directories,
+                &entry.relative,
+                true,
+            )?;
+            let expected = receipt
+                .member_sets
+                .get(&entry.relative)
+                .ok_or(MoveSideFailure::Unverifiable)?;
+            verify_exact_members(&directory, expected)
+        }
+    }
+}
+
+fn verify_target_tree_during_preflight<H: MoveHooks>(
+    receipt: &PublishedDirectoryReceipt,
+    source_lease: &WorkspaceRootLease,
+    target_lease: &WorkspaceRootLease,
+    hooks: &mut H,
+) -> Result<(), WorkspaceMoveIncompleteReason> {
+    if let Err(target_failure) = target_root_current(receipt, target_lease) {
+        return Err(target_failure_with_source_priority(
+            receipt,
+            source_lease,
+            target_failure,
+        ));
+    }
+    if let Err(target_failure) = verify_published_member_sets(receipt) {
+        return Err(target_failure_with_source_priority(
+            receipt,
+            source_lease,
+            target_failure,
+        ));
+    }
+    let mut verified_entries = 0_u32;
+    for entry in &receipt.manifest.entries {
+        if let Err(target_failure) = verify_target_entry(receipt, target_lease, entry) {
+            return Err(target_failure_with_source_priority(
+                receipt,
+                source_lease,
+                target_failure,
+            ));
+        }
+        verified_entries = verified_entries.saturating_add(1);
+        hooks.after_target_entry(verified_entries);
+        verify_source_root_strict(receipt, source_lease).map_err(source_reason)?;
+        verify_source_entry_strict(receipt, entry).map_err(source_reason)?;
+    }
+    Ok(())
+}
+
+fn target_failure_with_source_priority(
+    receipt: &PublishedDirectoryReceipt,
+    source_lease: &WorkspaceRootLease,
+    target_failure: MoveSideFailure,
+) -> WorkspaceMoveIncompleteReason {
+    match verify_source_tree(receipt, source_lease) {
+        Ok(()) => target_reason(target_failure),
+        Err(source_failure) => source_reason(source_failure),
+    }
+}
+
+fn verify_target_tree(
+    receipt: &PublishedDirectoryReceipt,
+    target_lease: &WorkspaceRootLease,
+) -> Result<(), MoveSideFailure> {
+    target_root_current(receipt, target_lease)?;
+    verify_published_member_sets(receipt)?;
+    for entry in &receipt.manifest.entries {
+        verify_target_entry(receipt, target_lease, entry)?;
+    }
+    Ok(())
+}
+
+fn verify_source_member_sets(receipt: &PublishedDirectoryReceipt) -> Result<(), MoveSideFailure> {
+    for (relative, expected) in &receipt.member_sets {
+        let directory = open_source_directory_prepared(
+            &receipt.source.directory,
+            &receipt.source_directories,
+            relative,
+            true,
+        )?;
+        verify_exact_members(&directory, expected)?;
+    }
+    Ok(())
+}
+
+fn delete_manifest_entry(
+    receipt: &PublishedDirectoryReceipt,
+    index: usize,
+    source_lease: &WorkspaceRootLease,
+    target_lease: &WorkspaceRootLease,
+    removed_aliases: &mut BTreeMap<FileIdentity, u64>,
+    hooks: &mut impl MoveHooks,
+    next_removed_entries: u32,
+) -> Result<(), WorkspaceMoveIncompleteReason> {
+    source_root_for_delete(receipt, source_lease).map_err(source_reason)?;
+    let entry = receipt
+        .manifest
+        .entries
+        .get(index)
+        .ok_or(WorkspaceMoveIncompleteReason::SourceUnverifiable)?;
+    let source_parent = open_source_parent_prepared(
+        &receipt.source.directory,
+        &receipt.source_directories,
+        &entry.relative,
+        false,
+    )
+    .map_err(source_reason)?;
+    let source_basename = entry
+        .relative
+        .file_name()
+        .ok_or(WorkspaceMoveIncompleteReason::SourceChanged)?;
+    let source_basename = Path::new(source_basename);
+    let stage = published_receipt(receipt, &entry.relative).map_err(source_reason)?;
+
+    match &entry.kind {
+        ManifestEntryKind::File(expected) => {
+            let digest = stage
+                .file_digest
+                .ok_or(WorkspaceMoveIncompleteReason::SourceUnverifiable)?;
+            let removed = removed_aliases
+                .get(&expected.identity)
+                .copied()
+                .ok_or(WorkspaceMoveIncompleteReason::SourceUnverifiable)?;
+            let mut retained = open_copy_source(&source_parent, source_basename)
+                .map_err(|error| source_reason(classify_command_error(&error)))?;
+            verify_source_file(
+                &source_parent,
+                source_basename,
+                &mut retained,
+                *expected,
+                digest,
+                removed,
+            )
+            .map_err(source_reason)?;
+            verify_target_entry(receipt, target_lease, entry).map_err(target_reason)?;
+            let next = removed
+                .checked_add(1)
+                .ok_or(WorkspaceMoveIncompleteReason::SourceUnverifiable)?;
+            let alias_count = removed_aliases
+                .get_mut(&expected.identity)
+                .ok_or(WorkspaceMoveIncompleteReason::SourceUnverifiable)?;
+            hooks.before_remove_entry(next_removed_entries);
+            *alias_count = next;
+            if remove_verified_source_file(&source_parent, source_basename).is_err() {
+                *alias_count = removed;
+                return Err(WorkspaceMoveIncompleteReason::DeleteFailed);
+            }
+        }
+        ManifestEntryKind::Symlink { snapshot, payload } => {
+            let removed = removed_aliases
+                .get(&snapshot.identity)
+                .copied()
+                .ok_or(WorkspaceMoveIncompleteReason::SourceUnverifiable)?;
+            verify_symlink(&source_parent, source_basename, *snapshot, payload, removed)
+                .map_err(source_reason)?;
+            verify_target_entry(receipt, target_lease, entry).map_err(target_reason)?;
+            let next = removed
+                .checked_add(1)
+                .ok_or(WorkspaceMoveIncompleteReason::SourceUnverifiable)?;
+            let alias_count = removed_aliases
+                .get_mut(&snapshot.identity)
+                .ok_or(WorkspaceMoveIncompleteReason::SourceUnverifiable)?;
+            hooks.before_remove_entry(next_removed_entries);
+            *alias_count = next;
+            if remove_verified_source_file(&source_parent, source_basename).is_err() {
+                *alias_count = removed;
+                return Err(WorkspaceMoveIncompleteReason::DeleteFailed);
+            }
+        }
+        ManifestEntryKind::Directory(expected) => {
+            let pathname = source_parent
+                .symlink_metadata(source_basename)
+                .map_err(|error| source_reason(classify_io(&error)))?;
+            let directory = source_parent
+                .open_dir_nofollow(source_basename)
+                .map_err(|error| source_reason(classify_io(&error)))?;
+            let handle = directory
+                .dir_metadata()
+                .map_err(|error| source_reason(classify_io(&error)))?;
+            if !directory_snapshot_for_delete_matches(&pathname, *expected)
+                || !directory_snapshot_for_delete_matches(&handle, *expected)
+            {
+                return Err(WorkspaceMoveIncompleteReason::SourceChanged);
+            }
+            ensure_directory_empty(&directory).map_err(source_reason)?;
+            verify_target_entry(receipt, target_lease, entry).map_err(target_reason)?;
+            hooks.before_remove_entry(next_removed_entries);
+            remove_verified_source_directory(&source_parent, source_basename)
+                .map_err(|_| WorkspaceMoveIncompleteReason::DeleteFailed)?;
+        }
+    }
+    Ok(())
+}
+
+fn source_root_for_delete(
+    receipt: &PublishedDirectoryReceipt,
+    source_lease: &WorkspaceRootLease,
+) -> Result<(Dir, Dir), MoveSideFailure> {
+    let parent = reopen_parent(
+        source_lease.directory(),
+        &receipt.source_parent_path,
+        receipt.source_parent_identity,
+        &receipt.source.parent,
+    )?;
+    let pathname = parent
+        .symlink_metadata(&receipt.source.name)
+        .map_err(|error| classify_io(&error))?;
+    let root = parent
+        .open_dir_nofollow(&receipt.source.name)
+        .map_err(|error| classify_io(&error))?;
+    let handle = root.dir_metadata().map_err(|error| classify_io(&error))?;
+    if directory_snapshot_for_delete_matches(&pathname, receipt.manifest.root)
+        && directory_snapshot_for_delete_matches(&handle, receipt.manifest.root)
+    {
+        Ok((parent, root))
+    } else {
+        Err(MoveSideFailure::Changed)
+    }
+}
+
+fn target_root_current(
+    receipt: &PublishedDirectoryReceipt,
+    target_lease: &WorkspaceRootLease,
+) -> Result<Dir, MoveSideFailure> {
+    let parent = reopen_parent(
+        target_lease.directory(),
+        &receipt.target_parent_path,
+        receipt.target_parent_identity,
+        &receipt.target_parent,
+    )?;
+    let root_receipt = published_receipt(receipt, Path::new(""))?;
+    let pathname = parent
+        .symlink_metadata(&receipt.target_name)
+        .map_err(|error| classify_io(&error))?;
+    let root = parent
+        .open_dir_nofollow(&receipt.target_name)
+        .map_err(|error| classify_io(&error))?;
+    let handle = root.dir_metadata().map_err(|error| classify_io(&error))?;
+    let expected_mode = match root_receipt.kind {
+        ReceiptKind::Directory { source_mode } => source_mode,
+        _ => return Err(MoveSideFailure::Changed),
+    };
+    if target_directory_metadata_matches(&pathname, root_receipt.identity, expected_mode)
+        && target_directory_metadata_matches(&handle, root_receipt.identity, expected_mode)
+        && FileIdentity::from_metadata(
+            &receipt
+                .target_root
+                .dir_metadata()
+                .map_err(|error| classify_io(&error))?,
+        ) == root_receipt.identity
+    {
+        Ok(root)
+    } else {
+        Err(MoveSideFailure::Changed)
+    }
+}
+
+fn verify_target_entry(
+    receipt: &PublishedDirectoryReceipt,
+    target_lease: &WorkspaceRootLease,
+    entry: &ManifestEntry,
+) -> Result<(), MoveSideFailure> {
+    target_root_current(receipt, target_lease)?;
+    let stage = published_receipt(receipt, &entry.relative)?;
+    let parent = open_published_parent(receipt, &entry.relative)?;
+    let name = entry.relative.file_name().ok_or(MoveSideFailure::Changed)?;
+    let name = Path::new(name);
+    match stage.kind {
+        ReceiptKind::File => {
+            let snapshot = stage.file_snapshot.ok_or(MoveSideFailure::Unverifiable)?;
+            let digest = stage.file_digest.ok_or(MoveSideFailure::Unverifiable)?;
+            let mut retained =
+                open_copy_source(&parent, name).map_err(|error| classify_command_error(&error))?;
+            verify_target_file(&parent, name, &mut retained, snapshot, digest)
+        }
+        ReceiptKind::Symlink => {
+            let snapshot = stage
+                .symlink_snapshot
+                .ok_or(MoveSideFailure::Unverifiable)?;
+            let payload = stage
+                .symlink_payload
+                .as_deref()
+                .ok_or(MoveSideFailure::Unverifiable)?;
+            verify_target_symlink(&parent, name, snapshot, payload)
+        }
+        ReceiptKind::Directory { source_mode } => {
+            let pathname = parent
+                .symlink_metadata(name)
+                .map_err(|error| classify_io(&error))?;
+            let directory = parent
+                .open_dir_nofollow(name)
+                .map_err(|error| classify_io(&error))?;
+            let handle = directory
+                .dir_metadata()
+                .map_err(|error| classify_io(&error))?;
+            if target_directory_metadata_matches(&pathname, stage.identity, source_mode)
+                && target_directory_metadata_matches(&handle, stage.identity, source_mode)
+            {
+                verify_published_directory_members(receipt, &entry.relative, &directory)
+            } else {
+                Err(MoveSideFailure::Changed)
+            }
+        }
+    }
+}
+
+fn open_source_parent_prepared(
+    root: &Dir,
+    directories: &BTreeMap<PathBuf, DirectorySnapshot>,
+    relative: &Path,
+    strict: bool,
+) -> Result<Dir, MoveSideFailure> {
+    open_source_directory_prepared(
+        root,
+        directories,
+        relative.parent().unwrap_or(Path::new("")),
+        strict,
+    )
+}
+
+fn open_source_directory_prepared(
+    root: &Dir,
+    directories: &BTreeMap<PathBuf, DirectorySnapshot>,
+    relative: &Path,
+    strict: bool,
+) -> Result<Dir, MoveSideFailure> {
+    let root_expected = directories
+        .get(Path::new(""))
+        .ok_or(MoveSideFailure::Unverifiable)?;
+    let mut current = root.try_clone().map_err(|error| classify_io(&error))?;
+    let root_metadata = current
+        .dir_metadata()
+        .map_err(|error| classify_io(&error))?;
+    if !directory_metadata_matches(&root_metadata, *root_expected, strict) {
+        return Err(MoveSideFailure::Changed);
+    }
+    let mut walked = PathBuf::new();
+    for component in relative.components() {
+        use std::path::Component;
+        let Component::Normal(name) = component else {
+            return Err(MoveSideFailure::Changed);
+        };
+        walked.push(name);
+        let expected = directories
+            .get(walked.as_path())
+            .ok_or(MoveSideFailure::Unverifiable)?;
+        let pathname = current
+            .symlink_metadata(Path::new(name))
+            .map_err(|error| classify_io(&error))?;
+        let child = current
+            .open_dir_nofollow(Path::new(name))
+            .map_err(|error| classify_io(&error))?;
+        let handle = child.dir_metadata().map_err(|error| classify_io(&error))?;
+        if !directory_metadata_matches(&pathname, *expected, strict)
+            || !directory_metadata_matches(&handle, *expected, strict)
+        {
+            return Err(MoveSideFailure::Changed);
+        }
+        current = child;
+    }
+    Ok(current)
+}
+
+fn open_published_parent(
+    receipt: &PublishedDirectoryReceipt,
+    relative: &Path,
+) -> Result<Dir, MoveSideFailure> {
+    let root_receipt = published_receipt(receipt, Path::new(""))?;
+    let mut current = receipt
+        .target_root
+        .try_clone()
+        .map_err(|error| classify_io(&error))?;
+    let root_metadata = current
+        .dir_metadata()
+        .map_err(|error| classify_io(&error))?;
+    if FileIdentity::from_metadata(&root_metadata) != root_receipt.identity {
+        return Err(MoveSideFailure::Changed);
+    }
+    let mut walked = PathBuf::new();
+    for component in relative.parent().unwrap_or(Path::new("")).components() {
+        use std::path::Component;
+        let Component::Normal(name) = component else {
+            return Err(MoveSideFailure::Changed);
+        };
+        walked.push(name);
+        let stage = published_receipt(receipt, &walked)?;
+        let source_mode = match stage.kind {
+            ReceiptKind::Directory { source_mode } => source_mode,
+            _ => return Err(MoveSideFailure::Changed),
+        };
+        let pathname = current
+            .symlink_metadata(Path::new(name))
+            .map_err(|error| classify_io(&error))?;
+        let child = current
+            .open_dir_nofollow(Path::new(name))
+            .map_err(|error| classify_io(&error))?;
+        let handle = child.dir_metadata().map_err(|error| classify_io(&error))?;
+        if !target_directory_metadata_matches(&pathname, stage.identity, source_mode)
+            || !target_directory_metadata_matches(&handle, stage.identity, source_mode)
+        {
+            return Err(MoveSideFailure::Changed);
+        }
+        current = child;
+    }
+    Ok(current)
+}
+
+fn verify_published_member_sets(
+    receipt: &PublishedDirectoryReceipt,
+) -> Result<(), MoveSideFailure> {
+    for stage in receipt
+        .receipts
+        .iter()
+        .filter(|stage| matches!(stage.kind, ReceiptKind::Directory { .. }))
+    {
+        let directory = if stage.relative.as_os_str().is_empty() {
+            receipt
+                .target_root
+                .try_clone()
+                .map_err(|error| classify_io(&error))?
+        } else {
+            let parent = open_published_parent(receipt, &stage.relative)?;
+            let name = stage.relative.file_name().ok_or(MoveSideFailure::Changed)?;
+            parent
+                .open_dir_nofollow(name)
+                .map_err(|error| classify_io(&error))?
+        };
+        verify_published_directory_members(receipt, &stage.relative, &directory)?;
+    }
+    Ok(())
+}
+
+fn verify_published_directory_members(
+    receipt: &PublishedDirectoryReceipt,
+    relative: &Path,
+    directory: &Dir,
+) -> Result<(), MoveSideFailure> {
+    let expected = receipt
+        .member_sets
+        .get(relative)
+        .ok_or(MoveSideFailure::Unverifiable)?;
+    verify_exact_members(directory, expected)
+}
+
+fn verify_exact_members(
+    directory: &Dir,
+    expected: &BTreeSet<OsString>,
+) -> Result<(), MoveSideFailure> {
+    let mut observed_count = 0_usize;
+    for entry in directory.entries().map_err(|error| classify_io(&error))? {
+        if observed_count == expected.len() {
+            return Err(MoveSideFailure::Changed);
+        }
+        let name = entry.map_err(|error| classify_io(&error))?.file_name();
+        if !expected.contains(&name) {
+            return Err(MoveSideFailure::Changed);
+        }
+        observed_count = observed_count
+            .checked_add(1)
+            .ok_or(MoveSideFailure::Unverifiable)?;
+    }
+    if observed_count == expected.len() {
+        Ok(())
+    } else {
+        Err(MoveSideFailure::Changed)
+    }
+}
+
+fn ensure_directory_empty(directory: &Dir) -> Result<(), MoveSideFailure> {
+    let mut entries = directory.entries().map_err(|error| classify_io(&error))?;
+    match entries.next() {
+        None => Ok(()),
+        Some(Ok(_)) => Err(MoveSideFailure::Changed),
+        Some(Err(error)) => Err(classify_io(&error)),
+    }
+}
+
+fn directory_snapshot_for_delete_matches(metadata: &Metadata, expected: DirectorySnapshot) -> bool {
+    use cap_std::fs::MetadataExt;
+
+    metadata.is_dir()
+        && FileIdentity::from_metadata(metadata) == expected.identity
+        && metadata.mode() == expected.mode
+}
+
+fn directory_metadata_matches(
+    metadata: &Metadata,
+    expected: DirectorySnapshot,
+    strict: bool,
+) -> bool {
+    if strict {
+        DirectorySnapshot::from_metadata(metadata).ok() == Some(expected)
+    } else {
+        directory_snapshot_for_delete_matches(metadata, expected)
+    }
+}
+
+fn target_directory_metadata_matches(
+    metadata: &Metadata,
+    expected_identity: FileIdentity,
+    source_mode: u32,
+) -> bool {
+    use cap_std::fs::MetadataExt;
+
+    metadata.is_dir()
+        && FileIdentity::from_metadata(metadata) == expected_identity
+        && metadata.mode() & 0o777 == source_mode & 0o777
+}
+
+fn published_receipt<'receipt>(
+    receipt: &'receipt PublishedDirectoryReceipt,
+    relative: &Path,
+) -> Result<&'receipt StageReceipt, MoveSideFailure> {
+    receipt
+        .receipt_index
+        .get(relative)
+        .and_then(|index| receipt.receipts.get(*index))
+        .ok_or(MoveSideFailure::Unverifiable)
 }
 
 fn open_source_root(
@@ -529,6 +1317,39 @@ fn source_directory_identities(
     }))
 }
 
+fn prepare_member_sets(
+    manifest: &DirectoryManifest,
+) -> Result<BTreeMap<PathBuf, BTreeSet<OsString>>, CommandError> {
+    let mut member_sets = BTreeMap::new();
+    for directory in manifest.owned_directory_map()?.into_keys() {
+        member_sets.insert(directory, BTreeSet::new());
+    }
+    for entry in &manifest.entries {
+        let parent = entry.relative.parent().unwrap_or(Path::new(""));
+        let name = entry.relative.file_name().ok_or_else(copy_failed)?;
+        let members = member_sets.get_mut(parent).ok_or_else(copy_failed)?;
+        if !members.insert(name.to_owned()) {
+            return Err(copy_failed());
+        }
+    }
+    Ok(member_sets)
+}
+
+fn prepare_alias_groups(manifest: &DirectoryManifest) -> BTreeMap<FileIdentity, u64> {
+    let mut groups = BTreeMap::new();
+    for entry in &manifest.entries {
+        let identity = match entry.kind {
+            ManifestEntryKind::File(snapshot) => Some(snapshot.identity),
+            ManifestEntryKind::Symlink { snapshot, .. } => Some(snapshot.identity),
+            ManifestEntryKind::Directory(_) => None,
+        };
+        if let Some(identity) = identity {
+            groups.entry(identity).or_insert(0);
+        }
+    }
+    groups
+}
+
 impl<'parent> StagedTree<'parent> {
     fn create(
         parent: &'parent Dir,
@@ -565,6 +1386,9 @@ impl<'parent> StagedTree<'parent> {
                             identity: handle_identity,
                             kind: ReceiptKind::Directory { source_mode },
                             symlink_payload: None,
+                            symlink_snapshot: None,
+                            file_snapshot: None,
+                            file_digest: None,
                         }],
                         receipt_index: BTreeMap::from([(PathBuf::new(), 0)]),
                         active: true,
@@ -644,6 +1468,9 @@ impl<'parent> StagedTree<'parent> {
                             source_mode: expected.mode,
                         },
                         symlink_payload: None,
+                        symlink_snapshot: None,
+                        file_snapshot: None,
+                        file_digest: None,
                     })?;
                     set_directory_mode(&staged_directory, 0o700)?;
                 }
@@ -680,6 +1507,9 @@ impl<'parent> StagedTree<'parent> {
                         identity: staged_identity,
                         kind: ReceiptKind::File,
                         symlink_payload: None,
+                        symlink_snapshot: None,
+                        file_snapshot: None,
+                        file_digest: None,
                     })?;
                     let transferred =
                         transfer_bounded_count(&mut source_file, &mut staged_file, remaining)?;
@@ -696,8 +1526,15 @@ impl<'parent> StagedTree<'parent> {
                         .set_permissions(Permissions::from_mode(expected.mode & 0o777))
                         .map_err(map_workspace_copy_error)?;
                     staged_file.sync_all().map_err(map_workspace_copy_error)?;
-                    verify_staged_contents(&mut source_file, &mut staged_file)?;
+                    let digest = verify_staged_contents_digest(&mut source_file, &mut staged_file)?;
                     ensure_expected_file(&source_parent, name_path, &source_file, *expected)?;
+                    let file_snapshot = PublishedFileSnapshot::from_metadata(
+                        &staged_file.metadata().map_err(|_| copy_failed())?,
+                    )?;
+                    if file_snapshot.identity != staged_identity {
+                        return Err(copy_failed());
+                    }
+                    self.set_file_receipt(&entry.relative, file_snapshot, digest)?;
                 }
                 ManifestEntryKind::Symlink { snapshot, payload } => {
                     ensure_expected_symlink(&source_parent, name_path, *snapshot, payload)?;
@@ -727,6 +1564,9 @@ impl<'parent> StagedTree<'parent> {
                         identity: before.identity,
                         kind: ReceiptKind::Symlink,
                         symlink_payload: Some(payload.clone()),
+                        symlink_snapshot: Some(PublishedSymlinkSnapshot::from_source(before)),
+                        file_snapshot: None,
+                        file_digest: None,
                     })?;
                 }
             }
@@ -813,13 +1653,18 @@ impl<'parent> StagedTree<'parent> {
                         return Err(copy_failed());
                     }
                     hooks.after_stage_file_open(&self.name, &entry.relative);
-                    verify_staged_contents(&mut source_file, &mut staged_file)?;
+                    let digest = verify_staged_contents_digest(&mut source_file, &mut staged_file)?;
+                    if receipt.file_digest != Some(digest) {
+                        return Err(copy_failed());
+                    }
                     ensure_expected_file(&source_parent, name_path, &source_file, *expected)?;
                     let staged_after = stage_parent
                         .symlink_metadata(name)
                         .map_err(|_| copy_failed())?;
                     if !staged_after.is_file()
                         || FileIdentity::from_metadata(&staged_after) != receipt.identity
+                        || PublishedFileSnapshot::from_metadata(&staged_after).ok()
+                            != receipt.file_snapshot
                     {
                         return Err(copy_failed());
                     }
@@ -908,6 +1753,26 @@ impl<'parent> StagedTree<'parent> {
         let index = self.receipts.len();
         self.receipt_index.insert(receipt.relative.clone(), index);
         self.receipts.push(receipt);
+        Ok(())
+    }
+
+    fn set_file_receipt(
+        &mut self,
+        relative: &Path,
+        snapshot: PublishedFileSnapshot,
+        digest: [u8; 32],
+    ) -> Result<(), CommandError> {
+        let index = *self.receipt_index.get(relative).ok_or_else(copy_failed)?;
+        let receipt = self.receipts.get_mut(index).ok_or_else(copy_failed)?;
+        if receipt.kind != ReceiptKind::File
+            || receipt.identity != snapshot.identity
+            || receipt.file_snapshot.is_some()
+            || receipt.file_digest.is_some()
+        {
+            return Err(copy_failed());
+        }
+        receipt.file_snapshot = Some(snapshot);
+        receipt.file_digest = Some(digest);
         Ok(())
     }
 

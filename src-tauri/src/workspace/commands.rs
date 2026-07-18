@@ -3,9 +3,10 @@ use tauri::{State, WebviewWindow};
 use crate::error::CommandError;
 
 use super::dto::{
-    WorkspaceCopyRequest, WorkspaceEntryRequest, WorkspaceEntryStat, WorkspacePickRootsRequest,
-    WorkspacePickRootsResult, WorkspaceReadDirectoryResult, WorkspaceRemoveRootRequest,
-    WorkspaceRenameRequest, WorkspaceSnapshot, WorkspaceSnapshotRequest,
+    WorkspaceCopyRequest, WorkspaceEntryRequest, WorkspaceEntryStat, WorkspaceMoveRequest,
+    WorkspaceMoveResult, WorkspacePickRootsRequest, WorkspacePickRootsResult,
+    WorkspaceReadDirectoryResult, WorkspaceRemoveRootRequest, WorkspaceRenameRequest,
+    WorkspaceSnapshot, WorkspaceSnapshotRequest,
 };
 use super::picker::TauriDirectoryPicker;
 use super::service::WorkspaceService;
@@ -125,6 +126,24 @@ pub(crate) async fn workspace_copy(
 ) -> Result<(), CommandError> {
     let (source_root_id, source_path, target_root_id, target_path) = request.into_parts()?;
     WorkspaceService::copy_entry(
+        service.inner(),
+        window.label(),
+        source_root_id,
+        source_path,
+        target_root_id,
+        target_path,
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn workspace_move(
+    window: WebviewWindow,
+    service: State<'_, WorkspaceService>,
+    request: WorkspaceMoveRequest,
+) -> Result<WorkspaceMoveResult, CommandError> {
+    let (source_root_id, source_path, target_root_id, target_path) = request.into_parts()?;
+    WorkspaceService::move_entry(
         service.inner(),
         window.label(),
         source_root_id,
