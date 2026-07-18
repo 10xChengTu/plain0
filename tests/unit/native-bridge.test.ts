@@ -71,6 +71,7 @@ describe("native Plain bridge", () => {
 		tauri.invoke
 			.mockResolvedValueOnce(null)
 			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(null)
 			.mockResolvedValueOnce({
 				kind: "file",
 				size: 4,
@@ -88,6 +89,11 @@ describe("native Plain bridge", () => {
 
 		await bridge.workspaceCreateFile(rootId, "%2e%2e/new.txt");
 		await bridge.workspaceCreateDirectory(rootId, "%2e%2e/new-directory");
+		await bridge.workspaceRename(
+			rootId,
+			"%2e%2e/source.txt",
+			"%2e%2e/target.txt",
+		);
 		const stat = await bridge.workspaceStat(rootId, "%2e%2e/file.bin");
 		const directory = await bridge.workspaceReadDirectory(rootId, "%2e%2e");
 		const file = await bridge.workspaceReadFile(rootId, "%2F");
@@ -100,6 +106,16 @@ describe("native Plain bridge", () => {
 			[
 				"workspace_create_directory",
 				{ request: { rootId, relativePath: "%2e%2e/new-directory" } },
+			],
+			[
+				"workspace_rename",
+				{
+					request: {
+						rootId,
+						sourcePath: "%2e%2e/source.txt",
+						targetPath: "%2e%2e/target.txt",
+					},
+				},
 			],
 			[
 				"workspace_stat",
@@ -127,8 +143,11 @@ describe("native Plain bridge", () => {
 		expect([...file.copy()]).toEqual([0, 255, 128, 42]);
 	});
 
-	it("accepts only a null response from void create commands", async () => {
-		tauri.invoke.mockResolvedValueOnce(undefined).mockResolvedValueOnce({});
+	it("accepts only a null response from void mutation commands", async () => {
+		tauri.invoke
+			.mockResolvedValueOnce(undefined)
+			.mockResolvedValueOnce({})
+			.mockResolvedValueOnce([]);
 		const bridge = createNativeBridge();
 
 		await expect(
@@ -136,6 +155,9 @@ describe("native Plain bridge", () => {
 		).rejects.toMatchObject({ code: "IPC_CONTRACT_VIOLATION" });
 		await expect(
 			bridge.workspaceCreateDirectory(rootId, "new-directory"),
+		).rejects.toMatchObject({ code: "IPC_CONTRACT_VIOLATION" });
+		await expect(
+			bridge.workspaceRename(rootId, "source", "target"),
 		).rejects.toMatchObject({ code: "IPC_CONTRACT_VIOLATION" });
 	});
 
@@ -171,6 +193,28 @@ describe("native Plain bridge", () => {
 		).rejects.toEqual({
 			code: "INVALID_RELATIVE_PATH",
 			message: "The workspace-relative path is invalid.",
+		});
+		await expect(bridge.workspaceRename(rootId, "", "target")).rejects.toEqual({
+			code: "ENTRY_TYPE_MISMATCH",
+			message: "The workspace entry has an incompatible type.",
+		});
+		await expect(
+			bridge.workspaceRename(rootId, "source", "../private-secret"),
+		).rejects.toEqual({
+			code: "INVALID_RELATIVE_PATH",
+			message: "The workspace-relative path is invalid.",
+		});
+		await expect(
+			bridge.workspaceRename(rootId, "source", "source"),
+		).rejects.toEqual({
+			code: "ENTRY_ALREADY_EXISTS",
+			message: "The workspace entry already exists.",
+		});
+		await expect(
+			bridge.workspaceRename(rootId, "source", "source/nested"),
+		).rejects.toEqual({
+			code: "WORKSPACE_CONFLICT",
+			message: "The workspace rename conflicts with the source path.",
 		});
 		expect(tauri.invoke).not.toHaveBeenCalled();
 	});

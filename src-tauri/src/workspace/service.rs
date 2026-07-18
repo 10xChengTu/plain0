@@ -118,6 +118,19 @@ impl WorkspaceService {
         .await
     }
 
+    pub async fn rename(
+        &self,
+        window_label: &str,
+        root_id: RootId,
+        source_path: RelativePath,
+        target_path: RelativePath,
+    ) -> Result<(), CommandError> {
+        self.run_mutation(window_label, root_id, move |lease| {
+            writer::rename(&lease, &source_path, &target_path)
+        })
+        .await
+    }
+
     pub fn close_window(&self, window_label: &str) {
         if let Some(workspace) = self.detach_window(window_label) {
             workspace.close();

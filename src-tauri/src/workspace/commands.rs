@@ -4,8 +4,8 @@ use crate::error::CommandError;
 
 use super::dto::{
     WorkspaceEntryRequest, WorkspaceEntryStat, WorkspacePickRootsRequest, WorkspacePickRootsResult,
-    WorkspaceReadDirectoryResult, WorkspaceRemoveRootRequest, WorkspaceSnapshot,
-    WorkspaceSnapshotRequest,
+    WorkspaceReadDirectoryResult, WorkspaceRemoveRootRequest, WorkspaceRenameRequest,
+    WorkspaceSnapshot, WorkspaceSnapshotRequest,
 };
 use super::picker::TauriDirectoryPicker;
 use super::service::WorkspaceService;
@@ -98,6 +98,23 @@ pub(crate) async fn workspace_create_directory(
     service
         .create_directory(window.label(), root_id, relative_path)
         .await
+}
+
+#[tauri::command]
+pub(crate) async fn workspace_rename(
+    window: WebviewWindow,
+    service: State<'_, WorkspaceService>,
+    request: WorkspaceRenameRequest,
+) -> Result<(), CommandError> {
+    let (root_id, source_path, target_path) = request.into_parts()?;
+    WorkspaceService::rename(
+        service.inner(),
+        window.label(),
+        root_id,
+        source_path,
+        target_path,
+    )
+    .await
 }
 
 fn raw_bytes_response(bytes: Vec<u8>) -> tauri::ipc::Response {

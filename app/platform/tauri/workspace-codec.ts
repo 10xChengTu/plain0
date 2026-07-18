@@ -207,6 +207,40 @@ export function frozenWorkspaceCreateEntryRequest(
 	return request;
 }
 
+export function frozenWorkspaceRenameRequest(
+	rootId: unknown,
+	sourcePath: unknown,
+	targetPath: unknown,
+): Readonly<{ rootId: string; sourcePath: string; targetPath: string }> {
+	const source = frozenWorkspaceCreateEntryRequest(rootId, sourcePath);
+	const target = frozenWorkspaceCreateEntryRequest(rootId, targetPath);
+	if (source.relativePath === target.relativePath) {
+		return requestViolation(
+			"ENTRY_ALREADY_EXISTS",
+			"The workspace entry already exists.",
+		);
+	}
+	const sourceSegments = workspaceRelativePathSegments(source.relativePath);
+	const targetSegments = workspaceRelativePathSegments(target.relativePath);
+	if (sourceSegments === undefined || targetSegments === undefined) {
+		return violation();
+	}
+	if (
+		targetSegments.length > sourceSegments.length &&
+		sourceSegments.every((segment, index) => targetSegments[index] === segment)
+	) {
+		return requestViolation(
+			"WORKSPACE_CONFLICT",
+			"The workspace rename conflicts with the source path.",
+		);
+	}
+	return Object.freeze({
+		rootId: source.rootId,
+		sourcePath: source.relativePath,
+		targetPath: target.relativePath,
+	});
+}
+
 function compareUtf8(left: Uint8Array, right: Uint8Array): number {
 	const length = Math.min(left.byteLength, right.byteLength);
 	for (let index = 0; index < length; index += 1) {

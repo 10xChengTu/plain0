@@ -74,6 +74,11 @@ export interface PlainBridge {
 	workspaceRemoveRoot(rootId: string): Promise<WorkspaceSnapshot>;
 	workspaceCreateFile(rootId: string, relativePath: string): Promise<void>;
 	workspaceCreateDirectory(rootId: string, relativePath: string): Promise<void>;
+	workspaceRename(
+		rootId: string,
+		sourcePath: string,
+		targetPath: string,
+	): Promise<void>;
 	workspaceStat(
 		rootId: string,
 		relativePath: string,

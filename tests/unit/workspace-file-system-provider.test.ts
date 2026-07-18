@@ -62,6 +62,9 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async workspaceCreateDirectory() {
 			throw new Error("unused");
 		},
+		async workspaceRename() {
+			throw new Error("unused");
+		},
 		async workspaceStat() {
 			return { kind: "file", size: 3, mtime: 20, ctime: 10 };
 		},

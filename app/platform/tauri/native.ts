@@ -12,6 +12,7 @@ import {
 	decodeWorkspaceVoid,
 	frozenWorkspaceCreateEntryRequest,
 	frozenWorkspaceEntryRequest,
+	frozenWorkspaceRenameRequest,
 } from "./workspace-codec";
 
 export function createNativeBridge(): PlainBridge {
@@ -49,6 +50,16 @@ export function createNativeBridge(): PlainBridge {
 			const request = frozenWorkspaceCreateEntryRequest(rootId, relativePath);
 			decodeWorkspaceVoid(
 				await invoke<unknown>("workspace_create_directory", { request }),
+			);
+		},
+		workspaceRename: async (rootId, sourcePath, targetPath) => {
+			const request = frozenWorkspaceRenameRequest(
+				rootId,
+				sourcePath,
+				targetPath,
+			);
+			decodeWorkspaceVoid(
+				await invoke<unknown>("workspace_rename", { request }),
 			);
 		},
 		workspaceStat: async (rootId, relativePath) => {

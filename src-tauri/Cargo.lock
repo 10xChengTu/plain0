@@ -2233,6 +2233,7 @@ version = "0.1.0"
 dependencies = [
  "cap-std",
  "libc",
+ "rustix",
  "serde",
  "serde_json",
  "tauri",

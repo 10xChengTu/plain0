@@ -55,6 +55,7 @@ pub fn run() {
             workspace::commands::workspace_read_file,
             workspace::commands::workspace_create_file,
             workspace::commands::workspace_create_directory,
+            workspace::commands::workspace_rename,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Plain");

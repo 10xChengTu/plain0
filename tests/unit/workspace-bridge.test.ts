@@ -228,6 +228,186 @@ describe("browser mock workspace bridge", () => {
 		});
 	});
 
+	it("renames files and directory subtrees within one root", async () => {
+		const bridge = createBrowserMockBridge();
+		const selected = await bridge.workspacePickRoots("replace");
+		const rootId = selected.snapshot.roots[0]!.rootId;
+		const readme = (await bridge.workspaceReadFile(rootId, "README.md")).copy();
+
+		await bridge.workspaceRename(rootId, "README.md", "GUIDE.md");
+		await expect(
+			bridge.workspaceStat(rootId, "README.md"),
+		).rejects.toMatchObject({ code: "ENTRY_NOT_FOUND" });
+		expect((await bridge.workspaceReadFile(rootId, "GUIDE.md")).copy()).toEqual(
+			readme,
+		);
+
+		await bridge.workspaceRename(rootId, "src", "source");
+		await expect(bridge.workspaceStat(rootId, "src")).rejects.toMatchObject({
+			code: "ENTRY_NOT_FOUND",
+		});
+		expect(
+			(await bridge.workspaceReadDirectory(rootId, "source")).entries,
+		).toEqual([{ name: "main.ts", kind: "file" }]);
+		expect(
+			(await bridge.workspaceReadFile(rootId, "source/main.ts")).byteLength,
+		).toBeGreaterThan(0);
+
+		await bridge.workspaceCreateDirectory(rootId, "destination");
+		await bridge.workspaceRename(
+			rootId,
+			"source/main.ts",
+			"destination/main.ts",
+		);
+		expect(
+			(await bridge.workspaceReadDirectory(rootId, "source")).entries,
+		).toEqual([]);
+		expect(
+			(await bridge.workspaceReadDirectory(rootId, "destination")).entries,
+		).toEqual([{ name: "main.ts", kind: "file" }]);
+		expect(await bridge.workspaceSnapshot()).toMatchObject({ revision: 1 });
+	});
+
+	it("renames atomically without clobbering targets", async () => {
+		const bridge = createBrowserMockBridge();
+		const selected = await bridge.workspacePickRoots("replace");
+		const rootId = selected.snapshot.roots[0]!.rootId;
+		const readme = (await bridge.workspaceReadFile(rootId, "README.md")).copy();
+		const binary = (
+			await bridge.workspaceReadFile(rootId, "binary.bin")
+		).copy();
+
+		for (const operation of [
+			() => bridge.workspaceRename(rootId, "README.md", "binary.bin"),
+			() => bridge.workspaceRename(rootId, "src", "empty"),
+			() => bridge.workspaceRename(rootId, "README.md", "README.md"),
+			() => bridge.workspaceRename(rootId, "missing", "missing"),
+		]) {
+			await expect(operation()).rejects.toEqual({
+				code: "ENTRY_ALREADY_EXISTS",
+				message: "The workspace entry already exists.",
+			});
+		}
+		expect(
+			(await bridge.workspaceReadFile(rootId, "README.md")).copy(),
+		).toEqual(readme);
+		expect(
+			(await bridge.workspaceReadFile(rootId, "binary.bin")).copy(),
+		).toEqual(binary);
+		expect((await bridge.workspaceStat(rootId, "src")).kind).toBe("directory");
+		expect((await bridge.workspaceStat(rootId, "empty")).kind).toBe(
+			"directory",
+		);
+
+		const racing = await Promise.allSettled([
+			bridge.workspaceRename(rootId, "README.md", "racing-target"),
+			bridge.workspaceRename(rootId, "binary.bin", "racing-target"),
+		]);
+		expect(racing.filter(({ status }) => status === "fulfilled")).toHaveLength(
+			1,
+		);
+		expect(racing.filter(({ status }) => status === "rejected")).toHaveLength(
+			1,
+		);
+		const remainingSources = await Promise.all(
+			["README.md", "binary.bin"].map(async (path) =>
+				bridge
+					.workspaceStat(rootId, path)
+					.then(() => path)
+					.catch(() => undefined),
+			),
+		);
+		expect(remainingSources.filter(Boolean)).toHaveLength(1);
+		expect((await bridge.workspaceStat(rootId, "racing-target")).kind).toBe(
+			"file",
+		);
+	});
+
+	it("rejects invalid rename relationships and parents before mutation", async () => {
+		const bridge = createBrowserMockBridge();
+		const selected = await bridge.workspacePickRoots("replace");
+		const rootId = selected.snapshot.roots[0]!.rootId;
+
+		await expect(
+			bridge.workspaceRename(rootId, "missing", "target"),
+		).rejects.toMatchObject({ code: "ENTRY_NOT_FOUND" });
+		await expect(
+			bridge.workspaceRename(rootId, "README.md", "missing/target"),
+		).rejects.toMatchObject({ code: "ENTRY_NOT_FOUND" });
+		await expect(
+			bridge.workspaceRename(rootId, "README.md/child", "target"),
+		).rejects.toMatchObject({ code: "ENTRY_TYPE_MISMATCH" });
+		await expect(
+			bridge.workspaceRename(rootId, "README.md", "binary.bin/target"),
+		).rejects.toMatchObject({ code: "ENTRY_TYPE_MISMATCH" });
+		for (const [sourcePath, targetPath] of [
+			["", "target"],
+			["source", ""],
+		] as const) {
+			await expect(
+				bridge.workspaceRename(rootId, sourcePath, targetPath),
+			).rejects.toEqual({
+				code: "ENTRY_TYPE_MISMATCH",
+				message: "The workspace entry has an incompatible type.",
+			});
+		}
+
+		for (const [sourcePath, targetPath] of [
+			["src", "src/nested/target"],
+			["README.md", "README.md/target"],
+		] as const) {
+			await expect(
+				bridge.workspaceRename(rootId, sourcePath, targetPath),
+			).rejects.toEqual({
+				code: "WORKSPACE_CONFLICT",
+				message: "The workspace rename conflicts with the source path.",
+			});
+		}
+		expect((await bridge.workspaceStat(rootId, "src")).kind).toBe("directory");
+		expect((await bridge.workspaceStat(rootId, "README.md")).kind).toBe("file");
+
+		await bridge.workspaceRename(rootId, "src", "src-copy");
+		expect((await bridge.workspaceStat(rootId, "src-copy")).kind).toBe(
+			"directory",
+		);
+	});
+
+	it("keeps rename state isolated per bridge and errors sanitized", async () => {
+		const first = createBrowserMockBridge();
+		const second = createBrowserMockBridge();
+		const firstRoot = (await first.workspacePickRoots("replace")).snapshot
+			.roots[0]!;
+		const secondRoot = (await second.workspacePickRoots("replace")).snapshot
+			.roots[0]!;
+
+		await first.workspaceRename(firstRoot.rootId, "README.md", "renamed.md");
+		await expect(
+			first.workspaceStat(firstRoot.rootId, "README.md"),
+		).rejects.toMatchObject({ code: "ENTRY_NOT_FOUND" });
+		expect(
+			(await second.workspaceStat(secondRoot.rootId, "README.md")).kind,
+		).toBe("file");
+		await expect(
+			first.workspaceRename(
+				"00000000-0000-4000-8000-000000000999",
+				"private-source",
+				"private-target",
+			),
+		).rejects.toEqual({
+			code: "ROOT_NOT_AUTHORIZED",
+			message: "The workspace root is not authorized.",
+		});
+		const error = await first
+			.workspaceRename(firstRoot.rootId, "../private-source", "target")
+			.catch((candidate: unknown) => candidate);
+		expect(error).toEqual({
+			code: "INVALID_RELATIVE_PATH",
+			message: "The workspace-relative path is invalid.",
+		});
+		expect(Object.isFrozen(error)).toBe(true);
+		expect(JSON.stringify(error)).not.toContain("private");
+	});
+
 	it("returns frozen stable file errors with Rust-compatible precedence", async () => {
 		const bridge = createBrowserMockBridge();
 		const knownRootId = "00000000-0000-4000-8000-000000000101";

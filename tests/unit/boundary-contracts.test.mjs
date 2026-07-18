@@ -116,6 +116,7 @@ describe("Plain Tauri boundary contracts", () => {
 const workspaceCargo = `
 cap-std = "4.0.2"
 libc = "0.2.186"
+rustix = { version = "=1.1.4", features = ["fs"] }
 uuid = { version = "1.24.0", features = ["v4"] }
 `;
 
@@ -140,6 +141,15 @@ fn windows_identity(path: &std::path::Path) {
 		relativePath: "src-tauri/src/workspace/tests.rs",
 		source: `use std::fs; fn fixture() { fs::write("outside", "test"); }`,
 	},
+	{
+		relativePath: "src-tauri/src/workspace/writer.rs",
+		source: `
+use rustix::fs::{renameat_with, RenameFlags};
+fn rename_exclusive(source: &cap_std::fs::Dir, target: &cap_std::fs::Dir) {
+  let _ = renameat_with(source, "old", target, "new", RenameFlags::NOREPLACE);
+}
+`,
+	},
 ];
 
 describe("Plain workspace Rust boundary contracts", () => {
@@ -149,7 +159,7 @@ describe("Plain workspace Rust boundary contracts", () => {
 		).toEqual([]);
 	});
 
-	it("requires the reviewed capability, nonblocking-open and opaque-id versions", () => {
+	it("requires the reviewed capability, exclusive-rename and opaque-id versions", () => {
 		expect(
 			validateWorkspaceRustBoundary(
 				'cap-std = "4"\nuuid = "1.24"',
@@ -159,6 +169,7 @@ describe("Plain workspace Rust boundary contracts", () => {
 			expect.arrayContaining([
 				"Cargo.toml must pin cap-std to 4.0.2",
 				"Cargo.toml must pin libc to 0.2.186",
+				"Cargo.toml must pin rustix to =1.1.4",
 				"Cargo.toml must pin uuid to 1.24.0",
 			]),
 		);
@@ -168,6 +179,12 @@ describe("Plain workspace Rust boundary contracts", () => {
 				workspaceSources,
 			),
 		).toContain("Cargo.toml must pin libc to 0.2.186");
+		expect(
+			validateWorkspaceRustBoundary(
+				workspaceCargo.replace('version = "=1.1.4"', 'version = "1"'),
+				workspaceSources,
+			),
+		).toContain("Cargo.toml must pin rustix to =1.1.4");
 	});
 
 	it("rejects ambient I/O aliases, lossy paths and extra authorizers", () => {
@@ -199,6 +216,52 @@ fn bypass(path: &std::path::Path) {
 				"src-tauri/src/workspace/service.rs uses forbidden ambient std::fs operation remove_file",
 				"src-tauri/src/workspace/service.rs opens ambient paths outside the sole root authorizer",
 				"workspace production code must contain exactly one ambient root authorizer",
+			]),
+		);
+	});
+
+	it("rejects overwrite-capable rename fallbacks and rustix use outside the writer", () => {
+		const hostileSources = workspaceSources.map((entry) =>
+			entry.relativePath === "src-tauri/src/workspace/writer.rs"
+				? {
+						relativePath: entry.relativePath,
+						source: `
+use rustix::fs::{renameat as clobber, renameat_with, RenameFlags};
+fn unsafe_rename(source: &cap_std::fs::Dir, target: &cap_std::fs::Dir) {
+  let _ = renameat_with(source, "safe-old", target, "safe-new", RenameFlags::NOREPLACE);
+  let _ = clobber(source, "old", target, "new");
+  let _ = cap_std::fs::Dir::rename(source, "old", target, "new");
+}
+`,
+					}
+				: entry,
+		);
+		hostileSources.push({
+			relativePath: "src-tauri/src/workspace/service.rs",
+			source: `
+use rustix::fs::renameat_with;
+fn bypass(source: &cap_std::fs::Dir, target: &cap_std::fs::Dir) {
+  let _ = source.rename("old", target, "new");
+}
+`,
+		});
+		hostileSources.push({
+			relativePath: "src-tauri/src/workspace/reader.rs",
+			source: `
+use cap_std::fs::Dir as WorkspaceService;
+fn disguised(source: &WorkspaceService, target: &WorkspaceService) {
+  let _ = WorkspaceService::rename(source, "old", target, "new");
+}
+`,
+		});
+		expect(
+			validateWorkspaceRustBoundary(workspaceCargo, hostileSources),
+		).toEqual(
+			expect.arrayContaining([
+				"src-tauri/src/workspace/writer.rs must not use an overwrite-capable rename",
+				"src-tauri/src/workspace/service.rs must not use an overwrite-capable rename",
+				"src-tauri/src/workspace/reader.rs must not use an overwrite-capable rename",
+				"src-tauri/src/workspace/service.rs must not use the exclusive rename syscall outside the workspace writer",
 			]),
 		);
 	});

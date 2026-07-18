@@ -13,6 +13,7 @@ import {
 	frozenWorkspaceFileData,
 	frozenWorkspacePickResult,
 	frozenWorkspaceReadDirectory,
+	frozenWorkspaceRenameRequest,
 	frozenWorkspaceSnapshot,
 	isPortableWorkspaceEntryName,
 	workspaceRelativePathSegments,
@@ -262,6 +263,37 @@ export function createBrowserMockBridge(
 		}
 		parent.entries.set(name, entry);
 	};
+	const renameEntry = (
+		rootId: string,
+		sourcePath: string,
+		targetPath: string,
+	): void => {
+		const request = frozenWorkspaceRenameRequest(
+			rootId,
+			sourcePath,
+			targetPath,
+		);
+		if (!roots.has(request.rootId) || !trees.has(request.rootId)) {
+			throw rootNotAuthorized();
+		}
+
+		const sourceTarget = resolveCreateTarget(
+			request.rootId,
+			request.sourcePath,
+		);
+		const source = sourceTarget.parent.entries.get(sourceTarget.name);
+		if (source === undefined) {
+			throw entryNotFound();
+		}
+
+		const target = resolveCreateTarget(request.rootId, request.targetPath);
+		if (target.parent.entries.has(target.name)) {
+			throw entryAlreadyExists();
+		}
+
+		sourceTarget.parent.entries.delete(sourceTarget.name);
+		target.parent.entries.set(target.name, source);
+	};
 
 	return {
 		async runtimeInfo() {
@@ -320,6 +352,9 @@ export function createBrowserMockBridge(
 		},
 		async workspaceCreateDirectory(rootId, relativePath) {
 			createEntry(rootId, relativePath, mockDirectory({}));
+		},
+		async workspaceRename(rootId, sourcePath, targetPath) {
+			renameEntry(rootId, sourcePath, targetPath);
 		},
 		async workspaceStat(rootId, relativePath) {
 			const node = resolveNode(rootId, relativePath);

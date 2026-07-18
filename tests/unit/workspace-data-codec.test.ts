@@ -9,6 +9,7 @@ import {
 	frozenWorkspaceCreateEntryRequest,
 	frozenWorkspaceEntryRequest,
 	frozenWorkspaceFileData,
+	frozenWorkspaceRenameRequest,
 	isPortableWorkspaceEntryName,
 } from "../../app/platform/tauri/workspace-codec";
 
@@ -309,13 +310,24 @@ describe("workspace file data codec", () => {
 			rootId,
 			"src/new.ts",
 		);
+		const renameRequest = frozenWorkspaceRenameRequest(
+			rootId,
+			"src/old.ts",
+			"src/new.ts",
+		);
 		expect(request).toEqual({ rootId, relativePath: "src/main.ts" });
 		expect(createRequest).toEqual({
 			rootId,
 			relativePath: "src/new.ts",
 		});
+		expect(renameRequest).toEqual({
+			rootId,
+			sourcePath: "src/old.ts",
+			targetPath: "src/new.ts",
+		});
 		expect(Object.isFrozen(request)).toBe(true);
 		expect(Object.isFrozen(createRequest)).toBe(true);
+		expect(Object.isFrozen(renameRequest)).toBe(true);
 		expect(() =>
 			frozenWorkspaceCreateEntryRequest(
 				"00000000-0000-3000-8000-000000000101",
@@ -327,6 +339,13 @@ describe("workspace file data codec", () => {
 				message: "The workspace root is not authorized.",
 			}),
 		);
+		expect(() =>
+			frozenWorkspaceRenameRequest(
+				"00000000-0000-3000-8000-000000000101",
+				"source",
+				"target",
+			),
+		).toThrowError(expect.objectContaining({ code: "ROOT_NOT_AUTHORIZED" }));
 
 		for (const [relativePath, code, message] of [
 			[
@@ -352,6 +371,38 @@ describe("workspace file data codec", () => {
 				expect(JSON.stringify(error)).not.toContain("private-secret");
 			}
 		}
+
+		for (const [sourcePath, targetPath, code] of [
+			["", "target", "ENTRY_TYPE_MISMATCH"],
+			["source", "", "ENTRY_TYPE_MISMATCH"],
+			["../private-source", "target", "INVALID_RELATIVE_PATH"],
+			["source", "../private-target", "INVALID_RELATIVE_PATH"],
+		] as const) {
+			try {
+				frozenWorkspaceRenameRequest(rootId, sourcePath, targetPath);
+				expect.fail("invalid rename request must throw");
+			} catch (error) {
+				expect(error).toMatchObject({ code });
+				expect(Object.isFrozen(error)).toBe(true);
+				expect(JSON.stringify(error)).not.toContain("private");
+			}
+		}
+		expect(frozenWorkspaceRenameRequest(rootId, "%2e%2e", "%2F")).toEqual({
+			rootId,
+			sourcePath: "%2e%2e",
+			targetPath: "%2F",
+		});
+		expect(() =>
+			frozenWorkspaceRenameRequest(rootId, "source", "source"),
+		).toThrowError(expect.objectContaining({ code: "ENTRY_ALREADY_EXISTS" }));
+		expect(() =>
+			frozenWorkspaceRenameRequest(rootId, "source", "source/nested"),
+		).toThrowError(expect.objectContaining({ code: "WORKSPACE_CONFLICT" }));
+		expect(frozenWorkspaceRenameRequest(rootId, "a", "ab")).toEqual({
+			rootId,
+			sourcePath: "a",
+			targetPath: "ab",
+		});
 
 		for (const [candidateRoot, path, code] of [
 			["00000000-0000-3000-8000-000000000101", "src", "ROOT_NOT_AUTHORIZED"],

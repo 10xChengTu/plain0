@@ -207,6 +207,7 @@ export function validateWorkspaceRustBoundary(cargoSource, rustSources) {
 	for (const [dependency, version] of [
 		["cap-std", "4.0.2"],
 		["libc", "0.2.186"],
+		["rustix", "=1.1.4"],
 		["uuid", "1.24.0"],
 	]) {
 		const escapedDependency = escapeRegularExpression(dependency);
@@ -223,6 +224,7 @@ export function validateWorkspaceRustBoundary(cargoSource, rustSources) {
 	let ambientOpenCount = 0;
 	let ambientAuthorityCallCount = 0;
 	let ambientCanonicalizeCount = 0;
+	let exclusiveRenameCount = 0;
 
 	for (const { relativePath, source } of rustSources) {
 		const normalizedPath = relativePath.replaceAll("\\", "/");
@@ -277,6 +279,39 @@ export function validateWorkspaceRustBoundary(cargoSource, rustSources) {
 		}
 		ambientOpenCount += openCount;
 		ambientAuthorityCallCount += authorityCallCount;
+
+		if (/\brustix\s*::\s*fs\b/.test(source)) {
+			if (normalizedPath !== "src-tauri/src/workspace/writer.rs") {
+				failures.push(
+					`${normalizedPath} must not use the exclusive rename syscall outside the workspace writer`,
+				);
+			} else {
+				exclusiveRenameCount += [...source.matchAll(/\brenameat_with\s*\(/g)]
+					.length;
+				if (!/\bRenameFlags\s*::\s*NOREPLACE\b/.test(source)) {
+					failures.push("workspace writer must use RenameFlags::NOREPLACE");
+				}
+			}
+		}
+		const forbiddenQualifiedRenames = [
+			...source.matchAll(/\b([A-Za-z_]\w*)\s*::\s*rename\b/g),
+		].filter((match) => {
+			const allowedCall =
+				(normalizedPath === "src-tauri/src/workspace/commands.rs" &&
+					match[1] === "WorkspaceService") ||
+				(normalizedPath === "src-tauri/src/workspace/service.rs" &&
+					match[1] === "writer");
+			return !allowedCall;
+		});
+		if (
+			/\brenameat\b/.test(source) ||
+			/\.rename\s*\(/.test(source) ||
+			forbiddenQualifiedRenames.length > 0
+		) {
+			failures.push(
+				`${normalizedPath} must not use an overwrite-capable rename`,
+			);
+		}
 	}
 
 	if (ambientOpenCount !== 1 || ambientAuthorityCallCount !== 1) {
@@ -287,6 +322,11 @@ export function validateWorkspaceRustBoundary(cargoSource, rustSources) {
 	if (ambientCanonicalizeCount > 2) {
 		failures.push(
 			"workspace root identity may use at most two platform canonicalize fallbacks",
+		);
+	}
+	if (exclusiveRenameCount !== 1) {
+		failures.push(
+			"workspace writer must contain exactly one audited renameat_with call",
 		);
 	}
 

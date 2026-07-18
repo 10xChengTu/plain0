@@ -155,6 +155,22 @@ impl WorkspaceEntryRequest {
     }
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceRenameRequest {
+    root_id: RootId,
+    source_path: String,
+    target_path: String,
+}
+
+impl WorkspaceRenameRequest {
+    pub fn into_parts(self) -> Result<(RootId, RelativePath, RelativePath), CommandError> {
+        let source_path = RelativePath::parse_wire(&self.source_path)?;
+        let target_path = RelativePath::parse_wire(&self.target_path)?;
+        Ok((self.root_id, source_path, target_path))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum WorkspaceEntryKind {
@@ -242,7 +258,7 @@ impl WorkspaceReadDirectoryResult {
 mod tests {
     use super::{
         WorkspaceEntryKind, WorkspaceEntryRequest, WorkspacePickRootsMode,
-        WorkspacePickRootsRequest,
+        WorkspacePickRootsRequest, WorkspaceRenameRequest,
     };
 
     #[test]
@@ -299,6 +315,41 @@ mod tests {
             traversal.into_parts().unwrap_err().code(),
             "INVALID_RELATIVE_PATH"
         );
+    }
+
+    #[test]
+    fn rename_request_owns_one_root_and_two_validated_paths() {
+        let request: WorkspaceRenameRequest = serde_json::from_str(
+            r#"{"rootId":"00000000-0000-4000-8000-000000000000","sourcePath":"src/old.rs","targetPath":"src/new.rs"}"#,
+        )
+        .unwrap();
+        let (root_id, source_path, target_path) = request.into_parts().unwrap();
+        assert_eq!(root_id.as_wire(), "00000000-0000-4000-8000-000000000000");
+        assert_eq!(source_path.as_wire(), "src/old.rs");
+        assert_eq!(target_path.as_wire(), "src/new.rs");
+
+        for invalid in [
+            r#"{"rootId":"00000000-0000-4000-8000-000000000000","sourcePath":"old","targetPath":"new","overwrite":false}"#,
+            r#"{"rootId":"00000000-0000-4000-8000-000000000000","sourcePath":"old"}"#,
+            r#"{"rootId":"00000000-0000-4000-8000-000000000000","targetPath":"new"}"#,
+            r#"{"sourceRootId":"00000000-0000-4000-8000-000000000000","targetRootId":"00000000-0000-4000-8000-000000000001","sourcePath":"old","targetPath":"new"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<WorkspaceRenameRequest>(invalid).is_err(),
+                "request must reject {invalid}"
+            );
+        }
+
+        for (source_path, target_path) in [("../private", "new"), ("old", "../private")] {
+            let wire = format!(
+                r#"{{"rootId":"00000000-0000-4000-8000-000000000000","sourcePath":"{source_path}","targetPath":"{target_path}"}}"#
+            );
+            let request: WorkspaceRenameRequest = serde_json::from_str(&wire).unwrap();
+            assert_eq!(
+                request.into_parts().unwrap_err().code(),
+                "INVALID_RELATIVE_PATH"
+            );
+        }
     }
 
     #[test]
