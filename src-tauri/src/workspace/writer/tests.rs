@@ -5,7 +5,12 @@ use std::sync::{Arc, Barrier};
 
 use tempfile::TempDir;
 
-use super::{create_directory, create_file, rename as rename_entry};
+use super::{copy_regular_file, create_directory, create_file, rename as rename_entry};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::{
+    copy_regular_file_with_hooks, copy_regular_file_with_pre_open_hook, MAX_COPY_FILE_BYTES,
+    STAGING_PREFIX,
+};
 use crate::path_policy::RelativePath;
 use crate::workspace::{WorkspaceRootLease, WorkspaceScope};
 
@@ -534,6 +539,603 @@ fn one_logical_parent_uses_one_opened_directory_during_symlink_swaps() {
     assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn staged_copy_supports_same_and_cross_root_files_and_preserves_basic_mode() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let temp = TempDir::new().unwrap();
+    let source_root = temp.path().join("source-root");
+    let target_root = temp.path().join("target-root");
+    fs::create_dir(&source_root).unwrap();
+    fs::create_dir(&target_root).unwrap();
+    fs::create_dir(target_root.join("nested")).unwrap();
+    fs::write(source_root.join("source.bin"), b"plain-copy").unwrap();
+    fs::set_permissions(
+        source_root.join("source.bin"),
+        fs::Permissions::from_mode(0o754),
+    )
+    .unwrap();
+
+    let mut scope = WorkspaceScope::new();
+    let ids = scope
+        .authorize_roots_atomically(&[source_root.clone(), target_root.clone()])
+        .unwrap();
+    let source_lease = scope.lease(ids[0]).unwrap();
+    let same_root_target = scope.lease(ids[0]).unwrap();
+    let cross_root_target = scope.lease(ids[1]).unwrap();
+
+    copy_regular_file(
+        &source_lease,
+        &path("source.bin"),
+        &same_root_target,
+        &path("same-root.bin"),
+    )
+    .unwrap();
+    copy_regular_file(
+        &source_lease,
+        &path("source.bin"),
+        &cross_root_target,
+        &path("nested/cross-root.bin"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        fs::read(source_root.join("source.bin")).unwrap(),
+        b"plain-copy"
+    );
+    assert_eq!(
+        fs::read(source_root.join("same-root.bin")).unwrap(),
+        b"plain-copy"
+    );
+    assert_eq!(
+        fs::read(target_root.join("nested/cross-root.bin")).unwrap(),
+        b"plain-copy"
+    );
+    assert_eq!(
+        fs::metadata(target_root.join("nested/cross-root.bin"))
+            .unwrap()
+            .mode()
+            & 0o777,
+        0o754
+    );
+    assert_no_staging_entries(&source_root);
+    assert_no_staging_entries(&target_root.join("nested"));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn staged_copy_rejects_invalid_paths_types_and_missing_target_parents() {
+    let temp = TempDir::new().unwrap();
+    let root = create_root(&temp);
+    fs::write(root.join("source"), b"source").unwrap();
+    fs::create_dir(root.join("source-dir")).unwrap();
+    fs::write(root.join("parent-file"), b"parent").unwrap();
+    let lease = authorize(&root);
+
+    for (source, target, expected) in [
+        ("", "target", "ENTRY_TYPE_MISMATCH"),
+        ("source", "", "ENTRY_TYPE_MISMATCH"),
+        ("missing", "target", "ENTRY_NOT_FOUND"),
+        ("source-dir", "target", "ENTRY_TYPE_MISMATCH"),
+        ("source", "missing-parent/target", "ENTRY_NOT_FOUND"),
+        ("source", "parent-file/target", "ENTRY_TYPE_MISMATCH"),
+    ] {
+        assert_eq!(
+            copy_regular_file(&lease, &path(source), &lease, &path(target))
+                .unwrap_err()
+                .code(),
+            expected
+        );
+    }
+    assert_eq!(
+        copy_regular_file(&lease, &path("missing"), &lease, &path("missing"))
+            .unwrap_err()
+            .code(),
+        "ENTRY_ALREADY_EXISTS"
+    );
+    assert_eq!(
+        copy_regular_file(&lease, &path("source"), &lease, &path("source/descendant"))
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_CONFLICT"
+    );
+    assert_no_staging_entries(&root);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn staged_copy_rejects_symlinks_special_files_and_every_existing_target_kind() {
+    use std::os::unix::fs::{symlink, FileTypeExt};
+    use std::os::unix::net::UnixDatagram;
+
+    let temp = TempDir::new().unwrap();
+    let root = create_root(&temp);
+    fs::write(root.join("source"), b"source").unwrap();
+    symlink("source", root.join("source-link")).unwrap();
+    symlink("missing", root.join("source-dangling")).unwrap();
+    create_fifo(&root.join("source-fifo"));
+    fs::write(root.join("target-file"), b"target").unwrap();
+    fs::create_dir(root.join("target-dir")).unwrap();
+    symlink("target-file", root.join("target-link")).unwrap();
+    symlink("missing", root.join("target-dangling-link")).unwrap();
+    create_fifo(&root.join("target-fifo"));
+    let _target_socket = UnixDatagram::bind(root.join("target-socket")).unwrap();
+    let lease = authorize(&root);
+
+    for source in ["source-link", "source-dangling", "source-fifo"] {
+        assert_eq!(
+            copy_regular_file(&lease, &path(source), &lease, &path("unused"))
+                .unwrap_err()
+                .code(),
+            "ENTRY_TYPE_MISMATCH"
+        );
+    }
+    for target in [
+        "target-file",
+        "target-dir",
+        "target-link",
+        "target-dangling-link",
+        "target-fifo",
+        "target-socket",
+    ] {
+        assert_eq!(
+            copy_regular_file(&lease, &path("source"), &lease, &path(target))
+                .unwrap_err()
+                .code(),
+            "ENTRY_ALREADY_EXISTS"
+        );
+    }
+
+    assert_eq!(fs::read(root.join("target-file")).unwrap(), b"target");
+    assert!(root.join("target-dir").is_dir());
+    assert_eq!(
+        fs::read_link(root.join("target-link")).unwrap(),
+        path("target-file").as_path()
+    );
+    assert_eq!(
+        fs::read_link(root.join("target-dangling-link")).unwrap(),
+        path("missing").as_path()
+    );
+    assert!(fs::symlink_metadata(root.join("target-fifo"))
+        .unwrap()
+        .file_type()
+        .is_fifo());
+    assert!(fs::symlink_metadata(root.join("target-socket"))
+        .unwrap()
+        .file_type()
+        .is_socket());
+    assert_no_staging_entries(&root);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn staged_copy_does_not_block_when_source_is_swapped_to_a_fifo_before_open() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let temp = TempDir::new().unwrap();
+    let root = create_root(&temp);
+    let source = root.join("source");
+    fs::write(&source, b"source").unwrap();
+    let lease = authorize(&root);
+    let hook_source = source.clone();
+    let (result_tx, result_rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let result = copy_regular_file_with_pre_open_hook(
+            &lease,
+            &path("source"),
+            &lease,
+            &path("target"),
+            move || {
+                fs::remove_file(&hook_source).unwrap();
+                create_fifo(&hook_source);
+            },
+        );
+        result_tx.send(result).unwrap();
+    });
+
+    let first_result = result_rx.recv_timeout(Duration::from_secs(2));
+    let timed_out = first_result.is_err();
+    let result = match first_result {
+        Ok(result) => result,
+        Err(_) => {
+            let _rescue = fs::OpenOptions::new().write(true).open(&source).unwrap();
+            result_rx.recv_timeout(Duration::from_secs(2)).unwrap()
+        }
+    };
+    worker.join().unwrap();
+
+    assert!(!timed_out, "copy source open must be nonblocking");
+    assert_eq!(result.unwrap_err().code(), "ENTRY_TYPE_MISMATCH");
+    assert!(!root.join("target").exists());
+    assert_no_staging_entries(&root);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn staged_copy_never_follows_a_final_symlink_swapped_in_before_source_open() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    let root = create_root(&temp);
+    let outside = temp.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(root.join("source"), b"inside").unwrap();
+    fs::write(outside.join("sentinel"), b"outside").unwrap();
+    let lease = authorize(&root);
+    let source = root.join("source");
+    let outside_sentinel = outside.join("sentinel");
+
+    let error = copy_regular_file_with_pre_open_hook(
+        &lease,
+        &path("source"),
+        &lease,
+        &path("target"),
+        move || {
+            fs::remove_file(&source).unwrap();
+            symlink(&outside_sentinel, &source).unwrap();
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "ENTRY_TYPE_MISMATCH");
+    assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"outside");
+    assert!(!root.join("target").exists());
+    assert_no_staging_entries(&root);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn staged_copy_accepts_exactly_eight_mib_and_reads_only_one_probe_byte_more() {
+    let temp = TempDir::new().unwrap();
+    let root = create_root(&temp);
+    fs::File::create(root.join("exact"))
+        .unwrap()
+        .set_len(MAX_COPY_FILE_BYTES as u64)
+        .unwrap();
+    fs::File::create(root.join("oversized"))
+        .unwrap()
+        .set_len(MAX_COPY_FILE_BYTES as u64 + 1)
+        .unwrap();
+    fs::write(root.join("growing"), b"small").unwrap();
+    let lease = authorize(&root);
+
+    copy_regular_file(&lease, &path("exact"), &lease, &path("exact-target")).unwrap();
+    assert_eq!(
+        fs::metadata(root.join("exact-target")).unwrap().len(),
+        MAX_COPY_FILE_BYTES as u64
+    );
+    assert_eq!(
+        copy_regular_file(
+            &lease,
+            &path("oversized"),
+            &lease,
+            &path("oversized-target")
+        )
+        .unwrap_err()
+        .code(),
+        "FILE_TOO_LARGE"
+    );
+
+    let growing = root.join("growing");
+    assert_eq!(
+        copy_regular_file_with_hooks(
+            &lease,
+            &path("growing"),
+            &lease,
+            &path("growing-target"),
+            move || {
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(&growing)
+                    .unwrap()
+                    .set_len(MAX_COPY_FILE_BYTES as u64 + 1)
+                    .unwrap();
+            },
+            || {},
+            || {},
+        )
+        .unwrap_err()
+        .code(),
+        "FILE_TOO_LARGE"
+    );
+    assert!(!root.join("oversized-target").exists());
+    assert!(!root.join("growing-target").exists());
+    assert_no_staging_entries(&root);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn opened_source_handle_does_not_jump_when_its_basename_is_replaced() {
+    let temp = TempDir::new().unwrap();
+    let root = create_root(&temp);
+    fs::write(root.join("source"), b"opened-handle").unwrap();
+    let lease = authorize(&root);
+    let hook_root = root.clone();
+
+    copy_regular_file_with_hooks(
+        &lease,
+        &path("source"),
+        &lease,
+        &path("target"),
+        move || {
+            fs::rename(hook_root.join("source"), hook_root.join("moved-source")).unwrap();
+            fs::write(hook_root.join("source"), b"replacement").unwrap();
+        },
+        || {},
+        || {},
+    )
+    .unwrap();
+
+    assert_eq!(fs::read(root.join("target")).unwrap(), b"opened-handle");
+    assert_eq!(fs::read(root.join("source")).unwrap(), b"replacement");
+    assert_eq!(
+        fs::read(root.join("moved-source")).unwrap(),
+        b"opened-handle"
+    );
+    assert_no_staging_entries(&root);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn same_length_rewrite_of_renamed_source_with_restored_mtime_returns_conflict() {
+    use std::io::Write as _;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
+
+    let temp = TempDir::new().unwrap();
+    let root = create_root(&temp);
+    let original = b"original-content";
+    let rewritten = b"rewritten-bytes!";
+    assert_eq!(original.len(), rewritten.len());
+    fs::write(root.join("source"), original).unwrap();
+    let original_metadata = fs::metadata(root.join("source")).unwrap();
+    let original_times = [
+        libc::timespec {
+            tv_sec: original_metadata.atime() as _,
+            tv_nsec: original_metadata.atime_nsec() as _,
+        },
+        libc::timespec {
+            tv_sec: original_metadata.mtime() as _,
+            tv_nsec: original_metadata.mtime_nsec() as _,
+        },
+    ];
+    let lease = authorize(&root);
+    let rename_root = root.clone();
+    let rewrite_root = root.clone();
+
+    let error = copy_regular_file_with_hooks(
+        &lease,
+        &path("source"),
+        &lease,
+        &path("target"),
+        move || {
+            fs::rename(rename_root.join("source"), rename_root.join("moved-source")).unwrap();
+            fs::write(rename_root.join("source"), b"replacement-name").unwrap();
+        },
+        move || {
+            let mut moved_source = fs::OpenOptions::new()
+                .write(true)
+                .open(rewrite_root.join("moved-source"))
+                .unwrap();
+            moved_source.write_all(rewritten).unwrap();
+            moved_source.sync_all().unwrap();
+            // SAFETY: `moved_source` owns a valid descriptor and `original_times`
+            // contains exactly the two timespec values required by futimens.
+            assert_eq!(
+                unsafe { libc::futimens(moved_source.as_raw_fd(), original_times.as_ptr()) },
+                0
+            );
+        },
+        || {},
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "WORKSPACE_CONFLICT");
+    assert_eq!(fs::read(root.join("moved-source")).unwrap(), rewritten);
+    assert_eq!(fs::read(root.join("source")).unwrap(), b"replacement-name");
+    assert!(!root.join("target").exists());
+    assert_no_staging_entries(&root);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn source_growth_after_transfer_returns_conflict_and_removes_its_stage() {
+    let temp = TempDir::new().unwrap();
+    let root = create_root(&temp);
+    fs::write(root.join("source"), b"source").unwrap();
+    let lease = authorize(&root);
+    let source = root.join("source");
+
+    let error = copy_regular_file_with_hooks(
+        &lease,
+        &path("source"),
+        &lease,
+        &path("target"),
+        || {},
+        move || {
+            use std::io::Write as _;
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&source)
+                .unwrap()
+                .write_all(b"!")
+                .unwrap();
+        },
+        || {},
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "WORKSPACE_CONFLICT");
+    assert_eq!(
+        error.message(),
+        "The workspace copy conflicts with the source path."
+    );
+    assert!(!root.join("target").exists());
+    assert_no_staging_entries(&root);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn source_truncation_after_transfer_returns_conflict_and_removes_its_stage() {
+    let temp = TempDir::new().unwrap();
+    let root = create_root(&temp);
+    fs::write(root.join("source"), b"source-data").unwrap();
+    let lease = authorize(&root);
+    let source = root.join("source");
+
+    let error = copy_regular_file_with_hooks(
+        &lease,
+        &path("source"),
+        &lease,
+        &path("target"),
+        || {},
+        move || {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&source)
+                .unwrap()
+                .set_len(1)
+                .unwrap();
+        },
+        || {},
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "WORKSPACE_CONFLICT");
+    assert!(!root.join("target").exists());
+    assert_no_staging_entries(&root);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn opened_source_and_target_parents_do_not_jump_during_external_symlink_swaps() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    let root = create_root(&temp);
+    let outside = temp.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::create_dir(root.join("inside-source")).unwrap();
+    fs::create_dir(root.join("inside-target")).unwrap();
+    fs::write(root.join("inside-source/source"), b"inside").unwrap();
+    fs::write(outside.join("source"), b"outside-source").unwrap();
+    fs::write(outside.join("sentinel"), b"outside-sentinel").unwrap();
+    symlink("inside-source", root.join("source-parent")).unwrap();
+    symlink("inside-target", root.join("target-parent")).unwrap();
+    let lease = authorize(&root);
+    let source_link = root.join("source-parent");
+    let target_link = root.join("target-parent");
+    let outside_for_source = outside.clone();
+    let outside_for_target = outside.clone();
+
+    copy_regular_file_with_hooks(
+        &lease,
+        &path("source-parent/source"),
+        &lease,
+        &path("target-parent/target"),
+        move || {
+            fs::remove_file(&source_link).unwrap();
+            symlink(&outside_for_source, &source_link).unwrap();
+        },
+        || {},
+        move || {
+            fs::remove_file(&target_link).unwrap();
+            symlink(&outside_for_target, &target_link).unwrap();
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        fs::read(root.join("inside-target/target")).unwrap(),
+        b"inside"
+    );
+    assert_eq!(fs::read(outside.join("source")).unwrap(), b"outside-source");
+    assert_eq!(
+        fs::read(outside.join("sentinel")).unwrap(),
+        b"outside-sentinel"
+    );
+    assert!(!outside.join("target").exists());
+    assert_no_staging_entries(&root.join("inside-target"));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn staging_identity_mismatch_never_publishes_or_deletes_the_replacement() {
+    let temp = TempDir::new().unwrap();
+    let root = create_root(&temp);
+    fs::write(root.join("source"), b"source").unwrap();
+    let lease = authorize(&root);
+    let hook_root = root.clone();
+
+    let error = copy_regular_file_with_hooks(
+        &lease,
+        &path("source"),
+        &lease,
+        &path("target"),
+        || {},
+        || {},
+        move || {
+            let staging = staging_paths(&hook_root).pop().unwrap();
+            fs::remove_file(&staging).unwrap();
+            fs::write(&staging, b"replacement-stage").unwrap();
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "IO_FAILED");
+    assert!(!root.join("target").exists());
+    let artifacts = staging_paths(&root);
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(fs::read(&artifacts[0]).unwrap(), b"replacement-stage");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn concurrent_staged_copies_to_one_target_have_exactly_one_winner() {
+    let temp = TempDir::new().unwrap();
+    let root = create_root(&temp);
+    fs::write(root.join("first"), b"first").unwrap();
+    fs::write(root.join("second"), b"second").unwrap();
+    let mut scope = WorkspaceScope::new();
+    let root_id = scope.authorize_root(&root).unwrap();
+    let first_source = scope.lease(root_id).unwrap();
+    let first_target = scope.lease(root_id).unwrap();
+    let second_source = scope.lease(root_id).unwrap();
+    let second_target = scope.lease(root_id).unwrap();
+    let barrier = Arc::new(Barrier::new(3));
+
+    let spawn = |source_lease: WorkspaceRootLease,
+                 target_lease: WorkspaceRootLease,
+                 source: &'static str| {
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            copy_regular_file(&source_lease, &path(source), &target_lease, &path("target"))
+        })
+    };
+    let first = spawn(first_source, first_target, "first");
+    let second = spawn(second_source, second_target, "second");
+    barrier.wait();
+    let results = [first.join().unwrap(), second.join().unwrap()];
+
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .filter(|error| error.code() == "ENTRY_ALREADY_EXISTS")
+            .count(),
+        1
+    );
+    let target = fs::read(root.join("target")).unwrap();
+    assert!(target == b"first" || target == b"second");
+    assert_eq!(fs::read(root.join("first")).unwrap(), b"first");
+    assert_eq!(fs::read(root.join("second")).unwrap(), b"second");
+    assert_no_staging_entries(&root);
+}
+
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[test]
 fn atomic_rename_fails_closed_on_unsupported_platforms() {
@@ -544,6 +1146,24 @@ fn atomic_rename_fails_closed_on_unsupported_platforms() {
 
     assert_eq!(
         rename_entry(&lease, &path("source"), &path("target"))
+            .unwrap_err()
+            .code(),
+        "IO_FAILED"
+    );
+    assert_eq!(fs::read(root.join("source")).unwrap(), b"source");
+    assert!(!root.join("target").exists());
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn atomic_copy_fails_closed_on_unsupported_platforms() {
+    let temp = TempDir::new().unwrap();
+    let root = create_root(&temp);
+    fs::write(root.join("source"), b"source").unwrap();
+    let lease = authorize(&root);
+
+    assert_eq!(
+        copy_regular_file(&lease, &path("source"), &lease, &path("target"))
             .unwrap_err()
             .code(),
         "IO_FAILED"
@@ -747,6 +1367,25 @@ fn mutation_errors_are_stable_and_never_expose_private_paths() {
         assert_eq!(error.code(), expected);
         assert!(!serde_json::to_string(&error).unwrap().contains("private"));
     }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        for (source, expected) in [
+            (rustix::io::Errno::EXIST, "ENTRY_ALREADY_EXISTS"),
+            (rustix::io::Errno::NOTEMPTY, "ENTRY_ALREADY_EXISTS"),
+            (rustix::io::Errno::ACCESS, "PERMISSION_DENIED"),
+            (rustix::io::Errno::NOTSUP, "IO_FAILED"),
+            (rustix::io::Errno::XDEV, "IO_FAILED"),
+        ] {
+            assert_eq!(super::map_copy_publish_error(source).code(), expected);
+        }
+        for source in [libc::ELOOP, libc::ENXIO, libc::ENODEV] {
+            assert_eq!(
+                super::map_copy_source_open_error(std::io::Error::from_raw_os_error(source)).code(),
+                "ENTRY_TYPE_MISMATCH"
+            );
+        }
+    }
 }
 
 fn assert_single_winner(
@@ -794,6 +1433,41 @@ fn assert_sanitized_parent_error(error: &crate::error::CommandError) {
         error.code()
     );
     assert!(!serde_json::to_string(error).unwrap().contains("private"));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn staging_paths(directory: &std::path::Path) -> Vec<PathBuf> {
+    fs::read_dir(directory)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(STAGING_PREFIX))
+        })
+        .map(|entry| entry.path())
+        .collect()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn assert_no_staging_entries(directory: &std::path::Path) {
+    assert!(
+        staging_paths(directory).is_empty(),
+        "copy staging entries must be cleaned up"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn create_fifo(path: &std::path::Path) {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let native = CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: `native` is a NUL-terminated path owned for the call and the
+    // mode contains only ordinary permission bits.
+    let result = unsafe { libc::mkfifo(native.as_ptr(), 0o600) };
+    assert_eq!(result, 0);
 }
 
 fn create_root(temp: &TempDir) -> std::path::PathBuf {

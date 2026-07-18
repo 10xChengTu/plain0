@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,7 +8,9 @@ import {
 	validateMainCapability,
 	validateTauriApiBoundary,
 	validateTauriConfiguration,
+	validateWorkspaceCopyCommandRegistration,
 	validateWorkspaceProviderBootstrap,
+	validateWorkspaceProviderCopyBoundary,
 	validateWorkspaceRustBoundary,
 } from "./boundary-contracts.mjs";
 
@@ -232,6 +235,15 @@ const mainSource = await readFile(path.join(appRoot, "main.ts"), "utf8");
 for (const failure of validateWorkspaceProviderBootstrap(mainSource)) {
 	fail(failure);
 }
+const workspaceProviderSource = await readFile(
+	path.join(appRoot, "features/workspace/file-system-provider.ts"),
+	"utf8",
+);
+for (const failure of validateWorkspaceProviderCopyBoundary(
+	workspaceProviderSource,
+)) {
+	fail(failure);
+}
 
 const tauriConfig = JSON.parse(
 	await readFile(path.join(root, "src-tauri/tauri.conf.json"), "utf8"),
@@ -257,6 +269,41 @@ for (const failure of validateMainCapability(capability)) {
 }
 
 const cargo = await readFile(path.join(root, "src-tauri/Cargo.toml"), "utf8");
+let cargoDependencies = [];
+try {
+	const cargoMetadata = JSON.parse(
+		execFileSync(
+			"cargo",
+			[
+				"metadata",
+				"--no-deps",
+				"--locked",
+				"--format-version",
+				"1",
+				"--manifest-path",
+				"src-tauri/Cargo.toml",
+			],
+			{ cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+		),
+	);
+	const plainPackage = cargoMetadata.packages?.find(
+		(packageMetadata) => packageMetadata.name === "plain",
+	);
+	if (!Array.isArray(plainPackage?.dependencies)) {
+		throw new Error("plain package dependency metadata is missing");
+	}
+	cargoDependencies = plainPackage.dependencies.map(
+		({ name, req, kind, rename, target }) => ({
+			name,
+			req,
+			kind,
+			rename,
+			target,
+		}),
+	);
+} catch {
+	fail("cargo metadata --locked must describe the Plain dependency graph");
+}
 for (const plugin of [
 	"tauri-plugin-fs",
 	"tauri-plugin-shell",
@@ -275,7 +322,14 @@ const rustSources = await Promise.all(
 		source: await readFile(file, "utf8"),
 	})),
 );
-for (const failure of validateWorkspaceRustBoundary(cargo, rustSources)) {
+for (const failure of validateWorkspaceRustBoundary(
+	cargo,
+	rustSources,
+	cargoDependencies,
+)) {
+	fail(failure);
+}
+for (const failure of validateWorkspaceCopyCommandRegistration(rustSources)) {
 	fail(failure);
 }
 

@@ -3,10 +3,12 @@ import type {
 	PlainBridge,
 	RuntimeInfo,
 	WorkspaceDirectoryEntry,
+	WorkspaceEntryKind,
 	WorkspaceRoot,
 } from "./contracts";
 import {
 	compareWorkspaceEntryNames,
+	frozenWorkspaceCopyRequest,
 	frozenWorkspaceEntryStat,
 	frozenWorkspaceCreateEntryRequest,
 	frozenWorkspaceEntryRequest,
@@ -54,7 +56,11 @@ interface MockDirectoryNode {
 	readonly entries: Map<string, MockNode>;
 }
 
-type MockNode = MockFileNode | MockDirectoryNode;
+interface MockUnsupportedNode {
+	readonly kind: Exclude<WorkspaceEntryKind, "file" | "directory">;
+}
+
+type MockNode = MockFileNode | MockDirectoryNode | MockUnsupportedNode;
 
 function mockFile(contents: string | readonly number[]): MockFileNode {
 	const bytes =
@@ -70,6 +76,12 @@ function oversizedMockFile(): MockFileNode {
 		size: MAX_FILE_BYTES + 1,
 		bytes: new Uint8Array(),
 	});
+}
+
+function mockUnsupportedNode(
+	kind: MockUnsupportedNode["kind"],
+): MockUnsupportedNode {
+	return Object.freeze({ kind });
 }
 
 function mockDirectory(
@@ -94,6 +106,10 @@ const mockTreeTemplates = new Map<string, MockDirectoryNode>([
 			"binary.bin": mockFile([0, 255, 128, 1, 0, 42]),
 			empty: mockDirectory({}),
 			fixtures: mockDirectory({
+				"dangling-link": mockUnsupportedNode("symlink"),
+				"directory-link": mockUnsupportedNode("symlinkDirectory"),
+				"file-link": mockUnsupportedNode("symlinkFile"),
+				other: mockUnsupportedNode("other"),
 				"oversized.bin": oversizedMockFile(),
 			}),
 			src: mockDirectory({
@@ -118,12 +134,15 @@ function cloneMockNode(node: MockNode): MockNode {
 			bytes: node.bytes.slice(),
 		});
 	}
-	return Object.freeze({
-		kind: "directory",
-		entries: new Map(
-			[...node.entries].map(([name, child]) => [name, cloneMockNode(child)]),
-		),
-	});
+	if (node.kind === "directory") {
+		return Object.freeze({
+			kind: "directory",
+			entries: new Map(
+				[...node.entries].map(([name, child]) => [name, cloneMockNode(child)]),
+			),
+		});
+	}
+	return mockUnsupportedNode(node.kind);
 }
 
 function cloneMockTrees(): Map<string, MockDirectoryNode> {
@@ -177,10 +196,24 @@ function entryTypeMismatch(): CommandError {
 	);
 }
 
+function copyConflict(): CommandError {
+	return commandError(
+		"WORKSPACE_CONFLICT",
+		"The workspace copy conflicts with the source path.",
+	);
+}
+
 function fileTooLarge(): CommandError {
 	return commandError(
 		"FILE_TOO_LARGE",
 		"The workspace file exceeds the supported read limit.",
+	);
+}
+
+function copyFileTooLarge(): CommandError {
+	return commandError(
+		"FILE_TOO_LARGE",
+		"The workspace file exceeds the supported copy limit.",
 	);
 }
 
@@ -294,6 +327,67 @@ export function createBrowserMockBridge(
 		sourceTarget.parent.entries.delete(sourceTarget.name);
 		target.parent.entries.set(target.name, source);
 	};
+	const copyEntry = (
+		sourceRootId: string,
+		sourcePath: string,
+		targetRootId: string,
+		targetPath: string,
+	): void => {
+		const request = frozenWorkspaceCopyRequest(
+			sourceRootId,
+			sourcePath,
+			targetRootId,
+			targetPath,
+		);
+		if (
+			!roots.has(request.sourceRootId) ||
+			!trees.has(request.sourceRootId) ||
+			!roots.has(request.targetRootId) ||
+			!trees.has(request.targetRootId)
+		) {
+			throw rootNotAuthorized();
+		}
+		if (request.sourcePath.length === 0 || request.targetPath.length === 0) {
+			throw entryTypeMismatch();
+		}
+		if (
+			request.sourceRootId === request.targetRootId &&
+			request.sourcePath === request.targetPath
+		) {
+			throw entryAlreadyExists();
+		}
+		const sourceSegments = workspaceRelativePathSegments(request.sourcePath);
+		const targetSegments = workspaceRelativePathSegments(request.targetPath);
+		if (sourceSegments === undefined || targetSegments === undefined) {
+			throw invalidRelativePath();
+		}
+		if (
+			request.sourceRootId === request.targetRootId &&
+			targetSegments.length > sourceSegments.length &&
+			sourceSegments.every(
+				(segment, index) => targetSegments[index] === segment,
+			)
+		) {
+			throw copyConflict();
+		}
+
+		const source = resolveNode(request.sourceRootId, request.sourcePath);
+		if (source.kind !== "file") {
+			throw entryTypeMismatch();
+		}
+		if (source.size > MAX_FILE_BYTES) {
+			throw copyFileTooLarge();
+		}
+
+		const target = resolveCreateTarget(
+			request.targetRootId,
+			request.targetPath,
+		);
+		if (target.parent.entries.has(target.name)) {
+			throw entryAlreadyExists();
+		}
+		target.parent.entries.set(target.name, cloneMockNode(source));
+	};
 
 	return {
 		async runtimeInfo() {
@@ -355,6 +449,9 @@ export function createBrowserMockBridge(
 		},
 		async workspaceRename(rootId, sourcePath, targetPath) {
 			renameEntry(rootId, sourcePath, targetPath);
+		},
+		async workspaceCopy(sourceRootId, sourcePath, targetRootId, targetPath) {
+			copyEntry(sourceRootId, sourcePath, targetRootId, targetPath);
 		},
 		async workspaceStat(rootId, relativePath) {
 			const node = resolveNode(rootId, relativePath);

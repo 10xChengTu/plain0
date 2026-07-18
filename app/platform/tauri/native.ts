@@ -10,6 +10,7 @@ import {
 	decodeWorkspaceReadDirectory,
 	decodeWorkspaceSnapshot,
 	decodeWorkspaceVoid,
+	frozenWorkspaceCopyRequest,
 	frozenWorkspaceCreateEntryRequest,
 	frozenWorkspaceEntryRequest,
 	frozenWorkspaceRenameRequest,
@@ -61,6 +62,20 @@ export function createNativeBridge(): PlainBridge {
 			decodeWorkspaceVoid(
 				await invoke<unknown>("workspace_rename", { request }),
 			);
+		},
+		workspaceCopy: async (
+			sourceRootId,
+			sourcePath,
+			targetRootId,
+			targetPath,
+		) => {
+			const request = frozenWorkspaceCopyRequest(
+				sourceRootId,
+				sourcePath,
+				targetRootId,
+				targetPath,
+			);
+			decodeWorkspaceVoid(await invoke<unknown>("workspace_copy", { request }));
 		},
 		workspaceStat: async (rootId, relativePath) => {
 			const request = frozenWorkspaceEntryRequest(rootId, relativePath);

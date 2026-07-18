@@ -55,6 +55,13 @@ export interface WorkspaceReadDirectoryResult {
 	readonly entries: readonly WorkspaceDirectoryEntry[];
 }
 
+export interface WorkspaceCopyRequest {
+	readonly sourceRootId: string;
+	readonly sourcePath: string;
+	readonly targetRootId: string;
+	readonly targetPath: string;
+}
+
 /**
  * Immutable file payload. The backing bytes are closure-private; each call to
  * copy returns a new Uint8Array that the caller may mutate independently.
@@ -77,6 +84,12 @@ export interface PlainBridge {
 	workspaceRename(
 		rootId: string,
 		sourcePath: string,
+		targetPath: string,
+	): Promise<void>;
+	workspaceCopy(
+		sourceRootId: string,
+		sourcePath: string,
+		targetRootId: string,
 		targetPath: string,
 	): Promise<void>;
 	workspaceStat(

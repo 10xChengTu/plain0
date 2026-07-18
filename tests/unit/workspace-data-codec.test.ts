@@ -6,6 +6,7 @@ import {
 	decodeWorkspaceFileData,
 	decodeWorkspaceReadDirectory,
 	decodeWorkspaceVoid,
+	frozenWorkspaceCopyRequest,
 	frozenWorkspaceCreateEntryRequest,
 	frozenWorkspaceEntryRequest,
 	frozenWorkspaceFileData,
@@ -14,6 +15,7 @@ import {
 } from "../../app/platform/tauri/workspace-codec";
 
 const rootId = "00000000-0000-4000-8000-000000000101";
+const targetRootId = "00000000-0000-4000-8000-000000000102";
 const contractError = {
 	code: "IPC_CONTRACT_VIOLATION",
 	message: "Native IPC returned a payload that violates the Plain contract.",
@@ -423,5 +425,133 @@ describe("workspace file data codec", () => {
 				expect(JSON.stringify(error)).not.toContain("private-secret");
 			}
 		}
+	});
+
+	it("builds strict frozen copy requests for one or two roots", () => {
+		const crossRoot = frozenWorkspaceCopyRequest(
+			rootId,
+			"src/main.ts",
+			targetRootId,
+			"packages/main.ts",
+		);
+		expect(crossRoot).toEqual({
+			sourceRootId: rootId,
+			sourcePath: "src/main.ts",
+			targetRootId,
+			targetPath: "packages/main.ts",
+		});
+		expect(Object.isFrozen(crossRoot)).toBe(true);
+		expect(
+			frozenWorkspaceCopyRequest(
+				rootId,
+				"same/path",
+				targetRootId,
+				"same/path",
+			),
+		).toEqual({
+			sourceRootId: rootId,
+			sourcePath: "same/path",
+			targetRootId,
+			targetPath: "same/path",
+		});
+		expect(
+			frozenWorkspaceCopyRequest(rootId, "%2e%2e", targetRootId, "%2F"),
+		).toEqual({
+			sourceRootId: rootId,
+			sourcePath: "%2e%2e",
+			targetRootId,
+			targetPath: "%2F",
+		});
+		expect(frozenWorkspaceCopyRequest(rootId, "", rootId, "")).toEqual({
+			sourceRootId: rootId,
+			sourcePath: "",
+			targetRootId: rootId,
+			targetPath: "",
+		});
+		expect(
+			frozenWorkspaceCopyRequest(rootId, "source", rootId, "source"),
+		).toEqual({
+			sourceRootId: rootId,
+			sourcePath: "source",
+			targetRootId: rootId,
+			targetPath: "source",
+		});
+		expect(
+			frozenWorkspaceCopyRequest(rootId, "source", rootId, "source/nested"),
+		).toEqual({
+			sourceRootId: rootId,
+			sourcePath: "source",
+			targetRootId: rootId,
+			targetPath: "source/nested",
+		});
+	});
+
+	it("rejects only malformed copy UUIDs and path syntax", () => {
+		const invalidCases: readonly (readonly [
+			unknown,
+			unknown,
+			unknown,
+			unknown,
+			string,
+		])[] = [
+			[
+				"00000000-0000-3000-8000-000000000101",
+				"source",
+				targetRootId,
+				"target",
+				"ROOT_NOT_AUTHORIZED",
+			],
+			[
+				rootId,
+				"source",
+				"00000000-0000-4000-8000-000000000ABC",
+				"target",
+				"ROOT_NOT_AUTHORIZED",
+			],
+			[
+				rootId,
+				"../private-source",
+				targetRootId,
+				"target",
+				"INVALID_RELATIVE_PATH",
+			],
+			[
+				rootId,
+				"source",
+				targetRootId,
+				"../private-target",
+				"INVALID_RELATIVE_PATH",
+			],
+			[rootId, 42, targetRootId, "target", "INVALID_RELATIVE_PATH"],
+			[rootId, "source", targetRootId, undefined, "INVALID_RELATIVE_PATH"],
+		];
+		for (const [
+			sourceRoot,
+			sourcePath,
+			targetRoot,
+			targetPath,
+			code,
+		] of invalidCases) {
+			try {
+				frozenWorkspaceCopyRequest(
+					sourceRoot,
+					sourcePath,
+					targetRoot,
+					targetPath,
+				);
+				expect.fail("invalid copy request must throw");
+			} catch (error) {
+				expect(error).toMatchObject({ code });
+				expect(Object.isFrozen(error)).toBe(true);
+				expect(JSON.stringify(error)).not.toContain("private");
+			}
+		}
+
+		expect(frozenWorkspaceCopyRequest(rootId, "a", rootId, "ab")).toEqual({
+			sourceRootId: rootId,
+			sourcePath: "a",
+			targetRootId: rootId,
+			targetPath: "ab",
+		});
 	});
 });

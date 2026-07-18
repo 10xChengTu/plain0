@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：暂无；有界 capability copy 方案已冻结，下一项为双 root 普通文件 staged copy。
+- 当前最小工作项：暂无；双 root 普通文件 staged copy 已完成，下一项为原样 symlink copy。
 - 当前 Code OSS 基线：1.130.0，Electron 42.6.0，约 16,555 个跟踪文件。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
 
@@ -36,11 +36,13 @@
 - [x] 完成同 root 原子 no-clobber 重命名：父目录先由 `cap_std` 打开为 capability，同父目录复用句柄，macOS/Linux 只对 basename 调用固定 `rustix 1.1.4` `NOREPLACE`；其他平台和不支持的文件系统安全失败，不存在普通 rename fallback。严格 Rust/TypeScript DTO、native bridge、每实例 browser mock、mutation gate 竞态与 Harness 边界 guard 均已覆盖，provider 继续保持只读。
 - [x] 重命名切片通过完整 `pnpm check`：90 个 TypeScript 测试、91 个 Rust 测试、架构/排除面 guard 与 bundle 债务基线全部通过。
 - [x] 完成 capability copy 的 GitHub 补充调研与方案冻结：排除会覆盖目标的 `Dir::copy`/`std::fs::copy`、无界且可留半成品的 VS Code fallback，以及 ambient/overwrite 导向的第三方整包方案；确定双 root、无 overwrite、普通文件 8 MiB staged copy 先行，目录 manifest 与原样 symlink copy 后续独立提交，provider 期间继续只读。
+- [x] 完成双 root、8 MiB、仅普通文件的 staged no-clobber copy：四字段严格 IPC、双 lease mutation gate、末级 nofollow/nonblock、16 次有界高熵 staging、基础权限与 `sync_all`、第二遍 source-handle/staging 内容复核、identity 清理和 `NOREPLACE` 发布均已落地；目录、symlink、特殊文件与不支持平台安全拒绝，provider 继续保持只读。
+- [x] 普通文件 copy 切片通过完整 `pnpm check`：110 个 TypeScript/JavaScript 单元测试（含 24 个 Harness 边界合同）、110 个 Rust 测试、架构/排除面 guard 与 bundle 债务基线全部通过；测试覆盖跨 root、8 MiB + 1、source 等长改写、basename/parent/staging swap、现有目标各类型、双 root 撤销和并发单胜者。
 
 ## 下一步
 
-1. 实现双 root、8 MiB、仅普通文件的 staged no-clobber copy，并单独提交；目录、symlink 与特殊文件稳定拒绝，provider 暂时保持只读。
-2. 先实现原样、有界、不解引用的 symlink staged copy，再实现有界目录 manifest/staged tree；随后实现显式跨 root move（copy receipt + verified delete）与确认删除。每项单独提交，期间 provider 保持只读。
+1. 实现原样、有界、不解引用的 symlink staged copy，并单独提交；内部、外部、dangling 与 loop link 都按 link payload 处理，provider 暂时保持只读。
+2. 实现有界目录 manifest/staged tree；随后实现显式跨 root move（copy receipt + verified delete）与确认删除。每项单独提交，期间 provider 保持只读。
 3. 全部 CRUD 后先实现 opaque version、有界原子写入和 Workbench 期望版本透传，再在 provider 注册前读取严格 `workspace_capabilities` DTO，增加 copy 同路径/overwrite/自动 mkdirp/cross-scheme 防绕过 patch，并按 Rust 平台能力激活写能力与 Browser E2E；不支持原子 no-replace rename 的平台继续只读。随后实现 watcher/rescan，最后运行真实 Tauri 文件树总验收并写回 `F020` evidence。
 
 ## 当前验收命令

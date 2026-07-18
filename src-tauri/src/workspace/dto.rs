@@ -171,6 +171,28 @@ impl WorkspaceRenameRequest {
     }
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceCopyRequest {
+    source_root_id: RootId,
+    source_path: String,
+    target_root_id: RootId,
+    target_path: String,
+}
+
+impl WorkspaceCopyRequest {
+    pub fn into_parts(self) -> Result<(RootId, RelativePath, RootId, RelativePath), CommandError> {
+        let source_path = RelativePath::parse_wire(&self.source_path)?;
+        let target_path = RelativePath::parse_wire(&self.target_path)?;
+        Ok((
+            self.source_root_id,
+            source_path,
+            self.target_root_id,
+            target_path,
+        ))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum WorkspaceEntryKind {
@@ -257,7 +279,7 @@ impl WorkspaceReadDirectoryResult {
 #[cfg(test)]
 mod tests {
     use super::{
-        WorkspaceEntryKind, WorkspaceEntryRequest, WorkspacePickRootsMode,
+        WorkspaceCopyRequest, WorkspaceEntryKind, WorkspaceEntryRequest, WorkspacePickRootsMode,
         WorkspacePickRootsRequest, WorkspaceRenameRequest,
     };
 
@@ -345,6 +367,49 @@ mod tests {
                 r#"{{"rootId":"00000000-0000-4000-8000-000000000000","sourcePath":"{source_path}","targetPath":"{target_path}"}}"#
             );
             let request: WorkspaceRenameRequest = serde_json::from_str(&wire).unwrap();
+            assert_eq!(
+                request.into_parts().unwrap_err().code(),
+                "INVALID_RELATIVE_PATH"
+            );
+        }
+    }
+
+    #[test]
+    fn copy_request_owns_exactly_two_roots_and_two_validated_paths() {
+        let request: WorkspaceCopyRequest = serde_json::from_str(
+            r#"{"sourceRootId":"00000000-0000-4000-8000-000000000000","sourcePath":"src/old.rs","targetRootId":"00000000-0000-4000-8000-000000000001","targetPath":"backup/new.rs"}"#,
+        )
+        .unwrap();
+        let (source_root_id, source_path, target_root_id, target_path) =
+            request.into_parts().unwrap();
+        assert_eq!(
+            source_root_id.as_wire(),
+            "00000000-0000-4000-8000-000000000000"
+        );
+        assert_eq!(source_path.as_wire(), "src/old.rs");
+        assert_eq!(
+            target_root_id.as_wire(),
+            "00000000-0000-4000-8000-000000000001"
+        );
+        assert_eq!(target_path.as_wire(), "backup/new.rs");
+
+        for invalid in [
+            r#"{"sourceRootId":"00000000-0000-4000-8000-000000000000","sourcePath":"old","targetRootId":"00000000-0000-4000-8000-000000000001","targetPath":"new","overwrite":false}"#,
+            r#"{"sourceRootId":"00000000-0000-4000-8000-000000000000","sourcePath":"old","targetRootId":"00000000-0000-4000-8000-000000000001"}"#,
+            r#"{"sourceRootId":"00000000-0000-4000-8000-000000000000","targetRootId":"00000000-0000-4000-8000-000000000001","targetPath":"new"}"#,
+            r#"{"rootId":"00000000-0000-4000-8000-000000000000","sourcePath":"old","targetPath":"new"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<WorkspaceCopyRequest>(invalid).is_err(),
+                "request must reject {invalid}"
+            );
+        }
+
+        for (source_path, target_path) in [("../private", "new"), ("old", "../private")] {
+            let wire = format!(
+                r#"{{"sourceRootId":"00000000-0000-4000-8000-000000000000","sourcePath":"{source_path}","targetRootId":"00000000-0000-4000-8000-000000000001","targetPath":"{target_path}"}}"#
+            );
+            let request: WorkspaceCopyRequest = serde_json::from_str(&wire).unwrap();
             assert_eq!(
                 request.into_parts().unwrap_err().code(),
                 "INVALID_RELATIVE_PATH"

@@ -1,6 +1,7 @@
 import type {
 	RuntimeInfo,
 	WorkspaceDirectoryEntry,
+	WorkspaceCopyRequest,
 	WorkspaceEntryKind,
 	WorkspaceEntryStat,
 	WorkspaceFileData,
@@ -237,6 +238,22 @@ export function frozenWorkspaceRenameRequest(
 	return Object.freeze({
 		rootId: source.rootId,
 		sourcePath: source.relativePath,
+		targetPath: target.relativePath,
+	});
+}
+
+export function frozenWorkspaceCopyRequest(
+	sourceRootId: unknown,
+	sourcePath: unknown,
+	targetRootId: unknown,
+	targetPath: unknown,
+): Readonly<WorkspaceCopyRequest> {
+	const source = frozenWorkspaceEntryRequest(sourceRootId, sourcePath);
+	const target = frozenWorkspaceEntryRequest(targetRootId, targetPath);
+	return Object.freeze({
+		sourceRootId: source.rootId,
+		sourcePath: source.relativePath,
+		targetRootId: target.rootId,
 		targetPath: target.relativePath,
 	});
 }

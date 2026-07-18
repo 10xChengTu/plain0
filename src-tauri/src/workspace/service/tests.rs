@@ -953,6 +953,300 @@ fn rename_winning_the_gate_completes_before_window_close() {
     assert_eq!(std::fs::read(root.join("target")).unwrap(), b"source");
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn copies_are_isolated_by_window_and_both_root_ids() {
+    let temp = TempDir::new().unwrap();
+    let source_root = create_directory(&temp, "source-root");
+    let target_root = create_directory(&temp, "target-root");
+    std::fs::write(source_root.join("source"), b"source").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![source_root.clone(), target_root.clone()]),
+        WorkspacePickRootsMode::Add,
+    ))
+    .unwrap();
+    let source_id = selected.snapshot().roots()[0].root_id();
+    let target_id = selected.snapshot().roots()[1].root_id();
+
+    block_on(service.copy_entry(
+        "main",
+        source_id,
+        relative("source"),
+        target_id,
+        relative("target"),
+    ))
+    .unwrap();
+    assert_eq!(
+        std::fs::read(target_root.join("target")).unwrap(),
+        b"source"
+    );
+    assert_eq!(
+        std::fs::read(source_root.join("source")).unwrap(),
+        b"source"
+    );
+
+    let wrong_window = block_on(service.copy_entry(
+        "other-window",
+        source_id,
+        relative("source"),
+        target_id,
+        relative("private"),
+    ))
+    .unwrap_err();
+    assert_eq!(wrong_window.code(), "ROOT_NOT_AUTHORIZED");
+    assert!(!target_root.join("private").exists());
+
+    service.remove_root("main", target_id).unwrap();
+    let revoked = block_on(service.copy_entry(
+        "main",
+        source_id,
+        relative("source"),
+        target_id,
+        relative("revoked"),
+    ))
+    .unwrap_err();
+    assert_eq!(revoked.code(), "ROOT_NOT_AUTHORIZED");
+    assert!(!target_root.join("revoked").exists());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn target_revocation_winning_the_gate_prevents_dual_root_copy() {
+    let temp = TempDir::new().unwrap();
+    let source_root = create_directory(&temp, "source-root");
+    let target_root = create_directory(&temp, "target-root");
+    std::fs::write(source_root.join("source"), b"source").unwrap();
+    let service = Arc::new(WorkspaceService::new());
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![source_root, target_root.clone()]),
+        WorkspacePickRootsMode::Add,
+    ))
+    .unwrap();
+    let source_id = selected.snapshot().roots()[0].root_id();
+    let target_id = selected.snapshot().roots()[1].root_id();
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let pending_service = Arc::clone(&service);
+    let pending_entered = Arc::clone(&entered);
+    let pending_release = Arc::clone(&release);
+    let pending = tauri::async_runtime::spawn(async move {
+        pending_service
+            .run_dual_root_mutation_with_hook(
+                "main",
+                source_id,
+                target_id,
+                move || {
+                    pending_entered.wait();
+                    pending_release.wait();
+                },
+                move |source_lease, target_lease| {
+                    crate::workspace::writer::copy_regular_file(
+                        &source_lease,
+                        &relative("source"),
+                        &target_lease,
+                        &relative("target"),
+                    )
+                },
+            )
+            .await
+    });
+    entered.wait();
+
+    service.remove_root("main", target_id).unwrap();
+    release.wait();
+
+    assert_eq!(
+        block_on(pending).unwrap().unwrap_err().code(),
+        "ROOT_NOT_AUTHORIZED"
+    );
+    assert!(!target_root.join("target").exists());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn root_replacement_winning_the_gate_prevents_dual_root_copy() {
+    let temp = TempDir::new().unwrap();
+    let source_root = create_directory(&temp, "source-root");
+    let target_root = create_directory(&temp, "target-root");
+    let replacement_root = create_directory(&temp, "replacement-root");
+    std::fs::write(source_root.join("source"), b"source").unwrap();
+    let service = Arc::new(WorkspaceService::new());
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![source_root, target_root.clone()]),
+        WorkspacePickRootsMode::Add,
+    ))
+    .unwrap();
+    let source_id = selected.snapshot().roots()[0].root_id();
+    let target_id = selected.snapshot().roots()[1].root_id();
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let pending_service = Arc::clone(&service);
+    let pending_entered = Arc::clone(&entered);
+    let pending_release = Arc::clone(&release);
+    let pending = tauri::async_runtime::spawn(async move {
+        pending_service
+            .run_dual_root_mutation_with_hook(
+                "main",
+                source_id,
+                target_id,
+                move || {
+                    pending_entered.wait();
+                    pending_release.wait();
+                },
+                move |source_lease, target_lease| {
+                    crate::workspace::writer::copy_regular_file(
+                        &source_lease,
+                        &relative("source"),
+                        &target_lease,
+                        &relative("target"),
+                    )
+                },
+            )
+            .await
+    });
+    entered.wait();
+
+    let replaced = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![replacement_root]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    assert_eq!(replaced.snapshot().roots().len(), 1);
+    release.wait();
+
+    assert_eq!(
+        block_on(pending).unwrap().unwrap_err().code(),
+        "ROOT_NOT_AUTHORIZED"
+    );
+    assert!(!target_root.join("target").exists());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn window_close_winning_the_gate_prevents_dual_root_copy() {
+    let temp = TempDir::new().unwrap();
+    let source_root = create_directory(&temp, "source-root");
+    let target_root = create_directory(&temp, "target-root");
+    std::fs::write(source_root.join("source"), b"source").unwrap();
+    let service = Arc::new(WorkspaceService::new());
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![source_root, target_root.clone()]),
+        WorkspacePickRootsMode::Add,
+    ))
+    .unwrap();
+    let source_id = selected.snapshot().roots()[0].root_id();
+    let target_id = selected.snapshot().roots()[1].root_id();
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let pending_service = Arc::clone(&service);
+    let pending_entered = Arc::clone(&entered);
+    let pending_release = Arc::clone(&release);
+    let pending = tauri::async_runtime::spawn(async move {
+        pending_service
+            .run_dual_root_mutation_with_hook(
+                "main",
+                source_id,
+                target_id,
+                move || {
+                    pending_entered.wait();
+                    pending_release.wait();
+                },
+                move |source_lease, target_lease| {
+                    crate::workspace::writer::copy_regular_file(
+                        &source_lease,
+                        &relative("source"),
+                        &target_lease,
+                        &relative("target"),
+                    )
+                },
+            )
+            .await
+    });
+    entered.wait();
+
+    service.close_window("main");
+    release.wait();
+
+    assert_eq!(
+        block_on(pending).unwrap().unwrap_err().code(),
+        "WORKSPACE_WINDOW_CLOSED"
+    );
+    assert!(!target_root.join("target").exists());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn dual_root_copy_winning_the_gate_finishes_before_revocation() {
+    let temp = TempDir::new().unwrap();
+    let source_root = create_directory(&temp, "source-root");
+    let target_root = create_directory(&temp, "target-root");
+    std::fs::write(source_root.join("source"), b"source").unwrap();
+    let service = Arc::new(WorkspaceService::new());
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![source_root, target_root.clone()]),
+        WorkspacePickRootsMode::Add,
+    ))
+    .unwrap();
+    let source_id = selected.snapshot().roots()[0].root_id();
+    let target_id = selected.snapshot().roots()[1].root_id();
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let pending_service = Arc::clone(&service);
+    let pending_entered = Arc::clone(&entered);
+    let pending_release = Arc::clone(&release);
+    let pending = tauri::async_runtime::spawn(async move {
+        pending_service
+            .run_dual_root_mutation(
+                "main",
+                source_id,
+                target_id,
+                move |source_lease, target_lease| {
+                    pending_entered.wait();
+                    pending_release.wait();
+                    crate::workspace::writer::copy_regular_file(
+                        &source_lease,
+                        &relative("source"),
+                        &target_lease,
+                        &relative("target"),
+                    )
+                },
+            )
+            .await
+    });
+    entered.wait();
+
+    let remove_service = Arc::clone(&service);
+    let (removed_tx, removed_rx) = mpsc::channel();
+    let remover = std::thread::spawn(move || {
+        removed_tx
+            .send(remove_service.remove_root("main", target_id))
+            .unwrap();
+    });
+    assert!(removed_rx.recv_timeout(Duration::from_millis(100)).is_err());
+    release.wait();
+
+    block_on(pending).unwrap().unwrap();
+    assert!(removed_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap()
+        .roots()
+        .iter()
+        .all(|root| root.root_id() != target_id));
+    remover.join().unwrap();
+    assert_eq!(
+        std::fs::read(target_root.join("target")).unwrap(),
+        b"source"
+    );
+}
+
 #[test]
 fn a_revocation_that_wins_the_mutation_gate_prevents_the_write() {
     let temp = TempDir::new().unwrap();

@@ -408,6 +408,213 @@ describe("browser mock workspace bridge", () => {
 		expect(JSON.stringify(error)).not.toContain("private");
 	});
 
+	it("copies bounded ordinary files within and across authorized roots", async () => {
+		const bridge = createBrowserMockBridge();
+		const isolated = createBrowserMockBridge();
+		const added = await bridge.workspacePickRoots("add");
+		const isolatedRoot = (await isolated.workspacePickRoots("replace")).snapshot
+			.roots[0]!;
+		const [workspaceRoot, libraryRoot] = added.snapshot.roots;
+		const source = (
+			await bridge.workspaceReadFile(workspaceRoot!.rootId, "binary.bin")
+		).copy();
+
+		await bridge.workspaceCopy(
+			workspaceRoot!.rootId,
+			"binary.bin",
+			workspaceRoot!.rootId,
+			"empty/copied.bin",
+		);
+		await bridge.workspaceCopy(
+			workspaceRoot!.rootId,
+			"binary.bin",
+			libraryRoot!.rootId,
+			"packages/copied.bin",
+		);
+		await bridge.workspaceCopy(
+			workspaceRoot!.rootId,
+			"README.md",
+			libraryRoot!.rootId,
+			"README.md",
+		);
+
+		expect(
+			(
+				await bridge.workspaceReadFile(
+					workspaceRoot!.rootId,
+					"empty/copied.bin",
+				)
+			).copy(),
+		).toEqual(source);
+		expect(
+			(
+				await bridge.workspaceReadFile(
+					libraryRoot!.rootId,
+					"packages/copied.bin",
+				)
+			).copy(),
+		).toEqual(source);
+		expect(
+			(
+				await bridge.workspaceReadFile(workspaceRoot!.rootId, "binary.bin")
+			).copy(),
+		).toEqual(source);
+		expect(await bridge.workspaceSnapshot()).toMatchObject({ revision: 1 });
+		await expect(
+			isolated.workspaceStat(isolatedRoot.rootId, "empty/copied.bin"),
+		).rejects.toMatchObject({ code: "ENTRY_NOT_FOUND" });
+	});
+
+	it("copies without clobbering and requires an existing directory parent", async () => {
+		const bridge = createBrowserMockBridge();
+		const selected = await bridge.workspacePickRoots("replace");
+		const rootId = selected.snapshot.roots[0]!.rootId;
+		const readme = (await bridge.workspaceReadFile(rootId, "README.md")).copy();
+		const binary = (
+			await bridge.workspaceReadFile(rootId, "binary.bin")
+		).copy();
+
+		await expect(
+			bridge.workspaceCopy(rootId, "README.md", rootId, "binary.bin"),
+		).rejects.toEqual({
+			code: "ENTRY_ALREADY_EXISTS",
+			message: "The workspace entry already exists.",
+		});
+		await expect(
+			bridge.workspaceCopy(rootId, "README.md", rootId, "missing/copied.md"),
+		).rejects.toEqual({
+			code: "ENTRY_NOT_FOUND",
+			message: "The workspace entry does not exist.",
+		});
+		await expect(
+			bridge.workspaceCopy(rootId, "README.md", rootId, "binary.bin/copied.md"),
+		).rejects.toEqual({
+			code: "ENTRY_TYPE_MISMATCH",
+			message: "The workspace entry has an incompatible type.",
+		});
+		expect(
+			(await bridge.workspaceReadFile(rootId, "README.md")).copy(),
+		).toEqual(readme);
+		expect(
+			(await bridge.workspaceReadFile(rootId, "binary.bin")).copy(),
+		).toEqual(binary);
+
+		const racing = await Promise.allSettled([
+			bridge.workspaceCopy(rootId, "README.md", rootId, "racing-copy"),
+			bridge.workspaceCopy(rootId, "binary.bin", rootId, "racing-copy"),
+		]);
+		expect(racing.filter(({ status }) => status === "fulfilled")).toHaveLength(
+			1,
+		);
+		expect(racing.filter(({ status }) => status === "rejected")).toHaveLength(
+			1,
+		);
+		expect((await bridge.workspaceStat(rootId, "racing-copy")).kind).toBe(
+			"file",
+		);
+	});
+
+	it("rejects invalid copy relationships and unsupported source kinds", async () => {
+		const bridge = createBrowserMockBridge();
+		const selected = await bridge.workspacePickRoots("replace");
+		const rootId = selected.snapshot.roots[0]!.rootId;
+		for (const [sourcePath, targetPath] of [
+			["", "target"],
+			["source", ""],
+		] as const) {
+			await expect(
+				bridge.workspaceCopy(rootId, sourcePath, rootId, targetPath),
+			).rejects.toEqual({
+				code: "ENTRY_TYPE_MISMATCH",
+				message: "The workspace entry has an incompatible type.",
+			});
+		}
+
+		await expect(
+			bridge.workspaceCopy(rootId, "README.md", rootId, "README.md"),
+		).rejects.toEqual({
+			code: "ENTRY_ALREADY_EXISTS",
+			message: "The workspace entry already exists.",
+		});
+		await expect(
+			bridge.workspaceCopy(rootId, "README.md", rootId, "README.md/nested"),
+		).rejects.toEqual({
+			code: "WORKSPACE_CONFLICT",
+			message: "The workspace copy conflicts with the source path.",
+		});
+
+		for (const sourcePath of [
+			"src",
+			"fixtures/dangling-link",
+			"fixtures/file-link",
+			"fixtures/directory-link",
+			"fixtures/other",
+		]) {
+			await expect(
+				bridge.workspaceCopy(rootId, sourcePath, rootId, "copy-target"),
+			).rejects.toEqual({
+				code: "ENTRY_TYPE_MISMATCH",
+				message: "The workspace entry has an incompatible type.",
+			});
+		}
+		await expect(
+			bridge.workspaceCopy(
+				rootId,
+				"fixtures/oversized.bin",
+				rootId,
+				"copy-target",
+			),
+		).rejects.toEqual({
+			code: "FILE_TOO_LARGE",
+			message: "The workspace file exceeds the supported copy limit.",
+		});
+		await expect(
+			bridge.workspaceCopy(rootId, "../private-source", rootId, "copy-target"),
+		).rejects.toEqual({
+			code: "INVALID_RELATIVE_PATH",
+			message: "The workspace-relative path is invalid.",
+		});
+		await expect(
+			bridge.workspaceCopy(
+				rootId,
+				"README.md",
+				"00000000-0000-4000-8000-000000000999",
+				"private-target",
+			),
+		).rejects.toEqual({
+			code: "ROOT_NOT_AUTHORIZED",
+			message: "The workspace root is not authorized.",
+		});
+	});
+
+	it("checks both root leases before copy path semantics", async () => {
+		const bridge = createBrowserMockBridge();
+		const added = await bridge.workspacePickRoots("add");
+		const sourceRootId = added.snapshot.roots[0]!.rootId;
+		const revokedRootId = added.snapshot.roots[1]!.rootId;
+		const unknownRootId = "00000000-0000-4000-8000-000000000999";
+		await bridge.workspaceRemoveRoot(revokedRootId);
+
+		for (const [sourceRoot, sourcePath, targetRoot, targetPath] of [
+			[unknownRootId, "", unknownRootId, "target"],
+			[unknownRootId, "same", unknownRootId, "same"],
+			[unknownRootId, "source", unknownRootId, "source/nested"],
+			[revokedRootId, "", revokedRootId, "target"],
+			[revokedRootId, "same", revokedRootId, "same"],
+			[revokedRootId, "source", revokedRootId, "source/nested"],
+			[sourceRootId, "", revokedRootId, ""],
+		] as const) {
+			const error = await bridge
+				.workspaceCopy(sourceRoot, sourcePath, targetRoot, targetPath)
+				.catch((candidate: unknown) => candidate);
+			expect(error).toEqual({
+				code: "ROOT_NOT_AUTHORIZED",
+				message: "The workspace root is not authorized.",
+			});
+			expect(Object.isFrozen(error)).toBe(true);
+		}
+	});
+
 	it("returns frozen stable file errors with Rust-compatible precedence", async () => {
 		const bridge = createBrowserMockBridge();
 		const knownRootId = "00000000-0000-4000-8000-000000000101";

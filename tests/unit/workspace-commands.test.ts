@@ -28,6 +28,7 @@ describe("workspace Workbench command overrides", () => {
 			workspaceCreateFile: vi.fn(),
 			workspaceCreateDirectory: vi.fn(),
 			workspaceRename: vi.fn(),
+			workspaceCopy: vi.fn(),
 			workspaceStat: vi.fn(),
 			workspaceReadDirectory: vi.fn(),
 			workspaceReadFile: vi.fn(),

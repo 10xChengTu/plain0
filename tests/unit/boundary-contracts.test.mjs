@@ -5,8 +5,10 @@ import {
 	validateMainCapability,
 	validateTauriApiBoundary,
 	validateTauriConfiguration,
+	validateWorkspaceCopyCommandRegistration,
 	validateWorkspaceProviderBootstrap,
-	validateWorkspaceRustBoundary,
+	validateWorkspaceProviderCopyBoundary,
+	validateWorkspaceRustBoundary as validateWorkspaceRustBoundaryContract,
 } from "../../scripts/plain/boundary-contracts.mjs";
 
 const baselineConfig = {
@@ -114,11 +116,31 @@ describe("Plain Tauri boundary contracts", () => {
 });
 
 const workspaceCargo = `
+[dependencies]
 cap-std = "4.0.2"
 libc = "0.2.186"
 rustix = { version = "=1.1.4", features = ["fs"] }
 uuid = { version = "1.24.0", features = ["v4"] }
 `;
+
+const exactRustixDependency = Object.freeze({
+	name: "rustix",
+	req: "=1.1.4",
+	kind: null,
+	rename: null,
+	target: 'cfg(any(target_os = "linux", target_os = "macos"))',
+});
+
+function validateWorkspaceRustBoundary(
+	cargoSource,
+	rustSources,
+	cargoDependencies = [],
+) {
+	return validateWorkspaceRustBoundaryContract(cargoSource, rustSources, [
+		exactRustixDependency,
+		...cargoDependencies,
+	]);
+}
 
 const workspaceSources = [
 	{
@@ -147,6 +169,41 @@ fn windows_identity(path: &std::path::Path) {
 use rustix::fs::{renameat_with, RenameFlags};
 fn rename_exclusive(source: &cap_std::fs::Dir, target: &cap_std::fs::Dir) {
   let _ = renameat_with(source, "old", target, "new", RenameFlags::NOREPLACE);
+}
+fn publish_exclusive(parent: &cap_std::fs::Dir) {
+  let _ = renameat_with(parent, "staging", parent, "target", RenameFlags::NOREPLACE);
+}
+`,
+	},
+	{
+		relativePath: "src-tauri/src/workspace/commands.rs",
+		source: `
+#[tauri::command]
+pub(crate) async fn workspace_copy(
+  window: WebviewWindow,
+  service: State<'_, WorkspaceService>,
+  request: WorkspaceCopyRequest,
+) -> Result<(), CommandError> {
+  let (source_root_id, source_path, target_root_id, target_path) = request.into_parts()?;
+  WorkspaceService::copy_entry(
+    service.inner(),
+    window.label(),
+    source_root_id,
+    source_path,
+    target_root_id,
+    target_path,
+  ).await
+}
+`,
+	},
+	{
+		relativePath: "src-tauri/src/lib.rs",
+		source: `
+fn run() {
+  tauri::Builder::default()
+    .invoke_handler(tauri::generate_handler![
+      workspace::commands::workspace_copy,
+    ]);
 }
 `,
 	},
@@ -187,6 +244,97 @@ describe("Plain workspace Rust boundary contracts", () => {
 		).toContain("Cargo.toml must pin rustix to =1.1.4");
 	});
 
+	it("requires one exact unrenamed runtime rustix dependency on the audited targets", () => {
+		const failure =
+			"Cargo metadata must contain exactly one unrenamed runtime rustix =1.1.4 dependency for the audited Linux/macOS target";
+		expect(
+			validateWorkspaceRustBoundaryContract(workspaceCargo, workspaceSources, [
+				exactRustixDependency,
+			]),
+		).not.toContain(failure);
+
+		for (const dependencies of [
+			[],
+			[{ ...exactRustixDependency, req: "^1.1.4" }],
+			[{ ...exactRustixDependency, rename: "syscalls" }],
+			[{ ...exactRustixDependency, kind: "dev" }],
+			[{ ...exactRustixDependency, kind: "build" }],
+			[{ ...exactRustixDependency, target: "cfg(unix)" }],
+			[exactRustixDependency, { ...exactRustixDependency, rename: "syscalls" }],
+		]) {
+			expect(
+				validateWorkspaceRustBoundaryContract(
+					workspaceCargo,
+					workspaceSources,
+					dependencies,
+				),
+			).toContain(failure);
+		}
+	});
+
+	it("requires an exact cap-fs-ext pin only when the copy implementation introduces it", () => {
+		const failure =
+			"Cargo metadata must contain exactly one unrenamed runtime cap-fs-ext =4.0.2 dependency";
+		expect(
+			validateWorkspaceRustBoundary(workspaceCargo, workspaceSources),
+		).not.toContain(failure);
+
+		const capFsSource = {
+			relativePath: "src-tauri/src/workspace/copier.rs",
+			source: "use cap_fs_ext::OpenOptionsFollowExt;",
+		};
+		expect(
+			validateWorkspaceRustBoundary(workspaceCargo, [
+				...workspaceSources,
+				capFsSource,
+			]),
+		).toContain(failure);
+		expect(
+			validateWorkspaceRustBoundary(
+				workspaceCargo,
+				[...workspaceSources, capFsSource],
+				[
+					{
+						name: "cap-fs-ext",
+						req: "=4.0.2",
+						kind: null,
+						rename: null,
+					},
+				],
+			),
+		).not.toContain(failure);
+	});
+
+	it("rejects renamed, non-exact, dev, build and duplicate metadata bait", () => {
+		const capFsSource = {
+			relativePath: "src-tauri/src/workspace/copier.rs",
+			source: "use cap_fs_ext::OpenOptionsFollowExt;",
+		};
+		const exact = {
+			name: "cap-fs-ext",
+			req: "=4.0.2",
+			kind: null,
+			rename: null,
+		};
+		for (const dependencies of [
+			[{ ...exact, req: "^4.0.2" }],
+			[{ ...exact, rename: "capability-fs" }],
+			[{ ...exact, kind: "dev" }],
+			[{ ...exact, kind: "build" }],
+			[exact, { ...exact, kind: "dev" }],
+		]) {
+			expect(
+				validateWorkspaceRustBoundary(
+					workspaceCargo,
+					[...workspaceSources, capFsSource],
+					dependencies,
+				),
+			).toContain(
+				"Cargo metadata must contain exactly one unrenamed runtime cap-fs-ext =4.0.2 dependency",
+			);
+		}
+	});
+
 	it("rejects ambient I/O aliases, lossy paths and extra authorizers", () => {
 		const hostileSources = [
 			...workspaceSources,
@@ -217,6 +365,64 @@ fn bypass(path: &std::path::Path) {
 				"src-tauri/src/workspace/service.rs opens ambient paths outside the sole root authorizer",
 				"workspace production code must contain exactly one ambient root authorizer",
 			]),
+		);
+	});
+
+	it("rejects copy primitives and overwrite paths across aliases and UFCS", () => {
+		const hostileCopySources = [
+			'fn bypass() { let _ = std::fs::copy("a", "b"); }',
+			"use std::io::{copy as transfer}; fn bypass() { transfer(); }",
+			"use std::io as stream; fn bypass() { stream::copy(); }",
+			"use cap_std::fs::Dir as CapabilityDir; fn bypass() { CapabilityDir::copy(); }",
+			"fn bypass() { <cap_std::fs::Dir>::copy(); }",
+			"fn bypass(directory: &cap_std::fs::Dir) { directory.copy(); }",
+		];
+		for (const source of hostileCopySources) {
+			expect(
+				validateWorkspaceRustBoundary(workspaceCargo, [
+					...workspaceSources,
+					{
+						relativePath: "src-tauri/src/workspace/copier.rs",
+						source,
+					},
+				]),
+			).toContain(
+				"src-tauri/src/workspace/copier.rs must not use an unaudited copy primitive; use workspace_copy/copy_entry helpers",
+			);
+		}
+
+		expect(
+			validateWorkspaceRustBoundary(workspaceCargo, [
+				...workspaceSources,
+				{
+					relativePath: "src-tauri/src/workspace/copier.rs",
+					source: "fn overwrite() {}",
+				},
+			]),
+		).toContain(
+			"src-tauri/src/workspace/copier.rs must not add an overwrite path to workspace mutations",
+		);
+	});
+
+	it("ignores forbidden copy words in Rust comments and literals", () => {
+		const harmlessSource = {
+			relativePath: "src-tauri/src/workspace/copier.rs",
+			source: `
+// std::io::copy and overwrite are forbidden examples.
+const MESSAGE: &str = "cap_std::fs::Dir::copy overwrite";
+const RAW: &str = r#"std::fs::copy overwrite"#;
+fn copy_entry() {}
+`,
+		};
+		const failures = validateWorkspaceRustBoundary(workspaceCargo, [
+			...workspaceSources,
+			harmlessSource,
+		]);
+		expect(failures).not.toContain(
+			"src-tauri/src/workspace/copier.rs must not use an unaudited copy primitive; use workspace_copy/copy_entry helpers",
+		);
+		expect(failures).not.toContain(
+			"src-tauri/src/workspace/copier.rs must not add an overwrite path to workspace mutations",
 		);
 	});
 
@@ -266,6 +472,118 @@ fn disguised(source: &WorkspaceService, target: &WorkspaceService) {
 		);
 	});
 
+	it("binds NOREPLACE to each audited renameat_with call", () => {
+		const mismatchedFlags = workspaceSources.map((entry) =>
+			entry.relativePath === "src-tauri/src/workspace/writer.rs"
+				? {
+						...entry,
+						source: `
+use rustix::fs::{renameat_with, RenameFlags};
+fn rename_exclusive(source: &cap_std::fs::Dir, target: &cap_std::fs::Dir) {
+  let _ = renameat_with(source, "old", target, "new", RenameFlags::empty());
+}
+fn publish_exclusive(parent: &cap_std::fs::Dir) {
+  let _ = renameat_with(
+    parent,
+    "staging",
+    parent,
+    "target",
+    RenameFlags::NOREPLACE | RenameFlags::NOREPLACE,
+  );
+}
+`,
+					}
+				: entry,
+		);
+
+		expect(
+			validateWorkspaceRustBoundary(workspaceCargo, mismatchedFlags),
+		).toContain(
+			"every workspace writer renameat_with call must pass exactly one direct RenameFlags::NOREPLACE flag",
+		);
+	});
+
+	it("rejects renameat_with aliases, re-exports and rustix namespace aliases", () => {
+		const writer = workspaceSources.find(
+			({ relativePath }) =>
+				relativePath === "src-tauri/src/workspace/writer.rs",
+		);
+		for (const source of [
+			writer.source.replace(
+				"use rustix::fs::{renameat_with, RenameFlags};",
+				"use rustix::fs::{renameat_with as atomic_rename, RenameFlags};",
+			),
+			`pub(crate) use rustix::fs::renameat_with;\n${writer.source}`,
+			`use rustix as syscalls;\n${writer.source}`,
+			`use rustix::fs as syscall_fs;\n${writer.source}`,
+			`use rustix::{fs};\n${writer.source}`,
+			`${writer.source}\nconst ATOMIC_RENAME: usize = renameat_with as usize;`,
+		]) {
+			const hostileSources = workspaceSources.map((entry) =>
+				entry.relativePath === writer.relativePath
+					? { ...entry, source }
+					: entry,
+			);
+			expect(
+				validateWorkspaceRustBoundary(workspaceCargo, hostileSources),
+			).toContain(
+				"src-tauri/src/workspace/writer.rs must not alias or re-export rustix or renameat_with",
+			);
+		}
+
+		const outsideAlias = [
+			...workspaceSources,
+			{
+				relativePath: "src-tauri/src/workspace/service.rs",
+				source: `
+use rustix as syscalls;
+fn hidden(source: &cap_std::fs::Dir, target: &cap_std::fs::Dir) {
+  let _ = syscalls::fs::renameat_with(
+    source,
+    "old",
+    target,
+    "new",
+    syscalls::fs::RenameFlags::NOREPLACE,
+  );
+}
+`,
+			},
+		];
+		expect(validateWorkspaceRustBoundary(workspaceCargo, outsideAlias)).toEqual(
+			expect.arrayContaining([
+				"src-tauri/src/workspace/service.rs must not alias or re-export rustix or renameat_with",
+				"src-tauri/src/workspace/service.rs must not use the exclusive rename syscall outside the workspace writer",
+			]),
+		);
+
+		const reexportedSyscall = [
+			...workspaceSources.map((entry) =>
+				entry.relativePath === writer.relativePath
+					? {
+							...entry,
+							source: entry.source.replace(
+								"use rustix::fs::{renameat_with, RenameFlags};",
+								"use crate::syscalls::{renameat_with, RenameFlags};",
+							),
+						}
+					: entry,
+			),
+			{
+				relativePath: "src-tauri/src/syscalls.rs",
+				source: "pub(crate) use rustix::fs::{renameat_with, RenameFlags};",
+			},
+		];
+		expect(
+			validateWorkspaceRustBoundary(workspaceCargo, reexportedSyscall),
+		).toEqual(
+			expect.arrayContaining([
+				"src-tauri/src/syscalls.rs must not alias or re-export rustix or renameat_with",
+				"src-tauri/src/syscalls.rs must not use the exclusive rename syscall outside the workspace writer",
+				"src-tauri/src/workspace/writer.rs must not alias or re-export rustix or renameat_with",
+			]),
+		);
+	});
+
 	it("rejects extra ambient canonicalize fallbacks", () => {
 		const source = `${workspaceSources[0].source}
 fn fallback_one(path: &std::path::Path) { let _ = std::fs::canonicalize(path); }
@@ -278,6 +596,254 @@ fn fallback_two(path: &std::path::Path) { let _ = std::fs::canonicalize(path); }
 		).toContain(
 			"workspace root identity may use at most two platform canonicalize fallbacks",
 		);
+	});
+
+	it("requires the workspace_copy command and its exact Tauri registration", () => {
+		expect(validateWorkspaceCopyCommandRegistration(workspaceSources)).toEqual(
+			[],
+		);
+
+		const withoutCommand = workspaceSources.filter(
+			({ relativePath }) =>
+				relativePath !== "src-tauri/src/workspace/commands.rs",
+		);
+		expect(validateWorkspaceCopyCommandRegistration(withoutCommand)).toContain(
+			"workspace copy boundary requires workspace/commands.rs",
+		);
+
+		const missingAttribute = workspaceSources.map((entry) =>
+			entry.relativePath === "src-tauri/src/workspace/commands.rs"
+				? { ...entry, source: entry.source.replace("#[tauri::command]\n", "") }
+				: entry,
+		);
+		expect(
+			validateWorkspaceCopyCommandRegistration(missingAttribute),
+		).toContain(
+			"workspace/commands.rs must define exactly one audited workspace_copy Tauri command",
+		);
+
+		const aliasRegistration = workspaceSources.map((entry) =>
+			entry.relativePath === "src-tauri/src/lib.rs"
+				? {
+						...entry,
+						source: entry.source.replace(
+							"workspace::commands::workspace_copy,",
+							"registered_copy,",
+						),
+					}
+				: entry,
+		);
+		expect(
+			validateWorkspaceCopyCommandRegistration(aliasRegistration),
+		).toContain(
+			"src-tauri/src/lib.rs must register workspace::commands::workspace_copy exactly once in generate_handler",
+		);
+
+		const commentOnlyRegistration = workspaceSources.map((entry) =>
+			entry.relativePath === "src-tauri/src/lib.rs"
+				? {
+						...entry,
+						source: entry.source.replace(
+							"workspace::commands::workspace_copy,",
+							"// workspace::commands::workspace_copy,",
+						),
+					}
+				: entry,
+		);
+		expect(
+			validateWorkspaceCopyCommandRegistration(commentOnlyRegistration),
+		).toContain(
+			"src-tauri/src/lib.rs must register workspace::commands::workspace_copy exactly once in generate_handler",
+		);
+
+		const noOpCommand = workspaceSources.map((entry) =>
+			entry.relativePath === "src-tauri/src/workspace/commands.rs"
+				? {
+						...entry,
+						source: `
+#[tauri::command]
+pub(crate) async fn workspace_copy() {}
+`,
+					}
+				: entry,
+		);
+		expect(validateWorkspaceCopyCommandRegistration(noOpCommand)).toEqual(
+			expect.arrayContaining([
+				"workspace_copy must accept request: WorkspaceCopyRequest and return Result<(), CommandError>",
+				"workspace_copy must route exactly once through WorkspaceService::copy_entry",
+			]),
+		);
+
+		for (const invalidCommand of [
+			workspaceSources.map((entry) =>
+				entry.relativePath === "src-tauri/src/workspace/commands.rs"
+					? {
+							...entry,
+							source: entry.source.replace(
+								"request: WorkspaceCopyRequest",
+								"request: WorkspaceRenameRequest",
+							),
+						}
+					: entry,
+			),
+			workspaceSources.map((entry) =>
+				entry.relativePath === "src-tauri/src/workspace/commands.rs"
+					? {
+							...entry,
+							source: entry.source.replace(
+								"Result<(), CommandError>",
+								"Result<bool, CommandError>",
+							),
+						}
+					: entry,
+			),
+		]) {
+			expect(
+				validateWorkspaceCopyCommandRegistration(invalidCommand),
+			).toContain(
+				"workspace_copy must accept request: WorkspaceCopyRequest and return Result<(), CommandError>",
+			);
+		}
+
+		const bypassedRoute = workspaceSources.map((entry) =>
+			entry.relativePath === "src-tauri/src/workspace/commands.rs"
+				? {
+						...entry,
+						source: entry.source.replace(
+							"WorkspaceService::copy_entry(",
+							"writer::copy_regular_file(",
+						),
+					}
+				: entry,
+		);
+		expect(validateWorkspaceCopyCommandRegistration(bypassedRoute)).toContain(
+			"workspace_copy must route exactly once through WorkspaceService::copy_entry",
+		);
+	});
+});
+
+const readonlyWorkspaceProvider = `
+export class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileReadWriteCapability {
+  readonly capabilities =
+    FileSystemProviderCapabilities.FileReadWrite |
+    FileSystemProviderCapabilities.Readonly;
+
+  async readFile() {
+    return file.copy();
+  }
+}
+
+export function createPlainWorkspaceFileSystemProvider(
+  bridge: PlainBridge,
+): PlainWorkspaceFileSystemProvider {
+  return new PlainWorkspaceFileSystemProvider(bridge);
+}
+`;
+
+describe("Plain workspace provider copy boundary", () => {
+	it("keeps the provider exactly readonly while allowing immutable file payload copies", () => {
+		expect(
+			validateWorkspaceProviderCopyBoundary(readonlyWorkspaceProvider),
+		).toEqual([]);
+	});
+
+	it("rejects early FileFolderCopy capability or removal of Readonly", () => {
+		const nativeCopy = readonlyWorkspaceProvider.replace(
+			"FileSystemProviderCapabilities.Readonly;",
+			"FileSystemProviderCapabilities.Readonly |\n    FileSystemProviderCapabilities.FileFolderCopy;",
+		);
+		expect(validateWorkspaceProviderCopyBoundary(nativeCopy)).toEqual(
+			expect.arrayContaining([
+				"Plain workspace provider capabilities must remain exactly FileReadWrite | Readonly",
+				"Plain workspace provider must not advertise FileFolderCopy before activation",
+			]),
+		);
+
+		const writable = readonlyWorkspaceProvider.replace(
+			" |\n    FileSystemProviderCapabilities.Readonly",
+			"",
+		);
+		expect(validateWorkspaceProviderCopyBoundary(writable)).toContain(
+			"Plain workspace provider capabilities must remain exactly FileReadWrite | Readonly",
+		);
+	});
+
+	it("rejects direct, computed or inherited provider copy surfaces", () => {
+		const directCopy = readonlyWorkspaceProvider.replace(
+			"\n}",
+			"\n  async copy() {}\n}",
+		);
+		expect(validateWorkspaceProviderCopyBoundary(directCopy)).toContain(
+			"Plain workspace provider must not expose copy before write activation",
+		);
+
+		const computedCopy = readonlyWorkspaceProvider.replace(
+			"\n}",
+			'\n  ["copy"] = async () => {};\n}',
+		);
+		expect(validateWorkspaceProviderCopyBoundary(computedCopy)).toContain(
+			"Plain workspace provider must not hide members behind computed names",
+		);
+
+		const inheritedCopy = readonlyWorkspaceProvider.replace(
+			"implements IFileSystemProviderWithFileReadWriteCapability",
+			"extends WritableProvider implements IFileSystemProviderWithFileReadWriteCapability",
+		);
+		expect(validateWorkspaceProviderCopyBoundary(inheritedCopy)).toContain(
+			"Plain workspace provider must not inherit hidden write capabilities",
+		);
+	});
+
+	it("fixes the provider factory to one direct audited construction", () => {
+		for (const hostileFactory of [
+			readonlyWorkspaceProvider.replace(
+				"return new PlainWorkspaceFileSystemProvider(bridge);",
+				"return new Proxy(new PlainWorkspaceFileSystemProvider(bridge), {});",
+			),
+			readonlyWorkspaceProvider.replace(
+				"return new PlainWorkspaceFileSystemProvider(bridge);",
+				"const provider = new PlainWorkspaceFileSystemProvider(bridge);\n  return provider;",
+			),
+			readonlyWorkspaceProvider.replace(
+				"new PlainWorkspaceFileSystemProvider(bridge)",
+				"new PlainWorkspaceFileSystemProvider(otherBridge)",
+			),
+		]) {
+			expect(validateWorkspaceProviderCopyBoundary(hostileFactory)).toContain(
+				"Plain workspace provider factory must directly return new PlainWorkspaceFileSystemProvider(bridge)",
+			);
+		}
+	});
+
+	it("rejects extra provider identifiers and dynamic mutation surfaces", () => {
+		for (const [addition, expected] of [
+			[
+				"const ProviderAlias = PlainWorkspaceFileSystemProvider;",
+				"PlainWorkspaceFileSystemProvider may be referenced only by its declaration and audited factory",
+			],
+			[
+				"void PlainWorkspaceFileSystemProvider.prototype;",
+				"Plain workspace provider must not expose prototype mutation references",
+			],
+			[
+				'Object.defineProperty({}, "copy", { value() {} });',
+				"Plain workspace provider must not use defineProperty or Proxy mutation surfaces",
+			],
+			[
+				"const wrapped = new Proxy({}, {});",
+				"Plain workspace provider must not use defineProperty or Proxy mutation surfaces",
+			],
+			[
+				"provider.capabilities = FileSystemProviderCapabilities.FileFolderCopy;",
+				"Plain workspace provider capabilities must not be referenced outside their readonly declaration",
+			],
+		]) {
+			expect(
+				validateWorkspaceProviderCopyBoundary(
+					`${readonlyWorkspaceProvider}\n${addition}`,
+				),
+			).toContain(expected);
+		}
 	});
 });
 

@@ -131,6 +131,25 @@ impl WorkspaceService {
         .await
     }
 
+    pub async fn copy_entry(
+        &self,
+        window_label: &str,
+        source_root_id: RootId,
+        source_path: RelativePath,
+        target_root_id: RootId,
+        target_path: RelativePath,
+    ) -> Result<(), CommandError> {
+        self.run_dual_root_mutation(
+            window_label,
+            source_root_id,
+            target_root_id,
+            move |source_lease, target_lease| {
+                writer::copy_regular_file(&source_lease, &source_path, &target_lease, &target_path)
+            },
+        )
+        .await
+    }
+
     pub fn close_window(&self, window_label: &str) {
         if let Some(workspace) = self.detach_window(window_label) {
             workspace.close();
@@ -221,6 +240,58 @@ impl WorkspaceService {
         })
         .await
         .map_err(|_| workspace_mutation_failed())?
+    }
+
+    async fn run_dual_root_mutation<T, F>(
+        &self,
+        window_label: &str,
+        source_root_id: RootId,
+        target_root_id: RootId,
+        operation: F,
+    ) -> Result<T, CommandError>
+    where
+        T: Send + 'static,
+        F: FnOnce(WorkspaceRootLease, WorkspaceRootLease) -> Result<T, CommandError>
+            + Send
+            + 'static,
+    {
+        self.run_dual_root_mutation_with_hook(
+            window_label,
+            source_root_id,
+            target_root_id,
+            || {},
+            operation,
+        )
+        .await
+    }
+
+    async fn run_dual_root_mutation_with_hook<T, B, F>(
+        &self,
+        window_label: &str,
+        source_root_id: RootId,
+        target_root_id: RootId,
+        before_gate: B,
+        operation: F,
+    ) -> Result<T, CommandError>
+    where
+        T: Send + 'static,
+        B: FnOnce() + Send + 'static,
+        F: FnOnce(WorkspaceRootLease, WorkspaceRootLease) -> Result<T, CommandError>
+            + Send
+            + 'static,
+    {
+        let workspace = self.scope_for_window(window_label)?;
+        let source_lease = workspace.lease(source_root_id)?;
+        let target_lease = workspace.lease(target_root_id)?;
+        let leased_root_ids = [source_lease.root_id(), target_lease.root_id()];
+        tauri::async_runtime::spawn_blocking(move || {
+            before_gate();
+            let _mutation = lock(&workspace.mutation_gate)?;
+            workspace.validate_leases(&leased_root_ids)?;
+            operation(source_lease, target_lease)
+        })
+        .await
+        .map_err(|_| workspace_copy_failed())?
     }
 }
 
@@ -325,9 +396,16 @@ impl WindowWorkspace {
     }
 
     fn validate_lease(&self, root_id: RootId) -> Result<(), CommandError> {
+        self.validate_leases(&[root_id])
+    }
+
+    fn validate_leases(&self, root_ids: &[RootId]) -> Result<(), CommandError> {
         let state = lock(&self.state)?;
         ensure_open(&state)?;
-        if state.scope.contains_root(root_id) {
+        if root_ids
+            .iter()
+            .all(|root_id| state.scope.contains_root(*root_id))
+        {
             Ok(())
         } else {
             Err(root_not_authorized())
@@ -410,6 +488,10 @@ fn workspace_read_failed() -> CommandError {
 
 fn workspace_mutation_failed() -> CommandError {
     CommandError::new("IO_FAILED", "The workspace entry could not be created.")
+}
+
+fn workspace_copy_failed() -> CommandError {
+    CommandError::new("IO_FAILED", "The workspace entry could not be copied.")
 }
 
 fn root_not_authorized() -> CommandError {

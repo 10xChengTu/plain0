@@ -12,6 +12,7 @@ import { createNativeBridge } from "../../app/platform/tauri/native";
 
 const workspaceId = "00000000-0000-4000-8000-000000000001";
 const rootId = "00000000-0000-4000-8000-000000000101";
+const targetRootId = "00000000-0000-4000-8000-000000000102";
 
 function validRoot() {
 	return {
@@ -72,6 +73,7 @@ describe("native Plain bridge", () => {
 			.mockResolvedValueOnce(null)
 			.mockResolvedValueOnce(null)
 			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(null)
 			.mockResolvedValueOnce({
 				kind: "file",
 				size: 4,
@@ -94,6 +96,12 @@ describe("native Plain bridge", () => {
 			"%2e%2e/source.txt",
 			"%2e%2e/target.txt",
 		);
+		await bridge.workspaceCopy(
+			rootId,
+			"%2e%2e/source.txt",
+			targetRootId,
+			"%2F/target.txt",
+		);
 		const stat = await bridge.workspaceStat(rootId, "%2e%2e/file.bin");
 		const directory = await bridge.workspaceReadDirectory(rootId, "%2e%2e");
 		const file = await bridge.workspaceReadFile(rootId, "%2F");
@@ -114,6 +122,17 @@ describe("native Plain bridge", () => {
 						rootId,
 						sourcePath: "%2e%2e/source.txt",
 						targetPath: "%2e%2e/target.txt",
+					},
+				},
+			],
+			[
+				"workspace_copy",
+				{
+					request: {
+						sourceRootId: rootId,
+						sourcePath: "%2e%2e/source.txt",
+						targetRootId,
+						targetPath: "%2F/target.txt",
 					},
 				},
 			],
@@ -147,7 +166,8 @@ describe("native Plain bridge", () => {
 		tauri.invoke
 			.mockResolvedValueOnce(undefined)
 			.mockResolvedValueOnce({})
-			.mockResolvedValueOnce([]);
+			.mockResolvedValueOnce([])
+			.mockResolvedValueOnce("ok");
 		const bridge = createNativeBridge();
 
 		await expect(
@@ -158,6 +178,9 @@ describe("native Plain bridge", () => {
 		).rejects.toMatchObject({ code: "IPC_CONTRACT_VIOLATION" });
 		await expect(
 			bridge.workspaceRename(rootId, "source", "target"),
+		).rejects.toMatchObject({ code: "IPC_CONTRACT_VIOLATION" });
+		await expect(
+			bridge.workspaceCopy(rootId, "source", targetRootId, "target"),
 		).rejects.toMatchObject({ code: "IPC_CONTRACT_VIOLATION" });
 	});
 
@@ -216,7 +239,94 @@ describe("native Plain bridge", () => {
 			code: "WORKSPACE_CONFLICT",
 			message: "The workspace rename conflicts with the source path.",
 		});
+		await expect(
+			bridge.workspaceCopy(
+				rootId,
+				"source",
+				"00000000-0000-4000-8000-000000000ABC",
+				"target",
+			),
+		).rejects.toEqual({
+			code: "ROOT_NOT_AUTHORIZED",
+			message: "The workspace root is not authorized.",
+		});
+		await expect(
+			bridge.workspaceCopy(rootId, "../private", targetRootId, "target"),
+		).rejects.toEqual({
+			code: "INVALID_RELATIVE_PATH",
+			message: "The workspace-relative path is invalid.",
+		});
 		expect(tauri.invoke).not.toHaveBeenCalled();
+	});
+
+	it("leaves authorized copy semantics and root state to Rust", async () => {
+		const unknownRootId = "00000000-0000-4000-8000-000000000998";
+		const revokedRootId = "00000000-0000-4000-8000-000000000999";
+		const rootError = {
+			code: "ROOT_NOT_AUTHORIZED",
+			message: "The workspace root is not authorized.",
+		};
+		const typeError = {
+			code: "ENTRY_TYPE_MISMATCH",
+			message: "The workspace entry has an incompatible type.",
+		};
+		const existsError = {
+			code: "ENTRY_ALREADY_EXISTS",
+			message: "The workspace entry already exists.",
+		};
+		const conflictError = {
+			code: "WORKSPACE_CONFLICT",
+			message: "The workspace copy conflicts with the source path.",
+		};
+		tauri.invoke
+			.mockRejectedValueOnce(rootError)
+			.mockRejectedValueOnce(rootError)
+			.mockRejectedValueOnce(rootError)
+			.mockRejectedValueOnce(rootError)
+			.mockRejectedValueOnce(typeError)
+			.mockRejectedValueOnce(typeError)
+			.mockRejectedValueOnce(existsError)
+			.mockRejectedValueOnce(conflictError);
+		const bridge = createNativeBridge();
+		const cases = [
+			[unknownRootId, "", unknownRootId, "target", rootError],
+			[unknownRootId, "same", unknownRootId, "same", rootError],
+			[unknownRootId, "source", unknownRootId, "source/nested", rootError],
+			[rootId, "", revokedRootId, "", rootError],
+			[rootId, "", targetRootId, "target", typeError],
+			[rootId, "source", targetRootId, "", typeError],
+			[rootId, "source", rootId, "source", existsError],
+			[rootId, "source", rootId, "source/nested", conflictError],
+		] as const;
+
+		for (const [
+			sourceRoot,
+			sourcePath,
+			targetRoot,
+			targetPath,
+			expected,
+		] of cases) {
+			await expect(
+				bridge.workspaceCopy(sourceRoot, sourcePath, targetRoot, targetPath),
+			).rejects.toEqual(expected);
+		}
+
+		expect(tauri.invoke.mock.calls).toEqual(
+			cases.map(([sourceRootId, sourcePath, targetRootId, targetPath]) => [
+				"workspace_copy",
+				{
+					request: {
+						sourceRootId,
+						sourcePath,
+						targetRootId,
+						targetPath,
+					},
+				},
+			]),
+		);
+		for (const [, arguments_] of tauri.invoke.mock.calls) {
+			expect(Object.isFrozen(arguments_?.request)).toBe(true);
+		}
 	});
 
 	it.each([
