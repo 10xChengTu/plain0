@@ -26,11 +26,14 @@
 - [x] 完成 TypeScript 文件数据 bridge 与 browser mock：严格 DTO/path/UTF-8 codec、冻结字节隔离和授权撤销语义均有测试。
 - [x] 完成只读 `plain-workspace:` Workbench provider，并显式接入 files/model/explorer `35.0.1` service overrides；Rust/bridge 保持唯一 root 授权权威，URI、错误去敏、只读能力和撤销均有测试。
 - [x] 审计 provider 集成后的 bundle：只新增 20 个预期的 Explorer、model 和 Plain provider source，排除域债务仍为 203，分类计数与 SHA-256 均未变化。
+- [x] 完成 picker snapshot 到单目录 Workbench workspace 的首屏与动态投影；Browser E2E 从空 workspace 选择目录后展开 Explorer，并通过只读 provider 打开 README 与嵌套 TypeScript 文件。
+- [x] 单目录阶段显式禁用 add-root 与 VS Code workspace trust；Git、PTY、DAP 的执行信任继续只归 Rust 管理。通用语言状态贡献使用纯空 service，不引入语言 service override。
+- [x] 审计投影切片 bundle：只新增 workspace projection 与空 language-status 两个 Plain source，排除域债务数量、分类和 SHA-256 均未变化。
 
 ## 下一步
 
-1. 投影 picker snapshot 到 Workbench workspace，完成 Explorer 展开与只读文件打开 Browser E2E，再单独提交。
-2. 依次实现新建/重命名、复制/移动、确认删除和 watcher/rescan；每个可独立回滚的切片单独提交。
+1. 依次实现新建/重命名、复制/移动和确认删除；每种可独立回滚的写语义单独提交。
+2. 实现 watcher 的有界 dirty/rescan 状态机并单独提交。
 3. 最后分别运行 browser mock 和真实 Tauri 文件树验收，再写回 `F020` evidence。
 
 ## 当前验收命令

@@ -96,6 +96,11 @@ export function validateWorkspaceProviderBootstrap(source) {
 			"the plain-workspace provider must be registered before initialize",
 		);
 	}
+	if (!/\benableWorkspaceTrust\s*:\s*false\b/.test(source)) {
+		failures.push(
+			"Plain must keep VS Code workspace trust disabled in favor of Rust process trust",
+		);
+	}
 
 	return failures;
 }

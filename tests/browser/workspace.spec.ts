@@ -5,6 +5,8 @@ interface TestTauriInvocation {
 	readonly args: Record<string, unknown>;
 }
 
+const nativeRootId = "00000000-0000-4000-8000-000000000101";
+
 async function installNativeIpcMock(page: Page): Promise<void> {
 	await page.addInitScript(() => {
 		const calls: Array<{
@@ -13,7 +15,12 @@ async function installNativeIpcMock(page: Page): Promise<void> {
 		}> = [];
 		const workspaceId = "00000000-0000-4000-8000-000000000001";
 		const rootId = "00000000-0000-4000-8000-000000000101";
-		const snapshot = {
+		const emptySnapshot = {
+			workspaceId,
+			revision: 0,
+			roots: [],
+		};
+		const selectedSnapshot = {
 			workspaceId,
 			revision: 1,
 			roots: [
@@ -24,6 +31,26 @@ async function installNativeIpcMock(page: Page): Promise<void> {
 				},
 			],
 		};
+		const fileContents = new Map([
+			["README.md", "# Native workspace\n\nRead-only Explorer fixture.\n"],
+			["src/main.ts", "export const plain = true;\n"],
+		]);
+		const entryKinds = new Map([
+			["", "directory"],
+			["README.md", "file"],
+			["src", "directory"],
+			["src/main.ts", "file"],
+		]);
+		const directories = new Map([
+			[
+				"",
+				[
+					{ name: "README.md", kind: "file" },
+					{ name: "src", kind: "directory" },
+				],
+			],
+			["src", [{ name: "main.ts", kind: "file" }]],
+		]);
 		let nextCallbackId = 0;
 		const testWindow = window as unknown as Window & {
 			__PLAIN_TEST_TAURI_CALLS__: typeof calls;
@@ -51,6 +78,8 @@ async function installNativeIpcMock(page: Page): Promise<void> {
 			unregisterCallback() {},
 			async invoke(command, args = {}) {
 				calls.push({ command, args });
+				const request = args.request as
+					{ rootId?: string; relativePath?: string } | undefined;
 				switch (command) {
 					case "plugin:event|listen":
 						return 1;
@@ -63,9 +92,47 @@ async function installNativeIpcMock(page: Page): Promise<void> {
 							runtime: "tauri",
 						};
 					case "workspace_snapshot":
-						return snapshot;
+						return emptySnapshot;
 					case "workspace_pick_roots":
-						return { status: "selected", snapshot };
+						return { status: "selected", snapshot: selectedSnapshot };
+					case "workspace_stat": {
+						const relativePath = request?.relativePath ?? "";
+						const kind = entryKinds.get(relativePath);
+						if (request?.rootId !== rootId || kind === undefined) {
+							throw {
+								code: "ENTRY_NOT_FOUND",
+								message: "The workspace entry does not exist.",
+							};
+						}
+						return {
+							kind,
+							size: fileContents.get(relativePath)?.length ?? 0,
+							mtime: 1_700_000_000_000,
+							ctime: 1_699_999_000_000,
+						};
+					}
+					case "workspace_read_dir": {
+						const relativePath = request?.relativePath ?? "";
+						const entries = directories.get(relativePath);
+						if (request?.rootId !== rootId || entries === undefined) {
+							throw {
+								code: "ENTRY_TYPE_MISMATCH",
+								message: "The workspace entry is not a directory.",
+							};
+						}
+						return { entries };
+					}
+					case "workspace_read_file": {
+						const relativePath = request?.relativePath ?? "";
+						const content = fileContents.get(relativePath);
+						if (request?.rootId !== rootId || content === undefined) {
+							throw {
+								code: "ENTRY_TYPE_MISMATCH",
+								message: "The workspace entry is not a file.",
+							};
+						}
+						return new TextEncoder().encode(content).buffer;
+					}
 					default:
 						throw new Error(`Unexpected Tauri test command: ${command}`);
 				}
@@ -104,7 +171,7 @@ async function expectPaletteCommandHidden(
 	await expect(palette).toBeHidden();
 }
 
-test("reuses the existing Open Folder action through the workspace bridge", async ({
+test("projects a selected folder into Explorer and opens files", async ({
 	page,
 }) => {
 	const errors: string[] = [];
@@ -122,8 +189,44 @@ test("reuses the existing Open Folder action through the workspace bridge", asyn
 		"true",
 		{ timeout: 60_000 },
 	);
-
+	await expect(
+		page.getByRole("treeitem", { name: "README.md", exact: true }),
+	).toHaveCount(0);
 	await executePaletteCommand(page, "Open Folder", "File: Open Folder...");
+	await page.getByRole("tab", { name: /^Explorer / }).click();
+
+	const explorer = page.getByRole("tree", { name: "Files Explorer" });
+	await expect(explorer).toBeVisible();
+	const readme = explorer.getByRole("treeitem", {
+		name: "README.md",
+		exact: true,
+	});
+	await expect(readme).toHaveCount(1);
+	await readme.dblclick();
+	await expect(
+		page.getByRole("tab", { name: /^README\.md(?:,.*)?$/ }),
+	).toBeVisible();
+	await expect(
+		page.getByRole("code").filter({ hasText: "Read-only Explorer fixture." }),
+	).toBeVisible();
+
+	const src = explorer.getByRole("treeitem", { name: "src", exact: true });
+	await src.click();
+	await page.keyboard.press("ArrowRight");
+	await expect(src).toHaveAttribute("aria-expanded", "true");
+	const main = explorer.getByRole("treeitem", {
+		name: "main.ts",
+		exact: true,
+	});
+	await expect(main).toHaveCount(1);
+	await main.dblclick();
+	await expect(
+		page.getByRole("tab", { name: /^main\.ts(?:,.*)?$/ }),
+	).toBeVisible();
+	await expect(
+		page.getByRole("code").filter({ hasText: "export const plain = true;" }),
+	).toBeVisible();
+
 	await executePaletteCommand(page, "Open Folder", "File: Open Folder...");
 	await expectPaletteCommandHidden(
 		page,
@@ -162,5 +265,26 @@ test("reuses the existing Open Folder action through the workspace bridge", asyn
 			args: { request: { mode: "replace" } },
 		},
 	]);
+	const fileReadInvocations = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+		};
+		return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+			({ command }) => command === "workspace_read_file",
+		);
+	});
+	const fileReadRequests = fileReadInvocations.map(
+		({ args }) =>
+			args.request as {
+				readonly rootId: string;
+				readonly relativePath: string;
+			},
+	);
+	expect(fileReadRequests.map(({ relativePath }) => relativePath)).toEqual(
+		expect.arrayContaining(["README.md", "src/main.ts"]),
+	);
+	expect(fileReadRequests.every(({ rootId }) => rootId === nativeRootId)).toBe(
+		true,
+	);
 	expect(errors).toEqual([]);
 });

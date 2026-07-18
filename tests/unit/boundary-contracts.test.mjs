@@ -223,7 +223,7 @@ describe("Plain workspace provider bootstrap contract", () => {
 const bridge = createBridge();
 const provider = createPlainWorkspaceFileSystemProvider(bridge);
 registerCustomProvider(PLAIN_WORKSPACE_SCHEME, provider);
-await initialize(createServiceOverrides(), container, {});
+await initialize(createServiceOverrides(), container, { enableWorkspaceTrust: false });
 `;
 
 	it("requires one plain-workspace registration before service initialization", () => {
@@ -271,6 +271,26 @@ await initialize(createServiceOverrides(), container, {});
 			),
 		).toContain(
 			"the plain-workspace provider must be registered before initialize",
+		);
+	});
+
+	it("rejects delegating Plain process trust to the VS Code trust service", () => {
+		expect(
+			validateWorkspaceProviderBootstrap(
+				bootstrap.replace("enableWorkspaceTrust: false", ""),
+			),
+		).toContain(
+			"Plain must keep VS Code workspace trust disabled in favor of Rust process trust",
+		);
+		expect(
+			validateWorkspaceProviderBootstrap(
+				bootstrap.replace(
+					"enableWorkspaceTrust: false",
+					"enableWorkspaceTrust: true",
+				),
+			),
+		).toContain(
+			"Plain must keep VS Code workspace trust disabled in favor of Rust process trust",
 		);
 	});
 });

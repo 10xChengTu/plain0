@@ -141,6 +141,7 @@ try {
 
 const forbiddenLockPackages = [
 	"@anthropic-ai/",
+	"@codingame/monaco-vscode-languages-service-override@",
 	"@github/copilot",
 	"@huggingface/transformers",
 	"@openai/",
@@ -193,6 +194,10 @@ const forbiddenSourcePatterns = [
 	[
 		/monaco-vscode-(?:ai|chat|auth|sync|gallery|remote|task|testing|notebook|telemetry|speech|mcp)[^'"]*/,
 		"excluded service override",
+	],
+	[
+		/monaco-vscode-languages?-service-override[^'"]*/,
+		"language service override",
 	],
 ];
 

@@ -6,6 +6,7 @@ import {
 	registerWorkspaceCommands,
 	WORKSPACE_COMMAND_IDS,
 } from "../../app/features/workspace/commands";
+import { MULTI_ROOT_WORKSPACE_UNSUPPORTED } from "../../app/features/workspace/workspace-projection";
 import type { PlainBridge } from "../../app/platform/tauri";
 
 describe("workspace Workbench command overrides", () => {
@@ -44,7 +45,12 @@ describe("workspace Workbench command overrides", () => {
 			}),
 			getContextKeyValue: vi.fn((key: string) => contextValues.get(key)),
 		} as unknown as IContextKeyService;
-		const registration = registerWorkspaceCommands(bridge, contextKeyService);
+		const applySnapshot = vi.fn();
+		const registration = registerWorkspaceCommands(
+			bridge,
+			contextKeyService,
+			applySnapshot,
+		);
 
 		try {
 			expect(Object.values(WORKSPACE_COMMAND_IDS)).toEqual([
@@ -53,22 +59,75 @@ describe("workspace Workbench command overrides", () => {
 				"addRootFolder",
 			]);
 			expect(contextValues.get("openFolderWorkspaceSupport")).toBe(true);
-			expect(contextValues.has("enterMultiRootWorkspaceSupport")).toBe(false);
-			for (const id of Object.values(WORKSPACE_COMMAND_IDS)) {
+			for (const id of [
+				WORKSPACE_COMMAND_IDS.openFolder,
+				WORKSPACE_COMMAND_IDS.openFolderViaWorkspace,
+			]) {
 				const command = CommandsRegistry.getCommand(id);
 				expect(command?.id).toBe(id);
 				expect(command?.metadata).toBeUndefined();
 				await command?.handler(undefined as never);
 			}
+			const addRoot = CommandsRegistry.getCommand(
+				WORKSPACE_COMMAND_IDS.addRootFolder,
+			);
+			expect(addRoot?.id).toBe(WORKSPACE_COMMAND_IDS.addRootFolder);
+			await expect(addRoot?.handler(undefined as never)).rejects.toMatchObject({
+				code: MULTI_ROOT_WORKSPACE_UNSUPPORTED,
+			});
 
-			expect(workspacePickRoots.mock.calls).toEqual([
-				["replace"],
-				["replace"],
-				["add"],
-			]);
+			expect(workspacePickRoots.mock.calls).toEqual([["replace"], ["replace"]]);
+			expect(applySnapshot).not.toHaveBeenCalled();
+			expect(contextValues.get("enterMultiRootWorkspaceSupport")).toBe(false);
 		} finally {
 			registration.dispose();
 		}
 		expect(contextValues.get("openFolderWorkspaceSupport")).toBe(false);
+		expect(contextValues.get("enterMultiRootWorkspaceSupport")).toBe(true);
+	});
+
+	it("waits for a selected snapshot projection before resolving", async () => {
+		const calls: string[] = [];
+		const snapshot = {
+			workspaceId: "00000000-0000-4000-8000-000000000001",
+			revision: 1,
+			roots: [],
+		};
+		const bridge = {
+			workspacePickRoots: vi.fn(async () => {
+				calls.push("pick");
+				return { status: "selected" as const, snapshot };
+			}),
+		} as unknown as PlainBridge;
+		const contextValues = new Map<string, unknown>();
+		const contextKeyService = {
+			createKey: vi.fn((key: string, defaultValue: unknown) => {
+				contextValues.set(key, defaultValue);
+				return {
+					set: (value: unknown) => contextValues.set(key, value),
+					reset: () => contextValues.set(key, defaultValue),
+					get: () => contextValues.get(key),
+				};
+			}),
+			getContextKeyValue: vi.fn((key: string) => contextValues.get(key)),
+		} as unknown as IContextKeyService;
+		const registration = registerWorkspaceCommands(
+			bridge,
+			contextKeyService,
+			async (nextSnapshot) => {
+				expect(nextSnapshot).toBe(snapshot);
+				await Promise.resolve();
+				calls.push("project");
+			},
+		);
+
+		try {
+			await CommandsRegistry.getCommand(
+				WORKSPACE_COMMAND_IDS.openFolder,
+			)?.handler(undefined as never);
+			expect(calls).toEqual(["pick", "project"]);
+		} finally {
+			registration.dispose();
+		}
 	});
 });

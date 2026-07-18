@@ -5,6 +5,7 @@ import {
 	IContextKeyService,
 	initialize,
 } from "@codingame/monaco-vscode-api";
+import { reinitializeWorkspace } from "@codingame/monaco-vscode-configuration-service-override";
 import { registerCustomProvider } from "@codingame/monaco-vscode-files-service-override";
 
 import { EXCLUDED_SURFACE_GUARD_MARKER } from "./excluded-surface-policy";
@@ -14,6 +15,7 @@ import {
 	createPlainWorkspaceFileSystemProvider,
 	PLAIN_WORKSPACE_SCHEME,
 } from "./features/workspace/file-system-provider";
+import { createWorkspaceProjector } from "./features/workspace/workspace-projection";
 import { configureMonacoEnvironment } from "./monaco-environment";
 import { createBridge, normalizeCommandError } from "./platform/tauri";
 import { createServiceOverrides } from "./services";
@@ -31,6 +33,9 @@ async function bootstrap(): Promise<void> {
 	const workspaceFileSystemProvider =
 		createPlainWorkspaceFileSystemProvider(bridge);
 	registerCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);
+	const workspaceProjector = createWorkspaceProjector(reinitializeWorkspace);
+	const initialWorkspaceSnapshot = await bridge.workspaceSnapshot();
+	const initialWorkspace = workspaceProjector.project(initialWorkspaceSnapshot);
 	const stopListening = await bridge.onRuntimeReady((payload) => {
 		document.body.dataset.plainRuntimeEvent = payload.runtime;
 	});
@@ -57,10 +62,18 @@ async function bootstrap(): Promise<void> {
 			"window.menuBarVisibility": "hidden",
 			"workbench.startupEditor": "none",
 		},
+		enableWorkspaceTrust: false,
+		workspaceProvider: initialWorkspace.provider,
 	});
+	if (initialWorkspace.provider.workspace === undefined) {
+		await workspaceProjector.apply(initialWorkspaceSnapshot);
+	}
 	workspaceCommands = registerWorkspaceCommands(
 		bridge,
 		await getService(IContextKeyService),
+		async (snapshot) => {
+			await workspaceProjector.apply(snapshot);
+		},
 	);
 	const surfaceSnapshot = enforceExcludedWorkbenchSurfaces();
 	document.body.dataset.plainSurfaceGuard = EXCLUDED_SURFACE_GUARD_MARKER;

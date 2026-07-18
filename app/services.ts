@@ -5,6 +5,10 @@ import getModelServiceOverride from "@codingame/monaco-vscode-model-service-over
 import getTextmateServiceOverride from "@codingame/monaco-vscode-textmate-service-override";
 import getThemeServiceOverride from "@codingame/monaco-vscode-theme-service-override";
 import getWorkbenchServiceOverride from "@codingame/monaco-vscode-workbench-service-override";
+import { SyncDescriptor } from "@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors";
+import { ILanguageStatusService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/languageStatus/common/languageStatusService.service";
+
+import { EmptyLanguageStatusService } from "./services/empty-language-status";
 
 /**
  * The only Workbench services directly selected by Plain. Core services pulled
@@ -19,5 +23,10 @@ export function createServiceOverrides() {
 		...getExplorerServiceOverride(),
 		...getThemeServiceOverride(),
 		...getTextmateServiceOverride(),
+		[ILanguageStatusService.toString()]: new SyncDescriptor(
+			EmptyLanguageStatusService,
+			[],
+			true,
+		),
 	};
 }

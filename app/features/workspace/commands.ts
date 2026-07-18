@@ -1,8 +1,12 @@
 import { CommandsRegistry } from "@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands";
 import type { IContextKeyService } from "@codingame/monaco-vscode-api/vscode/vs/platform/contextkey/common/contextkey.service";
-import { OpenFolderWorkspaceSupportContext } from "@codingame/monaco-vscode-api/vscode/vs/workbench/common/contextkeys";
+import {
+	EnterMultiRootWorkspaceSupportContext,
+	OpenFolderWorkspaceSupportContext,
+} from "@codingame/monaco-vscode-api/vscode/vs/workbench/common/contextkeys";
 
-import type { PlainBridge } from "../../platform/tauri";
+import type { PlainBridge, WorkspaceSnapshot } from "../../platform/tauri";
+import { MultiRootWorkspaceUnsupportedError } from "./workspace-projection";
 
 export const WORKSPACE_COMMAND_IDS = Object.freeze({
 	openFolder: "workbench.action.files.openFolder",
@@ -17,6 +21,7 @@ export interface WorkspaceCommandRegistration {
 export function registerWorkspaceCommands(
 	bridge: PlainBridge,
 	contextKeyService: IContextKeyService,
+	applySnapshot: (snapshot: WorkspaceSnapshot) => void | Promise<void>,
 ): WorkspaceCommandRegistration {
 	const previousOpenFolderSupport =
 		contextKeyService.getContextKeyValue<boolean>(
@@ -25,17 +30,33 @@ export function registerWorkspaceCommands(
 	const openFolderSupported =
 		OpenFolderWorkspaceSupportContext.bindTo(contextKeyService);
 	openFolderSupported.set(true);
+	const previousMultiRootSupport =
+		contextKeyService.getContextKeyValue<boolean>(
+			EnterMultiRootWorkspaceSupportContext.key,
+		);
+	const multiRootSupported =
+		EnterMultiRootWorkspaceSupportContext.bindTo(contextKeyService);
+	const restoreMultiRootSupport =
+		previousMultiRootSupport ?? multiRootSupported.get() ?? false;
+	multiRootSupported.set(false);
 
+	const pickRoots = async (mode: "replace" | "add") => {
+		const result = await bridge.workspacePickRoots(mode);
+		if (result.status === "selected") {
+			await applySnapshot(result.snapshot);
+		}
+		return result;
+	};
 	const registrations = [
 		CommandsRegistry.registerCommand(WORKSPACE_COMMAND_IDS.openFolder, () =>
-			bridge.workspacePickRoots("replace"),
+			pickRoots("replace"),
 		),
 		CommandsRegistry.registerCommand(
 			WORKSPACE_COMMAND_IDS.openFolderViaWorkspace,
-			() => bridge.workspacePickRoots("replace"),
+			() => pickRoots("replace"),
 		),
 		CommandsRegistry.registerCommand(WORKSPACE_COMMAND_IDS.addRootFolder, () =>
-			bridge.workspacePickRoots("add"),
+			Promise.reject(new MultiRootWorkspaceUnsupportedError()),
 		),
 	];
 
@@ -45,6 +66,7 @@ export function registerWorkspaceCommands(
 				registration.dispose();
 			}
 			openFolderSupported.set(previousOpenFolderSupport ?? false);
+			multiRootSupported.set(restoreMultiRootSupport);
 		},
 	};
 }
