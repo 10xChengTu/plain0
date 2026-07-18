@@ -1,3 +1,11 @@
+# Plain（Tauri 重写进行中）
+
+本仓库正在把 Code OSS 重写为基于 Tauri 2 + Rust 的轻量代码编辑器 Plain。当前大部分源码仍是迁移基线，不代表最终架构。项目范围、技术方案和实时进度分别见 [产品范围](docs/product-scope.md)、[总体架构](docs/architecture.md) 与 [进度记录](progress.md)。
+
+以下内容是迁移前的上游 Code OSS 说明，在完成产品重品牌和旧体系退役前暂时保留。
+
+---
+
 # Visual Studio Code - Open Source ("Code - OSS")
 [![Feature Requests](https://img.shields.io/github/issues/microsoft/vscode/feature-request.svg)](https://github.com/microsoft/vscode/issues?q=is%3Aopen+is%3Aissue+label%3Afeature-request+sort%3Areactions-%2B1-desc)
 [![Bugs](https://img.shields.io/github/issues/microsoft/vscode/bug.svg)](https://github.com/microsoft/vscode/issues?utf8=✓&q=is%3Aissue+is%3Aopen+label%3Abug)

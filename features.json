@@ -1,0 +1,198 @@
+{
+  "schemaVersion": 2,
+  "updatedAt": "2026-07-18",
+  "currentPhase": 1,
+  "wipLimit": 1,
+  "completionEvidenceFields": [
+    "commands",
+    "results",
+    "nativeScenarios",
+    "platformGaps"
+  ],
+  "features": [
+    {
+      "id": "F001",
+      "name": "Research, architecture and harness baseline",
+      "phase": 0,
+      "status": "complete",
+      "acceptance": [
+        "GitHub solution and license research is recorded",
+        "Architecture and explicit product exclusions are recorded",
+        "Progress, feature tracking and test strategy are resumable",
+        "No temporary research clone is committed"
+      ],
+      "evidence": {
+        "commands": [
+          "features.json parse and invariant check",
+          "internal documentation reference check",
+          "git diff --check",
+          "git status --short"
+        ],
+        "results": [
+          "Passed on 2026-07-18",
+          "Independent harness review blockers resolved"
+        ],
+        "nativeScenarios": [],
+        "platformGaps": [
+          "No native application exists in F001; native acceptance starts with F010"
+        ]
+      }
+    },
+    {
+      "id": "F010",
+      "name": "Tauri application and IPC foundation",
+      "phase": 1,
+      "status": "planned",
+      "acceptance": [
+        "Tauri window renders the allowlisted modular Workbench without Electron",
+        "Typed command and event bridge has stable error DTOs",
+        "Capabilities and CSP expose minimum permissions",
+        "Architecture checks reject AI, Auth, Sync, Gallery and Extension Host packages",
+        "Feature completion evidence shape is validated automatically",
+        "One command runs TypeScript and Rust checks"
+      ]
+    },
+    {
+      "id": "F020",
+      "name": "Workspace path policy and file tree",
+      "phase": 2,
+      "status": "planned",
+      "acceptance": [
+        "Open folder and file tree CRUD work in a scoped workspace",
+        "A workspace can hold multiple independently authorized canonical roots",
+        "Symlink and traversal escapes are rejected",
+        "External changes update the tree with rescan fallback"
+      ]
+    },
+    {
+      "id": "F030",
+      "name": "Editing, preview and hot-exit recovery",
+      "phase": 2,
+      "status": "planned",
+      "acceptance": [
+        "Open, preview, pin, split, edit and save files",
+        "External save conflicts never overwrite silently",
+        "Dirty content survives window restart",
+        "Text, image and Markdown preview have safe fallbacks"
+      ]
+    },
+    {
+      "id": "F040",
+      "name": "Quick Open, workspace search and replace",
+      "phase": 2,
+      "status": "planned",
+      "acceptance": [
+        "File and content search honor ignore and include/exclude rules",
+        "Results stream and cancel without blocking the UI",
+        "Replace plan validates file versions before writes"
+      ]
+    },
+    {
+      "id": "F050",
+      "name": "VS Code color theme compatibility",
+      "phase": 2,
+      "status": "planned",
+      "acceptance": [
+        "Import local VSIX and unpacked theme directory",
+        "Apply workbench colors and TextMate token colors",
+        "JSONC, include and tmTheme fixtures pass",
+        "Extension code is never executed"
+      ]
+    },
+    {
+      "id": "F060",
+      "name": "VS Code file and product icon themes",
+      "phase": 2,
+      "status": "planned",
+      "acceptance": [
+        "File, folder and expanded icon precedence matches fixtures",
+        "Font and image resources stay inside the imported theme",
+        "Unsafe SVG or missing icon IDs fall back safely"
+      ]
+    },
+    {
+      "id": "F070",
+      "name": "Rust PTY terminal",
+      "phase": 3,
+      "status": "planned",
+      "acceptance": [
+        "Interactive shell supports input, resize, search and exit",
+        "Multiple tabs and splits clean up on window close",
+        "Backpressure and output fragmentation tests pass"
+      ]
+    },
+    {
+      "id": "F080",
+      "name": "Core Git workflow",
+      "phase": 3,
+      "status": "planned",
+      "acceptance": [
+        "Status, diff, hunk stage, commit, fetch, pull and push work",
+        "Git output parsing is independent of locale",
+        "Untrusted workspaces never start Git or configured helper processes",
+        "Background reads cannot execute hooks, fsmonitor, external diff, textconv or credential helpers",
+        "Destructive actions preview impact and require confirmation"
+      ]
+    },
+    {
+      "id": "F090",
+      "name": "Native Git history and blame tools",
+      "phase": 3,
+      "status": "planned",
+      "acceptance": [
+        "Inline and file blame, hover and age heatmap work",
+        "File and line history, revision navigation and compare work",
+        "Graph, refs, stash and worktree workflows pass fixtures",
+        "No GitLens Plus, account, cloud, brand or AI code is present"
+      ]
+    },
+    {
+      "id": "F100",
+      "name": "Generic Debug Adapter Protocol client",
+      "phase": 4,
+      "status": "planned",
+      "acceptance": [
+        "Stdio and TCP transports pass fragmented frame fixtures",
+        "Breakpoints, stepping, stack, variables and evaluate work",
+        "runInTerminal uses the integrated terminal",
+        "Missing or untrusted adapters fail with actionable confirmation"
+      ]
+    },
+    {
+      "id": "F110",
+      "name": "Legacy subsystem retirement",
+      "phase": 5,
+      "status": "planned",
+      "acceptance": [
+        "Electron and Node native runtime paths are removed",
+        "AI, Agent, Chat, MCP and Copilot paths are removed",
+        "Authentication, accounts and sync paths are removed",
+        "General Extension Host and non-theme extensions are removed",
+        "Language environments, remote, notebook, tasks and testing are removed"
+      ]
+    },
+    {
+      "id": "F120",
+      "name": "Branding, packaging, notices and release checks",
+      "phase": 5,
+      "status": "planned",
+      "acceptance": [
+        "Bundle id, protocol, data directory and UI use Plain branding",
+        "Third-party notices and SBOM match shipped code and assets",
+        "macOS, Windows and Linux packages build in CI"
+      ]
+    },
+    {
+      "id": "F130",
+      "name": "Browser and native end-to-end acceptance",
+      "phase": 5,
+      "status": "planned",
+      "acceptance": [
+        "Browser mock E2E covers required UI state machines",
+        "Computer-driven Tauri E2E covers real fs, PTY, Git, theme and DAP",
+        "No excluded product surface is reachable",
+        "Startup, memory and large workspace baselines are recorded"
+      ]
+    }
+  ]
+}
