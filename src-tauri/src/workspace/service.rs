@@ -2,12 +2,15 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::error::CommandError;
+use crate::path_policy::RelativePath;
 
 use super::dto::{
-    WorkspacePickRootsMode, WorkspacePickRootsResult, WorkspacePickRootsStatus, WorkspaceSnapshot,
+    WorkspaceEntryStat, WorkspacePickRootsMode, WorkspacePickRootsResult, WorkspacePickRootsStatus,
+    WorkspaceReadDirectoryResult, WorkspaceSnapshot,
 };
 use super::picker::{DirectoryPicker, DirectoryPickerResult};
-use super::{RootId, WorkspaceScope};
+use super::reader;
+use super::{RootId, WorkspaceRootLease, WorkspaceScope};
 
 #[derive(Default)]
 pub struct WorkspaceService {
@@ -54,6 +57,30 @@ impl WorkspaceService {
         self.scope_for_window(window_label)?.remove_root(root_id)
     }
 
+    pub async fn stat(
+        &self,
+        window_label: &str,
+        root_id: RootId,
+        relative_path: RelativePath,
+    ) -> Result<WorkspaceEntryStat, CommandError> {
+        self.run_reader(window_label, root_id, move |lease| {
+            reader::stat(&lease, &relative_path)
+        })
+        .await
+    }
+
+    pub async fn read_directory(
+        &self,
+        window_label: &str,
+        root_id: RootId,
+        relative_path: RelativePath,
+    ) -> Result<WorkspaceReadDirectoryResult, CommandError> {
+        self.run_reader(window_label, root_id, move |lease| {
+            reader::read_directory(&lease, &relative_path)
+        })
+        .await
+    }
+
     pub fn close_window(&self, window_label: &str) {
         let Ok(mut windows) = self.windows.lock() else {
             return;
@@ -70,6 +97,26 @@ impl WorkspaceService {
             .entry(window_label.to_owned())
             .or_insert_with(|| Arc::new(WindowWorkspace::new()))
             .clone())
+    }
+
+    async fn run_reader<T, F>(
+        &self,
+        window_label: &str,
+        root_id: RootId,
+        operation: F,
+    ) -> Result<T, CommandError>
+    where
+        T: Send + 'static,
+        F: FnOnce(WorkspaceRootLease) -> Result<T, CommandError> + Send + 'static,
+    {
+        let workspace = self.scope_for_window(window_label)?;
+        let lease = workspace.lease(root_id)?;
+        let leased_root_id = lease.root_id();
+        let result = tauri::async_runtime::spawn_blocking(move || operation(lease))
+            .await
+            .map_err(|_| workspace_read_failed());
+        workspace.validate_lease(leased_root_id)?;
+        result?
     }
 }
 
@@ -163,6 +210,22 @@ impl WindowWorkspace {
         Ok(state.scope.snapshot())
     }
 
+    fn lease(&self, root_id: RootId) -> Result<WorkspaceRootLease, CommandError> {
+        let state = lock(&self.state)?;
+        ensure_open(&state)?;
+        state.scope.lease(root_id)
+    }
+
+    fn validate_lease(&self, root_id: RootId) -> Result<(), CommandError> {
+        let state = lock(&self.state)?;
+        ensure_open(&state)?;
+        if state.scope.contains_root(root_id) {
+            Ok(())
+        } else {
+            Err(root_not_authorized())
+        }
+    }
+
     fn close(&self) {
         let Ok(mut state) = self.state.lock() else {
             return;
@@ -225,6 +288,17 @@ fn workspace_operation_failed() -> CommandError {
     CommandError::new(
         "WORKSPACE_CONFLICT",
         "The workspace operation could not be completed.",
+    )
+}
+
+fn workspace_read_failed() -> CommandError {
+    CommandError::new("IO_FAILED", "The workspace entry could not be read.")
+}
+
+fn root_not_authorized() -> CommandError {
+    CommandError::new(
+        "ROOT_NOT_AUTHORIZED",
+        "The workspace root is not authorized.",
     )
 }
 

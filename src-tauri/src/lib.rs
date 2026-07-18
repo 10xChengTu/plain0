@@ -50,6 +50,8 @@ pub fn run() {
             workspace::commands::workspace_snapshot,
             workspace::commands::workspace_pick_roots,
             workspace::commands::workspace_remove_root,
+            workspace::commands::workspace_stat,
+            workspace::commands::workspace_read_dir,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Plain");

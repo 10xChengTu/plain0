@@ -64,6 +64,15 @@ impl RelativePath {
     pub fn as_path(&self) -> &Path {
         &self.native
     }
+
+    pub fn join_child(&self, child: &str) -> Result<Self, CommandError> {
+        let wire = if self.is_root() {
+            child.to_owned()
+        } else {
+            format!("{}/{}", self.wire, child)
+        };
+        Self::parse_wire(&wire)
+    }
 }
 
 impl fmt::Display for RelativePath {
@@ -217,6 +226,49 @@ mod tests {
             .collect::<Vec<_>>()
             .join("/");
         assert!(RelativePath::parse_wire(&maximum_segments).is_ok());
+    }
+
+    #[test]
+    fn child_join_revalidates_the_complete_wire_path() {
+        let parent = RelativePath::parse_wire("parent").unwrap();
+        assert_eq!(
+            parent.join_child("child.txt").unwrap().as_wire(),
+            "parent/child.txt"
+        );
+        assert_eq!(
+            RelativePath::parse_wire("")
+                .unwrap()
+                .join_child("child.txt")
+                .unwrap()
+                .as_wire(),
+            "child.txt"
+        );
+        assert_eq!(
+            parent.join_child("../private").unwrap_err().code(),
+            "INVALID_RELATIVE_PATH"
+        );
+
+        let segment_limit = std::iter::repeat_n("a", MAX_RELATIVE_PATH_SEGMENTS)
+            .collect::<Vec<_>>()
+            .join("/");
+        assert_eq!(
+            RelativePath::parse_wire(&segment_limit)
+                .unwrap()
+                .join_child("overflow")
+                .unwrap_err()
+                .code(),
+            "INVALID_RELATIVE_PATH"
+        );
+
+        let byte_limit = "a".repeat(MAX_RELATIVE_PATH_BYTES);
+        assert_eq!(
+            RelativePath::parse_wire(&byte_limit)
+                .unwrap()
+                .join_child("overflow")
+                .unwrap_err()
+                .code(),
+            "INVALID_RELATIVE_PATH"
+        );
     }
 
     #[test]

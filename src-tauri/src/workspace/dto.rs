@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::{RootId, WorkspaceId};
+use crate::error::CommandError;
+use crate::path_policy::RelativePath;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -139,9 +141,109 @@ impl WorkspaceRemoveRootRequest {
     }
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceEntryRequest {
+    root_id: RootId,
+    relative_path: String,
+}
+
+impl WorkspaceEntryRequest {
+    pub fn into_parts(self) -> Result<(RootId, RelativePath), CommandError> {
+        let relative_path = RelativePath::parse_wire(&self.relative_path)?;
+        Ok((self.root_id, relative_path))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkspaceEntryKind {
+    File,
+    Directory,
+    Symlink,
+    SymlinkFile,
+    SymlinkDirectory,
+    Other,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceEntryStat {
+    kind: WorkspaceEntryKind,
+    size: u64,
+    mtime: u64,
+    ctime: u64,
+}
+
+impl WorkspaceEntryStat {
+    pub(crate) const fn new(kind: WorkspaceEntryKind, size: u64, mtime: u64, ctime: u64) -> Self {
+        Self {
+            kind,
+            size,
+            mtime,
+            ctime,
+        }
+    }
+
+    pub const fn kind(&self) -> WorkspaceEntryKind {
+        self.kind
+    }
+
+    pub const fn size(&self) -> u64 {
+        self.size
+    }
+
+    pub const fn mtime(&self) -> u64 {
+        self.mtime
+    }
+
+    pub const fn ctime(&self) -> u64 {
+        self.ctime
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDirectoryEntry {
+    name: String,
+    kind: WorkspaceEntryKind,
+}
+
+impl WorkspaceDirectoryEntry {
+    pub(crate) const fn new(name: String, kind: WorkspaceEntryKind) -> Self {
+        Self { name, kind }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub const fn kind(&self) -> WorkspaceEntryKind {
+        self.kind
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct WorkspaceReadDirectoryResult {
+    entries: Vec<WorkspaceDirectoryEntry>,
+}
+
+impl WorkspaceReadDirectoryResult {
+    pub(crate) const fn new(entries: Vec<WorkspaceDirectoryEntry>) -> Self {
+        Self { entries }
+    }
+
+    pub fn entries(&self) -> &[WorkspaceDirectoryEntry] {
+        &self.entries
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{WorkspacePickRootsMode, WorkspacePickRootsRequest};
+    use super::{
+        WorkspaceEntryKind, WorkspaceEntryRequest, WorkspacePickRootsMode,
+        WorkspacePickRootsRequest,
+    };
 
     #[test]
     fn pick_roots_mode_is_a_closed_lowercase_wire_enum() {
@@ -165,6 +267,53 @@ mod tests {
                 serde_json::from_str::<WorkspacePickRootsRequest>(invalid).is_err(),
                 "request must reject {invalid}"
             );
+        }
+    }
+
+    #[test]
+    fn entry_request_owns_and_validates_the_relative_path() {
+        let request: WorkspaceEntryRequest = serde_json::from_str(
+            r#"{"rootId":"00000000-0000-4000-8000-000000000000","relativePath":"src/main.rs"}"#,
+        )
+        .unwrap();
+        let (root_id, relative_path) = request.into_parts().unwrap();
+        assert_eq!(root_id.as_wire(), "00000000-0000-4000-8000-000000000000");
+        assert_eq!(relative_path.as_wire(), "src/main.rs");
+
+        for invalid in [
+            r#"{"rootId":"00000000-0000-4000-8000-000000000000","relativePath":"src","path":"private"}"#,
+            r#"{"rootId":"00000000-0000-4000-8000-000000000000"}"#,
+            r#"{"relativePath":"src"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<WorkspaceEntryRequest>(invalid).is_err(),
+                "request must reject {invalid}"
+            );
+        }
+
+        let traversal: WorkspaceEntryRequest = serde_json::from_str(
+            r#"{"rootId":"00000000-0000-4000-8000-000000000000","relativePath":"../private"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            traversal.into_parts().unwrap_err().code(),
+            "INVALID_RELATIVE_PATH"
+        );
+    }
+
+    #[test]
+    fn entry_kind_is_a_closed_camel_case_wire_enum() {
+        let values = [
+            (WorkspaceEntryKind::File, "file"),
+            (WorkspaceEntryKind::Directory, "directory"),
+            (WorkspaceEntryKind::Symlink, "symlink"),
+            (WorkspaceEntryKind::SymlinkFile, "symlinkFile"),
+            (WorkspaceEntryKind::SymlinkDirectory, "symlinkDirectory"),
+            (WorkspaceEntryKind::Other, "other"),
+        ];
+
+        for (kind, wire) in values {
+            assert_eq!(serde_json::to_value(kind).unwrap(), wire);
         }
     }
 }

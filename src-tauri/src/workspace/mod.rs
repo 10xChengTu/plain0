@@ -15,6 +15,7 @@ use crate::path_policy::RelativePath;
 pub(crate) mod commands;
 pub mod dto;
 pub mod picker;
+pub(crate) mod reader;
 pub mod service;
 
 use dto::{WorkspaceRootSnapshot, WorkspaceSnapshot};
@@ -107,6 +108,30 @@ pub struct ResolvedWorkspacePath<'scope> {
     root_id: RootId,
     directory: &'scope Dir,
     relative_path: PathBuf,
+}
+
+pub(crate) struct WorkspaceRootLease {
+    root_id: RootId,
+    directory: Dir,
+}
+
+impl fmt::Debug for WorkspaceRootLease {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkspaceRootLease")
+            .field("root_id", &self.root_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl WorkspaceRootLease {
+    pub const fn root_id(&self) -> RootId {
+        self.root_id
+    }
+
+    pub fn directory(&self) -> &Dir {
+        &self.directory
+    }
 }
 
 impl fmt::Debug for ResolvedWorkspacePath<'_> {
@@ -303,6 +328,19 @@ impl WorkspaceScope {
         Ok(())
     }
 
+    pub(crate) fn lease(&self, root_id: RootId) -> Result<WorkspaceRootLease, CommandError> {
+        let root = self.roots.get(&root_id).ok_or_else(root_not_authorized)?;
+        let directory = root
+            .directory
+            .try_clone()
+            .map_err(|_| root_capability_clone_failed())?;
+        Ok(WorkspaceRootLease { root_id, directory })
+    }
+
+    pub(crate) fn contains_root(&self, root_id: RootId) -> bool {
+        self.roots.contains_key(&root_id)
+    }
+
     pub fn resolve<'scope>(
         &'scope self,
         root_id: RootId,
@@ -447,6 +485,13 @@ fn root_not_authorized() -> CommandError {
     CommandError::new(
         "ROOT_NOT_AUTHORIZED",
         "The workspace root is not authorized.",
+    )
+}
+
+fn root_capability_clone_failed() -> CommandError {
+    CommandError::new(
+        "ROOT_UNAVAILABLE",
+        "The authorized workspace root is unavailable.",
     )
 }
 

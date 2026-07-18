@@ -1,13 +1,15 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{mpsc, Arc, Barrier, Mutex};
+use std::time::Duration;
 
 use tempfile::TempDir;
 
 use super::WorkspaceService;
 use crate::error::CommandError;
-use crate::workspace::dto::{WorkspacePickRootsMode, WorkspacePickRootsStatus};
+use crate::path_policy::RelativePath;
+use crate::workspace::dto::{WorkspaceEntryKind, WorkspacePickRootsMode, WorkspacePickRootsStatus};
 use crate::workspace::picker::{DirectoryPicker, DirectoryPickerFuture, DirectoryPickerResult};
 use crate::workspace::MAX_WORKSPACE_ROOTS;
 
@@ -596,6 +598,147 @@ fn non_utf8_selected_paths_fail_with_a_sanitized_encoding_error() {
     let serialized = serde_json::to_string(&error).unwrap();
     assert!(!serialized.contains("private"));
     assert_eq!(service.snapshot("main").unwrap().revision(), 0);
+}
+
+#[test]
+fn readers_are_isolated_by_window_and_root_id() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "shared-root");
+    std::fs::write(root.join("identity.txt"), b"plain").unwrap();
+    let service = WorkspaceService::new();
+
+    let first = block_on(service.pick_roots(
+        "first",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let second = block_on(service.pick_roots(
+        "second",
+        FakePicker::selected(vec![root]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let first_id = first.snapshot().roots()[0].root_id();
+    let second_id = second.snapshot().roots()[0].root_id();
+
+    let stat = block_on(service.stat(
+        "first",
+        first_id,
+        RelativePath::parse_wire("identity.txt").unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(stat.kind(), WorkspaceEntryKind::File);
+    assert_eq!(stat.size(), 5);
+    assert_eq!(
+        block_on(service.stat(
+            "second",
+            first_id,
+            RelativePath::parse_wire("identity.txt").unwrap(),
+        ))
+        .unwrap_err()
+        .code(),
+        "ROOT_NOT_AUTHORIZED"
+    );
+    assert!(block_on(service.read_directory(
+        "second",
+        second_id,
+        RelativePath::parse_wire("").unwrap(),
+    ))
+    .unwrap()
+    .entries()
+    .iter()
+    .any(|entry| entry.name() == "identity.txt"));
+}
+
+#[test]
+fn blocking_reader_releases_the_window_lock_and_discards_a_revoked_root_result() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    let service = Arc::new(WorkspaceService::new());
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let pending_service = Arc::clone(&service);
+    let pending_entered = Arc::clone(&entered);
+    let pending_release = Arc::clone(&release);
+    let pending = tauri::async_runtime::spawn(async move {
+        pending_service
+            .run_reader("main", root_id, move |_lease| {
+                pending_entered.wait();
+                pending_release.wait();
+                Ok(())
+            })
+            .await
+    });
+    entered.wait();
+
+    let remove_service = Arc::clone(&service);
+    let (removed_tx, removed_rx) = mpsc::channel();
+    let remover = std::thread::spawn(move || {
+        removed_tx
+            .send(remove_service.remove_root("main", root_id))
+            .unwrap();
+    });
+    let removed = removed_rx.recv_timeout(Duration::from_secs(2));
+    release.wait();
+    remover.join().unwrap();
+    let pending_result = block_on(pending).unwrap();
+
+    let removed = removed.expect("root removal must not wait for blocking I/O");
+    assert!(removed.unwrap().roots().is_empty());
+    assert_eq!(pending_result.unwrap_err().code(), "ROOT_NOT_AUTHORIZED");
+}
+
+#[test]
+fn blocking_reader_discards_a_result_after_its_window_closes() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    let service = Arc::new(WorkspaceService::new());
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let pending_service = Arc::clone(&service);
+    let pending_entered = Arc::clone(&entered);
+    let pending_release = Arc::clone(&release);
+    let pending = tauri::async_runtime::spawn(async move {
+        pending_service
+            .run_reader("main", root_id, move |_lease| {
+                pending_entered.wait();
+                pending_release.wait();
+                Ok(())
+            })
+            .await
+    });
+    entered.wait();
+    let close_service = Arc::clone(&service);
+    let (closed_tx, closed_rx) = mpsc::channel();
+    let closer = std::thread::spawn(move || {
+        close_service.close_window("main");
+        closed_tx.send(()).unwrap();
+    });
+    let closed = closed_rx.recv_timeout(Duration::from_secs(2));
+    release.wait();
+    closer.join().unwrap();
+    let pending_result = block_on(pending).unwrap();
+
+    closed.expect("window close must not wait for blocking I/O");
+    assert_eq!(
+        pending_result.unwrap_err().code(),
+        "WORKSPACE_WINDOW_CLOSED"
+    );
 }
 
 fn create_directory(temp: &TempDir, name: &str) -> PathBuf {
