@@ -2,6 +2,13 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+	validateCapabilityFiles,
+	validateMainCapability,
+	validateTauriApiBoundary,
+	validateTauriConfiguration,
+} from "./boundary-contracts.mjs";
+
 const root = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
 	"../..",
@@ -179,12 +186,8 @@ for (const file of appFiles) {
 			fail(`${relative} contains ${label}`);
 		}
 	}
-	if (
-		(source.includes("'@tauri-apps/api/core'") ||
-			source.includes("'@tauri-apps/api/event'")) &&
-		!relative.startsWith(`app${path.sep}platform${path.sep}tauri${path.sep}`)
-	) {
-		fail(`${relative} bypasses the sole Tauri bridge directory`);
+	for (const failure of validateTauriApiBoundary(source, relative)) {
+		fail(failure);
 	}
 	if (
 		source.includes("@codingame/monaco-vscode-api/extensions") &&
@@ -199,34 +202,24 @@ for (const file of appFiles) {
 const tauriConfig = JSON.parse(
 	await readFile(path.join(root, "src-tauri/tauri.conf.json"), "utf8"),
 );
-const security = tauriConfig.app?.security;
-if (security?.csp === null || security?.csp === undefined) {
-	fail("Tauri production CSP must be explicit and non-null");
-}
-if (security?.devCsp === null || security?.devCsp === undefined) {
-	fail("Tauri development CSP must be explicit and non-null");
-}
-if (tauriConfig.app?.withGlobalTauri !== false) {
-	fail("withGlobalTauri must remain false");
-}
-if (
-	security?.assetProtocol?.enable !== false ||
-	security?.assetProtocol?.scope?.length !== 0
-) {
-	fail("Tauri asset protocol must remain disabled with an empty scope");
+for (const failure of validateTauriConfiguration(tauriConfig)) {
+	fail(failure);
 }
 
+const capabilitiesRoot = path.join(root, "src-tauri/capabilities");
+const capabilityFiles = (
+	await readdir(capabilitiesRoot, { withFileTypes: true })
+)
+	.filter((entry) => entry.isFile())
+	.map((entry) => entry.name);
+for (const failure of validateCapabilityFiles(capabilityFiles)) {
+	fail(failure);
+}
 const capability = JSON.parse(
-	await readFile(path.join(root, "src-tauri/capabilities/main.json"), "utf8"),
+	await readFile(path.join(capabilitiesRoot, "main.json"), "utf8"),
 );
-const allowedPermissions = new Set([
-	"core:event:allow-listen",
-	"core:event:allow-unlisten",
-]);
-for (const permission of capability.permissions ?? []) {
-	if (!allowedPermissions.has(permission)) {
-		fail(`main capability has a non-allowlisted permission: ${permission}`);
-	}
+for (const failure of validateMainCapability(capability)) {
+	fail(failure);
 }
 
 const cargo = await readFile(path.join(root, "src-tauri/Cargo.toml"), "utf8");
