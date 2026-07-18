@@ -68,8 +68,9 @@ cargo test --manifest-path src-tauri/Cargo.toml
 - PTY、搜索、文件监听和 DAP 使用有界事件流，必须处理取消、退出、背压和窗口销毁。
 - DAP 是 `Content-Length` framing 的独立协议，不得按 JSON-RPC 处理。
 - Tauri capability 采用最小权限；新增权限必须同时添加威胁说明和测试。
-- 禁止依赖或导入 `monaco-vscode-api` 的 AI、Chat、Auth、Sync、Gallery、Remote、Task、Testing、Notebook 或 Extension Host service packages。
-- 允许使用 extension contribution registry 解析静态主题 manifest，但不得创建 local、worker、WASM 或 sidecar Extension Host。
+- 禁止依赖或导入 `monaco-vscode-api` 的 AI、Chat、Auth、Sync、Gallery、Remote、Task、Testing 或 Notebook service packages。
+- `@codingame/monaco-vscode-api` 会传递依赖 extensions service；只允许把它当作惰性的静态 contribution registry，不得由 `app/` 直接导入该 service override，也不得创建 local、worker、WASM、remote 或 sidecar Extension Host。
+- 禁止 `vscode/localExtensionHost`、`extensionHost.worker`、`ExtensionHostKind`、`setLocalExtensionHost` 和 `enableWorkerExtensionHost: true` 等宿主入口或配置。
 
 ## 工作方式
 

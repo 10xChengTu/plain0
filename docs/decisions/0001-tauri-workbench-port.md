@@ -24,7 +24,7 @@
 - Plain 自己拥有 TypeScript feature composition、IPC DTO 和 Rust service contract。
 - Tauri 替换 Electron lifecycle/window/menu/IPC/build。
 - Rust 替换 Node/Electron 的 fs/search/PTY/Git/DAP/theme/storage。
-- 不导入 AI、Chat、Auth、Sync、Gallery、Remote、Task、Testing、Notebook 或 Extension Host packages。
+- 不导入 AI、Chat、Auth、Sync、Gallery、Remote、Task、Testing 或 Notebook packages。API 包传递带入的 extensions service 只作惰性静态 registry，不直接导入或启用任何 Extension Host。
 - 当前 Code OSS 源码只在迁移期作为行为、静态资源和测试基线，最终删除。
 
 主题 contribution registry 可以作为内部声明解析机制，但不会创建 local、worker、WASM 或 sidecar Extension Host。
@@ -36,7 +36,7 @@ SideX 只作为 MIT Rust donor/reference；每个借鉴模块重新审计并按 
 优点：
 
 - 保留成熟编辑/Workbench 行为，同时避免维护数千个上游源码文件。
-- service package 可按产品范围组合和升级，禁止面可以由 import/lockfile 检查强制执行。
+- service package 可按产品范围组合和升级，禁止面可以由 direct dependency、import、宿主配置和最终 worker 产物检查强制执行。
 - 不捆绑 Chromium/Node runtime，原生权限集中在 Rust。
 
 代价：

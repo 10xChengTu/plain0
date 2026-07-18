@@ -1,0 +1,374 @@
+diff --git a/index.js b/index.js
+index 0750755e93896afef3a9737a13c2eacbba900d3d..15d775bd31285599371d38c52734b67b08c28c69 100644
+--- a/index.js
++++ b/index.js
+@@ -2,7 +2,6 @@
+ import { __decorate, __param } from '@codingame/monaco-vscode-api/external/tslib/tslib.es6';
+ import { IFileService } from '@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files.service';
+ import { ILifecycleService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/lifecycle/common/lifecycle.service';
+-import { ExtensionHostStartup } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions';
+ import { IExtensionService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions.service';
+ import { ILogService } from '@codingame/monaco-vscode-api/vscode/vs/platform/log/common/log.service';
+ import '@codingame/monaco-vscode-api/vscode/vs/platform/extensions/common/extensions';
+@@ -24,15 +23,12 @@ import { IBrowserWorkbenchEnvironmentService } from '@codingame/monaco-vscode-ap
+ import { SyncDescriptor } from '@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors';
+ import { IUserDataInitializationService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/userData/browser/userDataInit.service';
+ import { ExtensionsProposedApi } from './vscode/src/vs/workbench/services/extensions/common/extensionsProposedApi.js';
+-import { BrowserExtensionHostFactory, BrowserExtensionHostKindPicker, ExtensionService } from './vscode/src/vs/workbench/services/extensions/browser/extensionService.js';
+-import { ExtensionHostKind } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensionHostKind';
+-export { ExtensionHostKind } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensionHostKind';
++import { ExtensionService } from './vscode/src/vs/workbench/services/extensions/browser/extensionService.js';
+ import './vscode/src/vs/workbench/services/extensions/common/extensionRunningLocationTracker.js';
+ import '@codingame/monaco-vscode-api/vscode/vs/base/common/charCode';
+ import '@codingame/monaco-vscode-api/vscode/vs/base/common/marshallingIds';
+ import '@codingame/monaco-vscode-api/vscode/vs/base/common/path';
+ import { language } from '@codingame/monaco-vscode-api/vscode/vs/base/common/platform';
+-import { WebWorkerExtensionHost } from './vscode/src/vs/workbench/services/extensions/browser/webWorkerExtensionHost.js';
+ import { IUserDataProfileService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/userDataProfile/common/userDataProfile.service';
+ import { IWorkspaceTrustManagementService } from '@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspaceTrust.service';
+ import { IRemoteExplorerService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/remote/common/remoteExplorerService.service';
+@@ -41,191 +37,30 @@ import { ExtensionResourceLoaderService } from './vscode/src/vs/platform/extensi
+ import { IExtensionResourceLoaderService } from '@codingame/monaco-vscode-api/vscode/vs/platform/extensionResourceLoader/common/extensionResourceLoader.service';
+ import { ExtensionBisectService } from './vscode/src/vs/workbench/services/extensionManagement/browser/extensionBisect.js';
+ import { IExtensionBisectService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensionManagement/browser/extensionBisect.service';
+-import { changeUrlDomain } from '@codingame/monaco-vscode-api/service-override/tools/url';
+ import { CustomSchemas } from '@codingame/monaco-vscode-files-service-override';
+-import { registerAssets } from '@codingame/monaco-vscode-api/assets';
+-import { getForcedExtensionHostKind, getBuiltinExtensions } from '@codingame/monaco-vscode-api/extensions';
++import { getBuiltinExtensions } from '@codingame/monaco-vscode-api/extensions';
+ import { WebExtensionsScannerService } from './vscode/src/vs/workbench/services/extensionManagement/browser/webExtensionsScannerService.js';
+ import { IBuiltinExtensionsScannerService } from '@codingame/monaco-vscode-api/vscode/vs/platform/extensions/common/extensions.service';
+ import { ExtensionManifestTranslator } from '@codingame/monaco-vscode-api/vscode/vs/platform/extensionManagement/common/extensionsScannerService';
+ import { getBuiltInExtensionTranslationsUris } from '@codingame/monaco-vscode-api/l10n';
+-import '@codingame/monaco-vscode-api/vscode/vs/workbench/api/common/jsonValidationExtensionPoint';
+ import '@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/colorExtensionPoint';
+ import '@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/iconExtensionPoint';
+ import '@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/tokenClassificationExtensionPoint';
+-import '@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/codeEditor/common/languageConfigurationExtensionPoint';
+-import '@codingame/monaco-vscode-api/vscode/vs/workbench/api/browser/statusBarExtensionPoint';
+-import './vscode/src/vs/workbench/services/themes/browser/cssExtensionPoint.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadAgentEditorComments.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadLocalization.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadBulkEdits.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadLanguageModels.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadChatAgents2.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadChatCodeMapper.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadLanguageModelTools.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadEmbeddings.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadCodeInsets.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadCLICommands.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadClipboard.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadCommands.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadConfiguration.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadConsole.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadDebugService.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadDecorations.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadDiagnostics.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadDialogs.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadDocumentContentProviders.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadDocuments.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadDocumentsAndEditors.js';
+-import '@codingame/monaco-vscode-api/vscode/vs/base/common/event';
+-import '@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle';
+-import '@codingame/monaco-vscode-api/vscode/vs/editor/common/config/editorOptions';
+-import '@codingame/monaco-vscode-api/vscode/vs/editor/common/core/selection';
+-import '@codingame/monaco-vscode-api/vscode/vs/editor/common/editorCommon';
+-import '@codingame/monaco-vscode-api/vscode/vs/editor/contrib/snippet/browser/snippetController2';
+-import '@codingame/monaco-vscode-api/vscode/vs/workbench/api/common/extHost.protocol';
+-import '@codingame/monaco-vscode-api/vscode/vs/base/common/arrays';
+-import '@codingame/monaco-vscode-api/vscode/vs/editor/contrib/editorState/browser/editorState';
+-import '@codingame/monaco-vscode-api/vscode/vs/editor/contrib/snippet/browser/snippetParser';
+-import './vscode/src/vs/workbench/api/browser/mainThreadEditors.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadEditorTabs.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadErrors.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadExtensionService.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadFileSystem.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadFileSystemEventService.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadLanguageFeatures.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadLanguages.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadLogService.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadMessageService.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadManagedSockets.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadBrowserTunnelProxy.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadOutputService.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadProgress.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadQuickDiff.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadDocumentDiff.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadQuickOpen.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadRemoteConnectionData.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadSaveParticipant.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadSpeech.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadEditSessionIdentityParticipant.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadSCM.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadSearch.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadStatusBar.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadStorage.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadTelemetry.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadTerminalService.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadTerminalShellIntegration.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadTheming.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadTreeViews.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadDownloadService.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadUrls.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadUriOpeners.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadWindow.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadPower.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadWebviewManager.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadWorkspace.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadComments.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadNotebook.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadNotebookKernels.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadNotebookDocumentsAndEditors.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadNotebookRenderers.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadNotebookSaveParticipant.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadInteractive.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadTask.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadLabelService.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadTunnelService.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadAuthentication.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadTimeline.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadTesting.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadSecretState.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadShare.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadProfileContentHandlers.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadAiRelatedInformation.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadAiEmbeddingVector.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadAiSettingsSearch.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadMcp.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadChatContext.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadChatDebug.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadChatStatus.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadChatQuota.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadChatInputNotification.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadChatOutputRenderer.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadChatSessions.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadDataChannels.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadMeteredConnection.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadGitExtensionService.js';
+-import './vscode/src/vs/workbench/api/browser/mainThreadBrowsers.js';
+-
+-let localExtensionHost;
+-function setLocalExtensionHost(_localExtensionHost) {
+-    localExtensionHost = _localExtensionHost;
+-}
+-let BrowserExtensionHostFactoryOverride = class BrowserExtensionHostFactoryOverride extends BrowserExtensionHostFactory {
+-    constructor(enableWorkerExtensionHost, _extensionsProposedApi, _scanWebExtensions, _getExtensionRegistrySnapshotWhenReady, _instantiationService, _remoteAgentService, _remoteAuthorityResolverService, _extensionEnablementService, _logService) {
+-        super(_extensionsProposedApi, _scanWebExtensions, _getExtensionRegistrySnapshotWhenReady, _instantiationService, _remoteAgentService, _remoteAuthorityResolverService, _extensionEnablementService, _logService);
+-        this.enableWorkerExtensionHost = enableWorkerExtensionHost;
+-    }
+-    createExtensionHost(runningLocations, runningLocation, isInitialStart) {
+-        switch (runningLocation.kind) {
+-            case ExtensionHostKind.LocalProcess: {
+-                if (localExtensionHost == null) {
+-                    return null;
+-                }
+-                return this._instantiationService.createInstance(localExtensionHost, runningLocation, ExtensionHostStartup.EagerAutoStart, this._createLocalExtensionHostDataProvider(runningLocations, runningLocation, isInitialStart));
+-            }
+-            case ExtensionHostKind.LocalWebWorker: {
+-                if (!this.enableWorkerExtensionHost) {
+-                    return null;
+-                }
+-                const startup = isInitialStart
+-                    ? ExtensionHostStartup.EagerManualStart
+-                    : ExtensionHostStartup.EagerAutoStart;
+-                return this._instantiationService.createInstance(WebWorkerExtensionHost, runningLocation, startup, this._createLocalExtensionHostDataProvider(runningLocations, runningLocation, isInitialStart));
+-            }
+-            case ExtensionHostKind.Remote: {
+-                return super.createExtensionHost(runningLocations, runningLocation, isInitialStart);
+-            }
+-        }
++class DisabledExtensionHostFactory {
++    createExtensionHost() {
++        return null;
+     }
+-};
+-BrowserExtensionHostFactoryOverride = __decorate([
+-    __param(4, IInstantiationService),
+-    __param(5, IRemoteAgentService),
+-    __param(6, IRemoteAuthorityResolverService),
+-    __param(7, IWorkbenchExtensionEnablementService),
+-    __param(8, ILogService)
+-], BrowserExtensionHostFactoryOverride);
+-let LocalBrowserExtensionHostKindPicker = class LocalBrowserExtensionHostKindPicker extends BrowserExtensionHostKindPicker {
+-    constructor(allowedExtHostKinds, _logService) {
+-        super(_logService);
+-        this.allowedExtHostKinds = allowedExtHostKinds;
+-    }
+-    pickExtensionHostKind(extensionId, extensionKinds, isInstalledLocally, isInstalledRemotely, preference) {
+-        const forcedKind = getForcedExtensionHostKind(extensionId.value);
+-        if (forcedKind != null) {
+-            return forcedKind;
+-        }
+-        const detectedKind = super.pickExtensionHostKind(extensionId, extensionKinds, isInstalledLocally, isInstalledRemotely, preference);
+-        if (detectedKind != null && !this.allowedExtHostKinds.includes(detectedKind)) {
+-            return this.allowedExtHostKinds[0] ?? null;
+-        }
+-        return detectedKind;
++}
++
++class DisabledExtensionHostKindPicker {
++    pickExtensionHostKind() {
++        return null;
+     }
+-};
+-LocalBrowserExtensionHostKindPicker = __decorate([
+-    __param(1, ILogService)
+-], LocalBrowserExtensionHostKindPicker);
++}
+ let ExtensionServiceOverride = class ExtensionServiceOverride extends ExtensionService {
+-    constructor(enableWorkerExtensionHost, instantiationService, notificationService, browserEnvironmentService, telemetryService, extensionEnablementService, fileService, productService, extensionManagementService, contextService, configurationService, extensionManifestPropertiesService, webExtensionsScannerService, logService, remoteAgentService, remoteExtensionsScannerService, lifecycleService, remoteAuthorityResolverService, userDataInitializationService, userDataProfileService, workspaceTrustManagementService, remoteExplorerService, dialogService) {
++    constructor(_enableWorkerExtensionHost, instantiationService, notificationService, browserEnvironmentService, telemetryService, extensionEnablementService, fileService, productService, extensionManagementService, contextService, configurationService, extensionManifestPropertiesService, webExtensionsScannerService, logService, remoteAgentService, remoteExtensionsScannerService, lifecycleService, remoteAuthorityResolverService, userDataInitializationService, userDataProfileService, workspaceTrustManagementService, remoteExplorerService, dialogService) {
+         const extensionsProposedApi = instantiationService.createInstance(ExtensionsProposedApi);
+-        const extensionHostFactory = new BrowserExtensionHostFactoryOverride(enableWorkerExtensionHost, extensionsProposedApi, async () => await this._scanWebExtensions(), () => this._getExtensionRegistrySnapshotWhenReady(), instantiationService, remoteAgentService, remoteAuthorityResolverService, extensionEnablementService, logService);
+-        super({ hasLocalProcess: true, allowRemoteExtensionsInLocalWebWorker: true }, extensionsProposedApi, extensionHostFactory, new LocalBrowserExtensionHostKindPicker(enableWorkerExtensionHost
+-            ? [
+-                ExtensionHostKind.LocalWebWorker,
+-                ExtensionHostKind.LocalProcess,
+-                ExtensionHostKind.Remote
+-            ]
+-            : [ExtensionHostKind.LocalProcess, ExtensionHostKind.Remote], logService), instantiationService, notificationService, browserEnvironmentService, telemetryService, extensionEnablementService, fileService, productService, extensionManagementService, contextService, configurationService, extensionManifestPropertiesService, webExtensionsScannerService, logService, remoteAgentService, remoteExtensionsScannerService, lifecycleService, remoteAuthorityResolverService, userDataInitializationService, userDataProfileService, workspaceTrustManagementService, remoteExplorerService, dialogService);
++        super({ hasLocalProcess: false, allowRemoteExtensionsInLocalWebWorker: false }, extensionsProposedApi, new DisabledExtensionHostFactory(), new DisabledExtensionHostKindPicker(), instantiationService, notificationService, browserEnvironmentService, telemetryService, extensionEnablementService, fileService, productService, extensionManagementService, contextService, configurationService, extensionManifestPropertiesService, webExtensionsScannerService, logService, remoteAgentService, remoteExtensionsScannerService, lifecycleService, remoteAuthorityResolverService, userDataInitializationService, userDataProfileService, workspaceTrustManagementService, remoteExplorerService, dialogService);
+     }
+     async deltaExtensions(toAdd, toRemove) {
+         await this._handleDeltaExtensions(new DeltaExtensionsQueueItem(toAdd, toRemove));
+@@ -290,16 +125,9 @@ CustomBuiltinExtensionsScannerService = __decorate([
+     __param(1, IExtensionResourceLoaderService),
+     __param(2, ILogService)
+ ], CustomBuiltinExtensionsScannerService);
+-let iframeAlternateDomain;
+-registerAssets({
+-    'vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html': () => changeUrlDomain(new URL('./vscode/src/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html', import.meta.url).href, iframeAlternateDomain)
+-});
+-function getServiceOverride({ enableWorkerExtensionHost, iframeAlternateDomain: _iframeAlternateDomain } = {}) {
+-    if (_iframeAlternateDomain != null) {
+-        iframeAlternateDomain = _iframeAlternateDomain;
+-    }
++function getServiceOverride() {
+     return {
+-        [IExtensionService.toString()]: new SyncDescriptor(ExtensionServiceOverride, [enableWorkerExtensionHost], false),
++        [IExtensionService.toString()]: new SyncDescriptor(ExtensionServiceOverride, [false], false),
+         [IExtensionManifestPropertiesService.toString()]: new SyncDescriptor(ExtensionManifestPropertiesService, [], true),
+         [IExtensionResourceLoaderService.toString()]: new SyncDescriptor(ExtensionResourceLoaderServiceOverride, [], true),
+         [IExtensionBisectService.toString()]: new SyncDescriptor(ExtensionBisectService, [], true),
+@@ -308,4 +136,4 @@ function getServiceOverride({ enableWorkerExtensionHost, iframeAlternateDomain:
+     };
+ }
+ 
+-export { CustomBuiltinExtensionsScannerService, ExtensionServiceOverride, getServiceOverride as default, setLocalExtensionHost };
++export { CustomBuiltinExtensionsScannerService, ExtensionServiceOverride, getServiceOverride as default };
+diff --git a/vscode/src/vs/workbench/services/extensions/browser/extensionService.js b/vscode/src/vs/workbench/services/extensions/browser/extensionService.js
+index c6eaab78aad20a98fd6f448a2fc283c38294d4ba..ec061cc1487d2b00c466150ca63b9fb96c4077d1 100644
+--- a/vscode/src/vs/workbench/services/extensions/browser/extensionService.js
++++ b/vscode/src/vs/workbench/services/extensions/browser/extensionService.js
+@@ -20,16 +20,13 @@ import { IWorkspaceContextService } from '@codingame/monaco-vscode-api/vscode/vs
+ import { IWorkspaceTrustManagementService } from '@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspaceTrust.service';
+ import { IBrowserWorkbenchEnvironmentService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/environment/browser/environmentService.service';
+ import { IWorkbenchExtensionEnablementService, IWorkbenchExtensionManagementService, IWebExtensionsScannerService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensionManagement/common/extensionManagement.service';
+-import { WebWorkerExtensionHost } from './webWorkerExtensionHost.js';
+ import { FetchFileSystemProvider } from './webWorkerFileSystemProvider.js';
+-import { AbstractExtensionService, RemoteExtensions, LocalExtensions, isResolverExtension, ResolverExtensions, checkEnabledAndProposedAPI } from '../common/abstractExtensionService.js';
++import { AbstractExtensionService, RemoteExtensions, LocalExtensions, isResolverExtension, ResolverExtensions } from '../common/abstractExtensionService.js';
+ import { ExtensionHostKind, extensionRunningPreferenceToString, extensionHostKindToString, ExtensionRunningPreference } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensionHostKind';
+ import { IExtensionManifestPropertiesService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensionManifestPropertiesService.service';
+-import { filterExtensionDescriptions } from '../common/extensionRunningLocationTracker.js';
+-import { toExtensionDescription, ExtensionHostStartup, ExtensionHostExtensions } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions';
++import { toExtensionDescription } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions';
+ import '../common/extensionsProposedApi.js';
+ import { dedupExtensions } from '../common/extensionsUtil.js';
+-import { RemoteExtensionHost } from '../common/remoteExtensionHost.js';
+ import { LifecyclePhase } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/lifecycle/common/lifecycle';
+ import { ILifecycleService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/lifecycle/common/lifecycle.service';
+ import { IRemoteAgentService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/remote/common/remoteAgentService.service';
+@@ -210,90 +207,8 @@ let BrowserExtensionHostFactory = class BrowserExtensionHostFactory {
+         this._extensionEnablementService = _extensionEnablementService;
+         this._logService = _logService;
+     }
+-    createExtensionHost(runningLocations, runningLocation, isInitialStart) {
+-        switch (runningLocation.kind) {
+-        case ExtensionHostKind.LocalProcess:
+-            {
+-                return null;
+-            }
+-        case ExtensionHostKind.LocalWebWorker:
+-            {
+-                const startup = (isInitialStart ? ExtensionHostStartup.EagerManualStart : ExtensionHostStartup.EagerAutoStart);
+-                return this._instantiationService.createInstance(
+-                    WebWorkerExtensionHost,
+-                    runningLocation,
+-                    startup,
+-                    this._createLocalExtensionHostDataProvider(runningLocations, runningLocation, isInitialStart)
+-                );
+-            }
+-        case ExtensionHostKind.Remote:
+-            {
+-                const remoteAgentConnection = this._remoteAgentService.getConnection();
+-                if (remoteAgentConnection) {
+-                    return this._instantiationService.createInstance(
+-                        RemoteExtensionHost,
+-                        runningLocation,
+-                        this._createRemoteExtensionHostDataProvider(runningLocations, remoteAgentConnection.remoteAuthority)
+-                    );
+-                }
+-                return null;
+-            }
+-        }
+-    }
+-    _createLocalExtensionHostDataProvider(runningLocations, desiredRunningLocation, isInitialStart) {
+-        return {
+-            getInitData: async () => {
+-                if (isInitialStart) {
+-                    const localExtensions = checkEnabledAndProposedAPI(
+-                        this._logService,
+-                        this._extensionEnablementService,
+-                        this._extensionsProposedApi,
+-                        await this._scanWebExtensions(),
+-                         true
+-                    );
+-                    const runningLocation = runningLocations.computeRunningLocation(localExtensions, [], false);
+-                    const myExtensions = filterExtensionDescriptions(
+-                        localExtensions,
+-                        runningLocation,
+-                        extRunningLocation => desiredRunningLocation.equals(extRunningLocation)
+-                    );
+-                    const extensions = ( new ExtensionHostExtensions(0, localExtensions, ( myExtensions.map(extension => extension.identifier))));
+-                    return {
+-                        extensions
+-                    };
+-                } else {
+-                    const snapshot = await this._getExtensionRegistrySnapshotWhenReady();
+-                    const myExtensions = runningLocations.filterByRunningLocation(snapshot.extensions, desiredRunningLocation);
+-                    const extensions = ( new ExtensionHostExtensions(snapshot.versionId, snapshot.extensions, ( myExtensions.map(extension => extension.identifier))));
+-                    return {
+-                        extensions
+-                    };
+-                }
+-            }
+-        };
+-    }
+-    _createRemoteExtensionHostDataProvider(runningLocations, remoteAuthority) {
+-        return {
+-            remoteAuthority: remoteAuthority,
+-            getInitData: async () => {
+-                const snapshot = await this._getExtensionRegistrySnapshotWhenReady();
+-                const remoteEnv = await this._remoteAgentService.getEnvironment();
+-                if (!remoteEnv) {
+-                    throw ( new Error("Cannot provide init data for remote extension host!"));
+-                }
+-                const myExtensions = runningLocations.filterByExtensionHostKind(snapshot.extensions, ExtensionHostKind.Remote);
+-                const extensions = ( new ExtensionHostExtensions(snapshot.versionId, snapshot.extensions, ( myExtensions.map(extension => extension.identifier))));
+-                return {
+-                    connectionData: this._remoteAuthorityResolverService.getConnectionData(remoteAuthority),
+-                    pid: remoteEnv.pid,
+-                    appRoot: remoteEnv.appRoot,
+-                    extensionHostLogsPath: remoteEnv.extensionHostLogsPath,
+-                    globalStorageHome: remoteEnv.globalStorageHome,
+-                    workspaceStorageHome: remoteEnv.workspaceStorageHome,
+-                    extensions
+-                };
+-            }
+-        };
++    createExtensionHost() {
++        return null;
+     }
+ };
+ BrowserExtensionHostFactory = ( __decorate([( __param(3, IInstantiationService)), ( __param(4, IRemoteAgentService)), ( __param(5, IRemoteAuthorityResolverService)), ( __param(6, IWorkbenchExtensionEnablementService)), ( __param(7, ILogService))], BrowserExtensionHostFactory));

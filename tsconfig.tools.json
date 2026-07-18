@@ -1,0 +1,23 @@
+{
+	"compilerOptions": {
+		"target": "ES2023",
+		"module": "ESNext",
+		"lib": ["ES2023", "DOM"],
+		"skipLibCheck": true,
+		"moduleResolution": "Bundler",
+		"resolveJsonModule": true,
+		"isolatedModules": true,
+		"moduleDetection": "force",
+		"noEmit": true,
+		"strict": true,
+		"noUncheckedIndexedAccess": true,
+		"types": ["node"]
+	},
+	"include": [
+		"tests/**/*.ts",
+		"vite.config.ts",
+		"vitest.config.ts",
+		"playwright.config.ts"
+	],
+	"exclude": ["build", "cli", "extensions", "remote", "src", "test"]
+}

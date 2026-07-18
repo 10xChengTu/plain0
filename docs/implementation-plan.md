@@ -27,7 +27,7 @@
 4. capability/CSP 最小权限、app data 路径和本地 settings。
 5. 前端 browser mock bridge、Rust command test harness。
 
-退出条件：`pnpm tauri dev` 显示 Workbench；`pnpm check` 同时覆盖 TS/Rust 和禁止依赖；无 Electron、Extension Host 或 AI/Auth/Sync service 参与。
+退出条件：`pnpm tauri dev` 显示 Workbench；`pnpm check` 同时覆盖 TS/Rust 和禁止依赖；无 Electron、Extension Host 执行入口或 AI/Auth/Sync service 参与。仅允许 `monaco-vscode-api` 内部惰性的静态 contribution registry。
 
 ## 阶段 2：编辑主链
 

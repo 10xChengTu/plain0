@@ -35,8 +35,8 @@
 
 ### 架构与供应链检查
 
-- `app/` import、`package.json` 和 lockfile 只能出现 ADR 允许的 Workbench service packages。
-- 拒绝 AI、Chat、MCP、Authentication、Sync、Gallery、Remote、Task、Testing、Notebook 和所有 Extension Host entry。
+- `app/` import、`package.json` 和 lockfile 只能出现 ADR 允许的 Workbench service packages；`monaco-vscode-api` 对 extensions service 的精确传递依赖只作静态 registry 使用。
+- 拒绝 AI、Chat、MCP、Authentication、Sync、Gallery、Remote、Task、Testing、Notebook，以及 local/worker/WASM/remote Extension Host 入口或启用配置。
 - 检查最终 bundle 不含 Electron、Node PTY、模型 SDK、账号/同步字符串和通用扩展执行 worker。
 - 检查 Tauri CSP/capabilities 没有 `csp: null`、`$HOME/**`、宽泛 shell/fs scope。
 - 记录依赖许可证、bundle size 和第三方 notices 差异。

@@ -4,8 +4,8 @@
 
 ## 当前状态
 
-- 阶段：0 已完成；下一阶段为 1 — Tauri 最小闭环。
-- WIP：无。下一个工作项是 `F010`，开始实现时再标记为 `in_progress`。
+- 阶段：1 — Tauri 最小闭环。
+- WIP：`F010` Tauri application and IPC foundation。
 - 当前 Code OSS 基线：1.130.0，Electron 42.6.0，约 16,555 个跟踪文件。
 - 工作树在本工作项开始时干净；SideX 与 monaco-vscode-api 的临时浅克隆均已删除且未纳入版本管理。
 
@@ -20,9 +20,10 @@
 
 ## 下一步
 
-1. 开始 `F010` 时把它标记为 `in_progress`，保持 WIP 不超过 1。
+1. 核实现行 Tauri 2 与 `monaco-vscode-api` packages 的稳定版本和最小组合。
 2. 搭建 Tauri 2 最小应用、允许的 Workbench service 组合、类型化 IPC 和统一检查入口。
-3. 先建立 service/import denylist、CSP/capability 和 browser mock，再接真实文件服务。
+3. 建立 service/import denylist、CSP/capability、feature evidence schema 和 browser mock。
+4. 在不依赖 Electron/Extension Host 的情况下启动实际 Tauri 窗口并完成最小 E2E。
 
 ## 当前验收命令
 

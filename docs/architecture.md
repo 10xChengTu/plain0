@@ -105,7 +105,9 @@ tests/
 - Task、Testing、Notebook、Interactive、LSP 或语言 feature extensions。
 - 任何 `vscode/localExtensionHost`、extension worker、WASM runtime 或外部 Extension Host。
 
-构建必须有架构检查：扫描 `package.json`、lockfile 和 `app/` import，禁止上述包或入口。主题 manifest 可通过 extension contribution registry 注册，但 registry 只收到导入器产生的白名单静态描述，不启动 host。
+`@codingame/monaco-vscode-api` 35.0.1 的 `initialize()` 会无条件组合 extensions service，API 包本身也对它有传递依赖。因此 lockfile 中允许这个精确的惰性 registry 依赖，但 `app/` 不得直接导入 extensions service override。默认的 worker host 必须保持关闭；不得出现 `vscode/localExtensionHost`、`extensionHost.worker`、`ExtensionHostKind`、`setLocalExtensionHost` 或 `enableWorkerExtensionHost: true`。
+
+构建必须有架构检查：扫描 `package.json`、lockfile、`app/` import 和最终 worker 产物，禁止上述执行入口及其他排除包。主题 manifest 可通过 extension contribution registry 注册，但 registry 只收到 Rust 导入器产生的白名单静态描述，不启动 host。
 
 ## 5. 依赖方向
 

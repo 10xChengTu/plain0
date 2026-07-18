@@ -9,30 +9,30 @@
 
 ## 整机候选
 
-| 项目 | 现状与能力 | 许可证 | 结论 |
-|---|---|---|---|
-| [SideX](https://github.com/Sidenai/sidex) | Tauri 2 + Rust + 直接移植的旧版 VS Code Workbench；来源未记录可靠 upstream commit，代码/产品标记约在 1.96–1.110 时代；文件、PTY、Git、search、theme、SQLite 已有，debug/extension host 仍在进行；v0.1.2，约 2.5k stars | MIT | 最接近的整机参考；只作 Rust donor/架构样本，不能无审计整仓替换 |
-| [monaco-vscode-api](https://github.com/CodinGame/monaco-vscode-api) | 把 Code OSS 1.128.0（commit `fc3def6774c76082adf699d366f31a557ce5573f`）能力拆成 Workbench/theme/TextMate/files/search/terminal/SCM/debug 等 service packages，版本活跃 | MIT | 推荐产品前端主体；只安装 allowlist packages，禁止 extension host 与 AI/Auth/Sync 等包 |
-| [Terax](https://github.com/crynta/terax-ai) | Tauri 2、React、CodeMirror、portable-pty、xterm、文件树和 Git graph；AI 深度耦合，无通用 DAP/VSIX 主题 | Apache-2.0 | 参考 PTY、Git graph 和打包，不作基座 |
-| [Athas](https://github.com/athasdev/athas) | Tauri 编辑器，Git/LSP/terminal/AI/协作能力广 | AGPL-3.0 | 只参考产品行为，不搬代码 |
-| [JulIDE](https://github.com/sinisterMage/JulIde) | Tauri + Monaco，Git2 能力较完整，但强绑定 Julia | MIT | 参考 Git UI/API，不作通用基座 |
-| [Blink](https://github.com/bmarti44/blink) | Tauri + monaco-vscode-api full workbench POC，项目自称 buggy、无稳定 release | 复制前需再次核验 | 只参考接线，不作基座 |
-| [montauri-editor](https://github.com/TimSusa/montauri-editor) | 旧 Tauri + Monaco 极小原型，功能很少 | MIT | 排除 |
+| 项目                                                                | 现状与能力                                                                                                                                                                                                                                                   | 许可证           | 结论                                                                                          |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------- | --------------------------------------------------------------------------------------------- |
+| [SideX](https://github.com/Sidenai/sidex)                           | Tauri 2 + Rust + 直接移植的旧版 VS Code Workbench；来源未记录可靠 upstream commit，代码/产品标记约在 1.96–1.110 时代；文件、PTY、Git、search、theme、SQLite 已有，debug/extension host 仍在进行；v0.1.2，约 2.5k stars                                       | MIT              | 最接近的整机参考；只作 Rust donor/架构样本，不能无审计整仓替换                                |
+| [monaco-vscode-api](https://github.com/CodinGame/monaco-vscode-api) | 把 Code OSS 1.128.0（commit `fc3def6774c76082adf699d366f31a557ce5573f`）能力拆成 Workbench/theme/TextMate/files/search/terminal/SCM/debug 等 service packages；调研日 npm 最新为 35.0.1（2026-07-15，git commit `d8367168c23c9d0a9ba5bc84b8034e5435e9eb93`） | MIT              | 推荐产品前端主体；只安装 allowlist packages，禁止 Extension Host 执行入口与 AI/Auth/Sync 等包 |
+| [Terax](https://github.com/crynta/terax-ai)                         | Tauri 2、React、CodeMirror、portable-pty、xterm、文件树和 Git graph；AI 深度耦合，无通用 DAP/VSIX 主题                                                                                                                                                       | Apache-2.0       | 参考 PTY、Git graph 和打包，不作基座                                                          |
+| [Athas](https://github.com/athasdev/athas)                          | Tauri 编辑器，Git/LSP/terminal/AI/协作能力广                                                                                                                                                                                                                 | AGPL-3.0         | 只参考产品行为，不搬代码                                                                      |
+| [JulIDE](https://github.com/sinisterMage/JulIde)                    | Tauri + Monaco，Git2 能力较完整，但强绑定 Julia                                                                                                                                                                                                              | MIT              | 参考 Git UI/API，不作通用基座                                                                 |
+| [Blink](https://github.com/bmarti44/blink)                          | Tauri + monaco-vscode-api full workbench POC，项目自称 buggy、无稳定 release                                                                                                                                                                                 | 复制前需再次核验 | 只参考接线，不作基座                                                                          |
+| [montauri-editor](https://github.com/TimSusa/montauri-editor)       | 旧 Tauri + Monaco 极小原型，功能很少                                                                                                                                                                                                                         | MIT              | 排除                                                                                          |
 
 SideX 的关键映射已由源码确认：Electron main → Tauri Rust，`ipcMain` → commands/events，Node fs/pty → Rust/portable-pty，renderer/Monaco/Workbench 继续在 WebView 运行。其当前仓库也包含 Extension Host、LSP、tasks、auth、update、remote、WASM 等大量 Plain 明确不要的模块，因此只能按域挑选并重新审计。
 
 本地源码安全审计进一步排除了直接移植：SideX 路径校验允许绝对路径和 symlink 越界；搜索/监听未统一过安全层；Git config/run 暴露 hooks、credential helper、ssh command 等进程执行面；DAP transport 对 UTF-8/UTF-16 字节长度处理错误且缺少上限/超时；watch pattern 更新捕获旧值并使用无界队列；主题模型不兼容 VS Code 的 dotted color ids，也缺 VSIX/JSONC/include/semantic/tmTheme；当前 Tauri 配置为 `csp: null` 且 asset scope 覆盖 `$HOME/**`。这些实现只可用作失败模式和测试用例来源。
 
-`monaco-vscode-api` 自身也不能整包导入：其 demo 同时展示 AI、Chat、Auth、Sync、Remote、Notebook、Testing、Gallery 和 Extension Host。Plain 必须只导入明确允许的 service packages，并用架构检查扫描 imports、manifest 和 lockfile；主题只走静态 contribution registry，不导入 `vscode/localExtensionHost`。
+`monaco-vscode-api` 自身也不能照搬 demo：demo 同时展示 AI、Chat、Auth、Sync、Remote、Notebook、Testing、Gallery 和 Extension Host。35.0.1 API 会传递依赖 extensions service，`initialize()` 也会组合其默认 override；默认 worker host 关闭，因此可把这部分严格限定为静态 contribution registry。Plain 只直接安装明确允许的 service packages，并用架构检查扫描 direct dependencies、imports、host 配置和最终 worker 产物；主题不导入 `vscode/localExtensionHost`，不配置 `ExtensionHostKind`，不启用 worker host。
 
 ## 非 Tauri Rust 编辑器
 
-| 项目 | 可参考点 | 许可边界 |
-|---|---|---|
-| [Lapce](https://github.com/lapce/lapce) | Rust DAP 状态机、proxy/rope、文件/Git/terminal | Apache-2.0，可参考或经审计复用 |
-| [Zed](https://github.com/zed-industries/zed) | 成熟 debugger/Git/terminal 交互 | 多数 GPL-3.0；只参考行为，不能搬入 MIT 项目 |
-| [Helix](https://github.com/helix-editor/helix) | `helix-dap` transport/types、tree-sitter | MPL-2.0 文件级 copyleft，慎用源码 |
-| [Xi Editor](https://github.com/xi-editor/xi-editor) | rope 算法历史 | 已停止维护，不作基础 |
+| 项目                                                | 可参考点                                       | 许可边界                                    |
+| --------------------------------------------------- | ---------------------------------------------- | ------------------------------------------- |
+| [Lapce](https://github.com/lapce/lapce)             | Rust DAP 状态机、proxy/rope、文件/Git/terminal | Apache-2.0，可参考或经审计复用              |
+| [Zed](https://github.com/zed-industries/zed)        | 成熟 debugger/Git/terminal 交互                | 多数 GPL-3.0；只参考行为，不能搬入 MIT 项目 |
+| [Helix](https://github.com/helix-editor/helix)      | `helix-dap` transport/types、tree-sitter       | MPL-2.0 文件级 copyleft，慎用源码           |
+| [Xi Editor](https://github.com/xi-editor/xi-editor) | rope 算法历史                                  | 已停止维护，不作基础                        |
 
 ## 主题兼容
 
@@ -85,7 +85,7 @@ Rust 端使用 Tokio process/TCP、`tokio-util` 自定义 codec、Serde，并基
 - 整仓引入任何 AI-first 编辑器。
 - 直接维护当前完整 `src/vs` 分叉，或照搬 SideX 整仓。
 - SideX 的 Extension Host、LSP、tasks、auth、remote、update、Marketplace proxy 及未经重写的高风险原生模块。
-- `monaco-vscode-api` 的 AI、Chat、Auth、Sync、Gallery、Remote、Task、Testing、Notebook 和 Extension Host packages。
+- `monaco-vscode-api` 的 AI、Chat、Auth、Sync、Gallery、Remote、Task、Testing 和 Notebook packages，以及任何 Extension Host 入口或启用配置；API 自带的惰性静态 contribution registry 除外。
 - GitLens Plus/Pro/品牌代码或 Zed GPL 代码。
 - 以“支持主题”为由开放任意扩展执行。
 - 依赖 DAP/主题/Git 的模糊兼容声明而没有 fixture 合同。
