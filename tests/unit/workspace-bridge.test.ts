@@ -114,6 +114,120 @@ describe("browser mock workspace bridge", () => {
 		expect([...file.copy()]).toEqual([0, 255, 128, 1, 0, 42]);
 	});
 
+	it("creates empty files and single directories without changing root revisions", async () => {
+		const bridge = createBrowserMockBridge();
+		const selected = await bridge.workspacePickRoots("replace");
+		const rootId = selected.snapshot.roots[0]!.rootId;
+
+		await bridge.workspaceCreateFile(rootId, "created.txt");
+		await bridge.workspaceCreateDirectory(rootId, "created-directory");
+		await bridge.workspaceCreateFile(rootId, "created-directory/nested.txt");
+
+		expect(await bridge.workspaceSnapshot()).toMatchObject({ revision: 1 });
+		expect(await bridge.workspaceStat(rootId, "created.txt")).toMatchObject({
+			kind: "file",
+			size: 0,
+		});
+		expect(
+			await bridge.workspaceStat(rootId, "created-directory"),
+		).toMatchObject({ kind: "directory" });
+		expect(
+			(await bridge.workspaceReadDirectory(rootId, "created-directory"))
+				.entries,
+		).toEqual([{ name: "nested.txt", kind: "file" }]);
+		expect(
+			(
+				await bridge.workspaceReadFile(rootId, "created-directory/nested.txt")
+			).copy(),
+		).toEqual(new Uint8Array());
+	});
+
+	it("creates atomically without clobbering any existing entry", async () => {
+		const bridge = createBrowserMockBridge();
+		const selected = await bridge.workspacePickRoots("replace");
+		const rootId = selected.snapshot.roots[0]!.rootId;
+		const before = (await bridge.workspaceReadFile(rootId, "README.md")).copy();
+
+		for (const operation of [
+			() => bridge.workspaceCreateFile(rootId, "README.md"),
+			() => bridge.workspaceCreateDirectory(rootId, "README.md"),
+			() => bridge.workspaceCreateFile(rootId, "src"),
+			() => bridge.workspaceCreateDirectory(rootId, "src"),
+		]) {
+			await expect(operation()).rejects.toEqual({
+				code: "ENTRY_ALREADY_EXISTS",
+				message: "The workspace entry already exists.",
+			});
+		}
+		expect(
+			(await bridge.workspaceReadFile(rootId, "README.md")).copy(),
+		).toEqual(before);
+		expect((await bridge.workspaceStat(rootId, "src")).kind).toBe("directory");
+
+		const racing = await Promise.allSettled([
+			bridge.workspaceCreateFile(rootId, "racing.txt"),
+			bridge.workspaceCreateFile(rootId, "racing.txt"),
+		]);
+		expect(racing.filter(({ status }) => status === "fulfilled")).toHaveLength(
+			1,
+		);
+		const rejected = racing.find(({ status }) => status === "rejected");
+		expect(rejected).toMatchObject({
+			status: "rejected",
+			reason: { code: "ENTRY_ALREADY_EXISTS" },
+		});
+	});
+
+	it("keeps mutable trees isolated per bridge and returns sanitized create errors", async () => {
+		const first = createBrowserMockBridge();
+		const second = createBrowserMockBridge();
+		const firstRoot = (await first.workspacePickRoots("replace")).snapshot
+			.roots[0]!;
+		const secondRoot = (await second.workspacePickRoots("replace")).snapshot
+			.roots[0]!;
+
+		await first.workspaceCreateDirectory(firstRoot.rootId, "isolated");
+		await expect(
+			second.workspaceStat(secondRoot.rootId, "isolated"),
+		).rejects.toMatchObject({ code: "ENTRY_NOT_FOUND" });
+		await expect(
+			first.workspaceCreateFile(firstRoot.rootId, "missing/child.txt"),
+		).rejects.toEqual({
+			code: "ENTRY_NOT_FOUND",
+			message: "The workspace entry does not exist.",
+		});
+		await expect(
+			first.workspaceCreateDirectory(firstRoot.rootId, "README.md/child"),
+		).rejects.toEqual({
+			code: "ENTRY_TYPE_MISMATCH",
+			message: "The workspace entry has an incompatible type.",
+		});
+		await expect(
+			first.workspaceCreateFile(firstRoot.rootId, ""),
+		).rejects.toEqual({
+			code: "ENTRY_TYPE_MISMATCH",
+			message: "The workspace entry has an incompatible type.",
+		});
+		const error = await first
+			.workspaceCreateFile(firstRoot.rootId, "../private-secret")
+			.catch((candidate: unknown) => candidate);
+		expect(error).toEqual({
+			code: "INVALID_RELATIVE_PATH",
+			message: "The workspace-relative path is invalid.",
+		});
+		expect(Object.isFrozen(error)).toBe(true);
+		expect(JSON.stringify(error)).not.toContain("private-secret");
+		await expect(
+			first.workspaceCreateFile(
+				"00000000-0000-4000-8000-000000000999",
+				"private-secret",
+			),
+		).rejects.toEqual({
+			code: "ROOT_NOT_AUTHORIZED",
+			message: "The workspace root is not authorized.",
+		});
+	});
+
 	it("returns frozen stable file errors with Rust-compatible precedence", async () => {
 		const bridge = createBrowserMockBridge();
 		const knownRootId = "00000000-0000-4000-8000-000000000101";

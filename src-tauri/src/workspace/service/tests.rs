@@ -652,6 +652,387 @@ fn readers_are_isolated_by_window_and_root_id() {
 }
 
 #[test]
+fn creators_are_isolated_by_window_and_root_id() {
+    let temp = TempDir::new().unwrap();
+    let first_root = create_directory(&temp, "first-root");
+    let second_root = create_directory(&temp, "second-root");
+    let service = WorkspaceService::new();
+
+    let first = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![first_root.clone(), second_root.clone()]),
+        WorkspacePickRootsMode::Add,
+    ))
+    .unwrap();
+    let first_id = first.snapshot().roots()[0].root_id();
+    let second_id = first.snapshot().roots()[1].root_id();
+
+    block_on(service.create_file(
+        "main",
+        first_id,
+        RelativePath::parse_wire("created.txt").unwrap(),
+    ))
+    .unwrap();
+    block_on(service.create_directory(
+        "main",
+        second_id,
+        RelativePath::parse_wire("created-dir").unwrap(),
+    ))
+    .unwrap();
+
+    assert!(first_root.join("created.txt").is_file());
+    assert!(!second_root.join("created.txt").exists());
+    assert!(second_root.join("created-dir").is_dir());
+    assert!(!first_root.join("created-dir").exists());
+
+    let wrong_window = block_on(service.create_file(
+        "other-window",
+        first_id,
+        RelativePath::parse_wire("private.txt").unwrap(),
+    ))
+    .unwrap_err();
+    assert_eq!(wrong_window.code(), "ROOT_NOT_AUTHORIZED");
+    assert!(!first_root.join("private.txt").exists());
+
+    service.remove_root("main", first_id).unwrap();
+    let revoked = block_on(service.create_file(
+        "main",
+        first_id,
+        RelativePath::parse_wire("revoked.txt").unwrap(),
+    ))
+    .unwrap_err();
+    assert_eq!(revoked.code(), "ROOT_NOT_AUTHORIZED");
+    assert!(!first_root.join("revoked.txt").exists());
+}
+
+#[test]
+fn a_revocation_that_wins_the_mutation_gate_prevents_the_write() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    let service = Arc::new(WorkspaceService::new());
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let pending_service = Arc::clone(&service);
+    let pending_entered = Arc::clone(&entered);
+    let pending_release = Arc::clone(&release);
+    let pending = tauri::async_runtime::spawn(async move {
+        pending_service
+            .run_mutation_with_hook(
+                "main",
+                root_id,
+                move || {
+                    pending_entered.wait();
+                    pending_release.wait();
+                },
+                move |lease| {
+                    crate::workspace::writer::create_file(
+                        &lease,
+                        &RelativePath::parse_wire("blocked.txt").unwrap(),
+                    )
+                },
+            )
+            .await
+    });
+    entered.wait();
+
+    let removed = service.remove_root("main", root_id).unwrap();
+    assert!(removed.roots().is_empty());
+    release.wait();
+
+    let error = block_on(pending).unwrap().unwrap_err();
+    assert_eq!(error.code(), "ROOT_NOT_AUTHORIZED");
+    assert!(!root.join("blocked.txt").exists());
+}
+
+#[test]
+fn a_mutation_that_wins_the_gate_completes_before_root_revocation() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    let service = Arc::new(WorkspaceService::new());
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let pending_service = Arc::clone(&service);
+    let pending_entered = Arc::clone(&entered);
+    let pending_release = Arc::clone(&release);
+    let pending = tauri::async_runtime::spawn(async move {
+        pending_service
+            .run_mutation("main", root_id, move |lease| {
+                pending_entered.wait();
+                pending_release.wait();
+                crate::workspace::writer::create_file(
+                    &lease,
+                    &RelativePath::parse_wire("committed.txt").unwrap(),
+                )
+            })
+            .await
+    });
+    entered.wait();
+
+    let remove_service = Arc::clone(&service);
+    let (removed_tx, removed_rx) = mpsc::channel();
+    let remover = std::thread::spawn(move || {
+        removed_tx
+            .send(remove_service.remove_root("main", root_id))
+            .unwrap();
+    });
+    assert!(removed_rx.recv_timeout(Duration::from_millis(100)).is_err());
+    release.wait();
+
+    block_on(pending).unwrap().unwrap();
+    let removed = removed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    remover.join().unwrap();
+    assert!(removed.unwrap().roots().is_empty());
+    assert!(root.join("committed.txt").is_file());
+}
+
+#[test]
+fn root_replacement_waits_for_a_mutation_that_already_holds_the_gate() {
+    let temp = TempDir::new().unwrap();
+    let original_root = create_directory(&temp, "original-root");
+    let replacement_root = create_directory(&temp, "replacement-root");
+    let service = Arc::new(WorkspaceService::new());
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![original_root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let pending_service = Arc::clone(&service);
+    let pending_entered = Arc::clone(&entered);
+    let pending_release = Arc::clone(&release);
+    let pending = tauri::async_runtime::spawn(async move {
+        pending_service
+            .run_mutation("main", root_id, move |lease| {
+                pending_entered.wait();
+                pending_release.wait();
+                crate::workspace::writer::create_file(
+                    &lease,
+                    &RelativePath::parse_wire("before-replace.txt").unwrap(),
+                )
+            })
+            .await
+    });
+    entered.wait();
+
+    let replace_service = Arc::clone(&service);
+    let (replaced_tx, replaced_rx) = mpsc::channel();
+    let replacement = tauri::async_runtime::spawn(async move {
+        let result = replace_service
+            .pick_roots(
+                "main",
+                FakePicker::selected(vec![replacement_root]),
+                WorkspacePickRootsMode::Replace,
+            )
+            .await;
+        replaced_tx.send(result).unwrap();
+    });
+    assert!(replaced_rx
+        .recv_timeout(Duration::from_millis(100))
+        .is_err());
+    release.wait();
+
+    block_on(pending).unwrap().unwrap();
+    let replaced = replaced_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    block_on(replacement).unwrap();
+    assert!(original_root.join("before-replace.txt").is_file());
+    assert_ne!(replaced.unwrap().snapshot().roots()[0].root_id(), root_id);
+}
+
+#[test]
+fn a_mutation_that_owns_the_gate_completes_before_window_close() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    let service = Arc::new(WorkspaceService::new());
+    let original_workspace_id = service.snapshot("main").unwrap().workspace_id();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let pending_service = Arc::clone(&service);
+    let pending_entered = Arc::clone(&entered);
+    let pending_release = Arc::clone(&release);
+    let pending = tauri::async_runtime::spawn(async move {
+        pending_service
+            .run_mutation("main", root_id, move |lease| {
+                pending_entered.wait();
+                pending_release.wait();
+                crate::workspace::writer::create_file(
+                    &lease,
+                    &RelativePath::parse_wire("before-close.txt").unwrap(),
+                )
+            })
+            .await
+    });
+    entered.wait();
+
+    let close_service = Arc::clone(&service);
+    let (started_tx, started_rx) = mpsc::channel();
+    let (closed_tx, closed_rx) = mpsc::channel();
+    let closer = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        close_service.close_window("main");
+        closed_tx.send(()).unwrap();
+    });
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(closed_rx.recv_timeout(Duration::from_millis(100)).is_err());
+    release.wait();
+
+    block_on(pending).unwrap().unwrap();
+    closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    closer.join().unwrap();
+    assert!(root.join("before-close.txt").is_file());
+    assert_ne!(
+        service.snapshot("main").unwrap().workspace_id(),
+        original_workspace_id
+    );
+}
+
+#[test]
+fn a_waiting_window_close_does_not_block_other_window_operations() {
+    let temp = TempDir::new().unwrap();
+    let first_root = create_directory(&temp, "first-root");
+    let second_root = create_directory(&temp, "second-root");
+    let service = Arc::new(WorkspaceService::new());
+    let first = block_on(service.pick_roots(
+        "first",
+        FakePicker::selected(vec![first_root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let second = block_on(service.pick_roots(
+        "second",
+        FakePicker::selected(vec![second_root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let first_id = first.snapshot().roots()[0].root_id();
+    let second_id = second.snapshot().roots()[0].root_id();
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let pending_service = Arc::clone(&service);
+    let pending_entered = Arc::clone(&entered);
+    let pending_release = Arc::clone(&release);
+    let pending = tauri::async_runtime::spawn(async move {
+        pending_service
+            .run_mutation("first", first_id, move |lease| {
+                pending_entered.wait();
+                pending_release.wait();
+                crate::workspace::writer::create_file(
+                    &lease,
+                    &RelativePath::parse_wire("first.txt").unwrap(),
+                )
+            })
+            .await
+    });
+    entered.wait();
+
+    let close_service = Arc::clone(&service);
+    let (detached_tx, detached_rx) = mpsc::channel();
+    let (closed_tx, closed_rx) = mpsc::channel();
+    let closer = std::thread::spawn(move || {
+        close_service.close_window_with_hook("first", || {
+            detached_tx.send(()).unwrap();
+        });
+        closed_tx.send(()).unwrap();
+    });
+    detached_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(closed_rx.recv_timeout(Duration::from_millis(100)).is_err());
+
+    let other_service = Arc::clone(&service);
+    let (other_tx, other_rx) = mpsc::channel();
+    let other = tauri::async_runtime::spawn(async move {
+        let snapshot = other_service.snapshot("second");
+        let created = other_service
+            .create_file(
+                "second",
+                second_id,
+                RelativePath::parse_wire("second.txt").unwrap(),
+            )
+            .await;
+        other_tx.send((snapshot, created)).unwrap();
+    });
+    let other_result = other_rx.recv_timeout(Duration::from_secs(2));
+    release.wait();
+
+    let (snapshot, created) = other_result.expect("another window must not wait for close");
+    assert_eq!(snapshot.unwrap().roots()[0].root_id(), second_id);
+    created.unwrap();
+    block_on(other).unwrap();
+    block_on(pending).unwrap().unwrap();
+    closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    closer.join().unwrap();
+    assert!(first_root.join("first.txt").is_file());
+    assert!(second_root.join("second.txt").is_file());
+}
+
+#[test]
+fn a_window_close_that_wins_the_mutation_gate_prevents_the_write() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    let service = Arc::new(WorkspaceService::new());
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let pending_service = Arc::clone(&service);
+    let pending_entered = Arc::clone(&entered);
+    let pending_release = Arc::clone(&release);
+    let pending = tauri::async_runtime::spawn(async move {
+        pending_service
+            .run_mutation_with_hook(
+                "main",
+                root_id,
+                move || {
+                    pending_entered.wait();
+                    pending_release.wait();
+                },
+                move |lease| {
+                    crate::workspace::writer::create_directory(
+                        &lease,
+                        &RelativePath::parse_wire("blocked-dir").unwrap(),
+                    )
+                },
+            )
+            .await
+    });
+    entered.wait();
+
+    service.close_window("main");
+    release.wait();
+
+    let error = block_on(pending).unwrap().unwrap_err();
+    assert_eq!(error.code(), "WORKSPACE_WINDOW_CLOSED");
+    assert!(!root.join("blocked-dir").exists());
+}
+
+#[test]
 fn read_file_returns_binary_bytes_and_rejects_wrong_or_revoked_roots() {
     let temp = TempDir::new().unwrap();
     let root = create_directory(&temp, "root");

@@ -69,6 +69,8 @@ describe("native Plain bridge", () => {
 	it("invokes the bounded file commands with frozen owned requests", async () => {
 		const rawBytes = new Uint8Array([0, 255, 128, 42]);
 		tauri.invoke
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(null)
 			.mockResolvedValueOnce({
 				kind: "file",
 				size: 4,
@@ -84,11 +86,21 @@ describe("native Plain bridge", () => {
 			.mockResolvedValueOnce(rawBytes.buffer);
 		const bridge = createNativeBridge();
 
+		await bridge.workspaceCreateFile(rootId, "%2e%2e/new.txt");
+		await bridge.workspaceCreateDirectory(rootId, "%2e%2e/new-directory");
 		const stat = await bridge.workspaceStat(rootId, "%2e%2e/file.bin");
 		const directory = await bridge.workspaceReadDirectory(rootId, "%2e%2e");
 		const file = await bridge.workspaceReadFile(rootId, "%2F");
 
 		expect(tauri.invoke.mock.calls).toEqual([
+			[
+				"workspace_create_file",
+				{ request: { rootId, relativePath: "%2e%2e/new.txt" } },
+			],
+			[
+				"workspace_create_directory",
+				{ request: { rootId, relativePath: "%2e%2e/new-directory" } },
+			],
 			[
 				"workspace_stat",
 				{ request: { rootId, relativePath: "%2e%2e/file.bin" } },
@@ -115,6 +127,18 @@ describe("native Plain bridge", () => {
 		expect([...file.copy()]).toEqual([0, 255, 128, 42]);
 	});
 
+	it("accepts only a null response from void create commands", async () => {
+		tauri.invoke.mockResolvedValueOnce(undefined).mockResolvedValueOnce({});
+		const bridge = createNativeBridge();
+
+		await expect(
+			bridge.workspaceCreateFile(rootId, "new.txt"),
+		).rejects.toMatchObject({ code: "IPC_CONTRACT_VIOLATION" });
+		await expect(
+			bridge.workspaceCreateDirectory(rootId, "new-directory"),
+		).rejects.toMatchObject({ code: "IPC_CONTRACT_VIOLATION" });
+	});
+
 	it("supports strict number-array fallback bytes and rejects invalid requests before invoke", async () => {
 		tauri.invoke.mockResolvedValueOnce([1, 2, 3]);
 		const bridge = createNativeBridge();
@@ -137,6 +161,16 @@ describe("native Plain bridge", () => {
 		).rejects.toEqual({
 			code: "ROOT_NOT_AUTHORIZED",
 			message: "The workspace root is not authorized.",
+		});
+		await expect(bridge.workspaceCreateFile(rootId, "")).rejects.toEqual({
+			code: "ENTRY_TYPE_MISMATCH",
+			message: "The workspace entry has an incompatible type.",
+		});
+		await expect(
+			bridge.workspaceCreateDirectory(rootId, "../private-secret"),
+		).rejects.toEqual({
+			code: "INVALID_RELATIVE_PATH",
+			message: "The workspace-relative path is invalid.",
 		});
 		expect(tauri.invoke).not.toHaveBeenCalled();
 	});

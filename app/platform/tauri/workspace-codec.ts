@@ -193,6 +193,20 @@ export function frozenWorkspaceEntryRequest(
 	return Object.freeze({ rootId, relativePath });
 }
 
+export function frozenWorkspaceCreateEntryRequest(
+	rootId: unknown,
+	relativePath: unknown,
+): Readonly<{ rootId: string; relativePath: string }> {
+	const request = frozenWorkspaceEntryRequest(rootId, relativePath);
+	if (request.relativePath.length === 0) {
+		return requestViolation(
+			"ENTRY_TYPE_MISMATCH",
+			"The workspace entry has an incompatible type.",
+		);
+	}
+	return request;
+}
+
 function compareUtf8(left: Uint8Array, right: Uint8Array): number {
 	const length = Math.min(left.byteLength, right.byteLength);
 	for (let index = 0; index < length; index += 1) {
@@ -448,6 +462,14 @@ export function decodeWorkspaceFileData(value: unknown): WorkspaceFileData {
 			return violation();
 		}
 		return frozenWorkspaceFileDataFromBytes(bytes);
+	});
+}
+
+export function decodeWorkspaceVoid(value: unknown): void {
+	return sanitizedDecode(() => {
+		if (value !== null) {
+			return violation();
+		}
 	});
 }
 

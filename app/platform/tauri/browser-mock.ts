@@ -8,6 +8,7 @@ import type {
 import {
 	compareWorkspaceEntryNames,
 	frozenWorkspaceEntryStat,
+	frozenWorkspaceCreateEntryRequest,
 	frozenWorkspaceEntryRequest,
 	frozenWorkspaceFileData,
 	frozenWorkspacePickResult,
@@ -49,7 +50,7 @@ interface MockFileNode {
 
 interface MockDirectoryNode {
 	readonly kind: "directory";
-	readonly entries: ReadonlyMap<string, MockNode>;
+	readonly entries: Map<string, MockNode>;
 }
 
 type MockNode = MockFileNode | MockDirectoryNode;
@@ -83,7 +84,7 @@ function mockDirectory(
 	return Object.freeze({ kind: "directory", entries: new Map(pairs) });
 }
 
-const mockTrees = new Map<string, MockDirectoryNode>([
+const mockTreeTemplates = new Map<string, MockDirectoryNode>([
 	[
 		mockRoots[0]!.rootId,
 		mockDirectory({
@@ -107,6 +108,31 @@ const mockTrees = new Map<string, MockDirectoryNode>([
 		}),
 	],
 ]);
+
+function cloneMockNode(node: MockNode): MockNode {
+	if (node.kind === "file") {
+		return Object.freeze({
+			kind: "file",
+			size: node.size,
+			bytes: node.bytes.slice(),
+		});
+	}
+	return Object.freeze({
+		kind: "directory",
+		entries: new Map(
+			[...node.entries].map(([name, child]) => [name, cloneMockNode(child)]),
+		),
+	});
+}
+
+function cloneMockTrees(): Map<string, MockDirectoryNode> {
+	return new Map(
+		[...mockTreeTemplates].map(([rootId, root]) => [
+			rootId,
+			cloneMockNode(root) as MockDirectoryNode,
+		]),
+	);
+}
 
 export type BrowserMockWorkspacePick = "selected" | "cancelled";
 
@@ -136,6 +162,13 @@ function entryNotFound(): CommandError {
 	return commandError("ENTRY_NOT_FOUND", "The workspace entry does not exist.");
 }
 
+function entryAlreadyExists(): CommandError {
+	return commandError(
+		"ENTRY_ALREADY_EXISTS",
+		"The workspace entry already exists.",
+	);
+}
+
 function entryTypeMismatch(): CommandError {
 	return commandError(
 		"ENTRY_TYPE_MISMATCH",
@@ -156,6 +189,7 @@ export function createBrowserMockBridge(
 	const listeners = new Set<(payload: RuntimeInfo) => void>();
 	const scriptedPicks = [...(options.workspacePicks ?? [])];
 	const roots = new Map<string, WorkspaceRoot>();
+	const trees = cloneMockTrees();
 	let revision = 0;
 
 	const snapshot = () =>
@@ -165,7 +199,7 @@ export function createBrowserMockBridge(
 		if (!roots.has(request.rootId)) {
 			throw rootNotAuthorized();
 		}
-		const root = mockTrees.get(request.rootId);
+		const root = trees.get(request.rootId);
 		if (root === undefined) {
 			throw rootNotAuthorized();
 		}
@@ -186,6 +220,47 @@ export function createBrowserMockBridge(
 			node = child;
 		}
 		return node;
+	};
+	const resolveCreateTarget = (
+		rootId: string,
+		relativePath: string,
+	): Readonly<{ parent: MockDirectoryNode; name: string }> => {
+		const request = frozenWorkspaceCreateEntryRequest(rootId, relativePath);
+		if (!roots.has(request.rootId)) {
+			throw rootNotAuthorized();
+		}
+		const root = trees.get(request.rootId);
+		if (root === undefined) {
+			throw rootNotAuthorized();
+		}
+		const segments = workspaceRelativePathSegments(request.relativePath);
+		if (segments === undefined || segments.length === 0) {
+			throw invalidRelativePath();
+		}
+
+		let parent = root;
+		for (const segment of segments.slice(0, -1)) {
+			const child = parent.entries.get(segment);
+			if (child === undefined) {
+				throw entryNotFound();
+			}
+			if (child.kind !== "directory") {
+				throw entryTypeMismatch();
+			}
+			parent = child;
+		}
+		return Object.freeze({ parent, name: segments.at(-1)! });
+	};
+	const createEntry = (
+		rootId: string,
+		relativePath: string,
+		entry: MockNode,
+	): void => {
+		const { parent, name } = resolveCreateTarget(rootId, relativePath);
+		if (parent.entries.has(name)) {
+			throw entryAlreadyExists();
+		}
+		parent.entries.set(name, entry);
 	};
 
 	return {
@@ -239,6 +314,12 @@ export function createBrowserMockBridge(
 			}
 			revision += 1;
 			return snapshot();
+		},
+		async workspaceCreateFile(rootId, relativePath) {
+			createEntry(rootId, relativePath, mockFile([]));
+		},
+		async workspaceCreateDirectory(rootId, relativePath) {
+			createEntry(rootId, relativePath, mockDirectory({}));
 		},
 		async workspaceStat(rootId, relativePath) {
 			const node = resolveNode(rootId, relativePath);

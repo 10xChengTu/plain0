@@ -10,6 +10,7 @@ use super::dto::{
 };
 use super::picker::{DirectoryPicker, DirectoryPickerResult};
 use super::reader;
+use super::writer;
 use super::{RootId, WorkspaceRootLease, WorkspaceScope};
 
 #[derive(Default)]
@@ -93,14 +94,34 @@ impl WorkspaceService {
         .await
     }
 
+    pub async fn create_file(
+        &self,
+        window_label: &str,
+        root_id: RootId,
+        relative_path: RelativePath,
+    ) -> Result<(), CommandError> {
+        self.run_mutation(window_label, root_id, move |lease| {
+            writer::create_file(&lease, &relative_path)
+        })
+        .await
+    }
+
+    pub async fn create_directory(
+        &self,
+        window_label: &str,
+        root_id: RootId,
+        relative_path: RelativePath,
+    ) -> Result<(), CommandError> {
+        self.run_mutation(window_label, root_id, move |lease| {
+            writer::create_directory(&lease, &relative_path)
+        })
+        .await
+    }
+
     pub fn close_window(&self, window_label: &str) {
-        let Ok(mut windows) = self.windows.lock() else {
-            return;
-        };
-        if let Some(workspace) = windows.get(window_label) {
+        if let Some(workspace) = self.detach_window(window_label) {
             workspace.close();
         }
-        windows.remove(window_label);
     }
 
     fn scope_for_window(&self, window_label: &str) -> Result<Arc<WindowWorkspace>, CommandError> {
@@ -109,6 +130,25 @@ impl WorkspaceService {
             .entry(window_label.to_owned())
             .or_insert_with(|| Arc::new(WindowWorkspace::new()))
             .clone())
+    }
+
+    fn detach_window(&self, window_label: &str) -> Option<Arc<WindowWorkspace>> {
+        let Ok(mut windows) = self.windows.lock() else {
+            return None;
+        };
+        windows.remove(window_label)
+    }
+
+    #[cfg(test)]
+    fn close_window_with_hook<F>(&self, window_label: &str, after_detach: F)
+    where
+        F: FnOnce(),
+    {
+        let workspace = self.detach_window(window_label);
+        after_detach();
+        if let Some(workspace) = workspace {
+            workspace.close();
+        }
     }
 
     async fn run_reader<T, F>(
@@ -130,15 +170,56 @@ impl WorkspaceService {
         workspace.validate_lease(leased_root_id)?;
         result?
     }
+
+    async fn run_mutation<T, F>(
+        &self,
+        window_label: &str,
+        root_id: RootId,
+        operation: F,
+    ) -> Result<T, CommandError>
+    where
+        T: Send + 'static,
+        F: FnOnce(WorkspaceRootLease) -> Result<T, CommandError> + Send + 'static,
+    {
+        self.run_mutation_with_hook(window_label, root_id, || {}, operation)
+            .await
+    }
+
+    async fn run_mutation_with_hook<T, B, F>(
+        &self,
+        window_label: &str,
+        root_id: RootId,
+        before_gate: B,
+        operation: F,
+    ) -> Result<T, CommandError>
+    where
+        T: Send + 'static,
+        B: FnOnce() + Send + 'static,
+        F: FnOnce(WorkspaceRootLease) -> Result<T, CommandError> + Send + 'static,
+    {
+        let workspace = self.scope_for_window(window_label)?;
+        let lease = workspace.lease(root_id)?;
+        let leased_root_id = lease.root_id();
+        tauri::async_runtime::spawn_blocking(move || {
+            before_gate();
+            let _mutation = lock(&workspace.mutation_gate)?;
+            workspace.validate_lease(leased_root_id)?;
+            operation(lease)
+        })
+        .await
+        .map_err(|_| workspace_mutation_failed())?
+    }
 }
 
 struct WindowWorkspace {
+    mutation_gate: Mutex<()>,
     state: Mutex<WindowWorkspaceState>,
 }
 
 impl WindowWorkspace {
     fn new() -> Self {
         Self {
+            mutation_gate: Mutex::new(()),
             state: Mutex::new(WindowWorkspaceState {
                 scope: WorkspaceScope::new(),
                 next_picker_token: 0,
@@ -182,6 +263,7 @@ impl WindowWorkspace {
         mode: WorkspacePickRootsMode,
         selection: DirectoryPickerResult,
     ) -> Result<WorkspacePickRootsResult, CommandError> {
+        let _mutation = lock(&self.mutation_gate)?;
         let mut state = lock(&self.state)?;
         ensure_active_picker(&state, token)?;
 
@@ -216,6 +298,7 @@ impl WindowWorkspace {
     }
 
     fn remove_root(&self, root_id: RootId) -> Result<WorkspaceSnapshot, CommandError> {
+        let _mutation = lock(&self.mutation_gate)?;
         let mut state = lock(&self.state)?;
         ensure_open(&state)?;
         state.scope.remove(root_id)?;
@@ -239,8 +322,13 @@ impl WindowWorkspace {
     }
 
     fn close(&self) {
-        let Ok(mut state) = self.state.lock() else {
-            return;
+        let _mutation = match self.mutation_gate.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
         };
         state.closed = true;
         state.active_picker = None;
@@ -305,6 +393,10 @@ fn workspace_operation_failed() -> CommandError {
 
 fn workspace_read_failed() -> CommandError {
     CommandError::new("IO_FAILED", "The workspace entry could not be read.")
+}
+
+fn workspace_mutation_failed() -> CommandError {
+    CommandError::new("IO_FAILED", "The workspace entry could not be created.")
 }
 
 fn root_not_authorized() -> CommandError {

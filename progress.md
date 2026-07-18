@@ -30,11 +30,13 @@
 - [x] 单目录阶段显式禁用 add-root 与 VS Code workspace trust；Git、PTY、DAP 的执行信任继续只归 Rust 管理。通用语言状态贡献使用纯空 service，不引入语言 service override。
 - [x] 审计投影切片 bundle：只新增 workspace projection 与空 language-status 两个 Plain source，排除域债务数量、分类和 SHA-256 均未变化。
 - [x] 完成 F020 CRUD 写语义补充调研与方案冻结：各写语义、最小安全保存与平台写能力激活分成独立提交；写入与授权撤销使用统一 mutation gate 线性化；原子 no-clobber 不允许检查后普通 rename fallback。
+- [x] 完成空文件与单级目录的原子 no-clobber 创建：Rust capability command、每窗口 mutation gate、严格 TypeScript bridge 和每实例 browser mock 均已接通；root replace/remove/window close 与写入线性化，关闭单窗口不会阻塞其他窗口。provider 继续保持只读。
+- [x] 创建切片通过完整 `pnpm check`：85 个 TypeScript 测试、76 个 Rust 测试、架构/排除面 guard 与 bundle 债务基线全部通过；Tauri `Result<(), CommandError>` 成功响应另有 JSON `null` 合同测试。
 
 ## 下一步
 
-1. 实现空文件/单级目录的原子创建 command、mutation gate、严格 TypeScript bridge 与每实例 browser mock；provider 暂时保持只读，完成后单独提交。
-2. 实现同 root 原子 no-clobber rename 并单独提交；复制/移动与确认删除继续各自单独提交，期间 provider 保持只读。
+1. 实现同 root 原子 no-clobber rename 并单独提交；provider 暂时保持只读。
+2. 复制/移动与确认删除继续各自单独提交，期间 provider 保持只读。
 3. 全部 CRUD 后先实现 opaque version、有界原子写入和 Workbench 期望版本透传，再在 provider 注册前读取严格 `workspace_capabilities` DTO，按 Rust 平台能力激活写能力与 Browser E2E；不支持原子 no-replace rename 的平台继续只读。随后实现 watcher/rescan，最后运行真实 Tauri 文件树总验收并写回 `F020` evidence。
 
 ## 当前验收命令

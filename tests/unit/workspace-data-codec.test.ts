@@ -5,6 +5,8 @@ import {
 	decodeWorkspaceEntryStat,
 	decodeWorkspaceFileData,
 	decodeWorkspaceReadDirectory,
+	decodeWorkspaceVoid,
+	frozenWorkspaceCreateEntryRequest,
 	frozenWorkspaceEntryRequest,
 	frozenWorkspaceFileData,
 	isPortableWorkspaceEntryName,
@@ -17,6 +19,15 @@ const contractError = {
 };
 
 describe("workspace file data codec", () => {
+	it("accepts only null for void native command responses", () => {
+		expect(decodeWorkspaceVoid(null)).toBeUndefined();
+		for (const payload of [undefined, false, 0, "", {}, []]) {
+			expect(() => decodeWorkspaceVoid(payload)).toThrowError(
+				expect.objectContaining(contractError),
+			);
+		}
+	});
+
 	it("decodes exact immutable stat payloads and rejects unsafe fields", () => {
 		const stat = decodeWorkspaceEntryStat({
 			kind: "file",
@@ -294,8 +305,53 @@ describe("workspace file data codec", () => {
 
 	it("builds frozen owned requests and rejects invalid inputs without leakage", () => {
 		const request = frozenWorkspaceEntryRequest(rootId, "src/main.ts");
+		const createRequest = frozenWorkspaceCreateEntryRequest(
+			rootId,
+			"src/new.ts",
+		);
 		expect(request).toEqual({ rootId, relativePath: "src/main.ts" });
+		expect(createRequest).toEqual({
+			rootId,
+			relativePath: "src/new.ts",
+		});
 		expect(Object.isFrozen(request)).toBe(true);
+		expect(Object.isFrozen(createRequest)).toBe(true);
+		expect(() =>
+			frozenWorkspaceCreateEntryRequest(
+				"00000000-0000-3000-8000-000000000101",
+				"new.ts",
+			),
+		).toThrowError(
+			expect.objectContaining({
+				code: "ROOT_NOT_AUTHORIZED",
+				message: "The workspace root is not authorized.",
+			}),
+		);
+
+		for (const [relativePath, code, message] of [
+			[
+				"",
+				"ENTRY_TYPE_MISMATCH",
+				"The workspace entry has an incompatible type.",
+			],
+			[
+				"../private-secret",
+				"INVALID_RELATIVE_PATH",
+				"The workspace-relative path is invalid.",
+			],
+		] as const) {
+			try {
+				frozenWorkspaceCreateEntryRequest(rootId, relativePath);
+				expect.fail("invalid create request must throw");
+			} catch (error) {
+				expect(error).toEqual({
+					code,
+					message,
+				});
+				expect(Object.isFrozen(error)).toBe(true);
+				expect(JSON.stringify(error)).not.toContain("private-secret");
+			}
+		}
 
 		for (const [candidateRoot, path, code] of [
 			["00000000-0000-3000-8000-000000000101", "src", "ROOT_NOT_AUTHORIZED"],

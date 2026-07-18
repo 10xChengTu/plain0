@@ -17,6 +17,7 @@ pub mod dto;
 pub mod picker;
 pub(crate) mod reader;
 pub mod service;
+pub(crate) mod writer;
 
 use dto::{WorkspaceRootSnapshot, WorkspaceSnapshot};
 

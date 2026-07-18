@@ -72,6 +72,8 @@ export interface PlainBridge {
 	workspaceSnapshot(): Promise<WorkspaceSnapshot>;
 	workspacePickRoots(mode: WorkspacePickMode): Promise<WorkspacePickResult>;
 	workspaceRemoveRoot(rootId: string): Promise<WorkspaceSnapshot>;
+	workspaceCreateFile(rootId: string, relativePath: string): Promise<void>;
+	workspaceCreateDirectory(rootId: string, relativePath: string): Promise<void>;
 	workspaceStat(
 		rootId: string,
 		relativePath: string,
