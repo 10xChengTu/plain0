@@ -14,7 +14,7 @@
 3. 按需组合 `@codingame/monaco-vscode-api` service overrides，自建 Plain composition 与 Rust services。
 4. 从空白 React+Monaco/CodeMirror 重建全部 Workbench。
 
-源码审计显示：当前 `src/vs` 约 8,750 个文件，直接裁剪会长期维护一个高耦合下游分叉；SideX 缺少可可靠 rebase 的 upstream commit，源码/产品标记约处于 Code OSS 1.96–1.110 时代，仍带 Extension Host/LSP/Remote/Auth 且 debugger 未完成；空白 UI 会重复实现标签、布局、命令、快捷键、数据防丢、SCM、DAP 和可访问性。`monaco-vscode-api` 在调研日跟随 Code OSS 1.128.0（commit `fc3def6774c76082adf699d366f31a557ce5573f`），并把 Workbench 能力拆成可独立安装的 packages。
+源码审计显示：当前 `src/vs` 约 8,750 个文件，直接裁剪会长期维护一个高耦合下游分叉；SideX 缺少可可靠 rebase 的 upstream commit，源码/产品标记约处于 Code OSS 1.96–1.110 时代，仍带 Extension Host/LSP/Remote/Auth 且 debugger 未完成；空白 UI 会重复实现标签、布局、命令、快捷键、数据防丢、SCM、DAP 和可访问性。固定的 `monaco-vscode-api@35.0.1` 跟随 Code OSS 1.128.1（commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`），并把 Workbench 能力拆成可独立安装的 packages。
 
 ## 决策
 

@@ -13,7 +13,7 @@ Plain 采用“模块化 Workbench + Rust 原生服务”的重写方式：
 - Rust 实现 workspace、文件监听、搜索、PTY、Git、DAP、主题包与本地存储。
 - 主题是唯一允许导入的 VS Code extension contribution，而且只按静态数据处理；不会创建任何 Extension Host。
 
-SideX 证明 VS Code Workbench 可以运行在 Tauri WebView 中，但其来源没有记录可可靠 rebase 的 upstream commit，源码/产品标记约处于 Code OSS 1.96–1.110 时代，已经落后于当前 1.130；它仍带 LSP、Remote、Auth、通用扩展扫描和高风险权限。Plain 只借鉴经过重新审计的 Rust 实现思路。`monaco-vscode-api` 在调研时跟随 Code OSS 1.128.0（commit `fc3def6774c76082adf699d366f31a557ce5573f`），并把功能拆成独立包，更适合作为可升级产品主体。
+SideX 证明 VS Code Workbench 可以运行在 Tauri WebView 中，但其来源没有记录可可靠 rebase 的 upstream commit，源码/产品标记约处于 Code OSS 1.96–1.110 时代，已经落后于仓库内仅作迁移 oracle 的 Code OSS 1.130；它仍带 LSP、Remote、Auth、通用扩展扫描和高风险权限。Plain 只借鉴经过重新审计的 Rust 实现思路。产品 Workbench 运行时固定为 `monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1（commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`），并把功能拆成独立包，更适合作为可升级产品主体。
 
 ## 2. 进程模型
 
@@ -132,6 +132,7 @@ Workbench model ← Plain feature service ← typed bridge/events
 - 所有路径请求采用 `(rootId, relativePath)` 或经过授权的 opaque handle。wire path 固定使用 `/`，拒绝 absolute、prefix、`.`、`..`、NUL、空组件和平台歧义；WebView 不接收或提交原生绝对路径。
 - 读取与 CRUD 必须相对 root capability 执行，禁止先 `canonicalize`/`starts_with` 再用 ambient `std::fs`。跨 root 操作必须显式携带两个已授权 root；普通 rename 默认不覆盖。
 - 目录 copy 在任何目标副作用前建立并重验 capability-relative manifest；固定条目、名称、深度、symlink 与逻辑文件字节预算，逐层 `open_dir_nofollow`，特殊文件拒绝。目标父目录不得落入 source directory identity 集合；完整 staged tree 经 receipt 重验后只用原子 no-replace 发布，失败清理不得使用无界递归 helper。
+- 跨 root move 在同一次双 root mutation gate 内消费 Rust-only `PublishedCopyReceipt`：普通文件由 publication 前稳定 source/staged target 双侧确认的 SHA-256 digest 绑定，symlink 保存完整 raw payload；正式 target 发布后先分别重验当前 source 与 published target，再以 manifest 驱动的有界逆序 `remove_file/remove_dir` 删除 source。发布后禁止回滚 target；source 零删除或部分删除必须返回结构化非原子状态。没有 expected-inode conditional unlink 或跨文件系统事务，因此 source 最后 identity 检查与删除之间、target 最后验收与 source 删除之间的同 UID 竞态都是公开边界，不能宣称跨进程原子。
 - 每窗口 mutation 与 root replace/remove/window close 共享独立 gate，并统一使用 `mutation gate -> workspace state` 锁序；写线程拿到 gate 后重验 lease，保证授权撤销与磁盘副作用具有明确先后关系。只读操作继续锁外执行并丢弃撤销后的迟到结果。
 - symlink 可以显示；只有 capability 解析后仍位于同一 root 内的相对链接可跟随。删除链接只删除目录项，递归扫描与删除不得跟随越界链接。
 - 非 UTF-8 名称不得通过 lossy conversion 变成后续可操作路径；在无损 opaque handle 落地前返回明确的不支持状态。

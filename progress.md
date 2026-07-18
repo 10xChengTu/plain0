@@ -6,8 +6,9 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：暂无；有界目录 manifest/staged tree copy 已完成，下一项为显式跨 root move 的补充调研与方案冻结。
-- 当前 Code OSS 基线：1.130.0，Electron 42.6.0，约 16,555 个跟踪文件。
+- 当前最小工作项：暂无；显式跨 root move 方案已冻结，下一项为 receipt/verified delete 落地。
+- 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
+- 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
 
 ## 已完成
@@ -43,11 +44,12 @@
 - [x] 完成有界目录 copy 的 GitHub/固定依赖补充调研与方案冻结：排除 `remove_dir_all`、第三方 walker 和 Code OSS 边遍历边创建 fallback；明确 source-first manifest、descendant 精确预算、target-parent directory identity 冲突、0700 staged tree、发布前 source/stage 双重验收、receipt-only 有界清理、目录 mode 收尾和外部竞态边界。现有四字段 command、双 root mutation gate 与只读 provider 保持不变。
 - [x] 完成有界目录 manifest/staged tree copy：Rust 以显式 DFS 建立并重验完整 source manifest，执行 10,000 条目、1 KiB 单名、2 MiB 名称、256 层、4 KiB/2 MiB symlink、8 MiB/256 MiB 文件预算；目录逐层 nofollow，raw symlink 原样复制，特殊文件拒绝。目标树在 0700 高熵 staging 中按 identity/payload receipt 构建，所有测试竞态窗口结束后再次精确核对成员、文件字节、raw link 与 source manifest，再应用目录 mode 并仅用 `NOREPLACE` 发布；未知或 replacement 成员只安全遗留，不做无界递归删除。Browser mock 同步实现有界 detached tree 和跨 root 语义，provider 继续只读。
 - [x] 目录 copy 切片通过完整局部验收：134 个 TypeScript/JavaScript 单元测试（含 39 个 Harness 边界合同）、144 个 Rust 测试、格式、类型、lint 与架构 guard 均通过；独立审查额外复现并修复了最终 member-set 后新增未知成员、同 inode staged file 改写、staged symlink 替换和嵌套 source 变化的发布窗口。
+- [x] 完成显式跨 root move 的 GitHub/固定源码补充调研与方案冻结：对照 Code OSS 1.130/实际依赖 1.128.1、GNU coreutils 9.11、systemd、cap-std 4.0.2、rustix 1.1.4 与 RustCrypto sha2 0.10.9，确认没有 expected-inode conditional unlink 或能表达 partial 的现成方案。确定四字段 different-root command、同 gate 内 Rust-only `PublishedCopyReceipt`、publication 前 file SHA-256/raw-link 基线、发布后 source/target 双端独立重验、manifest 驱动有界 verified delete、hardlink nlink 跟踪，以及 `moved`/source-retained/source-partial 结构化非原子结果；正式 target 一旦发布绝不回滚，provider 继续只读。
 
 ## 下一步
 
-1. 先对显式跨 root move（copy receipt + verified delete）和确认删除做 GitHub/固定依赖补充调研与方案冻结，再分别落地并单独提交；期间 provider 保持只读。
-2. 全部 CRUD 后先实现 opaque version、有界原子写入和 Workbench 期望版本透传，再在 provider 注册前读取严格 `workspace_capabilities` DTO，增加 copy 同路径/overwrite/自动 mkdirp/cross-scheme 防绕过 patch，并按 Rust 平台能力激活写能力与 Browser E2E；不支持原子 no-replace rename 的平台继续只读。随后实现 watcher/rescan，最后运行真实 Tauri 文件树总验收并写回 `F020` evidence。
+1. 落地显式跨 root move（copy receipt + verified delete）并单独提交；随后对确认删除做补充调研、方案冻结与独立实现提交。期间 provider 保持只读。
+2. 全部 CRUD 后先实现 opaque version、有界原子写入和 Workbench 期望版本透传，再在 provider 注册前读取严格 `workspace_capabilities` DTO，增加 copy/move 同路径、overwrite、自动 mkdirp、generic fallback 与 cross-scheme 防绕过 patch，并按 Rust 平台能力激活写能力与 Browser E2E；不支持原子 no-replace rename 的平台继续只读。随后实现 watcher/rescan，最后运行真实 Tauri 文件树总验收并写回 `F020` evidence。
 
 ## 当前验收命令
 
@@ -59,7 +61,7 @@ pnpm test:e2e:browser -- workspace.spec.ts
 
 ## 已知风险
 
-- 当前 Code OSS 1.130、`monaco-vscode-api` 对应的 Code OSS 1.128.0（upstream commit `fc3def6774c76082adf699d366f31a557ce5573f`）和 SideX 约 1.96/1.110 的接口存在漂移；旧源码只作 oracle，Rust/TS 实现都不能直接套用。
+- 旧源码迁移 oracle Code OSS 1.130、产品运行时 `monaco-vscode-api@35.0.1` 对应的 Code OSS 1.128.1（upstream commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`）和 SideX 约 1.96/1.110 的接口存在漂移；Rust/TS 实现都不能直接套用任一旧结构。
 - SideX 源码审计发现路径逃逸、宽泛 Git 执行、DAP Unicode framing、watcher 无界队列、主题格式和 CSP/capability 问题；只保留失败模式和纯逻辑参考。
 - `monaco-vscode-api` 的 `missing-services.js` 仍让 bundle source map 含 203 个 Chat/Agent/MCP/Auth/Sync/Extension Runtime 债务源；运行时 guard 保证当前不可达，`F110` 必须物理清零。
 - 当前排除面 guard 在 Workbench `initialize` 后审计已注册贡献；未来引入延迟 contribution 时，必须扩展为生命周期恢复后或持续审计。

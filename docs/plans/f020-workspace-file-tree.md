@@ -69,7 +69,7 @@ service 在窗口 mutex 内验证窗口/root 并 clone `Dir` lease，释放锁�
 
 provider 激活使用显式能力合同：`workspace_capabilities() -> { create, renameNoReplace, copyMove, delete, versionedWrite }`。`main.ts` 必须在注册 provider 前经严格 codec 读取并冻结该 DTO，provider 构造时只有五项全为 `true` 才移除 `Readonly`；能力在一个窗口生命周期内不可升级。macOS/Linux 的安全实现可返回全 true，Windows 在 handle-relative exclusive rename 落地前返回 `renameNoReplace: false`，因此仍为只读。
 
-激活 copy 还必须同时声明并真正实现 `FileFolderCopy`，确保同一 `plain-workspace:` provider 的跨 root copy 的唯一写副作用只进入一个 Rust `workspace_copy` command；前后的 stat/resolve 仍是只读调用。Plain 不接受 Workbench 同路径 no-op、`overwrite` 或自动创建目标父目录：激活工作项必须增加窄 patch，在任何写副作用前返回与 Rust 一致的错误，阻断预删除和 `mkdirp`。任何涉及 Plain 的跨 scheme copy 也必须阻断通用 `mkdir/writeFile` fallback，另走以后明确授权的 import/export 合同。仅在 provider 内拒绝这些选项已经太迟，因为 upstream 可能先删除或创建文件系统项。
+激活 copy/move 还必须同时声明并真正实现 `FileFolderCopy`，确保同一 `plain-workspace:` provider 的跨 root copy 只进入一个 Rust `workspace_copy` command；provider `rename(from, to)` 按 authority/rootId 分流，同 root 只进入 `workspace_rename`，不同 root 只进入 `workspace_move`。Plain 不接受 Workbench 同路径 no-op、`overwrite` 或自动创建目标父目录：激活工作项必须增加同时覆盖 copy/move 的窄 patch，在任何写副作用前返回与 Rust 一致的错误，阻断预删除、`mkdirp`、generic copy/delete 和 rename fallback。任何涉及 Plain 的跨 scheme copy/move 也必须阻断通用 `mkdir/writeFile` fallback，另走以后明确授权的 import/export 合同。move incomplete 必须先发布两个 root 的 dirty/rescan/file-event 提示，再向 Workbench 抛稳定且明确“target 已发布”的 `WORKSPACE_MOVE_INCOMPLETE`；不能上报 MOVE 成功、建立 undo、走 fallback 或被当作普通 rename 失败自动重试。仅在 provider 内拒绝 overwrite 已经太迟，因为 upstream 可能先删除或创建文件系统项。
 
 版本化写入是 F020 的底层传输合同，不是 F030 的冲突 UI。Rust stat 增加 opaque version token；`workspace_write_file` 必须同时接收期望 version 与有界 bytes，在 mutation gate 内重验版本、写同目录临时文件并原子替换。由于 upstream `FileService` 不把 `mtime/etag` 继续传给 provider，Plain 需要一份可审计的窄 pnpm patch，把已经用于 dirty-write 校验的期望版本附加到 `IFileWriteOptions`；provider 不维护全局“最近 stat”缓存，也不接受缺少期望版本的覆盖写。
 
@@ -106,6 +106,70 @@ Browser mock 同样先做完整有界预检与 detached clone，最后只执行�
 
 验收必须同时覆盖 exact/+1 预算、同/跨 root mixed tree、空目录、raw symlink、非 UTF-8 名称、嵌套特殊文件、同树 alias、source/stage/parent swap、未知 stage 成员、目标竞争和双 root 撤销。大预算用可注入小 limits 与纯 accumulator 证明，不在常规测试实际生成 256 MiB；产品常量由 Harness 锁定，manifest/stage 行为由真实 Rust 测试证明。
 
+### 跨 root move receipt 与 verified delete 冻结合同
+
+move 新增独立 `workspace_move` command，但 request 继续只拥有 `sourceRootId/sourcePath/targetRootId/targetPath` 四个字段，不接受 `overwrite`、`recursive`、`force`、`confirmed`、URI、scheme 或前端 receipt。Rust DTO、TypeScript request codec 和 writer 都必须在副作用前要求两个 rootId 不同；同 root 永远使用现有 `workspace_rename`。`WorkspaceService::move_entry` 复用同一个 `run_dual_root_mutation`，mutation gate 从 copy 前一直持有到 move 结构化终态，期间不重新获取 lease、不拆 IPC，也不提供中途取消。
+
+native response 是严格判别联合：
+
+```ts
+type WorkspaceMoveResult =
+	| { readonly status: "moved" }
+	| {
+			readonly status: "targetPublishedSourceRetained";
+			readonly reason:
+				| "sourceChanged"
+				| "targetChanged"
+				| "sourceUnverifiable"
+				| "targetUnverifiable"
+				| "deleteFailed";
+	  }
+	| {
+			readonly status: "targetPublishedSourcePartiallyDeleted";
+			readonly reason:
+				| "sourceChanged"
+				| "targetChanged"
+				| "sourceUnverifiable"
+				| "targetUnverifiable"
+				| "deleteFailed";
+			readonly removedEntries: number;
+	  };
+```
+
+`removedEntries` 是本次成功执行的 source `remove_file/remove_dir` 数，partial 时范围为 1..10,000；它不含路径或名称。`SourceRetained` 的精确定义是 Plain 成功删除了零个 receipt 成员，不承诺外部进程没有改变或移走 source。只有正式目标尚未由本次操作发布时才允许返回 `CommandError`；从 `NOREPLACE` 成功开始，任何 source/target 验证或删除问题都必须折叠为上述结果，不能让调用方误以为什么都没发生。正式目标发布后永不自动回滚，incomplete 状态不得自动重试或建立 undo。
+
+reason 判定顺序同样冻结：每轮永远先验证 source、再验证 target；pathname missing、identity/type/content/member-set 或已冻结 metadata 字段不匹配，分别映射 `sourceChanged`/`targetChanged`。permission、I/O、最终 mode/ACL/ownership 语义导致某一端无法完成 receipt 验证，分别映射 `sourceUnverifiable`/`targetUnverifiable`；只有实际 remove syscall 失败映射 `deleteFailed`。两端同时异常时 source 先胜；删除阶段保留首先观察到的 reason。普通文件不能只比较两个当前 handle 或依赖 post-publication metadata：receipt 在 publication 前保存由稳定 source 与 staged target 双侧确认的 SHA-256 digest；每轮先独立重哈希 source，匹配后再独立重哈希 target，哪一端首先偏离 digest 就归对应 changed。协调改写成相同新 bytes 仍会偏离 receipt；开始删除后 source 可放宽的 ctime/nlink 仅限 Plain 已成功 unlink 可解释的变化，digest 永不放宽。symlink 使用完整 raw payload 作等价基线。最后 metadata-after 与 source unlink 之间仍属于已公开竞态。Rust、browser mock 和严格 codec 测试不得对相同注入点采用不同优先级。
+
+内部新增不实现 `Serialize`/`Deserialize` 的 `PublishedCopyReceipt`。推荐由 `workspace/move_entry.rs` 消费，现有 `copy_entry` 改为调用内部 `copy_entry_with_receipt` 后直接丢弃 receipt。receipt 必须在发布前完成全部可能失败的 handle clone、路径/manifest/receipt 分配和 target 名称准备；只有原子 publication 成功才能进入 published typestate。按类型持有：
+
+- 普通文件：source/target parent handle 与 identity、basename、source nofollow file handle 与完整 pre-copy snapshot、在 publication 前由稳定 source/staged target 双侧确认的 32-byte SHA-256 digest，以及 published target handle/identity 与 staged receipt；digest 不是从 publication 后第一次观察到的 target 生成。
+- symlink：两端 parent identity、basename、symlink identity/metadata 与 raw payload；任何阶段都不解析 payload。
+- 目录：`OpenSourceRoot`、完整 `DirectoryManifest`、source/target 顶层 parent identity，以及发布后的 `StagedTree` root handle、member receipts 和正式 target basename；不持有最多 10,000 个目录 FD。
+
+执行顺序固定为：
+
+1. 校验 different-root、四字段路径、双 lease 与现有 copy 冲突规则；copy 失败沿用“源未由 Plain 修改、正式目标未由本次发布”的合同。
+2. 完成现有 file/symlink/directory source-first staged copy，所有 source/stage 最终验收、目录 mode 应用和 `NOREPLACE` 保持不变。每个 file 在 publication 前以 metadata before/after 括住流式 SHA-256：source 与对应 staged target 必须独立产生相同 digest，再把 32-byte 值写入 prepared receipt；目录成员逐个复用同一规则。成功 syscall 以无额外 fallible gap 的方式激活 `PublishedCopyReceipt`。
+3. 从 source/target root capability 重新打开请求路径的 parent，并匹配 receipt 记录的 parent identity；只持有旧 parent handle 而当前 root-relative 路径已经跳到别处时，不允许删源。
+4. 在零个 source 删除副作用下完整重验 source。file 比 pathname/handle snapshot，并在 before/after 间流式重算 SHA-256、匹配 receipt；symlink 比 before/raw payload/after；目录重建完整 manifest 并逐文件匹配 digest。
+5. 完整重验已发布 target。file 的 pathname/handle 必须匹配 published identity/type/len/final mode，并在 before/after 间流式重算 SHA-256、匹配同一 receipt digest；symlink 比 target identity/metadata 与 receipt raw payload；目录从 published root/receipts 验证成员集合、目录最终 mode、每个 pathname/handle identity、file digest 和 raw link。任何 missing、replacement、未知成员或 target metadata/content/mode 改写都保留 source 并返回 `targetChanged`；任一 published member 因最终 mode、未复制的 ACL/ownership 语义或 I/O 而无法重新打开，则保留 source 并返回 `targetUnverifiable`。
+6. target 验收期间同时逐项复核 source，结束后再次重验 source 顶层与完整 manifest，避免较早检查过的 source 成员在较晚 target 检查期间变化。
+7. 对 file/symlink，立即再做一次两端 paired receipt 验证后只调用 source parent 的 capability-relative `remove_file`；成功即 `moved`，失败为 retained。
+8. 对目录，消费 manifest 生成的 bounded delete plan：manifest entries 逆序删除 leaf/空目录，最后删除根。每个 source leaf 删除前重验 source 顶层 basename、identity/type 与对应 published target；文件两端分别重算并匹配 receipt digest，symlink 两端再比 receipt raw payload。每个目录删除时逐层 nofollow 打开、匹配 receipt identity/mode，并确认其 receipt child 已全部删除且当前集合为空；`remove_dir` 失败即停止。
+9. 删除完全部 source 后返回 `moved`；任何中途问题按已成功 remove 数返回 retained 或 partial。不得删除/修改 target，不得恢复 source，不得为了收尾遍历未知成员。
+
+file verifier 和 symlink 一样必须括住整个比较窗口：source 与 target 分别取得 pathname/handle metadata before，在各自窗口内完成有界流式 SHA-256，再取得各自 pathname/handle metadata after；before/after 必须匹配当前允许的 metadata 基线，两个 digest 必须分别匹配 publication 前 receipt。不能只在读取前看一次 identity，不能把 source 的 after 当成 target 的 after，也不能仅凭“当前两端相等”替代各自 receipt 验收。
+
+删除开始后插入的未知成员绝不由 Plain 删除；为保持线性预算，不在每个 leaf 前重扫整个 parent。它最迟在包含目录执行 `remove_dir` 前由空集合检查发现，因此可能在其他 receipt leaf 已删后返回 partial。该延迟发现是冻结合同，不宣称“未知成员出现即立即停止”。
+
+目录 deletion verifier 不能继续机械比较原始完整 `DirectorySnapshot`：移除 child 会合法改变 parent 的 mtime/ctime，移除同 inode hardlink 会改变其余 alias 的 ctime/nlink。任何 source 删除前仍做一次完整严格 preflight；开始后目录只比较 identity、mode 和应为空的剩余集合。普通文件与 symlink 按 identity 分组，source snapshot 增加 `nlink`，并维护 `original_nlink - Plain 已成功移除的同 identity alias 数`；后续 source alias 允许由该已知 unlink 导致的 ctime 变化，但仍要求 expected nlink、identity/type/mode/size/mtime，file SHA-256 与 receipt 相同，raw payload 与 receipt 相同。对应 target 也必须独立匹配同一 digest/payload，不能把当前 source 当 target 的内容基线。外部对这些可比较字段或 link count 的可观测、未抵消变化必须停止；Plain 第一次成功 unlink 后发生的外部 source ctime-only touch、恢复原值的抵消变化，以及未纳入 receipt 的 owner/xattr/ACL 变化不可判别，属于已公开的同 UID 竞态边界。
+
+所有 source 删除继续使用 `cap_std::Dir::remove_file/remove_dir` 的 parent-handle + basename 形式；没有 conditional unlink 原语，因此最后一次 identity 检查与 syscall 之间的同 UID rename/swap 竞态仍是公开边界。target 也可能在最后验收后、source unlink 前被外部删除、替换或改写，所以 `moved` 只描述最后观察和成功 syscall，不构成跨文件系统事务。禁止 `remove_dir_all`、`remove_open_dir`、`remove_open_dir_all`、ambient `std::fs`、直接 `unlink/unlinkat`、shell/`std::process`、walker、follow-capable directory open 和“先移到 tombstone 再后台删”。单次目录 move 最多成功执行 descendants + 1 个删除 syscall；每轮文件比较受 8 MiB/256 MiB 逻辑字节预算，link 比较受 4 KiB/2 MiB 预算，名称、深度和成员仍受原 manifest 上限。
+
+Browser mock 使用同一 detached copy 先发布 target，再消费不可伪造的内存 receipt；新增 after-publication/before-delete/after-delete-entry 测试 seam，模拟 source/target replacement 与第 N 项失败，并返回冻结的同构结果。Harness 必须锁定唯一 command/registration/service route、different-root request、receipt 不跨 Serde/IPC、发布后不再普通 error、target 不回滚，且 file receipt 必须在 publication 前形成。SHA-256 依赖合同必须从 `cargo metadata` 同时核对：direct edge 唯一、未重命名、normal runtime、无 target、非 optional、精确 `=0.10.9`、`uses_default_features=false`、显式 `features=[]`；resolved `sha2@0.10.9` 只允许现有传递依赖带来的 `default/std`，禁止任何额外 feature，并为每个字段提供负例。source `remove_file/remove_dir` 只允许出现在受审计 move 模块且参数必须是已打开 parent handle 下的 basename，现有 writer/directory staging cleanup 保持精确 allowlist。另须禁止 `remove_open_dir(_all)`、`remove_dir_all`、直接 unlink、目录 follow、walker、ambient fs 与 process/shell 绕过。当前工作项不修改 provider capability 或 pnpm patch；provider 继续 `Readonly`。
+
+实现验收至少覆盖：file、raw symlink、空目录、可重新验证 mode 的 mixed tree 正常 move；same-root、未授权、非法路径、特殊文件、超限、缺失 parent 和既有 target 的零副作用；publication 后 source/target basename swap、missing、同 inode 等长改写、恢复时间戳的等长改写、source/target 协调改成相同新 bytes、chmod、link payload 与目录成员变化；任一嵌套 target 因最终 mode/ACL/ownership 语义不可重新打开时 source 零删除并返回 retained/targetUnverifiable；删除前变化必须零 source remove，删除中第 N 项变化/权限失败必须给出精确 partial count；hardlink alias 正常完成且外部 nlink 变化失败；只读 source 不擅自 chmod；外部/dangling/loop link 不触碰 sentinel；双 root 撤销、window close 和并发目标竞争均保持 mutation gate/no-clobber 合同。TypeScript 另覆盖 strict request/result codec、unknown key/enum/prototype 拒绝和所有完整 bridge stub。
+
 ## 提交级落地顺序
 
 每项完成最小验证后立即提交，WIP 始终保持为 F020：
@@ -121,7 +185,7 @@ Browser mock 同样先做完整有界预检与 detached clone，最后只执行�
 9. 有界目录 manifest 与 staged tree：聚合预算、特殊文件拒绝、失败清理与 source 变化重验单独提交。
 10. 跨 root move receipt/verified delete 与确认删除各自单独提交；检测到源变化时不删，并公开外部 TOCTOU 下的非原子结果；不能借 Workbench 的 overwrite 预删除绕过 no-clobber。
 11. 有界内容写入、opaque version、上游期望版本透传 patch 与临时文件原子替换单独提交，形成 provider 所需的安全写传输。
-12. 增加严格 `workspace_capabilities` DTO、copy 同路径/overwrite/mkdirp/cross-scheme 窄 patch，并按 Rust 平台能力激活 provider 写能力、精确文件事件与 Explorer Browser E2E；不支持安全 rename 的平台继续只读。
+12. 增加严格 `workspace_capabilities` DTO、copy/move 同路径/overwrite/mkdirp/generic fallback/cross-scheme 窄 patch，并按 Rust 平台能力激活 provider 写能力、精确文件事件与 Explorer Browser E2E；不支持安全 rename 的平台继续只读。
 13. watcher 的有界 dirty/rescan 状态机、浏览器 mock 收敛测试与真实 Tauri 文件树验收。
 
 ## 验收矩阵
