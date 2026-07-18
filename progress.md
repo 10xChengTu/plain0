@@ -24,9 +24,9 @@
 
 ## 下一步
 
-1. 实现每窗口隔离的 Rust workspace scope、原生目录选择授权和 opaque root id。
-2. 固化 `(rootId, relativePath)` 路径合同，以目录 capability 拒绝 traversal、越界 symlink 和 TOCTOU。
-3. 依次接入只读文件树、新建/重命名、复制/移动/确认删除和 watcher/rescan；每个切片独立提交。
+1. 按 `docs/plans/f020-workspace-file-tree.md` 实现 Rust `stat`/`readDirectory` capability reader，并单独提交。
+2. 增加有界 `readFile`，再接入 `plain-workspace:` provider 与 Workbench Explorer；后端、bridge、UI 各自通过最小验证后提交。
+3. 依次实现新建/重命名、复制/移动、确认删除和 watcher/rescan；每个可独立回滚的切片单独提交。
 4. 最后分别运行 browser mock 和真实 Tauri 文件树验收，再写回 `F020` evidence。
 
 ## 当前验收命令

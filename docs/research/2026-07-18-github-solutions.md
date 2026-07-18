@@ -74,6 +74,10 @@ Git 后端首期统一调用系统 Git CLI，使用 porcelain v2/NUL 等机器�
 
 对应威胁合同包括：多 root 与多窗口隔离，POSIX/Windows/UNC/device/ADS/traversal 输入，中间与末端 symlink、dangling link 和 loop，不存在写目标的父目录逃逸，symlink swap 压测，非覆盖 rename，递归删除不跟随链接，以及 watcher overflow/error/乱序/丢失后的收敛。非 UTF-8 名称禁止 `to_string_lossy()` 后继续寻址；无损 opaque entry handle 延后但错误必须明确。
 
+只读文件树接线继续固定到 `monaco-vscode-api` 35.0.1 的 commit `d8367168c23c9d0a9ba5bc84b8034e5435e9eb93`。官方 [files override](https://github.com/CodinGame/monaco-vscode-api/blob/d8367168c23c9d0a9ba5bc84b8034e5435e9eb93/src/service-override/files.ts) 暴露 `registerCustomProvider`，且要求在 Workbench 初始化前注册；官方 [explorer override](https://github.com/CodinGame/monaco-vscode-api/blob/d8367168c23c9d0a9ba5bc84b8034e5435e9eb93/src/service-override/explorer.ts) 可独立引入 Explorer service、命令和 contribution；[demo 接线](https://github.com/CodinGame/monaco-vscode-api/blob/d8367168c23c9d0a9ba5bc84b8034e5435e9eb93/demo/src/setup.common.ts) 证明 provider、workspace provider 和 Explorer override 可以组合。Plain 采用独立的 `plain-workspace:` provider，并通过 configuration override 的 `reinitializeWorkspace` 在原生 picker 返回后切换单目录 workspace；不把 `file:`、绝对路径或通用 Tauri fs 权限暴露给 WebView。
+
+现有 Tauri 编辑器只能作为反例或交互参考。SideX 固定版本 `05d0710a2735d2a5d6d493f299381d5b6dd06a61` 的 provider 向 Rust 传递绝对路径，Rust 后端继续使用 ambient 文件 API；Terax 固定版本 `34b0a0b0ce2c950112d7c775e64f15000cb74ec5` 的前端树有可参考的懒加载状态机，但后端接收任意路径并静默跳过错误；JulIDE 固定版本 `d98ae7626005232765346623af6a1acc7df51491` 一次 IPC 递归整棵树，会跟随 symlink、吞掉错误并放大大仓库启动成本。Plain 因此只实现 Workbench 所需的单层 `stat`/`readDirectory`，设置条目数和 payload 上限，并把预览所需的有界 `readFile` 作为接入 Explorer 前的独立切片；不会复制这些仓库的文件实现。
+
 ## 调试
 
 [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) 当前规范 1.71。DAP 使用 `Content-Length` frame 和 JSON，但不是 JSON-RPC。
