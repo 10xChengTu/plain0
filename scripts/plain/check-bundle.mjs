@@ -3,10 +3,13 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const root = path.resolve(
+	path.dirname(fileURLToPath(import.meta.url)),
+	"../..",
+);
 const distRoot = path.join(root, "dist");
 const failures = [];
-const fail = message => failures.push(message);
+const fail = (message) => failures.push(message);
 
 async function walk(directory) {
 	const files = [];
@@ -29,13 +32,18 @@ function normalizeSource(source) {
 }
 
 const categories = {
-	chatAgent: source => /\/(?:chat|inlineChat|agentHost|agentEditorComments)\//i.test(source),
-	mcp: source => /\/mcp\//i.test(source),
-	authAccount: source =>
-		/\/(?:authentication|accounts?)\//i.test(source) || /\/(?:defaultAccount|globalCompositeBar)\.js$/i.test(source),
-	syncEditSessions: source => /\/(?:userDataSync|editSessions)\//i.test(source),
-	extensionRuntime: source =>
-		/\/(?:extensions|extensionManagement|extensionGallery|extensionHost)(?:\/|[A-Z])/i.test(source),
+	chatAgent: (source) =>
+		/\/(?:chat|inlineChat|agentHost|agentEditorComments)\//i.test(source),
+	mcp: (source) => /\/mcp\//i.test(source),
+	authAccount: (source) =>
+		/\/(?:authentication|accounts?)\//i.test(source) ||
+		/\/(?:defaultAccount|globalCompositeBar)\.js$/i.test(source),
+	syncEditSessions: (source) =>
+		/\/(?:userDataSync|editSessions)\//i.test(source),
+	extensionRuntime: (source) =>
+		/\/(?:extensions|extensionManagement|extensionGallery|extensionHost)(?:\/|[A-Z])/i.test(
+			source,
+		),
 };
 
 const forbiddenHostSources = [
@@ -71,7 +79,7 @@ for (const file of distFiles) {
 }
 
 const sources = new Set();
-for (const mapFile of distFiles.filter(file => file.endsWith(".js.map"))) {
+for (const mapFile of distFiles.filter((file) => file.endsWith(".js.map"))) {
 	const map = JSON.parse(await readFile(mapFile, "utf8"));
 	for (const source of map.sources ?? []) {
 		sources.add(normalizeSource(source));
@@ -89,8 +97,8 @@ for (const source of sources) {
 const javascript = (
 	await Promise.all(
 		distFiles
-			.filter(file => file.endsWith(".js") && !file.endsWith(".js.map"))
-			.map(file => readFile(file, "utf8")),
+			.filter((file) => file.endsWith(".js") && !file.endsWith(".js.map"))
+			.map((file) => readFile(file, "utf8")),
 	)
 ).join("\n");
 for (const command of forbiddenCommandIds) {
@@ -100,8 +108,8 @@ for (const command of forbiddenCommandIds) {
 }
 
 const sortedSources = [...sources].sort();
-const debtSources = sortedSources.filter(source =>
-	Object.values(categories).some(matches => matches(source)),
+const debtSources = sortedSources.filter((source) =>
+	Object.values(categories).some((matches) => matches(source)),
 );
 const actual = {
 	sourceCount: sortedSources.length,
@@ -112,7 +120,9 @@ const actual = {
 			sortedSources.filter(matches).length,
 		]),
 	),
-	debtSourceSha256: createHash("sha256").update(debtSources.join("\n")).digest("hex"),
+	debtSourceSha256: createHash("sha256")
+		.update(debtSources.join("\n"))
+		.digest("hex"),
 };
 
 if (process.argv.includes("--print")) {
@@ -123,7 +133,9 @@ if (process.argv.includes("--print")) {
 	);
 	for (const key of ["sourceCount", "debtSourceCount", "debtSourceSha256"]) {
 		if (baseline[key] !== actual[key]) {
-			fail(`bundle baseline ${key} changed: expected ${baseline[key]}, got ${actual[key]}`);
+			fail(
+				`bundle baseline ${key} changed: expected ${baseline[key]}, got ${actual[key]}`,
+			);
 		}
 	}
 	for (const [category, count] of Object.entries(actual.categoryCounts)) {
@@ -134,10 +146,19 @@ if (process.argv.includes("--print")) {
 		}
 	}
 
-	const featureDocument = JSON.parse(await readFile(path.join(root, "features.json"), "utf8"));
-	if (featureDocument.features.find(feature => feature.id === "F110")?.status === "complete") {
-		if (sortedSources.some(source => source.endsWith("/missing-services.js"))) {
-			fail("F110 is complete but the transitional missing-services bundle remains");
+	const featureDocument = JSON.parse(
+		await readFile(path.join(root, "features.json"), "utf8"),
+	);
+	if (
+		featureDocument.features.find((feature) => feature.id === "F110")
+			?.status === "complete"
+	) {
+		if (
+			sortedSources.some((source) => source.endsWith("/missing-services.js"))
+		) {
+			fail(
+				"F110 is complete but the transitional missing-services bundle remains",
+			);
 		}
 	}
 }

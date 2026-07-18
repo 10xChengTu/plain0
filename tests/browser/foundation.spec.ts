@@ -9,7 +9,10 @@ const excludedCommands = [
 	"Browse Color Themes in Marketplace",
 ];
 
-async function expectCommandUnavailable(page: Page, label: string): Promise<void> {
+async function expectCommandUnavailable(
+	page: Page,
+	label: string,
+): Promise<void> {
 	await page.keyboard.press("Meta+Shift+P");
 	const palette = page.locator(".quick-input-widget");
 	await expect(palette).toBeVisible();
@@ -27,20 +30,20 @@ test("boots the allowlisted Workbench without excluded runtime surfaces", async 
 	const workers: string[] = [];
 	const serviceWorkers: string[] = [];
 
-	page.on("pageerror", error => errors.push(error.message));
-	page.on("console", message => {
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
 		if (message.type() === "error") {
 			errors.push(message.text());
 		}
 	});
-	page.on("request", request => {
+	page.on("request", (request) => {
 		const url = new URL(request.url());
 		if (url.hostname !== "127.0.0.1") {
 			externalRequests.push(request.url());
 		}
 	});
-	page.on("worker", worker => workers.push(worker.url()));
-	context.on("serviceworker", worker => serviceWorkers.push(worker.url()));
+	page.on("worker", (worker) => workers.push(worker.url()));
+	context.on("serviceworker", (worker) => serviceWorkers.push(worker.url()));
 
 	await page.goto("/");
 
@@ -80,6 +83,6 @@ test("boots the allowlisted Workbench without excluded runtime surfaces", async 
 
 	expect(errors).toEqual([]);
 	expect(externalRequests).toEqual([]);
-	expect(workers.some(url => /extension.?host/i.test(url))).toBe(false);
+	expect(workers.some((url) => /extension.?host/i.test(url))).toBe(false);
 	expect(serviceWorkers).toEqual([]);
 });
