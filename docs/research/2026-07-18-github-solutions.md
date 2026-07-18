@@ -78,6 +78,14 @@ Git 后端首期统一调用系统 Git CLI，使用 porcelain v2/NUL 等机器�
 
 现有 Tauri 编辑器只能作为反例或交互参考。SideX 固定版本 `05d0710a2735d2a5d6d493f299381d5b6dd06a61` 的 provider 向 Rust 传递绝对路径，Rust 后端继续使用 ambient 文件 API；Terax 固定版本 `34b0a0b0ce2c950112d7c775e64f15000cb74ec5` 的前端树有可参考的懒加载状态机，但后端接收任意路径并静默跳过错误；JulIDE 固定版本 `d98ae7626005232765346623af6a1acc7df51491` 一次 IPC 递归整棵树，会跟随 symlink、吞掉错误并放大大仓库启动成本。Plain 因此只实现 Workbench 所需的单层 `stat`/`readDirectory`，设置条目数和 payload 上限，并把预览所需的有界 `readFile` 作为接入 Explorer 前的独立切片；不会复制这些仓库的文件实现。
 
+### F020 CRUD 写语义补充调研
+
+创建和重命名不能直接照搬 `std::fs` 或 Workbench 的乐观预检查。[cap-std 4.0.2 固定源码的 `Dir`](https://github.com/bytecodealliance/cap-std/blob/715e4ed607ae9a93c7446b0fa63296f7898831c2/cap-std/src/fs/dir.rs) 中，`create` 会截断已有文件，`rename` 也明确允许替换目标；空文件必须改用 [`OpenOptions::write(true).create_new(true)`](https://github.com/bytecodealliance/cap-std/blob/715e4ed607ae9a93c7446b0fa63296f7898831c2/cap-primitives/src/fs/open_options.rs)，目录则使用单级 `create_dir`。重命名必须先由 `cap_std` 安全打开源和目标父目录，再只把 basename 交给 [rustix 1.1.4 固定源码的 `renameat_with`](https://github.com/bytecodealliance/rustix/blob/c4caf5caaa7e93828a2e4a4cdba1dd0171e45717/src/fs/at.rs) 和 `NOREPLACE`；把多段路径直接传给原始 `renameat` 会重新暴露中间 symlink 逃逸。macOS/Linux 或文件系统不支持原子 no-replace 时必须安全失败；Windows 的 handle-relative exclusive rename 留给 F120/F130，期间不得退化为 `exists + rename`。
+
+`monaco-vscode-api@35.0.1` 对应的 upstream Code OSS commit 中，[`openExplorerAndCreate`](https://github.com/microsoft/vscode/blob/fc3def6774c76082adf699d366f31a557ce5573f/src/vs/workbench/contrib/files/browser/fileActions.ts) 通过 `ResourceFileEdit` 进入 [`FileService`](https://github.com/microsoft/vscode/blob/fc3def6774c76082adf699d366f31a557ce5573f/src/vs/platform/files/common/fileService.ts)。`createFile` 的存在性检查和最终 provider `writeFile` 分离，而且后者会收到 `create: true, overwrite: true`；因此 Plain provider 不能把该 `overwrite` 当成覆盖授权，Rust 仍必须以 `create_new` 为最终权威。[`Readonly` provider capability](https://github.com/microsoft/vscode/blob/fc3def6774c76082adf699d366f31a557ce5573f/src/vs/platform/files/common/files.ts) 又是整个 scheme 的粗粒度开关，解除后会同时启用新建、重命名、剪切/粘贴和编辑器写入；[Explorer 菜单贡献](https://github.com/microsoft/vscode/blob/fc3def6774c76082adf699d366f31a557ce5573f/src/vs/workbench/contrib/files/browser/fileActions.contribution.ts) 甚至不能用它细分永久删除。保持 `Readonly` 只能保证 provider 拒绝写入并禁用部分动作，不能保证所有命令和菜单不可见。Plain 先分别完成 create、rename、其余 CRUD 与安全内容写入合同，最后才按原生能力单独激活写界面。
+
+写操作也不能复用只读 lease 的“执行后再校验”模式。每个窗口新增一个 mutation gate；create/rename 与 root replace/remove/window close 都按 `mutation gate -> workspace state` 的统一锁序线性化。写线程取得 gate 后再次验证旧 lease，只有仍授权时才执行 syscall：撤销先发生则磁盘不变，写先发生则撤销等待。读操作仍保持锁外 I/O 和迟到结果丢弃。
+
 ## 调试
 
 [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) 当前规范 1.71。DAP 使用 `Content-Length` frame 和 JSON，但不是 JSON-RPC。

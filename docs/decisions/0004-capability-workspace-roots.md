@@ -16,6 +16,7 @@ Tauri `plugin-fs` 的 scope 适合限制通用前端文件 API，但其核心仍
 - IPC 文件路径固定为 `(rootId, relativePath)`。`relativePath` 使用 `/` wire format；解析器拒绝 absolute/prefix、`.`、`..`、空组件、NUL、反斜杠及 Windows drive/UNC/device/ADS 歧义，并设置长度与段数上限。
 - 所有 stat、read、create、rename、copy、move 和 delete 都通过 root `Dir` 或从它打开的子目录 handle 执行。canonical path 只作为 Rust 私有的显示、文件身份去重和 watcher 元数据。
 - 普通 rename 只允许同 root 且默认 no-clobber；跨 root move 是两个明确授权根之间的 copy + verified delete，并公开非原子失败状态。
+- 每窗口写操作与 root replace/remove/window close 共享 mutation gate，并统一按 `mutation gate -> workspace state` 获取锁。写操作拿到 gate 后必须重验 lease；不得复用读取的事后撤销校验，因为已经发生的磁盘副作用无法丢弃。
 - symlink 可列出；只有能力解析确认仍在当前 root 内的相对链接可跟随。删除 symlink 删除链接自身，递归扫描/删除不跟随最终链接。
 - 非 UTF-8 名称不做 lossy conversion。首版返回 `PATH_ENCODING_UNSUPPORTED`，以后可增加无损 opaque entry handle。
 - 不安装或授权 Tauri 通用 fs/shell scope。目录选择只授予文件访问，与 Git、PTY、DAP 的 workspace trust 分离。

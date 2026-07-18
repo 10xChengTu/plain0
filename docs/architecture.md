@@ -131,10 +131,12 @@ Workbench model ← Plain feature service ← typed bridge/events
 - 每个 root 在 Rust 中持有已打开的 `cap_std::fs::Dir` capability；canonical path 是仅供显示、文件身份去重和 watcher 使用的私有元数据，不是 I/O 授权依据。
 - 所有路径请求采用 `(rootId, relativePath)` 或经过授权的 opaque handle。wire path 固定使用 `/`，拒绝 absolute、prefix、`.`、`..`、NUL、空组件和平台歧义；WebView 不接收或提交原生绝对路径。
 - 读取与 CRUD 必须相对 root capability 执行，禁止先 `canonicalize`/`starts_with` 再用 ambient `std::fs`。跨 root 操作必须显式携带两个已授权 root；普通 rename 默认不覆盖。
+- 每窗口 mutation 与 root replace/remove/window close 共享独立 gate，并统一使用 `mutation gate -> workspace state` 锁序；写线程拿到 gate 后重验 lease，保证授权撤销与磁盘副作用具有明确先后关系。只读操作继续锁外执行并丢弃撤销后的迟到结果。
 - symlink 可以显示；只有 capability 解析后仍位于同一 root 内的相对链接可跟随。删除链接只删除目录项，递归扫描与删除不得跟随越界链接。
 - 非 UTF-8 名称不得通过 lossy conversion 变成后续可操作路径；在无损 opaque handle 落地前返回明确的不支持状态。
 - watcher 使用每 root 一个 `notify::RecommendedWatcher`；回调只写入 dirty/rescan 状态和有界唤醒队列。事件只是可能合并、乱序或丢失的提示，队列满、watch error、睡眠恢复和 root rename/delete 都触发 capability-based rescan。
-- 保存使用临时文件加原子替换；保存前比较版本/mtime，避免静默覆盖外部修改。
+- Rust 暴露不可变、可审计的 workspace 写能力 DTO；前端在 provider 注册前读取，只有 create、exclusive rename、copy/move、delete 和 versioned write 全部安全可用的平台才移除 provider `Readonly`，其余平台保持只读。
+- 保存使用 opaque version、同目录临时文件加原子替换；上游 FileService 的期望版本经可审计窄 patch 继续传到 provider/Rust，写入在 mutation gate 内重验，避免静默覆盖外部修改。provider 不维护易受其他 stat 调用污染的“最近版本”缓存。
 - Rust provider 实现 Workbench 文件 service 所需的窄接口，不给 WebView 全局 fs scope。
 
 ### 搜索
