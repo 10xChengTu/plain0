@@ -9,6 +9,7 @@ use super::WorkspaceService;
 use crate::error::CommandError;
 use crate::workspace::dto::WorkspacePickRootsStatus;
 use crate::workspace::picker::{DirectoryPicker, DirectoryPickerFuture, DirectoryPickerResult};
+use crate::workspace::MAX_WORKSPACE_ROOTS;
 
 enum FakeOutcome {
     Selected(Vec<PathBuf>),
@@ -217,6 +218,24 @@ fn root_limit_counts_existing_and_deduplicated_selections_atomically() {
     assert!(!serialized.contains("private-overflow-root"));
     assert!(!serialized.contains(temp.path().to_str().unwrap()));
     assert_eq!(service.snapshot("main").unwrap(), before_overflow);
+}
+
+#[test]
+fn root_limit_rejects_oversized_picker_results_before_authorization() {
+    let temp = TempDir::new().unwrap();
+    let duplicate = create_directory(&temp, "private-repeated-root");
+    let service = WorkspaceService::new();
+    let before = service.snapshot("main").unwrap();
+
+    let error = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![duplicate; MAX_WORKSPACE_ROOTS + 1]),
+        true,
+    ))
+    .unwrap_err();
+
+    assert_eq!(error.code(), "WORKSPACE_ROOT_LIMIT_EXCEEDED");
+    assert_eq!(service.snapshot("main").unwrap(), before);
 }
 
 #[test]

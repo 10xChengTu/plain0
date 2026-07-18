@@ -162,6 +162,10 @@ impl WorkspaceScope {
         &mut self,
         ambient_paths: &[PathBuf],
     ) -> Result<Vec<RootId>, CommandError> {
+        if ambient_paths.len() > MAX_WORKSPACE_ROOTS {
+            return Err(workspace_root_limit_exceeded());
+        }
+
         let prepared = ambient_paths
             .iter()
             .map(|ambient_path| {
