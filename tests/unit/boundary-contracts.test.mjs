@@ -80,6 +80,10 @@ const baselineTauriE2EConfig = {
 		windows: [{ ...baselineWindow, incognito: true }],
 	},
 };
+const baselineTauriE2ELaunchScript =
+	"tauri dev --config src-tauri/tauri.e2e.conf.json";
+const baselineTauriE2EBuildScript =
+	"tauri build --debug --bundles app --config src-tauri/tauri.e2e.conf.json";
 
 const baselineCapability = {
 	$schema: "../gen/schemas/desktop-schema.json",
@@ -279,7 +283,8 @@ describe("Plain Tauri boundary contracts", () => {
 			validateTauriE2EConfiguration(
 				baselineConfig,
 				baselineTauriE2EConfig,
-				"tauri dev --config src-tauri/tauri.e2e.conf.json",
+				baselineTauriE2ELaunchScript,
+				baselineTauriE2EBuildScript,
 			),
 		).toEqual([]);
 
@@ -289,7 +294,8 @@ describe("Plain Tauri boundary contracts", () => {
 			validateTauriE2EConfiguration(
 				baselineConfig,
 				persistentE2EWindow,
-				"tauri dev --config src-tauri/tauri.e2e.conf.json",
+				baselineTauriE2ELaunchScript,
+				baselineTauriE2EBuildScript,
 			),
 		).toContain(
 			"the Tauri E2E window must equal the production window plus incognito true",
@@ -301,7 +307,8 @@ describe("Plain Tauri boundary contracts", () => {
 			validateTauriE2EConfiguration(
 				baselineConfig,
 				incompleteE2EWindow,
-				"tauri dev --config src-tauri/tauri.e2e.conf.json",
+				baselineTauriE2ELaunchScript,
+				baselineTauriE2EBuildScript,
 			),
 		).toContain(
 			"the Tauri E2E window must equal the production window plus incognito true",
@@ -313,7 +320,8 @@ describe("Plain Tauri boundary contracts", () => {
 			validateTauriE2EConfiguration(
 				baselineConfig,
 				broadE2EOverlay,
-				"tauri dev --config src-tauri/tauri.e2e.conf.json",
+				baselineTauriE2ELaunchScript,
+				baselineTauriE2EBuildScript,
 			),
 		).toContain("the Tauri E2E app overlay must replace only windows");
 
@@ -322,9 +330,21 @@ describe("Plain Tauri boundary contracts", () => {
 				baselineConfig,
 				baselineTauriE2EConfig,
 				"tauri dev",
+				baselineTauriE2EBuildScript,
 			),
 		).toContain(
 			"tauri:dev:e2e must launch only the audited Tauri E2E configuration",
+		);
+
+		expect(
+			validateTauriE2EConfiguration(
+				baselineConfig,
+				baselineTauriE2EConfig,
+				baselineTauriE2ELaunchScript,
+				"tauri build",
+			),
+		).toContain(
+			"tauri:build:e2e must build only the audited isolated debug app bundle",
 		);
 
 		expect(

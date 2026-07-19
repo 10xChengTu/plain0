@@ -332,6 +332,7 @@ for (const failure of validateTauriE2EConfiguration(
 	tauriConfig,
 	tauriE2EConfig,
 	packageDocument.scripts?.["tauri:dev:e2e"],
+	packageDocument.scripts?.["tauri:build:e2e"],
 )) {
 	fail(failure);
 }

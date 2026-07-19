@@ -70,6 +70,8 @@ Git 后端首期统一调用系统 Git CLI，使用 porcelain v2/NUL 等机器�
 
 Tauri CLI 官方 `--config` flavor 会按给定顺序覆盖默认配置；[CLI 2.11.4 的合并实现](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-cli/src/helpers/config.rs) 使用 RFC 7396 JSON Merge Patch，数组会整体替换而不是逐项合并。因此 Plain 采用独立 E2E overlay，完整复制唯一主窗口并只增加 `incognito: true`；Harness 负责防止窗口字段漂移、自动平台配置插入、overlay 扩权或验收脚本误用生产 profile。
 
+真实电脑控制还必须消除同 bundle id 歧义：`tauri dev` 运行的是裸 `target/debug/plain`，而按 `com.plain.editor` 查询 GUI 可能自动拉起上一次的 `target/debug/bundle/macos/Plain.app`。Plain 因此以同一 overlay 执行 `tauri build --debug --bundles app`，再按刚生成 `.app` 的绝对路径绑定；启动取样等待 Explorer contribution 或明确 bootstrap error。这样代码版本、WebView profile 和被控制进程三者同时可证，而不是用旧 bundle 的画面推断当前源码。
+
 ## F020 工作区路径与文件树专项调研
 
 专项审计排除了把 Tauri `plugin-fs` scope 直接当作编辑器安全边界：Tauri core 的 [fs scope](https://github.com/tauri-apps/tauri/blob/3f62c70d6b9a9eeeb7c302b010c858405a1bb761/crates/tauri/src/scope/fs.rs) 采用 glob、allow/deny 和 canonicalize，不存在目标会退回词法匹配；[plugin-fs commands](https://github.com/tauri-apps/plugins-workspace/blob/57ac98645324c04ab2b4c969538f5d55569bf43d/plugins/fs/src/commands.rs) 在 scope 检查后继续使用 ambient `std::fs`。这类检查/使用分离无法消除 symlink swap/TOCTOU，也会迫使 WebView 接触绝对路径或宽泛 scope。

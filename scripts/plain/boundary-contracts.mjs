@@ -29,6 +29,8 @@ const EXPECTED_CAPABILITY_KEYS = Object.freeze([
 
 const EXPECTED_TAURI_E2E_SCRIPT =
 	"tauri dev --config src-tauri/tauri.e2e.conf.json";
+const EXPECTED_TAURI_E2E_BUILD_SCRIPT =
+	"tauri build --debug --bundles app --config src-tauri/tauri.e2e.conf.json";
 const EXPECTED_TAURI_CONFIG_FILES = Object.freeze([
 	"tauri.conf.json",
 	"tauri.e2e.conf.json",
@@ -744,11 +746,17 @@ export function validateTauriE2EConfiguration(
 	productionConfig,
 	e2eConfig,
 	launchScript,
+	buildScript,
 ) {
 	const failures = [];
 	if (launchScript !== EXPECTED_TAURI_E2E_SCRIPT) {
 		failures.push(
 			"tauri:dev:e2e must launch only the audited Tauri E2E configuration",
+		);
+	}
+	if (buildScript !== EXPECTED_TAURI_E2E_BUILD_SCRIPT) {
+		failures.push(
+			"tauri:build:e2e must build only the audited isolated debug app bundle",
 		);
 	}
 	if (

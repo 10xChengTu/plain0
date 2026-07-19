@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：诊断干净、非持久 WKWebView 中仍缺失 Explorer/Activity Bar contribution 的真实启动差异；在根因与修复形成独立验证提交后，再继续外部文件系统事件与文件树 CRUD/save 总验收。
+- 当前最小工作项：在刚构建且已出现 Explorer ready 的隔离 debug `.app` 中完成系统目录选择、文件树 CRUD/save 和真实外部 FSEvents 刷新验收；写回证据后立即独立提交。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -77,14 +77,15 @@
 - [x] 完成 watcher/rescan 专项 GitHub 补充调研与方案冻结：锁定 `notify 8.2.0` 与 `follow_symlinks(false)`，排除 full debouncer、Tauri raw-path watcher 和 Parcel 直接移植；确认固定 Explorer 默认忽略 root `UPDATED`，因此冻结每 root watcher/每 window 单 worker、容量 1 唤醒队列、capability root scan、单 sticky generation + sync/ack、window-targeted wake、事务化 root 生命周期和只命中 `plain-workspace:` 根事件的 deep-refresh 补丁。本项不把 notify path 送入 WebView，不伪造 root delete，不冒充 F030 打开文件外部冲突。
 - [x] 完成 watcher/rescan 实现：Rust 为每个窗口建立单 worker 与容量 1 唤醒队列，每个授权 root 使用 `notify =8.2.0` 且显式禁用 symlink following；callback 丢弃原始 path/error，仅累积 dirty/rescan。capability root scan、事务化 prepare/activate/revoke、窗口隔离、resume、close、sticky `u32` generation 与 exact ack 已接入严格 Tauri command/event。TypeScript manager 以单 listener、单 timer、单 in-flight sync 收敛丢失 wake，supported/readonly provider 共用同一路径并只发冻结 root `UPDATED`；Plain-only Explorer 补丁据此执行 `refresh(false)`，不伪造 root delete。
 - [x] watcher Harness 与局部验收收口：25 个 TypeScript/JavaScript 测试文件、480 个用例通过；Rust watcher 21/21、service/DTO 聚焦测试与 Clippy 通过，全量 Rust 255 项中 253 项通过，剩余两项仍是沙箱禁止 FIFO fixture 的既有 `EPERM`。格式、双类型检查、严格 lint、生产构建、245 项 watcher/patch 聚焦用例、107 项边界 hostile mutation、Workbench patch SHA/hunk/lock graph、架构 guard 及 2104-source/203-debt bundle 基线均通过；Harness 的 Cargo metadata 审计按当前 `rustc host` 过滤无关目标依赖，同时继续检查完整直接依赖声明。最终双路复核修复了 invoke-thread 阻塞、lease failure 丢 dirty、非 v4 rootId、饱和 generation 不收敛和 provider callback 可绕过五项问题，复核后无剩余 P0/P1/P2。新增 Browser watcher E2E 覆盖即时 wake 与丢 wake 定时拉取，但当前会话因本地端口 bind 权限尚未执行。
-- [x] 完成真实 Tauri E2E WebView profile 隔离：对照 Tauri/Wry 官方 GitHub 与固定依赖源码，排除会改变生产持久状态且仅 macOS 14+ 生效的 `dataStoreIdentifier`，新增 `tauri:dev:e2e` flavor，以完整主窗口 + `incognito: true` 使用非持久 `WKWebsiteDataStore`。Harness 锁定启动命令、overlay 闭集和窗口字段一致性；108 项边界测试、架构检查与真实 Tauri 启动通过。干净原生 profile 仍缺 Explorer，证明先前“损坏的持久 profile”判断不成立，下一项转为 WKWebView 启动差异诊断。
+- [x] 完成真实 Tauri E2E WebView profile 隔离：对照 Tauri/Wry 官方 GitHub 与固定依赖源码，排除会改变生产持久状态且仅 macOS 14+ 生效的 `dataStoreIdentifier`，新增 `tauri:dev:e2e` flavor，以完整主窗口 + `incognito: true` 使用非持久 `WKWebsiteDataStore`。Harness 锁定启动命令、overlay 闭集和窗口字段一致性；108 项边界测试、架构检查与真实 Tauri 启动通过。随后确认当时按 bundle id 取得的空视图来自旧 `.app`/过早取样，而不是隔离 profile 或当前 contribution 缺陷。
 - [x] watcher Browser E2E 在允许绑定本地端口的桌面会话通过 7/7，覆盖即时 wake、丢 wake 定时收敛、五类 CRUD/保存路由与只读能力回退；该结果只证明 Browser mock/UI 链，不替代真实 FSEvents/WKWebView 验收。
+- [x] 修复真实 Tauri 电脑验收的运行态假阴性：确认按 `com.plain.editor` 会自动拉起旧 `target/debug/bundle/macos/Plain.app`，且过早取样可看到尚未稳定的空 Activity Bar；当前 WKWebView contribution 实际正常。新增受 Harness 锁定的 `tauri:build:e2e`，从当前源码构建隔离 debug `.app`，要求按绝对 bundle 路径绑定并轮询 Explorer ready 或明确 bootstrap error。108 项边界测试、架构/格式检查、完整当前 bundle 构建与 Computer Use 首次 ready 取样均通过。
 
 ## 下一步
 
-1. 定位干净 WKWebView 与普通 Browser 之间的 Workbench contribution 启动差异，恢复原生 Explorer/Activity Bar。
+1. 以系统目录选择器打开原生 fixture，完成文件树 CRUD/save 验收。
 2. 以真实外部文件系统事件验证 FSEvents → Rust watcher → Explorer deep refresh。
-3. 完成文件树 CRUD/save 总验收并写回 `F020` evidence。
+3. 写回 `F020` evidence 并执行最终回归。
 
 ## 当前验收命令
 
@@ -103,7 +104,7 @@ pnpm test:e2e:browser -- workspace.spec.ts
 - 工作区安全依赖已打开的 Rust 目录 capability；canonical path 只允许用于显示、去重与 watcher，不能退化为 `starts_with` 后调用 ambient `std::fs`。
 - VSIX 主题和 GitLens-like 功能有独立许可边界，第三方资源不得未经审计打包。
 - macOS 的 WKWebView 不能由普通浏览器 E2E 代替，最终必须真实启动应用。
-- 受 Harness 约束的 `incognito` WKWebView 与原生产 profile 都缺失 Explorer/Activity Bar contribution，而普通 Browser profile 正常；根因位于 WKWebView 环境或启动时序差异，不是持久 profile。`F020` 最终原生文件树验收必须先修复此差异，不能把系统 picker 或 Browser mock 通过冒充为原生 CRUD 通过。
+- Computer Use 按 `com.plain.editor` 绑定时可能自动拉起同 bundle id 的旧 debug `.app`；真实证据必须来自刚执行 `tauri:build:e2e` 的绝对 bundle 路径，并等待 Explorer ready 或明确 bootstrap error，不能把旧画面或瞬时空 Activity Bar 当成当前源码结果。
 - 若 native `prepare-delete` 已登记批次但 IPC 响应在前端收到 confirmation id 前丢失，前端无法主动 cancel；批次仍不可 begin/commit，由 Rust 的 120 秒单调 idle TTL、root/window 生命周期清理兜底。
 - watcher wake event 只是可丢失提示，权威状态在 Rust sticky generation；Browser mock 已覆盖定时拉取收敛，但真实 macOS FSEvents/WKWebView 链仍须在可启动桌面会话中验收，不能用单元测试冒充完成。
 
