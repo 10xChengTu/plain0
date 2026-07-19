@@ -3744,20 +3744,42 @@ describe("Plain confirmed-delete TypeScript invocation boundary", () => {
 });
 
 const readonlyWorkspaceProvider = `
-export class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileReadWriteCapability {
+import { FileSystemProviderCapabilities } from "@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files";
+import { Event } from "@codingame/monaco-vscode-api/vscode/vs/base/common/event";
+import { decodeWorkspaceCapabilities } from "../../platform/tauri/workspace-codec";
+
+function createPlainWorkspaceMutationPolicy(
+  platformCapabilities: WorkspaceCapabilities,
+): boolean {
+  const snapshot = decodeWorkspaceCapabilities(platformCapabilities);
+  return (
+    snapshot.create &&
+    snapshot.renameNoReplace &&
+    snapshot.copyMove &&
+    snapshot.delete &&
+    snapshot.versionedWrite
+  );
+}
+
+class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileReadWriteCapability {
   readonly capabilities =
     FileSystemProviderCapabilities.FileReadWrite |
     FileSystemProviderCapabilities.Readonly;
+  readonly onDidChangeCapabilities = Event.None;
   private readonly changeEmitter = new Emitter();
   readonly onDidChangeFile = this.changeEmitter.event;
 
-  constructor(private readonly bridge: PlainBridge) {}
+  constructor(
+    private readonly bridge: PlainBridge,
+    private readonly allowsMutationDispatch: boolean,
+  ) {}
 
   async readFile() {
     return file.copy();
   }
 
   async plainWriteFile(resource, content, expectedVersion) {
+    this.requireMutationDispatchAllowed();
     const result = await this.bridge.workspaceWriteFile(
       rootId,
       relativePath,
@@ -3773,12 +3795,22 @@ export class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWith
   async writeFile() {
     throw noPermissions();
   }
+
+  private requireMutationDispatchAllowed(): void {
+    if (!this.allowsMutationDispatch) {
+      throw noPermissions();
+    }
+  }
 }
 
 export function createPlainWorkspaceFileSystemProvider(
   bridge: PlainBridge,
+  platformCapabilities: WorkspaceCapabilities,
 ): PlainWorkspaceFileSystemProvider {
-  return new PlainWorkspaceFileSystemProvider(bridge);
+  return new PlainWorkspaceFileSystemProvider(
+    bridge,
+    createPlainWorkspaceMutationPolicy(platformCapabilities),
+  );
 }
 `;
 
@@ -3824,16 +3856,16 @@ describe("Plain workspace provider copy boundary", () => {
 
 	it("rejects direct, computed or inherited provider copy surfaces", () => {
 		const directCopy = readonlyWorkspaceProvider.replace(
-			"\n}",
-			"\n  async copy() {}\n}",
+			"  async writeFile() {",
+			"  async copy() {}\n\n  async writeFile() {",
 		);
 		expect(validateWorkspaceProviderCopyBoundary(directCopy)).toContain(
 			"Plain workspace provider must not expose copy before write activation",
 		);
 
 		const computedCopy = readonlyWorkspaceProvider.replace(
-			"\n}",
-			'\n  ["copy"] = async () => {};\n}',
+			"  async writeFile() {",
+			'  ["copy"] = async () => {};\n\n  async writeFile() {',
 		);
 		expect(validateWorkspaceProviderCopyBoundary(computedCopy)).toContain(
 			"Plain workspace provider must not hide members behind computed names",
@@ -3848,7 +3880,7 @@ describe("Plain workspace provider copy boundary", () => {
 		);
 	});
 
-	it("locks the private versioned write seam, root rescan and public readonly failure", () => {
+	it("locks the policy gate, private versioned write seam, root rescan and public readonly failure", () => {
 		for (const [hostile, expected] of [
 			[
 				readonlyWorkspaceProvider.replace("plainWriteFile", "plainWriteBypass"),
@@ -3859,19 +3891,26 @@ describe("Plain workspace provider copy boundary", () => {
 					"this.bridge.workspaceWriteFile(",
 					"this.bridge.workspaceWriteFile(await this.bridge.workspaceWriteFile(",
 				),
-				"plainWriteFile must dispatch one versioned bridge write and one audited root-rescan branch",
+				"plainWriteFile must gate first, dispatch one versioned bridge write and retain one root-rescan branch",
 			],
 			[
 				readonlyWorkspaceProvider.replace(
 					"this.changeEmitter.fire(rootRescan);",
 					"void rootRescan;",
 				),
-				"plainWriteFile must dispatch one versioned bridge write and one audited root-rescan branch",
+				"plainWriteFile must gate first, dispatch one versioned bridge write and retain one root-rescan branch",
 			],
 			[
 				readonlyWorkspaceProvider.replace(
-					"throw noPermissions();",
-					"return this.bridge.workspaceWriteFile();",
+					"    this.requireMutationDispatchAllowed();\n",
+					"",
+				),
+				"plainWriteFile must gate first, dispatch one versioned bridge write and retain one root-rescan branch",
+			],
+			[
+				readonlyWorkspaceProvider.replace(
+					"  async writeFile() {\n    throw noPermissions();\n  }",
+					"  async writeFile() {\n    return this.bridge.workspaceWriteFile();\n  }",
 				),
 				"public writeFile must remain a direct noPermissions failure without native dispatch",
 			],
@@ -3882,6 +3921,27 @@ describe("Plain workspace provider copy boundary", () => {
 				),
 				"Plain workspace provider file-change event must be sourced only from its private emitter",
 			],
+			[
+				readonlyWorkspaceProvider.replace(
+					"readonly onDidChangeCapabilities = Event.None;",
+					"readonly onDidChangeCapabilities = this.changeEmitter.event;",
+				),
+				"Plain workspace provider capability event must remain exactly Event.None",
+			],
+			[
+				readonlyWorkspaceProvider.replace(
+					"if (!this.allowsMutationDispatch)",
+					"if (false)",
+				),
+				"mutation dispatch gate must fail closed from the immutable primitive policy",
+			],
+			[
+				readonlyWorkspaceProvider.replace(
+					"  private requireMutationDispatchAllowed(): void {",
+					"  private leakMutationPolicy() { return this.allowsMutationDispatch; }\n\n  private requireMutationDispatchAllowed(): void {",
+				),
+				"Plain workspace mutation boolean may appear only in its constructor parameter and dispatch gate",
+			],
 		]) {
 			expect(validateWorkspaceProviderCopyBoundary(hostile)).toContain(
 				expected,
@@ -3889,25 +3949,96 @@ describe("Plain workspace provider copy boundary", () => {
 		}
 	});
 
-	it("fixes the provider factory to one direct audited construction", () => {
+	it("fixes the provider factory to one direct audited policy construction", () => {
 		for (const hostileFactory of [
 			readonlyWorkspaceProvider.replace(
-				"return new PlainWorkspaceFileSystemProvider(bridge);",
-				"return new Proxy(new PlainWorkspaceFileSystemProvider(bridge), {});",
+				"return new PlainWorkspaceFileSystemProvider(\n    bridge,\n    createPlainWorkspaceMutationPolicy(platformCapabilities),\n  );",
+				"return new Proxy(new PlainWorkspaceFileSystemProvider(bridge, createPlainWorkspaceMutationPolicy(platformCapabilities)), {});",
 			),
 			readonlyWorkspaceProvider.replace(
-				"return new PlainWorkspaceFileSystemProvider(bridge);",
-				"const provider = new PlainWorkspaceFileSystemProvider(bridge);\n  return provider;",
+				"return new PlainWorkspaceFileSystemProvider(\n    bridge,\n    createPlainWorkspaceMutationPolicy(platformCapabilities),\n  );",
+				"const provider = new PlainWorkspaceFileSystemProvider(bridge, createPlainWorkspaceMutationPolicy(platformCapabilities));\n  return provider;",
 			),
 			readonlyWorkspaceProvider.replace(
-				"new PlainWorkspaceFileSystemProvider(bridge)",
-				"new PlainWorkspaceFileSystemProvider(otherBridge)",
+				"    bridge,\n    createPlainWorkspaceMutationPolicy(platformCapabilities),",
+				"    otherBridge,\n    createPlainWorkspaceMutationPolicy(platformCapabilities),",
+			),
+			readonlyWorkspaceProvider.replace(
+				"createPlainWorkspaceMutationPolicy(platformCapabilities)",
+				"createPlainWorkspaceMutationPolicy(otherCapabilities)",
 			),
 		]) {
 			expect(validateWorkspaceProviderCopyBoundary(hostileFactory)).toContain(
-				"Plain workspace provider factory must directly return new PlainWorkspaceFileSystemProvider(bridge)",
+				"Plain workspace provider factory must directly bind bridge and decoded platform capabilities",
 			);
 		}
+	});
+
+	it("locks one own-data all-five primitive policy", () => {
+		for (const hostilePolicy of [
+			readonlyWorkspaceProvider.replace(
+				"decodeWorkspaceCapabilities(platformCapabilities)",
+				"platformCapabilities",
+			),
+			readonlyWorkspaceProvider.replace(
+				"    snapshot.versionedWrite",
+				"    true",
+			),
+			readonlyWorkspaceProvider.replace(
+				"    snapshot.copyMove &&",
+				"    snapshot.copyMove ||",
+			),
+		]) {
+			expect(validateWorkspaceProviderCopyBoundary(hostilePolicy)).toContain(
+				"mutation policy must decode one own-data DTO into an immutable all-five boolean",
+			);
+		}
+	});
+
+	it("locks the strict decoder import", () => {
+		expect(
+			validateWorkspaceProviderCopyBoundary(
+				readonlyWorkspaceProvider.replace(
+					'import { decodeWorkspaceCapabilities } from "../../platform/tauri/workspace-codec";',
+					'import { decodeWorkspaceCapabilities as decodeCapabilities } from "../../platform/tauri/workspace-codec";',
+				),
+			),
+		).toContain(
+			"file-system-provider.ts must import the strict workspace capability decoder exactly by name",
+		);
+	});
+
+	it("rejects constructor-time policy upgrades", () => {
+		const hostile = readonlyWorkspaceProvider.replace(
+			"  ) {}",
+			"  ) { this.allowsMutationDispatch = true; }",
+		);
+		expect(validateWorkspaceProviderCopyBoundary(hostile)).toContain(
+			"Plain workspace provider constructor must retain only the bridge and immutable mutation boolean",
+		);
+	});
+
+	it("keeps the provider class and policy builder module-private", () => {
+		expect(
+			validateWorkspaceProviderCopyBoundary(
+				readonlyWorkspaceProvider.replace(
+					"class PlainWorkspaceFileSystemProvider",
+					"export class PlainWorkspaceFileSystemProvider",
+				),
+			),
+		).toContain(
+			"Plain workspace provider class must remain module-private behind its audited factory",
+		);
+		expect(
+			validateWorkspaceProviderCopyBoundary(
+				readonlyWorkspaceProvider.replace(
+					"function createPlainWorkspaceMutationPolicy(",
+					"export function createPlainWorkspaceMutationPolicy(",
+				),
+			),
+		).toContain(
+			"mutation policy must decode one own-data DTO into an immutable all-five boolean",
+		);
 	});
 
 	it("rejects extra provider identifiers and dynamic mutation surfaces", () => {
@@ -3944,43 +4075,58 @@ describe("Plain workspace provider copy boundary", () => {
 
 describe("Plain workspace provider bootstrap contract", () => {
 	const bootstrap = `
+import { initialize } from "@codingame/monaco-vscode-api";
+import { registerCustomProvider } from "@codingame/monaco-vscode-files-service-override";
+import { createPlainWorkspaceFileSystemProvider, PLAIN_WORKSPACE_SCHEME } from "./features/workspace/file-system-provider";
+import { createBridge } from "./platform/tauri";
+
+async function bootstrap() {
 const bridge = createBridge();
-const provider = createPlainWorkspaceFileSystemProvider(bridge);
-registerCustomProvider(PLAIN_WORKSPACE_SCHEME, provider);
+const workspaceCapabilities = await bridge.workspaceCapabilities();
+const workspaceFileSystemProvider = createPlainWorkspaceFileSystemProvider(
+  bridge,
+  workspaceCapabilities,
+);
+registerCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);
+const initialWorkspaceSnapshot = await bridge.workspaceSnapshot();
 await initialize(createServiceOverrides(), container, { enableWorkspaceTrust: false });
+}
 `;
 
-	it("requires one plain-workspace registration before service initialization", () => {
+	it("requires one direct capability-bound registration before service initialization", () => {
 		expect(validateWorkspaceProviderBootstrap(bootstrap)).toEqual([]);
 		expect(
 			validateWorkspaceProviderBootstrap(
 				bootstrap.replace(
-					"registerCustomProvider(PLAIN_WORKSPACE_SCHEME, provider);\n",
+					"registerCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);\n",
 					"",
 				),
 			),
 		).toEqual(
 			expect.arrayContaining([
 				"app/main.ts must register exactly one custom workspace provider",
-				"app/main.ts must register only the plain-workspace provider scheme",
-				"the plain-workspace provider must be registered before initialize",
+				"app/main.ts must unconditionally register only the audited plain-workspace provider",
+				"bootstrap order must remain createBridge -> capabilities -> provider -> register -> snapshot -> initialize",
 			]),
 		);
 	});
 
-	it("rejects a different scheme, duplicate registration or late registration", () => {
+	it("rejects a different scheme, duplicate registration or dead-code registration", () => {
 		expect(
 			validateWorkspaceProviderBootstrap(
-				bootstrap.replace("PLAIN_WORKSPACE_SCHEME", '"file"'),
+				bootstrap.replace(
+					"registerCustomProvider(PLAIN_WORKSPACE_SCHEME",
+					'registerCustomProvider("file"',
+				),
 			),
 		).toContain(
-			"app/main.ts must register only the plain-workspace provider scheme",
+			"app/main.ts must unconditionally register only the audited plain-workspace provider",
 		);
 		expect(
 			validateWorkspaceProviderBootstrap(
 				bootstrap.replace(
 					"await initialize",
-					"registerCustomProvider(PLAIN_WORKSPACE_SCHEME, provider);\nawait initialize",
+					"registerCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);\nawait initialize",
 				),
 			),
 		).toContain(
@@ -3989,12 +4135,148 @@ await initialize(createServiceOverrides(), container, { enableWorkspaceTrust: fa
 		expect(
 			validateWorkspaceProviderBootstrap(
 				bootstrap.replace(
-					"registerCustomProvider(PLAIN_WORKSPACE_SCHEME, provider);\nawait initialize",
-					"await initialize(createServiceOverrides(), container, {});\nregisterCustomProvider(PLAIN_WORKSPACE_SCHEME, provider);\nvoid",
+					"registerCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);",
+					"if (false) { registerCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider); }",
 				),
 			),
 		).toContain(
-			"the plain-workspace provider must be registered before initialize",
+			"app/main.ts must unconditionally register only the audited plain-workspace provider",
+		);
+	});
+
+	it("rejects missing, repeated, late or aliased capability reads", () => {
+		const missing = bootstrap.replace(
+			"const workspaceCapabilities = await bridge.workspaceCapabilities();\n",
+			"",
+		);
+		expect(validateWorkspaceProviderBootstrap(missing)).toContain(
+			"app/main.ts must await bridge.workspaceCapabilities exactly once in bootstrap",
+		);
+
+		const repeated = bootstrap.replace(
+			"const initialWorkspaceSnapshot = await bridge.workspaceSnapshot();",
+			"void bridge.workspaceCapabilities();\nconst initialWorkspaceSnapshot = await bridge.workspaceSnapshot();",
+		);
+		expect(validateWorkspaceProviderBootstrap(repeated)).toContain(
+			"app/main.ts must await bridge.workspaceCapabilities exactly once in bootstrap",
+		);
+		const destructuredReread = bootstrap.replace(
+			"const initialWorkspaceSnapshot = await bridge.workspaceSnapshot();",
+			"const { workspaceCapabilities: reread } = bridge;\nvoid reread();\nconst initialWorkspaceSnapshot = await bridge.workspaceSnapshot();",
+		);
+		expect(validateWorkspaceProviderBootstrap(destructuredReread)).toContain(
+			"app/main.ts must await bridge.workspaceCapabilities exactly once in bootstrap",
+		);
+
+		const late = bootstrap
+			.replace(
+				"const workspaceCapabilities = await bridge.workspaceCapabilities();\n",
+				"",
+			)
+			.replace(
+				"registerCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);",
+				"const workspaceCapabilities = await bridge.workspaceCapabilities();\nregisterCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);",
+			);
+		expect(validateWorkspaceProviderBootstrap(late)).toContain(
+			"bootstrap order must remain createBridge -> capabilities -> provider -> register -> snapshot -> initialize",
+		);
+
+		const aliased = bootstrap.replace(
+			"  workspaceCapabilities,",
+			"  otherCapabilities,",
+		);
+		expect(validateWorkspaceProviderBootstrap(aliased)).toContain(
+			"app/main.ts must pass the sole capability snapshot directly to the Plain provider factory",
+		);
+
+		for (const indirect of [
+			bootstrap.replace(
+				"await bridge.workspaceCapabilities()",
+				"bridge.workspaceCapabilities()",
+			),
+			bootstrap.replace(
+				"bridge.workspaceCapabilities()",
+				'bridge["workspaceCapabilities"]()',
+			),
+		]) {
+			expect(validateWorkspaceProviderBootstrap(indirect)).toContain(
+				"app/main.ts must await bridge.workspaceCapabilities exactly once in bootstrap",
+			);
+		}
+
+		for (const dynamicReread of [
+			bootstrap.replace(
+				"const initialWorkspaceSnapshot = await bridge.workspaceSnapshot();",
+				"void bridge[`workspaceCapabilities`]();\nconst initialWorkspaceSnapshot = await bridge.workspaceSnapshot();",
+			),
+			bootstrap.replace(
+				"const initialWorkspaceSnapshot = await bridge.workspaceSnapshot();",
+				'void Reflect.get(bridge, "workspaceCapabilities")();\nconst initialWorkspaceSnapshot = await bridge.workspaceSnapshot();',
+			),
+			bootstrap.replace(
+				"const initialWorkspaceSnapshot = await bridge.workspaceSnapshot();",
+				"const bridgeAlias = bridge;\nvoid bridgeAlias.workspaceCapabilities();\nconst initialWorkspaceSnapshot = await bridge.workspaceSnapshot();",
+			),
+			bootstrap.replace(
+				"const initialWorkspaceSnapshot = await bridge.workspaceSnapshot();",
+				"let reread;\n({ workspaceCapabilities: reread } = bridge);\nvoid reread();\nconst initialWorkspaceSnapshot = await bridge.workspaceSnapshot();",
+			),
+			bootstrap.replace(
+				"const initialWorkspaceSnapshot = await bridge.workspaceSnapshot();",
+				"let reread;\n({ workspaceCapabilities: reread } = (void 0, bridge));\nvoid reread();\nconst initialWorkspaceSnapshot = await bridge.workspaceSnapshot();",
+			),
+			bootstrap.replace(
+				"const initialWorkspaceSnapshot = await bridge.workspaceSnapshot();",
+				"let reread;\n({ workspaceCapabilities: reread } = (true ? bridge : bridge));\nvoid reread();\nconst initialWorkspaceSnapshot = await bridge.workspaceSnapshot();",
+			),
+		]) {
+			expect(validateWorkspaceProviderBootstrap(dynamicReread)).toContain(
+				"app/main.ts must not alias or dynamically access the audited bootstrap bridge",
+			);
+		}
+	});
+
+	it("locks audited imports and rejects local factory shadowing", () => {
+		const aliasedImport = bootstrap.replace(
+			'import { createBridge } from "./platform/tauri";',
+			'import { createBridge as createRealBridge } from "./platform/tauri";',
+		);
+		expect(validateWorkspaceProviderBootstrap(aliasedImport)).toContain(
+			"app/main.ts must import createBridge exactly by name from ./platform/tauri",
+		);
+
+		const shadowedFactory = bootstrap.replace(
+			"const bridge = createBridge();",
+			"function createPlainWorkspaceFileSystemProvider() { return fakeProvider; }\nconst bridge = createBridge();",
+		);
+		expect(validateWorkspaceProviderBootstrap(shadowedFactory)).toContain(
+			"bootstrap must not shadow any audited provider-registration binding",
+		);
+	});
+
+	it("rejects explicit early termination after bridge creation", () => {
+		for (const terminator of [
+			"return;",
+			"if (true) { return; }",
+			'throw new Error("stop");',
+		]) {
+			const hostile = bootstrap.replace(
+				"const bridge = createBridge();",
+				`const bridge = createBridge();\n${terminator}`,
+			);
+			expect(validateWorkspaceProviderBootstrap(hostile)).toContain(
+				"bootstrap must not explicitly terminate between bridge creation and capability-bound initialization",
+			);
+		}
+	});
+
+	it("keeps capability read, provider construction and registration contiguous", () => {
+		const interrupted = bootstrap.replace(
+			"const workspaceCapabilities = await bridge.workspaceCapabilities();",
+			"await bridge.runtimeInfo();\nconst workspaceCapabilities = await bridge.workspaceCapabilities();",
+		);
+		expect(validateWorkspaceProviderBootstrap(interrupted)).toContain(
+			"bootstrap order must remain createBridge -> capabilities -> provider -> register -> snapshot -> initialize",
 		);
 	});
 

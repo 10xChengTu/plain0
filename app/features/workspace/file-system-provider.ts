@@ -27,11 +27,15 @@ import type { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri
 
 import type {
 	PlainBridge,
+	WorkspaceCapabilities,
 	WorkspaceEntryKind,
 	WorkspaceEntryStat,
 	WorkspaceWriteResult,
 } from "../../platform/tauri";
-import { frozenWorkspaceEntryRequest } from "../../platform/tauri/workspace-codec";
+import {
+	decodeWorkspaceCapabilities,
+	frozenWorkspaceEntryRequest,
+} from "../../platform/tauri/workspace-codec";
 
 export const PLAIN_WORKSPACE_SCHEME = "plain-workspace" as const;
 
@@ -74,6 +78,19 @@ function noPermissions(): FileSystemProviderError {
 	return fileSystemError(
 		FileSystemProviderErrorCode.NoPermissions,
 		SANITIZED_MESSAGES.noPermissions,
+	);
+}
+
+function createPlainWorkspaceMutationPolicy(
+	platformCapabilities: WorkspaceCapabilities,
+): boolean {
+	const snapshot = decodeWorkspaceCapabilities(platformCapabilities);
+	return (
+		snapshot.create &&
+		snapshot.renameNoReplace &&
+		snapshot.copyMove &&
+		snapshot.delete &&
+		snapshot.versionedWrite
 	);
 }
 
@@ -187,7 +204,7 @@ function providerStat(stat: WorkspaceEntryStat): PlainWorkspaceProviderStat {
  * from case-sensitive and case-insensitive volumes at the same time, while the
  * Workbench capability is provider-wide rather than root-specific.
  */
-export class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileReadWriteCapability {
+class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileReadWriteCapability {
 	readonly capabilities =
 		FileSystemProviderCapabilities.FileReadWrite |
 		FileSystemProviderCapabilities.Readonly;
@@ -196,7 +213,10 @@ export class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWith
 	readonly onDidChangeFile: Event<readonly IFileChange[]> =
 		this.changeEmitter.event;
 
-	constructor(private readonly bridge: PlainBridge) {}
+	constructor(
+		private readonly bridge: PlainBridge,
+		private readonly allowsMutationDispatch: boolean,
+	) {}
 
 	watch(resource: URI, options: IWatchOptions): IDisposable {
 		void options;
@@ -258,6 +278,7 @@ export class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWith
 		content: Uint8Array,
 		expectedVersion: string,
 	): Promise<PlainWorkspaceWriteFileResult> {
+		this.requireMutationDispatchAllowed();
 		const resolved = this.resolveResource(resource);
 		try {
 			const result = await this.bridge.workspaceWriteFile(
@@ -314,6 +335,12 @@ export class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWith
 		throw noPermissions();
 	}
 
+	private requireMutationDispatchAllowed(): void {
+		if (!this.allowsMutationDispatch) {
+			throw noPermissions();
+		}
+	}
+
 	private resolveResource(resource: URI): ResolvedResource {
 		try {
 			if (
@@ -336,6 +363,10 @@ export class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWith
 
 export function createPlainWorkspaceFileSystemProvider(
 	bridge: PlainBridge,
+	platformCapabilities: WorkspaceCapabilities,
 ): PlainWorkspaceFileSystemProvider {
-	return new PlainWorkspaceFileSystemProvider(bridge);
+	return new PlainWorkspaceFileSystemProvider(
+		bridge,
+		createPlainWorkspaceMutationPolicy(platformCapabilities),
+	);
 }

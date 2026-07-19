@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：无；provider 写能力激活的 GitHub 补充调研、五切片施工顺序与 Harness/E2E 合同已冻结，下一项只落地注册前 capability policy，provider 继续只读。
+- 当前最小工作项：无；注册前 capability policy 已完成，下一项接入 Plain 空文件与单级目录的专用 create 路由；provider 继续严格只读。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -64,15 +64,16 @@
 - [x] mutation routing 切片通过完整 `pnpm check`：19 个 TypeScript/JavaScript 测试文件、366 个用例和 230 个 Rust 测试通过，格式、双 TypeScript 类型检查、严格 lint、生产构建、五补丁 SHA/hunk/lock graph、架构与 2101-source/203-debt bundle 基线全部通过。独立三路终审无剩余 P0/P1；测试覆盖 `Foo.ts → foo.ts`、native no-clobber 冲突去敏、嵌套缺失父目录、同步 sequential getter/Proxy、异步 URI 修改、direct `doMoveCopy`、generic helper 与非 Plain same/native/generic/cross-provider 控制组；补丁 SHA-256 为 `0f0b29444ba911b4c8c652012c1e876a3d4482fbaac6fb0815e225192afac98a`。
 - [x] 完成 provider 写能力激活的 GitHub/固定源码补充调研与技术方案冻结：确认 `Readonly` 是 scheme 级粗粒度开关，不能在 create 专用 FileService 路由、copy/move provider、四层 confirmed-delete 授权链和既有 versioned save 全部接通前移除；排除 Extension Host fsprovider、通用 Tauri fs plugin、Blink/SideX 等整包替换路线，确定“启动能力策略 → create → copy/move → confirmed delete → 最终能力广告/E2E”五个独立提交。
 - [x] provider 激活方案通过文档最小验收：Prettier、`features.json` WIP=1、架构边界和 `git diff --check` 均通过；Harness 冻结 capability 单次 pre-init 读取、all-five-true 内部守卫、七补丁闭集、URI/options hostile inputs、mutation 成功事件矩阵、partial/unknown root rescan 以及 supported/readonly 双 Browser E2E。
+- [x] 完成 provider 注册前 capability policy：`main.ts` 在 provider 构造/注册前恰好 await 一次严格 DTO；factory 再次 own-data 解码并只保存五字段合取产生的 immutable primitive boolean。任一 false 会在 URI 解析、bridge dispatch 和 file-change event 前拒绝私有 mutation seam，transport/codec 失败则在 provider 注册前终止启动；provider class 保持模块私有，Workbench capability 仍精确为 `FileReadWrite | Readonly`，公共 `writeFile/mkdir/delete/rename` 未开放。
+- [x] capability policy 切片通过完整 `pnpm check` 与 Browser E2E：19 个 TypeScript/JavaScript 测试文件、377 个用例、230 个 Rust 测试、格式、双类型检查、严格 lint、生产构建、架构、2101-source/203-debt bundle 基线全部通过；4/4 Chromium 场景覆盖 capability failure、Workbench foundation、ArrayBuffer 与 number[] transport。AST Harness 锁定关键 import 来源/本地名、连续 bootstrap 顺序、bridge 标识符允许位置、factory/constructor/decoder、all-five boolean、`Event.None` 和只读 capability；独立终审 P0/P1/P2 均为 0。
 
 ## 下一步
 
-1. 在 provider 注册前恰好读取一次能力 DTO，建立不可升级的 all-five-true policy；本切片继续只读。
-2. 接入 Plain 空文件/单级目录 create 路由；provider 继续只读。
-3. 接入 copy/同 root rename/跨 root move provider adapters；provider 继续只读。
-4. 接入一次确认的永久删除 coordinator 与调用级 authorization；provider 继续只读。
-5. 原子切换 capability Harness，激活全真平台写能力并完成 supported/readonly Browser E2E。
-6. 实现 watcher/rescan，最后运行真实 Tauri 文件树总验收并写回 `F020` evidence。
+1. 接入 Plain 空文件/单级目录 create 路由；provider 继续只读。
+2. 接入 copy/同 root rename/跨 root move provider adapters；provider 继续只读。
+3. 接入一次确认的永久删除 coordinator 与调用级 authorization；provider 继续只读。
+4. 原子切换 capability Harness，激活全真平台写能力并完成 supported/readonly Browser E2E。
+5. 实现 watcher/rescan，最后运行真实 Tauri 文件树总验收并写回 `F020` evidence。
 
 ## 当前验收命令
 

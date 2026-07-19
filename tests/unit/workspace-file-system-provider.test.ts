@@ -10,14 +10,14 @@ import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
 import { describe, expect, it, vi } from "vitest";
 
 import {
-	createPlainWorkspaceFileSystemProvider,
-	PlainWorkspaceFileSystemProvider,
+	createPlainWorkspaceFileSystemProvider as createProviderWithCapabilities,
 	PLAIN_WORKSPACE_SCHEME,
 } from "../../app/features/workspace/file-system-provider";
 import { createBrowserMockBridge } from "../../app/platform/tauri/browser-mock";
 import type {
 	PlainBridge,
 	RuntimeInfo,
+	WorkspaceCapabilities,
 	WorkspaceEntryKind,
 } from "../../app/platform/tauri/contracts";
 import { frozenWorkspaceReadFile } from "../../app/platform/tauri/workspace-codec";
@@ -30,6 +30,13 @@ const runtimeInfo: RuntimeInfo = Object.freeze({
 	application: "Plain",
 	ipcVersion: 1,
 	runtime: "browser-mock",
+});
+const supportedCapabilities: WorkspaceCapabilities = Object.freeze({
+	create: true,
+	renameNoReplace: true,
+	copyMove: true,
+	delete: true,
+	versionedWrite: true,
 });
 
 function workspaceUri(relativePath = ""): URI {
@@ -127,6 +134,13 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 	};
 }
 
+function createPlainWorkspaceFileSystemProvider(
+	bridge: PlainBridge,
+	platformCapabilities: WorkspaceCapabilities = supportedCapabilities,
+) {
+	return createProviderWithCapabilities(bridge, platformCapabilities);
+}
+
 async function rejected(error: Promise<unknown>): Promise<{
 	readonly code: string;
 	readonly message: string;
@@ -143,7 +157,6 @@ describe("Plain workspace file system provider", () => {
 	it("declares only read/write transport plus readonly semantics", () => {
 		const provider = createPlainWorkspaceFileSystemProvider(testBridge());
 
-		expect(provider).toBeInstanceOf(PlainWorkspaceFileSystemProvider);
 		expect(provider.capabilities).toBe(
 			FileSystemProviderCapabilities.FileReadWrite |
 				FileSystemProviderCapabilities.Readonly,
@@ -151,6 +164,116 @@ describe("Plain workspace file system provider", () => {
 		expect(
 			provider.capabilities & FileSystemProviderCapabilities.PathCaseSensitive,
 		).toBe(0);
+	});
+
+	it("snapshots one immutable all-five mutation policy without changing provider capabilities", async () => {
+		const mutableCapabilities = { ...supportedCapabilities };
+		const write = vi.fn(async () =>
+			Object.freeze({
+				status: "written" as const,
+				stat: Object.freeze({
+					kind: "file" as const,
+					size: 1,
+					mtime: 30,
+					ctime: 20,
+					version: versionB,
+				}),
+			}),
+		);
+		const provider = createPlainWorkspaceFileSystemProvider(
+			testBridge({ workspaceWriteFile: write }),
+			mutableCapabilities,
+		);
+		mutableCapabilities.versionedWrite = false;
+
+		expect(provider.capabilities).toBe(
+			FileSystemProviderCapabilities.FileReadWrite |
+				FileSystemProviderCapabilities.Readonly,
+		);
+		await expect(
+			provider.plainWriteFile(
+				workspaceUri("snapshot.txt"),
+				new Uint8Array([1]),
+				versionA,
+			),
+		).resolves.toMatchObject({ status: "written" });
+		expect(write).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps the private mutation seam disabled when any platform capability is false", async () => {
+		for (const capability of Object.keys(
+			supportedCapabilities,
+		) as (keyof WorkspaceCapabilities)[]) {
+			const write = vi.fn();
+			const platformCapabilities = {
+				...supportedCapabilities,
+				[capability]: false,
+			};
+			const provider = createPlainWorkspaceFileSystemProvider(
+				testBridge({ workspaceWriteFile: write }),
+				platformCapabilities,
+			);
+			platformCapabilities[capability] = true;
+			const changeListener = vi.fn();
+			const changeSubscription = provider.onDidChangeFile(changeListener);
+
+			const error = await rejected(
+				provider.plainWriteFile(
+					workspaceUri("readonly.txt"),
+					new Uint8Array([1]),
+					versionA,
+				),
+			);
+			changeSubscription.dispose();
+			expect(error.code).toBe(FileSystemProviderErrorCode.NoPermissions);
+			expect(write).not.toHaveBeenCalled();
+			expect(changeListener).not.toHaveBeenCalled();
+			expect(provider.capabilities).toBe(
+				FileSystemProviderCapabilities.FileReadWrite |
+					FileSystemProviderCapabilities.Readonly,
+			);
+		}
+	});
+
+	it("rejects accessor and Proxy capability inputs without constructing a provider", () => {
+		let accessorReads = 0;
+		const accessorCapabilities = { ...supportedCapabilities };
+		Object.defineProperty(accessorCapabilities, "copyMove", {
+			enumerable: true,
+			get() {
+				accessorReads += 1;
+				return true;
+			},
+		});
+		let proxyReads = 0;
+		const proxyCapabilities = new Proxy(
+			{ ...supportedCapabilities },
+			{
+				get(target, property, receiver) {
+					proxyReads += 1;
+					return Reflect.get(target, property, receiver);
+				},
+			},
+		);
+
+		for (const platformCapabilities of [
+			accessorCapabilities,
+			proxyCapabilities,
+			{ ...supportedCapabilities, extra: true } as WorkspaceCapabilities,
+			{
+				...supportedCapabilities,
+				delete: 1,
+			} as unknown as WorkspaceCapabilities,
+		]) {
+			expect(() =>
+				createPlainWorkspaceFileSystemProvider(
+					testBridge(),
+					platformCapabilities,
+				),
+			).toThrowError(/Plain contract/u);
+		}
+		expect(accessorReads).toBe(0);
+		expect(proxyReads).toBe(0);
 	});
 
 	it("maps every Rust entry kind with an own opaque version field", async () => {

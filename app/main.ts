@@ -30,8 +30,11 @@ async function bootstrap(): Promise<void> {
 	}
 
 	const bridge = createBridge();
-	const workspaceFileSystemProvider =
-		createPlainWorkspaceFileSystemProvider(bridge);
+	const workspaceCapabilities = await bridge.workspaceCapabilities();
+	const workspaceFileSystemProvider = createPlainWorkspaceFileSystemProvider(
+		bridge,
+		workspaceCapabilities,
+	);
 	registerCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);
 	const workspaceProjector = createWorkspaceProjector(reinitializeWorkspace);
 	const initialWorkspaceSnapshot = await bridge.workspaceSnapshot();

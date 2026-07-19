@@ -73,32 +73,445 @@ export function validateTauriApiBoundary(source, relativePath) {
 
 export function validateWorkspaceProviderBootstrap(source) {
 	const failures = [];
-	const registrations = [...source.matchAll(/\bregisterCustomProvider\s*\(/g)];
-	if (registrations.length !== 1) {
+	const sourceFile = ts.createSourceFile(
+		"main.ts",
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	function countExactNamedImport(moduleName, importedName) {
+		let count = 0;
+		for (const statement of sourceFile.statements) {
+			if (
+				!ts.isImportDeclaration(statement) ||
+				!ts.isStringLiteral(statement.moduleSpecifier) ||
+				statement.moduleSpecifier.text !== moduleName ||
+				statement.importClause?.isTypeOnly === true ||
+				!ts.isNamedImports(statement.importClause?.namedBindings)
+			) {
+				continue;
+			}
+			for (const specifier of statement.importClause.namedBindings.elements) {
+				if (
+					!specifier.isTypeOnly &&
+					(specifier.propertyName?.text ?? specifier.name.text) ===
+						importedName &&
+					specifier.name.text === importedName
+				) {
+					count += 1;
+				}
+			}
+		}
+		return count;
+	}
+	for (const [moduleName, importedName] of [
+		["@codingame/monaco-vscode-api", "initialize"],
+		[
+			"@codingame/monaco-vscode-files-service-override",
+			"registerCustomProvider",
+		],
+		[
+			"./features/workspace/file-system-provider",
+			"createPlainWorkspaceFileSystemProvider",
+		],
+		["./features/workspace/file-system-provider", "PLAIN_WORKSPACE_SCHEME"],
+		["./platform/tauri", "createBridge"],
+	]) {
+		if (countExactNamedImport(moduleName, importedName) !== 1) {
+			failures.push(
+				`app/main.ts must import ${importedName} exactly by name from ${moduleName}`,
+			);
+		}
+	}
+	const bootstraps = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "bootstrap" &&
+			statement.body !== undefined,
+	);
+	if (bootstraps.length !== 1) {
+		return ["app/main.ts must define exactly one audited bootstrap function"];
+	}
+	const bootstrap = bootstraps[0];
+	const statements = bootstrap.body.statements;
+	const criticalBootstrapBindings = new Set([
+		"createBridge",
+		"createPlainWorkspaceFileSystemProvider",
+		"registerCustomProvider",
+		"initialize",
+		"PLAIN_WORKSPACE_SCHEME",
+	]);
+	let hasCriticalBootstrapShadow = false;
+	function bindingContainsCriticalName(name) {
+		if (ts.isIdentifier(name)) {
+			return criticalBootstrapBindings.has(name.text);
+		}
+		return name.elements.some(
+			(element) =>
+				!ts.isOmittedExpression(element) &&
+				bindingContainsCriticalName(element.name),
+		);
+	}
+	function visitBootstrapBindings(node) {
+		if (
+			((ts.isVariableDeclaration(node) || ts.isParameter(node)) &&
+				bindingContainsCriticalName(node.name)) ||
+			((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) &&
+				node.name !== undefined &&
+				criticalBootstrapBindings.has(node.name.text)) ||
+			(ts.isCatchClause(node) &&
+				node.variableDeclaration !== undefined &&
+				bindingContainsCriticalName(node.variableDeclaration.name))
+		) {
+			hasCriticalBootstrapShadow = true;
+		}
+		ts.forEachChild(node, visitBootstrapBindings);
+	}
+	visitBootstrapBindings(bootstrap.body);
+	if (hasCriticalBootstrapShadow) {
+		failures.push(
+			"bootstrap must not shadow any audited provider-registration binding",
+		);
+	}
+
+	function exactConstDeclaration(statement, bindingName) {
+		if (
+			!ts.isVariableStatement(statement) ||
+			(statement.declarationList.flags & ts.NodeFlags.Const) === 0 ||
+			statement.declarationList.declarations.length !== 1
+		) {
+			return undefined;
+		}
+		const [declaration] = statement.declarationList.declarations;
+		return ts.isIdentifier(declaration.name) &&
+			declaration.name.text === bindingName
+			? declaration
+			: undefined;
+	}
+
+	function identifierCall(expression, name, argumentCount) {
+		return (
+			ts.isCallExpression(expression) &&
+			ts.isIdentifier(expression.expression) &&
+			expression.expression.text === name &&
+			expression.arguments.length === argumentCount
+		);
+	}
+
+	function bridgeMethodCall(expression, methodName) {
+		return (
+			ts.isCallExpression(expression) &&
+			expression.arguments.length === 0 &&
+			ts.isPropertyAccessExpression(expression.expression) &&
+			ts.isIdentifier(expression.expression.expression) &&
+			expression.expression.expression.text === "bridge" &&
+			expression.expression.name.text === methodName
+		);
+	}
+
+	function matchingStatementIndexes(predicate) {
+		const indexes = [];
+		for (let index = 0; index < statements.length; index += 1) {
+			if (predicate(statements[index])) {
+				indexes.push(index);
+			}
+		}
+		return indexes;
+	}
+
+	const bridgeIndexes = matchingStatementIndexes((statement) => {
+		const declaration = exactConstDeclaration(statement, "bridge");
+		return (
+			declaration?.initializer !== undefined &&
+			identifierCall(declaration.initializer, "createBridge", 0)
+		);
+	});
+	const capabilityIndexes = matchingStatementIndexes((statement) => {
+		const declaration = exactConstDeclaration(
+			statement,
+			"workspaceCapabilities",
+		);
+		return (
+			declaration?.initializer !== undefined &&
+			ts.isAwaitExpression(declaration.initializer) &&
+			bridgeMethodCall(
+				declaration.initializer.expression,
+				"workspaceCapabilities",
+			)
+		);
+	});
+	const providerIndexes = matchingStatementIndexes((statement) => {
+		const declaration = exactConstDeclaration(
+			statement,
+			"workspaceFileSystemProvider",
+		);
+		const initializer = declaration?.initializer;
+		return (
+			initializer !== undefined &&
+			identifierCall(
+				initializer,
+				"createPlainWorkspaceFileSystemProvider",
+				2,
+			) &&
+			ts.isIdentifier(initializer.arguments[0]) &&
+			initializer.arguments[0].text === "bridge" &&
+			ts.isIdentifier(initializer.arguments[1]) &&
+			initializer.arguments[1].text === "workspaceCapabilities"
+		);
+	});
+	const registrationIndexes = matchingStatementIndexes((statement) => {
+		if (!ts.isExpressionStatement(statement)) {
+			return false;
+		}
+		const expression = statement.expression;
+		return (
+			identifierCall(expression, "registerCustomProvider", 2) &&
+			ts.isIdentifier(expression.arguments[0]) &&
+			expression.arguments[0].text === "PLAIN_WORKSPACE_SCHEME" &&
+			ts.isIdentifier(expression.arguments[1]) &&
+			expression.arguments[1].text === "workspaceFileSystemProvider"
+		);
+	});
+	const snapshotIndexes = matchingStatementIndexes((statement) => {
+		const declaration = exactConstDeclaration(
+			statement,
+			"initialWorkspaceSnapshot",
+		);
+		return (
+			declaration?.initializer !== undefined &&
+			ts.isAwaitExpression(declaration.initializer) &&
+			bridgeMethodCall(declaration.initializer.expression, "workspaceSnapshot")
+		);
+	});
+	const initializeIndexes = matchingStatementIndexes((statement) => {
+		return (
+			ts.isExpressionStatement(statement) &&
+			ts.isAwaitExpression(statement.expression) &&
+			identifierCall(statement.expression.expression, "initialize", 3)
+		);
+	});
+
+	const calls = {
+		createBridge: 0,
+		workspaceCapabilities: 0,
+		providerFactory: 0,
+		registerCustomProvider: 0,
+		workspaceSnapshot: 0,
+		initialize: 0,
+	};
+	let capabilityMemberReferences = 0;
+	let hasUnexpectedBridgeReference = false;
+	function isAllowedBridgeIdentifier(node) {
+		const parent = node.parent;
+		if (
+			ts.isVariableDeclaration(parent) &&
+			parent.name === node &&
+			parent.initializer !== undefined &&
+			identifierCall(parent.initializer, "createBridge", 0)
+		) {
+			return true;
+		}
+		if (
+			ts.isPropertyAccessExpression(parent) &&
+			parent.expression === node &&
+			[
+				"workspaceCapabilities",
+				"workspaceSnapshot",
+				"onRuntimeReady",
+				"runtimeInfo",
+			].includes(parent.name.text) &&
+			ts.isCallExpression(parent.parent) &&
+			parent.parent.expression === parent
+		) {
+			return true;
+		}
+		return (
+			ts.isCallExpression(parent) &&
+			parent.arguments[0] === node &&
+			ts.isIdentifier(parent.expression) &&
+			(parent.expression.text === "createPlainWorkspaceFileSystemProvider" ||
+				parent.expression.text === "registerWorkspaceCommands")
+		);
+	}
+	function visit(node) {
+		if (ts.isCallExpression(node)) {
+			if (ts.isIdentifier(node.expression)) {
+				switch (node.expression.text) {
+					case "createBridge":
+						calls.createBridge += 1;
+						break;
+					case "createPlainWorkspaceFileSystemProvider":
+						calls.providerFactory += 1;
+						break;
+					case "registerCustomProvider":
+						calls.registerCustomProvider += 1;
+						break;
+					case "initialize":
+						calls.initialize += 1;
+						break;
+				}
+			}
+			if (
+				ts.isPropertyAccessExpression(node.expression) &&
+				node.expression.name.text === "workspaceCapabilities"
+			) {
+				calls.workspaceCapabilities += 1;
+			}
+			if (
+				ts.isPropertyAccessExpression(node.expression) &&
+				node.expression.name.text === "workspaceSnapshot"
+			) {
+				calls.workspaceSnapshot += 1;
+			}
+		}
+		if (
+			(ts.isPropertyAccessExpression(node) &&
+				node.name.text === "workspaceCapabilities") ||
+			(ts.isElementAccessExpression(node) &&
+				ts.isStringLiteral(node.argumentExpression) &&
+				node.argumentExpression.text === "workspaceCapabilities") ||
+			(ts.isBindingElement(node) &&
+				node.propertyName !== undefined &&
+				typeScriptStaticName(node.propertyName) === "workspaceCapabilities")
+		) {
+			capabilityMemberReferences += 1;
+		}
+		if (
+			ts.isIdentifier(node) &&
+			node.text === "bridge" &&
+			!isAllowedBridgeIdentifier(node)
+		) {
+			hasUnexpectedBridgeReference = true;
+		}
+		ts.forEachChild(node, visit);
+	}
+	visit(sourceFile);
+
+	if (calls.createBridge !== 1 || bridgeIndexes.length !== 1) {
+		failures.push("app/main.ts must create exactly one bootstrap bridge");
+	}
+	if (
+		calls.workspaceCapabilities !== 1 ||
+		capabilityMemberReferences !== 1 ||
+		capabilityIndexes.length !== 1
+	) {
+		failures.push(
+			"app/main.ts must await bridge.workspaceCapabilities exactly once in bootstrap",
+		);
+	}
+	if (hasUnexpectedBridgeReference) {
+		failures.push(
+			"app/main.ts must not alias or dynamically access the audited bootstrap bridge",
+		);
+	}
+	if (calls.providerFactory !== 1 || providerIndexes.length !== 1) {
+		failures.push(
+			"app/main.ts must pass the sole capability snapshot directly to the Plain provider factory",
+		);
+	}
+	if (calls.registerCustomProvider !== 1) {
 		failures.push(
 			"app/main.ts must register exactly one custom workspace provider",
 		);
 	}
-	if (
-		!/\bregisterCustomProvider\s*\(\s*PLAIN_WORKSPACE_SCHEME\s*,/.test(source)
-	) {
+	if (registrationIndexes.length !== 1) {
 		failures.push(
-			"app/main.ts must register only the plain-workspace provider scheme",
+			"app/main.ts must unconditionally register only the audited plain-workspace provider",
 		);
 	}
-
-	const registrationOffset = source.search(/\bregisterCustomProvider\s*\(/);
-	const initializeOffset = source.search(/\bawait\s+initialize\s*\(/);
 	if (
-		initializeOffset < 0 ||
-		registrationOffset < 0 ||
-		registrationOffset > initializeOffset
+		calls.workspaceSnapshot !== 1 ||
+		snapshotIndexes.length !== 1 ||
+		calls.initialize !== 1 ||
+		initializeIndexes.length !== 1
 	) {
 		failures.push(
-			"the plain-workspace provider must be registered before initialize",
+			"app/main.ts must keep one direct workspace snapshot and initialize sequence",
 		);
 	}
-	if (!/\benableWorkspaceTrust\s*:\s*false\b/.test(source)) {
+	const orderedIndexes = [
+		bridgeIndexes[0],
+		capabilityIndexes[0],
+		providerIndexes[0],
+		registrationIndexes[0],
+		snapshotIndexes[0],
+		initializeIndexes[0],
+	];
+	if (
+		orderedIndexes.some((index) => index === undefined) ||
+		orderedIndexes.some(
+			(index, position) =>
+				position > 0 && index <= orderedIndexes[position - 1],
+		) ||
+		(bridgeIndexes[0] !== undefined &&
+			capabilityIndexes[0] !== bridgeIndexes[0] + 1) ||
+		(capabilityIndexes[0] !== undefined &&
+			providerIndexes[0] !== capabilityIndexes[0] + 1) ||
+		(providerIndexes[0] !== undefined &&
+			registrationIndexes[0] !== providerIndexes[0] + 1)
+	) {
+		failures.push(
+			"bootstrap order must remain createBridge -> capabilities -> provider -> register -> snapshot -> initialize",
+		);
+	}
+	function containsBootstrapTerminator(node, isRoot = true) {
+		if (
+			!isRoot &&
+			(ts.isFunctionDeclaration(node) ||
+				ts.isFunctionExpression(node) ||
+				ts.isArrowFunction(node) ||
+				ts.isMethodDeclaration(node) ||
+				ts.isGetAccessorDeclaration(node) ||
+				ts.isSetAccessorDeclaration(node) ||
+				ts.isConstructorDeclaration(node))
+		) {
+			return false;
+		}
+		if (ts.isReturnStatement(node) || ts.isThrowStatement(node)) {
+			return true;
+		}
+		let found = false;
+		ts.forEachChild(node, (child) => {
+			if (!found && containsBootstrapTerminator(child, false)) {
+				found = true;
+			}
+		});
+		return found;
+	}
+	const bridgeIndex = bridgeIndexes[0];
+	const initializeIndex = initializeIndexes[0];
+	if (
+		bridgeIndex !== undefined &&
+		initializeIndex !== undefined &&
+		statements
+			.slice(bridgeIndex + 1, initializeIndex)
+			.some((statement) => containsBootstrapTerminator(statement))
+	) {
+		failures.push(
+			"bootstrap must not explicitly terminate between bridge creation and capability-bound initialization",
+		);
+	}
+	const initializeStatement = statements[initializeIndexes[0]];
+	const initializeCall =
+		initializeStatement !== undefined &&
+		ts.isExpressionStatement(initializeStatement) &&
+		ts.isAwaitExpression(initializeStatement.expression) &&
+		ts.isCallExpression(initializeStatement.expression.expression)
+			? initializeStatement.expression.expression
+			: undefined;
+	const initializeOptions = initializeCall?.arguments[2];
+	const trustProperties =
+		initializeOptions !== undefined &&
+		ts.isObjectLiteralExpression(initializeOptions)
+			? initializeOptions.properties.filter(
+					(property) =>
+						ts.isPropertyAssignment(property) &&
+						typeScriptStaticName(property.name) === "enableWorkspaceTrust" &&
+						property.initializer.kind === ts.SyntaxKind.FalseKeyword,
+				)
+			: [];
+	if (trustProperties.length !== 1) {
 		failures.push(
 			"Plain must keep VS Code workspace trust disabled in favor of Rust process trust",
 		);
@@ -4125,6 +4538,71 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		true,
 		ts.ScriptKind.TS,
 	);
+	let decoderImportCount = 0;
+	for (const statement of sourceFile.statements) {
+		if (
+			ts.isImportDeclaration(statement) &&
+			ts.isStringLiteral(statement.moduleSpecifier) &&
+			statement.moduleSpecifier.text ===
+				"../../platform/tauri/workspace-codec" &&
+			statement.importClause?.isTypeOnly !== true &&
+			ts.isNamedImports(statement.importClause?.namedBindings)
+		) {
+			for (const specifier of statement.importClause.namedBindings.elements) {
+				if (
+					!specifier.isTypeOnly &&
+					(specifier.propertyName?.text ?? specifier.name.text) ===
+						"decodeWorkspaceCapabilities" &&
+					specifier.name.text === "decodeWorkspaceCapabilities"
+				) {
+					decoderImportCount += 1;
+				}
+			}
+		}
+	}
+	if (decoderImportCount !== 1) {
+		failures.push(
+			"file-system-provider.ts must import the strict workspace capability decoder exactly by name",
+		);
+	}
+	function countExactProviderImport(moduleName, importedName) {
+		let count = 0;
+		for (const statement of sourceFile.statements) {
+			if (
+				!ts.isImportDeclaration(statement) ||
+				!ts.isStringLiteral(statement.moduleSpecifier) ||
+				statement.moduleSpecifier.text !== moduleName ||
+				statement.importClause?.isTypeOnly === true ||
+				!ts.isNamedImports(statement.importClause?.namedBindings)
+			) {
+				continue;
+			}
+			for (const specifier of statement.importClause.namedBindings.elements) {
+				if (
+					!specifier.isTypeOnly &&
+					(specifier.propertyName?.text ?? specifier.name.text) ===
+						importedName &&
+					specifier.name.text === importedName
+				) {
+					count += 1;
+				}
+			}
+		}
+		return count;
+	}
+	for (const [moduleName, importedName] of [
+		[
+			"@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files",
+			"FileSystemProviderCapabilities",
+		],
+		["@codingame/monaco-vscode-api/vscode/vs/base/common/event", "Event"],
+	]) {
+		if (countExactProviderImport(moduleName, importedName) !== 1) {
+			failures.push(
+				`file-system-provider.ts must import ${importedName} exactly by name from its fixed Workbench module`,
+			);
+		}
+	}
 	const providerClasses = sourceFile.statements.filter(
 		(statement) =>
 			ts.isClassDeclaration(statement) &&
@@ -4137,6 +4615,167 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	}
 
 	const provider = providerClasses[0];
+	if (
+		provider.modifiers?.some(
+			(modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
+		)
+	) {
+		failures.push(
+			"Plain workspace provider class must remain module-private behind its audited factory",
+		);
+	}
+	const policyFunctions = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "createPlainWorkspaceMutationPolicy",
+	);
+	if (policyFunctions.length !== 1) {
+		failures.push(
+			"file-system-provider.ts must define exactly one audited mutation policy builder",
+		);
+	} else {
+		const [policyFunction] = policyFunctions;
+		const [parameter] = policyFunction.parameters;
+		const [snapshotStatement, returnStatement] =
+			policyFunction.body?.statements ?? [];
+		const snapshotDeclaration =
+			snapshotStatement !== undefined &&
+			ts.isVariableStatement(snapshotStatement) &&
+			(snapshotStatement.declarationList.flags & ts.NodeFlags.Const) !== 0 &&
+			snapshotStatement.declarationList.declarations.length === 1
+				? snapshotStatement.declarationList.declarations[0]
+				: undefined;
+		const snapshotInitializer = snapshotDeclaration?.initializer;
+		const returned =
+			returnStatement !== undefined && ts.isReturnStatement(returnStatement)
+				? returnStatement.expression
+				: undefined;
+		const capabilityFields = [];
+		function collectCapabilityFields(expression) {
+			if (ts.isParenthesizedExpression(expression)) {
+				return collectCapabilityFields(expression.expression);
+			}
+			if (
+				ts.isBinaryExpression(expression) &&
+				expression.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
+			) {
+				return (
+					collectCapabilityFields(expression.left) &&
+					collectCapabilityFields(expression.right)
+				);
+			}
+			if (
+				ts.isPropertyAccessExpression(expression) &&
+				ts.isIdentifier(expression.expression) &&
+				expression.expression.text === "snapshot"
+			) {
+				capabilityFields.push(expression.name.text);
+				return true;
+			}
+			return false;
+		}
+		const exactPolicyShape =
+			policyFunction.body?.statements.length === 2 &&
+			!policyFunction.modifiers?.some(
+				(modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
+			) &&
+			policyFunction.parameters.length === 1 &&
+			parameter !== undefined &&
+			ts.isIdentifier(parameter.name) &&
+			parameter.name.text === "platformCapabilities" &&
+			parameter.type !== undefined &&
+			ts.isTypeReferenceNode(parameter.type) &&
+			ts.isIdentifier(parameter.type.typeName) &&
+			parameter.type.typeName.text === "WorkspaceCapabilities" &&
+			policyFunction.type?.kind === ts.SyntaxKind.BooleanKeyword &&
+			snapshotDeclaration !== undefined &&
+			ts.isIdentifier(snapshotDeclaration.name) &&
+			snapshotDeclaration.name.text === "snapshot" &&
+			snapshotInitializer !== undefined &&
+			ts.isCallExpression(snapshotInitializer) &&
+			ts.isIdentifier(snapshotInitializer.expression) &&
+			snapshotInitializer.expression.text === "decodeWorkspaceCapabilities" &&
+			snapshotInitializer.arguments.length === 1 &&
+			ts.isIdentifier(snapshotInitializer.arguments[0]) &&
+			snapshotInitializer.arguments[0].text === "platformCapabilities" &&
+			returned !== undefined &&
+			collectCapabilityFields(returned) &&
+			sameArray(capabilityFields, [
+				"create",
+				"renameNoReplace",
+				"copyMove",
+				"delete",
+				"versionedWrite",
+			]);
+		if (!exactPolicyShape) {
+			failures.push(
+				"mutation policy must decode one own-data DTO into an immutable all-five boolean",
+			);
+		}
+	}
+
+	const constructors = provider.members.filter((member) =>
+		ts.isConstructorDeclaration(member),
+	);
+	if (constructors.length !== 1) {
+		failures.push(
+			"Plain workspace provider must have one module-private audited constructor",
+		);
+	} else {
+		const [constructor] = constructors;
+		const [bridgeParameter, policyParameter] = constructor.parameters;
+		function exactPrivateReadonlyParameter(parameter, name, typeName) {
+			return (
+				parameter !== undefined &&
+				ts.isIdentifier(parameter.name) &&
+				parameter.name.text === name &&
+				parameter.modifiers?.some(
+					(modifier) => modifier.kind === ts.SyntaxKind.PrivateKeyword,
+				) &&
+				parameter.modifiers?.some(
+					(modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword,
+				) &&
+				parameter.type !== undefined &&
+				ts.isTypeReferenceNode(parameter.type) &&
+				ts.isIdentifier(parameter.type.typeName) &&
+				parameter.type.typeName.text === typeName
+			);
+		}
+		function exactPrivateReadonlyBoolean(parameter, name) {
+			return (
+				parameter !== undefined &&
+				ts.isIdentifier(parameter.name) &&
+				parameter.name.text === name &&
+				parameter.modifiers?.some(
+					(modifier) => modifier.kind === ts.SyntaxKind.PrivateKeyword,
+				) &&
+				parameter.modifiers?.some(
+					(modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword,
+				) &&
+				parameter.type?.kind === ts.SyntaxKind.BooleanKeyword
+			);
+		}
+		if (
+			constructor.parameters.length !== 2 ||
+			constructor.body?.statements.length !== 0 ||
+			constructor.modifiers?.some(
+				(modifier) =>
+					modifier.kind === ts.SyntaxKind.PublicKeyword ||
+					modifier.kind === ts.SyntaxKind.ProtectedKeyword,
+			) ||
+			!exactPrivateReadonlyParameter(
+				bridgeParameter,
+				"bridge",
+				"PlainBridge",
+			) ||
+			!exactPrivateReadonlyBoolean(policyParameter, "allowsMutationDispatch")
+		) {
+			failures.push(
+				"Plain workspace provider constructor must retain only the bridge and immutable mutation boolean",
+			);
+		}
+	}
+
 	const providerFactories = sourceFile.statements.filter(
 		(statement) =>
 			ts.isFunctionDeclaration(statement) &&
@@ -4153,28 +4792,53 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		const isExported = factory.modifiers?.some(
 			(modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
 		);
-		const [parameter] = factory.parameters;
+		const [bridgeParameter, capabilitiesParameter] = factory.parameters;
 		const [statement] = factory.body?.statements ?? [];
 		const returned =
 			statement !== undefined && ts.isReturnStatement(statement)
 				? statement.expression
 				: undefined;
 		const isExactParameter =
-			factory.parameters.length === 1 &&
-			ts.isIdentifier(parameter.name) &&
-			parameter.name.text === "bridge";
+			factory.parameters.length === 2 &&
+			bridgeParameter !== undefined &&
+			capabilitiesParameter !== undefined &&
+			ts.isIdentifier(bridgeParameter.name) &&
+			bridgeParameter.name.text === "bridge" &&
+			bridgeParameter.type !== undefined &&
+			ts.isTypeReferenceNode(bridgeParameter.type) &&
+			ts.isIdentifier(bridgeParameter.type.typeName) &&
+			bridgeParameter.type.typeName.text === "PlainBridge" &&
+			ts.isIdentifier(capabilitiesParameter.name) &&
+			capabilitiesParameter.name.text === "platformCapabilities" &&
+			capabilitiesParameter.type !== undefined &&
+			ts.isTypeReferenceNode(capabilitiesParameter.type) &&
+			ts.isIdentifier(capabilitiesParameter.type.typeName) &&
+			capabilitiesParameter.type.typeName.text === "WorkspaceCapabilities";
+		const policyArgument =
+			returned !== undefined &&
+			ts.isNewExpression(returned) &&
+			returned.arguments?.length === 2
+				? returned.arguments[1]
+				: undefined;
 		const isExactConstruction =
 			factory.body?.statements.length === 1 &&
 			returned !== undefined &&
 			ts.isNewExpression(returned) &&
 			ts.isIdentifier(returned.expression) &&
 			returned.expression.text === "PlainWorkspaceFileSystemProvider" &&
-			returned.arguments?.length === 1 &&
+			returned.arguments?.length === 2 &&
 			ts.isIdentifier(returned.arguments[0]) &&
-			returned.arguments[0].text === "bridge";
+			returned.arguments[0].text === "bridge" &&
+			policyArgument !== undefined &&
+			ts.isCallExpression(policyArgument) &&
+			ts.isIdentifier(policyArgument.expression) &&
+			policyArgument.expression.text === "createPlainWorkspaceMutationPolicy" &&
+			policyArgument.arguments.length === 1 &&
+			ts.isIdentifier(policyArgument.arguments[0]) &&
+			policyArgument.arguments[0].text === "platformCapabilities";
 		if (!isExported || !isExactParameter || !isExactConstruction) {
 			failures.push(
-				"Plain workspace provider factory must directly return new PlainWorkspaceFileSystemProvider(bridge)",
+				"Plain workspace provider factory must directly bind bridge and decoded platform capabilities",
 			);
 		} else {
 			factoryNewExpression = returned.expression;
@@ -4222,10 +4886,20 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			ts.isMethodDeclaration(member) &&
 			typeScriptMemberName(member) === "writeFile",
 	);
+	const mutationGateMethods = provider.members.filter(
+		(member) =>
+			ts.isMethodDeclaration(member) &&
+			typeScriptMemberName(member) === "requireMutationDispatchAllowed",
+	);
 	const changeEventMembers = provider.members.filter(
 		(member) =>
 			ts.isPropertyDeclaration(member) &&
 			typeScriptMemberName(member) === "onDidChangeFile",
+	);
+	const capabilityChangeEventMembers = provider.members.filter(
+		(member) =>
+			ts.isPropertyDeclaration(member) &&
+			typeScriptMemberName(member) === "onDidChangeCapabilities",
 	);
 	function providerMethodCallCount(method, receiverName, methodName) {
 		let count = 0;
@@ -4247,6 +4921,29 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		}
 		return count;
 	}
+	if (mutationGateMethods.length !== 1) {
+		failures.push(
+			"Plain workspace provider must define one primitive mutation dispatch gate",
+		);
+	} else {
+		const [mutationGate] = mutationGateMethods;
+		const normalizedBody = mutationGate.body
+			?.getText(sourceFile)
+			.replaceAll(/\s+/g, "");
+		if (
+			mutationGate.parameters.length !== 0 ||
+			!mutationGate.modifiers?.some(
+				(modifier) => modifier.kind === ts.SyntaxKind.PrivateKeyword,
+			) ||
+			mutationGate.type?.kind !== ts.SyntaxKind.VoidKeyword ||
+			normalizedBody !==
+				"{if(!this.allowsMutationDispatch){thrownoPermissions();}}"
+		) {
+			failures.push(
+				"mutation dispatch gate must fail closed from the immutable primitive policy",
+			);
+		}
+	}
 	if (plainWriteMethods.length !== 1) {
 		failures.push(
 			"Plain workspace provider must expose exactly one audited private plainWriteFile seam",
@@ -4256,17 +4953,31 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		const parameterNames = plainWrite.parameters.map((parameter) =>
 			ts.isIdentifier(parameter.name) ? parameter.name.text : undefined,
 		);
+		const [firstStatement] = plainWrite.body?.statements ?? [];
+		const firstExpression =
+			firstStatement !== undefined && ts.isExpressionStatement(firstStatement)
+				? firstStatement.expression
+				: undefined;
+		const startsWithMutationGate =
+			firstExpression !== undefined &&
+			ts.isCallExpression(firstExpression) &&
+			firstExpression.arguments.length === 0 &&
+			ts.isPropertyAccessExpression(firstExpression.expression) &&
+			firstExpression.expression.expression.kind ===
+				ts.SyntaxKind.ThisKeyword &&
+			firstExpression.expression.name.text === "requireMutationDispatchAllowed";
 		if (
 			!plainWrite.modifiers?.some(
 				(modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword,
 			) ||
 			!sameArray(parameterNames, ["resource", "content", "expectedVersion"]) ||
+			!startsWithMutationGate ||
 			providerMethodCallCount(plainWrite, "bridge", "workspaceWriteFile") !==
 				1 ||
 			providerMethodCallCount(plainWrite, "changeEmitter", "fire") !== 1
 		) {
 			failures.push(
-				"plainWriteFile must dispatch one versioned bridge write and one audited root-rescan branch",
+				"plainWriteFile must gate first, dispatch one versioned bridge write and retain one root-rescan branch",
 			);
 		}
 	}
@@ -4314,6 +5025,28 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			);
 		}
 	}
+	if (capabilityChangeEventMembers.length !== 1) {
+		failures.push(
+			"Plain workspace provider must expose one immutable capability event",
+		);
+	} else {
+		const [capabilityChangeEvent] = capabilityChangeEventMembers;
+		const initializer = capabilityChangeEvent.initializer;
+		if (
+			!capabilityChangeEvent.modifiers?.some(
+				(modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword,
+			) ||
+			initializer === undefined ||
+			!ts.isPropertyAccessExpression(initializer) ||
+			!ts.isIdentifier(initializer.expression) ||
+			initializer.expression.text !== "Event" ||
+			initializer.name.text !== "None"
+		) {
+			failures.push(
+				"Plain workspace provider capability event must remain exactly Event.None",
+			);
+		}
+	}
 
 	const capabilityMembers = provider.members.filter(
 		(member) =>
@@ -4350,6 +5083,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	let hasPrototypeMutationSurface = false;
 	let hasDynamicMutationSurface = false;
 	let hasCapabilitiesReference = false;
+	let mutationDispatchReferences = 0;
 	function visit(node) {
 		if (ts.isIdentifier(node) && node.text === "FileFolderCopy") {
 			failures.push(
@@ -4392,6 +5126,12 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		) {
 			hasCapabilitiesReference = true;
 		}
+		if (
+			(ts.isIdentifier(node) || ts.isStringLiteral(node)) &&
+			node.text === "allowsMutationDispatch"
+		) {
+			mutationDispatchReferences += 1;
+		}
 		ts.forEachChild(node, visit);
 	}
 	visit(sourceFile);
@@ -4413,6 +5153,11 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	if (hasCapabilitiesReference) {
 		failures.push(
 			"Plain workspace provider capabilities must not be referenced outside their readonly declaration",
+		);
+	}
+	if (mutationDispatchReferences !== 2) {
+		failures.push(
+			"Plain workspace mutation boolean may appear only in its constructor parameter and dispatch gate",
 		);
 	}
 

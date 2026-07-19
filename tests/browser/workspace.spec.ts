@@ -147,6 +147,14 @@ async function installNativeIpcMock(
 								ipcVersion: 1,
 								runtime: "tauri",
 							};
+						case "workspace_capabilities":
+							return {
+								create: true,
+								renameNoReplace: false,
+								copyMove: false,
+								delete: false,
+								versionedWrite: false,
+							};
 						case "workspace_snapshot":
 							return emptySnapshot;
 						case "workspace_pick_roots":
@@ -213,6 +221,51 @@ async function installNativeIpcMock(
 	);
 }
 
+async function installCapabilityFailureIpcMock(page: Page): Promise<void> {
+	await page.addInitScript(() => {
+		const calls: Array<{
+			command: string;
+			args: Record<string, unknown>;
+		}> = [];
+		let nextCallbackId = 0;
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: typeof calls;
+			__TAURI_EVENT_PLUGIN_INTERNALS__: {
+				unregisterListener(): void;
+			};
+			__TAURI_INTERNALS__: {
+				invoke(
+					command: string,
+					args?: Record<string, unknown>,
+				): Promise<unknown>;
+				transformCallback(): number;
+				unregisterCallback(): void;
+			};
+		};
+		testWindow.__PLAIN_TEST_TAURI_CALLS__ = calls;
+		testWindow.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+			unregisterListener() {},
+		};
+		testWindow.__TAURI_INTERNALS__ = {
+			transformCallback() {
+				nextCallbackId += 1;
+				return nextCallbackId;
+			},
+			unregisterCallback() {},
+			async invoke(command, args = {}) {
+				calls.push({ command, args });
+				if (command === "workspace_capabilities") {
+					throw {
+						code: "CAPABILITY_UNAVAILABLE",
+						message: "Workspace capabilities are unavailable.",
+					};
+				}
+				throw new Error(`Unexpected Tauri test command: ${command}`);
+			},
+		};
+	});
+}
+
 async function executePaletteCommand(
 	page: Page,
 	query: string,
@@ -242,6 +295,28 @@ async function expectPaletteCommandHidden(
 	await page.keyboard.press("Escape");
 	await expect(palette).toBeHidden();
 }
+
+test("fails closed before workspace bootstrap when capabilities are unavailable", async ({
+	page,
+}) => {
+	await installCapabilityFailureIpcMock(page);
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"error",
+	);
+	const workspaceInvocations = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+		};
+		return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(({ command }) =>
+			command.startsWith("workspace_"),
+		);
+	});
+	expect(workspaceInvocations).toEqual([
+		{ command: "workspace_capabilities", args: { request: {} } },
+	]);
+});
 
 for (const rawReadTransport of ["arrayBuffer", "numberArray"] as const) {
 	test(`projects a selected folder into Explorer and opens files via ${rawReadTransport}`, async ({
@@ -320,6 +395,27 @@ for (const rawReadTransport of ["arrayBuffer", "numberArray"] as const) {
 		await expect(
 			page.locator(".notifications-toasts .notification-toast"),
 		).toHaveCount(0);
+		const bootstrapInvocations = await page.evaluate(() => {
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+			};
+			const workspaceInvocations = testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+				({ command }) => command.startsWith("workspace_"),
+			);
+			return {
+				capabilities: workspaceInvocations.filter(
+					({ command }) => command === "workspace_capabilities",
+				),
+				firstTwo: workspaceInvocations.slice(0, 2),
+			};
+		});
+		expect(bootstrapInvocations.capabilities).toEqual([
+			{ command: "workspace_capabilities", args: { request: {} } },
+		]);
+		expect(bootstrapInvocations.firstTwo).toEqual([
+			{ command: "workspace_capabilities", args: { request: {} } },
+			{ command: "workspace_snapshot", args: { request: {} } },
+		]);
 		const workspaceInvocations = await page.evaluate(() => {
 			const testWindow = window as unknown as Window & {
 				__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
