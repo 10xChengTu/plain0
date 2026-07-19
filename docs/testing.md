@@ -1,7 +1,7 @@
 # Plain 测试与验收策略
 
 状态：初始合同
-更新时间：2026-07-18
+更新时间：2026-07-19
 
 ## 目标
 
@@ -32,6 +32,7 @@
 - 搜索结果批次、取消、替换 plan。
 - theme color/token/icon 映射。
 - Git/DAP view model 在乱序或缺失事件下的行为。
+- 固定 FileService patch 对 Plain copy/move/clone 的 provider-lookup 前拒绝、native-only 合法路径和零副作用失败矩阵；非 Plain 控制组必须保持 upstream 行为。
 
 ### 架构与供应链检查
 
@@ -40,6 +41,7 @@
 - 检查最终 bundle 不含 Electron、Node PTY、模型 SDK、账号/同步字符串和通用扩展执行 worker。
 - 检查 Tauri CSP/capabilities 没有 `csp: null`、`$HOME/**`、宽泛 shell/fs scope。
 - 记录依赖许可证、bundle size 和第三方 notices 差异。
+- pnpm patch 以精确 SHA-256、文件/hunk 形状和 lock graph 锁定；mutation tests 必须证明删除或后移任一 Plain copy/move/clone guard、恢复 overwrite/mkdirp/generic fallback 都会失败。
 
 ### 浏览器 E2E
 

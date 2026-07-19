@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：无；严格 `workspace_capabilities` 原生/桥接合同已完成，下一项是在 provider 注册前读取该 DTO，并与 Workbench 防 fallback 补丁、删除 coordinator 和写能力激活原子落地；provider 当前继续只读。
+- 当前最小工作项：无；FileService 的 Plain copy/move/clone 路由守卫技术合同已冻结，下一项按该合同落地依赖 patch、runtime 测试与 hostile Harness；provider 当前继续只读。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -59,11 +59,13 @@
 - [x] 版本化保存 consumer 通过完整验收：17 个 TypeScript/JavaScript 测试文件、345 个用例和 228 个 Rust 测试通过，格式、双 TypeScript 类型检查、严格 lint、生产构建、五补丁 SHA/hunk/lock graph、provider 写 seam、collector/终态 hostile mutations、2101-source/203-debt bundle 基线全部通过；真实 Chromium E2E 3/3 继续覆盖 Workbench 启动、Explorer 与两种 PLR1 transport。独立 FileService/模型/UI 终审无剩余 P0/P1；测试覆盖 8 MiB+1、零进展、stream destroy、mtime 回拨 A→B→C、保存中再编辑、旧 token queued replay、unknown 前延迟 PLR1、大小写 comparison-key 碰撞、恶意回执、品牌伪造和无 Retry/Overwrite 动作。
 - [x] 完成严格 `workspace_capabilities` 平台合同：Rust 只返回 `{ create, renameNoReplace, copyMove, delete, versionedWrite }` 五个布尔值，create 跨平台可用，其余四项由唯一 Linux/macOS 编译门控制；空请求拒绝额外字段。TypeScript 以 own-data snapshot、精确 key/boolean、Proxy brand check 和冻结结果解码，native bridge 与 browser mock 各只有一条路由；provider 尚未消费该合同并继续全局只读。
 - [x] 平台能力合同通过完整 `pnpm check`：18 个 TypeScript/JavaScript 测试文件、350 个用例和 230 个 Rust 测试通过，格式、双 TypeScript 类型检查、严格 lint、生产构建、capability hostile mutations、既有架构/补丁/2101-source/203-debt bundle 基线全部通过。
+- [x] 基于固定 Code OSS `5264f` GitHub 源码冻结 FileService mutation routing v1：Plain copy/move 在 provider lookup 前闭集拒绝跨 scheme、query/fragment、同 URI 与非严格 overwrite，只允许同 provider native copy/rename；generic helpers 设置纵深 tripwire，clone 任一端 Plain 总拒绝。方案明确本项只覆盖 copy/move 自动 mkdirp，createFolder 和 move partial 由后续激活工作项处理，并冻结 runtime 零副作用矩阵与 hostile patch mutations。
 
 ## 下一步
 
-1. 在provider注册前读取能力DTO，增加copy/move同路径、overwrite、自动mkdirp、generic fallback、clone与cross-scheme防绕过patch，接入确认删除 coordinator，并按Rust平台能力激活写能力与Browser E2E；不支持原子no-replace rename的平台继续只读。
-2. 实现watcher/rescan，最后运行真实Tauri文件树总验收并写回`F020` evidence。
+1. 按冻结合同落地 FileService copy/move/clone 防绕过 patch、runtime 零副作用测试与 hostile Harness；本提交继续保持 provider 只读。
+2. 在 provider 注册前读取能力 DTO，接入 create/copy/move/确认删除 coordinator，并按 Rust 平台能力激活写能力与 Browser E2E；不支持原子 no-replace rename 的平台继续只读。
+3. 实现 watcher/rescan，最后运行真实 Tauri 文件树总验收并写回 `F020` evidence。
 
 ## 当前验收命令
 

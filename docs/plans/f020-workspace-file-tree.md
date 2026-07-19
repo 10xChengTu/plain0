@@ -71,6 +71,33 @@ provider 激活使用显式能力合同：`workspace_capabilities() -> { create,
 
 激活 copy/move 还必须同时声明并真正实现 `FileFolderCopy`，确保同一 `plain-workspace:` provider 的跨 root copy 只进入一个 Rust `workspace_copy` command；provider `rename(from, to)` 按 authority/rootId 分流，同 root 只进入 `workspace_rename`，不同 root 只进入 `workspace_move`。Plain 不接受 Workbench 同路径 no-op、`overwrite` 或自动创建目标父目录：激活工作项必须增加同时覆盖 copy/move 的窄 patch，在任何写副作用前返回与 Rust 一致的错误，阻断预删除、`mkdirp`、generic copy/delete 和 rename fallback。任何涉及 Plain 的跨 scheme copy/move 也必须阻断通用 `mkdir/writeFile` fallback，另走以后明确授权的 import/export 合同。move incomplete 必须先发布两个 root 的 dirty/rescan/file-event 提示，再向 Workbench 抛稳定且明确“target 已发布”的 `WORKSPACE_MOVE_INCOMPLETE`；不能上报 MOVE 成功、建立 undo、走 fallback 或被当作普通 rename 失败自动重试。仅在 provider 内拒绝 overwrite 已经太迟，因为 upstream 可能先删除或创建文件系统项。
 
+### Plain copy/move/clone 路由守卫冻结合同
+
+路由守卫先作为独立 patch 工作项落地，provider 在本工作项中仍严格保持 `FileReadWrite | Readonly`。这样先修复 Plain 作为只读 source 时已可到达的跨 scheme copy/clone 泄漏路径，再在后续提交原子接入 provider mutation 与能力激活。
+
+单一无副作用分类器必须作为 `doCanMoveCopy`、`move`、`copy` 和 `cloneFile` 的首个可执行动作，位于 provider lookup、布尔强制转换及任何 stat 前；`canMove/canCopy` 只是直接转发给已受守卫的 `doCanMoveCopy`，不再重复一份逻辑。`doMoveCopy` 再执行同一个完整检查，防止编译后普通 JS 方法或后续重构绕过。任一端为 `plain-workspace:` 时采用下列闭集：
+
+| 输入                                                | 唯一结果                                                                           |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| 仅一端是 Plain                                      | 在 provider lookup 前拒绝；禁止 import/export fallback                             |
+| 任一 Plain URI 带 query 或 fragment                 | 在 provider lookup 前拒绝                                                          |
+| `overwrite` 不是严格 `undefined` 或 `false`         | 在 `!!overwrite` 前拒绝；`true`、`null`、`0`、空字符串和 Boolean object 都不是授权 |
+| 两端 Plain 且 `scheme + authority + path` 完全相同  | 冲突；不得作为成功 no-op，也不得发布 COPY/MOVE event                               |
+| 两端 Plain、不同 URI、provider 实例不同             | 拒绝；scheme 相同不允许跨 provider fallback                                        |
+| Plain copy 缺少 `FileFolderCopy` 或 callable `copy` | 拒绝；不得进入 read/write 或递归目录 fallback                                      |
+| Plain move 缺少 callable `rename`                   | 拒绝；不得进入 copy/delete fallback                                                |
+| 合法 Plain copy                                     | 可作只读 validation，随后只调用一次 `provider.copy(..., { overwrite: false })`     |
+| 合法 Plain move                                     | 可作只读 validation，随后只调用一次 `provider.rename(..., { overwrite: false })`   |
+| clone 任一端是 Plain                                | 一律拒绝；Plain 不声明或模拟 `FileClone`                                           |
+
+Plain 专用 actual 分支必须位于上游同字符串成功 no-op、target `del`、`mkdirp` 和 generic 分流之前；分支内禁止 `del`、`mkdirp`、`doCopyFile`、`doCopyFolder` 或递归 `doMoveCopy`。`doCopyFile`/`doCopyFolder` 还要在任一 URI 为 Plain 时作纵深拒绝。相同资源只按已经要求 query/fragment 为空后的精确 `scheme + authority + path` 判断，不使用 provider-wide ignore-case comparison key；真实路径大小写与 alias 仍由 Rust root/path gate 最终裁决。非 Plain 路径保持固定 upstream 行为。
+
+所有本地拒绝都返回不含路径的 `FileOperationError`：同 URI 使用 `FILE_MOVE_CONFLICT`，跨 scheme、非规范 URI、非严格 overwrite、clone、generic fallback 与 provider/capability/method 不匹配使用 `FILE_PERMISSION_DENIED`。`canCopy/canMove` 返回该 Error 值，真实 `copy/move/cloneFile` reject；失败路径不得发布任何 operation event。
+
+本合同只封死 copy/move 自带的自动 `mkdirp`。`createFolder` 与导出的通用 `mkdirp` 在 provider 激活工作项中另行接入“单次 native mkdir、父目录必须已存在”的合同，不能把本提交描述成全局 mkdirp 已禁用。跨 root move 的 retained/partial 终态也由后续 provider 工作项消费：只有 `moved` 可返回成功，其余终态先同步触发两个 root rescan，再阻止 MOVE success event 与任何重试/fallback。
+
+runtime 测试必须参数化覆盖入口前置拒绝、同 provider 实例注册到两个 scheme、target 存在/不存在的 overwrite、缺失父目录、native-only happy path、缺 capability/method、直接 generic helper、clone 与非 Plain 控制组；所有失败例同时断言 provider activation/stat/delete/mkdir/read/write/copy/rename 调用数和 operation event。patch Harness 除精确 SHA-256、hunk 与 lock graph 外，还要 hostile mutate：删除任一入口 guard、把双 Plain 改成 OR、恢复 same-URI no-op或 truthy overwrite、把 Plain 分支移到 `del/mkdirp` 后、恢复 generic fallback、删除 clone guard、只检查 capability 不检查方法。
+
 版本化写入是 F020 的底层传输合同，不是 F030 的冲突 UI。Rust stat 增加 opaque version token；`workspace_write_file` 必须同时接收期望 version 与有界 bytes，在 mutation gate 内重验版本、写同目录临时文件并原子替换。由于 upstream `FileService` 不把 `mtime/etag` 继续传给 provider，Plain 需要一份可审计的窄 pnpm patch，只在 `plain-workspace:` 私有分支把已用于 dirty-write 校验的期望版本直接交给 `plainWriteFile(resource, bytes, expectedVersion)`；不得修改公开 `IFileWriteOptions` 或扩展 API。provider 不维护全局“最近 stat”缓存，也不接受缺少期望版本的覆盖写。
 
 ### 版本化原子写入冻结合同
