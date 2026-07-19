@@ -75,28 +75,30 @@ provider 激活使用显式能力合同：`workspace_capabilities() -> { create,
 
 路由守卫先作为独立 patch 工作项落地，provider 在本工作项中仍严格保持 `FileReadWrite | Readonly`。这样先修复 Plain 作为只读 source 时已可到达的跨 scheme copy/clone 泄漏路径，再在后续提交原子接入 provider mutation 与能力激活。
 
-单一无副作用分类器必须作为 `doCanMoveCopy`、`move`、`copy` 和 `cloneFile` 的首个可执行动作，位于 provider lookup、布尔强制转换及任何 stat 前；`canMove/canCopy` 只是直接转发给已受守卫的 `doCanMoveCopy`，不再重复一份逻辑。`doMoveCopy` 再执行同一个完整检查，防止编译后普通 JS 方法或后续重构绕过。任一端为 `plain-workspace:` 时采用下列闭集：
+单一无副作用 snapshot/classifier 必须作为 `doCanMoveCopy`、`move`、`copy` 和 `cloneFile` 的首个可执行动作：先各读取 source/target 的 scheme、authority、path、query、fragment 一次并建立冻结 URI，再只对该 snapshot 分类，整个过程位于 provider lookup、布尔强制转换及任何 stat 前；不得先分类原 URI 再重复读取字段生成 snapshot。`canMove/canCopy` 只是直接转发给已受守卫的 `doCanMoveCopy`，不再重复一份逻辑。`doMoveCopy` 对其直接调用者再执行同一套 snapshot/classifier，防止编译后普通 JS 方法或后续重构绕过。任一 snapshot 端为 `plain-workspace:` 时采用下列闭集：
 
-| 输入                                                | 唯一结果                                                                           |
-| --------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| 仅一端是 Plain                                      | 在 provider lookup 前拒绝；禁止 import/export fallback                             |
-| 任一 Plain URI 带 query 或 fragment                 | 在 provider lookup 前拒绝                                                          |
-| `overwrite` 不是严格 `undefined` 或 `false`         | 在 `!!overwrite` 前拒绝；`true`、`null`、`0`、空字符串和 Boolean object 都不是授权 |
-| 两端 Plain 且 `scheme + authority + path` 完全相同  | 冲突；不得作为成功 no-op，也不得发布 COPY/MOVE event                               |
-| 两端 Plain、不同 URI、provider 实例不同             | 拒绝；scheme 相同不允许跨 provider fallback                                        |
-| Plain copy 缺少 `FileFolderCopy` 或 callable `copy` | 拒绝；不得进入 read/write 或递归目录 fallback                                      |
-| Plain move 缺少 callable `rename`                   | 拒绝；不得进入 copy/delete fallback                                                |
-| 合法 Plain copy                                     | 可作只读 validation，随后只调用一次 `provider.copy(..., { overwrite: false })`     |
-| 合法 Plain move                                     | 可作只读 validation，随后只调用一次 `provider.rename(..., { overwrite: false })`   |
-| clone 任一端是 Plain                                | 一律拒绝；Plain 不声明或模拟 `FileClone`                                           |
+| 输入                                                | 唯一结果                                                                                      |
+| --------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| 仅一端是 Plain                                      | 在 provider lookup 前拒绝；禁止 import/export fallback                                        |
+| 任一 Plain URI 带 query 或 fragment                 | 在 provider lookup 前拒绝                                                                     |
+| `overwrite` 不是严格 `undefined` 或 `false`         | 在 `!!overwrite` 前拒绝；`true`、`null`、`0`、空字符串和 Boolean object 都不是授权            |
+| 两端 Plain 且 `scheme + authority + path` 完全相同  | 冲突；不得作为成功 no-op，也不得发布 COPY/MOVE event                                          |
+| 两端 Plain、不同 URI、provider 实例不同             | 拒绝；scheme 相同不允许跨 provider fallback                                                   |
+| Plain copy 缺少 `FileFolderCopy` 或 callable `copy` | 拒绝；不得进入 read/write 或递归目录 fallback                                                 |
+| Plain move 缺少 callable `rename`                   | 拒绝；不得进入 copy/delete fallback                                                           |
+| 合法 Plain copy                                     | `canCopy` 只校验路由/provider；actual 只调用一次 `provider.copy(..., { overwrite: false })`   |
+| 合法 Plain move                                     | `canMove` 只校验路由/provider；actual 只调用一次 `provider.rename(..., { overwrite: false })` |
+| clone 任一端是 Plain                                | 一律拒绝；Plain 不声明或模拟 `FileClone`                                                      |
 
-Plain 专用 actual 分支必须位于上游同字符串成功 no-op、target `del`、`mkdirp` 和 generic 分流之前；分支内禁止 `del`、`mkdirp`、`doCopyFile`、`doCopyFolder` 或递归 `doMoveCopy`。`doCopyFile`/`doCopyFolder` 还要在任一 URI 为 Plain 时作纵深拒绝。相同资源只按已经要求 query/fragment 为空后的精确 `scheme + authority + path` 判断，不使用 provider-wide ignore-case comparison key；真实路径大小写与 alias 仍由 Rust root/path gate 最终裁决。非 Plain 路径保持固定 upstream 行为。
+Plain 专用 actual 分支必须位于上游同字符串成功 no-op、target `del`、`mkdirp` 和 generic 分流之前；分支内禁止 target `stat`/`exists`、`del`、`mkdirp`、`doCopyFile`、`doCopyFolder` 或递归 `doMoveCopy`。`doCopyFile`/`doCopyFolder` 还要在任一 URI 为 Plain 时作纵深拒绝。相同资源只按已经要求 query/fragment 为空后的精确 `scheme + authority + path` 判断，不使用 provider-wide ignore-case comparison key；target 是否存在、真实路径大小写与 alias 必须由 Rust root/path gate 和原子 no-clobber 最终裁决，不能由 Workbench 的 provider-wide 比较或 check-then-act 预检抢先判断。非 Plain 路径保持固定 upstream 行为。
+
+后续 provider lookup/dispatch、target resolve 与 operation event 只使用由这次单次读取派生的冻结 snapshot；内部入口的重复 snapshot 也只能读取已经冻结的值。原 URI 的同步 accessor 顺序变化或 promise 运行期间修改，都不能让分类输入与 mutation 目标不一致。非 Plain 请求同样使用内容等价 snapshot，固定 upstream 的分支和结果保持不变。provider 激活后仍须在自身同步读取 scheme/authority/path/options 为不可变 primitive request，再进入 native bridge，FileService snapshot 只是纵深防御。
 
 所有本地拒绝都返回不含路径的 `FileOperationError`：同 URI 使用 `FILE_MOVE_CONFLICT`，跨 scheme、非规范 URI、非严格 overwrite、clone、generic fallback 与 provider/capability/method 不匹配使用 `FILE_PERMISSION_DENIED`。`canCopy/canMove` 返回该 Error 值，真实 `copy/move/cloneFile` reject；失败路径不得发布任何 operation event。
 
 本合同只封死 copy/move 自带的自动 `mkdirp`。`createFolder` 与导出的通用 `mkdirp` 在 provider 激活工作项中另行接入“单次 native mkdir、父目录必须已存在”的合同，不能把本提交描述成全局 mkdirp 已禁用。跨 root move 的 retained/partial 终态也由后续 provider 工作项消费：只有 `moved` 可返回成功，其余终态先同步触发两个 root rescan，再阻止 MOVE success event 与任何重试/fallback。
 
-runtime 测试必须参数化覆盖入口前置拒绝、同 provider 实例注册到两个 scheme、target 存在/不存在的 overwrite、缺失父目录、native-only happy path、缺 capability/method、直接 generic helper、clone 与非 Plain 控制组；所有失败例同时断言 provider activation/stat/delete/mkdir/read/write/copy/rename 调用数和 operation event。patch Harness 除精确 SHA-256、hunk 与 lock graph 外，还要 hostile mutate：删除任一入口 guard、把双 Plain 改成 OR、恢复 same-URI no-op或 truthy overwrite、把 Plain 分支移到 `del/mkdirp` 后、恢复 generic fallback、删除 clone guard、只检查 capability 不检查方法。
+runtime 测试必须参数化覆盖入口前置拒绝、同 provider 实例注册到两个 scheme、target 存在/不存在的 overwrite、由 native no-clobber 返回的 target conflict、大小写仅有差异的路径、缺失父目录、同步 sequential getter/Proxy 与异步 URI mutation、native-only happy path、缺 capability/method、直接 generic helper、clone 与非 Plain 控制组；所有失败例同时断言 provider activation/stat/delete/mkdir/read/write/copy/rename 调用数和 operation event。patch Harness 除精确 SHA-256、hunk 与 lock graph 外，还要 hostile mutate：删除任一入口 guard、把双 Plain 改成 OR、恢复 same-URI no-op或 truthy overwrite、把 Plain 分支移到 `del/mkdirp` 后、恢复 target stat/exists 或 generic fallback、后移/删除 URI snapshot 或 clone guard、只检查 capability 不检查方法。
 
 版本化写入是 F020 的底层传输合同，不是 F030 的冲突 UI。Rust stat 增加 opaque version token；`workspace_write_file` 必须同时接收期望 version 与有界 bytes，在 mutation gate 内重验版本、写同目录临时文件并原子替换。由于 upstream `FileService` 不把 `mtime/etag` 继续传给 provider，Plain 需要一份可审计的窄 pnpm patch，只在 `plain-workspace:` 私有分支把已用于 dirty-write 校验的期望版本直接交给 `plainWriteFile(resource, bytes, expectedVersion)`；不得修改公开 `IFileWriteOptions` 或扩展 API。provider 不维护全局“最近 stat”缓存，也不接受缺少期望版本的覆盖写。
 

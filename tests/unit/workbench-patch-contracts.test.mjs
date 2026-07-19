@@ -95,7 +95,7 @@ describe("exact Workbench patch contracts", () => {
 
 		const stale = await baseline();
 		stale.lockfile = stale.lockfile.replace(
-			"5aafc3e41fc13c7e72c60da8b48893b4b5c5ed14883f6f669238ae62aadc8aec",
+			"0f0b29444ba911b4c8c652012c1e876a3d4482fbaac6fb0815e225192afac98a",
 			"0".repeat(64),
 		);
 		expect(validateWorkbenchPatchSet(stale)).toContain(
@@ -262,6 +262,108 @@ describe("exact Workbench patch contracts", () => {
 			);
 			expect(validateWorkbenchPatchSet(input)).toContain(
 				`${mutation.patchPath} differs from its exact audited SHA-256`,
+			);
+		}
+	});
+
+	it("rejects Plain copy, move and clone routing guard downgrades", async () => {
+		const patchPath =
+			"patches/@codingame__monaco-vscode-files-service-override@35.0.1.patch";
+		const baselineInput = await baseline();
+		const baselineSource = baselineInput.patchSources.get(patchPath);
+		expect(
+			baselineSource.match(
+				/\(\{ source, target \} = snapshotWorkspaceMutationResources\(source, target\)\);/gu,
+			),
+		).toHaveLength(5);
+		const mutations = [
+			{
+				from: "({ source, target } = snapshotWorkspaceMutationResources(source, target));\n+            const isPlainWorkspaceMutation = classifyPlainWorkspaceMutation(source, target, mode, overwrite);",
+				to: "const isPlainWorkspaceMutation = classifyPlainWorkspaceMutation(source, target, mode, overwrite);\n+            ({ source, target } = snapshotWorkspaceMutationResources(source, target));",
+			},
+			{
+				from: "const isPlainWorkspaceMutation = classifyPlainWorkspaceMutation(source, target, mode, overwrite);",
+				to: "const isPlainWorkspaceMutation = false;",
+			},
+			{
+				from: 'classifyPlainWorkspaceMutation(source, target, "copy", overwrite);',
+				to: "void overwrite;",
+			},
+			{
+				from: 'classifyPlainWorkspaceMutation(source, target, "move", overwrite);',
+				to: "void overwrite;",
+			},
+			{
+				from: "const isPlainWorkspaceMutation = classifyPlainWorkspaceMutation(source, target, mode, overwrite);\n+        if (isPlainWorkspaceMutation)",
+				to: "const isPlainWorkspaceMutation = false;\n+        if (isPlainWorkspaceMutation)",
+			},
+			{
+				from: "if (!sourceIsPlain || !targetIsPlain) {",
+				to: "if (!sourceIsPlain && !targetIsPlain) {",
+			},
+			{
+				from: "if (sourceProvider !== targetProvider) {",
+				to: "if (false) {",
+			},
+			{
+				from: 'source.query !== "" || source.fragment !== ""',
+				to: "false",
+			},
+			{
+				from: "source.scheme === target.scheme && source.authority === target.authority && source.path === target.path",
+				to: "false",
+			},
+			{
+				from: "if (overwrite !== undefined && overwrite !== false) {",
+				to: "if (overwrite) {",
+			},
+			{
+				from: "return Object.freeze(snapshot);",
+				to: "return snapshot;",
+			},
+			{
+				from: 'validatePlainWorkspaceMutationProviders(sourceProvider, targetProvider, mode);\n+            if (mode === "copy") {',
+				to: 'validatePlainWorkspaceMutationProviders(sourceProvider, targetProvider, mode);\n+            await this.exists(target);\n+            if (mode === "copy") {',
+			},
+			{
+				from: "rejectPlainWorkspaceGenericCopy(source, target);",
+				to: "void source; void target;",
+			},
+			{
+				from: "rejectPlainWorkspaceGenericCopy(sourceFolder.resource, targetFolder);",
+				to: "void sourceFolder; void targetFolder;",
+			},
+			{
+				from: 'classifyPlainWorkspaceMutation(source, target, "clone", undefined);',
+				to: "void source; void target;",
+			},
+			{
+				from: "!hasFileFolderCopyCapability(sourceProvider)",
+				to: "false",
+			},
+			{
+				from: ' || typeof sourceProvider.copy !== "function"',
+				to: "",
+			},
+			{
+				from: 'typeof sourceProvider.rename !== "function"',
+				to: "false",
+			},
+			{
+				from: "overwrite: false",
+				to: "overwrite",
+			},
+		];
+		for (const mutation of mutations) {
+			const input = await baseline();
+			const source = input.patchSources.get(patchPath);
+			expect(source).toContain(mutation.from);
+			input.patchSources.set(
+				patchPath,
+				source.replace(mutation.from, mutation.to),
+			);
+			expect(validateWorkbenchPatchSet(input)).toContain(
+				`${patchPath} differs from its exact audited SHA-256`,
 			);
 		}
 	});

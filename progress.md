@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：无；FileService 的 Plain copy/move/clone 路由守卫技术合同已冻结，下一项按该合同落地依赖 patch、runtime 测试与 hostile Harness；provider 当前继续只读。
+- 当前最小工作项：无；FileService mutation routing v1 已完成，下一项在 provider 注册前消费平台能力 DTO 并接入写能力；provider 当前继续严格只读。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -60,12 +60,13 @@
 - [x] 完成严格 `workspace_capabilities` 平台合同：Rust 只返回 `{ create, renameNoReplace, copyMove, delete, versionedWrite }` 五个布尔值，create 跨平台可用，其余四项由唯一 Linux/macOS 编译门控制；空请求拒绝额外字段。TypeScript 以 own-data snapshot、精确 key/boolean、Proxy brand check 和冻结结果解码，native bridge 与 browser mock 各只有一条路由；provider 尚未消费该合同并继续全局只读。
 - [x] 平台能力合同通过完整 `pnpm check`：18 个 TypeScript/JavaScript 测试文件、350 个用例和 230 个 Rust 测试通过，格式、双 TypeScript 类型检查、严格 lint、生产构建、capability hostile mutations、既有架构/补丁/2101-source/203-debt bundle 基线全部通过。
 - [x] 基于固定 Code OSS `5264f` GitHub 源码冻结 FileService mutation routing v1：Plain copy/move 在 provider lookup 前闭集拒绝跨 scheme、query/fragment、同 URI 与非严格 overwrite，只允许同 provider native copy/rename；generic helpers 设置纵深 tripwire，clone 任一端 Plain 总拒绝。方案明确本项只覆盖 copy/move 自动 mkdirp，createFolder 和 move partial 由后续激活工作项处理，并冻结 runtime 零副作用矩阵与 hostile patch mutations。
+- [x] 完成固定 FileService mutation routing patch：copy/move/clone 与内部 `doMoveCopy` 先一次性读取并冻结 source/target URI snapshot，再只对 snapshot 分类、查 provider、调用和发事件；Plain actual 绕开 provider-wide 大小写/target 预检、自动 `del/mkdirp` 与 generic fallback，只调用一次同 provider native `copy/rename({ overwrite: false })`。copy/move 跨 scheme、query/fragment、同 URI、非严格 overwrite、provider/capability/method 不匹配、clone 和 generic helper 均 fail closed；provider 继续全局只读。
+- [x] mutation routing 切片通过完整 `pnpm check`：19 个 TypeScript/JavaScript 测试文件、366 个用例和 230 个 Rust 测试通过，格式、双 TypeScript 类型检查、严格 lint、生产构建、五补丁 SHA/hunk/lock graph、架构与 2101-source/203-debt bundle 基线全部通过。独立三路终审无剩余 P0/P1；测试覆盖 `Foo.ts → foo.ts`、native no-clobber 冲突去敏、嵌套缺失父目录、同步 sequential getter/Proxy、异步 URI 修改、direct `doMoveCopy`、generic helper 与非 Plain same/native/generic/cross-provider 控制组；补丁 SHA-256 为 `0f0b29444ba911b4c8c652012c1e876a3d4482fbaac6fb0815e225192afac98a`。
 
 ## 下一步
 
-1. 按冻结合同落地 FileService copy/move/clone 防绕过 patch、runtime 零副作用测试与 hostile Harness；本提交继续保持 provider 只读。
-2. 在 provider 注册前读取能力 DTO，接入 create/copy/move/确认删除 coordinator，并按 Rust 平台能力激活写能力与 Browser E2E；不支持原子 no-replace rename 的平台继续只读。
-3. 实现 watcher/rescan，最后运行真实 Tauri 文件树总验收并写回 `F020` evidence。
+1. 在 provider 注册前读取能力 DTO，接入 create/copy/move/确认删除 coordinator，并按 Rust 平台能力激活写能力与 Browser E2E；不支持原子 no-replace rename 的平台继续只读。
+2. 实现 watcher/rescan，最后运行真实 Tauri 文件树总验收并写回 `F020` evidence。
 
 ## 当前验收命令
 

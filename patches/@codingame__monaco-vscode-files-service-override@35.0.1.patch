@@ -1,8 +1,14 @@
 diff --git a/vscode/src/vs/platform/files/common/fileService.js b/vscode/src/vs/platform/files/common/fileService.js
-index 107a37ee3b1999392b35fa5545382acc7238a3c1..b48432d5ebe3cc5cba8f619d5dc1a3f3ba0bc146 100644
+index 107a37ee3b1999392b35fa5545382acc7238a3c1..10de016c04970eae0dd4e3c1e3da758a32980ae9 100644
 --- a/vscode/src/vs/platform/files/common/fileService.js
 +++ b/vscode/src/vs/platform/files/common/fileService.js
-@@ -14,7 +14,7 @@ import { mark } from '@codingame/monaco-vscode-api/vscode/vs/base/common/perform
+@@ -9,12 +9,13 @@ import { hash } from '@codingame/monaco-vscode-api/vscode/vs/base/common/hash';
+ import { Iterable } from '@codingame/monaco-vscode-api/vscode/vs/base/common/iterator';
+ import { Disposable, DisposableStore, toDisposable, dispose } from '@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle';
+ import { TernarySearchTree } from '@codingame/monaco-vscode-api/vscode/vs/base/common/ternarySearchTree';
++import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri';
+ import { Schemas } from '@codingame/monaco-vscode-api/vscode/vs/base/common/network';
+ import { mark } from '@codingame/monaco-vscode-api/vscode/vs/base/common/performance';
  import { isAbsolutePath, extUri, extUriIgnorePathCase } from '@codingame/monaco-vscode-api/vscode/vs/base/common/resources';
  import { isReadableStream, peekStream, peekReadable, consumeStream, transform, newWriteableStream, isReadableBufferedStream, listenStream } from '@codingame/monaco-vscode-api/vscode/vs/base/common/stream';
  import { localize } from '@codingame/monaco-vscode-api/vscode/vs/nls';
@@ -11,7 +17,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..b48432d5ebe3cc5cba8f619d5dc1a3f3
  import { readFileIntoStream } from './io.js';
  import { ILogService } from '@codingame/monaco-vscode-api/vscode/vs/platform/log/common/log.service';
  import { ErrorNoTelemetry } from '@codingame/monaco-vscode-api/vscode/vs/base/common/errors';
-@@ -26,6 +26,399 @@ function resourceForError(resource) {
+@@ -26,6 +27,468 @@ function resourceForError(resource) {
      }
      return ( resource.toString(true));
  }
@@ -19,6 +25,75 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..b48432d5ebe3cc5cba8f619d5dc1a3f3
 +const PLAIN_WORKSPACE_VERSION_PATTERN = /^wv1:[0-9a-f]{64}$/;
 +const PLAIN_WORKSPACE_MAX_READ_BYTES = 8 * 1024 * 1024;
 +const PLAIN_WORKSPACE_MAX_WRITE_BYTES = 8 * 1024 * 1024;
++function plainWorkspaceMutationError(message, result = FileOperationResult.FILE_PERMISSION_DENIED) {
++    return ( new FileOperationError(message, result));
++}
++function isPlainWorkspaceResource(resource) {
++    return resource?.scheme === PLAIN_WORKSPACE_SCHEME;
++}
++function snapshotWorkspaceMutationResource(resource) {
++    const snapshot = URI.from({
++        scheme: resource.scheme,
++        authority: resource.authority,
++        path: resource.path,
++        query: resource.query,
++        fragment: resource.fragment
++    }, true);
++    snapshot.toString();
++    snapshot.fsPath;
++    return Object.freeze(snapshot);
++}
++function snapshotWorkspaceMutationResources(source, target) {
++    return Object.freeze({
++        source: snapshotWorkspaceMutationResource(source),
++        target: snapshotWorkspaceMutationResource(target)
++    });
++}
++function classifyPlainWorkspaceMutation(source, target, mode, overwrite) {
++    const sourceIsPlain = isPlainWorkspaceResource(source);
++    const targetIsPlain = isPlainWorkspaceResource(target);
++    if (!sourceIsPlain && !targetIsPlain) {
++        return false;
++    }
++    if (mode === "clone") {
++        throw plainWorkspaceMutationError("Plain workspace resources do not support clone operations");
++    }
++    if (mode !== "copy" && mode !== "move") {
++        throw plainWorkspaceMutationError("Plain workspace resources cannot enter generic copy operations");
++    }
++    if (!sourceIsPlain || !targetIsPlain) {
++        throw plainWorkspaceMutationError("Plain workspace copy and move cannot cross schemes");
++    }
++    if (source.query !== "" || source.fragment !== "" || target.query !== "" || target.fragment !== "") {
++        throw plainWorkspaceMutationError("Plain workspace mutation URIs cannot contain a query or fragment");
++    }
++    if (overwrite !== undefined && overwrite !== false) {
++        throw plainWorkspaceMutationError("Plain workspace copy and move do not permit overwrite");
++    }
++    if (source.scheme === target.scheme && source.authority === target.authority && source.path === target.path) {
++        throw plainWorkspaceMutationError(
++            "Plain workspace source and target must differ",
++            FileOperationResult.FILE_MOVE_CONFLICT
++        );
++    }
++    return true;
++}
++function validatePlainWorkspaceMutationProviders(sourceProvider, targetProvider, mode) {
++    if (sourceProvider !== targetProvider) {
++        throw plainWorkspaceMutationError("Plain workspace copy and move require one provider instance");
++    }
++    if (mode === "copy" && (!hasFileFolderCopyCapability(sourceProvider) || typeof sourceProvider.copy !== "function")) {
++        throw plainWorkspaceMutationError("Plain workspace copy requires one callable native copy provider");
++    }
++    if (mode === "move" && typeof sourceProvider.rename !== "function") {
++        throw plainWorkspaceMutationError("Plain workspace move requires one callable native rename provider");
++    }
++}
++function rejectPlainWorkspaceGenericCopy(source, target) {
++    if (isPlainWorkspaceResource(source) || isPlainWorkspaceResource(target)) {
++        throw plainWorkspaceMutationError("Plain workspace resources cannot enter generic copy operations");
++    }
++}
 +const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype);
 +const TYPED_ARRAY_SET = Uint8Array.prototype.set;
 +const TYPED_ARRAY_SUBARRAY = Uint8Array.prototype.subarray;
@@ -411,7 +486,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..b48432d5ebe3cc5cba8f619d5dc1a3f3
  async function mkdirp(providerExtUri, provider, directory) {
      const directoriesToCreate = [];
      while (!providerExtUri.isEqual(directory, providerExtUri.dirname(directory))) {
-@@ -81,6 +474,7 @@ let FileService = class FileService extends Disposable {
+@@ -81,6 +544,7 @@ let FileService = class FileService extends Disposable {
          this._onDidWatchError = this._register(( new Emitter()));
          this.onDidWatchError = this._onDidWatchError.event;
          this.activeWatchers = ( new Map());
@@ -419,7 +494,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..b48432d5ebe3cc5cba8f619d5dc1a3f3
          this.writeQueue = this._register(( new ResourceQueue()));
      }
      registerProvider(scheme, provider) {
-@@ -266,6 +660,21 @@ let FileService = class FileService extends Disposable {
+@@ -266,6 +730,21 @@ let FileService = class FileService extends Disposable {
              }),
              children: undefined
          };
@@ -441,7 +516,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..b48432d5ebe3cc5cba8f619d5dc1a3f3
          if (fileStat.isDirectory && recurse(fileStat, siblings)) {
              try {
                  const entries = await provider.readdir(resource);
-@@ -369,9 +778,11 @@ let FileService = class FileService extends Disposable {
+@@ -369,9 +848,11 @@ let FileService = class FileService extends Disposable {
      }
      async writeFile(resource, bufferOrReadableOrStream, options) {
          const provider = this.throwIfFileSystemIsReadonly(await this.withWriteProvider(resource), resource);
@@ -453,7 +528,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..b48432d5ebe3cc5cba8f619d5dc1a3f3
          let writeFileOptions = options;
          if (hasFileAtomicWriteCapability(provider) && !writeFileOptions?.atomic) {
              const enforcedAtomicWrite = provider.enforceAtomicWriteFile?.(resource);
-@@ -383,10 +794,39 @@ let FileService = class FileService extends Disposable {
+@@ -383,10 +864,39 @@ let FileService = class FileService extends Disposable {
              }
          }
          try {
@@ -494,7 +569,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..b48432d5ebe3cc5cba8f619d5dc1a3f3
              if (!stat) {
                  await this.mkdirp(provider, providerExtUri.dirname(resource));
              }
-@@ -412,6 +852,9 @@ let FileService = class FileService extends Disposable {
+@@ -412,6 +922,9 @@ let FileService = class FileService extends Disposable {
              }
              this._onDidRunOperation.fire(( new FileOperationEvent(resource, FileOperation.WRITE)));
          } catch (error) {
@@ -504,7 +579,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..b48432d5ebe3cc5cba8f619d5dc1a3f3
              throw ( new FileOperationError(( localize(
                  2096,
                  "Unable to write file '{0}' ({1})",
-@@ -442,6 +885,57 @@ let FileService = class FileService extends Disposable {
+@@ -442,6 +955,57 @@ let FileService = class FileService extends Disposable {
          return peekResult;
      }
      async validateWriteFile(provider, resource, bufferOrReadableOrStream, options) {
@@ -562,7 +637,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..b48432d5ebe3cc5cba8f619d5dc1a3f3
          const unlock = !!options?.unlock;
          if (unlock && !(provider.capabilities & FileSystemProviderCapabilities.FileWriteUnlock)) {
              throw ( new Error(( localize(
-@@ -559,6 +1053,9 @@ let FileService = class FileService extends Disposable {
+@@ -559,6 +1123,9 @@ let FileService = class FileService extends Disposable {
          return this.doReadFileStream(provider, resource, options, token);
      }
      async doReadFileStream(provider, resource, options, token) {
@@ -572,7 +647,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..b48432d5ebe3cc5cba8f619d5dc1a3f3
          const cancellableSource = ( new CancellationTokenSource(token));
          let readFileOptions = options;
          if (hasFileAtomicReadCapability(provider) && provider.enforceAtomicReadFile?.(resource)) {
-@@ -600,6 +1097,57 @@ let FileService = class FileService extends Disposable {
+@@ -600,6 +1167,57 @@ let FileService = class FileService extends Disposable {
              throw this.restoreReadError(error, resource, readFileOptions);
          }
      }
@@ -630,7 +705,97 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..b48432d5ebe3cc5cba8f619d5dc1a3f3
      restoreReadError(error, resource, options) {
          const message = ( localize(
              2104,
-@@ -1154,14 +1702,54 @@ let FileService = class FileService extends Disposable {
+@@ -691,18 +1309,27 @@ let FileService = class FileService extends Disposable {
+         return this.doCanMoveCopy(source, target, "copy", overwrite);
+     }
+     async doCanMoveCopy(source, target, mode, overwrite) {
+-        if (( source.toString()) !== ( target.toString())) {
+-            try {
+-                const sourceProvider = mode === "move" ? this.throwIfFileSystemIsReadonly(await this.withWriteProvider(source), source) : await this.withReadProvider(source);
+-                const targetProvider = this.throwIfFileSystemIsReadonly(await this.withWriteProvider(target), target);
++        try {
++            ({ source, target } = snapshotWorkspaceMutationResources(source, target));
++            const isPlainWorkspaceMutation = classifyPlainWorkspaceMutation(source, target, mode, overwrite);
++            if (!isPlainWorkspaceMutation && ( source.toString()) === ( target.toString())) {
++                return true;
++            }
++            const sourceProvider = mode === "move" ? this.throwIfFileSystemIsReadonly(await this.withWriteProvider(source), source) : await this.withReadProvider(source);
++            const targetProvider = this.throwIfFileSystemIsReadonly(await this.withWriteProvider(target), target);
++            if (isPlainWorkspaceMutation) {
++                validatePlainWorkspaceMutationProviders(sourceProvider, targetProvider, mode);
++            } else {
+                 await this.doValidateMoveCopy(sourceProvider, source, targetProvider, target, mode, overwrite);
+-            } catch (error) {
+-                return error;
+             }
++        } catch (error) {
++            return error;
+         }
+         return true;
+     }
+     async move(source, target, overwrite) {
++        ({ source, target } = snapshotWorkspaceMutationResources(source, target));
++        classifyPlainWorkspaceMutation(source, target, "move", overwrite);
+         const sourceProvider = this.throwIfFileSystemIsReadonly(await this.withWriteProvider(source), source);
+         const targetProvider = this.throwIfFileSystemIsReadonly(await this.withWriteProvider(target), target);
+         const mode = await this.doMoveCopy(sourceProvider, source, targetProvider, target, "move", !!overwrite);
+@@ -717,6 +1344,8 @@ let FileService = class FileService extends Disposable {
+         return fileStat;
+     }
+     async copy(source, target, overwrite) {
++        ({ source, target } = snapshotWorkspaceMutationResources(source, target));
++        classifyPlainWorkspaceMutation(source, target, "copy", overwrite);
+         const sourceProvider = await this.withReadProvider(source);
+         const targetProvider = this.throwIfFileSystemIsReadonly(await this.withWriteProvider(target), target);
+         const mode = await this.doMoveCopy(sourceProvider, source, targetProvider, target, "copy", !!overwrite);
+@@ -731,6 +1360,21 @@ let FileService = class FileService extends Disposable {
+         return fileStat;
+     }
+     async doMoveCopy(sourceProvider, source, targetProvider, target, mode, overwrite) {
++        ({ source, target } = snapshotWorkspaceMutationResources(source, target));
++        const isPlainWorkspaceMutation = classifyPlainWorkspaceMutation(source, target, mode, overwrite);
++        if (isPlainWorkspaceMutation) {
++            validatePlainWorkspaceMutationProviders(sourceProvider, targetProvider, mode);
++            if (mode === "copy") {
++                await sourceProvider.copy(source, target, {
++                    overwrite: false
++                });
++            } else {
++                await sourceProvider.rename(source, target, {
++                    overwrite: false
++                });
++            }
++            return mode;
++        }
+         if (( source.toString()) === ( target.toString())) {
+             return mode;
+         }
+@@ -780,6 +1424,7 @@ let FileService = class FileService extends Disposable {
+         }
+     }
+     async doCopyFile(sourceProvider, source, targetProvider, target) {
++        rejectPlainWorkspaceGenericCopy(source, target);
+         if (hasOpenReadWriteCloseCapability(sourceProvider) && hasOpenReadWriteCloseCapability(targetProvider)) {
+             return this.doPipeBuffered(sourceProvider, source, targetProvider, target);
+         }
+@@ -794,6 +1439,7 @@ let FileService = class FileService extends Disposable {
+         }
+     }
+     async doCopyFolder(sourceProvider, sourceFolder, targetProvider, targetFolder) {
++        rejectPlainWorkspaceGenericCopy(sourceFolder.resource, targetFolder);
+         await targetProvider.mkdir(targetFolder);
+         if (Array.isArray(sourceFolder.children)) {
+             await Promises.settled(( sourceFolder.children.map(async sourceChild => {
+@@ -974,6 +1620,8 @@ let FileService = class FileService extends Disposable {
+         this._onDidRunOperation.fire(( new FileOperationEvent(resource, FileOperation.DELETE)));
+     }
+     async cloneFile(source, target) {
++        ({ source, target } = snapshotWorkspaceMutationResources(source, target));
++        classifyPlainWorkspaceMutation(source, target, "clone", undefined);
+         const sourceProvider = await this.withProvider(source);
+         const targetProvider = this.throwIfFileSystemIsReadonly(await this.withWriteProvider(target), target);
+         if (sourceProvider === targetProvider && this.getExtUri(sourceProvider).providerExtUri.isEqual(source, target)) {
+@@ -1154,14 +1802,54 @@ let FileService = class FileService extends Disposable {
              totalBytesWritten += bytesWritten;
          }
      }
