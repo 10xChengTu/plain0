@@ -18,6 +18,10 @@ import {
 	validateWorkspaceProviderCopyBoundary,
 	validateWorkspaceRustBoundary,
 } from "./boundary-contracts.mjs";
+import {
+	auditedWorkbenchPatchPaths,
+	validateWorkbenchPatchSet,
+} from "./workbench-patch-contracts.mjs";
 
 const root = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -71,6 +75,13 @@ const requiredPatches = new Map([
 		},
 	],
 	[
+		"@codingame/monaco-vscode-files-service-override@35.0.1",
+		{
+			file: "patches/@codingame__monaco-vscode-files-service-override@35.0.1.patch",
+			marker: "PLAIN_WORKSPACE_INVALID_READ_RECEIPT",
+		},
+	],
+	[
 		"@codingame/monaco-vscode-theme-service-override@35.0.1",
 		{
 			file: "patches/@codingame__monaco-vscode-theme-service-override@35.0.1.patch",
@@ -90,11 +101,13 @@ const workspaceManifest = await readFile(
 	path.join(root, "pnpm-workspace.yaml"),
 	"utf8",
 );
+const patchSources = new Map();
 for (const [dependency, patch] of requiredPatches) {
 	if (!workspaceManifest.includes(`'${dependency}': ${patch.file}`)) {
 		fail(`pnpm-workspace.yaml must apply the audited patch for ${dependency}`);
 	}
 	const patchSource = await readFile(path.join(root, patch.file), "utf8");
+	patchSources.set(patch.file, patchSource);
 	if (!patchSource.includes(patch.marker)) {
 		fail(`${patch.file} is missing security marker ${patch.marker}`);
 	}
@@ -145,6 +158,20 @@ try {
 	lock = await readFile(lockPath, "utf8");
 } catch {
 	fail("pnpm-lock.yaml is required");
+}
+if (
+	auditedWorkbenchPatchPaths.length !== requiredPatches.size ||
+	auditedWorkbenchPatchPaths.some((patchPath) => !patchSources.has(patchPath))
+) {
+	fail("the required and exact-audited Workbench patch sets must match");
+} else {
+	for (const failure of validateWorkbenchPatchSet({
+		workspaceManifest,
+		lockfile: lock,
+		patchSources,
+	})) {
+		fail(failure);
+	}
 }
 
 const forbiddenLockPackages = [

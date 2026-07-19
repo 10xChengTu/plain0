@@ -24,7 +24,7 @@ import {
 	frozenWorkspaceEntryStat,
 	frozenWorkspaceCreateEntryRequest,
 	frozenWorkspaceEntryRequest,
-	frozenWorkspaceFileData,
+	frozenWorkspaceReadFile,
 	frozenWorkspaceMoveRequest,
 	frozenWorkspaceMoveResult,
 	frozenWorkspacePrepareDeleteRequest,
@@ -240,6 +240,21 @@ function resolveMockNodeFollowingSymlinks(
 	seen: ReadonlySet<MockSymlinkNode> = new Set(),
 	depth = 0,
 ): MockNode | undefined {
+	return resolveMockPathFollowingSymlinks(root, segments, seen, depth)?.node;
+}
+
+interface MockResolvedPath {
+	readonly node: MockNode;
+	readonly resolvedSegments: readonly string[];
+	readonly finalSymlink?: MockSymlinkNode;
+}
+
+function resolveMockPathFollowingSymlinks(
+	root: MockDirectoryNode,
+	segments: readonly string[],
+	seen: ReadonlySet<MockSymlinkNode> = new Set(),
+	depth = 0,
+): MockResolvedPath | undefined {
 	if (depth > MAX_MOCK_SYMLINK_DEPTH) {
 		return undefined;
 	}
@@ -265,17 +280,32 @@ function resolveMockNodeFollowingSymlinks(
 			}
 			const nextSeen = new Set(seen);
 			nextSeen.add(child);
-			return resolveMockNodeFollowingSymlinks(
+			const resolved = resolveMockPathFollowingSymlinks(
 				root,
 				[...targetSegments, ...segments.slice(index + 1)],
 				nextSeen,
 				depth + 1,
 			);
+			if (resolved === undefined) {
+				return undefined;
+			}
+			return Object.freeze({
+				node: resolved.node,
+				resolvedSegments: resolved.resolvedSegments,
+				...(index === segments.length - 1
+					? { finalSymlink: child }
+					: resolved.finalSymlink === undefined
+						? {}
+						: { finalSymlink: resolved.finalSymlink }),
+			});
 		}
 		node = child;
 		traversed.push(segment);
 	}
-	return node;
+	return Object.freeze({
+		node,
+		resolvedSegments: Object.freeze([...traversed]),
+	});
 }
 
 function classifyMockNode(
@@ -1678,6 +1708,71 @@ export function createBrowserMockBridge(
 			node = child;
 		}
 		return node;
+	};
+	const resolveEntryForRead = (
+		rootId: string,
+		relativePath: string,
+	): Readonly<{
+		node: MockNode;
+		kind: WorkspaceEntryKind;
+		size: number;
+		resolvedSegments: readonly string[];
+	}> => {
+		let directNode: MockNode | undefined;
+		let directError: unknown;
+		try {
+			directNode = resolveNode(rootId, relativePath);
+		} catch (error) {
+			if (
+				(error as { readonly code?: unknown })?.code !== "ENTRY_TYPE_MISMATCH"
+			) {
+				throw error;
+			}
+			directError = error;
+		}
+		const request = frozenWorkspaceEntryRequest(rootId, relativePath);
+		const root = trees.get(request.rootId);
+		const segments = workspaceRelativePathSegments(request.relativePath);
+		if (root === undefined || segments === undefined) {
+			throw rootNotAuthorized();
+		}
+		const resolved = resolveMockPathFollowingSymlinks(root, segments);
+		if (resolved === undefined) {
+			if (directNode !== undefined && isMockSymlinkNode(directNode)) {
+				return Object.freeze({
+					node: directNode,
+					kind: "symlink",
+					size: directNode.payload.byteLength,
+					resolvedSegments: segments,
+				});
+			}
+			throw directError ?? entryTypeMismatch();
+		}
+
+		let kind: WorkspaceEntryKind;
+		let size = 0;
+		if (resolved.finalSymlink !== undefined) {
+			if (resolved.node.kind === "file") {
+				kind = "symlinkFile";
+				size = resolved.node.size;
+			} else if (resolved.node.kind === "directory") {
+				kind = "symlinkDirectory";
+			} else {
+				kind = "symlink";
+				size = resolved.finalSymlink.payload.byteLength;
+			}
+		} else {
+			kind = resolved.node.kind;
+			if (resolved.node.kind === "file") {
+				size = resolved.node.size;
+			}
+		}
+		return Object.freeze({
+			node: resolved.node,
+			kind,
+			size,
+			resolvedSegments: resolved.resolvedSegments,
+		});
 	};
 	const resolveCreateTarget = (
 		rootId: string,
@@ -3505,32 +3600,27 @@ export function createBrowserMockBridge(
 			);
 		},
 		async workspaceStat(rootId, relativePath) {
-			const node = resolveNode(rootId, relativePath);
-			const root = trees.get(rootId);
-			if (root === undefined) {
-				throw rootNotAuthorized();
-			}
-			const classified = classifyMockNode(root, relativePath, node);
+			const entry = resolveEntryForRead(rootId, relativePath);
 			return frozenWorkspaceEntryStat(
-				classified.kind,
-				classified.size,
+				entry.kind,
+				entry.size,
 				MOCK_MTIME,
 				MOCK_CTIME,
+				null,
 			);
 		},
 		async workspaceReadDirectory(rootId, relativePath) {
-			const node = resolveNode(rootId, relativePath);
-			if (node.kind !== "directory") {
+			const entry = resolveEntryForRead(rootId, relativePath);
+			if (entry.node.kind !== "directory") {
 				throw entryTypeMismatch();
 			}
 			const root = trees.get(rootId);
 			if (root === undefined) {
 				throw rootNotAuthorized();
 			}
-			const entries = [...node.entries].map(
+			const entries = [...entry.node.entries].map(
 				([name, child]): WorkspaceDirectoryEntry => {
-					const childPath =
-						relativePath.length === 0 ? name : `${relativePath}/${name}`;
+					const childPath = [...entry.resolvedSegments, name].join("/");
 					return {
 						name,
 						kind: classifyMockNode(root, childPath, child).kind,
@@ -3543,14 +3633,21 @@ export function createBrowserMockBridge(
 			return frozenWorkspaceReadDirectory(entries, relativePath);
 		},
 		async workspaceReadFile(rootId, relativePath) {
-			const node = resolveNode(rootId, relativePath);
-			if (node.kind !== "file") {
+			const entry = resolveEntryForRead(rootId, relativePath);
+			if (entry.node.kind !== "file") {
 				throw entryTypeMismatch();
 			}
-			if (node.size > MAX_FILE_BYTES) {
+			if (entry.node.size > MAX_FILE_BYTES) {
 				throw fileTooLarge();
 			}
-			return frozenWorkspaceFileData(node.bytes);
+			const stat = frozenWorkspaceEntryStat(
+				entry.kind,
+				entry.node.size,
+				MOCK_MTIME,
+				MOCK_CTIME,
+				null,
+			);
+			return frozenWorkspaceReadFile(stat, entry.node.bytes);
 		},
 	};
 }

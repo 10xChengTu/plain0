@@ -19,6 +19,7 @@ import type {
 	WorkspacePrepareDeleteRequest,
 	WorkspacePickResult,
 	WorkspaceReadDirectoryResult,
+	WorkspaceReadFileResult,
 	WorkspaceRoot,
 	WorkspaceSnapshot,
 } from "./contracts";
@@ -36,6 +37,12 @@ const MAX_DELETE_BATCH_ENTRIES = 64;
 const MAX_DELETE_DESCENDANT_ENTRIES = 10_000;
 const MAX_RELATIVE_PATH_BYTES = 4_096;
 const MAX_RELATIVE_PATH_SEGMENTS = 256;
+const PLR1_HEADER_BYTES = 36;
+const WORKSPACE_VERSION_BYTES = 68;
+const MAX_PLR1_FRAME_BYTES =
+	PLR1_HEADER_BYTES + WORKSPACE_VERSION_BYTES + MAX_FILE_BYTES;
+const WORKSPACE_VERSION_PATTERN = /^wv1:[0-9a-f]{64}$/u;
+const MAX_JS_SAFE_INTEGER_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 const CONTRACT_ERROR_MESSAGE =
 	"Native IPC returned a payload that violates the Plain contract.";
 const WORKSPACE_ENTRY_KINDS = new Set<WorkspaceEntryKind>([
@@ -159,6 +166,20 @@ function ownArrayDataSnapshot(
 	if (Object.getPrototypeOf(value) !== Array.prototype) {
 		return violation();
 	}
+	const declaredLengthDescriptor = Object.getOwnPropertyDescriptor(
+		value,
+		"length",
+	);
+	if (
+		declaredLengthDescriptor === undefined ||
+		!("value" in declaredLengthDescriptor) ||
+		!Number.isSafeInteger(declaredLengthDescriptor.value) ||
+		declaredLengthDescriptor.value < minimumLength ||
+		declaredLengthDescriptor.value > maximumLength
+	) {
+		return violation();
+	}
+	const declaredLength = declaredLengthDescriptor.value as number;
 
 	const descriptors = Object.getOwnPropertyDescriptors(value);
 	const descriptorMap = descriptors as unknown as Record<
@@ -170,12 +191,11 @@ function ownArrayDataSnapshot(
 		lengthDescriptor === undefined ||
 		!("value" in lengthDescriptor) ||
 		!Number.isSafeInteger(lengthDescriptor.value) ||
-		lengthDescriptor.value < minimumLength ||
-		lengthDescriptor.value > maximumLength
+		lengthDescriptor.value !== declaredLength
 	) {
 		return violation();
 	}
-	const length = lengthDescriptor.value as number;
+	const length = declaredLength;
 	const keys = Reflect.ownKeys(descriptors);
 	if (keys.length !== length + 1) {
 		return violation();
@@ -651,22 +671,28 @@ function decodeWorkspaceSnapshotValue(value: unknown): WorkspaceSnapshot {
 }
 
 function decodeWorkspaceEntryStatValue(value: unknown): WorkspaceEntryStat {
+	const snapshot = ownPlainDataSnapshot(value);
 	if (
-		!isPlainObject(value) ||
-		!hasExactKeys(value, ["kind", "size", "mtime", "ctime"]) ||
-		!isWorkspaceEntryKind(value.kind) ||
-		!isSafeNonnegativeInteger(value.size) ||
-		!isSafeNonnegativeInteger(value.mtime) ||
-		!isSafeNonnegativeInteger(value.ctime)
+		!hasExactKeys(snapshot, ["kind", "size", "mtime", "ctime", "version"]) ||
+		!isWorkspaceEntryKind(snapshot.kind) ||
+		!isSafeNonnegativeInteger(snapshot.size) ||
+		!isSafeNonnegativeInteger(snapshot.mtime) ||
+		!isSafeNonnegativeInteger(snapshot.ctime) ||
+		(snapshot.version !== null &&
+			(typeof snapshot.version !== "string" ||
+				!WORKSPACE_VERSION_PATTERN.test(snapshot.version))) ||
+		(snapshot.kind !== "file" && snapshot.version !== null)
 	) {
 		return violation();
 	}
+	rejectProxyObject(value as object);
 
 	return Object.freeze({
-		kind: value.kind,
-		size: value.size,
-		mtime: value.mtime,
-		ctime: value.ctime,
+		kind: snapshot.kind,
+		size: snapshot.size,
+		mtime: snapshot.mtime,
+		ctime: snapshot.ctime,
+		version: snapshot.version,
 	});
 }
 
@@ -726,16 +752,36 @@ function decodeWorkspaceReadDirectoryValue(
 	return Object.freeze({ entries: Object.freeze(entries) });
 }
 
-function decodeStrictByteArray(value: unknown[]): Uint8Array {
+function decodeStrictByteArray(
+	value: unknown,
+	minimumLength = 0,
+	maximumLength = MAX_FILE_BYTES,
+	consume = false,
+): Uint8Array {
 	if (
-		Object.getPrototypeOf(value) !== Array.prototype ||
-		value.length > MAX_FILE_BYTES
+		typeof value !== "object" ||
+		value === null ||
+		!Array.isArray(value) ||
+		Object.getPrototypeOf(value) !== Array.prototype
 	) {
 		return violation();
 	}
-
-	const bytes = new Uint8Array(value.length);
-	for (let index = 0; index < value.length; index += 1) {
+	const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+	if (
+		lengthDescriptor === undefined ||
+		!("value" in lengthDescriptor) ||
+		!Number.isSafeInteger(lengthDescriptor.value) ||
+		lengthDescriptor.value < minimumLength ||
+		lengthDescriptor.value > maximumLength ||
+		lengthDescriptor.writable !== true ||
+		lengthDescriptor.enumerable !== false ||
+		lengthDescriptor.configurable !== false
+	) {
+		return violation();
+	}
+	const length = lengthDescriptor.value as number;
+	const bytes = new Uint8Array(length);
+	for (let index = 0; index < length; index += 1) {
 		const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
 		if (
 			descriptor === undefined ||
@@ -743,11 +789,64 @@ function decodeStrictByteArray(value: unknown[]): Uint8Array {
 			typeof descriptor.value !== "number" ||
 			!Number.isInteger(descriptor.value) ||
 			descriptor.value < 0 ||
-			descriptor.value > 255
+			descriptor.value > 255 ||
+			descriptor.writable !== true ||
+			descriptor.enumerable !== true ||
+			descriptor.configurable !== true
 		) {
 			return violation();
 		}
 		bytes[index] = descriptor.value;
+	}
+
+	// Remove the verified JSON-style indices before exact-key and Proxy checks:
+	// a valid 8 MiB array then has only `length`, so reflection and structured
+	// clone cannot amplify millions of descriptors, strings, or boxed numbers.
+	// Only the private Tauri raw-response route requests permanent consumption;
+	// other valid callers are restored synchronously after the brand check.
+	if (!Reflect.defineProperty(value, "length", { value: 0 })) {
+		return violation();
+	}
+	const consumedLength = Object.getOwnPropertyDescriptor(value, "length");
+	if (
+		consumedLength === undefined ||
+		!("value" in consumedLength) ||
+		consumedLength.value !== 0 ||
+		consumedLength.writable !== true ||
+		consumedLength.enumerable !== false ||
+		consumedLength.configurable !== false
+	) {
+		return violation();
+	}
+	const remainingKeys = Reflect.ownKeys(value);
+	if (remainingKeys.length !== 1 || remainingKeys[0] !== "length") {
+		return violation();
+	}
+	rejectProxyObject(value);
+	if (!consume) {
+		for (let index = 0; index < length; index += 1) {
+			if (
+				!Reflect.defineProperty(value, String(index), {
+					value: bytes[index]!,
+					writable: true,
+					enumerable: true,
+					configurable: true,
+				})
+			) {
+				return violation();
+			}
+		}
+		const restoredLength = Object.getOwnPropertyDescriptor(value, "length");
+		if (
+			restoredLength === undefined ||
+			!("value" in restoredLength) ||
+			restoredLength.value !== length ||
+			restoredLength.writable !== true ||
+			restoredLength.enumerable !== false ||
+			restoredLength.configurable !== false
+		) {
+			return violation();
+		}
 	}
 	return bytes;
 }
@@ -762,6 +861,94 @@ function frozenWorkspaceFileDataFromBytes(
 	return Object.freeze({
 		byteLength: bytes.byteLength,
 		copy: () => bytes.slice(),
+	});
+}
+
+function exactRawFrameSnapshot(value: unknown): Uint8Array {
+	if (Array.isArray(value)) {
+		return decodeStrictByteArray(
+			value,
+			PLR1_HEADER_BYTES,
+			MAX_PLR1_FRAME_BYTES,
+			true,
+		);
+	}
+	if (
+		typeof value !== "object" ||
+		value === null ||
+		Object.getPrototypeOf(value) !== ArrayBuffer.prototype ||
+		Reflect.ownKeys(value).length !== 0
+	) {
+		return violation();
+	}
+
+	const byteLengthGetter = Object.getOwnPropertyDescriptor(
+		ArrayBuffer.prototype,
+		"byteLength",
+	)?.get;
+	if (byteLengthGetter === undefined) {
+		return violation();
+	}
+	const byteLength = Reflect.apply(byteLengthGetter, value, []);
+	if (
+		typeof byteLength !== "number" ||
+		!Number.isSafeInteger(byteLength) ||
+		byteLength < PLR1_HEADER_BYTES ||
+		byteLength > MAX_PLR1_FRAME_BYTES
+	) {
+		return violation();
+	}
+
+	const snapshot = new Uint8Array(byteLength);
+	snapshot.set(new Uint8Array(value as ArrayBuffer));
+	return snapshot;
+}
+
+function safeUint64(view: DataView, offset: number): number {
+	const value = view.getBigUint64(offset, false);
+	if (value > MAX_JS_SAFE_INTEGER_BIGINT) {
+		return violation();
+	}
+	return Number(value);
+}
+
+function decodeWorkspaceVersion(
+	bytes: Uint8Array,
+	offset: number,
+	length: number,
+): string | null {
+	if (length === 0) {
+		return null;
+	}
+	if (length !== WORKSPACE_VERSION_BYTES) {
+		return violation();
+	}
+
+	let version = "";
+	for (let index = 0; index < length; index += 1) {
+		const byte = bytes[offset + index];
+		if (byte === undefined || byte > 0x7f) {
+			return violation();
+		}
+		version += String.fromCharCode(byte);
+	}
+	return WORKSPACE_VERSION_PATTERN.test(version) ? version : violation();
+}
+
+function frozenWorkspaceReadFileResult(
+	stat: WorkspaceEntryStat,
+	bytes: Uint8Array,
+): WorkspaceReadFileResult {
+	if (
+		(stat.kind !== "file" && stat.kind !== "symlinkFile") ||
+		stat.size !== bytes.byteLength ||
+		(stat.kind === "symlinkFile" && stat.version !== null)
+	) {
+		return violation();
+	}
+	return Object.freeze({
+		stat,
+		value: frozenWorkspaceFileDataFromBytes(bytes),
 	});
 }
 
@@ -841,6 +1028,60 @@ export function decodeWorkspaceFileData(value: unknown): WorkspaceFileData {
 			return violation();
 		}
 		return frozenWorkspaceFileDataFromBytes(bytes);
+	});
+}
+
+export function decodeWorkspaceReadFile(
+	value: unknown,
+): WorkspaceReadFileResult {
+	return sanitizedDecode(() => {
+		const bytes = exactRawFrameSnapshot(value);
+		const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+		if (
+			bytes[0] !== 0x50 ||
+			bytes[1] !== 0x4c ||
+			bytes[2] !== 0x52 ||
+			bytes[3] !== 0x31 ||
+			view.getUint16(6, false) !== 0
+		) {
+			return violation();
+		}
+
+		const kindByte = bytes[4];
+		const versionLength = bytes[5];
+		if (
+			(kindByte !== 1 && kindByte !== 2) ||
+			versionLength === undefined ||
+			(versionLength !== 0 && versionLength !== WORKSPACE_VERSION_BYTES) ||
+			(kindByte === 2 && versionLength !== 0)
+		) {
+			return violation();
+		}
+
+		const contentLength = view.getUint32(8, false);
+		const expectedLength = PLR1_HEADER_BYTES + versionLength + contentLength;
+		if (contentLength > MAX_FILE_BYTES || expectedLength !== bytes.byteLength) {
+			return violation();
+		}
+
+		const size = safeUint64(view, 12);
+		const mtime = safeUint64(view, 20);
+		const ctime = safeUint64(view, 28);
+		if (size !== contentLength) {
+			return violation();
+		}
+		const version = decodeWorkspaceVersion(
+			bytes,
+			PLR1_HEADER_BYTES,
+			versionLength,
+		);
+		const kind = kindByte === 1 ? "file" : "symlinkFile";
+		const stat = Object.freeze({ kind, size, mtime, ctime, version });
+		const contentOffset = PLR1_HEADER_BYTES + versionLength;
+		return frozenWorkspaceReadFileResult(
+			stat,
+			bytes.subarray(contentOffset, contentOffset + contentLength),
+		);
 	});
 }
 
@@ -1061,8 +1302,9 @@ export function frozenWorkspaceEntryStat(
 	size: number,
 	mtime: number,
 	ctime: number,
+	version: string | null,
 ): WorkspaceEntryStat {
-	return decodeWorkspaceEntryStat({ kind, size, mtime, ctime });
+	return decodeWorkspaceEntryStat({ kind, size, mtime, ctime, version });
 }
 
 export function frozenWorkspaceReadDirectory(
@@ -1079,6 +1321,14 @@ export function frozenWorkspaceFileData(
 		return frozenWorkspaceFileDataFromBytes(bytes);
 	}
 	return decodeWorkspaceFileData(bytes);
+}
+
+export function frozenWorkspaceReadFile(
+	stat: WorkspaceEntryStat,
+	bytes: Uint8Array,
+): WorkspaceReadFileResult {
+	const frozenStat = decodeWorkspaceEntryStat(stat);
+	return frozenWorkspaceReadFileResult(frozenStat, bytes.slice());
 }
 
 export function frozenWorkspaceMoveResult(

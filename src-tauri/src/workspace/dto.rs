@@ -551,15 +551,23 @@ pub struct WorkspaceEntryStat {
     size: u64,
     mtime: u64,
     ctime: u64,
+    version: Option<String>,
 }
 
 impl WorkspaceEntryStat {
-    pub(crate) const fn new(kind: WorkspaceEntryKind, size: u64, mtime: u64, ctime: u64) -> Self {
+    pub(crate) const fn new(
+        kind: WorkspaceEntryKind,
+        size: u64,
+        mtime: u64,
+        ctime: u64,
+        version: Option<String>,
+    ) -> Self {
         Self {
             kind,
             size,
             mtime,
             ctime,
+            version,
         }
     }
 
@@ -577,6 +585,10 @@ impl WorkspaceEntryStat {
 
     pub const fn ctime(&self) -> u64 {
         self.ctime
+    }
+
+    pub fn version(&self) -> Option<&str> {
+        self.version.as_deref()
     }
 }
 

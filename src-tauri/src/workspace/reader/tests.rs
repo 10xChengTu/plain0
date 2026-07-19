@@ -2,7 +2,10 @@ use std::fs;
 
 use tempfile::TempDir;
 
-use super::{read_directory_with_limits, read_file_with_limit, stat, ReaderLimits};
+use super::{
+    read_directory_with_limits, read_file_with_limit, read_file_with_limit_and_hooks, stat,
+    ReaderLimits, WorkspaceReadFileReceipt,
+};
 use crate::path_policy::RelativePath;
 use crate::workspace::dto::WorkspaceEntryKind;
 use crate::workspace::{WorkspaceRootLease, WorkspaceScope};
@@ -28,7 +31,7 @@ fn stat_and_read_directory_return_owned_exact_sorted_contracts() {
     assert_eq!(file_stat.kind(), WorkspaceEntryKind::File);
     assert_eq!(file_stat.size(), 5);
     let stat_value = serde_json::to_value(&file_stat).unwrap();
-    assert_exact_keys(&stat_value, &["ctime", "kind", "mtime", "size"]);
+    assert_exact_keys(&stat_value, &["ctime", "kind", "mtime", "size", "version"]);
     assert_eq!(stat_value["kind"], "file");
 
     let listing = super::read_directory(&lease, &path("")).unwrap();
@@ -79,11 +82,14 @@ fn read_file_preserves_binary_bytes_and_rejects_non_files() {
     let lease = authorize(&root);
 
     assert_eq!(
-        super::read_file(&lease, &path("binary.bin")).unwrap(),
+        super::read_file(&lease, &path("binary.bin"))
+            .unwrap()
+            .content(),
         binary
     );
     assert!(super::read_file(&lease, &path("empty.bin"))
         .unwrap()
+        .content()
         .is_empty());
     for relative_path in ["", "directory"] {
         assert_eq!(
@@ -98,6 +104,269 @@ fn read_file_preserves_binary_bytes_and_rejects_non_files() {
             .unwrap_err()
             .code(),
         "ENTRY_NOT_FOUND"
+    );
+}
+
+#[test]
+fn plr1_encoder_matches_the_shared_golden_fixture() {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Fixture {
+        read: ReadFixture,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReadFixture {
+        content_hex: String,
+        size: u64,
+        mtime_ms: u64,
+        ctime_ms: u64,
+        version: String,
+        frame_hex: String,
+    }
+
+    let fixture: Fixture = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/workspace-version-v1.json"
+    ))
+    .unwrap();
+    let content = decode_hex(&fixture.read.content_hex);
+    let receipt = WorkspaceReadFileReceipt::new(
+        crate::workspace::dto::WorkspaceEntryStat::new(
+            WorkspaceEntryKind::File,
+            fixture.read.size,
+            fixture.read.mtime_ms,
+            fixture.read.ctime_ms,
+            Some(fixture.read.version),
+        ),
+        content,
+    )
+    .unwrap();
+    assert_eq!(
+        receipt.into_plr1_frame().unwrap(),
+        decode_hex(&fixture.read.frame_hex)
+    );
+}
+
+#[test]
+fn plr1_receipts_reject_oversized_content_and_noncanonical_versions() {
+    let stat = |kind, size, version: Option<String>| {
+        crate::workspace::dto::WorkspaceEntryStat::new(kind, size, 0, 0, version)
+    };
+    let oversized = vec![0; super::MAX_FILE_BYTES + 1];
+    assert_eq!(
+        WorkspaceReadFileReceipt::new(
+            stat(WorkspaceEntryKind::File, oversized.len() as u64, None,),
+            oversized,
+        )
+        .unwrap_err()
+        .code(),
+        "FILE_TOO_LARGE"
+    );
+
+    for malformed in [
+        "wv1:short".to_owned(),
+        format!("wv1:{}", "A".repeat(64)),
+        format!("wv2:{}", "a".repeat(64)),
+        format!("wv1:{}g", "a".repeat(63)),
+    ] {
+        assert_eq!(
+            WorkspaceReadFileReceipt::new(
+                stat(WorkspaceEntryKind::File, 1, Some(malformed)),
+                vec![0],
+            )
+            .unwrap_err()
+            .code(),
+            "IO_FAILED"
+        );
+    }
+
+    let forged = WorkspaceReadFileReceipt {
+        stat: stat(
+            WorkspaceEntryKind::File,
+            1,
+            Some(format!("wv1:{}", "A".repeat(64))),
+        ),
+        content: vec![0],
+    };
+    assert_eq!(forged.into_plr1_frame().unwrap_err().code(), "IO_FAILED");
+    let forged_oversized = WorkspaceReadFileReceipt {
+        stat: stat(
+            WorkspaceEntryKind::File,
+            (super::MAX_FILE_BYTES + 1) as u64,
+            None,
+        ),
+        content: vec![0; super::MAX_FILE_BYTES + 1],
+    };
+    assert_eq!(
+        forged_oversized.into_plr1_frame().unwrap_err().code(),
+        "FILE_TOO_LARGE"
+    );
+
+    assert_eq!(
+        WorkspaceReadFileReceipt::new(
+            stat(
+                WorkspaceEntryKind::SymlinkFile,
+                1,
+                Some(format!("wv1:{}", "a".repeat(64))),
+            ),
+            vec![0],
+        )
+        .unwrap_err()
+        .code(),
+        "IO_FAILED"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn direct_files_get_versions_but_symlinks_hardlinks_and_readonly_files_do_not() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("root");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(root.join("direct-parent")).unwrap();
+    fs::write(root.join("direct-parent/direct.txt"), b"direct").unwrap();
+    fs::create_dir(root.join("linked-parent")).unwrap();
+    fs::write(root.join("linked-parent/linked.txt"), b"linked").unwrap();
+    symlink("linked-parent", root.join("parent-link")).unwrap();
+    symlink("direct-parent/direct.txt", root.join("final-file-link")).unwrap();
+    fs::hard_link(
+        root.join("direct-parent/direct.txt"),
+        root.join("hardlink.txt"),
+    )
+    .unwrap();
+    fs::write(root.join("readonly.txt"), b"readonly").unwrap();
+    fs::set_permissions(root.join("readonly.txt"), fs::Permissions::from_mode(0o444)).unwrap();
+    for (directory, mode) in [("group-writable", 0o770), ("world-writable", 0o777)] {
+        fs::create_dir(root.join(directory)).unwrap();
+        fs::set_permissions(root.join(directory), fs::Permissions::from_mode(mode)).unwrap();
+        fs::write(root.join(directory).join("shared.txt"), b"shared").unwrap();
+    }
+    let lease = authorize(&root);
+
+    // The hard link makes direct.txt ineligible too. A separate ordinary file
+    // demonstrates the positive path on the allowlisted local test volume.
+    fs::write(root.join("eligible.txt"), b"eligible").unwrap();
+    let eligible = stat(&lease, &path("eligible.txt")).unwrap();
+    assert!(eligible
+        .version()
+        .is_some_and(|version| version.starts_with("wv1:") && version.len() == 68));
+    let eligible_read = super::read_file(&lease, &path("eligible.txt")).unwrap();
+    assert_eq!(eligible_read.stat().version(), eligible.version());
+
+    for candidate in [
+        "direct-parent/direct.txt",
+        "hardlink.txt",
+        "parent-link/linked.txt",
+        "final-file-link",
+        "readonly.txt",
+        "group-writable/shared.txt",
+        "world-writable/shared.txt",
+    ] {
+        assert_eq!(
+            stat(&lease, &path(candidate)).unwrap().version(),
+            None,
+            "{candidate} must remain tokenless"
+        );
+    }
+    assert_eq!(stat(&lease, &path("")).unwrap().version(), None);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn canonical_spelling_aliases_use_the_same_requested_path_for_stat_and_read_tokens() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("root");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("MixedCase.txt"), b"plain").unwrap();
+    let lease = authorize(&root);
+    let alias = path("mixedcase.txt");
+
+    // APFS volumes can be configured case-sensitive. In that configuration
+    // there is no spelling alias to exercise and the contract is inapplicable.
+    if lease.directory().metadata(alias.as_path()).is_err() {
+        return;
+    }
+    let stat = stat(&lease, &alias).unwrap();
+    let read = super::read_file(&lease, &alias).unwrap();
+    assert_eq!(read.stat().version(), stat.version());
+    assert!(stat.version().is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn pathname_replacement_after_read_cannot_pair_old_content_with_a_new_version() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("root");
+    fs::create_dir(&root).unwrap();
+    let target = root.join("target.txt");
+    let replacement = root.join("replacement.txt");
+    fs::write(&target, b"old!").unwrap();
+    fs::write(&replacement, b"new!").unwrap();
+    let lease = authorize(&root);
+
+    let error = read_file_with_limit_and_hooks(
+        &lease,
+        &path("target.txt"),
+        64,
+        || {},
+        || {
+            fs::rename(&replacement, &target).unwrap();
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "WORKSPACE_CONFLICT");
+}
+
+#[cfg(unix)]
+#[test]
+fn unrelated_parent_timestamp_changes_do_not_invalidate_a_stable_target_receipt() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("root");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("target.txt"), b"stable").unwrap();
+    let lease = authorize(&root);
+
+    let receipt = read_file_with_limit_and_hooks(
+        &lease,
+        &path("target.txt"),
+        64,
+        || {},
+        || {
+            fs::write(root.join("unrelated.txt"), b"other").unwrap();
+        },
+    )
+    .unwrap();
+    assert_eq!(receipt.content(), b"stable");
+    assert!(receipt.stat().version().is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn resolved_target_revalidation_rejects_a_filesystem_gate_change() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("root");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("target.txt"), b"stable").unwrap();
+    let lease = authorize(&root);
+    let mut opened =
+        super::open_resolved_target(lease.directory(), path("target.txt").as_path(), 64).unwrap();
+    opened.filesystem = match opened.filesystem {
+        Some(_) => None,
+        None => Some(crate::workspace::version::FileSystemKind::Apfs),
+    };
+    assert_eq!(
+        super::verify_resolved_target(
+            lease.directory(),
+            path("target.txt").as_path(),
+            &opened,
+            64,
+        )
+        .unwrap_err()
+        .code(),
+        "WORKSPACE_CONFLICT"
     );
 }
 
@@ -119,8 +388,8 @@ fn read_file_accepts_the_exact_limit_and_rejects_one_byte_more() {
     let lease = authorize(&root);
 
     let exact = super::read_file(&lease, &path("exact.bin")).unwrap();
-    assert_eq!(exact.len(), super::MAX_FILE_BYTES);
-    assert!(exact.iter().all(|byte| *byte == 0));
+    assert_eq!(exact.content().len(), super::MAX_FILE_BYTES);
+    assert!(exact.content().iter().all(|byte| *byte == 0));
     assert_eq!(
         super::read_file(&lease, &path("oversized.bin"))
             .unwrap_err()
@@ -130,7 +399,9 @@ fn read_file_accepts_the_exact_limit_and_rejects_one_byte_more() {
 
     fs::write(root.join("small-boundary.bin"), b"12345").unwrap();
     assert_eq!(
-        read_file_with_limit(&lease, &path("small-boundary.bin"), 5).unwrap(),
+        read_file_with_limit(&lease, &path("small-boundary.bin"), 5)
+            .unwrap()
+            .content(),
         b"12345"
     );
     assert_eq!(
@@ -457,7 +728,9 @@ fn symlinks_are_classified_without_following_targets_outside_the_root() {
     assert_eq!(kind("loop-link"), WorkspaceEntryKind::Symlink);
 
     assert_eq!(
-        super::read_file(&lease, &path("inside-file-link")).unwrap(),
+        super::read_file(&lease, &path("inside-file-link"))
+            .unwrap()
+            .content(),
         b"inside"
     );
     assert_eq!(
@@ -547,11 +820,13 @@ fn symlink_swap_never_projects_metadata_from_outside_the_root() {
     let swapper = std::thread::spawn(move || {
         swapper_start.wait();
         for _ in 0..2_000 {
-            fs::remove_file(&swapper_link).unwrap();
-            symlink(&outside_file, &swapper_link).unwrap();
-            fs::remove_file(&swapper_link).unwrap();
-            symlink("inside.txt", &swapper_link).unwrap();
+            let _ = fs::remove_file(&swapper_link);
+            let _ = symlink(&outside_file, &swapper_link);
+            let _ = fs::remove_file(&swapper_link);
+            let _ = symlink("inside.txt", &swapper_link);
         }
+        let _ = fs::remove_file(&swapper_link);
+        symlink("inside.txt", &swapper_link).unwrap();
     });
 
     start.wait();
@@ -570,7 +845,7 @@ fn symlink_swap_never_projects_metadata_from_outside_the_root() {
             Err(error) => assert!(
                 matches!(
                     error.code(),
-                    "ENTRY_NOT_FOUND" | "PATH_OUTSIDE_ROOT" | "IO_FAILED"
+                    "ENTRY_NOT_FOUND" | "PATH_OUTSIDE_ROOT" | "WORKSPACE_CONFLICT" | "IO_FAILED"
                 ),
                 "unexpected sanitized race error: {}",
                 error.code()
@@ -680,4 +955,16 @@ fn assert_exact_keys(value: &serde_json::Value, expected: &[&str]) {
         .collect::<Vec<_>>();
     actual.sort_unstable();
     assert_eq!(actual, expected);
+}
+
+fn decode_hex(value: &str) -> Vec<u8> {
+    assert_eq!(value.len() % 2, 0);
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).unwrap();
+            u8::from_str_radix(text, 16).unwrap()
+        })
+        .collect()
 }

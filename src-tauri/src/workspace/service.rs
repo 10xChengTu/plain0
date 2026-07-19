@@ -119,7 +119,7 @@ impl WorkspaceService {
         relative_path: RelativePath,
     ) -> Result<Vec<u8>, CommandError> {
         self.run_reader(window_label, root_id, move |lease| {
-            reader::read_file(&lease, &relative_path)
+            reader::read_file(&lease, &relative_path)?.into_plr1_frame()
         })
         .await
     }

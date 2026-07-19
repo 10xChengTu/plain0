@@ -1087,7 +1087,7 @@ fn symlink_snapshot_at(parent: &Dir, name: &Path) -> Result<SymlinkSnapshot, Com
     SymlinkSnapshot::from_metadata(&metadata)
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 pub(super) fn read_symlink_payload<F>(
     parent: &Dir,
     name: &Path,
@@ -1119,7 +1119,7 @@ fn stage_name_already_exists(error: &CommandError) -> bool {
     error.code() == "ENTRY_ALREADY_EXISTS"
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 fn bounded_symlink_payload(buffer: &[u8], length: usize) -> Result<Vec<u8>, CommandError> {
     if length > MAX_COPY_SYMLINK_BYTES || length > buffer.len() {
         return Err(symlink_too_large());
@@ -1495,7 +1495,7 @@ pub(super) fn file_too_large() -> CommandError {
     )
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 pub(super) fn symlink_too_large() -> CommandError {
     CommandError::new(
         "FILE_TOO_LARGE",

@@ -1642,7 +1642,7 @@ fn a_window_close_that_wins_the_mutation_gate_prevents_the_write() {
 }
 
 #[test]
-fn read_file_returns_binary_bytes_and_rejects_wrong_or_revoked_roots() {
+fn read_file_returns_a_binary_plr1_receipt_and_rejects_wrong_or_revoked_roots() {
     let temp = TempDir::new().unwrap();
     let root = create_directory(&temp, "root");
     let binary = [0, 255, 128, 1, 0, 42];
@@ -1656,13 +1656,13 @@ fn read_file_returns_binary_bytes_and_rejects_wrong_or_revoked_roots() {
     .unwrap();
     let root_id = selected.snapshot().roots()[0].root_id();
 
-    let bytes = block_on(service.read_file(
+    let frame = block_on(service.read_file(
         "main",
         root_id,
         RelativePath::parse_wire("binary.bin").unwrap(),
     ))
     .unwrap();
-    assert_eq!(bytes, binary);
+    assert_eq!(plr1_content(&frame), binary);
 
     let wrong_window = block_on(service.read_file(
         "other-window",
@@ -2670,4 +2670,14 @@ fn relative(wire: &str) -> RelativePath {
 
 fn block_on<F: Future>(future: F) -> F::Output {
     tauri::async_runtime::block_on(future)
+}
+
+fn plr1_content(frame: &[u8]) -> &[u8] {
+    assert!(frame.len() >= 36);
+    assert_eq!(&frame[..4], b"PLR1");
+    let version_length = usize::from(frame[5]);
+    let content_length = u32::from_be_bytes(frame[8..12].try_into().unwrap()) as usize;
+    let content_offset = 36 + version_length;
+    assert_eq!(frame.len(), content_offset + content_length);
+    &frame[content_offset..]
 }

@@ -1,0 +1,221 @@
+diff --git a/vscode/src/vs/platform/files/common/fileService.js b/vscode/src/vs/platform/files/common/fileService.js
+index 107a37ee3b1999392b35fa5545382acc7238a3c1..07387a8139e3d4468501e666e449519bedd72a7c 100644
+--- a/vscode/src/vs/platform/files/common/fileService.js
++++ b/vscode/src/vs/platform/files/common/fileService.js
+@@ -26,6 +26,133 @@ function resourceForError(resource) {
+     }
+     return ( resource.toString(true));
+ }
++const PLAIN_WORKSPACE_SCHEME = "plain-workspace";
++const PLAIN_WORKSPACE_VERSION_PATTERN = /^wv1:[0-9a-f]{64}$/;
++const PLAIN_WORKSPACE_MAX_READ_BYTES = 8 * 1024 * 1024;
++const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype);
++const TYPED_ARRAY_SET = Uint8Array.prototype.set;
++const TYPED_ARRAY_BUFFER_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, "buffer").get;
++const TYPED_ARRAY_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, "byteLength").get;
++const TYPED_ARRAY_BYTE_OFFSET_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, "byteOffset").get;
++const ARRAY_BUFFER_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength").get;
++function plainWorkspaceVersion(stat) {
++    const descriptor = Object.getOwnPropertyDescriptor(stat, "plainVersion");
++    if (!descriptor) {
++        return undefined;
++    }
++    if (!("value" in descriptor)) {
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_VERSION: plainVersion must be an own data property"));
++    }
++    const version = descriptor.value;
++    if (version === null || typeof version === "string" && PLAIN_WORKSPACE_VERSION_PATTERN.test(version)) {
++        return version;
++    }
++    throw ( new Error("PLAIN_WORKSPACE_INVALID_VERSION: plainVersion must be null or a wv1 token"));
++}
++function validatePlainReadReceipt(receipt, resource, options) {
++    if (!receipt || typeof receipt !== "object" || !Object.isFrozen(receipt)) {
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_READ_RECEIPT: receipt must be a frozen object"));
++    }
++    const receiptKeys = Reflect.ownKeys(receipt);
++    if (receiptKeys.length !== 2 || !receiptKeys.includes("stat") || !receiptKeys.includes("value")) {
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_READ_RECEIPT: receipt must contain only stat and value"));
++    }
++    const statDescriptor = Object.getOwnPropertyDescriptor(receipt, "stat");
++    const valueDescriptor = Object.getOwnPropertyDescriptor(receipt, "value");
++    if (!statDescriptor || !("value" in statDescriptor) || !valueDescriptor || !("value" in valueDescriptor)) {
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_READ_RECEIPT: stat and value must be own data properties"));
++    }
++    const stat = statDescriptor.value;
++    const value = valueDescriptor.value;
++    if (!stat || typeof stat !== "object" || Object.getPrototypeOf(stat) !== Object.prototype || !Object.isFrozen(stat)) {
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_READ_RECEIPT: stat must be a frozen object"));
++    }
++    const statDescriptors = Object.getOwnPropertyDescriptors(stat);
++    const statKeys = Reflect.ownKeys(statDescriptors);
++    const hasPermissions = statKeys.includes("permissions");
++    const expectedStatKeys = hasPermissions ? ["type", "size", "mtime", "ctime", "permissions", "plainVersion"] : ["type", "size", "mtime", "ctime", "plainVersion"];
++    if (statKeys.length !== expectedStatKeys.length || !expectedStatKeys.every(key => statKeys.includes(key))) {
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_READ_RECEIPT: stat fields differ from the Plain provider contract"));
++    }
++    for (const key of expectedStatKeys) {
++        const descriptor = statDescriptors[key];
++        if (!descriptor || !("value" in descriptor)) {
++            throw ( new Error("PLAIN_WORKSPACE_INVALID_READ_RECEIPT: stat fields must be own data properties"));
++        }
++    }
++    let buffer;
++    let byteLength;
++    let byteOffset;
++    try {
++        if (Object.getPrototypeOf(value) !== Uint8Array.prototype) {
++            throw ( new Error("value must be an exact Uint8Array"));
++        }
++        buffer = Reflect.apply(TYPED_ARRAY_BUFFER_GETTER, value, []);
++        byteLength = Reflect.apply(TYPED_ARRAY_BYTE_LENGTH_GETTER, value, []);
++        byteOffset = Reflect.apply(TYPED_ARRAY_BYTE_OFFSET_GETTER, value, []);
++        if (Object.getPrototypeOf(buffer) !== ArrayBuffer.prototype || byteOffset !== 0 || Reflect.apply(ARRAY_BUFFER_BYTE_LENGTH_GETTER, buffer, []) !== byteLength) {
++            throw ( new Error("value must own one exact ArrayBuffer"));
++        }
++        Reflect.apply(ArrayBuffer.prototype.slice, buffer, [0, 0]);
++    }
++    catch {
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_READ_RECEIPT: value must be an exact Uint8Array backed by one exact ArrayBuffer"));
++    }
++    const fileType = FileType.File;
++    const symlinkFileType = FileType.File | FileType.SymbolicLink;
++    const type = statDescriptors.type.value;
++    const size = statDescriptors.size.value;
++    const mtime = statDescriptors.mtime.value;
++    const ctime = statDescriptors.ctime.value;
++    const permissions = hasPermissions ? statDescriptors.permissions.value : undefined;
++    const version = statDescriptors.plainVersion.value;
++    if (type !== fileType && type !== symlinkFileType) {
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_READ_RECEIPT: stat type must be file or symlinkFile"));
++    }
++    if (![size, mtime, ctime].every(value => Number.isSafeInteger(value) && value >= 0)) {
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_READ_RECEIPT: stat size and times must be nonnegative safe integers"));
++    }
++    if (size !== byteLength) {
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_READ_RECEIPT: stat size must match value"));
++    }
++    if (byteLength > PLAIN_WORKSPACE_MAX_READ_BYTES) {
++        throw ( new TooLargeFileOperationError(
++            `Unable to read '${resource.toString()}' because it exceeds Plain's 8 MiB receipt limit`,
++            FileOperationResult.FILE_TOO_LARGE,
++            byteLength,
++            options
++        ));
++    }
++    if (!(version === null || typeof version === "string" && PLAIN_WORKSPACE_VERSION_PATTERN.test(version))) {
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_READ_RECEIPT: stat version must be null or a canonical wv1 token"));
++    }
++    if (type === symlinkFileType && version !== null) {
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_READ_RECEIPT: symlinkFile cannot carry a wv1 token"));
++    }
++    if (version === null) {
++        if (!hasPermissions || permissions !== FilePermission.Readonly) {
++            throw ( new Error("PLAIN_WORKSPACE_INVALID_READ_RECEIPT: tokenless files must be readonly"));
++        }
++    }
++    else if (hasPermissions) {
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_READ_RECEIPT: versioned files cannot carry permissions"));
++    }
++    structuredClone(stat);
++    const safeStat = Object.freeze({
++        type,
++        size,
++        mtime,
++        ctime,
++        ...(hasPermissions ? { permissions } : {}),
++        plainVersion: version
++    });
++    const valueSnapshot = new Uint8Array(byteLength);
++    Reflect.apply(TYPED_ARRAY_SET, valueSnapshot, [value, 0]);
++    return {
++        stat: safeStat,
++        value: valueSnapshot
++    };
++}
+ async function mkdirp(providerExtUri, provider, directory) {
+     const directoriesToCreate = [];
+     while (!providerExtUri.isEqual(directory, providerExtUri.dirname(directory))) {
+@@ -266,6 +393,21 @@ let FileService = class FileService extends Disposable {
+             }),
+             children: undefined
+         };
++        if (resource.scheme === PLAIN_WORKSPACE_SCHEME) {
++            const version = plainWorkspaceVersion(stat);
++            if (fileStat.isDirectory) {
++                if (version !== undefined && version !== null) {
++                    throw ( new Error("PLAIN_WORKSPACE_INVALID_VERSION: directories cannot carry a wv1 token"));
++                }
++            }
++            else if (typeof version === "string") {
++                fileStat.etag = version;
++            }
++            else {
++                fileStat.etag = ETAG_DISABLED;
++                fileStat.readonly = true;
++            }
++        }
+         if (fileStat.isDirectory && recurse(fileStat, siblings)) {
+             try {
+                 const entries = await provider.readdir(resource);
+@@ -559,6 +701,9 @@ let FileService = class FileService extends Disposable {
+         return this.doReadFileStream(provider, resource, options, token);
+     }
+     async doReadFileStream(provider, resource, options, token) {
++        if (resource.scheme === PLAIN_WORKSPACE_SCHEME) {
++            return this.doReadPlainFileStream(provider, resource, options);
++        }
+         const cancellableSource = ( new CancellationTokenSource(token));
+         let readFileOptions = options;
+         if (hasFileAtomicReadCapability(provider) && provider.enforceAtomicReadFile?.(resource)) {
+@@ -600,6 +745,50 @@ let FileService = class FileService extends Disposable {
+             throw this.restoreReadError(error, resource, readFileOptions);
+         }
+     }
++    async doReadPlainFileStream(provider, resource, options) {
++        try {
++            if (typeof provider.plainReadFile !== "function") {
++                throw ( new Error("PLAIN_WORKSPACE_INVALID_READ_RECEIPT: provider does not implement plainReadFile"));
++            }
++            const receipt = validatePlainReadReceipt(await provider.plainReadFile(resource), resource, options);
++            const fileStat = await this.toFileStat(
++                provider,
++                resource,
++                receipt.stat,
++                undefined,
++                true,
++                () => false
++            );
++            if (fileStat.isDirectory) {
++                throw ( new FileOperationError(( localize(
++                    2105,
++                    "Unable to read file '{0}' that is actually a directory",
++                    this.resourceForError(resource)
++                )), FileOperationResult.FILE_IS_DIRECTORY, options));
++            }
++            if (typeof options?.etag === "string" && options.etag !== ETAG_DISABLED && options.etag === fileStat.etag) {
++                throw ( new NotModifiedSinceFileOperationError(( localize(2106, "File not modified since")), fileStat, options));
++            }
++            this.validateReadFileLimits(resource, fileStat.size, options);
++            let buffer = VSBuffer.wrap(receipt.value);
++            if (typeof options?.position === "number") {
++                buffer = buffer.slice(options.position);
++            }
++            if (typeof options?.length === "number") {
++                buffer = buffer.slice(0, options.length);
++            }
++            this.validateReadFileLimits(resource, buffer.byteLength, options);
++            const stream = newWriteableStream(data => VSBuffer.concat(data));
++            stream.end(buffer);
++            return {
++                ...fileStat,
++                plainReadReceipt: true,
++                value: stream
++            };
++        } catch (error) {
++            throw this.restoreReadError(error, resource, options);
++        }
++    }
+     restoreReadError(error, resource, options) {
+         const message = ( localize(
+             2104,

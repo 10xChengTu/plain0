@@ -112,13 +112,97 @@ describe("browser mock workspace bridge", () => {
 		expect(Object.isFrozen(root)).toBe(true);
 		expect(Object.isFrozen(root.entries)).toBe(true);
 		expect(Object.isFrozen(file)).toBe(true);
-		const first = file.copy();
-		const second = file.copy();
+		expect(Object.isFrozen(file.stat)).toBe(true);
+		expect(Object.isFrozen(file.value)).toBe(true);
+		expect(file.stat).toEqual({
+			kind: "file",
+			size: 6,
+			mtime: 1_700_000_000_000,
+			ctime: 1_699_999_000_000,
+			version: null,
+		});
+		const first = file.value.copy();
+		const second = file.value.copy();
 		expect([...first]).toEqual([0, 255, 128, 1, 0, 42]);
 		expect(first).not.toBe(second);
 		first[0] = 99;
 		expect([...second]).toEqual([0, 255, 128, 1, 0, 42]);
-		expect([...file.copy()]).toEqual([0, 255, 128, 1, 0, 42]);
+		expect([...file.value.copy()]).toEqual([0, 255, 128, 1, 0, 42]);
+
+		const symlinkFile = await bridge.workspaceReadFile(
+			rootId,
+			"fixtures/file-link",
+		);
+		expect(symlinkFile.stat).toMatchObject({
+			kind: "symlinkFile",
+			version: null,
+		});
+		expect(new TextDecoder().decode(symlinkFile.value.copy())).toBe(
+			"# Plain browser workspace\n",
+		);
+	});
+
+	it("reads tokenless files through only root-internal symlink directories", async () => {
+		const bridge = createBrowserMockBridge();
+		const selected = await bridge.workspacePickRoots("replace");
+		const rootId = selected.snapshot.roots[0]!.rootId;
+		const linkStat = await bridge.workspaceStat(
+			rootId,
+			"fixtures/directory-link",
+		);
+		const linkedDirectory = await bridge.workspaceReadDirectory(
+			rootId,
+			"fixtures/directory-link",
+		);
+		const direct = await bridge.workspaceReadFile(rootId, "src/main.ts");
+		const nestedStat = await bridge.workspaceStat(
+			rootId,
+			"fixtures/directory-link/main.ts",
+		);
+		const throughInternalLink = await bridge.workspaceReadFile(
+			rootId,
+			"fixtures/directory-link/main.ts",
+		);
+
+		expect(linkStat).toMatchObject({
+			kind: "symlinkDirectory",
+			version: null,
+		});
+		expect(linkedDirectory.entries).toEqual([
+			{ name: "main.ts", kind: "file" },
+		]);
+		expect(nestedStat).toMatchObject({ kind: "file", version: null });
+		expect(throughInternalLink.stat).toEqual({
+			kind: "file",
+			size: direct.stat.size,
+			mtime: direct.stat.mtime,
+			ctime: direct.stat.ctime,
+			version: null,
+		});
+		expect(throughInternalLink.value.copy()).toEqual(direct.value.copy());
+
+		for (const basePath of [
+			"fixtures/external-link",
+			"fixtures/dangling-link",
+			"fixtures/loop-link",
+		]) {
+			expect(await bridge.workspaceStat(rootId, basePath)).toMatchObject({
+				kind: "symlink",
+				version: null,
+			});
+			for (const operation of [
+				() => bridge.workspaceReadDirectory(rootId, basePath),
+				() => bridge.workspaceReadFile(rootId, basePath),
+				() => bridge.workspaceStat(rootId, `${basePath}/private.ts`),
+				() => bridge.workspaceReadDirectory(rootId, `${basePath}/private.ts`),
+				() => bridge.workspaceReadFile(rootId, `${basePath}/private.ts`),
+			]) {
+				await expect(operation()).rejects.toEqual({
+					code: "ENTRY_TYPE_MISMATCH",
+					message: "The workspace entry has an incompatible type.",
+				});
+			}
+		}
 	});
 
 	it("creates empty files and single directories without changing root revisions", async () => {
@@ -145,7 +229,7 @@ describe("browser mock workspace bridge", () => {
 		expect(
 			(
 				await bridge.workspaceReadFile(rootId, "created-directory/nested.txt")
-			).copy(),
+			).value.copy(),
 		).toEqual(new Uint8Array());
 	});
 
@@ -153,7 +237,9 @@ describe("browser mock workspace bridge", () => {
 		const bridge = createBrowserMockBridge();
 		const selected = await bridge.workspacePickRoots("replace");
 		const rootId = selected.snapshot.roots[0]!.rootId;
-		const before = (await bridge.workspaceReadFile(rootId, "README.md")).copy();
+		const before = (
+			await bridge.workspaceReadFile(rootId, "README.md")
+		).value.copy();
 
 		for (const operation of [
 			() => bridge.workspaceCreateFile(rootId, "README.md"),
@@ -167,7 +253,7 @@ describe("browser mock workspace bridge", () => {
 			});
 		}
 		expect(
-			(await bridge.workspaceReadFile(rootId, "README.md")).copy(),
+			(await bridge.workspaceReadFile(rootId, "README.md")).value.copy(),
 		).toEqual(before);
 		expect((await bridge.workspaceStat(rootId, "src")).kind).toBe("directory");
 
@@ -239,15 +325,17 @@ describe("browser mock workspace bridge", () => {
 		const bridge = createBrowserMockBridge();
 		const selected = await bridge.workspacePickRoots("replace");
 		const rootId = selected.snapshot.roots[0]!.rootId;
-		const readme = (await bridge.workspaceReadFile(rootId, "README.md")).copy();
+		const readme = (
+			await bridge.workspaceReadFile(rootId, "README.md")
+		).value.copy();
 
 		await bridge.workspaceRename(rootId, "README.md", "GUIDE.md");
 		await expect(
 			bridge.workspaceStat(rootId, "README.md"),
 		).rejects.toMatchObject({ code: "ENTRY_NOT_FOUND" });
-		expect((await bridge.workspaceReadFile(rootId, "GUIDE.md")).copy()).toEqual(
-			readme,
-		);
+		expect(
+			(await bridge.workspaceReadFile(rootId, "GUIDE.md")).value.copy(),
+		).toEqual(readme);
 
 		await bridge.workspaceRename(rootId, "src", "source");
 		await expect(bridge.workspaceStat(rootId, "src")).rejects.toMatchObject({
@@ -257,7 +345,8 @@ describe("browser mock workspace bridge", () => {
 			(await bridge.workspaceReadDirectory(rootId, "source")).entries,
 		).toEqual([{ name: "main.ts", kind: "file" }]);
 		expect(
-			(await bridge.workspaceReadFile(rootId, "source/main.ts")).byteLength,
+			(await bridge.workspaceReadFile(rootId, "source/main.ts")).value
+				.byteLength,
 		).toBeGreaterThan(0);
 
 		await bridge.workspaceCreateDirectory(rootId, "destination");
@@ -279,10 +368,12 @@ describe("browser mock workspace bridge", () => {
 		const bridge = createBrowserMockBridge();
 		const selected = await bridge.workspacePickRoots("replace");
 		const rootId = selected.snapshot.roots[0]!.rootId;
-		const readme = (await bridge.workspaceReadFile(rootId, "README.md")).copy();
+		const readme = (
+			await bridge.workspaceReadFile(rootId, "README.md")
+		).value.copy();
 		const binary = (
 			await bridge.workspaceReadFile(rootId, "binary.bin")
-		).copy();
+		).value.copy();
 
 		for (const operation of [
 			() => bridge.workspaceRename(rootId, "README.md", "binary.bin"),
@@ -296,10 +387,10 @@ describe("browser mock workspace bridge", () => {
 			});
 		}
 		expect(
-			(await bridge.workspaceReadFile(rootId, "README.md")).copy(),
+			(await bridge.workspaceReadFile(rootId, "README.md")).value.copy(),
 		).toEqual(readme);
 		expect(
-			(await bridge.workspaceReadFile(rootId, "binary.bin")).copy(),
+			(await bridge.workspaceReadFile(rootId, "binary.bin")).value.copy(),
 		).toEqual(binary);
 		expect((await bridge.workspaceStat(rootId, "src")).kind).toBe("directory");
 		expect((await bridge.workspaceStat(rootId, "empty")).kind).toBe(
@@ -424,7 +515,7 @@ describe("browser mock workspace bridge", () => {
 		const [workspaceRoot, libraryRoot] = added.snapshot.roots;
 		const source = (
 			await bridge.workspaceReadFile(workspaceRoot!.rootId, "binary.bin")
-		).copy();
+		).value.copy();
 
 		await bridge.workspaceCopy(
 			workspaceRoot!.rootId,
@@ -451,7 +542,7 @@ describe("browser mock workspace bridge", () => {
 					workspaceRoot!.rootId,
 					"empty/copied.bin",
 				)
-			).copy(),
+			).value.copy(),
 		).toEqual(source);
 		expect(
 			(
@@ -459,12 +550,12 @@ describe("browser mock workspace bridge", () => {
 					libraryRoot!.rootId,
 					"packages/copied.bin",
 				)
-			).copy(),
+			).value.copy(),
 		).toEqual(source);
 		expect(
 			(
 				await bridge.workspaceReadFile(workspaceRoot!.rootId, "binary.bin")
-			).copy(),
+			).value.copy(),
 		).toEqual(source);
 		expect(await bridge.workspaceSnapshot()).toMatchObject({ revision: 1 });
 		await expect(
@@ -476,10 +567,12 @@ describe("browser mock workspace bridge", () => {
 		const bridge = createBrowserMockBridge();
 		const selected = await bridge.workspacePickRoots("replace");
 		const rootId = selected.snapshot.roots[0]!.rootId;
-		const readme = (await bridge.workspaceReadFile(rootId, "README.md")).copy();
+		const readme = (
+			await bridge.workspaceReadFile(rootId, "README.md")
+		).value.copy();
 		const binary = (
 			await bridge.workspaceReadFile(rootId, "binary.bin")
-		).copy();
+		).value.copy();
 
 		await expect(
 			bridge.workspaceCopy(rootId, "README.md", rootId, "binary.bin"),
@@ -500,10 +593,10 @@ describe("browser mock workspace bridge", () => {
 			message: "The workspace entry has an incompatible type.",
 		});
 		expect(
-			(await bridge.workspaceReadFile(rootId, "README.md")).copy(),
+			(await bridge.workspaceReadFile(rootId, "README.md")).value.copy(),
 		).toEqual(readme);
 		expect(
-			(await bridge.workspaceReadFile(rootId, "binary.bin")).copy(),
+			(await bridge.workspaceReadFile(rootId, "binary.bin")).value.copy(),
 		).toEqual(binary);
 
 		const racing = await Promise.allSettled([
@@ -641,11 +734,11 @@ describe("browser mock workspace bridge", () => {
 			[workspaceRoot!.rootId, "tree-copy/data.bin"],
 			[libraryRoot!.rootId, "packages/tree-copy/data.bin"],
 		] as const) {
-			const first = (await bridge.workspaceReadFile(rootId, path)).copy();
+			const first = (await bridge.workspaceReadFile(rootId, path)).value.copy();
 			expect([...first]).toEqual([0, 255, 128, 1]);
 			first[0] = 99;
 			expect([
-				...(await bridge.workspaceReadFile(rootId, path)).copy(),
+				...(await bridge.workspaceReadFile(rootId, path)).value.copy(),
 			]).toEqual([0, 255, 128, 1]);
 		}
 		expect(
@@ -686,7 +779,7 @@ describe("browser mock workspace bridge", () => {
 					workspaceRoot!.rootId,
 					"tree-copy/data.bin",
 				)
-			).copy(),
+			).value.copy(),
 		]).toEqual([0, 255, 128, 1]);
 
 		expect(observations).toHaveLength(2);
@@ -1457,7 +1550,7 @@ describe("browser mock workspace bridge", () => {
 		expect(
 			(
 				await bridge.workspaceReadFile(targetRootId, "packages/README.md")
-			).copy(),
+			).value.copy(),
 		).toEqual(new TextEncoder().encode("# Plain browser workspace\n"));
 		expect(
 			await bridge.workspaceStat(targetRootId, "packages/binary-link"),
@@ -1465,7 +1558,7 @@ describe("browser mock workspace bridge", () => {
 		expect(
 			(
 				await bridge.workspaceReadFile(targetRootId, "packages/src/main.ts")
-			).copy(),
+			).value.copy(),
 		).toEqual(new TextEncoder().encode('export const editor = "Plain";\n'));
 		for (const path of ["README.md", "fixtures/binary-link", "src"]) {
 			await expect(
@@ -1601,7 +1694,7 @@ describe("browser mock workspace bridge", () => {
 		const [sourceRoot, targetRoot] = added.snapshot.roots;
 		const original = (
 			await bridge.workspaceReadFile(sourceRoot!.rootId, "README.md")
-		).copy();
+		).value.copy();
 		replacement = [...original].map((byte) => byte ^ 0xff);
 
 		const result = await bridge.workspaceMove(
@@ -1619,7 +1712,7 @@ describe("browser mock workspace bridge", () => {
 		expect([
 			...(
 				await bridge.workspaceReadFile(sourceRoot!.rootId, "README.md")
-			).copy(),
+			).value.copy(),
 		]).toEqual(replacement);
 		expect([
 			...(
@@ -1627,7 +1720,7 @@ describe("browser mock workspace bridge", () => {
 					targetRoot!.rootId,
 					"packages/rewritten.md",
 				)
-			).copy(),
+			).value.copy(),
 		]).toEqual(replacement);
 	});
 
@@ -1642,7 +1735,7 @@ describe("browser mock workspace bridge", () => {
 		const [sourceRoot, targetRoot] = added.snapshot.roots;
 		const original = (
 			await bridge.workspaceReadFile(sourceRoot!.rootId, "README.md")
-		).copy();
+		).value.copy();
 		replacement = [...original].map((byte) => byte ^ 0xaa);
 
 		await expect(
@@ -1702,7 +1795,7 @@ describe("browser mock workspace bridge", () => {
 		const [sourceRoot, targetRoot] = added.snapshot.roots;
 		const original = (
 			await bridge.workspaceReadFile(sourceRoot!.rootId, "README.md")
-		).copy();
+		).value.copy();
 		replacement = [...original].map((byte) => byte ^ 0x55);
 
 		await expect(
@@ -1767,7 +1860,7 @@ describe("browser mock workspace bridge", () => {
 		const [sourceRoot, targetRoot] = added.snapshot.roots;
 		const original = (
 			await bridge.workspaceReadFile(sourceRoot!.rootId, "README.md")
-		).copy();
+		).value.copy();
 		replacement = [...original].map((byte) => byte ^ 0x33);
 
 		await expect(
@@ -1798,7 +1891,7 @@ describe("browser mock workspace bridge", () => {
 		original = [
 			...(
 				await bridge.workspaceReadFile(sourceRoot!.rootId, "README.md")
-			).copy(),
+			).value.copy(),
 		];
 		replacement = original.map((byte) => byte ^ 0x77);
 
@@ -1827,7 +1920,7 @@ describe("browser mock workspace bridge", () => {
 		const [sourceRoot, targetRoot] = added.snapshot.roots;
 		const original = (
 			await bridge.workspaceReadFile(sourceRoot!.rootId, "README.md")
-		).copy();
+		).value.copy();
 		replacement = [...original].map((byte) => byte ^ 0x66);
 
 		await expect(
@@ -1967,7 +2060,7 @@ describe("browser mock workspace bridge", () => {
 					targetRoot!.rootId,
 					"packages/move-tree/a.bin",
 				)
-			).byteLength,
+			).value.byteLength,
 		).toBe(1);
 		await expect(
 			bridge.workspaceStat(sourceRoot!.rootId, "move-tree/nested/b.bin"),

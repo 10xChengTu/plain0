@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import workspaceVersionFixture from "../fixtures/workspace-version-v1.json" with { type: "json" };
+
 const tauri = vi.hoisted(() => ({
 	invoke: vi.fn(),
 	listen: vi.fn(),
@@ -13,6 +15,14 @@ import { createNativeBridge } from "../../app/platform/tauri/native";
 const workspaceId = "00000000-0000-4000-8000-000000000001";
 const rootId = "00000000-0000-4000-8000-000000000101";
 const targetRootId = "00000000-0000-4000-8000-000000000102";
+
+function arrayBufferFromHex(hex: string): ArrayBuffer {
+	const bytes = new Uint8Array(hex.length / 2);
+	for (let index = 0; index < bytes.length; index += 1) {
+		bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+	}
+	return bytes.buffer;
+}
 
 function validRoot() {
 	return {
@@ -68,7 +78,9 @@ describe("native Plain bridge", () => {
 	});
 
 	it("invokes the bounded file commands with frozen owned requests", async () => {
-		const rawBytes = new Uint8Array([0, 255, 128, 42]);
+		const rawReadFrame = arrayBufferFromHex(
+			workspaceVersionFixture.read.frameHex,
+		);
 		tauri.invoke
 			.mockResolvedValueOnce(null)
 			.mockResolvedValueOnce(null)
@@ -79,6 +91,7 @@ describe("native Plain bridge", () => {
 				size: 4,
 				mtime: 1_700_000_000_000,
 				ctime: 0,
+				version: null,
 			})
 			.mockResolvedValueOnce({
 				entries: [
@@ -86,7 +99,7 @@ describe("native Plain bridge", () => {
 					{ name: "%2e%2e", kind: "directory" },
 				],
 			})
-			.mockResolvedValueOnce(rawBytes.buffer);
+			.mockResolvedValueOnce(rawReadFrame);
 		const bridge = createNativeBridge();
 
 		await bridge.workspaceCreateFile(rootId, "%2e%2e/new.txt");
@@ -151,6 +164,7 @@ describe("native Plain bridge", () => {
 			size: 4,
 			mtime: 1_700_000_000_000,
 			ctime: 0,
+			version: null,
 		});
 		expect(Object.isFrozen(stat)).toBe(true);
 		expect(directory.entries.map(({ name }) => name)).toEqual([
@@ -158,8 +172,20 @@ describe("native Plain bridge", () => {
 			"%2e%2e",
 		]);
 		expect(Object.isFrozen(directory.entries)).toBe(true);
-		rawBytes[0] = 99;
-		expect([...file.copy()]).toEqual([0, 255, 128, 42]);
+		new Uint8Array(rawReadFrame).fill(99);
+		expect(file.stat).toEqual({
+			kind: workspaceVersionFixture.read.kind,
+			size: workspaceVersionFixture.read.size,
+			mtime: workspaceVersionFixture.read.mtimeMs,
+			ctime: workspaceVersionFixture.read.ctimeMs,
+			version: workspaceVersionFixture.read.version,
+		});
+		expect(Buffer.from(file.value.copy()).toString("hex")).toBe(
+			workspaceVersionFixture.read.contentHex,
+		);
+		expect(Object.isFrozen(file)).toBe(true);
+		expect(Object.isFrozen(file.stat)).toBe(true);
+		expect(Object.isFrozen(file.value)).toBe(true);
 	});
 
 	it("accepts only a null response from void mutation commands", async () => {
@@ -402,12 +428,20 @@ describe("native Plain bridge", () => {
 		expect(tauri.invoke).not.toHaveBeenCalled();
 	});
 
-	it("supports strict number-array fallback bytes and rejects invalid requests before invoke", async () => {
-		tauri.invoke.mockResolvedValueOnce([1, 2, 3]);
+	it("accepts the macOS dense raw-byte fallback and rejects invalid requests before invoke", async () => {
+		const fallback = [
+			...new Uint8Array(
+				arrayBufferFromHex(workspaceVersionFixture.read.frameHex),
+			),
+		];
+		tauri.invoke.mockResolvedValueOnce(fallback);
 		const bridge = createNativeBridge();
-		expect([
-			...(await bridge.workspaceReadFile(rootId, "binary.bin")).copy(),
-		]).toEqual([1, 2, 3]);
+		const receipt = await bridge.workspaceReadFile(rootId, "binary.bin");
+		expect(receipt.stat.version).toBe(workspaceVersionFixture.read.version);
+		expect(Buffer.from(receipt.value.copy()).toString("hex")).toBe(
+			workspaceVersionFixture.read.contentHex,
+		);
+		expect(fallback).toHaveLength(0);
 
 		tauri.invoke.mockClear();
 		await expect(
@@ -475,6 +509,54 @@ describe("native Plain bridge", () => {
 			message: "The workspace-relative path is invalid.",
 		});
 		expect(tauri.invoke).not.toHaveBeenCalled();
+	});
+
+	it("rejects hostile macOS byte-array fallbacks", async () => {
+		const valid = [
+			...new Uint8Array(
+				arrayBufferFromHex(workspaceVersionFixture.read.frameHex),
+			),
+		];
+		const sparse: number[] = [];
+		sparse.length = valid.length;
+		const accessor = [...valid];
+		let accessorReads = 0;
+		Object.defineProperty(accessor, "0", {
+			get() {
+				accessorReads += 1;
+				return 0x50;
+			},
+		});
+		class ByteArraySubclass extends Array<number> {}
+		const withExtraKey = [...valid];
+		Object.defineProperty(withExtraKey, "private", { value: true });
+		let proxyIndexReads = 0;
+		const proxy = new Proxy([...valid], {
+			get(target, property, receiver) {
+				if (
+					typeof property === "string" &&
+					/^(?:0|[1-9][0-9]*)$/u.test(property)
+				) {
+					proxyIndexReads += 1;
+				}
+				return Reflect.get(target, property, receiver);
+			},
+		});
+		tauri.invoke
+			.mockResolvedValueOnce(sparse)
+			.mockResolvedValueOnce(accessor)
+			.mockResolvedValueOnce(new ByteArraySubclass(...valid))
+			.mockResolvedValueOnce(withExtraKey)
+			.mockResolvedValueOnce(proxy);
+		const bridge = createNativeBridge();
+
+		for (let index = 0; index < 5; index += 1) {
+			await expect(
+				bridge.workspaceReadFile(rootId, `hostile-${index}.bin`),
+			).rejects.toMatchObject({ code: "IPC_CONTRACT_VIOLATION" });
+		}
+		expect(accessorReads).toBe(0);
+		expect(proxyIndexReads).toBe(0);
 	});
 
 	it("leaves authorized copy semantics and root state to Rust", async () => {

@@ -7,7 +7,7 @@ import {
 	decodeWorkspaceEntryStat,
 	decodeWorkspaceDeleteBatchPlan,
 	decodeWorkspaceDeleteResult,
-	decodeWorkspaceFileData,
+	decodeWorkspaceReadFile,
 	decodeWorkspaceMoveResult,
 	decodeWorkspacePickResult,
 	decodeWorkspaceReadDirectory,
@@ -152,8 +152,10 @@ export function createNativeBridge(): PlainBridge {
 		},
 		workspaceReadFile: async (rootId, relativePath) => {
 			const request = frozenWorkspaceEntryRequest(rootId, relativePath);
-			return decodeWorkspaceFileData(
-				await invoke<unknown>("workspace_read_file", { request }),
+			return decodeWorkspaceReadFile(
+				await invoke<ArrayBuffer | number[]>("workspace_read_file", {
+					request,
+				}),
 			);
 		},
 	};

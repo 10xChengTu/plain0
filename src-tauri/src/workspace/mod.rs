@@ -23,6 +23,8 @@ pub(crate) mod move_entry;
 pub mod picker;
 pub(crate) mod reader;
 pub mod service;
+#[cfg(unix)]
+pub(crate) mod version;
 pub(crate) mod writer;
 
 use dto::{WorkspaceRootSnapshot, WorkspaceSnapshot};
@@ -39,6 +41,11 @@ impl RootId {
 
     pub fn as_wire(self) -> String {
         self.0.hyphenated().to_string()
+    }
+
+    #[cfg(unix)]
+    pub(crate) const fn as_bytes(&self) -> &[u8; 16] {
+        self.0.as_bytes()
     }
 }
 

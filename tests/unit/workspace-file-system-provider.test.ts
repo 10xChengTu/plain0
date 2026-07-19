@@ -18,10 +18,12 @@ import type {
 	RuntimeInfo,
 	WorkspaceEntryKind,
 } from "../../app/platform/tauri/contracts";
-import { frozenWorkspaceFileData } from "../../app/platform/tauri/workspace-codec";
+import { frozenWorkspaceReadFile } from "../../app/platform/tauri/workspace-codec";
 
 const rootId = "00000000-0000-4000-8000-000000000101";
 const rootUri = `${PLAIN_WORKSPACE_SCHEME}://${rootId}/`;
+const versionA = `wv1:${"a".repeat(64)}`;
+const versionB = `wv1:${"b".repeat(64)}`;
 const runtimeInfo: RuntimeInfo = Object.freeze({
 	application: "Plain",
 	ipcVersion: 1,
@@ -84,13 +86,28 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 			throw new Error("unused");
 		},
 		async workspaceStat() {
-			return { kind: "file", size: 3, mtime: 20, ctime: 10 };
+			return {
+				kind: "file",
+				size: 3,
+				mtime: 20,
+				ctime: 10,
+				version: versionA,
+			};
 		},
 		async workspaceReadDirectory() {
 			return { entries: [] };
 		},
 		async workspaceReadFile() {
-			return frozenWorkspaceFileData([1, 2, 3]);
+			return frozenWorkspaceReadFile(
+				{
+					kind: "file",
+					size: 3,
+					mtime: 20,
+					ctime: 10,
+					version: versionA,
+				},
+				Uint8Array.from([1, 2, 3]),
+			);
 		},
 		...overrides,
 	};
@@ -122,7 +139,7 @@ describe("Plain workspace file system provider", () => {
 		).toBe(0);
 	});
 
-	it("maps every Rust entry kind and explicit readonly stat metadata", async () => {
+	it("maps every Rust entry kind with an own opaque version field", async () => {
 		const kinds: WorkspaceEntryKind[] = [
 			"file",
 			"directory",
@@ -139,11 +156,13 @@ describe("Plain workspace file system provider", () => {
 			FileType.SymbolicLink | FileType.Directory,
 			FileType.Unknown,
 		];
+		const versions = [versionA, null, null, null, null, null] as const;
 		const stat = vi.fn(async (_rootId: string, relativePath: string) => ({
 			kind: kinds[Number(relativePath)]!,
 			size: 42,
 			mtime: 1_700_000_000_000,
 			ctime: 1_699_000_000_000,
+			version: versions[Number(relativePath)]!,
 		}));
 		const provider = createPlainWorkspaceFileSystemProvider(
 			testBridge({ workspaceStat: stat }),
@@ -156,11 +175,59 @@ describe("Plain workspace file system provider", () => {
 				size: 42,
 				mtime: 1_700_000_000_000,
 				ctime: 1_699_000_000_000,
-				permissions: FilePermission.Readonly,
+				...(kinds[index] === "symlinkFile"
+					? { permissions: FilePermission.Readonly }
+					: {}),
+				plainVersion: versions[index],
 			});
 			expect(Object.isFrozen(result)).toBe(true);
+			expect(
+				Object.getOwnPropertyDescriptor(result, "plainVersion"),
+			).toMatchObject({ value: versions[index] });
 		}
 		expect(stat).toHaveBeenCalledWith(rootId, "0");
+	});
+
+	it("marks tokenless regular files readonly without marking directories", async () => {
+		const provider = createPlainWorkspaceFileSystemProvider(
+			testBridge({
+				async workspaceStat(_rootId, relativePath) {
+					return {
+						kind: relativePath === "file" ? "file" : "directory",
+						size: 0,
+						mtime: 0,
+						ctime: 0,
+						version: null,
+					};
+				},
+				async workspaceReadFile() {
+					return frozenWorkspaceReadFile(
+						{
+							kind: "file",
+							size: 0,
+							mtime: 0,
+							ctime: 0,
+							version: null,
+						},
+						new Uint8Array(),
+					);
+				},
+			}),
+		);
+
+		expect(await provider.stat(workspaceUri("file"))).toMatchObject({
+			permissions: FilePermission.Readonly,
+			plainVersion: null,
+		});
+		const directory = await provider.stat(workspaceUri("directory"));
+		expect(directory.plainVersion).toBeNull();
+		expect(directory.permissions).toBeUndefined();
+		expect(
+			(await provider.plainReadFile(workspaceUri("file"))).stat,
+		).toMatchObject({
+			plainVersion: null,
+			permissions: FilePermission.Readonly,
+		});
 	});
 
 	it("maps directory entries and returns an owned file byte copy", async () => {
@@ -175,7 +242,18 @@ describe("Plain workspace file system provider", () => {
 				{ name: "socket", kind: "other" as const },
 			],
 		}));
-		const readFile = vi.fn(async () => frozenWorkspaceFileData(bytes));
+		const readFile = vi.fn(async () =>
+			frozenWorkspaceReadFile(
+				{
+					kind: "file",
+					size: bytes.byteLength,
+					mtime: 20,
+					ctime: 10,
+					version: versionA,
+				},
+				bytes,
+			),
+		);
 		const provider = createPlainWorkspaceFileSystemProvider(
 			testBridge({
 				workspaceReadDirectory: readDirectory,
@@ -191,7 +269,17 @@ describe("Plain workspace file system provider", () => {
 			["link-folder", FileType.SymbolicLink | FileType.Directory],
 			["socket", FileType.Unknown],
 		]);
-		const first = await provider.readFile(workspaceUri("binary.bin"));
+		const receipt = await provider.plainReadFile(workspaceUri("binary.bin"));
+		expect(receipt.stat).toEqual({
+			type: FileType.File,
+			size: 4,
+			mtime: 20,
+			ctime: 10,
+			plainVersion: versionA,
+		});
+		expect(Object.isFrozen(receipt)).toBe(true);
+		expect(Object.isFrozen(receipt.stat)).toBe(true);
+		const first = receipt.value;
 		first[0] = 99;
 		expect([...bytes]).toEqual([0, 255, 128, 42]);
 		expect([...(await provider.readFile(workspaceUri("binary.bin")))]).toEqual([
@@ -201,12 +289,45 @@ describe("Plain workspace file system provider", () => {
 		expect(readFile).toHaveBeenCalledWith(rootId, "binary.bin");
 	});
 
+	it("keeps content and version in one bridge receipt without a stat race", async () => {
+		const stat = vi.fn(async () => ({
+			kind: "file" as const,
+			size: 4,
+			mtime: 200,
+			ctime: 100,
+			version: versionB,
+		}));
+		const readFile = vi.fn(async () =>
+			frozenWorkspaceReadFile(
+				{
+					kind: "file",
+					size: 4,
+					mtime: 20,
+					ctime: 10,
+					version: versionA,
+				},
+				Uint8Array.from([1, 2, 3, 4]),
+			),
+		);
+		const provider = createPlainWorkspaceFileSystemProvider(
+			testBridge({ workspaceStat: stat, workspaceReadFile: readFile }),
+		);
+
+		const receipt = await provider.plainReadFile(workspaceUri("racing.bin"));
+		expect([...receipt.value]).toEqual([1, 2, 3, 4]);
+		expect(receipt.stat.plainVersion).toBe(versionA);
+		expect(receipt.stat.mtime).toBe(20);
+		expect(stat).not.toHaveBeenCalled();
+		expect(readFile).toHaveBeenCalledTimes(1);
+	});
+
 	it("accepts only canonical Plain URIs and forwards literal percent names once", async () => {
 		const stat = vi.fn(async () => ({
 			kind: "file" as const,
 			size: 0,
 			mtime: 0,
 			ctime: 0,
+			version: null,
 		}));
 		const provider = createPlainWorkspaceFileSystemProvider(
 			testBridge({ workspaceStat: stat }),
@@ -294,6 +415,7 @@ describe("Plain workspace file system provider", () => {
 			["PERMISSION_DENIED", FileSystemProviderErrorCode.NoPermissions],
 			["ROOT_UNAVAILABLE", FileSystemProviderErrorCode.Unavailable],
 			["PATH_ENCODING_UNSUPPORTED", FileSystemProviderErrorCode.Unavailable],
+			["WORKSPACE_FILE_CHANGED", FileSystemProviderErrorCode.Unavailable],
 			["DIRECTORY_TOO_LARGE", FileSystemProviderErrorCode.Unavailable],
 			["FILE_TOO_LARGE", FileSystemProviderErrorCode.Unavailable],
 			["IO_FAILED", FileSystemProviderErrorCode.Unavailable],

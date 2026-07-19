@@ -269,7 +269,7 @@ describe("browser mock workspace delete bridge", () => {
 		});
 		expect(Object.isFrozen(result)).toBe(true);
 		expect(
-			(await bridge.workspaceReadFile(rootId, "README.md")).copy(),
+			(await bridge.workspaceReadFile(rootId, "README.md")).value.copy(),
 		).toEqual(new Uint8Array([1, 2, 3]));
 	});
 

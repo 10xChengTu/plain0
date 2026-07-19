@@ -19,7 +19,11 @@ import {
 } from "@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle";
 import type { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
 
-import type { PlainBridge, WorkspaceEntryKind } from "../../platform/tauri";
+import type {
+	PlainBridge,
+	WorkspaceEntryKind,
+	WorkspaceEntryStat,
+} from "../../platform/tauri";
 import { frozenWorkspaceEntryRequest } from "../../platform/tauri/workspace-codec";
 
 export const PLAIN_WORKSPACE_SCHEME = "plain-workspace" as const;
@@ -27,6 +31,15 @@ export const PLAIN_WORKSPACE_SCHEME = "plain-workspace" as const;
 interface ResolvedResource {
 	readonly rootId: string;
 	readonly relativePath: string;
+}
+
+export interface PlainWorkspaceProviderStat extends IStat {
+	readonly plainVersion: string | null;
+}
+
+export interface PlainWorkspaceReadFileResult {
+	readonly stat: PlainWorkspaceProviderStat;
+	readonly value: Uint8Array;
 }
 
 const SANITIZED_MESSAGES = Object.freeze({
@@ -90,6 +103,7 @@ function mapReadError(error: unknown): FileSystemProviderError {
 		case "ROOT_UNAVAILABLE":
 		case "PATH_ENCODING_UNSUPPORTED":
 		case "WORKSPACE_CONFLICT":
+		case "WORKSPACE_FILE_CHANGED":
 		case "WORKSPACE_WINDOW_CLOSED":
 		case "DIRECTORY_TOO_LARGE":
 		case "FILE_TOO_LARGE":
@@ -117,6 +131,20 @@ function kindToFileType(kind: WorkspaceEntryKind): FileType {
 	}
 }
 
+function providerStat(stat: WorkspaceEntryStat): PlainWorkspaceProviderStat {
+	const readonlyFile =
+		(stat.kind === "file" || stat.kind === "symlinkFile") &&
+		stat.version === null;
+	return Object.freeze({
+		type: kindToFileType(stat.kind),
+		size: stat.size,
+		mtime: stat.mtime,
+		ctime: stat.ctime,
+		...(readonlyFile ? { permissions: FilePermission.Readonly } : {}),
+		plainVersion: stat.version,
+	});
+}
+
 /**
  * Read-only Workbench provider for capability-authorized Plain workspace roots.
  *
@@ -139,20 +167,14 @@ export class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWith
 		return Disposable.None;
 	}
 
-	async stat(resource: URI): Promise<IStat> {
+	async stat(resource: URI): Promise<PlainWorkspaceProviderStat> {
 		const resolved = this.resolveResource(resource);
 		try {
 			const stat = await this.bridge.workspaceStat(
 				resolved.rootId,
 				resolved.relativePath,
 			);
-			return Object.freeze({
-				type: kindToFileType(stat.kind),
-				size: stat.size,
-				mtime: stat.mtime,
-				ctime: stat.ctime,
-				permissions: FilePermission.Readonly,
-			});
+			return providerStat(stat);
 		} catch (error) {
 			throw mapReadError(error);
 		}
@@ -175,13 +197,20 @@ export class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWith
 	}
 
 	async readFile(resource: URI): Promise<Uint8Array> {
+		return (await this.plainReadFile(resource)).value.slice();
+	}
+
+	async plainReadFile(resource: URI): Promise<PlainWorkspaceReadFileResult> {
 		const resolved = this.resolveResource(resource);
 		try {
-			const file = await this.bridge.workspaceReadFile(
+			const receipt = await this.bridge.workspaceReadFile(
 				resolved.rootId,
 				resolved.relativePath,
 			);
-			return file.copy();
+			return Object.freeze({
+				stat: providerStat(receipt.stat),
+				value: receipt.value.copy(),
+			});
 		} catch (error) {
 			throw mapReadError(error);
 		}

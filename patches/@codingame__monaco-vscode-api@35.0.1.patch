@@ -110,3 +110,271 @@ index dbf2cd589ee4f869b69ffa850d0b8a11f1e656b4..a94a5a349e647b6b900e055c930c8882
  }
  
  export { AccountsActivityActionViewItem, GlobalActivityActionViewItem, GlobalCompositeBar, SimpleAccountActivityActionViewItem, SimpleGlobalActivityActionViewItem, isAccountsActionVisible };
+diff --git a/vscode/src/vs/workbench/services/textfile/common/textFileEditorModel.js b/vscode/src/vs/workbench/services/textfile/common/textFileEditorModel.js
+index e743e309f1b308aebcb4559a12d9591bd0d49701..7e6bca2addc203c8cecf2a0ea3e080c8e0eb5092 100644
+--- a/vscode/src/vs/workbench/services/textfile/common/textFileEditorModel.js
++++ b/vscode/src/vs/workbench/services/textfile/common/textFileEditorModel.js
+@@ -34,6 +34,40 @@ import { IProgressService } from '../../../../platform/progress/common/progress.
+ import { isCancellationError } from '../../../../base/common/errors.js';
+ import { EditSources } from '../../../../editor/common/textModelEditSource.js';
+ 
++const PLAIN_WORKSPACE_SCHEME = "plain-workspace";
++const PLAIN_BUFFER_NO_BASELINE_ETAG = "plain-buffer-no-baseline";
++const PLAIN_WORKSPACE_VERSION_PATTERN = /^wv1:[0-9a-f]{64}$/;
++const PLAIN_READ_RECEIPT_SOURCE = Symbol("plainReadReceipt");
++const PLAIN_BUFFER_NO_BASELINE_SOURCE = Symbol("plainBufferNoBaseline");
++function plainReadBaselineSource(resource, content) {
++    if (resource.scheme !== PLAIN_WORKSPACE_SCHEME) {
++        return undefined;
++    }
++    const descriptor = Object.getOwnPropertyDescriptor(content, "plainReadReceipt");
++    if (!descriptor || !("value" in descriptor) || descriptor.value !== true) {
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_READ_RECEIPT: resolved file content is missing its receipt marker"));
++    }
++    return PLAIN_READ_RECEIPT_SOURCE;
++}
++function acceptsPlainBaseline(resource, source, stat) {
++    if (resource.scheme !== PLAIN_WORKSPACE_SCHEME) {
++        return false;
++    }
++    if (source === PLAIN_READ_RECEIPT_SOURCE) {
++        if (stat.etag === ETAG_DISABLED || typeof stat.etag === "string" && PLAIN_WORKSPACE_VERSION_PATTERN.test(stat.etag)) {
++            return true;
++        }
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_READ_RECEIPT: read baseline must carry a wv1 token or ETAG_DISABLED"));
++    }
++    if (source === PLAIN_BUFFER_NO_BASELINE_SOURCE) {
++        if (stat.etag === PLAIN_BUFFER_NO_BASELINE_ETAG) {
++            return true;
++        }
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_BUFFER_BASELINE: buffer baseline must carry the no-baseline sentinel"));
++    }
++    return false;
++}
++
+ var TextFileEditorModel_1;
+ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel {
+     static {
+@@ -255,22 +289,30 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel
+     }
+     async resolveFromBuffer(buffer, options) {
+         this.trace("resolveFromBuffer()");
++        const isPlainWorkspace = this.resource.scheme === PLAIN_WORKSPACE_SCHEME;
+         let mtime;
+         let ctime;
+         let size;
+         let etag;
++        let readonly = false;
++        let locked = false;
+         try {
+             const metadata = await this.fileService.stat(this.resource);
+             mtime = metadata.mtime;
+             ctime = metadata.ctime;
+             size = metadata.size;
+-            etag = metadata.etag;
++            etag = isPlainWorkspace ? PLAIN_BUFFER_NO_BASELINE_ETAG : metadata.etag;
++            if (isPlainWorkspace) {
++                readonly = Boolean(metadata.readonly);
++                locked = Boolean(metadata.locked);
++            }
+             this.setOrphaned(false);
+         } catch (error) {
+             mtime = Date.now();
+             ctime = Date.now();
+             size = 0;
+-            etag = ETAG_DISABLED;
++            etag = isPlainWorkspace ? PLAIN_BUFFER_NO_BASELINE_ETAG : ETAG_DISABLED;
++            readonly = isPlainWorkspace;
+             this.setOrphaned(error.fileOperationResult === FileOperationResult.FILE_NOT_FOUND);
+         }
+         const preferredEncoding = await this.textFileService.encoding.getPreferredWriteEncoding(this.resource, this.preferredEncoding);
+@@ -283,10 +325,10 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel
+             etag,
+             value: buffer,
+             encoding: preferredEncoding.encoding,
+-            readonly: false,
+-            locked: false,
++            readonly,
++            locked,
+             executable: false
+-        }, true, options);
++        }, true, options, isPlainWorkspace ? PLAIN_BUFFER_NO_BASELINE_SOURCE : undefined);
+     }
+     async resolveFromBackup(options) {
+         const backup = await this.workingCopyBackupService.resolve(this);
+@@ -353,7 +395,7 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel
+                 );
+                 return;
+             }
+-            return this.resolveFromContent(content, false, options);
++            return this.resolveFromContent(content, false, options, plainReadBaselineSource(this.resource, content));
+         } catch (error) {
+             const result = error.fileOperationResult;
+             this.setOrphaned(result === FileOperationResult.FILE_NOT_FOUND);
+@@ -369,7 +411,7 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel
+             throw error;
+         }
+     }
+-    resolveFromContent(content, dirty, options) {
++    resolveFromContent(content, dirty, options, plainBaselineSource) {
+         this.trace("resolveFromContent() - enter");
+         if (this.isDisposed()) {
+             this.trace("resolveFromContent() - exit - because model is disposed");
+@@ -389,7 +431,7 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel
+             isDirectory: false,
+             isSymbolicLink: false,
+             children: undefined
+-        });
++        }, plainBaselineSource);
+         const oldEncoding = this.contentEncoding;
+         this.contentEncoding = content.encoding;
+         if (this.preferredEncoding) {
+@@ -687,9 +729,12 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel
+             this.bufferSavedVersionId = this.textEditorModel.getAlternativeVersionId();
+         }
+     }
+-    updateLastResolvedFileStat(newFileStat) {
++    updateLastResolvedFileStat(newFileStat, plainBaselineSource) {
+         const oldReadonly = this.isReadonly();
+-        if (!this.lastResolvedFileStat) {
++        if (acceptsPlainBaseline(this.resource, plainBaselineSource, newFileStat)) {
++            this.lastResolvedFileStat = newFileStat;
++        }
++        else if (!this.lastResolvedFileStat) {
+             this.lastResolvedFileStat = newFileStat;
+         }
+         else if (this.lastResolvedFileStat.mtime <= newFileStat.mtime) {
+diff --git a/vscode/src/vs/workbench/services/workingCopy/common/storedFileWorkingCopy.js b/vscode/src/vs/workbench/services/workingCopy/common/storedFileWorkingCopy.js
+index 0a769e25cf6030e9aa17ae5ec845795f964e5017..3227b2399ebf0a300ad8302166f2433e4018121c 100644
+--- a/vscode/src/vs/workbench/services/workingCopy/common/storedFileWorkingCopy.js
++++ b/vscode/src/vs/workbench/services/workingCopy/common/storedFileWorkingCopy.js
+@@ -30,6 +30,40 @@ import { IProgressService } from '../../../../platform/progress/common/progress.
+ import { isCancellationError } from '../../../../base/common/errors.js';
+ import Severity$1 from '../../../../base/common/severity.js';
+ 
++const PLAIN_WORKSPACE_SCHEME = "plain-workspace";
++const PLAIN_BUFFER_NO_BASELINE_ETAG = "plain-buffer-no-baseline";
++const PLAIN_WORKSPACE_VERSION_PATTERN = /^wv1:[0-9a-f]{64}$/;
++const PLAIN_READ_RECEIPT_SOURCE = Symbol("plainReadReceipt");
++const PLAIN_BUFFER_NO_BASELINE_SOURCE = Symbol("plainBufferNoBaseline");
++function plainReadBaselineSource(resource, content) {
++    if (resource.scheme !== PLAIN_WORKSPACE_SCHEME) {
++        return undefined;
++    }
++    const descriptor = Object.getOwnPropertyDescriptor(content, "plainReadReceipt");
++    if (!descriptor || !("value" in descriptor) || descriptor.value !== true) {
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_READ_RECEIPT: resolved file content is missing its receipt marker"));
++    }
++    return PLAIN_READ_RECEIPT_SOURCE;
++}
++function acceptsPlainBaseline(resource, source, stat) {
++    if (resource.scheme !== PLAIN_WORKSPACE_SCHEME) {
++        return false;
++    }
++    if (source === PLAIN_READ_RECEIPT_SOURCE) {
++        if (stat.etag === ETAG_DISABLED || typeof stat.etag === "string" && PLAIN_WORKSPACE_VERSION_PATTERN.test(stat.etag)) {
++            return true;
++        }
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_READ_RECEIPT: read baseline must carry a wv1 token or ETAG_DISABLED"));
++    }
++    if (source === PLAIN_BUFFER_NO_BASELINE_SOURCE) {
++        if (stat.etag === PLAIN_BUFFER_NO_BASELINE_ETAG) {
++            return true;
++        }
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_BUFFER_BASELINE: buffer baseline must carry the no-baseline sentinel"));
++    }
++    return false;
++}
++
+ var StoredFileWorkingCopy_1;
+ var StoredFileWorkingCopyState;
+ (function(StoredFileWorkingCopyState) {
+@@ -187,22 +221,30 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
+     }
+     async resolveFromBuffer(buffer) {
+         this.trace("resolveFromBuffer()");
++        const isPlainWorkspace = this.resource.scheme === PLAIN_WORKSPACE_SCHEME;
+         let mtime;
+         let ctime;
+         let size;
+         let etag;
++        let readonly = false;
++        let locked = false;
+         try {
+             const metadata = await this.fileService.stat(this.resource);
+             mtime = metadata.mtime;
+             ctime = metadata.ctime;
+             size = metadata.size;
+-            etag = metadata.etag;
++            etag = isPlainWorkspace ? PLAIN_BUFFER_NO_BASELINE_ETAG : metadata.etag;
++            if (isPlainWorkspace) {
++                readonly = Boolean(metadata.readonly);
++                locked = Boolean(metadata.locked);
++            }
+             this.setOrphaned(false);
+         } catch (error) {
+             mtime = Date.now();
+             ctime = Date.now();
+             size = 0;
+-            etag = ETAG_DISABLED;
++            etag = isPlainWorkspace ? PLAIN_BUFFER_NO_BASELINE_ETAG : ETAG_DISABLED;
++            readonly = isPlainWorkspace;
+             this.setOrphaned(error.fileOperationResult === FileOperationResult.FILE_NOT_FOUND);
+         }
+         return this.resolveFromContent({
+@@ -213,10 +255,10 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
+             size,
+             etag,
+             value: buffer,
+-            readonly: false,
+-            locked: false,
++            readonly,
++            locked,
+             executable: false
+-        }, true );
++        }, true, isPlainWorkspace ? PLAIN_BUFFER_NO_BASELINE_SOURCE : undefined);
+     }
+     async resolveFromBackup() {
+         const backup = await this.workingCopyBackupService.resolve(this);
+@@ -273,7 +315,7 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
+                 );
+                 return;
+             }
+-            await this.resolveFromContent(content, false );
++            await this.resolveFromContent(content, false, plainReadBaselineSource(this.resource, content));
+         } catch (error) {
+             const result = error.fileOperationResult;
+             this.setOrphaned(result === FileOperationResult.FILE_NOT_FOUND);
+@@ -289,7 +331,7 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
+             throw error;
+         }
+     }
+-    async resolveFromContent(content, dirty) {
++    async resolveFromContent(content, dirty, plainBaselineSource) {
+         this.trace("resolveFromContent() - enter");
+         if (this.isDisposed()) {
+             this.trace("resolveFromContent() - exit - because working copy is disposed");
+@@ -309,7 +351,7 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
+             isDirectory: false,
+             isSymbolicLink: false,
+             children: undefined
+-        });
++        }, plainBaselineSource);
+         if (this.isResolved()) {
+             await this.doUpdateModel(content.value);
+         }
+@@ -741,9 +783,12 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
+         );
+         this._register(Event.once(handle.onDidClose)(() => listener.dispose()));
+     }
+-    updateLastResolvedFileStat(newFileStat) {
++    updateLastResolvedFileStat(newFileStat, plainBaselineSource) {
+         const oldReadonly = this.isReadonly();
+-        if (!this.lastResolvedFileStat) {
++        if (acceptsPlainBaseline(this.resource, plainBaselineSource, newFileStat)) {
++            this.lastResolvedFileStat = newFileStat;
++        }
++        else if (!this.lastResolvedFileStat) {
+             this.lastResolvedFileStat = newFileStat;
+         }
+         else if (this.lastResolvedFileStat.mtime <= newFileStat.mtime) {

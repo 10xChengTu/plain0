@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 
+import workspaceVersionFixture from "../fixtures/workspace-version-v1.json" with { type: "json" };
+
 import {
 	compareWorkspaceEntryNames,
 	decodeWorkspaceEntryStat,
 	decodeWorkspaceFileData,
+	decodeWorkspaceReadFile,
 	decodeWorkspaceReadDirectory,
 	decodeWorkspaceVoid,
 	frozenWorkspaceCopyRequest,
@@ -20,6 +23,60 @@ const contractError = {
 	code: "IPC_CONTRACT_VIOLATION",
 	message: "Native IPC returned a payload that violates the Plain contract.",
 };
+const version = `wv1:${"a".repeat(64)}`;
+
+function plr1Frame({
+	kind = "file",
+	version: frameVersion = version,
+	content = new Uint8Array([0, 255, 128, 42]),
+	size = content.byteLength,
+	mtime = 1_700_000_000_123,
+	ctime = 1_699_999_999_000,
+}: {
+	readonly kind?: "file" | "symlinkFile";
+	readonly version?: string | null;
+	readonly content?: Uint8Array;
+	readonly size?: number;
+	readonly mtime?: number;
+	readonly ctime?: number;
+} = {}): ArrayBuffer {
+	const versionBytes =
+		frameVersion === null
+			? new Uint8Array()
+			: new TextEncoder().encode(frameVersion);
+	const frame = new Uint8Array(
+		36 + versionBytes.byteLength + content.byteLength,
+	);
+	const view = new DataView(frame.buffer);
+	frame.set([0x50, 0x4c, 0x52, 0x31], 0);
+	frame[4] = kind === "file" ? 1 : 2;
+	frame[5] = versionBytes.byteLength;
+	view.setUint16(6, 0, false);
+	view.setUint32(8, content.byteLength, false);
+	view.setBigUint64(12, BigInt(size), false);
+	view.setBigUint64(20, BigInt(mtime), false);
+	view.setBigUint64(28, BigInt(ctime), false);
+	frame.set(versionBytes, 36);
+	frame.set(content, 36 + versionBytes.byteLength);
+	return frame.buffer;
+}
+
+function mutatedFrame(
+	frame: ArrayBuffer,
+	mutate: (bytes: Uint8Array, view: DataView) => void,
+): ArrayBuffer {
+	const copy = frame.slice(0);
+	mutate(new Uint8Array(copy), new DataView(copy));
+	return copy;
+}
+
+function arrayBufferFromHex(hex: string): ArrayBuffer {
+	const bytes = new Uint8Array(hex.length / 2);
+	for (let index = 0; index < bytes.length; index += 1) {
+		bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+	}
+	return bytes.buffer;
+}
 
 describe("workspace file data codec", () => {
 	it("accepts only null for void native command responses", () => {
@@ -37,12 +94,14 @@ describe("workspace file data codec", () => {
 			size: 42,
 			mtime: 1_700_000_000_000,
 			ctime: 0,
+			version,
 		});
 		expect(stat).toEqual({
 			kind: "file",
 			size: 42,
 			mtime: 1_700_000_000_000,
 			ctime: 0,
+			version,
 		});
 		expect(Object.isFrozen(stat)).toBe(true);
 		expect(
@@ -51,20 +110,309 @@ describe("workspace file data codec", () => {
 				size: Number.MAX_SAFE_INTEGER,
 				mtime: 0,
 				ctime: 0,
+				version: null,
 			}).size,
 		).toBe(Number.MAX_SAFE_INTEGER);
 
 		for (const payload of [
-			{ kind: "unknown", size: 0, mtime: 0, ctime: 0 },
-			{ kind: "file", size: -1, mtime: 0, ctime: 0 },
-			{ kind: "file", size: 1.5, mtime: 0, ctime: 0 },
-			{ kind: "file", size: 0, mtime: Number.MAX_VALUE, ctime: 0 },
-			{ kind: "file", size: 0, mtime: 0, ctime: 0, path: "/private" },
+			{ kind: "unknown", size: 0, mtime: 0, ctime: 0, version: null },
+			{ kind: "file", size: -1, mtime: 0, ctime: 0, version: null },
+			{ kind: "file", size: 1.5, mtime: 0, ctime: 0, version: null },
+			{
+				kind: "file",
+				size: 0,
+				mtime: Number.MAX_VALUE,
+				ctime: 0,
+				version: null,
+			},
+			{ kind: "file", size: 0, mtime: 0, ctime: 0 },
+			{ kind: "directory", size: 0, mtime: 0, ctime: 0, version },
+			{ kind: "file", size: 0, mtime: 0, ctime: 0, version: "wv1:ABC" },
+			{
+				kind: "file",
+				size: 0,
+				mtime: 0,
+				ctime: 0,
+				version: null,
+				path: "/private",
+			},
 		]) {
 			expect(() => decodeWorkspaceEntryStat(payload)).toThrowError(
 				expect.objectContaining(contractError),
 			);
 		}
+	});
+
+	it("decodes stat fields from one own-data snapshot without invoking accessors or Proxy reads", () => {
+		let accessorReads = 0;
+		const accessorStat = {
+			kind: "file",
+			size: 1,
+			mtime: 2,
+			ctime: 3,
+			get version() {
+				accessorReads += 1;
+				return version;
+			},
+		};
+		let proxyReads = 0;
+		const proxyStat = new Proxy(
+			{
+				kind: "file",
+				size: 1,
+				mtime: 2,
+				ctime: 3,
+				version,
+			},
+			{
+				get(target, property, receiver) {
+					proxyReads += 1;
+					if (property === "version") {
+						return proxyReads % 2 === 0 ? `wv1:${"b".repeat(64)}` : version;
+					}
+					return Reflect.get(target, property, receiver);
+				},
+			},
+		);
+		let descriptorVersionReads = 0;
+		const changingDescriptorStat = new Proxy(
+			{
+				kind: "file",
+				size: 1,
+				mtime: 2,
+				ctime: 3,
+				version,
+			},
+			{
+				getOwnPropertyDescriptor(target, property) {
+					const descriptor = Reflect.getOwnPropertyDescriptor(target, property);
+					if (
+						property !== "version" ||
+						descriptor === undefined ||
+						!("value" in descriptor)
+					) {
+						return descriptor;
+					}
+					descriptorVersionReads += 1;
+					return {
+						...descriptor,
+						value:
+							descriptorVersionReads % 2 === 0
+								? `wv1:${"b".repeat(64)}`
+								: version,
+					};
+				},
+			},
+		);
+
+		for (const payload of [accessorStat, proxyStat, changingDescriptorStat]) {
+			expect(() => decodeWorkspaceEntryStat(payload)).toThrowError(
+				expect.objectContaining(contractError),
+			);
+		}
+		expect(accessorReads).toBe(0);
+		expect(proxyReads).toBe(0);
+		expect(descriptorVersionReads).toBeGreaterThan(0);
+	});
+
+	it("decodes the shared golden PLR1 into one immutable read receipt", () => {
+		const source = arrayBufferFromHex(workspaceVersionFixture.read.frameHex);
+		const receipt = decodeWorkspaceReadFile(source);
+		const fallbackSource = [
+			...new Uint8Array(
+				arrayBufferFromHex(workspaceVersionFixture.read.frameHex),
+			),
+		];
+		const fallbackReceipt = decodeWorkspaceReadFile(fallbackSource);
+
+		expect(receipt.stat).toEqual({
+			kind: workspaceVersionFixture.read.kind,
+			size: workspaceVersionFixture.read.size,
+			mtime: workspaceVersionFixture.read.mtimeMs,
+			ctime: workspaceVersionFixture.read.ctimeMs,
+			version: workspaceVersionFixture.read.version,
+		});
+		expect(receipt.value.byteLength).toBe(4);
+		expect(Buffer.from(receipt.value.copy()).toString("hex")).toBe(
+			workspaceVersionFixture.read.contentHex,
+		);
+		expect(Object.isFrozen(receipt)).toBe(true);
+		expect(Object.isFrozen(receipt.stat)).toBe(true);
+		expect(Object.isFrozen(receipt.value)).toBe(true);
+		expect(fallbackReceipt.stat).toEqual(receipt.stat);
+		expect(fallbackReceipt.value.copy()).toEqual(receipt.value.copy());
+		expect(fallbackSource).toHaveLength(0);
+
+		new Uint8Array(source).fill(7);
+		fallbackSource.fill(7);
+		const first = receipt.value.copy();
+		const second = receipt.value.copy();
+		first[0] = 99;
+		expect(Buffer.from(second).toString("hex")).toBe(
+			workspaceVersionFixture.read.contentHex,
+		);
+		expect(Buffer.from(receipt.value.copy()).toString("hex")).toBe(
+			workspaceVersionFixture.read.contentHex,
+		);
+		expect(Buffer.from(fallbackReceipt.value.copy()).toString("hex")).toBe(
+			workspaceVersionFixture.read.contentHex,
+		);
+	});
+
+	it(
+		"decodes and consumes the maximum dense macOS fallback without reflective amplification",
+		{ timeout: 60_000 },
+		() => {
+			const frame = plr1Frame({
+				version: null,
+				content: new Uint8Array(8 * 1_024 * 1_024),
+			});
+			const fallback = Array.from(new Uint8Array(frame));
+			const receipt = decodeWorkspaceReadFile(fallback);
+
+			expect(fallback).toHaveLength(0);
+			expect(receipt.stat).toMatchObject({
+				kind: "file",
+				size: 8 * 1_024 * 1_024,
+				version: null,
+			});
+			expect(receipt.value.byteLength).toBe(8 * 1_024 * 1_024);
+		},
+	);
+
+	it("accepts only the closed tokenless PLR1 kinds and bounded content", () => {
+		for (const kind of ["file", "symlinkFile"] as const) {
+			const receipt = decodeWorkspaceReadFile(
+				plr1Frame({ kind, version: null, content: new Uint8Array() }),
+			);
+			expect(receipt.stat).toEqual({
+				kind,
+				size: 0,
+				mtime: 1_700_000_000_123,
+				ctime: 1_699_999_999_000,
+				version: null,
+			});
+		}
+
+		const maximum = decodeWorkspaceReadFile(
+			plr1Frame({
+				content: new Uint8Array(8 * 1_024 * 1_024),
+			}),
+		);
+		expect(maximum.value.byteLength).toBe(8 * 1_024 * 1_024);
+		expect(() =>
+			decodeWorkspaceReadFile(
+				plr1Frame({ content: new Uint8Array(8 * 1_024 * 1_024 + 1) }),
+			),
+		).toThrowError(expect.objectContaining(contractError));
+	});
+
+	it("rejects malformed, unsafe and non-raw PLR1 transports", () => {
+		const valid = plr1Frame();
+		class ArrayBufferSubclass extends ArrayBuffer {}
+		const withOwnProperty = valid.slice(0);
+		Object.defineProperty(withOwnProperty, "private", { value: true });
+		const proxy = new Proxy(valid.slice(0), {});
+		const shared = new SharedArrayBuffer(valid.byteLength);
+		new Uint8Array(shared).set(new Uint8Array(valid));
+		const detached = valid.slice(0);
+		structuredClone(detached, { transfer: [detached] });
+		const withTrailingByte = new Uint8Array(valid.byteLength + 1);
+		withTrailingByte.set(new Uint8Array(valid));
+
+		const sparse: number[] = [];
+		sparse.length = valid.byteLength;
+		const accessor = [...new Uint8Array(valid)];
+		let accessorReads = 0;
+		Object.defineProperty(accessor, "0", {
+			get() {
+				accessorReads += 1;
+				return 0x50;
+			},
+		});
+		class ByteArraySubclass extends Array<number> {}
+		const withExtraArrayKey = [...new Uint8Array(valid)];
+		Object.defineProperty(withExtraArrayKey, "private", { value: true });
+		const withSymbolKey = [...new Uint8Array(valid)];
+		Object.defineProperty(withSymbolKey, Symbol("private"), { value: true });
+		const withNonstandardIndex = [...new Uint8Array(valid)];
+		Object.defineProperty(withNonstandardIndex, "00", { value: 0x50 });
+		const withNonconfigurableIndex = [...new Uint8Array(valid)];
+		Object.defineProperty(withNonconfigurableIndex, "0", {
+			configurable: false,
+		});
+		let proxyReads = 0;
+		const proxyArray = new Proxy([...new Uint8Array(valid)], {
+			get(target, property, receiver) {
+				proxyReads += 1;
+				return Reflect.get(target, property, receiver);
+			},
+		});
+		const oversizedArray: number[] = [];
+		oversizedArray.length = 36 + 68 + 8 * 1_024 * 1_024 + 1;
+		const negativeByte = [...new Uint8Array(valid)];
+		negativeByte[0] = -1;
+		const oversizedByte = [...new Uint8Array(valid)];
+		oversizedByte[0] = 256;
+		const fractionalByte = [...new Uint8Array(valid)];
+		fractionalByte[0] = 0.5;
+
+		for (const payload of [
+			new Uint8Array(valid),
+			new ArrayBufferSubclass(valid.byteLength),
+			withOwnProperty,
+			proxy,
+			shared,
+			detached,
+			withTrailingByte.buffer,
+			sparse,
+			accessor,
+			new ByteArraySubclass(...new Uint8Array(valid)),
+			withExtraArrayKey,
+			withSymbolKey,
+			withNonstandardIndex,
+			withNonconfigurableIndex,
+			proxyArray,
+			oversizedArray,
+			negativeByte,
+			oversizedByte,
+			fractionalByte,
+			valid.slice(0, -1),
+			new ArrayBuffer(0),
+			mutatedFrame(valid, (bytes) => {
+				bytes[0] = 0;
+			}),
+			mutatedFrame(valid, (bytes) => {
+				bytes[4] = 3;
+			}),
+			mutatedFrame(valid, (bytes) => {
+				bytes[5] = 1;
+			}),
+			mutatedFrame(valid, (_bytes, view) => {
+				view.setUint16(6, 1, false);
+			}),
+			mutatedFrame(valid, (_bytes, view) => {
+				view.setUint32(8, 3, false);
+			}),
+			mutatedFrame(valid, (_bytes, view) => {
+				view.setBigUint64(12, 3n, false);
+			}),
+			mutatedFrame(valid, (_bytes, view) => {
+				view.setBigUint64(20, BigInt(Number.MAX_SAFE_INTEGER) + 1n, false);
+			}),
+			mutatedFrame(valid, (bytes) => {
+				bytes[36] = 0x57;
+			}),
+			plr1Frame({ kind: "symlinkFile", version }),
+		]) {
+			expect(() => decodeWorkspaceReadFile(payload)).toThrowError(
+				expect.objectContaining(contractError),
+			);
+		}
+		expect(accessorReads).toBe(0);
+		// Promise/Array brand checks may read `then`; the PLR1 decoder itself must
+		// still reject the Proxy before consuming indexed values.
+		expect(proxyReads).toBe(0);
 	});
 
 	it("decodes only sorted unique addressable directory entries", () => {
@@ -249,10 +597,29 @@ describe("workspace file data codec", () => {
 		const bufferData = decodeWorkspaceFileData(buffer);
 		const numbers = [1, 2, 3, 4];
 		const numberData = decodeWorkspaceFileData(numbers);
+		const inheritedSetterNumbers = [5, 6, 7, 8];
+		let inheritedSetterCalls = 0;
+		Object.defineProperty(Array.prototype, "3", {
+			configurable: true,
+			set() {
+				inheritedSetterCalls += 1;
+			},
+		});
+		const inheritedSetterData = (() => {
+			try {
+				return decodeWorkspaceFileData(inheritedSetterNumbers);
+			} finally {
+				Reflect.deleteProperty(Array.prototype, "3");
+			}
+		})();
 		expect(Object.isFrozen(bufferData)).toBe(true);
 		expect(Object.isFrozen(numberData)).toBe(true);
 		expect(bufferData.byteLength).toBe(4);
 		expect(numberData.byteLength).toBe(4);
+		expect(numbers).toEqual([1, 2, 3, 4]);
+		expect(inheritedSetterCalls).toBe(0);
+		expect(inheritedSetterNumbers).toEqual([5, 6, 7, 8]);
+		expect([...inheritedSetterData.copy()]).toEqual([5, 6, 7, 8]);
 
 		new Uint8Array(buffer)[0] = 99;
 		numbers[0] = 99;

@@ -44,6 +44,7 @@ export interface WorkspaceEntryStat {
 	readonly size: number;
 	readonly mtime: number;
 	readonly ctime: number;
+	readonly version: string | null;
 }
 
 export interface WorkspaceDirectoryEntry {
@@ -144,6 +145,15 @@ export interface WorkspaceFileData {
 	readonly copy: () => Uint8Array;
 }
 
+/**
+ * One stable native read receipt. The stat and bytes originate from the same
+ * opened file handle and must never be split into independent IPC requests.
+ */
+export interface WorkspaceReadFileResult {
+	readonly stat: WorkspaceEntryStat;
+	readonly value: WorkspaceFileData;
+}
+
 export type Unlisten = () => void | Promise<void>;
 
 export interface PlainBridge {
@@ -194,5 +204,5 @@ export interface PlainBridge {
 	workspaceReadFile(
 		rootId: string,
 		relativePath: string,
-	): Promise<WorkspaceFileData>;
+	): Promise<WorkspaceReadFileResult>;
 }
