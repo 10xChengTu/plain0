@@ -2,7 +2,7 @@
 
 状态：执行中
 
-更新时间：2026-07-18
+更新时间：2026-07-19
 
 ## 目标与范围
 
@@ -30,9 +30,9 @@ flowchart LR
 
 所有请求均为 `deny_unknown_fields` 的 owned DTO：
 
-- `workspace_stat({ rootId, relativePath }) -> { kind, size, mtime, ctime }`
+- `workspace_stat({ rootId, relativePath }) -> { kind, size, mtime, ctime, version }`
 - `workspace_read_dir({ rootId, relativePath }) -> { entries: [{ name, kind }] }`
-- `workspace_read_file({ rootId, relativePath }) -> bytes`
+- `workspace_read_file({ rootId, relativePath }) -> PLR1 raw { stat/version, bytes }`
 
 `kind` 是闭集：`file`、`directory`、`symlink`、`symlinkFile`、`symlinkDirectory`、`other`，分别映射 Workbench `FileType`。目录读取只列一层并按 UTF-8 字节稳定排序；目录优先、自然排序和 `files.exclude` 留给 Workbench。
 
@@ -71,7 +71,108 @@ provider 激活使用显式能力合同：`workspace_capabilities() -> { create,
 
 激活 copy/move 还必须同时声明并真正实现 `FileFolderCopy`，确保同一 `plain-workspace:` provider 的跨 root copy 只进入一个 Rust `workspace_copy` command；provider `rename(from, to)` 按 authority/rootId 分流，同 root 只进入 `workspace_rename`，不同 root 只进入 `workspace_move`。Plain 不接受 Workbench 同路径 no-op、`overwrite` 或自动创建目标父目录：激活工作项必须增加同时覆盖 copy/move 的窄 patch，在任何写副作用前返回与 Rust 一致的错误，阻断预删除、`mkdirp`、generic copy/delete 和 rename fallback。任何涉及 Plain 的跨 scheme copy/move 也必须阻断通用 `mkdir/writeFile` fallback，另走以后明确授权的 import/export 合同。move incomplete 必须先发布两个 root 的 dirty/rescan/file-event 提示，再向 Workbench 抛稳定且明确“target 已发布”的 `WORKSPACE_MOVE_INCOMPLETE`；不能上报 MOVE 成功、建立 undo、走 fallback 或被当作普通 rename 失败自动重试。仅在 provider 内拒绝 overwrite 已经太迟，因为 upstream 可能先删除或创建文件系统项。
 
-版本化写入是 F020 的底层传输合同，不是 F030 的冲突 UI。Rust stat 增加 opaque version token；`workspace_write_file` 必须同时接收期望 version 与有界 bytes，在 mutation gate 内重验版本、写同目录临时文件并原子替换。由于 upstream `FileService` 不把 `mtime/etag` 继续传给 provider，Plain 需要一份可审计的窄 pnpm patch，把已经用于 dirty-write 校验的期望版本附加到 `IFileWriteOptions`；provider 不维护全局“最近 stat”缓存，也不接受缺少期望版本的覆盖写。
+版本化写入是 F020 的底层传输合同，不是 F030 的冲突 UI。Rust stat 增加 opaque version token；`workspace_write_file` 必须同时接收期望 version 与有界 bytes，在 mutation gate 内重验版本、写同目录临时文件并原子替换。由于 upstream `FileService` 不把 `mtime/etag` 继续传给 provider，Plain 需要一份可审计的窄 pnpm patch，只在 `plain-workspace:` 私有分支把已用于 dirty-write 校验的期望版本直接交给 `plainWriteFile(resource, bytes, expectedVersion)`；不得修改公开 `IFileWriteOptions` 或扩展 API。provider 不维护全局“最近 stat”缓存，也不接受缺少期望版本的覆盖写。
+
+### 版本化原子写入冻结合同
+
+`WorkspaceEntryStat` 增加必备闭集字段 `version: string | null`。全局 `workspace_capabilities.versionedWrite` 只表示当前构建包含实现；每个普通文件还必须通过 handle-relative filesystem gate 和同一份保守 `writer_eligibility` 静态资格检查才签发 token。首版 allowlist 固定为 macOS `apfs`，以及 Linux ext-family、XFS、Btrfs、tmpfs 和 overlayfs；root/target/parent 每次 stat、read、write 都重新 `fstatfs`，并拒绝只读 mount。未知、FAT/exFAT、NFS、SMB/CIFS、FUSE 和不一致类型返回 `version: null`/`WORKSPACE_WRITE_UNSUPPORTED`。文件型 stat 的 `version: null` 在 provider 解除全局只读后映射 `FilePermission.Readonly`；目录的 null 是正常状态，不能因此禁止安全 CRUD。混合 root 不靠 provider-wide 平台布尔值虚构文件系统保证。
+
+首版 token 还要求末级是真实普通文件、从 root 到 parent 的每段都不是 symlink、`nlink == 1`、无 `0o7000` 特殊 mode、完整 Unix identity/time 可用且 size 不超过 8 MiB。共享 `writer_eligibility` 进一步保守要求 target 与最终 parent 的 uid/gid 都等于进程 effective uid/gid，target 有 owner-write，parent 有 owner-write+execute 且无特殊 mode；这样 same-parent `create_new` stage 能保持 uid/gid。共享目录、ACL 才授权、setgid parent、只读 mount或任何无法无副作用证明的情况一律不签 token。写入时仍重新创建并验收 stage，token 不是权限授权。token 语法固定为 `wv1:<64 lowercase hex>`，是确定性磁盘 metadata 指纹，不是 secret、内容认证、文件权限或跨进程锁。唯一 production helper 按下表顺序做 SHA-256；除 path 外不加 padding，所有整数为 big-endian：
+
+| 字段     | 精确编码                                                                                                   |
+| -------- | ---------------------------------------------------------------------------------------------------------- |
+| domain   | ASCII `plain.workspace.file-version.v1` 后跟单个 `00` byte                                                 |
+| rootId   | 规范 UUID v4 的 16 raw bytes                                                                               |
+| path     | `u32` byte length + 规范 wire relative path UTF-8 bytes，不含前导 `/`                                      |
+| fs kind  | `u32`：APFS=1、ext=2、XFS=3、Btrfs=4、tmpfs=5、overlayfs=6                                                 |
+| identity | `dev:u64, ino:u64, len:u64, mode:u32, uid:u32, gid:u32, rdev:u64`                                          |
+| times    | `mtimeSec:i64, mtimeNsec:u32, ctimeSec:i64, ctimeNsec:u32`；秒为 two's-complement，纳秒必须 0..999,999,999 |
+| links    | `nlink:u64`                                                                                                |
+
+golden snapshot 固定为 root `00112233-4455-4677-8899-aabbccddeeff`、path `src/你好.rs`、APFS、dev `0x0102030405060708`、ino `0x1112131415161718`、len 5、mode `0o100644`、uid 501、gid 20、rdev 0、mtime `1700000000.123456789`、POSIX change-time `1700000001.987654321`、nlink 1，结果必须是 `wv1:dc1552695bf401f822d12397265943a7868008cad960c6ee11a9b1949ecdf800`。普通 Explorer stat 禁止读取/hash 内容，也不维护 Rust/TS token table、TTL、path→recent-version map 或 provider cache；否则 metadata resolve 会放大文件 I/O，或让无关 stat 挤出打开文档版本。
+
+#### 版本与首次读取绑定
+
+当前独立 `stat` 与 `readFile` 不能组成保存基线：固定 FileService 会并发执行两者，可产生 content(A)+token(B)。因此既有 `workspace_read_file` 在本切片演进为单次 versioned read，Rust 对同一个 opened target handle 执行 metadata-before → 0..8 MiB bounded read → metadata-after，再用 capability resolver receipt 从 root 重走并重验路径后，才返回同一快照的 bytes + stat/version。无 symlink parent 的直接普通文件比较 pathname/handle identity并可按资格签 token；经 root 内 `symlinkDirectory` 到达的普通文件仍返回 kind=file，但逐段重验 symlink lstat/raw payload与 resolved target handle identity，version为 null；final `symlinkFile` 分别重验 symlink 自身的 lstat/raw payload和解析后 target handle，不能把两者 inode误当相同。越 root、dangling、loop 或期间任一 receipt 字段变化仍返回清洗错误；所有经 symlink读取的内容只读。
+
+Tauri response 使用 raw `PLR1` frame：
+
+```text
+PLR1 | kind:u8 | versionLen:u8 | reserved=0:u16 | contentLen:u32be
+     | size:u64be | mtimeMs:u64be | ctimeMs:u64be | version:ascii | content:bytes
+```
+
+kind 首版只允许 file=1、symlinkFile=2；file 的 versionLen 只允许 0 或 68，symlinkFile 只能为 0。file=0 表示同 handle 内容可读但没有写基线，provider 必须映射 `FilePermission.Readonly` 并使用 `ETAG_DISABLED`，绝不能回退为 upstream `mtime+size` etag；因此 unknown filesystem、Windows、hardlink、只读 mode或 symlink parent 下的普通文件仍可只读打开，且每次读取真实 receipt。size 必须等于 contentLen，三个公开时间/大小数都要落在 JS safe integer，frame 精确结束且总内容不超过 8 MiB。PLR1 的 `ctimeMs` 是与现有 `WorkspaceEntryStat.ctime` 一致的 birth/created time；`wv1` 内部另取 POSIX metadata change-time sec+nsec，两者不得混用。provider 暴露不进入通用接口的 `plainReadFile(resource)`，返回 frozen `{ stat, value }`；标准 `readFile` 只作兼容 wrapper并复制 bytes。固定 FileService 的 Plain 专项 read 分支只调用 `plainReadFile`，用 receipt stat 生成高层 stat/etag并处理 etag、position、length、limit，不再启动独立 provider.stat。必须用确定性 A/B 时序测试证明旧内容不能与新 token 配对，也要证明 tokenless 文件被等长/同 mtime外部改写后不会误报 NotModified。
+
+#### 固定 Workbench patch
+
+固定 patch 由 `pnpm-workspace.yaml`、lockfile patch hash、exact package/file/hunk validator 和 hostile mutation tests 共同锁定，不接受 marker-only 检查。`@codingame/monaco-vscode-files-service-override@35.0.1` 的 `fileService.js` 只允许五处 Plain 分支：
+
+1. `toFileStat`：仅当 URI 记法为 `plain-workspace:`（运行时 `resource.scheme === "plain-workspace"`）且 provider实际返回的 stat自有私有`plainVersion`为合法token时复用高层`etag`；present-null的file/symlink file强制`ETAG_DISABLED + FilePermission.Readonly`，present-but-malformed fail closed，绝不产生通用mtime+size etag。`resolveMetadata=false`递归child的FileService partial `{ type }`没有该自有字段，不视为恶意malformed：partial file同样按无baseline readonly处理，partial directory保持目录语义。其他scheme保持upstream。
+2. `doReadFileStream`：只对同一 scheme 调用上述私有 `plainReadFile` 并直接使用 receipt stat；禁止独立 stat/read 并发或读取后的第二次 stat。
+3. `validateWriteFile`：此切片只允许 existing write。合法、非空、非 `ETAG_DISABLED` 的旧 token也必须遇到真实 existing stat且精确匹配；FileNotFound、token 缺失/null/malformed/force 都返回 `FILE_MODIFIED_SINCE`，permission/unavailable 等 stat error 原样传播。Plain 分支绝不返回 create intent、调用 `mkdirp` 或执行 upstream mtime/size/content弱比较。
+4. `doWriteUnbufferedQueued`：只对同一scheme接收已经有界的VSBuffer，再次验byteLength后才交给provider私有`plainWriteFile(resource, bytes, expectedVersion)`，并把其严格result原样向上返回；标准`provider.writeFile`对Plain existing save继续fail closed，其他scheme保持原调用。Plain不声明`OpenReadWriteClose`，禁止buffered/append/unlock/force fallback。
+5. `writeFile`：Plain在`validateWriteFile`通过后、任何upstream `peekBufferForWriting`前绕过peek并执行8 MiB有界collector。现成VSBuffer先验byteLength；ReadableStream逐chunk先验单chunk和checked累计，失败时destroy；ReadableBufferedStream先逐项计算既有`buffer`而不concat，再从其`stream`最多读到8 MiB+1并在失败时destroy；纯Readable逐次read但没有destroy能力，失败后停止继续read。三类都拒绝零长度无进展chunk，单个超大chunk在任何concat/copy前即失败。FILE_TOO_LARGE/contract error时`plainWriteFile/workspace_write_file`调用次数必须为零（前置`provider.stat`可有一次），禁止进入`peekStream`、`peekReadable`、`streamToBuffer`、`bufferedStreamToBuffer`或`readableToBuffer`。随后消费私有write result；只有`written`直接用Rust同次publication验收返回的完整provider stat调用`toFileStat`，且只有此分支能发布FileService WRITE success event，不得发起post-write`resolve/stat`。provider对Rust的结构化`targetPublished/outcomeUnknown`或dispatch后无法严格认证的rejection先发一个root `UPDATED`，再把frozen union返回；FileService将其构造成保留outcome的branded非冲突`FileOperationError`并抛出。它不能被catch降成普通“未写入”，也不能触发成功事件。非Plain仍走原peek/resolve。
+
+固定 API patch 在 `TextFileEditorModel` 与 `StoredFileWorkingCopy` 两个模型各增加三个来源闭集的 Plain baseline 分支，不能只修 save-success：
+
+1. `resolveFromFile` 从同次 PLR1 receipt 应用内容时，以 `plainReadReceipt` 来源无条件接纳该 stat，即使 mtime 回拨；若 resolve generation 已过期则整份 receipt（内容和 stat）一起丢弃，不能只应用内容或只保留旧 token。
+2. `resolveFromBuffer` 覆盖 preferredContents 和 MOVE/COPY snapshot restore。无论独立 stat 成功或失败，它只能用 stat 更新 readonly/orphan/display 信息，随后把 etag 无条件替换为唯一 sentinel `plain-buffer-no-baseline`，并以 `plainBufferNoBaseline` 来源强制替换旧 baseline；不能受 monotonic mtime guard保留旧 wv1。sentinel 永不进入 provider/Rust，下一次保存稳定返回 `FILE_MODIFIED_SINCE`，直到 F030 明确 reload/rebase/重新授权。
+3. `handleSaveSuccess` 只对严格 `written.stat` 使用 `plainWriteReceipt` 来源，使合法新 `wv1` 即使 mtime 回拨也成为新基线。
+
+`updateLastResolvedFileStat` 的私有来源闭集必须验证 scheme 与 etag：read receipt 只接受合法 wv1 或 tokenless `ETAG_DISABLED`，buffer 只接受精确 sentinel，write receipt只接受合法 wv1；其余普通 resolve、backup/迟到 stat 与非 Plain 继续 upstream monotonic guard。exact patch validator锁住两文件的来源定义和六个权威调用点。Workbench 的 model version/sequentializer 继续负责“异步保存期间内存是否又被编辑”，不得把它塞入 Rust disk token。
+
+`ETAG_DISABLED`、`ignoreModifiedSince`、`files.saveConflictResolution=overwriteFileOnDisk`、原生 Overwrite 和任意 `force/confirmed` boolean 都不能授权覆盖。F020 保持 dirty/conflict并 fail closed；F030 用户确认覆盖时必须重新获取当前 version，再提交该精确快照。Rust 最终发现 stale token 时，Plain provider 必须抛清洗后的 `FileOperationError(FILE_MODIFIED_SINCE)`，不能通过不存在 ModifiedSince 的 provider error code退化为 OTHER/MOVE error。新目标的非空 save/create 留给激活工作项的 exclusive create 路由；本 raw write 没有 create 语义。
+
+#### 有界 raw write 与原生发布
+
+单次 `workspace_write_file` 只接受 Tauri `Request` 的 raw body。生产 bridge 只构造 exact `Uint8Array`，frame 固定为：
+
+```text
+PLW1 | rootIdLen:u16be | pathLen:u16be | versionLen:u16be | contentLen:u32be
+     | rootId:utf8 | relativePath:utf8 | expectedVersion:ascii | content:bytes
+```
+
+rootId 恰为规范 UUID v4 的 36 bytes，path 为 1..4 KiB/最多 256 段，version 恰为 68 ASCII bytes，content 为 0..8 MiB，frame 精确结束。TS 先读取 own data descriptors，让 accessor/抛错 trap fail closed；标准 JS 不能证明识别所有透明 Proxy，安全性来自把 exact intrinsic `Uint8Array` view（只复制 view 的 byteOffset/byteLength）同步复制到不再暴露的私有 snapshot并立即编码，而不是冻结 typed array。拒绝 SharedArrayBuffer、detached buffer、subclass、unknown key和超限，冻结的只是外层 request/result/wrapper。Tauri 会把顶层 number[]、ArrayBuffer 和任意 view 都变成 `InvokeBody::Raw`，Rust无法反推 JS 原类型；Rust只验 magic、总长、checked offsets、UTF-8/ASCII、闭集 token和尾部零剩余，Harness则锁生产 bridge只传 exact Uint8Array。嵌套 JSON bytes、base64、headers、第二次 metadata IPC 和无界 Serde DTO 一律禁止。Tauri 在 command 前已经分配 raw `Vec<u8>`，8 MiB 是服务处理上限而非 renderer-compromise 下的 transport preallocation firewall。
+
+Rust service 在 `mutation gate → workspace state` 下重新取得 lease并持有到明确终态。pre-publication 顺序固定：
+
+1. 从 root 逐段 nofollow 打开并记录完整 parent identity chain；末级 nofollow/nonblock 打开 existing target，重验 allowlisted fs、真实普通、`nlink == 1`、无特殊 mode、owner可写、size和 expected token。
+2. 同 parent 最多 16 次创建 UUID v4 高熵、`0600`、`create_new`、nofollow/nonblock 的 `.plain-write-*` stage；记录 handle/pathname identity，初建与每次最终验收都要求真实 regular、`nlink == 1`、uid/gid等于 target、mode等于当前阶段期望、size/content SHA-256和 pathname↔handle identity。
+3. 写 0..8 MiB，设置 `target.mode & 0o777`，按 metadata-before → bounded read/hash → metadata-after 复核完整 bytes并同步 stage；不能在 target 上 truncate/write。
+4. publication 前从当前 root重新走完整 nofollow parent chain并逐层匹配原 identity，使用重新取得的同一 parent handle再次重算 target token，并再次验收 stage全部字段。任一不匹配都保持旧 target并按 identity receipt有界清理；stage 名被替换时宁可遗留 artifact，也不删 replacement。
+5. 只把重新确认的 parent capability 与两个 basename交给无 flags `rustix::fs::renameat`。禁止多段 `Dir::rename`、`std::fs`、backup/restore、copy/tombstone、shell、ambient path、`EXCHANGE/SWAP` rollback 或 no-replace+delete。
+
+唯一 `publish_and_classify` typestate helper 消费 stage/old-target/parent receipts；调用 `renameat` 后禁止 `?`、`map_err` 或普通 `Result` 早退，也禁止第二次 rename/rollback。只有 syscall 报错，且从当前 root 重走的 parent chain仍匹配、target仍精确为 old receipt、stage仍精确为本次 receipt/content时，才可返回 `notPublished(CommandError)`并安全清理；其余必须进入闭集终态。post-publication target 验收也必须从当前 root 重新走完整 parent chain、逐层匹配，再在重新确认的 parent 下验证 target；只在旧 held parent fd中匹配不算 URI 当前状态。rename 成功后 parent rewalk mismatch归已发布但 unverifiable，不能返回 written：
+
+- `{ status: "written", stat }`：rename reported success，parent directory sync 成功，current-root parent rewalk和target postcheck精确匹配本次 stage content/identity，`stat` 与新 version来自这次同一验收。
+- `{ status: "targetPublished", publicationEvidence: "renameReportedSuccess" | "targetObservedWritten", rename: "reportedSuccess" | "reportedFailure", directorySync: "synced" | "failed", target: "matchesWritten" | "changed" | "unverifiable" }`：有证据证明target namespace已被本次rename影响，但至少一个publication观察不是完整普通成功。`renameReportedSuccess`只证明rename syscall报告已替换namespace，不声称所请求bytes曾发布；只有current-root target identity/content明确匹配本次stage才能使用`targetObservedWritten`。rename failure必须先取得后一证据，即使后续观察变成changed/unverifiable也保留它。`reportedSuccess+synced+matchesWritten`只能编码为written；无上述证据的failure不得冒充targetPublished。正交字段保留组合故障，不做单reason优先级压缩。
+- `{ status: "outcomeUnknown", observation: "native", rename: "reportedFailure", directorySync: "notAttempted" | "synced" | "failed", target: "ambiguous" }`：Rust已观察rename failure，但当前证据既不能证明未发布，也不能证明target保持旧值。
+- `{ status: "outcomeUnknown", observation: "responseUnavailable", rename: "unobserved", directorySync: "unobserved", target: "ambiguous" }`：invoke已dispatch但response/rejection无法严格认证，前端没有资格伪造任何native rename/sync观察。
+
+Rust/TS/Browser strict decoder必须拒绝 full-success伪 incomplete、reportedFailure却无 targetObservedWritten证据的 published、非法 evidence/rename组合、native/responseUnavailable交叉字段和unknown的任何额外状态。provider本切片新增可测的有界rescan seam：`onDidChangeFile`不再是`Event.None`。Rust结构化后两类由provider发一个root URI `UPDATED`后返回frozen union；FileService随后抛branded非冲突错误。raw invoke一旦dispatch，只有严格解码且位于Rust pre-publication闭集的`CommandError`才可作为普通失败；response丢失、Promise未知rejection、success/incomplete payload解码失败都必须保守转成`observation:"responseUnavailable"`的outcomeUnknown、发同一个root UPDATED并返回union。本地codec在invoke前失败才可直接ordinary error。不得上报WRITE成功、自动retry、rollback或依赖旧token一定冲突；unknown可能最终仍是旧target。正常stale token才映射`FILE_MODIFIED_SINCE`。stage/target cleanup只消费自己的identity receipt，published target永不删除。
+
+两个 model 的 save error handler还必须识别 branded incomplete/unknown：保持 dirty，禁止 generic Retry、Overwrite、自动 save或旧 token重放；只允许不会盲写同一路径的 Reload/Save As/Details 类人工动作。root UPDATED不会自动替换 dirty model baseline。本 provider capabilities 在三个版本化写子工作项中始终严格保持 `FileReadWrite | Readonly`，直到下一激活工作项完成全部 CRUD、root/fs能力激活与 E2E。
+
+此合同仍有公开外部竞态：系统没有从已验收 source fd 对 expected target做条件 rename。最后一次 root→parent rewalk、stage/target pathname/content验收到 `renameat` 之间，任何能修改 parent directory entry或stage inode的进程（通常同 UID，也可能是共享目录中的其他 UID或特权进程）仍可替换 ancestor、stage、target或修改stage bytes；错误内容可能短暂发布，postcheck只能分类而不能撤销。post-publication current-root rewalk/target check到返回 renderer之间仍可能再次变化，结果只描述该次观察。parent capability保证不越出已授权 root，但不能虚构 CAS。metadata token也不直接保护 ACL、xattr、resource fork和flags；新 inode可能丢失旧值或继承 parent default ACL，首版只承诺普通 POSIX mode与相同 uid/gid的受限源码文件保存，完整 metadata-preserving save另立平台工作项。Windows保持 `versionedWrite: false`。
+
+#### Harness 与验收落点
+
+实现必须新增单一共享 fixture（计划路径 `tests/fixtures/workspace-version-v1.json`），由 Rust token/parser、TS encoder/decoder、Browser mock共同读取。除上述 wv1 golden外，`PLW1` fixture 使用同 root/path/version和 bytes `00 41 ff 0a`，完整 hex 固定为：
+
+```text
+504c57310024000d00440000000430303131323233332d343435352d343637372d383839392d6161626263636464656566667372632fe4bda0e5a5bd2e72737776313a646331353532363935626634303166383232643132333937323635393433613738363830303863616439363063366565313161396231393439656364663830300041ff0a
+```
+
+`PLR1` file fixture 是独立的 len=4 stable-read snapshot：除 len 和公开 birth/created time外复用上述 metadata，size=4、mtimeMs=1700000000123，公开 `ctimeMs=1699999999000`，token内部仍使用POSIX change-time `1700000001.987654321`，因此token为`wv1:a5a3ace16ca7f42ef7702ed0d3c877891d3f937343041adc490869cde1de1feb`。它不冒充PLW1 staged rename后的inode/time；PLW1 fixture只是“以len5旧token提交四字节新内容”的独立request。完整hex固定为：
+
+```text
+504c5231014400000000000400000000000000040000018bcfe5687b0000018bcfe564187776313a613561336163653136636137663432656637373032656430643363383737383931643366393337333433303431616463343930383639636465316465316665620041ff0a
+```
+
+Harness 锁唯一 token/eligibility helper、raw command/registration/service/private-provider路由、read/write receipt贯穿、无 post-read/post-write stat、tokenless `ETAG_DISABLED+Readonly`、三个 model baseline来源、`PLW1/PLR1` exact codec、8 MiB+1 bounded collector、files-service/API/error-handler patch exact hunks、manifest/lock hashes；实现同时把 Cargo.toml 的 direct Tauri pin 改为 `version = "=2.11.5"`，并校验 resolved direct tauri恰为2.11.5、JS API恰为2.11.1。provider继续 Readonly且不声明 OpenReadWriteClose/append/unlock/force/create fallback。Rust只允许受审计 writer 的 parent+basename覆盖 `renameat`；publish helper在 rename后禁止普通 error传播。hostile tests必须覆盖缓存/content-read/ambient/truncate/backup/递归/process、alias/UFCS/模板/动态属性等绕路。
+
+最小验证映射为：Rust `workspace::version/reader/writer/service` tests；`tests/unit/workspace-data-codec.test.ts`、`workspace-bridge.test.ts`、`workspace-file-system-provider.test.ts`、`native-bridge.test.ts`；`scripts/plain/check-boundaries.mjs` 的 mutation fixtures；fixed patched-package runtime tests。至少覆盖 A/B read竞态、resolved model PLR1 reload mtime回拨、已解析 future-mtime模型的 preferredContents stat failure、MOVE/COPY snapshot restore、连续两次 save与 mtime回拨、tokenless unknown-fs/Windows/hardlink/symlink-parent/0444只读和同size同mtime改写、0/8 MiB/8 MiB+1、Readable/ReadableStream/ReadableBufferedStream各自单个超大chunk与无限/零进展输入在8 MiB+1停止（禁止peek/concat且write invoke=0，stat可为1）、production native invoke顶层exact Uint8Array且无request wrapper/header/JSON、non-zero byteOffset view、token malformed/null/stale/replay/cross-root/path、allowlist/unknown fs、等长改写、inode/ancestor/symlink/FIFO/device swap、target/stage chmod/chown/nlink/hardlink、16次 collision、stage replacement、sync/rename/parent-sync/postcheck组合、rename reported error但发布、unknown实际未发布、后端已写但invoke rejection/坏response、非法 result cross-field、无Retry/Overwrite UI、root lifecycle gate两种顺序，以及最终 parent/stage/target残余竞态的 deterministic hooks。格式/类型/Harness失败时不得继续后续验收。
 
 ### 目录 manifest 与 staged tree 冻结合同
 
@@ -281,9 +382,11 @@ Harness 必须锁定：四个 command/registration/service 唯一路由；prepar
 8. 原样 symlink staged copy：link payload 有界且不解引用；内部、外部、dangling 和 loop 行为单独提交。
 9. 有界目录 manifest 与 staged tree：聚合预算、特殊文件拒绝、失败清理与 source 变化重验单独提交。
 10. 跨 root move receipt/verified delete 与确认删除各自单独提交；检测到源变化时不删，并公开外部 TOCTOU 下的非原子结果；不能借 Workbench 的 overwrite 预删除绕过 no-clobber。
-11. 有界内容写入、opaque version、上游期望版本透传 patch 与临时文件原子替换单独提交，形成 provider 所需的安全写传输。
-12. 增加严格 `workspace_capabilities` DTO、copy/move 同路径/overwrite/mkdirp/generic fallback/cross-scheme 窄 patch，并按 Rust 平台能力激活 provider 写能力、精确文件事件与 Explorer Browser E2E；不支持安全 rename 的平台继续只读。
-13. watcher 的有界 dirty/rescan 状态机、浏览器 mock 收敛测试与真实 Tauri 文件树验收。
+11. `wv1`/静态 writer eligibility、`PLR1` 同 handle read、tokenless readonly、FileService read receipt和两个 model 的 read/buffer baseline patch，完成对应 Rust/TS/package/Harness验证后立即独立提交；provider保持只读。
+12. `PLW1` raw codec、Rust staged writer、post-rename typestate、严格 bridge/Browser mock合同，完成原生命令与故障矩阵验证后立即独立提交；尚无 Workbench 写 consumer，provider保持只读。
+13. FileService bounded collector/write receipt、provider result/rescan seam、dispatch 后 unknown分类和两个 save error handler的无 Retry/Overwrite UI，完成 package/runtime/Harness验证后立即独立提交；provider仍保持只读。
+14. 增加严格 `workspace_capabilities` DTO、copy/move 同路径/overwrite/mkdirp/generic fallback/cross-scheme 窄 patch，并按 Rust 平台能力激活 provider 写能力、精确文件事件与 Explorer Browser E2E；不支持安全 rename 的平台继续只读。
+15. watcher 的有界 dirty/rescan 状态机、浏览器 mock 收敛测试与真实 Tauri 文件树验收。
 
 ## 验收矩阵
 
@@ -296,4 +399,5 @@ Harness 必须锁定：四个 command/registration/service 唯一路由；prepar
 - 文件、目录和 symlink 的同 root rename 不覆盖任何既有目标；并发竞争最多一个成功；父目录 capability 与 mutation/revoke 两种线性顺序均有测试。
 - 普通文件 copy 覆盖同 root/双 root、exact 8 MiB/增长一字节、打开后 basename 替换仍复制原 handle、同 inode 增长/截断冲突、最终 symlink/FIFO/special file、目标各种既有类型、source/target parent swap、staging identity/清理竞争和并发单胜者；正式目标只完整出现或完全不存在。
 - symlink 与目录 manifest 覆盖全树聚合条目/名称/link payload/深度/总逻辑字节、稀疏大文件、内部/外部/dangling/loop link、重叠 root alias 后代、源树并发增删改和特殊文件；失败不得发布 staging。
+- 版本化写覆盖 `PLR1/PLW1` raw frame、tokenless readonly、0/8 MiB/8 MiB+1与无界 stream、opaque token 缺失/旧值/重放、任意 buffer baseline失效、等长外部改写、mtime 回拨、target/stage identity swap、symlink/hardlink/special mode 拒绝、sync/rename/parent-sync/current-root post-publish故障、IPC outcome unknown、无盲目 Retry UI、root 生命周期 gate，以及 fixed FileService/model patch 对 Plain/非 Plain、force/autosave 和 buffered fallback 的正负路径。
 - Browser mock 验证 Explorer 展开、文本打开和排除 surface；真实 Tauri 验证原生 picker、文件树展开、取消和外部变化收敛。

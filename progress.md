@@ -1,12 +1,12 @@
 # Plain 重写进度
 
-更新时间：2026-07-18
+更新时间：2026-07-19
 
 ## 当前状态
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：无；确认删除底层切片已完成，下一项是 opaque version、有界原子写入与期望版本透传的补充调研和方案冻结，尚未开始。
+- 当前最小工作项：无；opaque version、有界原子写入与 Workbench 期望版本透传的补充调研和方案冻结已完成，下一项是按冻结合同实现版本化原子写入，尚未开始。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -50,11 +50,15 @@
 - [x] 完成确认删除的 GitHub/固定依赖补充调研与方案冻结：Code OSS 1.128.1/1.130 的十个删除链关键文件无 blob 漂移；排除 Trash 文案后静默永久删除、逐项 fallback、5 MB/空目录伪 Undo、上游 atomic/tombstone、`remove_dir_all` 与 ambient `trash` crate。确定 1..64 项 prepare/Workbench 一次确认/begin 整批预检/带调用级授权的 provider 逐项 commit、Rust-only batch receipt、统一 mutation gate 锁序、一次性 token/entryId、per-entry revalidation/journal、结构化 retained/partial 和无内容字节上限的永久删除合同；provider 继续只读且不声明 Trash/atomic capability。
 - [x] 完成确认删除底层切片：Rust 实现 `prepare/cancel/begin/commit` 四阶段、窗口绑定 UUID v4、120 秒单调 idle TTL、整批 begin 预检、有序单 in-flight 消费、capability-relative nofollow 删除与精确 retained/partial 终态；目录 receipt 采用 `parent index + basename` 紧凑 manifest，hardlink/parent journal 原地重采样，未知成员流式 fail-fast。严格 TypeScript codec、native bridge 和 browser mock 同步实现，默认单调时钟、shared inode/nlink、raw symlink、生命周期失效与 observer 竞态均有回归；provider 仍保持只读，生产代码尚无删除 consumer。
 - [x] 确认删除切片通过完整 `pnpm check`：238 个 TypeScript/JavaScript 单元测试、194 个 Rust 测试、格式、类型、lint、架构/排除面 guard 与 203 项 bundle 债务基线全部通过。独立复核额外修复了完整路径重复导致的超 GiB receipt 峰值、unknown-member 无界收集、hardlink/parent O(N²)、basename 往返遗漏、UUID variant/日志泄漏和 template/computed/UFCS/额外 command 参数等 Harness 绕过；10,000 alias、深链宽叶、跨 root、外部 nlink、特殊 parent sibling 与并发单消费均有验收。
+- [x] 完成 opaque version、有界原子写入与 Workbench 期望版本透传的 GitHub/固定依赖补充调研和方案冻结：确认现有 model revision 链可复用，但 `mtime+size` 预检会漏等长改写、首次并发 stat/read 可配错内容基线、任意内存 buffer可与独立 stat token错配、mtime回拨会拆散权威receipt、expected token在provider前丢失且post-write resolve可再次配错token；排除Zed/Lapce/Helix的时间戳/truncate路线及通用atomic-write crate。确定保守 writer eligibility下的无状态`wv1`、tokenless readonly、同handle `PLR1` read receipt、8 MiB `PLW1` write frame、FileService五点私有receipt/bounded-stream patch、两个model各三来源baseline patch、无Retry/Overwrite错误UI、从当前root重走parent chain的staged write、带发布证据的post-rename typestate及dispatch后unknown分类；公开ancestor/stage/target最后syscall与postcheck后竞态，Windows和symlink/hardlink继续只读。
 
 ## 下一步
 
-1. 先完成 opaque version、有界原子写入和 Workbench 期望版本透传的 GitHub/固定依赖补充调研与方案冻结，再按独立工作项实现并提交。
-2. 在 provider 注册前读取严格 `workspace_capabilities` DTO，增加 copy/move 同路径、overwrite、自动 mkdirp、generic fallback 与 cross-scheme 防绕过 patch，并按 Rust 平台能力激活写能力与 Browser E2E；不支持原子 no-replace rename 的平台继续只读。随后实现 watcher/rescan，最后运行真实 Tauri 文件树总验收并写回 `F020` evidence。
+1. 实现`wv1`/writer eligibility、tokenless readonly与`PLR1`同handle read，接入FileService read receipt和两个model的read/buffer baseline patch；完成Rust/TypeScript/package/Harness局部验收后立即独立提交。
+2. 实现`PLW1` raw codec、Rust有界staged writer、current-root postcheck与严格post-rename typestate，接入native bridge/Browser mock；完成原生命令故障矩阵后立即独立提交，provider仍只读。
+3. 实现FileService 8 MiB+1 bounded collector/write receipt、provider rescan/result seam、dispatch后unknown分类和两个save error handler的无Retry/Overwrite UI；完成package/runtime/Harness验收后立即独立提交，provider仍只读。
+4. 在provider注册前读取严格`workspace_capabilities` DTO，增加copy/move同路径、overwrite、自动mkdirp、generic fallback与cross-scheme防绕过patch，并按Rust平台能力激活写能力与Browser E2E；不支持原子no-replace rename的平台继续只读。
+5. 实现watcher/rescan，最后运行真实Tauri文件树总验收并写回`F020` evidence。
 
 ## 当前验收命令
 
