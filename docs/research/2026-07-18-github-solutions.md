@@ -64,6 +64,12 @@ Git 后端首期统一调用系统 Git CLI，使用 porcelain v2/NUL 等机器�
 - 搜索：[ripgrep](https://github.com/BurntSushi/ripgrep) 15.2 sidecar，解析 `--json`；文件遍历使用 `ignore`。
 - 文件监听：[notify](https://github.com/notify-rs/notify) 8.2；事件丢失/合并时重扫。
 
+## 真实 Tauri 验收 profile 隔离
+
+固定依赖源码与官方 GitHub 仓库给出两条不同语义：Wry 0.55.1 的 [`WKWebsiteDataStore` 选择逻辑](https://github.com/tauri-apps/wry/blob/wry-v0.55.1/src/wkwebview/mod.rs) 在 `incognito` 下使用 `nonPersistentDataStore`，而 `dataStoreIdentifier` 仅在 macOS 14+/iOS 17+ 选择另一个仍会持久化的自定义 store；Tauri 固定源码的 [`WebviewConfig`](https://github.com/tauri-apps/tauri/blob/7cd71369c00978a3783b6ae3e9972358abbe4ae6/crates/tauri-utils/src/config.rs) 也明确把前者定义为隐私模式、后者定义为 WKWebView 对 `dataDirectory` 的替代。真实 E2E 需要每次从干净状态开始且不得迁移、清空或污染用户 profile，因此排除把固定 `dataStoreIdentifier` 写入生产配置，也不删除 `~/Library/WebKit` 数据。
+
+Tauri CLI 官方 `--config` flavor 会按给定顺序覆盖默认配置；[CLI 2.11.4 的合并实现](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-cli/src/helpers/config.rs) 使用 RFC 7396 JSON Merge Patch，数组会整体替换而不是逐项合并。因此 Plain 采用独立 E2E overlay，完整复制唯一主窗口并只增加 `incognito: true`；Harness 负责防止窗口字段漂移、自动平台配置插入、overlay 扩权或验收脚本误用生产 profile。
+
 ## F020 工作区路径与文件树专项调研
 
 专项审计排除了把 Tauri `plugin-fs` scope 直接当作编辑器安全边界：Tauri core 的 [fs scope](https://github.com/tauri-apps/tauri/blob/3f62c70d6b9a9eeeb7c302b010c858405a1bb761/crates/tauri/src/scope/fs.rs) 采用 glob、allow/deny 和 canonicalize，不存在目标会退回词法匹配；[plugin-fs commands](https://github.com/tauri-apps/plugins-workspace/blob/57ac98645324c04ab2b4c969538f5d55569bf43d/plugins/fs/src/commands.rs) 在 scope 检查后继续使用 ambient `std::fs`。这类检查/使用分离无法消除 symlink swap/TOCTOU，也会迫使 WebView 接触绝对路径或宽泛 scope。

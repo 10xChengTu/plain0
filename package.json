@@ -17,6 +17,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
+    "tauri:dev:e2e": "tauri dev --config src-tauri/tauri.e2e.conf.json",
     "tauri:build": "tauri build",
     "format": "prettier --write app tests scripts/plain package.json features.json AGENTS.md progress.md docs/**/*.md vite.config.ts playwright.config.ts vitest.config.ts tsconfig*.json",
     "format:check": "prettier --check app tests scripts/plain package.json features.json AGENTS.md progress.md docs/**/*.md vite.config.ts playwright.config.ts vitest.config.ts tsconfig*.json",

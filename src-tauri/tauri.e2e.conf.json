@@ -1,0 +1,19 @@
+{
+	"$schema": "https://schema.tauri.app/config/2",
+	"app": {
+		"windows": [
+			{
+				"label": "main",
+				"title": "Plain",
+				"width": 1280,
+				"height": 800,
+				"minWidth": 800,
+				"minHeight": 600,
+				"center": true,
+				"resizable": true,
+				"fullscreen": false,
+				"incognito": true
+			}
+		]
+	}
+}

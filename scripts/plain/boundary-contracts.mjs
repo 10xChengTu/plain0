@@ -27,6 +27,15 @@ const EXPECTED_CAPABILITY_KEYS = Object.freeze([
 	"windows",
 ]);
 
+const EXPECTED_TAURI_E2E_SCRIPT =
+	"tauri dev --config src-tauri/tauri.e2e.conf.json";
+const EXPECTED_TAURI_CONFIG_FILES = Object.freeze([
+	"tauri.conf.json",
+	"tauri.e2e.conf.json",
+]);
+const TAURI_CONFIG_FILE_PATTERN =
+	/^(?:tauri(?:\.[^.]+)*\.conf\.(?:json|json5)|Tauri(?:\.[^.]+)?\.toml)$/;
+
 function isRecord(value) {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -677,6 +686,16 @@ export function validateTauriConfiguration(config) {
 		if (isRecord(window) && Object.hasOwn(window, "url")) {
 			failures.push("the main window must use the bundled frontend, not a URL");
 		}
+		if (isRecord(window) && Object.hasOwn(window, "incognito")) {
+			failures.push(
+				"the production main window must use its persistent WebView data store",
+			);
+		}
+		if (isRecord(window) && Object.hasOwn(window, "dataStoreIdentifier")) {
+			failures.push(
+				"the production main window must not migrate to a custom WebView data store",
+			);
+		}
 	}
 
 	if (!sameArray(security?.capabilities, ["main-capability"])) {
@@ -705,6 +724,73 @@ export function validateTauriConfiguration(config) {
 				"Tauri security contains fields outside the minimum contract",
 			);
 		}
+	}
+
+	return failures;
+}
+
+export function validateTauriConfigurationFiles(fileNames) {
+	const configurationFiles = fileNames
+		.filter((fileName) => TAURI_CONFIG_FILE_PATTERN.test(fileName))
+		.sort();
+	return sameArray(configurationFiles, EXPECTED_TAURI_CONFIG_FILES)
+		? []
+		: [
+				"src-tauri must keep only the audited base and E2E Tauri configuration files",
+			];
+}
+
+export function validateTauriE2EConfiguration(
+	productionConfig,
+	e2eConfig,
+	launchScript,
+) {
+	const failures = [];
+	if (launchScript !== EXPECTED_TAURI_E2E_SCRIPT) {
+		failures.push(
+			"tauri:dev:e2e must launch only the audited Tauri E2E configuration",
+		);
+	}
+	if (
+		!isRecord(e2eConfig) ||
+		!sameArray(Object.keys(e2eConfig).sort(), ["$schema", "app"])
+	) {
+		failures.push("the Tauri E2E overlay must contain only $schema and app");
+		return failures;
+	}
+	if (e2eConfig.$schema !== productionConfig?.$schema) {
+		failures.push("the Tauri E2E overlay must use the production schema");
+	}
+	if (
+		!isRecord(e2eConfig.app) ||
+		!sameArray(Object.keys(e2eConfig.app).sort(), ["windows"])
+	) {
+		failures.push("the Tauri E2E app overlay must replace only windows");
+		return failures;
+	}
+	const productionWindows = productionConfig?.app?.windows;
+	const e2eWindows = e2eConfig.app.windows;
+	if (
+		!Array.isArray(productionWindows) ||
+		productionWindows.length !== 1 ||
+		!isRecord(productionWindows[0]) ||
+		!Array.isArray(e2eWindows) ||
+		e2eWindows.length !== 1 ||
+		!isRecord(e2eWindows[0])
+	) {
+		failures.push(
+			"production and Tauri E2E configurations must each define one window",
+		);
+		return failures;
+	}
+	const expectedWindow = {
+		...productionWindows[0],
+		incognito: true,
+	};
+	if (!sameObject(e2eWindows[0], expectedWindow)) {
+		failures.push(
+			"the Tauri E2E window must equal the production window plus incognito true",
+		);
 	}
 
 	return failures;

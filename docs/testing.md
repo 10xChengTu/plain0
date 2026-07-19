@@ -64,6 +64,8 @@
 
 ### 真实 Tauri E2E
 
+统一使用 `pnpm tauri:dev:e2e` 启动验收窗口。该命令通过 Tauri 官方 `--config` flavor 合并 `src-tauri/tauri.e2e.conf.json`，只把完整主窗口替换为 `incognito: true` 版本；WKWebView 因而使用进程级非持久 data store，不读取或污染用户的生产 Workbench 布局、Local Storage、IndexedDB、cookie 与 cache。生产 `pnpm tauri:dev` 必须继续使用持久 data store；Harness 同时锁定启动命令、overlay 闭集及两份窗口配置除 `incognito` 外完全一致。
+
 使用电脑控制操作实际应用，至少覆盖：
 
 1. 系统目录选择器打开 fixture。

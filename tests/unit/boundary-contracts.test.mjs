@@ -8,6 +8,8 @@ import {
 	validateMainCapability,
 	validateTauriApiBoundary,
 	validateTauriConfiguration,
+	validateTauriConfigurationFiles,
+	validateTauriE2EConfiguration,
 	validateWorkspaceCapabilitiesBoundary,
 	validateWorkspaceCopyCommandRegistration,
 	validateWorkspaceDeleteBoundary,
@@ -22,10 +24,23 @@ import {
 	validateWorkspaceWatcherBoundary,
 } from "../../scripts/plain/boundary-contracts.mjs";
 
+const baselineWindow = {
+	label: "main",
+	title: "Plain",
+	width: 1280,
+	height: 800,
+	minWidth: 800,
+	minHeight: 600,
+	center: true,
+	resizable: true,
+	fullscreen: false,
+};
+
 const baselineConfig = {
+	$schema: "https://schema.tauri.app/config/2",
 	app: {
 		withGlobalTauri: false,
-		windows: [{ label: "main" }],
+		windows: [baselineWindow],
 		security: {
 			capabilities: ["main-capability"],
 			assetProtocol: { enable: false, scope: [] },
@@ -56,6 +71,13 @@ const baselineConfig = {
 				"form-action": "'none'",
 			},
 		},
+	},
+};
+
+const baselineTauriE2EConfig = {
+	$schema: baselineConfig.$schema,
+	app: {
+		windows: [{ ...baselineWindow, incognito: true }],
 	},
 };
 
@@ -236,6 +258,90 @@ describe("Plain Tauri boundary contracts", () => {
 		remoteWindow.app.windows[0].url = "https://example.com";
 		expect(validateTauriConfiguration(remoteWindow)).toContain(
 			"the main window must use the bundled frontend, not a URL",
+		);
+
+		const ephemeralProductionWindow = structuredClone(baselineConfig);
+		ephemeralProductionWindow.app.windows[0].incognito = false;
+		expect(validateTauriConfiguration(ephemeralProductionWindow)).toContain(
+			"the production main window must use its persistent WebView data store",
+		);
+
+		const migratedProductionWindow = structuredClone(baselineConfig);
+		migratedProductionWindow.app.windows[0].dataStoreIdentifier =
+			Array(16).fill(0);
+		expect(validateTauriConfiguration(migratedProductionWindow)).toContain(
+			"the production main window must not migrate to a custom WebView data store",
+		);
+	});
+
+	it("isolates real Tauri acceptance without changing production state", () => {
+		expect(
+			validateTauriE2EConfiguration(
+				baselineConfig,
+				baselineTauriE2EConfig,
+				"tauri dev --config src-tauri/tauri.e2e.conf.json",
+			),
+		).toEqual([]);
+
+		const persistentE2EWindow = structuredClone(baselineTauriE2EConfig);
+		persistentE2EWindow.app.windows[0].incognito = false;
+		expect(
+			validateTauriE2EConfiguration(
+				baselineConfig,
+				persistentE2EWindow,
+				"tauri dev --config src-tauri/tauri.e2e.conf.json",
+			),
+		).toContain(
+			"the Tauri E2E window must equal the production window plus incognito true",
+		);
+
+		const incompleteE2EWindow = structuredClone(baselineTauriE2EConfig);
+		delete incompleteE2EWindow.app.windows[0].title;
+		expect(
+			validateTauriE2EConfiguration(
+				baselineConfig,
+				incompleteE2EWindow,
+				"tauri dev --config src-tauri/tauri.e2e.conf.json",
+			),
+		).toContain(
+			"the Tauri E2E window must equal the production window plus incognito true",
+		);
+
+		const broadE2EOverlay = structuredClone(baselineTauriE2EConfig);
+		broadE2EOverlay.app.security = { csp: null };
+		expect(
+			validateTauriE2EConfiguration(
+				baselineConfig,
+				broadE2EOverlay,
+				"tauri dev --config src-tauri/tauri.e2e.conf.json",
+			),
+		).toContain("the Tauri E2E app overlay must replace only windows");
+
+		expect(
+			validateTauriE2EConfiguration(
+				baselineConfig,
+				baselineTauriE2EConfig,
+				"tauri dev",
+			),
+		).toContain(
+			"tauri:dev:e2e must launch only the audited Tauri E2E configuration",
+		);
+
+		expect(
+			validateTauriConfigurationFiles([
+				"Cargo.toml",
+				"tauri.conf.json",
+				"tauri.e2e.conf.json",
+			]),
+		).toEqual([]);
+		expect(
+			validateTauriConfigurationFiles([
+				"tauri.conf.json",
+				"tauri.e2e.conf.json",
+				"tauri.macos.conf.json",
+			]),
+		).toContain(
+			"src-tauri must keep only the audited base and E2E Tauri configuration files",
 		);
 	});
 

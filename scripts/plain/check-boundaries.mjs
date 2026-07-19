@@ -8,6 +8,8 @@ import {
 	validateMainCapability,
 	validateTauriApiBoundary,
 	validateTauriConfiguration,
+	validateTauriConfigurationFiles,
+	validateTauriE2EConfiguration,
 	validateWorkspaceCapabilitiesBoundary,
 	validateWorkspaceCopyCommandRegistration,
 	validateWorkspaceDeleteBoundary,
@@ -310,10 +312,27 @@ for (const failure of validateWorkspaceProviderCopyBoundary(
 	fail(failure);
 }
 
+const tauriRoot = path.join(root, "src-tauri");
+const tauriRootFiles = (await readdir(tauriRoot, { withFileTypes: true }))
+	.filter((entry) => entry.isFile())
+	.map((entry) => entry.name);
+for (const failure of validateTauriConfigurationFiles(tauriRootFiles)) {
+	fail(failure);
+}
 const tauriConfig = JSON.parse(
-	await readFile(path.join(root, "src-tauri/tauri.conf.json"), "utf8"),
+	await readFile(path.join(tauriRoot, "tauri.conf.json"), "utf8"),
 );
 for (const failure of validateTauriConfiguration(tauriConfig)) {
+	fail(failure);
+}
+const tauriE2EConfig = JSON.parse(
+	await readFile(path.join(tauriRoot, "tauri.e2e.conf.json"), "utf8"),
+);
+for (const failure of validateTauriE2EConfiguration(
+	tauriConfig,
+	tauriE2EConfig,
+	packageDocument.scripts?.["tauri:dev:e2e"],
+)) {
 	fail(failure);
 }
 
