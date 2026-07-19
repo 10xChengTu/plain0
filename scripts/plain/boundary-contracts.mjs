@@ -4538,7 +4538,201 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		true,
 		ts.ScriptKind.TS,
 	);
+	const expectedProviderImports = new Map([
+		[
+			"@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files",
+			new Set([
+				"value:FileChangeType",
+				"value:FileOperationError",
+				"value:FileOperationResult",
+				"value:FilePermission",
+				"value:FileSystemProviderCapabilities",
+				"value:FileSystemProviderError",
+				"value:FileSystemProviderErrorCode",
+				"value:FileType",
+				"type:IFileChange",
+				"type:IFileDeleteOptions",
+				"type:IFileOverwriteOptions",
+				"type:IFileSystemProviderWithFileReadWriteCapability",
+				"type:IFileWriteOptions",
+				"type:IStat",
+				"type:IWatchOptions",
+			]),
+		],
+		[
+			"@codingame/monaco-vscode-api/vscode/vs/base/common/event",
+			new Set(["value:Emitter", "value:Event"]),
+		],
+		[
+			"@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle",
+			new Set(["value:Disposable", "type:IDisposable"]),
+		],
+		[
+			"@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
+			new Set(["value:URI"]),
+		],
+		[
+			"../../platform/tauri",
+			new Set([
+				"type:PlainBridge",
+				"type:WorkspaceCapabilities",
+				"type:WorkspaceEntryKind",
+				"type:WorkspaceEntryStat",
+				"type:WorkspaceWriteResult",
+			]),
+		],
+		[
+			"../../platform/tauri/workspace-codec",
+			new Set([
+				"value:decodeWorkspaceCapabilities",
+				"value:decodeWorkspaceEntryStat",
+				"value:frozenWorkspaceEntryRequest",
+			]),
+		],
+	]);
+	const seenProviderImports = new Set();
+	for (const statement of sourceFile.statements) {
+		if (!ts.isImportDeclaration(statement)) {
+			continue;
+		}
+		const moduleName = ts.isStringLiteral(statement.moduleSpecifier)
+			? statement.moduleSpecifier.text
+			: undefined;
+		const expected =
+			moduleName === undefined
+				? undefined
+				: expectedProviderImports.get(moduleName);
+		const clause = statement.importClause;
+		const actual = new Set();
+		let importShapeIsExact =
+			expected !== undefined &&
+			moduleName !== undefined &&
+			!seenProviderImports.has(moduleName) &&
+			clause !== undefined &&
+			clause.name === undefined &&
+			clause.namedBindings !== undefined &&
+			ts.isNamedImports(clause.namedBindings);
+		if (
+			importShapeIsExact &&
+			clause !== undefined &&
+			clause.namedBindings !== undefined &&
+			ts.isNamedImports(clause.namedBindings)
+		) {
+			for (const specifier of clause.namedBindings.elements) {
+				const importedName =
+					specifier.propertyName?.text ?? specifier.name.text;
+				if (importedName !== specifier.name.text) {
+					importShapeIsExact = false;
+				}
+				const effectiveTypeOnly = clause.isTypeOnly || specifier.isTypeOnly;
+				actual.add(`${effectiveTypeOnly ? "type" : "value"}:${importedName}`);
+			}
+		}
+		if (
+			!importShapeIsExact ||
+			expected === undefined ||
+			!sameArray([...actual].sort(), [...expected].sort())
+		) {
+			failures.push(
+				"file-system-provider.ts imports must match the exact audited module, name and type-only surface",
+			);
+		}
+		if (moduleName !== undefined) {
+			seenProviderImports.add(moduleName);
+		}
+	}
+	if (seenProviderImports.size !== expectedProviderImports.size) {
+		failures.push(
+			"file-system-provider.ts imports must match the exact audited module, name and type-only surface",
+		);
+	}
+	const allowedTopLevelDeclarations = new Map([
+		["PLAIN_WORKSPACE_SCHEME", { kind: "variable", exported: true }],
+		["ResolvedResource", { kind: "interface", exported: false }],
+		["ResolvedMutationResource", { kind: "interface", exported: false }],
+		["PlainWorkspaceProviderStat", { kind: "interface", exported: true }],
+		["PlainWorkspaceReadFileResult", { kind: "interface", exported: true }],
+		["PlainWorkspaceWriteFileResult", { kind: "type", exported: true }],
+		["SANITIZED_MESSAGES", { kind: "variable", exported: false }],
+		["fileSystemError", { kind: "function", exported: false }],
+		["noPermissions", { kind: "function", exported: false }],
+		[
+			"createPlainWorkspaceMutationPolicy",
+			{ kind: "function", exported: false },
+		],
+		["unavailable", { kind: "function", exported: false }],
+		["commandErrorCode", { kind: "function", exported: false }],
+		["mapReadError", { kind: "function", exported: false }],
+		["mapWriteError", { kind: "function", exported: false }],
+		["mapCreateError", { kind: "function", exported: false }],
+		["kindToFileType", { kind: "function", exported: false }],
+		["providerStat", { kind: "function", exported: false }],
+		["createdProviderStat", { kind: "function", exported: false }],
+		["PlainWorkspaceFileSystemProvider", { kind: "class", exported: false }],
+		[
+			"createPlainWorkspaceFileSystemProvider",
+			{ kind: "function", exported: true },
+		],
+	]);
+	const topLevelDeclarationCounts = new Map(
+		[...allowedTopLevelDeclarations].map(([name]) => [name, 0]),
+	);
+	let topLevelSurfaceIsExact = true;
+	function recordTopLevelDeclaration(name, kind, statement) {
+		const expected = ts.isIdentifier(name)
+			? allowedTopLevelDeclarations.get(name.text)
+			: undefined;
+		const modifierKinds = (statement.modifiers ?? []).map(
+			(modifier) => modifier.kind,
+		);
+		const expectedModifierKinds = expected?.exported
+			? [ts.SyntaxKind.ExportKeyword]
+			: [];
+		if (
+			!ts.isIdentifier(name) ||
+			expected === undefined ||
+			expected.kind !== kind ||
+			!sameArray(modifierKinds, expectedModifierKinds)
+		) {
+			topLevelSurfaceIsExact = false;
+			return;
+		}
+		topLevelDeclarationCounts.set(
+			name.text,
+			(topLevelDeclarationCounts.get(name.text) ?? 0) + 1,
+		);
+	}
+	for (const statement of sourceFile.statements) {
+		if (ts.isImportDeclaration(statement)) {
+			continue;
+		}
+		if (ts.isVariableStatement(statement)) {
+			for (const declaration of statement.declarationList.declarations) {
+				recordTopLevelDeclaration(declaration.name, "variable", statement);
+			}
+		} else if (ts.isFunctionDeclaration(statement)) {
+			recordTopLevelDeclaration(statement.name, "function", statement);
+		} else if (ts.isInterfaceDeclaration(statement)) {
+			recordTopLevelDeclaration(statement.name, "interface", statement);
+		} else if (ts.isTypeAliasDeclaration(statement)) {
+			recordTopLevelDeclaration(statement.name, "type", statement);
+		} else if (ts.isClassDeclaration(statement)) {
+			recordTopLevelDeclaration(statement.name, "class", statement);
+		} else {
+			topLevelSurfaceIsExact = false;
+		}
+	}
+	if (
+		!topLevelSurfaceIsExact ||
+		[...topLevelDeclarationCounts.values()].some((count) => count !== 1)
+	) {
+		failures.push(
+			"file-system-provider.ts must match the exact declared, exported and non-executable top-level surface",
+		);
+	}
 	let decoderImportCount = 0;
+	let entryStatDecoderImportCount = 0;
+	let frozenRequestImportCount = 0;
 	for (const statement of sourceFile.statements) {
 		if (
 			ts.isImportDeclaration(statement) &&
@@ -4557,6 +4751,22 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 				) {
 					decoderImportCount += 1;
 				}
+				if (
+					!specifier.isTypeOnly &&
+					(specifier.propertyName?.text ?? specifier.name.text) ===
+						"decodeWorkspaceEntryStat" &&
+					specifier.name.text === "decodeWorkspaceEntryStat"
+				) {
+					entryStatDecoderImportCount += 1;
+				}
+				if (
+					!specifier.isTypeOnly &&
+					(specifier.propertyName?.text ?? specifier.name.text) ===
+						"frozenWorkspaceEntryRequest" &&
+					specifier.name.text === "frozenWorkspaceEntryRequest"
+				) {
+					frozenRequestImportCount += 1;
+				}
 			}
 		}
 	}
@@ -4564,6 +4774,314 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		failures.push(
 			"file-system-provider.ts must import the strict workspace capability decoder exactly by name",
 		);
+	}
+	if (entryStatDecoderImportCount !== 1) {
+		failures.push(
+			"file-system-provider.ts must import the strict workspace entry stat decoder exactly by name",
+		);
+	}
+	if (frozenRequestImportCount !== 1) {
+		failures.push(
+			"file-system-provider.ts must import the frozen workspace request codec exactly by name",
+		);
+	}
+	const exactProviderErrorDeclarations = new Map([
+		[
+			"SANITIZED_MESSAGES",
+			`const SANITIZED_MESSAGES = Object.freeze({
+				entryNotFound: "The workspace entry does not exist.",
+				notDirectory: "The workspace entry is not a directory.",
+				noPermissions: "The workspace entry cannot be accessed.",
+				unavailable: "The workspace is unavailable.",
+			});`,
+		],
+		[
+			"fileSystemError",
+			`function fileSystemError(
+				code: FileSystemProviderErrorCode,
+				message: string,
+			): FileSystemProviderError {
+				return FileSystemProviderError.create(message, code);
+			}`,
+		],
+		[
+			"noPermissions",
+			`function noPermissions(): FileSystemProviderError {
+				return fileSystemError(
+					FileSystemProviderErrorCode.NoPermissions,
+					SANITIZED_MESSAGES.noPermissions,
+				);
+			}`,
+		],
+		[
+			"unavailable",
+			`function unavailable(): FileSystemProviderError {
+				return fileSystemError(
+					FileSystemProviderErrorCode.Unavailable,
+					SANITIZED_MESSAGES.unavailable,
+				);
+			}`,
+		],
+		[
+			"commandErrorCode",
+			`function commandErrorCode(error: unknown): string | undefined {
+				try {
+					if (typeof error !== "object" || error === null) {
+						return undefined;
+					}
+					const code = Reflect.get(error, "code");
+					return typeof code === "string" ? code : undefined;
+				} catch {
+					return undefined;
+				}
+			}`,
+		],
+		[
+			"mapReadError",
+			`function mapReadError(error: unknown): FileSystemProviderError {
+				const code = commandErrorCode(error);
+				switch (code) {
+					case "ENTRY_NOT_FOUND":
+						return fileSystemError(
+							FileSystemProviderErrorCode.FileNotFound,
+							SANITIZED_MESSAGES.entryNotFound,
+						);
+					case "ENTRY_TYPE_MISMATCH":
+						return fileSystemError(
+							FileSystemProviderErrorCode.FileNotADirectory,
+							SANITIZED_MESSAGES.notDirectory,
+						);
+					case "ROOT_NOT_AUTHORIZED":
+					case "INVALID_RELATIVE_PATH":
+					case "PATH_OUTSIDE_ROOT":
+					case "PERMISSION_DENIED":
+						return noPermissions();
+					case "ROOT_UNAVAILABLE":
+					case "PATH_ENCODING_UNSUPPORTED":
+					case "WORKSPACE_CONFLICT":
+					case "WORKSPACE_FILE_CHANGED":
+					case "WORKSPACE_WINDOW_CLOSED":
+					case "DIRECTORY_TOO_LARGE":
+					case "FILE_TOO_LARGE":
+					case "IO_FAILED":
+						return unavailable();
+					default:
+						return unavailable();
+				}
+			}`,
+		],
+		[
+			"mapWriteError",
+			`function mapWriteError(error: unknown): Error {
+				const code = commandErrorCode(error);
+				switch (code) {
+					case "WORKSPACE_FILE_MODIFIED":
+						return new FileOperationError(
+							"The workspace file changed before it could be written.",
+							FileOperationResult.FILE_MODIFIED_SINCE,
+						);
+					case "ROOT_NOT_AUTHORIZED":
+					case "PERMISSION_DENIED":
+						return noPermissions();
+					case "FILE_TOO_LARGE":
+						return fileSystemError(
+							FileSystemProviderErrorCode.FileTooLarge,
+							"The workspace file exceeds the supported write limit.",
+						);
+					default:
+						return unavailable();
+				}
+			}`,
+		],
+	]);
+	for (const [name, expectedSource] of exactProviderErrorDeclarations) {
+		const statements = sourceFile.statements.filter((statement) => {
+			if (ts.isFunctionDeclaration(statement)) {
+				return statement.name?.text === name;
+			}
+			return (
+				ts.isVariableStatement(statement) &&
+				statement.declarationList.declarations.some(
+					(declaration) =>
+						ts.isIdentifier(declaration.name) && declaration.name.text === name,
+				)
+			);
+		});
+		if (
+			statements.length !== 1 ||
+			statements[0].getText(sourceFile).replaceAll(/\s+/g, "") !==
+				expectedSource.replaceAll(/\s+/g, "")
+		) {
+			failures.push(
+				`${name} must retain its exact module-private sanitized error contract`,
+			);
+		}
+	}
+	const createdStatFunctions = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "createdProviderStat",
+	);
+	if (createdStatFunctions.length !== 1) {
+		failures.push(
+			"file-system-provider.ts must define exactly one strict createdProviderStat decoder",
+		);
+	} else {
+		const [createdStat] = createdStatFunctions;
+		const normalizedBody = createdStat.body
+			?.getText(sourceFile)
+			.replaceAll(/\s+/g, "");
+		const expectedBody = `{
+			const stat = decodeWorkspaceEntryStat(value);
+			if (
+				stat.kind !== expectedKind ||
+				stat.size !== 0 ||
+				stat.mtime !== 0 ||
+				stat.ctime !== 0 ||
+				stat.version !== null
+			) {
+				throw unavailable();
+			}
+			return Object.freeze({
+				type: expectedKind === "file" ? FileType.File : FileType.Directory,
+				size: 0,
+				mtime: 0,
+				ctime: 0,
+				...(expectedKind === "file"
+					? { permissions: FilePermission.Readonly }
+					: {}),
+				plainVersion: null,
+			});
+		}`.replaceAll(/\s+/g, "");
+		const [valueParameter, kindParameter] = createdStat.parameters;
+		if (
+			createdStat.parameters.length !== 2 ||
+			!ts.isIdentifier(valueParameter?.name) ||
+			valueParameter.name.text !== "value" ||
+			valueParameter.type?.kind !== ts.SyntaxKind.UnknownKeyword ||
+			!ts.isIdentifier(kindParameter?.name) ||
+			kindParameter.name.text !== "expectedKind" ||
+			normalizedBody !== expectedBody
+		) {
+			failures.push(
+				"createdProviderStat must strictly decode exact zero/null file or directory receipts",
+			);
+		}
+	}
+	const mapCreateFunctions = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "mapCreateError",
+	);
+	if (mapCreateFunctions.length !== 1) {
+		failures.push(
+			"file-system-provider.ts must define exactly one sanitized mapCreateError helper",
+		);
+	} else {
+		const [mapCreate] = mapCreateFunctions;
+		const normalizedBody = mapCreate.body
+			?.getText(sourceFile)
+			.replaceAll(/\s+/g, "");
+		const expectedBody = `{
+			let code: string | undefined;
+			try {
+				if (typeof error === "object" && error !== null) {
+					const value = Reflect.get(error, "code");
+					code = typeof value === "string" ? value : undefined;
+				}
+			} catch {
+				code = undefined;
+			}
+			switch (code) {
+				case "ENTRY_ALREADY_EXISTS":
+					return Object.freeze({
+						error: FileSystemProviderError.create(
+							"The workspace entry already exists.",
+							FileSystemProviderErrorCode.FileExists,
+						),
+						rescan: false,
+					});
+				case "ENTRY_NOT_FOUND":
+					return Object.freeze({
+						error: FileSystemProviderError.create(
+							"The workspace entry does not exist.",
+							FileSystemProviderErrorCode.FileNotFound,
+						),
+						rescan: false,
+					});
+				case "ENTRY_TYPE_MISMATCH":
+					return Object.freeze({
+						error: FileSystemProviderError.create(
+							"The workspace entry is not a directory.",
+							FileSystemProviderErrorCode.FileNotADirectory,
+						),
+						rescan: false,
+					});
+				case "ROOT_NOT_AUTHORIZED":
+				case "INVALID_RELATIVE_PATH":
+				case "PATH_OUTSIDE_ROOT":
+				case "PERMISSION_DENIED":
+					return Object.freeze({
+						error: FileSystemProviderError.create(
+							"The workspace entry cannot be accessed.",
+							FileSystemProviderErrorCode.NoPermissions,
+						),
+						rescan: false,
+					});
+				case "ROOT_UNAVAILABLE":
+				case "PATH_ENCODING_UNSUPPORTED":
+				case "WORKSPACE_CONFLICT":
+				case "WORKSPACE_WINDOW_CLOSED":
+					return Object.freeze({
+						error: FileSystemProviderError.create(
+							"The workspace is unavailable.",
+							FileSystemProviderErrorCode.Unavailable,
+						),
+						rescan: false,
+					});
+				default:
+					return Object.freeze({
+						error: FileSystemProviderError.create(
+							"The workspace is unavailable.",
+							FileSystemProviderErrorCode.Unavailable,
+						),
+						rescan: true,
+					});
+			}
+		}`.replaceAll(/\s+/g, "");
+		const [errorParameter] = mapCreate.parameters;
+		const resultType =
+			mapCreate.type !== undefined &&
+			ts.isTypeReferenceNode(mapCreate.type) &&
+			ts.isIdentifier(mapCreate.type.typeName) &&
+			mapCreate.type.typeName.text === "Readonly" &&
+			mapCreate.type.typeArguments?.length === 1 &&
+			ts.isTypeLiteralNode(mapCreate.type.typeArguments[0])
+				? mapCreate.type.typeArguments[0]
+				: undefined;
+		const resultMembers = resultType?.members ?? [];
+		if (
+			mapCreate.modifiers?.length ||
+			mapCreate.parameters.length !== 1 ||
+			!ts.isIdentifier(errorParameter?.name) ||
+			errorParameter.name.text !== "error" ||
+			errorParameter.type?.kind !== ts.SyntaxKind.UnknownKeyword ||
+			resultMembers.length !== 2 ||
+			!resultMembers.every((member) => ts.isPropertySignature(member)) ||
+			!sameArray(
+				resultMembers.map((member) => typeScriptMemberName(member)),
+				["error", "rescan"],
+			) ||
+			!ts.isTypeReferenceNode(resultMembers[0].type) ||
+			!ts.isIdentifier(resultMembers[0].type.typeName) ||
+			resultMembers[0].type.typeName.text !== "FileSystemProviderError" ||
+			resultMembers[1].type?.kind !== ts.SyntaxKind.BooleanKeyword ||
+			normalizedBody !== expectedBody
+		) {
+			failures.push(
+				"mapCreateError must own one exact sanitized code-to-provider-error mapping",
+			);
+		}
 	}
 	function countExactProviderImport(moduleName, importedName) {
 		let count = 0;
@@ -4590,18 +5108,125 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		}
 		return count;
 	}
-	for (const [moduleName, importedName] of [
+	const criticalProviderImports = [
+		[
+			"@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files",
+			"FileChangeType",
+		],
+		[
+			"@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files",
+			"FilePermission",
+		],
 		[
 			"@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files",
 			"FileSystemProviderCapabilities",
 		],
+		[
+			"@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files",
+			"FileSystemProviderError",
+		],
+		[
+			"@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files",
+			"FileSystemProviderErrorCode",
+		],
+		[
+			"@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files",
+			"FileType",
+		],
+		["@codingame/monaco-vscode-api/vscode/vs/base/common/event", "Emitter"],
 		["@codingame/monaco-vscode-api/vscode/vs/base/common/event", "Event"],
-	]) {
+		["@codingame/monaco-vscode-api/vscode/vs/base/common/uri", "URI"],
+		["../../platform/tauri/workspace-codec", "decodeWorkspaceCapabilities"],
+		["../../platform/tauri/workspace-codec", "decodeWorkspaceEntryStat"],
+		["../../platform/tauri/workspace-codec", "frozenWorkspaceEntryRequest"],
+	];
+	for (const [moduleName, importedName] of criticalProviderImports) {
 		if (countExactProviderImport(moduleName, importedName) !== 1) {
 			failures.push(
 				`file-system-provider.ts must import ${importedName} exactly by name from its fixed Workbench module`,
 			);
 		}
+	}
+	const criticalBindingNames = new Set(
+		criticalProviderImports.map(([, importedName]) => importedName),
+	);
+	const bindingIdentifiers = new Map();
+	function recordBindingName(name) {
+		if (ts.isIdentifier(name)) {
+			const nodes = bindingIdentifiers.get(name.text) ?? [];
+			nodes.push(name);
+			bindingIdentifiers.set(name.text, nodes);
+			return;
+		}
+		if (ts.isObjectBindingPattern(name) || ts.isArrayBindingPattern(name)) {
+			for (const element of name.elements) {
+				if (ts.isBindingElement(element)) {
+					recordBindingName(element.name);
+				}
+			}
+		}
+	}
+	function collectBindingIdentifiers(node) {
+		if (
+			ts.isVariableDeclaration(node) ||
+			ts.isParameter(node) ||
+			ts.isBindingElement(node)
+		) {
+			recordBindingName(node.name);
+		} else if (
+			ts.isFunctionDeclaration(node) ||
+			ts.isFunctionExpression(node) ||
+			ts.isClassDeclaration(node) ||
+			ts.isClassExpression(node) ||
+			ts.isInterfaceDeclaration(node) ||
+			ts.isTypeAliasDeclaration(node) ||
+			ts.isEnumDeclaration(node) ||
+			ts.isModuleDeclaration(node) ||
+			ts.isTypeParameterDeclaration(node) ||
+			ts.isImportEqualsDeclaration(node)
+		) {
+			if (node.name !== undefined) {
+				recordBindingName(node.name);
+			}
+		} else if (ts.isImportClause(node) && node.name !== undefined) {
+			recordBindingName(node.name);
+		} else if (ts.isNamespaceImport(node) || ts.isImportSpecifier(node)) {
+			recordBindingName(node.name);
+		}
+		ts.forEachChild(node, collectBindingIdentifiers);
+	}
+	collectBindingIdentifiers(sourceFile);
+	for (const name of criticalBindingNames) {
+		if ((bindingIdentifiers.get(name)?.length ?? 0) !== 1) {
+			failures.push(
+				`${name} must have exactly one fixed import binding and no local shadow`,
+			);
+		}
+	}
+	for (const name of ["Object", "Reflect"]) {
+		if ((bindingIdentifiers.get(name)?.length ?? 0) !== 0) {
+			failures.push(
+				`${name} must remain the unshadowed global intrinsic in the Plain workspace provider`,
+			);
+		}
+	}
+	const schemeStatements = sourceFile.statements.filter(
+		(statement) =>
+			ts.isVariableStatement(statement) &&
+			statement.declarationList.declarations.some(
+				(declaration) =>
+					ts.isIdentifier(declaration.name) &&
+					declaration.name.text === "PLAIN_WORKSPACE_SCHEME",
+			),
+	);
+	if (
+		schemeStatements.length !== 1 ||
+		schemeStatements[0].getText(sourceFile).replaceAll(/\s+/g, "") !==
+			'exportconstPLAIN_WORKSPACE_SCHEME="plain-workspace"asconst;'
+	) {
+		failures.push(
+			'PLAIN_WORKSPACE_SCHEME must remain the exact exported "plain-workspace" literal',
+		);
 	}
 	const providerClasses = sourceFile.statements.filter(
 		(statement) =>
@@ -4615,13 +5240,55 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	}
 
 	const provider = providerClasses[0];
+	if ((provider.modifiers?.length ?? 0) !== 0) {
+		failures.push(
+			"Plain workspace provider class must remain undecorated and module-private behind its audited factory",
+		);
+	}
+	const expectedProviderMembers = new Set([
+		"capabilities",
+		"onDidChangeCapabilities",
+		"changeEmitter",
+		"onDidChangeFile",
+		"watch",
+		"stat",
+		"readdir",
+		"readFile",
+		"plainReadFile",
+		"plainWriteFile",
+		"plainCreateFile",
+		"plainCreateDirectory",
+		"writeFile",
+		"mkdir",
+		"delete",
+		"rename",
+		"requireMutationDispatchAllowed",
+		"fireCreated",
+		"fireRootUpdated",
+		"resolveMutationResource",
+		"resolveResource",
+	]);
+	const providerMemberCounts = new Map(
+		[...expectedProviderMembers].map((name) => [name, 0]),
+	);
+	let providerSurfaceIsExact = true;
+	for (const member of provider.members) {
+		if (ts.isConstructorDeclaration(member)) {
+			continue;
+		}
+		const name = typeScriptMemberName(member);
+		if (name === undefined || !expectedProviderMembers.has(name)) {
+			providerSurfaceIsExact = false;
+			continue;
+		}
+		providerMemberCounts.set(name, providerMemberCounts.get(name) + 1);
+	}
 	if (
-		provider.modifiers?.some(
-			(modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
-		)
+		!providerSurfaceIsExact ||
+		[...providerMemberCounts.values()].some((count) => count !== 1)
 	) {
 		failures.push(
-			"Plain workspace provider class must remain module-private behind its audited factory",
+			"Plain workspace provider member surface must remain the exact audited readonly/provider seam set",
 		);
 	}
 	const policyFunctions = sourceFile.statements.filter(
@@ -4881,15 +5548,45 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			ts.isMethodDeclaration(member) &&
 			typeScriptMemberName(member) === "plainWriteFile",
 	);
+	const plainCreateFileMethods = provider.members.filter(
+		(member) =>
+			ts.isMethodDeclaration(member) &&
+			typeScriptMemberName(member) === "plainCreateFile",
+	);
+	const plainCreateDirectoryMethods = provider.members.filter(
+		(member) =>
+			ts.isMethodDeclaration(member) &&
+			typeScriptMemberName(member) === "plainCreateDirectory",
+	);
 	const publicWriteMethods = provider.members.filter(
 		(member) =>
 			ts.isMethodDeclaration(member) &&
 			typeScriptMemberName(member) === "writeFile",
 	);
+	const publicMkdirMethods = provider.members.filter(
+		(member) =>
+			ts.isMethodDeclaration(member) &&
+			typeScriptMemberName(member) === "mkdir",
+	);
 	const mutationGateMethods = provider.members.filter(
 		(member) =>
 			ts.isMethodDeclaration(member) &&
 			typeScriptMemberName(member) === "requireMutationDispatchAllowed",
+	);
+	const fireCreatedMethods = provider.members.filter(
+		(member) =>
+			ts.isMethodDeclaration(member) &&
+			typeScriptMemberName(member) === "fireCreated",
+	);
+	const fireRootUpdatedMethods = provider.members.filter(
+		(member) =>
+			ts.isMethodDeclaration(member) &&
+			typeScriptMemberName(member) === "fireRootUpdated",
+	);
+	const resolveMutationMethods = provider.members.filter(
+		(member) =>
+			ts.isMethodDeclaration(member) &&
+			typeScriptMemberName(member) === "resolveMutationResource",
 	);
 	const changeEventMembers = provider.members.filter(
 		(member) =>
@@ -4921,6 +5618,57 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		}
 		return count;
 	}
+	function directThisMethodCallCount(method, methodName) {
+		let count = 0;
+		function visitMethod(node) {
+			if (
+				ts.isCallExpression(node) &&
+				ts.isPropertyAccessExpression(node.expression) &&
+				node.expression.expression.kind === ts.SyntaxKind.ThisKeyword &&
+				node.expression.name.text === methodName
+			) {
+				count += 1;
+			}
+			ts.forEachChild(node, visitMethod);
+		}
+		if (method.body !== undefined) {
+			visitMethod(method.body);
+		}
+		return count;
+	}
+	function identifierCallCount(method, functionName) {
+		let count = 0;
+		function visitMethod(node) {
+			if (
+				ts.isCallExpression(node) &&
+				ts.isIdentifier(node.expression) &&
+				node.expression.text === functionName
+			) {
+				count += 1;
+			}
+			ts.forEachChild(node, visitMethod);
+		}
+		if (method.body !== undefined) {
+			visitMethod(method.body);
+		}
+		return count;
+	}
+	function startsWithMutationGate(method) {
+		const [firstStatement] = method.body?.statements ?? [];
+		const firstExpression =
+			firstStatement !== undefined && ts.isExpressionStatement(firstStatement)
+				? firstStatement.expression
+				: undefined;
+		return (
+			firstExpression !== undefined &&
+			ts.isCallExpression(firstExpression) &&
+			firstExpression.arguments.length === 0 &&
+			ts.isPropertyAccessExpression(firstExpression.expression) &&
+			firstExpression.expression.expression.kind ===
+				ts.SyntaxKind.ThisKeyword &&
+			firstExpression.expression.name.text === "requireMutationDispatchAllowed"
+		);
+	}
 	if (mutationGateMethods.length !== 1) {
 		failures.push(
 			"Plain workspace provider must define one primitive mutation dispatch gate",
@@ -4944,6 +5692,131 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			);
 		}
 	}
+	if (fireCreatedMethods.length !== 1) {
+		failures.push(
+			"Plain workspace provider must define exactly one audited fireCreated helper",
+		);
+	} else {
+		const [fireCreated] = fireCreatedMethods;
+		const normalizedBody = fireCreated.body
+			?.getText(sourceFile)
+			.replaceAll(/\s+/g, "");
+		const expectedBody = `{
+			this.changeEmitter.fire(
+				Object.freeze([
+					Object.freeze({
+						type: FileChangeType.ADDED,
+						resource,
+					}),
+				]),
+			);
+		}`.replaceAll(/\s+/g, "");
+		if (
+			!fireCreated.modifiers?.some(
+				(modifier) => modifier.kind === ts.SyntaxKind.PrivateKeyword,
+			) ||
+			fireCreated.parameters.length !== 1 ||
+			!ts.isIdentifier(fireCreated.parameters[0]?.name) ||
+			fireCreated.parameters[0].name.text !== "resource" ||
+			fireCreated.type?.kind !== ts.SyntaxKind.VoidKeyword ||
+			normalizedBody !== expectedBody
+		) {
+			failures.push(
+				"fireCreated must emit one frozen target ADDED event and nothing else",
+			);
+		}
+	}
+	if (fireRootUpdatedMethods.length !== 1) {
+		failures.push(
+			"Plain workspace provider must define exactly one audited fireRootUpdated helper",
+		);
+	} else {
+		const [fireRootUpdated] = fireRootUpdatedMethods;
+		const normalizedBody = fireRootUpdated.body
+			?.getText(sourceFile)
+			.replaceAll(/\s+/g, "");
+		const expectedBody = `{
+			const root = resource.with({ path: "/", query: null, fragment: null });
+			root.toString();
+			void root.fsPath;
+			Object.freeze(root);
+			this.changeEmitter.fire(
+				Object.freeze([
+					Object.freeze({
+						type: FileChangeType.UPDATED,
+						resource: root,
+					}),
+				]),
+			);
+		}`.replaceAll(/\s+/g, "");
+		if (
+			!fireRootUpdated.modifiers?.some(
+				(modifier) => modifier.kind === ts.SyntaxKind.PrivateKeyword,
+			) ||
+			fireRootUpdated.parameters.length !== 1 ||
+			!ts.isIdentifier(fireRootUpdated.parameters[0]?.name) ||
+			fireRootUpdated.parameters[0].name.text !== "resource" ||
+			fireRootUpdated.type?.kind !== ts.SyntaxKind.VoidKeyword ||
+			normalizedBody !== expectedBody
+		) {
+			failures.push(
+				"fireRootUpdated must emit one frozen root UPDATED event and nothing else",
+			);
+		}
+	}
+	if (resolveMutationMethods.length !== 1) {
+		failures.push(
+			"Plain workspace provider must define exactly one audited mutation URI snapshot helper",
+		);
+	} else {
+		const [resolveMutation] = resolveMutationMethods;
+		const normalizedBody = resolveMutation.body
+			?.getText(sourceFile)
+			.replaceAll(/\s+/g, "");
+		const expectedBody = `{
+			try {
+				const scheme = resource.scheme;
+				const authority = resource.authority;
+				const path = resource.path;
+				const query = resource.query;
+				const fragment = resource.fragment;
+				if (
+					scheme !== PLAIN_WORKSPACE_SCHEME ||
+					query !== "" ||
+					fragment !== "" ||
+					path.length <= 1 ||
+					!path.startsWith("/")
+				) {
+					throw noPermissions();
+				}
+				const relativePath = path === "/" ? "" : path.slice(1);
+				const request = frozenWorkspaceEntryRequest(authority, relativePath);
+				const eventResource = URI.from(
+					{ scheme, authority, path, query, fragment },
+					true,
+				);
+				eventResource.toString();
+				void eventResource.fsPath;
+				Object.freeze(eventResource);
+				return Object.freeze({ ...request, resource: eventResource });
+			} catch {
+				throw noPermissions();
+			}
+		}`.replaceAll(/\s+/g, "");
+		if (
+			!resolveMutation.modifiers?.some(
+				(modifier) => modifier.kind === ts.SyntaxKind.PrivateKeyword,
+			) ||
+			resolveMutation.parameters.length !== 1 ||
+			!ts.isIdentifier(resolveMutation.parameters[0]?.name) ||
+			resolveMutation.parameters[0].name.text !== "resource" ||
+			normalizedBody !== expectedBody
+		) {
+			failures.push(
+				"mutation URI helper must read each primitive once and return one frozen request/event snapshot",
+			);
+		}
+	}
 	if (plainWriteMethods.length !== 1) {
 		failures.push(
 			"Plain workspace provider must expose exactly one audited private plainWriteFile seam",
@@ -4953,25 +5826,12 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		const parameterNames = plainWrite.parameters.map((parameter) =>
 			ts.isIdentifier(parameter.name) ? parameter.name.text : undefined,
 		);
-		const [firstStatement] = plainWrite.body?.statements ?? [];
-		const firstExpression =
-			firstStatement !== undefined && ts.isExpressionStatement(firstStatement)
-				? firstStatement.expression
-				: undefined;
-		const startsWithMutationGate =
-			firstExpression !== undefined &&
-			ts.isCallExpression(firstExpression) &&
-			firstExpression.arguments.length === 0 &&
-			ts.isPropertyAccessExpression(firstExpression.expression) &&
-			firstExpression.expression.expression.kind ===
-				ts.SyntaxKind.ThisKeyword &&
-			firstExpression.expression.name.text === "requireMutationDispatchAllowed";
 		if (
 			!plainWrite.modifiers?.some(
 				(modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword,
 			) ||
 			!sameArray(parameterNames, ["resource", "content", "expectedVersion"]) ||
-			!startsWithMutationGate ||
+			!startsWithMutationGate(plainWrite) ||
 			providerMethodCallCount(plainWrite, "bridge", "workspaceWriteFile") !==
 				1 ||
 			providerMethodCallCount(plainWrite, "changeEmitter", "fire") !== 1
@@ -4981,6 +5841,83 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			);
 		}
 	}
+	function validatePlainCreateMethod(
+		methods,
+		methodName,
+		bridgeMethod,
+		expectedKind,
+	) {
+		if (methods.length !== 1) {
+			failures.push(
+				`Plain workspace provider must expose exactly one audited ${methodName} seam`,
+			);
+			return;
+		}
+		const [method] = methods;
+		const parameterNames = method.parameters.map((parameter) =>
+			ts.isIdentifier(parameter.name) ? parameter.name.text : undefined,
+		);
+		const normalizedBody = method.body
+			?.getText(sourceFile)
+			.replaceAll(/\s+/g, "");
+		const expectedBody = `{
+			this.requireMutationDispatchAllowed();
+			const resolved = this.resolveMutationResource(resource);
+			try {
+				const stat = createdProviderStat(
+					await this.bridge.${bridgeMethod}(
+						resolved.rootId,
+						resolved.relativePath,
+					),
+					"${expectedKind}",
+				);
+				this.fireCreated(resolved.resource);
+				return stat;
+			} catch (error) {
+				const failure = mapCreateError(error);
+				if (failure.rescan) {
+					this.fireRootUpdated(resolved.resource);
+				}
+				throw failure.error;
+			}
+		}`.replaceAll(/\s+/g, "");
+		if (
+			method.modifiers?.length !== 1 ||
+			method.modifiers[0].kind !== ts.SyntaxKind.AsyncKeyword ||
+			!sameArray(parameterNames, ["resource"]) ||
+			method.parameters[0].initializer !== undefined ||
+			method.parameters[0].questionToken !== undefined ||
+			method.parameters[0].dotDotDotToken !== undefined ||
+			(method.parameters[0].modifiers?.length ?? 0) !== 0 ||
+			method.parameters[0].type === undefined ||
+			!ts.isTypeReferenceNode(method.parameters[0].type) ||
+			!ts.isIdentifier(method.parameters[0].type.typeName) ||
+			method.parameters[0].type.typeName.text !== "URI" ||
+			!startsWithMutationGate(method) ||
+			providerMethodCallCount(method, "bridge", bridgeMethod) !== 1 ||
+			directThisMethodCallCount(method, "resolveMutationResource") !== 1 ||
+			directThisMethodCallCount(method, "fireCreated") !== 1 ||
+			directThisMethodCallCount(method, "fireRootUpdated") !== 1 ||
+			identifierCallCount(method, "createdProviderStat") !== 1 ||
+			normalizedBody !== expectedBody
+		) {
+			failures.push(
+				`${methodName} must gate first, snapshot once, validate one native receipt and emit one target addition`,
+			);
+		}
+	}
+	validatePlainCreateMethod(
+		plainCreateFileMethods,
+		"plainCreateFile",
+		"workspaceCreateFile",
+		"file",
+	);
+	validatePlainCreateMethod(
+		plainCreateDirectoryMethods,
+		"plainCreateDirectory",
+		"workspaceCreateDirectory",
+		"directory",
+	);
 	if (publicWriteMethods.length !== 1) {
 		failures.push(
 			"Plain workspace provider must keep exactly one fail-closed public writeFile method",
@@ -5002,6 +5939,34 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		) {
 			failures.push(
 				"public writeFile must remain a direct noPermissions failure without native dispatch",
+			);
+		}
+	}
+	if (publicMkdirMethods.length !== 1) {
+		failures.push(
+			"Plain workspace provider must keep exactly one fail-closed public mkdir method",
+		);
+	} else {
+		const [publicMkdir] = publicMkdirMethods;
+		const [statement] = publicMkdir.body?.statements ?? [];
+		const expression = ts.isThrowStatement(statement)
+			? statement.expression
+			: undefined;
+		if (
+			publicMkdir.body?.statements.length !== 1 ||
+			expression === undefined ||
+			!ts.isCallExpression(expression) ||
+			!ts.isIdentifier(expression.expression) ||
+			expression.expression.text !== "noPermissions" ||
+			expression.arguments.length !== 0 ||
+			providerMethodCallCount(
+				publicMkdir,
+				"bridge",
+				"workspaceCreateDirectory",
+			) !== 0
+		) {
+			failures.push(
+				"public mkdir must remain a direct noPermissions failure without native dispatch",
 			);
 		}
 	}
@@ -5084,7 +6049,173 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	let hasDynamicMutationSurface = false;
 	let hasCapabilitiesReference = false;
 	let mutationDispatchReferences = 0;
+	let createFileBridgeReferences = 0;
+	let createDirectoryBridgeReferences = 0;
+	const expectedBridgeMethods = new Map([
+		["workspaceStat", 1],
+		["workspaceReadDirectory", 1],
+		["workspaceReadFile", 1],
+		["workspaceWriteFile", 1],
+		["workspaceCreateFile", 1],
+		["workspaceCreateDirectory", 1],
+	]);
+	const bridgeMethodCounts = new Map(
+		[...expectedBridgeMethods].map(([name]) => [name, 0]),
+	);
+	const bindingIdentifierNodes = new Set(
+		[...bindingIdentifiers.values()].flat(),
+	);
+	const criticalPropertyBindings = new Set([
+		"FileChangeType",
+		"FilePermission",
+		"FileSystemProviderCapabilities",
+		"FileSystemProviderError",
+		"FileSystemProviderErrorCode",
+		"FileType",
+		"Event",
+		"URI",
+	]);
+	const criticalCallBindings = new Set([
+		"decodeWorkspaceCapabilities",
+		"decodeWorkspaceEntryStat",
+		"frozenWorkspaceEntryRequest",
+	]);
+	const criticalNewBindings = new Set(["Emitter"]);
+	const immutableRuntimeRoots = new Set([
+		...criticalBindingNames,
+		"Object",
+		"Reflect",
+		"PLAIN_WORKSPACE_SCHEME",
+		"SANITIZED_MESSAGES",
+		"fileSystemError",
+		"noPermissions",
+		"createPlainWorkspaceMutationPolicy",
+		"unavailable",
+		"commandErrorCode",
+		"mapReadError",
+		"mapWriteError",
+		"mapCreateError",
+		"kindToFileType",
+		"providerStat",
+		"createdProviderStat",
+		"PlainWorkspaceFileSystemProvider",
+		"createPlainWorkspaceFileSystemProvider",
+	]);
+	const protectedFunctionReferences = new Map([
+		["createdProviderStat", 2],
+		["mapCreateError", 2],
+		["mapReadError", 3],
+		["mapWriteError", 1],
+		["createPlainWorkspaceMutationPolicy", 1],
+		["createPlainWorkspaceFileSystemProvider", 0],
+	]);
+	const protectedFunctionCallCounts = new Map(
+		[...protectedFunctionReferences].map(([name]) => [name, 0]),
+	);
+	const forbiddenDynamicGlobalNames = new Set([
+		"globalThis",
+		"global",
+		"window",
+		"self",
+		"document",
+		"Function",
+		"eval",
+		"require",
+	]);
+	const forbiddenInternalMutationSeams = new Set([
+		"plainCreateFile",
+		"plainCreateDirectory",
+		"plainWriteFile",
+	]);
+	let fireCreatedCallCount = 0;
+	let fireRootUpdatedCallCount = 0;
+	let changeEmitterFireCallCount = 0;
+	function isThisBridge(node) {
+		return (
+			ts.isPropertyAccessExpression(node) &&
+			node.expression.kind === ts.SyntaxKind.ThisKeyword &&
+			node.name.text === "bridge"
+		);
+	}
+	function unwrapRuntimeExpression(node) {
+		let current = node;
+		while (
+			ts.isParenthesizedExpression(current) ||
+			ts.isAsExpression(current) ||
+			ts.isTypeAssertionExpression(current) ||
+			ts.isNonNullExpression(current) ||
+			ts.isSatisfiesExpression(current)
+		) {
+			current = current.expression;
+		}
+		return current;
+	}
+	function runtimeRootName(node) {
+		const current = unwrapRuntimeExpression(node);
+		if (ts.isIdentifier(current)) {
+			return current.text;
+		}
+		if (
+			ts.isPropertyAccessExpression(current) ||
+			ts.isElementAccessExpression(current)
+		) {
+			return runtimeRootName(current.expression);
+		}
+		return undefined;
+	}
+	function isProviderDescendant(node) {
+		let current = node;
+		while (current !== undefined) {
+			if (current === provider) {
+				return true;
+			}
+			if (ts.isClassDeclaration(current) && current !== provider) {
+				return false;
+			}
+			current = current.parent;
+		}
+		return false;
+	}
+	function isCriticalTypeReference(node) {
+		return (
+			ts.isTypeReferenceNode(node.parent) ||
+			ts.isExpressionWithTypeArguments(node.parent) ||
+			ts.isTypeQueryNode(node.parent)
+		);
+	}
+	function isAssignmentOperator(kind) {
+		return (
+			kind >= ts.SyntaxKind.FirstAssignment &&
+			kind <= ts.SyntaxKind.LastAssignment
+		);
+	}
 	function visit(node) {
+		if (node.kind === ts.SyntaxKind.Decorator) {
+			failures.push(
+				"Plain workspace provider source must not contain decorators that can wrap audited construction or mutation seams",
+			);
+		}
+		if (ts.isIdentifier(node) && forbiddenDynamicGlobalNames.has(node.text)) {
+			failures.push(
+				"Plain workspace provider must not reach dynamic global or code-loading surfaces",
+			);
+		}
+		if (
+			(ts.isIdentifier(node) || ts.isStringLiteral(node)) &&
+			(node.text === "constructor" || node.text === "__proto__")
+		) {
+			failures.push(
+				"Plain workspace provider must not reach constructor or prototype escape surfaces",
+			);
+		}
+		if (
+			ts.isCallExpression(node) &&
+			node.expression.kind === ts.SyntaxKind.ImportKeyword
+		) {
+			failures.push(
+				"Plain workspace provider must not reach dynamic global or code-loading surfaces",
+			);
+		}
 		if (ts.isIdentifier(node) && node.text === "FileFolderCopy") {
 			failures.push(
 				"Plain workspace provider must not advertise FileFolderCopy before activation",
@@ -5132,6 +6263,279 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		) {
 			mutationDispatchReferences += 1;
 		}
+		if (isThisBridge(node)) {
+			const methodAccess = node.parent;
+			const directCall =
+				ts.isPropertyAccessExpression(methodAccess) &&
+				methodAccess.expression === node &&
+				ts.isCallExpression(methodAccess.parent) &&
+				methodAccess.parent.expression === methodAccess
+					? methodAccess.parent
+					: undefined;
+			const methodName =
+				directCall === undefined ? undefined : methodAccess.name.text;
+			if (methodName === undefined || !expectedBridgeMethods.has(methodName)) {
+				failures.push(
+					"every this.bridge reference must be the receiver of one fixed direct provider call",
+				);
+			} else {
+				bridgeMethodCounts.set(
+					methodName,
+					bridgeMethodCounts.get(methodName) + 1,
+				);
+			}
+		}
+		if (
+			isProviderDescendant(node) &&
+			ts.isPropertyAccessExpression(node) &&
+			node.expression.kind === ts.SyntaxKind.ThisKeyword &&
+			forbiddenInternalMutationSeams.has(node.name.text)
+		) {
+			failures.push(
+				"Plain workspace provider methods must not internally consume dormant mutation seams",
+			);
+		}
+		if (
+			isProviderDescendant(node) &&
+			ts.isCallExpression(node) &&
+			ts.isPropertyAccessExpression(node.expression) &&
+			node.expression.expression.kind === ts.SyntaxKind.ThisKeyword
+		) {
+			if (node.expression.name.text === "fireCreated") {
+				fireCreatedCallCount += 1;
+			}
+			if (node.expression.name.text === "fireRootUpdated") {
+				fireRootUpdatedCallCount += 1;
+			}
+		}
+		if (
+			isProviderDescendant(node) &&
+			ts.isCallExpression(node) &&
+			ts.isPropertyAccessExpression(node.expression) &&
+			node.expression.name.text === "fire" &&
+			ts.isPropertyAccessExpression(node.expression.expression) &&
+			node.expression.expression.expression.kind ===
+				ts.SyntaxKind.ThisKeyword &&
+			node.expression.expression.name.text === "changeEmitter"
+		) {
+			changeEmitterFireCallCount += 1;
+		}
+		if (
+			ts.isIdentifier(node) &&
+			protectedFunctionReferences.has(node.text) &&
+			!bindingIdentifierNodes.has(node)
+		) {
+			const isDirectCall =
+				ts.isCallExpression(node.parent) && node.parent.expression === node;
+			if (!isDirectCall) {
+				failures.push(
+					`${node.text} must not be reassigned, aliased or consumed outside its audited direct calls`,
+				);
+			} else {
+				protectedFunctionCallCounts.set(
+					node.text,
+					protectedFunctionCallCounts.get(node.text) + 1,
+				);
+			}
+		}
+		if (isProviderDescendant(node) && node.kind === ts.SyntaxKind.ThisKeyword) {
+			const parent = node.parent;
+			if (
+				!ts.isPropertyAccessExpression(parent) ||
+				parent.expression !== node ||
+				(!expectedProviderMembers.has(parent.name.text) &&
+					parent.name.text !== "bridge" &&
+					parent.name.text !== "allowsMutationDispatch")
+			) {
+				failures.push(
+					"Plain workspace provider must not alias this or access inherited/computed mutation surfaces",
+				);
+			}
+		}
+		if (
+			isProviderDescendant(node) &&
+			ts.isIdentifier(node) &&
+			node.text === "bridge"
+		) {
+			const isConstructorParameter =
+				constructors[0]?.parameters[0]?.name === node;
+			const isDirectThisProperty =
+				ts.isPropertyAccessExpression(node.parent) &&
+				node.parent.name === node &&
+				node.parent.expression.kind === ts.SyntaxKind.ThisKeyword;
+			if (!isConstructorParameter && !isDirectThisProperty) {
+				failures.push(
+					"Plain workspace provider must not alias, destructure or synthesize its native bridge",
+				);
+			}
+		}
+		if (
+			isProviderDescendant(node) &&
+			(ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) &&
+			node.text === "bridge"
+		) {
+			failures.push(
+				"Plain workspace provider must not alias, destructure or synthesize its native bridge",
+			);
+		}
+		if (
+			ts.isIdentifier(node) &&
+			criticalBindingNames.has(node.text) &&
+			!bindingIdentifierNodes.has(node) &&
+			!(
+				ts.isImportSpecifier(node.parent) && node.parent.propertyName === node
+			) &&
+			!isCriticalTypeReference(node)
+		) {
+			const isAllowedPropertyReceiver =
+				criticalPropertyBindings.has(node.text) &&
+				ts.isPropertyAccessExpression(node.parent) &&
+				node.parent.expression === node;
+			const isAllowedDirectCall =
+				criticalCallBindings.has(node.text) &&
+				ts.isCallExpression(node.parent) &&
+				node.parent.expression === node;
+			const isAllowedDirectConstruction =
+				criticalNewBindings.has(node.text) &&
+				ts.isNewExpression(node.parent) &&
+				node.parent.expression === node;
+			if (
+				!isAllowedPropertyReceiver &&
+				!isAllowedDirectCall &&
+				!isAllowedDirectConstruction
+			) {
+				failures.push(
+					`${node.text} must not be aliased or consumed outside its fixed provider role`,
+				);
+			}
+		}
+		if (
+			ts.isIdentifier(node) &&
+			(node.text === "Object" || node.text === "Reflect")
+		) {
+			const access = node.parent;
+			const allowedMethods =
+				node.text === "Object" ? new Set(["freeze"]) : new Set(["get"]);
+			if (
+				!ts.isPropertyAccessExpression(access) ||
+				access.expression !== node ||
+				!allowedMethods.has(access.name.text) ||
+				!ts.isCallExpression(access.parent) ||
+				access.parent.expression !== access
+			) {
+				failures.push(
+					`${node.text} may be used only through its audited direct intrinsic calls`,
+				);
+			}
+		}
+		if (
+			ts.isBinaryExpression(node) &&
+			isAssignmentOperator(node.operatorToken.kind) &&
+			immutableRuntimeRoots.has(runtimeRootName(node.left))
+		) {
+			failures.push(
+				"Plain workspace provider must not mutate critical runtime bindings",
+			);
+		}
+		if (
+			(ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+			(node.operator === ts.SyntaxKind.PlusPlusToken ||
+				node.operator === ts.SyntaxKind.MinusMinusToken) &&
+			immutableRuntimeRoots.has(runtimeRootName(node.operand))
+		) {
+			failures.push(
+				"Plain workspace provider must not mutate critical runtime bindings",
+			);
+		}
+		if (
+			ts.isDeleteExpression(node) &&
+			immutableRuntimeRoots.has(runtimeRootName(node.expression))
+		) {
+			failures.push(
+				"Plain workspace provider must not mutate critical runtime bindings",
+			);
+		}
+		if (
+			ts.isCallExpression(node) &&
+			ts.isPropertyAccessExpression(node.expression)
+		) {
+			const receiver = node.expression.expression;
+			const method = node.expression.name.text;
+			const mutatesFirstArgument =
+				(ts.isIdentifier(receiver) &&
+					receiver.text === "Object" &&
+					["assign", "defineProperty", "setPrototypeOf"].includes(method)) ||
+				(ts.isIdentifier(receiver) &&
+					receiver.text === "Reflect" &&
+					["set", "defineProperty", "setPrototypeOf"].includes(method));
+			if (
+				mutatesFirstArgument &&
+				node.arguments[0] !== undefined &&
+				immutableRuntimeRoots.has(runtimeRootName(node.arguments[0]))
+			) {
+				failures.push(
+					"Plain workspace provider must not mutate critical runtime bindings",
+				);
+			}
+		}
+		if (
+			ts.isPropertyAccessExpression(node) &&
+			(node.name.text === "workspaceCreateFile" ||
+				node.name.text === "workspaceCreateDirectory")
+		) {
+			const isDirectBridgeCall =
+				ts.isCallExpression(node.parent) &&
+				node.parent.expression === node &&
+				ts.isPropertyAccessExpression(node.expression) &&
+				node.expression.expression.kind === ts.SyntaxKind.ThisKeyword &&
+				node.expression.name.text === "bridge";
+			if (!isDirectBridgeCall) {
+				failures.push(
+					`${node.name.text} may appear only as a direct this.bridge call in its audited create seam`,
+				);
+			}
+			if (node.name.text === "workspaceCreateFile") {
+				createFileBridgeReferences += 1;
+			} else {
+				createDirectoryBridgeReferences += 1;
+			}
+		}
+		if (
+			ts.isIdentifier(node) &&
+			(node.text === "workspaceCreateFile" ||
+				node.text === "workspaceCreateDirectory") &&
+			!(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)
+		) {
+			failures.push(
+				`${node.text} must not be aliased, destructured or referenced outside its direct provider call`,
+			);
+		}
+		if (
+			(ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) &&
+			(node.text === "workspaceCreateFile" ||
+				node.text === "workspaceCreateDirectory")
+		) {
+			failures.push(
+				`${node.text} must not be accessed through computed provider syntax`,
+			);
+		}
+		if (
+			(ts.isElementAccessExpression(node) && isThisBridge(node.expression)) ||
+			(ts.isCallExpression(node) &&
+				ts.isPropertyAccessExpression(node.expression) &&
+				ts.isIdentifier(node.expression.expression) &&
+				node.expression.expression.text === "Reflect" &&
+				node.expression.name.text === "get" &&
+				node.arguments[0] !== undefined &&
+				isThisBridge(node.arguments[0])) ||
+			(ts.isVariableDeclaration(node) &&
+				node.initializer !== undefined &&
+				isThisBridge(node.initializer))
+		) {
+			failures.push(
+				"Plain workspace provider must not alias or dynamically access its native bridge",
+			);
+		}
 		ts.forEachChild(node, visit);
 	}
 	visit(sourceFile);
@@ -5158,6 +6562,37 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	if (mutationDispatchReferences !== 2) {
 		failures.push(
 			"Plain workspace mutation boolean may appear only in its constructor parameter and dispatch gate",
+		);
+	}
+	if (
+		createFileBridgeReferences !== 1 ||
+		createDirectoryBridgeReferences !== 1
+	) {
+		failures.push(
+			"Plain workspace create bridges must each have exactly one direct provider call site",
+		);
+	}
+	for (const [methodName, expectedCount] of expectedBridgeMethods) {
+		if (bridgeMethodCounts.get(methodName) !== expectedCount) {
+			failures.push(
+				`${methodName} must have exactly one fixed direct this.bridge call site`,
+			);
+		}
+	}
+	for (const [functionName, expectedCount] of protectedFunctionReferences) {
+		if (protectedFunctionCallCounts.get(functionName) !== expectedCount) {
+			failures.push(
+				`${functionName} must have exactly ${expectedCount} audited direct call sites`,
+			);
+		}
+	}
+	if (
+		fireCreatedCallCount !== 2 ||
+		fireRootUpdatedCallCount !== 2 ||
+		changeEmitterFireCallCount !== 3
+	) {
+		failures.push(
+			"provider change events must remain confined to two create additions, two ambiguous root rescans and one write-outcome site",
 		);
 	}
 

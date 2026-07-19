@@ -1,5 +1,5 @@
 diff --git a/vscode/src/vs/platform/files/common/fileService.js b/vscode/src/vs/platform/files/common/fileService.js
-index 107a37ee3b1999392b35fa5545382acc7238a3c1..10de016c04970eae0dd4e3c1e3da758a32980ae9 100644
+index 107a37ee3b1999392b35fa5545382acc7238a3c1..5976d5a2f72cecb77dafb9475d777a9873b22f85 100644
 --- a/vscode/src/vs/platform/files/common/fileService.js
 +++ b/vscode/src/vs/platform/files/common/fileService.js
 @@ -9,12 +9,13 @@ import { hash } from '@codingame/monaco-vscode-api/vscode/vs/base/common/hash';
@@ -17,19 +17,320 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..10de016c04970eae0dd4e3c1e3da758a
  import { readFileIntoStream } from './io.js';
  import { ILogService } from '@codingame/monaco-vscode-api/vscode/vs/platform/log/common/log.service';
  import { ErrorNoTelemetry } from '@codingame/monaco-vscode-api/vscode/vs/base/common/errors';
-@@ -26,6 +27,468 @@ function resourceForError(resource) {
+@@ -26,7 +27,771 @@ function resourceForError(resource) {
      }
      return ( resource.toString(true));
  }
 +const PLAIN_WORKSPACE_SCHEME = "plain-workspace";
 +const PLAIN_WORKSPACE_VERSION_PATTERN = /^wv1:[0-9a-f]{64}$/;
++const PLAIN_WORKSPACE_ROOT_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 +const PLAIN_WORKSPACE_MAX_READ_BYTES = 8 * 1024 * 1024;
 +const PLAIN_WORKSPACE_MAX_WRITE_BYTES = 8 * 1024 * 1024;
++const PLAIN_WORKSPACE_MAX_RELATIVE_PATH_BYTES = 4 * 1024;
++const PLAIN_WORKSPACE_MAX_RELATIVE_PATH_SEGMENTS = 256;
++const PLAIN_WORKSPACE_UTF8_ENCODER = new TextEncoder();
 +function plainWorkspaceMutationError(message, result = FileOperationResult.FILE_PERMISSION_DENIED) {
 +    return ( new FileOperationError(message, result));
 +}
 +function isPlainWorkspaceResource(resource) {
 +    return resource?.scheme === PLAIN_WORKSPACE_SCHEME;
++}
++function isPlainWorkspaceWellFormedUtf16(value) {
++    for (let index = 0; index < value.length; index += 1) {
++        const code = value.charCodeAt(index);
++        if (code >= 0xd800 && code <= 0xdbff) {
++            if (index + 1 >= value.length) {
++                return false;
++            }
++            const next = value.charCodeAt(index + 1);
++            if (next < 0xdc00 || next > 0xdfff) {
++                return false;
++            }
++            index += 1;
++        }
++        else if (code >= 0xdc00 && code <= 0xdfff) {
++            return false;
++        }
++    }
++    return true;
++}
++function isPlainWorkspacePortableSegment(segment) {
++    if (
++        segment.length === 0 ||
++        segment === "." ||
++        segment === ".." ||
++        segment.endsWith(".") ||
++        segment.endsWith(" ") ||
++        !isPlainWorkspaceWellFormedUtf16(segment)
++    ) {
++        return false;
++    }
++    for (const character of segment) {
++        const code = character.charCodeAt(0);
++        if (code <= 0x1f || code === 0x7f || '/\\:<>"|?*'.includes(character)) {
++            return false;
++        }
++    }
++    const stem = (segment.split(".", 1)[0] ?? segment).replace(/[a-z]/g, character => String.fromCharCode(character.charCodeAt(0) - 32));
++    return !(
++        ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"].includes(stem) ||
++        /^(?:COM|LPT)(?:[1-9¹²³])$/.test(stem)
++    );
++}
++function isPlainWorkspaceCreatePath(path) {
++    if (typeof path !== "string" || !path.startsWith("/") || path.length <= 1) {
++        return false;
++    }
++    const relativePath = path.slice(1);
++    if (
++        relativePath.length > PLAIN_WORKSPACE_MAX_RELATIVE_PATH_BYTES ||
++        !isPlainWorkspaceWellFormedUtf16(relativePath) ||
++        PLAIN_WORKSPACE_UTF8_ENCODER.encode(relativePath).byteLength > PLAIN_WORKSPACE_MAX_RELATIVE_PATH_BYTES
++    ) {
++        return false;
++    }
++    const segments = relativePath.split("/");
++    return (
++        segments.length <= PLAIN_WORKSPACE_MAX_RELATIVE_PATH_SEGMENTS &&
++        segments.every(isPlainWorkspacePortableSegment)
++    );
++}
++function snapshotPlainWorkspaceCreateResource(resource) {
++    try {
++        const snapshot = snapshotWorkspaceMutationResource(resource);
++        if (isPlainWorkspaceResource(snapshot) && (
++            snapshot.query !== "" ||
++            snapshot.fragment !== "" ||
++            !PLAIN_WORKSPACE_ROOT_PATTERN.test(snapshot.authority) ||
++            !isPlainWorkspaceCreatePath(snapshot.path)
++        )) {
++            throw ( new Error("invalid Plain create URI"));
++        }
++        return snapshot;
++    }
++    catch {
++        throw plainWorkspaceMutationError("Plain workspace create URI violates the mutation contract");
++    }
++}
++function snapshotPlainWorkspaceCreateOptions(options) {
++    if (options === undefined) {
++        return false;
++    }
++    try {
++        if (!options || typeof options !== "object") {
++            throw ( new Error("invalid create options"));
++        }
++        const prototype = Object.getPrototypeOf(options);
++        if (prototype !== Object.prototype && prototype !== null) {
++            throw ( new Error("invalid create options prototype"));
++        }
++        const descriptors = Object.getOwnPropertyDescriptors(options);
++        const keys = Reflect.ownKeys(descriptors);
++        if (keys.length === 0) {
++            structuredClone(options);
++            return false;
++        }
++        const overwrite = descriptors.overwrite;
++        if (
++            keys.length !== 1 ||
++            keys[0] !== "overwrite" ||
++            !overwrite ||
++            !("value" in overwrite) ||
++            overwrite.enumerable !== true ||
++            (overwrite.value !== undefined && overwrite.value !== false)
++        ) {
++            throw ( new Error("invalid create options fields"));
++        }
++        structuredClone(options);
++        return false;
++    }
++    catch {
++        throw plainWorkspaceMutationError("Plain workspace create options violate the no-overwrite contract");
++    }
++}
++function plainWorkspaceCreateContractError(options) {
++    return ( new FileOperationError(
++        "Plain workspace create input violates the empty no-overwrite contract",
++        FileOperationResult.FILE_OTHER_ERROR,
++        options
++    ));
++}
++function plainWorkspaceCreateMethod(provider, directory, options) {
++    const method = directory ? provider.plainCreateDirectory : provider.plainCreateFile;
++    if (typeof method !== "function") {
++        throw plainWorkspaceCreateContractError(options);
++    }
++    return method;
++}
++function validatePlainWorkspaceCreatedStat(stat, expectedType, options) {
++    try {
++        if (!stat || typeof stat !== "object" || Object.getPrototypeOf(stat) !== Object.prototype || !Object.isFrozen(stat)) {
++            throw ( new Error("invalid create stat"));
++        }
++        const descriptors = Object.getOwnPropertyDescriptors(stat);
++        const keys = Reflect.ownKeys(descriptors);
++        const required = ["type", "size", "mtime", "ctime", "plainVersion"];
++        const permissions = descriptors.permissions;
++        if (
++            (keys.length !== required.length && keys.length !== required.length + 1) ||
++            !required.every(key => keys.includes(key)) ||
++            keys.some(key => typeof key !== "string" || (!required.includes(key) && key !== "permissions"))
++        ) {
++            throw ( new Error("invalid create stat fields"));
++        }
++        for (const key of required) {
++            if (!("value" in descriptors[key]) || descriptors[key].enumerable !== true) {
++                throw ( new Error("invalid create stat field"));
++            }
++        }
++        if (permissions && (!("value" in permissions) || permissions.enumerable !== true)) {
++            throw ( new Error("invalid create permissions"));
++        }
++        const type = descriptors.type.value;
++        const size = descriptors.size.value;
++        const mtime = descriptors.mtime.value;
++        const ctime = descriptors.ctime.value;
++        const version = descriptors.plainVersion.value;
++        const permissionValue = permissions?.value;
++        if (
++            type !== expectedType ||
++            size !== 0 ||
++            mtime !== 0 ||
++            ctime !== 0 ||
++            version !== null
++        ) {
++            throw ( new Error("invalid create stat values"));
++        }
++        if (expectedType === FileType.File) {
++            if (!permissions || permissionValue !== FilePermission.Readonly) {
++                throw ( new Error("tokenless created files must be readonly"));
++            }
++        }
++        else if (permissions) {
++            throw ( new Error("created directories cannot carry file metadata"));
++        }
++        structuredClone(stat);
++        return Object.freeze({
++            type,
++            size,
++            mtime,
++            ctime,
++            ...(permissions ? { permissions: permissionValue } : {}),
++            plainVersion: version
++        });
++    }
++    catch {
++        throw plainWorkspaceCreateContractError(options);
++    }
++}
++function collectPlainWorkspaceEmptyCreateStream(stream, options) {
++    return ( new Promise((resolve, reject) => {
++        let settled = false;
++        const cleanup = () => {
++            try {
++                stream.removeListener("error", onError);
++                stream.removeListener("end", onEnd);
++                stream.removeListener("data", onData);
++            }
++            catch {}
++        };
++        const fail = error => {
++            if (settled) {
++                return;
++            }
++            settled = true;
++            cleanup();
++            destroyPlainWorkspaceWriteStream(stream);
++            reject(error);
++        };
++        const onError = error => fail(error);
++        const onEnd = () => {
++            if (settled) {
++                return;
++            }
++            settled = true;
++            cleanup();
++            resolve();
++        };
++        const onData = chunk => {
++            if (settled) {
++                return;
++            }
++            try {
++                plainWorkspaceWriteChunkView(chunk, false, options);
++                fail(plainWorkspaceCreateContractError(options));
++            }
++            catch (error) {
++                fail(error);
++            }
++        };
++        try {
++            stream.on("error", onError);
++            if (settled) {
++                return;
++            }
++            stream.on("end", onEnd);
++            if (settled) {
++                return;
++            }
++            stream.on("data", onData);
++        }
++        catch (error) {
++            fail(error);
++        }
++    }));
++}
++async function validatePlainWorkspaceCreateContent(input, resource, options) {
++    void resource;
++    try {
++        if (input instanceof VSBuffer) {
++            const { byteLength } = plainWorkspaceWriteChunkView(input, true, options);
++            if (byteLength !== 0) {
++                throw plainWorkspaceCreateContractError(options);
++            }
++            return;
++        }
++        if (isReadableBufferedStream(input)) {
++            try {
++                for (const chunk of input.buffer) {
++                    plainWorkspaceWriteChunkView(chunk, false, options);
++                    throw plainWorkspaceCreateContractError(options);
++                }
++                if (input.ended) {
++                    return;
++                }
++            }
++            catch {
++                destroyPlainWorkspaceWriteStream(input.stream);
++                throw plainWorkspaceCreateContractError(options);
++            }
++            await collectPlainWorkspaceEmptyCreateStream(input.stream, options);
++            return;
++        }
++        if (isReadableStream(input)) {
++            await collectPlainWorkspaceEmptyCreateStream(input, options);
++            return;
++        }
++        if (!input || typeof input.read !== "function") {
++            throw plainWorkspaceCreateContractError(options);
++        }
++        const chunk = input.read();
++        if (chunk === null) {
++            return;
++        }
++        plainWorkspaceWriteChunkView(chunk, false, options);
++        throw plainWorkspaceCreateContractError(options);
++    }
++    catch {
++        throw plainWorkspaceCreateContractError(options);
++    }
++}
++function rejectPlainWorkspaceMkdirp(directory) {
++    const snapshot = snapshotWorkspaceMutationResource(directory);
++    if (isPlainWorkspaceResource(snapshot)) {
++        throw plainWorkspaceMutationError("Plain workspace resources cannot enter recursive mkdirp");
++    }
++    return snapshot;
 +}
 +function snapshotWorkspaceMutationResource(resource) {
 +    const snapshot = URI.from({
@@ -484,9 +785,11 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..10de016c04970eae0dd4e3c1e3da758a
 +    }
 +}
  async function mkdirp(providerExtUri, provider, directory) {
++    directory = rejectPlainWorkspaceMkdirp(directory);
      const directoriesToCreate = [];
      while (!providerExtUri.isEqual(directory, providerExtUri.dirname(directory))) {
-@@ -81,6 +544,7 @@ let FileService = class FileService extends Disposable {
+         try {
+@@ -81,6 +846,7 @@ let FileService = class FileService extends Disposable {
          this._onDidWatchError = this._register(( new Emitter()));
          this.onDidWatchError = this._onDidWatchError.event;
          this.activeWatchers = ( new Map());
@@ -494,7 +797,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..10de016c04970eae0dd4e3c1e3da758a
          this.writeQueue = this._register(( new ResourceQueue()));
      }
      registerProvider(scheme, provider) {
-@@ -266,6 +730,21 @@ let FileService = class FileService extends Disposable {
+@@ -266,6 +1032,21 @@ let FileService = class FileService extends Disposable {
              }),
              children: undefined
          };
@@ -516,7 +819,72 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..10de016c04970eae0dd4e3c1e3da758a
          if (fileStat.isDirectory && recurse(fileStat, siblings)) {
              try {
                  const entries = await provider.readdir(resource);
-@@ -369,9 +848,11 @@ let FileService = class FileService extends Disposable {
+@@ -345,8 +1126,21 @@ let FileService = class FileService extends Disposable {
+         }
+     }
+     async canCreateFile(resource, options) {
++        let createResource;
+         try {
+-            await this.doValidateCreateFile(resource, options);
++            createResource = snapshotPlainWorkspaceCreateResource(resource);
++            if (isPlainWorkspaceResource(createResource)) {
++                const createOptions = { overwrite: snapshotPlainWorkspaceCreateOptions(options) };
++                const provider = this.throwIfFileSystemIsReadonly(await this.withProvider(createResource), createResource);
++                plainWorkspaceCreateMethod(provider, false, createOptions);
++                return true;
++            }
++        }
++        catch (error) {
++            return error;
++        }
++        try {
++            await this.doValidateCreateFile(createResource, options);
+         } catch (error) {
+             return error;
+         }
+@@ -362,16 +1156,50 @@ let FileService = class FileService extends Disposable {
+         }
+     }
+     async createFile(resource, bufferOrReadableOrStream = VSBuffer.fromString(""), options) {
+-        await this.doValidateCreateFile(resource, options);
+-        const fileStat = await this.writeFile(resource, bufferOrReadableOrStream);
+-        this._onDidRunOperation.fire(( new FileOperationEvent(resource, FileOperation.CREATE, fileStat)));
++        const createResource = snapshotPlainWorkspaceCreateResource(resource);
++        if (isPlainWorkspaceResource(createResource)) {
++            const createOptions = { overwrite: snapshotPlainWorkspaceCreateOptions(options) };
++            await validatePlainWorkspaceCreateContent(bufferOrReadableOrStream, createResource, createOptions);
++            const provider = this.throwIfFileSystemIsReadonly(await this.withProvider(createResource), createResource);
++            const create = plainWorkspaceCreateMethod(provider, false, createOptions);
++            let createdStat;
++            try {
++                createdStat = validatePlainWorkspaceCreatedStat(
++                    await Reflect.apply(create, provider, [createResource]),
++                    FileType.File,
++                    createOptions
++                );
++            }
++            catch (error) {
++                throw ( new FileOperationError(
++                    "Unable to create the Plain workspace entry",
++                    toFileOperationResult(error),
++                    createOptions
++                ));
++            }
++            const fileStat = await this.toFileStat(
++                provider,
++                createResource,
++                createdStat,
++                undefined,
++                true,
++                () => false
++            );
++            this._onDidRunOperation.fire(( new FileOperationEvent(createResource, FileOperation.CREATE, fileStat)));
++            return fileStat;
++        }
++        await this.doValidateCreateFile(createResource, options);
++        const fileStat = await this.writeFile(createResource, bufferOrReadableOrStream);
++        this._onDidRunOperation.fire(( new FileOperationEvent(createResource, FileOperation.CREATE, fileStat)));
+         return fileStat;
      }
      async writeFile(resource, bufferOrReadableOrStream, options) {
          const provider = this.throwIfFileSystemIsReadonly(await this.withWriteProvider(resource), resource);
@@ -528,7 +896,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..10de016c04970eae0dd4e3c1e3da758a
          let writeFileOptions = options;
          if (hasFileAtomicWriteCapability(provider) && !writeFileOptions?.atomic) {
              const enforcedAtomicWrite = provider.enforceAtomicWriteFile?.(resource);
-@@ -383,10 +864,39 @@ let FileService = class FileService extends Disposable {
+@@ -383,10 +1211,39 @@ let FileService = class FileService extends Disposable {
              }
          }
          try {
@@ -569,7 +937,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..10de016c04970eae0dd4e3c1e3da758a
              if (!stat) {
                  await this.mkdirp(provider, providerExtUri.dirname(resource));
              }
-@@ -412,6 +922,9 @@ let FileService = class FileService extends Disposable {
+@@ -412,6 +1269,9 @@ let FileService = class FileService extends Disposable {
              }
              this._onDidRunOperation.fire(( new FileOperationEvent(resource, FileOperation.WRITE)));
          } catch (error) {
@@ -579,7 +947,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..10de016c04970eae0dd4e3c1e3da758a
              throw ( new FileOperationError(( localize(
                  2096,
                  "Unable to write file '{0}' ({1})",
-@@ -442,6 +955,57 @@ let FileService = class FileService extends Disposable {
+@@ -442,6 +1302,57 @@ let FileService = class FileService extends Disposable {
          return peekResult;
      }
      async validateWriteFile(provider, resource, bufferOrReadableOrStream, options) {
@@ -637,7 +1005,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..10de016c04970eae0dd4e3c1e3da758a
          const unlock = !!options?.unlock;
          if (unlock && !(provider.capabilities & FileSystemProviderCapabilities.FileWriteUnlock)) {
              throw ( new Error(( localize(
-@@ -559,6 +1123,9 @@ let FileService = class FileService extends Disposable {
+@@ -559,6 +1470,9 @@ let FileService = class FileService extends Disposable {
          return this.doReadFileStream(provider, resource, options, token);
      }
      async doReadFileStream(provider, resource, options, token) {
@@ -647,7 +1015,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..10de016c04970eae0dd4e3c1e3da758a
          const cancellableSource = ( new CancellationTokenSource(token));
          let readFileOptions = options;
          if (hasFileAtomicReadCapability(provider) && provider.enforceAtomicReadFile?.(resource)) {
-@@ -600,6 +1167,57 @@ let FileService = class FileService extends Disposable {
+@@ -600,6 +1514,57 @@ let FileService = class FileService extends Disposable {
              throw this.restoreReadError(error, resource, readFileOptions);
          }
      }
@@ -705,7 +1073,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..10de016c04970eae0dd4e3c1e3da758a
      restoreReadError(error, resource, options) {
          const message = ( localize(
              2104,
-@@ -691,18 +1309,27 @@ let FileService = class FileService extends Disposable {
+@@ -691,18 +1656,27 @@ let FileService = class FileService extends Disposable {
          return this.doCanMoveCopy(source, target, "copy", overwrite);
      }
      async doCanMoveCopy(source, target, mode, overwrite) {
@@ -739,7 +1107,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..10de016c04970eae0dd4e3c1e3da758a
          const sourceProvider = this.throwIfFileSystemIsReadonly(await this.withWriteProvider(source), source);
          const targetProvider = this.throwIfFileSystemIsReadonly(await this.withWriteProvider(target), target);
          const mode = await this.doMoveCopy(sourceProvider, source, targetProvider, target, "move", !!overwrite);
-@@ -717,6 +1344,8 @@ let FileService = class FileService extends Disposable {
+@@ -717,6 +1691,8 @@ let FileService = class FileService extends Disposable {
          return fileStat;
      }
      async copy(source, target, overwrite) {
@@ -748,7 +1116,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..10de016c04970eae0dd4e3c1e3da758a
          const sourceProvider = await this.withReadProvider(source);
          const targetProvider = this.throwIfFileSystemIsReadonly(await this.withWriteProvider(target), target);
          const mode = await this.doMoveCopy(sourceProvider, source, targetProvider, target, "copy", !!overwrite);
-@@ -731,6 +1360,21 @@ let FileService = class FileService extends Disposable {
+@@ -731,6 +1707,21 @@ let FileService = class FileService extends Disposable {
          return fileStat;
      }
      async doMoveCopy(sourceProvider, source, targetProvider, target, mode, overwrite) {
@@ -770,7 +1138,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..10de016c04970eae0dd4e3c1e3da758a
          if (( source.toString()) === ( target.toString())) {
              return mode;
          }
-@@ -780,6 +1424,7 @@ let FileService = class FileService extends Disposable {
+@@ -780,6 +1771,7 @@ let FileService = class FileService extends Disposable {
          }
      }
      async doCopyFile(sourceProvider, source, targetProvider, target) {
@@ -778,7 +1146,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..10de016c04970eae0dd4e3c1e3da758a
          if (hasOpenReadWriteCloseCapability(sourceProvider) && hasOpenReadWriteCloseCapability(targetProvider)) {
              return this.doPipeBuffered(sourceProvider, source, targetProvider, target);
          }
-@@ -794,6 +1439,7 @@ let FileService = class FileService extends Disposable {
+@@ -794,6 +1786,7 @@ let FileService = class FileService extends Disposable {
          }
      }
      async doCopyFolder(sourceProvider, sourceFolder, targetProvider, targetFolder) {
@@ -786,7 +1154,59 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..10de016c04970eae0dd4e3c1e3da758a
          await targetProvider.mkdir(targetFolder);
          if (Array.isArray(sourceFolder.children)) {
              await Promises.settled(( sourceFolder.children.map(async sourceChild => {
-@@ -974,6 +1620,8 @@ let FileService = class FileService extends Disposable {
+@@ -878,15 +1871,47 @@ let FileService = class FileService extends Disposable {
+         return !!(provider.capabilities & FileSystemProviderCapabilities.PathCaseSensitive);
+     }
+     async createFolder(resource) {
+-        const provider = this.throwIfFileSystemIsReadonly(await this.withProvider(resource), resource);
+-        await this.mkdirp(provider, resource);
+-        const fileStat = await this.resolve(resource, {
++        const createResource = snapshotPlainWorkspaceCreateResource(resource);
++        if (isPlainWorkspaceResource(createResource)) {
++            const createOptions = { overwrite: false };
++            const provider = this.throwIfFileSystemIsReadonly(await this.withProvider(createResource), createResource);
++            const create = plainWorkspaceCreateMethod(provider, true, createOptions);
++            let createdStat;
++            try {
++                createdStat = validatePlainWorkspaceCreatedStat(
++                    await Reflect.apply(create, provider, [createResource]),
++                    FileType.Directory,
++                    createOptions
++                );
++            }
++            catch (error) {
++                throw ( new FileOperationError(
++                    "Unable to create the Plain workspace entry",
++                    toFileOperationResult(error),
++                    createOptions
++                ));
++            }
++            const fileStat = await this.toFileStat(
++                provider,
++                createResource,
++                createdStat,
++                undefined,
++                true,
++                () => false
++            );
++            this._onDidRunOperation.fire(( new FileOperationEvent(createResource, FileOperation.CREATE, fileStat)));
++            return fileStat;
++        }
++        const provider = this.throwIfFileSystemIsReadonly(await this.withProvider(createResource), createResource);
++        await this.mkdirp(provider, createResource);
++        const fileStat = await this.resolve(createResource, {
+             resolveMetadata: true
+         });
+-        this._onDidRunOperation.fire(( new FileOperationEvent(resource, FileOperation.CREATE, fileStat)));
++        this._onDidRunOperation.fire(( new FileOperationEvent(createResource, FileOperation.CREATE, fileStat)));
+         return fileStat;
+     }
+     async mkdirp(provider, directory) {
++        directory = rejectPlainWorkspaceMkdirp(directory);
+         const {
+             providerExtUri
+         } = this.getExtUri(provider);
+@@ -974,6 +1999,8 @@ let FileService = class FileService extends Disposable {
          this._onDidRunOperation.fire(( new FileOperationEvent(resource, FileOperation.DELETE)));
      }
      async cloneFile(source, target) {
@@ -795,7 +1215,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..10de016c04970eae0dd4e3c1e3da758a
          const sourceProvider = await this.withProvider(source);
          const targetProvider = this.throwIfFileSystemIsReadonly(await this.withWriteProvider(target), target);
          if (sourceProvider === targetProvider && this.getExtUri(sourceProvider).providerExtUri.isEqual(source, target)) {
-@@ -1154,14 +1802,54 @@ let FileService = class FileService extends Disposable {
+@@ -1154,14 +2181,54 @@ let FileService = class FileService extends Disposable {
              totalBytesWritten += bytesWritten;
          }
      }

@@ -56,8 +56,9 @@
    - 本切片仍固定 `FileReadWrite | Readonly`，不增加任何 Workbench 写入口；unsupported/畸形/读取失败都不能产生半注册 provider。
 2. **新建文件/目录路由，继续只读**
    - FileService 对 Plain `canCreateFile/createFile/createFolder/mkdirp` 增加窄分支和纵深 tripwire。
-   - 新文件只接受空内容、无 overwrite，直接调用一次私有 native-create seam；目录只调用一次 provider `mkdir`。两者都不做 target stat、递归 mkdirp 或通用 write fallback。
-   - provider 在 all-five-true policy 下把 URI 一次性复制为 primitive request，再分别调用一次 `workspaceCreateFile/workspaceCreateDirectory`；本切片仍不移除 `Readonly`。
+   - 新文件只接受空内容、无 overwrite；文件与目录分别只调用一次私有 native-create seam。两条原生 command 必须在同一次 IPC 返回严格创建回执，不能让 `void` 与 Workbench 的 `IFileStatWithMetadata` 合同冲突，也不能伪造一次额外的前端 stat。
+   - Rust 创建回执只陈述 syscall 已知事实：`kind`、`size=0`、未知时间 `0` 与 `version=null`；首次文件读取再由同 handle `PLR1` 回执取得真实 metadata/`wv1`。FileService/provider 不做 create 前 target `stat/exists` 或 create 后第二次 `workspace_stat/resolve`，也不进入递归 mkdirp、公共 `writeFile/mkdir` 或通用 fallback。
+   - provider 在 all-five-true policy 下把 URI 一次性复制为 primitive request，再分别调用一次 `workspaceCreateFile/workspaceCreateDirectory`，严格解码回执后只发 target `ADDED`；回执畸形、未知 rejection 或响应无法认证时只发一次冻结的 root `UPDATED` 再失败，已认证的 syscall 前错误不发事件。本切片仍不移除 `Readonly`，公共 `writeFile/mkdir/delete/rename` 继续拒绝。
 3. **copy/rename/move provider 路由，继续只读**
    - `copy/rename` 严格接纳 own-data `{ overwrite: false }`，禁止额外字段和 accessor。
    - copy 只调用 `workspaceCopy`；rename 同 root 只调用 `workspaceRename`，不同 root 只调用 `workspaceMove`。

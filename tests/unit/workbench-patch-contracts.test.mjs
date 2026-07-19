@@ -95,7 +95,7 @@ describe("exact Workbench patch contracts", () => {
 
 		const stale = await baseline();
 		stale.lockfile = stale.lockfile.replace(
-			"0f0b29444ba911b4c8c652012c1e876a3d4482fbaac6fb0815e225192afac98a",
+			"ec05e44dd1cebac5b9b27c9ee77c3fa15452867c610e46a1ed89fdd16f844279",
 			"0".repeat(64),
 		);
 		expect(validateWorkbenchPatchSet(stale)).toContain(
@@ -354,6 +354,62 @@ describe("exact Workbench patch contracts", () => {
 				to: "overwrite",
 			},
 		];
+		for (const mutation of mutations) {
+			const input = await baseline();
+			const source = input.patchSources.get(patchPath);
+			expect(source).toContain(mutation.from);
+			input.patchSources.set(
+				patchPath,
+				source.replace(mutation.from, mutation.to),
+			);
+			expect(validateWorkbenchPatchSet(input)).toContain(
+				`${patchPath} differs from its exact audited SHA-256`,
+			);
+		}
+	});
+
+	it("rejects Plain create receipt and fallback guard downgrades", async () => {
+		const patchPath =
+			"patches/@codingame__monaco-vscode-files-service-override@35.0.1.patch";
+		const mutations = [
+			{
+				from: "+            createResource = snapshotPlainWorkspaceCreateResource(resource);",
+				to: "+            createResource = resource;",
+			},
+			{
+				from: "+            const createOptions = { overwrite: snapshotPlainWorkspaceCreateOptions(options) };",
+				to: "+            const createOptions = options;",
+			},
+			{
+				from: "+            await validatePlainWorkspaceCreateContent(bufferOrReadableOrStream, createResource, createOptions);",
+				to: "+            void bufferOrReadableOrStream;",
+			},
+			{
+				from: "+                    await Reflect.apply(create, provider, [createResource]),",
+				to: "+                    await provider.writeFile(createResource, bufferOrReadableOrStream, createOptions),",
+			},
+			{
+				from: "+            const fileStat = await this.toFileStat(",
+				to: "+            const fileStat = await this.resolve(createResource, { resolveMetadata: true }); void this.toFileStat(",
+			},
+			{
+				from: "+        directory = rejectPlainWorkspaceMkdirp(directory);",
+				to: "+        void directory;",
+			},
+			{
+				from: "+    directory = rejectPlainWorkspaceMkdirp(directory);",
+				to: "+    void directory;",
+			},
+			{
+				from: "+            const create = plainWorkspaceCreateMethod(provider, true, createOptions);",
+				to: "+            const create = provider.mkdir;",
+			},
+			{
+				from: "+            this._onDidRunOperation.fire(( new FileOperationEvent(createResource, FileOperation.CREATE, fileStat)));",
+				to: "+            this._onDidRunOperation.fire(( new FileOperationEvent(resource, FileOperation.CREATE)));",
+			},
+		];
+
 		for (const mutation of mutations) {
 			const input = await baseline();
 			const source = input.patchSources.get(patchPath);

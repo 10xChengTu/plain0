@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { VSBuffer } from "@codingame/monaco-vscode-api/vscode/vs/base/common/buffer";
 import { Event } from "@codingame/monaco-vscode-api/vscode/vs/base/common/event";
 import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
 import {
@@ -13,12 +14,19 @@ import {
 	FileType,
 	toFileSystemProviderErrorCode,
 } from "@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files";
-import { FileService } from "@codingame/monaco-vscode-files-service-override/vscode/vs/platform/files/common/fileService";
+import {
+	FileService,
+	mkdirp,
+} from "@codingame/monaco-vscode-files-service-override/vscode/vs/platform/files/common/fileService";
 
 const ROOT_A = "00112233-4455-4677-8899-aabbccddeeff";
 const ROOT_B = "10112233-4455-4677-8899-aabbccddeeff";
 const PLAIN_SOURCE = URI.parse(`plain-workspace://${ROOT_A}/source.txt`);
 const PLAIN_TARGET = URI.parse(`plain-workspace://${ROOT_A}/target.txt`);
+const PLAIN_CREATED_FILE = URI.parse(`plain-workspace://${ROOT_A}/created.txt`);
+const PLAIN_CREATED_DIRECTORY = URI.parse(
+	`plain-workspace://${ROOT_A}/created-directory`,
+);
 const PLAIN_MISSING_PARENT_TARGET = URI.parse(
 	`plain-workspace://${ROOT_A}/missing/target.txt`,
 );
@@ -57,6 +65,27 @@ function directoryStat() {
 	});
 }
 
+function createdFileStat() {
+	return Object.freeze({
+		type: FileType.File,
+		ctime: 0,
+		mtime: 0,
+		size: 0,
+		permissions: FilePermission.Readonly,
+		plainVersion: null,
+	});
+}
+
+function createdDirectoryStat() {
+	return Object.freeze({
+		type: FileType.Directory,
+		ctime: 0,
+		mtime: 0,
+		size: 0,
+		plainVersion: null,
+	});
+}
+
 function providerHarness({
 	capabilities = FileSystemProviderCapabilities.FileReadWrite |
 		FileSystemProviderCapabilities.FileFolderCopy,
@@ -64,8 +93,14 @@ function providerHarness({
 	targets = [],
 	omitCopy = false,
 	omitRename = false,
+	omitPlainCreateFile = false,
+	omitPlainCreateDirectory = false,
 	copyError,
 	renameError,
+	createFileError,
+	createDirectoryError,
+	createFileResult = createdFileStat(),
+	createDirectoryResult = createdDirectoryStat(),
 } = {}) {
 	const entries = new Set(
 		[...sources, ...targets].map((resource) => resource.toString()),
@@ -78,12 +113,19 @@ function providerHarness({
 		writeCalls: 0,
 		copyCalls: 0,
 		renameCalls: 0,
+		plainCreateFileCalls: 0,
+		plainCreateDirectoryCalls: 0,
 		copyOptions: [],
 		renameOptions: [],
 		copyTargets: [],
 		renameTargets: [],
 		copyResourcesFrozen: [],
 		renameResourcesFrozen: [],
+		plainCreateResources: [],
+		plainCreateResourcesFrozen: [],
+		statResources: [],
+		mkdirResources: [],
+		writeResources: [],
 	};
 	const provider = {
 		capabilities,
@@ -91,6 +133,7 @@ function providerHarness({
 		onDidChangeFile: Event.None,
 		async stat(resource) {
 			state.statCalls += 1;
+			state.statResources.push(resource.toString());
 			if (resource.path === "/") {
 				return directoryStat();
 			}
@@ -104,6 +147,7 @@ function providerHarness({
 		},
 		async mkdir(resource) {
 			state.mkdirCalls += 1;
+			state.mkdirResources.push(resource.toString());
 			entries.add(resource.toString());
 		},
 		async delete(resource) {
@@ -116,9 +160,46 @@ function providerHarness({
 		},
 		async writeFile(resource) {
 			state.writeCalls += 1;
+			state.writeResources.push(resource.toString());
 			entries.add(resource.toString());
 		},
 	};
+	if (!omitPlainCreateFile) {
+		provider.plainCreateFile = async (resource) => {
+			state.plainCreateFileCalls += 1;
+			state.plainCreateResources.push(resource.toString());
+			state.plainCreateResourcesFrozen.push(Object.isFrozen(resource));
+			if (createFileError !== undefined) {
+				throw createFileError;
+			}
+			if (entries.has(resource.toString())) {
+				throw FileSystemProviderError.create(
+					"private target already exists",
+					FileSystemProviderErrorCode.FileExists,
+				);
+			}
+			entries.add(resource.toString());
+			return createFileResult;
+		};
+	}
+	if (!omitPlainCreateDirectory) {
+		provider.plainCreateDirectory = async (resource) => {
+			state.plainCreateDirectoryCalls += 1;
+			state.plainCreateResources.push(resource.toString());
+			state.plainCreateResourcesFrozen.push(Object.isFrozen(resource));
+			if (createDirectoryError !== undefined) {
+				throw createDirectoryError;
+			}
+			if (entries.has(resource.toString())) {
+				throw FileSystemProviderError.create(
+					"private target already exists",
+					FileSystemProviderErrorCode.FileExists,
+				);
+			}
+			entries.add(resource.toString());
+			return createDirectoryResult;
+		};
+	}
 	if (!omitCopy) {
 		provider.copy = async (source, target, options) => {
 			state.copyCalls += 1;
@@ -230,7 +311,75 @@ function expectNoProviderSideEffects(state) {
 		writeCalls: 0,
 		copyCalls: 0,
 		renameCalls: 0,
+		plainCreateFileCalls: 0,
+		plainCreateDirectoryCalls: 0,
 	});
+}
+
+function scriptedReadable(chunks) {
+	let index = 0;
+	const state = { readCalls: 0 };
+	return {
+		input: {
+			read() {
+				state.readCalls += 1;
+				return chunks[index++] ?? null;
+			},
+		},
+		state,
+	};
+}
+
+function deferred() {
+	let resolve;
+	let reject;
+	const promise = new Promise((resolvePromise, rejectPromise) => {
+		resolve = resolvePromise;
+		reject = rejectPromise;
+	});
+	return { promise, resolve, reject };
+}
+
+function nonEndingStreamWithChunk(chunk) {
+	const listeners = {
+		error: new Set(),
+		end: new Set(),
+		data: new Set(),
+	};
+	const state = { destroyCalls: 0, dataCalls: 0 };
+	const stream = {
+		on(event, listener) {
+			listeners[event].add(listener);
+			if (event === "data") {
+				state.dataCalls += 1;
+				listener(chunk);
+			}
+		},
+		removeListener(event, listener) {
+			listeners[event].delete(listener);
+		},
+		pause() {},
+		resume() {},
+		destroy() {
+			state.destroyCalls += 1;
+		},
+	};
+	return { input: stream, state };
+}
+
+function hostileCreateStream(on, state = { destroyCalls: 0 }) {
+	return {
+		input: {
+			on,
+			removeListener() {},
+			pause() {},
+			resume() {},
+			destroy() {
+				state.destroyCalls += 1;
+			},
+		},
+		state,
+	};
 }
 
 async function invokeGuarded(service, method, source, target, overwrite) {
@@ -239,6 +388,646 @@ async function invokeGuarded(service, method, source, target, overwrite) {
 }
 
 describe("patched FileService Plain workspace mutation routing", () => {
+	it("routes empty file and single-directory creation through one native-only provider receipt", async () => {
+		const harness = providerHarness({ sources: [] });
+		const runtime = serviceHarness([["plain-workspace", harness.provider]]);
+
+		try {
+			expect(
+				await runtime.service.canCreateFile(PLAIN_CREATED_FILE, {
+					overwrite: undefined,
+				}),
+			).toBe(true);
+			const file = await runtime.service.createFile(
+				PLAIN_CREATED_FILE,
+				VSBuffer.alloc(0),
+				{ overwrite: false },
+			);
+			const directory = await runtime.service.createFolder(
+				PLAIN_CREATED_DIRECTORY,
+			);
+
+			expect(file).toMatchObject({
+				isFile: true,
+				isDirectory: false,
+				size: 0,
+				mtime: 0,
+				ctime: 0,
+				readonly: true,
+			});
+			expect(directory).toMatchObject({
+				isFile: false,
+				isDirectory: true,
+				size: 0,
+			});
+			expect(file.resource.toString()).toBe(PLAIN_CREATED_FILE.toString());
+			expect(directory.resource.toString()).toBe(
+				PLAIN_CREATED_DIRECTORY.toString(),
+			);
+			expect(harness.state).toMatchObject({
+				statCalls: 0,
+				deleteCalls: 0,
+				mkdirCalls: 0,
+				readCalls: 0,
+				writeCalls: 0,
+				plainCreateFileCalls: 1,
+				plainCreateDirectoryCalls: 1,
+			});
+			expect(harness.state.plainCreateResources).toEqual([
+				PLAIN_CREATED_FILE.toString(),
+				PLAIN_CREATED_DIRECTORY.toString(),
+			]);
+			expect(harness.state.plainCreateResourcesFrozen).toEqual([true, true]);
+			expect(runtime.state.operations).toHaveLength(2);
+			for (const [index, event] of runtime.state.operations.entries()) {
+				expect(event.operation).toBe(FileOperation.CREATE);
+				expect(event.resource.toString()).toBe(
+					(index === 0
+						? PLAIN_CREATED_FILE
+						: PLAIN_CREATED_DIRECTORY
+					).toString(),
+				);
+				expect(event.target).toBeDefined();
+			}
+		} finally {
+			runtime.dispose();
+		}
+	});
+
+	it("accepts an immediately exhausted readable without entering generic write", async () => {
+		const harness = providerHarness({ sources: [] });
+		const runtime = serviceHarness([["plain-workspace", harness.provider]]);
+		const readable = scriptedReadable([]);
+
+		try {
+			await runtime.service.createFile(PLAIN_CREATED_FILE, readable.input, {});
+			expect(readable.state.readCalls).toBe(1);
+			expect(harness.state.plainCreateFileCalls).toBe(1);
+			expect(harness.state.writeCalls).toBe(0);
+			expect(harness.state.statCalls).toBe(0);
+		} finally {
+			runtime.dispose();
+		}
+	});
+
+	it("snapshots create URI and options before the first await", async () => {
+		const harness = providerHarness({ sources: [] });
+		const gate = deferred();
+		harness.provider.plainCreateFile = async (resource) => {
+			harness.state.plainCreateFileCalls += 1;
+			harness.state.plainCreateResources.push(resource.toString());
+			harness.state.plainCreateResourcesFrozen.push(Object.isFrozen(resource));
+			await gate.promise;
+			return createdFileStat();
+		};
+		const runtime = serviceHarness([["plain-workspace", harness.provider]]);
+		const reads = new Map();
+		const values = {
+			scheme: "plain-workspace",
+			authority: ROOT_A,
+			path: "/safe.txt",
+			query: "",
+			fragment: "",
+		};
+		const hostileResource = Object.create(null);
+		for (const key of Object.keys(values)) {
+			Object.defineProperty(hostileResource, key, {
+				get() {
+					reads.set(key, (reads.get(key) ?? 0) + 1);
+					return values[key];
+				},
+			});
+		}
+		const options = { overwrite: false };
+
+		try {
+			const operation = runtime.service.createFile(
+				hostileResource,
+				VSBuffer.alloc(0),
+				options,
+			);
+			values.authority = ROOT_B;
+			values.path = "/private.txt";
+			options.overwrite = true;
+			await Promise.resolve();
+			await Promise.resolve();
+			gate.resolve();
+			const result = await operation;
+
+			expect(Object.fromEntries(reads)).toEqual({
+				scheme: 1,
+				authority: 1,
+				path: 1,
+				query: 1,
+				fragment: 1,
+			});
+			expect(harness.state.plainCreateResources).toEqual([
+				`plain-workspace://${ROOT_A}/safe.txt`,
+			]);
+			expect(harness.state.plainCreateResourcesFrozen).toEqual([true]);
+			expect(result.resource.toString()).toBe(
+				`plain-workspace://${ROOT_A}/safe.txt`,
+			);
+			expect(runtime.state.operations[0].resource.toString()).toBe(
+				`plain-workspace://${ROOT_A}/safe.txt`,
+			);
+		} finally {
+			gate.resolve();
+			runtime.dispose();
+		}
+	});
+
+	it("keeps a first-observed non-Plain resource on the generic scheme", async () => {
+		const harness = providerHarness({ sources: [] });
+		const runtime = serviceHarness([
+			["plain-test", harness.provider],
+			["plain-workspace", harness.provider],
+		]);
+		const sequentialResource = (path) => {
+			let schemeReads = 0;
+			const resource = Object.create(null);
+			Object.defineProperties(resource, {
+				scheme: {
+					get() {
+						schemeReads += 1;
+						return schemeReads === 1 ? "plain-test" : "plain-workspace";
+					},
+				},
+				authority: { value: ROOT_A },
+				path: { value: path },
+				query: { value: "" },
+				fragment: { value: "" },
+			});
+			return { resource, reads: () => schemeReads };
+		};
+		const file = sequentialResource("/sequential.txt");
+		const folder = sequentialResource("/sequential-folder");
+
+		try {
+			await runtime.service.createFile(
+				file.resource,
+				VSBuffer.fromString("x"),
+				{ overwrite: false },
+			);
+			await runtime.service.createFolder(folder.resource);
+
+			expect(file.reads()).toBe(1);
+			expect(folder.reads()).toBe(1);
+			expect(harness.state.plainCreateFileCalls).toBe(0);
+			expect(harness.state.plainCreateDirectoryCalls).toBe(0);
+			expect(harness.state.writeResources).toEqual([
+				`plain-test://${ROOT_A}/sequential.txt`,
+			]);
+			expect(harness.state.mkdirResources).toEqual([
+				`plain-test://${ROOT_A}/sequential-folder`,
+			]);
+			for (const resource of harness.state.statResources) {
+				expect(resource.startsWith("plain-test:")).toBe(true);
+			}
+		} finally {
+			runtime.dispose();
+		}
+	});
+
+	it("rejects create URI and option violations before provider activation", async () => {
+		const harness = providerHarness({ sources: [] });
+		const runtime = serviceHarness([["plain-workspace", harness.provider]]);
+		let accessorReads = 0;
+		const accessorOptions = {};
+		Object.defineProperty(accessorOptions, "overwrite", {
+			enumerable: true,
+			get() {
+				accessorReads += 1;
+				return false;
+			},
+		});
+		let proxyReads = 0;
+		const proxyOptions = new Proxy(
+			{ overwrite: false },
+			{
+				get(target, property, receiver) {
+					proxyReads += 1;
+					return Reflect.get(target, property, receiver);
+				},
+			},
+		);
+		const invalidResources = [
+			PLAIN_CREATED_FILE.with({ query: "private" }),
+			PLAIN_CREATED_FILE.with({ fragment: "private" }),
+			URI.parse(`plain-workspace://${ROOT_A}/`),
+			URI.parse(
+				"plain-workspace://00112233-4455-3677-8899-aabbccddeeff/created.txt",
+			),
+			URI.parse(
+				"plain-workspace://00112233-4455-4677-8899-AABBCCDDEEFF/created.txt",
+			),
+			URI.from({
+				scheme: "plain-workspace",
+				authority: ROOT_A,
+				path: "/../private",
+			}),
+			URI.from({
+				scheme: "plain-workspace",
+				authority: ROOT_A,
+				path: "/CON",
+			}),
+			URI.from({
+				scheme: "plain-workspace",
+				authority: ROOT_A,
+				path: "/src//main.ts",
+			}),
+			URI.from({
+				scheme: "plain-workspace",
+				authority: ROOT_A,
+				path: "/stream:name",
+			}),
+			URI.from({
+				scheme: "plain-workspace",
+				authority: ROOT_A,
+				path: "/created/",
+			}),
+		];
+		const invalidOptions = [
+			{ overwrite: true },
+			{ overwrite: 0 },
+			{ overwrite: false, extra: true },
+			accessorOptions,
+			proxyOptions,
+		];
+
+		try {
+			for (const resource of invalidResources) {
+				expect(
+					await runtime.service.canCreateFile(resource, { overwrite: false }),
+				).toBeInstanceOf(Error);
+				await rejected(
+					runtime.service.createFile(resource, VSBuffer.alloc(0), {
+						overwrite: false,
+					}),
+				);
+				await rejected(runtime.service.createFolder(resource));
+			}
+			for (const options of invalidOptions) {
+				expect(
+					await runtime.service.canCreateFile(PLAIN_CREATED_FILE, options),
+				).toBeInstanceOf(Error);
+				await rejected(
+					runtime.service.createFile(
+						PLAIN_CREATED_FILE,
+						VSBuffer.alloc(0),
+						options,
+					),
+				);
+			}
+			expect(accessorReads).toBe(0);
+			expect(proxyReads).toBe(0);
+			expect(runtime.state.activationCalls).toBe(0);
+			expectNoProviderSideEffects(harness.state);
+			expect(runtime.state.operations).toEqual([]);
+
+			const throwingResource = Object.create(null);
+			Object.defineProperty(throwingResource, "scheme", {
+				get() {
+					throw new Error("secret /Users/private/workspace");
+				},
+			});
+			const canError = await runtime.service.canCreateFile(throwingResource, {
+				overwrite: false,
+			});
+			expect(canError).toBeInstanceOf(FileOperationError);
+			expect(canError.message).not.toContain("/Users/private");
+			const createError = await rejected(
+				runtime.service.createFile(throwingResource, VSBuffer.alloc(0), {
+					overwrite: false,
+				}),
+			);
+			expect(createError.message).not.toContain("/Users/private");
+		} finally {
+			runtime.dispose();
+		}
+	});
+
+	it("rejects every nonempty or zero-progress file body before native create", async () => {
+		const inputs = [
+			VSBuffer.alloc(1),
+			scriptedReadable([VSBuffer.alloc(1)]).input,
+			scriptedReadable([VSBuffer.alloc(0)]).input,
+		];
+
+		for (const input of inputs) {
+			const harness = providerHarness({ sources: [] });
+			const runtime = serviceHarness([["plain-workspace", harness.provider]]);
+			try {
+				await rejected(
+					runtime.service.createFile(PLAIN_CREATED_FILE, input, {
+						overwrite: false,
+					}),
+				);
+				expectNoProviderSideEffects(harness.state);
+				expect(runtime.state.operations).toEqual([]);
+			} finally {
+				runtime.dispose();
+			}
+		}
+
+		const stream = nonEndingStreamWithChunk(VSBuffer.alloc(1));
+		const harness = providerHarness({ sources: [] });
+		const runtime = serviceHarness([["plain-workspace", harness.provider]]);
+		try {
+			await rejected(
+				runtime.service.createFile(PLAIN_CREATED_FILE, stream.input, {
+					overwrite: false,
+				}),
+			);
+			expect(stream.state.dataCalls).toBe(1);
+			expect(stream.state.destroyCalls).toBe(1);
+			expectNoProviderSideEffects(harness.state);
+			expect(runtime.state.operations).toEqual([]);
+		} finally {
+			runtime.dispose();
+		}
+	});
+
+	it("sanitizes hostile readable and stream protocol failures before native create", async () => {
+		const secret = "secret /Users/private/input";
+		const registrationFailure = hostileCreateStream(() => {
+			throw new Error(secret);
+		});
+		const emittedFailure = hostileCreateStream((event, listener) => {
+			if (event === "error") {
+				listener(new Error(secret));
+			}
+		});
+		const inputs = [
+			{
+				read() {
+					throw new Error(secret);
+				},
+			},
+			registrationFailure.input,
+			emittedFailure.input,
+		];
+
+		for (const input of inputs) {
+			const harness = providerHarness({ sources: [] });
+			const runtime = serviceHarness([["plain-workspace", harness.provider]]);
+			try {
+				const error = await rejected(
+					runtime.service.createFile(PLAIN_CREATED_FILE, input, {
+						overwrite: false,
+					}),
+				);
+				expect(error).toBeInstanceOf(FileOperationError);
+				expect(error.message).not.toContain(secret);
+				expect(error.message).not.toContain("/Users/private");
+				expectNoProviderSideEffects(harness.state);
+				expect(runtime.state.operations).toEqual([]);
+			} finally {
+				runtime.dispose();
+			}
+		}
+		expect(registrationFailure.state.destroyCalls).toBe(1);
+		expect(emittedFailure.state.destroyCalls).toBe(1);
+	});
+
+	it("rejects untrusted create receipts before publishing a FileService operation", async () => {
+		const tokenlessWithoutPermission = Object.freeze({
+			type: FileType.File,
+			size: 0,
+			mtime: 0,
+			ctime: 0,
+			plainVersion: null,
+		});
+		const accessorReceipt = {
+			type: FileType.File,
+			size: 0,
+			mtime: 0,
+			ctime: 0,
+			plainVersion: `wv1:${"d".repeat(64)}`,
+		};
+		Object.defineProperty(accessorReceipt, "size", {
+			enumerable: true,
+			get() {
+				throw new Error("must not read receipt accessor");
+			},
+		});
+		Object.freeze(accessorReceipt);
+		const valid = createdFileStat();
+		const invalidReceipts = [
+			{ ...valid },
+			Object.freeze({ ...valid, extra: true }),
+			Object.freeze({ ...valid, type: FileType.Directory }),
+			Object.freeze({ ...valid, size: 1 }),
+			Object.freeze({ ...valid, mtime: 1 }),
+			Object.freeze({ ...valid, ctime: 1 }),
+			Object.freeze({
+				...valid,
+				plainVersion: `wv1:${"e".repeat(64)}`,
+			}),
+			tokenlessWithoutPermission,
+			accessorReceipt,
+			new Proxy(valid, {}),
+		];
+
+		for (const createFileResult of invalidReceipts) {
+			const harness = providerHarness({
+				sources: [],
+				createFileResult,
+			});
+			const runtime = serviceHarness([["plain-workspace", harness.provider]]);
+			try {
+				const error = await rejected(
+					runtime.service.createFile(PLAIN_CREATED_FILE, VSBuffer.alloc(0), {
+						overwrite: false,
+					}),
+				);
+				expect(error).toBeInstanceOf(FileOperationError);
+				expect(harness.state.plainCreateFileCalls).toBe(1);
+				expect(harness.state.statCalls).toBe(0);
+				expect(harness.state.writeCalls).toBe(0);
+				expect(runtime.state.operations).toEqual([]);
+			} finally {
+				runtime.dispose();
+			}
+		}
+	});
+
+	it("rejects malformed directory receipts and native create failures without events", async () => {
+		const malformedDirectory = Object.freeze({
+			...createdDirectoryStat(),
+			mtime: 1,
+		});
+		const missingParent = FileSystemProviderError.create(
+			"secret /Users/private/missing-parent",
+			FileSystemProviderErrorCode.FileNotFound,
+		);
+		const cases = [
+			{
+				harness: providerHarness({
+					sources: [],
+					createDirectoryResult: malformedDirectory,
+				}),
+				invoke: (service) => service.createFolder(PLAIN_CREATED_DIRECTORY),
+			},
+			{
+				harness: providerHarness({
+					sources: [],
+					createFileError: missingParent,
+				}),
+				invoke: (service) =>
+					service.createFile(PLAIN_MISSING_PARENT_TARGET, VSBuffer.alloc(0), {
+						overwrite: false,
+					}),
+			},
+			{
+				harness: providerHarness({
+					sources: [],
+					createDirectoryError: missingParent,
+				}),
+				invoke: (service) => service.createFolder(PLAIN_MISSING_PARENT_TARGET),
+			},
+		];
+
+		for (const testCase of cases) {
+			const runtime = serviceHarness([
+				["plain-workspace", testCase.harness.provider],
+			]);
+			try {
+				const error = await rejected(testCase.invoke(runtime.service));
+				expect(error).toBeInstanceOf(FileOperationError);
+				expect(error.message).not.toContain("/Users/private");
+				expect(testCase.harness.state.statCalls).toBe(0);
+				expect(testCase.harness.state.writeCalls).toBe(0);
+				expect(testCase.harness.state.mkdirCalls).toBe(0);
+				expect(runtime.state.operations).toEqual([]);
+			} finally {
+				runtime.dispose();
+			}
+		}
+	});
+
+	it("lets atomic native create decide target conflicts without a stat preflight or retry", async () => {
+		const harness = providerHarness({
+			sources: [PLAIN_CREATED_FILE],
+		});
+		const runtime = serviceHarness([["plain-workspace", harness.provider]]);
+
+		try {
+			expect(
+				await runtime.service.canCreateFile(PLAIN_CREATED_FILE, {
+					overwrite: false,
+				}),
+			).toBe(true);
+			const error = await rejected(
+				runtime.service.createFile(PLAIN_CREATED_FILE, VSBuffer.alloc(0), {
+					overwrite: false,
+				}),
+			);
+			expect(error).toBeInstanceOf(FileOperationError);
+			expect(error.message).not.toContain("private target");
+			expect(harness.state.plainCreateFileCalls).toBe(1);
+			expect(harness.state.statCalls).toBe(0);
+			expect(harness.state.writeCalls).toBe(0);
+			expect(runtime.state.operations).toEqual([]);
+		} finally {
+			runtime.dispose();
+		}
+	});
+
+	it("keeps create routes dormant for readonly or incomplete providers", async () => {
+		for (const testCase of [
+			{
+				harness: providerHarness({
+					capabilities:
+						FileSystemProviderCapabilities.FileReadWrite |
+						FileSystemProviderCapabilities.Readonly,
+					sources: [],
+				}),
+				file: true,
+				directory: true,
+			},
+			{
+				harness: providerHarness({
+					sources: [],
+					omitPlainCreateFile: true,
+				}),
+				file: true,
+				directory: false,
+			},
+			{
+				harness: providerHarness({
+					sources: [],
+					omitPlainCreateDirectory: true,
+				}),
+				file: false,
+				directory: true,
+			},
+		]) {
+			const { harness } = testCase;
+			const runtime = serviceHarness([["plain-workspace", harness.provider]]);
+			try {
+				if (testCase.file) {
+					expect(
+						await runtime.service.canCreateFile(PLAIN_CREATED_FILE, {
+							overwrite: false,
+						}),
+					).toBeInstanceOf(Error);
+					await rejected(
+						runtime.service.createFile(PLAIN_CREATED_FILE, VSBuffer.alloc(0), {
+							overwrite: false,
+						}),
+					);
+				}
+				if (testCase.directory) {
+					await rejected(runtime.service.createFolder(PLAIN_CREATED_DIRECTORY));
+				}
+				expect(harness.state.statCalls).toBe(0);
+				expect(harness.state.writeCalls).toBe(0);
+				expect(harness.state.mkdirCalls).toBe(0);
+				expect(runtime.state.operations).toEqual([]);
+			} finally {
+				runtime.dispose();
+			}
+		}
+	});
+
+	it("trips both recursive mkdirp entry points for Plain resources", async () => {
+		const harness = providerHarness({ sources: [] });
+		const runtime = serviceHarness([["plain-workspace", harness.provider]]);
+		const extUri = {
+			isEqual() {
+				throw new Error("must not traverse");
+			},
+		};
+
+		try {
+			await rejected(mkdirp(extUri, harness.provider, PLAIN_CREATED_DIRECTORY));
+			await rejected(
+				runtime.service.mkdirp(harness.provider, PLAIN_CREATED_DIRECTORY),
+			);
+			expectNoProviderSideEffects(harness.state);
+		} finally {
+			runtime.dispose();
+		}
+	});
+
+	it("preserves upstream non-Plain create behavior", async () => {
+		const harness = providerHarness({ sources: [] });
+		const runtime = serviceHarness([["plain-test", harness.provider]]);
+
+		try {
+			await runtime.service.createFile(OTHER_TARGET, VSBuffer.fromString("x"), {
+				overwrite: false,
+			});
+			expect(harness.state.plainCreateFileCalls).toBe(0);
+			expect(harness.state.writeCalls).toBe(1);
+			expect(harness.state.statCalls).toBeGreaterThan(0);
+			expect(harness.hasEntry(OTHER_TARGET)).toBe(true);
+		} finally {
+			runtime.dispose();
+		}
+	});
+
 	it("rejects every URI or overwrite violation before provider activation", async () => {
 		const cases = [
 			{

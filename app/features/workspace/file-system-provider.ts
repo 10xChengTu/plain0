@@ -23,7 +23,7 @@ import {
 	Disposable,
 	type IDisposable,
 } from "@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle";
-import type { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
+import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
 
 import type {
 	PlainBridge,
@@ -33,6 +33,7 @@ import type {
 	WorkspaceWriteResult,
 } from "../../platform/tauri";
 import {
+	decodeWorkspaceEntryStat,
 	decodeWorkspaceCapabilities,
 	frozenWorkspaceEntryRequest,
 } from "../../platform/tauri/workspace-codec";
@@ -42,6 +43,10 @@ export const PLAIN_WORKSPACE_SCHEME = "plain-workspace" as const;
 interface ResolvedResource {
 	readonly rootId: string;
 	readonly relativePath: string;
+}
+
+interface ResolvedMutationResource extends ResolvedResource {
+	readonly resource: URI;
 }
 
 export interface PlainWorkspaceProviderStat extends IStat {
@@ -166,6 +171,77 @@ function mapWriteError(error: unknown): Error {
 	}
 }
 
+function mapCreateError(error: unknown): Readonly<{
+	error: FileSystemProviderError;
+	rescan: boolean;
+}> {
+	let code: string | undefined;
+	try {
+		if (typeof error === "object" && error !== null) {
+			const value = Reflect.get(error, "code");
+			code = typeof value === "string" ? value : undefined;
+		}
+	} catch {
+		code = undefined;
+	}
+	switch (code) {
+		case "ENTRY_ALREADY_EXISTS":
+			return Object.freeze({
+				error: FileSystemProviderError.create(
+					"The workspace entry already exists.",
+					FileSystemProviderErrorCode.FileExists,
+				),
+				rescan: false,
+			});
+		case "ENTRY_NOT_FOUND":
+			return Object.freeze({
+				error: FileSystemProviderError.create(
+					"The workspace entry does not exist.",
+					FileSystemProviderErrorCode.FileNotFound,
+				),
+				rescan: false,
+			});
+		case "ENTRY_TYPE_MISMATCH":
+			return Object.freeze({
+				error: FileSystemProviderError.create(
+					"The workspace entry is not a directory.",
+					FileSystemProviderErrorCode.FileNotADirectory,
+				),
+				rescan: false,
+			});
+		case "ROOT_NOT_AUTHORIZED":
+		case "INVALID_RELATIVE_PATH":
+		case "PATH_OUTSIDE_ROOT":
+		case "PERMISSION_DENIED":
+			return Object.freeze({
+				error: FileSystemProviderError.create(
+					"The workspace entry cannot be accessed.",
+					FileSystemProviderErrorCode.NoPermissions,
+				),
+				rescan: false,
+			});
+		case "ROOT_UNAVAILABLE":
+		case "PATH_ENCODING_UNSUPPORTED":
+		case "WORKSPACE_CONFLICT":
+		case "WORKSPACE_WINDOW_CLOSED":
+			return Object.freeze({
+				error: FileSystemProviderError.create(
+					"The workspace is unavailable.",
+					FileSystemProviderErrorCode.Unavailable,
+				),
+				rescan: false,
+			});
+		default:
+			return Object.freeze({
+				error: FileSystemProviderError.create(
+					"The workspace is unavailable.",
+					FileSystemProviderErrorCode.Unavailable,
+				),
+				rescan: true,
+			});
+	}
+}
+
 function kindToFileType(kind: WorkspaceEntryKind): FileType {
 	switch (kind) {
 		case "file":
@@ -194,6 +270,32 @@ function providerStat(stat: WorkspaceEntryStat): PlainWorkspaceProviderStat {
 		ctime: stat.ctime,
 		...(readonlyFile ? { permissions: FilePermission.Readonly } : {}),
 		plainVersion: stat.version,
+	});
+}
+
+function createdProviderStat(
+	value: unknown,
+	expectedKind: "file" | "directory",
+): PlainWorkspaceProviderStat {
+	const stat = decodeWorkspaceEntryStat(value);
+	if (
+		stat.kind !== expectedKind ||
+		stat.size !== 0 ||
+		stat.mtime !== 0 ||
+		stat.ctime !== 0 ||
+		stat.version !== null
+	) {
+		throw unavailable();
+	}
+	return Object.freeze({
+		type: expectedKind === "file" ? FileType.File : FileType.Directory,
+		size: 0,
+		mtime: 0,
+		ctime: 0,
+		...(expectedKind === "file"
+			? { permissions: FilePermission.Readonly }
+			: {}),
+		plainVersion: null,
 	});
 }
 
@@ -311,6 +413,52 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 		}
 	}
 
+	async plainCreateFile(resource: URI): Promise<PlainWorkspaceProviderStat> {
+		this.requireMutationDispatchAllowed();
+		const resolved = this.resolveMutationResource(resource);
+		try {
+			const stat = createdProviderStat(
+				await this.bridge.workspaceCreateFile(
+					resolved.rootId,
+					resolved.relativePath,
+				),
+				"file",
+			);
+			this.fireCreated(resolved.resource);
+			return stat;
+		} catch (error) {
+			const failure = mapCreateError(error);
+			if (failure.rescan) {
+				this.fireRootUpdated(resolved.resource);
+			}
+			throw failure.error;
+		}
+	}
+
+	async plainCreateDirectory(
+		resource: URI,
+	): Promise<PlainWorkspaceProviderStat> {
+		this.requireMutationDispatchAllowed();
+		const resolved = this.resolveMutationResource(resource);
+		try {
+			const stat = createdProviderStat(
+				await this.bridge.workspaceCreateDirectory(
+					resolved.rootId,
+					resolved.relativePath,
+				),
+				"directory",
+			);
+			this.fireCreated(resolved.resource);
+			return stat;
+		} catch (error) {
+			const failure = mapCreateError(error);
+			if (failure.rescan) {
+				this.fireRootUpdated(resolved.resource);
+			}
+			throw failure.error;
+		}
+	}
+
 	async writeFile(
 		_resource: URI,
 		_content: Uint8Array,
@@ -337,6 +485,64 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 
 	private requireMutationDispatchAllowed(): void {
 		if (!this.allowsMutationDispatch) {
+			throw noPermissions();
+		}
+	}
+
+	private fireCreated(resource: URI): void {
+		this.changeEmitter.fire(
+			Object.freeze([
+				Object.freeze({
+					type: FileChangeType.ADDED,
+					resource,
+				}),
+			]),
+		);
+	}
+
+	private fireRootUpdated(resource: URI): void {
+		const root = resource.with({ path: "/", query: null, fragment: null });
+		root.toString();
+		void root.fsPath;
+		Object.freeze(root);
+		this.changeEmitter.fire(
+			Object.freeze([
+				Object.freeze({
+					type: FileChangeType.UPDATED,
+					resource: root,
+				}),
+			]),
+		);
+	}
+
+	private resolveMutationResource(resource: URI): ResolvedMutationResource {
+		try {
+			const scheme = resource.scheme;
+			const authority = resource.authority;
+			const path = resource.path;
+			const query = resource.query;
+			const fragment = resource.fragment;
+			if (
+				scheme !== PLAIN_WORKSPACE_SCHEME ||
+				query !== "" ||
+				fragment !== "" ||
+				path.length <= 1 ||
+				!path.startsWith("/")
+			) {
+				throw noPermissions();
+			}
+
+			const relativePath = path === "/" ? "" : path.slice(1);
+			const request = frozenWorkspaceEntryRequest(authority, relativePath);
+			const eventResource = URI.from(
+				{ scheme, authority, path, query, fragment },
+				true,
+			);
+			eventResource.toString();
+			void eventResource.fsPath;
+			Object.freeze(eventResource);
+			return Object.freeze({ ...request, resource: eventResource });
+		} catch {
 			throw noPermissions();
 		}
 	}

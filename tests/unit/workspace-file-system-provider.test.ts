@@ -205,12 +205,18 @@ describe("Plain workspace file system provider", () => {
 			supportedCapabilities,
 		) as (keyof WorkspaceCapabilities)[]) {
 			const write = vi.fn();
+			const createFile = vi.fn();
+			const createDirectory = vi.fn();
 			const platformCapabilities = {
 				...supportedCapabilities,
 				[capability]: false,
 			};
 			const provider = createPlainWorkspaceFileSystemProvider(
-				testBridge({ workspaceWriteFile: write }),
+				testBridge({
+					workspaceWriteFile: write,
+					workspaceCreateFile: createFile,
+					workspaceCreateDirectory: createDirectory,
+				}),
 				platformCapabilities,
 			);
 			platformCapabilities[capability] = true;
@@ -224,10 +230,31 @@ describe("Plain workspace file system provider", () => {
 					versionA,
 				),
 			);
-			changeSubscription.dispose();
 			expect(error.code).toBe(FileSystemProviderErrorCode.NoPermissions);
 			expect(write).not.toHaveBeenCalled();
+			let uriReads = 0;
+			const unreadableResource = Object.create(null) as URI;
+			for (const key of ["scheme", "authority", "path", "query", "fragment"]) {
+				Object.defineProperty(unreadableResource, key, {
+					get() {
+						uriReads += 1;
+						throw new Error("must not read URI");
+					},
+				});
+			}
+			for (const operation of [
+				provider.plainCreateFile(unreadableResource),
+				provider.plainCreateDirectory(unreadableResource),
+			]) {
+				expect((await rejected(operation)).code).toBe(
+					FileSystemProviderErrorCode.NoPermissions,
+				);
+			}
+			expect(uriReads).toBe(0);
+			expect(createFile).not.toHaveBeenCalled();
+			expect(createDirectory).not.toHaveBeenCalled();
 			expect(changeListener).not.toHaveBeenCalled();
+			changeSubscription.dispose();
 			expect(provider.capabilities).toBe(
 				FileSystemProviderCapabilities.FileReadWrite |
 					FileSystemProviderCapabilities.Readonly,
@@ -606,6 +633,338 @@ describe("Plain workspace file system provider", () => {
 				FileSystemProviderErrorCode.FileNotADirectory,
 			);
 		}
+	});
+
+	it("exposes one native create receipt per entry and emits only frozen target additions", async () => {
+		const createFile = vi.fn(async () =>
+			Object.freeze({
+				kind: "file" as const,
+				size: 0,
+				mtime: 0,
+				ctime: 0,
+				version: null,
+			}),
+		);
+		const createDirectory = vi.fn(async () =>
+			Object.freeze({
+				kind: "directory" as const,
+				size: 0,
+				mtime: 0,
+				ctime: 0,
+				version: null,
+			}),
+		);
+		const provider = createPlainWorkspaceFileSystemProvider(
+			testBridge({
+				workspaceCreateFile: createFile,
+				workspaceCreateDirectory: createDirectory,
+			}),
+		);
+		const events: (readonly {
+			readonly type: FileChangeType;
+			readonly resource: URI;
+		}[])[] = [];
+		const subscription = provider.onDidChangeFile(
+			(
+				event: readonly {
+					readonly type: FileChangeType;
+					readonly resource: URI;
+				}[],
+			) => events.push(event),
+		);
+		const fileResource = workspaceUri("src/new.ts");
+		const directoryResource = workspaceUri("src/new-folder");
+
+		const file = await provider.plainCreateFile(fileResource);
+		const directory = await provider.plainCreateDirectory(directoryResource);
+		subscription.dispose();
+
+		expect(file).toEqual({
+			type: FileType.File,
+			size: 0,
+			mtime: 0,
+			ctime: 0,
+			permissions: FilePermission.Readonly,
+			plainVersion: null,
+		});
+		expect(directory).toEqual({
+			type: FileType.Directory,
+			size: 0,
+			mtime: 0,
+			ctime: 0,
+			plainVersion: null,
+		});
+		expect(Object.isFrozen(file)).toBe(true);
+		expect(Object.isFrozen(directory)).toBe(true);
+		expect(createFile).toHaveBeenCalledTimes(1);
+		expect(createFile).toHaveBeenCalledWith(rootId, "src/new.ts");
+		expect(createDirectory).toHaveBeenCalledTimes(1);
+		expect(createDirectory).toHaveBeenCalledWith(rootId, "src/new-folder");
+		expect(events).toHaveLength(2);
+		for (const [index, event] of events.entries()) {
+			expect(Object.isFrozen(event)).toBe(true);
+			expect(event).toHaveLength(1);
+			expect(Object.isFrozen(event[0])).toBe(true);
+			expect(Object.isFrozen(event[0]!.resource)).toBe(true);
+			expect(event[0]!.type).toBe(FileChangeType.ADDED);
+			expect(event[0]!.resource).not.toBe(
+				index === 0 ? fileResource : directoryResource,
+			);
+			expect(event[0]!.resource.toString()).toBe(
+				(index === 0 ? fileResource : directoryResource).toString(),
+			);
+		}
+	});
+
+	it("snapshots every create URI field once before awaiting the bridge", async () => {
+		let resolveCreate:
+			| ((value: {
+					kind: "file";
+					size: number;
+					mtime: number;
+					ctime: number;
+					version: null;
+			  }) => void)
+			| undefined;
+		const pending = new Promise<{
+			kind: "file";
+			size: number;
+			mtime: number;
+			ctime: number;
+			version: null;
+		}>((resolve) => {
+			resolveCreate = resolve;
+		});
+		const createFile = vi.fn(() => pending);
+		const provider = createPlainWorkspaceFileSystemProvider(
+			testBridge({ workspaceCreateFile: createFile }),
+		);
+		const reads = new Map<string, number>();
+		const values: Record<string, string> = {
+			scheme: PLAIN_WORKSPACE_SCHEME,
+			authority: rootId,
+			path: "/safe.txt",
+			query: "",
+			fragment: "",
+		};
+		const hostile = Object.create(null) as URI;
+		for (const key of Object.keys(values)) {
+			Object.defineProperty(hostile, key, {
+				get() {
+					reads.set(key, (reads.get(key) ?? 0) + 1);
+					return values[key];
+				},
+			});
+		}
+		const events: string[] = [];
+		const subscription = provider.onDidChangeFile(
+			(
+				event: readonly {
+					readonly type: FileChangeType;
+					readonly resource: URI;
+				}[],
+			) => events.push(event[0]!.resource.toString()),
+		);
+
+		const operation = provider.plainCreateFile(hostile);
+		values.authority = "00000000-0000-4000-8000-000000000999";
+		values.path = "/private.txt";
+		resolveCreate?.({
+			kind: "file",
+			size: 0,
+			mtime: 0,
+			ctime: 0,
+			version: null,
+		});
+		await operation;
+		subscription.dispose();
+
+		expect(Object.fromEntries(reads)).toEqual({
+			scheme: 1,
+			authority: 1,
+			path: 1,
+			query: 1,
+			fragment: 1,
+		});
+		expect(createFile).toHaveBeenCalledWith(rootId, "safe.txt");
+		expect(events).toEqual([`${rootUri}safe.txt`]);
+	});
+
+	it("fails closed on create violations and rescans only ambiguous outcomes", async () => {
+		const cases = [
+			[
+				async () => ({
+					kind: "directory" as const,
+					size: 0,
+					mtime: 0,
+					ctime: 0,
+					version: null,
+				}),
+				FileSystemProviderErrorCode.Unavailable,
+				true,
+			],
+			[
+				async () => ({
+					kind: "file" as const,
+					size: 1,
+					mtime: 0,
+					ctime: 0,
+					version: null,
+				}),
+				FileSystemProviderErrorCode.Unavailable,
+				true,
+			],
+			[
+				async () => ({
+					kind: "file" as const,
+					size: 0,
+					mtime: 1,
+					ctime: 0,
+					version: null,
+				}),
+				FileSystemProviderErrorCode.Unavailable,
+				true,
+			],
+			[
+				async () => ({
+					kind: "file" as const,
+					size: 0,
+					mtime: 0,
+					ctime: 1,
+					version: null,
+				}),
+				FileSystemProviderErrorCode.Unavailable,
+				true,
+			],
+			[
+				async () => ({
+					kind: "file" as const,
+					size: 0,
+					mtime: 0,
+					ctime: 0,
+					version: versionB,
+				}),
+				FileSystemProviderErrorCode.Unavailable,
+				true,
+			],
+			[
+				async () => {
+					throw commandError("ENTRY_ALREADY_EXISTS");
+				},
+				FileSystemProviderErrorCode.FileExists,
+				false,
+			],
+			[
+				async () => {
+					throw commandError("ENTRY_NOT_FOUND");
+				},
+				FileSystemProviderErrorCode.FileNotFound,
+				false,
+			],
+			[
+				async () => {
+					throw commandError("PERMISSION_DENIED");
+				},
+				FileSystemProviderErrorCode.NoPermissions,
+				false,
+			],
+			[
+				async () => {
+					throw commandError("ROOT_UNAVAILABLE");
+				},
+				FileSystemProviderErrorCode.Unavailable,
+				false,
+			],
+			[
+				async () => {
+					throw commandError("IO_FAILED");
+				},
+				FileSystemProviderErrorCode.Unavailable,
+				true,
+			],
+			[
+				async () => {
+					const hostile = Object.create(null);
+					Object.defineProperty(hostile, "code", {
+						get() {
+							throw new Error("secret /Users/private/error-code");
+						},
+					});
+					throw hostile;
+				},
+				FileSystemProviderErrorCode.Unavailable,
+				true,
+			],
+		] as const;
+
+		for (const [createFile, expectedCode, expectsRescan] of cases) {
+			const provider = createPlainWorkspaceFileSystemProvider(
+				testBridge({ workspaceCreateFile: createFile }),
+			);
+			const events: (readonly {
+				readonly type: FileChangeType;
+				readonly resource: URI;
+			}[])[] = [];
+			const subscription = provider.onDidChangeFile(
+				(
+					event: readonly {
+						readonly type: FileChangeType;
+						readonly resource: URI;
+					}[],
+				) => events.push(event),
+			);
+			const error = await rejected(
+				provider.plainCreateFile(workspaceUri("private.txt")),
+			);
+			subscription.dispose();
+			expect(error.code).toBe(expectedCode);
+			expect(error.message).not.toContain("/Users/private");
+			if (expectsRescan) {
+				expect(events).toHaveLength(1);
+				expect(Object.isFrozen(events[0])).toBe(true);
+				expect(events[0]).toHaveLength(1);
+				expect(Object.isFrozen(events[0]![0])).toBe(true);
+				expect(Object.isFrozen(events[0]![0]!.resource)).toBe(true);
+				expect(events[0]![0]!.type).toBe(FileChangeType.UPDATED);
+				expect(events[0]![0]!.resource.toString()).toBe(rootUri);
+			} else {
+				expect(events).toEqual([]);
+			}
+		}
+	});
+
+	it("rejects root and noncanonical mutation URIs before native create", async () => {
+		const createFile = vi.fn();
+		const createDirectory = vi.fn();
+		const provider = createPlainWorkspaceFileSystemProvider(
+			testBridge({
+				workspaceCreateFile: createFile,
+				workspaceCreateDirectory: createDirectory,
+			}),
+		);
+		const invalid = [
+			workspaceUri(),
+			workspaceUri("entry").with({ query: "private" }),
+			workspaceUri("entry").with({ fragment: "private" }),
+			URI.from({
+				scheme: PLAIN_WORKSPACE_SCHEME,
+				authority: rootId,
+				path: "/entry/",
+			}),
+		];
+
+		for (const resource of invalid) {
+			for (const operation of [
+				provider.plainCreateFile(resource),
+				provider.plainCreateDirectory(resource),
+			]) {
+				expect((await rejected(operation)).code).toBe(
+					FileSystemProviderErrorCode.NoPermissions,
+				);
+			}
+		}
+		expect(createFile).not.toHaveBeenCalled();
+		expect(createDirectory).not.toHaveBeenCalled();
 	});
 
 	it("exposes one private versioned-write receipt while the public provider stays readonly", async () => {

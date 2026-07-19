@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：接入 Plain 空文件与单级目录的专用 FileService/provider create 路由，锁定 no-clobber、无 target stat、无递归 mkdirp、无通用 write fallback 与 hostile-input Harness；provider 全局继续 `Readonly`。
+- 当前最小工作项：接入 copy/同 root rename/跨 root move provider adapters，锁定严格 options、唯一 bridge 路由、retained/partial/unknown root rescan 与成功事件闭集；provider 全局继续 `Readonly`。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -66,14 +66,15 @@
 - [x] provider 激活方案通过文档最小验收：Prettier、`features.json` WIP=1、架构边界和 `git diff --check` 均通过；Harness 冻结 capability 单次 pre-init 读取、all-five-true 内部守卫、七补丁闭集、URI/options hostile inputs、mutation 成功事件矩阵、partial/unknown root rescan 以及 supported/readonly 双 Browser E2E。
 - [x] 完成 provider 注册前 capability policy：`main.ts` 在 provider 构造/注册前恰好 await 一次严格 DTO；factory 再次 own-data 解码并只保存五字段合取产生的 immutable primitive boolean。任一 false 会在 URI 解析、bridge dispatch 和 file-change event 前拒绝私有 mutation seam，transport/codec 失败则在 provider 注册前终止启动；provider class 保持模块私有，Workbench capability 仍精确为 `FileReadWrite | Readonly`，公共 `writeFile/mkdir/delete/rename` 未开放。
 - [x] capability policy 切片通过完整 `pnpm check` 与 Browser E2E：19 个 TypeScript/JavaScript 测试文件、377 个用例、230 个 Rust 测试、格式、双类型检查、严格 lint、生产构建、架构、2101-source/203-debt bundle 基线全部通过；4/4 Chromium 场景覆盖 capability failure、Workbench foundation、ArrayBuffer 与 number[] transport。AST Harness 锁定关键 import 来源/本地名、连续 bootstrap 顺序、bridge 标识符允许位置、factory/constructor/decoder、all-five boolean、`Event.None` 和只读 capability；独立终审 P0/P1/P2 均为 0。
+- [x] 完成 Plain 空文件/单级目录 FileService/provider create 路由：URI/options/空内容在 provider lookup 或任何异步边界前严格快照，合法路径只调用一次私有 `plainCreateFile/plainCreateDirectory`，消费同次 IPC 的 exact `size/mtime/ctime=0 + version=null` 回执；无 target `stat/exists`、post-create `resolve/workspace_stat`、递归 `mkdirp`、公共 `writeFile/mkdir`、retry 或 fallback。成功只发冻结 target `ADDED`；畸形回执、未知 rejection 或响应无法认证时只发一次冻结 root `UPDATED` 再失败，已认证 syscall 前错误保持零事件；provider 仍精确为 `FileReadWrite | Readonly`。
+- [x] create 路由切片完成最终验收：19 个 TypeScript/JavaScript 测试文件、408 个用例和 230 个 Rust 测试通过，格式、双类型检查、严格 lint、生产构建、七补丁 SHA/hunk/lock graph、架构及 2101-source/203-debt bundle 基线全部通过；4/4 Chromium 场景继续覆盖 capability failure、Workbench foundation 与两种 PLR1 transport。补丁 SHA-256 为 `ec05e44dd1cebac5b9b27c9ee77c3fa15452867c610e46a1ed89fdd16f844279`；AST/hostile-input Harness 锁定 exact import/top-level/export/member/call graph、URI/options/stream、错误去敏、回执冻结和成功/保守 rescan 事件闭集，最终独立复核 P0/P1/P2 均为 0。
 
 ## 下一步
 
-1. 接入 Plain 空文件/单级目录 create 路由；provider 继续只读。
-2. 接入 copy/同 root rename/跨 root move provider adapters；provider 继续只读。
-3. 接入一次确认的永久删除 coordinator 与调用级 authorization；provider 继续只读。
-4. 原子切换 capability Harness，激活全真平台写能力并完成 supported/readonly Browser E2E。
-5. 实现 watcher/rescan，最后运行真实 Tauri 文件树总验收并写回 `F020` evidence。
+1. 接入 copy/同 root rename/跨 root move provider adapters；provider 继续只读。
+2. 接入一次确认的永久删除 coordinator 与调用级 authorization；provider 继续只读。
+3. 原子切换 capability Harness，激活全真平台写能力并完成 supported/readonly Browser E2E。
+4. 实现 watcher/rescan，最后运行真实 Tauri 文件树总验收并写回 `F020` evidence。
 
 ## 当前验收命令
 
