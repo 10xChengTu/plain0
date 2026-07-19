@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 
+import * as ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -3542,6 +3543,8 @@ describe("Plain confirmed-delete Harness contracts", () => {
 });
 
 const workspaceDeleteAppPaths = [
+	"app/main.ts",
+	"app/platform/tauri/index.ts",
 	"app/platform/tauri/native.ts",
 	"app/platform/tauri/contracts.ts",
 	"app/platform/tauri/browser-mock.ts",
@@ -3758,6 +3761,226 @@ describe("Plain confirmed-delete TypeScript invocation boundary", () => {
 		}
 	});
 
+	it("rejects every app-wide IFileService or getProvider recovery path", () => {
+		for (const [relativePath, source] of [
+			[
+				"app/features/provider-direct-bypass.ts",
+				`import { getService, IFileService } from "@codingame/monaco-vscode-api";
+async function recoverProvider() {
+  const fileService = await getService(IFileService);
+  return fileService.getProvider(PLAIN_WORKSPACE_SCHEME);
+}`,
+			],
+			[
+				"app/features/provider-computed-bypass.ts",
+				`import { getService, IFileService as FileServiceToken } from "@codingame/monaco-vscode-api";
+const fileService = await getService(FileServiceToken);
+void fileService["get" + "Provider"];`,
+			],
+			[
+				"app/features/provider-alias-bypass.ts",
+				`import * as services from "@codingame/monaco-vscode-api";
+const token = services["IFile" + "Service"];
+const resolve = services.getService;
+const fileService = await resolve(token);
+const recover = fileService.getProvider;
+void recover;`,
+			],
+		]) {
+			const failures = validateWorkspaceDeleteTypeScriptBoundary([
+				...workspaceDeleteAppSources,
+				{ relativePath, source },
+			]);
+			expect(failures).toContain(
+				`${relativePath} must not recover the registered workspace provider through getProvider`,
+			);
+			if (source.includes("IFileService")) {
+				expect(failures).toContain(
+					`${relativePath} must not import or reference IFileService in the Plain application`,
+				);
+			}
+		}
+	});
+
+	it("allows unrelated getProvider APIs without IFileService authority", () => {
+		const harmless = [
+			...workspaceDeleteAppSources,
+			{
+				relativePath: "app/features/catalog.ts",
+				source: [
+					"declare const catalog: { getProvider(): unknown };",
+					'const getterPrefix = "get";',
+					"const getterKey = `${getterPrefix}Provider`;",
+					"void catalog.getProvider();",
+					"void catalog[getterKey]();",
+					"void Reflect.get(catalog, getterKey);",
+					"const { [getterKey]: recover } = catalog;",
+					"void recover;",
+				].join("\n"),
+			},
+		];
+		expect(validateWorkspaceDeleteTypeScriptBoundary(harmless)).toEqual([]);
+	});
+
+	it("rejects constructed Reflect.get IFileService and provider authority", () => {
+		for (const [relativePath, source, expected] of [
+			[
+				"app/features/reflect-token-bypass.ts",
+				`declare const services: unknown;
+void Reflect.get(services, "IFile" + "Service");`,
+				"IFileService",
+			],
+			[
+				"app/features/reflect-provider-bypass.ts",
+				`import { getService, IFileService } from "@codingame/monaco-vscode-api";
+const fileService = await getService(IFileService);
+void Reflect["g" + "et"](fileService, "get" + "Provider");`,
+				"getProvider",
+			],
+		]) {
+			const failures = validateWorkspaceDeleteTypeScriptBoundary([
+				...workspaceDeleteAppSources,
+				{ relativePath, source },
+			]);
+			expect(
+				failures.some((message) => message.includes(expected)),
+				`${relativePath} must reject ${expected} authority`,
+			).toBe(true);
+		}
+	});
+
+	it("propagates multi-level const keys through Reflect authority reads", () => {
+		const relativePath = "app/features/reflect-const-key-bypass.ts";
+		const source = [
+			'import { getService } from "@codingame/monaco-vscode-api";',
+			"declare const services: unknown;",
+			'const reflectGet = "g" + "et";',
+			'const tokenPrefix = "IFile";',
+			'const tokenSuffix = `${"Serv"}ice`;',
+			"const tokenKey = `${tokenPrefix}${tokenSuffix}`;",
+			'const getterPrefix = "get";',
+			'const getterSuffix = "Pro" + "vider";',
+			"const getterKey = `${getterPrefix}${getterSuffix}`;",
+			"const token = Reflect[reflectGet](services, tokenKey);",
+			"const fileService = await getService(token);",
+			"const recover = Reflect.get(fileService, getterKey);",
+			"void recover();",
+		].join("\n");
+		const failures = validateWorkspaceDeleteTypeScriptBoundary([
+			...workspaceDeleteAppSources,
+			{ relativePath, source },
+		]);
+		expect(failures).toContain(
+			`${relativePath} must not import or reference IFileService in the Plain application`,
+		);
+		expect(failures).toContain(
+			`${relativePath} must not recover the registered workspace provider through getProvider`,
+		);
+	});
+
+	it("propagates const keys through computed authority destructuring", () => {
+		const relativePath = "app/features/destructured-const-key-bypass.ts";
+		const source = [
+			'import { getService } from "@codingame/monaco-vscode-api";',
+			"declare const services: unknown;",
+			'const tokenStart = "I";',
+			"const tokenMiddle = `${tokenStart}File`;",
+			'const tokenKey = tokenMiddle + "Service";',
+			'const getterStart = "get";',
+			'const getterKey = `${getterStart}${"Provider"}`;',
+			"const { [tokenKey]: token } = services;",
+			"const fileService = await getService(token);",
+			"const { [getterKey]: recover } = fileService;",
+			"void recover();",
+		].join("\n");
+		const failures = validateWorkspaceDeleteTypeScriptBoundary([
+			...workspaceDeleteAppSources,
+			{ relativePath, source },
+		]);
+		expect(failures).toContain(
+			`${relativePath} must not import or reference IFileService in the Plain application`,
+		);
+		expect(failures).toContain(
+			`${relativePath} must not recover the registered workspace provider through getProvider`,
+		);
+	});
+
+	it("locks provider and bridge factories to their audited authority routes", () => {
+		for (const [relativePath, source, expectedNames] of [
+			[
+				"app/features/second-writable-provider.ts",
+				`import { createPlainWorkspaceFileSystemProvider } from "./workspace/file-system-provider";
+import { createBridge } from "../platform/tauri";
+const bridge = createBridge();
+void createPlainWorkspaceFileSystemProvider(bridge, {
+  create: true,
+  renameNoReplace: true,
+  copyMove: true,
+  delete: true,
+  versionedWrite: true,
+});`,
+				["createPlainWorkspaceFileSystemProvider", "createBridge"],
+			],
+			[
+				"app/features/aliased-native-bridge.ts",
+				`import { createNativeBridge as makeBridge } from "../platform/tauri/native";
+void makeBridge();`,
+				["createNativeBridge"],
+			],
+			[
+				"app/features/namespace-bridge.ts",
+				`import * as tauri from "../platform/tauri";
+void tauri.createBridge();`,
+				["createBridge"],
+			],
+			[
+				"app/features/computed-bridge.ts",
+				`declare const tauri: any;
+void tauri["create" + "BrowserMockBridge"]();`,
+				["createBrowserMockBridge"],
+			],
+		]) {
+			const failures = validateWorkspaceDeleteTypeScriptBoundary([
+				...workspaceDeleteAppSources,
+				{ relativePath, source },
+			]);
+			for (const expectedName of expectedNames) {
+				expect(
+					failures.some(
+						(message) =>
+							message.includes(relativePath) && message.includes(expectedName),
+					),
+					`${relativePath} must reject ${expectedName}`,
+				).toBe(true);
+			}
+		}
+	});
+
+	it("keeps Tauri's private global inside the bridge directory", () => {
+		for (const [relativePath, source] of [
+			[
+				"app/features/direct-tauri-internals.ts",
+				"void (window as any).__TAURI_INTERNALS__.invoke;",
+			],
+			[
+				"app/features/computed-tauri-internals.ts",
+				'void (globalThis as any)["__TAURI_INTERNALS__"];',
+			],
+			[
+				"app/features/concatenated-tauri-internals.ts",
+				'void (window as any)["__TAURI_" + "INTERNALS__"].invoke("workspace_create_file");',
+			],
+		]) {
+			const failures = validateWorkspaceDeleteTypeScriptBoundary([
+				...workspaceDeleteAppSources,
+				{ relativePath, source },
+			]);
+			expect(failures).toContain(
+				`${relativePath} must not access __TAURI_INTERNALS__ outside app/platform/tauri/`,
+			);
+		}
+	});
+
 	it("locks one confirmation and strict prepare -> begin -> authorization -> bulk sequencing", () => {
 		const coordinator = "app/features/workspace/delete-coordinator.ts";
 		const cases = [
@@ -3848,8 +4071,8 @@ describe("Plain confirmed-delete TypeScript invocation boundary", () => {
 				'rescan: false,\n\t\t\t\toutcome: "outcomeUnknown"',
 			],
 			[
-				"this.bridge.workspaceCommitDeleteEntry(",
-				'this.bridge["workspaceCommitDeleteEntry"](',
+				"this.#bridge.workspaceCommitDeleteEntry(",
+				'this.#bridge["workspaceCommitDeleteEntry"](',
 			],
 		];
 		for (const [from, to] of cases) {
@@ -3866,18 +4089,20 @@ describe("Plain confirmed-delete TypeScript invocation boundary", () => {
 		}
 	});
 
-	it("keeps the provider globally Readonly with permanent non-Trash events", () => {
+	it("keeps confirmed delete inside the final all-five capability contract with permanent non-Trash events", () => {
 		const provider = "app/features/workspace/file-system-provider.ts";
 		for (const [from, to, expected] of [
 			[
-				"FileSystemProviderCapabilities.FileReadWrite |\n\t\tFileSystemProviderCapabilities.Readonly;",
-				"FileSystemProviderCapabilities.FileReadWrite;",
-				"confirmed delete must not remove Readonly or advertise Trash/atomic provider capabilities",
+				`(allowsMutationDispatch
+				? FileSystemProviderCapabilities.FileFolderCopy
+				: FileSystemProviderCapabilities.Readonly);`,
+				"FileSystemProviderCapabilities.FileFolderCopy;",
+				"confirmed delete requires the final all-five writable-or-readonly provider capability contract",
 			],
 			[
-				"FileSystemProviderCapabilities.Readonly;",
-				"FileSystemProviderCapabilities.Readonly |\n\t\tFileSystemProviderCapabilities.Trash;",
-				"confirmed delete must not remove Readonly or advertise Trash/atomic provider capabilities",
+				"? FileSystemProviderCapabilities.FileFolderCopy",
+				"? FileSystemProviderCapabilities.Trash",
+				"confirmed delete requires the final all-five writable-or-readonly provider capability contract",
 			],
 			[
 				"type: FileChangeType.DELETED,\n\t\t\t\t\tresource,",
@@ -3890,6 +4115,19 @@ describe("Plain confirmed-delete TypeScript invocation boundary", () => {
 				expected,
 			);
 		}
+
+		const detachedPolicy = mutateWorkspaceSource(
+			workspaceDeleteAppSources,
+			provider,
+			(source) =>
+				`const allowsMutationDispatch = true;\n${source.replace(
+					"constructor(bridge: PlainBridge, allowsMutationDispatch: boolean)",
+					"constructor(bridge: PlainBridge)",
+				)}`,
+		);
+		expect(validateWorkspaceDeleteTypeScriptBoundary(detachedPolicy)).toContain(
+			"confirmed delete requires the final all-five writable-or-readonly provider capability contract",
+		);
 	});
 });
 
@@ -3902,6 +4140,14 @@ const readonlyWorkspaceProvider = readFileSync(
 );
 
 describe("Plain workspace provider copy boundary", () => {
+	const capabilityAssignment = `this.capabilities =
+			FileSystemProviderCapabilities.FileReadWrite |
+			(allowsMutationDispatch
+				? FileSystemProviderCapabilities.FileFolderCopy
+				: FileSystemProviderCapabilities.Readonly);`;
+	const capabilityContractFailure =
+		"Plain workspace provider capabilities must be constructed once as all-five FileReadWrite | FileFolderCopy or FileReadWrite | Readonly";
+
 	function mutateProvider(from, to) {
 		if (!readonlyWorkspaceProvider.includes(from)) {
 			throw new Error("provider mutation fixture no longer matches production");
@@ -3921,43 +4167,164 @@ describe("Plain workspace provider copy boundary", () => {
 		);
 	}
 
-	it("accepts the production provider while retaining Readonly and forbidding FileFolderCopy", () => {
+	function removeProviderMethodMutationGate(methodName) {
+		const sourceFile = ts.createSourceFile(
+			"app/features/workspace/file-system-provider.ts",
+			readonlyWorkspaceProvider,
+			ts.ScriptTarget.Latest,
+			true,
+			ts.ScriptKind.TS,
+		);
+		const providers = sourceFile.statements.filter(
+			(statement) =>
+				ts.isClassDeclaration(statement) &&
+				statement.name?.text === "PlainWorkspaceFileSystemProvider",
+		);
+		const methods =
+			providers.length === 1
+				? providers[0].members.filter(
+						(member) =>
+							ts.isMethodDeclaration(member) &&
+							ts.isIdentifier(member.name) &&
+							member.name.text === methodName,
+					)
+				: [];
+		const [firstStatement] = methods[0]?.body?.statements ?? [];
+		if (
+			methods.length !== 1 ||
+			firstStatement === undefined ||
+			firstStatement.getText(sourceFile).replaceAll(/\s+/g, "") !==
+				"this.requireMutationDispatchAllowed();"
+		) {
+			throw new Error(`provider ${methodName} gate fixture no longer matches`);
+		}
+		return (
+			readonlyWorkspaceProvider.slice(0, firstStatement.getStart(sourceFile)) +
+			readonlyWorkspaceProvider.slice(firstStatement.end)
+		);
+	}
+
+	it("accepts only the immutable all-five writable-or-readonly capability assignment", () => {
 		expect(
 			validateWorkspaceProviderCopyBoundary(readonlyWorkspaceProvider),
 		).toEqual([]);
 
-		const fileFolderCopy = mutateProvider(
-			"FileSystemProviderCapabilities.Readonly;",
-			"FileSystemProviderCapabilities.Readonly |\n\t\tFileSystemProviderCapabilities.FileFolderCopy;",
-		);
-		expect(validateWorkspaceProviderCopyBoundary(fileFolderCopy)).toEqual(
-			expect.arrayContaining([
-				"Plain workspace provider capabilities must remain exactly FileReadWrite | Readonly",
-				"Plain workspace provider must not advertise FileFolderCopy before activation",
-			]),
-		);
-
-		const writable = mutateProvider(
-			"FileSystemProviderCapabilities.FileReadWrite |\n\t\tFileSystemProviderCapabilities.Readonly;",
-			"FileSystemProviderCapabilities.FileReadWrite;",
-		);
-		expect(validateWorkspaceProviderCopyBoundary(writable)).toContain(
-			"Plain workspace provider capabilities must remain exactly FileReadWrite | Readonly",
-		);
+		for (const hostile of [
+			mutateProvider(
+				capabilityAssignment,
+				"this.capabilities = FileSystemProviderCapabilities.FileReadWrite | FileSystemProviderCapabilities.FileFolderCopy;",
+			),
+			mutateProvider(
+				capabilityAssignment,
+				"this.capabilities = FileSystemProviderCapabilities.FileReadWrite | FileSystemProviderCapabilities.Readonly;",
+			),
+			mutateProvider(
+				"(allowsMutationDispatch\n\t\t\t\t? FileSystemProviderCapabilities.FileFolderCopy\n\t\t\t\t: FileSystemProviderCapabilities.Readonly)",
+				"(allowsMutationDispatch\n\t\t\t\t? FileSystemProviderCapabilities.Readonly\n\t\t\t\t: FileSystemProviderCapabilities.FileFolderCopy)",
+			),
+			mutateProvider("(allowsMutationDispatch\n", "(!allowsMutationDispatch\n"),
+			mutateProvider(
+				"? FileSystemProviderCapabilities.FileFolderCopy",
+				"? FileSystemProviderCapabilities.FileFolderCopy | FileSystemProviderCapabilities.Readonly",
+			),
+			mutateProvider(
+				"readonly capabilities: FileSystemProviderCapabilities;",
+				"readonly capabilities = this.#allowsMutationDispatch ? FileSystemProviderCapabilities.FileFolderCopy : FileSystemProviderCapabilities.Readonly;",
+			),
+			...["static readonly", "declare readonly", "public readonly"].map(
+				(modifiers) =>
+					mutateProvider(
+						"readonly capabilities: FileSystemProviderCapabilities;",
+						`${modifiers} capabilities: FileSystemProviderCapabilities;`,
+					),
+			),
+			mutateProvider(
+				"readonly capabilities: FileSystemProviderCapabilities;",
+				"readonly capabilities?: FileSystemProviderCapabilities;",
+			),
+			mutateProvider(
+				"readonly capabilities: FileSystemProviderCapabilities;",
+				"readonly capabilities!: FileSystemProviderCapabilities;",
+			),
+			mutateProvider("FileSystemProviderCapabilities.FileReadWrite |", "1 |"),
+		]) {
+			expect(validateWorkspaceProviderCopyBoundary(hostile)).toContain(
+				capabilityContractFailure,
+			);
+		}
 	});
 
-	it("rejects Trash, atomic delete, computed, duplicate and inherited provider surfaces", () => {
-		for (const flag of ["Trash", "FileAtomicDelete"]) {
+	it("locks the exact ECMAScript-private authority fields and runtime freeze order", () => {
+		const privateAssignments = `this.#bridge = bridge;
+		this.#allowsMutationDispatch = allowsMutationDispatch;`;
+		const prototypeFreeze =
+			"Object.freeze(PlainWorkspaceFileSystemProvider.prototype);";
+		const earlyPrototypeFreeze = readonlyWorkspaceProvider
+			.replace(`${prototypeFreeze}\n\n`, "")
+			.replace(
+				"class PlainWorkspaceFileSystemProvider",
+				`${prototypeFreeze}\nclass PlainWorkspaceFileSystemProvider`,
+			);
+		for (const hostile of [
+			mutateProvider(
+				"readonly #bridge: PlainBridge;",
+				"readonly bridge: PlainBridge;",
+			),
+			mutateProvider(
+				"readonly #allowsMutationDispatch: boolean;",
+				"readonly allowsMutationDispatch: boolean;",
+			),
+			mutateProvider(
+				privateAssignments,
+				`this.#allowsMutationDispatch = allowsMutationDispatch;
+		this.#bridge = bridge;`,
+			),
+			mutateProvider(
+				`${capabilityAssignment}
+		Object.freeze(this);`,
+				capabilityAssignment,
+			),
+			mutateProvider(
+				`${capabilityAssignment}
+		Object.freeze(this);`,
+				`Object.freeze(this);
+		${capabilityAssignment}`,
+			),
+			mutateProvider(
+				prototypeFreeze,
+				"Object.seal(PlainWorkspaceFileSystemProvider.prototype);",
+			),
+			mutateProvider(prototypeFreeze, `${prototypeFreeze}\n${prototypeFreeze}`),
+			earlyPrototypeFreeze,
+		]) {
+			expect(validateWorkspaceProviderCopyBoundary(hostile)).toContain(
+				capabilityContractFailure,
+			);
+		}
+	});
+
+	it("rejects every capability outside the final two sets plus computed, duplicate and inherited surfaces", () => {
+		for (const flag of [
+			"PathCaseSensitive",
+			"Trash",
+			"FileAtomicRead",
+			"FileAtomicWrite",
+			"FileAtomicDelete",
+			"FileClone",
+			"FileRealpath",
+			"FileAppend",
+			"FileOpenReadWriteClose",
+			"FileReadStream",
+			"FileWriteUnlock",
+		]) {
 			const hostile = mutateProvider(
-				"FileSystemProviderCapabilities.Readonly;",
-				"FileSystemProviderCapabilities.Readonly |\n\t\tFileSystemProviderCapabilities." +
+				"FileSystemProviderCapabilities.Readonly);",
+				"FileSystemProviderCapabilities.Readonly |\n\t\t\t\tFileSystemProviderCapabilities." +
 					flag +
-					";",
+					");",
 			);
 			expect(validateWorkspaceProviderCopyBoundary(hostile)).toContain(
-				"Plain workspace provider must not advertise " +
-					flag +
-					" before activation",
+				`Plain workspace provider must not advertise ${flag} outside the final two capability sets`,
 			);
 		}
 
@@ -4047,8 +4414,8 @@ describe("Plain workspace provider copy boundary", () => {
 				"const target = this.resolveMutationResource(from);",
 			),
 			mutateProvider(
-				"this.bridge.workspaceCopy(",
-				"this.bridge.workspaceMove(",
+				"this.#bridge.workspaceCopy(",
+				"this.#bridge.workspaceMove(",
 			),
 			mutateProvider("requireVoidMutationReceipt(receipt);", "void receipt;"),
 			mutateProvider(
@@ -4073,12 +4440,12 @@ describe("Plain workspace provider copy boundary", () => {
 				"const target = this.resolveMutationResource(from);",
 			),
 			mutateProvider(
-				"this.bridge.workspaceRename(",
-				"this.bridge.workspaceCopy(",
+				"this.#bridge.workspaceRename(",
+				"this.#bridge.workspaceCopy(",
 			),
 			mutateProvider(
-				"this.bridge.workspaceMove(",
-				"this.bridge.workspaceCopy(",
+				"this.#bridge.workspaceMove(",
+				"this.#bridge.workspaceCopy(",
 			),
 			mutateLastProvider(
 				"requireVoidMutationReceipt(receipt);",
@@ -4199,12 +4566,12 @@ describe("Plain workspace provider copy boundary", () => {
 
 		const bridgeAlias = mutateProvider(
 			"\tasync copy(\n",
-			"\tprivate mutationBridge(): PlainBridge { return this.bridge; }\n\n\tasync copy(\n",
+			"\tprivate mutationBridge(): PlainBridge { return this.#bridge; }\n\n\tasync copy(\n",
 		);
 		expect(validateWorkspaceProviderCopyBoundary(bridgeAlias)).toEqual(
 			expect.arrayContaining([
 				"Plain workspace provider member surface must remain the exact audited readonly/provider seam set",
-				"every this.bridge reference must be the receiver of one fixed direct provider call",
+				"every this.#bridge reference must be the receiver of one fixed direct provider call",
 			]),
 		);
 	});
@@ -4298,6 +4665,67 @@ describe("Plain workspace provider copy boundary", () => {
 		);
 	});
 
+	it("requires every advertised mutation consumer to retain the all-five gate as its first statement", () => {
+		for (const [methodName, validator, expectedFailure] of [
+			[
+				"plainWriteFile",
+				"provider",
+				"plainWriteFile must gate first, dispatch one versioned bridge write and retain one root-rescan branch",
+			],
+			[
+				"plainCreateFile",
+				"provider",
+				"plainCreateFile must gate first, snapshot once, validate one native receipt and emit one target addition",
+			],
+			[
+				"plainCreateDirectory",
+				"provider",
+				"plainCreateDirectory must gate first, snapshot once, validate one native receipt and emit one target addition",
+			],
+			[
+				"copy",
+				"provider",
+				"copy must gate first, authenticate strict options, snapshot two URIs, route one copy, verify void and close its event set",
+			],
+			[
+				"rename",
+				"provider",
+				"rename must gate first, authenticate strict options, snapshot two URIs, split one rename or move route and accept only moved",
+			],
+			[
+				"delete",
+				"delete",
+				"provider delete must consume one authorization through prepared/inFlight/terminal typestate and dispatch exactly one permanent commit",
+			],
+			[
+				"plainSnapshotDeleteResource",
+				"delete",
+				"plainSnapshotDeleteResource must retain its exact snapshotted root/event delete role",
+			],
+			[
+				"plainRefreshDeleteRoots",
+				"delete",
+				"plainRefreshDeleteRoots must retain its exact snapshotted root/event delete role",
+			],
+		]) {
+			const hostileProvider = removeProviderMethodMutationGate(methodName);
+			const failures =
+				validator === "provider"
+					? validateWorkspaceProviderCopyBoundary(hostileProvider)
+					: validateWorkspaceDeleteTypeScriptBoundary(
+							workspaceDeleteAppSources.map((entry) =>
+								entry.relativePath ===
+								"app/features/workspace/file-system-provider.ts"
+									? { ...entry, source: hostileProvider }
+									: entry,
+							),
+						);
+			expect(failures, `${methodName} lost its exact gate failure`).toContain(
+				expectedFailure,
+			);
+		}
+	});
+
 	it("rejects dynamic globals, runtime binding mutation and computed bridge access", () => {
 		for (const hostile of [
 			readonlyWorkspaceProvider + '\nvoid globalThis["Object"]["freeze"];',
@@ -4305,7 +4733,7 @@ describe("Plain workspace provider copy boundary", () => {
 				"\n(FileChangeType as any).ADDED = FileChangeType.DELETED;",
 			mutateProvider(
 				"requireNoOverwriteOptions(options);\n\t\tconst source",
-				'requireNoOverwriteOptions(options);\n\t\tconst method = "workspaceCopy";\n\t\tvoid this.bridge[method];\n\t\tconst source',
+				'requireNoOverwriteOptions(options);\n\t\tconst method = "workspaceCopy";\n\t\tvoid this.#bridge[method];\n\t\tconst source',
 			),
 		]) {
 			const failures = validateWorkspaceProviderCopyBoundary(hostile);
@@ -4329,11 +4757,12 @@ describe("Plain workspace provider copy boundary", () => {
 		);
 
 		const constructorUpgrade = mutateProvider(
-			"\t\tprivate readonly allowsMutationDispatch: boolean,\n\t) {}",
-			"\t\tprivate readonly allowsMutationDispatch: boolean,\n\t) { this.allowsMutationDispatch = true; }",
+			capabilityAssignment,
+			`${capabilityAssignment}
+		this.capabilities = FileSystemProviderCapabilities.FileReadWrite | FileSystemProviderCapabilities.FileFolderCopy;`,
 		);
 		expect(validateWorkspaceProviderCopyBoundary(constructorUpgrade)).toContain(
-			"Plain workspace provider constructor must retain only the bridge and immutable mutation boolean",
+			"Plain workspace provider constructor must retain only the bridge, immutable mutation boolean and exact capability assignment",
 		);
 
 		const liveAlias =
@@ -4355,7 +4784,7 @@ describe("Plain workspace provider copy boundary", () => {
 			readonlyWorkspaceProvider +
 			"\nconst ProviderAlias = PlainWorkspaceFileSystemProvider;";
 		expect(validateWorkspaceProviderCopyBoundary(providerAlias)).toContain(
-			"PlainWorkspaceFileSystemProvider may be referenced only by its declaration and audited factory",
+			"PlainWorkspaceFileSystemProvider may be referenced only by its declaration, prototype freeze and audited factory",
 		);
 
 		for (const addition of [
@@ -4417,6 +4846,26 @@ await initialize(createServiceOverrides(), container, { enableWorkspaceTrust: fa
 				"bootstrap order must remain createBridge -> capabilities -> provider -> delete coordinator -> register -> snapshot -> initialize",
 			]),
 		);
+	});
+
+	it("forbids inspecting, mutating, aliasing or forwarding the registered workspace provider", () => {
+		const registration =
+			"registerCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);";
+		for (const addition of [
+			"(workspaceFileSystemProvider as any).allowsMutationDispatch = true;",
+			'(workspaceFileSystemProvider as any)["capabilities"] = 10;',
+			"Object.assign(workspaceFileSystemProvider, { capabilities: 10 });",
+			"const providerAlias = workspaceFileSystemProvider;",
+			"consumeProvider(workspaceFileSystemProvider);",
+		]) {
+			const hostile = bootstrap.replace(
+				registration,
+				`${registration}\n${addition}`,
+			);
+			expect(validateWorkspaceProviderBootstrap(hostile)).toContain(
+				"app/main.ts may use the audited workspace provider only for its declaration, delete coordinator and custom-provider registration",
+			);
+		}
 	});
 
 	it("rejects a different scheme, duplicate registration or dead-code registration", () => {

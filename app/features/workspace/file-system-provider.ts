@@ -498,25 +498,31 @@ function createdProviderStat(
 }
 
 /**
- * Read-only Workbench provider for capability-authorized Plain workspace roots.
+ * Workbench provider for capability-authorized Plain workspace roots.
  *
  * PathCaseSensitive is intentionally omitted: one provider can represent roots
  * from case-sensitive and case-insensitive volumes at the same time, while the
  * Workbench capability is provider-wide rather than root-specific.
  */
 class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileReadWriteCapability {
-	readonly capabilities =
-		FileSystemProviderCapabilities.FileReadWrite |
-		FileSystemProviderCapabilities.Readonly;
+	readonly #bridge: PlainBridge;
+	readonly #allowsMutationDispatch: boolean;
+	readonly capabilities: FileSystemProviderCapabilities;
 	readonly onDidChangeCapabilities: Event<void> = Event.None;
 	private readonly changeEmitter = new Emitter<readonly IFileChange[]>();
 	readonly onDidChangeFile: Event<readonly IFileChange[]> =
 		this.changeEmitter.event;
 
-	constructor(
-		private readonly bridge: PlainBridge,
-		private readonly allowsMutationDispatch: boolean,
-	) {}
+	constructor(bridge: PlainBridge, allowsMutationDispatch: boolean) {
+		this.#bridge = bridge;
+		this.#allowsMutationDispatch = allowsMutationDispatch;
+		this.capabilities =
+			FileSystemProviderCapabilities.FileReadWrite |
+			(allowsMutationDispatch
+				? FileSystemProviderCapabilities.FileFolderCopy
+				: FileSystemProviderCapabilities.Readonly);
+		Object.freeze(this);
+	}
 
 	watch(resource: URI, options: IWatchOptions): IDisposable {
 		void options;
@@ -527,7 +533,7 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 	async stat(resource: URI): Promise<PlainWorkspaceProviderStat> {
 		const resolved = this.resolveResource(resource);
 		try {
-			const stat = await this.bridge.workspaceStat(
+			const stat = await this.#bridge.workspaceStat(
 				resolved.rootId,
 				resolved.relativePath,
 			);
@@ -540,7 +546,7 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 	async readdir(resource: URI): Promise<[string, FileType][]> {
 		const resolved = this.resolveResource(resource);
 		try {
-			const result = await this.bridge.workspaceReadDirectory(
+			const result = await this.#bridge.workspaceReadDirectory(
 				resolved.rootId,
 				resolved.relativePath,
 			);
@@ -560,7 +566,7 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 	async plainReadFile(resource: URI): Promise<PlainWorkspaceReadFileResult> {
 		const resolved = this.resolveResource(resource);
 		try {
-			const receipt = await this.bridge.workspaceReadFile(
+			const receipt = await this.#bridge.workspaceReadFile(
 				resolved.rootId,
 				resolved.relativePath,
 			);
@@ -581,7 +587,7 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 		this.requireMutationDispatchAllowed();
 		const resolved = this.resolveResource(resource);
 		try {
-			const result = await this.bridge.workspaceWriteFile(
+			const result = await this.#bridge.workspaceWriteFile(
 				resolved.rootId,
 				resolved.relativePath,
 				expectedVersion,
@@ -616,7 +622,7 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 		const resolved = this.resolveMutationResource(resource);
 		try {
 			const stat = createdProviderStat(
-				await this.bridge.workspaceCreateFile(
+				await this.#bridge.workspaceCreateFile(
 					resolved.rootId,
 					resolved.relativePath,
 				),
@@ -640,7 +646,7 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 		const resolved = this.resolveMutationResource(resource);
 		try {
 			const stat = createdProviderStat(
-				await this.bridge.workspaceCreateDirectory(
+				await this.#bridge.workspaceCreateDirectory(
 					resolved.rootId,
 					resolved.relativePath,
 				),
@@ -699,7 +705,7 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 		let result: WorkspaceDeleteResult;
 		try {
 			result = decodeWorkspaceDeleteResult(
-				await this.bridge.workspaceCommitDeleteEntry(
+				await this.#bridge.workspaceCommitDeleteEntry(
 					authorizationSnapshot.confirmationId,
 					authorizationSnapshot.entryId,
 					authorizationSnapshot.rootId,
@@ -786,7 +792,7 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 			);
 		}
 		try {
-			const receipt = (await this.bridge.workspaceCopy(
+			const receipt = (await this.#bridge.workspaceCopy(
 				source.rootId,
 				source.relativePath,
 				target.rootId,
@@ -824,7 +830,7 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 
 		if (source.rootId === target.rootId) {
 			try {
-				const receipt = (await this.bridge.workspaceRename(
+				const receipt = (await this.#bridge.workspaceRename(
 					source.rootId,
 					source.relativePath,
 					target.relativePath,
@@ -844,7 +850,7 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 		let result;
 		try {
 			result = decodeWorkspaceMoveResult(
-				await this.bridge.workspaceMove(
+				await this.#bridge.workspaceMove(
 					source.rootId,
 					source.relativePath,
 					target.rootId,
@@ -867,7 +873,7 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 	}
 
 	private requireMutationDispatchAllowed(): void {
-		if (!this.allowsMutationDispatch) {
+		if (!this.#allowsMutationDispatch) {
 			throw noPermissions();
 		}
 	}
@@ -1003,6 +1009,8 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 		}
 	}
 }
+
+Object.freeze(PlainWorkspaceFileSystemProvider.prototype);
 
 export function createPlainWorkspaceFileSystemProvider(
 	bridge: PlainBridge,

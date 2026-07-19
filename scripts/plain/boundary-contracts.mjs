@@ -323,6 +323,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 	};
 	let capabilityMemberReferences = 0;
 	let hasUnexpectedBridgeReference = false;
+	let hasUnexpectedWorkspaceProviderReference = false;
 	function isAllowedBridgeIdentifier(node) {
 		const parent = node.parent;
 		if (
@@ -354,6 +355,28 @@ export function validateWorkspaceProviderBootstrap(source) {
 			(parent.expression.text === "createPlainWorkspaceFileSystemProvider" ||
 				parent.expression.text === "registerWorkspaceDeleteCoordinator" ||
 				parent.expression.text === "registerWorkspaceCommands")
+		);
+	}
+	function isAllowedWorkspaceProviderIdentifier(node) {
+		const parent = node.parent;
+		if (
+			ts.isVariableDeclaration(parent) &&
+			parent.name === node &&
+			parent.initializer !== undefined &&
+			identifierCall(
+				parent.initializer,
+				"createPlainWorkspaceFileSystemProvider",
+				2,
+			)
+		) {
+			return true;
+		}
+		return (
+			ts.isCallExpression(parent) &&
+			parent.arguments[1] === node &&
+			ts.isIdentifier(parent.expression) &&
+			(parent.expression.text === "registerWorkspaceDeleteCoordinator" ||
+				parent.expression.text === "registerCustomProvider")
 		);
 	}
 	function visit(node) {
@@ -409,6 +432,13 @@ export function validateWorkspaceProviderBootstrap(source) {
 		) {
 			hasUnexpectedBridgeReference = true;
 		}
+		if (
+			ts.isIdentifier(node) &&
+			node.text === "workspaceFileSystemProvider" &&
+			!isAllowedWorkspaceProviderIdentifier(node)
+		) {
+			hasUnexpectedWorkspaceProviderReference = true;
+		}
 		ts.forEachChild(node, visit);
 	}
 	visit(sourceFile);
@@ -428,6 +458,11 @@ export function validateWorkspaceProviderBootstrap(source) {
 	if (hasUnexpectedBridgeReference) {
 		failures.push(
 			"app/main.ts must not alias or dynamically access the audited bootstrap bridge",
+		);
+	}
+	if (hasUnexpectedWorkspaceProviderReference) {
+		failures.push(
+			"app/main.ts may use the audited workspace provider only for its declaration, delete coordinator and custom-provider registration",
 		);
 	}
 	if (calls.providerFactory !== 1 || providerIndexes.length !== 1) {
@@ -4214,6 +4249,7 @@ function typeScriptMemberName(member) {
 	}
 	if (
 		ts.isIdentifier(member.name) ||
+		ts.isPrivateIdentifier(member.name) ||
 		ts.isStringLiteral(member.name) ||
 		ts.isNumericLiteral(member.name)
 	) {
@@ -4222,28 +4258,126 @@ function typeScriptMemberName(member) {
 	return undefined;
 }
 
-function collectProviderCapabilityFlags(expression, flags) {
-	if (ts.isParenthesizedExpression(expression)) {
-		return collectProviderCapabilityFlags(expression.expression, flags);
+function isFinalWorkspaceProviderPrototypeFreeze(statement, sourceFile) {
+	return (
+		ts.isExpressionStatement(statement) &&
+		statement.getText(sourceFile).replaceAll(/\s+/g, "") ===
+			"Object.freeze(PlainWorkspaceFileSystemProvider.prototype);"
+	);
+}
+
+function hasFinalWorkspaceProviderCapabilityContract(provider, sourceFile) {
+	const capabilityMembers = provider.members.filter(
+		(member) =>
+			ts.isPropertyDeclaration(member) &&
+			typeScriptMemberName(member) === "capabilities",
+	);
+	const constructors = provider.members.filter((member) =>
+		ts.isConstructorDeclaration(member),
+	);
+	if (capabilityMembers.length !== 1 || constructors.length !== 1) {
+		return false;
 	}
-	if (
-		ts.isBinaryExpression(expression) &&
-		expression.operatorToken.kind === ts.SyntaxKind.BarToken
-	) {
+	const capabilityMember = capabilityMembers[0];
+	const capabilityType = capabilityMember.type;
+	const constructor = constructors[0];
+	const providerStatementIndex = sourceFile.statements.indexOf(provider);
+	const prototypeFreezeIndexes = sourceFile.statements.flatMap(
+		(statement, index) =>
+			isFinalWorkspaceProviderPrototypeFreeze(statement, sourceFile)
+				? [index]
+				: [],
+	);
+	const privateBridgeMembers = provider.members.filter(
+		(member) =>
+			ts.isPropertyDeclaration(member) &&
+			typeScriptMemberName(member) === "#bridge",
+	);
+	const privatePolicyMembers = provider.members.filter(
+		(member) =>
+			ts.isPropertyDeclaration(member) &&
+			typeScriptMemberName(member) === "#allowsMutationDispatch",
+	);
+	const [bridgeParameter, policyParameter] = constructor.parameters;
+	const constructorStatements = constructor.body?.statements ?? [];
+	function isExactPrivateField(member, name, typeName) {
 		return (
-			collectProviderCapabilityFlags(expression.left, flags) &&
-			collectProviderCapabilityFlags(expression.right, flags)
+			member !== undefined &&
+			ts.isPrivateIdentifier(member.name) &&
+			member.name.text === name &&
+			member.modifiers?.length === 1 &&
+			member.modifiers[0].kind === ts.SyntaxKind.ReadonlyKeyword &&
+			member.questionToken === undefined &&
+			member.exclamationToken === undefined &&
+			member.initializer === undefined &&
+			member.type !== undefined &&
+			(typeName === "boolean"
+				? member.type.kind === ts.SyntaxKind.BooleanKeyword
+				: ts.isTypeReferenceNode(member.type) &&
+					ts.isIdentifier(member.type.typeName) &&
+					member.type.typeName.text === typeName)
 		);
 	}
-	if (
-		ts.isPropertyAccessExpression(expression) &&
-		ts.isIdentifier(expression.expression) &&
-		expression.expression.text === "FileSystemProviderCapabilities"
-	) {
-		flags.push(expression.name.text);
-		return true;
+	function isExactPlainParameter(parameter, name, typeName) {
+		return (
+			parameter !== undefined &&
+			ts.isIdentifier(parameter.name) &&
+			parameter.name.text === name &&
+			(parameter.modifiers?.length ?? 0) === 0 &&
+			parameter.questionToken === undefined &&
+			parameter.dotDotDotToken === undefined &&
+			parameter.initializer === undefined &&
+			parameter.type !== undefined &&
+			(typeName === "boolean"
+				? parameter.type.kind === ts.SyntaxKind.BooleanKeyword
+				: ts.isTypeReferenceNode(parameter.type) &&
+					ts.isIdentifier(parameter.type.typeName) &&
+					parameter.type.typeName.text === typeName)
+		);
 	}
-	return false;
+	return (
+		privateBridgeMembers.length === 1 &&
+		isExactPrivateField(privateBridgeMembers[0], "#bridge", "PlainBridge") &&
+		privatePolicyMembers.length === 1 &&
+		isExactPrivateField(
+			privatePolicyMembers[0],
+			"#allowsMutationDispatch",
+			"boolean",
+		) &&
+		ts.isIdentifier(capabilityMember.name) &&
+		capabilityMember.name.text === "capabilities" &&
+		capabilityMember.initializer === undefined &&
+		capabilityMember.modifiers?.length === 1 &&
+		capabilityMember.modifiers[0].kind === ts.SyntaxKind.ReadonlyKeyword &&
+		capabilityMember.questionToken === undefined &&
+		capabilityMember.exclamationToken === undefined &&
+		capabilityType !== undefined &&
+		ts.isTypeReferenceNode(capabilityType) &&
+		ts.isIdentifier(capabilityType.typeName) &&
+		capabilityType.typeName.text === "FileSystemProviderCapabilities" &&
+		(constructor.modifiers?.length ?? 0) === 0 &&
+		constructor.parameters.length === 2 &&
+		isExactPlainParameter(bridgeParameter, "bridge", "PlainBridge") &&
+		isExactPlainParameter(
+			policyParameter,
+			"allowsMutationDispatch",
+			"boolean",
+		) &&
+		constructorStatements.length === 4 &&
+		sameArray(
+			constructorStatements.map((statement) =>
+				statement.getText(sourceFile).replaceAll(/\s+/g, ""),
+			),
+			[
+				"this.#bridge=bridge;",
+				"this.#allowsMutationDispatch=allowsMutationDispatch;",
+				"this.capabilities=FileSystemProviderCapabilities.FileReadWrite|(allowsMutationDispatch?FileSystemProviderCapabilities.FileFolderCopy:FileSystemProviderCapabilities.Readonly);",
+				"Object.freeze(this);",
+			],
+		) &&
+		prototypeFreezeIndexes.length === 1 &&
+		prototypeFreezeIndexes[0] === providerStatementIndex + 1
+	);
 }
 
 const WORKSPACE_DELETE_TS_COMMANDS = Object.freeze([
@@ -4409,12 +4543,472 @@ function collectTypeScriptBridgeAliases(sourceFile) {
 }
 
 /**
+ * The registered workspace provider and the native bridge are one-way
+ * bootstrap values. Keep their factories on the fixed definition -> import ->
+ * direct-call routes, keep Tauri's private global inside the bridge directory,
+ * and reject only getProvider reads derived from the IFileService authority
+ * token. The last condition deliberately permits unrelated catalog APIs that
+ * happen to use the same method name.
+ */
+export function validateWorkspaceProviderRetrievalBoundary(appSources) {
+	const failures = [];
+	const factoryContracts = new Map([
+		[
+			"createPlainWorkspaceFileSystemProvider",
+			{
+				definitionPath: "app/features/workspace/file-system-provider.ts",
+				consumerPath: "app/main.ts",
+				moduleName: "./features/workspace/file-system-provider",
+			},
+		],
+		[
+			"createBridge",
+			{
+				definitionPath: "app/platform/tauri/index.ts",
+				consumerPath: "app/main.ts",
+				moduleName: "./platform/tauri",
+			},
+		],
+		[
+			"createNativeBridge",
+			{
+				definitionPath: "app/platform/tauri/native.ts",
+				consumerPath: "app/platform/tauri/index.ts",
+				moduleName: "./native",
+			},
+		],
+		[
+			"createBrowserMockBridge",
+			{
+				definitionPath: "app/platform/tauri/browser-mock.ts",
+				consumerPath: "app/platform/tauri/index.ts",
+				moduleName: "./browser-mock",
+			},
+		],
+	]);
+	const factoryOccurrences = new Map(
+		[...factoryContracts.keys()].map((name) => [
+			name,
+			{ definitions: 0, imports: 0, calls: 0 },
+		]),
+	);
+	const hasExportModifier = (node) =>
+		node.modifiers?.some(
+			(modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
+		) === true;
+	const importDeclarationFor = (specifier) => {
+		const namedImports = specifier.parent;
+		const importClause = namedImports.parent;
+		const declaration = importClause.parent;
+		return ts.isImportDeclaration(declaration) ? declaration : undefined;
+	};
+	const isExactFactoryDefinition = (node, normalizedPath, contract) =>
+		ts.isFunctionDeclaration(node.parent) &&
+		node.parent.name === node &&
+		normalizedPath === contract.definitionPath &&
+		hasExportModifier(node.parent);
+	const isExactFactoryImport = (node, normalizedPath, contract) => {
+		if (
+			!ts.isImportSpecifier(node.parent) ||
+			node.parent.name !== node ||
+			node.parent.propertyName !== undefined ||
+			node.parent.isTypeOnly ||
+			normalizedPath !== contract.consumerPath
+		) {
+			return false;
+		}
+		const declaration = importDeclarationFor(node.parent);
+		return (
+			declaration !== undefined &&
+			declaration.importClause?.isTypeOnly !== true &&
+			ts.isStringLiteral(declaration.moduleSpecifier) &&
+			declaration.moduleSpecifier.text === contract.moduleName
+		);
+	};
+	const isExactFactoryCall = (node, normalizedPath, contract) =>
+		ts.isCallExpression(node.parent) &&
+		node.parent.expression === node &&
+		normalizedPath === contract.consumerPath;
+	const isReflectGetCall = (
+		node,
+		evaluateString = evaluateStaticTypeScriptString,
+	) => {
+		if (!ts.isCallExpression(node)) {
+			return false;
+		}
+		const target = unwrapTypeScriptExpression(node.expression);
+		if (ts.isPropertyAccessExpression(target)) {
+			return (
+				ts.isIdentifier(unwrapTypeScriptExpression(target.expression)) &&
+				unwrapTypeScriptExpression(target.expression).text === "Reflect" &&
+				target.name.text === "get"
+			);
+		}
+		return (
+			ts.isElementAccessExpression(target) &&
+			ts.isIdentifier(unwrapTypeScriptExpression(target.expression)) &&
+			unwrapTypeScriptExpression(target.expression).text === "Reflect" &&
+			evaluateString(target.argumentExpression) === "get"
+		);
+	};
+	for (const { relativePath, source } of appSources) {
+		const normalizedPath = relativePath.replaceAll("\\", "/");
+		const sourceFile = ts.createSourceFile(
+			normalizedPath,
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			normalizedPath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+		);
+		let referencesFileServiceToken = false;
+		let referencesProviderGetter = false;
+		const tokenAliases = new Set(["IFileService"]);
+		const getServiceAliases = new Set(["getService"]);
+		const fileServiceAliases = new Set();
+		const aliasCandidates = [];
+		const unwrapAuthorityExpression = (node) => {
+			let current = unwrapTypeScriptExpression(node);
+			while (ts.isAwaitExpression(current)) {
+				current = unwrapTypeScriptExpression(current.expression);
+			}
+			return current;
+		};
+		const staticStringAliases = new Map();
+		const staticStringCandidates = [];
+		function evaluateAuthorityStaticString(node) {
+			const current = unwrapTypeScriptExpression(node);
+			if (ts.isIdentifier(current)) {
+				return staticStringAliases.get(current.text);
+			}
+			if (
+				ts.isStringLiteral(current) ||
+				ts.isNoSubstitutionTemplateLiteral(current)
+			) {
+				return current.text;
+			}
+			if (
+				ts.isBinaryExpression(current) &&
+				current.operatorToken.kind === ts.SyntaxKind.PlusToken
+			) {
+				const left = evaluateAuthorityStaticString(current.left);
+				const right = evaluateAuthorityStaticString(current.right);
+				return left === undefined || right === undefined
+					? undefined
+					: left + right;
+			}
+			if (ts.isTemplateExpression(current)) {
+				let value = current.head.text;
+				for (const span of current.templateSpans) {
+					const expression = evaluateAuthorityStaticString(span.expression);
+					if (expression === undefined) {
+						return undefined;
+					}
+					value += expression + span.literal.text;
+				}
+				return value;
+			}
+			return undefined;
+		}
+		function collectStaticStringCandidates(node) {
+			if (
+				ts.isVariableDeclaration(node) &&
+				ts.isIdentifier(node.name) &&
+				node.initializer !== undefined &&
+				ts.isVariableDeclarationList(node.parent) &&
+				(node.parent.flags & ts.NodeFlags.Const) !== 0
+			) {
+				staticStringCandidates.push({
+					name: node.name.text,
+					value: node.initializer,
+				});
+			}
+			ts.forEachChild(node, collectStaticStringCandidates);
+		}
+		collectStaticStringCandidates(sourceFile);
+		let staticStringsChanged = true;
+		while (staticStringsChanged) {
+			staticStringsChanged = false;
+			for (const candidate of staticStringCandidates) {
+				if (staticStringAliases.has(candidate.name)) {
+					continue;
+				}
+				const value = evaluateAuthorityStaticString(candidate.value);
+				if (value !== undefined) {
+					staticStringAliases.set(candidate.name, value);
+					staticStringsChanged = true;
+				}
+			}
+		}
+		const bindingElementStaticName = (node) => {
+			const propertyName = node.propertyName ?? node.name;
+			if (ts.isComputedPropertyName(propertyName)) {
+				return evaluateAuthorityStaticString(propertyName.expression);
+			}
+			return ts.isIdentifier(propertyName) || ts.isStringLiteral(propertyName)
+				? propertyName.text
+				: undefined;
+		};
+		const bindingElementInitializer = (node) => {
+			const bindingPattern = node.parent;
+			const declaration = bindingPattern.parent;
+			return ts.isObjectBindingPattern(bindingPattern) &&
+				ts.isVariableDeclaration(declaration)
+				? declaration.initializer
+				: undefined;
+		};
+		const isStaticMember = (node, memberName) => {
+			const current = unwrapAuthorityExpression(node);
+			return (
+				(ts.isPropertyAccessExpression(current) &&
+					current.name.text === memberName) ||
+				(ts.isElementAccessExpression(current) &&
+					evaluateAuthorityStaticString(current.argumentExpression) ===
+						memberName) ||
+				(isReflectGetCall(current, evaluateAuthorityStaticString) &&
+					current.arguments.length >= 2 &&
+					evaluateAuthorityStaticString(current.arguments[1]) === memberName)
+			);
+		};
+		const isTokenExpression = (node) => {
+			const current = unwrapAuthorityExpression(node);
+			return (
+				(ts.isIdentifier(current) && tokenAliases.has(current.text)) ||
+				isStaticMember(current, "IFileService")
+			);
+		};
+		const isGetServiceExpression = (node) => {
+			const current = unwrapAuthorityExpression(node);
+			return (
+				(ts.isIdentifier(current) && getServiceAliases.has(current.text)) ||
+				isStaticMember(current, "getService")
+			);
+		};
+		const isFileServiceExpression = (node) => {
+			const current = unwrapAuthorityExpression(node);
+			return (
+				(ts.isIdentifier(current) && fileServiceAliases.has(current.text)) ||
+				(ts.isCallExpression(current) &&
+					isGetServiceExpression(current.expression) &&
+					current.arguments.some(isTokenExpression))
+			);
+		};
+		for (const statement of sourceFile.statements) {
+			if (
+				!ts.isImportDeclaration(statement) ||
+				statement.importClause === undefined ||
+				statement.importClause.namedBindings === undefined ||
+				!ts.isNamedImports(statement.importClause.namedBindings)
+			) {
+				continue;
+			}
+			for (const specifier of statement.importClause.namedBindings.elements) {
+				const importedName =
+					specifier.propertyName?.text ?? specifier.name.text;
+				if (importedName === "IFileService") {
+					referencesFileServiceToken = true;
+					tokenAliases.add(specifier.name.text);
+				}
+				if (importedName === "getService") {
+					getServiceAliases.add(specifier.name.text);
+				}
+			}
+		}
+		function collectAliases(node) {
+			if (
+				ts.isVariableDeclaration(node) &&
+				ts.isIdentifier(node.name) &&
+				node.initializer !== undefined
+			) {
+				aliasCandidates.push({ name: node.name.text, value: node.initializer });
+			}
+			if (
+				ts.isBinaryExpression(node) &&
+				node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+				ts.isIdentifier(node.left)
+			) {
+				aliasCandidates.push({ name: node.left.text, value: node.right });
+			}
+			if (
+				ts.isBindingElement(node) &&
+				ts.isIdentifier(node.name) &&
+				bindingElementStaticName(node) === "IFileService"
+			) {
+				referencesFileServiceToken = true;
+				tokenAliases.add(node.name.text);
+			}
+			ts.forEachChild(node, collectAliases);
+		}
+		collectAliases(sourceFile);
+		let aliasesChanged = true;
+		while (aliasesChanged) {
+			aliasesChanged = false;
+			for (const candidate of aliasCandidates) {
+				if (
+					!tokenAliases.has(candidate.name) &&
+					isTokenExpression(candidate.value)
+				) {
+					tokenAliases.add(candidate.name);
+					aliasesChanged = true;
+				}
+				if (
+					!getServiceAliases.has(candidate.name) &&
+					isGetServiceExpression(candidate.value)
+				) {
+					getServiceAliases.add(candidate.name);
+					aliasesChanged = true;
+				}
+				if (
+					!fileServiceAliases.has(candidate.name) &&
+					isFileServiceExpression(candidate.value)
+				) {
+					fileServiceAliases.add(candidate.name);
+					aliasesChanged = true;
+				}
+			}
+		}
+		function visit(node) {
+			if (
+				(ts.isIdentifier(node) && node.text === "IFileService") ||
+				isStaticMember(node, "IFileService")
+			) {
+				referencesFileServiceToken = true;
+			}
+			if (
+				ts.isPropertyAccessExpression(node) &&
+				node.name.text === "getProvider" &&
+				isFileServiceExpression(node.expression)
+			) {
+				referencesProviderGetter = true;
+			}
+			if (
+				ts.isElementAccessExpression(node) &&
+				evaluateAuthorityStaticString(node.argumentExpression) ===
+					"getProvider" &&
+				isFileServiceExpression(node.expression)
+			) {
+				referencesProviderGetter = true;
+			}
+			if (
+				isReflectGetCall(node, evaluateAuthorityStaticString) &&
+				node.arguments.length >= 2 &&
+				evaluateAuthorityStaticString(node.arguments[1]) === "getProvider" &&
+				isFileServiceExpression(node.arguments[0])
+			) {
+				referencesProviderGetter = true;
+			}
+			if (
+				ts.isBindingElement(node) &&
+				bindingElementStaticName(node) === "getProvider"
+			) {
+				const initializer = bindingElementInitializer(node);
+				if (initializer !== undefined && isFileServiceExpression(initializer)) {
+					referencesProviderGetter = true;
+				}
+			}
+
+			if (ts.isIdentifier(node)) {
+				const contract = factoryContracts.get(node.text);
+				if (contract !== undefined) {
+					const occurrences = factoryOccurrences.get(node.text);
+					if (isExactFactoryDefinition(node, normalizedPath, contract)) {
+						occurrences.definitions += 1;
+					} else if (isExactFactoryImport(node, normalizedPath, contract)) {
+						occurrences.imports += 1;
+					} else if (isExactFactoryCall(node, normalizedPath, contract)) {
+						occurrences.calls += 1;
+					} else {
+						failures.push(
+							`${normalizedPath} must not reference ${node.text} outside its audited authority route`,
+						);
+					}
+				} else if (
+					/^create[A-Za-z0-9_$]*Bridge$/.test(node.text) &&
+					!normalizedPath.startsWith("app/platform/tauri/")
+				) {
+					failures.push(
+						`${normalizedPath} must not define or reference local bridge factory ${node.text} outside app/platform/tauri/`,
+					);
+				}
+			}
+			if (
+				ts.isStringLiteralLike(node) ||
+				ts.isIdentifier(node) ||
+				ts.isBinaryExpression(node) ||
+				ts.isTemplateExpression(node)
+			) {
+				const staticName = evaluateAuthorityStaticString(node);
+				if (factoryContracts.has(staticName)) {
+					failures.push(
+						`${normalizedPath} must not reference ${staticName} outside its audited authority route`,
+					);
+				} else if (
+					/^create[A-Za-z0-9_$]*Bridge$/.test(staticName ?? "") &&
+					!normalizedPath.startsWith("app/platform/tauri/")
+				) {
+					failures.push(
+						`${normalizedPath} must not define or reference local bridge factory ${staticName} outside app/platform/tauri/`,
+					);
+				}
+				if (
+					staticName === "__TAURI_INTERNALS__" &&
+					!normalizedPath.startsWith("app/platform/tauri/")
+				) {
+					failures.push(
+						`${normalizedPath} must not access __TAURI_INTERNALS__ outside app/platform/tauri/`,
+					);
+				}
+			}
+			if (
+				ts.isIdentifier(node) &&
+				node.text === "__TAURI_INTERNALS__" &&
+				!normalizedPath.startsWith("app/platform/tauri/")
+			) {
+				failures.push(
+					`${normalizedPath} must not access __TAURI_INTERNALS__ outside app/platform/tauri/`,
+				);
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(sourceFile);
+		if (referencesFileServiceToken) {
+			failures.push(
+				`${normalizedPath} must not import or reference IFileService in the Plain application`,
+			);
+		}
+		if (referencesProviderGetter) {
+			failures.push(
+				`${normalizedPath} must not recover the registered workspace provider through getProvider`,
+			);
+		}
+	}
+	for (const [factoryName, contract] of factoryContracts) {
+		const occurrences = factoryOccurrences.get(factoryName);
+		if (occurrences.definitions !== 1) {
+			failures.push(
+				`${factoryName} must have exactly one exported definition in ${contract.definitionPath}`,
+			);
+		}
+		if (occurrences.imports !== 1) {
+			failures.push(
+				`${factoryName} must have exactly one unaliased named import from ${contract.moduleName} in ${contract.consumerPath}`,
+			);
+		}
+		if (occurrences.calls !== 1) {
+			failures.push(
+				`${factoryName} must have exactly one direct call in ${contract.consumerPath}`,
+			);
+		}
+	}
+	return [...new Set(failures)];
+}
+
+/**
  * Locks the only confirmed-delete application route. The coordinator may own
  * prepare/cancel/begin, the provider may own commit, and the private Workbench
  * authorization helpers may be consumed only at their fixed typestate sites.
  */
 export function validateWorkspaceDeleteTypeScriptBoundary(appSources) {
-	const failures = [];
+	const failures = [...validateWorkspaceProviderRetrievalBoundary(appSources)];
 	const normalizedSources = new Map(
 		appSources.map(({ relativePath, source }) => [
 			relativePath.replaceAll("\\", "/"),
@@ -5404,23 +5998,9 @@ function validateWorkspaceDeleteProviderRoute(source) {
 			(member) =>
 				ts.isMethodDeclaration(member) && typeScriptMemberName(member) === name,
 		);
-	const capabilityMembers = provider.members.filter(
-		(member) =>
-			ts.isPropertyDeclaration(member) &&
-			typeScriptMemberName(member) === "capabilities",
-	);
-	const flags = [];
-	if (
-		capabilityMembers.length !== 1 ||
-		capabilityMembers[0].initializer === undefined ||
-		!capabilityMembers[0].modifiers?.some(
-			(modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword,
-		) ||
-		!collectProviderCapabilityFlags(capabilityMembers[0].initializer, flags) ||
-		!sameArray(flags.sort(), ["FileReadWrite", "Readonly"])
-	) {
+	if (!hasFinalWorkspaceProviderCapabilityContract(provider, sourceFile)) {
 		failures.push(
-			"confirmed delete must not remove Readonly or advertise Trash/atomic provider capabilities",
+			"confirmed delete requires the final all-five writable-or-readonly provider capability contract",
 		);
 	}
 
@@ -5455,7 +6035,7 @@ function validateWorkspaceDeleteProviderRoute(source) {
 		let result: WorkspaceDeleteResult;
 		try {
 			result = decodeWorkspaceDeleteResult(
-				await this.bridge.workspaceCommitDeleteEntry(
+				await this.#bridge.workspaceCommitDeleteEntry(
 					authorizationSnapshot.confirmationId,
 					authorizationSnapshot.entryId,
 					authorizationSnapshot.rootId,
@@ -5843,6 +6423,8 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			recordTopLevelDeclaration(statement.name, "type", statement);
 		} else if (ts.isClassDeclaration(statement)) {
 			recordTopLevelDeclaration(statement.name, "class", statement);
+		} else if (isFinalWorkspaceProviderPrototypeFreeze(statement, sourceFile)) {
+			continue;
 		} else {
 			topLevelSurfaceIsExact = false;
 		}
@@ -6623,6 +7205,8 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		);
 	}
 	const expectedProviderMembers = new Set([
+		"#bridge",
+		"#allowsMutationDispatch",
 		"capabilities",
 		"onDidChangeCapabilities",
 		"changeEmitter",
@@ -6772,56 +7356,9 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			"Plain workspace provider must have one module-private audited constructor",
 		);
 	} else {
-		const [constructor] = constructors;
-		const [bridgeParameter, policyParameter] = constructor.parameters;
-		function exactPrivateReadonlyParameter(parameter, name, typeName) {
-			return (
-				parameter !== undefined &&
-				ts.isIdentifier(parameter.name) &&
-				parameter.name.text === name &&
-				parameter.modifiers?.some(
-					(modifier) => modifier.kind === ts.SyntaxKind.PrivateKeyword,
-				) &&
-				parameter.modifiers?.some(
-					(modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword,
-				) &&
-				parameter.type !== undefined &&
-				ts.isTypeReferenceNode(parameter.type) &&
-				ts.isIdentifier(parameter.type.typeName) &&
-				parameter.type.typeName.text === typeName
-			);
-		}
-		function exactPrivateReadonlyBoolean(parameter, name) {
-			return (
-				parameter !== undefined &&
-				ts.isIdentifier(parameter.name) &&
-				parameter.name.text === name &&
-				parameter.modifiers?.some(
-					(modifier) => modifier.kind === ts.SyntaxKind.PrivateKeyword,
-				) &&
-				parameter.modifiers?.some(
-					(modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword,
-				) &&
-				parameter.type?.kind === ts.SyntaxKind.BooleanKeyword
-			);
-		}
-		if (
-			constructor.parameters.length !== 2 ||
-			constructor.body?.statements.length !== 0 ||
-			constructor.modifiers?.some(
-				(modifier) =>
-					modifier.kind === ts.SyntaxKind.PublicKeyword ||
-					modifier.kind === ts.SyntaxKind.ProtectedKeyword,
-			) ||
-			!exactPrivateReadonlyParameter(
-				bridgeParameter,
-				"bridge",
-				"PlainBridge",
-			) ||
-			!exactPrivateReadonlyBoolean(policyParameter, "allowsMutationDispatch")
-		) {
+		if (!hasFinalWorkspaceProviderCapabilityContract(provider, sourceFile)) {
 			failures.push(
-				"Plain workspace provider constructor must retain only the bridge and immutable mutation boolean",
+				"Plain workspace provider constructor must retain only the bridge, immutable mutation boolean and exact capability assignment",
 			);
 		}
 	}
@@ -6997,13 +7534,24 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	function providerMethodCallCount(method, receiverName, methodName) {
 		let count = 0;
 		function visitMethod(node) {
+			const receiver =
+				ts.isCallExpression(node) &&
+				ts.isPropertyAccessExpression(node.expression) &&
+				ts.isPropertyAccessExpression(node.expression.expression)
+					? node.expression.expression
+					: undefined;
+			const hasExpectedReceiver =
+				receiver !== undefined &&
+				receiver.expression.kind === ts.SyntaxKind.ThisKeyword &&
+				(receiverName === "bridge"
+					? ts.isPrivateIdentifier(receiver.name) &&
+						receiver.name.text === "#bridge"
+					: receiver.name.text === receiverName);
 			if (
 				ts.isCallExpression(node) &&
 				ts.isPropertyAccessExpression(node.expression) &&
 				node.expression.name.text === methodName &&
-				ts.isPropertyAccessExpression(node.expression.expression) &&
-				node.expression.expression.name.text === receiverName &&
-				node.expression.expression.expression.kind === ts.SyntaxKind.ThisKeyword
+				hasExpectedReceiver
 			) {
 				count += 1;
 			}
@@ -7081,7 +7629,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			) ||
 			mutationGate.type?.kind !== ts.SyntaxKind.VoidKeyword ||
 			normalizedBody !==
-				"{if(!this.allowsMutationDispatch){thrownoPermissions();}}"
+				"{if(!this.#allowsMutationDispatch){thrownoPermissions();}}"
 		) {
 			failures.push(
 				"mutation dispatch gate must fail closed from the immutable primitive policy",
@@ -7372,7 +7920,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			const resolved = this.resolveMutationResource(resource);
 			try {
 				const stat = createdProviderStat(
-					await this.bridge.${bridgeMethod}(
+					await this.#bridge.${bridgeMethod}(
 						resolved.rootId,
 						resolved.relativePath,
 					),
@@ -7540,7 +8088,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 				);
 			}
 			try {
-				const receipt = (await this.bridge.workspaceCopy(
+				const receipt = (await this.#bridge.workspaceCopy(
 					source.rootId,
 					source.relativePath,
 					target.rootId,
@@ -7598,7 +8146,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 
 			if (source.rootId === target.rootId) {
 				try {
-					const receipt = (await this.bridge.workspaceRename(
+					const receipt = (await this.#bridge.workspaceRename(
 						source.rootId,
 						source.relativePath,
 						target.relativePath,
@@ -7618,7 +8166,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			let result;
 			try {
 				result = decodeWorkspaceMoveResult(
-					await this.bridge.workspaceMove(
+						await this.#bridge.workspaceMove(
 						source.rootId,
 						source.relativePath,
 						target.rootId,
@@ -7713,21 +8261,12 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		failures.push(
 			"Plain workspace provider must declare one explicit capabilities property",
 		);
-	} else {
-		const capabilityMember = capabilityMembers[0];
-		const flags = [];
-		const isReadonlyDeclaration = capabilityMember.modifiers?.some(
-			(modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword,
+	} else if (
+		!hasFinalWorkspaceProviderCapabilityContract(provider, sourceFile)
+	) {
+		failures.push(
+			"Plain workspace provider capabilities must be constructed once as all-five FileReadWrite | FileFolderCopy or FileReadWrite | Readonly",
 		);
-		const isExactCapabilityExpression =
-			capabilityMember.initializer !== undefined &&
-			collectProviderCapabilityFlags(capabilityMember.initializer, flags) &&
-			sameArray(flags.sort(), ["FileReadWrite", "Readonly"]);
-		if (!isReadonlyDeclaration || !isExactCapabilityExpression) {
-			failures.push(
-				"Plain workspace provider capabilities must remain exactly FileReadWrite | Readonly",
-			);
-		}
 	}
 
 	const allowedProviderIdentifiers = new Set([
@@ -7742,6 +8281,12 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	let hasDynamicMutationSurface = false;
 	let hasCapabilitiesReference = false;
 	let mutationDispatchReferences = 0;
+	let hasUnexpectedPrivateIdentifier = false;
+	const capabilityFlagReferences = new Map([
+		["FileReadWrite", 0],
+		["FileFolderCopy", 0],
+		["Readonly", 0],
+	]);
 	let createFileBridgeReferences = 0;
 	let createDirectoryBridgeReferences = 0;
 	let copyBridgeReferences = 0;
@@ -7878,11 +8423,14 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	let fireRootsUpdatedCallCount = 0;
 	let changeEmitterFireCallCount = 0;
 	let moveIncompleteConstructionCount = 0;
+	let privateBridgeReferences = 0;
+	let privatePolicyReferences = 0;
 	function isThisBridge(node) {
 		return (
 			ts.isPropertyAccessExpression(node) &&
 			node.expression.kind === ts.SyntaxKind.ThisKeyword &&
-			node.name.text === "bridge"
+			ts.isPrivateIdentifier(node.name) &&
+			node.name.text === "#bridge"
 		);
 	}
 	function unwrapRuntimeExpression(node) {
@@ -7924,6 +8472,45 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		}
 		return false;
 	}
+	function isAuditedProviderInstanceFreezeThis(node) {
+		const call = node.parent;
+		return (
+			ts.isCallExpression(call) &&
+			call.arguments.length === 1 &&
+			call.arguments[0] === node &&
+			ts.isPropertyAccessExpression(call.expression) &&
+			ts.isIdentifier(call.expression.expression) &&
+			call.expression.expression.text === "Object" &&
+			call.expression.name.text === "freeze" &&
+			call.parent === constructors[0]?.body?.statements[3]
+		);
+	}
+	function isAuditedProviderPrototypeNode(node) {
+		const access = ts.isIdentifier(node)
+			? node.parent
+			: ts.isPropertyAccessExpression(node)
+				? node
+				: undefined;
+		const call = access?.parent;
+		const statement = call?.parent;
+		return (
+			access !== undefined &&
+			ts.isPropertyAccessExpression(access) &&
+			ts.isIdentifier(access.expression) &&
+			access.expression.text === "PlainWorkspaceFileSystemProvider" &&
+			ts.isIdentifier(access.name) &&
+			access.name.text === "prototype" &&
+			ts.isCallExpression(call) &&
+			call.arguments.length === 1 &&
+			call.arguments[0] === access &&
+			ts.isPropertyAccessExpression(call.expression) &&
+			ts.isIdentifier(call.expression.expression) &&
+			call.expression.expression.text === "Object" &&
+			call.expression.name.text === "freeze" &&
+			statement !== undefined &&
+			isFinalWorkspaceProviderPrototypeFreeze(statement, sourceFile)
+		);
+	}
 	function isCriticalTypeReference(node) {
 		return (
 			ts.isTypeReferenceNode(node.parent) ||
@@ -7938,6 +8525,15 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		);
 	}
 	function visit(node) {
+		if (ts.isPrivateIdentifier(node)) {
+			if (node.text === "#bridge") {
+				privateBridgeReferences += 1;
+			} else if (node.text === "#allowsMutationDispatch") {
+				privatePolicyReferences += 1;
+			} else {
+				hasUnexpectedPrivateIdentifier = true;
+			}
+		}
 		if (node.kind === ts.SyntaxKind.Decorator) {
 			failures.push(
 				"Plain workspace provider source must not contain decorators that can wrap audited construction or mutation seams",
@@ -7964,25 +8560,28 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 				"Plain workspace provider must not reach dynamic global or code-loading surfaces",
 			);
 		}
-		if (ts.isIdentifier(node) && node.text === "FileFolderCopy") {
-			failures.push(
-				"Plain workspace provider must not advertise FileFolderCopy before activation",
-			);
-			return;
-		}
 		if (
-			ts.isIdentifier(node) &&
-			(node.text === "Trash" || node.text === "FileAtomicDelete")
+			ts.isPropertyAccessExpression(node) &&
+			ts.isIdentifier(node.expression) &&
+			node.expression.text === "FileSystemProviderCapabilities"
 		) {
-			failures.push(
-				`Plain workspace provider must not advertise ${node.text} before activation`,
-			);
-			return;
+			const flag = node.name.text;
+			if (!capabilityFlagReferences.has(flag)) {
+				failures.push(
+					`Plain workspace provider must not advertise ${flag} outside the final two capability sets`,
+				);
+			} else {
+				capabilityFlagReferences.set(
+					flag,
+					capabilityFlagReferences.get(flag) + 1,
+				);
+			}
 		}
 		if (
 			ts.isIdentifier(node) &&
 			node.text === "PlainWorkspaceFileSystemProvider" &&
-			!allowedProviderIdentifiers.has(node)
+			!allowedProviderIdentifiers.has(node) &&
+			!isAuditedProviderPrototypeNode(node)
 		) {
 			hasExtraProviderReference = true;
 		}
@@ -7998,6 +8597,8 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 				node.parent.expression.text === "Object";
 			if (isAuditedObjectPrototype) {
 				objectPrototypeReferences += 1;
+			} else if (isAuditedProviderPrototypeNode(node)) {
+				// The one frozen provider prototype is part of the runtime authority seal.
 			} else if (ts.isIdentifier(node)) {
 				localPrototypeReferences += 1;
 			} else {
@@ -8015,7 +8616,20 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			node.text === "capabilities" &&
 			node !== capabilityMembers[0]?.name
 		) {
-			hasCapabilitiesReference = true;
+			const propertyAccess = node.parent;
+			const assignment = propertyAccess?.parent;
+			const isAuditedConstructorAssignment =
+				ts.isIdentifier(node) &&
+				ts.isPropertyAccessExpression(propertyAccess) &&
+				propertyAccess.name === node &&
+				propertyAccess.expression.kind === ts.SyntaxKind.ThisKeyword &&
+				ts.isBinaryExpression(assignment) &&
+				assignment.left === propertyAccess &&
+				assignment.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+				assignment.parent === constructors[0]?.body?.statements[2];
+			if (!isAuditedConstructorAssignment) {
+				hasCapabilitiesReference = true;
+			}
 		}
 		if (
 			(ts.isIdentifier(node) || ts.isStringLiteral(node)) &&
@@ -8024,6 +8638,15 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			mutationDispatchReferences += 1;
 		}
 		if (isThisBridge(node)) {
+			const constructorAssignment = constructors[0]?.body?.statements[0];
+			const isConstructorAssignment =
+				ts.isExpressionStatement(constructorAssignment) &&
+				ts.isBinaryExpression(constructorAssignment.expression) &&
+				constructorAssignment.expression.left === node;
+			if (isConstructorAssignment) {
+				ts.forEachChild(node, visit);
+				return;
+			}
 			const methodAccess = node.parent;
 			const directCall =
 				ts.isPropertyAccessExpression(methodAccess) &&
@@ -8036,7 +8659,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 				directCall === undefined ? undefined : methodAccess.name.text;
 			if (methodName === undefined || !expectedBridgeMethods.has(methodName)) {
 				failures.push(
-					"every this.bridge reference must be the receiver of one fixed direct provider call",
+					"every this.#bridge reference must be the receiver of one fixed direct provider call",
 				);
 			} else {
 				bridgeMethodCounts.set(
@@ -8126,11 +8749,10 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		if (isProviderDescendant(node) && node.kind === ts.SyntaxKind.ThisKeyword) {
 			const parent = node.parent;
 			if (
-				!ts.isPropertyAccessExpression(parent) ||
-				parent.expression !== node ||
-				(!expectedProviderMembers.has(parent.name.text) &&
-					parent.name.text !== "bridge" &&
-					parent.name.text !== "allowsMutationDispatch")
+				!isAuditedProviderInstanceFreezeThis(node) &&
+				(!ts.isPropertyAccessExpression(parent) ||
+					parent.expression !== node ||
+					!expectedProviderMembers.has(parent.name.text))
 			) {
 				failures.push(
 					"Plain workspace provider must not alias this or access inherited/computed mutation surfaces",
@@ -8144,11 +8766,12 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		) {
 			const isConstructorParameter =
 				constructors[0]?.parameters[0]?.name === node;
-			const isDirectThisProperty =
-				ts.isPropertyAccessExpression(node.parent) &&
-				node.parent.name === node &&
-				node.parent.expression.kind === ts.SyntaxKind.ThisKeyword;
-			if (!isConstructorParameter && !isDirectThisProperty) {
+			const constructorAssignment = constructors[0]?.body?.statements[0];
+			const isConstructorAssignmentValue =
+				ts.isExpressionStatement(constructorAssignment) &&
+				ts.isBinaryExpression(constructorAssignment.expression) &&
+				constructorAssignment.expression.right === node;
+			if (!isConstructorParameter && !isConstructorAssignmentValue) {
 				failures.push(
 					"Plain workspace provider must not alias, destructure or synthesize its native bridge",
 				);
@@ -8280,10 +8903,11 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 				node.parent.expression === node &&
 				ts.isPropertyAccessExpression(node.expression) &&
 				node.expression.expression.kind === ts.SyntaxKind.ThisKeyword &&
-				node.expression.name.text === "bridge";
+				ts.isPrivateIdentifier(node.expression.name) &&
+				node.expression.name.text === "#bridge";
 			if (!isDirectBridgeCall) {
 				failures.push(
-					`${node.name.text} may appear only as a direct this.bridge call in its audited mutation seam`,
+					`${node.name.text} may appear only as a direct this.#bridge call in its audited mutation seam`,
 				);
 			}
 			switch (node.name.text) {
@@ -8346,7 +8970,12 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	visit(sourceFile);
 	if (hasExtraProviderReference) {
 		failures.push(
-			"PlainWorkspaceFileSystemProvider may be referenced only by its declaration and audited factory",
+			"PlainWorkspaceFileSystemProvider may be referenced only by its declaration, prototype freeze and audited factory",
+		);
+	}
+	if (hasUnexpectedPrivateIdentifier) {
+		failures.push(
+			"Plain workspace provider may declare and consume only its audited #bridge and #allowsMutationDispatch private fields",
 		);
 	}
 	if (hasPrototypeMutationSurface) {
@@ -8371,12 +9000,22 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	}
 	if (hasCapabilitiesReference) {
 		failures.push(
-			"Plain workspace provider capabilities must not be referenced outside their readonly declaration",
+			"Plain workspace provider capabilities may appear only in their readonly declaration and constructor assignment",
 		);
 	}
-	if (mutationDispatchReferences !== 2) {
+	if ([...capabilityFlagReferences.values()].some((count) => count !== 1)) {
 		failures.push(
-			"Plain workspace mutation boolean may appear only in its constructor parameter and dispatch gate",
+			"Plain workspace provider must reference FileReadWrite, FileFolderCopy and Readonly exactly once in the final capability assignment",
+		);
+	}
+	if (mutationDispatchReferences !== 3) {
+		failures.push(
+			"Plain workspace mutation boolean parameter may appear only in its declaration, private-field assignment and capability condition",
+		);
+	}
+	if (privateBridgeReferences !== 12 || privatePolicyReferences !== 3) {
+		failures.push(
+			"Plain workspace native authority must remain sealed in the exact #bridge and #allowsMutationDispatch private-field consumers",
 		);
 	}
 	if (
@@ -8394,7 +9033,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	for (const [methodName, expectedCount] of expectedBridgeMethods) {
 		if (bridgeMethodCounts.get(methodName) !== expectedCount) {
 			failures.push(
-				`${methodName} must have exactly one fixed direct this.bridge call site`,
+				`${methodName} must have exactly one fixed direct this.#bridge call site`,
 			);
 		}
 	}

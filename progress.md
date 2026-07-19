@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：原子切换 capability Harness，激活全真平台写能力并完成 supported/readonly Browser E2E。
+- 当前最小工作项：实现 watcher 的有界 dirty/rescan 状态机与 Browser mock 收敛测试。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -72,11 +72,13 @@
 - [x] copy/move provider 切片完成最终验收：19 个 TypeScript/JavaScript 测试文件、408 个用例通过，格式、双类型检查、严格 lint、生产构建、七补丁/架构 guard 及 2101-source/203-debt bundle 基线全部通过；Rust 230/230 在沙箱外通过，沙箱内仅两项 FIFO/特殊文件用例按预期因 `EPERM` 受限；Chromium E2E 4/4 继续覆盖 capability failure、Workbench foundation 与两种 PLR1 transport。Harness 改为直接以真实 provider 为基线，锁定 strict options/error auth、唯一 bridge 路由、void/move decoder、成功/单根/双根 frozen event 和 incomplete terminal；独立审查发现并修复 non-primitive path 可拆分 bridge/event snapshot 的 P1 后，最终 P0/P1/P2 均为 0。
 - [x] 完成一次确认的永久删除 consumer：Explorer Delete 与 Move to Trash 在 `distinctParents` 后统一进入 `prepare → 单一不可逆确认 → begin → Bulk → WorkingCopy → FileService → provider commit`；1..64 项按输入顺序逐项消费。四层私有 WeakMap authorization 一次性绑定 confirmation/entry/root/path/recursive/kind/permanent，不增加公开 option 字段；Bulk 不 resolve/read/Trash/Undo，WorkingCopy 只在对应 native delete 成功后 soft-revert，FileService 不 stat/atomic/fallback，provider 对 deleted 发 target `DELETED`，对 retained/partial/unknown 保守 root rescan 并停止后续项。非法 Plain URI 在任何通用确认/Retry 前 fail closed；provider capability 仍精确为 `FileReadWrite | Readonly`。
 - [x] confirmed-delete consumer 完成最终验收：21 个 TypeScript/JavaScript 测试文件、430 个用例与 230 个 Rust 用例通过，格式、双类型检查、严格 lint、生产构建、七补丁 SHA/hunk/lock graph、架构及 2103-source/203-debt bundle 基线全部通过；Chromium E2E 4/4 通过。内置浏览器可见验收确认 `ready=true`、排除面 guard、只读文件树/README 预览及零错误日志；真实 Tauri/WKWebView 验收确认原生启动、命令面板和 macOS 文件夹选择器。API/base/bulk/files 四段补丁 SHA-256 分别为 `b416c3f7a73dc3c72fae55455515b805a180ac154aa4044d698b8a00cd68be62`、`db541d394346ba2985b5550e2f0faf665a056ac701df25119354bd0b1e3baf4e`、`4437c5e441146d5d2f2262cbe8748932a1353ebf48424356fa648d33abf44245`、`4639136edb34a2de20a9f24c8d7bfc892c7080e444c997a8290772ce37ac0159`；独立攻击复核最终 P0/P1/P2 均为 0。
+- [x] 完成 provider 写能力原子激活：启动时五项平台能力全真才广告精确 `FileReadWrite | FileFolderCopy`，任一 false 则保持精确 `FileReadWrite | Readonly`，且 `Event.None` 表明窗口生命周期内不可升级。bridge 与 mutation policy 使用 ECMAScript `#private`，provider 实例和 prototype 均冻结；create、versioned save、copy/move、confirmed delete 的每个 consumer 继续在 URI/options/bridge 前消费同一个 all-five gate。跨 app authority Harness 锁定唯一 capability snapshot、provider/bridge factory、`IFileService → getProvider`、Tauri internal global 和 direct/alias/namespace/computed/Reflect/常量键路径，同时保留无关 `getProvider` 控制组。
+- [x] capability 激活切片完成最终验收：21 个 TypeScript/JavaScript 测试文件、441 个用例、格式、双类型检查、严格 lint、生产构建、架构 guard 与 2103-source/203-debt bundle 基线通过；Rust 230/230 在沙箱外通过，沙箱内仅两项 FIFO/特殊文件 fixture 按预期受 `EPERM` 限制。Chromium E2E 6/6 覆盖 capability failure、Workbench foundation、两种 PLR1 transport、all-true 的 versioned save/create/native copy/rename/一次确认永久删除，以及 one-false 的整 provider readonly、零 native mutation 与无晚到确认框。内置浏览器可见验收确认 writable Explorer toolbar、create 与一次确认删除；真实 Tauri/WKWebView 再次确认原生启动、命令面板和 macOS 文件夹选择器。
 
 ## 下一步
 
-1. 原子切换 capability Harness，激活全真平台写能力并完成 supported/readonly Browser E2E。
-2. 实现 watcher/rescan，最后运行真实 Tauri 文件树总验收并写回 `F020` evidence。
+1. 实现 watcher/rescan 的有界状态机与 Browser mock 收敛测试。
+2. 隔离或修复真实 Tauri 测试 profile 的空视图容器，完成文件树 CRUD/save 总验收并写回 `F020` evidence。
 
 ## 当前验收命令
 
@@ -95,6 +97,7 @@ pnpm test:e2e:browser -- workspace.spec.ts
 - 工作区安全依赖已打开的 Rust 目录 capability；canonical path 只允许用于显示、去重与 watcher，不能退化为 `starts_with` 后调用 ambient `std::fs`。
 - VSIX 主题和 GitLens-like 功能有独立许可边界，第三方资源不得未经审计打包。
 - macOS 的 WKWebView 不能由普通浏览器 E2E 代替，最终必须真实启动应用。
+- 当前机器的真实 Tauri 测试 profile 已把 Activity Bar/Primary Sidebar 持久化为空视图容器；`View: Reset View Locations` 加 reload 仍未恢复 Explorer。干净 Browser profile 不受影响，但 `F020` 最终原生文件树验收必须先隔离或修复这项 profile 状态，不能把系统 picker 通过冒充为原生 CRUD 通过。
 - 若 native `prepare-delete` 已登记批次但 IPC 响应在前端收到 confirmation id 前丢失，前端无法主动 cancel；批次仍不可 begin/commit，由 Rust 的 120 秒单调 idle TTL、root/window 生命周期清理兜底。
 
 ## 阻塞项

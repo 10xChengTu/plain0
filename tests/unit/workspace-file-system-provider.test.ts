@@ -9,6 +9,7 @@ import {
 	type IFileDeleteOptions,
 } from "@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files";
 import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
+import { Event } from "@codingame/monaco-vscode-api/vscode/vs/base/common/event";
 import {
 	authorizePlainWorkspaceDeleteResourceEdit,
 	getPlainWorkspaceDeleteState,
@@ -276,22 +277,76 @@ async function rejected(error: Promise<unknown>): Promise<{
 }
 
 describe("Plain workspace file system provider", () => {
-	it("declares only read/write transport plus readonly semantics", () => {
-		const provider = createPlainWorkspaceFileSystemProvider(testBridge());
+	it("advertises the writable set only for the sole all-true tuple across all 32 capability combinations", () => {
+		for (let mask = 0; mask < 32; mask += 1) {
+			const platformCapabilities: WorkspaceCapabilities = Object.freeze({
+				create: (mask & 1) !== 0,
+				renameNoReplace: (mask & 2) !== 0,
+				copyMove: (mask & 4) !== 0,
+				delete: (mask & 8) !== 0,
+				versionedWrite: (mask & 16) !== 0,
+			});
+			const provider = createPlainWorkspaceFileSystemProvider(
+				testBridge(),
+				platformCapabilities,
+			);
+			const expected =
+				mask === 31
+					? FileSystemProviderCapabilities.FileReadWrite |
+						FileSystemProviderCapabilities.FileFolderCopy
+					: FileSystemProviderCapabilities.FileReadWrite |
+						FileSystemProviderCapabilities.Readonly;
 
-		expect(provider.capabilities).toBe(
+			expect(provider.capabilities, `capability mask ${mask}`).toBe(expected);
+			expect(provider.onDidChangeCapabilities).toBe(Event.None);
+			expect(
+				provider.capabilities &
+					FileSystemProviderCapabilities.PathCaseSensitive,
+			).toBe(0);
+		}
+	});
+
+	it("seals the native bridge, mutation policy, capability bits and provider prototype at runtime", async () => {
+		const readonlyCreate = vi.fn();
+		const writableProvider =
+			createPlainWorkspaceFileSystemProvider(testBridge());
+		const readonlyProvider = createPlainWorkspaceFileSystemProvider(
+			testBridge({ workspaceCreateFile: readonlyCreate }),
+			Object.freeze({ ...supportedCapabilities, renameNoReplace: false }),
+		);
+
+		for (const provider of [writableProvider, readonlyProvider]) {
+			const ownKeys = Reflect.ownKeys(provider);
+			expect(ownKeys).not.toContain("bridge");
+			expect(ownKeys).not.toContain("allowsMutationDispatch");
+			expect(Object.isFrozen(provider)).toBe(true);
+			expect(Object.isFrozen(Object.getPrototypeOf(provider))).toBe(true);
+			expect(Reflect.set(provider, "capabilities", 10)).toBe(false);
+			expect(Reflect.set(provider, "bridge", testBridge())).toBe(false);
+			expect(Reflect.set(provider, "allowsMutationDispatch", true)).toBe(false);
+			expect(Reflect.set(provider, "injected", true)).toBe(false);
+			expect(Reflect.set(provider, "copy", async () => {})).toBe(false);
+			expect(
+				Reflect.set(Object.getPrototypeOf(provider), "copy", async () => {}),
+			).toBe(false);
+		}
+
+		expect(writableProvider.capabilities).toBe(
+			FileSystemProviderCapabilities.FileReadWrite |
+				FileSystemProviderCapabilities.FileFolderCopy,
+		);
+		expect(readonlyProvider.capabilities).toBe(
 			FileSystemProviderCapabilities.FileReadWrite |
 				FileSystemProviderCapabilities.Readonly,
 		);
-		expect(
-			provider.capabilities & FileSystemProviderCapabilities.PathCaseSensitive,
-		).toBe(0);
-		expect(
-			provider.capabilities & FileSystemProviderCapabilities.FileFolderCopy,
-		).toBe(0);
+		const error = await rejected(
+			readonlyProvider.plainCreateFile(workspaceUri("still-readonly.txt")),
+		);
+		expect(error.code).toBe(FileSystemProviderErrorCode.NoPermissions);
+		expect(readonlyCreate).not.toHaveBeenCalled();
 	});
 
-	it("snapshots one immutable all-five mutation policy without changing provider capabilities", async () => {
+	it("snapshots one immutable all-five mutation policy and writable capability set", async () => {
 		const mutableCapabilities = { ...supportedCapabilities };
 		const write = vi.fn(async () =>
 			Object.freeze({
@@ -313,7 +368,7 @@ describe("Plain workspace file system provider", () => {
 
 		expect(provider.capabilities).toBe(
 			FileSystemProviderCapabilities.FileReadWrite |
-				FileSystemProviderCapabilities.Readonly,
+				FileSystemProviderCapabilities.FileFolderCopy,
 		);
 		await expect(
 			provider.plainWriteFile(
@@ -1917,7 +1972,7 @@ describe("Plain workspace file system provider", () => {
 		expect(changes[0]![0]!.resource.toString()).toBe(resource.toString());
 		expect(provider.capabilities).toBe(
 			FileSystemProviderCapabilities.FileReadWrite |
-				FileSystemProviderCapabilities.Readonly,
+				FileSystemProviderCapabilities.FileFolderCopy,
 		);
 
 		const replay = await rejected(
