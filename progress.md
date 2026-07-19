@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：诊断并修复隔离 debug `.app` 中永久删除动作未出现确认框的问题；系统目录选择、其余文件树 CRUD/save 和真实外部 FSEvents 刷新已经通过原生验收。
+- 当前最小工作项：按已冻结方案接入 `@codingame/monaco-vscode-dialogs-service-override@35.0.1`，让 Browser 与真实 WKWebView 共用 VS Code DOM dialog；同步补齐 Harness 和取消/确认 E2E 后独立提交。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -81,11 +81,12 @@
 - [x] watcher Browser E2E 在允许绑定本地端口的桌面会话通过 7/7，覆盖即时 wake、丢 wake 定时收敛、五类 CRUD/保存路由与只读能力回退；该结果只证明 Browser mock/UI 链，不替代真实 FSEvents/WKWebView 验收。
 - [x] 修复真实 Tauri 电脑验收的运行态假阴性：确认按 `com.plain.editor` 会自动拉起旧 `target/debug/bundle/macos/Plain.app`，且过早取样可看到尚未稳定的空 Activity Bar；当前 WKWebView contribution 实际正常。新增受 Harness 锁定的 `tauri:build:e2e`，从当前源码构建隔离 debug `.app`，要求按绝对 bundle 路径绑定并轮询 Explorer ready 或明确 bootstrap error。108 项边界测试、架构/格式检查、完整当前 bundle 构建与 Computer Use 首次 ready 取样均通过。
 - [x] 完成真实 Tauri `F020` 部分总验收：从刚构建的绝对 `.app` 经 macOS 系统目录选择器打开临时 workspace；原生 Explorer 完成空文件创建、31 字节精确内容保存、单级目录创建与同 root 重命名、文件复制，磁盘结果均逐项核对。外部新增和删除文件后不点击 Refresh，Explorer 均在首次轮询即由 FSEvents 链收敛。`Delete Permanently` 菜单可见且可用，但当前选择后未出现确认框、磁盘也未删除，因此永久删除仍判定失败，`F020` 保持 `in_progress`；临时 fixture、截图和调试改动均已清理。
+- [x] 完成真实 Tauri 对话框专项 GitHub/固定源码调研与方案冻结：确认 Explorer 菜单和 `⌘Backspace` 都正确进入 `deleteFile`，故障来自未覆盖的 `StandaloneDialogService` 同步 `window.confirm` 假设、Tauri dialog 插件的异步全局改写与 WKWebView 无原生 confirm fallback。排除扩 dialog capability、patch 全局 confirm、补 Wry delegate 和自写重复服务；采用同版 CodinGame 官方 dialogs override，以 VS Code DOM `BrowserDialogHandler` 实现跨 WebView、可访问、无新增权限的确认链。
 
 ## 下一步
 
-1. 复现并定位真实 WKWebView 中 `Delete Permanently` 未进入单一确认框的动作、对话框和 `prepare-delete` 链路。
-2. 修复永久删除并重新执行原生确认、磁盘删除和取消路径验收。
+1. 接入同版官方 dialogs override，并以 Harness 锁定依赖、服务覆盖和零新增 Tauri dialog capability。
+2. 更新 Browser DOM dialog 的取消/确认 E2E，重新构建隔离 `.app` 并执行原生取消与确认验收。
 3. 执行 `F020` 全量回归；全部通过后再写入 `features.json` evidence 并完成该功能。
 
 ## 当前验收命令
@@ -106,7 +107,7 @@ pnpm test:e2e:browser -- workspace.spec.ts
 - VSIX 主题和 GitLens-like 功能有独立许可边界，第三方资源不得未经审计打包。
 - macOS 的 WKWebView 不能由普通浏览器 E2E 代替，最终必须真实启动应用。
 - Computer Use 按 `com.plain.editor` 绑定时可能自动拉起同 bundle id 的旧 debug `.app`；真实证据必须来自刚执行 `tauri:build:e2e` 的绝对 bundle 路径，并等待 Explorer ready 或明确 bootstrap error，不能把旧画面或瞬时空 Activity Bar 当成当前源码结果。
-- 真实 WKWebView 中 `Delete Permanently` 菜单已出现，但当前没有拉起单一不可逆确认框；在确认动作分派、dialog service 和 `prepare-delete` IPC 的实际边界前，不得把 Browser mock 的删除通过冒充为原生通过。
+- 真实 WKWebView 中 `Delete Permanently` 菜单和无坐标快捷键均已进入验收，但当前 Standalone/Tauri 异步 `window.confirm` 不兼容会静默取消；修复必须接入官方 DOM dialogs override，不能以扩大 Tauri dialog capability 或 Browser 原生 confirm 假通过代替。
 - 若 native `prepare-delete` 已登记批次但 IPC 响应在前端收到 confirmation id 前丢失，前端无法主动 cancel；批次仍不可 begin/commit，由 Rust 的 120 秒单调 idle TTL、root/window 生命周期清理兜底。
 - watcher wake event 只是可丢失提示，权威状态在 Rust sticky generation；Browser mock 已覆盖定时拉取收敛，真实 macOS FSEvents/WKWebView 链也已覆盖外部新增与删除后的即时收敛，但 lost-wake 定时拉取仍只由可控 Browser mock 确定性验证。
 
