@@ -24,6 +24,7 @@ describe("workspace Workbench command overrides", () => {
 			onRuntimeReady: vi.fn(),
 			workspaceCapabilities: vi.fn(),
 			workspaceSnapshot: vi.fn(),
+			workspaceWatch: vi.fn(() => () => {}),
 			workspacePickRoots,
 			workspaceRemoveRoot: vi.fn(),
 			workspaceCreateFile: vi.fn(),

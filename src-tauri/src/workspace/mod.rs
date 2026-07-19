@@ -26,6 +26,7 @@ pub mod service;
 pub(crate) mod version;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod versioned_writer;
+pub(crate) mod watcher;
 pub(crate) mod write_frame;
 pub(crate) mod writer;
 
@@ -123,11 +124,7 @@ impl<'de> Deserialize<'de> for RootId {
         D: Deserializer<'de>,
     {
         let wire = String::deserialize(deserializer)?;
-        let value = Uuid::parse_str(&wire).map_err(|_| D::Error::custom("invalid root id"))?;
-        if value.hyphenated().to_string() != wire {
-            return Err(D::Error::custom("invalid root id"));
-        }
-        Ok(Self(value))
+        Self::parse_v4_wire(&wire).map_err(|_| D::Error::custom("invalid root id"))
     }
 }
 
@@ -213,10 +210,22 @@ impl WorkspaceScope {
     }
 
     /// Opens and validates every selected path before changing the scope.
+    #[cfg(test)]
     pub(crate) fn authorize_roots_atomically(
         &mut self,
         ambient_paths: &[PathBuf],
     ) -> Result<Vec<RootId>, CommandError> {
+        self.authorize_roots_atomically_with(ambient_paths, |_, _, _| Ok(()))
+    }
+
+    pub(crate) fn authorize_roots_atomically_with<F>(
+        &mut self,
+        ambient_paths: &[PathBuf],
+        mut prepare_watcher: F,
+    ) -> Result<Vec<RootId>, CommandError>
+    where
+        F: FnMut(RootId, &Path, WorkspaceRootLease) -> Result<(), CommandError>,
+    {
         if ambient_paths.len() > MAX_WORKSPACE_ROOTS {
             return Err(workspace_root_limit_exceeded());
         }
@@ -266,6 +275,10 @@ impl WorkspaceScope {
             return Ok(selected_ids);
         }
         let next_revision = next_revision(self.revision)?;
+        for (root_id, candidate) in &additions {
+            let lease = candidate.lease(*root_id)?;
+            prepare_watcher(*root_id, &candidate.watch_path, lease)?;
+        }
         for (root_id, candidate) in additions {
             self.roots.insert(
                 root_id,
@@ -284,10 +297,22 @@ impl WorkspaceScope {
     /// Opens and validates the selected path before replacing the scope. An
     /// already-authorized directory keeps its root id, display name and held
     /// capability; every other capability is revoked in the same mutation.
+    #[cfg(test)]
     pub(crate) fn replace_root_atomically(
         &mut self,
         ambient_path: &Path,
     ) -> Result<RootId, CommandError> {
+        self.replace_root_atomically_with(ambient_path, |_, _, _| Ok(()))
+    }
+
+    pub(crate) fn replace_root_atomically_with<F>(
+        &mut self,
+        ambient_path: &Path,
+        mut prepare_watcher: F,
+    ) -> Result<RootId, CommandError>
+    where
+        F: FnMut(RootId, &Path, WorkspaceRootLease) -> Result<(), CommandError>,
+    {
         let candidate = prepare_workspace_root(ambient_path)?;
         if let Some(root_id) = self
             .roots
@@ -310,6 +335,8 @@ impl WorkspaceScope {
 
         let next_revision = next_revision(self.revision)?;
         let root_id = RootId::new();
+        let lease = candidate.lease(root_id)?;
+        prepare_watcher(root_id, &candidate.watch_path, lease)?;
         self.roots.clear();
         self.order.clear();
         self.roots.insert(
@@ -325,6 +352,7 @@ impl WorkspaceScope {
         Ok(root_id)
     }
 
+    #[cfg(test)]
     #[cfg(test)]
     pub(crate) fn authorize_root(&mut self, ambient_path: &Path) -> Result<RootId, CommandError> {
         self.authorize_roots_atomically(&[ambient_path.to_path_buf()])?
@@ -346,6 +374,14 @@ impl WorkspaceScope {
                 })
                 .collect(),
         )
+    }
+
+    pub(crate) const fn workspace_id(&self) -> WorkspaceId {
+        self.workspace_id
+    }
+
+    pub(crate) fn root_ids(&self) -> Vec<RootId> {
+        self.order.clone()
     }
 
     pub fn remove(&mut self, root_id: RootId) -> Result<(), CommandError> {
@@ -408,6 +444,17 @@ struct PreparedWorkspaceRoot {
     directory: Dir,
     display_name: String,
     identity: DirectoryIdentity,
+    watch_path: PathBuf,
+}
+
+impl PreparedWorkspaceRoot {
+    fn lease(&self, root_id: RootId) -> Result<WorkspaceRootLease, CommandError> {
+        let directory = self
+            .directory
+            .try_clone()
+            .map_err(|_| root_capability_clone_failed())?;
+        Ok(WorkspaceRootLease { root_id, directory })
+    }
 }
 
 #[derive(Eq, PartialEq)]
@@ -432,19 +479,19 @@ fn directory_identity(directory: &Dir, _ambient_path: &Path) -> io::Result<Direc
 }
 
 #[cfg(windows)]
-fn directory_identity(directory: &Dir, ambient_path: &Path) -> io::Result<DirectoryIdentity> {
+fn directory_identity(directory: &Dir, canonical_path: &Path) -> io::Result<DirectoryIdentity> {
     use std::os::windows::fs::MetadataExt;
 
     let metadata = directory.try_clone()?.into_std_file().metadata()?;
     match (metadata.volume_serial_number(), metadata.file_index()) {
         (Some(volume), Some(file_index)) => Ok(DirectoryIdentity::Windows { volume, file_index }),
-        _ => std::fs::canonicalize(ambient_path).map(DirectoryIdentity::Canonical),
+        _ => Ok(DirectoryIdentity::Canonical(canonical_path.to_path_buf())),
     }
 }
 
 #[cfg(not(any(unix, windows)))]
-fn directory_identity(_directory: &Dir, ambient_path: &Path) -> io::Result<DirectoryIdentity> {
-    std::fs::canonicalize(ambient_path).map(DirectoryIdentity::Canonical)
+fn directory_identity(_directory: &Dir, canonical_path: &Path) -> io::Result<DirectoryIdentity> {
+    Ok(DirectoryIdentity::Canonical(canonical_path.to_path_buf()))
 }
 
 fn is_capability_relative(path: &Path) -> bool {
@@ -472,14 +519,16 @@ fn root_display_name(ambient_path: &Path) -> Result<String, CommandError> {
 
 fn prepare_workspace_root(ambient_path: &Path) -> Result<PreparedWorkspaceRoot, CommandError> {
     let display_name = root_display_name(ambient_path)?;
-    let directory = Dir::open_ambient_dir(ambient_path, ambient_authority())
+    let watch_path = std::fs::canonicalize(ambient_path).map_err(map_root_authorization_error)?;
+    let directory = Dir::open_ambient_dir(&watch_path, ambient_authority())
         .map_err(map_root_authorization_error)?;
     let identity =
-        directory_identity(&directory, ambient_path).map_err(map_root_authorization_error)?;
+        directory_identity(&directory, &watch_path).map_err(map_root_authorization_error)?;
     Ok(PreparedWorkspaceRoot {
         directory,
         display_name,
         identity,
+        watch_path,
     })
 }
 

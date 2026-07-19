@@ -19,6 +19,7 @@ import {
 	validateWorkspaceProviderCopyBoundary,
 	validateWorkspaceRustBoundary as validateWorkspaceRustBoundaryContract,
 	validateWorkspaceVersionedWriteBoundary,
+	validateWorkspaceWatcherBoundary,
 } from "../../scripts/plain/boundary-contracts.mjs";
 
 const baselineConfig = {
@@ -247,7 +248,11 @@ describe("Plain Tauri boundary contracts", () => {
 
 		const broad = structuredClone(baselineCapability);
 		broad.webviews = ["*"];
-		broad.permissions.push("core:default");
+		broad.permissions.push(
+			"core:default",
+			"fs:allow-read-file",
+			"shell:allow-execute",
+		);
 		expect(validateMainCapability(broad)).toEqual(
 			expect.arrayContaining([
 				"main capability contains fields outside the minimum contract",
@@ -488,10 +493,315 @@ const unused = {
 	});
 });
 
+const workspaceWatcherRustPaths = [
+	"src-tauri/src/workspace/watcher.rs",
+	"src-tauri/src/workspace/mod.rs",
+	"src-tauri/src/workspace/dto.rs",
+	"src-tauri/src/workspace/commands.rs",
+	"src-tauri/src/workspace/service.rs",
+	"src-tauri/src/lib.rs",
+];
+const workspaceWatcherAppPaths = [
+	"app/platform/tauri/contracts.ts",
+	"app/platform/tauri/workspace-codec.ts",
+	"app/platform/tauri/workspace-watcher.ts",
+	"app/platform/tauri/native.ts",
+	"app/platform/tauri/browser-mock.ts",
+	"app/features/workspace/file-system-provider.ts",
+];
+
+function workspaceWatcherBoundarySources() {
+	const readSources = (paths) =>
+		paths.map((relativePath) => ({
+			relativePath,
+			source: readFileSync(
+				new URL(`../../${relativePath}`, import.meta.url),
+				"utf8",
+			),
+		}));
+	return {
+		rust: readSources(workspaceWatcherRustPaths),
+		app: readSources(workspaceWatcherAppPaths),
+	};
+}
+
+function replaceWatcherSource(sources, relativePath, from, to) {
+	let replaced = false;
+	const result = sources.map((entry) => {
+		if (entry.relativePath !== relativePath) {
+			return entry;
+		}
+		if (!entry.source.includes(from)) {
+			throw new Error(
+				`${relativePath} is missing watcher fixture anchor ${from}`,
+			);
+		}
+		replaced = true;
+		return { ...entry, source: entry.source.replace(from, to) };
+	});
+	if (!replaced) {
+		throw new Error(`watcher fixture is missing ${relativePath}`);
+	}
+	return result;
+}
+
+describe("workspace watcher Harness", () => {
+	it("accepts the current bounded watcher vertical slice", () => {
+		const baseline = workspaceWatcherBoundarySources();
+		expect(
+			validateWorkspaceWatcherBoundary(baseline.rust, baseline.app),
+		).toEqual([]);
+	});
+
+	it("keeps notify callback state path-free, conservative and bounded", () => {
+		const baseline = workspaceWatcherBoundarySources();
+		const watcherPath = "src-tauri/src/workspace/watcher.rs";
+		const cases = [
+			[
+				".with_follow_symlinks(false)",
+				".with_follow_symlinks(true)",
+				"workspace watcher must keep one capacity-one queue and notify symlink following disabled",
+			],
+			[
+				"if event.kind.is_access() {",
+				"if false {",
+				"notify callback must discard paths and raw errors, ignore access events and conservatively request rescans",
+			],
+			[
+				"if event.kind.is_access() {",
+				"let leaked_paths = event.paths.clone();\n    drop(leaked_paths);\n    if event.kind.is_access() {",
+				"notify callback must discard paths and raw errors, ignore access events and conservatively request rescans",
+			],
+			[
+				"event.need_rescan() || conservative_namespace_rescan",
+				"conservative_namespace_rescan",
+				"notify callback must discard paths and raw errors, ignore access events and conservatively request rescans",
+			],
+			[
+				"self.rescan_required.store(true, Ordering::Release);",
+				"self.rescan_required.store(false, Ordering::Release);",
+				"a full watcher wake queue must preserve dirty rescan state",
+			],
+			[
+				"pending.generation == acknowledgement.generation",
+				"pending.generation <= acknowledgement.generation",
+				"watcher pending generations must stay sticky until one exact bounded acknowledgement",
+			],
+		];
+		for (const [from, to, failure] of cases) {
+			const hostile = replaceWatcherSource(
+				baseline.rust,
+				watcherPath,
+				from,
+				to,
+			);
+			expect(validateWorkspaceWatcherBoundary(hostile, baseline.app)).toContain(
+				failure,
+			);
+		}
+	});
+
+	it("keeps wake and sync IPC opaque, window-targeted and resume-safe", () => {
+		const baseline = workspaceWatcherBoundarySources();
+		const responseFailure =
+			"watcher IPC responses must expose only opaque ids, generations and rescan state";
+		const hostileDto = replaceWatcherSource(
+			baseline.rust,
+			"src-tauri/src/workspace/dto.rs",
+			"pub(crate) struct WorkspaceWatchWakeEvent {\n    workspace_id: WorkspaceId,\n}",
+			"pub(crate) struct WorkspaceWatchWakeEvent {\n    workspace_id: WorkspaceId,\n    raw_path: String,\n}",
+		);
+		expect(
+			validateWorkspaceWatcherBoundary(hostileDto, baseline.app),
+		).toContain(responseFailure);
+
+		for (const [from, to] of [
+			["let _ = app.emit_to(", "let _ = app.emit("],
+			[
+				"EventTarget::webview_window(window_label.clone()),",
+				"EventTarget::Any,",
+			],
+		]) {
+			const hostile = replaceWatcherSource(
+				baseline.rust,
+				"src-tauri/src/workspace/commands.rs",
+				from,
+				to,
+			);
+			expect(validateWorkspaceWatcherBoundary(hostile, baseline.app)).toContain(
+				"workspace watcher wake must be one window-targeted opaque workspaceId hint",
+			);
+		}
+
+		const noResume = replaceWatcherSource(
+			baseline.rust,
+			"src-tauri/src/lib.rs",
+			"app.state::<WorkspaceService>().mark_all_watchers_rescan();",
+			"let _ = app;",
+		);
+		expect(validateWorkspaceWatcherBoundary(noResume, baseline.app)).toContain(
+			"Tauri resume must conservatively mark every window watcher for rescan",
+		);
+	});
+
+	it("keeps watcher ids v4 and all blocking sync or scan work off the invoke thread", () => {
+		const baseline = workspaceWatcherBoundarySources();
+		const weakRootId = replaceWatcherSource(
+			baseline.rust,
+			"src-tauri/src/workspace/mod.rs",
+			"Self::parse_v4_wire(&wire)",
+			"Ok(Self(Uuid::nil()))",
+		);
+		expect(
+			validateWorkspaceWatcherBoundary(weakRootId, baseline.app),
+		).toContain(
+			"workspace watcher root ids must use canonical RFC4122 UUID v4 decoding",
+		);
+
+		const syncCommand = replaceWatcherSource(
+			baseline.rust,
+			"src-tauri/src/workspace/commands.rs",
+			"pub(crate) async fn workspace_watch_sync(",
+			"pub(crate) fn workspace_watch_sync(",
+		);
+		expect(
+			validateWorkspaceWatcherBoundary(syncCommand, baseline.app),
+		).toContain(
+			"workspace_watch_sync must asynchronously route the decoded bounded request through the window service",
+		);
+
+		for (const [from, to] of [
+			[
+				"tauri::async_runtime::spawn_blocking(move || workspace.watch_sync(&roots))",
+				"workspace.watch_sync(&roots)",
+			],
+			[
+				"Err(_) => return WatchScanOutcome::Failed,",
+				"Err(_) => return WatchScanOutcome::Stale,",
+			],
+		]) {
+			const hostile = replaceWatcherSource(
+				baseline.rust,
+				"src-tauri/src/workspace/service.rs",
+				from,
+				to,
+			);
+			expect(validateWorkspaceWatcherBoundary(hostile, baseline.app)).toContain(
+				"watch sync and capability scans must stay off the invoke thread and preserve lease failures as rescans",
+			);
+		}
+	});
+
+	it("fails closed when codec bounds or manager serialization drift", () => {
+		const baseline = workspaceWatcherBoundarySources();
+		const codecPath = "app/platform/tauri/workspace-codec.ts";
+		for (const [from, to, failure] of [
+			[
+				"const MAX_WORKSPACE_ROOTS = 256;",
+				"const MAX_WORKSPACE_ROOTS = 4_096;",
+				"watch sync codec must freeze and bound one exact unique root acknowledgement request",
+			],
+			[
+				"if (unique.has(snapshot.rootId)) {",
+				"// if (unique.has(snapshot.rootId)) {}\n\t\tif (false) {",
+				"watch sync codec must freeze and bound one exact unique root acknowledgement request",
+			],
+			[
+				'hasExactKeys(snapshot, ["workspaceId"])',
+				'hasExactKeys(snapshot, ["workspaceId", "rawPath"])',
+				"watch wake decoder must accept only one opaque workspaceId",
+			],
+			[
+				"!saturatedReplay) ||",
+				"false) ||",
+				"watch sync decoder must reject unsolicited, duplicate, stale or oversized pending roots",
+			],
+		]) {
+			const hostile = replaceWatcherSource(baseline.app, codecPath, from, to);
+			expect(
+				validateWorkspaceWatcherBoundary(baseline.rust, hostile),
+			).toContain(failure);
+		}
+
+		const managerPath = "app/platform/tauri/workspace-watcher.ts";
+		for (const [from, to] of [
+			[
+				"const DEFAULT_POLL_INTERVAL_MS = 2_000;",
+				"const DEFAULT_POLL_INTERVAL_MS = 0;",
+			],
+			[
+				"this.#syncInFlight = true;",
+				"// this.#syncInFlight = true;\n\t\tthis.#syncInFlight = false;",
+			],
+			[
+				"state.acknowledgedGeneration = pending.generation;",
+				"state.acknowledgedGeneration = 0;",
+			],
+			[
+				'return saturatedReplay ? "retry-later" : "acknowledged";',
+				'return "acknowledged";',
+			],
+		]) {
+			const hostile = replaceWatcherSource(baseline.app, managerPath, from, to);
+			expect(
+				validateWorkspaceWatcherBoundary(baseline.rust, hostile),
+			).toContain(
+				"watch manager must serialize wake/timer pulls and acknowledge only after listener delivery",
+			);
+		}
+	});
+
+	it("allows provider watch only through the narrow bridge and rejects excluded services", () => {
+		const baseline = workspaceWatcherBoundarySources();
+		const providerPath = "app/features/workspace/file-system-provider.ts";
+		for (const [from, to] of [
+			["this.#bridge.workspaceWatch(", "this.#bridge.workspaceStat("],
+			[
+				"const unlisten = this.#bridge.workspaceWatch(",
+				"const watch = this.#bridge.workspaceWatch;\n\t\tconst unlisten = watch(",
+			],
+			[
+				"const unlisten = this.#bridge.workspaceWatch(resolved.rootId, () => {\n\t\t\tthis.fireRootUpdated(resource);\n\t\t});",
+				"const unlisten = this.#bridge.workspaceWatch(resolved.rootId, () => {});\n\t\tthis.fireRootUpdated(resource);",
+			],
+		]) {
+			const hostile = replaceWatcherSource(
+				baseline.app,
+				providerPath,
+				from,
+				to,
+			);
+			expect(
+				validateWorkspaceWatcherBoundary(baseline.rust, hostile),
+			).toContain(
+				"Plain provider watch must route one root-only subscription through bridge.workspaceWatch",
+			);
+		}
+
+		for (const injection of [
+			'import "@codingame/monaco-vscode-auth-service-override";',
+			"const hostKind = ExtensionHostKind.LocalProcess;",
+			'import "@tauri-apps/plugin-shell";',
+		]) {
+			const hostile = baseline.app.map((entry) =>
+				entry.relativePath === "app/platform/tauri/workspace-watcher.ts"
+					? { ...entry, source: `${injection}\n${entry.source}` }
+					: entry,
+			);
+			expect(
+				validateWorkspaceWatcherBoundary(baseline.rust, hostile).some(
+					(failure) => failure.includes("restores an excluded"),
+				),
+			).toBe(true);
+		}
+	});
+});
+
 const workspaceCargo = `
 [dependencies]
 cap-std = "4.0.2"
 libc = "0.2.186"
+notify = "=8.2.0"
 rustix = { version = "=1.1.4", features = ["fs"] }
 sha2 = { version = "=0.10.9", default-features = false, features = [] }
 uuid = { version = "1.24.0", features = ["v4"] }
@@ -516,6 +826,17 @@ const exactSha2Dependency = Object.freeze({
 	features: [],
 });
 
+const exactNotifyDependency = Object.freeze({
+	name: "notify",
+	req: "=8.2.0",
+	kind: null,
+	rename: null,
+	target: null,
+	optional: false,
+	uses_default_features: true,
+	features: [],
+});
+
 function validateWorkspaceRustBoundary(
 	cargoSource,
 	rustSources,
@@ -525,7 +846,12 @@ function validateWorkspaceRustBoundary(
 	return validateWorkspaceRustBoundaryContract(
 		cargoSource,
 		rustSources,
-		[exactRustixDependency, exactSha2Dependency, ...cargoDependencies],
+		[
+			exactRustixDependency,
+			exactSha2Dependency,
+			exactNotifyDependency,
+			...cargoDependencies,
+		],
 		resolvedSha2Features,
 	);
 }
@@ -1471,6 +1797,51 @@ fn copy_directory_for_test(limits: DirectoryCopyLimits, hooks: &mut Hooks) {
 		).toContain("Cargo.toml must pin rustix to =1.1.4");
 	});
 
+	it("pins the watcher backend exactly and rejects broad native authority plugins", () => {
+		const pinFailure = "Cargo.toml must pin notify to =8.2.0";
+		const edgeFailure =
+			"notify must remain one direct unrenamed non-optional runtime dependency pinned exactly to =8.2.0";
+		for (const [hostile, notifyDependencies, expected] of [
+			[
+				workspaceCargo.replace('notify = "=8.2.0"', 'notify = "8.2"'),
+				[{ ...exactNotifyDependency, req: "^8.2" }],
+				[pinFailure, edgeFailure],
+			],
+			[
+				workspaceCargo.replace(
+					'notify = "=8.2.0"',
+					'notify = "=8.2.0"\nnotify-copy = { package = "notify", version = "=8.2.0" }',
+				),
+				[
+					exactNotifyDependency,
+					{ ...exactNotifyDependency, rename: "notify-copy" },
+				],
+				[edgeFailure],
+			],
+		]) {
+			const failures = validateWorkspaceRustBoundaryContract(
+				hostile,
+				workspaceSources,
+				[exactRustixDependency, exactSha2Dependency, ...notifyDependencies],
+			);
+			expect(failures).toEqual(expect.arrayContaining(expected));
+		}
+
+		for (const plugin of [
+			'tauri-plugin-fs = "2"',
+			'native-shell = { package = "tauri-plugin-shell", version = "2" }',
+		]) {
+			expect(
+				validateWorkspaceRustBoundary(
+					`${workspaceCargo}\n${plugin}`,
+					workspaceSources,
+				),
+			).toContain(
+				"Cargo.toml must not grant broad Tauri filesystem or shell authority",
+			);
+		}
+	});
+
 	it("requires one exact unrenamed runtime rustix dependency on the audited targets", () => {
 		const failure =
 			"Cargo metadata must contain exactly one unrenamed runtime rustix =1.1.4 dependency for the audited Linux/macOS target";
@@ -1500,7 +1871,11 @@ fn copy_directory_for_test(limits: DirectoryCopyLimits, hooks: &mut Hooks) {
 	});
 
 	it("locks the sole direct sha2 edge and every Cargo metadata field", () => {
-		const dependencies = [exactRustixDependency, exactSha2Dependency];
+		const dependencies = [
+			exactRustixDependency,
+			exactSha2Dependency,
+			exactNotifyDependency,
+		];
 		expect(
 			validateWorkspaceRustBoundaryContract(
 				workspaceCargo,

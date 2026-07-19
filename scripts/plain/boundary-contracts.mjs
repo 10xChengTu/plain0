@@ -1534,6 +1534,7 @@ export function validateWorkspaceRustBoundary(
 	for (const [dependency, version] of [
 		["cap-std", "4.0.2"],
 		["libc", "0.2.186"],
+		["notify", "=8.2.0"],
 		["rustix", "=1.1.4"],
 		["uuid", "1.24.0"],
 	]) {
@@ -1591,6 +1592,32 @@ export function validateWorkspaceRustBoundary(
 	if (!sameArray(normalizedSha2Features, SHA2_RESOLVED_FEATURES)) {
 		failures.push(
 			"resolved sha2@0.10.9 features must remain exactly default and std",
+		);
+	}
+	const notifyDeclarations = [...cargoSource.matchAll(/^notify\s*=/gm)];
+	const notifyDependencies = cargoDependencies.filter(
+		({ name }) => name === "notify",
+	);
+	if (
+		notifyDeclarations.length !== 1 ||
+		notifyDependencies.length !== 1 ||
+		notifyDependencies[0].req !== "=8.2.0" ||
+		notifyDependencies[0].rename !== null ||
+		notifyDependencies[0].kind !== null ||
+		notifyDependencies[0].target !== null ||
+		notifyDependencies[0].optional !== false
+	) {
+		failures.push(
+			"notify must remain one direct unrenamed non-optional runtime dependency pinned exactly to =8.2.0",
+		);
+	}
+	if (
+		/^(?!\s*#)[^\n]*(?:tauri-plugin-fs|tauri_plugin_fs|tauri-plugin-shell|tauri_plugin_shell)[^\n]*$/m.test(
+			cargoSource,
+		)
+	) {
+		failures.push(
+			"Cargo.toml must not grant broad Tauri filesystem or shell authority",
 		);
 	}
 
@@ -2236,6 +2263,38 @@ export function validateWorkspaceCapabilitiesBoundary(rustSources, appSources) {
 	const nativeBridgeReturns = nativeBridgeBodyStatements.filter(
 		ts.isReturnStatement,
 	);
+	const nativeWatcherSetupStatements = nativeBridgeBodyStatements.filter(
+		(statement) => {
+			if (
+				!ts.isVariableStatement(statement) ||
+				(statement.declarationList.flags & ts.NodeFlags.Const) === 0 ||
+				statement.declarationList.declarations.length !== 1
+			) {
+				return false;
+			}
+			const [declaration] = statement.declarationList.declarations;
+			return (
+				ts.isIdentifier(declaration.name) &&
+				declaration.name.text === "workspaceWatcher" &&
+				declaration.initializer !== undefined &&
+				ts.isCallExpression(declaration.initializer) &&
+				ts.isIdentifier(declaration.initializer.expression) &&
+				declaration.initializer.expression.text ===
+					"createWorkspaceWatcherManager" &&
+				declaration.initializer.arguments.length === 1
+			);
+		},
+	);
+	const nativeWatcherManagerIsPresent =
+		appSource("app/platform/tauri/workspace-watcher.ts") !== undefined;
+	const nativeBridgeStatementsAreExact = nativeWatcherManagerIsPresent
+		? nativeBridgeBodyStatements.length === 2 &&
+			nativeWatcherSetupStatements.length === 1 &&
+			nativeBridgeBodyStatements[0] === nativeWatcherSetupStatements[0] &&
+			nativeBridgeBodyStatements[1] === nativeBridgeReturns[0]
+		: nativeBridgeBodyStatements.length === 1 &&
+			nativeWatcherSetupStatements.length === 0 &&
+			nativeBridgeBodyStatements[0] === nativeBridgeReturns[0];
 	const nativeBridgeReturnExpression = nativeBridgeReturns[0]?.expression;
 	const nativeBridgeObject =
 		nativeBridgeReturnExpression !== undefined &&
@@ -2290,7 +2349,7 @@ export function validateWorkspaceCapabilitiesBoundary(rustSources, appSources) {
 		!nativeBridgeFactory.modifiers?.some(
 			(modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
 		) ||
-		nativeBridgeBodyStatements.length !== 1 ||
+		!nativeBridgeStatementsAreExact ||
 		nativeBridgeReturns.length !== 1 ||
 		nativeBridgeObject === undefined ||
 		nativeObjectHasDynamicOverrides ||
@@ -2347,6 +2406,864 @@ export function validateWorkspaceCapabilitiesBoundary(rustSources, appSources) {
 		);
 	}
 
+	failures.push(...validateWorkspaceWatcherBoundary(rustSources, appSources));
+	return [...new Set(failures)];
+}
+
+function watcherRustStructBodies(source, name) {
+	if (source === undefined) {
+		return [];
+	}
+	const bodies = [];
+	const pattern = new RegExp(
+		`\\b(?:pub(?:\\s*\\([^)]*\\))?\\s+)?struct\\s+${escapeRegularExpression(name)}\\b`,
+		"g",
+	);
+	for (const match of source.matchAll(pattern)) {
+		const bodyOpen = source.indexOf("{", match.index + match[0].length);
+		if (bodyOpen < 0) {
+			continue;
+		}
+		const bodyClose = findMatchingDelimiter(source, bodyOpen, "{", "}");
+		if (bodyClose !== undefined) {
+			bodies.push({
+				start: match.index,
+				body: source.slice(bodyOpen + 1, bodyClose),
+			});
+		}
+	}
+	return bodies;
+}
+
+function watcherTypeScriptSource(source, fileName) {
+	return source === undefined
+		? undefined
+		: ts.createSourceFile(
+				fileName,
+				source,
+				ts.ScriptTarget.Latest,
+				true,
+				ts.ScriptKind.TS,
+			);
+}
+
+function watcherTypeScriptExecutableText(source) {
+	if (source === undefined) {
+		return "";
+	}
+	const scanner = ts.createScanner(
+		ts.ScriptTarget.Latest,
+		true,
+		ts.LanguageVariant.Standard,
+		source,
+	);
+	const tokens = [];
+	for (
+		let token = scanner.scan();
+		token !== ts.SyntaxKind.EndOfFileToken;
+		token = scanner.scan()
+	) {
+		tokens.push(scanner.getTokenText());
+	}
+	return tokens.join("");
+}
+
+function watcherInterfaceShape(sourceFile, name) {
+	const declarations =
+		sourceFile?.statements.filter(
+			(statement) =>
+				ts.isInterfaceDeclaration(statement) && statement.name.text === name,
+		) ?? [];
+	if (declarations.length !== 1) {
+		return undefined;
+	}
+	return declarations[0].members.map((member) => ({
+		kind: ts.isPropertySignature(member) ? "property" : "other",
+		name: typeScriptStaticName(member.name),
+		optional: member.questionToken !== undefined,
+		readonly:
+			member.modifiers?.some(
+				(modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword,
+			) ?? false,
+		type: member.type?.getText(sourceFile).replaceAll(/\s+/g, "") ?? "",
+	}));
+}
+
+function watcherClassMethod(sourceFile, className, methodName) {
+	const classes =
+		sourceFile?.statements.filter(
+			(statement) =>
+				ts.isClassDeclaration(statement) && statement.name?.text === className,
+		) ?? [];
+	if (classes.length !== 1) {
+		return undefined;
+	}
+	const methods = classes[0].members.filter(
+		(member) =>
+			ts.isMethodDeclaration(member) &&
+			member.name.getText(sourceFile) === methodName,
+	);
+	return methods.length === 1 ? methods[0] : undefined;
+}
+
+function validateWatcherProviderRoute(providerSource) {
+	const failure =
+		"Plain provider watch must route one root-only subscription through bridge.workspaceWatch";
+	const sourceFile = watcherTypeScriptSource(
+		providerSource,
+		"file-system-provider.ts",
+	);
+	const watch = watcherClassMethod(
+		sourceFile,
+		"PlainWorkspaceFileSystemProvider",
+		"watch",
+	);
+	if (sourceFile === undefined || watch?.body === undefined) {
+		return [failure];
+	}
+
+	const bridgeReferences = [];
+	const bridgeCalls = [];
+	const resolveCalls = [];
+	const refreshCalls = [];
+	const forbiddenCalls = [];
+	function visit(node) {
+		if (
+			ts.isPropertyAccessExpression(node) &&
+			node.expression.kind === ts.SyntaxKind.ThisKeyword &&
+			node.name.getText(sourceFile) === "#bridge"
+		) {
+			bridgeReferences.push(node);
+		}
+		if (ts.isCallExpression(node)) {
+			if (
+				ts.isPropertyAccessExpression(node.expression) &&
+				ts.isPropertyAccessExpression(node.expression.expression) &&
+				node.expression.expression.expression.kind ===
+					ts.SyntaxKind.ThisKeyword &&
+				node.expression.expression.name.getText(sourceFile) === "#bridge"
+			) {
+				bridgeCalls.push(node);
+			}
+			if (
+				ts.isPropertyAccessExpression(node.expression) &&
+				node.expression.expression.kind === ts.SyntaxKind.ThisKeyword &&
+				node.expression.name.text === "resolveResource"
+			) {
+				resolveCalls.push(node);
+			}
+			if (
+				ts.isPropertyAccessExpression(node.expression) &&
+				node.expression.expression.kind === ts.SyntaxKind.ThisKeyword &&
+				node.expression.name.text === "fireRootUpdated"
+			) {
+				refreshCalls.push(node);
+			}
+			if (
+				ts.isIdentifier(node.expression) &&
+				["invoke", "listen", "readFile", "watch"].includes(node.expression.text)
+			) {
+				forbiddenCalls.push(node);
+			}
+		}
+		ts.forEachChild(node, visit);
+	}
+	visit(watch.body);
+
+	const [bridgeCall] = bridgeCalls;
+	const bridgeCallName =
+		bridgeCall !== undefined &&
+		ts.isPropertyAccessExpression(bridgeCall.expression)
+			? bridgeCall.expression.name.text
+			: undefined;
+	const rootArgument = bridgeCall?.arguments[0];
+	const listenerArgument = bridgeCall?.arguments[1];
+	const rootIsResolvedId =
+		rootArgument !== undefined &&
+		ts.isPropertyAccessExpression(rootArgument) &&
+		ts.isIdentifier(rootArgument.expression) &&
+		rootArgument.expression.text === "resolved" &&
+		rootArgument.name.text === "rootId";
+	const listenerIsNarrow =
+		listenerArgument !== undefined &&
+		(ts.isArrowFunction(listenerArgument) ||
+			ts.isFunctionExpression(listenerArgument)) &&
+		listenerArgument.parameters.length === 0;
+	const refreshIsInsideListener =
+		listenerArgument !== undefined &&
+		refreshCalls.length === 1 &&
+		(() => {
+			let current = refreshCalls[0];
+			while (current !== undefined) {
+				if (current === listenerArgument) {
+					return true;
+				}
+				current = current.parent;
+			}
+			return false;
+		})();
+	if (
+		watch.parameters.length !== 2 ||
+		bridgeReferences.length !== 1 ||
+		bridgeCalls.length !== 1 ||
+		bridgeCallName !== "workspaceWatch" ||
+		bridgeCall.arguments.length !== 2 ||
+		!rootIsResolvedId ||
+		!listenerIsNarrow ||
+		!refreshIsInsideListener ||
+		resolveCalls.length !== 1 ||
+		refreshCalls.length !== 1 ||
+		forbiddenCalls.length !== 0
+	) {
+		return [failure];
+	}
+	return [];
+}
+
+function watcherForbiddenAppSurface(appSources) {
+	const forbiddenModules =
+		/(?:^|\/)(?:vscode\/localExtensionHost|extensionHost\.worker)|monaco-vscode-(?:ai|chat|auth|sync|gallery|remote|task|testing|notebook|telemetry|speech|mcp)(?:[-/@]|$)|@(?:openai|github\/copilot)|@tauri-apps\/(?:plugin-fs|plugin-shell)/i;
+	const forbiddenIdentifiers = new Set([
+		"ExtensionHostKind",
+		"setLocalExtensionHost",
+		"extensionHostWorkerMain",
+	]);
+	for (const { source, relativePath } of appSources) {
+		const sourceFile = watcherTypeScriptSource(source, relativePath);
+		let forbidden = false;
+		function visit(node) {
+			if (
+				(ts.isStringLiteral(node) ||
+					ts.isNoSubstitutionTemplateLiteral(node)) &&
+				forbiddenModules.test(node.text)
+			) {
+				forbidden = true;
+			}
+			if (ts.isIdentifier(node) && forbiddenIdentifiers.has(node.text)) {
+				forbidden = true;
+			}
+			if (
+				ts.isPropertyAssignment(node) &&
+				typeScriptStaticName(node.name) === "enableWorkerExtensionHost" &&
+				node.initializer.kind === ts.SyntaxKind.TrueKeyword
+			) {
+				forbidden = true;
+			}
+			ts.forEachChild(node, visit);
+		}
+		if (sourceFile !== undefined) {
+			visit(sourceFile);
+		}
+		if (forbidden) {
+			return `${relativePath.replaceAll("\\", "/")} restores an excluded Extension Host, AI, account, sync or broad native surface`;
+		}
+	}
+	return undefined;
+}
+
+export function validateWorkspaceWatcherBoundary(rustSources, appSources) {
+	const normalizedPath = (value) => value.replaceAll("\\", "/");
+	const hasWatcherSurface =
+		rustSources.some(
+			({ relativePath }) =>
+				normalizedPath(relativePath) === "src-tauri/src/workspace/watcher.rs",
+		) ||
+		appSources.some(({ relativePath }) =>
+			[
+				"app/platform/tauri/workspace-watcher.ts",
+				"app/features/workspace/file-system-provider.ts",
+			].includes(normalizedPath(relativePath)),
+		);
+	if (!hasWatcherSurface) {
+		return [];
+	}
+
+	const failures = [];
+	const rustSource = (expectedPath) =>
+		findRustSource(rustSources, expectedPath);
+	const appSource = (expectedPath) =>
+		appSources.find(
+			({ relativePath }) => normalizedPath(relativePath) === expectedPath,
+		)?.source;
+	const watcher = rustSource("src-tauri/src/workspace/watcher.rs");
+	const workspaceRoot = rustSource("src-tauri/src/workspace/mod.rs");
+	const dto = rustSource("src-tauri/src/workspace/dto.rs");
+	const commands = rustSource("src-tauri/src/workspace/commands.rs");
+	const lib = rustSource("src-tauri/src/lib.rs");
+	const service = rustSource("src-tauri/src/workspace/service.rs");
+	const contracts = appSource("app/platform/tauri/contracts.ts");
+	const codec = appSource("app/platform/tauri/workspace-codec.ts");
+	const manager = appSource("app/platform/tauri/workspace-watcher.ts");
+	const native = appSource("app/platform/tauri/native.ts");
+	const browserMock = appSource("app/platform/tauri/browser-mock.ts");
+	const provider = appSource("app/features/workspace/file-system-provider.ts");
+	const compact = (value) => value?.replaceAll(/\s+/g, "") ?? "";
+
+	const executableWatcher =
+		watcher === undefined ? undefined : stripRustCommentsAndLiterals(watcher);
+	const classifier =
+		executableWatcher === undefined
+			? undefined
+			: extractRustFunctions(executableWatcher, "classify_notify_event")[0];
+	const classifierBody = compact(classifier?.body);
+	const watcherPrepare =
+		executableWatcher === undefined
+			? undefined
+			: extractRustFunctions(executableWatcher, "prepare")[0];
+	const watcherPrepareBody = compact(watcherPrepare?.body);
+	if (
+		watcher === undefined ||
+		!/\bconst\s+WATCH_WAKE_QUEUE_CAPACITY\s*:\s*usize\s*=\s*1\s*;/.test(
+			executableWatcher,
+		) ||
+		[
+			...executableWatcher.matchAll(
+				/\bmpsc\s*::\s*sync_channel\s*\(\s*WATCH_WAKE_QUEUE_CAPACITY\s*\)/g,
+			),
+		].length !== 1 ||
+		!/Config\s*::\s*default\s*\(\s*\)\s*\.\s*with_follow_symlinks\s*\(\s*false\s*\)/.test(
+			executableWatcher,
+		)
+	) {
+		failures.push(
+			"workspace watcher must keep one capacity-one queue and notify symlink following disabled",
+		);
+	}
+	if (
+		classifier === undefined ||
+		!classifierBody.includes("event.kind.is_access()") ||
+		!classifierBody.includes("WatchObservation::Ignore") ||
+		!classifierBody.includes("event.need_rescan()") ||
+		!classifierBody.includes("rescan_required:true") ||
+		/(?:\.paths\b|\bpaths\s*\(|to_string\s*\(|format\s*!|Debug\b)/.test(
+			classifier?.body ?? "",
+		) ||
+		watcherPrepare === undefined ||
+		!watcherPrepareBody.includes(
+			"move|result:notify::Result<Event>|callback(classify_notify_event(result))",
+		) ||
+		[...watcherPrepareBody.matchAll(/callback\(/g)].length !== 1 ||
+		[...watcherPrepareBody.matchAll(/classify_notify_event\(result\)/g)]
+			.length !== 1
+	) {
+		failures.push(
+			"notify callback must discard paths and raw errors, ignore access events and conservatively request rescans",
+		);
+	}
+	const markFunctions =
+		executableWatcher === undefined
+			? []
+			: extractRustFunctions(executableWatcher, "mark");
+	const markBody = compact(markFunctions[0]?.body);
+	const fullIndex = markBody.indexOf("Err(TrySendError::Full(()))");
+	if (
+		markFunctions.length !== 1 ||
+		fullIndex < 0 ||
+		markBody.indexOf(
+			"self.rescan_required.store(true,Ordering::Release)",
+			fullIndex,
+		) < fullIndex ||
+		markBody.indexOf("self.dirty.store(true,Ordering::Release)", fullIndex) <
+			fullIndex
+	) {
+		failures.push("a full watcher wake queue must preserve dirty rescan state");
+	}
+	const syncFunctions =
+		executableWatcher === undefined
+			? []
+			: extractRustFunctions(executableWatcher, "sync");
+	const syncBody = compact(syncFunctions[0]?.body);
+	if (
+		syncFunctions.length !== 1 ||
+		!syncBody.includes("acknowledgements.len()>MAX_WATCH_ACKNOWLEDGEMENTS") ||
+		!syncBody.includes("pending.generation==acknowledgement.generation") ||
+		!syncBody.includes("acknowledgement.generation==u32::MAX") ||
+		!syncBody.includes("record.pending=None") ||
+		!syncBody.includes("record.pending.map") ||
+		[...executableWatcher.matchAll(/\brecord\s*\.\s*pending\s*=\s*None\b/g)]
+			.length !== 1
+	) {
+		failures.push(
+			"watcher pending generations must stay sticky until one exact bounded acknowledgement",
+		);
+	}
+
+	const dtoExecutable =
+		dto === undefined ? undefined : stripRustCommentsAndLiterals(dto);
+	const structRecord = (name) => {
+		const bodies = watcherRustStructBodies(dtoExecutable, name);
+		return bodies.length === 1 ? bodies[0] : undefined;
+	};
+	const structBody = (name) =>
+		compact(structRecord(name)?.body?.replaceAll(/#\s*\[[^\]]+\]/g, ""));
+	const hasDenyUnknownFields = (name) => {
+		const record = structRecord(name);
+		return (
+			record !== undefined &&
+			/#\s*\[\s*serde\s*\([^\]]*\bdeny_unknown_fields\b[^\]]*\)\s*\]\s*$/.test(
+				dtoExecutable.slice(Math.max(0, record.start - 200), record.start),
+			)
+		);
+	};
+	if (
+		dtoExecutable === undefined ||
+		!/\bconst\s+MAX_WORKSPACE_WATCH_ROOTS\s*:\s*usize\s*=\s*256\s*;/.test(
+			dtoExecutable,
+		) ||
+		structBody("WorkspaceWatchSyncRootRequest") !==
+			"root_id:RootId,acknowledged_generation:WorkspaceWatchAcknowledgedGeneration," ||
+		structBody("WorkspaceWatchSyncRequest") !==
+			"roots:Vec<WorkspaceWatchSyncRootRequest>," ||
+		structBody("WorkspaceWatchSyncRootRequestWire") !==
+			"root_id:RootId,acknowledged_generation:WorkspaceWatchAcknowledgedGeneration," ||
+		!hasDenyUnknownFields("WorkspaceWatchSyncRootRequestWire") ||
+		!hasDenyUnknownFields("WorkspaceWatchSyncRequest") ||
+		!compact(
+			extractRustFunctions(dtoExecutable, "deserialize").find((candidate) =>
+				candidate.body.includes("WorkspaceWatchSyncRootRequestWire"),
+			)?.body,
+		).includes(
+			"wire.acknowledged_generation==WorkspaceWatchAcknowledgedGeneration::Missing{returnErr(D::Error::missing_field());",
+		) ||
+		!compact(
+			extractRustFunctions(dtoExecutable, "into_parts").find((candidate) =>
+				candidate.returnType.includes("Vec<(RootId, Option<u32>)>"),
+			)?.body,
+		).includes(
+			"self.roots.is_empty()||self.roots.len()>MAX_WORKSPACE_WATCH_ROOTS",
+		) ||
+		!compact(
+			extractRustFunctions(dtoExecutable, "into_parts").find((candidate) =>
+				candidate.returnType.includes("Vec<(RootId, Option<u32>)>"),
+			)?.body,
+		).includes("!unique.insert(root.root_id)")
+	) {
+		failures.push(
+			"workspace watch Rust request must deny unbounded, empty and duplicate root pulls",
+		);
+	}
+	const executableWorkspaceRoot =
+		workspaceRoot === undefined
+			? undefined
+			: stripRustCommentsAndLiterals(workspaceRoot);
+	const rootIdDeserialize =
+		executableWorkspaceRoot === undefined
+			? undefined
+			: extractRustFunctions(executableWorkspaceRoot, "deserialize")[0];
+	if (
+		rootIdDeserialize === undefined ||
+		!compact(rootIdDeserialize.body).includes("Self::parse_v4_wire(&wire)")
+	) {
+		failures.push(
+			"workspace watcher root ids must use canonical RFC4122 UUID v4 decoding",
+		);
+	}
+	if (
+		structBody("WorkspaceWatchPendingRoot") !==
+			"root_id:RootId,generation:u32,rescan_required:bool," ||
+		structBody("WorkspaceWatchSyncResult") !==
+			"workspace_id:WorkspaceId,roots:Vec<WorkspaceWatchPendingRoot>," ||
+		structBody("WorkspaceWatchWakeEvent") !== "workspace_id:WorkspaceId,"
+	) {
+		failures.push(
+			"watcher IPC responses must expose only opaque ids, generations and rescan state",
+		);
+	}
+
+	const executableCommands =
+		commands === undefined ? undefined : stripRustCommentsAndLiterals(commands);
+	const picker =
+		executableCommands === undefined
+			? undefined
+			: extractRustFunctions(executableCommands, "workspace_pick_roots")[0];
+	const watchSync =
+		executableCommands === undefined
+			? undefined
+			: extractRustFunctions(executableCommands, "workspace_watch_sync")[0];
+	const pickerBody = compact(picker?.body);
+	const watchSyncBody = compact(watchSync?.body);
+	if (
+		commands === undefined ||
+		!/\bWORKSPACE_WATCH_WAKE_EVENT\s*:\s*&str\s*=\s*"plain:\/\/workspace-watch-wake"\s*;/.test(
+			commands,
+		) ||
+		picker === undefined ||
+		[...pickerBody.matchAll(/\.emit_to\(/g)].length !== 1 ||
+		!pickerBody.includes("EventTarget::webview_window(window_label.clone())") ||
+		!pickerBody.includes("WorkspaceWatchWakeEvent::new(workspace_id)") ||
+		/\.emit\(/.test(pickerBody)
+	) {
+		failures.push(
+			"workspace watcher wake must be one window-targeted opaque workspaceId hint",
+		);
+	}
+	if (
+		watchSync === undefined ||
+		!/\bpub\s*\(\s*crate\s*\)\s+async\s+fn\s+workspace_watch_sync\b/.test(
+			executableCommands,
+		) ||
+		!watchSyncBody.includes(
+			"service.watch_sync(window.label(),request.into_parts()?)",
+		) ||
+		!watchSyncBody.includes(".await")
+	) {
+		failures.push(
+			"workspace_watch_sync must asynchronously route the decoded bounded request through the window service",
+		);
+	}
+	const executableService =
+		service === undefined ? undefined : stripRustCommentsAndLiterals(service);
+	const serviceWatchSync =
+		executableService === undefined
+			? undefined
+			: extractRustFunctions(executableService, "watch_sync").find(
+					(candidate) =>
+						compact(candidate.body).includes(
+							"spawn_blocking(move||workspace.watch_sync(&roots))",
+						),
+				);
+	const scanWatchRoot =
+		executableService === undefined
+			? undefined
+			: extractRustFunctions(executableService, "scan_watch_root")[0];
+	if (
+		serviceWatchSync === undefined ||
+		!compact(
+			executableService.slice(
+				Math.max(0, serviceWatchSync.start - 48),
+				serviceWatchSync.start,
+			),
+		).includes("pubasync") ||
+		!compact(scanWatchRoot?.body).includes(
+			"Err(_)=>returnWatchScanOutcome::Failed",
+		)
+	) {
+		failures.push(
+			"watch sync and capability scans must stay off the invoke thread and preserve lease failures as rescans",
+		);
+	}
+	const executableLib =
+		lib === undefined ? undefined : stripRustCommentsAndLiterals(lib);
+	const runBody = compact(
+		executableLib === undefined
+			? undefined
+			: extractRustFunctions(executableLib, "run")[0]?.body,
+	);
+	if (
+		executableLib === undefined ||
+		[
+			...executableLib.matchAll(
+				/\bworkspace\s*::\s*commands\s*::\s*workspace_watch_sync\b/g,
+			),
+		].length !== 1
+	) {
+		failures.push(
+			"src-tauri/src/lib.rs must register workspace_watch_sync exactly once",
+		);
+	}
+	if (
+		!runBody.includes(".build(tauri::generate_context!())") ||
+		!runBody.includes(".run(|app,event|") ||
+		!runBody.includes(
+			"ifmatches!(event,tauri::RunEvent::Resumed){app.state::<WorkspaceService>().mark_all_watchers_rescan();}",
+		)
+	) {
+		failures.push(
+			"Tauri resume must conservatively mark every window watcher for rescan",
+		);
+	}
+
+	const contractsFile = watcherTypeScriptSource(contracts, "contracts.ts");
+	const expectedInterfaces = new Map([
+		[
+			"WorkspaceWatchWakeEvent",
+			[
+				{
+					kind: "property",
+					name: "workspaceId",
+					optional: false,
+					readonly: true,
+					type: "string",
+				},
+			],
+		],
+		[
+			"WorkspaceWatchSyncRootRequest",
+			[
+				{
+					kind: "property",
+					name: "rootId",
+					optional: false,
+					readonly: true,
+					type: "string",
+				},
+				{
+					kind: "property",
+					name: "acknowledgedGeneration",
+					optional: false,
+					readonly: true,
+					type: "number|null",
+				},
+			],
+		],
+		[
+			"WorkspaceWatchPendingRoot",
+			[
+				{
+					kind: "property",
+					name: "rootId",
+					optional: false,
+					readonly: true,
+					type: "string",
+				},
+				{
+					kind: "property",
+					name: "generation",
+					optional: false,
+					readonly: true,
+					type: "number",
+				},
+				{
+					kind: "property",
+					name: "rescanRequired",
+					optional: false,
+					readonly: true,
+					type: "boolean",
+				},
+			],
+		],
+	]);
+	if (
+		[...expectedInterfaces].some(
+			([name, expected]) =>
+				JSON.stringify(watcherInterfaceShape(contractsFile, name)) !==
+				JSON.stringify(expected),
+		)
+	) {
+		failures.push(
+			"TypeScript watcher wire contracts must remain path-free exact readonly shapes",
+		);
+	}
+	const bridgeInterfaces =
+		contractsFile?.statements.filter(
+			(statement) =>
+				ts.isInterfaceDeclaration(statement) &&
+				statement.name.text === "PlainBridge",
+		) ?? [];
+	const workspaceWatchMembers =
+		bridgeInterfaces[0]?.members.filter(
+			(member) =>
+				ts.isMethodSignature(member) &&
+				typeScriptStaticName(member.name) === "workspaceWatch",
+		) ?? [];
+	const bridgeWatch = workspaceWatchMembers[0];
+	if (
+		bridgeInterfaces.length !== 1 ||
+		workspaceWatchMembers.length !== 1 ||
+		bridgeWatch.parameters.length !== 2 ||
+		compact(bridgeWatch.parameters[0].type?.getText(contractsFile)) !==
+			"string" ||
+		compact(bridgeWatch.parameters[1].type?.getText(contractsFile)) !==
+			"()=>void" ||
+		compact(bridgeWatch.type?.getText(contractsFile)) !== "Unlisten"
+	) {
+		failures.push(
+			"PlainBridge must expose one root-only workspaceWatch callback contract",
+		);
+	}
+
+	const codecFile = watcherTypeScriptSource(codec, "workspace-codec.ts");
+	const codecFunctions = (name) =>
+		codecFile?.statements.filter(
+			(statement) =>
+				ts.isFunctionDeclaration(statement) && statement.name?.text === name,
+		) ?? [];
+	const frozenRequest = codecFunctions("frozenWorkspaceWatchSyncRequest");
+	const wakeDecoder = codecFunctions("decodeWorkspaceWatchWakeEvent");
+	const syncDecoder = codecFunctions("decodeWorkspaceWatchSyncResult");
+	const requestBody = watcherTypeScriptExecutableText(
+		frozenRequest[0]?.body?.getText(codecFile),
+	);
+	const wakeBody = watcherTypeScriptExecutableText(
+		wakeDecoder[0]?.body?.getText(codecFile),
+	);
+	const responseBody = watcherTypeScriptExecutableText(
+		syncDecoder[0]?.body?.getText(codecFile),
+	);
+	if (
+		codec === undefined ||
+		!/\bconst\s+MAX_WORKSPACE_ROOTS\s*=\s*256\s*;/.test(codec) ||
+		!/\bconst\s+MAX_WORKSPACE_WATCH_GENERATION\s*=\s*0xffff_ffff\s*;/.test(
+			codec,
+		) ||
+		frozenRequest.length !== 1 ||
+		!requestBody.includes(
+			"ownArrayDataSnapshot(roots,1,MAX_WORKSPACE_ROOTS)",
+		) ||
+		!requestBody.includes(
+			'hasExactKeys(snapshot,["rootId","acknowledgedGeneration"])',
+		) ||
+		!requestBody.includes("unique.has(snapshot.rootId)") ||
+		!requestBody.includes("unique.add(snapshot.rootId)") ||
+		!requestBody.includes("rejectProxyObject(arraySnapshot.value)")
+	) {
+		failures.push(
+			"watch sync codec must freeze and bound one exact unique root acknowledgement request",
+		);
+	}
+	if (
+		wakeDecoder.length !== 1 ||
+		!wakeBody.includes('hasExactKeys(snapshot,["workspaceId"])') ||
+		!wakeBody.includes("rejectProxyObject(valueasobject)") ||
+		!wakeBody.includes("Object.freeze({workspaceId:snapshot.workspaceId})")
+	) {
+		failures.push("watch wake decoder must accept only one opaque workspaceId");
+	}
+	if (
+		syncDecoder.length !== 1 ||
+		!/ownArrayDataSnapshot\(snapshot\.roots,0,request\.roots\.length,?\)/.test(
+			responseBody,
+		) ||
+		!responseBody.includes(
+			'hasExactKeys(root,["rootId","generation","rescanRequired"])',
+		) ||
+		!responseBody.includes("unique.has(requestedRoot.rootId)") ||
+		!responseBody.includes(
+			"root.generation<=requestedRoot.acknowledgedGeneration",
+		) ||
+		!responseBody.includes(
+			"root.generation===MAX_WORKSPACE_WATCH_GENERATION",
+		) ||
+		!responseBody.includes("!saturatedReplay") ||
+		!responseBody.includes("rejectProxyObject(valueasobject)")
+	) {
+		failures.push(
+			"watch sync decoder must reject unsolicited, duplicate, stale or oversized pending roots",
+		);
+	}
+
+	const managerFile = watcherTypeScriptSource(manager, "workspace-watcher.ts");
+	const schedulePull = watcherClassMethod(
+		managerFile,
+		"PerBridgeWorkspaceWatcherManager",
+		"#schedulePull",
+	);
+	const pull = watcherClassMethod(
+		managerFile,
+		"PerBridgeWorkspaceWatcherManager",
+		"#pull",
+	);
+	const deliver = watcherClassMethod(
+		managerFile,
+		"PerBridgeWorkspaceWatcherManager",
+		"#deliver",
+	);
+	const managerExecutable = watcherTypeScriptExecutableText(manager);
+	const scheduleBody = watcherTypeScriptExecutableText(
+		schedulePull?.body?.getText(managerFile),
+	);
+	const pullBody = watcherTypeScriptExecutableText(
+		pull?.body?.getText(managerFile),
+	);
+	const deliverBody = watcherTypeScriptExecutableText(
+		deliver?.body?.getText(managerFile),
+	);
+	const acknowledgementGuard = deliverBody.indexOf(
+		"Array.from(state.subscriptions).every",
+	);
+	const acknowledgementWrite = deliverBody.indexOf(
+		"state.acknowledgedGeneration=pending.generation",
+	);
+	if (
+		manager === undefined ||
+		!/\bconst\s+DEFAULT_POLL_INTERVAL_MS\s*=\s*2_000\s*;/.test(manager) ||
+		!/\bconst\s+MAX_WORKSPACE_WATCH_GENERATION\s*=\s*0xffff_ffff\s*;/.test(
+			manager,
+		) ||
+		/@tauri-apps\//.test(manager) ||
+		!managerExecutable.includes(
+			"readonly#onWake=(wake:WorkspaceWatchWakeEvent):void=>",
+		) ||
+		!managerExecutable.includes("this.#schedulePull(true)") ||
+		[...managerExecutable.matchAll(/this\.#transport\.sync\(/g)].length !== 1 ||
+		schedulePull === undefined ||
+		!scheduleBody.includes(
+			"if(this.#syncInFlight){this.#pullRequested||=urgent;return;}",
+		) ||
+		!scheduleBody.includes("urgent?0:this.#pollIntervalMs") ||
+		pull === undefined ||
+		!pullBody.includes("this.#syncInFlight=true") ||
+		!pullBody.includes("awaitthis.#transport.sync(request)") ||
+		!pullBody.includes("finally{this.#syncInFlight=false") ||
+		!pullBody.includes("this.#schedulePull(") ||
+		deliver === undefined ||
+		!deliverBody.includes("constsaturatedReplay=") ||
+		!deliverBody.includes(
+			'returnsaturatedReplay?"retry-later":"acknowledged"',
+		) ||
+		acknowledgementGuard < 0 ||
+		acknowledgementWrite <= acknowledgementGuard
+	) {
+		failures.push(
+			"watch manager must serialize wake/timer pulls and acknowledge only after listener delivery",
+		);
+	}
+
+	const compactNative = watcherTypeScriptExecutableText(native);
+	if (
+		native === undefined ||
+		!compactNative.includes(
+			"listen<unknown>(WORKSPACE_WATCH_WAKE_EVENT,(event)=>listener(decodeWorkspaceWatchWakeEvent(event.payload)),)",
+		) ||
+		!compactNative.includes(
+			'awaitinvoke<unknown>("workspace_watch_sync",{request})',
+		) ||
+		!compactNative.includes("workspaceWatch:workspaceWatcher.workspaceWatch")
+	) {
+		failures.push(
+			"native bridge must decode the wake hint and route sync through the watcher manager",
+		);
+	}
+	const browserFile = watcherTypeScriptSource(browserMock, "browser-mock.ts");
+	let browserManagerCreations = 0;
+	let browserWatchRoutes = 0;
+	if (browserFile !== undefined) {
+		function visitBrowserWatcher(node) {
+			if (
+				ts.isCallExpression(node) &&
+				ts.isIdentifier(node.expression) &&
+				node.expression.text === "createWorkspaceWatcherManager" &&
+				node.arguments.length === 1 &&
+				ts.isIdentifier(node.arguments[0]) &&
+				node.arguments[0].text === "workspaceWatchTransport"
+			) {
+				browserManagerCreations += 1;
+			}
+			if (
+				ts.isPropertyAssignment(node) &&
+				typeScriptStaticName(node.name) === "workspaceWatch" &&
+				ts.isPropertyAccessExpression(node.initializer) &&
+				ts.isIdentifier(node.initializer.expression) &&
+				node.initializer.expression.text === "workspaceWatcher" &&
+				node.initializer.name.text === "workspaceWatch"
+			) {
+				browserWatchRoutes += 1;
+			}
+			ts.forEachChild(node, visitBrowserWatcher);
+		}
+		visitBrowserWatcher(browserFile);
+	}
+	if (browserManagerCreations !== 1 || browserWatchRoutes !== 1) {
+		failures.push(
+			"browser mock must exercise the same bounded workspace watcher manager",
+		);
+	}
+	failures.push(...validateWatcherProviderRoute(provider));
+
+	const excludedSurface = watcherForbiddenAppSurface(appSources);
+	if (excludedSurface !== undefined) {
+		failures.push(excludedSurface);
+	}
 	return [...new Set(failures)];
 }
 
@@ -6248,7 +7165,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		],
 		[
 			"@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle",
-			new Set(["value:Disposable", "type:IDisposable"]),
+			new Set(["type:IDisposable"]),
 		],
 		[
 			"@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
@@ -8302,6 +9219,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		"workspaceCommitDeleteEntry",
 	]);
 	const expectedBridgeMethods = new Map([
+		["workspaceWatch", 1],
 		["workspaceStat", 1],
 		["workspaceReadDirectory", 1],
 		["workspaceReadFile", 1],
@@ -9013,7 +9931,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			"Plain workspace mutation boolean parameter may appear only in its declaration, private-field assignment and capability condition",
 		);
 	}
-	if (privateBridgeReferences !== 12 || privatePolicyReferences !== 3) {
+	if (privateBridgeReferences !== 13 || privatePolicyReferences !== 3) {
 		failures.push(
 			"Plain workspace native authority must remain sealed in the exact #bridge and #allowsMutationDispatch private-field consumers",
 		);
@@ -9053,7 +9971,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		fireCreatedCallCount !== 3 ||
 		fireDeletedCallCount !== 1 ||
 		fireMovedCallCount !== 2 ||
-		fireRootUpdatedCallCount !== 7 ||
+		fireRootUpdatedCallCount !== 8 ||
 		fireRootsUpdatedCallCount !== 2 ||
 		changeEmitterFireCallCount !== 7
 	) {

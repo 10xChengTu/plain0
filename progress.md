@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：按已冻结合同实现 watcher 的有界 dirty/rescan + sticky generation/ack 状态机、Plain-only Explorer deep refresh 与 Browser mock 收敛测试。
+- 当前最小工作项：在允许绑定本地端口的桌面会话执行 watcher Browser E2E；随后隔离真实 Tauri 测试 profile，并完成外部文件系统事件与文件树 CRUD/save 总验收。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -75,11 +75,14 @@
 - [x] 完成 provider 写能力原子激活：启动时五项平台能力全真才广告精确 `FileReadWrite | FileFolderCopy`，任一 false 则保持精确 `FileReadWrite | Readonly`，且 `Event.None` 表明窗口生命周期内不可升级。bridge 与 mutation policy 使用 ECMAScript `#private`，provider 实例和 prototype 均冻结；create、versioned save、copy/move、confirmed delete 的每个 consumer 继续在 URI/options/bridge 前消费同一个 all-five gate。跨 app authority Harness 锁定唯一 capability snapshot、provider/bridge factory、`IFileService → getProvider`、Tauri internal global 和 direct/alias/namespace/computed/Reflect/常量键路径，同时保留无关 `getProvider` 控制组。
 - [x] capability 激活切片完成最终验收：21 个 TypeScript/JavaScript 测试文件、441 个用例、格式、双类型检查、严格 lint、生产构建、架构 guard 与 2103-source/203-debt bundle 基线通过；Rust 230/230 在沙箱外通过，沙箱内仅两项 FIFO/特殊文件 fixture 按预期受 `EPERM` 限制。Chromium E2E 6/6 覆盖 capability failure、Workbench foundation、两种 PLR1 transport、all-true 的 versioned save/create/native copy/rename/一次确认永久删除，以及 one-false 的整 provider readonly、零 native mutation 与无晚到确认框。内置浏览器可见验收确认 writable Explorer toolbar、create 与一次确认删除；真实 Tauri/WKWebView 再次确认原生启动、命令面板和 macOS 文件夹选择器。
 - [x] 完成 watcher/rescan 专项 GitHub 补充调研与方案冻结：锁定 `notify 8.2.0` 与 `follow_symlinks(false)`，排除 full debouncer、Tauri raw-path watcher 和 Parcel 直接移植；确认固定 Explorer 默认忽略 root `UPDATED`，因此冻结每 root watcher/每 window 单 worker、容量 1 唤醒队列、capability root scan、单 sticky generation + sync/ack、window-targeted wake、事务化 root 生命周期和只命中 `plain-workspace:` 根事件的 deep-refresh 补丁。本项不把 notify path 送入 WebView，不伪造 root delete，不冒充 F030 打开文件外部冲突。
+- [x] 完成 watcher/rescan 实现：Rust 为每个窗口建立单 worker 与容量 1 唤醒队列，每个授权 root 使用 `notify =8.2.0` 且显式禁用 symlink following；callback 丢弃原始 path/error，仅累积 dirty/rescan。capability root scan、事务化 prepare/activate/revoke、窗口隔离、resume、close、sticky `u32` generation 与 exact ack 已接入严格 Tauri command/event。TypeScript manager 以单 listener、单 timer、单 in-flight sync 收敛丢失 wake，supported/readonly provider 共用同一路径并只发冻结 root `UPDATED`；Plain-only Explorer 补丁据此执行 `refresh(false)`，不伪造 root delete。
+- [x] watcher Harness 与局部验收收口：25 个 TypeScript/JavaScript 测试文件、480 个用例通过；Rust watcher 21/21、service/DTO 聚焦测试与 Clippy 通过，全量 Rust 255 项中 253 项通过，剩余两项仍是沙箱禁止 FIFO fixture 的既有 `EPERM`。格式、双类型检查、严格 lint、生产构建、245 项 watcher/patch 聚焦用例、107 项边界 hostile mutation、Workbench patch SHA/hunk/lock graph、架构 guard 及 2104-source/203-debt bundle 基线均通过；Harness 的 Cargo metadata 审计按当前 `rustc host` 过滤无关目标依赖，同时继续检查完整直接依赖声明。最终双路复核修复了 invoke-thread 阻塞、lease failure 丢 dirty、非 v4 rootId、饱和 generation 不收敛和 provider callback 可绕过五项问题，复核后无剩余 P0/P1/P2。新增 Browser watcher E2E 覆盖即时 wake 与丢 wake 定时拉取，但当前会话因本地端口 bind 权限尚未执行。
 
 ## 下一步
 
-1. 实现 watcher/rescan 的有界状态机与 Browser mock 收敛测试。
-2. 隔离或修复真实 Tauri 测试 profile 的空视图容器，完成文件树 CRUD/save 总验收并写回 `F020` evidence。
+1. 在可绑定 `127.0.0.1:1420` 的桌面会话执行 watcher Browser E2E，并验证即时 wake 与丢 wake 定时收敛。
+2. 隔离或修复真实 Tauri 测试 profile 的空视图容器，以真实外部文件系统事件验证 FSEvents → Rust watcher → Explorer deep refresh。
+3. 完成文件树 CRUD/save 总验收并写回 `F020` evidence。
 
 ## 当前验收命令
 
@@ -100,7 +103,8 @@ pnpm test:e2e:browser -- workspace.spec.ts
 - macOS 的 WKWebView 不能由普通浏览器 E2E 代替，最终必须真实启动应用。
 - 当前机器的真实 Tauri 测试 profile 已把 Activity Bar/Primary Sidebar 持久化为空视图容器；`View: Reset View Locations` 加 reload 仍未恢复 Explorer。干净 Browser profile 不受影响，但 `F020` 最终原生文件树验收必须先隔离或修复这项 profile 状态，不能把系统 picker 通过冒充为原生 CRUD 通过。
 - 若 native `prepare-delete` 已登记批次但 IPC 响应在前端收到 confirmation id 前丢失，前端无法主动 cancel；批次仍不可 begin/commit，由 Rust 的 120 秒单调 idle TTL、root/window 生命周期清理兜底。
+- watcher wake event 只是可丢失提示，权威状态在 Rust sticky generation；Browser mock 已覆盖定时拉取收敛，但真实 macOS FSEvents/WKWebView 链仍须在可启动桌面会话中验收，不能用单元测试冒充完成。
 
 ## 阻塞项
 
-无。
+- 当前受限会话禁止 Vite 绑定 `127.0.0.1:1420`，且提权请求因账户执行额度暂不可用，因此本轮不能启动 Browser E2E 或真实 Tauri GUI。

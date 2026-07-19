@@ -24,12 +24,17 @@ import type {
 	WorkspaceReadFileResult,
 	WorkspaceRoot,
 	WorkspaceSnapshot,
+	WorkspaceWatchPendingRoot,
+	WorkspaceWatchSyncRequest,
+	WorkspaceWatchSyncResult,
+	WorkspaceWatchWakeEvent,
 	WorkspaceWriteResult,
 } from "./contracts";
 
 const UUID_V4_PATTERN =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_WORKSPACE_ROOTS = 256;
+const MAX_WORKSPACE_WATCH_GENERATION = 0xffff_ffff;
 const MAX_DISPLAY_NAME_LENGTH = 255;
 const MAX_DIRECTORY_ENTRIES = 10_000;
 const MAX_ENTRY_NAME_BYTES = 1_024;
@@ -403,6 +408,60 @@ export function frozenWorkspaceEntryRequest(
 		);
 	}
 	return Object.freeze({ rootId, relativePath });
+}
+
+function workspaceWatchRequestInvalid(): never {
+	return requestViolation(
+		"WORKSPACE_WATCH_REQUEST_INVALID",
+		"The workspace watcher synchronization request is invalid.",
+	);
+}
+
+export function frozenWorkspaceWatchSyncRequest(
+	roots: unknown,
+): Readonly<WorkspaceWatchSyncRequest> {
+	let arraySnapshot: ReturnType<typeof ownArrayDataSnapshot>;
+	try {
+		arraySnapshot = ownArrayDataSnapshot(roots, 1, MAX_WORKSPACE_ROOTS);
+	} catch {
+		return workspaceWatchRequestInvalid();
+	}
+
+	const unique = new Set<string>();
+	const frozenRoots = arraySnapshot.entries.map((value) => {
+		let snapshot: Readonly<Record<string, unknown>>;
+		try {
+			snapshot = ownPlainDataSnapshot(value);
+			if (
+				!hasExactKeys(snapshot, ["rootId", "acknowledgedGeneration"]) ||
+				!isUuidV4(snapshot.rootId) ||
+				(snapshot.acknowledgedGeneration !== null &&
+					(typeof snapshot.acknowledgedGeneration !== "number" ||
+						!Number.isSafeInteger(snapshot.acknowledgedGeneration) ||
+						snapshot.acknowledgedGeneration < 1 ||
+						snapshot.acknowledgedGeneration > MAX_WORKSPACE_WATCH_GENERATION))
+			) {
+				return workspaceWatchRequestInvalid();
+			}
+			rejectProxyObject(value as object);
+		} catch {
+			return workspaceWatchRequestInvalid();
+		}
+		if (unique.has(snapshot.rootId)) {
+			return workspaceWatchRequestInvalid();
+		}
+		unique.add(snapshot.rootId);
+		return Object.freeze({
+			rootId: snapshot.rootId,
+			acknowledgedGeneration: snapshot.acknowledgedGeneration,
+		});
+	});
+	try {
+		rejectProxyObject(arraySnapshot.value);
+	} catch {
+		return workspaceWatchRequestInvalid();
+	}
+	return Object.freeze({ roots: Object.freeze(frozenRoots) });
 }
 
 export function frozenWorkspaceCreateEntryRequest(
@@ -1172,6 +1231,88 @@ export function decodeWorkspaceCapabilities(
 
 export function decodeWorkspaceSnapshot(value: unknown): WorkspaceSnapshot {
 	return sanitizedDecode(() => decodeWorkspaceSnapshotValue(value));
+}
+
+export function decodeWorkspaceWatchWakeEvent(
+	value: unknown,
+): WorkspaceWatchWakeEvent {
+	return sanitizedDecode(() => {
+		const snapshot = ownPlainDataSnapshot(value);
+		if (
+			!hasExactKeys(snapshot, ["workspaceId"]) ||
+			!isUuidV4(snapshot.workspaceId)
+		) {
+			return violation();
+		}
+		rejectProxyObject(value as object);
+		return Object.freeze({ workspaceId: snapshot.workspaceId });
+	});
+}
+
+export function decodeWorkspaceWatchSyncResult(
+	value: unknown,
+	request: Readonly<WorkspaceWatchSyncRequest>,
+): WorkspaceWatchSyncResult {
+	return sanitizedDecode(() => {
+		const snapshot = ownPlainDataSnapshot(value);
+		if (
+			!hasExactKeys(snapshot, ["workspaceId", "roots"]) ||
+			!isUuidV4(snapshot.workspaceId)
+		) {
+			return violation();
+		}
+		const arraySnapshot = ownArrayDataSnapshot(
+			snapshot.roots,
+			0,
+			request.roots.length,
+		);
+		const requested = new Map(
+			request.roots.map((root) => [root.rootId, root] as const),
+		);
+		const unique = new Set<string>();
+		const roots = arraySnapshot.entries.map(
+			(entry): WorkspaceWatchPendingRoot => {
+				const root = ownPlainDataSnapshot(entry);
+				const requestedRoot =
+					typeof root.rootId === "string"
+						? requested.get(root.rootId)
+						: undefined;
+				const saturatedReplay =
+					root.generation === MAX_WORKSPACE_WATCH_GENERATION &&
+					requestedRoot?.acknowledgedGeneration ===
+						MAX_WORKSPACE_WATCH_GENERATION &&
+					root.rescanRequired === true;
+				if (
+					!hasExactKeys(root, ["rootId", "generation", "rescanRequired"]) ||
+					requestedRoot === undefined ||
+					unique.has(requestedRoot.rootId) ||
+					typeof root.generation !== "number" ||
+					!Number.isSafeInteger(root.generation) ||
+					root.generation < 1 ||
+					root.generation > MAX_WORKSPACE_WATCH_GENERATION ||
+					(requestedRoot.acknowledgedGeneration !== null &&
+						root.generation <= requestedRoot.acknowledgedGeneration &&
+						!saturatedReplay) ||
+					typeof root.rescanRequired !== "boolean"
+				) {
+					return violation();
+				}
+				rejectProxyObject(entry as object);
+				unique.add(requestedRoot.rootId);
+				return Object.freeze({
+					rootId: requestedRoot.rootId,
+					generation: root.generation,
+					rescanRequired: root.rescanRequired,
+				});
+			},
+		);
+		rejectProxyObject(arraySnapshot.value);
+		rejectProxyObject(value as object);
+		return Object.freeze({
+			workspaceId: snapshot.workspaceId,
+			roots: Object.freeze(roots),
+		});
+	});
 }
 
 export function decodeWorkspacePickResult(value: unknown): WorkspacePickResult {

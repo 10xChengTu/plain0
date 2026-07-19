@@ -247,8 +247,53 @@ async function installNativeIpcMock(
 				  }
 				| undefined;
 			let nextCallbackId = 0;
+			let nextEventId = 0;
+			const callbacks = new Map<
+				number,
+				{ callback: (payload: unknown) => void; once: boolean }
+			>();
+			const eventHandlers = new Map<
+				number,
+				{ event: string; handlerId: number }
+			>();
+			let watchNextGeneration = 1;
+			let watchPending:
+				| { rootId: string; generation: number; rescanRequired: boolean }
+				| undefined;
+			let watchDirty = false;
+			let watchDirtyRescanRequired = false;
+			const promoteWatchDirty = (): void => {
+				if (watchPending !== undefined || !watchDirty) {
+					return;
+				}
+				watchPending = {
+					rootId,
+					generation: watchNextGeneration,
+					rescanRequired: watchDirtyRescanRequired,
+				};
+				watchNextGeneration = Math.min(0xffff_ffff, watchNextGeneration + 1);
+				watchDirty = false;
+				watchDirtyRescanRequired = false;
+			};
+			const emitWatchWake = (): void => {
+				for (const [eventId, registration] of eventHandlers) {
+					if (registration.event !== "plain://workspace-watch-wake") {
+						continue;
+					}
+					const transformed = callbacks.get(registration.handlerId);
+					transformed?.callback({
+						event: registration.event,
+						id: eventId,
+						payload: { workspaceId },
+					});
+					if (transformed?.once === true) {
+						callbacks.delete(registration.handlerId);
+					}
+				}
+			};
 			const testWindow = window as unknown as Window & {
 				__PLAIN_TEST_TAURI_CALLS__: typeof calls;
+				__PLAIN_TEST_EXTERNAL_CREATE__(name: string, emitWake: boolean): void;
 				__TAURI_EVENT_PLUGIN_INTERNALS__: {
 					unregisterListener(): void;
 				};
@@ -257,20 +302,43 @@ async function installNativeIpcMock(
 						command: string,
 						args?: Record<string, unknown> | Uint8Array,
 					): Promise<unknown>;
-					transformCallback(): number;
-					unregisterCallback(): void;
+					transformCallback(
+						callback?: (payload: unknown) => void,
+						once?: boolean,
+					): number;
+					unregisterCallback(callbackId: number): void;
 				};
 			};
 			testWindow.__PLAIN_TEST_TAURI_CALLS__ = calls;
+			testWindow.__PLAIN_TEST_EXTERNAL_CREATE__ = (name, shouldEmitWake) => {
+				if (
+					!/^[A-Za-z0-9._-]+$/u.test(name) ||
+					root.entries.has(name) ||
+					typeof shouldEmitWake !== "boolean"
+				) {
+					throw new Error("Invalid external workspace test change.");
+				}
+				root.entries.set(name, file(`external:${name}\n`));
+				watchDirty = true;
+				promoteWatchDirty();
+				if (shouldEmitWake) {
+					emitWatchWake();
+				}
+			};
 			testWindow.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
 				unregisterListener() {},
 			};
 			testWindow.__TAURI_INTERNALS__ = {
-				transformCallback() {
+				transformCallback(callback, once = false) {
 					nextCallbackId += 1;
+					if (callback !== undefined) {
+						callbacks.set(nextCallbackId, { callback, once });
+					}
 					return nextCallbackId;
 				},
-				unregisterCallback() {},
+				unregisterCallback(callbackId) {
+					callbacks.delete(callbackId);
+				},
 				async invoke(command, args: Record<string, unknown> | Uint8Array = {}) {
 					if (command === "workspace_write_file") {
 						if (!(args instanceof Uint8Array)) {
@@ -322,10 +390,23 @@ async function installNativeIpcMock(
 					const request = args.request as
 						{ rootId?: string; relativePath?: string } | undefined;
 					switch (command) {
-						case "plugin:event|listen":
-							return 1;
-						case "plugin:event|unlisten":
+						case "plugin:event|listen": {
+							const event = args.event;
+							const handlerId = args.handler;
+							if (typeof event !== "string" || typeof handlerId !== "number") {
+								throw new Error("Malformed Tauri event listener request.");
+							}
+							nextEventId += 1;
+							eventHandlers.set(nextEventId, { event, handlerId });
+							return nextEventId;
+						}
+						case "plugin:event|unlisten": {
+							const eventId = args.eventId;
+							if (typeof eventId === "number") {
+								eventHandlers.delete(eventId);
+							}
 							return undefined;
+						}
 						case "runtime_info":
 							return {
 								application: "Plain",
@@ -344,6 +425,43 @@ async function installNativeIpcMock(
 							return emptySnapshot;
 						case "workspace_pick_roots":
 							return { status: "selected", snapshot: selectedSnapshot };
+						case "workspace_watch_sync": {
+							const watchRequest = args.request as
+								| {
+										roots?: readonly {
+											rootId?: string;
+											acknowledgedGeneration?: number | null;
+										}[];
+								  }
+								| undefined;
+							const watchedRoot = watchRequest?.roots?.[0];
+							if (
+								watchRequest?.roots?.length !== 1 ||
+								watchedRoot?.rootId !== rootId
+							) {
+								return { workspaceId, roots: [] };
+							}
+							if (watchedRoot.acknowledgedGeneration === null) {
+								if (watchPending === undefined) {
+									watchDirty = true;
+									watchDirtyRescanRequired = true;
+								}
+							} else if (
+								typeof watchedRoot.acknowledgedGeneration === "number" &&
+								watchPending?.generation === watchedRoot.acknowledgedGeneration
+							) {
+								if (watchedRoot.acknowledgedGeneration === 0xffff_ffff) {
+									watchPending.rescanRequired = true;
+								} else {
+									watchPending = undefined;
+								}
+							}
+							promoteWatchDirty();
+							return {
+								workspaceId,
+								roots: watchPending === undefined ? [] : [watchPending],
+							};
+						}
 						case "workspace_create_file": {
 							if (request?.rootId !== rootId) {
 								throw entryNotFound();
@@ -880,6 +998,94 @@ for (const rawReadTransport of ["arrayBuffer", "numberArray"] as const) {
 		expect(errors).toEqual([]);
 	});
 }
+
+test("refreshes Explorer after watcher wakes and after a lost wake timer pull", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	await installNativeIpcMock(page, "arrayBuffer");
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			errors.push(message.text());
+		}
+	});
+
+	const explorer = await openNativeWorkspaceExplorer(page);
+	await expect
+		.poll(() =>
+			page.evaluate(() => {
+				const testWindow = window as unknown as Window & {
+					__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+				};
+				return testWindow.__PLAIN_TEST_TAURI_CALLS__.some(
+					({ command, args }) =>
+						command === "plugin:event|listen" &&
+						args.event === "plain://workspace-watch-wake",
+				);
+			}),
+		)
+		.toBe(true);
+
+	await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_EXTERNAL_CREATE__(name: string, emitWake: boolean): void;
+		};
+		testWindow.__PLAIN_TEST_EXTERNAL_CREATE__("external-wake.txt", true);
+	});
+	await expect(
+		explorer.getByRole("treeitem", {
+			name: "external-wake.txt",
+			exact: true,
+		}),
+	).toHaveCount(1, { timeout: 5_000 });
+
+	await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_EXTERNAL_CREATE__(name: string, emitWake: boolean): void;
+		};
+		testWindow.__PLAIN_TEST_EXTERNAL_CREATE__("external-timer.txt", false);
+	});
+	await expect(
+		explorer.getByRole("treeitem", {
+			name: "external-timer.txt",
+			exact: true,
+		}),
+	).toHaveCount(1, { timeout: 7_000 });
+
+	const watcherRequests = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+		};
+		return testWindow.__PLAIN_TEST_TAURI_CALLS__
+			.filter(({ command }) => command === "workspace_watch_sync")
+			.map(({ args }) => args.request);
+	});
+	expect(watcherRequests.length).toBeGreaterThanOrEqual(5);
+	for (const request of watcherRequests) {
+		const roots = (
+			request as {
+				roots?: readonly {
+					rootId?: unknown;
+					acknowledgedGeneration?: unknown;
+				}[];
+			}
+		).roots;
+		expect(roots).toHaveLength(1);
+		expect(roots?.[0]?.rootId).toBe(nativeRootId);
+		const acknowledgedGeneration = roots?.[0]?.acknowledgedGeneration;
+		expect(
+			acknowledgedGeneration === null ||
+				(typeof acknowledgedGeneration === "number" &&
+					Number.isInteger(acknowledgedGeneration) &&
+					acknowledgedGeneration > 0),
+		).toBe(true);
+		expect(JSON.stringify(request)).not.toMatch(
+			/(?:relative|canonical|native)?path/iu,
+		);
+	}
+	expect(errors).toEqual([]);
+});
 
 test("routes all-five workspace CRUD, save, rename and permanent delete through native IPC", async ({
 	page,

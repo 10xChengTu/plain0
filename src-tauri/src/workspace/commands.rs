@@ -1,4 +1,6 @@
-use tauri::{State, WebviewWindow};
+use std::sync::Arc;
+
+use tauri::{Emitter, EventTarget, Manager, State, WebviewWindow};
 
 use crate::error::CommandError;
 
@@ -8,10 +10,13 @@ use super::dto::{
     WorkspaceDeleteResult, WorkspaceEntryRequest, WorkspaceEntryStat, WorkspaceMoveRequest,
     WorkspaceMoveResult, WorkspacePickRootsRequest, WorkspacePickRootsResult,
     WorkspacePrepareDeleteRequest, WorkspaceReadDirectoryResult, WorkspaceRemoveRootRequest,
-    WorkspaceRenameRequest, WorkspaceSnapshot, WorkspaceSnapshotRequest, WorkspaceWriteResult,
+    WorkspaceRenameRequest, WorkspaceSnapshot, WorkspaceSnapshotRequest, WorkspaceWatchSyncRequest,
+    WorkspaceWatchSyncResult, WorkspaceWatchWakeEvent, WorkspaceWriteResult,
 };
 use super::picker::TauriDirectoryPicker;
 use super::service::WorkspaceService;
+
+pub(crate) const WORKSPACE_WATCH_WAKE_EVENT: &str = "plain://workspace-watch-wake";
 
 #[tauri::command]
 pub(crate) fn workspace_capabilities(
@@ -39,8 +44,28 @@ pub(crate) async fn workspace_pick_roots(
     request: WorkspacePickRootsRequest,
 ) -> Result<WorkspacePickRootsResult, CommandError> {
     let picker = TauriDirectoryPicker::new(window.clone());
+    let app = window.app_handle().clone();
+    let window_label = window.label().to_owned();
+    let watch_wake_sink = Arc::new(move |workspace_id| {
+        let _ = app.emit_to(
+            EventTarget::webview_window(window_label.clone()),
+            WORKSPACE_WATCH_WAKE_EVENT,
+            WorkspaceWatchWakeEvent::new(workspace_id),
+        );
+    });
     service
-        .pick_roots(window.label(), picker, request.mode())
+        .pick_roots_with_watch_sink(window.label(), picker, request.mode(), watch_wake_sink)
+        .await
+}
+
+#[tauri::command]
+pub(crate) async fn workspace_watch_sync(
+    window: WebviewWindow,
+    service: State<'_, WorkspaceService>,
+    request: WorkspaceWatchSyncRequest,
+) -> Result<WorkspaceWatchSyncResult, CommandError> {
+    service
+        .watch_sync(window.label(), request.into_parts()?)
         .await
 }
 

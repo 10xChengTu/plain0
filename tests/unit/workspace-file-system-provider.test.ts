@@ -193,6 +193,9 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async workspaceSnapshot() {
 			throw new Error("unused");
 		},
+		workspaceWatch() {
+			return () => {};
+		},
 		async workspacePickRoots() {
 			throw new Error("unused");
 		},
@@ -2126,13 +2129,57 @@ describe("Plain workspace file system provider", () => {
 		}
 	});
 
-	it("provides a strict no-op watcher without broadening URI access", () => {
-		const provider = createPlainWorkspaceFileSystemProvider(testBridge());
-		const disposable = provider.watch(workspaceUri("src"), {
-			recursive: true,
-			excludes: [],
+	it("routes supported and readonly watches through the same root-scoped bridge and disposes once", () => {
+		const watchListeners: Array<() => void> = [];
+		const unlisteners: Array<ReturnType<typeof vi.fn>> = [];
+		const workspaceWatch = vi.fn(
+			(watchedRootId: string, listener: () => void) => {
+				watchListeners.push(listener);
+				const unlisten = vi.fn();
+				unlisteners.push(unlisten);
+				return unlisten;
+			},
+		);
+		const bridge = testBridge({ workspaceWatch });
+		const readonlyCapabilities = Object.freeze({
+			create: false,
+			renameNoReplace: false,
+			copyMove: false,
+			delete: false,
+			versionedWrite: false,
 		});
-		expect(() => disposable.dispose()).not.toThrow();
+
+		for (const capabilities of [supportedCapabilities, readonlyCapabilities]) {
+			const provider = createPlainWorkspaceFileSystemProvider(
+				bridge,
+				capabilities,
+			);
+			const changes: ProviderChanges[] = [];
+			const subscription = provider.onDidChangeFile((event: ProviderChanges) =>
+				changes.push(event),
+			);
+			const disposable = provider.watch(workspaceUri("src"), {
+				recursive: true,
+				excludes: [],
+			});
+
+			watchListeners.at(-1)!();
+			expect(changes).toHaveLength(1);
+			expect(changes[0]).toHaveLength(1);
+			expect(changes[0]![0]!.type).toBe(FileChangeType.UPDATED);
+			expect(changes[0]![0]!.resource.toString()).toBe(rootUri);
+			disposable.dispose();
+			disposable.dispose();
+			expect(unlisteners.at(-1)).toHaveBeenCalledOnce();
+			subscription.dispose();
+		}
+
+		expect(workspaceWatch.mock.calls).toEqual([
+			[rootId, watchListeners[0]],
+			[rootId, watchListeners[1]],
+		]);
+
+		const provider = createPlainWorkspaceFileSystemProvider(bridge);
 		expect(() =>
 			provider.watch(URI.parse(`file://${rootId}/src`), {
 				recursive: true,

@@ -1,6 +1,4 @@
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::collections::BTreeMap;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::time::{Duration, Instant};
@@ -12,18 +10,24 @@ use super::dto::{
     DeleteConfirmationId, DeleteEntryId, WorkspaceDeleteBatchPlan, WorkspaceDeleteResult,
     WorkspaceEntryStat, WorkspaceMoveResult, WorkspacePickRootsMode, WorkspacePickRootsResult,
     WorkspacePickRootsStatus, WorkspaceReadDirectoryResult, WorkspaceSnapshot,
-    WorkspaceWriteResult,
+    WorkspaceWatchPendingRoot, WorkspaceWatchSyncResult, WorkspaceWriteResult,
 };
 use super::picker::{DirectoryPicker, DirectoryPickerResult};
 use super::reader;
+use super::watcher::{
+    WatchAcknowledgement, WatchRegistration, WatchRegistrationEpoch, WatchScanOutcome,
+    WindowWatcher,
+};
 use super::writer;
-use super::{RootId, WorkspaceRootLease, WorkspaceScope};
+use super::{RootId, WorkspaceId, WorkspaceRootLease, WorkspaceScope};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::delete::{DeleteBatchReceipt, DeleteSelection};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const DELETE_BATCH_IDLE_TTL: Duration = Duration::from_secs(120);
+
+type WorkspaceWatchWakeSink = Arc<dyn Fn(WorkspaceId) + Send + Sync>;
 
 pub struct WorkspaceService {
     windows: Mutex<HashMap<String, Arc<WindowWorkspace>>>,
@@ -64,6 +68,17 @@ impl WorkspaceService {
         picker: P,
         mode: WorkspacePickRootsMode,
     ) -> Result<WorkspacePickRootsResult, CommandError> {
+        self.pick_roots_with_watch_sink(window_label, picker, mode, Arc::new(|_workspace_id| {}))
+            .await
+    }
+
+    pub(crate) async fn pick_roots_with_watch_sink<P: DirectoryPicker>(
+        &self,
+        window_label: &str,
+        picker: P,
+        mode: WorkspacePickRootsMode,
+        watch_wake_sink: WorkspaceWatchWakeSink,
+    ) -> Result<WorkspacePickRootsResult, CommandError> {
         let workspace = self.scope_for_window(window_label)?;
         let picker_token = workspace.begin_picker()?;
         let selection = match picker.pick_directories(mode.allows_multiple()).await {
@@ -75,7 +90,7 @@ impl WorkspaceService {
         };
 
         tauri::async_runtime::spawn_blocking(move || {
-            workspace.finish_picker(picker_token, mode, selection)
+            workspace.finish_picker(picker_token, mode, selection, watch_wake_sink)
         })
         .await
         .map_err(|_| workspace_operation_failed())?
@@ -348,6 +363,27 @@ impl WorkspaceService {
         }
     }
 
+    pub async fn watch_sync(
+        &self,
+        window_label: &str,
+        roots: Vec<(RootId, Option<u32>)>,
+    ) -> Result<WorkspaceWatchSyncResult, CommandError> {
+        let workspace = self.scope_for_window(window_label)?;
+        tauri::async_runtime::spawn_blocking(move || workspace.watch_sync(&roots))
+            .await
+            .map_err(|_| workspace_operation_failed())?
+    }
+
+    pub fn mark_all_watchers_rescan(&self) {
+        let windows = match self.windows.lock() {
+            Ok(windows) => windows.values().cloned().collect::<Vec<_>>(),
+            Err(poisoned) => poisoned.into_inner().values().cloned().collect::<Vec<_>>(),
+        };
+        for workspace in windows {
+            workspace.mark_all_watchers_rescan();
+        }
+    }
+
     pub fn close_window(&self, window_label: &str) {
         if let Some(workspace) = self.detach_window(window_label) {
             workspace.close();
@@ -549,6 +585,7 @@ fn classify_versioned_write_join<E>(
 struct WindowWorkspace {
     mutation_gate: Mutex<()>,
     state: Mutex<WindowWorkspaceState>,
+    watcher: Mutex<Option<Arc<WindowWatcher>>>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     delete_clock: Arc<dyn Fn() -> Instant + Send + Sync>,
 }
@@ -565,10 +602,13 @@ impl WindowWorkspace {
                 scope: WorkspaceScope::new(),
                 next_picker_token: 0,
                 active_picker: None,
+                next_watch_epoch: 0,
+                watch_registrations: BTreeMap::new(),
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 active_delete_batch: None,
                 closed: false,
             }),
+            watcher: Mutex::new(None),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             delete_clock,
         }
@@ -603,53 +643,289 @@ impl WindowWorkspace {
     }
 
     fn finish_picker(
-        &self,
+        self: &Arc<Self>,
         token: u64,
         mode: WorkspacePickRootsMode,
         selection: DirectoryPickerResult,
+        watch_wake_sink: WorkspaceWatchWakeSink,
     ) -> Result<WorkspacePickRootsResult, CommandError> {
-        let _mutation = lock(&self.mutation_gate)?;
+        let mutation = lock(&self.mutation_gate)?;
         let mut state = lock(&self.state)?;
         ensure_active_picker(&state, token)?;
 
-        let status = match selection {
+        let (result, watcher, active_registrations) = match selection {
             DirectoryPickerResult::Selected(paths) if paths.is_empty() => {
-                WorkspacePickRootsStatus::Cancelled
+                state.active_picker = None;
+                (
+                    WorkspacePickRootsResult::new(
+                        WorkspacePickRootsStatus::Cancelled,
+                        state.scope.snapshot(),
+                    ),
+                    None,
+                    Vec::new(),
+                )
             }
             DirectoryPickerResult::Selected(paths) => {
-                let authorization = match mode {
-                    WorkspacePickRootsMode::Add => {
-                        state.scope.authorize_roots_atomically(&paths).map(|_| ())
+                if matches!(mode, WorkspacePickRootsMode::Replace) && paths.len() != 1 {
+                    state.active_picker = None;
+                    return Err(invalid_picker_selection());
+                }
+                let watcher = match self
+                    .watcher_for(state.scope.workspace_id(), Arc::clone(&watch_wake_sink))
+                {
+                    Ok(watcher) => watcher,
+                    Err(error) => {
+                        state.active_picker = None;
+                        return Err(error);
                     }
-                    WorkspacePickRootsMode::Replace => match paths.as_slice() {
-                        [path] => state.scope.replace_root_atomically(path).map(|_| ()),
-                        _ => Err(invalid_picker_selection()),
-                    },
                 };
+                let mut next_watch_epoch = state.next_watch_epoch;
+                let mut prepared = Vec::new();
+                let mut prepare = |root_id, watch_path: &std::path::Path, _lease| {
+                    next_watch_epoch = next_watch_epoch
+                        .checked_add(1)
+                        .ok_or_else(workspace_conflict)?;
+                    let epoch = WatchRegistrationEpoch::new(next_watch_epoch)?;
+                    prepared.push(
+                        watcher.prepare_root(WatchRegistration::new(root_id, epoch), watch_path)?,
+                    );
+                    Ok(())
+                };
+                let authorization = match mode {
+                    WorkspacePickRootsMode::Add => state
+                        .scope
+                        .authorize_roots_atomically_with(&paths, &mut prepare)
+                        .map(|_| ()),
+                    WorkspacePickRootsMode::Replace => state
+                        .scope
+                        .replace_root_atomically_with(&paths[0], &mut prepare)
+                        .map(|_| ()),
+                };
+                state.next_watch_epoch = next_watch_epoch;
                 state.active_picker = None;
                 authorization?;
+                for prepared_watcher in prepared {
+                    let registration = watcher.activate(prepared_watcher);
+                    state
+                        .watch_registrations
+                        .insert(registration.root_id(), registration);
+                }
+                let active_root_ids = state.scope.root_ids().into_iter().collect::<BTreeSet<_>>();
+                state
+                    .watch_registrations
+                    .retain(|root_id, _| active_root_ids.contains(root_id));
+                let active_registrations = state
+                    .watch_registrations
+                    .values()
+                    .copied()
+                    .collect::<Vec<_>>();
                 invalidate_delete_batch(&mut state);
-                return Ok(WorkspacePickRootsResult::new(
-                    WorkspacePickRootsStatus::Selected,
-                    state.scope.snapshot(),
-                ));
+                (
+                    WorkspacePickRootsResult::new(
+                        WorkspacePickRootsStatus::Selected,
+                        state.scope.snapshot(),
+                    ),
+                    Some(watcher),
+                    active_registrations,
+                )
             }
-            DirectoryPickerResult::Cancelled => WorkspacePickRootsStatus::Cancelled,
+            DirectoryPickerResult::Cancelled => {
+                state.active_picker = None;
+                (
+                    WorkspacePickRootsResult::new(
+                        WorkspacePickRootsStatus::Cancelled,
+                        state.scope.snapshot(),
+                    ),
+                    None,
+                    Vec::new(),
+                )
+            }
         };
-        state.active_picker = None;
-        Ok(WorkspacePickRootsResult::new(
-            status,
-            state.scope.snapshot(),
-        ))
+        drop(state);
+        drop(mutation);
+        if let Some(watcher) = watcher {
+            watcher.retain(&active_registrations);
+        }
+        Ok(result)
+    }
+
+    fn watcher_for(
+        self: &Arc<Self>,
+        workspace_id: WorkspaceId,
+        watch_wake_sink: WorkspaceWatchWakeSink,
+    ) -> Result<Arc<WindowWatcher>, CommandError> {
+        let mut slot = lock(&self.watcher)?;
+        if let Some(watcher) = slot.as_ref() {
+            return Ok(Arc::clone(watcher));
+        }
+
+        let weak_workspace = Arc::downgrade(self);
+        let scanner = move |root_id, epoch| {
+            weak_workspace
+                .upgrade()
+                .map_or(WatchScanOutcome::Stale, |workspace| {
+                    workspace.scan_watch_root(root_id, epoch)
+                })
+        };
+        let pending_emitter = move || watch_wake_sink(workspace_id);
+        let watcher = Arc::new(WindowWatcher::start(
+            workspace_id,
+            scanner,
+            pending_emitter,
+        )?);
+        *slot = Some(Arc::clone(&watcher));
+        Ok(watcher)
+    }
+
+    fn scan_watch_root(&self, root_id: RootId, epoch: WatchRegistrationEpoch) -> WatchScanOutcome {
+        let Ok(_mutation) = self.mutation_gate.lock() else {
+            return WatchScanOutcome::Failed;
+        };
+        let lease = {
+            let Ok(state) = self.state.lock() else {
+                return WatchScanOutcome::Failed;
+            };
+            if state.closed
+                || state
+                    .watch_registrations
+                    .get(&root_id)
+                    .is_none_or(|registration| registration.epoch() != epoch)
+            {
+                return WatchScanOutcome::Stale;
+            }
+            match state.scope.lease(root_id) {
+                Ok(lease) => lease,
+                Err(_) => return WatchScanOutcome::Failed,
+            }
+        };
+
+        let root_path = RelativePath::parse_wire("")
+            .expect("the empty workspace-relative path is always valid");
+        let scan_succeeded = reader::read_directory(&lease, &root_path).is_ok();
+        let Ok(state) = self.state.lock() else {
+            return WatchScanOutcome::Failed;
+        };
+        let still_current = !state.closed
+            && state.scope.contains_root(root_id)
+            && state
+                .watch_registrations
+                .get(&root_id)
+                .is_some_and(|registration| registration.epoch() == epoch);
+        if !still_current {
+            WatchScanOutcome::Stale
+        } else if scan_succeeded {
+            WatchScanOutcome::Valid
+        } else {
+            WatchScanOutcome::Failed
+        }
+    }
+
+    fn watch_sync(
+        &self,
+        roots: &[(RootId, Option<u32>)],
+    ) -> Result<WorkspaceWatchSyncResult, CommandError> {
+        let _mutation = lock(&self.mutation_gate)?;
+        let (workspace_id, requested) = {
+            let state = lock(&self.state)?;
+            ensure_open(&state)?;
+            let requested = roots
+                .iter()
+                .filter_map(|(root_id, acknowledged_generation)| {
+                    state
+                        .watch_registrations
+                        .get(root_id)
+                        .copied()
+                        .map(|registration| (registration, *acknowledged_generation))
+                })
+                .collect::<Vec<_>>();
+            (state.scope.workspace_id(), requested)
+        };
+        let watcher = lock(&self.watcher)?.clone();
+        let Some(watcher) = watcher else {
+            return Ok(WorkspaceWatchSyncResult::new(workspace_id, Vec::new()));
+        };
+
+        let mut acknowledgements = Vec::new();
+        let mut first_subscriptions = Vec::new();
+        let mut requested_root_ids = BTreeSet::new();
+        for (registration, acknowledged_generation) in requested {
+            requested_root_ids.insert(registration.root_id());
+            if let Some(generation) = acknowledged_generation {
+                acknowledgements.push(WatchAcknowledgement::new(
+                    registration.root_id(),
+                    generation,
+                )?);
+            } else {
+                first_subscriptions.push(registration);
+            }
+        }
+        let mut snapshot = watcher.sync(&acknowledgements)?;
+        if snapshot.workspace_id() != workspace_id {
+            return Err(workspace_conflict());
+        }
+        let already_pending = snapshot
+            .pending()
+            .iter()
+            .map(|root| root.root_id())
+            .collect::<BTreeSet<_>>();
+        let mut requested_scan = false;
+        for registration in first_subscriptions {
+            if !already_pending.contains(&registration.root_id()) {
+                requested_scan |= watcher.mark_root_rescan(registration);
+            }
+        }
+        if requested_scan {
+            snapshot = watcher.sync(&[])?;
+            if snapshot.workspace_id() != workspace_id {
+                return Err(workspace_conflict());
+            }
+        }
+        let pending = snapshot
+            .into_pending()
+            .into_iter()
+            .filter(|root| requested_root_ids.contains(&root.root_id()))
+            .map(|root| {
+                WorkspaceWatchPendingRoot::new(
+                    root.root_id(),
+                    root.generation(),
+                    root.rescan_required(),
+                )
+            })
+            .collect();
+        Ok(WorkspaceWatchSyncResult::new(workspace_id, pending))
+    }
+
+    fn mark_all_watchers_rescan(&self) {
+        let watcher = self
+            .watcher
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(watcher) = watcher {
+            watcher.mark_all_rescan();
+        }
     }
 
     fn remove_root(&self, root_id: RootId) -> Result<WorkspaceSnapshot, CommandError> {
-        let _mutation = lock(&self.mutation_gate)?;
+        let mutation = lock(&self.mutation_gate)?;
         let mut state = lock(&self.state)?;
         ensure_open(&state)?;
         state.scope.remove(root_id)?;
+        state.watch_registrations.remove(&root_id);
+        let active_registrations = state
+            .watch_registrations
+            .values()
+            .copied()
+            .collect::<Vec<_>>();
         invalidate_delete_batch(&mut state);
-        Ok(state.scope.snapshot())
+        let snapshot = state.scope.snapshot();
+        let watcher = lock(&self.watcher)?.clone();
+        drop(state);
+        drop(mutation);
+        if let Some(watcher) = watcher {
+            watcher.retain(&active_registrations);
+        }
+        Ok(snapshot)
     }
 
     fn lease(&self, root_id: RootId) -> Result<WorkspaceRootLease, CommandError> {
@@ -839,7 +1115,7 @@ impl WindowWorkspace {
     }
 
     fn close(&self) {
-        let _mutation = match self.mutation_gate.lock() {
+        let mutation = match self.mutation_gate.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
@@ -849,7 +1125,18 @@ impl WindowWorkspace {
         };
         state.closed = true;
         state.active_picker = None;
+        state.watch_registrations.clear();
         invalidate_delete_batch(&mut state);
+        let watcher = self
+            .watcher
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        drop(state);
+        drop(mutation);
+        if let Some(watcher) = watcher {
+            watcher.close();
+        }
     }
 }
 
@@ -857,6 +1144,8 @@ struct WindowWorkspaceState {
     scope: WorkspaceScope,
     next_picker_token: u64,
     active_picker: Option<u64>,
+    next_watch_epoch: u64,
+    watch_registrations: BTreeMap<RootId, WatchRegistration>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     active_delete_batch: Option<DeleteBatchReceipt>,
     closed: bool,

@@ -1,7 +1,11 @@
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 
-import { RUNTIME_READY_EVENT, type PlainBridge } from "./contracts";
+import {
+	RUNTIME_READY_EVENT,
+	WORKSPACE_WATCH_WAKE_EVENT,
+	type PlainBridge,
+} from "./contracts";
 import {
 	decodeRuntimeInfo,
 	decodeWorkspaceCapabilities,
@@ -16,6 +20,8 @@ import {
 	decodeWorkspaceReadDirectory,
 	decodeWorkspaceSnapshot,
 	decodeWorkspaceVoid,
+	decodeWorkspaceWatchSyncResult,
+	decodeWorkspaceWatchWakeEvent,
 	encodeWorkspaceWriteFileRequest,
 	frozenWorkspaceCopyRequest,
 	frozenWorkspaceCommitDeleteEntryRequest,
@@ -25,10 +31,26 @@ import {
 	frozenWorkspaceMoveRequest,
 	frozenWorkspacePrepareDeleteRequest,
 	frozenWorkspaceRenameRequest,
+	frozenWorkspaceWatchSyncRequest,
 	workspaceWriteResponseUnavailable,
 } from "./workspace-codec";
+import { createWorkspaceWatcherManager } from "./workspace-watcher";
 
 export function createNativeBridge(): PlainBridge {
+	const workspaceWatcher = createWorkspaceWatcherManager({
+		listenWake: async (listener) =>
+			listen<unknown>(WORKSPACE_WATCH_WAKE_EVENT, (event) =>
+				listener(decodeWorkspaceWatchWakeEvent(event.payload)),
+			),
+		sync: async ({ roots }) => {
+			const request = frozenWorkspaceWatchSyncRequest(roots);
+			return decodeWorkspaceWatchSyncResult(
+				await invoke<unknown>("workspace_watch_sync", { request }),
+				request,
+			);
+		},
+	});
+
 	return {
 		runtimeInfo: async () =>
 			decodeRuntimeInfo(await invoke<unknown>("runtime_info")),
@@ -45,6 +67,7 @@ export function createNativeBridge(): PlainBridge {
 			decodeWorkspaceSnapshot(
 				await invoke<unknown>("workspace_snapshot", { request: {} }),
 			),
+		workspaceWatch: workspaceWatcher.workspaceWatch,
 		workspacePickRoots: async (mode) =>
 			decodeWorkspacePickResult(
 				await invoke<unknown>("workspace_pick_roots", {

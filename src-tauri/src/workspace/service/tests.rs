@@ -14,7 +14,7 @@ use crate::workspace::dto::{
     WorkspacePickRootsMode, WorkspacePickRootsStatus,
 };
 use crate::workspace::picker::{DirectoryPicker, DirectoryPickerFuture, DirectoryPickerResult};
-use crate::workspace::MAX_WORKSPACE_ROOTS;
+use crate::workspace::{RootId, MAX_WORKSPACE_ROOTS};
 
 enum FakeOutcome {
     Selected(Vec<PathBuf>),
@@ -155,6 +155,95 @@ fn multi_selection_registers_roots_in_stable_authorization_order() {
     assert_eq!(result.snapshot().roots().len(), 2);
     assert_eq!(result.snapshot().roots()[0].display_name(), "first");
     assert_eq!(result.snapshot().roots()[1].display_name(), "second");
+}
+
+#[test]
+fn watcher_sync_is_sticky_window_scoped_and_rescans_after_resume() {
+    let temp = TempDir::new().unwrap();
+    let first = create_directory(&temp, "first");
+    let second = create_directory(&temp, "second");
+    let service = WorkspaceService::new();
+    let (wake_sender, wake_receiver) = mpsc::channel();
+
+    let selected = block_on(service.pick_roots_with_watch_sink(
+        "main",
+        FakePicker::selected(vec![first, second]),
+        WorkspacePickRootsMode::Add,
+        Arc::new(move |workspace_id| {
+            let _ = wake_sender.send(workspace_id);
+        }),
+    ))
+    .unwrap();
+    let workspace_id = selected.snapshot().workspace_id();
+    let first_root_id = selected.snapshot().roots()[0].root_id();
+    let second_root_id = selected.snapshot().roots()[1].root_id();
+    assert_eq!(
+        wake_receiver.recv_timeout(Duration::from_secs(3)).unwrap(),
+        workspace_id
+    );
+
+    let first_pending = block_on(service.watch_sync("main", vec![(first_root_id, None)])).unwrap();
+    assert_eq!(first_pending.workspace_id(), workspace_id);
+    assert_eq!(first_pending.roots().len(), 1);
+    let first_generation = first_pending.roots()[0].generation();
+    assert_eq!(first_pending.roots()[0].root_id(), first_root_id);
+    assert!(first_pending.roots()[0].rescan_required());
+
+    let sticky = block_on(service.watch_sync("main", vec![(first_root_id, None)])).unwrap();
+    assert_eq!(sticky, first_pending);
+
+    let second_pending =
+        block_on(service.watch_sync("main", vec![(second_root_id, None)])).unwrap();
+    assert_eq!(second_pending.roots().len(), 1);
+    let second_generation = second_pending.roots()[0].generation();
+    assert_eq!(second_pending.roots()[0].root_id(), second_root_id);
+    assert!(second_pending.roots()[0].rescan_required());
+
+    let unknown = block_on(service.watch_sync("main", vec![(RootId::new(), None)])).unwrap();
+    assert!(unknown.roots().is_empty());
+    assert!(
+        block_on(service.watch_sync("main", vec![(first_root_id, Some(first_generation))]))
+            .unwrap()
+            .roots()
+            .is_empty()
+    );
+    assert!(
+        block_on(service.watch_sync("main", vec![(second_root_id, Some(second_generation))]))
+            .unwrap()
+            .roots()
+            .is_empty()
+    );
+
+    while wake_receiver.try_recv().is_ok() {}
+    service.mark_all_watchers_rescan();
+    assert_eq!(
+        wake_receiver.recv_timeout(Duration::from_secs(3)).unwrap(),
+        workspace_id
+    );
+    let resumed = block_on(service.watch_sync(
+        "main",
+        vec![
+            (first_root_id, Some(first_generation)),
+            (second_root_id, Some(second_generation)),
+        ],
+    ))
+    .unwrap();
+    assert_eq!(resumed.roots().len(), 2);
+    for root in resumed.roots() {
+        assert!(root.rescan_required());
+        if root.root_id() == first_root_id {
+            assert!(root.generation() > first_generation);
+        } else {
+            assert_eq!(root.root_id(), second_root_id);
+            assert!(root.generation() > second_generation);
+        }
+    }
+
+    service.remove_root("main", second_root_id).unwrap();
+    let removed =
+        block_on(service.watch_sync("main", vec![(second_root_id, Some(second_generation))]))
+            .unwrap();
+    assert!(removed.roots().is_empty());
 }
 
 #[test]

@@ -3,6 +3,7 @@ use std::fs;
 use tempfile::TempDir;
 
 use super::{RootId, WorkspaceScope};
+use crate::error::CommandError;
 use crate::path_policy::RelativePath;
 
 #[test]
@@ -109,6 +110,53 @@ fn replace_is_atomic_reuses_existing_identity_and_revokes_old_capabilities() {
         .unwrap_err();
     assert_eq!(error.code(), "ROOT_UNAVAILABLE");
     assert_eq!(scope.snapshot(), before_failure);
+}
+
+#[test]
+fn watcher_preparation_failure_preserves_the_complete_scope_transaction() {
+    let temp = TempDir::new().unwrap();
+    let existing = temp.path().join("existing");
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    fs::create_dir(&existing).unwrap();
+    fs::create_dir(&first).unwrap();
+    fs::create_dir(&second).unwrap();
+
+    let mut scope = WorkspaceScope::new();
+    scope.authorize_root(&existing).unwrap();
+    let before_add = scope.snapshot();
+    let mut prepared = Vec::new();
+    let error = scope
+        .authorize_roots_atomically_with(&[first.clone(), second.clone()], |_, path, lease| {
+            assert!(path.is_absolute());
+            assert!(lease.directory().dir_metadata().unwrap().is_dir());
+            prepared.push(path.to_path_buf());
+            if prepared.len() == 2 {
+                Err(CommandError::new(
+                    "WORKSPACE_WATCH_UNAVAILABLE",
+                    "The workspace watcher could not be started.",
+                ))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+    assert_eq!(error.code(), "WORKSPACE_WATCH_UNAVAILABLE");
+    assert_eq!(prepared.len(), 2);
+    assert_eq!(scope.snapshot(), before_add);
+
+    let before_replace = scope.snapshot();
+    let error = scope
+        .replace_root_atomically_with(&first, |_, path, _| {
+            assert!(path.is_absolute());
+            Err(CommandError::new(
+                "WORKSPACE_WATCH_UNAVAILABLE",
+                "The workspace watcher could not be started.",
+            ))
+        })
+        .unwrap_err();
+    assert_eq!(error.code(), "WORKSPACE_WATCH_UNAVAILABLE");
+    assert_eq!(scope.snapshot(), before_replace);
 }
 
 #[cfg(unix)]

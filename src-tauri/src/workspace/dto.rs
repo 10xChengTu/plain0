@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt;
 
 use serde::de::Error as _;
@@ -139,6 +140,210 @@ pub struct WorkspaceSnapshotRequest {}
 
 impl WorkspaceSnapshotRequest {
     pub const fn validate(self) {}
+}
+
+const MAX_WORKSPACE_WATCH_ROOTS: usize = 256;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum WorkspaceWatchAcknowledgedGeneration {
+    #[default]
+    Missing,
+    None,
+    Generation(u32),
+}
+
+impl<'de> Deserialize<'de> for WorkspaceWatchAcknowledgedGeneration {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct NullableGenerationVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for NullableGenerationVisitor {
+            type Value = WorkspaceWatchAcknowledgedGeneration;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("null or a positive 32-bit watcher generation")
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(WorkspaceWatchAcknowledgedGeneration::None)
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(WorkspaceWatchAcknowledgedGeneration::None)
+            }
+
+            fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                let generation = u32::deserialize(deserializer)?;
+                if generation == 0 {
+                    return Err(D::Error::custom(
+                        "watcher generation must be greater than zero",
+                    ));
+                }
+                Ok(WorkspaceWatchAcknowledgedGeneration::Generation(generation))
+            }
+
+            fn visit_u64<E>(self, generation: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                let generation = u32::try_from(generation)
+                    .map_err(|_| E::custom("watcher generation is out of range"))?;
+                if generation == 0 {
+                    return Err(E::custom("watcher generation must be greater than zero"));
+                }
+                Ok(WorkspaceWatchAcknowledgedGeneration::Generation(generation))
+            }
+        }
+
+        deserializer.deserialize_option(NullableGenerationVisitor)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WorkspaceWatchSyncRootRequest {
+    root_id: RootId,
+    acknowledged_generation: WorkspaceWatchAcknowledgedGeneration,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkspaceWatchSyncRootRequestWire {
+    root_id: RootId,
+    #[serde(default)]
+    acknowledged_generation: WorkspaceWatchAcknowledgedGeneration,
+}
+
+impl<'de> Deserialize<'de> for WorkspaceWatchSyncRootRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = WorkspaceWatchSyncRootRequestWire::deserialize(deserializer)?;
+        if wire.acknowledged_generation == WorkspaceWatchAcknowledgedGeneration::Missing {
+            return Err(D::Error::missing_field("acknowledgedGeneration"));
+        }
+        Ok(Self {
+            root_id: wire.root_id,
+            acknowledged_generation: wire.acknowledged_generation,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceWatchSyncRequest {
+    roots: Vec<WorkspaceWatchSyncRootRequest>,
+}
+
+impl WorkspaceWatchSyncRequest {
+    pub fn into_parts(self) -> Result<Vec<(RootId, Option<u32>)>, CommandError> {
+        if self.roots.is_empty() || self.roots.len() > MAX_WORKSPACE_WATCH_ROOTS {
+            return Err(workspace_watch_request_invalid());
+        }
+        let mut unique = BTreeSet::new();
+        let mut roots = Vec::with_capacity(self.roots.len());
+        for root in self.roots {
+            if !unique.insert(root.root_id) {
+                return Err(workspace_watch_request_invalid());
+            }
+            let acknowledged_generation = match root.acknowledged_generation {
+                WorkspaceWatchAcknowledgedGeneration::Missing => {
+                    return Err(workspace_watch_request_invalid());
+                }
+                WorkspaceWatchAcknowledgedGeneration::None => None,
+                WorkspaceWatchAcknowledgedGeneration::Generation(generation) => Some(generation),
+            };
+            roots.push((root.root_id, acknowledged_generation));
+        }
+        Ok(roots)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceWatchPendingRoot {
+    root_id: RootId,
+    generation: u32,
+    rescan_required: bool,
+}
+
+impl WorkspaceWatchPendingRoot {
+    pub(crate) const fn new(root_id: RootId, generation: u32, rescan_required: bool) -> Self {
+        Self {
+            root_id,
+            generation,
+            rescan_required,
+        }
+    }
+
+    pub const fn root_id(self) -> RootId {
+        self.root_id
+    }
+
+    pub const fn generation(self) -> u32 {
+        self.generation
+    }
+
+    pub const fn rescan_required(self) -> bool {
+        self.rescan_required
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceWatchSyncResult {
+    workspace_id: WorkspaceId,
+    roots: Vec<WorkspaceWatchPendingRoot>,
+}
+
+impl WorkspaceWatchSyncResult {
+    pub(crate) const fn new(
+        workspace_id: WorkspaceId,
+        roots: Vec<WorkspaceWatchPendingRoot>,
+    ) -> Self {
+        Self {
+            workspace_id,
+            roots,
+        }
+    }
+
+    pub const fn workspace_id(&self) -> WorkspaceId {
+        self.workspace_id
+    }
+
+    pub fn roots(&self) -> &[WorkspaceWatchPendingRoot] {
+        &self.roots
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorkspaceWatchWakeEvent {
+    workspace_id: WorkspaceId,
+}
+
+impl WorkspaceWatchWakeEvent {
+    pub(crate) const fn new(workspace_id: WorkspaceId) -> Self {
+        Self { workspace_id }
+    }
+}
+
+fn workspace_watch_request_invalid() -> CommandError {
+    CommandError::new(
+        "WORKSPACE_WATCH_REQUEST_INVALID",
+        "The workspace watcher synchronization request is invalid.",
+    )
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -816,10 +1021,12 @@ mod tests {
         WorkspaceDeleteIncompleteReason, WorkspaceDeleteResult, WorkspaceEntryKind,
         WorkspaceEntryRequest, WorkspaceMoveIncompleteReason, WorkspaceMoveRequest,
         WorkspaceMoveResult, WorkspacePickRootsMode, WorkspacePickRootsRequest,
-        WorkspacePrepareDeleteRequest, WorkspaceRenameRequest,
+        WorkspacePrepareDeleteRequest, WorkspaceRenameRequest, WorkspaceWatchPendingRoot,
+        WorkspaceWatchSyncRequest, WorkspaceWatchSyncResult, WorkspaceWatchWakeEvent,
         WorkspaceWriteDirectorySyncObservation, WorkspaceWriteResult,
         WorkspaceWriteTargetObservation,
     };
+    use crate::workspace::{RootId, WorkspaceId};
 
     #[test]
     fn pick_roots_mode_is_a_closed_lowercase_wire_enum() {
@@ -844,6 +1051,91 @@ mod tests {
                 "request must reject {invalid}"
             );
         }
+    }
+
+    #[test]
+    fn watch_sync_request_requires_one_to_256_unique_roots_and_explicit_ack() {
+        let request: WorkspaceWatchSyncRequest = serde_json::from_str(
+            r#"{"roots":[{"rootId":"00000000-0000-4000-8000-000000000001","acknowledgedGeneration":null},{"rootId":"00000000-0000-4000-8000-000000000002","acknowledgedGeneration":7}]}"#,
+        )
+        .unwrap();
+        let roots = request.into_parts().unwrap();
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots[0].1, None);
+        assert_eq!(roots[1].1, Some(7));
+
+        for invalid in [
+            r#"{"roots":[]}"#,
+            r#"{"roots":[{"rootId":"00000000-0000-0000-0000-000000000000","acknowledgedGeneration":null}]}"#,
+            r#"{"roots":[{"rootId":"00000000-0000-1000-8000-000000000001","acknowledgedGeneration":null}]}"#,
+            r#"{"roots":[{"rootId":"00000000-0000-4000-0000-000000000001","acknowledgedGeneration":null}]}"#,
+            r#"{"roots":[{"rootId":"00000000-0000-4000-8000-000000000001"}]}"#,
+            r#"{"roots":[{"rootId":"00000000-0000-4000-8000-000000000001","acknowledgedGeneration":0}]}"#,
+            r#"{"roots":[{"rootId":"00000000-0000-4000-8000-000000000001","acknowledgedGeneration":4294967296}]}"#,
+            r#"{"roots":[{"rootId":"00000000-0000-4000-8000-000000000001","acknowledgedGeneration":1,"relativePath":"src"}]}"#,
+            r#"{"roots":[{"rootId":"00000000-0000-4000-8000-000000000001","acknowledgedGeneration":null}],"path":"/tmp"}"#,
+        ] {
+            let rejected = serde_json::from_str::<WorkspaceWatchSyncRequest>(invalid)
+                .map_or(true, |request| request.into_parts().is_err());
+            assert!(rejected, "request must reject {invalid}");
+        }
+
+        let duplicate: WorkspaceWatchSyncRequest = serde_json::from_str(
+            r#"{"roots":[{"rootId":"00000000-0000-4000-8000-000000000001","acknowledgedGeneration":null},{"rootId":"00000000-0000-4000-8000-000000000001","acknowledgedGeneration":1}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            duplicate.into_parts().unwrap_err().code(),
+            "WORKSPACE_WATCH_REQUEST_INVALID"
+        );
+
+        let roots = (0..257)
+            .map(|index| {
+                serde_json::json!({
+                    "rootId": format!("00000000-0000-4000-8000-{index:012}"),
+                    "acknowledgedGeneration": null,
+                })
+            })
+            .collect::<Vec<_>>();
+        let oversized: WorkspaceWatchSyncRequest =
+            serde_json::from_value(serde_json::json!({ "roots": roots })).unwrap();
+        assert_eq!(
+            oversized.into_parts().unwrap_err().code(),
+            "WORKSPACE_WATCH_REQUEST_INVALID"
+        );
+    }
+
+    #[test]
+    fn watch_sync_response_and_wake_are_path_free_closed_camel_case_dtos() {
+        let workspace_id =
+            WorkspaceId(uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000010").unwrap());
+        let root_id =
+            RootId(uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000011").unwrap());
+        let pending = WorkspaceWatchPendingRoot::new(root_id, 3, true);
+        assert_eq!(pending.root_id(), root_id);
+        assert_eq!(pending.generation(), 3);
+        assert!(pending.rescan_required());
+
+        let result = WorkspaceWatchSyncResult::new(workspace_id, vec![pending]);
+        assert_eq!(result.workspace_id(), workspace_id);
+        assert_eq!(result.roots(), &[pending]);
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            serde_json::json!({
+                "workspaceId": "00000000-0000-4000-8000-000000000010",
+                "roots": [{
+                    "rootId": "00000000-0000-4000-8000-000000000011",
+                    "generation": 3,
+                    "rescanRequired": true,
+                }],
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(WorkspaceWatchWakeEvent::new(workspace_id)).unwrap(),
+            serde_json::json!({
+                "workspaceId": "00000000-0000-4000-8000-000000000010",
+            })
+        );
     }
 
     #[test]

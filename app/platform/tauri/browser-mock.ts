@@ -14,6 +14,9 @@ import type {
 	WorkspaceMoveIncompleteReason,
 	WorkspaceMoveResult,
 	WorkspaceRoot,
+	WorkspaceWatchPendingRoot,
+	WorkspaceWatchSyncRequest,
+	WorkspaceWatchWakeEvent,
 	WorkspaceWriteResult,
 } from "./contracts";
 import {
@@ -35,11 +38,18 @@ import {
 	frozenWorkspaceReadDirectory,
 	frozenWorkspaceRenameRequest,
 	frozenWorkspaceSnapshot,
+	frozenWorkspaceWatchSyncRequest,
 	frozenWorkspaceWriteResult,
 	isPortableWorkspaceEntryName,
+	decodeWorkspaceWatchSyncResult,
+	decodeWorkspaceWatchWakeEvent,
 	workspaceRelativePathSegments,
 	workspaceWriteResponseUnavailable,
 } from "./workspace-codec";
+import {
+	createWorkspaceWatcherManager,
+	type WorkspaceWatcherTransport,
+} from "./workspace-watcher";
 
 const runtimeInfo: RuntimeInfo = Object.freeze({
 	application: "Plain",
@@ -611,6 +621,23 @@ export type BrowserMockWorkspaceWriteDirectorySyncResult =
 export type BrowserMockWorkspaceWriteTargetResult =
 	"matchesWritten" | "changed" | "unverifiable" | void;
 
+export interface BrowserMockWorkspaceWatchInvalidationForTest {
+	/** False simulates a lost/coalesced native wake; the manager timer must recover. */
+	readonly emitWake?: boolean;
+	readonly rescanRequired?: boolean;
+}
+
+/**
+ * Browser-only, path-free seam for exercising external filesystem changes.
+ * It deliberately accepts a root id rather than a resource or native path.
+ */
+export interface BrowserMockWorkspaceWatchControllerForTest {
+	invalidateRoot(
+		rootId: string,
+		options?: BrowserMockWorkspaceWatchInvalidationForTest,
+	): void;
+}
+
 export interface BrowserMockBridgeOptions {
 	readonly workspacePicks?: readonly BrowserMockWorkspacePick[];
 	/** Browser-mock only bounded tree injected below the first mock root. */
@@ -696,6 +723,10 @@ export interface BrowserMockBridgeOptions {
 		observation: BrowserMockWorkspaceWriteObservation,
 		mutations: BrowserMockWorkspaceWriteMutationsForTest,
 	) => BrowserMockWorkspaceWriteTargetResult;
+	/** Captures the path-free external-change seam for watcher acceptance tests. */
+	readonly onWorkspaceWatchControllerForTest?: (
+		controller: BrowserMockWorkspaceWatchControllerForTest,
+	) => void;
 }
 
 interface CapturedBrowserMockWorkspaceMoveSeams {
@@ -721,6 +752,16 @@ interface CapturedBrowserMockWorkspaceWriteSeams {
 	readonly rename: BrowserMockBridgeOptions["onWorkspaceWriteRenameForTest"];
 	readonly directorySync: BrowserMockBridgeOptions["onWorkspaceWriteDirectorySyncForTest"];
 	readonly afterPublication: BrowserMockBridgeOptions["onWorkspaceWriteAfterPublicationForTest"];
+}
+
+function captureBrowserMockWorkspaceWatchController(
+	options: BrowserMockBridgeOptions,
+): BrowserMockBridgeOptions["onWorkspaceWatchControllerForTest"] {
+	const capture = options.onWorkspaceWatchControllerForTest;
+	if (capture !== undefined && typeof capture !== "function") {
+		throw new TypeError("Invalid browser mock workspace-watch seam.");
+	}
+	return capture;
 }
 
 function captureBrowserMockWorkspaceMoveSeams(
@@ -1665,6 +1706,8 @@ export function createBrowserMockBridge(
 	const workspaceMoveSeams = captureBrowserMockWorkspaceMoveSeams(options);
 	const workspaceDeleteSeams = captureBrowserMockWorkspaceDeleteSeams(options);
 	const workspaceWriteSeams = captureBrowserMockWorkspaceWriteSeams(options);
+	const captureWorkspaceWatchController =
+		captureBrowserMockWorkspaceWatchController(options);
 	const listeners = new Set<(payload: RuntimeInfo) => void>();
 	const scriptedPicks = [...(options.workspacePicks ?? [])];
 	const roots = new Map<string, WorkspaceRoot>();
@@ -1727,6 +1770,149 @@ export function createBrowserMockBridge(
 	let workspaceWriteAncestorGeneration = 0;
 	let pendingWorkspaceWindowClose = false;
 	const pendingWorkspaceRootRevocations = new Set<string>();
+	const workspaceWatchWakeListeners = new Set<
+		(wake: WorkspaceWatchWakeEvent) => void
+	>();
+	const workspaceWatchStates = new Map<
+		string,
+		{
+			nextGeneration: number;
+			pending: WorkspaceWatchPendingRoot | undefined;
+			dirty: boolean;
+			dirtyRescanRequired: boolean;
+		}
+	>();
+	const workspaceWatchState = (rootId: string) => {
+		let state = workspaceWatchStates.get(rootId);
+		if (state === undefined) {
+			state = {
+				nextGeneration: 1,
+				pending: undefined,
+				dirty: false,
+				dirtyRescanRequired: false,
+			};
+			workspaceWatchStates.set(rootId, state);
+		}
+		return state;
+	};
+	const promoteWorkspaceWatchDirty = (
+		rootId: string,
+		state: ReturnType<typeof workspaceWatchState>,
+	): void => {
+		if (state.pending !== undefined || !state.dirty) {
+			return;
+		}
+		const generation = state.nextGeneration;
+		state.nextGeneration = Math.min(0xffff_ffff, generation + 1);
+		state.pending = Object.freeze({
+			rootId,
+			generation,
+			rescanRequired: state.dirtyRescanRequired,
+		});
+		state.dirty = false;
+		state.dirtyRescanRequired = false;
+	};
+	const emitWorkspaceWatchWake = (): void => {
+		const wake = decodeWorkspaceWatchWakeEvent({
+			workspaceId: MOCK_WORKSPACE_ID,
+		});
+		for (const listener of workspaceWatchWakeListeners) {
+			listener(wake);
+		}
+	};
+	const dirtyWorkspaceWatchRoot = (
+		rootId: string,
+		rescanRequired: boolean,
+		emitWake: boolean,
+	): void => {
+		const state = workspaceWatchState(rootId);
+		state.dirty = true;
+		state.dirtyRescanRequired ||= rescanRequired;
+		promoteWorkspaceWatchDirty(rootId, state);
+		if (emitWake) {
+			emitWorkspaceWatchWake();
+		}
+	};
+	const workspaceWatchTransport: WorkspaceWatcherTransport = {
+		async listenWake(listener) {
+			workspaceWatchWakeListeners.add(listener);
+			return (): void => {
+				workspaceWatchWakeListeners.delete(listener);
+			};
+		},
+		async sync(candidate: WorkspaceWatchSyncRequest) {
+			const request = frozenWorkspaceWatchSyncRequest(candidate.roots);
+			const pendingRoots: WorkspaceWatchPendingRoot[] = [];
+			for (const root of request.roots) {
+				if (!roots.has(root.rootId)) {
+					continue;
+				}
+				const state = workspaceWatchState(root.rootId);
+				if (
+					root.acknowledgedGeneration === null &&
+					state.pending === undefined
+				) {
+					state.dirty = true;
+					state.dirtyRescanRequired = true;
+				} else if (state.pending?.generation === root.acknowledgedGeneration) {
+					if (root.acknowledgedGeneration === 0xffff_ffff) {
+						state.pending = Object.freeze({
+							...state.pending,
+							rescanRequired: true,
+						});
+					} else {
+						state.pending = undefined;
+					}
+				}
+				promoteWorkspaceWatchDirty(root.rootId, state);
+				if (state.pending !== undefined) {
+					pendingRoots.push(state.pending);
+				}
+			}
+			return decodeWorkspaceWatchSyncResult(
+				{
+					workspaceId: MOCK_WORKSPACE_ID,
+					roots: pendingRoots,
+				},
+				request,
+			);
+		},
+	};
+	const workspaceWatcher = createWorkspaceWatcherManager(
+		workspaceWatchTransport,
+	);
+	const workspaceWatchController = Object.freeze({
+		invalidateRoot(
+			rootId: string,
+			invalidation: BrowserMockWorkspaceWatchInvalidationForTest = {},
+		): void {
+			if (!roots.has(rootId)) {
+				throw rootNotAuthorized();
+			}
+			if (
+				typeof invalidation !== "object" ||
+				invalidation === null ||
+				Object.getPrototypeOf(invalidation) !== Object.prototype ||
+				Reflect.ownKeys(invalidation).some(
+					(key) => key !== "emitWake" && key !== "rescanRequired",
+				) ||
+				(invalidation.emitWake !== undefined &&
+					typeof invalidation.emitWake !== "boolean") ||
+				(invalidation.rescanRequired !== undefined &&
+					typeof invalidation.rescanRequired !== "boolean")
+			) {
+				throw new TypeError(
+					"Invalid browser mock workspace-watch invalidation.",
+				);
+			}
+			dirtyWorkspaceWatchRoot(
+				rootId,
+				invalidation.rescanRequired ?? false,
+				invalidation.emitWake ?? true,
+			);
+		},
+	} satisfies BrowserMockWorkspaceWatchControllerForTest);
+	captureWorkspaceWatchController?.(workspaceWatchController);
 
 	const registerDeleteMetadata = (node: MockNode): void => {
 		const counts = new Map<MockNode, number>();
@@ -4238,6 +4424,7 @@ export function createBrowserMockBridge(
 		async workspaceSnapshot() {
 			return snapshot();
 		},
+		workspaceWatch: workspaceWatcher.workspaceWatch,
 		async workspacePickRoots(mode) {
 			const status = scriptedPicks.shift() ?? "selected";
 			if (status === "cancelled") {
@@ -4251,6 +4438,11 @@ export function createBrowserMockBridge(
 				if (roots.size !== 1 || !roots.has(replacement.rootId)) {
 					roots.clear();
 					roots.set(replacement.rootId, replacement);
+					for (const rootId of workspaceWatchStates.keys()) {
+						if (rootId !== replacement.rootId) {
+							workspaceWatchStates.delete(rootId);
+						}
+					}
 					revision += 1;
 				}
 				return frozenWorkspacePickResult(status, snapshot());
@@ -4270,6 +4462,7 @@ export function createBrowserMockBridge(
 			if (!roots.delete(rootId)) {
 				throw rootNotAuthorized();
 			}
+			workspaceWatchStates.delete(rootId);
 			invalidateDeleteBatch();
 			revision += 1;
 			return snapshot();

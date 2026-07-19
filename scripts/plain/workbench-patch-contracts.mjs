@@ -93,6 +93,18 @@ const PATCH_CONTRACTS = Object.freeze([
 		]),
 	}),
 	Object.freeze({
+		packageName: "@codingame/monaco-vscode-explorer-service-override@35.0.1",
+		patchPath:
+			"patches/@codingame__monaco-vscode-explorer-service-override@35.0.1.patch",
+		sha256: "1345cf49b5d4621da51a4c873d6c03f98a02c70bde9d5f747c4ef0e826ab5cc2",
+		directImporter: true,
+		snapshotEdgeCount: 0,
+		shape: Object.freeze([
+			"diff --git a/vscode/src/vs/workbench/contrib/files/browser/explorerService.js b/vscode/src/vs/workbench/contrib/files/browser/explorerService.js",
+			"@@ -71,7 +71,12 @@ let ExplorerService = class ExplorerService {",
+		]),
+	}),
+	Object.freeze({
 		packageName: "@codingame/monaco-vscode-extensions-service-override@35.0.1",
 		patchPath:
 			"patches/@codingame__monaco-vscode-extensions-service-override@35.0.1.patch",
@@ -359,7 +371,7 @@ function exactMappingLines(source, expected, label, failures) {
 	).filter((line) => line.trim().length > 0);
 	if (JSON.stringify(actual) !== JSON.stringify(expected)) {
 		failures.push(
-			`${label} top-level patchedDependencies must be the exact audited seven-entry closed set`,
+			`${label} top-level patchedDependencies must be the exact audited eight-entry closed set`,
 		);
 	}
 	return actual;

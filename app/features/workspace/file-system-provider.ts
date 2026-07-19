@@ -19,10 +19,7 @@ import {
 	Emitter,
 	Event,
 } from "@codingame/monaco-vscode-api/vscode/vs/base/common/event";
-import {
-	Disposable,
-	type IDisposable,
-} from "@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle";
+import type { IDisposable } from "@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle";
 import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
 import {
 	beginPlainWorkspaceDeleteProviderDispatch,
@@ -526,8 +523,24 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 
 	watch(resource: URI, options: IWatchOptions): IDisposable {
 		void options;
-		this.resolveResource(resource);
-		return Disposable.None;
+		const resolved = this.resolveResource(resource);
+		const unlisten = this.#bridge.workspaceWatch(resolved.rootId, () => {
+			this.fireRootUpdated(resource);
+		});
+		let disposed = false;
+		return {
+			dispose(): void {
+				if (disposed) {
+					return;
+				}
+				disposed = true;
+				try {
+					void Promise.resolve(unlisten()).catch(() => undefined);
+				} catch {
+					// Disposal is best-effort and must remain safe during window teardown.
+				}
+			},
+		};
 	}
 
 	async stat(resource: URI): Promise<PlainWorkspaceProviderStat> {

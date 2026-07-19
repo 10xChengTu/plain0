@@ -84,6 +84,13 @@ const requiredPatches = new Map([
 		},
 	],
 	[
+		"@codingame/monaco-vscode-explorer-service-override@35.0.1",
+		{
+			file: "patches/@codingame__monaco-vscode-explorer-service-override@35.0.1.patch",
+			marker: "event.rawUpdated.some(resource =>",
+		},
+	],
+	[
 		"@codingame/monaco-vscode-extensions-service-override@35.0.1",
 		{
 			file: "patches/@codingame__monaco-vscode-extensions-service-override@35.0.1.patch",
@@ -330,6 +337,14 @@ const cargo = await readFile(path.join(root, "src-tauri/Cargo.toml"), "utf8");
 let cargoDependencies = [];
 let resolvedSha2Features = [];
 try {
+	const rustcHost = execFileSync("rustc", ["-vV"], {
+		cwd: root,
+		encoding: "utf8",
+		stdio: ["ignore", "pipe", "pipe"],
+	}).match(/^host: (\S+)$/m)?.[1];
+	if (rustcHost === undefined) {
+		throw new Error("rustc host metadata is missing");
+	}
 	const cargoMetadata = JSON.parse(
 		execFileSync(
 			"cargo",
@@ -338,6 +353,8 @@ try {
 				"--locked",
 				"--format-version",
 				"1",
+				"--filter-platform",
+				rustcHost,
 				"--manifest-path",
 				"src-tauri/Cargo.toml",
 			],

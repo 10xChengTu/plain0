@@ -34,8 +34,48 @@ async function baseline() {
 }
 
 describe("exact Workbench patch contracts", () => {
-	it("accepts only the checked-in seven-package patch and lock graph", async () => {
+	it("accepts only the checked-in eight-package patch and lock graph", async () => {
 		expect(validateWorkbenchPatchSet(await baseline())).toEqual([]);
+	});
+
+	it("rejects Plain root UPDATED refresh scope broadening and rerouting", async () => {
+		const patchPath =
+			"patches/@codingame__monaco-vscode-explorer-service-override@35.0.1.patch";
+		const mutations = [
+			{
+				from: "event.rawUpdated.some(resource =>",
+				to: "event.rawDeleted.some(resource =>",
+			},
+			{
+				from: 'resource.scheme === "plain-workspace"',
+				to: 'resource.scheme !== "plain-workspace"',
+			},
+			{
+				from: 'resource.path === "/"',
+				to: 'resource.path.startsWith("/")',
+			},
+			{
+				from: 'resource.query === ""',
+				to: "true",
+			},
+			{
+				from: 'resource.fragment === ""',
+				to: "true",
+			},
+		];
+
+		for (const mutation of mutations) {
+			const input = await baseline();
+			const source = input.patchSources.get(patchPath);
+			expect(source).toContain(mutation.from);
+			input.patchSources.set(
+				patchPath,
+				source.replace(mutation.from, mutation.to),
+			);
+			expect(validateWorkbenchPatchSet(input)).toContain(
+				`${patchPath} differs from its exact audited SHA-256`,
+			);
+		}
 	});
 
 	it("requires both private confirmed-delete transport patches", async () => {
@@ -167,7 +207,7 @@ describe("exact Workbench patch contracts", () => {
 			"patchedDependencies:\n  '@example/extra@1.0.0': patches/extra.patch\n",
 		);
 		expect(validateWorkbenchPatchSet(manifestExtra)).toContain(
-			"pnpm-workspace.yaml top-level patchedDependencies must be the exact audited seven-entry closed set",
+			"pnpm-workspace.yaml top-level patchedDependencies must be the exact audited eight-entry closed set",
 		);
 
 		const lockExtra = await baseline();
@@ -176,7 +216,7 @@ describe("exact Workbench patch contracts", () => {
 			`patchedDependencies:\n  '@example/extra@1.0.0': ${"f".repeat(64)}\n`,
 		);
 		expect(validateWorkbenchPatchSet(lockExtra)).toContain(
-			"pnpm-lock.yaml top-level patchedDependencies must be the exact audited seven-entry closed set",
+			"pnpm-lock.yaml top-level patchedDependencies must be the exact audited eight-entry closed set",
 		);
 	});
 

@@ -50,6 +50,7 @@ pub fn run() {
             workspace::commands::workspace_capabilities,
             workspace::commands::workspace_snapshot,
             workspace::commands::workspace_pick_roots,
+            workspace::commands::workspace_watch_sync,
             workspace::commands::workspace_remove_root,
             workspace::commands::workspace_stat,
             workspace::commands::workspace_read_dir,
@@ -65,8 +66,13 @@ pub fn run() {
             workspace::commands::workspace_begin_delete,
             workspace::commands::workspace_commit_delete_entry,
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Plain");
+        .build(tauri::generate_context!())
+        .expect("failed to build Plain")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Resumed) {
+                app.state::<WorkspaceService>().mark_all_watchers_rescan();
+            }
+        });
 }
 
 #[cfg(test)]

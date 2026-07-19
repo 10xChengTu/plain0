@@ -24,6 +24,7 @@
 - PTY session 生命周期、resize/kill/exit 和事件序号。
 - DAP header/body fragmentation、多个 frame、错误长度、timeout/cancel。
 - settings schema、版本迁移和错误 DTO 稳定性。
+- workspace watcher 必须覆盖 inactive prepare/atomic activate、root epoch 撤销、window 隔离、capacity-one queue storm、queue full/error/root rename/resume 的 rescan、sticky generation/exact ack、scan/close 竞态与 path/error 不出 native 状态机。
 
 ### TypeScript 单元测试
 
@@ -36,6 +37,7 @@
 - 固定 FileService patch 对 Plain copy/move/clone 的 provider-lookup 前拒绝、native-only 合法路径和零副作用失败矩阵；非 Plain 控制组必须保持 upstream 行为。
 - Plain create/createFolder 必须各只调用一次私有 native create seam，并由同一次 IPC 返回严格 `WorkspaceEntryStat` 创建回执；不得 create 前 target `stat/exists`、create 后第二次 `workspace_stat/resolve`、非空 create、overwrite、递归 mkdirp、公共 `writeFile/mkdir` 或通用 fallback。测试必须区分已认证 syscall 前错误的零事件与畸形回执/未知响应的一次冻结 root `UPDATED`，两者都不得发成功事件。copy/rename/move/delete provider adapters 必须覆盖严格 options、唯一 bridge 路由、成功事件闭集，以及 partial/unknown 只 rescan、不发成功事件。
 - confirmed-delete 测试必须覆盖一次 prepare/confirm/begin、调用级 token+entry+URI/options 绑定、逐项 commit、无授权/replay/错项拒绝，以及禁止 Trash、Bulk Undo、成功前 soft-revert 和 retained/partial 后继续执行。
+- watcher bridge/manager 必须拒绝额外字段、Proxy/accessor、重复 root、零 generation、workspace/root 混淆与畸形 wake；单 listener、单 timer、单 in-flight sync 在即时 wake、丢 wake、listener 释放、窗口销毁和 exact ack 后都必须有确定状态。
 
 ### 架构与供应链检查
 
@@ -58,6 +60,7 @@
 - 终端/Git/DAP 使用录制事件测试 UI 状态机。
 - 未信任 workspace 的终端、Git、DAP 操作保持禁用并显示准确风险说明。
 - 无 AI、账号、同步、通用扩展入口。
+- 外部目录变化必须通过 mock native watcher 触发精确 root `UPDATED` 和 Explorer deep refresh；同一场景还要丢弃 wake，证明定时 sync 最终收敛，且不得伪造 root `DELETED`。
 
 ### 真实 Tauri E2E
 

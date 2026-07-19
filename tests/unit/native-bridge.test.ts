@@ -60,6 +60,99 @@ describe("native Plain bridge", () => {
 		tauri.listen.mockReset();
 	});
 
+	it("shares the watcher manager while strictly decoding wake events and acknowledging generations", async () => {
+		vi.useFakeTimers();
+		try {
+			let wakeHandler:
+				((event: { readonly payload: unknown }) => void) | undefined;
+			const unlisten = vi.fn();
+			tauri.listen.mockImplementation(
+				async (
+					eventName: string,
+					handler: (event: { readonly payload: unknown }) => void,
+				) => {
+					expect(eventName).toBe("plain://workspace-watch-wake");
+					wakeHandler = handler;
+					return unlisten;
+				},
+			);
+			let syncCount = 0;
+			tauri.invoke.mockImplementation(async (command: string) => {
+				expect(command).toBe("workspace_watch_sync");
+				syncCount += 1;
+				return {
+					workspaceId,
+					roots:
+						syncCount === 1
+							? [{ rootId, generation: 1, rescanRequired: true }]
+							: syncCount === 3
+								? [{ rootId, generation: 2, rescanRequired: false }]
+								: [],
+				};
+			});
+			const listener = vi.fn();
+			const bridge = createNativeBridge();
+
+			const stop = bridge.workspaceWatch(rootId, listener);
+			for (let index = 0; index < 8; index += 1) {
+				await vi.advanceTimersByTimeAsync(1);
+				await Promise.resolve();
+			}
+
+			expect(tauri.listen).toHaveBeenCalledOnce();
+			expect(listener).toHaveBeenCalledOnce();
+			expect(tauri.invoke.mock.calls).toEqual([
+				[
+					"workspace_watch_sync",
+					{
+						request: {
+							roots: [{ rootId, acknowledgedGeneration: null }],
+						},
+					},
+				],
+				[
+					"workspace_watch_sync",
+					{
+						request: {
+							roots: [{ rootId, acknowledgedGeneration: 1 }],
+						},
+					},
+				],
+			]);
+			expect(() =>
+				wakeHandler?.({
+					payload: { workspaceId, nativePath: "/private/workspace" },
+				}),
+			).toThrowError(
+				expect.objectContaining({ code: "IPC_CONTRACT_VIOLATION" }),
+			);
+
+			wakeHandler?.({ payload: { workspaceId } });
+			for (let index = 0; index < 8; index += 1) {
+				await vi.advanceTimersByTimeAsync(1);
+				await Promise.resolve();
+			}
+			expect(listener).toHaveBeenCalledTimes(2);
+			expect(tauri.invoke.mock.calls.at(-2)?.[1]).toEqual({
+				request: {
+					roots: [{ rootId, acknowledgedGeneration: 1 }],
+				},
+			});
+			expect(tauri.invoke.mock.calls.at(-1)?.[1]).toEqual({
+				request: {
+					roots: [{ rootId, acknowledgedGeneration: 2 }],
+				},
+			});
+
+			stop();
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(unlisten).toHaveBeenCalledOnce();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("invokes and strictly freezes the workspace capability contract", async () => {
 		tauri.invoke.mockResolvedValueOnce({
 			create: true,

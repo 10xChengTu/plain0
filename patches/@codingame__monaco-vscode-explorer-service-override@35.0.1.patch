@@ -1,0 +1,18 @@
+diff --git a/vscode/src/vs/workbench/contrib/files/browser/explorerService.js b/vscode/src/vs/workbench/contrib/files/browser/explorerService.js
+index 722eccda618553a4f96a75a4642735982e619f8d..dc3e381ca9435226c285c9786d36cf3940ff7630 100644
+--- a/vscode/src/vs/workbench/contrib/files/browser/explorerService.js
++++ b/vscode/src/vs/workbench/contrib/files/browser/explorerService.js
+@@ -71,7 +71,12 @@ let ExplorerService = class ExplorerService {
+             if (this.config.sortOrder === SortOrder.Modified) {
+                 types.push(FileChangeType.UPDATED);
+             }
+-            let shouldRefresh = false;
++            let shouldRefresh = events.some(event => event.rawUpdated.some(resource =>
++                resource.scheme === "plain-workspace" &&
++                resource.path === "/" &&
++                resource.query === "" &&
++                resource.fragment === ""
++            ));
+             this.roots.forEach(r => {
+                 if (this.view && !shouldRefresh) {
+                     shouldRefresh = doesFileEventAffect(r, this.view, events, types);

@@ -1,4 +1,6 @@
 export const RUNTIME_READY_EVENT = "plain://runtime-ready" as const;
+export const WORKSPACE_WATCH_WAKE_EVENT =
+	"plain://workspace-watch-wake" as const;
 
 export interface RuntimeInfo {
 	application: "Plain";
@@ -30,6 +32,30 @@ export interface WorkspaceSnapshot {
 	readonly workspaceId: string;
 	readonly revision: number;
 	readonly roots: readonly WorkspaceRoot[];
+}
+
+export interface WorkspaceWatchWakeEvent {
+	readonly workspaceId: string;
+}
+
+export interface WorkspaceWatchSyncRootRequest {
+	readonly rootId: string;
+	readonly acknowledgedGeneration: number | null;
+}
+
+export interface WorkspaceWatchSyncRequest {
+	readonly roots: readonly WorkspaceWatchSyncRootRequest[];
+}
+
+export interface WorkspaceWatchPendingRoot {
+	readonly rootId: string;
+	readonly generation: number;
+	readonly rescanRequired: boolean;
+}
+
+export interface WorkspaceWatchSyncResult {
+	readonly workspaceId: string;
+	readonly roots: readonly WorkspaceWatchPendingRoot[];
 }
 
 export interface WorkspacePickResult {
@@ -213,6 +239,7 @@ export interface PlainBridge {
 	onRuntimeReady(listener: (payload: RuntimeInfo) => void): Promise<Unlisten>;
 	workspaceCapabilities(): Promise<WorkspaceCapabilities>;
 	workspaceSnapshot(): Promise<WorkspaceSnapshot>;
+	workspaceWatch(rootId: string, listener: () => void): Unlisten;
 	workspacePickRoots(mode: WorkspacePickMode): Promise<WorkspacePickResult>;
 	workspaceRemoveRoot(rootId: string): Promise<WorkspaceSnapshot>;
 	workspaceCreateFile(
