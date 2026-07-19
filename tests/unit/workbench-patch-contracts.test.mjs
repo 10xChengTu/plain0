@@ -34,8 +34,65 @@ async function baseline() {
 }
 
 describe("exact Workbench patch contracts", () => {
-	it("accepts only the checked-in five-package patch and lock graph", async () => {
+	it("accepts only the checked-in seven-package patch and lock graph", async () => {
 		expect(validateWorkbenchPatchSet(await baseline())).toEqual([]);
+	});
+
+	it("requires both private confirmed-delete transport patches", async () => {
+		for (const patchPath of [
+			"patches/@codingame__monaco-vscode-base-service-override@35.0.1.patch",
+			"patches/@codingame__monaco-vscode-bulk-edit-service-override@35.0.1.patch",
+		]) {
+			const input = await baseline();
+			input.patchSources.delete(patchPath);
+			expect(validateWorkbenchPatchSet(input)).toContain(
+				"the supplied patch sources must be the exact audited closed set",
+			);
+			expect(validateWorkbenchPatchSet(input)).toContain(
+				`${patchPath} is missing from the audited patch set`,
+			);
+		}
+	});
+
+	it("rejects confirmed-delete authorization, ordering and no-undo downgrades", async () => {
+		const mutations = [
+			{
+				patchPath: "patches/@codingame__monaco-vscode-api@35.0.1.patch",
+				from: "const authorizationHandles = ( new WeakMap());",
+				to: "const authorizationHandles = ( new Map());",
+			},
+			{
+				patchPath:
+					"patches/@codingame__monaco-vscode-base-service-override@35.0.1.patch",
+				from: "await this.fileService.del(operation.resource, plainOptions[index].options);",
+				to: "void operation;",
+			},
+			{
+				patchPath:
+					"patches/@codingame__monaco-vscode-bulk-edit-service-override@35.0.1.patch",
+				from: "const plainDeleteBatch = validatePlainWorkspaceDeleteResourceEditBatch(this._edits);",
+				to: "const plainDeleteBatch = false;",
+			},
+			{
+				patchPath:
+					"patches/@codingame__monaco-vscode-files-service-override@35.0.1.patch",
+				from: "const isAuthorizedPlainDelete = movePlainWorkspaceDeleteFileServiceAuthorization(options, resource, plainProviderOptions);",
+				to: "const isAuthorizedPlainDelete = true;",
+			},
+		];
+
+		for (const mutation of mutations) {
+			const input = await baseline();
+			const source = input.patchSources.get(mutation.patchPath);
+			expect(source).toContain(mutation.from);
+			input.patchSources.set(
+				mutation.patchPath,
+				source.replace(mutation.from, mutation.to),
+			);
+			expect(validateWorkbenchPatchSet(input)).toContain(
+				`${mutation.patchPath} differs from its exact audited SHA-256`,
+			);
+		}
 	});
 
 	it("rejects a marker-preserving API baseline source downgrade", async () => {
@@ -95,7 +152,7 @@ describe("exact Workbench patch contracts", () => {
 
 		const stale = await baseline();
 		stale.lockfile = stale.lockfile.replace(
-			"ec05e44dd1cebac5b9b27c9ee77c3fa15452867c610e46a1ed89fdd16f844279",
+			"4639136edb34a2de20a9f24c8d7bfc892c7080e444c997a8290772ce37ac0159",
 			"0".repeat(64),
 		);
 		expect(validateWorkbenchPatchSet(stale)).toContain(
@@ -110,7 +167,7 @@ describe("exact Workbench patch contracts", () => {
 			"patchedDependencies:\n  '@example/extra@1.0.0': patches/extra.patch\n",
 		);
 		expect(validateWorkbenchPatchSet(manifestExtra)).toContain(
-			"pnpm-workspace.yaml top-level patchedDependencies must be the exact audited five-entry closed set",
+			"pnpm-workspace.yaml top-level patchedDependencies must be the exact audited seven-entry closed set",
 		);
 
 		const lockExtra = await baseline();
@@ -119,7 +176,7 @@ describe("exact Workbench patch contracts", () => {
 			`patchedDependencies:\n  '@example/extra@1.0.0': ${"f".repeat(64)}\n`,
 		);
 		expect(validateWorkbenchPatchSet(lockExtra)).toContain(
-			"pnpm-lock.yaml top-level patchedDependencies must be the exact audited five-entry closed set",
+			"pnpm-lock.yaml top-level patchedDependencies must be the exact audited seven-entry closed set",
 		);
 	});
 
@@ -139,7 +196,7 @@ describe("exact Workbench patch contracts", () => {
 
 	it("rejects bare importer and snapshot edges even when comments repeat the hash", async () => {
 		const apiHash =
-			"71ac09018e6f1b2f74a120dc8f026aaf899c22c22c5fdec7a161f56d284d726f";
+			"b416c3f7a73dc3c72fae55455515b805a180ac154aa4044d698b8a00cd68be62";
 		const importerBare = await baseline();
 		importerBare.lockfile = `${importerBare.lockfile.replace(
 			`        version: 35.0.1(patch_hash=${apiHash})`,

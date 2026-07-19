@@ -11,6 +11,7 @@ import { registerCustomProvider } from "@codingame/monaco-vscode-files-service-o
 import { EXCLUDED_SURFACE_GUARD_MARKER } from "./excluded-surface-policy";
 import { enforceExcludedWorkbenchSurfaces } from "./excluded-surfaces";
 import { registerWorkspaceCommands } from "./features/workspace/commands";
+import { registerWorkspaceDeleteCoordinator } from "./features/workspace/delete-coordinator";
 import {
 	createPlainWorkspaceFileSystemProvider,
 	PLAIN_WORKSPACE_SCHEME,
@@ -35,6 +36,10 @@ async function bootstrap(): Promise<void> {
 		bridge,
 		workspaceCapabilities,
 	);
+	const workspaceDeleteCoordinator = registerWorkspaceDeleteCoordinator(
+		bridge,
+		workspaceFileSystemProvider,
+	);
 	registerCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);
 	const workspaceProjector = createWorkspaceProjector(reinitializeWorkspace);
 	const initialWorkspaceSnapshot = await bridge.workspaceSnapshot();
@@ -49,6 +54,7 @@ async function bootstrap(): Promise<void> {
 		() => {
 			void stopListening();
 			workspaceCommands?.dispose();
+			workspaceDeleteCoordinator.dispose();
 		},
 		{ once: true },
 	);

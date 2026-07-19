@@ -1,0 +1,79 @@
+diff --git a/vscode/src/vs/workbench/contrib/bulkEdit/browser/bulkFileEdits.js b/vscode/src/vs/workbench/contrib/bulkEdit/browser/bulkFileEdits.js
+index d1b90d1205ec913adce9b2cc8c0f428e60d411af..68aadad763cebae1e0edacf0b7955b062d797135 100644
+--- a/vscode/src/vs/workbench/contrib/bulkEdit/browser/bulkFileEdits.js
++++ b/vscode/src/vs/workbench/contrib/bulkEdit/browser/bulkFileEdits.js
+@@ -11,11 +11,13 @@ import { ILogService } from '@codingame/monaco-vscode-api/vscode/vs/platform/log
+ import { CancellationToken } from '@codingame/monaco-vscode-api/vscode/vs/base/common/cancellation';
+ import { ITextFileService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/textfile/common/textfiles.service';
+ import { Schemas } from '@codingame/monaco-vscode-api/vscode/vs/base/common/network';
++import { movePlainWorkspaceDeleteResourceEditAuthorization, validatePlainWorkspaceDeleteResourceEditBatch } from '@codingame/monaco-vscode-api/vscode/vs/platform/files/common/plainWorkspaceDelete';
+ 
+ var RenameOperation_1;
+ class Noop {
+-    constructor() {
++    constructor(skipUndo = false) {
+         this.uris = [];
++        this.skipUndo = skipUndo;
+     }
+     async perform() {
+         return this;
+@@ -209,6 +211,17 @@ class DeleteEdit {
+         this.type = "delete";
+     }
+ }
++function plainDeleteOperation(edit) {
++    const operation = {
++        resource: edit.oldUri,
++        recursive: true,
++        useTrash: false
++    };
++    return {
++        operation,
++        authorized: movePlainWorkspaceDeleteResourceEditAuthorization(edit.options, edit.oldUri, operation)
++    };
++}
+ let DeleteOperation = class DeleteOperation {
+     constructor(
+         _edits,
+@@ -231,6 +244,16 @@ let DeleteOperation = class DeleteOperation {
+         return ( this._edits.map(edit => edit.oldUri));
+     }
+     async perform(token) {
++        const plainOperations = this._edits.map(plainDeleteOperation);
++        const plainAuthorizationCount = plainOperations.filter(value => value.authorized).length;
++        if (plainAuthorizationCount > 0) {
++            if (plainAuthorizationCount !== this._edits.length) {
++                throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: mixed authorized delete group rejected"));
++            }
++            const deletes = plainOperations.map(value => value.operation);
++            await this._workingCopyFileService.delete(deletes, token, this._undoRedoInfo);
++            return ( new Noop(true));
++        }
+         const deletes = [];
+         const undoes = [];
+         for (const edit of this._edits) {
+@@ -333,6 +356,7 @@ let BulkFileEdits = class BulkFileEdits {
+         this._undoRedoService = _undoRedoService;
+     }
+     async apply() {
++        const plainDeleteBatch = validatePlainWorkspaceDeleteResourceEditBatch(this._edits);
+         const undoOperations = [];
+         const undoRedoInfo = {
+             undoRedoGroupId: this._undoRedoGroup.id
+@@ -384,10 +408,15 @@ let BulkFileEdits = class BulkFileEdits {
+             }
+             if (op) {
+                 const undoOp = await op.perform(this._token);
+-                undoOperations.push(undoOp);
++                if (!undoOp.skipUndo) {
++                    undoOperations.push(undoOp);
++                }
+             }
+             this._progress.report(undefined);
+         }
++        if (plainDeleteBatch && undoOperations.length === 0) {
++            return [];
++        }
+         const undoRedoElement = ( new FileUndoRedoElement(this._label, this._code, undoOperations, this._confirmBeforeUndo));
+         this._undoRedoService.pushElement(undoRedoElement, this._undoRedoGroup, this._undoRedoSource);
+         return undoRedoElement.resources;

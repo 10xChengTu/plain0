@@ -4,7 +4,7 @@ const PATCH_CONTRACTS = Object.freeze([
 	Object.freeze({
 		packageName: "@codingame/monaco-vscode-api@35.0.1",
 		patchPath: "patches/@codingame__monaco-vscode-api@35.0.1.patch",
-		sha256: "71ac09018e6f1b2f74a120dc8f026aaf899c22c22c5fdec7a161f56d284d726f",
+		sha256: "b416c3f7a73dc3c72fae55455515b805a180ac154aa4044d698b8a00cd68be62",
 		directImporter: true,
 		snapshotEdgeCount: 21,
 		shape: Object.freeze([
@@ -15,6 +15,10 @@ const PATCH_CONTRACTS = Object.freeze([
 			"diff --git a/vscode/src/vs/platform/files/common/files.js b/vscode/src/vs/platform/files/common/files.js",
 			"@@ -346,6 +346,95 @@ var FileOperationResult;",
 			"@@ -437,4 +526,4 @@ function getLargeFileConfirmationLimit(arg) {",
+			"diff --git a/vscode/src/vs/platform/files/common/plainWorkspaceDelete.d.ts b/vscode/src/vs/platform/files/common/plainWorkspaceDelete.d.ts",
+			"@@ -0,0 +1,70 @@",
+			"diff --git a/vscode/src/vs/platform/files/common/plainWorkspaceDelete.js b/vscode/src/vs/platform/files/common/plainWorkspaceDelete.js",
+			"@@ -0,0 +1,414 @@",
 			"diff --git a/vscode/src/vs/workbench/browser/parts/globalCompositeBar.js b/vscode/src/vs/workbench/browser/parts/globalCompositeBar.js",
 			"@@ -117,15 +117,7 @@ let GlobalCompositeBar = class GlobalCompositeBar extends Disposable {",
 			"@@ -137,30 +129,16 @@ let GlobalCompositeBar = class GlobalCompositeBar extends Disposable {",
@@ -26,6 +30,9 @@ const PATCH_CONTRACTS = Object.freeze([
 			"@@ -106,7 +151,14 @@ let TextFileSaveErrorHandler = class TextFileSaveErrorHandler extends Disposable",
 			"@@ -331,6 +383,27 @@ class RetrySaveModelAction extends Action {",
 			"@@ -431,6 +504,9 @@ async function acceptOrRevertLocalChangesCommand(accessor, resource, accept) {",
+			"diff --git a/vscode/src/vs/workbench/contrib/files/browser/fileActions.js b/vscode/src/vs/workbench/contrib/files/browser/fileActions.js",
+			"@@ -10,6 +10,7 @@ import { Action } from '../../../../base/common/actions.js';",
+			"@@ -99,6 +100,42 @@ async function deleteFiles(",
 			"diff --git a/vscode/src/vs/workbench/services/textfile/common/textFileEditorModel.js b/vscode/src/vs/workbench/services/textfile/common/textFileEditorModel.js",
 			"@@ -34,6 +34,57 @@ import { IProgressService } from '../../../../platform/progress/common/progress.",
 			"@@ -112,6 +163,7 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel",
@@ -57,6 +64,35 @@ const PATCH_CONTRACTS = Object.freeze([
 		]),
 	}),
 	Object.freeze({
+		packageName: "@codingame/monaco-vscode-base-service-override@35.0.1",
+		patchPath:
+			"patches/@codingame__monaco-vscode-base-service-override@35.0.1.patch",
+		sha256: "db541d394346ba2985b5550e2f0faf665a056ac701df25119354bd0b1e3baf4e",
+		directImporter: false,
+		snapshotEdgeCount: 1,
+		shape: Object.freeze([
+			"diff --git a/vscode/src/vs/workbench/services/workingCopy/common/workingCopyFileService.js b/vscode/src/vs/workbench/services/workingCopy/common/workingCopyFileService.js",
+			"@@ -13,6 +13,20 @@ import { IWorkingCopyService } from '@codingame/monaco-vscode-api/vscode/vs/work",
+			"@@ -160,6 +174,51 @@ let WorkingCopyFileService = class WorkingCopyFileService extends Disposable {",
+		]),
+	}),
+	Object.freeze({
+		packageName: "@codingame/monaco-vscode-bulk-edit-service-override@35.0.1",
+		patchPath:
+			"patches/@codingame__monaco-vscode-bulk-edit-service-override@35.0.1.patch",
+		sha256: "4437c5e441146d5d2f2262cbe8748932a1353ebf48424356fa648d33abf44245",
+		directImporter: false,
+		snapshotEdgeCount: 1,
+		shape: Object.freeze([
+			"diff --git a/vscode/src/vs/workbench/contrib/bulkEdit/browser/bulkFileEdits.js b/vscode/src/vs/workbench/contrib/bulkEdit/browser/bulkFileEdits.js",
+			"@@ -11,11 +11,13 @@ import { ILogService } from '@codingame/monaco-vscode-api/vscode/vs/platform/log",
+			"@@ -209,6 +211,17 @@ class DeleteEdit {",
+			"@@ -231,6 +244,16 @@ let DeleteOperation = class DeleteOperation {",
+			"@@ -333,6 +356,7 @@ let BulkFileEdits = class BulkFileEdits {",
+			"@@ -384,10 +408,15 @@ let BulkFileEdits = class BulkFileEdits {",
+		]),
+	}),
+	Object.freeze({
 		packageName: "@codingame/monaco-vscode-extensions-service-override@35.0.1",
 		patchPath:
 			"patches/@codingame__monaco-vscode-extensions-service-override@35.0.1.patch",
@@ -85,30 +121,32 @@ const PATCH_CONTRACTS = Object.freeze([
 		packageName: "@codingame/monaco-vscode-files-service-override@35.0.1",
 		patchPath:
 			"patches/@codingame__monaco-vscode-files-service-override@35.0.1.patch",
-		sha256: "ec05e44dd1cebac5b9b27c9ee77c3fa15452867c610e46a1ed89fdd16f844279",
+		sha256: "4639136edb34a2de20a9f24c8d7bfc892c7080e444c997a8290772ce37ac0159",
 		directImporter: true,
 		snapshotEdgeCount: 6,
 		shape: Object.freeze([
 			"diff --git a/vscode/src/vs/platform/files/common/fileService.js b/vscode/src/vs/platform/files/common/fileService.js",
-			"@@ -9,12 +9,13 @@ import { hash } from '@codingame/monaco-vscode-api/vscode/vs/base/common/hash';",
-			"@@ -26,7 +27,771 @@ function resourceForError(resource) {",
-			"@@ -81,6 +846,7 @@ let FileService = class FileService extends Disposable {",
-			"@@ -266,6 +1032,21 @@ let FileService = class FileService extends Disposable {",
-			"@@ -345,8 +1126,21 @@ let FileService = class FileService extends Disposable {",
-			"@@ -362,16 +1156,50 @@ let FileService = class FileService extends Disposable {",
-			"@@ -383,10 +1211,39 @@ let FileService = class FileService extends Disposable {",
-			"@@ -412,6 +1269,9 @@ let FileService = class FileService extends Disposable {",
-			"@@ -442,6 +1302,57 @@ let FileService = class FileService extends Disposable {",
-			"@@ -559,6 +1470,9 @@ let FileService = class FileService extends Disposable {",
-			"@@ -600,6 +1514,57 @@ let FileService = class FileService extends Disposable {",
-			"@@ -691,18 +1656,27 @@ let FileService = class FileService extends Disposable {",
-			"@@ -717,6 +1691,8 @@ let FileService = class FileService extends Disposable {",
-			"@@ -731,6 +1707,21 @@ let FileService = class FileService extends Disposable {",
-			"@@ -780,6 +1771,7 @@ let FileService = class FileService extends Disposable {",
-			"@@ -794,6 +1786,7 @@ let FileService = class FileService extends Disposable {",
-			"@@ -878,15 +1871,47 @@ let FileService = class FileService extends Disposable {",
-			"@@ -974,6 +1999,8 @@ let FileService = class FileService extends Disposable {",
-			"@@ -1154,14 +2181,54 @@ let FileService = class FileService extends Disposable {",
+			"@@ -9,15 +9,17 @@ import { hash } from '@codingame/monaco-vscode-api/vscode/vs/base/common/hash';",
+			"@@ -26,7 +28,771 @@ function resourceForError(resource) {",
+			"@@ -81,6 +847,7 @@ let FileService = class FileService extends Disposable {",
+			"@@ -266,6 +1033,21 @@ let FileService = class FileService extends Disposable {",
+			"@@ -345,8 +1127,21 @@ let FileService = class FileService extends Disposable {",
+			"@@ -362,16 +1157,50 @@ let FileService = class FileService extends Disposable {",
+			"@@ -383,10 +1212,39 @@ let FileService = class FileService extends Disposable {",
+			"@@ -412,6 +1270,9 @@ let FileService = class FileService extends Disposable {",
+			"@@ -442,6 +1303,57 @@ let FileService = class FileService extends Disposable {",
+			"@@ -559,6 +1471,9 @@ let FileService = class FileService extends Disposable {",
+			"@@ -600,6 +1515,57 @@ let FileService = class FileService extends Disposable {",
+			"@@ -691,18 +1657,27 @@ let FileService = class FileService extends Disposable {",
+			"@@ -717,6 +1692,8 @@ let FileService = class FileService extends Disposable {",
+			"@@ -731,6 +1708,21 @@ let FileService = class FileService extends Disposable {",
+			"@@ -780,6 +1772,7 @@ let FileService = class FileService extends Disposable {",
+			"@@ -794,6 +1787,7 @@ let FileService = class FileService extends Disposable {",
+			"@@ -878,21 +1872,56 @@ let FileService = class FileService extends Disposable {",
+			"@@ -901,6 +1930,9 @@ let FileService = class FileService extends Disposable {",
+			"@@ -952,6 +1984,24 @@ let FileService = class FileService extends Disposable {",
+			"@@ -974,6 +2024,8 @@ let FileService = class FileService extends Disposable {",
+			"@@ -1154,14 +2206,54 @@ let FileService = class FileService extends Disposable {",
 		]),
 	}),
 	Object.freeze({
@@ -321,7 +359,7 @@ function exactMappingLines(source, expected, label, failures) {
 	).filter((line) => line.trim().length > 0);
 	if (JSON.stringify(actual) !== JSON.stringify(expected)) {
 		failures.push(
-			`${label} top-level patchedDependencies must be the exact audited five-entry closed set`,
+			`${label} top-level patchedDependencies must be the exact audited seven-entry closed set`,
 		);
 	}
 	return actual;

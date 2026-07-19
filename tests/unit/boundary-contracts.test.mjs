@@ -3541,53 +3541,40 @@ describe("Plain confirmed-delete Harness contracts", () => {
 	});
 });
 
-const workspaceDeleteAppSources = [
-	{
-		relativePath: "app/platform/tauri/native.ts",
-		source: `
-import { invoke } from "@tauri-apps/api/core";
-export function createNativeBridge() {
-  return {
-    workspacePrepareDelete: async () => invoke("workspace_prepare_delete"),
-    workspaceCancelDelete: async () => invoke("workspace_cancel_delete"),
-    workspaceBeginDelete: async () => invoke("workspace_begin_delete"),
-    workspaceCommitDeleteEntry: async () => invoke("workspace_commit_delete_entry"),
-  };
-}
-`,
-	},
-	{
-		relativePath: "app/platform/tauri/contracts.ts",
-		source: `
-interface PlainBridge {
-  workspacePrepareDelete(): Promise<void>;
-  workspaceCancelDelete(): Promise<void>;
-  workspaceBeginDelete(): Promise<void>;
-  workspaceCommitDeleteEntry(): Promise<void>;
-}
-`,
-	},
-	{
-		relativePath: "app/platform/tauri/browser-mock.ts",
-		source: `
-export function createBrowserMockBridge() {
-  return {
-    async workspacePrepareDelete() {},
-    async workspaceCancelDelete() {},
-    async workspaceBeginDelete() {},
-    async workspaceCommitDeleteEntry() {},
-  };
-}
-`,
-	},
-	{
-		relativePath: "app/features/workspace/file-system-provider.ts",
-		source: "export const providerIsReadonly = true;",
-	},
+const workspaceDeleteAppPaths = [
+	"app/platform/tauri/native.ts",
+	"app/platform/tauri/contracts.ts",
+	"app/platform/tauri/browser-mock.ts",
+	"app/features/workspace/delete-coordinator.ts",
+	"app/features/workspace/file-system-provider.ts",
 ];
+const workspaceDeleteAppSources = workspaceDeleteAppPaths.map(
+	(relativePath) => ({
+		relativePath,
+		source: readFileSync(
+			new URL(`../../${relativePath}`, import.meta.url),
+			"utf8",
+		),
+	}),
+);
+
+function replaceWorkspaceDeleteAppSource(relativePath, from, to) {
+	return mutateWorkspaceSource(
+		workspaceDeleteAppSources,
+		relativePath,
+		(source) => {
+			if (!source.includes(from)) {
+				throw new Error(
+					`${relativePath} delete mutation fixture no longer matches production`,
+				);
+			}
+			return source.replace(from, to);
+		},
+	);
+}
 
 describe("Plain confirmed-delete TypeScript invocation boundary", () => {
-	it("keeps one native invoke per command and no feature consumer before activation", () => {
+	it("accepts the production prepare/confirm/begin -> authorized provider commit route", () => {
 		expect(
 			validateWorkspaceDeleteTypeScriptBoundary(workspaceDeleteAppSources),
 		).toEqual([]);
@@ -3597,52 +3584,35 @@ describe("Plain confirmed-delete TypeScript invocation boundary", () => {
 		const failure =
 			"workspace_begin_delete must appear only as the direct invoke command of native workspaceBeginDelete";
 		for (const hostile of [
-			mutateWorkspaceSource(
-				workspaceDeleteAppSources,
+			replaceWorkspaceDeleteAppSource(
 				"app/platform/tauri/native.ts",
-				(source) =>
-					source.replace('invoke("workspace_begin_delete")', "noop()"),
+				'invoke<unknown>("workspace_begin_delete", { request })',
+				"noop()",
 			),
-			mutateWorkspaceSource(
-				workspaceDeleteAppSources,
+			replaceWorkspaceDeleteAppSource(
 				"app/platform/tauri/native.ts",
-				(source) =>
-					source.replace(
-						'invoke("workspace_begin_delete")',
-						"invoke(`workspace_begin_delete`)",
-					),
+				'"workspace_begin_delete"',
+				"`workspace_begin_delete`",
 			),
-			mutateWorkspaceSource(
-				workspaceDeleteAppSources,
+			replaceWorkspaceDeleteAppSource(
 				"app/platform/tauri/native.ts",
-				(source) =>
-					source.replace(
-						'invoke("workspace_begin_delete")',
-						'invoke("workspace_" + "begin_delete")',
-					),
+				'"workspace_begin_delete"',
+				'"workspace_" + "begin_delete"',
 			),
-			mutateWorkspaceSource(
-				workspaceDeleteAppSources,
+			replaceWorkspaceDeleteAppSource(
 				"app/platform/tauri/native.ts",
-				(source) =>
-					source.replace(
-						'invoke("workspace_begin_delete")',
-						'invoke(["workspace", "begin", "delete"].join("_"))',
-					),
+				'"workspace_begin_delete"',
+				'["workspace", "begin", "delete"].join("_")',
 			),
 			mutateWorkspaceSource(
 				workspaceDeleteAppSources,
 				"app/platform/tauri/native.ts",
 				(source) => `${source}\nconst duplicate = "workspace_begin_delete";`,
 			),
-			mutateWorkspaceSource(
-				workspaceDeleteAppSources,
+			replaceWorkspaceDeleteAppSource(
 				"app/platform/tauri/native.ts",
-				(source) =>
-					source.replace(
-						"workspaceBeginDelete: async () =>",
-						"beginWithoutAuthorization: async () =>",
-					),
+				"workspaceBeginDelete: async (confirmationId) =>",
+				"beginWithoutAuthorization: async (confirmationId) =>",
 			),
 			mutateWorkspaceSource(
 				workspaceDeleteAppSources,
@@ -3725,9 +3695,7 @@ describe("Plain confirmed-delete TypeScript invocation boundary", () => {
 				failures.some(
 					(message) =>
 						message.includes("delete bridge") ||
-						message.includes(
-							"before the audited delete coordinator and provider authorization patch land",
-						),
+						message.includes("single audited coordinator/provider route"),
 				),
 			).toBe(true);
 		}
@@ -3740,8 +3708,188 @@ describe("Plain confirmed-delete TypeScript invocation boundary", () => {
 			},
 		];
 		expect(validateWorkspaceDeleteTypeScriptBoundary(platformBypass)).toContain(
-			"app/platform/tauri/delete-bypass.ts must not consume workspaceBeginDelete before the audited delete coordinator and provider authorization patch land",
+			"app/platform/tauri/delete-bypass.ts must not consume workspaceBeginDelete outside its single audited coordinator/provider route",
 		);
+	});
+
+	it("locks the unique internal authorization-helper import and consumer map", () => {
+		const coordinator = "app/features/workspace/delete-coordinator.ts";
+		const provider = "app/features/workspace/file-system-provider.ts";
+		for (const hostile of [
+			replaceWorkspaceDeleteAppSource(
+				coordinator,
+				"authorizePlainWorkspaceDeleteResourceEdit,",
+				"authorizePlainWorkspaceDeleteResourceEdit as authorizeDelete,",
+			),
+			replaceWorkspaceDeleteAppSource(
+				provider,
+				"beginPlainWorkspaceDeleteProviderDispatch,",
+				"beginPlainWorkspaceDeleteProviderDispatch as beginDelete,",
+			),
+			mutateWorkspaceSource(
+				workspaceDeleteAppSources,
+				coordinator,
+				(source) =>
+					`${source}\nconst leakedDeleteState = getPlainWorkspaceDeleteState;`,
+			),
+			mutateWorkspaceSource(
+				workspaceDeleteAppSources,
+				provider,
+				(source) =>
+					`${source}\nconst deleteDispatch = completePlainWorkspaceDeleteProviderResult;`,
+			),
+			[
+				...workspaceDeleteAppSources,
+				{
+					relativePath: "app/features/workspace/delete-helper-bypass.ts",
+					source:
+						'import { getPlainWorkspaceDeleteState } from "@codingame/monaco-vscode-api/vscode/vs/platform/files/common/plainWorkspaceDelete";',
+				},
+			],
+		]) {
+			const failures = validateWorkspaceDeleteTypeScriptBoundary(hostile);
+			expect(
+				failures.some((message) =>
+					/plainWorkspaceDelete|fixed confirmed-delete function|module-private coordinator surface|top-level surface/.test(
+						message,
+					),
+				),
+			).toBe(true);
+		}
+	});
+
+	it("locks one confirmation and strict prepare -> begin -> authorization -> bulk sequencing", () => {
+		const coordinator = "app/features/workspace/delete-coordinator.ts";
+		const cases = [
+			[
+				"if (confirmed !== true)",
+				"if (confirmed === true)",
+				"runDelete must retain strict confirmation, begin and terminal-success sequencing",
+			],
+			[
+				"beginAttempted = true;\n\t\tawait bridge.workspaceBeginDelete(plan.confirmationId);",
+				"await bridge.workspaceBeginDelete(plan.confirmationId);\n\t\tbeginAttempted = true;",
+				"runDelete must retain strict confirmation, begin and terminal-success sequencing",
+			],
+			[
+				"skipTrashBin: true",
+				"skipTrashBin: false",
+				"delete coordinator must bind one permanent recursive authorization to each ResourceFileEdit",
+			],
+			[
+				"permanent: true",
+				"permanent: false",
+				"delete coordinator must bind one permanent recursive authorization to each ResourceFileEdit",
+			],
+			[
+				"recursive: true,\n\t\t\t\tkind: entry.kind",
+				"recursive: false,\n\t\t\t\tkind: entry.kind",
+				"delete coordinator must bind one permanent recursive authorization to each ResourceFileEdit",
+			],
+			[
+				"if (!completed) {",
+				"if (completed) {",
+				"runDelete must rescan after begun failures and cancel every uncompleted confirmation in finally",
+			],
+			[
+				"if (beginAttempted) {",
+				"if (!beginAttempted) {",
+				"runDelete must rescan after begun failures and cancel every uncompleted confirmation in finally",
+			],
+			[
+				'result.status === "pending" || result.status === "inFlight"',
+				'result.status === "pending" || result.status === "deleted"',
+				"delete coordinator must classify every authorization terminal typestate without guessing success",
+			],
+		];
+		for (const [from, to, failure] of cases) {
+			const hostile = replaceWorkspaceDeleteAppSource(coordinator, from, to);
+			expect(validateWorkspaceDeleteTypeScriptBoundary(hostile)).toContain(
+				failure,
+			);
+		}
+
+		const doubleConfirm = replaceWorkspaceDeleteAppSource(
+			coordinator,
+			"const selection = snapshotSelection(context, provider);",
+			"await context.dialogService.confirm({});\n\tconst selection = snapshotSelection(context, provider);",
+		);
+		expect(validateWorkspaceDeleteTypeScriptBoundary(doubleConfirm)).toContain(
+			"runDelete must call context.dialogService.confirm exactly 1 times in the audited route",
+		);
+	});
+
+	it("locks provider authorization typestate, permanent commit and closed event outcomes", () => {
+		const provider = "app/features/workspace/file-system-provider.ts";
+		const cases = [
+			[
+				"authorizationSnapshot.permanent !== true",
+				"authorizationSnapshot.permanent !== false",
+			],
+			[
+				"beginPlainWorkspaceDeleteProviderDispatch(authorization);",
+				"void authorization;",
+			],
+			[
+				"result = decodeWorkspaceDeleteResult(",
+				"result = await Promise.resolve(",
+			],
+			[
+				"completePlainWorkspaceDeleteProviderResult(authorization, result);",
+				"void result;",
+			],
+			['if (result.status !== "deleted")', 'if (result.status === "deleted")'],
+			[
+				"this.fireDeleted(resolved.resource);",
+				"this.fireRootUpdated(resolved.resource);",
+			],
+			[
+				'rescan: true,\n\t\t\t\toutcome: "outcomeUnknown"',
+				'rescan: false,\n\t\t\t\toutcome: "outcomeUnknown"',
+			],
+			[
+				"this.bridge.workspaceCommitDeleteEntry(",
+				'this.bridge["workspaceCommitDeleteEntry"](',
+			],
+		];
+		for (const [from, to] of cases) {
+			const hostile = replaceWorkspaceDeleteAppSource(provider, from, to);
+			const failures = validateWorkspaceDeleteTypeScriptBoundary(hostile);
+			expect(
+				failures.some((message) =>
+					/provider delete|typestate|mapDeleteError|workspaceCommitDeleteEntry|computed access|direct consumers/.test(
+						message,
+					),
+				),
+				`mutation was not rejected: ${from}`,
+			).toBe(true);
+		}
+	});
+
+	it("keeps the provider globally Readonly with permanent non-Trash events", () => {
+		const provider = "app/features/workspace/file-system-provider.ts";
+		for (const [from, to, expected] of [
+			[
+				"FileSystemProviderCapabilities.FileReadWrite |\n\t\tFileSystemProviderCapabilities.Readonly;",
+				"FileSystemProviderCapabilities.FileReadWrite;",
+				"confirmed delete must not remove Readonly or advertise Trash/atomic provider capabilities",
+			],
+			[
+				"FileSystemProviderCapabilities.Readonly;",
+				"FileSystemProviderCapabilities.Readonly |\n\t\tFileSystemProviderCapabilities.Trash;",
+				"confirmed delete must not remove Readonly or advertise Trash/atomic provider capabilities",
+			],
+			[
+				"type: FileChangeType.DELETED,\n\t\t\t\t\tresource,",
+				"type: FileChangeType.UPDATED,\n\t\t\t\t\tresource,",
+				"fireDeleted must retain its exact snapshotted root/event delete role",
+			],
+		]) {
+			const hostile = replaceWorkspaceDeleteAppSource(provider, from, to);
+			expect(validateWorkspaceDeleteTypeScriptBoundary(hostile)).toContain(
+				expected,
+			);
+		}
 	});
 });
 
@@ -4011,7 +4159,7 @@ describe("Plain workspace provider copy boundary", () => {
 		}
 	});
 
-	it("keeps write, mkdir and delete public entry points fail-closed", () => {
+	it("keeps write and mkdir public entry points fail-closed", () => {
 		for (const [method, expected] of [
 			[
 				"writeFile",
@@ -4020,10 +4168,6 @@ describe("Plain workspace provider copy boundary", () => {
 			[
 				"mkdir",
 				"Plain workspace provider must keep exactly one fail-closed public mkdir method",
-			],
-			[
-				"delete",
-				"Plain workspace provider must keep exactly one fail-closed public delete method",
 			],
 		]) {
 			const hostile = mutateProvider(
@@ -4234,6 +4378,7 @@ describe("Plain workspace provider bootstrap contract", () => {
 import { initialize } from "@codingame/monaco-vscode-api";
 import { registerCustomProvider } from "@codingame/monaco-vscode-files-service-override";
 import { createPlainWorkspaceFileSystemProvider, PLAIN_WORKSPACE_SCHEME } from "./features/workspace/file-system-provider";
+import { registerWorkspaceDeleteCoordinator } from "./features/workspace/delete-coordinator";
 import { createBridge } from "./platform/tauri";
 
 async function bootstrap() {
@@ -4243,8 +4388,15 @@ const workspaceFileSystemProvider = createPlainWorkspaceFileSystemProvider(
   bridge,
   workspaceCapabilities,
 );
+const workspaceDeleteCoordinator = registerWorkspaceDeleteCoordinator(
+  bridge,
+  workspaceFileSystemProvider,
+);
 registerCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);
 const initialWorkspaceSnapshot = await bridge.workspaceSnapshot();
+window.addEventListener("pagehide", () => {
+  workspaceDeleteCoordinator.dispose();
+}, { once: true });
 await initialize(createServiceOverrides(), container, { enableWorkspaceTrust: false });
 }
 `;
@@ -4262,7 +4414,7 @@ await initialize(createServiceOverrides(), container, { enableWorkspaceTrust: fa
 			expect.arrayContaining([
 				"app/main.ts must register exactly one custom workspace provider",
 				"app/main.ts must unconditionally register only the audited plain-workspace provider",
-				"bootstrap order must remain createBridge -> capabilities -> provider -> register -> snapshot -> initialize",
+				"bootstrap order must remain createBridge -> capabilities -> provider -> delete coordinator -> register -> snapshot -> initialize",
 			]),
 		);
 	});
@@ -4334,7 +4486,7 @@ await initialize(createServiceOverrides(), container, { enableWorkspaceTrust: fa
 				"const workspaceCapabilities = await bridge.workspaceCapabilities();\nregisterCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);",
 			);
 		expect(validateWorkspaceProviderBootstrap(late)).toContain(
-			"bootstrap order must remain createBridge -> capabilities -> provider -> register -> snapshot -> initialize",
+			"bootstrap order must remain createBridge -> capabilities -> provider -> delete coordinator -> register -> snapshot -> initialize",
 		);
 
 		const aliased = bootstrap.replace(
@@ -4400,6 +4552,15 @@ await initialize(createServiceOverrides(), container, { enableWorkspaceTrust: fa
 		expect(validateWorkspaceProviderBootstrap(aliasedImport)).toContain(
 			"app/main.ts must import createBridge exactly by name from ./platform/tauri",
 		);
+		const aliasedCoordinatorImport = bootstrap.replace(
+			'import { registerWorkspaceDeleteCoordinator } from "./features/workspace/delete-coordinator";',
+			'import { registerWorkspaceDeleteCoordinator as registerDelete } from "./features/workspace/delete-coordinator";',
+		);
+		expect(
+			validateWorkspaceProviderBootstrap(aliasedCoordinatorImport),
+		).toContain(
+			"app/main.ts must import registerWorkspaceDeleteCoordinator exactly by name from ./features/workspace/delete-coordinator",
+		);
 
 		const shadowedFactory = bootstrap.replace(
 			"const bridge = createBridge();",
@@ -4407,6 +4568,62 @@ await initialize(createServiceOverrides(), container, { enableWorkspaceTrust: fa
 		);
 		expect(validateWorkspaceProviderBootstrap(shadowedFactory)).toContain(
 			"bootstrap must not shadow any audited provider-registration binding",
+		);
+	});
+
+	it("requires one direct delete coordinator registration and pagehide disposal", () => {
+		const missingRegistration = bootstrap.replace(
+			`const workspaceDeleteCoordinator = registerWorkspaceDeleteCoordinator(
+  bridge,
+  workspaceFileSystemProvider,
+);
+`,
+			"",
+		);
+		expect(validateWorkspaceProviderBootstrap(missingRegistration)).toEqual(
+			expect.arrayContaining([
+				"app/main.ts must register exactly one audited workspace delete coordinator",
+				"bootstrap order must remain createBridge -> capabilities -> provider -> delete coordinator -> register -> snapshot -> initialize",
+				"app/main.ts must dispose the sole workspace delete coordinator exactly once on pagehide",
+			]),
+		);
+
+		for (const hostile of [
+			bootstrap.replace("  workspaceDeleteCoordinator.dispose();\n", ""),
+			bootstrap.replace(
+				"  workspaceDeleteCoordinator.dispose();",
+				"  workspaceDeleteCoordinator.dispose();\n  workspaceDeleteCoordinator.dispose();",
+			),
+			bootstrap.replace('"pagehide"', '"beforeunload"'),
+			bootstrap.replace(
+				"  workspaceDeleteCoordinator.dispose();",
+				"  coordinatorAlias.dispose();",
+			),
+		]) {
+			expect(validateWorkspaceProviderBootstrap(hostile)).toContain(
+				"app/main.ts must dispose the sole workspace delete coordinator exactly once on pagehide",
+			);
+		}
+
+		const lateCoordinator = bootstrap
+			.replace(
+				`const workspaceDeleteCoordinator = registerWorkspaceDeleteCoordinator(
+  bridge,
+  workspaceFileSystemProvider,
+);
+`,
+				"",
+			)
+			.replace(
+				"registerCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);",
+				`registerCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);
+const workspaceDeleteCoordinator = registerWorkspaceDeleteCoordinator(
+  bridge,
+  workspaceFileSystemProvider,
+);`,
+			);
+		expect(validateWorkspaceProviderBootstrap(lateCoordinator)).toContain(
+			"bootstrap order must remain createBridge -> capabilities -> provider -> delete coordinator -> register -> snapshot -> initialize",
 		);
 	});
 
@@ -4432,7 +4649,7 @@ await initialize(createServiceOverrides(), container, { enableWorkspaceTrust: fa
 			"await bridge.runtimeInfo();\nconst workspaceCapabilities = await bridge.workspaceCapabilities();",
 		);
 		expect(validateWorkspaceProviderBootstrap(interrupted)).toContain(
-			"bootstrap order must remain createBridge -> capabilities -> provider -> register -> snapshot -> initialize",
+			"bootstrap order must remain createBridge -> capabilities -> provider -> delete coordinator -> register -> snapshot -> initialize",
 		);
 	});
 

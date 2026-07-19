@@ -70,6 +70,20 @@ const requiredPatches = new Map([
 		},
 	],
 	[
+		"@codingame/monaco-vscode-base-service-override@35.0.1",
+		{
+			file: "patches/@codingame__monaco-vscode-base-service-override@35.0.1.patch",
+			marker: "movePlainWorkspaceDeleteWorkingCopyAuthorization",
+		},
+	],
+	[
+		"@codingame/monaco-vscode-bulk-edit-service-override@35.0.1",
+		{
+			file: "patches/@codingame__monaco-vscode-bulk-edit-service-override@35.0.1.patch",
+			marker: "validatePlainWorkspaceDeleteResourceEditBatch",
+		},
+	],
+	[
 		"@codingame/monaco-vscode-extensions-service-override@35.0.1",
 		{
 			file: "patches/@codingame__monaco-vscode-extensions-service-override@35.0.1.patch",

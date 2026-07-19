@@ -6,8 +6,17 @@ import {
 	FileSystemProviderErrorCode,
 	FileType,
 	type IFileOverwriteOptions,
+	type IFileDeleteOptions,
 } from "@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files";
 import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
+import {
+	authorizePlainWorkspaceDeleteResourceEdit,
+	getPlainWorkspaceDeleteState,
+	movePlainWorkspaceDeleteFileServiceAuthorization,
+	movePlainWorkspaceDeleteResourceEditAuthorization,
+	movePlainWorkspaceDeleteWorkingCopyAuthorization,
+	type PlainWorkspaceDeleteAuthorization,
+} from "@codingame/monaco-vscode-api/vscode/vs/platform/files/common/plainWorkspaceDelete";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -55,6 +64,66 @@ function rootedWorkspaceUri(workspaceRootId: string, relativePath = ""): URI {
 	return URI.parse(
 		`${PLAIN_WORKSPACE_SCHEME}://${workspaceRootId}/${relativePath}`,
 	);
+}
+
+function authorizedProviderDelete(
+	resource: URI,
+	kind: "file" | "directory" | "symlink" = "file",
+): Readonly<{
+	options: IFileDeleteOptions;
+	authorization: PlainWorkspaceDeleteAuthorization;
+}> {
+	const resourceEditOptions = {
+		recursive: true,
+		folder: kind === "directory",
+		ignoreIfNotExists: false,
+		skipTrashBin: true,
+	};
+	const authorization = authorizePlainWorkspaceDeleteResourceEdit(
+		resourceEditOptions,
+		resource,
+		{
+			confirmationId: "00000000-0000-4000-8000-000000000303",
+			entryId: "00000000-0000-4000-8000-000000000404",
+			rootId: resource.authority,
+			relativePath: resource.path.slice(1),
+			recursive: true,
+			kind,
+			permanent: true,
+		},
+	);
+	const operation = { resource, recursive: true, useTrash: false };
+	expect(
+		movePlainWorkspaceDeleteResourceEditAuthorization(
+			resourceEditOptions,
+			resource,
+			operation,
+		),
+	).toBe(true);
+	const fileOptions = { recursive: true, useTrash: false, atomic: false };
+	expect(
+		movePlainWorkspaceDeleteWorkingCopyAuthorization(
+			operation,
+			resource,
+			fileOptions,
+		),
+	).toBe(true);
+	const providerOptions = {
+		recursive: true,
+		useTrash: false,
+		atomic: false,
+	} as const;
+	expect(
+		movePlainWorkspaceDeleteFileServiceAuthorization(
+			fileOptions,
+			resource,
+			providerOptions,
+		),
+	).toBe(true);
+	return Object.freeze({
+		options: providerOptions,
+		authorization,
+	});
 }
 
 function exactCommandError(code: string): object {
@@ -266,6 +335,7 @@ describe("Plain workspace file system provider", () => {
 			const copy = vi.fn();
 			const rename = vi.fn();
 			const move = vi.fn();
+			const commitDelete = vi.fn();
 			const platformCapabilities = {
 				...supportedCapabilities,
 				[capability]: false,
@@ -278,6 +348,7 @@ describe("Plain workspace file system provider", () => {
 					workspaceCopy: copy,
 					workspaceRename: rename,
 					workspaceMove: move,
+					workspaceCommitDeleteEntry: commitDelete,
 				}),
 				platformCapabilities,
 			);
@@ -326,6 +397,10 @@ describe("Plain workspace file system provider", () => {
 					unreadableResource,
 					unreadableOptions,
 				),
+				provider.delete(
+					unreadableResource,
+					unreadableOptions as IFileDeleteOptions,
+				),
 			]) {
 				expect((await rejected(operation)).code).toBe(
 					FileSystemProviderErrorCode.NoPermissions,
@@ -338,6 +413,7 @@ describe("Plain workspace file system provider", () => {
 			expect(copy).not.toHaveBeenCalled();
 			expect(rename).not.toHaveBeenCalled();
 			expect(move).not.toHaveBeenCalled();
+			expect(commitDelete).not.toHaveBeenCalled();
 			expect(changeListener).not.toHaveBeenCalled();
 			changeSubscription.dispose();
 			expect(provider.capabilities).toBe(
@@ -1800,6 +1876,174 @@ describe("Plain workspace file system provider", () => {
 			expect(error.message).not.toContain("/Users/private");
 			expect(error.message).not.toContain(nativeCode);
 			expect(changeListener).not.toHaveBeenCalled();
+		}
+	});
+
+	it("consumes one exact confirmed-delete authorization, commits once, and emits only the deleted entry", async () => {
+		const commit = vi.fn(async () =>
+			Object.freeze({ status: "deleted" as const }),
+		);
+		const provider = createPlainWorkspaceFileSystemProvider(
+			testBridge({ workspaceCommitDeleteEntry: commit }),
+		);
+		const resource = workspaceUri("delete-me.txt");
+		const authorized = authorizedProviderDelete(resource);
+		const changes: ProviderChanges[] = [];
+		const subscription = provider.onDidChangeFile((event: ProviderChanges) =>
+			changes.push(event),
+		);
+
+		await expect(
+			provider.delete(resource, authorized.options),
+		).resolves.toBeUndefined();
+		subscription.dispose();
+
+		expect(commit).toHaveBeenCalledOnce();
+		expect(commit).toHaveBeenCalledWith(
+			"00000000-0000-4000-8000-000000000303",
+			"00000000-0000-4000-8000-000000000404",
+			rootId,
+			"delete-me.txt",
+			true,
+		);
+		expect(getPlainWorkspaceDeleteState(authorized.authorization)).toEqual({
+			status: "deleted",
+		});
+		expect(changes).toHaveLength(1);
+		expect(changes[0]).toHaveLength(1);
+		expect(changes[0]![0]).toMatchObject({
+			type: FileChangeType.DELETED,
+		});
+		expect(changes[0]![0]!.resource.toString()).toBe(resource.toString());
+		expect(provider.capabilities).toBe(
+			FileSystemProviderCapabilities.FileReadWrite |
+				FileSystemProviderCapabilities.Readonly,
+		);
+
+		const replay = await rejected(
+			provider.delete(resource, authorized.options),
+		);
+		expect(replay.code).toBe(FileSystemProviderErrorCode.NoPermissions);
+		expect(commit).toHaveBeenCalledOnce();
+	});
+
+	it("publishes a root rescan before mapping every retained or partial terminal to unavailable", async () => {
+		for (const result of [
+			Object.freeze({
+				status: "entryRetained" as const,
+				reason: "entryChanged" as const,
+			}),
+			Object.freeze({
+				status: "entryPartiallyDeleted" as const,
+				reason: "deleteFailed" as const,
+				removedEntries: 10_000,
+			}),
+		]) {
+			const provider = createPlainWorkspaceFileSystemProvider(
+				testBridge({
+					async workspaceCommitDeleteEntry() {
+						return result;
+					},
+				}),
+			);
+			const resource = workspaceUri("tree");
+			const authorized = authorizedProviderDelete(resource, "directory");
+			const order: string[] = [];
+			const subscription = provider.onDidChangeFile(
+				(event: ProviderChanges) => {
+					order.push("event");
+					expect(event).toHaveLength(1);
+					expect(event[0]!.type).toBe(FileChangeType.UPDATED);
+					expect(event[0]!.resource.toString()).toBe(rootUri);
+				},
+			);
+
+			const error = await rejected(
+				provider.delete(resource, authorized.options).catch((candidate) => {
+					order.push("error");
+					throw candidate;
+				}),
+			);
+			subscription.dispose();
+			expect(error.code).toBe(FileSystemProviderErrorCode.Unavailable);
+			expect(order).toEqual(["event", "error"]);
+			expect(getPlainWorkspaceDeleteState(authorized.authorization)).toEqual(
+				result,
+			);
+		}
+	});
+
+	it("separates the closed pre-syscall ordinary set from response-unknown failures and never replays either", async () => {
+		for (const code of [
+			"ROOT_NOT_AUTHORIZED",
+			"ROOT_UNAVAILABLE",
+			"INVALID_RELATIVE_PATH",
+			"ENTRY_TYPE_MISMATCH",
+			"WORKSPACE_CONFLICT",
+			"WORKSPACE_WINDOW_CLOSED",
+			"WORKSPACE_DELETE_PLAN_INVALID",
+		]) {
+			const commit = vi.fn(async () => {
+				throw exactCommandError(code);
+			});
+			const provider = createPlainWorkspaceFileSystemProvider(
+				testBridge({ workspaceCommitDeleteEntry: commit }),
+			);
+			const resource = workspaceUri(`ordinary-${code}.txt`);
+			const authorized = authorizedProviderDelete(resource);
+			const changes = vi.fn();
+			const subscription = provider.onDidChangeFile(changes);
+
+			await expect(
+				provider.delete(resource, authorized.options),
+			).rejects.toBeDefined();
+			expect(getPlainWorkspaceDeleteState(authorized.authorization)).toEqual({
+				status: "ordinaryFailure",
+			});
+			expect(changes).not.toHaveBeenCalled();
+			await expect(
+				provider.delete(resource, authorized.options),
+			).rejects.toMatchObject({
+				code: FileSystemProviderErrorCode.NoPermissions,
+			});
+			expect(commit).toHaveBeenCalledOnce();
+			subscription.dispose();
+		}
+
+		for (const failure of [
+			commandError("IO_FAILED"),
+			Object.freeze({
+				code: "WORKSPACE_DELETE_BATCH_CHANGED",
+				message: "Unexpected commit rejection.",
+			}),
+			new Error("transport lost"),
+		]) {
+			const provider = createPlainWorkspaceFileSystemProvider(
+				testBridge({
+					async workspaceCommitDeleteEntry() {
+						throw failure;
+					},
+				}),
+			);
+			const resource = workspaceUri("unknown.txt");
+			const authorized = authorizedProviderDelete(resource);
+			const changes: ProviderChanges[] = [];
+			const subscription = provider.onDidChangeFile((event: ProviderChanges) =>
+				changes.push(event),
+			);
+
+			await expect(
+				provider.delete(resource, authorized.options),
+			).rejects.toMatchObject({
+				code: FileSystemProviderErrorCode.Unavailable,
+			});
+			subscription.dispose();
+			expect(getPlainWorkspaceDeleteState(authorized.authorization)).toEqual({
+				status: "outcomeUnknown",
+			});
+			expect(changes).toHaveLength(1);
+			expect(changes[0]![0]!.type).toBe(FileChangeType.UPDATED);
+			expect(changes[0]![0]!.resource.toString()).toBe(rootUri);
 		}
 	});
 

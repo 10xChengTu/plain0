@@ -1,8 +1,8 @@
 diff --git a/vscode/src/vs/platform/files/common/fileService.js b/vscode/src/vs/platform/files/common/fileService.js
-index 107a37ee3b1999392b35fa5545382acc7238a3c1..5976d5a2f72cecb77dafb9475d777a9873b22f85 100644
+index 107a37ee3b1999392b35fa5545382acc7238a3c1..ebe36148b077802ffb0ee969e3c0354aa39b3ee3 100644
 --- a/vscode/src/vs/platform/files/common/fileService.js
 +++ b/vscode/src/vs/platform/files/common/fileService.js
-@@ -9,12 +9,13 @@ import { hash } from '@codingame/monaco-vscode-api/vscode/vs/base/common/hash';
+@@ -9,15 +9,17 @@ import { hash } from '@codingame/monaco-vscode-api/vscode/vs/base/common/hash';
  import { Iterable } from '@codingame/monaco-vscode-api/vscode/vs/base/common/iterator';
  import { Disposable, DisposableStore, toDisposable, dispose } from '@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle';
  import { TernarySearchTree } from '@codingame/monaco-vscode-api/vscode/vs/base/common/ternarySearchTree';
@@ -17,7 +17,11 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..5976d5a2f72cecb77dafb9475d777a98
  import { readFileIntoStream } from './io.js';
  import { ILogService } from '@codingame/monaco-vscode-api/vscode/vs/platform/log/common/log.service';
  import { ErrorNoTelemetry } from '@codingame/monaco-vscode-api/vscode/vs/base/common/errors';
-@@ -26,7 +27,771 @@ function resourceForError(resource) {
++import { movePlainWorkspaceDeleteFileServiceAuthorization } from '@codingame/monaco-vscode-api/vscode/vs/platform/files/common/plainWorkspaceDelete';
+ 
+ var FileService_1;
+ function resourceForError(resource) {
+@@ -26,7 +28,771 @@ function resourceForError(resource) {
      }
      return ( resource.toString(true));
  }
@@ -789,7 +793,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..5976d5a2f72cecb77dafb9475d777a98
      const directoriesToCreate = [];
      while (!providerExtUri.isEqual(directory, providerExtUri.dirname(directory))) {
          try {
-@@ -81,6 +846,7 @@ let FileService = class FileService extends Disposable {
+@@ -81,6 +847,7 @@ let FileService = class FileService extends Disposable {
          this._onDidWatchError = this._register(( new Emitter()));
          this.onDidWatchError = this._onDidWatchError.event;
          this.activeWatchers = ( new Map());
@@ -797,7 +801,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..5976d5a2f72cecb77dafb9475d777a98
          this.writeQueue = this._register(( new ResourceQueue()));
      }
      registerProvider(scheme, provider) {
-@@ -266,6 +1032,21 @@ let FileService = class FileService extends Disposable {
+@@ -266,6 +1033,21 @@ let FileService = class FileService extends Disposable {
              }),
              children: undefined
          };
@@ -819,7 +823,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..5976d5a2f72cecb77dafb9475d777a98
          if (fileStat.isDirectory && recurse(fileStat, siblings)) {
              try {
                  const entries = await provider.readdir(resource);
-@@ -345,8 +1126,21 @@ let FileService = class FileService extends Disposable {
+@@ -345,8 +1127,21 @@ let FileService = class FileService extends Disposable {
          }
      }
      async canCreateFile(resource, options) {
@@ -842,7 +846,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..5976d5a2f72cecb77dafb9475d777a98
          } catch (error) {
              return error;
          }
-@@ -362,16 +1156,50 @@ let FileService = class FileService extends Disposable {
+@@ -362,16 +1157,50 @@ let FileService = class FileService extends Disposable {
          }
      }
      async createFile(resource, bufferOrReadableOrStream = VSBuffer.fromString(""), options) {
@@ -896,7 +900,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..5976d5a2f72cecb77dafb9475d777a98
          let writeFileOptions = options;
          if (hasFileAtomicWriteCapability(provider) && !writeFileOptions?.atomic) {
              const enforcedAtomicWrite = provider.enforceAtomicWriteFile?.(resource);
-@@ -383,10 +1211,39 @@ let FileService = class FileService extends Disposable {
+@@ -383,10 +1212,39 @@ let FileService = class FileService extends Disposable {
              }
          }
          try {
@@ -937,7 +941,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..5976d5a2f72cecb77dafb9475d777a98
              if (!stat) {
                  await this.mkdirp(provider, providerExtUri.dirname(resource));
              }
-@@ -412,6 +1269,9 @@ let FileService = class FileService extends Disposable {
+@@ -412,6 +1270,9 @@ let FileService = class FileService extends Disposable {
              }
              this._onDidRunOperation.fire(( new FileOperationEvent(resource, FileOperation.WRITE)));
          } catch (error) {
@@ -947,7 +951,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..5976d5a2f72cecb77dafb9475d777a98
              throw ( new FileOperationError(( localize(
                  2096,
                  "Unable to write file '{0}' ({1})",
-@@ -442,6 +1302,57 @@ let FileService = class FileService extends Disposable {
+@@ -442,6 +1303,57 @@ let FileService = class FileService extends Disposable {
          return peekResult;
      }
      async validateWriteFile(provider, resource, bufferOrReadableOrStream, options) {
@@ -1005,7 +1009,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..5976d5a2f72cecb77dafb9475d777a98
          const unlock = !!options?.unlock;
          if (unlock && !(provider.capabilities & FileSystemProviderCapabilities.FileWriteUnlock)) {
              throw ( new Error(( localize(
-@@ -559,6 +1470,9 @@ let FileService = class FileService extends Disposable {
+@@ -559,6 +1471,9 @@ let FileService = class FileService extends Disposable {
          return this.doReadFileStream(provider, resource, options, token);
      }
      async doReadFileStream(provider, resource, options, token) {
@@ -1015,7 +1019,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..5976d5a2f72cecb77dafb9475d777a98
          const cancellableSource = ( new CancellationTokenSource(token));
          let readFileOptions = options;
          if (hasFileAtomicReadCapability(provider) && provider.enforceAtomicReadFile?.(resource)) {
-@@ -600,6 +1514,57 @@ let FileService = class FileService extends Disposable {
+@@ -600,6 +1515,57 @@ let FileService = class FileService extends Disposable {
              throw this.restoreReadError(error, resource, readFileOptions);
          }
      }
@@ -1073,7 +1077,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..5976d5a2f72cecb77dafb9475d777a98
      restoreReadError(error, resource, options) {
          const message = ( localize(
              2104,
-@@ -691,18 +1656,27 @@ let FileService = class FileService extends Disposable {
+@@ -691,18 +1657,27 @@ let FileService = class FileService extends Disposable {
          return this.doCanMoveCopy(source, target, "copy", overwrite);
      }
      async doCanMoveCopy(source, target, mode, overwrite) {
@@ -1107,7 +1111,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..5976d5a2f72cecb77dafb9475d777a98
          const sourceProvider = this.throwIfFileSystemIsReadonly(await this.withWriteProvider(source), source);
          const targetProvider = this.throwIfFileSystemIsReadonly(await this.withWriteProvider(target), target);
          const mode = await this.doMoveCopy(sourceProvider, source, targetProvider, target, "move", !!overwrite);
-@@ -717,6 +1691,8 @@ let FileService = class FileService extends Disposable {
+@@ -717,6 +1692,8 @@ let FileService = class FileService extends Disposable {
          return fileStat;
      }
      async copy(source, target, overwrite) {
@@ -1116,7 +1120,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..5976d5a2f72cecb77dafb9475d777a98
          const sourceProvider = await this.withReadProvider(source);
          const targetProvider = this.throwIfFileSystemIsReadonly(await this.withWriteProvider(target), target);
          const mode = await this.doMoveCopy(sourceProvider, source, targetProvider, target, "copy", !!overwrite);
-@@ -731,6 +1707,21 @@ let FileService = class FileService extends Disposable {
+@@ -731,6 +1708,21 @@ let FileService = class FileService extends Disposable {
          return fileStat;
      }
      async doMoveCopy(sourceProvider, source, targetProvider, target, mode, overwrite) {
@@ -1138,7 +1142,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..5976d5a2f72cecb77dafb9475d777a98
          if (( source.toString()) === ( target.toString())) {
              return mode;
          }
-@@ -780,6 +1771,7 @@ let FileService = class FileService extends Disposable {
+@@ -780,6 +1772,7 @@ let FileService = class FileService extends Disposable {
          }
      }
      async doCopyFile(sourceProvider, source, targetProvider, target) {
@@ -1146,7 +1150,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..5976d5a2f72cecb77dafb9475d777a98
          if (hasOpenReadWriteCloseCapability(sourceProvider) && hasOpenReadWriteCloseCapability(targetProvider)) {
              return this.doPipeBuffered(sourceProvider, source, targetProvider, target);
          }
-@@ -794,6 +1786,7 @@ let FileService = class FileService extends Disposable {
+@@ -794,6 +1787,7 @@ let FileService = class FileService extends Disposable {
          }
      }
      async doCopyFolder(sourceProvider, sourceFolder, targetProvider, targetFolder) {
@@ -1154,7 +1158,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..5976d5a2f72cecb77dafb9475d777a98
          await targetProvider.mkdir(targetFolder);
          if (Array.isArray(sourceFolder.children)) {
              await Promises.settled(( sourceFolder.children.map(async sourceChild => {
-@@ -878,15 +1871,47 @@ let FileService = class FileService extends Disposable {
+@@ -878,21 +1872,56 @@ let FileService = class FileService extends Disposable {
          return !!(provider.capabilities & FileSystemProviderCapabilities.PathCaseSensitive);
      }
      async createFolder(resource) {
@@ -1206,7 +1210,51 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..5976d5a2f72cecb77dafb9475d777a98
          const {
              providerExtUri
          } = this.getExtUri(provider);
-@@ -974,6 +1999,8 @@ let FileService = class FileService extends Disposable {
+         return mkdirp(providerExtUri, provider, directory);
+     }
+     async canDelete(resource, options) {
++        if (isPlainWorkspaceResource(resource)) {
++            return plainWorkspaceMutationError("Plain workspace deletion requires one confirmed call authorization");
++        }
+         try {
+             await this.doValidateDelete(resource, options);
+         } catch (error) {
+@@ -901,6 +1930,9 @@ let FileService = class FileService extends Disposable {
+         return true;
+     }
+     async doValidateDelete(resource, options) {
++        if (isPlainWorkspaceResource(resource)) {
++            throw plainWorkspaceMutationError("Plain workspace deletion requires one confirmed call authorization");
++        }
+         const provider = this.throwIfFileSystemIsReadonly(await this.withProvider(resource), resource);
+         const useTrash = !!options?.useTrash;
+         if (useTrash && !(provider.capabilities & FileSystemProviderCapabilities.Trash)) {
+@@ -952,6 +1984,24 @@ let FileService = class FileService extends Disposable {
+         return provider;
+     }
+     async del(resource, options) {
++        const plainProviderOptions = {
++            recursive: true,
++            useTrash: false,
++            atomic: false
++        };
++        const isAuthorizedPlainDelete = movePlainWorkspaceDeleteFileServiceAuthorization(options, resource, plainProviderOptions);
++        if (isAuthorizedPlainDelete) {
++            const provider = await this.withProvider(resource);
++            if (typeof provider.delete !== "function") {
++                throw plainWorkspaceMutationError("Plain workspace deletion is unavailable");
++            }
++            await provider.delete(resource, plainProviderOptions);
++            this._onDidRunOperation.fire(( new FileOperationEvent(resource, FileOperation.DELETE)));
++            return;
++        }
++        if (isPlainWorkspaceResource(resource)) {
++            throw plainWorkspaceMutationError("Plain workspace deletion requires one confirmed call authorization");
++        }
+         const provider = await this.doValidateDelete(resource, options);
+         let deleteFileOptions = options;
+         if (hasFileAtomicDeleteCapability(provider) && !deleteFileOptions?.atomic) {
+@@ -974,6 +2024,8 @@ let FileService = class FileService extends Disposable {
          this._onDidRunOperation.fire(( new FileOperationEvent(resource, FileOperation.DELETE)));
      }
      async cloneFile(source, target) {
@@ -1215,7 +1263,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..5976d5a2f72cecb77dafb9475d777a98
          const sourceProvider = await this.withProvider(source);
          const targetProvider = this.throwIfFileSystemIsReadonly(await this.withWriteProvider(target), target);
          if (sourceProvider === targetProvider && this.getExtUri(sourceProvider).providerExtUri.isEqual(source, target)) {
-@@ -1154,14 +2181,54 @@ let FileService = class FileService extends Disposable {
+@@ -1154,14 +2206,54 @@ let FileService = class FileService extends Disposable {
              totalBytesWritten += bytesWritten;
          }
      }

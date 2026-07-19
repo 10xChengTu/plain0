@@ -24,10 +24,18 @@ import {
 	type IDisposable,
 } from "@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle";
 import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
+import {
+	beginPlainWorkspaceDeleteProviderDispatch,
+	completePlainWorkspaceDeleteProviderFailure,
+	completePlainWorkspaceDeleteProviderResult,
+	getPlainWorkspaceDeleteAuthorizationSnapshot,
+	takePlainWorkspaceDeleteProviderAuthorization,
+} from "@codingame/monaco-vscode-api/vscode/vs/platform/files/common/plainWorkspaceDelete";
 
 import type {
 	PlainBridge,
 	WorkspaceCapabilities,
+	WorkspaceDeleteResult,
 	WorkspaceEntryKind,
 	WorkspaceEntryStat,
 	WorkspaceWriteResult,
@@ -35,6 +43,7 @@ import type {
 import {
 	decodeWorkspaceEntryStat,
 	decodeWorkspaceCapabilities,
+	decodeWorkspaceDeleteResult,
 	decodeWorkspaceMoveResult,
 	frozenWorkspaceEntryRequest,
 } from "../../platform/tauri/workspace-codec";
@@ -48,6 +57,17 @@ interface ResolvedResource {
 
 interface ResolvedMutationResource extends ResolvedResource {
 	readonly resource: URI;
+}
+
+export interface PlainWorkspaceDeleteResource {
+	readonly rootId: string;
+	readonly relativePath: string;
+	readonly resource: URI;
+}
+
+export interface PlainWorkspaceDeleteProvider {
+	plainSnapshotDeleteResource(resource: URI): PlainWorkspaceDeleteResource;
+	plainRefreshDeleteRoots(resources: readonly URI[]): void;
 }
 
 export interface PlainWorkspaceProviderStat extends IStat {
@@ -364,6 +384,39 @@ function mapCopyMoveError(error: unknown): Readonly<{
 	}
 }
 
+function mapDeleteError(error: unknown): Readonly<{
+	error: FileSystemProviderError;
+	rescan: boolean;
+	outcome: "ordinaryFailure" | "outcomeUnknown";
+}> {
+	const code = copyMoveCommandErrorCode(error);
+	switch (code) {
+		case "ROOT_NOT_AUTHORIZED":
+			return Object.freeze({
+				error: noPermissions(),
+				rescan: false,
+				outcome: "ordinaryFailure",
+			});
+		case "WORKSPACE_DELETE_PLAN_INVALID":
+		case "ROOT_UNAVAILABLE":
+		case "WORKSPACE_WINDOW_CLOSED":
+		case "ENTRY_TYPE_MISMATCH":
+		case "INVALID_RELATIVE_PATH":
+		case "WORKSPACE_CONFLICT":
+			return Object.freeze({
+				error: unavailable(),
+				rescan: false,
+				outcome: "ordinaryFailure",
+			});
+		default:
+			return Object.freeze({
+				error: unavailable(),
+				rescan: true,
+				outcome: "outcomeUnknown",
+			});
+	}
+}
+
 function requireVoidMutationReceipt(value: unknown): void {
 	if (value !== undefined) {
 		throw unavailable();
@@ -617,7 +670,101 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 	}
 
 	async delete(_resource: URI, _options: IFileDeleteOptions): Promise<void> {
-		throw noPermissions();
+		this.requireMutationDispatchAllowed();
+		const resolved = this.resolveMutationResource(_resource);
+		let authorization;
+		try {
+			authorization = takePlainWorkspaceDeleteProviderAuthorization(
+				_options,
+				resolved.resource,
+			);
+		} catch {
+			throw noPermissions();
+		}
+		if (authorization === undefined) {
+			throw noPermissions();
+		}
+		const authorizationSnapshot =
+			getPlainWorkspaceDeleteAuthorizationSnapshot(authorization);
+		if (
+			authorizationSnapshot.rootId !== resolved.rootId ||
+			authorizationSnapshot.relativePath !== resolved.relativePath ||
+			authorizationSnapshot.recursive !== true ||
+			authorizationSnapshot.permanent !== true
+		) {
+			throw noPermissions();
+		}
+		beginPlainWorkspaceDeleteProviderDispatch(authorization);
+
+		let result: WorkspaceDeleteResult;
+		try {
+			result = decodeWorkspaceDeleteResult(
+				await this.bridge.workspaceCommitDeleteEntry(
+					authorizationSnapshot.confirmationId,
+					authorizationSnapshot.entryId,
+					authorizationSnapshot.rootId,
+					authorizationSnapshot.relativePath,
+					authorizationSnapshot.recursive,
+				),
+			);
+		} catch (error) {
+			const failure = mapDeleteError(error);
+			completePlainWorkspaceDeleteProviderFailure(
+				authorization,
+				failure.outcome,
+			);
+			if (failure.rescan) {
+				this.fireRootUpdated(resolved.resource);
+			}
+			throw failure.error;
+		}
+		try {
+			completePlainWorkspaceDeleteProviderResult(authorization, result);
+		} catch {
+			completePlainWorkspaceDeleteProviderFailure(
+				authorization,
+				"outcomeUnknown",
+			);
+			this.fireRootUpdated(resolved.resource);
+			throw unavailable();
+		}
+		if (result.status !== "deleted") {
+			this.fireRootUpdated(resolved.resource);
+			throw unavailable();
+		}
+		this.fireDeleted(resolved.resource);
+	}
+
+	plainSnapshotDeleteResource(resource: URI): PlainWorkspaceDeleteResource {
+		this.requireMutationDispatchAllowed();
+		return this.resolveMutationResource(resource);
+	}
+
+	plainRefreshDeleteRoots(resources: readonly URI[]): void {
+		this.requireMutationDispatchAllowed();
+		const roots = new Map<string, URI>();
+		for (const resource of resources) {
+			const resolved = this.resolveMutationResource(resource);
+			if (!roots.has(resolved.rootId)) {
+				roots.set(
+					resolved.rootId,
+					resolved.resource.with({
+						path: "/",
+						query: null,
+						fragment: null,
+					}),
+				);
+			}
+		}
+		const changes = [...roots.values()].map((resource) => {
+			resource.toString();
+			void resource.fsPath;
+			Object.freeze(resource);
+			return Object.freeze({ type: FileChangeType.UPDATED, resource });
+		});
+		if (changes.length > 0) {
+			this.changeEmitter.fire(Object.freeze(changes));
+		}
 	}
 
 	async copy(
@@ -730,6 +877,17 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 			Object.freeze([
 				Object.freeze({
 					type: FileChangeType.ADDED,
+					resource,
+				}),
+			]),
+		);
+	}
+
+	private fireDeleted(resource: URI): void {
+		this.changeEmitter.fire(
+			Object.freeze([
+				Object.freeze({
+					type: FileChangeType.DELETED,
 					resource,
 				}),
 			]),

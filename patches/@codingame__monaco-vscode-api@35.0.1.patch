@@ -161,6 +161,502 @@ index 0ec5225b326fbfa5c0225f4d96fffc251ea6a301..053504dc5cd4b8fcb0c5717e0c74ab1b
  
 -export { AutoSaveConfiguration, ByteSize, ETAG_DISABLED, FILES_ASSOCIATIONS_CONFIG, FILES_EXCLUDE_CONFIG, FILES_READONLY_EXCLUDE_CONFIG, FILES_READONLY_FROM_PERMISSIONS_CONFIG, FILES_READONLY_INCLUDE_CONFIG, FileChangeFilter, FileChangeType, FileChangesEvent, FileKind, FileOperation, FileOperationError, FileOperationEvent, FileOperationResult, FilePermission, FileSystemProviderCapabilities, FileSystemProviderError, FileSystemProviderErrorCode, FileType, HotExitConfiguration, NotModifiedSinceFileOperationError, TooLargeFileOperationError, createFileSystemProviderError, ensureFileSystemProviderError, etag, getLargeFileConfirmationLimit, hasFileAppendCapability, hasFileAtomicDeleteCapability, hasFileAtomicReadCapability, hasFileAtomicWriteCapability, hasFileCloneCapability, hasFileFolderCopyCapability, hasFileReadStreamCapability, hasFileRealpathCapability, hasOpenReadWriteCloseCapability, hasReadWriteCapability, hasReadonlyCapability, isFileOpenForWriteOptions, markAsFileSystemProviderError, toFileOperationResult, toFileSystemProviderErrorCode, whenProviderRegistered };
 +export { AutoSaveConfiguration, ByteSize, ETAG_DISABLED, FILES_ASSOCIATIONS_CONFIG, FILES_EXCLUDE_CONFIG, FILES_READONLY_EXCLUDE_CONFIG, FILES_READONLY_FROM_PERMISSIONS_CONFIG, FILES_READONLY_INCLUDE_CONFIG, FileChangeFilter, FileChangeType, FileChangesEvent, FileKind, FileOperation, FileOperationError, FileOperationEvent, FileOperationResult, FilePermission, FileSystemProviderCapabilities, FileSystemProviderError, FileSystemProviderErrorCode, FileType, HotExitConfiguration, NotModifiedSinceFileOperationError, TooLargeFileOperationError, createFileSystemProviderError, createPlainWorkspaceWriteOutcomeError, ensureFileSystemProviderError, etag, getLargeFileConfirmationLimit, getPlainWorkspaceWriteOutcome, hasFileAppendCapability, hasFileAtomicDeleteCapability, hasFileAtomicReadCapability, hasFileAtomicWriteCapability, hasFileCloneCapability, hasFileFolderCopyCapability, hasFileReadStreamCapability, hasFileRealpathCapability, hasOpenReadWriteCloseCapability, hasReadWriteCapability, hasReadonlyCapability, isFileOpenForWriteOptions, isPlainWorkspaceWriteOutcomeError, markAsFileSystemProviderError, toFileOperationResult, toFileSystemProviderErrorCode, whenProviderRegistered };
+diff --git a/vscode/src/vs/platform/files/common/plainWorkspaceDelete.d.ts b/vscode/src/vs/platform/files/common/plainWorkspaceDelete.d.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..299f37d1d978f3a0c8174cb544b687baec06f906
+--- /dev/null
++++ b/vscode/src/vs/platform/files/common/plainWorkspaceDelete.d.ts
+@@ -0,0 +1,70 @@
++import type { IDisposable } from "../../../base/common/lifecycle";
++import type { URI } from "../../../base/common/uri";
++import type { ResourceFileEdit } from "../../../editor/browser/services/bulkEditService";
++
++export declare const PLAIN_WORKSPACE_SCHEME = "plain-workspace";
++declare const plainWorkspaceDeleteAuthorizationBrand: unique symbol;
++export interface PlainWorkspaceDeleteAuthorization {
++    readonly [plainWorkspaceDeleteAuthorizationBrand]: true;
++}
++export type PlainWorkspaceDeleteKind = "file" | "directory" | "symlink";
++export type PlainWorkspaceDeleteReason = "entryChanged" | "entryUnverifiable" | "deleteFailed";
++export type PlainWorkspaceDeleteResult = Readonly<{ status: "deleted" }> | Readonly<{ status: "entryRetained"; reason: PlainWorkspaceDeleteReason }> | Readonly<{ status: "entryPartiallyDeleted"; reason: PlainWorkspaceDeleteReason; removedEntries: number }>;
++export type PlainWorkspaceDeleteState = Readonly<{ status: "pending" }> | Readonly<{ status: "inFlight" }> | Readonly<{ status: "ordinaryFailure" }> | Readonly<{ status: "outcomeUnknown" }> | PlainWorkspaceDeleteResult;
++export interface PlainWorkspaceDeleteAuthorizationSnapshot {
++    readonly confirmationId: string;
++    readonly entryId: string;
++    readonly rootId: string;
++    readonly relativePath: string;
++    readonly recursive: true;
++    readonly kind: PlainWorkspaceDeleteKind;
++    readonly permanent: true;
++}
++export interface PlainWorkspaceDeleteResourceSnapshot {
++    readonly scheme: typeof PLAIN_WORKSPACE_SCHEME;
++    readonly rootId: string;
++    readonly relativePath: string;
++}
++export type PlainWorkspaceDeleteResourceClassification = Readonly<{ kind: "other" }> | Readonly<{ kind: "plain"; scheme: typeof PLAIN_WORKSPACE_SCHEME; rootId: string; relativePath: string }>;
++export interface PlainWorkspaceDeleteElement {
++    readonly resource: URI;
++    readonly name: string;
++    readonly isDirectory: boolean;
++    readonly isSymbolicLink: boolean;
++}
++export interface PlainWorkspaceDeleteExplorerService {
++    applyBulkEdit(edits: readonly ResourceFileEdit[], options: Readonly<{ undoLabel: string; progressLabel: string }>): Promise<unknown>;
++}
++export interface PlainWorkspaceDeleteDialogService {
++    confirm(options: Readonly<{ type: "warning"; message: string; detail: string; primaryButton: string }>): Promise<Readonly<{ confirmed: boolean }>>;
++}
++export interface PlainWorkspaceDeleteWorkingCopyService {
++    getDirty(resource: URI): readonly unknown[];
++}
++export interface PlainWorkspaceDeleteFilesConfigurationService {
++    isReadonly(resource: URI): unknown;
++}
++export interface PlainWorkspaceDeleteCoordinatorContext {
++    readonly elements: readonly PlainWorkspaceDeleteElement[];
++    readonly explorerService: PlainWorkspaceDeleteExplorerService;
++    readonly dialogService: PlainWorkspaceDeleteDialogService;
++    readonly workingCopyFileService: PlainWorkspaceDeleteWorkingCopyService;
++    readonly filesConfigurationService: PlainWorkspaceDeleteFilesConfigurationService;
++}
++export type PlainWorkspaceDeleteCoordinator = (context: PlainWorkspaceDeleteCoordinatorContext) => Promise<void>;
++
++export declare function authorizePlainWorkspaceDeleteResourceEdit(options: object, resource: URI, value: PlainWorkspaceDeleteAuthorizationSnapshot): PlainWorkspaceDeleteAuthorization;
++export declare function validatePlainWorkspaceDeleteResourceEditBatch(edits: readonly ResourceFileEdit[]): boolean;
++export declare function movePlainWorkspaceDeleteResourceEditAuthorization(options: object, resource: URI, operation: object): boolean;
++export declare function movePlainWorkspaceDeleteWorkingCopyAuthorization(operation: object, resource: URI, fileOptions: object): boolean;
++export declare function movePlainWorkspaceDeleteFileServiceAuthorization(fileOptions: object, resource: URI, providerOptions: object): boolean;
++export declare function takePlainWorkspaceDeleteProviderAuthorization(providerOptions: object, resource: URI): PlainWorkspaceDeleteAuthorization | undefined;
++export declare function getPlainWorkspaceDeleteAuthorizationSnapshot(authorization: PlainWorkspaceDeleteAuthorization): PlainWorkspaceDeleteAuthorizationSnapshot;
++export declare function classifyPlainWorkspaceDeleteResource(resource: URI): PlainWorkspaceDeleteResourceClassification | undefined;
++export declare function beginPlainWorkspaceDeleteProviderDispatch(authorization: PlainWorkspaceDeleteAuthorization): void;
++export declare function completePlainWorkspaceDeleteProviderResult(authorization: PlainWorkspaceDeleteAuthorization, value: PlainWorkspaceDeleteResult): PlainWorkspaceDeleteResult;
++export declare function completePlainWorkspaceDeleteProviderFailure(authorization: PlainWorkspaceDeleteAuthorization, outcome: "ordinaryFailure" | "outcomeUnknown"): Readonly<{ status: "ordinaryFailure" | "outcomeUnknown" }>;
++export declare function getPlainWorkspaceDeleteState(authorization: PlainWorkspaceDeleteAuthorization): PlainWorkspaceDeleteState;
++export declare function snapshotPlainWorkspaceDeleteResource(resource: URI): PlainWorkspaceDeleteResourceSnapshot | undefined;
++export declare function registerPlainWorkspaceDeleteCoordinator(coordinator: PlainWorkspaceDeleteCoordinator): IDisposable;
++export declare function runPlainWorkspaceDeleteCoordinator(context: PlainWorkspaceDeleteCoordinatorContext): Promise<void>;
+diff --git a/vscode/src/vs/platform/files/common/plainWorkspaceDelete.js b/vscode/src/vs/platform/files/common/plainWorkspaceDelete.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..90ff02199b0822f4ee279609909b1b2f14a6be20
+--- /dev/null
++++ b/vscode/src/vs/platform/files/common/plainWorkspaceDelete.js
+@@ -0,0 +1,414 @@
++const PLAIN_WORKSPACE_SCHEME = "plain-workspace";
++const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
++const DELETE_KINDS = ( new Set(["file", "directory", "symlink"]));
++const DELETE_REASONS = ( new Set(["entryChanged", "entryUnverifiable", "deleteFailed"]));
++const MAX_RELATIVE_PATH_BYTES = 4096;
++const MAX_RELATIVE_PATH_SEGMENTS = 256;
++const utf8Encoder = ( new TextEncoder());
++const authorizationHandles = ( new WeakMap());
++const resourceEditAuthorizations = ( new WeakMap());
++const workingCopyAuthorizations = ( new WeakMap());
++const fileServiceAuthorizations = ( new WeakMap());
++const providerAuthorizations = ( new WeakMap());
++let registeredCoordinator;
++
++function ownDataSnapshot(value) {
++    if (!value || typeof value !== "object") {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: expected one plain object"));
++    }
++    const prototype = Object.getPrototypeOf(value);
++    if (prototype !== Object.prototype && prototype !== null) {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: unexpected prototype"));
++    }
++    const descriptors = Object.getOwnPropertyDescriptors(value);
++    const keys = Reflect.ownKeys(descriptors);
++    const snapshot = Object.create(null);
++    for (const key of keys) {
++        if (typeof key !== "string") {
++            throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: fields must use string keys"));
++        }
++        const descriptor = descriptors[key];
++        if (!descriptor || !("value" in descriptor) || descriptor.enumerable !== true) {
++            throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: fields must be enumerable own data"));
++        }
++        snapshot[key] = descriptor.value;
++    }
++    return Object.freeze({ keys: Object.freeze(keys), snapshot: Object.freeze(snapshot), descriptors });
++}
++
++function exactOwnDataSnapshot(value, expectedKeys, requireOrdinary = false) {
++    const result = ownDataSnapshot(value);
++    if (result.keys.length !== expectedKeys.length || expectedKeys.some(key => !result.keys.includes(key))) {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: unexpected fields"));
++    }
++    if (requireOrdinary && expectedKeys.some(key => result.descriptors[key]?.configurable !== true || result.descriptors[key]?.writable !== true)) {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: fields must be ordinary own data"));
++    }
++    return result.snapshot;
++}
++
++function isWellFormedUtf16(value) {
++    for (let index = 0; index < value.length; index++) {
++        const code = value.charCodeAt(index);
++        if (code >= 0xd800 && code <= 0xdbff) {
++            if (index + 1 >= value.length) {
++                return false;
++            }
++            const next = value.charCodeAt(index + 1);
++            if (next < 0xdc00 || next > 0xdfff) {
++                return false;
++            }
++            index++;
++        }
++        else if (code >= 0xdc00 && code <= 0xdfff) {
++            return false;
++        }
++    }
++    return true;
++}
++
++function isWindowsReservedSegment(value) {
++    const rawStem = value.split(".", 1)[0] ?? value;
++    const stem = rawStem.replace(/[a-z]/g, character => String.fromCharCode(character.charCodeAt(0) - 32));
++    return ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"].includes(stem) || /^(?:COM|LPT)(?:[1-9¹²³])$/u.test(stem);
++}
++
++function isPortableWorkspacePathSegment(value) {
++    if (value.length < 1 || !isWellFormedUtf16(value) || value === "." || value === ".." || value.endsWith(".") || value.endsWith(" ") || isWindowsReservedSegment(value)) {
++        return false;
++    }
++    for (const character of value) {
++        const code = character.charCodeAt(0);
++        if (code <= 0x1f || code === 0x7f || '/\\:<>"|?*'.includes(character)) {
++            return false;
++        }
++    }
++    return true;
++}
++
++function isValidRelativePath(value) {
++    if (typeof value !== "string" || value.length < 1 || value.length > MAX_RELATIVE_PATH_BYTES || !isWellFormedUtf16(value) || utf8Encoder.encode(value).byteLength > MAX_RELATIVE_PATH_BYTES) {
++        return false;
++    }
++    const segments = value.split("/");
++    return segments.length <= MAX_RELATIVE_PATH_SEGMENTS && segments.every(isPortableWorkspacePathSegment);
++}
++
++function deleteAuthorizationSnapshot(value) {
++    const snapshot = exactOwnDataSnapshot(value, [
++        "confirmationId",
++        "entryId",
++        "rootId",
++        "relativePath",
++        "recursive",
++        "kind",
++        "permanent"
++    ], true);
++    if (!UUID_V4_PATTERN.test(snapshot.confirmationId) || !UUID_V4_PATTERN.test(snapshot.entryId) || snapshot.confirmationId === snapshot.entryId || !UUID_V4_PATTERN.test(snapshot.rootId) || !isValidRelativePath(snapshot.relativePath) || snapshot.recursive !== true || !DELETE_KINDS.has(snapshot.kind) || snapshot.permanent !== true) {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: invalid authorization"));
++    }
++    return Object.freeze({
++        confirmationId: snapshot.confirmationId,
++        entryId: snapshot.entryId,
++        rootId: snapshot.rootId,
++        relativePath: snapshot.relativePath,
++        recursive: snapshot.recursive,
++        kind: snapshot.kind,
++        permanent: snapshot.permanent
++    });
++}
++
++function deleteResultSnapshot(value) {
++    const result = ownDataSnapshot(value);
++    const status = result.snapshot.status;
++    if (status === "deleted") {
++        if (result.keys.length !== 1 || result.keys[0] !== "status") {
++            throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: invalid deleted result"));
++        }
++        return Object.freeze({ status });
++    }
++    if (status === "entryRetained") {
++        if (result.keys.length !== 2 || !result.keys.includes("status") || !result.keys.includes("reason") || !DELETE_REASONS.has(result.snapshot.reason)) {
++            throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: invalid retained result"));
++        }
++        return Object.freeze({ status, reason: result.snapshot.reason });
++    }
++    if (status === "entryPartiallyDeleted") {
++        if (result.keys.length !== 3 || !result.keys.includes("status") || !result.keys.includes("reason") || !result.keys.includes("removedEntries") || !DELETE_REASONS.has(result.snapshot.reason) || !Number.isSafeInteger(result.snapshot.removedEntries) || result.snapshot.removedEntries < 1 || result.snapshot.removedEntries > 10000) {
++            throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: invalid partial result"));
++        }
++        return Object.freeze({ status, reason: result.snapshot.reason, removedEntries: result.snapshot.removedEntries });
++    }
++    throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: invalid delete result"));
++}
++
++function classifyPlainWorkspaceDeleteResource(resource) {
++    try {
++        const scheme = resource.scheme;
++        if (typeof scheme !== "string") {
++            return undefined;
++        }
++        if (scheme !== PLAIN_WORKSPACE_SCHEME) {
++            return Object.freeze({ kind: "other" });
++        }
++        const authority = resource.authority;
++        const path = resource.path;
++        const query = resource.query;
++        const fragment = resource.fragment;
++        if (typeof authority !== "string" || typeof path !== "string" || typeof query !== "string" || typeof fragment !== "string" || !UUID_V4_PATTERN.test(authority) || query !== "" || fragment !== "" || path.length <= 1 || !path.startsWith("/")) {
++            return undefined;
++        }
++        const relativePath = path.slice(1);
++        if (!isValidRelativePath(relativePath)) {
++            return undefined;
++        }
++        return Object.freeze({ kind: "plain", scheme, rootId: authority, relativePath });
++    }
++    catch {
++        return undefined;
++    }
++}
++
++function snapshotPlainWorkspaceDeleteResource(resource) {
++    const classification = classifyPlainWorkspaceDeleteResource(resource);
++    if (classification?.kind !== "plain") {
++        return undefined;
++    }
++    return Object.freeze({
++        scheme: classification.scheme,
++        rootId: classification.rootId,
++        relativePath: classification.relativePath
++    });
++}
++
++function assertPrepared(record) {
++    if (record.phase !== "prepared") {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: authorization is no longer pending"));
++    }
++}
++
++function assertResource(record, resource) {
++    const snapshot = snapshotPlainWorkspaceDeleteResource(resource);
++    if (snapshot === undefined || snapshot.rootId !== record.snapshot.rootId || snapshot.relativePath !== record.snapshot.relativePath) {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: authorization resource mismatch"));
++    }
++}
++
++function assertResourceEditOptions(record, options) {
++    const snapshot = exactOwnDataSnapshot(options, ["recursive", "folder", "ignoreIfNotExists", "skipTrashBin"], true);
++    if (snapshot.recursive !== true || snapshot.folder !== (record.snapshot.kind === "directory") || snapshot.ignoreIfNotExists !== false || snapshot.skipTrashBin !== true) {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: invalid ResourceFileEdit options"));
++    }
++}
++
++function assertWorkingCopyOperation(record, operation, resource) {
++    const snapshot = exactOwnDataSnapshot(operation, ["resource", "recursive", "useTrash"], true);
++    if (snapshot.resource !== resource || snapshot.recursive !== true || snapshot.useTrash !== false) {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: invalid working-copy delete operation"));
++    }
++}
++
++function assertFileDeleteOptions(options) {
++    const snapshot = exactOwnDataSnapshot(options, ["recursive", "useTrash", "atomic"], true);
++    if (snapshot.recursive !== true || snapshot.useTrash !== false || snapshot.atomic !== false) {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: delete must be recursive, permanent and non-atomic"));
++    }
++}
++
++function createAuthorizationRecord(value) {
++    const handle = Object.freeze(Object.create(null));
++    const record = {
++        snapshot: deleteAuthorizationSnapshot(value),
++        phase: "prepared",
++        terminal: undefined
++    };
++    authorizationHandles.set(handle, record);
++    return { handle, record };
++}
++
++function authorizePlainWorkspaceDeleteResourceEdit(options, resource, value) {
++    if (resourceEditAuthorizations.has(options)) {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: ResourceFileEdit options already authorized"));
++    }
++    const created = createAuthorizationRecord(value);
++    assertResource(created.record, resource);
++    assertResourceEditOptions(created.record, options);
++    resourceEditAuthorizations.set(options, created.record);
++    return created.handle;
++}
++
++function validatePlainWorkspaceDeleteResourceEditBatch(edits) {
++    if (!Array.isArray(edits)) {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: invalid bulk edit collection"));
++    }
++    const records = edits.map(edit => resourceEditAuthorizations.get(edit?.options));
++    const authorizedCount = records.filter(record => record !== undefined).length;
++    if (authorizedCount === 0) {
++        return false;
++    }
++    if (authorizedCount !== edits.length) {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: authorized delete batch must contain only authorized edits"));
++    }
++    let confirmationId;
++    const entryIds = ( new Set());
++    for (let index = 0; index < edits.length; index++) {
++        const edit = edits[index];
++        const record = records[index];
++        if (!record || !edit || edit.oldResource === undefined || edit.newResource !== undefined) {
++            throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: authorized batch must contain only deletes"));
++        }
++        assertPrepared(record);
++        assertResource(record, edit.oldResource);
++        assertResourceEditOptions(record, edit.options);
++        if (confirmationId === undefined) {
++            confirmationId = record.snapshot.confirmationId;
++        }
++        if (record.snapshot.confirmationId !== confirmationId || entryIds.has(record.snapshot.entryId)) {
++            throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: authorized batch identity mismatch"));
++        }
++        entryIds.add(record.snapshot.entryId);
++    }
++    return true;
++}
++
++function movePlainWorkspaceDeleteResourceEditAuthorization(options, resource, operation) {
++    const record = resourceEditAuthorizations.get(options);
++    if (record === undefined) {
++        return false;
++    }
++    resourceEditAuthorizations.delete(options);
++    assertPrepared(record);
++    assertResource(record, resource);
++    assertResourceEditOptions(record, options);
++    assertWorkingCopyOperation(record, operation, resource);
++    if (workingCopyAuthorizations.has(operation)) {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: working-copy operation already authorized"));
++    }
++    workingCopyAuthorizations.set(operation, record);
++    return true;
++}
++
++function movePlainWorkspaceDeleteWorkingCopyAuthorization(operation, resource, fileOptions) {
++    const record = workingCopyAuthorizations.get(operation);
++    if (record === undefined) {
++        return false;
++    }
++    workingCopyAuthorizations.delete(operation);
++    assertPrepared(record);
++    assertResource(record, resource);
++    assertWorkingCopyOperation(record, operation, resource);
++    assertFileDeleteOptions(fileOptions);
++    if (fileServiceAuthorizations.has(fileOptions)) {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: FileService options already authorized"));
++    }
++    fileServiceAuthorizations.set(fileOptions, record);
++    return true;
++}
++
++function movePlainWorkspaceDeleteFileServiceAuthorization(fileOptions, resource, providerOptions) {
++    const record = fileServiceAuthorizations.get(fileOptions);
++    if (record === undefined) {
++        return false;
++    }
++    fileServiceAuthorizations.delete(fileOptions);
++    assertPrepared(record);
++    assertResource(record, resource);
++    assertFileDeleteOptions(fileOptions);
++    assertFileDeleteOptions(providerOptions);
++    if (providerAuthorizations.has(providerOptions)) {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: provider options already authorized"));
++    }
++    providerAuthorizations.set(providerOptions, record);
++    return true;
++}
++
++function takePlainWorkspaceDeleteProviderAuthorization(providerOptions, resource) {
++    const record = providerAuthorizations.get(providerOptions);
++    if (record === undefined) {
++        return undefined;
++    }
++    providerAuthorizations.delete(providerOptions);
++    assertPrepared(record);
++    assertResource(record, resource);
++    assertFileDeleteOptions(providerOptions);
++    const handle = Object.freeze(Object.create(null));
++    authorizationHandles.set(handle, record);
++    return handle;
++}
++
++function getPlainWorkspaceDeleteAuthorizationSnapshot(authorization) {
++    const record = authorizationHandles.get(authorization);
++    if (!record) {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: unknown authorization"));
++    }
++    return record.snapshot;
++}
++
++function beginPlainWorkspaceDeleteProviderDispatch(authorization) {
++    const record = authorizationHandles.get(authorization);
++    if (!record || record.phase !== "prepared") {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: provider dispatch rejected"));
++    }
++    record.phase = "inFlight";
++}
++
++function completePlainWorkspaceDeleteProviderResult(authorization, value) {
++    const record = authorizationHandles.get(authorization);
++    if (!record || record.phase !== "inFlight") {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: provider result rejected"));
++    }
++    const result = deleteResultSnapshot(value);
++    record.terminal = result;
++    record.phase = "terminal";
++    return result;
++}
++
++function completePlainWorkspaceDeleteProviderFailure(authorization, outcome) {
++    const record = authorizationHandles.get(authorization);
++    if (!record || record.phase !== "inFlight" || (outcome !== "ordinaryFailure" && outcome !== "outcomeUnknown")) {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: provider failure rejected"));
++    }
++    record.terminal = Object.freeze({ status: outcome });
++    record.phase = "terminal";
++    return record.terminal;
++}
++
++function getPlainWorkspaceDeleteState(authorization) {
++    const record = authorizationHandles.get(authorization);
++    if (!record) {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: unknown authorization"));
++    }
++    if (record.phase === "prepared") {
++        return Object.freeze({ status: "pending" });
++    }
++    if (record.phase === "inFlight") {
++        return Object.freeze({ status: "inFlight" });
++    }
++    return record.terminal;
++}
++
++function registerPlainWorkspaceDeleteCoordinator(coordinator) {
++    if (typeof coordinator !== "function" || registeredCoordinator !== undefined) {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: coordinator registration rejected"));
++    }
++    registeredCoordinator = coordinator;
++    let active = true;
++    return Object.freeze({
++        dispose() {
++            if (active && registeredCoordinator === coordinator) {
++                active = false;
++                registeredCoordinator = undefined;
++            }
++        }
++    });
++}
++
++async function runPlainWorkspaceDeleteCoordinator(context) {
++    const coordinator = registeredCoordinator;
++    if (coordinator === undefined) {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: coordinator is unavailable"));
++    }
++    return await coordinator(context);
++}
++
++export { PLAIN_WORKSPACE_SCHEME, authorizePlainWorkspaceDeleteResourceEdit, beginPlainWorkspaceDeleteProviderDispatch, classifyPlainWorkspaceDeleteResource, completePlainWorkspaceDeleteProviderFailure, completePlainWorkspaceDeleteProviderResult, getPlainWorkspaceDeleteAuthorizationSnapshot, getPlainWorkspaceDeleteState, movePlainWorkspaceDeleteFileServiceAuthorization, movePlainWorkspaceDeleteResourceEditAuthorization, movePlainWorkspaceDeleteWorkingCopyAuthorization, registerPlainWorkspaceDeleteCoordinator, runPlainWorkspaceDeleteCoordinator, snapshotPlainWorkspaceDeleteResource, takePlainWorkspaceDeleteProviderAuthorization, validatePlainWorkspaceDeleteResourceEditBatch };
 diff --git a/vscode/src/vs/workbench/browser/parts/globalCompositeBar.js b/vscode/src/vs/workbench/browser/parts/globalCompositeBar.js
 index dbf2cd589ee4f869b69ffa850d0b8a11f1e656b4..a94a5a349e647b6b900e055c930c88828a8c238b 100644
 --- a/vscode/src/vs/workbench/browser/parts/globalCompositeBar.js
@@ -384,6 +880,61 @@ index 145182985cf7b0cde4731c5176834c70f74b1f41..adb80a904b389beded5b669634749e6a
      const editorPane = editorService.activeEditorPane;
      if (!editorPane) {
          return;
+diff --git a/vscode/src/vs/workbench/contrib/files/browser/fileActions.js b/vscode/src/vs/workbench/contrib/files/browser/fileActions.js
+index f4f533eb6e2e9cbcd50b4d4a4d90167b513462b3..d47a3d968f3f3d21bd04701f8a896313bc142b2b 100644
+--- a/vscode/src/vs/workbench/contrib/files/browser/fileActions.js
++++ b/vscode/src/vs/workbench/contrib/files/browser/fileActions.js
+@@ -10,6 +10,7 @@ import { Action } from '../../../../base/common/actions.js';
+ import { dispose } from '../../../../base/common/lifecycle.js';
+ import { VIEWLET_ID, VIEW_ID, UndoConfirmLevel } from '../common/files.js';
+ import { IFileService } from '../../../../platform/files/common/files.service.js';
++import { classifyPlainWorkspaceDeleteResource, runPlainWorkspaceDeleteCoordinator } from '../../../../platform/files/common/plainWorkspaceDelete.js';
+ import { EditorResourceAccessor, SideBySideEditor } from '../../../common/editor.js';
+ import { ItemActivation } from '../../../../platform/quickinput/common/quickInput.js';
+ import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.service.js';
+@@ -99,6 +100,42 @@ async function deleteFiles(
+         primaryButton = ( localize(10966, "&&Delete"));
+     }
+     const distinctElements = distinctParents(elements, e => e.resource);
++    const classifiedElements = distinctElements.map(element => ({
++        element,
++        classification: classifyPlainWorkspaceDeleteResource(element.resource)
++    }));
++    if (classifiedElements.some(value => value.classification === undefined)) {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: invalid deletion resource rejected"));
++    }
++    const plainElementCount = classifiedElements.reduce((count, value) => count + (value.classification?.kind === "plain" ? 1 : 0), 0);
++    if (plainElementCount > 0) {
++        if (plainElementCount !== classifiedElements.length) {
++            throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: mixed-scheme deletion rejected"));
++        }
++        const plainElements = classifiedElements.map(({ element, classification }) => {
++            const resource = URI.from({
++                scheme: classification.scheme,
++                authority: classification.rootId,
++                path: `/${classification.relativePath}`
++            }, true);
++            resource.toString();
++            void resource.fsPath;
++            Object.freeze(resource);
++            return Object.freeze({
++                resource,
++                name: element.name,
++                isDirectory: element.isDirectory,
++                isSymbolicLink: element.isSymbolicLink
++            });
++        });
++        return runPlainWorkspaceDeleteCoordinator(Object.freeze({
++            elements: Object.freeze(plainElements),
++            explorerService,
++            dialogService,
++            workingCopyFileService,
++            filesConfigurationService
++        }));
++    }
+     const dirtyWorkingCopies = ( new Set());
+     for (const distinctElement of distinctElements) {
+         for (const dirtyWorkingCopy of workingCopyFileService.getDirty(distinctElement.resource)) {
 diff --git a/vscode/src/vs/workbench/services/textfile/common/textFileEditorModel.js b/vscode/src/vs/workbench/services/textfile/common/textFileEditorModel.js
 index e743e309f1b308aebcb4559a12d9591bd0d49701..3d4bda71433542a808b6827671788e0573d4e653 100644
 --- a/vscode/src/vs/workbench/services/textfile/common/textFileEditorModel.js

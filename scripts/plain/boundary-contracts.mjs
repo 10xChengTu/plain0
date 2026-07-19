@@ -116,6 +116,10 @@ export function validateWorkspaceProviderBootstrap(source) {
 			"createPlainWorkspaceFileSystemProvider",
 		],
 		["./features/workspace/file-system-provider", "PLAIN_WORKSPACE_SCHEME"],
+		[
+			"./features/workspace/delete-coordinator",
+			"registerWorkspaceDeleteCoordinator",
+		],
 		["./platform/tauri", "createBridge"],
 	]) {
 		if (countExactNamedImport(moduleName, importedName) !== 1) {
@@ -138,6 +142,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 	const criticalBootstrapBindings = new Set([
 		"createBridge",
 		"createPlainWorkspaceFileSystemProvider",
+		"registerWorkspaceDeleteCoordinator",
 		"registerCustomProvider",
 		"initialize",
 		"PLAIN_WORKSPACE_SCHEME",
@@ -260,6 +265,21 @@ export function validateWorkspaceProviderBootstrap(source) {
 			initializer.arguments[1].text === "workspaceCapabilities"
 		);
 	});
+	const coordinatorIndexes = matchingStatementIndexes((statement) => {
+		const declaration = exactConstDeclaration(
+			statement,
+			"workspaceDeleteCoordinator",
+		);
+		const initializer = declaration?.initializer;
+		return (
+			initializer !== undefined &&
+			identifierCall(initializer, "registerWorkspaceDeleteCoordinator", 2) &&
+			ts.isIdentifier(initializer.arguments[0]) &&
+			initializer.arguments[0].text === "bridge" &&
+			ts.isIdentifier(initializer.arguments[1]) &&
+			initializer.arguments[1].text === "workspaceFileSystemProvider"
+		);
+	});
 	const registrationIndexes = matchingStatementIndexes((statement) => {
 		if (!ts.isExpressionStatement(statement)) {
 			return false;
@@ -296,6 +316,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 		createBridge: 0,
 		workspaceCapabilities: 0,
 		providerFactory: 0,
+		deleteCoordinatorRegistration: 0,
 		registerCustomProvider: 0,
 		workspaceSnapshot: 0,
 		initialize: 0,
@@ -331,6 +352,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 			parent.arguments[0] === node &&
 			ts.isIdentifier(parent.expression) &&
 			(parent.expression.text === "createPlainWorkspaceFileSystemProvider" ||
+				parent.expression.text === "registerWorkspaceDeleteCoordinator" ||
 				parent.expression.text === "registerWorkspaceCommands")
 		);
 	}
@@ -343,6 +365,9 @@ export function validateWorkspaceProviderBootstrap(source) {
 						break;
 					case "createPlainWorkspaceFileSystemProvider":
 						calls.providerFactory += 1;
+						break;
+					case "registerWorkspaceDeleteCoordinator":
+						calls.deleteCoordinatorRegistration += 1;
 						break;
 					case "registerCustomProvider":
 						calls.registerCustomProvider += 1;
@@ -410,6 +435,14 @@ export function validateWorkspaceProviderBootstrap(source) {
 			"app/main.ts must pass the sole capability snapshot directly to the Plain provider factory",
 		);
 	}
+	if (
+		calls.deleteCoordinatorRegistration !== 1 ||
+		coordinatorIndexes.length !== 1
+	) {
+		failures.push(
+			"app/main.ts must register exactly one audited workspace delete coordinator",
+		);
+	}
 	if (calls.registerCustomProvider !== 1) {
 		failures.push(
 			"app/main.ts must register exactly one custom workspace provider",
@@ -434,6 +467,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 		bridgeIndexes[0],
 		capabilityIndexes[0],
 		providerIndexes[0],
+		coordinatorIndexes[0],
 		registrationIndexes[0],
 		snapshotIndexes[0],
 		initializeIndexes[0],
@@ -449,10 +483,79 @@ export function validateWorkspaceProviderBootstrap(source) {
 		(capabilityIndexes[0] !== undefined &&
 			providerIndexes[0] !== capabilityIndexes[0] + 1) ||
 		(providerIndexes[0] !== undefined &&
-			registrationIndexes[0] !== providerIndexes[0] + 1)
+			coordinatorIndexes[0] !== providerIndexes[0] + 1) ||
+		(coordinatorIndexes[0] !== undefined &&
+			registrationIndexes[0] !== coordinatorIndexes[0] + 1)
 	) {
 		failures.push(
-			"bootstrap order must remain createBridge -> capabilities -> provider -> register -> snapshot -> initialize",
+			"bootstrap order must remain createBridge -> capabilities -> provider -> delete coordinator -> register -> snapshot -> initialize",
+		);
+	}
+
+	let coordinatorReferences = 0;
+	let coordinatorDisposeCalls = 0;
+	let pagehideDisposeStatements = 0;
+	function countCoordinatorUsage(node) {
+		if (ts.isIdentifier(node) && node.text === "workspaceDeleteCoordinator") {
+			coordinatorReferences += 1;
+		}
+		if (
+			ts.isCallExpression(node) &&
+			node.arguments.length === 0 &&
+			ts.isPropertyAccessExpression(node.expression) &&
+			ts.isIdentifier(node.expression.expression) &&
+			node.expression.expression.text === "workspaceDeleteCoordinator" &&
+			node.expression.name.text === "dispose"
+		) {
+			coordinatorDisposeCalls += 1;
+		}
+		ts.forEachChild(node, countCoordinatorUsage);
+	}
+	countCoordinatorUsage(bootstrap.body);
+	for (const statement of statements) {
+		if (!ts.isExpressionStatement(statement)) {
+			continue;
+		}
+		const call = statement.expression;
+		if (
+			!ts.isCallExpression(call) ||
+			call.arguments.length !== 3 ||
+			!ts.isPropertyAccessExpression(call.expression) ||
+			!ts.isIdentifier(call.expression.expression) ||
+			call.expression.expression.text !== "window" ||
+			call.expression.name.text !== "addEventListener" ||
+			!ts.isStringLiteral(call.arguments[0]) ||
+			call.arguments[0].text !== "pagehide"
+		) {
+			continue;
+		}
+		const listener = call.arguments[1];
+		if (
+			!(ts.isArrowFunction(listener) || ts.isFunctionExpression(listener)) ||
+			listener.parameters.length !== 0 ||
+			!ts.isBlock(listener.body)
+		) {
+			continue;
+		}
+		pagehideDisposeStatements += listener.body.statements.filter(
+			(candidate) =>
+				ts.isExpressionStatement(candidate) &&
+				ts.isCallExpression(candidate.expression) &&
+				candidate.expression.arguments.length === 0 &&
+				ts.isPropertyAccessExpression(candidate.expression.expression) &&
+				ts.isIdentifier(candidate.expression.expression.expression) &&
+				candidate.expression.expression.expression.text ===
+					"workspaceDeleteCoordinator" &&
+				candidate.expression.expression.name.text === "dispose",
+		).length;
+	}
+	if (
+		coordinatorReferences !== 2 ||
+		coordinatorDisposeCalls !== 1 ||
+		pagehideDisposeStatements !== 1
+	) {
+		failures.push(
+			"app/main.ts must dispose the sole workspace delete coordinator exactly once on pagehide",
 		);
 	}
 	function containsBootstrapTerminator(node, isRoot = true) {
@@ -4306,34 +4409,181 @@ function collectTypeScriptBridgeAliases(sourceFile) {
 }
 
 /**
- * During the Rust/bridge slice no application feature is allowed to consume a
- * delete token. The future coordinator/provider/Workbench authorization patch
- * will replace this zero-consumer gate with its own audited route atomically.
+ * Locks the only confirmed-delete application route. The coordinator may own
+ * prepare/cancel/begin, the provider may own commit, and the private Workbench
+ * authorization helpers may be consumed only at their fixed typestate sites.
  */
 export function validateWorkspaceDeleteTypeScriptBoundary(appSources) {
 	const failures = [];
+	const normalizedSources = new Map(
+		appSources.map(({ relativePath, source }) => [
+			relativePath.replaceAll("\\", "/"),
+			source,
+		]),
+	);
+	const requiredPaths = Object.freeze([
+		"app/platform/tauri/contracts.ts",
+		"app/platform/tauri/native.ts",
+		"app/platform/tauri/browser-mock.ts",
+		"app/features/workspace/delete-coordinator.ts",
+		"app/features/workspace/file-system-provider.ts",
+	]);
+	for (const relativePath of requiredPaths) {
+		if (!normalizedSources.has(relativePath)) {
+			failures.push(
+				`confirmed-delete TypeScript boundary requires ${relativePath}`,
+			);
+		}
+	}
+
 	const commandOccurrences = new Map(
 		WORKSPACE_DELETE_TS_COMMANDS.map(({ command }) => [command, []]),
 	);
 	const bridgeMethods = new Set(
 		WORKSPACE_DELETE_TS_COMMANDS.map(({ bridgeMethod }) => bridgeMethod),
 	);
+	const declarationPaths = Object.freeze([
+		"app/platform/tauri/contracts.ts",
+		"app/platform/tauri/native.ts",
+		"app/platform/tauri/browser-mock.ts",
+	]);
 	const declarationCounts = new Map(
-		[
-			"app/platform/tauri/contracts.ts",
-			"app/platform/tauri/native.ts",
-			"app/platform/tauri/browser-mock.ts",
-		].flatMap((relativePath) =>
+		declarationPaths.flatMap((relativePath) =>
 			[...bridgeMethods].map((bridgeMethod) => [
 				`${relativePath}:${bridgeMethod}`,
 				0,
 			]),
 		),
 	);
+	const coordinatorPath = "app/features/workspace/delete-coordinator.ts";
+	const providerPath = "app/features/workspace/file-system-provider.ts";
+	const bridgeRouteCounts = new Map(
+		[coordinatorPath, providerPath].flatMap((relativePath) =>
+			[...bridgeMethods].map((bridgeMethod) => [
+				`${relativePath}:${bridgeMethod}`,
+				0,
+			]),
+		),
+	);
+	const expectedBridgeRoutes = new Map([
+		[`${coordinatorPath}:workspacePrepareDelete`, 1],
+		[`${coordinatorPath}:workspaceCancelDelete`, 1],
+		[`${coordinatorPath}:workspaceBeginDelete`, 1],
+		[`${coordinatorPath}:workspaceCommitDeleteEntry`, 0],
+		[`${providerPath}:workspacePrepareDelete`, 0],
+		[`${providerPath}:workspaceCancelDelete`, 0],
+		[`${providerPath}:workspaceBeginDelete`, 0],
+		[`${providerPath}:workspaceCommitDeleteEntry`, 1],
+	]);
+	const expectedBridgeArguments = new Map([
+		[`${coordinatorPath}:workspacePrepareDelete`, ["requests"]],
+		[`${coordinatorPath}:workspaceCancelDelete`, ["plan.confirmationId"]],
+		[`${coordinatorPath}:workspaceBeginDelete`, ["plan.confirmationId"]],
+		[
+			`${providerPath}:workspaceCommitDeleteEntry`,
+			[
+				"authorizationSnapshot.confirmationId",
+				"authorizationSnapshot.entryId",
+				"authorizationSnapshot.rootId",
+				"authorizationSnapshot.relativePath",
+				"authorizationSnapshot.recursive",
+			],
+		],
+	]);
+
+	const internalModule =
+		"@codingame/monaco-vscode-api/vscode/vs/platform/files/common/plainWorkspaceDelete";
+	const expectedInternalImports = new Map([
+		[
+			coordinatorPath,
+			new Set([
+				"value:authorizePlainWorkspaceDeleteResourceEdit",
+				"value:getPlainWorkspaceDeleteState",
+				"value:registerPlainWorkspaceDeleteCoordinator",
+				"type:PlainWorkspaceDeleteAuthorization",
+				"type:PlainWorkspaceDeleteCoordinatorContext",
+			]),
+		],
+		[
+			providerPath,
+			new Set([
+				"value:beginPlainWorkspaceDeleteProviderDispatch",
+				"value:completePlainWorkspaceDeleteProviderFailure",
+				"value:completePlainWorkspaceDeleteProviderResult",
+				"value:getPlainWorkspaceDeleteAuthorizationSnapshot",
+				"value:takePlainWorkspaceDeleteProviderAuthorization",
+			]),
+		],
+	]);
+	const internalValueConsumers = new Map([
+		[
+			"authorizePlainWorkspaceDeleteResourceEdit",
+			{
+				path: coordinatorPath,
+				functionName: "createAuthorizedEdits",
+				count: 1,
+			},
+		],
+		[
+			"getPlainWorkspaceDeleteState",
+			{
+				path: coordinatorPath,
+				functionName: "classifyAuthorizationResults",
+				count: 1,
+			},
+		],
+		[
+			"registerPlainWorkspaceDeleteCoordinator",
+			{
+				path: coordinatorPath,
+				functionName: "registerWorkspaceDeleteCoordinator",
+				count: 1,
+			},
+		],
+		[
+			"beginPlainWorkspaceDeleteProviderDispatch",
+			{ path: providerPath, functionName: "delete", count: 1 },
+		],
+		[
+			"completePlainWorkspaceDeleteProviderFailure",
+			{ path: providerPath, functionName: "delete", count: 2 },
+		],
+		[
+			"completePlainWorkspaceDeleteProviderResult",
+			{ path: providerPath, functionName: "delete", count: 1 },
+		],
+		[
+			"getPlainWorkspaceDeleteAuthorizationSnapshot",
+			{ path: providerPath, functionName: "delete", count: 1 },
+		],
+		[
+			"takePlainWorkspaceDeleteProviderAuthorization",
+			{ path: providerPath, functionName: "delete", count: 1 },
+		],
+	]);
+	const internalConsumerCounts = new Map(
+		[...internalValueConsumers].map(([name]) => [name, 0]),
+	);
+	const seenInternalImports = new Map(
+		[...expectedInternalImports].map(([relativePath]) => [relativePath, 0]),
+	);
 	let exactInvokeImportCount = 0;
 
-	for (const { relativePath, source } of appSources) {
-		const normalizedPath = relativePath.replaceAll("\\", "/");
+	function containingFunctionName(node) {
+		let current = node.parent;
+		while (current !== undefined) {
+			if (
+				ts.isFunctionDeclaration(current) ||
+				ts.isMethodDeclaration(current)
+			) {
+				return typeScriptStaticName(current.name);
+			}
+			current = current.parent;
+		}
+		return undefined;
+	}
+
+	for (const [normalizedPath, source] of normalizedSources) {
 		const sourceFile = ts.createSourceFile(
 			normalizedPath,
 			source,
@@ -4345,39 +4595,83 @@ export function validateWorkspaceDeleteTypeScriptBoundary(appSources) {
 		for (const statement of sourceFile.statements) {
 			if (
 				!ts.isImportDeclaration(statement) ||
-				!ts.isStringLiteral(statement.moduleSpecifier) ||
-				statement.moduleSpecifier.text !== "@tauri-apps/api/core"
+				!ts.isStringLiteral(statement.moduleSpecifier)
 			) {
 				continue;
 			}
-			const bindings = statement.importClause?.namedBindings;
-			const isExactInvokeImport =
-				normalizedPath === "app/platform/tauri/native.ts" &&
-				bindings !== undefined &&
-				ts.isNamedImports(bindings) &&
-				bindings.elements.length === 1 &&
-				bindings.elements[0].propertyName === undefined &&
-				bindings.elements[0].name.text === "invoke";
-			if (!isExactInvokeImport) {
-				failures.push(
-					`${normalizedPath} must import invoke from @tauri-apps/api/core only as the direct native bridge binding`,
-				);
-			} else {
-				exactInvokeImportCount += 1;
+			const moduleName = statement.moduleSpecifier.text;
+			if (moduleName === "@tauri-apps/api/core") {
+				const bindings = statement.importClause?.namedBindings;
+				const isExactInvokeImport =
+					normalizedPath === "app/platform/tauri/native.ts" &&
+					statement.importClause?.isTypeOnly !== true &&
+					statement.importClause?.name === undefined &&
+					bindings !== undefined &&
+					ts.isNamedImports(bindings) &&
+					bindings.elements.length === 1 &&
+					bindings.elements[0].propertyName === undefined &&
+					bindings.elements[0].isTypeOnly !== true &&
+					bindings.elements[0].name.text === "invoke";
+				if (!isExactInvokeImport) {
+					failures.push(
+						`${normalizedPath} must import invoke from @tauri-apps/api/core only as the direct native bridge binding`,
+					);
+				} else {
+					exactInvokeImportCount += 1;
+				}
+			}
+			if (moduleName === internalModule) {
+				const expected = expectedInternalImports.get(normalizedPath);
+				const bindings = statement.importClause?.namedBindings;
+				const actual = new Set();
+				let exact =
+					expected !== undefined &&
+					statement.importClause?.name === undefined &&
+					bindings !== undefined &&
+					ts.isNamedImports(bindings);
+				if (exact && bindings !== undefined && ts.isNamedImports(bindings)) {
+					for (const specifier of bindings.elements) {
+						const imported =
+							specifier.propertyName?.text ?? specifier.name.text;
+						if (imported !== specifier.name.text) {
+							exact = false;
+						}
+						const typeOnly =
+							statement.importClause?.isTypeOnly === true ||
+							specifier.isTypeOnly;
+						actual.add(`${typeOnly ? "type" : "value"}:${imported}`);
+					}
+				}
+				if (
+					!exact ||
+					expected === undefined ||
+					!sameArray([...actual].sort(), [...expected].sort())
+				) {
+					failures.push(
+						`${normalizedPath} must import exactly its audited plainWorkspaceDelete helper surface`,
+					);
+				} else {
+					seenInternalImports.set(
+						normalizedPath,
+						(seenInternalImports.get(normalizedPath) ?? 0) + 1,
+					);
+				}
 			}
 		}
+
 		function visit(node) {
 			if (
 				ts.isStringLiteral(node) ||
 				ts.isNoSubstitutionTemplateLiteral(node)
 			) {
 				if (
-					node.text === "@tauri-apps/api/core" &&
+					(node.text === "@tauri-apps/api/core" ||
+						node.text === internalModule) &&
 					(!ts.isImportDeclaration(node.parent) ||
 						node.parent.moduleSpecifier !== node)
 				) {
 					failures.push(
-						`${normalizedPath} must not load @tauri-apps/api/core dynamically`,
+						`${normalizedPath} must not load the native bridge or delete authorization module dynamically`,
 					);
 				}
 				const contract = WORKSPACE_DELETE_TS_COMMANDS.find(
@@ -4497,9 +4791,65 @@ export function validateWorkspaceDeleteTypeScriptBoundary(appSources) {
 					const key = `${normalizedPath}:${referencedMethod}`;
 					declarationCounts.set(key, declarationCounts.get(key) + 1);
 				} else {
-					failures.push(
-						`${normalizedPath} must not consume ${referencedMethod} before the audited delete coordinator and provider authorization patch land`,
-					);
+					const propertyAccess = ts.isIdentifier(node)
+						? node.parent
+						: undefined;
+					const directCall =
+						propertyAccess !== undefined &&
+						ts.isPropertyAccessExpression(propertyAccess) &&
+						propertyAccess.name === node &&
+						ts.isCallExpression(propertyAccess.parent) &&
+						propertyAccess.parent.expression === propertyAccess &&
+						isKnownBridge(propertyAccess.expression)
+							? propertyAccess.parent
+							: undefined;
+					const routeKey = `${normalizedPath}:${referencedMethod}`;
+					if (directCall === undefined || !expectedBridgeRoutes.has(routeKey)) {
+						failures.push(
+							`${normalizedPath} must not consume ${referencedMethod} outside its single audited coordinator/provider route`,
+						);
+					} else {
+						bridgeRouteCounts.set(
+							routeKey,
+							(bridgeRouteCounts.get(routeKey) ?? 0) + 1,
+						);
+						const actualArguments = directCall.arguments.map((argument) =>
+							argument.getText(sourceFile).replaceAll(/\s+/g, ""),
+						);
+						const expectedArguments = expectedBridgeArguments.get(routeKey);
+						if (
+							expectedArguments === undefined ||
+							!sameArray(actualArguments, expectedArguments)
+						) {
+							failures.push(
+								`${routeKey} must use its exact snapshotted delete arguments`,
+							);
+						}
+					}
+				}
+			}
+
+			if (ts.isIdentifier(node) && internalValueConsumers.has(node.text)) {
+				const isImportBinding =
+					ts.isImportSpecifier(node.parent) && node.parent.name === node;
+				if (!isImportBinding) {
+					const consumer = internalValueConsumers.get(node.text);
+					const isDirectCall =
+						ts.isCallExpression(node.parent) && node.parent.expression === node;
+					if (
+						!isDirectCall ||
+						normalizedPath !== consumer.path ||
+						containingFunctionName(node) !== consumer.functionName
+					) {
+						failures.push(
+							`${node.text} must be consumed only by its fixed confirmed-delete function`,
+						);
+					} else {
+						internalConsumerCounts.set(
+							node.text,
+							internalConsumerCounts.get(node.text) + 1,
+						);
+					}
 				}
 			}
 			ts.forEachChild(node, visit);
@@ -4523,6 +4873,759 @@ export function validateWorkspaceDeleteTypeScriptBoundary(appSources) {
 		if (count !== 1) {
 			failures.push(
 				`${declaration} must have exactly one audited delete bridge declaration`,
+			);
+		}
+	}
+	for (const [route, count] of expectedBridgeRoutes) {
+		if (bridgeRouteCounts.get(route) !== count) {
+			failures.push(
+				`${route} must have exactly ${count} audited direct delete bridge call sites`,
+			);
+		}
+	}
+	for (const [relativePath, count] of seenInternalImports) {
+		if (count !== 1) {
+			failures.push(
+				`${relativePath} must have exactly one audited plainWorkspaceDelete import`,
+			);
+		}
+	}
+	for (const [name, consumer] of internalValueConsumers) {
+		if (internalConsumerCounts.get(name) !== consumer.count) {
+			failures.push(
+				`${name} must have exactly ${consumer.count} audited direct consumers`,
+			);
+		}
+	}
+
+	const coordinatorSource = normalizedSources.get(coordinatorPath);
+	if (coordinatorSource !== undefined) {
+		failures.push(
+			...validateWorkspaceDeleteCoordinatorRoute(coordinatorSource),
+		);
+	}
+	const providerSource = normalizedSources.get(providerPath);
+	if (providerSource !== undefined) {
+		failures.push(...validateWorkspaceDeleteProviderRoute(providerSource));
+	}
+	return [...new Set(failures)];
+}
+
+function validateWorkspaceDeleteCoordinatorRoute(source) {
+	const failures = [];
+	const sourceFile = ts.createSourceFile(
+		"app/features/workspace/delete-coordinator.ts",
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["delete-coordinator.ts must remain valid TypeScript"];
+	}
+	const normalized = (node) => node?.getText(sourceFile).replaceAll(/\s+/g, "");
+	const expectedImports = new Map([
+		[
+			"@codingame/monaco-vscode-api/vscode/vs/editor/browser/services/bulkEditService",
+			new Set(["value:ResourceFileEdit"]),
+		],
+		[
+			"@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle",
+			new Set(["type:IDisposable"]),
+		],
+		[
+			"@codingame/monaco-vscode-api/vscode/vs/platform/files/common/plainWorkspaceDelete",
+			new Set([
+				"value:authorizePlainWorkspaceDeleteResourceEdit",
+				"value:getPlainWorkspaceDeleteState",
+				"value:registerPlainWorkspaceDeleteCoordinator",
+				"type:PlainWorkspaceDeleteAuthorization",
+				"type:PlainWorkspaceDeleteCoordinatorContext",
+			]),
+		],
+		[
+			"../../platform/tauri",
+			new Set([
+				"type:PlainBridge",
+				"type:WorkspaceDeleteBatchPlan",
+				"type:WorkspaceDeleteResult",
+			]),
+		],
+		[
+			"./file-system-provider",
+			new Set([
+				"type:PlainWorkspaceDeleteProvider",
+				"type:PlainWorkspaceDeleteResource",
+			]),
+		],
+	]);
+	const seenImports = new Set();
+	for (const statement of sourceFile.statements) {
+		if (!ts.isImportDeclaration(statement)) {
+			continue;
+		}
+		const moduleName = ts.isStringLiteral(statement.moduleSpecifier)
+			? statement.moduleSpecifier.text
+			: undefined;
+		const expected =
+			moduleName === undefined ? undefined : expectedImports.get(moduleName);
+		const bindings = statement.importClause?.namedBindings;
+		const actual = new Set();
+		let exact =
+			expected !== undefined &&
+			moduleName !== undefined &&
+			!seenImports.has(moduleName) &&
+			statement.importClause?.name === undefined &&
+			bindings !== undefined &&
+			ts.isNamedImports(bindings);
+		if (exact && bindings !== undefined && ts.isNamedImports(bindings)) {
+			for (const specifier of bindings.elements) {
+				const imported = specifier.propertyName?.text ?? specifier.name.text;
+				if (imported !== specifier.name.text) {
+					exact = false;
+				}
+				const typeOnly =
+					statement.importClause?.isTypeOnly === true || specifier.isTypeOnly;
+				actual.add(`${typeOnly ? "type" : "value"}:${imported}`);
+			}
+		}
+		if (
+			!exact ||
+			expected === undefined ||
+			!sameArray([...actual].sort(), [...expected].sort())
+		) {
+			failures.push(
+				"delete-coordinator.ts imports must match the exact audited type/value surface",
+			);
+		}
+		if (moduleName !== undefined) {
+			seenImports.add(moduleName);
+		}
+	}
+	if (seenImports.size !== expectedImports.size) {
+		failures.push(
+			"delete-coordinator.ts imports must match the exact audited type/value surface",
+		);
+	}
+
+	const expectedTopLevel = new Map([
+		["MAX_DELETE_ENTRIES", { kind: "variable", exported: false }],
+		["deleteFailureDetails", { kind: "variable", exported: false }],
+		["WorkspaceDeleteIncompleteError", { kind: "class", exported: true }],
+		[
+			"getWorkspaceDeleteIncompleteDetails",
+			{ kind: "function", exported: true },
+		],
+		["DeleteSelectionEntry", { kind: "interface", exported: false }],
+		["snapshotSelection", { kind: "function", exported: false }],
+		["confirmationDetail", { kind: "function", exported: false }],
+		["createAuthorizedEdits", { kind: "function", exported: false }],
+		["classifyAuthorizationResults", { kind: "function", exported: false }],
+		["runDelete", { kind: "function", exported: false, async: true }],
+		[
+			"registerWorkspaceDeleteCoordinator",
+			{ kind: "function", exported: true },
+		],
+	]);
+	const topLevelCounts = new Map(
+		[...expectedTopLevel].map(([name]) => [name, 0]),
+	);
+	let topLevelIsExact = true;
+	for (const statement of sourceFile.statements) {
+		if (ts.isImportDeclaration(statement)) {
+			continue;
+		}
+		let name;
+		let kind;
+		if (ts.isVariableStatement(statement)) {
+			if (statement.declarationList.declarations.length !== 1) {
+				topLevelIsExact = false;
+				continue;
+			}
+			name = statement.declarationList.declarations[0].name;
+			kind = "variable";
+		} else if (ts.isFunctionDeclaration(statement)) {
+			name = statement.name;
+			kind = "function";
+		} else if (ts.isInterfaceDeclaration(statement)) {
+			name = statement.name;
+			kind = "interface";
+		} else if (ts.isClassDeclaration(statement)) {
+			name = statement.name;
+			kind = "class";
+		} else {
+			topLevelIsExact = false;
+			continue;
+		}
+		const expected = ts.isIdentifier(name)
+			? expectedTopLevel.get(name.text)
+			: undefined;
+		const modifierKinds = (statement.modifiers ?? []).map(
+			(modifier) => modifier.kind,
+		);
+		const expectedModifiers = [
+			...(expected?.exported ? [ts.SyntaxKind.ExportKeyword] : []),
+			...(expected?.async ? [ts.SyntaxKind.AsyncKeyword] : []),
+		];
+		if (
+			expected === undefined ||
+			expected.kind !== kind ||
+			!sameArray(modifierKinds, expectedModifiers)
+		) {
+			topLevelIsExact = false;
+		} else {
+			topLevelCounts.set(name.text, topLevelCounts.get(name.text) + 1);
+		}
+	}
+	if (
+		!topLevelIsExact ||
+		[...topLevelCounts.values()].some((count) => count !== 1)
+	) {
+		failures.push(
+			"delete-coordinator.ts must retain its exact module-private coordinator surface",
+		);
+	}
+
+	function exactFunctionBody(name, expectedBody, failure) {
+		const functions = sourceFile.statements.filter(
+			(statement) =>
+				ts.isFunctionDeclaration(statement) && statement.name?.text === name,
+		);
+		if (
+			functions.length !== 1 ||
+			normalized(functions[0].body) !== expectedBody.replaceAll(/\s+/g, "")
+		) {
+			failures.push(failure);
+		}
+		return functions.length === 1 ? functions[0] : undefined;
+	}
+
+	exactFunctionBody(
+		"snapshotSelection",
+		`{
+			try {
+				if (
+					!Array.isArray(context.elements) ||
+					context.elements.length < 1 ||
+					context.elements.length > MAX_DELETE_ENTRIES
+				) {
+					throw new Error("Invalid Plain delete selection.");
+				}
+				const entries = context.elements.map((element) => {
+					const resource = element.resource;
+					const name = element.name;
+					if (typeof name !== "string" || name.length < 1 || name.length > 1024) {
+						throw new Error("Invalid Plain delete selection.");
+					}
+					return Object.freeze({
+						resource: provider.plainSnapshotDeleteResource(resource),
+						name,
+					});
+				});
+				return Object.freeze(entries);
+			} catch {
+				throw new Error("The permanent delete selection is invalid.");
+			}
+		}`,
+		"delete coordinator must synchronously snapshot one bounded distinct selection",
+	);
+	exactFunctionBody(
+		"createAuthorizedEdits",
+		`{
+			if (plan.entries.length !== selection.length) {
+				throw new Error("The permanent delete plan is invalid.");
+			}
+			const authorizations: PlainWorkspaceDeleteAuthorization[] = [];
+			const edits = plan.entries.map((entry, index) => {
+				const selected = selection[index];
+				if (selected === undefined) {
+					throw new Error("The permanent delete plan is invalid.");
+				}
+				const options = {
+					recursive: true,
+					folder: entry.kind === "directory",
+					ignoreIfNotExists: false,
+					skipTrashBin: true,
+				};
+				const authorization = authorizePlainWorkspaceDeleteResourceEdit(
+					options,
+					selected.resource.resource,
+					{
+						confirmationId: plan.confirmationId,
+						entryId: entry.entryId,
+						rootId: selected.resource.rootId,
+						relativePath: selected.resource.relativePath,
+						recursive: true,
+						kind: entry.kind,
+						permanent: true,
+					},
+				);
+				authorizations.push(authorization);
+				return new ResourceFileEdit(selected.resource.resource, undefined, options);
+			});
+			return Object.freeze({
+				edits: Object.freeze(edits),
+				authorizations: Object.freeze(authorizations),
+			});
+		}`,
+		"delete coordinator must bind one permanent recursive authorization to each ResourceFileEdit",
+	);
+	exactFunctionBody(
+		"classifyAuthorizationResults",
+		`{
+			let deletedEntries = 0;
+			let pendingEntries = 0;
+			let ordinaryFailures = 0;
+			let outcomeUnknown = false;
+			let incompleteResult: WorkspaceDeleteResult | undefined;
+			for (const authorization of authorizations) {
+				const result = getPlainWorkspaceDeleteState(authorization);
+				if (result.status === "pending" || result.status === "inFlight") {
+					pendingEntries += 1;
+				} else if (result.status === "deleted") {
+					deletedEntries += 1;
+				} else if (result.status === "ordinaryFailure") {
+					ordinaryFailures += 1;
+				} else if (result.status === "outcomeUnknown") {
+					outcomeUnknown = true;
+				} else if (incompleteResult === undefined) {
+					incompleteResult = result;
+				}
+			}
+			return Object.freeze({
+				deletedEntries,
+				pendingEntries,
+				ordinaryFailures,
+				outcomeUnknown,
+				...(incompleteResult === undefined ? {} : { incompleteResult }),
+			});
+		}`,
+		"delete coordinator must classify every authorization terminal typestate without guessing success",
+	);
+	exactFunctionBody(
+		"registerWorkspaceDeleteCoordinator",
+		`{
+			return registerPlainWorkspaceDeleteCoordinator((context) =>
+				runDelete(bridge, provider, context),
+			);
+		}`,
+		"delete coordinator registration must directly close over one bridge and provider",
+	);
+
+	const runFunctions = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "runDelete",
+	);
+	if (runFunctions.length !== 1 || runFunctions[0].body === undefined) {
+		failures.push(
+			"delete coordinator must define exactly one audited async runDelete route",
+		);
+		return [...new Set(failures)];
+	}
+	const runDelete = runFunctions[0];
+	const runBody = normalized(runDelete.body) ?? "";
+	const callPositions = new Map();
+	function recordCall(name, node) {
+		const positions = callPositions.get(name) ?? [];
+		positions.push(node.getStart(sourceFile));
+		callPositions.set(name, positions);
+	}
+	function visitRun(node) {
+		if (ts.isCallExpression(node)) {
+			const callee = node.expression.getText(sourceFile).replaceAll(/\s+/g, "");
+			for (const name of [
+				"snapshotSelection",
+				"bridge.workspacePrepareDelete",
+				"context.dialogService.confirm",
+				"bridge.workspaceBeginDelete",
+				"createAuthorizedEdits",
+				"context.explorerService.applyBulkEdit",
+				"classifyAuthorizationResults",
+				"provider.plainRefreshDeleteRoots",
+				"bridge.workspaceCancelDelete",
+			]) {
+				if (callee === name) {
+					recordCall(name, node);
+				}
+			}
+		}
+		ts.forEachChild(node, visitRun);
+	}
+	visitRun(runDelete.body);
+	const expectedCallCounts = new Map([
+		["snapshotSelection", 1],
+		["bridge.workspacePrepareDelete", 1],
+		["context.dialogService.confirm", 1],
+		["bridge.workspaceBeginDelete", 1],
+		["createAuthorizedEdits", 1],
+		["context.explorerService.applyBulkEdit", 1],
+		["classifyAuthorizationResults", 2],
+		["provider.plainRefreshDeleteRoots", 1],
+		["bridge.workspaceCancelDelete", 1],
+	]);
+	for (const [name, count] of expectedCallCounts) {
+		if ((callPositions.get(name)?.length ?? 0) !== count) {
+			failures.push(
+				`runDelete must call ${name} exactly ${count} times in the audited route`,
+			);
+		}
+	}
+	const orderedNames = [
+		"snapshotSelection",
+		"bridge.workspacePrepareDelete",
+		"context.dialogService.confirm",
+		"bridge.workspaceBeginDelete",
+		"createAuthorizedEdits",
+		"context.explorerService.applyBulkEdit",
+	];
+	const orderedPositions = orderedNames.map(
+		(name) => callPositions.get(name)?.[0],
+	);
+	if (
+		orderedPositions.some((position) => position === undefined) ||
+		orderedPositions.some(
+			(position, index) => index > 0 && position <= orderedPositions[index - 1],
+		)
+	) {
+		failures.push(
+			"runDelete must prepare, confirm once, begin, authorize and apply in that strict order",
+		);
+	}
+	const topLevelTry = runDelete.body.statements.filter((statement) =>
+		ts.isTryStatement(statement),
+	);
+	const tryStatement = topLevelTry.length === 1 ? topLevelTry[0] : undefined;
+	const expectedCatch = `{
+		if (beginAttempted) {
+			provider.plainRefreshDeleteRoots(
+				selection.map(({ resource }) => resource.resource),
+			);
+		}
+		const results = classifyAuthorizationResults(authorizations);
+		if (
+			!(error instanceof WorkspaceDeleteIncompleteError) &&
+			(results.incompleteResult !== undefined ||
+				results.outcomeUnknown ||
+				results.deletedEntries > 0)
+		) {
+			throw new WorkspaceDeleteIncompleteError(
+				results.deletedEntries,
+				results.incompleteResult,
+			);
+		}
+		throw error;
+	}`.replaceAll(/\s+/g, "");
+	const expectedFinally = `{
+		if (!completed) {
+			try {
+				await bridge.workspaceCancelDelete(plan.confirmationId);
+			} catch {}
+		}
+	}`.replaceAll(/\s+/g, "");
+	if (
+		tryStatement === undefined ||
+		tryStatement.catchClause?.variableDeclaration === undefined ||
+		!ts.isIdentifier(tryStatement.catchClause.variableDeclaration.name) ||
+		tryStatement.catchClause.variableDeclaration.name.text !== "error" ||
+		normalized(tryStatement.catchClause.block) !== expectedCatch ||
+		normalized(tryStatement.finallyBlock) !== expectedFinally
+	) {
+		failures.push(
+			"runDelete must rescan after begun failures and cancel every uncompleted confirmation in finally",
+		);
+	}
+	for (const required of [
+		"constplan=awaitbridge.workspacePrepareDelete(requests);letbeginAttempted=false;letcompleted=false;letauthorizations:readonlyPlainWorkspaceDeleteAuthorization[]= [];".replace(
+			"= [];",
+			"=[];",
+		),
+		"constconfirmed=response.confirmed;if(confirmed!==true){return;}beginAttempted=true;awaitbridge.workspaceBeginDelete(plan.confirmationId);",
+		"constauthorized=createAuthorizedEdits(selection,plan);authorizations=authorized.authorizations;awaitcontext.explorerService.applyBulkEdit(authorized.edits,",
+		"results.incompleteResult!==undefined||results.outcomeUnknown||results.ordinaryFailures!==0||results.pendingEntries!==0||results.deletedEntries!==selection.length",
+		"completed=true;",
+	]) {
+		if (!runBody.includes(required)) {
+			failures.push(
+				"runDelete must retain strict confirmation, begin and terminal-success sequencing",
+			);
+			break;
+		}
+	}
+	if (
+		runDelete.modifiers?.length !== 1 ||
+		runDelete.modifiers[0].kind !== ts.SyntaxKind.AsyncKeyword ||
+		runDelete.parameters.length !== 3 ||
+		!sameArray(
+			runDelete.parameters.map((parameter) =>
+				ts.isIdentifier(parameter.name) ? parameter.name.text : undefined,
+			),
+			["bridge", "provider", "context"],
+		) ||
+		runDelete.type === undefined ||
+		!ts.isTypeReferenceNode(runDelete.type) ||
+		!ts.isIdentifier(runDelete.type.typeName) ||
+		runDelete.type.typeName.text !== "Promise" ||
+		runDelete.type.typeArguments?.[0]?.kind !== ts.SyntaxKind.VoidKeyword
+	) {
+		failures.push(
+			"delete coordinator must define exactly one audited async runDelete route",
+		);
+	}
+	return [...new Set(failures)];
+}
+
+function validateWorkspaceDeleteProviderRoute(source) {
+	const failures = [];
+	const sourceFile = ts.createSourceFile(
+		"app/features/workspace/file-system-provider.ts",
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["file-system-provider.ts must remain valid TypeScript"];
+	}
+	const normalized = (node) => node?.getText(sourceFile).replaceAll(/\s+/g, "");
+	const providers = sourceFile.statements.filter(
+		(statement) =>
+			ts.isClassDeclaration(statement) &&
+			statement.name?.text === "PlainWorkspaceFileSystemProvider",
+	);
+	if (providers.length !== 1) {
+		return [
+			"confirmed delete requires exactly one PlainWorkspaceFileSystemProvider",
+		];
+	}
+	const provider = providers[0];
+	const methodsByName = (name) =>
+		provider.members.filter(
+			(member) =>
+				ts.isMethodDeclaration(member) && typeScriptMemberName(member) === name,
+		);
+	const capabilityMembers = provider.members.filter(
+		(member) =>
+			ts.isPropertyDeclaration(member) &&
+			typeScriptMemberName(member) === "capabilities",
+	);
+	const flags = [];
+	if (
+		capabilityMembers.length !== 1 ||
+		capabilityMembers[0].initializer === undefined ||
+		!capabilityMembers[0].modifiers?.some(
+			(modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword,
+		) ||
+		!collectProviderCapabilityFlags(capabilityMembers[0].initializer, flags) ||
+		!sameArray(flags.sort(), ["FileReadWrite", "Readonly"])
+	) {
+		failures.push(
+			"confirmed delete must not remove Readonly or advertise Trash/atomic provider capabilities",
+		);
+	}
+
+	const deleteMethods = methodsByName("delete");
+	const expectedDeleteBody = `{
+		this.requireMutationDispatchAllowed();
+		const resolved = this.resolveMutationResource(_resource);
+		let authorization;
+		try {
+			authorization = takePlainWorkspaceDeleteProviderAuthorization(
+				_options,
+				resolved.resource,
+			);
+		} catch {
+			throw noPermissions();
+		}
+		if (authorization === undefined) {
+			throw noPermissions();
+		}
+		const authorizationSnapshot =
+			getPlainWorkspaceDeleteAuthorizationSnapshot(authorization);
+		if (
+			authorizationSnapshot.rootId !== resolved.rootId ||
+			authorizationSnapshot.relativePath !== resolved.relativePath ||
+			authorizationSnapshot.recursive !== true ||
+			authorizationSnapshot.permanent !== true
+		) {
+			throw noPermissions();
+		}
+		beginPlainWorkspaceDeleteProviderDispatch(authorization);
+
+		let result: WorkspaceDeleteResult;
+		try {
+			result = decodeWorkspaceDeleteResult(
+				await this.bridge.workspaceCommitDeleteEntry(
+					authorizationSnapshot.confirmationId,
+					authorizationSnapshot.entryId,
+					authorizationSnapshot.rootId,
+					authorizationSnapshot.relativePath,
+					authorizationSnapshot.recursive,
+				),
+			);
+		} catch (error) {
+			const failure = mapDeleteError(error);
+			completePlainWorkspaceDeleteProviderFailure(
+				authorization,
+				failure.outcome,
+			);
+			if (failure.rescan) {
+				this.fireRootUpdated(resolved.resource);
+			}
+			throw failure.error;
+		}
+		try {
+			completePlainWorkspaceDeleteProviderResult(authorization, result);
+		} catch {
+			completePlainWorkspaceDeleteProviderFailure(
+				authorization,
+				"outcomeUnknown",
+			);
+			this.fireRootUpdated(resolved.resource);
+			throw unavailable();
+		}
+		if (result.status !== "deleted") {
+			this.fireRootUpdated(resolved.resource);
+			throw unavailable();
+		}
+		this.fireDeleted(resolved.resource);
+	}`.replaceAll(/\s+/g, "");
+	if (deleteMethods.length !== 1) {
+		failures.push(
+			"provider must expose exactly one call-authorized permanent delete adapter",
+		);
+	} else {
+		const method = deleteMethods[0];
+		const [resource, options] = method.parameters;
+		const hasType = (parameter, name) =>
+			parameter?.type !== undefined &&
+			ts.isTypeReferenceNode(parameter.type) &&
+			ts.isIdentifier(parameter.type.typeName) &&
+			parameter.type.typeName.text === name;
+		if (
+			method.modifiers?.length !== 1 ||
+			method.modifiers[0].kind !== ts.SyntaxKind.AsyncKeyword ||
+			method.parameters.length !== 2 ||
+			!ts.isIdentifier(resource?.name) ||
+			resource.name.text !== "_resource" ||
+			!hasType(resource, "URI") ||
+			!ts.isIdentifier(options?.name) ||
+			options.name.text !== "_options" ||
+			!hasType(options, "IFileDeleteOptions") ||
+			method.type === undefined ||
+			!ts.isTypeReferenceNode(method.type) ||
+			!ts.isIdentifier(method.type.typeName) ||
+			method.type.typeName.text !== "Promise" ||
+			method.type.typeArguments?.[0]?.kind !== ts.SyntaxKind.VoidKeyword ||
+			normalized(method.body) !== expectedDeleteBody
+		) {
+			failures.push(
+				"provider delete must consume one authorization through prepared/inFlight/terminal typestate and dispatch exactly one permanent commit",
+			);
+		}
+	}
+
+	const mapDeleteFunctions = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "mapDeleteError",
+	);
+	const expectedMapDeleteBody = `{
+		const code = copyMoveCommandErrorCode(error);
+		switch (code) {
+			case "ROOT_NOT_AUTHORIZED":
+				return Object.freeze({
+					error: noPermissions(),
+					rescan: false,
+					outcome: "ordinaryFailure",
+				});
+			case "WORKSPACE_DELETE_PLAN_INVALID":
+			case "ROOT_UNAVAILABLE":
+			case "WORKSPACE_WINDOW_CLOSED":
+			case "ENTRY_TYPE_MISMATCH":
+			case "INVALID_RELATIVE_PATH":
+			case "WORKSPACE_CONFLICT":
+				return Object.freeze({
+					error: unavailable(),
+					rescan: false,
+					outcome: "ordinaryFailure",
+				});
+			default:
+				return Object.freeze({
+					error: unavailable(),
+					rescan: true,
+					outcome: "outcomeUnknown",
+				});
+		}
+	}`.replaceAll(/\s+/g, "");
+	if (
+		mapDeleteFunctions.length !== 1 ||
+		normalized(mapDeleteFunctions[0].body) !== expectedMapDeleteBody
+	) {
+		failures.push(
+			"mapDeleteError must distinguish authenticated ordinary failure from rescan-required unknown outcome",
+		);
+	}
+
+	const exactMethodBodies = new Map([
+		[
+			"plainSnapshotDeleteResource",
+			`{
+				this.requireMutationDispatchAllowed();
+				return this.resolveMutationResource(resource);
+			}`,
+		],
+		[
+			"plainRefreshDeleteRoots",
+			`{
+				this.requireMutationDispatchAllowed();
+				const roots = new Map<string, URI>();
+				for (const resource of resources) {
+					const resolved = this.resolveMutationResource(resource);
+					if (!roots.has(resolved.rootId)) {
+						roots.set(
+							resolved.rootId,
+							resolved.resource.with({
+								path: "/",
+								query: null,
+								fragment: null,
+							}),
+						);
+					}
+				}
+				const changes = [...roots.values()].map((resource) => {
+					resource.toString();
+					void resource.fsPath;
+					Object.freeze(resource);
+					return Object.freeze({ type: FileChangeType.UPDATED, resource });
+				});
+				if (changes.length > 0) {
+					this.changeEmitter.fire(Object.freeze(changes));
+				}
+			}`,
+		],
+		[
+			"fireDeleted",
+			`{
+				this.changeEmitter.fire(
+					Object.freeze([
+						Object.freeze({
+							type: FileChangeType.DELETED,
+							resource,
+						}),
+					]),
+				);
+			}`,
+		],
+	]);
+	for (const [name, body] of exactMethodBodies) {
+		const methods = methodsByName(name);
+		if (
+			methods.length !== 1 ||
+			normalized(methods[0].body) !== body.replaceAll(/\s+/g, "")
+		) {
+			failures.push(
+				`${name} must retain its exact snapshotted root/event delete role`,
 			);
 		}
 	}
@@ -4572,10 +5675,21 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			new Set(["value:URI"]),
 		],
 		[
+			"@codingame/monaco-vscode-api/vscode/vs/platform/files/common/plainWorkspaceDelete",
+			new Set([
+				"value:beginPlainWorkspaceDeleteProviderDispatch",
+				"value:completePlainWorkspaceDeleteProviderFailure",
+				"value:completePlainWorkspaceDeleteProviderResult",
+				"value:getPlainWorkspaceDeleteAuthorizationSnapshot",
+				"value:takePlainWorkspaceDeleteProviderAuthorization",
+			]),
+		],
+		[
 			"../../platform/tauri",
 			new Set([
 				"type:PlainBridge",
 				"type:WorkspaceCapabilities",
+				"type:WorkspaceDeleteResult",
 				"type:WorkspaceEntryKind",
 				"type:WorkspaceEntryStat",
 				"type:WorkspaceWriteResult",
@@ -4585,6 +5699,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			"../../platform/tauri/workspace-codec",
 			new Set([
 				"value:decodeWorkspaceCapabilities",
+				"value:decodeWorkspaceDeleteResult",
 				"value:decodeWorkspaceEntryStat",
 				"value:decodeWorkspaceMoveResult",
 				"value:frozenWorkspaceEntryRequest",
@@ -4651,6 +5766,8 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		["PLAIN_WORKSPACE_SCHEME", { kind: "variable", exported: true }],
 		["ResolvedResource", { kind: "interface", exported: false }],
 		["ResolvedMutationResource", { kind: "interface", exported: false }],
+		["PlainWorkspaceDeleteResource", { kind: "interface", exported: true }],
+		["PlainWorkspaceDeleteProvider", { kind: "interface", exported: true }],
 		["PlainWorkspaceProviderStat", { kind: "interface", exported: true }],
 		["PlainWorkspaceReadFileResult", { kind: "interface", exported: true }],
 		["PlainWorkspaceWriteFileResult", { kind: "type", exported: true }],
@@ -4669,6 +5786,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		["requireNoOverwriteOptions", { kind: "function", exported: false }],
 		["copyMoveCommandErrorCode", { kind: "function", exported: false }],
 		["mapCopyMoveError", { kind: "function", exported: false }],
+		["mapDeleteError", { kind: "function", exported: false }],
 		["requireVoidMutationReceipt", { kind: "function", exported: false }],
 		["WorkspaceMoveIncompleteError", { kind: "class", exported: false }],
 		["workspaceMoveIncomplete", { kind: "function", exported: false }],
@@ -4738,6 +5856,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		);
 	}
 	let decoderImportCount = 0;
+	let deleteDecoderImportCount = 0;
 	let entryStatDecoderImportCount = 0;
 	let moveDecoderImportCount = 0;
 	let frozenRequestImportCount = 0;
@@ -4751,6 +5870,14 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			ts.isNamedImports(statement.importClause?.namedBindings)
 		) {
 			for (const specifier of statement.importClause.namedBindings.elements) {
+				if (
+					!specifier.isTypeOnly &&
+					(specifier.propertyName?.text ?? specifier.name.text) ===
+						"decodeWorkspaceDeleteResult" &&
+					specifier.name.text === "decodeWorkspaceDeleteResult"
+				) {
+					deleteDecoderImportCount += 1;
+				}
 				if (
 					!specifier.isTypeOnly &&
 					(specifier.propertyName?.text ?? specifier.name.text) ===
@@ -4789,6 +5916,11 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	if (decoderImportCount !== 1) {
 		failures.push(
 			"file-system-provider.ts must import the strict workspace capability decoder exactly by name",
+		);
+	}
+	if (deleteDecoderImportCount !== 1) {
+		failures.push(
+			"file-system-provider.ts must import the strict workspace delete decoder exactly by name",
 		);
 	}
 	if (entryStatDecoderImportCount !== 1) {
@@ -5359,7 +6491,28 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		["@codingame/monaco-vscode-api/vscode/vs/base/common/event", "Emitter"],
 		["@codingame/monaco-vscode-api/vscode/vs/base/common/event", "Event"],
 		["@codingame/monaco-vscode-api/vscode/vs/base/common/uri", "URI"],
+		[
+			"@codingame/monaco-vscode-api/vscode/vs/platform/files/common/plainWorkspaceDelete",
+			"beginPlainWorkspaceDeleteProviderDispatch",
+		],
+		[
+			"@codingame/monaco-vscode-api/vscode/vs/platform/files/common/plainWorkspaceDelete",
+			"completePlainWorkspaceDeleteProviderFailure",
+		],
+		[
+			"@codingame/monaco-vscode-api/vscode/vs/platform/files/common/plainWorkspaceDelete",
+			"completePlainWorkspaceDeleteProviderResult",
+		],
+		[
+			"@codingame/monaco-vscode-api/vscode/vs/platform/files/common/plainWorkspaceDelete",
+			"getPlainWorkspaceDeleteAuthorizationSnapshot",
+		],
+		[
+			"@codingame/monaco-vscode-api/vscode/vs/platform/files/common/plainWorkspaceDelete",
+			"takePlainWorkspaceDeleteProviderAuthorization",
+		],
 		["../../platform/tauri/workspace-codec", "decodeWorkspaceCapabilities"],
+		["../../platform/tauri/workspace-codec", "decodeWorkspaceDeleteResult"],
 		["../../platform/tauri/workspace-codec", "decodeWorkspaceEntryStat"],
 		["../../platform/tauri/workspace-codec", "decodeWorkspaceMoveResult"],
 		["../../platform/tauri/workspace-codec", "frozenWorkspaceEntryRequest"],
@@ -5485,10 +6638,13 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		"writeFile",
 		"mkdir",
 		"delete",
+		"plainSnapshotDeleteResource",
+		"plainRefreshDeleteRoots",
 		"copy",
 		"rename",
 		"requireMutationDispatchAllowed",
 		"fireCreated",
+		"fireDeleted",
 		"fireMoved",
 		"fireRootUpdated",
 		"fireRootsUpdated",
@@ -5788,11 +6944,6 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		(member) =>
 			ts.isMethodDeclaration(member) &&
 			typeScriptMemberName(member) === "mkdir",
-	);
-	const publicDeleteMethods = provider.members.filter(
-		(member) =>
-			ts.isMethodDeclaration(member) &&
-			typeScriptMemberName(member) === "delete",
 	);
 	const copyMethods = provider.members.filter(
 		(member) =>
@@ -6326,29 +7477,6 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			);
 		}
 	}
-	if (publicDeleteMethods.length !== 1) {
-		failures.push(
-			"Plain workspace provider must keep exactly one fail-closed public delete method",
-		);
-	} else {
-		const [publicDelete] = publicDeleteMethods;
-		const [statement] = publicDelete.body?.statements ?? [];
-		const expression = ts.isThrowStatement(statement)
-			? statement.expression
-			: undefined;
-		if (
-			publicDelete.body?.statements.length !== 1 ||
-			expression === undefined ||
-			!ts.isCallExpression(expression) ||
-			!ts.isIdentifier(expression.expression) ||
-			expression.expression.text !== "noPermissions" ||
-			expression.arguments.length !== 0
-		) {
-			failures.push(
-				"public delete must remain a direct noPermissions failure without native dispatch",
-			);
-		}
-	}
 	function exactCopyMoveMethodSignature(method) {
 		if (
 			method.modifiers?.length !== 1 ||
@@ -6619,12 +7747,14 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	let copyBridgeReferences = 0;
 	let renameBridgeReferences = 0;
 	let moveBridgeReferences = 0;
+	let deleteBridgeReferences = 0;
 	const auditedMutationBridgeNames = new Set([
 		"workspaceCreateFile",
 		"workspaceCreateDirectory",
 		"workspaceCopy",
 		"workspaceRename",
 		"workspaceMove",
+		"workspaceCommitDeleteEntry",
 	]);
 	const expectedBridgeMethods = new Map([
 		["workspaceStat", 1],
@@ -6636,6 +7766,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		["workspaceCopy", 1],
 		["workspaceRename", 1],
 		["workspaceMove", 1],
+		["workspaceCommitDeleteEntry", 1],
 	]);
 	const bridgeMethodCounts = new Map(
 		[...expectedBridgeMethods].map(([name]) => [name, 0]),
@@ -6654,7 +7785,13 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		"URI",
 	]);
 	const criticalCallBindings = new Set([
+		"beginPlainWorkspaceDeleteProviderDispatch",
+		"completePlainWorkspaceDeleteProviderFailure",
+		"completePlainWorkspaceDeleteProviderResult",
+		"getPlainWorkspaceDeleteAuthorizationSnapshot",
+		"takePlainWorkspaceDeleteProviderAuthorization",
 		"decodeWorkspaceCapabilities",
+		"decodeWorkspaceDeleteResult",
 		"decodeWorkspaceEntryStat",
 		"decodeWorkspaceMoveResult",
 		"frozenWorkspaceEntryRequest",
@@ -6680,6 +7817,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		"requireNoOverwriteOptions",
 		"copyMoveCommandErrorCode",
 		"mapCopyMoveError",
+		"mapDeleteError",
 		"requireVoidMutationReceipt",
 		"WorkspaceMoveIncompleteError",
 		"workspaceMoveIncomplete",
@@ -6694,11 +7832,18 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		["createdProviderStat", 2],
 		["mapCreateError", 2],
 		["requireNoOverwriteOptions", 2],
-		["copyMoveCommandErrorCode", 1],
+		["copyMoveCommandErrorCode", 2],
 		["mapCopyMoveError", 3],
+		["mapDeleteError", 1],
 		["requireVoidMutationReceipt", 2],
 		["workspaceMoveIncomplete", 2],
 		["decodeWorkspaceMoveResult", 1],
+		["decodeWorkspaceDeleteResult", 1],
+		["beginPlainWorkspaceDeleteProviderDispatch", 1],
+		["completePlainWorkspaceDeleteProviderFailure", 2],
+		["completePlainWorkspaceDeleteProviderResult", 1],
+		["getPlainWorkspaceDeleteAuthorizationSnapshot", 1],
+		["takePlainWorkspaceDeleteProviderAuthorization", 1],
 		["structuredClone", 2],
 		["mapReadError", 3],
 		["mapWriteError", 1],
@@ -6722,10 +7867,12 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		"plainCreateFile",
 		"plainCreateDirectory",
 		"plainWriteFile",
+		"delete",
 		"copy",
 		"rename",
 	]);
 	let fireCreatedCallCount = 0;
+	let fireDeletedCallCount = 0;
 	let fireMovedCallCount = 0;
 	let fireRootUpdatedCallCount = 0;
 	let fireRootsUpdatedCallCount = 0;
@@ -6916,6 +8063,9 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		) {
 			if (node.expression.name.text === "fireCreated") {
 				fireCreatedCallCount += 1;
+			}
+			if (node.expression.name.text === "fireDeleted") {
+				fireDeletedCallCount += 1;
 			}
 			if (node.expression.name.text === "fireMoved") {
 				fireMovedCallCount += 1;
@@ -7152,6 +8302,9 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 				case "workspaceMove":
 					moveBridgeReferences += 1;
 					break;
+				case "workspaceCommitDeleteEntry":
+					deleteBridgeReferences += 1;
+					break;
 			}
 		}
 		if (
@@ -7231,7 +8384,8 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		createDirectoryBridgeReferences !== 1 ||
 		copyBridgeReferences !== 1 ||
 		renameBridgeReferences !== 1 ||
-		moveBridgeReferences !== 1
+		moveBridgeReferences !== 1 ||
+		deleteBridgeReferences !== 1
 	) {
 		failures.push(
 			"Plain workspace mutation bridges must each have exactly one direct provider call site",
@@ -7258,10 +8412,11 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	}
 	if (
 		fireCreatedCallCount !== 3 ||
+		fireDeletedCallCount !== 1 ||
 		fireMovedCallCount !== 2 ||
-		fireRootUpdatedCallCount !== 4 ||
+		fireRootUpdatedCallCount !== 7 ||
 		fireRootsUpdatedCallCount !== 2 ||
-		changeEmitterFireCallCount !== 5
+		changeEmitterFireCallCount !== 7
 	) {
 		failures.push(
 			"provider change events must remain confined to the audited create, copy, rename, move and rescan closure",
