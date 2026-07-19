@@ -200,6 +200,8 @@ const WORKSPACE_RUST_SOURCE_PATTERN =
 	/^src-tauri\/src\/(?:path_policy\.rs|workspace\/.*\.rs)$/;
 const RUST_PRODUCTION_SOURCE_PATTERN = /^src-tauri\/src\/.*\.rs$/;
 const WORKSPACE_TEST_SOURCE_PATTERN = /(?:^|\/)tests\.rs$/;
+const WORKSPACE_VERSIONED_WRITER_PATH =
+	"src-tauri/src/workspace/versioned_writer.rs";
 const RUSTIX_TARGET = 'cfg(any(target_os = "linux", target_os = "macos"))';
 const SHA2_VERSION = "0.10.9";
 const SHA2_REQUIREMENT = `=${SHA2_VERSION}`;
@@ -1335,9 +1337,10 @@ export function validateWorkspaceRustBoundary(
 			return !allowedCall;
 		});
 		if (
-			/\brenameat\b/.test(source) ||
-			/\.rename\s*\(/.test(source) ||
-			forbiddenQualifiedRenames.length > 0
+			normalizedPath !== WORKSPACE_VERSIONED_WRITER_PATH &&
+			(/\brenameat\b/.test(source) ||
+				/\.rename\s*\(/.test(source) ||
+				forbiddenQualifiedRenames.length > 0)
 		) {
 			failures.push(
 				`${normalizedPath} must not use an overwrite-capable rename`,
@@ -1924,6 +1927,18 @@ function stageCleanupCallsAreExact(relativePath, source) {
 					"&self.name",
 				),
 			)
+		);
+	}
+	if (relativePath === WORKSPACE_VERSIONED_WRITER_PATH) {
+		return (
+			removeFileCalls.length === 1 &&
+			exactMethodCall(
+				source,
+				removeFileCalls[0],
+				/\bparent\s*\.\s*$/,
+				"stage",
+			) &&
+			removeDirectoryCalls.length === 0
 		);
 	}
 	return removeFileCalls.length === 0 && removeDirectoryCalls.length === 0;
@@ -3907,4 +3922,978 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	}
 
 	return [...new Set(failures)];
+}
+
+function normalizedRustFunction(functionRecord) {
+	return {
+		parameters: functionRecord.parameters
+			.replaceAll(/\s+/g, "")
+			.replace(/,$/, ""),
+		returnType: functionRecord.returnType.replaceAll(/\s+/g, ""),
+		body: functionRecord.body.replaceAll(/\s+/g, ""),
+	};
+}
+
+function validateVersionedWriteRustBoundary(rustSources) {
+	const failures = [];
+	const commandsSource = findRustSource(
+		rustSources,
+		"src-tauri/src/workspace/commands.rs",
+	);
+	const libSource = findRustSource(rustSources, "src-tauri/src/lib.rs");
+	const frameSource = findRustSource(
+		rustSources,
+		"src-tauri/src/workspace/write_frame.rs",
+	);
+	const dtoSource = findRustSource(
+		rustSources,
+		"src-tauri/src/workspace/dto.rs",
+	);
+	const writerSource = findRustSource(
+		rustSources,
+		WORKSPACE_VERSIONED_WRITER_PATH,
+	);
+	const serviceSource = findRustSource(
+		rustSources,
+		"src-tauri/src/workspace/service.rs",
+	);
+
+	if (commandsSource === undefined) {
+		failures.push("versioned write boundary requires workspace/commands.rs");
+	} else {
+		const executable = stripRustCommentsAndLiterals(commandsSource);
+		const commands = extractAuditedTauriCommands(
+			executable,
+			"workspace_write_file",
+		);
+		if (commands.length !== 1) {
+			failures.push(
+				"workspace/commands.rs must define exactly one audited workspace_write_file Tauri command",
+			);
+		} else {
+			const command = normalizedRustFunction(commands[0]);
+			if (
+				command.parameters !==
+					"window:WebviewWindow,service:State<'_,WorkspaceService>,request:tauri::ipc::Request<'_>" ||
+				command.returnType !== "->Result<WorkspaceWriteResult,CommandError>"
+			) {
+				failures.push(
+					"workspace_write_file must accept only the raw tauri::ipc::Request body and return WorkspaceWriteResult",
+				);
+			}
+			if (
+				!/WorkspaceWriteFileFrame::parse_invoke_body\(request\.body\(\)\)\?/.test(
+					command.body,
+				) ||
+				!/(?:service\.|WorkspaceService::)write_file\(/.test(command.body) ||
+				/WorkspaceWriteFileRequest|serde_json|InvokeBody::Json/.test(
+					command.body,
+				)
+			) {
+				failures.push(
+					"workspace_write_file must decode one PLW1 raw frame and route it directly to WorkspaceService::write_file",
+				);
+			}
+		}
+	}
+
+	if (libSource === undefined) {
+		failures.push("versioned write boundary requires src-tauri/src/lib.rs");
+	} else {
+		const executable = stripRustCommentsAndLiterals(libSource);
+		const registrations = [
+			...executable.matchAll(
+				/\bworkspace\s*::\s*commands\s*::\s*workspace_write_file\b/g,
+			),
+		];
+		const handlers = [
+			...executable.matchAll(
+				/\.invoke_handler\s*\(\s*tauri\s*::\s*generate_handler\s*!\s*\[([\s\S]*?)\]\s*\)/g,
+			),
+		];
+		if (
+			registrations.length !== 1 ||
+			handlers.length !== 1 ||
+			!/\bworkspace\s*::\s*commands\s*::\s*workspace_write_file\b/.test(
+				handlers[0][1],
+			)
+		) {
+			failures.push(
+				"src-tauri/src/lib.rs must register workspace_write_file exactly once in generate_handler",
+			);
+		}
+	}
+
+	if (frameSource === undefined) {
+		failures.push("versioned write boundary requires workspace/write_frame.rs");
+	} else {
+		const executable = stripRustCommentsAndLiterals(frameSource);
+		const parsers = extractRustFunctions(executable, "parse_invoke_body");
+		if (parsers.length !== 1) {
+			failures.push("PLW1 must have exactly one raw InvokeBody parser");
+		} else {
+			const parser = normalizedRustFunction(parsers[0]);
+			if (
+				parser.parameters !== "body:&InvokeBody" ||
+				parser.returnType !== "->Result<Self,CommandError>" ||
+				parser.body !==
+					"matchbody{InvokeBody::Raw(bytes)=>Self::parse(bytes),InvokeBody::Json(_)=>Err(invalid_write_request()),}"
+			) {
+				failures.push(
+					"PLW1 parser must accept InvokeBody::Raw and reject InvokeBody::Json exactly",
+				);
+			}
+		}
+		for (const pattern of [
+			/\bconst\s+PLW1_MAGIC\s*:\s*&\s*\[u8\s*;\s*4\s*\]\s*=\s*b\s*"PLW1"\s*;/,
+			/\bconst\s+PLW1_HEADER_BYTES\s*:\s*usize\s*=\s*14\s*;/,
+			/\bconst\s+ROOT_ID_BYTES\s*:\s*usize\s*=\s*36\s*;/,
+		]) {
+			if (!pattern.test(frameSource)) {
+				failures.push(
+					"PLW1 wire constants must remain magic PLW1, header 14 and root UUID 36 bytes",
+				);
+				break;
+			}
+		}
+		const parseFunctions = extractRustFunctions(executable, "parse");
+		if (
+			parseFunctions.length !== 1 ||
+			!/[.]checked_add\(/.test(parseFunctions[0].body) ||
+			!/frame_end\s*!=\s*frame[.]len\(\)/.test(parseFunctions[0].body) ||
+			!/content_length\s*>\s*MAX_VERSIONED_FILE_BYTES/.test(
+				parseFunctions[0].body,
+			)
+		) {
+			failures.push(
+				"PLW1 parser must use checked offsets, the 8 MiB limit and an exact frame tail",
+			);
+		}
+	}
+
+	let renameatCall;
+	for (const { relativePath, source } of rustSources) {
+		const normalizedPath = relativePath.replaceAll("\\", "/");
+		if (
+			!RUST_PRODUCTION_SOURCE_PATTERN.test(normalizedPath) ||
+			WORKSPACE_TEST_SOURCE_PATTERN.test(normalizedPath)
+		) {
+			continue;
+		}
+		const executable = stripRustCommentsAndLiterals(source);
+		const audit = auditDirectRustixFsFunction(executable, "renameat");
+		if (audit.hasForbiddenBinding) {
+			failures.push(
+				`${normalizedPath} must not alias, re-export or indirectly reference rustix::fs::renameat`,
+			);
+		}
+		if (audit.referenceCount > 0) {
+			if (normalizedPath !== WORKSPACE_VERSIONED_WRITER_PATH) {
+				failures.push(
+					`${normalizedPath} must not use overwrite renameat outside the versioned writer`,
+				);
+			} else if (audit.calls.length === 1 && audit.referenceCount === 1) {
+				renameatCall = audit.calls[0];
+			}
+		}
+	}
+
+	if (writerSource === undefined) {
+		failures.push(
+			"versioned write boundary requires workspace/versioned_writer.rs",
+		);
+	} else {
+		const executable = stripRustCommentsAndLiterals(writerSource);
+		const renameIdentifierCount = [...executable.matchAll(/\brename\b/g)]
+			.length;
+		if (
+			renameIdentifierCount !== 2 ||
+			/\b(?:renameat2|renameat_with|RENAME_EXCHANGE|RENAME_SWAP)\b/.test(
+				executable,
+			) ||
+			/\b(?:SYS_rename|SYS_renameat|SYS_renameat2|SYS_unlink|SYS_unlinkat)\b/.test(
+				executable,
+			) ||
+			/\b(?:libc|nix)\s*::(?:\s*[A-Za-z_]\w*\s*::)*\s*(?:rename|renameat|renameat2|unlink|unlinkat|syscall)\b/.test(
+				executable,
+			) ||
+			/\bextern\s+"C"\s*\{[^}]*\bfn\s+(?:rename|renameat|renameat2|unlink|unlinkat)\b/s.test(
+				executable,
+			)
+		) {
+			failures.push(
+				"versioned writer must not add an alternate, aliased or exchange rename path",
+			);
+		}
+		if (
+			renameatCall === undefined ||
+			!renameatCall.closed ||
+			renameatCall.arguments.replaceAll(/\s+/g, "") !==
+				"parent,stage,parent,target"
+		) {
+			failures.push(
+				"versioned writer must contain one direct parent+stage to parent+target rustix::fs::renameat call",
+			);
+		}
+
+		const renameFunctions = extractRustFunctions(executable, "rename");
+		const renameCalls = methodCalls(executable, "rename");
+		if (
+			renameFunctions.length !== 1 ||
+			renameCalls.length !== 1 ||
+			!/\bhooks\s*\.\s*$/.test(executable.slice(0, renameCalls[0]?.index)) ||
+			renameCalls[0]?.arguments.replaceAll(/\s+/g, "").replace(/,$/, "") !==
+				"&publication_parent.parent,&stage.name,&publication_parent.name"
+		) {
+			failures.push(
+				"versioned writer must dispatch overwrite publication through one audited hooks.rename call",
+			);
+		}
+
+		const publishers = extractRustFunctions(executable, "publish_and_classify");
+		if (publishers.length !== 1) {
+			failures.push(
+				"versioned writer must define exactly one publish_and_classify typestate consumer",
+			);
+		} else {
+			const publisher = publishers[0];
+			const calls = methodCalls(publisher.body, "rename");
+			const disables = methodCalls(publisher.body, "disable_cleanup");
+			const renameCall = calls[0];
+			if (
+				calls.length !== 1 ||
+				disables.length !== 1 ||
+				renameCall === undefined ||
+				disables[0].index >= renameCall.index
+			) {
+				failures.push(
+					"publish_and_classify must disable automatic cleanup before its sole rename dispatch",
+				);
+			} else {
+				const afterRename = publisher.body.slice(renameCall.end);
+				if (
+					/\?|[.]\s*(?:map_err|unwrap|expect)\s*\(|\b(?:panic|unreachable)\s*!/.test(
+						afterRename,
+					) ||
+					/\b(?:renameat|renameat_with|remove_file|remove_dir|unlink|unlinkat)\b/.test(
+						afterRename,
+					) ||
+					methodCalls(afterRename, "rename").length > 0
+				) {
+					failures.push(
+						"publish_and_classify must not propagate, panic, rename again or directly delete after publication dispatch",
+					);
+				}
+				const normalizedAfterRename = afterRename.replaceAll(/\s+/g, "");
+				const notPublishedStart = normalizedAfterRename.indexOf(
+					"RenameFailureCheck::NotPublishedProof=>{",
+				);
+				const observedWrittenStart = normalizedAfterRename.indexOf(
+					"RenameFailureCheck::ObservedWritten=>",
+				);
+				const ordinaryErrors = [
+					...normalizedAfterRename.matchAll(/\bErr\(/g),
+				].map((match) => match.index);
+				if (
+					/\breturn\b/.test(afterRename) ||
+					notPublishedStart < 0 ||
+					observedWrittenStart <= notPublishedStart ||
+					ordinaryErrors.length !== 2 ||
+					ordinaryErrors[0] >= notPublishedStart ||
+					ordinaryErrors
+						.slice(1)
+						.some(
+							(index) =>
+								index <= notPublishedStart || index >= observedWrittenStart,
+						)
+				) {
+					failures.push(
+						"post-rename ordinary errors must be confined to the proven NotPublished cleanup branch",
+					);
+				}
+			}
+			const normalized = publisher.body
+				.replaceAll(/\s+/g, "")
+				.replaceAll(/,(?=\))/g, "");
+			const proofHook = normalized.indexOf(
+				"hooks.after_not_published_proof(&publication_parent.parent,&stage.name,&publication_parent.name)",
+			);
+			const strictRemoval = normalized.indexOf(
+				"letremoval=strict_remove_stage_after_rename(&initial_parent,initial_target,&mutstage,hooks)",
+			);
+			const finalObservation = normalized.indexOf(
+				"matchobserve_rename_failure_target(lease,relative_path,&initial_parent,initial_target,&stage)",
+			);
+			if (
+				proofHook < 0 ||
+				strictRemoval <= proofHook ||
+				finalObservation <= strictRemoval ||
+				!/RenameFailureTarget::OldTargetifremoval==StrictStageRemoval::Removed=>\{Err\(map_rename_failure\(rename_error\)\)\}/.test(
+					normalized,
+				) ||
+				!/RenameFailureCheck::ObservedWritten=>/.test(normalized) ||
+				!/RenameFailureCheck::Unknown=>Ok\(WorkspaceWriteResult::native_unknown\(\)\)/.test(
+					normalized,
+				)
+			) {
+				failures.push(
+					"rename failure must classify proven not-published, observed-written and ambiguous outcomes separately",
+				);
+			}
+		}
+
+		const failureChecks = extractRustFunctions(
+			executable,
+			"check_reported_rename_failure",
+		);
+		if (
+			failureChecks.length !== 1 ||
+			![
+				"open_parent_chain",
+				"parent_chain_matches",
+				"observe_rename_failure_target_at_parent",
+				"stage_receipt_matches_at",
+			].every((name) =>
+				new RegExp(`\\b${name}\\s*\\(`).test(failureChecks[0].body),
+			) ||
+			!/RenameFailureCheck\s*::\s*NotPublishedProof/.test(failureChecks[0].body)
+		) {
+			failures.push(
+				"reported rename failure may return an ordinary error only after current-root old-target and owned-stage proof",
+			);
+		}
+		const strictRemovals = extractRustFunctions(
+			executable,
+			"strict_remove_stage_after_rename",
+		);
+		const strictRemovalBody = (strictRemovals[0]?.body ?? "").replaceAll(
+			/\s+/g,
+			"",
+		);
+		const expectedStrictRemovalBody =
+			"if!stage_receipt_matches_at(initial_parent,initial_target,stage){returnStrictStageRemoval::NotRemoved;}" +
+			"matchhooks.remove_stage(&stage.parent,&stage.name){" +
+			"Ok(())ifstage.opened_handle_is_unlinked()==Ok(true)=>StrictStageRemoval::Removed," +
+			"Ok(())=>StrictStageRemoval::NotRemoved," +
+			"Err(_)=>StrictStageRemoval::NotRemoved," +
+			"}";
+		const targetObservations = extractRustFunctions(
+			executable,
+			"observe_rename_failure_target",
+		);
+		const unlinkHelpers = extractRustFunctions(
+			executable,
+			"remove_owned_stage",
+		);
+		const removeStageHooks = extractRustFunctions(executable, "remove_stage");
+		if (
+			strictRemovals.length !== 1 ||
+			strictRemovalBody !== expectedStrictRemovalBody ||
+			targetObservations.length !== 1 ||
+			![
+				"open_parent_chain",
+				"parent_chain_matches",
+				"observe_rename_failure_target_at_parent",
+			].every((name) =>
+				new RegExp(`\\b${name}\\s*\\(`).test(targetObservations[0]?.body ?? ""),
+			) ||
+			unlinkHelpers.length !== 1 ||
+			unlinkHelpers[0].parameters.replaceAll(/\s+/g, "").replace(/,$/, "") !==
+				"parent:&Dir,stage:&Path" ||
+			unlinkHelpers[0].body.replaceAll(/\s+/g, "") !==
+				"parent.remove_file(stage)" ||
+			removeStageHooks.length !== 1 ||
+			removeStageHooks[0].parameters
+				.replaceAll(/\s+/g, "")
+				.replace(/,$/, "") !== "&mutself,parent:&Dir,stage:&Path" ||
+			removeStageHooks[0].body.replaceAll(/\s+/g, "") !==
+				"remove_owned_stage(parent,stage)"
+		) {
+			failures.push(
+				"reported rename failure must reverify and unlink only the owned stage, then reobserve the current-root target",
+			);
+		}
+	}
+
+	if (dtoSource === undefined) {
+		failures.push("versioned write boundary requires workspace/dto.rs");
+	} else {
+		const executable = stripRustCommentsAndLiterals(dtoSource);
+		const requiredConstructors = [
+			"written",
+			"rename_succeeded_sync_failed_with_written_target",
+			"rename_succeeded_with_changed_target",
+			"rename_succeeded_with_unverifiable_target",
+			"rename_failed_with_observed_target",
+			"native_unknown",
+		];
+		const constructorBodies = new Map([
+			["written", "Self(WorkspaceWriteResultWire::Written{stat})"],
+			[
+				"rename_succeeded_sync_failed_with_written_target",
+				"Self(WorkspaceWriteResultWire::TargetPublished{publication_evidence:WorkspaceWritePublicationEvidence::TargetObservedWritten,rename:WorkspaceWriteRenameObservation::ReportedSuccess,directory_sync:WorkspaceWriteDirectorySyncObservation::Failed,target:WorkspaceWriteTargetObservation::MatchesWritten,})",
+			],
+			[
+				"rename_succeeded_with_changed_target",
+				"Self(WorkspaceWriteResultWire::TargetPublished{publication_evidence:WorkspaceWritePublicationEvidence::RenameReportedSuccess,rename:WorkspaceWriteRenameObservation::ReportedSuccess,directory_sync,target:WorkspaceWriteTargetObservation::Changed,})",
+			],
+			[
+				"rename_succeeded_with_unverifiable_target",
+				"Self(WorkspaceWriteResultWire::TargetPublished{publication_evidence:WorkspaceWritePublicationEvidence::RenameReportedSuccess,rename:WorkspaceWriteRenameObservation::ReportedSuccess,directory_sync,target:WorkspaceWriteTargetObservation::Unverifiable,})",
+			],
+			[
+				"rename_failed_with_observed_target",
+				"Self(WorkspaceWriteResultWire::TargetPublished{publication_evidence:WorkspaceWritePublicationEvidence::TargetObservedWritten,rename:WorkspaceWriteRenameObservation::ReportedFailure,directory_sync,target,})",
+			],
+			[
+				"native_unknown",
+				"Self(WorkspaceWriteResultWire::OutcomeUnknown{observation:WorkspaceWriteNativeObservation::Native,rename:WorkspaceWriteFailedRenameObservation::ReportedFailure,directory_sync:WorkspaceWriteUnknownDirectorySyncObservation::NotAttempted,target:WorkspaceWriteAmbiguousTargetObservation::Ambiguous,})",
+			],
+		]);
+		const canonicalConstructorsAreExact = requiredConstructors.every((name) => {
+			const functions = extractRustFunctions(executable, name);
+			return (
+				functions.length === 1 &&
+				functions[0].body.replaceAll(/\s+/g, "") === constructorBodies.get(name)
+			);
+		});
+		const wireReferences = [
+			...executable.matchAll(/\bWorkspaceWriteResultWire\b/g),
+		].length;
+		if (
+			!/\benum\s+WorkspaceWriteResultWire\s*\{/.test(executable) ||
+			/\bpub(?:\s*\([^)]*\))?\s+enum\s+WorkspaceWriteResultWire\b/.test(
+				executable,
+			) ||
+			!/#\s*\[\s*serde\s*\(\s*transparent\s*\)\s*\]\s*pub\s+struct\s+WorkspaceWriteResult\s*\(\s*WorkspaceWriteResultWire\s*\)\s*;/s.test(
+				dtoSource,
+			) ||
+			/\bpub(?:\s*\([^)]*\))?\s+enum\s+WorkspaceWriteResult\b/.test(
+				executable,
+			) ||
+			/\bfn\s+target_published\b/.test(executable) ||
+			!canonicalConstructorsAreExact ||
+			wireReferences !== 11 ||
+			[...executable.matchAll(/\bSelf\s*\(\s*WorkspaceWriteResultWire\s*::/g)]
+				.length !== 6 ||
+			/\bWorkspaceWriteResult\s*\(\s*WorkspaceWriteResultWire\s*::/.test(
+				executable,
+			)
+		) {
+			failures.push(
+				"WorkspaceWriteResult must be a transparent wrapper over one private wire enum with only canonical constructors",
+			);
+		}
+	}
+	for (const { relativePath, source } of rustSources) {
+		const normalizedPath = relativePath.replaceAll("\\", "/");
+		if (
+			normalizedPath !== "src-tauri/src/workspace/dto.rs" &&
+			RUST_PRODUCTION_SOURCE_PATTERN.test(normalizedPath) &&
+			!WORKSPACE_TEST_SOURCE_PATTERN.test(normalizedPath) &&
+			/\bWorkspaceWriteResultWire\b/.test(stripRustCommentsAndLiterals(source))
+		) {
+			failures.push(
+				`${normalizedPath} must not access the private WorkspaceWriteResult wire enum`,
+			);
+		}
+	}
+
+	if (serviceSource === undefined) {
+		failures.push("versioned write boundary requires workspace/service.rs");
+	} else {
+		const executable = stripRustCommentsAndLiterals(serviceSource);
+		const runners = extractRustFunctions(executable, "run_versioned_write");
+		if (runners.length !== 1) {
+			failures.push(
+				"WorkspaceService must define one versioned-write mutation runner",
+			);
+		} else {
+			const body = runners[0].body.replaceAll(/\s+/g, "");
+			const unavailableBranches = [
+				...body.matchAll(
+					/Err\(_\)=>Err\(workspace_write_response_unavailable\(\)\)/g,
+				),
+			];
+			if (
+				!/spawn_blocking\(/.test(body) ||
+				!/lock\(&workspace\.mutation_gate\)\?/.test(body) ||
+				!/workspace\.validate_lease\(leased_root_id\)\?/.test(body) ||
+				!/matchstd::panic::catch_unwind\(std::panic::AssertUnwindSafe\(\|\|operation\(lease\)\)\)\{Ok\(result\)=>result,Err\(_\)=>Err\(workspace_write_response_unavailable\(\)\),\}/.test(
+					body,
+				) ||
+				unavailableBranches.length !== 1 ||
+				[...body.matchAll(/letjoined=/g)].length !== 1 ||
+				body.split("joined").length - 1 !== 2 ||
+				!body.includes(
+					"letjoined=tauri::async_runtime::spawn_blocking(move||{",
+				) ||
+				!body.endsWith("}).await;classify_versioned_write_join(joined)")
+			) {
+				failures.push(
+					"versioned-write runner must hold the mutation gate, revalidate the lease and conservatively classify join failure",
+				);
+			}
+		}
+		const unavailableHelpers = extractRustFunctions(
+			executable,
+			"workspace_write_response_unavailable",
+		);
+		if (
+			unavailableHelpers.length !== 1 ||
+			!/CommandError\s*::\s*new\s*\(\s*"WORKSPACE_WRITE_RESPONSE_UNAVAILABLE"\s*,/.test(
+				serviceSource,
+			)
+		) {
+			failures.push(
+				"versioned-write panic and join failure must use one non-whitelisted response-unavailable error",
+			);
+		}
+		const joinClassifiers = extractRustFunctions(
+			executable,
+			"classify_versioned_write_join",
+		);
+		if (
+			joinClassifiers.length !== 1 ||
+			joinClassifiers[0].body.replaceAll(/\s+/g, "") !==
+				"matchresult{Ok(result)=>result,Err(_)=>Err(workspace_write_response_unavailable()),}"
+		) {
+			failures.push(
+				"versioned-write JoinError must be classified only by the exact response-unavailable helper",
+			);
+		}
+	}
+
+	return failures;
+}
+
+function findTypeScriptFunction(sourceFile, name) {
+	return sourceFile.statements.find(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) && statement.name?.text === name,
+	);
+}
+
+function validateVersionedWriteTypeScriptBoundary(appSources) {
+	const failures = [];
+	const byPath = new Map(
+		appSources.map(({ relativePath, source }) => [
+			relativePath.replaceAll("\\", "/"),
+			source,
+		]),
+	);
+	const nativeSource = byPath.get("app/platform/tauri/native.ts");
+	const codecSource = byPath.get("app/platform/tauri/workspace-codec.ts");
+	if (nativeSource === undefined || codecSource === undefined) {
+		return [
+			"versioned write TypeScript boundary requires native.ts and workspace-codec.ts",
+		];
+	}
+	if (/['"]WORKSPACE_WRITE_RESPONSE_UNAVAILABLE['"]/.test(codecSource)) {
+		failures.push(
+			"WORKSPACE_WRITE_RESPONSE_UNAVAILABLE must remain outside the ordinary pre-publication error whitelist",
+		);
+	}
+
+	let commandLiteralCount = 0;
+	for (const [relativePath, source] of byPath) {
+		const sourceFile = ts.createSourceFile(
+			relativePath,
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			relativePath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+		);
+		function visit(node) {
+			if (
+				ts.isCallExpression(node) &&
+				ts.isIdentifier(node.expression) &&
+				node.expression.text === "invoke"
+			) {
+				if (
+					node.arguments.length < 1 ||
+					!ts.isStringLiteral(node.arguments[0])
+				) {
+					failures.push(
+						`${relativePath} must invoke only direct StringLiteral commands`,
+					);
+				}
+				if (
+					containingPropertyName(node) === "workspaceWriteFile" &&
+					(node.arguments.length !== 2 ||
+						!ts.isStringLiteral(node.arguments[0]) ||
+						node.arguments[0].text !== "workspace_write_file" ||
+						!ts.isIdentifier(node.arguments[1]) ||
+						node.arguments[1].text !== "frame")
+				) {
+					failures.push(
+						"native workspaceWriteFile must contain only its one exact invoke(command, frame) dispatch",
+					);
+				}
+			}
+			if (
+				(ts.isStringLiteral(node) ||
+					ts.isNoSubstitutionTemplateLiteral(node)) &&
+				node.text === "workspace_write_file"
+			) {
+				commandLiteralCount += 1;
+				const call = node.parent;
+				const exact =
+					relativePath === "app/platform/tauri/native.ts" &&
+					ts.isStringLiteral(node) &&
+					ts.isCallExpression(call) &&
+					call.arguments.length === 2 &&
+					call.arguments[0] === node &&
+					ts.isIdentifier(call.expression) &&
+					call.expression.text === "invoke" &&
+					ts.isIdentifier(call.arguments[1]) &&
+					call.arguments[1].text === "frame" &&
+					containingPropertyName(node) === "workspaceWriteFile";
+				if (!exact) {
+					failures.push(
+						"workspace_write_file must appear only as invoke(command, frame) in native workspaceWriteFile",
+					);
+				}
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(sourceFile);
+	}
+	if (commandLiteralCount !== 1) {
+		failures.push(
+			"application sources must contain exactly one workspace_write_file command literal",
+		);
+	}
+
+	const codecFile = ts.createSourceFile(
+		"app/platform/tauri/workspace-codec.ts",
+		codecSource,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	const expectedPrepublicationCodes = [
+		"ROOT_NOT_AUTHORIZED",
+		"ROOT_UNAVAILABLE",
+		"PERMISSION_DENIED",
+		"FILE_TOO_LARGE",
+		"INVALID_WORKSPACE_WRITE_REQUEST",
+		"WORKSPACE_CONFLICT",
+		"WORKSPACE_FILE_MODIFIED",
+		"WORKSPACE_WRITE_UNSUPPORTED",
+		"WORKSPACE_WINDOW_CLOSED",
+		"IO_FAILED",
+	];
+	const whitelistDeclarations = [];
+	const whitelistSetDeclarations = [];
+	let whitelistSetMutation = false;
+	function auditWriteWhitelist(node) {
+		if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+			if (node.name.text === "WORKSPACE_WRITE_PREPUBLICATION_ERROR_CODES") {
+				whitelistDeclarations.push(node);
+			}
+			if (node.name.text === "WORKSPACE_WRITE_PREPUBLICATION_ERROR_CODE_SET") {
+				whitelistSetDeclarations.push(node);
+			}
+		}
+		if (
+			ts.isCallExpression(node) &&
+			ts.isPropertyAccessExpression(node.expression) &&
+			ts.isIdentifier(node.expression.expression) &&
+			node.expression.expression.text ===
+				"WORKSPACE_WRITE_PREPUBLICATION_ERROR_CODE_SET" &&
+			["add", "delete", "clear"].includes(node.expression.name.text)
+		) {
+			whitelistSetMutation = true;
+		}
+		ts.forEachChild(node, auditWriteWhitelist);
+	}
+	auditWriteWhitelist(codecFile);
+	const whitelistInitializerNode = whitelistDeclarations[0]?.initializer;
+	const whitelistInitializer =
+		whitelistInitializerNode === undefined
+			? undefined
+			: unwrapTypeScriptExpression(whitelistInitializerNode);
+	const whitelistArray =
+		whitelistInitializer !== undefined &&
+		ts.isCallExpression(whitelistInitializer) &&
+		ts.isPropertyAccessExpression(whitelistInitializer.expression) &&
+		ts.isIdentifier(whitelistInitializer.expression.expression) &&
+		whitelistInitializer.expression.expression.text === "Object" &&
+		whitelistInitializer.expression.name.text === "freeze" &&
+		whitelistInitializer.arguments.length === 1
+			? unwrapTypeScriptExpression(whitelistInitializer.arguments[0])
+			: undefined;
+	const whitelistCodes =
+		whitelistArray !== undefined && ts.isArrayLiteralExpression(whitelistArray)
+			? whitelistArray.elements.map((element) =>
+					ts.isStringLiteral(element) ? element.text : undefined,
+				)
+			: [];
+	const whitelistSetInitializerNode = whitelistSetDeclarations[0]?.initializer;
+	const whitelistSetInitializer =
+		whitelistSetInitializerNode === undefined
+			? undefined
+			: unwrapTypeScriptExpression(whitelistSetInitializerNode);
+	const whitelistSetIsExact =
+		whitelistSetInitializer !== undefined &&
+		ts.isNewExpression(whitelistSetInitializer) &&
+		ts.isIdentifier(whitelistSetInitializer.expression) &&
+		whitelistSetInitializer.expression.text === "Set" &&
+		whitelistSetInitializer.arguments?.length === 1 &&
+		ts.isIdentifier(whitelistSetInitializer.arguments[0]) &&
+		whitelistSetInitializer.arguments[0].text ===
+			"WORKSPACE_WRITE_PREPUBLICATION_ERROR_CODES";
+	if (
+		whitelistDeclarations.length !== 1 ||
+		whitelistSetDeclarations.length !== 1 ||
+		whitelistCodes.length !== expectedPrepublicationCodes.length ||
+		whitelistCodes.some(
+			(code, index) => code !== expectedPrepublicationCodes[index],
+		) ||
+		!whitelistSetIsExact ||
+		whitelistSetMutation
+	) {
+		failures.push(
+			"workspace write ordinary rejection whitelist must equal the Rust pre-publication code set",
+		);
+	}
+	const prepublicationDecoder = findTypeScriptFunction(
+		codecFile,
+		"decodeWorkspaceWritePrepublicationError",
+	);
+	const prepublicationDecoderBody = prepublicationDecoder?.body
+		?.getText(codecFile)
+		.replaceAll(/\s+/g, "");
+	const expectedPrepublicationDecoderBody =
+		'{try{constsnapshot=ownPlainDataSnapshot(value);if(!hasExactKeys(snapshot,["code","message"])||typeofsnapshot.code!=="string"||!WORKSPACE_WRITE_PREPUBLICATION_ERROR_CODE_SET.has(snapshot.code)||typeofsnapshot.message!=="string"||snapshot.message.length<1||snapshot.message.length>MAX_COMMAND_ERROR_MESSAGE_LENGTH||!isWellFormedUtf16(snapshot.message)){returnundefined;}rejectProxyObject(valueasobject);returnObject.freeze({code:snapshot.code,message:snapshot.message,});}catch{returnundefined;}}';
+	if (prepublicationDecoderBody !== expectedPrepublicationDecoderBody) {
+		failures.push(
+			"workspace write ordinary rejection decoder must use only the exact closed whitelist",
+		);
+	}
+
+	const writeResultDecoder = findTypeScriptFunction(
+		codecFile,
+		"decodeWorkspaceWriteResult",
+	);
+	const decoderBody = writeResultDecoder?.body
+		?.getText(codecFile)
+		.replaceAll(/\s+/g, "")
+		.replaceAll(/,(?=\])/g, "");
+	const targetPublishedStart = decoderBody?.indexOf(
+		'if(snapshot.status==="targetPublished"){',
+	);
+	const unknownStart = decoderBody?.indexOf(
+		'if(snapshot.status!=="outcomeUnknown"',
+		targetPublishedStart,
+	);
+	const targetPublishedBody =
+		decoderBody !== undefined &&
+		targetPublishedStart !== undefined &&
+		targetPublishedStart >= 0 &&
+		unknownStart !== undefined &&
+		unknownStart > targetPublishedStart
+			? decoderBody.slice(targetPublishedStart, unknownStart)
+			: "";
+	const expectedTargetPublishedGuard =
+		'if(snapshot.status==="targetPublished"){if(!hasExactKeys(snapshot,["status","publicationEvidence","rename","directorySync","target"])||' +
+		'(snapshot.publicationEvidence!=="renameReportedSuccess"&&snapshot.publicationEvidence!=="targetObservedWritten")||' +
+		'(snapshot.rename!=="reportedSuccess"&&snapshot.rename!=="reportedFailure")||' +
+		'(snapshot.directorySync!=="synced"&&snapshot.directorySync!=="failed")||' +
+		'(snapshot.target!=="matchesWritten"&&snapshot.target!=="changed"&&snapshot.target!=="unverifiable")||' +
+		'(snapshot.rename==="reportedSuccess"&&snapshot.publicationEvidence==="targetObservedWritten"&&(snapshot.directorySync!=="failed"||snapshot.target!=="matchesWritten"))||' +
+		'(snapshot.rename==="reportedSuccess"&&snapshot.publicationEvidence==="renameReportedSuccess"&&snapshot.target==="matchesWritten")||' +
+		'(snapshot.rename==="reportedFailure"&&snapshot.publicationEvidence!=="targetObservedWritten")){returnviolation();}';
+	if (
+		!targetPublishedBody.startsWith(expectedTargetPublishedGuard) ||
+		[...decoderBody.matchAll(/"targetPublished"/g)].length !== 1
+	) {
+		failures.push(
+			"WorkspaceWriteResult decoder must accept only Rust-representable targetPublished cross-fields",
+		);
+	}
+	const nativeUnknownStart = decoderBody?.indexOf(
+		'if(snapshot.observation==="native"){',
+		unknownStart,
+	);
+	const responseUnavailableStart = decoderBody?.indexOf(
+		'if(snapshot.observation!=="responseUnavailable"',
+		nativeUnknownStart,
+	);
+	const nativeUnknownBody =
+		decoderBody !== undefined &&
+		nativeUnknownStart !== undefined &&
+		nativeUnknownStart >= 0 &&
+		responseUnavailableStart !== undefined &&
+		responseUnavailableStart > nativeUnknownStart
+			? decoderBody.slice(nativeUnknownStart, responseUnavailableStart)
+			: "";
+	const expectedNativeUnknownGuard =
+		'if(snapshot.observation==="native"){if(snapshot.rename!=="reportedFailure"||snapshot.directorySync!=="notAttempted"){returnviolation();}';
+	if (
+		!nativeUnknownBody.startsWith(expectedNativeUnknownGuard) ||
+		[...decoderBody.matchAll(/"native"/g)].length !== 1 ||
+		nativeUnknownBody.includes('"synced"') ||
+		nativeUnknownBody.includes('"failed"')
+	) {
+		failures.push(
+			"WorkspaceWriteResult decoder must accept only native reportedFailure/notAttempted unknown",
+		);
+	}
+	const encoder = findTypeScriptFunction(
+		codecFile,
+		"encodeWorkspaceWriteFileRequest",
+	);
+	const snapshot = findTypeScriptFunction(
+		codecFile,
+		"workspaceWriteContentSnapshot",
+	);
+	if (encoder?.body === undefined || snapshot?.body === undefined) {
+		failures.push(
+			"PLW1 codec must define its encoder and private content snapshot",
+		);
+	} else {
+		let forbiddenEnumeration = false;
+		for (const root of [encoder.body, snapshot.body]) {
+			function visit(node) {
+				if (ts.isForInStatement(node)) {
+					forbiddenEnumeration = true;
+				}
+				if (ts.isCallExpression(node)) {
+					const callee = node.expression
+						.getText(codecFile)
+						.replaceAll(/\s+/g, "");
+					if (
+						callee === "Reflect.ownKeys" ||
+						callee === "Object.keys" ||
+						callee === "Object.getOwnPropertyNames" ||
+						callee === "Object.getOwnPropertyDescriptors"
+					) {
+						forbiddenEnumeration = true;
+					}
+				}
+				ts.forEachChild(node, visit);
+			}
+			visit(root);
+		}
+		if (forbiddenEnumeration) {
+			failures.push(
+				"PLW1 encoder must not enumerate TypedArray integer-index own keys",
+			);
+		}
+		const allowedSnapshotCalls = new Set([
+			"Number.isSafeInteger",
+			"Object.getPrototypeOf",
+			"Reflect.apply",
+			"requestViolation",
+			"violation",
+		]);
+		let snapshotHasUnknownCollector = false;
+		function auditSnapshot(node) {
+			if (
+				ts.isForOfStatement(node) ||
+				ts.isSpreadElement(node) ||
+				(ts.isCallExpression(node) &&
+					!allowedSnapshotCalls.has(
+						node.expression.getText(codecFile).replaceAll(/\s+/g, ""),
+					))
+			) {
+				snapshotHasUnknownCollector = true;
+			}
+			ts.forEachChild(node, auditSnapshot);
+		}
+		auditSnapshot(snapshot.body);
+		if (snapshotHasUnknownCollector) {
+			failures.push(
+				"PLW1 private content snapshot may use only captured constant-space intrinsic operations",
+			);
+		}
+		let encoderContentReferences = 0;
+		let encoderContentRouteIsExact = true;
+		function auditEncoderContent(node) {
+			if (ts.isIdentifier(node) && node.text === "content") {
+				encoderContentReferences += 1;
+				const call = node.parent;
+				if (
+					!ts.isCallExpression(call) ||
+					call.arguments.length !== 1 ||
+					call.arguments[0] !== node ||
+					!ts.isIdentifier(call.expression) ||
+					call.expression.text !== "workspaceWriteContentSnapshot"
+				) {
+					encoderContentRouteIsExact = false;
+				}
+			}
+			ts.forEachChild(node, auditEncoderContent);
+		}
+		auditEncoderContent(encoder.body);
+		if (encoderContentReferences !== 1 || !encoderContentRouteIsExact) {
+			failures.push(
+				"PLW1 encoder must pass caller content exactly once into the private snapshot collector",
+			);
+		}
+		const encoderText = encoder.body.getText(codecFile);
+		if (
+			!/workspaceWriteContentSnapshot\s*\(\s*content\s*\)/.test(encoderText) ||
+			!/new\s+Uint8Array\s*\(/.test(encoderText) ||
+			!/return\s+frame\s*;/.test(encoderText)
+		) {
+			failures.push(
+				"PLW1 encoder must synchronously snapshot content into and return one exact Uint8Array frame",
+			);
+		}
+	}
+
+	const nativeFile = ts.createSourceFile(
+		"app/platform/tauri/native.ts",
+		nativeSource,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	let writeProperties = 0;
+	function visitNative(node) {
+		if (
+			ts.isPropertyAssignment(node) &&
+			typeScriptStaticName(node.name) === "workspaceWriteFile"
+		) {
+			writeProperties += 1;
+			const text = node.initializer.getText(nativeFile);
+			if (
+				!/encodeWorkspaceWriteFileRequest\s*\(/.test(text) ||
+				!/decodeWorkspaceWriteResult\s*\(/.test(text) ||
+				!/decodeWorkspaceWritePrepublicationError\s*\(/.test(text) ||
+				!/workspaceWriteResponseUnavailable\s*\(/.test(text)
+			) {
+				failures.push(
+					"native workspaceWriteFile must encode PLW1, strictly decode success/error and conservatively close unknown responses",
+				);
+			}
+		}
+		ts.forEachChild(node, visitNative);
+	}
+	visitNative(nativeFile);
+	if (writeProperties !== 1) {
+		failures.push(
+			"native bridge must define exactly one workspaceWriteFile route",
+		);
+	}
+
+	return [...new Set(failures)];
+}
+
+/**
+ * Freezes the raw PLW1 request, the only overwrite-capable syscall and the
+ * post-rename typestate. This guard deliberately lands before the Workbench
+ * write consumer; the provider remains read-only in this slice.
+ */
+export function validateWorkspaceVersionedWriteBoundary(
+	rustSources,
+	appSources,
+) {
+	return [
+		...validateVersionedWriteRustBoundary(rustSources),
+		...validateVersionedWriteTypeScriptBoundary(appSources),
+	];
 }

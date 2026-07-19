@@ -14,6 +14,7 @@ import {
 	validateWorkspaceProviderBootstrap,
 	validateWorkspaceProviderCopyBoundary,
 	validateWorkspaceRustBoundary as validateWorkspaceRustBoundaryContract,
+	validateWorkspaceVersionedWriteBoundary,
 } from "../../scripts/plain/boundary-contracts.mjs";
 
 const baselineConfig = {
@@ -3588,6 +3589,859 @@ await initialize(createServiceOverrides(), container, { enableWorkspaceTrust: fa
 			),
 		).toContain(
 			"Plain must keep VS Code workspace trust disabled in favor of Rust process trust",
+		);
+	});
+});
+
+const versionedWriteRustSources = [
+	{
+		relativePath: "src-tauri/src/workspace/commands.rs",
+		source: `
+#[tauri::command]
+pub(crate) async fn workspace_write_file(
+  window: WebviewWindow,
+  service: State<'_, WorkspaceService>,
+  request: tauri::ipc::Request<'_>,
+) -> Result<WorkspaceWriteResult, CommandError> {
+  let frame = WorkspaceWriteFileFrame::parse_invoke_body(request.body())?;
+  let (root_id, relative_path, expected_version, content) = frame.into_parts();
+  service.write_file(window.label(), root_id, relative_path, expected_version, content).await
+}
+`,
+	},
+	{
+		relativePath: "src-tauri/src/lib.rs",
+		source: `
+fn run() {
+  tauri::Builder::default().invoke_handler(tauri::generate_handler![
+    workspace::commands::workspace_write_file,
+  ]);
+}
+`,
+	},
+	{
+		relativePath: "src-tauri/src/workspace/write_frame.rs",
+		source: `
+const PLW1_MAGIC: &[u8; 4] = b"PLW1";
+const PLW1_HEADER_BYTES: usize = 14;
+const ROOT_ID_BYTES: usize = 36;
+impl WorkspaceWriteFileFrame {
+  fn parse_invoke_body(body: &InvokeBody) -> Result<Self, CommandError> {
+    match body {
+      InvokeBody::Raw(bytes) => Self::parse(bytes),
+      InvokeBody::Json(_) => Err(invalid_write_request()),
+    }
+  }
+  fn parse(frame: &[u8]) -> Result<Self, CommandError> {
+    let frame_end = PLW1_HEADER_BYTES.checked_add(frame.len()).unwrap();
+    if content_length > MAX_VERSIONED_FILE_BYTES { return Err(file_too_large()); }
+    if frame_end != frame.len() { return Err(invalid_write_request()); }
+    todo!()
+  }
+}
+`,
+	},
+	{
+		relativePath: "src-tauri/src/workspace/versioned_writer.rs",
+		source: `
+trait WriteHooks {
+  fn rename(&mut self, parent: &Dir, stage: &Path, target: &Path) -> rustix::io::Result<()> {
+    rustix::fs::renameat(parent, stage, parent, target)
+  }
+  fn after_not_published_proof(&mut self, parent: &Dir, stage: &Path, target: &Path) {}
+  fn remove_stage(&mut self, parent: &Dir, stage: &Path) -> io::Result<()> {
+    remove_owned_stage(parent, stage)
+  }
+}
+fn publish_and_classify(
+  stage: StagedWrite,
+  hooks: &mut impl WriteHooks,
+  publication_parent: ParentChain,
+) -> Result<WorkspaceWriteResult, CommandError> {
+  let mut stage = stage;
+  stage.disable_cleanup();
+  let rename_result = hooks.rename(
+    &publication_parent.parent,
+    &stage.name,
+    &publication_parent.name,
+  );
+  match rename_result {
+    Ok(()) => Ok(WorkspaceWriteResult::written(stat)),
+	    Err(rename_error) => match check_reported_rename_failure() {
+	      RenameFailureCheck::NotPublishedProof => {
+	        hooks.after_not_published_proof(
+	          &publication_parent.parent,
+	          &stage.name,
+	          &publication_parent.name,
+	        );
+	        let removal = strict_remove_stage_after_rename(
+	          &initial_parent,
+	          initial_target,
+	          &mut stage,
+	          hooks,
+	        );
+	        match observe_rename_failure_target(
+	          lease,
+	          relative_path,
+	          &initial_parent,
+	          initial_target,
+	          &stage,
+	        ) {
+          RenameFailureTarget::OldTarget if removal == StrictStageRemoval::Removed => {
+            Err(map_rename_failure(rename_error))
+          }
+          RenameFailureTarget::ObservedWritten => Ok(WorkspaceWriteResult::rename_failed_with_observed_target()),
+          RenameFailureTarget::OldTarget | RenameFailureTarget::Unknown => Ok(WorkspaceWriteResult::native_unknown()),
+        }
+      }
+      RenameFailureCheck::ObservedWritten => Ok(WorkspaceWriteResult::rename_failed_with_observed_target()),
+      RenameFailureCheck::Unknown => Ok(WorkspaceWriteResult::native_unknown()),
+    },
+  }
+}
+fn check_reported_rename_failure() -> RenameFailureCheck {
+  let current_parent = open_parent_chain();
+  parent_chain_matches();
+  observe_rename_failure_target_at_parent();
+  if stage_receipt_matches_at() {
+    RenameFailureCheck::NotPublishedProof
+  } else {
+    RenameFailureCheck::Unknown
+  }
+}
+fn strict_remove_stage_after_rename(
+  initial_parent: &ParentChain,
+  initial_target: TargetReceipt,
+  stage: &mut StagedWrite,
+  hooks: &mut impl WriteHooks,
+) -> StrictStageRemoval {
+  if !stage_receipt_matches_at(initial_parent, initial_target, stage) {
+    return StrictStageRemoval::NotRemoved;
+  }
+  match hooks.remove_stage(&stage.parent, &stage.name) {
+    Ok(()) if stage.opened_handle_is_unlinked() == Ok(true) => StrictStageRemoval::Removed,
+    Ok(()) => StrictStageRemoval::NotRemoved,
+    Err(_) => StrictStageRemoval::NotRemoved,
+  }
+}
+fn observe_rename_failure_target() -> RenameFailureTarget {
+  let current_parent = open_parent_chain();
+  parent_chain_matches();
+  observe_rename_failure_target_at_parent();
+  RenameFailureTarget::OldTarget
+}
+fn remove_owned_stage(parent: &Dir, stage: &Path) -> io::Result<()> {
+  parent.remove_file(stage)
+}
+`,
+	},
+	{
+		relativePath: "src-tauri/src/workspace/dto.rs",
+		source: `
+#[derive(Serialize)]
+enum WorkspaceWriteResultWire { Written, TargetPublished, OutcomeUnknown }
+enum WorkspaceWritePublicationEvidence { RenameReportedSuccess, TargetObservedWritten }
+enum WorkspaceWriteRenameObservation { ReportedSuccess, ReportedFailure }
+enum WorkspaceWriteDirectorySyncObservation { Synced, Failed }
+enum WorkspaceWriteTargetObservation { MatchesWritten, Changed, Unverifiable }
+enum WorkspaceWriteNativeObservation { Native }
+enum WorkspaceWriteFailedRenameObservation { ReportedFailure }
+enum WorkspaceWriteUnknownDirectorySyncObservation { NotAttempted }
+enum WorkspaceWriteAmbiguousTargetObservation { Ambiguous }
+#[derive(Serialize)]
+#[serde(transparent)]
+pub struct WorkspaceWriteResult(WorkspaceWriteResultWire);
+impl WorkspaceWriteResult {
+  fn written(stat: WorkspaceEntryStat) -> Self {
+    Self(WorkspaceWriteResultWire::Written { stat })
+  }
+  fn rename_succeeded_sync_failed_with_written_target() -> Self {
+    Self(WorkspaceWriteResultWire::TargetPublished {
+      publication_evidence: WorkspaceWritePublicationEvidence::TargetObservedWritten,
+      rename: WorkspaceWriteRenameObservation::ReportedSuccess,
+      directory_sync: WorkspaceWriteDirectorySyncObservation::Failed,
+      target: WorkspaceWriteTargetObservation::MatchesWritten,
+    })
+  }
+  fn rename_succeeded_with_changed_target(
+    directory_sync: WorkspaceWriteDirectorySyncObservation,
+  ) -> Self {
+    Self(WorkspaceWriteResultWire::TargetPublished {
+      publication_evidence: WorkspaceWritePublicationEvidence::RenameReportedSuccess,
+      rename: WorkspaceWriteRenameObservation::ReportedSuccess,
+      directory_sync,
+      target: WorkspaceWriteTargetObservation::Changed,
+    })
+  }
+  fn rename_succeeded_with_unverifiable_target(
+    directory_sync: WorkspaceWriteDirectorySyncObservation,
+  ) -> Self {
+    Self(WorkspaceWriteResultWire::TargetPublished {
+      publication_evidence: WorkspaceWritePublicationEvidence::RenameReportedSuccess,
+      rename: WorkspaceWriteRenameObservation::ReportedSuccess,
+      directory_sync,
+      target: WorkspaceWriteTargetObservation::Unverifiable,
+    })
+  }
+  fn rename_failed_with_observed_target(
+    directory_sync: WorkspaceWriteDirectorySyncObservation,
+    target: WorkspaceWriteTargetObservation,
+  ) -> Self {
+    Self(WorkspaceWriteResultWire::TargetPublished {
+      publication_evidence: WorkspaceWritePublicationEvidence::TargetObservedWritten,
+      rename: WorkspaceWriteRenameObservation::ReportedFailure,
+      directory_sync,
+      target,
+    })
+  }
+  fn native_unknown() -> Self {
+    Self(WorkspaceWriteResultWire::OutcomeUnknown {
+      observation: WorkspaceWriteNativeObservation::Native,
+      rename: WorkspaceWriteFailedRenameObservation::ReportedFailure,
+      directory_sync: WorkspaceWriteUnknownDirectorySyncObservation::NotAttempted,
+      target: WorkspaceWriteAmbiguousTargetObservation::Ambiguous,
+    })
+  }
+  fn written_stat(&self) {
+    match &self.0 {
+      WorkspaceWriteResultWire::Written { stat } => stat,
+      WorkspaceWriteResultWire::TargetPublished { .. } => todo!(),
+      WorkspaceWriteResultWire::OutcomeUnknown { .. } => todo!(),
+    }
+  }
+}
+`,
+	},
+	{
+		relativePath: "src-tauri/src/workspace/service.rs",
+		source: `
+async fn run_versioned_write() -> Result<WorkspaceWriteResult, CommandError> {
+  let joined = tauri::async_runtime::spawn_blocking(move || {
+    let _mutation = lock(&workspace.mutation_gate)?;
+    workspace.validate_lease(leased_root_id)?;
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(lease))) {
+      Ok(result) => result,
+      Err(_) => Err(workspace_write_response_unavailable()),
+    }
+  }).await;
+  classify_versioned_write_join(joined)
+}
+fn classify_versioned_write_join(result: Result<Result<WorkspaceWriteResult, CommandError>, JoinError>) -> Result<WorkspaceWriteResult, CommandError> {
+  match result {
+    Ok(result) => result,
+    Err(_) => Err(workspace_write_response_unavailable()),
+  }
+}
+fn workspace_write_response_unavailable() -> CommandError {
+  CommandError::new("WORKSPACE_WRITE_RESPONSE_UNAVAILABLE", "unavailable")
+}
+`,
+	},
+];
+
+const versionedWriteAppSources = [
+	{
+		relativePath: "app/platform/tauri/native.ts",
+		source: `
+const bridge = {
+  workspaceWriteFile: async (rootId, relativePath, expectedVersion, content) => {
+    const frame = encodeWorkspaceWriteFileRequest(rootId, relativePath, expectedVersion, content);
+    try {
+      return decodeWorkspaceWriteResult(
+        await invoke("workspace_write_file", frame),
+        expectedVersion,
+        frame[13],
+      );
+    } catch (error) {
+      const commandError = decodeWorkspaceWritePrepublicationError(error);
+      if (commandError !== undefined) throw commandError;
+      return workspaceWriteResponseUnavailable();
+    }
+  },
+};
+`,
+	},
+	{
+		relativePath: "app/platform/tauri/workspace-codec.ts",
+		source: `
+export const WORKSPACE_WRITE_PREPUBLICATION_ERROR_CODES = Object.freeze([
+  "ROOT_NOT_AUTHORIZED",
+  "ROOT_UNAVAILABLE",
+  "PERMISSION_DENIED",
+  "FILE_TOO_LARGE",
+  "INVALID_WORKSPACE_WRITE_REQUEST",
+  "WORKSPACE_CONFLICT",
+  "WORKSPACE_FILE_MODIFIED",
+  "WORKSPACE_WRITE_UNSUPPORTED",
+  "WORKSPACE_WINDOW_CLOSED",
+  "IO_FAILED",
+] as const);
+const WORKSPACE_WRITE_PREPUBLICATION_ERROR_CODE_SET = new Set<string>(
+  WORKSPACE_WRITE_PREPUBLICATION_ERROR_CODES,
+);
+function workspaceWriteContentSnapshot(content: unknown): Uint8Array {
+  const snapshot = new Uint8Array(content.byteLength);
+  Reflect.apply(typedArraySet, snapshot, [content, 0]);
+  return snapshot;
+}
+export function encodeWorkspaceWriteFileRequest(rootId, relativePath, expectedVersion, content) {
+  const contentSnapshot = workspaceWriteContentSnapshot(content);
+  const frame = new Uint8Array(14 + contentSnapshot.byteLength);
+  frame.set(contentSnapshot, 14);
+  return frame;
+}
+export function decodeWorkspaceWriteResult(snapshot) {
+  if (snapshot.status === "targetPublished") {
+    if (
+      !hasExactKeys(snapshot, [
+        "status",
+        "publicationEvidence",
+        "rename",
+        "directorySync",
+        "target",
+      ]) ||
+      (snapshot.publicationEvidence !== "renameReportedSuccess" &&
+        snapshot.publicationEvidence !== "targetObservedWritten") ||
+      (snapshot.rename !== "reportedSuccess" &&
+        snapshot.rename !== "reportedFailure") ||
+      (snapshot.directorySync !== "synced" &&
+        snapshot.directorySync !== "failed") ||
+      (snapshot.target !== "matchesWritten" &&
+        snapshot.target !== "changed" &&
+        snapshot.target !== "unverifiable") ||
+      (snapshot.rename === "reportedSuccess" &&
+        snapshot.publicationEvidence === "targetObservedWritten" &&
+        (snapshot.directorySync !== "failed" ||
+          snapshot.target !== "matchesWritten")) ||
+      (snapshot.rename === "reportedSuccess" &&
+        snapshot.publicationEvidence === "renameReportedSuccess" &&
+        snapshot.target === "matchesWritten") ||
+      (snapshot.rename === "reportedFailure" &&
+        snapshot.publicationEvidence !== "targetObservedWritten")
+    ) {
+      return violation();
+    }
+  }
+  if (snapshot.status !== "outcomeUnknown") return violation();
+  if (snapshot.observation === "native") {
+    if (
+      snapshot.rename !== "reportedFailure" ||
+      snapshot.directorySync !== "notAttempted"
+    ) {
+      return violation();
+    }
+    return snapshot;
+  }
+  if (snapshot.observation !== "responseUnavailable") return violation();
+  return snapshot;
+}
+export function decodeWorkspaceWritePrepublicationError(value: unknown) {
+  try {
+    const snapshot = ownPlainDataSnapshot(value);
+    if (
+      !hasExactKeys(snapshot, ["code", "message"]) ||
+      typeof snapshot.code !== "string" ||
+      !WORKSPACE_WRITE_PREPUBLICATION_ERROR_CODE_SET.has(snapshot.code) ||
+      typeof snapshot.message !== "string" ||
+      snapshot.message.length < 1 ||
+      snapshot.message.length > MAX_COMMAND_ERROR_MESSAGE_LENGTH ||
+      !isWellFormedUtf16(snapshot.message)
+    ) {
+      return undefined;
+    }
+    rejectProxyObject(value as object);
+    return Object.freeze({
+      code: snapshot.code,
+      message: snapshot.message,
+    });
+  } catch {
+    return undefined;
+  }
+}
+`,
+	},
+];
+
+function mutateVersionedWriteSource(sources, relativePath, mutation) {
+	return sources.map((entry) =>
+		entry.relativePath === relativePath
+			? { ...entry, source: mutation(entry.source) }
+			: entry,
+	);
+}
+
+describe("Plain PLW1 versioned-write harness", () => {
+	it("accepts only the raw command, single overwrite syscall and closed typestate", () => {
+		expect(
+			validateWorkspaceVersionedWriteBoundary(
+				versionedWriteRustSources,
+				versionedWriteAppSources,
+			),
+		).toEqual([]);
+	});
+
+	it("rejects raw wrappers, alternate rename arguments and post-dispatch propagation", () => {
+		const wrapped = mutateVersionedWriteSource(
+			versionedWriteAppSources,
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					'invoke("workspace_write_file", frame)',
+					'invoke("workspace_write_file", { request: frame })',
+				),
+		);
+		expect(
+			validateWorkspaceVersionedWriteBoundary(
+				versionedWriteRustSources,
+				wrapped,
+			),
+		).toContain(
+			"workspace_write_file must appear only as invoke(command, frame) in native workspaceWriteFile",
+		);
+
+		const swapped = mutateVersionedWriteSource(
+			versionedWriteRustSources,
+			"src-tauri/src/workspace/versioned_writer.rs",
+			(source) =>
+				source.replace(
+					"rustix::fs::renameat(parent, stage, parent, target)",
+					"rustix::fs::renameat(parent, target, parent, stage)",
+				),
+		);
+		expect(
+			validateWorkspaceVersionedWriteBoundary(
+				swapped,
+				versionedWriteAppSources,
+			),
+		).toContain(
+			"versioned writer must contain one direct parent+stage to parent+target rustix::fs::renameat call",
+		);
+
+		for (const injected of [
+			"  Dir::rename(parent, stage, parent, target);\n",
+			"  unsafe { libc::syscall(libc::SYS_renameat, parent, stage, parent, target); }\n",
+		]) {
+			const alternateRename = mutateVersionedWriteSource(
+				versionedWriteRustSources,
+				"src-tauri/src/workspace/versioned_writer.rs",
+				(source) =>
+					source.replace(
+						"  match rename_result {",
+						`${injected}  match rename_result {`,
+					),
+			);
+			expect(
+				validateWorkspaceVersionedWriteBoundary(
+					alternateRename,
+					versionedWriteAppSources,
+				),
+			).toContain(
+				"versioned writer must not add an alternate, aliased or exchange rename path",
+			);
+		}
+
+		const propagated = mutateVersionedWriteSource(
+			versionedWriteRustSources,
+			"src-tauri/src/workspace/versioned_writer.rs",
+			(source) =>
+				source.replace(
+					"  match rename_result {",
+					"  observe_after_rename()?;\n  match rename_result {",
+				),
+		);
+		expect(
+			validateWorkspaceVersionedWriteBoundary(
+				propagated,
+				versionedWriteAppSources,
+			),
+		).toContain(
+			"publish_and_classify must not propagate, panic, rename again or directly delete after publication dispatch",
+		);
+		const returned = mutateVersionedWriteSource(
+			versionedWriteRustSources,
+			"src-tauri/src/workspace/versioned_writer.rs",
+			(source) =>
+				source.replace(
+					"  match rename_result {",
+					"  return Err(stage_cleanup_failed());\n  match rename_result {",
+				),
+		);
+		expect(
+			validateWorkspaceVersionedWriteBoundary(
+				returned,
+				versionedWriteAppSources,
+			),
+		).toContain(
+			"post-rename ordinary errors must be confined to the proven NotPublished cleanup branch",
+		);
+	});
+
+	it("rejects wrong-stage unlink, discarded unlink proof and forged wire constructors", () => {
+		for (const mutation of [
+			(source) =>
+				source.replace(
+					"hooks.remove_stage(&stage.parent, &stage.name)",
+					"hooks.remove_stage(&initial_parent.parent, &initial_parent.name)",
+				),
+			(source) =>
+				source.replace(
+					"Ok(()) if stage.opened_handle_is_unlinked() == Ok(true) => StrictStageRemoval::Removed,",
+					"Ok(()) => { let _ = stage.opened_handle_is_unlinked(); StrictStageRemoval::Removed },",
+				),
+		]) {
+			const unsafeRemoval = mutateVersionedWriteSource(
+				versionedWriteRustSources,
+				"src-tauri/src/workspace/versioned_writer.rs",
+				mutation,
+			);
+			expect(
+				validateWorkspaceVersionedWriteBoundary(
+					unsafeRemoval,
+					versionedWriteAppSources,
+				),
+			).toContain(
+				"reported rename failure must reverify and unlink only the owned stage, then reobserve the current-root target",
+			);
+		}
+
+		const targetObservedBeforeRemoval = mutateVersionedWriteSource(
+			versionedWriteRustSources,
+			"src-tauri/src/workspace/versioned_writer.rs",
+			(source) =>
+				source.replace(
+					"let removal = strict_remove_stage_after_rename(",
+					`match observe_rename_failure_target(
+          lease,
+          relative_path,
+          &initial_parent,
+          initial_target,
+          &stage,
+		) {
+			_ => {}
+		}
+		let removal = strict_remove_stage_after_rename(`,
+				),
+		);
+		expect(
+			validateWorkspaceVersionedWriteBoundary(
+				targetObservedBeforeRemoval,
+				versionedWriteAppSources,
+			),
+		).toContain(
+			"rename failure must classify proven not-published, observed-written and ambiguous outcomes separately",
+		);
+
+		const forgedWire = mutateVersionedWriteSource(
+			versionedWriteRustSources,
+			"src-tauri/src/workspace/dto.rs",
+			(source) =>
+				source.replace(
+					"  fn written_stat(&self) {",
+					`  fn forged_full_success_incomplete() -> Self {
+    Self(WorkspaceWriteResultWire::TargetPublished {
+      publication_evidence: WorkspaceWritePublicationEvidence::TargetObservedWritten,
+      rename: WorkspaceWriteRenameObservation::ReportedSuccess,
+      directory_sync: WorkspaceWriteDirectorySyncObservation::Synced,
+      target: WorkspaceWriteTargetObservation::MatchesWritten,
+    })
+  }
+  fn written_stat(&self) {`,
+				),
+		);
+		expect(
+			validateWorkspaceVersionedWriteBoundary(
+				forgedWire,
+				versionedWriteAppSources,
+			),
+		).toContain(
+			"WorkspaceWriteResult must be a transparent wrapper over one private wire enum with only canonical constructors",
+		);
+	});
+
+	it("rejects TypedArray enumeration, JSON acceptance and join-error downgrades", () => {
+		const enumerating = mutateVersionedWriteSource(
+			versionedWriteAppSources,
+			"app/platform/tauri/workspace-codec.ts",
+			(source) =>
+				source.replace(
+					"  const snapshot = new Uint8Array(content.byteLength);",
+					"  Reflect.ownKeys(content);\n  const snapshot = new Uint8Array(content.byteLength);",
+				),
+		);
+		expect(
+			validateWorkspaceVersionedWriteBoundary(
+				versionedWriteRustSources,
+				enumerating,
+			),
+		).toContain(
+			"PLW1 encoder must not enumerate TypedArray integer-index own keys",
+		);
+		for (const collector of [
+			"const ownKeys = Reflect.ownKeys; ownKeys(content);",
+			"Object.entries(content);",
+			"const copied = [...content];",
+		]) {
+			const indirectEnumeration = mutateVersionedWriteSource(
+				versionedWriteAppSources,
+				"app/platform/tauri/workspace-codec.ts",
+				(source) =>
+					source.replace(
+						"  const snapshot = new Uint8Array(content.byteLength);",
+						`  ${collector}\n  const snapshot = new Uint8Array(content.byteLength);`,
+					),
+			);
+			expect(
+				validateWorkspaceVersionedWriteBoundary(
+					versionedWriteRustSources,
+					indirectEnumeration,
+				),
+			).toContain(
+				"PLW1 private content snapshot may use only captured constant-space intrinsic operations",
+			);
+		}
+
+		const dynamicDispatch = mutateVersionedWriteSource(
+			versionedWriteAppSources,
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					"    try {",
+					"    await invoke(['workspace', 'write', 'file'].join('_'), { request: frame });\n    try {",
+				),
+		);
+		expect(
+			validateWorkspaceVersionedWriteBoundary(
+				versionedWriteRustSources,
+				dynamicDispatch,
+			),
+		).toContain(
+			"app/platform/tauri/native.ts must invoke only direct StringLiteral commands",
+		);
+
+		const jsonAccepted = mutateVersionedWriteSource(
+			versionedWriteRustSources,
+			"src-tauri/src/workspace/write_frame.rs",
+			(source) =>
+				source.replace(
+					"InvokeBody::Json(_) => Err(invalid_write_request()),",
+					"InvokeBody::Json(value) => Self::parse_json(value),",
+				),
+		);
+		expect(
+			validateWorkspaceVersionedWriteBoundary(
+				jsonAccepted,
+				versionedWriteAppSources,
+			),
+		).toContain(
+			"PLW1 parser must accept InvokeBody::Raw and reject InvokeBody::Json exactly",
+		);
+
+		const downgradedJoin = mutateVersionedWriteSource(
+			versionedWriteRustSources,
+			"src-tauri/src/workspace/service.rs",
+			(source) =>
+				source.replace(
+					"Err(_) => Err(workspace_write_response_unavailable()),",
+					"Err(_) => Err(workspace_mutation_failed()),",
+				),
+		);
+		expect(
+			validateWorkspaceVersionedWriteBoundary(
+				downgradedJoin,
+				versionedWriteAppSources,
+			),
+		).toContain(
+			"versioned-write runner must hold the mutation gate, revalidate the lease and conservatively classify join failure",
+		);
+
+		const downgradedOuterJoin = mutateVersionedWriteSource(
+			versionedWriteRustSources,
+			"src-tauri/src/workspace/service.rs",
+			(source) => {
+				const start = source.indexOf("fn classify_versioned_write_join");
+				const prefix = source.slice(0, start);
+				const classifier = source
+					.slice(start)
+					.replace(
+						"Err(_) => Err(workspace_write_response_unavailable()),",
+						"Err(_) => Ok(WorkspaceWriteResult::native_unknown()),",
+					);
+				return prefix + classifier;
+			},
+		);
+		expect(
+			validateWorkspaceVersionedWriteBoundary(
+				downgradedOuterJoin,
+				versionedWriteAppSources,
+			),
+		).toContain(
+			"versioned-write JoinError must be classified only by the exact response-unavailable helper",
+		);
+		const shadowedOuterJoin = mutateVersionedWriteSource(
+			versionedWriteRustSources,
+			"src-tauri/src/workspace/service.rs",
+			(source) =>
+				source.replace(
+					"  classify_versioned_write_join(joined)",
+					"  let joined = Ok(Ok(WorkspaceWriteResult::native_unknown()));\n  classify_versioned_write_join(joined)",
+				),
+		);
+		expect(
+			validateWorkspaceVersionedWriteBoundary(
+				shadowedOuterJoin,
+				versionedWriteAppSources,
+			),
+		).toContain(
+			"versioned-write runner must hold the mutation gate, revalidate the lease and conservatively classify join failure",
+		);
+
+		const whitelistedUnavailable = mutateVersionedWriteSource(
+			versionedWriteAppSources,
+			"app/platform/tauri/workspace-codec.ts",
+			(source) =>
+				`const FORBIDDEN = "WORKSPACE_WRITE_RESPONSE_UNAVAILABLE";\n${source}`,
+		);
+		expect(
+			validateWorkspaceVersionedWriteBoundary(
+				versionedWriteRustSources,
+				whitelistedUnavailable,
+			),
+		).toContain(
+			"WORKSPACE_WRITE_RESPONSE_UNAVAILABLE must remain outside the ordinary pre-publication error whitelist",
+		);
+
+		const publicWire = mutateVersionedWriteSource(
+			versionedWriteRustSources,
+			"src-tauri/src/workspace/dto.rs",
+			(source) =>
+				source.replace(
+					"enum WorkspaceWriteResultWire",
+					"pub enum WorkspaceWriteResultWire",
+				),
+		);
+		expect(
+			validateWorkspaceVersionedWriteBoundary(
+				publicWire,
+				versionedWriteAppSources,
+			),
+		).toContain(
+			"WorkspaceWriteResult must be a transparent wrapper over one private wire enum with only canonical constructors",
+		);
+	});
+
+	it("rejects extra ordinary errors and Rust-unrepresentable terminal cross-fields", () => {
+		const expandedWhitelist = mutateVersionedWriteSource(
+			versionedWriteAppSources,
+			"app/platform/tauri/workspace-codec.ts",
+			(source) =>
+				source.replace(
+					'  "ROOT_UNAVAILABLE",',
+					'  "ROOT_UNAVAILABLE",\n  "ENTRY_NOT_FOUND",',
+				),
+		);
+		expect(
+			validateWorkspaceVersionedWriteBoundary(
+				versionedWriteRustSources,
+				expandedWhitelist,
+			),
+		).toContain(
+			"workspace write ordinary rejection whitelist must equal the Rust pre-publication code set",
+		);
+		const bypassedWhitelistUse = mutateVersionedWriteSource(
+			versionedWriteAppSources,
+			"app/platform/tauri/workspace-codec.ts",
+			(source) =>
+				source.replace(
+					"    const snapshot = ownPlainDataSnapshot(value);",
+					`    const snapshot = ownPlainDataSnapshot(value);
+    if (snapshot.code === "ENTRY_NOT_FOUND") {
+      return Object.freeze({ code: snapshot.code, message: snapshot.message });
+    }`,
+				),
+		);
+		expect(
+			validateWorkspaceVersionedWriteBoundary(
+				versionedWriteRustSources,
+				bypassedWhitelistUse,
+			),
+		).toContain(
+			"workspace write ordinary rejection decoder must use only the exact closed whitelist",
+		);
+
+		const relaxedNativeUnknown = mutateVersionedWriteSource(
+			versionedWriteAppSources,
+			"app/platform/tauri/workspace-codec.ts",
+			(source) =>
+				source.replace(
+					'snapshot.directorySync !== "notAttempted"',
+					'(snapshot.directorySync !== "notAttempted" && snapshot.directorySync !== "synced")',
+				),
+		);
+		expect(
+			validateWorkspaceVersionedWriteBoundary(
+				versionedWriteRustSources,
+				relaxedNativeUnknown,
+			),
+		).toContain(
+			"WorkspaceWriteResult decoder must accept only native reportedFailure/notAttempted unknown",
+		);
+		const earlyNativeUnknown = mutateVersionedWriteSource(
+			versionedWriteAppSources,
+			"app/platform/tauri/workspace-codec.ts",
+			(source) =>
+				source.replace(
+					'  if (snapshot.observation === "native") {',
+					`  if (snapshot.observation === "native" && snapshot.directorySync === "synced") {
+    return snapshot;
+  }
+  if (snapshot.observation === "native") {`,
+				),
+		);
+		expect(
+			validateWorkspaceVersionedWriteBoundary(
+				versionedWriteRustSources,
+				earlyNativeUnknown,
+			),
+		).toContain(
+			"WorkspaceWriteResult decoder must accept only native reportedFailure/notAttempted unknown",
+		);
+
+		const relaxedTargetPublished = mutateVersionedWriteSource(
+			versionedWriteAppSources,
+			"app/platform/tauri/workspace-codec.ts",
+			(source) =>
+				source.replace(
+					'snapshot.target !== "matchesWritten"',
+					'snapshot.target !== "matchesWritten" && false',
+				),
+		);
+		expect(
+			validateWorkspaceVersionedWriteBoundary(
+				versionedWriteRustSources,
+				relaxedTargetPublished,
+			),
+		).toContain(
+			"WorkspaceWriteResult decoder must accept only Rust-representable targetPublished cross-fields",
+		);
+		const earlyTargetPublished = mutateVersionedWriteSource(
+			versionedWriteAppSources,
+			"app/platform/tauri/workspace-codec.ts",
+			(source) =>
+				source.replace(
+					'  if (snapshot.status === "targetPublished") {',
+					`  if (snapshot.status === "targetPublished" && snapshot.target === "changed") {
+    return snapshot;
+  }
+  if (snapshot.status === "targetPublished") {`,
+				),
+		);
+		expect(
+			validateWorkspaceVersionedWriteBoundary(
+				versionedWriteRustSources,
+				earlyTargetPublished,
+			),
+		).toContain(
+			"WorkspaceWriteResult decoder must accept only Rust-representable targetPublished cross-fields",
 		);
 	});
 });

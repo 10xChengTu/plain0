@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import workspaceVersionFixture from "../fixtures/workspace-version-v1.json" with { type: "json" };
+
 import {
 	createBrowserMockBridge,
 	type BrowserMockBridgeOptions,
@@ -8,6 +10,14 @@ import {
 	type BrowserMockDirectoryFixtureEntryForTest,
 	type BrowserMockSymlinkCopyObservation,
 } from "../../app/platform/tauri/browser-mock";
+
+const workspaceVersionPattern = /^wv1:[0-9a-f]{64}$/u;
+
+function bytesFromHex(value: string): Uint8Array {
+	return Uint8Array.from(
+		value.match(/.{2}/gu)?.map((byte) => Number.parseInt(byte, 16)) ?? [],
+	);
+}
 
 describe("browser mock workspace bridge", () => {
 	it("isolates each instance and preserves revisions for cancellation and duplicates", async () => {
@@ -99,6 +109,7 @@ describe("browser mock workspace bridge", () => {
 
 		expect(rootStat).toMatchObject({ kind: "directory", size: 0 });
 		expect(fileStat).toMatchObject({ kind: "file", size: 6 });
+		expect(fileStat.version).toMatch(workspaceVersionPattern);
 		expect(root.entries.map(({ name }) => name)).toEqual([
 			".plainrc",
 			"README.md",
@@ -119,7 +130,7 @@ describe("browser mock workspace bridge", () => {
 			size: 6,
 			mtime: 1_700_000_000_000,
 			ctime: 1_699_999_000_000,
-			version: null,
+			version: fileStat.version,
 		});
 		const first = file.value.copy();
 		const second = file.value.copy();
@@ -203,6 +214,562 @@ describe("browser mock workspace bridge", () => {
 				});
 			}
 		}
+	});
+
+	it("writes only against the exact issued version and rotates the token", async () => {
+		const bridge = createBrowserMockBridge();
+		const selected = await bridge.workspacePickRoots("replace");
+		const rootId = selected.snapshot.roots[0]!.rootId;
+		const before = await bridge.workspaceReadFile(rootId, "binary.bin");
+		const content = bytesFromHex(workspaceVersionFixture.write.contentHex);
+
+		expect(before.stat.version).toMatch(workspaceVersionPattern);
+		const first = await bridge.workspaceWriteFile(
+			rootId,
+			"binary.bin",
+			before.stat.version!,
+			content,
+		);
+		expect(first.status).toBe("written");
+		if (first.status !== "written") {
+			throw new Error("Expected the browser mock write to finish.");
+		}
+		expect(Object.isFrozen(first)).toBe(true);
+		expect(Object.isFrozen(first.stat)).toBe(true);
+		expect(first.stat).toMatchObject({
+			kind: "file",
+			size: content.byteLength,
+		});
+		expect(first.stat.version).toMatch(workspaceVersionPattern);
+		expect(first.stat.version).not.toBe(before.stat.version);
+		expect(
+			(await bridge.workspaceReadFile(rootId, "binary.bin")).value.copy(),
+		).toEqual(content);
+
+		await expect(
+			bridge.workspaceWriteFile(
+				rootId,
+				"binary.bin",
+				before.stat.version!,
+				new Uint8Array(content.byteLength),
+			),
+		).rejects.toMatchObject({ code: "WORKSPACE_FILE_MODIFIED" });
+		const second = await bridge.workspaceWriteFile(
+			rootId,
+			"binary.bin",
+			first.stat.version!,
+			new Uint8Array(),
+		);
+		expect(second.status).toBe("written");
+		if (second.status === "written") {
+			expect(second.stat.size).toBe(0);
+			expect(second.stat.version).not.toBe(first.stat.version);
+		}
+	});
+
+	it("treats deletion after a versioned read as modification, never create", async () => {
+		const bridge = createBrowserMockBridge();
+		const selected = await bridge.workspacePickRoots("replace");
+		const rootId = selected.snapshot.roots[0]!.rootId;
+		const before = await bridge.workspaceReadFile(rootId, "binary.bin");
+		const plan = await bridge.workspacePrepareDelete([
+			{ rootId, relativePath: "binary.bin", recursive: false },
+		]);
+		await bridge.workspaceBeginDelete(plan.confirmationId);
+		await expect(
+			bridge.workspaceCommitDeleteEntry(
+				plan.confirmationId,
+				plan.entries[0]!.entryId,
+				rootId,
+				"binary.bin",
+				false,
+			),
+		).resolves.toEqual({ status: "deleted" });
+
+		await expect(
+			bridge.workspaceWriteFile(
+				rootId,
+				"binary.bin",
+				before.stat.version!,
+				new Uint8Array([1, 2, 3]),
+			),
+		).rejects.toMatchObject({ code: "WORKSPACE_FILE_MODIFIED" });
+		await expect(
+			bridge.workspaceStat(rootId, "binary.bin"),
+		).rejects.toMatchObject({ code: "ENTRY_NOT_FOUND" });
+	});
+
+	it("accepts exactly 8 MiB and rejects malformed tokens or 8 MiB plus one", async () => {
+		const bridge = createBrowserMockBridge();
+		const selected = await bridge.workspacePickRoots("replace");
+		const rootId = selected.snapshot.roots[0]!.rootId;
+		const baseline = await bridge.workspaceReadFile(rootId, "binary.bin");
+
+		await expect(
+			bridge.workspaceWriteFile(
+				rootId,
+				"binary.bin",
+				"WV1:INVALID",
+				new Uint8Array(),
+			),
+		).rejects.toMatchObject({ code: "WORKSPACE_FILE_MODIFIED" });
+		await expect(
+			bridge.workspaceWriteFile(
+				rootId,
+				"binary.bin",
+				baseline.stat.version!,
+				new Uint8Array(8 * 1_024 * 1_024 + 1),
+			),
+		).rejects.toMatchObject({ code: "FILE_TOO_LARGE" });
+
+		const maximum = new Uint8Array(8 * 1_024 * 1_024);
+		maximum[0] = 1;
+		maximum[maximum.byteLength - 1] = 2;
+		const result = await bridge.workspaceWriteFile(
+			rootId,
+			"binary.bin",
+			baseline.stat.version!,
+			maximum,
+		);
+		expect(result.status).toBe("written");
+		if (result.status === "written") {
+			expect(result.stat.size).toBe(maximum.byteLength);
+		}
+	});
+
+	it("keeps symlink and hardlink reads tokenless and refuses versioned writes", async () => {
+		const bridge = createBrowserMockBridge({
+			directoryCopyFixtureForTest: {
+				name: "write-ineligible",
+				entries: [
+					{ path: ["source.bin"], kind: "file", bytes: [1] },
+					{
+						path: ["alias.bin"],
+						kind: "hardlink",
+						targetPath: ["source.bin"],
+					},
+				],
+			},
+		});
+		const selected = await bridge.workspacePickRoots("replace");
+		const rootId = selected.snapshot.roots[0]!.rootId;
+		const validLookingVersion = `wv1:${"a".repeat(64)}`;
+
+		expect(
+			(await bridge.workspaceReadFile(rootId, "fixtures/file-link")).stat
+				.version,
+		).toBeNull();
+		expect(
+			(await bridge.workspaceReadFile(rootId, "write-ineligible/source.bin"))
+				.stat.version,
+		).toBeNull();
+		for (const path of [
+			"fixtures/file-link",
+			"fixtures/directory-link/main.ts",
+			"write-ineligible/source.bin",
+			"write-ineligible/alias.bin",
+		]) {
+			await expect(
+				bridge.workspaceWriteFile(
+					rootId,
+					path,
+					validLookingVersion,
+					new Uint8Array(),
+				),
+			).rejects.toMatchObject({ code: "WORKSPACE_WRITE_UNSUPPORTED" });
+		}
+	});
+
+	it("keeps files tokenless below writable or special-mode parents", async () => {
+		for (const parentMode of [0o777, 0o2755]) {
+			let rootId = "";
+			const bridge = createBrowserMockBridge({
+				onWorkspaceDeletePreparedForTest(_observation, mutations) {
+					mutations.chmod(rootId, "src", parentMode);
+				},
+			});
+			const selected = await bridge.workspacePickRoots("replace");
+			rootId = selected.snapshot.roots[0]!.rootId;
+			const before = await bridge.workspaceReadFile(rootId, "src/main.ts");
+			expect(before.stat.version).toMatch(workspaceVersionPattern);
+
+			const plan = await bridge.workspacePrepareDelete([
+				{ rootId, relativePath: "README.md", recursive: false },
+			]);
+			await bridge.workspaceCancelDelete(plan.confirmationId);
+			expect(
+				(await bridge.workspaceReadFile(rootId, "src/main.ts")).stat.version,
+			).toBeNull();
+			await expect(
+				bridge.workspaceWriteFile(
+					rootId,
+					"src/main.ts",
+					before.stat.version!,
+					new Uint8Array(),
+				),
+			).rejects.toMatchObject({ code: "WORKSPACE_WRITE_UNSUPPORTED" });
+		}
+	});
+
+	it("rejects target, stage, and ancestor receipt changes before publication", async () => {
+		const cases = [
+			{
+				name: "target",
+				code: "WORKSPACE_CONFLICT",
+				mutate: (
+					mutations: Parameters<
+						NonNullable<
+							BrowserMockBridgeOptions["onWorkspaceWriteBeforePublicationForTest"]
+						>
+					>[1],
+				) => mutations.rewriteTarget([1, 2, 3, 4, 5, 6]),
+			},
+			{
+				name: "stage",
+				code: "WORKSPACE_CONFLICT",
+				mutate: (
+					mutations: Parameters<
+						NonNullable<
+							BrowserMockBridgeOptions["onWorkspaceWriteBeforePublicationForTest"]
+						>
+					>[1],
+				) => mutations.replaceStage([9, 9, 9, 9]),
+			},
+			{
+				name: "ancestor",
+				code: "WORKSPACE_CONFLICT",
+				mutate: (
+					mutations: Parameters<
+						NonNullable<
+							BrowserMockBridgeOptions["onWorkspaceWriteBeforePublicationForTest"]
+						>
+					>[1],
+				) => mutations.changeAncestor(),
+			},
+		];
+
+		for (const testCase of cases) {
+			const bridge = createBrowserMockBridge({
+				onWorkspaceWriteBeforePublicationForTest(_observation, mutations) {
+					testCase.mutate(mutations);
+				},
+			});
+			const selected = await bridge.workspacePickRoots("replace");
+			const rootId = selected.snapshot.roots[0]!.rootId;
+			const before = await bridge.workspaceReadFile(rootId, "binary.bin");
+			await expect(
+				bridge.workspaceWriteFile(
+					rootId,
+					"binary.bin",
+					before.stat.version!,
+					new Uint8Array([7, 7, 7, 7]),
+				),
+			).rejects.toMatchObject({ code: testCase.code });
+			const after = await bridge.workspaceReadFile(rootId, "binary.bin");
+			expect([...after.value.copy()]).not.toEqual([7, 7, 7, 7]);
+			expect(testCase.name).toBeTruthy();
+		}
+	});
+
+	it("preserves publication evidence across rename, sync, and postcheck failures", async () => {
+		const renameFailure = createBrowserMockBridge({
+			onWorkspaceWriteRenameForTest(_observation, mutations) {
+				mutations.publishStage();
+				return "reportedFailure";
+			},
+			onWorkspaceWriteAfterPublicationForTest(_observation, mutations) {
+				mutations.rewriteTarget([9, 9, 9, 9]);
+				return "changed";
+			},
+		});
+		const renameRoot = (await renameFailure.workspacePickRoots("replace"))
+			.snapshot.roots[0]!.rootId;
+		const renameBefore = await renameFailure.workspaceReadFile(
+			renameRoot,
+			"binary.bin",
+		);
+		expect(
+			await renameFailure.workspaceWriteFile(
+				renameRoot,
+				"binary.bin",
+				renameBefore.stat.version!,
+				new Uint8Array([7, 7, 7, 7]),
+			),
+		).toEqual({
+			status: "targetPublished",
+			publicationEvidence: "targetObservedWritten",
+			rename: "reportedFailure",
+			directorySync: "synced",
+			target: "changed",
+		});
+
+		const syncFailure = createBrowserMockBridge({
+			onWorkspaceWriteDirectorySyncForTest: () => "failed",
+		});
+		const syncRoot = (await syncFailure.workspacePickRoots("replace")).snapshot
+			.roots[0]!.rootId;
+		const syncBefore = await syncFailure.workspaceReadFile(
+			syncRoot,
+			"binary.bin",
+		);
+		expect(
+			await syncFailure.workspaceWriteFile(
+				syncRoot,
+				"binary.bin",
+				syncBefore.stat.version!,
+				new Uint8Array([8]),
+			),
+		).toEqual({
+			status: "targetPublished",
+			publicationEvidence: "targetObservedWritten",
+			rename: "reportedSuccess",
+			directorySync: "failed",
+			target: "matchesWritten",
+		});
+
+		const syncChanged = createBrowserMockBridge({
+			onWorkspaceWriteDirectorySyncForTest(_observation, mutations) {
+				mutations.rewriteTarget([4, 4, 4, 4]);
+				return "synced";
+			},
+		});
+		const syncChangedRoot = (await syncChanged.workspacePickRoots("replace"))
+			.snapshot.roots[0]!.rootId;
+		const syncChangedBefore = await syncChanged.workspaceReadFile(
+			syncChangedRoot,
+			"binary.bin",
+		);
+		expect(
+			await syncChanged.workspaceWriteFile(
+				syncChangedRoot,
+				"binary.bin",
+				syncChangedBefore.stat.version!,
+				new Uint8Array([3, 3, 3, 3]),
+			),
+		).toEqual({
+			status: "targetPublished",
+			publicationEvidence: "renameReportedSuccess",
+			rename: "reportedSuccess",
+			directorySync: "synced",
+			target: "changed",
+		});
+
+		for (const [targetResult, mutation] of [
+			["changed", "rewriteTarget"],
+			["unverifiable", "markTargetUnverifiable"],
+		] as const) {
+			const bridge = createBrowserMockBridge({
+				onWorkspaceWriteAfterPublicationForTest(_observation, mutations) {
+					if (mutation === "rewriteTarget") {
+						mutations.rewriteTarget([6, 6, 6, 6]);
+					} else {
+						mutations.markTargetUnverifiable();
+					}
+					return targetResult;
+				},
+			});
+			const rootId = (await bridge.workspacePickRoots("replace")).snapshot
+				.roots[0]!.rootId;
+			const before = await bridge.workspaceReadFile(rootId, "binary.bin");
+			expect(
+				await bridge.workspaceWriteFile(
+					rootId,
+					"binary.bin",
+					before.stat.version!,
+					new Uint8Array([5, 5, 5, 5]),
+				),
+			).toEqual({
+				status: "targetPublished",
+				publicationEvidence: "renameReportedSuccess",
+				rename: "reportedSuccess",
+				directorySync: "synced",
+				target: targetResult,
+			});
+		}
+
+		for (const targetResult of ["changed", "unverifiable"] as const) {
+			const overrideOnly = createBrowserMockBridge({
+				onWorkspaceWriteAfterPublicationForTest() {
+					return targetResult;
+				},
+			});
+			const rootId = (await overrideOnly.workspacePickRoots("replace")).snapshot
+				.roots[0]!.rootId;
+			const before = await overrideOnly.workspaceReadFile(rootId, "binary.bin");
+			expect(
+				await overrideOnly.workspaceWriteFile(
+					rootId,
+					"binary.bin",
+					before.stat.version!,
+					new Uint8Array([7, 7, 7, 7]),
+				),
+			).toEqual({
+				status: "targetPublished",
+				publicationEvidence: "renameReportedSuccess",
+				rename: "reportedSuccess",
+				directorySync: "synced",
+				target: targetResult,
+			});
+		}
+	});
+
+	it("distinguishes safe rename failure from ambiguous native outcomes", async () => {
+		const safe = createBrowserMockBridge({
+			onWorkspaceWriteRenameForTest: () => "reportedFailure",
+		});
+		const safeRoot = (await safe.workspacePickRoots("replace")).snapshot
+			.roots[0]!.rootId;
+		const safeBefore = await safe.workspaceReadFile(safeRoot, "binary.bin");
+		await expect(
+			safe.workspaceWriteFile(
+				safeRoot,
+				"binary.bin",
+				safeBefore.stat.version!,
+				new Uint8Array([1]),
+			),
+		).rejects.toMatchObject({ code: "IO_FAILED" });
+		expect(
+			(await safe.workspaceReadFile(safeRoot, "binary.bin")).value.copy(),
+		).toEqual(safeBefore.value.copy());
+
+		let ambiguousSyncCalls = 0;
+		const ambiguous = createBrowserMockBridge({
+			onWorkspaceWriteRenameForTest(_observation, mutations) {
+				mutations.changeAncestor();
+				return "reportedFailure";
+			},
+			onWorkspaceWriteDirectorySyncForTest() {
+				ambiguousSyncCalls += 1;
+				return "failed";
+			},
+		});
+		const ambiguousRoot = (await ambiguous.workspacePickRoots("replace"))
+			.snapshot.roots[0]!.rootId;
+		const ambiguousBefore = await ambiguous.workspaceReadFile(
+			ambiguousRoot,
+			"binary.bin",
+		);
+		expect(
+			await ambiguous.workspaceWriteFile(
+				ambiguousRoot,
+				"binary.bin",
+				ambiguousBefore.stat.version!,
+				new Uint8Array([2]),
+			),
+		).toEqual({
+			status: "outcomeUnknown",
+			observation: "native",
+			rename: "reportedFailure",
+			directorySync: "notAttempted",
+			target: "ambiguous",
+		});
+		expect(ambiguousSyncCalls).toBe(0);
+
+		const unavailable = createBrowserMockBridge({
+			onWorkspaceWriteRenameForTest(_observation, mutations) {
+				mutations.publishStage();
+				throw new Error("simulated rename observation loss");
+			},
+		});
+		const unavailableRoot = (await unavailable.workspacePickRoots("replace"))
+			.snapshot.roots[0]!.rootId;
+		const unavailableBefore = await unavailable.workspaceReadFile(
+			unavailableRoot,
+			"binary.bin",
+		);
+		const unavailableResult = await unavailable.workspaceWriteFile(
+			unavailableRoot,
+			"binary.bin",
+			unavailableBefore.stat.version!,
+			new Uint8Array([3]),
+		);
+		expect(unavailableResult).toEqual({
+			status: "outcomeUnknown",
+			observation: "responseUnavailable",
+			rename: "unobserved",
+			directorySync: "unobserved",
+			target: "ambiguous",
+		});
+		expect(Object.isFrozen(unavailableResult)).toBe(true);
+		expect(
+			(
+				await unavailable.workspaceReadFile(unavailableRoot, "binary.bin")
+			).value.copy(),
+		).toEqual(new Uint8Array([3]));
+	});
+
+	it("linearizes root revocation and window close around an in-flight write", async () => {
+		const rootFirst = createBrowserMockBridge();
+		const rootFirstPick = await rootFirst.workspacePickRoots("replace");
+		const rootFirstId = rootFirstPick.snapshot.roots[0]!.rootId;
+		const rootFirstRead = await rootFirst.workspaceReadFile(
+			rootFirstId,
+			"binary.bin",
+		);
+		await rootFirst.workspaceRemoveRoot(rootFirstId);
+		await expect(
+			rootFirst.workspaceWriteFile(
+				rootFirstId,
+				"binary.bin",
+				rootFirstRead.stat.version!,
+				new Uint8Array([1]),
+			),
+		).rejects.toMatchObject({ code: "ROOT_NOT_AUTHORIZED" });
+
+		const writeFirst = createBrowserMockBridge({
+			onWorkspaceWriteBeforePublicationForTest(_observation, mutations) {
+				mutations.revokeRoot();
+			},
+		});
+		const writeFirstId = (await writeFirst.workspacePickRoots("replace"))
+			.snapshot.roots[0]!.rootId;
+		const writeFirstRead = await writeFirst.workspaceReadFile(
+			writeFirstId,
+			"binary.bin",
+		);
+		expect(
+			(
+				await writeFirst.workspaceWriteFile(
+					writeFirstId,
+					"binary.bin",
+					writeFirstRead.stat.version!,
+					new Uint8Array([2]),
+				)
+			).status,
+		).toBe("written");
+		await expect(
+			writeFirst.workspaceStat(writeFirstId, "binary.bin"),
+		).rejects.toMatchObject({ code: "ROOT_NOT_AUTHORIZED" });
+
+		const windowFirst = createBrowserMockBridge({
+			onWorkspaceWriteBeforePublicationForTest(_observation, mutations) {
+				mutations.closeWindow();
+			},
+		});
+		const windowRoot = (await windowFirst.workspacePickRoots("replace"))
+			.snapshot.roots[0]!.rootId;
+		const windowRead = await windowFirst.workspaceReadFile(
+			windowRoot,
+			"binary.bin",
+		);
+		const firstWindowWrite = await windowFirst.workspaceWriteFile(
+			windowRoot,
+			"binary.bin",
+			windowRead.stat.version!,
+			new Uint8Array([3]),
+		);
+		expect(firstWindowWrite.status).toBe("written");
+		if (firstWindowWrite.status !== "written") {
+			throw new Error("Expected the first window write to finish.");
+		}
+		await expect(
+			windowFirst.workspaceWriteFile(
+				windowRoot,
+				"binary.bin",
+				firstWindowWrite.stat.version!,
+				new Uint8Array([4]),
+			),
+		).rejects.toMatchObject({ code: "WORKSPACE_WINDOW_CLOSED" });
 	});
 
 	it("creates empty files and single directories without changing root revisions", async () => {

@@ -1694,6 +1694,92 @@ fn read_file_returns_a_binary_plr1_receipt_and_rejects_wrong_or_revoked_roots() 
     assert_eq!(error.code(), "ROOT_NOT_AUTHORIZED");
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn versioned_write_uses_the_mutation_gate_and_returns_the_publication_stat() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::write(root.join("target.txt"), b"old").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let path = RelativePath::parse_wire("target.txt").unwrap();
+    let expected = block_on(service.stat("main", root_id, path.clone()))
+        .unwrap()
+        .version()
+        .unwrap()
+        .to_owned();
+
+    let result =
+        block_on(service.write_file("main", root_id, path, expected.clone(), b"new".to_vec()))
+            .unwrap();
+    let written_version = result
+        .written_stat()
+        .unwrap_or_else(|| panic!("expected written, got {result:?}"))
+        .version()
+        .unwrap()
+        .to_owned();
+    assert_ne!(written_version, expected);
+    assert_eq!(std::fs::read(root.join("target.txt")).unwrap(), b"new");
+
+    assert_eq!(
+        block_on(service.write_file(
+            "main",
+            root_id,
+            RelativePath::parse_wire("target.txt").unwrap(),
+            expected,
+            b"replay".to_vec(),
+        ))
+        .unwrap_err()
+        .code(),
+        "WORKSPACE_FILE_MODIFIED"
+    );
+}
+
+#[test]
+fn versioned_write_panic_is_response_unavailable_without_poisoning_the_mutation_gate() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+
+    let error = block_on(service.run_versioned_write("main", root_id, |_lease| {
+        panic!("injected versioned write panic")
+    }))
+    .unwrap_err();
+    assert_eq!(error.code(), "WORKSPACE_WRITE_RESPONSE_UNAVAILABLE");
+    block_on(service.create_file(
+        "main",
+        root_id,
+        RelativePath::parse_wire("after-panic.txt").unwrap(),
+    ))
+    .unwrap();
+    assert!(root.join("after-panic.txt").is_file());
+}
+
+#[test]
+fn versioned_write_join_error_is_response_unavailable() {
+    let joined = block_on(tauri::async_runtime::spawn_blocking(
+        || -> Result<crate::workspace::dto::WorkspaceWriteResult, CommandError> {
+            panic!("injected task-level versioned write panic")
+        },
+    ));
+
+    let error = super::classify_versioned_write_join(joined).unwrap_err();
+    assert_eq!(error.code(), "WORKSPACE_WRITE_RESPONSE_UNAVAILABLE");
+}
+
 #[test]
 fn blocking_read_file_releases_the_window_lock_and_discards_a_revoked_root_result() {
     let temp = TempDir::new().unwrap();

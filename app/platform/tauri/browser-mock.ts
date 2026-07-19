@@ -13,9 +13,11 @@ import type {
 	WorkspaceMoveIncompleteReason,
 	WorkspaceMoveResult,
 	WorkspaceRoot,
+	WorkspaceWriteResult,
 } from "./contracts";
 import {
 	compareWorkspaceEntryNames,
+	encodeWorkspaceWriteFileRequest,
 	frozenWorkspaceCommitDeleteEntryRequest,
 	frozenWorkspaceCopyRequest,
 	frozenWorkspaceDeleteBatchPlan,
@@ -32,8 +34,10 @@ import {
 	frozenWorkspaceReadDirectory,
 	frozenWorkspaceRenameRequest,
 	frozenWorkspaceSnapshot,
+	frozenWorkspaceWriteResult,
 	isPortableWorkspaceEntryName,
 	workspaceRelativePathSegments,
+	workspaceWriteResponseUnavailable,
 } from "./workspace-codec";
 
 const runtimeInfo: RuntimeInfo = Object.freeze({
@@ -246,6 +250,7 @@ function resolveMockNodeFollowingSymlinks(
 interface MockResolvedPath {
 	readonly node: MockNode;
 	readonly resolvedSegments: readonly string[];
+	readonly followedSymlink: boolean;
 	readonly finalSymlink?: MockSymlinkNode;
 }
 
@@ -292,6 +297,7 @@ function resolveMockPathFollowingSymlinks(
 			return Object.freeze({
 				node: resolved.node,
 				resolvedSegments: resolved.resolvedSegments,
+				followedSymlink: true,
 				...(index === segments.length - 1
 					? { finalSymlink: child }
 					: resolved.finalSymlink === undefined
@@ -305,6 +311,7 @@ function resolveMockPathFollowingSymlinks(
 	return Object.freeze({
 		node,
 		resolvedSegments: Object.freeze([...traversed]),
+		followedSymlink: false,
 	});
 }
 
@@ -567,6 +574,34 @@ export interface BrowserMockWorkspaceDeleteMutationsForTest {
 	chmod(rootId: string, relativePath: string, mode: number): void;
 }
 
+export interface BrowserMockWorkspaceWriteObservation {
+	readonly phase:
+		"beforePublication" | "rename" | "directorySync" | "afterPublication";
+	readonly rootId: string;
+	readonly relativePath: string;
+	readonly expectedVersion: string;
+	readonly contentLength: number;
+}
+
+export interface BrowserMockWorkspaceWriteMutationsForTest {
+	rewriteTarget(bytes: readonly number[]): void;
+	replaceTarget(bytes: readonly number[]): void;
+	rewriteStage(bytes: readonly number[]): void;
+	replaceStage(bytes: readonly number[]): void;
+	changeAncestor(): void;
+	publishStage(): void;
+	markTargetUnverifiable(): void;
+	revokeRoot(): void;
+	closeWindow(): void;
+}
+
+export type BrowserMockWorkspaceWriteRenameResult =
+	"reportedSuccess" | "reportedFailure" | void;
+export type BrowserMockWorkspaceWriteDirectorySyncResult =
+	"synced" | "failed" | void;
+export type BrowserMockWorkspaceWriteTargetResult =
+	"matchesWritten" | "changed" | "unverifiable" | void;
+
 export interface BrowserMockBridgeOptions {
 	readonly workspacePicks?: readonly BrowserMockWorkspacePick[];
 	/** Browser-mock only bounded tree injected below the first mock root. */
@@ -632,6 +667,26 @@ export interface BrowserMockBridgeOptions {
 	) => void;
 	/** Counts private delete receipt comparisons for complexity assertions only. */
 	readonly onWorkspaceDeleteReceiptVisitForTest?: () => void;
+	/** Runs after the staged receipt exists and before final pre-publication checks. */
+	readonly onWorkspaceWriteBeforePublicationForTest?: (
+		observation: BrowserMockWorkspaceWriteObservation,
+		mutations: BrowserMockWorkspaceWriteMutationsForTest,
+	) => void;
+	/** Simulates the one rename syscall report; publication is a separate mutation. */
+	readonly onWorkspaceWriteRenameForTest?: (
+		observation: BrowserMockWorkspaceWriteObservation,
+		mutations: BrowserMockWorkspaceWriteMutationsForTest,
+	) => BrowserMockWorkspaceWriteRenameResult;
+	/** Simulates parent-directory synchronization after a possible publication. */
+	readonly onWorkspaceWriteDirectorySyncForTest?: (
+		observation: BrowserMockWorkspaceWriteObservation,
+		mutations: BrowserMockWorkspaceWriteMutationsForTest,
+	) => BrowserMockWorkspaceWriteDirectorySyncResult;
+	/** Runs before the current-root target observation is classified. */
+	readonly onWorkspaceWriteAfterPublicationForTest?: (
+		observation: BrowserMockWorkspaceWriteObservation,
+		mutations: BrowserMockWorkspaceWriteMutationsForTest,
+	) => BrowserMockWorkspaceWriteTargetResult;
 }
 
 interface CapturedBrowserMockWorkspaceMoveSeams {
@@ -650,6 +705,13 @@ interface CapturedBrowserMockWorkspaceDeleteSeams {
 	readonly afterRemove: BrowserMockBridgeOptions["onWorkspaceDeleteAfterRemoveForTest"];
 	readonly remove: BrowserMockBridgeOptions["onWorkspaceDeleteRemoveForTest"];
 	readonly receiptVisit: BrowserMockBridgeOptions["onWorkspaceDeleteReceiptVisitForTest"];
+}
+
+interface CapturedBrowserMockWorkspaceWriteSeams {
+	readonly beforePublication: BrowserMockBridgeOptions["onWorkspaceWriteBeforePublicationForTest"];
+	readonly rename: BrowserMockBridgeOptions["onWorkspaceWriteRenameForTest"];
+	readonly directorySync: BrowserMockBridgeOptions["onWorkspaceWriteDirectorySyncForTest"];
+	readonly afterPublication: BrowserMockBridgeOptions["onWorkspaceWriteAfterPublicationForTest"];
 }
 
 function captureBrowserMockWorkspaceMoveSeams(
@@ -716,6 +778,31 @@ function captureBrowserMockWorkspaceDeleteSeams(
 	});
 }
 
+function captureBrowserMockWorkspaceWriteSeams(
+	options: BrowserMockBridgeOptions,
+): CapturedBrowserMockWorkspaceWriteSeams {
+	const beforePublication = options.onWorkspaceWriteBeforePublicationForTest;
+	const rename = options.onWorkspaceWriteRenameForTest;
+	const directorySync = options.onWorkspaceWriteDirectorySyncForTest;
+	const afterPublication = options.onWorkspaceWriteAfterPublicationForTest;
+	for (const seam of [
+		beforePublication,
+		rename,
+		directorySync,
+		afterPublication,
+	]) {
+		if (seam !== undefined && typeof seam !== "function") {
+			throw new TypeError("Invalid browser mock workspace-write seam.");
+		}
+	}
+	return Object.freeze({
+		beforePublication,
+		rename,
+		directorySync,
+		afterPublication,
+	});
+}
+
 function commandError(code: string, message: string): CommandError {
 	return Object.freeze({ code, message });
 }
@@ -763,6 +850,38 @@ function fileTooLarge(): CommandError {
 	return commandError(
 		"FILE_TOO_LARGE",
 		"The workspace file exceeds the supported read limit.",
+	);
+}
+
+function workspaceWriteUnsupported(): CommandError {
+	return commandError(
+		"WORKSPACE_WRITE_UNSUPPORTED",
+		"The workspace file does not support versioned writes.",
+	);
+}
+
+function workspaceFileChanged(): CommandError {
+	return commandError(
+		"WORKSPACE_FILE_MODIFIED",
+		"The workspace file changed before it could be written.",
+	);
+}
+
+function workspaceWindowClosed(): CommandError {
+	return commandError(
+		"WORKSPACE_WINDOW_CLOSED",
+		"The workspace window is closed.",
+	);
+}
+
+function workspaceWriteFailed(): CommandError {
+	return commandError("IO_FAILED", "The workspace file could not be written.");
+}
+
+function workspaceWriteConflict(): CommandError {
+	return commandError(
+		"WORKSPACE_CONFLICT",
+		"The workspace write staging state changed before publication.",
 	);
 }
 
@@ -1536,6 +1655,7 @@ export function createBrowserMockBridge(
 ): PlainBridge {
 	const workspaceMoveSeams = captureBrowserMockWorkspaceMoveSeams(options);
 	const workspaceDeleteSeams = captureBrowserMockWorkspaceDeleteSeams(options);
+	const workspaceWriteSeams = captureBrowserMockWorkspaceWriteSeams(options);
 	const listeners = new Set<(payload: RuntimeInfo) => void>();
 	const scriptedPicks = [...(options.workspacePicks ?? [])];
 	const roots = new Map<string, WorkspaceRoot>();
@@ -1551,6 +1671,8 @@ export function createBrowserMockBridge(
 		options.workspaceDeleteLimitsForTest,
 	);
 	const deleteMetadata = new WeakMap<MockNode, MockDeleteMetadata>();
+	const workspaceWriteIdentities = new WeakMap<MockNode, number>();
+	let nextWorkspaceWriteIdentity = 1;
 	const initialLinkCounts = new Map<MockNode, number>();
 	const countedDirectories = new Set<MockDirectoryNode>();
 	const pendingDirectories = [...trees.values()];
@@ -1563,7 +1685,13 @@ export function createBrowserMockBridge(
 			continue;
 		}
 		countedDirectories.add(directory);
+		if (!workspaceWriteIdentities.has(directory)) {
+			workspaceWriteIdentities.set(directory, nextWorkspaceWriteIdentity++);
+		}
 		for (const child of directory.entries.values()) {
+			if (!workspaceWriteIdentities.has(child)) {
+				workspaceWriteIdentities.set(child, nextWorkspaceWriteIdentity++);
+			}
 			initialLinkCounts.set(child, (initialLinkCounts.get(child) ?? 0) + 1);
 			if (child.kind === "directory") {
 				pendingDirectories.push(child);
@@ -1585,6 +1713,11 @@ export function createBrowserMockBridge(
 	let revision = 0;
 	const issuedDeleteIds = new Set<string>();
 	let activeDeleteBatch: MockDeleteBatch | undefined;
+	let workspaceWriteInFlight = false;
+	let workspaceWriteWindowIsClosed = false;
+	let workspaceWriteAncestorGeneration = 0;
+	let pendingWorkspaceWindowClose = false;
+	const pendingWorkspaceRootRevocations = new Set<string>();
 
 	const registerDeleteMetadata = (node: MockNode): void => {
 		const counts = new Map<MockNode, number>();
@@ -1603,6 +1736,9 @@ export function createBrowserMockBridge(
 			}
 		}
 		for (const [current, count] of counts) {
+			if (!workspaceWriteIdentities.has(current)) {
+				workspaceWriteIdentities.set(current, nextWorkspaceWriteIdentity++);
+			}
 			const metadata = deleteMetadata.get(current);
 			if (metadata === undefined) {
 				deleteMetadata.set(current, {
@@ -1717,6 +1853,7 @@ export function createBrowserMockBridge(
 		kind: WorkspaceEntryKind;
 		size: number;
 		resolvedSegments: readonly string[];
+		followedSymlink: boolean;
 	}> => {
 		let directNode: MockNode | undefined;
 		let directError: unknown;
@@ -1744,6 +1881,7 @@ export function createBrowserMockBridge(
 					kind: "symlink",
 					size: directNode.payload.byteLength,
 					resolvedSegments: segments,
+					followedSymlink: true,
 				});
 			}
 			throw directError ?? entryTypeMismatch();
@@ -1772,6 +1910,7 @@ export function createBrowserMockBridge(
 			kind,
 			size,
 			resolvedSegments: resolved.resolvedSegments,
+			followedSymlink: resolved.followedSymlink,
 		});
 	};
 	const resolveCreateTarget = (
@@ -1803,6 +1942,569 @@ export function createBrowserMockBridge(
 			parent = child;
 		}
 		return Object.freeze({ parent, name: segments.at(-1)! });
+	};
+	const mockWorkspaceVersion = (
+		rootId: string,
+		relativePath: string,
+		file: MockFileNode,
+		metadata: MockDeleteMetadata,
+	): string => {
+		const hashes = [
+			0x811c9dc5, 0x9e3779b9, 0x85ebca6b, 0xc2b2ae35, 0x27d4eb2f, 0x165667b1,
+			0xd3a2646c, 0xfd7046c5,
+		];
+		const feed = (bytes: Uint8Array): void => {
+			for (let hashIndex = 0; hashIndex < hashes.length; hashIndex += 1) {
+				let hash = hashes[hashIndex]!;
+				const multiplier = 0x01000193 + hashIndex * 2;
+				for (const byte of bytes) {
+					hash = Math.imul(hash ^ byte, multiplier) >>> 0;
+				}
+				hashes[hashIndex] = hash;
+			}
+		};
+		feed(
+			textEncoder.encode(
+				`plain.browser-mock.wv1\0${rootId}\0${relativePath}\0${workspaceWriteIdentities.get(file) ?? 0}\0${file.size}\0${metadata.mode}\0${metadata.version}\0${metadata.nlink}\0`,
+			),
+		);
+		feed(file.bytes);
+		return `wv1:${hashes
+			.map((hash) => hash.toString(16).padStart(8, "0"))
+			.join("")}`;
+	};
+	const writableVersionForEntry = (
+		rootId: string,
+		relativePath: string,
+		entry: Readonly<{
+			node: MockNode;
+			kind: WorkspaceEntryKind;
+			followedSymlink: boolean;
+		}>,
+	): string | null => {
+		if (
+			entry.kind !== "file" ||
+			entry.node.kind !== "file" ||
+			entry.followedSymlink ||
+			entry.node.size > MAX_FILE_BYTES
+		) {
+			return null;
+		}
+		try {
+			const target = resolveCreateTarget(rootId, relativePath);
+			if (target.parent.entries.get(target.name) !== entry.node) {
+				return null;
+			}
+			const metadata = metadataFor(entry.node);
+			const parentMetadata = metadataFor(target.parent);
+			if (
+				metadata.nlink !== 1 ||
+				(metadata.mode & 0o7000) !== 0 ||
+				(metadata.mode & 0o200) === 0 ||
+				(parentMetadata.mode & 0o7000) !== 0 ||
+				(parentMetadata.mode & 0o022) !== 0 ||
+				(parentMetadata.mode & 0o300) !== 0o300
+			) {
+				return null;
+			}
+			return mockWorkspaceVersion(rootId, relativePath, entry.node, metadata);
+		} catch {
+			return null;
+		}
+	};
+	const writeMetadataMatches = (
+		node: MockNode,
+		expected: MockDeleteMetadataSnapshot,
+	): boolean => {
+		const actual = deleteMetadata.get(node);
+		return (
+			actual !== undefined &&
+			actual.mode === expected.mode &&
+			actual.version === expected.version &&
+			actual.nlink === expected.nlink
+		);
+	};
+	const writeBytesMatch = (
+		file: MockFileNode,
+		expected: Uint8Array,
+	): boolean => {
+		if (
+			file.size !== expected.byteLength ||
+			file.bytes.byteLength !== expected.byteLength
+		) {
+			return false;
+		}
+		for (let index = 0; index < expected.byteLength; index += 1) {
+			if (file.bytes[index] !== expected[index]) {
+				return false;
+			}
+		}
+		return true;
+	};
+	const finishWorkspaceWriteGate = (): void => {
+		workspaceWriteInFlight = false;
+		for (const rootId of pendingWorkspaceRootRevocations) {
+			if (roots.delete(rootId)) {
+				revision += 1;
+				invalidateDeleteBatch();
+			}
+		}
+		pendingWorkspaceRootRevocations.clear();
+		if (pendingWorkspaceWindowClose) {
+			workspaceWriteWindowIsClosed = true;
+			pendingWorkspaceWindowClose = false;
+		}
+	};
+	const writeWorkspaceFile = (
+		rootId: string,
+		relativePath: string,
+		expectedVersion: string,
+		content: Uint8Array,
+	): WorkspaceWriteResult => {
+		if (workspaceWriteWindowIsClosed) {
+			throw workspaceWindowClosed();
+		}
+		if (workspaceWriteInFlight) {
+			throw workspaceWriteConflict();
+		}
+		const request = frozenWorkspaceCreateEntryRequest(rootId, relativePath);
+		if (!roots.has(request.rootId)) {
+			throw rootNotAuthorized();
+		}
+
+		const frame = encodeWorkspaceWriteFileRequest(
+			request.rootId,
+			request.relativePath,
+			expectedVersion,
+			content,
+		);
+		const contentLength = new DataView(
+			frame.buffer,
+			frame.byteOffset,
+			frame.byteLength,
+		).getUint32(10, false);
+		const contentSnapshot = frame.slice(frame.byteLength - contentLength);
+
+		workspaceWriteInFlight = true;
+		let ownStage: MockFileNode | undefined;
+		try {
+			let targetLocation: Readonly<{
+				parent: MockDirectoryNode;
+				name: string;
+			}>;
+			try {
+				targetLocation = resolveCreateTarget(
+					request.rootId,
+					request.relativePath,
+				);
+			} catch (error) {
+				if (
+					(error as { readonly code?: unknown })?.code === "ENTRY_TYPE_MISMATCH"
+				) {
+					throw workspaceWriteUnsupported();
+				}
+				throw error;
+			}
+			const oldTarget = targetLocation.parent.entries.get(targetLocation.name);
+			if (oldTarget === undefined) {
+				throw workspaceFileChanged();
+			}
+			if (oldTarget.kind !== "file") {
+				throw workspaceWriteUnsupported();
+			}
+			const currentVersion = writableVersionForEntry(
+				request.rootId,
+				request.relativePath,
+				Object.freeze({
+					node: oldTarget,
+					kind: "file" as const,
+					followedSymlink: false,
+				}),
+			);
+			if (currentVersion === null) {
+				throw workspaceWriteUnsupported();
+			}
+			if (currentVersion !== expectedVersion) {
+				throw workspaceFileChanged();
+			}
+
+			const oldTargetMetadata = metadataSnapshot(oldTarget);
+			const parentMetadata = metadataSnapshot(targetLocation.parent);
+			const initialAncestorGeneration = workspaceWriteAncestorGeneration;
+			const stage = Object.freeze({
+				kind: "file" as const,
+				size: contentSnapshot.byteLength,
+				bytes: contentSnapshot,
+			});
+			ownStage = stage;
+			workspaceWriteIdentities.set(stage, nextWorkspaceWriteIdentity++);
+			deleteMetadata.set(stage, {
+				mode: oldTargetMetadata.mode,
+				version: oldTargetMetadata.version + 1,
+				nlink: 1,
+			});
+			const ownStageMetadata = metadataSnapshot(stage);
+			let stageNamespace: MockFileNode | undefined = stage;
+			let stageWasPublished = false;
+			let forceTargetUnverifiable = false;
+			let phase: BrowserMockWorkspaceWriteObservation["phase"] =
+				"beforePublication";
+
+			const currentLocation = () => {
+				if (!roots.has(request.rootId)) {
+					return undefined;
+				}
+				try {
+					const current = resolveCreateTarget(
+						request.rootId,
+						request.relativePath,
+					);
+					return current.parent === targetLocation.parent &&
+						current.name === targetLocation.name
+						? current
+						: undefined;
+				} catch {
+					return undefined;
+				}
+			};
+			const parentPathReceiptMatches = (): boolean =>
+				workspaceWriteAncestorGeneration === initialAncestorGeneration &&
+				currentLocation() !== undefined;
+			const prepublicationParentReceiptMatches = (): boolean =>
+				parentPathReceiptMatches() &&
+				writeMetadataMatches(targetLocation.parent, parentMetadata);
+			const oldTargetReceiptMatches = (): boolean => {
+				const location = currentLocation();
+				return (
+					location !== undefined &&
+					prepublicationParentReceiptMatches() &&
+					location.parent.entries.get(location.name) === oldTarget &&
+					writeMetadataMatches(oldTarget, oldTargetMetadata) &&
+					mockWorkspaceVersion(
+						request.rootId,
+						request.relativePath,
+						oldTarget,
+						metadataFor(oldTarget),
+					) === expectedVersion
+				);
+			};
+			const ownStageReceiptMatches = (): boolean =>
+				stageNamespace === stage &&
+				writeMetadataMatches(stage, ownStageMetadata) &&
+				writeBytesMatch(stage, contentSnapshot);
+			const observeTarget = ():
+				"matchesWritten" | "changed" | "unverifiable" => {
+				if (forceTargetUnverifiable || !parentPathReceiptMatches()) {
+					return "unverifiable";
+				}
+				const current = targetLocation.parent.entries.get(targetLocation.name);
+				if (
+					current === stage &&
+					writeMetadataMatches(stage, ownStageMetadata) &&
+					writeBytesMatch(stage, contentSnapshot)
+				) {
+					return "matchesWritten";
+				}
+				return "changed";
+			};
+			const replacementFile = (bytes: readonly number[]): MockFileNode => {
+				const replacementBytes = strictMockBytes(bytes);
+				const replacement = Object.freeze({
+					kind: "file" as const,
+					size: replacementBytes.byteLength,
+					bytes: replacementBytes,
+				});
+				registerDeleteMetadata(replacement);
+				return replacement;
+			};
+			const publishStage = (): void => {
+				if (phase !== "rename" || stageNamespace === undefined) {
+					throw new Error("Invalid browser mock workspace-write publication.");
+				}
+				const current = targetLocation.parent.entries.get(targetLocation.name);
+				if (current !== undefined) {
+					unlinkDeleteNode(current);
+				}
+				targetLocation.parent.entries.set(targetLocation.name, stageNamespace);
+				touchDeleteNode(targetLocation.parent);
+				stageWasPublished = true;
+				stageNamespace = undefined;
+			};
+			const writeMutations = Object.freeze({
+				rewriteTarget(bytes: readonly number[]): void {
+					const current = targetLocation.parent.entries.get(
+						targetLocation.name,
+					);
+					const replacement = strictMockBytes(bytes);
+					if (
+						current?.kind !== "file" ||
+						current.bytes.byteLength !== replacement.byteLength
+					) {
+						throw new Error("Invalid browser mock workspace-write mutation.");
+					}
+					current.bytes.set(replacement);
+					touchDeleteNode(current);
+				},
+				replaceTarget(bytes: readonly number[]): void {
+					const current = targetLocation.parent.entries.get(
+						targetLocation.name,
+					);
+					if (current === undefined) {
+						throw new Error("Invalid browser mock workspace-write mutation.");
+					}
+					const replacement = replacementFile(bytes);
+					targetLocation.parent.entries.set(targetLocation.name, replacement);
+					unlinkDeleteNode(current);
+					touchDeleteNode(targetLocation.parent);
+				},
+				rewriteStage(bytes: readonly number[]): void {
+					const replacement = strictMockBytes(bytes);
+					if (
+						stageNamespace === undefined ||
+						stageNamespace.bytes.byteLength !== replacement.byteLength
+					) {
+						throw new Error("Invalid browser mock workspace-write mutation.");
+					}
+					stageNamespace.bytes.set(replacement);
+					touchDeleteNode(stageNamespace);
+				},
+				replaceStage(bytes: readonly number[]): void {
+					if (stageNamespace === undefined) {
+						throw new Error("Invalid browser mock workspace-write mutation.");
+					}
+					const replacement = replacementFile(bytes);
+					unlinkDeleteNode(stageNamespace);
+					stageNamespace = replacement;
+				},
+				changeAncestor(): void {
+					workspaceWriteAncestorGeneration += 1;
+				},
+				publishStage,
+				markTargetUnverifiable(): void {
+					forceTargetUnverifiable = true;
+				},
+				revokeRoot(): void {
+					pendingWorkspaceRootRevocations.add(request.rootId);
+				},
+				closeWindow(): void {
+					pendingWorkspaceWindowClose = true;
+				},
+			} satisfies BrowserMockWorkspaceWriteMutationsForTest);
+			const observation = () =>
+				Object.freeze({
+					phase,
+					rootId: request.rootId,
+					relativePath: request.relativePath,
+					expectedVersion,
+					contentLength,
+				} satisfies BrowserMockWorkspaceWriteObservation);
+
+			try {
+				workspaceWriteSeams.beforePublication?.(observation(), writeMutations);
+			} catch {
+				throw workspaceWriteFailed();
+			}
+			if (!prepublicationParentReceiptMatches()) {
+				throw workspaceWriteConflict();
+			}
+			if (!oldTargetReceiptMatches()) {
+				throw workspaceWriteConflict();
+			}
+			if (!ownStageReceiptMatches()) {
+				throw workspaceWriteConflict();
+			}
+
+			phase = "rename";
+			let rename: "reportedSuccess" | "reportedFailure";
+			try {
+				const reported = workspaceWriteSeams.rename?.(
+					observation(),
+					writeMutations,
+				);
+				if (
+					reported !== undefined &&
+					reported !== "reportedSuccess" &&
+					reported !== "reportedFailure"
+				) {
+					throw new Error(
+						"Invalid browser mock workspace-write rename result.",
+					);
+				}
+				rename = reported ?? "reportedSuccess";
+				if (rename === "reportedSuccess" && !stageWasPublished) {
+					publishStage();
+				}
+			} catch {
+				return workspaceWriteResponseUnavailable();
+			}
+
+			let targetObservedWritten =
+				rename === "reportedFailure" && observeTarget() === "matchesWritten";
+			if (
+				rename === "reportedFailure" &&
+				!stageWasPublished &&
+				oldTargetReceiptMatches() &&
+				ownStageReceiptMatches()
+			) {
+				unlinkDeleteNode(stage);
+				stageNamespace = undefined;
+				throw workspaceWriteFailed();
+			}
+			if (rename === "reportedFailure" && !targetObservedWritten) {
+				return frozenWorkspaceWriteResult(
+					{
+						status: "outcomeUnknown",
+						observation: "native",
+						rename: "reportedFailure",
+						directorySync: "notAttempted",
+						target: "ambiguous",
+					},
+					expectedVersion,
+					contentLength,
+				);
+			}
+
+			phase = "directorySync";
+			let directorySync: "synced" | "failed" = "synced";
+			try {
+				const reported = workspaceWriteSeams.directorySync?.(
+					observation(),
+					writeMutations,
+				);
+				if (
+					reported !== undefined &&
+					reported !== "synced" &&
+					reported !== "failed"
+				) {
+					throw new Error(
+						"Invalid browser mock workspace-write directory-sync result.",
+					);
+				}
+				if (reported !== undefined) {
+					directorySync = reported;
+				}
+			} catch {
+				directorySync = "failed";
+			}
+
+			phase = "afterPublication";
+			let targetOverride: BrowserMockWorkspaceWriteTargetResult;
+			try {
+				targetOverride = workspaceWriteSeams.afterPublication?.(
+					observation(),
+					writeMutations,
+				);
+				if (
+					targetOverride !== undefined &&
+					targetOverride !== "matchesWritten" &&
+					targetOverride !== "changed" &&
+					targetOverride !== "unverifiable"
+				) {
+					throw new Error(
+						"Invalid browser mock workspace-write target result.",
+					);
+				}
+			} catch {
+				targetOverride = "unverifiable";
+			}
+			let target = observeTarget();
+			if (targetOverride === "changed" || targetOverride === "unverifiable") {
+				target = targetOverride;
+			} else if (
+				targetOverride === "matchesWritten" &&
+				target !== "matchesWritten"
+			) {
+				target = "unverifiable";
+			}
+			if (target === "matchesWritten") {
+				targetObservedWritten = true;
+			}
+
+			if (
+				rename === "reportedSuccess" &&
+				directorySync === "synced" &&
+				target === "matchesWritten"
+			) {
+				const version = mockWorkspaceVersion(
+					request.rootId,
+					request.relativePath,
+					stage,
+					metadataFor(stage),
+				);
+				if (version !== expectedVersion) {
+					return frozenWorkspaceWriteResult(
+						{
+							status: "written",
+							stat: frozenWorkspaceEntryStat(
+								"file",
+								contentLength,
+								MOCK_MTIME,
+								MOCK_CTIME,
+								version,
+							),
+						},
+						expectedVersion,
+						contentLength,
+					);
+				}
+				target = "unverifiable";
+			}
+
+			if (rename === "reportedFailure") {
+				return frozenWorkspaceWriteResult(
+					{
+						status: "targetPublished",
+						publicationEvidence: "targetObservedWritten",
+						rename,
+						directorySync,
+						target,
+					},
+					expectedVersion,
+					contentLength,
+				);
+			}
+			if (target === "matchesWritten") {
+				if (directorySync !== "failed") {
+					return workspaceWriteResponseUnavailable();
+				}
+				return frozenWorkspaceWriteResult(
+					{
+						status: "targetPublished",
+						publicationEvidence: "targetObservedWritten",
+						rename,
+						directorySync,
+						target,
+					},
+					expectedVersion,
+					contentLength,
+				);
+			}
+			return frozenWorkspaceWriteResult(
+				{
+					status: "targetPublished",
+					publicationEvidence: "renameReportedSuccess",
+					rename,
+					directorySync,
+					target,
+				},
+				expectedVersion,
+				contentLength,
+			);
+		} finally {
+			if (ownStage !== undefined && metadataFor(ownStage).nlink > 0) {
+				const location = (() => {
+					try {
+						return resolveCreateTarget(request.rootId, request.relativePath);
+					} catch {
+						return undefined;
+					}
+				})();
+				if (location?.parent.entries.get(location.name) !== ownStage) {
+					unlinkDeleteNode(ownStage);
+				}
+			}
+			finishWorkspaceWriteGate();
+		}
 	};
 	const strictMockBytes = (bytes: readonly number[]): Uint8Array => {
 		if (
@@ -3601,12 +4303,13 @@ export function createBrowserMockBridge(
 		},
 		async workspaceStat(rootId, relativePath) {
 			const entry = resolveEntryForRead(rootId, relativePath);
+			const version = writableVersionForEntry(rootId, relativePath, entry);
 			return frozenWorkspaceEntryStat(
 				entry.kind,
 				entry.size,
 				MOCK_MTIME,
 				MOCK_CTIME,
-				null,
+				version,
 			);
 		},
 		async workspaceReadDirectory(rootId, relativePath) {
@@ -3640,14 +4343,18 @@ export function createBrowserMockBridge(
 			if (entry.node.size > MAX_FILE_BYTES) {
 				throw fileTooLarge();
 			}
+			const version = writableVersionForEntry(rootId, relativePath, entry);
 			const stat = frozenWorkspaceEntryStat(
 				entry.kind,
 				entry.node.size,
 				MOCK_MTIME,
 				MOCK_CTIME,
-				null,
+				version,
 			);
 			return frozenWorkspaceReadFile(stat, entry.node.bytes);
+		},
+		async workspaceWriteFile(rootId, relativePath, expectedVersion, content) {
+			return writeWorkspaceFile(rootId, relativePath, expectedVersion, content);
 		},
 	};
 }

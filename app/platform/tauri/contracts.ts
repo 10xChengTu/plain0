@@ -154,6 +154,50 @@ export interface WorkspaceReadFileResult {
 	readonly value: WorkspaceFileData;
 }
 
+export type WorkspaceWritePublicationEvidence =
+	"renameReportedSuccess" | "targetObservedWritten";
+
+export type WorkspaceWriteResult =
+	| Readonly<{
+			status: "written";
+			stat: WorkspaceEntryStat;
+	  }>
+	| Readonly<{
+			status: "targetPublished";
+			publicationEvidence: "targetObservedWritten";
+			rename: "reportedSuccess";
+			directorySync: "failed";
+			target: "matchesWritten";
+	  }>
+	| Readonly<{
+			status: "targetPublished";
+			publicationEvidence: "renameReportedSuccess";
+			rename: "reportedSuccess";
+			directorySync: "synced" | "failed";
+			target: "changed" | "unverifiable";
+	  }>
+	| Readonly<{
+			status: "targetPublished";
+			publicationEvidence: "targetObservedWritten";
+			rename: "reportedFailure";
+			directorySync: "synced" | "failed";
+			target: "matchesWritten" | "changed" | "unverifiable";
+	  }>
+	| Readonly<{
+			status: "outcomeUnknown";
+			observation: "native";
+			rename: "reportedFailure";
+			directorySync: "notAttempted";
+			target: "ambiguous";
+	  }>
+	| Readonly<{
+			status: "outcomeUnknown";
+			observation: "responseUnavailable";
+			rename: "unobserved";
+			directorySync: "unobserved";
+			target: "ambiguous";
+	  }>;
+
 export type Unlisten = () => void | Promise<void>;
 
 export interface PlainBridge {
@@ -205,4 +249,10 @@ export interface PlainBridge {
 		rootId: string,
 		relativePath: string,
 	): Promise<WorkspaceReadFileResult>;
+	workspaceWriteFile(
+		rootId: string,
+		relativePath: string,
+		expectedVersion: string,
+		content: Uint8Array,
+	): Promise<WorkspaceWriteResult>;
 }

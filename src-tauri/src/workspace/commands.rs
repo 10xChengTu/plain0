@@ -7,7 +7,7 @@ use super::dto::{
     WorkspaceDeleteBatchRequest, WorkspaceDeleteResult, WorkspaceEntryRequest, WorkspaceEntryStat,
     WorkspaceMoveRequest, WorkspaceMoveResult, WorkspacePickRootsRequest, WorkspacePickRootsResult,
     WorkspacePrepareDeleteRequest, WorkspaceReadDirectoryResult, WorkspaceRemoveRootRequest,
-    WorkspaceRenameRequest, WorkspaceSnapshot, WorkspaceSnapshotRequest,
+    WorkspaceRenameRequest, WorkspaceSnapshot, WorkspaceSnapshotRequest, WorkspaceWriteResult,
 };
 use super::picker::TauriDirectoryPicker;
 use super::service::WorkspaceService;
@@ -76,6 +76,25 @@ pub(crate) async fn workspace_read_file(
         .read_file(window.label(), root_id, relative_path)
         .await?;
     Ok(raw_bytes_response(bytes))
+}
+
+#[tauri::command]
+pub(crate) async fn workspace_write_file(
+    window: WebviewWindow,
+    service: State<'_, WorkspaceService>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<WorkspaceWriteResult, CommandError> {
+    let frame = super::write_frame::WorkspaceWriteFileFrame::parse_invoke_body(request.body())?;
+    let (root_id, relative_path, expected_version, content) = frame.into_parts();
+    service
+        .write_file(
+            window.label(),
+            root_id,
+            relative_path,
+            expected_version,
+            content,
+        )
+        .await
 }
 
 #[tauri::command]

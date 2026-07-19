@@ -17,6 +17,7 @@ import {
 	validateWorkspaceProviderBootstrap,
 	validateWorkspaceProviderCopyBoundary,
 	validateWorkspaceRustBoundary,
+	validateWorkspaceVersionedWriteBoundary,
 } from "./boundary-contracts.mjs";
 import {
 	auditedWorkbenchPatchPaths,
@@ -406,6 +407,12 @@ for (const failure of validateWorkspaceRustBoundary(
 )) {
 	fail(failure);
 }
+for (const failure of validateWorkspaceVersionedWriteBoundary(
+	rustSources,
+	appSources,
+)) {
+	fail(failure);
+}
 for (const failure of validateWorkspaceCopyCommandRegistration(rustSources)) {
 	fail(failure);
 }
@@ -442,6 +449,6 @@ if (failures.length > 0) {
 	process.exitCode = 1;
 } else {
 	console.log(
-		`architecture: ${appFiles.length} app sources, ${rustSources.length} Rust sources, ${allowedDependencies.size} pinned runtime dependencies, audited bounded directory/file/symlink copy, cross-root move and confirmed-delete boundaries, minimum Tauri capability`,
+		`architecture: ${appFiles.length} app sources, ${rustSources.length} Rust sources, ${allowedDependencies.size} pinned runtime dependencies, audited bounded directory/file/symlink copy, cross-root move, confirmed-delete and PLW1 versioned-write boundaries, minimum Tauri capability`,
 	);
 }

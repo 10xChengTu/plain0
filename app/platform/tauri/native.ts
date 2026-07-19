@@ -8,11 +8,14 @@ import {
 	decodeWorkspaceDeleteBatchPlan,
 	decodeWorkspaceDeleteResult,
 	decodeWorkspaceReadFile,
+	decodeWorkspaceWritePrepublicationError,
+	decodeWorkspaceWriteResult,
 	decodeWorkspaceMoveResult,
 	decodeWorkspacePickResult,
 	decodeWorkspaceReadDirectory,
 	decodeWorkspaceSnapshot,
 	decodeWorkspaceVoid,
+	encodeWorkspaceWriteFileRequest,
 	frozenWorkspaceCopyRequest,
 	frozenWorkspaceCommitDeleteEntryRequest,
 	frozenWorkspaceCreateEntryRequest,
@@ -21,6 +24,7 @@ import {
 	frozenWorkspaceMoveRequest,
 	frozenWorkspacePrepareDeleteRequest,
 	frozenWorkspaceRenameRequest,
+	workspaceWriteResponseUnavailable,
 } from "./workspace-codec";
 
 export function createNativeBridge(): PlainBridge {
@@ -157,6 +161,37 @@ export function createNativeBridge(): PlainBridge {
 					request,
 				}),
 			);
+		},
+		workspaceWriteFile: async (
+			rootId,
+			relativePath,
+			expectedVersion,
+			content,
+		) => {
+			const frame = encodeWorkspaceWriteFileRequest(
+				rootId,
+				relativePath,
+				expectedVersion,
+				content,
+			);
+			const expectedContentLength =
+				frame[10]! * 0x1_00_00_00 +
+				frame[11]! * 0x1_00_00 +
+				frame[12]! * 0x1_00 +
+				frame[13]!;
+			try {
+				return decodeWorkspaceWriteResult(
+					await invoke<unknown>("workspace_write_file", frame),
+					expectedVersion,
+					expectedContentLength,
+				);
+			} catch (error) {
+				const commandError = decodeWorkspaceWritePrepublicationError(error);
+				if (commandError !== undefined) {
+					throw commandError;
+				}
+				return workspaceWriteResponseUnavailable();
+			}
 		},
 	};
 }

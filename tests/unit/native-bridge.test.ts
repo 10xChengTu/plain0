@@ -15,6 +15,7 @@ import { createNativeBridge } from "../../app/platform/tauri/native";
 const workspaceId = "00000000-0000-4000-8000-000000000001";
 const rootId = "00000000-0000-4000-8000-000000000101";
 const targetRootId = "00000000-0000-4000-8000-000000000102";
+const version = `wv1:${"a".repeat(64)}`;
 
 function arrayBufferFromHex(hex: string): ArrayBuffer {
 	const bytes = new Uint8Array(hex.length / 2);
@@ -37,6 +38,19 @@ function validSnapshot() {
 		workspaceId,
 		revision: 1,
 		roots: [validRoot()],
+	};
+}
+
+function validWrittenResult() {
+	return {
+		status: "written",
+		stat: {
+			kind: "file",
+			size: 4,
+			mtime: 1_700_000_000_124,
+			ctime: 1_699_999_999_000,
+			version: `wv1:${"b".repeat(64)}`,
+		},
 	};
 }
 
@@ -509,6 +523,142 @@ describe("native Plain bridge", () => {
 			message: "The workspace-relative path is invalid.",
 		});
 		expect(tauri.invoke).not.toHaveBeenCalled();
+	});
+
+	it("dispatches one exact top-level PLW1 Uint8Array and isolates a nonzero-offset input", async () => {
+		const backing = new Uint8Array([9, 9, 0, 0x41, 0xff, 0x0a, 9]);
+		const content = backing.subarray(2, 6);
+		let dispatchedFrame: Uint8Array | undefined;
+		tauri.invoke.mockImplementationOnce((command, raw) => {
+			expect(command).toBe("workspace_write_file");
+			expect(Object.getPrototypeOf(raw)).toBe(Uint8Array.prototype);
+			dispatchedFrame = raw as Uint8Array;
+			backing.fill(7);
+			return Promise.resolve(validWrittenResult());
+		});
+		const bridge = createNativeBridge();
+
+		const result = await bridge.workspaceWriteFile(
+			workspaceVersionFixture.rootId,
+			workspaceVersionFixture.relativePath,
+			workspaceVersionFixture.version,
+			content,
+		);
+
+		expect(Buffer.from(dispatchedFrame ?? []).toString("hex")).toBe(
+			workspaceVersionFixture.write.frameHex,
+		);
+		expect(dispatchedFrame?.byteOffset).toBe(0);
+		expect(dispatchedFrame?.byteLength).toBe(
+			dispatchedFrame?.buffer.byteLength,
+		);
+		expect(tauri.invoke.mock.calls[0]).toHaveLength(2);
+		expect(result).toEqual(validWrittenResult());
+		expect(Object.isFrozen(result)).toBe(true);
+		if (result.status === "written") {
+			expect(Object.isFrozen(result.stat)).toBe(true);
+		}
+	});
+
+	it("rejects malformed PLW1 inputs locally without dispatch", async () => {
+		const bridge = createNativeBridge();
+
+		for (const operation of [
+			() => bridge.workspaceWriteFile(rootId, "", version, new Uint8Array()),
+			() =>
+				bridge.workspaceWriteFile(
+					rootId,
+					"../private",
+					version,
+					new Uint8Array(),
+				),
+			() =>
+				bridge.workspaceWriteFile(
+					rootId,
+					"file.bin",
+					"wv1:UPPER",
+					new Uint8Array(),
+				),
+			() =>
+				bridge.workspaceWriteFile(
+					rootId,
+					"file.bin",
+					version,
+					new Uint8Array(8 * 1_024 * 1_024 + 1),
+				),
+		]) {
+			await expect(operation()).rejects.toMatchObject({
+				code: expect.any(String),
+			});
+		}
+		expect(tauri.invoke).not.toHaveBeenCalled();
+	});
+
+	it("preserves strict pre-publication errors and classifies every untrusted response as unavailable", async () => {
+		const strictError = {
+			code: "WORKSPACE_FILE_MODIFIED",
+			message: "The workspace file changed since it was read.",
+		};
+		const nonRawWriteErrors = [
+			"INVALID_RELATIVE_PATH",
+			"PATH_OUTSIDE_ROOT",
+			"PATH_ENCODING_UNSUPPORTED",
+			"ENTRY_NOT_FOUND",
+			"ENTRY_TYPE_MISMATCH",
+		] as const;
+		tauri.invoke.mockRejectedValueOnce(strictError);
+		for (const code of nonRawWriteErrors) {
+			tauri.invoke.mockRejectedValueOnce({
+				code,
+				message: "This code is not reachable from the raw-write route.",
+			});
+		}
+		tauri.invoke
+			.mockRejectedValueOnce({
+				code: "WORKSPACE_WRITE_RESPONSE_UNAVAILABLE",
+				message: "The write task ended without a trustworthy response.",
+			})
+			.mockRejectedValueOnce({ code: "UNKNOWN", message: "backend wrote" })
+			.mockRejectedValueOnce(new Error("response channel lost"))
+			.mockResolvedValueOnce({ status: "written", stat: { private: true } })
+			.mockResolvedValueOnce({
+				status: "targetPublished",
+				publicationEvidence: "targetObservedWritten",
+				rename: "reportedFailure",
+				directorySync: "failed",
+				target: "changed",
+			});
+		const bridge = createNativeBridge();
+		const write = () =>
+			bridge.workspaceWriteFile(
+				rootId,
+				"file.bin",
+				version,
+				new Uint8Array([0, 0x41, 0xff, 0x0a]),
+			);
+
+		await expect(write()).rejects.toEqual(strictError);
+		for (let index = 0; index < nonRawWriteErrors.length + 4; index += 1) {
+			const unknown = await write();
+			expect(unknown).toEqual({
+				status: "outcomeUnknown",
+				observation: "responseUnavailable",
+				rename: "unobserved",
+				directorySync: "unobserved",
+				target: "ambiguous",
+			});
+			expect(Object.isFrozen(unknown)).toBe(true);
+		}
+		const published = await write();
+		expect(published).toEqual({
+			status: "targetPublished",
+			publicationEvidence: "targetObservedWritten",
+			rename: "reportedFailure",
+			directorySync: "failed",
+			target: "changed",
+		});
+		expect(Object.isFrozen(published)).toBe(true);
+		expect(tauri.invoke).toHaveBeenCalledTimes(nonRawWriteErrors.length + 6);
 	});
 
 	it("rejects hostile macOS byte-array fallbacks", async () => {

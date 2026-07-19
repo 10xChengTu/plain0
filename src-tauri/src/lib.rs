@@ -53,6 +53,7 @@ pub fn run() {
             workspace::commands::workspace_stat,
             workspace::commands::workspace_read_dir,
             workspace::commands::workspace_read_file,
+            workspace::commands::workspace_write_file,
             workspace::commands::workspace_create_file,
             workspace::commands::workspace_create_directory,
             workspace::commands::workspace_rename,

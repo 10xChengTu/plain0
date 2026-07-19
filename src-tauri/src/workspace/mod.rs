@@ -23,8 +23,10 @@ pub(crate) mod move_entry;
 pub mod picker;
 pub(crate) mod reader;
 pub mod service;
-#[cfg(unix)]
 pub(crate) mod version;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod versioned_writer;
+pub(crate) mod write_frame;
 pub(crate) mod writer;
 
 use dto::{WorkspaceRootSnapshot, WorkspaceSnapshot};
@@ -46,6 +48,17 @@ impl RootId {
     #[cfg(unix)]
     pub(crate) const fn as_bytes(&self) -> &[u8; 16] {
         self.0.as_bytes()
+    }
+
+    pub(crate) fn parse_v4_wire(wire: &str) -> Result<Self, CommandError> {
+        let value = Uuid::parse_str(wire).map_err(|_| invalid_root_id())?;
+        if value.hyphenated().to_string() != wire
+            || value.get_version() != Some(uuid::Version::Random)
+            || value.get_variant() != uuid::Variant::RFC4122
+        {
+            return Err(invalid_root_id());
+        }
+        Ok(Self(value))
     }
 }
 
@@ -503,6 +516,13 @@ fn root_not_authorized() -> CommandError {
     CommandError::new(
         "ROOT_NOT_AUTHORIZED",
         "The workspace root is not authorized.",
+    )
+}
+
+fn invalid_root_id() -> CommandError {
+    CommandError::new(
+        "INVALID_WORKSPACE_WRITE_REQUEST",
+        "The workspace write request is invalid.",
     )
 }
 

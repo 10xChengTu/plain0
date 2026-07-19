@@ -1,4 +1,5 @@
 import type {
+	CommandError,
 	RuntimeInfo,
 	WorkspaceCommitDeleteEntryRequest,
 	WorkspaceDeleteBatchPlan,
@@ -22,6 +23,7 @@ import type {
 	WorkspaceReadFileResult,
 	WorkspaceRoot,
 	WorkspaceSnapshot,
+	WorkspaceWriteResult,
 } from "./contracts";
 
 const UUID_V4_PATTERN =
@@ -38,11 +40,13 @@ const MAX_DELETE_DESCENDANT_ENTRIES = 10_000;
 const MAX_RELATIVE_PATH_BYTES = 4_096;
 const MAX_RELATIVE_PATH_SEGMENTS = 256;
 const PLR1_HEADER_BYTES = 36;
+const PLW1_HEADER_BYTES = 14;
 const WORKSPACE_VERSION_BYTES = 68;
 const MAX_PLR1_FRAME_BYTES =
 	PLR1_HEADER_BYTES + WORKSPACE_VERSION_BYTES + MAX_FILE_BYTES;
 const WORKSPACE_VERSION_PATTERN = /^wv1:[0-9a-f]{64}$/u;
 const MAX_JS_SAFE_INTEGER_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
+const MAX_COMMAND_ERROR_MESSAGE_LENGTH = 512;
 const CONTRACT_ERROR_MESSAGE =
 	"Native IPC returned a payload that violates the Plain contract.";
 const WORKSPACE_ENTRY_KINDS = new Set<WorkspaceEntryKind>([
@@ -53,6 +57,21 @@ const WORKSPACE_ENTRY_KINDS = new Set<WorkspaceEntryKind>([
 	"symlinkDirectory",
 	"other",
 ]);
+export const WORKSPACE_WRITE_PREPUBLICATION_ERROR_CODES = Object.freeze([
+	"ROOT_NOT_AUTHORIZED",
+	"ROOT_UNAVAILABLE",
+	"PERMISSION_DENIED",
+	"FILE_TOO_LARGE",
+	"INVALID_WORKSPACE_WRITE_REQUEST",
+	"WORKSPACE_CONFLICT",
+	"WORKSPACE_FILE_MODIFIED",
+	"WORKSPACE_WRITE_UNSUPPORTED",
+	"WORKSPACE_WINDOW_CLOSED",
+	"IO_FAILED",
+] as const);
+const WORKSPACE_WRITE_PREPUBLICATION_ERROR_CODE_SET = new Set<string>(
+	WORKSPACE_WRITE_PREPUBLICATION_ERROR_CODES,
+);
 const WORKSPACE_MOVE_INCOMPLETE_REASONS =
 	new Set<WorkspaceMoveIncompleteReason>([
 		"sourceChanged",
@@ -73,6 +92,25 @@ const WORKSPACE_DELETE_INCOMPLETE_REASONS =
 		"deleteFailed",
 	]);
 const utf8Encoder = new TextEncoder();
+const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
+const typedArrayBufferGetter = Object.getOwnPropertyDescriptor(
+	typedArrayPrototype,
+	"buffer",
+)?.get;
+const typedArrayByteLengthGetter = Object.getOwnPropertyDescriptor(
+	typedArrayPrototype,
+	"byteLength",
+)?.get;
+const typedArrayByteOffsetGetter = Object.getOwnPropertyDescriptor(
+	typedArrayPrototype,
+	"byteOffset",
+)?.get;
+const typedArraySet = Uint8Array.prototype.set;
+const arrayBufferByteLengthGetter = Object.getOwnPropertyDescriptor(
+	ArrayBuffer.prototype,
+	"byteLength",
+)?.get;
+const arrayBufferSlice = ArrayBuffer.prototype.slice;
 
 class IpcContractViolation extends Error {
 	readonly code = "IPC_CONTRACT_VIOLATION";
@@ -378,6 +416,124 @@ export function frozenWorkspaceCreateEntryRequest(
 		);
 	}
 	return request;
+}
+
+function workspaceWriteContentSnapshot(value: unknown): Uint8Array {
+	let buffer: ArrayBuffer;
+	let byteLength: number;
+	let byteOffset: number;
+	try {
+		if (
+			typeof value !== "object" ||
+			value === null ||
+			Object.getPrototypeOf(value) !== Uint8Array.prototype ||
+			typedArrayBufferGetter === undefined ||
+			typedArrayByteLengthGetter === undefined ||
+			typedArrayByteOffsetGetter === undefined ||
+			arrayBufferByteLengthGetter === undefined
+		) {
+			return violation();
+		}
+		buffer = Reflect.apply(typedArrayBufferGetter, value, []) as ArrayBuffer;
+		byteLength = Reflect.apply(typedArrayByteLengthGetter, value, []) as number;
+		byteOffset = Reflect.apply(typedArrayByteOffsetGetter, value, []) as number;
+		if (
+			Object.getPrototypeOf(buffer) !== ArrayBuffer.prototype ||
+			!Number.isSafeInteger(byteLength) ||
+			byteLength < 0 ||
+			!Number.isSafeInteger(byteOffset) ||
+			byteOffset < 0
+		) {
+			return violation();
+		}
+		const bufferByteLength = Reflect.apply(
+			arrayBufferByteLengthGetter,
+			buffer,
+			[],
+		) as number;
+		if (
+			!Number.isSafeInteger(bufferByteLength) ||
+			byteOffset + byteLength > bufferByteLength
+		) {
+			return violation();
+		}
+		// A zero-length detached ArrayBuffer otherwise looks identical to a valid
+		// empty view through the length getters.
+		Reflect.apply(arrayBufferSlice, buffer, [0, 0]);
+	} catch {
+		return violation();
+	}
+
+	if (byteLength > MAX_FILE_BYTES) {
+		return requestViolation(
+			"FILE_TOO_LARGE",
+			"The workspace file exceeds the supported size limit.",
+		);
+	}
+
+	try {
+		// Only intrinsic byteOffset/byteLength bytes cross the IPC boundary.
+		// Arbitrary own JS properties are deliberately neither enumerated nor read:
+		// the private exact Uint8Array snapshot is the complete raw request body.
+		const snapshot = new Uint8Array(byteLength);
+		Reflect.apply(typedArraySet, snapshot, [value, 0]);
+		return snapshot;
+	} catch {
+		return violation();
+	}
+}
+
+export function encodeWorkspaceWriteFileRequest(
+	rootId: unknown,
+	relativePath: unknown,
+	expectedVersion: unknown,
+	content: unknown,
+): Uint8Array {
+	const request = frozenWorkspaceCreateEntryRequest(rootId, relativePath);
+	if (
+		typeof expectedVersion !== "string" ||
+		!WORKSPACE_VERSION_PATTERN.test(expectedVersion)
+	) {
+		return requestViolation(
+			"WORKSPACE_FILE_MODIFIED",
+			"The workspace file changed since it was read.",
+		);
+	}
+	const contentSnapshot = workspaceWriteContentSnapshot(content);
+	const rootBytes = utf8Encoder.encode(request.rootId);
+	const pathBytes = utf8Encoder.encode(request.relativePath);
+	const versionBytes = utf8Encoder.encode(expectedVersion);
+	if (
+		rootBytes.byteLength !== 36 ||
+		pathBytes.byteLength < 1 ||
+		pathBytes.byteLength > MAX_RELATIVE_PATH_BYTES ||
+		versionBytes.byteLength !== WORKSPACE_VERSION_BYTES
+	) {
+		return violation();
+	}
+
+	const frame = new Uint8Array(
+		PLW1_HEADER_BYTES +
+			rootBytes.byteLength +
+			pathBytes.byteLength +
+			versionBytes.byteLength +
+			contentSnapshot.byteLength,
+	);
+	const view = new DataView(frame.buffer);
+	frame.set([0x50, 0x4c, 0x57, 0x31], 0);
+	view.setUint16(4, rootBytes.byteLength, false);
+	view.setUint16(6, pathBytes.byteLength, false);
+	view.setUint16(8, versionBytes.byteLength, false);
+	view.setUint32(10, contentSnapshot.byteLength, false);
+	let offset = PLW1_HEADER_BYTES;
+	frame.set(rootBytes, offset);
+	offset += rootBytes.byteLength;
+	frame.set(pathBytes, offset);
+	offset += pathBytes.byteLength;
+	frame.set(versionBytes, offset);
+	offset += versionBytes.byteLength;
+	frame.set(contentSnapshot, offset);
+	return frame;
 }
 
 export function frozenWorkspaceRenameRequest(
@@ -1085,6 +1241,183 @@ export function decodeWorkspaceReadFile(
 	});
 }
 
+export function decodeWorkspaceWriteResult(
+	value: unknown,
+	expectedVersion: string,
+	expectedContentLength: number,
+): WorkspaceWriteResult {
+	return sanitizedDecode(() => {
+		if (
+			typeof expectedVersion !== "string" ||
+			!WORKSPACE_VERSION_PATTERN.test(expectedVersion) ||
+			!Number.isSafeInteger(expectedContentLength) ||
+			expectedContentLength < 0 ||
+			expectedContentLength > MAX_FILE_BYTES
+		) {
+			return violation();
+		}
+		const snapshot = ownPlainDataSnapshot(value);
+		if (snapshot.status === "written") {
+			if (!hasExactKeys(snapshot, ["status", "stat"])) {
+				return violation();
+			}
+			const stat = decodeWorkspaceEntryStatValue(snapshot.stat);
+			if (
+				stat.kind !== "file" ||
+				typeof stat.version !== "string" ||
+				stat.version === expectedVersion ||
+				stat.size !== expectedContentLength
+			) {
+				return violation();
+			}
+			rejectProxyObject(value as object);
+			return Object.freeze({ status: snapshot.status, stat });
+		}
+
+		if (snapshot.status === "targetPublished") {
+			if (
+				!hasExactKeys(snapshot, [
+					"status",
+					"publicationEvidence",
+					"rename",
+					"directorySync",
+					"target",
+				]) ||
+				(snapshot.publicationEvidence !== "renameReportedSuccess" &&
+					snapshot.publicationEvidence !== "targetObservedWritten") ||
+				(snapshot.rename !== "reportedSuccess" &&
+					snapshot.rename !== "reportedFailure") ||
+				(snapshot.directorySync !== "synced" &&
+					snapshot.directorySync !== "failed") ||
+				(snapshot.target !== "matchesWritten" &&
+					snapshot.target !== "changed" &&
+					snapshot.target !== "unverifiable") ||
+				(snapshot.rename === "reportedSuccess" &&
+					snapshot.publicationEvidence === "targetObservedWritten" &&
+					(snapshot.directorySync !== "failed" ||
+						snapshot.target !== "matchesWritten")) ||
+				(snapshot.rename === "reportedSuccess" &&
+					snapshot.publicationEvidence === "renameReportedSuccess" &&
+					snapshot.target === "matchesWritten") ||
+				(snapshot.rename === "reportedFailure" &&
+					snapshot.publicationEvidence !== "targetObservedWritten")
+			) {
+				return violation();
+			}
+			rejectProxyObject(value as object);
+			if (
+				snapshot.rename === "reportedSuccess" &&
+				snapshot.publicationEvidence === "targetObservedWritten"
+			) {
+				return Object.freeze({
+					status: snapshot.status,
+					publicationEvidence: snapshot.publicationEvidence,
+					rename: snapshot.rename,
+					directorySync: "failed",
+					target: "matchesWritten",
+				});
+			}
+			if (snapshot.rename === "reportedSuccess") {
+				return Object.freeze({
+					status: snapshot.status,
+					publicationEvidence: "renameReportedSuccess",
+					rename: snapshot.rename,
+					directorySync: snapshot.directorySync,
+					target: snapshot.target as "changed" | "unverifiable",
+				});
+			}
+			return Object.freeze({
+				status: snapshot.status,
+				publicationEvidence: "targetObservedWritten",
+				rename: snapshot.rename,
+				directorySync: snapshot.directorySync,
+				target: snapshot.target,
+			});
+		}
+
+		if (
+			snapshot.status !== "outcomeUnknown" ||
+			!hasExactKeys(snapshot, [
+				"status",
+				"observation",
+				"rename",
+				"directorySync",
+				"target",
+			]) ||
+			snapshot.target !== "ambiguous"
+		) {
+			return violation();
+		}
+		if (snapshot.observation === "native") {
+			if (
+				snapshot.rename !== "reportedFailure" ||
+				snapshot.directorySync !== "notAttempted"
+			) {
+				return violation();
+			}
+			rejectProxyObject(value as object);
+			return Object.freeze({
+				status: snapshot.status,
+				observation: snapshot.observation,
+				rename: snapshot.rename,
+				directorySync: snapshot.directorySync,
+				target: snapshot.target,
+			});
+		}
+		if (
+			snapshot.observation !== "responseUnavailable" ||
+			snapshot.rename !== "unobserved" ||
+			snapshot.directorySync !== "unobserved"
+		) {
+			return violation();
+		}
+		rejectProxyObject(value as object);
+		return Object.freeze({
+			status: snapshot.status,
+			observation: snapshot.observation,
+			rename: snapshot.rename,
+			directorySync: snapshot.directorySync,
+			target: snapshot.target,
+		});
+	});
+}
+
+export function workspaceWriteResponseUnavailable(): WorkspaceWriteResult {
+	return Object.freeze({
+		status: "outcomeUnknown",
+		observation: "responseUnavailable",
+		rename: "unobserved",
+		directorySync: "unobserved",
+		target: "ambiguous",
+	});
+}
+
+export function decodeWorkspaceWritePrepublicationError(
+	value: unknown,
+): CommandError | undefined {
+	try {
+		const snapshot = ownPlainDataSnapshot(value);
+		if (
+			!hasExactKeys(snapshot, ["code", "message"]) ||
+			typeof snapshot.code !== "string" ||
+			!WORKSPACE_WRITE_PREPUBLICATION_ERROR_CODE_SET.has(snapshot.code) ||
+			typeof snapshot.message !== "string" ||
+			snapshot.message.length < 1 ||
+			snapshot.message.length > MAX_COMMAND_ERROR_MESSAGE_LENGTH ||
+			!isWellFormedUtf16(snapshot.message)
+		) {
+			return undefined;
+		}
+		rejectProxyObject(value as object);
+		return Object.freeze({
+			code: snapshot.code,
+			message: snapshot.message,
+		});
+	} catch {
+		return undefined;
+	}
+}
+
 export function decodeWorkspaceVoid(value: unknown): void {
 	return sanitizedDecode(() => {
 		if (value !== null) {
@@ -1329,6 +1662,18 @@ export function frozenWorkspaceReadFile(
 ): WorkspaceReadFileResult {
 	const frozenStat = decodeWorkspaceEntryStat(stat);
 	return frozenWorkspaceReadFileResult(frozenStat, bytes.slice());
+}
+
+export function frozenWorkspaceWriteResult(
+	result: WorkspaceWriteResult,
+	expectedVersion: string,
+	expectedContentLength: number,
+): WorkspaceWriteResult {
+	return decodeWorkspaceWriteResult(
+		result,
+		expectedVersion,
+		expectedContentLength,
+	);
 }
 
 export function frozenWorkspaceMoveResult(

@@ -8,13 +8,18 @@ import {
 	decodeWorkspaceFileData,
 	decodeWorkspaceReadFile,
 	decodeWorkspaceReadDirectory,
+	decodeWorkspaceWritePrepublicationError,
+	decodeWorkspaceWriteResult,
 	decodeWorkspaceVoid,
+	encodeWorkspaceWriteFileRequest,
 	frozenWorkspaceCopyRequest,
 	frozenWorkspaceCreateEntryRequest,
 	frozenWorkspaceEntryRequest,
 	frozenWorkspaceFileData,
 	frozenWorkspaceRenameRequest,
 	isPortableWorkspaceEntryName,
+	WORKSPACE_WRITE_PREPUBLICATION_ERROR_CODES,
+	workspaceWriteResponseUnavailable,
 } from "../../app/platform/tauri/workspace-codec";
 
 const rootId = "00000000-0000-4000-8000-000000000101";
@@ -24,6 +29,7 @@ const contractError = {
 	message: "Native IPC returned a payload that violates the Plain contract.",
 };
 const version = `wv1:${"a".repeat(64)}`;
+const nextVersion = `wv1:${"b".repeat(64)}`;
 
 function plr1Frame({
 	kind = "file",
@@ -77,6 +83,385 @@ function arrayBufferFromHex(hex: string): ArrayBuffer {
 	}
 	return bytes.buffer;
 }
+
+function writtenStat(versionValue = nextVersion) {
+	return {
+		kind: "file",
+		size: 4,
+		mtime: 1_700_000_000_124,
+		ctime: 1_699_999_999_000,
+		version: versionValue,
+	};
+}
+
+function decodeWriteResult(value: unknown) {
+	return decodeWorkspaceWriteResult(value, version, 4);
+}
+
+describe("workspace versioned write codec", () => {
+	it("encodes the shared PLW1 golden from an isolated nonzero-offset view", () => {
+		const backing = new Uint8Array([9, 9, 0, 0x41, 0xff, 0x0a, 9]);
+		const content = backing.subarray(2, 6);
+		const frame = encodeWorkspaceWriteFileRequest(
+			workspaceVersionFixture.rootId,
+			workspaceVersionFixture.relativePath,
+			workspaceVersionFixture.version,
+			content,
+		);
+
+		expect(Buffer.from(frame).toString("hex")).toBe(
+			workspaceVersionFixture.write.frameHex,
+		);
+		expect(Object.getPrototypeOf(frame)).toBe(Uint8Array.prototype);
+		expect(frame.byteOffset).toBe(0);
+		expect(frame.byteLength).toBe(frame.buffer.byteLength);
+		expect(Reflect.ownKeys(frame.buffer)).toEqual([]);
+
+		backing.fill(7);
+		expect(Buffer.from(frame).toString("hex")).toBe(
+			workspaceVersionFixture.write.frameHex,
+		);
+	});
+
+	it(
+		"accepts the closed 0..8 MiB content range without retaining caller bytes",
+		{ timeout: 60_000 },
+		() => {
+			const empty = encodeWorkspaceWriteFileRequest(
+				rootId,
+				"empty.bin",
+				version,
+				new Uint8Array(),
+			);
+			const maximumContent = new Uint8Array(8 * 1_024 * 1_024);
+			const maximum = encodeWorkspaceWriteFileRequest(
+				rootId,
+				"maximum.bin",
+				version,
+				maximumContent,
+			);
+			expect(new DataView(empty.buffer).getUint32(10, false)).toBe(0);
+			expect(new DataView(maximum.buffer).getUint32(10, false)).toBe(
+				maximumContent.byteLength,
+			);
+			const maximumView = new DataView(maximum.buffer);
+			expect(maximumView.getUint16(4, false)).toBe(36);
+			expect(maximumView.getUint16(6, false)).toBe(
+				new TextEncoder().encode("maximum.bin").byteLength,
+			);
+			expect(maximumView.getUint16(8, false)).toBe(68);
+			expect(maximum.byteLength).toBe(
+				14 + 36 + "maximum.bin".length + 68 + maximumContent.byteLength,
+			);
+			maximumContent.fill(1);
+			expect(maximum.at(-1)).toBe(0);
+		},
+	);
+
+	it("rejects non-exact, detached, proxied and oversized write views", () => {
+		class Uint8ArraySubclass extends Uint8Array {}
+		const detached = new Uint8Array([1, 2, 3]);
+		structuredClone(detached.buffer, { transfer: [detached.buffer] });
+		let proxyReads = 0;
+		const proxy = new Proxy(new Uint8Array([1, 2, 3]), {
+			get(target, property, receiver) {
+				proxyReads += 1;
+				return Reflect.get(target, property, receiver);
+			},
+		});
+		const shared = new Uint8Array(new SharedArrayBuffer(3));
+
+		for (const content of [
+			new Uint8ArraySubclass([1, 2, 3]),
+			detached,
+			proxy,
+			shared,
+			new DataView(new ArrayBuffer(3)),
+			new ArrayBuffer(3),
+			[1, 2, 3],
+		]) {
+			expect(() =>
+				encodeWorkspaceWriteFileRequest(rootId, "file.bin", version, content),
+			).toThrowError(expect.objectContaining(contractError));
+		}
+		expect(proxyReads).toBe(0);
+		expect(() =>
+			encodeWorkspaceWriteFileRequest(
+				rootId,
+				"file.bin",
+				version,
+				new Uint8Array(8 * 1_024 * 1_024 + 1),
+			),
+		).toThrowError(expect.objectContaining({ code: "FILE_TOO_LARGE" }));
+	});
+
+	it("sanitizes arbitrary view properties without reading them", () => {
+		const decorated = new Uint8Array([1, 2, 3]);
+		let accessorReads = 0;
+		Object.defineProperty(decorated, "private", {
+			get() {
+				accessorReads += 1;
+				return "/secret";
+			},
+		});
+		Object.defineProperty(decorated, Symbol("private"), { value: true });
+		const clean = encodeWorkspaceWriteFileRequest(
+			rootId,
+			"file.bin",
+			version,
+			new Uint8Array([1, 2, 3]),
+		);
+		const sanitized = encodeWorkspaceWriteFileRequest(
+			rootId,
+			"file.bin",
+			version,
+			decorated,
+		);
+		expect(sanitized).toEqual(clean);
+		expect(accessorReads).toBe(0);
+	});
+
+	it("rejects invalid local write authority before frame construction", () => {
+		for (const [candidateRoot, path, expectedVersion, code] of [
+			[
+				"00000000-0000-3000-8000-000000000101",
+				"file",
+				version,
+				"ROOT_NOT_AUTHORIZED",
+			],
+			[rootId, "", version, "ENTRY_TYPE_MISMATCH"],
+			[rootId, "../private", version, "INVALID_RELATIVE_PATH"],
+			[rootId, "file", null, "WORKSPACE_FILE_MODIFIED"],
+			[rootId, "file", "wv1:UPPER", "WORKSPACE_FILE_MODIFIED"],
+		] as const) {
+			expect(() =>
+				encodeWorkspaceWriteFileRequest(
+					candidateRoot,
+					path,
+					expectedVersion,
+					new Uint8Array(),
+				),
+			).toThrowError(expect.objectContaining({ code }));
+		}
+	});
+
+	it("decodes and freezes every valid write terminal class", () => {
+		const written = decodeWriteResult({
+			status: "written",
+			stat: writtenStat(),
+		});
+		const results = [
+			written,
+			decodeWriteResult({
+				status: "targetPublished",
+				publicationEvidence: "targetObservedWritten",
+				rename: "reportedSuccess",
+				directorySync: "failed",
+				target: "matchesWritten",
+			}),
+			decodeWriteResult({
+				status: "targetPublished",
+				publicationEvidence: "renameReportedSuccess",
+				rename: "reportedSuccess",
+				directorySync: "failed",
+				target: "changed",
+			}),
+			decodeWriteResult({
+				status: "targetPublished",
+				publicationEvidence: "targetObservedWritten",
+				rename: "reportedFailure",
+				directorySync: "synced",
+				target: "matchesWritten",
+			}),
+			decodeWriteResult({
+				status: "outcomeUnknown",
+				observation: "native",
+				rename: "reportedFailure",
+				directorySync: "notAttempted",
+				target: "ambiguous",
+			}),
+			workspaceWriteResponseUnavailable(),
+		];
+		for (const result of results) {
+			expect(Object.isFrozen(result)).toBe(true);
+		}
+		expect(written.status).toBe("written");
+		if (written.status === "written") {
+			expect(Object.isFrozen(written.stat)).toBe(true);
+		}
+	});
+
+	it("rejects invalid publication evidence, full-success downgrades and unknown cross-fields", () => {
+		const invalid = [
+			{ status: "written", stat: { ...writtenStat(), version: null } },
+			{ status: "written", stat: writtenStat(version) },
+			{ status: "written", stat: { ...writtenStat(), kind: "symlinkFile" } },
+			{
+				status: "written",
+				stat: { ...writtenStat(), size: 8 * 1_024 * 1_024 + 1 },
+			},
+			{
+				status: "targetPublished",
+				publicationEvidence: "targetObservedWritten",
+				rename: "reportedSuccess",
+				directorySync: "synced",
+				target: "matchesWritten",
+			},
+			{
+				status: "targetPublished",
+				publicationEvidence: "renameReportedSuccess",
+				rename: "reportedFailure",
+				directorySync: "failed",
+				target: "changed",
+			},
+			{
+				status: "targetPublished",
+				publicationEvidence: "renameReportedSuccess",
+				rename: "reportedSuccess",
+				directorySync: "failed",
+				target: "matchesWritten",
+			},
+			{
+				status: "targetPublished",
+				publicationEvidence: "targetObservedWritten",
+				rename: "reportedSuccess",
+				directorySync: "failed",
+				target: "changed",
+			},
+			{
+				status: "targetPublished",
+				publicationEvidence: "targetObservedWritten",
+				rename: "reportedSuccess",
+				directorySync: "failed",
+				target: "unverifiable",
+			},
+			{
+				status: "outcomeUnknown",
+				observation: "native",
+				rename: "unobserved",
+				directorySync: "unobserved",
+				target: "ambiguous",
+			},
+			{
+				status: "outcomeUnknown",
+				observation: "native",
+				rename: "reportedFailure",
+				directorySync: "synced",
+				target: "ambiguous",
+			},
+			{
+				status: "outcomeUnknown",
+				observation: "native",
+				rename: "reportedFailure",
+				directorySync: "failed",
+				target: "ambiguous",
+			},
+			{
+				status: "outcomeUnknown",
+				observation: "responseUnavailable",
+				rename: "reportedFailure",
+				directorySync: "notAttempted",
+				target: "ambiguous",
+			},
+			{
+				status: "outcomeUnknown",
+				observation: "responseUnavailable",
+				rename: "unobserved",
+				directorySync: "unobserved",
+				target: "ambiguous",
+				privatePath: "/secret",
+			},
+		];
+		for (const value of invalid) {
+			expect(() => decodeWriteResult(value)).toThrowError(
+				expect.objectContaining(contractError),
+			);
+		}
+
+		let getterReads = 0;
+		const accessorResult = Object.defineProperty({}, "status", {
+			enumerable: true,
+			get() {
+				getterReads += 1;
+				return "written";
+			},
+		});
+		let proxyReads = 0;
+		const proxyResult = new Proxy(
+			Object.freeze({ status: "written", stat: Object.freeze(writtenStat()) }),
+			{
+				get(target, property, receiver) {
+					proxyReads += 1;
+					return Reflect.get(target, property, receiver);
+				},
+			},
+		);
+		for (const result of [accessorResult, proxyResult]) {
+			expect(() => decodeWriteResult(result)).toThrowError(
+				expect.objectContaining(contractError),
+			);
+		}
+		expect(getterReads).toBe(0);
+		expect(proxyReads).toBe(0);
+	});
+
+	it("preserves only the strict pre-publication CommandError whitelist", () => {
+		expect(WORKSPACE_WRITE_PREPUBLICATION_ERROR_CODES).toEqual([
+			"ROOT_NOT_AUTHORIZED",
+			"ROOT_UNAVAILABLE",
+			"PERMISSION_DENIED",
+			"FILE_TOO_LARGE",
+			"INVALID_WORKSPACE_WRITE_REQUEST",
+			"WORKSPACE_CONFLICT",
+			"WORKSPACE_FILE_MODIFIED",
+			"WORKSPACE_WRITE_UNSUPPORTED",
+			"WORKSPACE_WINDOW_CLOSED",
+			"IO_FAILED",
+		]);
+		const accepted = decodeWorkspaceWritePrepublicationError({
+			code: "WORKSPACE_FILE_MODIFIED",
+			message: "The workspace file changed since it was read.",
+		});
+		expect(accepted).toEqual({
+			code: "WORKSPACE_FILE_MODIFIED",
+			message: "The workspace file changed since it was read.",
+		});
+		expect(Object.isFrozen(accepted)).toBe(true);
+
+		for (const error of [
+			{ code: "UNKNOWN", message: "unknown" },
+			{ code: "INVALID_RELATIVE_PATH", message: "not a raw-write error" },
+			{ code: "PATH_OUTSIDE_ROOT", message: "not a raw-write error" },
+			{
+				code: "PATH_ENCODING_UNSUPPORTED",
+				message: "not a raw-write error",
+			},
+			{ code: "ENTRY_NOT_FOUND", message: "not a raw-write error" },
+			{ code: "ENTRY_TYPE_MISMATCH", message: "not a raw-write error" },
+			{ code: "IO_FAILED", message: "failure", details: "private" },
+			{ code: "IO_FAILED", message: "" },
+			new Error("failure"),
+			"failure",
+		]) {
+			expect(decodeWorkspaceWritePrepublicationError(error)).toBeUndefined();
+		}
+		let getterReads = 0;
+		const accessor = {
+			code: "IO_FAILED",
+			get message() {
+				getterReads += 1;
+				return "failure";
+			},
+		};
+		const proxy = new Proxy(
+			Object.freeze({ code: "IO_FAILED", message: "failure" }),
+			{},
+		);
+		expect(decodeWorkspaceWritePrepublicationError(accessor)).toBeUndefined();
+		expect(decodeWorkspaceWritePrepublicationError(proxy)).toBeUndefined();
+		expect(getterReads).toBe(0);
+	});
+});
 
 describe("workspace file data codec", () => {
 	it("accepts only null for void native command responses", () => {

@@ -1,12 +1,27 @@
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
 
+#[cfg(unix)]
 use crate::path_policy::RelativePath;
 
+#[cfg(unix)]
 use super::RootId;
 
 pub(crate) const MAX_VERSIONED_FILE_BYTES: u64 = 8 * 1_024 * 1_024;
+#[cfg(unix)]
 const VERSION_DOMAIN: &[u8] = b"plain.workspace.file-version.v1\0";
+#[cfg(unix)]
 const SPECIAL_MODE_BITS: u32 = 0o7000;
+pub(crate) const VERSION_TOKEN_BYTES: usize = 68;
+
+pub(crate) fn is_version_token(value: &str) -> bool {
+    value.len() == VERSION_TOKEN_BYTES
+        && value.strip_prefix("wv1:").is_some_and(|digest| {
+            digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -20,6 +35,7 @@ pub(crate) enum FileSystemKind {
     Overlayfs = 6,
 }
 
+#[cfg(unix)]
 impl FileSystemKind {
     const fn code(self) -> u32 {
         self as u32
@@ -127,6 +143,7 @@ fn version_token_from_parts(
     Some(format_digest(hasher.finalize().into()))
 }
 
+#[cfg(unix)]
 fn format_digest(digest: [u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut token = String::with_capacity(68);

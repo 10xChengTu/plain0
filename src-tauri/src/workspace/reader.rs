@@ -16,6 +16,7 @@ use crate::path_policy::RelativePath;
 use super::dto::{
     WorkspaceDirectoryEntry, WorkspaceEntryKind, WorkspaceEntryStat, WorkspaceReadDirectoryResult,
 };
+use super::version::is_version_token;
 #[cfg(unix)]
 use super::version::{
     version_token, writable_filesystem_kind, writer_eligibility, FileSystemKind,
@@ -32,7 +33,6 @@ const PLR1_HEADER_BYTES: usize = 36;
 const PLR1_MAGIC: &[u8; 4] = b"PLR1";
 const PLR1_FILE_KIND: u8 = 1;
 const PLR1_SYMLINK_FILE_KIND: u8 = 2;
-const VERSION_TOKEN_BYTES: usize = 68;
 
 #[derive(Clone, Copy)]
 struct ReaderLimits {
@@ -123,14 +123,7 @@ impl WorkspaceReadFileReceipt {
 fn valid_receipt_version(kind: WorkspaceEntryKind, version: Option<&str>) -> bool {
     match (kind, version) {
         (WorkspaceEntryKind::File, None) | (WorkspaceEntryKind::SymlinkFile, None) => true,
-        (WorkspaceEntryKind::File, Some(version)) => {
-            version.len() == VERSION_TOKEN_BYTES
-                && version.strip_prefix("wv1:").is_some_and(|digest| {
-                    digest
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                })
-        }
+        (WorkspaceEntryKind::File, Some(version)) => is_version_token(version),
         _ => false,
     }
 }
@@ -749,7 +742,7 @@ fn classify_plain_file_type(file_type: FileType) -> WorkspaceEntryKind {
     }
 }
 
-fn stat_from_metadata(
+pub(crate) fn stat_from_metadata(
     kind: WorkspaceEntryKind,
     metadata: &Metadata,
     version: Option<String>,

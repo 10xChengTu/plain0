@@ -554,6 +554,154 @@ pub struct WorkspaceEntryStat {
     version: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum WorkspaceWritePublicationEvidence {
+    RenameReportedSuccess,
+    TargetObservedWritten,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum WorkspaceWriteRenameObservation {
+    ReportedSuccess,
+    ReportedFailure,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum WorkspaceWriteDirectorySyncObservation {
+    Synced,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum WorkspaceWriteTargetObservation {
+    MatchesWritten,
+    Changed,
+    Unverifiable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum WorkspaceWriteNativeObservation {
+    Native,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum WorkspaceWriteFailedRenameObservation {
+    ReportedFailure,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum WorkspaceWriteUnknownDirectorySyncObservation {
+    NotAttempted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum WorkspaceWriteAmbiguousTargetObservation {
+    Ambiguous,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+enum WorkspaceWriteResultWire {
+    Written {
+        stat: WorkspaceEntryStat,
+    },
+    TargetPublished {
+        publication_evidence: WorkspaceWritePublicationEvidence,
+        rename: WorkspaceWriteRenameObservation,
+        directory_sync: WorkspaceWriteDirectorySyncObservation,
+        target: WorkspaceWriteTargetObservation,
+    },
+    OutcomeUnknown {
+        observation: WorkspaceWriteNativeObservation,
+        rename: WorkspaceWriteFailedRenameObservation,
+        directory_sync: WorkspaceWriteUnknownDirectorySyncObservation,
+        target: WorkspaceWriteAmbiguousTargetObservation,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WorkspaceWriteResult(WorkspaceWriteResultWire);
+
+impl WorkspaceWriteResult {
+    pub(crate) const fn written(stat: WorkspaceEntryStat) -> Self {
+        Self(WorkspaceWriteResultWire::Written { stat })
+    }
+
+    pub(crate) const fn rename_succeeded_sync_failed_with_written_target() -> Self {
+        Self(WorkspaceWriteResultWire::TargetPublished {
+            publication_evidence: WorkspaceWritePublicationEvidence::TargetObservedWritten,
+            rename: WorkspaceWriteRenameObservation::ReportedSuccess,
+            directory_sync: WorkspaceWriteDirectorySyncObservation::Failed,
+            target: WorkspaceWriteTargetObservation::MatchesWritten,
+        })
+    }
+
+    pub(crate) const fn rename_succeeded_with_changed_target(
+        directory_sync: WorkspaceWriteDirectorySyncObservation,
+    ) -> Self {
+        Self(WorkspaceWriteResultWire::TargetPublished {
+            publication_evidence: WorkspaceWritePublicationEvidence::RenameReportedSuccess,
+            rename: WorkspaceWriteRenameObservation::ReportedSuccess,
+            directory_sync,
+            target: WorkspaceWriteTargetObservation::Changed,
+        })
+    }
+
+    pub(crate) const fn rename_succeeded_with_unverifiable_target(
+        directory_sync: WorkspaceWriteDirectorySyncObservation,
+    ) -> Self {
+        Self(WorkspaceWriteResultWire::TargetPublished {
+            publication_evidence: WorkspaceWritePublicationEvidence::RenameReportedSuccess,
+            rename: WorkspaceWriteRenameObservation::ReportedSuccess,
+            directory_sync,
+            target: WorkspaceWriteTargetObservation::Unverifiable,
+        })
+    }
+
+    pub(crate) const fn rename_failed_with_observed_target(
+        directory_sync: WorkspaceWriteDirectorySyncObservation,
+        target: WorkspaceWriteTargetObservation,
+    ) -> Self {
+        Self(WorkspaceWriteResultWire::TargetPublished {
+            publication_evidence: WorkspaceWritePublicationEvidence::TargetObservedWritten,
+            rename: WorkspaceWriteRenameObservation::ReportedFailure,
+            directory_sync,
+            target,
+        })
+    }
+
+    pub(crate) const fn native_unknown() -> Self {
+        Self(WorkspaceWriteResultWire::OutcomeUnknown {
+            observation: WorkspaceWriteNativeObservation::Native,
+            rename: WorkspaceWriteFailedRenameObservation::ReportedFailure,
+            directory_sync: WorkspaceWriteUnknownDirectorySyncObservation::NotAttempted,
+            target: WorkspaceWriteAmbiguousTargetObservation::Ambiguous,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn written_stat(&self) -> Option<&WorkspaceEntryStat> {
+        match &self.0 {
+            WorkspaceWriteResultWire::Written { stat } => Some(stat),
+            WorkspaceWriteResultWire::TargetPublished { .. }
+            | WorkspaceWriteResultWire::OutcomeUnknown { .. } => None,
+        }
+    }
+}
+
 impl WorkspaceEntryStat {
     pub(crate) const fn new(
         kind: WorkspaceEntryKind,
@@ -636,6 +784,8 @@ mod tests {
         WorkspaceEntryRequest, WorkspaceMoveIncompleteReason, WorkspaceMoveRequest,
         WorkspaceMoveResult, WorkspacePickRootsMode, WorkspacePickRootsRequest,
         WorkspacePrepareDeleteRequest, WorkspaceRenameRequest,
+        WorkspaceWriteDirectorySyncObservation, WorkspaceWriteResult,
+        WorkspaceWriteTargetObservation,
     };
 
     #[test]
@@ -828,6 +978,95 @@ mod tests {
                 "status": "targetPublishedSourcePartiallyDeleted",
                 "reason": "deleteFailed",
                 "removedEntries": 7,
+            })
+        );
+    }
+
+    #[test]
+    fn write_result_constructors_only_emit_valid_camel_case_terminal_states() {
+        let stat = super::WorkspaceEntryStat::new(
+            WorkspaceEntryKind::File,
+            4,
+            5,
+            6,
+            Some(format!("wv1:{}", "a".repeat(64))),
+        );
+        assert_eq!(
+            serde_json::to_value(WorkspaceWriteResult::written(stat)).unwrap(),
+            serde_json::json!({
+                "status": "written",
+                "stat": {
+                    "kind": "file",
+                    "size": 4,
+                    "mtime": 5,
+                    "ctime": 6,
+                    "version": format!("wv1:{}", "a".repeat(64)),
+                },
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(
+                WorkspaceWriteResult::rename_succeeded_sync_failed_with_written_target(),
+            )
+            .unwrap(),
+            serde_json::json!({
+                "status": "targetPublished",
+                "publicationEvidence": "targetObservedWritten",
+                "rename": "reportedSuccess",
+                "directorySync": "failed",
+                "target": "matchesWritten",
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(WorkspaceWriteResult::rename_succeeded_with_changed_target(
+                WorkspaceWriteDirectorySyncObservation::Synced,
+            ))
+            .unwrap(),
+            serde_json::json!({
+                "status": "targetPublished",
+                "publicationEvidence": "renameReportedSuccess",
+                "rename": "reportedSuccess",
+                "directorySync": "synced",
+                "target": "changed",
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(
+                WorkspaceWriteResult::rename_succeeded_with_unverifiable_target(
+                    WorkspaceWriteDirectorySyncObservation::Failed,
+                ),
+            )
+            .unwrap(),
+            serde_json::json!({
+                "status": "targetPublished",
+                "publicationEvidence": "renameReportedSuccess",
+                "rename": "reportedSuccess",
+                "directorySync": "failed",
+                "target": "unverifiable",
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(WorkspaceWriteResult::rename_failed_with_observed_target(
+                WorkspaceWriteDirectorySyncObservation::Synced,
+                WorkspaceWriteTargetObservation::Changed,
+            ))
+            .unwrap(),
+            serde_json::json!({
+                "status": "targetPublished",
+                "publicationEvidence": "targetObservedWritten",
+                "rename": "reportedFailure",
+                "directorySync": "synced",
+                "target": "changed",
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(WorkspaceWriteResult::native_unknown()).unwrap(),
+            serde_json::json!({
+                "status": "outcomeUnknown",
+                "observation": "native",
+                "rename": "reportedFailure",
+                "directorySync": "notAttempted",
+                "target": "ambiguous",
             })
         );
     }

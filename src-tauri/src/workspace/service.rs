@@ -12,6 +12,7 @@ use super::dto::{
     DeleteConfirmationId, DeleteEntryId, WorkspaceDeleteBatchPlan, WorkspaceDeleteResult,
     WorkspaceEntryStat, WorkspaceMoveResult, WorkspacePickRootsMode, WorkspacePickRootsResult,
     WorkspacePickRootsStatus, WorkspaceReadDirectoryResult, WorkspaceSnapshot,
+    WorkspaceWriteResult,
 };
 use super::picker::{DirectoryPicker, DirectoryPickerResult};
 use super::reader;
@@ -120,6 +121,36 @@ impl WorkspaceService {
     ) -> Result<Vec<u8>, CommandError> {
         self.run_reader(window_label, root_id, move |lease| {
             reader::read_file(&lease, &relative_path)?.into_plr1_frame()
+        })
+        .await
+    }
+
+    pub async fn write_file(
+        &self,
+        window_label: &str,
+        root_id: RootId,
+        relative_path: RelativePath,
+        expected_version: String,
+        content: Vec<u8>,
+    ) -> Result<WorkspaceWriteResult, CommandError> {
+        self.run_versioned_write(window_label, root_id, move |lease| {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            {
+                super::versioned_writer::write_file(
+                    &lease,
+                    &relative_path,
+                    &expected_version,
+                    &content,
+                )
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            {
+                let _ = (lease, relative_path, expected_version, content);
+                Err(CommandError::new(
+                    "WORKSPACE_WRITE_UNSUPPORTED",
+                    "Versioned workspace writes are not supported on this platform.",
+                ))
+            }
         })
         .await
     }
@@ -395,6 +426,32 @@ impl WorkspaceService {
             .await
     }
 
+    async fn run_versioned_write<F>(
+        &self,
+        window_label: &str,
+        root_id: RootId,
+        operation: F,
+    ) -> Result<WorkspaceWriteResult, CommandError>
+    where
+        F: FnOnce(WorkspaceRootLease) -> Result<WorkspaceWriteResult, CommandError>
+            + Send
+            + 'static,
+    {
+        let workspace = self.scope_for_window(window_label)?;
+        let lease = workspace.lease(root_id)?;
+        let leased_root_id = lease.root_id();
+        let joined = tauri::async_runtime::spawn_blocking(move || {
+            let _mutation = lock(&workspace.mutation_gate)?;
+            workspace.validate_lease(leased_root_id)?;
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(lease))) {
+                Ok(result) => result,
+                Err(_) => Err(workspace_write_response_unavailable()),
+            }
+        })
+        .await;
+        classify_versioned_write_join(joined)
+    }
+
     async fn run_mutation_with_hook<T, B, F>(
         &self,
         window_label: &str,
@@ -470,6 +527,22 @@ impl WorkspaceService {
         })
         .await
         .map_err(|_| workspace_copy_failed())?
+    }
+}
+
+fn workspace_write_response_unavailable() -> CommandError {
+    CommandError::new(
+        "WORKSPACE_WRITE_RESPONSE_UNAVAILABLE",
+        "The workspace write result is unavailable.",
+    )
+}
+
+fn classify_versioned_write_join<E>(
+    result: Result<Result<WorkspaceWriteResult, CommandError>, E>,
+) -> Result<WorkspaceWriteResult, CommandError> {
+    match result {
+        Ok(result) => result,
+        Err(_) => Err(workspace_write_response_unavailable()),
     }
 }
 

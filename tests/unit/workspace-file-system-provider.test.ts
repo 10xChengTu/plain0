@@ -109,6 +109,9 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 				Uint8Array.from([1, 2, 3]),
 			);
 		},
+		async workspaceWriteFile() {
+			throw new Error("unused");
+		},
 		...overrides,
 	};
 }
