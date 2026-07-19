@@ -35,6 +35,7 @@ import type {
 import {
 	decodeWorkspaceEntryStat,
 	decodeWorkspaceCapabilities,
+	decodeWorkspaceMoveResult,
 	frozenWorkspaceEntryRequest,
 } from "../../platform/tauri/workspace-codec";
 
@@ -67,6 +68,8 @@ export type PlainWorkspaceWriteFileResult =
 
 const SANITIZED_MESSAGES = Object.freeze({
 	entryNotFound: "The workspace entry does not exist.",
+	moveIncomplete:
+		"The workspace move published its target but could not remove all of its source.",
 	notDirectory: "The workspace entry is not a directory.",
 	noPermissions: "The workspace entry cannot be accessed.",
 	unavailable: "The workspace is unavailable.",
@@ -240,6 +243,148 @@ function mapCreateError(error: unknown): Readonly<{
 				rescan: true,
 			});
 	}
+}
+
+function requireNoOverwriteOptions(options: IFileOverwriteOptions): void {
+	try {
+		if (typeof options !== "object" || options === null) {
+			throw noPermissions();
+		}
+		const prototype = Object.getPrototypeOf(options);
+		if (prototype !== Object.prototype && prototype !== null) {
+			throw noPermissions();
+		}
+		const descriptors = Object.getOwnPropertyDescriptors(options);
+		const keys = Reflect.ownKeys(descriptors);
+		const overwrite = descriptors.overwrite;
+		if (
+			keys.length !== 1 ||
+			keys[0] !== "overwrite" ||
+			overwrite === undefined ||
+			!("value" in overwrite) ||
+			overwrite.enumerable !== true ||
+			overwrite.value !== false
+		) {
+			throw noPermissions();
+		}
+		structuredClone(options);
+	} catch {
+		throw noPermissions();
+	}
+}
+
+function copyMoveCommandErrorCode(error: unknown): string | undefined {
+	try {
+		if (typeof error !== "object" || error === null) {
+			return undefined;
+		}
+		const prototype = Object.getPrototypeOf(error);
+		if (prototype !== Object.prototype && prototype !== null) {
+			return undefined;
+		}
+		const descriptors = Object.getOwnPropertyDescriptors(error);
+		const keys = Reflect.ownKeys(descriptors);
+		const code = descriptors.code;
+		const message = descriptors.message;
+		if (
+			keys.length !== 2 ||
+			!keys.includes("code") ||
+			!keys.includes("message") ||
+			code === undefined ||
+			message === undefined ||
+			!("value" in code) ||
+			!("value" in message) ||
+			code.enumerable !== true ||
+			message.enumerable !== true ||
+			typeof code.value !== "string" ||
+			typeof message.value !== "string" ||
+			message.value.length < 1 ||
+			message.value.length > 512
+		) {
+			return undefined;
+		}
+		structuredClone(error);
+		return code.value;
+	} catch {
+		return undefined;
+	}
+}
+
+function mapCopyMoveError(error: unknown): Readonly<{
+	error: FileSystemProviderError;
+	rescan: boolean;
+}> {
+	const code = copyMoveCommandErrorCode(error);
+	switch (code) {
+		case "ENTRY_ALREADY_EXISTS":
+			return Object.freeze({
+				error: fileSystemError(
+					FileSystemProviderErrorCode.FileExists,
+					"The workspace entry already exists.",
+				),
+				rescan: false,
+			});
+		case "ENTRY_NOT_FOUND":
+			return Object.freeze({
+				error: fileSystemError(
+					FileSystemProviderErrorCode.FileNotFound,
+					SANITIZED_MESSAGES.entryNotFound,
+				),
+				rescan: false,
+			});
+		case "ENTRY_TYPE_MISMATCH":
+			return Object.freeze({
+				error: fileSystemError(
+					FileSystemProviderErrorCode.FileNotADirectory,
+					SANITIZED_MESSAGES.notDirectory,
+				),
+				rescan: false,
+			});
+		case "ROOT_NOT_AUTHORIZED":
+		case "INVALID_RELATIVE_PATH":
+		case "PATH_OUTSIDE_ROOT":
+		case "PERMISSION_DENIED":
+			return Object.freeze({ error: noPermissions(), rescan: false });
+		case "ROOT_UNAVAILABLE":
+		case "PATH_ENCODING_UNSUPPORTED":
+		case "WORKSPACE_CONFLICT":
+		case "WORKSPACE_WINDOW_CLOSED":
+			return Object.freeze({ error: unavailable(), rescan: false });
+		case "DIRECTORY_TOO_LARGE":
+		case "FILE_TOO_LARGE":
+			return Object.freeze({
+				error: fileSystemError(
+					FileSystemProviderErrorCode.FileTooLarge,
+					"The workspace entry exceeds the supported copy limits.",
+				),
+				rescan: false,
+			});
+		default:
+			return Object.freeze({ error: unavailable(), rescan: true });
+	}
+}
+
+function requireVoidMutationReceipt(value: unknown): void {
+	if (value !== undefined) {
+		throw unavailable();
+	}
+}
+
+class WorkspaceMoveIncompleteError extends FileOperationError {
+	readonly code = "WORKSPACE_MOVE_INCOMPLETE" as const;
+
+	constructor() {
+		super(
+			SANITIZED_MESSAGES.moveIncomplete,
+			FileOperationResult.FILE_OTHER_ERROR,
+		);
+		this.name = this.code;
+		Object.freeze(this);
+	}
+}
+
+function workspaceMoveIncomplete(): WorkspaceMoveIncompleteError {
+	return new WorkspaceMoveIncompleteError();
 }
 
 function kindToFileType(kind: WorkspaceEntryKind): FileType {
@@ -475,12 +620,103 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 		throw noPermissions();
 	}
 
-	async rename(
-		_from: URI,
-		_to: URI,
-		_options: IFileOverwriteOptions,
+	async copy(
+		from: URI,
+		to: URI,
+		options: IFileOverwriteOptions,
 	): Promise<void> {
-		throw noPermissions();
+		this.requireMutationDispatchAllowed();
+		requireNoOverwriteOptions(options);
+		const source = this.resolveMutationResource(from);
+		const target = this.resolveMutationResource(to);
+		if (
+			source.rootId === target.rootId &&
+			source.relativePath === target.relativePath
+		) {
+			throw fileSystemError(
+				FileSystemProviderErrorCode.FileExists,
+				"The workspace entry already exists.",
+			);
+		}
+		try {
+			const receipt = (await this.bridge.workspaceCopy(
+				source.rootId,
+				source.relativePath,
+				target.rootId,
+				target.relativePath,
+			)) as unknown;
+			requireVoidMutationReceipt(receipt);
+		} catch (error) {
+			const failure = mapCopyMoveError(error);
+			if (failure.rescan) {
+				this.fireRootUpdated(target.resource);
+			}
+			throw failure.error;
+		}
+		this.fireCreated(target.resource);
+	}
+
+	async rename(
+		from: URI,
+		to: URI,
+		options: IFileOverwriteOptions,
+	): Promise<void> {
+		this.requireMutationDispatchAllowed();
+		requireNoOverwriteOptions(options);
+		const source = this.resolveMutationResource(from);
+		const target = this.resolveMutationResource(to);
+		if (
+			source.rootId === target.rootId &&
+			source.relativePath === target.relativePath
+		) {
+			throw fileSystemError(
+				FileSystemProviderErrorCode.FileExists,
+				"The workspace entry already exists.",
+			);
+		}
+
+		if (source.rootId === target.rootId) {
+			try {
+				const receipt = (await this.bridge.workspaceRename(
+					source.rootId,
+					source.relativePath,
+					target.relativePath,
+				)) as unknown;
+				requireVoidMutationReceipt(receipt);
+			} catch (error) {
+				const failure = mapCopyMoveError(error);
+				if (failure.rescan) {
+					this.fireRootUpdated(source.resource);
+				}
+				throw failure.error;
+			}
+			this.fireMoved(source.resource, target.resource);
+			return;
+		}
+
+		let result;
+		try {
+			result = decodeWorkspaceMoveResult(
+				await this.bridge.workspaceMove(
+					source.rootId,
+					source.relativePath,
+					target.rootId,
+					target.relativePath,
+				),
+			);
+		} catch (error) {
+			const failure = mapCopyMoveError(error);
+			if (failure.rescan) {
+				this.fireRootsUpdated(source.resource, target.resource);
+				throw workspaceMoveIncomplete();
+			}
+			throw failure.error;
+		}
+		if (result.status !== "moved") {
+			this.fireRootsUpdated(source.resource, target.resource);
+			throw workspaceMoveIncomplete();
+		}
+		this.fireMoved(source.resource, target.resource);
 	}
 
 	private requireMutationDispatchAllowed(): void {
@@ -495,6 +731,21 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 				Object.freeze({
 					type: FileChangeType.ADDED,
 					resource,
+				}),
+			]),
+		);
+	}
+
+	private fireMoved(source: URI, target: URI): void {
+		this.changeEmitter.fire(
+			Object.freeze([
+				Object.freeze({
+					type: FileChangeType.DELETED,
+					resource: source,
+				}),
+				Object.freeze({
+					type: FileChangeType.ADDED,
+					resource: target,
 				}),
 			]),
 		);
@@ -515,6 +766,29 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 		);
 	}
 
+	private fireRootsUpdated(source: URI, target: URI): void {
+		const sourceRoot = source.with({ path: "/", query: null, fragment: null });
+		const targetRoot = target.with({ path: "/", query: null, fragment: null });
+		sourceRoot.toString();
+		void sourceRoot.fsPath;
+		targetRoot.toString();
+		void targetRoot.fsPath;
+		Object.freeze(sourceRoot);
+		Object.freeze(targetRoot);
+		this.changeEmitter.fire(
+			Object.freeze([
+				Object.freeze({
+					type: FileChangeType.UPDATED,
+					resource: sourceRoot,
+				}),
+				Object.freeze({
+					type: FileChangeType.UPDATED,
+					resource: targetRoot,
+				}),
+			]),
+		);
+	}
+
 	private resolveMutationResource(resource: URI): ResolvedMutationResource {
 		try {
 			const scheme = resource.scheme;
@@ -523,6 +797,11 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 			const query = resource.query;
 			const fragment = resource.fragment;
 			if (
+				typeof scheme !== "string" ||
+				typeof authority !== "string" ||
+				typeof path !== "string" ||
+				typeof query !== "string" ||
+				typeof fragment !== "string" ||
 				scheme !== PLAIN_WORKSPACE_SCHEME ||
 				query !== "" ||
 				fragment !== "" ||

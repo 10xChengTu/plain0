@@ -4586,6 +4586,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			new Set([
 				"value:decodeWorkspaceCapabilities",
 				"value:decodeWorkspaceEntryStat",
+				"value:decodeWorkspaceMoveResult",
 				"value:frozenWorkspaceEntryRequest",
 			]),
 		],
@@ -4665,6 +4666,12 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		["mapReadError", { kind: "function", exported: false }],
 		["mapWriteError", { kind: "function", exported: false }],
 		["mapCreateError", { kind: "function", exported: false }],
+		["requireNoOverwriteOptions", { kind: "function", exported: false }],
+		["copyMoveCommandErrorCode", { kind: "function", exported: false }],
+		["mapCopyMoveError", { kind: "function", exported: false }],
+		["requireVoidMutationReceipt", { kind: "function", exported: false }],
+		["WorkspaceMoveIncompleteError", { kind: "class", exported: false }],
+		["workspaceMoveIncomplete", { kind: "function", exported: false }],
 		["kindToFileType", { kind: "function", exported: false }],
 		["providerStat", { kind: "function", exported: false }],
 		["createdProviderStat", { kind: "function", exported: false }],
@@ -4732,6 +4739,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	}
 	let decoderImportCount = 0;
 	let entryStatDecoderImportCount = 0;
+	let moveDecoderImportCount = 0;
 	let frozenRequestImportCount = 0;
 	for (const statement of sourceFile.statements) {
 		if (
@@ -4743,6 +4751,14 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			ts.isNamedImports(statement.importClause?.namedBindings)
 		) {
 			for (const specifier of statement.importClause.namedBindings.elements) {
+				if (
+					!specifier.isTypeOnly &&
+					(specifier.propertyName?.text ?? specifier.name.text) ===
+						"decodeWorkspaceMoveResult" &&
+					specifier.name.text === "decodeWorkspaceMoveResult"
+				) {
+					moveDecoderImportCount += 1;
+				}
 				if (
 					!specifier.isTypeOnly &&
 					(specifier.propertyName?.text ?? specifier.name.text) ===
@@ -4780,6 +4796,11 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			"file-system-provider.ts must import the strict workspace entry stat decoder exactly by name",
 		);
 	}
+	if (moveDecoderImportCount !== 1) {
+		failures.push(
+			"file-system-provider.ts must import the strict workspace move decoder exactly by name",
+		);
+	}
 	if (frozenRequestImportCount !== 1) {
 		failures.push(
 			"file-system-provider.ts must import the frozen workspace request codec exactly by name",
@@ -4790,6 +4811,8 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			"SANITIZED_MESSAGES",
 			`const SANITIZED_MESSAGES = Object.freeze({
 				entryNotFound: "The workspace entry does not exist.",
+				moveIncomplete:
+					"The workspace move published its target but could not remove all of its source.",
 				notDirectory: "The workspace entry is not a directory.",
 				noPermissions: "The workspace entry cannot be accessed.",
 				unavailable: "The workspace is unavailable.",
@@ -5083,6 +5106,206 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			);
 		}
 	}
+	const exactCopyMoveDeclarations = new Map([
+		[
+			"requireNoOverwriteOptions",
+			{
+				kind: "function",
+				failure:
+					"requireNoOverwriteOptions must accept only one own-data enumerable overwrite false field",
+				source: `function requireNoOverwriteOptions(options: IFileOverwriteOptions): void {
+					try {
+						if (typeof options !== "object" || options === null) {
+							throw noPermissions();
+						}
+						const prototype = Object.getPrototypeOf(options);
+						if (prototype !== Object.prototype && prototype !== null) {
+							throw noPermissions();
+						}
+						const descriptors = Object.getOwnPropertyDescriptors(options);
+						const keys = Reflect.ownKeys(descriptors);
+						const overwrite = descriptors.overwrite;
+						if (
+							keys.length !== 1 ||
+							keys[0] !== "overwrite" ||
+							overwrite === undefined ||
+							!("value" in overwrite) ||
+							overwrite.enumerable !== true ||
+							overwrite.value !== false
+						) {
+							throw noPermissions();
+						}
+						structuredClone(options);
+					} catch {
+						throw noPermissions();
+					}
+				}`,
+			},
+		],
+		[
+			"copyMoveCommandErrorCode",
+			{
+				kind: "function",
+				failure:
+					"copyMoveCommandErrorCode must authenticate one exact own-data code/message command error",
+				source: `function copyMoveCommandErrorCode(error: unknown): string | undefined {
+					try {
+						if (typeof error !== "object" || error === null) {
+							return undefined;
+						}
+						const prototype = Object.getPrototypeOf(error);
+						if (prototype !== Object.prototype && prototype !== null) {
+							return undefined;
+						}
+						const descriptors = Object.getOwnPropertyDescriptors(error);
+						const keys = Reflect.ownKeys(descriptors);
+						const code = descriptors.code;
+						const message = descriptors.message;
+						if (
+							keys.length !== 2 ||
+							!keys.includes("code") ||
+							!keys.includes("message") ||
+							code === undefined ||
+							message === undefined ||
+							!("value" in code) ||
+							!("value" in message) ||
+							code.enumerable !== true ||
+							message.enumerable !== true ||
+							typeof code.value !== "string" ||
+							typeof message.value !== "string" ||
+							message.value.length < 1 ||
+							message.value.length > 512
+						) {
+							return undefined;
+						}
+						structuredClone(error);
+						return code.value;
+					} catch {
+						return undefined;
+					}
+				}`,
+			},
+		],
+		[
+			"mapCopyMoveError",
+			{
+				kind: "function",
+				failure:
+					"mapCopyMoveError must own the exact authenticated copy/move error and rescan policy",
+				source: `function mapCopyMoveError(error: unknown): Readonly<{
+					error: FileSystemProviderError;
+					rescan: boolean;
+				}> {
+					const code = copyMoveCommandErrorCode(error);
+					switch (code) {
+						case "ENTRY_ALREADY_EXISTS":
+							return Object.freeze({
+								error: fileSystemError(
+									FileSystemProviderErrorCode.FileExists,
+									"The workspace entry already exists.",
+								),
+								rescan: false,
+							});
+						case "ENTRY_NOT_FOUND":
+							return Object.freeze({
+								error: fileSystemError(
+									FileSystemProviderErrorCode.FileNotFound,
+									SANITIZED_MESSAGES.entryNotFound,
+								),
+								rescan: false,
+							});
+						case "ENTRY_TYPE_MISMATCH":
+							return Object.freeze({
+								error: fileSystemError(
+									FileSystemProviderErrorCode.FileNotADirectory,
+									SANITIZED_MESSAGES.notDirectory,
+								),
+								rescan: false,
+							});
+						case "ROOT_NOT_AUTHORIZED":
+						case "INVALID_RELATIVE_PATH":
+						case "PATH_OUTSIDE_ROOT":
+						case "PERMISSION_DENIED":
+							return Object.freeze({ error: noPermissions(), rescan: false });
+						case "ROOT_UNAVAILABLE":
+						case "PATH_ENCODING_UNSUPPORTED":
+						case "WORKSPACE_CONFLICT":
+						case "WORKSPACE_WINDOW_CLOSED":
+							return Object.freeze({ error: unavailable(), rescan: false });
+						case "DIRECTORY_TOO_LARGE":
+						case "FILE_TOO_LARGE":
+							return Object.freeze({
+								error: fileSystemError(
+									FileSystemProviderErrorCode.FileTooLarge,
+									"The workspace entry exceeds the supported copy limits.",
+								),
+								rescan: false,
+							});
+						default:
+							return Object.freeze({ error: unavailable(), rescan: true });
+					}
+				}`,
+			},
+		],
+		[
+			"requireVoidMutationReceipt",
+			{
+				kind: "function",
+				failure:
+					"requireVoidMutationReceipt must reject every non-undefined copy or rename receipt",
+				source: `function requireVoidMutationReceipt(value: unknown): void {
+					if (value !== undefined) {
+						throw unavailable();
+					}
+				}`,
+			},
+		],
+		[
+			"WorkspaceMoveIncompleteError",
+			{
+				kind: "class",
+				failure:
+					"WorkspaceMoveIncompleteError must remain the frozen WORKSPACE_MOVE_INCOMPLETE FileOperationError",
+				source: `class WorkspaceMoveIncompleteError extends FileOperationError {
+					readonly code = "WORKSPACE_MOVE_INCOMPLETE" as const;
+
+					constructor() {
+						super(
+							SANITIZED_MESSAGES.moveIncomplete,
+							FileOperationResult.FILE_OTHER_ERROR,
+						);
+						this.name = this.code;
+						Object.freeze(this);
+					}
+				}`,
+			},
+		],
+		[
+			"workspaceMoveIncomplete",
+			{
+				kind: "function",
+				failure:
+					"workspaceMoveIncomplete must construct only the audited incomplete-move error",
+				source: `function workspaceMoveIncomplete(): WorkspaceMoveIncompleteError {
+					return new WorkspaceMoveIncompleteError();
+				}`,
+			},
+		],
+	]);
+	for (const [name, contract] of exactCopyMoveDeclarations) {
+		const statements = sourceFile.statements.filter((statement) =>
+			contract.kind === "class"
+				? ts.isClassDeclaration(statement) && statement.name?.text === name
+				: ts.isFunctionDeclaration(statement) && statement.name?.text === name,
+		);
+		if (
+			statements.length !== 1 ||
+			statements[0].getText(sourceFile).replaceAll(/\s+/g, "") !==
+				contract.source.replaceAll(/\s+/g, "")
+		) {
+			failures.push(contract.failure);
+		}
+	}
 	function countExactProviderImport(moduleName, importedName) {
 		let count = 0;
 		for (const statement of sourceFile.statements) {
@@ -5138,6 +5361,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		["@codingame/monaco-vscode-api/vscode/vs/base/common/uri", "URI"],
 		["../../platform/tauri/workspace-codec", "decodeWorkspaceCapabilities"],
 		["../../platform/tauri/workspace-codec", "decodeWorkspaceEntryStat"],
+		["../../platform/tauri/workspace-codec", "decodeWorkspaceMoveResult"],
 		["../../platform/tauri/workspace-codec", "frozenWorkspaceEntryRequest"],
 	];
 	for (const [moduleName, importedName] of criticalProviderImports) {
@@ -5203,7 +5427,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			);
 		}
 	}
-	for (const name of ["Object", "Reflect"]) {
+	for (const name of ["Object", "Reflect", "structuredClone"]) {
 		if ((bindingIdentifiers.get(name)?.length ?? 0) !== 0) {
 			failures.push(
 				`${name} must remain the unshadowed global intrinsic in the Plain workspace provider`,
@@ -5261,10 +5485,13 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		"writeFile",
 		"mkdir",
 		"delete",
+		"copy",
 		"rename",
 		"requireMutationDispatchAllowed",
 		"fireCreated",
+		"fireMoved",
 		"fireRootUpdated",
+		"fireRootsUpdated",
 		"resolveMutationResource",
 		"resolveResource",
 	]);
@@ -5534,12 +5761,6 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			failures.push(
 				"Plain workspace provider must not hide members behind computed names",
 			);
-			continue;
-		}
-		if (typeScriptMemberName(member) === "copy") {
-			failures.push(
-				"Plain workspace provider must not expose copy before write activation",
-			);
 		}
 	}
 
@@ -5568,6 +5789,20 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			ts.isMethodDeclaration(member) &&
 			typeScriptMemberName(member) === "mkdir",
 	);
+	const publicDeleteMethods = provider.members.filter(
+		(member) =>
+			ts.isMethodDeclaration(member) &&
+			typeScriptMemberName(member) === "delete",
+	);
+	const copyMethods = provider.members.filter(
+		(member) =>
+			ts.isMethodDeclaration(member) && typeScriptMemberName(member) === "copy",
+	);
+	const renameMethods = provider.members.filter(
+		(member) =>
+			ts.isMethodDeclaration(member) &&
+			typeScriptMemberName(member) === "rename",
+	);
 	const mutationGateMethods = provider.members.filter(
 		(member) =>
 			ts.isMethodDeclaration(member) &&
@@ -5578,10 +5813,20 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			ts.isMethodDeclaration(member) &&
 			typeScriptMemberName(member) === "fireCreated",
 	);
+	const fireMovedMethods = provider.members.filter(
+		(member) =>
+			ts.isMethodDeclaration(member) &&
+			typeScriptMemberName(member) === "fireMoved",
+	);
 	const fireRootUpdatedMethods = provider.members.filter(
 		(member) =>
 			ts.isMethodDeclaration(member) &&
 			typeScriptMemberName(member) === "fireRootUpdated",
+	);
+	const fireRootsUpdatedMethods = provider.members.filter(
+		(member) =>
+			ts.isMethodDeclaration(member) &&
+			typeScriptMemberName(member) === "fireRootsUpdated",
 	);
 	const resolveMutationMethods = provider.members.filter(
 		(member) =>
@@ -5726,6 +5971,55 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			);
 		}
 	}
+	if (fireMovedMethods.length !== 1) {
+		failures.push(
+			"Plain workspace provider must define exactly one audited fireMoved helper",
+		);
+	} else {
+		const [fireMoved] = fireMovedMethods;
+		const normalizedBody = fireMoved.body
+			?.getText(sourceFile)
+			.replaceAll(/\s+/g, "");
+		const expectedBody = `{
+			this.changeEmitter.fire(
+				Object.freeze([
+					Object.freeze({
+						type: FileChangeType.DELETED,
+						resource: source,
+					}),
+					Object.freeze({
+						type: FileChangeType.ADDED,
+						resource: target,
+					}),
+				]),
+			);
+		}`.replaceAll(/\s+/g, "");
+		if (
+			!fireMoved.modifiers?.some(
+				(modifier) => modifier.kind === ts.SyntaxKind.PrivateKeyword,
+			) ||
+			fireMoved.parameters.length !== 2 ||
+			!sameArray(
+				fireMoved.parameters.map((parameter) =>
+					ts.isIdentifier(parameter.name) ? parameter.name.text : undefined,
+				),
+				["source", "target"],
+			) ||
+			!fireMoved.parameters.every(
+				(parameter) =>
+					parameter.type !== undefined &&
+					ts.isTypeReferenceNode(parameter.type) &&
+					ts.isIdentifier(parameter.type.typeName) &&
+					parameter.type.typeName.text === "URI",
+			) ||
+			fireMoved.type?.kind !== ts.SyntaxKind.VoidKeyword ||
+			normalizedBody !== expectedBody
+		) {
+			failures.push(
+				"fireMoved must emit one frozen source DELETED plus target ADDED event and nothing else",
+			);
+		}
+	}
 	if (fireRootUpdatedMethods.length !== 1) {
 		failures.push(
 			"Plain workspace provider must define exactly one audited fireRootUpdated helper",
@@ -5764,6 +6058,63 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			);
 		}
 	}
+	if (fireRootsUpdatedMethods.length !== 1) {
+		failures.push(
+			"Plain workspace provider must define exactly one audited fireRootsUpdated helper",
+		);
+	} else {
+		const [fireRootsUpdated] = fireRootsUpdatedMethods;
+		const normalizedBody = fireRootsUpdated.body
+			?.getText(sourceFile)
+			.replaceAll(/\s+/g, "");
+		const expectedBody = `{
+			const sourceRoot = source.with({ path: "/", query: null, fragment: null });
+			const targetRoot = target.with({ path: "/", query: null, fragment: null });
+			sourceRoot.toString();
+			void sourceRoot.fsPath;
+			targetRoot.toString();
+			void targetRoot.fsPath;
+			Object.freeze(sourceRoot);
+			Object.freeze(targetRoot);
+			this.changeEmitter.fire(
+				Object.freeze([
+					Object.freeze({
+						type: FileChangeType.UPDATED,
+						resource: sourceRoot,
+					}),
+					Object.freeze({
+						type: FileChangeType.UPDATED,
+						resource: targetRoot,
+					}),
+				]),
+			);
+		}`.replaceAll(/\s+/g, "");
+		if (
+			!fireRootsUpdated.modifiers?.some(
+				(modifier) => modifier.kind === ts.SyntaxKind.PrivateKeyword,
+			) ||
+			fireRootsUpdated.parameters.length !== 2 ||
+			!sameArray(
+				fireRootsUpdated.parameters.map((parameter) =>
+					ts.isIdentifier(parameter.name) ? parameter.name.text : undefined,
+				),
+				["source", "target"],
+			) ||
+			!fireRootsUpdated.parameters.every(
+				(parameter) =>
+					parameter.type !== undefined &&
+					ts.isTypeReferenceNode(parameter.type) &&
+					ts.isIdentifier(parameter.type.typeName) &&
+					parameter.type.typeName.text === "URI",
+			) ||
+			fireRootsUpdated.type?.kind !== ts.SyntaxKind.VoidKeyword ||
+			normalizedBody !== expectedBody
+		) {
+			failures.push(
+				"fireRootsUpdated must emit one frozen source-root plus target-root UPDATED event and nothing else",
+			);
+		}
+	}
 	if (resolveMutationMethods.length !== 1) {
 		failures.push(
 			"Plain workspace provider must define exactly one audited mutation URI snapshot helper",
@@ -5781,6 +6132,11 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 				const query = resource.query;
 				const fragment = resource.fragment;
 				if (
+					typeof scheme !== "string" ||
+					typeof authority !== "string" ||
+					typeof path !== "string" ||
+					typeof query !== "string" ||
+					typeof fragment !== "string" ||
 					scheme !== PLAIN_WORKSPACE_SCHEME ||
 					query !== "" ||
 					fragment !== "" ||
@@ -5970,6 +6326,213 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			);
 		}
 	}
+	if (publicDeleteMethods.length !== 1) {
+		failures.push(
+			"Plain workspace provider must keep exactly one fail-closed public delete method",
+		);
+	} else {
+		const [publicDelete] = publicDeleteMethods;
+		const [statement] = publicDelete.body?.statements ?? [];
+		const expression = ts.isThrowStatement(statement)
+			? statement.expression
+			: undefined;
+		if (
+			publicDelete.body?.statements.length !== 1 ||
+			expression === undefined ||
+			!ts.isCallExpression(expression) ||
+			!ts.isIdentifier(expression.expression) ||
+			expression.expression.text !== "noPermissions" ||
+			expression.arguments.length !== 0
+		) {
+			failures.push(
+				"public delete must remain a direct noPermissions failure without native dispatch",
+			);
+		}
+	}
+	function exactCopyMoveMethodSignature(method) {
+		if (
+			method.modifiers?.length !== 1 ||
+			method.modifiers[0].kind !== ts.SyntaxKind.AsyncKeyword ||
+			method.parameters.length !== 3 ||
+			!sameArray(
+				method.parameters.map((parameter) =>
+					ts.isIdentifier(parameter.name) ? parameter.name.text : undefined,
+				),
+				["from", "to", "options"],
+			) ||
+			method.parameters.some(
+				(parameter) =>
+					parameter.initializer !== undefined ||
+					parameter.questionToken !== undefined ||
+					parameter.dotDotDotToken !== undefined ||
+					(parameter.modifiers?.length ?? 0) !== 0,
+			)
+		) {
+			return false;
+		}
+		const [from, to, options] = method.parameters;
+		const hasTypeName = (parameter, name) =>
+			parameter.type !== undefined &&
+			ts.isTypeReferenceNode(parameter.type) &&
+			ts.isIdentifier(parameter.type.typeName) &&
+			parameter.type.typeName.text === name;
+		return (
+			hasTypeName(from, "URI") &&
+			hasTypeName(to, "URI") &&
+			hasTypeName(options, "IFileOverwriteOptions") &&
+			method.type !== undefined &&
+			ts.isTypeReferenceNode(method.type) &&
+			ts.isIdentifier(method.type.typeName) &&
+			method.type.typeName.text === "Promise" &&
+			method.type.typeArguments?.length === 1 &&
+			method.type.typeArguments[0].kind === ts.SyntaxKind.VoidKeyword
+		);
+	}
+	if (copyMethods.length !== 1) {
+		failures.push(
+			"Plain workspace provider must expose exactly one audited copy adapter",
+		);
+	} else {
+		const [copyMethod] = copyMethods;
+		const normalizedBody = copyMethod.body
+			?.getText(sourceFile)
+			.replaceAll(/\s+/g, "");
+		const expectedBody = `{
+			this.requireMutationDispatchAllowed();
+			requireNoOverwriteOptions(options);
+			const source = this.resolveMutationResource(from);
+			const target = this.resolveMutationResource(to);
+			if (
+				source.rootId === target.rootId &&
+				source.relativePath === target.relativePath
+			) {
+				throw fileSystemError(
+					FileSystemProviderErrorCode.FileExists,
+					"The workspace entry already exists.",
+				);
+			}
+			try {
+				const receipt = (await this.bridge.workspaceCopy(
+					source.rootId,
+					source.relativePath,
+					target.rootId,
+					target.relativePath,
+				)) as unknown;
+				requireVoidMutationReceipt(receipt);
+			} catch (error) {
+				const failure = mapCopyMoveError(error);
+				if (failure.rescan) {
+					this.fireRootUpdated(target.resource);
+				}
+				throw failure.error;
+			}
+			this.fireCreated(target.resource);
+		}`.replaceAll(/\s+/g, "");
+		if (
+			!exactCopyMoveMethodSignature(copyMethod) ||
+			!startsWithMutationGate(copyMethod) ||
+			directThisMethodCallCount(copyMethod, "resolveMutationResource") !== 2 ||
+			providerMethodCallCount(copyMethod, "bridge", "workspaceCopy") !== 1 ||
+			identifierCallCount(copyMethod, "requireNoOverwriteOptions") !== 1 ||
+			identifierCallCount(copyMethod, "requireVoidMutationReceipt") !== 1 ||
+			directThisMethodCallCount(copyMethod, "fireCreated") !== 1 ||
+			directThisMethodCallCount(copyMethod, "fireRootUpdated") !== 1 ||
+			normalizedBody !== expectedBody
+		) {
+			failures.push(
+				"copy must gate first, authenticate strict options, snapshot two URIs, route one copy, verify void and close its event set",
+			);
+		}
+	}
+	if (renameMethods.length !== 1) {
+		failures.push(
+			"Plain workspace provider must expose exactly one audited rename/move adapter",
+		);
+	} else {
+		const [renameMethod] = renameMethods;
+		const normalizedBody = renameMethod.body
+			?.getText(sourceFile)
+			.replaceAll(/\s+/g, "");
+		const expectedBody = `{
+			this.requireMutationDispatchAllowed();
+			requireNoOverwriteOptions(options);
+			const source = this.resolveMutationResource(from);
+			const target = this.resolveMutationResource(to);
+			if (
+				source.rootId === target.rootId &&
+				source.relativePath === target.relativePath
+			) {
+				throw fileSystemError(
+					FileSystemProviderErrorCode.FileExists,
+					"The workspace entry already exists.",
+				);
+			}
+
+			if (source.rootId === target.rootId) {
+				try {
+					const receipt = (await this.bridge.workspaceRename(
+						source.rootId,
+						source.relativePath,
+						target.relativePath,
+					)) as unknown;
+					requireVoidMutationReceipt(receipt);
+				} catch (error) {
+					const failure = mapCopyMoveError(error);
+					if (failure.rescan) {
+						this.fireRootUpdated(source.resource);
+					}
+					throw failure.error;
+				}
+				this.fireMoved(source.resource, target.resource);
+				return;
+			}
+
+			let result;
+			try {
+				result = decodeWorkspaceMoveResult(
+					await this.bridge.workspaceMove(
+						source.rootId,
+						source.relativePath,
+						target.rootId,
+						target.relativePath,
+					),
+				);
+			} catch (error) {
+				const failure = mapCopyMoveError(error);
+				if (failure.rescan) {
+					this.fireRootsUpdated(source.resource, target.resource);
+					throw workspaceMoveIncomplete();
+				}
+				throw failure.error;
+			}
+			if (result.status !== "moved") {
+				this.fireRootsUpdated(source.resource, target.resource);
+				throw workspaceMoveIncomplete();
+			}
+			this.fireMoved(source.resource, target.resource);
+		}`.replaceAll(/\s+/g, "");
+		if (
+			!exactCopyMoveMethodSignature(renameMethod) ||
+			!startsWithMutationGate(renameMethod) ||
+			directThisMethodCallCount(renameMethod, "resolveMutationResource") !==
+				2 ||
+			providerMethodCallCount(renameMethod, "bridge", "workspaceRename") !==
+				1 ||
+			providerMethodCallCount(renameMethod, "bridge", "workspaceMove") !== 1 ||
+			identifierCallCount(renameMethod, "requireNoOverwriteOptions") !== 1 ||
+			identifierCallCount(renameMethod, "requireVoidMutationReceipt") !== 1 ||
+			identifierCallCount(renameMethod, "decodeWorkspaceMoveResult") !== 1 ||
+			directThisMethodCallCount(renameMethod, "fireMoved") !== 2 ||
+			directThisMethodCallCount(renameMethod, "fireRootUpdated") !== 1 ||
+			directThisMethodCallCount(renameMethod, "fireRootsUpdated") !== 2 ||
+			identifierCallCount(renameMethod, "workspaceMoveIncomplete") !== 2 ||
+			normalizedBody !== expectedBody
+		) {
+			failures.push(
+				"rename must gate first, authenticate strict options, snapshot two URIs, split one rename or move route and accept only moved",
+			);
+		}
+	}
 	if (changeEventMembers.length !== 1) {
 		failures.push(
 			"Plain workspace provider must expose exactly one audited file-change event",
@@ -6046,11 +6609,23 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	]);
 	let hasExtraProviderReference = false;
 	let hasPrototypeMutationSurface = false;
+	let objectPrototypeReferences = 0;
+	let localPrototypeReferences = 0;
 	let hasDynamicMutationSurface = false;
 	let hasCapabilitiesReference = false;
 	let mutationDispatchReferences = 0;
 	let createFileBridgeReferences = 0;
 	let createDirectoryBridgeReferences = 0;
+	let copyBridgeReferences = 0;
+	let renameBridgeReferences = 0;
+	let moveBridgeReferences = 0;
+	const auditedMutationBridgeNames = new Set([
+		"workspaceCreateFile",
+		"workspaceCreateDirectory",
+		"workspaceCopy",
+		"workspaceRename",
+		"workspaceMove",
+	]);
 	const expectedBridgeMethods = new Map([
 		["workspaceStat", 1],
 		["workspaceReadDirectory", 1],
@@ -6058,6 +6633,9 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		["workspaceWriteFile", 1],
 		["workspaceCreateFile", 1],
 		["workspaceCreateDirectory", 1],
+		["workspaceCopy", 1],
+		["workspaceRename", 1],
+		["workspaceMove", 1],
 	]);
 	const bridgeMethodCounts = new Map(
 		[...expectedBridgeMethods].map(([name]) => [name, 0]),
@@ -6078,9 +6656,13 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	const criticalCallBindings = new Set([
 		"decodeWorkspaceCapabilities",
 		"decodeWorkspaceEntryStat",
+		"decodeWorkspaceMoveResult",
 		"frozenWorkspaceEntryRequest",
 	]);
-	const criticalNewBindings = new Set(["Emitter"]);
+	const criticalNewBindings = new Set([
+		"Emitter",
+		"WorkspaceMoveIncompleteError",
+	]);
 	const immutableRuntimeRoots = new Set([
 		...criticalBindingNames,
 		"Object",
@@ -6095,6 +6677,13 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		"mapReadError",
 		"mapWriteError",
 		"mapCreateError",
+		"requireNoOverwriteOptions",
+		"copyMoveCommandErrorCode",
+		"mapCopyMoveError",
+		"requireVoidMutationReceipt",
+		"WorkspaceMoveIncompleteError",
+		"workspaceMoveIncomplete",
+		"structuredClone",
 		"kindToFileType",
 		"providerStat",
 		"createdProviderStat",
@@ -6104,6 +6693,13 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	const protectedFunctionReferences = new Map([
 		["createdProviderStat", 2],
 		["mapCreateError", 2],
+		["requireNoOverwriteOptions", 2],
+		["copyMoveCommandErrorCode", 1],
+		["mapCopyMoveError", 3],
+		["requireVoidMutationReceipt", 2],
+		["workspaceMoveIncomplete", 2],
+		["decodeWorkspaceMoveResult", 1],
+		["structuredClone", 2],
 		["mapReadError", 3],
 		["mapWriteError", 1],
 		["createPlainWorkspaceMutationPolicy", 1],
@@ -6126,10 +6722,15 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		"plainCreateFile",
 		"plainCreateDirectory",
 		"plainWriteFile",
+		"copy",
+		"rename",
 	]);
 	let fireCreatedCallCount = 0;
+	let fireMovedCallCount = 0;
 	let fireRootUpdatedCallCount = 0;
+	let fireRootsUpdatedCallCount = 0;
 	let changeEmitterFireCallCount = 0;
+	let moveIncompleteConstructionCount = 0;
 	function isThisBridge(node) {
 		return (
 			ts.isPropertyAccessExpression(node) &&
@@ -6242,7 +6843,19 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			(ts.isIdentifier(node) || ts.isStringLiteral(node)) &&
 			node.text === "prototype"
 		) {
-			hasPrototypeMutationSurface = true;
+			const isAuditedObjectPrototype =
+				ts.isIdentifier(node) &&
+				ts.isPropertyAccessExpression(node.parent) &&
+				node.parent.name === node &&
+				ts.isIdentifier(node.parent.expression) &&
+				node.parent.expression.text === "Object";
+			if (isAuditedObjectPrototype) {
+				objectPrototypeReferences += 1;
+			} else if (ts.isIdentifier(node)) {
+				localPrototypeReferences += 1;
+			} else {
+				hasPrototypeMutationSurface = true;
+			}
 		}
 		if (
 			ts.isIdentifier(node) &&
@@ -6304,8 +6917,14 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			if (node.expression.name.text === "fireCreated") {
 				fireCreatedCallCount += 1;
 			}
+			if (node.expression.name.text === "fireMoved") {
+				fireMovedCallCount += 1;
+			}
 			if (node.expression.name.text === "fireRootUpdated") {
 				fireRootUpdatedCallCount += 1;
+			}
+			if (node.expression.name.text === "fireRootsUpdated") {
+				fireRootsUpdatedCallCount += 1;
 			}
 		}
 		if (
@@ -6335,6 +6954,22 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 				protectedFunctionCallCounts.set(
 					node.text,
 					protectedFunctionCallCounts.get(node.text) + 1,
+				);
+			}
+		}
+		if (
+			ts.isIdentifier(node) &&
+			node.text === "WorkspaceMoveIncompleteError" &&
+			!bindingIdentifierNodes.has(node)
+		) {
+			const isTypeReference = isCriticalTypeReference(node);
+			const isDirectConstruction =
+				ts.isNewExpression(node.parent) && node.parent.expression === node;
+			if (isDirectConstruction) {
+				moveIncompleteConstructionCount += 1;
+			} else if (!isTypeReference) {
+				failures.push(
+					"WorkspaceMoveIncompleteError must not be aliased or consumed outside its audited constructor",
 				);
 			}
 		}
@@ -6415,13 +7050,21 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		) {
 			const access = node.parent;
 			const allowedMethods =
-				node.text === "Object" ? new Set(["freeze"]) : new Set(["get"]);
+				node.text === "Object"
+					? new Set(["freeze", "getPrototypeOf", "getOwnPropertyDescriptors"])
+					: new Set(["get", "ownKeys"]);
+			const isAuditedObjectPrototype =
+				node.text === "Object" &&
+				ts.isPropertyAccessExpression(access) &&
+				access.expression === node &&
+				access.name.text === "prototype";
 			if (
-				!ts.isPropertyAccessExpression(access) ||
-				access.expression !== node ||
-				!allowedMethods.has(access.name.text) ||
-				!ts.isCallExpression(access.parent) ||
-				access.parent.expression !== access
+				!isAuditedObjectPrototype &&
+				(!ts.isPropertyAccessExpression(access) ||
+					access.expression !== node ||
+					!allowedMethods.has(access.name.text) ||
+					!ts.isCallExpression(access.parent) ||
+					access.parent.expression !== access)
 			) {
 				failures.push(
 					`${node.text} may be used only through its audited direct intrinsic calls`,
@@ -6480,8 +7123,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		}
 		if (
 			ts.isPropertyAccessExpression(node) &&
-			(node.name.text === "workspaceCreateFile" ||
-				node.name.text === "workspaceCreateDirectory")
+			auditedMutationBridgeNames.has(node.name.text)
 		) {
 			const isDirectBridgeCall =
 				ts.isCallExpression(node.parent) &&
@@ -6491,19 +7133,30 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 				node.expression.name.text === "bridge";
 			if (!isDirectBridgeCall) {
 				failures.push(
-					`${node.name.text} may appear only as a direct this.bridge call in its audited create seam`,
+					`${node.name.text} may appear only as a direct this.bridge call in its audited mutation seam`,
 				);
 			}
-			if (node.name.text === "workspaceCreateFile") {
-				createFileBridgeReferences += 1;
-			} else {
-				createDirectoryBridgeReferences += 1;
+			switch (node.name.text) {
+				case "workspaceCreateFile":
+					createFileBridgeReferences += 1;
+					break;
+				case "workspaceCreateDirectory":
+					createDirectoryBridgeReferences += 1;
+					break;
+				case "workspaceCopy":
+					copyBridgeReferences += 1;
+					break;
+				case "workspaceRename":
+					renameBridgeReferences += 1;
+					break;
+				case "workspaceMove":
+					moveBridgeReferences += 1;
+					break;
 			}
 		}
 		if (
 			ts.isIdentifier(node) &&
-			(node.text === "workspaceCreateFile" ||
-				node.text === "workspaceCreateDirectory") &&
+			auditedMutationBridgeNames.has(node.text) &&
 			!(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)
 		) {
 			failures.push(
@@ -6512,8 +7165,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		}
 		if (
 			(ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) &&
-			(node.text === "workspaceCreateFile" ||
-				node.text === "workspaceCreateDirectory")
+			auditedMutationBridgeNames.has(node.text)
 		) {
 			failures.push(
 				`${node.text} must not be accessed through computed provider syntax`,
@@ -6549,6 +7201,16 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			"Plain workspace provider must not expose prototype mutation references",
 		);
 	}
+	if (objectPrototypeReferences !== 2) {
+		failures.push(
+			"Plain workspace provider may read Object.prototype only in the two audited own-data authenticators",
+		);
+	}
+	if (localPrototypeReferences !== 6) {
+		failures.push(
+			"prototype identifiers may appear only in the two audited own-data authenticators",
+		);
+	}
 	if (hasDynamicMutationSurface) {
 		failures.push(
 			"Plain workspace provider must not use defineProperty or Proxy mutation surfaces",
@@ -6566,10 +7228,13 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	}
 	if (
 		createFileBridgeReferences !== 1 ||
-		createDirectoryBridgeReferences !== 1
+		createDirectoryBridgeReferences !== 1 ||
+		copyBridgeReferences !== 1 ||
+		renameBridgeReferences !== 1 ||
+		moveBridgeReferences !== 1
 	) {
 		failures.push(
-			"Plain workspace create bridges must each have exactly one direct provider call site",
+			"Plain workspace mutation bridges must each have exactly one direct provider call site",
 		);
 	}
 	for (const [methodName, expectedCount] of expectedBridgeMethods) {
@@ -6586,13 +7251,20 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			);
 		}
 	}
+	if (moveIncompleteConstructionCount !== 1) {
+		failures.push(
+			"WorkspaceMoveIncompleteError must have exactly one audited direct construction",
+		);
+	}
 	if (
-		fireCreatedCallCount !== 2 ||
-		fireRootUpdatedCallCount !== 2 ||
-		changeEmitterFireCallCount !== 3
+		fireCreatedCallCount !== 3 ||
+		fireMovedCallCount !== 2 ||
+		fireRootUpdatedCallCount !== 4 ||
+		fireRootsUpdatedCallCount !== 2 ||
+		changeEmitterFireCallCount !== 5
 	) {
 		failures.push(
-			"provider change events must remain confined to two create additions, two ambiguous root rescans and one write-outcome site",
+			"provider change events must remain confined to the audited create, copy, rename, move and rescan closure",
 		);
 	}
 

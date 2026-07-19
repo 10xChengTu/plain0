@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -3743,594 +3745,145 @@ describe("Plain confirmed-delete TypeScript invocation boundary", () => {
 	});
 });
 
-const readonlyWorkspaceProvider = `
-import { FileChangeType, FileOperationError, FileOperationResult, FilePermission, FileSystemProviderCapabilities, FileSystemProviderError, FileSystemProviderErrorCode, FileType, type IFileChange, type IFileDeleteOptions, type IFileOverwriteOptions, type IFileSystemProviderWithFileReadWriteCapability, type IFileWriteOptions, type IStat, type IWatchOptions } from "@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files";
-import { Emitter, Event } from "@codingame/monaco-vscode-api/vscode/vs/base/common/event";
-import { Disposable, type IDisposable } from "@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle";
-import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
-import type { PlainBridge, WorkspaceCapabilities, WorkspaceEntryKind, WorkspaceEntryStat, WorkspaceWriteResult } from "../../platform/tauri";
-import { decodeWorkspaceCapabilities, decodeWorkspaceEntryStat, frozenWorkspaceEntryRequest } from "../../platform/tauri/workspace-codec";
-
-export const PLAIN_WORKSPACE_SCHEME = "plain-workspace" as const;
-
-interface ResolvedResource {}
-interface ResolvedMutationResource extends ResolvedResource {}
-export interface PlainWorkspaceProviderStat {}
-export interface PlainWorkspaceReadFileResult {}
-export type PlainWorkspaceWriteFileResult = {};
-
-const SANITIZED_MESSAGES = Object.freeze({
-  entryNotFound: "The workspace entry does not exist.",
-  notDirectory: "The workspace entry is not a directory.",
-  noPermissions: "The workspace entry cannot be accessed.",
-  unavailable: "The workspace is unavailable.",
-});
-
-function fileSystemError(
-  code: FileSystemProviderErrorCode,
-  message: string,
-): FileSystemProviderError {
-  return FileSystemProviderError.create(message, code);
-}
-
-function noPermissions(): FileSystemProviderError {
-  return fileSystemError(
-    FileSystemProviderErrorCode.NoPermissions,
-    SANITIZED_MESSAGES.noPermissions,
-  );
-}
-
-function unavailable(): FileSystemProviderError {
-  return fileSystemError(
-    FileSystemProviderErrorCode.Unavailable,
-    SANITIZED_MESSAGES.unavailable,
-  );
-}
-
-function commandErrorCode(error: unknown): string | undefined {
-  try {
-    if (typeof error !== "object" || error === null) {
-      return undefined;
-    }
-    const code = Reflect.get(error, "code");
-    return typeof code === "string" ? code : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function mapReadError(error: unknown): FileSystemProviderError {
-  const code = commandErrorCode(error);
-  switch (code) {
-    case "ENTRY_NOT_FOUND":
-      return fileSystemError(
-        FileSystemProviderErrorCode.FileNotFound,
-        SANITIZED_MESSAGES.entryNotFound,
-      );
-    case "ENTRY_TYPE_MISMATCH":
-      return fileSystemError(
-        FileSystemProviderErrorCode.FileNotADirectory,
-        SANITIZED_MESSAGES.notDirectory,
-      );
-    case "ROOT_NOT_AUTHORIZED":
-    case "INVALID_RELATIVE_PATH":
-    case "PATH_OUTSIDE_ROOT":
-    case "PERMISSION_DENIED":
-      return noPermissions();
-    case "ROOT_UNAVAILABLE":
-    case "PATH_ENCODING_UNSUPPORTED":
-    case "WORKSPACE_CONFLICT":
-    case "WORKSPACE_FILE_CHANGED":
-    case "WORKSPACE_WINDOW_CLOSED":
-    case "DIRECTORY_TOO_LARGE":
-    case "FILE_TOO_LARGE":
-    case "IO_FAILED":
-      return unavailable();
-    default:
-      return unavailable();
-  }
-}
-
-function mapWriteError(error: unknown): Error {
-  const code = commandErrorCode(error);
-  switch (code) {
-    case "WORKSPACE_FILE_MODIFIED":
-      return new FileOperationError(
-        "The workspace file changed before it could be written.",
-        FileOperationResult.FILE_MODIFIED_SINCE,
-      );
-    case "ROOT_NOT_AUTHORIZED":
-    case "PERMISSION_DENIED":
-      return noPermissions();
-    case "FILE_TOO_LARGE":
-      return fileSystemError(
-        FileSystemProviderErrorCode.FileTooLarge,
-        "The workspace file exceeds the supported write limit.",
-      );
-    default:
-      return unavailable();
-  }
-}
-
-function kindToFileType(kind: WorkspaceEntryKind): FileType {
-  switch (kind) {
-    case "file":
-      return FileType.File;
-    case "directory":
-      return FileType.Directory;
-    case "symlink":
-      return FileType.SymbolicLink;
-    case "symlinkFile":
-      return FileType.SymbolicLink | FileType.File;
-    case "symlinkDirectory":
-      return FileType.SymbolicLink | FileType.Directory;
-    case "other":
-      return FileType.Unknown;
-  }
-}
-
-function providerStat(stat: WorkspaceEntryStat): PlainWorkspaceProviderStat {
-  const readonlyFile =
-    (stat.kind === "file" || stat.kind === "symlinkFile") &&
-    stat.version === null;
-  return Object.freeze({
-    type: kindToFileType(stat.kind),
-    size: stat.size,
-    mtime: stat.mtime,
-    ctime: stat.ctime,
-    ...(readonlyFile ? { permissions: FilePermission.Readonly } : {}),
-    plainVersion: stat.version,
-  });
-}
-
-function createdProviderStat(value: unknown, expectedKind) {
-  const stat = decodeWorkspaceEntryStat(value);
-  if (
-    stat.kind !== expectedKind ||
-    stat.size !== 0 ||
-    stat.mtime !== 0 ||
-    stat.ctime !== 0 ||
-    stat.version !== null
-  ) {
-    throw unavailable();
-  }
-  return Object.freeze({
-    type: expectedKind === "file" ? FileType.File : FileType.Directory,
-    size: 0,
-    mtime: 0,
-    ctime: 0,
-    ...(expectedKind === "file"
-      ? { permissions: FilePermission.Readonly }
-      : {}),
-    plainVersion: null,
-  });
-}
-
-function mapCreateError(error: unknown): Readonly<{
-  error: FileSystemProviderError;
-  rescan: boolean;
-}> {
-  let code: string | undefined;
-  try {
-    if (typeof error === "object" && error !== null) {
-      const value = Reflect.get(error, "code");
-      code = typeof value === "string" ? value : undefined;
-    }
-  } catch {
-    code = undefined;
-  }
-  switch (code) {
-    case "ENTRY_ALREADY_EXISTS":
-      return Object.freeze({
-        error: FileSystemProviderError.create(
-          "The workspace entry already exists.",
-          FileSystemProviderErrorCode.FileExists,
-        ),
-        rescan: false,
-      });
-    case "ENTRY_NOT_FOUND":
-      return Object.freeze({
-        error: FileSystemProviderError.create(
-          "The workspace entry does not exist.",
-          FileSystemProviderErrorCode.FileNotFound,
-        ),
-        rescan: false,
-      });
-    case "ENTRY_TYPE_MISMATCH":
-      return Object.freeze({
-        error: FileSystemProviderError.create(
-          "The workspace entry is not a directory.",
-          FileSystemProviderErrorCode.FileNotADirectory,
-        ),
-        rescan: false,
-      });
-    case "ROOT_NOT_AUTHORIZED":
-    case "INVALID_RELATIVE_PATH":
-    case "PATH_OUTSIDE_ROOT":
-    case "PERMISSION_DENIED":
-      return Object.freeze({
-        error: FileSystemProviderError.create(
-          "The workspace entry cannot be accessed.",
-          FileSystemProviderErrorCode.NoPermissions,
-        ),
-        rescan: false,
-      });
-    case "ROOT_UNAVAILABLE":
-    case "PATH_ENCODING_UNSUPPORTED":
-    case "WORKSPACE_CONFLICT":
-    case "WORKSPACE_WINDOW_CLOSED":
-      return Object.freeze({
-        error: FileSystemProviderError.create(
-          "The workspace is unavailable.",
-          FileSystemProviderErrorCode.Unavailable,
-        ),
-        rescan: false,
-      });
-    default:
-      return Object.freeze({
-        error: FileSystemProviderError.create(
-          "The workspace is unavailable.",
-          FileSystemProviderErrorCode.Unavailable,
-        ),
-        rescan: true,
-      });
-  }
-}
-
-function createPlainWorkspaceMutationPolicy(
-  platformCapabilities: WorkspaceCapabilities,
-): boolean {
-  const snapshot = decodeWorkspaceCapabilities(platformCapabilities);
-  return (
-    snapshot.create &&
-    snapshot.renameNoReplace &&
-    snapshot.copyMove &&
-    snapshot.delete &&
-    snapshot.versionedWrite
-  );
-}
-
-class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileReadWriteCapability {
-  readonly capabilities =
-    FileSystemProviderCapabilities.FileReadWrite |
-    FileSystemProviderCapabilities.Readonly;
-  readonly onDidChangeCapabilities = Event.None;
-  private readonly changeEmitter = new Emitter();
-  readonly onDidChangeFile = this.changeEmitter.event;
-
-  constructor(
-    private readonly bridge: PlainBridge,
-    private readonly allowsMutationDispatch: boolean,
-  ) {}
-
-  watch(resource) {
-    this.resolveResource(resource);
-    return disposable;
-  }
-
-  async stat(resource) {
-    const resolved = this.resolveResource(resource);
-    try {
-      return providerStat(
-        await this.bridge.workspaceStat(resolved.rootId, resolved.relativePath),
-      );
-    } catch (error) {
-      throw mapReadError(error);
-    }
-  }
-
-  async readdir(resource) {
-    const resolved = this.resolveResource(resource);
-    try {
-      return await this.bridge.workspaceReadDirectory(
-        resolved.rootId,
-        resolved.relativePath,
-      );
-    } catch (error) {
-      throw mapReadError(error);
-    }
-  }
-
-  async readFile() {
-    return file.copy();
-  }
-
-  async plainReadFile(resource) {
-    const resolved = this.resolveResource(resource);
-    try {
-      return await this.bridge.workspaceReadFile(
-        resolved.rootId,
-        resolved.relativePath,
-      );
-    } catch (error) {
-      throw mapReadError(error);
-    }
-  }
-
-  async plainWriteFile(resource, content, expectedVersion) {
-    this.requireMutationDispatchAllowed();
-    try {
-      const result = await this.bridge.workspaceWriteFile(
-        rootId,
-        relativePath,
-        expectedVersion,
-        content,
-      );
-      if (result.status !== "written") {
-        this.changeEmitter.fire(rootRescan);
-      }
-      return result;
-    } catch (error) {
-      throw mapWriteError(error);
-    }
-  }
-
-  async plainCreateFile(resource: URI) {
-    this.requireMutationDispatchAllowed();
-    const resolved = this.resolveMutationResource(resource);
-    try {
-      const stat = createdProviderStat(
-        await this.bridge.workspaceCreateFile(
-          resolved.rootId,
-          resolved.relativePath,
-        ),
-        "file",
-      );
-      this.fireCreated(resolved.resource);
-      return stat;
-    } catch (error) {
-      const failure = mapCreateError(error);
-      if (failure.rescan) {
-        this.fireRootUpdated(resolved.resource);
-      }
-      throw failure.error;
-    }
-  }
-
-  async plainCreateDirectory(resource: URI) {
-    this.requireMutationDispatchAllowed();
-    const resolved = this.resolveMutationResource(resource);
-    try {
-      const stat = createdProviderStat(
-        await this.bridge.workspaceCreateDirectory(
-          resolved.rootId,
-          resolved.relativePath,
-        ),
-        "directory",
-      );
-      this.fireCreated(resolved.resource);
-      return stat;
-    } catch (error) {
-      const failure = mapCreateError(error);
-      if (failure.rescan) {
-        this.fireRootUpdated(resolved.resource);
-      }
-      throw failure.error;
-    }
-  }
-
-  async writeFile() {
-    throw noPermissions();
-  }
-
-  async mkdir() {
-    throw noPermissions();
-  }
-
-  async delete() {
-    throw noPermissions();
-  }
-
-  async rename() {
-    throw noPermissions();
-  }
-
-  private fireCreated(resource): void {
-    this.changeEmitter.fire(
-      Object.freeze([
-        Object.freeze({
-          type: FileChangeType.ADDED,
-          resource,
-        }),
-      ]),
-    );
-  }
-
-  private fireRootUpdated(resource): void {
-    const root = resource.with({ path: "/", query: null, fragment: null });
-    root.toString();
-    void root.fsPath;
-    Object.freeze(root);
-    this.changeEmitter.fire(
-      Object.freeze([
-        Object.freeze({
-          type: FileChangeType.UPDATED,
-          resource: root,
-        }),
-      ]),
-    );
-  }
-
-  private resolveMutationResource(resource) {
-    try {
-      const scheme = resource.scheme;
-      const authority = resource.authority;
-      const path = resource.path;
-      const query = resource.query;
-      const fragment = resource.fragment;
-      if (
-        scheme !== PLAIN_WORKSPACE_SCHEME ||
-        query !== "" ||
-        fragment !== "" ||
-        path.length <= 1 ||
-        !path.startsWith("/")
-      ) {
-        throw noPermissions();
-      }
-      const relativePath = path === "/" ? "" : path.slice(1);
-      const request = frozenWorkspaceEntryRequest(authority, relativePath);
-      const eventResource = URI.from(
-        { scheme, authority, path, query, fragment },
-        true,
-      );
-      eventResource.toString();
-      void eventResource.fsPath;
-      Object.freeze(eventResource);
-      return Object.freeze({ ...request, resource: eventResource });
-    } catch {
-      throw noPermissions();
-    }
-  }
-
-  private resolveResource(resource) {
-    return frozenWorkspaceEntryRequest(resource.authority, resource.path.slice(1));
-  }
-
-  private requireMutationDispatchAllowed(): void {
-    if (!this.allowsMutationDispatch) {
-      throw noPermissions();
-    }
-  }
-}
-
-export function createPlainWorkspaceFileSystemProvider(
-  bridge: PlainBridge,
-  platformCapabilities: WorkspaceCapabilities,
-): PlainWorkspaceFileSystemProvider {
-  return new PlainWorkspaceFileSystemProvider(
-    bridge,
-    createPlainWorkspaceMutationPolicy(platformCapabilities),
-  );
-}
-`;
+const readonlyWorkspaceProvider = readFileSync(
+	new URL(
+		"../../app/features/workspace/file-system-provider.ts",
+		import.meta.url,
+	),
+	"utf8",
+);
 
 describe("Plain workspace provider copy boundary", () => {
-	it("keeps the provider exactly readonly while allowing immutable file payload copies", () => {
+	function mutateProvider(from, to) {
+		if (!readonlyWorkspaceProvider.includes(from)) {
+			throw new Error("provider mutation fixture no longer matches production");
+		}
+		return readonlyWorkspaceProvider.replace(from, to);
+	}
+
+	function mutateLastProvider(from, to) {
+		const index = readonlyWorkspaceProvider.lastIndexOf(from);
+		if (index < 0) {
+			throw new Error("provider mutation fixture no longer matches production");
+		}
+		return (
+			readonlyWorkspaceProvider.slice(0, index) +
+			to +
+			readonlyWorkspaceProvider.slice(index + from.length)
+		);
+	}
+
+	it("accepts the production provider while retaining Readonly and forbidding FileFolderCopy", () => {
 		expect(
 			validateWorkspaceProviderCopyBoundary(readonlyWorkspaceProvider),
 		).toEqual([]);
-	});
 
-	it("rejects early FileFolderCopy capability or removal of Readonly", () => {
-		const nativeCopy = readonlyWorkspaceProvider.replace(
+		const fileFolderCopy = mutateProvider(
 			"FileSystemProviderCapabilities.Readonly;",
-			"FileSystemProviderCapabilities.Readonly |\n    FileSystemProviderCapabilities.FileFolderCopy;",
+			"FileSystemProviderCapabilities.Readonly |\n\t\tFileSystemProviderCapabilities.FileFolderCopy;",
 		);
-		expect(validateWorkspaceProviderCopyBoundary(nativeCopy)).toEqual(
+		expect(validateWorkspaceProviderCopyBoundary(fileFolderCopy)).toEqual(
 			expect.arrayContaining([
 				"Plain workspace provider capabilities must remain exactly FileReadWrite | Readonly",
 				"Plain workspace provider must not advertise FileFolderCopy before activation",
 			]),
 		);
 
-		const writable = readonlyWorkspaceProvider.replace(
-			" |\n    FileSystemProviderCapabilities.Readonly",
-			"",
+		const writable = mutateProvider(
+			"FileSystemProviderCapabilities.FileReadWrite |\n\t\tFileSystemProviderCapabilities.Readonly;",
+			"FileSystemProviderCapabilities.FileReadWrite;",
 		);
 		expect(validateWorkspaceProviderCopyBoundary(writable)).toContain(
 			"Plain workspace provider capabilities must remain exactly FileReadWrite | Readonly",
 		);
 	});
 
-	it("rejects Trash and FileAtomicDelete capability advertising", () => {
+	it("rejects Trash, atomic delete, computed, duplicate and inherited provider surfaces", () => {
 		for (const flag of ["Trash", "FileAtomicDelete"]) {
-			const hostile = readonlyWorkspaceProvider.replace(
+			const hostile = mutateProvider(
 				"FileSystemProviderCapabilities.Readonly;",
-				`FileSystemProviderCapabilities.Readonly |\n    FileSystemProviderCapabilities.${flag};`,
+				"FileSystemProviderCapabilities.Readonly |\n\t\tFileSystemProviderCapabilities." +
+					flag +
+					";",
 			);
 			expect(validateWorkspaceProviderCopyBoundary(hostile)).toContain(
-				`Plain workspace provider must not advertise ${flag} before activation`,
+				"Plain workspace provider must not advertise " +
+					flag +
+					" before activation",
 			);
 		}
-	});
 
-	it("rejects direct, computed or inherited provider copy surfaces", () => {
-		const directCopy = readonlyWorkspaceProvider.replace(
-			"  async writeFile() {",
-			"  async copy() {}\n\n  async writeFile() {",
+		const computed = mutateProvider(
+			"\tasync copy(\n",
+			'\t["copy"] = async () => {};\n\n\tasync copy(\n',
 		);
-		expect(validateWorkspaceProviderCopyBoundary(directCopy)).toContain(
-			"Plain workspace provider must not expose copy before write activation",
-		);
-
-		const computedCopy = readonlyWorkspaceProvider.replace(
-			"  async writeFile() {",
-			'  ["copy"] = async () => {};\n\n  async writeFile() {',
-		);
-		expect(validateWorkspaceProviderCopyBoundary(computedCopy)).toContain(
+		expect(validateWorkspaceProviderCopyBoundary(computed)).toContain(
 			"Plain workspace provider must not hide members behind computed names",
 		);
 
-		const inheritedCopy = readonlyWorkspaceProvider.replace(
+		const duplicate = mutateProvider(
+			"\tasync copy(\n",
+			"\tasync copy(): Promise<void> {}\n\n\tasync copy(\n",
+		);
+		expect(validateWorkspaceProviderCopyBoundary(duplicate)).toContain(
+			"Plain workspace provider member surface must remain the exact audited readonly/provider seam set",
+		);
+
+		const inherited = mutateProvider(
 			"implements IFileSystemProviderWithFileReadWriteCapability",
 			"extends WritableProvider implements IFileSystemProviderWithFileReadWriteCapability",
 		);
-		expect(validateWorkspaceProviderCopyBoundary(inheritedCopy)).toContain(
+		expect(validateWorkspaceProviderCopyBoundary(inherited)).toContain(
 			"Plain workspace provider must not inherit hidden write capabilities",
 		);
 	});
 
-	it("locks the policy gate, private versioned write seam, root rescan and public readonly failure", () => {
+	it("locks the strict overwrite-false own-data authenticator", () => {
+		for (const hostile of [
+			mutateProvider(
+				"Object.getOwnPropertyDescriptors(options)",
+				"Object.getOwnPropertyDescriptors({ overwrite: false })",
+			),
+			mutateProvider("keys.length !== 1", "keys.length < 1"),
+			mutateProvider("overwrite.value !== false", "overwrite.value !== true"),
+			mutateProvider("structuredClone(options);", "void options;"),
+			mutateProvider(
+				"Object.prototype && prototype !== null",
+				"prototype !== null",
+			),
+		]) {
+			expect(validateWorkspaceProviderCopyBoundary(hostile)).toContain(
+				"requireNoOverwriteOptions must accept only one own-data enumerable overwrite false field",
+			);
+		}
+	});
+
+	it("locks authenticated copy/move errors and their rescan classification", () => {
 		for (const [hostile, expected] of [
 			[
-				readonlyWorkspaceProvider.replace("plainWriteFile", "plainWriteBypass"),
-				"Plain workspace provider must expose exactly one audited private plainWriteFile seam",
+				mutateProvider("keys.length !== 2", "keys.length !== 1"),
+				"copyMoveCommandErrorCode must authenticate one exact own-data code/message command error",
 			],
 			[
-				readonlyWorkspaceProvider.replace(
-					"this.bridge.workspaceWriteFile(",
-					"this.bridge.workspaceWriteFile(await this.bridge.workspaceWriteFile(",
+				mutateProvider(
+					"structuredClone(error);\n\t\treturn code.value;",
+					"return code.value;",
 				),
-				"plainWriteFile must gate first, dispatch one versioned bridge write and retain one root-rescan branch",
+				"copyMoveCommandErrorCode must authenticate one exact own-data code/message command error",
 			],
 			[
-				readonlyWorkspaceProvider.replace(
-					"this.changeEmitter.fire(rootRescan);",
-					"void rootRescan;",
+				mutateProvider(
+					"const code = copyMoveCommandErrorCode(error);",
+					"const code = commandErrorCode(error);",
 				),
-				"plainWriteFile must gate first, dispatch one versioned bridge write and retain one root-rescan branch",
+				"mapCopyMoveError must own the exact authenticated copy/move error and rescan policy",
 			],
 			[
-				readonlyWorkspaceProvider.replace(
-					"    this.requireMutationDispatchAllowed();\n",
-					"",
+				mutateLastProvider(
+					'case "WORKSPACE_CONFLICT":\n\t\tcase "WORKSPACE_WINDOW_CLOSED":',
+					'case "WORKSPACE_CONFLICT":',
 				),
-				"plainWriteFile must gate first, dispatch one versioned bridge write and retain one root-rescan branch",
-			],
-			[
-				readonlyWorkspaceProvider.replace(
-					"  async writeFile() {\n    throw noPermissions();\n  }",
-					"  async writeFile() {\n    return this.bridge.workspaceWriteFile();\n  }",
-				),
-				"public writeFile must remain a direct noPermissions failure without native dispatch",
-			],
-			[
-				readonlyWorkspaceProvider.replace(
-					"this.changeEmitter.event",
-					"Event.None",
-				),
-				"Plain workspace provider file-change event must be sourced only from its private emitter",
-			],
-			[
-				readonlyWorkspaceProvider.replace(
-					"readonly onDidChangeCapabilities = Event.None;",
-					"readonly onDidChangeCapabilities = this.changeEmitter.event;",
-				),
-				"Plain workspace provider capability event must remain exactly Event.None",
-			],
-			[
-				readonlyWorkspaceProvider.replace(
-					"if (!this.allowsMutationDispatch)",
-					"if (false)",
-				),
-				"mutation dispatch gate must fail closed from the immutable primitive policy",
-			],
-			[
-				readonlyWorkspaceProvider.replace(
-					"  private requireMutationDispatchAllowed(): void {",
-					"  private leakMutationPolicy() { return this.allowsMutationDispatch; }\n\n  private requireMutationDispatchAllowed(): void {",
-				),
-				"Plain workspace mutation boolean may appear only in its constructor parameter and dispatch gate",
+				"mapCopyMoveError must own the exact authenticated copy/move error and rescan policy",
 			],
 		]) {
 			expect(validateWorkspaceProviderCopyBoundary(hostile)).toContain(
@@ -4339,154 +3892,209 @@ describe("Plain workspace provider copy boundary", () => {
 		}
 	});
 
-	it("locks both private create receipts while public mkdir remains readonly", () => {
-		for (const [index, [hostile, expected]] of [
-			[
-				readonlyWorkspaceProvider.replace(
-					"async plainCreateFile(resource: URI)",
-					"async createFileBypass(resource: URI)",
-				),
-				"Plain workspace provider must expose exactly one audited plainCreateFile seam",
-			],
-			[
-				readonlyWorkspaceProvider.replace(
-					"  async plainCreateFile(resource: URI) {\n    this.requireMutationDispatchAllowed();",
-					"  async plainCreateFile(resource: URI) {",
-				),
-				"plainCreateFile must gate first, snapshot once, validate one native receipt and emit one target addition",
-			],
-			[
-				readonlyWorkspaceProvider.replace(
-					"const stat = createdProviderStat(",
-					"const stat = providerStat(",
-				),
-				"plainCreateFile must gate first, snapshot once, validate one native receipt and emit one target addition",
-			],
-			[
-				readonlyWorkspaceProvider.replace(
-					"this.fireCreated(resolved.resource);",
-					"void resolved.resource;",
-				),
-				"plainCreateFile must gate first, snapshot once, validate one native receipt and emit one target addition",
-			],
-			[
-				readonlyWorkspaceProvider.replace(
-					"this.fireCreated(resolved.resource);",
-					"this.fireCreated(resource);",
-				),
-				"plainCreateFile must gate first, snapshot once, validate one native receipt and emit one target addition",
-			],
-			[
-				readonlyWorkspaceProvider.replace(
-					"await this.bridge.workspaceCreateFile(\n          resolved.rootId,\n          resolved.relativePath,\n        )",
-					"await this.bridge.workspaceCreateFile(\n          resource.authority,\n          resource.path,\n        )",
-				),
-				"plainCreateFile must gate first, snapshot once, validate one native receipt and emit one target addition",
-			],
-			[
-				readonlyWorkspaceProvider.replace(
-					"this.fireCreated(resolved.resource);",
-					'await this.bridge["workspace" + "CreateFile"](resolved.rootId, resolved.relativePath);\n    this.fireCreated(resolved.resource);',
-				),
-				"plainCreateFile must gate first, snapshot once, validate one native receipt and emit one target addition",
-			],
-			[
-				readonlyWorkspaceProvider.replace(
-					"await this.bridge.workspaceCreateDirectory(\n          resolved.rootId,\n          resolved.relativePath,\n        )",
-					"await this.bridge.workspaceCreateDirectory(\n          resolved.rootId,\n          resolved.relativePath,\n        ) || await this.bridge.workspaceCreateDirectory(\n          resolved.rootId,\n          resolved.relativePath,\n        )",
-				),
-				"plainCreateDirectory must gate first, snapshot once, validate one native receipt and emit one target addition",
-			],
-			[
-				readonlyWorkspaceProvider.replace(
-					"  async mkdir() {\n    throw noPermissions();\n  }",
-					"  async mkdir(resource) {\n    return this.bridge.workspaceCreateDirectory(rootId, resource.path);\n  }",
-				),
-				"public mkdir must remain a direct noPermissions failure without native dispatch",
-			],
-		].entries()) {
-			expect(hostile, `mutation ${index} must change the fixture`).not.toBe(
-				readonlyWorkspaceProvider,
+	it("locks copy to two URI snapshots, one bridge call, void re-authentication and its event closure", () => {
+		for (const hostile of [
+			mutateProvider(
+				"const target = this.resolveMutationResource(to);",
+				"const target = this.resolveMutationResource(from);",
+			),
+			mutateProvider(
+				"this.bridge.workspaceCopy(",
+				"this.bridge.workspaceMove(",
+			),
+			mutateProvider("requireVoidMutationReceipt(receipt);", "void receipt;"),
+			mutateProvider(
+				"this.fireRootUpdated(target.resource);",
+				"this.fireRootUpdated(source.resource);",
+			),
+			mutateProvider(
+				"this.fireCreated(target.resource);",
+				"this.fireCreated(source.resource);",
+			),
+		]) {
+			expect(validateWorkspaceProviderCopyBoundary(hostile)).toContain(
+				"copy must gate first, authenticate strict options, snapshot two URIs, route one copy, verify void and close its event set",
 			);
-			expect(
-				validateWorkspaceProviderCopyBoundary(hostile),
-				`mutation ${index}`,
-			).toContain(expected);
 		}
 	});
 
-	it("forbids read paths from consuming dormant mutations or publishing events", () => {
+	it("locks rename/move to two URI snapshots, unique routes, void verification and moved-only decoding", () => {
+		for (const hostile of [
+			mutateLastProvider(
+				"const target = this.resolveMutationResource(to);",
+				"const target = this.resolveMutationResource(from);",
+			),
+			mutateProvider(
+				"this.bridge.workspaceRename(",
+				"this.bridge.workspaceCopy(",
+			),
+			mutateProvider(
+				"this.bridge.workspaceMove(",
+				"this.bridge.workspaceCopy(",
+			),
+			mutateLastProvider(
+				"requireVoidMutationReceipt(receipt);",
+				"void receipt;",
+			),
+			mutateProvider("result = decodeWorkspaceMoveResult(", "result = ("),
+			mutateProvider(
+				'if (result.status !== "moved")',
+				'if (result.status === "moved")',
+			),
+		]) {
+			expect(validateWorkspaceProviderCopyBoundary(hostile)).toContain(
+				"rename must gate first, authenticate strict options, snapshot two URIs, split one rename or move route and accept only moved",
+			);
+		}
+	});
+
+	it("locks frozen success, single-root and double-root event sets", () => {
+		const moved = mutateProvider(
+			"type: FileChangeType.DELETED,\n\t\t\t\t\tresource: source,",
+			"type: FileChangeType.UPDATED,\n\t\t\t\t\tresource: source,",
+		);
+		expect(validateWorkspaceProviderCopyBoundary(moved)).toContain(
+			"fireMoved must emit one frozen source DELETED plus target ADDED event and nothing else",
+		);
+
+		const singleRoot = mutateProvider(
+			"resource: root,\n\t\t\t\t}),",
+			"resource,\n\t\t\t\t}),",
+		);
+		expect(validateWorkspaceProviderCopyBoundary(singleRoot)).toContain(
+			"fireRootUpdated must emit one frozen root UPDATED event and nothing else",
+		);
+
+		const doubleRoot = mutateProvider(
+			"resource: targetRoot,\n\t\t\t\t}),",
+			"resource: sourceRoot,\n\t\t\t\t}),",
+		);
+		expect(validateWorkspaceProviderCopyBoundary(doubleRoot)).toContain(
+			"fireRootsUpdated must emit one frozen source-root plus target-root UPDATED event and nothing else",
+		);
+	});
+
+	it("locks the frozen WORKSPACE_MOVE_INCOMPLETE terminal error", () => {
 		for (const [hostile, expected] of [
 			[
-				readonlyWorkspaceProvider.replace(
-					"  async stat(resource) {",
-					"  async stat(resource) {\n    await this.plainCreateFile(resource);",
+				mutateProvider(
+					'readonly code = "WORKSPACE_MOVE_INCOMPLETE" as const;',
+					'readonly code = "WORKSPACE_MOVE_PARTIAL" as const;',
 				),
-				"Plain workspace provider methods must not internally consume dormant mutation seams",
+				"WorkspaceMoveIncompleteError must remain the frozen WORKSPACE_MOVE_INCOMPLETE FileOperationError",
 			],
 			[
-				readonlyWorkspaceProvider.replace(
-					"  async stat(resource) {",
-					"  async stat(resource) {\n    this.fireCreated(resource);",
+				mutateProvider(
+					"FileOperationResult.FILE_OTHER_ERROR",
+					"FileOperationResult.FILE_MOVE_CONFLICT",
 				),
-				"provider change events must remain confined to two create additions, two ambiguous root rescans and one write-outcome site",
+				"WorkspaceMoveIncompleteError must remain the frozen WORKSPACE_MOVE_INCOMPLETE FileOperationError",
 			],
 			[
-				readonlyWorkspaceProvider.replace(
-					"  async stat(resource) {",
-					"  async stat(resource) {\n    this.changeEmitter.fire(rootRescan);",
+				mutateProvider(
+					"return new WorkspaceMoveIncompleteError();",
+					"return unavailable();",
 				),
-				"provider change events must remain confined to two create additions, two ambiguous root rescans and one write-outcome site",
+				"workspaceMoveIncomplete must construct only the audited incomplete-move error",
+			],
+			[
+				mutateProvider(
+					"throw workspaceMoveIncomplete();",
+					"throw unavailable();",
+				),
+				"rename must gate first, authenticate strict options, snapshot two URIs, split one rename or move route and accept only moved",
 			],
 		]) {
-			expect(hostile).not.toBe(readonlyWorkspaceProvider);
 			expect(validateWorkspaceProviderCopyBoundary(hostile)).toContain(
 				expected,
 			);
 		}
 	});
 
-	it("locks create receipt, event and URI helper semantics", () => {
+	it("keeps write, mkdir and delete public entry points fail-closed", () => {
+		for (const [method, expected] of [
+			[
+				"writeFile",
+				"Plain workspace provider must keep exactly one fail-closed public writeFile method",
+			],
+			[
+				"mkdir",
+				"Plain workspace provider must keep exactly one fail-closed public mkdir method",
+			],
+			[
+				"delete",
+				"Plain workspace provider must keep exactly one fail-closed public delete method",
+			],
+		]) {
+			const hostile = mutateProvider(
+				"\tasync " + method + "(",
+				"\tasync " + method + "Bypass(",
+			);
+			expect(validateWorkspaceProviderCopyBoundary(hostile)).toContain(
+				expected,
+			);
+		}
+	});
+
+	it("forbids read paths and extra provider members from consuming mutation seams or publishing events", () => {
+		const readMutation = mutateProvider(
+			"\tasync stat(resource: URI): Promise<PlainWorkspaceProviderStat> {",
+			"\tasync stat(resource: URI): Promise<PlainWorkspaceProviderStat> {\n\t\tawait this.rename(resource, resource, { overwrite: false });",
+		);
+		expect(validateWorkspaceProviderCopyBoundary(readMutation)).toContain(
+			"Plain workspace provider methods must not internally consume dormant mutation seams",
+		);
+
+		const readEvent = mutateProvider(
+			"\tasync stat(resource: URI): Promise<PlainWorkspaceProviderStat> {",
+			"\tasync stat(resource: URI): Promise<PlainWorkspaceProviderStat> {\n\t\tthis.changeEmitter.fire(Object.freeze([]));",
+		);
+		expect(validateWorkspaceProviderCopyBoundary(readEvent)).toContain(
+			"provider change events must remain confined to the audited create, copy, rename, move and rescan closure",
+		);
+
+		const bridgeAlias = mutateProvider(
+			"\tasync copy(\n",
+			"\tprivate mutationBridge(): PlainBridge { return this.bridge; }\n\n\tasync copy(\n",
+		);
+		expect(validateWorkspaceProviderCopyBoundary(bridgeAlias)).toEqual(
+			expect.arrayContaining([
+				"Plain workspace provider member surface must remain the exact audited readonly/provider seam set",
+				"every this.bridge reference must be the receiver of one fixed direct provider call",
+			]),
+		);
+	});
+
+	it("locks create receipts, create errors and the frozen mutation URI helper", () => {
 		for (const [hostile, expected] of [
 			[
-				readonlyWorkspaceProvider.replace("if (failure.rescan)", "if (false)"),
-				"plainCreateFile must gate first, snapshot once, validate one native receipt and emit one target addition",
-			],
-			[
-				readonlyWorkspaceProvider.replace("resource: root", "resource"),
-				"fireRootUpdated must emit one frozen root UPDATED event and nothing else",
-			],
-			[
-				readonlyWorkspaceProvider.replace("stat.version !== null", "false"),
+				mutateProvider("stat.version !== null", "false"),
 				"createdProviderStat must strictly decode exact zero/null file or directory receipts",
 			],
 			[
-				readonlyWorkspaceProvider.replace(
-					"return Object.freeze({\n    type: expectedKind",
-					"return providerStat(stat) || Object.freeze({\n    type: expectedKind",
+				mutateProvider(
+					"let code: string | undefined;",
+					"return Object.freeze({ error: unavailable(), rescan: false });\n\tlet code: string | undefined;",
 				),
-				"createdProviderStat must strictly decode exact zero/null file or directory receipts",
+				"mapCreateError must own one exact sanitized code-to-provider-error mapping",
 			],
 			[
-				readonlyWorkspaceProvider.replace(
-					"type: FileChangeType.ADDED",
-					"type: FileChangeType.DELETED",
-				),
-				"fireCreated must emit one frozen target ADDED event and nothing else",
+				mutateProvider('\t\t\t\ttypeof path !== "string" ||\n', ""),
+				"mutation URI helper must read each primitive once and return one frozen request/event snapshot",
 			],
 			[
-				readonlyWorkspaceProvider.replace(
+				mutateProvider(
 					"return Object.freeze({ ...request, resource: eventResource });",
 					"return Object.freeze({ ...request, resource });",
 				),
 				"mutation URI helper must read each primitive once and return one frozen request/event snapshot",
 			],
 			[
-				readonlyWorkspaceProvider.replace(
-					"const request = frozenWorkspaceEntryRequest(authority, relativePath);",
-					"const request = Object.freeze({ rootId: authority, relativePath });",
+				mutateProvider(
+					"this.fireCreated(resolved.resource);",
+					"this.fireCreated(resource);",
 				),
-				"mutation URI helper must read each primitive once and return one frozen request/event snapshot",
+				"plainCreateFile must gate first, snapshot once, validate one native receipt and emit one target addition",
 			],
 		]) {
 			expect(validateWorkspaceProviderCopyBoundary(hostile)).toContain(
@@ -4495,347 +4103,129 @@ describe("Plain workspace provider copy boundary", () => {
 		}
 	});
 
-	it("locks one self-contained sanitized create error mapping", () => {
-		const passthrough = readonlyWorkspaceProvider.replace(
-			"  let code: string | undefined;",
-			"  return Object.freeze({ error: error as FileSystemProviderError, rescan: false });\n  let code: string | undefined;",
+	it("locks exact decoder imports, intrinsic bindings and module-private declarations", () => {
+		const aliasedMoveDecoder = mutateProvider(
+			"\tdecodeWorkspaceMoveResult,\n",
+			"\tdecodeWorkspaceMoveResult as decodeMove,\n",
 		);
-		const wrongConflict = readonlyWorkspaceProvider.replace(
-			'case "ENTRY_ALREADY_EXISTS":',
-			'case "ENTRY_NOT_FOUND":',
+		expect(validateWorkspaceProviderCopyBoundary(aliasedMoveDecoder)).toContain(
+			"file-system-provider.ts must import the strict workspace move decoder exactly by name",
 		);
-		const messageProbe = readonlyWorkspaceProvider.replace(
-			"  } catch {\n    code = undefined;\n  }\n  switch (code) {",
-			'  } catch {\n    code = undefined;\n  }\n  void Reflect.get(error, "message");\n  switch (code) {',
-		);
-		for (const hostile of [passthrough, wrongConflict, messageProbe]) {
-			expect(hostile).not.toBe(readonlyWorkspaceProvider);
-			expect(validateWorkspaceProviderCopyBoundary(hostile)).toContain(
-				"mapCreateError must own one exact sanitized code-to-provider-error mapping",
-			);
-		}
-	});
 
-	it("requires every private error mapper and its audited call sites", () => {
-		const missingReadMapper = readonlyWorkspaceProvider
-			.replace("function mapReadError(", "function removedMapReadError(")
-			.replaceAll("throw mapReadError(error);", "throw error;");
-		const missingWriteMapper = readonlyWorkspaceProvider
-			.replace("function mapWriteError(", "function removedMapWriteError(")
-			.replace("throw mapWriteError(error);", "throw error;");
-
-		expect(validateWorkspaceProviderCopyBoundary(missingReadMapper)).toEqual(
-			expect.arrayContaining([
-				"file-system-provider.ts must match the exact declared, exported and non-executable top-level surface",
-				"mapReadError must have exactly 3 audited direct call sites",
-			]),
-		);
-		expect(validateWorkspaceProviderCopyBoundary(missingWriteMapper)).toEqual(
-			expect.arrayContaining([
-				"file-system-provider.ts must match the exact declared, exported and non-executable top-level surface",
-				"mapWriteError must have exactly 1 audited direct call sites",
-			]),
-		);
-	});
-
-	it("keeps non-API provider declarations module-private", () => {
-		for (const hostile of [
-			readonlyWorkspaceProvider.replace(
-				"function createdProviderStat(",
-				"export function createdProviderStat(",
-			),
-			readonlyWorkspaceProvider.replace(
-				"const SANITIZED_MESSAGES",
-				"export const SANITIZED_MESSAGES",
-			),
-			readonlyWorkspaceProvider.replace(
-				"interface ResolvedResource",
-				"export interface ResolvedResource",
-			),
-		]) {
-			expect(validateWorkspaceProviderCopyBoundary(hostile)).toContain(
-				"file-system-provider.ts must match the exact declared, exported and non-executable top-level surface",
-			);
-		}
-	});
-
-	it("fixes the provider factory to one direct audited policy construction", () => {
-		for (const hostileFactory of [
-			readonlyWorkspaceProvider.replace(
-				"return new PlainWorkspaceFileSystemProvider(\n    bridge,\n    createPlainWorkspaceMutationPolicy(platformCapabilities),\n  );",
-				"return new Proxy(new PlainWorkspaceFileSystemProvider(bridge, createPlainWorkspaceMutationPolicy(platformCapabilities)), {});",
-			),
-			readonlyWorkspaceProvider.replace(
-				"return new PlainWorkspaceFileSystemProvider(\n    bridge,\n    createPlainWorkspaceMutationPolicy(platformCapabilities),\n  );",
-				"const provider = new PlainWorkspaceFileSystemProvider(bridge, createPlainWorkspaceMutationPolicy(platformCapabilities));\n  return provider;",
-			),
-			readonlyWorkspaceProvider.replace(
-				"    bridge,\n    createPlainWorkspaceMutationPolicy(platformCapabilities),",
-				"    otherBridge,\n    createPlainWorkspaceMutationPolicy(platformCapabilities),",
-			),
-			readonlyWorkspaceProvider.replace(
-				"createPlainWorkspaceMutationPolicy(platformCapabilities)",
-				"createPlainWorkspaceMutationPolicy(otherCapabilities)",
-			),
-		]) {
-			expect(validateWorkspaceProviderCopyBoundary(hostileFactory)).toContain(
-				"Plain workspace provider factory must directly bind bridge and decoded platform capabilities",
-			);
-		}
-	});
-
-	it("locks one own-data all-five primitive policy", () => {
-		for (const hostilePolicy of [
-			readonlyWorkspaceProvider.replace(
-				"decodeWorkspaceCapabilities(platformCapabilities)",
-				"platformCapabilities",
-			),
-			readonlyWorkspaceProvider.replace(
-				"    snapshot.versionedWrite",
-				"    true",
-			),
-			readonlyWorkspaceProvider.replace(
-				"    snapshot.copyMove &&",
-				"    snapshot.copyMove ||",
-			),
-		]) {
-			expect(validateWorkspaceProviderCopyBoundary(hostilePolicy)).toContain(
-				"mutation policy must decode one own-data DTO into an immutable all-five boolean",
-			);
-		}
-	});
-
-	it("locks the strict decoder import", () => {
-		for (const [from, to, expected] of [
-			[
-				"decodeWorkspaceCapabilities, decodeWorkspaceEntryStat",
-				"decodeWorkspaceCapabilities as decodeCapabilities, decodeWorkspaceEntryStat",
-				"file-system-provider.ts must import the strict workspace capability decoder exactly by name",
-			],
-			[
-				"decodeWorkspaceCapabilities, decodeWorkspaceEntryStat",
-				"decodeWorkspaceCapabilities, decodeWorkspaceEntryStat as decodeStat",
-				"file-system-provider.ts must import the strict workspace entry stat decoder exactly by name",
-			],
-		]) {
-			expect(
-				validateWorkspaceProviderCopyBoundary(
-					readonlyWorkspaceProvider.replace(from, to),
-				),
-			).toContain(expected);
-		}
-	});
-
-	it("locks critical imports and rejects intrinsic or codec shadowing", () => {
-		const objectShadow = `${readonlyWorkspaceProvider}\nconst Object = { freeze(value) { return value; } };`;
-		const uriShadow = readonlyWorkspaceProvider.replace(
-			'import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";',
-			'import { URI as RealURI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";\ntype URI = RealURI;\nconst URI = { from(value) { return value as RealURI; } };',
-		);
-		const codecShadow = readonlyWorkspaceProvider
-			.replace(
-				"frozenWorkspaceEntryRequest }",
-				"frozenWorkspaceEntryRequest as strictFrozenRequest }",
-			)
-			.concat(
-				"\nfunction frozenWorkspaceEntryRequest(rootId, relativePath) { return Object.freeze({ rootId, relativePath }); }",
-			);
-
+		const objectShadow =
+			readonlyWorkspaceProvider +
+			"\nconst Object = { freeze(value: unknown) { return value; } };";
 		expect(validateWorkspaceProviderCopyBoundary(objectShadow)).toContain(
 			"Object must remain the unshadowed global intrinsic in the Plain workspace provider",
 		);
-		expect(validateWorkspaceProviderCopyBoundary(uriShadow)).toEqual(
-			expect.arrayContaining([
-				"file-system-provider.ts must import URI exactly by name from its fixed Workbench module",
-				"URI must have exactly one fixed import binding and no local shadow",
-			]),
+
+		const exportedHelper = mutateProvider(
+			"function requireNoOverwriteOptions(",
+			"export function requireNoOverwriteOptions(",
 		);
-		expect(validateWorkspaceProviderCopyBoundary(codecShadow)).toEqual(
-			expect.arrayContaining([
-				"file-system-provider.ts must import the frozen workspace request codec exactly by name",
-				"file-system-provider.ts must import frozenWorkspaceEntryRequest exactly by name from its fixed Workbench module",
-			]),
+		expect(validateWorkspaceProviderCopyBoundary(exportedHelper)).toContain(
+			"file-system-provider.ts must match the exact declared, exported and non-executable top-level surface",
 		);
 	});
 
-	it("rejects mutation or aliasing of critical runtime objects", () => {
-		for (const hostile of [
-			`${readonlyWorkspaceProvider}\n(FileChangeType as any).ADDED = FileChangeType.DELETED;`,
-			`${readonlyWorkspaceProvider}\n(FilePermission as any).Readonly = 0;`,
-			`${readonlyWorkspaceProvider}\nReflect.set(FileType, "File", FileType.Directory);`,
-			`${readonlyWorkspaceProvider}\nfunction leak() { return FileChangeType; }`,
-		]) {
-			expect(validateWorkspaceProviderCopyBoundary(hostile)).toEqual(
-				expect.arrayContaining([
-					expect.stringMatching(
-						/critical runtime bindings|must not be aliased or consumed/,
-					),
-				]),
-			);
-		}
-	});
-
-	it("rejects dynamic global, constructor and side-effect import escape routes", () => {
-		for (const hostile of [
-			`${readonlyWorkspaceProvider}\nconst intrinsics = globalThis as unknown as { [key: string]: { [key: string]: unknown } }; intrinsics["Object"]!["freeze"] = (value: unknown) => value;`,
-			`${readonlyWorkspaceProvider}\nconst constructor = ({}).constructor;`,
-			`${readonlyWorkspaceProvider}\nvoid import("./mutation-bypass");`,
-			`import "./mutation-bypass";\n${readonlyWorkspaceProvider}`,
-		]) {
-			expect(validateWorkspaceProviderCopyBoundary(hostile)).toEqual(
-				expect.arrayContaining([
-					expect.stringMatching(
-						/dynamic global|constructor or prototype|exact audited module/,
-					),
-				]),
-			);
-		}
-	});
-
-	it("rejects extra bridge-factory imports and top-level execution", () => {
-		const hostile = `${readonlyWorkspaceProvider}
-import { createBridge as createEscapeBridge } from "../../platform/tauri";
-const escapedBridge = createEscapeBridge();
-const escapedCreateName = ["workspace", "Create", "File"].join("");
-void (escapedBridge as unknown as Record<string, (...args: string[]) => Promise<unknown>>)[escapedCreateName]?.("00000000-0000-4000-8000-000000000000", "escape.txt");`;
-		expect(validateWorkspaceProviderCopyBoundary(hostile)).toEqual(
-			expect.arrayContaining([
-				"file-system-provider.ts imports must match the exact audited module, name and type-only surface",
-				"file-system-provider.ts must match the exact declared, exported and non-executable top-level surface",
-			]),
+	it("locks the all-five capability policy and direct provider factory", () => {
+		const policy = mutateProvider(
+			"snapshot.copyMove &&",
+			"snapshot.copyMove ||",
 		);
-	});
-
-	it("rejects live reassignment or aliasing of audited function bindings", () => {
-		for (const [hostile, binding] of [
-			[
-				`${readonlyWorkspaceProvider}\nconst originalProviderFactory = createPlainWorkspaceFileSystemProvider; createPlainWorkspaceFileSystemProvider = (bridge, platformCapabilities) => originalProviderFactory(bridge, platformCapabilities);`,
-				"createPlainWorkspaceFileSystemProvider",
-			],
-			[
-				`${readonlyWorkspaceProvider}\nmapCreateError = (error: unknown): FileSystemProviderError => error as FileSystemProviderError;`,
-				"mapCreateError",
-			],
-			[
-				`${readonlyWorkspaceProvider}\ncreatedProviderStat = (_value: unknown, expectedKind: "file" | "directory") => Object.freeze({ type: expectedKind === "file" ? FileType.File : FileType.Directory, size: 0, mtime: 0, ctime: 0, plainVersion: null });`,
-				"createdProviderStat",
-			],
-			[
-				`${readonlyWorkspaceProvider}\ncreatePlainWorkspaceMutationPolicy = (_platformCapabilities: WorkspaceCapabilities): boolean => true;`,
-				"createPlainWorkspaceMutationPolicy",
-			],
-		]) {
-			expect(validateWorkspaceProviderCopyBoundary(hostile)).toEqual(
-				expect.arrayContaining([
-					expect.stringContaining(
-						`${binding} must not be reassigned, aliased or consumed`,
-					),
-				]),
-			);
-		}
-	});
-
-	it("rejects constructor-time policy upgrades", () => {
-		const hostile = readonlyWorkspaceProvider.replace(
-			"  ) {}",
-			"  ) { this.allowsMutationDispatch = true; }",
-		);
-		expect(validateWorkspaceProviderCopyBoundary(hostile)).toContain(
-			"Plain workspace provider constructor must retain only the bridge and immutable mutation boolean",
-		);
-	});
-
-	it("keeps the provider class and policy builder module-private", () => {
-		expect(
-			validateWorkspaceProviderCopyBoundary(
-				readonlyWorkspaceProvider.replace(
-					"class PlainWorkspaceFileSystemProvider",
-					"export class PlainWorkspaceFileSystemProvider",
-				),
-			),
-		).toContain(
-			"Plain workspace provider class must remain undecorated and module-private behind its audited factory",
-		);
-		expect(
-			validateWorkspaceProviderCopyBoundary(
-				readonlyWorkspaceProvider.replace(
-					"function createPlainWorkspaceMutationPolicy(",
-					"export function createPlainWorkspaceMutationPolicy(",
-				),
-			),
-		).toContain(
+		expect(validateWorkspaceProviderCopyBoundary(policy)).toContain(
 			"mutation policy must decode one own-data DTO into an immutable all-five boolean",
 		);
+
+		const factory = mutateProvider(
+			"\t\tbridge,\n\t\tcreatePlainWorkspaceMutationPolicy(platformCapabilities),",
+			"\t\totherBridge,\n\t\tcreatePlainWorkspaceMutationPolicy(platformCapabilities),",
+		);
+		expect(validateWorkspaceProviderCopyBoundary(factory)).toContain(
+			"Plain workspace provider factory must directly bind bridge and decoded platform capabilities",
+		);
+
+		const exportedProvider = mutateProvider(
+			"class PlainWorkspaceFileSystemProvider",
+			"export class PlainWorkspaceFileSystemProvider",
+		);
+		expect(validateWorkspaceProviderCopyBoundary(exportedProvider)).toContain(
+			"Plain workspace provider class must remain undecorated and module-private behind its audited factory",
+		);
 	});
 
-	it("rejects method and class decorators before capability-gated mutation", () => {
+	it("rejects dynamic globals, runtime binding mutation and computed bridge access", () => {
 		for (const hostile of [
-			readonlyWorkspaceProvider.replace(
-				"  async plainCreateFile(resource: URI)",
-				"  @wrapCreate\n  async plainCreateFile(resource: URI)",
-			),
-			readonlyWorkspaceProvider.replace(
-				"class PlainWorkspaceFileSystemProvider",
-				"@wrapProvider\nclass PlainWorkspaceFileSystemProvider",
+			readonlyWorkspaceProvider + '\nvoid globalThis["Object"]["freeze"];',
+			readonlyWorkspaceProvider +
+				"\n(FileChangeType as any).ADDED = FileChangeType.DELETED;",
+			mutateProvider(
+				"requireNoOverwriteOptions(options);\n\t\tconst source",
+				'requireNoOverwriteOptions(options);\n\t\tconst method = "workspaceCopy";\n\t\tvoid this.bridge[method];\n\t\tconst source',
 			),
 		]) {
-			expect(validateWorkspaceProviderCopyBoundary(hostile)).toContain(
-				"Plain workspace provider source must not contain decorators that can wrap audited construction or mutation seams",
-			);
+			const failures = validateWorkspaceProviderCopyBoundary(hostile);
+			expect(
+				failures.some((message) =>
+					/dynamic global|critical runtime bindings|alias or dynamically access/.test(
+						message,
+					),
+				),
+			).toBe(true);
 		}
 	});
 
-	it("rejects extra provider identifiers and dynamic mutation surfaces", () => {
-		for (const [addition, expected] of [
-			[
-				"const ProviderAlias = PlainWorkspaceFileSystemProvider;",
-				"PlainWorkspaceFileSystemProvider may be referenced only by its declaration and audited factory",
-			],
-			[
-				"void PlainWorkspaceFileSystemProvider.prototype;",
-				"Plain workspace provider must not expose prototype mutation references",
-			],
-			[
-				'Object.defineProperty({}, "copy", { value() {} });',
-				"Plain workspace provider must not use defineProperty or Proxy mutation surfaces",
-			],
-			[
-				"const wrapped = new Proxy({}, {});",
-				"Plain workspace provider must not use defineProperty or Proxy mutation surfaces",
-			],
-			[
-				"provider.capabilities = FileSystemProviderCapabilities.FileFolderCopy;",
-				"Plain workspace provider capabilities must not be referenced outside their readonly declaration",
-			],
+	it("rejects decorators, constructor policy upgrades and live function aliases", () => {
+		const decorated = mutateProvider(
+			"\tasync copy(\n",
+			"\t@wrapMutation\n\tasync copy(\n",
+		);
+		expect(validateWorkspaceProviderCopyBoundary(decorated)).toContain(
+			"Plain workspace provider source must not contain decorators that can wrap audited construction or mutation seams",
+		);
+
+		const constructorUpgrade = mutateProvider(
+			"\t\tprivate readonly allowsMutationDispatch: boolean,\n\t) {}",
+			"\t\tprivate readonly allowsMutationDispatch: boolean,\n\t) { this.allowsMutationDispatch = true; }",
+		);
+		expect(validateWorkspaceProviderCopyBoundary(constructorUpgrade)).toContain(
+			"Plain workspace provider constructor must retain only the bridge and immutable mutation boolean",
+		);
+
+		const liveAlias =
+			readonlyWorkspaceProvider +
+			"\nconst originalMoveIncomplete = workspaceMoveIncomplete;";
+		expect(validateWorkspaceProviderCopyBoundary(liveAlias)).toContain(
+			"workspaceMoveIncomplete must not be reassigned, aliased or consumed outside its audited direct calls",
+		);
+	});
+
+	it("rejects side-effect imports, provider aliases and dynamic mutation surfaces", () => {
+		const sideEffectImport =
+			'import "./mutation-bypass";\n' + readonlyWorkspaceProvider;
+		expect(validateWorkspaceProviderCopyBoundary(sideEffectImport)).toContain(
+			"file-system-provider.ts imports must match the exact audited module, name and type-only surface",
+		);
+
+		const providerAlias =
+			readonlyWorkspaceProvider +
+			"\nconst ProviderAlias = PlainWorkspaceFileSystemProvider;";
+		expect(validateWorkspaceProviderCopyBoundary(providerAlias)).toContain(
+			"PlainWorkspaceFileSystemProvider may be referenced only by its declaration and audited factory",
+		);
+
+		for (const addition of [
+			'Object.defineProperty({}, "copy", { value() {} });',
+			"const wrapped = new Proxy({}, {});",
 		]) {
 			expect(
 				validateWorkspaceProviderCopyBoundary(
-					`${readonlyWorkspaceProvider}\n${addition}`,
+					readonlyWorkspaceProvider + "\n" + addition,
 				),
-			).toContain(expected);
+			).toContain(
+				"Plain workspace provider must not use defineProperty or Proxy mutation surfaces",
+			);
 		}
-	});
-
-	it("rejects extra provider members and transitive bridge aliases", () => {
-		const hostile = readonlyWorkspaceProvider.replace(
-			"  async writeFile() {",
-			`  private mutationBridge() { return this.bridge; }
-
-  async transitiveCreate(resource) {
-    const bridge = this.mutationBridge() as any;
-    const method = "workspace" + "CreateFile";
-    return bridge[method](resource.authority, resource.path);
-  }
-
-  async writeFile() {`,
-		);
-		expect(hostile).not.toBe(readonlyWorkspaceProvider);
-		expect(validateWorkspaceProviderCopyBoundary(hostile)).toEqual(
-			expect.arrayContaining([
-				"Plain workspace provider member surface must remain the exact audited readonly/provider seam set",
-				"every this.bridge reference must be the receiver of one fixed direct provider call",
-			]),
-		);
 	});
 });
 

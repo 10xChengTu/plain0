@@ -5,6 +5,7 @@ import {
 	FileSystemProviderCapabilities,
 	FileSystemProviderErrorCode,
 	FileType,
+	type IFileOverwriteOptions,
 } from "@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files";
 import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
 import { describe, expect, it, vi } from "vitest";
@@ -19,10 +20,12 @@ import type {
 	RuntimeInfo,
 	WorkspaceCapabilities,
 	WorkspaceEntryKind,
+	WorkspaceMoveResult,
 } from "../../app/platform/tauri/contracts";
 import { frozenWorkspaceReadFile } from "../../app/platform/tauri/workspace-codec";
 
 const rootId = "00000000-0000-4000-8000-000000000101";
+const targetRootId = "00000000-0000-4000-8000-000000000202";
 const rootUri = `${PLAIN_WORKSPACE_SCHEME}://${rootId}/`;
 const versionA = `wv1:${"a".repeat(64)}`;
 const versionB = `wv1:${"b".repeat(64)}`;
@@ -39,8 +42,58 @@ const supportedCapabilities: WorkspaceCapabilities = Object.freeze({
 	versionedWrite: true,
 });
 
+type ProviderChanges = readonly Readonly<{
+	type: FileChangeType;
+	resource: URI;
+}>[];
+
 function workspaceUri(relativePath = ""): URI {
 	return URI.parse(`${rootUri}${relativePath}`);
+}
+
+function rootedWorkspaceUri(workspaceRootId: string, relativePath = ""): URI {
+	return URI.parse(
+		`${PLAIN_WORKSPACE_SCHEME}://${workspaceRootId}/${relativePath}`,
+	);
+}
+
+function exactCommandError(code: string): object {
+	return Object.freeze({
+		code,
+		message: "The native workspace mutation failed.",
+	});
+}
+
+function hostileNonPrimitivePathUri(): {
+	readonly resource: URI;
+	readonly methodReads: () => number;
+} {
+	let reads = 0;
+	const resource = Object.assign(Object.create(null), {
+		scheme: PLAIN_WORKSPACE_SCHEME,
+		authority: rootId,
+		path: {
+			get length() {
+				reads += 1;
+				return 12;
+			},
+			startsWith() {
+				reads += 1;
+				return true;
+			},
+			slice() {
+				reads += 1;
+				return "safe";
+			},
+			toString() {
+				reads += 1;
+				return "/private";
+			},
+		},
+		query: "",
+		fragment: "",
+	}) as unknown as URI;
+	return { resource, methodReads: () => reads };
 }
 
 function commandError(
@@ -164,6 +217,9 @@ describe("Plain workspace file system provider", () => {
 		expect(
 			provider.capabilities & FileSystemProviderCapabilities.PathCaseSensitive,
 		).toBe(0);
+		expect(
+			provider.capabilities & FileSystemProviderCapabilities.FileFolderCopy,
+		).toBe(0);
 	});
 
 	it("snapshots one immutable all-five mutation policy without changing provider capabilities", async () => {
@@ -207,6 +263,9 @@ describe("Plain workspace file system provider", () => {
 			const write = vi.fn();
 			const createFile = vi.fn();
 			const createDirectory = vi.fn();
+			const copy = vi.fn();
+			const rename = vi.fn();
+			const move = vi.fn();
 			const platformCapabilities = {
 				...supportedCapabilities,
 				[capability]: false,
@@ -216,6 +275,9 @@ describe("Plain workspace file system provider", () => {
 					workspaceWriteFile: write,
 					workspaceCreateFile: createFile,
 					workspaceCreateDirectory: createDirectory,
+					workspaceCopy: copy,
+					workspaceRename: rename,
+					workspaceMove: move,
 				}),
 				platformCapabilities,
 			);
@@ -233,6 +295,7 @@ describe("Plain workspace file system provider", () => {
 			expect(error.code).toBe(FileSystemProviderErrorCode.NoPermissions);
 			expect(write).not.toHaveBeenCalled();
 			let uriReads = 0;
+			let optionReads = 0;
 			const unreadableResource = Object.create(null) as URI;
 			for (const key of ["scheme", "authority", "path", "query", "fragment"]) {
 				Object.defineProperty(unreadableResource, key, {
@@ -242,17 +305,39 @@ describe("Plain workspace file system provider", () => {
 					},
 				});
 			}
+			const unreadableOptions = Object.create(null);
+			Object.defineProperty(unreadableOptions, "overwrite", {
+				enumerable: true,
+				get() {
+					optionReads += 1;
+					throw new Error("must not read options");
+				},
+			});
 			for (const operation of [
 				provider.plainCreateFile(unreadableResource),
 				provider.plainCreateDirectory(unreadableResource),
+				provider.copy(
+					unreadableResource,
+					unreadableResource,
+					unreadableOptions,
+				),
+				provider.rename(
+					unreadableResource,
+					unreadableResource,
+					unreadableOptions,
+				),
 			]) {
 				expect((await rejected(operation)).code).toBe(
 					FileSystemProviderErrorCode.NoPermissions,
 				);
 			}
 			expect(uriReads).toBe(0);
+			expect(optionReads).toBe(0);
 			expect(createFile).not.toHaveBeenCalled();
 			expect(createDirectory).not.toHaveBeenCalled();
+			expect(copy).not.toHaveBeenCalled();
+			expect(rename).not.toHaveBeenCalled();
+			expect(move).not.toHaveBeenCalled();
 			expect(changeListener).not.toHaveBeenCalled();
 			changeSubscription.dispose();
 			expect(provider.capabilities).toBe(
@@ -942,6 +1027,9 @@ describe("Plain workspace file system provider", () => {
 				workspaceCreateDirectory: createDirectory,
 			}),
 		);
+		const changeListener = vi.fn();
+		const subscription = provider.onDidChangeFile(changeListener);
+		const hostilePath = hostileNonPrimitivePathUri();
 		const invalid = [
 			workspaceUri(),
 			workspaceUri("entry").with({ query: "private" }),
@@ -951,6 +1039,7 @@ describe("Plain workspace file system provider", () => {
 				authority: rootId,
 				path: "/entry/",
 			}),
+			hostilePath.resource,
 		];
 
 		for (const resource of invalid) {
@@ -965,6 +1054,600 @@ describe("Plain workspace file system provider", () => {
 		}
 		expect(createFile).not.toHaveBeenCalled();
 		expect(createDirectory).not.toHaveBeenCalled();
+		expect(hostilePath.methodReads()).toBe(0);
+		expect(changeListener).not.toHaveBeenCalled();
+		subscription.dispose();
+	});
+
+	it("routes copy, same-root rename, and cross-root move through one native bridge each", async () => {
+		const copy = vi.fn(async () => undefined);
+		const rename = vi.fn(async () => undefined);
+		const move = vi.fn(async () => Object.freeze({ status: "moved" as const }));
+		const provider = createPlainWorkspaceFileSystemProvider(
+			testBridge({
+				workspaceCopy: copy,
+				workspaceRename: rename,
+				workspaceMove: move,
+			}),
+		);
+		const events: (readonly {
+			readonly type: FileChangeType;
+			readonly resource: URI;
+		}[])[] = [];
+		const subscription = provider.onDidChangeFile((event: ProviderChanges) =>
+			events.push(event),
+		);
+		const source = workspaceUri("src/main.ts");
+		const sameRootCopy = workspaceUri("src/main-copy.ts");
+		const crossRootCopy = rootedWorkspaceUri(targetRootId, "copied/main.ts");
+		const sameRootRenameSource = workspaceUri("src/old.ts");
+		const sameRootRenameTarget = workspaceUri("src/new.ts");
+		const crossRootMoveSource = workspaceUri("move/source.ts");
+		const crossRootMoveTarget = rootedWorkspaceUri(
+			targetRootId,
+			"move/target.ts",
+		);
+
+		await provider.copy(source, sameRootCopy, { overwrite: false });
+		await provider.copy(source, crossRootCopy, { overwrite: false });
+		await provider.rename(sameRootRenameSource, sameRootRenameTarget, {
+			overwrite: false,
+		});
+		await provider.rename(crossRootMoveSource, crossRootMoveTarget, {
+			overwrite: false,
+		});
+		subscription.dispose();
+
+		expect(copy.mock.calls).toEqual([
+			[rootId, "src/main.ts", rootId, "src/main-copy.ts"],
+			[rootId, "src/main.ts", targetRootId, "copied/main.ts"],
+		]);
+		expect(rename.mock.calls).toEqual([[rootId, "src/old.ts", "src/new.ts"]]);
+		expect(move.mock.calls).toEqual([
+			[rootId, "move/source.ts", targetRootId, "move/target.ts"],
+		]);
+		expect(events).toHaveLength(4);
+		expect(
+			events.map((event) =>
+				event.map(({ type, resource }) => [type, resource.toString()]),
+			),
+		).toEqual([
+			[[FileChangeType.ADDED, sameRootCopy.toString()]],
+			[[FileChangeType.ADDED, crossRootCopy.toString()]],
+			[
+				[FileChangeType.DELETED, sameRootRenameSource.toString()],
+				[FileChangeType.ADDED, sameRootRenameTarget.toString()],
+			],
+			[
+				[FileChangeType.DELETED, crossRootMoveSource.toString()],
+				[FileChangeType.ADDED, crossRootMoveTarget.toString()],
+			],
+		]);
+		for (const event of events) {
+			expect(Object.isFrozen(event)).toBe(true);
+			for (const change of event) {
+				expect(Object.isFrozen(change)).toBe(true);
+				expect(Object.isFrozen(change.resource)).toBe(true);
+			}
+		}
+	});
+
+	it("treats equal relative paths in different roots as distinct mutation resources", async () => {
+		const copy = vi.fn(async () => undefined);
+		const move = vi.fn(async () => Object.freeze({ status: "moved" as const }));
+		const rename = vi.fn();
+		const provider = createPlainWorkspaceFileSystemProvider(
+			testBridge({
+				workspaceCopy: copy,
+				workspaceRename: rename,
+				workspaceMove: move,
+			}),
+		);
+		const source = workspaceUri("shared/name.ts");
+		const target = rootedWorkspaceUri(targetRootId, "shared/name.ts");
+
+		await provider.copy(source, target, { overwrite: false });
+		await provider.rename(source, target, { overwrite: false });
+
+		expect(copy).toHaveBeenCalledWith(
+			rootId,
+			"shared/name.ts",
+			targetRootId,
+			"shared/name.ts",
+		);
+		expect(move).toHaveBeenCalledWith(
+			rootId,
+			"shared/name.ts",
+			targetRootId,
+			"shared/name.ts",
+		);
+		expect(rename).not.toHaveBeenCalled();
+	});
+
+	it("snapshots both copy URIs before awaiting native work", async () => {
+		let resolveCopy: (() => void) | undefined;
+		const pending = new Promise<void>((resolve) => {
+			resolveCopy = resolve;
+		});
+		const copy = vi.fn(() => pending);
+		const provider = createPlainWorkspaceFileSystemProvider(
+			testBridge({ workspaceCopy: copy }),
+		);
+		const sourceValues: Record<string, string> = {
+			scheme: PLAIN_WORKSPACE_SCHEME,
+			authority: rootId,
+			path: "/safe/source.ts",
+			query: "",
+			fragment: "",
+		};
+		const targetValues: Record<string, string> = {
+			scheme: PLAIN_WORKSPACE_SCHEME,
+			authority: targetRootId,
+			path: "/safe/target.ts",
+			query: "",
+			fragment: "",
+		};
+		const sourceReads = new Map<string, number>();
+		const targetReads = new Map<string, number>();
+		const hostileUri = (
+			values: Record<string, string>,
+			reads: Map<string, number>,
+		): URI => {
+			const resource = Object.create(null) as URI;
+			for (const key of Object.keys(values)) {
+				Object.defineProperty(resource, key, {
+					get() {
+						reads.set(key, (reads.get(key) ?? 0) + 1);
+						return values[key];
+					},
+				});
+			}
+			return resource;
+		};
+		const source = hostileUri(sourceValues, sourceReads);
+		const target = hostileUri(targetValues, targetReads);
+		const options = { overwrite: false };
+		const events: string[] = [];
+		const subscription = provider.onDidChangeFile((event: ProviderChanges) =>
+			events.push(event[0]!.resource.toString()),
+		);
+
+		const operation = provider.copy(source, target, options);
+		sourceValues.authority = targetRootId;
+		sourceValues.path = "/private/source.ts";
+		targetValues.authority = rootId;
+		targetValues.path = "/private/target.ts";
+		options.overwrite = true;
+		resolveCopy?.();
+		await operation;
+		subscription.dispose();
+
+		const expectedReads = {
+			scheme: 1,
+			authority: 1,
+			path: 1,
+			query: 1,
+			fragment: 1,
+		};
+		expect(Object.fromEntries(sourceReads)).toEqual(expectedReads);
+		expect(Object.fromEntries(targetReads)).toEqual(expectedReads);
+		expect(copy).toHaveBeenCalledWith(
+			rootId,
+			"safe/source.ts",
+			targetRootId,
+			"safe/target.ts",
+		);
+		expect(events).toEqual([
+			`${PLAIN_WORKSPACE_SCHEME}://${targetRootId}/safe/target.ts`,
+		]);
+	});
+
+	it("accepts only own-data no-overwrite options before copy or rename dispatch", async () => {
+		const copy = vi.fn(async () => undefined);
+		const rename = vi.fn(async () => undefined);
+		const move = vi.fn();
+		const provider = createPlainWorkspaceFileSystemProvider(
+			testBridge({
+				workspaceCopy: copy,
+				workspaceRename: rename,
+				workspaceMove: move,
+			}),
+		);
+		let accessorReads = 0;
+		const accessorOptions = Object.create(null);
+		Object.defineProperty(accessorOptions, "overwrite", {
+			enumerable: true,
+			get() {
+				accessorReads += 1;
+				return false;
+			},
+		});
+		let proxyReads = 0;
+		const proxyOptions = new Proxy(
+			{ overwrite: false },
+			{
+				get(target, property, receiver) {
+					proxyReads += 1;
+					return Reflect.get(target, property, receiver);
+				},
+			},
+		);
+		const symbolOptions = { overwrite: false } as Record<PropertyKey, unknown>;
+		symbolOptions[Symbol("extra")] = true;
+		const invalidOptions = [
+			{},
+			{ overwrite: true },
+			{ overwrite: undefined },
+			{ overwrite: null },
+			{ overwrite: 0 },
+			{ overwrite: false, extra: true },
+			Object.create({ overwrite: false }),
+			accessorOptions,
+			proxyOptions,
+			symbolOptions,
+			new Boolean(false),
+		] as unknown as IFileOverwriteOptions[];
+
+		for (const options of invalidOptions) {
+			for (const operation of [
+				provider.copy(
+					workspaceUri("source.ts"),
+					workspaceUri("copy.ts"),
+					options,
+				),
+				provider.rename(
+					workspaceUri("source.ts"),
+					workspaceUri("renamed.ts"),
+					options,
+				),
+			]) {
+				expect((await rejected(operation)).code).toBe(
+					FileSystemProviderErrorCode.NoPermissions,
+				);
+			}
+		}
+		expect(accessorReads).toBe(0);
+		expect(proxyReads).toBe(0);
+		expect(copy).not.toHaveBeenCalled();
+		expect(rename).not.toHaveBeenCalled();
+		expect(move).not.toHaveBeenCalled();
+
+		const nullPrototypeOptions = Object.assign(Object.create(null), {
+			overwrite: false,
+		}) as IFileOverwriteOptions;
+		await provider.copy(
+			workspaceUri("source.ts"),
+			workspaceUri("copy.ts"),
+			nullPrototypeOptions,
+		);
+		expect(copy).toHaveBeenCalledTimes(1);
+	});
+
+	it("rejects invalid mutation URIs and equal resources before native dispatch", async () => {
+		const copy = vi.fn();
+		const rename = vi.fn();
+		const move = vi.fn();
+		const provider = createPlainWorkspaceFileSystemProvider(
+			testBridge({
+				workspaceCopy: copy,
+				workspaceRename: rename,
+				workspaceMove: move,
+			}),
+		);
+		const changeListener = vi.fn();
+		const subscription = provider.onDidChangeFile(changeListener);
+		const hostilePath = hostileNonPrimitivePathUri();
+		const invalid = [
+			workspaceUri(),
+			workspaceUri("entry").with({ query: "private" }),
+			workspaceUri("entry").with({ fragment: "private" }),
+			workspaceUri("entry/"),
+			URI.parse(`file://${rootId}/entry`),
+			URI.parse(
+				`${PLAIN_WORKSPACE_SCHEME}://00000000-0000-3000-8000-000000000101/entry`,
+			),
+			hostilePath.resource,
+		];
+
+		for (const resource of invalid) {
+			for (const operation of [
+				provider.copy(resource, workspaceUri("target"), {
+					overwrite: false,
+				}),
+				provider.rename(workspaceUri("source"), resource, {
+					overwrite: false,
+				}),
+			]) {
+				expect((await rejected(operation)).code).toBe(
+					FileSystemProviderErrorCode.NoPermissions,
+				);
+			}
+		}
+		for (const operation of [
+			provider.copy(workspaceUri("same"), workspaceUri("same"), {
+				overwrite: false,
+			}),
+			provider.rename(workspaceUri("same"), workspaceUri("same"), {
+				overwrite: false,
+			}),
+		]) {
+			expect((await rejected(operation)).code).toBe(
+				FileSystemProviderErrorCode.FileExists,
+			);
+		}
+		expect(copy).not.toHaveBeenCalled();
+		expect(rename).not.toHaveBeenCalled();
+		expect(move).not.toHaveBeenCalled();
+		expect(hostilePath.methodReads()).toBe(0);
+		expect(changeListener).not.toHaveBeenCalled();
+		subscription.dispose();
+	});
+
+	it("rescans both roots before rejecting every published incomplete move", async () => {
+		const reasons = [
+			"sourceChanged",
+			"targetChanged",
+			"sourceUnverifiable",
+			"targetUnverifiable",
+			"deleteFailed",
+		] as const;
+		const outcomes: WorkspaceMoveResult[] = [];
+		for (const [index, reason] of reasons.entries()) {
+			outcomes.push(
+				Object.freeze({
+					status: "targetPublishedSourceRetained",
+					reason,
+				}),
+				Object.freeze({
+					status: "targetPublishedSourcePartiallyDeleted",
+					reason,
+					removedEntries: index === 0 ? 1 : 10_000,
+				}),
+			);
+		}
+		let outcomeIndex = 0;
+		const move = vi.fn(async () => outcomes[outcomeIndex++]!);
+		const rename = vi.fn();
+		const copy = vi.fn();
+		const provider = createPlainWorkspaceFileSystemProvider(
+			testBridge({
+				workspaceCopy: copy,
+				workspaceRename: rename,
+				workspaceMove: move,
+			}),
+		);
+		const events: (readonly {
+			readonly type: FileChangeType;
+			readonly resource: URI;
+		}[])[] = [];
+		const order: string[] = [];
+		const subscription = provider.onDidChangeFile((event: ProviderChanges) => {
+			order.push("event");
+			events.push(event);
+		});
+		const source = workspaceUri("move/source");
+		const target = rootedWorkspaceUri(targetRootId, "move/target");
+
+		for (const outcome of outcomes) {
+			const operation = provider
+				.rename(source, target, { overwrite: false })
+				.catch((error: unknown) => {
+					order.push("reject");
+					throw error;
+				});
+			const error = await rejected(operation);
+			expect(error).toMatchObject({
+				code: "WORKSPACE_MOVE_INCOMPLETE",
+				name: "WORKSPACE_MOVE_INCOMPLETE",
+				fileOperationResult: FileOperationResult.FILE_OTHER_ERROR,
+			});
+			expect(Object.isFrozen(error)).toBe(true);
+			expect(error.message).toContain("published its target");
+			expect(error.message).not.toContain(outcome.status);
+			if ("reason" in outcome) {
+				expect(error.message).not.toContain(outcome.reason);
+			}
+		}
+		subscription.dispose();
+
+		expect(move).toHaveBeenCalledTimes(outcomes.length);
+		expect(rename).not.toHaveBeenCalled();
+		expect(copy).not.toHaveBeenCalled();
+		expect(order).toEqual(outcomes.flatMap(() => ["event", "reject"]));
+		expect(events).toHaveLength(outcomes.length);
+		for (const event of events) {
+			expect(Object.isFrozen(event)).toBe(true);
+			expect(
+				event.map(({ type, resource }) => [type, resource.toString()]),
+			).toEqual([
+				[FileChangeType.UPDATED, rootUri],
+				[
+					FileChangeType.UPDATED,
+					`${PLAIN_WORKSPACE_SCHEME}://${targetRootId}/`,
+				],
+			]);
+			for (const change of event) {
+				expect(Object.isFrozen(change)).toBe(true);
+				expect(Object.isFrozen(change.resource)).toBe(true);
+			}
+		}
+	});
+
+	it("rescans only affected roots when copy or move responses cannot be authenticated", async () => {
+		const source = workspaceUri("unknown/source");
+		const sameRootTarget = workspaceUri("unknown/target");
+		const crossRootTarget = rootedWorkspaceUri(targetRootId, "unknown/target");
+		let errorCodeReads = 0;
+		const accessorError = Object.create(null);
+		Object.defineProperties(accessorError, {
+			code: {
+				enumerable: true,
+				get() {
+					errorCodeReads += 1;
+					return "ENTRY_NOT_FOUND";
+				},
+			},
+			message: {
+				enumerable: true,
+				value: "Private failure at /Users/private/workspace",
+			},
+		});
+		const cases = [
+			{
+				bridge: testBridge({
+					async workspaceCopy() {
+						return null as never;
+					},
+				}),
+				invoke: "copy" as const,
+				target: sameRootTarget,
+				expectedRoots: [rootUri],
+				expectedCode: FileSystemProviderErrorCode.Unavailable,
+			},
+			{
+				bridge: testBridge({
+					async workspaceCopy() {
+						throw accessorError;
+					},
+				}),
+				invoke: "copy" as const,
+				target: sameRootTarget,
+				expectedRoots: [rootUri],
+				expectedCode: FileSystemProviderErrorCode.Unavailable,
+			},
+			{
+				bridge: testBridge({
+					async workspaceRename() {
+						return null as never;
+					},
+				}),
+				invoke: "rename" as const,
+				target: sameRootTarget,
+				expectedRoots: [rootUri],
+				expectedCode: FileSystemProviderErrorCode.Unavailable,
+			},
+			{
+				bridge: testBridge({
+					async workspaceMove() {
+						return Object.freeze({ status: "moved", extra: true }) as never;
+					},
+				}),
+				invoke: "rename" as const,
+				target: crossRootTarget,
+				expectedRoots: [
+					rootUri,
+					`${PLAIN_WORKSPACE_SCHEME}://${targetRootId}/`,
+				],
+				expectedCode: "WORKSPACE_MOVE_INCOMPLETE",
+			},
+			{
+				bridge: testBridge({
+					async workspaceMove() {
+						throw exactCommandError("IO_FAILED");
+					},
+				}),
+				invoke: "rename" as const,
+				target: crossRootTarget,
+				expectedRoots: [
+					rootUri,
+					`${PLAIN_WORKSPACE_SCHEME}://${targetRootId}/`,
+				],
+				expectedCode: "WORKSPACE_MOVE_INCOMPLETE",
+			},
+		] as const;
+
+		for (const scenario of cases) {
+			const provider = createPlainWorkspaceFileSystemProvider(scenario.bridge);
+			const events: (readonly {
+				readonly type: FileChangeType;
+				readonly resource: URI;
+			}[])[] = [];
+			const subscription = provider.onDidChangeFile((event: ProviderChanges) =>
+				events.push(event),
+			);
+			const operation =
+				scenario.invoke === "copy"
+					? provider.copy(source, scenario.target, { overwrite: false })
+					: provider.rename(source, scenario.target, { overwrite: false });
+			const error = await rejected(operation);
+			subscription.dispose();
+
+			expect(error.code).toBe(scenario.expectedCode);
+			expect(events).toHaveLength(1);
+			expect(
+				events[0]!.map(({ type, resource }) => [type, resource.toString()]),
+			).toEqual(
+				scenario.expectedRoots.map((resource) => [
+					FileChangeType.UPDATED,
+					resource,
+				]),
+			);
+		}
+		expect(errorCodeReads).toBe(0);
+	});
+
+	it("maps exact prepublication copy and move errors without publishing changes", async () => {
+		const mappings = [
+			["ENTRY_ALREADY_EXISTS", FileSystemProviderErrorCode.FileExists],
+			["ENTRY_NOT_FOUND", FileSystemProviderErrorCode.FileNotFound],
+			["ENTRY_TYPE_MISMATCH", FileSystemProviderErrorCode.FileNotADirectory],
+			["ROOT_NOT_AUTHORIZED", FileSystemProviderErrorCode.NoPermissions],
+			["INVALID_RELATIVE_PATH", FileSystemProviderErrorCode.NoPermissions],
+			["PATH_OUTSIDE_ROOT", FileSystemProviderErrorCode.NoPermissions],
+			["PERMISSION_DENIED", FileSystemProviderErrorCode.NoPermissions],
+			["ROOT_UNAVAILABLE", FileSystemProviderErrorCode.Unavailable],
+			["PATH_ENCODING_UNSUPPORTED", FileSystemProviderErrorCode.Unavailable],
+			["WORKSPACE_CONFLICT", FileSystemProviderErrorCode.Unavailable],
+			["WORKSPACE_WINDOW_CLOSED", FileSystemProviderErrorCode.Unavailable],
+			["DIRECTORY_TOO_LARGE", FileSystemProviderErrorCode.FileTooLarge],
+			["FILE_TOO_LARGE", FileSystemProviderErrorCode.FileTooLarge],
+		] as const;
+
+		for (const [nativeCode, expectedCode] of mappings) {
+			const provider = createPlainWorkspaceFileSystemProvider(
+				testBridge({
+					async workspaceCopy() {
+						throw Object.freeze({
+							code: nativeCode,
+							message: "Native failure at /Users/private/workspace",
+						});
+					},
+				}),
+			);
+			const changeListener = vi.fn();
+			const subscription = provider.onDidChangeFile(changeListener);
+			const error = await rejected(
+				provider.copy(workspaceUri("source"), workspaceUri("target"), {
+					overwrite: false,
+				}),
+			);
+			subscription.dispose();
+
+			expect(error.code).toBe(expectedCode);
+			expect(error.message).not.toContain("/Users/private");
+			expect(error.message).not.toContain(nativeCode);
+			expect(changeListener).not.toHaveBeenCalled();
+		}
+
+		const provider = createPlainWorkspaceFileSystemProvider(
+			testBridge({
+				async workspaceMove() {
+					throw exactCommandError("ENTRY_NOT_FOUND");
+				},
+			}),
+		);
+		const changeListener = vi.fn();
+		const subscription = provider.onDidChangeFile(changeListener);
+		const error = await rejected(
+			provider.rename(
+				workspaceUri("source"),
+				rootedWorkspaceUri(targetRootId, "target"),
+				{ overwrite: false },
+			),
+		);
+		subscription.dispose();
+		expect(error.code).toBe(FileSystemProviderErrorCode.FileNotFound);
+		expect(changeListener).not.toHaveBeenCalled();
 	});
 
 	it("exposes one private versioned-write receipt while the public provider stays readonly", async () => {
@@ -1120,10 +1803,9 @@ describe("Plain workspace file system provider", () => {
 		}
 	});
 
-	it("rejects every write operation with a stable NoPermissions error", async () => {
+	it("keeps generic write, mkdir, and delete operations unavailable", async () => {
 		const provider = createPlainWorkspaceFileSystemProvider(testBridge());
 		const from = workspaceUri("from");
-		const to = workspaceUri("to");
 
 		for (const operation of [
 			provider.writeFile(from, new Uint8Array([1]), {
@@ -1138,7 +1820,6 @@ describe("Plain workspace file system provider", () => {
 				useTrash: false,
 				atomic: false,
 			}),
-			provider.rename(from, to, { overwrite: false }),
 		]) {
 			const error = await rejected(operation);
 			expect(error.code).toBe(FileSystemProviderErrorCode.NoPermissions);
