@@ -59,13 +59,13 @@ export function createNativeBridge(): PlainBridge {
 			),
 		workspaceCreateFile: async (rootId, relativePath) => {
 			const request = frozenWorkspaceCreateEntryRequest(rootId, relativePath);
-			decodeWorkspaceVoid(
+			return decodeWorkspaceEntryStat(
 				await invoke<unknown>("workspace_create_file", { request }),
 			);
 		},
 		workspaceCreateDirectory: async (rootId, relativePath) => {
 			const request = frozenWorkspaceCreateEntryRequest(rootId, relativePath);
-			decodeWorkspaceVoid(
+			return decodeWorkspaceEntryStat(
 				await invoke<unknown>("workspace_create_directory", { request }),
 			);
 		},

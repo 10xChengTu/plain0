@@ -160,7 +160,7 @@ impl WorkspaceService {
         window_label: &str,
         root_id: RootId,
         relative_path: RelativePath,
-    ) -> Result<(), CommandError> {
+    ) -> Result<WorkspaceEntryStat, CommandError> {
         self.run_mutation(window_label, root_id, move |lease| {
             writer::create_file(&lease, &relative_path)
         })
@@ -172,7 +172,7 @@ impl WorkspaceService {
         window_label: &str,
         root_id: RootId,
         relative_path: RelativePath,
-    ) -> Result<(), CommandError> {
+    ) -> Result<WorkspaceEntryStat, CommandError> {
         self.run_mutation(window_label, root_id, move |lease| {
             writer::create_directory(&lease, &relative_path)
         })

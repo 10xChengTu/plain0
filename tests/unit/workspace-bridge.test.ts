@@ -777,11 +777,34 @@ describe("browser mock workspace bridge", () => {
 		const selected = await bridge.workspacePickRoots("replace");
 		const rootId = selected.snapshot.roots[0]!.rootId;
 
-		await bridge.workspaceCreateFile(rootId, "created.txt");
-		await bridge.workspaceCreateDirectory(rootId, "created-directory");
-		await bridge.workspaceCreateFile(rootId, "created-directory/nested.txt");
+		const fileReceipt = await bridge.workspaceCreateFile(rootId, "created.txt");
+		const directoryReceipt = await bridge.workspaceCreateDirectory(
+			rootId,
+			"created-directory",
+		);
+		const nestedReceipt = await bridge.workspaceCreateFile(
+			rootId,
+			"created-directory/nested.txt",
+		);
 
 		expect(await bridge.workspaceSnapshot()).toMatchObject({ revision: 1 });
+		expect(fileReceipt).toEqual({
+			kind: "file",
+			size: 0,
+			mtime: 0,
+			ctime: 0,
+			version: null,
+		});
+		expect(directoryReceipt).toEqual({
+			kind: "directory",
+			size: 0,
+			mtime: 0,
+			ctime: 0,
+			version: null,
+		});
+		expect(nestedReceipt.kind).toBe("file");
+		expect(Object.isFrozen(fileReceipt)).toBe(true);
+		expect(Object.isFrozen(directoryReceipt)).toBe(true);
 		expect(await bridge.workspaceStat(rootId, "created.txt")).toMatchObject({
 			kind: "file",
 			size: 0,
@@ -2769,7 +2792,7 @@ describe("browser mock workspace bridge", () => {
 	});
 
 	it("detects an unknown source member at directory removal without deleting it", async () => {
-		let injected: Promise<void> | undefined;
+		let injected: Promise<unknown> | undefined;
 		let bridge!: ReturnType<typeof createBrowserMockBridge>;
 		bridge = createBrowserMockBridge({
 			directoryCopyFixtureForTest: {

@@ -21,11 +21,45 @@ fn creates_empty_files_and_single_directories_without_accepting_the_root() {
     let root = create_root(&temp);
     let lease = authorize(&root);
 
-    create_file(&lease, &path("empty.txt")).unwrap();
-    create_directory(&lease, &path("folder")).unwrap();
+    let file_receipt = create_file(&lease, &path("empty.txt")).unwrap();
+    let directory_receipt = create_directory(&lease, &path("folder")).unwrap();
 
     assert_eq!(fs::read(root.join("empty.txt")).unwrap(), b"");
     assert!(root.join("folder").is_dir());
+    assert_eq!(
+        file_receipt.kind(),
+        crate::workspace::dto::WorkspaceEntryKind::File
+    );
+    assert_eq!(
+        directory_receipt.kind(),
+        crate::workspace::dto::WorkspaceEntryKind::Directory
+    );
+    for receipt in [&file_receipt, &directory_receipt] {
+        assert_eq!(receipt.size(), 0);
+        assert_eq!(receipt.mtime(), 0);
+        assert_eq!(receipt.ctime(), 0);
+        assert_eq!(receipt.version(), None);
+    }
+    assert_eq!(
+        serde_json::to_value(&file_receipt).unwrap(),
+        serde_json::json!({
+            "kind": "file",
+            "size": 0,
+            "mtime": 0,
+            "ctime": 0,
+            "version": null,
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(&directory_receipt).unwrap(),
+        serde_json::json!({
+            "kind": "directory",
+            "size": 0,
+            "mtime": 0,
+            "ctime": 0,
+            "version": null,
+        })
+    );
     for create in [
         create_file as fn(&WorkspaceRootLease, &RelativePath) -> _,
         create_directory,
@@ -1737,7 +1771,11 @@ fn mutation_errors_are_stable_and_never_expose_private_paths() {
 fn assert_single_winner(
     root: &std::path::Path,
     relative_path: &'static str,
-    create: fn(&WorkspaceRootLease, &RelativePath) -> Result<(), crate::error::CommandError>,
+    create: fn(
+        &WorkspaceRootLease,
+        &RelativePath,
+    )
+        -> Result<crate::workspace::dto::WorkspaceEntryStat, crate::error::CommandError>,
 ) {
     let mut scope = WorkspaceScope::new();
     let root_id = scope.authorize_root(root).unwrap();

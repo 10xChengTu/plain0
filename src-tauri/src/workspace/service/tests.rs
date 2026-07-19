@@ -670,18 +670,31 @@ fn creators_are_isolated_by_window_and_root_id() {
     let first_id = first.snapshot().roots()[0].root_id();
     let second_id = first.snapshot().roots()[1].root_id();
 
-    block_on(service.create_file(
+    let file_receipt = block_on(service.create_file(
         "main",
         first_id,
         RelativePath::parse_wire("created.txt").unwrap(),
     ))
     .unwrap();
-    block_on(service.create_directory(
+    let directory_receipt = block_on(service.create_directory(
         "main",
         second_id,
         RelativePath::parse_wire("created-dir").unwrap(),
     ))
     .unwrap();
+
+    assert_eq!(
+        file_receipt.kind(),
+        crate::workspace::dto::WorkspaceEntryKind::File
+    );
+    assert_eq!(
+        directory_receipt.kind(),
+        crate::workspace::dto::WorkspaceEntryKind::Directory
+    );
+    assert_eq!(file_receipt.size(), 0);
+    assert_eq!(directory_receipt.size(), 0);
+    assert_eq!(file_receipt.version(), None);
+    assert_eq!(directory_receipt.version(), None);
 
     assert!(first_root.join("created.txt").is_file());
     assert!(!second_root.join("created.txt").exists());

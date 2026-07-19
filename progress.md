@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：无；注册前 capability policy 已完成，下一项接入 Plain 空文件与单级目录的专用 create 路由；provider 继续严格只读。
+- 当前最小工作项：接入 Plain 空文件与单级目录的专用 FileService/provider create 路由，锁定 no-clobber、无 target stat、无递归 mkdirp、无通用 write fallback 与 hostile-input Harness；provider 全局继续 `Readonly`。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -32,8 +32,8 @@
 - [x] 单目录阶段显式禁用 add-root 与 VS Code workspace trust；Git、PTY、DAP 的执行信任继续只归 Rust 管理。通用语言状态贡献使用纯空 service，不引入语言 service override。
 - [x] 审计投影切片 bundle：只新增 workspace projection 与空 language-status 两个 Plain source，排除域债务数量、分类和 SHA-256 均未变化。
 - [x] 完成 F020 CRUD 写语义补充调研与方案冻结：各写语义、最小安全保存与平台写能力激活分成独立提交；写入与授权撤销使用统一 mutation gate 线性化；原子 no-clobber 不允许检查后普通 rename fallback。
-- [x] 完成空文件与单级目录的原子 no-clobber 创建：Rust capability command、每窗口 mutation gate、严格 TypeScript bridge 和每实例 browser mock 均已接通；root replace/remove/window close 与写入线性化，关闭单窗口不会阻塞其他窗口。provider 继续保持只读。
-- [x] 创建切片通过完整 `pnpm check`：85 个 TypeScript 测试、76 个 Rust 测试、架构/排除面 guard 与 bundle 债务基线全部通过；Tauri `Result<(), CommandError>` 成功响应另有 JSON `null` 合同测试。
+- [x] 完成空文件与单级目录的原子 no-clobber 创建：Rust capability command、每窗口 mutation gate、严格 TypeScript bridge 和每实例 browser mock 均已接通；root replace/remove/window close 与写入线性化，关闭单窗口不会阻塞其他窗口。创建 command 现已在同一次 IPC 返回只陈述 syscall 已知事实的严格 `WorkspaceEntryStat` 回执，避免 Workbench 再做 target stat；provider 继续保持只读。
+- [x] 创建底层切片通过完整 `pnpm check`：85 个 TypeScript 测试、76 个 Rust 测试、架构/排除面 guard 与 bundle 债务基线全部通过；本次回执升级另以 131 个 native/browser bridge 定向 TypeScript 用例和 230 个 Rust 用例验证，create 返回闭集 stat，仍为 void 的 mutation command 继续由 JSON `null` 合同锁定。
 - [x] 完成同 root 原子 no-clobber 重命名：父目录先由 `cap_std` 打开为 capability，同父目录复用句柄，macOS/Linux 只对 basename 调用固定 `rustix 1.1.4` `NOREPLACE`；其他平台和不支持的文件系统安全失败，不存在普通 rename fallback。严格 Rust/TypeScript DTO、native bridge、每实例 browser mock、mutation gate 竞态与 Harness 边界 guard 均已覆盖，provider 继续保持只读。
 - [x] 重命名切片通过完整 `pnpm check`：90 个 TypeScript 测试、91 个 Rust 测试、架构/排除面 guard 与 bundle 债务基线全部通过。
 - [x] 完成 capability copy 的 GitHub 补充调研与方案冻结：排除会覆盖目标的 `Dir::copy`/`std::fs::copy`、无界且可留半成品的 VS Code fallback，以及 ambient/overwrite 导向的第三方整包方案；确定双 root、无 overwrite、普通文件 8 MiB staged copy 先行，目录 manifest 与原样 symlink copy 后续独立提交，provider 期间继续只读。

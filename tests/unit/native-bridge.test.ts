@@ -122,8 +122,20 @@ describe("native Plain bridge", () => {
 			workspaceVersionFixture.read.frameHex,
 		);
 		tauri.invoke
-			.mockResolvedValueOnce(null)
-			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce({
+				kind: "file",
+				size: 0,
+				mtime: 0,
+				ctime: 0,
+				version: null,
+			})
+			.mockResolvedValueOnce({
+				kind: "directory",
+				size: 0,
+				mtime: 0,
+				ctime: 0,
+				version: null,
+			})
 			.mockResolvedValueOnce(null)
 			.mockResolvedValueOnce(null)
 			.mockResolvedValueOnce({
@@ -142,8 +154,14 @@ describe("native Plain bridge", () => {
 			.mockResolvedValueOnce(rawReadFrame);
 		const bridge = createNativeBridge();
 
-		await bridge.workspaceCreateFile(rootId, "%2e%2e/new.txt");
-		await bridge.workspaceCreateDirectory(rootId, "%2e%2e/new-directory");
+		const createdFile = await bridge.workspaceCreateFile(
+			rootId,
+			"%2e%2e/new.txt",
+		);
+		const createdDirectory = await bridge.workspaceCreateDirectory(
+			rootId,
+			"%2e%2e/new-directory",
+		);
 		await bridge.workspaceRename(
 			rootId,
 			"%2e%2e/source.txt",
@@ -199,6 +217,22 @@ describe("native Plain bridge", () => {
 		for (const [, arguments_] of tauri.invoke.mock.calls) {
 			expect(Object.isFrozen(arguments_?.request)).toBe(true);
 		}
+		expect(createdFile).toEqual({
+			kind: "file",
+			size: 0,
+			mtime: 0,
+			ctime: 0,
+			version: null,
+		});
+		expect(createdDirectory).toEqual({
+			kind: "directory",
+			size: 0,
+			mtime: 0,
+			ctime: 0,
+			version: null,
+		});
+		expect(Object.isFrozen(createdFile)).toBe(true);
+		expect(Object.isFrozen(createdDirectory)).toBe(true);
 		expect(stat).toEqual({
 			kind: "file",
 			size: 4,
@@ -228,7 +262,7 @@ describe("native Plain bridge", () => {
 		expect(Object.isFrozen(file.value)).toBe(true);
 	});
 
-	it("accepts only a null response from void mutation commands", async () => {
+	it("requires stat receipts for create and null for void mutation commands", async () => {
 		tauri.invoke
 			.mockResolvedValueOnce(undefined)
 			.mockResolvedValueOnce({})

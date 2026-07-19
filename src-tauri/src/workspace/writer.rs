@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::error::CommandError;
 use crate::path_policy::RelativePath;
 
+use super::dto::{WorkspaceEntryKind, WorkspaceEntryStat};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::move_entry::{PublishedCopyReceipt, PublishedFileReceipt, PublishedSymlinkReceipt};
 use super::WorkspaceRootLease;
@@ -85,7 +86,7 @@ impl PublishedFileSnapshot {
 pub(crate) fn create_file(
     lease: &WorkspaceRootLease,
     relative_path: &RelativePath,
-) -> Result<(), CommandError> {
+) -> Result<WorkspaceEntryStat, CommandError> {
     ensure_entry_path(relative_path)?;
 
     let mut options = OpenOptions::new();
@@ -93,19 +94,28 @@ pub(crate) fn create_file(
     lease
         .directory()
         .open_with(relative_path.as_path(), &options)
-        .map(|_| ())
+        .map(|_| created_entry_stat(WorkspaceEntryKind::File))
         .map_err(map_workspace_mutation_error)
 }
 
 pub(crate) fn create_directory(
     lease: &WorkspaceRootLease,
     relative_path: &RelativePath,
-) -> Result<(), CommandError> {
+) -> Result<WorkspaceEntryStat, CommandError> {
     ensure_entry_path(relative_path)?;
     lease
         .directory()
         .create_dir(relative_path.as_path())
+        .map(|()| created_entry_stat(WorkspaceEntryKind::Directory))
         .map_err(map_workspace_mutation_error)
+}
+
+fn created_entry_stat(kind: WorkspaceEntryKind) -> WorkspaceEntryStat {
+    // The create syscall is the mutation linearization point. A conservative
+    // receipt is intentionally constructed without a fallible pathname lookup:
+    // the entry is known to be empty at publication, while timestamps and a
+    // writable version are obtained by the first subsequent read receipt.
+    WorkspaceEntryStat::new(kind, 0, 0, 0, None)
 }
 
 pub(crate) fn rename(

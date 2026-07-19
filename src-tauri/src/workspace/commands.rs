@@ -112,7 +112,7 @@ pub(crate) async fn workspace_create_file(
     window: WebviewWindow,
     service: State<'_, WorkspaceService>,
     request: WorkspaceEntryRequest,
-) -> Result<(), CommandError> {
+) -> Result<WorkspaceEntryStat, CommandError> {
     let (root_id, relative_path) = request.into_parts()?;
     service
         .create_file(window.label(), root_id, relative_path)
@@ -124,7 +124,7 @@ pub(crate) async fn workspace_create_directory(
     window: WebviewWindow,
     service: State<'_, WorkspaceService>,
     request: WorkspaceEntryRequest,
-) -> Result<(), CommandError> {
+) -> Result<WorkspaceEntryStat, CommandError> {
     let (root_id, relative_path) = request.into_parts()?;
     service
         .create_directory(window.label(), root_id, relative_path)

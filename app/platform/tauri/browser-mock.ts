@@ -4276,9 +4276,11 @@ export function createBrowserMockBridge(
 		},
 		async workspaceCreateFile(rootId, relativePath) {
 			createEntry(rootId, relativePath, mockFile([]));
+			return frozenWorkspaceEntryStat("file", 0, 0, 0, null);
 		},
 		async workspaceCreateDirectory(rootId, relativePath) {
 			createEntry(rootId, relativePath, mockDirectory({}));
+			return frozenWorkspaceEntryStat("directory", 0, 0, 0, null);
 		},
 		async workspaceRename(rootId, sourcePath, targetPath) {
 			renameEntry(rootId, sourcePath, targetPath);
