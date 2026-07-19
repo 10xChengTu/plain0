@@ -413,6 +413,20 @@ Harness 必须锁定：四个 command/registration/service 唯一路由；prepar
 
 实现验收至少覆盖：单项和 64 项 batch 的 prepare/cancel/begin/逐项 commit，正常 file、空目录、raw symlink、mixed tree 与跨 root 选择；duplicate namespace/ancestor overlap、大小写/Unicode normalization alias、跨顶层相同 identity 拒绝，但同一目录 manifest 内不同真实名称的 hardlink 允许；大于 8 MiB 文件和逻辑字节大于 256 MiB 目录可 prepare；全批次 exact/+1 条目、深度、名称与 link 预算；root 空路径、non-recursive 非空目录、特殊文件、非法/未授权路径零副作用；token/entry unknown、expired、replay、错 URI/options、无调用级 authorization、cross-window、第二 batch、root replace/remove/window close；begin whole-batch preflight 能在 Undo read/soft-revert/首个 remove 前发现末项变化，相关调用计数为零且 dirty 内容不变；确认期间 source/parent basename swap、missing、同 inode内容/metadata变化、chmod、manifest 内 hardlink 外部 nlink、link payload、目录增删改；删除前变化零 remove，删除中第 N 项 change/unverifiable/remove failure 返回精确 partial并取消余项；mutation journal 的 residual set、parent time 与 hardlink rebaseline 正常且采样窗口边界有测试；顶层外部 parent 的超大/特殊/非 portable siblings 不进入 receipt且不阻塞；第 10,000 个 descendant remove 后失败仍可编码，root remove 后无 fallible gap；未知成员和外部/dangling/loop link不触碰 sentinel；并发两个相同 entry commit 至多一个消费，跳项/不同 entry 并发无副作用拒绝。TypeScript codec 必须用冻结 prepare request 验证 response entries 长度严格相等、entryId 全局唯一、count 为安全整数且总和 ≤10,000，并覆盖 accessor/Proxy TOCTOU、prototype/unknown key/enum 拒绝、冻结 batch plan/result、cancel finally、observer exception 与完整 bridge stub。Browser mock 新增 delete 专用共享 inode/metadata 节点、parent version、mutation journal 与可注入单调 clock；两个 manifest 目录项可引用同 inode，observer 只能变异模型而不能直接指定终态，Rust/browser 的 begin/reason 优先级、hardlink accounting 和 removed count 必须完全同构。
 
+### Watcher / rescan 收敛合同
+
+F020 首版 watcher 是 root invalidation 状态机，不是 raw path event relay。每个 root 使用锁定 `notify 8.2.0` 的一个 `RecommendedWatcher`，每窗口共用一个 worker 和容量 1 的 `sync_channel`。`Config` 必须显式 `with_follow_symlinks(false)`；callback 忽略所有 `EventKind::Access`，丢弃事件路径，只用原子/Mutex 下的 dirty/rescan bit 保留权威状态并 `try_send`。queue full、notify error、`need_rescan()`、root rename/delete、`RunEvent::Resumed` 和显式初始订阅都只置 `rescanRequired`，不让 callback 做 I/O、workspace lock 或 Tauri emit。
+
+worker 在固定节流后 drain 全部 dirty roots，在现有 `mutation gate → workspace state` 锁序中取得并重验 root lease，释放 state lock 后仍持 gate 用 `cap_std::Dir` 调用有界 root `read_directory("")`。notify canonical path 绝不成为 scan 输入。扫描结束时再重验 window/root/registration epoch；迟到或已撤权结果丢弃。每 root 只保留一个 sticky pending `u32` generation，有 pending 时新事件继续置 dirty，ack 后才启动下一轮，因此内存和 IPC 都不随 storm 增长。
+
+watcher 安装是 picker/root 授权事务的一部分：`prepare capability → create inactive watcher → commit scope → activate + rescan`。任一 watcher 创建/注册失败都使整次 snapshot/revision 不变。replace/remove/close 先在 gate 内 detach/cancel，释放所有 workspace 锁后才 drop watcher 和停 worker，禁止 join/callback 与 gate/state 锁反转。canonical watch path 和 root identity 仅留在 Rust，不进入 DTO、日志或错误。
+
+Tauri 的 window-targeted event 只是 wake hint。前端通过一个严格有界 `workspace_watch_sync` 拉取/确认最多 256 个 root；response 只包含 `workspaceId` 与 pending `{ rootId, generation, rescanRequired }`，不含 relative/canonical path 或 raw error。native bridge 内部封装单 listener、单 in-flight sync、ack 和低频 timer，`PlainBridge` 只暴露高层 per-root watch disposable。丢失 wake 后 timer 仍会 pull sticky pending；readonly provider 与 supported provider 共用同一 watch 路径，不经 mutation capability gate。
+
+固定 Workbench 基线默认会忽略 root `UPDATED`。本项增加一个窄补丁：只对 `plain-workspace:`、根 path、无 query/fragment 的 `UPDATED` 进入 Explorer 已有 `refresh(false)`。禁止伪造 root `DELETED`，也不改变其他 scheme、非根事件、排序或打开 model 语义。打开文件的精细外部冲突仍属 F030。
+
+Harness 负例必须覆盖：取消 `follow_symlinks(false)`、把 Access 当 dirty、读取/序列化 notify path、无界 channel、多 worker、多 pending generation、无 ack 推进、复用 workspace revision、scope commit 后才安装 watcher、持 gate/state drop/join、全局 Tauri emit、DTO 夹带 path/error、provider watch 误走 mutation gate、root `DELETED` 伪 rescan 和扩大 Explorer 补丁命中面。最小验收覆盖 storm/queue-full、scan 期间再 dirty、overflow/error/resume/explicit、wake 丢失 timer pull、安装失败原子回滚、replace/remove/close 迟到事件、多窗口隔离、symlink 不跟随，以及 supported/readonly Browser E2E 的外部新增和删除收敛。
+
 ## 提交级落地顺序
 
 每项完成最小验证后立即提交，WIP 始终保持为 F020：

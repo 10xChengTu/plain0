@@ -31,11 +31,13 @@ Tauri `plugin-fs` 的 scope 适合限制通用前端文件 API，但其核心仍
 
 ## Watcher 决策
 
-- 每个 root 使用一个稳定版 `notify::RecommendedWatcher`。
+- 每个 root 使用一个精确锁定的 `notify 8.2.0` `RecommendedWatcher`，并显式设置 `with_follow_symlinks(false)`。不引入 `notify-debouncer-full` 的递归 file-id cache。
 - watcher absolute path 只是不可信提示，不能直接成为后续 I/O 参数，也不能发给 WebView。
-- 回调只更新 dirty/need-rescan 状态并 `try_send` 到有界唤醒队列；单一 worker 节流后从 root capability 重扫并递增 generation。
+- 回调忽略 `EventKind::Access`，其他事件只更新 dirty/need-rescan 状态并 `try_send` 到容量 1 的唤醒队列；单一 window worker 节流后从 root capability 有界重扫并递增独立 generation。
 - 队列满、notify error、root rename/delete、睡眠恢复和显式刷新都折叠为 `rescanRequired`。
-- 首版不依赖 `notify-debouncer-full` 的递归 file-id cache；若以后需要细粒度 rename 动画，仍必须保留有界出口和 rescan fallback。
+- Rust 每 root 最多保留一个 sticky pending generation；Tauri 事件只是 window-targeted wake hint，前端通过有界 sync/ack 拉取 `{ rootId, generation, rescanRequired }`。路径、notify error 和原始系统错误都不进入 IPC。
+- 新 root 必须在 scope commit 前完成 inactive watcher 准备，commit 后才 activate 并强制 rescan；准备失败时 snapshot/revision 不变。replace/remove/close 先在既有 gate 锁序中 detach/cancel，释放锁后才 drop/join。
+- 首版不依赖 rename path 配对，也不维护原生全树 manifest。它以 root invalidation 让 Workbench 重读已投影的树；固定 Explorer 窄补丁仅使 `plain-workspace:` 根 `UPDATED` 进入既有 deep refresh。若以后需要细粒度 rename 动画或打开文件冲突，仍必须保留有界出口、ack 和 rescan fallback。
 
 ## 错误与验证合同
 

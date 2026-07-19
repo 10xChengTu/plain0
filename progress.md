@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：实现 watcher 的有界 dirty/rescan 状态机与 Browser mock 收敛测试。
+- 当前最小工作项：按已冻结合同实现 watcher 的有界 dirty/rescan + sticky generation/ack 状态机、Plain-only Explorer deep refresh 与 Browser mock 收敛测试。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -74,6 +74,7 @@
 - [x] confirmed-delete consumer 完成最终验收：21 个 TypeScript/JavaScript 测试文件、430 个用例与 230 个 Rust 用例通过，格式、双类型检查、严格 lint、生产构建、七补丁 SHA/hunk/lock graph、架构及 2103-source/203-debt bundle 基线全部通过；Chromium E2E 4/4 通过。内置浏览器可见验收确认 `ready=true`、排除面 guard、只读文件树/README 预览及零错误日志；真实 Tauri/WKWebView 验收确认原生启动、命令面板和 macOS 文件夹选择器。API/base/bulk/files 四段补丁 SHA-256 分别为 `b416c3f7a73dc3c72fae55455515b805a180ac154aa4044d698b8a00cd68be62`、`db541d394346ba2985b5550e2f0faf665a056ac701df25119354bd0b1e3baf4e`、`4437c5e441146d5d2f2262cbe8748932a1353ebf48424356fa648d33abf44245`、`4639136edb34a2de20a9f24c8d7bfc892c7080e444c997a8290772ce37ac0159`；独立攻击复核最终 P0/P1/P2 均为 0。
 - [x] 完成 provider 写能力原子激活：启动时五项平台能力全真才广告精确 `FileReadWrite | FileFolderCopy`，任一 false 则保持精确 `FileReadWrite | Readonly`，且 `Event.None` 表明窗口生命周期内不可升级。bridge 与 mutation policy 使用 ECMAScript `#private`，provider 实例和 prototype 均冻结；create、versioned save、copy/move、confirmed delete 的每个 consumer 继续在 URI/options/bridge 前消费同一个 all-five gate。跨 app authority Harness 锁定唯一 capability snapshot、provider/bridge factory、`IFileService → getProvider`、Tauri internal global 和 direct/alias/namespace/computed/Reflect/常量键路径，同时保留无关 `getProvider` 控制组。
 - [x] capability 激活切片完成最终验收：21 个 TypeScript/JavaScript 测试文件、441 个用例、格式、双类型检查、严格 lint、生产构建、架构 guard 与 2103-source/203-debt bundle 基线通过；Rust 230/230 在沙箱外通过，沙箱内仅两项 FIFO/特殊文件 fixture 按预期受 `EPERM` 限制。Chromium E2E 6/6 覆盖 capability failure、Workbench foundation、两种 PLR1 transport、all-true 的 versioned save/create/native copy/rename/一次确认永久删除，以及 one-false 的整 provider readonly、零 native mutation 与无晚到确认框。内置浏览器可见验收确认 writable Explorer toolbar、create 与一次确认删除；真实 Tauri/WKWebView 再次确认原生启动、命令面板和 macOS 文件夹选择器。
+- [x] 完成 watcher/rescan 专项 GitHub 补充调研与方案冻结：锁定 `notify 8.2.0` 与 `follow_symlinks(false)`，排除 full debouncer、Tauri raw-path watcher 和 Parcel 直接移植；确认固定 Explorer 默认忽略 root `UPDATED`，因此冻结每 root watcher/每 window 单 worker、容量 1 唤醒队列、capability root scan、单 sticky generation + sync/ack、window-targeted wake、事务化 root 生命周期和只命中 `plain-workspace:` 根事件的 deep-refresh 补丁。本项不把 notify path 送入 WebView，不伪造 root delete，不冒充 F030 打开文件外部冲突。
 
 ## 下一步
 
