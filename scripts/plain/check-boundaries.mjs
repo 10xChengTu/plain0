@@ -5,6 +5,9 @@ import { fileURLToPath } from "node:url";
 
 import {
 	validateCapabilityFiles,
+	validateDialogOverrideImportBoundary,
+	validateDialogServiceOverride,
+	validateDialogSurfaceBoundary,
 	validateMainCapability,
 	validateTauriApiBoundary,
 	validateTauriConfiguration,
@@ -37,6 +40,7 @@ const fail = (message) => failures.push(message);
 const allowedDependencies = new Map([
 	["@codingame/monaco-vscode-api", "35.0.1"],
 	["@codingame/monaco-vscode-configuration-service-override", "35.0.1"],
+	["@codingame/monaco-vscode-dialogs-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-explorer-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-files-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-model-service-override", "35.0.1"],
@@ -272,6 +276,15 @@ for (const file of appFiles) {
 	for (const failure of validateTauriApiBoundary(source, relative)) {
 		fail(failure);
 	}
+	for (const failure of validateDialogOverrideImportBoundary(
+		source,
+		relative,
+	)) {
+		fail(failure);
+	}
+	for (const failure of validateDialogSurfaceBoundary(source, relative)) {
+		fail(failure);
+	}
 	if (
 		relative.replaceAll("\\", "/") !== "app/main.ts" &&
 		/\bregisterCustomProvider\s*\(/.test(source)
@@ -300,6 +313,13 @@ for (const failure of validateWorkspaceDeleteTypeScriptBoundary(appSources)) {
 
 const mainSource = await readFile(path.join(appRoot, "main.ts"), "utf8");
 for (const failure of validateWorkspaceProviderBootstrap(mainSource)) {
+	fail(failure);
+}
+const servicesSource = await readFile(
+	path.join(appRoot, "services.ts"),
+	"utf8",
+);
+for (const failure of validateDialogServiceOverride(servicesSource)) {
 	fail(failure);
 }
 const workspaceProviderSource = await readFile(
@@ -340,9 +360,18 @@ for (const failure of validateTauriE2EConfiguration(
 const capabilitiesRoot = path.join(root, "src-tauri/capabilities");
 const capabilityFiles = (
 	await readdir(capabilitiesRoot, { withFileTypes: true })
-)
-	.filter((entry) => entry.isFile())
-	.map((entry) => entry.name);
+).map((entry) =>
+	Object.freeze({
+		name: entry.name,
+		kind: entry.isFile()
+			? "file"
+			: entry.isDirectory()
+				? "directory"
+				: entry.isSymbolicLink()
+					? "symlink"
+					: "other",
+	}),
+);
 for (const failure of validateCapabilityFiles(capabilityFiles)) {
 	fail(failure);
 }
@@ -507,6 +536,6 @@ if (failures.length > 0) {
 	process.exitCode = 1;
 } else {
 	console.log(
-		`architecture: ${appFiles.length} app sources, ${rustSources.length} Rust sources, ${allowedDependencies.size} pinned runtime dependencies, audited bounded directory/file/symlink copy, cross-root move, confirmed-delete, PLW1 versioned-write and workspace-capability boundaries, minimum Tauri capability`,
+		`architecture: ${appFiles.length} app sources, ${rustSources.length} Rust sources, ${allowedDependencies.size} pinned runtime dependencies, audited DOM dialogs, bounded directory/file/symlink copy, cross-root move, confirmed-delete, PLW1 versioned-write and workspace-capability boundaries, minimum Tauri capability`,
 	);
 }

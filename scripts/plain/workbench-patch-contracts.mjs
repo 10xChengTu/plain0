@@ -6,7 +6,7 @@ const PATCH_CONTRACTS = Object.freeze([
 		patchPath: "patches/@codingame__monaco-vscode-api@35.0.1.patch",
 		sha256: "b416c3f7a73dc3c72fae55455515b805a180ac154aa4044d698b8a00cd68be62",
 		directImporter: true,
-		snapshotEdgeCount: 21,
+		snapshotEdgeCount: 22,
 		shape: Object.freeze([
 			"diff --git a/services.js b/services.js",
 			"@@ -24,7 +24,6 @@ import './vscode/src/vs/workbench/contrib/inlayHints/browser/inlayHintsAccessibi",

@@ -55,6 +55,13 @@ const forbiddenHostSources = [
 	"webWorkerExtensionHostIframe.html",
 ];
 
+const forbiddenDialogFileSources = [
+	"@codingame/monaco-vscode-dialogs-service-override/index.js",
+	"/dialogs/browser/abstractFileDialogService.js",
+	"/dialogs/browser/fileDialogService.js",
+	"/dialogs/browser/simpleFileDialog.js",
+];
+
 const forbiddenCommandIds = [
 	"extension.bisect.start",
 	"extension.bisect.next",
@@ -91,6 +98,13 @@ for (const source of sources) {
 	for (const forbidden of forbiddenHostSources) {
 		if (source.includes(forbidden)) {
 			fail(`source map contains forbidden host implementation: ${source}`);
+		}
+	}
+	for (const forbidden of forbiddenDialogFileSources) {
+		if (source.includes(forbidden)) {
+			fail(
+				`source map contains unused Web file-dialog implementation: ${source}`,
+			);
 		}
 	}
 }

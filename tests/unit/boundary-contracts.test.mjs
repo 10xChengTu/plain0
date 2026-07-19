@@ -5,6 +5,9 @@ import { describe, expect, it } from "vitest";
 
 import {
 	validateCapabilityFiles,
+	validateDialogOverrideImportBoundary,
+	validateDialogServiceOverride,
+	validateDialogSurfaceBoundary,
 	validateMainCapability,
 	validateTauriApiBoundary,
 	validateTauriConfiguration,
@@ -92,6 +95,44 @@ const baselineCapability = {
 	windows: ["main"],
 	permissions: ["core:event:allow-listen", "core:event:allow-unlisten"],
 };
+
+const baselineServiceOverrides = `
+import getConfigurationServiceOverride from "@codingame/monaco-vscode-configuration-service-override";
+import "@codingame/monaco-vscode-dialogs-service-override/vscode/vs/workbench/browser/parts/dialogs/dialog.web.contribution";
+import { DialogService } from "@codingame/monaco-vscode-dialogs-service-override/vscode/vs/workbench/services/dialogs/common/dialogService";
+import getExplorerServiceOverride from "@codingame/monaco-vscode-explorer-service-override";
+import getFilesServiceOverride from "@codingame/monaco-vscode-files-service-override";
+import getModelServiceOverride from "@codingame/monaco-vscode-model-service-override";
+import getTextmateServiceOverride from "@codingame/monaco-vscode-textmate-service-override";
+import getThemeServiceOverride from "@codingame/monaco-vscode-theme-service-override";
+import getWorkbenchServiceOverride from "@codingame/monaco-vscode-workbench-service-override";
+import { IDialogService } from "@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service";
+import { SyncDescriptor } from "@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors";
+import { ILanguageStatusService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/languageStatus/common/languageStatusService.service";
+import { EmptyLanguageStatusService } from "./services/empty-language-status";
+
+export function createServiceOverrides() {
+  return {
+    ...getConfigurationServiceOverride(),
+    ...getFilesServiceOverride(),
+    ...getModelServiceOverride(),
+    ...getWorkbenchServiceOverride(),
+    ...getExplorerServiceOverride(),
+    ...getThemeServiceOverride(),
+    ...getTextmateServiceOverride(),
+    [IDialogService.toString()]: new SyncDescriptor(
+      DialogService,
+      undefined,
+      true,
+    ),
+    [ILanguageStatusService.toString()]: new SyncDescriptor(
+      EmptyLanguageStatusService,
+      [],
+      true,
+    ),
+  };
+}
+`;
 
 function workspaceCapabilitiesBoundarySources() {
 	return {
@@ -366,16 +407,31 @@ describe("Plain Tauri boundary contracts", () => {
 	});
 
 	it("rejects extra capability files, targets and permissions", () => {
-		expect(validateCapabilityFiles(["main.json"])).toEqual([]);
-		expect(validateCapabilityFiles(["main.json", "broad.json"])).not.toEqual(
-			[],
-		);
+		expect(
+			validateCapabilityFiles([{ name: "main.json", kind: "file" }]),
+		).toEqual([]);
+		expect(
+			validateCapabilityFiles([
+				{ name: "main.json", kind: "file" },
+				{ name: "broad.json", kind: "file" },
+			]),
+		).not.toEqual([]);
+		expect(
+			validateCapabilityFiles([
+				{ name: "main.json", kind: "file" },
+				{ name: "nested", kind: "directory" },
+			]),
+		).not.toEqual([]);
+		expect(
+			validateCapabilityFiles([{ name: "main.json", kind: "symlink" }]),
+		).not.toEqual([]);
 		expect(validateMainCapability(baselineCapability)).toEqual([]);
 
 		const broad = structuredClone(baselineCapability);
 		broad.webviews = ["*"];
 		broad.permissions.push(
 			"core:default",
+			"dialog:default",
 			"fs:allow-read-file",
 			"shell:allow-execute",
 		);
@@ -384,6 +440,180 @@ describe("Plain Tauri boundary contracts", () => {
 				"main capability contains fields outside the minimum contract",
 				"main capability permissions differ from the minimum contract",
 			]),
+		);
+		for (const permission of [
+			"dialog:default",
+			"dialog:allow-ask",
+			"dialog:allow-confirm",
+			"dialog:allow-message",
+			"dialog:allow-open",
+			"dialog:allow-save",
+		]) {
+			const dialogCapability = structuredClone(baselineCapability);
+			dialogCapability.permissions.push(permission);
+			expect(validateMainCapability(dialogCapability)).toContain(
+				"main capability permissions differ from the minimum contract",
+			);
+		}
+	});
+});
+
+describe("Plain DOM dialog service Harness", () => {
+	it("rejects global confirm and file-dialog tokens across every app source", () => {
+		for (const source of [
+			'window.confirm("unsafe")',
+			'globalThis["confirm"]("unsafe")',
+			'self.confirm("unsafe")',
+			'mainWindow.confirm.call(null, "unsafe")',
+			'confirm("unsafe")',
+			"const { confirm: unsafeConfirm } = window; unsafeConfirm();",
+		]) {
+			expect(
+				validateDialogSurfaceBoundary(source, "app/features/unsafe-dialog.ts"),
+			).toContain(
+				"app/features/unsafe-dialog.ts uses a forbidden global confirm path",
+			);
+		}
+		expect(
+			validateDialogSurfaceBoundary(
+				'import { IFileDialogService as FileDialogs } from "@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service";',
+				"app/features/unsafe-file-dialog.ts",
+			),
+		).toContain(
+			"app/features/unsafe-file-dialog.ts references IFileDialogService outside Plain's Rust picker boundary",
+		);
+		expect(
+			validateDialogSurfaceBoundary(
+				"await context.dialogService.confirm(confirmation);",
+				"app/features/workspace/delete-coordinator.ts",
+			),
+		).toEqual([]);
+	});
+
+	it("locks the official same-version DOM implementation into the exact service order", () => {
+		expect(validateDialogServiceOverride(baselineServiceOverrides)).toEqual([]);
+		expect(
+			validateDialogOverrideImportBoundary(
+				baselineServiceOverrides,
+				"app/services.ts",
+			),
+		).toEqual([]);
+		for (const source of [
+			'import dialogs from "@codingame/monaco-vscode-dialogs-service-override";',
+			'void import("@codingame/monaco-vscode-dialogs-service-override/vscode/vs/workbench/services/dialogs/common/dialogService");',
+			'export * from "@codingame/monaco-vscode-dialogs-service-override";',
+			'const unsafeModule = "@codingame/monaco-vscode-dialogs-service-override";',
+		]) {
+			expect(
+				validateDialogOverrideImportBoundary(
+					source,
+					"app/features/unsafe-dialog.ts",
+				),
+			).toEqual([
+				"app/features/unsafe-dialog.ts imports the dialogs override outside app/services.ts",
+			]);
+		}
+
+		const withoutImport = baselineServiceOverrides.replace(
+			'import { DialogService } from "@codingame/monaco-vscode-dialogs-service-override/vscode/vs/workbench/services/dialogs/common/dialogService";\n',
+			"",
+		);
+		expect(validateDialogServiceOverride(withoutImport)).toContain(
+			"app/services.ts must import only the exact official DialogService and DOM contribution subpaths",
+		);
+		const withoutContribution = baselineServiceOverrides.replace(
+			'import "@codingame/monaco-vscode-dialogs-service-override/vscode/vs/workbench/browser/parts/dialogs/dialog.web.contribution";\n',
+			"",
+		);
+		expect(validateDialogServiceOverride(withoutContribution)).toContain(
+			"app/services.ts must import only the exact official DialogService and DOM contribution subpaths",
+		);
+		const hiddenRootReference = baselineServiceOverrides.replace(
+			"export function createServiceOverrides()",
+			'const unsafeModule = "@codingame/monaco-vscode-dialogs-service-override";\n\nexport function createServiceOverrides()',
+		);
+		expect(validateDialogServiceOverride(hiddenRootReference)).toContain(
+			"app/services.ts must import only the exact official DialogService and DOM contribution subpaths",
+		);
+
+		const aliasedImport = baselineServiceOverrides.replace(
+			"import { DialogService } from",
+			"import { DialogService as UnsafeDialogService } from",
+		);
+		expect(validateDialogServiceOverride(aliasedImport)).toEqual(
+			expect.arrayContaining([
+				"app/services.ts must import only the exact official DialogService and DOM contribution subpaths",
+			]),
+		);
+
+		const fullFactorySpread = baselineServiceOverrides
+			.replace(
+				"import getConfigurationServiceOverride from",
+				'import getDialogsServiceOverride from "@codingame/monaco-vscode-dialogs-service-override";\nimport getConfigurationServiceOverride from',
+			)
+			.replace(
+				"    ...getExplorerServiceOverride(),",
+				"    ...getDialogsServiceOverride(),\n    ...getExplorerServiceOverride(),",
+			);
+		expect(validateDialogServiceOverride(fullFactorySpread)).toEqual(
+			expect.arrayContaining([
+				"app/services.ts must import only the exact official DialogService and DOM contribution subpaths",
+				"createServiceOverrides must keep the exact direct service spread order",
+			]),
+		);
+
+		const dialogSelection = `    [IDialogService.toString()]: new SyncDescriptor(
+      DialogService,
+      undefined,
+      true,
+    ),
+`;
+		expect(baselineServiceOverrides).toContain(dialogSelection);
+		const movedSelection = baselineServiceOverrides
+			.replace(dialogSelection, "")
+			.replace(
+				"    ...getWorkbenchServiceOverride(),\n",
+				`    ...getWorkbenchServiceOverride(),\n${dialogSelection}`,
+			);
+		expect(validateDialogServiceOverride(movedSelection)).toContain(
+			"createServiceOverrides must keep IDialogService as the final Workbench override before language status",
+		);
+	});
+
+	it("rejects indirect construction, file services and global confirm fallbacks", () => {
+		const indirect = baselineServiceOverrides.replace(
+			"new SyncDescriptor(\n      DialogService,\n      undefined,\n      true,\n    )",
+			"Reflect.construct(SyncDescriptor, [DialogService, undefined, true])",
+		);
+		expect(validateDialogServiceOverride(indirect)).toContain(
+			"createServiceOverrides must construct only the audited delayed IDialogService descriptor before the empty language-status descriptor",
+		);
+
+		const fileDialogOverride = baselineServiceOverrides.replace(
+			"    [IDialogService.toString()]:",
+			"    [IFileDialogService.toString()]: unsafeFileDialogs,\n    [IDialogService.toString()]:",
+		);
+		expect(validateDialogServiceOverride(fileDialogOverride)).toEqual(
+			expect.arrayContaining([
+				"createServiceOverrides must construct only the audited delayed IDialogService descriptor before the empty language-status descriptor",
+				"app/services.ts must not enable IFileDialogService or fall back to global confirm",
+			]),
+		);
+
+		const globalConfirm = baselineServiceOverrides.replace(
+			"new SyncDescriptor(\n      DialogService,\n      undefined,\n      true,\n    )",
+			'window.confirm("unsafe")',
+		);
+		expect(validateDialogServiceOverride(globalConfirm)).toContain(
+			"app/services.ts must not enable IFileDialogService or fall back to global confirm",
+		);
+
+		const extraFactoryStatement = baselineServiceOverrides.replace(
+			"export function createServiceOverrides() {\n",
+			"export function createServiceOverrides() {\n  void 0;\n",
+		);
+		expect(validateDialogServiceOverride(extraFactoryStatement)).toContain(
+			"createServiceOverrides must directly return one audited object literal",
 		);
 	});
 });

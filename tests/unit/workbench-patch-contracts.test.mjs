@@ -254,6 +254,19 @@ describe("exact Workbench patch contracts", () => {
 		expect(validateWorkbenchPatchSet(snapshotBare)).toContain(
 			`pnpm-lock.yaml snapshot graph for @codingame/monaco-vscode-api must use only 35.0.1(patch_hash=${apiHash})`,
 		);
+
+		const dialogsBare = await baseline();
+		const dialogsSnapshot = `  '@codingame/monaco-vscode-dialogs-service-override@35.0.1':
+    dependencies:
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=${apiHash})`;
+		expect(dialogsBare.lockfile).toContain(dialogsSnapshot);
+		dialogsBare.lockfile = dialogsBare.lockfile.replace(
+			dialogsSnapshot,
+			dialogsSnapshot.replace(`35.0.1(patch_hash=${apiHash})`, "35.0.1"),
+		);
+		expect(validateWorkbenchPatchSet(dialogsBare)).toContain(
+			`pnpm-lock.yaml snapshot graph for @codingame/monaco-vscode-api must use only 35.0.1(patch_hash=${apiHash})`,
+		);
 	});
 
 	it("rejects escaped double-quoted package keys before semantic graph matching", async () => {

@@ -107,6 +107,8 @@ tests/
 
 `@codingame/monaco-vscode-api` 35.0.1 的 `initialize()` 会无条件组合 extensions service，API 包本身也对它有传递依赖。因此 lockfile 中允许这个精确的惰性 registry 依赖，但 `app/` 不得直接导入 extensions service override。默认的 worker host 必须保持关闭；不得出现 `vscode/localExtensionHost`、`extensionHost.worker`、`ExtensionHostKind`、`setLocalExtensionHost` 或 `enableWorkerExtensionHost: true`。
 
+对话框只从同版 `@codingame/monaco-vscode-dialogs-service-override` 的公开导出子路径加载官方 `DialogService` 与 `dialog.web.contribution`，并只为 `IDialogService` 构造 descriptor，使用 VS Code `BrowserDialogHandler` 在 Workbench DOM 中异步渲染。禁止导入或 spread 包根工厂：它还会把 `IFileDialogService` 及约 89 KB 未压缩文件对话框实现带入 bundle，完整 spread 更会绕开 Plain 的 Rust picker/文件边界；也禁止以对话框为由增加 `dialog:*` Tauri capability 或回退到全局 `window.confirm`。
+
 构建必须有架构检查：扫描 `package.json`、lockfile、`app/` import 和最终 worker 产物，禁止上述执行入口及其他排除包。主题 manifest 可通过 extension contribution registry 注册，但 registry 只收到 Rust 导入器产生的白名单静态描述，不启动 host。
 
 ## 5. 依赖方向

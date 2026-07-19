@@ -48,6 +48,7 @@
 - 记录依赖许可证、bundle size 和第三方 notices 差异。
 - pnpm patch 以精确 SHA-256、文件/hunk 形状和 lock graph 锁定；mutation tests 必须证明删除或后移任一 Plain copy/move/clone guard、恢复 overwrite/mkdirp/generic fallback 都会失败。
 - provider 激活 Harness 必须从“全局禁止写”原子演进为闭集：最终只允许 `FileReadWrite | FileFolderCopy` 或 `FileReadWrite | Readonly`，且只有前置 capability DTO、create、copy/move、confirmed delete 和 versioned write 的全部 guard 同时存在时才接受前者。
+- dialogs Harness 必须锁定同版官方 dependency、`DialogService` 与 DOM contribution 两个公开导出子路径，以及只构造 `IDialogService` 的最终 descriptor；根 factory、完整 factory spread、任意 app 文件中的 `IFileDialogService`、全局/括号/解构 confirm、其他 app import、间接构造和任何 `dialog:*` capability 均须失败。capabilities 目录中的子目录、symlink 或第二文件也必须失败，不能依赖只扫描普通顶层文件的伪闭集。
 
 ### 浏览器 E2E
 
@@ -55,6 +56,7 @@
 
 - 打开 fixture、文件树 CRUD、标签/预览/拆分、编辑保存和冲突提示。
 - 文件树 CRUD 必须分别在 all-true 能力下真实调用 mock native，在任一 false 时保持整 provider 只读且 native mutation 调用数为零；create 缺失父目录、move partial 和 delete retained/partial 必须显示失败且不产生成功事件。
+- 永久删除必须观察 Workbench DOM `role="dialog"`，先取消并证明只有 prepare/cancel、目标仍在，再确认并证明 prepare/begin/commit 与目标消失；Playwright 原生 `dialog` 事件必须保持为空，防止同步 `window.confirm` 路径假通过。
 - Quick Open、全文搜索、替换、取消。
 - 颜色/文件图标主题导入和切换。
 - 终端/Git/DAP 使用录制事件测试 UI 状态机。
@@ -71,7 +73,7 @@
 使用电脑控制操作实际应用，至少覆盖：
 
 1. 系统目录选择器打开 fixture。
-2. 新建文件、编辑、保存、关闭重开和热退出恢复。
+2. 新建文件、编辑、保存、永久删除的 DOM 确认/取消、关闭重开和热退出恢复；Computer Use 点击不可逆确认按钮前必须取得即时确认。
 3. 外部修改后冲突处理。
 4. 全文搜索与批量替换。
 5. 导入本地测试 VSIX，验证 workbench 与 token/icon 变化。

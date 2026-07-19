@@ -836,6 +836,13 @@ const nativeMutationCommands = [
 	"workspace_remove_root",
 ] as const;
 
+const nativeDeleteCommands = [
+	"workspace_prepare_delete",
+	"workspace_cancel_delete",
+	"workspace_begin_delete",
+	"workspace_commit_delete_entry",
+] as const;
+
 test("fails closed before workspace bootstrap when capabilities are unavailable", async ({
 	page,
 }) => {
@@ -1091,6 +1098,7 @@ test("routes all-five workspace CRUD, save, rename and permanent delete through 
 	page,
 }) => {
 	const errors: string[] = [];
+	const nativeDialogs: string[] = [];
 	await installNativeIpcMock(page, "arrayBuffer", "supported");
 	await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {
 		origin: "http://127.0.0.1:1420",
@@ -1100,6 +1108,10 @@ test("routes all-five workspace CRUD, save, rename and permanent delete through 
 		if (message.type() === "error") {
 			errors.push(message.text());
 		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
 	});
 
 	const explorer = await openNativeWorkspaceExplorer(page);
@@ -1202,15 +1214,48 @@ test("routes all-five workspace CRUD, save, rename and permanent delete through 
 	await expect(renamed).toBeVisible();
 
 	await renamed.click();
-	const dialogPromise = page.waitForEvent("dialog");
-	const deleteKey = page.keyboard.press("ControlOrMeta+Backspace");
-	const dialog = await dialogPromise;
-	expect(dialog.type()).toBe("confirm");
-	expect(dialog.message()).toContain("永久删除“renamed”？");
-	expect(dialog.message()).toContain("此操作永久且不可撤销");
-	expect(dialog.message()).toContain("不会移入废纸篓");
-	await dialog.accept();
-	await deleteKey;
+	const cancelDeleteKey = page.keyboard.press("ControlOrMeta+Backspace");
+	const permanentDeleteDialog = page.getByRole("dialog");
+	await expect(permanentDeleteDialog).toBeVisible();
+	await expect(permanentDeleteDialog).toContainText("永久删除“renamed”？");
+	await expect(permanentDeleteDialog).toContainText("此操作永久且不可撤销");
+	await expect(permanentDeleteDialog).toContainText("不会移入废纸篓");
+	await expect(
+		permanentDeleteDialog.getByRole("button", {
+			name: "永久删除",
+			exact: true,
+		}),
+	).toBeVisible();
+	await permanentDeleteDialog
+		.getByRole("button", { name: "Cancel", exact: true })
+		.click();
+	await cancelDeleteKey;
+	await expect(permanentDeleteDialog).toHaveCount(0);
+	await expect(renamed).toBeVisible();
+	await expect
+		.poll(async () =>
+			page.evaluate(
+				(commands) => {
+					const testWindow = window as unknown as Window & {
+						__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+					};
+					return testWindow.__PLAIN_TEST_TAURI_CALLS__
+						.filter(({ command }) => commands.includes(command))
+						.map(({ command }) => command);
+				},
+				nativeDeleteCommands as readonly string[],
+			),
+		)
+		.toEqual(["workspace_prepare_delete", "workspace_cancel_delete"]);
+
+	await renamed.click();
+	const confirmDeleteKey = page.keyboard.press("ControlOrMeta+Backspace");
+	await expect(permanentDeleteDialog).toBeVisible();
+	await permanentDeleteDialog
+		.getByRole("button", { name: "永久删除", exact: true })
+		.click();
+	await confirmDeleteKey;
+	await expect(permanentDeleteDialog).toHaveCount(0);
 	await expect(renamed).toHaveCount(0);
 
 	const mutations = await page.evaluate(
@@ -1230,6 +1275,8 @@ test("routes all-five workspace CRUD, save, rename and permanent delete through 
 		"workspace_create_file",
 		"workspace_copy",
 		"workspace_rename",
+		"workspace_prepare_delete",
+		"workspace_cancel_delete",
 		"workspace_prepare_delete",
 		"workspace_begin_delete",
 		"workspace_commit_delete_entry",
@@ -1266,26 +1313,31 @@ test("routes all-five workspace CRUD, save, rename and permanent delete through 
 			targetPath: "src/renamed",
 		},
 	});
-	const prepared = mutations[5]!.args.request as {
-		readonly entries: readonly {
-			readonly rootId: string;
-			readonly relativePath: string;
-			readonly recursive: boolean;
-		}[];
-	};
-	expect(prepared).toEqual({
-		entries: [
-			{
-				rootId: nativeRootId,
-				relativePath: "src/renamed",
-				recursive: true,
-			},
-		],
-	});
-	const begin = mutations[6]!.args.request as {
+	for (const prepareMutation of [mutations[5], mutations[7]]) {
+		const prepared = prepareMutation!.args.request as {
+			readonly entries: readonly {
+				readonly rootId: string;
+				readonly relativePath: string;
+				readonly recursive: boolean;
+			}[];
+		};
+		expect(prepared).toEqual({
+			entries: [
+				{
+					rootId: nativeRootId,
+					relativePath: "src/renamed",
+					recursive: true,
+				},
+			],
+		});
+	}
+	const cancel = mutations[6]!.args.request as {
 		readonly confirmationId: string;
 	};
-	const commit = mutations[7]!.args.request as {
+	const begin = mutations[8]!.args.request as {
+		readonly confirmationId: string;
+	};
+	const commit = mutations[9]!.args.request as {
 		readonly confirmationId: string;
 		readonly entryId: string;
 		readonly rootId: string;
@@ -1295,6 +1347,10 @@ test("routes all-five workspace CRUD, save, rename and permanent delete through 
 	expect(begin.confirmationId).toMatch(
 		/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
 	);
+	expect(cancel.confirmationId).toMatch(
+		/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+	);
+	expect(cancel.confirmationId).not.toBe(begin.confirmationId);
 	expect(commit).toMatchObject({
 		confirmationId: begin.confirmationId,
 		entryId: expect.stringMatching(
@@ -1308,6 +1364,7 @@ test("routes all-five workspace CRUD, save, rename and permanent delete through 
 	await expect(
 		page.locator(".notifications-toasts .notification-toast"),
 	).toHaveCount(0);
+	expect(nativeDialogs).toEqual([]);
 	expect(errors).toEqual([]);
 });
 
@@ -1352,13 +1409,8 @@ test("keeps the entire provider readonly when one platform capability is false",
 	const pageErrors: string[] = [];
 	const consoleErrors: string[] = [];
 	const consoleWarnings: string[] = [];
-	let signalDialog!: () => void;
-	const dialogArrival = new Promise<void>((resolve) => {
-		signalDialog = resolve;
-	});
 	const onDialog = (dialog: Dialog): void => {
 		dialogs.push(dialog.message());
-		signalDialog();
 		void dialog.dismiss();
 	};
 	const onPageError = (error: Error): void => {
@@ -1376,12 +1428,7 @@ test("keeps the entire provider readonly when one platform capability is false",
 	page.on("console", onConsole);
 	try {
 		await src.click();
-		const noDialogWindow = Promise.race([
-			dialogArrival.then(() => false),
-			page.waitForTimeout(500).then(() => true),
-		]);
 		await page.keyboard.press("ControlOrMeta+Backspace");
-		expect(await noDialogWindow).toBe(true);
 		await expect
 			.poll(
 				() =>
@@ -1390,6 +1437,7 @@ test("keeps the entire provider readonly when one platform capability is false",
 					).length,
 			)
 			.toBe(1);
+		await expect(page.getByRole("dialog")).toHaveCount(0);
 		await expect
 			.poll(async () =>
 				page.evaluate(

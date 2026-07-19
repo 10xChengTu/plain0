@@ -82,6 +82,393 @@ export function validateTauriApiBoundary(source, relativePath) {
 		: [`${normalizedPath} bypasses the sole Tauri bridge directory`];
 }
 
+const DIALOGS_OVERRIDE_ROOT_MODULE =
+	"@codingame/monaco-vscode-dialogs-service-override";
+const DIALOG_SERVICE_IMPLEMENTATION_MODULE = `${DIALOGS_OVERRIDE_ROOT_MODULE}/vscode/vs/workbench/services/dialogs/common/dialogService`;
+const DIALOG_HANDLER_CONTRIBUTION_MODULE = `${DIALOGS_OVERRIDE_ROOT_MODULE}/vscode/vs/workbench/browser/parts/dialogs/dialog.web.contribution`;
+const DIALOG_SERVICE_TOKEN_MODULE =
+	"@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service";
+const EXPECTED_SERVICE_OVERRIDE_CALLS = Object.freeze([
+	"getConfigurationServiceOverride",
+	"getFilesServiceOverride",
+	"getModelServiceOverride",
+	"getWorkbenchServiceOverride",
+	"getExplorerServiceOverride",
+	"getThemeServiceOverride",
+	"getTextmateServiceOverride",
+]);
+
+export function validateDialogOverrideImportBoundary(source, relativePath) {
+	const sourceFile = ts.createSourceFile(
+		relativePath,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	let importsDialogsOverride = false;
+	function visit(node) {
+		if (
+			ts.isStringLiteralLike(node) &&
+			(node.text === DIALOGS_OVERRIDE_ROOT_MODULE ||
+				node.text.startsWith(`${DIALOGS_OVERRIDE_ROOT_MODULE}/`))
+		) {
+			importsDialogsOverride = true;
+		}
+		ts.forEachChild(node, visit);
+	}
+	visit(sourceFile);
+	const normalizedPath = relativePath.replaceAll("\\", "/");
+	return importsDialogsOverride && normalizedPath !== "app/services.ts"
+		? [`${normalizedPath} imports the dialogs override outside app/services.ts`]
+		: [];
+}
+
+export function validateDialogSurfaceBoundary(source, relativePath) {
+	const sourceFile = ts.createSourceFile(
+		relativePath,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	const globalObjects = new Set(["globalThis", "mainWindow", "self", "window"]);
+	let referencesFileDialogService = false;
+	let usesGlobalConfirm = false;
+	const isGlobalObject = (node) =>
+		ts.isIdentifier(node) && globalObjects.has(node.text);
+	function visit(node) {
+		if (ts.isIdentifier(node) && node.text === "IFileDialogService") {
+			referencesFileDialogService = true;
+		}
+		if (
+			(ts.isPropertyAccessExpression(node) &&
+				isGlobalObject(node.expression) &&
+				node.name.text === "confirm") ||
+			(ts.isElementAccessExpression(node) &&
+				isGlobalObject(node.expression) &&
+				ts.isStringLiteralLike(node.argumentExpression) &&
+				node.argumentExpression.text === "confirm") ||
+			(ts.isCallExpression(node) &&
+				ts.isIdentifier(node.expression) &&
+				node.expression.text === "confirm")
+		) {
+			usesGlobalConfirm = true;
+		}
+		if (
+			ts.isVariableDeclaration(node) &&
+			ts.isObjectBindingPattern(node.name) &&
+			node.initializer !== undefined &&
+			isGlobalObject(node.initializer) &&
+			node.name.elements.some((element) => {
+				const importedName = element.propertyName ?? element.name;
+				return ts.isIdentifier(importedName) && importedName.text === "confirm";
+			})
+		) {
+			usesGlobalConfirm = true;
+		}
+		ts.forEachChild(node, visit);
+	}
+	visit(sourceFile);
+	const normalizedPath = relativePath.replaceAll("\\", "/");
+	const failures = [];
+	if (referencesFileDialogService) {
+		failures.push(
+			`${normalizedPath} references IFileDialogService outside Plain's Rust picker boundary`,
+		);
+	}
+	if (usesGlobalConfirm) {
+		failures.push(`${normalizedPath} uses a forbidden global confirm path`);
+	}
+	return failures;
+}
+
+export function validateDialogServiceOverride(source) {
+	const failures = [];
+	const sourceFile = ts.createSourceFile(
+		"services.ts",
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	const dialogModuleReferences = [];
+	function collectDialogModuleReferences(node) {
+		if (
+			ts.isStringLiteralLike(node) &&
+			(node.text === DIALOGS_OVERRIDE_ROOT_MODULE ||
+				node.text.startsWith(`${DIALOGS_OVERRIDE_ROOT_MODULE}/`))
+		) {
+			dialogModuleReferences.push(node.text);
+		}
+		ts.forEachChild(node, collectDialogModuleReferences);
+	}
+	collectDialogModuleReferences(sourceFile);
+	const allDialogImports = sourceFile.statements.filter(
+		(statement) =>
+			ts.isImportDeclaration(statement) &&
+			ts.isStringLiteral(statement.moduleSpecifier) &&
+			(statement.moduleSpecifier.text === DIALOGS_OVERRIDE_ROOT_MODULE ||
+				statement.moduleSpecifier.text.startsWith(
+					`${DIALOGS_OVERRIDE_ROOT_MODULE}/`,
+				)),
+	);
+	const implementationImports = allDialogImports.filter(
+		(statement) =>
+			statement.moduleSpecifier.text === DIALOG_SERVICE_IMPLEMENTATION_MODULE,
+	);
+	const implementationElements =
+		implementationImports.length === 1 &&
+		implementationImports[0].importClause?.isTypeOnly !== true &&
+		implementationImports[0].importClause?.name === undefined &&
+		ts.isNamedImports(implementationImports[0].importClause?.namedBindings)
+			? implementationImports[0].importClause.namedBindings.elements
+			: undefined;
+	const contributionImports = allDialogImports.filter(
+		(statement) =>
+			statement.moduleSpecifier.text === DIALOG_HANDLER_CONTRIBUTION_MODULE,
+	);
+	if (
+		dialogModuleReferences.length !== 2 ||
+		allDialogImports.length !== 2 ||
+		implementationElements?.length !== 1 ||
+		implementationElements[0].isTypeOnly ||
+		(implementationElements[0].propertyName?.text ??
+			implementationElements[0].name.text) !== "DialogService" ||
+		implementationElements[0].name.text !== "DialogService" ||
+		contributionImports.length !== 1 ||
+		contributionImports[0].importClause !== undefined
+	) {
+		failures.push(
+			"app/services.ts must import only the exact official DialogService and DOM contribution subpaths",
+		);
+	}
+	const dialogTokenImports = sourceFile.statements.filter(
+		(statement) =>
+			ts.isImportDeclaration(statement) &&
+			ts.isStringLiteral(statement.moduleSpecifier) &&
+			statement.moduleSpecifier.text === DIALOG_SERVICE_TOKEN_MODULE,
+	);
+	const dialogTokenElements =
+		dialogTokenImports.length === 1 &&
+		dialogTokenImports[0].importClause?.isTypeOnly !== true &&
+		dialogTokenImports[0].importClause?.name === undefined &&
+		ts.isNamedImports(dialogTokenImports[0].importClause?.namedBindings)
+			? dialogTokenImports[0].importClause.namedBindings.elements
+			: undefined;
+	if (
+		dialogTokenElements?.length !== 1 ||
+		dialogTokenElements[0].isTypeOnly ||
+		(dialogTokenElements[0].propertyName?.text ??
+			dialogTokenElements[0].name.text) !== "IDialogService" ||
+		dialogTokenElements[0].name.text !== "IDialogService"
+	) {
+		failures.push(
+			"app/services.ts must import only the direct IDialogService token from its fixed API module",
+		);
+	}
+
+	const factories = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "createServiceOverrides" &&
+			statement.body !== undefined,
+	);
+	if (factories.length !== 1) {
+		return [
+			...failures,
+			"app/services.ts must define exactly one audited service override factory",
+		];
+	}
+	const returns = factories[0].body.statements.filter(ts.isReturnStatement);
+	const overrideObject =
+		factories[0].body.statements.length === 1 &&
+		returns.length === 1 &&
+		returns[0].expression !== undefined &&
+		ts.isObjectLiteralExpression(returns[0].expression)
+			? returns[0].expression
+			: undefined;
+	if (overrideObject === undefined) {
+		return [
+			...failures,
+			"createServiceOverrides must directly return one audited object literal",
+		];
+	}
+
+	const spreadCalls = [];
+	let malformedSpread = false;
+	for (const property of overrideObject.properties) {
+		if (!ts.isSpreadAssignment(property)) {
+			continue;
+		}
+		if (
+			!ts.isCallExpression(property.expression) ||
+			!ts.isIdentifier(property.expression.expression) ||
+			property.expression.arguments.length !== 0
+		) {
+			malformedSpread = true;
+			continue;
+		}
+		spreadCalls.push(property.expression.expression.text);
+	}
+	if (
+		malformedSpread ||
+		!sameArray(spreadCalls, EXPECTED_SERVICE_OVERRIDE_CALLS)
+	) {
+		failures.push(
+			"createServiceOverrides must keep the exact direct service spread order",
+		);
+	}
+
+	const nonSpreadProperties = overrideObject.properties.filter(
+		(property) => !ts.isSpreadAssignment(property),
+	);
+	function isDialogServiceKeyCall(expression) {
+		return (
+			ts.isCallExpression(expression) &&
+			ts.isPropertyAccessExpression(expression.expression) &&
+			ts.isIdentifier(expression.expression.expression) &&
+			expression.expression.expression.text === "IDialogService" &&
+			expression.expression.name.text === "toString" &&
+			expression.arguments.length === 0
+		);
+	}
+	const dialogService = nonSpreadProperties[0];
+	const dialogServiceName =
+		dialogService !== undefined &&
+		ts.isPropertyAssignment(dialogService) &&
+		ts.isComputedPropertyName(dialogService.name) &&
+		isDialogServiceKeyCall(dialogService.name.expression);
+	const dialogServiceInitializer =
+		dialogService !== undefined && ts.isPropertyAssignment(dialogService)
+			? dialogService.initializer
+			: undefined;
+	const dialogServiceInitializerIsExact =
+		dialogServiceInitializer !== undefined &&
+		ts.isNewExpression(dialogServiceInitializer) &&
+		ts.isIdentifier(dialogServiceInitializer.expression) &&
+		dialogServiceInitializer.expression.text === "SyncDescriptor" &&
+		dialogServiceInitializer.arguments?.length === 3 &&
+		ts.isIdentifier(dialogServiceInitializer.arguments[0]) &&
+		dialogServiceInitializer.arguments[0].text === "DialogService" &&
+		ts.isIdentifier(dialogServiceInitializer.arguments[1]) &&
+		dialogServiceInitializer.arguments[1].text === "undefined" &&
+		dialogServiceInitializer.arguments[2].kind === ts.SyntaxKind.TrueKeyword;
+	const languageStatus = nonSpreadProperties[1];
+	const languageStatusName =
+		languageStatus !== undefined &&
+		ts.isPropertyAssignment(languageStatus) &&
+		ts.isComputedPropertyName(languageStatus.name) &&
+		ts.isCallExpression(languageStatus.name.expression) &&
+		ts.isPropertyAccessExpression(languageStatus.name.expression.expression) &&
+		ts.isIdentifier(languageStatus.name.expression.expression.expression) &&
+		languageStatus.name.expression.expression.expression.text ===
+			"ILanguageStatusService" &&
+		languageStatus.name.expression.expression.name.text === "toString" &&
+		languageStatus.name.expression.arguments.length === 0;
+	const descriptor =
+		languageStatus !== undefined && ts.isPropertyAssignment(languageStatus)
+			? languageStatus.initializer
+			: undefined;
+	const descriptorIsExact =
+		descriptor !== undefined &&
+		ts.isNewExpression(descriptor) &&
+		ts.isIdentifier(descriptor.expression) &&
+		descriptor.expression.text === "SyncDescriptor" &&
+		descriptor.arguments?.length === 3 &&
+		ts.isIdentifier(descriptor.arguments[0]) &&
+		descriptor.arguments[0].text === "EmptyLanguageStatusService" &&
+		ts.isArrayLiteralExpression(descriptor.arguments[1]) &&
+		descriptor.arguments[1].elements.length === 0 &&
+		descriptor.arguments[2].kind === ts.SyntaxKind.TrueKeyword;
+	if (
+		overrideObject.properties.length !==
+			EXPECTED_SERVICE_OVERRIDE_CALLS.length + 2 ||
+		nonSpreadProperties.length !== 2 ||
+		!dialogServiceName ||
+		!dialogServiceInitializerIsExact ||
+		!languageStatusName ||
+		!descriptorIsExact
+	) {
+		failures.push(
+			"createServiceOverrides must construct only the audited delayed IDialogService descriptor before the empty language-status descriptor",
+		);
+	}
+	const propertyOrder = overrideObject.properties.map((property) => {
+		if (
+			ts.isSpreadAssignment(property) &&
+			ts.isCallExpression(property.expression) &&
+			ts.isIdentifier(property.expression.expression) &&
+			property.expression.arguments.length === 0
+		) {
+			return property.expression.expression.text;
+		}
+		if (property === dialogService) {
+			return "IDialogService";
+		}
+		if (property === languageStatus) {
+			return "ILanguageStatusService";
+		}
+		return "invalid";
+	});
+	if (
+		!sameArray(propertyOrder, [
+			...EXPECTED_SERVICE_OVERRIDE_CALLS,
+			"IDialogService",
+			"ILanguageStatusService",
+		])
+	) {
+		failures.push(
+			"createServiceOverrides must keep IDialogService as the final Workbench override before language status",
+		);
+	}
+
+	let dialogBindingReferences = 0;
+	let dialogServiceTokenReferences = 0;
+	let fileDialogServiceReference = false;
+	let globalConfirmReference = false;
+	function visit(node) {
+		if (ts.isIdentifier(node)) {
+			if (node.text === "DialogService") {
+				dialogBindingReferences += 1;
+			}
+			if (node.text === "IDialogService") {
+				dialogServiceTokenReferences += 1;
+			}
+			if (node.text === "IFileDialogService") {
+				fileDialogServiceReference = true;
+			}
+		}
+		if (
+			ts.isPropertyAccessExpression(node) &&
+			node.name.text === "confirm" &&
+			ts.isIdentifier(node.expression) &&
+			["globalThis", "mainWindow", "window"].includes(node.expression.text)
+		) {
+			globalConfirmReference = true;
+		}
+		ts.forEachChild(node, visit);
+	}
+	visit(sourceFile);
+	if (dialogBindingReferences !== 2) {
+		failures.push(
+			"DialogService may appear only in its exact import and audited IDialogService descriptor",
+		);
+	}
+	if (dialogServiceTokenReferences !== 2) {
+		failures.push(
+			"IDialogService may appear only in its import and output key",
+		);
+	}
+	if (fileDialogServiceReference || globalConfirmReference) {
+		failures.push(
+			"app/services.ts must not enable IFileDialogService or fall back to global confirm",
+		);
+	}
+
+	return failures;
+}
+
 export function validateWorkspaceProviderBootstrap(source) {
 	const failures = [];
 	const sourceFile = ts.createSourceFile(
@@ -804,8 +1191,8 @@ export function validateTauriE2EConfiguration(
 	return failures;
 }
 
-export function validateCapabilityFiles(fileNames) {
-	return sameArray([...fileNames].sort(), ["main.json"])
+export function validateCapabilityFiles(entries) {
+	return sameArray(entries, [{ name: "main.json", kind: "file" }])
 		? []
 		: ["src-tauri/capabilities must contain only main.json"];
 }

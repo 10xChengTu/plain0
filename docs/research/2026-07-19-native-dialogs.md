@@ -33,10 +33,16 @@
 | Plain 自写 DOM dialog service                           | 可行但不采用。固定依赖已经提供同版官方实现，重复维护没有收益。                          |
 | CodinGame 官方 dialogs service override                 | 采用。版本与现有 Workbench 完全一致，沿用 VS Code DOM dialog，零新增 Tauri capability。 |
 
+## 依赖与产物审计
+
+- lockfile 精确固定 `35.0.1` 及 integrity `sha512-tPOLJgBVynQjWN/eJ343g9aQk8P9VWPIQjA4R5cpPxM0GclPHBl3cy5Lj4g9wrBPPCu/1jsukenbOdOZ9xNfjg==`，它只依赖同版且已打 Plain patch 的 API edge；Workbench patch graph 的 API snapshot edge 由 21 增至 22。
+- 包与现有 CodinGame Workbench packages 同为 MIT，不引入新的许可证类别；仓库当前没有生成第三方 notices 产物，最终 notices/SBOM 仍由退役门 `F110` 统一重建。
+- 根 factory 构建会新增 8 个 source、2277 个 transformed modules，并带入约 89 KB 未压缩 Web 文件对话框源码；固定子路径方案只新增 4 个必需 source、2273 个 transformed modules。最终基线为 2108 source，203 项排除域债务的分类计数与 SHA-256 均不变。
+
 ## 冻结实施边界
 
 1. 只新增 `@codingame/monaco-vscode-dialogs-service-override@35.0.1`，在 `createServiceOverrides()` 中显式加入；禁止隐式升级其他 `@codingame` packages。
-2. Harness 把 dialogs package 纳入同版 allowlist，锁定唯一 import、唯一 override 调用和 `IDialogService` 最终覆盖；同时禁止以本修复为由加入 `dialog:default`、`dialog:allow-message` 或其他 WebView 权限。
+2. 官方根 factory 同时返回 `IDialogService` 与 `IFileDialogService`；即使只索引前者，bundle 审计仍会带入根入口与三份未使用的文件对话框实现（约 89 KB 未压缩源码）。Plain 因此只从该包公开的 `./vscode/*` 导出子路径加载官方 `DialogService` 与 `dialog.web.contribution`，自己构造唯一的 `IDialogService` descriptor。Harness 锁定这两个精确 import，禁止根 factory、`IFileDialogService` 和其他 app import；同时禁止加入 `dialog:default`、`dialog:allow-message` 或其他 WebView 权限。
 3. Browser E2E 改为观察 `role="dialog"`、完整不可逆文案和明确按钮；先验证取消不产生 begin/commit，再验证确认后的 prepare/begin/commit 顺序。不得继续用 Playwright 原生 `dialog` 事件冒充 Workbench DOM dialog。
 4. 真实 Tauri 先执行取消验收：菜单与 `⌘Backspace` 都能出现相同的可访问对话框，Escape/取消后磁盘保留。正向永久删除使用专用临时 fixture，并在 Computer Use 点击不可逆确认按钮前取得即时确认。
 5. 本工作项只修通 Workbench 通用对话框服务，不改变 Rust 删除 receipt、确认文案、Trash capability 或任何文件系统权限。
