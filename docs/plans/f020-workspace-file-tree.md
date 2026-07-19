@@ -170,6 +170,103 @@ Browser mock 使用同一 detached copy 先发布 target，再消费不可伪造
 
 实现验收至少覆盖：file、raw symlink、空目录、可重新验证 mode 的 mixed tree 正常 move；same-root、未授权、非法路径、特殊文件、超限、缺失 parent 和既有 target 的零副作用；publication 后 source/target basename swap、missing、同 inode 等长改写、恢复时间戳的等长改写、source/target 协调改成相同新 bytes、chmod、link payload 与目录成员变化；任一嵌套 target 因最终 mode/ACL/ownership 语义不可重新打开时 source 零删除并返回 retained/targetUnverifiable；删除前变化必须零 source remove，删除中第 N 项变化/权限失败必须给出精确 partial count；hardlink alias 正常完成且外部 nlink 变化失败；只读 source 不擅自 chmod；外部/dangling/loop link 不触碰 sentinel；双 root 撤销、window close 和并发目标竞争均保持 mutation gate/no-clobber 合同。TypeScript 另覆盖 strict request/result codec、unknown key/enum/prototype 拒绝和所有完整 bridge stub。
 
+### 确认删除的批量永久删除冻结合同
+
+首版只实现永久删除，不增加系统 Trash。Plain provider 不声明 `Trash` 或 `FileAtomicDelete`，其 adapter 收到 `useTrash: true` 或非 false `atomic` 必须在任何 plan/磁盘副作用前 fail closed；回收站失败也绝不能自动降级为永久删除。Workbench 原始 Delete、Shift+Delete、Bulk Edit、WorkingCopy 与 FileService 的确认/重试/程序化入口不能分别拥有删除权威，未来解除 `Readonly` 时必须统一进入 Plain 自有 delete coordinator。
+
+wire 拆成四个严格 command：
+
+```ts
+type WorkspacePrepareDeleteRequest = {
+	readonly entries: readonly {
+		readonly rootId: string;
+		readonly relativePath: string;
+		readonly recursive: boolean;
+	}[];
+};
+
+type WorkspaceDeleteBatchPlan = {
+	readonly confirmationId: string;
+	readonly entries: readonly {
+		readonly entryId: string;
+		readonly kind: "file" | "directory" | "symlink";
+		readonly descendantEntries: number;
+	}[];
+};
+
+type WorkspaceDeleteBatchRequest = {
+	readonly confirmationId: string;
+};
+
+type WorkspaceCommitDeleteEntryRequest = {
+	readonly confirmationId: string;
+	readonly entryId: string;
+	readonly rootId: string;
+	readonly relativePath: string;
+	readonly recursive: boolean;
+};
+```
+
+- `workspace_prepare_delete(request) -> WorkspaceDeleteBatchPlan`：`entries` 必须有 1..64 项；每个 `relativePath` 不能为空、不能代表 workspace root，且同一批次不得重复或存在 ancestor/descendant 重叠。同 root 相同 wire path 先直接判 duplicate；随后每个顶层 pathname 都以 parent capability + requested basename 打开/查询并绑定 handle identity，任意两个顶层若解析到相同 file/symlink/directory identity 都返回 `WORKSPACE_CONFLICT`，因此大小写/Unicode normalization alias 与真实不同名称 hardlink 都 fail closed。ancestor overlap 另以所选 directory identity 是否包含在另一项 parent chain/manifest 判定，覆盖嵌套授权 root。hardlink journal 只处理同一所选目录 manifest 内的 aliases，避免一个顶层已完整删除后还需用不可表达的 batch 状态报告余项 rebaseline 失败。禁止为了恢复 actual name 枚举可能无界的外部 parent siblings；单个请求使用文件系统实际解析到且由 receipt 绑定的 pathname identity。`recursive: false` 遇到非空目录返回稳定 `DIRECTORY_NOT_EMPTY`。普通文件、空目录和 symlink 的 `descendantEntries` 为 0；全批次共享 10,000 descendants 预算。response 顺序与输入完全一致，但只返回随机 `entryId`、kind 与计数，不返回 rootId、basename、相对/绝对路径、manifest、identity、metadata、raw link 或 receipt；UI 按 index 与已有 Explorer URI 构造显示名，不能把 Rust 清洗错误当作路径回传通道。
+- `workspace_cancel_delete({ confirmationId }) -> null`：只允许丢弃同窗口仍处于 prepared 状态或尚未执行的剩余 batch；不存在、过期、跨窗口、已完成或已取消 token 返回相同的 `WORKSPACE_DELETE_PLAN_INVALID`，不暴露 token 是否属于其他窗口。首项删除前取消绝无文件副作用；执行开始后的取消只丢弃尚未开始的 entries，不能中断已经进入 verified-delete 的单项。
+- `workspace_begin_delete({ confirmationId }) -> null`：只在 UI 已确认后调用；在同一 mutation gate 内取得 prepared batch，按输入顺序对全部 entry 做零副作用 revalidation，成功才把 phase 从 prepared 改为 executing。任一项变化或不可验收分别返回 `WORKSPACE_DELETE_BATCH_CHANGED`/`WORKSPACE_DELETE_BATCH_UNVERIFIABLE`，失效整批且不返回 failed entryId；不能把 entryId 塞入可解析的错误 message。begin 必须发生在 Bulk Edit 读取 Undo 内容、WorkingCopy participants/soft-revert 和任何 provider delete 之前。
+- `workspace_commit_delete_entry(request) -> WorkspaceDeleteResult`：`confirmationId + entryId + rootId + relativePath + recursive` 必须全部匹配 executing batch，且 entryId 必须是输入顺序中的 next pending entry；跳项、并发不同项和重排一律无副作用返回 `WORKSPACE_DELETE_PLAN_INVALID`。所有 batch 操作统一先取得 mutation gate，再短暂锁 batch state；commit 在 gate 内验证 token/phase/revision/next entry 后才把当前 receipt 标记为唯一 in-flight，释放 state lock但始终持有 gate执行 verified-delete，终态后再锁 state 更新或销毁。cancel/过期/root 生命周期操作等待同一 gate，因此不能抢走 in-flight receipt。token/entry 在参数 codec、窗口检查、过期检查或标记 in-flight 前失败时走普通 `CommandError`；一旦当前 entry 进入 verified-delete，所有可能已产生该 entry 删除副作用的终态只能使用下述严格结果。
+
+每个窗口最多存在一个 active batch，默认 120 秒单调时钟 idle TTL；有未过期 batch 时再次 prepare 返回 `WORKSPACE_CONFLICT`，UI 必须先 cancel。`workspace_begin_delete` 成功后进入 executing phase，每个正常 entry 终态刷新 idle deadline，避免大批次因前一项执行时间自然过期；retained/partial、取消或普通 entry mismatch 立即丢弃全部剩余 receipt。显式 cancel、root replace/remove、picker 成功替换/新增授权和 window close 都在 `mutation gate → batch/workspace state` 锁序下使 batch 失效；expired batch 在下一次 prepare/cancel/begin/commit 时于同一锁序清除。batch token 与每个 entryId 都是独立 128-bit UUID v4，绑定窗口、创建时 workspace revision、严格有序的 rootId/path/recursive 选择和 Rust-only `DeleteBatchReceipt`。receipt 不实现 `Serialize`/`Deserialize`，不跨 IPC，不跨窗口，不持久化，也不在确认期间保留目录 handle；确认 gap 后必须从各自当前 root capability 重新打开全部 parent chain。
+
+UI coordinator 的顺序固定为：对 `distinctParents` 后的完整选择集一次 prepare → 根据 batch plan 与当前 Explorer 选择显示一次“永久且不可撤销”确认 → confirm 后立即 begin 整批 preflight → 为每项创建带调用级删除授权的 `ResourceFileEdit` → Workbench 按项调用 provider 时逐项 commit；cancel/关闭对话框后 cancel。它不能传 `confirmed: boolean`、不能自行构造 token、不能跳过 prepare/begin。provider.delete 必须从当前调用 options 收到并同时匹配 batch token、entryId、URI/root/path、`recursive` 与永久删除模式，不能从全局 active context 仅凭同 URI/options 取“下一项”；任何没有授权 metadata 的 FileService/provider delete 都 fail closed。
+
+调用级授权需要在固定 `5264f` 基线上做窄 patch：Plain coordinator 把私有 authorization 写入 `ResourceFileEdit` options；`BulkFileEdits` 只透传到 `IDeleteOperation`，`WorkingCopyFileService` 只透传到 `FileService.del`，`FileService` 最后只传给同一 `plain-workspace:` provider 的 `IFileDeleteOptions`。authorization 不能进入通用扩展 API、undo/redo 序列化、日志或其他 scheme；非 Plain provider 看到它必须拒绝。这样另一条相同 URI/options 的程序化 FileService 调用没有调用级 capability，不能抢先消费 entry。
+
+Plain 永久删除不读取 Bulk Edit 的 <=5 MB Undo 内容、不为文件或目录创建上游 CreateEdit/Undo，并把 working-copy soft revert 从“全批删除前”改为“对应 provider entry 已返回 `deleted` 后”。participants/will-event 可以在 begin 后运行，但它们或外部进程造成的变化仍由每项 commit 重验；retained/partial/普通 mismatch 时当前和未执行项的 dirty working copies 保持原状。首个原生 remove 前 Workbench cancellation 可以 cancel 整批；某项进入 verified-delete 后必须运行到明确终态，取消只阻止剩余项。`explorer.confirmDelete=false` 不适用于 Plain 永久删除；dirty/readonly prompt 设置的 `skipConfirm`、上游 Retry 与任何无 authorization 的 `ResourceFileEdit`/FileService 入口也不得绕过 coordinator。provider 激活补丁还必须把 Plain 的普通 Delete 明确路由为 permanent，不能先展示 Trash 文案再由 Bulk Edit 静默改为永久。
+
+opaque batch token 绑定的是“用户一次看到的完整选择集”与“最终逐项重验的磁盘对象”，避免自由布尔值、重放、错 URI/options 和确认期间 TOCTOU；它本身不能密码学证明 WebView 真的渲染并点击了对话框。这里的确认是产品 UX 不变量，文件授权安全仍由 Rust root capability、mutation gate 与 verified-delete 提供。选择 Workbench 内的中央 coordinator 而不是在单项 Rust command 内弹原生 blocking dialog，是因为 provider delete 需要正确表达取消、dirty working copy、多选整体预览和按项 partial；原生单项弹窗会在上游已经 soft-revert 后才出现，取消只能被误报为 provider 成功或普通失败，并对多选重复弹窗。Harness 必须用唯一调用路径、CSP、无通用 Extension Host 和运行时排除面守住 coordinator；若未来把恶意 WebView 纳入“必须强制人类点击”的威胁模型，必须另立 native confirmation capability，不能宣称当前 token 已解决该问题。
+
+#### Rust-only delete receipt 与资源预算
+
+delete 不复用 copy 的内容预算或 SHA-256 receipt。普通文件可以大于 8 MiB，目录逻辑文件字节可以大于 256 MiB；prepare/commit 都不得读取普通文件内容。receipt 只冻结 capability-relative namespace 与当前 entry 身份：每层 parent identity，basename，pathname/handle identity，kind、mode、size、mtime、ctime、nlink；symlink 另存完整 raw payload。普通文件内容写入会产生可观察 ctime 变化；同 UID 无法把 ctime 恢复为旧值的当前平台上据此停止。特权进程、无法表达的 owner/xattr/ACL 变化和最后检查到 unlink 之间的 swap 继续是公开竞态，不把 metadata receipt 宣称为内容级或跨进程事务。
+
+目录 receipt 使用独立 source-only manifest：每个顶层根 header 不计 descendants；全批次 descendants 最多 10,000，每个根 depth 0/最大 256，单名 1 KiB、全批次 descendant 名称总量 2 MiB，单 raw link 4 KiB、全批次 raw link 2 MiB，所有累计 checked arithmetic。目录逐层 `open_dir_nofollow`；symlink 永不解析；FIFO、socket、设备和未知类型首版返回 `ENTRY_TYPE_MISMATCH`，不得删除部分可识别成员后才发现特殊项。同一顶层目录 manifest 内的 file/symlink identity 纳入 hardlink group，跨顶层 identity 冲突已在 prepare 拒绝；prepare 完成全部 manifest 后必须在零副作用下从各 root 重建并精确比较整个 batch 一次，才可注册 plan；超限分别返回既有 `DIRECTORY_TOO_LARGE`、`FILE_TOO_LARGE` 或 `PATH_ENCODING_UNSUPPORTED`。
+
+prepare receipt 记录普通文件/目录/symlink identity 与各顶层目录 manifest 内的 hardlink groups，但不跨确认 gap 保留打开 handle。它只允许为同窗口 active batch 占用一份有界 manifest，TTL/取消/生命周期失效都释放内存。Browser mock 保存 detached、冻结且不可伪造的等价 receipt，observer 只能收到冻结安全摘要；不能把前端可修改 plan 对象当作删除权威。
+
+#### Commit 与结构化终态
+
+begin 与每个 entry commit 的执行顺序固定为：
+
+1. begin 取得 mutation gate，验证 window、prepared phase/revision 与全部 entry 的 root 授权，重新从各 root 打开 parent chain并做一次完整 input-order preflight；root 空路径永远拒绝。失败返回 `WORKSPACE_DELETE_BATCH_CHANGED` 或 `WORKSPACE_DELETE_BATCH_UNVERIFIABLE`、失效整批且零 remove，成功只把 phase 标为 executing。每个 commit 随后在同一锁序验证 next entry，并再次完整重验当前 entry，防止 participants、前项执行或外部进程造成的变化。
+2. 在当前 entry 零 remove syscall 下完整重建并比较 prepare receipt：pathname/handle identity、kind、mode、size、mtime、ctime、nlink、目录成员集合与 symlink raw payload 都必须匹配。每个 entry 不可暂停/恢复，因此 mutation journal 只在随后当前 entry 的删除循环内生效；`recursive: false` 再次验证目录为空。
+3. 把当前 entry manifest 变成 leaf 逆序、directory 逆深度、根最后的固定 bounded plan；每个节点都只携带已验证 parent-relative path 与 receipt，不接受运行时 walker 新发现的成员。
+4. 每次删除前从当前 root 逐层 nofollow 打开 parent，重新确认顶层与当前 entry。file/symlink 均只调用已打开 parent 的 `remove_file(basename)`，目录只调用 `remove_dir(basename)`；symlink 不跟随，特殊文件在 prepare 已拒绝。禁止 `remove_dir_all`、`remove_open_dir(_all)`、ambient `std::fs`、直接 `unlink/unlinkat`、walker、shell/`std::process`、Trash/OS URL 和 tombstone/background cleanup。
+5. 对所选顶层目录 manifest 内的 descendant，每个成功 remove syscall 递增 `removedEntries` 并追加 Rust-only mutation journal：从对应 manifest-owned parent 的 expected residual member set 精确移除该 namespace entry；affected hardlink group 的 expected nlink 减一。若仍有 manifest alias，立即从一个仍存在的已知 alias nofollow 重开并验证 identity/type/mode/size/mtime/expected nlink，再把 observed ctime 设为全组新基线；manifest-owned parent 同样立即重开、验证 identity/mode，再把 observed mtime/ctime 设为新基线。下一步只接受该 journal 后的 residual set/nlink/基线，不能继续比较原始完整 manifest，也不能笼统忽略 ctime。
+6. 顶层 entry 的外部 parent 不属于 receipt-owned manifest：只冻结 parent identity、requested basename 与该 pathname 实际解析到的 entry identity，不枚举或冻结其可能无界的其他 siblings、portable name、special type、member set 或 mtime/ctime。顶层 file/symlink/empty-directory 或递归目录根成功 remove 后，当前 entry 已完整删除，必须无额外 fallible rebaseline gap 地返回 `deleted`；其 root remove 不计入 partial `removedEntries`。因此 partial 上界仍是 descendants 10,000，而不是 10,001。
+7. descendant mutation journal 的 rebaseline 发生在 unlink 之后，若验证失败已经属于 retained/partial；外部同 UID 改动若恰好落在成功 syscall 与立即重采样之间，可能被吸收为新基线，这是明确公开的窄竞态。未知或 replacement 成员仍绝不删除；为保持线性预算，不在每个 leaf 后枚举完整 parent，而在自然遍历与 manifest-owned directory 最终 residual/empty 检查时发现，最迟在 `remove_dir` 前停止。
+8. 当前根项成功删除后，post-root batch state 更新必须使用不可失败的 poison recovery/typestate：即使不能安全继续下一项，也只能返回 `deleted` 并失效余项，不能把已经完整删除的 entry 改写为 partial/普通 error。此前任何停止都按 descendant remove 计数返回 retained/partial并立即丢弃剩余 entries。不得自动恢复已删除成员、重试剩余计划、注册 Undo。最后一个 entry 完成后销毁 batch。
+
+严格结果为：
+
+```ts
+type WorkspaceDeleteResult =
+	| { readonly status: "deleted" }
+	| {
+			readonly status: "entryRetained";
+			readonly reason: "entryChanged" | "entryUnverifiable" | "deleteFailed";
+	  }
+	| {
+			readonly status: "entryPartiallyDeleted";
+			readonly reason: "entryChanged" | "entryUnverifiable" | "deleteFailed";
+			readonly removedEntries: number;
+	  };
+```
+
+pathname missing、identity/type/metadata/member-set/raw payload 不匹配归 `entryChanged`；permission/I/O 导致不能完成 receipt 验证归 `entryUnverifiable`；只有实际 `remove_file/remove_dir` syscall 失败归 `deleteFailed`。第一次成功 remove 前失败返回 `entryRetained`；至少一次后失败返回 `entryPartiallyDeleted`，`removedEntries` 必须是 1..10,000。retained 只表示 Plain 成功执行了零个 remove，不保证外部进程没有同时改变路径。最终 entry identity 检查和 remove syscall 之间仍没有 expected-inode conditional unlink，必须继续公开这一同 UID 竞态。
+
+provider 遇 retained/partial 必须先发布 root dirty/rescan/file-event 提示，再丢弃 batch 剩余 entries；Plain coordinator 保存严格 `WorkspaceDeleteResult` 用于品牌化错误提示，而 provider 对 Workbench 只映射到标准 `FileSystemProviderErrorCode.Unavailable`，不虚构上游不存在的自定义 provider code。不得上报 DELETE 成功、建立 Undo、自动 retry 或启用上游 `ignoreIfNotExists`。coordinator 对多选先整体 prepare/显示一次确认，再按 plan 输入顺序让 provider 消费精确 entryId，并记录每项结构化结果。任一项 ordinary mismatch 或 incomplete 后停止未执行项并刷新所有涉及 root，不能照搬 Workbench 普通数组循环和“忽略已不存在后整批重试”。
+
+Harness 必须锁定：四个 command/registration/service 唯一路由；prepare batch/request、begin phase、调用级 authorization、entry binding 与 plan/result 严格闭集；receipt 无 Serde/IPC；1..64 顶层、单 active batch、120 秒 idle TTL、窗口/revision/有序 root/path/options/一次性 token+entry 绑定；统一 `mutation gate → state`、单 in-flight；begin whole-batch preflight 与每项 remove 前完整 preflight；Plain Bulk 不读 Undo 内容且只在 deleted 后 soft-revert；普通文件不读取/hash 且不受 copy byte budget；全批次目录仍受 namespace/link 预算；只允许受审计 delete 模块中的 parent-handle `remove_file/remove_dir`；禁止所有递归/ambient/Trash/process 绕路；生产 TS 中 begin/commit 只能从 delete coordinator → fixed-patch authorization → provider 路径可达；provider 当前继续 `Readonly` 且无 `Trash`/`FileAtomicDelete` capability。每一条必须有对应负例，不能只搜索正例字符串。
+
+实现验收至少覆盖：单项和 64 项 batch 的 prepare/cancel/begin/逐项 commit，正常 file、空目录、raw symlink、mixed tree 与跨 root 选择；duplicate namespace/ancestor overlap、大小写/Unicode normalization alias、跨顶层相同 identity 拒绝，但同一目录 manifest 内不同真实名称的 hardlink 允许；大于 8 MiB 文件和逻辑字节大于 256 MiB 目录可 prepare；全批次 exact/+1 条目、深度、名称与 link 预算；root 空路径、non-recursive 非空目录、特殊文件、非法/未授权路径零副作用；token/entry unknown、expired、replay、错 URI/options、无调用级 authorization、cross-window、第二 batch、root replace/remove/window close；begin whole-batch preflight 能在 Undo read/soft-revert/首个 remove 前发现末项变化，相关调用计数为零且 dirty 内容不变；确认期间 source/parent basename swap、missing、同 inode内容/metadata变化、chmod、manifest 内 hardlink 外部 nlink、link payload、目录增删改；删除前变化零 remove，删除中第 N 项 change/unverifiable/remove failure 返回精确 partial并取消余项；mutation journal 的 residual set、parent time 与 hardlink rebaseline 正常且采样窗口边界有测试；顶层外部 parent 的超大/特殊/非 portable siblings 不进入 receipt且不阻塞；第 10,000 个 descendant remove 后失败仍可编码，root remove 后无 fallible gap；未知成员和外部/dangling/loop link不触碰 sentinel；并发两个相同 entry commit 至多一个消费，跳项/不同 entry 并发无副作用拒绝。TypeScript codec 必须用冻结 prepare request 验证 response entries 长度严格相等、entryId 全局唯一、count 为安全整数且总和 ≤10,000，并覆盖 accessor/Proxy TOCTOU、prototype/unknown key/enum 拒绝、冻结 batch plan/result、cancel finally、observer exception 与完整 bridge stub。Browser mock 新增 delete 专用共享 inode/metadata 节点、parent version、mutation journal 与可注入单调 clock；两个 manifest 目录项可引用同 inode，observer 只能变异模型而不能直接指定终态，Rust/browser 的 begin/reason 优先级、hardlink accounting 和 removed count 必须完全同构。
+
 ## 提交级落地顺序
 
 每项完成最小验证后立即提交，WIP 始终保持为 F020：
