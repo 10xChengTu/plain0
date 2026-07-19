@@ -5,6 +5,7 @@ import {
 	validateMainCapability,
 	validateTauriApiBoundary,
 	validateTauriConfiguration,
+	validateWorkspaceCapabilitiesBoundary,
 	validateWorkspaceCopyCommandRegistration,
 	validateWorkspaceDeleteBoundary,
 	validateWorkspaceDeleteCommandRegistration,
@@ -62,6 +63,138 @@ const baselineCapability = {
 	permissions: ["core:event:allow-listen", "core:event:allow-unlisten"],
 };
 
+function workspaceCapabilitiesBoundarySources() {
+	return {
+		rust: [
+			{
+				relativePath: "src-tauri/src/workspace/dto.rs",
+				source: `
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceCapabilitiesRequest {}
+
+#[derive(Serialize)]
+pub struct WorkspaceCapabilities {
+  create: bool,
+  rename_no_replace: bool,
+  copy_move: bool,
+  delete: bool,
+  versioned_write: bool,
+}
+
+impl WorkspaceCapabilities {
+  pub const fn current_platform() -> Self {
+    const HAS_EXCLUSIVE_NAMESPACE_MUTATIONS: bool =
+      ::core::cfg!(any(target_os = "linux", target_os = "macos"));
+    Self {
+      create: true,
+      rename_no_replace: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
+      copy_move: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
+      delete: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
+      versioned_write: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
+    }
+  }
+}
+`,
+			},
+			{
+				relativePath: "src-tauri/src/workspace/commands.rs",
+				source: `
+#[tauri::command]
+pub(crate) fn workspace_capabilities(
+  _window: WebviewWindow,
+  request: WorkspaceCapabilitiesRequest,
+) -> WorkspaceCapabilities {
+  request.validate();
+  WorkspaceCapabilities::current_platform()
+}
+`,
+			},
+			{
+				relativePath: "src-tauri/src/lib.rs",
+				source:
+					"builder.invoke_handler(tauri::generate_handler![workspace::commands::workspace_capabilities])",
+			},
+		],
+		app: [
+			{
+				relativePath: "app/platform/tauri/contracts.ts",
+				source: `
+export interface WorkspaceCapabilities {
+  readonly create: boolean;
+  readonly renameNoReplace: boolean;
+  readonly copyMove: boolean;
+  readonly delete: boolean;
+  readonly versionedWrite: boolean;
+}
+export interface PlainBridge {
+  workspaceCapabilities(): Promise<WorkspaceCapabilities>;
+}
+`,
+			},
+			{
+				relativePath: "app/platform/tauri/workspace-codec.ts",
+				source: `
+export function decodeWorkspaceCapabilities(value: unknown): WorkspaceCapabilities {
+  return sanitizedDecode(() => {
+    const snapshot = ownPlainDataSnapshot(value);
+    if (!hasExactKeys(snapshot, ["create", "renameNoReplace", "copyMove", "delete", "versionedWrite",]) ||
+      typeof snapshot.create !== "boolean" ||
+      typeof snapshot.renameNoReplace !== "boolean" ||
+      typeof snapshot.copyMove !== "boolean" ||
+      typeof snapshot.delete !== "boolean" ||
+      typeof snapshot.versionedWrite !== "boolean") {
+      return violation();
+    }
+    rejectProxyObject(value as object);
+    return Object.freeze({
+      create: snapshot.create,
+      renameNoReplace: snapshot.renameNoReplace,
+      copyMove: snapshot.copyMove,
+      delete: snapshot.delete,
+      versionedWrite: snapshot.versionedWrite,
+    });
+  });
+}
+`,
+			},
+			{
+				relativePath: "app/platform/tauri/native.ts",
+				source: `
+import { invoke } from "@tauri-apps/api/core";
+import { decodeWorkspaceCapabilities } from "./workspace-codec";
+
+export function createNativeBridge(): PlainBridge {
+  return {
+    workspaceCapabilities: async () =>
+      decodeWorkspaceCapabilities(
+        await invoke<unknown>("workspace_capabilities", { request: {} }),
+      ),
+  };
+}
+`,
+			},
+			{
+				relativePath: "app/platform/tauri/browser-mock.ts",
+				source: `
+const workspaceCapabilities: WorkspaceCapabilities = Object.freeze({
+  create: true,
+  renameNoReplace: true,
+  copyMove: true,
+  delete: true,
+  versionedWrite: true,
+});
+const bridge = {
+  async workspaceCapabilities() {
+    return workspaceCapabilities;
+  },
+};
+`,
+			},
+		],
+	};
+}
+
 describe("Plain Tauri boundary contracts", () => {
 	it("rejects Tauri API imports outside the bridge for either quote style", () => {
 		for (const quote of ["'", '"']) {
@@ -117,6 +250,237 @@ describe("Plain Tauri boundary contracts", () => {
 				"main capability contains fields outside the minimum contract",
 				"main capability permissions differ from the minimum contract",
 			]),
+		);
+	});
+});
+
+describe("workspace capability Harness", () => {
+	it("locks the exact Rust/TypeScript capability route and hostile fail-closed decoder", () => {
+		const baseline = workspaceCapabilitiesBoundarySources();
+		expect(
+			validateWorkspaceCapabilitiesBoundary(baseline.rust, baseline.app),
+		).toEqual([]);
+
+		const mutate = (sources, path, transform) =>
+			sources.map((entry) =>
+				entry.relativePath === path
+					? { ...entry, source: transform(entry.source) }
+					: entry,
+			);
+		const extraRustField = mutate(
+			baseline.rust,
+			"src-tauri/src/workspace/dto.rs",
+			(source) =>
+				source.replace(
+					"  versioned_write: bool,",
+					"  versioned_write: bool,\n  shell: bool,",
+				),
+		);
+		expect(
+			validateWorkspaceCapabilitiesBoundary(extraRustField, baseline.app),
+		).toContain(
+			"workspace capability Rust DTO must be an empty deny-unknown request and the exact five-boolean response",
+		);
+
+		const splitPlatformGate = mutate(
+			baseline.rust,
+			"src-tauri/src/workspace/dto.rs",
+			(source) =>
+				source.replace(
+					"delete: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,",
+					"delete: true,",
+				),
+		);
+		expect(
+			validateWorkspaceCapabilitiesBoundary(splitPlatformGate, baseline.app),
+		).toContain(
+			"workspace capabilities must keep create cross-platform and derive every unsafe mutation from the one Linux/macOS build gate",
+		);
+
+		const missingRegistration = mutate(
+			baseline.rust,
+			"src-tauri/src/lib.rs",
+			() => "builder.invoke_handler(tauri::generate_handler![])",
+		);
+		expect(
+			validateWorkspaceCapabilitiesBoundary(missingRegistration, baseline.app),
+		).toContain(
+			"src-tauri/src/lib.rs must register workspace_capabilities exactly once",
+		);
+
+		const commentedRegistrationDecoy = mutate(
+			baseline.rust,
+			"src-tauri/src/lib.rs",
+			() =>
+				"// builder.invoke_handler(tauri::generate_handler![workspace::commands::workspace_capabilities])\nbuilder.invoke_handler(tauri::generate_handler![])",
+		);
+		expect(
+			validateWorkspaceCapabilitiesBoundary(
+				commentedRegistrationDecoy,
+				baseline.app,
+			),
+		).toContain(
+			"src-tauri/src/lib.rs must register workspace_capabilities exactly once",
+		);
+
+		const unreachablePlatformDecoy = mutate(
+			baseline.rust,
+			"src-tauri/src/workspace/dto.rs",
+			(source) =>
+				source.replace(
+					'    const HAS_EXCLUSIVE_NAMESPACE_MUTATIONS: bool =\n      ::core::cfg!(any(target_os = "linux", target_os = "macos"));',
+					`    if false {
+      const HAS_EXCLUSIVE_NAMESPACE_MUTATIONS: bool =
+        ::core::cfg!(any(target_os = "linux", target_os = "macos"));
+      return Self {
+        create: true,
+        rename_no_replace: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
+        copy_move: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
+        delete: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
+        versioned_write: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
+      };
+    }
+    const HAS_EXCLUSIVE_NAMESPACE_MUTATIONS: bool = true;`,
+				),
+		);
+		expect(
+			validateWorkspaceCapabilitiesBoundary(
+				unreachablePlatformDecoy,
+				baseline.app,
+			),
+		).toContain(
+			"workspace capabilities must keep create cross-platform and derive every unsafe mutation from the one Linux/macOS build gate",
+		);
+
+		const shadowedPlatformMacro = mutate(
+			baseline.rust,
+			"src-tauri/src/workspace/dto.rs",
+			(source) =>
+				`macro_rules! cfg { ($($token:tt)*) => { true }; }\n${source.replace("::core::cfg!", "cfg!")}`,
+		);
+		expect(
+			validateWorkspaceCapabilitiesBoundary(
+				shadowedPlatformMacro,
+				baseline.app,
+			),
+		).toContain(
+			"workspace capabilities must keep create cross-platform and derive every unsafe mutation from the one Linux/macOS build gate",
+		);
+
+		for (const hostileCodec of [
+			mutate(baseline.app, "app/platform/tauri/workspace-codec.ts", (source) =>
+				source.replace(
+					'typeof snapshot.copyMove !== "boolean"',
+					"!Boolean(snapshot.copyMove)",
+				),
+			),
+			mutate(baseline.app, "app/platform/tauri/workspace-codec.ts", (source) =>
+				source.replace("    rejectProxyObject(value as object);\n", ""),
+			),
+			mutate(baseline.app, "app/platform/tauri/workspace-codec.ts", (source) =>
+				source.replace(
+					"export function decodeWorkspaceCapabilities(value: unknown): WorkspaceCapabilities {",
+					"export function decodeWorkspaceCapabilities(value: unknown): WorkspaceCapabilities {\n  return value as WorkspaceCapabilities;",
+				),
+			),
+		]) {
+			expect(
+				validateWorkspaceCapabilitiesBoundary(baseline.rust, hostileCodec),
+			).toContain(
+				"workspace capability decoder must snapshot exact own booleans, reject Proxy payloads and freeze the result",
+			);
+		}
+
+		const wrongNativeRoute = mutate(
+			baseline.app,
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace('"workspace_capabilities"', '"workspace_snapshot"'),
+		);
+		expect(
+			validateWorkspaceCapabilitiesBoundary(baseline.rust, wrongNativeRoute),
+		).toContain(
+			"native bridge must invoke workspace_capabilities once with an empty request and strictly decode it",
+		);
+
+		const spreadNativeOverride = mutate(
+			baseline.app,
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					"  };\n}",
+					`    ...{
+      workspaceCapabilities: async () => ({
+        create: true,
+        renameNoReplace: true,
+        copyMove: true,
+        delete: true,
+        versionedWrite: true,
+      }),
+    },
+  };
+}`,
+				),
+		);
+		expect(
+			validateWorkspaceCapabilitiesBoundary(
+				baseline.rust,
+				spreadNativeOverride,
+			),
+		).toContain(
+			"native bridge must invoke workspace_capabilities once with an empty request and strictly decode it",
+		);
+
+		const shadowedNativeInvoke = mutate(
+			baseline.app,
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					'import { invoke } from "@tauri-apps/api/core";',
+					`import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+const invoke = async () => ({
+  create: true,
+  renameNoReplace: true,
+  copyMove: true,
+  delete: true,
+  versionedWrite: true,
+});
+void tauriInvoke;`,
+				),
+		);
+		expect(
+			validateWorkspaceCapabilitiesBoundary(
+				baseline.rust,
+				shadowedNativeInvoke,
+			),
+		).toContain(
+			"native bridge must invoke workspace_capabilities once with an empty request and strictly decode it",
+		);
+
+		const detachedNativeRoute = mutate(
+			baseline.app,
+			"app/platform/tauri/native.ts",
+			(source) =>
+				`${source.replace(
+					`workspaceCapabilities: async () =>
+      decodeWorkspaceCapabilities(
+        await invoke<unknown>("workspace_capabilities", { request: {} }),
+      ),`,
+					`workspaceCapabilities() {
+      return { create: true, renameNoReplace: true, copyMove: true, delete: true, versionedWrite: true };
+    },`,
+				)}
+const unused = {
+  workspaceCapabilities: async () =>
+    decodeWorkspaceCapabilities(
+      await invoke<unknown>("workspace_capabilities", { request: {} }),
+    ),
+};`,
+		);
+		expect(
+			validateWorkspaceCapabilitiesBoundary(baseline.rust, detachedNativeRoute),
+		).toContain(
+			"native bridge must invoke workspace_capabilities once with an empty request and strictly decode it",
 		);
 	});
 });

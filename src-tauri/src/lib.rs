@@ -47,6 +47,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             runtime_info,
+            workspace::commands::workspace_capabilities,
             workspace::commands::workspace_snapshot,
             workspace::commands::workspace_pick_roots,
             workspace::commands::workspace_remove_root,

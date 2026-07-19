@@ -51,6 +51,15 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async onRuntimeReady() {
 			return () => {};
 		},
+		async workspaceCapabilities() {
+			return {
+				create: true,
+				renameNoReplace: true,
+				copyMove: true,
+				delete: true,
+				versionedWrite: true,
+			};
+		},
 		async workspaceSnapshot() {
 			throw new Error("unused");
 		},

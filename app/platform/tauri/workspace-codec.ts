@@ -1,6 +1,7 @@
 import type {
 	CommandError,
 	RuntimeInfo,
+	WorkspaceCapabilities,
 	WorkspaceCommitDeleteEntryRequest,
 	WorkspaceDeleteBatchPlan,
 	WorkspaceDeleteBatchPlanEntry,
@@ -1132,6 +1133,39 @@ export function decodeRuntimeInfo(value: unknown): RuntimeInfo {
 			application: value.application,
 			ipcVersion: value.ipcVersion,
 			runtime: value.runtime,
+		});
+	});
+}
+
+export function decodeWorkspaceCapabilities(
+	value: unknown,
+): WorkspaceCapabilities {
+	return sanitizedDecode(() => {
+		const snapshot = ownPlainDataSnapshot(value);
+		if (
+			!hasExactKeys(snapshot, [
+				"create",
+				"renameNoReplace",
+				"copyMove",
+				"delete",
+				"versionedWrite",
+			]) ||
+			typeof snapshot.create !== "boolean" ||
+			typeof snapshot.renameNoReplace !== "boolean" ||
+			typeof snapshot.copyMove !== "boolean" ||
+			typeof snapshot.delete !== "boolean" ||
+			typeof snapshot.versionedWrite !== "boolean"
+		) {
+			return violation();
+		}
+		rejectProxyObject(value as object);
+
+		return Object.freeze({
+			create: snapshot.create,
+			renameNoReplace: snapshot.renameNoReplace,
+			copyMove: snapshot.copyMove,
+			delete: snapshot.delete,
+			versionedWrite: snapshot.versionedWrite,
 		});
 	});
 }

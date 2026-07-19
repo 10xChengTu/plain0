@@ -8,6 +8,39 @@ use super::{RootId, WorkspaceId};
 use crate::error::CommandError;
 use crate::path_policy::RelativePath;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceCapabilitiesRequest {}
+
+impl WorkspaceCapabilitiesRequest {
+    pub const fn validate(self) {}
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceCapabilities {
+    create: bool,
+    rename_no_replace: bool,
+    copy_move: bool,
+    delete: bool,
+    versioned_write: bool,
+}
+
+impl WorkspaceCapabilities {
+    pub const fn current_platform() -> Self {
+        const HAS_EXCLUSIVE_NAMESPACE_MUTATIONS: bool =
+            ::core::cfg!(any(target_os = "linux", target_os = "macos"));
+
+        Self {
+            create: true,
+            rename_no_replace: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
+            copy_move: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
+            delete: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
+            versioned_write: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceRootSnapshot {

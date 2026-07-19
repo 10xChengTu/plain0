@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：无；FileService 版本化保存 consumer 已完成，下一项是在 provider 注册前读取严格 `workspace_capabilities` 并按平台原子能力激活写接口；provider 当前继续只读。
+- 当前最小工作项：无；严格 `workspace_capabilities` 原生/桥接合同已完成，下一项是在 provider 注册前读取该 DTO，并与 Workbench 防 fallback 补丁、删除 coordinator 和写能力激活原子落地；provider 当前继续只读。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -57,10 +57,12 @@
 - [x] `PLW1` 底层切片通过完整 `pnpm check`：15 个 TypeScript/JavaScript 测试文件、303 个用例、228 个 Rust 测试、格式、双 TypeScript 类型检查、严格 lint、生产构建、架构/PLW1 mutation guard 及 2101-source/203-debt bundle 基线全部通过；真实 Chromium E2E 3/3 继续覆盖 Workbench 启动、Explorer 打开文件和两种 PLR1 transport。独立 Rust/TS 攻击复核最终无 P0/P1；额外锁定 owned-stage unlink 参数/顺序/nlink 后验、私有 wire 构造器、exact ordinary-error whitelist、Rust 可表示终态、`spawn_blocking` JoinResult 数据流和 early-return 绕过。
 - [x] 完成 FileService 版本化保存 consumer：Plain existing save 必须携带精确旧 `wv1`，四种输入在任何通用 peek/无界 converter 前由单一 8 MiB 累积区收集，队列内只调用 provider 私有 `plainWriteFile`；严格 `written.stat` 直接生成冻结 write receipt、只发一次 WRITE 且不再 post-stat，发布不完整或结果未知通过不可伪造 WeakMap 品牌错误保留闭集终态。provider 对非成功终态先发 root `UPDATED`，公共能力和标准写接口继续只读；两个模型只接纳三种权威 baseline 来源，未决保存会阻断显式、自动、force、queued 与 `ignoreErrorHandler` 重放，两个 Plain 错误处理器只提供 Reload、Save As、Details。
 - [x] 版本化保存 consumer 通过完整验收：17 个 TypeScript/JavaScript 测试文件、345 个用例和 228 个 Rust 测试通过，格式、双 TypeScript 类型检查、严格 lint、生产构建、五补丁 SHA/hunk/lock graph、provider 写 seam、collector/终态 hostile mutations、2101-source/203-debt bundle 基线全部通过；真实 Chromium E2E 3/3 继续覆盖 Workbench 启动、Explorer 与两种 PLR1 transport。独立 FileService/模型/UI 终审无剩余 P0/P1；测试覆盖 8 MiB+1、零进展、stream destroy、mtime 回拨 A→B→C、保存中再编辑、旧 token queued replay、unknown 前延迟 PLR1、大小写 comparison-key 碰撞、恶意回执、品牌伪造和无 Retry/Overwrite 动作。
+- [x] 完成严格 `workspace_capabilities` 平台合同：Rust 只返回 `{ create, renameNoReplace, copyMove, delete, versionedWrite }` 五个布尔值，create 跨平台可用，其余四项由唯一 Linux/macOS 编译门控制；空请求拒绝额外字段。TypeScript 以 own-data snapshot、精确 key/boolean、Proxy brand check 和冻结结果解码，native bridge 与 browser mock 各只有一条路由；provider 尚未消费该合同并继续全局只读。
+- [x] 平台能力合同通过完整 `pnpm check`：18 个 TypeScript/JavaScript 测试文件、350 个用例和 230 个 Rust 测试通过，格式、双 TypeScript 类型检查、严格 lint、生产构建、capability hostile mutations、既有架构/补丁/2101-source/203-debt bundle 基线全部通过。
 
 ## 下一步
 
-1. 在provider注册前读取严格`workspace_capabilities` DTO，增加copy/move同路径、overwrite、自动mkdirp、generic fallback与cross-scheme防绕过patch，并按Rust平台能力激活写能力与Browser E2E；不支持原子no-replace rename的平台继续只读。
+1. 在provider注册前读取能力DTO，增加copy/move同路径、overwrite、自动mkdirp、generic fallback、clone与cross-scheme防绕过patch，接入确认删除 coordinator，并按Rust平台能力激活写能力与Browser E2E；不支持原子no-replace rename的平台继续只读。
 2. 实现watcher/rescan，最后运行真实Tauri文件树总验收并写回`F020` evidence。
 
 ## 当前验收命令

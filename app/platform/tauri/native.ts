@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { RUNTIME_READY_EVENT, type PlainBridge } from "./contracts";
 import {
 	decodeRuntimeInfo,
+	decodeWorkspaceCapabilities,
 	decodeWorkspaceEntryStat,
 	decodeWorkspaceDeleteBatchPlan,
 	decodeWorkspaceDeleteResult,
@@ -36,6 +37,10 @@ export function createNativeBridge(): PlainBridge {
 				listener(decodeRuntimeInfo(event.payload)),
 			);
 		},
+		workspaceCapabilities: async () =>
+			decodeWorkspaceCapabilities(
+				await invoke<unknown>("workspace_capabilities", { request: {} }),
+			),
 		workspaceSnapshot: async () =>
 			decodeWorkspaceSnapshot(
 				await invoke<unknown>("workspace_snapshot", { request: {} }),

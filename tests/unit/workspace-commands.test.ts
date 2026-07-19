@@ -22,6 +22,7 @@ describe("workspace Workbench command overrides", () => {
 		const bridge: PlainBridge = {
 			runtimeInfo: vi.fn(),
 			onRuntimeReady: vi.fn(),
+			workspaceCapabilities: vi.fn(),
 			workspaceSnapshot: vi.fn(),
 			workspacePickRoots,
 			workspaceRemoveRoot: vi.fn(),

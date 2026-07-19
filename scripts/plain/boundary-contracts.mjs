@@ -1410,6 +1410,395 @@ function findRustSource(rustSources, expectedPath) {
 	)?.source;
 }
 
+export function validateWorkspaceCapabilitiesBoundary(rustSources, appSources) {
+	const failures = [];
+	const dto = findRustSource(rustSources, "src-tauri/src/workspace/dto.rs");
+	const commands = findRustSource(
+		rustSources,
+		"src-tauri/src/workspace/commands.rs",
+	);
+	const lib = findRustSource(rustSources, "src-tauri/src/lib.rs");
+	const appSource = (expectedPath) =>
+		appSources.find(
+			({ relativePath }) => relativePath.replaceAll("\\", "/") === expectedPath,
+		)?.source;
+	const contracts = appSource("app/platform/tauri/contracts.ts");
+	const codec = appSource("app/platform/tauri/workspace-codec.ts");
+	const native = appSource("app/platform/tauri/native.ts");
+	const browserMock = appSource("app/platform/tauri/browser-mock.ts");
+	const normalized = (value) => value.replaceAll(/\s+/g, "");
+	const rustStructs = (source, name) => {
+		const structs = [];
+		const pattern = new RegExp(`\\bpub\\s+struct\\s+${name}\\b`, "g");
+		for (const match of source.matchAll(pattern)) {
+			const bodyOpen = source.indexOf("{", match.index + match[0].length);
+			if (bodyOpen < 0) {
+				continue;
+			}
+			const bodyClose = findMatchingDelimiter(source, bodyOpen, "{", "}");
+			if (bodyClose !== undefined) {
+				structs.push({
+					start: match.index,
+					body: source.slice(bodyOpen + 1, bodyClose),
+				});
+			}
+		}
+		return structs;
+	};
+
+	const executableDto = dto && stripRustCommentsAndLiterals(dto);
+	const requestStructs = executableDto
+		? rustStructs(executableDto, "WorkspaceCapabilitiesRequest")
+		: [];
+	const capabilityStructs = executableDto
+		? rustStructs(executableDto, "WorkspaceCapabilities")
+		: [];
+	const requestHasDenyUnknown =
+		requestStructs.length === 1 &&
+		/#\s*\[\s*serde\s*\(\s*deny_unknown_fields\s*\)\s*\]\s*$/.test(
+			executableDto.slice(
+				Math.max(0, requestStructs[0].start - 160),
+				requestStructs[0].start,
+			),
+		);
+	if (
+		requestStructs.length !== 1 ||
+		normalized(requestStructs[0]?.body ?? "") !== "" ||
+		!requestHasDenyUnknown ||
+		capabilityStructs.length !== 1 ||
+		normalized(capabilityStructs[0]?.body ?? "") !==
+			"create:bool,rename_no_replace:bool,copy_move:bool,delete:bool,versioned_write:bool,"
+	) {
+		failures.push(
+			"workspace capability Rust DTO must be an empty deny-unknown request and the exact five-boolean response",
+		);
+	}
+	const currentPlatformFunctions = executableDto
+		? extractRustFunctions(executableDto, "current_platform")
+		: [];
+	const currentPlatform = currentPlatformFunctions[0];
+	const expectedCurrentPlatformBody =
+		"constHAS_EXCLUSIVE_NAMESPACE_MUTATIONS:bool=::core::cfg!(any(target_os=,target_os=));" +
+		"Self{create:true,rename_no_replace:HAS_EXCLUSIVE_NAMESPACE_MUTATIONS," +
+		"copy_move:HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,delete:HAS_EXCLUSIVE_NAMESPACE_MUTATIONS," +
+		"versioned_write:HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,}";
+	const originalCurrentPlatformBody =
+		dto !== undefined && currentPlatform !== undefined
+			? dto.slice(currentPlatform.bodyStart, currentPlatform.bodyEnd)
+			: "";
+	if (
+		currentPlatformFunctions.length !== 1 ||
+		normalized(currentPlatform?.returnType ?? "") !== "->Self" ||
+		normalized(currentPlatform?.body ?? "") !== expectedCurrentPlatformBody ||
+		!/^\s*const\s+HAS_EXCLUSIVE_NAMESPACE_MUTATIONS\s*:\s*bool\s*=\s*::\s*core\s*::\s*cfg!\(\s*any\(\s*target_os\s*=\s*"linux"\s*,\s*target_os\s*=\s*"macos"\s*\)\s*\)\s*;/u.test(
+			originalCurrentPlatformBody,
+		)
+	) {
+		failures.push(
+			"workspace capabilities must keep create cross-platform and derive every unsafe mutation from the one Linux/macOS build gate",
+		);
+	}
+	const executableCommands = commands && stripRustCommentsAndLiterals(commands);
+	const capabilityCommands = executableCommands
+		? extractRustFunctions(executableCommands, "workspace_capabilities")
+		: [];
+	const capabilityCommand = capabilityCommands[0];
+	const commandPrefix =
+		executableCommands !== undefined && capabilityCommand !== undefined
+			? executableCommands.slice(
+					Math.max(0, capabilityCommand.start - 120),
+					capabilityCommand.start,
+				)
+			: "";
+	if (
+		capabilityCommands.length !== 1 ||
+		!/#\s*\[\s*tauri\s*::\s*command\s*\]\s*pub\s*\(\s*crate\s*\)\s*$/u.test(
+			commandPrefix,
+		) ||
+		normalized(capabilityCommand?.parameters ?? "") !==
+			"_window:WebviewWindow,request:WorkspaceCapabilitiesRequest," ||
+		normalized(capabilityCommand?.returnType ?? "") !==
+			"->WorkspaceCapabilities" ||
+		normalized(capabilityCommand?.body ?? "") !==
+			"request.validate();WorkspaceCapabilities::current_platform()"
+	) {
+		failures.push(
+			"workspace_capabilities must be one exact Tauri command returning only the frozen platform contract",
+		);
+	}
+	const executableLib = lib && stripRustCommentsAndLiterals(lib);
+	const capabilityRegistrations = executableLib
+		? [
+				...executableLib.matchAll(
+					/\bworkspace\s*::\s*commands\s*::\s*workspace_capabilities\b/g,
+				),
+			]
+		: [];
+	const handlerBodies = executableLib
+		? [
+				...executableLib.matchAll(
+					/\.invoke_handler\s*\(\s*tauri\s*::\s*generate_handler\s*!\s*\[([\s\S]*?)\]\s*\)/g,
+				),
+			]
+		: [];
+	if (
+		capabilityRegistrations.length !== 1 ||
+		handlerBodies.length !== 1 ||
+		!/(?:^|[\s,])workspace\s*::\s*commands\s*::\s*workspace_capabilities\s*(?:,|$)/u.test(
+			handlerBodies[0]?.[1] ?? "",
+		)
+	) {
+		failures.push(
+			"src-tauri/src/lib.rs must register workspace_capabilities exactly once",
+		);
+	}
+
+	const contractsFile =
+		contracts === undefined
+			? undefined
+			: ts.createSourceFile(
+					"contracts.ts",
+					contracts,
+					ts.ScriptTarget.Latest,
+					true,
+					ts.ScriptKind.TS,
+				);
+	const capabilityInterfaces =
+		contractsFile?.statements.filter(
+			(statement) =>
+				ts.isInterfaceDeclaration(statement) &&
+				statement.name.text === "WorkspaceCapabilities",
+		) ?? [];
+	const capabilityInterface = capabilityInterfaces[0];
+	const capabilityMembers =
+		capabilityInterface?.members.map((member) => ({
+			name: typeScriptStaticName(member.name),
+			readonly:
+				member.modifiers?.some(
+					(modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword,
+				) ?? false,
+			boolean: member.type?.kind === ts.SyntaxKind.BooleanKeyword,
+			property: ts.isPropertySignature(member),
+		})) ?? [];
+	const plainBridgeInterfaces =
+		contractsFile?.statements.filter(
+			(statement) =>
+				ts.isInterfaceDeclaration(statement) &&
+				statement.name.text === "PlainBridge",
+		) ?? [];
+	const bridgeCapabilityMembers =
+		plainBridgeInterfaces[0]?.members.filter(
+			(member) =>
+				ts.isMethodSignature(member) &&
+				typeScriptStaticName(member.name) === "workspaceCapabilities",
+		) ?? [];
+	if (
+		capabilityInterfaces.length !== 1 ||
+		JSON.stringify(capabilityMembers) !==
+			JSON.stringify(
+				[
+					"create",
+					"renameNoReplace",
+					"copyMove",
+					"delete",
+					"versionedWrite",
+				].map((name) => ({
+					name,
+					readonly: true,
+					boolean: true,
+					property: true,
+				})),
+			) ||
+		plainBridgeInterfaces.length !== 1 ||
+		bridgeCapabilityMembers.length !== 1 ||
+		bridgeCapabilityMembers[0].parameters.length !== 0 ||
+		normalized(
+			bridgeCapabilityMembers[0].type?.getText(contractsFile) ?? "",
+		) !== "Promise<WorkspaceCapabilities>"
+	) {
+		failures.push(
+			"PlainBridge must own the exact five-boolean workspace capability contract",
+		);
+	}
+	const codecFile =
+		codec === undefined
+			? undefined
+			: ts.createSourceFile(
+					"workspace-codec.ts",
+					codec,
+					ts.ScriptTarget.Latest,
+					true,
+					ts.ScriptKind.TS,
+				);
+	const capabilityDecoders =
+		codecFile?.statements.filter(
+			(statement) =>
+				ts.isFunctionDeclaration(statement) &&
+				statement.name?.text === "decodeWorkspaceCapabilities",
+		) ?? [];
+	const capabilityDecoder = capabilityDecoders[0];
+	const expectedDecoderBody =
+		"{returnsanitizedDecode(()=>{constsnapshot=ownPlainDataSnapshot(value);" +
+		'if(!hasExactKeys(snapshot,["create","renameNoReplace","copyMove","delete","versionedWrite",])||' +
+		'typeofsnapshot.create!=="boolean"||typeofsnapshot.renameNoReplace!=="boolean"||' +
+		'typeofsnapshot.copyMove!=="boolean"||typeofsnapshot.delete!=="boolean"||' +
+		'typeofsnapshot.versionedWrite!=="boolean"){returnviolation();}' +
+		"rejectProxyObject(valueasobject);returnObject.freeze({create:snapshot.create," +
+		"renameNoReplace:snapshot.renameNoReplace,copyMove:snapshot.copyMove," +
+		"delete:snapshot.delete,versionedWrite:snapshot.versionedWrite,});});}";
+	if (
+		capabilityDecoders.length !== 1 ||
+		capabilityDecoder.parameters.length !== 1 ||
+		!ts.isIdentifier(capabilityDecoder.parameters[0]?.name) ||
+		capabilityDecoder.parameters[0].name.text !== "value" ||
+		normalized(capabilityDecoder.type?.getText(codecFile) ?? "") !==
+			"WorkspaceCapabilities" ||
+		!capabilityDecoder.modifiers?.some(
+			(modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
+		) ||
+		normalized(capabilityDecoder.body?.getText(codecFile) ?? "") !==
+			expectedDecoderBody
+	) {
+		failures.push(
+			"workspace capability decoder must snapshot exact own booleans, reject Proxy payloads and freeze the result",
+		);
+	}
+	const nativeFile =
+		native === undefined
+			? undefined
+			: ts.createSourceFile(
+					"native.ts",
+					native,
+					ts.ScriptTarget.Latest,
+					true,
+					ts.ScriptKind.TS,
+				);
+	const nativeBridgeFactories =
+		nativeFile?.statements.filter(
+			(statement) =>
+				ts.isFunctionDeclaration(statement) &&
+				statement.name?.text === "createNativeBridge",
+		) ?? [];
+	const nativeBridgeFactory = nativeBridgeFactories[0];
+	const nativeBridgeBodyStatements =
+		nativeBridgeFactory?.body?.statements ?? [];
+	const nativeBridgeReturns = nativeBridgeBodyStatements.filter(
+		ts.isReturnStatement,
+	);
+	const nativeBridgeReturnExpression = nativeBridgeReturns[0]?.expression;
+	const nativeBridgeObject =
+		nativeBridgeReturnExpression !== undefined &&
+		ts.isObjectLiteralExpression(nativeBridgeReturnExpression)
+			? nativeBridgeReturns[0].expression
+			: undefined;
+	const nativeCapabilityRoutes =
+		nativeBridgeObject?.properties.filter(
+			(property) =>
+				typeScriptStaticName(property.name) === "workspaceCapabilities",
+		) ?? [];
+	const nativeCapabilityRoute = nativeCapabilityRoutes[0];
+	const nativeObjectHasDynamicOverrides =
+		nativeBridgeObject?.properties.some(
+			(property) =>
+				ts.isSpreadAssignment(property) ||
+				typeScriptStaticName(property.name) === undefined,
+		) ?? true;
+	const nativeImportBindingCount = (moduleName, importedName, localName) =>
+		nativeFile?.statements
+			.filter(ts.isImportDeclaration)
+			.filter(
+				(declaration) =>
+					ts.isStringLiteral(declaration.moduleSpecifier) &&
+					declaration.moduleSpecifier.text === moduleName &&
+					declaration.importClause !== undefined &&
+					!declaration.importClause.isTypeOnly &&
+					declaration.importClause.namedBindings !== undefined &&
+					ts.isNamedImports(declaration.importClause.namedBindings),
+			)
+			.flatMap((declaration) =>
+				declaration.importClause.namedBindings.elements.filter(
+					(specifier) =>
+						!specifier.isTypeOnly &&
+						(specifier.propertyName?.text ?? specifier.name.text) ===
+							importedName &&
+						specifier.name.text === localName,
+				),
+			).length ?? 0;
+	if (
+		nativeImportBindingCount("@tauri-apps/api/core", "invoke", "invoke") !==
+			1 ||
+		nativeImportBindingCount(
+			"./workspace-codec",
+			"decodeWorkspaceCapabilities",
+			"decodeWorkspaceCapabilities",
+		) !== 1 ||
+		nativeBridgeFactories.length !== 1 ||
+		nativeBridgeFactory.parameters.length !== 0 ||
+		normalized(nativeBridgeFactory.type?.getText(nativeFile) ?? "") !==
+			"PlainBridge" ||
+		!nativeBridgeFactory.modifiers?.some(
+			(modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
+		) ||
+		nativeBridgeBodyStatements.length !== 1 ||
+		nativeBridgeReturns.length !== 1 ||
+		nativeBridgeObject === undefined ||
+		nativeObjectHasDynamicOverrides ||
+		nativeCapabilityRoutes.length !== 1 ||
+		!ts.isPropertyAssignment(nativeCapabilityRoute) ||
+		normalized(nativeCapabilityRoute.initializer.getText(nativeFile)) !==
+			'async()=>decodeWorkspaceCapabilities(awaitinvoke<unknown>("workspace_capabilities",{request:{}}),)'
+	) {
+		failures.push(
+			"native bridge must invoke workspace_capabilities once with an empty request and strictly decode it",
+		);
+	}
+	const browserFile =
+		browserMock === undefined
+			? undefined
+			: ts.createSourceFile(
+					"browser-mock.ts",
+					browserMock,
+					ts.ScriptTarget.Latest,
+					true,
+					ts.ScriptKind.TS,
+				);
+	const browserCapabilityMethods = [];
+	const browserCapabilitySnapshots = [];
+	if (browserFile !== undefined) {
+		function visitBrowserCapability(node) {
+			if (
+				ts.isMethodDeclaration(node) &&
+				typeScriptStaticName(node.name) === "workspaceCapabilities"
+			) {
+				browserCapabilityMethods.push(node);
+			}
+			if (
+				ts.isVariableDeclaration(node) &&
+				node.name.getText(browserFile) === "workspaceCapabilities"
+			) {
+				browserCapabilitySnapshots.push(node.initializer);
+			}
+			ts.forEachChild(node, visitBrowserCapability);
+		}
+		visitBrowserCapability(browserFile);
+	}
+	if (
+		browserCapabilityMethods.length !== 1 ||
+		browserCapabilityMethods[0].parameters.length !== 0 ||
+		normalized(browserCapabilityMethods[0].body?.getText(browserFile) ?? "") !==
+			"{returnworkspaceCapabilities;}" ||
+		browserCapabilitySnapshots.length !== 1 ||
+		normalized(browserCapabilitySnapshots[0]?.getText(browserFile) ?? "") !==
+			"Object.freeze({create:true,renameNoReplace:true,copyMove:true,delete:true,versionedWrite:true,})"
+	) {
+		failures.push(
+			"browser mock must expose one immutable workspace capability snapshot",
+		);
+	}
+
+	return [...new Set(failures)];
+}
+
 function findMatchingDelimiter(source, openIndex, open, close) {
 	let depth = 1;
 	for (let index = openIndex + 1; index < source.length; index += 1) {
@@ -3361,6 +3750,9 @@ const WORKSPACE_DELETE_TS_COMMANDS = Object.freeze([
 ]);
 
 function typeScriptStaticName(node) {
+	if (node === undefined) {
+		return undefined;
+	}
 	if (
 		ts.isIdentifier(node) ||
 		ts.isStringLiteral(node) ||

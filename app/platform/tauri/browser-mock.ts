@@ -2,6 +2,7 @@ import type {
 	CommandError,
 	PlainBridge,
 	RuntimeInfo,
+	WorkspaceCapabilities,
 	WorkspaceCommitDeleteEntryRequest,
 	WorkspaceDeleteBatchPlan,
 	WorkspaceDeleteEntryKind,
@@ -44,6 +45,14 @@ const runtimeInfo: RuntimeInfo = Object.freeze({
 	application: "Plain",
 	ipcVersion: 1,
 	runtime: "browser-mock",
+});
+
+const workspaceCapabilities: WorkspaceCapabilities = Object.freeze({
+	create: true,
+	renameNoReplace: true,
+	copyMove: true,
+	delete: true,
+	versionedWrite: true,
 });
 
 const MOCK_WORKSPACE_ID = "00000000-0000-4000-8000-000000000001";
@@ -4222,6 +4231,9 @@ export function createBrowserMockBridge(
 			return () => {
 				listeners.delete(listener);
 			};
+		},
+		async workspaceCapabilities() {
+			return workspaceCapabilities;
 		},
 		async workspaceSnapshot() {
 			return snapshot();

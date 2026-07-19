@@ -60,6 +60,32 @@ describe("native Plain bridge", () => {
 		tauri.listen.mockReset();
 	});
 
+	it("invokes and strictly freezes the workspace capability contract", async () => {
+		tauri.invoke.mockResolvedValueOnce({
+			create: true,
+			renameNoReplace: true,
+			copyMove: true,
+			delete: true,
+			versionedWrite: true,
+		});
+		const bridge = createNativeBridge();
+
+		const capabilities = await bridge.workspaceCapabilities();
+
+		expect(tauri.invoke).toHaveBeenCalledOnce();
+		expect(tauri.invoke).toHaveBeenCalledWith("workspace_capabilities", {
+			request: {},
+		});
+		expect(capabilities).toEqual({
+			create: true,
+			renameNoReplace: true,
+			copyMove: true,
+			delete: true,
+			versionedWrite: true,
+		});
+		expect(Object.isFrozen(capabilities)).toBe(true);
+	});
+
 	it("uses owned request DTOs and decodes immutable workspace results", async () => {
 		tauri.invoke
 			.mockResolvedValueOnce(validSnapshot())

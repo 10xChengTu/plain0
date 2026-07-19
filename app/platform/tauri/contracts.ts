@@ -12,6 +12,14 @@ export interface CommandError {
 	readonly details?: unknown;
 }
 
+export interface WorkspaceCapabilities {
+	readonly create: boolean;
+	readonly renameNoReplace: boolean;
+	readonly copyMove: boolean;
+	readonly delete: boolean;
+	readonly versionedWrite: boolean;
+}
+
 export interface WorkspaceRoot {
 	readonly rootId: string;
 	readonly displayName: string;
@@ -203,6 +211,7 @@ export type Unlisten = () => void | Promise<void>;
 export interface PlainBridge {
 	runtimeInfo(): Promise<RuntimeInfo>;
 	onRuntimeReady(listener: (payload: RuntimeInfo) => void): Promise<Unlisten>;
+	workspaceCapabilities(): Promise<WorkspaceCapabilities>;
 	workspaceSnapshot(): Promise<WorkspaceSnapshot>;
 	workspacePickRoots(mode: WorkspacePickMode): Promise<WorkspacePickResult>;
 	workspaceRemoveRoot(rootId: string): Promise<WorkspaceSnapshot>;

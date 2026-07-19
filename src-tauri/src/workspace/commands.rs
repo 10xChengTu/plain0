@@ -3,14 +3,24 @@ use tauri::{State, WebviewWindow};
 use crate::error::CommandError;
 
 use super::dto::{
-    WorkspaceCommitDeleteEntryRequest, WorkspaceCopyRequest, WorkspaceDeleteBatchPlan,
-    WorkspaceDeleteBatchRequest, WorkspaceDeleteResult, WorkspaceEntryRequest, WorkspaceEntryStat,
-    WorkspaceMoveRequest, WorkspaceMoveResult, WorkspacePickRootsRequest, WorkspacePickRootsResult,
+    WorkspaceCapabilities, WorkspaceCapabilitiesRequest, WorkspaceCommitDeleteEntryRequest,
+    WorkspaceCopyRequest, WorkspaceDeleteBatchPlan, WorkspaceDeleteBatchRequest,
+    WorkspaceDeleteResult, WorkspaceEntryRequest, WorkspaceEntryStat, WorkspaceMoveRequest,
+    WorkspaceMoveResult, WorkspacePickRootsRequest, WorkspacePickRootsResult,
     WorkspacePrepareDeleteRequest, WorkspaceReadDirectoryResult, WorkspaceRemoveRootRequest,
     WorkspaceRenameRequest, WorkspaceSnapshot, WorkspaceSnapshotRequest, WorkspaceWriteResult,
 };
 use super::picker::TauriDirectoryPicker;
 use super::service::WorkspaceService;
+
+#[tauri::command]
+pub(crate) fn workspace_capabilities(
+    _window: WebviewWindow,
+    request: WorkspaceCapabilitiesRequest,
+) -> WorkspaceCapabilities {
+    request.validate();
+    WorkspaceCapabilities::current_platform()
+}
 
 #[tauri::command]
 pub(crate) async fn workspace_snapshot(
@@ -236,6 +246,45 @@ mod tests {
 
     use super::raw_bytes_response;
     use crate::error::CommandError;
+    use crate::workspace::dto::{WorkspaceCapabilities, WorkspaceCapabilitiesRequest};
+
+    #[test]
+    fn capabilities_are_an_exact_platform_closed_set() {
+        let value = serde_json::to_value(WorkspaceCapabilities::current_platform())
+            .expect("workspace capabilities serialize");
+        let object = value
+            .as_object()
+            .expect("workspace capabilities are an object");
+        let mut keys = object.keys().map(String::as_str).collect::<Vec<_>>();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "copyMove",
+                "create",
+                "delete",
+                "renameNoReplace",
+                "versionedWrite",
+            ]
+        );
+        assert_eq!(value["create"], true);
+        let namespace_mutations = cfg!(any(target_os = "linux", target_os = "macos"));
+        for key in ["renameNoReplace", "copyMove", "delete", "versionedWrite"] {
+            assert_eq!(value[key], namespace_mutations, "unexpected {key} value");
+        }
+    }
+
+    #[test]
+    fn capabilities_request_rejects_every_extra_field() {
+        serde_json::from_value::<WorkspaceCapabilitiesRequest>(serde_json::json!({}))
+            .expect("empty capability request is valid");
+        assert!(
+            serde_json::from_value::<WorkspaceCapabilitiesRequest>(serde_json::json!({
+                "rootId": "00000000-0000-4000-8000-000000000001"
+            }))
+            .is_err()
+        );
+    }
 
     #[test]
     fn file_response_uses_raw_ipc_bytes_instead_of_json_numbers() {
