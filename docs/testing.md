@@ -28,11 +28,14 @@
 ### TypeScript 单元测试
 
 - Tauri bridge 请求/错误映射。
+- provider bootstrap 必须证明能力 DTO 在注册前恰好读取一次、窗口生命周期不可升级；五项全真与任一 false 分别产生唯一 writable/readonly capability 集合，畸形或读取失败不能回退为可写。
 - 编辑器模型和脏状态/恢复状态机。
 - 搜索结果批次、取消、替换 plan。
 - theme color/token/icon 映射。
 - Git/DAP view model 在乱序或缺失事件下的行为。
 - 固定 FileService patch 对 Plain copy/move/clone 的 provider-lookup 前拒绝、native-only 合法路径和零副作用失败矩阵；非 Plain 控制组必须保持 upstream 行为。
+- Plain create/createFolder 必须只调用一次 native create/mkdir，且不做 target stat、非空 create、overwrite、递归 mkdirp 或通用 write fallback；copy/rename/move/delete provider adapters 必须覆盖严格 options、唯一 bridge 路由、成功事件闭集，以及 partial/unknown 只 rescan、不发成功事件。
+- confirmed-delete 测试必须覆盖一次 prepare/confirm/begin、调用级 token+entry+URI/options 绑定、逐项 commit、无授权/replay/错项拒绝，以及禁止 Trash、Bulk Undo、成功前 soft-revert 和 retained/partial 后继续执行。
 
 ### 架构与供应链检查
 
@@ -42,12 +45,14 @@
 - 检查 Tauri CSP/capabilities 没有 `csp: null`、`$HOME/**`、宽泛 shell/fs scope。
 - 记录依赖许可证、bundle size 和第三方 notices 差异。
 - pnpm patch 以精确 SHA-256、文件/hunk 形状和 lock graph 锁定；mutation tests 必须证明删除或后移任一 Plain copy/move/clone guard、恢复 overwrite/mkdirp/generic fallback 都会失败。
+- provider 激活 Harness 必须从“全局禁止写”原子演进为闭集：最终只允许 `FileReadWrite | FileFolderCopy` 或 `FileReadWrite | Readonly`，且只有前置 capability DTO、create、copy/move、confirmed delete 和 versioned write 的全部 guard 同时存在时才接受前者。
 
 ### 浏览器 E2E
 
 浏览器模式用 deterministic mock IPC 驱动 Workbench，验证 UI 和数据状态，不伪装原生能力：
 
 - 打开 fixture、文件树 CRUD、标签/预览/拆分、编辑保存和冲突提示。
+- 文件树 CRUD 必须分别在 all-true 能力下真实调用 mock native，在任一 false 时保持整 provider 只读且 native mutation 调用数为零；create 缺失父目录、move partial 和 delete retained/partial 必须显示失败且不产生成功事件。
 - Quick Open、全文搜索、替换、取消。
 - 颜色/文件图标主题导入和切换。
 - 终端/Git/DAP 使用录制事件测试 UI 状态机。

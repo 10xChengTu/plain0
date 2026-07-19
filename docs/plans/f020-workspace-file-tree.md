@@ -100,6 +100,20 @@ Plain 专用 actual 分支必须位于上游同字符串成功 no-op、target `d
 
 runtime 测试必须参数化覆盖入口前置拒绝、同 provider 实例注册到两个 scheme、target 存在/不存在的 overwrite、由 native no-clobber 返回的 target conflict、大小写仅有差异的路径、缺失父目录、同步 sequential getter/Proxy 与异步 URI mutation、native-only happy path、缺 capability/method、直接 generic helper、clone 与非 Plain 控制组；所有失败例同时断言 provider activation/stat/delete/mkdir/read/write/copy/rename 调用数和 operation event。patch Harness 除精确 SHA-256、hunk 与 lock graph 外，还要 hostile mutate：删除任一入口 guard、把双 Plain 改成 OR、恢复 same-URI no-op或 truthy overwrite、把 Plain 分支移到 `del/mkdirp` 后、恢复 target stat/exists 或 generic fallback、后移/删除 URI snapshot 或 clone guard、只检查 capability 不检查方法。
 
+### Provider 激活施工顺序
+
+补充 GitHub 与仓库调研见 [`docs/research/2026-07-19-provider-activation.md`](../research/2026-07-19-provider-activation.md)。以下五项必须各自形成独立提交，前四项期间 provider 都继续 `FileReadWrite | Readonly`：
+
+1. **启动能力策略**：`main.ts` 在 provider 构造/注册前恰好读取一次严格冻结的 `workspaceCapabilities()`；factory 再 own-data snapshot 并建立窗口生命周期内不可升级的 all-five-true policy。读取失败、畸形 DTO 或任一 false 均不能形成可写 provider，本切片不新增 Workbench 写入口。
+2. **create 路由**：Plain `canCreateFile/createFile/createFolder` 在 provider lookup 前做 URI/options 闭集检查；新文件只接受空内容和无 overwrite并调用一次私有 native-create seam，目录只调用一次 `mkdir`。FileService 的 Plain 分支及导出/内部 `mkdirp` tripwire 禁止 target stat、递归建父目录、通用 write 或 overwrite fallback；provider 自身再次把 URI 同步复制为 primitive request后才调用 bridge。
+3. **copy/move provider**：`copy/rename` 只接纳 own-data `{ overwrite: false }`。copy 唯一路由到 `workspaceCopy`；rename 同 root 唯一路由到 `workspaceRename`，不同 root唯一路由到 `workspaceMove`。只有 `moved` 可成功；retained/partial 或响应无法认证时，先同步 fire 对应 root rescan，再抛稳定 incomplete error，禁止 success event、retry 或 fallback。本项仍不声明 `FileFolderCopy`。
+4. **confirmed-delete consumer**：按本计划后文既定 coordinator 和固定 patch 落地 prepare/一次确认/begin/调用级 authorization/逐项 commit；无 token+entry+URI/options 精确授权的 `FileService.del`/provider.delete fail closed，Trash/atomic/Bulk Undo/成功前 soft-revert 继续禁止。
+5. **最终广告与验收**：只有 create、exclusive rename、copy/move、confirmed delete 与 versioned write 的 consumer/Harness 全部通过，且五字段全 true，provider 才固定声明 `FileReadWrite | FileFolderCopy`；否则固定 `FileReadWrite | Readonly`。两种能力集合都在构造时一次决定，`onDidChangeCapabilities` 保持 `Event.None`，不声明 `PathCaseSensitive`、Trash、atomic delete/write、clone、append 或 unlock。
+
+前四项的 dormant methods 也必须由 all-five-true policy 守住，不能把 provider `Readonly` 当作唯一内部防线。provider file-change 事件闭集固定为：create/createFolder/copy 成功后只发 target `ADDED`；同 root rename 与跨 root `moved` 只发 source `DELETED` + target `ADDED`；确认删除只有 `deleted` 后才发 target `DELETED`。retained/partial/响应无法认证时只同步发受影响 root `UPDATED` 再失败，不发精确成功事件；FileService 的 CREATE/COPY/MOVE/DELETE operation event 只能在 provider 成功返回后发布。既有 versioned save 继续由 FileService 发布唯一 WRITE operation event，provider 只在非成功终态发 root `UPDATED`。
+
+最终浏览器验收同时覆盖 all-true CRUD/save 与任一 false 的整 provider 只读降级；真实 Tauri smoke 至少覆盖空文件、单级目录、同 root rename、跨 root copy/move、一次确认的永久删除与 versioned save。watcher/rescan 外部事件仍是后续独立工作项，不得塞入能力广告提交。
+
 版本化写入是 F020 的底层传输合同，不是 F030 的冲突 UI。Rust stat 增加 opaque version token；`workspace_write_file` 必须同时接收期望 version 与有界 bytes，在 mutation gate 内重验版本、写同目录临时文件并原子替换。由于 upstream `FileService` 不把 `mtime/etag` 继续传给 provider，Plain 需要一份可审计的窄 pnpm patch，只在 `plain-workspace:` 私有分支把已用于 dirty-write 校验的期望版本直接交给 `plainWriteFile(resource, bytes, expectedVersion)`；不得修改公开 `IFileWriteOptions` 或扩展 API。provider 不维护全局“最近 stat”缓存，也不接受缺少期望版本的覆盖写。
 
 ### 版本化原子写入冻结合同
