@@ -1,5 +1,13 @@
 import type {
 	RuntimeInfo,
+	WorkspaceCommitDeleteEntryRequest,
+	WorkspaceDeleteBatchPlan,
+	WorkspaceDeleteBatchPlanEntry,
+	WorkspaceDeleteBatchRequest,
+	WorkspaceDeleteEntryKind,
+	WorkspaceDeleteEntryRequest,
+	WorkspaceDeleteIncompleteReason,
+	WorkspaceDeleteResult,
 	WorkspaceDirectoryEntry,
 	WorkspaceCopyRequest,
 	WorkspaceEntryKind,
@@ -8,6 +16,7 @@ import type {
 	WorkspaceMoveIncompleteReason,
 	WorkspaceMoveRequest,
 	WorkspaceMoveResult,
+	WorkspacePrepareDeleteRequest,
 	WorkspacePickResult,
 	WorkspaceReadDirectoryResult,
 	WorkspaceRoot,
@@ -23,6 +32,8 @@ const MAX_ENTRY_NAME_BYTES = 1_024;
 const MAX_DIRECTORY_NAME_PAYLOAD_BYTES = 2 * 1_024 * 1_024;
 const MAX_FILE_BYTES = 8 * 1_024 * 1_024;
 const MAX_MOVE_REMOVED_ENTRIES = 10_000;
+const MAX_DELETE_BATCH_ENTRIES = 64;
+const MAX_DELETE_DESCENDANT_ENTRIES = 10_000;
 const MAX_RELATIVE_PATH_BYTES = 4_096;
 const MAX_RELATIVE_PATH_SEGMENTS = 256;
 const CONTRACT_ERROR_MESSAGE =
@@ -41,6 +52,17 @@ const WORKSPACE_MOVE_INCOMPLETE_REASONS =
 		"targetChanged",
 		"sourceUnverifiable",
 		"targetUnverifiable",
+		"deleteFailed",
+	]);
+const WORKSPACE_DELETE_ENTRY_KINDS = new Set<WorkspaceDeleteEntryKind>([
+	"file",
+	"directory",
+	"symlink",
+]);
+const WORKSPACE_DELETE_INCOMPLETE_REASONS =
+	new Set<WorkspaceDeleteIncompleteReason>([
+		"entryChanged",
+		"entryUnverifiable",
 		"deleteFailed",
 	]);
 const utf8Encoder = new TextEncoder();
@@ -124,6 +146,68 @@ function ownPlainDataSnapshot(
 	}
 
 	return Object.freeze(snapshot);
+}
+
+function ownArrayDataSnapshot(
+	value: unknown,
+	minimumLength: number,
+	maximumLength: number,
+): Readonly<{ value: object; entries: readonly unknown[] }> {
+	if (typeof value !== "object" || value === null || !Array.isArray(value)) {
+		return violation();
+	}
+	if (Object.getPrototypeOf(value) !== Array.prototype) {
+		return violation();
+	}
+
+	const descriptors = Object.getOwnPropertyDescriptors(value);
+	const descriptorMap = descriptors as unknown as Record<
+		PropertyKey,
+		PropertyDescriptor
+	>;
+	const lengthDescriptor = descriptorMap.length;
+	if (
+		lengthDescriptor === undefined ||
+		!("value" in lengthDescriptor) ||
+		!Number.isSafeInteger(lengthDescriptor.value) ||
+		lengthDescriptor.value < minimumLength ||
+		lengthDescriptor.value > maximumLength
+	) {
+		return violation();
+	}
+	const length = lengthDescriptor.value as number;
+	const keys = Reflect.ownKeys(descriptors);
+	if (keys.length !== length + 1) {
+		return violation();
+	}
+
+	const entries: unknown[] = [];
+	for (let index = 0; index < length; index += 1) {
+		const descriptor = descriptorMap[String(index)];
+		if (
+			descriptor === undefined ||
+			!("value" in descriptor) ||
+			descriptor.get !== undefined ||
+			descriptor.set !== undefined
+		) {
+			return violation();
+		}
+		entries.push(descriptor.value);
+	}
+	for (const key of keys) {
+		if (key === "length") {
+			continue;
+		}
+		if (
+			typeof key !== "string" ||
+			!/^(?:0|[1-9][0-9]*)$/u.test(key) ||
+			Number(key) >= length
+		) {
+			return violation();
+		}
+	}
+
+	return Object.freeze({ value, entries: Object.freeze(entries) });
 }
 
 function rejectProxyObject(value: object): void {
@@ -345,6 +429,161 @@ export function frozenWorkspaceMoveRequest(
 		);
 	}
 	return Object.freeze({ ...request });
+}
+
+function workspaceDeletePlanInvalid(): never {
+	return requestViolation(
+		"WORKSPACE_DELETE_PLAN_INVALID",
+		"The workspace delete plan is invalid.",
+	);
+}
+
+function workspaceDeleteConflict(): never {
+	return requestViolation(
+		"WORKSPACE_CONFLICT",
+		"The workspace delete selection conflicts with another entry.",
+	);
+}
+
+function deleteEntryRequestFromSnapshot(
+	value: unknown,
+): WorkspaceDeleteEntryRequest {
+	let snapshot: Readonly<Record<string, unknown>>;
+	try {
+		snapshot = ownPlainDataSnapshot(value);
+		if (!hasExactKeys(snapshot, ["rootId", "relativePath", "recursive"])) {
+			return workspaceDeletePlanInvalid();
+		}
+		rejectProxyObject(value as object);
+	} catch {
+		return workspaceDeletePlanInvalid();
+	}
+	const entry = frozenWorkspaceCreateEntryRequest(
+		snapshot.rootId,
+		snapshot.relativePath,
+	);
+	if (typeof snapshot.recursive !== "boolean") {
+		return workspaceDeletePlanInvalid();
+	}
+	return Object.freeze({
+		rootId: entry.rootId,
+		relativePath: entry.relativePath,
+		recursive: snapshot.recursive,
+	});
+}
+
+export function frozenWorkspacePrepareDeleteRequest(
+	entries: unknown,
+): Readonly<WorkspacePrepareDeleteRequest> {
+	let declaredLength: number;
+	try {
+		if (
+			typeof entries !== "object" ||
+			entries === null ||
+			!Array.isArray(entries) ||
+			Object.getPrototypeOf(entries) !== Array.prototype
+		) {
+			return workspaceDeletePlanInvalid();
+		}
+		const descriptor = Object.getOwnPropertyDescriptor(entries, "length");
+		if (
+			descriptor === undefined ||
+			!("value" in descriptor) ||
+			!Number.isSafeInteger(descriptor.value) ||
+			descriptor.value < 0
+		) {
+			return workspaceDeletePlanInvalid();
+		}
+		declaredLength = descriptor.value as number;
+	} catch {
+		return workspaceDeletePlanInvalid();
+	}
+	if (declaredLength < 1 || declaredLength > MAX_DELETE_BATCH_ENTRIES) {
+		return workspaceDeleteConflict();
+	}
+	let arraySnapshot: ReturnType<typeof ownArrayDataSnapshot>;
+	try {
+		arraySnapshot = ownArrayDataSnapshot(
+			entries,
+			declaredLength,
+			declaredLength,
+		);
+	} catch {
+		return workspaceDeletePlanInvalid();
+	}
+	const frozenEntries = arraySnapshot.entries.map(
+		deleteEntryRequestFromSnapshot,
+	);
+	try {
+		rejectProxyObject(arraySnapshot.value);
+	} catch {
+		return workspaceDeletePlanInvalid();
+	}
+
+	for (let leftIndex = 0; leftIndex < frozenEntries.length; leftIndex += 1) {
+		const left = frozenEntries[leftIndex]!;
+		const leftSegments = workspaceRelativePathSegments(left.relativePath);
+		if (leftSegments === undefined || leftSegments.length === 0) {
+			return workspaceDeletePlanInvalid();
+		}
+		for (
+			let rightIndex = leftIndex + 1;
+			rightIndex < frozenEntries.length;
+			rightIndex += 1
+		) {
+			const right = frozenEntries[rightIndex]!;
+			if (left.rootId !== right.rootId) {
+				continue;
+			}
+			const rightSegments = workspaceRelativePathSegments(right.relativePath);
+			if (rightSegments === undefined || rightSegments.length === 0) {
+				return workspaceDeletePlanInvalid();
+			}
+			const commonLength = Math.min(leftSegments.length, rightSegments.length);
+			if (
+				leftSegments
+					.slice(0, commonLength)
+					.every((segment, index) => rightSegments[index] === segment)
+			) {
+				return workspaceDeleteConflict();
+			}
+		}
+	}
+
+	return Object.freeze({ entries: Object.freeze(frozenEntries) });
+}
+
+export function frozenWorkspaceDeleteBatchRequest(
+	confirmationId: unknown,
+): Readonly<WorkspaceDeleteBatchRequest> {
+	if (!isUuidV4(confirmationId)) {
+		return workspaceDeletePlanInvalid();
+	}
+	return Object.freeze({ confirmationId });
+}
+
+export function frozenWorkspaceCommitDeleteEntryRequest(
+	confirmationId: unknown,
+	entryId: unknown,
+	rootId: unknown,
+	relativePath: unknown,
+	recursive: unknown,
+): Readonly<WorkspaceCommitDeleteEntryRequest> {
+	const batch = frozenWorkspaceDeleteBatchRequest(confirmationId);
+	if (!isUuidV4(entryId) || entryId === batch.confirmationId) {
+		return workspaceDeletePlanInvalid();
+	}
+	const entry = frozenWorkspaceCreateEntryRequest(rootId, relativePath);
+	if (typeof recursive !== "boolean") {
+		return workspaceDeletePlanInvalid();
+	}
+	return Object.freeze({
+		confirmationId: batch.confirmationId,
+		entryId,
+		rootId: entry.rootId,
+		relativePath: entry.relativePath,
+		recursive,
+	});
 }
 
 function compareUtf8(left: Uint8Array, right: Uint8Array): number {
@@ -670,6 +909,138 @@ export function decodeWorkspaceMoveResult(value: unknown): WorkspaceMoveResult {
 	});
 }
 
+function isWorkspaceDeleteEntryKind(
+	value: unknown,
+): value is WorkspaceDeleteEntryKind {
+	return (
+		typeof value === "string" &&
+		WORKSPACE_DELETE_ENTRY_KINDS.has(value as WorkspaceDeleteEntryKind)
+	);
+}
+
+function isWorkspaceDeleteIncompleteReason(
+	value: unknown,
+): value is WorkspaceDeleteIncompleteReason {
+	return (
+		typeof value === "string" &&
+		WORKSPACE_DELETE_INCOMPLETE_REASONS.has(
+			value as WorkspaceDeleteIncompleteReason,
+		)
+	);
+}
+
+export function decodeWorkspaceDeleteBatchPlan(
+	value: unknown,
+	request: WorkspacePrepareDeleteRequest,
+): WorkspaceDeleteBatchPlan {
+	return sanitizedDecode(() => {
+		const requestSnapshot = ownPlainDataSnapshot(request);
+		if (!hasExactKeys(requestSnapshot, ["entries"])) {
+			return violation();
+		}
+		const frozenRequest = frozenWorkspacePrepareDeleteRequest(
+			requestSnapshot.entries,
+		);
+		rejectProxyObject(request as object);
+
+		const snapshot = ownPlainDataSnapshot(value);
+		if (
+			!hasExactKeys(snapshot, ["confirmationId", "entries"]) ||
+			!isUuidV4(snapshot.confirmationId)
+		) {
+			return violation();
+		}
+		const entriesSnapshot = ownArrayDataSnapshot(
+			snapshot.entries,
+			frozenRequest.entries.length,
+			frozenRequest.entries.length,
+		);
+		const seenIds = new Set<string>([snapshot.confirmationId]);
+		let totalDescendants = 0;
+		const entries = entriesSnapshot.entries.map(
+			(candidate): WorkspaceDeleteBatchPlanEntry => {
+				const entry = ownPlainDataSnapshot(candidate);
+				if (
+					!hasExactKeys(entry, ["entryId", "kind", "descendantEntries"]) ||
+					!isUuidV4(entry.entryId) ||
+					seenIds.has(entry.entryId) ||
+					!isWorkspaceDeleteEntryKind(entry.kind) ||
+					!isSafeNonnegativeInteger(entry.descendantEntries) ||
+					entry.descendantEntries > MAX_DELETE_DESCENDANT_ENTRIES ||
+					(entry.kind !== "directory" && entry.descendantEntries !== 0)
+				) {
+					return violation();
+				}
+				seenIds.add(entry.entryId);
+				totalDescendants += entry.descendantEntries;
+				if (
+					!Number.isSafeInteger(totalDescendants) ||
+					totalDescendants > MAX_DELETE_DESCENDANT_ENTRIES
+				) {
+					return violation();
+				}
+				rejectProxyObject(candidate as object);
+				return Object.freeze({
+					entryId: entry.entryId,
+					kind: entry.kind,
+					descendantEntries: entry.descendantEntries,
+				});
+			},
+		);
+		rejectProxyObject(entriesSnapshot.value);
+		rejectProxyObject(value as object);
+		return Object.freeze({
+			confirmationId: snapshot.confirmationId,
+			entries: Object.freeze(entries),
+		});
+	});
+}
+
+export function decodeWorkspaceDeleteResult(
+	value: unknown,
+): WorkspaceDeleteResult {
+	return sanitizedDecode(() => {
+		const snapshot = ownPlainDataSnapshot(value);
+		if (snapshot.status === "deleted") {
+			if (!hasExactKeys(snapshot, ["status"])) {
+				return violation();
+			}
+			rejectProxyObject(value as object);
+			return Object.freeze({ status: snapshot.status });
+		}
+		if (snapshot.status === "entryRetained") {
+			if (
+				!hasExactKeys(snapshot, ["status", "reason"]) ||
+				!isWorkspaceDeleteIncompleteReason(snapshot.reason)
+			) {
+				return violation();
+			}
+			rejectProxyObject(value as object);
+			return Object.freeze({
+				status: snapshot.status,
+				reason: snapshot.reason,
+			});
+		}
+		if (
+			snapshot.status !== "entryPartiallyDeleted" ||
+			!hasExactKeys(snapshot, ["status", "reason", "removedEntries"]) ||
+			!isWorkspaceDeleteIncompleteReason(snapshot.reason) ||
+			typeof snapshot.removedEntries !== "number" ||
+			!Number.isSafeInteger(snapshot.removedEntries) ||
+			snapshot.removedEntries < 1 ||
+			snapshot.removedEntries > MAX_DELETE_DESCENDANT_ENTRIES
+		) {
+			return violation();
+		}
+		rejectProxyObject(value as object);
+		return Object.freeze({
+			status: snapshot.status,
+			reason: snapshot.reason,
+			removedEntries: snapshot.removedEntries,
+		});
+	});
+}
+
 export function frozenWorkspaceSnapshot(
 	workspaceId: string,
 	revision: number,
@@ -714,4 +1085,17 @@ export function frozenWorkspaceMoveResult(
 	result: WorkspaceMoveResult,
 ): WorkspaceMoveResult {
 	return decodeWorkspaceMoveResult(result);
+}
+
+export function frozenWorkspaceDeleteBatchPlan(
+	plan: WorkspaceDeleteBatchPlan,
+	request: WorkspacePrepareDeleteRequest,
+): WorkspaceDeleteBatchPlan {
+	return decodeWorkspaceDeleteBatchPlan(plan, request);
+}
+
+export function frozenWorkspaceDeleteResult(
+	result: WorkspaceDeleteResult,
+): WorkspaceDeleteResult {
+	return decodeWorkspaceDeleteResult(result);
 }

@@ -6,6 +6,9 @@ import {
 	validateTauriApiBoundary,
 	validateTauriConfiguration,
 	validateWorkspaceCopyCommandRegistration,
+	validateWorkspaceDeleteBoundary,
+	validateWorkspaceDeleteCommandRegistration,
+	validateWorkspaceDeleteTypeScriptBoundary,
 	validateWorkspaceMoveBoundary,
 	validateWorkspaceMoveCommandRegistration,
 	validateWorkspaceProviderBootstrap,
@@ -564,6 +567,276 @@ fn finish_move(
 	},
 ];
 
+const workspaceDeleteSources = [
+	...mutateWorkspaceSource(
+		mutateWorkspaceSource(
+			workspaceMoveSources,
+			"src-tauri/src/workspace/commands.rs",
+			(source) => `${source}
+#[tauri::command]
+pub(crate) async fn workspace_prepare_delete(
+  window: WebviewWindow,
+  service: State<'_, WorkspaceService>,
+  request: WorkspacePrepareDeleteRequest,
+) -> Result<WorkspaceDeleteBatchPlan, CommandError> {
+  service.prepare_delete(window.label(), request.into_parts()?).await
+}
+#[tauri::command]
+pub(crate) async fn workspace_cancel_delete(
+  window: WebviewWindow,
+  service: State<'_, WorkspaceService>,
+  request: WorkspaceDeleteBatchRequest,
+) -> Result<(), CommandError> {
+  service.cancel_delete(window.label(), request.confirmation_id()).await
+}
+#[tauri::command]
+pub(crate) async fn workspace_begin_delete(
+  window: WebviewWindow,
+  service: State<'_, WorkspaceService>,
+  request: WorkspaceDeleteBatchRequest,
+) -> Result<(), CommandError> {
+  service.begin_delete(window.label(), request.confirmation_id()).await
+}
+#[tauri::command]
+pub(crate) async fn workspace_commit_delete_entry(
+  window: WebviewWindow,
+  service: State<'_, WorkspaceService>,
+  request: WorkspaceCommitDeleteEntryRequest,
+) -> Result<WorkspaceDeleteResult, CommandError> {
+  let (confirmation_id, entry_id, root_id, relative_path, recursive) = request.into_parts()?;
+  service.commit_delete_entry(
+    window.label(),
+    confirmation_id,
+    entry_id,
+    root_id,
+    relative_path,
+    recursive,
+  ).await
+}`,
+		),
+		"src-tauri/src/lib.rs",
+		(source) =>
+			source.replace(
+				"workspace::commands::workspace_move,",
+				`workspace::commands::workspace_move,
+      workspace::commands::workspace_prepare_delete,
+      workspace::commands::workspace_cancel_delete,
+      workspace::commands::workspace_begin_delete,
+      workspace::commands::workspace_commit_delete_entry,`,
+			),
+	).filter(
+		({ relativePath }) =>
+			relativePath !== "src-tauri/src/workspace/service.rs" &&
+			relativePath !== "src-tauri/src/workspace/dto.rs",
+	),
+	{
+		relativePath: "src-tauri/src/workspace/delete.rs",
+		source: `
+const MAX_DELETE_BATCH_ENTRIES: usize = 64;
+const MAX_DELETE_DESCENDANTS: usize = 10_000;
+const MAX_DELETE_TREE_DEPTH: usize = 256;
+const MAX_DELETE_ENTRY_NAME_BYTES: usize = 1_024;
+const MAX_DELETE_TREE_NAME_BYTES: usize = 2 * 1_024 * 1_024;
+const MAX_DELETE_SYMLINK_BYTES: usize = 4 * 1_024;
+const MAX_DELETE_TREE_SYMLINK_BYTES: usize = 2 * 1_024 * 1_024;
+
+struct DeleteLimits {
+  batch_entries: usize,
+  descendants: usize,
+  depth: usize,
+  entry_name_bytes: usize,
+  name_bytes: usize,
+  symlink_bytes: usize,
+  tree_symlink_bytes: usize,
+}
+
+const DELETE_LIMITS: DeleteLimits = DeleteLimits {
+  batch_entries: MAX_DELETE_BATCH_ENTRIES,
+  descendants: MAX_DELETE_DESCENDANTS,
+  depth: MAX_DELETE_TREE_DEPTH,
+  entry_name_bytes: MAX_DELETE_ENTRY_NAME_BYTES,
+  name_bytes: MAX_DELETE_TREE_NAME_BYTES,
+  symlink_bytes: MAX_DELETE_SYMLINK_BYTES,
+  tree_symlink_bytes: MAX_DELETE_TREE_SYMLINK_BYTES,
+};
+
+pub(super) struct DeleteBatchReceipt {
+  limits: DeleteLimits,
+}
+
+struct DeleteEntryReceipt {
+  parent_chain: Vec<FileIdentity>,
+  kind: DeleteReceiptKind,
+}
+
+enum DeleteReceiptKind {
+  File,
+  Directory(DirectoryReceipt),
+}
+
+struct DirectoryReceipt {
+  root: NodeSnapshot,
+  entries: Vec<ManifestEntry>,
+}
+
+struct ManifestEntry {
+  name: String,
+  parent: DirectoryIndex,
+  kind: ManifestEntryKind,
+}
+
+enum DirectoryIndex {
+  Root,
+  Entry(usize),
+}
+
+enum ManifestEntryKind {
+  File,
+  Directory,
+}
+
+struct AliasJournal {
+  remaining_indices: BTreeSet<usize>,
+}
+
+fn remove_verified_entry(
+  parent: &Dir,
+  basename: &Path,
+  kind: DeleteKind,
+) -> std::io::Result<()> {
+  match kind {
+    DeleteKind::File | DeleteKind::Symlink => parent.remove_file(basename),
+    DeleteKind::Directory => parent.remove_dir(basename),
+  }
+}
+
+fn open_metadata_only(options: &mut OpenOptions) {
+  options.read(true);
+}
+
+fn delete_verified_entry() {
+  let observed = match build_entry_receipt() {
+    Ok(observed) => observed,
+    Err(error) => return incomplete(error),
+  };
+  if &observed != expected {
+    return incomplete(changed);
+  }
+  drop(observed);
+  match &expected.kind {
+    DeleteReceiptKind::Directory(receipt) => delete_directory(receipt),
+    DeleteReceiptKind::File => delete_top_leaf(),
+  }
+}
+
+fn delete_top_leaf() {
+  let _ = DELETE_LIMITS;
+  let _ = remove_verified_entry(parent, basename, kind);
+}
+fn delete_directory() {
+  let _ = remove_verified_entry(parent, basename, kind);
+}
+fn delete_manifest_entry() {
+  let _ = remove_verified_entry(parent, basename, kind);
+  let _ = remove_verified_entry(parent, basename, kind);
+  let _ = remove_verified_entry(parent, basename, kind);
+}
+
+fn rebaseline_aliases() {
+  let current = aliases.get_mut(&identity).ok_or(failure)?;
+  let remaining_index = remove_alias_index(current, removed_index)?;
+  let _ = remaining_index;
+}
+
+fn remove_alias_index(journal: &mut AliasJournal, removed_index: usize) {
+  if !journal.remaining_indices.remove(&removed_index) {
+    return Err(failure);
+  }
+  Ok(journal.remaining_indices.iter().next_back().copied())
+}
+
+fn verify_exact_members(directory: &Dir, expected: &BTreeSet<OsString>) -> Result<(), DeleteFailure> {
+  let entries = directory.entries()?.map(|entry| entry.map(|entry| entry.file_name()));
+  verify_member_stream(expected, entries)
+}
+
+fn verify_member_stream(expected: &BTreeSet<OsString>, observed: impl Iterator<Item = Result<OsString, DeleteFailure>>) -> Result<(), DeleteFailure> {
+  let mut observed_count = 0_usize;
+  for name in observed {
+    let name = name?;
+    if !expected.contains(&name) {
+      return Err(DeleteFailure::Changed);
+    }
+    observed_count = observed_count.checked_add(1).ok_or(DeleteFailure::Unverifiable)?;
+    if observed_count > expected.len() {
+      return Err(DeleteFailure::Changed);
+    }
+  }
+  if observed_count == expected.len() { Ok(()) } else { Err(DeleteFailure::Changed) }
+}
+`,
+	},
+	{
+		relativePath: "src-tauri/src/workspace/service.rs",
+		source: `
+use std::time::Duration;
+const DELETE_BATCH_IDLE_TTL: Duration = Duration::from_secs(120);
+
+impl WorkspaceService {
+  async fn prepare_delete(&self, workspace: &WindowWorkspace) {
+    workspace.prepare_delete();
+  }
+  async fn cancel_delete(&self, workspace: &WindowWorkspace) {
+    workspace.cancel_delete();
+  }
+  async fn begin_delete(&self, workspace: &WindowWorkspace) {
+    workspace.begin_delete();
+  }
+  async fn commit_delete_entry(&self, workspace: &WindowWorkspace) {
+    workspace.commit_delete_entry();
+  }
+}
+
+impl WindowWorkspace {
+  fn prepare_delete(&self) {
+    let _mutation = lock(&self.mutation_gate);
+    let _state = lock(&self.state);
+  }
+  fn cancel_delete(&self) {
+    let _mutation = lock(&self.mutation_gate);
+    let _state = lock(&self.state);
+  }
+  fn begin_delete(&self) {
+    let _mutation = lock(&self.mutation_gate);
+    let _state = lock(&self.state);
+  }
+  fn commit_delete_entry(&self) {
+    let _mutation = lock(&self.mutation_gate);
+    let _state = lock(&self.state);
+  }
+}
+
+struct WindowWorkspaceState {
+  active_delete_batch: Option<DeleteBatchReceipt>,
+}
+
+fn delete_deadline() -> Duration {
+  DELETE_BATCH_IDLE_TTL
+}
+`,
+	},
+	{
+		relativePath: "src-tauri/src/workspace/dto.rs",
+		source: `
+struct WorkspacePrepareDeleteRequest;
+struct WorkspaceDeleteBatchPlan;
+struct WorkspaceDeleteBatchRequest;
+struct WorkspaceCommitDeleteEntryRequest;
+struct WorkspaceDeleteResult;
+`,
+	},
+];
+
 const workspaceCopyLimits = Object.freeze([
 	{
 		path: "src-tauri/src/workspace/writer.rs",
@@ -1054,6 +1327,28 @@ fn copy_directory_for_test(limits: DirectoryCopyLimits, hooks: &mut Hooks) {
 					]),
 				).toContain(failure);
 			}
+		}
+	});
+
+	it("rejects direct Trash and process delete-bypass dependencies", () => {
+		for (const dependency of [
+			"async-process",
+			"duct",
+			"subprocess",
+			"trash",
+			"xshell",
+		]) {
+			const failure = `Cargo metadata must not contain direct delete-bypass dependency ${dependency}, including renamed dependencies`;
+			expect(
+				validateWorkspaceRustBoundary(workspaceCargo, workspaceSources, [
+					{
+						name: dependency,
+						req: "^99",
+						kind: null,
+						rename: `safe_${dependency}`,
+					},
+				]),
+			).toContain(failure);
 		}
 	});
 
@@ -2335,6 +2630,754 @@ pub(crate) async fn workspace_copy() {}
 	});
 });
 
+describe("Plain confirmed-delete Harness contracts", () => {
+	it("requires four unique Tauri commands with exact DTO, result and service routes", () => {
+		expect(
+			validateWorkspaceDeleteCommandRegistration(workspaceDeleteSources),
+		).toEqual([]);
+
+		const commandCases = [
+			[
+				"workspace_prepare_delete",
+				"WorkspacePrepareDeleteRequest",
+				"WorkspaceDeleteBatchPlan",
+				"prepare_delete",
+			],
+			[
+				"workspace_cancel_delete",
+				"WorkspaceDeleteBatchRequest",
+				"()",
+				"cancel_delete",
+			],
+			[
+				"workspace_begin_delete",
+				"WorkspaceDeleteBatchRequest",
+				"()",
+				"begin_delete",
+			],
+			[
+				"workspace_commit_delete_entry",
+				"WorkspaceCommitDeleteEntryRequest",
+				"WorkspaceDeleteResult",
+				"commit_delete_entry",
+			],
+		];
+		for (const [command, request, result, service] of commandCases) {
+			const missingAttribute = mutateWorkspaceSource(
+				workspaceDeleteSources,
+				"src-tauri/src/workspace/commands.rs",
+				(source) =>
+					source.replace(
+						`#[tauri::command]\npub(crate) async fn ${command}`,
+						`pub(crate) async fn ${command}`,
+					),
+			);
+			expect(
+				validateWorkspaceDeleteCommandRegistration(missingAttribute),
+			).toContain(
+				`workspace/commands.rs must define exactly one audited ${command} Tauri command`,
+			);
+
+			const wrongRequest = mutateWorkspaceSource(
+				workspaceDeleteSources,
+				"src-tauri/src/workspace/commands.rs",
+				(source) =>
+					source.replace(
+						new RegExp(`(fn ${command}\\([\\s\\S]*?request:\\s*)${request}`),
+						"$1WorkspaceCopyRequest",
+					),
+			);
+			expect(
+				validateWorkspaceDeleteCommandRegistration(wrongRequest),
+			).toContain(
+				`${command} must accept request: ${request} and return Result<${result}, CommandError>`,
+			);
+
+			const extraConfirmationParameter = mutateWorkspaceSource(
+				workspaceDeleteSources,
+				"src-tauri/src/workspace/commands.rs",
+				(source) =>
+					source.replace(
+						new RegExp(`(fn ${command}\\([\\s\\S]*?request:\\s*${request},)`),
+						"$1\n  confirmed: bool,",
+					),
+			);
+			expect(
+				validateWorkspaceDeleteCommandRegistration(extraConfirmationParameter),
+			).toContain(
+				`${command} must accept request: ${request} and return Result<${result}, CommandError>`,
+			);
+
+			const extraBodyStatement = mutateWorkspaceSource(
+				workspaceDeleteSources,
+				"src-tauri/src/workspace/commands.rs",
+				(source) =>
+					source.replace(
+						new RegExp(`(fn ${command}\\([\\s\\S]*?\\)\\s*->[^{]+\\{)`),
+						"$1\n  let confirmed = true;",
+					),
+			);
+			expect(
+				validateWorkspaceDeleteCommandRegistration(extraBodyStatement),
+			).toContain(
+				`${command} must contain only its audited DTO decode and WorkspaceService::${service} route`,
+			);
+
+			const bypassedRoute = mutateWorkspaceSource(
+				workspaceDeleteSources,
+				"src-tauri/src/workspace/commands.rs",
+				(source) =>
+					source.replace(`service.${service}(`, `delete::${service}(`),
+			);
+			expect(
+				validateWorkspaceDeleteCommandRegistration(bypassedRoute),
+			).toContain(
+				`${command} must route exactly once through WorkspaceService::${service}`,
+			);
+
+			const aliasedRegistration = mutateWorkspaceSource(
+				workspaceDeleteSources,
+				"src-tauri/src/lib.rs",
+				(source) =>
+					source.replace(
+						`workspace::commands::${command},`,
+						`registered_${command},`,
+					),
+			);
+			expect(
+				validateWorkspaceDeleteCommandRegistration(aliasedRegistration),
+			).toContain(
+				`src-tauri/src/lib.rs must register workspace::commands::${command} exactly once in generate_handler`,
+			);
+		}
+
+		const extraDeleteServiceCall = mutateWorkspaceSource(
+			workspaceDeleteSources,
+			"src-tauri/src/workspace/commands.rs",
+			(source) =>
+				source.replace(
+					"  service.begin_delete(window.label(), request.confirmation_id()).await",
+					"  service.cancel_delete(window.label(), request.confirmation_id()).await?;\n  service.begin_delete(window.label(), request.confirmation_id()).await",
+				),
+		);
+		expect(
+			validateWorkspaceDeleteCommandRegistration(extraDeleteServiceCall),
+		).toContain(
+			"workspace_begin_delete must contain only its audited DTO decode and WorkspaceService::begin_delete route",
+		);
+	});
+
+	it("keeps DeleteBatchReceipt unique, non-Serde, non-Clone and outside IPC DTOs", () => {
+		expect(validateWorkspaceDeleteBoundary(workspaceDeleteSources)).toEqual([]);
+		for (const [relativePath, transform, failure] of [
+			[
+				"src-tauri/src/workspace/delete.rs",
+				(source) =>
+					source.replace(
+						"pub(super) struct DeleteBatchReceipt",
+						"#[derive(serde::Serialize)]\npub(super) struct DeleteBatchReceipt",
+					),
+				"DeleteBatchReceipt must remain non-Serde and non-Clone Rust-only typestate",
+			],
+			[
+				"src-tauri/src/workspace/delete.rs",
+				(source) =>
+					`${source}\nimpl Clone for DeleteBatchReceipt { fn clone(&self) -> Self { unreachable!() } }`,
+				"DeleteBatchReceipt must remain non-Serde and non-Clone Rust-only typestate",
+			],
+			[
+				"src-tauri/src/workspace/dto.rs",
+				(source) => `${source}\nstruct LeakedReceipt(DeleteBatchReceipt);`,
+				"src-tauri/src/workspace/dto.rs must not expose DeleteBatchReceipt across DTO or IPC boundaries",
+			],
+			[
+				"src-tauri/src/workspace/service.rs",
+				(source) => `${source}\nstruct DeleteBatchReceipt;`,
+				"DeleteBatchReceipt must have exactly one production definition in workspace/delete.rs",
+			],
+			[
+				"src-tauri/src/lib.rs",
+				(source) => `${source}\nfn leak(receipt: DeleteBatchReceipt) {}`,
+				"src-tauri/src/lib.rs must not expose DeleteBatchReceipt across DTO or IPC boundaries",
+			],
+		]) {
+			const hostile = mutateWorkspaceSource(
+				workspaceDeleteSources,
+				relativePath,
+				transform,
+			);
+			expect(validateWorkspaceDeleteBoundary(hostile)).toContain(failure);
+		}
+	});
+
+	it("keeps delete receipts compact and index-based", () => {
+		const failure =
+			"workspace/delete.rs must keep compact index-based receipt structures and non-Clone directory journals";
+		for (const [original, replacement] of [
+			["parent_chain: Vec<FileIdentity>", "parent_chain: Vec<PathBuf>"],
+			["name: String,", "name: PathBuf,"],
+			["parent: DirectoryIndex,", "parent: PathBuf,"],
+			[
+				"kind: ManifestEntryKind,",
+				"relative: String,\n  kind: ManifestEntryKind,",
+			],
+		]) {
+			const hostile = mutateWorkspaceSource(
+				workspaceDeleteSources,
+				"src-tauri/src/workspace/delete.rs",
+				(source) => source.replace(original, replacement),
+			);
+			expect(validateWorkspaceDeleteBoundary(hostile)).toContain(failure);
+		}
+	});
+
+	it("keeps directory receipts, manifest entries and alias journals non-Clone", () => {
+		const failure =
+			"workspace/delete.rs must keep compact index-based receipt structures and non-Clone directory journals";
+		for (const typeName of [
+			"DirectoryReceipt",
+			"ManifestEntry",
+			"AliasJournal",
+		]) {
+			for (const transform of [
+				(source) =>
+					source.replace(
+						`struct ${typeName}`,
+						`#[derive(Clone)]\nstruct ${typeName}`,
+					),
+				(source) =>
+					`${source}\nimpl Clone for ${typeName} { fn clone(&self) -> Self { unreachable!() } }`,
+				(source) =>
+					`${source}\nimpl Clone for self::${typeName} { fn clone(&self) -> Self { unreachable!() } }`,
+			]) {
+				const hostile = mutateWorkspaceSource(
+					workspaceDeleteSources,
+					"src-tauri/src/workspace/delete.rs",
+					transform,
+				);
+				expect(validateWorkspaceDeleteBoundary(hostile)).toContain(failure);
+			}
+		}
+	});
+
+	it("rejects full manifest paths and mutable linear manifest searches", () => {
+		const failure =
+			"workspace/delete.rs must not retain full manifest paths or linearly search mutable manifests";
+		for (const injection of [
+			"fn bypass() { let _: BTreeMap<PathBuf, NodeSnapshot> = BTreeMap::new(); }",
+			"fn bypass(relative: &Path) { let _ = relative.to_path_buf(); }",
+			"fn bypass(relative: &Path) { let _ = Path::to_path_buf(relative); }",
+			"fn bypass(receipt: &mut DirectoryReceipt) { let _ = receipt.entries.iter_mut().find(|entry| entry.name == target); }",
+			"fn bypass(receipt: &mut DirectoryReceipt) { let _ = Iterator::find(receipt.entries.iter_mut(), |entry| entry.name == target); }",
+		]) {
+			const hostile = mutateWorkspaceSource(
+				workspaceDeleteSources,
+				"src-tauri/src/workspace/delete.rs",
+				(source) => `${source}\n${injection}`,
+			);
+			expect(validateWorkspaceDeleteBoundary(hostile)).toContain(failure);
+		}
+	});
+
+	it("rebaselines one remaining alias without cloning whole sets", () => {
+		const failure =
+			"workspace/delete.rs alias rebaseline must select one remaining index without cloning whole journal sets";
+		for (const replacement of [
+			"let cloned = aliases.get(&identity).cloned();\n  let current = aliases.get_mut(&identity).ok_or(failure)?;",
+			"let cloned = current.remaining_indices.clone();\n  let current = aliases.get_mut(&identity).ok_or(failure)?;",
+			"let cloned = current.remaining_indices.to_owned();\n  let current = aliases.get_mut(&identity).ok_or(failure)?;",
+		]) {
+			const hostile = mutateWorkspaceSource(
+				workspaceDeleteSources,
+				"src-tauri/src/workspace/delete.rs",
+				(source) =>
+					source.replace(
+						"let current = aliases.get_mut(&identity).ok_or(failure)?;",
+						replacement,
+					),
+			);
+			expect(validateWorkspaceDeleteBoundary(hostile)).toContain(failure);
+		}
+	});
+
+	it("streams observed members and drops the full observed receipt before journals", () => {
+		const streamFailure =
+			"workspace/delete.rs must verify observed directory members as a fail-fast stream without collecting a second set";
+		for (const [original, replacement] of [
+			[
+				"observed: impl Iterator<Item = Result<OsString, DeleteFailure>>",
+				"observed: BTreeSet<OsString>",
+			],
+			[
+				"let entries = directory.entries()?.map(|entry| entry.map(|entry| entry.file_name()));",
+				"let entries: BTreeSet<_> = directory.entries()?.collect();",
+			],
+			[
+				"verify_member_stream(expected, entries)",
+				"let observed = entries.collect::<Vec<_>>(); verify_member_stream(expected, observed.into_iter())",
+			],
+			["return Err(DeleteFailure::Changed);", "continue;"],
+		]) {
+			const hostile = mutateWorkspaceSource(
+				workspaceDeleteSources,
+				"src-tauri/src/workspace/delete.rs",
+				(source) => source.replace(original, replacement),
+			);
+			expect(validateWorkspaceDeleteBoundary(hostile)).toContain(streamFailure);
+		}
+
+		const dropFailure =
+			"workspace/delete.rs must explicitly drop the full observed receipt before building delete journals";
+		for (const replacement of [
+			"",
+			"drop(&observed);",
+			"drop(observed); let _late_use = &observed;",
+		]) {
+			const hostile = mutateWorkspaceSource(
+				workspaceDeleteSources,
+				"src-tauri/src/workspace/delete.rs",
+				(source) => source.replace("drop(observed);", replacement),
+			);
+			expect(validateWorkspaceDeleteBoundary(hostile)).toContain(dropFailure);
+		}
+	});
+
+	it("locks every delete namespace limit and the idle TTL to production use", () => {
+		const limits = [
+			["MAX_DELETE_BATCH_ENTRIES", "64"],
+			["MAX_DELETE_DESCENDANTS", "10_000"],
+			["MAX_DELETE_TREE_DEPTH", "256"],
+			["MAX_DELETE_ENTRY_NAME_BYTES", "1_024"],
+			["MAX_DELETE_TREE_NAME_BYTES", "2 * 1_024 * 1_024"],
+			["MAX_DELETE_SYMLINK_BYTES", "4 * 1_024"],
+			["MAX_DELETE_TREE_SYMLINK_BYTES", "2 * 1_024 * 1_024"],
+		];
+		for (const [name, expression] of limits) {
+			for (const transform of [
+				(source) =>
+					source.replace(
+						`const ${name}: usize = ${expression};`,
+						`const ${name}: usize = (${expression}) + 1;`,
+					),
+				(source) =>
+					source.replace(new RegExp(`([a-z_]+: )${name},`), `$1${expression},`),
+			]) {
+				const hostile = mutateWorkspaceSource(
+					workspaceDeleteSources,
+					"src-tauri/src/workspace/delete.rs",
+					transform,
+				);
+				expect(validateWorkspaceDeleteBoundary(hostile)).toContain(
+					"workspace/delete.rs must define and consume the exact audited delete namespace limits",
+				);
+			}
+		}
+
+		for (const replacement of [
+			"Duration::from_secs(121)",
+			"Duration::from_secs(120)",
+		]) {
+			const hostile = mutateWorkspaceSource(
+				workspaceDeleteSources,
+				"src-tauri/src/workspace/service.rs",
+				(source) =>
+					replacement.endsWith("121)")
+						? source.replace("Duration::from_secs(120)", replacement)
+						: source.replace(
+								"  DELETE_BATCH_IDLE_TTL",
+								"  Duration::from_secs(120)",
+							),
+			);
+			expect(validateWorkspaceDeleteBoundary(hostile)).toContain(
+				"workspace/service.rs must define and consume a 120-second DELETE_BATCH_IDLE_TTL",
+			);
+		}
+
+		const duplicateLimit = mutateWorkspaceSource(
+			workspaceDeleteSources,
+			"src-tauri/src/workspace/service.rs",
+			(source) => `${source}\nconst MAX_DELETE_BATCH_ENTRIES: usize = 64;`,
+		);
+		expect(validateWorkspaceDeleteBoundary(duplicateLimit)).toContain(
+			"workspace/delete.rs must define and consume the exact audited delete namespace limits",
+		);
+	});
+
+	it("requires one service route and mutation_gate before state for every phase", () => {
+		const serviceFailure =
+			"WorkspaceService must define one route for each delete phase and delegate once to WindowWorkspace";
+		const lockFailure =
+			"every WindowWorkspace delete phase must lock mutation_gate before delete state";
+		for (const method of [
+			"prepare_delete",
+			"cancel_delete",
+			"begin_delete",
+			"commit_delete_entry",
+		]) {
+			const bypassed = mutateWorkspaceSource(
+				workspaceDeleteSources,
+				"src-tauri/src/workspace/service.rs",
+				(source) =>
+					source.replace(`workspace.${method}();`, `delete::${method}();`),
+			);
+			expect(validateWorkspaceDeleteBoundary(bypassed)).toContain(
+				serviceFailure,
+			);
+
+			const reversed = mutateWorkspaceSource(
+				workspaceDeleteSources,
+				"src-tauri/src/workspace/service.rs",
+				(source) => {
+					const marker = `fn ${method}(&self) {\n    let _mutation = lock(&self.mutation_gate);\n    let _state = lock(&self.state);`;
+					return source.replace(
+						marker,
+						`fn ${method}(&self) {\n    let _state = lock(&self.state);\n    let _mutation = lock(&self.mutation_gate);`,
+					);
+				},
+			);
+			expect(validateWorkspaceDeleteBoundary(reversed)).toContain(lockFailure);
+		}
+
+		const secondReceipt = mutateWorkspaceSource(
+			workspaceDeleteSources,
+			"src-tauri/src/workspace/service.rs",
+			(source) =>
+				source.replace(
+					"active_delete_batch: Option<DeleteBatchReceipt>,",
+					"active_delete_batch: Option<DeleteBatchReceipt>,\n  shadow_delete_batch: Option<DeleteBatchReceipt>,",
+				),
+		);
+		expect(validateWorkspaceDeleteBoundary(secondReceipt)).toContain(
+			"WindowWorkspace state must hold exactly one optional active DeleteBatchReceipt",
+		);
+	});
+
+	it("allows only the audited parent-handle removal helper", () => {
+		const failure =
+			"workspace/delete.rs must delete only through one audited parent-handle remove_verified_entry helper";
+		for (const [original, replacement] of [
+			["parent.remove_file(basename)", "target.remove_file(basename)"],
+			["parent.remove_dir(basename)", 'parent.remove_dir(Path::new("nested"))'],
+			[
+				"fn delete_top_leaf() {",
+				'fn extra(parent: &Dir) { let _ = parent.remove_file("extra"); }\nfn delete_top_leaf() {',
+			],
+			[
+				"fn delete_top_leaf() {",
+				"fn extra(parent: &Dir, basename: &Path) { let _ = Dir::remove_file(parent, basename); }\nfn delete_top_leaf() {",
+			],
+		]) {
+			const hostile = mutateWorkspaceSource(
+				workspaceDeleteSources,
+				"src-tauri/src/workspace/delete.rs",
+				(source) => source.replace(original, replacement),
+			);
+			expect(validateWorkspaceDeleteBoundary(hostile)).toContain(failure);
+		}
+	});
+
+	it("rejects content hashing and recursive, ambient, Trash, process or walker bypasses", () => {
+		const cases = [
+			[
+				"fn bypass() { let _ = Sha256::digest(bytes); }",
+				"workspace/delete.rs must not read or hash ordinary file contents or impose copy byte budgets",
+			],
+			[
+				"use std::io::Read; fn bypass(mut file: File) { let _ = file.read(&mut buffer); }",
+				"workspace/delete.rs must not read or hash ordinary file contents or impose copy byte budgets",
+			],
+			[
+				"fn bypass(mut file: File) { let _ = std::io::Read::read(&mut file, &mut buffer); }",
+				"workspace/delete.rs must not read or hash ordinary file contents or impose copy byte budgets",
+			],
+			[
+				"use std::io::Read as ContentRead; fn bypass(mut file: File) { let _ = ContentRead::read(&mut file, &mut buffer); }",
+				"workspace/delete.rs must not read or hash ordinary file contents or impose copy byte budgets",
+			],
+			[
+				"use std::io as hidden; fn bypass(mut file: File) { let _ = hidden::Read::read(&mut file, &mut buffer); }",
+				"workspace/delete.rs must not read or hash ordinary file contents or impose copy byte budgets",
+			],
+			[
+				"use std::{io as hidden}; fn bypass(mut file: File) { let _ = hidden::Read::read(&mut file, &mut buffer); }",
+				"workspace/delete.rs must not read or hash ordinary file contents or impose copy byte budgets",
+			],
+			[
+				"use std::io::{self as hidden}; fn bypass(mut file: File) { let _ = hidden::Read::read(&mut file, &mut buffer); }",
+				"workspace/delete.rs must not read or hash ordinary file contents or impose copy byte budgets",
+			],
+			[
+				"use std::{io::Read as HiddenRead}; fn bypass(mut file: File) { let _ = HiddenRead::read(&mut file, &mut buffer); }",
+				"workspace/delete.rs must not read or hash ordinary file contents or impose copy byte budgets",
+			],
+			[
+				"use std::io::prelude::*; fn bypass(mut file: File) { let _ = file.read(&mut buffer); }",
+				"workspace/delete.rs must not read or hash ordinary file contents or impose copy byte budgets",
+			],
+			[
+				"fn bypass(mut file: File) { let reader = &mut file; let _ = reader.read(&mut buffer); }",
+				"workspace/delete.rs must not read or hash ordinary file contents or impose copy byte budgets",
+			],
+			[
+				"fn bypass(mut file: File) { let _ = <File as std::io::Read>::read(&mut file, &mut buffer); }",
+				"workspace/delete.rs must not read or hash ordinary file contents or impose copy byte budgets",
+			],
+			[
+				"fn bypass(mut file: File) { let _ = std::io::copy(&mut file, &mut sink); }",
+				"workspace/delete.rs must not read or hash ordinary file contents or impose copy byte budgets",
+			],
+			[
+				"const MAX_DELETE_FILE_BYTES: usize = 8 * 1_024 * 1_024;",
+				"workspace/delete.rs must not read or hash ordinary file contents or impose copy byte budgets",
+			],
+			[
+				'fn bypass(parent: &Dir) { parent.remove_dir_all("entry"); }',
+				"workspace/delete.rs must not use recursive, open-directory, direct-unlink or ambient-fs deletion",
+			],
+			[
+				'fn bypass(parent: &Dir) { rustix::fs::unlinkat(parent, "entry", AtFlags::empty()); }',
+				"workspace/delete.rs must not use recursive, open-directory, direct-unlink or ambient-fs deletion",
+			],
+			[
+				'fn bypass() { std::fs::remove_file("entry"); }',
+				"workspace/delete.rs must not use recursive, open-directory, direct-unlink or ambient-fs deletion",
+			],
+			[
+				'fn bypass(root: &Dir) { let _ = root.open_dir("entry"); }',
+				"workspace/delete.rs must reopen directory chains only with capability-relative nofollow operations",
+			],
+			[
+				'use std::process::Command; fn bypass() { Command::new("rm"); }',
+				"workspace/delete.rs must not use process, shell or recursive-walker deletion bypasses",
+			],
+			[
+				"use walkdir::WalkDir;",
+				"workspace/delete.rs must not use process, shell or recursive-walker deletion bypasses",
+			],
+			[
+				"fn bypass() { trash::delete(path); }",
+				"src-tauri/src/workspace/delete.rs must not route workspace deletion through Trash or atomic-delete surfaces",
+			],
+			[
+				"fn bypass() { trash_rs::delete(path); }",
+				"src-tauri/src/workspace/delete.rs must not route workspace deletion through Trash or atomic-delete surfaces",
+			],
+		];
+		for (const [injection, failure] of cases) {
+			const hostile = mutateWorkspaceSource(
+				workspaceDeleteSources,
+				"src-tauri/src/workspace/delete.rs",
+				(source) => `${source}\n${injection}`,
+			);
+			expect(validateWorkspaceDeleteBoundary(hostile)).toContain(failure);
+		}
+	});
+});
+
+const workspaceDeleteAppSources = [
+	{
+		relativePath: "app/platform/tauri/native.ts",
+		source: `
+import { invoke } from "@tauri-apps/api/core";
+export function createNativeBridge() {
+  return {
+    workspacePrepareDelete: async () => invoke("workspace_prepare_delete"),
+    workspaceCancelDelete: async () => invoke("workspace_cancel_delete"),
+    workspaceBeginDelete: async () => invoke("workspace_begin_delete"),
+    workspaceCommitDeleteEntry: async () => invoke("workspace_commit_delete_entry"),
+  };
+}
+`,
+	},
+	{
+		relativePath: "app/platform/tauri/contracts.ts",
+		source: `
+interface PlainBridge {
+  workspacePrepareDelete(): Promise<void>;
+  workspaceCancelDelete(): Promise<void>;
+  workspaceBeginDelete(): Promise<void>;
+  workspaceCommitDeleteEntry(): Promise<void>;
+}
+`,
+	},
+	{
+		relativePath: "app/platform/tauri/browser-mock.ts",
+		source: `
+export function createBrowserMockBridge() {
+  return {
+    async workspacePrepareDelete() {},
+    async workspaceCancelDelete() {},
+    async workspaceBeginDelete() {},
+    async workspaceCommitDeleteEntry() {},
+  };
+}
+`,
+	},
+	{
+		relativePath: "app/features/workspace/file-system-provider.ts",
+		source: "export const providerIsReadonly = true;",
+	},
+];
+
+describe("Plain confirmed-delete TypeScript invocation boundary", () => {
+	it("keeps one native invoke per command and no feature consumer before activation", () => {
+		expect(
+			validateWorkspaceDeleteTypeScriptBoundary(workspaceDeleteAppSources),
+		).toEqual([]);
+	});
+
+	it("rejects missing, duplicated, indirect or wrongly-owned command literals", () => {
+		const failure =
+			"workspace_begin_delete must appear only as the direct invoke command of native workspaceBeginDelete";
+		for (const hostile of [
+			mutateWorkspaceSource(
+				workspaceDeleteAppSources,
+				"app/platform/tauri/native.ts",
+				(source) =>
+					source.replace('invoke("workspace_begin_delete")', "noop()"),
+			),
+			mutateWorkspaceSource(
+				workspaceDeleteAppSources,
+				"app/platform/tauri/native.ts",
+				(source) =>
+					source.replace(
+						'invoke("workspace_begin_delete")',
+						"invoke(`workspace_begin_delete`)",
+					),
+			),
+			mutateWorkspaceSource(
+				workspaceDeleteAppSources,
+				"app/platform/tauri/native.ts",
+				(source) =>
+					source.replace(
+						'invoke("workspace_begin_delete")',
+						'invoke("workspace_" + "begin_delete")',
+					),
+			),
+			mutateWorkspaceSource(
+				workspaceDeleteAppSources,
+				"app/platform/tauri/native.ts",
+				(source) =>
+					source.replace(
+						'invoke("workspace_begin_delete")',
+						'invoke(["workspace", "begin", "delete"].join("_"))',
+					),
+			),
+			mutateWorkspaceSource(
+				workspaceDeleteAppSources,
+				"app/platform/tauri/native.ts",
+				(source) => `${source}\nconst duplicate = "workspace_begin_delete";`,
+			),
+			mutateWorkspaceSource(
+				workspaceDeleteAppSources,
+				"app/platform/tauri/native.ts",
+				(source) =>
+					source.replace(
+						"workspaceBeginDelete: async () =>",
+						"beginWithoutAuthorization: async () =>",
+					),
+			),
+			mutateWorkspaceSource(
+				workspaceDeleteAppSources,
+				"app/platform/tauri/browser-mock.ts",
+				(source) => `${source}\nconst command = "workspace_begin_delete";`,
+			),
+			mutateWorkspaceSource(
+				workspaceDeleteAppSources,
+				"app/platform/tauri/native.ts",
+				(source) => `${source}\nconst indirectInvoke = invoke;`,
+			),
+		]) {
+			const failures = validateWorkspaceDeleteTypeScriptBoundary(hostile);
+			expect(
+				failures.some(
+					(message) =>
+						message === failure ||
+						message.includes("workspace_begin_delete") ||
+						message.includes("invoke"),
+				),
+			).toBe(true);
+		}
+	});
+
+	it("rejects aliased, namespace and duplicate invoke bindings", () => {
+		for (const transform of [
+			(source) =>
+				source.replace(
+					'import { invoke } from "@tauri-apps/api/core";',
+					'import { invoke as call } from "@tauri-apps/api/core";',
+				),
+			(source) =>
+				source.replace(
+					'import { invoke } from "@tauri-apps/api/core";',
+					'import * as core from "@tauri-apps/api/core";',
+				),
+			(source) => `${source}\nimport { invoke } from "@tauri-apps/api/core";`,
+			(source) =>
+				`${source}\nconst core = await import("@tauri-apps/api/core");`,
+		]) {
+			const hostile = mutateWorkspaceSource(
+				workspaceDeleteAppSources,
+				"app/platform/tauri/native.ts",
+				transform,
+			);
+			const failures = validateWorkspaceDeleteTypeScriptBoundary(hostile);
+			expect(
+				failures.some(
+					(message) =>
+						message.includes("direct native bridge binding") ||
+						message.includes("exactly one direct invoke import") ||
+						message.includes("indirectly reference invoke") ||
+						message.includes("dynamically"),
+				),
+			).toBe(true);
+		}
+	});
+
+	it("rejects direct, computed and destructured feature consumption", () => {
+		for (const source of [
+			"void bridge.workspaceBeginDelete();",
+			'void bridge["workspaceCommitDeleteEntry"]();',
+			"void bridge[`workspaceBeginDelete`]();",
+			'void bridge["workspace" + "BeginDelete"]();',
+			'const method = "workspace" + "BeginDelete"; void bridge[method]();',
+			'const b = bridge; const method = "workspace" + "BeginDelete"; void b[method]();',
+			"const b: PlainBridge = getBridge(); const method = getMethod(); void b[method]();",
+			'const method = "workspace" + "BeginDelete"; void Reflect.get(bridge, method)();',
+			"const { workspacePrepareDelete } = bridge;",
+		]) {
+			const hostile = [
+				...workspaceDeleteAppSources,
+				{
+					relativePath: "app/features/workspace/delete-bypass.ts",
+					source,
+				},
+			];
+			const failures = validateWorkspaceDeleteTypeScriptBoundary(hostile);
+			expect(
+				failures.some(
+					(message) =>
+						message.includes("delete bridge") ||
+						message.includes(
+							"before the audited delete coordinator and provider authorization patch land",
+						),
+				),
+			).toBe(true);
+		}
+
+		const platformBypass = [
+			...workspaceDeleteAppSources,
+			{
+				relativePath: "app/platform/tauri/delete-bypass.ts",
+				source: "void bridge.workspaceBeginDelete();",
+			},
+		];
+		expect(validateWorkspaceDeleteTypeScriptBoundary(platformBypass)).toContain(
+			"app/platform/tauri/delete-bypass.ts must not consume workspaceBeginDelete before the audited delete coordinator and provider authorization patch land",
+		);
+	});
+});
+
 const readonlyWorkspaceProvider = `
 export class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileReadWriteCapability {
   readonly capabilities =
@@ -2379,6 +3422,18 @@ describe("Plain workspace provider copy boundary", () => {
 		expect(validateWorkspaceProviderCopyBoundary(writable)).toContain(
 			"Plain workspace provider capabilities must remain exactly FileReadWrite | Readonly",
 		);
+	});
+
+	it("rejects Trash and FileAtomicDelete capability advertising", () => {
+		for (const flag of ["Trash", "FileAtomicDelete"]) {
+			const hostile = readonlyWorkspaceProvider.replace(
+				"FileSystemProviderCapabilities.Readonly;",
+				`FileSystemProviderCapabilities.Readonly |\n    FileSystemProviderCapabilities.${flag};`,
+			);
+			expect(validateWorkspaceProviderCopyBoundary(hostile)).toContain(
+				`Plain workspace provider must not advertise ${flag} before activation`,
+			);
+		}
 	});
 
 	it("rejects direct, computed or inherited provider copy surfaces", () => {

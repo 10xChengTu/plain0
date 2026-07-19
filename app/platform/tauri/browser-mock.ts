@@ -2,6 +2,12 @@ import type {
 	CommandError,
 	PlainBridge,
 	RuntimeInfo,
+	WorkspaceCommitDeleteEntryRequest,
+	WorkspaceDeleteBatchPlan,
+	WorkspaceDeleteEntryKind,
+	WorkspaceDeleteEntryRequest,
+	WorkspaceDeleteIncompleteReason,
+	WorkspaceDeleteResult,
 	WorkspaceDirectoryEntry,
 	WorkspaceEntryKind,
 	WorkspaceMoveIncompleteReason,
@@ -10,13 +16,18 @@ import type {
 } from "./contracts";
 import {
 	compareWorkspaceEntryNames,
+	frozenWorkspaceCommitDeleteEntryRequest,
 	frozenWorkspaceCopyRequest,
+	frozenWorkspaceDeleteBatchPlan,
+	frozenWorkspaceDeleteBatchRequest,
+	frozenWorkspaceDeleteResult,
 	frozenWorkspaceEntryStat,
 	frozenWorkspaceCreateEntryRequest,
 	frozenWorkspaceEntryRequest,
 	frozenWorkspaceFileData,
 	frozenWorkspaceMoveRequest,
 	frozenWorkspaceMoveResult,
+	frozenWorkspacePrepareDeleteRequest,
 	frozenWorkspacePickResult,
 	frozenWorkspaceReadDirectory,
 	frozenWorkspaceRenameRequest,
@@ -43,6 +54,13 @@ const MAX_DIRECTORY_COPY_SYMLINK_BYTES = 2 * 1_024 * 1_024;
 const MAX_DIRECTORY_COPY_PATH_BYTES = 4 * 1_024;
 const MAX_DIRECTORY_COPY_PATH_SEGMENTS = 256;
 const MAX_MOCK_SYMLINK_DEPTH = 256;
+const MAX_DELETE_BATCH_ENTRIES = 64;
+const MAX_DELETE_DESCENDANTS = 10_000;
+const MAX_DELETE_DEPTH = 256;
+const MAX_DELETE_NAME_PAYLOAD_BYTES = 2 * 1_024 * 1_024;
+const MAX_DELETE_SYMLINK_PAYLOAD_BYTES = 4 * 1_024;
+const MAX_DELETE_SYMLINK_TOTAL_BYTES = 2 * 1_024 * 1_024;
+const WORKSPACE_DELETE_IDLE_TTL_MS = 120_000;
 const MOCK_MTIME = 1_700_000_000_000;
 const MOCK_CTIME = 1_699_999_000_000;
 const textEncoder = new TextEncoder();
@@ -104,6 +122,14 @@ interface DirectoryCopyLimits {
 	readonly pathSegments: number;
 }
 
+interface WorkspaceDeleteLimits {
+	readonly descendants: number;
+	readonly depth: number;
+	readonly namePayloadBytes: number;
+	readonly symlinkBytes: number;
+	readonly totalSymlinkBytes: number;
+}
+
 const DIRECTORY_COPY_LIMITS = Object.freeze({
 	descendants: MAX_DIRECTORY_COPY_DESCENDANTS,
 	entryNameBytes: MAX_DIRECTORY_COPY_NAME_BYTES,
@@ -116,6 +142,14 @@ const DIRECTORY_COPY_LIMITS = Object.freeze({
 	pathBytes: MAX_DIRECTORY_COPY_PATH_BYTES,
 	pathSegments: MAX_DIRECTORY_COPY_PATH_SEGMENTS,
 } satisfies DirectoryCopyLimits);
+
+const WORKSPACE_DELETE_LIMITS = Object.freeze({
+	descendants: MAX_DELETE_DESCENDANTS,
+	depth: MAX_DELETE_DEPTH,
+	namePayloadBytes: MAX_DELETE_NAME_PAYLOAD_BYTES,
+	symlinkBytes: MAX_DELETE_SYMLINK_PAYLOAD_BYTES,
+	totalSymlinkBytes: MAX_DELETE_SYMLINK_TOTAL_BYTES,
+} satisfies WorkspaceDeleteLimits);
 
 function mockFile(contents: string | readonly number[]): MockFileNode {
 	const bytes =
@@ -390,6 +424,11 @@ export type BrowserMockDirectoryFixtureEntryForTest =
 	| (BrowserMockDirectoryFixtureEntryBaseForTest & {
 			readonly kind: "symlink";
 			readonly payload: readonly number[] | Uint8Array;
+	  })
+	| (BrowserMockDirectoryFixtureEntryBaseForTest & {
+			readonly kind: "hardlink";
+			/** Path relative to the injected fixture root. */
+			readonly targetPath: readonly string[];
 	  });
 
 export interface BrowserMockDirectoryFixtureForTest {
@@ -463,6 +502,41 @@ export interface BrowserMockWorkspaceMoveMutationsForTest {
 	rewriteTargetFile(relativePath: string, bytes: readonly number[]): void;
 }
 
+export interface BrowserMockWorkspaceDeleteLimitsForTest {
+	readonly descendants?: number;
+	readonly depth?: number;
+	readonly namePayloadBytes?: number;
+	readonly symlinkBytes?: number;
+	readonly totalSymlinkBytes?: number;
+}
+
+export interface BrowserMockWorkspaceDeleteObservation {
+	readonly confirmationId: string;
+	readonly phase: "prepared" | "begin" | "beforeRemove" | "afterRemove";
+	readonly entryIndex?: number;
+	readonly kind?: WorkspaceDeleteEntryKind;
+	readonly descendantEntries?: number;
+	readonly removedEntries: number;
+	readonly isRoot?: boolean;
+}
+
+export interface BrowserMockWorkspaceDeleteMutationsForTest {
+	rewriteFile(
+		rootId: string,
+		relativePath: string,
+		bytes: readonly number[],
+	): void;
+	replaceFile(
+		rootId: string,
+		relativePath: string,
+		bytes: readonly number[],
+	): void;
+	addFile(rootId: string, relativePath: string, bytes: readonly number[]): void;
+	addHardlink(rootId: string, sourcePath: string, targetPath: string): void;
+	removeEntry(rootId: string, relativePath: string): void;
+	chmod(rootId: string, relativePath: string, mode: number): void;
+}
+
 export interface BrowserMockBridgeOptions {
 	readonly workspacePicks?: readonly BrowserMockWorkspacePick[];
 	/** Browser-mock only bounded tree injected below the first mock root. */
@@ -498,6 +572,36 @@ export interface BrowserMockBridgeOptions {
 	) => void;
 	/** Counts private receipt-node comparisons for complexity assertions only. */
 	readonly onWorkspaceMoveReceiptVisitForTest?: () => void;
+	/** May only lower the production delete namespace/link budgets. */
+	readonly workspaceDeleteLimitsForTest?: BrowserMockWorkspaceDeleteLimitsForTest;
+	/** Injectable monotonic millisecond clock for delete batch expiry tests. */
+	readonly workspaceDeleteClockForTest?: () => number;
+	/** Runs after a private receipt exists and before prepare's second pass. */
+	readonly onWorkspaceDeletePreparedForTest?: (
+		observation: BrowserMockWorkspaceDeleteObservation,
+		mutations: BrowserMockWorkspaceDeleteMutationsForTest,
+	) => void;
+	/** Runs immediately before begin's whole-batch zero-remove preflight. */
+	readonly onWorkspaceDeleteBeginForTest?: (
+		observation: BrowserMockWorkspaceDeleteObservation,
+		mutations: BrowserMockWorkspaceDeleteMutationsForTest,
+	) => void;
+	/** Runs before each receipt-owned remove and may mutate only the mock model. */
+	readonly onWorkspaceDeleteBeforeRemoveForTest?: (
+		observation: BrowserMockWorkspaceDeleteObservation,
+		mutations: BrowserMockWorkspaceDeleteMutationsForTest,
+	) => void;
+	/** Runs after each successfully removed descendant, never after the root. */
+	readonly onWorkspaceDeleteAfterRemoveForTest?: (
+		observation: BrowserMockWorkspaceDeleteObservation,
+		mutations: BrowserMockWorkspaceDeleteMutationsForTest,
+	) => void;
+	/** Throws at the simulated remove syscall to inject deleteFailed. */
+	readonly onWorkspaceDeleteRemoveForTest?: (
+		observation: BrowserMockWorkspaceDeleteObservation,
+	) => void;
+	/** Counts private delete receipt comparisons for complexity assertions only. */
+	readonly onWorkspaceDeleteReceiptVisitForTest?: () => void;
 }
 
 interface CapturedBrowserMockWorkspaceMoveSeams {
@@ -506,6 +610,16 @@ interface CapturedBrowserMockWorkspaceMoveSeams {
 	readonly afterDeleteEntry: BrowserMockBridgeOptions["onWorkspaceMoveAfterDeleteEntryForTest"];
 	readonly deleteEntry: BrowserMockBridgeOptions["onWorkspaceMoveDeleteForTest"];
 	readonly receiptVisit: BrowserMockBridgeOptions["onWorkspaceMoveReceiptVisitForTest"];
+}
+
+interface CapturedBrowserMockWorkspaceDeleteSeams {
+	readonly clock: () => number;
+	readonly prepared: BrowserMockBridgeOptions["onWorkspaceDeletePreparedForTest"];
+	readonly begin: BrowserMockBridgeOptions["onWorkspaceDeleteBeginForTest"];
+	readonly beforeRemove: BrowserMockBridgeOptions["onWorkspaceDeleteBeforeRemoveForTest"];
+	readonly afterRemove: BrowserMockBridgeOptions["onWorkspaceDeleteAfterRemoveForTest"];
+	readonly remove: BrowserMockBridgeOptions["onWorkspaceDeleteRemoveForTest"];
+	readonly receiptVisit: BrowserMockBridgeOptions["onWorkspaceDeleteReceiptVisitForTest"];
 }
 
 function captureBrowserMockWorkspaceMoveSeams(
@@ -532,6 +646,42 @@ function captureBrowserMockWorkspaceMoveSeams(
 		beforeDelete,
 		afterDeleteEntry,
 		deleteEntry,
+		receiptVisit,
+	});
+}
+
+function captureBrowserMockWorkspaceDeleteSeams(
+	options: BrowserMockBridgeOptions,
+): CapturedBrowserMockWorkspaceDeleteSeams {
+	const clock =
+		options.workspaceDeleteClockForTest ??
+		(() => Math.floor(globalThis.performance.now()));
+	const prepared = options.onWorkspaceDeletePreparedForTest;
+	const begin = options.onWorkspaceDeleteBeginForTest;
+	const beforeRemove = options.onWorkspaceDeleteBeforeRemoveForTest;
+	const afterRemove = options.onWorkspaceDeleteAfterRemoveForTest;
+	const remove = options.onWorkspaceDeleteRemoveForTest;
+	const receiptVisit = options.onWorkspaceDeleteReceiptVisitForTest;
+	for (const seam of [
+		clock,
+		prepared,
+		begin,
+		beforeRemove,
+		afterRemove,
+		remove,
+		receiptVisit,
+	]) {
+		if (seam !== undefined && typeof seam !== "function") {
+			throw new TypeError("Invalid browser mock workspace-delete seam.");
+		}
+	}
+	return Object.freeze({
+		clock,
+		prepared,
+		begin,
+		beforeRemove,
+		afterRemove,
+		remove,
 		receiptVisit,
 	});
 }
@@ -614,6 +764,76 @@ function pathEncodingUnsupported(): CommandError {
 	);
 }
 
+function workspaceDeletePlanInvalid(): CommandError {
+	return commandError(
+		"WORKSPACE_DELETE_PLAN_INVALID",
+		"The workspace delete plan is invalid.",
+	);
+}
+
+function workspaceDeleteConflict(): CommandError {
+	return commandError(
+		"WORKSPACE_CONFLICT",
+		"The workspace delete selection conflicts with another entry.",
+	);
+}
+
+function workspaceDeleteBatchChanged(): CommandError {
+	return commandError(
+		"WORKSPACE_DELETE_BATCH_CHANGED",
+		"The workspace delete selection changed before deletion began.",
+	);
+}
+
+function workspaceDeleteBatchUnverifiable(): CommandError {
+	return commandError(
+		"WORKSPACE_DELETE_BATCH_UNVERIFIABLE",
+		"The workspace delete selection could not be verified.",
+	);
+}
+
+function directoryNotEmpty(): CommandError {
+	return commandError(
+		"DIRECTORY_NOT_EMPTY",
+		"The workspace directory is not empty.",
+	);
+}
+
+function resolveWorkspaceDeleteLimits(
+	overrides: BrowserMockWorkspaceDeleteLimitsForTest | undefined,
+): WorkspaceDeleteLimits {
+	if (overrides === undefined) {
+		return WORKSPACE_DELETE_LIMITS;
+	}
+	const resolved = { ...WORKSPACE_DELETE_LIMITS };
+	const keys = Object.keys(
+		WORKSPACE_DELETE_LIMITS,
+	) as (keyof WorkspaceDeleteLimits)[];
+	const allowed = new Set<string>(keys);
+	if (
+		Reflect.ownKeys(overrides).some(
+			(key) => typeof key !== "string" || !allowed.has(key),
+		)
+	) {
+		throw new Error("Invalid browser mock workspace-delete limits.");
+	}
+	for (const key of keys) {
+		const value = overrides[key];
+		if (value === undefined) {
+			continue;
+		}
+		if (
+			!Number.isSafeInteger(value) ||
+			value < 0 ||
+			value > WORKSPACE_DELETE_LIMITS[key]
+		) {
+			throw new Error("Invalid browser mock workspace-delete limits.");
+		}
+		resolved[key] = value;
+	}
+	return Object.freeze(resolved);
+}
+
 function resolveDirectoryCopyLimits(
 	overrides: BrowserMockDirectoryCopyLimitsForTest | undefined,
 ): DirectoryCopyLimits {
@@ -653,6 +873,9 @@ function resolveDirectoryCopyLimits(
 function fixtureNodeForTest(
 	entry: BrowserMockDirectoryFixtureEntryForTest,
 ): MockNode {
+	if (entry.kind === "hardlink") {
+		throw new Error("Invalid browser mock directory-copy fixture.");
+	}
 	if (entry.kind === "directory") {
 		return mockDirectory({});
 	}
@@ -708,6 +931,9 @@ function installDirectoryCopyFixtureForTest(
 		);
 
 	for (const { entry, path } of entries) {
+		if (entry.kind === "hardlink") {
+			continue;
+		}
 		let parent = fixtureRoot;
 		for (const segment of path.slice(0, -1)) {
 			const child = parent.entries.get(segment);
@@ -721,6 +947,45 @@ function installDirectoryCopyFixtureForTest(
 			throw new Error("Invalid browser mock directory-copy fixture.");
 		}
 		parent.entries.set(name, fixtureNodeForTest(entry));
+	}
+	for (const { entry, path } of entries) {
+		if (entry.kind !== "hardlink") {
+			continue;
+		}
+		if (
+			!Array.isArray(entry.targetPath) ||
+			entry.targetPath.length === 0 ||
+			entry.targetPath.some((segment) => typeof segment !== "string")
+		) {
+			throw new Error("Invalid browser mock directory-copy fixture.");
+		}
+		let target: MockNode = fixtureRoot;
+		for (const segment of entry.targetPath) {
+			if (target.kind !== "directory") {
+				throw new Error("Invalid browser mock directory-copy fixture.");
+			}
+			const child = target.entries.get(segment);
+			if (child === undefined) {
+				throw new Error("Invalid browser mock directory-copy fixture.");
+			}
+			target = child;
+		}
+		if (target.kind !== "file") {
+			throw new Error("Invalid browser mock directory-copy fixture.");
+		}
+		let parent = fixtureRoot;
+		for (const segment of path.slice(0, -1)) {
+			const child = parent.entries.get(segment);
+			if (child?.kind !== "directory") {
+				throw new Error("Invalid browser mock directory-copy fixture.");
+			}
+			parent = child;
+		}
+		const name = path.at(-1)!;
+		if (parent.entries.has(name)) {
+			throw new Error("Invalid browser mock directory-copy fixture.");
+		}
+		parent.entries.set(name, target);
 	}
 	root.entries.set(fixture.name, fixtureRoot);
 }
@@ -1161,10 +1426,86 @@ function mockMoveResolutionFailure(
 	}
 }
 
+interface MockDeleteMetadata {
+	mode: number;
+	version: number;
+	nlink: number;
+}
+
+interface MockDeleteMetadataSnapshot {
+	readonly mode: number;
+	readonly version: number;
+	readonly nlink: number;
+}
+
+interface MockDeleteReceiptEntry {
+	readonly name: string;
+	readonly relativePath: string;
+	readonly depth: number;
+	readonly parentIdentity: MockDirectoryNode;
+	readonly parentEntryCount: number;
+	readonly receipt: MockDeleteReceipt;
+}
+
+interface MockDeleteFileReceipt {
+	readonly kind: "file";
+	readonly identity: MockFileNode;
+	readonly size: number;
+	readonly metadata: MockDeleteMetadataSnapshot;
+}
+
+interface MockDeleteSymlinkReceipt {
+	readonly kind: "symlink";
+	readonly identity: MockSymlinkNode;
+	readonly payload: MockImmutableBytes;
+	readonly metadata: MockDeleteMetadataSnapshot;
+}
+
+interface MockDeleteDirectoryReceipt {
+	readonly kind: "directory";
+	readonly identity: MockDirectoryNode;
+	readonly metadata: MockDeleteMetadataSnapshot;
+	readonly entries: readonly MockDeleteReceiptEntry[];
+}
+
+type MockDeleteReceipt =
+	MockDeleteFileReceipt | MockDeleteSymlinkReceipt | MockDeleteDirectoryReceipt;
+
+interface MockDeleteTopReceipt {
+	readonly request: WorkspaceDeleteEntryRequest;
+	readonly parentIdentity: MockDirectoryNode;
+	readonly name: string;
+	readonly receipt: MockDeleteReceipt;
+	readonly receiptIdentities: ReadonlySet<MockNode>;
+	readonly descendantEntries: number;
+}
+
+interface MockDeleteBatchEntry {
+	readonly entryId: string;
+	readonly top: MockDeleteTopReceipt;
+}
+
+interface MockDeleteBatch {
+	readonly confirmationId: string;
+	readonly revision: number;
+	readonly entries: readonly MockDeleteBatchEntry[];
+	phase: "prepared" | "executing";
+	nextIndex: number;
+	deadline: number;
+	inFlight: boolean;
+}
+
+interface MockDeleteJournal {
+	readonly removedPaths: Set<string>;
+	readonly expectedMetadata: Map<MockNode, MockDeleteMetadataSnapshot>;
+	readonly removedChildCounts: Map<MockDirectoryNode, number>;
+}
+
 export function createBrowserMockBridge(
 	options: BrowserMockBridgeOptions = {},
 ): PlainBridge {
 	const workspaceMoveSeams = captureBrowserMockWorkspaceMoveSeams(options);
+	const workspaceDeleteSeams = captureBrowserMockWorkspaceDeleteSeams(options);
 	const listeners = new Set<(payload: RuntimeInfo) => void>();
 	const scriptedPicks = [...(options.workspacePicks ?? [])];
 	const roots = new Map<string, WorkspaceRoot>();
@@ -1176,7 +1517,138 @@ export function createBrowserMockBridge(
 		trees,
 		options.directoryCopyFixtureForTest,
 	);
+	const workspaceDeleteLimits = resolveWorkspaceDeleteLimits(
+		options.workspaceDeleteLimitsForTest,
+	);
+	const deleteMetadata = new WeakMap<MockNode, MockDeleteMetadata>();
+	const initialLinkCounts = new Map<MockNode, number>();
+	const countedDirectories = new Set<MockDirectoryNode>();
+	const pendingDirectories = [...trees.values()];
+	for (const root of pendingDirectories) {
+		initialLinkCounts.set(root, (initialLinkCounts.get(root) ?? 0) + 1);
+	}
+	while (pendingDirectories.length > 0) {
+		const directory = pendingDirectories.pop()!;
+		if (countedDirectories.has(directory)) {
+			continue;
+		}
+		countedDirectories.add(directory);
+		for (const child of directory.entries.values()) {
+			initialLinkCounts.set(child, (initialLinkCounts.get(child) ?? 0) + 1);
+			if (child.kind === "directory") {
+				pendingDirectories.push(child);
+			}
+		}
+	}
+	for (const [node, nlink] of initialLinkCounts) {
+		deleteMetadata.set(node, {
+			mode:
+				node.kind === "directory"
+					? 0o755
+					: node.kind === "symlink"
+						? 0o777
+						: 0o644,
+			version: 1,
+			nlink,
+		});
+	}
 	let revision = 0;
+	const issuedDeleteIds = new Set<string>();
+	let activeDeleteBatch: MockDeleteBatch | undefined;
+
+	const registerDeleteMetadata = (node: MockNode): void => {
+		const counts = new Map<MockNode, number>();
+		const directories = new Set<MockDirectoryNode>();
+		const pending: MockNode[] = [node];
+		counts.set(node, 1);
+		while (pending.length > 0) {
+			const current = pending.pop()!;
+			if (current.kind !== "directory" || directories.has(current)) {
+				continue;
+			}
+			directories.add(current);
+			for (const child of current.entries.values()) {
+				counts.set(child, (counts.get(child) ?? 0) + 1);
+				pending.push(child);
+			}
+		}
+		for (const [current, count] of counts) {
+			const metadata = deleteMetadata.get(current);
+			if (metadata === undefined) {
+				deleteMetadata.set(current, {
+					mode:
+						current.kind === "directory"
+							? 0o755
+							: current.kind === "symlink"
+								? 0o777
+								: 0o644,
+					version: 1,
+					nlink: count,
+				});
+			} else {
+				metadata.nlink += count;
+				metadata.version += 1;
+			}
+		}
+	};
+	const metadataFor = (node: MockNode): MockDeleteMetadata => {
+		const metadata = deleteMetadata.get(node);
+		if (metadata === undefined) {
+			throw new Error("Missing browser mock delete metadata.");
+		}
+		return metadata;
+	};
+	const metadataSnapshot = (node: MockNode): MockDeleteMetadataSnapshot => {
+		const metadata = metadataFor(node);
+		return Object.freeze({
+			mode: metadata.mode,
+			version: metadata.version,
+			nlink: metadata.nlink,
+		});
+	};
+	const touchDeleteNode = (node: MockNode): void => {
+		metadataFor(node).version += 1;
+	};
+	const unlinkDeleteNode = (node: MockNode): void => {
+		const metadata = metadataFor(node);
+		metadata.nlink = Math.max(0, metadata.nlink - 1);
+		metadata.version += 1;
+	};
+	const nextDeleteId = (): string => {
+		for (let attempt = 0; attempt < 16; attempt += 1) {
+			const bytes = new Uint8Array(16);
+			globalThis.crypto.getRandomValues(bytes);
+			bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+			bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+			const hex = [...bytes]
+				.map((value) => value.toString(16).padStart(2, "0"))
+				.join("");
+			const id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(
+				12,
+				16,
+			)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+			if (!issuedDeleteIds.has(id)) {
+				issuedDeleteIds.add(id);
+				return id;
+			}
+		}
+		throw new Error("Browser mock workspace-delete id generation failed.");
+	};
+	const deleteNow = (): number => {
+		const value = workspaceDeleteSeams.clock();
+		if (!Number.isSafeInteger(value) || value < 0) {
+			throw workspaceDeletePlanInvalid();
+		}
+		return value;
+	};
+	const expireDeleteBatch = (now: number): void => {
+		if (activeDeleteBatch !== undefined && now >= activeDeleteBatch.deadline) {
+			activeDeleteBatch = undefined;
+		}
+	};
+	const invalidateDeleteBatch = (): void => {
+		activeDeleteBatch = undefined;
+	};
 
 	const snapshot = () =>
 		frozenWorkspaceSnapshot(MOCK_WORKSPACE_ID, revision, [...roots.values()]);
@@ -1237,6 +1709,320 @@ export function createBrowserMockBridge(
 		}
 		return Object.freeze({ parent, name: segments.at(-1)! });
 	};
+	const strictMockBytes = (bytes: readonly number[]): Uint8Array => {
+		if (
+			!Array.isArray(bytes) ||
+			bytes.some(
+				(value) =>
+					typeof value !== "number" ||
+					!Number.isInteger(value) ||
+					value < 0 ||
+					value > 255,
+			)
+		) {
+			throw new Error("Invalid browser mock workspace-delete mutation.");
+		}
+		return Uint8Array.from(bytes);
+	};
+	const deleteObserverTouchedNodes = new Set<MockNode>();
+	const deleteMutations = Object.freeze({
+		rewriteFile(
+			rootId: string,
+			relativePath: string,
+			bytes: readonly number[],
+		): void {
+			const node = resolveNode(rootId, relativePath);
+			const replacement = strictMockBytes(bytes);
+			if (
+				node.kind !== "file" ||
+				node.bytes.byteLength !== replacement.length
+			) {
+				throw new Error("Invalid browser mock workspace-delete mutation.");
+			}
+			node.bytes.set(replacement);
+			touchDeleteNode(node);
+			deleteObserverTouchedNodes.add(node);
+		},
+		replaceFile(
+			rootId: string,
+			relativePath: string,
+			bytes: readonly number[],
+		): void {
+			const target = resolveCreateTarget(rootId, relativePath);
+			const current = target.parent.entries.get(target.name);
+			if (current === undefined) {
+				throw new Error("Invalid browser mock workspace-delete mutation.");
+			}
+			const replacementBytes = strictMockBytes(bytes);
+			const replacement = Object.freeze({
+				kind: "file" as const,
+				size: replacementBytes.byteLength,
+				bytes: replacementBytes,
+			});
+			registerDeleteMetadata(replacement);
+			target.parent.entries.set(target.name, replacement);
+			unlinkDeleteNode(current);
+			touchDeleteNode(target.parent);
+			deleteObserverTouchedNodes.add(current);
+			deleteObserverTouchedNodes.add(target.parent);
+		},
+		addFile(
+			rootId: string,
+			relativePath: string,
+			bytes: readonly number[],
+		): void {
+			const target = resolveCreateTarget(rootId, relativePath);
+			if (target.parent.entries.has(target.name)) {
+				throw new Error("Invalid browser mock workspace-delete mutation.");
+			}
+			const fileBytes = strictMockBytes(bytes);
+			const file = Object.freeze({
+				kind: "file" as const,
+				size: fileBytes.byteLength,
+				bytes: fileBytes,
+			});
+			registerDeleteMetadata(file);
+			target.parent.entries.set(target.name, file);
+			touchDeleteNode(target.parent);
+			deleteObserverTouchedNodes.add(target.parent);
+		},
+		addHardlink(rootId: string, sourcePath: string, targetPath: string): void {
+			const source = resolveNode(rootId, sourcePath);
+			const target = resolveCreateTarget(rootId, targetPath);
+			if (source.kind !== "file" || target.parent.entries.has(target.name)) {
+				throw new Error("Invalid browser mock workspace-delete mutation.");
+			}
+			target.parent.entries.set(target.name, source);
+			const metadata = metadataFor(source);
+			metadata.nlink += 1;
+			metadata.version += 1;
+			touchDeleteNode(target.parent);
+			deleteObserverTouchedNodes.add(source);
+			deleteObserverTouchedNodes.add(target.parent);
+		},
+		removeEntry(rootId: string, relativePath: string): void {
+			const target = resolveCreateTarget(rootId, relativePath);
+			const current = target.parent.entries.get(target.name);
+			if (current === undefined) {
+				throw new Error("Invalid browser mock workspace-delete mutation.");
+			}
+			target.parent.entries.delete(target.name);
+			unlinkDeleteNode(current);
+			touchDeleteNode(target.parent);
+			deleteObserverTouchedNodes.add(current);
+			deleteObserverTouchedNodes.add(target.parent);
+		},
+		chmod(rootId: string, relativePath: string, mode: number): void {
+			if (!Number.isSafeInteger(mode) || mode < 0 || mode > 0o7777) {
+				throw new Error("Invalid browser mock workspace-delete mutation.");
+			}
+			const node = resolveNode(rootId, relativePath);
+			const metadata = metadataFor(node);
+			metadata.mode = mode;
+			metadata.version += 1;
+			deleteObserverTouchedNodes.add(node);
+		},
+	}) satisfies BrowserMockWorkspaceDeleteMutationsForTest;
+	interface DeleteCaptureBudget {
+		descendants: number;
+		namePayloadBytes: number;
+		symlinkPayloadBytes: number;
+	}
+	const captureDeleteReceipt = (
+		node: MockNode,
+		parentPath: string,
+		depth: number,
+		budget: DeleteCaptureBudget,
+	): MockDeleteReceipt => {
+		if (node.kind === "file") {
+			return Object.freeze({
+				kind: node.kind,
+				identity: node,
+				size: node.size,
+				metadata: metadataSnapshot(node),
+			});
+		}
+		if (isMockSymlinkNode(node)) {
+			if (
+				node.payload.byteLength > workspaceDeleteLimits.symlinkBytes ||
+				budget.symlinkPayloadBytes + node.payload.byteLength >
+					workspaceDeleteLimits.totalSymlinkBytes
+			) {
+				throw symlinkTooLarge();
+			}
+			budget.symlinkPayloadBytes += node.payload.byteLength;
+			return Object.freeze({
+				kind: node.kind,
+				identity: node,
+				payload: immutableMockBytes(node.payload.copy()),
+				metadata: metadataSnapshot(node),
+			});
+		}
+		if (node.kind !== "directory") {
+			throw entryTypeMismatch();
+		}
+		const entries: MockDeleteReceiptEntry[] = [];
+		for (const [name, child] of [...node.entries].sort(([left], [right]) =>
+			compareWorkspaceEntryNames(left, right),
+		)) {
+			const childDepth = depth + 1;
+			const nameBytes = textEncoder.encode(name).byteLength;
+			if (
+				childDepth > workspaceDeleteLimits.depth ||
+				budget.descendants >= workspaceDeleteLimits.descendants ||
+				nameBytes > MAX_DIRECTORY_COPY_NAME_BYTES ||
+				budget.namePayloadBytes + nameBytes >
+					workspaceDeleteLimits.namePayloadBytes
+			) {
+				throw directoryCopyTooLarge();
+			}
+			if (!isPortableWorkspaceEntryName(name)) {
+				throw pathEncodingUnsupported();
+			}
+			const relativePath =
+				parentPath.length === 0 ? name : `${parentPath}/${name}`;
+			if (workspaceRelativePathSegments(relativePath) === undefined) {
+				throw pathEncodingUnsupported();
+			}
+			budget.descendants += 1;
+			budget.namePayloadBytes += nameBytes;
+			entries.push(
+				Object.freeze({
+					name,
+					relativePath,
+					depth: childDepth,
+					parentIdentity: node,
+					parentEntryCount: node.entries.size,
+					receipt: captureDeleteReceipt(
+						child,
+						relativePath,
+						childDepth,
+						budget,
+					),
+				}),
+			);
+		}
+		return Object.freeze({
+			kind: node.kind,
+			identity: node,
+			metadata: metadataSnapshot(node),
+			entries: Object.freeze(entries),
+		});
+	};
+	const metadataEqual = (
+		left: MockDeleteMetadata,
+		right: MockDeleteMetadataSnapshot,
+	): boolean =>
+		left.mode === right.mode &&
+		left.version === right.version &&
+		left.nlink === right.nlink;
+	const matchesDeleteReceipt = (
+		node: MockNode,
+		receipt: MockDeleteReceipt,
+		journal: MockDeleteJournal | undefined,
+	): boolean => {
+		workspaceDeleteSeams.receiptVisit?.();
+		if (node !== receipt.identity || node.kind !== receipt.kind) {
+			return false;
+		}
+		const expected = journal?.expectedMetadata.get(node) ?? receipt.metadata;
+		if (!metadataEqual(metadataFor(node), expected)) {
+			return false;
+		}
+		if (receipt.kind === "file") {
+			return node.kind === "file" && node.size === receipt.size;
+		}
+		if (receipt.kind === "symlink") {
+			return (
+				isMockSymlinkNode(node) &&
+				mockBytesEqual(node.payload.copy(), receipt.payload.copy())
+			);
+		}
+		if (node.kind !== "directory") {
+			return false;
+		}
+		const expectedEntries = receipt.entries.filter(
+			(entry) => !journal?.removedPaths.has(entry.relativePath),
+		);
+		if (node.entries.size !== expectedEntries.length) {
+			return false;
+		}
+		return expectedEntries.every((entry) => {
+			const child = node.entries.get(entry.name);
+			return (
+				child !== undefined &&
+				matchesDeleteReceipt(child, entry.receipt, journal)
+			);
+		});
+	};
+	const matchesDeleteTop = (
+		top: MockDeleteTopReceipt,
+		journal?: MockDeleteJournal,
+	): boolean => {
+		try {
+			const target = resolveCreateTarget(
+				top.request.rootId,
+				top.request.relativePath,
+			);
+			const node = target.parent.entries.get(target.name);
+			return (
+				target.parent === top.parentIdentity &&
+				target.name === top.name &&
+				node !== undefined &&
+				matchesDeleteReceipt(node, top.receipt, journal)
+			);
+		} catch {
+			return false;
+		}
+	};
+	const collectDeleteExpectedMetadata = (
+		receipt: MockDeleteReceipt,
+		target: Map<MockNode, MockDeleteMetadataSnapshot>,
+	): void => {
+		if (!target.has(receipt.identity)) {
+			target.set(receipt.identity, receipt.metadata);
+		}
+		if (receipt.kind === "directory") {
+			for (const entry of receipt.entries) {
+				collectDeleteExpectedMetadata(entry.receipt, target);
+			}
+		}
+	};
+	const collectDeleteReceiptIdentities = (
+		receipt: MockDeleteReceipt,
+	): ReadonlySet<MockNode> => {
+		const identities = new Set<MockNode>();
+		const pending: MockDeleteReceipt[] = [receipt];
+		while (pending.length > 0) {
+			const current = pending.pop()!;
+			identities.add(current.identity);
+			if (current.kind === "directory") {
+				for (const entry of current.entries) {
+					pending.push(entry.receipt);
+				}
+			}
+		}
+		return identities;
+	};
+	const flattenDeleteReceipt = (
+		receipt: MockDeleteReceipt,
+	): readonly MockDeleteReceiptEntry[] => {
+		if (receipt.kind !== "directory") {
+			return Object.freeze([]);
+		}
+		const flattened: MockDeleteReceiptEntry[] = [];
+		const pending = [...receipt.entries].reverse();
+		while (pending.length > 0) {
+			const entry = pending.pop()!;
+			flattened.push(entry);
+			if (entry.receipt.kind === "directory") {
+				for (const child of [...entry.receipt.entries].reverse()) {
+					pending.push(child);
+				}
+			}
+		}
+		return Object.freeze(flattened);
+	};
 	const createEntry = (
 		rootId: string,
 		relativePath: string,
@@ -1246,7 +2032,9 @@ export function createBrowserMockBridge(
 		if (parent.entries.has(name)) {
 			throw entryAlreadyExists();
 		}
+		registerDeleteMetadata(entry);
 		parent.entries.set(name, entry);
+		touchDeleteNode(parent);
 	};
 	const renameEntry = (
 		rootId: string,
@@ -1278,6 +2066,11 @@ export function createBrowserMockBridge(
 
 		sourceTarget.parent.entries.delete(sourceTarget.name);
 		target.parent.entries.set(target.name, source);
+		touchDeleteNode(source);
+		touchDeleteNode(sourceTarget.parent);
+		if (target.parent !== sourceTarget.parent) {
+			touchDeleteNode(target.parent);
+		}
 	};
 	type MockCopyRequest = ReturnType<typeof frozenWorkspaceCopyRequest>;
 	interface PreparedMockCopy {
@@ -1380,7 +2173,9 @@ export function createBrowserMockBridge(
 		if (prepared.target.parent.entries.has(prepared.target.name)) {
 			throw entryAlreadyExists();
 		}
+		registerDeleteMetadata(prepared.copied);
 		prepared.target.parent.entries.set(prepared.target.name, prepared.copied);
+		touchDeleteNode(prepared.target.parent);
 	};
 	const copyEntry = (
 		sourceRootId: string,
@@ -1971,6 +2766,8 @@ export function createBrowserMockBridge(
 				if (!sourceTarget.parent.entries.delete(sourceTarget.name)) {
 					return incompleteMoveResult("deleteFailed", 0);
 				}
+				touchDeleteNode(sourceTarget.parent);
+				unlinkDeleteNode(sourceReceipt.identity);
 				return frozenWorkspaceMoveResult({ status: "moved" });
 			}
 
@@ -2055,6 +2852,8 @@ export function createBrowserMockBridge(
 				if (!sourceTarget.parent.entries.delete(sourceTarget.name)) {
 					return incompleteMoveResult("deleteFailed", removedEntries);
 				}
+				touchDeleteNode(sourceTarget.parent);
+				unlinkDeleteNode(entry.receipt.identity);
 				removedEntries += 1;
 				if (workspaceMoveSeams.afterDeleteEntry !== undefined) {
 					const observation = Object.freeze({
@@ -2148,10 +2947,468 @@ export function createBrowserMockBridge(
 			if (!sourceTarget.parent.entries.delete(sourceTarget.name)) {
 				return incompleteMoveResult("deleteFailed", removedEntries);
 			}
+			touchDeleteNode(sourceTarget.parent);
+			unlinkDeleteNode(sourceReceipt.identity);
 			return frozenWorkspaceMoveResult({ status: "moved" });
 		} catch {
 			return incompleteMoveResult("sourceUnverifiable", removedEntries);
 		}
+	};
+	const deleteDeadline = (now: number): number => {
+		const deadline = now + WORKSPACE_DELETE_IDLE_TTL_MS;
+		if (!Number.isSafeInteger(deadline)) {
+			throw workspaceDeletePlanInvalid();
+		}
+		return deadline;
+	};
+	const deleteObservation = (
+		confirmationId: string,
+		phase: BrowserMockWorkspaceDeleteObservation["phase"],
+		removedEntries: number,
+		details: Readonly<{
+			entryIndex?: number;
+			kind?: WorkspaceDeleteEntryKind;
+			descendantEntries?: number;
+			isRoot?: boolean;
+		}> = {},
+	): BrowserMockWorkspaceDeleteObservation =>
+		Object.freeze({
+			confirmationId,
+			phase,
+			removedEntries,
+			...(details.entryIndex === undefined
+				? {}
+				: { entryIndex: details.entryIndex }),
+			...(details.kind === undefined ? {} : { kind: details.kind }),
+			...(details.descendantEntries === undefined
+				? {}
+				: { descendantEntries: details.descendantEntries }),
+			...(details.isRoot === undefined ? {} : { isRoot: details.isRoot }),
+		});
+	const invokeDeleteObserver = (
+		seam:
+			| ((
+					observation: BrowserMockWorkspaceDeleteObservation,
+					mutations: BrowserMockWorkspaceDeleteMutationsForTest,
+			  ) => void)
+			| undefined,
+		observation: BrowserMockWorkspaceDeleteObservation,
+	): Readonly<{ threw: boolean; touchedNodes: ReadonlySet<MockNode> }> => {
+		deleteObserverTouchedNodes.clear();
+		if (seam === undefined) {
+			return Object.freeze({
+				threw: false,
+				touchedNodes: new Set<MockNode>(),
+			});
+		}
+		try {
+			seam(observation, deleteMutations);
+			return Object.freeze({
+				threw: false,
+				touchedNodes: new Set(deleteObserverTouchedNodes),
+			});
+		} catch {
+			return Object.freeze({
+				threw: true,
+				touchedNodes: new Set(deleteObserverTouchedNodes),
+			});
+		}
+	};
+	const prepareDeleteBatch = (
+		entriesInput: readonly WorkspaceDeleteEntryRequest[],
+	): WorkspaceDeleteBatchPlan => {
+		const request = frozenWorkspacePrepareDeleteRequest(entriesInput);
+		if (
+			request.entries.length < 1 ||
+			request.entries.length > MAX_DELETE_BATCH_ENTRIES
+		) {
+			throw workspaceDeletePlanInvalid();
+		}
+		const now = deleteNow();
+		expireDeleteBatch(now);
+		if (activeDeleteBatch !== undefined) {
+			throw workspaceDeleteConflict();
+		}
+
+		const budget: DeleteCaptureBudget = {
+			descendants: 0,
+			namePayloadBytes: 0,
+			symlinkPayloadBytes: 0,
+		};
+		const seenTopIdentities = new Set<MockNode>();
+		const tops = request.entries.map((entry): MockDeleteTopReceipt => {
+			const target = resolveCreateTarget(entry.rootId, entry.relativePath);
+			const node = target.parent.entries.get(target.name);
+			if (node === undefined) {
+				throw entryNotFound();
+			}
+			if (seenTopIdentities.has(node)) {
+				throw workspaceDeleteConflict();
+			}
+			seenTopIdentities.add(node);
+			if (
+				node.kind === "directory" &&
+				!entry.recursive &&
+				node.entries.size > 0
+			) {
+				throw directoryNotEmpty();
+			}
+			const beforeDescendants = budget.descendants;
+			const receipt = captureDeleteReceipt(node, "", 0, budget);
+			return Object.freeze({
+				request: entry,
+				parentIdentity: target.parent,
+				name: target.name,
+				receipt,
+				receiptIdentities: collectDeleteReceiptIdentities(receipt),
+				descendantEntries: budget.descendants - beforeDescendants,
+			});
+		});
+		const batchReceiptIdentities = new Set<MockNode>();
+		for (const top of tops) {
+			for (const identity of top.receiptIdentities) {
+				if (batchReceiptIdentities.has(identity)) {
+					throw workspaceDeleteConflict();
+				}
+				batchReceiptIdentities.add(identity);
+			}
+		}
+		const confirmationId = nextDeleteId();
+		const batchEntries = tops.map((top) =>
+			Object.freeze({ entryId: nextDeleteId(), top }),
+		);
+		const plan = frozenWorkspaceDeleteBatchPlan(
+			{
+				confirmationId,
+				entries: batchEntries.map(({ entryId, top }) => ({
+					entryId,
+					kind: top.receipt.kind,
+					descendantEntries: top.descendantEntries,
+				})),
+			},
+			request,
+		);
+		const observer = invokeDeleteObserver(
+			workspaceDeleteSeams.prepared,
+			deleteObservation(confirmationId, "prepared", 0),
+		);
+		if (tops.some((top) => !matchesDeleteTop(top))) {
+			throw workspaceDeleteBatchChanged();
+		}
+		if (observer.threw) {
+			throw workspaceDeleteBatchUnverifiable();
+		}
+		const completedNow = deleteNow();
+		if (completedNow < now) {
+			throw workspaceDeletePlanInvalid();
+		}
+		activeDeleteBatch = {
+			confirmationId,
+			revision,
+			entries: Object.freeze(batchEntries),
+			phase: "prepared",
+			nextIndex: 0,
+			deadline: deleteDeadline(completedNow),
+			inFlight: false,
+		};
+		return plan;
+	};
+	const matchingDeleteBatch = (
+		confirmationId: string,
+		phase?: MockDeleteBatch["phase"],
+	): MockDeleteBatch => {
+		const now = deleteNow();
+		expireDeleteBatch(now);
+		const batch = activeDeleteBatch;
+		if (
+			batch === undefined ||
+			batch.confirmationId !== confirmationId ||
+			(phase !== undefined && batch.phase !== phase) ||
+			batch.revision !== revision ||
+			batch.inFlight
+		) {
+			throw workspaceDeletePlanInvalid();
+		}
+		return batch;
+	};
+	const cancelDeleteBatch = (confirmationIdInput: string): void => {
+		const { confirmationId } =
+			frozenWorkspaceDeleteBatchRequest(confirmationIdInput);
+		matchingDeleteBatch(confirmationId);
+		activeDeleteBatch = undefined;
+	};
+	const beginDeleteBatch = (confirmationIdInput: string): void => {
+		const { confirmationId } =
+			frozenWorkspaceDeleteBatchRequest(confirmationIdInput);
+		const batch = matchingDeleteBatch(confirmationId, "prepared");
+		const observer = invokeDeleteObserver(
+			workspaceDeleteSeams.begin,
+			deleteObservation(confirmationId, "begin", 0),
+		);
+		if (batch.entries.some(({ top }) => !matchesDeleteTop(top))) {
+			activeDeleteBatch = undefined;
+			throw workspaceDeleteBatchChanged();
+		}
+		if (observer.threw) {
+			activeDeleteBatch = undefined;
+			throw workspaceDeleteBatchUnverifiable();
+		}
+		batch.phase = "executing";
+		batch.deadline = deleteDeadline(deleteNow());
+	};
+	const incompleteDeleteResult = (
+		reason: WorkspaceDeleteIncompleteReason,
+		removedEntries: number,
+	): WorkspaceDeleteResult =>
+		frozenWorkspaceDeleteResult(
+			removedEntries === 0
+				? { status: "entryRetained", reason }
+				: {
+						status: "entryPartiallyDeleted",
+						reason,
+						removedEntries,
+					},
+		);
+	const verifiedDeleteEntry = (
+		batch: MockDeleteBatch,
+		entryIndex: number,
+		entry: MockDeleteBatchEntry,
+	): WorkspaceDeleteResult => {
+		const top = entry.top;
+		const expectedMetadata = new Map<MockNode, MockDeleteMetadataSnapshot>();
+		collectDeleteExpectedMetadata(top.receipt, expectedMetadata);
+		const journal: MockDeleteJournal = {
+			removedPaths: new Set<string>(),
+			expectedMetadata,
+			removedChildCounts: new Map<MockDirectoryNode, number>(),
+		};
+		let removedEntries = 0;
+		if (!matchesDeleteTop(top)) {
+			return incompleteDeleteResult("entryChanged", 0);
+		}
+		const observerTouchedReceipt = (
+			observation: Readonly<{ touchedNodes: ReadonlySet<MockNode> }>,
+		): boolean => {
+			for (const node of observation.touchedNodes) {
+				if (top.receiptIdentities.has(node)) {
+					return true;
+				}
+			}
+			return false;
+		};
+		const matchesLocalReceipt = (
+			node: MockNode,
+			receipt: MockDeleteReceipt,
+			directoryMustBeEmpty: boolean,
+		): boolean => {
+			workspaceDeleteSeams.receiptVisit?.();
+			if (node !== receipt.identity || node.kind !== receipt.kind) {
+				return false;
+			}
+			const expected = journal.expectedMetadata.get(node) ?? receipt.metadata;
+			if (!metadataEqual(metadataFor(node), expected)) {
+				return false;
+			}
+			if (receipt.kind === "file") {
+				return node.kind === "file" && node.size === receipt.size;
+			}
+			if (receipt.kind === "symlink") {
+				return (
+					isMockSymlinkNode(node) &&
+					mockBytesEqual(node.payload.copy(), receipt.payload.copy())
+				);
+			}
+			return (
+				node.kind === "directory" &&
+				(!directoryMustBeEmpty || node.entries.size === 0)
+			);
+		};
+		const matchesTopHeader = (): boolean => {
+			const current = top.parentIdentity.entries.get(top.name);
+			return (
+				current !== undefined &&
+				matchesLocalReceipt(current, top.receipt, false)
+			);
+		};
+		const flattened = flattenDeleteReceipt(top.receipt);
+		const descendants = [
+			...flattened
+				.filter(({ receipt }) => receipt.kind !== "directory")
+				.sort(
+					(left, right) =>
+						right.depth - left.depth ||
+						compareWorkspaceEntryNames(left.relativePath, right.relativePath),
+				),
+			...flattened
+				.filter(({ receipt }) => receipt.kind === "directory")
+				.sort(
+					(left, right) =>
+						right.depth - left.depth ||
+						compareWorkspaceEntryNames(left.relativePath, right.relativePath),
+				),
+		];
+		const removeOne = (
+			entryReceipt: MockDeleteReceiptEntry | undefined,
+			receipt: MockDeleteReceipt,
+			isRoot: boolean,
+		): WorkspaceDeleteResult | undefined => {
+			const observation = deleteObservation(
+				batch.confirmationId,
+				"beforeRemove",
+				removedEntries,
+				{
+					entryIndex,
+					kind: receipt.kind,
+					descendantEntries: top.descendantEntries,
+					isRoot,
+				},
+			);
+			const observer = invokeDeleteObserver(
+				workspaceDeleteSeams.beforeRemove,
+				observation,
+			);
+			if (observerTouchedReceipt(observer) || !matchesTopHeader()) {
+				return incompleteDeleteResult("entryChanged", removedEntries);
+			}
+			if (observer.threw) {
+				return incompleteDeleteResult("entryUnverifiable", removedEntries);
+			}
+			const target = isRoot
+				? Object.freeze({ parent: top.parentIdentity, name: top.name })
+				: Object.freeze({
+						parent: entryReceipt!.parentIdentity,
+						name: entryReceipt!.name,
+					});
+			if (!isRoot) {
+				const expectedParent = journal.expectedMetadata.get(target.parent);
+				const removedChildren =
+					journal.removedChildCounts.get(target.parent) ?? 0;
+				if (
+					expectedParent === undefined ||
+					!metadataEqual(metadataFor(target.parent), expectedParent) ||
+					target.parent.entries.size !==
+						entryReceipt!.parentEntryCount - removedChildren
+				) {
+					return incompleteDeleteResult("entryChanged", removedEntries);
+				}
+			}
+			const current = target.parent.entries.get(target.name);
+			if (
+				current === undefined ||
+				!matchesLocalReceipt(current, receipt, true)
+			) {
+				return incompleteDeleteResult("entryChanged", removedEntries);
+			}
+			let removeFailed = false;
+			try {
+				workspaceDeleteSeams.remove?.(observation);
+			} catch {
+				removeFailed = true;
+			}
+			if (!matchesTopHeader()) {
+				return incompleteDeleteResult("entryChanged", removedEntries);
+			}
+			if (removeFailed) {
+				return incompleteDeleteResult("deleteFailed", removedEntries);
+			}
+			if (!target.parent.entries.delete(target.name)) {
+				return incompleteDeleteResult("deleteFailed", removedEntries);
+			}
+			touchDeleteNode(target.parent);
+			unlinkDeleteNode(current);
+			if (isRoot) {
+				return frozenWorkspaceDeleteResult({ status: "deleted" });
+			}
+			journal.removedPaths.add(entryReceipt!.relativePath);
+			journal.removedChildCounts.set(
+				target.parent,
+				(journal.removedChildCounts.get(target.parent) ?? 0) + 1,
+			);
+			journal.expectedMetadata.set(
+				target.parent,
+				metadataSnapshot(target.parent),
+			);
+			journal.expectedMetadata.set(current, metadataSnapshot(current));
+			removedEntries += 1;
+			const afterObservation = deleteObservation(
+				batch.confirmationId,
+				"afterRemove",
+				removedEntries,
+				{
+					entryIndex,
+					kind: receipt.kind,
+					descendantEntries: top.descendantEntries,
+					isRoot: false,
+				},
+			);
+			const afterObserver = invokeDeleteObserver(
+				workspaceDeleteSeams.afterRemove,
+				afterObservation,
+			);
+			if (observerTouchedReceipt(afterObserver) || !matchesTopHeader()) {
+				return incompleteDeleteResult("entryChanged", removedEntries);
+			}
+			return afterObserver.threw
+				? incompleteDeleteResult("entryUnverifiable", removedEntries)
+				: undefined;
+		};
+
+		for (const descendant of descendants) {
+			const result = removeOne(descendant, descendant.receipt, false);
+			if (result !== undefined) {
+				return result;
+			}
+		}
+		return (
+			removeOne(undefined, top.receipt, true) ??
+			incompleteDeleteResult("entryUnverifiable", removedEntries)
+		);
+	};
+	const commitDeleteEntry = (
+		confirmationIdInput: string,
+		entryIdInput: string,
+		rootIdInput: string,
+		relativePathInput: string,
+		recursiveInput: boolean,
+	): WorkspaceDeleteResult => {
+		const request: WorkspaceCommitDeleteEntryRequest =
+			frozenWorkspaceCommitDeleteEntryRequest(
+				confirmationIdInput,
+				entryIdInput,
+				rootIdInput,
+				relativePathInput,
+				recursiveInput,
+			);
+		const batch = matchingDeleteBatch(request.confirmationId, "executing");
+		const entry = batch.entries[batch.nextIndex];
+		if (
+			entry === undefined ||
+			entry.entryId !== request.entryId ||
+			entry.top.request.rootId !== request.rootId ||
+			entry.top.request.relativePath !== request.relativePath ||
+			entry.top.request.recursive !== request.recursive
+		) {
+			activeDeleteBatch = undefined;
+			throw workspaceDeletePlanInvalid();
+		}
+		batch.inFlight = true;
+		const result = verifiedDeleteEntry(batch, batch.nextIndex, entry);
+		batch.inFlight = false;
+		if (result.status !== "deleted") {
+			activeDeleteBatch = undefined;
+			return result;
+		}
+		batch.nextIndex += 1;
+		if (batch.nextIndex >= batch.entries.length) {
+			activeDeleteBatch = undefined;
+			return result;
+		}
+		try {
+			batch.deadline = deleteDeadline(deleteNow());
+		} catch {
+			activeDeleteBatch = undefined;
+		}
+		return result;
 	};
 
 	return {
@@ -2177,6 +3434,7 @@ export function createBrowserMockBridge(
 			if (status === "cancelled") {
 				return frozenWorkspacePickResult(status, snapshot());
 			}
+			invalidateDeleteBatch();
 
 			const selected = mode === "add" ? mockRoots : mockRoots.slice(0, 1);
 			if (mode === "replace") {
@@ -2203,6 +3461,7 @@ export function createBrowserMockBridge(
 			if (!roots.delete(rootId)) {
 				throw rootNotAuthorized();
 			}
+			invalidateDeleteBatch();
 			revision += 1;
 			return snapshot();
 		},
@@ -2220,6 +3479,30 @@ export function createBrowserMockBridge(
 		},
 		async workspaceMove(sourceRootId, sourcePath, targetRootId, targetPath) {
 			return moveEntry(sourceRootId, sourcePath, targetRootId, targetPath);
+		},
+		async workspacePrepareDelete(entries) {
+			return prepareDeleteBatch(entries);
+		},
+		async workspaceCancelDelete(confirmationId) {
+			cancelDeleteBatch(confirmationId);
+		},
+		async workspaceBeginDelete(confirmationId) {
+			beginDeleteBatch(confirmationId);
+		},
+		async workspaceCommitDeleteEntry(
+			confirmationId,
+			entryId,
+			rootId,
+			relativePath,
+			recursive,
+		) {
+			return commitDeleteEntry(
+				confirmationId,
+				entryId,
+				rootId,
+				relativePath,
+				recursive,
+			);
 		},
 		async workspaceStat(rootId, relativePath) {
 			const node = resolveNode(rootId, relativePath);

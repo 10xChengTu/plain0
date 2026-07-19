@@ -71,6 +71,18 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async workspaceMove() {
 			throw new Error("unused");
 		},
+		async workspacePrepareDelete() {
+			throw new Error("unused");
+		},
+		async workspaceCancelDelete() {
+			throw new Error("unused");
+		},
+		async workspaceBeginDelete() {
+			throw new Error("unused");
+		},
+		async workspaceCommitDeleteEntry() {
+			throw new Error("unused");
+		},
 		async workspaceStat() {
 			return { kind: "file", size: 3, mtime: 20, ctime: 10 };
 		},

@@ -1,10 +1,15 @@
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::time::{Duration, Instant};
 
 use crate::error::CommandError;
 use crate::path_policy::RelativePath;
 
 use super::dto::{
+    DeleteConfirmationId, DeleteEntryId, WorkspaceDeleteBatchPlan, WorkspaceDeleteResult,
     WorkspaceEntryStat, WorkspaceMoveResult, WorkspacePickRootsMode, WorkspacePickRootsResult,
     WorkspacePickRootsStatus, WorkspaceReadDirectoryResult, WorkspaceSnapshot,
 };
@@ -13,14 +18,39 @@ use super::reader;
 use super::writer;
 use super::{RootId, WorkspaceRootLease, WorkspaceScope};
 
-#[derive(Default)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::delete::{DeleteBatchReceipt, DeleteSelection};
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const DELETE_BATCH_IDLE_TTL: Duration = Duration::from_secs(120);
+
 pub struct WorkspaceService {
     windows: Mutex<HashMap<String, Arc<WindowWorkspace>>>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    delete_clock: Arc<dyn Fn() -> Instant + Send + Sync>,
+}
+
+impl Default for WorkspaceService {
+    fn default() -> Self {
+        Self {
+            windows: Mutex::new(HashMap::new()),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            delete_clock: Arc::new(Instant::now),
+        }
+    }
 }
 
 impl WorkspaceService {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    fn with_delete_clock(clock: Arc<dyn Fn() -> Instant + Send + Sync>) -> Self {
+        Self {
+            windows: Mutex::new(HashMap::new()),
+            delete_clock: clock,
+        }
     }
 
     pub fn snapshot(&self, window_label: &str) -> Result<WorkspaceSnapshot, CommandError> {
@@ -191,6 +221,102 @@ impl WorkspaceService {
         .await
     }
 
+    pub async fn prepare_delete(
+        &self,
+        window_label: &str,
+        entries: Vec<(RootId, RelativePath, bool)>,
+    ) -> Result<WorkspaceDeleteBatchPlan, CommandError> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let workspace = self.scope_for_window(window_label)?;
+            tauri::async_runtime::spawn_blocking(move || workspace.prepare_delete(entries))
+                .await
+                .map_err(|_| workspace_delete_failed())?
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = (window_label, entries);
+            Err(workspace_delete_unsupported())
+        }
+    }
+
+    pub async fn cancel_delete(
+        &self,
+        window_label: &str,
+        confirmation_id: DeleteConfirmationId,
+    ) -> Result<(), CommandError> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let workspace = self.scope_for_window(window_label)?;
+            tauri::async_runtime::spawn_blocking(move || workspace.cancel_delete(confirmation_id))
+                .await
+                .map_err(|_| workspace_delete_failed())?
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = (window_label, confirmation_id);
+            Err(workspace_delete_unsupported())
+        }
+    }
+
+    pub async fn begin_delete(
+        &self,
+        window_label: &str,
+        confirmation_id: DeleteConfirmationId,
+    ) -> Result<(), CommandError> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let workspace = self.scope_for_window(window_label)?;
+            tauri::async_runtime::spawn_blocking(move || workspace.begin_delete(confirmation_id))
+                .await
+                .map_err(|_| workspace_delete_failed())?
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = (window_label, confirmation_id);
+            Err(workspace_delete_unsupported())
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn commit_delete_entry(
+        &self,
+        window_label: &str,
+        confirmation_id: DeleteConfirmationId,
+        entry_id: DeleteEntryId,
+        root_id: RootId,
+        relative_path: RelativePath,
+        recursive: bool,
+    ) -> Result<WorkspaceDeleteResult, CommandError> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let workspace = self.scope_for_window(window_label)?;
+            tauri::async_runtime::spawn_blocking(move || {
+                workspace.commit_delete_entry(
+                    confirmation_id,
+                    entry_id,
+                    root_id,
+                    relative_path,
+                    recursive,
+                )
+            })
+            .await
+            .map_err(|_| workspace_delete_failed())?
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = (
+                window_label,
+                confirmation_id,
+                entry_id,
+                root_id,
+                relative_path,
+                recursive,
+            );
+            Err(workspace_delete_unsupported())
+        }
+    }
+
     pub fn close_window(&self, window_label: &str) {
         if let Some(workspace) = self.detach_window(window_label) {
             workspace.close();
@@ -199,9 +325,20 @@ impl WorkspaceService {
 
     fn scope_for_window(&self, window_label: &str) -> Result<Arc<WindowWorkspace>, CommandError> {
         let mut windows = lock(&self.windows)?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let delete_clock = Arc::clone(&self.delete_clock);
         Ok(windows
             .entry(window_label.to_owned())
-            .or_insert_with(|| Arc::new(WindowWorkspace::new()))
+            .or_insert_with(|| {
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                {
+                    Arc::new(WindowWorkspace::new(delete_clock))
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                {
+                    Arc::new(WindowWorkspace::new())
+                }
+            })
             .clone())
     }
 
@@ -339,18 +476,28 @@ impl WorkspaceService {
 struct WindowWorkspace {
     mutation_gate: Mutex<()>,
     state: Mutex<WindowWorkspaceState>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    delete_clock: Arc<dyn Fn() -> Instant + Send + Sync>,
 }
 
 impl WindowWorkspace {
-    fn new() -> Self {
+    fn new(
+        #[cfg(any(target_os = "linux", target_os = "macos"))] delete_clock: Arc<
+            dyn Fn() -> Instant + Send + Sync,
+        >,
+    ) -> Self {
         Self {
             mutation_gate: Mutex::new(()),
             state: Mutex::new(WindowWorkspaceState {
                 scope: WorkspaceScope::new(),
                 next_picker_token: 0,
                 active_picker: None,
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                active_delete_batch: None,
                 closed: false,
             }),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            delete_clock,
         }
     }
 
@@ -408,6 +555,7 @@ impl WindowWorkspace {
                 };
                 state.active_picker = None;
                 authorization?;
+                invalidate_delete_batch(&mut state);
                 return Ok(WorkspacePickRootsResult::new(
                     WorkspacePickRootsStatus::Selected,
                     state.scope.snapshot(),
@@ -427,6 +575,7 @@ impl WindowWorkspace {
         let mut state = lock(&self.state)?;
         ensure_open(&state)?;
         state.scope.remove(root_id)?;
+        invalidate_delete_batch(&mut state);
         Ok(state.scope.snapshot())
     }
 
@@ -453,6 +602,169 @@ impl WindowWorkspace {
         }
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn prepare_delete(
+        &self,
+        entries: Vec<(RootId, RelativePath, bool)>,
+    ) -> Result<WorkspaceDeleteBatchPlan, CommandError> {
+        let _mutation = lock(&self.mutation_gate)?;
+        let (workspace_revision, selected) = {
+            let mut state = lock(&self.state)?;
+            ensure_open(&state)?;
+            discard_expired_delete_batch(&mut state, (self.delete_clock)());
+            if state.active_delete_batch.is_some() {
+                return Err(workspace_delete_conflict());
+            }
+            let selected = entries
+                .into_iter()
+                .map(|(root_id, relative_path, recursive)| {
+                    let lease = state.scope.lease(root_id)?;
+                    Ok((
+                        DeleteSelection::new(root_id, relative_path, recursive),
+                        lease,
+                    ))
+                })
+                .collect::<Result<Vec<_>, CommandError>>()?;
+            (state.scope.revision(), selected)
+        };
+        let deadline = delete_deadline((self.delete_clock)())?;
+        let mut receipt = super::delete::prepare_batch(workspace_revision, deadline, selected)?;
+        let plan = receipt.plan()?;
+        receipt.refresh_deadline(delete_deadline((self.delete_clock)())?);
+        let mut state = lock(&self.state)?;
+        ensure_open(&state)?;
+        if state.scope.revision() != workspace_revision || state.active_delete_batch.is_some() {
+            return Err(workspace_delete_conflict());
+        }
+        state.active_delete_batch = Some(receipt);
+        Ok(plan)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn cancel_delete(&self, confirmation_id: DeleteConfirmationId) -> Result<(), CommandError> {
+        let _mutation = lock(&self.mutation_gate)?;
+        let mut state = lock(&self.state)?;
+        ensure_open(&state)?;
+        discard_expired_delete_batch(&mut state, (self.delete_clock)());
+        if state
+            .active_delete_batch
+            .as_ref()
+            .is_some_and(|batch| batch.confirmation_id() == confirmation_id)
+        {
+            state.active_delete_batch = None;
+            Ok(())
+        } else {
+            Err(workspace_delete_plan_invalid())
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn begin_delete(&self, confirmation_id: DeleteConfirmationId) -> Result<(), CommandError> {
+        let _mutation = lock(&self.mutation_gate)?;
+        let (mut receipt, leases) = {
+            let mut state = lock(&self.state)?;
+            ensure_open(&state)?;
+            discard_expired_delete_batch(&mut state, (self.delete_clock)());
+            let matches = state.active_delete_batch.as_ref().is_some_and(|batch| {
+                batch.confirmation_id() == confirmation_id
+                    && batch.is_prepared()
+                    && batch.workspace_revision() == state.scope.revision()
+            });
+            if !matches {
+                return Err(workspace_delete_plan_invalid());
+            }
+            let receipt = state
+                .active_delete_batch
+                .take()
+                .ok_or_else(workspace_delete_plan_invalid)?;
+            let mut leases = BTreeMap::new();
+            for selection in receipt.selections() {
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    leases.entry(selection.root_id())
+                {
+                    entry.insert(state.scope.lease(selection.root_id())?);
+                }
+            }
+            (receipt, leases)
+        };
+        // Any failure here invalidates the complete batch and performs no
+        // remove syscall. The receipt was taken from state before I/O.
+        receipt.revalidate_all(&leases)?;
+        receipt.begin();
+        receipt.refresh_deadline(delete_deadline((self.delete_clock)())?);
+        let mut state = lock(&self.state)?;
+        ensure_open(&state)?;
+        if state.scope.revision() != receipt.workspace_revision()
+            || state.active_delete_batch.is_some()
+        {
+            return Err(workspace_delete_plan_invalid());
+        }
+        state.active_delete_batch = Some(receipt);
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[allow(clippy::too_many_arguments)]
+    fn commit_delete_entry(
+        &self,
+        confirmation_id: DeleteConfirmationId,
+        entry_id: DeleteEntryId,
+        root_id: RootId,
+        relative_path: RelativePath,
+        recursive: bool,
+    ) -> Result<WorkspaceDeleteResult, CommandError> {
+        let _mutation = lock(&self.mutation_gate)?;
+        let (mut receipt, lease) = {
+            let mut state = lock(&self.state)?;
+            ensure_open(&state)?;
+            discard_expired_delete_batch(&mut state, (self.delete_clock)());
+            let Some(batch) = state.active_delete_batch.as_ref() else {
+                return Err(workspace_delete_plan_invalid());
+            };
+            if batch.confirmation_id() != confirmation_id {
+                return Err(workspace_delete_plan_invalid());
+            }
+            if !batch.is_executing()
+                || batch.workspace_revision() != state.scope.revision()
+                || !batch.matches_next(entry_id, root_id, &relative_path, recursive)
+            {
+                state.active_delete_batch = None;
+                return Err(workspace_delete_plan_invalid());
+            }
+            if batch.next_root_id() != Some(root_id) {
+                state.active_delete_batch = None;
+                return Err(workspace_delete_plan_invalid());
+            }
+            let lease = match state.scope.lease(root_id) {
+                Ok(lease) => lease,
+                Err(error) => {
+                    state.active_delete_batch = None;
+                    return Err(error);
+                }
+            };
+            let receipt = state
+                .active_delete_batch
+                .take()
+                .ok_or_else(workspace_delete_plan_invalid)?;
+            (receipt, lease)
+        };
+
+        // Taking the receipt marks the exact next entry as the sole in-flight
+        // authorization while this window's mutation gate remains held.
+        let result = receipt.commit_next(&lease);
+        let mut state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if result.is_deleted() && !receipt.is_complete() && !state.closed {
+            if let Ok(deadline) = delete_deadline((self.delete_clock)()) {
+                receipt.refresh_deadline(deadline);
+                state.active_delete_batch = Some(receipt);
+            }
+        }
+        Ok(result)
+    }
+
     fn close(&self) {
         let _mutation = match self.mutation_gate.lock() {
             Ok(guard) => guard,
@@ -464,6 +776,7 @@ impl WindowWorkspace {
         };
         state.closed = true;
         state.active_picker = None;
+        invalidate_delete_batch(&mut state);
     }
 }
 
@@ -471,6 +784,8 @@ struct WindowWorkspaceState {
     scope: WorkspaceScope,
     next_picker_token: u64,
     active_picker: Option<u64>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    active_delete_batch: Option<DeleteBatchReceipt>,
     closed: bool,
 }
 
@@ -493,6 +808,31 @@ fn ensure_active_picker(state: &WindowWorkspaceState, token: u64) -> Result<(), 
 
 fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, CommandError> {
     mutex.lock().map_err(|_| workspace_operation_failed())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn invalidate_delete_batch(state: &mut WindowWorkspaceState) {
+    state.active_delete_batch = None;
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn invalidate_delete_batch(_state: &mut WindowWorkspaceState) {}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn discard_expired_delete_batch(state: &mut WindowWorkspaceState, now: Instant) {
+    if state
+        .active_delete_batch
+        .as_ref()
+        .is_some_and(|batch| batch.is_expired(now))
+    {
+        state.active_delete_batch = None;
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn delete_deadline(now: Instant) -> Result<Instant, CommandError> {
+    now.checked_add(DELETE_BATCH_IDLE_TTL)
+        .ok_or_else(workspace_delete_failed)
 }
 
 fn picker_already_active() -> CommandError {
@@ -533,6 +873,35 @@ fn workspace_mutation_failed() -> CommandError {
 
 fn workspace_copy_failed() -> CommandError {
     CommandError::new("IO_FAILED", "The workspace entry could not be copied.")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn workspace_delete_failed() -> CommandError {
+    CommandError::new("IO_FAILED", "The workspace entry could not be deleted.")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn workspace_delete_conflict() -> CommandError {
+    CommandError::new(
+        "WORKSPACE_CONFLICT",
+        "A delete confirmation is already active for this window.",
+    )
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn workspace_delete_plan_invalid() -> CommandError {
+    CommandError::new(
+        "WORKSPACE_DELETE_PLAN_INVALID",
+        "The delete confirmation is no longer valid.",
+    )
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn workspace_delete_unsupported() -> CommandError {
+    CommandError::new(
+        "IO_FAILED",
+        "Permanent workspace delete is not supported on this platform.",
+    )
 }
 
 fn root_not_authorized() -> CommandError {

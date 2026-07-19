@@ -3,10 +3,11 @@ use tauri::{State, WebviewWindow};
 use crate::error::CommandError;
 
 use super::dto::{
-    WorkspaceCopyRequest, WorkspaceEntryRequest, WorkspaceEntryStat, WorkspaceMoveRequest,
-    WorkspaceMoveResult, WorkspacePickRootsRequest, WorkspacePickRootsResult,
-    WorkspaceReadDirectoryResult, WorkspaceRemoveRootRequest, WorkspaceRenameRequest,
-    WorkspaceSnapshot, WorkspaceSnapshotRequest,
+    WorkspaceCommitDeleteEntryRequest, WorkspaceCopyRequest, WorkspaceDeleteBatchPlan,
+    WorkspaceDeleteBatchRequest, WorkspaceDeleteResult, WorkspaceEntryRequest, WorkspaceEntryStat,
+    WorkspaceMoveRequest, WorkspaceMoveResult, WorkspacePickRootsRequest, WorkspacePickRootsResult,
+    WorkspacePrepareDeleteRequest, WorkspaceReadDirectoryResult, WorkspaceRemoveRootRequest,
+    WorkspaceRenameRequest, WorkspaceSnapshot, WorkspaceSnapshotRequest,
 };
 use super::picker::TauriDirectoryPicker;
 use super::service::WorkspaceService;
@@ -152,6 +153,58 @@ pub(crate) async fn workspace_move(
         target_path,
     )
     .await
+}
+
+#[tauri::command]
+pub(crate) async fn workspace_prepare_delete(
+    window: WebviewWindow,
+    service: State<'_, WorkspaceService>,
+    request: WorkspacePrepareDeleteRequest,
+) -> Result<WorkspaceDeleteBatchPlan, CommandError> {
+    service
+        .prepare_delete(window.label(), request.into_parts()?)
+        .await
+}
+
+#[tauri::command]
+pub(crate) async fn workspace_cancel_delete(
+    window: WebviewWindow,
+    service: State<'_, WorkspaceService>,
+    request: WorkspaceDeleteBatchRequest,
+) -> Result<(), CommandError> {
+    service
+        .cancel_delete(window.label(), request.confirmation_id())
+        .await
+}
+
+#[tauri::command]
+pub(crate) async fn workspace_begin_delete(
+    window: WebviewWindow,
+    service: State<'_, WorkspaceService>,
+    request: WorkspaceDeleteBatchRequest,
+) -> Result<(), CommandError> {
+    service
+        .begin_delete(window.label(), request.confirmation_id())
+        .await
+}
+
+#[tauri::command]
+pub(crate) async fn workspace_commit_delete_entry(
+    window: WebviewWindow,
+    service: State<'_, WorkspaceService>,
+    request: WorkspaceCommitDeleteEntryRequest,
+) -> Result<WorkspaceDeleteResult, CommandError> {
+    let (confirmation_id, entry_id, root_id, relative_path, recursive) = request.into_parts()?;
+    service
+        .commit_delete_entry(
+            window.label(),
+            confirmation_id,
+            entry_id,
+            root_id,
+            relative_path,
+            recursive,
+        )
+        .await
 }
 
 fn raw_bytes_response(bytes: Vec<u8>) -> tauri::ipc::Response {

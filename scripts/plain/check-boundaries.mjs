@@ -9,6 +9,9 @@ import {
 	validateTauriApiBoundary,
 	validateTauriConfiguration,
 	validateWorkspaceCopyCommandRegistration,
+	validateWorkspaceDeleteBoundary,
+	validateWorkspaceDeleteCommandRegistration,
+	validateWorkspaceDeleteTypeScriptBoundary,
 	validateWorkspaceMoveBoundary,
 	validateWorkspaceMoveCommandRegistration,
 	validateWorkspaceProviderBootstrap,
@@ -233,6 +236,16 @@ for (const file of appFiles) {
 	}
 }
 
+const appSources = await Promise.all(
+	appFiles.map(async (file) => ({
+		relativePath: path.relative(root, file),
+		source: await readFile(file, "utf8"),
+	})),
+);
+for (const failure of validateWorkspaceDeleteTypeScriptBoundary(appSources)) {
+	fail(failure);
+}
+
 const mainSource = await readFile(path.join(appRoot, "main.ts"), "utf8");
 for (const failure of validateWorkspaceProviderBootstrap(mainSource)) {
 	fail(failure);
@@ -375,6 +388,12 @@ for (const failure of validateWorkspaceMoveCommandRegistration(rustSources)) {
 for (const failure of validateWorkspaceMoveBoundary(rustSources)) {
 	fail(failure);
 }
+for (const failure of validateWorkspaceDeleteCommandRegistration(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateWorkspaceDeleteBoundary(rustSources)) {
+	fail(failure);
+}
 
 const distRoot = path.join(root, "dist");
 try {
@@ -396,6 +415,6 @@ if (failures.length > 0) {
 	process.exitCode = 1;
 } else {
 	console.log(
-		`architecture: ${appFiles.length} app sources, ${rustSources.length} Rust sources, ${allowedDependencies.size} pinned runtime dependencies, audited bounded directory/file/symlink copy and cross-root move boundaries, minimum Tauri capability`,
+		`architecture: ${appFiles.length} app sources, ${rustSources.length} Rust sources, ${allowedDependencies.size} pinned runtime dependencies, audited bounded directory/file/symlink copy, cross-root move and confirmed-delete boundaries, minimum Tauri capability`,
 	);
 }

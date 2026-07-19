@@ -58,6 +58,10 @@ pub fn run() {
             workspace::commands::workspace_rename,
             workspace::commands::workspace_copy,
             workspace::commands::workspace_move,
+            workspace::commands::workspace_prepare_delete,
+            workspace::commands::workspace_cancel_delete,
+            workspace::commands::workspace_begin_delete,
+            workspace::commands::workspace_commit_delete_entry,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Plain");

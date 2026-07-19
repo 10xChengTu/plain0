@@ -14,6 +14,8 @@ use crate::path_policy::RelativePath;
 
 pub(crate) mod commands;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod delete;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod directory_copy;
 pub mod dto;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -184,6 +186,10 @@ impl Default for WorkspaceScope {
 impl WorkspaceScope {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) const fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Opens and validates every selected path before changing the scope.

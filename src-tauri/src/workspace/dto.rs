@@ -1,4 +1,8 @@
-use serde::{Deserialize, Serialize};
+use std::fmt;
+
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use uuid::{Uuid, Variant};
 
 use super::{RootId, WorkspaceId};
 use crate::error::CommandError;
@@ -245,6 +249,274 @@ pub enum WorkspaceMoveResult {
     },
 }
 
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct DeleteConfirmationId(Uuid);
+
+impl DeleteConfirmationId {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub fn as_wire(self) -> String {
+        self.0.hyphenated().to_string()
+    }
+}
+
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct DeleteEntryId(Uuid);
+
+impl DeleteEntryId {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub fn as_wire(self) -> String {
+        self.0.hyphenated().to_string()
+    }
+}
+
+macro_rules! opaque_delete_id_wire {
+    ($name:ident, $label:literal) => {
+        impl fmt::Debug for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.debug_tuple($label).field(&"<redacted>").finish()
+            }
+        }
+
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                serializer.serialize_str(&self.as_wire())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                let wire = String::deserialize(deserializer)?;
+                let value = Uuid::parse_str(&wire)
+                    .map_err(|_| D::Error::custom(concat!("invalid ", $label)))?;
+                if value.get_version_num() != 4
+                    || value.get_variant() != Variant::RFC4122
+                    || value.hyphenated().to_string() != wire
+                {
+                    return Err(D::Error::custom(concat!("invalid ", $label)));
+                }
+                Ok(Self(value))
+            }
+        }
+    };
+}
+
+opaque_delete_id_wire!(DeleteConfirmationId, "delete confirmation id");
+opaque_delete_id_wire!(DeleteEntryId, "delete entry id");
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspacePrepareDeleteEntryRequest {
+    root_id: RootId,
+    relative_path: String,
+    recursive: bool,
+}
+
+impl WorkspacePrepareDeleteEntryRequest {
+    fn into_parts(self) -> Result<(RootId, RelativePath, bool), CommandError> {
+        let relative_path = RelativePath::parse_wire(&self.relative_path)?;
+        if relative_path.is_root() {
+            return Err(CommandError::new(
+                "ENTRY_TYPE_MISMATCH",
+                "The workspace root cannot be deleted.",
+            ));
+        }
+        Ok((self.root_id, relative_path, self.recursive))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspacePrepareDeleteRequest {
+    entries: Vec<WorkspacePrepareDeleteEntryRequest>,
+}
+
+impl WorkspacePrepareDeleteRequest {
+    pub fn into_parts(self) -> Result<Vec<(RootId, RelativePath, bool)>, CommandError> {
+        if self.entries.is_empty() || self.entries.len() > 64 {
+            return Err(CommandError::new(
+                "WORKSPACE_CONFLICT",
+                "A delete batch must contain between one and 64 entries.",
+            ));
+        }
+        self.entries
+            .into_iter()
+            .map(WorkspacePrepareDeleteEntryRequest::into_parts)
+            .collect()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceDeleteEntryKind {
+    File,
+    Directory,
+    Symlink,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDeleteEntryPlan {
+    entry_id: DeleteEntryId,
+    kind: WorkspaceDeleteEntryKind,
+    descendant_entries: u32,
+}
+
+impl WorkspaceDeleteEntryPlan {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) const fn new(
+        entry_id: DeleteEntryId,
+        kind: WorkspaceDeleteEntryKind,
+        descendant_entries: u32,
+    ) -> Self {
+        Self {
+            entry_id,
+            kind,
+            descendant_entries,
+        }
+    }
+
+    pub const fn entry_id(self) -> DeleteEntryId {
+        self.entry_id
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDeleteBatchPlan {
+    confirmation_id: DeleteConfirmationId,
+    entries: Vec<WorkspaceDeleteEntryPlan>,
+}
+
+impl WorkspaceDeleteBatchPlan {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) const fn new(
+        confirmation_id: DeleteConfirmationId,
+        entries: Vec<WorkspaceDeleteEntryPlan>,
+    ) -> Self {
+        Self {
+            confirmation_id,
+            entries,
+        }
+    }
+
+    pub const fn confirmation_id(&self) -> DeleteConfirmationId {
+        self.confirmation_id
+    }
+
+    pub fn entries(&self) -> &[WorkspaceDeleteEntryPlan] {
+        &self.entries
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceDeleteBatchRequest {
+    confirmation_id: DeleteConfirmationId,
+}
+
+impl WorkspaceDeleteBatchRequest {
+    pub const fn confirmation_id(self) -> DeleteConfirmationId {
+        self.confirmation_id
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceCommitDeleteEntryRequest {
+    confirmation_id: DeleteConfirmationId,
+    entry_id: DeleteEntryId,
+    root_id: RootId,
+    relative_path: String,
+    recursive: bool,
+}
+
+impl WorkspaceCommitDeleteEntryRequest {
+    pub fn into_parts(
+        self,
+    ) -> Result<
+        (
+            DeleteConfirmationId,
+            DeleteEntryId,
+            RootId,
+            RelativePath,
+            bool,
+        ),
+        CommandError,
+    > {
+        let relative_path = RelativePath::parse_wire(&self.relative_path)?;
+        if relative_path.is_root() {
+            return Err(CommandError::new(
+                "ENTRY_TYPE_MISMATCH",
+                "The workspace root cannot be deleted.",
+            ));
+        }
+        Ok((
+            self.confirmation_id,
+            self.entry_id,
+            self.root_id,
+            relative_path,
+            self.recursive,
+        ))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkspaceDeleteIncompleteReason {
+    EntryChanged,
+    EntryUnverifiable,
+    DeleteFailed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum WorkspaceDeleteResult {
+    Deleted,
+    EntryRetained {
+        reason: WorkspaceDeleteIncompleteReason,
+    },
+    EntryPartiallyDeleted {
+        reason: WorkspaceDeleteIncompleteReason,
+        #[serde(rename = "removedEntries")]
+        removed_entries: u32,
+    },
+}
+
+impl WorkspaceDeleteResult {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) const fn incomplete(
+        reason: WorkspaceDeleteIncompleteReason,
+        removed_entries: u32,
+    ) -> Self {
+        if removed_entries == 0 {
+            Self::EntryRetained { reason }
+        } else {
+            Self::EntryPartiallyDeleted {
+                reason,
+                removed_entries,
+            }
+        }
+    }
+
+    pub const fn is_deleted(self) -> bool {
+        matches!(self, Self::Deleted)
+    }
+}
+
 impl WorkspaceMoveResult {
     pub(super) const fn incomplete(
         reason: WorkspaceMoveIncompleteReason,
@@ -347,9 +619,11 @@ impl WorkspaceReadDirectoryResult {
 #[cfg(test)]
 mod tests {
     use super::{
-        WorkspaceCopyRequest, WorkspaceEntryKind, WorkspaceEntryRequest,
-        WorkspaceMoveIncompleteReason, WorkspaceMoveRequest, WorkspaceMoveResult,
-        WorkspacePickRootsMode, WorkspacePickRootsRequest, WorkspaceRenameRequest,
+        WorkspaceCommitDeleteEntryRequest, WorkspaceCopyRequest, WorkspaceDeleteBatchRequest,
+        WorkspaceDeleteIncompleteReason, WorkspaceDeleteResult, WorkspaceEntryKind,
+        WorkspaceEntryRequest, WorkspaceMoveIncompleteReason, WorkspaceMoveRequest,
+        WorkspaceMoveResult, WorkspacePickRootsMode, WorkspacePickRootsRequest,
+        WorkspacePrepareDeleteRequest, WorkspaceRenameRequest,
     };
 
     #[test]
@@ -542,6 +816,91 @@ mod tests {
                 "status": "targetPublishedSourcePartiallyDeleted",
                 "reason": "deleteFailed",
                 "removedEntries": 7,
+            })
+        );
+    }
+
+    #[test]
+    fn delete_requests_are_closed_and_bind_uuid_v4_ids_paths_and_options() {
+        let request: WorkspacePrepareDeleteRequest = serde_json::from_str(
+            r#"{"entries":[{"rootId":"00000000-0000-4000-8000-000000000000","relativePath":"src/main.rs","recursive":false}]}"#,
+        )
+        .unwrap();
+        let entries = request.into_parts().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.as_wire(), "src/main.rs");
+        assert!(!entries[0].2);
+
+        for invalid in [
+            r#"{"entries":[],"confirmed":true}"#,
+            r#"{"entries":[{"rootId":"00000000-0000-4000-8000-000000000000","relativePath":"a","recursive":true,"useTrash":false}]}"#,
+            r#"{"entries":[{"rootId":"00000000-0000-4000-8000-000000000000","relativePath":"a"}]}"#,
+        ] {
+            assert!(serde_json::from_str::<WorkspacePrepareDeleteRequest>(invalid).is_err());
+        }
+
+        let root: WorkspacePrepareDeleteRequest = serde_json::from_str(
+            r#"{"entries":[{"rootId":"00000000-0000-4000-8000-000000000000","relativePath":"","recursive":true}]}"#,
+        )
+        .unwrap();
+        assert_eq!(root.into_parts().unwrap_err().code(), "ENTRY_TYPE_MISMATCH");
+
+        let batch: WorkspaceDeleteBatchRequest =
+            serde_json::from_str(r#"{"confirmationId":"00000000-0000-4000-8000-000000000000"}"#)
+                .unwrap();
+        assert_eq!(
+            batch.confirmation_id().as_wire(),
+            "00000000-0000-4000-8000-000000000000"
+        );
+        assert!(!format!("{batch:?}").contains("00000000-0000-4000-8000-000000000000"));
+        for invalid in [
+            r#"{"confirmationId":"00000000-0000-1000-8000-000000000000"}"#,
+            r#"{"confirmationId":"00000000-0000-4000-0000-000000000000"}"#,
+            r#"{"confirmationId":"00000000000040008000000000000000"}"#,
+            r#"{"confirmationId":"00000000-0000-4000-8000-000000000000","entryId":"00000000-0000-4000-8000-000000000001"}"#,
+        ] {
+            assert!(serde_json::from_str::<WorkspaceDeleteBatchRequest>(invalid).is_err());
+        }
+
+        let commit: WorkspaceCommitDeleteEntryRequest = serde_json::from_str(
+            r#"{"confirmationId":"00000000-0000-4000-8000-000000000000","entryId":"00000000-0000-4000-8000-000000000001","rootId":"00000000-0000-4000-8000-000000000002","relativePath":"src/main.rs","recursive":false}"#,
+        )
+        .unwrap();
+        let (_, _, _, path, recursive) = commit.into_parts().unwrap();
+        assert_eq!(path.as_wire(), "src/main.rs");
+        assert!(!recursive);
+        assert!(serde_json::from_str::<WorkspaceCommitDeleteEntryRequest>(
+            r#"{"confirmationId":"00000000-0000-4000-8000-000000000000","entryId":"00000000-0000-4000-8000-000000000001","rootId":"00000000-0000-4000-8000-000000000002","relativePath":"src/main.rs","recursive":false,"atomic":false}"#,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn delete_result_is_a_strict_structured_terminal_state() {
+        assert_eq!(
+            serde_json::to_value(WorkspaceDeleteResult::Deleted).unwrap(),
+            serde_json::json!({ "status": "deleted" })
+        );
+        assert_eq!(
+            serde_json::to_value(WorkspaceDeleteResult::EntryRetained {
+                reason: WorkspaceDeleteIncompleteReason::EntryChanged,
+            })
+            .unwrap(),
+            serde_json::json!({
+                "status": "entryRetained",
+                "reason": "entryChanged",
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(WorkspaceDeleteResult::EntryPartiallyDeleted {
+                reason: WorkspaceDeleteIncompleteReason::DeleteFailed,
+                removed_entries: 3,
+            })
+            .unwrap(),
+            serde_json::json!({
+                "status": "entryPartiallyDeleted",
+                "reason": "deleteFailed",
+                "removedEntries": 3,
             })
         );
     }

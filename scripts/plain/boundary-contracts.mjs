@@ -214,6 +214,13 @@ const FORBIDDEN_DIRECTORY_DEPENDENCIES = Object.freeze([
 	"jwalk",
 	"walkdir",
 ]);
+const FORBIDDEN_DELETE_BYPASS_DEPENDENCIES = Object.freeze([
+	"async-process",
+	"duct",
+	"subprocess",
+	"trash",
+	"xshell",
+]);
 const WORKSPACE_COPY_LIMITS = Object.freeze([
 	["MAX_COPY_FILE_BYTES", 8 * 1_024 * 1_024, "usize"],
 	["MAX_COPY_SYMLINK_BYTES", 4 * 1_024, "usize"],
@@ -223,6 +230,15 @@ const WORKSPACE_COPY_LIMITS = Object.freeze([
 	["MAX_COPY_TREE_DEPTH", 256, "usize"],
 	["MAX_COPY_TREE_SYMLINK_BYTES", 2 * 1_024 * 1_024, "u64"],
 	["MAX_COPY_TREE_BYTES", 256 * 1_024 * 1_024, "u64"],
+]);
+const WORKSPACE_DELETE_LIMITS = Object.freeze([
+	["MAX_DELETE_BATCH_ENTRIES", 64, "usize"],
+	["MAX_DELETE_DESCENDANTS", 10_000, "usize"],
+	["MAX_DELETE_TREE_DEPTH", 256, "usize"],
+	["MAX_DELETE_ENTRY_NAME_BYTES", 1_024, "usize"],
+	["MAX_DELETE_TREE_NAME_BYTES", 2 * 1_024 * 1_024, "usize"],
+	["MAX_DELETE_SYMLINK_BYTES", 4 * 1_024, "usize"],
+	["MAX_DELETE_TREE_SYMLINK_BYTES", 2 * 1_024 * 1_024, "usize"],
 ]);
 
 function escapeRegularExpression(value) {
@@ -1068,6 +1084,13 @@ export function validateWorkspaceRustBoundary(
 			);
 		}
 	}
+	for (const dependency of FORBIDDEN_DELETE_BYPASS_DEPENDENCIES) {
+		if (cargoDependencies.some(({ name }) => name === dependency)) {
+			failures.push(
+				`Cargo metadata must not contain direct delete-bypass dependency ${dependency}, including renamed dependencies`,
+			);
+		}
+	}
 	const ignoreCrateNames = [
 		"ignore",
 		...cargoDependencies
@@ -1614,6 +1637,188 @@ export function validateWorkspaceMoveCommandRegistration(rustSources) {
 		if (registrations.length !== 1 || !registeredInHandler) {
 			failures.push(
 				"src-tauri/src/lib.rs must register workspace::commands::workspace_move exactly once in generate_handler",
+			);
+		}
+	}
+
+	return failures;
+}
+
+const WORKSPACE_DELETE_COMMAND_CONTRACTS = Object.freeze([
+	Object.freeze({
+		command: "workspace_prepare_delete",
+		request: "WorkspacePrepareDeleteRequest",
+		result: "WorkspaceDeleteBatchPlan",
+		service: "prepare_delete",
+		adapter: "prepare",
+	}),
+	Object.freeze({
+		command: "workspace_cancel_delete",
+		request: "WorkspaceDeleteBatchRequest",
+		result: "()",
+		service: "cancel_delete",
+		adapter: "token",
+	}),
+	Object.freeze({
+		command: "workspace_begin_delete",
+		request: "WorkspaceDeleteBatchRequest",
+		result: "()",
+		service: "begin_delete",
+		adapter: "token",
+	}),
+	Object.freeze({
+		command: "workspace_commit_delete_entry",
+		request: "WorkspaceCommitDeleteEntryRequest",
+		result: "WorkspaceDeleteResult",
+		service: "commit_delete_entry",
+		adapter: "commit",
+	}),
+]);
+
+function extractAuditedTauriCommands(source, commandName) {
+	const commands = [];
+	const definitionPattern = new RegExp(
+		`#\\s*\\[\\s*tauri\\s*::\\s*command\\s*\\]\\s*pub\\s*\\(\\s*crate\\s*\\)\\s+async\\s+fn\\s+${escapeRegularExpression(commandName)}\\s*\\(`,
+		"g",
+	);
+	for (const match of source.matchAll(definitionPattern)) {
+		const parameterOpen = match.index + match[0].lastIndexOf("(");
+		const parameterClose = findMatchingDelimiter(
+			source,
+			parameterOpen,
+			"(",
+			")",
+		);
+		if (parameterClose === undefined) {
+			commands.push({ parameters: "", returnType: "", body: "" });
+			continue;
+		}
+		const bodyOpen = source.indexOf("{", parameterClose + 1);
+		const bodyClose =
+			bodyOpen < 0
+				? undefined
+				: findMatchingDelimiter(source, bodyOpen, "{", "}");
+		commands.push({
+			parameters: source.slice(parameterOpen + 1, parameterClose),
+			returnType:
+				bodyOpen < 0
+					? source.slice(parameterClose + 1)
+					: source.slice(parameterClose + 1, bodyOpen),
+			body:
+				bodyOpen < 0
+					? ""
+					: source.slice(
+							bodyOpen + 1,
+							bodyClose === undefined ? source.length : bodyClose,
+						),
+		});
+	}
+	return commands;
+}
+
+function workspaceDeleteCommandBodyIsExact(body, contract) {
+	const normalized = body.replaceAll(/\s+/g, "").replace(/;$/, "");
+	if (contract.adapter === "prepare") {
+		return (
+			normalized ===
+			`service.${contract.service}(window.label(),request.into_parts()?).await`
+		);
+	}
+	if (contract.adapter === "token") {
+		return (
+			normalized ===
+			`service.${contract.service}(window.label(),request.confirmation_id()).await`
+		);
+	}
+	return (
+		normalized ===
+		`let(confirmation_id,entry_id,root_id,relative_path,recursive)=request.into_parts()?;service.${contract.service}(window.label(),confirmation_id,entry_id,root_id,relative_path,recursive,).await`
+	);
+}
+
+/**
+ * Freezes the four-step delete protocol at the Tauri adapter. The receipt is
+ * deliberately not represented here: commands can route only owned wire DTOs
+ * into one WorkspaceService method each.
+ */
+export function validateWorkspaceDeleteCommandRegistration(rustSources) {
+	const failures = [];
+	const commandsSource = findRustSource(
+		rustSources,
+		"src-tauri/src/workspace/commands.rs",
+	);
+	const libSource = findRustSource(rustSources, "src-tauri/src/lib.rs");
+
+	if (commandsSource === undefined) {
+		return ["workspace delete boundary requires workspace/commands.rs"];
+	}
+	const executableCommands = stripRustCommentsAndLiterals(commandsSource);
+	for (const contract of WORKSPACE_DELETE_COMMAND_CONTRACTS) {
+		const commands = extractAuditedTauriCommands(
+			executableCommands,
+			contract.command,
+		);
+		if (commands.length !== 1) {
+			failures.push(
+				`workspace/commands.rs must define exactly one audited ${contract.command} Tauri command`,
+			);
+			continue;
+		}
+		const [command] = commands;
+		const normalizedParameters = command.parameters
+			.replaceAll(/\s+/g, "")
+			.replace(/,$/, "");
+		const expectedParameters = `window:WebviewWindow,service:State<'_,WorkspaceService>,request:${contract.request}`;
+		const expectedReturn = `->Result<${contract.result},CommandError>`;
+		if (
+			normalizedParameters !== expectedParameters ||
+			command.returnType.replaceAll(/\s+/g, "") !== expectedReturn
+		) {
+			failures.push(
+				`${contract.command} must accept request: ${contract.request} and return Result<${contract.result}, CommandError>`,
+			);
+		}
+
+		const routePattern = new RegExp(
+			`(?<![:A-Za-z0-9_])(?:WorkspaceService\\s*::\\s*|service\\s*\\.\\s*)${escapeRegularExpression(contract.service)}\\s*\\(`,
+			"g",
+		);
+		if ([...command.body.matchAll(routePattern)].length !== 1) {
+			failures.push(
+				`${contract.command} must route exactly once through WorkspaceService::${contract.service}`,
+			);
+		}
+		if (!workspaceDeleteCommandBodyIsExact(command.body, contract)) {
+			failures.push(
+				`${contract.command} must contain only its audited DTO decode and WorkspaceService::${contract.service} route`,
+			);
+		}
+	}
+
+	if (libSource === undefined) {
+		failures.push("workspace delete boundary requires src-tauri/src/lib.rs");
+		return failures;
+	}
+	const executableLib = stripRustCommentsAndLiterals(libSource);
+	const handlerBodies = [
+		...executableLib.matchAll(
+			/\.invoke_handler\s*\(\s*tauri\s*::\s*generate_handler\s*!\s*\[([\s\S]*?)\]\s*\)/g,
+		),
+	];
+	for (const contract of WORKSPACE_DELETE_COMMAND_CONTRACTS) {
+		const commandPath = new RegExp(
+			`\\bworkspace\\s*::\\s*commands\\s*::\\s*${escapeRegularExpression(contract.command)}\\b`,
+			"g",
+		);
+		const registrations = [...executableLib.matchAll(commandPath)];
+		const registeredInHandler =
+			handlerBodies.length === 1 &&
+			new RegExp(
+				`\\bworkspace\\s*::\\s*commands\\s*::\\s*${escapeRegularExpression(contract.command)}\\b`,
+			).test(handlerBodies[0][1]);
+		if (registrations.length !== 1 || !registeredInHandler) {
+			failures.push(
+				`src-tauri/src/lib.rs must register workspace::commands::${contract.command} exactly once in generate_handler`,
 			);
 		}
 	}
@@ -2452,7 +2657,10 @@ export function validateWorkspaceMoveBoundary(rustSources) {
 					"workspace/move_entry.rs may contain only the two audited source removal calls",
 				);
 			}
-		} else if (!stageCleanupCallsAreExact(normalizedPath, executableSource)) {
+		} else if (
+			normalizedPath !== "src-tauri/src/workspace/delete.rs" &&
+			!stageCleanupCallsAreExact(normalizedPath, executableSource)
+		) {
 			failures.push(
 				`${normalizedPath} contains source deletion outside the exact staging cleanup allowlist`,
 			);
@@ -2460,6 +2668,624 @@ export function validateWorkspaceMoveBoundary(rustSources) {
 	}
 
 	return failures;
+}
+
+function rustLockOffsets(body, fieldName) {
+	const escapedField = escapeRegularExpression(fieldName);
+	const patterns = [
+		new RegExp(
+			`\\block\\s*\\(\\s*&\\s*self\\s*\\.\\s*${escapedField}\\s*\\)`,
+			"g",
+		),
+		new RegExp(`\\bself\\s*\\.\\s*${escapedField}\\s*\\.\\s*lock\\s*\\(`, "g"),
+	];
+	return patterns
+		.flatMap((pattern) =>
+			[...body.matchAll(pattern)].map((match) => match.index),
+		)
+		.sort((left, right) => left - right);
+}
+
+function deleteServiceLockOrderIsExact(serviceSource) {
+	const windowImpls = extractNamedImplBodies(serviceSource, "WindowWorkspace");
+	if (windowImpls.length !== 1) {
+		return false;
+	}
+	for (const { service } of WORKSPACE_DELETE_COMMAND_CONTRACTS) {
+		const functions = extractRustFunctions(windowImpls[0], service);
+		if (functions.length !== 1) {
+			return false;
+		}
+		const mutationLocks = rustLockOffsets(functions[0].body, "mutation_gate");
+		const stateLocks = rustLockOffsets(functions[0].body, "state");
+		if (
+			mutationLocks.length !== 1 ||
+			stateLocks.length < 1 ||
+			stateLocks.some((offset) => offset < mutationLocks[0])
+		) {
+			return false;
+		}
+	}
+	return true;
+}
+
+function deleteServiceRoutesAreUnique(serviceSource) {
+	const serviceImpls = extractNamedImplBodies(
+		serviceSource,
+		"WorkspaceService",
+	);
+	if (serviceImpls.length !== 1) {
+		return false;
+	}
+	for (const { service } of WORKSPACE_DELETE_COMMAND_CONTRACTS) {
+		const functions = extractRustFunctions(serviceImpls[0], service);
+		if (functions.length !== 1) {
+			return false;
+		}
+		const route = new RegExp(
+			`\\bworkspace\\s*\\.\\s*${escapeRegularExpression(service)}\\s*\\(`,
+			"g",
+		);
+		if ([...functions[0].body.matchAll(route)].length !== 1) {
+			return false;
+		}
+	}
+	return true;
+}
+
+function deleteRemovalHelperIsExact(deleteSource) {
+	const helpers = extractRustFunctions(deleteSource, "remove_verified_entry");
+	if (helpers.length !== 1) {
+		return false;
+	}
+	const [helper] = helpers;
+	const parameters = helper.parameters.replaceAll(/\s+/g, "");
+	if (
+		!/(?:^|,)parent:&Dir(?=,|$)/.test(parameters) ||
+		!/(?:^|,)basename:&Path(?=,|$)/.test(parameters)
+	) {
+		return false;
+	}
+	const removeFileCalls = methodCalls(deleteSource, "remove_file");
+	const removeDirectoryCalls = methodCalls(deleteSource, "remove_dir");
+	const references = [
+		...deleteSource.matchAll(/\b(?:remove_file|remove_dir)\b/g),
+	].length;
+	const helperCalls = extractCallArguments(
+		deleteSource,
+		"remove_verified_entry",
+	).filter((call) => !/\bfn\s*$/.test(deleteSource.slice(0, call.index)));
+	const allowedCallers = new Map([
+		["delete_top_leaf", 1],
+		["delete_directory", 1],
+		["delete_manifest_entry", 3],
+	]);
+	const observedCallers = new Map(
+		[...allowedCallers.keys()].map((name) => [name, 0]),
+	);
+	const functions = extractAllRustFunctions(deleteSource);
+	for (const call of helperCalls) {
+		const containing = functions
+			.filter((fn) => fn.bodyStart <= call.index && call.index < fn.bodyEnd)
+			.sort((left, right) => right.bodyStart - left.bodyStart)[0];
+		if (containing === undefined || !allowedCallers.has(containing.name)) {
+			return false;
+		}
+		observedCallers.set(
+			containing.name,
+			observedCallers.get(containing.name) + 1,
+		);
+	}
+	return (
+		removeFileCalls.length === 1 &&
+		removeDirectoryCalls.length === 1 &&
+		exactMethodCall(
+			deleteSource,
+			removeFileCalls[0],
+			/\bparent\s*\.\s*$/,
+			"basename",
+		) &&
+		exactMethodCall(
+			deleteSource,
+			removeDirectoryCalls[0],
+			/\bparent\s*\.\s*$/,
+			"basename",
+		) &&
+		references === 2 &&
+		[...allowedCallers].every(
+			([name, count]) => observedCallers.get(name) === count,
+		)
+	);
+}
+
+function deleteLimitsAreExact(deleteSource) {
+	for (const [name, value, integerType] of WORKSPACE_DELETE_LIMITS) {
+		const declarations = findWorkspaceCopyLimitDeclarations(
+			deleteSource,
+			name,
+			integerType,
+		);
+		const references = [
+			...deleteSource.matchAll(
+				new RegExp(`\\b${escapeRegularExpression(name)}\\b`, "g"),
+			),
+		];
+		if (
+			declarations.length !== 1 ||
+			evaluateSmallRustIntegerExpression(declarations[0]) !== value ||
+			references.length < 2
+		) {
+			return false;
+		}
+	}
+	return true;
+}
+
+function deleteTtlIsExact(serviceSource) {
+	const declarations = [
+		...serviceSource.matchAll(
+			/^\s*(?:pub(?:\s*\([^)]*\))?\s+)?const\s+DELETE_BATCH_IDLE_TTL\s*:\s*Duration\s*=\s*Duration\s*::\s*from_secs\s*\(\s*([^)]*)\s*\)\s*;/gm,
+		),
+	];
+	const references = [...serviceSource.matchAll(/\bDELETE_BATCH_IDLE_TTL\b/g)];
+	return (
+		declarations.length === 1 &&
+		evaluateSmallRustIntegerExpression(declarations[0][1]) === 120 &&
+		references.length >= 2
+	);
+}
+
+function deleteContentReadBypass(executableDelete) {
+	const readCalls = methodCalls(executableDelete, "read");
+	if (
+		readCalls.some(
+			(call) =>
+				!exactMethodCall(executableDelete, call, /\boptions\s*\.\s*$/, "true"),
+		)
+	) {
+		return true;
+	}
+	for (const methodName of [
+		"bytes",
+		"fill_buf",
+		"read_buf",
+		"read_buf_exact",
+		"read_exact",
+		"read_line",
+		"read_to_end",
+		"read_to_string",
+		"read_vectored",
+	]) {
+		if (methodCalls(executableDelete, methodName).length > 0) {
+			return true;
+		}
+	}
+	for (const match of executableDelete.matchAll(
+		/\b(?:pub(?:\s*\([^)]*\))?\s+)?use\s+([^;]+);/g,
+	)) {
+		const clause = match[1];
+		if (
+			(/\bstd\s*::[\s\S]*\bio\b/.test(clause) &&
+				(/\b(?:Read|BufRead|AsyncRead|AsyncReadExt|prelude)\b/.test(clause) ||
+					/\*/.test(clause))) ||
+			(/\bstd\s*::[\s\S]*\bio\b/.test(clause) &&
+				/\b(?:io|self)\s+as\s+[A-Za-z_]\w*/.test(clause)) ||
+			/\bstd\s+as\s+[A-Za-z_]\w*/.test(clause)
+		) {
+			return true;
+		}
+	}
+	return (
+		/\bextern\s+crate\s+std\b/.test(executableDelete) ||
+		/\b(?:std\s*::\s*)?io\s*::\s*(?:Read|BufRead|AsyncRead|AsyncReadExt)\b/.test(
+			executableDelete,
+		) ||
+		/\b(?:Read|BufRead|AsyncRead|AsyncReadExt)\s*::\s*(?:read|bytes|fill_buf|read_buf|read_exact|read_line|read_to_end|read_to_string|read_vectored)\b/.test(
+			executableDelete,
+		) ||
+		/\b(?:std\s*::\s*)?io\s*::\s*copy\b/.test(executableDelete)
+	);
+}
+
+function rustStructFieldsAreExact(source, typeName, expectedFields) {
+	const bodies = extractNamedStructBody(source, typeName);
+	if (bodies.length !== 1) {
+		return false;
+	}
+	const fields = splitTopLevelComma(bodies[0]).map((field) =>
+		field.replaceAll(/\s+/g, ""),
+	);
+	return sameArray(fields, expectedFields);
+}
+
+function rustTypeIsNonClone(source, typeName) {
+	const definitionPattern = new RegExp(
+		`\\b(?:struct|enum)\\s+${escapeRegularExpression(typeName)}\\b`,
+		"g",
+	);
+	const definitions = [...source.matchAll(definitionPattern)];
+	if (definitions.length !== 1) {
+		return false;
+	}
+	const prefix = source.slice(0, definitions[0].index);
+	const attributes = /(?:#\s*\[[^\]]*\]\s*)+$/.exec(prefix)?.[0] ?? "";
+	if (/\bClone\b/.test(attributes)) {
+		return false;
+	}
+	const cloneImplementation = new RegExp(
+		`\\bimpl(?:\\s*<[^>]*>)?\\s+(?:(?:[A-Za-z_]\\w*)\\s*::\\s*)*Clone\\s+for\\s+(?:(?:crate|self|super)\\s*::\\s*(?:[A-Za-z_]\\w*\\s*::\\s*)*)?${escapeRegularExpression(typeName)}\\b`,
+	);
+	return !cloneImplementation.test(source);
+}
+
+function compactDeleteStructuresAreExact(source) {
+	return (
+		rustStructFieldsAreExact(source, "DeleteEntryReceipt", [
+			"parent_chain:Vec<FileIdentity>",
+			"kind:DeleteReceiptKind",
+		]) &&
+		rustStructFieldsAreExact(source, "ManifestEntry", [
+			"name:String",
+			"parent:DirectoryIndex",
+			"kind:ManifestEntryKind",
+		]) &&
+		["DirectoryReceipt", "ManifestEntry", "AliasJournal"].every((typeName) =>
+			rustTypeIsNonClone(source, typeName),
+		)
+	);
+}
+
+function deleteAliasJournalAvoidsWholeSetClones(source) {
+	if (
+		/\bremaining_indices\b[^;\n]*\.\s*(?:clone|to_owned)\s*\(|\bremaining_indices\b[^;\n]*\.\s*iter\s*\(\s*\)[^;\n]*\.\s*cloned\s*\(/.test(
+			source,
+		)
+	) {
+		return false;
+	}
+	const functions = [
+		...extractRustFunctions(source, "rebaseline_aliases"),
+		...extractRustFunctions(source, "remove_alias_index"),
+	];
+	if (functions.length !== 2) {
+		return false;
+	}
+	return functions.every(
+		({ body }) =>
+			!/\.\s*cloned\s*\(|\.\s*clone\s*\(|\.\s*to_owned\s*\(|\bremaining_indices\s*\.\s*(?:clone|to_owned)\s*\(/.test(
+				body,
+			),
+	);
+}
+
+function deleteMemberVerificationIsStreaming(source) {
+	const exactFunctions = extractRustFunctions(source, "verify_exact_members");
+	const streamFunctions = extractRustFunctions(source, "verify_member_stream");
+	if (exactFunctions.length !== 1 || streamFunctions.length !== 1) {
+		return false;
+	}
+	const exact = exactFunctions[0].body;
+	const stream = streamFunctions[0].body;
+	const exactParameters = exactFunctions[0].parameters
+		.replaceAll(/\s+/g, "")
+		.replace(/,$/, "");
+	const streamParameters = streamFunctions[0].parameters
+		.replaceAll(/\s+/g, "")
+		.replace(/,$/, "");
+	if (
+		exactParameters !== "directory:&Dir,expected:&BTreeSet<OsString>" ||
+		exactFunctions[0].returnType.replaceAll(/\s+/g, "") !==
+			"->Result<(),DeleteFailure>" ||
+		streamParameters !==
+			"expected:&BTreeSet<OsString>,observed:implIterator<Item=Result<OsString,DeleteFailure>>" ||
+		streamFunctions[0].returnType.replaceAll(/\s+/g, "") !==
+			"->Result<(),DeleteFailure>"
+	) {
+		return false;
+	}
+	if (
+		/\.\s*collect\s*(?:::|\()|\b(?:BTreeSet|Vec)\s*(?:::|<)/.test(exact) ||
+		/\.\s*collect\s*(?:::|\()|\b(?:BTreeSet|Vec)\s*(?:::|<)/.test(stream)
+	) {
+		return false;
+	}
+	const entriesCalls = methodCalls(exact, "entries");
+	const streamCalls = extractCallArguments(
+		exact,
+		"verify_member_stream",
+	).filter((call) => !/\bfn\s*$/.test(exact.slice(0, call.index)));
+	return (
+		entriesCalls.length === 1 &&
+		streamCalls.length === 1 &&
+		streamCalls[0].arguments.replaceAll(/\s+/g, "") === "expected,entries" &&
+		/\bfor\s+name\s+in\s+observed\s*\{/.test(stream) &&
+		/\bif\s*!\s*expected\s*\.\s*contains\s*\(\s*&\s*name\s*\)\s*\{[^}]*\breturn\s+Err\s*\(\s*DeleteFailure\s*::\s*Changed\s*\)\s*;/s.test(
+			stream,
+		) &&
+		/\bobserved_count\s*\.\s*checked_add\s*\(\s*1\s*\)/.test(stream) &&
+		/\bif\s+observed_count\s*>\s*expected\s*\.\s*len\s*\(\s*\)/.test(stream) &&
+		/\bobserved_count\s*==\s*expected\s*\.\s*len\s*\(\s*\)/.test(stream)
+	);
+}
+
+function deleteObservedReceiptDropsBeforeJournal(source) {
+	const functions = extractRustFunctions(source, "delete_verified_entry");
+	if (functions.length !== 1) {
+		return false;
+	}
+	const body = functions[0].body;
+	const binding =
+		/\blet\s+([A-Za-z_]\w*)\s*=\s*match\s+build_entry_receipt\b/.exec(body);
+	if (binding === null) {
+		return false;
+	}
+	const observedName = binding[1];
+	const build = binding.index;
+	const comparison = body.search(
+		new RegExp(
+			`&\\s*${escapeRegularExpression(observedName)}\\s*!=\\s*expected`,
+		),
+	);
+	const drops = extractCallArguments(body, "drop").filter(
+		(call) => call.arguments.trim() === observedName,
+	);
+	const journalOffsets = [
+		body.indexOf("delete_directory", Math.max(build, 0)),
+		body.indexOf("directory_journal", Math.max(build, 0)),
+		body.indexOf("alias_journal", Math.max(build, 0)),
+	].filter((offset) => offset >= 0);
+	if (
+		build < 0 ||
+		comparison < build ||
+		drops.length !== 1 ||
+		drops[0].index < comparison ||
+		journalOffsets.length === 0 ||
+		journalOffsets.some((offset) => offset < drops[0].end)
+	) {
+		return false;
+	}
+	return !new RegExp(`\\b${escapeRegularExpression(observedName)}\\b`).test(
+		body.slice(drops[0].end),
+	);
+}
+
+/**
+ * Audits the source-only, permanent-delete implementation. This deliberately
+ * complements (rather than weakens) the move/staging deletion allowlists.
+ */
+export function validateWorkspaceDeleteBoundary(rustSources) {
+	const failures = [];
+	const deletePath = "src-tauri/src/workspace/delete.rs";
+	const deleteSource = findRustSource(rustSources, deletePath);
+	const serviceSource = findRustSource(
+		rustSources,
+		"src-tauri/src/workspace/service.rs",
+	);
+
+	if (deleteSource === undefined) {
+		return ["workspace delete boundary requires workspace/delete.rs"];
+	}
+	const executableDelete = stripRustCommentsAndLiterals(deleteSource);
+	const duplicateDeleteLimit = rustSources.some(({ relativePath, source }) => {
+		const normalizedPath = relativePath.replaceAll("\\", "/");
+		if (
+			normalizedPath === deletePath ||
+			!WORKSPACE_RUST_SOURCE_PATTERN.test(normalizedPath) ||
+			WORKSPACE_TEST_SOURCE_PATTERN.test(normalizedPath)
+		) {
+			return false;
+		}
+		const executableSource = stripRustCommentsAndLiterals(source);
+		return WORKSPACE_DELETE_LIMITS.some(
+			([name, , integerType]) =>
+				findWorkspaceCopyLimitDeclarations(executableSource, name, integerType)
+					.length > 0,
+		);
+	});
+	if (!deleteLimitsAreExact(executableDelete) || duplicateDeleteLimit) {
+		failures.push(
+			"workspace/delete.rs must define and consume the exact audited delete namespace limits",
+		);
+	}
+	if (
+		/\b(?:MAX_DELETE_(?:FILE|TREE|TOTAL|CONTENT)_BYTES|MAX_COPY_FILE_BYTES|MAX_COPY_TREE_BYTES)\b/.test(
+			executableDelete,
+		) ||
+		/\b(?:sha2|Sha256|Digest|blake3|md5)\b|\bring\s*::\s*digest\b/.test(
+			executableDelete,
+		) ||
+		deleteContentReadBypass(executableDelete)
+	) {
+		failures.push(
+			"workspace/delete.rs must not read or hash ordinary file contents or impose copy byte budgets",
+		);
+	}
+	if (!compactDeleteStructuresAreExact(executableDelete)) {
+		failures.push(
+			"workspace/delete.rs must keep compact index-based receipt structures and non-Clone directory journals",
+		);
+	}
+	if (/\bPathBuf\b|\bto_path_buf\s*\(|\biter_mut\s*\(/.test(executableDelete)) {
+		failures.push(
+			"workspace/delete.rs must not retain full manifest paths or linearly search mutable manifests",
+		);
+	}
+	if (!deleteAliasJournalAvoidsWholeSetClones(executableDelete)) {
+		failures.push(
+			"workspace/delete.rs alias rebaseline must select one remaining index without cloning whole journal sets",
+		);
+	}
+	if (!deleteMemberVerificationIsStreaming(executableDelete)) {
+		failures.push(
+			"workspace/delete.rs must verify observed directory members as a fail-fast stream without collecting a second set",
+		);
+	}
+	if (!deleteObservedReceiptDropsBeforeJournal(executableDelete)) {
+		failures.push(
+			"workspace/delete.rs must explicitly drop the full observed receipt before building delete journals",
+		);
+	}
+
+	const receiptDefinitions = [];
+	let receiptTraitImplementation = false;
+	for (const { relativePath, source } of rustSources) {
+		const normalizedPath = relativePath.replaceAll("\\", "/");
+		if (
+			!RUST_PRODUCTION_SOURCE_PATTERN.test(normalizedPath) ||
+			WORKSPACE_TEST_SOURCE_PATTERN.test(normalizedPath)
+		) {
+			continue;
+		}
+		const executableSource = stripRustCommentsAndLiterals(source);
+		for (const match of executableSource.matchAll(
+			/\b(?:struct|enum)\s+DeleteBatchReceipt\b/g,
+		)) {
+			receiptDefinitions.push({
+				relativePath: normalizedPath,
+				index: match.index,
+			});
+		}
+		if (
+			/\bimpl(?:\s*<[^>]*>)?\s+(?:(?:serde\s*::\s*)?(?:Serialize|Deserialize)|Clone)\s+for\s+DeleteBatchReceipt\b/.test(
+				executableSource,
+			)
+		) {
+			receiptTraitImplementation = true;
+		}
+		if (
+			normalizedPath !== deletePath &&
+			normalizedPath !== "src-tauri/src/workspace/service.rs" &&
+			/\bDeleteBatchReceipt\b/.test(executableSource)
+		) {
+			failures.push(
+				`${normalizedPath} must not expose DeleteBatchReceipt across DTO or IPC boundaries`,
+			);
+		}
+		if (
+			/\b(?:trash(?:_rs)?|RecycleBin|FileAtomicDelete)\b|\btrash(?:_rs)?\s*::/.test(
+				executableSource,
+			)
+		) {
+			failures.push(
+				`${normalizedPath} must not route workspace deletion through Trash or atomic-delete surfaces`,
+			);
+		}
+	}
+	if (
+		receiptDefinitions.length !== 1 ||
+		receiptDefinitions[0]?.relativePath !== deletePath
+	) {
+		failures.push(
+			"DeleteBatchReceipt must have exactly one production definition in workspace/delete.rs",
+		);
+	}
+	if (
+		/#\s*\[\s*derive\s*\([^\]]*\b(?:Serialize|Deserialize|Clone)\b[^\]]*\)\s*\]\s*(?:pub(?:\s*\([^)]*\))?\s+)?(?:struct|enum)\s+DeleteBatchReceipt\b/s.test(
+			executableDelete,
+		) ||
+		/#\s*\[\s*serde\b[^\]]*\]\s*(?:pub(?:\s*\([^)]*\))?\s+)?(?:struct|enum)\s+DeleteBatchReceipt\b/s.test(
+			executableDelete,
+		) ||
+		receiptTraitImplementation
+	) {
+		failures.push(
+			"DeleteBatchReceipt must remain non-Serde and non-Clone Rust-only typestate",
+		);
+	}
+	for (const relativePath of [
+		"src-tauri/src/workspace/dto.rs",
+		"src-tauri/src/workspace/commands.rs",
+		"src-tauri/src/lib.rs",
+	]) {
+		const source = findRustSource(rustSources, relativePath);
+		if (
+			source !== undefined &&
+			/\bDeleteBatchReceipt\b/.test(stripRustCommentsAndLiterals(source))
+		) {
+			failures.push(
+				`${relativePath} must not expose DeleteBatchReceipt across DTO or IPC boundaries`,
+			);
+		}
+	}
+
+	if (!deleteRemovalHelperIsExact(executableDelete)) {
+		failures.push(
+			"workspace/delete.rs must delete only through one audited parent-handle remove_verified_entry helper",
+		);
+	}
+	if (
+		/\.\s*open_dir\s*\(/.test(executableDelete) ||
+		/\bDir\s*::\s*(?:open|from_std_file|from_raw_fd|from_raw_handle|open_ambient_dir)\s*\(/.test(
+			executableDelete,
+		) ||
+		/\bambient_authority\b/.test(executableDelete)
+	) {
+		failures.push(
+			"workspace/delete.rs must reopen directory chains only with capability-relative nofollow operations",
+		);
+	}
+	if (
+		/\b(?:remove_open_dir|remove_open_dir_all|remove_dir_all|unlink|unlinkat)\b/.test(
+			executableDelete,
+		) ||
+		/\bstd\s*::\s*fs\s*::/.test(executableDelete)
+	) {
+		failures.push(
+			"workspace/delete.rs must not use recursive, open-directory, direct-unlink or ambient-fs deletion",
+		);
+	}
+	if (
+		/\b(?:std|tokio|async_process)\s*::\s*(?:\{[^;}]*\bprocess\b|process\b)|\btauri_plugin_shell\b|\b(?:Command|Shell)\s*::\s*new\s*\(/s.test(
+			executableDelete,
+		) ||
+		/\b(?:async_process|duct|subprocess|xshell|walkdir|jwalk|globwalk)\b/.test(
+			executableDelete,
+		) ||
+		/\b(?:libc|nix)\s*::(?:\s*[A-Za-z_]\w*\s*::)*\s*(?:remove|rmdir|system|posix_spawn|execv|execve|fork)\b/.test(
+			executableDelete,
+		) ||
+		/\bignore\s*::\s*(?:Walk|WalkBuilder)\b/.test(executableDelete)
+	) {
+		failures.push(
+			"workspace/delete.rs must not use process, shell or recursive-walker deletion bypasses",
+		);
+	}
+
+	if (serviceSource === undefined) {
+		failures.push("workspace delete boundary requires workspace/service.rs");
+		return failures;
+	}
+	const executableService = stripRustCommentsAndLiterals(serviceSource);
+	if (!deleteTtlIsExact(executableService)) {
+		failures.push(
+			"workspace/service.rs must define and consume a 120-second DELETE_BATCH_IDLE_TTL",
+		);
+	}
+	const activeReceiptFields = [
+		...executableService.matchAll(
+			/\b([A-Za-z_]\w*)\s*:\s*Option\s*<\s*DeleteBatchReceipt\s*>/g,
+		),
+	];
+	if (
+		activeReceiptFields.length !== 1 ||
+		activeReceiptFields[0][1] !== "active_delete_batch"
+	) {
+		failures.push(
+			"WindowWorkspace state must hold exactly one optional active DeleteBatchReceipt",
+		);
+	}
+	if (!deleteServiceRoutesAreUnique(executableService)) {
+		failures.push(
+			"WorkspaceService must define one route for each delete phase and delegate once to WindowWorkspace",
+		);
+	}
+	if (!deleteServiceLockOrderIsExact(executableService)) {
+		failures.push(
+			"every WindowWorkspace delete phase must lock mutation_gate before delete state",
+		);
+	}
+
+	return [...new Set(failures)];
 }
 
 function typeScriptMemberName(member) {
@@ -2498,6 +3324,389 @@ function collectProviderCapabilityFlags(expression, flags) {
 		return true;
 	}
 	return false;
+}
+
+const WORKSPACE_DELETE_TS_COMMANDS = Object.freeze([
+	Object.freeze({
+		command: "workspace_prepare_delete",
+		bridgeMethod: "workspacePrepareDelete",
+	}),
+	Object.freeze({
+		command: "workspace_cancel_delete",
+		bridgeMethod: "workspaceCancelDelete",
+	}),
+	Object.freeze({
+		command: "workspace_begin_delete",
+		bridgeMethod: "workspaceBeginDelete",
+	}),
+	Object.freeze({
+		command: "workspace_commit_delete_entry",
+		bridgeMethod: "workspaceCommitDeleteEntry",
+	}),
+]);
+
+function typeScriptStaticName(node) {
+	if (
+		ts.isIdentifier(node) ||
+		ts.isStringLiteral(node) ||
+		ts.isNoSubstitutionTemplateLiteral(node)
+	) {
+		return node.text;
+	}
+	return undefined;
+}
+
+function containingPropertyName(node) {
+	let current = node.parent;
+	while (current !== undefined) {
+		if (
+			ts.isPropertyAssignment(current) ||
+			ts.isMethodDeclaration(current) ||
+			ts.isMethodSignature(current)
+		) {
+			return typeScriptStaticName(current.name);
+		}
+		if (ts.isSourceFile(current)) {
+			break;
+		}
+		current = current.parent;
+	}
+	return undefined;
+}
+
+function unwrapTypeScriptExpression(node) {
+	let current = node;
+	while (
+		ts.isParenthesizedExpression(current) ||
+		ts.isAsExpression(current) ||
+		ts.isTypeAssertionExpression(current) ||
+		ts.isNonNullExpression(current) ||
+		ts.isSatisfiesExpression(current)
+	) {
+		current = current.expression;
+	}
+	return current;
+}
+
+function evaluateStaticTypeScriptString(node) {
+	const current = unwrapTypeScriptExpression(node);
+	if (
+		ts.isStringLiteral(current) ||
+		ts.isNoSubstitutionTemplateLiteral(current)
+	) {
+		return current.text;
+	}
+	if (
+		ts.isBinaryExpression(current) &&
+		current.operatorToken.kind === ts.SyntaxKind.PlusToken
+	) {
+		const left = evaluateStaticTypeScriptString(current.left);
+		const right = evaluateStaticTypeScriptString(current.right);
+		return left === undefined || right === undefined ? undefined : left + right;
+	}
+	if (ts.isTemplateExpression(current)) {
+		let value = current.head.text;
+		for (const span of current.templateSpans) {
+			const expression = evaluateStaticTypeScriptString(span.expression);
+			if (expression === undefined) {
+				return undefined;
+			}
+			value += expression + span.literal.text;
+		}
+		return value;
+	}
+	return undefined;
+}
+
+function collectTypeScriptBridgeAliases(sourceFile) {
+	const aliases = new Set();
+	const candidates = [];
+	function collect(node) {
+		if (
+			ts.isParameter(node) &&
+			ts.isIdentifier(node.name) &&
+			(/bridge/i.test(node.name.text) ||
+				(node.type !== undefined &&
+					/\bPlainBridge\b/.test(node.type.getText(sourceFile))))
+		) {
+			aliases.add(node.name.text);
+		}
+		if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+			if (
+				/bridge/i.test(node.name.text) ||
+				(node.type !== undefined &&
+					/\bPlainBridge\b/.test(node.type.getText(sourceFile))) ||
+				(node.initializer !== undefined &&
+					(ts.isAsExpression(node.initializer) ||
+						ts.isTypeAssertionExpression(node.initializer)) &&
+					/\bPlainBridge\b/.test(node.initializer.type.getText(sourceFile)))
+			) {
+				aliases.add(node.name.text);
+			}
+			if (node.initializer !== undefined) {
+				candidates.push({ name: node.name.text, value: node.initializer });
+			}
+		}
+		if (
+			ts.isBinaryExpression(node) &&
+			node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+			ts.isIdentifier(node.left)
+		) {
+			candidates.push({ name: node.left.text, value: node.right });
+		}
+		ts.forEachChild(node, collect);
+	}
+	collect(sourceFile);
+
+	const isKnownBridge = (node) => {
+		const current = unwrapTypeScriptExpression(node);
+		if (ts.isIdentifier(current)) {
+			return aliases.has(current.text) || /bridge/i.test(current.text);
+		}
+		if (ts.isPropertyAccessExpression(current)) {
+			return /bridge/i.test(current.name.text);
+		}
+		return (
+			ts.isCallExpression(current) &&
+			ts.isIdentifier(current.expression) &&
+			/^create(?:Native|BrowserMock)?Bridge$/.test(current.expression.text)
+		);
+	};
+	let changed = true;
+	while (changed) {
+		changed = false;
+		for (const candidate of candidates) {
+			if (!aliases.has(candidate.name) && isKnownBridge(candidate.value)) {
+				aliases.add(candidate.name);
+				changed = true;
+			}
+		}
+	}
+	return isKnownBridge;
+}
+
+/**
+ * During the Rust/bridge slice no application feature is allowed to consume a
+ * delete token. The future coordinator/provider/Workbench authorization patch
+ * will replace this zero-consumer gate with its own audited route atomically.
+ */
+export function validateWorkspaceDeleteTypeScriptBoundary(appSources) {
+	const failures = [];
+	const commandOccurrences = new Map(
+		WORKSPACE_DELETE_TS_COMMANDS.map(({ command }) => [command, []]),
+	);
+	const bridgeMethods = new Set(
+		WORKSPACE_DELETE_TS_COMMANDS.map(({ bridgeMethod }) => bridgeMethod),
+	);
+	const declarationCounts = new Map(
+		[
+			"app/platform/tauri/contracts.ts",
+			"app/platform/tauri/native.ts",
+			"app/platform/tauri/browser-mock.ts",
+		].flatMap((relativePath) =>
+			[...bridgeMethods].map((bridgeMethod) => [
+				`${relativePath}:${bridgeMethod}`,
+				0,
+			]),
+		),
+	);
+	let exactInvokeImportCount = 0;
+
+	for (const { relativePath, source } of appSources) {
+		const normalizedPath = relativePath.replaceAll("\\", "/");
+		const sourceFile = ts.createSourceFile(
+			normalizedPath,
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			normalizedPath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+		);
+		const isKnownBridge = collectTypeScriptBridgeAliases(sourceFile);
+		for (const statement of sourceFile.statements) {
+			if (
+				!ts.isImportDeclaration(statement) ||
+				!ts.isStringLiteral(statement.moduleSpecifier) ||
+				statement.moduleSpecifier.text !== "@tauri-apps/api/core"
+			) {
+				continue;
+			}
+			const bindings = statement.importClause?.namedBindings;
+			const isExactInvokeImport =
+				normalizedPath === "app/platform/tauri/native.ts" &&
+				bindings !== undefined &&
+				ts.isNamedImports(bindings) &&
+				bindings.elements.length === 1 &&
+				bindings.elements[0].propertyName === undefined &&
+				bindings.elements[0].name.text === "invoke";
+			if (!isExactInvokeImport) {
+				failures.push(
+					`${normalizedPath} must import invoke from @tauri-apps/api/core only as the direct native bridge binding`,
+				);
+			} else {
+				exactInvokeImportCount += 1;
+			}
+		}
+		function visit(node) {
+			if (
+				ts.isStringLiteral(node) ||
+				ts.isNoSubstitutionTemplateLiteral(node)
+			) {
+				if (
+					node.text === "@tauri-apps/api/core" &&
+					(!ts.isImportDeclaration(node.parent) ||
+						node.parent.moduleSpecifier !== node)
+				) {
+					failures.push(
+						`${normalizedPath} must not load @tauri-apps/api/core dynamically`,
+					);
+				}
+				const contract = WORKSPACE_DELETE_TS_COMMANDS.find(
+					({ command }) => command === node.text,
+				);
+				if (contract !== undefined) {
+					if (ts.isStringLiteral(node)) {
+						commandOccurrences.get(contract.command).push(normalizedPath);
+					}
+					const call = node.parent;
+					const isInvokeArgument =
+						normalizedPath === "app/platform/tauri/native.ts" &&
+						ts.isCallExpression(call) &&
+						call.arguments[0] === node &&
+						ts.isIdentifier(call.expression) &&
+						call.expression.text === "invoke" &&
+						containingPropertyName(node) === contract.bridgeMethod;
+					if (!isInvokeArgument) {
+						failures.push(
+							`${contract.command} must appear only as the direct invoke command of native ${contract.bridgeMethod}`,
+						);
+					}
+				}
+			}
+
+			if (ts.isCallExpression(node)) {
+				const callee = unwrapTypeScriptExpression(node.expression);
+				if (ts.isIdentifier(callee) && callee.text === "invoke") {
+					if (
+						normalizedPath !== "app/platform/tauri/native.ts" ||
+						node.arguments.length < 1 ||
+						!ts.isStringLiteral(node.arguments[0])
+					) {
+						failures.push(
+							`${normalizedPath} must call invoke only with a direct StringLiteral command in the native bridge`,
+						);
+					}
+				} else if (
+					(ts.isPropertyAccessExpression(callee) &&
+						callee.name.text === "invoke") ||
+					(ts.isElementAccessExpression(callee) &&
+						evaluateStaticTypeScriptString(callee.argumentExpression) ===
+							"invoke")
+				) {
+					failures.push(
+						`${normalizedPath} must not access invoke through a namespace or computed property`,
+					);
+				}
+				if (
+					ts.isPropertyAccessExpression(callee) &&
+					callee.expression.getText(sourceFile) === "Reflect" &&
+					(callee.name.text === "get" || callee.name.text === "apply") &&
+					node.arguments[0] !== undefined &&
+					isKnownBridge(node.arguments[0])
+				) {
+					failures.push(
+						`${normalizedPath} must not consume delete bridge methods through Reflect`,
+					);
+				}
+			}
+
+			if (ts.isIdentifier(node) && node.text === "invoke") {
+				const parent = node.parent;
+				const isDirectImport =
+					normalizedPath === "app/platform/tauri/native.ts" &&
+					ts.isImportSpecifier(parent) &&
+					parent.name === node &&
+					parent.propertyName === undefined;
+				const isDirectCall =
+					normalizedPath === "app/platform/tauri/native.ts" &&
+					ts.isCallExpression(parent) &&
+					parent.expression === node &&
+					parent.arguments[0] !== undefined &&
+					ts.isStringLiteral(parent.arguments[0]);
+				if (!isDirectImport && !isDirectCall) {
+					failures.push(
+						`${normalizedPath} must not alias, re-export or indirectly reference invoke`,
+					);
+				}
+			}
+
+			if (ts.isElementAccessExpression(node)) {
+				const property = evaluateStaticTypeScriptString(
+					node.argumentExpression,
+				);
+				if (bridgeMethods.has(property) || isKnownBridge(node.expression)) {
+					failures.push(
+						`${normalizedPath} must not consume delete bridge methods through computed access`,
+					);
+				}
+			}
+
+			let referencedMethod;
+			if (ts.isIdentifier(node) && bridgeMethods.has(node.text)) {
+				referencedMethod = node.text;
+			} else if (
+				(ts.isStringLiteral(node) ||
+					ts.isNoSubstitutionTemplateLiteral(node)) &&
+				bridgeMethods.has(node.text)
+			) {
+				referencedMethod = node.text;
+			}
+			if (referencedMethod !== undefined) {
+				const parent = node.parent;
+				const isAllowedDeclaration =
+					(normalizedPath === "app/platform/tauri/contracts.ts" &&
+						ts.isMethodSignature(parent) &&
+						parent.name === node) ||
+					(normalizedPath === "app/platform/tauri/native.ts" &&
+						ts.isPropertyAssignment(parent) &&
+						parent.name === node) ||
+					(normalizedPath === "app/platform/tauri/browser-mock.ts" &&
+						(ts.isMethodDeclaration(parent) ||
+							ts.isPropertyAssignment(parent)) &&
+						parent.name === node);
+				if (isAllowedDeclaration) {
+					const key = `${normalizedPath}:${referencedMethod}`;
+					declarationCounts.set(key, declarationCounts.get(key) + 1);
+				} else {
+					failures.push(
+						`${normalizedPath} must not consume ${referencedMethod} before the audited delete coordinator and provider authorization patch land`,
+					);
+				}
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(sourceFile);
+	}
+
+	for (const { command } of WORKSPACE_DELETE_TS_COMMANDS) {
+		if (commandOccurrences.get(command).length !== 1) {
+			failures.push(
+				`${command} must have exactly one production TypeScript invoke route`,
+			);
+		}
+	}
+	if (exactInvokeImportCount !== 1) {
+		failures.push(
+			"app/platform/tauri/native.ts must contain exactly one direct invoke import",
+		);
+	}
+	for (const [declaration, count] of declarationCounts) {
+		if (count !== 1) {
+			failures.push(
+				`${declaration} must have exactly one audited delete bridge declaration`,
+			);
+		}
+	}
+	return [...new Set(failures)];
 }
 
 export function validateWorkspaceProviderCopyBoundary(source) {
@@ -2635,6 +3844,15 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		if (ts.isIdentifier(node) && node.text === "FileFolderCopy") {
 			failures.push(
 				"Plain workspace provider must not advertise FileFolderCopy before activation",
+			);
+			return;
+		}
+		if (
+			ts.isIdentifier(node) &&
+			(node.text === "Trash" || node.text === "FileAtomicDelete")
+		) {
+			failures.push(
+				`Plain workspace provider must not advertise ${node.text} before activation`,
 			);
 			return;
 		}

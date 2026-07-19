@@ -5,6 +5,8 @@ import { RUNTIME_READY_EVENT, type PlainBridge } from "./contracts";
 import {
 	decodeRuntimeInfo,
 	decodeWorkspaceEntryStat,
+	decodeWorkspaceDeleteBatchPlan,
+	decodeWorkspaceDeleteResult,
 	decodeWorkspaceFileData,
 	decodeWorkspaceMoveResult,
 	decodeWorkspacePickResult,
@@ -12,9 +14,12 @@ import {
 	decodeWorkspaceSnapshot,
 	decodeWorkspaceVoid,
 	frozenWorkspaceCopyRequest,
+	frozenWorkspaceCommitDeleteEntryRequest,
 	frozenWorkspaceCreateEntryRequest,
+	frozenWorkspaceDeleteBatchRequest,
 	frozenWorkspaceEntryRequest,
 	frozenWorkspaceMoveRequest,
+	frozenWorkspacePrepareDeleteRequest,
 	frozenWorkspaceRenameRequest,
 } from "./workspace-codec";
 
@@ -93,6 +98,43 @@ export function createNativeBridge(): PlainBridge {
 			);
 			return decodeWorkspaceMoveResult(
 				await invoke<unknown>("workspace_move", { request }),
+			);
+		},
+		workspacePrepareDelete: async (entries) => {
+			const request = frozenWorkspacePrepareDeleteRequest(entries);
+			return decodeWorkspaceDeleteBatchPlan(
+				await invoke<unknown>("workspace_prepare_delete", { request }),
+				request,
+			);
+		},
+		workspaceCancelDelete: async (confirmationId) => {
+			const request = frozenWorkspaceDeleteBatchRequest(confirmationId);
+			decodeWorkspaceVoid(
+				await invoke<unknown>("workspace_cancel_delete", { request }),
+			);
+		},
+		workspaceBeginDelete: async (confirmationId) => {
+			const request = frozenWorkspaceDeleteBatchRequest(confirmationId);
+			decodeWorkspaceVoid(
+				await invoke<unknown>("workspace_begin_delete", { request }),
+			);
+		},
+		workspaceCommitDeleteEntry: async (
+			confirmationId,
+			entryId,
+			rootId,
+			relativePath,
+			recursive,
+		) => {
+			const request = frozenWorkspaceCommitDeleteEntryRequest(
+				confirmationId,
+				entryId,
+				rootId,
+				relativePath,
+				recursive,
+			);
+			return decodeWorkspaceDeleteResult(
+				await invoke<unknown>("workspace_commit_delete_entry", { request }),
 			);
 		},
 		workspaceStat: async (rootId, relativePath) => {

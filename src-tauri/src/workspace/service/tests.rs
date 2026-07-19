@@ -2,14 +2,17 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Barrier, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
 use super::WorkspaceService;
 use crate::error::CommandError;
 use crate::path_policy::RelativePath;
-use crate::workspace::dto::{WorkspaceEntryKind, WorkspacePickRootsMode, WorkspacePickRootsStatus};
+use crate::workspace::dto::{
+    WorkspaceDeleteIncompleteReason, WorkspaceDeleteResult, WorkspaceEntryKind,
+    WorkspacePickRootsMode, WorkspacePickRootsStatus,
+};
 use crate::workspace::picker::{DirectoryPicker, DirectoryPickerFuture, DirectoryPickerResult};
 use crate::workspace::MAX_WORKSPACE_ROOTS;
 
@@ -1783,6 +1786,868 @@ fn blocking_reader_discards_a_result_after_its_window_closes() {
         pending_result.unwrap_err().code(),
         "WORKSPACE_WINDOW_CLOSED"
     );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn confirmed_delete_consumes_file_authorization_once() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::write(root.join("delete.txt"), b"plain").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+
+    let plan =
+        block_on(service.prepare_delete("main", vec![(root_id, relative("delete.txt"), false)]))
+            .unwrap();
+    let confirmation_id = plan.confirmation_id();
+    let entry_id = plan.entries()[0].entry_id();
+    block_on(service.begin_delete("main", confirmation_id)).unwrap();
+    let result = block_on(service.commit_delete_entry(
+        "main",
+        confirmation_id,
+        entry_id,
+        root_id,
+        relative("delete.txt"),
+        false,
+    ))
+    .unwrap();
+    assert_eq!(result, WorkspaceDeleteResult::Deleted);
+    assert_entry_absent(&root.join("delete.txt"));
+
+    let replay = block_on(service.commit_delete_entry(
+        "main",
+        confirmation_id,
+        entry_id,
+        root_id,
+        relative("delete.txt"),
+        false,
+    ))
+    .unwrap_err();
+    assert_eq!(replay.code(), "WORKSPACE_DELETE_PLAN_INVALID");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn delete_cancel_and_second_batch_have_zero_file_side_effects() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::write(root.join("first"), b"first").unwrap();
+    std::fs::write(root.join("second"), b"second").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let plan = block_on(service.prepare_delete("main", vec![(root_id, relative("first"), false)]))
+        .unwrap();
+    let conflict =
+        block_on(service.prepare_delete("main", vec![(root_id, relative("second"), false)]))
+            .unwrap_err();
+    assert_eq!(conflict.code(), "WORKSPACE_CONFLICT");
+
+    block_on(service.cancel_delete("main", plan.confirmation_id())).unwrap();
+    assert_eq!(std::fs::read(root.join("first")).unwrap(), b"first");
+    let replay = block_on(service.cancel_delete("main", plan.confirmation_id())).unwrap_err();
+    assert_eq!(replay.code(), "WORKSPACE_DELETE_PLAN_INVALID");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn begin_revalidates_the_whole_batch_before_any_remove() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::write(root.join("first"), b"first").unwrap();
+    std::fs::write(root.join("last"), b"last").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let plan = block_on(service.prepare_delete(
+        "main",
+        vec![
+            (root_id, relative("first"), false),
+            (root_id, relative("last"), false),
+        ],
+    ))
+    .unwrap();
+    std::fs::write(root.join("last"), b"changed").unwrap();
+
+    let error = block_on(service.begin_delete("main", plan.confirmation_id())).unwrap_err();
+    assert_eq!(error.code(), "WORKSPACE_DELETE_BATCH_CHANGED");
+    assert_eq!(std::fs::read(root.join("first")).unwrap(), b"first");
+    assert_eq!(std::fs::read(root.join("last")).unwrap(), b"changed");
+    assert_eq!(
+        block_on(service.begin_delete("main", plan.confirmation_id()))
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_DELETE_PLAN_INVALID"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn recursive_delete_handles_mixed_tree_raw_symlink_and_hardlink_journal() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::create_dir_all(root.join("tree/nested")).unwrap();
+    std::fs::write(root.join("tree/data"), b"plain").unwrap();
+    std::fs::hard_link(root.join("tree/data"), root.join("tree/nested/alias")).unwrap();
+    symlink("../../outside-sentinel", root.join("tree/nested/link")).unwrap();
+    std::fs::write(root.join("outside-sentinel"), b"outside").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let plan =
+        block_on(service.prepare_delete("main", vec![(root_id, relative("tree"), true)])).unwrap();
+    assert_eq!(plan.entries().len(), 1);
+    let entry_id = plan.entries()[0].entry_id();
+    block_on(service.begin_delete("main", plan.confirmation_id())).unwrap();
+    let result = block_on(service.commit_delete_entry(
+        "main",
+        plan.confirmation_id(),
+        entry_id,
+        root_id,
+        relative("tree"),
+        true,
+    ))
+    .unwrap();
+    assert_eq!(result, WorkspaceDeleteResult::Deleted);
+    assert_entry_absent(&root.join("tree"));
+    assert_eq!(
+        std::fs::read(root.join("outside-sentinel")).unwrap(),
+        b"outside"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn delete_rejects_nonrecursive_nonempty_and_overlapping_selections() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::create_dir(root.join("tree")).unwrap();
+    std::fs::write(root.join("tree/child"), b"child").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    assert_eq!(
+        block_on(service.prepare_delete("main", vec![(root_id, relative("tree"), false)],))
+            .unwrap_err()
+            .code(),
+        "DIRECTORY_NOT_EMPTY"
+    );
+    assert_eq!(
+        block_on(service.prepare_delete(
+            "main",
+            vec![
+                (root_id, relative("tree"), true),
+                (root_id, relative("tree/child"), false),
+            ],
+        ))
+        .unwrap_err()
+        .code(),
+        "WORKSPACE_CONFLICT"
+    );
+    std::fs::write(root.join("hardlink-source"), b"same inode").unwrap();
+    std::fs::hard_link(root.join("hardlink-source"), root.join("hardlink-alias")).unwrap();
+    assert_eq!(
+        block_on(service.prepare_delete(
+            "main",
+            vec![
+                (root_id, relative("hardlink-source"), false),
+                (root_id, relative("hardlink-alias"), false),
+            ],
+        ))
+        .unwrap_err()
+        .code(),
+        "WORKSPACE_CONFLICT"
+    );
+    std::fs::create_dir(root.join("first-tree")).unwrap();
+    std::fs::create_dir(root.join("second-tree")).unwrap();
+    std::fs::write(root.join("first-tree/shared"), b"shared inode").unwrap();
+    std::fs::hard_link(
+        root.join("first-tree/shared"),
+        root.join("second-tree/shared"),
+    )
+    .unwrap();
+    assert_eq!(
+        block_on(service.prepare_delete(
+            "main",
+            vec![
+                (root_id, relative("first-tree"), true),
+                (root_id, relative("second-tree"), true),
+            ],
+        ))
+        .unwrap_err()
+        .code(),
+        "WORKSPACE_CONFLICT"
+    );
+    assert!(root.join("tree/child").is_file());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn delete_plan_expires_at_the_exact_monotonic_deadline() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::write(root.join("entry"), b"plain").unwrap();
+    let now = Arc::new(Mutex::new(Instant::now()));
+    let clock_now = Arc::clone(&now);
+    let service = WorkspaceService::with_delete_clock(Arc::new(move || {
+        *clock_now.lock().expect("test clock")
+    }));
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let before_boundary =
+        block_on(service.prepare_delete("main", vec![(root_id, relative("entry"), false)]))
+            .unwrap();
+    let base = *now.lock().unwrap();
+    *now.lock().unwrap() = base + Duration::from_secs(119);
+    block_on(service.begin_delete("main", before_boundary.confirmation_id())).unwrap();
+    block_on(service.cancel_delete("main", before_boundary.confirmation_id())).unwrap();
+
+    let at_boundary =
+        block_on(service.prepare_delete("main", vec![(root_id, relative("entry"), false)]))
+            .unwrap();
+    *now.lock().unwrap() = base + Duration::from_secs(239);
+
+    let error = block_on(service.begin_delete("main", at_boundary.confirmation_id())).unwrap_err();
+    assert_eq!(error.code(), "WORKSPACE_DELETE_PLAN_INVALID");
+    assert_eq!(std::fs::read(root.join("entry")).unwrap(), b"plain");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn root_lifecycle_invalidates_delete_plan_without_touching_files() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::write(root.join("entry"), b"plain").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let plan = block_on(service.prepare_delete("main", vec![(root_id, relative("entry"), false)]))
+        .unwrap();
+    service.remove_root("main", root_id).unwrap();
+    assert_eq!(
+        block_on(service.begin_delete("main", plan.confirmation_id()))
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_DELETE_PLAN_INVALID"
+    );
+    assert_eq!(std::fs::read(root.join("entry")).unwrap(), b"plain");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn picker_replacement_and_window_close_invalidate_delete_receipts() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    let replacement = create_directory(&temp, "replacement");
+    std::fs::write(root.join("entry"), b"plain").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let replaced_plan =
+        block_on(service.prepare_delete("main", vec![(root_id, relative("entry"), false)]))
+            .unwrap();
+    block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![replacement]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    assert_eq!(
+        block_on(service.begin_delete("main", replaced_plan.confirmation_id()))
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_DELETE_PLAN_INVALID"
+    );
+
+    let restored = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let restored_id = restored.snapshot().roots()[0].root_id();
+    let closed_plan =
+        block_on(service.prepare_delete("main", vec![(restored_id, relative("entry"), false)]))
+            .unwrap();
+    service.close_window("main");
+    assert_eq!(
+        block_on(service.begin_delete("main", closed_plan.confirmation_id()))
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_DELETE_PLAN_INVALID"
+    );
+    assert_eq!(std::fs::read(root.join("entry")).unwrap(), b"plain");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn each_deleted_entry_refreshes_the_executing_batch_idle_deadline() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::write(root.join("first"), b"first").unwrap();
+    std::fs::write(root.join("second"), b"second").unwrap();
+    let now = Arc::new(Mutex::new(Instant::now()));
+    let clock_now = Arc::clone(&now);
+    let service = WorkspaceService::with_delete_clock(Arc::new(move || {
+        *clock_now.lock().expect("test clock")
+    }));
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let plan = block_on(service.prepare_delete(
+        "main",
+        vec![
+            (root_id, relative("first"), false),
+            (root_id, relative("second"), false),
+        ],
+    ))
+    .unwrap();
+    let base = *now.lock().unwrap();
+    block_on(service.begin_delete("main", plan.confirmation_id())).unwrap();
+    *now.lock().unwrap() = base + Duration::from_secs(119);
+    assert_eq!(
+        block_on(service.commit_delete_entry(
+            "main",
+            plan.confirmation_id(),
+            plan.entries()[0].entry_id(),
+            root_id,
+            relative("first"),
+            false,
+        ))
+        .unwrap(),
+        WorkspaceDeleteResult::Deleted
+    );
+    *now.lock().unwrap() = base + Duration::from_secs(121);
+    assert_eq!(
+        block_on(service.commit_delete_entry(
+            "main",
+            plan.confirmation_id(),
+            plan.entries()[1].entry_id(),
+            root_id,
+            relative("second"),
+            false,
+        ))
+        .unwrap(),
+        WorkspaceDeleteResult::Deleted
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_changed_entry_returns_retained_and_invalidates_remaining_batch() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::write(root.join("first"), b"first").unwrap();
+    std::fs::write(root.join("second"), b"second").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let plan = block_on(service.prepare_delete(
+        "main",
+        vec![
+            (root_id, relative("first"), false),
+            (root_id, relative("second"), false),
+        ],
+    ))
+    .unwrap();
+    block_on(service.begin_delete("main", plan.confirmation_id())).unwrap();
+    std::fs::write(root.join("first"), b"changed").unwrap();
+    let result = block_on(service.commit_delete_entry(
+        "main",
+        plan.confirmation_id(),
+        plan.entries()[0].entry_id(),
+        root_id,
+        relative("first"),
+        false,
+    ))
+    .unwrap();
+    assert_eq!(
+        result,
+        WorkspaceDeleteResult::EntryRetained {
+            reason: WorkspaceDeleteIncompleteReason::EntryChanged,
+        }
+    );
+    assert_eq!(std::fs::read(root.join("first")).unwrap(), b"changed");
+    assert_eq!(std::fs::read(root.join("second")).unwrap(), b"second");
+    assert_eq!(
+        block_on(service.commit_delete_entry(
+            "main",
+            plan.confirmation_id(),
+            plan.entries()[1].entry_id(),
+            root_id,
+            relative("second"),
+            false,
+        ))
+        .unwrap_err()
+        .code(),
+        "WORKSPACE_DELETE_PLAN_INVALID"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn delete_accepts_a_full_64_entry_batch_in_exact_input_order() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let entries = (0..64)
+        .map(|index| {
+            let name = format!("entry-{index:02}");
+            std::fs::write(root.join(&name), name.as_bytes()).unwrap();
+            (root_id, relative(&name), false)
+        })
+        .collect::<Vec<_>>();
+    let plan = block_on(service.prepare_delete("main", entries.clone())).unwrap();
+    assert_eq!(plan.entries().len(), 64);
+    block_on(service.begin_delete("main", plan.confirmation_id())).unwrap();
+    for (entry, (root_id, path, recursive)) in plan.entries().iter().zip(entries) {
+        let result = block_on(service.commit_delete_entry(
+            "main",
+            plan.confirmation_id(),
+            entry.entry_id(),
+            root_id,
+            path,
+            recursive,
+        ))
+        .unwrap();
+        assert_eq!(result, WorkspaceDeleteResult::Deleted);
+    }
+    assert_eq!(std::fs::read_dir(root).unwrap().count(), 0);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn delete_plans_large_files_without_copy_content_limits() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    let large = root.join("large.bin");
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&large)
+        .unwrap();
+    file.set_len(9 * 1_024 * 1_024).unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let plan =
+        block_on(service.prepare_delete("main", vec![(root_id, relative("large.bin"), false)]))
+            .unwrap();
+    block_on(service.begin_delete("main", plan.confirmation_id())).unwrap();
+    assert_eq!(
+        block_on(service.commit_delete_entry(
+            "main",
+            plan.confirmation_id(),
+            plan.entries()[0].entry_id(),
+            root_id,
+            relative("large.bin"),
+            false,
+        ))
+        .unwrap(),
+        WorkspaceDeleteResult::Deleted
+    );
+    assert_entry_absent(&large);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn delete_rejects_special_files_before_any_batch_side_effect() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    let special = root.join("pipe");
+    let wire = CString::new(special.as_os_str().as_bytes()).unwrap();
+    // SAFETY: `wire` is a NUL-terminated copy of the temporary test path.
+    assert_eq!(unsafe { libc::mkfifo(wire.as_ptr(), 0o600) }, 0);
+    std::fs::write(root.join("ordinary"), b"ordinary").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let error = block_on(service.prepare_delete(
+        "main",
+        vec![
+            (root_id, relative("ordinary"), false),
+            (root_id, relative("pipe"), false),
+        ],
+    ))
+    .unwrap_err();
+    assert_eq!(error.code(), "ENTRY_TYPE_MISMATCH");
+    assert_eq!(std::fs::read(root.join("ordinary")).unwrap(), b"ordinary");
+    assert!(std::fs::symlink_metadata(special).is_ok());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn delete_tokens_are_window_bound_and_wrong_entry_options_invalidate_the_batch() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::write(root.join("entry"), b"plain").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let plan = block_on(service.prepare_delete("main", vec![(root_id, relative("entry"), false)]))
+        .unwrap();
+    assert_eq!(
+        block_on(service.begin_delete("other", plan.confirmation_id()))
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_DELETE_PLAN_INVALID"
+    );
+    block_on(service.begin_delete("main", plan.confirmation_id())).unwrap();
+    assert_eq!(
+        block_on(service.commit_delete_entry(
+            "main",
+            plan.confirmation_id(),
+            plan.entries()[0].entry_id(),
+            root_id,
+            relative("entry"),
+            true,
+        ))
+        .unwrap_err()
+        .code(),
+        "WORKSPACE_DELETE_PLAN_INVALID"
+    );
+    assert_eq!(std::fs::read(root.join("entry")).unwrap(), b"plain");
+    assert_eq!(
+        block_on(service.commit_delete_entry(
+            "main",
+            plan.confirmation_id(),
+            plan.entries()[0].entry_id(),
+            root_id,
+            relative("entry"),
+            false,
+        ))
+        .unwrap_err()
+        .code(),
+        "WORKSPACE_DELETE_PLAN_INVALID"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn confirmed_delete_consumes_a_cross_root_batch_in_input_order() {
+    let temp = TempDir::new().unwrap();
+    let first_root = create_directory(&temp, "first-root");
+    let second_root = create_directory(&temp, "second-root");
+    std::fs::write(first_root.join("file"), b"first").unwrap();
+    std::fs::create_dir(second_root.join("empty")).unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![first_root.clone(), second_root.clone()]),
+        WorkspacePickRootsMode::Add,
+    ))
+    .unwrap();
+    let first_id = selected.snapshot().roots()[0].root_id();
+    let second_id = selected.snapshot().roots()[1].root_id();
+    let requests = vec![
+        (first_id, relative("file"), false),
+        (second_id, relative("empty"), false),
+    ];
+    let plan = block_on(service.prepare_delete("main", requests.clone())).unwrap();
+    block_on(service.begin_delete("main", plan.confirmation_id())).unwrap();
+
+    for (entry, (root_id, path, recursive)) in plan.entries().iter().zip(requests) {
+        assert_eq!(
+            block_on(service.commit_delete_entry(
+                "main",
+                plan.confirmation_id(),
+                entry.entry_id(),
+                root_id,
+                path,
+                recursive,
+            ))
+            .unwrap(),
+            WorkspaceDeleteResult::Deleted
+        );
+    }
+    assert_entry_absent(&first_root.join("file"));
+    assert_entry_absent(&second_root.join("empty"));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn confirmed_delete_rejects_a_same_identity_basename_round_trip() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    let entry = root.join("entry");
+    let temporary = root.join("temporary");
+    std::fs::write(&entry, b"plain").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let plan = block_on(service.prepare_delete("main", vec![(root_id, relative("entry"), false)]))
+        .unwrap();
+    let before = std::fs::metadata(&entry).unwrap();
+    let original_permissions = before.permissions();
+
+    std::thread::sleep(Duration::from_millis(2));
+    std::fs::rename(&entry, &temporary).unwrap();
+    let mut toggled = original_permissions.clone();
+    toggled.set_mode(original_permissions.mode() ^ 0o100);
+    std::fs::set_permissions(&temporary, toggled).unwrap();
+    std::fs::set_permissions(&temporary, original_permissions).unwrap();
+    std::fs::rename(&temporary, &entry).unwrap();
+    let after = std::fs::metadata(&entry).unwrap();
+    assert_eq!(before.ino(), after.ino());
+    assert_ne!(
+        (before.ctime(), before.ctime_nsec()),
+        (after.ctime(), after.ctime_nsec())
+    );
+
+    assert_eq!(
+        block_on(service.begin_delete("main", plan.confirmation_id()))
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_DELETE_BATCH_CHANGED"
+    );
+    assert_eq!(std::fs::read(entry).unwrap(), b"plain");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn confirmed_delete_rejects_external_hardlink_count_changes_after_begin() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    let entry = root.join("entry");
+    let alias = root.join("outside-alias");
+    std::fs::write(&entry, b"plain").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let plan = block_on(service.prepare_delete("main", vec![(root_id, relative("entry"), false)]))
+        .unwrap();
+    block_on(service.begin_delete("main", plan.confirmation_id())).unwrap();
+    std::fs::hard_link(&entry, &alias).unwrap();
+
+    assert_eq!(
+        block_on(service.commit_delete_entry(
+            "main",
+            plan.confirmation_id(),
+            plan.entries()[0].entry_id(),
+            root_id,
+            relative("entry"),
+            false,
+        ))
+        .unwrap(),
+        WorkspaceDeleteResult::EntryRetained {
+            reason: WorkspaceDeleteIncompleteReason::EntryChanged,
+        }
+    );
+    assert_eq!(std::fs::read(entry).unwrap(), b"plain");
+    assert_eq!(std::fs::read(alias).unwrap(), b"plain");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn top_level_delete_ignores_special_and_unrepresentable_parent_siblings() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    let target = root.join("target");
+    std::fs::write(&target, b"plain").unwrap();
+    #[cfg(target_os = "linux")]
+    let non_utf8_sibling = {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = root.join(OsString::from_vec(vec![b'n', 0xff]));
+        std::fs::write(&path, b"outside").unwrap();
+        path
+    };
+    let fifo = root.join("outside-pipe");
+    let fifo_wire = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    // SAFETY: `fifo_wire` is a NUL-terminated copy of the temporary test path.
+    assert_eq!(unsafe { libc::mkfifo(fifo_wire.as_ptr(), 0o600) }, 0);
+
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let plan = block_on(service.prepare_delete("main", vec![(root_id, relative("target"), false)]))
+        .unwrap();
+    block_on(service.begin_delete("main", plan.confirmation_id())).unwrap();
+    assert_eq!(
+        block_on(service.commit_delete_entry(
+            "main",
+            plan.confirmation_id(),
+            plan.entries()[0].entry_id(),
+            root_id,
+            relative("target"),
+            false,
+        ))
+        .unwrap(),
+        WorkspaceDeleteResult::Deleted
+    );
+    assert_entry_absent(&target);
+    #[cfg(target_os = "linux")]
+    {
+        assert_eq!(std::fs::read(non_utf8_sibling).unwrap(), b"outside");
+    }
+    assert!(std::fs::symlink_metadata(fifo).is_ok());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn concurrent_identical_delete_commits_consume_at_most_once() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    let entry = root.join("entry");
+    std::fs::write(&entry, b"plain").unwrap();
+    let service = Arc::new(WorkspaceService::new());
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let plan = block_on(service.prepare_delete("main", vec![(root_id, relative("entry"), false)]))
+        .unwrap();
+    let confirmation_id = plan.confirmation_id();
+    let entry_id = plan.entries()[0].entry_id();
+    block_on(service.begin_delete("main", confirmation_id)).unwrap();
+
+    let first_service = Arc::clone(&service);
+    let first = tauri::async_runtime::spawn(async move {
+        first_service
+            .commit_delete_entry(
+                "main",
+                confirmation_id,
+                entry_id,
+                root_id,
+                relative("entry"),
+                false,
+            )
+            .await
+    });
+    let second_service = Arc::clone(&service);
+    let second = tauri::async_runtime::spawn(async move {
+        second_service
+            .commit_delete_entry(
+                "main",
+                confirmation_id,
+                entry_id,
+                root_id,
+                relative("entry"),
+                false,
+            )
+            .await
+    });
+    let results = [block_on(first).unwrap(), block_on(second).unwrap()];
+
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Ok(WorkspaceDeleteResult::Deleted)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| result
+                .as_ref()
+                .is_err_and(|error| { error.code() == "WORKSPACE_DELETE_PLAN_INVALID" }))
+            .count(),
+        1
+    );
+    assert_entry_absent(&entry);
 }
 
 fn create_directory(temp: &TempDir, name: &str) -> PathBuf {
