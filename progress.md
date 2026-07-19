@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：无；`PLW1` raw codec 与 Rust staged writer 已完成验收，下一项是 FileService 有界写 consumer、provider rescan/result seam 和 save error UI，尚未开始；provider 继续只读。
+- 当前最小工作项：无；FileService 版本化保存 consumer 已完成，下一项是在 provider 注册前读取严格 `workspace_capabilities` 并按平台原子能力激活写接口；provider 当前继续只读。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -55,12 +55,13 @@
 - [x] 版本化读取切片通过完整 `pnpm check`：15 个 TypeScript/JavaScript 测试文件、278 个用例、207 个 Rust 测试、格式、双 TypeScript 类型检查、严格 lint、架构/五补丁闭集 guard、前端构建及 2101-source/203-debt bundle 基线全部通过；真实 Chromium E2E 3/3 覆盖 Workbench 启动和 `ArrayBuffer`/`number[]` 两条 PLR1 transport。独立 Rust/TS/Workbench 攻击审查无剩余 P0/P1/P2；验收期间额外修复了 8 MiB descriptor 放大、symlinkDirectory 展开、共享 parent writer eligibility、TypedArray Proxy 稳定拒绝、JSON import attribute 和受审计 bounded raw symlink probe 复用。
 - [x] 完成 `PLW1` 版本化原子写底层切片：前端以私有 exact `Uint8Array` snapshot 编码 8 MiB raw frame，Rust 在 mutation gate 内执行 current-root parent/target/stage 逐层回执、单次 `renameat` 发布与闭集 post-rename typestate；reported rename failure 只有在重验并删除自有 stage、确认已打开 fd 的 `nlink == 0`、最后确认 old target 后才返回普通错误，panic/真实外层 `JoinError` 与所有不可信 IPC 响应统一降级为 `responseUnavailable`。严格 native bridge、Browser mock、私有 Rust wire constructors 和 Harness hostile mutations 同步落地，provider 仍全局只读。
 - [x] `PLW1` 底层切片通过完整 `pnpm check`：15 个 TypeScript/JavaScript 测试文件、303 个用例、228 个 Rust 测试、格式、双 TypeScript 类型检查、严格 lint、生产构建、架构/PLW1 mutation guard 及 2101-source/203-debt bundle 基线全部通过；真实 Chromium E2E 3/3 继续覆盖 Workbench 启动、Explorer 打开文件和两种 PLR1 transport。独立 Rust/TS 攻击复核最终无 P0/P1；额外锁定 owned-stage unlink 参数/顺序/nlink 后验、私有 wire 构造器、exact ordinary-error whitelist、Rust 可表示终态、`spawn_blocking` JoinResult 数据流和 early-return 绕过。
+- [x] 完成 FileService 版本化保存 consumer：Plain existing save 必须携带精确旧 `wv1`，四种输入在任何通用 peek/无界 converter 前由单一 8 MiB 累积区收集，队列内只调用 provider 私有 `plainWriteFile`；严格 `written.stat` 直接生成冻结 write receipt、只发一次 WRITE 且不再 post-stat，发布不完整或结果未知通过不可伪造 WeakMap 品牌错误保留闭集终态。provider 对非成功终态先发 root `UPDATED`，公共能力和标准写接口继续只读；两个模型只接纳三种权威 baseline 来源，未决保存会阻断显式、自动、force、queued 与 `ignoreErrorHandler` 重放，两个 Plain 错误处理器只提供 Reload、Save As、Details。
+- [x] 版本化保存 consumer 通过完整验收：17 个 TypeScript/JavaScript 测试文件、345 个用例和 228 个 Rust 测试通过，格式、双 TypeScript 类型检查、严格 lint、生产构建、五补丁 SHA/hunk/lock graph、provider 写 seam、collector/终态 hostile mutations、2101-source/203-debt bundle 基线全部通过；真实 Chromium E2E 3/3 继续覆盖 Workbench 启动、Explorer 与两种 PLR1 transport。独立 FileService/模型/UI 终审无剩余 P0/P1；测试覆盖 8 MiB+1、零进展、stream destroy、mtime 回拨 A→B→C、保存中再编辑、旧 token queued replay、unknown 前延迟 PLR1、大小写 comparison-key 碰撞、恶意回执、品牌伪造和无 Retry/Overwrite 动作。
 
 ## 下一步
 
-1. 实现FileService 8 MiB+1 bounded collector/write receipt、provider rescan/result seam、dispatch后unknown分类和两个save error handler的无Retry/Overwrite UI；完成package/runtime/Harness验收后立即独立提交，provider仍只读。
-2. 在provider注册前读取严格`workspace_capabilities` DTO，增加copy/move同路径、overwrite、自动mkdirp、generic fallback与cross-scheme防绕过patch，并按Rust平台能力激活写能力与Browser E2E；不支持原子no-replace rename的平台继续只读。
-3. 实现watcher/rescan，最后运行真实Tauri文件树总验收并写回`F020` evidence。
+1. 在provider注册前读取严格`workspace_capabilities` DTO，增加copy/move同路径、overwrite、自动mkdirp、generic fallback与cross-scheme防绕过patch，并按Rust平台能力激活写能力与Browser E2E；不支持原子no-replace rename的平台继续只读。
+2. 实现watcher/rescan，最后运行真实Tauri文件树总验收并写回`F020` evidence。
 
 ## 当前验收命令
 

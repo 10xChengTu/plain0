@@ -10,6 +10,157 @@ index 018691b598a8aa41da826da3e6a1100fa4929b97..ac7d4eb9521ed4c2d7ce38cb13060d90
  import './vscode/src/vs/workbench/contrib/dropOrPasteInto/browser/dropOrPasteInto.contribution.js';
  import './vscode/src/vs/workbench/contrib/meteredConnection/browser/meteredConnection.contribution.js';
  import './vscode/src/vs/workbench/contrib/inlineCompletions/browser/inlineCompletions.contribution.js';
+diff --git a/vscode/src/vs/platform/files/common/files.d.ts b/vscode/src/vs/platform/files/common/files.d.ts
+index 217e68b81ae5b921ecb15f866edd5f861f081f2e..43b7a7b7294045784b0e051fec711f9b3c49ea0e 100644
+--- a/vscode/src/vs/platform/files/common/files.d.ts
++++ b/vscode/src/vs/platform/files/common/files.d.ts
+@@ -775,6 +775,40 @@ export declare class FileOperationError extends Error {
+     readonly options?: (IReadFileOptions | IWriteFileOptions | ICreateFileOptions) | undefined;
+     constructor(message: string, fileOperationResult: FileOperationResult, options?: (IReadFileOptions | IWriteFileOptions | ICreateFileOptions) | undefined);
+ }
++export type PlainWorkspaceWriteOutcome = Readonly<{
++    readonly status: "targetPublished";
++    readonly publicationEvidence: "targetObservedWritten";
++    readonly rename: "reportedSuccess";
++    readonly directorySync: "failed";
++    readonly target: "matchesWritten";
++}> | Readonly<{
++    readonly status: "targetPublished";
++    readonly publicationEvidence: "renameReportedSuccess";
++    readonly rename: "reportedSuccess";
++    readonly directorySync: "synced" | "failed";
++    readonly target: "changed" | "unverifiable";
++}> | Readonly<{
++    readonly status: "targetPublished";
++    readonly publicationEvidence: "targetObservedWritten";
++    readonly rename: "reportedFailure";
++    readonly directorySync: "synced" | "failed";
++    readonly target: "matchesWritten" | "changed" | "unverifiable";
++}> | Readonly<{
++    readonly status: "outcomeUnknown";
++    readonly observation: "native";
++    readonly rename: "reportedFailure";
++    readonly directorySync: "notAttempted";
++    readonly target: "ambiguous";
++}> | Readonly<{
++    readonly status: "outcomeUnknown";
++    readonly observation: "responseUnavailable";
++    readonly rename: "unobserved";
++    readonly directorySync: "unobserved";
++    readonly target: "ambiguous";
++}>;
++export declare function createPlainWorkspaceWriteOutcomeError(outcome: PlainWorkspaceWriteOutcome, options?: IWriteFileOptions): FileOperationError;
++export declare function isPlainWorkspaceWriteOutcomeError(error: unknown): error is FileOperationError;
++export declare function getPlainWorkspaceWriteOutcome(error: unknown): PlainWorkspaceWriteOutcome | undefined;
+ export declare class TooLargeFileOperationError extends FileOperationError {
+     readonly fileOperationResult: FileOperationResult.FILE_TOO_LARGE;
+     readonly size: number;
+diff --git a/vscode/src/vs/platform/files/common/files.js b/vscode/src/vs/platform/files/common/files.js
+index 0ec5225b326fbfa5c0225f4d96fffc251ea6a301..053504dc5cd4b8fcb0c5717e0c74ab1b2a39ab99 100644
+--- a/vscode/src/vs/platform/files/common/files.js
++++ b/vscode/src/vs/platform/files/common/files.js
+@@ -346,6 +346,95 @@ var FileOperationResult;
+     FileOperationResult[FileOperationResult["FILE_NOT_DIRECTORY"] = 9] = "FILE_NOT_DIRECTORY";
+     FileOperationResult[FileOperationResult["FILE_OTHER_ERROR"] = 10] = "FILE_OTHER_ERROR";
+ })(FileOperationResult || (FileOperationResult = {}));
++const plainWorkspaceWriteOutcomeErrors = ( new WeakMap());
++function plainWorkspaceWriteOutcomeSnapshot(value) {
++    try {
++        if (!value || typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype || !Object.isFrozen(value)) {
++            throw ( new Error("PLAIN_WORKSPACE_INVALID_WRITE_OUTCOME: outcome must be one frozen plain object"));
++        }
++        const descriptors = Object.getOwnPropertyDescriptors(value);
++        const keys = Reflect.ownKeys(descriptors);
++        if (keys.some(key => typeof key !== "string")) {
++            throw ( new Error("PLAIN_WORKSPACE_INVALID_WRITE_OUTCOME: outcome keys must be strings"));
++        }
++        for (const key of keys) {
++            const descriptor = descriptors[key];
++            if (!descriptor || !("value" in descriptor) || descriptor.enumerable !== true) {
++                throw ( new Error("PLAIN_WORKSPACE_INVALID_WRITE_OUTCOME: outcome fields must be enumerable own data properties"));
++            }
++        }
++        structuredClone(value);
++        const status = descriptors.status?.value;
++        if (status === "targetPublished") {
++            const expectedKeys = ["status", "publicationEvidence", "rename", "directorySync", "target"];
++            if (keys.length !== expectedKeys.length || !expectedKeys.every(key => keys.includes(key))) {
++                throw ( new Error("PLAIN_WORKSPACE_INVALID_WRITE_OUTCOME: targetPublished fields differ from the closed contract"));
++            }
++            const publicationEvidence = descriptors.publicationEvidence.value;
++            const rename = descriptors.rename.value;
++            const directorySync = descriptors.directorySync.value;
++            const target = descriptors.target.value;
++            const reportedSuccessWithObservedTarget = rename === "reportedSuccess" && publicationEvidence === "targetObservedWritten" && directorySync === "failed" && target === "matchesWritten";
++            const reportedSuccessWithChangedTarget = rename === "reportedSuccess" && publicationEvidence === "renameReportedSuccess" && (directorySync === "synced" || directorySync === "failed") && (target === "changed" || target === "unverifiable");
++            const reportedFailureWithObservedTarget = rename === "reportedFailure" && publicationEvidence === "targetObservedWritten" && (directorySync === "synced" || directorySync === "failed") && (target === "matchesWritten" || target === "changed" || target === "unverifiable");
++            if (!reportedSuccessWithObservedTarget && !reportedSuccessWithChangedTarget && !reportedFailureWithObservedTarget) {
++                throw ( new Error("PLAIN_WORKSPACE_INVALID_WRITE_OUTCOME: targetPublished fields are not Rust-representable"));
++            }
++            return Object.freeze({
++                status,
++                publicationEvidence,
++                rename,
++                directorySync,
++                target
++            });
++        }
++        if (status === "outcomeUnknown") {
++            const expectedKeys = ["status", "observation", "rename", "directorySync", "target"];
++            if (keys.length !== expectedKeys.length || !expectedKeys.every(key => keys.includes(key))) {
++                throw ( new Error("PLAIN_WORKSPACE_INVALID_WRITE_OUTCOME: outcomeUnknown fields differ from the closed contract"));
++            }
++            const observation = descriptors.observation.value;
++            const rename = descriptors.rename.value;
++            const directorySync = descriptors.directorySync.value;
++            const target = descriptors.target.value;
++            const nativeUnknown = observation === "native" && rename === "reportedFailure" && directorySync === "notAttempted" && target === "ambiguous";
++            const responseUnavailable = observation === "responseUnavailable" && rename === "unobserved" && directorySync === "unobserved" && target === "ambiguous";
++            if (!nativeUnknown && !responseUnavailable) {
++                throw ( new Error("PLAIN_WORKSPACE_INVALID_WRITE_OUTCOME: outcomeUnknown fields are not Rust-representable"));
++            }
++            return Object.freeze({
++                status,
++                observation,
++                rename,
++                directorySync,
++                target
++            });
++        }
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_WRITE_OUTCOME: only incomplete or unknown outcomes can be branded"));
++    } catch {
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_WRITE_OUTCOME: outcome validation failed"));
++    }
++}
++class PlainWorkspaceWriteOutcomeError extends FileOperationError {
++    constructor(outcome, options) {
++        const snapshot = plainWorkspaceWriteOutcomeSnapshot(outcome);
++        const message = snapshot.status === "targetPublished" ? "The workspace write may have changed the target file." : "The workspace write result could not be verified.";
++        super(message, FileOperationResult.FILE_OTHER_ERROR, options);
++        plainWorkspaceWriteOutcomeErrors.set(this, snapshot);
++    }
++}
++function createPlainWorkspaceWriteOutcomeError(outcome, options) {
++    return ( new PlainWorkspaceWriteOutcomeError(outcome, options));
++}
++function isPlainWorkspaceWriteOutcomeError(error) {
++    return error instanceof PlainWorkspaceWriteOutcomeError && plainWorkspaceWriteOutcomeErrors.has(error);
++}
++function getPlainWorkspaceWriteOutcome(error) {
++    if (!isPlainWorkspaceWriteOutcomeError(error)) {
++        return undefined;
++    }
++    return plainWorkspaceWriteOutcomeSnapshot(plainWorkspaceWriteOutcomeErrors.get(error));
++}
+ const AutoSaveConfiguration = {
+     OFF: "off",
+     AFTER_DELAY: "afterDelay",
+@@ -437,4 +526,4 @@ function getLargeFileConfirmationLimit(arg) {
+     return 1024 * ByteSize.MB;
+ }
+ 
+-export { AutoSaveConfiguration, ByteSize, ETAG_DISABLED, FILES_ASSOCIATIONS_CONFIG, FILES_EXCLUDE_CONFIG, FILES_READONLY_EXCLUDE_CONFIG, FILES_READONLY_FROM_PERMISSIONS_CONFIG, FILES_READONLY_INCLUDE_CONFIG, FileChangeFilter, FileChangeType, FileChangesEvent, FileKind, FileOperation, FileOperationError, FileOperationEvent, FileOperationResult, FilePermission, FileSystemProviderCapabilities, FileSystemProviderError, FileSystemProviderErrorCode, FileType, HotExitConfiguration, NotModifiedSinceFileOperationError, TooLargeFileOperationError, createFileSystemProviderError, ensureFileSystemProviderError, etag, getLargeFileConfirmationLimit, hasFileAppendCapability, hasFileAtomicDeleteCapability, hasFileAtomicReadCapability, hasFileAtomicWriteCapability, hasFileCloneCapability, hasFileFolderCopyCapability, hasFileReadStreamCapability, hasFileRealpathCapability, hasOpenReadWriteCloseCapability, hasReadWriteCapability, hasReadonlyCapability, isFileOpenForWriteOptions, markAsFileSystemProviderError, toFileOperationResult, toFileSystemProviderErrorCode, whenProviderRegistered };
++export { AutoSaveConfiguration, ByteSize, ETAG_DISABLED, FILES_ASSOCIATIONS_CONFIG, FILES_EXCLUDE_CONFIG, FILES_READONLY_EXCLUDE_CONFIG, FILES_READONLY_FROM_PERMISSIONS_CONFIG, FILES_READONLY_INCLUDE_CONFIG, FileChangeFilter, FileChangeType, FileChangesEvent, FileKind, FileOperation, FileOperationError, FileOperationEvent, FileOperationResult, FilePermission, FileSystemProviderCapabilities, FileSystemProviderError, FileSystemProviderErrorCode, FileType, HotExitConfiguration, NotModifiedSinceFileOperationError, TooLargeFileOperationError, createFileSystemProviderError, createPlainWorkspaceWriteOutcomeError, ensureFileSystemProviderError, etag, getLargeFileConfirmationLimit, getPlainWorkspaceWriteOutcome, hasFileAppendCapability, hasFileAtomicDeleteCapability, hasFileAtomicReadCapability, hasFileAtomicWriteCapability, hasFileCloneCapability, hasFileFolderCopyCapability, hasFileReadStreamCapability, hasFileRealpathCapability, hasOpenReadWriteCloseCapability, hasReadWriteCapability, hasReadonlyCapability, isFileOpenForWriteOptions, isPlainWorkspaceWriteOutcomeError, markAsFileSystemProviderError, toFileOperationResult, toFileSystemProviderErrorCode, whenProviderRegistered };
 diff --git a/vscode/src/vs/workbench/browser/parts/globalCompositeBar.js b/vscode/src/vs/workbench/browser/parts/globalCompositeBar.js
 index dbf2cd589ee4f869b69ffa850d0b8a11f1e656b4..a94a5a349e647b6b900e055c930c88828a8c238b 100644
 --- a/vscode/src/vs/workbench/browser/parts/globalCompositeBar.js
@@ -110,11 +261,134 @@ index dbf2cd589ee4f869b69ffa850d0b8a11f1e656b4..a94a5a349e647b6b900e055c930c8882
  }
  
  export { AccountsActivityActionViewItem, GlobalActivityActionViewItem, GlobalCompositeBar, SimpleAccountActivityActionViewItem, SimpleGlobalActivityActionViewItem, isAccountsActionVisible };
+diff --git a/vscode/src/vs/workbench/contrib/files/browser/editors/textFileSaveErrorHandler.js b/vscode/src/vs/workbench/contrib/files/browser/editors/textFileSaveErrorHandler.js
+index 145182985cf7b0cde4731c5176834c70f74b1f41..adb80a904b389beded5b669634749e6aa27c19fa 100644
+--- a/vscode/src/vs/workbench/contrib/files/browser/editors/textFileSaveErrorHandler.js
++++ b/vscode/src/vs/workbench/contrib/files/browser/editors/textFileSaveErrorHandler.js
+@@ -5,7 +5,7 @@ import { toErrorMessage } from '../../../../../base/common/errorMessage.js';
+ import { isEqual, basename } from '../../../../../base/common/resources.js';
+ import { Action } from '../../../../../base/common/actions.js';
+ import { URI } from '../../../../../base/common/uri.js';
+-import { FileOperationResult } from '../../../../../platform/files/common/files.js';
++import { FileOperationResult, getPlainWorkspaceWriteOutcome } from '../../../../../platform/files/common/files.js';
+ import { ITextFileService } from '../../../../services/textfile/common/textfiles.service.js';
+ import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
+ import { Disposable, dispose } from '../../../../../base/common/lifecycle.js';
+@@ -35,10 +35,55 @@ import Severity$1 from '../../../../../base/common/severity.js';
+ const CONFLICT_RESOLUTION_CONTEXT = "saveConflictResolutionContext";
+ const CONFLICT_RESOLUTION_SCHEME = "conflictResolution";
+ const LEARN_MORE_DIRTY_WRITE_IGNORE_KEY = "learnMoreDirtyWriteError";
++const PLAIN_WORKSPACE_SCHEME = "plain-workspace";
+ const conflictEditorHelp = ( localize(
+     10886,
+     "Use the actions in the editor tool bar to either undo your changes or overwrite the content of the file with your changes."
+ ));
++function plainSaveFailureMessage(resource, outcome) {
++    if (outcome?.status === "targetPublished") {
++        return ( localize(
++            10906,
++            "Failed to save '{0}': The file may have changed. Reload it before saving again, or use Save As to preserve your edits.",
++            basename(resource)
++        ));
++    }
++    if (outcome?.status === "outcomeUnknown") {
++        return ( localize(
++            10907,
++            "Failed to save '{0}': The write result could not be verified. Reload the file before saving again, or use Save As to preserve your edits.",
++            basename(resource)
++        ));
++    }
++    return ( localize(
++        10908,
++        "Failed to save '{0}'. Reload the file before saving again, or use Save As to preserve your edits.",
++        basename(resource)
++    ));
++}
++function plainSaveFailureDetails(outcome) {
++    if (outcome?.status === "targetPublished") {
++        return ( localize(
++            10909,
++            "Write outcome: target published; evidence {0}; rename {1}; directory sync {2}; target {3}.",
++            outcome.publicationEvidence,
++            outcome.rename,
++            outcome.directorySync,
++            outcome.target
++        ));
++    }
++    if (outcome?.status === "outcomeUnknown") {
++        return ( localize(
++            10910,
++            "Write outcome: unknown; observation {0}; rename {1}; directory sync {2}; target {3}.",
++            outcome.observation,
++            outcome.rename,
++            outcome.directorySync,
++            outcome.target
++        ));
++    }
++    return ( localize(10911, "The write was rejected without a confirmed file update."));
++}
+ let TextFileSaveErrorHandler = class TextFileSaveErrorHandler extends Disposable {
+     static {
+         this.ID = "workbench.contrib.textFileSaveErrorHandler";
+@@ -106,7 +151,14 @@ let TextFileSaveErrorHandler = class TextFileSaveErrorHandler extends Disposable
+         let message;
+         const primaryActions = [];
+         const secondaryActions = [];
+-        if (fileOperationError.fileOperationResult === FileOperationResult.FILE_MODIFIED_SINCE) {
++        if (resource.scheme === PLAIN_WORKSPACE_SCHEME) {
++            const outcome = getPlainWorkspaceWriteOutcome(error);
++            message = plainSaveFailureMessage(resource, outcome);
++            primaryActions.push(( new PlainReloadModelAction(model)));
++            primaryActions.push(this.instantiationService.createInstance(SaveModelAsAction, model));
++            primaryActions.push(( new PlainWriteDetailsAction(plainSaveFailureDetails(outcome), this.notificationService)));
++        }
++        else if (fileOperationError.fileOperationResult === FileOperationResult.FILE_MODIFIED_SINCE) {
+             if (this.activeConflictResolutionResource && isEqual(this.activeConflictResolutionResource, model.resource)) {
+                 if (this.storageService.getBoolean(LEARN_MORE_DIRTY_WRITE_IGNORE_KEY, StorageScope.APPLICATION)) {
+                     return;
+@@ -331,6 +383,27 @@ class RetrySaveModelAction extends Action {
+         }
+     }
+ }
++class PlainReloadModelAction extends Action {
++    constructor(model) {
++        super("workbench.files.action.plainReload", ( localize(10912, "Reload")));
++        this.model = model;
++    }
++    async run() {
++        if (!this.model.isDisposed()) {
++            await this.model.revert();
++        }
++    }
++}
++class PlainWriteDetailsAction extends Action {
++    constructor(details, notificationService) {
++        super("workbench.files.action.plainWriteDetails", ( localize(10913, "Details")));
++        this.details = details;
++        this.notificationService = notificationService;
++    }
++    async run() {
++        this.notificationService.info(this.details);
++    }
++}
+ class RevertModelAction extends Action {
+     constructor(model) {
+         super("workbench.files.action.revertModel", ( localize(10903, "Revert")));
+@@ -431,6 +504,9 @@ async function acceptOrRevertLocalChangesCommand(accessor, resource, accept) {
+     if (!URI.isUri(resource)) {
+         return;
+     }
++    if (accept && resource.scheme === PLAIN_WORKSPACE_SCHEME) {
++        return;
++    }
+     const editorPane = editorService.activeEditorPane;
+     if (!editorPane) {
+         return;
 diff --git a/vscode/src/vs/workbench/services/textfile/common/textFileEditorModel.js b/vscode/src/vs/workbench/services/textfile/common/textFileEditorModel.js
-index e743e309f1b308aebcb4559a12d9591bd0d49701..7e6bca2addc203c8cecf2a0ea3e080c8e0eb5092 100644
+index e743e309f1b308aebcb4559a12d9591bd0d49701..3d4bda71433542a808b6827671788e0573d4e653 100644
 --- a/vscode/src/vs/workbench/services/textfile/common/textFileEditorModel.js
 +++ b/vscode/src/vs/workbench/services/textfile/common/textFileEditorModel.js
-@@ -34,6 +34,40 @@ import { IProgressService } from '../../../../platform/progress/common/progress.
+@@ -34,6 +34,57 @@ import { IProgressService } from '../../../../platform/progress/common/progress.
  import { isCancellationError } from '../../../../base/common/errors.js';
  import { EditSources } from '../../../../editor/common/textModelEditSource.js';
  
@@ -123,6 +397,7 @@ index e743e309f1b308aebcb4559a12d9591bd0d49701..7e6bca2addc203c8cecf2a0ea3e080c8
 +const PLAIN_WORKSPACE_VERSION_PATTERN = /^wv1:[0-9a-f]{64}$/;
 +const PLAIN_READ_RECEIPT_SOURCE = Symbol("plainReadReceipt");
 +const PLAIN_BUFFER_NO_BASELINE_SOURCE = Symbol("plainBufferNoBaseline");
++const PLAIN_WRITE_RECEIPT_SOURCE = Symbol("plainWriteReceipt");
 +function plainReadBaselineSource(resource, content) {
 +    if (resource.scheme !== PLAIN_WORKSPACE_SCHEME) {
 +        return undefined;
@@ -132,6 +407,16 @@ index e743e309f1b308aebcb4559a12d9591bd0d49701..7e6bca2addc203c8cecf2a0ea3e080c8
 +        throw ( new Error("PLAIN_WORKSPACE_INVALID_READ_RECEIPT: resolved file content is missing its receipt marker"));
 +    }
 +    return PLAIN_READ_RECEIPT_SOURCE;
++}
++function plainWriteBaselineSource(resource, stat) {
++    if (resource.scheme !== PLAIN_WORKSPACE_SCHEME) {
++        return undefined;
++    }
++    const descriptor = stat && typeof stat === "object" ? Object.getOwnPropertyDescriptor(stat, "plainWriteReceipt") : undefined;
++    if (!descriptor || !("value" in descriptor) || descriptor.value !== true) {
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_WRITE_RECEIPT: successful save stat is missing its receipt marker"));
++    }
++    return PLAIN_WRITE_RECEIPT_SOURCE;
 +}
 +function acceptsPlainBaseline(resource, source, stat) {
 +    if (resource.scheme !== PLAIN_WORKSPACE_SCHEME) {
@@ -149,13 +434,27 @@ index e743e309f1b308aebcb4559a12d9591bd0d49701..7e6bca2addc203c8cecf2a0ea3e080c8
 +        }
 +        throw ( new Error("PLAIN_WORKSPACE_INVALID_BUFFER_BASELINE: buffer baseline must carry the no-baseline sentinel"));
 +    }
++    if (source === PLAIN_WRITE_RECEIPT_SOURCE) {
++        if (typeof stat.etag === "string" && PLAIN_WORKSPACE_VERSION_PATTERN.test(stat.etag)) {
++            return true;
++        }
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_WRITE_RECEIPT: write baseline must carry a wv1 token"));
++    }
 +    return false;
 +}
 +
  var TextFileEditorModel_1;
  let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel {
      static {
-@@ -255,22 +289,30 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel
+@@ -112,6 +163,7 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel
+         this.inConflictMode = false;
+         this.inOrphanMode = false;
+         this.inErrorMode = false;
++        this.plainSaveRequiresReload = false;
+         this.hasEncodingSetExplicitly = false;
+         this.name = basename(this.labelService.getUriLabel(this.resource));
+         this.resourceHasExtension = !!extUri.extname(this.resource);
+@@ -255,22 +307,30 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel
      }
      async resolveFromBuffer(buffer, options) {
          this.trace("resolveFromBuffer()");
@@ -188,7 +487,7 @@ index e743e309f1b308aebcb4559a12d9591bd0d49701..7e6bca2addc203c8cecf2a0ea3e080c8
              this.setOrphaned(error.fileOperationResult === FileOperationResult.FILE_NOT_FOUND);
          }
          const preferredEncoding = await this.textFileService.encoding.getPreferredWriteEncoding(this.resource, this.preferredEncoding);
-@@ -283,10 +325,10 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel
+@@ -283,10 +343,10 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel
              etag,
              value: buffer,
              encoding: preferredEncoding.encoding,
@@ -202,7 +501,7 @@ index e743e309f1b308aebcb4559a12d9591bd0d49701..7e6bca2addc203c8cecf2a0ea3e080c8
      }
      async resolveFromBackup(options) {
          const backup = await this.workingCopyBackupService.resolve(this);
-@@ -353,7 +395,7 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel
+@@ -353,7 +413,7 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel
                  );
                  return;
              }
@@ -211,7 +510,7 @@ index e743e309f1b308aebcb4559a12d9591bd0d49701..7e6bca2addc203c8cecf2a0ea3e080c8
          } catch (error) {
              const result = error.fileOperationResult;
              this.setOrphaned(result === FileOperationResult.FILE_NOT_FOUND);
-@@ -369,7 +411,7 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel
+@@ -369,7 +429,7 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel
              throw error;
          }
      }
@@ -220,7 +519,7 @@ index e743e309f1b308aebcb4559a12d9591bd0d49701..7e6bca2addc203c8cecf2a0ea3e080c8
          this.trace("resolveFromContent() - enter");
          if (this.isDisposed()) {
              this.trace("resolveFromContent() - exit - because model is disposed");
-@@ -389,7 +431,7 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel
+@@ -389,7 +449,7 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel
              isDirectory: false,
              isSymbolicLink: false,
              children: undefined
@@ -229,7 +528,59 @@ index e743e309f1b308aebcb4559a12d9591bd0d49701..7e6bca2addc203c8cecf2a0ea3e080c8
          const oldEncoding = this.contentEncoding;
          this.contentEncoding = content.encoding;
          if (this.preferredEncoding) {
-@@ -687,9 +729,12 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel
+@@ -513,6 +573,10 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel
+         if (!this.isResolved()) {
+             return false;
+         }
++        if (this.resource.scheme === PLAIN_WORKSPACE_SCHEME && this.plainSaveRequiresReload) {
++            this.trace("save() - refusing to reuse an unresolved Plain write baseline");
++            return false;
++        }
+         if (this.isReadonly()) {
+             this.trace("save() - ignoring request for readonly resource");
+             return false;
+@@ -532,6 +596,10 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel
+         if (typeof options.reason !== "number") {
+             options.reason = SaveReason.EXPLICIT;
+         }
++        if (this.resource.scheme === PLAIN_WORKSPACE_SCHEME && this.plainSaveRequiresReload) {
++            this.trace("doSave() - refusing to reuse an unresolved Plain write baseline");
++            return;
++        }
+         const versionId = this.versionId;
+         this.trace(`doSave(${versionId}) - enter with versionId ${versionId}`);
+         if (this.ignoreSaveFromSaveParticipants) {
+@@ -648,7 +716,7 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel
+         })(), () => saveCancellation.cancel());
+     }
+     handleSaveSuccess(stat, versionId, options) {
+-        this.updateLastResolvedFileStat(stat);
++        this.updateLastResolvedFileStat(stat, plainWriteBaselineSource(this.resource, stat));
+         if (versionId === this.versionId) {
+             this.trace(
+                 `handleSaveSuccess(${versionId}) - setting dirty to false because versionId did not change`
+@@ -671,11 +739,18 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel
+             `[text file model] handleSaveError(${versionId}) - exit - resulted in a save error: ${( error.toString())}`,
+             ( this.resource.toString())
+         ]);
++        if (this.resource.scheme === PLAIN_WORKSPACE_SCHEME) {
++            this.plainSaveRequiresReload = true;
++            this.setDirty(true);
++            this.inErrorMode = true;
++        }
+         if (options.ignoreErrorHandler) {
+             throw error;
+         }
+-        this.setDirty(true);
+-        this.inErrorMode = true;
++        if (this.resource.scheme !== PLAIN_WORKSPACE_SCHEME) {
++            this.setDirty(true);
++            this.inErrorMode = true;
++        }
+         if (error.fileOperationResult === FileOperationResult.FILE_MODIFIED_SINCE) {
+             this.inConflictMode = true;
+         }
+@@ -687,9 +762,13 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel
              this.bufferSavedVersionId = this.textEditorModel.getAlternativeVersionId();
          }
      }
@@ -239,16 +590,26 @@ index e743e309f1b308aebcb4559a12d9591bd0d49701..7e6bca2addc203c8cecf2a0ea3e080c8
 -        if (!this.lastResolvedFileStat) {
 +        if (acceptsPlainBaseline(this.resource, plainBaselineSource, newFileStat)) {
 +            this.lastResolvedFileStat = newFileStat;
++            this.plainSaveRequiresReload = plainBaselineSource === PLAIN_BUFFER_NO_BASELINE_SOURCE;
 +        }
 +        else if (!this.lastResolvedFileStat) {
              this.lastResolvedFileStat = newFileStat;
          }
          else if (this.lastResolvedFileStat.mtime <= newFileStat.mtime) {
 diff --git a/vscode/src/vs/workbench/services/workingCopy/common/storedFileWorkingCopy.js b/vscode/src/vs/workbench/services/workingCopy/common/storedFileWorkingCopy.js
-index 0a769e25cf6030e9aa17ae5ec845795f964e5017..3227b2399ebf0a300ad8302166f2433e4018121c 100644
+index 0a769e25cf6030e9aa17ae5ec845795f964e5017..0ca61d77c1a1dccfdc383e4c1faec37a5fe54953 100644
 --- a/vscode/src/vs/workbench/services/workingCopy/common/storedFileWorkingCopy.js
 +++ b/vscode/src/vs/workbench/services/workingCopy/common/storedFileWorkingCopy.js
-@@ -30,6 +30,40 @@ import { IProgressService } from '../../../../platform/progress/common/progress.
+@@ -3,7 +3,7 @@ import { __decorate, __param } from '../../../../../../../external/tslib/tslib.e
+ import { localize } from '../../../../nls.js';
+ import { Emitter, Event } from '../../../../base/common/event.js';
+ import { CancellationToken, CancellationTokenSource } from '../../../../base/common/cancellation.js';
+-import { ETAG_DISABLED, FileOperationResult, NotModifiedSinceFileOperationError } from '../../../../platform/files/common/files.js';
++import { ETAG_DISABLED, FileOperationResult, NotModifiedSinceFileOperationError, getPlainWorkspaceWriteOutcome } from '../../../../platform/files/common/files.js';
+ import { IFileService } from '../../../../platform/files/common/files.service.js';
+ import { SaveReason } from '../../../common/editor.js';
+ import { IWorkingCopyService } from './workingCopyService.service.js';
+@@ -30,6 +30,101 @@ import { IProgressService } from '../../../../platform/progress/common/progress.
  import { isCancellationError } from '../../../../base/common/errors.js';
  import Severity$1 from '../../../../base/common/severity.js';
  
@@ -257,6 +618,7 @@ index 0a769e25cf6030e9aa17ae5ec845795f964e5017..3227b2399ebf0a300ad8302166f2433e
 +const PLAIN_WORKSPACE_VERSION_PATTERN = /^wv1:[0-9a-f]{64}$/;
 +const PLAIN_READ_RECEIPT_SOURCE = Symbol("plainReadReceipt");
 +const PLAIN_BUFFER_NO_BASELINE_SOURCE = Symbol("plainBufferNoBaseline");
++const PLAIN_WRITE_RECEIPT_SOURCE = Symbol("plainWriteReceipt");
 +function plainReadBaselineSource(resource, content) {
 +    if (resource.scheme !== PLAIN_WORKSPACE_SCHEME) {
 +        return undefined;
@@ -266,6 +628,16 @@ index 0a769e25cf6030e9aa17ae5ec845795f964e5017..3227b2399ebf0a300ad8302166f2433e
 +        throw ( new Error("PLAIN_WORKSPACE_INVALID_READ_RECEIPT: resolved file content is missing its receipt marker"));
 +    }
 +    return PLAIN_READ_RECEIPT_SOURCE;
++}
++function plainWriteBaselineSource(resource, stat) {
++    if (resource.scheme !== PLAIN_WORKSPACE_SCHEME) {
++        return undefined;
++    }
++    const descriptor = stat && typeof stat === "object" ? Object.getOwnPropertyDescriptor(stat, "plainWriteReceipt") : undefined;
++    if (!descriptor || !("value" in descriptor) || descriptor.value !== true) {
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_WRITE_RECEIPT: successful save stat is missing its receipt marker"));
++    }
++    return PLAIN_WRITE_RECEIPT_SOURCE;
 +}
 +function acceptsPlainBaseline(resource, source, stat) {
 +    if (resource.scheme !== PLAIN_WORKSPACE_SCHEME) {
@@ -283,13 +655,71 @@ index 0a769e25cf6030e9aa17ae5ec845795f964e5017..3227b2399ebf0a300ad8302166f2433e
 +        }
 +        throw ( new Error("PLAIN_WORKSPACE_INVALID_BUFFER_BASELINE: buffer baseline must carry the no-baseline sentinel"));
 +    }
++    if (source === PLAIN_WRITE_RECEIPT_SOURCE) {
++        if (typeof stat.etag === "string" && PLAIN_WORKSPACE_VERSION_PATTERN.test(stat.etag)) {
++            return true;
++        }
++        throw ( new Error("PLAIN_WORKSPACE_INVALID_WRITE_RECEIPT: write baseline must carry a wv1 token"));
++    }
 +    return false;
++}
++function plainSaveFailureMessage(name, outcome) {
++    if (outcome?.status === "targetPublished") {
++        return ( localize(
++            18313,
++            "Failed to save '{0}': The file may have changed. Reload it before saving again, or use Save As to preserve your edits.",
++            name
++        ));
++    }
++    if (outcome?.status === "outcomeUnknown") {
++        return ( localize(
++            18314,
++            "Failed to save '{0}': The write result could not be verified. Reload the file before saving again, or use Save As to preserve your edits.",
++            name
++        ));
++    }
++    return ( localize(
++        18315,
++        "Failed to save '{0}'. Reload the file before saving again, or use Save As to preserve your edits.",
++        name
++    ));
++}
++function plainSaveFailureDetails(outcome) {
++    if (outcome?.status === "targetPublished") {
++        return ( localize(
++            18316,
++            "Write outcome: target published; evidence {0}; rename {1}; directory sync {2}; target {3}.",
++            outcome.publicationEvidence,
++            outcome.rename,
++            outcome.directorySync,
++            outcome.target
++        ));
++    }
++    if (outcome?.status === "outcomeUnknown") {
++        return ( localize(
++            18317,
++            "Write outcome: unknown; observation {0}; rename {1}; directory sync {2}; target {3}.",
++            outcome.observation,
++            outcome.rename,
++            outcome.directorySync,
++            outcome.target
++        ));
++    }
++    return ( localize(18318, "The write was rejected without a confirmed file update."));
 +}
 +
  var StoredFileWorkingCopy_1;
  var StoredFileWorkingCopyState;
  (function(StoredFileWorkingCopyState) {
-@@ -187,22 +221,30 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
+@@ -107,6 +202,7 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
+         this.ignoreSaveFromSaveParticipants = false;
+         this.inConflictMode = false;
+         this.inErrorMode = false;
++        this.plainSaveRequiresReload = false;
+         this._register(workingCopyService.registerWorkingCopy(this));
+         this.registerListeners();
+     }
+@@ -187,22 +283,30 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
      }
      async resolveFromBuffer(buffer) {
          this.trace("resolveFromBuffer()");
@@ -322,7 +752,7 @@ index 0a769e25cf6030e9aa17ae5ec845795f964e5017..3227b2399ebf0a300ad8302166f2433e
              this.setOrphaned(error.fileOperationResult === FileOperationResult.FILE_NOT_FOUND);
          }
          return this.resolveFromContent({
-@@ -213,10 +255,10 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
+@@ -213,10 +317,10 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
              size,
              etag,
              value: buffer,
@@ -336,7 +766,7 @@ index 0a769e25cf6030e9aa17ae5ec845795f964e5017..3227b2399ebf0a300ad8302166f2433e
      }
      async resolveFromBackup() {
          const backup = await this.workingCopyBackupService.resolve(this);
-@@ -273,7 +315,7 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
+@@ -273,7 +377,7 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
                  );
                  return;
              }
@@ -345,7 +775,7 @@ index 0a769e25cf6030e9aa17ae5ec845795f964e5017..3227b2399ebf0a300ad8302166f2433e
          } catch (error) {
              const result = error.fileOperationResult;
              this.setOrphaned(result === FileOperationResult.FILE_NOT_FOUND);
-@@ -289,7 +331,7 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
+@@ -289,7 +393,7 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
              throw error;
          }
      }
@@ -354,7 +784,7 @@ index 0a769e25cf6030e9aa17ae5ec845795f964e5017..3227b2399ebf0a300ad8302166f2433e
          this.trace("resolveFromContent() - enter");
          if (this.isDisposed()) {
              this.trace("resolveFromContent() - exit - because working copy is disposed");
-@@ -309,7 +351,7 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
+@@ -309,7 +413,7 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
              isDirectory: false,
              isSymbolicLink: false,
              children: undefined
@@ -363,7 +793,99 @@ index 0a769e25cf6030e9aa17ae5ec845795f964e5017..3227b2399ebf0a300ad8302166f2433e
          if (this.isResolved()) {
              await this.doUpdateModel(content.value);
          }
-@@ -741,9 +783,12 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
+@@ -404,6 +508,10 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
+         if (!this.isResolved()) {
+             return false;
+         }
++        if (this.resource.scheme === PLAIN_WORKSPACE_SCHEME && this.plainSaveRequiresReload) {
++            this.trace("save() - refusing to reuse an unresolved Plain write baseline");
++            return false;
++        }
+         if (this.isReadonly()) {
+             this.trace("save() - ignoring request for readonly resource");
+             return false;
+@@ -423,6 +531,10 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
+         if (typeof options.reason !== "number") {
+             options.reason = SaveReason.EXPLICIT;
+         }
++        if (this.resource.scheme === PLAIN_WORKSPACE_SCHEME && this.plainSaveRequiresReload) {
++            this.trace("doSave() - refusing to reuse an unresolved Plain write baseline");
++            return;
++        }
+         const versionId = this.versionId;
+         this.trace(`doSave(${versionId}) - enter with versionId ${versionId}`);
+         if (this.ignoreSaveFromSaveParticipants) {
+@@ -567,7 +679,7 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
+         })(), () => saveCancellation.cancel());
+     }
+     handleSaveSuccess(stat, versionId, options) {
+-        this.updateLastResolvedFileStat(stat);
++        this.updateLastResolvedFileStat(stat, plainWriteBaselineSource(this.resource, stat));
+         if (versionId === this.versionId) {
+             this.trace(
+                 `handleSaveSuccess(${versionId}) - setting dirty to false because versionId did not change`
+@@ -591,11 +703,18 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
+             ( this.resource.toString()),
+             this.typeId
+         ]);
++        if (this.resource.scheme === PLAIN_WORKSPACE_SCHEME) {
++            this.plainSaveRequiresReload = true;
++            this.setDirty(true);
++            this.inErrorMode = true;
++        }
+         if (options.ignoreErrorHandler) {
+             throw error;
+         }
+-        this.setDirty(true);
+-        this.inErrorMode = true;
++        if (this.resource.scheme !== PLAIN_WORKSPACE_SCHEME) {
++            this.setDirty(true);
++            this.inErrorMode = true;
++        }
+         if (error.fileOperationResult === FileOperationResult.FILE_MODIFIED_SINCE) {
+             this.inConflictMode = true;
+         }
+@@ -606,7 +725,38 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
+         const fileOperationError = error;
+         const primaryActions = [];
+         let message;
+-        if (fileOperationError.fileOperationResult === FileOperationResult.FILE_MODIFIED_SINCE) {
++        if (this.resource.scheme === PLAIN_WORKSPACE_SCHEME) {
++            const outcome = getPlainWorkspaceWriteOutcome(error);
++            const details = plainSaveFailureDetails(outcome);
++            message = plainSaveFailureMessage(this.name, outcome);
++            primaryActions.push(toAction({
++                id: "fileWorkingCopy.plainReload",
++                label: ( localize(18319, "Reload")),
++                run: () => this.revert()
++            }));
++            primaryActions.push(toAction({
++                id: "fileWorkingCopy.plainSaveAs",
++                label: ( localize(18306, "Save As...")),
++                run: async () => {
++                    const editor = this.workingCopyEditorService.findEditor(this);
++                    if (editor) {
++                        const result = await this.editorService.save(editor, {
++                            saveAs: true,
++                            reason: SaveReason.EXPLICIT
++                        });
++                        if (!result.success) {
++                            this.doHandleSaveError(error, options);
++                        }
++                    }
++                }
++            }));
++            primaryActions.push(toAction({
++                id: "fileWorkingCopy.plainWriteDetails",
++                label: ( localize(18320, "Details")),
++                run: () => this.notificationService.info(details)
++            }));
++        }
++        else if (fileOperationError.fileOperationResult === FileOperationResult.FILE_MODIFIED_SINCE) {
+             message = ( localize(
+                 18298,
+                 "Failed to save '{0}': The content of the file is newer. Do you want to overwrite the file with your changes?",
+@@ -741,9 +891,13 @@ let StoredFileWorkingCopy = class StoredFileWorkingCopy extends ResourceWorkingC
          );
          this._register(Event.once(handle.onDidClose)(() => listener.dispose()));
      }
@@ -373,6 +895,7 @@ index 0a769e25cf6030e9aa17ae5ec845795f964e5017..3227b2399ebf0a300ad8302166f2433e
 -        if (!this.lastResolvedFileStat) {
 +        if (acceptsPlainBaseline(this.resource, plainBaselineSource, newFileStat)) {
 +            this.lastResolvedFileStat = newFileStat;
++            this.plainSaveRequiresReload = plainBaselineSource === PLAIN_BUFFER_NO_BASELINE_SOURCE;
 +        }
 +        else if (!this.lastResolvedFileStat) {
              this.lastResolvedFileStat = newFileStat;

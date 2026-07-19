@@ -3384,9 +3384,30 @@ export class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWith
   readonly capabilities =
     FileSystemProviderCapabilities.FileReadWrite |
     FileSystemProviderCapabilities.Readonly;
+  private readonly changeEmitter = new Emitter();
+  readonly onDidChangeFile = this.changeEmitter.event;
+
+  constructor(private readonly bridge: PlainBridge) {}
 
   async readFile() {
     return file.copy();
+  }
+
+  async plainWriteFile(resource, content, expectedVersion) {
+    const result = await this.bridge.workspaceWriteFile(
+      rootId,
+      relativePath,
+      expectedVersion,
+      content,
+    );
+    if (result.status !== "written") {
+      this.changeEmitter.fire(rootRescan);
+    }
+    return result;
+  }
+
+  async writeFile() {
+    throw noPermissions();
   }
 }
 
@@ -3461,6 +3482,47 @@ describe("Plain workspace provider copy boundary", () => {
 		expect(validateWorkspaceProviderCopyBoundary(inheritedCopy)).toContain(
 			"Plain workspace provider must not inherit hidden write capabilities",
 		);
+	});
+
+	it("locks the private versioned write seam, root rescan and public readonly failure", () => {
+		for (const [hostile, expected] of [
+			[
+				readonlyWorkspaceProvider.replace("plainWriteFile", "plainWriteBypass"),
+				"Plain workspace provider must expose exactly one audited private plainWriteFile seam",
+			],
+			[
+				readonlyWorkspaceProvider.replace(
+					"this.bridge.workspaceWriteFile(",
+					"this.bridge.workspaceWriteFile(await this.bridge.workspaceWriteFile(",
+				),
+				"plainWriteFile must dispatch one versioned bridge write and one audited root-rescan branch",
+			],
+			[
+				readonlyWorkspaceProvider.replace(
+					"this.changeEmitter.fire(rootRescan);",
+					"void rootRescan;",
+				),
+				"plainWriteFile must dispatch one versioned bridge write and one audited root-rescan branch",
+			],
+			[
+				readonlyWorkspaceProvider.replace(
+					"throw noPermissions();",
+					"return this.bridge.workspaceWriteFile();",
+				),
+				"public writeFile must remain a direct noPermissions failure without native dispatch",
+			],
+			[
+				readonlyWorkspaceProvider.replace(
+					"this.changeEmitter.event",
+					"Event.None",
+				),
+				"Plain workspace provider file-change event must be sourced only from its private emitter",
+			],
+		]) {
+			expect(validateWorkspaceProviderCopyBoundary(hostile)).toContain(
+				expected,
+			);
+		}
 	});
 
 	it("fixes the provider factory to one direct audited construction", () => {

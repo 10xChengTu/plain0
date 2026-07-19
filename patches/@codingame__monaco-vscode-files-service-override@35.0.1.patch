@@ -1,16 +1,28 @@
 diff --git a/vscode/src/vs/platform/files/common/fileService.js b/vscode/src/vs/platform/files/common/fileService.js
-index 107a37ee3b1999392b35fa5545382acc7238a3c1..07387a8139e3d4468501e666e449519bedd72a7c 100644
+index 107a37ee3b1999392b35fa5545382acc7238a3c1..b48432d5ebe3cc5cba8f619d5dc1a3f3ba0bc146 100644
 --- a/vscode/src/vs/platform/files/common/fileService.js
 +++ b/vscode/src/vs/platform/files/common/fileService.js
-@@ -26,6 +26,133 @@ function resourceForError(resource) {
+@@ -14,7 +14,7 @@ import { mark } from '@codingame/monaco-vscode-api/vscode/vs/base/common/perform
+ import { isAbsolutePath, extUri, extUriIgnorePathCase } from '@codingame/monaco-vscode-api/vscode/vs/base/common/resources';
+ import { isReadableStream, peekStream, peekReadable, consumeStream, transform, newWriteableStream, isReadableBufferedStream, listenStream } from '@codingame/monaco-vscode-api/vscode/vs/base/common/stream';
+ import { localize } from '@codingame/monaco-vscode-api/vscode/vs/nls';
+-import { FileType, toFileSystemProviderErrorCode, FileSystemProviderErrorCode, FileChangesEvent, FileOperationError, FileOperationResult, hasOpenReadWriteCloseCapability, hasReadWriteCapability, hasFileReadStreamCapability, ensureFileSystemProviderError, etag, FilePermission, FileSystemProviderCapabilities, hasFileRealpathCapability, FileOperationEvent, FileOperation, hasFileAtomicWriteCapability, toFileOperationResult, hasFileAppendCapability, ETAG_DISABLED, hasFileAtomicReadCapability, NotModifiedSinceFileOperationError, TooLargeFileOperationError, hasFileFolderCopyCapability, hasFileAtomicDeleteCapability, hasFileCloneCapability } from '@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files';
++import { FileType, toFileSystemProviderErrorCode, FileSystemProviderErrorCode, FileChangesEvent, FileOperationError, FileOperationResult, hasOpenReadWriteCloseCapability, hasReadWriteCapability, hasFileReadStreamCapability, ensureFileSystemProviderError, etag, FilePermission, FileSystemProviderCapabilities, hasFileRealpathCapability, FileOperationEvent, FileOperation, hasFileAtomicWriteCapability, toFileOperationResult, hasFileAppendCapability, ETAG_DISABLED, hasFileAtomicReadCapability, NotModifiedSinceFileOperationError, TooLargeFileOperationError, hasFileFolderCopyCapability, hasFileAtomicDeleteCapability, hasFileCloneCapability, createPlainWorkspaceWriteOutcomeError, isPlainWorkspaceWriteOutcomeError } from '@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files';
+ import { readFileIntoStream } from './io.js';
+ import { ILogService } from '@codingame/monaco-vscode-api/vscode/vs/platform/log/common/log.service';
+ import { ErrorNoTelemetry } from '@codingame/monaco-vscode-api/vscode/vs/base/common/errors';
+@@ -26,6 +26,399 @@ function resourceForError(resource) {
      }
      return ( resource.toString(true));
  }
 +const PLAIN_WORKSPACE_SCHEME = "plain-workspace";
 +const PLAIN_WORKSPACE_VERSION_PATTERN = /^wv1:[0-9a-f]{64}$/;
 +const PLAIN_WORKSPACE_MAX_READ_BYTES = 8 * 1024 * 1024;
++const PLAIN_WORKSPACE_MAX_WRITE_BYTES = 8 * 1024 * 1024;
 +const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype);
 +const TYPED_ARRAY_SET = Uint8Array.prototype.set;
++const TYPED_ARRAY_SUBARRAY = Uint8Array.prototype.subarray;
++const TYPED_ARRAY_TAG_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, Symbol.toStringTag).get;
 +const TYPED_ARRAY_BUFFER_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, "buffer").get;
 +const TYPED_ARRAY_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, "byteLength").get;
 +const TYPED_ARRAY_BYTE_OFFSET_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, "byteOffset").get;
@@ -133,10 +145,281 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..07387a8139e3d4468501e666e449519b
 +        value: valueSnapshot
 +    };
 +}
++function plainWorkspaceWriteModified(options) {
++    return ( new FileOperationError("File Modified Since", FileOperationResult.FILE_MODIFIED_SINCE, options));
++}
++function plainWorkspaceWriteContractError(options) {
++    return ( new FileOperationError("Plain workspace write input violates the bounded write contract", FileOperationResult.FILE_OTHER_ERROR, options));
++}
++function plainWorkspaceWriteTooLarge(resource, size, options) {
++    return ( new TooLargeFileOperationError(
++        `Unable to write '${resource.toString()}' because it exceeds Plain's 8 MiB write limit`,
++        FileOperationResult.FILE_TOO_LARGE,
++        size,
++        options
++    ));
++}
++function plainWorkspaceWriteChunkView(chunk, allowEmpty, options) {
++    let bufferDescriptor;
++    let byteLengthDescriptor;
++    try {
++        if (!chunk || typeof chunk !== "object" || Object.getPrototypeOf(chunk) !== VSBuffer.prototype) {
++            throw ( new Error("invalid VSBuffer"));
++        }
++        const descriptors = Object.getOwnPropertyDescriptors(chunk);
++        bufferDescriptor = descriptors.buffer;
++        byteLengthDescriptor = descriptors.byteLength;
++        if (!bufferDescriptor || !("value" in bufferDescriptor) || !byteLengthDescriptor || !("value" in byteLengthDescriptor)) {
++            throw ( new Error("invalid VSBuffer fields"));
++        }
++    }
++    catch {
++        throw plainWorkspaceWriteContractError(options);
++    }
++    const view = bufferDescriptor.value;
++    let byteLength;
++    let byteOffset;
++    let backingBuffer;
++    let backingByteLength;
++    try {
++        if (Reflect.apply(TYPED_ARRAY_TAG_GETTER, view, []) !== "Uint8Array") {
++            throw ( new Error("invalid typed array kind"));
++        }
++        byteLength = Reflect.apply(TYPED_ARRAY_BYTE_LENGTH_GETTER, view, []);
++        byteOffset = Reflect.apply(TYPED_ARRAY_BYTE_OFFSET_GETTER, view, []);
++        backingBuffer = Reflect.apply(TYPED_ARRAY_BUFFER_GETTER, view, []);
++        if (Object.getPrototypeOf(backingBuffer) !== ArrayBuffer.prototype) {
++            throw ( new Error("invalid backing buffer"));
++        }
++        backingByteLength = Reflect.apply(ARRAY_BUFFER_BYTE_LENGTH_GETTER, backingBuffer, []);
++        Reflect.apply(ArrayBuffer.prototype.slice, backingBuffer, [0, 0]);
++    }
++    catch {
++        throw plainWorkspaceWriteContractError(options);
++    }
++    if (
++        !Number.isSafeInteger(byteLength) ||
++        byteLength < 0 ||
++        (!allowEmpty && byteLength === 0) ||
++        byteLengthDescriptor.value !== byteLength ||
++        !Number.isSafeInteger(byteOffset) ||
++        byteOffset < 0 ||
++        !Number.isSafeInteger(backingByteLength) ||
++        backingByteLength < byteOffset ||
++        byteLength > backingByteLength - byteOffset
++    ) {
++        throw plainWorkspaceWriteContractError(options);
++    }
++    return { view, byteLength };
++}
++function appendPlainWorkspaceWriteChunk(collector, chunk, resource, options) {
++    const { view, byteLength } = plainWorkspaceWriteChunkView(chunk, false, options);
++    if (byteLength > PLAIN_WORKSPACE_MAX_WRITE_BYTES - collector.total) {
++        const observedSize = collector.total <= Number.MAX_SAFE_INTEGER - byteLength ? collector.total + byteLength : PLAIN_WORKSPACE_MAX_WRITE_BYTES + 1;
++        throw plainWorkspaceWriteTooLarge(resource, observedSize, options);
++    }
++    if (!collector.buffer) {
++        collector.buffer = new Uint8Array(PLAIN_WORKSPACE_MAX_WRITE_BYTES);
++    }
++    Reflect.apply(TYPED_ARRAY_SET, collector.buffer, [view, collector.total]);
++    collector.total += byteLength;
++}
++function finishPlainWorkspaceWriteCollector(collector) {
++    if (collector.total === 0) {
++        return VSBuffer.alloc(0);
++    }
++    return VSBuffer.wrap(Reflect.apply(TYPED_ARRAY_SUBARRAY, collector.buffer, [0, collector.total]));
++}
++function destroyPlainWorkspaceWriteStream(stream) {
++    try {
++        stream.destroy();
++    }
++    catch {}
++}
++function collectPlainWorkspaceWriteStream(stream, collector, resource, options) {
++    return ( new Promise((resolve, reject) => {
++        let settled = false;
++        const cleanup = () => {
++            try {
++                stream.removeListener("error", onError);
++                stream.removeListener("end", onEnd);
++                stream.removeListener("data", onData);
++            }
++            catch {}
++        };
++        const fail = error => {
++            if (settled) {
++                return;
++            }
++            settled = true;
++            cleanup();
++            destroyPlainWorkspaceWriteStream(stream);
++            reject(error);
++        };
++        const onError = error => fail(error);
++        const onEnd = () => {
++            if (settled) {
++                return;
++            }
++            try {
++                const result = finishPlainWorkspaceWriteCollector(collector);
++                settled = true;
++                cleanup();
++                resolve(result);
++            }
++            catch (error) {
++                fail(error);
++            }
++        };
++        const onData = chunk => {
++            if (settled) {
++                return;
++            }
++            try {
++                appendPlainWorkspaceWriteChunk(collector, chunk, resource, options);
++            }
++            catch (error) {
++                fail(error);
++            }
++        };
++        try {
++            stream.on("error", onError);
++            if (settled) {
++                return;
++            }
++            stream.on("end", onEnd);
++            if (settled) {
++                return;
++            }
++            stream.on("data", onData);
++        }
++        catch (error) {
++            fail(error);
++        }
++    }));
++}
++async function collectPlainWorkspaceWriteBuffer(input, resource, options) {
++    if (input instanceof VSBuffer) {
++        const { view, byteLength } = plainWorkspaceWriteChunkView(input, true, options);
++        if (byteLength > PLAIN_WORKSPACE_MAX_WRITE_BYTES) {
++            throw plainWorkspaceWriteTooLarge(resource, byteLength, options);
++        }
++        if (byteLength === 0) {
++            return VSBuffer.alloc(0);
++        }
++        const collector = { buffer: new Uint8Array(PLAIN_WORKSPACE_MAX_WRITE_BYTES), total: byteLength };
++        Reflect.apply(TYPED_ARRAY_SET, collector.buffer, [view, 0]);
++        return finishPlainWorkspaceWriteCollector(collector);
++    }
++    if (isReadableBufferedStream(input)) {
++        const collector = { buffer: undefined, total: 0 };
++        let ended;
++        try {
++            for (const chunk of input.buffer) {
++                appendPlainWorkspaceWriteChunk(collector, chunk, resource, options);
++            }
++            ended = input.ended;
++        }
++        catch (error) {
++            destroyPlainWorkspaceWriteStream(input.stream);
++            throw error;
++        }
++        if (ended) {
++            return finishPlainWorkspaceWriteCollector(collector);
++        }
++        return collectPlainWorkspaceWriteStream(input.stream, collector, resource, options);
++    }
++    if (isReadableStream(input)) {
++        return collectPlainWorkspaceWriteStream(input, { buffer: undefined, total: 0 }, resource, options);
++    }
++    if (!input || typeof input.read !== "function") {
++        throw plainWorkspaceWriteContractError(options);
++    }
++    const collector = { buffer: undefined, total: 0 };
++    while (true) {
++        const chunk = input.read();
++        if (chunk === null) {
++            break;
++        }
++        appendPlainWorkspaceWriteChunk(collector, chunk, resource, options);
++    }
++    return finishPlainWorkspaceWriteCollector(collector);
++}
++function validatePlainWorkspaceWrittenResult(result, expectedVersion, expectedContentLength, options) {
++    try {
++        if (!result || typeof result !== "object" || Object.getPrototypeOf(result) !== Object.prototype || !Object.isFrozen(result)) {
++            throw ( new Error("invalid result"));
++        }
++        const resultDescriptors = Object.getOwnPropertyDescriptors(result);
++        const resultKeys = Reflect.ownKeys(resultDescriptors);
++        const statusDescriptor = resultDescriptors.status;
++        if (!statusDescriptor || !("value" in statusDescriptor) || statusDescriptor.enumerable !== true) {
++            throw ( new Error("invalid status"));
++        }
++        if (statusDescriptor.value !== "written") {
++            return undefined;
++        }
++        if (resultKeys.length !== 2 || !resultKeys.includes("status") || !resultKeys.includes("stat")) {
++            throw ( new Error("invalid result fields"));
++        }
++        const statDescriptor = resultDescriptors.stat;
++        if (!statDescriptor || !("value" in statDescriptor) || statDescriptor.enumerable !== true) {
++            throw ( new Error("invalid stat"));
++        }
++        const stat = statDescriptor.value;
++        if (!stat || typeof stat !== "object" || Object.getPrototypeOf(stat) !== Object.prototype || !Object.isFrozen(stat)) {
++            throw ( new Error("invalid stat"));
++        }
++        const statDescriptors = Object.getOwnPropertyDescriptors(stat);
++        const statKeys = Reflect.ownKeys(statDescriptors);
++        const expectedStatKeys = ["type", "size", "mtime", "ctime", "plainVersion"];
++        if (statKeys.length !== expectedStatKeys.length || !expectedStatKeys.every(key => statKeys.includes(key))) {
++            throw ( new Error("invalid stat fields"));
++        }
++        for (const key of expectedStatKeys) {
++            if (!("value" in statDescriptors[key]) || statDescriptors[key].enumerable !== true) {
++                throw ( new Error("invalid stat field"));
++            }
++        }
++        const type = statDescriptors.type.value;
++        const size = statDescriptors.size.value;
++        const mtime = statDescriptors.mtime.value;
++        const ctime = statDescriptors.ctime.value;
++        const version = statDescriptors.plainVersion.value;
++        if (
++            type !== FileType.File ||
++            size !== expectedContentLength ||
++            !Number.isSafeInteger(size) ||
++            size < 0 ||
++            !Number.isSafeInteger(mtime) ||
++            mtime < 0 ||
++            !Number.isSafeInteger(ctime) ||
++            ctime < 0 ||
++            typeof version !== "string" ||
++            !PLAIN_WORKSPACE_VERSION_PATTERN.test(version) ||
++            version === expectedVersion
++        ) {
++            throw ( new Error("invalid stat values"));
++        }
++        structuredClone(result);
++        return Object.freeze({ type, size, mtime, ctime, plainVersion: version });
++    }
++    catch {
++        throw plainWorkspaceWriteContractError(options);
++    }
++}
  async function mkdirp(providerExtUri, provider, directory) {
      const directoriesToCreate = [];
      while (!providerExtUri.isEqual(directory, providerExtUri.dirname(directory))) {
-@@ -266,6 +393,21 @@ let FileService = class FileService extends Disposable {
+@@ -81,6 +474,7 @@ let FileService = class FileService extends Disposable {
+         this._onDidWatchError = this._register(( new Emitter()));
+         this.onDidWatchError = this._onDidWatchError.event;
+         this.activeWatchers = ( new Map());
++        this.plainWorkspaceWriteFailures = ( new Map());
+         this.writeQueue = this._register(( new ResourceQueue()));
+     }
+     registerProvider(scheme, provider) {
+@@ -266,6 +660,21 @@ let FileService = class FileService extends Disposable {
              }),
              children: undefined
          };
@@ -158,7 +441,128 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..07387a8139e3d4468501e666e449519b
          if (fileStat.isDirectory && recurse(fileStat, siblings)) {
              try {
                  const entries = await provider.readdir(resource);
-@@ -559,6 +701,9 @@ let FileService = class FileService extends Disposable {
+@@ -369,9 +778,11 @@ let FileService = class FileService extends Disposable {
+     }
+     async writeFile(resource, bufferOrReadableOrStream, options) {
+         const provider = this.throwIfFileSystemIsReadonly(await this.withWriteProvider(resource), resource);
++        const isPlainWorkspace = resource.scheme === PLAIN_WORKSPACE_SCHEME;
+         const {
+             providerExtUri
+         } = this.getExtUri(provider);
++        const plainWorkspaceWriteKey = isPlainWorkspace ? providerExtUri.getComparisonKey(resource) : undefined;
+         let writeFileOptions = options;
+         if (hasFileAtomicWriteCapability(provider) && !writeFileOptions?.atomic) {
+             const enforcedAtomicWrite = provider.enforceAtomicWriteFile?.(resource);
+@@ -383,10 +794,39 @@ let FileService = class FileService extends Disposable {
+             }
+         }
+         try {
++            if (plainWorkspaceWriteKey !== undefined && this.plainWorkspaceWriteFailures.has(plainWorkspaceWriteKey)) {
++                throw this.plainWorkspaceWriteFailures.get(plainWorkspaceWriteKey).error;
++            }
+             let {
+                 stat,
+-                buffer: bufferOrReadableOrStreamOrBufferedStream
++                buffer: bufferOrReadableOrStreamOrBufferedStream,
++                expectedVersion
+             } = await this.validateWriteFile(provider, resource, bufferOrReadableOrStream, writeFileOptions);
++            if (isPlainWorkspace) {
++                const buffer = await collectPlainWorkspaceWriteBuffer(bufferOrReadableOrStream, resource, writeFileOptions);
++                const writtenStat = await this.doWriteUnbuffered(
++                    provider,
++                    resource,
++                    writeFileOptions,
++                    buffer,
++                    expectedVersion,
++                    plainWorkspaceWriteKey
++                );
++                const fileStat = await this.toFileStat(
++                    provider,
++                    resource,
++                    writtenStat,
++                    undefined,
++                    true,
++                    () => false
++                );
++                const receipt = Object.freeze({
++                    ...fileStat,
++                    plainWriteReceipt: true
++                });
++                this._onDidRunOperation.fire(( new FileOperationEvent(resource, FileOperation.WRITE, receipt)));
++                return receipt;
++            }
+             if (!stat) {
+                 await this.mkdirp(provider, providerExtUri.dirname(resource));
+             }
+@@ -412,6 +852,9 @@ let FileService = class FileService extends Disposable {
+             }
+             this._onDidRunOperation.fire(( new FileOperationEvent(resource, FileOperation.WRITE)));
+         } catch (error) {
++            if (isPlainWorkspace && isPlainWorkspaceWriteOutcomeError(error)) {
++                throw error;
++            }
+             throw ( new FileOperationError(( localize(
+                 2096,
+                 "Unable to write file '{0}' ({1})",
+@@ -442,6 +885,57 @@ let FileService = class FileService extends Disposable {
+         return peekResult;
+     }
+     async validateWriteFile(provider, resource, bufferOrReadableOrStream, options) {
++        if (resource.scheme === PLAIN_WORKSPACE_SCHEME) {
++            const expectedVersion = options?.etag;
++            if (
++                typeof expectedVersion !== "string" ||
++                !PLAIN_WORKSPACE_VERSION_PATTERN.test(expectedVersion) ||
++                expectedVersion === ETAG_DISABLED ||
++                !!options?.unlock ||
++                !!options?.append ||
++                !!options?.atomic ||
++                !!options?.force ||
++                !!options?.overwrite
++            ) {
++                throw plainWorkspaceWriteModified(options);
++            }
++            let stat;
++            try {
++                stat = await provider.stat(resource);
++            }
++            catch (error) {
++                if (toFileSystemProviderErrorCode(error) === FileSystemProviderErrorCode.FileNotFound) {
++                    throw plainWorkspaceWriteModified(options);
++                }
++                throw error;
++            }
++            if ((stat?.type & FileType.Directory) !== 0) {
++                throw ( new FileOperationError(( localize(
++                    2102,
++                    "Unable to write file '{0}' that is actually a directory",
++                    this.resourceForError(resource)
++                )), FileOperationResult.FILE_IS_DIRECTORY, options));
++            }
++            let currentVersion;
++            try {
++                currentVersion = plainWorkspaceVersion(stat);
++            }
++            catch {
++                throw plainWorkspaceWriteModified(options);
++            }
++            if (
++                stat.type !== FileType.File ||
++                currentVersion !== expectedVersion ||
++                Boolean((stat.permissions ?? 0) & FilePermission.Readonly)
++            ) {
++                throw plainWorkspaceWriteModified(options);
++            }
++            return {
++                stat,
++                buffer: undefined,
++                expectedVersion
++            };
++        }
+         const unlock = !!options?.unlock;
+         if (unlock && !(provider.capabilities & FileSystemProviderCapabilities.FileWriteUnlock)) {
+             throw ( new Error(( localize(
+@@ -559,6 +1053,9 @@ let FileService = class FileService extends Disposable {
          return this.doReadFileStream(provider, resource, options, token);
      }
      async doReadFileStream(provider, resource, options, token) {
@@ -168,11 +572,15 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..07387a8139e3d4468501e666e449519b
          const cancellableSource = ( new CancellationTokenSource(token));
          let readFileOptions = options;
          if (hasFileAtomicReadCapability(provider) && provider.enforceAtomicReadFile?.(resource)) {
-@@ -600,6 +745,50 @@ let FileService = class FileService extends Disposable {
+@@ -600,6 +1097,57 @@ let FileService = class FileService extends Disposable {
              throw this.restoreReadError(error, resource, readFileOptions);
          }
      }
 +    async doReadPlainFileStream(provider, resource, options) {
++        const plainWorkspaceWriteKey = this.getExtUri(provider).providerExtUri.getComparisonKey(resource);
++        const resourceIdentity = resource.toString();
++        const failureAtReadStart = this.plainWorkspaceWriteFailures.get(plainWorkspaceWriteKey);
++        const clearableFailure = failureAtReadStart?.resourceIdentity === resourceIdentity ? failureAtReadStart : undefined;
 +        try {
 +            if (typeof provider.plainReadFile !== "function") {
 +                throw ( new Error("PLAIN_WORKSPACE_INVALID_READ_RECEIPT: provider does not implement plainReadFile"));
@@ -207,6 +615,9 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..07387a8139e3d4468501e666e449519b
 +            this.validateReadFileLimits(resource, buffer.byteLength, options);
 +            const stream = newWriteableStream(data => VSBuffer.concat(data));
 +            stream.end(buffer);
++            if (clearableFailure !== undefined && this.plainWorkspaceWriteFailures.get(plainWorkspaceWriteKey) === clearableFailure) {
++                this.plainWorkspaceWriteFailures.delete(plainWorkspaceWriteKey);
++            }
 +            return {
 +                ...fileStat,
 +                plainReadReceipt: true,
@@ -219,3 +630,61 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..07387a8139e3d4468501e666e449519b
      restoreReadError(error, resource, options) {
          const message = ( localize(
              2104,
+@@ -1154,14 +1702,54 @@ let FileService = class FileService extends Disposable {
+             totalBytesWritten += bytesWritten;
+         }
+     }
+-    async doWriteUnbuffered(provider, resource, options, bufferOrReadableOrStreamOrBufferedStream) {
++    async doWriteUnbuffered(provider, resource, options, bufferOrReadableOrStreamOrBufferedStream, expectedVersion, plainWorkspaceWriteKey) {
+         return this.writeQueue.queueFor(
+             resource,
+-            () => this.doWriteUnbufferedQueued(provider, resource, options, bufferOrReadableOrStreamOrBufferedStream),
++            () => this.doWriteUnbufferedQueued(provider, resource, options, bufferOrReadableOrStreamOrBufferedStream, expectedVersion, plainWorkspaceWriteKey),
+             this.getExtUri(provider).providerExtUri
+         );
+     }
+-    async doWriteUnbufferedQueued(provider, resource, options, bufferOrReadableOrStreamOrBufferedStream) {
++    async doWriteUnbufferedQueued(provider, resource, options, bufferOrReadableOrStreamOrBufferedStream, expectedVersion, plainWorkspaceWriteKey) {
++        if (resource.scheme === PLAIN_WORKSPACE_SCHEME) {
++            const { view, byteLength } = plainWorkspaceWriteChunkView(bufferOrReadableOrStreamOrBufferedStream, true, options);
++            if (byteLength > PLAIN_WORKSPACE_MAX_WRITE_BYTES) {
++                throw plainWorkspaceWriteTooLarge(resource, byteLength, options);
++            }
++            if (
++                typeof expectedVersion !== "string" ||
++                !PLAIN_WORKSPACE_VERSION_PATTERN.test(expectedVersion) ||
++                typeof plainWorkspaceWriteKey !== "string"
++            ) {
++                throw plainWorkspaceWriteContractError(options);
++            }
++            if (this.plainWorkspaceWriteFailures.has(plainWorkspaceWriteKey)) {
++                throw this.plainWorkspaceWriteFailures.get(plainWorkspaceWriteKey).error;
++            }
++            const plainWriteFile = provider.plainWriteFile;
++            if (typeof plainWriteFile !== "function") {
++                throw plainWorkspaceWriteContractError(options);
++            }
++            let dispatched = false;
++            try {
++                dispatched = true;
++                const result = await Reflect.apply(plainWriteFile, provider, [resource, view, expectedVersion]);
++                const writtenStat = validatePlainWorkspaceWrittenResult(result, expectedVersion, byteLength, options);
++                if (!writtenStat) {
++                    throw createPlainWorkspaceWriteOutcomeError(result, options);
++                }
++                return writtenStat;
++            }
++            catch (error) {
++                const failure = error instanceof Error ? error : plainWorkspaceWriteContractError(options);
++                if (dispatched) {
++                    this.plainWorkspaceWriteFailures.set(plainWorkspaceWriteKey, Object.freeze({
++                        error: failure,
++                        resourceIdentity: resource.toString()
++                    }));
++                }
++                throw failure;
++            }
++        }
+         let buffer;
+         if (bufferOrReadableOrStreamOrBufferedStream instanceof VSBuffer) {
+             buffer = bufferOrReadableOrStreamOrBufferedStream;

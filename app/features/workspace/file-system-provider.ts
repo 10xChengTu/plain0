@@ -1,4 +1,7 @@
 import {
+	FileChangeType,
+	FileOperationError,
+	FileOperationResult,
 	FilePermission,
 	FileSystemProviderCapabilities,
 	FileSystemProviderError,
@@ -12,7 +15,10 @@ import {
 	type IStat,
 	type IWatchOptions,
 } from "@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files";
-import { Event } from "@codingame/monaco-vscode-api/vscode/vs/base/common/event";
+import {
+	Emitter,
+	Event,
+} from "@codingame/monaco-vscode-api/vscode/vs/base/common/event";
 import {
 	Disposable,
 	type IDisposable,
@@ -23,6 +29,7 @@ import type {
 	PlainBridge,
 	WorkspaceEntryKind,
 	WorkspaceEntryStat,
+	WorkspaceWriteResult,
 } from "../../platform/tauri";
 import { frozenWorkspaceEntryRequest } from "../../platform/tauri/workspace-codec";
 
@@ -41,6 +48,13 @@ export interface PlainWorkspaceReadFileResult {
 	readonly stat: PlainWorkspaceProviderStat;
 	readonly value: Uint8Array;
 }
+
+export type PlainWorkspaceWriteFileResult =
+	| Readonly<{
+			status: "written";
+			stat: PlainWorkspaceProviderStat;
+	  }>
+	| Exclude<WorkspaceWriteResult, Readonly<{ status: "written" }>>;
 
 const SANITIZED_MESSAGES = Object.freeze({
 	entryNotFound: "The workspace entry does not exist.",
@@ -114,6 +128,27 @@ function mapReadError(error: unknown): FileSystemProviderError {
 	}
 }
 
+function mapWriteError(error: unknown): Error {
+	const code = commandErrorCode(error);
+	switch (code) {
+		case "WORKSPACE_FILE_MODIFIED":
+			return new FileOperationError(
+				"The workspace file changed before it could be written.",
+				FileOperationResult.FILE_MODIFIED_SINCE,
+			);
+		case "ROOT_NOT_AUTHORIZED":
+		case "PERMISSION_DENIED":
+			return noPermissions();
+		case "FILE_TOO_LARGE":
+			return fileSystemError(
+				FileSystemProviderErrorCode.FileTooLarge,
+				"The workspace file exceeds the supported write limit.",
+			);
+		default:
+			return unavailable();
+	}
+}
+
 function kindToFileType(kind: WorkspaceEntryKind): FileType {
 	switch (kind) {
 		case "file":
@@ -157,7 +192,9 @@ export class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWith
 		FileSystemProviderCapabilities.FileReadWrite |
 		FileSystemProviderCapabilities.Readonly;
 	readonly onDidChangeCapabilities: Event<void> = Event.None;
-	readonly onDidChangeFile: Event<readonly IFileChange[]> = Event.None;
+	private readonly changeEmitter = new Emitter<readonly IFileChange[]>();
+	readonly onDidChangeFile: Event<readonly IFileChange[]> =
+		this.changeEmitter.event;
 
 	constructor(private readonly bridge: PlainBridge) {}
 
@@ -213,6 +250,43 @@ export class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWith
 			});
 		} catch (error) {
 			throw mapReadError(error);
+		}
+	}
+
+	async plainWriteFile(
+		resource: URI,
+		content: Uint8Array,
+		expectedVersion: string,
+	): Promise<PlainWorkspaceWriteFileResult> {
+		const resolved = this.resolveResource(resource);
+		try {
+			const result = await this.bridge.workspaceWriteFile(
+				resolved.rootId,
+				resolved.relativePath,
+				expectedVersion,
+				content,
+			);
+			if (result.status === "written") {
+				return Object.freeze({
+					status: result.status,
+					stat: providerStat(result.stat),
+				});
+			}
+			this.changeEmitter.fire(
+				Object.freeze([
+					Object.freeze({
+						type: FileChangeType.UPDATED,
+						resource: resource.with({
+							path: "/",
+							query: null,
+							fragment: null,
+						}),
+					}),
+				]),
+			);
+			return result;
+		} catch (error) {
+			throw mapWriteError(error);
 		}
 	}
 

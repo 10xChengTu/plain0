@@ -3820,6 +3820,109 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		}
 	}
 
+	const plainWriteMethods = provider.members.filter(
+		(member) =>
+			ts.isMethodDeclaration(member) &&
+			typeScriptMemberName(member) === "plainWriteFile",
+	);
+	const publicWriteMethods = provider.members.filter(
+		(member) =>
+			ts.isMethodDeclaration(member) &&
+			typeScriptMemberName(member) === "writeFile",
+	);
+	const changeEventMembers = provider.members.filter(
+		(member) =>
+			ts.isPropertyDeclaration(member) &&
+			typeScriptMemberName(member) === "onDidChangeFile",
+	);
+	function providerMethodCallCount(method, receiverName, methodName) {
+		let count = 0;
+		function visitMethod(node) {
+			if (
+				ts.isCallExpression(node) &&
+				ts.isPropertyAccessExpression(node.expression) &&
+				node.expression.name.text === methodName &&
+				ts.isPropertyAccessExpression(node.expression.expression) &&
+				node.expression.expression.name.text === receiverName &&
+				node.expression.expression.expression.kind === ts.SyntaxKind.ThisKeyword
+			) {
+				count += 1;
+			}
+			ts.forEachChild(node, visitMethod);
+		}
+		if (method.body !== undefined) {
+			visitMethod(method.body);
+		}
+		return count;
+	}
+	if (plainWriteMethods.length !== 1) {
+		failures.push(
+			"Plain workspace provider must expose exactly one audited private plainWriteFile seam",
+		);
+	} else {
+		const [plainWrite] = plainWriteMethods;
+		const parameterNames = plainWrite.parameters.map((parameter) =>
+			ts.isIdentifier(parameter.name) ? parameter.name.text : undefined,
+		);
+		if (
+			!plainWrite.modifiers?.some(
+				(modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword,
+			) ||
+			!sameArray(parameterNames, ["resource", "content", "expectedVersion"]) ||
+			providerMethodCallCount(plainWrite, "bridge", "workspaceWriteFile") !==
+				1 ||
+			providerMethodCallCount(plainWrite, "changeEmitter", "fire") !== 1
+		) {
+			failures.push(
+				"plainWriteFile must dispatch one versioned bridge write and one audited root-rescan branch",
+			);
+		}
+	}
+	if (publicWriteMethods.length !== 1) {
+		failures.push(
+			"Plain workspace provider must keep exactly one fail-closed public writeFile method",
+		);
+	} else {
+		const [publicWrite] = publicWriteMethods;
+		const [statement] = publicWrite.body?.statements ?? [];
+		const expression = ts.isThrowStatement(statement)
+			? statement.expression
+			: undefined;
+		if (
+			publicWrite.body?.statements.length !== 1 ||
+			expression === undefined ||
+			!ts.isCallExpression(expression) ||
+			!ts.isIdentifier(expression.expression) ||
+			expression.expression.text !== "noPermissions" ||
+			expression.arguments.length !== 0 ||
+			providerMethodCallCount(publicWrite, "bridge", "workspaceWriteFile") !== 0
+		) {
+			failures.push(
+				"public writeFile must remain a direct noPermissions failure without native dispatch",
+			);
+		}
+	}
+	if (changeEventMembers.length !== 1) {
+		failures.push(
+			"Plain workspace provider must expose exactly one audited file-change event",
+		);
+	} else {
+		const [changeEvent] = changeEventMembers;
+		const initializer = changeEvent.initializer;
+		if (
+			initializer === undefined ||
+			!ts.isPropertyAccessExpression(initializer) ||
+			initializer.name.text !== "event" ||
+			!ts.isPropertyAccessExpression(initializer.expression) ||
+			initializer.expression.name.text !== "changeEmitter" ||
+			initializer.expression.expression.kind !== ts.SyntaxKind.ThisKeyword
+		) {
+			failures.push(
+				"Plain workspace provider file-change event must be sourced only from its private emitter",
+			);
+		}
+	}
+
 	const capabilityMembers = provider.members.filter(
 		(member) =>
 			ts.isPropertyDeclaration(member) &&

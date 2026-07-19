@@ -1,4 +1,6 @@
 import {
+	FileChangeType,
+	FileOperationResult,
 	FilePermission,
 	FileSystemProviderCapabilities,
 	FileSystemProviderErrorCode,
@@ -471,6 +473,159 @@ describe("Plain workspace file system provider", () => {
 			expect((await rejected(operation)).code).toBe(
 				FileSystemProviderErrorCode.FileNotADirectory,
 			);
+		}
+	});
+
+	it("exposes one private versioned-write receipt while the public provider stays readonly", async () => {
+		const write = vi.fn(async () =>
+			Object.freeze({
+				status: "written" as const,
+				stat: Object.freeze({
+					kind: "file" as const,
+					size: 3,
+					mtime: 30,
+					ctime: 20,
+					version: versionB,
+				}),
+			}),
+		);
+		const provider = createPlainWorkspaceFileSystemProvider(
+			testBridge({ workspaceWriteFile: write }),
+		);
+		const content = Uint8Array.from([4, 5, 6]);
+
+		const result = await provider.plainWriteFile(
+			workspaceUri("src/main.ts"),
+			content,
+			versionA,
+		);
+		expect(result).toEqual({
+			status: "written",
+			stat: {
+				type: FileType.File,
+				size: 3,
+				mtime: 30,
+				ctime: 20,
+				plainVersion: versionB,
+			},
+		});
+		expect(Object.isFrozen(result)).toBe(true);
+		if (result.status === "written") {
+			expect(Object.isFrozen(result.stat)).toBe(true);
+		}
+		expect(write).toHaveBeenCalledWith(
+			rootId,
+			"src/main.ts",
+			versionA,
+			content,
+		);
+	});
+
+	it("publishes one root rescan before returning every incomplete or unknown outcome", async () => {
+		const outcomes = [
+			Object.freeze({
+				status: "targetPublished" as const,
+				publicationEvidence: "targetObservedWritten" as const,
+				rename: "reportedFailure" as const,
+				directorySync: "failed" as const,
+				target: "changed" as const,
+			}),
+			Object.freeze({
+				status: "outcomeUnknown" as const,
+				observation: "responseUnavailable" as const,
+				rename: "unobserved" as const,
+				directorySync: "unobserved" as const,
+				target: "ambiguous" as const,
+			}),
+		];
+		let outcomeIndex = 0;
+		const provider = createPlainWorkspaceFileSystemProvider(
+			testBridge({
+				async workspaceWriteFile() {
+					return outcomes[outcomeIndex++ % outcomes.length]!;
+				},
+			}),
+		);
+		const order: string[] = [];
+		const events: (readonly {
+			readonly type: FileChangeType;
+			readonly resource: URI;
+		}[])[] = [];
+		const listener = provider.onDidChangeFile(
+			(
+				event: readonly {
+					readonly type: FileChangeType;
+					readonly resource: URI;
+				}[],
+			) => {
+				order.push("event");
+				events.push(event);
+			},
+		);
+
+		for (const expected of outcomes) {
+			const result = await provider.plainWriteFile(
+				workspaceUri("src/main.ts"),
+				new Uint8Array([1]),
+				versionA,
+			);
+			order.push("result");
+			expect(result).toBe(expected);
+		}
+		listener.dispose();
+		const resultAfterDispose = await provider.plainWriteFile(
+			workspaceUri("src/main.ts"),
+			new Uint8Array([1]),
+			versionA,
+		);
+
+		expect(order).toEqual(["event", "result", "event", "result"]);
+		expect(resultAfterDispose).toBe(outcomes[0]);
+		expect(events).toHaveLength(2);
+		for (const event of events) {
+			expect(Object.isFrozen(event)).toBe(true);
+			expect(event).toHaveLength(1);
+			expect(Object.isFrozen(event[0])).toBe(true);
+			expect(event[0]!.type).toBe(FileChangeType.UPDATED);
+			expect(event[0]!.resource.toString()).toBe(rootUri);
+			expect(event[0]!.resource.path).toBe("/");
+			expect(event[0]!.resource.query).toBe("");
+			expect(event[0]!.resource.fragment).toBe("");
+		}
+	});
+
+	it("maps pre-publication write errors without leaking native details", async () => {
+		for (const [nativeCode, expected] of [
+			["WORKSPACE_FILE_MODIFIED", FileOperationResult.FILE_MODIFIED_SINCE],
+			["FILE_TOO_LARGE", FileSystemProviderErrorCode.FileTooLarge],
+			["PERMISSION_DENIED", FileSystemProviderErrorCode.NoPermissions],
+			["IO_FAILED", FileSystemProviderErrorCode.Unavailable],
+		] as const) {
+			const provider = createPlainWorkspaceFileSystemProvider(
+				testBridge({
+					async workspaceWriteFile() {
+						throw commandError(nativeCode);
+					},
+				}),
+			);
+			const changeListener = vi.fn();
+			const changeSubscription = provider.onDidChangeFile(changeListener);
+			const error = await rejected(
+				provider.plainWriteFile(
+					workspaceUri("private"),
+					new Uint8Array(),
+					versionA,
+				),
+			);
+			changeSubscription.dispose();
+			if (typeof expected === "number") {
+				expect(error).toMatchObject({ fileOperationResult: expected });
+			} else {
+				expect(error.code).toBe(expected);
+			}
+			expect(error.message).not.toContain("/Users/private");
+			expect(error.message).not.toContain(nativeCode);
+			expect(changeListener).not.toHaveBeenCalled();
 		}
 	});
 

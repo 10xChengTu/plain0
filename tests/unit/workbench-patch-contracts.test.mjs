@@ -95,7 +95,7 @@ describe("exact Workbench patch contracts", () => {
 
 		const stale = await baseline();
 		stale.lockfile = stale.lockfile.replace(
-			"e66da17c64d9f10010396149d3905cf7ed586933c214999c419c73c965eda877",
+			"5aafc3e41fc13c7e72c60da8b48893b4b5c5ed14883f6f669238ae62aadc8aec",
 			"0".repeat(64),
 		);
 		expect(validateWorkbenchPatchSet(stale)).toContain(
@@ -139,7 +139,7 @@ describe("exact Workbench patch contracts", () => {
 
 	it("rejects bare importer and snapshot edges even when comments repeat the hash", async () => {
 		const apiHash =
-			"e25f901e0568ea0e7a77e1b1c0286306929a223832ef5e439508039f831e91a4";
+			"71ac09018e6f1b2f74a120dc8f026aaf899c22c22c5fdec7a161f56d284d726f";
 		const importerBare = await baseline();
 		importerBare.lockfile = `${importerBare.lockfile.replace(
 			`        version: 35.0.1(patch_hash=${apiHash})`,
@@ -206,15 +206,63 @@ describe("exact Workbench patch contracts", () => {
 		);
 	});
 
-	it("does not pre-authorize the future write receipt source", async () => {
+	it("pins the three Plain baseline sources and the unresolved-save latch", async () => {
 		const input = await baseline();
 		const apiPatch = input.patchSources.get(
 			"patches/@codingame__monaco-vscode-api@35.0.1.patch",
 		);
-		expect(apiPatch).not.toContain("plainWriteReceipt");
 		expect(apiPatch.match(/Symbol\("plainReadReceipt"\)/gu)).toHaveLength(2);
 		expect(apiPatch.match(/Symbol\("plainBufferNoBaseline"\)/gu)).toHaveLength(
 			2,
 		);
+		expect(apiPatch.match(/Symbol\("plainWriteReceipt"\)/gu)).toHaveLength(2);
+		expect(apiPatch.match(/plainWriteReceipt/gu)).toHaveLength(4);
+		expect(apiPatch.match(/plainSaveRequiresReload/gu)).toHaveLength(10);
+	});
+
+	it("rejects save-latch, branded-error and bounded-collector downgrades", async () => {
+		const mutations = [
+			{
+				patchPath: "patches/@codingame__monaco-vscode-api@35.0.1.patch",
+				from: "this.plainSaveRequiresReload = true;",
+				to: "this.plainSaveRequiresReload = false;",
+			},
+			{
+				patchPath:
+					"patches/@codingame__monaco-vscode-files-service-override@35.0.1.patch",
+				from: "throw createPlainWorkspaceWriteOutcomeError(result, options);",
+				to: "throw new Error(String(result));",
+			},
+			{
+				patchPath:
+					"patches/@codingame__monaco-vscode-files-service-override@35.0.1.patch",
+				from: "this.plainWorkspaceWriteFailures.set(plainWorkspaceWriteKey, Object.freeze({",
+				to: "void plainWorkspaceWriteKey; Object.freeze({",
+			},
+			{
+				patchPath:
+					"patches/@codingame__monaco-vscode-files-service-override@35.0.1.patch",
+				from: "failureAtReadStart?.resourceIdentity === resourceIdentity ? failureAtReadStart : undefined",
+				to: "failureAtReadStart",
+			},
+			{
+				patchPath:
+					"patches/@codingame__monaco-vscode-files-service-override@35.0.1.patch",
+				from: "const buffer = await collectPlainWorkspaceWriteBuffer(bufferOrReadableOrStream, resource, writeFileOptions);",
+				to: "const buffer = await streamToBuffer(bufferOrReadableOrStream);",
+			},
+		];
+		for (const mutation of mutations) {
+			const input = await baseline();
+			const source = input.patchSources.get(mutation.patchPath);
+			expect(source).toContain(mutation.from);
+			input.patchSources.set(
+				mutation.patchPath,
+				source.replace(mutation.from, mutation.to),
+			);
+			expect(validateWorkbenchPatchSet(input)).toContain(
+				`${mutation.patchPath} differs from its exact audited SHA-256`,
+			);
+		}
 	});
 });
