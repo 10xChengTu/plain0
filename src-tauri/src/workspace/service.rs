@@ -653,7 +653,7 @@ impl WindowWorkspace {
         let mut state = lock(&self.state)?;
         ensure_active_picker(&state, token)?;
 
-        let (result, watcher, active_registrations) = match selection {
+        let (result, watcher, revoked_registrations) = match selection {
             DirectoryPickerResult::Selected(paths) if paths.is_empty() => {
                 state.active_picker = None;
                 (
@@ -711,14 +711,14 @@ impl WindowWorkspace {
                         .insert(registration.root_id(), registration);
                 }
                 let active_root_ids = state.scope.root_ids().into_iter().collect::<BTreeSet<_>>();
-                state
-                    .watch_registrations
-                    .retain(|root_id, _| active_root_ids.contains(root_id));
-                let active_registrations = state
-                    .watch_registrations
-                    .values()
-                    .copied()
-                    .collect::<Vec<_>>();
+                let mut revoked_registrations = Vec::new();
+                state.watch_registrations.retain(|root_id, registration| {
+                    let retained = active_root_ids.contains(root_id);
+                    if !retained {
+                        revoked_registrations.push(*registration);
+                    }
+                    retained
+                });
                 invalidate_delete_batch(&mut state);
                 (
                     WorkspacePickRootsResult::new(
@@ -726,7 +726,7 @@ impl WindowWorkspace {
                         state.scope.snapshot(),
                     ),
                     Some(watcher),
-                    active_registrations,
+                    revoked_registrations,
                 )
             }
             DirectoryPickerResult::Cancelled => {
@@ -744,7 +744,9 @@ impl WindowWorkspace {
         drop(state);
         drop(mutation);
         if let Some(watcher) = watcher {
-            watcher.retain(&active_registrations);
+            for registration in revoked_registrations {
+                watcher.revoke(registration);
+            }
         }
         Ok(result)
     }
@@ -911,19 +913,14 @@ impl WindowWorkspace {
         let mut state = lock(&self.state)?;
         ensure_open(&state)?;
         state.scope.remove(root_id)?;
-        state.watch_registrations.remove(&root_id);
-        let active_registrations = state
-            .watch_registrations
-            .values()
-            .copied()
-            .collect::<Vec<_>>();
+        let removed_registration = state.watch_registrations.remove(&root_id);
         invalidate_delete_batch(&mut state);
         let snapshot = state.scope.snapshot();
         let watcher = lock(&self.watcher)?.clone();
         drop(state);
         drop(mutation);
-        if let Some(watcher) = watcher {
-            watcher.retain(&active_registrations);
+        if let (Some(watcher), Some(registration)) = (watcher, removed_registration) {
+            watcher.revoke(registration);
         }
         Ok(snapshot)
     }

@@ -343,7 +343,6 @@ impl WindowWatcher {
     }
 
     /// Removes one exact epoch. A stale caller cannot revoke its replacement.
-    #[cfg(test)]
     pub(crate) fn revoke(&self, registration: WatchRegistration) -> bool {
         let removed = {
             let mut state = recover_lock(&self.shared.state);
@@ -368,6 +367,7 @@ impl WindowWatcher {
 
     /// Retains only the exact root/epoch registrations still authorized by the
     /// workspace scope. Detached watcher handles are dropped outside the lock.
+    #[cfg(test)]
     pub(crate) fn retain(&self, registrations: &[WatchRegistration]) {
         let retained = registrations.iter().copied().collect::<BTreeSet<_>>();
         let removed = {

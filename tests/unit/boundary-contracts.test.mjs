@@ -1105,6 +1105,56 @@ describe("workspace watcher Harness", () => {
 		}
 	});
 
+	it("keeps root topology changes connected to exact OS watcher revocation", () => {
+		const baseline = workspaceWatcherBoundarySources();
+		const failure =
+			"root topology changes must revoke only their exact watcher epochs after releasing workspace locks";
+		const removeRootTail =
+			"let watcher = lock(&self.watcher)?.clone();\n        drop(state);\n        drop(mutation);\n        if let (Some(watcher), Some(registration)) = (watcher, removed_registration) {\n            watcher.revoke(registration);\n        }\n        Ok(snapshot)";
+		const finishPickerTail =
+			"if let Some(watcher) = watcher {\n            for registration in revoked_registrations {\n                watcher.revoke(registration);\n            }\n        }\n        Ok(result)";
+		for (const [from, to] of [
+			[
+				removeRootTail,
+				removeRootTail.replace(
+					"watcher.revoke(registration);",
+					"let _ = registration;",
+				),
+			],
+			[removeRootTail, removeRootTail.replace("        drop(mutation);\n", "")],
+			[
+				"let snapshot = state.scope.snapshot();",
+				"let snapshot = state.scope.snapshot();\n        if snapshot.roots().is_empty() {\n            return Ok(snapshot);\n        }",
+			],
+			[
+				finishPickerTail,
+				finishPickerTail.replace(
+					"watcher.revoke(registration);",
+					"let _ = registration;",
+				),
+			],
+		]) {
+			const hostile = replaceWatcherSource(
+				baseline.rust,
+				"src-tauri/src/workspace/service.rs",
+				from,
+				to,
+			);
+			expect(validateWorkspaceWatcherBoundary(hostile, baseline.app)).toContain(
+				failure,
+			);
+		}
+		const testOnlyRevoke = replaceWatcherSource(
+			baseline.rust,
+			"src-tauri/src/workspace/watcher.rs",
+			"    pub(crate) fn revoke(&self, registration: WatchRegistration) -> bool {",
+			"    #[cfg(test)]\n    pub(crate) fn revoke(&self, registration: WatchRegistration) -> bool {",
+		);
+		expect(
+			validateWorkspaceWatcherBoundary(testOnlyRevoke, baseline.app),
+		).toContain(failure);
+	});
+
 	it("fails closed when codec bounds or manager serialization drift", () => {
 		const baseline = workspaceWatcherBoundarySources();
 		const codecPath = "app/platform/tauri/workspace-codec.ts";

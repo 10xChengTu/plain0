@@ -20,8 +20,6 @@ export const WORKSPACE_TOPOLOGY_CONTRACT_FAILURES = Object.freeze({
 });
 
 export const EXPECTED_GUARDED_WORKSPACE_COMMAND_IDS = Object.freeze([
-	"removeRootFolder",
-	"workbench.action.removeRootFolder",
 	"workbench.action.closeFolder",
 	"workbench.action.openWorkspace",
 	"workbench.action.openWorkspaceConfigFile",
@@ -181,7 +179,7 @@ export function validateViteResolverAuthority(
 	);
 }
 
-const productContracts = Object.freeze([
+const pickerProductContracts = Object.freeze([
 	Object.freeze(["openFolder", "workbench.action.files.openFolder", "replace"]),
 	Object.freeze([
 		"openFolderViaWorkspace",
@@ -191,9 +189,24 @@ const productContracts = Object.freeze([
 	Object.freeze(["setRootFolder", "setRootFolder", "replace"]),
 	Object.freeze(["addRootFolder", "addRootFolder", "add"]),
 ]);
+const removeProductContracts = Object.freeze([
+	Object.freeze(["removeRootFolder", "removeRootFolder", "resource"]),
+	Object.freeze([
+		"removeRootFolderViaPicker",
+		"workbench.action.removeRootFolder",
+		"picker",
+	]),
+]);
+const productContracts = Object.freeze([
+	...pickerProductContracts,
+	...removeProductContracts,
+]);
 
 const COMMAND_REGISTRY_MODULE =
 	"@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands";
+const COMMAND_SERVICE_MODULE =
+	"@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands.service";
+const URI_MODULE = "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
 const MONACO_API_MODULE = "@codingame/monaco-vscode-api/monaco";
 const FILES_PROVIDER_OVERRIDE_MODULE =
 	"@codingame/monaco-vscode-files-service-override";
@@ -214,7 +227,9 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/excluded-surfaces.ts:@codingame/monaco-vscode-api/monaco",
 	"app/excluded-surfaces.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/views",
 	"app/features/workspace/commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands",
+	"app/features/workspace/commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands.service",
 	"app/features/workspace/commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextkey/common/contextkey.service",
+	"app/features/workspace/commands.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
 	"app/features/workspace/commands.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/contextkeys",
 	"app/features/workspace/delete-coordinator.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle",
 	"app/features/workspace/delete-coordinator.ts:@codingame/monaco-vscode-api/vscode/vs/editor/browser/services/bulkEditService",
@@ -997,6 +1012,62 @@ function expressionBody(functionLike) {
 		return undefined;
 	}
 	return directReturnedExpression(functionLike.body);
+}
+
+function syntaxTokenSignature(source) {
+	if (typeof source !== "string") {
+		return undefined;
+	}
+	const scanner = ts.createScanner(
+		ts.ScriptTarget.Latest,
+		true,
+		ts.LanguageVariant.Standard,
+		source,
+	);
+	const tokens = [];
+	for (
+		let token = scanner.scan();
+		token !== ts.SyntaxKind.EndOfFileToken;
+		token = scanner.scan()
+	) {
+		tokens.push([token, scanner.getTokenText()]);
+	}
+	return JSON.stringify(tokens);
+}
+
+function syntaxAstSignature(source) {
+	if (typeof source !== "string") {
+		return undefined;
+	}
+	const sourceFile = ts.createSourceFile(
+		"workspace-remove-command-contract.ts",
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length !== 0) {
+		return undefined;
+	}
+	const signature = (node) => {
+		const children = [];
+		ts.forEachChild(node, (child) => {
+			children.push(signature(child));
+		});
+		return [node.kind, children];
+	};
+	return JSON.stringify(signature(sourceFile));
+}
+
+function hasExactSyntaxTokens(node, expected) {
+	if (node === undefined) {
+		return false;
+	}
+	const actual = node.getText(node.getSourceFile());
+	return (
+		syntaxTokenSignature(actual) === syntaxTokenSignature(expected) &&
+		syntaxAstSignature(actual) === syntaxAstSignature(expected)
+	);
 }
 
 function sameStringArray(actual, expected) {
@@ -2452,14 +2523,193 @@ function validatePlainServiceImplementation(sourceFile) {
 	);
 }
 
+function validateWorkspaceRemoveCommandIr(sourceFile) {
+	const fixedConst = (name) => {
+		const declarations = variableDeclarations(sourceFile, name);
+		return declarations.length === 1 &&
+			isConstVariableDeclaration(declarations[0])
+			? declarations[0]
+			: undefined;
+	};
+	const pickId = fixedConst("PICK_WORKSPACE_FOLDER_COMMAND_ID");
+	const scheme = fixedConst("PLAIN_WORKSPACE_SCHEME");
+	const uuidPattern = fixedConst("UUID_V4_PATTERN");
+	const componentKeys = fixedConst("URI_COMPONENT_KEYS");
+	const invalidCode = fixedConst("PLAIN_WORKSPACE_ROOT_RESOURCE_INVALID");
+	const invalidFunctions = callableDeclarations(
+		sourceFile,
+		"invalidWorkspaceRootResource",
+	);
+	const rootIdFunctions = callableDeclarations(sourceFile, "workspaceRootId");
+	const folderFunctions = callableDeclarations(
+		sourceFile,
+		"workspaceFolderResource",
+	);
+	const invalidClasses = sourceFile.statements.filter(
+		(statement) =>
+			ts.isClassDeclaration(statement) &&
+			statement.name?.text === "PlainWorkspaceRootResourceInvalidError",
+	);
+	const removeRootDeclarations = variableDeclarations(sourceFile, "removeRoot");
+	const uuidInitializer = unwrapExpression(uuidPattern?.initializer);
+	return (
+		isExactStringLiteral(
+			unwrapExpression(pickId?.initializer),
+			"_workbench.pickWorkspaceFolder",
+		) &&
+		isExactStringLiteral(
+			unwrapExpression(scheme?.initializer),
+			"plain-workspace",
+		) &&
+		uuidInitializer?.kind === ts.SyntaxKind.RegularExpressionLiteral &&
+		uuidInitializer.text ===
+			"/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/" &&
+		sameStringArray(arrayLiteralStrings(componentKeys?.initializer), [
+			"scheme",
+			"authority",
+			"path",
+			"query",
+			"fragment",
+		]) &&
+		isExactStringLiteral(
+			unwrapExpression(invalidCode?.initializer),
+			"PLAIN_WORKSPACE_ROOT_RESOURCE_INVALID",
+		) &&
+		invalidClasses.length === 1 &&
+		hasExactSyntaxTokens(
+			invalidClasses[0],
+			`class PlainWorkspaceRootResourceInvalidError extends TypeError {
+				readonly code = PLAIN_WORKSPACE_ROOT_RESOURCE_INVALID;
+				constructor() {
+					super("The workspace root URI is invalid.");
+					this.name = "PlainWorkspaceRootResourceInvalidError";
+					Object.freeze(this);
+				}
+			}`,
+		) &&
+		invalidFunctions.length === 1 &&
+		hasExactSyntaxTokens(
+			invalidFunctions[0],
+			`function invalidWorkspaceRootResource(): never {
+				throw new PlainWorkspaceRootResourceInvalidError();
+			}`,
+		) &&
+		rootIdFunctions.length === 1 &&
+		hasExactSyntaxTokens(
+			rootIdFunctions[0],
+			`function workspaceRootId(resource: unknown): string {
+				try {
+					if (!(resource instanceof URI)) {
+						return invalidWorkspaceRootResource();
+					}
+					const descriptors = Object.getOwnPropertyDescriptors(resource);
+					const components: Record<string, string> = Object.create(null);
+					for (const key of URI_COMPONENT_KEYS) {
+						const descriptor = descriptors[key];
+						if (
+							descriptor === undefined ||
+							!("value" in descriptor) ||
+							descriptor.get !== undefined ||
+							descriptor.set !== undefined ||
+							typeof descriptor.value !== "string"
+						) {
+							return invalidWorkspaceRootResource();
+						}
+						components[key] = descriptor.value;
+					}
+					for (const key of Reflect.ownKeys(descriptors)) {
+						if (typeof key !== "string") {
+							return invalidWorkspaceRootResource();
+						}
+						const descriptor = descriptors[key];
+						if (
+							descriptor === undefined ||
+							!("value" in descriptor) ||
+							descriptor.get !== undefined ||
+							descriptor.set !== undefined ||
+							(typeof descriptor.value !== "string" &&
+								descriptor.value !== null)
+						) {
+							return invalidWorkspaceRootResource();
+						}
+					}
+					structuredClone(resource);
+					if (
+						components.scheme !== PLAIN_WORKSPACE_SCHEME ||
+						!UUID_V4_PATTERN.test(components.authority!) ||
+						components.path !== "/" ||
+						components.query !== "" ||
+						components.fragment !== ""
+					) {
+						return invalidWorkspaceRootResource();
+					}
+					return components.authority!;
+				} catch {
+					return invalidWorkspaceRootResource();
+				}
+			}`,
+		) &&
+		folderFunctions.length === 1 &&
+		hasExactSyntaxTokens(
+			folderFunctions[0],
+			`function workspaceFolderResource(folder: unknown): unknown {
+				try {
+					if (typeof folder !== "object" || folder === null) {
+						return invalidWorkspaceRootResource();
+					}
+					const descriptor = Object.getOwnPropertyDescriptor(folder, "uri");
+					if (
+						descriptor === undefined ||
+						!("value" in descriptor) ||
+						descriptor.get !== undefined ||
+						descriptor.set !== undefined
+					) {
+						return invalidWorkspaceRootResource();
+					}
+					return descriptor.value;
+				} catch {
+					return invalidWorkspaceRootResource();
+				}
+			}`,
+		) &&
+		removeRootDeclarations.length === 1 &&
+		isConstVariableDeclaration(removeRootDeclarations[0]) &&
+		hasExactSyntaxTokens(
+			removeRootDeclarations[0],
+			`removeRoot = (commandService: ICommandService, resource: unknown) =>
+				topologyCoordinator.runMutation(async () => {
+					let selectedResource = resource;
+					if (selectedResource === undefined) {
+						const folder = await commandService.executeCommand<unknown>(
+							PICK_WORKSPACE_FOLDER_COMMAND_ID,
+						);
+						if (folder === undefined) {
+							return Object.freeze({
+								result: undefined,
+								snapshot: undefined,
+							});
+						}
+						selectedResource = workspaceFolderResource(folder);
+					}
+					const rootId = workspaceRootId(selectedResource);
+					const snapshot = await bridge.workspaceRemoveRoot(rootId);
+					return Object.freeze({ result: undefined, snapshot });
+				})`,
+		)
+	);
+}
+
 function validateGuardedCommands(sourceFile) {
 	if (
 		sourceFile.parseDiagnostics.length !== 0 ||
+		!importsNamedValue(sourceFile, COMMAND_SERVICE_MODULE, "ICommandService") ||
+		!importsNamedValue(sourceFile, URI_MODULE, "URI") ||
 		!importsNamedValue(
 			sourceFile,
 			"../../services/plain-workspace-services",
 			"PlainWorkspaceOperationUnsupportedError",
-		)
+		) ||
+		!validateWorkspaceRemoveCommandIr(sourceFile)
 	) {
 		return false;
 	}
@@ -2676,7 +2926,7 @@ function validateGuardedCommands(sourceFile) {
 		const chain = propertyChain(call.arguments[0]);
 		return chain?.length === 2 && chain[0] === "WORKSPACE_COMMAND_IDS";
 	});
-	const productAnalyses = productContracts.map(([property, id, mode]) => {
+	const analyzeProduct = ([property, id]) => {
 		const idProperty = objectProperty(commandIdObject, property);
 		const matches = productRegistrations.filter((call) =>
 			sameChain(call.arguments[0], ["WORKSPACE_COMMAND_IDS", property]),
@@ -2699,25 +2949,96 @@ function validateGuardedCommands(sourceFile) {
 			? unwrapExpression(route.expression)
 			: undefined;
 		return {
+			property,
+			id,
+			idProperty,
 			productRegistration,
 			registryReceiver,
+			productHandler,
+			route,
 			routeIdentifier,
-			valid:
+			validId:
 				ts.isPropertyAssignment(idProperty) &&
 				ts.isStringLiteralLike(unwrapExpression(idProperty.initializer)) &&
 				unwrapExpression(idProperty.initializer).text === id &&
 				productRegistration !== undefined &&
-				registryReceiver !== undefined &&
-				ts.isArrowFunction(productHandler) &&
-				productHandler.parameters.length === 0 &&
-				ts.isCallExpression(route) &&
-				ts.isIdentifier(routeIdentifier) &&
-				routeIdentifier.text === "pickRoots" &&
-				route.arguments.length === 1 &&
-				ts.isStringLiteralLike(unwrapExpression(route.arguments[0])) &&
-				unwrapExpression(route.arguments[0]).text === mode,
+				registryReceiver !== undefined,
+		};
+	};
+	const pickerProductAnalyses = pickerProductContracts.map((contract) => {
+		const analysis = analyzeProduct(contract);
+		const mode = contract[2];
+		return {
+			...analysis,
+			valid:
+				analysis.validId &&
+				ts.isArrowFunction(analysis.productHandler) &&
+				analysis.productHandler.parameters.length === 0 &&
+				ts.isCallExpression(analysis.route) &&
+				ts.isIdentifier(analysis.routeIdentifier) &&
+				analysis.routeIdentifier.text === "pickRoots" &&
+				analysis.route.arguments.length === 1 &&
+				ts.isStringLiteralLike(unwrapExpression(analysis.route.arguments[0])) &&
+				unwrapExpression(analysis.route.arguments[0]).text === mode,
 		};
 	});
+	const removeProductAnalyses = removeProductContracts.map((contract) => {
+		const analysis = analyzeProduct(contract);
+		const routeKind = contract[2];
+		const parameters = ts.isArrowFunction(analysis.productHandler)
+			? analysis.productHandler.parameters
+			: [];
+		const accessorParameter = parameters[0];
+		const resourceParameter = parameters[1];
+		const commandServiceCall = ts.isCallExpression(analysis.route)
+			? unwrapExpression(analysis.route.arguments[0])
+			: undefined;
+		const commandServiceToken = ts.isCallExpression(commandServiceCall)
+			? unwrapExpression(commandServiceCall.arguments[0])
+			: undefined;
+		const resourceArgument = ts.isCallExpression(analysis.route)
+			? unwrapExpression(analysis.route.arguments[1])
+			: undefined;
+		const validParameters =
+			ts.isArrowFunction(analysis.productHandler) &&
+			parameters.length === (routeKind === "resource" ? 2 : 1) &&
+			ts.isIdentifier(accessorParameter?.name) &&
+			accessorParameter.name.text === "accessor" &&
+			accessorParameter.dotDotDotToken === undefined &&
+			accessorParameter.questionToken === undefined &&
+			accessorParameter.initializer === undefined &&
+			(routeKind !== "resource" ||
+				(ts.isIdentifier(resourceParameter?.name) &&
+					resourceParameter.name.text === "resource" &&
+					resourceParameter.dotDotDotToken === undefined &&
+					resourceParameter.questionToken === undefined &&
+					resourceParameter.initializer === undefined));
+		return {
+			...analysis,
+			accessorParameter,
+			resourceParameter,
+			commandServiceCall,
+			commandServiceToken,
+			resourceArgument,
+			valid:
+				analysis.validId &&
+				validParameters &&
+				ts.isCallExpression(analysis.route) &&
+				ts.isIdentifier(analysis.routeIdentifier) &&
+				analysis.routeIdentifier.text === "removeRoot" &&
+				analysis.route.arguments.length === 2 &&
+				ts.isCallExpression(commandServiceCall) &&
+				sameChain(commandServiceCall.expression, ["accessor", "get"]) &&
+				commandServiceCall.arguments.length === 1 &&
+				ts.isIdentifier(commandServiceToken) &&
+				commandServiceToken.text === "ICommandService" &&
+				(routeKind === "resource"
+					? ts.isIdentifier(resourceArgument) &&
+						resourceArgument.text === "resource"
+					: sameChain(resourceArgument, ["undefined"])),
+		};
+	});
+	const productAnalyses = [...pickerProductAnalyses, ...removeProductAnalyses];
 	const registrationsDeclarations = variableDeclarations(
 		sourceFile,
 		"registrations",
@@ -2792,34 +3113,109 @@ function validateGuardedCommands(sourceFile) {
 			...productAnalyses.map(({ registryReceiver }) => registryReceiver),
 		],
 	);
+	const removeRootDeclarations = variableDeclarations(sourceFile, "removeRoot");
+	const removeRootDeclaration =
+		removeRootDeclarations.length === 1 ? removeRootDeclarations[0] : undefined;
+	const removeRootInitializer = unwrapExpression(
+		removeRootDeclaration?.initializer,
+	);
+	const nativeRemoveCalls = callWithChain(sourceFile, [
+		"bridge",
+		"workspaceRemoveRoot",
+	]);
+	const nativeRemoveReceiver =
+		nativeRemoveCalls.length === 1
+			? directMethodReceiver(
+					nativeRemoveCalls[0],
+					"bridge",
+					"workspaceRemoveRoot",
+				)
+			: undefined;
+	const topologyCalls = callWithChain(sourceFile, [
+		"topologyCoordinator",
+		"runMutation",
+	]);
+	const removeTopologyCall = topologyCalls.find(
+		(call) =>
+			removeRootInitializer !== undefined &&
+			containsNode(removeRootInitializer, call),
+	);
+	const removeTopologyReceiver = directMethodReceiver(
+		removeTopologyCall,
+		"topologyCoordinator",
+		"runMutation",
+	);
 	const hasClosedPickRootsBinding = hasExactIdentifierReferences(
 		sourceFile,
 		"pickRoots",
 		[
 			pickDeclaration?.name,
-			...productAnalyses.map(({ routeIdentifier }) => routeIdentifier),
+			...pickerProductAnalyses.map(({ routeIdentifier }) => routeIdentifier),
+		],
+	);
+	const hasClosedRemoveRootBinding = hasExactIdentifierReferences(
+		sourceFile,
+		"removeRoot",
+		[
+			removeRootDeclaration?.name,
+			...removeProductAnalyses.map(({ routeIdentifier }) => routeIdentifier),
 		],
 	);
 	const hasClosedBridgeBinding = hasExactIdentifierReferences(
 		sourceFile,
 		"bridge",
-		[bridgeParameter.name, nativePickReceiver],
+		[bridgeParameter.name, nativePickReceiver, nativeRemoveReceiver],
 	);
 	const hasClosedTopologyBinding = hasExactIdentifierReferences(
 		sourceFile,
 		"topologyCoordinator",
-		[topologyParameter.name, topologyReceiver],
+		[topologyParameter.name, topologyReceiver, removeTopologyReceiver],
 	);
 	const hasClosedModeBinding = hasExactIdentifierReferences(
 		sourceFile,
 		"mode",
 		[pickParameter?.name, nativeModeArgument],
 	);
-	const hasClosedObjectBinding = hasExactIdentifierReferences(
-		sourceFile,
-		"Object",
-		[commandIdFreezeReceiver, guardedFreezeReceiver, mutationFreezeReceiver],
+	const objectMethodContracts = [
+		["freeze", 7],
+		["getOwnPropertyDescriptors", 1],
+		["create", 1],
+		["getOwnPropertyDescriptor", 1],
+	];
+	const objectCalls = objectMethodContracts.flatMap(([method]) =>
+		callWithChain(sourceFile, ["Object", method]),
 	);
+	const objectReceivers = objectCalls.map((call) => {
+		const expression = unwrapExpression(call.expression);
+		return ts.isPropertyAccessExpression(expression)
+			? unwrapExpression(expression.expression)
+			: undefined;
+	});
+	const hasClosedObjectBinding =
+		objectMethodContracts.every(
+			([method, count]) =>
+				callWithChain(sourceFile, ["Object", method]).length === count,
+		) && hasExactIdentifierReferences(sourceFile, "Object", objectReceivers);
+	const reflectCalls = callWithChain(sourceFile, ["Reflect", "ownKeys"]);
+	const reflectReceiver =
+		reflectCalls.length === 1
+			? directMethodReceiver(reflectCalls[0], "Reflect", "ownKeys")
+			: undefined;
+	const hasClosedReflectBinding =
+		reflectReceiver !== undefined &&
+		hasExactIdentifierReferences(sourceFile, "Reflect", [reflectReceiver]);
+	const structuredCloneCalls = directCallsNamed(sourceFile, "structuredClone");
+	const structuredCloneCallees = structuredCloneCalls.map((call) =>
+		unwrapExpression(call.expression),
+	);
+	const hasClosedStructuredCloneBinding =
+		structuredCloneCalls.length === 1 &&
+		structuredCloneCallees.every(ts.isIdentifier) &&
+		hasExactIdentifierReferences(
+			sourceFile,
+			"structuredClone",
+			structuredCloneCallees,
+		);
 	const hasClosedPromiseBinding = hasExactIdentifierReferences(
 		sourceFile,
 		"Promise",
@@ -2830,6 +3226,48 @@ function validateGuardedCommands(sourceFile) {
 		"PlainWorkspaceOperationUnsupportedError",
 		[rejectionErrorImport, rejectionErrorIdentifier],
 	);
+	const commandServiceImport = namedImportLocalIdentifier(
+		sourceFile,
+		COMMAND_SERVICE_MODULE,
+		"ICommandService",
+	);
+	const removeCommandServiceParameter =
+		ts.isArrowFunction(removeRootInitializer) &&
+		removeRootInitializer.parameters.length === 2
+			? removeRootInitializer.parameters[0]
+			: undefined;
+	const removeCommandServiceType =
+		removeCommandServiceParameter?.type !== undefined &&
+		ts.isTypeReferenceNode(removeCommandServiceParameter.type)
+			? unwrapExpression(removeCommandServiceParameter.type.typeName)
+			: undefined;
+	const hasClosedCommandServiceTokenBinding =
+		commandServiceImport !== undefined &&
+		ts.isIdentifier(removeCommandServiceType) &&
+		removeCommandServiceType.text === "ICommandService" &&
+		hasExactIdentifierReferences(sourceFile, "ICommandService", [
+			commandServiceImport,
+			removeCommandServiceType,
+			...removeProductAnalyses.map(({ commandServiceToken }) =>
+				ts.isIdentifier(commandServiceToken) ? commandServiceToken : undefined,
+			),
+		]);
+	const uriImport = namedImportLocalIdentifier(sourceFile, URI_MODULE, "URI");
+	const uriInstanceOfReferences = descendants(
+		sourceFile,
+		(node) =>
+			ts.isBinaryExpression(node) &&
+			node.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword &&
+			ts.isIdentifier(unwrapExpression(node.right)) &&
+			unwrapExpression(node.right).text === "URI",
+	).map((expression) => unwrapExpression(expression.right));
+	const hasClosedUriBinding =
+		uriImport !== undefined &&
+		uriInstanceOfReferences.length === 1 &&
+		hasExactIdentifierReferences(sourceFile, "URI", [
+			uriImport,
+			uriInstanceOfReferences[0],
+		]);
 	const hasClosedRegistrationsBinding = hasExactIdentifierReferences(
 		sourceFile,
 		"registrations",
@@ -2879,6 +3317,14 @@ function validateGuardedCommands(sourceFile) {
 		ts.isIdentifier(nativeModeArgument) &&
 		nativeModeArgument.text === "mode" &&
 		callWithChain(sourceFile, ["bridge", "workspacePickRoots"]).length === 1 &&
+		nativeRemoveCalls.length === 1 &&
+		nativeRemoveReceiver !== undefined &&
+		removeRootInitializer !== undefined &&
+		isDirectVariableDeclaration(commandFunction, removeRootDeclaration) &&
+		containsNode(removeRootInitializer, nativeRemoveCalls[0]) &&
+		topologyCalls.length === 2 &&
+		removeTopologyCall !== undefined &&
+		removeTopologyReceiver !== undefined &&
 		ts.isObjectLiteralExpression(mutationResultObject) &&
 		mutationResultObject.properties.length === 2 &&
 		ts.isShorthandPropertyAssignment(mutationResultProperty) &&
@@ -2943,12 +3389,17 @@ function validateGuardedCommands(sourceFile) {
 		disposeCall.arguments.length === 0 &&
 		hasClosedCommandRegistryBinding &&
 		hasClosedPickRootsBinding &&
+		hasClosedRemoveRootBinding &&
 		hasClosedBridgeBinding &&
 		hasClosedTopologyBinding &&
 		hasClosedModeBinding &&
 		hasClosedObjectBinding &&
+		hasClosedReflectBinding &&
+		hasClosedStructuredCloneBinding &&
 		hasClosedPromiseBinding &&
 		hasClosedRejectionErrorBinding &&
+		hasClosedCommandServiceTokenBinding &&
+		hasClosedUriBinding &&
 		hasClosedRegistrationsBinding &&
 		hasClosedLoopRegistrationBinding
 	);
@@ -4733,6 +5184,10 @@ function validateTopologyAuthority(authority) {
 		hasExactNamedImport(commandSource, COMMAND_REGISTRY_MODULE, [
 			"CommandsRegistry",
 		]) &&
+		hasExactNamedImport(commandSource, COMMAND_SERVICE_MODULE, [
+			"ICommandService",
+		]) &&
+		hasExactNamedImport(commandSource, URI_MODULE, ["URI"]) &&
 		hasExactNamedImport(excludedSurfaceSource, MONACO_API_MODULE, [
 			"CommandsRegistry",
 			"Registry",

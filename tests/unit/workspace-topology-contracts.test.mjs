@@ -1225,6 +1225,11 @@ editor.addCommand({ id: "plain.extra", run: () => undefined });`,
 				source: `import { getService } from "@codingame/monaco-vscode-api";
 void getService;`,
 			},
+			{
+				relativePath: "app/rogue-command-service.ts",
+				source: `import { ICommandService } from "@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands.service";
+void ICommandService;`,
+			},
 		]) {
 			expectFailure(
 				withAppSources(currentSources(), [entry]),
@@ -1463,6 +1468,107 @@ export function captureWorkbenchSurfaces`,
 		);
 	});
 
+	it("rejects weakened remove-root URI authentication", () => {
+		for (const [anchor, needle, replacement] of [
+			[
+				"const PICK_WORKSPACE_FOLDER_COMMAND_ID =",
+				'"_workbench.pickWorkspaceFolder"',
+				'"_workbench.pickWorkspaceFile"',
+			],
+			["const UUID_V4_PATTERN =", "-4[0-9a-f]{3}-", "-[0-9a-f]{4}-"],
+			[
+				"function workspaceRootId",
+				"components.scheme !== PLAIN_WORKSPACE_SCHEME",
+				'components.scheme !== "file"',
+			],
+			["function workspaceRootId", 'components.path !== "/"', "false"],
+			[
+				"function workspaceRootId",
+				"structuredClone(resource);",
+				"void resource;",
+			],
+			[
+				"function workspaceRootId",
+				"descriptor.get !== undefined ||",
+				"false ||",
+			],
+		]) {
+			expectFailure(
+				mutated("commands", (source) =>
+					replaceAfter(source, anchor, needle, replacement),
+				),
+				WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.commands,
+			);
+		}
+	});
+
+	it("rejects unsafe workspace-folder URI extraction", () => {
+		for (const [needle, replacement] of [
+			[
+				'const descriptor = Object.getOwnPropertyDescriptor(folder, "uri");',
+				"const descriptor = { value: (folder as { uri?: unknown }).uri };",
+			],
+			['"uri"', '"u ri"'],
+			["return descriptor.value;", "return\n descriptor.value;"],
+		]) {
+			expectFailure(
+				mutated("commands", (source) =>
+					replaceAfter(
+						source,
+						"function workspaceFolderResource",
+						needle,
+						replacement,
+					),
+				),
+				WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.commands,
+			);
+		}
+	});
+
+	it("rejects remapped remove-root handlers", () => {
+		for (const [needle, replacement] of [
+			[
+				"removeRoot(accessor.get(ICommandService), resource)",
+				"removeRoot(accessor.get(ICommandService), undefined)",
+			],
+			[
+				"removeRoot(accessor.get(ICommandService), undefined)",
+				"removeRoot(accessor.get(ICommandService), accessor)",
+			],
+		]) {
+			expectFailure(
+				mutated("commands", (source) =>
+					replaceOnce(source, needle, replacement),
+				),
+				WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.commands,
+			);
+		}
+	});
+
+	it("rejects remove-root FIFO, native dispatch, or snapshot weakening", () => {
+		for (const [needle, replacement] of [
+			[
+				"topologyCoordinator.runMutation(async () => {",
+				"Promise.resolve().then(async () => {",
+			],
+			[
+				"const snapshot = await bridge.workspaceRemoveRoot(rootId);",
+				"const snapshot = await bridge.workspaceSnapshot();",
+			],
+			[
+				"return Object.freeze({ result: undefined, snapshot });",
+				"return Object.freeze({ result: undefined, snapshot: undefined });",
+			],
+		]) {
+			expectFailure(
+				mutated("commands", (source) =>
+					replaceAfter(source, "const removeRoot =", needle, replacement),
+				),
+				WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.commands,
+			);
+		}
+	});
+
 	it("rejects non-FIFO queues and weakened revision conflicts", () => {
 		expectFailure(
 			mutated("projection", (source) =>
@@ -1664,8 +1770,9 @@ export function captureWorkbenchSurfaces`,
 		);
 		expectFailure(
 			mutated("commands", (source) =>
-				replaceOnce(
+				replaceAfter(
 					source,
+					"const pickRoots =",
 					"topologyCoordinator.runMutation(async () => {",
 					"Promise.resolve().then(async () => {",
 				),

@@ -3468,6 +3468,90 @@ export function validateWorkspaceWatcherBoundary(rustSources, appSources) {
 		executableService === undefined
 			? undefined
 			: extractRustFunctions(executableService, "scan_watch_root")[0];
+	const removeRootWithWatcherCandidates =
+		executableService === undefined
+			? []
+			: extractRustFunctions(executableService, "remove_root").filter(
+					(candidate) =>
+						compact(candidate.parameters) === "&self,root_id:RootId" &&
+						compact(candidate.returnType) ===
+							"->Result<WorkspaceSnapshot,CommandError>",
+				);
+	const removeRootWithWatcher =
+		removeRootWithWatcherCandidates.length === 1
+			? removeRootWithWatcherCandidates[0]
+			: undefined;
+	const removeRootWithWatcherBody = compact(removeRootWithWatcher?.body);
+	let removeRootWatcherCursor = -1;
+	const removeRootWatcherFragments = [
+		"letmutation=lock(&self.mutation_gate)?",
+		"letmutstate=lock(&self.state)?",
+		"ensure_open(&state)?",
+		"state.scope.remove(root_id)?",
+		"letremoved_registration=state.watch_registrations.remove(&root_id)",
+		"letsnapshot=state.scope.snapshot()",
+		"letwatcher=lock(&self.watcher)?.clone()",
+		"drop(state)",
+		"drop(mutation)",
+		"iflet(Some(watcher),Some(registration))=(watcher,removed_registration){watcher.revoke(registration);}",
+		"Ok(snapshot)",
+	];
+	const removeRootWatcherLifecycle = removeRootWatcherFragments.every(
+		(fragment) => {
+			const index = removeRootWithWatcherBody.indexOf(
+				fragment,
+				removeRootWatcherCursor + 1,
+			);
+			if (index < 0 || removeRootWithWatcherBody.split(fragment).length !== 2) {
+				return false;
+			}
+			removeRootWatcherCursor = index;
+			return true;
+		},
+	);
+	const finishPickerCandidates =
+		executableService === undefined
+			? []
+			: extractRustFunctions(executableService, "finish_picker").filter(
+					(candidate) =>
+						compact(candidate.parameters) ===
+							"self:&Arc<Self>,token:u64,mode:WorkspacePickRootsMode,selection:DirectoryPickerResult,watch_wake_sink:WorkspaceWatchWakeSink," &&
+						compact(candidate.returnType) ===
+							"->Result<WorkspacePickRootsResult,CommandError>",
+				);
+	const finishPicker =
+		finishPickerCandidates.length === 1 ? finishPickerCandidates[0] : undefined;
+	const finishPickerBody = compact(finishPicker?.body);
+	const finishPickerRevokesDeltas =
+		finishPicker !== undefined &&
+		finishPickerBody.includes(
+			"letmutrevoked_registrations=Vec::new();state.watch_registrations.retain(|root_id,registration|{letretained=active_root_ids.contains(root_id);if!retained{revoked_registrations.push(*registration);}retained});",
+		) &&
+		finishPickerBody.includes(
+			"drop(state);drop(mutation);ifletSome(watcher)=watcher{forregistrationinrevoked_registrations{watcher.revoke(registration);}}Ok(result)",
+		) &&
+		!finishPickerBody.includes("watcher.retain(&active_registrations)");
+	const watcherRevokeCandidates =
+		executableWatcher === undefined
+			? []
+			: extractRustFunctions(executableWatcher, "revoke").filter(
+					(candidate) =>
+						compact(candidate.parameters) ===
+							"&self,registration:WatchRegistration" &&
+						compact(candidate.returnType) === "->bool",
+				);
+	const watcherRevoke =
+		watcherRevokeCandidates.length === 1
+			? watcherRevokeCandidates[0]
+			: undefined;
+	const watcherRevokeIsProduction =
+		watcherRevoke !== undefined &&
+		!/#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]/.test(
+			executableWatcher.slice(
+				Math.max(0, watcherRevoke.start - 64),
+				watcherRevoke.start,
+			),
+		);
 	if (
 		serviceWatchSync === undefined ||
 		!compact(
@@ -3482,6 +3566,19 @@ export function validateWorkspaceWatcherBoundary(rustSources, appSources) {
 	) {
 		failures.push(
 			"watch sync and capability scans must stay off the invoke thread and preserve lease failures as rescans",
+		);
+	}
+	if (
+		removeRootWithWatcher === undefined ||
+		!removeRootWatcherLifecycle ||
+		[...removeRootWithWatcherBody.matchAll(/watcher\.revoke\(/g)].length !==
+			1 ||
+		!finishPickerRevokesDeltas ||
+		!watcherRevokeIsProduction ||
+		/watcher\.retain\s*\(\s*&active_registrations\s*\)/.test(executableService)
+	) {
+		failures.push(
+			"root topology changes must revoke only their exact watcher epochs after releasing workspace locks",
 		);
 	}
 	const executableLib =

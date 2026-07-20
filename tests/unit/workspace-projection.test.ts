@@ -174,6 +174,41 @@ describe("workspace topology coordinator", () => {
 		expect(projection.identifier).toEqual({ id: workspaceId });
 	});
 
+	it("projects removal of the final root as EMPTY without restoring a root", async () => {
+		const harness = configurationStore();
+		const initial = snapshot(0, [firstRoot]);
+		const empty = snapshot(1, []);
+		const load = vi.fn(async () => empty);
+		const reinitialize = vi.fn(async () => {});
+		const adoption = readAdoption(harness);
+		const coordinator = createWorkspaceTopologyCoordinator(
+			harness.store,
+			reinitialize,
+			load,
+			adoption,
+		);
+		coordinator.prepareInitial(initial);
+		await coordinator.completeInitial();
+
+		await expect(
+			coordinator.runMutation(async () =>
+				Object.freeze({ result: empty, snapshot: empty }),
+			),
+		).resolves.toBe(empty);
+
+		expect(harness.store.clear).toHaveBeenCalledOnce();
+		expect(harness.store.install).toHaveBeenCalledExactlyOnceWith(initial);
+		expect(harness.state.installed).toBeUndefined();
+		expect(reinitialize).toHaveBeenCalledExactlyOnceWith({ id: workspaceId });
+		expect(adoption).toHaveBeenCalledTimes(2);
+		await expect(adoption.mock.results[1]?.value).resolves.toEqual({
+			id: workspaceId,
+			configPath: undefined,
+			rootUris: [],
+		});
+		expect(load).not.toHaveBeenCalled();
+	});
+
 	it("serializes bytes, reinitialize and adoption in exact revision order", async () => {
 		const harness = configurationStore();
 		const releases: Array<() => void> = [];

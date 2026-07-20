@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：实现 remove-root 产品命令，把固定 remove-root 入口接入 topology FIFO 与 Rust `workspace_remove_root`，并保持 Close Folder、通用 Workspace 与其他窗口入口 fail closed。
+- 当前最小工作项：扩展 Browser multi-root E2E，覆盖双根 Explorer、两个 remove-root 入口、最后一根回到 EMPTY、旧 URI/watcher 撤权及 generic workspace surface 不可达。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -95,10 +95,13 @@
 - [x] 完成 topology authority 共享 IR 与 provider binding 的 GitHub 调研和技术方案：评估 TypeScript Compiler API/TypeChecker、TypeScript binder、typescript-eslint scope manager 与 eslint-scope；选择不新增依赖的 TypeScript AST 声明—引用 IR，把行为保持的 IR 提取与 provider binding 闭合拆成两个独立提交，并明确 alias/computed/re-export/reassign/跨文件 authority 验收矩阵。
 - [x] 完成 topology authority 共享只读 IR：每个 app source 只执行一次 AST walk，bootstrap、commands 与全 app ownership 复用同一 `SourceFile`、call/import/identifier/declaration facts，并保留 direct、property-chain 与 static-computed 三种调用语义。SourceSet 统一 `/` 路径、拒绝规范化重复/越界输入及 named/appSources 文本漂移；生产 architecture 入口显式绑定 `excluded-surfaces.ts`，无 `appSources` 的兼容入口继续让可选 Plain service 只走 implementation validator。定向 topology 用例 29/29、完整 `pnpm check` 通过 29 个前端测试文件、543 个用例、2275 个前端模块、2110 个 bundle source、203 项既有迁移债务与 Rust 255/255。
 - [x] 完成 provider binding 与运行入口闭包：registrar、root/config factory、provider instance、scheme/path 常量、实现类 constructor/factory/prototype freeze、URI/config watch/bound-file 数据流和能力枚举均锁定唯一声明、导入与固定引用；alias、re-export、额外构造/调用、intrinsic 改写、大小写或扩展名抢占、CommonJS、动态/Vite glob 与跨文件 value acquisition 全部拒绝。闭世界入口同时锁定 package/Tauri build scripts、唯一真实 Tauri/Vite 配置、固定 Vite resolver、canonical `index.html`、真实 `app/` 目录、无 symlink/未知资产及八类可执行源。最终复核无剩余 P1/P2；topology 定向用例 49/49，完整 `pnpm check` 通过 29 个前端测试文件、563 个用例、2275 个前端模块、2110 个 bundle source、203 项既有迁移债务与 Rust 255/255。
+- [x] 完成 remove-root 产品命令：Explorer `removeRootFolder` 只接受精确 `plain-workspace://<lowercase UUID v4>/` 根 URI，命令面板 `workbench.action.removeRootFolder` 只经固定 `_workbench.pickWorkspaceFolder` 取得 `folder.uri`；picker、URI 快照、Rust `workspace_remove_root` 与完整 snapshot 投影均位于同一 topology FIFO，cancel 零副作用，最后一根按权威 snapshot 清配置并回到 EMPTY。Close Folder、通用 Workspace、文件/窗口入口和默认 `IWorkspaceEditingService` 继续 fail closed。
+- [x] remove-root 生命周期 Harness 与终审收口：六个产品命令、固定 picker、URI 品牌/own-data/Proxy/UUID、native dispatch、完整 snapshot、fatal gate、直接词法归属和 import/writer authority 均由 token + AST 双签名与 hostile mutations 锁定；Rust remove/replace 不再用 gate 外 stale active-set `retain`，而是捕获本次移除的 exact watcher epoch 并在释放 workspace locks 后逐项 `revoke`，过期调用不能误伤并发新增或替换根。终审额外修复了 folder 无关 getter TOCTOU、字符串空白与 ASI 绕过、最后根提前返回 watcher 泄漏及 stale-set watcher 竞态。
+- [x] remove-root 切片通过完整 `pnpm check`：29 个 TypeScript/JavaScript 测试文件、574 个用例、2275 个前端模块、2110 个 bundle source、203 项既有迁移债务与 Rust 255/255 全部通过；格式、双类型检查、严格 lint、Clippy、架构与 bundle guard 均通过，最终三路复审无剩余 P0/P1/P2。
 
 ## 下一步
 
-1. 按“GitHub 调研 → 技术方案 → 实现”完成 Workbench multi-root 投影及新增/移除 root 生命周期。
+1. 按“GitHub 调研 → 技术方案 → 实现”完成 Browser multi-root 双根、两个 remove-root 入口、最后根 EMPTY 与撤权 E2E。
 2. 补齐 Browser missing-parent、move partial、delete retained/partial 可见失败矩阵和真实 multi-root Tauri 验收。
 3. 全部通过后写入 `features.json` evidence/status，完成 `F020` 并切换到下一个垂直切片。
 
