@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import * as ts from "typescript";
 
 export const WORKSPACE_TOPOLOGY_CONTRACT_FAILURES = Object.freeze({
@@ -183,16 +185,204 @@ function parse(relativePath, source) {
 	);
 }
 
-function descendants(node, predicate) {
-	const matches = [];
-	function visit(candidate) {
-		if (predicate(candidate)) {
-			matches.push(candidate);
+const sourceAnalysisCache = new WeakMap();
+const EMPTY_NODES = Object.freeze([]);
+
+function freezeNodeIndex(nodes, keyOf) {
+	const mutable = Object.create(null);
+	for (const node of nodes) {
+		const key = keyOf(node);
+		if (key !== undefined) {
+			(mutable[key] ??= []).push(node);
 		}
-		ts.forEachChild(candidate, visit);
 	}
-	visit(node);
-	return matches;
+	for (const key of Object.keys(mutable)) {
+		Object.freeze(mutable[key]);
+	}
+	return Object.freeze(mutable);
+}
+
+function analyzeSourceFile(sourceFile) {
+	const cached = sourceAnalysisCache.get(sourceFile);
+	if (cached !== undefined) {
+		return cached;
+	}
+	const nodes = [];
+	const visit = (node) => {
+		nodes.push(node);
+		ts.forEachChild(node, visit);
+	};
+	visit(sourceFile);
+
+	const calls = nodes.filter(ts.isCallExpression);
+	const identifiers = nodes.filter(ts.isIdentifier);
+	const stringLiterals = nodes.filter(ts.isStringLiteralLike);
+	const variableDeclarations = nodes.filter(ts.isVariableDeclaration);
+	const functionDeclarations = nodes.filter(ts.isFunctionDeclaration);
+	const importsExports = sourceFile.statements
+		.filter(
+			(node) => ts.isImportDeclaration(node) || ts.isExportDeclaration(node),
+		)
+		.map((statement) =>
+			Object.freeze({
+				node: statement,
+				moduleName: ts.isStringLiteralLike(statement.moduleSpecifier)
+					? statement.moduleSpecifier.text
+					: undefined,
+				statement,
+			}),
+		);
+	const callFacts = calls.map((call) => {
+		const callee = unwrapExpression(call.expression);
+		return Object.freeze({
+			node: call,
+			call,
+			chainName: callName(call),
+			directName: ts.isIdentifier(callee) ? callee.text : undefined,
+			staticName: staticCallName(call),
+		});
+	});
+	const staticComputedAccesses = nodes
+		.filter(ts.isElementAccessExpression)
+		.map((access) =>
+			Object.freeze({
+				node: access,
+				access,
+				staticName: staticStringValue(access.argumentExpression),
+			}),
+		)
+		.filter(({ staticName }) => staticName !== undefined);
+	const analysis = Object.freeze({
+		sourceFile,
+		nodes: Object.freeze(nodes),
+		callFacts: Object.freeze(callFacts),
+		callsByChainName: freezeNodeIndex(callFacts, ({ chainName }) => chainName),
+		identifiers: Object.freeze(identifiers),
+		identifiersByName: freezeNodeIndex(identifiers, ({ text }) => text),
+		stringLiterals: Object.freeze(stringLiterals),
+		staticComputedAccesses: Object.freeze(staticComputedAccesses),
+		variableDeclarations: Object.freeze(variableDeclarations),
+		variableDeclarationsByName: freezeNodeIndex(
+			variableDeclarations,
+			(declaration) =>
+				ts.isIdentifier(declaration.name) ? declaration.name.text : undefined,
+		),
+		functionDeclarationsByName: freezeNodeIndex(
+			functionDeclarations,
+			(declaration) => declaration.name?.text,
+		),
+		importsExports: Object.freeze(importsExports),
+	});
+	sourceAnalysisCache.set(sourceFile, analysis);
+	return analysis;
+}
+
+function normalizeRelativePath(relativePath) {
+	if (typeof relativePath !== "string" || relativePath.includes("\0")) {
+		return undefined;
+	}
+	const slashed = relativePath.replaceAll("\\", "/");
+	const normalized = path.posix.normalize(slashed);
+	return !path.posix.isAbsolute(slashed) &&
+		normalized.startsWith("app/") &&
+		!normalized.endsWith("/")
+		? normalized
+		: undefined;
+}
+
+function analyzeTopologyAuthority(sourceEntries, namedSources) {
+	const filesByPath = Object.create(null);
+	const analyses = [];
+	let hasDuplicatePath = false;
+	let hasInvalidPath = false;
+	for (const entry of sourceEntries) {
+		if (
+			entry === null ||
+			typeof entry !== "object" ||
+			typeof entry.source !== "string"
+		) {
+			hasInvalidPath = true;
+			continue;
+		}
+		const { relativePath, source } = entry;
+		const normalizedPath = normalizeRelativePath(relativePath);
+		if (normalizedPath === undefined) {
+			hasInvalidPath = true;
+			continue;
+		}
+		if (filesByPath[normalizedPath] !== undefined) {
+			hasDuplicatePath = true;
+			continue;
+		}
+		const analysis = analyzeSourceFile(parse(normalizedPath, source));
+		filesByPath[normalizedPath] = analysis;
+		analyses.push(analysis);
+	}
+	const normalizedNamedSources = namedSources.map(
+		({ relativePath, source }) => ({
+			relativePath: normalizeRelativePath(relativePath),
+			source,
+		}),
+	);
+	const hasConsistentNamedSources = normalizedNamedSources.every(
+		({ relativePath, source }) =>
+			filesByPath[relativePath]?.sourceFile.text === source,
+	);
+	const sourceFiles = analyses.map(({ sourceFile }) => sourceFile);
+	const identifiers = analyses.flatMap(({ identifiers }) => identifiers);
+	const staticComputedAccesses = analyses.flatMap(
+		({ staticComputedAccesses }) => staticComputedAccesses,
+	);
+	const stringLiterals = analyses.flatMap(
+		({ stringLiterals }) => stringLiterals,
+	);
+	const importsExports = analyses.flatMap((analysis) =>
+		analysis.importsExports.map((fact) =>
+			Object.freeze({ ...fact, sourceFile: analysis.sourceFile }),
+		),
+	);
+	const callFacts = analyses.flatMap((analysis) =>
+		analysis.callFacts.map((fact) =>
+			Object.freeze({ ...fact, sourceFile: analysis.sourceFile }),
+		),
+	);
+	return Object.freeze({
+		valid: !hasDuplicatePath && !hasInvalidPath && hasConsistentNamedSources,
+		filesByPath: Object.freeze(filesByPath),
+		sourceFiles: Object.freeze(sourceFiles),
+		importsExports: Object.freeze(importsExports),
+		callFacts: Object.freeze(callFacts),
+		identifiers: Object.freeze(identifiers),
+		staticComputedAccesses: Object.freeze(staticComputedAccesses),
+		stringLiterals: Object.freeze(stringLiterals),
+	});
+}
+
+function isNodeWithin(root, candidate) {
+	let current = candidate;
+	while (current !== undefined) {
+		if (current === root) {
+			return true;
+		}
+		current = current.parent;
+	}
+	return false;
+}
+
+function indexedWithin(root, nodes) {
+	return nodes.filter((candidate) =>
+		isNodeWithin(
+			root,
+			typeof candidate.kind === "number" ? candidate : candidate.node,
+		),
+	);
+}
+
+function descendants(node, predicate) {
+	return indexedWithin(
+		node,
+		analyzeSourceFile(node.getSourceFile()).nodes,
+	).filter(predicate);
 }
 
 function unwrapExpression(expression) {
@@ -304,34 +494,35 @@ function callName(call) {
 }
 
 function callsNamed(node, name) {
-	return descendants(
-		node,
-		(candidate) =>
-			ts.isCallExpression(candidate) && callName(candidate) === name,
-	);
+	const facts =
+		analyzeSourceFile(node.getSourceFile()).callsByChainName[name] ??
+		EMPTY_NODES;
+	return indexedWithin(node, facts).map(({ call }) => call);
 }
 
 function callWithChain(node, chain) {
-	return descendants(
-		node,
-		(candidate) =>
-			ts.isCallExpression(candidate) && sameChain(candidate.expression, chain),
-	);
+	return indexedWithin(node, analyzeSourceFile(node.getSourceFile()).callFacts)
+		.map(({ call }) => call)
+		.filter((call) => sameChain(call.expression, chain));
 }
 
 function variableDeclarations(sourceFile, name) {
-	return descendants(
+	return indexedWithin(
 		sourceFile,
-		(node) =>
-			ts.isVariableDeclaration(node) &&
-			ts.isIdentifier(node.name) &&
-			node.name.text === name,
+		analyzeSourceFile(sourceFile.getSourceFile()).variableDeclarationsByName[
+			name
+		] ?? EMPTY_NODES,
 	);
 }
 
 function callableDeclarations(sourceFile, name) {
 	const declarations = [];
-	for (const node of descendants(sourceFile, () => true)) {
+	const analysis = analyzeSourceFile(sourceFile.getSourceFile());
+	const candidates = [
+		...(analysis.functionDeclarationsByName[name] ?? EMPTY_NODES),
+		...(analysis.variableDeclarationsByName[name] ?? EMPTY_NODES),
+	].sort((left, right) => left.pos - right.pos);
+	for (const node of indexedWithin(sourceFile, candidates)) {
 		if (
 			ts.isFunctionDeclaration(node) &&
 			node.name?.text === name &&
@@ -387,10 +578,11 @@ function unwrapFreeze(expression) {
 }
 
 function declarationInitializedByCall(sourceFile, name) {
-	return descendants(
+	return indexedWithin(
 		sourceFile,
+		analyzeSourceFile(sourceFile.getSourceFile()).variableDeclarations,
+	).filter(
 		(node) =>
-			ts.isVariableDeclaration(node) &&
 			ts.isIdentifier(node.name) &&
 			node.initializer !== undefined &&
 			ts.isCallExpression(unwrapExpression(node.initializer)) &&
@@ -528,9 +720,10 @@ function importsNamedValue(sourceFile, moduleName, importedName) {
 
 function hasExactIdentifierReferences(sourceFile, name, allowedNodes) {
 	const allowed = new Set(allowedNodes.filter((node) => node !== undefined));
-	const references = descendants(
+	const references = indexedWithin(
 		sourceFile,
-		(node) => ts.isIdentifier(node) && node.text === name,
+		analyzeSourceFile(sourceFile.getSourceFile()).identifiersByName[name] ??
+			EMPTY_NODES,
 	);
 	return (
 		references.length === allowed.size &&
@@ -2508,7 +2701,7 @@ function validateCommandRegistryReader(sourceFile) {
 	);
 }
 
-function validateDirectCommandRegistrationManifest(parsed, registrations) {
+function validateDirectCommandRegistrationManifest(authority, registrations) {
 	const manifestPaths = DIRECT_COMMAND_REGISTRATION_MANIFEST.map(
 		({ relativePath }) => relativePath,
 	);
@@ -2520,16 +2713,13 @@ function validateDirectCommandRegistrationManifest(parsed, registrations) {
 		new Set(manifestPaths).size === manifestPaths.length &&
 		registrations.length === expectedCount &&
 		DIRECT_COMMAND_REGISTRATION_MANIFEST.every(({ relativePath, count }) => {
-			const sources = parsed.filter(
-				(sourceFile) => sourceFile.fileName === relativePath,
-			);
+			const sourceFile = authority.filesByPath[relativePath]?.sourceFile;
 			const sourceRegistrations = registrations.filter(
 				({ sourceFile }) => sourceFile.fileName === relativePath,
 			);
-			if (sources.length !== 1 || sourceRegistrations.length !== count) {
+			if (sourceFile === undefined || sourceRegistrations.length !== count) {
 				return false;
 			}
-			const sourceFile = sources[0];
 			const commandRegistryImport = namedImportLocalIdentifier(
 				sourceFile,
 				COMMAND_REGISTRY_MODULE,
@@ -2550,34 +2740,20 @@ function validateDirectCommandRegistrationManifest(parsed, registrations) {
 	);
 }
 
-function validateTopologyAuthority(sourceEntries) {
-	const parsed = sourceEntries.map(({ relativePath, source }) =>
-		parse(relativePath, source),
-	);
-	if (parsed.some((sourceFile) => sourceFile.parseDiagnostics.length !== 0)) {
+function validateTopologyAuthority(authority) {
+	if (
+		!authority.valid ||
+		authority.sourceFiles.some(
+			(sourceFile) => sourceFile.parseDiagnostics.length !== 0,
+		)
+	) {
 		return false;
 	}
-	const dynamicImports = parsed.flatMap((sourceFile) =>
-		descendants(
-			sourceFile,
-			(node) =>
-				ts.isCallExpression(node) &&
-				node.expression.kind === ts.SyntaxKind.ImportKeyword,
-		),
+	const dynamicImports = authority.callFacts.filter(
+		({ call }) => call.expression.kind === ts.SyntaxKind.ImportKeyword,
 	);
-	const moduleImports = parsed.flatMap((sourceFile) =>
-		sourceFile.statements
-			.filter(
-				(statement) =>
-					(ts.isImportDeclaration(statement) ||
-						ts.isExportDeclaration(statement)) &&
-					ts.isStringLiteralLike(statement.moduleSpecifier),
-			)
-			.map((statement) => ({
-				moduleName: statement.moduleSpecifier.text,
-				sourceFile,
-				statement,
-			})),
+	const moduleImports = authority.importsExports.filter(
+		({ moduleName }) => moduleName !== undefined,
 	);
 	const constrainedPackageImports = moduleImports.filter(
 		({ moduleName }) =>
@@ -2621,26 +2797,16 @@ function validateTopologyAuthority(sourceEntries) {
 				);
 			}).length > 0,
 	);
-	const forbiddenWriterReferences = parsed.flatMap((sourceFile) =>
-		descendants(
-			sourceFile,
-			(node) =>
-				(ts.isIdentifier(node) &&
-					FORBIDDEN_COMMAND_WRITER_NAMES.includes(node.text)) ||
-				(ts.isElementAccessExpression(node) &&
-					FORBIDDEN_COMMAND_WRITER_NAMES.includes(
-						staticStringValue(node.argumentExpression),
-					)),
+	const forbiddenWriterReferences = [
+		...authority.identifiers.filter(({ text }) =>
+			FORBIDDEN_COMMAND_WRITER_NAMES.includes(text),
 		),
-	);
-	const initializeCalls = parsed.flatMap((sourceFile) =>
-		descendants(sourceFile, (node) => {
-			if (!ts.isCallExpression(node)) {
-				return false;
-			}
-			const callee = unwrapExpression(node.expression);
-			return ts.isIdentifier(callee) && callee.text === "initialize";
-		}).map((call) => ({ call, sourceFile })),
+		...authority.staticComputedAccesses.filter(({ staticName }) =>
+			FORBIDDEN_COMMAND_WRITER_NAMES.includes(staticName),
+		),
+	];
+	const initializeCalls = authority.callFacts.filter(
+		({ directName }) => directName === "initialize",
 	);
 	const workspaceCommandAuthorityImports = moduleImports.filter(
 		({ moduleName, statement }) => {
@@ -2683,56 +2849,45 @@ function validateTopologyAuthority(sourceEntries) {
 			);
 		},
 	);
-	const workspaceCommandCalls = parsed.flatMap((sourceFile) =>
-		descendants(
-			sourceFile,
-			(node) =>
-				ts.isCallExpression(node) &&
-				staticCallName(node) === "registerWorkspaceCommands",
-		).map((call) => ({ call, sourceFile })),
+	const workspaceCommandCalls = authority.callFacts.filter(
+		({ staticName }) => staticName === "registerWorkspaceCommands",
 	);
-	const mainSources = parsed.filter(
-		(sourceFile) => sourceFile.fileName === "app/main.ts",
-	);
-	const commandSources = parsed.filter(
-		(sourceFile) =>
-			sourceFile.fileName === "app/features/workspace/commands.ts",
-	);
-	const excludedSurfaceSources = parsed.filter(
-		(sourceFile) => sourceFile.fileName === "app/excluded-surfaces.ts",
-	);
-	const serviceSources = parsed.filter(
-		(sourceFile) => sourceFile.fileName === "app/services.ts",
-	);
+	const mainAnalysis = authority.filesByPath["app/main.ts"];
+	const commandAnalysis =
+		authority.filesByPath["app/features/workspace/commands.ts"];
+	const excludedSurfaceAnalysis =
+		authority.filesByPath["app/excluded-surfaces.ts"];
+	const serviceAnalysis = authority.filesByPath["app/services.ts"];
+	const mainSource = mainAnalysis?.sourceFile;
+	const commandSource = commandAnalysis?.sourceFile;
+	const excludedSurfaceSource = excludedSurfaceAnalysis?.sourceFile;
+	const serviceSource = serviceAnalysis?.sourceFile;
 	const workspaceCommandDeclarations =
-		commandSources.length === 1
-			? commandSources[0].statements.filter(
+		commandSource === undefined
+			? []
+			: commandSource.statements.filter(
 					(statement) =>
 						ts.isFunctionDeclaration(statement) &&
 						statement.name?.text === "registerWorkspaceCommands",
-				)
-			: [];
+				);
 	const workspaceCommandDeclaration =
 		workspaceCommandDeclarations.length === 1
 			? workspaceCommandDeclarations[0]
 			: undefined;
 	const workspaceCommandMainImport =
-		mainSources.length === 1
+		mainSource !== undefined
 			? namedImportLocalIdentifier(
-					mainSources[0],
+					mainSource,
 					"./features/workspace/commands",
 					"registerWorkspaceCommands",
 				)
 			: undefined;
 	const workspaceCommandMainTypeReferences =
-		mainSources.length === 1
-			? descendants(
-					mainSources[0],
-					(node) =>
-						ts.isIdentifier(node) &&
-						node.text === "registerWorkspaceCommands" &&
-						ts.isTypeQueryNode(node.parent),
-				)
+		mainAnalysis !== undefined
+			? (
+					mainAnalysis.identifiersByName.registerWorkspaceCommands ??
+					EMPTY_NODES
+				).filter((node) => ts.isTypeQueryNode(node.parent))
 			: [];
 	const workspaceCommandMainCalls = workspaceCommandCalls.filter(
 		({ sourceFile }) => sourceFile.fileName === "app/main.ts",
@@ -2741,22 +2896,13 @@ function validateTopologyAuthority(sourceEntries) {
 		workspaceCommandMainCalls.length === 1
 			? unwrapExpression(workspaceCommandMainCalls[0].call.expression)
 			: undefined;
-	const workspaceCommandIdentifiers = parsed.flatMap((sourceFile) =>
-		descendants(
-			sourceFile,
-			(node) =>
-				ts.isIdentifier(node) && node.text === "registerWorkspaceCommands",
-		),
+	const workspaceCommandIdentifiers = authority.identifiers.filter(
+		({ text }) => text === "registerWorkspaceCommands",
 	);
-	const computedWorkspaceCommandAccesses = parsed.flatMap((sourceFile) =>
-		descendants(
-			sourceFile,
-			(node) =>
-				ts.isElementAccessExpression(node) &&
-				staticStringValue(node.argumentExpression) ===
-					"registerWorkspaceCommands",
-		),
-	);
+	const computedWorkspaceCommandAccesses =
+		authority.staticComputedAccesses.filter(
+			({ staticName }) => staticName === "registerWorkspaceCommands",
+		);
 	const allowedWorkspaceCommandIdentifiers = new Set([
 		workspaceCommandDeclaration?.name,
 		workspaceCommandMainImport,
@@ -2848,31 +2994,20 @@ function validateTopologyAuthority(sourceEntries) {
 			({ relativePath }) => `${relativePath}:${COMMAND_REGISTRY_MODULE}`,
 		),
 	].sort();
-	const providerFactories = parsed.flatMap((sourceFile) =>
-		callsNamed(sourceFile, "createPlainWorkspaceConfigurationProvider").map(
-			(call) => ({ call, sourceFile }),
-		),
+	const providerFactories = authority.callFacts.filter(
+		({ chainName }) =>
+			chainName === "createPlainWorkspaceConfigurationProvider",
 	);
-	const providerRegistrations = parsed.flatMap((sourceFile) =>
-		callsNamed(sourceFile, "registerCustomProvider").map((call) => ({
-			call,
-			sourceFile,
-		})),
+	const providerRegistrations = authority.callFacts.filter(
+		({ chainName }) => chainName === "registerCustomProvider",
 	);
-	const commandRegistrations = parsed.flatMap((sourceFile) =>
-		callsNamed(sourceFile, "registerCommand").map((call) => ({
-			call,
-			sourceFile,
-		})),
+	const commandRegistrations = authority.callFacts.filter(
+		({ chainName }) => chainName === "registerCommand",
 	);
 	const hasDirectCommandRegistrationManifest =
-		validateDirectCommandRegistrationManifest(parsed, commandRegistrations);
-	const staticCommandRegistrations = parsed.flatMap((sourceFile) =>
-		descendants(
-			sourceFile,
-			(node) =>
-				ts.isCallExpression(node) && staticCallName(node) === "registerCommand",
-		).map((call) => ({ call, sourceFile })),
+		validateDirectCommandRegistrationManifest(authority, commandRegistrations);
+	const staticCommandRegistrations = authority.callFacts.filter(
+		({ staticName }) => staticName === "registerCommand",
 	);
 	const directRegisterCommandNames = commandRegistrations.map(({ call }) => {
 		const expression = unwrapExpression(call.expression);
@@ -2880,31 +3015,17 @@ function validateTopologyAuthority(sourceEntries) {
 			? expression.name
 			: undefined;
 	});
-	const registerCommandIdentifiers = parsed.flatMap((sourceFile) =>
-		descendants(
-			sourceFile,
-			(node) => ts.isIdentifier(node) && node.text === "registerCommand",
-		),
+	const registerCommandIdentifiers = authority.identifiers.filter(
+		({ text }) => text === "registerCommand",
 	);
-	const computedRegisterCommandAccesses = parsed.flatMap((sourceFile) =>
-		descendants(
-			sourceFile,
-			(node) =>
-				ts.isElementAccessExpression(node) &&
-				staticStringValue(node.argumentExpression) === "registerCommand",
-		),
-	);
-	const guardedIdLeaks = parsed.flatMap((sourceFile) =>
-		descendants(
-			sourceFile,
-			(node) =>
-				ts.isStringLiteralLike(node) &&
-				EXPECTED_GUARDED_WORKSPACE_COMMAND_IDS.includes(node.text) &&
-				sourceFile.fileName !== "app/features/workspace/commands.ts",
-		),
-	);
-	const commandRegistryReaders = parsed.filter(
-		(sourceFile) => sourceFile.fileName === "app/excluded-surfaces.ts",
+	const computedRegisterCommandAccesses =
+		authority.staticComputedAccesses.filter(
+			({ staticName }) => staticName === "registerCommand",
+		);
+	const guardedIdLeaks = authority.stringLiterals.filter(
+		(node) =>
+			EXPECTED_GUARDED_WORKSPACE_COMMAND_IDS.includes(node.text) &&
+			node.getSourceFile().fileName !== "app/features/workspace/commands.ts",
 	);
 	return (
 		dynamicImports.length === 0 &&
@@ -2916,25 +3037,25 @@ function validateTopologyAuthority(sourceEntries) {
 		forbiddenApiImportShapes.length === 0 &&
 		forbiddenWriterImports.length === 0 &&
 		forbiddenWriterReferences.length === 0 &&
-		mainSources.length === 1 &&
-		commandSources.length === 1 &&
-		excludedSurfaceSources.length === 1 &&
-		serviceSources.length === 1 &&
-		hasExactNamedImport(mainSources[0], "@codingame/monaco-vscode-api", [
+		mainSource !== undefined &&
+		commandSource !== undefined &&
+		excludedSurfaceSource !== undefined &&
+		serviceSource !== undefined &&
+		hasExactNamedImport(mainSource, "@codingame/monaco-vscode-api", [
 			"getService",
 			"IContextKeyService",
 			"IWorkspaceContextService",
 			"initialize",
 		]) &&
-		hasExactNamedImport(commandSources[0], COMMAND_REGISTRY_MODULE, [
+		hasExactNamedImport(commandSource, COMMAND_REGISTRY_MODULE, [
 			"CommandsRegistry",
 		]) &&
-		hasExactNamedImport(excludedSurfaceSources[0], MONACO_API_MODULE, [
+		hasExactNamedImport(excludedSurfaceSource, MONACO_API_MODULE, [
 			"CommandsRegistry",
 			"Registry",
 		]) &&
 		hasExactDefaultImport(
-			serviceSources[0],
+			serviceSource,
 			"@codingame/monaco-vscode-workbench-service-override",
 			"getWorkbenchServiceOverride",
 		) &&
@@ -3008,12 +3129,11 @@ function validateTopologyAuthority(sourceEntries) {
 		registerCommandIdentifiers.every((identifier) =>
 			directRegisterCommandNames.includes(identifier),
 		) &&
-		commandRegistryReaders.length === 1 &&
-		validateCommandRegistryReader(commandRegistryReaders[0]) &&
+		validateCommandRegistryReader(excludedSurfaceSource) &&
 		guardedIdLeaks.length === 0 &&
-		parsed.flatMap((sourceFile) =>
-			callsNamed(sourceFile, "projectWorkspaceSnapshot"),
-		).length === 0
+		authority.callFacts.every(
+			({ chainName }) => chainName !== "projectWorkspaceSnapshot",
+		)
 	);
 }
 
@@ -3040,66 +3160,92 @@ function safelyValidate(validator, ...args) {
  * into method-by-method fail-closed validation when the caller has it.
  */
 export function validateWorkspaceTopologyContracts(sources) {
-	const main = parse("app/main.ts", sourceValue(sources, "main", "mainSource"));
-	const services = parse(
-		"app/services.ts",
-		sourceValue(sources, "services", "servicesSource"),
-	);
-	const commands = parse(
-		"app/features/workspace/commands.ts",
-		sourceValue(sources, "commands", "commandsSource"),
-	);
-	const projection = parse(
-		"app/features/workspace/workspace-projection.ts",
-		sourceValue(
-			sources,
-			"projection",
-			"workspaceProjection",
-			"workspaceProjectionSource",
-		),
-	);
-	const configurationProvider = parse(
-		"app/features/workspace/workspace-configuration-provider.ts",
-		sourceValue(
-			sources,
-			"configurationProvider",
-			"workspaceConfigurationProvider",
-			"workspaceConfigurationProviderSource",
-		),
-	);
 	const plainServicesSource = sourceValue(
 		sources,
 		"plainWorkspaceServices",
 		"plainWorkspaceServicesSource",
 	);
-	const excludedSurfacesSource = sourceValue(
-		sources,
-		"excludedSurfaces",
-		"excludedSurfacesSource",
+	const topologySources = [
+		{
+			relativePath: "app/main.ts",
+			source: sourceValue(sources, "main", "mainSource"),
+		},
+		{
+			relativePath: "app/services.ts",
+			source: sourceValue(sources, "services", "servicesSource"),
+		},
+		{
+			relativePath: "app/features/workspace/commands.ts",
+			source: sourceValue(sources, "commands", "commandsSource"),
+		},
+		{
+			relativePath: "app/features/workspace/workspace-projection.ts",
+			source: sourceValue(
+				sources,
+				"projection",
+				"workspaceProjection",
+				"workspaceProjectionSource",
+			),
+		},
+		{
+			relativePath:
+				"app/features/workspace/workspace-configuration-provider.ts",
+			source: sourceValue(
+				sources,
+				"configurationProvider",
+				"workspaceConfigurationProvider",
+				"workspaceConfigurationProviderSource",
+			),
+		},
+		{
+			relativePath: "app/excluded-surfaces.ts",
+			source: sourceValue(
+				sources,
+				"excludedSurfaces",
+				"excludedSurfacesSource",
+			),
+		},
+	];
+	const namedSources = [
+		...topologySources,
+		...(plainServicesSource === ""
+			? []
+			: [
+					{
+						relativePath: "app/services/plain-workspace-services.ts",
+						source: plainServicesSource,
+					},
+				]),
+	];
+	const hasAppSources = Array.isArray(sources?.appSources);
+	const sourceEntries = hasAppSources ? sources.appSources : topologySources;
+	const authority = analyzeTopologyAuthority(
+		sourceEntries,
+		hasAppSources ? namedSources : topologySources,
 	);
-	const sourceEntries = Array.isArray(sources?.appSources)
-		? sources.appSources
-		: [
-				{ relativePath: "app/main.ts", source: main.text },
-				{ relativePath: "app/services.ts", source: services.text },
-				{
-					relativePath: "app/features/workspace/commands.ts",
-					source: commands.text,
-				},
-				{
-					relativePath: "app/features/workspace/workspace-projection.ts",
-					source: projection.text,
-				},
-				{
-					relativePath:
-						"app/features/workspace/workspace-configuration-provider.ts",
-					source: configurationProvider.text,
-				},
-				{
-					relativePath: "app/excluded-surfaces.ts",
-					source: excludedSurfacesSource,
-				},
-			];
+	if (!authority.valid) {
+		return [WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority];
+	}
+	const sourceFile = (relativePath) =>
+		authority.filesByPath[relativePath]?.sourceFile;
+	const main = sourceFile("app/main.ts");
+	const services = sourceFile("app/services.ts");
+	const commands = sourceFile("app/features/workspace/commands.ts");
+	const projection = sourceFile(
+		"app/features/workspace/workspace-projection.ts",
+	);
+	const configurationProvider = sourceFile(
+		"app/features/workspace/workspace-configuration-provider.ts",
+	);
+	const plainServices =
+		plainServicesSource === ""
+			? undefined
+			: hasAppSources
+				? sourceFile("app/services/plain-workspace-services.ts")
+				: parse(
+						"app/services/plain-workspace-services.ts",
+						plainServicesSource,
+					);
 	const failures = [];
 	if (!safelyValidate(validateBootstrap, main)) {
 		failures.push(WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.bootstrap);
@@ -3113,7 +3259,7 @@ export function validateWorkspaceTopologyContracts(sources) {
 	) {
 		failures.push(WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.configuration);
 	}
-	if (!safelyValidate(validateTopologyAuthority, sourceEntries)) {
+	if (!safelyValidate(validateTopologyAuthority, authority)) {
 		failures.push(WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority);
 	}
 	if (!safelyValidate(validateCoordinator, projection)) {
@@ -3125,10 +3271,7 @@ export function validateWorkspaceTopologyContracts(sources) {
 	if (
 		!safelyValidate(validateServiceDescriptors, services) ||
 		(plainServicesSource !== "" &&
-			!safelyValidate(
-				validatePlainServiceImplementation,
-				parse("app/services/plain-workspace-services.ts", plainServicesSource),
-			))
+			!safelyValidate(validatePlainServiceImplementation, plainServices))
 	) {
 		failures.push(WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.services);
 	}

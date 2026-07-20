@@ -346,6 +346,10 @@ const plainWorkspaceServicesSource = await readFile(
 	path.join(appRoot, "services/plain-workspace-services.ts"),
 	"utf8",
 );
+const excludedSurfacesSource = await readFile(
+	path.join(appRoot, "excluded-surfaces.ts"),
+	"utf8",
+);
 for (const failure of validateWorkspaceTopologyContracts({
 	appSources,
 	main: mainSource,
@@ -354,6 +358,7 @@ for (const failure of validateWorkspaceTopologyContracts({
 	projection: workspaceProjectionSource,
 	configurationProvider: workspaceConfigurationProviderSource,
 	plainWorkspaceServices: plainWorkspaceServicesSource,
+	excludedSurfaces: excludedSurfacesSource,
 })) {
 	fail(failure);
 }

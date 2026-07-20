@@ -144,10 +144,77 @@ describe("workspace topology source contracts", () => {
 		expect(validateWorkspaceTopologyContracts(currentSources())).toEqual([]);
 	});
 
+	it("keeps the optional service implementation outside fallback app authority", () => {
+		const sources = currentSources();
+		expect(
+			validateWorkspaceTopologyContracts({
+				...sources,
+				plainWorkspaceServices: `${sources.plainWorkspaceServices}\nconst serviceMetadata = { registerCommand: 1 };`,
+			}),
+		).toEqual([]);
+	});
+
 	it("accepts the complete production app source authority", () => {
 		expect(
 			validateWorkspaceTopologyContracts(withAppSources(currentSources())),
 		).toEqual([]);
+	});
+
+	it("normalizes Windows separators in the complete app authority", () => {
+		const sources = withAppSources(currentSources());
+		expect(
+			validateWorkspaceTopologyContracts({
+				...sources,
+				appSources: sources.appSources.map(({ relativePath, source }) => ({
+					relativePath: relativePath.replaceAll("/", "\\"),
+					source,
+				})),
+			}),
+		).toEqual([]);
+	});
+
+	it("rejects normalized duplicate app authority paths", () => {
+		for (const relativePath of ["app\\main.ts", "app/./main.ts"]) {
+			const sources = withAppSources(currentSources());
+			expect(
+				validateWorkspaceTopologyContracts({
+					...sources,
+					appSources: [
+						...sources.appSources,
+						{ relativePath, source: sources.main },
+					],
+				}),
+			).toEqual([WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority]);
+		}
+	});
+
+	it("rejects invalid or outside-app authority paths", () => {
+		for (const relativePath of [
+			"/app/rogue.ts",
+			"../app/rogue.ts",
+			"app/../../rogue.ts",
+		]) {
+			const sources = withAppSources(currentSources());
+			expect(
+				validateWorkspaceTopologyContracts({
+					...sources,
+					appSources: [
+						...sources.appSources,
+						{ relativePath, source: "export {};" },
+					],
+				}),
+			).toEqual([WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority]);
+		}
+	});
+
+	it("rejects named source text that differs from appSources", () => {
+		const sources = withAppSources(currentSources());
+		expect(
+			validateWorkspaceTopologyContracts({
+				...sources,
+				main: `/* named source mismatch */\n${sources.main}`,
+			}),
+		).toEqual([WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority]);
 	});
 
 	it("allows unrelated object initialize methods in the full app authority", () => {
