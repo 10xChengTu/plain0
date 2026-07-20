@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：调研固定 Code OSS/CodinGame 35.0.1 的 multi-root workspace/configuration/editing 路径，结合 Rust opaque root snapshot 生成技术方案；研究与方案独立提交后再实现，不复用任意绝对路径或通用 workspace file 权限。
+- 当前最小工作项：实现 Workbench multi-root 安全投影底座：独立只读虚拟配置 provider、1..256-root 串行 topology coordinator、双 scheme no-cache patch、fail-closed workspace editing/recent services 和 Harness；新增/移除 root product commands 在本项仍安全拒绝。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -88,6 +88,7 @@
 - [x] `F020` 首轮闭环回归通过：`pnpm check` 完成 25 个 TypeScript/JavaScript 文件、484 个用例、2273 个前端模块、2108 个 bundle source、203 项既有迁移债务和 Rust 255/255；Workspace Browser E2E 7/7 通过。终审同时识别出 Harness 路径规则冲突、feature evidence guard 可绕过、Workbench multi-root 尚未投影，以及既定 CRUD 失败矩阵缺少 Browser 可见验收，因此 `F020` 继续保持 `in_progress`，不以已有 happy path 证据提前闭环。
 - [x] 完成 feature evidence Harness 的 GitHub 调研与技术方案：采用 validator-owned 固定闭集、非空/唯一约束和 hostile mutation tests，不让 `features.json` 自己声明可删除的必需字段；schema v3 增加逐条 `acceptanceResults`，并把 active phase/WIP 与 `progress.md` 双向锁定。方案不新增通用 schema 依赖，也不把机器形状检查冒充真实 Browser/Tauri 证据。
 - [x] 完成 feature evidence Harness schema v3：根、feature、evidence 与逐条 acceptance result 全部改为 validator-owned 固定闭集；`currentPhase` 从最早未完成阶段派生且不得早于已完成阶段，`blocked` 以非空 blocker 占用 WIP，`progress.md` 当前状态必须精确匹配唯一 active id/name。F001/F010 已迁移到逐条绑定证据，hostile tests 覆盖 schema 自降级、无效日期、空/额外/重排字段、原生证据缺失、acceptance 漂移、phase 倒退、WIP 0/1 和进度文档错配；完整 `pnpm check` 通过 26 个前端测试文件、489 个用例、Rust 255/255、架构与 bundle gate。
+- [x] 完成 Workbench multi-root 的固定 GitHub 源码调研与技术方案：复用 Code OSS `{ id, configPath }` 和 CodinGame `reinitializeWorkspace`，但用独立只读 `plain-workspace-config:`、稳定生成 URI、双 scheme no-cache patch、串行 snapshot topology coordinator 及 fail-closed workspace editing/recent services 守住 opaque root 权威。方案排除普通 `.code-workspace`、可写内存 provider、默认 workspace editing、开启通用 multi-root context 和 native mutation 反向回滚，并把安全投影、add、remove、Browser 失败矩阵与真实 Tauri 验收拆为逐项提交。
 
 ## 下一步
 
