@@ -1411,10 +1411,31 @@ function validateBootstrap(sourceFile) {
 	}
 	const coordinatorCall = coordinatorCalls[0];
 	const coordinatorName = coordinatorDeclaration.name.text;
+	const watcherAuthorityCallback = unwrapExpression(
+		coordinatorCall.arguments[5],
+	);
+	const watcherAuthorityExpression = expressionBody(watcherAuthorityCallback);
+	const watcherAuthorityCalls = callWithChain(bootstrap, [
+		"bridge",
+		"workspaceReconcileWatchRoots",
+	]);
 	if (
-		coordinatorCall.arguments.length !== 5 ||
+		coordinatorCall.arguments.length !== 6 ||
 		!sameChain(coordinatorCall.arguments[0], [configurationName]) ||
 		!sameChain(coordinatorCall.arguments[1], ["reinitializeWorkspace"]) ||
+		!ts.isArrowFunction(watcherAuthorityCallback) ||
+		watcherAuthorityCallback.parameters.length !== 1 ||
+		!ts.isIdentifier(watcherAuthorityCallback.parameters[0].name) ||
+		watcherAuthorityCallback.parameters[0].name.text !== "rootIds" ||
+		!ts.isCallExpression(watcherAuthorityExpression) ||
+		!sameChain(watcherAuthorityExpression.expression, [
+			"bridge",
+			"workspaceReconcileWatchRoots",
+		]) ||
+		watcherAuthorityExpression.arguments.length !== 1 ||
+		!sameChain(watcherAuthorityExpression.arguments[0], ["rootIds"]) ||
+		watcherAuthorityCalls.length !== 1 ||
+		!containsNode(watcherAuthorityCallback, watcherAuthorityCalls[0]) ||
 		coordinatorCall.pos <= configurationRegistration.pos
 	) {
 		return false;
@@ -1856,7 +1877,33 @@ function validateCoordinator(sourceFile) {
 	);
 	const coordinator = declarations.length === 1 ? declarations[0] : undefined;
 	const body = coordinator?.body;
-	if (!ts.isBlock(body) || coordinator.parameters.length !== 5) {
+	if (!ts.isBlock(body) || coordinator.parameters.length !== 6) {
+		return false;
+	}
+	const watcherAuthorityParameter = coordinator.parameters[5];
+	const watcherAuthorityDeclarations = callableDeclarations(
+		body,
+		"acceptWatcherAuthority",
+	);
+	const watcherAuthorityDeclaration = watcherAuthorityDeclarations[0];
+	if (
+		!ts.isIdentifier(watcherAuthorityParameter.name) ||
+		watcherAuthorityParameter.name.text !== "reconcileWorkspaceWatchRoots" ||
+		!isUndefinedCallback(watcherAuthorityParameter.initializer) ||
+		watcherAuthorityDeclarations.length !== 1 ||
+		!hasExactSyntaxTokens(
+			watcherAuthorityDeclaration,
+			`(projected: ProjectedState): void => {
+				try {
+					reconcileWorkspaceWatchRoots(
+						Object.freeze(projected.snapshot.roots.map(({ rootId }) => rootId)),
+					);
+				} catch {
+					throw failPermanently();
+				}
+			}`,
+		)
+	) {
 		return false;
 	}
 	const queueDeclarations = variableDeclarations(body, "queueTail");
@@ -2051,6 +2098,10 @@ function validateCoordinator(sourceFile) {
 		return false;
 	}
 	const dispatches = callsNamed(reinitialize, "reinitializeWorkspace");
+	const watcherAuthorityDispatches = callsNamed(
+		reinitialize,
+		"acceptWatcherAuthority",
+	);
 	const fatalGuards = descendants(reinitialize, ts.isIfStatement).filter(
 		(branch) =>
 			hasBinary(
@@ -2062,6 +2113,7 @@ function validateCoordinator(sourceFile) {
 	);
 	if (
 		dispatches.length !== 1 ||
+		watcherAuthorityDispatches.length !== 1 ||
 		!fatalOnlyCatchAround(reinitialize, dispatches[0]) ||
 		fatalGuards.length !== 1 ||
 		descendants(
@@ -2070,6 +2122,7 @@ function validateCoordinator(sourceFile) {
 				ts.isThrowStatement(node) && sameChain(node.expression, ["fatalError"]),
 		).length !== 1 ||
 		fatalGuards[0].pos >= dispatches[0].pos ||
+		watcherAuthorityDispatches[0].pos >= dispatches[0].pos ||
 		callsNamed(body, "reinitializeProjectedState").length !== 1
 	) {
 		return false;
@@ -2097,16 +2150,38 @@ function validateCoordinator(sourceFile) {
 		.map((statement) => unwrapFreeze(statement.expression))
 		.find(ts.isObjectLiteralExpression);
 	const complete = objectProperty(returned, "completeInitial");
+	const prepareInitial = objectProperty(returned, "prepareInitial");
 	const applyMethod = objectProperty(returned, "apply");
 	const mutationMethod = objectProperty(returned, "runMutation");
 	const mutationInQueue = callableBody(body, "runMutationInQueue");
 	const rejectedMutation = callableBody(body, "reconcileRejectedMutation");
 	if (
+		!ts.isMethodDeclaration(prepareInitial) ||
 		!ts.isMethodDeclaration(complete) ||
 		!ts.isMethodDeclaration(applyMethod) ||
 		!ts.isMethodDeclaration(mutationMethod) ||
 		mutationInQueue === undefined ||
 		rejectedMutation === undefined
+	) {
+		return false;
+	}
+	const initialProjects = callsNamed(prepareInitial, "projectDecodedSnapshot");
+	const initialWatcherAuthority = callsNamed(
+		prepareInitial,
+		"acceptWatcherAuthority",
+	);
+	const preparedInitialAssignment = assignmentPosition(
+		prepareInitial,
+		["preparedInitial"],
+		["projected"],
+	);
+	if (
+		initialProjects.length !== 1 ||
+		initialWatcherAuthority.length !== 1 ||
+		preparedInitialAssignment === undefined ||
+		initialProjects[0].pos >= initialWatcherAuthority[0].pos ||
+		initialWatcherAuthority[0].pos >= preparedInitialAssignment ||
+		callsNamed(body, "acceptWatcherAuthority").length !== 2
 	) {
 		return false;
 	}

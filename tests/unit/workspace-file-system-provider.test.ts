@@ -193,6 +193,7 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async workspaceSnapshot() {
 			throw new Error("unused");
 		},
+		workspaceReconcileWatchRoots() {},
 		workspaceWatch() {
 			return () => {};
 		},

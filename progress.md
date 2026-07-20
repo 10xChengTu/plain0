@@ -98,6 +98,7 @@
 - [x] 完成 remove-root 产品命令：Explorer `removeRootFolder` 只接受精确 `plain-workspace://<lowercase UUID v4>/` 根 URI，命令面板 `workbench.action.removeRootFolder` 只经固定 `_workbench.pickWorkspaceFolder` 取得 `folder.uri`；picker、URI 快照、Rust `workspace_remove_root` 与完整 snapshot 投影均位于同一 topology FIFO，cancel 零副作用，最后一根按权威 snapshot 清配置并回到 EMPTY。Close Folder、通用 Workspace、文件/窗口入口和默认 `IWorkspaceEditingService` 继续 fail closed。
 - [x] remove-root 生命周期 Harness 与终审收口：六个产品命令、固定 picker、URI 品牌/own-data/Proxy/UUID、native dispatch、完整 snapshot、fatal gate、直接词法归属和 import/writer authority 均由 token + AST 双签名与 hostile mutations 锁定；Rust remove/replace 不再用 gate 外 stale active-set `retain`，而是捕获本次移除的 exact watcher epoch 并在释放 workspace locks 后逐项 `revoke`，过期调用不能误伤并发新增或替换根。终审额外修复了 folder 无关 getter TOCTOU、字符串空白与 ASI 绕过、最后根提前返回 watcher 泄漏及 stale-set watcher 竞态。
 - [x] remove-root 切片通过完整 `pnpm check`：29 个 TypeScript/JavaScript 测试文件、574 个用例、2275 个前端模块、2110 个 bundle source、203 项既有迁移债务与 Rust 255/255 全部通过；格式、双类型检查、严格 lint、Clippy、架构与 bundle guard 均通过，最终三路复审无剩余 P0/P1/P2。
+- [x] 修复 remove-root 后前端 watcher 继续轮询已撤销根的问题：manager 改为默认空授权，只有 topology coordinator 通过 workspaceId/revision/topology 校验并选定的最终 snapshot 才能在 Workbench dispatch 前同步 root 集合；stale/冲突/仅解码响应无副作用，撤销会先删除旧 state、取消 listener、清 timer/解绑 wake，并以 state identity 隔离迟到结果与同 rootId 重授权。Native/Browser mock 只暴露无 IPC 的本地 reconcile route，单元测试与 Harness hostile mutations 锁定初始 fail-closed、最终 authoritative fallback、dispatch/adoption 失败不回滚、零根撤权和隐式 bridge reconcile 禁令。完整前端/架构/bundle 校验通过 29 个测试文件、582 个用例、2275 个模块、2110 个 source 与 203 项既有迁移债务；Rust 255/255 通过。
 
 ## 下一步
 

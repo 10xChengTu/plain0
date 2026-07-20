@@ -37,7 +37,7 @@
 - 固定 FileService patch 对 Plain copy/move/clone 的 provider-lookup 前拒绝、native-only 合法路径和零副作用失败矩阵；非 Plain 控制组必须保持 upstream 行为。
 - Plain create/createFolder 必须各只调用一次私有 native create seam，并由同一次 IPC 返回严格 `WorkspaceEntryStat` 创建回执；不得 create 前 target `stat/exists`、create 后第二次 `workspace_stat/resolve`、非空 create、overwrite、递归 mkdirp、公共 `writeFile/mkdir` 或通用 fallback。测试必须区分已认证 syscall 前错误的零事件与畸形回执/未知响应的一次冻结 root `UPDATED`，两者都不得发成功事件。copy/rename/move/delete provider adapters 必须覆盖严格 options、唯一 bridge 路由、成功事件闭集，以及 partial/unknown 只 rescan、不发成功事件。
 - confirmed-delete 测试必须覆盖一次 prepare/confirm/begin、调用级 token+entry+URI/options 绑定、逐项 commit、无授权/replay/错项拒绝，以及禁止 Trash、Bulk Undo、成功前 soft-revert 和 retained/partial 后继续执行。
-- watcher bridge/manager 必须拒绝额外字段、Proxy/accessor、重复 root、零 generation、workspace/root 混淆与畸形 wake；单 listener、单 timer、单 in-flight sync 在即时 wake、丢 wake、listener 释放、窗口销毁和 exact ack 后都必须有确定状态。
+- watcher bridge/manager 必须拒绝额外字段、Proxy/accessor、重复 root、零 generation、workspace/root 混淆与畸形 wake；manager 必须以空 root authority 启动，且只有 topology coordinator 已接受的 snapshot 能在 Workbench dispatch 前更新该集合。移除 root 后须先删除旧 subscription state，再取消 listener、丢弃迟到结果；最后一根移除后必须清 timer、解绑 wake listener，同 rootId 重授权不得被旧 disposer 误伤。单 listener、单 timer、单 in-flight sync 在即时 wake、丢 wake、listener 释放、窗口销毁和 exact ack 后都必须有确定状态。
 
 ### 架构与供应链检查
 

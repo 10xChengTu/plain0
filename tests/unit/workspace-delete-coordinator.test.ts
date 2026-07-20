@@ -89,6 +89,7 @@ function testBridge(
 		async workspaceSnapshot() {
 			throw new Error("unused");
 		},
+		workspaceReconcileWatchRoots() {},
 		workspaceWatch() {
 			return () => {};
 		},

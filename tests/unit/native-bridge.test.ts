@@ -92,6 +92,7 @@ describe("native Plain bridge", () => {
 			});
 			const listener = vi.fn();
 			const bridge = createNativeBridge();
+			bridge.workspaceReconcileWatchRoots([rootId]);
 
 			const stop = bridge.workspaceWatch(rootId, listener);
 			for (let index = 0; index < 8; index += 1) {
@@ -144,10 +145,11 @@ describe("native Plain bridge", () => {
 				},
 			});
 
-			stop();
+			bridge.workspaceReconcileWatchRoots([]);
 			await Promise.resolve();
 			await Promise.resolve();
 			expect(unlisten).toHaveBeenCalledOnce();
+			stop();
 		} finally {
 			vi.useRealTimers();
 		}
@@ -208,6 +210,38 @@ describe("native Plain bridge", () => {
 		expect(Object.isFrozen(snapshot)).toBe(true);
 		expect(Object.isFrozen(snapshot.roots)).toBe(true);
 		expect(Object.isFrozen(snapshot.roots[0])).toBe(true);
+	});
+
+	it("keeps decoded topology responses side-effect free until accepted roots are reconciled", async () => {
+		vi.useFakeTimers();
+		try {
+			const unlisten = vi.fn();
+			tauri.listen.mockResolvedValue(unlisten);
+			tauri.invoke.mockResolvedValueOnce(validSnapshot());
+			const bridge = createNativeBridge();
+			bridge.workspaceReconcileWatchRoots([targetRootId]);
+			const stop = bridge.workspaceWatch(targetRootId, vi.fn());
+			await Promise.resolve();
+			await Promise.resolve();
+
+			await expect(bridge.workspaceSnapshot()).resolves.toEqual(
+				validSnapshot(),
+			);
+			await Promise.resolve();
+			expect(unlisten).not.toHaveBeenCalled();
+			expect(tauri.invoke).toHaveBeenCalledExactlyOnceWith(
+				"workspace_snapshot",
+				{ request: {} },
+			);
+
+			bridge.workspaceReconcileWatchRoots([]);
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(unlisten).toHaveBeenCalledOnce();
+			stop();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("invokes the bounded file commands with frozen owned requests", async () => {

@@ -71,6 +71,7 @@ async function bootstrap(): Promise<void> {
 		() => {
 			document.body.dataset.plainWorkspaceProjection = "reload-required";
 		},
+		(rootIds) => bridge.workspaceReconcileWatchRoots(rootIds),
 	);
 	const initialWorkspaceSnapshot = await bridge.workspaceSnapshot();
 	const initialWorkspace = workspaceTopologyCoordinator.prepareInitial(

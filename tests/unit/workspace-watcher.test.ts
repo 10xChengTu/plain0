@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
-	createWorkspaceWatcherManager,
+	createWorkspaceWatcherManager as createRawWorkspaceWatcherManager,
 	type WorkspaceWatcherClock,
+	type WorkspaceWatcherManagerOptions,
 	type WorkspaceWatcherPageLifecycle,
 	type WorkspaceWatcherTransport,
 	type WorkspaceWatchPendingRoot,
@@ -169,6 +170,15 @@ function createTransport(
 	return { listenWake, sync, wakeListeners, unlisten };
 }
 
+function createWorkspaceWatcherManager(
+	transport: WorkspaceWatcherTransport,
+	options: WorkspaceWatcherManagerOptions = {},
+): ReturnType<typeof createRawWorkspaceWatcherManager> {
+	const manager = createRawWorkspaceWatcherManager(transport, options);
+	manager.reconcileRoots([ROOT_A, ROOT_B]);
+	return manager;
+}
+
 function emitWake(
 	transport: ReturnType<typeof createTransport>,
 	workspaceId = WORKSPACE_ID,
@@ -179,6 +189,23 @@ function emitWake(
 }
 
 describe("per-bridge workspace watcher manager", () => {
+	it("starts with an empty authority set and refuses unknown roots without side effects", () => {
+		const clock = new FakeClock();
+		const transport = createTransport(vi.fn(async () => watchResult()));
+		const manager = createRawWorkspaceWatcherManager(transport, {
+			clock,
+			pageLifecycle: null,
+			pollIntervalMs: 100,
+		});
+
+		const stop = manager.workspaceWatch(ROOT_A, vi.fn());
+		stop();
+
+		expect(transport.listenWake).not.toHaveBeenCalled();
+		expect(transport.sync).not.toHaveBeenCalled();
+		expect(clock.pendingCount).toBe(0);
+	});
+
 	it("ref-counts root listeners while sharing one wake listener and one timer", async () => {
 		const clock = new FakeClock();
 		const sync = vi.fn(async (_request: WorkspaceWatchSyncRequest) =>
@@ -216,6 +243,99 @@ describe("per-bridge workspace watcher manager", () => {
 		expect(transport.unlisten).toHaveBeenCalledOnce();
 		expect(transport.wakeListeners.size).toBe(0);
 		expect(clock.pendingCount).toBe(0);
+	});
+
+	it("revokes removed roots and detaches every watcher when accepted authority becomes empty", async () => {
+		const clock = new FakeClock();
+		const requests: unknown[] = [];
+		const sync = vi.fn(async (request: WorkspaceWatchSyncRequest) => {
+			requests.push(snapshotRequest(request));
+			return watchResult();
+		});
+		const transport = createTransport(sync);
+		const manager = createWorkspaceWatcherManager(transport, {
+			clock,
+			pageLifecycle: null,
+			pollIntervalMs: 100,
+		});
+		manager.reconcileRoots([ROOT_A, ROOT_B]);
+		const stopRootA = manager.workspaceWatch(ROOT_A, vi.fn());
+		manager.workspaceWatch(ROOT_B, vi.fn());
+
+		await runDue(clock);
+		expect(requests).toEqual([
+			{
+				roots: [
+					{ rootId: ROOT_A, acknowledgedGeneration: null },
+					{ rootId: ROOT_B, acknowledgedGeneration: null },
+				],
+			},
+		]);
+
+		manager.reconcileRoots([ROOT_B]);
+		await runDue(clock);
+		expect(requests[1]).toEqual({
+			roots: [{ rootId: ROOT_B, acknowledgedGeneration: null }],
+		});
+		expect(() => manager.reconcileRoots([ROOT_A, ROOT_A])).toThrow(
+			"The workspace watcher root set is invalid.",
+		);
+		const rejectedListener = vi.fn();
+		manager.workspaceWatch(ROOT_A, rejectedListener);
+		expect(clock.pendingCount).toBe(1);
+		emitWake(transport);
+		await runDue(clock);
+		expect(requests[2]).toEqual({
+			roots: [{ rootId: ROOT_B, acknowledgedGeneration: null }],
+		});
+
+		manager.reconcileRoots([]);
+		await flushMicrotasks();
+		expect(transport.unlisten).toHaveBeenCalledOnce();
+		expect(transport.wakeListeners.size).toBe(0);
+		expect(clock.pendingCount).toBe(0);
+		expect(rejectedListener).not.toHaveBeenCalled();
+
+		stopRootA();
+	});
+
+	it("ignores an in-flight revoked result and protects a same-root replacement from the old disposer", async () => {
+		const clock = new FakeClock();
+		const first = deferred<WorkspaceWatchSyncResult>();
+		const sync = vi.fn(async (_request: WorkspaceWatchSyncRequest) =>
+			sync.mock.calls.length === 1
+				? first.promise
+				: watchResult([pending(ROOT_A, 5, true)]),
+		);
+		const transport = createTransport(sync);
+		const manager = createWorkspaceWatcherManager(transport, {
+			clock,
+			pageLifecycle: null,
+			pollIntervalMs: 100,
+		});
+		manager.reconcileRoots([ROOT_A]);
+		const oldListener = vi.fn();
+		const stopOld = manager.workspaceWatch(ROOT_A, oldListener);
+
+		await runDue(clock);
+		expect(sync).toHaveBeenCalledOnce();
+		manager.reconcileRoots([]);
+		manager.reconcileRoots([ROOT_A]);
+		const replacement = vi.fn();
+		manager.workspaceWatch(ROOT_A, replacement);
+		stopOld();
+
+		first.resolve(watchResult([pending(ROOT_A, 4, true)]));
+		await flushMicrotasks();
+		expect(oldListener).not.toHaveBeenCalled();
+		expect(replacement).not.toHaveBeenCalled();
+		expect(clock.nextDelay).toBe(0);
+
+		await runDue(clock);
+		expect(replacement).toHaveBeenCalledOnce();
+		expect(snapshotRequest(sync.mock.calls[1]![0])).toEqual({
+			roots: [{ rootId: ROOT_A, acknowledgedGeneration: null }],
+		});
 	});
 
 	it("delivers a generation once and sends its acknowledgement in the next serial sync", async () => {

@@ -24,6 +24,7 @@ describe("browser mock workspace watcher transport", () => {
 			});
 			const picked = await bridge.workspacePickRoots("replace");
 			const root = picked.snapshot.roots[0]!;
+			bridge.workspaceReconcileWatchRoots([root.rootId]);
 			const listener = vi.fn();
 			const stop = bridge.workspaceWatch(root.rootId, listener);
 
@@ -62,6 +63,7 @@ describe("browser mock workspace watcher transport", () => {
 			});
 			const picked = await bridge.workspacePickRoots("replace");
 			const root = picked.snapshot.roots[0]!;
+			bridge.workspaceReconcileWatchRoots([root.rootId]);
 			const listener = vi.fn();
 			const stop = bridge.workspaceWatch(root.rootId, listener);
 			await settleImmediateWatcherWork();
@@ -83,6 +85,48 @@ describe("browser mock workspace watcher transport", () => {
 				} as never),
 			).toThrow("Invalid browser mock workspace-watch invalidation.");
 			stop();
+			await Promise.resolve();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("revokes listeners and protects a same-root replacement from the old disposer", async () => {
+		vi.useFakeTimers();
+		try {
+			let controller!: BrowserMockWorkspaceWatchControllerForTest;
+			const bridge = createBrowserMockBridge({
+				onWorkspaceWatchControllerForTest(value) {
+					controller = value;
+				},
+			});
+			const picked = await bridge.workspacePickRoots("replace");
+			const root = picked.snapshot.roots[0]!;
+			bridge.workspaceReconcileWatchRoots([root.rootId]);
+			const oldListener = vi.fn();
+			const stopOld = bridge.workspaceWatch(root.rootId, oldListener);
+			await settleImmediateWatcherWork();
+			expect(oldListener).toHaveBeenCalledOnce();
+
+			bridge.workspaceReconcileWatchRoots([]);
+			controller.invalidateRoot(root.rootId, {
+				emitWake: true,
+				rescanRequired: true,
+			});
+			await settleImmediateWatcherWork();
+			expect(oldListener).toHaveBeenCalledOnce();
+
+			bridge.workspaceReconcileWatchRoots([root.rootId]);
+			const replacement = vi.fn();
+			const stopReplacement = bridge.workspaceWatch(root.rootId, replacement);
+			stopOld();
+			await settleImmediateWatcherWork();
+			expect(replacement).toHaveBeenCalledOnce();
+
+			controller.invalidateRoot(root.rootId, { emitWake: true });
+			await settleImmediateWatcherWork();
+			expect(replacement).toHaveBeenCalledTimes(2);
+			stopReplacement();
 			await Promise.resolve();
 		} finally {
 			vi.useRealTimers();

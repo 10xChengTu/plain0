@@ -1592,6 +1592,63 @@ export function captureWorkbenchSurfaces`,
 		);
 	});
 
+	it("keeps watcher authority owned by accepted topology transitions", () => {
+		expectFailure(
+			mutated("main", (source) =>
+				replaceOnce(
+					source,
+					"(rootIds) => bridge.workspaceReconcileWatchRoots(rootIds),",
+					"(rootIds) => void rootIds,",
+				),
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.bootstrap,
+		);
+		for (const [anchor, needle, replacement] of [
+			[
+				"prepareInitial(snapshot: WorkspaceSnapshot)",
+				"acceptWatcherAuthority(projected);",
+				"void projected;",
+			],
+			[
+				"const reinitializeProjectedState = async",
+				"acceptWatcherAuthority(projected);",
+				"void projected;",
+			],
+			[
+				"if (decoded.revision < current.snapshot.revision)",
+				"throw new WorkspaceProjectionConflictError();",
+				"acceptWatcherAuthority(current);\n\t\t\tthrow new WorkspaceProjectionConflictError();",
+			],
+		]) {
+			expectFailure(
+				mutated("projection", (source) =>
+					replaceAfter(source, anchor, needle, replacement),
+				),
+				WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.coordinator,
+			);
+		}
+		expectFailure(
+			mutated("projection", (source) =>
+				replaceOnce(
+					source,
+					"projected.snapshot.roots.map(({ rootId }) => rootId)",
+					"[]",
+				),
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.coordinator,
+		);
+		expectFailure(
+			mutated("projection", (source) =>
+				replaceOnce(
+					source,
+					"acceptWatcherAuthority(projected);\n\t\ttry {\n\t\t\tawait reinitializeWorkspace(projected.projection.identifier);",
+					"try {\n\t\t\tawait reinitializeWorkspace(projected.projection.identifier);\n\t\t\tacceptWatcherAuthority(projected);",
+				),
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.coordinator,
+		);
+	});
+
 	it("rejects retry or recoverable handling after reinitialize dispatch", () => {
 		const scope = "const reinitializeProjectedState = async";
 		expectFailure(

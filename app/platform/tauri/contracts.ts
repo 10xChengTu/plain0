@@ -239,6 +239,7 @@ export interface PlainBridge {
 	onRuntimeReady(listener: (payload: RuntimeInfo) => void): Promise<Unlisten>;
 	workspaceCapabilities(): Promise<WorkspaceCapabilities>;
 	workspaceSnapshot(): Promise<WorkspaceSnapshot>;
+	workspaceReconcileWatchRoots(rootIds: readonly string[]): void;
 	workspaceWatch(rootId: string, listener: () => void): Unlisten;
 	workspacePickRoots(mode: WorkspacePickMode): Promise<WorkspacePickResult>;
 	workspaceRemoveRoot(rootId: string): Promise<WorkspaceSnapshot>;

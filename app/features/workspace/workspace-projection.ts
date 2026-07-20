@@ -46,6 +46,8 @@ export type ReinitializeWorkspace = (
 	identifier: IAnyWorkspaceIdentifier,
 ) => Promise<void>;
 
+export type ReconcileWorkspaceWatchRoots = (rootIds: readonly string[]) => void;
+
 export interface WorkbenchWorkspaceAdoption {
 	readonly id: string;
 	readonly configPath: URI | undefined;
@@ -140,6 +142,7 @@ export function createWorkspaceTopologyCoordinator(
 	loadAuthoritativeSnapshot: () => Promise<WorkspaceSnapshot>,
 	readWorkbenchAdoption: () => Promise<WorkbenchWorkspaceAdoption>,
 	onReloadRequired: (error: WorkspaceProjectionFailedError) => void = () => {},
+	reconcileWorkspaceWatchRoots: ReconcileWorkspaceWatchRoots = () => undefined,
 ): WorkspaceTopologyCoordinator {
 	let preparedInitial: ProjectedState | undefined;
 	let current: ProjectedState | undefined;
@@ -167,6 +170,16 @@ export function createWorkspaceTopologyCoordinator(
 			}
 		}
 		return fatalError;
+	};
+
+	const acceptWatcherAuthority = (projected: ProjectedState): void => {
+		try {
+			reconcileWorkspaceWatchRoots(
+				Object.freeze(projected.snapshot.roots.map(({ rootId }) => rootId)),
+			);
+		} catch {
+			throw failPermanently();
+		}
 	};
 
 	const assertWorkbenchAdoption = async (
@@ -228,6 +241,7 @@ export function createWorkspaceTopologyCoordinator(
 		if (fatalError !== undefined) {
 			throw fatalError;
 		}
+		acceptWatcherAuthority(projected);
 		try {
 			await reinitializeWorkspace(projected.projection.identifier);
 		} catch {
@@ -362,10 +376,12 @@ export function createWorkspaceTopologyCoordinator(
 			if (preparedInitial !== undefined || initialCompleted) {
 				throw new WorkspaceProjectionConflictError();
 			}
-			preparedInitial = projectDecodedSnapshot(
+			const projected = projectDecodedSnapshot(
 				decodeWorkspaceSnapshot(snapshot),
 				configurationStore,
 			);
+			acceptWatcherAuthority(projected);
+			preparedInitial = projected;
 			return preparedInitial.projection;
 		},
 		completeInitial() {

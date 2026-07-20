@@ -50,7 +50,6 @@ export function createNativeBridge(): PlainBridge {
 			);
 		},
 	});
-
 	return {
 		runtimeInfo: async () =>
 			decodeRuntimeInfo(await invoke<unknown>("runtime_info")),
@@ -67,6 +66,7 @@ export function createNativeBridge(): PlainBridge {
 			decodeWorkspaceSnapshot(
 				await invoke<unknown>("workspace_snapshot", { request: {} }),
 			),
+		workspaceReconcileWatchRoots: workspaceWatcher.reconcileRoots,
 		workspaceWatch: workspaceWatcher.workspaceWatch,
 		workspacePickRoots: async (mode) =>
 			decodeWorkspacePickResult(

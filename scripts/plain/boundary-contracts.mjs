@@ -775,6 +775,28 @@ export function validateWorkspaceProviderBootstrap(source) {
 		if (
 			ts.isPropertyAccessExpression(parent) &&
 			parent.expression === node &&
+			parent.name.text === "workspaceReconcileWatchRoots" &&
+			ts.isCallExpression(parent.parent) &&
+			parent.parent.expression === parent &&
+			parent.parent.arguments.length === 1 &&
+			ts.isIdentifier(parent.parent.arguments[0]) &&
+			parent.parent.arguments[0].text === "rootIds" &&
+			ts.isArrowFunction(parent.parent.parent) &&
+			parent.parent.parent.body === parent.parent &&
+			parent.parent.parent.parameters.length === 1 &&
+			ts.isIdentifier(parent.parent.parent.parameters[0].name) &&
+			parent.parent.parent.parameters[0].name.text === "rootIds" &&
+			ts.isCallExpression(parent.parent.parent.parent) &&
+			ts.isIdentifier(parent.parent.parent.parent.expression) &&
+			parent.parent.parent.parent.expression.text ===
+				"createWorkspaceTopologyCoordinator" &&
+			parent.parent.parent.parent.arguments[5] === parent.parent.parent
+		) {
+			return true;
+		}
+		if (
+			ts.isPropertyAccessExpression(parent) &&
+			parent.expression === node &&
 			[
 				"workspaceCapabilities",
 				"workspaceSnapshot",
@@ -3048,6 +3070,24 @@ function watcherClassMethod(sourceFile, className, methodName) {
 	return methods.length === 1 ? methods[0] : undefined;
 }
 
+function watcherClassArrowFunction(sourceFile, className, propertyName) {
+	const classes =
+		sourceFile?.statements.filter(
+			(statement) =>
+				ts.isClassDeclaration(statement) && statement.name?.text === className,
+		) ?? [];
+	if (classes.length !== 1) {
+		return undefined;
+	}
+	const properties = classes[0].members.filter(
+		(member) =>
+			ts.isPropertyDeclaration(member) &&
+			typeScriptStaticName(member.name) === propertyName &&
+			ts.isArrowFunction(member.initializer),
+	);
+	return properties.length === 1 ? properties[0].initializer : undefined;
+}
+
 function validateWatcherProviderRoute(providerSource) {
 	const failure =
 		"Plain provider watch must route one root-only subscription through bridge.workspaceWatch";
@@ -3696,18 +3736,30 @@ export function validateWorkspaceWatcherBoundary(rustSources, appSources) {
 				typeScriptStaticName(member.name) === "workspaceWatch",
 		) ?? [];
 	const bridgeWatch = workspaceWatchMembers[0];
+	const workspaceReconcileMembers =
+		bridgeInterfaces[0]?.members.filter(
+			(member) =>
+				ts.isMethodSignature(member) &&
+				typeScriptStaticName(member.name) === "workspaceReconcileWatchRoots",
+		) ?? [];
+	const bridgeReconcile = workspaceReconcileMembers[0];
 	if (
 		bridgeInterfaces.length !== 1 ||
 		workspaceWatchMembers.length !== 1 ||
+		workspaceReconcileMembers.length !== 1 ||
 		bridgeWatch.parameters.length !== 2 ||
 		compact(bridgeWatch.parameters[0].type?.getText(contractsFile)) !==
 			"string" ||
 		compact(bridgeWatch.parameters[1].type?.getText(contractsFile)) !==
 			"()=>void" ||
-		compact(bridgeWatch.type?.getText(contractsFile)) !== "Unlisten"
+		compact(bridgeWatch.type?.getText(contractsFile)) !== "Unlisten" ||
+		bridgeReconcile.parameters.length !== 1 ||
+		compact(bridgeReconcile.parameters[0].type?.getText(contractsFile)) !==
+			"readonlystring[]" ||
+		compact(bridgeReconcile.type?.getText(contractsFile)) !== "void"
 	) {
 		failures.push(
-			"PlainBridge must expose one root-only workspaceWatch callback contract",
+			"PlainBridge must expose exact local watcher authority and root-only watch contracts",
 		);
 	}
 
@@ -3797,6 +3849,16 @@ export function validateWorkspaceWatcherBoundary(rustSources, appSources) {
 		"PerBridgeWorkspaceWatcherManager",
 		"#deliver",
 	);
+	const reconcileRoots = watcherClassArrowFunction(
+		managerFile,
+		"PerBridgeWorkspaceWatcherManager",
+		"reconcileRoots",
+	);
+	const workspaceWatch = watcherClassArrowFunction(
+		managerFile,
+		"PerBridgeWorkspaceWatcherManager",
+		"workspaceWatch",
+	);
 	const managerExecutable = watcherTypeScriptExecutableText(manager);
 	const scheduleBody = watcherTypeScriptExecutableText(
 		schedulePull?.body?.getText(managerFile),
@@ -3807,6 +3869,14 @@ export function validateWorkspaceWatcherBoundary(rustSources, appSources) {
 	const deliverBody = watcherTypeScriptExecutableText(
 		deliver?.body?.getText(managerFile),
 	);
+	const reconcileBody = watcherTypeScriptExecutableText(
+		reconcileRoots?.body.getText(managerFile),
+	);
+	const workspaceWatchBody = watcherTypeScriptExecutableText(
+		workspaceWatch?.body.getText(managerFile),
+	);
+	const revokeDelete = reconcileBody.indexOf("this.#roots.delete(rootId)");
+	const revokeCancel = reconcileBody.indexOf("subscription.cancel()");
 	const acknowledgementGuard = deliverBody.indexOf(
 		"Array.from(state.subscriptions).every",
 	);
@@ -3822,6 +3892,27 @@ export function validateWorkspaceWatcherBoundary(rustSources, appSources) {
 		/@tauri-apps\//.test(manager) ||
 		!managerExecutable.includes(
 			"readonly#onWake=(wake:WorkspaceWatchWakeEvent):void=>",
+		) ||
+		!managerExecutable.includes(
+			"#authorizedRoots:ReadonlySet<string>=newSet()",
+		) ||
+		reconcileRoots === undefined ||
+		!reconcileBody.includes("constauthorizedRoots=newSet<string>()") ||
+		!reconcileBody.includes(
+			'if(typeofrootId!=="string"||authorizedRoots.has(rootId)){thrownewTypeError("The workspace watcher root set is invalid.");}',
+		) ||
+		!reconcileBody.includes("this.#authorizedRoots=authorizedRoots") ||
+		revokeDelete < 0 ||
+		revokeCancel <= revokeDelete ||
+		!reconcileBody.includes(
+			"if(this.#roots.size===0){this.#pullRequested=false;this.#clearScheduledPull();voidthis.#detachWakeListener();}",
+		) ||
+		!reconcileBody.includes(
+			"elseif(revokedStates.length>0){this.#schedulePull(true);}",
+		) ||
+		workspaceWatch === undefined ||
+		!workspaceWatchBody.includes(
+			"if(!this.#authorizedRoots.has(rootId)){return()=>{};}",
 		) ||
 		!managerExecutable.includes("this.#schedulePull(true)") ||
 		[...managerExecutable.matchAll(/this\.#transport\.sync\(/g)].length !== 1 ||
@@ -3857,15 +3948,23 @@ export function validateWorkspaceWatcherBoundary(rustSources, appSources) {
 		!compactNative.includes(
 			'awaitinvoke<unknown>("workspace_watch_sync",{request})',
 		) ||
-		!compactNative.includes("workspaceWatch:workspaceWatcher.workspaceWatch")
+		!compactNative.includes("workspaceWatch:workspaceWatcher.workspaceWatch") ||
+		!compactNative.includes(
+			"workspaceReconcileWatchRoots:workspaceWatcher.reconcileRoots",
+		) ||
+		[...compactNative.matchAll(/workspaceWatcher\.reconcileRoots/g)].length !==
+			1 ||
+		compactNative.includes("workspace_reconcile_watch_roots")
 	) {
 		failures.push(
-			"native bridge must decode the wake hint and route sync through the watcher manager",
+			"native bridge must keep topology decoding side-effect free and route local watcher authority through one manager",
 		);
 	}
 	const browserFile = watcherTypeScriptSource(browserMock, "browser-mock.ts");
 	let browserManagerCreations = 0;
 	let browserWatchRoutes = 0;
+	let browserReconcileRoutes = 0;
+	let browserReconcileCalls = 0;
 	if (browserFile !== undefined) {
 		function visitBrowserWatcher(node) {
 			if (
@@ -3888,13 +3987,38 @@ export function validateWorkspaceWatcherBoundary(rustSources, appSources) {
 			) {
 				browserWatchRoutes += 1;
 			}
+			if (
+				ts.isPropertyAssignment(node) &&
+				typeScriptStaticName(node.name) === "workspaceReconcileWatchRoots" &&
+				ts.isPropertyAccessExpression(node.initializer) &&
+				ts.isIdentifier(node.initializer.expression) &&
+				node.initializer.expression.text === "workspaceWatcher" &&
+				node.initializer.name.text === "reconcileRoots"
+			) {
+				browserReconcileRoutes += 1;
+			}
+			if (
+				ts.isCallExpression(node) &&
+				ts.isPropertyAccessExpression(node.expression) &&
+				ts.isIdentifier(node.expression.expression) &&
+				node.expression.expression.text === "workspaceWatcher" &&
+				node.expression.name.text === "reconcileRoots"
+			) {
+				browserReconcileCalls += 1;
+			}
 			ts.forEachChild(node, visitBrowserWatcher);
 		}
 		visitBrowserWatcher(browserFile);
 	}
-	if (browserManagerCreations !== 1 || browserWatchRoutes !== 1) {
+	if (
+		browserManagerCreations !== 1 ||
+		browserWatchRoutes !== 1 ||
+		browserReconcileRoutes !== 1 ||
+		browserReconcileCalls !== 0 ||
+		browserMock?.includes("workspace_reconcile_watch_roots")
+	) {
 		failures.push(
-			"browser mock must exercise the same bounded workspace watcher manager",
+			"browser mock must use one side-effect-free local authority route and the same bounded watcher manager",
 		);
 	}
 	failures.push(...validateWatcherProviderRoute(provider));

@@ -1214,6 +1214,87 @@ describe("workspace watcher Harness", () => {
 		}
 	});
 
+	it("keeps frontend watcher authority local, fail-closed, and side-effect free until accepted", () => {
+		const baseline = workspaceWatcherBoundarySources();
+		const managerPath = "app/platform/tauri/workspace-watcher.ts";
+		const managerFailure =
+			"watch manager must serialize wake/timer pulls and acknowledge only after listener delivery";
+		for (const [from, to] of [
+			[
+				"#authorizedRoots: ReadonlySet<string> = new Set();",
+				"#authorizedRoots: ReadonlySet<string> | undefined;",
+			],
+			["if (!this.#authorizedRoots.has(rootId)) {", "if (false) {"],
+			["this.#roots.delete(rootId);", "void rootId;"],
+			["subscription.cancel();", "void subscription;"],
+			["this.#clearScheduledPull();", "void this.#scheduledPull;"],
+			["void this.#detachWakeListener();", "void this.#wakeUnlisten;"],
+		]) {
+			const hostile = replaceWatcherSource(baseline.app, managerPath, from, to);
+			expect(
+				validateWorkspaceWatcherBoundary(baseline.rust, hostile),
+			).toContain(managerFailure);
+		}
+
+		const contractFailure =
+			"PlainBridge must expose exact local watcher authority and root-only watch contracts";
+		const weakContract = replaceWatcherSource(
+			baseline.app,
+			"app/platform/tauri/contracts.ts",
+			"workspaceReconcileWatchRoots(rootIds: readonly string[]): void;",
+			"workspaceReconcileWatchRoots(rootIds: string[]): Promise<void>;",
+		);
+		expect(
+			validateWorkspaceWatcherBoundary(baseline.rust, weakContract),
+		).toContain(contractFailure);
+
+		const nativeFailure =
+			"native bridge must keep topology decoding side-effect free and route local watcher authority through one manager";
+		for (const [from, to] of [
+			[
+				"workspaceReconcileWatchRoots: workspaceWatcher.reconcileRoots,",
+				"workspaceReconcileWatchRoots: () => undefined,",
+			],
+			[
+				'workspaceSnapshot: async () =>\n\t\t\tdecodeWorkspaceSnapshot(\n\t\t\t\tawait invoke<unknown>("workspace_snapshot", { request: {} }),\n\t\t\t),',
+				'workspaceSnapshot: async () => {\n\t\t\tworkspaceWatcher.reconcileRoots([]);\n\t\t\treturn decodeWorkspaceSnapshot(\n\t\t\t\tawait invoke<unknown>("workspace_snapshot", { request: {} }),\n\t\t\t);\n\t\t},',
+			],
+		]) {
+			const hostile = replaceWatcherSource(
+				baseline.app,
+				"app/platform/tauri/native.ts",
+				from,
+				to,
+			);
+			expect(
+				validateWorkspaceWatcherBoundary(baseline.rust, hostile),
+			).toContain(nativeFailure);
+		}
+
+		const browserFailure =
+			"browser mock must use one side-effect-free local authority route and the same bounded watcher manager";
+		for (const [from, to] of [
+			[
+				"workspaceReconcileWatchRoots: workspaceWatcher.reconcileRoots,",
+				"workspaceReconcileWatchRoots: () => undefined,",
+			],
+			[
+				"async workspaceSnapshot() {\n\t\t\treturn snapshot();",
+				"async workspaceSnapshot() {\n\t\t\tworkspaceWatcher.reconcileRoots([]);\n\t\t\treturn snapshot();",
+			],
+		]) {
+			const hostile = replaceWatcherSource(
+				baseline.app,
+				"app/platform/tauri/browser-mock.ts",
+				from,
+				to,
+			);
+			expect(
+				validateWorkspaceWatcherBoundary(baseline.rust, hostile),
+			).toContain(browserFailure);
+		}
+	});
+
 	it("allows provider watch only through the narrow bridge and rejects excluded services", () => {
 		const baseline = workspaceWatcherBoundarySources();
 		const providerPath = "app/features/workspace/file-system-provider.ts";

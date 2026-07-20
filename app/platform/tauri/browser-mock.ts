@@ -4424,6 +4424,7 @@ export function createBrowserMockBridge(
 		async workspaceSnapshot() {
 			return snapshot();
 		},
+		workspaceReconcileWatchRoots: workspaceWatcher.reconcileRoots,
 		workspaceWatch: workspaceWatcher.workspaceWatch,
 		async workspacePickRoots(mode) {
 			const status = scriptedPicks.shift() ?? "selected";

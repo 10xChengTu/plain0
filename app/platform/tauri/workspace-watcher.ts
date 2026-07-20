@@ -47,6 +47,7 @@ export interface WorkspaceWatcherManagerOptions {
 }
 
 export interface WorkspaceWatcherManager {
+	reconcileRoots(rootIds: readonly string[]): void;
 	workspaceWatch(rootId: string, listener: WorkspaceWatchListener): Unlisten;
 	dispose(): Promise<void>;
 }
@@ -111,6 +112,7 @@ class PerBridgeWorkspaceWatcherManager implements WorkspaceWatcherManager {
 	readonly #pollIntervalMs: number;
 	readonly #pageLifecycle: WorkspaceWatcherPageLifecycle | undefined;
 	readonly #roots = new Map<string, RootSubscriptionState>();
+	#authorizedRoots: ReadonlySet<string> = new Set();
 
 	#scheduledPull: ScheduledPull | undefined;
 	#syncInFlight = false;
@@ -155,12 +157,52 @@ class PerBridgeWorkspaceWatcherManager implements WorkspaceWatcherManager {
 		this.#pageLifecycle?.addEventListener("pagehide", this.#onPageHide);
 	}
 
+	readonly reconcileRoots = (rootIds: readonly string[]): void => {
+		if (this.#disposed) {
+			return;
+		}
+		const authorizedRoots = new Set<string>();
+		for (const rootId of rootIds) {
+			if (typeof rootId !== "string" || authorizedRoots.has(rootId)) {
+				throw new TypeError("The workspace watcher root set is invalid.");
+			}
+			authorizedRoots.add(rootId);
+		}
+		this.#authorizedRoots = authorizedRoots;
+
+		const revokedStates: RootSubscriptionState[] = [];
+		for (const [rootId, state] of this.#roots) {
+			if (authorizedRoots.has(rootId)) {
+				continue;
+			}
+			this.#roots.delete(rootId);
+			revokedStates.push(state);
+		}
+		for (const state of revokedStates) {
+			for (const subscription of state.subscriptions) {
+				subscription.cancel();
+			}
+			state.subscriptions.clear();
+		}
+
+		if (this.#roots.size === 0) {
+			this.#pullRequested = false;
+			this.#clearScheduledPull();
+			void this.#detachWakeListener();
+		} else if (revokedStates.length > 0) {
+			this.#schedulePull(true);
+		}
+	};
+
 	readonly workspaceWatch = (
 		rootId: string,
 		listener: WorkspaceWatchListener,
 	): Unlisten => {
 		if (this.#disposed) {
 			throw new Error("The workspace watcher manager has been disposed.");
+		}
+		if (!this.#authorizedRoots.has(rootId)) {
+			return () => {};
 		}
 
 		let state = this.#roots.get(rootId);

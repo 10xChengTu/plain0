@@ -141,14 +141,21 @@ describe("workspace topology coordinator", () => {
 		const harness = configurationStore();
 		const reinitialize = vi.fn(async () => {});
 		const adoption = readAdoption(harness);
+		const reconcileWatchRoots = vi.fn();
 		const coordinator = createWorkspaceTopologyCoordinator(
 			harness.store,
 			reinitialize,
 			vi.fn(async () => snapshot(0, [firstRoot])),
 			adoption,
+			vi.fn(),
+			reconcileWatchRoots,
 		);
 
 		const projection = coordinator.prepareInitial(snapshot(0, [firstRoot]));
+		expect(reconcileWatchRoots).toHaveBeenCalledExactlyOnceWith([
+			firstRoot.rootId,
+		]);
+		expect(Object.isFrozen(reconcileWatchRoots.mock.calls[0]![0])).toBe(true);
 		await expect(coordinator.completeInitial()).resolves.toBe(
 			projection.identifier,
 		);
@@ -368,11 +375,14 @@ describe("workspace topology coordinator", () => {
 	it("deduplicates identical revisions without reinstall and rejects stale responses", async () => {
 		const harness = configurationStore();
 		const reinitialize = vi.fn(async () => {});
+		const reconcileWatchRoots = vi.fn();
 		const coordinator = createWorkspaceTopologyCoordinator(
 			harness.store,
 			reinitialize,
 			vi.fn(async () => snapshot(1, [firstRoot, secondRoot])),
 			readAdoption(harness),
+			vi.fn(),
+			reconcileWatchRoots,
 		);
 		coordinator.prepareInitial(snapshot(1, [firstRoot, secondRoot]));
 		await coordinator.completeInitial();
@@ -381,10 +391,12 @@ describe("workspace topology coordinator", () => {
 		await coordinator.apply(snapshot(1, [firstRoot, secondRoot]));
 		expect(harness.store.install).toHaveBeenCalledTimes(installsAfterInitial);
 		expect(reinitialize).not.toHaveBeenCalled();
+		expect(reconcileWatchRoots).toHaveBeenCalledOnce();
 		await expect(
 			coordinator.apply(snapshot(0, [firstRoot])),
 		).rejects.toMatchObject({ code: WORKSPACE_PROJECTION_CONFLICT });
 		expect(reinitialize).not.toHaveBeenCalled();
+		expect(reconcileWatchRoots).toHaveBeenCalledOnce();
 	});
 
 	it("applies a queued newer revision and then rejects an older late response", async () => {
@@ -423,11 +435,14 @@ describe("workspace topology coordinator", () => {
 		});
 		const reinitialize = vi.fn(async () => {});
 		const load = vi.fn(async () => next);
+		const reconcileWatchRoots = vi.fn();
 		const coordinator = createWorkspaceTopologyCoordinator(
 			harness.store,
 			reinitialize,
 			load,
 			readAdoption(harness),
+			vi.fn(),
+			reconcileWatchRoots,
 		);
 		coordinator.prepareInitial(snapshot(0, [firstRoot]));
 		await coordinator.completeInitial();
@@ -437,25 +452,36 @@ describe("workspace topology coordinator", () => {
 		});
 		expect(load).toHaveBeenCalledOnce();
 		expect(reinitialize).toHaveBeenCalledOnce();
+		expect(reconcileWatchRoots.mock.calls).toEqual([
+			[[firstRoot.rootId]],
+			[[firstRoot.rootId, secondRoot.rootId]],
+		]);
 	});
 
 	it("treats reinitialize rejection as outcome unknown without retry", async () => {
 		const harness = configurationStore();
 		const next = snapshot(1, [firstRoot, secondRoot]);
+		const authorityOrder: string[] = [];
 		const reinitialize = vi.fn(async () => {
+			authorityOrder.push("dispatch");
 			throw new Error("private partial failure");
 		});
 		const load = vi.fn(async () => next);
 		const onReloadRequired = vi.fn();
+		const reconcileWatchRoots = vi.fn((rootIds: readonly string[]) => {
+			authorityOrder.push(`authority:${rootIds.join(",")}`);
+		});
 		const coordinator = createWorkspaceTopologyCoordinator(
 			harness.store,
 			reinitialize,
 			load,
 			readAdoption(harness),
 			onReloadRequired,
+			reconcileWatchRoots,
 		);
 		coordinator.prepareInitial(snapshot(0, [firstRoot]));
 		await coordinator.completeInitial();
+		authorityOrder.length = 0;
 
 		await expect(coordinator.apply(next)).rejects.toMatchObject({
 			code: WORKSPACE_PROJECTION_FAILED,
@@ -465,6 +491,10 @@ describe("workspace topology coordinator", () => {
 		expect(reinitialize).toHaveBeenCalledOnce();
 		expect(load).not.toHaveBeenCalled();
 		expect(harness.state.installed?.revision).toBe(1);
+		expect(authorityOrder).toEqual([
+			`authority:${firstRoot.rootId},${secondRoot.rootId}`,
+			"dispatch",
+		]);
 
 		await expect(
 			coordinator.apply(snapshot(2, [secondRoot])),
@@ -481,6 +511,35 @@ describe("workspace topology coordinator", () => {
 		expect(forbiddenMutation).not.toHaveBeenCalled();
 		expect(reinitialize).toHaveBeenCalledOnce();
 		expect(load).not.toHaveBeenCalled();
+	});
+
+	it("locks before dispatch when watcher authority reconciliation fails", async () => {
+		const harness = configurationStore();
+		const next = snapshot(1, [firstRoot, secondRoot]);
+		const reinitialize = vi.fn(async () => {});
+		const onReloadRequired = vi.fn();
+		const reconcileWatchRoots = vi.fn((rootIds: readonly string[]) => {
+			if (rootIds.length === 2) {
+				throw new Error("private watcher failure");
+			}
+		});
+		const coordinator = createWorkspaceTopologyCoordinator(
+			harness.store,
+			reinitialize,
+			vi.fn(async () => next),
+			readAdoption(harness),
+			onReloadRequired,
+			reconcileWatchRoots,
+		);
+		coordinator.prepareInitial(snapshot(0, [firstRoot]));
+		await coordinator.completeInitial();
+
+		await expect(coordinator.apply(next)).rejects.toMatchObject({
+			code: WORKSPACE_PROJECTION_FAILED,
+			message: expect.not.stringContaining("private watcher failure"),
+		});
+		expect(reinitialize).not.toHaveBeenCalled();
+		expect(onReloadRequired).toHaveBeenCalledOnce();
 	});
 
 	it("locks after a resolved reinitialize fails the adoption handshake", async () => {
