@@ -14,6 +14,16 @@ interface TestTauriInvocation {
 	readonly args: Record<string, unknown>;
 }
 
+interface TestWorkspaceVersionTransition {
+	readonly command: "workspace_copy" | "workspace_move";
+	readonly sourceRootId: string;
+	readonly sourcePath: string;
+	readonly sourceVersion: string;
+	readonly targetRootId: string;
+	readonly targetPath: string;
+	readonly targetVersion: string;
+}
+
 const nativeWorkspaceId = "00000000-0000-4000-8000-000000000001";
 const nativeRootId = "00000000-0000-4000-8000-000000000101";
 const nativeSecondaryRootId = "00000000-0000-4000-8000-000000000102";
@@ -729,13 +739,17 @@ async function installNativeIpcMock(
 	);
 }
 
-async function installMultiRootNativeIpcMock(page: Page): Promise<void> {
+async function installMultiRootNativeIpcMock(
+	page: Page,
+	mode: NativeIpcMockMode = "readonly",
+): Promise<void> {
 	await page.addInitScript(
-		({ workspaceId, primaryRootId, secondaryRootId }) => {
-			type MockFile = Readonly<{
+		({ mode, workspaceId, primaryRootId, secondaryRootId }) => {
+			type MockFile = {
 				kind: "file";
 				bytes: Uint8Array;
-			}>;
+				version: string;
+			};
 			type MockDirectory = Readonly<{
 				kind: "directory";
 				entries: Map<string, MockNode>;
@@ -769,6 +783,7 @@ async function installMultiRootNativeIpcMock(page: Page): Promise<void> {
 				request: { roots: WatchRootRequest[] };
 				result: { workspaceId: string; roots: WatchPendingRoot[] };
 			}> = [];
+			const versionTransitions: TestWorkspaceVersionTransition[] = [];
 			const primaryRoot = Object.freeze({
 				rootId: primaryRootId,
 				displayName: "plain-workspace",
@@ -780,23 +795,45 @@ async function installMultiRootNativeIpcMock(page: Page): Promise<void> {
 				uri: `plain-workspace://${secondaryRootId}/`,
 			});
 			const encoder = new TextEncoder();
-			const file = (content: string): MockFile =>
-				Object.freeze({ kind: "file", bytes: encoder.encode(content) });
+			const decoder = new TextDecoder();
+			let versionSerial = 101;
+			const nextVersion = (): string =>
+				`wv1:${(versionSerial++).toString(16).padStart(64, "0")}`;
+			const file = (content: string): MockFile => ({
+				kind: "file",
+				bytes: encoder.encode(content),
+				version: nextVersion(),
+			});
 			const directory = (
 				entries: readonly (readonly [string, MockNode])[],
 			): MockDirectory =>
 				Object.freeze({ kind: "directory", entries: new Map(entries) });
+			const rebindNodeVersions = (node: MockNode): MockNode =>
+				node.kind === "file"
+					? {
+							kind: "file",
+							bytes: node.bytes,
+							version: nextVersion(),
+						}
+					: directory(
+							[...node.entries].map(([name, child]) => [
+								name,
+								rebindNodeVersions(child),
+							]),
+						);
 			const trees = new Map<string, MockDirectory>([
 				[
 					primaryRootId,
 					directory([
 						["README.md", file("# Primary workspace\n")],
+						["copy-source.txt", file("Copy across roots.\n")],
 						["src", directory([])],
 					]),
 				],
 				[
 					secondaryRootId,
 					directory([
+						["move-source.txt", file("Move across roots.\n")],
 						["notes.txt", file("Secondary workspace\n")],
 						["packages", directory([])],
 					]),
@@ -814,10 +851,25 @@ async function installMultiRootNativeIpcMock(page: Page): Promise<void> {
 				code: "ENTRY_NOT_FOUND",
 				message: "The workspace entry does not exist.",
 			});
+			const entryAlreadyExists = () => ({
+				code: "ENTRY_ALREADY_EXISTS",
+				message: "The workspace entry already exists.",
+			});
 			const entryTypeMismatch = () => ({
 				code: "ENTRY_TYPE_MISMATCH",
 				message: "The workspace entry has an incompatible type.",
 			});
+			const invalidDeletePlan = () => ({
+				code: "WORKSPACE_DELETE_PLAN_INVALID",
+				message: "The workspace delete plan is invalid.",
+			});
+			const assertSupportedMutation = (): void => {
+				if (mode !== "supported") {
+					throw new Error("Unexpected readonly multi-root mutation.");
+				}
+			};
+			const pathSegments = (relativePath: string): readonly string[] =>
+				relativePath === "" ? [] : relativePath.split("/");
 			const snapshot = () => ({
 				workspaceId,
 				revision,
@@ -831,9 +883,7 @@ async function installMultiRootNativeIpcMock(page: Page): Promise<void> {
 				if (node === undefined) {
 					throw rootNotAuthorized();
 				}
-				for (const segment of relativePath === ""
-					? []
-					: relativePath.split("/")) {
+				for (const segment of pathSegments(relativePath)) {
 					if (node.kind !== "directory") {
 						throw entryTypeMismatch();
 					}
@@ -844,20 +894,111 @@ async function installMultiRootNativeIpcMock(page: Page): Promise<void> {
 				}
 				return node;
 			};
-			const plr1Frame = (content: Uint8Array): Uint8Array => {
-				const frame = new Uint8Array(36 + content.byteLength);
+			const resolveParent = (
+				rootId: string,
+				relativePath: string,
+			): { parent: MockDirectory; name: string } => {
+				const segments = pathSegments(relativePath);
+				if (segments.length === 0) {
+					throw entryTypeMismatch();
+				}
+				const name = segments.at(-1)!;
+				const parent = resolveNode(rootId, segments.slice(0, -1).join("/"));
+				if (parent.kind !== "directory") {
+					throw entryTypeMismatch();
+				}
+				return { parent, name };
+			};
+			const descendantEntries = (node: MockNode): number => {
+				if (node.kind === "file") {
+					return 0;
+				}
+				let descendants = node.entries.size;
+				for (const child of node.entries.values()) {
+					descendants += descendantEntries(child);
+				}
+				return descendants;
+			};
+			const hexFromBytes = (bytes: Uint8Array): string =>
+				[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+			const plw1Frame = (value: Uint8Array) => {
+				if (
+					value.byteLength < 14 ||
+					value[0] !== 0x50 ||
+					value[1] !== 0x4c ||
+					value[2] !== 0x57 ||
+					value[3] !== 0x31
+				) {
+					throw new Error("Malformed PLW1 multi-root browser test frame.");
+				}
+				const view = new DataView(
+					value.buffer,
+					value.byteOffset,
+					value.byteLength,
+				);
+				const rootLength = view.getUint16(4, false);
+				const pathLength = view.getUint16(6, false);
+				const versionLength = view.getUint16(8, false);
+				const contentLength = view.getUint32(10, false);
+				if (
+					14 + rootLength + pathLength + versionLength + contentLength !==
+					value.byteLength
+				) {
+					throw new Error(
+						"Malformed PLW1 multi-root browser test frame length.",
+					);
+				}
+				let offset = 14;
+				const rootId = decoder.decode(value.slice(offset, offset + rootLength));
+				offset += rootLength;
+				const relativePath = decoder.decode(
+					value.slice(offset, offset + pathLength),
+				);
+				offset += pathLength;
+				const expectedVersion = decoder.decode(
+					value.slice(offset, offset + versionLength),
+				);
+				offset += versionLength;
+				return {
+					rootId,
+					relativePath,
+					expectedVersion,
+					content: value.slice(offset, offset + contentLength),
+				};
+			};
+			const plr1Frame = (content: Uint8Array, version: string): Uint8Array => {
+				const versionBytes = encoder.encode(version);
+				const frame = new Uint8Array(
+					36 + versionBytes.byteLength + content.byteLength,
+				);
 				const view = new DataView(frame.buffer);
 				frame.set([0x50, 0x4c, 0x52, 0x31], 0);
 				frame[4] = 1;
-				frame[5] = 0;
+				frame[5] = versionBytes.byteLength;
 				view.setUint16(6, 0, false);
 				view.setUint32(8, content.byteLength, false);
 				view.setBigUint64(12, BigInt(content.byteLength), false);
 				view.setBigUint64(20, 1_700_000_000_000n, false);
 				view.setBigUint64(28, 1_699_999_000_000n, false);
-				frame.set(content, 36);
+				frame.set(versionBytes, 36);
+				frame.set(content, 36 + versionBytes.byteLength);
 				return frame;
 			};
+			let deleteSerial = 401;
+			const nextDeleteId = (): string =>
+				`00000000-0000-4000-8000-${(deleteSerial++)
+					.toString()
+					.padStart(12, "0")}`;
+			let activeDelete:
+				| {
+						confirmationId: string;
+						entryId: string;
+						rootId: string;
+						relativePath: string;
+						recursive: boolean;
+						phase: "prepared" | "executing";
+				  }
+				| undefined;
 
 			const callbacks = new Map<
 				number,
@@ -916,6 +1057,7 @@ async function installMultiRootNativeIpcMock(page: Page): Promise<void> {
 
 			const testWindow = window as unknown as Window & {
 				__PLAIN_TEST_TAURI_CALLS__: typeof calls;
+				__PLAIN_TEST_MULTI_ROOT_VERSION_TRANSITIONS__: typeof versionTransitions;
 				__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__: typeof watchExchanges;
 				__PLAIN_TEST_MULTI_ROOT_EMIT_WAKE__(): number;
 				__PLAIN_TEST_MULTI_ROOT_WATCH_LISTENER_COUNT__(): number;
@@ -929,7 +1071,7 @@ async function installMultiRootNativeIpcMock(page: Page): Promise<void> {
 				__TAURI_INTERNALS__: {
 					invoke(
 						command: string,
-						args?: Record<string, unknown>,
+						args?: Record<string, unknown> | Uint8Array,
 					): Promise<unknown>;
 					transformCallback(
 						callback?: (payload: unknown) => void,
@@ -939,6 +1081,8 @@ async function installMultiRootNativeIpcMock(page: Page): Promise<void> {
 				};
 			};
 			testWindow.__PLAIN_TEST_TAURI_CALLS__ = calls;
+			testWindow.__PLAIN_TEST_MULTI_ROOT_VERSION_TRANSITIONS__ =
+				versionTransitions;
 			testWindow.__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__ = watchExchanges;
 			testWindow.__PLAIN_TEST_MULTI_ROOT_EMIT_WAKE__ = emitWorkspaceWatchWake;
 			testWindow.__PLAIN_TEST_MULTI_ROOT_WATCH_LISTENER_COUNT__ = () =>
@@ -971,7 +1115,51 @@ async function installMultiRootNativeIpcMock(page: Page): Promise<void> {
 				unregisterCallback(callbackId) {
 					callbacks.delete(callbackId);
 				},
-				async invoke(command, args = {}) {
+				async invoke(command, args: Record<string, unknown> | Uint8Array = {}) {
+					if (command === "workspace_write_file") {
+						if (!(args instanceof Uint8Array)) {
+							throw new Error("Expected one raw PLW1 multi-root frame.");
+						}
+						assertSupportedMutation();
+						const frame = plw1Frame(args);
+						calls.push({
+							command,
+							args: {
+								rawHex: hexFromBytes(args),
+								request: {
+									rootId: frame.rootId,
+									relativePath: frame.relativePath,
+									expectedVersion: frame.expectedVersion,
+								},
+								contentHex: hexFromBytes(frame.content),
+							},
+						});
+						const node = resolveNode(frame.rootId, frame.relativePath);
+						if (node.kind !== "file") {
+							throw entryTypeMismatch();
+						}
+						if (node.version !== frame.expectedVersion) {
+							throw {
+								code: "WORKSPACE_FILE_MODIFIED",
+								message: "The workspace file changed since it was read.",
+							};
+						}
+						node.bytes = frame.content.slice();
+						node.version = nextVersion();
+						return {
+							status: "written",
+							stat: {
+								kind: "file",
+								size: node.bytes.byteLength,
+								mtime: 1_700_000_000_001,
+								ctime: 1_699_999_000_000,
+								version: node.version,
+							},
+						};
+					}
+					if (args instanceof Uint8Array) {
+						throw new Error(`Unexpected raw Tauri test command: ${command}`);
+					}
 					calls.push({ command, args: structuredClone(args) });
 					switch (command) {
 						case "plugin:event|listen": {
@@ -999,11 +1187,11 @@ async function installMultiRootNativeIpcMock(page: Page): Promise<void> {
 							};
 						case "workspace_capabilities":
 							return {
-								create: false,
-								renameNoReplace: false,
-								copyMove: false,
-								delete: false,
-								versionedWrite: false,
+								create: mode === "supported",
+								renameNoReplace: mode === "supported",
+								copyMove: mode === "supported",
+								delete: mode === "supported",
+								versionedWrite: mode === "supported",
 							};
 						case "workspace_snapshot":
 							return snapshot();
@@ -1040,6 +1228,9 @@ async function installMultiRootNativeIpcMock(page: Page): Promise<void> {
 								throw rootNotAuthorized();
 							}
 							watchStates.delete(request.rootId);
+							if (activeDelete?.rootId === request.rootId) {
+								activeDelete = undefined;
+							}
 							revision += 1;
 							return snapshot();
 						}
@@ -1080,6 +1271,279 @@ async function installMultiRootNativeIpcMock(page: Page): Promise<void> {
 							});
 							return result;
 						}
+						case "workspace_create_file":
+						case "workspace_create_directory": {
+							assertSupportedMutation();
+							const request = args.request as
+								{ rootId?: unknown; relativePath?: unknown } | undefined;
+							if (
+								request === undefined ||
+								Object.keys(request).length !== 2 ||
+								typeof request.rootId !== "string" ||
+								typeof request.relativePath !== "string"
+							) {
+								throw entryTypeMismatch();
+							}
+							const target = resolveParent(
+								request.rootId,
+								request.relativePath,
+							);
+							if (target.parent.entries.has(target.name)) {
+								throw entryAlreadyExists();
+							}
+							const kind =
+								command === "workspace_create_file" ? "file" : "directory";
+							target.parent.entries.set(
+								target.name,
+								kind === "file" ? file("") : directory([]),
+							);
+							return {
+								kind,
+								size: 0,
+								mtime: 0,
+								ctime: 0,
+								version: null,
+							};
+						}
+						case "workspace_copy": {
+							assertSupportedMutation();
+							const request = args.request as
+								| {
+										sourceRootId?: unknown;
+										sourcePath?: unknown;
+										targetRootId?: unknown;
+										targetPath?: unknown;
+								  }
+								| undefined;
+							if (
+								request === undefined ||
+								Object.keys(request).length !== 4 ||
+								typeof request.sourceRootId !== "string" ||
+								typeof request.sourcePath !== "string" ||
+								typeof request.targetRootId !== "string" ||
+								typeof request.targetPath !== "string"
+							) {
+								throw entryTypeMismatch();
+							}
+							const source = resolveNode(
+								request.sourceRootId,
+								request.sourcePath,
+							);
+							if (source.kind !== "file") {
+								throw entryTypeMismatch();
+							}
+							const target = resolveParent(
+								request.targetRootId,
+								request.targetPath,
+							);
+							if (target.parent.entries.has(target.name)) {
+								throw entryAlreadyExists();
+							}
+							const copiedNode: MockFile = {
+								kind: "file",
+								bytes: source.bytes.slice(),
+								version: nextVersion(),
+							};
+							target.parent.entries.set(target.name, copiedNode);
+							versionTransitions.push({
+								command: "workspace_copy",
+								sourceRootId: request.sourceRootId,
+								sourcePath: request.sourcePath,
+								sourceVersion: source.version,
+								targetRootId: request.targetRootId,
+								targetPath: request.targetPath,
+								targetVersion: copiedNode.version,
+							});
+							return null;
+						}
+						case "workspace_rename": {
+							assertSupportedMutation();
+							const request = args.request as
+								| {
+										rootId?: unknown;
+										sourcePath?: unknown;
+										targetPath?: unknown;
+								  }
+								| undefined;
+							if (
+								request === undefined ||
+								Object.keys(request).length !== 3 ||
+								typeof request.rootId !== "string" ||
+								typeof request.sourcePath !== "string" ||
+								typeof request.targetPath !== "string"
+							) {
+								throw entryTypeMismatch();
+							}
+							const source = resolveParent(request.rootId, request.sourcePath);
+							const target = resolveParent(request.rootId, request.targetPath);
+							const node = source.parent.entries.get(source.name);
+							if (node === undefined) {
+								throw entryNotFound();
+							}
+							if (target.parent.entries.has(target.name)) {
+								throw entryAlreadyExists();
+							}
+							target.parent.entries.set(target.name, rebindNodeVersions(node));
+							source.parent.entries.delete(source.name);
+							return null;
+						}
+						case "workspace_move": {
+							assertSupportedMutation();
+							const request = args.request as
+								| {
+										sourceRootId?: unknown;
+										sourcePath?: unknown;
+										targetRootId?: unknown;
+										targetPath?: unknown;
+								  }
+								| undefined;
+							if (
+								request === undefined ||
+								Object.keys(request).length !== 4 ||
+								typeof request.sourceRootId !== "string" ||
+								typeof request.sourcePath !== "string" ||
+								typeof request.targetRootId !== "string" ||
+								typeof request.targetPath !== "string" ||
+								request.sourceRootId === request.targetRootId
+							) {
+								throw entryTypeMismatch();
+							}
+							const source = resolveParent(
+								request.sourceRootId,
+								request.sourcePath,
+							);
+							const target = resolveParent(
+								request.targetRootId,
+								request.targetPath,
+							);
+							const node = source.parent.entries.get(source.name);
+							if (node === undefined) {
+								throw entryNotFound();
+							}
+							if (target.parent.entries.has(target.name)) {
+								throw entryAlreadyExists();
+							}
+							const reboundNode = rebindNodeVersions(node);
+							target.parent.entries.set(target.name, reboundNode);
+							source.parent.entries.delete(source.name);
+							if (node.kind === "file" && reboundNode.kind === "file") {
+								versionTransitions.push({
+									command: "workspace_move",
+									sourceRootId: request.sourceRootId,
+									sourcePath: request.sourcePath,
+									sourceVersion: node.version,
+									targetRootId: request.targetRootId,
+									targetPath: request.targetPath,
+									targetVersion: reboundNode.version,
+								});
+							}
+							return { status: "moved" };
+						}
+						case "workspace_prepare_delete": {
+							assertSupportedMutation();
+							const request = args.request as
+								| {
+										entries?: readonly {
+											rootId?: unknown;
+											relativePath?: unknown;
+											recursive?: unknown;
+										}[];
+								  }
+								| undefined;
+							const entry = request?.entries?.[0];
+							if (
+								request === undefined ||
+								Object.keys(request).length !== 1 ||
+								request.entries?.length !== 1 ||
+								entry === undefined ||
+								Object.keys(entry).length !== 3 ||
+								typeof entry.rootId !== "string" ||
+								typeof entry.relativePath !== "string" ||
+								typeof entry.recursive !== "boolean"
+							) {
+								throw invalidDeletePlan();
+							}
+							const node = resolveNode(entry.rootId, entry.relativePath);
+							const confirmationId = nextDeleteId();
+							const entryId = nextDeleteId();
+							activeDelete = {
+								confirmationId,
+								entryId,
+								rootId: entry.rootId,
+								relativePath: entry.relativePath,
+								recursive: entry.recursive,
+								phase: "prepared",
+							};
+							return {
+								confirmationId,
+								entries: [
+									{
+										entryId,
+										kind: node.kind,
+										descendantEntries: descendantEntries(node),
+									},
+								],
+							};
+						}
+						case "workspace_cancel_delete": {
+							assertSupportedMutation();
+							const request = args.request as
+								{ confirmationId?: unknown } | undefined;
+							if (
+								typeof request?.confirmationId !== "string" ||
+								request.confirmationId !== activeDelete?.confirmationId
+							) {
+								throw invalidDeletePlan();
+							}
+							activeDelete = undefined;
+							return null;
+						}
+						case "workspace_begin_delete": {
+							assertSupportedMutation();
+							const request = args.request as
+								{ confirmationId?: unknown } | undefined;
+							if (
+								activeDelete === undefined ||
+								activeDelete.phase !== "prepared" ||
+								request?.confirmationId !== activeDelete.confirmationId
+							) {
+								throw invalidDeletePlan();
+							}
+							activeDelete.phase = "executing";
+							return null;
+						}
+						case "workspace_commit_delete_entry": {
+							assertSupportedMutation();
+							const request = args.request as
+								| {
+										confirmationId?: unknown;
+										entryId?: unknown;
+										rootId?: unknown;
+										relativePath?: unknown;
+										recursive?: unknown;
+								  }
+								| undefined;
+							if (
+								activeDelete === undefined ||
+								activeDelete.phase !== "executing" ||
+								request?.confirmationId !== activeDelete.confirmationId ||
+								request.entryId !== activeDelete.entryId ||
+								request.rootId !== activeDelete.rootId ||
+								request.relativePath !== activeDelete.relativePath ||
+								request.recursive !== activeDelete.recursive
+							) {
+								throw invalidDeletePlan();
+							}
+							const target = resolveParent(
+								activeDelete.rootId,
+								activeDelete.relativePath,
+							);
+							if (!target.parent.entries.delete(target.name)) {
+								throw entryNotFound();
+							}
+							activeDelete = undefined;
+							return { status: "deleted" };
+						}
 						case "workspace_stat":
 						case "workspace_read_dir":
 						case "workspace_read_file": {
@@ -1098,7 +1562,7 @@ async function installMultiRootNativeIpcMock(page: Page): Promise<void> {
 									size: node.kind === "file" ? node.bytes.byteLength : 0,
 									mtime: 1_700_000_000_000,
 									ctime: 1_699_999_000_000,
-									version: null,
+									version: node.kind === "file" ? node.version : null,
 								};
 							}
 							if (command === "workspace_read_dir") {
@@ -1120,7 +1584,7 @@ async function installMultiRootNativeIpcMock(page: Page): Promise<void> {
 							if (node.kind !== "file") {
 								throw entryTypeMismatch();
 							}
-							return plr1Frame(node.bytes).buffer;
+							return plr1Frame(node.bytes, node.version).buffer;
 						}
 						default:
 							throw new Error(
@@ -1131,6 +1595,7 @@ async function installMultiRootNativeIpcMock(page: Page): Promise<void> {
 			};
 		},
 		{
+			mode,
 			workspaceId: nativeWorkspaceId,
 			primaryRootId: nativeRootId,
 			secondaryRootId: nativeSecondaryRootId,
@@ -1277,7 +1742,10 @@ async function explorerContextAction(
 	label: string,
 ): Promise<Locator> {
 	await item.click({ button: "right" });
-	const action = page.getByRole("menuitem", { name: label }).last();
+	const action = page
+		.getByRole("menuitem")
+		.filter({ has: page.getByText(label, { exact: true }) })
+		.last();
 	await expect(action).toBeVisible();
 	return action;
 }
@@ -1832,6 +2300,311 @@ test("covers the browser multi-root remove lifecycle through Explorer and palett
 			expect(root.generation).toBeLessThanOrEqual(0xffff_ffff);
 			expect(typeof root.rescanRequired).toBe("boolean");
 		}
+	}
+	await expect(
+		page.locator(".notifications-toasts .notification-toast"),
+	).toHaveCount(0);
+	expect(nativeDialogs).toEqual([]);
+	expect(errors).toEqual([]);
+});
+
+test("edits both roots and routes cross-root copy and move through all-true IPC", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	const nativeDialogs: string[] = [];
+	await installMultiRootNativeIpcMock(page, "supported");
+	await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {
+		origin: "http://127.0.0.1:1420",
+	});
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			errors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+
+	const explorer = await openNativeWorkspaceExplorer(page);
+	await executePaletteCommand(
+		page,
+		"Add Folder to Workspace",
+		"Workspaces: Add Folder to Workspace...",
+	);
+	const primaryRoot = explorer.getByRole("treeitem", {
+		name: "plain-workspace",
+		exact: true,
+	});
+	const secondaryRoot = explorer.getByRole("treeitem", {
+		name: "plain-library",
+		exact: true,
+	});
+	await expect(primaryRoot).toHaveCount(1);
+	await expect(secondaryRoot).toHaveCount(1);
+	const expandDirectory = async (directory: Locator): Promise<void> => {
+		if ((await directory.getAttribute("aria-expanded")) !== "true") {
+			await directory.click();
+			await page.keyboard.press("ArrowRight");
+		}
+		await expect(directory).toHaveAttribute("aria-expanded", "true");
+	};
+	await expandDirectory(primaryRoot);
+	await expandDirectory(secondaryRoot);
+
+	const readme = explorer.getByRole("treeitem", {
+		name: "README.md",
+		exact: true,
+	});
+	const notes = explorer.getByRole("treeitem", {
+		name: "notes.txt",
+		exact: true,
+	});
+	const saveExplorerFile = async (
+		entry: Locator,
+		initialText: string,
+		savedContent: string,
+		savedMarker: string,
+		expectedWriteCount: number,
+	): Promise<void> => {
+		await entry.dblclick();
+		const editor = page.getByRole("code").filter({ hasText: initialText });
+		await expect(editor).toBeVisible();
+		await page
+			.locator(".monaco-editor .view-line")
+			.filter({ hasText: initialText })
+			.click();
+		await page.keyboard.press("ControlOrMeta+A");
+		await page.keyboard.type(savedContent);
+		const activeTab = page.locator(".tabs-container .tab.active");
+		await page.keyboard.press("ControlOrMeta+S");
+		await expect
+			.poll(() =>
+				page.evaluate(() => {
+					const testWindow = window as unknown as Window & {
+						__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+					};
+					return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+						({ command }) => command === "workspace_write_file",
+					).length;
+				}),
+			)
+			.toBe(expectedWriteCount);
+		await expect(activeTab).not.toHaveClass(/dirty/);
+		await expect(
+			page.getByRole("code").filter({ hasText: savedMarker }),
+		).toBeVisible();
+	};
+	const primarySavedContent =
+		"# Primary workspace\n\nEdited in the primary root.\n";
+	await saveExplorerFile(
+		readme,
+		"# Primary workspace",
+		primarySavedContent,
+		"Edited in the primary root.",
+		1,
+	);
+	const secondarySavedContent =
+		"Secondary workspace\nEdited in the secondary root.\n";
+	await saveExplorerFile(
+		notes,
+		"Secondary workspace",
+		secondarySavedContent,
+		"Edited in the secondary root.",
+		2,
+	);
+
+	const copySource = explorer.getByRole("treeitem", {
+		name: "copy-source.txt",
+		exact: true,
+	});
+	const packages = explorer.getByRole("treeitem", {
+		name: "packages",
+		exact: true,
+	});
+	await activateExplorerContextAction(page, copySource, "Copy");
+	await activateExplorerContextAction(page, packages, "Paste");
+	await expect
+		.poll(() =>
+			page.evaluate(() => {
+				const testWindow = window as unknown as Window & {
+					__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+				};
+				return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+					({ command }) => command === "workspace_copy",
+				).length;
+			}),
+		)
+		.toBe(1);
+	await expandDirectory(packages);
+	const copiedTarget = explorer
+		.locator('[role="treeitem"][aria-level="3"]')
+		.filter({ hasText: "copy-source.txt" });
+	await expect(copiedTarget).toHaveCount(1);
+	await expect(
+		explorer
+			.locator('[role="treeitem"][aria-level="2"]')
+			.filter({ hasText: "copy-source.txt" }),
+	).toHaveCount(1);
+	await copiedTarget.dblclick();
+	await expect(
+		page.getByRole("code").filter({ hasText: "Copy across roots." }),
+	).toBeVisible();
+
+	const moveSource = explorer.getByRole("treeitem", {
+		name: "move-source.txt",
+		exact: true,
+	});
+	const src = explorer.getByRole("treeitem", { name: "src", exact: true });
+	const renameAction = await explorerContextAction(
+		page,
+		moveSource,
+		"Rename...",
+	);
+	await expect(renameAction).not.toHaveAttribute("aria-disabled", "true");
+	await page.keyboard.press("Escape");
+	await expect(page.locator(".context-view")).toBeHidden();
+	await moveSource.click();
+	await expect(moveSource).toHaveAttribute("aria-selected", "true");
+	await page.keyboard.press("ControlOrMeta+X");
+	await expect(moveSource.locator(".explorer-item.cut")).toHaveCount(1);
+	await activateExplorerContextAction(page, src, "Paste");
+	await expect
+		.poll(() =>
+			page.evaluate(() => {
+				const testWindow = window as unknown as Window & {
+					__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+				};
+				return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+					({ command }) => command === "workspace_move",
+				).length;
+			}),
+		)
+		.toBe(1);
+	await expandDirectory(src);
+	const movedTarget = explorer
+		.locator('[role="treeitem"][aria-level="3"]')
+		.filter({ hasText: "move-source.txt" });
+	await expect(movedTarget).toHaveCount(1);
+	await expect(
+		explorer
+			.locator('[role="treeitem"][aria-level="2"]')
+			.filter({ hasText: "move-source.txt" }),
+	).toHaveCount(0);
+	await movedTarget.dblclick();
+	await expect(
+		page.getByRole("code").filter({ hasText: "Move across roots." }),
+	).toBeVisible();
+
+	const evidence = await page.evaluate(
+		(mutationCommands) => {
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_MULTI_ROOT_VERSION_TRANSITIONS__: TestWorkspaceVersionTransition[];
+				__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+			};
+			return {
+				capabilities: testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+					({ command }) => command === "workspace_capabilities",
+				),
+				mutations: testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(({ command }) =>
+					mutationCommands.includes(command),
+				),
+				versionTransitions: structuredClone(
+					testWindow.__PLAIN_TEST_MULTI_ROOT_VERSION_TRANSITIONS__,
+				),
+			};
+		},
+		nativeMutationCommands as readonly string[],
+	);
+	expect(evidence.capabilities).toEqual([
+		{ command: "workspace_capabilities", args: { request: {} } },
+	]);
+	expect(evidence.mutations.map(({ command }) => command)).toEqual([
+		"workspace_write_file",
+		"workspace_write_file",
+		"workspace_copy",
+		"workspace_move",
+	]);
+	const [primaryWrite, secondaryWrite, copy, move] = evidence.mutations;
+	for (const write of [primaryWrite, secondaryWrite]) {
+		expect(Reflect.ownKeys(write!.args)).toEqual([
+			"rawHex",
+			"request",
+			"contentHex",
+		]);
+		expect(write!.args.rawHex).toEqual(expect.stringMatching(/^504c5731/u));
+		expect(Reflect.ownKeys(write!.args.request as object)).toEqual([
+			"rootId",
+			"relativePath",
+			"expectedVersion",
+		]);
+	}
+	expect(primaryWrite!.args.request).toEqual({
+		rootId: nativeRootId,
+		relativePath: "README.md",
+		expectedVersion: expect.stringMatching(/^wv1:[0-9a-f]{64}$/u),
+	});
+	expect(primaryWrite!.args.contentHex).toBe(
+		[...new TextEncoder().encode(primarySavedContent)]
+			.map((byte) => byte.toString(16).padStart(2, "0"))
+			.join(""),
+	);
+	expect(secondaryWrite!.args.request).toEqual({
+		rootId: nativeSecondaryRootId,
+		relativePath: "notes.txt",
+		expectedVersion: expect.stringMatching(/^wv1:[0-9a-f]{64}$/u),
+	});
+	expect(secondaryWrite!.args.contentHex).toBe(
+		[...new TextEncoder().encode(secondarySavedContent)]
+			.map((byte) => byte.toString(16).padStart(2, "0"))
+			.join(""),
+	);
+	expect(
+		(primaryWrite!.args.request as { expectedVersion: string }).expectedVersion,
+	).not.toBe(
+		(secondaryWrite!.args.request as { expectedVersion: string })
+			.expectedVersion,
+	);
+	expect(copy!.args).toEqual({
+		request: {
+			sourceRootId: nativeRootId,
+			sourcePath: "copy-source.txt",
+			targetRootId: nativeSecondaryRootId,
+			targetPath: "packages/copy-source.txt",
+		},
+	});
+	expect(move!.args).toEqual({
+		request: {
+			sourceRootId: nativeSecondaryRootId,
+			sourcePath: "move-source.txt",
+			targetRootId: nativeRootId,
+			targetPath: "src/move-source.txt",
+		},
+	});
+	expect(evidence.versionTransitions).toEqual([
+		{
+			command: "workspace_copy",
+			sourceRootId: nativeRootId,
+			sourcePath: "copy-source.txt",
+			sourceVersion: expect.stringMatching(/^wv1:[0-9a-f]{64}$/u),
+			targetRootId: nativeSecondaryRootId,
+			targetPath: "packages/copy-source.txt",
+			targetVersion: expect.stringMatching(/^wv1:[0-9a-f]{64}$/u),
+		},
+		{
+			command: "workspace_move",
+			sourceRootId: nativeSecondaryRootId,
+			sourcePath: "move-source.txt",
+			sourceVersion: expect.stringMatching(/^wv1:[0-9a-f]{64}$/u),
+			targetRootId: nativeRootId,
+			targetPath: "src/move-source.txt",
+			targetVersion: expect.stringMatching(/^wv1:[0-9a-f]{64}$/u),
+		},
+	]);
+	for (const transition of evidence.versionTransitions) {
+		expect(transition.targetVersion).not.toBe(transition.sourceVersion);
 	}
 	await expect(
 		page.locator(".notifications-toasts .notification-toast"),
