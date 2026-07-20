@@ -14,9 +14,29 @@ interface TestTauriInvocation {
 	readonly args: Record<string, unknown>;
 }
 
+const nativeWorkspaceId = "00000000-0000-4000-8000-000000000001";
 const nativeRootId = "00000000-0000-4000-8000-000000000101";
+const nativeSecondaryRootId = "00000000-0000-4000-8000-000000000102";
 type RawReadTransport = "arrayBuffer" | "numberArray";
 type NativeIpcMockMode = "readonly" | "supported";
+
+interface TestWorkspaceWatchExchange {
+	readonly callIndex: number;
+	readonly request: Readonly<{
+		roots: readonly Readonly<{
+			rootId: string;
+			acknowledgedGeneration: number | null;
+		}>[];
+	}>;
+	readonly result: Readonly<{
+		workspaceId: string;
+		roots: readonly Readonly<{
+			rootId: string;
+			generation: number;
+			rescanRequired: boolean;
+		}>[];
+	}>;
+}
 
 async function installNativeIpcMock(
 	page: Page,
@@ -709,6 +729,415 @@ async function installNativeIpcMock(
 	);
 }
 
+async function installMultiRootNativeIpcMock(page: Page): Promise<void> {
+	await page.addInitScript(
+		({ workspaceId, primaryRootId, secondaryRootId }) => {
+			type MockFile = Readonly<{
+				kind: "file";
+				bytes: Uint8Array;
+			}>;
+			type MockDirectory = Readonly<{
+				kind: "directory";
+				entries: Map<string, MockNode>;
+			}>;
+			type MockNode = MockFile | MockDirectory;
+			type MockWorkspaceRoot = Readonly<{
+				rootId: string;
+				displayName: string;
+				uri: string;
+			}>;
+			type WatchRootRequest = Readonly<{
+				rootId: string;
+				acknowledgedGeneration: number | null;
+			}>;
+			type WatchPendingRoot = Readonly<{
+				rootId: string;
+				generation: number;
+				rescanRequired: boolean;
+			}>;
+			type WatchState = {
+				nextGeneration: number;
+				pending: WatchPendingRoot | undefined;
+			};
+
+			const calls: Array<{
+				command: string;
+				args: Record<string, unknown>;
+			}> = [];
+			const watchExchanges: Array<{
+				callIndex: number;
+				request: { roots: WatchRootRequest[] };
+				result: { workspaceId: string; roots: WatchPendingRoot[] };
+			}> = [];
+			const primaryRoot = Object.freeze({
+				rootId: primaryRootId,
+				displayName: "plain-workspace",
+				uri: `plain-workspace://${primaryRootId}/`,
+			});
+			const secondaryRoot = Object.freeze({
+				rootId: secondaryRootId,
+				displayName: "plain-library",
+				uri: `plain-workspace://${secondaryRootId}/`,
+			});
+			const encoder = new TextEncoder();
+			const file = (content: string): MockFile =>
+				Object.freeze({ kind: "file", bytes: encoder.encode(content) });
+			const directory = (
+				entries: readonly (readonly [string, MockNode])[],
+			): MockDirectory =>
+				Object.freeze({ kind: "directory", entries: new Map(entries) });
+			const trees = new Map<string, MockDirectory>([
+				[
+					primaryRootId,
+					directory([
+						["README.md", file("# Primary workspace\n")],
+						["src", directory([])],
+					]),
+				],
+				[
+					secondaryRootId,
+					directory([
+						["notes.txt", file("Secondary workspace\n")],
+						["packages", directory([])],
+					]),
+				],
+			]);
+			const activeRoots = new Map<string, MockWorkspaceRoot>();
+			const watchStates = new Map<string, WatchState>();
+			let revision = 0;
+
+			const rootNotAuthorized = () => ({
+				code: "ROOT_NOT_AUTHORIZED",
+				message: "The workspace root is not authorized.",
+			});
+			const entryNotFound = () => ({
+				code: "ENTRY_NOT_FOUND",
+				message: "The workspace entry does not exist.",
+			});
+			const entryTypeMismatch = () => ({
+				code: "ENTRY_TYPE_MISMATCH",
+				message: "The workspace entry has an incompatible type.",
+			});
+			const snapshot = () => ({
+				workspaceId,
+				revision,
+				roots: [...activeRoots.values()],
+			});
+			const resolveNode = (rootId: string, relativePath: string): MockNode => {
+				if (!activeRoots.has(rootId)) {
+					throw rootNotAuthorized();
+				}
+				let node: MockNode | undefined = trees.get(rootId);
+				if (node === undefined) {
+					throw rootNotAuthorized();
+				}
+				for (const segment of relativePath === ""
+					? []
+					: relativePath.split("/")) {
+					if (node.kind !== "directory") {
+						throw entryTypeMismatch();
+					}
+					node = node.entries.get(segment);
+					if (node === undefined) {
+						throw entryNotFound();
+					}
+				}
+				return node;
+			};
+			const plr1Frame = (content: Uint8Array): Uint8Array => {
+				const frame = new Uint8Array(36 + content.byteLength);
+				const view = new DataView(frame.buffer);
+				frame.set([0x50, 0x4c, 0x52, 0x31], 0);
+				frame[4] = 1;
+				frame[5] = 0;
+				view.setUint16(6, 0, false);
+				view.setUint32(8, content.byteLength, false);
+				view.setBigUint64(12, BigInt(content.byteLength), false);
+				view.setBigUint64(20, 1_700_000_000_000n, false);
+				view.setBigUint64(28, 1_699_999_000_000n, false);
+				frame.set(content, 36);
+				return frame;
+			};
+
+			const callbacks = new Map<
+				number,
+				{ callback: (payload: unknown) => void; once: boolean }
+			>();
+			const eventHandlers = new Map<
+				number,
+				{ event: string; handlerId: number }
+			>();
+			let nextCallbackId = 0;
+			let nextEventId = 0;
+			const emitWorkspaceWatchWake = (): number => {
+				let delivered = 0;
+				for (const [eventId, registration] of eventHandlers) {
+					if (registration.event !== "plain://workspace-watch-wake") {
+						continue;
+					}
+					const transformed = callbacks.get(registration.handlerId);
+					if (transformed === undefined) {
+						continue;
+					}
+					delivered += 1;
+					transformed.callback({
+						event: registration.event,
+						id: eventId,
+						payload: { workspaceId },
+					});
+					if (transformed.once) {
+						callbacks.delete(registration.handlerId);
+					}
+				}
+				return delivered;
+			};
+			const watchState = (rootId: string): WatchState => {
+				let state = watchStates.get(rootId);
+				if (state === undefined) {
+					state = { nextGeneration: 1, pending: undefined };
+					watchStates.set(rootId, state);
+				}
+				return state;
+			};
+			const invalidateRoot = (rootId: string): void => {
+				if (!activeRoots.has(rootId)) {
+					throw rootNotAuthorized();
+				}
+				const state = watchState(rootId);
+				if (state.pending === undefined) {
+					state.pending = Object.freeze({
+						rootId,
+						generation: state.nextGeneration,
+						rescanRequired: true,
+					});
+					state.nextGeneration += 1;
+				}
+			};
+
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_TAURI_CALLS__: typeof calls;
+				__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__: typeof watchExchanges;
+				__PLAIN_TEST_MULTI_ROOT_EMIT_WAKE__(): number;
+				__PLAIN_TEST_MULTI_ROOT_WATCH_LISTENER_COUNT__(): number;
+				__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__(
+					rootId: string,
+					name: string,
+				): void;
+				__TAURI_EVENT_PLUGIN_INTERNALS__: {
+					unregisterListener(): void;
+				};
+				__TAURI_INTERNALS__: {
+					invoke(
+						command: string,
+						args?: Record<string, unknown>,
+					): Promise<unknown>;
+					transformCallback(
+						callback?: (payload: unknown) => void,
+						once?: boolean,
+					): number;
+					unregisterCallback(callbackId: number): void;
+				};
+			};
+			testWindow.__PLAIN_TEST_TAURI_CALLS__ = calls;
+			testWindow.__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__ = watchExchanges;
+			testWindow.__PLAIN_TEST_MULTI_ROOT_EMIT_WAKE__ = emitWorkspaceWatchWake;
+			testWindow.__PLAIN_TEST_MULTI_ROOT_WATCH_LISTENER_COUNT__ = () =>
+				[...eventHandlers.values()].filter(
+					({ event }) => event === "plain://workspace-watch-wake",
+				).length;
+			testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__ = (rootId, name) => {
+				if (!/^[A-Za-z0-9._-]+$/u.test(name)) {
+					throw new TypeError("Invalid multi-root browser test entry.");
+				}
+				const root = resolveNode(rootId, "");
+				if (root.kind !== "directory" || root.entries.has(name)) {
+					throw entryTypeMismatch();
+				}
+				root.entries.set(name, file(`external:${name}\n`));
+				invalidateRoot(rootId);
+				emitWorkspaceWatchWake();
+			};
+			testWindow.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+				unregisterListener() {},
+			};
+			testWindow.__TAURI_INTERNALS__ = {
+				transformCallback(callback, once = false) {
+					nextCallbackId += 1;
+					if (callback !== undefined) {
+						callbacks.set(nextCallbackId, { callback, once });
+					}
+					return nextCallbackId;
+				},
+				unregisterCallback(callbackId) {
+					callbacks.delete(callbackId);
+				},
+				async invoke(command, args = {}) {
+					calls.push({ command, args: structuredClone(args) });
+					switch (command) {
+						case "plugin:event|listen": {
+							const event = args.event;
+							const handlerId = args.handler;
+							if (typeof event !== "string" || typeof handlerId !== "number") {
+								throw new Error("Malformed Tauri event listener request.");
+							}
+							nextEventId += 1;
+							eventHandlers.set(nextEventId, { event, handlerId });
+							return nextEventId;
+						}
+						case "plugin:event|unlisten": {
+							const eventId = args.eventId;
+							if (typeof eventId === "number") {
+								eventHandlers.delete(eventId);
+							}
+							return undefined;
+						}
+						case "runtime_info":
+							return {
+								application: "Plain",
+								ipcVersion: 1,
+								runtime: "tauri",
+							};
+						case "workspace_capabilities":
+							return {
+								create: false,
+								renameNoReplace: false,
+								copyMove: false,
+								delete: false,
+								versionedWrite: false,
+							};
+						case "workspace_snapshot":
+							return snapshot();
+						case "workspace_pick_roots": {
+							const request = args.request as { mode?: unknown } | undefined;
+							if (request?.mode === "replace") {
+								if (activeRoots.size !== 0) {
+									throw new Error(
+										"Unexpected replace-root browser test state.",
+									);
+								}
+								activeRoots.set(primaryRootId, primaryRoot);
+								invalidateRoot(primaryRootId);
+								revision += 1;
+								return { status: "selected", snapshot: snapshot() };
+							}
+							if (request?.mode === "add") {
+								if (activeRoots.size !== 1 || !activeRoots.has(primaryRootId)) {
+									throw new Error("Unexpected add-root browser test state.");
+								}
+								activeRoots.set(secondaryRootId, secondaryRoot);
+								invalidateRoot(secondaryRootId);
+								revision += 1;
+								return { status: "selected", snapshot: snapshot() };
+							}
+							throw new Error("Unexpected workspace picker mode.");
+						}
+						case "workspace_remove_root": {
+							const request = args.request as { rootId?: unknown } | undefined;
+							if (
+								typeof request?.rootId !== "string" ||
+								!activeRoots.delete(request.rootId)
+							) {
+								throw rootNotAuthorized();
+							}
+							watchStates.delete(request.rootId);
+							revision += 1;
+							return snapshot();
+						}
+						case "workspace_watch_sync": {
+							const request = args.request as
+								{ roots?: readonly WatchRootRequest[] } | undefined;
+							if (!Array.isArray(request?.roots)) {
+								throw new TypeError("Invalid workspace watch test request.");
+							}
+							const requestRoots = request.roots.map((root) => ({
+								rootId: root.rootId,
+								acknowledgedGeneration: root.acknowledgedGeneration,
+							}));
+							const pendingRoots: WatchPendingRoot[] = [];
+							for (const root of requestRoots) {
+								if (!activeRoots.has(root.rootId)) {
+									continue;
+								}
+								const state = watchState(root.rootId);
+								if (
+									typeof root.acknowledgedGeneration === "number" &&
+									state.pending?.generation === root.acknowledgedGeneration
+								) {
+									state.pending = undefined;
+								}
+								if (state.pending !== undefined) {
+									pendingRoots.push(state.pending);
+								}
+							}
+							const result = { workspaceId, roots: pendingRoots };
+							watchExchanges.push({
+								callIndex: calls.length - 1,
+								request: { roots: requestRoots },
+								result: {
+									workspaceId,
+									roots: pendingRoots.map((root) => ({ ...root })),
+								},
+							});
+							return result;
+						}
+						case "workspace_stat":
+						case "workspace_read_dir":
+						case "workspace_read_file": {
+							const request = args.request as
+								{ rootId?: unknown; relativePath?: unknown } | undefined;
+							if (
+								typeof request?.rootId !== "string" ||
+								typeof request.relativePath !== "string"
+							) {
+								throw new TypeError("Invalid workspace entry test request.");
+							}
+							const node = resolveNode(request.rootId, request.relativePath);
+							if (command === "workspace_stat") {
+								return {
+									kind: node.kind,
+									size: node.kind === "file" ? node.bytes.byteLength : 0,
+									mtime: 1_700_000_000_000,
+									ctime: 1_699_999_000_000,
+									version: null,
+								};
+							}
+							if (command === "workspace_read_dir") {
+								if (node.kind !== "directory") {
+									throw entryTypeMismatch();
+								}
+								return {
+									entries: [...node.entries]
+										.map(([name, entry]) => ({ name, kind: entry.kind }))
+										.sort((left, right) =>
+											left.name < right.name
+												? -1
+												: left.name > right.name
+													? 1
+													: 0,
+										),
+								};
+							}
+							if (node.kind !== "file") {
+								throw entryTypeMismatch();
+							}
+							return plr1Frame(node.bytes).buffer;
+						}
+						default:
+							throw new Error(
+								`Unexpected Tauri multi-root test command: ${command}`,
+							);
+					}
+				},
+			};
+		},
+		{
+			workspaceId: nativeWorkspaceId,
+			primaryRootId: nativeRootId,
+			secondaryRootId: nativeSecondaryRootId,
+		},
+	);
+}
+
 async function installCapabilityFailureIpcMock(page: Page): Promise<void> {
 	await page.addInitScript(() => {
 		const calls: Array<{
@@ -784,6 +1213,50 @@ async function expectPaletteCommandHidden(
 	await expect(palette).toBeHidden();
 }
 
+async function expectPaletteTitleHidden(
+	page: Page,
+	query: string,
+	title: string,
+): Promise<void> {
+	await page.keyboard.press("ControlOrMeta+Shift+P");
+	const palette = page.locator(".quick-input-widget");
+	await expect(palette).toBeVisible();
+	await palette.locator("input").pressSequentially(query);
+	await expect(
+		palette
+			.locator(".quick-input-list .monaco-list-row")
+			.filter({ hasText: title }),
+	).toHaveCount(0);
+	await page.keyboard.press("Escape");
+	await expect(palette).toBeHidden();
+}
+
+async function removeWorkspaceRootViaPalette(
+	page: Page,
+	rootLabel: string,
+): Promise<void> {
+	await page.keyboard.press("ControlOrMeta+Shift+P");
+	const palette = page.locator(".quick-input-widget");
+	await expect(palette).toBeVisible();
+	await palette
+		.locator("input")
+		.pressSequentially("Remove Folder from Workspace");
+	const command = palette.getByText(
+		"Workspaces: Remove Folder from Workspace...",
+		{ exact: true },
+	);
+	await expect(command).toHaveCount(1);
+	await command.click();
+	await expect(palette.locator("input")).toHaveAttribute(
+		"placeholder",
+		"Select workspace folder",
+	);
+	const root = palette.getByText(rootLabel, { exact: true });
+	await expect(root).toHaveCount(1);
+	await root.click();
+	await expect(palette).toBeHidden();
+}
+
 async function openNativeWorkspaceExplorer(page: Page): Promise<Locator> {
 	await page.goto("/");
 	await expect(page.locator("body")).toHaveAttribute(
@@ -807,6 +1280,19 @@ async function explorerContextAction(
 	const action = page.getByRole("menuitem", { name: label }).last();
 	await expect(action).toBeVisible();
 	return action;
+}
+
+async function activateExplorerContextAction(
+	page: Page,
+	item: Locator,
+	label: string,
+): Promise<void> {
+	const action = await explorerContextAction(page, item, label);
+	// The fixed Workbench menu delays its mouse-up listener. Hover selects the
+	// real menu row and Enter exercises the same action without a timed sleep.
+	await action.hover();
+	await page.keyboard.press("Enter");
+	await expect(page.locator(".context-view")).toBeHidden();
 }
 
 async function finishExplorerNameInput(
@@ -912,6 +1398,445 @@ test("adds a second workspace root and replaces it through Workbench actions", a
 	await expect(
 		page.locator(".notifications-toasts .notification-toast"),
 	).toHaveCount(0);
+	expect(errors).toEqual([]);
+});
+
+test("covers the browser multi-root remove lifecycle through Explorer and palette", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	const nativeDialogs: string[] = [];
+	await installMultiRootNativeIpcMock(page);
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			errors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	await executePaletteCommand(page, "Open Folder", "File: Open Folder...");
+	await page.getByRole("tab", { name: /^Explorer / }).click();
+	const explorer = page.getByRole("tree", { name: "Files Explorer" });
+	await expect(explorer).toBeVisible();
+	const primaryRoot = explorer.getByRole("treeitem", {
+		name: "plain-workspace",
+		exact: true,
+	});
+	const secondaryRoot = explorer.getByRole("treeitem", {
+		name: "plain-library",
+		exact: true,
+	});
+	await expect(primaryRoot).toHaveCount(1);
+	await expect(secondaryRoot).toHaveCount(0);
+
+	await executePaletteCommand(
+		page,
+		"Add Folder to Workspace",
+		"Workspaces: Add Folder to Workspace...",
+	);
+	await expect(primaryRoot).toHaveCount(1);
+	await expect(secondaryRoot).toHaveCount(1);
+	const expandRoot = async (root: Locator): Promise<void> => {
+		if ((await root.getAttribute("aria-expanded")) !== "true") {
+			await root.click();
+			await page.keyboard.press("ArrowRight");
+		}
+		await expect(root).toHaveAttribute("aria-expanded", "true");
+	};
+	await expandRoot(primaryRoot);
+	await expect(
+		explorer.getByRole("treeitem", { name: "README.md", exact: true }),
+	).toHaveCount(1);
+	await expandRoot(secondaryRoot);
+	const secondaryFile = explorer.getByRole("treeitem", {
+		name: "notes.txt",
+		exact: true,
+	});
+	await expect(secondaryFile).toHaveCount(1);
+
+	await expect
+		.poll(async () =>
+			page.evaluate(
+				({ primaryRootId, secondaryRootId }) => {
+					const testWindow = window as unknown as Window & {
+						__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__: TestWorkspaceWatchExchange[];
+					};
+					const exchanges = testWindow.__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__;
+					return [primaryRootId, secondaryRootId].every(
+						(rootId) =>
+							exchanges.some(({ result }) =>
+								result.roots.some(
+									(root) =>
+										root.rootId === rootId &&
+										root.generation === 1 &&
+										root.rescanRequired,
+								),
+							) &&
+							exchanges.some(({ request }) =>
+								request.roots.some(
+									(root) =>
+										root.rootId === rootId && root.acknowledgedGeneration === 1,
+								),
+							),
+					);
+				},
+				{
+					primaryRootId: nativeRootId,
+					secondaryRootId: nativeSecondaryRootId,
+				},
+			),
+		)
+		.toBe(true);
+
+	const topologyCallCount = async (): Promise<number> =>
+		page.evaluate(() => {
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+			};
+			return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(({ command }) =>
+				[
+					"workspace_snapshot",
+					"workspace_pick_roots",
+					"workspace_remove_root",
+				].includes(command),
+			).length;
+		});
+	const topologyCallsBeforeGenericProbes = await topologyCallCount();
+	for (const [query, title] of [
+		["Open Workspace from File", "Open Workspace from File..."],
+		["Open Workspace Configuration", "Open Workspace Configuration File"],
+		["Close Workspace", "Close Workspace"],
+		["Save Workspace As", "Save Workspace As..."],
+		["Duplicate As Workspace", "Duplicate As Workspace in New Window"],
+	] as const) {
+		await expectPaletteTitleHidden(page, query, title);
+	}
+	expect(await topologyCallCount()).toBe(topologyCallsBeforeGenericProbes);
+
+	await activateExplorerContextAction(
+		page,
+		secondaryRoot,
+		"Remove Folder from Workspace",
+	);
+	await expect(secondaryRoot).toHaveCount(0);
+	await expect(secondaryFile).toHaveCount(0);
+	await expect(primaryRoot).toHaveCount(1);
+	await expect
+		.poll(async () =>
+			page.evaluate(() => {
+				const testWindow = window as unknown as Window & {
+					__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+				};
+				return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+					({ command }) => command === "workspace_remove_root",
+				).length;
+			}),
+		)
+		.toBe(1);
+	const postSecondaryAcceptanceExchangeStart = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__: TestWorkspaceWatchExchange[];
+		};
+		return testWindow.__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__.length;
+	});
+
+	// This is a deterministic fixture-authority invariant. Production Rust root
+	// capability revocation is covered by the native contract tests.
+	const revokedInvalidation = await page.evaluate(
+		({ rootId }) => {
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__(
+					rootId: string,
+					name: string,
+				): void;
+			};
+			try {
+				testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__(
+					rootId,
+					"revoked.txt",
+				);
+				return undefined;
+			} catch (error) {
+				return error;
+			}
+		},
+		{ rootId: nativeSecondaryRootId },
+	);
+	expect(revokedInvalidation).toEqual({
+		code: "ROOT_NOT_AUTHORIZED",
+		message: "The workspace root is not authorized.",
+	});
+	const staleWakeDeliveries = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_MULTI_ROOT_EMIT_WAKE__(): number;
+		};
+		return testWindow.__PLAIN_TEST_MULTI_ROOT_EMIT_WAKE__();
+	});
+	expect(staleWakeDeliveries).toBe(1);
+	await page.evaluate(
+		({ rootId }) => {
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__(
+					rootId: string,
+					name: string,
+				): void;
+			};
+			testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__(rootId, "alive.txt");
+		},
+		{ rootId: nativeRootId },
+	);
+	await expect(
+		explorer.getByRole("treeitem", { name: "alive.txt", exact: true }),
+	).toHaveCount(1);
+	await expect
+		.poll(async () =>
+			page.evaluate(
+				({ exchangeStart, rootId }) => {
+					const testWindow = window as unknown as Window & {
+						__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__: TestWorkspaceWatchExchange[];
+					};
+					const exchanges =
+						testWindow.__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__.slice(
+							exchangeStart,
+						);
+					return (
+						exchanges.some(
+							({ result }) =>
+								result.roots.length === 1 &&
+								result.roots[0]?.rootId === rootId &&
+								result.roots[0].generation === 2 &&
+								result.roots[0].rescanRequired,
+						) &&
+						exchanges.some(
+							({ request }) =>
+								request.roots.length === 1 &&
+								request.roots[0]?.rootId === rootId &&
+								request.roots[0].acknowledgedGeneration === 2,
+						)
+					);
+				},
+				{
+					exchangeStart: postSecondaryAcceptanceExchangeStart,
+					rootId: nativeRootId,
+				},
+			),
+		)
+		.toBe(true);
+	const postRemovalWatchExchanges = await page.evaluate(
+		({ exchangeStart }) => {
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__: TestWorkspaceWatchExchange[];
+			};
+			return testWindow.__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__.slice(
+				exchangeStart,
+			);
+		},
+		{ exchangeStart: postSecondaryAcceptanceExchangeStart },
+	);
+	for (const exchange of postRemovalWatchExchanges) {
+		expect(
+			exchange.request.roots.some(
+				({ rootId }) => rootId === nativeSecondaryRootId,
+			),
+		).toBe(false);
+		expect(
+			exchange.result.roots.some(
+				({ rootId }) => rootId === nativeSecondaryRootId,
+			),
+		).toBe(false);
+		expect(JSON.stringify(exchange)).not.toMatch(
+			/(?:absolute|canonical|native|relative)path/iu,
+		);
+	}
+
+	await removeWorkspaceRootViaPalette(page, "plain-workspace");
+	await expect(primaryRoot).toHaveCount(0);
+	await expect(secondaryRoot).toHaveCount(0);
+	await expect(page.getByRole("tree", { name: "Files Explorer" })).toHaveCount(
+		0,
+	);
+	await expect(page.locator("body")).not.toHaveAttribute(
+		"data-plain-workspace-projection",
+		"reload-required",
+	);
+	await expect
+		.poll(async () =>
+			page.evaluate(() => {
+				const testWindow = window as unknown as Window & {
+					__PLAIN_TEST_MULTI_ROOT_WATCH_LISTENER_COUNT__(): number;
+				};
+				return testWindow.__PLAIN_TEST_MULTI_ROOT_WATCH_LISTENER_COUNT__();
+			}),
+		)
+		.toBe(0);
+	const finalAcceptedWatcherWatermark = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+			__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__: TestWorkspaceWatchExchange[];
+		};
+		return {
+			callCount: testWindow.__PLAIN_TEST_TAURI_CALLS__.length,
+			exchangeCount: testWindow.__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__.length,
+		};
+	});
+	const finalWakeDeliveries = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_MULTI_ROOT_EMIT_WAKE__(): number;
+		};
+		return testWindow.__PLAIN_TEST_MULTI_ROOT_EMIT_WAKE__();
+	});
+	expect(finalWakeDeliveries).toBe(0);
+	const finalWatcherEvidence = await page.evaluate(
+		({ callCount, exchangeCount }) => {
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+				__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__: TestWorkspaceWatchExchange[];
+			};
+			return {
+				watchCommandsAfterAcceptedEmpty: testWindow.__PLAIN_TEST_TAURI_CALLS__
+					.slice(callCount)
+					.filter(({ command }) => command === "workspace_watch_sync"),
+				watchExchangesAfterAcceptedEmpty:
+					testWindow.__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__.slice(
+						exchangeCount,
+					),
+			};
+		},
+		finalAcceptedWatcherWatermark,
+	);
+	expect(finalWatcherEvidence.watchCommandsAfterAcceptedEmpty).toEqual([]);
+	expect(finalWatcherEvidence.watchExchangesAfterAcceptedEmpty).toEqual([]);
+	// Keep the mock authorization state honest without presenting it as native
+	// filesystem evidence.
+	const finalRootInvalidation = await page.evaluate(
+		({ rootId }) => {
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__(
+					rootId: string,
+					name: string,
+				): void;
+			};
+			try {
+				testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__(
+					rootId,
+					"revoked-final.txt",
+				);
+				return undefined;
+			} catch (error) {
+				return error;
+			}
+		},
+		{ rootId: nativeRootId },
+	);
+	expect(finalRootInvalidation).toEqual({
+		code: "ROOT_NOT_AUTHORIZED",
+		message: "The workspace root is not authorized.",
+	});
+	await expect(primaryRoot).toHaveCount(0);
+	await expect(secondaryRoot).toHaveCount(0);
+
+	await expectPaletteTitleHidden(
+		page,
+		"Remove Folder from Workspace",
+		"Workspaces: Remove Folder from Workspace...",
+	);
+	await expectPaletteTitleHidden(
+		page,
+		"Add Folder to Workspace",
+		"Workspaces: Add Folder to Workspace...",
+	);
+	await page.keyboard.press("ControlOrMeta+Shift+P");
+	const palette = page.locator(".quick-input-widget");
+	await expect(palette).toBeVisible();
+	await palette.locator("input").pressSequentially("Open Folder");
+	await expect(
+		palette.getByText("File: Open Folder...", { exact: true }),
+	).toHaveCount(1);
+	await page.keyboard.press("Escape");
+	await expect(palette).toBeHidden();
+
+	const removeRequests = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+		};
+		return testWindow.__PLAIN_TEST_TAURI_CALLS__
+			.filter(({ command }) => command === "workspace_remove_root")
+			.map(({ args }) => args.request);
+	});
+	expect(removeRequests).toEqual([
+		{ rootId: nativeSecondaryRootId },
+		{ rootId: nativeRootId },
+	]);
+	const rawWatcherEvidence = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+			__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__: TestWorkspaceWatchExchange[];
+		};
+		return {
+			invocations: testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+				({ command }) => command === "workspace_watch_sync",
+			),
+			exchanges: testWindow.__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__,
+		};
+	});
+	expect(rawWatcherEvidence.invocations.length).toBeGreaterThan(0);
+	for (const { args } of rawWatcherEvidence.invocations) {
+		expect(Reflect.ownKeys(args)).toEqual(["request"]);
+		const request = args.request as { roots: unknown };
+		expect(Reflect.ownKeys(request)).toEqual(["roots"]);
+		expect(Array.isArray(request.roots)).toBe(true);
+		expect((request.roots as unknown[]).length).toBeGreaterThan(0);
+		for (const root of request.roots as Record<string, unknown>[]) {
+			expect(Reflect.ownKeys(root)).toEqual([
+				"rootId",
+				"acknowledgedGeneration",
+			]);
+			expect([nativeRootId, nativeSecondaryRootId]).toContain(root.rootId);
+			expect(
+				root.acknowledgedGeneration === null ||
+					(Number.isSafeInteger(root.acknowledgedGeneration) &&
+						(root.acknowledgedGeneration as number) >= 1 &&
+						(root.acknowledgedGeneration as number) <= 0xffff_ffff),
+			).toBe(true);
+		}
+	}
+	for (const exchange of rawWatcherEvidence.exchanges) {
+		expect(Reflect.ownKeys(exchange)).toEqual([
+			"callIndex",
+			"request",
+			"result",
+		]);
+		expect(Number.isSafeInteger(exchange.callIndex)).toBe(true);
+		expect(exchange.callIndex).toBeGreaterThanOrEqual(0);
+		expect(Reflect.ownKeys(exchange.result)).toEqual(["workspaceId", "roots"]);
+		expect(exchange.result.workspaceId).toBe(nativeWorkspaceId);
+		for (const root of exchange.result.roots) {
+			expect(Reflect.ownKeys(root)).toEqual([
+				"rootId",
+				"generation",
+				"rescanRequired",
+			]);
+			expect([nativeRootId, nativeSecondaryRootId]).toContain(root.rootId);
+			expect(Number.isSafeInteger(root.generation)).toBe(true);
+			expect(root.generation).toBeGreaterThanOrEqual(1);
+			expect(root.generation).toBeLessThanOrEqual(0xffff_ffff);
+			expect(typeof root.rescanRequired).toBe("boolean");
+		}
+	}
+	await expect(
+		page.locator(".notifications-toasts .notification-toast"),
+	).toHaveCount(0);
+	expect(nativeDialogs).toEqual([]);
 	expect(errors).toEqual([]);
 });
 

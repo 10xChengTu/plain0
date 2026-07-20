@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：扩展 Browser multi-root E2E，覆盖双根 Explorer、两个 remove-root 入口、最后一根回到 EMPTY、旧 URI/watcher 撤权及 generic workspace surface 不可达。
+- 当前最小工作项：扩展 Browser multi-root all-true 写路径，覆盖双根可编辑与跨 root copy/move；per-root 丢 wake、retained/partial UI 和真实 Tauri 多根验收继续保持为后续独立工作项。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -99,12 +99,14 @@
 - [x] remove-root 生命周期 Harness 与终审收口：六个产品命令、固定 picker、URI 品牌/own-data/Proxy/UUID、native dispatch、完整 snapshot、fatal gate、直接词法归属和 import/writer authority 均由 token + AST 双签名与 hostile mutations 锁定；Rust remove/replace 不再用 gate 外 stale active-set `retain`，而是捕获本次移除的 exact watcher epoch 并在释放 workspace locks 后逐项 `revoke`，过期调用不能误伤并发新增或替换根。终审额外修复了 folder 无关 getter TOCTOU、字符串空白与 ASI 绕过、最后根提前返回 watcher 泄漏及 stale-set watcher 竞态。
 - [x] remove-root 切片通过完整 `pnpm check`：29 个 TypeScript/JavaScript 测试文件、574 个用例、2275 个前端模块、2110 个 bundle source、203 项既有迁移债务与 Rust 255/255 全部通过；格式、双类型检查、严格 lint、Clippy、架构与 bundle guard 均通过，最终三路复审无剩余 P0/P1/P2。
 - [x] 修复 remove-root 后前端 watcher 继续轮询已撤销根的问题：manager 改为默认空授权，只有 topology coordinator 通过 workspaceId/revision/topology 校验并选定的最终 snapshot 才能在 Workbench dispatch 前同步 root 集合；stale/冲突/仅解码响应无副作用，撤销会先删除旧 state、取消 listener、清 timer/解绑 wake，并以 state identity 隔离迟到结果与同 rootId 重授权。Native/Browser mock 只暴露无 IPC 的本地 reconcile route，单元测试与 Harness hostile mutations 锁定初始 fail-closed、最终 authoritative fallback、dispatch/adoption 失败不回滚、零根撤权和隐式 bridge reconcile 禁令。完整前端/架构/bundle 校验通过 29 个测试文件、582 个用例、2275 个模块、2110 个 source 与 203 项既有迁移债务；Rust 255/255 通过。
+- [x] 完成 Browser multi-root remove smoke：确定性 Tauri IPC mock 驱动真实 Chromium、Workbench 与 TypeScript bridge 从 EMPTY 经 Open Folder/Add Folder 投影两棵 Explorer root，再分别通过 Explorer context 和命令面板移除 secondary/primary，最后以 Add Folder 隐藏、Open Folder 可见和 Explorer tree 消失证明返回 EMPTY。两根初始 generation 1 均先完成 ack，保留根的外部变化精确产生并 ack generation 2；secondary UI/adoption 完成后的 wake 与外部变化 request/result 不再含该 root，accepted EMPTY 后 wake listener 为 0、人工 wake 投递为 0 且未产生新 sync。测试直接核对原始 watch IPC request 的 exact own-key、UUID 与 primitive generation/ack 形状，并确认固定 generic workspace palette surface 不可达、无原生 dialog、pageerror、console error 或 toast；聚焦重复 5/5、完整 Browser 9/9 通过。该证据只覆盖 Browser mock/Workbench/TypeScript bridge；fixture 的 `ROOT_NOT_AUTHORIZED` 不替代 Rust capability，且不证明 canonical filesystem root、系统 picker、WKWebView、FSEvents、定时器的无限期未来或磁盘行为。
 
 ## 下一步
 
-1. 按“GitHub 调研 → 技术方案 → 实现”完成 Browser multi-root 双根、两个 remove-root 入口、最后根 EMPTY 与撤权 E2E。
-2. 补齐 Browser missing-parent、move partial、delete retained/partial 可见失败矩阵和真实 multi-root Tauri 验收。
-3. 全部通过后写入 `features.json` evidence/status，完成 `F020` 并切换到下一个垂直切片。
+1. 按“GitHub 调研 → 技术方案 → 实现”完成 Browser multi-root all-true 双根编辑与跨 root copy/move。
+2. 补齐两根各自的即时 wake/丢 wake 收敛，再覆盖 Browser missing-parent、move partial、delete retained/partial 可见失败矩阵。
+3. 完成真实 multi-root Tauri 验收。
+4. 全部通过后写入 `features.json` evidence/status，完成 `F020` 并切换到下一个垂直切片。
 
 ## 当前验收命令
 
