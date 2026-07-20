@@ -24,6 +24,16 @@ Plain 当前 `monaco-vscode-api@35.0.1` 对应 Code OSS commit `5264f2156cbcd7ae
 
 当前 Plain provider 已与固定上游语义相接：`copy` 唯一调用 `workspaceCopy(sourceRootId, sourcePath, targetRootId, targetPath)`；`rename` 在不同 rootId 时唯一调用 `workspaceMove(...)`。单根 all-true Browser 场景已验证版本化保存和同根 Copy/Paste，但不能证明跨 root authority 与路径映射。
 
+### 实现期补充：保存只读不等于路径 mutation 只读
+
+首轮真实 Chromium 发现一个固定上游与 Plain 保守版本策略的组合缺口：
+
+- 固定 FileService 在未请求 metadata 时只把 `{ type }` 交给子项 `toFileStat`；Plain 的版本化保存补丁会把缺少 `wv1` 的普通文件子项标为 readonly，避免没有读取基线的内容保存。来源：[Code OSS child resolve](https://github.com/microsoft/vscode/blob/5264f2156cbcd7aea5fd004d29eaa10209155d66/src/vs/platform/files/common/fileService.ts#L248-L282)。
+- Explorer 把 `stat.isReadonly` 直接写入唯一的 `ExplorerResourceReadonlyContext`，而 Cut keybinding 同时要求它的反相 `ExplorerResourceWritableContext`。因此保守的“内容不可保存”会连带隐藏安全的 Rust path mutation，即使 provider 已由五项全真 capability 激活。来源：[Code OSS Explorer context](https://github.com/microsoft/vscode/blob/5264f2156cbcd7aea5fd004d29eaa10209155d66/src/vs/workbench/contrib/files/browser/views/explorerView.ts#L614-L623)、[Code OSS Cut keybinding](https://github.com/microsoft/vscode/blob/5264f2156cbcd7aea5fd004d29eaa10209155d66/src/vs/workbench/contrib/files/browser/fileActions.contribution.ts#L99-L108)。
+- 对当前 VS Code `main` 的复核仍是同一个单 context 设计，没有可直接移植的“内容保存权限 / 路径 mutation 权限”双维度实现。来源：[current Explorer context](https://github.com/microsoft/vscode/blob/main/src/vs/workbench/contrib/files/browser/views/explorerView.ts)、[current FileService](https://github.com/microsoft/vscode/blob/main/src/vs/platform/files/common/fileService.ts)。
+
+冻结的最小补丁只改变 Explorer context-key 投影：当且仅当资源 scheme 为 `plain-workspace`、provider 具有 `FileFolderCopy` 且不具有 `Readonly` capability 时，把 tokenless file 的保守 readonly 从 Explorer path-mutation context 中豁免。它不改 `IFileStat.readonly`、`ExplorerItem.isReadonly`、FilesConfigurationService、editor/model readonly 或版本化保存基线，因此无 `wv1` 的内容保存仍 fail closed；DnD 仍按 `ExplorerItem.isReadonly` 排除，继续不在本项范围。provider 的私有 mutation seam 与 all-five policy 仍是最终 dispatch gate，context key 只恢复可达的产品 UI。
+
 ## 方案选择
 
 ### 复用现有双根 IPC mock
@@ -52,7 +62,7 @@ fixture 的 `ENTRY_*`/`ROOT_NOT_AUTHORIZED` 仅是测试自身的确定性不变
 | 跨根复制    | `primary/copy-source.txt`   | `secondary/packages/copy-source.txt` | `workspace_copy`                         |
 | 跨根移动    | `secondary/move-source.txt` | `primary/src/move-source.txt`        | `workspace_move`                         |
 
-场景先经 Open Folder 从 EMPTY 选中 primary，再经 Add Folder 投影 secondary。两次保存都通过真实 Monaco editor 修改并使用 `ControlOrMeta+S`；跨根操作通过 Explorer 已有的 `ControlOrMeta+C` / `ControlOrMeta+X` / `ControlOrMeta+V` command route 完成。该键盘路径已被现有单根 Browser 场景使用，且固定源码显示它与菜单动作共享上述 handlers；不读取或断言操作系统剪贴板内容。
+场景先经 Open Folder 从 EMPTY 选中 primary，再经 Add Folder 投影 secondary。两次保存都通过真实 Monaco editor 修改并使用 `ControlOrMeta+S`；Copy/Paste 使用 Explorer 右键菜单，Cut 使用固定 `ControlOrMeta+X` keybinding 并先断言真实 `.cut` 投影，随后再从目标目录菜单 Paste。菜单和键盘快捷键共享上述 handlers；测试不读取或断言操作系统剪贴板内容，也不直接调用 bridge。
 
 目标目录展开后使用 Explorer 层级形成 UI 证据：复制后同名文件应同时存在于 level 2 source 和 level 3 target；移动后只允许 level 3 target 存在。最终再读取原始 Tauri call log，核对两次 write 的不同 rootId、相对路径、`wv1` expectedVersion 与内容 bytes，以及 copy/move 的 exact 四字段对象。
 
