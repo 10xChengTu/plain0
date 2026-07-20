@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：修复 Plain tokenless file 的 Explorer path-mutation context，在不放宽版本化保存只读边界的前提下恢复 Cut/rename 可达性。
+- 当前最小工作项：按已冻结方案实现并验收 Browser multi-root all-true 双根编辑与跨 root copy/move。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -101,7 +101,8 @@
 - [x] 修复 remove-root 后前端 watcher 继续轮询已撤销根的问题：manager 改为默认空授权，只有 topology coordinator 通过 workspaceId/revision/topology 校验并选定的最终 snapshot 才能在 Workbench dispatch 前同步 root 集合；stale/冲突/仅解码响应无副作用，撤销会先删除旧 state、取消 listener、清 timer/解绑 wake，并以 state identity 隔离迟到结果与同 rootId 重授权。Native/Browser mock 只暴露无 IPC 的本地 reconcile route，单元测试与 Harness hostile mutations 锁定初始 fail-closed、最终 authoritative fallback、dispatch/adoption 失败不回滚、零根撤权和隐式 bridge reconcile 禁令。完整前端/架构/bundle 校验通过 29 个测试文件、582 个用例、2275 个模块、2110 个 source 与 203 项既有迁移债务；Rust 255/255 通过。
 - [x] 完成 Browser multi-root remove smoke：确定性 Tauri IPC mock 驱动真实 Chromium、Workbench 与 TypeScript bridge 从 EMPTY 经 Open Folder/Add Folder 投影两棵 Explorer root，再分别通过 Explorer context 和命令面板移除 secondary/primary，最后以 Add Folder 隐藏、Open Folder 可见和 Explorer tree 消失证明返回 EMPTY。两根初始 generation 1 均先完成 ack，保留根的外部变化精确产生并 ack generation 2；secondary UI/adoption 完成后的 wake 与外部变化 request/result 不再含该 root，accepted EMPTY 后 wake listener 为 0、人工 wake 投递为 0 且未产生新 sync。测试直接核对原始 watch IPC request 的 exact own-key、UUID 与 primitive generation/ack 形状，并确认固定 generic workspace palette surface 不可达、无原生 dialog、pageerror、console error 或 toast；聚焦重复 5/5、完整 Browser 9/9 通过。该证据只覆盖 Browser mock/Workbench/TypeScript bridge；fixture 的 `ROOT_NOT_AUTHORIZED` 不替代 Rust capability，且不证明 canonical filesystem root、系统 picker、WKWebView、FSEvents、定时器的无限期未来或磁盘行为。
 - [x] 完成 Browser 双根可写与跨根 copy/move 的固定 GitHub 调研和技术方案：固定 Code OSS `5264f` 的 FileService、Explorer Copy/Cut/Paste 与 DnD 路径，选择复用现有双根 Tauri IPC mock 的显式 all-true 模式，以两个版本化编辑、跨根 Copy/Paste、跨根 Cut/Paste 和 exact IPC 参数形成独立证据；DnD、per-root 丢 wake、missing-parent、retained/partial UI、真实 Rust capability/磁盘与 Tauri 验收继续拆分。
-- [x] 完成 Explorer path-mutation context 补充调研与方案：固定和当前 Code OSS 都把 `stat.isReadonly` 直接映射到 Cut/rename 共用的 writable context，而 Plain 为保护无 `wv1` 保存基线会把未取 metadata 的文件子项保守标为 readonly。方案只对 `plain-workspace` + `FileFolderCopy` + 非 `Readonly` provider 豁免 Explorer path-mutation context，不改 file stat、ExplorerItem、editor/model readonly、版本化保存或 DnD；all-five provider 私有 seam 继续是最终 dispatch gate。
+- [x] 完成 Explorer path-mutation context 补充调研与方案：固定和当前 Code OSS 都把 `stat.isReadonly` 直接映射到 Cut/rename 共用的 writable context，而 Plain 为保护无 `wv1` 保存基线会把未取 metadata 的文件子项保守标为 readonly。方案只对 `plain-workspace` + `FileFolderCopy` + 非 `Readonly` provider 豁免 Explorer path-mutation context，不改 file stat、ExplorerItem 既有 readonly 结果/raw state、editor/model readonly、版本化保存或 DnD；all-five provider 私有 seam 继续是最终 dispatch gate。
+- [x] 完成 Explorer path-mutation context 分离：新增纯函数闭集只接受 `plain-workspace`、`FileFolderCopy=true`、`Readonly=false` 且只由 raw file-stat 造成只读的四元组，并仅在 Explorer context projection 中解除 Cut/rename 的 UI readonly；重新查询 files configuration 时显式去掉 raw readonly、保留 locked，因此 provider、session、`files.readonlyInclude`、permission lock 等独立只读原因仍 fail closed，文件 stat、editor/model、版本化保存、parent readonly 与 DnD 均未放宽。补丁 SHA/hunk/lock graph 合同与定向单元测试已覆盖精确导入、能力查询、叠加只读负向矩阵和禁止 stat/parent 改写。
 
 ## 下一步
 

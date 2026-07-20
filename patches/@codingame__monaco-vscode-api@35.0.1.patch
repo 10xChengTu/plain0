@@ -166,12 +166,13 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..299f37d1d978f3a0c8174cb544b687baec06f906
 --- /dev/null
 +++ b/vscode/src/vs/platform/files/common/plainWorkspaceDelete.d.ts
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,71 @@
 +import type { IDisposable } from "../../../base/common/lifecycle";
 +import type { URI } from "../../../base/common/uri";
 +import type { ResourceFileEdit } from "../../../editor/browser/services/bulkEditService";
 +
 +export declare const PLAIN_WORKSPACE_SCHEME = "plain-workspace";
++export declare function isPlainWorkspaceExplorerPathMutationAllowed(scheme: unknown, hasFileFolderCopy: unknown, hasReadonly: unknown, rawFileStatReadonlyOnly: unknown): boolean;
 +declare const plainWorkspaceDeleteAuthorizationBrand: unique symbol;
 +export interface PlainWorkspaceDeleteAuthorization {
 +    readonly [plainWorkspaceDeleteAuthorizationBrand]: true;
@@ -242,7 +243,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..90ff02199b0822f4ee279609909b1b2f14a6be20
 --- /dev/null
 +++ b/vscode/src/vs/platform/files/common/plainWorkspaceDelete.js
-@@ -0,0 +1,414 @@
+@@ -0,0 +1,417 @@
 +const PLAIN_WORKSPACE_SCHEME = "plain-workspace";
 +const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 +const DELETE_KINDS = ( new Set(["file", "directory", "symlink"]));
@@ -256,6 +257,9 @@ index 0000000000000000000000000000000000000000..90ff02199b0822f4ee279609909b1b2f
 +const fileServiceAuthorizations = ( new WeakMap());
 +const providerAuthorizations = ( new WeakMap());
 +let registeredCoordinator;
++function isPlainWorkspaceExplorerPathMutationAllowed(scheme, hasFileFolderCopy, hasReadonly, rawFileStatReadonlyOnly) {
++    return scheme === PLAIN_WORKSPACE_SCHEME && hasFileFolderCopy === true && hasReadonly === false && rawFileStatReadonlyOnly === true;
++}
 +
 +function ownDataSnapshot(value) {
 +    if (!value || typeof value !== "object") {
@@ -656,7 +660,7 @@ index 0000000000000000000000000000000000000000..90ff02199b0822f4ee279609909b1b2f
 +    return await coordinator(context);
 +}
 +
-+export { PLAIN_WORKSPACE_SCHEME, authorizePlainWorkspaceDeleteResourceEdit, beginPlainWorkspaceDeleteProviderDispatch, classifyPlainWorkspaceDeleteResource, completePlainWorkspaceDeleteProviderFailure, completePlainWorkspaceDeleteProviderResult, getPlainWorkspaceDeleteAuthorizationSnapshot, getPlainWorkspaceDeleteState, movePlainWorkspaceDeleteFileServiceAuthorization, movePlainWorkspaceDeleteResourceEditAuthorization, movePlainWorkspaceDeleteWorkingCopyAuthorization, registerPlainWorkspaceDeleteCoordinator, runPlainWorkspaceDeleteCoordinator, snapshotPlainWorkspaceDeleteResource, takePlainWorkspaceDeleteProviderAuthorization, validatePlainWorkspaceDeleteResourceEditBatch };
++export { PLAIN_WORKSPACE_SCHEME, authorizePlainWorkspaceDeleteResourceEdit, beginPlainWorkspaceDeleteProviderDispatch, classifyPlainWorkspaceDeleteResource, completePlainWorkspaceDeleteProviderFailure, completePlainWorkspaceDeleteProviderResult, getPlainWorkspaceDeleteAuthorizationSnapshot, getPlainWorkspaceDeleteState, isPlainWorkspaceExplorerPathMutationAllowed, movePlainWorkspaceDeleteFileServiceAuthorization, movePlainWorkspaceDeleteResourceEditAuthorization, movePlainWorkspaceDeleteWorkingCopyAuthorization, registerPlainWorkspaceDeleteCoordinator, runPlainWorkspaceDeleteCoordinator, snapshotPlainWorkspaceDeleteResource, takePlainWorkspaceDeleteProviderAuthorization, validatePlainWorkspaceDeleteResourceEditBatch };
 diff --git a/vscode/src/vs/workbench/browser/actions/windowActions.js b/vscode/src/vs/workbench/browser/actions/windowActions.js
 index 40af0c2aeab96c5637f67ac6c620f53e562b909f..400c32572f9f1d4d95d9e267465d448f973daf15 100644
 --- a/vscode/src/vs/workbench/browser/actions/windowActions.js
@@ -1490,6 +1494,55 @@ index e743e309f1b308aebcb4559a12d9591bd0d49701..3d4bda71433542a808b6827671788e05
              this.lastResolvedFileStat = newFileStat;
          }
          else if (this.lastResolvedFileStat.mtime <= newFileStat.mtime) {
+diff --git a/vscode/src/vs/workbench/contrib/files/common/explorerModel.js b/vscode/src/vs/workbench/contrib/files/common/explorerModel.js
+--- a/vscode/src/vs/workbench/contrib/files/common/explorerModel.js
++++ b/vscode/src/vs/workbench/contrib/files/common/explorerModel.js
+@@ -134,11 +134,22 @@ let ExplorerItem = class ExplorerItem {
+     get isReadonly() {
+         return this.filesConfigService.isReadonly(this.resource, {
+             resource: this.resource,
+             name: this.name,
+             readonly: this._readonly,
+             locked: this._locked
+         });
+     }
++    get isReadonlyExclusivelyFromRawFileStat() {
++        if (this._readonly !== true) {
++            return false;
++        }
++        return this.filesConfigService.isReadonly(this.resource, {
++            resource: this.resource,
++            name: this.name,
++            readonly: false,
++            locked: this._locked
++        }) === false;
++    }
+     get mtime() {
+         return this._mtime;
+     }
+diff --git a/vscode/src/vs/workbench/contrib/files/browser/views/explorerView.js b/vscode/src/vs/workbench/contrib/files/browser/views/explorerView.js
+--- a/vscode/src/vs/workbench/contrib/files/browser/views/explorerView.js
++++ b/vscode/src/vs/workbench/contrib/files/browser/views/explorerView.js
+@@ -37,6 +37,7 @@ import { StorageScope, StorageTarget } from '../../../../../platform/storage/com
+ import { IStorageService } from '../../../../../platform/storage/common/storage.service.js';
+ import { IClipboardService } from '../../../../../platform/clipboard/common/clipboardService.service.js';
+ import { FileSystemProviderCapabilities } from '../../../../../platform/files/common/files.js';
++import { PLAIN_WORKSPACE_SCHEME, isPlainWorkspaceExplorerPathMutationAllowed } from '../../../../../platform/files/common/plainWorkspaceDelete.js';
+ import { IFileService } from '../../../../../platform/files/common/files.service.js';
+ import { Event } from '../../../../../base/common/event.js';
+ import { IViewDescriptorService } from '../../../../common/views.service.js';
+@@ -541,9 +542,10 @@ let ExplorerView = class ExplorerView extends ViewPane {
+         const folders = this.contextService.getWorkspace().folders;
+         const resource = stat ? stat.resource : folders[folders.length - 1].uri;
+         stat = stat || this.explorerService.findClosest(resource);
++        const plainWorkspacePathMutationAllowed = !!stat && resource.scheme === PLAIN_WORKSPACE_SCHEME && isPlainWorkspaceExplorerPathMutationAllowed(resource.scheme, this.fileService.hasCapability(resource, FileSystemProviderCapabilities.FileFolderCopy), this.fileService.hasCapability(resource, FileSystemProviderCapabilities.Readonly), stat.isReadonlyExclusivelyFromRawFileStat);
+         this.resourceContext.set(resource);
+         this.folderContext.set(!!stat && stat.isDirectory);
+-        this.readonlyContext.set(!!stat && !!stat.isReadonly);
++        this.readonlyContext.set(!!stat && !!stat.isReadonly && !plainWorkspacePathMutationAllowed);
+         this.parentReadonlyContext.set(Boolean(stat?.parent?.isReadonly));
+         this.rootContext.set(!!stat && stat.isRoot);
+         if (resource) {
 diff --git a/vscode/src/vs/workbench/services/workingCopy/common/storedFileWorkingCopy.js b/vscode/src/vs/workbench/services/workingCopy/common/storedFileWorkingCopy.js
 index 0a769e25cf6030e9aa17ae5ec845795f964e5017..0ca61d77c1a1dccfdc383e4c1faec37a5fe54953 100644
 --- a/vscode/src/vs/workbench/services/workingCopy/common/storedFileWorkingCopy.js
