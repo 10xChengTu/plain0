@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：补齐 Browser multi-root 两根各自的即时 wake 与丢 wake 定时收敛。
+- 当前最小工作项：按已冻结方案实现 Browser multi-root 两根各自的即时 wake 与丢 wake 定时收敛。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -104,6 +104,7 @@
 - [x] 完成 Explorer path-mutation context 补充调研与方案：固定和当前 Code OSS 都把 `stat.isReadonly` 直接映射到 Cut/rename 共用的 writable context，而 Plain 为保护无 `wv1` 保存基线会把未取 metadata 的文件子项保守标为 readonly。方案只对 `plain-workspace` + `FileFolderCopy` + 非 `Readonly` provider 豁免 Explorer path-mutation context，不改 file stat、ExplorerItem 既有 readonly 结果/raw state、editor/model readonly、版本化保存或 DnD；all-five provider 私有 seam 继续是最终 dispatch gate。
 - [x] 完成 Explorer path-mutation context 分离：新增纯函数闭集只接受 `plain-workspace`、`FileFolderCopy=true`、`Readonly=false` 且只由 raw file-stat 造成只读的四元组，并仅在 Explorer context projection 中解除 Cut/rename 的 UI readonly；重新查询 files configuration 时显式去掉 raw readonly、保留 locked，因此 provider、session、`files.readonlyInclude`、permission lock 等独立只读原因仍 fail closed，文件 stat、editor/model、版本化保存、parent readonly 与 DnD 均未放宽。补丁 SHA/hunk/lock graph 合同与定向单元测试已覆盖精确导入、能力查询、叠加只读负向矩阵和禁止 stat/parent 改写。
 - [x] 完成 Browser multi-root all-true 双根写入与跨根 copy/move：同一确定性 Tauri IPC mock 以显式 `supported` 模式返回五项全 true，分别读取并保存 primary `README.md` 与 secondary `notes.txt` 的独立 `wv1`/`PLW1` 基线；Explorer Copy/Paste 把 `copy-source.txt` 从 primary 复制到 secondary `packages/`，Cut/Paste 把未打开的独立 `move-source.txt` 从 secondary 移到 primary `src/`。测试核对唯一 capability 调用、两次 exact framed write、copy/move 四字段 root/path、源/目标树和内容，并以独立于 IPC args 的实际 source/target token 记录证明 copy/move 都重签了路径绑定版本；mock 对 rename/move 目录树递归重签，且 readonly 默认模式不变。聚焦重复 5/5、完整 Workspace Browser 9/9、全部 Browser 10/10 通过，无原生 dialog、正向 pageerror、console error、toast 或残留 cut source；该证据不包含 DnD、真实 Rust capability/磁盘、WKWebView 或 per-root watcher 收敛。
+- [x] 完成 Browser multi-root watcher 的 GitHub/固定源码调研与技术方案：固定 Code OSS `5264f` 的 per-folder watch、Explorer 500 ms 聚合/全 root refresh、`notify 8.2.0` 丢事件与 watched-path 异常边界，并继续排除会把 raw path 发进 WebView 的 Tauri plugin-fs watcher。方案复用唯一双根 fixture并补齐 pending-behind-dirty latch，以两根 generation 1 exact ack/empty 为基线，严格串行覆盖 `primary wake → primary lost → secondary wake → secondary lost`；四阶段分别锁定实际 wake delivery、唯一目标 pending、双根有序 exact ack/empty 水位和 Explorer 自动出现，禁止历史 exchange、上一代 urgent pull、focus/manual refresh 伪兜底。
 
 ## 下一步
 
