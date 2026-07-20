@@ -34,8 +34,63 @@ async function baseline() {
 }
 
 describe("exact Workbench patch contracts", () => {
-	it("accepts only the checked-in eight-package patch and lock graph", async () => {
+	it("accepts only the checked-in nine-package patch and lock graph", async () => {
 		expect(validateWorkbenchPatchSet(await baseline())).toEqual([]);
+	});
+
+	it("pins both Plain no-cache schemes and removes direct file/workspace open surfaces", async () => {
+		const input = await baseline();
+		const configurationPatch = input.patchSources.get(
+			"patches/@codingame__monaco-vscode-configuration-service-override@35.0.1.patch",
+		);
+		expect(configurationPatch).toContain(
+			'[Schemas.file, Schemas.vscodeUserData, Schemas.tmp, "plain-workspace", "plain-workspace-config"]',
+		);
+
+		const apiPatch = input.patchSources.get(
+			"patches/@codingame__monaco-vscode-api@35.0.1.patch",
+		);
+		for (const removedSurface of [
+			"-registerAction2(OpenFileAction);",
+			"-registerAction2(OpenFileFolderAction);",
+			"-registerAction2(OpenWorkspaceAction);",
+			"-registerAction2(OpenWorkspaceConfigFileAction);",
+			"-registerAction2(CloseWorkspaceAction);",
+			"-        id: OpenFileAction.ID,",
+			"-        id: OpenFileFolderAction.ID,",
+			'-    id: "workbench.action.files.openFileFolderInNewWindow",',
+			'-    id: "workbench.action.files.openFileInNewWindow",',
+			'-    id: "workbench.action.files.openFolderInNewWindow",',
+			'-    id: "workbench.action.openWorkspaceInNewWindow",',
+			'-            id: "workbench.action.newWindow",',
+			"-registerAction2(NewWindowAction);",
+			"-    id: ADD_ROOT_FOLDER_COMMAND_ID,",
+			"-    id: SET_ROOT_FOLDER_COMMAND_ID,",
+			'-    id: "vscode.openFolder",',
+			'-    id: "vscode.newWindow",',
+			'-    id: "_files.pickFolderAndOpen",',
+			'-CommandsRegistry.registerCommand("_files.newWindow", newWindowCommand);',
+			'-CommandsRegistry.registerCommand("_files.windowOpen", openWindowCommand);',
+			"-async function selectWorkspaceFolders(accessor) {",
+			"-import { IWorkspaceEditingService } from '../../services/workspaces/common/workspaceEditing.service.js';",
+			"-import { mnemonicButtonLabel } from '../../../base/common/labels.js';",
+			"-import { IFileDialogService } from '../../../platform/dialogs/common/dialogs.service.js';",
+			"-import { IPathService } from '../../services/path/common/pathService.service.js';",
+		]) {
+			expect(apiPatch).toContain(removedSurface);
+		}
+		expect(apiPatch).toContain(
+			[
+				"+    run(accessor) {",
+				"+        const commandService = accessor.get(ICommandService);",
+				"+        return commandService.executeCommand(SET_ROOT_FOLDER_COMMAND_ID);",
+			].join("\n"),
+		);
+		expect(apiPatch).toContain(" registerAction2(AddRootFolderAction);");
+		expect(apiPatch).toContain(" registerAction2(OpenFolderAction);");
+		expect(apiPatch).toContain(
+			" registerAction2(OpenFolderViaWorkspaceAction);",
+		);
 	});
 
 	it("rejects Plain root UPDATED refresh scope broadening and rerouting", async () => {
@@ -200,6 +255,17 @@ describe("exact Workbench patch contracts", () => {
 		);
 	});
 
+	it("pins the exact unpatched tarball integrity for every patched package", async () => {
+		const input = await baseline();
+		input.lockfile = input.lockfile.replace(
+			"sha512-pJMSRMI0m5Mvx54u6iBGh+iad9KqfICnwAcjswNJOO7Xt1OXm5xILcM32VkMe4UX0YmrGAvYc0WVKWL8I9O4ng==",
+			"sha512-AJMSRMI0m5Mvx54u6iBGh+iad9KqfICnwAcjswNJOO7Xt1OXm5xILcM32VkMe4UX0YmrGAvYc0WVKWL8I9O4ng==",
+		);
+		expect(validateWorkbenchPatchSet(input)).toContain(
+			"pnpm-lock.yaml package integrity for @codingame/monaco-vscode-api@35.0.1 must remain the exact audited tarball",
+		);
+	});
+
 	it("rejects extra patchedDependencies entries in either top-level mapping", async () => {
 		const manifestExtra = await baseline();
 		manifestExtra.workspaceManifest = manifestExtra.workspaceManifest.replace(
@@ -207,7 +273,7 @@ describe("exact Workbench patch contracts", () => {
 			"patchedDependencies:\n  '@example/extra@1.0.0': patches/extra.patch\n",
 		);
 		expect(validateWorkbenchPatchSet(manifestExtra)).toContain(
-			"pnpm-workspace.yaml top-level patchedDependencies must be the exact audited eight-entry closed set",
+			"pnpm-workspace.yaml top-level patchedDependencies must be the exact audited nine-entry closed set",
 		);
 
 		const lockExtra = await baseline();
@@ -216,7 +282,7 @@ describe("exact Workbench patch contracts", () => {
 			`patchedDependencies:\n  '@example/extra@1.0.0': ${"f".repeat(64)}\n`,
 		);
 		expect(validateWorkbenchPatchSet(lockExtra)).toContain(
-			"pnpm-lock.yaml top-level patchedDependencies must be the exact audited eight-entry closed set",
+			"pnpm-lock.yaml top-level patchedDependencies must be the exact audited nine-entry closed set",
 		);
 	});
 
@@ -236,7 +302,7 @@ describe("exact Workbench patch contracts", () => {
 
 	it("rejects bare importer and snapshot edges even when comments repeat the hash", async () => {
 		const apiHash =
-			"b416c3f7a73dc3c72fae55455515b805a180ac154aa4044d698b8a00cd68be62";
+			"c307c7be7a3a08afa76611200dda1bceab1d649f6494652b580d8e9978237581";
 		const importerBare = await baseline();
 		importerBare.lockfile = `${importerBare.lockfile.replace(
 			`        version: 35.0.1(patch_hash=${apiHash})`,

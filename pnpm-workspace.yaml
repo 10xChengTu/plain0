@@ -7,6 +7,7 @@ patchedDependencies:
   '@codingame/monaco-vscode-api@35.0.1': patches/@codingame__monaco-vscode-api@35.0.1.patch
   '@codingame/monaco-vscode-base-service-override@35.0.1': patches/@codingame__monaco-vscode-base-service-override@35.0.1.patch
   '@codingame/monaco-vscode-bulk-edit-service-override@35.0.1': patches/@codingame__monaco-vscode-bulk-edit-service-override@35.0.1.patch
+  '@codingame/monaco-vscode-configuration-service-override@35.0.1': patches/@codingame__monaco-vscode-configuration-service-override@35.0.1.patch
   '@codingame/monaco-vscode-explorer-service-override@35.0.1': patches/@codingame__monaco-vscode-explorer-service-override@35.0.1.patch
   '@codingame/monaco-vscode-extensions-service-override@35.0.1': patches/@codingame__monaco-vscode-extensions-service-override@35.0.1.patch
   '@codingame/monaco-vscode-files-service-override@35.0.1': patches/@codingame__monaco-vscode-files-service-override@35.0.1.patch

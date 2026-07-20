@@ -4,7 +4,9 @@ const PATCH_CONTRACTS = Object.freeze([
 	Object.freeze({
 		packageName: "@codingame/monaco-vscode-api@35.0.1",
 		patchPath: "patches/@codingame__monaco-vscode-api@35.0.1.patch",
-		sha256: "b416c3f7a73dc3c72fae55455515b805a180ac154aa4044d698b8a00cd68be62",
+		sha256: "c307c7be7a3a08afa76611200dda1bceab1d649f6494652b580d8e9978237581",
+		integrity:
+			"sha512-pJMSRMI0m5Mvx54u6iBGh+iad9KqfICnwAcjswNJOO7Xt1OXm5xILcM32VkMe4UX0YmrGAvYc0WVKWL8I9O4ng==",
 		directImporter: true,
 		snapshotEdgeCount: 22,
 		shape: Object.freeze([
@@ -19,6 +21,17 @@ const PATCH_CONTRACTS = Object.freeze([
 			"@@ -0,0 +1,70 @@",
 			"diff --git a/vscode/src/vs/platform/files/common/plainWorkspaceDelete.js b/vscode/src/vs/platform/files/common/plainWorkspaceDelete.js",
 			"@@ -0,0 +1,414 @@",
+			"diff --git a/vscode/src/vs/workbench/browser/actions/windowActions.js b/vscode/src/vs/workbench/browser/actions/windowActions.js",
+			"@@ -407,36 +407,6 @@ class ShowAboutDialogAction extends Action2 {",
+			"@@ -451,7 +421,6 @@ class BlurAction extends Action2 {",
+			"diff --git a/vscode/src/vs/workbench/browser/actions/workspaceActions.js b/vscode/src/vs/workbench/browser/actions/workspaceActions.js",
+			"@@ -67,12 +67,9 @@ class OpenFolderAction extends Action2 {",
+			"@@ -304,24 +301,10 @@ class DuplicateWorkspaceInNewWindowAction extends Action2 {",
+			"@@ -340,24 +323,6 @@ MenuRegistry.appendMenuItem(MenuId.MenubarFileMenu, {",
+			"@@ -385,23 +350,4 @@ MenuRegistry.appendMenuItem(MenuId.MenubarFileMenu, {",
+			"diff --git a/vscode/src/vs/workbench/browser/actions/workspaceCommands.js b/vscode/src/vs/workbench/browser/actions/workspaceCommands.js",
+			"@@ -1,97 +1,22 @@",
+			"@@ -131,76 +56,6 @@ CommandsRegistry.registerCommand(PICK_WORKSPACE_FOLDER_COMMAND_ID, async functio",
 			"diff --git a/vscode/src/vs/workbench/browser/parts/globalCompositeBar.js b/vscode/src/vs/workbench/browser/parts/globalCompositeBar.js",
 			"@@ -117,15 +117,7 @@ let GlobalCompositeBar = class GlobalCompositeBar extends Disposable {",
 			"@@ -137,30 +129,16 @@ let GlobalCompositeBar = class GlobalCompositeBar extends Disposable {",
@@ -30,6 +43,9 @@ const PATCH_CONTRACTS = Object.freeze([
 			"@@ -106,7 +151,14 @@ let TextFileSaveErrorHandler = class TextFileSaveErrorHandler extends Disposable",
 			"@@ -331,6 +383,27 @@ class RetrySaveModelAction extends Action {",
 			"@@ -431,6 +504,9 @@ async function acceptOrRevertLocalChangesCommand(accessor, resource, accept) {",
+			"diff --git a/vscode/src/vs/workbench/contrib/files/browser/fileActions.contribution.js b/vscode/src/vs/workbench/contrib/files/browser/fileActions.contribution.js",
+			"@@ -4,7 +4,6 @@ import { GlobalCompareResourcesAction, FocusFilesExplorer, ShowActiveFileInExplo",
+			"@@ -32,8 +31,6 @@ registerAction2(SetActiveEditorReadonlyInSession);",
 			"diff --git a/vscode/src/vs/workbench/contrib/files/browser/fileActions.js b/vscode/src/vs/workbench/contrib/files/browser/fileActions.js",
 			"@@ -10,6 +10,7 @@ import { Action } from '../../../../base/common/actions.js';",
 			"@@ -99,6 +100,42 @@ async function deleteFiles(",
@@ -68,6 +84,8 @@ const PATCH_CONTRACTS = Object.freeze([
 		patchPath:
 			"patches/@codingame__monaco-vscode-base-service-override@35.0.1.patch",
 		sha256: "db541d394346ba2985b5550e2f0faf665a056ac701df25119354bd0b1e3baf4e",
+		integrity:
+			"sha512-t1jG2GWrJcNJBzvSSC7H174C/7VmPDFR3FT89cmmYu1XjSs9XUDYgjLAzaQrf+KP6zlWv+uE3HvLBo0OESQ4MQ==",
 		directImporter: false,
 		snapshotEdgeCount: 1,
 		shape: Object.freeze([
@@ -81,6 +99,8 @@ const PATCH_CONTRACTS = Object.freeze([
 		patchPath:
 			"patches/@codingame__monaco-vscode-bulk-edit-service-override@35.0.1.patch",
 		sha256: "4437c5e441146d5d2f2262cbe8748932a1353ebf48424356fa648d33abf44245",
+		integrity:
+			"sha512-4pLqH3KRUU0IevwRFBUPvHkiP9+wkWHIsPNXq/BVwulvEAgR69bjmpXkRHXXGOUilYdq1LCoICFGIyAtmyrTdg==",
 		directImporter: false,
 		snapshotEdgeCount: 1,
 		shape: Object.freeze([
@@ -93,10 +113,27 @@ const PATCH_CONTRACTS = Object.freeze([
 		]),
 	}),
 	Object.freeze({
+		packageName:
+			"@codingame/monaco-vscode-configuration-service-override@35.0.1",
+		patchPath:
+			"patches/@codingame__monaco-vscode-configuration-service-override@35.0.1.patch",
+		sha256: "99b3c228c6f0fbab7e5fe84b2a173c569af2b99c0e969a2f24b39f6f5d39f093",
+		integrity:
+			"sha512-ndOt5a9jok43KSunXygHg/enZ19jHhxxsyzNg+T3ymSi3dpBNRHB30sJ7zeh+Ogz3a4y35gx8rlLSlwqB9ZoXQ==",
+		directImporter: true,
+		snapshotEdgeCount: 0,
+		shape: Object.freeze([
+			"diff --git a/index.js b/index.js",
+			"@@ -68,7 +68,7 @@ function onUserConfigurationChange(callback) {",
+		]),
+	}),
+	Object.freeze({
 		packageName: "@codingame/monaco-vscode-explorer-service-override@35.0.1",
 		patchPath:
 			"patches/@codingame__monaco-vscode-explorer-service-override@35.0.1.patch",
 		sha256: "1345cf49b5d4621da51a4c873d6c03f98a02c70bde9d5f747c4ef0e826ab5cc2",
+		integrity:
+			"sha512-hTeVVepUXl9+sM2qZP7QMvA9zEDacl4ubkVWmcqpaxvQ5YUQysFtWeZPQkKOuTfS4lCH374mfiQ02GkbrkDpmg==",
 		directImporter: true,
 		snapshotEdgeCount: 0,
 		shape: Object.freeze([
@@ -109,6 +146,8 @@ const PATCH_CONTRACTS = Object.freeze([
 		patchPath:
 			"patches/@codingame__monaco-vscode-extensions-service-override@35.0.1.patch",
 		sha256: "1e3fa68b2e618e1d8031ed3adb95f73be80654854d3607b37cab6ba3b1e0113c",
+		integrity:
+			"sha512-AMqRfu1UP5D8r3NR/YXJPcgJRnLJAxJDOOZTp3ydNLUyVjN10z9TFpYlL5FJPbu433ygG+vfJmI4+Bzau32e+Q==",
 		directImporter: false,
 		snapshotEdgeCount: 1,
 		shape: Object.freeze([
@@ -134,6 +173,8 @@ const PATCH_CONTRACTS = Object.freeze([
 		patchPath:
 			"patches/@codingame__monaco-vscode-files-service-override@35.0.1.patch",
 		sha256: "4639136edb34a2de20a9f24c8d7bfc892c7080e444c997a8290772ce37ac0159",
+		integrity:
+			"sha512-tuyXQG4xajLk3uHpYRF0KCO1DV1L3U6tf+COPumRgDmJUINNOPBWpJ43uAdDnE2MNJL9eY5E4LlIxeHSZChaZw==",
 		directImporter: true,
 		snapshotEdgeCount: 6,
 		shape: Object.freeze([
@@ -166,6 +207,8 @@ const PATCH_CONTRACTS = Object.freeze([
 		patchPath:
 			"patches/@codingame__monaco-vscode-theme-service-override@35.0.1.patch",
 		sha256: "2f03277b14543f1e3bc2f723ca214543b1b0d2ca1c893a78287ccc34d071a9b5",
+		integrity:
+			"sha512-dBF71oD/yKAqPT8Sl0CLy2pzpV2Q9unICL+NroRZPA989X1d4/74UV650Tmp3S2StYLSVQKcZ0qhZ8vcf6zRYQ==",
 		directImporter: true,
 		snapshotEdgeCount: 0,
 		shape: Object.freeze([
@@ -179,6 +222,8 @@ const PATCH_CONTRACTS = Object.freeze([
 		patchPath:
 			"patches/@codingame__monaco-vscode-view-common-service-override@35.0.1.patch",
 		sha256: "9d6591b1439109dba9a065546df06b69d90c8ae81d4c7cbd5566032f4322fe39",
+		integrity:
+			"sha512-qfbBJfClz18VZwZV0htcD4l7TQqotIZx3yMb8O1Ud0bNByFkj/SkN7q+XoSZtjW/eo4GVimlMV9TjDdCXIpaBQ==",
 		directImporter: false,
 		snapshotEdgeCount: 1,
 		shape: Object.freeze([
@@ -371,7 +416,7 @@ function exactMappingLines(source, expected, label, failures) {
 	).filter((line) => line.trim().length > 0);
 	if (JSON.stringify(actual) !== JSON.stringify(expected)) {
 		failures.push(
-			`${label} top-level patchedDependencies must be the exact audited eight-entry closed set`,
+			`${label} top-level patchedDependencies must be the exact audited nine-entry closed set`,
 		);
 	}
 	return actual;
@@ -445,6 +490,37 @@ function validateSnapshotGraph(lines, failures) {
 	}
 }
 
+function validatePackageIntegrities(lines, failures) {
+	const packageLines = semanticLines(lines);
+	for (const contract of PATCH_CONTRACTS) {
+		const { alias, version } = packageIdentity(contract);
+		const expectedHeader = `  '${alias}@${version}':`;
+		const expectedResolution = `    resolution: {integrity: ${contract.integrity}}`;
+		const matchingHeaders = packageLines.filter((line) =>
+			line.startsWith(`  '${alias}@`),
+		);
+		const headerIndex = packageLines.indexOf(expectedHeader);
+		const nextPackageIndex = packageLines.findIndex(
+			(line, index) => index > headerIndex && /^  \S/u.test(line),
+		);
+		const blockEnd =
+			nextPackageIndex === -1 ? packageLines.length : nextPackageIndex;
+		const block =
+			headerIndex === -1 ? [] : packageLines.slice(headerIndex, blockEnd);
+		if (
+			matchingHeaders.length !== 1 ||
+			matchingHeaders[0] !== expectedHeader ||
+			block.length !== 2 ||
+			block[0] !== expectedHeader ||
+			block[1] !== expectedResolution
+		) {
+			failures.push(
+				`pnpm-lock.yaml package integrity for ${alias}@${version} must remain the exact audited tarball`,
+			);
+		}
+	}
+}
+
 export function validateWorkbenchPatchSet({
 	workspaceManifest,
 	lockfile,
@@ -460,7 +536,7 @@ export function validateWorkbenchPatchSet({
 	validateTopLevelYamlEnvelope(
 		lockfile,
 		"pnpm-lock.yaml",
-		["patchedDependencies", "importers", "snapshots"],
+		["patchedDependencies", "importers", "packages", "snapshots"],
 		failures,
 	);
 	const manifestExpected = PATCH_CONTRACTS.map(
@@ -538,6 +614,12 @@ export function validateWorkbenchPatchSet({
 		"pnpm-lock.yaml",
 		failures,
 	);
+	const packagesSection = topLevelSection(
+		lockfile,
+		"packages",
+		"pnpm-lock.yaml",
+		failures,
+	);
 	validateCanonicalSection(
 		importerSection,
 		"pnpm-lock.yaml importers",
@@ -553,6 +635,7 @@ export function validateWorkbenchPatchSet({
 		failures,
 	);
 	validateImporterGraph(importerSection, failures);
+	validatePackageIntegrities(packagesSection, failures);
 	validateSnapshotGraph(snapshotSection, failures);
 
 	return failures;

@@ -80,7 +80,7 @@ Plain 当前 `monaco-vscode-api@35.0.1` 对应 Code OSS commit `5264f2156cbcd7ae
 - 唯一 URI 的 `stat` 与有界标准 `readFile`；返回精确 size、`File`、`Readonly`。独立配置 scheme 不实现 `plainReadFile`、不返回 `plainVersion`，也不进入真实文件 scheme 的私有 PLR1/PLW1 receipt 路径。
 - `watch` 只接受唯一文件或 scheme 根并返回 no-op disposable。生成配置只有协调器一个写入源；install 后不发 `UPDATED`，避免固定实现的 50 ms reload scheduler 逃出 FIFO 并与显式 reinitialize 重复加载。
 - mkdir、write、delete、rename、copy 及其他路径全部以稳定去敏错误拒绝。
-- 每次安装冻结 workspaceId、revision、roots 和生成 bytes；外部对象、Proxy 或晚到 mutation 不能改变已安装内容。
+- 每次安装冻结 workspaceId、revision、roots 和生成 bytes；外部对象、Proxy 或晚到 mutation 不能改变已安装内容。切换到零 root 时同步清除旧 bytes，使旧配置 URI 立即 `FileNotFound`，不继续暴露已撤销 rootId/displayName。
 
 configuration override patch 必须把 `plain-workspace-config` 和 `plain-workspace` 同时加入 `ConfigurationCache` 的 no-cache scheme 闭集：前者保证 workspace file 立即加载，后者保证每个 folder 的 `.vscode` 静态配置探测不先返回旧 cache。Harness 锁定 patch hunk、scheme 常量、两个 provider 的唯一实例、注册次数与先后顺序。
 
@@ -88,12 +88,14 @@ configuration override patch 必须把 `plain-workspace-config` 和 `plain-works
 
 新增 `WorkspaceTopologyCoordinator`，它是安装配置和调用 `reinitializeWorkspace` 的唯一生产入口：
 
-1. 所有 initial/apply、replace、add、remove 和失败重同步任务进入同一个 FIFO Promise 队列。
+1. 所有 initial/apply、replace、add、remove 和 dispatch 前权威重取任务进入同一个 FIFO Promise 队列。
 2. 每个任务先严格 decode 完整 Rust snapshot；绝不在前端 `push`、`splice` 或猜测 root。
 3. workspaceId 必须与当前窗口一致；revision 必须单调。旧 revision 拒绝；同 revision + 同一冻结内容为 no-op；同 revision + 不同内容 fail closed。
-4. 在队列内按 root 数量分支：零 root 调用 `reinitializeWorkspace({ id })` 回到 `EMPTY`；1..256 roots 先安装最新虚拟配置 bytes，再调用 `reinitializeWorkspace({ id, configPath })`。调用完成才允许下一个拓扑任务进入。
-5. native mutation 成功但 Workbench 投影失败时，不能用反向 add/remove 回滚授权。尤其 remove 后，未经系统 picker 不能重新授予目录。协调器保留最新配置，最多执行一次 `workspaceSnapshot → install → reinitialize` 权威重同步；仍失败则返回稳定 `WORKSPACE_PROJECTION_FAILED`，将页面标记为需要重载并停止新的拓扑 mutation。
-6. picker cancelled 或 Rust 在 prepare/activate/revoke 前失败时不安装新 snapshot；Rust 既有事务语义保留旧 root/watcher。
+4. 在队列内按 root 数量分支：零 root 调用 `reinitializeWorkspace({ id })` 回到 `EMPTY`；1..256 roots 先安装最新虚拟配置 bytes，再调用 `reinitializeWorkspace({ id, configPath })`。resolve 后还必须从 `IWorkspaceContextService` 读取并逐项核对实际采用的 id、configPath 和 root URI 顺序；完成 adoption 握手才记录成功并允许下一个任务进入。
+5. root mutation callback 自身 reject 也属于潜在 outcome unknown：Rust command 可能已经成功而 Tauri 响应传输或严格 decoder 才失败。协调器必须仍在同一 FIFO 内读取一次权威 snapshot；若 revision/topology 未变则透传原错误，若 authority 更新则先完成投影与 adoption 再透传原错误，若 snapshot 无法读取、id/revision 冲突或无法收敛则永久锁死。不得把 callback reject 默认当作“native 未执行”。
+6. 只有配置 install/clear 在调用 `reinitializeWorkspace` 前同步失败时，协调器才可重取一次 `workspaceSnapshot` 并重新准备。固定 `WorkspaceService.initialize` 可能在部分更新内存 workspace 或发送部分事件后才 reject，因此 dispatch 后的拒绝属于 outcome unknown，绝不能自动 retry 或宣称第二次成功；它必须立即返回稳定 `WORKSPACE_PROJECTION_FAILED`、标记需要重载并停止新的 topology mutation。
+7. native mutation 成功但 Workbench 投影失败时，不能用反向 add/remove 回滚授权。尤其 remove 后，未经系统 picker 不能重新授予目录。fatal 状态保留最新 Rust snapshot 对应的生成配置供重载收敛，但不再声称当前 Explorer 与 provider 一致。
+8. picker cancelled 或 Rust 在 prepare/activate/revoke 前失败时不安装新 snapshot；Rust 既有事务语义保留旧 root/watcher。
 
 固定 configPath 很重要：Code OSS 的 `FileServiceBasedWorkspaceConfiguration.load` 只在 workspace id 变化时替换内部 identifier；同一个 workspaceId 使用随 revision 变化的 URI 可能继续读取旧 path。固定 URI、更新内容、串行 reinitialize 才是与固定实现一致的更新方式。
 
@@ -114,7 +116,9 @@ Plain 只接管以下 product commands：
 - `PlainWorkspaceEditingService`：所有通用 add/remove/update/create/save/copy/enter/pick API 以稳定去敏错误 fail closed；Plain product commands 不经过该服务。
 - `PlainWorkspacesService`：recent add/remove/clear 为 no-op，读取为空；untitled/create/delete/enter/identifier API fail closed，dirty workspaces 为空。F030 如需本地恢复，再以 Rust 本地持久化替换它。
 
-`workbench.action.openWorkspaceConfigFile` 仅凭 `WORKSPACE` state 就会出现，必须在已有 API patch 中增加依赖 `EnterMultiRootWorkspaceSupportContext` 的窄 precondition，使其在 Plain 保持隐藏；不能只让点击后报只读错误。Harness 还要拒绝恢复默认 workspace editing、recent persistence、普通 workspace file dialog 或任意生成配置写路径。
+只在单个文件里检查合法注册不足以阻止晚到模块覆盖 provider 或 command handler。当前 `app/` 必须禁止动态 `import()`，并由全源码 AST authority guard 按 module specifier 与原始导出名锁定 `registerCustomProvider`、配置 provider/factory 和 `CommandsRegistry` 的唯一导入/调用点；guarded command id 字符串只允许存在于 Plain command 闭集。未来若确需动态前端切片，必须先实现能够持续验证当前 provider/handler 身份的生命周期 guard，再单独放宽。
+
+`workbench.action.openWorkspaceConfigFile` 等 generic workspace/file action 在固定 Web bundle 里仍可能直接取得 Host/FileDialog service。已有 API patch 必须删除这些 action、command 与菜单的精确注册；app 再为对应 direct command id 注册稳定拒绝作为纵深，不能只让可见菜单点击后报只读错误。Harness 还要拒绝恢复默认 workspace editing、recent persistence、普通 workspace file dialog 或任意生成配置写路径。
 
 仅覆盖 editing/recent services 仍不足以封住直接走 Host/FileDialog 的命令。以下入口必须逐项隐藏并以 Plain command override 稳定拒绝，且进入排除面与 Harness 闭集：
 
@@ -165,7 +169,7 @@ Plain 只接管以下 product commands：
 ### 单元与 Harness
 
 - 配置 provider：1/2/256 roots，有界 JSON、无 `transient`、稳定 URI、顺序/名称、唯一 URI、query/fragment/错 authority/path 和所有写操作拒绝；watch no-op 且 install 零 file-change event。
-- topology：零 root 精确 `{ id }`、非零 root 精确 `{ id, configPath }`、单调 revision、同 revision 幂等/冲突、旧 revision、FIFO、首次失败、一次权威重同步、二次失败锁死、绝不反向 mutation。
+- topology：零 root 精确 `{ id }`、非零 root 精确 `{ id, configPath }`、单调 revision、同 revision 幂等/冲突、旧 revision、native mutation/配置 bytes/reinitialize 的同一 FIFO、id/configPath/root URI adoption 握手；mutation response reject 后区分权威未变、更新后收敛与不可判定 fatal；dispatch 前 install 失败最多一次权威重取，dispatch 后拒绝立即 outcome-unknown 锁死且绝不 retry/反向 mutation。
 - commands：replace/add selected/cancelled；两个 remove 入口；严格 UUID v4 root URI；并发命令不交错。
 - services/surfaces：默认 editing/recent API 全部 fail closed；internal config、workspace save/open/duplicate/close/new-window、`vscode.openFolder`、`_files.*`、untitled 和 file dialog 不可达。
 - provider dispatch：两个 roots 间 copy/move 与 partial refresh；移除 root 后旧 watcher wake/in-flight sync 被忽略，其余 root 不受影响。

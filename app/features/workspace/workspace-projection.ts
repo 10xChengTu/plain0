@@ -1,4 +1,4 @@
-import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
+import type { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
 import type { IAnyWorkspaceIdentifier } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace";
 import type { IWorkspaceProvider } from "@codingame/monaco-vscode-api/vscode/vs/workbench/browser/web.api";
 
@@ -7,15 +7,48 @@ import { decodeWorkspaceSnapshot } from "../../platform/tauri/workspace-codec";
 
 export const MULTI_ROOT_WORKSPACE_UNSUPPORTED =
 	"WORKSPACE_MULTI_ROOT_UNSUPPORTED" as const;
+export const WORKSPACE_PROJECTION_CONFLICT =
+	"WORKSPACE_PROJECTION_CONFLICT" as const;
+export const WORKSPACE_PROJECTION_FAILED =
+	"WORKSPACE_PROJECTION_FAILED" as const;
 
 export class MultiRootWorkspaceUnsupportedError extends Error {
 	readonly code = MULTI_ROOT_WORKSPACE_UNSUPPORTED;
 
 	constructor() {
-		super("Plain does not support adding workspace folders yet.");
+		super(
+			"Plain does not support changing workspace folders through this command yet.",
+		);
 		this.name = "MultiRootWorkspaceUnsupportedError";
 		Object.freeze(this);
 	}
+}
+
+export class WorkspaceProjectionConflictError extends Error {
+	readonly code = WORKSPACE_PROJECTION_CONFLICT;
+
+	constructor() {
+		super(
+			"The native workspace topology conflicts with the visible workspace.",
+		);
+		this.name = "WorkspaceProjectionConflictError";
+		Object.freeze(this);
+	}
+}
+
+export class WorkspaceProjectionFailedError extends Error {
+	readonly code = WORKSPACE_PROJECTION_FAILED;
+
+	constructor() {
+		super("The workspace view could not be updated. Reload Plain to continue.");
+		this.name = "WorkspaceProjectionFailedError";
+		Object.freeze(this);
+	}
+}
+
+export interface WorkspaceConfigurationStore {
+	install(snapshot: WorkspaceSnapshot): Readonly<{ configPath: URI }>;
+	clear(): void;
 }
 
 export interface WorkspaceProjection {
@@ -27,75 +60,358 @@ export type ReinitializeWorkspace = (
 	identifier: IAnyWorkspaceIdentifier,
 ) => Promise<void>;
 
-export interface WorkspaceProjector {
-	project(snapshot: WorkspaceSnapshot): WorkspaceProjection;
+export interface WorkbenchWorkspaceAdoption {
+	readonly id: string;
+	readonly configPath: URI | undefined;
+	readonly rootUris: readonly string[];
+}
+
+export interface WorkspaceTopologyMutationResult<T> {
+	readonly result: T;
+	readonly snapshot: WorkspaceSnapshot | undefined;
+}
+
+export interface WorkspaceTopologyCoordinator {
+	prepareInitial(snapshot: WorkspaceSnapshot): WorkspaceProjection;
+	completeInitial(): Promise<IAnyWorkspaceIdentifier>;
 	apply(snapshot: WorkspaceSnapshot): Promise<IAnyWorkspaceIdentifier>;
+	runMutation<T>(
+		mutation: () => Promise<WorkspaceTopologyMutationResult<T>>,
+	): Promise<T>;
+}
+
+interface ProjectedState {
+	readonly snapshot: WorkspaceSnapshot;
+	readonly topologyKey: string;
+	readonly projection: WorkspaceProjection;
 }
 
 const rejectWorkbenchWorkspaceOpen: IWorkspaceProvider["open"] = async () =>
 	false;
 
+function workspaceTopologyKey(snapshot: WorkspaceSnapshot): string {
+	return JSON.stringify(
+		snapshot.roots.map(({ rootId, displayName, uri }) => [
+			rootId,
+			displayName,
+			uri,
+		]),
+	);
+}
+
 function projectDecodedSnapshot(
 	snapshot: WorkspaceSnapshot,
-): WorkspaceProjection {
-	// F020 currently exposes one folder in Workbench. Any additional native
-	// capabilities remain authorized in Rust but are not projected until the
-	// virtual .code-workspace slice lands; the add-root command stays disabled.
-	const root = snapshot.roots[0];
-	if (root === undefined) {
-		return Object.freeze({
-			provider: Object.freeze({
-				workspace: undefined,
-				// Filesystem authorization does not grant Git, PTY or DAP process
-				// trust, so the Workbench must not infer a trusted workspace here.
-				trusted: false,
-				open: rejectWorkbenchWorkspaceOpen,
-			}),
-			identifier: Object.freeze({ id: snapshot.workspaceId }),
+	configurationStore: WorkspaceConfigurationStore,
+): ProjectedState {
+	const rootCount = snapshot.roots.length;
+	let workspace: IWorkspaceProvider["workspace"];
+	let identifier: IAnyWorkspaceIdentifier;
+	if (rootCount === 0) {
+		configurationStore.clear();
+		workspace = undefined;
+		identifier = Object.freeze({ id: snapshot.workspaceId });
+	} else {
+		const { configPath } = configurationStore.install(snapshot);
+		workspace = Object.freeze({
+			workspaceUri: configPath,
+			id: snapshot.workspaceId,
+		});
+		identifier = Object.freeze({
+			id: snapshot.workspaceId,
+			configPath,
 		});
 	}
 
-	const folderUri = URI.parse(root.uri, true);
 	return Object.freeze({
-		provider: Object.freeze({
-			workspace: Object.freeze({
-				folderUri,
-				id: snapshot.workspaceId,
-				label: root.displayName,
+		snapshot,
+		topologyKey: workspaceTopologyKey(snapshot),
+		projection: Object.freeze({
+			provider: Object.freeze({
+				workspace,
+				// Native directory authorization does not grant Git, PTY or DAP
+				// process trust. Plain keeps execution trust in Rust.
+				trusted: false,
+				open: rejectWorkbenchWorkspaceOpen,
 			}),
-			// Native directory authorization is deliberately separate from
-			// permission to execute Git, terminal or debug adapter processes.
-			trusted: false,
-			open: rejectWorkbenchWorkspaceOpen,
-		}),
-		identifier: Object.freeze({
-			id: snapshot.workspaceId,
-			uri: folderUri,
+			identifier,
 		}),
 	});
 }
 
 export function projectWorkspaceSnapshot(
 	snapshot: WorkspaceSnapshot,
+	configurationStore: WorkspaceConfigurationStore,
 ): WorkspaceProjection {
-	return projectDecodedSnapshot(decodeWorkspaceSnapshot(snapshot));
+	return projectDecodedSnapshot(
+		decodeWorkspaceSnapshot(snapshot),
+		configurationStore,
+	).projection;
 }
 
-export async function applyWorkspaceSnapshot(
-	snapshot: WorkspaceSnapshot,
+export function createWorkspaceTopologyCoordinator(
+	configurationStore: WorkspaceConfigurationStore,
 	reinitializeWorkspace: ReinitializeWorkspace,
-): Promise<IAnyWorkspaceIdentifier> {
-	const projection = projectWorkspaceSnapshot(snapshot);
-	await reinitializeWorkspace(projection.identifier);
-	return projection.identifier;
-}
+	loadAuthoritativeSnapshot: () => Promise<WorkspaceSnapshot>,
+	readWorkbenchAdoption: () => Promise<WorkbenchWorkspaceAdoption>,
+	onReloadRequired: (error: WorkspaceProjectionFailedError) => void = () => {},
+): WorkspaceTopologyCoordinator {
+	let preparedInitial: ProjectedState | undefined;
+	let current: ProjectedState | undefined;
+	let initialCompleted = false;
+	let fatalError: WorkspaceProjectionFailedError | undefined;
+	let queueTail: Promise<void> = Promise.resolve();
 
-export function createWorkspaceProjector(
-	reinitializeWorkspace: ReinitializeWorkspace,
-): WorkspaceProjector {
+	const enqueue = <T>(task: () => Promise<T>): Promise<T> => {
+		const pending = queueTail.then(task);
+		queueTail = pending.then(
+			() => undefined,
+			() => undefined,
+		);
+		return pending;
+	};
+
+	const failPermanently = (): WorkspaceProjectionFailedError => {
+		if (fatalError === undefined) {
+			fatalError = new WorkspaceProjectionFailedError();
+			current = undefined;
+			try {
+				onReloadRequired(fatalError);
+			} catch {
+				// A UI marker must never replace the stable projection failure.
+			}
+		}
+		return fatalError;
+	};
+
+	const assertWorkbenchAdoption = async (
+		projected: ProjectedState,
+	): Promise<void> => {
+		let adoption: WorkbenchWorkspaceAdoption;
+		try {
+			adoption = await readWorkbenchAdoption();
+		} catch {
+			throw failPermanently();
+		}
+		const expectedConfigPath =
+			"configPath" in projected.projection.identifier
+				? projected.projection.identifier.configPath.toString()
+				: undefined;
+		let adoptedConfigPath: string | undefined;
+		try {
+			adoptedConfigPath = adoption.configPath?.toString();
+		} catch {
+			throw failPermanently();
+		}
+		if (
+			adoption.id !== projected.snapshot.workspaceId ||
+			adoptedConfigPath !== expectedConfigPath ||
+			adoption.rootUris.length !== projected.snapshot.roots.length ||
+			adoption.rootUris.some(
+				(uri, index) => uri !== projected.snapshot.roots[index]?.uri,
+			)
+		) {
+			throw failPermanently();
+		}
+	};
+
+	const assertCompatibleSnapshot = (
+		candidate: WorkspaceSnapshot,
+		candidateKey: string,
+		failed: WorkspaceSnapshot,
+		failedKey: string,
+	): void => {
+		if (
+			current === undefined ||
+			candidate.workspaceId !== current.snapshot.workspaceId ||
+			candidate.revision < failed.revision
+		) {
+			throw failPermanently();
+		}
+		if (
+			(candidate.revision === failed.revision && candidateKey !== failedKey) ||
+			(candidate.revision === current.snapshot.revision &&
+				candidateKey !== current.topologyKey)
+		) {
+			throw failPermanently();
+		}
+	};
+
+	const reinitializeProjectedState = async (
+		projected: ProjectedState,
+	): Promise<IAnyWorkspaceIdentifier> => {
+		if (fatalError !== undefined) {
+			throw fatalError;
+		}
+		try {
+			await reinitializeWorkspace(projected.projection.identifier);
+		} catch {
+			// WorkspaceService.initialize can reject after partially updating its
+			// in-memory workspace. Re-dispatch could then miss folder events, so
+			// every post-dispatch failure is an outcome-unknown reload boundary.
+			throw failPermanently();
+		}
+		await assertWorkbenchAdoption(projected);
+		current = projected;
+		return projected.projection.identifier;
+	};
+
+	const applyInQueue = async (
+		snapshot: WorkspaceSnapshot,
+	): Promise<IAnyWorkspaceIdentifier> => {
+		if (fatalError !== undefined) {
+			throw fatalError;
+		}
+		if (!initialCompleted || current === undefined) {
+			throw new WorkspaceProjectionConflictError();
+		}
+
+		const decoded = decodeWorkspaceSnapshot(snapshot);
+		if (decoded.workspaceId !== current.snapshot.workspaceId) {
+			throw failPermanently();
+		}
+		if (decoded.revision < current.snapshot.revision) {
+			throw new WorkspaceProjectionConflictError();
+		}
+		const decodedKey = workspaceTopologyKey(decoded);
+		if (decoded.revision === current.snapshot.revision) {
+			if (decodedKey === current.topologyKey) {
+				return current.projection.identifier;
+			}
+			throw failPermanently();
+		}
+
+		let projected: ProjectedState;
+		try {
+			projected = projectDecodedSnapshot(decoded, configurationStore);
+		} catch {
+			let authoritativeSnapshot: WorkspaceSnapshot;
+			let authoritativeKey: string;
+			try {
+				authoritativeSnapshot = decodeWorkspaceSnapshot(
+					await loadAuthoritativeSnapshot(),
+				);
+				authoritativeKey = workspaceTopologyKey(authoritativeSnapshot);
+				assertCompatibleSnapshot(
+					authoritativeSnapshot,
+					authoritativeKey,
+					decoded,
+					decodedKey,
+				);
+			} catch {
+				throw failPermanently();
+			}
+
+			try {
+				projected = projectDecodedSnapshot(
+					authoritativeSnapshot,
+					configurationStore,
+				);
+			} catch {
+				throw failPermanently();
+			}
+		}
+		return reinitializeProjectedState(projected);
+	};
+
+	const reconcileRejectedMutation = async (error: unknown): Promise<never> => {
+		let authoritative: WorkspaceSnapshot;
+		let authoritativeKey: string;
+		try {
+			authoritative = decodeWorkspaceSnapshot(
+				await loadAuthoritativeSnapshot(),
+			);
+			authoritativeKey = workspaceTopologyKey(authoritative);
+		} catch {
+			throw failPermanently();
+		}
+		if (
+			current === undefined ||
+			authoritative.workspaceId !== current.snapshot.workspaceId ||
+			authoritative.revision < current.snapshot.revision
+		) {
+			throw failPermanently();
+		}
+		if (authoritative.revision === current.snapshot.revision) {
+			if (authoritativeKey !== current.topologyKey) {
+				throw failPermanently();
+			}
+			throw error;
+		}
+
+		try {
+			await applyInQueue(authoritative);
+		} catch {
+			throw failPermanently();
+		}
+		throw error;
+	};
+
+	const runMutationInQueue = async <T>(
+		mutation: () => Promise<WorkspaceTopologyMutationResult<T>>,
+	): Promise<T> => {
+		if (fatalError !== undefined) {
+			throw fatalError;
+		}
+		if (!initialCompleted || current === undefined) {
+			throw new WorkspaceProjectionConflictError();
+		}
+
+		let result: T;
+		let snapshot: WorkspaceSnapshot | undefined;
+		try {
+			const mutationResult = await mutation();
+			result = mutationResult.result;
+			snapshot = mutationResult.snapshot;
+		} catch (error) {
+			return reconcileRejectedMutation(error);
+		}
+		if (snapshot !== undefined) {
+			await applyInQueue(snapshot);
+		}
+		return result;
+	};
+
 	return Object.freeze({
-		project: projectWorkspaceSnapshot,
-		apply: (snapshot: WorkspaceSnapshot) =>
-			applyWorkspaceSnapshot(snapshot, reinitializeWorkspace),
+		prepareInitial(snapshot: WorkspaceSnapshot) {
+			if (preparedInitial !== undefined || initialCompleted) {
+				throw new WorkspaceProjectionConflictError();
+			}
+			preparedInitial = projectDecodedSnapshot(
+				decodeWorkspaceSnapshot(snapshot),
+				configurationStore,
+			);
+			return preparedInitial.projection;
+		},
+		completeInitial() {
+			return enqueue(async () => {
+				if (
+					fatalError !== undefined ||
+					preparedInitial === undefined ||
+					initialCompleted
+				) {
+					throw fatalError ?? new WorkspaceProjectionConflictError();
+				}
+				const initial = preparedInitial;
+				if (initial.snapshot.roots.length === 0) {
+					try {
+						await reinitializeWorkspace(initial.projection.identifier);
+					} catch {
+						throw failPermanently();
+					}
+				}
+				await assertWorkbenchAdoption(initial);
+				current = initial;
+				initialCompleted = true;
+				return initial.projection.identifier;
+			});
+		},
+		apply(snapshot: WorkspaceSnapshot) {
+			return enqueue(() => applyInQueue(snapshot));
+		},
+		runMutation<T>(
+			mutation: () => Promise<WorkspaceTopologyMutationResult<T>>,
+		) {
+			return enqueue(() => runMutationInQueue(mutation));
+		},
 	});
 }

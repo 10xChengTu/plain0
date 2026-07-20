@@ -9,9 +9,15 @@ import getThemeServiceOverride from "@codingame/monaco-vscode-theme-service-over
 import getWorkbenchServiceOverride from "@codingame/monaco-vscode-workbench-service-override";
 import { IDialogService } from "@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service";
 import { SyncDescriptor } from "@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors";
+import { IWorkspacesService } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspaces/common/workspaces.service";
 import { ILanguageStatusService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/languageStatus/common/languageStatusService.service";
+import { IWorkspaceEditingService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workspaces/common/workspaceEditing.service";
 
 import { EmptyLanguageStatusService } from "./services/empty-language-status";
+import {
+	PlainWorkspaceEditingService,
+	PlainWorkspacesService,
+} from "./services/plain-workspace-services";
 
 /**
  * The only Workbench services directly selected by Plain. Core services pulled
@@ -26,6 +32,16 @@ export function createServiceOverrides() {
 		...getExplorerServiceOverride(),
 		...getThemeServiceOverride(),
 		...getTextmateServiceOverride(),
+		[IWorkspaceEditingService.toString()]: new SyncDescriptor(
+			PlainWorkspaceEditingService,
+			[],
+			true,
+		),
+		[IWorkspacesService.toString()]: new SyncDescriptor(
+			PlainWorkspacesService,
+			[],
+			true,
+		),
 		[IDialogService.toString()]: new SyncDescriptor(
 			DialogService,
 			undefined,

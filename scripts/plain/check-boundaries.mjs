@@ -29,6 +29,7 @@ import {
 	auditedWorkbenchPatchPaths,
 	validateWorkbenchPatchSet,
 } from "./workbench-patch-contracts.mjs";
+import { validateWorkspaceTopologyContracts } from "./workspace-topology-contracts.mjs";
 
 const root = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -87,6 +88,13 @@ const requiredPatches = new Map([
 		{
 			file: "patches/@codingame__monaco-vscode-bulk-edit-service-override@35.0.1.patch",
 			marker: "validatePlainWorkspaceDeleteResourceEditBatch",
+		},
+	],
+	[
+		"@codingame/monaco-vscode-configuration-service-override@35.0.1",
+		{
+			file: "patches/@codingame__monaco-vscode-configuration-service-override@35.0.1.patch",
+			marker: '"plain-workspace-config"',
 		},
 	],
 	[
@@ -320,6 +328,33 @@ const servicesSource = await readFile(
 	"utf8",
 );
 for (const failure of validateDialogServiceOverride(servicesSource)) {
+	fail(failure);
+}
+const workspaceCommandsSource = await readFile(
+	path.join(appRoot, "features/workspace/commands.ts"),
+	"utf8",
+);
+const workspaceProjectionSource = await readFile(
+	path.join(appRoot, "features/workspace/workspace-projection.ts"),
+	"utf8",
+);
+const workspaceConfigurationProviderSource = await readFile(
+	path.join(appRoot, "features/workspace/workspace-configuration-provider.ts"),
+	"utf8",
+);
+const plainWorkspaceServicesSource = await readFile(
+	path.join(appRoot, "services/plain-workspace-services.ts"),
+	"utf8",
+);
+for (const failure of validateWorkspaceTopologyContracts({
+	appSources,
+	main: mainSource,
+	services: servicesSource,
+	commands: workspaceCommandsSource,
+	projection: workspaceProjectionSource,
+	configurationProvider: workspaceConfigurationProviderSource,
+	plainWorkspaceServices: plainWorkspaceServicesSource,
+})) {
 	fail(failure);
 }
 const workspaceProviderSource = await readFile(

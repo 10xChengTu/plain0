@@ -1,0 +1,13 @@
+diff --git a/index.js b/index.js
+index 8a66a9f0ab2be79998dc2100cccc71014bf213d8..d05fb48eb13e133c0301d97888058e46c926b9b3 100644
+--- a/index.js
++++ b/index.js
+@@ -68,7 +68,7 @@ function onUserConfigurationChange(callback) {
+ const configurationRegistry = Registry.as(Extensions.Configuration);
+ let InjectedConfigurationService = class InjectedConfigurationService extends WorkspaceService {
+     constructor(workbenchEnvironmentService, userDataProfileService, userDataProfilesService, fileService, remoteAgentService, uriIdentityService, logService, policyService) {
+-        const configurationCache = new ConfigurationCache([Schemas.file, Schemas.vscodeUserData, Schemas.tmp], workbenchEnvironmentService, fileService);
++        const configurationCache = new ConfigurationCache([Schemas.file, Schemas.vscodeUserData, Schemas.tmp, "plain-workspace", "plain-workspace-config"], workbenchEnvironmentService, fileService);
+         super({ configurationCache, remoteAuthority: getWorkbenchConstructionOptions().remoteAuthority }, workbenchEnvironmentService, userDataProfileService, userDataProfilesService, fileService, remoteAgentService, uriIdentityService, logService, policyService);
+     }
+ };

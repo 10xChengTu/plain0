@@ -3,11 +3,21 @@ import type { IContextKeyService } from "@codingame/monaco-vscode-api/vscode/vs/
 import { describe, expect, it, vi } from "vitest";
 
 import {
+	GUARDED_WORKSPACE_COMMAND_IDS,
 	registerWorkspaceCommands,
 	WORKSPACE_COMMAND_IDS,
 } from "../../app/features/workspace/commands";
-import { MULTI_ROOT_WORKSPACE_UNSUPPORTED } from "../../app/features/workspace/workspace-projection";
-import type { PlainBridge } from "../../app/platform/tauri";
+import {
+	MULTI_ROOT_WORKSPACE_UNSUPPORTED,
+	type WorkspaceTopologyCoordinator,
+} from "../../app/features/workspace/workspace-projection";
+import type { PlainBridge, WorkspaceSnapshot } from "../../app/platform/tauri";
+import { PLAIN_WORKSPACE_OPERATION_UNSUPPORTED } from "../../app/services/plain-workspace-services";
+
+type TestTopologyMutation = () => Promise<{
+	readonly result: unknown;
+	readonly snapshot: WorkspaceSnapshot | undefined;
+}>;
 
 describe("workspace Workbench command overrides", () => {
 	it("keeps the existing command ids and passes each picker mode", async () => {
@@ -57,11 +67,20 @@ describe("workspace Workbench command overrides", () => {
 			}),
 			getContextKeyValue: vi.fn((key: string) => contextValues.get(key)),
 		} as unknown as IContextKeyService;
-		const applySnapshot = vi.fn();
+		const projectedSnapshots: unknown[] = [];
+		const topologyCoordinator = {
+			runMutation: vi.fn(async (mutation: TestTopologyMutation) => {
+				const mutationResult = await mutation();
+				if (mutationResult.snapshot !== undefined) {
+					projectedSnapshots.push(mutationResult.snapshot);
+				}
+				return mutationResult.result;
+			}),
+		} as unknown as WorkspaceTopologyCoordinator;
 		const registration = registerWorkspaceCommands(
 			bridge,
 			contextKeyService,
-			applySnapshot,
+			topologyCoordinator,
 		);
 
 		try {
@@ -87,9 +106,18 @@ describe("workspace Workbench command overrides", () => {
 			await expect(addRoot?.handler(undefined as never)).rejects.toMatchObject({
 				code: MULTI_ROOT_WORKSPACE_UNSUPPORTED,
 			});
+			for (const id of GUARDED_WORKSPACE_COMMAND_IDS) {
+				const guarded = CommandsRegistry.getCommand(id);
+				expect(guarded?.id).toBe(id);
+				await expect(
+					guarded?.handler(undefined as never),
+				).rejects.toMatchObject({
+					code: PLAIN_WORKSPACE_OPERATION_UNSUPPORTED,
+				});
+			}
 
 			expect(workspacePickRoots.mock.calls).toEqual([["replace"], ["replace"]]);
-			expect(applySnapshot).not.toHaveBeenCalled();
+			expect(projectedSnapshots).toEqual([]);
 			expect(contextValues.get("enterMultiRootWorkspaceSupport")).toBe(false);
 		} finally {
 			registration.dispose();
@@ -123,21 +151,64 @@ describe("workspace Workbench command overrides", () => {
 			}),
 			getContextKeyValue: vi.fn((key: string) => contextValues.get(key)),
 		} as unknown as IContextKeyService;
+		const topologyCoordinator = {
+			runMutation: vi.fn(async (mutation: TestTopologyMutation) => {
+				calls.push("queue");
+				const mutationResult = await mutation();
+				expect(mutationResult.snapshot).toBe(snapshot);
+				await Promise.resolve();
+				calls.push("project");
+				return mutationResult.result;
+			}),
+		} as unknown as WorkspaceTopologyCoordinator;
 		const registration = registerWorkspaceCommands(
 			bridge,
 			contextKeyService,
-			async (nextSnapshot) => {
-				expect(nextSnapshot).toBe(snapshot);
-				await Promise.resolve();
-				calls.push("project");
-			},
+			topologyCoordinator,
 		);
 
 		try {
 			await CommandsRegistry.getCommand(
 				WORKSPACE_COMMAND_IDS.openFolder,
 			)?.handler(undefined as never);
-			expect(calls).toEqual(["pick", "project"]);
+			expect(calls).toEqual(["queue", "pick", "project"]);
+		} finally {
+			registration.dispose();
+		}
+	});
+
+	it("lets the coordinator reject before a native picker mutation runs", async () => {
+		const workspacePickRoots = vi.fn();
+		const bridge = { workspacePickRoots } as unknown as PlainBridge;
+		const contextValues = new Map<string, unknown>();
+		const contextKeyService = {
+			createKey: vi.fn((key: string, defaultValue: unknown) => {
+				contextValues.set(key, defaultValue);
+				return {
+					set: (value: unknown) => contextValues.set(key, value),
+					reset: () => contextValues.set(key, defaultValue),
+					get: () => contextValues.get(key),
+				};
+			}),
+			getContextKeyValue: vi.fn((key: string) => contextValues.get(key)),
+		} as unknown as IContextKeyService;
+		const fatal = Object.freeze({ code: "WORKSPACE_PROJECTION_FAILED" });
+		const topologyCoordinator = {
+			runMutation: vi.fn(async () => Promise.reject(fatal)),
+		} as unknown as WorkspaceTopologyCoordinator;
+		const registration = registerWorkspaceCommands(
+			bridge,
+			contextKeyService,
+			topologyCoordinator,
+		);
+
+		try {
+			await expect(
+				CommandsRegistry.getCommand(WORKSPACE_COMMAND_IDS.openFolder)?.handler(
+					undefined as never,
+				),
+			).rejects.toBe(fatal);
+			expect(workspacePickRoots).not.toHaveBeenCalled();
 		} finally {
 			registration.dispose();
 		}

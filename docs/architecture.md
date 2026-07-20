@@ -130,6 +130,10 @@ Workbench model ← Plain feature service ← typed bridge/events
 ### Workspace 与文件
 
 - 一个窗口拥有一个独立 workspace scope；它包含一个或多个只经 Rust 原生目录选择器授权的 root，并为每个 root 分配稳定 opaque id。目录选择只授予文件访问，不等于授予 Git、PTY 或 DAP 外部进程执行信任。
+- Workbench 的 1..256 个 folders 只由完整 Rust `WorkspaceSnapshot` 投影：真实文件继续使用 `plain-workspace://<rootId>/`，生成配置固定为只读、eventless 的 `plain-workspace-config://<workspaceId>/workspace.code-workspace`，JSON 只含有序 `folders[].{uri,name}`。零 root 清除旧配置并回到 EMPTY；生成配置不使用 `file:`、绝对路径、`transient`、settings/tasks/launch 或可写内存文件。固定 configuration patch 让两个 Plain scheme 都绕过异步 cache。
+- 单一 topology coordinator 以 FIFO 串行 native root mutation、install/clear 与 `reinitializeWorkspace`，保持 workspaceId、强制 revision 单调并拒绝同 revision 异内容。mutation callback reject 时必须在队列内读取权威 Rust snapshot：未变则透传错误，已更新则先收敛再透传，不可判定则锁死。每次 reinitialize resolve 后必须从 `IWorkspaceContextService` 核对实际采用的 id、configPath 与有序 root URI；只有 dispatch 前的配置准备失败允许重取一次 Rust snapshot。`reinitializeWorkspace` reject 可能已经部分更新 Workbench，必须按 outcome unknown 立即锁死、要求重载，禁止 retry、反向 root mutation或宣称成功。
+- 默认 `IWorkspaceEditingService` 与 `IWorkspacesService` 由 Plain fail-closed/no-recent 实现覆盖；通用 Open File/Workspace、Host/FileDialog、untitled、save/duplicate/close/new-window command 注册从固定 patch 移除，direct command id 再稳定拒绝。replace/add/remove 只能由 Plain product command 调用 Rust picker/scope mutation并消费返回的完整 snapshot。
+- 当前 `app/` 生产源码禁止动态 `import()`，配置 provider/factory 与 `CommandsRegistry` 的导入、注册和 guarded id 也由全 app authority Harness 锁成固定闭集；在建立可持续核对当前 handler/provider 身份的生命周期 guard 前，不允许用晚到模块重新开放这些入口。
 - 每个 root 在 Rust 中持有已打开的 `cap_std::fs::Dir` capability；canonical path 是仅供显示、文件身份去重和 watcher 使用的私有元数据，不是 I/O 授权依据。
 - 所有路径请求采用 `(rootId, relativePath)` 或经过授权的 opaque handle。wire path 固定使用 `/`，拒绝 absolute、prefix、`.`、`..`、NUL、空组件和平台歧义；WebView 不接收或提交原生绝对路径。
 - 读取与 CRUD 必须相对 root capability 执行，禁止先 `canonicalize`/`starts_with` 再用 ambient `std::fs`。跨 root 操作必须显式携带两个已授权 root；普通 rename 默认不覆盖。

@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：实现 Workbench multi-root 安全投影底座：独立只读虚拟配置 provider、1..256-root 串行 topology coordinator、双 scheme no-cache patch、fail-closed workspace editing/recent services 和 Harness；新增/移除 root product commands 在本项仍安全拒绝。
+- 当前最小工作项：实现新增/替换 root product commands：Open Folder 保持 Rust replace，Add Folder 通过同一 topology FIFO 调用 Rust add picker，并继续拒绝所有 generic workspace/file/window 入口。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -89,6 +89,8 @@
 - [x] 完成 feature evidence Harness 的 GitHub 调研与技术方案：采用 validator-owned 固定闭集、非空/唯一约束和 hostile mutation tests，不让 `features.json` 自己声明可删除的必需字段；schema v3 增加逐条 `acceptanceResults`，并把 active phase/WIP 与 `progress.md` 双向锁定。方案不新增通用 schema 依赖，也不把机器形状检查冒充真实 Browser/Tauri 证据。
 - [x] 完成 feature evidence Harness schema v3：根、feature、evidence 与逐条 acceptance result 全部改为 validator-owned 固定闭集；`currentPhase` 从最早未完成阶段派生且不得早于已完成阶段，`blocked` 以非空 blocker 占用 WIP，`progress.md` 当前状态必须精确匹配唯一 active id/name。F001/F010 已迁移到逐条绑定证据，hostile tests 覆盖 schema 自降级、无效日期、空/额外/重排字段、原生证据缺失、acceptance 漂移、phase 倒退、WIP 0/1 和进度文档错配；完整 `pnpm check` 通过 26 个前端测试文件、489 个用例、Rust 255/255、架构与 bundle gate。
 - [x] 完成 Workbench multi-root 的固定 GitHub 源码调研与技术方案：复用 Code OSS `{ id, configPath }` 和 CodinGame `reinitializeWorkspace`，但用独立只读 `plain-workspace-config:`、稳定生成 URI、双 scheme no-cache patch、串行 snapshot topology coordinator 及 fail-closed workspace editing/recent services 守住 opaque root 权威。方案排除普通 `.code-workspace`、可写内存 provider、默认 workspace editing、开启通用 multi-root context 和 native mutation 反向回滚，并把安全投影、add、remove、Browser 失败矩阵与真实 Tauri 验收拆为逐项提交。
+- [x] 完成 Workbench multi-root 安全投影底座：独立只读/eventless `plain-workspace-config:` provider 只生成有序 `folders[].{uri,name}`，零 root 清除旧配置；固定 configuration patch 让两个 Plain scheme 绕过异步 cache。单一 coordinator 以 FIFO 串行 native mutation、配置 install/clear、`reinitializeWorkspace` 与 adoption 握手，锁定 workspaceId/revision/有序 root URI；mutation response reject 会按权威 snapshot 区分未变化、更新后收敛和不可判定 fatal，dispatch 后拒绝绝不重试或反向 mutation。默认 workspace editing/recent 服务、Open File/Workspace/Close/New Window 等 generic action 全部 fail closed，三个 Host new-window 入口也从固定包移除并由 direct guard 拒绝。
+- [x] multi-root 底座 Harness 与验收闭合：全 app 配置 provider 单写入口、post-dispatch 单次调用、native mutation FIFO、recent 空状态、九个 patch 基础 tarball integrity、双 scheme no-cache 和 generic command 闭集均有 AST/patch hostile mutations；独立复核额外修复了 fatal 后仍先变更 Rust roots、mutation 响应未知不重同步、provider/command alias 与晚到模块旁路、reinitialize 重试和 new-window Host 直达。完整 `pnpm check` 通过 29 个 TypeScript/JavaScript 文件、528 个用例、2275 个前端模块、2110 个 bundle source、203 项既有迁移债务与 Rust 255/255；修复后 Browser workspace E2E 6/6 通过，Open Folder 的两种 bytes transport 均无正向 pageerror/console.error/通知。
 
 ## 下一步
 

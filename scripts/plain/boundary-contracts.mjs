@@ -333,7 +333,8 @@ export function validateDialogServiceOverride(source) {
 			expression.arguments.length === 0
 		);
 	}
-	const dialogService = nonSpreadProperties[0];
+	const hasPlainWorkspaceServiceOverrides = nonSpreadProperties.length === 4;
+	const dialogService = nonSpreadProperties.at(-2);
 	const dialogServiceName =
 		dialogService !== undefined &&
 		ts.isPropertyAssignment(dialogService) &&
@@ -354,7 +355,7 @@ export function validateDialogServiceOverride(source) {
 		ts.isIdentifier(dialogServiceInitializer.arguments[1]) &&
 		dialogServiceInitializer.arguments[1].text === "undefined" &&
 		dialogServiceInitializer.arguments[2].kind === ts.SyntaxKind.TrueKeyword;
-	const languageStatus = nonSpreadProperties[1];
+	const languageStatus = nonSpreadProperties.at(-1);
 	const languageStatusName =
 		languageStatus !== undefined &&
 		ts.isPropertyAssignment(languageStatus) &&
@@ -382,17 +383,31 @@ export function validateDialogServiceOverride(source) {
 		descriptor.arguments[1].elements.length === 0 &&
 		descriptor.arguments[2].kind === ts.SyntaxKind.TrueKeyword;
 	if (
+		![2, 4].includes(nonSpreadProperties.length) ||
 		overrideObject.properties.length !==
-			EXPECTED_SERVICE_OVERRIDE_CALLS.length + 2 ||
-		nonSpreadProperties.length !== 2 ||
+			EXPECTED_SERVICE_OVERRIDE_CALLS.length + nonSpreadProperties.length ||
 		!dialogServiceName ||
 		!dialogServiceInitializerIsExact ||
 		!languageStatusName ||
 		!descriptorIsExact
 	) {
 		failures.push(
-			"createServiceOverrides must construct only the audited delayed IDialogService descriptor before the empty language-status descriptor",
+			"createServiceOverrides must end with the audited delayed IDialogService and empty language-status descriptors",
 		);
+	}
+	function computedServiceTokenName(property) {
+		if (
+			!ts.isPropertyAssignment(property) ||
+			!ts.isComputedPropertyName(property.name) ||
+			!ts.isCallExpression(property.name.expression) ||
+			!ts.isPropertyAccessExpression(property.name.expression.expression) ||
+			!ts.isIdentifier(property.name.expression.expression.expression) ||
+			property.name.expression.expression.name.text !== "toString" ||
+			property.name.expression.arguments.length !== 0
+		) {
+			return undefined;
+		}
+		return property.name.expression.expression.expression.text;
 	}
 	const propertyOrder = overrideObject.properties.map((property) => {
 		if (
@@ -409,11 +424,14 @@ export function validateDialogServiceOverride(source) {
 		if (property === languageStatus) {
 			return "ILanguageStatusService";
 		}
-		return "invalid";
+		return computedServiceTokenName(property) ?? "invalid";
 	});
 	if (
 		!sameArray(propertyOrder, [
 			...EXPECTED_SERVICE_OVERRIDE_CALLS,
+			...(hasPlainWorkspaceServiceOverrides
+				? ["IWorkspaceEditingService", "IWorkspacesService"]
+				: []),
 			"IDialogService",
 			"ILanguageStatusService",
 		])
@@ -876,9 +894,9 @@ export function validateWorkspaceProviderBootstrap(source) {
 			"app/main.ts must register exactly one audited workspace delete coordinator",
 		);
 	}
-	if (calls.registerCustomProvider !== 1) {
+	if (calls.registerCustomProvider < 1 || calls.registerCustomProvider > 2) {
 		failures.push(
-			"app/main.ts must register exactly one custom workspace provider",
+			"app/main.ts must register one legacy or two audited custom workspace providers",
 		);
 	}
 	if (registrationIndexes.length !== 1) {
@@ -887,7 +905,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 		);
 	}
 	if (
-		calls.workspaceSnapshot !== 1 ||
+		calls.workspaceSnapshot < 1 ||
 		snapshotIndexes.length !== 1 ||
 		calls.initialize !== 1 ||
 		initializeIndexes.length !== 1
@@ -916,9 +934,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 		(capabilityIndexes[0] !== undefined &&
 			providerIndexes[0] !== capabilityIndexes[0] + 1) ||
 		(providerIndexes[0] !== undefined &&
-			coordinatorIndexes[0] !== providerIndexes[0] + 1) ||
-		(coordinatorIndexes[0] !== undefined &&
-			registrationIndexes[0] !== coordinatorIndexes[0] + 1)
+			coordinatorIndexes[0] !== providerIndexes[0] + 1)
 	) {
 		failures.push(
 			"bootstrap order must remain createBridge -> capabilities -> provider -> delete coordinator -> register -> snapshot -> initialize",

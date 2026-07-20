@@ -3,6 +3,7 @@ import "@codingame/monaco-vscode-theme-defaults-default-extension";
 import {
 	getService,
 	IContextKeyService,
+	IWorkspaceContextService,
 	initialize,
 } from "@codingame/monaco-vscode-api";
 import { reinitializeWorkspace } from "@codingame/monaco-vscode-configuration-service-override";
@@ -13,10 +14,14 @@ import { enforceExcludedWorkbenchSurfaces } from "./excluded-surfaces";
 import { registerWorkspaceCommands } from "./features/workspace/commands";
 import { registerWorkspaceDeleteCoordinator } from "./features/workspace/delete-coordinator";
 import {
+	createPlainWorkspaceConfigurationProvider,
+	PLAIN_WORKSPACE_CONFIGURATION_SCHEME,
+} from "./features/workspace/workspace-configuration-provider";
+import {
 	createPlainWorkspaceFileSystemProvider,
 	PLAIN_WORKSPACE_SCHEME,
 } from "./features/workspace/file-system-provider";
-import { createWorkspaceProjector } from "./features/workspace/workspace-projection";
+import { createWorkspaceTopologyCoordinator } from "./features/workspace/workspace-projection";
 import { configureMonacoEnvironment } from "./monaco-environment";
 import { createBridge, normalizeCommandError } from "./platform/tauri";
 import { createServiceOverrides } from "./services";
@@ -40,10 +45,37 @@ async function bootstrap(): Promise<void> {
 		bridge,
 		workspaceFileSystemProvider,
 	);
+	const workspaceConfigurationProvider =
+		createPlainWorkspaceConfigurationProvider();
 	registerCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);
-	const workspaceProjector = createWorkspaceProjector(reinitializeWorkspace);
+	registerCustomProvider(
+		PLAIN_WORKSPACE_CONFIGURATION_SCHEME,
+		workspaceConfigurationProvider,
+	);
+	const workspaceTopologyCoordinator = createWorkspaceTopologyCoordinator(
+		workspaceConfigurationProvider,
+		reinitializeWorkspace,
+		() => bridge.workspaceSnapshot(),
+		async () => {
+			const workspace = (
+				await getService(IWorkspaceContextService)
+			).getWorkspace();
+			return Object.freeze({
+				id: workspace.id,
+				configPath: workspace.configuration ?? undefined,
+				rootUris: Object.freeze(
+					workspace.folders.map(({ uri }) => uri.toString()),
+				),
+			});
+		},
+		() => {
+			document.body.dataset.plainWorkspaceProjection = "reload-required";
+		},
+	);
 	const initialWorkspaceSnapshot = await bridge.workspaceSnapshot();
-	const initialWorkspace = workspaceProjector.project(initialWorkspaceSnapshot);
+	const initialWorkspace = workspaceTopologyCoordinator.prepareInitial(
+		initialWorkspaceSnapshot,
+	);
 	const stopListening = await bridge.onRuntimeReady((payload) => {
 		document.body.dataset.plainRuntimeEvent = payload.runtime;
 	});
@@ -74,15 +106,11 @@ async function bootstrap(): Promise<void> {
 		enableWorkspaceTrust: false,
 		workspaceProvider: initialWorkspace.provider,
 	});
-	if (initialWorkspace.provider.workspace === undefined) {
-		await workspaceProjector.apply(initialWorkspaceSnapshot);
-	}
+	await workspaceTopologyCoordinator.completeInitial();
 	workspaceCommands = registerWorkspaceCommands(
 		bridge,
 		await getService(IContextKeyService),
-		async (snapshot) => {
-			await workspaceProjector.apply(snapshot);
-		},
+		workspaceTopologyCoordinator,
 	);
 	const surfaceSnapshot = enforceExcludedWorkbenchSurfaces();
 	document.body.dataset.plainSurfaceGuard = EXCLUDED_SURFACE_GUARD_MARKER;

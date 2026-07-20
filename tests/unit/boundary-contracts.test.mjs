@@ -586,7 +586,7 @@ describe("Plain DOM dialog service Harness", () => {
 			"Reflect.construct(SyncDescriptor, [DialogService, undefined, true])",
 		);
 		expect(validateDialogServiceOverride(indirect)).toContain(
-			"createServiceOverrides must construct only the audited delayed IDialogService descriptor before the empty language-status descriptor",
+			"createServiceOverrides must end with the audited delayed IDialogService and empty language-status descriptors",
 		);
 
 		const fileDialogOverride = baselineServiceOverrides.replace(
@@ -595,7 +595,7 @@ describe("Plain DOM dialog service Harness", () => {
 		);
 		expect(validateDialogServiceOverride(fileDialogOverride)).toEqual(
 			expect.arrayContaining([
-				"createServiceOverrides must construct only the audited delayed IDialogService descriptor before the empty language-status descriptor",
+				"createServiceOverrides must end with the audited delayed IDialogService and empty language-status descriptors",
 				"app/services.ts must not enable IFileDialogService or fall back to global confirm",
 			]),
 		);
@@ -5572,7 +5572,7 @@ await initialize(createServiceOverrides(), container, { enableWorkspaceTrust: fa
 			),
 		).toEqual(
 			expect.arrayContaining([
-				"app/main.ts must register exactly one custom workspace provider",
+				"app/main.ts must register one legacy or two audited custom workspace providers",
 				"app/main.ts must unconditionally register only the audited plain-workspace provider",
 				"bootstrap order must remain createBridge -> capabilities -> provider -> delete coordinator -> register -> snapshot -> initialize",
 			]),
@@ -5618,7 +5618,7 @@ await initialize(createServiceOverrides(), container, { enableWorkspaceTrust: fa
 				),
 			),
 		).toContain(
-			"app/main.ts must register exactly one custom workspace provider",
+			"app/main.ts must unconditionally register only the audited plain-workspace provider",
 		);
 		expect(
 			validateWorkspaceProviderBootstrap(
