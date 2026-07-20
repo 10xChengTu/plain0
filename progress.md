@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：修正 Harness 中与 ADR 0004 冲突的工作区路径规则，锁定“root 授权时 canonicalize、授权后 capability-relative I/O”的唯一安全模型；验证并独立提交后，再处理终审发现的 feature evidence guard、Workbench multi-root 和 Browser 失败矩阵缺口。
+- 当前最小工作项：实现 feature evidence Harness schema v3：固定完成证据闭集、逐条 acceptance 映射和 `progress.md` WIP 交叉校验；调研与技术方案已冻结，完成 hostile tests、迁移和验证后独立提交。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -86,6 +86,7 @@
 - [x] 完成提交 `d20a3912` 的真实 Tauri 取消路径验收：`tauri:build:e2e` 从该提交重建隔离 debug `.app`，Computer Use 的 app state 明确绑定绝对 bundle 路径，再由 macOS 系统选择器打开只含 `delete-me.txt` 的临时 workspace。`⌘Backspace` 与 Explorer 右键 `Delete Permanently` 均显示 Workbench DOM `Warning 永久删除“delete-me.txt”？`，辅助功能树同时暴露 Cancel、永久删除和“永久且不可撤销，不会移入废纸篓”正文；显式点击 Cancel 与按 Escape 后 Explorer 均保留目标，磁盘文件仍为 42 字节且 SHA-256 固定为 `352d5751359ff38c32d89294c097085d7ac80b3f5c77260f2369f1ba36b49265`。应用已退出，临时 workspace 与截图均已清理；本项没有执行不可逆点击。
 - [x] 完成提交 `90ae894c` 的真实 Tauri 正向永久删除验收：收到用户对专用临时文件的即时确认后，再次执行 `tauri:build:e2e` 并从绝对 `.app` 打开全新 workspace；点击前重新核对唯一目标 `delete-after-confirmation.txt` 为 52 字节、SHA-256 `992160ec1e97b614d176054746fb011ae898fbee35e4d285903a93faac3bdb87`，辅助功能树显示同名不可逆 DOM 对话框后才点击“永久删除”。点击后对话框、Explorer 条目与预览编辑器同时消失，磁盘目标不存在且 workspace 目录为空，证明 `prepare → begin → commit` 的真实 Rust 路径与 Workbench 收敛成功。应用已退出，临时 workspace 与截图均已清理，未触碰其他仓库文件。
 - [x] `F020` 首轮闭环回归通过：`pnpm check` 完成 25 个 TypeScript/JavaScript 文件、484 个用例、2273 个前端模块、2108 个 bundle source、203 项既有迁移债务和 Rust 255/255；Workspace Browser E2E 7/7 通过。终审同时识别出 Harness 路径规则冲突、feature evidence guard 可绕过、Workbench multi-root 尚未投影，以及既定 CRUD 失败矩阵缺少 Browser 可见验收，因此 `F020` 继续保持 `in_progress`，不以已有 happy path 证据提前闭环。
+- [x] 完成 feature evidence Harness 的 GitHub 调研与技术方案：采用 validator-owned 固定闭集、非空/唯一约束和 hostile mutation tests，不让 `features.json` 自己声明可删除的必需字段；schema v3 增加逐条 `acceptanceResults`，并把 active phase/WIP 与 `progress.md` 双向锁定。方案不新增通用 schema 依赖，也不把机器形状检查冒充真实 Browser/Tauri 证据。
 
 ## 下一步
 
