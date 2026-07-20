@@ -22,15 +22,16 @@
 
 - `schemaVersion` 必须精确为 `3`；删除可自我降级的 `completionEvidenceFields`。
 - 根对象、feature 和 evidence 都使用固定闭集 key；字符串必须 trim 后非空，feature id/name/acceptance 唯一且按 phase/id 排序。
-- `updatedAt` 必须是有效的 `YYYY-MM-DD`；`currentPhase` 必须与唯一 active feature 的 phase 一致。没有 active feature 时允许工作项切换间的 WIP 0，但 phase 不能低于已完成 feature 的最高 phase。
+- `updatedAt` 必须是有效的 `YYYY-MM-DD`；`currentPhase` 直接派生为最早未完成 feature 的 phase，全部完成时等于最高 phase，并且不得早于任何已完成 feature。唯一 active feature 的 phase 必须与它一致，禁止阶段倒退、跳过或任意写成未来值。没有 active feature 时仍允许工作项切换间的 WIP 0。
 - `blocked` 与 `in_progress` 都占 WIP；`wipLimit` 继续精确为 `1`，避免修改清单本身绕过项目 WIP=1 规则。
 - complete feature 必须有固定 evidence：`commands`、`results`、`nativeScenarios`、`platformGaps`、`acceptanceResults`。前四项都是字符串数组；commands/results 非空。phase 大于 0 的 UI/原生 feature 必须有 native scenario。
-- `acceptanceResults` 与 acceptance 等长、按索引一一对应且每项非空。它只建立“每条退出条件都有明确证据说明”的机器门；证据真伪仍由对应命令、Browser/Tauri 验收和 Git 历史审计。
+- `acceptanceResults` 与 acceptance 等长，每项固定为 `{ acceptance, result }`，并逐索引要求 acceptance 原文完全相等、result 非空。这样 acceptance 重排或替换不能继续套用旧证据。它只建立“每条退出条件都有明确证据说明”的机器门；证据真伪仍由对应命令、Browser/Tauri 验收和 Git 历史审计。
+- blocked feature 仍占 WIP，并必须携带非空 `blocker`；其他非 complete 状态禁止该字段。
 - 非 complete feature 禁止携带 evidence，避免半成品证据被误读为验收结果。
 
 ### 跨文件 WIP
 
-- validator 从 `progress.md` 读取唯一 `- WIP：...` 行。
+- validator 只从 `progress.md` 唯一的 `## 当前状态` section 读取唯一规范 `- WIP：...` 行。
 - 一个 active feature 时，progress 必须精确引用其 id；零 active feature 时必须写 `WIP：无`。
 - 重复 WIP 行、未知 id 或与 `features.json` 不一致均失败。
 

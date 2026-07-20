@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：实现 feature evidence Harness schema v3：固定完成证据闭集、逐条 acceptance 映射和 `progress.md` WIP 交叉校验；调研与技术方案已冻结，完成 hostile tests、迁移和验证后独立提交。
+- 当前最小工作项：调研固定 Code OSS/CodinGame 35.0.1 的 multi-root workspace/configuration/editing 路径，结合 Rust opaque root snapshot 生成技术方案；研究与方案独立提交后再实现，不复用任意绝对路径或通用 workspace file 权限。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -87,19 +87,19 @@
 - [x] 完成提交 `90ae894c` 的真实 Tauri 正向永久删除验收：收到用户对专用临时文件的即时确认后，再次执行 `tauri:build:e2e` 并从绝对 `.app` 打开全新 workspace；点击前重新核对唯一目标 `delete-after-confirmation.txt` 为 52 字节、SHA-256 `992160ec1e97b614d176054746fb011ae898fbee35e4d285903a93faac3bdb87`，辅助功能树显示同名不可逆 DOM 对话框后才点击“永久删除”。点击后对话框、Explorer 条目与预览编辑器同时消失，磁盘目标不存在且 workspace 目录为空，证明 `prepare → begin → commit` 的真实 Rust 路径与 Workbench 收敛成功。应用已退出，临时 workspace 与截图均已清理，未触碰其他仓库文件。
 - [x] `F020` 首轮闭环回归通过：`pnpm check` 完成 25 个 TypeScript/JavaScript 文件、484 个用例、2273 个前端模块、2108 个 bundle source、203 项既有迁移债务和 Rust 255/255；Workspace Browser E2E 7/7 通过。终审同时识别出 Harness 路径规则冲突、feature evidence guard 可绕过、Workbench multi-root 尚未投影，以及既定 CRUD 失败矩阵缺少 Browser 可见验收，因此 `F020` 继续保持 `in_progress`，不以已有 happy path 证据提前闭环。
 - [x] 完成 feature evidence Harness 的 GitHub 调研与技术方案：采用 validator-owned 固定闭集、非空/唯一约束和 hostile mutation tests，不让 `features.json` 自己声明可删除的必需字段；schema v3 增加逐条 `acceptanceResults`，并把 active phase/WIP 与 `progress.md` 双向锁定。方案不新增通用 schema 依赖，也不把机器形状检查冒充真实 Browser/Tauri 证据。
+- [x] 完成 feature evidence Harness schema v3：根、feature、evidence 与逐条 acceptance result 全部改为 validator-owned 固定闭集；`currentPhase` 从最早未完成阶段派生且不得早于已完成阶段，`blocked` 以非空 blocker 占用 WIP，`progress.md` 当前状态必须精确匹配唯一 active id/name。F001/F010 已迁移到逐条绑定证据，hostile tests 覆盖 schema 自降级、无效日期、空/额外/重排字段、原生证据缺失、acceptance 漂移、phase 倒退、WIP 0/1 和进度文档错配；完整 `pnpm check` 通过 26 个前端测试文件、489 个用例、Rust 255/255、架构与 bundle gate。
 
 ## 下一步
 
-1. 修正并验证 Harness 路径授权规则与 feature completion evidence guard。
-2. 按“GitHub 调研 → 技术方案 → 实现”完成 Workbench multi-root 投影及新增/移除 root 生命周期。
-3. 补齐 Browser missing-parent、move partial、delete retained/partial 可见失败矩阵和真实 multi-root Tauri 验收。
-4. 全部通过后写入 `features.json` evidence/status，完成 `F020` 并切换到下一个垂直切片。
+1. 按“GitHub 调研 → 技术方案 → 实现”完成 Workbench multi-root 投影及新增/移除 root 生命周期。
+2. 补齐 Browser missing-parent、move partial、delete retained/partial 可见失败矩阵和真实 multi-root Tauri 验收。
+3. 全部通过后写入 `features.json` evidence/status，完成 `F020` 并切换到下一个垂直切片。
 
 ## 当前验收命令
 
 ```bash
 pnpm check
-cargo test --manifest-path src-tauri/Cargo.toml workspace
+cargo test --manifest-path src-tauri/Cargo.toml
 pnpm test:e2e:browser -- workspace.spec.ts
 ```
 

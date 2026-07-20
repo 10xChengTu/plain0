@@ -1,14 +1,8 @@
 {
-	"schemaVersion": 2,
-	"updatedAt": "2026-07-19",
+	"schemaVersion": 3,
+	"updatedAt": "2026-07-20",
 	"currentPhase": 2,
 	"wipLimit": 1,
-	"completionEvidenceFields": [
-		"commands",
-		"results",
-		"nativeScenarios",
-		"platformGaps"
-	],
 	"features": [
 		{
 			"id": "F001",
@@ -35,6 +29,24 @@
 				"nativeScenarios": [],
 				"platformGaps": [
 					"No native application exists in F001; native acceptance starts with F010"
+				],
+				"acceptanceResults": [
+					{
+						"acceptance": "GitHub solution and license research is recorded",
+						"result": "docs/research records the evaluated GitHub implementations, upstream licenses and rejected integration boundaries."
+					},
+					{
+						"acceptance": "Architecture and explicit product exclusions are recorded",
+						"result": "Product scope, architecture and accepted ADRs define the Tauri boundary and excluded AI, account, sync and general extension surfaces."
+					},
+					{
+						"acceptance": "Progress, feature tracking and test strategy are resumable",
+						"result": "progress.md, features.json and docs/testing.md provide the current WIP, phase gates and validation routes."
+					},
+					{
+						"acceptance": "No temporary research clone is committed",
+						"result": "The F001 completion audit and clean tracked tree confirmed that research clones and temporary artifacts were not committed."
+					}
 				]
 			}
 		},
@@ -71,6 +83,32 @@
 					"F010 native rendering was accepted on macOS; Windows and Linux packaging remains F120",
 					"The full filesystem, search, theme, PTY, Git and DAP native matrix remains F130",
 					"The inert monaco-vscode-api missing-services debt must be physically retired before F110 can complete"
+				],
+				"acceptanceResults": [
+					{
+						"acceptance": "Tauri window renders the allowlisted modular Workbench without Electron",
+						"result": "The macOS Plain.app bundle and Browser E2E rendered the allowlisted Workbench in Tauri/WKWebView with no Electron runtime."
+					},
+					{
+						"acceptance": "Typed command and event bridge has stable error DTOs",
+						"result": "TypeScript and Rust contract tests validated versioned command/event DTOs and sanitized stable error fields."
+					},
+					{
+						"acceptance": "Capabilities and CSP expose minimum permissions",
+						"result": "Architecture checks and the debug bundle audited the explicit CSP and minimum Tauri capability file."
+					},
+					{
+						"acceptance": "Architecture checks reject AI, Auth, Sync, Gallery and Extension Host entrypoints or enablement",
+						"result": "Source and final-bundle guards rejected excluded imports, commands, views, hosts and workers while recording transitional source-map debt."
+					},
+					{
+						"acceptance": "Feature completion evidence shape is validated automatically",
+						"result": "pnpm check:features validates the versioned feature contract and complete-feature evidence in CI and local checks."
+					},
+					{
+						"acceptance": "One command runs TypeScript and Rust checks",
+						"result": "pnpm check ran formatting, types, lint, feature/unit/build/architecture/bundle gates and Rust fmt, clippy and tests."
+					}
 				]
 			}
 		},

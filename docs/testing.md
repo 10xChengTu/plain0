@@ -119,7 +119,10 @@ pnpm check
 - 自动测试命令和结果。
 - 若涉及 UI/原生能力，浏览器或电脑控制场景名称。
 - 已知平台缺口。
+- 与每条 acceptance 原文一一绑定的结果说明；调整 acceptance 时不得继续复用不匹配的旧证据。
 - 对应提交可由 Git 历史查询；不在文件中写自引用 commit hash。
+
+feature schema、必需 evidence 字段、active/blocked WIP、派生 phase 与 `progress.md` 当前 WIP 的一致性由 validator-owned schema v3 和 hostile mutation tests 固定；`features.json` 不得声明或降低自己的校验字段。
 
 ## 基线迁移
 
