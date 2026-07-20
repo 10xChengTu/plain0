@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：重构 topology authority 的共享分析 IR，并封闭 configuration provider 注册权威的剩余旁路：固定 `registerCustomProvider` 与 configuration provider factory 的导入绑定和调用引用，拒绝 alias/computed/重赋值后再开始 remove-root 产品命令。
+- 当前最小工作项：提取 topology authority 共享只读 IR，在不改变现有通过/失败判定的前提下，让 bootstrap、commands 与全 app ownership 消费同一份 import/call/binding 分析。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -92,6 +92,7 @@
 - [x] 完成 Workbench multi-root 安全投影底座：独立只读/eventless `plain-workspace-config:` provider 只生成有序 `folders[].{uri,name}`，零 root 清除旧配置；固定 configuration patch 让两个 Plain scheme 绕过异步 cache。单一 coordinator 以 FIFO 串行 native mutation、配置 install/clear、`reinitializeWorkspace` 与 adoption 握手，锁定 workspaceId/revision/有序 root URI；mutation response reject 会按权威 snapshot 区分未变化、更新后收敛和不可判定 fatal，dispatch 后拒绝绝不重试或反向 mutation。默认 workspace editing/recent 服务、Open File/Workspace/Close/New Window 等 generic action 全部 fail closed，三个 Host new-window 入口也从固定包移除并由 direct guard 拒绝。
 - [x] multi-root 底座 Harness 与验收闭合：全 app 配置 provider 单写入口、post-dispatch 单次调用、native mutation FIFO、recent 空状态、九个 patch 基础 tarball integrity、双 scheme no-cache 和 generic command 闭集均有 AST/patch hostile mutations；独立复核额外修复了 fatal 后仍先变更 Rust roots、mutation 响应未知不重同步、provider/command alias 与晚到模块旁路、reinitialize 重试和 new-window Host 直达。完整 `pnpm check` 通过 29 个 TypeScript/JavaScript 文件、528 个用例、2275 个前端模块、2110 个 bundle source、203 项既有迁移债务与 Rust 255/255；修复后 Browser workspace E2E 6/6 通过，Open Folder 的两种 bytes transport 均无正向 pageerror/console.error/通知。
 - [x] 完成新增/替换 root 产品命令：`workbench.action.files.openFolder`、`openFolderViaWorkspace` 与固定上游 `setRootFolder` 全部通过同一 topology FIFO 调用 Rust `replace` picker，固定上游 `workbench.action.addRootFolder` 继续转发 Plain `addRootFolder` 并调用 Rust `add` picker；cancelled 不投影，selected 等待 adoption，fatal gate 不再触发原生 picker，generic workspace/file/window 入口仍稳定拒绝。Harness 同步锁定四个产品 ID/mode、native bridge/coordinator 绑定、命令 holder/dispose 生命周期、本地 registrar 唯一调用、`initialize` 无 commands 的固定配置，以及 47 条 `relativePath:moduleSpecifier` Workbench 导入 allowlist；direct command writer 由 manifest 驱动，单测以生产等价的 19 个 app sources 为正向基线，alias/computed、writer wrapper、Monaco editor、custom view、side-effect contribution、mode shadow 与提前撤销均有 hostile mutations。完整 `pnpm check` 通过 29 个测试文件、538 个前端用例、2275 个前端模块、2110 个 bundle source、203 项既有迁移债务与 Rust 255/255；Workspace Browser E2E 7/7 通过，新增场景真实验证单根 Open Folder → Add Folder 双根 → Open Folder 替换回单根，且无正向 pageerror、console.error 或通知。
+- [x] 完成 topology authority 共享 IR 与 provider binding 的 GitHub 调研和技术方案：评估 TypeScript Compiler API/TypeChecker、TypeScript binder、typescript-eslint scope manager 与 eslint-scope；选择不新增依赖的 TypeScript AST 声明—引用 IR，把行为保持的 IR 提取与 provider binding 闭合拆成两个独立提交，并明确 alias/computed/re-export/reassign/跨文件 authority 验收矩阵。
 
 ## 下一步
 
