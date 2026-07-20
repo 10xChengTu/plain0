@@ -1,12 +1,12 @@
 # Plain 重写进度
 
-更新时间：2026-07-19
+更新时间：2026-07-20
 
 ## 当前状态
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：为正向永久删除创建全新临时 fixture，从已提交源码重建/启动绝对 `.app` 并停在可访问的“永久删除”按钮前；取得用户即时确认后再点击，核对 Rust 删除、磁盘与 Explorer 收敛并独立提交。
+- 当前最小工作项：执行 `F020` 最终全量回归，逐条核对 `features.json` acceptance 与真实 Rust/Browser/Tauri 证据；全部成立后更新 feature evidence/status 并独立提交，任何缺口则先修复并追加提交。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -84,11 +84,12 @@
 - [x] 完成真实 Tauri 对话框专项 GitHub/固定源码调研与方案冻结：确认 Explorer 菜单和 `⌘Backspace` 都正确进入 `deleteFile`，故障来自未覆盖的 `StandaloneDialogService` 同步 `window.confirm` 假设、Tauri dialog 插件的异步全局改写与 WKWebView 无原生 confirm fallback。排除扩 dialog capability、patch 全局 confirm、补 Wry delegate 和自写重复服务；采用同版 CodinGame 官方 dialogs override，以 VS Code DOM `BrowserDialogHandler` 实现跨 WebView、可访问、无新增权限的确认链。
 - [x] 完成 Workbench DOM dialogs 接线与 Harness：精确新增 `@codingame/monaco-vscode-dialogs-service-override@35.0.1`，只从公开导出子路径加载官方 `DialogService` 与 `dialog.web.contribution`，构造唯一 `IDialogService` descriptor；禁止根 factory、`IFileDialogService`、其他 app import、全局 confirm、任意 `dialog:*` capability，以及 capability 目录嵌套/符号链接绕过。bundle 审计剔除根 factory 会附带的约 89 KB 未压缩 Web 文件对话框实现，只新增 4 个必需 DOM dialog source；最终 2108 source、203 项迁移债务分类与 SHA-256 均未变化。完整 `pnpm check` 通过 25 个 TypeScript/JavaScript 文件、484 个用例与 255 个 Rust 用例；Browser workspace E2E 7/7 通过，明确覆盖 DOM 取消后仅 prepare/cancel、再次确认后的 prepare/begin/commit、零原生 JavaScript dialog 和 readonly 零对话框回退。
 - [x] 完成提交 `d20a3912` 的真实 Tauri 取消路径验收：`tauri:build:e2e` 从该提交重建隔离 debug `.app`，Computer Use 的 app state 明确绑定绝对 bundle 路径，再由 macOS 系统选择器打开只含 `delete-me.txt` 的临时 workspace。`⌘Backspace` 与 Explorer 右键 `Delete Permanently` 均显示 Workbench DOM `Warning 永久删除“delete-me.txt”？`，辅助功能树同时暴露 Cancel、永久删除和“永久且不可撤销，不会移入废纸篓”正文；显式点击 Cancel 与按 Escape 后 Explorer 均保留目标，磁盘文件仍为 42 字节且 SHA-256 固定为 `352d5751359ff38c32d89294c097085d7ac80b3f5c77260f2369f1ba36b49265`。应用已退出，临时 workspace 与截图均已清理；本项没有执行不可逆点击。
+- [x] 完成提交 `90ae894c` 的真实 Tauri 正向永久删除验收：收到用户对专用临时文件的即时确认后，再次执行 `tauri:build:e2e` 并从绝对 `.app` 打开全新 workspace；点击前重新核对唯一目标 `delete-after-confirmation.txt` 为 52 字节、SHA-256 `992160ec1e97b614d176054746fb011ae898fbee35e4d285903a93faac3bdb87`，辅助功能树显示同名不可逆 DOM 对话框后才点击“永久删除”。点击后对话框、Explorer 条目与预览编辑器同时消失，磁盘目标不存在且 workspace 目录为空，证明 `prepare → begin → commit` 的真实 Rust 路径与 Workbench 收敛成功。应用已退出，临时 workspace 与截图均已清理，未触碰其他仓库文件。
 
 ## 下一步
 
-1. 创建新的专用临时 fixture，在 Computer Use 点击不可逆按钮前取得即时确认，再验收 Rust 删除路由、磁盘结果与 Explorer 收敛。
-2. 执行 `F020` 全量回归；全部通过后再写入 `features.json` evidence 并完成该功能。
+1. 执行 `F020` 全量回归，逐条审计 acceptance 的强证据并补齐任何缺口。
+2. 全部通过后写入 `features.json` evidence/status，完成 `F020` 并切换到下一个垂直切片。
 
 ## 当前验收命令
 
@@ -108,7 +109,7 @@ pnpm test:e2e:browser -- workspace.spec.ts
 - VSIX 主题和 GitLens-like 功能有独立许可边界，第三方资源不得未经审计打包。
 - macOS 的 WKWebView 不能由普通浏览器 E2E 代替，最终必须真实启动应用。
 - Computer Use 按 `com.plain.editor` 绑定时可能自动拉起同 bundle id 的旧 debug `.app`；真实证据必须来自刚执行 `tauri:build:e2e` 的绝对 bundle 路径，并等待 Explorer ready 或明确 bootstrap error，不能把旧画面或瞬时空 Activity Bar 当成当前源码结果。
-- Browser 与本提交的真实 WKWebView 均已证明当前 `IDialogService` 使用 Workbench DOM handler，且根 factory/Web 文件对话框未进入最终 bundle；菜单/快捷键取消路径已通过，正向永久删除仍必须使用全新临时 fixture，并在 Computer Use 点击不可逆按钮前取得即时确认。
+- Browser 与真实 WKWebView 均已证明当前 `IDialogService` 使用 Workbench DOM handler，且根 factory/Web 文件对话框未进入最终 bundle；菜单/快捷键取消与用户即时确认后的正向永久删除均已通过。
 - 若 native `prepare-delete` 已登记批次但 IPC 响应在前端收到 confirmation id 前丢失，前端无法主动 cancel；批次仍不可 begin/commit，由 Rust 的 120 秒单调 idle TTL、root/window 生命周期清理兜底。
 - watcher wake event 只是可丢失提示，权威状态在 Rust sticky generation；Browser mock 已覆盖定时拉取收敛，真实 macOS FSEvents/WKWebView 链也已覆盖外部新增与删除后的即时收敛，但 lost-wake 定时拉取仍只由可控 Browser mock 确定性验证。
 
