@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readdir, readFile } from "node:fs/promises";
+import { lstat, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,6 +8,7 @@ import {
 	validateDialogOverrideImportBoundary,
 	validateDialogServiceOverride,
 	validateDialogSurfaceBoundary,
+	validateFrontendEntrypointScripts,
 	validateMainCapability,
 	validateTauriApiBoundary,
 	validateTauriConfiguration,
@@ -29,7 +30,11 @@ import {
 	auditedWorkbenchPatchPaths,
 	validateWorkbenchPatchSet,
 } from "./workbench-patch-contracts.mjs";
-import { validateWorkspaceTopologyContracts } from "./workspace-topology-contracts.mjs";
+import {
+	validateAppHtmlAuthority,
+	validateViteResolverAuthority,
+	validateWorkspaceTopologyContracts,
+} from "./workspace-topology-contracts.mjs";
 
 const root = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -67,6 +72,42 @@ const allowedDevDependencies = new Set([
 const packageDocument = JSON.parse(
 	await readFile(path.join(root, "package.json"), "utf8"),
 );
+for (const failure of validateFrontendEntrypointScripts(
+	packageDocument.scripts,
+)) {
+	fail(failure);
+}
+const viteConfigurationNames = new Set([
+	"vite.config.js",
+	"vite.config.mjs",
+	"vite.config.ts",
+	"vite.config.cjs",
+	"vite.config.mts",
+	"vite.config.cts",
+]);
+const viteConfigurationEntries = (
+	await readdir(root, { withFileTypes: true })
+).filter((entry) => viteConfigurationNames.has(entry.name));
+if (
+	viteConfigurationEntries.length !== 1 ||
+	viteConfigurationEntries[0].name !== "vite.config.ts" ||
+	!viteConfigurationEntries[0].isFile()
+) {
+	fail("vite.config.ts must be the only real Vite configuration file");
+} else {
+	const viteConfigurationSource = await readFile(
+		path.join(root, "vite.config.ts"),
+		"utf8",
+	);
+	if (
+		!validateViteResolverAuthority(
+			viteConfigurationSource,
+			viteConfigurationEntries.map(({ name }) => name),
+		)
+	) {
+		fail("vite.config.ts must preserve the fixed static resolver authority");
+	}
+}
 
 const requiredPatches = new Map([
 	[
@@ -230,23 +271,55 @@ if (/^\s{2}electron@[^:]*:/m.test(lock)) {
 	fail("pnpm-lock.yaml contains the Electron runtime");
 }
 
-async function walk(directory) {
+async function walk(directory, onSymbolicLink) {
 	const files = [];
 	for (const entry of await readdir(directory, { withFileTypes: true })) {
 		const absolute = path.join(directory, entry.name);
 		if (entry.isDirectory()) {
-			files.push(...(await walk(absolute)));
+			files.push(...(await walk(absolute, onSymbolicLink)));
 		} else if (entry.isFile()) {
 			files.push(absolute);
+		} else if (entry.isSymbolicLink()) {
+			onSymbolicLink?.(absolute);
 		}
 	}
 	return files;
 }
 
 const appRoot = path.join(root, "app");
-const appFiles = (await walk(appRoot)).filter((file) =>
-	/\.(?:ts|tsx|js|mjs)$/.test(file),
-);
+const appRootEntry = await lstat(appRoot);
+let appFiles = [];
+if (appRootEntry.isSymbolicLink() || !appRootEntry.isDirectory()) {
+	fail("app must be a real directory, not a symbolic link");
+} else {
+	const discoveredAppFiles = await walk(appRoot, (file) => {
+		fail(`${path.relative(root, file)} must not be a symbolic link`);
+	});
+	const allowedStaticAppFiles = new Set([
+		path.join(appRoot, "index.html"),
+		path.join(appRoot, "styles.css"),
+	]);
+	for (const file of discoveredAppFiles) {
+		if (
+			!/\.(?:[cm]?[jt]s|[jt]sx)$/.test(file) &&
+			!allowedStaticAppFiles.has(file)
+		) {
+			fail(`${path.relative(root, file)} is outside the closed app source set`);
+		}
+	}
+	appFiles = discoveredAppFiles.filter((file) =>
+		/\.(?:[cm]?[jt]s|[jt]sx)$/.test(file),
+	);
+	const appHtmlSource = await readFile(
+		path.join(appRoot, "index.html"),
+		"utf8",
+	);
+	if (!validateAppHtmlAuthority(appHtmlSource)) {
+		fail(
+			"app/index.html must expose only the fixed /main.ts module entrypoint",
+		);
+	}
+}
 const forbiddenSourcePatterns = [
 	[
 		/['"](?:vscode|@codingame\/monaco-vscode-extension-api)['"]/,
@@ -373,28 +446,48 @@ for (const failure of validateWorkspaceProviderCopyBoundary(
 }
 
 const tauriRoot = path.join(root, "src-tauri");
-const tauriRootFiles = (await readdir(tauriRoot, { withFileTypes: true }))
-	.filter((entry) => entry.isFile())
-	.map((entry) => entry.name);
+const tauriRootEntries = await readdir(tauriRoot, { withFileTypes: true });
+const tauriRootFiles = tauriRootEntries.map((entry) => entry.name);
 for (const failure of validateTauriConfigurationFiles(tauriRootFiles)) {
 	fail(failure);
 }
-const tauriConfig = JSON.parse(
-	await readFile(path.join(tauriRoot, "tauri.conf.json"), "utf8"),
+
+const expectedTauriConfigurationNames = [
+	"tauri.conf.json",
+	"tauri.e2e.conf.json",
+];
+const hasRealTauriConfigurationFiles = expectedTauriConfigurationNames.every(
+	(fileName) =>
+		tauriRootEntries.some((entry) => entry.name === fileName && entry.isFile()),
 );
-for (const failure of validateTauriConfiguration(tauriConfig)) {
-	fail(failure);
-}
-const tauriE2EConfig = JSON.parse(
-	await readFile(path.join(tauriRoot, "tauri.e2e.conf.json"), "utf8"),
-);
-for (const failure of validateTauriE2EConfiguration(
-	tauriConfig,
-	tauriE2EConfig,
-	packageDocument.scripts?.["tauri:dev:e2e"],
-	packageDocument.scripts?.["tauri:build:e2e"],
-)) {
-	fail(failure);
+if (!hasRealTauriConfigurationFiles) {
+	for (const fileName of expectedTauriConfigurationNames) {
+		if (
+			!tauriRootEntries.some(
+				(entry) => entry.name === fileName && entry.isFile(),
+			)
+		) {
+			fail(`src-tauri/${fileName} must be a real configuration file`);
+		}
+	}
+} else {
+	const tauriConfig = JSON.parse(
+		await readFile(path.join(tauriRoot, "tauri.conf.json"), "utf8"),
+	);
+	for (const failure of validateTauriConfiguration(tauriConfig)) {
+		fail(failure);
+	}
+	const tauriE2EConfig = JSON.parse(
+		await readFile(path.join(tauriRoot, "tauri.e2e.conf.json"), "utf8"),
+	);
+	for (const failure of validateTauriE2EConfiguration(
+		tauriConfig,
+		tauriE2EConfig,
+		packageDocument.scripts?.["tauri:dev:e2e"],
+		packageDocument.scripts?.["tauri:build:e2e"],
+	)) {
+		fail(failure);
+	}
 }
 
 const capabilitiesRoot = path.join(root, "src-tauri/capabilities");

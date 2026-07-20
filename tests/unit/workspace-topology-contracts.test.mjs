@@ -3,9 +3,20 @@ import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import {
+	validateAppHtmlAuthority,
+	validateViteResolverAuthority,
 	validateWorkspaceTopologyContracts,
 	WORKSPACE_TOPOLOGY_CONTRACT_FAILURES,
 } from "../../scripts/plain/workspace-topology-contracts.mjs";
+
+const productionHtml = readFileSync(
+	new URL("../../app/index.html", import.meta.url),
+	"utf8",
+);
+const productionViteConfiguration = readFileSync(
+	new URL("../../vite.config.ts", import.meta.url),
+	"utf8",
+);
 
 const paths = Object.freeze({
 	main: "app/main.ts",
@@ -32,7 +43,7 @@ function readProductionAppSources(
 					relativePath,
 				);
 			}
-			if (!entry.isFile() || !/\.(?:ts|tsx|js|mjs)$/u.test(entry.name)) {
+			if (!entry.isFile() || !/\.(?:[cm]?[jt]s|[jt]sx)$/u.test(entry.name)) {
 				return [];
 			}
 			return [
@@ -80,6 +91,27 @@ function withAppSources(sources, extraEntries = []) {
 			})),
 			...extraEntries,
 		],
+	};
+}
+
+function mutatedProductionAppSource(relativePath, mutate) {
+	const sources = withAppSources(currentSources());
+	const current = productionAppSourceByPath.get(relativePath);
+	if (current === undefined) {
+		throw new Error(`missing production app source: ${relativePath}`);
+	}
+	const mutatedSource = mutate(current);
+	const namedKey = Object.entries(paths).find(
+		([, candidate]) => candidate === relativePath,
+	)?.[0];
+	return {
+		...sources,
+		...(namedKey === undefined ? {} : { [namedKey]: mutatedSource }),
+		appSources: sources.appSources.map((entry) =>
+			entry.relativePath === relativePath
+				? { ...entry, source: mutatedSource }
+				: entry,
+		),
 	};
 }
 
@@ -133,7 +165,74 @@ function expectFailure(sources, failure) {
 	expect(validateWorkspaceTopologyContracts(sources)).toContain(failure);
 }
 
+function expectMainAuthorityFailure(mutate) {
+	expectFailure(
+		withAppSources(mutated("main", mutate)),
+		WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+	);
+}
+
 describe("workspace topology source contracts", () => {
+	it("keeps the HTML and Vite module entry authority closed", () => {
+		expect(validateAppHtmlAuthority(productionHtml)).toBe(true);
+		expect(validateViteResolverAuthority(productionViteConfiguration)).toBe(
+			true,
+		);
+		expect(
+			validateViteResolverAuthority(productionViteConfiguration, [
+				"vite.config.js",
+				"vite.config.ts",
+			]),
+		).toBe(false);
+
+		for (const html of [
+			`${productionHtml}\n<script type="module">void import("./rogue.mts")</script>`,
+			replaceOnce(productionHtml, 'src="/main.ts"', 'src="/rogue.jsx"'),
+			replaceOnce(
+				productionHtml,
+				'<script type="module" src="/main.ts"></script>',
+				'<!-- <script type="module" src="/main.ts"></script> -->',
+			),
+			replaceOnce(
+				productionHtml,
+				'<script type="module" src="/main.ts"></script>',
+				'<template><script type="module" src="/main.ts"></script></template>',
+			),
+			replaceOnce(
+				productionHtml,
+				'<script type="module" src="/main.ts"></script>',
+				'<style><script type="module" src="/main.ts"></script></style>',
+			),
+			replaceOnce(
+				productionHtml,
+				'<script type="module" src="/main.ts"></script>',
+				'<title><script type="module" src="/main.ts"></script></title>',
+			),
+			replaceOnce(
+				productionHtml,
+				"<body>",
+				"<body onload=\"void import('./rogue.js')\">",
+			),
+		]) {
+			expect(validateAppHtmlAuthority(html)).toBe(false);
+		}
+
+		for (const configuration of [
+			replaceOnce(
+				productionViteConfiguration,
+				"\tclearScreen: false,",
+				'\tresolve: { alias: { "@tauri-apps/api/core": "/rogue.mts" } },\n\tclearScreen: false,',
+			),
+			replaceOnce(
+				productionViteConfiguration,
+				"\tclearScreen: false,",
+				"\tplugins: [],\n\tclearScreen: false,",
+			),
+		]) {
+			expect(validateViteResolverAuthority(configuration)).toBe(false);
+		}
+	});
+
 	it("accepts the current five topology entrypoints", () => {
 		const { plainWorkspaceServices: _implementation, ...sources } =
 			currentSources();
@@ -154,10 +253,35 @@ describe("workspace topology source contracts", () => {
 		).toEqual([]);
 	});
 
+	it("rejects new bare module authority in fallback validation", () => {
+		for (const moduleName of ["@tauri-apps/api/core", "#workspace-provider"]) {
+			expectFailure(
+				mutated(
+					"main",
+					(source) => `import ${JSON.stringify(moduleName)};\n${source}`,
+				),
+				WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+			);
+		}
+	});
+
 	it("accepts the complete production app source authority", () => {
 		expect(
 			validateWorkspaceTopologyContracts(withAppSources(currentSources())),
 		).toEqual([]);
+	});
+
+	it("requires the root provider producer in complete app authority", () => {
+		const sources = withAppSources(currentSources());
+		expect(
+			validateWorkspaceTopologyContracts({
+				...sources,
+				appSources: sources.appSources.filter(
+					({ relativePath }) =>
+						relativePath !== "app/features/workspace/file-system-provider.ts",
+				),
+			}),
+		).toEqual([WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority]);
 	});
 
 	it("normalizes Windows separators in the complete app authority", () => {
@@ -231,6 +355,91 @@ terminal.initialize();`,
 		).toEqual([]);
 	});
 
+	it("allows unrelated provider names without protected value acquisition", () => {
+		expect(
+			validateWorkspaceTopologyContracts(
+				withAppSources(currentSources(), [
+					{
+						relativePath: "app/features/terminal/provider-names.ts",
+						source: `import type { PlainWorkspaceDeleteProvider } from "../workspace/file-system-provider";
+const local = {
+	registerCustomProvider: () => undefined,
+	createPlainWorkspaceFileSystemProvider: () => undefined,
+	createPlainWorkspaceConfigurationProvider: () => undefined,
+};
+function registerCustomProvider(): void {}
+local.registerCustomProvider();
+local.createPlainWorkspaceConfigurationProvider();
+local["createPlainWorkspaceFileSystemProvider"]();
+registerCustomProvider();
+						void (undefined as PlainWorkspaceDeleteProvider | undefined);`,
+					},
+					{
+						relativePath: "app/features/terminal/file-system-provider.ts",
+						source:
+							"export function createPlainWorkspaceFileSystemProvider(): void {}",
+					},
+					{
+						relativePath: "app/features/terminal/use-provider.ts",
+						source: `import { createPlainWorkspaceFileSystemProvider } from "./file-system-provider";
+createPlainWorkspaceFileSystemProvider();`,
+					},
+				]),
+			),
+		).toEqual([]);
+	});
+
+	it("allows unrelated provider methods inside bootstrap", () => {
+		const sources = mutated("main", (source) =>
+			replaceOnce(
+				source,
+				"createPlainWorkspaceConfigurationProvider();",
+				`createPlainWorkspaceConfigurationProvider();
+	const unrelatedProviders = {
+		registerCustomProvider: () => undefined,
+		createPlainWorkspaceFileSystemProvider: () => undefined,
+		createPlainWorkspaceConfigurationProvider: () => undefined,
+	};
+	unrelatedProviders.registerCustomProvider();
+	unrelatedProviders.createPlainWorkspaceFileSystemProvider();
+	unrelatedProviders["createPlainWorkspaceConfigurationProvider"]();`,
+			),
+		);
+		expect(validateWorkspaceTopologyContracts(withAppSources(sources))).toEqual(
+			[],
+		);
+	});
+
+	it("allows transparent wrappers around producer scheme references", () => {
+		expect(
+			validateWorkspaceTopologyContracts(
+				mutatedProductionAppSource(
+					"app/features/workspace/file-system-provider.ts",
+					(source) =>
+						replaceAfter(
+							source,
+							"private resolveMutationResource(",
+							"scheme !== PLAIN_WORKSPACE_SCHEME",
+							"scheme !== (PLAIN_WORKSPACE_SCHEME)",
+						),
+				),
+			),
+		).toEqual([]);
+		expect(
+			validateWorkspaceTopologyContracts(
+				mutatedProductionAppSource(
+					"app/features/workspace/workspace-configuration-provider.ts",
+					(source) =>
+						replaceOnce(
+							source,
+							"scheme: PLAIN_WORKSPACE_CONFIGURATION_SCHEME,",
+							"scheme: (PLAIN_WORKSPACE_CONFIGURATION_SCHEME),",
+						),
+				),
+			),
+		).toEqual([]);
+	});
+
 	it("uses AST structure instead of source formatting", () => {
 		const sources = currentSources();
 		expect(
@@ -243,15 +452,20 @@ terminal.initialize();`,
 	});
 
 	it("rejects duplicate providers and reversed fixed-scheme registration", () => {
-		expectFailure(
-			mutated("main", (source) =>
-				replaceOnce(
-					source,
-					"createPlainWorkspaceConfigurationProvider();",
-					"createPlainWorkspaceConfigurationProvider();\n\tvoid createPlainWorkspaceConfigurationProvider();",
-				),
+		const duplicateConfigurationFactory = mutated("main", (source) =>
+			replaceOnce(
+				source,
+				"createPlainWorkspaceConfigurationProvider();",
+				"createPlainWorkspaceConfigurationProvider();\n\tvoid createPlainWorkspaceConfigurationProvider();",
 			),
+		);
+		expectFailure(
+			duplicateConfigurationFactory,
 			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.bootstrap,
+		);
+		expectFailure(
+			withAppSources(duplicateConfigurationFactory),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
 		);
 		expectFailure(
 			mutated("main", (source) =>
@@ -282,6 +496,513 @@ terminal.initialize();`,
 				),
 			),
 			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.bootstrap,
+		);
+	});
+
+	it("rejects provider binding aliases, bind, shorthand, and parameter escapes", () => {
+		for (const escape of [
+			"const registerProvider = registerCustomProvider.bind(undefined);\n\tvoid registerProvider;",
+			"const makeProvider = createPlainWorkspaceConfigurationProvider;\n\tvoid makeProvider;",
+			"void ({ registerCustomProvider });",
+			"void Promise.resolve(createPlainWorkspaceFileSystemProvider);",
+		]) {
+			expectMainAuthorityFailure((source) =>
+				replaceOnce(
+					source,
+					"createPlainWorkspaceConfigurationProvider();",
+					`createPlainWorkspaceConfigurationProvider();\n\t${escape}`,
+				),
+			);
+		}
+	});
+
+	it("rejects computed provider calls and local shadows of fixed consumers", () => {
+		expectMainAuthorityFailure((source) =>
+			replaceOnce(
+				source,
+				"registerCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);",
+				'({ registerCustomProvider })["registerCustomProvider"](PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);',
+			),
+		);
+		for (const [anchor, shadow] of [
+			[
+				"\tconst workspaceDeleteCoordinator = registerWorkspaceDeleteCoordinator(",
+				"\tconst registerWorkspaceDeleteCoordinator = () => ({ dispose: () => undefined });\n",
+			],
+			[
+				"\tconst workspaceConfigurationProvider =",
+				"\tconst createPlainWorkspaceConfigurationProvider = () => ({}) as never;\n",
+			],
+			[
+				"\tconst workspaceTopologyCoordinator = createWorkspaceTopologyCoordinator(",
+				"\tconst createWorkspaceTopologyCoordinator = () => ({}) as never;\n",
+			],
+			[
+				"\tregisterCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);",
+				'\tconst PLAIN_WORKSPACE_SCHEME = "rogue";\n',
+			],
+		]) {
+			expectMainAuthorityFailure((source) =>
+				replaceOnce(source, anchor, `${shadow}${anchor}`),
+			);
+		}
+	});
+
+	it("rejects a bootstrap seam hidden inside an uncalled nested function", () => {
+		const sources = mutated("main", (source) =>
+			replaceOnce(
+				replaceOnce(
+					source,
+					"async function bootstrap(): Promise<void> {\n",
+					"async function bootstrap(): Promise<void> {\n\tasync function neverRun(): Promise<void> {\n",
+				),
+				"\n}\n\nvoid bootstrap().catch",
+				"\n\t}\n\tvoid neverRun;\n}\n\nvoid bootstrap().catch",
+			),
+		);
+		const failures = validateWorkspaceTopologyContracts(
+			withAppSources(sources),
+		);
+		expect(failures).toContain(WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.bootstrap);
+		expect(failures).toContain(WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority);
+	});
+
+	it("invokes the bootstrap binding exactly once", () => {
+		expectFailure(
+			mutated("main", (source) => `${source}\nvoid bootstrap();\n`),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.bootstrap,
+		);
+	});
+
+	it("rejects namespace, default, alias, and re-export provider acquisition", () => {
+		for (const source of [
+			`import * as providerModule from "./features/workspace/file-system-provider";
+void providerModule;`,
+			`import providerModule from "./features/workspace/workspace-configuration-provider";
+void providerModule;`,
+			`import { createPlainWorkspaceFileSystemProvider as make } from "./features/workspace/file-system-provider";
+void make;`,
+			`import { createPlainWorkspaceFileSystemProvider as make } from "./features/workspace/file-system-provider.ts?plain";
+void make;`,
+			`import { createPlainWorkspaceFileSystemProvider as make } from "./features/workspace/file-system-provider.ts#plain";
+void make;`,
+			`import { createPlainWorkspaceFileSystemProvider as make } from "./features/workspace/File-System-Provider";
+void make;`,
+			`import { createPlainWorkspaceFileSystemProvider as make } from "#workspace-provider";
+void make;`,
+			`import { createPlainWorkspaceFileSystemProvider as make } from "plain-editor/workspace-provider";
+void make;`,
+			`export { createPlainWorkspaceConfigurationProvider as make } from "./features/workspace/workspace-configuration-provider";`,
+			`export { default } from "./features/workspace/workspace-configuration-provider";`,
+			`import { PLAIN_WORKSPACE_CONFIGURATION_PATH as configPath } from "./features/workspace/workspace-configuration-provider";
+void configPath;`,
+			`export { PLAIN_WORKSPACE_CONFIGURATION_PATH as configPath } from "./features/workspace/workspace-configuration-provider";`,
+			`export { registerCustomProvider as register } from "@codingame/monaco-vscode-files-service-override";`,
+		]) {
+			expectFailure(
+				withAppSources(currentSources(), [
+					{ relativePath: "app/rogue-provider-binding.ts", source },
+				]),
+				WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+			);
+		}
+		expectFailure(
+			withAppSources(currentSources(), [
+				{
+					relativePath: "app/rogue-provider-binding.jsx",
+					source: `import { createPlainWorkspaceFileSystemProvider as make } from "./features/workspace/file-system-provider";\nvoid make;`,
+				},
+			]),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+	});
+
+	it("rejects extension and case variants that can preempt audited modules", () => {
+		for (const relativePath of [
+			"app/features/workspace/file-system-provider",
+			"app/features/workspace/file-system-provider.mjs",
+			"app/features/workspace/file-system-provider.js",
+			"app/features/workspace/file-system-provider.mts",
+			"app/features/workspace/File-System-Provider.js",
+		]) {
+			expectFailure(
+				withAppSources(currentSources(), [
+					{
+						relativePath,
+						source: `export const PLAIN_WORKSPACE_SCHEME = "other";\nexport const createPlainWorkspaceFileSystemProvider = () => ({});`,
+					},
+				]),
+				WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+			);
+		}
+	});
+
+	it("rejects producer-local factory and scheme binding escapes", () => {
+		for (const [relativePath, factoryName, schemeName] of [
+			[
+				"app/features/workspace/file-system-provider.ts",
+				"createPlainWorkspaceFileSystemProvider",
+				"PLAIN_WORKSPACE_SCHEME",
+			],
+			[
+				"app/features/workspace/workspace-configuration-provider.ts",
+				"createPlainWorkspaceConfigurationProvider",
+				"PLAIN_WORKSPACE_CONFIGURATION_SCHEME",
+			],
+		]) {
+			for (const append of [
+				`\nconst makeAgain = ${factoryName};\nvoid makeAgain;\n`,
+				`\nexport { ${factoryName} as createAgain };\n`,
+				`\nexport const copiedScheme = ${schemeName};\n`,
+			]) {
+				expectFailure(
+					mutatedProductionAppSource(
+						relativePath,
+						(source) => `${source}${append}`,
+					),
+					WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+				);
+			}
+		}
+		expectFailure(
+			mutatedProductionAppSource(
+				"app/features/workspace/workspace-configuration-provider.ts",
+				(source) =>
+					`${replaceOnce(
+						source,
+						"candidate.scheme === PLAIN_WORKSPACE_CONFIGURATION_SCHEME",
+						'candidate.scheme === "plain-workspace-config"',
+					)}
+function rogueSchemeComparison(candidate: { readonly scheme: string }): boolean {
+	return candidate.scheme === PLAIN_WORKSPACE_CONFIGURATION_SCHEME;
+}
+`,
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+		expectFailure(
+			mutatedProductionAppSource(
+				"app/features/workspace/workspace-configuration-provider.ts",
+				(source) => {
+					const extended = replaceOnce(
+						source,
+						"class PlainWorkspaceConfigurationProviderImpl implements PlainWorkspaceConfigurationProvider",
+						`class RogueConfigurationBase {
+	constructor() {
+		return Object.create(null) as never;
+	}
+}
+class PlainWorkspaceConfigurationProviderImpl extends RogueConfigurationBase implements PlainWorkspaceConfigurationProvider`,
+					);
+					return replaceAfter(
+						extended,
+						"class PlainWorkspaceConfigurationProviderImpl",
+						"constructor() {",
+						"constructor() {\n\t\tsuper();",
+					);
+				},
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+		expectFailure(
+			mutatedProductionAppSource(
+				"app/features/workspace/workspace-configuration-provider.ts",
+				(source) =>
+					replaceAfter(
+						source,
+						"class PlainWorkspaceConfigurationProviderImpl",
+						"Object.freeze(this);",
+						"Object.freeze(this);\n\t\treturn Object.create(null) as never;",
+					),
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+		expectFailure(
+			mutatedProductionAppSource(
+				"app/features/workspace/workspace-configuration-provider.ts",
+				(source) =>
+					replaceOnce(
+						replaceOnce(
+							source,
+							"candidate.scheme === PLAIN_WORKSPACE_CONFIGURATION_SCHEME",
+							'candidate.scheme === "plain-workspace-config"',
+						),
+						"if (!schemeRoot) {",
+						"void (candidate.scheme === PLAIN_WORKSPACE_CONFIGURATION_SCHEME);\n\t\tif (!schemeRoot) {",
+					),
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+		expectFailure(
+			mutatedProductionAppSource(
+				"app/features/workspace/file-system-provider.ts",
+				(source) => `${replaceAfter(
+					replaceAfter(
+						source,
+						"private resolveMutationResource(",
+						"scheme !== PLAIN_WORKSPACE_SCHEME",
+						'scheme !== "plain-workspace"',
+					),
+					"private resolveResource(",
+					"resource.scheme !== PLAIN_WORKSPACE_SCHEME",
+					'resource.scheme !== "plain-workspace"',
+				)}
+function decoySchemeOwners(): void {
+	class PlainWorkspaceFileSystemProvider {
+		resolveMutationResource(scheme: string): boolean {
+			return scheme !== PLAIN_WORKSPACE_SCHEME;
+		}
+		resolveResource(resource: { readonly scheme: string }): boolean {
+			return resource.scheme !== PLAIN_WORKSPACE_SCHEME;
+		}
+	}
+	void PlainWorkspaceFileSystemProvider;
+}
+`,
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+		expectFailure(
+			mutatedProductionAppSource(
+				"app/features/workspace/workspace-configuration-provider.ts",
+				(source) =>
+					replaceOnce(
+						source,
+						"Object.freeze(PlainWorkspaceConfigurationProviderImpl.prototype);",
+						`function neverFreeze(): void {
+	Object.freeze(PlainWorkspaceConfigurationProviderImpl.prototype);
+}`,
+					),
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+	});
+
+	it("locks configuration URI, watch, and bound-file data flow", () => {
+		const relativePath =
+			"app/features/workspace/workspace-configuration-provider.ts";
+		for (const mutate of [
+			(source) =>
+				replaceOnce(
+					source,
+					'"/workspace.code-workspace" as const',
+					'"/rogue" as const',
+				),
+			(source) =>
+				replaceAfter(
+					source,
+					"function configurationUri(",
+					"return resource;",
+					'return URI.from({ scheme: "file", authority: "", path: "/" }, true);',
+				),
+			(source) =>
+				replaceOnce(
+					source,
+					"const candidate = resourceSnapshot(resource);",
+					`const candidate = {
+			scheme: PLAIN_WORKSPACE_CONFIGURATION_SCHEME,
+			authority: "",
+			path: "/",
+			query: "",
+			fragment: "",
+		};`,
+				),
+			(source) =>
+				replaceOnce(
+					source,
+					"\t\tif (!schemeRoot) {",
+					`\t\tif (candidate.authority === candidate.authority) {
+			return Object.freeze({ dispose(): void {} });
+		}
+		if (!schemeRoot) {`,
+				),
+			(source) =>
+				replaceOnce(
+					source,
+					'candidate.path === "/"',
+					"candidate.path === candidate.path",
+				),
+			(source) =>
+				replaceOnce(
+					source,
+					"): InstalledWorkspaceConfiguration | undefined {\n\t\tif (",
+					`): InstalledWorkspaceConfiguration | undefined {
+		if (candidate.path === candidate.path) {
+			return this.#binding?.installed;
+		}
+		if (`,
+				),
+			(source) =>
+				replaceOnce(
+					source,
+					"candidate.path !== PLAIN_WORKSPACE_CONFIGURATION_PATH",
+					"candidate.path !== candidate.path",
+				),
+			(source) =>
+				replaceOnce(
+					source,
+					'import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";',
+					`import { URI as RealURI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
+const URI = {
+	from: RealURI.from.bind(RealURI),
+};`,
+				),
+			(source) =>
+				`${source}
+Reflect.set(URI, "from", () => {
+	throw new Error("changed URI factory");
+});
+`,
+			(source) =>
+				`${source}
+Object.freeze = ((value: unknown) => value) as typeof Object.freeze;
+`,
+			(source) =>
+				`${source}
+Reflect.set(FileSystemProviderCapabilities, "FileReadWrite", 0);
+`,
+		]) {
+			expectFailure(
+				mutatedProductionAppSource(relativePath, mutate),
+				WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+			);
+		}
+	});
+
+	it("keeps provider implementation classes module-private and factory-owned", () => {
+		for (const [relativePath, moduleName, className] of [
+			[
+				"app/features/workspace/file-system-provider.ts",
+				"file-system-provider",
+				"PlainWorkspaceFileSystemProvider",
+			],
+			[
+				"app/features/workspace/workspace-configuration-provider.ts",
+				"workspace-configuration-provider",
+				"PlainWorkspaceConfigurationProviderImpl",
+			],
+		]) {
+			expectFailure(
+				mutatedProductionAppSource(relativePath, (source) =>
+					replaceOnce(
+						source,
+						`class ${className}`,
+						`export class ${className}`,
+					),
+				),
+				WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+			);
+			expectFailure(
+				withAppSources(currentSources(), [
+					{
+						relativePath: "app/rogue-provider-construction.ts",
+						source: `import { ${className} } from "./features/workspace/${moduleName}";\nvoid new ${className}({} as never, {} as never);`,
+					},
+				]),
+				WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+			);
+		}
+
+		expectFailure(
+			mutatedProductionAppSource(
+				"app/features/workspace/workspace-configuration-provider.ts",
+				(source) =>
+					replaceOnce(
+						source,
+						"return new PlainWorkspaceConfigurationProviderImpl();",
+						"new PlainWorkspaceConfigurationProviderImpl();\n\treturn {} as never;",
+					),
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+		expectFailure(
+			mutatedProductionAppSource(
+				"app/features/workspace/workspace-configuration-provider.ts",
+				(source) => `${source}\nconst Object = globalThis.Object;\n`,
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+		expectFailure(
+			mutatedProductionAppSource(
+				"app/features/workspace/workspace-configuration-provider.ts",
+				(source) =>
+					replaceOnce(
+						source,
+						"return new PlainWorkspaceConfigurationProviderImpl();",
+						`if ("always".length > 0) {
+		return {} as never;
+	}
+	return new PlainWorkspaceConfigurationProviderImpl();`,
+					),
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+	});
+
+	it("rejects provider factory argument drift and lifecycle reordering", () => {
+		for (const mutate of [
+			(source) =>
+				replaceOnce(
+					source,
+					"createPlainWorkspaceFileSystemProvider(\n\t\tbridge,\n\t\tworkspaceCapabilities,\n\t);",
+					"createPlainWorkspaceFileSystemProvider(bridge);",
+				),
+			(source) =>
+				replaceOnce(
+					source,
+					"createPlainWorkspaceConfigurationProvider();",
+					"createPlainWorkspaceConfigurationProvider(bridge);",
+				),
+			(source) =>
+				moveBefore(
+					source,
+					"\tconst workspaceConfigurationProvider =\n\t\tcreatePlainWorkspaceConfigurationProvider();\n",
+					"\tconst workspaceDeleteCoordinator = registerWorkspaceDeleteCoordinator(",
+				),
+		]) {
+			expectMainAuthorityFailure(mutate);
+		}
+	});
+
+	it("rejects extra provider calls, reassignment, and instance references", () => {
+		for (const [anchor, replacement] of [
+			[
+				"registerCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);",
+				"registerCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);\n\tregisterCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);",
+			],
+			[
+				"createPlainWorkspaceConfigurationProvider();",
+				"createPlainWorkspaceConfigurationProvider();\n\tregisterCustomProvider = registerCustomProvider;",
+			],
+			[
+				"createPlainWorkspaceConfigurationProvider();",
+				"createPlainWorkspaceConfigurationProvider();\n\tvoid PLAIN_WORKSPACE_SCHEME;",
+			],
+			[
+				"registerCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);",
+				"registerCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);\n\tvoid workspaceFileSystemProvider;",
+			],
+			[
+				"registerCustomProvider(\n\t\tPLAIN_WORKSPACE_CONFIGURATION_SCHEME,\n\t\tworkspaceConfigurationProvider,\n\t);",
+				"registerCustomProvider(\n\t\tPLAIN_WORKSPACE_CONFIGURATION_SCHEME,\n\t\tworkspaceConfigurationProvider,\n\t);\n\tworkspaceConfigurationProvider = workspaceConfigurationProvider;",
+			],
+		]) {
+			expectMainAuthorityFailure((source) =>
+				replaceOnce(source, anchor, replacement),
+			);
+		}
+		expectMainAuthorityFailure((source) =>
+			replaceOnce(
+				source,
+				"const workspaceFileSystemProvider =",
+				"let workspaceFileSystemProvider =",
+			),
+		);
+	});
+
+	it("rejects exporting a protected main binding without throwing", () => {
+		expectMainAuthorityFailure(
+			(source) => `${source}\nexport { registerCustomProvider };\n`,
 		);
 	});
 
@@ -396,6 +1117,81 @@ commands.CommandsRegistry.registerCommand("vscode.newWindow", () => Promise.reso
 			withAppSources(lateModule),
 			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
 		);
+	});
+
+	it("rejects CommonJS and outside-app static module acquisition", () => {
+		for (const source of [
+			`declare const require: (specifier: string) => unknown;
+const provider = require("./features/workspace/file-system-provider");
+void provider;`,
+			`import provider = require("./features/workspace/file-system-provider");
+void provider;`,
+		]) {
+			expectFailure(
+				withAppSources(currentSources(), [
+					{ relativePath: "app/rogue-commonjs-provider.ts", source },
+				]),
+				WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+			);
+		}
+
+		const reachableRogue = mutated("main", (source) =>
+			replaceOnce(
+				source,
+				'import "@codingame/monaco-vscode-theme-defaults-default-extension";',
+				'import "./rogue-relative-provider";\nimport "@codingame/monaco-vscode-theme-defaults-default-extension";',
+			),
+		);
+		expectFailure(
+			withAppSources(reachableRogue, [
+				{
+					relativePath: "app/rogue-relative-provider.ts",
+					source: `import { registerCustomProvider as register } from "../node_modules/@codingame/monaco-vscode-files-service-override";
+register("plain-workspace", {} as never);`,
+				},
+			]),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+		expectFailure(
+			withAppSources(currentSources(), [
+				{
+					relativePath: "app/rogue-file-url-provider.ts",
+					source: `import { createPlainWorkspaceFileSystemProvider as make } from "file:///workspace/app/features/workspace/file-system-provider.ts";
+void make;`,
+				},
+			]),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+	});
+
+	it("allows import.meta metadata but rejects Vite module glob acquisition", () => {
+		expect(
+			validateWorkspaceTopologyContracts(
+				withAppSources(currentSources(), [
+					{
+						relativePath: "app/features/terminal/import-meta-env.ts",
+						source:
+							'import rawFixture from "./fixture.svg?raw";\nvoid rawFixture;\nvoid import.meta.env;',
+					},
+				]),
+			),
+		).toEqual([]);
+
+		for (const expression of [
+			'import.meta.glob("./features/workspace/file-system-provider.ts", { eager: true })',
+			'import.meta.globEager("./features/workspace/file-system-provider.ts")',
+			'import.meta["glob"]("./features/workspace/file-system-provider.ts", { eager: true })',
+		]) {
+			expectFailure(
+				withAppSources(currentSources(), [
+					{
+						relativePath: "app/rogue-import-meta-provider.ts",
+						source: `const providerModules = ${expression};\nvoid providerModules;`,
+					},
+				]),
+				WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+			);
+		}
 	});
 
 	it("rejects every researched upstream command-writer surface", () => {

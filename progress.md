@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：闭合 topology provider binding，把 registrar、两个 provider factory、两个 scheme 常量和 provider 实例限制在固定声明与固定引用节点内，拒绝 alias、computed、re-export、reassign、额外调用和跨文件 authority。
+- 当前最小工作项：实现 remove-root 产品命令，把固定 remove-root 入口接入 topology FIFO 与 Rust `workspace_remove_root`，并保持 Close Folder、通用 Workspace 与其他窗口入口 fail closed。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -94,6 +94,7 @@
 - [x] 完成新增/替换 root 产品命令：`workbench.action.files.openFolder`、`openFolderViaWorkspace` 与固定上游 `setRootFolder` 全部通过同一 topology FIFO 调用 Rust `replace` picker，固定上游 `workbench.action.addRootFolder` 继续转发 Plain `addRootFolder` 并调用 Rust `add` picker；cancelled 不投影，selected 等待 adoption，fatal gate 不再触发原生 picker，generic workspace/file/window 入口仍稳定拒绝。Harness 同步锁定四个产品 ID/mode、native bridge/coordinator 绑定、命令 holder/dispose 生命周期、本地 registrar 唯一调用、`initialize` 无 commands 的固定配置，以及 47 条 `relativePath:moduleSpecifier` Workbench 导入 allowlist；direct command writer 由 manifest 驱动，单测以生产等价的 19 个 app sources 为正向基线，alias/computed、writer wrapper、Monaco editor、custom view、side-effect contribution、mode shadow 与提前撤销均有 hostile mutations。完整 `pnpm check` 通过 29 个测试文件、538 个前端用例、2275 个前端模块、2110 个 bundle source、203 项既有迁移债务与 Rust 255/255；Workspace Browser E2E 7/7 通过，新增场景真实验证单根 Open Folder → Add Folder 双根 → Open Folder 替换回单根，且无正向 pageerror、console.error 或通知。
 - [x] 完成 topology authority 共享 IR 与 provider binding 的 GitHub 调研和技术方案：评估 TypeScript Compiler API/TypeChecker、TypeScript binder、typescript-eslint scope manager 与 eslint-scope；选择不新增依赖的 TypeScript AST 声明—引用 IR，把行为保持的 IR 提取与 provider binding 闭合拆成两个独立提交，并明确 alias/computed/re-export/reassign/跨文件 authority 验收矩阵。
 - [x] 完成 topology authority 共享只读 IR：每个 app source 只执行一次 AST walk，bootstrap、commands 与全 app ownership 复用同一 `SourceFile`、call/import/identifier/declaration facts，并保留 direct、property-chain 与 static-computed 三种调用语义。SourceSet 统一 `/` 路径、拒绝规范化重复/越界输入及 named/appSources 文本漂移；生产 architecture 入口显式绑定 `excluded-surfaces.ts`，无 `appSources` 的兼容入口继续让可选 Plain service 只走 implementation validator。定向 topology 用例 29/29、完整 `pnpm check` 通过 29 个前端测试文件、543 个用例、2275 个前端模块、2110 个 bundle source、203 项既有迁移债务与 Rust 255/255。
+- [x] 完成 provider binding 与运行入口闭包：registrar、root/config factory、provider instance、scheme/path 常量、实现类 constructor/factory/prototype freeze、URI/config watch/bound-file 数据流和能力枚举均锁定唯一声明、导入与固定引用；alias、re-export、额外构造/调用、intrinsic 改写、大小写或扩展名抢占、CommonJS、动态/Vite glob 与跨文件 value acquisition 全部拒绝。闭世界入口同时锁定 package/Tauri build scripts、唯一真实 Tauri/Vite 配置、固定 Vite resolver、canonical `index.html`、真实 `app/` 目录、无 symlink/未知资产及八类可执行源。最终复核无剩余 P1/P2；topology 定向用例 49/49，完整 `pnpm check` 通过 29 个前端测试文件、563 个用例、2275 个前端模块、2110 个 bundle source、203 项既有迁移债务与 Rust 255/255。
 
 ## 下一步
 

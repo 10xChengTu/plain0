@@ -19,6 +19,32 @@ const EXPECTED_DEVELOPMENT_CSP = Object.freeze({
 	"connect-src": "'self' ipc: http://ipc.localhost ws://127.0.0.1:1420",
 });
 
+const EXPECTED_TAURI_BUILD = Object.freeze({
+	beforeDevCommand: "pnpm dev",
+	devUrl: "http://127.0.0.1:1420",
+	beforeBuildCommand: "pnpm build",
+	frontendDist: "../dist",
+});
+
+const EXPECTED_TAURI_E2E_SCRIPT =
+	"tauri dev --config src-tauri/tauri.e2e.conf.json";
+const EXPECTED_TAURI_E2E_BUILD_SCRIPT =
+	"tauri build --debug --bundles app --config src-tauri/tauri.e2e.conf.json";
+
+const EXPECTED_FRONTEND_ENTRYPOINT_SCRIPTS = Object.freeze({
+	dev: "vite",
+	build: "pnpm typecheck && pnpm build:frontend",
+	"build:frontend": "vite build",
+	typecheck:
+		"tsc --project tsconfig.json --noEmit && tsc --project tsconfig.tools.json --noEmit",
+	preview: "vite preview",
+	tauri: "tauri",
+	"tauri:dev": "tauri dev",
+	"tauri:dev:e2e": EXPECTED_TAURI_E2E_SCRIPT,
+	"tauri:build": "tauri build",
+	"tauri:build:e2e": EXPECTED_TAURI_E2E_BUILD_SCRIPT,
+});
+
 const EXPECTED_CAPABILITY_KEYS = Object.freeze([
 	"$schema",
 	"description",
@@ -27,10 +53,6 @@ const EXPECTED_CAPABILITY_KEYS = Object.freeze([
 	"windows",
 ]);
 
-const EXPECTED_TAURI_E2E_SCRIPT =
-	"tauri dev --config src-tauri/tauri.e2e.conf.json";
-const EXPECTED_TAURI_E2E_BUILD_SCRIPT =
-	"tauri build --debug --bundles app --config src-tauri/tauri.e2e.conf.json";
 const EXPECTED_TAURI_CONFIG_FILES = Object.freeze([
 	"tauri.conf.json",
 	"tauri.e2e.conf.json",
@@ -1077,6 +1099,10 @@ export function validateTauriConfiguration(config) {
 	const app = config?.app;
 	const security = app?.security;
 
+	if (!sameObject(config?.build, EXPECTED_TAURI_BUILD)) {
+		failures.push("Tauri build must preserve the fixed local Vite entrypoint");
+	}
+
 	if (app?.withGlobalTauri !== false) {
 		failures.push("withGlobalTauri must remain false");
 	}
@@ -1132,6 +1158,25 @@ export function validateTauriConfiguration(config) {
 	}
 
 	return failures;
+}
+
+export function validateFrontendEntrypointScripts(scripts) {
+	if (!isRecord(scripts)) {
+		return [
+			"package scripts must preserve the audited frontend entrypoint chain",
+		];
+	}
+	const entrypointNames = Object.keys(EXPECTED_FRONTEND_ENTRYPOINT_SCRIPTS);
+	return Object.entries(EXPECTED_FRONTEND_ENTRYPOINT_SCRIPTS).every(
+		([name, command]) => scripts[name] === command,
+	) &&
+		entrypointNames.every(
+			(name) =>
+				scripts[`pre${name}`] === undefined &&
+				scripts[`post${name}`] === undefined,
+		)
+		? []
+		: ["package scripts must preserve the audited frontend entrypoint chain"];
 }
 
 export function validateTauriConfigurationFiles(fileNames) {

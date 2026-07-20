@@ -39,6 +39,148 @@ export const EXPECTED_GUARDED_WORKSPACE_COMMAND_IDS = Object.freeze([
 	"_files.windowOpen",
 ]);
 
+const EXPECTED_APP_BODY =
+	'<body> <div id="app"> <div id="workbench" aria-label="Plain 编辑器"></div> <div id="plain-bootstrap-status" role="status">正在启动 Plain…</div> </div> <script type="module" src="/main.ts"></script> </body>';
+const EXPECTED_APP_HTML = `<!doctype html> <html lang="zh-CN"> <head> <meta charset="UTF-8" /> <meta name="viewport" content="width=device-width, initial-scale=1.0" /> <meta name="color-scheme" content="dark light" /> <title>Plain</title> </head> ${EXPECTED_APP_BODY} </html>`;
+
+export function validateAppHtmlAuthority(source) {
+	if (typeof source !== "string") {
+		return false;
+	}
+	const scriptStarts = source.match(/<script\b/giu) ?? [];
+	const scriptEnds = source.match(/<\/script\s*>/giu) ?? [];
+	const scriptTags =
+		source.match(/<script\b[^>]*>[\s\S]*?<\/script\s*>/giu) ?? [];
+	const bodyTags = source.match(/<body\b[^>]*>[\s\S]*?<\/body\s*>/giu) ?? [];
+	return (
+		scriptStarts.length === 1 &&
+		scriptEnds.length === 1 &&
+		scriptTags.length === 1 &&
+		bodyTags.length === 1 &&
+		scriptTags[0].replace(/\s+/gu, " ").trim() ===
+			'<script type="module" src="/main.ts"></script>' &&
+		bodyTags[0].replace(/\s+/gu, " ").trim() === EXPECTED_APP_BODY &&
+		source.replace(/\s+/gu, " ").trim() === EXPECTED_APP_HTML
+	);
+}
+
+export function validateViteResolverAuthority(
+	source,
+	configurationFiles = ["vite.config.ts"],
+) {
+	if (
+		typeof source !== "string" ||
+		!Array.isArray(configurationFiles) ||
+		configurationFiles.length !== 1 ||
+		configurationFiles[0] !== "vite.config.ts"
+	) {
+		return false;
+	}
+	const sourceFile = parse("vite.config.ts", source);
+	if (
+		sourceFile.parseDiagnostics.length !== 0 ||
+		sourceFile.statements.length !== 2
+	) {
+		return false;
+	}
+	const [importStatement, exportStatement] = sourceFile.statements;
+	const bindings = ts.isImportDeclaration(importStatement)
+		? importStatement.importClause?.namedBindings
+		: undefined;
+	const importElements = ts.isNamedImports(bindings) ? bindings.elements : [];
+	if (
+		!ts.isImportDeclaration(importStatement) ||
+		!ts.isStringLiteralLike(importStatement.moduleSpecifier) ||
+		importStatement.moduleSpecifier.text !== "vite" ||
+		importStatement.importClause?.isTypeOnly === true ||
+		importStatement.importClause?.name !== undefined ||
+		!ts.isNamedImports(bindings) ||
+		importElements.length !== 1 ||
+		importElements[0].isTypeOnly ||
+		importElements[0].propertyName !== undefined ||
+		importElements[0].name.text !== "defineConfig" ||
+		!ts.isExportAssignment(exportStatement) ||
+		exportStatement.isExportEquals
+	) {
+		return false;
+	}
+	const configCall = unwrapExpression(exportStatement.expression);
+	const configCallee = ts.isCallExpression(configCall)
+		? unwrapExpression(configCall.expression)
+		: undefined;
+	const config =
+		ts.isCallExpression(configCall) && configCall.arguments.length === 1
+			? unwrapExpression(configCall.arguments[0])
+			: undefined;
+	const stringValue = (expected) => (value) =>
+		isExactStringLiteral(value, expected);
+	const booleanValue = (kind) => (value) => value.kind === kind;
+	const numberValue = (expected) => (value) =>
+		ts.isNumericLiteral(value) && value.text === expected;
+	return (
+		ts.isIdentifier(configCallee) &&
+		configCallee.text === "defineConfig" &&
+		exactBindingReferences(
+			sourceFile,
+			analyzeSourceFile(sourceFile),
+			"defineConfig",
+			[importElements[0].name, configCallee],
+		) &&
+		hasExactObjectShape(config, [
+			["root", stringValue("app")],
+			["clearScreen", booleanValue(ts.SyntaxKind.FalseKeyword)],
+			[
+				"build",
+				(value) =>
+					hasExactObjectShape(value, [
+						["outDir", stringValue("../dist")],
+						["emptyOutDir", booleanValue(ts.SyntaxKind.TrueKeyword)],
+						["target", stringValue("esnext")],
+						["sourcemap", booleanValue(ts.SyntaxKind.TrueKeyword)],
+					]),
+			],
+			[
+				"worker",
+				(value) => hasExactObjectShape(value, [["format", stringValue("es")]]),
+			],
+			[
+				"server",
+				(value) =>
+					hasExactObjectShape(value, [
+						["host", stringValue("127.0.0.1")],
+						["port", numberValue("1420")],
+						["strictPort", booleanValue(ts.SyntaxKind.TrueKeyword)],
+						[
+							"watch",
+							(watch) =>
+								hasExactObjectShape(watch, [
+									[
+										"ignored",
+										(ignored) =>
+											ts.isArrayLiteralExpression(ignored) &&
+											ignored.elements.length === 1 &&
+											isExactStringLiteral(
+												unwrapExpression(ignored.elements[0]),
+												"**/src-tauri/**",
+											),
+									],
+								]),
+						],
+					]),
+			],
+			[
+				"preview",
+				(value) =>
+					hasExactObjectShape(value, [
+						["host", stringValue("127.0.0.1")],
+						["port", numberValue("1421")],
+						["strictPort", booleanValue(ts.SyntaxKind.TrueKeyword)],
+					]),
+			],
+		])
+	);
+}
+
 const productContracts = Object.freeze([
 	Object.freeze(["openFolder", "workbench.action.files.openFolder", "replace"]),
 	Object.freeze([
@@ -53,6 +195,11 @@ const productContracts = Object.freeze([
 const COMMAND_REGISTRY_MODULE =
 	"@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands";
 const MONACO_API_MODULE = "@codingame/monaco-vscode-api/monaco";
+const FILES_PROVIDER_OVERRIDE_MODULE =
+	"@codingame/monaco-vscode-files-service-override";
+const ROOT_PROVIDER_MODULE = "features/workspace/file-system-provider";
+const CONFIGURATION_PROVIDER_MODULE =
+	"features/workspace/workspace-configuration-provider";
 const DIRECT_COMMAND_REGISTRATION_MANIFEST = Object.freeze([
 	Object.freeze({
 		relativePath: "app/features/workspace/commands.ts",
@@ -111,6 +258,10 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/services/plain-workspace-services.ts:@codingame/monaco-vscode-api/vscode/vs/platform/workspaces/common/workspaces",
 	"app/services/plain-workspace-services.ts:@codingame/monaco-vscode-api/vscode/vs/platform/workspaces/common/workspaces.service",
 	"app/services/plain-workspace-services.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/workspaces/common/workspaceEditing.service",
+]);
+const ALLOWED_OTHER_BARE_APP_IMPORTS = Object.freeze([
+	"app/platform/tauri/native.ts:@tauri-apps/api/core",
+	"app/platform/tauri/native.ts:@tauri-apps/api/event",
 ]);
 
 // These public wrappers all reach CommandsRegistry in the pinned dependency
@@ -219,6 +370,21 @@ function analyzeSourceFile(sourceFile) {
 	const stringLiterals = nodes.filter(ts.isStringLiteralLike);
 	const variableDeclarations = nodes.filter(ts.isVariableDeclaration);
 	const functionDeclarations = nodes.filter(ts.isFunctionDeclaration);
+	const classDeclarations = nodes.filter(ts.isClassDeclaration);
+	const importEqualsDeclarations = nodes.filter(ts.isImportEqualsDeclaration);
+	const importMetaModuleAccesses = nodes.filter((node) => {
+		if (ts.isPropertyAccessExpression(node)) {
+			return (
+				isImportMeta(node.expression) &&
+				["glob", "globEager"].includes(node.name.text)
+			);
+		}
+		return (
+			ts.isElementAccessExpression(node) &&
+			isImportMeta(node.expression) &&
+			["glob", "globEager"].includes(staticStringValue(node.argumentExpression))
+		);
+	});
 	const importsExports = sourceFile.statements
 		.filter(
 			(node) => ts.isImportDeclaration(node) || ts.isExportDeclaration(node),
@@ -226,9 +392,11 @@ function analyzeSourceFile(sourceFile) {
 		.map((statement) =>
 			Object.freeze({
 				node: statement,
-				moduleName: ts.isStringLiteralLike(statement.moduleSpecifier)
-					? statement.moduleSpecifier.text
-					: undefined,
+				moduleName:
+					statement.moduleSpecifier !== undefined &&
+					ts.isStringLiteralLike(statement.moduleSpecifier)
+						? statement.moduleSpecifier.text
+						: undefined,
 				statement,
 			}),
 		);
@@ -271,6 +439,12 @@ function analyzeSourceFile(sourceFile) {
 			functionDeclarations,
 			(declaration) => declaration.name?.text,
 		),
+		classDeclarationsByName: freezeNodeIndex(
+			classDeclarations,
+			(declaration) => declaration.name?.text,
+		),
+		importEqualsDeclarations: Object.freeze(importEqualsDeclarations),
+		importMetaModuleAccesses: Object.freeze(importMetaModuleAccesses),
 		importsExports: Object.freeze(importsExports),
 	});
 	sourceAnalysisCache.set(sourceFile, analysis);
@@ -290,10 +464,16 @@ function normalizeRelativePath(relativePath) {
 		: undefined;
 }
 
-function analyzeTopologyAuthority(sourceEntries, namedSources) {
+function analyzeTopologyAuthority(
+	sourceEntries,
+	namedSources,
+	{ completeAppAuthority = false } = {},
+) {
 	const filesByPath = Object.create(null);
 	const analyses = [];
+	const modulePaths = new Set();
 	let hasDuplicatePath = false;
+	let hasAmbiguousModulePath = false;
 	let hasInvalidPath = false;
 	for (const entry of sourceEntries) {
 		if (
@@ -313,6 +493,14 @@ function analyzeTopologyAuthority(sourceEntries, namedSources) {
 		if (filesByPath[normalizedPath] !== undefined) {
 			hasDuplicatePath = true;
 			continue;
+		}
+		const modulePath = normalizedPath
+			.replace(/\.(?:[cm]?[jt]s|[jt]sx)$/u, "")
+			.toLowerCase();
+		if (modulePaths.has(modulePath)) {
+			hasAmbiguousModulePath = true;
+		} else {
+			modulePaths.add(modulePath);
 		}
 		const analysis = analyzeSourceFile(parse(normalizedPath, source));
 		filesByPath[normalizedPath] = analysis;
@@ -336,6 +524,12 @@ function analyzeTopologyAuthority(sourceEntries, namedSources) {
 	const stringLiterals = analyses.flatMap(
 		({ stringLiterals }) => stringLiterals,
 	);
+	const importEqualsDeclarations = analyses.flatMap(
+		({ importEqualsDeclarations }) => importEqualsDeclarations,
+	);
+	const importMetaModuleAccesses = analyses.flatMap(
+		({ importMetaModuleAccesses }) => importMetaModuleAccesses,
+	);
 	const importsExports = analyses.flatMap((analysis) =>
 		analysis.importsExports.map((fact) =>
 			Object.freeze({ ...fact, sourceFile: analysis.sourceFile }),
@@ -347,7 +541,12 @@ function analyzeTopologyAuthority(sourceEntries, namedSources) {
 		),
 	);
 	return Object.freeze({
-		valid: !hasDuplicatePath && !hasInvalidPath && hasConsistentNamedSources,
+		valid:
+			!hasDuplicatePath &&
+			!hasAmbiguousModulePath &&
+			!hasInvalidPath &&
+			hasConsistentNamedSources,
+		completeAppAuthority,
 		filesByPath: Object.freeze(filesByPath),
 		sourceFiles: Object.freeze(sourceFiles),
 		importsExports: Object.freeze(importsExports),
@@ -355,6 +554,8 @@ function analyzeTopologyAuthority(sourceEntries, namedSources) {
 		identifiers: Object.freeze(identifiers),
 		staticComputedAccesses: Object.freeze(staticComputedAccesses),
 		stringLiterals: Object.freeze(stringLiterals),
+		importEqualsDeclarations: Object.freeze(importEqualsDeclarations),
+		importMetaModuleAccesses: Object.freeze(importMetaModuleAccesses),
 	});
 }
 
@@ -378,6 +579,21 @@ function indexedWithin(root, nodes) {
 	);
 }
 
+function nearestFunctionLike(node) {
+	let current = node.parent;
+	while (current !== undefined) {
+		if (ts.isFunctionLike(current)) {
+			return current;
+		}
+		current = current.parent;
+	}
+	return undefined;
+}
+
+function isOwnedByFunction(node, owner) {
+	return nearestFunctionLike(node) === owner;
+}
+
 function descendants(node, predicate) {
 	return indexedWithin(
 		node,
@@ -398,6 +614,16 @@ function unwrapExpression(expression) {
 		current = current.expression;
 	}
 	return current;
+}
+
+function isImportMeta(expression) {
+	const current = unwrapExpression(expression);
+	return (
+		current !== undefined &&
+		ts.isMetaProperty(current) &&
+		current.keywordToken === ts.SyntaxKind.ImportKeyword &&
+		current.name.text === "meta"
+	);
 }
 
 function propertyChain(expression) {
@@ -498,6 +724,16 @@ function callsNamed(node, name) {
 		analyzeSourceFile(node.getSourceFile()).callsByChainName[name] ??
 		EMPTY_NODES;
 	return indexedWithin(node, facts).map(({ call }) => call);
+}
+
+function directCallsNamed(node, name, owner) {
+	return indexedWithin(node, analyzeSourceFile(node.getSourceFile()).callFacts)
+		.filter(
+			({ call, directName }) =>
+				directName === name &&
+				(owner === undefined || isOwnedByFunction(call, owner)),
+		)
+		.map(({ call }) => call);
 }
 
 function callWithChain(node, chain) {
@@ -867,6 +1103,24 @@ function isPromiseRejectNew(expression, errorName) {
 	);
 }
 
+function isDirectVariableDeclaration(owner, declaration) {
+	return (
+		declaration !== undefined &&
+		ts.isVariableDeclarationList(declaration.parent) &&
+		ts.isVariableStatement(declaration.parent.parent) &&
+		declaration.parent.parent.parent === owner.body
+	);
+}
+
+function isDirectExpressionCall(owner, call) {
+	const expression = outermostTransparentExpression(call);
+	return (
+		ts.isExpressionStatement(expression.parent) &&
+		expression.parent.expression === expression &&
+		expression.parent.parent === owner.body
+	);
+}
+
 function directMethodReturnCall(classDeclaration, methodName, call) {
 	const methods = classDeclaration.members.filter(
 		(member) =>
@@ -950,40 +1204,98 @@ function validateBootstrap(sourceFile) {
 	) {
 		return false;
 	}
-	const bootstrap = callableBody(sourceFile, "bootstrap");
-	if (bootstrap === undefined) {
-		return false;
-	}
-	const rootDeclarations = declarationInitializedByCall(
-		bootstrap,
-		"createPlainWorkspaceFileSystemProvider",
-	);
-	const configurationDeclarations = declarationInitializedByCall(
-		bootstrap,
-		"createPlainWorkspaceConfigurationProvider",
-	);
+	const bootstrapDeclarations = callableDeclarations(sourceFile, "bootstrap");
+	const bootstrapOwner =
+		bootstrapDeclarations.length === 1 ? bootstrapDeclarations[0] : undefined;
+	const bootstrap = bootstrapOwner?.body;
+	const sourceAnalysis = analyzeSourceFile(sourceFile);
 	if (
-		rootDeclarations.length !== 1 ||
-		configurationDeclarations.length !== 1 ||
-		!ts.isIdentifier(rootDeclarations[0].name) ||
-		!ts.isIdentifier(configurationDeclarations[0].name) ||
-		callsNamed(bootstrap, "createPlainWorkspaceFileSystemProvider").length !==
-			1 ||
-		callsNamed(bootstrap, "createPlainWorkspaceConfigurationProvider")
-			.length !== 1
+		!ts.isFunctionDeclaration(bootstrapOwner) ||
+		bootstrapOwner.parent !== sourceFile ||
+		bootstrapOwner.name === undefined ||
+		bootstrap === undefined
 	) {
 		return false;
 	}
-	const rootName = rootDeclarations[0].name.text;
-	const configurationName = configurationDeclarations[0].name.text;
-	const configurationReferences = descendants(
+	const bootstrapCalls = directCallsNamed(sourceFile, "bootstrap");
+	const bootstrapInvocation =
+		bootstrapCalls.length === 1 ? bootstrapCalls[0] : undefined;
+	const bootstrapCallee = ts.isCallExpression(bootstrapInvocation)
+		? unwrapExpression(bootstrapInvocation.expression)
+		: undefined;
+	const catchAccess = bootstrapInvocation?.parent;
+	const catchCall = catchAccess?.parent;
+	const voidExpression = catchCall?.parent;
+	const invocationStatement = voidExpression?.parent;
+	if (
+		!ts.isIdentifier(bootstrapCallee) ||
+		bootstrapCallee.text !== "bootstrap" ||
+		!ts.isPropertyAccessExpression(catchAccess) ||
+		catchAccess.expression !== bootstrapInvocation ||
+		catchAccess.name.text !== "catch" ||
+		!ts.isCallExpression(catchCall) ||
+		catchCall.expression !== catchAccess ||
+		catchCall.arguments.length !== 1 ||
+		!ts.isVoidExpression(voidExpression) ||
+		voidExpression.expression !== catchCall ||
+		!ts.isExpressionStatement(invocationStatement) ||
+		invocationStatement.expression !== voidExpression ||
+		invocationStatement.parent !== sourceFile ||
+		!exactBindingReferences(sourceFile, sourceAnalysis, "bootstrap", [
+			bootstrapOwner.name,
+			bootstrapCallee,
+		])
+	) {
+		return false;
+	}
+	const rootFactoryCalls = directCallsNamed(
 		bootstrap,
-		(node) => ts.isIdentifier(node) && node.text === configurationName,
+		"createPlainWorkspaceFileSystemProvider",
+		bootstrapOwner,
 	);
+	const configurationFactoryCalls = directCallsNamed(
+		bootstrap,
+		"createPlainWorkspaceConfigurationProvider",
+		bootstrapOwner,
+	);
+	const rootDeclaration =
+		rootFactoryCalls.length === 1
+			? declarationInitializedByExactCall(sourceAnalysis, rootFactoryCalls[0])
+			: undefined;
+	const configurationDeclaration =
+		configurationFactoryCalls.length === 1
+			? declarationInitializedByExactCall(
+					sourceAnalysis,
+					configurationFactoryCalls[0],
+				)
+			: undefined;
+	if (
+		rootDeclaration === undefined ||
+		configurationDeclaration === undefined ||
+		!isDirectVariableDeclaration(bootstrapOwner, rootDeclaration) ||
+		!isDirectVariableDeclaration(bootstrapOwner, configurationDeclaration) ||
+		!isOwnedByFunction(rootDeclaration, bootstrapOwner) ||
+		!isOwnedByFunction(configurationDeclaration, bootstrapOwner) ||
+		!ts.isIdentifier(rootDeclaration.name) ||
+		!ts.isIdentifier(configurationDeclaration.name)
+	) {
+		return false;
+	}
+	const rootName = rootDeclaration.name.text;
+	const configurationName = configurationDeclaration.name.text;
+	const configurationReferences = bindingReferences(
+		bootstrap,
+		sourceAnalysis,
+		configurationName,
+	).filter((reference) => isOwnedByFunction(reference, bootstrapOwner));
 	if (configurationReferences.length !== 3) {
 		return false;
 	}
-	const registrations = callsNamed(bootstrap, "registerCustomProvider");
+	const registrations = directCallsNamed(
+		bootstrap,
+		"registerCustomProvider",
+		bootstrapOwner,
+	);
 	if (registrations.length !== 2) {
 		return false;
 	}
@@ -1002,24 +1314,32 @@ function validateBootstrap(sourceFile) {
 	if (
 		rootRegistration === undefined ||
 		configurationRegistration === undefined ||
+		!isDirectExpressionCall(bootstrapOwner, rootRegistration) ||
+		!isDirectExpressionCall(bootstrapOwner, configurationRegistration) ||
 		rootRegistration.pos >= configurationRegistration.pos
 	) {
 		return false;
 	}
 
-	const coordinators = declarationInitializedByCall(
+	const coordinatorCalls = directCallsNamed(
 		bootstrap,
 		"createWorkspaceTopologyCoordinator",
+		bootstrapOwner,
 	);
+	const coordinatorDeclaration =
+		coordinatorCalls.length === 1
+			? declarationInitializedByExactCall(sourceAnalysis, coordinatorCalls[0])
+			: undefined;
 	if (
-		coordinators.length !== 1 ||
-		callsNamed(bootstrap, "createWorkspaceTopologyCoordinator").length !== 1 ||
-		!ts.isIdentifier(coordinators[0].name)
+		coordinatorDeclaration === undefined ||
+		!isDirectVariableDeclaration(bootstrapOwner, coordinatorDeclaration) ||
+		!isOwnedByFunction(coordinatorDeclaration, bootstrapOwner) ||
+		!ts.isIdentifier(coordinatorDeclaration.name)
 	) {
 		return false;
 	}
-	const coordinatorCall = unwrapExpression(coordinators[0].initializer);
-	const coordinatorName = coordinators[0].name.text;
+	const coordinatorCall = coordinatorCalls[0];
+	const coordinatorName = coordinatorDeclaration.name.text;
 	if (
 		coordinatorCall.arguments.length !== 5 ||
 		!sameChain(coordinatorCall.arguments[0], [configurationName]) ||
@@ -1029,14 +1349,21 @@ function validateBootstrap(sourceFile) {
 		return false;
 	}
 
-	const prepare = callWithChain(bootstrap, [coordinatorName, "prepareInitial"]);
-	const initialize = callsNamed(bootstrap, "initialize");
+	const prepare = callWithChain(bootstrap, [
+		coordinatorName,
+		"prepareInitial",
+	]).filter((call) => isOwnedByFunction(call, bootstrapOwner));
+	const initialize = directCallsNamed(bootstrap, "initialize", bootstrapOwner);
 	const complete = callWithChain(bootstrap, [
 		coordinatorName,
 		"completeInitial",
-	]);
+	]).filter((call) => isOwnedByFunction(call, bootstrapOwner));
 	const apply = callWithChain(bootstrap, [coordinatorName, "apply"]);
-	const commands = callsNamed(bootstrap, "registerWorkspaceCommands");
+	const commands = directCallsNamed(
+		bootstrap,
+		"registerWorkspaceCommands",
+		bootstrapOwner,
+	);
 	const workspaceCommandCall = commands.length === 1 ? commands[0] : undefined;
 	const workspaceCommandCallee = ts.isCallExpression(workspaceCommandCall)
 		? unwrapExpression(workspaceCommandCall.expression)
@@ -1049,7 +1376,7 @@ function validateBootstrap(sourceFile) {
 	const workspaceCommandHolders = variableDeclarations(
 		bootstrap,
 		"workspaceCommands",
-	);
+	).filter((declaration) => isOwnedByFunction(declaration, bootstrapOwner));
 	const workspaceCommandHolder =
 		workspaceCommandHolders.length === 1
 			? workspaceCommandHolders[0]
@@ -1068,7 +1395,7 @@ function validateBootstrap(sourceFile) {
 			ts.isBinaryExpression(node) &&
 			node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
 			sameChain(node.left, ["workspaceCommands"]),
-	);
+	).filter((assignment) => isOwnedByFunction(assignment, bootstrapOwner));
 	const workspaceCommandAssignment =
 		workspaceCommandAssignments.length === 1
 			? workspaceCommandAssignments[0]
@@ -1091,6 +1418,7 @@ function validateBootstrap(sourceFile) {
 		"addEventListener",
 	]).filter(
 		(call) =>
+			isOwnedByFunction(call, bootstrapOwner) &&
 			call.arguments.length >= 2 &&
 			ts.isStringLiteralLike(unwrapExpression(call.arguments[0])) &&
 			unwrapExpression(call.arguments[0]).text === "pagehide",
@@ -1115,7 +1443,7 @@ function validateBootstrap(sourceFile) {
 	const initialWorkspaceDeclarations = declarationInitializedByCall(
 		bootstrap,
 		"prepareInitial",
-	);
+	).filter((declaration) => isOwnedByFunction(declaration, bootstrapOwner));
 	const initialWorkspaceName =
 		initialWorkspaceDeclarations.length === 1 &&
 		ts.isIdentifier(initialWorkspaceDeclarations[0].name)
@@ -2701,6 +3029,1367 @@ function validateCommandRegistryReader(sourceFile) {
 	);
 }
 
+function resolveRelativeAppModulePath(sourceFile, moduleName) {
+	const slashed = moduleName.replaceAll("\\", "/");
+	const pathname = slashed.replace(/[?#].*$/u, "");
+	if (
+		pathname !== "." &&
+		pathname !== ".." &&
+		!pathname.startsWith("./") &&
+		!pathname.startsWith("../")
+	) {
+		return undefined;
+	}
+	return path.posix.normalize(
+		path.posix.join(path.posix.dirname(sourceFile.fileName), pathname),
+	);
+}
+
+function resolvesAppModule(sourceFile, moduleName, targetPath) {
+	const resolved = resolveRelativeAppModulePath(sourceFile, moduleName);
+	if (resolved === undefined) {
+		return false;
+	}
+	return (
+		resolved.replace(/\.(?:[cm]?[jt]s|[jt]sx)$/u, "").toLowerCase() ===
+		targetPath.toLowerCase()
+	);
+}
+
+function providerBindingAcquisitions(
+	moduleImports,
+	matchesModule,
+	names,
+	{ defaultAcquires = false } = {},
+) {
+	return moduleImports.filter(({ moduleName, sourceFile, statement }) => {
+		if (!matchesModule(moduleName, sourceFile)) {
+			return false;
+		}
+		if (ts.isExportDeclaration(statement)) {
+			if (statement.isTypeOnly) {
+				return false;
+			}
+			const exports = statement.exportClause;
+			return (
+				exports === undefined ||
+				ts.isNamespaceExport(exports) ||
+				exports.elements.some(
+					(element) =>
+						!element.isTypeOnly &&
+						((defaultAcquires &&
+							(element.propertyName?.text === "default" ||
+								element.name.text === "default")) ||
+							names.includes(element.propertyName?.text ?? element.name.text) ||
+							names.includes(element.name.text)),
+				)
+			);
+		}
+		const clause = statement.importClause;
+		if (clause === undefined || clause.isTypeOnly) {
+			return false;
+		}
+		const bindings = clause.namedBindings;
+		if (clause.name !== undefined && defaultAcquires) {
+			return true;
+		}
+		if (bindings !== undefined && ts.isNamespaceImport(bindings)) {
+			return true;
+		}
+		return (
+			bindings !== undefined &&
+			ts.isNamedImports(bindings) &&
+			bindings.elements.some(
+				(element) =>
+					!element.isTypeOnly &&
+					names.includes(element.propertyName?.text ?? element.name.text),
+			)
+		);
+	});
+}
+
+function exactDirectBindingCalls(node, name, count, owner) {
+	const directCalls = directCallsNamed(node, name, owner);
+	return directCalls.length === count ? directCalls : undefined;
+}
+
+function declarationInitializedByExactCall(analysis, call) {
+	const declarations = analysis.variableDeclarations.filter(
+		(declaration) => unwrapExpression(declaration.initializer) === call,
+	);
+	return declarations.length === 1 ? declarations[0] : undefined;
+}
+
+function isNonBindingPropertyName(identifier) {
+	const parent = identifier.parent;
+	return (
+		(ts.isPropertyAccessExpression(parent) && parent.name === identifier) ||
+		(ts.isQualifiedName(parent) && parent.right === identifier) ||
+		(ts.isBindingElement(parent) && parent.propertyName === identifier) ||
+		(ts.isImportSpecifier(parent) && parent.propertyName === identifier) ||
+		(ts.isExportSpecifier(parent) &&
+			parent.propertyName !== undefined &&
+			parent.name === identifier) ||
+		((ts.isPropertyAssignment(parent) ||
+			ts.isMethodDeclaration(parent) ||
+			ts.isPropertyDeclaration(parent) ||
+			ts.isPropertySignature(parent) ||
+			ts.isMethodSignature(parent) ||
+			ts.isGetAccessorDeclaration(parent) ||
+			ts.isSetAccessorDeclaration(parent) ||
+			ts.isEnumMember(parent)) &&
+			parent.name === identifier)
+	);
+}
+
+function isLocalValueBinding(identifier) {
+	const parent = identifier.parent;
+	return (
+		((ts.isVariableDeclaration(parent) ||
+			ts.isParameter(parent) ||
+			ts.isBindingElement(parent) ||
+			ts.isFunctionDeclaration(parent) ||
+			ts.isFunctionExpression(parent) ||
+			ts.isClassDeclaration(parent) ||
+			ts.isClassExpression(parent) ||
+			ts.isEnumDeclaration(parent) ||
+			ts.isModuleDeclaration(parent) ||
+			ts.isImportClause(parent) ||
+			ts.isImportSpecifier(parent) ||
+			ts.isNamespaceImport(parent) ||
+			ts.isImportEqualsDeclaration(parent)) &&
+			parent.name === identifier) ||
+		(ts.isShorthandPropertyAssignment(parent) &&
+			parent.objectAssignmentInitializer !== undefined &&
+			parent.name === identifier)
+	);
+}
+
+function hasNoLocalValueBinding(analysis, name) {
+	return !(analysis.identifiersByName[name] ?? EMPTY_NODES).some(
+		isLocalValueBinding,
+	);
+}
+
+function hasExactLocalValueBindings(analysis, name, allowedNodes) {
+	const allowed = new Set(allowedNodes.filter((node) => node !== undefined));
+	const bindings = (analysis.identifiersByName[name] ?? EMPTY_NODES).filter(
+		isLocalValueBinding,
+	);
+	return (
+		bindings.length === allowed.size &&
+		bindings.every((binding) => allowed.has(binding))
+	);
+}
+
+function exactValueReferences(sourceFile, analysis, name, allowedNodes) {
+	const allowed = new Set(allowedNodes.filter((node) => node !== undefined));
+	const references = indexedWithin(
+		sourceFile,
+		analysis.identifiersByName[name] ?? EMPTY_NODES,
+	).filter(
+		(identifier) =>
+			!ts.isPartOfTypeNode(identifier) && !isNonBindingPropertyName(identifier),
+	);
+	return (
+		references.length === allowed.size &&
+		references.every((reference) => allowed.has(reference))
+	);
+}
+
+function validateImportedValueMembers(analysis, moduleName, name, members) {
+	const importIdentifier = namedImportLocalIdentifier(
+		analysis.sourceFile,
+		moduleName,
+		name,
+	);
+	const valueReferences = (
+		analysis.identifiersByName[name] ?? EMPTY_NODES
+	).filter(
+		(identifier) =>
+			!ts.isPartOfTypeNode(identifier) && !isNonBindingPropertyName(identifier),
+	);
+	const memberReceivers = valueReferences.filter(
+		(identifier) =>
+			identifier !== importIdentifier &&
+			ts.isPropertyAccessExpression(identifier.parent) &&
+			identifier.parent.expression === identifier,
+	);
+	const actualMembers = memberReceivers.map(
+		(identifier) => identifier.parent.name.text,
+	);
+	return (
+		importIdentifier !== undefined &&
+		hasExactLocalValueBindings(analysis, name, [importIdentifier]) &&
+		sameStringArray([...actualMembers].sort(), [...members].sort()) &&
+		exactValueReferences(analysis.sourceFile, analysis, name, [
+			importIdentifier,
+			...memberReceivers,
+		])
+	);
+}
+
+function validateProducerIntrinsicReferences(analysis) {
+	const forbiddenGlobalReferences = [
+		"eval",
+		"Function",
+		"globalThis",
+		"self",
+		"window",
+	].flatMap((name) =>
+		(analysis.identifiersByName[name] ?? EMPTY_NODES).filter(
+			(identifier) =>
+				!ts.isPartOfTypeNode(identifier) &&
+				!isNonBindingPropertyName(identifier),
+		),
+	);
+	const objectReferences = (
+		analysis.identifiersByName.Object ?? EMPTY_NODES
+	).filter(
+		(identifier) =>
+			!ts.isPartOfTypeNode(identifier) && !isNonBindingPropertyName(identifier),
+	);
+	const directMethods = new Set([
+		"create",
+		"freeze",
+		"getOwnPropertyDescriptor",
+		"getOwnPropertyDescriptors",
+		"getPrototypeOf",
+	]);
+	const reflectReferences = (
+		analysis.identifiersByName.Reflect ?? EMPTY_NODES
+	).filter(
+		(identifier) =>
+			!ts.isPartOfTypeNode(identifier) && !isNonBindingPropertyName(identifier),
+	);
+	const directReflectMethods = new Set(["apply", "get", "ownKeys"]);
+	return (
+		hasNoLocalValueBinding(analysis, "Object") &&
+		hasNoLocalValueBinding(analysis, "Reflect") &&
+		forbiddenGlobalReferences.length === 0 &&
+		objectReferences.every((identifier) => {
+			const access = identifier.parent;
+			if (
+				!ts.isPropertyAccessExpression(access) ||
+				access.expression !== identifier
+			) {
+				return false;
+			}
+			if (access.name.text === "prototype") {
+				const comparison = access.parent;
+				return (
+					ts.isBinaryExpression(comparison) &&
+					comparison.right === access &&
+					comparison.operatorToken.kind ===
+						ts.SyntaxKind.ExclamationEqualsEqualsToken &&
+					sameChain(comparison.left, ["prototype"])
+				);
+			}
+			return (
+				directMethods.has(access.name.text) &&
+				ts.isCallExpression(access.parent) &&
+				access.parent.expression === access
+			);
+		}) &&
+		reflectReferences.every((identifier) => {
+			const access = identifier.parent;
+			return (
+				ts.isPropertyAccessExpression(access) &&
+				access.expression === identifier &&
+				directReflectMethods.has(access.name.text) &&
+				ts.isCallExpression(access.parent) &&
+				access.parent.expression === access
+			);
+		})
+	);
+}
+
+function bindingReferences(sourceFile, analysis, name) {
+	return indexedWithin(
+		sourceFile,
+		analysis.identifiersByName[name] ?? EMPTY_NODES,
+	).filter((identifier) => !isNonBindingPropertyName(identifier));
+}
+
+function exactBindingReferences(sourceFile, analysis, name, allowedNodes) {
+	const allowed = new Set(allowedNodes.filter((node) => node !== undefined));
+	const references = bindingReferences(sourceFile, analysis, name);
+	return (
+		references.length === allowed.size &&
+		references.every((reference) => allowed.has(reference))
+	);
+}
+
+function exactOwnedBindingReferences(owner, analysis, name, allowedNodes) {
+	const allowed = new Set(allowedNodes.filter((node) => node !== undefined));
+	const references = indexedWithin(
+		owner,
+		bindingReferences(analysis.sourceFile, analysis, name),
+	);
+	return (
+		references.length === allowed.size &&
+		references.every((reference) => allowed.has(reference))
+	);
+}
+
+function hasExportModifier(node) {
+	return (
+		node.modifiers?.some(
+			(modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
+		) === true
+	);
+}
+
+function validateProducerFactory(analysis, name) {
+	const declarations = analysis.functionDeclarationsByName[name] ?? EMPTY_NODES;
+	const declaration = declarations.length === 1 ? declarations[0] : undefined;
+	return (
+		declaration !== undefined &&
+		declaration.parent === analysis.sourceFile &&
+		hasExportModifier(declaration) &&
+		declaration.modifiers?.some(
+			(modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword,
+		) !== true &&
+		declaration.name !== undefined &&
+		exactBindingReferences(analysis.sourceFile, analysis, name, [
+			declaration.name,
+		])
+	);
+}
+
+function validateProducerImplementationClass(
+	analysis,
+	className,
+	factoryName,
+	{
+		constructorParameters,
+		constructorStatementCount,
+		factoryReturnsClass = false,
+	} = {},
+) {
+	const classes = analysis.classDeclarationsByName[className] ?? EMPTY_NODES;
+	const classDeclaration = classes.length === 1 ? classes[0] : undefined;
+	const factories =
+		analysis.functionDeclarationsByName[factoryName] ?? EMPTY_NODES;
+	const factory = factories.length === 1 ? factories[0] : undefined;
+	if (
+		classDeclaration === undefined ||
+		classDeclaration.parent !== analysis.sourceFile ||
+		(classDeclaration.modifiers?.length ?? 0) !== 0 ||
+		classDeclaration.name === undefined ||
+		factory === undefined
+	) {
+		return false;
+	}
+	const extendsClauses =
+		classDeclaration.heritageClauses?.filter(
+			(clause) => clause.token === ts.SyntaxKind.ExtendsKeyword,
+		) ?? EMPTY_NODES;
+	const constructors = classDeclaration.members.filter(
+		ts.isConstructorDeclaration,
+	);
+	const constructor = constructors.length === 1 ? constructors[0] : undefined;
+	const constructorStatements = constructor?.body?.statements ?? EMPTY_NODES;
+	const constructorFreezeStatement = constructorStatements.at(-1);
+	const constructorFreeze =
+		constructorFreezeStatement !== undefined &&
+		ts.isExpressionStatement(constructorFreezeStatement)
+			? unwrapExpression(constructorFreezeStatement.expression)
+			: undefined;
+	if (
+		extendsClauses.length !== 0 ||
+		constructor === undefined ||
+		constructor.body === undefined ||
+		(constructor.modifiers?.length ?? 0) !== 0 ||
+		constructorParameters === undefined ||
+		constructor.parameters.length !== constructorParameters.length ||
+		!constructor.parameters.every(
+			(parameter, index) =>
+				ts.isIdentifier(parameter.name) &&
+				parameter.name.text === constructorParameters[index] &&
+				parameter.dotDotDotToken === undefined &&
+				parameter.questionToken === undefined &&
+				parameter.initializer === undefined,
+		) ||
+		constructorStatements.length !== constructorStatementCount ||
+		descendants(constructor.body, ts.isReturnStatement).length !== 0 ||
+		!ts.isCallExpression(constructorFreeze) ||
+		!sameChain(constructorFreeze.expression, ["Object", "freeze"]) ||
+		constructorFreeze.arguments.length !== 1 ||
+		constructorFreeze.arguments[0].kind !== ts.SyntaxKind.ThisKeyword
+	) {
+		return false;
+	}
+	const references = bindingReferences(
+		analysis.sourceFile,
+		analysis,
+		className,
+	);
+	const factoryReturn =
+		factory.body?.statements.length === 1 &&
+		ts.isReturnStatement(factory.body.statements[0])
+			? factory.body.statements[0]
+			: undefined;
+	const returnedConstruction =
+		factoryReturn?.expression === undefined
+			? undefined
+			: unwrapExpression(factoryReturn.expression);
+	const prototypeFreezes = references.filter((identifier) => {
+		const access = identifier.parent;
+		const call = access?.parent;
+		const statement = call?.parent;
+		return (
+			ts.isPropertyAccessExpression(access) &&
+			access.expression === identifier &&
+			access.name.text === "prototype" &&
+			ts.isCallExpression(call) &&
+			sameChain(call.expression, ["Object", "freeze"]) &&
+			call.arguments.length === 1 &&
+			call.arguments[0] === access &&
+			ts.isExpressionStatement(statement) &&
+			statement.expression === call &&
+			statement.parent === analysis.sourceFile &&
+			classDeclaration.pos < statement.pos &&
+			statement.pos < factory.pos
+		);
+	});
+	const factoryConstructions = references.filter((identifier) => {
+		const construction = identifier.parent;
+		return (
+			ts.isNewExpression(construction) &&
+			construction.expression === identifier &&
+			construction === returnedConstruction &&
+			nearestFunctionLike(identifier) === factory
+		);
+	});
+	const factoryReturnType =
+		factoryReturnsClass &&
+		factory.type !== undefined &&
+		ts.isTypeReferenceNode(factory.type) &&
+		ts.isIdentifier(factory.type.typeName) &&
+		factory.type.typeName.text === className
+			? factory.type.typeName
+			: undefined;
+	return (
+		validateProducerIntrinsicReferences(analysis) &&
+		factoryReturn !== undefined &&
+		returnedConstruction !== undefined &&
+		ts.isNewExpression(returnedConstruction) &&
+		prototypeFreezes.length === 1 &&
+		factoryConstructions.length === 1 &&
+		(!factoryReturnsClass || factoryReturnType !== undefined) &&
+		exactBindingReferences(analysis.sourceFile, analysis, className, [
+			classDeclaration.name,
+			prototypeFreezes[0],
+			factoryConstructions[0],
+			...(factoryReturnsClass ? [factoryReturnType] : []),
+		])
+	);
+}
+
+function validateProducerScheme(analysis, name, value, referenceContracts) {
+	const declarations = analysis.variableDeclarationsByName[name] ?? EMPTY_NODES;
+	const declaration = declarations.length === 1 ? declarations[0] : undefined;
+	const statement =
+		declaration !== undefined && ts.isVariableDeclaration(declaration)
+			? declaration.parent.parent
+			: undefined;
+	if (
+		declaration === undefined ||
+		!ts.isVariableStatement(statement) ||
+		statement.parent !== analysis.sourceFile ||
+		!hasExportModifier(statement) ||
+		!isConstVariableDeclaration(declaration) ||
+		!ts.isIdentifier(declaration.name) ||
+		!isExactStringLiteral(unwrapExpression(declaration.initializer), value)
+	) {
+		return false;
+	}
+	const references = bindingReferences(analysis.sourceFile, analysis, name);
+	const contractedReferences = referenceContracts.map((contract) => {
+		const matches = references.filter(contract);
+		return matches.length === 1 ? matches[0] : undefined;
+	});
+	return (
+		contractedReferences.every((reference) => reference !== undefined) &&
+		exactBindingReferences(analysis.sourceFile, analysis, name, [
+			declaration.name,
+			...contractedReferences,
+		])
+	);
+}
+
+function callableOwner(name, className) {
+	return (identifier) => {
+		const sourceFile = identifier.getSourceFile();
+		const analysis = analyzeSourceFile(sourceFile);
+		let expectedOwner;
+		if (className === undefined) {
+			const declarations =
+				analysis.functionDeclarationsByName[name] ?? EMPTY_NODES;
+			expectedOwner =
+				declarations.length === 1 && declarations[0].parent === sourceFile
+					? declarations[0]
+					: undefined;
+		} else {
+			const classes =
+				analysis.classDeclarationsByName[className] ?? EMPTY_NODES;
+			const classDeclaration =
+				classes.length === 1 && classes[0].parent === sourceFile
+					? classes[0]
+					: undefined;
+			const methods =
+				classDeclaration?.members.filter(
+					(member) =>
+						ts.isMethodDeclaration(member) &&
+						propertyName(member.name) === name,
+				) ?? EMPTY_NODES;
+			expectedOwner = methods.length === 1 ? methods[0] : undefined;
+		}
+		if (expectedOwner === undefined) {
+			return false;
+		}
+		let current = identifier.parent;
+		while (current !== undefined && current !== sourceFile) {
+			if (ts.isFunctionLike(current)) {
+				return current === expectedOwner;
+			}
+			current = current.parent;
+		}
+		return false;
+	};
+}
+
+function outermostTransparentExpression(expression) {
+	let current = expression;
+	while (
+		current.parent !== undefined &&
+		(ts.isParenthesizedExpression(current.parent) ||
+			ts.isAsExpression(current.parent) ||
+			ts.isTypeAssertionExpression(current.parent) ||
+			ts.isNonNullExpression(current.parent) ||
+			(ts.isSatisfiesExpression?.(current.parent) ?? false)) &&
+		current.parent.expression === current
+	) {
+		current = current.parent;
+	}
+	return current;
+}
+
+function nearestAncestor(node, predicate) {
+	let current = node.parent;
+	while (current !== undefined) {
+		if (predicate(current)) {
+			return current;
+		}
+		current = current.parent;
+	}
+	return undefined;
+}
+
+function isBooleanChainMember(expression, member, operator) {
+	let current = outermostTransparentExpression(member);
+	while (current !== expression) {
+		const parent = current.parent;
+		if (
+			parent === undefined ||
+			!ts.isBinaryExpression(parent) ||
+			parent.operatorToken.kind !== operator ||
+			(parent.left !== current && parent.right !== current)
+		) {
+			return false;
+		}
+		current = outermostTransparentExpression(parent);
+	}
+	return true;
+}
+
+function binaryChainTerms(expression, operator) {
+	const current = unwrapExpression(expression);
+	if (
+		current !== undefined &&
+		ts.isBinaryExpression(current) &&
+		current.operatorToken.kind === operator
+	) {
+		return [
+			...binaryChainTerms(current.left, operator),
+			...binaryChainTerms(current.right, operator),
+		];
+	}
+	return current === undefined ? [] : [current];
+}
+
+function matchesComparison(expression, left, operator, validateRight) {
+	const current = unwrapExpression(expression);
+	return (
+		current !== undefined &&
+		ts.isBinaryExpression(current) &&
+		current.operatorToken.kind === operator &&
+		sameChain(current.left, left) &&
+		validateRight(unwrapExpression(current.right))
+	);
+}
+
+function singleConstDeclaration(statement, name) {
+	if (
+		!ts.isVariableStatement(statement) ||
+		statement.declarationList.declarations.length !== 1
+	) {
+		return undefined;
+	}
+	const declaration = statement.declarationList.declarations[0];
+	return isConstVariableDeclaration(declaration) &&
+		ts.isIdentifier(declaration.name) &&
+		declaration.name.text === name
+		? declaration
+		: undefined;
+}
+
+function throwsNoPermissions(statement) {
+	const statements = ts.isBlock(statement) ? statement.statements : [statement];
+	if (statements.length !== 1 || !ts.isThrowStatement(statements[0])) {
+		return false;
+	}
+	const thrown = unwrapExpression(statements[0].expression);
+	return (
+		thrown !== undefined &&
+		ts.isCallExpression(thrown) &&
+		sameChain(thrown.expression, ["noPermissions"]) &&
+		thrown.arguments.length === 0
+	);
+}
+
+function rejectionGateContext(_identifier, comparison) {
+	const branch = nearestAncestor(comparison, ts.isIfStatement);
+	return (
+		branch !== undefined &&
+		branch.elseStatement === undefined &&
+		isBooleanChainMember(
+			branch.expression,
+			comparison,
+			ts.SyntaxKind.BarBarToken,
+		) &&
+		throwsNoPermissions(branch.thenStatement)
+	);
+}
+
+function watchSchemeRootContext(identifier, comparison) {
+	const analysis = analyzeSourceFile(identifier.getSourceFile());
+	const owner = nearestFunctionLike(identifier);
+	if (
+		!ts.isMethodDeclaration(owner) ||
+		owner.body === undefined ||
+		owner.body.statements.length !== 4 ||
+		owner.parameters.length !== 2 ||
+		!ts.isIdentifier(owner.parameters[0].name) ||
+		owner.parameters[0].name.text !== "resource" ||
+		!ts.isIdentifier(owner.parameters[1].name) ||
+		owner.parameters[1].name.text !== "_options"
+	) {
+		return false;
+	}
+	const [candidateStatement, schemeStatement, branch, returnStatement] =
+		owner.body.statements;
+	const candidateDeclaration = singleConstDeclaration(
+		candidateStatement,
+		"candidate",
+	);
+	const declaration = singleConstDeclaration(schemeStatement, "schemeRoot");
+	const candidateCall = unwrapExpression(candidateDeclaration?.initializer);
+	if (
+		declaration === undefined ||
+		declaration.initializer === undefined ||
+		!isBooleanChainMember(
+			declaration.initializer,
+			comparison,
+			ts.SyntaxKind.AmpersandAmpersandToken,
+		) ||
+		!ts.isCallExpression(candidateCall) ||
+		!sameChain(candidateCall.expression, ["resourceSnapshot"]) ||
+		candidateCall.arguments.length !== 1 ||
+		!sameChain(candidateCall.arguments[0], ["resource"]) ||
+		!ts.isIfStatement(branch) ||
+		branch.elseStatement !== undefined
+	) {
+		return false;
+	}
+	const schemeTerms = binaryChainTerms(
+		declaration.initializer,
+		ts.SyntaxKind.AmpersandAmpersandToken,
+	);
+	const expectedSchemeTerms = [
+		["scheme", "plain-workspace-config"],
+		["authority", ""],
+		["path", "/"],
+		["query", ""],
+		["fragment", ""],
+	];
+	const condition = unwrapExpression(branch.expression);
+	const branchStatements = ts.isBlock(branch.thenStatement)
+		? branch.thenStatement.statements
+		: [branch.thenStatement];
+	const boundCall =
+		branchStatements.length === 1 &&
+		ts.isExpressionStatement(branchStatements[0])
+			? unwrapExpression(branchStatements[0].expression)
+			: undefined;
+	const returned = ts.isReturnStatement(returnStatement)
+		? unwrapExpression(returnStatement.expression)
+		: undefined;
+	const disposeObject =
+		ts.isCallExpression(returned) &&
+		sameChain(returned.expression, ["Object", "freeze"]) &&
+		returned.arguments.length === 1
+			? unwrapExpression(returned.arguments[0])
+			: undefined;
+	const disposeMethod = ts.isObjectLiteralExpression(disposeObject)
+		? objectProperty(disposeObject, "dispose")
+		: undefined;
+	const candidateSchemeReferences = bindingReferences(
+		declaration.initializer,
+		analysis,
+		"candidate",
+	);
+	const candidateArgument = ts.isCallExpression(boundCall)
+		? unwrapExpression(boundCall.arguments[0])
+		: undefined;
+	const schemeRootOperand =
+		condition !== undefined &&
+		ts.isPrefixUnaryExpression(condition) &&
+		condition.operator === ts.SyntaxKind.ExclamationToken
+			? unwrapExpression(condition.operand)
+			: undefined;
+	return (
+		schemeTerms.length === expectedSchemeTerms.length &&
+		expectedSchemeTerms.every(([property, value], index) =>
+			matchesComparison(
+				schemeTerms[index],
+				["candidate", property],
+				ts.SyntaxKind.EqualsEqualsEqualsToken,
+				(right) =>
+					property === "scheme"
+						? sameChain(right, ["PLAIN_WORKSPACE_CONFIGURATION_SCHEME"])
+						: isExactStringLiteral(right, value),
+			),
+		) &&
+		sameChain(schemeRootOperand, ["schemeRoot"]) &&
+		ts.isCallExpression(boundCall) &&
+		sameChain(boundCall.expression, ["this", "boundFile"]) &&
+		boundCall.arguments.length === 1 &&
+		ts.isIdentifier(candidateArgument) &&
+		candidateArgument.text === "candidate" &&
+		ts.isObjectLiteralExpression(disposeObject) &&
+		disposeObject.properties.length === 1 &&
+		ts.isMethodDeclaration(disposeMethod) &&
+		disposeMethod.parameters.length === 0 &&
+		disposeMethod.body?.statements.length === 0 &&
+		candidateSchemeReferences.length === 5 &&
+		exactOwnedBindingReferences(owner, analysis, "candidate", [
+			candidateDeclaration.name,
+			...candidateSchemeReferences,
+			candidateArgument,
+		]) &&
+		exactOwnedBindingReferences(owner, analysis, "schemeRoot", [
+			declaration.name,
+			schemeRootOperand,
+		]) &&
+		exactOwnedBindingReferences(owner, analysis, "resource", [
+			owner.parameters[0].name,
+			unwrapExpression(candidateCall.arguments[0]),
+		])
+	);
+}
+
+function configurationUriContext(identifier, property, expectedProperty) {
+	const analysis = analyzeSourceFile(identifier.getSourceFile());
+	const uriImport = namedImportLocalIdentifier(
+		analysis.sourceFile,
+		"@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
+		"URI",
+	);
+	const owner = nearestFunctionLike(identifier);
+	const object = property.parent;
+	if (
+		!ts.isFunctionDeclaration(owner) ||
+		owner.body === undefined ||
+		owner.body.statements.length !== 5 ||
+		owner.parameters.length !== 1 ||
+		!ts.isIdentifier(owner.parameters[0].name) ||
+		owner.parameters[0].name.text !== "workspaceId" ||
+		!ts.isObjectLiteralExpression(object)
+	) {
+		return false;
+	}
+	const call = object.parent;
+	const uriFromAccess = ts.isCallExpression(call)
+		? unwrapExpression(call.expression)
+		: undefined;
+	const uriReceiver = ts.isPropertyAccessExpression(uriFromAccess)
+		? unwrapExpression(uriFromAccess.expression)
+		: undefined;
+	const [
+		declarationStatement,
+		toStringStatement,
+		fsPathStatement,
+		freezeStatement,
+		returnStatement,
+	] = owner.body.statements;
+	const declaration = singleConstDeclaration(declarationStatement, "resource");
+	if (
+		!ts.isCallExpression(call) ||
+		!sameChain(call.expression, ["URI", "from"]) ||
+		call.arguments.length !== 2 ||
+		call.arguments[0] !== object ||
+		unwrapExpression(declaration?.initializer) !== call
+	) {
+		return false;
+	}
+	const toStringCall = ts.isExpressionStatement(toStringStatement)
+		? unwrapExpression(toStringStatement.expression)
+		: undefined;
+	const toStringReceiver = directMethodReceiver(
+		toStringCall,
+		"resource",
+		"toString",
+	);
+	const voidExpression = ts.isExpressionStatement(fsPathStatement)
+		? unwrapExpression(fsPathStatement.expression)
+		: undefined;
+	const fsPathAccess =
+		voidExpression !== undefined && ts.isVoidExpression(voidExpression)
+			? unwrapExpression(voidExpression.expression)
+			: undefined;
+	const fsPathReceiver = ts.isPropertyAccessExpression(fsPathAccess)
+		? unwrapExpression(fsPathAccess.expression)
+		: undefined;
+	const freezeCall = ts.isExpressionStatement(freezeStatement)
+		? unwrapExpression(freezeStatement.expression)
+		: undefined;
+	const freezeArgument =
+		ts.isCallExpression(freezeCall) && freezeCall.arguments.length === 1
+			? unwrapExpression(freezeCall.arguments[0])
+			: undefined;
+	const returned = ts.isReturnStatement(returnStatement)
+		? unwrapExpression(returnStatement.expression)
+		: undefined;
+	const authorityProperty = objectProperty(object, "authority");
+	const workspaceIdValue = ts.isPropertyAssignment(authorityProperty)
+		? unwrapExpression(authorityProperty.initializer)
+		: undefined;
+	const pathProperty = objectProperty(object, "path");
+	const pathValue = ts.isPropertyAssignment(pathProperty)
+		? unwrapExpression(pathProperty.initializer)
+		: undefined;
+	return (
+		declaration !== undefined &&
+		uriImport !== undefined &&
+		hasExactLocalValueBindings(analysis, "URI", [uriImport]) &&
+		ts.isIdentifier(uriReceiver) &&
+		uriReceiver.text === "URI" &&
+		exactValueReferences(analysis.sourceFile, analysis, "URI", [
+			uriImport,
+			uriReceiver,
+		]) &&
+		object.properties.length === 3 &&
+		objectProperty(object, expectedProperty) === property &&
+		call.arguments[1].kind === ts.SyntaxKind.TrueKeyword &&
+		toStringReceiver !== undefined &&
+		ts.isPropertyAccessExpression(fsPathAccess) &&
+		fsPathAccess.name.text === "fsPath" &&
+		ts.isIdentifier(fsPathReceiver) &&
+		fsPathReceiver.text === "resource" &&
+		ts.isCallExpression(freezeCall) &&
+		sameChain(freezeCall.expression, ["Object", "freeze"]) &&
+		ts.isIdentifier(freezeArgument) &&
+		freezeArgument.text === "resource" &&
+		ts.isIdentifier(returned) &&
+		returned.text === "resource" &&
+		ts.isIdentifier(workspaceIdValue) &&
+		workspaceIdValue.text === "workspaceId" &&
+		sameChain(pathValue, ["PLAIN_WORKSPACE_CONFIGURATION_PATH"]) &&
+		exactOwnedBindingReferences(owner, analysis, "resource", [
+			declaration.name,
+			toStringReceiver,
+			fsPathReceiver,
+			freezeArgument,
+			returned,
+		]) &&
+		exactOwnedBindingReferences(owner, analysis, "workspaceId", [
+			owner.parameters[0].name,
+			workspaceIdValue,
+		])
+	);
+}
+
+function configurationSchemeUriContext(identifier, property) {
+	return configurationUriContext(identifier, property, "scheme");
+}
+
+function configurationPathUriContext(identifier, property) {
+	return configurationUriContext(identifier, property, "path");
+}
+
+function boundFileRejectionContext(identifier, comparison) {
+	const owner = nearestFunctionLike(identifier);
+	if (
+		!ts.isMethodDeclaration(owner) ||
+		owner.body === undefined ||
+		owner.body.statements.length !== 2 ||
+		owner.parameters.length !== 1 ||
+		!ts.isIdentifier(owner.parameters[0].name) ||
+		owner.parameters[0].name.text !== "candidate"
+	) {
+		return false;
+	}
+	const [branch, returnStatement] = owner.body.statements;
+	const terms = ts.isIfStatement(branch)
+		? binaryChainTerms(branch.expression, ts.SyntaxKind.BarBarToken)
+		: [];
+	const returned = ts.isReturnStatement(returnStatement)
+		? unwrapExpression(returnStatement.expression)
+		: undefined;
+	return (
+		ts.isIfStatement(branch) &&
+		nearestAncestor(comparison, ts.isIfStatement) === branch &&
+		rejectionGateContext(identifier, comparison) &&
+		terms.length === 6 &&
+		matchesComparison(
+			terms[0],
+			["candidate", "scheme"],
+			ts.SyntaxKind.ExclamationEqualsEqualsToken,
+			(right) => sameChain(right, ["PLAIN_WORKSPACE_CONFIGURATION_SCHEME"]),
+		) &&
+		matchesComparison(
+			terms[1],
+			["candidate", "path"],
+			ts.SyntaxKind.ExclamationEqualsEqualsToken,
+			(right) => sameChain(right, ["PLAIN_WORKSPACE_CONFIGURATION_PATH"]),
+		) &&
+		matchesComparison(
+			terms[2],
+			["candidate", "query"],
+			ts.SyntaxKind.ExclamationEqualsEqualsToken,
+			(right) => isExactStringLiteral(right, ""),
+		) &&
+		matchesComparison(
+			terms[3],
+			["candidate", "fragment"],
+			ts.SyntaxKind.ExclamationEqualsEqualsToken,
+			(right) => isExactStringLiteral(right, ""),
+		) &&
+		matchesComparison(
+			terms[4],
+			["this", "#binding"],
+			ts.SyntaxKind.EqualsEqualsEqualsToken,
+			(right) => sameChain(right, ["undefined"]),
+		) &&
+		matchesComparison(
+			terms[5],
+			["candidate", "authority"],
+			ts.SyntaxKind.ExclamationEqualsEqualsToken,
+			(right) => sameChain(right, ["this", "#binding", "workspaceId"]),
+		) &&
+		sameChain(returned, ["this", "#binding", "installed"])
+	);
+}
+
+function binaryRightReference(left, operator, owner, context) {
+	return (identifier) => {
+		const expression = outermostTransparentExpression(identifier);
+		return (
+			ts.isBinaryExpression(expression.parent) &&
+			expression.parent.right === expression &&
+			expression.parent.operatorToken.kind === operator &&
+			sameChain(expression.parent.left, left) &&
+			owner(identifier) &&
+			context(identifier, expression.parent)
+		);
+	};
+}
+
+function propertyInitializerReference(name, owner, context) {
+	return (identifier) => {
+		const expression = outermostTransparentExpression(identifier);
+		return (
+			ts.isPropertyAssignment(expression.parent) &&
+			expression.parent.initializer === expression &&
+			propertyName(expression.parent.name) === name &&
+			owner(identifier) &&
+			context(identifier, expression.parent)
+		);
+	};
+}
+
+function validateProviderProducerBindings(authority) {
+	return [
+		{
+			analysis: authority.filesByPath[`app/${ROOT_PROVIDER_MODULE}.ts`],
+			optional: !authority.completeAppAuthority,
+			factory: "createPlainWorkspaceFileSystemProvider",
+			implementation: "PlainWorkspaceFileSystemProvider",
+			constructorParameters: ["bridge", "allowsMutationDispatch"],
+			constructorStatementCount: 4,
+			factoryReturnsImplementation: true,
+			valueMemberImports: [
+				{
+					moduleName:
+						"@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files",
+					name: "FileSystemProviderCapabilities",
+					members: ["FileFolderCopy", "FileReadWrite", "Readonly"],
+				},
+				{
+					moduleName:
+						"@codingame/monaco-vscode-api/vscode/vs/base/common/event",
+					name: "Event",
+					members: ["None"],
+				},
+			],
+			constants: [
+				{
+					name: "PLAIN_WORKSPACE_SCHEME",
+					value: "plain-workspace",
+					references: [
+						binaryRightReference(
+							["scheme"],
+							ts.SyntaxKind.ExclamationEqualsEqualsToken,
+							callableOwner(
+								"resolveMutationResource",
+								"PlainWorkspaceFileSystemProvider",
+							),
+							rejectionGateContext,
+						),
+						binaryRightReference(
+							["resource", "scheme"],
+							ts.SyntaxKind.ExclamationEqualsEqualsToken,
+							callableOwner(
+								"resolveResource",
+								"PlainWorkspaceFileSystemProvider",
+							),
+							rejectionGateContext,
+						),
+					],
+				},
+			],
+		},
+		{
+			analysis:
+				authority.filesByPath[`app/${CONFIGURATION_PROVIDER_MODULE}.ts`],
+			optional: false,
+			factory: "createPlainWorkspaceConfigurationProvider",
+			implementation: "PlainWorkspaceConfigurationProviderImpl",
+			constructorParameters: [],
+			constructorStatementCount: 1,
+			factoryReturnsImplementation: false,
+			valueMemberImports: [
+				{
+					moduleName:
+						"@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files",
+					name: "FileSystemProviderCapabilities",
+					members: ["FileReadWrite", "Readonly"],
+				},
+				{
+					moduleName:
+						"@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files",
+					name: "FilePermission",
+					members: ["Readonly"],
+				},
+				{
+					moduleName:
+						"@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files",
+					name: "FileType",
+					members: ["File"],
+				},
+				{
+					moduleName:
+						"@codingame/monaco-vscode-api/vscode/vs/base/common/event",
+					name: "Event",
+					members: ["None", "None"],
+				},
+			],
+			constants: [
+				{
+					name: "PLAIN_WORKSPACE_CONFIGURATION_SCHEME",
+					value: "plain-workspace-config",
+					references: [
+						propertyInitializerReference(
+							"scheme",
+							callableOwner("configurationUri"),
+							configurationSchemeUriContext,
+						),
+						binaryRightReference(
+							["candidate", "scheme"],
+							ts.SyntaxKind.EqualsEqualsEqualsToken,
+							callableOwner("watch", "PlainWorkspaceConfigurationProviderImpl"),
+							watchSchemeRootContext,
+						),
+						binaryRightReference(
+							["candidate", "scheme"],
+							ts.SyntaxKind.ExclamationEqualsEqualsToken,
+							callableOwner(
+								"boundFile",
+								"PlainWorkspaceConfigurationProviderImpl",
+							),
+							boundFileRejectionContext,
+						),
+					],
+				},
+				{
+					name: "PLAIN_WORKSPACE_CONFIGURATION_PATH",
+					value: "/workspace.code-workspace",
+					references: [
+						propertyInitializerReference(
+							"path",
+							callableOwner("configurationUri"),
+							configurationPathUriContext,
+						),
+						binaryRightReference(
+							["candidate", "path"],
+							ts.SyntaxKind.ExclamationEqualsEqualsToken,
+							callableOwner(
+								"boundFile",
+								"PlainWorkspaceConfigurationProviderImpl",
+							),
+							boundFileRejectionContext,
+						),
+					],
+				},
+			],
+		},
+	].every(
+		({
+			analysis,
+			optional,
+			factory,
+			implementation,
+			constructorParameters,
+			constructorStatementCount,
+			factoryReturnsImplementation,
+			valueMemberImports,
+			constants,
+		}) =>
+			analysis === undefined
+				? optional
+				: validateProducerFactory(analysis, factory) &&
+					validateProducerImplementationClass(
+						analysis,
+						implementation,
+						factory,
+						{
+							constructorParameters,
+							constructorStatementCount,
+							factoryReturnsClass: factoryReturnsImplementation,
+						},
+					) &&
+					valueMemberImports.every(({ moduleName, name, members }) =>
+						validateImportedValueMembers(analysis, moduleName, name, members),
+					) &&
+					constants.every(({ name, value, references }) =>
+						validateProducerScheme(analysis, name, value, references),
+					),
+	);
+}
+
+function validateProviderBindingAuthority(authority, moduleImports) {
+	const mainAnalysis = authority.filesByPath["app/main.ts"];
+	const mainSource = mainAnalysis?.sourceFile;
+	if (mainAnalysis === undefined || mainSource === undefined) {
+		return false;
+	}
+	const bootstrapDeclarations = callableDeclarations(mainSource, "bootstrap");
+	const bootstrapOwner =
+		bootstrapDeclarations.length === 1 ? bootstrapDeclarations[0] : undefined;
+	if (bootstrapOwner === undefined) {
+		return false;
+	}
+	const registrarName = "registerCustomProvider";
+	const rootFactoryName = "createPlainWorkspaceFileSystemProvider";
+	const configurationFactoryName = "createPlainWorkspaceConfigurationProvider";
+	const rootSchemeName = "PLAIN_WORKSPACE_SCHEME";
+	const configurationSchemeName = "PLAIN_WORKSPACE_CONFIGURATION_SCHEME";
+	const deleteCoordinatorName = "registerWorkspaceDeleteCoordinator";
+	const topologyCoordinatorName = "createWorkspaceTopologyCoordinator";
+	const rootModule = `./${ROOT_PROVIDER_MODULE}`;
+	const configurationModule = `./${CONFIGURATION_PROVIDER_MODULE}`;
+	const importContracts = [
+		[FILES_PROVIDER_OVERRIDE_MODULE, [registrarName]],
+		[rootModule, [rootFactoryName, rootSchemeName]],
+		[configurationModule, [configurationFactoryName, configurationSchemeName]],
+		["./features/workspace/delete-coordinator", [deleteCoordinatorName]],
+		["./features/workspace/workspace-projection", [topologyCoordinatorName]],
+	];
+	const acquisitionContracts = [
+		providerBindingAcquisitions(
+			moduleImports,
+			(moduleName) => moduleName.startsWith(FILES_PROVIDER_OVERRIDE_MODULE),
+			[registrarName],
+		),
+		providerBindingAcquisitions(
+			moduleImports,
+			(moduleName, sourceFile) =>
+				resolvesAppModule(
+					sourceFile,
+					moduleName,
+					`app/${ROOT_PROVIDER_MODULE}`,
+				),
+			[rootFactoryName, rootSchemeName, "PlainWorkspaceFileSystemProvider"],
+			{ defaultAcquires: true },
+		),
+		providerBindingAcquisitions(
+			moduleImports,
+			(moduleName, sourceFile) =>
+				resolvesAppModule(
+					sourceFile,
+					moduleName,
+					`app/${CONFIGURATION_PROVIDER_MODULE}`,
+				),
+			[
+				configurationFactoryName,
+				configurationSchemeName,
+				"PLAIN_WORKSPACE_CONFIGURATION_PATH",
+				"PlainWorkspaceConfigurationProviderImpl",
+			],
+			{ defaultAcquires: true },
+		),
+	];
+	if (
+		!importContracts.every(([moduleName, names]) =>
+			hasExactNamedImport(mainSource, moduleName, names),
+		) ||
+		!acquisitionContracts.every(
+			(acquisitions) =>
+				acquisitions.length === 1 && acquisitions[0].sourceFile === mainSource,
+		)
+	) {
+		return false;
+	}
+
+	const directBindingContracts = [
+		[registrarName, FILES_PROVIDER_OVERRIDE_MODULE, 2],
+		[rootFactoryName, rootModule, 1],
+		[configurationFactoryName, configurationModule, 1],
+		[deleteCoordinatorName, "./features/workspace/delete-coordinator", 1],
+		[topologyCoordinatorName, "./features/workspace/workspace-projection", 1],
+	];
+	const callsByName = Object.fromEntries(
+		directBindingContracts.map(([name, , count]) => [
+			name,
+			exactDirectBindingCalls(mainSource, name, count, bootstrapOwner),
+		]),
+	);
+	if (
+		!directBindingContracts.every(([name, moduleName]) => {
+			const calls = callsByName[name];
+			return (
+				calls !== undefined &&
+				exactBindingReferences(mainSource, mainAnalysis, name, [
+					namedImportLocalIdentifier(mainSource, moduleName, name),
+					...calls.map((call) => unwrapExpression(call.expression)),
+				])
+			);
+		})
+	) {
+		return false;
+	}
+	const registrarCalls = callsByName[registrarName];
+	const rootFactoryCalls = callsByName[rootFactoryName];
+	const configurationFactoryCalls = callsByName[configurationFactoryName];
+	const deleteCoordinatorCalls = callsByName[deleteCoordinatorName];
+	const topologyCoordinatorCalls = callsByName[topologyCoordinatorName];
+
+	const rootDeclaration = declarationInitializedByExactCall(
+		mainAnalysis,
+		rootFactoryCalls[0],
+	);
+	const configurationDeclaration = declarationInitializedByExactCall(
+		mainAnalysis,
+		configurationFactoryCalls[0],
+	);
+	if (
+		rootDeclaration === undefined ||
+		configurationDeclaration === undefined ||
+		!isConstVariableDeclaration(rootDeclaration) ||
+		!isConstVariableDeclaration(configurationDeclaration) ||
+		!ts.isIdentifier(rootDeclaration.name) ||
+		!ts.isIdentifier(configurationDeclaration.name)
+	) {
+		return false;
+	}
+	const rootName = rootDeclaration.name.text;
+	const configurationName = configurationDeclaration.name.text;
+	const rootRegistration = registrarCalls.find(
+		(call) =>
+			call.arguments.length === 2 &&
+			sameChain(call.arguments[0], [rootSchemeName]) &&
+			sameChain(call.arguments[1], [rootName]),
+	);
+	const configurationRegistration = registrarCalls.find(
+		(call) =>
+			call.arguments.length === 2 &&
+			sameChain(call.arguments[0], [configurationSchemeName]) &&
+			sameChain(call.arguments[1], [configurationName]),
+	);
+	const deleteCoordinatorCall = deleteCoordinatorCalls[0];
+	const topologyCoordinatorCall = topologyCoordinatorCalls[0];
+	if (
+		rootRegistration === undefined ||
+		configurationRegistration === undefined ||
+		rootFactoryCalls[0].arguments.length !== 2 ||
+		!sameChain(rootFactoryCalls[0].arguments[0], ["bridge"]) ||
+		!sameChain(rootFactoryCalls[0].arguments[1], ["workspaceCapabilities"]) ||
+		configurationFactoryCalls[0].arguments.length !== 0 ||
+		deleteCoordinatorCall?.arguments.length !== 2 ||
+		!sameChain(deleteCoordinatorCall.arguments[0], ["bridge"]) ||
+		topologyCoordinatorCall?.arguments.length === 0 ||
+		!sameChain(deleteCoordinatorCall.arguments[1], [rootName]) ||
+		!sameChain(topologyCoordinatorCall.arguments[0], [configurationName]) ||
+		rootFactoryCalls[0].pos >= deleteCoordinatorCall.pos ||
+		deleteCoordinatorCall.pos >= configurationFactoryCalls[0].pos ||
+		configurationFactoryCalls[0].pos >= rootRegistration.pos
+	) {
+		return false;
+	}
+	const rootSchemeArgument = unwrapExpression(rootRegistration.arguments[0]);
+	const configurationSchemeArgument = unwrapExpression(
+		configurationRegistration.arguments[0],
+	);
+	const rootRegistrationArgument = unwrapExpression(
+		rootRegistration.arguments[1],
+	);
+	const configurationRegistrationArgument = unwrapExpression(
+		configurationRegistration.arguments[1],
+	);
+	const deleteCoordinatorProviderArgument = unwrapExpression(
+		deleteCoordinatorCall.arguments[1],
+	);
+	const topologyCoordinatorProviderArgument = unwrapExpression(
+		topologyCoordinatorCall.arguments[0],
+	);
+	return (
+		exactBindingReferences(mainSource, mainAnalysis, rootSchemeName, [
+			namedImportLocalIdentifier(mainSource, rootModule, rootSchemeName),
+			rootSchemeArgument,
+		]) &&
+		exactBindingReferences(mainSource, mainAnalysis, configurationSchemeName, [
+			namedImportLocalIdentifier(
+				mainSource,
+				configurationModule,
+				configurationSchemeName,
+			),
+			configurationSchemeArgument,
+		]) &&
+		exactBindingReferences(mainSource, mainAnalysis, rootName, [
+			rootDeclaration.name,
+			deleteCoordinatorProviderArgument,
+			rootRegistrationArgument,
+		]) &&
+		exactBindingReferences(mainSource, mainAnalysis, configurationName, [
+			configurationDeclaration.name,
+			configurationRegistrationArgument,
+			topologyCoordinatorProviderArgument,
+		])
+	);
+}
+
 function validateDirectCommandRegistrationManifest(authority, registrations) {
 	const manifestPaths = DIRECT_COMMAND_REGISTRATION_MANIFEST.map(
 		({ relativePath }) => relativePath,
@@ -2752,18 +4441,48 @@ function validateTopologyAuthority(authority) {
 	const dynamicImports = authority.callFacts.filter(
 		({ call }) => call.expression.kind === ts.SyntaxKind.ImportKeyword,
 	);
+	const commonJsModuleAccesses = [
+		...authority.importEqualsDeclarations,
+		...authority.callFacts.filter(({ directName }) => directName === "require"),
+	];
 	const moduleImports = authority.importsExports.filter(
 		({ moduleName }) => moduleName !== undefined,
 	);
-	const constrainedPackageImports = moduleImports.filter(
-		({ moduleName }) =>
-			moduleName.startsWith("@codingame/monaco-vscode-") ||
-			moduleName === "monaco-editor" ||
-			moduleName.startsWith("monaco-editor/"),
+	const invalidStaticModulePaths = moduleImports.filter(
+		({ moduleName, sourceFile }) => {
+			const slashed = moduleName.replaceAll("\\", "/");
+			if (
+				path.posix.isAbsolute(slashed) ||
+				/^[A-Za-z][A-Za-z0-9+.-]*:/u.test(slashed)
+			) {
+				return true;
+			}
+			const resolved = resolveRelativeAppModulePath(sourceFile, moduleName);
+			return (
+				resolved !== undefined &&
+				resolved !== "app" &&
+				!resolved.startsWith("app/")
+			);
+		},
+	);
+	const isConstrainedPackage = (moduleName) =>
+		moduleName.startsWith("@codingame/monaco-vscode-") ||
+		moduleName === "monaco-editor" ||
+		moduleName.startsWith("monaco-editor/");
+	const constrainedPackageImports = moduleImports.filter(({ moduleName }) =>
+		isConstrainedPackage(moduleName),
 	);
 	const constrainedPackageImportKeys = constrainedPackageImports.map(
 		({ moduleName, sourceFile }) => `${sourceFile.fileName}:${moduleName}`,
 	);
+	const otherBareImportKeys = moduleImports
+		.filter(
+			({ moduleName, sourceFile }) =>
+				resolveRelativeAppModulePath(sourceFile, moduleName) === undefined &&
+				!isConstrainedPackage(moduleName),
+		)
+		.map(({ moduleName, sourceFile }) => `${sourceFile.fileName}:${moduleName}`)
+		.sort();
 	const forbiddenApiImportShapes = constrainedPackageImports.filter(
 		({ moduleName, statement }) => {
 			if (!moduleName.startsWith("@codingame/monaco-vscode-api")) {
@@ -2909,50 +4628,6 @@ function validateTopologyAuthority(authority) {
 		workspaceCommandMainTypeReferences[0],
 		workspaceCommandMainCallee,
 	]);
-	const providerAuthorityImports = moduleImports.filter(
-		({ moduleName, statement }) => {
-			if (
-				!moduleName.startsWith(
-					"@codingame/monaco-vscode-files-service-override",
-				)
-			) {
-				return false;
-			}
-			if (ts.isImportDeclaration(statement)) {
-				const bindings = statement.importClause?.namedBindings;
-				if (bindings === undefined) {
-					return false;
-				}
-				if (ts.isNamespaceImport(bindings)) {
-					return true;
-				}
-				return (
-					ts.isNamedImports(bindings) &&
-					bindings.elements.some(
-						(element) =>
-							(element.propertyName?.text ?? element.name.text) ===
-							"registerCustomProvider",
-					)
-				);
-			}
-			const exports = statement.exportClause;
-			return (
-				exports === undefined ||
-				ts.isNamespaceExport(exports) ||
-				(ts.isNamedExports(exports) &&
-					exports.elements.some(
-						(element) =>
-							(element.propertyName?.text ?? element.name.text) ===
-							"registerCustomProvider",
-					))
-			);
-		},
-	);
-	const configurationAuthorityImports = moduleImports.filter(({ moduleName }) =>
-		/(?:^|\/)workspace-configuration-provider(?:\.(?:ts|js))?$/u.test(
-			moduleName,
-		),
-	);
 	const commandAuthorityImports = moduleImports.filter(
 		({ moduleName, statement }) => {
 			if (!moduleName.startsWith("@codingame/monaco-vscode-api")) {
@@ -2994,13 +4669,12 @@ function validateTopologyAuthority(authority) {
 			({ relativePath }) => `${relativePath}:${COMMAND_REGISTRY_MODULE}`,
 		),
 	].sort();
-	const providerFactories = authority.callFacts.filter(
-		({ chainName }) =>
-			chainName === "createPlainWorkspaceConfigurationProvider",
+	const hasClosedProviderBindings = validateProviderBindingAuthority(
+		authority,
+		moduleImports,
 	);
-	const providerRegistrations = authority.callFacts.filter(
-		({ chainName }) => chainName === "registerCustomProvider",
-	);
+	const hasClosedProviderProducers =
+		validateProviderProducerBindings(authority);
 	const commandRegistrations = authority.callFacts.filter(
 		({ chainName }) => chainName === "registerCommand",
 	);
@@ -3029,11 +4703,20 @@ function validateTopologyAuthority(authority) {
 	);
 	return (
 		dynamicImports.length === 0 &&
+		commonJsModuleAccesses.length === 0 &&
+		authority.importMetaModuleAccesses.length === 0 &&
+		invalidStaticModulePaths.length === 0 &&
 		constrainedPackageImportKeys.length ===
 			new Set(constrainedPackageImportKeys).size &&
 		constrainedPackageImportKeys.every((key) =>
 			ALLOWED_MONACO_APP_IMPORTS.includes(key),
 		) &&
+		otherBareImportKeys.length === new Set(otherBareImportKeys).size &&
+		otherBareImportKeys.every((key) =>
+			ALLOWED_OTHER_BARE_APP_IMPORTS.includes(key),
+		) &&
+		(!authority.completeAppAuthority ||
+			sameStringArray(otherBareImportKeys, ALLOWED_OTHER_BARE_APP_IMPORTS)) &&
 		forbiddenApiImportShapes.length === 0 &&
 		forbiddenWriterImports.length === 0 &&
 		forbiddenWriterReferences.length === 0 &&
@@ -3081,14 +4764,8 @@ function validateTopologyAuthority(authority) {
 		workspaceCommandIdentifiers.every((identifier) =>
 			allowedWorkspaceCommandIdentifiers.has(identifier),
 		) &&
-		providerAuthorityImports.length === 1 &&
-		providerAuthorityImports[0].sourceFile.fileName === "app/main.ts" &&
-		providerAuthorityImports[0].moduleName ===
-			"@codingame/monaco-vscode-files-service-override" &&
-		ts.isImportDeclaration(providerAuthorityImports[0].statement) &&
-		configurationAuthorityImports.length === 1 &&
-		configurationAuthorityImports[0].sourceFile.fileName === "app/main.ts" &&
-		ts.isImportDeclaration(configurationAuthorityImports[0].statement) &&
+		hasClosedProviderBindings &&
+		hasClosedProviderProducers &&
 		commandAuthorityImports.length ===
 			expectedCommandAuthorityImportKeys.length &&
 		sameStringArray(
@@ -3112,12 +4789,6 @@ function validateTopologyAuthority(authority) {
 							"CommandsRegistry" &&
 						element.name.text === "CommandsRegistry",
 				),
-		) &&
-		providerFactories.length === 1 &&
-		providerFactories[0].sourceFile.fileName === "app/main.ts" &&
-		providerRegistrations.length === 2 &&
-		providerRegistrations.every(
-			({ sourceFile }) => sourceFile.fileName === "app/main.ts",
 		) &&
 		hasDirectCommandRegistrationManifest &&
 		staticCommandRegistrations.length === commandRegistrations.length &&
@@ -3222,6 +4893,7 @@ export function validateWorkspaceTopologyContracts(sources) {
 	const authority = analyzeTopologyAuthority(
 		sourceEntries,
 		hasAppSources ? namedSources : topologySources,
+		{ completeAppAuthority: hasAppSources },
 	);
 	if (!authority.valid) {
 		return [WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority];

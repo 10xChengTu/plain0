@@ -8,6 +8,7 @@ import {
 	validateDialogOverrideImportBoundary,
 	validateDialogServiceOverride,
 	validateDialogSurfaceBoundary,
+	validateFrontendEntrypointScripts,
 	validateMainCapability,
 	validateTauriApiBoundary,
 	validateTauriConfiguration,
@@ -41,6 +42,12 @@ const baselineWindow = {
 
 const baselineConfig = {
 	$schema: "https://schema.tauri.app/config/2",
+	build: {
+		beforeDevCommand: "pnpm dev",
+		devUrl: "http://127.0.0.1:1420",
+		beforeBuildCommand: "pnpm build",
+		frontendDist: "../dist",
+	},
 	app: {
 		withGlobalTauri: false,
 		windows: [baselineWindow],
@@ -75,6 +82,21 @@ const baselineConfig = {
 			},
 		},
 	},
+};
+
+const baselineFrontendEntrypointScripts = {
+	dev: "vite",
+	build: "pnpm typecheck && pnpm build:frontend",
+	"build:frontend": "vite build",
+	typecheck:
+		"tsc --project tsconfig.json --noEmit && tsc --project tsconfig.tools.json --noEmit",
+	preview: "vite preview",
+	tauri: "tauri",
+	"tauri:dev": "tauri dev",
+	"tauri:dev:e2e": "tauri dev --config src-tauri/tauri.e2e.conf.json",
+	"tauri:build": "tauri build",
+	"tauri:build:e2e":
+		"tauri build --debug --bundles app --config src-tauri/tauri.e2e.conf.json",
 };
 
 const baselineTauriE2EConfig = {
@@ -286,6 +308,41 @@ describe("Plain Tauri boundary contracts", () => {
 
 	it("accepts only the exact minimum Tauri configuration", () => {
 		expect(validateTauriConfiguration(baselineConfig)).toEqual([]);
+		expect(
+			validateFrontendEntrypointScripts(baselineFrontendEntrypointScripts),
+		).toEqual([]);
+
+		for (const [field, value] of [
+			["beforeDevCommand", "node rogue.mjs"],
+			["devUrl", "https://example.com"],
+			["beforeBuildCommand", "node rogue.mjs"],
+			["frontendDist", "../rogue-dist"],
+		]) {
+			const changedBuild = structuredClone(baselineConfig);
+			changedBuild.build[field] = value;
+			expect(validateTauriConfiguration(changedBuild)).toContain(
+				"Tauri build must preserve the fixed local Vite entrypoint",
+			);
+		}
+
+		for (const changedScripts of [
+			{
+				...baselineFrontendEntrypointScripts,
+				"build:frontend": "node rogue.mjs",
+			},
+			{
+				...baselineFrontendEntrypointScripts,
+				typecheck: "node rogue.mjs",
+			},
+			{
+				...baselineFrontendEntrypointScripts,
+				prebuild: "node rogue.mjs",
+			},
+		]) {
+			expect(validateFrontendEntrypointScripts(changedScripts)).toEqual([
+				"package scripts must preserve the audited frontend entrypoint chain",
+			]);
+		}
 
 		const wildcard = structuredClone(baselineConfig);
 		wildcard.app.security.csp["default-src"] = "*";
