@@ -62,7 +62,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 ## 原生服务规则
 
 - 文件、搜索、PTY、Git、DAP、主题解包和持久化必须由 Rust 实现；前端不得直接取得宽泛 shell/fs 权限。
-- 所有工作区路径先 canonicalize，再验证仍位于允许根目录；符号链接、归档解包和重命名同样适用。
+- 工作区 root 只能由 Rust 原生选择器 canonicalize 后授权并持有目录 capability；授权后的 stat/read/CRUD 必须从该已打开 root handle 相对解析和操作，禁止把 `canonicalize`/`starts_with` 检查与 ambient `std::fs` I/O 组合。符号链接、归档解包和重命名同样必须使用 capability-relative、nofollow 与重验合同。
 - 启动子进程必须使用参数数组，禁止拼接 shell 字符串。Git 写操作以系统 Git CLI 为权威。
 - 未信任 workspace 不得启动 Git、PTY 或 DAP 子进程；Git 后台读取还必须禁用 hooks、fsmonitor、external diff/textconv、credential prompt 等外部执行入口。
 - PTY、搜索、文件监听和 DAP 使用有界事件流，必须处理取消、退出、背压和窗口销毁。
