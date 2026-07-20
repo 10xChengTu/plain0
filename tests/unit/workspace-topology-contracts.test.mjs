@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
@@ -8,32 +8,75 @@ import {
 } from "../../scripts/plain/workspace-topology-contracts.mjs";
 
 const paths = Object.freeze({
-	main: "../../app/main.ts",
-	excludedSurfaces: "../../app/excluded-surfaces.ts",
-	services: "../../app/services.ts",
-	commands: "../../app/features/workspace/commands.ts",
-	projection: "../../app/features/workspace/workspace-projection.ts",
+	main: "app/main.ts",
+	excludedSurfaces: "app/excluded-surfaces.ts",
+	services: "app/services.ts",
+	commands: "app/features/workspace/commands.ts",
+	projection: "app/features/workspace/workspace-projection.ts",
 	configurationProvider:
-		"../../app/features/workspace/workspace-configuration-provider.ts",
-	plainWorkspaceServices: "../../app/services/plain-workspace-services.ts",
+		"app/features/workspace/workspace-configuration-provider.ts",
+	plainWorkspaceServices: "app/services/plain-workspace-services.ts",
 });
+
+function readProductionAppSources(
+	directory = new URL("../../app/", import.meta.url),
+	relativeDirectory = "app",
+) {
+	return readdirSync(directory, { withFileTypes: true })
+		.sort((left, right) => left.name.localeCompare(right.name))
+		.flatMap((entry) => {
+			const relativePath = `${relativeDirectory}/${entry.name}`;
+			if (entry.isDirectory()) {
+				return readProductionAppSources(
+					new URL(`${entry.name}/`, directory),
+					relativePath,
+				);
+			}
+			if (!entry.isFile() || !/\.(?:ts|tsx|js|mjs)$/u.test(entry.name)) {
+				return [];
+			}
+			return [
+				{
+					relativePath,
+					source: readFileSync(new URL(entry.name, directory), "utf8"),
+				},
+			];
+		});
+}
+
+const productionAppSources = Object.freeze(readProductionAppSources());
+const productionAppSourceByPath = new Map(
+	productionAppSources.map(({ relativePath, source }) => [
+		relativePath,
+		source,
+	]),
+);
 
 function currentSources() {
 	return Object.fromEntries(
-		Object.entries(paths).map(([key, path]) => [
-			key,
-			readFileSync(new URL(path, import.meta.url), "utf8"),
-		]),
+		Object.entries(paths).map(([key, relativePath]) => {
+			const source = productionAppSourceByPath.get(relativePath);
+			if (source === undefined) {
+				throw new Error(`missing production app source: ${relativePath}`);
+			}
+			return [key, source];
+		}),
 	);
 }
 
 function withAppSources(sources, extraEntries = []) {
+	const overrides = new Map(
+		Object.entries(paths).map(([key, relativePath]) => [
+			relativePath,
+			sources[key],
+		]),
+	);
 	return {
 		...sources,
 		appSources: [
-			...Object.entries(paths).map(([key, path]) => ({
-				relativePath: path.replace(/^\.\.\/\.\.\//u, ""),
-				source: sources[key],
+			...productionAppSources.map(({ relativePath, source }) => ({
+				relativePath,
+				source: overrides.get(relativePath) ?? source,
 			})),
 			...extraEntries,
 		],
@@ -78,6 +121,14 @@ function mutated(key, mutate) {
 	return { ...sources, [key]: mutate(sources[key]) };
 }
 
+function insertBeforePickRoots(source, block) {
+	return replaceOnce(
+		source,
+		"\n\tconst pickRoots =",
+		`\n${block}\n\n\tconst pickRoots =`,
+	);
+}
+
 function expectFailure(sources, failure) {
 	expect(validateWorkspaceTopologyContracts(sources)).toContain(failure);
 }
@@ -91,6 +142,26 @@ describe("workspace topology source contracts", () => {
 
 	it("accepts the current topology together with its fail-closed services", () => {
 		expect(validateWorkspaceTopologyContracts(currentSources())).toEqual([]);
+	});
+
+	it("accepts the complete production app source authority", () => {
+		expect(
+			validateWorkspaceTopologyContracts(withAppSources(currentSources())),
+		).toEqual([]);
+	});
+
+	it("allows unrelated object initialize methods in the full app authority", () => {
+		expect(
+			validateWorkspaceTopologyContracts(
+				withAppSources(currentSources(), [
+					{
+						relativePath: "app/features/terminal/session.ts",
+						source: `const terminal = { initialize: () => "ready" };
+terminal.initialize();`,
+					},
+				]),
+			),
+		).toEqual([]);
 	});
 
 	it("uses AST structure instead of source formatting", () => {
@@ -141,6 +212,31 @@ describe("workspace topology source contracts", () => {
 					source,
 					"registerCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);",
 					"registerCustomProvider(PLAIN_WORKSPACE_CONFIGURATION_SCHEME, workspaceFileSystemProvider);",
+				),
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.bootstrap,
+		);
+	});
+
+	it("rejects command injection through initialize or the command holder", () => {
+		expectFailure(
+			mutated("main", (source) =>
+				replaceOnce(
+					source,
+					"await initialize(createServiceOverrides(), container, {\n\t\tproductConfiguration:",
+					`await initialize(createServiceOverrides(), container, {
+		commands: [{ id: "plain.extra", handler: () => undefined }],
+		productConfiguration:`,
+				),
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.bootstrap,
+		);
+		expectFailure(
+			mutated("main", (source) =>
+				replaceOnce(
+					source,
+					"await workspaceTopologyCoordinator.completeInitial();\n\tworkspaceCommands =",
+					"await workspaceTopologyCoordinator.completeInitial();\n\tworkspaceCommands?.dispose();\n\tworkspaceCommands =",
 				),
 			),
 			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.bootstrap,
@@ -232,6 +328,275 @@ commands.CommandsRegistry.registerCommand("vscode.newWindow", () => Promise.reso
 		expectFailure(
 			withAppSources(lateModule),
 			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+	});
+
+	it("rejects every researched upstream command-writer surface", () => {
+		for (const entry of [
+			{
+				relativePath: "app/rogue-action.ts",
+				source: `import { registerAction2 } from "@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions";
+registerAction2(class {});`,
+			},
+			{
+				relativePath: "app/rogue-keybinding.ts",
+				source: `import { KeybindingsRegistry } from "@codingame/monaco-vscode-api/vscode/vs/platform/keybinding/common/keybindingsRegistry";
+KeybindingsRegistry.registerCommandAndKeybindingRule({ id: "plain.extra", handler: () => undefined });`,
+			},
+			{
+				relativePath: "app/rogue-alias.ts",
+				source: `import { CommandsRegistry } from "@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands";
+CommandsRegistry.registerCommandAlias("plain.extra", "noop");`,
+			},
+			{
+				relativePath: "app/rogue-monaco-editor.ts",
+				source: `import { editor } from "monaco-editor";
+editor.addCommand({ id: "plain.extra", run: () => undefined });`,
+			},
+			{
+				relativePath: "app/rogue-side-effect.ts",
+				source: `import "@codingame/monaco-vscode-api/vscode/vs/workbench/browser/actions/workspaceActions";`,
+			},
+			{
+				relativePath: "app/rogue-reused-api.ts",
+				source: `import { getService } from "@codingame/monaco-vscode-api";
+void getService;`,
+			},
+		]) {
+			expectFailure(
+				withAppSources(currentSources(), [entry]),
+				WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+			);
+		}
+
+		const customView = mutated("services", (source) =>
+			replaceOnce(
+				source,
+				'import getWorkbenchServiceOverride from "@codingame/monaco-vscode-workbench-service-override";',
+				`import getWorkbenchServiceOverride, { registerCustomView } from "@codingame/monaco-vscode-workbench-service-override";
+registerCustomView({ id: "plain.extra", name: "Extra", actions: [] });`,
+			),
+		);
+		expectFailure(
+			withAppSources(customView),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+	});
+
+	it("rejects a second local workspace-command registrar", () => {
+		expectFailure(
+			withAppSources(currentSources(), [
+				{
+					relativePath: "app/rogue-workspace-commands.ts",
+					source: `import { registerWorkspaceCommands } from "./features/workspace/commands";
+registerWorkspaceCommands({} as never, {} as never, {} as never);`,
+				},
+			]),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+		expectFailure(
+			withAppSources(currentSources(), [
+				{
+					relativePath: "app/rogue-workspace-namespace.ts",
+					source: `import * as workspaceCommands from "./features/workspace/commands.js";
+const register = workspaceCommands["registerWorkspace" + "Commands"];
+register({} as never, {} as never, {} as never);`,
+				},
+			]),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+	});
+
+	it("rejects command binding escapes and remapped product commands", () => {
+		expectFailure(
+			mutated("commands", (source) =>
+				replaceOnce(
+					source,
+					"\t];\n\n\treturn {",
+					`\t];
+\tconst registerAlias = CommandsRegistry.registerCommand.bind(CommandsRegistry);
+\tregistrations.push(
+\t\tregisterAlias(WORKSPACE_COMMAND_IDS.addRootFolder, () => Promise.resolve()),
+\t);
+
+\treturn {`,
+				),
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.commands,
+		);
+		expectFailure(
+			mutated("commands", (source) =>
+				replaceOnce(
+					source,
+					"\t];\n\n\treturn {",
+					`\t];
+	registrations.push(
+		CommandsRegistry.registerCommandAlias("plain.extra", "noop"),
+	);
+
+	return {`,
+				),
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.commands,
+		);
+		expectFailure(
+			mutated("commands", (source) =>
+				replaceOnce(
+					source,
+					"\t];\n\n\treturn {",
+					`\t];
+\tregistrations.push(
+\t\tCommandsRegistry["register" + "Command"](
+\t\t\tWORKSPACE_COMMAND_IDS.addRootFolder,
+\t\t\t() => Promise.resolve(),
+\t\t),
+\t);
+
+\treturn {`,
+				),
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.commands,
+		);
+		expectFailure(
+			mutated("commands", (source) =>
+				replaceOnce(
+					source,
+					'setRootFolder: "setRootFolder",',
+					'setRootFolder: "addRootFolder",',
+				),
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.commands,
+		);
+	});
+
+	it("rejects wrapped native command dependencies and shadowed globals", () => {
+		expectFailure(
+			mutated("commands", (source) =>
+				insertBeforePickRoots(
+					replaceOnce(
+						source,
+						"bridge: PlainBridge,",
+						"nativeBridge: PlainBridge,",
+					),
+					`	const bridge = {
+		workspacePickRoots: (_mode: "replace" | "add") =>
+			nativeBridge.workspacePickRoots("replace"),
+	};`,
+				),
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.commands,
+		);
+		expectFailure(
+			mutated("commands", (source) =>
+				insertBeforePickRoots(
+					replaceOnce(
+						source,
+						"topologyCoordinator: WorkspaceTopologyCoordinator,",
+						"nativeTopologyCoordinator: WorkspaceTopologyCoordinator,",
+					),
+					`	const topologyCoordinator = {
+		runMutation: <T>(task: () => Promise<T>) => task(),
+	};
+	void nativeTopologyCoordinator;`,
+				),
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.commands,
+		);
+		expectFailure(
+			mutated("commands", (source) =>
+				insertBeforePickRoots(
+					source,
+					`	const Object = {
+		freeze: ({ result }: { result: unknown }) => result,
+	};`,
+				),
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.commands,
+		);
+		expectFailure(
+			mutated("commands", (source) =>
+				insertBeforePickRoots(
+					source,
+					`	const Promise = {
+		reject: () => globalThis.Promise.resolve(),
+	};`,
+				),
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.commands,
+		);
+	});
+
+	it("rejects early disposal or any extra registrations use", () => {
+		for (const statement of [
+			"\tregistrations[0]?.dispose();",
+			"\tvoid registrations.length;",
+		]) {
+			expectFailure(
+				mutated("commands", (source) =>
+					replaceOnce(
+						source,
+						"\t];\n\n\treturn {",
+						`\t];\n${statement}\n\n\treturn {`,
+					),
+				),
+				WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.commands,
+			);
+		}
+	});
+
+	it("rejects writes through the excluded-surface command reader", () => {
+		const sources = mutated("excludedSurfaces", (source) =>
+			replaceOnce(
+				source,
+				"export function captureWorkbenchSurfaces",
+				`const registerAlias = CommandsRegistry.registerCommand.bind(CommandsRegistry);
+registerAlias("plain.extra", () => Promise.resolve());
+
+export function captureWorkbenchSurfaces`,
+			),
+		);
+		expectFailure(
+			withAppSources(sources),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+
+		const indirectSources = mutated("excludedSurfaces", (source) =>
+			replaceOnce(
+				source,
+				"export function captureWorkbenchSurfaces",
+				`const keybindings = Registry.as<any>("platform.keybindingsRegistry");
+const writerName = ["registerCommand", "AndKeybindingRule"].join("");
+keybindings[writerName]({ id: "plain.extra", handler: () => undefined });
+
+export function captureWorkbenchSurfaces`,
+			),
+		);
+		expectFailure(
+			withAppSources(indirectSources),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+	});
+
+	it("rejects shadowing or reassigning the pick-roots mode closure", () => {
+		expectFailure(
+			mutated("commands", (source) =>
+				replaceOnce(
+					source,
+					"topologyCoordinator.runMutation(async () => {\n\t\t\tconst result",
+					'topologyCoordinator.runMutation(async () => {\n\t\t\tconst mode = "replace";\n\t\t\tconst result',
+				),
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.commands,
+		);
+		expectFailure(
+			mutated("commands", (source) =>
+				replaceOnce(
+					replaceOnce(source, "const pickRoots =", "let pickRoots ="),
+					"\tconst registrations = [",
+					"\tpickRoots = pickRoots;\n\tconst registrations = [",
+				),
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.commands,
 		);
 	});
 
@@ -414,6 +779,12 @@ commands.CommandsRegistry.registerCommand("vscode.newWindow", () => Promise.reso
 					'\t"_files.windowOpen",',
 					'\t"_files.windowOpen",\n\t"workbench.action.unsafeGenericWorkspace",',
 				),
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.commands,
+		);
+		expectFailure(
+			mutated("commands", (source) =>
+				replaceOnce(source, 'pickRoots("add"),', 'pickRoots("replace"),'),
 			),
 			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.commands,
 		);

@@ -7,21 +7,17 @@ import {
 
 import type { PlainBridge } from "../../platform/tauri";
 import { PlainWorkspaceOperationUnsupportedError } from "../../services/plain-workspace-services";
-import {
-	MultiRootWorkspaceUnsupportedError,
-	type WorkspaceTopologyCoordinator,
-} from "./workspace-projection";
+import type { WorkspaceTopologyCoordinator } from "./workspace-projection";
 
 export const WORKSPACE_COMMAND_IDS = Object.freeze({
 	openFolder: "workbench.action.files.openFolder",
 	openFolderViaWorkspace: "workbench.action.files.openFolderViaWorkspace",
+	setRootFolder: "setRootFolder",
 	addRootFolder: "addRootFolder",
 });
 
 export const GUARDED_WORKSPACE_COMMAND_IDS = Object.freeze([
-	"setRootFolder",
 	"removeRootFolder",
-	"workbench.action.addRootFolder",
 	"workbench.action.removeRootFolder",
 	"workbench.action.closeFolder",
 	"workbench.action.openWorkspace",
@@ -82,8 +78,11 @@ export function registerWorkspaceCommands(
 			WORKSPACE_COMMAND_IDS.openFolderViaWorkspace,
 			() => pickRoots("replace"),
 		),
+		CommandsRegistry.registerCommand(WORKSPACE_COMMAND_IDS.setRootFolder, () =>
+			pickRoots("replace"),
+		),
 		CommandsRegistry.registerCommand(WORKSPACE_COMMAND_IDS.addRootFolder, () =>
-			Promise.reject(new MultiRootWorkspaceUnsupportedError()),
+			pickRoots("add"),
 		),
 		...GUARDED_WORKSPACE_COMMAND_IDS.map((id) =>
 			CommandsRegistry.registerCommand(id, () =>

@@ -7,10 +7,7 @@ import {
 	registerWorkspaceCommands,
 	WORKSPACE_COMMAND_IDS,
 } from "../../app/features/workspace/commands";
-import {
-	MULTI_ROOT_WORKSPACE_UNSUPPORTED,
-	type WorkspaceTopologyCoordinator,
-} from "../../app/features/workspace/workspace-projection";
+import type { WorkspaceTopologyCoordinator } from "../../app/features/workspace/workspace-projection";
 import type { PlainBridge, WorkspaceSnapshot } from "../../app/platform/tauri";
 import { PLAIN_WORKSPACE_OPERATION_UNSUPPORTED } from "../../app/services/plain-workspace-services";
 
@@ -87,25 +84,21 @@ describe("workspace Workbench command overrides", () => {
 			expect(Object.values(WORKSPACE_COMMAND_IDS)).toEqual([
 				"workbench.action.files.openFolder",
 				"workbench.action.files.openFolderViaWorkspace",
+				"setRootFolder",
 				"addRootFolder",
 			]);
 			expect(contextValues.get("openFolderWorkspaceSupport")).toBe(true);
-			for (const id of [
-				WORKSPACE_COMMAND_IDS.openFolder,
-				WORKSPACE_COMMAND_IDS.openFolderViaWorkspace,
-			]) {
+			for (const [id] of [
+				[WORKSPACE_COMMAND_IDS.openFolder, "replace"],
+				[WORKSPACE_COMMAND_IDS.openFolderViaWorkspace, "replace"],
+				[WORKSPACE_COMMAND_IDS.setRootFolder, "replace"],
+				[WORKSPACE_COMMAND_IDS.addRootFolder, "add"],
+			] as const) {
 				const command = CommandsRegistry.getCommand(id);
 				expect(command?.id).toBe(id);
 				expect(command?.metadata).toBeUndefined();
 				await command?.handler(undefined as never);
 			}
-			const addRoot = CommandsRegistry.getCommand(
-				WORKSPACE_COMMAND_IDS.addRootFolder,
-			);
-			expect(addRoot?.id).toBe(WORKSPACE_COMMAND_IDS.addRootFolder);
-			await expect(addRoot?.handler(undefined as never)).rejects.toMatchObject({
-				code: MULTI_ROOT_WORKSPACE_UNSUPPORTED,
-			});
 			for (const id of GUARDED_WORKSPACE_COMMAND_IDS) {
 				const guarded = CommandsRegistry.getCommand(id);
 				expect(guarded?.id).toBe(id);
@@ -116,7 +109,12 @@ describe("workspace Workbench command overrides", () => {
 				});
 			}
 
-			expect(workspacePickRoots.mock.calls).toEqual([["replace"], ["replace"]]);
+			expect(workspacePickRoots.mock.calls).toEqual([
+				["replace"],
+				["replace"],
+				["replace"],
+				["add"],
+			]);
 			expect(projectedSnapshots).toEqual([]);
 			expect(contextValues.get("enterMultiRootWorkspaceSupport")).toBe(false);
 		} finally {
@@ -126,7 +124,7 @@ describe("workspace Workbench command overrides", () => {
 		expect(contextValues.get("enterMultiRootWorkspaceSupport")).toBe(true);
 	});
 
-	it("waits for a selected snapshot projection before resolving", async () => {
+	it("waits for every replace and add snapshot projection before resolving", async () => {
 		const calls: string[] = [];
 		const snapshot = {
 			workspaceId: "00000000-0000-4000-8000-000000000001",
@@ -168,10 +166,27 @@ describe("workspace Workbench command overrides", () => {
 		);
 
 		try {
-			await CommandsRegistry.getCommand(
+			for (const id of [
 				WORKSPACE_COMMAND_IDS.openFolder,
-			)?.handler(undefined as never);
-			expect(calls).toEqual(["queue", "pick", "project"]);
+				WORKSPACE_COMMAND_IDS.setRootFolder,
+				WORKSPACE_COMMAND_IDS.addRootFolder,
+			]) {
+				await CommandsRegistry.getCommand(id)?.handler(undefined as never);
+			}
+			expect(calls).toEqual([
+				"queue",
+				"pick",
+				"project",
+				"queue",
+				"pick",
+				"project",
+				"queue",
+				"pick",
+				"project",
+			]);
+			expect(bridge.workspacePickRoots).toHaveBeenNthCalledWith(1, "replace");
+			expect(bridge.workspacePickRoots).toHaveBeenNthCalledWith(2, "replace");
+			expect(bridge.workspacePickRoots).toHaveBeenNthCalledWith(3, "add");
 		} finally {
 			registration.dispose();
 		}
@@ -203,11 +218,14 @@ describe("workspace Workbench command overrides", () => {
 		);
 
 		try {
-			await expect(
-				CommandsRegistry.getCommand(WORKSPACE_COMMAND_IDS.openFolder)?.handler(
-					undefined as never,
-				),
-			).rejects.toBe(fatal);
+			for (const id of [
+				WORKSPACE_COMMAND_IDS.openFolder,
+				WORKSPACE_COMMAND_IDS.addRootFolder,
+			]) {
+				await expect(
+					CommandsRegistry.getCommand(id)?.handler(undefined as never),
+				).rejects.toBe(fatal);
+			}
 			expect(workspacePickRoots).not.toHaveBeenCalled();
 		} finally {
 			registration.dispose();

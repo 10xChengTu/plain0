@@ -865,6 +865,56 @@ test("fails closed before workspace bootstrap when capabilities are unavailable"
 	]);
 });
 
+test("adds a second workspace root and replaces it through Workbench actions", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			errors.push(message.text());
+		}
+	});
+
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	await executePaletteCommand(page, "Open Folder", "File: Open Folder...");
+	await page.getByRole("tab", { name: /^Explorer / }).click();
+
+	const explorer = page.getByRole("tree", { name: "Files Explorer" });
+	await expect(explorer).toBeVisible();
+	const primaryRoot = explorer.getByRole("treeitem", {
+		name: "plain-workspace",
+		exact: true,
+	});
+	const secondaryRoot = explorer.getByRole("treeitem", {
+		name: "plain-library",
+		exact: true,
+	});
+	await expect(primaryRoot).toHaveCount(1);
+	await expect(secondaryRoot).toHaveCount(0);
+
+	await executePaletteCommand(
+		page,
+		"Add Folder to Workspace",
+		"Workspaces: Add Folder to Workspace...",
+	);
+	await expect(primaryRoot).toHaveCount(1);
+	await expect(secondaryRoot).toHaveCount(1);
+
+	await executePaletteCommand(page, "Open Folder", "File: Open Folder...");
+	await expect(primaryRoot).toHaveCount(1);
+	await expect(secondaryRoot).toHaveCount(0);
+	await expect(
+		page.locator(".notifications-toasts .notification-toast"),
+	).toHaveCount(0);
+	expect(errors).toEqual([]);
+});
+
 for (const rawReadTransport of ["arrayBuffer", "numberArray"] as const) {
 	test(`projects a selected folder into Explorer and opens files via ${rawReadTransport}`, async ({
 		page,

@@ -5,24 +5,10 @@ import type { IWorkspaceProvider } from "@codingame/monaco-vscode-api/vscode/vs/
 import type { WorkspaceSnapshot } from "../../platform/tauri";
 import { decodeWorkspaceSnapshot } from "../../platform/tauri/workspace-codec";
 
-export const MULTI_ROOT_WORKSPACE_UNSUPPORTED =
-	"WORKSPACE_MULTI_ROOT_UNSUPPORTED" as const;
 export const WORKSPACE_PROJECTION_CONFLICT =
 	"WORKSPACE_PROJECTION_CONFLICT" as const;
 export const WORKSPACE_PROJECTION_FAILED =
 	"WORKSPACE_PROJECTION_FAILED" as const;
-
-export class MultiRootWorkspaceUnsupportedError extends Error {
-	readonly code = MULTI_ROOT_WORKSPACE_UNSUPPORTED;
-
-	constructor() {
-		super(
-			"Plain does not support changing workspace folders through this command yet.",
-		);
-		this.name = "MultiRootWorkspaceUnsupportedError";
-		Object.freeze(this);
-	}
-}
 
 export class WorkspaceProjectionConflictError extends Error {
 	readonly code = WORKSPACE_PROJECTION_CONFLICT;
