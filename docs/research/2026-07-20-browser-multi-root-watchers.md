@@ -48,7 +48,8 @@ Tauri [`plugin-fs` watcher](https://github.com/tauri-apps/plugins-workspace/blob
 1. 使用默认 readonly multi-root mock，从 EMPTY 经 Open Folder/Add Folder 进入双根。
 2. 展开 primary `plain-workspace` 与 secondary `plain-library`，等待两根 generation 1 都被返回并 exact ack。
 3. 每一阶段都等待上一 generation 的 ack 完成后再制造下一变化，避免 sticky pending 合并掩盖 per-root 独立性。
-4. 按下表依次新增四个唯一 root-level 文件。
+4. 即时阶段把 external-create 挂到下一次已知空 sync 的返回边界：mock 在该 sync 尚处于 in-flight 时原子新增文件并投递 wake。正常 handler 会把下一次 pull 标记为 urgent；若 handler 退化为 no-op，则只能在完整的 2 秒周期后再 pull。fixture 用 WebView 内同一 `performance.now()` 时钟记录注入和 pending exchange，直接拒绝不小于 1.8 秒的时间差，不依赖 Browser → Node 返回延迟。丢 wake 阶段则在上一代 exact ack 后直接新增且不投递事件。
+5. 按下表依次新增四个唯一 root-level 文件。
 
 | 阶段 | root      | 文件                  | wake deliveries | response pending       | 最终 request ack 水位   |
 | ---- | --------- | --------------------- | --------------: | ---------------------- | ----------------------- |
@@ -57,7 +58,7 @@ Tauri [`plugin-fs` watcher](https://github.com/tauri-apps/plugins-workspace/blob
 | 3    | secondary | `secondary-wake.txt`  |               1 | secondary generation 2 | primary 3 / secondary 2 |
 | 4    | secondary | `secondary-timer.txt` |               0 | secondary generation 3 | primary 3 / secondary 3 |
 
-即时阶段的 UI timeout 为 5 秒，覆盖 urgent pull 与 Explorer 500 ms refresh；丢 wake 阶段为 7 秒，覆盖 2 秒 poll、ack pull 与 Explorer refresh。fixture external-create 必须严格接收 `emitWake: boolean` 并返回实际 listener delivery 数；`false` 必须返回 0，文件最终出现才可归因于 timer pull。
+即时阶段的协议 transition timeout 与 WebView 内注入→pending 上限均为 1.8 秒，UI timeout 为 5 秒，覆盖 urgent pull 与 Explorer 500 ms refresh；丢 wake 阶段为 7 秒，覆盖 2 秒 poll、ack pull 与 Explorer refresh。fixture external-create 必须严格接收 `emitWake: boolean` 并返回实际 listener delivery 数；`false` 必须返回 0，文件最终出现才可归因于 timer pull。同步屏障和计时证据只属于测试夹具，不进入产品 API。
 
 ## 精确证据
 
@@ -66,8 +67,9 @@ Tauri [`plugin-fs` watcher](https://github.com/tauri-apps/plugins-workspace/blob
 - 按 exchange index 顺序先找到“当前 ack 向量 + 只含目标 root 的新 pending”，再找到“上表最终 ack 向量 + empty result”；下一阶段 watermark 必须从该 ack exchange 之后开始，禁止复用历史 generation。
 - 任何 response 都不得把未变化 root 作为 pending 返回；request 始终同时含两个 root，顺序仍为 workspace topology 顺序。
 - request、response 和 exchange 继续保持既有 exact own-key、UUID、primitive generation 及无 path/error 泄漏合同。
+- 必须按 exchange 的 `callIndex` 回查未归一化的原始 `workspace_watch_sync` invocation，并直接检查 `args/request/root` 的 exact own-key 与无任何 `path` 字段；不能只检查 mock 清洗后的 exchange。
 - 四个文件都由真实 Explorer 自动出现；测试期间不执行 Refresh、不切换焦点、不调用主动文件 mutation。
-- 即时阶段的 pending/ack exchange 必须在低于 2 秒 poll interval 的窗口内出现；丢 wake 阶段只能在上一阶段 exact ack/empty 后注入，防止上一代 urgent ack pull 顺带收走变化。
+- 即时阶段必须先由下一次空 sync 原子注入并投递 wake，随后 pending/ack exchange 在 1.8 秒内出现，且 WebView 内 `pendingObservedAt - injectedAt < 1,800`；丢 wake 阶段只能在上一阶段 exact ack/empty 后注入，防止上一代 urgent ack pull 顺带收走变化。
 - wake listener 数始终为 1；无原生 dialog、pageerror、console error 或 toast。
 
 ## 排除项
@@ -75,12 +77,13 @@ Tauri [`plugin-fs` watcher](https://github.com/tauri-apps/plugins-workspace/blob
 - root remove/replace 后迟到 wake：已有独立 remove smoke。
 - 单 root wake/timer：已有独立 Browser 场景。
 - watcher queue storm、饱和 generation、listener failure、撤权竞态：已有 Rust/TypeScript 单元与 Harness 测试。
+- pending 后再次 dirty 的产品语义由 `workspace-watcher-browser-mock.test.ts` 和 Rust watcher 单元测试直接覆盖；本 Browser 场景只使用与 browser mock 一致的 deterministic latch，不把 Rust worker 的异步扫描时序伪装成 WebView 证据。
 - DnD、missing-parent、move/delete partial UI、真实 multi-root Tauri：后续独立工作项。
 
 ## 验收
 
 ```bash
 pnpm check
-pnpm exec playwright test tests/browser/workspace.spec.ts -g "converges both workspace roots through wake and timer pulls" --repeat-each=5 --retries=0
+pnpm exec playwright test tests/browser/workspace.spec.ts -g "converges both workspace roots after watcher wakes and lost-wake timer pulls" --repeat-each=5 --retries=0
 pnpm exec playwright test --retries=0
 ```

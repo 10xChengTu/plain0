@@ -48,6 +48,22 @@ interface TestWorkspaceWatchExchange {
 	}>;
 }
 
+interface TestWorkspaceWatchExchangeTiming {
+	readonly callIndex: number;
+	readonly observedAt: number;
+}
+
+interface TestMultiRootExternalCreateTiming {
+	readonly rootId: string;
+	readonly name: string;
+	readonly injectedAt: number;
+}
+
+type TestMultiRootWatchAcknowledgements = readonly [
+	primary: number,
+	secondary: number,
+];
+
 async function installNativeIpcMock(
 	page: Page,
 	rawReadTransport: RawReadTransport,
@@ -772,7 +788,16 @@ async function installMultiRootNativeIpcMock(
 			type WatchState = {
 				nextGeneration: number;
 				pending: WatchPendingRoot | undefined;
+				dirty: boolean;
+				dirtyRescanRequired: boolean;
 			};
+			type DeferredExternalCreate = Readonly<{
+				rootId: string;
+				name: string;
+				emitWake: boolean;
+				resolve(deliveries: number): void;
+				reject(reason: unknown): void;
+			}>;
 
 			const calls: Array<{
 				command: string;
@@ -783,6 +808,8 @@ async function installMultiRootNativeIpcMock(
 				request: { roots: WatchRootRequest[] };
 				result: { workspaceId: string; roots: WatchPendingRoot[] };
 			}> = [];
+			const watchExchangeTimings: TestWorkspaceWatchExchangeTiming[] = [];
+			const externalCreateTimings: TestMultiRootExternalCreateTiming[] = [];
 			const versionTransitions: TestWorkspaceVersionTransition[] = [];
 			const primaryRoot = Object.freeze({
 				rootId: primaryRootId,
@@ -797,6 +824,7 @@ async function installMultiRootNativeIpcMock(
 			const encoder = new TextEncoder();
 			const decoder = new TextDecoder();
 			let versionSerial = 101;
+			let deferredExternalCreate: DeferredExternalCreate | undefined;
 			const nextVersion = (): string =>
 				`wv1:${(versionSerial++).toString(16).padStart(64, "0")}`;
 			const file = (content: string): MockFile => ({
@@ -1035,36 +1063,82 @@ async function installMultiRootNativeIpcMock(
 			const watchState = (rootId: string): WatchState => {
 				let state = watchStates.get(rootId);
 				if (state === undefined) {
-					state = { nextGeneration: 1, pending: undefined };
+					state = {
+						nextGeneration: 1,
+						pending: undefined,
+						dirty: false,
+						dirtyRescanRequired: false,
+					};
 					watchStates.set(rootId, state);
 				}
 				return state;
+			};
+			const promoteWatchPending = (rootId: string, state: WatchState): void => {
+				if (state.pending !== undefined || !state.dirty) {
+					return;
+				}
+				const generation = state.nextGeneration;
+				state.pending = Object.freeze({
+					rootId,
+					generation,
+					rescanRequired: state.dirtyRescanRequired,
+				});
+				state.nextGeneration = Math.min(0xffff_ffff, generation + 1);
+				state.dirty = false;
+				state.dirtyRescanRequired = false;
 			};
 			const invalidateRoot = (rootId: string): void => {
 				if (!activeRoots.has(rootId)) {
 					throw rootNotAuthorized();
 				}
 				const state = watchState(rootId);
-				if (state.pending === undefined) {
-					state.pending = Object.freeze({
-						rootId,
-						generation: state.nextGeneration,
-						rescanRequired: true,
-					});
-					state.nextGeneration += 1;
+				state.dirty = true;
+				state.dirtyRescanRequired = true;
+				promoteWatchPending(rootId, state);
+			};
+			const externalCreate = (
+				rootId: string,
+				name: string,
+				emitWake: boolean,
+			): number => {
+				if (!/^[A-Za-z0-9._-]+$/u.test(name)) {
+					throw new TypeError("Invalid multi-root browser test entry.");
 				}
+				if (typeof emitWake !== "boolean") {
+					throw new TypeError("Invalid multi-root browser test wake mode.");
+				}
+				const root = resolveNode(rootId, "");
+				if (root.kind !== "directory" || root.entries.has(name)) {
+					throw entryTypeMismatch();
+				}
+				root.entries.set(name, file(`external:${name}\n`));
+				invalidateRoot(rootId);
+				externalCreateTimings.push({
+					rootId,
+					name,
+					injectedAt: performance.now(),
+				});
+				return emitWake ? emitWorkspaceWatchWake() : 0;
 			};
 
 			const testWindow = window as unknown as Window & {
 				__PLAIN_TEST_TAURI_CALLS__: typeof calls;
 				__PLAIN_TEST_MULTI_ROOT_VERSION_TRANSITIONS__: typeof versionTransitions;
 				__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__: typeof watchExchanges;
+				__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGE_TIMINGS__: typeof watchExchangeTimings;
+				__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_TIMINGS__: typeof externalCreateTimings;
 				__PLAIN_TEST_MULTI_ROOT_EMIT_WAKE__(): number;
 				__PLAIN_TEST_MULTI_ROOT_WATCH_LISTENER_COUNT__(): number;
 				__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__(
 					rootId: string,
 					name: string,
-				): void;
+					emitWake: boolean,
+				): number;
+				__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_AFTER_NEXT_SYNC__(
+					rootId: string,
+					name: string,
+					emitWake: boolean,
+				): Promise<number>;
 				__TAURI_EVENT_PLUGIN_INTERNALS__: {
 					unregisterListener(): void;
 				};
@@ -1084,22 +1158,41 @@ async function installMultiRootNativeIpcMock(
 			testWindow.__PLAIN_TEST_MULTI_ROOT_VERSION_TRANSITIONS__ =
 				versionTransitions;
 			testWindow.__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__ = watchExchanges;
+			testWindow.__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGE_TIMINGS__ =
+				watchExchangeTimings;
+			testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_TIMINGS__ =
+				externalCreateTimings;
 			testWindow.__PLAIN_TEST_MULTI_ROOT_EMIT_WAKE__ = emitWorkspaceWatchWake;
 			testWindow.__PLAIN_TEST_MULTI_ROOT_WATCH_LISTENER_COUNT__ = () =>
 				[...eventHandlers.values()].filter(
 					({ event }) => event === "plain://workspace-watch-wake",
 				).length;
-			testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__ = (rootId, name) => {
+			testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__ = externalCreate;
+			testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_AFTER_NEXT_SYNC__ = (
+				rootId,
+				name,
+				emitWake,
+			) => {
+				if (deferredExternalCreate !== undefined) {
+					throw new Error(
+						"A multi-root browser test change is already queued.",
+					);
+				}
 				if (!/^[A-Za-z0-9._-]+$/u.test(name)) {
 					throw new TypeError("Invalid multi-root browser test entry.");
 				}
-				const root = resolveNode(rootId, "");
-				if (root.kind !== "directory" || root.entries.has(name)) {
-					throw entryTypeMismatch();
+				if (typeof emitWake !== "boolean") {
+					throw new TypeError("Invalid multi-root browser test wake mode.");
 				}
-				root.entries.set(name, file(`external:${name}\n`));
-				invalidateRoot(rootId);
-				emitWorkspaceWatchWake();
+				return new Promise<number>((resolve, reject) => {
+					deferredExternalCreate = Object.freeze({
+						rootId,
+						name,
+						emitWake,
+						resolve,
+						reject,
+					});
+				});
 			};
 			testWindow.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
 				unregisterListener() {},
@@ -1236,14 +1329,53 @@ async function installMultiRootNativeIpcMock(
 						}
 						case "workspace_watch_sync": {
 							const request = args.request as
-								{ roots?: readonly WatchRootRequest[] } | undefined;
-							if (!Array.isArray(request?.roots)) {
+								{ roots?: readonly unknown[] } | null | undefined;
+							if (
+								typeof request !== "object" ||
+								request === null ||
+								Array.isArray(request) ||
+								Reflect.ownKeys(request).length !== 1 ||
+								!Object.hasOwn(request, "roots") ||
+								!Array.isArray(request.roots) ||
+								request.roots.length < 1 ||
+								request.roots.length > 256
+							) {
 								throw new TypeError("Invalid workspace watch test request.");
 							}
-							const requestRoots = request.roots.map((root) => ({
-								rootId: root.rootId,
-								acknowledgedGeneration: root.acknowledgedGeneration,
-							}));
+							const uniqueRootIds = new Set<string>();
+							const requestRoots = request.roots.map((candidate) => {
+								if (
+									typeof candidate !== "object" ||
+									candidate === null ||
+									Array.isArray(candidate)
+								) {
+									throw new TypeError("Invalid workspace watch test root.");
+								}
+								const root = candidate as Record<string, unknown>;
+								const rootKeys = Reflect.ownKeys(root);
+								if (
+									rootKeys.length !== 2 ||
+									!Object.hasOwn(root, "rootId") ||
+									!Object.hasOwn(root, "acknowledgedGeneration") ||
+									typeof root.rootId !== "string" ||
+									!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+										root.rootId,
+									) ||
+									(root.acknowledgedGeneration !== null &&
+										(typeof root.acknowledgedGeneration !== "number" ||
+											!Number.isSafeInteger(root.acknowledgedGeneration) ||
+											root.acknowledgedGeneration < 1 ||
+											root.acknowledgedGeneration > 0xffff_ffff)) ||
+									uniqueRootIds.has(root.rootId)
+								) {
+									throw new TypeError("Invalid workspace watch test root.");
+								}
+								uniqueRootIds.add(root.rootId);
+								return {
+									rootId: root.rootId,
+									acknowledgedGeneration: root.acknowledgedGeneration,
+								} satisfies WatchRootRequest;
+							});
 							const pendingRoots: WatchPendingRoot[] = [];
 							for (const root of requestRoots) {
 								if (!activeRoots.has(root.rootId)) {
@@ -1251,11 +1383,24 @@ async function installMultiRootNativeIpcMock(
 								}
 								const state = watchState(root.rootId);
 								if (
-									typeof root.acknowledgedGeneration === "number" &&
+									root.acknowledgedGeneration === null &&
+									state.pending === undefined
+								) {
+									state.dirty = true;
+									state.dirtyRescanRequired = true;
+								} else if (
 									state.pending?.generation === root.acknowledgedGeneration
 								) {
-									state.pending = undefined;
+									if (root.acknowledgedGeneration === 0xffff_ffff) {
+										state.pending = Object.freeze({
+											...state.pending,
+											rescanRequired: true,
+										});
+									} else {
+										state.pending = undefined;
+									}
 								}
+								promoteWatchPending(root.rootId, state);
 								if (state.pending !== undefined) {
 									pendingRoots.push(state.pending);
 								}
@@ -1269,6 +1414,25 @@ async function installMultiRootNativeIpcMock(
 									roots: pendingRoots.map((root) => ({ ...root })),
 								},
 							});
+							watchExchangeTimings.push({
+								callIndex: calls.length - 1,
+								observedAt: performance.now(),
+							});
+							const deferred = deferredExternalCreate;
+							if (deferred !== undefined) {
+								deferredExternalCreate = undefined;
+								try {
+									deferred.resolve(
+										externalCreate(
+											deferred.rootId,
+											deferred.name,
+											deferred.emitWake,
+										),
+									);
+								} catch (error) {
+									deferred.reject(error);
+								}
+							}
 							return result;
 						}
 						case "workspace_create_file":
@@ -1736,6 +1900,140 @@ async function openNativeWorkspaceExplorer(page: Page): Promise<Locator> {
 	return explorer;
 }
 
+async function waitForMultiRootWatchBaseline(page: Page): Promise<number> {
+	let watermark = -1;
+	await expect
+		.poll(
+			async () => {
+				watermark = await page.evaluate(
+					({ primaryRootId, secondaryRootId, workspaceId }) => {
+						const testWindow = window as unknown as Window & {
+							__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__: TestWorkspaceWatchExchange[];
+						};
+						const index =
+							testWindow.__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__.findIndex(
+								({ request, result }) =>
+									request.roots.length === 2 &&
+									request.roots[0]?.rootId === primaryRootId &&
+									request.roots[0].acknowledgedGeneration === 1 &&
+									request.roots[1]?.rootId === secondaryRootId &&
+									request.roots[1].acknowledgedGeneration === 1 &&
+									result.workspaceId === workspaceId &&
+									result.roots.length === 0,
+							);
+						return index + 1;
+					},
+					{
+						primaryRootId: nativeRootId,
+						secondaryRootId: nativeSecondaryRootId,
+						workspaceId: nativeWorkspaceId,
+					},
+				);
+				return watermark;
+			},
+			{
+				message:
+					"both workspace roots should reach generation-one acknowledgement",
+				timeout: 5_000,
+			},
+		)
+		.toBeGreaterThan(0);
+	return watermark;
+}
+
+async function waitForMultiRootWatchTransition(
+	page: Page,
+	start: number,
+	beforeAcknowledgements: TestMultiRootWatchAcknowledgements,
+	targetRootId: string,
+	generation: number,
+	afterAcknowledgements: TestMultiRootWatchAcknowledgements,
+	timeout: number,
+): Promise<number> {
+	let watermark = -1;
+	await expect
+		.poll(
+			async () => {
+				watermark = await page.evaluate(
+					({
+						afterAcknowledgements,
+						beforeAcknowledgements,
+						generation,
+						primaryRootId,
+						secondaryRootId,
+						start,
+						targetRootId,
+						workspaceId,
+					}) => {
+						const testWindow = window as unknown as Window & {
+							__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__: TestWorkspaceWatchExchange[];
+						};
+						const exchanges =
+							testWindow.__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__;
+						const matchesRequest = (
+							exchange: TestWorkspaceWatchExchange,
+							acknowledgements: TestMultiRootWatchAcknowledgements,
+						): boolean =>
+							exchange.request.roots.length === 2 &&
+							exchange.request.roots[0]?.rootId === primaryRootId &&
+							exchange.request.roots[0].acknowledgedGeneration ===
+								acknowledgements[0] &&
+							exchange.request.roots[1]?.rootId === secondaryRootId &&
+							exchange.request.roots[1].acknowledgedGeneration ===
+								acknowledgements[1];
+						let pendingIndex = -1;
+						for (let index = start; index < exchanges.length; index += 1) {
+							const exchange = exchanges[index];
+							if (
+								exchange === undefined ||
+								exchange.result.workspaceId !== workspaceId
+							) {
+								continue;
+							}
+							if (
+								pendingIndex < 0 &&
+								matchesRequest(exchange, beforeAcknowledgements) &&
+								exchange.result.roots.length === 1 &&
+								exchange.result.roots[0]?.rootId === targetRootId &&
+								exchange.result.roots[0].generation === generation &&
+								exchange.result.roots[0].rescanRequired
+							) {
+								pendingIndex = index;
+								continue;
+							}
+							if (
+								pendingIndex >= 0 &&
+								index > pendingIndex &&
+								matchesRequest(exchange, afterAcknowledgements) &&
+								exchange.result.roots.length === 0
+							) {
+								return index + 1;
+							}
+						}
+						return -1;
+					},
+					{
+						afterAcknowledgements,
+						beforeAcknowledgements,
+						generation,
+						primaryRootId: nativeRootId,
+						secondaryRootId: nativeSecondaryRootId,
+						start,
+						targetRootId,
+						workspaceId: nativeWorkspaceId,
+					},
+				);
+				return watermark;
+			},
+			{
+				message: `workspace watcher should acknowledge ${targetRootId} generation ${generation}`,
+				timeout,
+			},
+		)
+		.toBeGreaterThan(0);
+	return watermark;
+}
+
 async function explorerContextAction(
 	page: Page,
 	item: Locator,
@@ -2026,12 +2324,14 @@ test("covers the browser multi-root remove lifecycle through Explorer and palett
 				__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__(
 					rootId: string,
 					name: string,
-				): void;
+					emitWake: boolean,
+				): number;
 			};
 			try {
 				testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__(
 					rootId,
 					"revoked.txt",
+					true,
 				);
 				return undefined;
 			} catch (error) {
@@ -2057,9 +2357,14 @@ test("covers the browser multi-root remove lifecycle through Explorer and palett
 				__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__(
 					rootId: string,
 					name: string,
-				): void;
+					emitWake: boolean,
+				): number;
 			};
-			testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__(rootId, "alive.txt");
+			testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__(
+				rootId,
+				"alive.txt",
+				true,
+			);
 		},
 		{ rootId: nativeRootId },
 	);
@@ -2192,12 +2497,14 @@ test("covers the browser multi-root remove lifecycle through Explorer and palett
 				__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__(
 					rootId: string,
 					name: string,
-				): void;
+					emitWake: boolean,
+				): number;
 			};
 			try {
 				testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__(
 					rootId,
 					"revoked-final.txt",
+					true,
 				);
 				return undefined;
 			} catch (error) {
@@ -2301,6 +2608,294 @@ test("covers the browser multi-root remove lifecycle through Explorer and palett
 			expect(typeof root.rescanRequired).toBe("boolean");
 		}
 	}
+	await expect(
+		page.locator(".notifications-toasts .notification-toast"),
+	).toHaveCount(0);
+	expect(nativeDialogs).toEqual([]);
+	expect(errors).toEqual([]);
+});
+
+test("converges both workspace roots after watcher wakes and lost-wake timer pulls", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	const nativeDialogs: string[] = [];
+	await installMultiRootNativeIpcMock(page);
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			errors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+
+	const explorer = await openNativeWorkspaceExplorer(page);
+	await executePaletteCommand(
+		page,
+		"Add Folder to Workspace",
+		"Workspaces: Add Folder to Workspace...",
+	);
+	const primaryRoot = explorer.getByRole("treeitem", {
+		name: "plain-workspace",
+		exact: true,
+	});
+	const secondaryRoot = explorer.getByRole("treeitem", {
+		name: "plain-library",
+		exact: true,
+	});
+	const expandRoot = async (root: Locator): Promise<void> => {
+		if ((await root.getAttribute("aria-expanded")) !== "true") {
+			await root.click();
+			await page.keyboard.press("ArrowRight");
+		}
+		await expect(root).toHaveAttribute("aria-expanded", "true");
+	};
+	await expect(primaryRoot).toHaveCount(1);
+	await expect(secondaryRoot).toHaveCount(1);
+	await expandRoot(primaryRoot);
+	await expandRoot(secondaryRoot);
+
+	let exchangeWatermark = await waitForMultiRootWatchBaseline(page);
+	await expect
+		.poll(() =>
+			page.evaluate(() => {
+				const testWindow = window as unknown as Window & {
+					__PLAIN_TEST_MULTI_ROOT_WATCH_LISTENER_COUNT__(): number;
+				};
+				return testWindow.__PLAIN_TEST_MULTI_ROOT_WATCH_LISTENER_COUNT__();
+			}),
+		)
+		.toBe(1);
+
+	const phases = [
+		{
+			rootId: nativeRootId,
+			name: "primary-wake.txt",
+			emitWake: true,
+			generation: 2,
+			beforeAcknowledgements: [1, 1],
+			afterAcknowledgements: [2, 1],
+			transitionTimeout: 1_800,
+		},
+		{
+			rootId: nativeRootId,
+			name: "primary-timer.txt",
+			emitWake: false,
+			generation: 3,
+			beforeAcknowledgements: [2, 1],
+			afterAcknowledgements: [3, 1],
+			transitionTimeout: 7_000,
+		},
+		{
+			rootId: nativeSecondaryRootId,
+			name: "secondary-wake.txt",
+			emitWake: true,
+			generation: 2,
+			beforeAcknowledgements: [3, 1],
+			afterAcknowledgements: [3, 2],
+			transitionTimeout: 1_800,
+		},
+		{
+			rootId: nativeSecondaryRootId,
+			name: "secondary-timer.txt",
+			emitWake: false,
+			generation: 3,
+			beforeAcknowledgements: [3, 2],
+			afterAcknowledgements: [3, 3],
+			transitionTimeout: 7_000,
+		},
+	] as const satisfies readonly {
+		rootId: string;
+		name: string;
+		emitWake: boolean;
+		generation: number;
+		beforeAcknowledgements: TestMultiRootWatchAcknowledgements;
+		afterAcknowledgements: TestMultiRootWatchAcknowledgements;
+		transitionTimeout: number;
+	}[];
+
+	for (const phase of phases) {
+		const createdEntry = explorer.getByRole("treeitem", {
+			name: phase.name,
+			exact: true,
+		});
+		await expect(createdEntry).toHaveCount(0);
+		const phaseStart = exchangeWatermark;
+		const wakeDeliveries = await page.evaluate(
+			async ({ emitWake, name, rootId }) => {
+				const testWindow = window as unknown as Window & {
+					__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__(
+						rootId: string,
+						name: string,
+						emitWake: boolean,
+					): number;
+					__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_AFTER_NEXT_SYNC__(
+						rootId: string,
+						name: string,
+						emitWake: boolean,
+					): Promise<number>;
+				};
+				return emitWake
+					? testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_AFTER_NEXT_SYNC__(
+							rootId,
+							name,
+							emitWake,
+						)
+					: testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__(
+							rootId,
+							name,
+							emitWake,
+						);
+			},
+			phase,
+		);
+		expect(wakeDeliveries).toBe(phase.emitWake ? 1 : 0);
+
+		exchangeWatermark = await waitForMultiRootWatchTransition(
+			page,
+			phaseStart,
+			phase.beforeAcknowledgements,
+			phase.rootId,
+			phase.generation,
+			phase.afterAcknowledgements,
+			phase.transitionTimeout,
+		);
+		const phaseEvidence = await page.evaluate(
+			({ end, generation, name, rootId, start }) => {
+				const testWindow = window as unknown as Window & {
+					__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+					__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__: TestWorkspaceWatchExchange[];
+					__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGE_TIMINGS__: TestWorkspaceWatchExchangeTiming[];
+					__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_TIMINGS__: TestMultiRootExternalCreateTiming[];
+				};
+				const exchanges =
+					testWindow.__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__.slice(start, end);
+				const pendingExchange = exchanges.find(
+					({ result }) =>
+						result.roots.length === 1 &&
+						result.roots[0]?.rootId === rootId &&
+						result.roots[0].generation === generation,
+				);
+				const pendingTiming =
+					pendingExchange === undefined
+						? undefined
+						: testWindow.__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGE_TIMINGS__.find(
+								({ callIndex }) => callIndex === pendingExchange.callIndex,
+							);
+				const injectionTiming =
+					testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_TIMINGS__.find(
+						(timing) => timing.rootId === rootId && timing.name === name,
+					);
+				return {
+					exchanges,
+					invocations: exchanges.map(
+						({ callIndex }) => testWindow.__PLAIN_TEST_TAURI_CALLS__[callIndex],
+					),
+					injectionToPendingMs:
+						pendingTiming === undefined || injectionTiming === undefined
+							? undefined
+							: pendingTiming.observedAt - injectionTiming.injectedAt,
+				};
+			},
+			{
+				end: exchangeWatermark,
+				generation: phase.generation,
+				name: phase.name,
+				rootId: phase.rootId,
+				start: phaseStart,
+			},
+		);
+		const phaseExchanges = phaseEvidence.exchanges;
+		expect(phaseExchanges.length).toBeGreaterThanOrEqual(2);
+		expect(phaseEvidence.invocations).toHaveLength(phaseExchanges.length);
+		expect(phaseEvidence.injectionToPendingMs).toBeGreaterThanOrEqual(0);
+		if (phase.emitWake) {
+			expect(phaseEvidence.injectionToPendingMs).toBeLessThan(1_800);
+		}
+		let pendingCount = 0;
+		for (const [index, exchange] of phaseExchanges.entries()) {
+			const invocation = phaseEvidence.invocations[index];
+			expect(invocation?.command).toBe("workspace_watch_sync");
+			expect(Reflect.ownKeys(invocation?.args ?? {})).toEqual(["request"]);
+			const rawRequest = invocation?.args.request as
+				{ roots?: readonly Record<string, unknown>[] } | undefined;
+			expect(Reflect.ownKeys(rawRequest ?? {})).toEqual(["roots"]);
+			expect(rawRequest?.roots).toHaveLength(2);
+			for (const root of rawRequest?.roots ?? []) {
+				expect(Reflect.ownKeys(root)).toEqual([
+					"rootId",
+					"acknowledgedGeneration",
+				]);
+			}
+			expect(JSON.stringify(invocation)).not.toMatch(
+				/(?:absolute|canonical|native|relative|file)?path/iu,
+			);
+			expect(exchange.result.workspaceId).toBe(nativeWorkspaceId);
+			expect(exchange.request.roots).toHaveLength(2);
+			expect(exchange.request.roots.map(({ rootId }) => rootId)).toEqual([
+				nativeRootId,
+				nativeSecondaryRootId,
+			]);
+			const acknowledgements = exchange.request.roots.map(
+				({ acknowledgedGeneration }) => acknowledgedGeneration,
+			);
+			expect([
+				phase.beforeAcknowledgements,
+				phase.afterAcknowledgements,
+			]).toContainEqual(acknowledgements);
+			if (exchange.result.roots.length > 0) {
+				pendingCount += 1;
+				expect(exchange.result.roots).toEqual([
+					{
+						rootId: phase.rootId,
+						generation: phase.generation,
+						rescanRequired: true,
+					},
+				]);
+			}
+			expect(JSON.stringify(exchange)).not.toMatch(
+				/(?:absolute|canonical|native|relative|file)?path/iu,
+			);
+		}
+		expect(pendingCount).toBeGreaterThanOrEqual(1);
+		const acceptedExchange = phaseExchanges.at(-1);
+		expect(
+			acceptedExchange?.request.roots.map(
+				({ acknowledgedGeneration }) => acknowledgedGeneration,
+			),
+		).toEqual(phase.afterAcknowledgements);
+		expect(acceptedExchange?.result.roots).toEqual([]);
+		await expect(createdEntry).toHaveCount(1, { timeout: 5_000 });
+	}
+
+	const finalEvidence = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_MULTI_ROOT_WATCH_LISTENER_COUNT__(): number;
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+		};
+		const mutationCommands = new Set([
+			"workspace_write_file",
+			"workspace_create_file",
+			"workspace_create_directory",
+			"workspace_rename",
+			"workspace_copy",
+			"workspace_move",
+			"workspace_prepare_delete",
+			"workspace_execute_delete",
+		]);
+		return {
+			listenerCount:
+				testWindow.__PLAIN_TEST_MULTI_ROOT_WATCH_LISTENER_COUNT__(),
+			mutationCalls: testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+				({ command }) => mutationCommands.has(command),
+			),
+		};
+	});
+	expect(finalEvidence.listenerCount).toBe(1);
+	expect(finalEvidence.mutationCalls).toEqual([]);
 	await expect(
 		page.locator(".notifications-toasts .notification-toast"),
 	).toHaveCount(0);
