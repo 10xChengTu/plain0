@@ -33,11 +33,11 @@ Plain 产品运行时固定在 Code OSS commit `5264f2156cbcd7aea5fd004d29eaa102
 - Plain 固定 API patch 在 `distinctParents` 之后、上游 try/catch 之前直接 `return runPlainWorkspaceDeleteCoordinator(...)`，因此所有 Plain permanent delete 都明确绕开上游 Retry/Trash fallback。这个边界必须保持，不能为了可见错误重新落回上游分支。
 - 右键菜单 ActionRunner 会把 action rejection 显示为 Error notification；键盘命令则显示 Warning notification。[Code OSS ContextMenu ActionRunner](https://github.com/microsoft/vscode/blob/5264f2156cbcd7aea5fd004d29eaa10209155d66/src/vs/platform/contextview/browser/contextMenuHandler.ts#L152-L164)、[Keybinding service](https://github.com/microsoft/vscode/blob/5264f2156cbcd7aea5fd004d29eaa10209155d66/src/vs/platform/keybinding/common/abstractKeybindingService.ts#L363-L370)
 
-为得到单一、确定的 surface，两个 Delete phase 都走真实 Explorer 右键 `Delete Permanently`：先显示一次 Plain DOM 永久删除确认；确认后的 branded incomplete rejection 由 ActionRunner 显示一个 Error toast。失败后不出现第二个 `.monaco-dialog-box`，toast 也没有 Retry、Overwrite 或再次删除动作。
+原方案假设两个 Delete phase 走真实 Explorer 右键 `Delete Permanently`，由 ActionRunner 把 rejection 显示为 Error toast。实施探针推翻了这一点：固定 `ContextMenuHandler` 在 `onWillRun` 时同步 `hideContextView(false)`，随即销毁承载 `actionRunner.onDidRun` 监听器的 `menuDisposables`，早于确认框之后才 settle 的 rejection，因此右键路径永远不会为该场景显示通知。修正后的单一确定 surface 是与既有单根验收一致的键盘 `⌘Backspace`：`abstractKeybindingService` 以持久的 `.then(undefined, err => notificationService.warn(err))` 把 branded incomplete rejection 显示为一个 Warning toast。每 phase 仍先显示一次 Plain DOM 永久删除确认；失败后不出现第二个 `.monaco-dialog-box`，toast 也没有 Retry、Overwrite 或再次删除动作。
 
 ### 诊断日志
 
-固定 `BulkEditService` 会在 rethrow 前记录一次结构化错误；真实 Error notification 又由 `NotificationsAlerts` 记录一次并发出 ARIA alert。[NotificationsAlerts](https://github.com/microsoft/vscode/blob/5264f2156cbcd7aea5fd004d29eaa10209155d66/src/vs/workbench/browser/parts/notifications/notificationsAlerts.ts#L23-L56) 因此每个 retained/partial phase 预期恰好两条去敏 `console.error`，而不是强行追求控制台零日志；`pageerror` 仍必须为零。
+固定 `BulkEditService` 会在 rethrow 前记录一次结构化错误；`NotificationsAlerts` 只在通知是 Error 级时才把它再镜像进控制台并发出 ARIA alert，Warning 级不镜像。[NotificationsAlerts](https://github.com/microsoft/vscode/blob/5264f2156cbcd7aea5fd004d29eaa10209155d66/src/vs/workbench/browser/parts/notifications/notificationsAlerts.ts#L23-L56) 因此可见 toast 为 Error 级的 phase（Move）预期恰好两条去敏 `console.error`；可见 toast 为 Warning 级的 phase（Delete 键盘路径）只剩 BulkEditService 那一条。两个矩阵都不强行追求控制台零日志；`pageerror` 仍必须为零。
 
 ## 当前仓库事实
 
@@ -75,18 +75,26 @@ Move 可见层因此需要一个窄的固定 patch：Paste catch 只对上述两
 
 ### Delete retained / partial
 
-| phase    | 固定操作                                                  | IPC/fixture 终态                                               | root refresh 后的 Explorer                 |
-| -------- | --------------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------ |
-| retained | primary `delete-retained.txt` → 右键 `Delete Permanently` | 首次 remove syscall 失败且树不变；`entryRetained/deleteFailed` | entry 完整保留                             |
-| partial  | secondary `delete-partial/` → 右键 `Delete Permanently`   | 只删 `removed.txt`；`entryPartiallyDeleted/deleteFailed/1`     | 目录和 `kept.txt` 保留，`removed.txt` 消失 |
+| phase    | 固定操作                                          | IPC/fixture 终态                                               | root refresh 后的 Explorer                 |
+| -------- | ------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------ |
+| retained | primary `delete-retained.txt` → 选中 `⌘Backspace` | 首次 remove syscall 失败且树不变；`entryRetained/deleteFailed` | entry 完整保留                             |
+| partial  | secondary `delete-partial/` → 选中 `⌘Backspace`   | 只删 `removed.txt`；`entryPartiallyDeleted/deleteFailed/1`     | 目录和 `kept.txt` 保留，`removed.txt` 消失 |
 
-每 phase 先出现唯一 Plain DOM 永久且不可撤销确认；确认后的 mutation 顺序严格为 `prepare → begin → commit → cancel`，confirmationId/entryId/root/path/recursive 必须闭合。incomplete 后 batch 已失效，fixture 让 cancel 返回 `WORKSPACE_DELETE_PLAN_INVALID`，coordinator 只把它当 best-effort cleanup；不得有第二次 prepare/begin/commit。
+每 phase 先出现唯一 Plain DOM 永久且不可撤销确认；确认后的 mutation 顺序严格为 `prepare → begin → commit → cancel`，confirmationId/entryId/root/path/recursive 必须闭合。incomplete 终态分支把 fixture 的 `activeDelete` 置为 `undefined` 使批次失效，coordinator 的 finally 仍发出恰好一次 best-effort cancel。**订正**：E2E 并不断言这次 cancel 的错误码——mock 只记录请求、不记录 reject 结果，coordinator 又用空 catch 吞掉 cancel 失败，所以任何 Browser 断言都无法区分 cancel 成败。该 cancel 会被 fixture 既有的 `activeDelete` 校验拒绝，其拒绝语义由 mock 源码与 `boundary-contracts` 单元层锁定，不是本 E2E 的观测范围；Browser 层只锁「cancel 请求恰好出现一次、且之后不再有第二轮 prepare/begin/commit」。
 
-每次最终只有一个 Error toast，精确为 `The permanent delete batch stopped after a native delete became incomplete.`，且没有 Retry。retained 至少观察 primary root post-commit `read_dir("")`；partial 至少观察 secondary root `read_dir("")` 与 expanded `read_dir("delete-partial")`。Explorer 可能合并 provider/coordinator 的重复 refresh，所以只锁受影响 root 至少一次读取，不锁 exact read 次数。
+每次最终只有一个 Warning toast，精确包含 `The permanent delete batch stopped after a native delete became incomplete.`，且没有 Retry。retained 至少观察 primary root post-commit `read_dir("")`，且这次观察发生在测试触碰树之前。partial 同样先于任何进一步交互观察到 secondary root `read_dir("")`；但 `read_dir("delete-partial")` **不**是同一类自动证据——探针证实已展开的子目录不会随 root 刷新自动重读，只有测试自身重新展开该目录才触发这次读取，所以这条断言被移到 `expandDirectory` 之后，如实标注为「重新展开触发」而非「自动刷新命中」。Explorer 可能合并 provider/coordinator 的重复 refresh，所以只锁受影响 root 至少一次读取，不锁 exact read 次数。
+
+### Delete 实施结果
+
+- fixture 以第四个 `deleteIncompleteScenarios` 闭集扩展同一 `installMultiRootNativeIpcMock`：primary 根按需追加 `delete-retained.txt`，secondary 根按需追加含 `removed.txt`/`kept.txt` 的 `delete-partial`；`workspace_commit_delete_entry` 在既有校验与正常删除语句之间按 FIFO 消费 retained（零树变更）与 partial（真实 `entries.delete("removed.txt")` 布尔结果推导 `removedEntries`）终态，并使批次失效，触发 coordinator 恰好一次的 best-effort cancel（该 cancel 被 fixture 已失效的 `activeDelete` 拒绝；拒绝语义由 mock 源码与单元层锁定，E2E 只断言 cancel 请求出现恰好一次、之后无第二轮 prepare/begin/commit，不断言其错误码）。
+- 触发 surface 按上文修正为键盘 `⌘Backspace`，两 phase 各恰好一条 `prepare → begin → commit → cancel` 链、一个无 Retry 的去敏 Warning toast、一条 BulkEditService 结构化 `console.error`；树终态、受影响 root `read_dir` 刷新、零 native dialog/`pageerror`/第二确认框均已断言。
+- Harness 更新 `validateWorkspaceMoveFailureBrowserFixture` 适配四参签名，新增 `validateWorkspaceDeleteFailureBrowserFixture` 锁定场景闭集、树种子、请求校验、retained/partial 分支顺序与禁止 window 控制面；配套 hostile mutation 单测就位。
+- 独立对抗复核发现原 `forbiddenWindowControls` 只锁字面 `window`/`testWindow` receiver，不追踪别名（`const winAlias = window as unknown as ...`）也不锁 peek/target/tree-seed 引用范围，可被 plan 别名 + window 别名钩子绕过。修复：新增 `validateWorkspaceBrowserFixtureWindowAuthority` 把 callback 内每个可达全局对象的标识符（`window`/`globalThis`/`self`/`top`/`frames`/`document`/`eval`/`Function`）锁死为唯一一次、且必须落在被审计的 `testWindow` 声明语句内，`testWindow` 本身的所有引用也锁进固定语句 allowlist；两个既有验证器新增 peek 语句精确文本锁与 `deleteIncompletePlan`/`moveIncompletePlan`/commit-case `target`/`primaryEntries`/`secondaryEntries` 的引用范围锁（只允许出现在审计过的声明、peek、terminal 分支等语句区间内）。
+- 验收：聚焦与合并 `shows retained and partial` 重复 5 次通过，全部 Browser E2E 14/14，完整 `pnpm check`（30 前端测试文件、600 用例、2277 模块、2112 bundle source、203 债务、Rust 255/255）通过。
 
 ### 公共负向证据
 
-- Move/Delete 各 phase 恰好两条有序 console error：BulkEdit structured log 后跟 NotificationsAlerts 的可见 Error message；总数分别为 4。首次聚焦实现探针先核对真实稳定片段，再冻结，不锁 sourcemap 行号。
+- Move 各 phase 恰好两条有序 console error：BulkEdit structured log 后跟 NotificationsAlerts 的可见 Error message，总数为 4。Delete 实施探针修正了原「同样两条」的假设：`NotificationsAlerts` 只把 Error 级通知镜像到控制台，而 Delete 的键盘路径显示 Warning toast，因此每 phase 只有一条 BulkEditService 结构化 `console.error`（记录的是 coordinator 包装前的 provider 通用 `Unavailable (FileSystemError)` 拒绝，不含 `WORKSPACE_DELETE_INCOMPLETE`），总数为 2。首次聚焦实现探针先核对真实稳定片段，再冻结，不锁 sourcemap 行号。
 - `pageerror=[]`、native JavaScript dialog `=[]`；结束时 toast 为 0、确认 `.monaco-dialog-box` 为 0。
 - toast 与 NotificationsAlerts 的直接安全 message 不得出现 wire status、reason、`removedEntries`、root UUID、`ENTRY_*`、本机用户或绝对路径；BulkEdit 的结构化开发诊断还会携带 Vite source-map 本机源码栈，因此只锁其错误 code/message 及不含 native DTO/root 身份，不把开发服务器栈误判为产品数据泄漏。
 - retained 与 partial 必须以实际树差异证明，不能只返回不同 DTO；partial count 必须来自 fixture 实际成功删除数。
@@ -124,4 +132,4 @@ pnpm exec playwright test --retries=0
 
 ## 退出条件
 
-本调研文档和 `progress.md` 已独立提交；Move retained/partial 已完成完整验收，当前最小工作项切到 Delete retained/partial。Delete 和真实 multi-root Tauri 验收都完成前，`F020` 保持 `in_progress`。
+本调研文档和 `progress.md` 已独立提交；Move 与 Delete 的 retained/partial 均已完成完整验收，当前最小工作项切到真实 multi-root Tauri 验收。该验收完成前，`F020` 保持 `in_progress`。
