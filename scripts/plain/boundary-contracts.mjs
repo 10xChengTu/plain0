@@ -8178,6 +8178,8 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		["requireVoidMutationReceipt", { kind: "function", exported: false }],
 		["WorkspaceMoveIncompleteError", { kind: "class", exported: false }],
 		["workspaceMoveIncomplete", { kind: "function", exported: false }],
+		["WorkspaceMoveOutcomeUnknownError", { kind: "class", exported: false }],
+		["workspaceMoveOutcomeUnknown", { kind: "function", exported: false }],
 		["kindToFileType", { kind: "function", exported: false }],
 		["providerStat", { kind: "function", exported: false }],
 		["createdProviderStat", { kind: "function", exported: false }],
@@ -8335,6 +8337,8 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 				entryNotFound: "The workspace entry does not exist.",
 				moveIncomplete:
 					"The workspace move published its target but could not remove all of its source.",
+				moveOutcomeUnknown:
+					"The workspace move outcome is unknown. The source and target locations were refreshed; check both locations before continuing.",
 				notDirectory: "The workspace entry is not a directory.",
 				noPermissions: "The workspace entry cannot be accessed.",
 				unavailable: "The workspace is unavailable.",
@@ -8813,6 +8817,37 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 				}`,
 			},
 		],
+		[
+			"WorkspaceMoveOutcomeUnknownError",
+			{
+				kind: "class",
+				failure:
+					"WorkspaceMoveOutcomeUnknownError must remain the frozen WORKSPACE_MOVE_OUTCOME_UNKNOWN FileOperationError",
+				source: `class WorkspaceMoveOutcomeUnknownError extends FileOperationError {
+					readonly code = "WORKSPACE_MOVE_OUTCOME_UNKNOWN" as const;
+
+					constructor() {
+						super(
+							SANITIZED_MESSAGES.moveOutcomeUnknown,
+							FileOperationResult.FILE_OTHER_ERROR,
+						);
+						this.name = this.code;
+						Object.freeze(this);
+					}
+				}`,
+			},
+		],
+		[
+			"workspaceMoveOutcomeUnknown",
+			{
+				kind: "function",
+				failure:
+					"workspaceMoveOutcomeUnknown must construct only the audited unknown-outcome error",
+				source: `function workspaceMoveOutcomeUnknown(): WorkspaceMoveOutcomeUnknownError {
+					return new WorkspaceMoveOutcomeUnknownError();
+				}`,
+			},
+		],
 	]);
 	for (const [name, contract] of exactCopyMoveDeclarations) {
 		const statements = sourceFile.statements.filter((statement) =>
@@ -8827,6 +8862,32 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		) {
 			failures.push(contract.failure);
 		}
+	}
+	const moveErrorDeclarationOrder = sourceFile.statements
+		.map((statement) =>
+			ts.isClassDeclaration(statement) || ts.isFunctionDeclaration(statement)
+				? statement.name?.text
+				: undefined,
+		)
+		.filter((name) =>
+			[
+				"WorkspaceMoveIncompleteError",
+				"workspaceMoveIncomplete",
+				"WorkspaceMoveOutcomeUnknownError",
+				"workspaceMoveOutcomeUnknown",
+			].includes(name),
+		);
+	if (
+		!sameArray(moveErrorDeclarationOrder, [
+			"WorkspaceMoveIncompleteError",
+			"workspaceMoveIncomplete",
+			"WorkspaceMoveOutcomeUnknownError",
+			"workspaceMoveOutcomeUnknown",
+		])
+	) {
+		failures.push(
+			"workspace move terminal errors and factories must retain their audited declaration order",
+		);
 	}
 	function countExactProviderImport(moduleName, importedName) {
 		let count = 0;
@@ -9985,7 +10046,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 				const failure = mapCopyMoveError(error);
 				if (failure.rescan) {
 					this.fireRootsUpdated(source.resource, target.resource);
-					throw workspaceMoveIncomplete();
+					throw workspaceMoveOutcomeUnknown();
 				}
 				throw failure.error;
 			}
@@ -10009,7 +10070,8 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			directThisMethodCallCount(renameMethod, "fireMoved") !== 2 ||
 			directThisMethodCallCount(renameMethod, "fireRootUpdated") !== 1 ||
 			directThisMethodCallCount(renameMethod, "fireRootsUpdated") !== 2 ||
-			identifierCallCount(renameMethod, "workspaceMoveIncomplete") !== 2 ||
+			identifierCallCount(renameMethod, "workspaceMoveIncomplete") !== 1 ||
+			identifierCallCount(renameMethod, "workspaceMoveOutcomeUnknown") !== 1 ||
 			normalizedBody !== expectedBody
 		) {
 			failures.push(
@@ -10153,6 +10215,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	const criticalNewBindings = new Set([
 		"Emitter",
 		"WorkspaceMoveIncompleteError",
+		"WorkspaceMoveOutcomeUnknownError",
 	]);
 	const immutableRuntimeRoots = new Set([
 		...criticalBindingNames,
@@ -10175,6 +10238,8 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		"requireVoidMutationReceipt",
 		"WorkspaceMoveIncompleteError",
 		"workspaceMoveIncomplete",
+		"WorkspaceMoveOutcomeUnknownError",
+		"workspaceMoveOutcomeUnknown",
 		"structuredClone",
 		"kindToFileType",
 		"providerStat",
@@ -10190,7 +10255,8 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		["mapCopyMoveError", 3],
 		["mapDeleteError", 1],
 		["requireVoidMutationReceipt", 2],
-		["workspaceMoveIncomplete", 2],
+		["workspaceMoveIncomplete", 1],
+		["workspaceMoveOutcomeUnknown", 1],
 		["decodeWorkspaceMoveResult", 1],
 		["decodeWorkspaceDeleteResult", 1],
 		["beginPlainWorkspaceDeleteProviderDispatch", 1],
@@ -10232,6 +10298,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	let fireRootsUpdatedCallCount = 0;
 	let changeEmitterFireCallCount = 0;
 	let moveIncompleteConstructionCount = 0;
+	let moveOutcomeUnknownConstructionCount = 0;
 	let privateBridgeReferences = 0;
 	let privatePolicyReferences = 0;
 	function isThisBridge(node) {
@@ -10541,17 +10608,22 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		}
 		if (
 			ts.isIdentifier(node) &&
-			node.text === "WorkspaceMoveIncompleteError" &&
+			(node.text === "WorkspaceMoveIncompleteError" ||
+				node.text === "WorkspaceMoveOutcomeUnknownError") &&
 			!bindingIdentifierNodes.has(node)
 		) {
 			const isTypeReference = isCriticalTypeReference(node);
 			const isDirectConstruction =
 				ts.isNewExpression(node.parent) && node.parent.expression === node;
 			if (isDirectConstruction) {
-				moveIncompleteConstructionCount += 1;
+				if (node.text === "WorkspaceMoveIncompleteError") {
+					moveIncompleteConstructionCount += 1;
+				} else {
+					moveOutcomeUnknownConstructionCount += 1;
+				}
 			} else if (!isTypeReference) {
 				failures.push(
-					"WorkspaceMoveIncompleteError must not be aliased or consumed outside its audited constructor",
+					`${node.text} must not be aliased or consumed outside its audited constructor`,
 				);
 			}
 		}
@@ -10858,6 +10930,11 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			"WorkspaceMoveIncompleteError must have exactly one audited direct construction",
 		);
 	}
+	if (moveOutcomeUnknownConstructionCount !== 1) {
+		failures.push(
+			"WorkspaceMoveOutcomeUnknownError must have exactly one audited direct construction",
+		);
+	}
 	if (
 		fireCreatedCallCount !== 3 ||
 		fireDeletedCallCount !== 1 ||
@@ -10868,6 +10945,358 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	) {
 		failures.push(
 			"provider change events must remain confined to the audited create, copy, rename, move and rescan closure",
+		);
+	}
+
+	return [...new Set(failures)];
+}
+
+/**
+ * Locks the browser-only retained/partial move fixture to two local scenarios.
+ * The fixture may shape only the addInitScript closure; production code and the
+ * page window never receive a mutable failure-plan control surface.
+ */
+export function validateWorkspaceMoveFailureBrowserFixture(source) {
+	const failures = [];
+	const sourceFile = ts.createSourceFile(
+		"tests/browser/workspace.spec.ts",
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	const normalizedText = (node) => {
+		if (node === undefined) {
+			return undefined;
+		}
+		const scanner = ts.createScanner(
+			ts.ScriptTarget.Latest,
+			true,
+			ts.LanguageVariant.Standard,
+			node.getText(sourceFile),
+		);
+		let compact = "";
+		for (
+			let token = scanner.scan();
+			token !== ts.SyntaxKind.EndOfFileToken;
+			token = scanner.scan()
+		) {
+			compact += scanner.getTokenText();
+		}
+		return compact;
+	};
+	const collect = (root, predicate) => {
+		const matches = [];
+		function visit(node) {
+			if (predicate(node)) {
+				matches.push(node);
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(root);
+		return matches;
+	};
+	const countIdentifier = (root, name) =>
+		collect(root, (node) => ts.isIdentifier(node) && node.text === name).length;
+
+	const scenarioAliases = sourceFile.statements.filter(
+		(statement) =>
+			ts.isTypeAliasDeclaration(statement) &&
+			statement.name.text === "TestMultiRootMoveIncompleteScenario",
+	);
+	let scenarioAliasIsClosed = false;
+	if (scenarioAliases.length === 1) {
+		const [alias] = scenarioAliases;
+		const members = ts.isUnionTypeNode(alias.type) ? alias.type.types : [];
+		const values = members.map((member) =>
+			ts.isLiteralTypeNode(member) && ts.isStringLiteral(member.literal)
+				? member.literal.text
+				: undefined,
+		);
+		scenarioAliasIsClosed =
+			(alias.modifiers?.length ?? 0) === 0 &&
+			members.length === 2 &&
+			sameArray([...values].sort(), ["movePartial", "moveRetained"]);
+	}
+	if (!scenarioAliasIsClosed) {
+		failures.push(
+			"browser move-failure fixture third argument must remain the closed moveRetained/movePartial scenario set",
+		);
+	}
+
+	const installers = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "installMultiRootNativeIpcMock",
+	);
+	if (installers.length !== 1) {
+		return [
+			...failures,
+			"browser move-failure scenarios must remain local to one audited multi-root addInitScript fixture",
+		];
+	}
+	const [installer] = installers;
+	const [pageParameter, modeParameter, scenarioParameter] =
+		installer.parameters;
+	const scenarioArrayType =
+		scenarioParameter?.type !== undefined &&
+		ts.isTypeOperatorNode(scenarioParameter.type) &&
+		scenarioParameter.type.operator === ts.SyntaxKind.ReadonlyKeyword &&
+		ts.isArrayTypeNode(scenarioParameter.type.type)
+			? scenarioParameter.type.type
+			: undefined;
+	const scenarioElementType = scenarioArrayType?.elementType;
+	const returnType = installer.type;
+	const signatureIsExact =
+		installer.modifiers?.length === 1 &&
+		installer.modifiers[0].kind === ts.SyntaxKind.AsyncKeyword &&
+		installer.parameters.length === 3 &&
+		pageParameter !== undefined &&
+		ts.isIdentifier(pageParameter.name) &&
+		pageParameter.name.text === "page" &&
+		normalizedText(pageParameter.type) === "Page" &&
+		pageParameter.initializer === undefined &&
+		modeParameter !== undefined &&
+		ts.isIdentifier(modeParameter.name) &&
+		modeParameter.name.text === "mode" &&
+		normalizedText(modeParameter.type) === "NativeIpcMockMode" &&
+		normalizedText(modeParameter.initializer) === '"readonly"' &&
+		scenarioParameter !== undefined &&
+		ts.isIdentifier(scenarioParameter.name) &&
+		scenarioParameter.name.text === "moveIncompleteScenarios" &&
+		scenarioElementType !== undefined &&
+		ts.isTypeReferenceNode(scenarioElementType) &&
+		ts.isIdentifier(scenarioElementType.typeName) &&
+		scenarioElementType.typeName.text ===
+			"TestMultiRootMoveIncompleteScenario" &&
+		scenarioElementType.typeArguments === undefined &&
+		scenarioParameter.initializer !== undefined &&
+		ts.isArrayLiteralExpression(scenarioParameter.initializer) &&
+		scenarioParameter.initializer.elements.length === 0 &&
+		returnType !== undefined &&
+		ts.isTypeReferenceNode(returnType) &&
+		ts.isIdentifier(returnType.typeName) &&
+		returnType.typeName.text === "Promise" &&
+		returnType.typeArguments?.length === 1 &&
+		returnType.typeArguments[0].kind === ts.SyntaxKind.VoidKeyword;
+	if (!signatureIsExact) {
+		failures.push(
+			"browser move-failure fixture third argument must remain the closed moveRetained/movePartial scenario set",
+		);
+	}
+
+	const [onlyStatement] = installer.body?.statements ?? [];
+	const awaited =
+		installer.body?.statements.length === 1 &&
+		onlyStatement !== undefined &&
+		ts.isExpressionStatement(onlyStatement) &&
+		ts.isAwaitExpression(onlyStatement.expression)
+			? onlyStatement.expression.expression
+			: undefined;
+	const addInitScriptCall =
+		awaited !== undefined &&
+		ts.isCallExpression(awaited) &&
+		ts.isPropertyAccessExpression(awaited.expression) &&
+		ts.isIdentifier(awaited.expression.expression) &&
+		awaited.expression.expression.text === "page" &&
+		awaited.expression.name.text === "addInitScript" &&
+		awaited.arguments.length === 2
+			? awaited
+			: undefined;
+	const callback =
+		addInitScriptCall !== undefined &&
+		ts.isArrowFunction(addInitScriptCall.arguments[0])
+			? addInitScriptCall.arguments[0]
+			: undefined;
+	const callbackParameter = callback?.parameters[0];
+	const callbackBindings =
+		callback?.parameters.length === 1 &&
+		callbackParameter !== undefined &&
+		ts.isObjectBindingPattern(callbackParameter.name)
+			? callbackParameter.name.elements.map((element) => ({
+					name: typeScriptStaticName(element.name),
+					property: typeScriptStaticName(element.propertyName ?? element.name),
+				}))
+			: [];
+	const callbackBindingsAreExact = sameArray(callbackBindings, [
+		{ name: "mode", property: "mode" },
+		{
+			name: "moveIncompleteScenarios",
+			property: "moveIncompleteScenarios",
+		},
+		{ name: "workspaceId", property: "workspaceId" },
+		{ name: "primaryRootId", property: "primaryRootId" },
+		{ name: "secondaryRootId", property: "secondaryRootId" },
+	]);
+	const initData = addInitScriptCall?.arguments[1];
+	const initDataIsExact =
+		initData !== undefined &&
+		ts.isObjectLiteralExpression(initData) &&
+		normalizedText(initData) ===
+			"{mode,moveIncompleteScenarios,workspaceId:nativeWorkspaceId,primaryRootId:nativeRootId,secondaryRootId:nativeSecondaryRootId,}";
+	const scenarioReferenceCount = countIdentifier(
+		installer,
+		"moveIncompleteScenarios",
+	);
+	if (
+		callback === undefined ||
+		!ts.isBlock(callback.body) ||
+		!callbackBindingsAreExact ||
+		!initDataIsExact ||
+		scenarioReferenceCount !== 5
+	) {
+		failures.push(
+			"browser move-failure scenarios must remain local to one audited multi-root addInitScript fixture",
+		);
+	}
+	if (callback === undefined || !ts.isBlock(callback.body)) {
+		return [...new Set(failures)];
+	}
+
+	const planDeclarations = collect(
+		callback.body,
+		(node) =>
+			ts.isVariableDeclaration(node) &&
+			ts.isIdentifier(node.name) &&
+			node.name.text === "moveIncompletePlan",
+	);
+	const partialTreeInitializers = collect(
+		callback.body,
+		(node) =>
+			ts.isIfStatement(node) &&
+			normalizedText(node) ===
+				'if(moveIncompleteScenarios.includes("movePartial")){secondaryEntries.push(["move-partial",directory([["removed.txt",file("Remove this source child.\\n")],["kept.txt",file("Keep this source child.\\n")],]),]);}',
+	);
+	if (
+		planDeclarations.length !== 1 ||
+		normalizedText(planDeclarations[0]) !==
+			"moveIncompletePlan=[...moveIncompleteScenarios]" ||
+		partialTreeInitializers.length !== 1
+	) {
+		failures.push(
+			"browser move-failure scenarios must remain local to one audited multi-root addInitScript fixture",
+		);
+	}
+
+	const moveCases = collect(
+		callback.body,
+		(node) =>
+			ts.isCaseClause(node) &&
+			ts.isStringLiteral(node.expression) &&
+			node.expression.text === "workspace_move",
+	);
+	if (moveCases.length !== 1) {
+		return [
+			...new Set([
+				...failures,
+				"browser move-failure fixture must retain exact cross-root request validation",
+			]),
+		];
+	}
+	const [moveCase] = moveCases;
+	const ifStatements = collect(moveCase, (node) => ts.isIfStatement(node));
+	const retainedRequest = ifStatements.filter(
+		(node) =>
+			normalizedText(node) ===
+			'if(plannedIncomplete==="moveRetained"&&(request.sourceRootId!==secondaryRootId||request.sourcePath!=="move-source.txt"||request.targetRootId!==primaryRootId||request.targetPath!=="src/move-source.txt")){thrownewError("Unexpected retained move browser test request.",);}',
+	);
+	const partialRequest = ifStatements.filter(
+		(node) =>
+			normalizedText(node) ===
+			'if(plannedIncomplete==="movePartial"&&(request.sourceRootId!==secondaryRootId||request.sourcePath!=="move-partial"||request.targetRootId!==primaryRootId||request.targetPath!=="src/move-partial")){thrownewError("Unexpected partial move browser test request.",);}',
+	);
+	if (retainedRequest.length !== 1 || partialRequest.length !== 1) {
+		failures.push(
+			"browser move-failure fixture must retain exact cross-root request validation",
+		);
+	}
+
+	const publicationStatements = collect(
+		moveCase,
+		(node) =>
+			ts.isExpressionStatement(node) &&
+			normalizedText(node) ===
+				"target.parent.entries.set(target.name,reboundNode);",
+	);
+	const retainedBranches = ifStatements.filter(
+		(node) =>
+			normalizedText(node) ===
+			'if(plannedIncomplete==="moveRetained"){moveIncompletePlan.shift();return{status:"targetPublishedSourceRetained",reason:"deleteFailed",};}',
+	);
+	const partialBranches = ifStatements.filter(
+		(node) =>
+			normalizedText(node) ===
+			'if(plannedIncomplete==="movePartial"){if(node.kind!=="directory"){throwentryTypeMismatch();}constremovedEntries=node.entries.delete("removed.txt")?1:0;if(removedEntries!==1||!node.entries.has("kept.txt")){thrownewError("Invalid partial move browser test source tree.",);}moveIncompletePlan.shift();return{status:"targetPublishedSourcePartiallyDeleted",reason:"deleteFailed",removedEntries,};}',
+	);
+	if (
+		publicationStatements.length !== 1 ||
+		retainedBranches.length !== 1 ||
+		partialBranches.length !== 1 ||
+		publicationStatements[0].getStart(sourceFile) >=
+			retainedBranches[0].getStart(sourceFile) ||
+		retainedBranches[0].getStart(sourceFile) >=
+			partialBranches[0].getStart(sourceFile)
+	) {
+		failures.push(
+			"browser move-failure fixture must publish the target before its ordered terminal scenario branches",
+		);
+	}
+	if (retainedBranches.length !== 1) {
+		failures.push(
+			"browser retained-move fixture must leave the source untouched and return only its fixed receipt",
+		);
+	}
+	if (partialBranches.length !== 1) {
+		failures.push(
+			"browser partial-move fixture must delete removed.txt and derive removedEntries from that boolean result",
+		);
+	}
+
+	const movePlanReferences = countIdentifier(
+		callback.body,
+		"moveIncompletePlan",
+	);
+	const callbackScenarioReferences = countIdentifier(
+		callback.body,
+		"moveIncompleteScenarios",
+	);
+	const forbiddenWindowControls = collect(callback.body, (node) => {
+		if (
+			!ts.isPropertyAccessExpression(node) &&
+			!ts.isElementAccessExpression(node)
+		) {
+			return false;
+		}
+		const name = ts.isPropertyAccessExpression(node)
+			? node.name.text
+			: typeScriptStaticName(node.argumentExpression);
+		if (
+			name === undefined ||
+			!/(?:move.*(?:failure|incomplete|scenario|status|reason|count)|(?:failure|incomplete|scenario).*move)/iu.test(
+				name,
+			)
+		) {
+			return false;
+		}
+		let receiver = node.expression;
+		while (
+			ts.isPropertyAccessExpression(receiver) ||
+			ts.isElementAccessExpression(receiver)
+		) {
+			receiver = receiver.expression;
+		}
+		return (
+			ts.isIdentifier(receiver) &&
+			(receiver.text === "window" || receiver.text === "testWindow")
+		);
+	});
+	if (
+		movePlanReferences !== 4 ||
+		callbackScenarioReferences !== 2 ||
+		forbiddenWindowControls.length !== 0
+	) {
+		failures.push(
+			"browser move-failure fixture must not accept raw receipt fields or expose a window mutation control",
 		);
 	}
 

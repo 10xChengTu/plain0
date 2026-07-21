@@ -163,7 +163,7 @@ index 0ec5225b326fbfa5c0225f4d96fffc251ea6a301..053504dc5cd4b8fcb0c5717e0c74ab1b
 +export { AutoSaveConfiguration, ByteSize, ETAG_DISABLED, FILES_ASSOCIATIONS_CONFIG, FILES_EXCLUDE_CONFIG, FILES_READONLY_EXCLUDE_CONFIG, FILES_READONLY_FROM_PERMISSIONS_CONFIG, FILES_READONLY_INCLUDE_CONFIG, FileChangeFilter, FileChangeType, FileChangesEvent, FileKind, FileOperation, FileOperationError, FileOperationEvent, FileOperationResult, FilePermission, FileSystemProviderCapabilities, FileSystemProviderError, FileSystemProviderErrorCode, FileType, HotExitConfiguration, NotModifiedSinceFileOperationError, TooLargeFileOperationError, createFileSystemProviderError, createPlainWorkspaceWriteOutcomeError, ensureFileSystemProviderError, etag, getLargeFileConfirmationLimit, getPlainWorkspaceWriteOutcome, hasFileAppendCapability, hasFileAtomicDeleteCapability, hasFileAtomicReadCapability, hasFileAtomicWriteCapability, hasFileCloneCapability, hasFileFolderCopyCapability, hasFileReadStreamCapability, hasFileRealpathCapability, hasOpenReadWriteCloseCapability, hasReadWriteCapability, hasReadonlyCapability, isFileOpenForWriteOptions, isPlainWorkspaceWriteOutcomeError, markAsFileSystemProviderError, toFileOperationResult, toFileSystemProviderErrorCode, whenProviderRegistered };
 diff --git a/vscode/src/vs/platform/files/common/plainWorkspaceDelete.d.ts b/vscode/src/vs/platform/files/common/plainWorkspaceDelete.d.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..299f37d1d978f3a0c8174cb544b687baec06f906
+index 0000000000000000000000000000000000000000..fc455e29fe6ad3220fe783c0ece8c2824938e09d
 --- /dev/null
 +++ b/vscode/src/vs/platform/files/common/plainWorkspaceDelete.d.ts
 @@ -0,0 +1,71 @@
@@ -240,7 +240,7 @@ index 0000000000000000000000000000000000000000..299f37d1d978f3a0c8174cb544b687ba
 +export declare function runPlainWorkspaceDeleteCoordinator(context: PlainWorkspaceDeleteCoordinatorContext): Promise<void>;
 diff --git a/vscode/src/vs/platform/files/common/plainWorkspaceDelete.js b/vscode/src/vs/platform/files/common/plainWorkspaceDelete.js
 new file mode 100644
-index 0000000000000000000000000000000000000000..90ff02199b0822f4ee279609909b1b2f14a6be20
+index 0000000000000000000000000000000000000000..cb1ac39d496be53077432617485abf5ee4dba6b9
 --- /dev/null
 +++ b/vscode/src/vs/platform/files/common/plainWorkspaceDelete.js
 @@ -0,0 +1,417 @@
@@ -1228,7 +1228,7 @@ index 8d123c3d769b98698d473420ba78b6d0af1eb5cb..21f3621e7b0b264abb4c661d4c969d29
  const RENAME_ID = "renameFile";
  KeybindingsRegistry.registerCommandAndKeybindingRule({
 diff --git a/vscode/src/vs/workbench/contrib/files/browser/fileActions.js b/vscode/src/vs/workbench/contrib/files/browser/fileActions.js
-index f4f533eb6e2e9cbcd50b4d4a4d90167b513462b3..f7ee35d33d4e163419c67f658012e10b83d8e32b 100644
+index f4f533eb6e2e9cbcd50b4d4a4d90167b513462b3..1d650fa546ddd228ba6630deed088e888d1b93e6 100644
 --- a/vscode/src/vs/workbench/contrib/files/browser/fileActions.js
 +++ b/vscode/src/vs/workbench/contrib/files/browser/fileActions.js
 @@ -10,6 +10,7 @@ import { Action } from '../../../../base/common/actions.js';
@@ -1282,6 +1282,94 @@ index f4f533eb6e2e9cbcd50b4d4a4d90167b513462b3..f7ee35d33d4e163419c67f658012e10b
      const dirtyWorkingCopies = ( new Set());
      for (const distinctElement of distinctElements) {
          for (const dirtyWorkingCopy of workingCopyFileService.getDirty(distinctElement.resource)) {
+@@ -1120,6 +1157,18 @@ CommandsRegistry.registerCommand({
+     id: UPLOAD_COMMAND_ID,
+     handler: uploadFileHandler
+ });
++function plainMoveFailureMessage(error) {
++    if (!(error instanceof Error) || !Object.isFrozen(error)) {
++        return undefined;
++    }
++    if (error.name === "WORKSPACE_MOVE_INCOMPLETE" && error.message === "The workspace move published its target but could not remove all of its source.") {
++        return error.message;
++    }
++    if (error.name === "WORKSPACE_MOVE_OUTCOME_UNKNOWN" && error.message === "The workspace move outcome is unknown. The source and target locations were refreshed; check both locations before continuing.") {
++        return error.message;
++    }
++    return undefined;
++}
+ const pasteFileHandler = async (accessor, fileList) => {
+     const clipboardService = accessor.get(IClipboardService);
+     const explorerService = accessor.get(IExplorerService);
+@@ -1263,11 +1312,17 @@ const pasteFileHandler = async (accessor, fileList) => {
+             }
+         }
+     } catch (e) {
+-        notificationService.error(toErrorMessage(( new Error(( localize(
+-            11041,
+-            "The file(s) to paste have been deleted or moved since you copied them. {0}",
+-            getErrorMessage(e)
+-        )))), false));
++        const plainMoveMessage = plainMoveFailureMessage(e);
++        if (plainMoveMessage !== undefined) {
++            notificationService.error(plainMoveMessage);
++        }
++        else {
++            notificationService.error(toErrorMessage(( new Error(( localize(
++                11041,
++                "The file(s) to paste have been deleted or moved since you copied them. {0}",
++                getErrorMessage(e)
++            )))), false));
++        }
+     } finally {
+         if (pasteShouldMove) {
+             await explorerService.setToCopy([], false);
+diff --git a/vscode/src/vs/workbench/contrib/files/browser/views/explorerView.js b/vscode/src/vs/workbench/contrib/files/browser/views/explorerView.js
+index a55c3b2a0ec15783e04295b9fd723bf00169ccba..5252f86572a6d5da9185aba8e394768ab4ad3413 100644
+--- a/vscode/src/vs/workbench/contrib/files/browser/views/explorerView.js
++++ b/vscode/src/vs/workbench/contrib/files/browser/views/explorerView.js
+@@ -37,6 +37,7 @@ import { StorageScope, StorageTarget } from '../../../../../platform/storage/com
+ import { IStorageService } from '../../../../../platform/storage/common/storage.service.js';
+ import { IClipboardService } from '../../../../../platform/clipboard/common/clipboardService.service.js';
+ import { FileSystemProviderCapabilities } from '../../../../../platform/files/common/files.js';
++import { PLAIN_WORKSPACE_SCHEME, isPlainWorkspaceExplorerPathMutationAllowed } from '../../../../../platform/files/common/plainWorkspaceDelete.js';
+ import { IFileService } from '../../../../../platform/files/common/files.service.js';
+ import { Event } from '../../../../../base/common/event.js';
+ import { IViewDescriptorService } from '../../../../common/views.service.js';
+@@ -541,9 +542,10 @@ let ExplorerView = class ExplorerView extends ViewPane {
+         const folders = this.contextService.getWorkspace().folders;
+         const resource = stat ? stat.resource : folders[folders.length - 1].uri;
+         stat = stat || this.explorerService.findClosest(resource);
++        const plainWorkspacePathMutationAllowed = !!stat && resource.scheme === PLAIN_WORKSPACE_SCHEME && isPlainWorkspaceExplorerPathMutationAllowed(resource.scheme, this.fileService.hasCapability(resource, FileSystemProviderCapabilities.FileFolderCopy), this.fileService.hasCapability(resource, FileSystemProviderCapabilities.Readonly), stat.isReadonlyExclusivelyFromRawFileStat);
+         this.resourceContext.set(resource);
+         this.folderContext.set(!!stat && stat.isDirectory);
+-        this.readonlyContext.set(!!stat && !!stat.isReadonly);
++        this.readonlyContext.set(!!stat && !!stat.isReadonly && !plainWorkspacePathMutationAllowed);
+         this.parentReadonlyContext.set(Boolean(stat?.parent?.isReadonly));
+         this.rootContext.set(!!stat && stat.isRoot);
+         if (resource) {
+diff --git a/vscode/src/vs/workbench/contrib/files/common/explorerModel.js b/vscode/src/vs/workbench/contrib/files/common/explorerModel.js
+index 8e1228dc28a1ffd502ac8e50429be96a3b4283b0..d7933998d5dcc038ebdd1417261792f5b5825618 100644
+--- a/vscode/src/vs/workbench/contrib/files/common/explorerModel.js
++++ b/vscode/src/vs/workbench/contrib/files/common/explorerModel.js
+@@ -139,6 +139,17 @@ class ExplorerItem {
+             locked: this._locked
+         });
+     }
++    get isReadonlyExclusivelyFromRawFileStat() {
++        if (this._readonly !== true) {
++            return false;
++        }
++        return this.filesConfigService.isReadonly(this.resource, {
++            resource: this.resource,
++            name: this.name,
++            readonly: false,
++            locked: this._locked
++        }) === false;
++    }
+     get mtime() {
+         return this._mtime;
+     }
 diff --git a/vscode/src/vs/workbench/services/textfile/common/textFileEditorModel.js b/vscode/src/vs/workbench/services/textfile/common/textFileEditorModel.js
 index e743e309f1b308aebcb4559a12d9591bd0d49701..3d4bda71433542a808b6827671788e0573d4e653 100644
 --- a/vscode/src/vs/workbench/services/textfile/common/textFileEditorModel.js
@@ -1494,55 +1582,6 @@ index e743e309f1b308aebcb4559a12d9591bd0d49701..3d4bda71433542a808b6827671788e05
              this.lastResolvedFileStat = newFileStat;
          }
          else if (this.lastResolvedFileStat.mtime <= newFileStat.mtime) {
-diff --git a/vscode/src/vs/workbench/contrib/files/common/explorerModel.js b/vscode/src/vs/workbench/contrib/files/common/explorerModel.js
---- a/vscode/src/vs/workbench/contrib/files/common/explorerModel.js
-+++ b/vscode/src/vs/workbench/contrib/files/common/explorerModel.js
-@@ -134,11 +134,22 @@ let ExplorerItem = class ExplorerItem {
-     get isReadonly() {
-         return this.filesConfigService.isReadonly(this.resource, {
-             resource: this.resource,
-             name: this.name,
-             readonly: this._readonly,
-             locked: this._locked
-         });
-     }
-+    get isReadonlyExclusivelyFromRawFileStat() {
-+        if (this._readonly !== true) {
-+            return false;
-+        }
-+        return this.filesConfigService.isReadonly(this.resource, {
-+            resource: this.resource,
-+            name: this.name,
-+            readonly: false,
-+            locked: this._locked
-+        }) === false;
-+    }
-     get mtime() {
-         return this._mtime;
-     }
-diff --git a/vscode/src/vs/workbench/contrib/files/browser/views/explorerView.js b/vscode/src/vs/workbench/contrib/files/browser/views/explorerView.js
---- a/vscode/src/vs/workbench/contrib/files/browser/views/explorerView.js
-+++ b/vscode/src/vs/workbench/contrib/files/browser/views/explorerView.js
-@@ -37,6 +37,7 @@ import { StorageScope, StorageTarget } from '../../../../../platform/storage/com
- import { IStorageService } from '../../../../../platform/storage/common/storage.service.js';
- import { IClipboardService } from '../../../../../platform/clipboard/common/clipboardService.service.js';
- import { FileSystemProviderCapabilities } from '../../../../../platform/files/common/files.js';
-+import { PLAIN_WORKSPACE_SCHEME, isPlainWorkspaceExplorerPathMutationAllowed } from '../../../../../platform/files/common/plainWorkspaceDelete.js';
- import { IFileService } from '../../../../../platform/files/common/files.service.js';
- import { Event } from '../../../../../base/common/event.js';
- import { IViewDescriptorService } from '../../../../common/views.service.js';
-@@ -541,9 +542,10 @@ let ExplorerView = class ExplorerView extends ViewPane {
-         const folders = this.contextService.getWorkspace().folders;
-         const resource = stat ? stat.resource : folders[folders.length - 1].uri;
-         stat = stat || this.explorerService.findClosest(resource);
-+        const plainWorkspacePathMutationAllowed = !!stat && resource.scheme === PLAIN_WORKSPACE_SCHEME && isPlainWorkspaceExplorerPathMutationAllowed(resource.scheme, this.fileService.hasCapability(resource, FileSystemProviderCapabilities.FileFolderCopy), this.fileService.hasCapability(resource, FileSystemProviderCapabilities.Readonly), stat.isReadonlyExclusivelyFromRawFileStat);
-         this.resourceContext.set(resource);
-         this.folderContext.set(!!stat && stat.isDirectory);
--        this.readonlyContext.set(!!stat && !!stat.isReadonly);
-+        this.readonlyContext.set(!!stat && !!stat.isReadonly && !plainWorkspacePathMutationAllowed);
-         this.parentReadonlyContext.set(Boolean(stat?.parent?.isReadonly));
-         this.rootContext.set(!!stat && stat.isRoot);
-         if (resource) {
 diff --git a/vscode/src/vs/workbench/services/workingCopy/common/storedFileWorkingCopy.js b/vscode/src/vs/workbench/services/workingCopy/common/storedFileWorkingCopy.js
 index 0a769e25cf6030e9aa17ae5ec845795f964e5017..0ca61d77c1a1dccfdc383e4c1faec37a5fe54953 100644
 --- a/vscode/src/vs/workbench/services/workingCopy/common/storedFileWorkingCopy.js

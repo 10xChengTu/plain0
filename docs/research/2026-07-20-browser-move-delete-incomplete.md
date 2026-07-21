@@ -45,7 +45,7 @@ Plain 产品运行时固定在 Code OSS commit `5264f2156cbcd7aea5fd004d29eaa102
 
 - Rust wire DTO 已严格区分 `moved`、`targetPublishedSourceRetained` 和带 `removedEntries` 的 `targetPublishedSourcePartiallyDeleted`；零次成功 source remove 是 retained，一次以上是 partial。正式目标发布后绝不自动回滚。
 - `workspace-codec.ts` 保留两种终态与 reason/count 闭集；provider 对已认证 retained/partial 先按 source、target 顺序发两个 root `UPDATED`，再抛冻结的 `WORKSPACE_MOVE_INCOMPLETE`。Explorer patch 会把 Plain root update 提升为完整 refresh。
-- provider catch 对 transport reject、畸形 DTO 或其他未认证 failure 也会刷新两个 root，但目前错误地复用 `WORKSPACE_MOVE_INCOMPLETE` 的“目标已发布”文案。unknown 没有该 publication 证据，必须先拆成独立去敏 `WORKSPACE_MOVE_OUTCOME_UNKNOWN`，不能在 retained/partial E2E 中顺便伪装成某个 wire 终态。
+- provider catch 对 transport reject、畸形 DTO 或其他未认证 failure 也会刷新两个 root；实施前它错误地复用 `WORKSPACE_MOVE_INCOMPLETE` 的“目标已发布”文案。现已拆成独立去敏 `WORKSPACE_MOVE_OUTCOME_UNKNOWN`，不再把没有 publication 证据的 unknown 伪装成某个 wire 终态。
 
 Move 可见层因此需要一个窄的固定 patch：Paste catch 只对上述两个 Plain 冻结错误直接显示其安全 message；其他 scheme/普通失败继续使用上游文案。两种 Plain toast 都不得有 Retry。retained/partial Browser 本项只验 `WORKSPACE_MOVE_INCOMPLETE`；unknown 的 provider/文案合同用单元与 Harness 锁定，Browser unknown 另立工作项。
 
@@ -66,6 +66,13 @@ Move 可见层因此需要一个窄的固定 patch：Paste catch 只对上述两
 
 每 phase 恰好一次 `workspace_move`，第二 phase 后总数为 2；不出现 rename/copy/delete 或第二次 move。每次只有一个 Error toast，精确包含 `The workspace move published its target but could not remove all of its source.`，不含上游 stale-source 猜测，且 `Retry` 为 0。Cut 装饰/clipboard 在失败后清空，不选择或打开虚构成功目标，不产生成功 MOVE event 或 Undo。
 
+### Move 实施结果
+
+- provider 现用两个独立、冻结的 `FileOperationError`：只有已认证 retained/partial 使用 `WORKSPACE_MOVE_INCOMPLETE`；transport、codec 与其他需要双根 rescan 的未认证结果使用 `WORKSPACE_MOVE_OUTCOME_UNKNOWN`，安全文案只要求检查已刷新的 source/target，不声称 target 已发布。
+- 固定 API Paste patch 只接受精确 name/message 且 `Object.isFrozen(error)` 的上述两个错误，直接显示安全 message；任意普通 Error、伪 name、伪 message 或非冻结对象仍进入上游 fallback。失败后的 Cut 清理保持在原有 `finally`，没有新增 Retry。补丁 SHA-256 为 `184ceed92b82bccb869ca91bc322e6c01740d8eb85cd9ddde47484e8959858f6`。
+- Browser fixture 使用本地 `TestMultiRootMoveIncompleteScenario` 两项闭集。retained 先发布 target 后不删除 source；partial 先发布完整 target，再以 `node.entries.delete("removed.txt")` 的真实 boolean 结果产生 `removedEntries=1`，并保留 source `kept.txt`。Harness 同时禁止 raw receipt 参数、任意 callback 和 window mutation seam。
+- 定向 provider/补丁/Harness 单测 178/178、聚焦 Browser 单次及重复 5/5、完整 Workspace Browser 12/12、全部 Browser 13/13 均通过；完整 `pnpm check` 为前端 595/595、Rust 255/255、bundle 2112 source/203 debt。两阶段均验证 exact IPC、双根 refresh、单 toast、无 Retry、Cut 清空、零 `pageerror`/native dialog，以及 retained/partial 的实际树终态。
+
 ### Delete retained / partial
 
 | phase    | 固定操作                                                  | IPC/fixture 终态                                               | root refresh 后的 Explorer                 |
@@ -81,7 +88,7 @@ Move 可见层因此需要一个窄的固定 patch：Paste catch 只对上述两
 
 - Move/Delete 各 phase 恰好两条有序 console error：BulkEdit structured log 后跟 NotificationsAlerts 的可见 Error message；总数分别为 4。首次聚焦实现探针先核对真实稳定片段，再冻结，不锁 sourcemap 行号。
 - `pageerror=[]`、native JavaScript dialog `=[]`；结束时 toast 为 0、确认 `.monaco-dialog-box` 为 0。
-- toast/console 不得出现 wire status、reason、`removedEntries`、root UUID、`ENTRY_*`、本机用户或绝对路径。
+- toast 与 NotificationsAlerts 的直接安全 message 不得出现 wire status、reason、`removedEntries`、root UUID、`ENTRY_*`、本机用户或绝对路径；BulkEdit 的结构化开发诊断还会携带 Vite source-map 本机源码栈，因此只锁其错误 code/message 及不含 native DTO/root 身份，不把开发服务器栈误判为产品数据泄漏。
 - retained 与 partial 必须以实际树差异证明，不能只返回不同 DTO；partial count 必须来自 fixture 实际成功删除数。
 
 ## 确定性 fixture 方案
@@ -89,11 +96,10 @@ Move 可见层因此需要一个窄的固定 patch：Paste catch 只对上述两
 只扩展 `tests/browser/workspace.spec.ts` 内的 `installMultiRootNativeIpcMock`，不改 `app/`、bridge contract 或生产 `browser-mock.ts`。第三参数是可结构化克隆的固定 FIFO 场景闭集，而不是任意 callback、原始 result DTO 或页面可写全局：
 
 ```ts
-type TestMultiRootIncompleteScenario =
-	"moveRetained" | "movePartial" | "deleteRetained" | "deletePartial";
+type TestMultiRootMoveIncompleteScenario = "moveRetained" | "movePartial";
 ```
 
-fixture 只在计划非空时增加对应节点。每个 scenario 必须匹配固定 root/path、按 FIFO 单次消费；错序、重复、耗尽或剩余计划都让测试 fixture 自身失败。move 仍先真实 clone/rebind target；delete 仍真实维护 active batch。禁止把 queue mutator 暴露到 `window`，也禁止让测试直接指定 status/reason/count。
+Move 实施提交先保持两项专用闭集；Delete 工作项再以独立专用闭集扩展同一 fixture，避免未实现场景提前进入当前控制面。fixture 只在计划非空时增加对应节点。每个 scenario 必须匹配固定 root/path、按 FIFO 单次消费；错序、重复、耗尽或剩余计划都让测试 fixture 自身失败。move 仍先真实 clone/rebind target；delete 仍真实维护 active batch。禁止把 queue mutator 暴露到 `window`，也禁止让测试直接指定 status/reason/count。
 
 Harness 需要锁定场景闭集、FIFO 消费、请求匹配、target publication 在 incomplete 返回之前、retained 零 source delete、partial 由实际删除计数生成，并禁止相关测试符号进入 `app/**`。既有 provider/Harness 继续证明双 root/root refresh、零成功事件、no-retry 和 authorization typestate。
 
@@ -118,4 +124,4 @@ pnpm exec playwright test --retries=0
 
 ## 退出条件
 
-本调研文档和 `progress.md` 格式/feature guard 通过并独立提交后，当前最小工作项切到 Move retained/partial。Move 完成完整验收并提交后才切到 Delete retained/partial；两者都完成前 `F020` 保持 `in_progress`。
+本调研文档和 `progress.md` 已独立提交；Move retained/partial 已完成完整验收，当前最小工作项切到 Delete retained/partial。Delete 和真实 multi-root Tauri 验收都完成前，`F020` 保持 `in_progress`。

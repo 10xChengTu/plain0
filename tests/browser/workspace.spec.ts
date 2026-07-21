@@ -29,6 +29,7 @@ const nativeRootId = "00000000-0000-4000-8000-000000000101";
 const nativeSecondaryRootId = "00000000-0000-4000-8000-000000000102";
 type RawReadTransport = "arrayBuffer" | "numberArray";
 type NativeIpcMockMode = "readonly" | "supported";
+type TestMultiRootMoveIncompleteScenario = "moveRetained" | "movePartial";
 
 interface TestWorkspaceWatchExchange {
 	readonly callIndex: number;
@@ -758,9 +759,16 @@ async function installNativeIpcMock(
 async function installMultiRootNativeIpcMock(
 	page: Page,
 	mode: NativeIpcMockMode = "readonly",
+	moveIncompleteScenarios: readonly TestMultiRootMoveIncompleteScenario[] = [],
 ): Promise<void> {
 	await page.addInitScript(
-		({ mode, workspaceId, primaryRootId, secondaryRootId }) => {
+		({
+			mode,
+			moveIncompleteScenarios,
+			workspaceId,
+			primaryRootId,
+			secondaryRootId,
+		}) => {
 			type MockFile = {
 				kind: "file";
 				bytes: Uint8Array;
@@ -823,6 +831,7 @@ async function installMultiRootNativeIpcMock(
 			});
 			const encoder = new TextEncoder();
 			const decoder = new TextDecoder();
+			const moveIncompletePlan = [...moveIncompleteScenarios];
 			let versionSerial = 101;
 			let deferredExternalCreate: DeferredExternalCreate | undefined;
 			const nextVersion = (): string =>
@@ -849,6 +858,20 @@ async function installMultiRootNativeIpcMock(
 								rebindNodeVersions(child),
 							]),
 						);
+			const secondaryEntries: Array<readonly [string, MockNode]> = [
+				["move-source.txt", file("Move across roots.\n")],
+				["notes.txt", file("Secondary workspace\n")],
+				["packages", directory([])],
+			];
+			if (moveIncompleteScenarios.includes("movePartial")) {
+				secondaryEntries.push([
+					"move-partial",
+					directory([
+						["removed.txt", file("Remove this source child.\n")],
+						["kept.txt", file("Keep this source child.\n")],
+					]),
+				]);
+			}
 			const trees = new Map<string, MockDirectory>([
 				[
 					primaryRootId,
@@ -858,14 +881,7 @@ async function installMultiRootNativeIpcMock(
 						["src", directory([])],
 					]),
 				],
-				[
-					secondaryRootId,
-					directory([
-						["move-source.txt", file("Move across roots.\n")],
-						["notes.txt", file("Secondary workspace\n")],
-						["packages", directory([])],
-					]),
-				],
+				[secondaryRootId, directory(secondaryEntries)],
 			]);
 			const activeRoots = new Map<string, MockWorkspaceRoot>();
 			const watchStates = new Map<string, WatchState>();
@@ -1587,9 +1603,31 @@ async function installMultiRootNativeIpcMock(
 							if (target.parent.entries.has(target.name)) {
 								throw entryAlreadyExists();
 							}
+							const plannedIncomplete = moveIncompletePlan[0];
+							if (
+								plannedIncomplete === "moveRetained" &&
+								(request.sourceRootId !== secondaryRootId ||
+									request.sourcePath !== "move-source.txt" ||
+									request.targetRootId !== primaryRootId ||
+									request.targetPath !== "src/move-source.txt")
+							) {
+								throw new Error(
+									"Unexpected retained move browser test request.",
+								);
+							}
+							if (
+								plannedIncomplete === "movePartial" &&
+								(request.sourceRootId !== secondaryRootId ||
+									request.sourcePath !== "move-partial" ||
+									request.targetRootId !== primaryRootId ||
+									request.targetPath !== "src/move-partial")
+							) {
+								throw new Error(
+									"Unexpected partial move browser test request.",
+								);
+							}
 							const reboundNode = rebindNodeVersions(node);
 							target.parent.entries.set(target.name, reboundNode);
-							source.parent.entries.delete(source.name);
 							if (node.kind === "file" && reboundNode.kind === "file") {
 								versionTransitions.push({
 									command: "workspace_move",
@@ -1601,6 +1639,33 @@ async function installMultiRootNativeIpcMock(
 									targetVersion: reboundNode.version,
 								});
 							}
+							if (plannedIncomplete === "moveRetained") {
+								moveIncompletePlan.shift();
+								return {
+									status: "targetPublishedSourceRetained",
+									reason: "deleteFailed",
+								};
+							}
+							if (plannedIncomplete === "movePartial") {
+								if (node.kind !== "directory") {
+									throw entryTypeMismatch();
+								}
+								const removedEntries = node.entries.delete("removed.txt")
+									? 1
+									: 0;
+								if (removedEntries !== 1 || !node.entries.has("kept.txt")) {
+									throw new Error(
+										"Invalid partial move browser test source tree.",
+									);
+								}
+								moveIncompletePlan.shift();
+								return {
+									status: "targetPublishedSourcePartiallyDeleted",
+									reason: "deleteFailed",
+									removedEntries,
+								};
+							}
+							source.parent.entries.delete(source.name);
 							return { status: "moved" };
 						}
 						case "workspace_prepare_delete": {
@@ -1760,6 +1825,7 @@ async function installMultiRootNativeIpcMock(
 		},
 		{
 			mode,
+			moveIncompleteScenarios,
 			workspaceId: nativeWorkspaceId,
 			primaryRootId: nativeRootId,
 			secondaryRootId: nativeSecondaryRootId,
@@ -3127,6 +3193,250 @@ test("shows missing-parent create failures for both workspace roots", async ({
 		"FileOperationError: Unable to create the Plain workspace entry",
 	);
 	expect(consoleErrors[3]).toBe("Unable to create the Plain workspace entry");
+});
+
+test("shows retained and partial cross-root move failures", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	await installMultiRootNativeIpcMock(page, "supported", [
+		"moveRetained",
+		"movePartial",
+	]);
+	await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {
+		origin: "http://127.0.0.1:1420",
+	});
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+
+	const explorer = await openNativeWorkspaceExplorer(page);
+	await executePaletteCommand(
+		page,
+		"Add Folder to Workspace",
+		"Workspaces: Add Folder to Workspace...",
+	);
+	const primaryRoot = explorer.getByRole("treeitem", {
+		name: "plain-workspace",
+		exact: true,
+	});
+	const secondaryRoot = explorer.getByRole("treeitem", {
+		name: "plain-library",
+		exact: true,
+	});
+	const itemAtLevel = (name: string, level: number): Locator =>
+		explorer
+			.locator(`[role="treeitem"][aria-level="${level}"]`)
+			.filter({ hasText: name });
+	const expandDirectory = async (directory: Locator): Promise<void> => {
+		await expect(directory).toHaveCount(1);
+		if ((await directory.getAttribute("aria-expanded")) !== "true") {
+			await directory.click();
+			await page.keyboard.press("ArrowRight");
+		}
+		await expect(directory).toHaveAttribute("aria-expanded", "true");
+	};
+	await expandDirectory(primaryRoot);
+	await expandDirectory(secondaryRoot);
+	const src = itemAtLevel("src", 2);
+	await expect(src).toHaveCount(1);
+
+	const callStart = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+		};
+		return testWindow.__PLAIN_TEST_TAURI_CALLS__.length;
+	});
+	const currentCallCount = (): Promise<number> =>
+		page.evaluate(() => {
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+			};
+			return testWindow.__PLAIN_TEST_TAURI_CALLS__.length;
+		});
+	const moveCount = (): Promise<number> =>
+		page.evaluate(() => {
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+			};
+			return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+				({ command }) => command === "workspace_move",
+			).length;
+		});
+	const expectBothRootRefreshes = async (phaseStart: number): Promise<void> => {
+		await expect
+			.poll(() =>
+				page.evaluate(
+					({ phaseStart, rootIds }) => {
+						const testWindow = window as unknown as Window & {
+							__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+						};
+						const refreshed = new Set(
+							testWindow.__PLAIN_TEST_TAURI_CALLS__
+								.slice(phaseStart)
+								.filter(({ command, args }) => {
+									if (command !== "workspace_read_dir") {
+										return false;
+									}
+									const request = args.request as
+										{ rootId?: unknown; relativePath?: unknown } | undefined;
+									return (
+										request?.relativePath === "" &&
+										typeof request.rootId === "string" &&
+										rootIds.includes(request.rootId)
+									);
+								})
+								.map(({ args }) => (args.request as { rootId: string }).rootId),
+						);
+						return rootIds.every((rootId) => refreshed.has(rootId));
+					},
+					{
+						phaseStart,
+						rootIds: [nativeRootId, nativeSecondaryRootId],
+					},
+				),
+			)
+			.toBe(true);
+	};
+	const moveMessage =
+		"The workspace move published its target but could not remove all of its source.";
+	const consumeMoveFailureToast = async (): Promise<void> => {
+		const toasts = page.locator(".notifications-toasts .notification-toast");
+		await expect(toasts).toHaveCount(1);
+		const toast = toasts.first();
+		await expect(toast).toContainText(moveMessage);
+		await expect(toast).not.toContainText(
+			"The file(s) to paste have been deleted or moved since you copied them.",
+		);
+		await expect(
+			toast.getByRole("button", { name: "Retry", exact: true }),
+		).toHaveCount(0);
+		const text = await toast.innerText();
+		expect(text).not.toContain("targetPublishedSource");
+		expect(text).not.toContain("deleteFailed");
+		expect(text).not.toContain("removedEntries");
+		expect(text).not.toContain(nativeRootId);
+		expect(text).not.toContain(nativeSecondaryRootId);
+		expect(text).not.toMatch(/(?:\/Users\/|[A-Za-z]:\\|\\\\)/u);
+		await toast.hover();
+		await toast
+			.getByRole("button", {
+				name: /^Clear Notification(?: \(.+\))?$/u,
+			})
+			.click();
+		await expect(toasts).toHaveCount(0);
+	};
+	const cutAndPaste = async (
+		source: Locator,
+		expectedMoves: number,
+	): Promise<number> => {
+		const phaseStart = await currentCallCount();
+		await activateExplorerContextAction(page, source, "Cut");
+		await expect(source.locator(".explorer-item.cut")).toHaveCount(1);
+		await activateExplorerContextAction(page, src, "Paste");
+		await expect.poll(moveCount).toBe(expectedMoves);
+		await consumeMoveFailureToast();
+		await expect(source.locator(".explorer-item.cut")).toHaveCount(0);
+		await expectBothRootRefreshes(phaseStart);
+		return phaseStart;
+	};
+
+	const retainedSource = itemAtLevel("move-source.txt", 2);
+	await expect(retainedSource).toHaveCount(1);
+	await cutAndPaste(retainedSource, 1);
+	await expandDirectory(src);
+	await expect(itemAtLevel("move-source.txt", 2)).toHaveCount(1);
+	await expect(itemAtLevel("move-source.txt", 3)).toHaveCount(1);
+	await expect(
+		page.locator(".tabs-container .tab").filter({ hasText: "move-source.txt" }),
+	).toHaveCount(0);
+
+	const partialSource = itemAtLevel("move-partial", 2);
+	await expandDirectory(partialSource);
+	await expect(itemAtLevel("removed.txt", 3)).toHaveCount(1);
+	await expect(itemAtLevel("kept.txt", 3)).toHaveCount(1);
+	await cutAndPaste(partialSource, 2);
+	await expandDirectory(src);
+	const retainedPartialSource = itemAtLevel("move-partial", 2);
+	const publishedPartialTarget = itemAtLevel("move-partial", 3);
+	await expandDirectory(retainedPartialSource);
+	await expandDirectory(publishedPartialTarget);
+	await expect(itemAtLevel("removed.txt", 3)).toHaveCount(0);
+	await expect(itemAtLevel("kept.txt", 3)).toHaveCount(1);
+	await expect(itemAtLevel("removed.txt", 4)).toHaveCount(1);
+	await expect(itemAtLevel("kept.txt", 4)).toHaveCount(1);
+	await expect(
+		page.locator(".tabs-container .tab").filter({ hasText: "move-partial" }),
+	).toHaveCount(0);
+
+	const evidence = await page.evaluate(
+		({ callStart, mutationCommands }) => {
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+			};
+			return testWindow.__PLAIN_TEST_TAURI_CALLS__
+				.slice(callStart)
+				.filter(({ command }) => mutationCommands.includes(command));
+		},
+		{
+			callStart,
+			mutationCommands: nativeMutationCommands as readonly string[],
+		},
+	);
+	expect(evidence).toEqual([
+		{
+			command: "workspace_move",
+			args: {
+				request: {
+					sourceRootId: nativeSecondaryRootId,
+					sourcePath: "move-source.txt",
+					targetRootId: nativeRootId,
+					targetPath: "src/move-source.txt",
+				},
+			},
+		},
+		{
+			command: "workspace_move",
+			args: {
+				request: {
+					sourceRootId: nativeSecondaryRootId,
+					sourcePath: "move-partial",
+					targetRootId: nativeRootId,
+					targetPath: "src/move-partial",
+				},
+			},
+		},
+	]);
+	await expect(
+		page.locator(".notifications-toasts .notification-toast"),
+	).toHaveCount(0);
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toHaveLength(4);
+	for (const diagnostic of consoleErrors) {
+		expect(diagnostic).not.toContain("targetPublishedSource");
+		expect(diagnostic).not.toContain("deleteFailed");
+		expect(diagnostic).not.toContain("removedEntries");
+		expect(diagnostic).not.toContain(nativeRootId);
+		expect(diagnostic).not.toContain(nativeSecondaryRootId);
+	}
+	expect(consoleErrors[0]).toContain("WORKSPACE_MOVE_INCOMPLETE");
+	expect(consoleErrors[0]).toContain(moveMessage);
+	expect(consoleErrors[1]).toBe(moveMessage);
+	expect(consoleErrors[1]).not.toMatch(/(?:\/Users\/|[A-Za-z]:\\|\\\\)/u);
+	expect(consoleErrors[2]).toContain("WORKSPACE_MOVE_INCOMPLETE");
+	expect(consoleErrors[2]).toContain(moveMessage);
+	expect(consoleErrors[3]).toBe(moveMessage);
+	expect(consoleErrors[3]).not.toMatch(/(?:\/Users\/|[A-Za-z]:\\|\\\\)/u);
 });
 
 test("edits both roots and routes cross-root copy and move through all-true IPC", async ({

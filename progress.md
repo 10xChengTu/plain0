@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：实现并验收 Browser move retained/partial 可见失败矩阵。
+- 当前最小工作项：实现并验收 Browser delete retained/partial 可见失败矩阵。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -110,13 +110,14 @@
 - [x] 完成 missing-parent create 错误通道补充调研与方案：官方 NotificationService 已让真实 toast/Retry 可见；剩余三个 `pageerror` 精确来自固定 ProgressService 对同一 rejection 创建的 notification model、notification cleanup 和 Activity Bar 三个 detached observer。方案只在既有 view-common 固定 patch 中让这三条 observer 的 resolve/reject 两端执行同一 cleanup，保持原始 task/rejection、Explorer catch、取消与 timing 不变；不安装全局吞错 listener、不在测试中过滤 pageerror，也不删除固定 BulkEditService 与 NotificationsAlerts 为每个失败分别产生的一条诊断日志。
 - [x] 完成 Browser multi-root missing-parent create 可见失败矩阵：显式接入固定 notifications override，Harness 锁定 direct dependency、唯一 default import/零参 spread、`Workbench → Notification → Explorer` 顺序与其他 app source 禁止导入；view-common 固定补丁把三个 detached progress observer 改为 resolve/reject 对称 cleanup，保留原始 rejection 与上游诊断。primary New File 与 secondary New Folder 各只调用一次对应 native create，显示一个带手动 `Retry` 的去敏 Error toast，且无父目录/leaf、目标预读、伪 editor、自动 replay、原生 dialog 或 `pageerror`；readonly 永久删除拒绝同步从 standalone console warning 升级为真实 Warning toast，仍为零确认框/零 mutation。独立 bundle Set 集差只新增 notification override 入口和 `NotificationService` 两个 source，2112-source/203-debt 的五类计数与 SHA 均未变化；完整 `pnpm check` 通过 30 个前端测试文件、588 个用例、2277 个模块与 Rust 255/255，聚焦重复 5/5、全部 Browser E2E 12/12 通过。
 - [x] 完成 Browser move/delete incomplete 的固定 GitHub 调研与技术方案：固定 Code OSS `5264f` 的 Cut/Paste 单 Error toast、无 Retry、失败清 Cut、成功后才建 Undo，以及 permanent delete 的危险 Retry fallback；Plain fixed delete patch 继续在上游 try/catch 前提前分流，retained/partial 由右键 ActionRunner 显示单 Error toast，不恢复 Retry。方案只在测试本地 multi-root IPC mock 增加不可伪造 DTO 的 FIFO 场景闭集，以真实 target publication/源子项删除生成 move retained/partial，以真实 batch/tree 变化生成 delete retained/partial；各自锁定 root refresh、树终态、exact IPC、零重放、去敏诊断和无 `pageerror`。同时识别 move transport/DTO unknown 没有 target publication 证据，实施前必须从 `WORKSPACE_MOVE_INCOMPLETE` 拆成独立安全错误，不能混入 retained/partial Browser 终态。
+- [x] 完成 Browser move retained/partial 可见失败矩阵：已认证的 `targetPublishedSourceRetained/PartiallyDeleted` 继续抛冻结的 `WORKSPACE_MOVE_INCOMPLETE`，transport reject、畸形 DTO 与未认证 rescan failure 则改为不声称发布事实的冻结 `WORKSPACE_MOVE_OUTCOME_UNKNOWN`；固定 Workbench Paste patch 只对这两个精确 name/message 且冻结的 Plain 错误显示直接安全文案，其他错误仍走上游 stale-source fallback，失败始终清空 Cut 且不增加 Retry。Browser-only 双根 fixture 先真实发布 target，再分别保留完整 source 或只删除 source `removed.txt`，以树差异和实际 boolean delete 生成 retained/partial 回执；AST Harness 锁定场景闭集、请求、target-first、source 终态、错误分流及禁止页面可写控制面。API patch SHA-256 更新为 `184ceed92b82bccb869ca91bc322e6c01740d8eb85cd9ddde47484e8959858f6`。
+- [x] Move 可见失败切片通过完整验收：定向 provider/patch/Harness 为 178/178，聚焦 Chromium 单次与重复 5/5 均通过；完整 `pnpm check` 通过 30 个前端测试文件、595 个用例、2277 个模块、2112 个 bundle source、203 项既有迁移债务与 Rust 255/255，全部 Browser E2E 13/13 通过。两阶段各只有一次 `workspace_move`、一个无 Retry Error toast 和两条有序诊断，Cut 均清空、双根均刷新，retained 的 source/target 均存在，partial 的完整 target 与仅剩 `kept.txt` 的 source 同时可见，且无 native dialog、`pageerror`、自动重放或伪成功事件。
 
 ## 下一步
 
-1. 实现并验收 Browser move retained/partial 可见失败矩阵。
-2. 实现并验收 Browser delete retained/partial 可见失败矩阵。
-3. 完成真实 multi-root Tauri 验收。
-4. 全部通过后写入 `features.json` evidence/status，完成 `F020` 并切换到下一个垂直切片。
+1. 实现并验收 Browser delete retained/partial 可见失败矩阵。
+2. 完成真实 multi-root Tauri 验收。
+3. 全部通过后写入 `features.json` evidence/status，完成 `F020` 并切换到下一个垂直切片。
 
 ## 当前验收命令
 

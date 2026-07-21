@@ -1576,8 +1576,10 @@ describe("Plain workspace file system provider", () => {
 				name: "WORKSPACE_MOVE_INCOMPLETE",
 				fileOperationResult: FileOperationResult.FILE_OTHER_ERROR,
 			});
+			expect(error.code).not.toBe("WORKSPACE_MOVE_OUTCOME_UNKNOWN");
 			expect(Object.isFrozen(error)).toBe(true);
 			expect(error.message).toContain("published its target");
+			expect(error.message).not.toContain("outcome is unknown");
 			expect(error.message).not.toContain(outcome.status);
 			if ("reason" in outcome) {
 				expect(error.message).not.toContain(outcome.reason);
@@ -1591,6 +1593,101 @@ describe("Plain workspace file system provider", () => {
 		expect(order).toEqual(outcomes.flatMap(() => ["event", "reject"]));
 		expect(events).toHaveLength(outcomes.length);
 		for (const event of events) {
+			expect(Object.isFrozen(event)).toBe(true);
+			expect(
+				event.map(({ type, resource }) => [type, resource.toString()]),
+			).toEqual([
+				[FileChangeType.UPDATED, rootUri],
+				[
+					FileChangeType.UPDATED,
+					`${PLAIN_WORKSPACE_SCHEME}://${targetRootId}/`,
+				],
+			]);
+			for (const change of event) {
+				expect(Object.isFrozen(change)).toBe(true);
+				expect(Object.isFrozen(change.resource)).toBe(true);
+			}
+		}
+	});
+
+	it("rescans both roots before rejecting every unknown move outcome", async () => {
+		const privatePath = "/Users/private/workspace";
+		const scenarios = [
+			{
+				label: "transport rejection",
+				bridge: testBridge({
+					async workspaceMove() {
+						throw new Error(`Transport rejected at ${privatePath}`);
+					},
+				}),
+				secrets: ["Transport rejected", privatePath],
+			},
+			{
+				label: "malformed response",
+				bridge: testBridge({
+					async workspaceMove() {
+						return Object.freeze({
+							status: "moved",
+							details: privatePath,
+						}) as never;
+					},
+				}),
+				secrets: ["details", privatePath],
+			},
+			{
+				label: "unauthenticated command error",
+				bridge: testBridge({
+					async workspaceMove() {
+						throw Object.freeze({
+							code: "IO_FAILED",
+							message: `Native move failed at ${privatePath}`,
+							details: privatePath,
+						});
+					},
+				}),
+				secrets: ["IO_FAILED", "Native move failed", privatePath],
+			},
+		] as const;
+		const source = workspaceUri("unknown/source");
+		const target = rootedWorkspaceUri(targetRootId, "unknown/target");
+
+		for (const scenario of scenarios) {
+			const provider = createPlainWorkspaceFileSystemProvider(scenario.bridge);
+			const order: string[] = [];
+			const events: ProviderChanges[] = [];
+			const subscription = provider.onDidChangeFile(
+				(event: ProviderChanges) => {
+					order.push("event");
+					events.push(event);
+				},
+			);
+			const operation = provider
+				.rename(source, target, { overwrite: false })
+				.catch((error: unknown) => {
+					order.push("reject");
+					throw error;
+				});
+			const error = await rejected(operation);
+			subscription.dispose();
+
+			expect(error, scenario.label).toMatchObject({
+				code: "WORKSPACE_MOVE_OUTCOME_UNKNOWN",
+				name: "WORKSPACE_MOVE_OUTCOME_UNKNOWN",
+				fileOperationResult: FileOperationResult.FILE_OTHER_ERROR,
+			});
+			expect(error.code).not.toBe("WORKSPACE_MOVE_INCOMPLETE");
+			expect(Object.isFrozen(error)).toBe(true);
+			expect(error.message).toContain("outcome is unknown");
+			expect(error.message).toContain("source and target");
+			expect(error.message).toContain("were refreshed");
+			expect(error.message).toContain("check both locations");
+			expect(error.message).not.toContain("published");
+			for (const secret of scenario.secrets) {
+				expect(error.message).not.toContain(secret);
+			}
+			expect(order).toEqual(["event", "reject"]);
+			expect(events).toHaveLength(1);
+			const event = events[0]!;
 			expect(Object.isFrozen(event)).toBe(true);
 			expect(
 				event.map(({ type, resource }) => [type, resource.toString()]),
@@ -1673,7 +1770,7 @@ describe("Plain workspace file system provider", () => {
 					rootUri,
 					`${PLAIN_WORKSPACE_SCHEME}://${targetRootId}/`,
 				],
-				expectedCode: "WORKSPACE_MOVE_INCOMPLETE",
+				expectedCode: "WORKSPACE_MOVE_OUTCOME_UNKNOWN",
 			},
 			{
 				bridge: testBridge({
@@ -1687,7 +1784,7 @@ describe("Plain workspace file system provider", () => {
 					rootUri,
 					`${PLAIN_WORKSPACE_SCHEME}://${targetRootId}/`,
 				],
-				expectedCode: "WORKSPACE_MOVE_INCOMPLETE",
+				expectedCode: "WORKSPACE_MOVE_OUTCOME_UNKNOWN",
 			},
 		] as const;
 
@@ -1782,6 +1879,8 @@ describe("Plain workspace file system provider", () => {
 		);
 		subscription.dispose();
 		expect(error.code).toBe(FileSystemProviderErrorCode.FileNotFound);
+		expect(error.code).not.toBe("WORKSPACE_MOVE_INCOMPLETE");
+		expect(error.code).not.toBe("WORKSPACE_MOVE_OUTCOME_UNKNOWN");
 		expect(changeListener).not.toHaveBeenCalled();
 	});
 

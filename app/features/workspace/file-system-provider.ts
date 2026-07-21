@@ -87,6 +87,8 @@ const SANITIZED_MESSAGES = Object.freeze({
 	entryNotFound: "The workspace entry does not exist.",
 	moveIncomplete:
 		"The workspace move published its target but could not remove all of its source.",
+	moveOutcomeUnknown:
+		"The workspace move outcome is unknown. The source and target locations were refreshed; check both locations before continuing.",
 	notDirectory: "The workspace entry is not a directory.",
 	noPermissions: "The workspace entry cannot be accessed.",
 	unavailable: "The workspace is unavailable.",
@@ -435,6 +437,23 @@ class WorkspaceMoveIncompleteError extends FileOperationError {
 
 function workspaceMoveIncomplete(): WorkspaceMoveIncompleteError {
 	return new WorkspaceMoveIncompleteError();
+}
+
+class WorkspaceMoveOutcomeUnknownError extends FileOperationError {
+	readonly code = "WORKSPACE_MOVE_OUTCOME_UNKNOWN" as const;
+
+	constructor() {
+		super(
+			SANITIZED_MESSAGES.moveOutcomeUnknown,
+			FileOperationResult.FILE_OTHER_ERROR,
+		);
+		this.name = this.code;
+		Object.freeze(this);
+	}
+}
+
+function workspaceMoveOutcomeUnknown(): WorkspaceMoveOutcomeUnknownError {
+	return new WorkspaceMoveOutcomeUnknownError();
 }
 
 function kindToFileType(kind: WorkspaceEntryKind): FileType {
@@ -874,7 +893,7 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 			const failure = mapCopyMoveError(error);
 			if (failure.rescan) {
 				this.fireRootsUpdated(source.resource, target.resource);
-				throw workspaceMoveIncomplete();
+				throw workspaceMoveOutcomeUnknown();
 			}
 			throw failure.error;
 		}

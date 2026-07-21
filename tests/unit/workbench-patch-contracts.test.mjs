@@ -174,6 +174,83 @@ describe("exact Workbench patch contracts", () => {
 		}
 	});
 
+	it("locks incomplete move Paste presentation to two frozen safe errors", async () => {
+		const patchPath = "patches/@codingame__monaco-vscode-api@35.0.1.patch";
+		const baselineInput = await baseline();
+		const baselineSource = baselineInput.patchSources.get(patchPath);
+		const pasteStart = baselineSource.indexOf(
+			"+function plainMoveFailureMessage(error) {",
+		);
+		const pasteEnd = baselineSource.indexOf(
+			"diff --git a/vscode/src/vs/workbench/contrib/files/browser/views/explorerView.js",
+			pasteStart,
+		);
+		expect(pasteStart).toBeGreaterThanOrEqual(0);
+		expect(pasteEnd).toBeGreaterThan(pasteStart);
+		const pastePatch = baselineSource.slice(pasteStart, pasteEnd);
+		expect(pastePatch).toContain(
+			"+    if (!(error instanceof Error) || !Object.isFrozen(error)) {",
+		);
+		expect(pastePatch).toContain(
+			'+    if (error.name === "WORKSPACE_MOVE_INCOMPLETE" && error.message === "The workspace move published its target but could not remove all of its source.") {',
+		);
+		expect(pastePatch).toContain(
+			'+    if (error.name === "WORKSPACE_MOVE_OUTCOME_UNKNOWN" && error.message === "The workspace move outcome is unknown. The source and target locations were refreshed; check both locations before continuing.") {',
+		);
+		expect(pastePatch).toContain(
+			"+            notificationService.error(plainMoveMessage);",
+		);
+		expect(pastePatch).toContain(
+			'+                "The file(s) to paste have been deleted or moved since you copied them. {0}",',
+		);
+		expect(pastePatch).toContain(
+			"             await explorerService.setToCopy([], false);",
+		);
+		expect(pastePatch).not.toContain("Retry");
+
+		for (const mutation of [
+			{
+				from: "+    if (!(error instanceof Error) || !Object.isFrozen(error)) {",
+				to: "+    if (!error) {",
+			},
+			{
+				from: 'error.name === "WORKSPACE_MOVE_INCOMPLETE" && error.message === "The workspace move published its target but could not remove all of its source."',
+				to: 'error.message === "The workspace move published its target but could not remove all of its source."',
+			},
+			{
+				from: 'error.name === "WORKSPACE_MOVE_OUTCOME_UNKNOWN" && error.message === "The workspace move outcome is unknown. The source and target locations were refreshed; check both locations before continuing."',
+				to: 'error.name === "WORKSPACE_MOVE_OUTCOME_UNKNOWN"',
+			},
+			{
+				from: "+            notificationService.error(plainMoveMessage);",
+				to: "+            notificationService.error(getErrorMessage(e));",
+			},
+			{
+				from: '+                "The file(s) to paste have been deleted or moved since you copied them. {0}",',
+				to: '+                "Move failed: {0}",',
+			},
+			{
+				from: "             await explorerService.setToCopy([], false);",
+				to: "             void pasteShouldMove;",
+			},
+			{
+				from: "+            notificationService.error(plainMoveMessage);",
+				to: '+            notificationService.prompt(Severity.Error, plainMoveMessage, [{ label: "Retry", run: () => pasteFileHandler(accessor, fileList) }]);',
+			},
+		]) {
+			const input = await baseline();
+			const source = input.patchSources.get(patchPath);
+			expect(source).toContain(mutation.from);
+			input.patchSources.set(
+				patchPath,
+				source.replace(mutation.from, mutation.to),
+			);
+			expect(validateWorkbenchPatchSet(input)).toContain(
+				`${patchPath} differs from its exact audited SHA-256`,
+			);
+		}
+	});
+
 	it("requires both private confirmed-delete transport patches", async () => {
 		for (const patchPath of [
 			"patches/@codingame__monaco-vscode-base-service-override@35.0.1.patch",
@@ -343,7 +420,7 @@ describe("exact Workbench patch contracts", () => {
 
 	it("rejects bare importer and snapshot edges even when comments repeat the hash", async () => {
 		const apiHash =
-			"4e68ad95a7acfe75a3a4d5ca73d17266361bf369f731f3ecb0f9e2e70bed05e8";
+			"184ceed92b82bccb869ca91bc322e6c01740d8eb85cd9ddde47484e8959858f6";
 		const importerBare = await baseline();
 		importerBare.lockfile = `${importerBare.lockfile.replace(
 			`        version: 35.0.1(patch_hash=${apiHash})`,

@@ -22,6 +22,7 @@ import {
 	validateWorkspaceDeleteTypeScriptBoundary,
 	validateWorkspaceMoveBoundary,
 	validateWorkspaceMoveCommandRegistration,
+	validateWorkspaceMoveFailureBrowserFixture,
 	validateWorkspaceProviderBootstrap,
 	validateWorkspaceProviderCopyBoundary,
 	validateWorkspaceRustBoundary,
@@ -449,6 +450,15 @@ const workspaceProviderSource = await readFile(
 );
 for (const failure of validateWorkspaceProviderCopyBoundary(
 	workspaceProviderSource,
+)) {
+	fail(failure);
+}
+const workspaceBrowserFixtureSource = await readFile(
+	path.join(root, "tests/browser/workspace.spec.ts"),
+	"utf8",
+);
+for (const failure of validateWorkspaceMoveFailureBrowserFixture(
+	workspaceBrowserFixtureSource,
 )) {
 	fail(failure);
 }

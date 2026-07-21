@@ -22,6 +22,7 @@ import {
 	validateWorkspaceDeleteTypeScriptBoundary,
 	validateWorkspaceMoveBoundary,
 	validateWorkspaceMoveCommandRegistration,
+	validateWorkspaceMoveFailureBrowserFixture,
 	validateWorkspaceProviderBootstrap,
 	validateWorkspaceProviderCopyBoundary,
 	validateWorkspaceRustBoundary as validateWorkspaceRustBoundaryContract,
@@ -5188,6 +5189,10 @@ const readonlyWorkspaceProvider = readFileSync(
 	),
 	"utf8",
 );
+const workspaceBrowserFixture = readFileSync(
+	new URL("../../tests/browser/workspace.spec.ts", import.meta.url),
+	"utf8",
+);
 
 describe("Plain workspace provider copy boundary", () => {
 	const capabilityAssignment = `this.capabilities =
@@ -5539,7 +5544,51 @@ describe("Plain workspace provider copy boundary", () => {
 		);
 	});
 
-	it("locks the frozen WORKSPACE_MOVE_INCOMPLETE terminal error", () => {
+	it("locks distinct frozen incomplete and outcome-unknown move errors and factories", () => {
+		const incompleteDeclarations = `class WorkspaceMoveIncompleteError extends FileOperationError {
+	readonly code = "WORKSPACE_MOVE_INCOMPLETE" as const;
+
+	constructor() {
+		super(
+			SANITIZED_MESSAGES.moveIncomplete,
+			FileOperationResult.FILE_OTHER_ERROR,
+		);
+		this.name = this.code;
+		Object.freeze(this);
+	}
+}
+
+function workspaceMoveIncomplete(): WorkspaceMoveIncompleteError {
+	return new WorkspaceMoveIncompleteError();
+}`;
+		const outcomeUnknownDeclarations = `class WorkspaceMoveOutcomeUnknownError extends FileOperationError {
+	readonly code = "WORKSPACE_MOVE_OUTCOME_UNKNOWN" as const;
+
+	constructor() {
+		super(
+			SANITIZED_MESSAGES.moveOutcomeUnknown,
+			FileOperationResult.FILE_OTHER_ERROR,
+		);
+		this.name = this.code;
+		Object.freeze(this);
+	}
+}
+
+function workspaceMoveOutcomeUnknown(): WorkspaceMoveOutcomeUnknownError {
+	return new WorkspaceMoveOutcomeUnknownError();
+}`;
+		const swappedTerminalBranches = mutateProvider(
+			"throw workspaceMoveOutcomeUnknown();",
+			"throw workspaceMoveSwapSentinel();",
+		)
+			.replace(
+				"throw workspaceMoveIncomplete();",
+				"throw workspaceMoveOutcomeUnknown();",
+			)
+			.replace(
+				"throw workspaceMoveSwapSentinel();",
+				"throw workspaceMoveIncomplete();",
+			);
 		for (const [hostile, expected] of [
 			[
 				mutateProvider(
@@ -5550,10 +5599,31 @@ describe("Plain workspace provider copy boundary", () => {
 			],
 			[
 				mutateProvider(
+					'readonly code = "WORKSPACE_MOVE_OUTCOME_UNKNOWN" as const;',
+					'readonly code = "WORKSPACE_MOVE_INCOMPLETE" as const;',
+				),
+				"WorkspaceMoveOutcomeUnknownError must remain the frozen WORKSPACE_MOVE_OUTCOME_UNKNOWN FileOperationError",
+			],
+			[
+				mutateProvider(
 					"FileOperationResult.FILE_OTHER_ERROR",
 					"FileOperationResult.FILE_MOVE_CONFLICT",
 				),
 				"WorkspaceMoveIncompleteError must remain the frozen WORKSPACE_MOVE_INCOMPLETE FileOperationError",
+			],
+			[
+				mutateProvider(
+					'moveOutcomeUnknown:\n\t\t"The workspace move outcome is unknown. The source and target locations were refreshed; check both locations before continuing.",',
+					'moveOutcomeUnknown:\n\t\t"The workspace move published its target but could not remove all of its source.",',
+				),
+				"SANITIZED_MESSAGES must retain its exact module-private sanitized error contract",
+			],
+			[
+				mutateProvider(
+					`${outcomeUnknownDeclarations}\n\nfunction kindToFileType`,
+					`${outcomeUnknownDeclarations.replace("\n\t\tObject.freeze(this);", "")}\n\nfunction kindToFileType`,
+				),
+				"WorkspaceMoveOutcomeUnknownError must remain the frozen WORKSPACE_MOVE_OUTCOME_UNKNOWN FileOperationError",
 			],
 			[
 				mutateProvider(
@@ -5564,7 +5634,25 @@ describe("Plain workspace provider copy boundary", () => {
 			],
 			[
 				mutateProvider(
-					"throw workspaceMoveIncomplete();",
+					"return new WorkspaceMoveOutcomeUnknownError();",
+					"return new WorkspaceMoveIncompleteError();",
+				),
+				"workspaceMoveOutcomeUnknown must construct only the audited unknown-outcome error",
+			],
+			[
+				mutateProvider(
+					`${incompleteDeclarations}\n\n${outcomeUnknownDeclarations}`,
+					`${outcomeUnknownDeclarations}\n\n${incompleteDeclarations}`,
+				),
+				"workspace move terminal errors and factories must retain their audited declaration order",
+			],
+			[
+				swappedTerminalBranches,
+				"rename must gate first, authenticate strict options, snapshot two URIs, split one rename or move route and accept only moved",
+			],
+			[
+				mutateProvider(
+					"throw workspaceMoveOutcomeUnknown();",
 					"throw unavailable();",
 				),
 				"rename must gate first, authenticate strict options, snapshot two URIs, split one rename or move route and accept only moved",
@@ -5849,6 +5937,118 @@ describe("Plain workspace provider copy boundary", () => {
 				"Plain workspace provider must not use defineProperty or Proxy mutation surfaces",
 			);
 		}
+	});
+});
+
+describe("Plain browser move-failure fixture boundary", () => {
+	function mutateBrowserFixture(from, to) {
+		if (!workspaceBrowserFixture.includes(from)) {
+			throw new Error(
+				"browser move-failure fixture no longer matches production",
+			);
+		}
+		return workspaceBrowserFixture.replace(from, to);
+	}
+
+	it("accepts the local retained/partial multi-root fixture", () => {
+		expect(
+			validateWorkspaceMoveFailureBrowserFixture(workspaceBrowserFixture),
+		).toEqual([]);
+	});
+
+	it("rejects open scenario sets and raw receipt parameters", () => {
+		for (const hostile of [
+			mutateBrowserFixture(
+				'type TestMultiRootMoveIncompleteScenario = "moveRetained" | "movePartial";',
+				'type TestMultiRootMoveIncompleteScenario = "moveRetained" | "movePartial" | "moveUnknown";',
+			),
+			mutateBrowserFixture(
+				"moveIncompleteScenarios: readonly TestMultiRootMoveIncompleteScenario[] = [],\n): Promise<void>",
+				'moveIncompleteScenarios: readonly TestMultiRootMoveIncompleteScenario[] = [],\n\tstatus: string = "targetPublishedSourceRetained",\n): Promise<void>',
+			),
+			mutateBrowserFixture(
+				"moveIncompleteScenarios: readonly TestMultiRootMoveIncompleteScenario[] = []",
+				"moveIncompleteScenarios: readonly string[] = []",
+			),
+		]) {
+			expect(validateWorkspaceMoveFailureBrowserFixture(hostile)).toContain(
+				"browser move-failure fixture third argument must remain the closed moveRetained/movePartial scenario set",
+			);
+		}
+	});
+
+	it("keeps scenario state inside the one local addInitScript closure", () => {
+		for (const hostile of [
+			mutateBrowserFixture(
+				"moveIncompleteScenarios: readonly TestMultiRootMoveIncompleteScenario[] = [],\n): Promise<void> {\n\tawait page.addInitScript(",
+				"moveIncompleteScenarios: readonly TestMultiRootMoveIncompleteScenario[] = [],\n): Promise<void> {\n\tvoid moveIncompleteScenarios;\n\tawait page.addInitScript(",
+			),
+			mutateBrowserFixture(
+				"\t\t\tmoveIncompleteScenarios,\n\t\t\tworkspaceId: nativeWorkspaceId,",
+				"\t\t\tworkspaceId: nativeWorkspaceId,",
+			),
+			mutateBrowserFixture(
+				"const moveIncompletePlan = [...moveIncompleteScenarios];",
+				`const moveIncompletePlan = [...moveIncompleteScenarios];
+			const testMoveWindow = window as unknown as Record<string, unknown>;
+			testMoveWindow.__PLAIN_TEST_MOVE_FAILURE__ = () =>
+				moveIncompletePlan.shift();`,
+			),
+		]) {
+			const failures = validateWorkspaceMoveFailureBrowserFixture(hostile);
+			expect(
+				failures.some((failure) =>
+					/local to one audited multi-root addInitScript fixture|must not accept raw receipt fields or expose a window mutation control/.test(
+						failure,
+					),
+				),
+			).toBe(true);
+		}
+	});
+
+	it("locks fixed cross-root requests and target-first ordering", () => {
+		const wrongRequest = mutateBrowserFixture(
+			'request.targetPath !== "src/move-source.txt"',
+			'request.targetPath !== "src/other.txt"',
+		);
+		expect(validateWorkspaceMoveFailureBrowserFixture(wrongRequest)).toContain(
+			"browser move-failure fixture must retain exact cross-root request validation",
+		);
+
+		const delayedPublication = mutateBrowserFixture(
+			"\t\t\t\t\t\t\ttarget.parent.entries.set(target.name, reboundNode);",
+			"",
+		).replace(
+			'if (plannedIncomplete === "moveRetained") {',
+			'if (plannedIncomplete === "moveRetained") {\n\t\t\t\t\t\t\t\ttarget.parent.entries.set(target.name, reboundNode);',
+		);
+		expect(
+			validateWorkspaceMoveFailureBrowserFixture(delayedPublication),
+		).toContain(
+			"browser move-failure fixture must publish the target before its ordered terminal scenario branches",
+		);
+	});
+
+	it("locks retained source preservation and boolean-derived partial deletion count", () => {
+		const retainedDelete = mutateBrowserFixture(
+			'if (plannedIncomplete === "moveRetained") {\n\t\t\t\t\t\t\t\tmoveIncompletePlan.shift();',
+			'if (plannedIncomplete === "moveRetained") {\n\t\t\t\t\t\t\t\tsource.parent.entries.delete(source.name);\n\t\t\t\t\t\t\t\tmoveIncompletePlan.shift();',
+		);
+		expect(
+			validateWorkspaceMoveFailureBrowserFixture(retainedDelete),
+		).toContain(
+			"browser retained-move fixture must leave the source untouched and return only its fixed receipt",
+		);
+
+		const forgedCount = mutateBrowserFixture(
+			`const removedEntries = node.entries.delete("removed.txt")
+									? 1
+									: 0;`,
+			"const removedEntries = 1;",
+		);
+		expect(validateWorkspaceMoveFailureBrowserFixture(forgedCount)).toContain(
+			"browser partial-move fixture must delete removed.txt and derive removedEntries from that boolean result",
+		);
 	});
 });
 
