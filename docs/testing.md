@@ -70,6 +70,8 @@
 
 两个 E2E 命令都通过 Tauri 官方 `--config` flavor 合并 `src-tauri/tauri.e2e.conf.json`，只把完整主窗口替换为 `incognito: true` 版本；WKWebView 因而使用进程级非持久 data store，不读取或污染用户的生产 Workbench 布局、Local Storage、IndexedDB、cookie 与 cache。生产 `pnpm tauri:dev`/`pnpm tauri:build` 必须继续使用持久 data store；Harness 同时锁定两条 E2E 命令、overlay 闭集及两份窗口配置除 `incognito` 外完全一致。
 
+`tauri:dev:e2e` 不能作为电脑控制验收的取样对象，这是 2026-07-22 实测确认的结构性限制而非流程偏好：`tauri dev` 的窗口进程是 `cargo run` 直接执行的裸 Mach-O（无 `Info.plist`/`CFBundleIdentifier`，`lsappinfo` 显示 `bundleID=[ NULL ]`，不经 `open`/LaunchServices 注册），而桌面自动化的应用授权层依赖 LaunchServices/Spotlight 应用索引，因此无论以何种名称请求都无法识别或授权该窗口，与用户是否批准无关。debug `.app` bundle（`CFBundleIdentifier=com.plain.editor`）可被正常注册并弹出授权对话框。据此：电脑控制验收必须使用 debug `.app`；若磁盘上已有与当前 HEAD 完全对应的构建产物，应直接复用而不重复执行 `tauri:build:e2e`；验收全部通过后清理 `src-tauri/target` 等大体积构建产物。
+
 使用电脑控制操作实际应用，至少覆盖：
 
 1. 系统目录选择器打开 fixture。
