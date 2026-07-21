@@ -38,7 +38,7 @@ Plain 当前产品运行时固定为 Code OSS commit `5264f2156cbcd7aea5fd004d29
 
 完整 Code OSS Workbench 用全局 `unhandledrejection` listener 统一记录并 `preventDefault`；CodinGame 的固定 [`CustomWorkbench.registerErrorHandler`](https://github.com/CodinGame/monaco-vscode-api/blob/d8367168c23c9d0a9ba5bc84b8034e5435e9eb93/src/service-override/workbench.ts#L31-L37) 则明确不接管宿主的全局错误事件，所以该组合差异会把三个 detached observer 暴露成 Browser `pageerror`。Plain 不安装按消息匹配的全局吞错 listener，也不在测试中过滤 pageerror：固定 `view-common-service-override@35.0.1` patch 只把上述三个 observer 改为 resolve/reject 两端执行相同 cleanup；原始 task promise、rejection identity、Explorer catch/toast、取消和 progress timing 都保持不变。
 
-固定上游 `BulkEditService.apply` 在 rethrow 前会显式执行 `logService.error(err)`；这一条诊断不是 standalone notification fallback，也不是 unhandled rejection。Plain 保留每个失败操作恰好一条该日志，并在 E2E 中精确验证两条日志都只含固定去敏错误而不含 rootId 或 `ENTRY_NOT_FOUND`；禁止为了“控制台全绿”删除上游诊断。
+固定上游 `BulkEditService.apply` 在 rethrow 前会显式执行 `logService.error(err)`；固定 [`NotificationsAlerts`](https://github.com/microsoft/vscode/blob/5264f2156cbcd7aea5fd004d29eaa10209155d66/src/vs/workbench/browser/parts/notifications/notificationsAlerts.ts#L31-L45) 也明确要求每个 Error notification 再向 console 写一次完整错误消息。这两条诊断都不是 standalone notification fallback 或 unhandled rejection。Plain 保留每个失败操作恰好一条 BulkEdit 堆栈日志和一条 NotificationsAlerts 去敏消息，并在 E2E 中精确验证两次失败的有序四条日志都不含 rootId 或 `ENTRY_NOT_FOUND`；禁止为了“控制台全绿”删除上游诊断。
 
 ## 当前仓库事实
 
@@ -68,7 +68,7 @@ Plain 当前产品运行时固定为 Code OSS commit `5264f2156cbcd7aea5fd004d29
 - 两个调用之后都不存在目标 leaf，也不存在 `missing-file-parent`/`missing-folder-parent`；primary/secondary root 及各自原有 fixture 项仍在 Explorer。
 - 不出现 `workspace_write_file`、rename、copy、move、delete 或额外 create；针对两个 missing target 不出现 `workspace_stat`、`workspace_read_file` 或 `workspace_read_dir` 预检。
 - 失败不打开 `new.txt` editor，不选中虚构目标，不发布可见成功项。已知 `ENTRY_NOT_FOUND` 的 `rescan: false` 是当前合同，本项不制造 synthetic watcher refresh。
-- 官方 NotificationService 在 Workbench render 后只挂载一套通知 UI；每个 phase 只有一个 Workbench Error notification，清除后最终 toast 为零。全程无 DOM/native confirmation dialog 或 `pageerror`；console error 精确为每个 phase 一条固定 BulkEdit diagnostic，不出现 standalone notification fallback、Vite unhandled-rejection log 或其他错误。
+- 官方 NotificationService 在 Workbench render 后只挂载一套通知 UI；每个 phase 只有一个 Workbench Error notification，清除后最终 toast 为零。全程无 DOM/native confirmation dialog 或 `pageerror`；console error 精确为每个 phase 一条固定 BulkEdit diagnostic 后跟一条 NotificationsAlerts 去敏消息，不出现 standalone notification fallback、Vite unhandled-rejection log 或其他错误。
 - 原始 IPC 只含 opaque UUID v4 rootId 和 workspace-relative path；Browser fixture 的失败只能证明 Workbench/patch/provider/bridge 组合，不替代 Rust capability 或真实磁盘证据。
 
 ## 排除项
