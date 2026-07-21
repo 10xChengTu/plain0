@@ -11036,8 +11036,12 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 		];
 	}
 	const [installer] = installers;
-	const [pageParameter, modeParameter, scenarioParameter] =
-		installer.parameters;
+	const [
+		pageParameter,
+		modeParameter,
+		scenarioParameter,
+		deleteScenarioParameter,
+	] = installer.parameters;
 	const scenarioArrayType =
 		scenarioParameter?.type !== undefined &&
 		ts.isTypeOperatorNode(scenarioParameter.type) &&
@@ -11046,11 +11050,19 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 			? scenarioParameter.type.type
 			: undefined;
 	const scenarioElementType = scenarioArrayType?.elementType;
+	const deleteScenarioArrayType =
+		deleteScenarioParameter?.type !== undefined &&
+		ts.isTypeOperatorNode(deleteScenarioParameter.type) &&
+		deleteScenarioParameter.type.operator === ts.SyntaxKind.ReadonlyKeyword &&
+		ts.isArrayTypeNode(deleteScenarioParameter.type.type)
+			? deleteScenarioParameter.type.type
+			: undefined;
+	const deleteScenarioElementType = deleteScenarioArrayType?.elementType;
 	const returnType = installer.type;
 	const signatureIsExact =
 		installer.modifiers?.length === 1 &&
 		installer.modifiers[0].kind === ts.SyntaxKind.AsyncKeyword &&
-		installer.parameters.length === 3 &&
+		installer.parameters.length === 4 &&
 		pageParameter !== undefined &&
 		ts.isIdentifier(pageParameter.name) &&
 		pageParameter.name.text === "page" &&
@@ -11073,6 +11085,18 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 		scenarioParameter.initializer !== undefined &&
 		ts.isArrayLiteralExpression(scenarioParameter.initializer) &&
 		scenarioParameter.initializer.elements.length === 0 &&
+		deleteScenarioParameter !== undefined &&
+		ts.isIdentifier(deleteScenarioParameter.name) &&
+		deleteScenarioParameter.name.text === "deleteIncompleteScenarios" &&
+		deleteScenarioElementType !== undefined &&
+		ts.isTypeReferenceNode(deleteScenarioElementType) &&
+		ts.isIdentifier(deleteScenarioElementType.typeName) &&
+		deleteScenarioElementType.typeName.text ===
+			"TestMultiRootDeleteIncompleteScenario" &&
+		deleteScenarioElementType.typeArguments === undefined &&
+		deleteScenarioParameter.initializer !== undefined &&
+		ts.isArrayLiteralExpression(deleteScenarioParameter.initializer) &&
+		deleteScenarioParameter.initializer.elements.length === 0 &&
 		returnType !== undefined &&
 		ts.isTypeReferenceNode(returnType) &&
 		ts.isIdentifier(returnType.typeName) &&
@@ -11124,6 +11148,10 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 			name: "moveIncompleteScenarios",
 			property: "moveIncompleteScenarios",
 		},
+		{
+			name: "deleteIncompleteScenarios",
+			property: "deleteIncompleteScenarios",
+		},
 		{ name: "workspaceId", property: "workspaceId" },
 		{ name: "primaryRootId", property: "primaryRootId" },
 		{ name: "secondaryRootId", property: "secondaryRootId" },
@@ -11133,7 +11161,7 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 		initData !== undefined &&
 		ts.isObjectLiteralExpression(initData) &&
 		normalizedText(initData) ===
-			"{mode,moveIncompleteScenarios,workspaceId:nativeWorkspaceId,primaryRootId:nativeRootId,secondaryRootId:nativeSecondaryRootId,}";
+			"{mode,moveIncompleteScenarios,deleteIncompleteScenarios,workspaceId:nativeWorkspaceId,primaryRootId:nativeRootId,secondaryRootId:nativeSecondaryRootId,}";
 	const scenarioReferenceCount = countIdentifier(
 		installer,
 		"moveIncompleteScenarios",
@@ -11260,6 +11288,12 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 		callback.body,
 		"moveIncompleteScenarios",
 	);
+	// `forbiddenWindowControls` only catches receivers that are literally
+	// `window`/`testWindow` after unwrapping property chains; it is kept as
+	// defense in depth, but `validateWorkspaceBrowserFixtureWindowAuthority`
+	// is what actually closes the window-alias gap (see that function's
+	// JSDoc) by locking down every way the callback can reach the page
+	// window at all.
 	const forbiddenWindowControls = collect(callback.body, (node) => {
 		if (
 			!ts.isPropertyAccessExpression(node) &&
@@ -11298,6 +11332,827 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 		failures.push(
 			"browser move-failure fixture must not accept raw receipt fields or expose a window mutation control",
 		);
+	}
+
+	const peekDeclarations = collect(
+		callback.body,
+		(node) =>
+			ts.isVariableDeclaration(node) &&
+			ts.isIdentifier(node.name) &&
+			node.name.text === "plannedIncomplete",
+	);
+	const peekStatementIsExact =
+		peekDeclarations.length === 1 &&
+		normalizedText(peekDeclarations[0].parent.parent) ===
+			"constplannedIncomplete=moveIncompletePlan[0];";
+	if (!peekStatementIsExact) {
+		failures.push(
+			"browser move-failure fixture must peek moveIncompletePlan[0] through one audited statement",
+		);
+	}
+
+	const movePlanAuditedRanges = [
+		planDeclarations[0]?.parent?.parent,
+		peekDeclarations[0]?.parent?.parent,
+		retainedBranches[0],
+		partialBranches[0],
+	]
+		.filter((node) => node !== undefined)
+		.map((node) => [node.getStart(sourceFile), node.getEnd()]);
+	const movePlanReferenceNodes = collect(
+		callback.body,
+		(node) => ts.isIdentifier(node) && node.text === "moveIncompletePlan",
+	);
+	const movePlanReferencesOutOfRange = movePlanReferenceNodes.some(
+		(node) =>
+			!movePlanAuditedRanges.some(
+				([start, end]) =>
+					node.getStart(sourceFile) >= start && node.getEnd() <= end,
+			),
+	);
+	if (movePlanAuditedRanges.length !== 4 || movePlanReferencesOutOfRange) {
+		failures.push(
+			"browser move-failure fixture must keep moveIncompletePlan references inside its audited plan, peek and terminal branch statements",
+		);
+	}
+
+	return [...new Set(failures)];
+}
+
+/**
+ * Locks the browser-only retained/partial permanent delete fixture to two
+ * local scenarios. The fixture may shape only the addInitScript closure that
+ * `validateWorkspaceMoveFailureBrowserFixture` also audits; production code
+ * and the page window never receive a mutable failure-plan control surface.
+ */
+export function validateWorkspaceDeleteFailureBrowserFixture(source) {
+	const failures = [];
+	const sourceFile = ts.createSourceFile(
+		"tests/browser/workspace.spec.ts",
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	const normalizedText = (node) => {
+		if (node === undefined) {
+			return undefined;
+		}
+		const scanner = ts.createScanner(
+			ts.ScriptTarget.Latest,
+			true,
+			ts.LanguageVariant.Standard,
+			node.getText(sourceFile),
+		);
+		let compact = "";
+		for (
+			let token = scanner.scan();
+			token !== ts.SyntaxKind.EndOfFileToken;
+			token = scanner.scan()
+		) {
+			compact += scanner.getTokenText();
+		}
+		return compact;
+	};
+	const collect = (root, predicate) => {
+		const matches = [];
+		function visit(node) {
+			if (predicate(node)) {
+				matches.push(node);
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(root);
+		return matches;
+	};
+	const countIdentifier = (root, name) =>
+		collect(root, (node) => ts.isIdentifier(node) && node.text === name).length;
+
+	const scenarioAliases = sourceFile.statements.filter(
+		(statement) =>
+			ts.isTypeAliasDeclaration(statement) &&
+			statement.name.text === "TestMultiRootDeleteIncompleteScenario",
+	);
+	let scenarioAliasIsClosed = false;
+	if (scenarioAliases.length === 1) {
+		const [alias] = scenarioAliases;
+		const members = ts.isUnionTypeNode(alias.type) ? alias.type.types : [];
+		const values = members.map((member) =>
+			ts.isLiteralTypeNode(member) && ts.isStringLiteral(member.literal)
+				? member.literal.text
+				: undefined,
+		);
+		scenarioAliasIsClosed =
+			(alias.modifiers?.length ?? 0) === 0 &&
+			members.length === 2 &&
+			sameArray([...values].sort(), ["deletePartial", "deleteRetained"]);
+	}
+	if (!scenarioAliasIsClosed) {
+		failures.push(
+			"browser delete-failure fixture fourth argument must remain the closed deleteRetained/deletePartial scenario set",
+		);
+	}
+
+	const installers = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "installMultiRootNativeIpcMock",
+	);
+	if (installers.length !== 1) {
+		return [
+			...failures,
+			"browser delete-failure scenarios must remain local to one audited multi-root addInitScript fixture",
+		];
+	}
+	const [installer] = installers;
+	const [, , , deleteScenarioParameter] = installer.parameters;
+	const deleteScenarioArrayType =
+		deleteScenarioParameter?.type !== undefined &&
+		ts.isTypeOperatorNode(deleteScenarioParameter.type) &&
+		deleteScenarioParameter.type.operator === ts.SyntaxKind.ReadonlyKeyword &&
+		ts.isArrayTypeNode(deleteScenarioParameter.type.type)
+			? deleteScenarioParameter.type.type
+			: undefined;
+	const deleteScenarioElementType = deleteScenarioArrayType?.elementType;
+	const signatureIsExact =
+		installer.parameters.length === 4 &&
+		deleteScenarioParameter !== undefined &&
+		ts.isIdentifier(deleteScenarioParameter.name) &&
+		deleteScenarioParameter.name.text === "deleteIncompleteScenarios" &&
+		deleteScenarioElementType !== undefined &&
+		ts.isTypeReferenceNode(deleteScenarioElementType) &&
+		ts.isIdentifier(deleteScenarioElementType.typeName) &&
+		deleteScenarioElementType.typeName.text ===
+			"TestMultiRootDeleteIncompleteScenario" &&
+		deleteScenarioElementType.typeArguments === undefined &&
+		deleteScenarioParameter.initializer !== undefined &&
+		ts.isArrayLiteralExpression(deleteScenarioParameter.initializer) &&
+		deleteScenarioParameter.initializer.elements.length === 0;
+	if (!signatureIsExact) {
+		failures.push(
+			"browser delete-failure fixture fourth argument must remain the closed deleteRetained/deletePartial scenario set",
+		);
+	}
+
+	const [onlyStatement] = installer.body?.statements ?? [];
+	const awaited =
+		installer.body?.statements.length === 1 &&
+		onlyStatement !== undefined &&
+		ts.isExpressionStatement(onlyStatement) &&
+		ts.isAwaitExpression(onlyStatement.expression)
+			? onlyStatement.expression.expression
+			: undefined;
+	const addInitScriptCall =
+		awaited !== undefined &&
+		ts.isCallExpression(awaited) &&
+		ts.isPropertyAccessExpression(awaited.expression) &&
+		ts.isIdentifier(awaited.expression.expression) &&
+		awaited.expression.expression.text === "page" &&
+		awaited.expression.name.text === "addInitScript" &&
+		awaited.arguments.length === 2
+			? awaited
+			: undefined;
+	const callback =
+		addInitScriptCall !== undefined &&
+		ts.isArrowFunction(addInitScriptCall.arguments[0])
+			? addInitScriptCall.arguments[0]
+			: undefined;
+	const callbackParameter = callback?.parameters[0];
+	const callbackBindings =
+		callback?.parameters.length === 1 &&
+		callbackParameter !== undefined &&
+		ts.isObjectBindingPattern(callbackParameter.name)
+			? callbackParameter.name.elements.map((element) => ({
+					name: typeScriptStaticName(element.name),
+					property: typeScriptStaticName(element.propertyName ?? element.name),
+				}))
+			: [];
+	const callbackBindingsAreExact = sameArray(callbackBindings, [
+		{ name: "mode", property: "mode" },
+		{
+			name: "moveIncompleteScenarios",
+			property: "moveIncompleteScenarios",
+		},
+		{
+			name: "deleteIncompleteScenarios",
+			property: "deleteIncompleteScenarios",
+		},
+		{ name: "workspaceId", property: "workspaceId" },
+		{ name: "primaryRootId", property: "primaryRootId" },
+		{ name: "secondaryRootId", property: "secondaryRootId" },
+	]);
+	const initData = addInitScriptCall?.arguments[1];
+	const initDataIsExact =
+		initData !== undefined &&
+		ts.isObjectLiteralExpression(initData) &&
+		normalizedText(initData) ===
+			"{mode,moveIncompleteScenarios,deleteIncompleteScenarios,workspaceId:nativeWorkspaceId,primaryRootId:nativeRootId,secondaryRootId:nativeSecondaryRootId,}";
+	const scenarioReferenceCount = countIdentifier(
+		installer,
+		"deleteIncompleteScenarios",
+	);
+	if (
+		callback === undefined ||
+		!ts.isBlock(callback.body) ||
+		!callbackBindingsAreExact ||
+		!initDataIsExact ||
+		scenarioReferenceCount !== 6
+	) {
+		failures.push(
+			"browser delete-failure scenarios must remain local to one audited multi-root addInitScript fixture",
+		);
+	}
+	if (callback === undefined || !ts.isBlock(callback.body)) {
+		return [...new Set(failures)];
+	}
+
+	const planDeclarations = collect(
+		callback.body,
+		(node) =>
+			ts.isVariableDeclaration(node) &&
+			ts.isIdentifier(node.name) &&
+			node.name.text === "deleteIncompletePlan",
+	);
+	const retainedTreeInitializers = collect(
+		callback.body,
+		(node) =>
+			ts.isIfStatement(node) &&
+			normalizedText(node) ===
+				'if(deleteIncompleteScenarios.includes("deleteRetained")){primaryEntries.push(["delete-retained.txt",file("Retain this delete target.\\n"),]);}',
+	);
+	const partialTreeInitializers = collect(
+		callback.body,
+		(node) =>
+			ts.isIfStatement(node) &&
+			normalizedText(node) ===
+				'if(deleteIncompleteScenarios.includes("deletePartial")){secondaryEntries.push(["delete-partial",directory([["removed.txt",file("Remove this delete child.\\n")],["kept.txt",file("Keep this delete child.\\n")],]),]);}',
+	);
+	// The shared fixture also seeds a movePartial secondaryEntries branch for
+	// validateWorkspaceMoveFailureBrowserFixture; this validator locks it too
+	// because the tree-seed reference range lock below audits every
+	// primaryEntries/secondaryEntries reference in the whole shared callback,
+	// not only the delete-related ones.
+	const movePartialTreeInitializers = collect(
+		callback.body,
+		(node) =>
+			ts.isIfStatement(node) &&
+			normalizedText(node) ===
+				'if(moveIncompleteScenarios.includes("movePartial")){secondaryEntries.push(["move-partial",directory([["removed.txt",file("Remove this source child.\\n")],["kept.txt",file("Keep this source child.\\n")],]),]);}',
+	);
+	const primaryEntriesDeclarations = collect(
+		callback.body,
+		(node) =>
+			ts.isVariableDeclaration(node) &&
+			ts.isIdentifier(node.name) &&
+			node.name.text === "primaryEntries",
+	);
+	const secondaryEntriesDeclarations = collect(
+		callback.body,
+		(node) =>
+			ts.isVariableDeclaration(node) &&
+			ts.isIdentifier(node.name) &&
+			node.name.text === "secondaryEntries",
+	);
+	const treesDeclarations = collect(
+		callback.body,
+		(node) =>
+			ts.isVariableDeclaration(node) &&
+			ts.isIdentifier(node.name) &&
+			node.name.text === "trees",
+	);
+	if (
+		planDeclarations.length !== 1 ||
+		normalizedText(planDeclarations[0]) !==
+			"deleteIncompletePlan=[...deleteIncompleteScenarios]" ||
+		retainedTreeInitializers.length !== 1 ||
+		partialTreeInitializers.length !== 1 ||
+		movePartialTreeInitializers.length !== 1 ||
+		primaryEntriesDeclarations.length !== 1 ||
+		secondaryEntriesDeclarations.length !== 1 ||
+		treesDeclarations.length !== 1 ||
+		normalizedText(primaryEntriesDeclarations[0].parent.parent) !==
+			'constprimaryEntries:Array<readonly[string,MockNode]>=[["README.md",file("# Primary workspace\\n")],["copy-source.txt",file("Copy across roots.\\n")],["src",directory([])],];' ||
+		normalizedText(secondaryEntriesDeclarations[0].parent.parent) !==
+			'constsecondaryEntries:Array<readonly[string,MockNode]>=[["move-source.txt",file("Move across roots.\\n")],["notes.txt",file("Secondary workspace\\n")],["packages",directory([])],];' ||
+		normalizedText(treesDeclarations[0].parent.parent) !==
+			"consttrees=newMap<string,MockDirectory>([[primaryRootId,directory(primaryEntries)],[secondaryRootId,directory(secondaryEntries)],]);"
+	) {
+		failures.push(
+			"browser delete-failure scenarios must remain local to one audited multi-root addInitScript fixture",
+		);
+	}
+
+	const treeSeedAuditedRanges = [
+		primaryEntriesDeclarations[0]?.parent?.parent,
+		secondaryEntriesDeclarations[0]?.parent?.parent,
+		movePartialTreeInitializers[0],
+		retainedTreeInitializers[0],
+		partialTreeInitializers[0],
+		treesDeclarations[0]?.parent?.parent,
+	]
+		.filter((node) => node !== undefined)
+		.map((node) => [node.getStart(sourceFile), node.getEnd()]);
+	const treeSeedReferenceNodes = collect(
+		callback.body,
+		(node) =>
+			ts.isIdentifier(node) &&
+			(node.text === "primaryEntries" || node.text === "secondaryEntries"),
+	);
+	const treeSeedReferencesOutOfRange = treeSeedReferenceNodes.some(
+		(node) =>
+			!treeSeedAuditedRanges.some(
+				([start, end]) =>
+					node.getStart(sourceFile) >= start && node.getEnd() <= end,
+			),
+	);
+	if (treeSeedAuditedRanges.length !== 6 || treeSeedReferencesOutOfRange) {
+		failures.push(
+			"browser delete-failure fixture must keep primaryEntries and secondaryEntries references inside their audited seed and tree-construction statements",
+		);
+	}
+
+	const commitCases = collect(
+		callback.body,
+		(node) =>
+			ts.isCaseClause(node) &&
+			ts.isStringLiteral(node.expression) &&
+			node.expression.text === "workspace_commit_delete_entry",
+	);
+	if (commitCases.length !== 1) {
+		return [
+			...new Set([
+				...failures,
+				"browser delete-failure fixture must retain exact per-entry request validation",
+			]),
+		];
+	}
+	const [commitCase] = commitCases;
+	const targetDeclarations = collect(
+		commitCase,
+		(node) =>
+			ts.isVariableDeclaration(node) &&
+			ts.isIdentifier(node.name) &&
+			node.name.text === "target",
+	);
+	const ifStatements = collect(commitCase, (node) => ts.isIfStatement(node));
+	const retainedRequest = ifStatements.filter(
+		(node) =>
+			normalizedText(node) ===
+			'if(plannedDeleteIncomplete==="deleteRetained"&&(activeDelete.rootId!==primaryRootId||activeDelete.relativePath!=="delete-retained.txt")){thrownewError("Unexpected retained delete browser test request.",);}',
+	);
+	const partialRequest = ifStatements.filter(
+		(node) =>
+			normalizedText(node) ===
+			'if(plannedDeleteIncomplete==="deletePartial"&&(activeDelete.rootId!==secondaryRootId||activeDelete.relativePath!=="delete-partial")){thrownewError("Unexpected partial delete browser test request.",);}',
+	);
+	if (retainedRequest.length !== 1 || partialRequest.length !== 1) {
+		failures.push(
+			"browser delete-failure fixture must retain exact per-entry request validation",
+		);
+	}
+
+	const retainedBranches = ifStatements.filter(
+		(node) =>
+			normalizedText(node) ===
+			'if(plannedDeleteIncomplete==="deleteRetained"){deleteIncompletePlan.shift();activeDelete=undefined;return{status:"entryRetained",reason:"deleteFailed"};}',
+	);
+	const partialBranches = ifStatements.filter(
+		(node) =>
+			normalizedText(node) ===
+			'if(plannedDeleteIncomplete==="deletePartial"){constnode=target.parent.entries.get(target.name);if(node?.kind!=="directory"){throwentryTypeMismatch();}constremovedEntries=node.entries.delete("removed.txt")?1:0;if(removedEntries!==1||!node.entries.has("kept.txt")){thrownewError("Invalid partial delete browser test target tree.",);}deleteIncompletePlan.shift();activeDelete=undefined;return{status:"entryPartiallyDeleted",reason:"deleteFailed",removedEntries,};}',
+	);
+	const normalDeleteStatements = ifStatements.filter(
+		(node) =>
+			normalizedText(node) ===
+			"if(!target.parent.entries.delete(target.name)){throwentryNotFound();}",
+	);
+	if (retainedBranches.length !== 1) {
+		failures.push(
+			"browser retained-delete fixture must leave the tree untouched and return only its fixed receipt",
+		);
+	}
+	if (partialBranches.length !== 1) {
+		failures.push(
+			"browser partial-delete fixture must delete removed.txt and derive removedEntries from that boolean result",
+		);
+	}
+	if (
+		retainedRequest.length !== 1 ||
+		partialRequest.length !== 1 ||
+		retainedBranches.length !== 1 ||
+		partialBranches.length !== 1 ||
+		normalDeleteStatements.length !== 1 ||
+		retainedRequest[0].getStart(sourceFile) >=
+			partialRequest[0].getStart(sourceFile) ||
+		partialRequest[0].getStart(sourceFile) >=
+			retainedBranches[0].getStart(sourceFile) ||
+		retainedBranches[0].getStart(sourceFile) >=
+			partialBranches[0].getStart(sourceFile) ||
+		partialBranches[0].getStart(sourceFile) >=
+			normalDeleteStatements[0].getStart(sourceFile)
+	) {
+		failures.push(
+			"browser delete-failure fixture must invalidate the active batch before its ordered terminal scenario branches",
+		);
+	}
+
+	const targetAuditedRanges = [
+		targetDeclarations[0]?.parent?.parent,
+		partialBranches[0],
+		normalDeleteStatements[0],
+	]
+		.filter((node) => node !== undefined)
+		.map((node) => [node.getStart(sourceFile), node.getEnd()]);
+	const targetReferenceNodes = collect(
+		commitCase,
+		(node) => ts.isIdentifier(node) && node.text === "target",
+	);
+	const targetReferencesOutOfRange = targetReferenceNodes.some(
+		(node) =>
+			!targetAuditedRanges.some(
+				([start, end]) =>
+					node.getStart(sourceFile) >= start && node.getEnd() <= end,
+			),
+	);
+	if (
+		targetDeclarations.length !== 1 ||
+		normalizedText(targetDeclarations[0].parent.parent) !==
+			"consttarget=resolveParent(activeDelete.rootId,activeDelete.relativePath,);" ||
+		targetAuditedRanges.length !== 3 ||
+		targetReferencesOutOfRange
+	) {
+		failures.push(
+			"browser delete-failure fixture must keep commit-case target references inside its audited declaration and terminal branch statements",
+		);
+	}
+
+	const peekDeclarations = collect(
+		callback.body,
+		(node) =>
+			ts.isVariableDeclaration(node) &&
+			ts.isIdentifier(node.name) &&
+			node.name.text === "plannedDeleteIncomplete",
+	);
+	const peekStatementIsExact =
+		peekDeclarations.length === 1 &&
+		normalizedText(peekDeclarations[0].parent.parent) ===
+			"constplannedDeleteIncomplete=deleteIncompletePlan[0];";
+	if (!peekStatementIsExact) {
+		failures.push(
+			"browser delete-failure fixture must peek deleteIncompletePlan[0] through one audited statement",
+		);
+	}
+
+	const deletePlanAuditedRanges = [
+		planDeclarations[0]?.parent?.parent,
+		peekDeclarations[0]?.parent?.parent,
+		retainedBranches[0],
+		partialBranches[0],
+	]
+		.filter((node) => node !== undefined)
+		.map((node) => [node.getStart(sourceFile), node.getEnd()]);
+	const deletePlanReferenceNodes = collect(
+		callback.body,
+		(node) => ts.isIdentifier(node) && node.text === "deleteIncompletePlan",
+	);
+	const deletePlanReferencesOutOfRange = deletePlanReferenceNodes.some(
+		(node) =>
+			!deletePlanAuditedRanges.some(
+				([start, end]) =>
+					node.getStart(sourceFile) >= start && node.getEnd() <= end,
+			),
+	);
+	if (deletePlanAuditedRanges.length !== 4 || deletePlanReferencesOutOfRange) {
+		failures.push(
+			"browser delete-failure fixture must keep deleteIncompletePlan references inside its audited plan, peek and terminal branch statements",
+		);
+	}
+
+	const deletePlanReferences = countIdentifier(
+		callback.body,
+		"deleteIncompletePlan",
+	);
+	const callbackScenarioReferences = countIdentifier(
+		callback.body,
+		"deleteIncompleteScenarios",
+	);
+	// Kept as defense in depth; see the matching comment in
+	// validateWorkspaceMoveFailureBrowserFixture and the JSDoc on
+	// validateWorkspaceBrowserFixtureWindowAuthority, which is what actually
+	// closes the window-alias gap this check alone cannot catch.
+	const forbiddenWindowControls = collect(callback.body, (node) => {
+		if (
+			!ts.isPropertyAccessExpression(node) &&
+			!ts.isElementAccessExpression(node)
+		) {
+			return false;
+		}
+		const name = ts.isPropertyAccessExpression(node)
+			? node.name.text
+			: typeScriptStaticName(node.argumentExpression);
+		if (
+			name === undefined ||
+			!/(?:delete.*(?:failure|incomplete|scenario|status|reason|count)|(?:failure|incomplete|scenario).*delete)/iu.test(
+				name,
+			)
+		) {
+			return false;
+		}
+		let receiver = node.expression;
+		while (
+			ts.isPropertyAccessExpression(receiver) ||
+			ts.isElementAccessExpression(receiver)
+		) {
+			receiver = receiver.expression;
+		}
+		return (
+			ts.isIdentifier(receiver) &&
+			(receiver.text === "window" || receiver.text === "testWindow")
+		);
+	});
+	if (
+		deletePlanReferences !== 4 ||
+		callbackScenarioReferences !== 3 ||
+		forbiddenWindowControls.length !== 0
+	) {
+		failures.push(
+			"browser delete-failure fixture must not accept raw receipt fields or expose a window mutation control",
+		);
+	}
+
+	return [...new Set(failures)];
+}
+
+/**
+ * Locks the browser-only retained/partial move/delete fixture so the page
+ * window can only be reached through the single audited `testWindow`
+ * declaration inside `installMultiRootNativeIpcMock`'s addInitScript
+ * callback.
+ *
+ * `validateWorkspaceMoveFailureBrowserFixture` and
+ * `validateWorkspaceDeleteFailureBrowserFixture` already lock the
+ * failure-plan shapes inside that same callback, but their
+ * `forbiddenWindowControls` check only rejects property accesses whose
+ * receiver is literally `window` or `testWindow` after unwrapping property
+ * chains. An alias such as `const winAlias = window as unknown as
+ * Record<string, unknown>;` followed by
+ * `winAlias.__PLAIN_TEST_DELETE_FAILURE__ = (next) => { ... };` never
+ * mentions `window`/`testWindow` as a receiver, so it slips through
+ * untouched. This validator closes that gap directly: every value-position
+ * reference to a well-known way of reaching the global object (`window`,
+ * `globalThis`, `self`, `top`, `frames`, `document`, `eval`, `Function`)
+ * must be the single audited `const testWindow = window as unknown as
+ * Window & {...};` declaration, and every subsequent `testWindow` reference
+ * must live in one of the fixed statements that install its exposed test
+ * surface (no new alias, no new property).
+ *
+ * `parent` is deliberately left out of the forbidden-name set: the fixture
+ * legitimately shadows it with `const parent = resolveNode(...)` inside the
+ * local `resolveParent` helper, and every other occurrence of `parent` in
+ * the callback is the `.parent` property name (a non-value position this
+ * validator already ignores). This validator does no scope analysis, so a
+ * name with a legitimate local shadow cannot be added to a closed-world
+ * list without false positives; `window.parent`/`self.parent`-style access
+ * is still caught because `window` (and every other listed name) may only
+ * appear once, in the audited declaration.
+ *
+ * The `testWindow.__TAURI_INTERNALS__ = {...}` statement is recognised
+ * structurally (assignment target only) rather than by exact source text:
+ * its right-hand object literal is the entire IPC command switch, which
+ * contains a template literal with a `${command}` substitution, and the
+ * plain `ts.createScanner` token loop used for `normalizedText` elsewhere in
+ * this file does not call `reScanTemplateToken`, so it mis-tokenizes
+ * anything after that substitution as one runaway token. Pinning that
+ * mis-tokenized text would lock in a scanner artifact instead of the actual
+ * source, and would break on any unrelated reformatting inside the switch.
+ * The switch's own contents (case shapes, ordering, terminal branches) are
+ * independently locked by `validateWorkspaceMoveFailureBrowserFixture` and
+ * `validateWorkspaceDeleteFailureBrowserFixture`, so recognising this one
+ * statement by its assignment shape does not weaken coverage of this
+ * validator's actual concern: window/testWindow reachability.
+ */
+export function validateWorkspaceBrowserFixtureWindowAuthority(source) {
+	const FAILURE_MESSAGE =
+		"browser workspace fixture must reach the page window only through the audited testWindow surface";
+	const sourceFile = ts.createSourceFile(
+		"tests/browser/workspace.spec.ts",
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	const normalizedText = (node) => {
+		if (node === undefined) {
+			return undefined;
+		}
+		const scanner = ts.createScanner(
+			ts.ScriptTarget.Latest,
+			true,
+			ts.LanguageVariant.Standard,
+			node.getText(sourceFile),
+		);
+		let compact = "";
+		for (
+			let token = scanner.scan();
+			token !== ts.SyntaxKind.EndOfFileToken;
+			token = scanner.scan()
+		) {
+			compact += scanner.getTokenText();
+		}
+		return compact;
+	};
+	const collect = (root, predicate) => {
+		const matches = [];
+		function visit(node) {
+			if (predicate(node)) {
+				matches.push(node);
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(root);
+		return matches;
+	};
+
+	const installers = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "installMultiRootNativeIpcMock",
+	);
+	if (installers.length !== 1) {
+		return [FAILURE_MESSAGE];
+	}
+	const [installer] = installers;
+	const [onlyStatement] = installer.body?.statements ?? [];
+	const awaited =
+		installer.body?.statements.length === 1 &&
+		onlyStatement !== undefined &&
+		ts.isExpressionStatement(onlyStatement) &&
+		ts.isAwaitExpression(onlyStatement.expression)
+			? onlyStatement.expression.expression
+			: undefined;
+	const addInitScriptCall =
+		awaited !== undefined &&
+		ts.isCallExpression(awaited) &&
+		ts.isPropertyAccessExpression(awaited.expression) &&
+		ts.isIdentifier(awaited.expression.expression) &&
+		awaited.expression.expression.text === "page" &&
+		awaited.expression.name.text === "addInitScript" &&
+		awaited.arguments.length === 2
+			? awaited
+			: undefined;
+	const callback =
+		addInitScriptCall !== undefined &&
+		ts.isArrowFunction(addInitScriptCall.arguments[0])
+			? addInitScriptCall.arguments[0]
+			: undefined;
+	if (callback === undefined || !ts.isBlock(callback.body)) {
+		return [FAILURE_MESSAGE];
+	}
+	const body = callback.body;
+	const failures = [];
+
+	const isValuePositionIdentifier = (node) => {
+		const parent = node.parent;
+		if (parent === undefined) {
+			return true;
+		}
+		if (ts.isPropertyAccessExpression(parent) && parent.name === node) {
+			return false;
+		}
+		if (
+			(ts.isPropertySignature(parent) ||
+				ts.isPropertyAssignment(parent) ||
+				ts.isMethodSignature(parent) ||
+				ts.isMethodDeclaration(parent) ||
+				ts.isPropertyDeclaration(parent)) &&
+			parent.name === node
+		) {
+			return false;
+		}
+		if (
+			(ts.isBindingElement(parent) ||
+				ts.isParameter(parent) ||
+				ts.isVariableDeclaration(parent)) &&
+			parent.name === node
+		) {
+			return false;
+		}
+		if (ts.isBindingElement(parent) && parent.propertyName === node) {
+			return false;
+		}
+		if (ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent)) {
+			return false;
+		}
+		if (ts.isQualifiedName(parent) && parent.right === node) {
+			return false;
+		}
+		if (ts.isTypeReferenceNode(parent) || ts.isTypeQueryNode(parent)) {
+			return false;
+		}
+		if (
+			ts.isLabeledStatement(parent) ||
+			ts.isBreakOrContinueStatement(parent)
+		) {
+			return false;
+		}
+		return true;
+	};
+
+	const FORBIDDEN_GLOBAL_NAMES = new Set([
+		"window",
+		"globalThis",
+		"self",
+		"top",
+		"frames",
+		"document",
+		"eval",
+		"Function",
+	]);
+	const globalReferences = collect(
+		body,
+		(node) =>
+			ts.isIdentifier(node) &&
+			FORBIDDEN_GLOBAL_NAMES.has(node.text) &&
+			isValuePositionIdentifier(node),
+	);
+	const windowReferences = globalReferences.filter(
+		(node) => node.text === "window",
+	);
+	const otherGlobalReferences = globalReferences.filter(
+		(node) => node.text !== "window",
+	);
+	if (otherGlobalReferences.length !== 0) {
+		failures.push(FAILURE_MESSAGE);
+	}
+
+	const unwrapAsExpressions = (node) => {
+		let current = node;
+		while (
+			ts.isAsExpression(current.parent) &&
+			current.parent.expression === current
+		) {
+			current = current.parent;
+		}
+		return current;
+	};
+	let windowDeclarationIsAudited = false;
+	if (windowReferences.length === 1) {
+		const [windowReference] = windowReferences;
+		const outer = unwrapAsExpressions(windowReference);
+		windowDeclarationIsAudited =
+			outer !== windowReference &&
+			ts.isVariableDeclaration(outer.parent) &&
+			outer.parent.initializer === outer &&
+			ts.isIdentifier(outer.parent.name) &&
+			outer.parent.name.text === "testWindow";
+	}
+	if (windowReferences.length !== 1 || !windowDeclarationIsAudited) {
+		failures.push(FAILURE_MESSAGE);
+	}
+
+	const ALLOWED_TEST_WINDOW_STATEMENTS = new Set([
+		"consttestWindow=windowasunknownasWindow&{__PLAIN_TEST_TAURI_CALLS__:typeofcalls;__PLAIN_TEST_MULTI_ROOT_VERSION_TRANSITIONS__:typeofversionTransitions;__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__:typeofwatchExchanges;__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGE_TIMINGS__:typeofwatchExchangeTimings;__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_TIMINGS__:typeofexternalCreateTimings;__PLAIN_TEST_MULTI_ROOT_EMIT_WAKE__():number;__PLAIN_TEST_MULTI_ROOT_WATCH_LISTENER_COUNT__():number;__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__(rootId:string,name:string,emitWake:boolean,):number;__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_AFTER_NEXT_SYNC__(rootId:string,name:string,emitWake:boolean,):Promise<number>;__TAURI_EVENT_PLUGIN_INTERNALS__:{unregisterListener():void;};__TAURI_INTERNALS__:{invoke(command:string,args?:Record<string,unknown>|Uint8Array,):Promise<unknown>;transformCallback(callback?:(payload:unknown)=>void,once?:boolean,):number;unregisterCallback(callbackId:number):void;};};",
+		"testWindow.__PLAIN_TEST_TAURI_CALLS__=calls;",
+		"testWindow.__PLAIN_TEST_MULTI_ROOT_VERSION_TRANSITIONS__=versionTransitions;",
+		"testWindow.__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__=watchExchanges;",
+		"testWindow.__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGE_TIMINGS__=watchExchangeTimings;",
+		"testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_TIMINGS__=externalCreateTimings;",
+		"testWindow.__PLAIN_TEST_MULTI_ROOT_EMIT_WAKE__=emitWorkspaceWatchWake;",
+		'testWindow.__PLAIN_TEST_MULTI_ROOT_WATCH_LISTENER_COUNT__=()=>[...eventHandlers.values()].filter(({event})=>event==="plain://workspace-watch-wake",).length;',
+		"testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__=externalCreate;",
+		'testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_AFTER_NEXT_SYNC__=(rootId,name,emitWake,)=>{if(deferredExternalCreate!==undefined){thrownewError("A multi-root browser test change is already queued.",);}if(!/^[A-Za-z0-9._-]+$/u.test(name)){thrownewTypeError("Invalid multi-root browser test entry.");}if(typeofemitWake!=="boolean"){thrownewTypeError("Invalid multi-root browser test wake mode.");}returnnewPromise<number>((resolve,reject)=>{deferredExternalCreate=Object.freeze({rootId,name,emitWake,resolve,reject,});});};',
+		"testWindow.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener(){},};",
+	]);
+	const isTauriInternalsAssignmentStatement = (statement) =>
+		ts.isExpressionStatement(statement) &&
+		ts.isBinaryExpression(statement.expression) &&
+		statement.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+		ts.isPropertyAccessExpression(statement.expression.left) &&
+		ts.isIdentifier(statement.expression.left.expression) &&
+		statement.expression.left.expression.text === "testWindow" &&
+		statement.expression.left.name.text === "__TAURI_INTERNALS__" &&
+		ts.isObjectLiteralExpression(statement.expression.right);
+
+	const testWindowReferences = collect(
+		body,
+		(node) => ts.isIdentifier(node) && node.text === "testWindow",
+	);
+	let tauriInternalsAssignmentReferences = 0;
+	for (const reference of testWindowReferences) {
+		let statement = reference;
+		while (statement.parent !== body) {
+			statement = statement.parent;
+		}
+		if (isTauriInternalsAssignmentStatement(statement)) {
+			tauriInternalsAssignmentReferences += 1;
+			continue;
+		}
+		if (!ALLOWED_TEST_WINDOW_STATEMENTS.has(normalizedText(statement))) {
+			failures.push(FAILURE_MESSAGE);
+		}
+	}
+	if (tauriInternalsAssignmentReferences !== 1) {
+		failures.push(FAILURE_MESSAGE);
 	}
 
 	return [...new Set(failures)];

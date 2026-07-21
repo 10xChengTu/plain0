@@ -30,6 +30,7 @@ const nativeSecondaryRootId = "00000000-0000-4000-8000-000000000102";
 type RawReadTransport = "arrayBuffer" | "numberArray";
 type NativeIpcMockMode = "readonly" | "supported";
 type TestMultiRootMoveIncompleteScenario = "moveRetained" | "movePartial";
+type TestMultiRootDeleteIncompleteScenario = "deleteRetained" | "deletePartial";
 
 interface TestWorkspaceWatchExchange {
 	readonly callIndex: number;
@@ -760,11 +761,13 @@ async function installMultiRootNativeIpcMock(
 	page: Page,
 	mode: NativeIpcMockMode = "readonly",
 	moveIncompleteScenarios: readonly TestMultiRootMoveIncompleteScenario[] = [],
+	deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],
 ): Promise<void> {
 	await page.addInitScript(
 		({
 			mode,
 			moveIncompleteScenarios,
+			deleteIncompleteScenarios,
 			workspaceId,
 			primaryRootId,
 			secondaryRootId,
@@ -832,6 +835,7 @@ async function installMultiRootNativeIpcMock(
 			const encoder = new TextEncoder();
 			const decoder = new TextDecoder();
 			const moveIncompletePlan = [...moveIncompleteScenarios];
+			const deleteIncompletePlan = [...deleteIncompleteScenarios];
 			let versionSerial = 101;
 			let deferredExternalCreate: DeferredExternalCreate | undefined;
 			const nextVersion = (): string =>
@@ -858,6 +862,17 @@ async function installMultiRootNativeIpcMock(
 								rebindNodeVersions(child),
 							]),
 						);
+			const primaryEntries: Array<readonly [string, MockNode]> = [
+				["README.md", file("# Primary workspace\n")],
+				["copy-source.txt", file("Copy across roots.\n")],
+				["src", directory([])],
+			];
+			if (deleteIncompleteScenarios.includes("deleteRetained")) {
+				primaryEntries.push([
+					"delete-retained.txt",
+					file("Retain this delete target.\n"),
+				]);
+			}
 			const secondaryEntries: Array<readonly [string, MockNode]> = [
 				["move-source.txt", file("Move across roots.\n")],
 				["notes.txt", file("Secondary workspace\n")],
@@ -872,15 +887,17 @@ async function installMultiRootNativeIpcMock(
 					]),
 				]);
 			}
-			const trees = new Map<string, MockDirectory>([
-				[
-					primaryRootId,
+			if (deleteIncompleteScenarios.includes("deletePartial")) {
+				secondaryEntries.push([
+					"delete-partial",
 					directory([
-						["README.md", file("# Primary workspace\n")],
-						["copy-source.txt", file("Copy across roots.\n")],
-						["src", directory([])],
+						["removed.txt", file("Remove this delete child.\n")],
+						["kept.txt", file("Keep this delete child.\n")],
 					]),
-				],
+				]);
+			}
+			const trees = new Map<string, MockDirectory>([
+				[primaryRootId, directory(primaryEntries)],
 				[secondaryRootId, directory(secondaryEntries)],
 			]);
 			const activeRoots = new Map<string, MockWorkspaceRoot>();
@@ -1763,10 +1780,55 @@ async function installMultiRootNativeIpcMock(
 							) {
 								throw invalidDeletePlan();
 							}
+							const plannedDeleteIncomplete = deleteIncompletePlan[0];
+							if (
+								plannedDeleteIncomplete === "deleteRetained" &&
+								(activeDelete.rootId !== primaryRootId ||
+									activeDelete.relativePath !== "delete-retained.txt")
+							) {
+								throw new Error(
+									"Unexpected retained delete browser test request.",
+								);
+							}
+							if (
+								plannedDeleteIncomplete === "deletePartial" &&
+								(activeDelete.rootId !== secondaryRootId ||
+									activeDelete.relativePath !== "delete-partial")
+							) {
+								throw new Error(
+									"Unexpected partial delete browser test request.",
+								);
+							}
 							const target = resolveParent(
 								activeDelete.rootId,
 								activeDelete.relativePath,
 							);
+							if (plannedDeleteIncomplete === "deleteRetained") {
+								deleteIncompletePlan.shift();
+								activeDelete = undefined;
+								return { status: "entryRetained", reason: "deleteFailed" };
+							}
+							if (plannedDeleteIncomplete === "deletePartial") {
+								const node = target.parent.entries.get(target.name);
+								if (node?.kind !== "directory") {
+									throw entryTypeMismatch();
+								}
+								const removedEntries = node.entries.delete("removed.txt")
+									? 1
+									: 0;
+								if (removedEntries !== 1 || !node.entries.has("kept.txt")) {
+									throw new Error(
+										"Invalid partial delete browser test target tree.",
+									);
+								}
+								deleteIncompletePlan.shift();
+								activeDelete = undefined;
+								return {
+									status: "entryPartiallyDeleted",
+									reason: "deleteFailed",
+									removedEntries,
+								};
+							}
 							if (!target.parent.entries.delete(target.name)) {
 								throw entryNotFound();
 							}
@@ -1826,6 +1888,7 @@ async function installMultiRootNativeIpcMock(
 		{
 			mode,
 			moveIncompleteScenarios,
+			deleteIncompleteScenarios,
 			workspaceId: nativeWorkspaceId,
 			primaryRootId: nativeRootId,
 			secondaryRootId: nativeSecondaryRootId,
@@ -3437,6 +3500,342 @@ test("shows retained and partial cross-root move failures", async ({
 	expect(consoleErrors[2]).toContain(moveMessage);
 	expect(consoleErrors[3]).toBe(moveMessage);
 	expect(consoleErrors[3]).not.toMatch(/(?:\/Users\/|[A-Za-z]:\\|\\\\)/u);
+});
+
+test("shows retained and partial permanent delete failures", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	await installMultiRootNativeIpcMock(
+		page,
+		"supported",
+		[],
+		["deleteRetained", "deletePartial"],
+	);
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+
+	const explorer = await openNativeWorkspaceExplorer(page);
+	await executePaletteCommand(
+		page,
+		"Add Folder to Workspace",
+		"Workspaces: Add Folder to Workspace...",
+	);
+	const primaryRoot = explorer.getByRole("treeitem", {
+		name: "plain-workspace",
+		exact: true,
+	});
+	const secondaryRoot = explorer.getByRole("treeitem", {
+		name: "plain-library",
+		exact: true,
+	});
+	const itemAtLevel = (name: string, level: number): Locator =>
+		explorer
+			.locator(`[role="treeitem"][aria-level="${level}"]`)
+			.filter({ hasText: name });
+	const expandDirectory = async (directory: Locator): Promise<void> => {
+		await expect(directory).toHaveCount(1);
+		if ((await directory.getAttribute("aria-expanded")) !== "true") {
+			await directory.click();
+			await page.keyboard.press("ArrowRight");
+		}
+		await expect(directory).toHaveAttribute("aria-expanded", "true");
+	};
+	await expandDirectory(primaryRoot);
+	await expandDirectory(secondaryRoot);
+
+	const currentCallCount = (): Promise<number> =>
+		page.evaluate(() => {
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+			};
+			return testWindow.__PLAIN_TEST_TAURI_CALLS__.length;
+		});
+	const callStart = await currentCallCount();
+
+	const deleteMessage =
+		"The permanent delete batch stopped after a native delete became incomplete.";
+
+	const expectRootRefresh = async (
+		phaseStart: number,
+		rootId: string,
+		relativePath: string,
+	): Promise<void> => {
+		await expect
+			.poll(() =>
+				page.evaluate(
+					({ phaseStart, rootId, relativePath }) => {
+						const testWindow = window as unknown as Window & {
+							__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+						};
+						return testWindow.__PLAIN_TEST_TAURI_CALLS__
+							.slice(phaseStart)
+							.some(({ command, args }) => {
+								if (command !== "workspace_read_dir") {
+									return false;
+								}
+								const request = args.request as
+									{ rootId?: unknown; relativePath?: unknown } | undefined;
+								return (
+									request?.rootId === rootId &&
+									request.relativePath === relativePath
+								);
+							});
+					},
+					{ phaseStart, rootId, relativePath },
+				),
+			)
+			.toBe(true);
+	};
+
+	const consumeDeleteFailureToast = async (): Promise<void> => {
+		const toasts = page.locator(".notifications-toasts .notification-toast");
+		await expect(toasts).toHaveCount(1);
+		const toast = toasts.first();
+		await expect(toast).toContainText(deleteMessage);
+		await expect(
+			toast.getByRole("button", { name: "Retry", exact: true }),
+		).toHaveCount(0);
+		const text = await toast.innerText();
+		expect(text).not.toContain("entryRetained");
+		expect(text).not.toContain("entryPartiallyDeleted");
+		expect(text).not.toContain("deleteFailed");
+		expect(text).not.toContain("removedEntries");
+		expect(text).not.toContain(nativeRootId);
+		expect(text).not.toContain(nativeSecondaryRootId);
+		expect(text).not.toMatch(/ENTRY_/u);
+		expect(text).not.toMatch(/(?:\/Users\/|[A-Za-z]:\\|\\\\)/u);
+		// The keyboard delete path rejects through the persistent
+		// `.then(undefined, err => notificationService.warn(err))` handler, so
+		// the toast is rendered at Warning severity, not Error severity.
+		await expect(
+			toast.locator(".notification-list-item-icon.codicon-warning"),
+		).toHaveCount(1);
+		await expect(toast.locator(".codicon-error")).toHaveCount(0);
+		await toast.hover();
+		await toast
+			.getByRole("button", {
+				name: /^Clear Notification(?: \(.+\))?$/u,
+			})
+			.click();
+		await expect(toasts).toHaveCount(0);
+	};
+
+	// Right-click "Delete Permanently" closes the context menu as soon as the
+	// action starts (ContextMenuHandler disposes its ActionRunner listener via
+	// onWillRun before the confirm-dialog-gated rejection settles), so it can
+	// never surface a notification for this scenario. The keybinding dispatch
+	// path attaches a persistent `.then(undefined, err => notify)` and reliably
+	// shows the failure once the coordinator rejects, so both phases trigger
+	// the permanent delete the same way the existing single-root delete test
+	// does: select the entry, then press the keyboard shortcut.
+	const deletePermanently = async (
+		item: Locator,
+		name: string,
+	): Promise<number> => {
+		const phaseStart = await currentCallCount();
+		await item.click();
+		await page.keyboard.press("ControlOrMeta+Backspace");
+		const dialog = page.getByRole("dialog");
+		await expect(dialog).toHaveCount(1);
+		await expect(dialog).toContainText(`永久删除“${name}”？`);
+		await expect(dialog).toContainText("此操作永久且不可撤销");
+		await expect(dialog).toContainText("不会移入废纸篓");
+		await dialog.getByRole("button", { name: "永久删除", exact: true }).click();
+		await expect(page.locator(".monaco-dialog-box")).toHaveCount(0);
+		await consumeDeleteFailureToast();
+		return phaseStart;
+	};
+
+	const retainedTarget = itemAtLevel("delete-retained.txt", 2);
+	await expect(retainedTarget).toHaveCount(1);
+	const retainedPhaseStart = await deletePermanently(
+		retainedTarget,
+		"delete-retained.txt",
+	);
+	await expect(itemAtLevel("delete-retained.txt", 2)).toHaveCount(1);
+	await expectRootRefresh(retainedPhaseStart, nativeRootId, "");
+
+	const partialTarget = itemAtLevel("delete-partial", 2);
+	await expandDirectory(partialTarget);
+	await expect(itemAtLevel("removed.txt", 3)).toHaveCount(1);
+	await expect(itemAtLevel("kept.txt", 3)).toHaveCount(1);
+	const partialPhaseStart = await deletePermanently(
+		partialTarget,
+		"delete-partial",
+	);
+	await expect(itemAtLevel("delete-partial", 2)).toHaveCount(1);
+	// Assert the root-level auto-refresh before any further tree interaction,
+	// so this is unambiguously the coordinator's own post-failure refresh and
+	// not something the test induced: probed against this fixture, the root
+	// ("") read_dir lands here even with zero interaction since
+	// consumeDeleteFailureToast(). The already-expanded "delete-partial" child
+	// is a different story -- probed the same way, its read_dir does *not*
+	// land without a further explorer interaction, so re-reading it here
+	// would silently start relying on the expandDirectory click below for
+	// evidence instead of on automatic refresh. That assertion is therefore
+	// made only after expandDirectory, where it is honestly attributable to
+	// reopening the directory rather than to the coordinator's refresh.
+	await expectRootRefresh(partialPhaseStart, nativeSecondaryRootId, "");
+	await expandDirectory(itemAtLevel("delete-partial", 2));
+	await expectRootRefresh(
+		partialPhaseStart,
+		nativeSecondaryRootId,
+		"delete-partial",
+	);
+	await expect(itemAtLevel("kept.txt", 3)).toHaveCount(1);
+	await expect(itemAtLevel("removed.txt", 3)).toHaveCount(0);
+
+	const evidence = await page.evaluate(
+		({ callStart, mutationCommands }) => {
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+			};
+			return testWindow.__PLAIN_TEST_TAURI_CALLS__
+				.slice(callStart)
+				.filter(({ command }) => mutationCommands.includes(command));
+		},
+		{
+			callStart,
+			mutationCommands: nativeMutationCommands as readonly string[],
+		},
+	);
+	expect(evidence.map(({ command }) => command)).toEqual([
+		"workspace_prepare_delete",
+		"workspace_begin_delete",
+		"workspace_commit_delete_entry",
+		"workspace_cancel_delete",
+		"workspace_prepare_delete",
+		"workspace_begin_delete",
+		"workspace_commit_delete_entry",
+		"workspace_cancel_delete",
+	]);
+
+	const idPattern =
+		/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+	const retainedPrepare = evidence[0]!.args.request as {
+		readonly entries: readonly {
+			readonly rootId: string;
+			readonly relativePath: string;
+			readonly recursive: boolean;
+		}[];
+	};
+	expect(retainedPrepare).toEqual({
+		entries: [
+			{
+				rootId: nativeRootId,
+				relativePath: "delete-retained.txt",
+				recursive: true,
+			},
+		],
+	});
+	const retainedBegin = evidence[1]!.args.request as {
+		readonly confirmationId: string;
+	};
+	const retainedCommit = evidence[2]!.args.request as {
+		readonly confirmationId: string;
+		readonly entryId: string;
+		readonly rootId: string;
+		readonly relativePath: string;
+		readonly recursive: boolean;
+	};
+	const retainedCancel = evidence[3]!.args.request as {
+		readonly confirmationId: string;
+	};
+	expect(retainedBegin.confirmationId).toMatch(idPattern);
+	expect(retainedCommit).toMatchObject({
+		confirmationId: retainedBegin.confirmationId,
+		entryId: expect.stringMatching(idPattern),
+		rootId: nativeRootId,
+		relativePath: "delete-retained.txt",
+		recursive: true,
+	});
+	expect(retainedCommit.entryId).not.toBe(retainedCommit.confirmationId);
+	expect(retainedCancel.confirmationId).toBe(retainedBegin.confirmationId);
+
+	const partialPrepare = evidence[4]!.args.request as {
+		readonly entries: readonly {
+			readonly rootId: string;
+			readonly relativePath: string;
+			readonly recursive: boolean;
+		}[];
+	};
+	expect(partialPrepare).toEqual({
+		entries: [
+			{
+				rootId: nativeSecondaryRootId,
+				relativePath: "delete-partial",
+				recursive: true,
+			},
+		],
+	});
+	const partialBegin = evidence[5]!.args.request as {
+		readonly confirmationId: string;
+	};
+	const partialCommit = evidence[6]!.args.request as {
+		readonly confirmationId: string;
+		readonly entryId: string;
+		readonly rootId: string;
+		readonly relativePath: string;
+		readonly recursive: boolean;
+	};
+	const partialCancel = evidence[7]!.args.request as {
+		readonly confirmationId: string;
+	};
+	expect(partialBegin.confirmationId).toMatch(idPattern);
+	expect(partialCommit).toMatchObject({
+		confirmationId: partialBegin.confirmationId,
+		entryId: expect.stringMatching(idPattern),
+		rootId: nativeSecondaryRootId,
+		relativePath: "delete-partial",
+		recursive: true,
+	});
+	expect(partialCommit.entryId).not.toBe(partialCommit.confirmationId);
+	expect(partialCancel.confirmationId).toBe(partialBegin.confirmationId);
+	expect(partialBegin.confirmationId).not.toBe(retainedBegin.confirmationId);
+
+	await expect(
+		page.locator(".notifications-toasts .notification-toast"),
+	).toHaveCount(0);
+	await expect(page.locator(".monaco-dialog-box")).toHaveCount(0);
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	// Each phase produces exactly one structured BulkEditService diagnostic:
+	// `_logService.error(err)` logs and rethrows the raw provider rejection
+	// before the coordinator wraps it into `WorkspaceDeleteIncompleteError`, so
+	// the logged text is the generic "Unavailable (FileSystemError)" message,
+	// not the coordinator's own name/message. `NotificationsAlerts` only
+	// mirrors Error-severity notifications to the console
+	// (severity === Severity.Error); the keybinding dispatch path shows a
+	// Warning-severity toast, so it does not add a second console error. The
+	// Vite dev-server stack trace legitimately contains local absolute paths
+	// (source maps), so those diagnostics are only checked for the absence of
+	// wire DTO fields, not for absolute-path leakage.
+	expect(consoleErrors).toHaveLength(2);
+	expect(consoleErrors[0]).toContain("Unavailable (FileSystemError)");
+	expect(consoleErrors[0]).toContain("The workspace is unavailable.");
+	expect(consoleErrors[1]).toContain("Unavailable (FileSystemError)");
+	expect(consoleErrors[1]).toContain("The workspace is unavailable.");
+	for (const diagnostic of consoleErrors) {
+		expect(diagnostic).not.toContain("entryRetained");
+		expect(diagnostic).not.toContain("entryPartiallyDeleted");
+		expect(diagnostic).not.toContain("deleteFailed");
+		expect(diagnostic).not.toContain("removedEntries");
+		expect(diagnostic).not.toContain(nativeRootId);
+		expect(diagnostic).not.toContain(nativeSecondaryRootId);
+		expect(diagnostic).not.toContain(deleteMessage);
+	}
 });
 
 test("edits both roots and routes cross-root copy and move through all-true IPC", async ({

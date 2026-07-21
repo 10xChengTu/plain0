@@ -15,10 +15,12 @@ import {
 	validateTauriConfiguration,
 	validateTauriConfigurationFiles,
 	validateTauriE2EConfiguration,
+	validateWorkspaceBrowserFixtureWindowAuthority,
 	validateWorkspaceCapabilitiesBoundary,
 	validateWorkspaceCopyCommandRegistration,
 	validateWorkspaceDeleteBoundary,
 	validateWorkspaceDeleteCommandRegistration,
+	validateWorkspaceDeleteFailureBrowserFixture,
 	validateWorkspaceDeleteTypeScriptBoundary,
 	validateWorkspaceMoveBoundary,
 	validateWorkspaceMoveCommandRegistration,
@@ -5963,8 +5965,8 @@ describe("Plain browser move-failure fixture boundary", () => {
 				'type TestMultiRootMoveIncompleteScenario = "moveRetained" | "movePartial" | "moveUnknown";',
 			),
 			mutateBrowserFixture(
-				"moveIncompleteScenarios: readonly TestMultiRootMoveIncompleteScenario[] = [],\n): Promise<void>",
-				'moveIncompleteScenarios: readonly TestMultiRootMoveIncompleteScenario[] = [],\n\tstatus: string = "targetPublishedSourceRetained",\n): Promise<void>',
+				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n): Promise<void>",
+				'deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n\tstatus: string = "targetPublishedSourceRetained",\n): Promise<void>',
 			),
 			mutateBrowserFixture(
 				"moveIncompleteScenarios: readonly TestMultiRootMoveIncompleteScenario[] = []",
@@ -5980,12 +5982,12 @@ describe("Plain browser move-failure fixture boundary", () => {
 	it("keeps scenario state inside the one local addInitScript closure", () => {
 		for (const hostile of [
 			mutateBrowserFixture(
-				"moveIncompleteScenarios: readonly TestMultiRootMoveIncompleteScenario[] = [],\n): Promise<void> {\n\tawait page.addInitScript(",
-				"moveIncompleteScenarios: readonly TestMultiRootMoveIncompleteScenario[] = [],\n): Promise<void> {\n\tvoid moveIncompleteScenarios;\n\tawait page.addInitScript(",
+				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n): Promise<void> {\n\tawait page.addInitScript(",
+				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n): Promise<void> {\n\tvoid moveIncompleteScenarios;\n\tawait page.addInitScript(",
 			),
 			mutateBrowserFixture(
-				"\t\t\tmoveIncompleteScenarios,\n\t\t\tworkspaceId: nativeWorkspaceId,",
-				"\t\t\tworkspaceId: nativeWorkspaceId,",
+				"\t\t\tmoveIncompleteScenarios,\n\t\t\tdeleteIncompleteScenarios,\n\t\t\tworkspaceId: nativeWorkspaceId,",
+				"\t\t\tdeleteIncompleteScenarios,\n\t\t\tworkspaceId: nativeWorkspaceId,",
 			),
 			mutateBrowserFixture(
 				"const moveIncompletePlan = [...moveIncompleteScenarios];",
@@ -6048,6 +6050,245 @@ describe("Plain browser move-failure fixture boundary", () => {
 		);
 		expect(validateWorkspaceMoveFailureBrowserFixture(forgedCount)).toContain(
 			"browser partial-move fixture must delete removed.txt and derive removedEntries from that boolean result",
+		);
+	});
+});
+
+describe("Plain browser delete-failure fixture boundary", () => {
+	function mutateBrowserFixture(from, to) {
+		if (!workspaceBrowserFixture.includes(from)) {
+			throw new Error(
+				"browser delete-failure fixture no longer matches production",
+			);
+		}
+		return workspaceBrowserFixture.replace(from, to);
+	}
+
+	it("accepts the local retained/partial multi-root fixture", () => {
+		expect(
+			validateWorkspaceDeleteFailureBrowserFixture(workspaceBrowserFixture),
+		).toEqual([]);
+	});
+
+	it("rejects open scenario sets and raw receipt parameters", () => {
+		for (const hostile of [
+			mutateBrowserFixture(
+				'type TestMultiRootDeleteIncompleteScenario = "deleteRetained" | "deletePartial";',
+				'type TestMultiRootDeleteIncompleteScenario = "deleteRetained" | "deletePartial" | "deleteUnknown";',
+			),
+			mutateBrowserFixture(
+				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n): Promise<void>",
+				'deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n\tstatus: string = "entryRetained",\n): Promise<void>',
+			),
+			mutateBrowserFixture(
+				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = []",
+				"deleteIncompleteScenarios: readonly string[] = []",
+			),
+		]) {
+			expect(validateWorkspaceDeleteFailureBrowserFixture(hostile)).toContain(
+				"browser delete-failure fixture fourth argument must remain the closed deleteRetained/deletePartial scenario set",
+			);
+		}
+	});
+
+	it("keeps scenario state inside the one local addInitScript closure", () => {
+		for (const hostile of [
+			mutateBrowserFixture(
+				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n): Promise<void> {\n\tawait page.addInitScript(",
+				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n): Promise<void> {\n\tvoid deleteIncompleteScenarios;\n\tawait page.addInitScript(",
+			),
+			mutateBrowserFixture(
+				"\t\t\tdeleteIncompleteScenarios,\n\t\t\tworkspaceId: nativeWorkspaceId,",
+				"\t\t\tworkspaceId: nativeWorkspaceId,",
+			),
+			mutateBrowserFixture(
+				"const deleteIncompletePlan = [...deleteIncompleteScenarios];",
+				`const deleteIncompletePlan = [...deleteIncompleteScenarios];
+				const testDeleteWindow = window as unknown as Record<string, unknown>;
+				testDeleteWindow.__PLAIN_TEST_DELETE_FAILURE__ = () =>
+					deleteIncompletePlan.shift();`,
+			),
+		]) {
+			const failures = validateWorkspaceDeleteFailureBrowserFixture(hostile);
+			expect(
+				failures.some((failure) =>
+					/local to one audited multi-root addInitScript fixture|must not accept raw receipt fields or expose a window mutation control/.test(
+						failure,
+					),
+				),
+			).toBe(true);
+		}
+	});
+
+	it("locks fixed per-entry requests and ordered terminal branches", () => {
+		const wrongRequest = mutateBrowserFixture(
+			'activeDelete.relativePath !== "delete-retained.txt"',
+			'activeDelete.relativePath !== "other.txt"',
+		);
+		expect(
+			validateWorkspaceDeleteFailureBrowserFixture(wrongRequest),
+		).toContain(
+			"browser delete-failure fixture must retain exact per-entry request validation",
+		);
+
+		const reorderedNormalDelete = mutateBrowserFixture(
+			"\t\t\t\t\t\t\tif (!target.parent.entries.delete(target.name)) {\n\t\t\t\t\t\t\t\tthrow entryNotFound();\n\t\t\t\t\t\t\t}\n",
+			"",
+		).replace(
+			'if (plannedDeleteIncomplete === "deleteRetained") {',
+			'if (!target.parent.entries.delete(target.name)) {\n\t\t\t\t\t\t\t\tthrow entryNotFound();\n\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\tif (plannedDeleteIncomplete === "deleteRetained") {',
+		);
+		expect(
+			validateWorkspaceDeleteFailureBrowserFixture(reorderedNormalDelete),
+		).toContain(
+			"browser delete-failure fixture must invalidate the active batch before its ordered terminal scenario branches",
+		);
+	});
+
+	it("locks retained tree preservation and boolean-derived partial deletion count", () => {
+		const retainedDelete = mutateBrowserFixture(
+			'if (plannedDeleteIncomplete === "deleteRetained") {\n\t\t\t\t\t\t\t\tdeleteIncompletePlan.shift();',
+			'if (plannedDeleteIncomplete === "deleteRetained") {\n\t\t\t\t\t\t\t\ttarget.parent.entries.delete(target.name);\n\t\t\t\t\t\t\t\tdeleteIncompletePlan.shift();',
+		);
+		expect(
+			validateWorkspaceDeleteFailureBrowserFixture(retainedDelete),
+		).toContain(
+			"browser retained-delete fixture must leave the tree untouched and return only its fixed receipt",
+		);
+
+		const forgedCount = mutateBrowserFixture(
+			`const node = target.parent.entries.get(target.name);
+								if (node?.kind !== "directory") {
+									throw entryTypeMismatch();
+								}
+								const removedEntries = node.entries.delete("removed.txt")
+									? 1
+									: 0;`,
+			`const node = target.parent.entries.get(target.name);
+								if (node?.kind !== "directory") {
+									throw entryTypeMismatch();
+								}
+								const removedEntries = 1;`,
+		);
+		expect(validateWorkspaceDeleteFailureBrowserFixture(forgedCount)).toContain(
+			"browser partial-delete fixture must delete removed.txt and derive removedEntries from that boolean result",
+		);
+	});
+});
+
+describe("Plain browser workspace fixture window authority boundary", () => {
+	function mutateBrowserFixture(from, to) {
+		if (!workspaceBrowserFixture.includes(from)) {
+			throw new Error("browser workspace fixture no longer matches production");
+		}
+		return workspaceBrowserFixture.replace(from, to);
+	}
+
+	const windowAuthorityFailure =
+		"browser workspace fixture must reach the page window only through the audited testWindow surface";
+
+	it("accepts the local retained/partial multi-root fixture", () => {
+		expect(
+			validateWorkspaceBrowserFixtureWindowAuthority(workspaceBrowserFixture),
+		).toEqual([]);
+		expect(
+			validateWorkspaceMoveFailureBrowserFixture(workspaceBrowserFixture),
+		).toEqual([]);
+		expect(
+			validateWorkspaceDeleteFailureBrowserFixture(workspaceBrowserFixture),
+		).toEqual([]);
+	});
+
+	it("rejects a plan alias combined with a window-alias mutation hook", () => {
+		// The confirmed P1 bypass: reading the plan through an alias defeats the
+		// exact peek-statement text lock, and reaching the page window through
+		// a freshly declared alias (instead of the audited testWindow receiver)
+		// defeats the old receiver-name-based forbiddenWindowControls check.
+		// `const testWindow = window as unknown as Window & {` also opens many
+		// unrelated single-purpose addInitScript callbacks elsewhere in this
+		// file, so the anchor below pins the line that follows it
+		// (`__PLAIN_TEST_MULTI_ROOT_VERSION_TRANSITIONS__`, unique to the
+		// shared multi-root fixture) to make sure the mutation lands inside
+		// `installMultiRootNativeIpcMock` and not some other fixture.
+		const hostile = mutateBrowserFixture(
+			"\t\t\t\t\t\t\tconst plannedDeleteIncomplete = deleteIncompletePlan[0];",
+			"\t\t\t\t\t\t\tconst planAlias = deleteIncompletePlan;\n\t\t\t\t\t\t\tconst plannedDeleteIncomplete = planAlias[0];",
+		).replace(
+			"\t\t\tconst testWindow = window as unknown as Window & {\n\t\t\t\t__PLAIN_TEST_TAURI_CALLS__: typeof calls;\n\t\t\t\t__PLAIN_TEST_MULTI_ROOT_VERSION_TRANSITIONS__: typeof versionTransitions;",
+			"\t\t\tconst winAlias = window as unknown as Record<string, unknown>;\n\t\t\twinAlias.__PLAIN_TEST_DELETE_FAILURE__ = (next: string) => {\n\t\t\t\tplanAlias.length = 0;\n\t\t\t\tplanAlias.push(next);\n\t\t\t};\n\t\t\tconst testWindow = window as unknown as Window & {\n\t\t\t\t__PLAIN_TEST_TAURI_CALLS__: typeof calls;\n\t\t\t\t__PLAIN_TEST_MULTI_ROOT_VERSION_TRANSITIONS__: typeof versionTransitions;",
+		);
+		expect(validateWorkspaceBrowserFixtureWindowAuthority(hostile)).toContain(
+			windowAuthorityFailure,
+		);
+		expect(validateWorkspaceDeleteFailureBrowserFixture(hostile)).toContain(
+			"browser delete-failure fixture must peek deleteIncompletePlan[0] through one audited statement",
+		);
+		expect(validateWorkspaceDeleteFailureBrowserFixture(hostile)).toContain(
+			"browser delete-failure fixture must keep deleteIncompletePlan references inside its audited plan, peek and terminal branch statements",
+		);
+	});
+
+	it("rejects a globalThis alias hook even without touching moveIncompletePlan/deleteIncompletePlan", () => {
+		const hostile = mutateBrowserFixture(
+			"\t\t\tconst testWindow = window as unknown as Window & {\n\t\t\t\t__PLAIN_TEST_TAURI_CALLS__: typeof calls;\n\t\t\t\t__PLAIN_TEST_MULTI_ROOT_VERSION_TRANSITIONS__: typeof versionTransitions;",
+			"\t\t\tconst g = globalThis as unknown as Record<string, unknown>;\n\t\t\tg.__PLAIN_TEST_HOOK__ = () => {};\n\t\t\tconst testWindow = window as unknown as Window & {\n\t\t\t\t__PLAIN_TEST_TAURI_CALLS__: typeof calls;\n\t\t\t\t__PLAIN_TEST_MULTI_ROOT_VERSION_TRANSITIONS__: typeof versionTransitions;",
+		);
+		expect(validateWorkspaceBrowserFixtureWindowAuthority(hostile)).toContain(
+			windowAuthorityFailure,
+		);
+	});
+
+	it("rejects a bare plan alias even when the page window is untouched", () => {
+		const hostile = mutateBrowserFixture(
+			"\t\t\t\t\t\t\tconst plannedDeleteIncomplete = deleteIncompletePlan[0];",
+			"\t\t\t\t\t\t\tconst planAlias = deleteIncompletePlan;\n\t\t\t\t\t\t\tconst plannedDeleteIncomplete = planAlias[0];",
+		);
+		expect(validateWorkspaceBrowserFixtureWindowAuthority(hostile)).toEqual([]);
+		expect(validateWorkspaceDeleteFailureBrowserFixture(hostile)).toContain(
+			"browser delete-failure fixture must peek deleteIncompletePlan[0] through one audited statement",
+		);
+		expect(validateWorkspaceDeleteFailureBrowserFixture(hostile)).toContain(
+			"browser delete-failure fixture must keep deleteIncompletePlan references inside its audited plan, peek and terminal branch statements",
+		);
+	});
+
+	it("rejects peek index tampering on both failure plans", () => {
+		const hostileDelete = mutateBrowserFixture(
+			"\t\t\t\t\t\t\tconst plannedDeleteIncomplete = deleteIncompletePlan[0];",
+			"\t\t\t\t\t\t\tconst plannedDeleteIncomplete = deleteIncompletePlan[1];",
+		);
+		expect(
+			validateWorkspaceDeleteFailureBrowserFixture(hostileDelete),
+		).toContain(
+			"browser delete-failure fixture must peek deleteIncompletePlan[0] through one audited statement",
+		);
+
+		const hostileMove = mutateBrowserFixture(
+			"\t\t\t\t\t\t\tconst plannedIncomplete = moveIncompletePlan[0];",
+			"\t\t\t\t\t\t\tconst plannedIncomplete = moveIncompletePlan[1];",
+		);
+		expect(validateWorkspaceMoveFailureBrowserFixture(hostileMove)).toContain(
+			"browser move-failure fixture must peek moveIncompletePlan[0] through one audited statement",
+		);
+	});
+
+	it("rejects an unconditional delete inserted before the retained commit branch", () => {
+		const hostile = mutateBrowserFixture(
+			'\t\t\t\t\t\t\tif (plannedDeleteIncomplete === "deleteRetained") {',
+			'\t\t\t\t\t\t\ttarget.parent.entries.delete(target.name);\n\t\t\t\t\t\t\tif (plannedDeleteIncomplete === "deleteRetained") {',
+		);
+		expect(validateWorkspaceDeleteFailureBrowserFixture(hostile)).toContain(
+			"browser delete-failure fixture must keep commit-case target references inside its audited declaration and terminal branch statements",
+		);
+	});
+
+	it("rejects an unconditional primaryEntries.push inserted at tree-construction time", () => {
+		const hostile = mutateBrowserFixture(
+			"\t\t\tconst trees = new Map<string, MockDirectory>([",
+			'\t\t\tprimaryEntries.push(["extra-secret.txt", file("x\\n")]);\n\t\t\tconst trees = new Map<string, MockDirectory>([',
+		);
+		expect(validateWorkspaceDeleteFailureBrowserFixture(hostile)).toContain(
+			"browser delete-failure fixture must keep primaryEntries and secondaryEntries references inside their audited seed and tree-construction statements",
 		);
 	});
 });

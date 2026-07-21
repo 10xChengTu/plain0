@@ -15,10 +15,12 @@ import {
 	validateTauriConfiguration,
 	validateTauriConfigurationFiles,
 	validateTauriE2EConfiguration,
+	validateWorkspaceBrowserFixtureWindowAuthority,
 	validateWorkspaceCapabilitiesBoundary,
 	validateWorkspaceCopyCommandRegistration,
 	validateWorkspaceDeleteBoundary,
 	validateWorkspaceDeleteCommandRegistration,
+	validateWorkspaceDeleteFailureBrowserFixture,
 	validateWorkspaceDeleteTypeScriptBoundary,
 	validateWorkspaceMoveBoundary,
 	validateWorkspaceMoveCommandRegistration,
@@ -458,6 +460,16 @@ const workspaceBrowserFixtureSource = await readFile(
 	"utf8",
 );
 for (const failure of validateWorkspaceMoveFailureBrowserFixture(
+	workspaceBrowserFixtureSource,
+)) {
+	fail(failure);
+}
+for (const failure of validateWorkspaceDeleteFailureBrowserFixture(
+	workspaceBrowserFixtureSource,
+)) {
+	fail(failure);
+}
+for (const failure of validateWorkspaceBrowserFixtureWindowAuthority(
 	workspaceBrowserFixtureSource,
 )) {
 	fail(failure);
