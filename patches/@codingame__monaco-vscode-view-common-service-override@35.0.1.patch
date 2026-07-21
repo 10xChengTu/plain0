@@ -20,3 +20,73 @@ index fa191a992dca775f34b74619230ecbb7334048b9..29d3f3f852cd2f1f216371464c00aa81
  const viewsContainerSchema = {
      type: "object",
      properties: {
+diff --git a/vscode/src/vs/workbench/services/progress/browser/progressService.js b/vscode/src/vs/workbench/services/progress/browser/progressService.js
+index 51fb5862d51959b4e148b75c4b6543f30ee82362..99dfb5b1407439d01b8ca5a25e8dd18f54e25869 100644
+--- a/vscode/src/vs/workbench/services/progress/browser/progressService.js
++++ b/vscode/src/vs/workbench/services/progress/browser/progressService.js
+@@ -29,8 +29,20 @@ import { IUserActivityService } from '@codingame/monaco-vscode-api/vscode/vs/wor
+ import { createWorkbenchDialogOptions } from '@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/dialogs/dialog';
+ import { IHostService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/host/browser/host.service';
+ import Severity from '@codingame/monaco-vscode-api/vscode/vs/base/common/severity';
++import { onUnexpectedError } from '@codingame/monaco-vscode-api/vscode/vs/base/common/errors';
+ 
+ registerCss(progressService);
++function observeProgressSettlement(promise, cleanup) {
++    const safeCleanup = () => {
++        try {
++            cleanup();
++        }
++        catch (error) {
++            onUnexpectedError(error);
++        }
++    };
++    void promise.then(safeCleanup, safeCleanup);
++}
+ let ProgressService = class ProgressService extends Disposable {
+     constructor(
+         activityService,
+@@ -228,7 +240,7 @@ let ProgressService = class ProgressService extends Disposable {
+                 this._step = undefined;
+                 this._done = false;
+                 this.promise = callback(this);
+-                this.promise.finally(() => {
++                observeProgressSettlement(this.promise, () => {
+                     this.dispose();
+                 });
+             }
+@@ -380,19 +392,13 @@ let ProgressService = class ProgressService extends Disposable {
+         updateNotification(progressStateModel.step);
+         const listener = progressStateModel.onDidReport(step => updateNotification(step));
+         Event.once(progressStateModel.onWillDispose)(() => listener.dispose());
+-        (async () => {
+-            try {
+-                if (typeof options.delay === "number" && options.delay > 0) {
+-                    await progressStateModel.promise;
+-                }
+-                else {
+-                    await Promise.all([timeout(800), progressStateModel.promise]);
+-                }
+-            } finally {
+-                clearTimeout(notificationTimeout);
+-                notificationHandle?.close();
+-            }
+-        })();
++        const notificationCleanupPromise = typeof options.delay === "number" && options.delay > 0
++            ? progressStateModel.promise
++            : Promise.all([timeout(800), progressStateModel.promise]);
++        observeProgressSettlement(notificationCleanupPromise, () => {
++            clearTimeout(notificationTimeout);
++            notificationHandle?.close();
++        });
+         return progressStateModel.promise;
+     }
+     withPaneCompositeProgress(paneCompositeId, viewContainerLocation, task, options) {
+@@ -437,7 +443,7 @@ let ProgressService = class ProgressService extends Disposable {
+                 }
+             };
+         }, options.delay || 300);
+-        promise.finally(() => {
++        observeProgressSettlement(promise, () => {
+             clearTimeout(delayHandle);
+             dispose(activityProgress);
+         });

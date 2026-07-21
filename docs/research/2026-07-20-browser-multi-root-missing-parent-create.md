@@ -79,6 +79,13 @@ Plain 当前产品运行时固定为 Code OSS commit `5264f2156cbcd7aea5fd004d29
 - 不覆盖 rename/copy/move 的 missing-parent Paste 文案。固定 Explorer 会把所有 Paste 失败包装成“source 已删除或移动”，该文案并不准确；若未来补 Browser 证据，应作为独立工作项裁决，不能顺带冻结为 Plain 产品合同。
 - 不覆盖 move retained/partial/unknown、delete retained/partial/unknown、save conflict、watcher、DnD 或真实 Tauri；它们分别需要结构化终态、保守 root refresh、确认状态机或原生磁盘证据。
 
+## 实现与验收结果
+
+- Plain 显式接入固定 `@codingame/monaco-vscode-notifications-service-override@35.0.1`，并由 Harness 锁定 direct dependency、唯一 default import、唯一零参 spread、`Workbench → Notification → Explorer` 顺序和其他 app source 禁止导入。既有 view-common patch 同时修正三个 detached progress observer；补丁 SHA-256 更新为 `0682d0c1a4c7d8e8eb0c975d216becdedda28245857e7aab17eccff8aeaf97d4`，敌对测试会拒绝任一分支恢复为 ignored `finally()`/rejected async observer。
+- 独立对 HEAD/current 生产 sourcemap 做归一化 Set 集差，最终 bundle 只新增 `@codingame/monaco-vscode-notifications-service-override/index.js` 和其 `notificationService.js` 两个 source，删除 0；总数为 2112。既有 203 项迁移债务、`121/16/11/8/47` 五类计数与 SHA-256 `03208818d455dabc60ddc6d2185e54bb8427303f7bd0ac111ac4d29d43c02b8b` 均不变，没有新增 AI、Auth、Sync、Gallery、Remote、Task、Testing、Notebook 或 Extension Host source。
+- Browser 场景按计划从 primary 创建缺失父目录文件、从 secondary 创建缺失父目录文件夹；每个 phase 都只产生一次对应 native create、一个带手动 `Retry` 的去敏 Error toast、固定 BulkEdit/NotificationsAlerts 两条诊断，且无父目录、leaf、目标预读、伪 editor、自动 replay、原生 dialog 或 `pageerror`。通知接线还把 readonly 永久删除拒绝从 standalone `console.warn` 升级为真实 Warning toast；既有 readonly 场景同步验证只出现该 toast、零确认框和零 mutation。
+- 完整 `pnpm check` 通过 30 个前端测试文件、588 个用例、2277 个生产模块、2112 个 bundle source、203 项既有迁移债务和 Rust 255/255；missing-parent 场景聚焦重复 5/5、全部 Browser E2E 12/12 通过。
+
 ## 验收
 
 ```bash

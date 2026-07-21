@@ -4,6 +4,7 @@ import { DialogService } from "@codingame/monaco-vscode-dialogs-service-override
 import getExplorerServiceOverride from "@codingame/monaco-vscode-explorer-service-override";
 import getFilesServiceOverride from "@codingame/monaco-vscode-files-service-override";
 import getModelServiceOverride from "@codingame/monaco-vscode-model-service-override";
+import getNotificationServiceOverride from "@codingame/monaco-vscode-notifications-service-override";
 import getTextmateServiceOverride from "@codingame/monaco-vscode-textmate-service-override";
 import getThemeServiceOverride from "@codingame/monaco-vscode-theme-service-override";
 import getWorkbenchServiceOverride from "@codingame/monaco-vscode-workbench-service-override";
@@ -29,6 +30,7 @@ export function createServiceOverrides() {
 		...getFilesServiceOverride(),
 		...getModelServiceOverride(),
 		...getWorkbenchServiceOverride(),
+		...getNotificationServiceOverride(),
 		...getExplorerServiceOverride(),
 		...getThemeServiceOverride(),
 		...getTextmateServiceOverride(),

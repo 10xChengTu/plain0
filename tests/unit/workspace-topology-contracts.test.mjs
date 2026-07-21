@@ -1226,6 +1226,11 @@ editor.addCommand({ id: "plain.extra", run: () => undefined });`,
 void getService;`,
 			},
 			{
+				relativePath: "app/rogue-notifications.ts",
+				source: `import getNotificationServiceOverride from "@codingame/monaco-vscode-notifications-service-override";
+void getNotificationServiceOverride;`,
+			},
+			{
 				relativePath: "app/rogue-command-service.ts",
 				source: `import { ICommandService } from "@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands.service";
 void ICommandService;`,

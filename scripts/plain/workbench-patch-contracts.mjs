@@ -8,7 +8,7 @@ const PATCH_CONTRACTS = Object.freeze([
 		integrity:
 			"sha512-pJMSRMI0m5Mvx54u6iBGh+iad9KqfICnwAcjswNJOO7Xt1OXm5xILcM32VkMe4UX0YmrGAvYc0WVKWL8I9O4ng==",
 		directImporter: true,
-		snapshotEdgeCount: 22,
+		snapshotEdgeCount: 23,
 		shape: Object.freeze([
 			"diff --git a/services.js b/services.js",
 			"@@ -24,7 +24,6 @@ import './vscode/src/vs/workbench/contrib/inlayHints/browser/inlayHintsAccessibi",
@@ -226,7 +226,7 @@ const PATCH_CONTRACTS = Object.freeze([
 		packageName: "@codingame/monaco-vscode-view-common-service-override@35.0.1",
 		patchPath:
 			"patches/@codingame__monaco-vscode-view-common-service-override@35.0.1.patch",
-		sha256: "9d6591b1439109dba9a065546df06b69d90c8ae81d4c7cbd5566032f4322fe39",
+		sha256: "0682d0c1a4c7d8e8eb0c975d216becdedda28245857e7aab17eccff8aeaf97d4",
 		integrity:
 			"sha512-qfbBJfClz18VZwZV0htcD4l7TQqotIZx3yMb8O1Ud0bNByFkj/SkN7q+XoSZtjW/eo4GVimlMV9TjDdCXIpaBQ==",
 		directImporter: false,
@@ -234,6 +234,11 @@ const PATCH_CONTRACTS = Object.freeze([
 		shape: Object.freeze([
 			"diff --git a/vscode/src/vs/workbench/api/browser/viewsExtensionPoint.js b/vscode/src/vs/workbench/api/browser/viewsExtensionPoint.js",
 			"@@ -19,13 +19,16 @@ import { registerWorkbenchContribution2, WorkbenchPhase } from '@codingame/monac",
+			"diff --git a/vscode/src/vs/workbench/services/progress/browser/progressService.js b/vscode/src/vs/workbench/services/progress/browser/progressService.js",
+			"@@ -29,8 +29,20 @@ import { IUserActivityService } from '@codingame/monaco-vscode-api/vscode/vs/wor",
+			"@@ -228,7 +240,7 @@ let ProgressService = class ProgressService extends Disposable {",
+			"@@ -380,19 +392,13 @@ let ProgressService = class ProgressService extends Disposable {",
+			"@@ -437,7 +443,7 @@ let ProgressService = class ProgressService extends Disposable {",
 		]),
 	}),
 ]);

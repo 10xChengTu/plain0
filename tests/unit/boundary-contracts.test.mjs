@@ -8,6 +8,7 @@ import {
 	validateDialogOverrideImportBoundary,
 	validateDialogServiceOverride,
 	validateDialogSurfaceBoundary,
+	validateNotificationOverrideImportBoundary,
 	validateFrontendEntrypointScripts,
 	validateMainCapability,
 	validateTauriApiBoundary,
@@ -125,6 +126,7 @@ import { DialogService } from "@codingame/monaco-vscode-dialogs-service-override
 import getExplorerServiceOverride from "@codingame/monaco-vscode-explorer-service-override";
 import getFilesServiceOverride from "@codingame/monaco-vscode-files-service-override";
 import getModelServiceOverride from "@codingame/monaco-vscode-model-service-override";
+import getNotificationServiceOverride from "@codingame/monaco-vscode-notifications-service-override";
 import getTextmateServiceOverride from "@codingame/monaco-vscode-textmate-service-override";
 import getThemeServiceOverride from "@codingame/monaco-vscode-theme-service-override";
 import getWorkbenchServiceOverride from "@codingame/monaco-vscode-workbench-service-override";
@@ -139,6 +141,7 @@ export function createServiceOverrides() {
     ...getFilesServiceOverride(),
     ...getModelServiceOverride(),
     ...getWorkbenchServiceOverride(),
+    ...getNotificationServiceOverride(),
     ...getExplorerServiceOverride(),
     ...getThemeServiceOverride(),
     ...getTextmateServiceOverride(),
@@ -515,7 +518,135 @@ describe("Plain Tauri boundary contracts", () => {
 	});
 });
 
-describe("Plain DOM dialog service Harness", () => {
+describe("Plain Workbench service override Harness", () => {
+	it("locks notifications to one static root import and one ordered zero-argument spread", () => {
+		expect(validateDialogServiceOverride(baselineServiceOverrides)).toEqual([]);
+		expect(
+			validateNotificationOverrideImportBoundary(
+				baselineServiceOverrides,
+				"app/services.ts",
+			),
+		).toEqual([]);
+
+		const importFailure =
+			"app/services.ts must import the exact notifications override as getNotificationServiceOverride";
+		const spreadFailure =
+			"createServiceOverrides must keep the exact direct service spread order";
+		const bindingFailure =
+			"getNotificationServiceOverride may appear only in its exact import and audited service spread";
+		const notificationImport =
+			'import getNotificationServiceOverride from "@codingame/monaco-vscode-notifications-service-override";\n';
+		const notificationSpread = "    ...getNotificationServiceOverride(),\n";
+
+		const withoutImport = baselineServiceOverrides.replace(
+			notificationImport,
+			"",
+		);
+		expect(validateDialogServiceOverride(withoutImport)).toEqual(
+			expect.arrayContaining([importFailure, bindingFailure]),
+		);
+
+		const withoutSpread = baselineServiceOverrides.replace(
+			notificationSpread,
+			"",
+		);
+		expect(validateDialogServiceOverride(withoutSpread)).toEqual(
+			expect.arrayContaining([spreadFailure, bindingFailure]),
+		);
+
+		const duplicateImport = baselineServiceOverrides.replace(
+			notificationImport,
+			`${notificationImport}import duplicateNotificationOverride from "@codingame/monaco-vscode-notifications-service-override";\n`,
+		);
+		expect(validateDialogServiceOverride(duplicateImport)).toContain(
+			importFailure,
+		);
+
+		const aliasedImport = baselineServiceOverrides.replace(
+			notificationImport,
+			'import unsafeNotificationOverride from "@codingame/monaco-vscode-notifications-service-override";\n',
+		);
+		expect(validateDialogServiceOverride(aliasedImport)).toEqual(
+			expect.arrayContaining([importFailure, bindingFailure]),
+		);
+
+		const namespaceImport = baselineServiceOverrides
+			.replace(
+				notificationImport,
+				'import * as notificationOverrides from "@codingame/monaco-vscode-notifications-service-override";\n',
+			)
+			.replace(notificationSpread, "    ...notificationOverrides.default(),\n");
+		expect(validateDialogServiceOverride(namespaceImport)).toEqual(
+			expect.arrayContaining([importFailure, spreadFailure, bindingFailure]),
+		);
+
+		const dynamicImport = baselineServiceOverrides.replace(
+			notificationImport,
+			'const getNotificationServiceOverride = (await import("@codingame/monaco-vscode-notifications-service-override")).default;\n',
+		);
+		expect(validateDialogServiceOverride(dynamicImport)).toContain(
+			importFailure,
+		);
+
+		const hiddenDynamicImport = baselineServiceOverrides.replace(
+			"export function createServiceOverrides()",
+			'void import("@codingame/monaco-vscode-notifications-" + "service-override");\n\nexport function createServiceOverrides()',
+		);
+		expect(validateDialogServiceOverride(hiddenDynamicImport)).toContain(
+			importFailure,
+		);
+
+		const wrongModule = baselineServiceOverrides.replace(
+			notificationImport,
+			'import getNotificationServiceOverride from "@codingame/monaco-vscode-notifications-service-override/internal";\n',
+		);
+		expect(validateDialogServiceOverride(wrongModule)).toContain(importFailure);
+
+		const duplicateSpread = baselineServiceOverrides.replace(
+			notificationSpread,
+			`${notificationSpread}${notificationSpread}`,
+		);
+		expect(validateDialogServiceOverride(duplicateSpread)).toContain(
+			spreadFailure,
+		);
+
+		const wrongOrder = baselineServiceOverrides
+			.replace(notificationSpread, "")
+			.replace(
+				"    ...getExplorerServiceOverride(),\n",
+				`    ...getExplorerServiceOverride(),\n${notificationSpread}`,
+			);
+		expect(validateDialogServiceOverride(wrongOrder)).toContain(spreadFailure);
+
+		const withArguments = baselineServiceOverrides.replace(
+			"...getNotificationServiceOverride()",
+			"...getNotificationServiceOverride({ unsafe: true })",
+		);
+		expect(validateDialogServiceOverride(withArguments)).toContain(
+			spreadFailure,
+		);
+	});
+
+	it("rejects notification override references outside app/services.ts", () => {
+		for (const source of [
+			'import notifications from "@codingame/monaco-vscode-notifications-service-override";',
+			'import * as notifications from "@codingame/monaco-vscode-notifications-service-override";',
+			'void import("@codingame/monaco-vscode-notifications-service-override");',
+			'void import("@codingame/monaco-vscode-notifications-" + "service-override");',
+			'export * from "@codingame/monaco-vscode-notifications-service-override/internal";',
+			'const moduleName = "@codingame/monaco-vscode-notifications-service-override";',
+		]) {
+			expect(
+				validateNotificationOverrideImportBoundary(
+					source,
+					"app/features/unsafe-notification.ts",
+				),
+			).toEqual([
+				"app/features/unsafe-notification.ts imports the notifications override outside app/services.ts",
+			]);
+		}
+	});
+
 	it("rejects global confirm and file-dialog tokens across every app source", () => {
 		for (const source of [
 			'window.confirm("unsafe")',

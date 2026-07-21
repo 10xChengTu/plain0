@@ -133,6 +133,47 @@ describe("exact Workbench patch contracts", () => {
 		}
 	});
 
+	it("keeps handled progress failures on the original promise only", async () => {
+		const patchPath =
+			"patches/@codingame__monaco-vscode-view-common-service-override@35.0.1.patch";
+		const baselineInput = await baseline();
+		const baselineSource = baselineInput.patchSources.get(patchPath);
+		expect(baselineSource.match(/observeProgressSettlement/gu)).toHaveLength(4);
+		expect(baselineSource).toContain(
+			"void promise.then(safeCleanup, safeCleanup);",
+		);
+
+		for (const mutation of [
+			{
+				from: "void promise.then(safeCleanup, safeCleanup);",
+				to: "void promise.finally(safeCleanup);",
+			},
+			{
+				from: "observeProgressSettlement(this.promise, () => {",
+				to: "this.promise.finally(() => {",
+			},
+			{
+				from: "observeProgressSettlement(notificationCleanupPromise, () => {",
+				to: "notificationCleanupPromise.finally(() => {",
+			},
+			{
+				from: "observeProgressSettlement(promise, () => {",
+				to: "promise.finally(() => {",
+			},
+		]) {
+			const input = await baseline();
+			const source = input.patchSources.get(patchPath);
+			expect(source).toContain(mutation.from);
+			input.patchSources.set(
+				patchPath,
+				source.replace(mutation.from, mutation.to),
+			);
+			expect(validateWorkbenchPatchSet(input)).toContain(
+				`${patchPath} differs from its exact audited SHA-256`,
+			);
+		}
+	});
+
 	it("requires both private confirmed-delete transport patches", async () => {
 		for (const patchPath of [
 			"patches/@codingame__monaco-vscode-base-service-override@35.0.1.patch",
@@ -331,6 +372,19 @@ describe("exact Workbench patch contracts", () => {
 			dialogsSnapshot.replace(`35.0.1(patch_hash=${apiHash})`, "35.0.1"),
 		);
 		expect(validateWorkbenchPatchSet(dialogsBare)).toContain(
+			`pnpm-lock.yaml snapshot graph for @codingame/monaco-vscode-api must use only 35.0.1(patch_hash=${apiHash})`,
+		);
+
+		const notificationsBare = await baseline();
+		const notificationsSnapshot = `  '@codingame/monaco-vscode-notifications-service-override@35.0.1':
+    dependencies:
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=${apiHash})`;
+		expect(notificationsBare.lockfile).toContain(notificationsSnapshot);
+		notificationsBare.lockfile = notificationsBare.lockfile.replace(
+			notificationsSnapshot,
+			notificationsSnapshot.replace(`35.0.1(patch_hash=${apiHash})`, "35.0.1"),
+		);
+		expect(validateWorkbenchPatchSet(notificationsBare)).toContain(
 			`pnpm-lock.yaml snapshot graph for @codingame/monaco-vscode-api must use only 35.0.1(patch_hash=${apiHash})`,
 		);
 	});

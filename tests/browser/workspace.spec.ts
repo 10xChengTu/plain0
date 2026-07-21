@@ -2903,6 +2903,232 @@ test("converges both workspace roots after watcher wakes and lost-wake timer pul
 	expect(errors).toEqual([]);
 });
 
+test("shows missing-parent create failures for both workspace roots", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	await installMultiRootNativeIpcMock(page, "supported");
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+
+	const explorer = await openNativeWorkspaceExplorer(page);
+	await executePaletteCommand(
+		page,
+		"Add Folder to Workspace",
+		"Workspaces: Add Folder to Workspace...",
+	);
+	const primaryRoot = explorer.getByRole("treeitem", {
+		name: "plain-workspace",
+		exact: true,
+	});
+	const secondaryRoot = explorer.getByRole("treeitem", {
+		name: "plain-library",
+		exact: true,
+	});
+	const expandRoot = async (root: Locator): Promise<void> => {
+		if ((await root.getAttribute("aria-expanded")) !== "true") {
+			await root.click();
+			await page.keyboard.press("ArrowRight");
+		}
+		await expect(root).toHaveAttribute("aria-expanded", "true");
+	};
+	await expect(primaryRoot).toHaveCount(1);
+	await expect(secondaryRoot).toHaveCount(1);
+	await expandRoot(primaryRoot);
+	await expandRoot(secondaryRoot);
+	await expect(
+		explorer.getByRole("treeitem", { name: "README.md", exact: true }),
+	).toHaveCount(1);
+	await expect(
+		explorer.getByRole("treeitem", { name: "notes.txt", exact: true }),
+	).toHaveCount(1);
+
+	const callStart = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+		};
+		return testWindow.__PLAIN_TEST_TAURI_CALLS__.length;
+	});
+	const createCommandCount = async (command: string): Promise<number> =>
+		page.evaluate(
+			({ callStart, command }) => {
+				const testWindow = window as unknown as Window & {
+					__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+				};
+				return testWindow.__PLAIN_TEST_TAURI_CALLS__
+					.slice(callStart)
+					.filter((call) => call.command === command).length;
+			},
+			{ callStart, command },
+		);
+	const consumeCreateFailureNotification = async (): Promise<void> => {
+		const toasts = page.locator(".notifications-toasts .notification-toast");
+		await expect(toasts).toHaveCount(1);
+		const toast = toasts.first();
+		await expect(toast).toContainText(
+			"Unable to create the Plain workspace entry",
+		);
+		await expect(
+			toast.getByRole("button", { name: "Retry", exact: true }),
+		).toHaveCount(1);
+		const text = await toast.innerText();
+		expect(text).not.toContain("ENTRY_NOT_FOUND");
+		expect(text).not.toContain(nativeRootId);
+		expect(text).not.toContain(nativeSecondaryRootId);
+		expect(text).not.toMatch(/(?:\/Users\/|[A-Za-z]:\\|\\\\)/u);
+		await toast
+			.getByRole("button", {
+				name: /^Clear Notification(?: \(.+\))?$/u,
+			})
+			.click();
+		await expect(toasts).toHaveCount(0);
+	};
+
+	await primaryRoot.click();
+	await page.getByRole("button", { name: "New File...", exact: true }).click();
+	await finishExplorerNameInput(page, "missing-file-parent/new.txt");
+	await expect.poll(() => createCommandCount("workspace_create_file")).toBe(1);
+	await consumeCreateFailureNotification();
+	await expect(
+		explorer.getByRole("treeitem", {
+			name: "missing-file-parent",
+			exact: true,
+		}),
+	).toHaveCount(0);
+	await expect(
+		explorer.getByRole("treeitem", { name: "new.txt", exact: true }),
+	).toHaveCount(0);
+
+	await secondaryRoot.click();
+	await page
+		.getByRole("button", { name: "New Folder...", exact: true })
+		.click();
+	await finishExplorerNameInput(page, "missing-folder-parent/new-dir");
+	await expect
+		.poll(() => createCommandCount("workspace_create_directory"))
+		.toBe(1);
+	await consumeCreateFailureNotification();
+	await expect(
+		explorer.getByRole("treeitem", {
+			name: "missing-folder-parent",
+			exact: true,
+		}),
+	).toHaveCount(0);
+	await expect(
+		explorer.getByRole("treeitem", { name: "new-dir", exact: true }),
+	).toHaveCount(0);
+
+	const evidence = await page.evaluate(
+		({ callStart, mutationCommands }) => {
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+			};
+			const calls = testWindow.__PLAIN_TEST_TAURI_CALLS__;
+			const callsAfterStart = calls.slice(callStart);
+			const missingPrefixes = ["missing-file-parent", "missing-folder-parent"];
+			return {
+				capabilities: calls.filter(
+					({ command }) => command === "workspace_capabilities",
+				),
+				mutations: callsAfterStart.filter(({ command }) =>
+					mutationCommands.includes(command),
+				),
+				targetReads: callsAfterStart.filter(({ command, args }) => {
+					if (
+						![
+							"workspace_stat",
+							"workspace_read_file",
+							"workspace_read_dir",
+						].includes(command)
+					) {
+						return false;
+					}
+					const request = args.request as
+						{ relativePath?: unknown } | undefined;
+					return (
+						typeof request?.relativePath === "string" &&
+						missingPrefixes.some(
+							(prefix) =>
+								request.relativePath === prefix ||
+								(request.relativePath as string).startsWith(`${prefix}/`),
+						)
+					);
+				}),
+			};
+		},
+		{
+			callStart,
+			mutationCommands: nativeMutationCommands as readonly string[],
+		},
+	);
+	expect(evidence.capabilities).toEqual([
+		{ command: "workspace_capabilities", args: { request: {} } },
+	]);
+	expect(evidence.mutations).toEqual([
+		{
+			command: "workspace_create_file",
+			args: {
+				request: {
+					rootId: nativeRootId,
+					relativePath: "missing-file-parent/new.txt",
+				},
+			},
+		},
+		{
+			command: "workspace_create_directory",
+			args: {
+				request: {
+					rootId: nativeSecondaryRootId,
+					relativePath: "missing-folder-parent/new-dir",
+				},
+			},
+		},
+	]);
+	expect(evidence.targetReads).toEqual([]);
+	await expect(
+		page.locator(".tabs-container .tab").filter({ hasText: "new.txt" }),
+	).toHaveCount(0);
+	await expect(primaryRoot).toHaveCount(1);
+	await expect(secondaryRoot).toHaveCount(1);
+	await expect(
+		explorer.getByRole("treeitem", { name: "README.md", exact: true }),
+	).toHaveCount(1);
+	await expect(
+		explorer.getByRole("treeitem", { name: "notes.txt", exact: true }),
+	).toHaveCount(1);
+	await expect(
+		page.locator(".notifications-toasts .notification-toast"),
+	).toHaveCount(0);
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toHaveLength(4);
+	for (const diagnostic of consoleErrors) {
+		expect(diagnostic).not.toContain("ENTRY_NOT_FOUND");
+		expect(diagnostic).not.toContain(nativeRootId);
+		expect(diagnostic).not.toContain(nativeSecondaryRootId);
+	}
+	expect(consoleErrors[0]).toContain("FileServiceOverride.createFile");
+	expect(consoleErrors[0]).toContain(
+		"FileOperationError: Unable to create the Plain workspace entry",
+	);
+	expect(consoleErrors[1]).toBe("Unable to create the Plain workspace entry");
+	expect(consoleErrors[2]).toContain("FileServiceOverride.createFolder");
+	expect(consoleErrors[2]).toContain(
+		"FileOperationError: Unable to create the Plain workspace entry",
+	);
+	expect(consoleErrors[3]).toBe("Unable to create the Plain workspace entry");
+});
+
 test("edits both roots and routes cross-root copy and move through all-true IPC", async ({
 	page,
 }) => {
@@ -3772,14 +3998,21 @@ test("keeps the entire provider readonly when one platform capability is false",
 	try {
 		await src.click();
 		await page.keyboard.press("ControlOrMeta+Backspace");
-		await expect
-			.poll(
-				() =>
-					consoleWarnings.filter((message) =>
-						message.includes("The permanent delete selection is invalid."),
-					).length,
-			)
-			.toBe(1);
+		const warningToast = page
+			.locator(".notifications-toasts .notification-toast")
+			.filter({ hasText: "The permanent delete selection is invalid." });
+		await expect(warningToast).toHaveCount(1);
+		await expect(warningToast).toContainText(
+			"The permanent delete selection is invalid.",
+		);
+		await expect(page.getByRole("dialog")).toHaveCount(1);
+		await warningToast.hover();
+		await warningToast
+			.getByRole("button", {
+				name: /^Clear Notification(?: \(.+\))?$/u,
+			})
+			.click();
+		await expect(warningToast).toHaveCount(0);
 		await expect(page.getByRole("dialog")).toHaveCount(0);
 		await expect
 			.poll(async () =>
@@ -3835,8 +4068,5 @@ test("keeps the entire provider readonly when one platform capability is false",
 	expect(dialogs).toEqual([]);
 	expect(pageErrors).toEqual([]);
 	expect(consoleErrors).toEqual([]);
-	expect(consoleWarnings).toHaveLength(1);
-	expect(consoleWarnings[0]).toContain(
-		"The permanent delete selection is invalid.",
-	);
+	expect(consoleWarnings).toEqual([]);
 });

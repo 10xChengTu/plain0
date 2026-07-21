@@ -8,6 +8,7 @@ import {
 	validateDialogOverrideImportBoundary,
 	validateDialogServiceOverride,
 	validateDialogSurfaceBoundary,
+	validateNotificationOverrideImportBoundary,
 	validateFrontendEntrypointScripts,
 	validateMainCapability,
 	validateTauriApiBoundary,
@@ -50,6 +51,7 @@ const allowedDependencies = new Map([
 	["@codingame/monaco-vscode-explorer-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-files-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-model-service-override", "35.0.1"],
+	["@codingame/monaco-vscode-notifications-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-textmate-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-theme-defaults-default-extension", "35.0.1"],
 	["@codingame/monaco-vscode-theme-service-override", "35.0.1"],
@@ -364,6 +366,12 @@ for (const file of appFiles) {
 		fail(failure);
 	}
 	for (const failure of validateDialogSurfaceBoundary(source, relative)) {
+		fail(failure);
+	}
+	for (const failure of validateNotificationOverrideImportBoundary(
+		source,
+		relative,
+	)) {
 		fail(failure);
 	}
 	if (

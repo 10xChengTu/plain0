@@ -110,15 +110,48 @@ const DIALOG_SERVICE_IMPLEMENTATION_MODULE = `${DIALOGS_OVERRIDE_ROOT_MODULE}/vs
 const DIALOG_HANDLER_CONTRIBUTION_MODULE = `${DIALOGS_OVERRIDE_ROOT_MODULE}/vscode/vs/workbench/browser/parts/dialogs/dialog.web.contribution`;
 const DIALOG_SERVICE_TOKEN_MODULE =
 	"@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service";
+const NOTIFICATIONS_OVERRIDE_ROOT_MODULE =
+	"@codingame/monaco-vscode-notifications-service-override";
 const EXPECTED_SERVICE_OVERRIDE_CALLS = Object.freeze([
 	"getConfigurationServiceOverride",
 	"getFilesServiceOverride",
 	"getModelServiceOverride",
 	"getWorkbenchServiceOverride",
+	"getNotificationServiceOverride",
 	"getExplorerServiceOverride",
 	"getThemeServiceOverride",
 	"getTextmateServiceOverride",
 ]);
+
+function staticStringValue(node) {
+	if (
+		ts.isParenthesizedExpression(node) ||
+		ts.isAsExpression(node) ||
+		ts.isTypeAssertionExpression(node) ||
+		ts.isSatisfiesExpression(node)
+	) {
+		return staticStringValue(node.expression);
+	}
+	if (ts.isStringLiteralLike(node)) {
+		return node.text;
+	}
+	if (
+		ts.isBinaryExpression(node) &&
+		node.operatorToken.kind === ts.SyntaxKind.PlusToken
+	) {
+		const left = staticStringValue(node.left);
+		const right = staticStringValue(node.right);
+		return left === undefined || right === undefined ? undefined : left + right;
+	}
+	return undefined;
+}
+
+function isNotificationsOverrideModule(moduleName) {
+	return (
+		moduleName === NOTIFICATIONS_OVERRIDE_ROOT_MODULE ||
+		moduleName.startsWith(`${NOTIFICATIONS_OVERRIDE_ROOT_MODULE}/`)
+	);
+}
 
 export function validateDialogOverrideImportBoundary(source, relativePath) {
 	const sourceFile = ts.createSourceFile(
@@ -143,6 +176,44 @@ export function validateDialogOverrideImportBoundary(source, relativePath) {
 	const normalizedPath = relativePath.replaceAll("\\", "/");
 	return importsDialogsOverride && normalizedPath !== "app/services.ts"
 		? [`${normalizedPath} imports the dialogs override outside app/services.ts`]
+		: [];
+}
+
+export function validateNotificationOverrideImportBoundary(
+	source,
+	relativePath,
+) {
+	const sourceFile = ts.createSourceFile(
+		relativePath,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	let referencesNotificationsOverride = false;
+	function visit(node) {
+		if (
+			ts.isStringLiteralLike(node) &&
+			isNotificationsOverrideModule(node.text)
+		) {
+			referencesNotificationsOverride = true;
+		}
+		if (
+			ts.isCallExpression(node) &&
+			node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+			node.arguments.length > 0 &&
+			isNotificationsOverrideModule(staticStringValue(node.arguments[0]) ?? "")
+		) {
+			referencesNotificationsOverride = true;
+		}
+		ts.forEachChild(node, visit);
+	}
+	visit(sourceFile);
+	const normalizedPath = relativePath.replaceAll("\\", "/");
+	return referencesNotificationsOverride && normalizedPath !== "app/services.ts"
+		? [
+				`${normalizedPath} imports the notifications override outside app/services.ts`,
+			]
 		: [];
 }
 
@@ -287,6 +358,54 @@ export function validateDialogServiceOverride(source) {
 	) {
 		failures.push(
 			"app/services.ts must import only the direct IDialogService token from its fixed API module",
+		);
+	}
+
+	const notificationModuleReferences = [];
+	let hasDynamicNotificationImport = false;
+	function collectNotificationModuleReferences(node) {
+		if (
+			ts.isStringLiteralLike(node) &&
+			isNotificationsOverrideModule(node.text)
+		) {
+			notificationModuleReferences.push(node.text);
+		}
+		if (
+			ts.isCallExpression(node) &&
+			node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+			node.arguments.length > 0 &&
+			isNotificationsOverrideModule(staticStringValue(node.arguments[0]) ?? "")
+		) {
+			hasDynamicNotificationImport = true;
+		}
+		ts.forEachChild(node, collectNotificationModuleReferences);
+	}
+	collectNotificationModuleReferences(sourceFile);
+	const notificationImports = sourceFile.statements.filter(
+		(statement) =>
+			ts.isImportDeclaration(statement) &&
+			ts.isStringLiteral(statement.moduleSpecifier) &&
+			(statement.moduleSpecifier.text === NOTIFICATIONS_OVERRIDE_ROOT_MODULE ||
+				statement.moduleSpecifier.text.startsWith(
+					`${NOTIFICATIONS_OVERRIDE_ROOT_MODULE}/`,
+				)),
+	);
+	const notificationImport = notificationImports.filter(
+		(statement) =>
+			statement.moduleSpecifier.text === NOTIFICATIONS_OVERRIDE_ROOT_MODULE,
+	);
+	if (
+		notificationModuleReferences.length !== 1 ||
+		hasDynamicNotificationImport ||
+		notificationImports.length !== 1 ||
+		notificationImport.length !== 1 ||
+		notificationImport[0].importClause?.isTypeOnly === true ||
+		notificationImport[0].importClause?.name?.text !==
+			"getNotificationServiceOverride" ||
+		notificationImport[0].importClause?.namedBindings !== undefined
+	) {
+		failures.push(
+			"app/services.ts must import the exact notifications override as getNotificationServiceOverride",
 		);
 	}
 
@@ -465,6 +584,7 @@ export function validateDialogServiceOverride(source) {
 
 	let dialogBindingReferences = 0;
 	let dialogServiceTokenReferences = 0;
+	let notificationOverrideBindingReferences = 0;
 	let fileDialogServiceReference = false;
 	let globalConfirmReference = false;
 	function visit(node) {
@@ -474,6 +594,9 @@ export function validateDialogServiceOverride(source) {
 			}
 			if (node.text === "IDialogService") {
 				dialogServiceTokenReferences += 1;
+			}
+			if (node.text === "getNotificationServiceOverride") {
+				notificationOverrideBindingReferences += 1;
 			}
 			if (node.text === "IFileDialogService") {
 				fileDialogServiceReference = true;
@@ -498,6 +621,11 @@ export function validateDialogServiceOverride(source) {
 	if (dialogServiceTokenReferences !== 2) {
 		failures.push(
 			"IDialogService may appear only in its import and output key",
+		);
+	}
+	if (notificationOverrideBindingReferences !== 2) {
+		failures.push(
+			"getNotificationServiceOverride may appear only in its exact import and audited service spread",
 		);
 	}
 	if (fileDialogServiceReference || globalConfirmReference) {

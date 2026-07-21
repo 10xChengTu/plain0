@@ -261,6 +261,7 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/services.ts:@codingame/monaco-vscode-explorer-service-override",
 	"app/services.ts:@codingame/monaco-vscode-files-service-override",
 	"app/services.ts:@codingame/monaco-vscode-model-service-override",
+	"app/services.ts:@codingame/monaco-vscode-notifications-service-override",
 	"app/services.ts:@codingame/monaco-vscode-textmate-service-override",
 	"app/services.ts:@codingame/monaco-vscode-theme-service-override",
 	"app/services.ts:@codingame/monaco-vscode-workbench-service-override",
