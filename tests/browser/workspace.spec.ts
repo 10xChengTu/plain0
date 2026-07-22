@@ -4779,3 +4779,101 @@ test("keeps the entire provider readonly when one platform capability is false",
 	expect(consoleErrors).toEqual([]);
 	expect(consoleWarnings).toEqual([]);
 });
+
+test("keeps single preview tab until pin promotes the editor", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	const nativeDialogs: string[] = [];
+	await installNativeIpcMock(page, "arrayBuffer", "supported");
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			errors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+
+	const explorer = await openNativeWorkspaceExplorer(page);
+	const readme = explorer.getByRole("treeitem", {
+		name: "README.md",
+		exact: true,
+	});
+	const src = explorer.getByRole("treeitem", { name: "src", exact: true });
+
+	const tabs = page.locator(".tabs-container .tab");
+	// The upstream `multiEditorTabsControl` marks a non-pinned (preview) tab's
+	// label with an `italic` class (see redrawTabLabel's `italic:
+	// !this.tabsModel.isPinned(editor)` and IconLabel#setLabel pushing
+	// "italic" onto `.monaco-icon-label`); pinning clears it. This is the
+	// real DOM marker probed and frozen for this test, not a guess.
+	const previewMarker = (tab: Locator): Locator =>
+		tab.locator(".monaco-icon-label.italic");
+
+	// Single click on a file in Explorer opens it as the sole preview tab.
+	await readme.click();
+	await expect(tabs).toHaveCount(1);
+	const readmeTab = tabs.filter({ hasText: "README.md" });
+	await expect(readmeTab).toHaveCount(1);
+	await expect(previewMarker(readmeTab)).toHaveCount(1);
+	await expect(
+		page.getByRole("code").filter({ hasText: "Read-only Explorer fixture." }),
+	).toBeVisible();
+
+	// Single click on a second file replaces the preview slot: still one tab,
+	// and README's tab is gone.
+	await src.click();
+	await page.keyboard.press("ArrowRight");
+	await expect(src).toHaveAttribute("aria-expanded", "true");
+	const main = explorer.getByRole("treeitem", {
+		name: "main.ts",
+		exact: true,
+	});
+	await main.click();
+	await expect(tabs).toHaveCount(1);
+	const mainTab = tabs.filter({ hasText: "main.ts" });
+	await expect(mainTab).toHaveCount(1);
+	await expect(previewMarker(mainTab)).toHaveCount(1);
+	await expect(tabs.filter({ hasText: "README.md" })).toHaveCount(0);
+	await expect(
+		page.getByRole("code").filter({ hasText: "export const plain = true;" }),
+	).toBeVisible();
+
+	// Double-clicking the preview tab pins it: the italic marker disappears
+	// and no extra tab is created.
+	await mainTab.dblclick();
+	await expect(tabs).toHaveCount(1);
+	await expect(previewMarker(mainTab)).toHaveCount(0);
+
+	// Opening a third file (the now-closed README.md) creates a second,
+	// preview tab; the pinned main.ts tab is retained untouched.
+	await readme.click();
+	await expect(tabs).toHaveCount(2);
+	const pinnedMainTab = tabs.filter({ hasText: "main.ts" });
+	await expect(pinnedMainTab).toHaveCount(1);
+	await expect(previewMarker(pinnedMainTab)).toHaveCount(0);
+	const readmePreviewTab = tabs.filter({ hasText: "README.md" });
+	await expect(readmePreviewTab).toHaveCount(1);
+	await expect(previewMarker(readmePreviewTab)).toHaveCount(1);
+
+	// Editing the preview editor's content pins it via the dirty-state path
+	// (`onDidChangeEditorDirty` calls `pinEditor`), independent of double click.
+	await page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "Read-only Explorer fixture." })
+		.click();
+	await page.keyboard.type("X");
+	await expect(previewMarker(readmePreviewTab)).toHaveCount(0);
+	await expect(tabs).toHaveCount(2);
+	await expect(pinnedMainTab).toHaveCount(1);
+	await expect(previewMarker(pinnedMainTab)).toHaveCount(0);
+
+	await expect(
+		page.locator(".notifications-toasts .notification-toast"),
+	).toHaveCount(0);
+	expect(nativeDialogs).toEqual([]);
+	expect(errors).toEqual([]);
+});

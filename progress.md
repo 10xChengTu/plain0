@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F030` Editing, preview and hot-exit recovery。
-- 当前最小工作项：实现并验收 S1 preview/固定 tab 证据切片。
+- 当前最小工作项：实现并验收 S2 外部删除精确 DELETED 切片。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -118,11 +118,13 @@
 - [x] 分工切换与 `F020` 闭环：用户指示真实 Tauri 桌面（Computer Use / 人工驱动）验收自 2026-07-22 起不再由实现方执行，全部登记到新建 `docs/e2e-handover.md` 交接 Codex 统一执行并回写 evidence，`docs/testing.md`「真实 Tauri E2E」与 `AGENTS.md` 验收清单同步更新为指向该交接清单。`F020` 据此以现有 Browser E2E（14/14，含重复 5 次的 move+delete 失败矩阵 10/10）、Rust 255/255、独立对抗复核后 132/132 的 Harness 边界单测，以及既往真实单根桌面验收（绝对路径 `.app` 启动、目录选择器打开 workspace、空文件创建/31 字节精确保存/目录创建/同根重命名/文件复制并磁盘核对、外部增删经 FSEvents 首轮轮询收敛、DOM 确认框取消路径、用户即时确认后的正向永久删除并磁盘核实）闭环；真实 multi-root 桌面矩阵（双根投影、跨根磁盘写链、每根 FSEvents、root 生命周期）与 multi-root 永久删除桌面变体作为显式 `platformGaps` 登记为 `docs/e2e-handover.md` 的 E2E-001/E2E-002 交接 Codex 执行，`features.json` `F020` evidence 同步引用。本次真实桌面验收未能完成 multi-root 矩阵的原因如实记录：Computer Use 合成键盘在真人键鼠活动时会被让位中止，`pnpm tauri:dev:e2e` 的裸二进制无 `CFBundleIdentifier`、不经 LaunchServices 因而桌面自动化授权层结构性不可见、不可用于取样；两点均已写入 `docs/testing.md` 与 `docs/e2e-handover.md` 的执行环境纪律。
 - [x] 完成验收现场清理：临时 fixture、Computer Use 截图等探针产物与 3.6G 的 `src-tauri/target` 构建产物均已删除，工作树恢复干净，`git status --short` 无残留中间文件。
 - [x] 完成 `F030` 的固定 GitHub 调研与技术方案冻结（docs/research/2026-07-22-editing-hot-exit.md）：双路调研（固定源码 + 仓库审计）交叉复核并裁决矛盾——`missing-services.js` 已为 working copy 系列服务注册桩实现，编辑/保存今日可用（Browser E2E 14/14 为经验证据），F030 是「桩升级为真服务」而非「从不可用到可用」；preview/固定 tab 的真实上游链已随 workbench/view-common override 连锁引入且 `enablePreview` 默认 true；orphan 判定只认精确本资源 `DELETED`（`UPDATED` 不参与、目录 `DELETED` 向下命中），Plain 粗粒度 watcher 因此对外部删除已打开文件无自动反应；保存冲突链（etag → `FILE_MODIFIED_SINCE` → Plain 自有 Reload/Save As/Details）已在、缺测试证据。冻结三个决策：外部删除用「已打开 watch 集合的有界 stat 复核 → 精确单资源 DELETED」；working-copy 以 `@codingame/monaco-vscode-working-copy-service-override@35.0.1` 的 `storage: null` 组合激活（排除假 `editor-service-override` 与 IndexedDB 持久层）；hot-exit backup 新建 Rust capability 域（app data 目录、staged 原子写、per-window gate、窗口销毁清理）+ `PlainWorkingCopyBackupService` 填坑 + 自定义 tracker（不依赖 `beforeunload`），真实关窗握手与杀进程恢复登记交接清单。切片拆为 S1 preview 证据、S2 外部删除精确 DELETED、S3 working-copy 激活、S4 Rust backup 域、S5 恢复链、S6 桌面项登记。
+- [x] 完成 `F030` S1 preview/固定 tab 证据切片：excluded-surface 复核确认 `app/excluded-surface-policy.ts` 的六类正则（chat/agent/mcp、认证、sync、extensions、remote、notebook/tasks/testing）不匹配任何 tab/pin 相关命令或视图（`workbench.action.pinEditor`/`unpinEditor`/tab 右键菜单等），无裁剪冲突，未放宽排除面。新增 Browser E2E `keeps single preview tab until pin promotes the editor`（`tests/browser/workspace.spec.ts`），未改动 `installNativeIpcMock`/`installMultiRootNativeIpcMock` 两个受 Harness 锁定的 fixture 函数，只复用单根 `supported` 模式已有的 README.md 与嵌套 `src/main.ts` 两个文件即覆盖完整矩阵：单击 A 成第一个 preview tab、单击 B 顶替 preview 槽（tab 数仍为 1、A 的 tab 消失）、双击 B 的 tab 转 pinned、再单击 A（此时已关闭）产生第二个 tab 且 B 的 pinned tab 保留、在 A 的 preview 编辑器内输入字符经脏状态路径转 pinned。真实 DOM 探针（读取 `@codingame/monaco-vscode-api@35.0.1` 源码而非猜测）确定 preview 态的唯一标记是 `.tab` 内 `.monaco-icon-label.italic`（`multiEditorTabsControl.redrawTabLabel` 的 `italic: !this.tabsModel.isPinned(editor)` 经 `IconLabel#setLabel` 把 `"italic"` 类别推到 `.monaco-icon-label` 根节点；pin 后类别消失），`.tab` 本身没有独立的 `preview` CSS 类。同时确认并冻结两处与研究文档假设一致的真实行为：默认 `workbench.list.openMode` 为 `singleClick`，Explorer 单击文件即以 `pinned:false` 打开为 preview（`ResourceNavigator.onPointer`），双击文件直接以 `pinned:true` 打开（`onMouseDblClick`）——与研究文档"Explorer 双击文件打开即 pinned"一致；tab 双击经 `groupView.pinEditor` 促升，编辑触发的 pin 经 `onDidChangeEditorDirty → pinEditor`。探针同时证实只读 provider 能力下 Monaco 编辑器完全拒绝键盘输入（复用既有 "keeps the entire provider readonly" 测试的既定事实），因此编辑触发 pin 的子路径必须用 `supported` 模式验证；改为整条新测试统一使用单根 `supported` 模式（不新增 fixture 文件、不改 fixture 函数），覆盖全部子路径且避免依赖不确定行为。
+- [x] S1 切片通过完整验收：聚焦新测试 1/1 通过，`--repeat-each=3` 3/3 稳定；全部 Browser E2E 由 14/14 增至 15/15；完整 `pnpm check` 通过 30 个 TypeScript/JavaScript 测试文件、607 个用例，格式、双 TypeScript 类型检查、严格 lint、`check:features`、生产构建（2277 模块）、架构守卫与 2112-source/203-debt bundle 基线全部通过，Rust 255/255；`pnpm run check:features` 与 `pnpm exec vitest run tests/unit/feature-contract.test.mjs`（5/5）单独复核均通过，进度文档合同未破。验收后按用户规则删除 `src-tauri/target`（2.4G）。本切片无生产代码改动，只新增一条 Browser 测试。
 
 ## 下一步
 
-1. 实现并验收 S1 preview/固定 tab 证据切片。
-2. 按方案顺序推进 S2-S5，S6 桌面项登记 `docs/e2e-handover.md`。
+1. 实现并验收 S2 外部删除精确 DELETED 切片。
+2. 按方案顺序推进 S3-S5，S6 桌面项登记 `docs/e2e-handover.md`。
 3. 桌面 E2E 由 Codex 按 `docs/e2e-handover.md` 交接清单执行后回写对应 feature 的 evidence。
 
 ## 当前验收命令
