@@ -29,6 +29,7 @@ import {
 	validateWorkspaceProviderCopyBoundary,
 	validateWorkspaceRustBoundary,
 	validateWorkspaceVersionedWriteBoundary,
+	validateWorkingCopyOverrideImportBoundary,
 } from "./boundary-contracts.mjs";
 import {
 	auditedWorkbenchPatchPaths,
@@ -59,6 +60,7 @@ const allowedDependencies = new Map([
 	["@codingame/monaco-vscode-theme-defaults-default-extension", "35.0.1"],
 	["@codingame/monaco-vscode-theme-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-workbench-service-override", "35.0.1"],
+	["@codingame/monaco-vscode-working-copy-service-override", "35.0.1"],
 	["@tauri-apps/api", "2.11.1"],
 	["monaco-editor", "npm:@codingame/monaco-vscode-editor-api@35.0.1"],
 ]);
@@ -372,6 +374,12 @@ for (const file of appFiles) {
 		fail(failure);
 	}
 	for (const failure of validateNotificationOverrideImportBoundary(
+		source,
+		relative,
+	)) {
+		fail(failure);
+	}
+	for (const failure of validateWorkingCopyOverrideImportBoundary(
 		source,
 		relative,
 	)) {

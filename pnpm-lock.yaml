@@ -52,6 +52,9 @@ importers:
       '@codingame/monaco-vscode-workbench-service-override':
         specifier: 35.0.1
         version: 35.0.1
+      '@codingame/monaco-vscode-working-copy-service-override':
+        specifier: 35.0.1
+        version: 35.0.1
       '@tauri-apps/api':
         specifier: 2.11.1
         version: 2.11.1
@@ -157,6 +160,9 @@ packages:
 
   '@codingame/monaco-vscode-workbench-service-override@35.0.1':
     resolution: {integrity: sha512-9KnyoG1L1vE/H1WpxD0n6BSro7Vw+BHRXfabmUNp2OQxyj2ihTcnoblGS50gX1aLfSIfz111llD2d8zMtocaBQ==}
+
+  '@codingame/monaco-vscode-working-copy-service-override@35.0.1':
+    resolution: {integrity: sha512-75YvwXorpzVibOjrIqqmeQSgfhK/tYjKZtgyfNE3FA+1TyHM89xU+UI32vfacoIRtbiWSaQ4XYPxhGk/wnLNtA==}
 
   '@emnapi/core@1.11.1':
     resolution: {integrity: sha512-RSvbQmHzdKzNsLYa/wHrbc3KN4sYLKAdPZxqiM2HATqv/SBk2/ENSHpvXGaLOMcsAyz0poEGqkmmKYG3OWiJEQ==}
@@ -976,6 +982,11 @@ snapshots:
       '@codingame/monaco-vscode-view-common-service-override': 35.0.1(patch_hash=0682d0c1a4c7d8e8eb0c975d216becdedda28245857e7aab17eccff8aeaf97d4)
       '@codingame/monaco-vscode-view-status-bar-service-override': 35.0.1
       '@codingame/monaco-vscode-view-title-bar-service-override': 35.0.1
+
+  '@codingame/monaco-vscode-working-copy-service-override@35.0.1':
+    dependencies:
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=184ceed92b82bccb869ca91bc322e6c01740d8eb85cd9ddde47484e8959858f6)
+      '@codingame/monaco-vscode-files-service-override': 35.0.1(patch_hash=4639136edb34a2de20a9f24c8d7bfc892c7080e444c997a8290772ce37ac0159)
 
   '@emnapi/core@1.11.1':
     dependencies:

@@ -30,6 +30,7 @@ import {
 	validateWorkspaceRustBoundary as validateWorkspaceRustBoundaryContract,
 	validateWorkspaceVersionedWriteBoundary,
 	validateWorkspaceWatcherBoundary,
+	validateWorkingCopyOverrideImportBoundary,
 } from "../../scripts/plain/boundary-contracts.mjs";
 
 const baselineWindow = {
@@ -148,6 +149,76 @@ export function createServiceOverrides() {
     ...getExplorerServiceOverride(),
     ...getThemeServiceOverride(),
     ...getTextmateServiceOverride(),
+    [IDialogService.toString()]: new SyncDescriptor(
+      DialogService,
+      undefined,
+      true,
+    ),
+    [ILanguageStatusService.toString()]: new SyncDescriptor(
+      EmptyLanguageStatusService,
+      [],
+      true,
+    ),
+  };
+}
+`;
+
+// Mirrors the real app/services.ts shape: the two Plain workspace
+// SyncDescriptors plus the two hand-selected working-copy SyncDescriptors
+// must all be present together as the exact closed middle-descriptor set.
+const workingCopyServiceOverridesFixture = `
+import getConfigurationServiceOverride from "@codingame/monaco-vscode-configuration-service-override";
+import "@codingame/monaco-vscode-dialogs-service-override/vscode/vs/workbench/browser/parts/dialogs/dialog.web.contribution";
+import { DialogService } from "@codingame/monaco-vscode-dialogs-service-override/vscode/vs/workbench/services/dialogs/common/dialogService";
+import getExplorerServiceOverride from "@codingame/monaco-vscode-explorer-service-override";
+import getFilesServiceOverride from "@codingame/monaco-vscode-files-service-override";
+import getModelServiceOverride from "@codingame/monaco-vscode-model-service-override";
+import getNotificationServiceOverride from "@codingame/monaco-vscode-notifications-service-override";
+import getTextmateServiceOverride from "@codingame/monaco-vscode-textmate-service-override";
+import getThemeServiceOverride from "@codingame/monaco-vscode-theme-service-override";
+import getWorkbenchServiceOverride from "@codingame/monaco-vscode-workbench-service-override";
+import { WorkingCopyEditorService } from "@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService";
+import { WorkingCopyService } from "@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyService";
+import { IDialogService } from "@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service";
+import { SyncDescriptor } from "@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors";
+import { IWorkspacesService } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspaces/common/workspaces.service";
+import { ILanguageStatusService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/languageStatus/common/languageStatusService.service";
+import { IWorkingCopyEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService.service";
+import { IWorkingCopyService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyService.service";
+import { IWorkspaceEditingService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workspaces/common/workspaceEditing.service";
+import { EmptyLanguageStatusService } from "./services/empty-language-status";
+import { PlainWorkspaceEditingService, PlainWorkspacesService } from "./services/plain-workspace-services";
+
+export function createServiceOverrides() {
+  return {
+    ...getConfigurationServiceOverride(),
+    ...getFilesServiceOverride(),
+    ...getModelServiceOverride(),
+    ...getWorkbenchServiceOverride(),
+    ...getNotificationServiceOverride(),
+    ...getExplorerServiceOverride(),
+    ...getThemeServiceOverride(),
+    ...getTextmateServiceOverride(),
+    [IWorkspaceEditingService.toString()]: new SyncDescriptor(
+      PlainWorkspaceEditingService,
+      [],
+      true,
+    ),
+    [IWorkspacesService.toString()]: new SyncDescriptor(
+      PlainWorkspacesService,
+      [],
+      true,
+    ),
+    [IWorkingCopyService.toString()]: new SyncDescriptor(
+      WorkingCopyService,
+      [],
+      false,
+    ),
+    [IWorkingCopyEditorService.toString()]: new SyncDescriptor(
+      WorkingCopyEditorService,
+      [],
+      false,
+    ),
     [IDialogService.toString()]: new SyncDescriptor(
       DialogService,
       undefined,
@@ -627,6 +698,114 @@ describe("Plain Workbench service override Harness", () => {
 		);
 		expect(validateDialogServiceOverride(withArguments)).toContain(
 			spreadFailure,
+		);
+	});
+
+	it("locks IWorkingCopyService/IWorkingCopyEditorService to their exact class subpaths, never the aggregating package entry point", () => {
+		expect(
+			validateDialogServiceOverride(workingCopyServiceOverridesFixture),
+		).toEqual([]);
+		expect(
+			validateWorkingCopyOverrideImportBoundary(
+				workingCopyServiceOverridesFixture,
+				"app/services.ts",
+			),
+		).toEqual([]);
+
+		const importFailure =
+			"app/services.ts must import only the exact WorkingCopyService and WorkingCopyEditorService class subpaths";
+		const referenceFailure =
+			"WorkingCopyService and WorkingCopyEditorService may appear only in their exact imports and audited descriptors";
+		const middleDescriptorFailure =
+			"createServiceOverrides must keep the exact hand-selected working-copy and workspace service descriptors";
+		const orderFailure =
+			"createServiceOverrides must keep IDialogService as the final Workbench override before language status";
+		const aggregatingEntryPointFailure =
+			"app/services.ts must not import the working-copy-service-override aggregating entry point";
+
+		// Swapping the exact submodule import for the package's aggregating
+		// default export must be rejected: that entry point unconditionally
+		// registers BrowserWorkingCopyBackupTracker and
+		// WorkingCopyHistoryTracker as real contributions, and the latter
+		// breaks every save with an unhandled cloneFile rejection.
+		const aggregatingImport = workingCopyServiceOverridesFixture
+			.replace(
+				'import { WorkingCopyEditorService } from "@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService";\nimport { WorkingCopyService } from "@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyService";\n',
+				'import getWorkingCopyServiceOverride from "@codingame/monaco-vscode-working-copy-service-override";\n',
+			)
+			.replace(
+				"    [IWorkingCopyService.toString()]: new SyncDescriptor(\n      WorkingCopyService,\n      [],\n      false,\n    ),\n    [IWorkingCopyEditorService.toString()]: new SyncDescriptor(\n      WorkingCopyEditorService,\n      [],\n      false,\n    ),\n",
+				"    ...getWorkingCopyServiceOverride({ storage: null }),\n",
+			);
+		expect(
+			validateWorkingCopyOverrideImportBoundary(
+				aggregatingImport,
+				"app/services.ts",
+			),
+		).toContain(aggregatingEntryPointFailure);
+
+		const outsideServices = validateWorkingCopyOverrideImportBoundary(
+			workingCopyServiceOverridesFixture,
+			"app/features/unsafe-working-copy.ts",
+		);
+		expect(outsideServices).toContain(
+			"app/features/unsafe-working-copy.ts imports the working-copy override outside app/services.ts",
+		);
+
+		const wrongModule = workingCopyServiceOverridesFixture.replace(
+			"@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyService",
+			"@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyServiceOther",
+		);
+		expect(validateDialogServiceOverride(wrongModule)).toContain(importFailure);
+
+		const aliasedClass = workingCopyServiceOverridesFixture.replace(
+			"import { WorkingCopyService } from",
+			"import { WorkingCopyService as UnsafeWorkingCopyService } from",
+		);
+		expect(validateDialogServiceOverride(aliasedClass)).toContain(
+			importFailure,
+		);
+
+		const thirdArgumentFlipped = workingCopyServiceOverridesFixture.replace(
+			"      WorkingCopyService,\n      [],\n      false,\n",
+			"      WorkingCopyService,\n      [],\n      true,\n",
+		);
+		expect(validateDialogServiceOverride(thirdArgumentFlipped)).toContain(
+			middleDescriptorFailure,
+		);
+
+		const missingWorkingCopyEditor = workingCopyServiceOverridesFixture
+			.replace(
+				'import { WorkingCopyEditorService } from "@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService";\n',
+				"",
+			)
+			.replace(
+				'import { IWorkingCopyEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService.service";\n',
+				"",
+			)
+			.replace(
+				"    [IWorkingCopyEditorService.toString()]: new SyncDescriptor(\n      WorkingCopyEditorService,\n      [],\n      false,\n    ),\n",
+				"",
+			);
+		expect(validateDialogServiceOverride(missingWorkingCopyEditor)).toEqual(
+			expect.arrayContaining([
+				importFailure,
+				referenceFailure,
+				middleDescriptorFailure,
+			]),
+		);
+
+		const reordered = workingCopyServiceOverridesFixture
+			.replace(
+				"    [IWorkingCopyService.toString()]: new SyncDescriptor(\n      WorkingCopyService,\n      [],\n      false,\n    ),\n    [IWorkingCopyEditorService.toString()]: new SyncDescriptor(\n      WorkingCopyEditorService,\n      [],\n      false,\n    ),\n",
+				"",
+			)
+			.replace(
+				"    [IDialogService.toString()]:",
+				"    [IWorkingCopyEditorService.toString()]: new SyncDescriptor(\n      WorkingCopyEditorService,\n      [],\n      false,\n    ),\n    [IWorkingCopyService.toString()]: new SyncDescriptor(\n      WorkingCopyService,\n      [],\n      false,\n    ),\n    [IDialogService.toString()]:",
+			);
+		expect(validateDialogServiceOverride(reordered)).toEqual(
+			expect.arrayContaining([middleDescriptorFailure, orderFailure]),
 		);
 	});
 

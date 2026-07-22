@@ -343,6 +343,11 @@ async function installNativeIpcMock(
 				__PLAIN_TEST_TAURI_CALLS__: typeof calls;
 				__PLAIN_TEST_EXTERNAL_CREATE__(name: string, emitWake: boolean): void;
 				__PLAIN_TEST_EXTERNAL_DELETE__(name: string, emitWake: boolean): void;
+				__PLAIN_TEST_EXTERNAL_WRITE__(
+					name: string,
+					content: string,
+					emitWake: boolean,
+				): void;
 				__TAURI_EVENT_PLUGIN_INTERNALS__: {
 					unregisterListener(): void;
 				};
@@ -382,6 +387,30 @@ async function installNativeIpcMock(
 					throw new Error("Invalid external workspace test change.");
 				}
 				deleteNode(name);
+				watchDirty = true;
+				promoteWatchDirty();
+				if (shouldEmitWake) {
+					emitWatchWake();
+				}
+			};
+			testWindow.__PLAIN_TEST_EXTERNAL_WRITE__ = (
+				name,
+				content,
+				shouldEmitWake,
+			) => {
+				if (
+					!/^[A-Za-z0-9._-]+$/u.test(name) ||
+					typeof content !== "string" ||
+					typeof shouldEmitWake !== "boolean"
+				) {
+					throw new Error("Invalid external workspace test change.");
+				}
+				const existing = root.entries.get(name);
+				if (existing === undefined || existing.kind !== "file") {
+					throw new Error("Invalid external workspace test change.");
+				}
+				existing.bytes = encoder.encode(content);
+				existing.version = nextVersion();
 				watchDirty = true;
 				promoteWatchDirty();
 				if (shouldEmitWake) {
@@ -5017,4 +5046,200 @@ test("marks an externally deleted open file orphaned and clears it on restore, w
 
 	expect(nativeDialogs).toEqual([]);
 	expect(errors).toEqual([]);
+});
+
+test("shows a real dirty count on the tab and the Explorer activity badge, and clears both on save", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			errors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported");
+
+	const explorer = await openNativeWorkspaceExplorer(page);
+	const readme = explorer.getByRole("treeitem", {
+		name: "README.md",
+		exact: true,
+	});
+	await readme.dblclick();
+	const editor = page
+		.getByRole("code")
+		.filter({ hasText: "Read-only Explorer fixture." });
+	await expect(editor).toBeVisible();
+
+	const activeTab = page.locator(".tabs-container .tab.active");
+	// Real DOM probe (activity bar composite bar renders one badge per
+	// view-container action item; Explorer is the sole registered container
+	// here): the badge only becomes visible once IWorkingCopyService reports
+	// a non-zero dirtyCount, and its .badge-content text mirrors that count.
+	const explorerBadge = page.locator(".activitybar .badge").first();
+	const explorerBadgeContent = explorerBadge.locator(".badge-content");
+	await expect(activeTab).not.toHaveClass(/dirty/);
+	await expect(explorerBadge).toBeHidden();
+
+	await page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "Read-only Explorer fixture." })
+		.click();
+	await page.keyboard.press("End");
+	await page.keyboard.type("edited-but-unsaved");
+
+	await expect(activeTab).toHaveClass(/dirty/);
+	await expect(explorerBadge).toBeVisible();
+	await expect(explorerBadgeContent).toHaveText("1");
+	await expect(explorerBadge).toHaveAttribute("aria-label", /1 unsaved file/);
+
+	await page.keyboard.press("ControlOrMeta+S");
+	await expect
+		.poll(async () =>
+			page.evaluate(() => {
+				const testWindow = window as unknown as Window & {
+					__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+				};
+				return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+					({ command }) => command === "workspace_write_file",
+				).length;
+			}),
+		)
+		.toBe(1);
+	await expect(activeTab).not.toHaveClass(/dirty/);
+	await expect(explorerBadge).toBeHidden();
+
+	expect(nativeDialogs).toEqual([]);
+	expect(errors).toEqual([]);
+});
+
+test("shows a Reload/Save As/Details save-conflict notification when an external write races a save, keeps the model dirty and the disk untouched, and restores clean state on Reload", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported");
+
+	const explorer = await openNativeWorkspaceExplorer(page);
+	const readme = explorer.getByRole("treeitem", {
+		name: "README.md",
+		exact: true,
+	});
+	await readme.dblclick();
+	const editor = page
+		.getByRole("code")
+		.filter({ hasText: "Read-only Explorer fixture." });
+	await expect(editor).toBeVisible();
+	await page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "Read-only Explorer fixture." })
+		.click();
+	await page.keyboard.press("End");
+	await page.keyboard.type("local-unsaved-edit");
+	const activeTab = page.locator(".tabs-container .tab.active");
+	await expect(activeTab).toHaveClass(/dirty/);
+
+	// External rewrite of the same open file bumps its version behind the
+	// model's back; no wake is emitted so this stays isolated from the S2
+	// external-delete/root-refresh paths and only exercises the save-time
+	// version mismatch.
+	await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_EXTERNAL_WRITE__(
+				name: string,
+				content: string,
+				emitWake: boolean,
+			): void;
+		};
+		testWindow.__PLAIN_TEST_EXTERNAL_WRITE__(
+			"README.md",
+			"# Native workspace\n\nExternally rewritten while unsaved.\n",
+			false,
+		);
+	});
+
+	await page.keyboard.press("ControlOrMeta+S");
+	const toasts = page.locator(".notifications-toasts .notification-toast");
+	await expect(toasts).toHaveCount(1);
+	const toast = toasts.first();
+	await expect(toast).toContainText("Failed to save 'README.md'");
+	await expect(toast).toContainText(
+		"Reload the file before saving again, or use Save As to preserve your edits.",
+	);
+	await expect(
+		toast.getByRole("button", { name: "Reload", exact: true }),
+	).toHaveCount(1);
+	await expect(
+		toast.getByRole("button", { name: "Save As...", exact: true }),
+	).toHaveCount(1);
+	await expect(
+		toast.getByRole("button", { name: "Details", exact: true }),
+	).toHaveCount(1);
+	await expect(
+		toast.getByRole("button", { name: "Retry", exact: true }),
+	).toHaveCount(0);
+	await expect(toast.getByRole("button", { name: /Overwrite/ })).toHaveCount(0);
+
+	// The version mismatch is caught by FileService's own stat-based
+	// pre-write validation (files-service-override's validateWriteFile),
+	// which throws before ever invoking the provider's write path — so the
+	// native workspace_write_file command is never dispatched at all, and
+	// the workspace's stored bytes can never have been touched by this save
+	// attempt. The model is still dirty with the local edit, and reloading
+	// below proves the disk/mock tree still holds the external content
+	// rather than a silently-accepted local overwrite.
+	const writeCallCount = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+		};
+		return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+			({ command }) => command === "workspace_write_file",
+		).length;
+	});
+	expect(writeCallCount).toBe(0);
+	await expect(activeTab).toHaveClass(/dirty/);
+	await expect(
+		page.getByRole("code").filter({ hasText: "local-unsaved-edit" }),
+	).toBeVisible();
+
+	await toast.getByRole("button", { name: "Reload", exact: true }).click();
+	await expect(toasts).toHaveCount(0);
+	await expect(activeTab).not.toHaveClass(/dirty/);
+	await expect(
+		page
+			.getByRole("code")
+			.filter({ hasText: "Externally rewritten while unsaved." }),
+	).toBeVisible();
+	await expect(
+		page.getByRole("code").filter({ hasText: "local-unsaved-edit" }),
+	).toHaveCount(0);
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	// The failed save produces exactly two expected diagnostics (the model's
+	// own trace log and NotificationsAlerts' console mirror of the Error
+	// severity toast), matching the established diagnostic-mirroring pattern
+	// used across this file's other deliberate-failure scenarios.
+	expect(consoleErrors).toHaveLength(2);
+	expect(consoleErrors[0]).toContain("resulted in a save error");
+	expect(consoleErrors[0]).toContain("File Modified Since");
+	expect(consoleErrors[1]).toBe(
+		"Failed to save 'README.md'. Reload the file before saving again, or use Save As to preserve your edits.",
+	);
 });

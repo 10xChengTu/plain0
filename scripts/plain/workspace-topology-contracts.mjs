@@ -254,6 +254,8 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors",
 	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/platform/workspaces/common/workspaces.service",
 	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/languageStatus/common/languageStatusService.service",
+	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService.service",
+	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyService.service",
 	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/workspaces/common/workspaceEditing.service",
 	"app/services.ts:@codingame/monaco-vscode-configuration-service-override",
 	"app/services.ts:@codingame/monaco-vscode-dialogs-service-override/vscode/vs/workbench/browser/parts/dialogs/dialog.web.contribution",
@@ -265,6 +267,8 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/services.ts:@codingame/monaco-vscode-textmate-service-override",
 	"app/services.ts:@codingame/monaco-vscode-theme-service-override",
 	"app/services.ts:@codingame/monaco-vscode-workbench-service-override",
+	"app/services.ts:@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService",
+	"app/services.ts:@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyService",
 	"app/services/empty-language-status.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/event",
 	"app/services/empty-language-status.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle",
 	"app/services/plain-workspace-services.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/event",
@@ -1564,6 +1568,10 @@ function validateBootstrap(sourceFile) {
 						[
 							"workbench.startupEditor",
 							(editor) => isExactStringLiteral(editor, "none"),
+						],
+						[
+							"files.autoSave",
+							(autoSave) => isExactStringLiteral(autoSave, "off"),
 						],
 					]),
 			],

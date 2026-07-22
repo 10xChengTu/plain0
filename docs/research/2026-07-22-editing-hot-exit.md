@@ -48,10 +48,12 @@
 - 根级粗 `UPDATED` 的祖先命中语义：接受为既定行为并以测试锁定（clean 打开文件在无关外部变化后允许重载刷新；dirty 文件不得丢失编辑内容——上游模型对 dirty 不做静默 revert）。
 - 保存冲突 UX 维持 F020 合同（Reload/Save As/Details，无 Retry/Overwrite）。
 
-### 决策 2：working copy 激活
+### 决策 2：working copy 激活（S3 实现期间修正）
 
-- 引入 `@codingame/monaco-vscode-working-copy-service-override@35.0.1`，以 `storage: null` 组合：取真 `IWorkingCopyService`/`IWorkingCopyEditorService` 等，backup service 坑位由 Plain 自填。
-- 依赖 allowlist、bundle 基线、排除面 guard 同步更新；禁止 `editor-service-override`、禁止 `createIndexedDBProviders`。
+- 原方案假设 `...getWorkingCopyServiceOverride({ storage: null })` 整体 spread 即可只取 `IWorkingCopyService`/`IWorkingCopyEditorService`，backup service 坑位留白。实现探针推翻了这一点：该包的聚合入口 `index.js` 无条件导入 `browser/workingCopyBackupService.js` 与 `common/workingCopyHistoryService.js`，两者在模块顶层分别对 `registerWorkbenchContribution2(BrowserWorkingCopyBackupTracker, WorkbenchPhase.BlockStartup)` 与 `Registry.as(Extensions.Workbench).registerWorkbenchContribution(WorkingCopyHistoryTracker, LifecyclePhase.Restored)` 发起真实注册，且完全不受 `storage` 参数影响。`WorkingCopyHistoryTracker` 在每次真实保存时都会调用 `IWorkingCopyHistoryService.addEntry()`，其内部经 `IFileService.cloneFile()` 给 `plain-workspace:` 资源做本地历史快照，而 Plain 自有 files-service 补丁对任一端为 Plain 资源的 clone 操作总是拒绝，实测直接导致每次保存产生未捕获 rejection、破坏两个既有 E2E（`edits both roots...`、`routes all-five...`）。
+- 修正方案：不导入该包的聚合入口，而是仿照既有 `DialogService` 手选模式，直接从 `@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/{workingCopyService,workingCopyEditorService}` 两个无副作用的类子路径导入 `WorkingCopyService`/`WorkingCopyEditorService`，在 `app/services.ts` 手写两条 `SyncDescriptor` 绑定；`IWorkingCopyBackupService`/`IWorkingCopyHistoryService` 完全不触碰，继续沿用 `missing-services.js` 的安全空桩（真实 backup 服务留给 S4/S5）。
+- 连锁修正：探针同时发现 `IFilesConfigurationService` 的 `DEFAULT_AUTO_SAVE_MODE` 在 `isWeb` 下默认是 `AutoSaveConfiguration.AFTER_DELAY`（`DEFAULT_AUTO_SAVE_DELAY=1000ms`），而非本文档先前假设的桌面默认 `off`；这会让 `FileEditorInput.isSaving()` 因 `hasShortAutoSaveDelay()` 恒真而永远为真，掩盖 tab 级 `.dirty` CSS 类（`multiEditorTabsControl.doRedrawTabDirty` 的 `!editor.isSaving()` 门禁)。已在 `app/main.ts` 的 `configurationDefaults` 显式补 `"files.autoSave": "off"`，同时落实文档一直声明但从未真正生效的“默认关闭自动保存”。
+- 依赖 allowlist、bundle 基线、排除面 guard、`app/main.ts` 配置默认值合同同步更新；禁止 `editor-service-override`、禁止 `createIndexedDBProviders`、禁止直接导入该包聚合入口（新增 harness 检查）。
 
 ### 决策 3：Plain backup 域（Rust 权威）
 

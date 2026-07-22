@@ -8,7 +8,7 @@ const PATCH_CONTRACTS = Object.freeze([
 		integrity:
 			"sha512-pJMSRMI0m5Mvx54u6iBGh+iad9KqfICnwAcjswNJOO7Xt1OXm5xILcM32VkMe4UX0YmrGAvYc0WVKWL8I9O4ng==",
 		directImporter: true,
-		snapshotEdgeCount: 23,
+		snapshotEdgeCount: 24,
 		shape: Object.freeze([
 			"diff --git a/services.js b/services.js",
 			"@@ -24,7 +24,6 @@ import './vscode/src/vs/workbench/contrib/inlayHints/browser/inlayHintsAccessibi",
@@ -183,7 +183,7 @@ const PATCH_CONTRACTS = Object.freeze([
 		integrity:
 			"sha512-tuyXQG4xajLk3uHpYRF0KCO1DV1L3U6tf+COPumRgDmJUINNOPBWpJ43uAdDnE2MNJL9eY5E4LlIxeHSZChaZw==",
 		directImporter: true,
-		snapshotEdgeCount: 6,
+		snapshotEdgeCount: 7,
 		shape: Object.freeze([
 			"diff --git a/vscode/src/vs/platform/files/common/fileService.js b/vscode/src/vs/platform/files/common/fileService.js",
 			"@@ -9,15 +9,17 @@ import { hash } from '@codingame/monaco-vscode-api/vscode/vs/base/common/hash';",

@@ -122,6 +122,19 @@ const EXPECTED_SERVICE_OVERRIDE_CALLS = Object.freeze([
 	"getThemeServiceOverride",
 	"getTextmateServiceOverride",
 ]);
+// Working-copy-service-override's default export unconditionally imports
+// browser/workingCopyBackupService.js and common/workingCopyHistoryService.js,
+// which register BrowserWorkingCopyBackupTracker and WorkingCopyHistoryTracker
+// as real Workbench contributions purely as an import-time side effect (the
+// history tracker calls IFileService.cloneFile() on every save, which Plain's
+// files-service patch always rejects for plain-workspace resources). Plain
+// therefore never calls that package's factory; it imports WorkingCopyService
+// and WorkingCopyEditorService directly from their exact class submodules,
+// the same pattern already used for DialogService below.
+const WORKING_COPY_OVERRIDE_ROOT_MODULE =
+	"@codingame/monaco-vscode-working-copy-service-override";
+const WORKING_COPY_SERVICE_IMPLEMENTATION_MODULE = `${WORKING_COPY_OVERRIDE_ROOT_MODULE}/vscode/vs/workbench/services/workingCopy/common/workingCopyService`;
+const WORKING_COPY_EDITOR_SERVICE_IMPLEMENTATION_MODULE = `${WORKING_COPY_OVERRIDE_ROOT_MODULE}/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService`;
 
 function staticStringValue(node) {
 	if (
@@ -215,6 +228,74 @@ export function validateNotificationOverrideImportBoundary(
 				`${normalizedPath} imports the notifications override outside app/services.ts`,
 			]
 		: [];
+}
+
+function isWorkingCopyOverrideModule(moduleName) {
+	return (
+		moduleName === WORKING_COPY_OVERRIDE_ROOT_MODULE ||
+		moduleName.startsWith(`${WORKING_COPY_OVERRIDE_ROOT_MODULE}/`)
+	);
+}
+
+export function validateWorkingCopyOverrideImportBoundary(
+	source,
+	relativePath,
+) {
+	const sourceFile = ts.createSourceFile(
+		relativePath,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	let referencesWorkingCopyOverride = false;
+	let referencesAggregatingEntryPoint = false;
+	function visit(node) {
+		if (
+			ts.isStringLiteralLike(node) &&
+			isWorkingCopyOverrideModule(node.text)
+		) {
+			referencesWorkingCopyOverride = true;
+			if (node.text === WORKING_COPY_OVERRIDE_ROOT_MODULE) {
+				referencesAggregatingEntryPoint = true;
+			}
+		}
+		if (
+			ts.isCallExpression(node) &&
+			node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+			node.arguments.length > 0
+		) {
+			const moduleName = staticStringValue(node.arguments[0]) ?? "";
+			if (isWorkingCopyOverrideModule(moduleName)) {
+				referencesWorkingCopyOverride = true;
+				if (moduleName === WORKING_COPY_OVERRIDE_ROOT_MODULE) {
+					referencesAggregatingEntryPoint = true;
+				}
+			}
+		}
+		ts.forEachChild(node, visit);
+	}
+	visit(sourceFile);
+	const normalizedPath = relativePath.replaceAll("\\", "/");
+	const failures = [];
+	if (referencesWorkingCopyOverride && normalizedPath !== "app/services.ts") {
+		failures.push(
+			`${normalizedPath} imports the working-copy override outside app/services.ts`,
+		);
+	}
+	if (referencesAggregatingEntryPoint) {
+		// The package's default export unconditionally imports
+		// browser/workingCopyBackupService.js and
+		// common/workingCopyHistoryService.js, which register
+		// BrowserWorkingCopyBackupTracker and WorkingCopyHistoryTracker as real
+		// Workbench contributions as an import-time side effect: the history
+		// tracker calls IFileService.cloneFile() on every save, which Plain's
+		// files-service patch always rejects for plain-workspace resources.
+		failures.push(
+			`${normalizedPath} must not import the working-copy-service-override aggregating entry point`,
+		);
+	}
+	return failures;
 }
 
 export function validateDialogSurfaceBoundary(source, relativePath) {
@@ -409,6 +490,88 @@ export function validateDialogServiceOverride(source) {
 		);
 	}
 
+	const workingCopyModuleReferences = [];
+	let hasDynamicWorkingCopyImport = false;
+	function collectWorkingCopyModuleReferences(node) {
+		if (
+			ts.isStringLiteralLike(node) &&
+			isWorkingCopyOverrideModule(node.text)
+		) {
+			workingCopyModuleReferences.push(node.text);
+		}
+		if (
+			ts.isCallExpression(node) &&
+			node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+			node.arguments.length > 0 &&
+			isWorkingCopyOverrideModule(staticStringValue(node.arguments[0]) ?? "")
+		) {
+			hasDynamicWorkingCopyImport = true;
+		}
+		ts.forEachChild(node, collectWorkingCopyModuleReferences);
+	}
+	collectWorkingCopyModuleReferences(sourceFile);
+	const workingCopyImports = sourceFile.statements.filter(
+		(statement) =>
+			ts.isImportDeclaration(statement) &&
+			ts.isStringLiteral(statement.moduleSpecifier) &&
+			isWorkingCopyOverrideModule(statement.moduleSpecifier.text),
+	);
+	function isExactWorkingCopyClassImport(
+		statement,
+		expectedModule,
+		expectedName,
+	) {
+		return (
+			statement !== undefined &&
+			statement.moduleSpecifier.text === expectedModule &&
+			statement.importClause?.isTypeOnly !== true &&
+			statement.importClause?.name === undefined &&
+			ts.isNamedImports(statement.importClause?.namedBindings) &&
+			statement.importClause.namedBindings.elements.length === 1 &&
+			!statement.importClause.namedBindings.elements[0].isTypeOnly &&
+			(statement.importClause.namedBindings.elements[0].propertyName?.text ??
+				statement.importClause.namedBindings.elements[0].name.text) ===
+				expectedName &&
+			statement.importClause.namedBindings.elements[0].name.text ===
+				expectedName
+		);
+	}
+	const workingCopyServiceImport = workingCopyImports.find(
+		(statement) =>
+			statement.moduleSpecifier.text ===
+			WORKING_COPY_SERVICE_IMPLEMENTATION_MODULE,
+	);
+	const workingCopyEditorServiceImport = workingCopyImports.find(
+		(statement) =>
+			statement.moduleSpecifier.text ===
+			WORKING_COPY_EDITOR_SERVICE_IMPLEMENTATION_MODULE,
+	);
+	// Isolated fixtures exercising unrelated Dialog/Notification checks may
+	// omit working-copy wiring entirely (mirrors how IWorkspaceEditingService/
+	// IWorkspacesService are optional here too); but once any working-copy
+	// override reference appears, it must be exactly this closed shape.
+	if (workingCopyModuleReferences.length > 0 || hasDynamicWorkingCopyImport) {
+		if (
+			workingCopyModuleReferences.length !== 2 ||
+			hasDynamicWorkingCopyImport ||
+			workingCopyImports.length !== 2 ||
+			!isExactWorkingCopyClassImport(
+				workingCopyServiceImport,
+				WORKING_COPY_SERVICE_IMPLEMENTATION_MODULE,
+				"WorkingCopyService",
+			) ||
+			!isExactWorkingCopyClassImport(
+				workingCopyEditorServiceImport,
+				WORKING_COPY_EDITOR_SERVICE_IMPLEMENTATION_MODULE,
+				"WorkingCopyEditorService",
+			)
+		) {
+			failures.push(
+				"app/services.ts must import only the exact WorkingCopyService and WorkingCopyEditorService class subpaths",
+			);
+		}
+	}
+
 	const factories = sourceFile.statements.filter(
 		(statement) =>
 			ts.isFunctionDeclaration(statement) &&
@@ -464,6 +627,74 @@ export function validateDialogServiceOverride(source) {
 	const nonSpreadProperties = overrideObject.properties.filter(
 		(property) => !ts.isSpreadAssignment(property),
 	);
+	// Between the zero-argument override spreads and the trailing audited
+	// IDialogService/ILanguageStatusService pair, only this exact closed set
+	// of hand-selected SyncDescriptor bindings is permitted, in this order.
+	const MIDDLE_SERVICE_DESCRIPTORS = Object.freeze([
+		{
+			tokenName: "IWorkspaceEditingService",
+			className: "PlainWorkspaceEditingService",
+			thirdArgIsTrue: true,
+		},
+		{
+			tokenName: "IWorkspacesService",
+			className: "PlainWorkspacesService",
+			thirdArgIsTrue: true,
+		},
+		{
+			tokenName: "IWorkingCopyService",
+			className: "WorkingCopyService",
+			thirdArgIsTrue: false,
+		},
+		{
+			tokenName: "IWorkingCopyEditorService",
+			className: "WorkingCopyEditorService",
+			thirdArgIsTrue: false,
+		},
+	]);
+	function matchesMiddleServiceDescriptor(property, spec) {
+		if (
+			!ts.isPropertyAssignment(property) ||
+			!ts.isComputedPropertyName(property.name) ||
+			!ts.isCallExpression(property.name.expression) ||
+			!ts.isPropertyAccessExpression(property.name.expression.expression) ||
+			!ts.isIdentifier(property.name.expression.expression.expression) ||
+			property.name.expression.expression.expression.text !== spec.tokenName ||
+			property.name.expression.expression.name.text !== "toString" ||
+			property.name.expression.arguments.length !== 0
+		) {
+			return false;
+		}
+		const initializer = property.initializer;
+		return (
+			ts.isNewExpression(initializer) &&
+			ts.isIdentifier(initializer.expression) &&
+			initializer.expression.text === "SyncDescriptor" &&
+			initializer.arguments?.length === 3 &&
+			ts.isIdentifier(initializer.arguments[0]) &&
+			initializer.arguments[0].text === spec.className &&
+			ts.isArrayLiteralExpression(initializer.arguments[1]) &&
+			initializer.arguments[1].elements.length === 0 &&
+			initializer.arguments[2].kind ===
+				(spec.thirdArgIsTrue
+					? ts.SyntaxKind.TrueKeyword
+					: ts.SyntaxKind.FalseKeyword)
+		);
+	}
+	const middleProperties = nonSpreadProperties.slice(0, -2);
+	const hasMiddleServiceDescriptors =
+		middleProperties.length === MIDDLE_SERVICE_DESCRIPTORS.length &&
+		middleProperties.every((property, index) =>
+			matchesMiddleServiceDescriptor(
+				property,
+				MIDDLE_SERVICE_DESCRIPTORS[index],
+			),
+		);
+	if (middleProperties.length !== 0 && !hasMiddleServiceDescriptors) {
+		failures.push(
+			"createServiceOverrides must keep the exact hand-selected working-copy and workspace service descriptors",
+		);
+	}
 	function isDialogServiceKeyCall(expression) {
 		return (
 			ts.isCallExpression(expression) &&
@@ -474,7 +705,6 @@ export function validateDialogServiceOverride(source) {
 			expression.arguments.length === 0
 		);
 	}
-	const hasPlainWorkspaceServiceOverrides = nonSpreadProperties.length === 4;
 	const dialogService = nonSpreadProperties.at(-2);
 	const dialogServiceName =
 		dialogService !== undefined &&
@@ -524,7 +754,9 @@ export function validateDialogServiceOverride(source) {
 		descriptor.arguments[1].elements.length === 0 &&
 		descriptor.arguments[2].kind === ts.SyntaxKind.TrueKeyword;
 	if (
-		![2, 4].includes(nonSpreadProperties.length) ||
+		![2, 2 + MIDDLE_SERVICE_DESCRIPTORS.length].includes(
+			nonSpreadProperties.length,
+		) ||
 		overrideObject.properties.length !==
 			EXPECTED_SERVICE_OVERRIDE_CALLS.length + nonSpreadProperties.length ||
 		!dialogServiceName ||
@@ -570,8 +802,8 @@ export function validateDialogServiceOverride(source) {
 	if (
 		!sameArray(propertyOrder, [
 			...EXPECTED_SERVICE_OVERRIDE_CALLS,
-			...(hasPlainWorkspaceServiceOverrides
-				? ["IWorkspaceEditingService", "IWorkspacesService"]
+			...(hasMiddleServiceDescriptors
+				? MIDDLE_SERVICE_DESCRIPTORS.map((spec) => spec.tokenName)
 				: []),
 			"IDialogService",
 			"ILanguageStatusService",
@@ -587,6 +819,10 @@ export function validateDialogServiceOverride(source) {
 	let notificationOverrideBindingReferences = 0;
 	let fileDialogServiceReference = false;
 	let globalConfirmReference = false;
+	let workingCopyServiceBindingReferences = 0;
+	let workingCopyEditorServiceBindingReferences = 0;
+	let workingCopyServiceTokenReferences = 0;
+	let workingCopyEditorServiceTokenReferences = 0;
 	function visit(node) {
 		if (ts.isIdentifier(node)) {
 			if (node.text === "DialogService") {
@@ -600,6 +836,18 @@ export function validateDialogServiceOverride(source) {
 			}
 			if (node.text === "IFileDialogService") {
 				fileDialogServiceReference = true;
+			}
+			if (node.text === "WorkingCopyService") {
+				workingCopyServiceBindingReferences += 1;
+			}
+			if (node.text === "WorkingCopyEditorService") {
+				workingCopyEditorServiceBindingReferences += 1;
+			}
+			if (node.text === "IWorkingCopyService") {
+				workingCopyServiceTokenReferences += 1;
+			}
+			if (node.text === "IWorkingCopyEditorService") {
+				workingCopyEditorServiceTokenReferences += 1;
 			}
 		}
 		if (
@@ -626,6 +874,20 @@ export function validateDialogServiceOverride(source) {
 	if (notificationOverrideBindingReferences !== 2) {
 		failures.push(
 			"getNotificationServiceOverride may appear only in its exact import and audited service spread",
+		);
+	}
+	const workingCopyReferenceCounts = [
+		workingCopyServiceBindingReferences,
+		workingCopyEditorServiceBindingReferences,
+		workingCopyServiceTokenReferences,
+		workingCopyEditorServiceTokenReferences,
+	];
+	if (
+		workingCopyReferenceCounts.some((count) => count !== 0) &&
+		workingCopyReferenceCounts.some((count) => count !== 2)
+	) {
+		failures.push(
+			"WorkingCopyService and WorkingCopyEditorService may appear only in their exact imports and audited descriptors",
 		);
 	}
 	if (fileDialogServiceReference || globalConfirmReference) {

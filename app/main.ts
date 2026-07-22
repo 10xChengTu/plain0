@@ -103,6 +103,7 @@ async function bootstrap(): Promise<void> {
 		configurationDefaults: {
 			"window.menuBarVisibility": "hidden",
 			"workbench.startupEditor": "none",
+			"files.autoSave": "off",
 		},
 		enableWorkspaceTrust: false,
 		workspaceProvider: initialWorkspace.provider,
