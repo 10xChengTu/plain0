@@ -1707,6 +1707,7 @@ const RUST_PRODUCTION_SOURCE_PATTERN = /^src-tauri\/src\/.*\.rs$/;
 const WORKSPACE_TEST_SOURCE_PATTERN = /(?:^|\/)tests\.rs$/;
 const WORKSPACE_VERSIONED_WRITER_PATH =
 	"src-tauri/src/workspace/versioned_writer.rs";
+const BACKUP_STORE_PATH = "src-tauri/src/backup/store.rs";
 const RUSTIX_TARGET = 'cfg(any(target_os = "linux", target_os = "macos"))';
 const SHA2_VERSION = "0.10.9";
 const SHA2_REQUIREMENT = `=${SHA2_VERSION}`;
@@ -4947,6 +4948,26 @@ function stageCleanupCallsAreExact(relativePath, source) {
 				removeFileCalls[0],
 				/\bparent\s*\.\s*$/,
 				"stage",
+			) &&
+			removeDirectoryCalls.length === 0
+		);
+	}
+	if (relativePath === BACKUP_STORE_PATH) {
+		return (
+			removeFileCalls.length === 3 &&
+			removeFileCalls.some((call) =>
+				exactMethodCall(
+					source,
+					call,
+					/\bself\s*\.\s*dir\s*\.\s*$/,
+					"&self.name",
+				),
+			) &&
+			removeFileCalls.some((call) =>
+				exactMethodCall(source, call, /\bdir\s*\.\s*$/, "key.as_str()"),
+			) &&
+			removeFileCalls.some((call) =>
+				exactMethodCall(source, call, /\bdir\s*\.\s*$/, "name"),
 			) &&
 			removeDirectoryCalls.length === 0
 		);

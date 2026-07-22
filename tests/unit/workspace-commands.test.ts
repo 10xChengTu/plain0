@@ -80,6 +80,10 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		workspaceReadDirectory: vi.fn(),
 		workspaceReadFile: vi.fn(),
 		workspaceWriteFile: vi.fn(),
+		backupWrite: vi.fn(),
+		backupReadAll: vi.fn(),
+		backupDiscard: vi.fn(),
+		backupDiscardAll: vi.fn(),
 		...overrides,
 	};
 }
@@ -130,6 +134,10 @@ describe("workspace Workbench command overrides", () => {
 			workspaceReadDirectory: vi.fn(),
 			workspaceReadFile: vi.fn(),
 			workspaceWriteFile: vi.fn(),
+			backupWrite: vi.fn(),
+			backupReadAll: vi.fn(),
+			backupDiscard: vi.fn(),
+			backupDiscardAll: vi.fn(),
 		};
 		const contextValues = new Map<string, unknown>([
 			["openFolderWorkspaceSupport", false],

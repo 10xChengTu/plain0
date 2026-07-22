@@ -232,6 +232,16 @@ export type WorkspaceWriteResult =
 			target: "ambiguous";
 	  }>;
 
+/**
+ * One recovered backup entry. `bytes` is a freshly allocated snapshot: it
+ * shares no backing storage with the bridge/mock and the caller may freely
+ * mutate it.
+ */
+export interface BackupEntry {
+	readonly key: string;
+	readonly bytes: Uint8Array;
+}
+
 export type Unlisten = () => void | Promise<void>;
 
 export interface PlainBridge {
@@ -298,4 +308,8 @@ export interface PlainBridge {
 		expectedVersion: string,
 		content: Uint8Array,
 	): Promise<WorkspaceWriteResult>;
+	backupWrite(key: string, bytes: Uint8Array): Promise<void>;
+	backupReadAll(): Promise<readonly BackupEntry[]>;
+	backupDiscard(key: string): Promise<void>;
+	backupDiscardAll(): Promise<void>;
 }

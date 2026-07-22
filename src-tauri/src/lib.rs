@@ -1,9 +1,11 @@
 use tauri::{Emitter, Manager};
 
+pub mod backup;
 pub mod error;
 pub mod path_policy;
 pub mod workspace;
 
+use backup::service::BackupService;
 use error::CommandError;
 use workspace::service::WorkspaceService;
 
@@ -38,11 +40,17 @@ pub fn run() {
     tauri::Builder::default()
         .manage(WorkspaceService::new())
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let base_path = app.path().app_local_data_dir()?;
+            app.manage(BackupService::new(base_path));
+            Ok(())
+        })
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 window
                     .state::<WorkspaceService>()
                     .close_window(window.label());
+                window.state::<BackupService>().close_window(window.label());
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -65,6 +73,10 @@ pub fn run() {
             workspace::commands::workspace_cancel_delete,
             workspace::commands::workspace_begin_delete,
             workspace::commands::workspace_commit_delete_entry,
+            backup::commands::backup_write,
+            backup::commands::backup_read_all,
+            backup::commands::backup_discard,
+            backup::commands::backup_discard_all,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Plain")

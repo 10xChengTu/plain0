@@ -7,6 +7,12 @@ import {
 	type PlainBridge,
 } from "./contracts";
 import {
+	decodeBackupReadAllResult,
+	decodeBackupVoid,
+	encodeBackupWriteRequest,
+	frozenBackupDiscardRequest,
+} from "./backup-codec";
+import {
 	decodeRuntimeInfo,
 	decodeWorkspaceCapabilities,
 	decodeWorkspaceEntryStat,
@@ -220,6 +226,26 @@ export function createNativeBridge(): PlainBridge {
 				}
 				return workspaceWriteResponseUnavailable();
 			}
+		},
+		backupWrite: async (key, bytes) => {
+			const frame = encodeBackupWriteRequest(key, bytes);
+			decodeBackupVoid(await invoke<unknown>("backup_write", frame));
+		},
+		backupReadAll: async () => {
+			return decodeBackupReadAllResult(
+				await invoke<ArrayBuffer | number[]>("backup_read_all", {
+					request: {},
+				}),
+			);
+		},
+		backupDiscard: async (key) => {
+			const request = frozenBackupDiscardRequest(key);
+			decodeBackupVoid(await invoke<unknown>("backup_discard", { request }));
+		},
+		backupDiscardAll: async () => {
+			decodeBackupVoid(
+				await invoke<unknown>("backup_discard_all", { request: {} }),
+			);
 		},
 	};
 }

@@ -1,4 +1,5 @@
 import type {
+	BackupEntry,
 	CommandError,
 	PlainBridge,
 	RuntimeInfo,
@@ -19,6 +20,11 @@ import type {
 	WorkspaceWatchWakeEvent,
 	WorkspaceWriteResult,
 } from "./contracts";
+import {
+	backupUnavailable,
+	frozenBackupDiscardRequest,
+	frozenBackupWriteInputs,
+} from "./backup-codec";
 import {
 	compareWorkspaceEntryNames,
 	encodeWorkspaceWriteFileRequest,
@@ -638,8 +644,21 @@ export interface BrowserMockWorkspaceWatchControllerForTest {
 	): void;
 }
 
+/**
+ * Deterministic seed for the browser-mock backup store, injected before any
+ * interaction. Simulates content a previous session left on disk (the
+ * production Rust store's actual restart-persistence is out of scope for a
+ * browser-only mock).
+ */
+export interface BrowserMockBackupSeedEntryForTest {
+	readonly key: string;
+	readonly bytes: readonly number[];
+}
+
 export interface BrowserMockBridgeOptions {
 	readonly workspacePicks?: readonly BrowserMockWorkspacePick[];
+	/** Seeds the isolated in-memory backup store before first use. */
+	readonly backupFixtureForTest?: readonly BrowserMockBackupSeedEntryForTest[];
 	/** Browser-mock only bounded tree injected below the first mock root. */
 	readonly directoryCopyFixtureForTest?: BrowserMockDirectoryFixtureForTest;
 	/** May only lower production directory-copy budgets. */
@@ -1711,6 +1730,14 @@ export function createBrowserMockBridge(
 	const listeners = new Set<(payload: RuntimeInfo) => void>();
 	const scriptedPicks = [...(options.workspacePicks ?? [])];
 	const roots = new Map<string, WorkspaceRoot>();
+	const backupEntries = new Map<string, Uint8Array>();
+	for (const seed of options.backupFixtureForTest ?? []) {
+		const { key, content } = frozenBackupWriteInputs(
+			seed.key,
+			Uint8Array.from(seed.bytes),
+		);
+		backupEntries.set(key, content);
+	}
 	const trees = cloneMockTrees();
 	const directoryCopyLimits = resolveDirectoryCopyLimits(
 		options.directoryCopyLimitsForTest,
@@ -4563,6 +4590,37 @@ export function createBrowserMockBridge(
 		},
 		async workspaceWriteFile(rootId, relativePath, expectedVersion, content) {
 			return writeWorkspaceFile(rootId, relativePath, expectedVersion, content);
+		},
+		async backupWrite(key, bytes) {
+			if (roots.size === 0) {
+				throw backupUnavailable();
+			}
+			const validated = frozenBackupWriteInputs(key, bytes);
+			backupEntries.set(validated.key, validated.content);
+		},
+		async backupReadAll(): Promise<readonly BackupEntry[]> {
+			if (roots.size === 0) {
+				throw backupUnavailable();
+			}
+			const entries = [...backupEntries.entries()]
+				.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+				.map(([key, bytes]): BackupEntry =>
+					Object.freeze({ key, bytes: bytes.slice() }),
+				);
+			return Object.freeze(entries);
+		},
+		async backupDiscard(key) {
+			if (roots.size === 0) {
+				throw backupUnavailable();
+			}
+			const request = frozenBackupDiscardRequest(key);
+			backupEntries.delete(request.key);
+		},
+		async backupDiscardAll() {
+			if (roots.size === 0) {
+				throw backupUnavailable();
+			}
+			backupEntries.clear();
 		},
 	};
 }
