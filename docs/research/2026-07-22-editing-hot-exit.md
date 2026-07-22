@@ -57,7 +57,8 @@
 
 ### 决策 3：Plain backup 域（Rust 权威）
 
-- 新建 `src-tauri/src/backup/`：窗口绑定的 backup store，落在 Tauri `app_local_data_dir()/backups/<workspace-id>/` 下，目录经 `Dir::open_ambient_dir` 打开为 capability 后全部 handle-relative 操作；写入复用 staged 原子写范式；批量枚举/读取/丢弃各配严格 DTO；窗口销毁清理挂起句柄（内容保留，供重启恢复）。
+- 新建 `src-tauri/src/backup/`：窗口绑定的 backup store，落在 Tauri `app_local_data_dir()/backups/<identity>/` 下，目录经 `Dir::open_ambient_dir` 打开为 capability 后全部 handle-relative 操作；写入复用 staged 原子写范式；批量枚举/读取/丢弃各配严格 DTO；窗口销毁清理挂起句柄（内容保留，供重启恢复）。
+- **目录身份（S4 实施后修正）**：S4 首版以会话内随机 `workspaceId` 作目录键，但该 id 不跨应用重启，无法支撑「重启后恢复」这一 F030 acceptance。S5 修正为 Rust 内部派生的**稳定 workspace 身份**：对已授权 roots 的 canonical 路径集合排序后做 SHA-256（十六进制小写作目录名）。canonical 路径与哈希只在 Rust 内部使用、不进 WebView；同一组 roots 重开得到同一身份，topology 变化（增删根）产生新身份、旧身份下的 backup 自然不可达（与上游 workspace identity 变更语义一致）；EMPTY workspace 无身份，backup 命令维持 `BACKUP_UNAVAILABLE`。
 - 命令闭集（预计）：`backup_write`、`backup_read_all`（启动一次性枚举+读取）、`backup_discard`、`backup_discard_all`；大小上限沿用 8 MiB/条，超限拒绝并可见失败。
 - 前端 `PlainWorkingCopyBackupService` 实现 `IWorkingCopyBackupService` 接口，经既有 bridge 风格路由到上述命令；以 `SyncDescriptor` 替换 DI 坑位（与 `PlainWorkspacesService` 同法）。browser mock 提供确定性内存实现供 E2E。
 - tracker：继承 common `WorkingCopyBackupTracker` 自定义 Plain tracker（不用 packaged browser tracker 的 `beforeunload` 单点）；真实关窗握手（Rust `CloseRequested` `preventDefault` + IPC 确认后关闭）属桌面行为，登记交接清单，Browser 层以可注入的 shutdown 信号测试 veto/备份时序。
