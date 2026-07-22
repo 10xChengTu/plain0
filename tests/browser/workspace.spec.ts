@@ -27,6 +27,15 @@ interface TestWorkspaceVersionTransition {
 const nativeWorkspaceId = "00000000-0000-4000-8000-000000000001";
 const nativeRootId = "00000000-0000-4000-8000-000000000101";
 const nativeSecondaryRootId = "00000000-0000-4000-8000-000000000102";
+// A real, minimally valid 1x1 transparent PNG (68 bytes: signature + IHDR +
+// IDAT + IEND, each chunk's CRC32 verified). Used to exercise the genuine
+// upstream binary-detection path (detectEncodingFromBuffer's zero-byte scan
+// in src/vs/workbench/services/textfile/common/encoding.ts): this fixture
+// contains real 0x00 bytes that do not fit the UTF-16 LE/BE zero-byte
+// pattern, so it is flagged `seemsBinary` exactly like a real PNG on disk
+// would be, rather than being special-cased by name or extension.
+const MINIMAL_PNG_BASE64 =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 type RawReadTransport = "arrayBuffer" | "numberArray";
 type NativeIpcMockMode = "readonly" | "supported";
 type TestMultiRootMoveIncompleteScenario = "moveRetained" | "movePartial";
@@ -72,7 +81,7 @@ async function installNativeIpcMock(
 	mode: NativeIpcMockMode = "readonly",
 ): Promise<void> {
 	await page.addInitScript(
-		({ goldenRead, mode, rawReadTransport }) => {
+		({ goldenRead, mode, rawReadTransport, pngBase64 }) => {
 			const calls: Array<{
 				command: string;
 				args: Record<string, unknown>;
@@ -199,6 +208,21 @@ async function installNativeIpcMock(
 				bytes: encoder.encode(content),
 				version: nextVersion(),
 			});
+			// Real raw-byte variant of `file` (not text-encoded) so binary fixtures
+			// (e.g. the PNG below) round-trip as genuine bytes, not a string.
+			const fileBytes = (bytes: Uint8Array): MockFile => ({
+				kind: "file",
+				bytes,
+				version: nextVersion(),
+			});
+			const decodeBase64 = (value: string): Uint8Array => {
+				const binary = atob(value);
+				const decoded = new Uint8Array(binary.length);
+				for (let index = 0; index < binary.length; index += 1) {
+					decoded[index] = binary.charCodeAt(index);
+				}
+				return decoded;
+			};
 			const directory = (
 				entries: readonly (readonly [string, MockNode])[],
 			): MockDirectory => ({ kind: "directory", entries: new Map(entries) });
@@ -207,6 +231,13 @@ async function installNativeIpcMock(
 					"README.md",
 					file("# Native workspace\n\nRead-only Explorer fixture.\n"),
 				],
+				[
+					"notes.md",
+					file(
+						"# Notes\n\nPlain markdown source text, no rich preview here.\n",
+					),
+				],
+				["icon.png", fileBytes(decodeBase64(pngBase64))],
 				["src", directory([["main.ts", file("export const plain = true;\n")]])],
 			]);
 			const entryNotFound = () => ({
@@ -914,6 +945,7 @@ async function installNativeIpcMock(
 			goldenRead: workspaceVersionFixture.read,
 			mode,
 			rawReadTransport,
+			pngBase64: MINIMAL_PNG_BASE64,
 		},
 	);
 }
@@ -5564,6 +5596,258 @@ test("restores an unsaved edit as a dirty editor after a simulated hot-exit relo
 	// No backup remains, and nothing was manually reopened: no tab of any
 	// kind should exist for this fresh workspace re-adoption.
 	await expect(page.locator(".tabs-container .tab")).toHaveCount(0);
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("splits an editor into two groups that stay in sync while editing, and returns to one group with content intact after the split side is closed", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported");
+
+	const explorer = await openNativeWorkspaceExplorer(page);
+	const readme = explorer.getByRole("treeitem", {
+		name: "README.md",
+		exact: true,
+	});
+	await readme.dblclick();
+	await expect(
+		page.getByRole("code").filter({ hasText: "Read-only Explorer fixture." }),
+	).toBeVisible();
+
+	const groups = page.locator(".editor-group-container");
+	await expect(groups).toHaveCount(1);
+	await expect(page.locator(".tabs-container .tab")).toHaveCount(1);
+
+	// Real, unmodified upstream keybinding for `workbench.action.splitEditor`
+	// (`SplitEditorAction`, `KeyMod.CtrlCmd | KeyCode.Backslash` in
+	// src/vs/workbench/browser/parts/editor/editorActions.ts). `splitEditor()`
+	// (editorCommands.ts) adds a new group and `group.copyEditor`s the active
+	// editor into it, so both groups end up viewing the very same resource.
+	await page.keyboard.press("ControlOrMeta+Backslash");
+	await expect(groups).toHaveCount(2);
+
+	// Real upstream DOM marker, not a guess: `EditorGroupView#setActive`
+	// (editorGroupView.ts) toggles `active`/`inactive` directly on the group's
+	// own `.editor-group-container` element; the freshly split group is
+	// focused (`splitEditor` calls `newGroup.focus()`), so it alone is
+	// `.active` and the original group is `.inactive`.
+	const activeGroup = page.locator(".editor-group-container.active");
+	const inactiveGroup = page.locator(".editor-group-container.inactive");
+	await expect(activeGroup).toHaveCount(1);
+	await expect(inactiveGroup).toHaveCount(1);
+
+	const activeTab = activeGroup
+		.locator(".tabs-container .tab")
+		.filter({ hasText: "README.md" });
+	const inactiveTab = inactiveGroup
+		.locator(".tabs-container .tab")
+		.filter({ hasText: "README.md" });
+	await expect(activeTab).toHaveCount(1);
+	await expect(inactiveTab).toHaveCount(1);
+
+	// Edit through the new (active) side's own Monaco widget...
+	await activeGroup
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "Read-only Explorer fixture." })
+		.click();
+	await page.keyboard.press("End");
+	await page.keyboard.type("-split-edit");
+
+	// ...and the shared text model reflects it instantly in the other side's
+	// independent Monaco widget, while both tabs (one per group) go dirty
+	// together, since both editors point at the same underlying working copy.
+	await expect(
+		inactiveGroup
+			.locator(".monaco-editor .view-line")
+			.filter({ hasText: "Read-only Explorer fixture.-split-edit" }),
+	).toBeVisible();
+	await expect(activeTab).toHaveClass(/dirty/);
+	await expect(inactiveTab).toHaveClass(/dirty/);
+
+	await page.keyboard.press("ControlOrMeta+S");
+	await expect
+		.poll(async () =>
+			page.evaluate(() => {
+				const testWindow = window as unknown as Window & {
+					__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+				};
+				return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+					({ command }) => command === "workspace_write_file",
+				).length;
+			}),
+		)
+		.toBe(1);
+	await expect(activeTab).not.toHaveClass(/dirty/);
+	await expect(inactiveTab).not.toHaveClass(/dirty/);
+
+	// Closing the split (active) side's sole tab empties that group, which
+	// `workbench.editor.closeEmptyGroups` (default true, editor.ts) then
+	// removes automatically, returning to a single group with the saved
+	// content intact.
+	await page.keyboard.press("ControlOrMeta+W");
+	await expect(groups).toHaveCount(1);
+	await expect(page.locator(".tabs-container .tab")).toHaveCount(1);
+	await expect(page.locator(".tabs-container .tab.dirty")).toHaveCount(0);
+	await expect(
+		page
+			.getByRole("code")
+			.filter({ hasText: "Read-only Explorer fixture.-split-edit" }),
+	).toBeVisible();
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("opens a PNG through Explorer as the real binary-file placeholder pane instead of crashing or rendering blank", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported");
+
+	const explorer = await openNativeWorkspaceExplorer(page);
+	const icon = explorer.getByRole("treeitem", {
+		name: "icon.png",
+		exact: true,
+	});
+	await icon.dblclick();
+
+	// Real upstream detection path, not a name/extension special case: the PNG
+	// fixture's genuine 0x00 bytes make `detectEncodingFromBuffer` (src/vs/
+	// workbench/services/textfile/common/encoding.ts) report `seemsBinary`,
+	// which `TextFileEditorModel` turns into a `FILE_IS_BINARY` error that
+	// `FileEditorInput#resolve` (fileEditorInput.ts) catches to select
+	// `BinaryFileEditor` over `TextFileEditor` for this input.
+	await expect(
+		page.locator(".tabs-container .tab").filter({ hasText: "icon.png" }),
+	).toHaveCount(1);
+
+	// Real upstream DOM markers, not a guess: `BaseBinaryResourceEditor`
+	// (binaryEditor.ts) renders through `EditorPlaceholder` (editorPlaceholder.ts),
+	// whose `.monaco-editor-pane-placeholder` container holds a
+	// `.editor-placeholder-label-container` with the exact upstream
+	// `fileBinaryError` string and an "Open Anyway" action button.
+	const placeholder = page.locator(".monaco-editor-pane-placeholder");
+	await expect(placeholder).toBeVisible();
+	await expect(
+		placeholder.locator(".editor-placeholder-label-container"),
+	).toHaveText(
+		"The file is not displayed in the text editor because it is either binary or uses an unsupported text encoding.",
+	);
+	await expect(
+		placeholder.getByRole("button", { name: "Open Anyway", exact: true }),
+	).toBeVisible();
+
+	// No crash and no blank editor: the placeholder pane is a dedicated
+	// `EditorPane`, not a `CodeEditorWidget`, so no `.monaco-editor` exists
+	// underneath it at all while the fallback is showing.
+	await expect(page.locator(".monaco-editor")).toHaveCount(0);
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("opens a Markdown file as a plain Monaco text editor with no rich preview surface, and saves edits normally", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported");
+
+	const explorer = await openNativeWorkspaceExplorer(page);
+	const notes = explorer.getByRole("treeitem", {
+		name: "notes.md",
+		exact: true,
+	});
+	await notes.dblclick();
+
+	const editor = page
+		.getByRole("code")
+		.filter({ hasText: "Plain markdown source text, no rich preview here." });
+	await expect(editor).toBeVisible();
+	await expect(page.locator(".monaco-editor")).toHaveCount(1);
+
+	// Plain bundles no markdown-language-features/media-preview extension and
+	// no webview-service-override at all (see app/services.ts and this
+	// package's dependencies): there is no rich-render surface for this app to
+	// fall back *from*, so this is a real absence check against the genuine
+	// upstream webview DOM marker (`element.className = 'webview ...'` in
+	// src/vs/workbench/contrib/webview/browser/webviewElement.ts), not a mock.
+	await expect(page.locator(".webview")).toHaveCount(0);
+	await expectPaletteCommandHidden(
+		page,
+		"Markdown: Open Preview",
+		"Markdown: Open Preview",
+	);
+
+	await page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "Plain markdown source text, no rich preview here." })
+		.click();
+	await page.keyboard.press("End");
+	await page.keyboard.type(" Edited.");
+	const activeTab = page.locator(".tabs-container .tab.active");
+	await expect(activeTab).toHaveClass(/dirty/);
+
+	await page.keyboard.press("ControlOrMeta+S");
+	await expect
+		.poll(async () =>
+			page.evaluate(() => {
+				const testWindow = window as unknown as Window & {
+					__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+				};
+				return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+					({ command }) => command === "workspace_write_file",
+				).length;
+			}),
+		)
+		.toBe(1);
+	await expect(activeTab).not.toHaveClass(/dirty/);
+	await expect(
+		page.getByRole("code").filter({
+			hasText: "Plain markdown source text, no rich preview here. Edited.",
+		}),
+	).toBeVisible();
 
 	expect(nativeDialogs).toEqual([]);
 	expect(pageErrors).toEqual([]);
