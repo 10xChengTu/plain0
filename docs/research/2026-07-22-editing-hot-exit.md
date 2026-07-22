@@ -44,7 +44,7 @@
 
 ### 决策 1：外部删除/变化语义（先拍板后写码）
 
-- 打开文件的外部删除：provider 维护「当前被 watch 的精确文件 URI 集合」（上游会对每个打开文件调用 `watch(resource)`；现状 Plain 把一切 watch 都归并为 root 粗事件）。方案：每次 watcher wake/定时 sync 后，对该集合做**有界** `workspace_stat` 复核（仅已打开文件，非全树 diff）；确认消失的，fire 精确单资源 `DELETED`（随后的 `ADDED` 清除语义照上游）。不引入 per-file native watcher，不改 Rust 协议。
+- 打开文件的外部删除：原方案假设上游会对每个打开文件调用 `watch(resource)`，实施探针推翻了这一点——本 Workbench 组合下 `watch()` 只在 root 级发生（recursive），上游依赖 root watch 的细粒度原生事件，而 Plain 的 Rust watcher 有意丢弃它们。修正后的登记点是 `plainReadFile()`（文件内容被解析打开的精确时刻），以每 root 上限 256 条的 LRU 集合近似「最近打开」；每次该 root 的 watcher wake 后对集合做**有界** `workspace_stat` 复核（单飞 + dirty 合并，state 身份校验隔离撤销后的迟到结果），确认消失的 fire 精确单资源 `DELETED`，此前 missing 的重新出现 fire `ADDED`（上游据此清 orphan），其他 stat 错误 fail-safe 不伪造删除。已记录的近似代价：跟踪的是「最近读取」而非「当前打开」，超 256 条时最旧被逐出、其外部删除退化为 S2 前行为；已撤销 root 的 state 条目无主动删除（watcher 撤销后无触发源，纯有界惰性驻留）。不引入 per-file native watcher，不改 Rust 协议。
 - 根级粗 `UPDATED` 的祖先命中语义：接受为既定行为并以测试锁定（clean 打开文件在无关外部变化后允许重载刷新；dirty 文件不得丢失编辑内容——上游模型对 dirty 不做静默 revert）。
 - 保存冲突 UX 维持 F020 合同（Reload/Save As/Details，无 Retry/Overwrite）。
 

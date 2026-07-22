@@ -342,6 +342,7 @@ async function installNativeIpcMock(
 			const testWindow = window as unknown as Window & {
 				__PLAIN_TEST_TAURI_CALLS__: typeof calls;
 				__PLAIN_TEST_EXTERNAL_CREATE__(name: string, emitWake: boolean): void;
+				__PLAIN_TEST_EXTERNAL_DELETE__(name: string, emitWake: boolean): void;
 				__TAURI_EVENT_PLUGIN_INTERNALS__: {
 					unregisterListener(): void;
 				};
@@ -367,6 +368,20 @@ async function installNativeIpcMock(
 					throw new Error("Invalid external workspace test change.");
 				}
 				root.entries.set(name, file(`external:${name}\n`));
+				watchDirty = true;
+				promoteWatchDirty();
+				if (shouldEmitWake) {
+					emitWatchWake();
+				}
+			};
+			testWindow.__PLAIN_TEST_EXTERNAL_DELETE__ = (name, shouldEmitWake) => {
+				if (
+					!/^[A-Za-z0-9._-]+$/u.test(name) ||
+					typeof shouldEmitWake !== "boolean"
+				) {
+					throw new Error("Invalid external workspace test change.");
+				}
+				deleteNode(name);
 				watchDirty = true;
 				promoteWatchDirty();
 				if (shouldEmitWake) {
@@ -4874,6 +4889,132 @@ test("keeps single preview tab until pin promotes the editor", async ({
 	await expect(
 		page.locator(".notifications-toasts .notification-toast"),
 	).toHaveCount(0);
+	expect(nativeDialogs).toEqual([]);
+	expect(errors).toEqual([]);
+});
+
+test("marks an externally deleted open file orphaned and clears it on restore, while preserving unrelated dirty content", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	const nativeDialogs: string[] = [];
+	await installNativeIpcMock(page, "arrayBuffer", "supported");
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			errors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+
+	const explorer = await openNativeWorkspaceExplorer(page);
+	const readme = explorer.getByRole("treeitem", {
+		name: "README.md",
+		exact: true,
+	});
+	const src = explorer.getByRole("treeitem", { name: "src", exact: true });
+
+	// Real upstream DOM marker probed and frozen for this test, not a guess:
+	// `TextFileService`'s decorations provider (registerListeners in
+	// textFileService.ts) reports `strikethrough: true` for an orphaned
+	// working copy; `multiEditorTabsControl` always passes a `fileDecorations`
+	// object to the tab's `ResourceLabel`, so `IconLabel#setLabel` pushes the
+	// "strikethrough" class onto the tab's `.monaco-icon-label` regardless of
+	// the `fileDecorations.colors`/`badges` settings.
+	const orphanMarker = (tab: Locator): Locator =>
+		tab.locator(".monaco-icon-label.strikethrough");
+
+	// Open README.md (preview) and pin it via double click, then open and pin
+	// src/main.ts the same way so both stay open as independent tabs.
+	await readme.dblclick();
+	const readmeTab = page
+		.locator(".tabs-container .tab")
+		.filter({ hasText: "README.md" });
+	await expect(readmeTab).toHaveCount(1);
+
+	await src.click();
+	await page.keyboard.press("ArrowRight");
+	await expect(src).toHaveAttribute("aria-expanded", "true");
+	const main = explorer.getByRole("treeitem", {
+		name: "main.ts",
+		exact: true,
+	});
+	await main.dblclick();
+	const mainTab = page
+		.locator(".tabs-container .tab")
+		.filter({ hasText: "main.ts" });
+	await expect(mainTab).toHaveCount(1);
+	await expect(page.locator(".tabs-container .tab")).toHaveCount(2);
+
+	// The watcher wake listener must be attached before injecting an external
+	// change, otherwise the wake could fire before anything is subscribed.
+	await expect
+		.poll(() =>
+			page.evaluate(() => {
+				const testWindow = window as unknown as Window & {
+					__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+				};
+				return testWindow.__PLAIN_TEST_TAURI_CALLS__.some(
+					({ command, args }) =>
+						command === "plugin:event|listen" &&
+						args.event === "plain://workspace-watch-wake",
+				);
+			}),
+		)
+		.toBe(true);
+
+	// External delete of the open, unedited README.md + wake: the provider's
+	// bounded stat recheck must fire a precise DELETED for README.md only.
+	await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_EXTERNAL_DELETE__(name: string, emitWake: boolean): void;
+		};
+		testWindow.__PLAIN_TEST_EXTERNAL_DELETE__("README.md", true);
+	});
+	await expect(orphanMarker(readmeTab)).toHaveCount(1, { timeout: 5_000 });
+	await expect(orphanMarker(mainTab)).toHaveCount(0);
+	// The root-level coarse UPDATED that accompanies the wake is allowed to
+	// reach every open file under the ancestor semantics; main.ts is clean
+	// and unrelated to the delete, so it must remain intact and readable.
+	await expect(
+		page.getByRole("code").filter({ hasText: "export const plain = true;" }),
+	).toBeVisible();
+
+	// Dirty main.ts, then trigger another unrelated external change under the
+	// same root (another coarse root UPDATED). The dirty edit must survive.
+	await page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "export const plain = true;" })
+		.click();
+	await page.keyboard.press("Home");
+	await page.keyboard.type("X");
+	await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_EXTERNAL_CREATE__(name: string, emitWake: boolean): void;
+		};
+		testWindow.__PLAIN_TEST_EXTERNAL_CREATE__("unrelated.txt", true);
+	});
+	await expect(
+		explorer.getByRole("treeitem", { name: "unrelated.txt", exact: true }),
+	).toHaveCount(1, { timeout: 5_000 });
+	await expect(
+		page.getByRole("code").filter({ hasText: "Xexport const plain = true;" }),
+	).toBeVisible();
+	await expect(orphanMarker(mainTab)).toHaveCount(0);
+	await expect(orphanMarker(readmeTab)).toHaveCount(1);
+
+	// External restore (recreate) of README.md + wake clears the orphan mark.
+	await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_EXTERNAL_CREATE__(name: string, emitWake: boolean): void;
+		};
+		testWindow.__PLAIN_TEST_EXTERNAL_CREATE__("README.md", true);
+	});
+	await expect(orphanMarker(readmeTab)).toHaveCount(0, { timeout: 5_000 });
+
 	expect(nativeDialogs).toEqual([]);
 	expect(errors).toEqual([]);
 });

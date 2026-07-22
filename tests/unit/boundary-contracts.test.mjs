@@ -1439,8 +1439,8 @@ describe("workspace watcher Harness", () => {
 				"const watch = this.#bridge.workspaceWatch;\n\t\tconst unlisten = watch(",
 			],
 			[
-				"const unlisten = this.#bridge.workspaceWatch(resolved.rootId, () => {\n\t\t\tthis.fireRootUpdated(resource);\n\t\t});",
-				"const unlisten = this.#bridge.workspaceWatch(resolved.rootId, () => {});\n\t\tthis.fireRootUpdated(resource);",
+				"const unlisten = this.#bridge.workspaceWatch(resolved.rootId, () => {\n\t\t\tthis.fireRootUpdated(resource);\n\t\t\tvoid this.reconcileWatchedPaths(resolved.rootId);\n\t\t});",
+				"const unlisten = this.#bridge.workspaceWatch(resolved.rootId, () => {\n\t\t\tvoid this.reconcileWatchedPaths(resolved.rootId);\n\t\t});\n\t\tthis.fireRootUpdated(resource);",
 			],
 		]) {
 			const hostile = replaceWatcherSource(
@@ -5713,6 +5713,52 @@ function workspaceMoveOutcomeUnknown(): WorkspaceMoveOutcomeUnknownError {
 				"Plain workspace provider member surface must remain the exact audited readonly/provider seam set",
 				"every this.#bridge reference must be the receiver of one fixed direct provider call",
 			]),
+		);
+	});
+
+	it("audits the exact watch-state reconciliation closure introduced for external delete detection", () => {
+		const extraStat = mutateProvider(
+			"\tasync readdir(resource: URI): Promise<[string, FileType][]> {",
+			'\tasync readdir(resource: URI): Promise<[string, FileType][]> {\n\t\tvoid this.#bridge.workspaceStat("extra-root", "extra-path");',
+		);
+		expect(validateWorkspaceProviderCopyBoundary(extraStat)).toContain(
+			"workspaceStat must have exactly 2 fixed direct this.#bridge call site(s)",
+		);
+
+		const droppedReconcileStat = mutateProvider(
+			"\t\t\t\t\tawait this.#bridge.workspaceStat(rootId, relativePath);\n\t\t\t\t\tmissing = false;",
+			"\t\t\t\t\tmissing = false;",
+		);
+		expect(
+			validateWorkspaceProviderCopyBoundary(droppedReconcileStat),
+		).toContain(
+			"workspaceStat must have exactly 2 fixed direct this.#bridge call site(s)",
+		);
+
+		const extraFireDeleted = mutateProvider(
+			"\tasync readdir(resource: URI): Promise<[string, FileType][]> {",
+			"\tasync readdir(resource: URI): Promise<[string, FileType][]> {\n\t\tthis.fireDeleted(resource);",
+		);
+		expect(validateWorkspaceProviderCopyBoundary(extraFireDeleted)).toContain(
+			"provider change events must remain confined to the audited create, copy, rename, move and rescan closure",
+		);
+
+		const extraFireCreated = mutateProvider(
+			"\tasync readdir(resource: URI): Promise<[string, FileType][]> {",
+			"\tasync readdir(resource: URI): Promise<[string, FileType][]> {\n\t\tthis.fireCreated(resource);",
+		);
+		expect(validateWorkspaceProviderCopyBoundary(extraFireCreated)).toContain(
+			"provider change events must remain confined to the audited create, copy, rename, move and rescan closure",
+		);
+
+		const extraWatchStateReference = mutateProvider(
+			"\tasync readdir(resource: URI): Promise<[string, FileType][]> {",
+			"\tasync readdir(resource: URI): Promise<[string, FileType][]> {\n\t\tvoid this.#watchState.size;",
+		);
+		expect(
+			validateWorkspaceProviderCopyBoundary(extraWatchStateReference),
+		).toContain(
+			"Plain workspace native authority must remain sealed in the exact #bridge, #allowsMutationDispatch and #watchState private-field consumers",
 		);
 	});
 

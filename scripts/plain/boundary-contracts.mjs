@@ -8152,6 +8152,10 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	}
 	const allowedTopLevelDeclarations = new Map([
 		["PLAIN_WORKSPACE_SCHEME", { kind: "variable", exported: true }],
+		[
+			"MAX_TRACKED_OPEN_RESOURCES_PER_ROOT",
+			{ kind: "variable", exported: false },
+		],
 		["ResolvedResource", { kind: "interface", exported: false }],
 		["ResolvedMutationResource", { kind: "interface", exported: false }],
 		["PlainWorkspaceDeleteResource", { kind: "interface", exported: true }],
@@ -9076,6 +9080,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	const expectedProviderMembers = new Set([
 		"#bridge",
 		"#allowsMutationDispatch",
+		"#watchState",
 		"capabilities",
 		"onDidChangeCapabilities",
 		"changeEmitter",
@@ -9101,6 +9106,8 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		"fireMoved",
 		"fireRootUpdated",
 		"fireRootsUpdated",
+		"reconcileWatchedPaths",
+		"trackOpenResource",
 		"resolveMutationResource",
 		"resolveResource",
 	]);
@@ -10173,7 +10180,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	]);
 	const expectedBridgeMethods = new Map([
 		["workspaceWatch", 1],
-		["workspaceStat", 1],
+		["workspaceStat", 2],
 		["workspaceReadDirectory", 1],
 		["workspaceReadFile", 1],
 		["workspaceWriteFile", 1],
@@ -10301,6 +10308,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	let moveOutcomeUnknownConstructionCount = 0;
 	let privateBridgeReferences = 0;
 	let privatePolicyReferences = 0;
+	let privateWatchStateReferences = 0;
 	function isThisBridge(node) {
 		return (
 			ts.isPropertyAccessExpression(node) &&
@@ -10406,6 +10414,8 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 				privateBridgeReferences += 1;
 			} else if (node.text === "#allowsMutationDispatch") {
 				privatePolicyReferences += 1;
+			} else if (node.text === "#watchState") {
+				privateWatchStateReferences += 1;
 			} else {
 				hasUnexpectedPrivateIdentifier = true;
 			}
@@ -10894,9 +10904,13 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			"Plain workspace mutation boolean parameter may appear only in its declaration, private-field assignment and capability condition",
 		);
 	}
-	if (privateBridgeReferences !== 13 || privatePolicyReferences !== 3) {
+	if (
+		privateBridgeReferences !== 14 ||
+		privatePolicyReferences !== 3 ||
+		privateWatchStateReferences !== 7
+	) {
 		failures.push(
-			"Plain workspace native authority must remain sealed in the exact #bridge and #allowsMutationDispatch private-field consumers",
+			"Plain workspace native authority must remain sealed in the exact #bridge, #allowsMutationDispatch and #watchState private-field consumers",
 		);
 	}
 	if (
@@ -10914,7 +10928,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	for (const [methodName, expectedCount] of expectedBridgeMethods) {
 		if (bridgeMethodCounts.get(methodName) !== expectedCount) {
 			failures.push(
-				`${methodName} must have exactly one fixed direct this.#bridge call site`,
+				`${methodName} must have exactly ${expectedCount} fixed direct this.#bridge call site(s)`,
 			);
 		}
 	}
@@ -10936,8 +10950,8 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		);
 	}
 	if (
-		fireCreatedCallCount !== 3 ||
-		fireDeletedCallCount !== 1 ||
+		fireCreatedCallCount !== 4 ||
+		fireDeletedCallCount !== 2 ||
 		fireMovedCallCount !== 2 ||
 		fireRootUpdatedCallCount !== 8 ||
 		fireRootsUpdatedCallCount !== 2 ||

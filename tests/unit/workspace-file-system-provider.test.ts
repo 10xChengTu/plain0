@@ -2305,4 +2305,353 @@ describe("Plain workspace file system provider", () => {
 		expect(revoked.code).toBe(FileSystemProviderErrorCode.NoPermissions);
 		expect(revoked.message).toBe("The workspace entry cannot be accessed.");
 	});
+
+	describe("external delete detection via watch-state reconciliation", () => {
+		const fileStat = Object.freeze({
+			kind: "file" as const,
+			size: 3,
+			mtime: 20,
+			ctime: 10,
+			version: versionA,
+		});
+
+		function deferredStat(): Readonly<{
+			stat: (rootId: string, relativePath: string) => Promise<unknown>;
+			calls: string[];
+			resolveNext(value: unknown): void;
+			rejectNext(error: unknown): void;
+		}> {
+			const calls: string[] = [];
+			const pending: Array<{
+				resolve: (value: unknown) => void;
+				reject: (error: unknown) => void;
+			}> = [];
+			return Object.freeze({
+				calls,
+				stat(_rootId: string, relativePath: string): Promise<unknown> {
+					calls.push(relativePath);
+					return new Promise((resolve, reject) => {
+						pending.push({ resolve, reject });
+					});
+				},
+				resolveNext(value: unknown): void {
+					const next = pending.shift();
+					if (next === undefined) {
+						throw new Error("no pending stat call to resolve");
+					}
+					next.resolve(value);
+				},
+				rejectNext(error: unknown): void {
+					const next = pending.shift();
+					if (next === undefined) {
+						throw new Error("no pending stat call to reject");
+					}
+					next.reject(error);
+				},
+			});
+		}
+
+		async function flushMicrotasks(turns = 4): Promise<void> {
+			for (let turn = 0; turn < turns; turn += 1) {
+				await Promise.resolve();
+			}
+		}
+
+		function watchableBridge(overrides: Partial<PlainBridge> = {}): Readonly<{
+			bridge: PlainBridge;
+			watchListeners: Array<() => void>;
+			workspaceWatch: ReturnType<typeof vi.fn>;
+		}> {
+			const watchListeners: Array<() => void> = [];
+			const workspaceWatch = vi.fn(
+				(_watchedRootId: string, listener: () => void) => {
+					watchListeners.push(listener);
+					return () => {};
+				},
+			);
+			return Object.freeze({
+				bridge: testBridge({ workspaceWatch, ...overrides }),
+				watchListeners,
+				workspaceWatch,
+			});
+		}
+
+		it("fires a precise DELETED event once a previously read file's stat reports it missing, and does not refire while still missing", async () => {
+			const stat = vi.fn(async (_rootId: string, relativePath: string) => {
+				if (relativePath === "src/gone.ts") {
+					throw exactCommandError("ENTRY_NOT_FOUND");
+				}
+				return fileStat;
+			});
+			const { bridge, watchListeners } = watchableBridge({
+				workspaceStat: stat as PlainBridge["workspaceStat"],
+			});
+			const provider = createPlainWorkspaceFileSystemProvider(bridge);
+			const changes: ProviderChanges[] = [];
+			provider.onDidChangeFile((event: ProviderChanges) => changes.push(event));
+			provider.watch(workspaceUri(""), { recursive: true, excludes: [] });
+			const target = workspaceUri("src/gone.ts");
+			await provider.plainReadFile(target);
+
+			watchListeners.at(-1)!();
+			await flushMicrotasks();
+
+			expect(changes).toHaveLength(2);
+			expect(changes[0]).toHaveLength(1);
+			expect(changes[0]![0]!.type).toBe(FileChangeType.UPDATED);
+			expect(changes[0]![0]!.resource.toString()).toBe(rootUri);
+			expect(changes[1]).toHaveLength(1);
+			expect(changes[1]![0]!.type).toBe(FileChangeType.DELETED);
+			expect(changes[1]![0]!.resource.toString()).toBe(target.toString());
+
+			watchListeners.at(-1)!();
+			await flushMicrotasks();
+			expect(changes).toHaveLength(3);
+			expect(changes[2]![0]!.type).toBe(FileChangeType.UPDATED);
+		});
+
+		it("treats ENTRY_TYPE_MISMATCH the same as ENTRY_NOT_FOUND for a previously read path", async () => {
+			const stat = vi.fn(async () => {
+				throw exactCommandError("ENTRY_TYPE_MISMATCH");
+			});
+			const { bridge, watchListeners } = watchableBridge({
+				workspaceStat: stat as PlainBridge["workspaceStat"],
+			});
+			const provider = createPlainWorkspaceFileSystemProvider(bridge);
+			const changes: ProviderChanges[] = [];
+			provider.onDidChangeFile((event: ProviderChanges) => changes.push(event));
+			provider.watch(workspaceUri(""), { recursive: true, excludes: [] });
+			const target = workspaceUri("src/became-a-dir.ts");
+			await provider.plainReadFile(target);
+
+			watchListeners.at(-1)!();
+			await flushMicrotasks();
+
+			expect(changes).toHaveLength(2);
+			expect(changes[1]![0]!.type).toBe(FileChangeType.DELETED);
+			expect(changes[1]![0]!.resource.toString()).toBe(target.toString());
+		});
+
+		it("fires ADDED and clears the missing mark once a previously deleted read file reappears", async () => {
+			let missing = true;
+			const stat = vi.fn(async () => {
+				if (missing) {
+					throw exactCommandError("ENTRY_NOT_FOUND");
+				}
+				return fileStat;
+			});
+			const { bridge, watchListeners } = watchableBridge({
+				workspaceStat: stat as PlainBridge["workspaceStat"],
+			});
+			const provider = createPlainWorkspaceFileSystemProvider(bridge);
+			const changes: ProviderChanges[] = [];
+			provider.onDidChangeFile((event: ProviderChanges) => changes.push(event));
+			provider.watch(workspaceUri(""), { recursive: true, excludes: [] });
+			const target = workspaceUri("src/restored.ts");
+			await provider.plainReadFile(target);
+
+			watchListeners.at(-1)!();
+			await flushMicrotasks();
+			expect(changes).toHaveLength(2);
+			expect(changes[1]![0]!.type).toBe(FileChangeType.DELETED);
+
+			missing = false;
+			watchListeners.at(-1)!();
+			await flushMicrotasks();
+			expect(changes).toHaveLength(4);
+			expect(changes[3]).toHaveLength(1);
+			expect(changes[3]![0]!.type).toBe(FileChangeType.ADDED);
+			expect(changes[3]![0]!.resource.toString()).toBe(target.toString());
+
+			watchListeners.at(-1)!();
+			await flushMicrotasks();
+			expect(changes).toHaveLength(5);
+			expect(changes[4]![0]!.type).toBe(FileChangeType.UPDATED);
+		});
+
+		it("does not fire or mark missing when the stat recheck fails for a non-absence reason", async () => {
+			for (const code of [
+				"ROOT_NOT_AUTHORIZED",
+				"PERMISSION_DENIED",
+				"IO_FAILED",
+				"WORKSPACE_CONFLICT",
+			]) {
+				const stat = vi.fn(async () => {
+					throw exactCommandError(code);
+				});
+				const { bridge, watchListeners } = watchableBridge({
+					workspaceStat: stat as PlainBridge["workspaceStat"],
+				});
+				const provider = createPlainWorkspaceFileSystemProvider(bridge);
+				const changes: ProviderChanges[] = [];
+				provider.onDidChangeFile((event: ProviderChanges) =>
+					changes.push(event),
+				);
+				provider.watch(workspaceUri(""), { recursive: true, excludes: [] });
+				const target = workspaceUri("src/guarded.ts");
+				await provider.plainReadFile(target);
+
+				watchListeners.at(-1)!();
+				await flushMicrotasks();
+
+				expect(changes).toHaveLength(1);
+				expect(changes[0]![0]!.type).toBe(FileChangeType.UPDATED);
+			}
+		});
+
+		it("only rechecks previously read resources: a root-only watch with nothing read triggers no stat calls", async () => {
+			const stat = vi.fn(async () => fileStat);
+			const { bridge, watchListeners } = watchableBridge({
+				workspaceStat: stat as PlainBridge["workspaceStat"],
+			});
+			const provider = createPlainWorkspaceFileSystemProvider(bridge);
+			provider.watch(workspaceUri(""), { recursive: true, excludes: [] });
+
+			watchListeners.at(-1)!();
+			await flushMicrotasks();
+
+			expect(stat).not.toHaveBeenCalled();
+		});
+
+		it("sweeps every previously read path for a root during one wake", async () => {
+			const stat = vi.fn(async (_rootId: string, relativePath: string) => {
+				if (relativePath === "src/b.ts") {
+					throw exactCommandError("ENTRY_NOT_FOUND");
+				}
+				return fileStat;
+			});
+			const { bridge, watchListeners } = watchableBridge({
+				workspaceStat: stat as PlainBridge["workspaceStat"],
+			});
+			const provider = createPlainWorkspaceFileSystemProvider(bridge);
+			const changes: ProviderChanges[] = [];
+			provider.onDidChangeFile((event: ProviderChanges) => changes.push(event));
+			provider.watch(workspaceUri(""), { recursive: true, excludes: [] });
+			await provider.plainReadFile(workspaceUri("src/a.ts"));
+			await provider.plainReadFile(workspaceUri("src/b.ts"));
+
+			watchListeners.at(-1)!();
+			await flushMicrotasks();
+
+			expect(stat.mock.calls.map((call) => call[1]).sort()).toEqual([
+				"src/a.ts",
+				"src/b.ts",
+			]);
+			const deleted = changes
+				.flat()
+				.filter((change) => change.type === FileChangeType.DELETED);
+			expect(deleted).toHaveLength(1);
+			expect(deleted[0]!.resource.toString()).toBe(
+				workspaceUri("src/b.ts").toString(),
+			);
+		});
+
+		it("runs at most one in-flight stat sweep per root and merges a wake that arrives mid-sweep into one follow-up sweep", async () => {
+			const control = deferredStat();
+			const { bridge, watchListeners } = watchableBridge({
+				workspaceStat: control.stat as PlainBridge["workspaceStat"],
+			});
+			const provider = createPlainWorkspaceFileSystemProvider(bridge);
+			provider.watch(workspaceUri(""), { recursive: true, excludes: [] });
+			const target = workspaceUri("src/busy.ts");
+			await provider.plainReadFile(target);
+
+			watchListeners.at(-1)!();
+			await flushMicrotasks();
+			expect(control.calls).toEqual(["src/busy.ts"]);
+
+			watchListeners.at(-1)!();
+			await flushMicrotasks();
+			expect(control.calls).toEqual(["src/busy.ts"]);
+
+			control.resolveNext(fileStat);
+			await flushMicrotasks();
+			expect(control.calls).toEqual(["src/busy.ts", "src/busy.ts"]);
+
+			control.resolveNext(fileStat);
+			await flushMicrotasks();
+			expect(control.calls).toEqual(["src/busy.ts", "src/busy.ts"]);
+		});
+
+		it("bounds the tracked set per root: reading past the cap evicts the oldest untouched path but keeps a re-read path", async () => {
+			const stat = vi.fn(async (_rootId: string, relativePath: string) => {
+				if (
+					relativePath === "src/evicted.ts" ||
+					relativePath === "src/kept.ts"
+				) {
+					throw exactCommandError("ENTRY_NOT_FOUND");
+				}
+				return fileStat;
+			});
+			const { bridge, watchListeners } = watchableBridge({
+				workspaceStat: stat as PlainBridge["workspaceStat"],
+			});
+			const provider = createPlainWorkspaceFileSystemProvider(bridge);
+			const changes: ProviderChanges[] = [];
+			provider.onDidChangeFile((event: ProviderChanges) => changes.push(event));
+			provider.watch(workspaceUri(""), { recursive: true, excludes: [] });
+
+			// "src/evicted.ts" is read first; "src/kept.ts" is read second but
+			// re-read again right before the cap is exceeded, so it must not be
+			// the one evicted.
+			await provider.plainReadFile(workspaceUri("src/evicted.ts"));
+			await provider.plainReadFile(workspaceUri("src/kept.ts"));
+			for (let index = 0; index < 254; index += 1) {
+				await provider.plainReadFile(workspaceUri(`src/filler-${index}.ts`));
+			}
+			await provider.plainReadFile(workspaceUri("src/kept.ts"));
+			// Exactly one more distinct read exceeds the 256-entry bound and
+			// evicts the least-recently-touched path, which is now
+			// "src/evicted.ts" rather than "src/kept.ts".
+			await provider.plainReadFile(workspaceUri("src/one-more.ts"));
+
+			watchListeners.at(-1)!();
+			// The reconciliation sweep awaits one bridge call per tracked path
+			// sequentially, and "src/kept.ts" is last in iteration order because
+			// it was re-touched; a generous flush lets the whole bounded sweep
+			// (256 entries) settle before asserting.
+			await flushMicrotasks(2_000);
+
+			const deletedResources = changes
+				.flat()
+				.filter((change) => change.type === FileChangeType.DELETED)
+				.map((change) => change.resource.toString());
+			expect(deletedResources).toEqual([
+				workspaceUri("src/kept.ts").toString(),
+			]);
+			expect(stat.mock.calls.some((call) => call[1] === "src/evicted.ts")).toBe(
+				false,
+			);
+		});
+
+		it("discards an in-flight stat result once the path is evicted from the tracked set before it resolves", async () => {
+			const control = deferredStat();
+			const { bridge, watchListeners } = watchableBridge({
+				workspaceStat: control.stat as PlainBridge["workspaceStat"],
+			});
+			const provider = createPlainWorkspaceFileSystemProvider(bridge);
+			const changes: ProviderChanges[] = [];
+			provider.onDidChangeFile((event: ProviderChanges) => changes.push(event));
+			provider.watch(workspaceUri(""), { recursive: true, excludes: [] });
+			const target = workspaceUri("src/torn-down.ts");
+			await provider.plainReadFile(target);
+
+			watchListeners.at(-1)!();
+			await flushMicrotasks();
+			expect(control.calls).toEqual(["src/torn-down.ts"]);
+
+			// Evict "src/torn-down.ts" from the tracked set by reading past the
+			// per-root bound while its stat call is still in flight.
+			for (let index = 0; index < 256; index += 1) {
+				await provider.plainReadFile(workspaceUri(`src/filler-${index}.ts`));
+			}
+
+			control.rejectNext(exactCommandError("ENTRY_NOT_FOUND"));
+			await flushMicrotasks();
+
+			expect(
+				changes.some((batch) => batch[0]!.type === FileChangeType.DELETED),
+			).toBe(false);
+		});
+	});
 });
