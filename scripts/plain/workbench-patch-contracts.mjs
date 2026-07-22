@@ -8,7 +8,7 @@ const PATCH_CONTRACTS = Object.freeze([
 		integrity:
 			"sha512-pJMSRMI0m5Mvx54u6iBGh+iad9KqfICnwAcjswNJOO7Xt1OXm5xILcM32VkMe4UX0YmrGAvYc0WVKWL8I9O4ng==",
 		directImporter: true,
-		snapshotEdgeCount: 24,
+		snapshotEdgeCount: 25,
 		shape: Object.freeze([
 			"diff --git a/services.js b/services.js",
 			"@@ -24,7 +24,6 @@ import './vscode/src/vs/workbench/contrib/inlayHints/browser/inlayHintsAccessibi",

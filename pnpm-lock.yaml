@@ -40,6 +40,9 @@ importers:
       '@codingame/monaco-vscode-notifications-service-override':
         specifier: 35.0.1
         version: 35.0.1
+      '@codingame/monaco-vscode-search-service-override':
+        specifier: 35.0.1
+        version: 35.0.1
       '@codingame/monaco-vscode-textmate-service-override':
         specifier: 35.0.1
         version: 35.0.1
@@ -136,6 +139,9 @@ packages:
 
   '@codingame/monaco-vscode-quickaccess-service-override@35.0.1':
     resolution: {integrity: sha512-riQIc83YKHIH1eC3AumkA6KI1YgJIQzPHHabH7Q/9MlEngO10QT9lVRQY6itx0K3rR28baz38CL6H+iV+HPVOw==}
+
+  '@codingame/monaco-vscode-search-service-override@35.0.1':
+    resolution: {integrity: sha512-1u6rExIpFMn3y+1kbyRX9UkT08usnIt0TzECin5oAOczdpuKur9KQIdnKPVnd0LynOfmohsuXzhFWVCHQA+p3w==}
 
   '@codingame/monaco-vscode-textmate-service-override@35.0.1':
     resolution: {integrity: sha512-VLfp3Ei+lAPgVM1EzjIpXKDdAKMNUErVZ9WTsLQStts4O5geQ87i55DbaildRc3Ialf8ELU6Dea9qTH0R2XVGA==}
@@ -939,6 +945,10 @@ snapshots:
       '@codingame/monaco-vscode-api': 35.0.1(patch_hash=184ceed92b82bccb869ca91bc322e6c01740d8eb85cd9ddde47484e8959858f6)
 
   '@codingame/monaco-vscode-quickaccess-service-override@35.0.1':
+    dependencies:
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=184ceed92b82bccb869ca91bc322e6c01740d8eb85cd9ddde47484e8959858f6)
+
+  '@codingame/monaco-vscode-search-service-override@35.0.1':
     dependencies:
       '@codingame/monaco-vscode-api': 35.0.1(patch_hash=184ceed92b82bccb869ca91bc322e6c01740d8eb85cd9ddde47484e8959858f6)
 

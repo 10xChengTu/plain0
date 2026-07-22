@@ -5853,3 +5853,110 @@ test("opens a Markdown file as a plain Monaco text editor with no rich preview s
 	expect(pageErrors).toEqual([]);
 	expect(consoleErrors).toEqual([]);
 });
+
+test("opens Quick Open with Cmd+P and stays stable while typing, including on an absolute path", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported");
+	await openNativeWorkspaceExplorer(page);
+
+	const quickOpen = page.locator(".quick-input-widget");
+	await page.keyboard.press("ControlOrMeta+P");
+	await expect(quickOpen).toBeVisible();
+	await expect(quickOpen.locator("input")).toBeFocused();
+
+	// AnythingQuickAccessProvider's own upstream `NO_RESULTS_PICK` renders a
+	// single "No matching results" row whenever the picker has zero real
+	// picks (see anythingQuickAccess.js) — the genuine empty-results DOM
+	// state, not a guess or a mock.
+	const noMatchingResultsRow = quickOpen
+		.locator(".quick-input-list .monaco-list-row")
+		.filter({ hasText: "No matching results" });
+
+	await quickOpen.locator("input").pressSequentially("readme");
+	// PlainSearchService's fileSearch always resolves to an empty result set
+	// (see app/features/search/plain-search-service.ts), so AnythingQuick
+	// AccessProvider never lists README.md itself; the panel must simply stay
+	// open, show the upstream empty-results row, and stay free of a native
+	// error surface while a query is typed.
+	await expect(quickOpen).toBeVisible();
+	await expect(
+		quickOpen.locator(".quick-input-list .monaco-list-row"),
+	).toHaveCount(1);
+	await expect(noMatchingResultsRow).toHaveCount(1);
+	await page.keyboard.press("Escape");
+	await expect(quickOpen).toBeHidden();
+
+	// AnythingQuickAccessProvider.getAbsolutePathFileResult tries to stat an
+	// absolute path directly through IFileService, bypassing fileSearch
+	// entirely — a real code path probed here rather than assumed. Plain
+	// registers no `file:` provider at all, so it fails closed by itself: no
+	// pick, no crash, no native dialog, same empty-results row as any other
+	// query.
+	await page.keyboard.press("ControlOrMeta+P");
+	await expect(quickOpen).toBeVisible();
+	await quickOpen.locator("input").pressSequentially("/etc/passwd");
+	await expect(quickOpen).toBeVisible();
+	await expect(
+		quickOpen.locator(".quick-input-list .monaco-list-row"),
+	).toHaveCount(1);
+	await expect(noMatchingResultsRow).toHaveCount(1);
+	await page.keyboard.press("Escape");
+	await expect(quickOpen).toBeHidden();
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("shows a Search icon in the Activity Bar, opens the Search view, and stays stable with empty results while typing a query", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported");
+	await openNativeWorkspaceExplorer(page);
+
+	const searchActivityIcon = page.getByRole("tab", { name: /^Search/ });
+	await expect(searchActivityIcon).toHaveCount(1);
+	await searchActivityIcon.click();
+
+	const searchInput = page.locator(".plain-search-view-input");
+	await expect(searchInput).toBeVisible();
+	const status = page.locator(".plain-search-view-status");
+
+	await searchInput.pressSequentially("Read-only");
+	await expect(status).toHaveText("No results found.", { timeout: 5_000 });
+	await expect(page.locator(".plain-search-view-body")).toBeVisible();
+
+	await searchInput.fill("");
+	await expect(status).toHaveText("");
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});

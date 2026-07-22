@@ -143,6 +143,32 @@ const ALLOWED_WORKING_COPY_OVERRIDE_IMPORT_PATHS = new Set([
 	"app/services.ts",
 	"app/services/plain-workspace-backup-tracker.ts",
 ]);
+// search-service-override's default export (CustomSearchService) unconditionally
+// does `isHTMLFileSystemProvider(fileService.getProvider(Schemas.file))`, which
+// throws a TypeError once Plain's FileService (registering no `file:` provider)
+// returns undefined for that lookup; both of that factory's fallbacks are also
+// front-end file searchers hard-coded to the `file:` scheme. Plain therefore
+// never calls that package's factory; app/features/search/plain-search-service.ts
+// extends the exact, unpatched SearchService submodule instead. That same file's
+// own doc comment records the audit of searchService.js's own import graph
+// (no top-level registrations beyond defining the class).
+const SEARCH_OVERRIDE_ROOT_MODULE =
+	"@codingame/monaco-vscode-search-service-override";
+const SEARCH_SERVICE_IMPLEMENTATION_MODULE = `${SEARCH_OVERRIDE_ROOT_MODULE}/vscode/vs/workbench/services/search/common/searchService`;
+// app/features/search/search-contribution.ts imports exactly one other
+// submodule of this package for its side effects
+// (.../browser/searchQuickAccess.contribution, which registers only the
+// Cmd+P AnythingQuickAccessProvider, the `#` SymbolsQuickAccessProvider, and
+// the workbench.action.showAllSymbols command). It deliberately does not
+// import the package's own search.contribution.js: that file unconditionally
+// imports searchChatContext.js and registers SearchChatContextContribution as
+// a real WorkbenchPhase.AfterRestored contribution wiring Search results into
+// IChatContextPickService, a Chat/AI context-attachment surface forbidden by
+// AGENTS.md — see search-contribution.ts's own doc comment for the full audit.
+const ALLOWED_SEARCH_OVERRIDE_IMPORT_PATHS = new Set([
+	"app/features/search/plain-search-service.ts",
+	"app/features/search/search-contribution.ts",
+]);
 
 function staticStringValue(node) {
 	if (
@@ -236,6 +262,118 @@ export function validateNotificationOverrideImportBoundary(
 				`${normalizedPath} imports the notifications override outside app/services.ts`,
 			]
 		: [];
+}
+
+const SEARCH_CONTRIBUTION_MODULE = `${SEARCH_OVERRIDE_ROOT_MODULE}/vscode/vs/workbench/contrib/search/browser/search.contribution`;
+const SEARCH_EDITOR_CONTRIBUTION_MODULE = `${SEARCH_OVERRIDE_ROOT_MODULE}/vscode/vs/workbench/contrib/searchEditor/browser/searchEditor.contribution`;
+
+function isSearchOverrideModule(moduleName) {
+	return (
+		moduleName === SEARCH_OVERRIDE_ROOT_MODULE ||
+		moduleName.startsWith(`${SEARCH_OVERRIDE_ROOT_MODULE}/`)
+	);
+}
+
+export function validateSearchOverrideImportBoundary(source, relativePath) {
+	const sourceFile = ts.createSourceFile(
+		relativePath,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	let referencesSearchOverride = false;
+	let referencesAggregatingEntryPoint = false;
+	let referencesSearchContributionModule = false;
+	function record(moduleName) {
+		if (!isSearchOverrideModule(moduleName)) {
+			return;
+		}
+		referencesSearchOverride = true;
+		if (moduleName === SEARCH_OVERRIDE_ROOT_MODULE) {
+			referencesAggregatingEntryPoint = true;
+		}
+		if (
+			moduleName === SEARCH_CONTRIBUTION_MODULE ||
+			moduleName === SEARCH_EDITOR_CONTRIBUTION_MODULE
+		) {
+			referencesSearchContributionModule = true;
+		}
+	}
+	function visit(node) {
+		if (ts.isStringLiteralLike(node)) {
+			record(node.text);
+		}
+		if (
+			ts.isCallExpression(node) &&
+			node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+			node.arguments.length > 0
+		) {
+			record(staticStringValue(node.arguments[0]) ?? "");
+		}
+		ts.forEachChild(node, visit);
+	}
+	visit(sourceFile);
+	const normalizedPath = relativePath.replaceAll("\\", "/");
+	const failures = [];
+	if (
+		referencesSearchOverride &&
+		!ALLOWED_SEARCH_OVERRIDE_IMPORT_PATHS.has(normalizedPath)
+	) {
+		failures.push(
+			`${normalizedPath} imports the search override outside its audited files`,
+		);
+	}
+	if (referencesAggregatingEntryPoint) {
+		failures.push(
+			`${normalizedPath} must not import the search-service-override aggregating entry point`,
+		);
+	}
+	if (referencesSearchContributionModule) {
+		// search.contribution.js (and searchEditor.contribution.js, which it
+		// also imports) unconditionally registers SearchChatContextContribution
+		// as a real WorkbenchPhase.AfterRestored contribution wiring Search
+		// results/files/symbols into IChatContextPickService — a Chat/AI
+		// context-attachment surface. AGENTS.md forbids adding AI/Chat/Agent/MCP
+		// surfaces, and the runtime excluded-surface guard cannot catch this
+		// because it only audits commandIds/viewContainerIds/viewIds, not
+		// registerWorkbenchContribution2 ids. Only the narrower
+		// searchQuickAccess.contribution submodule (imported by
+		// app/features/search/search-contribution.ts) and Plain's own
+		// hand-reproduced view-container/view registration are permitted.
+		failures.push(
+			`${normalizedPath} must not import the search.contribution/searchEditor.contribution modules`,
+		);
+	}
+	if (normalizedPath === "app/features/search/plain-search-service.ts") {
+		const searchServiceImports = sourceFile.statements.filter(
+			(statement) =>
+				ts.isImportDeclaration(statement) &&
+				ts.isStringLiteral(statement.moduleSpecifier) &&
+				statement.moduleSpecifier.text === SEARCH_SERVICE_IMPLEMENTATION_MODULE,
+		);
+		const isExactSearchServiceImport =
+			searchServiceImports.length === 1 &&
+			searchServiceImports[0].importClause?.isTypeOnly !== true &&
+			searchServiceImports[0].importClause?.name === undefined &&
+			ts.isNamedImports(searchServiceImports[0].importClause?.namedBindings) &&
+			searchServiceImports[0].importClause.namedBindings.elements.length ===
+				1 &&
+			!searchServiceImports[0].importClause.namedBindings.elements[0]
+				.isTypeOnly &&
+			(searchServiceImports[0].importClause.namedBindings.elements[0]
+				.propertyName?.text ??
+				searchServiceImports[0].importClause.namedBindings.elements[0].name
+					.text) === "SearchService" &&
+			searchServiceImports[0].importClause.namedBindings.elements[0].name
+				.text === "SearchService";
+		if (!isExactSearchServiceImport) {
+			failures.push(
+				`${normalizedPath} must import only the exact SearchService class subpath`,
+			);
+		}
+	}
+	return failures;
 }
 
 function isWorkingCopyOverrideModule(moduleName) {
@@ -666,6 +804,11 @@ export function validateDialogServiceOverride(source) {
 			tokenName: "IWorkingCopyBackupService",
 			className: "PlainWorkingCopyBackupService",
 			thirdArgIsTrue: false,
+		},
+		{
+			tokenName: "ISearchService",
+			className: "PlainSearchService",
+			thirdArgIsTrue: true,
 		},
 	]);
 	function matchesMiddleServiceDescriptor(property, spec) {
@@ -6663,6 +6806,29 @@ function collectTypeScriptBridgeAliases(sourceFile) {
  * token. The last condition deliberately permits unrelated catalog APIs that
  * happen to use the same method name.
  */
+// app/features/search/plain-search-service.ts extends the unpatched
+// SearchService base class from @codingame/monaco-vscode-search-service-override
+// (see that file's own doc comment). That base class's own constructor takes
+// IFileService as its 6th parameter and stores it as `this.fileService`,
+// purely to call `this.fileService.exists(folder)` when pre-filtering folder
+// queries (verified: searchService.js contains zero `getProvider` calls of
+// any kind — grep confirms it). Extending that base class, and wiring it
+// through Plain's own DI SyncDescriptor, is therefore structurally
+// impossible without some app file importing the literal `IFileService`
+// value (both for the constructor parameter type and for the manual
+// ServiceIdentifier-decorator call each DI-constructed class must redeclare
+// for its own exact constructor — see that file's doc comment on why
+// PlainSearchService cannot inherit SearchService's dependency list).
+// This is the one narrow, audited exemption from the blanket "no app file
+// may reference IFileService" rule below; the getProvider-derivation check
+// three lines down is NOT exempted anywhere, including in this file — if
+// plain-search-service.ts (or anything it delegates to) ever called
+// `.getProvider(...)` on a fileService-derived expression, this function
+// would still fail it.
+const IFILE_SERVICE_TOKEN_EXEMPT_PATHS = new Set([
+	"app/features/search/plain-search-service.ts",
+]);
+
 export function validateWorkspaceProviderRetrievalBoundary(appSources) {
 	const failures = [];
 	const factoryContracts = new Map([
@@ -7083,7 +7249,10 @@ export function validateWorkspaceProviderRetrievalBoundary(appSources) {
 			ts.forEachChild(node, visit);
 		}
 		visit(sourceFile);
-		if (referencesFileServiceToken) {
+		if (
+			referencesFileServiceToken &&
+			!IFILE_SERVICE_TOKEN_EXEMPT_PATHS.has(normalizedPath)
+		) {
 			failures.push(
 				`${normalizedPath} must not import or reference IFileService in the Plain application`,
 			);

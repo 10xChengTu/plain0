@@ -11,6 +11,7 @@ import {
 	validateNotificationOverrideImportBoundary,
 	validateFrontendEntrypointScripts,
 	validateMainCapability,
+	validateSearchOverrideImportBoundary,
 	validateTauriApiBoundary,
 	validateTauriConfiguration,
 	validateTauriConfigurationFiles,
@@ -56,6 +57,7 @@ const allowedDependencies = new Map([
 	["@codingame/monaco-vscode-files-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-model-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-notifications-service-override", "35.0.1"],
+	["@codingame/monaco-vscode-search-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-textmate-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-theme-defaults-default-extension", "35.0.1"],
 	["@codingame/monaco-vscode-theme-service-override", "35.0.1"],
@@ -380,6 +382,12 @@ for (const file of appFiles) {
 		fail(failure);
 	}
 	for (const failure of validateWorkingCopyOverrideImportBoundary(
+		source,
+		relative,
+	)) {
+		fail(failure);
+	}
+	for (const failure of validateSearchOverrideImportBoundary(
 		source,
 		relative,
 	)) {

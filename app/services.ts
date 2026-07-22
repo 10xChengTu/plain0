@@ -13,12 +13,14 @@ import { WorkingCopyService } from "@codingame/monaco-vscode-working-copy-servic
 import { IDialogService } from "@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service";
 import { SyncDescriptor } from "@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors";
 import { IWorkspacesService } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspaces/common/workspaces.service";
+import { ISearchService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search.service";
 import { ILanguageStatusService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/languageStatus/common/languageStatusService.service";
 import { IWorkingCopyBackupService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyBackup.service";
 import { IWorkingCopyEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService.service";
 import { IWorkingCopyService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyService.service";
 import { IWorkspaceEditingService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workspaces/common/workspaceEditing.service";
 
+import { PlainSearchService } from "./features/search/plain-search-service";
 import { EmptyLanguageStatusService } from "./services/empty-language-status";
 import { PlainWorkingCopyBackupService } from "./services/plain-workspace-backup-service";
 import "./services/plain-workspace-backup-tracker";
@@ -51,6 +53,13 @@ import {
  * override's exact, side-effect-free WorkingCopyBackupTracker submodule —
  * never the packaged BrowserWorkingCopyBackupTracker, whose beforeunload-only
  * shutdown veto does not fit Tauri's native window close.
+ *
+ * ISearchService is Plain's own PlainSearchService
+ * (./features/search/plain-search-service), which extends the
+ * search-service-override package's exact, unpatched SearchService submodule
+ * rather than that package's aggregating default export/root factory — see
+ * that file's own doc comment for why the root factory crashes with no
+ * `file:` provider. The package is never spread here.
  */
 export function createServiceOverrides() {
 	return {
@@ -86,6 +95,11 @@ export function createServiceOverrides() {
 			PlainWorkingCopyBackupService,
 			[],
 			false,
+		),
+		[ISearchService.toString()]: new SyncDescriptor(
+			PlainSearchService,
+			[],
+			true,
 		),
 		[IDialogService.toString()]: new SyncDescriptor(
 			DialogService,

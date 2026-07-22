@@ -11,6 +11,7 @@ import {
 	validateNotificationOverrideImportBoundary,
 	validateFrontendEntrypointScripts,
 	validateMainCapability,
+	validateSearchOverrideImportBoundary,
 	validateTauriApiBoundary,
 	validateTauriConfiguration,
 	validateTauriConfigurationFiles,
@@ -164,7 +165,8 @@ export function createServiceOverrides() {
 `;
 
 // Mirrors the real app/services.ts shape: the two Plain workspace
-// SyncDescriptors plus the two hand-selected working-copy SyncDescriptors
+// SyncDescriptors, the two hand-selected working-copy SyncDescriptors, the
+// Rust-backed backup SyncDescriptor, and the Plain search SyncDescriptor
 // must all be present together as the exact closed middle-descriptor set.
 const workingCopyServiceOverridesFixture = `
 import getConfigurationServiceOverride from "@codingame/monaco-vscode-configuration-service-override";
@@ -182,11 +184,13 @@ import { WorkingCopyService } from "@codingame/monaco-vscode-working-copy-servic
 import { IDialogService } from "@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service";
 import { SyncDescriptor } from "@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors";
 import { IWorkspacesService } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspaces/common/workspaces.service";
+import { ISearchService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search.service";
 import { ILanguageStatusService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/languageStatus/common/languageStatusService.service";
 import { IWorkingCopyBackupService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyBackup.service";
 import { IWorkingCopyEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService.service";
 import { IWorkingCopyService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyService.service";
 import { IWorkspaceEditingService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workspaces/common/workspaceEditing.service";
+import { PlainSearchService } from "./features/search/plain-search-service";
 import { EmptyLanguageStatusService } from "./services/empty-language-status";
 import { PlainWorkingCopyBackupService } from "./services/plain-workspace-backup-service";
 import { PlainWorkspaceEditingService, PlainWorkspacesService } from "./services/plain-workspace-services";
@@ -225,6 +229,11 @@ export function createServiceOverrides() {
       PlainWorkingCopyBackupService,
       [],
       false,
+    ),
+    [ISearchService.toString()]: new SyncDescriptor(
+      PlainSearchService,
+      [],
+      true,
     ),
     [IDialogService.toString()]: new SyncDescriptor(
       DialogService,
@@ -814,6 +823,119 @@ describe("Plain Workbench service override Harness", () => {
 		expect(validateDialogServiceOverride(reordered)).toEqual(
 			expect.arrayContaining([middleDescriptorFailure, orderFailure]),
 		);
+	});
+
+	it("locks the search override to its two audited files and hard-rejects the aggregating entry point and search.contribution", () => {
+		const plainSearchServiceSource =
+			'import { SearchService } from "@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/services/search/common/searchService";\nexport class PlainSearchService extends SearchService {}\n';
+		const searchContributionSource =
+			'import "@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/contrib/search/browser/searchQuickAccess.contribution";\n';
+
+		// Both audited files, using only their exact narrow subpaths, pass.
+		expect(
+			validateSearchOverrideImportBoundary(
+				plainSearchServiceSource,
+				"app/features/search/plain-search-service.ts",
+			),
+		).toEqual([]);
+		expect(
+			validateSearchOverrideImportBoundary(
+				searchContributionSource,
+				"app/features/search/search-contribution.ts",
+			),
+		).toEqual([]);
+
+		const outsideAuditFailure =
+			"app/features/unsafe-search.ts imports the search override outside its audited files";
+		for (const source of [
+			plainSearchServiceSource,
+			searchContributionSource,
+			'import getServiceOverride from "@codingame/monaco-vscode-search-service-override";',
+			'void import("@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/services/search/common/searchService");',
+		]) {
+			expect(
+				validateSearchOverrideImportBoundary(
+					source,
+					"app/features/unsafe-search.ts",
+				),
+			).toContain(outsideAuditFailure);
+		}
+
+		// The aggregating default export must never be imported, in any file,
+		// static or dynamic, even one already on the audited allowlist: its
+		// CustomSearchService constructor throws a TypeError against Plain's
+		// file:-less FileService, and its two fallbacks are front-end file
+		// searchers hard-coded to the file: scheme.
+		const auditedPath = "app/features/search/plain-search-service.ts";
+		const aggregatingEntryPointFailure = `${auditedPath} must not import the search-service-override aggregating entry point`;
+		for (const source of [
+			'import getServiceOverride from "@codingame/monaco-vscode-search-service-override";',
+			'import * as searchOverride from "@codingame/monaco-vscode-search-service-override";',
+			'void import("@codingame/monaco-vscode-search-service-override");',
+			'void import("@codingame/monaco-vscode-search-service-" + "override");',
+		]) {
+			expect(
+				validateSearchOverrideImportBoundary(source, auditedPath),
+			).toContain(aggregatingEntryPointFailure);
+		}
+
+		// search.contribution.js (and searchEditor.contribution.js, which it
+		// unconditionally imports) is rejected even inside the two audited
+		// files: it eagerly registers SearchChatContextContribution as a real
+		// WorkbenchPhase.AfterRestored contribution wiring Search results into
+		// IChatContextPickService, a Chat/AI context-attachment surface the
+		// runtime excluded-surface guard cannot see (it only audits
+		// commandIds/viewContainerIds/viewIds, not
+		// registerWorkbenchContribution2 ids).
+		for (const [relativePath, moduleSpecifier] of [
+			[
+				"app/features/search/search-contribution.ts",
+				"@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/contrib/search/browser/search.contribution",
+			],
+			[
+				"app/features/search/search-contribution.ts",
+				"@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/contrib/searchEditor/browser/searchEditor.contribution",
+			],
+			[
+				"app/features/search/plain-search-service.ts",
+				"@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/contrib/search/browser/search.contribution",
+			],
+		]) {
+			expect(
+				validateSearchOverrideImportBoundary(
+					`import "${moduleSpecifier}";\n`,
+					relativePath,
+				),
+			).toContain(
+				`${relativePath} must not import the search.contribution/searchEditor.contribution modules`,
+			);
+		}
+
+		// plain-search-service.ts must import only the exact, unaliased
+		// SearchService named export from its exact class subpath — never a
+		// default/namespace import, a renamed binding, or the wrong subpath.
+		const exactImportFailure =
+			"app/features/search/plain-search-service.ts must import only the exact SearchService class subpath";
+		for (const mutatedSource of [
+			'import SearchService from "@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/services/search/common/searchService";\n',
+			'import * as searchServiceModule from "@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/services/search/common/searchService";\n',
+			'import { SearchService as UnsafeSearchService } from "@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/services/search/common/searchService";\n',
+			'import { SearchService } from "@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/services/search/common/searchServiceOther";\n',
+			'import type { SearchService } from "@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/services/search/common/searchService";\n',
+		]) {
+			expect(
+				validateSearchOverrideImportBoundary(
+					mutatedSource,
+					"app/features/search/plain-search-service.ts",
+				),
+			).toContain(exactImportFailure);
+		}
+		expect(
+			validateSearchOverrideImportBoundary(
+				plainSearchServiceSource,
+				"app/features/search/plain-search-service.ts",
+			),
+		).not.toContain(exactImportFailure);
 	});
 
 	it("rejects notification override references outside app/services.ts", () => {

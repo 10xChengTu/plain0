@@ -11,6 +11,7 @@ import { registerCustomProvider } from "@codingame/monaco-vscode-files-service-o
 
 import { EXCLUDED_SURFACE_GUARD_MARKER } from "./excluded-surface-policy";
 import { enforceExcludedWorkbenchSurfaces } from "./excluded-surfaces";
+import "./features/search/search-contribution";
 import { registerWorkspaceCommands } from "./features/workspace/commands";
 import { registerWorkspaceDeleteCoordinator } from "./features/workspace/delete-coordinator";
 import {
