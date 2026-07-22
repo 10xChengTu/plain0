@@ -44,8 +44,25 @@ fixture（临时目录中创建）：
 
 状态：待执行（低优先级）。单根真实永久删除（含取消路径与用户确认后的执行路径）已通过；本条目在双根 workspace 中重复一次「右键/⌘Backspace → DOM 确认 → 永久删除 → Explorer 与磁盘同步消失」。不可逆点击前必须取得用户即时确认。
 
+### E2E-003 · F030 热退出恢复的真实桌面矩阵
+
+状态：待执行。Browser mock 层已闭合（编辑不保存 → reload → 自动恢复 dirty → 保存 discard → 不再复活，22/22 E2E 含此链）；本条目补真实 WKWebView/磁盘/进程层。
+
+fixture：临时 workspace（含一个文本文件）。
+
+步骤与断言：
+
+1. 打开 workspace → 编辑文件不保存（tab 脏点 + Activity Bar 脏计数徽章可见）→ 等待 backup 落盘（`~/Library/Application Support/<app>/backups/<64位十六进制身份>/` 下出现条目文件；身份由 canonical roots 哈希派生，同 workspace 重开应相同）。
+2. **强杀进程**（`kill -9`，模拟崩溃）→ 重启应用 → 重开同一 workspace → 断言编辑器自动恢复为 dirty、内容含未保存编辑。
+3. 保存 → 磁盘内容正确、backup 目录条目消失；再次重启重开 → 无恢复 tab。
+4. 外部删除已打开文件（真实 FSEvents）→ tab 出现删除线装饰（`.monaco-icon-label.strikethrough`）；外部恢复 → 装饰消失。
+5. 保存冲突真实路径：外部改写文件后在 app 内 `Cmd+S` → 冲突通知（动作恰为 Reload/Save As.../Details，无 Retry/Overwrite）→ Reload 后内容为外部版本。
+6. 清理：退出、删除 fixture 与 backup 目录、删除 `src-tauri/target`。
+
+已知边界（执行方须知）：真实 `WindowEvent::CloseRequested` 关窗握手（关窗前保证 backup 落盘的 veto/等待协议）**尚未实现**——Plain tracker 的 `onFinalBeforeShutdown` 恒不 veto，正常关窗时最后一次节流备份可能未落盘；崩溃路径（kill -9）依赖此前已完成的节流备份。该协议属后续工作项，本条目按现状验收即可，发现关窗竞态属预期，不算回归。
+
 ## 后续条目（随切片追加）
 
-- F030 编辑主链：外部冲突（磁盘改动 vs 脏编辑器）、热退出恢复（强杀后重开）、预览/固定 tab 的真实桌面行为。
+- F030 遗留：真实 `CloseRequested` 关窗握手协议实现后，补「正常关窗 → 重开恢复」的桌面验收变体。
 - F040 搜索/替换、F050-F060 主题导入（本地 VSIX）、F070 PTY、F080-F090 Git、F100 DAP 的真实桌面矩阵按 docs/testing.md「真实 Tauri E2E」清单逐项登记。
 - F120/F130 发布与全量原生回归。

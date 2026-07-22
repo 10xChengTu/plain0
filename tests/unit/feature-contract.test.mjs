@@ -162,38 +162,38 @@ describe("feature completion contract", () => {
 			document.currentPhase = 3;
 		});
 		expectRejected((document) => {
-			document.features[4].status = "in_progress";
+			document.features[5].status = "in_progress";
 		});
 		expectRejected(
 			(document) => {
 				document.features[0].status = "planned";
 				delete document.features[0].evidence;
-				document.features[3].status = "planned";
+				document.features[4].status = "planned";
 				document.currentPhase = 0;
 			},
 			progressDocument.replace(
-				"- WIP：`F030` Editing, preview and hot-exit recovery。",
+				"- WIP：`F040` Quick Open, workspace search and replace。",
 				"- WIP：无。",
 			),
 		);
 
 		const blocked = cloneDocument();
-		blocked.features[3].status = "blocked";
-		blocked.features[3].blocker = "Waiting for an explicit external decision.";
+		blocked.features[4].status = "blocked";
+		blocked.features[4].blocker = "Waiting for an explicit external decision.";
 		const blockedProgress = progressDocument;
 		expect(validateFeatureContract(blocked, blockedProgress)).toMatchObject({
 			failures: [],
 			activeCount: 1,
 		});
-		blocked.features[3].blocker = " ";
+		blocked.features[4].blocker = " ";
 		expect(
 			validateFeatureContract(blocked, blockedProgress).failures.length,
 		).toBeGreaterThan(0);
 
 		const betweenItems = cloneDocument();
-		betweenItems.features[3].status = "planned";
+		betweenItems.features[4].status = "planned";
 		const betweenItemsProgress = progressDocument.replace(
-			"- WIP：`F030` Editing, preview and hot-exit recovery。",
+			"- WIP：`F040` Quick Open, workspace search and replace。",
 			"- WIP：无。",
 		);
 		expect(
@@ -201,15 +201,15 @@ describe("feature completion contract", () => {
 		).toMatchObject({ failures: [], activeCount: 0 });
 
 		for (const progress of [
-			progressDocument.replace("`F030`", "`F040`"),
+			progressDocument.replace("`F040`", "`F050`"),
 			progressDocument.replace(
-				"- WIP：`F030` Editing, preview and hot-exit recovery。",
+				"- WIP：`F040` Quick Open, workspace search and replace。",
 				"- WIP：无。",
 			),
 			progressDocument.replace("- WIP：", "- WIP:"),
 			progressDocument.replace(
-				"- WIP：`F030` Editing, preview and hot-exit recovery。",
-				"- WIP：`F030` Editing, preview and hot-exit recovery。\n- WIP：`F030` Editing, preview and hot-exit recovery。",
+				"- WIP：`F040` Quick Open, workspace search and replace。",
+				"- WIP：`F040` Quick Open, workspace search and replace。\n- WIP：`F040` Quick Open, workspace search and replace。",
 			),
 			progressDocument.replace("## 当前状态", "## 当前状态\n\n## 当前状态"),
 		]) {
