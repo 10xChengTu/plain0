@@ -162,29 +162,25 @@ describe("feature completion contract", () => {
 			document.currentPhase = 3;
 		});
 		expectRejected((document) => {
-			document.features[3].status = "in_progress";
+			document.features[4].status = "in_progress";
 		});
 		expectRejected(
 			(document) => {
 				document.features[0].status = "planned";
 				delete document.features[0].evidence;
-				document.features[2].status = "planned";
+				document.features[3].status = "planned";
 				document.currentPhase = 0;
 			},
 			progressDocument.replace(
-				"- WIP：`F020` Workspace path policy and file tree。",
+				"- WIP：`F030` Editing, preview and hot-exit recovery。",
 				"- WIP：无。",
 			),
 		);
 
 		const blocked = cloneDocument();
-		blocked.features[2].status = "planned";
 		blocked.features[3].status = "blocked";
 		blocked.features[3].blocker = "Waiting for an explicit external decision.";
-		const blockedProgress = progressDocument.replace(
-			"- WIP：`F020` Workspace path policy and file tree。",
-			"- WIP：`F030` Editing, preview and hot-exit recovery。",
-		);
+		const blockedProgress = progressDocument;
 		expect(validateFeatureContract(blocked, blockedProgress)).toMatchObject({
 			failures: [],
 			activeCount: 1,
@@ -195,9 +191,9 @@ describe("feature completion contract", () => {
 		).toBeGreaterThan(0);
 
 		const betweenItems = cloneDocument();
-		betweenItems.features[2].status = "planned";
+		betweenItems.features[3].status = "planned";
 		const betweenItemsProgress = progressDocument.replace(
-			"- WIP：`F020` Workspace path policy and file tree。",
+			"- WIP：`F030` Editing, preview and hot-exit recovery。",
 			"- WIP：无。",
 		);
 		expect(
@@ -205,15 +201,15 @@ describe("feature completion contract", () => {
 		).toMatchObject({ failures: [], activeCount: 0 });
 
 		for (const progress of [
-			progressDocument.replace("`F020`", "`F030`"),
+			progressDocument.replace("`F030`", "`F040`"),
 			progressDocument.replace(
-				"- WIP：`F020` Workspace path policy and file tree。",
+				"- WIP：`F030` Editing, preview and hot-exit recovery。",
 				"- WIP：无。",
 			),
 			progressDocument.replace("- WIP：", "- WIP:"),
 			progressDocument.replace(
-				"- WIP：`F020` Workspace path policy and file tree。",
-				"- WIP：`F020` Workspace path policy and file tree。\n- WIP：`F020` Workspace path policy and file tree。",
+				"- WIP：`F030` Editing, preview and hot-exit recovery。",
+				"- WIP：`F030` Editing, preview and hot-exit recovery。\n- WIP：`F030` Editing, preview and hot-exit recovery。",
 			),
 			progressDocument.replace("## 当前状态", "## 当前状态\n\n## 当前状态"),
 		]) {

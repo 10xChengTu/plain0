@@ -88,7 +88,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 2. 架构/边界检查。
 3. Rust 与前端单元测试。
 4. 相关集成测试。
-5. 涉及 UI 或原生行为时，执行 `docs/testing.md` 中对应的浏览器或真实 Tauri 场景。
+5. 涉及 UI 时执行 `docs/testing.md` 中对应的浏览器场景；真实 Tauri 桌面场景不由实现方执行，须登记到 `docs/e2e-handover.md` 交接 Codex（2026-07-22 起的分工）。
 
 编译或类型检查失败时，不得继续运行后续测试并宣称完成。
 
@@ -98,6 +98,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 - 总体架构：`docs/architecture.md`
 - 实施计划：`docs/implementation-plan.md`
 - 测试策略：`docs/testing.md`
+- 桌面 E2E 交接清单（Codex 执行）：`docs/e2e-handover.md`
 - GitHub 调研：`docs/research/2026-07-18-github-solutions.md`
 - 架构决策：`docs/decisions/`
 - 当前进度：`progress.md`

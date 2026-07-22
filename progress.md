@@ -1,12 +1,12 @@
 # Plain 重写进度
 
-更新时间：2026-07-20
+更新时间：2026-07-22
 
 ## 当前状态
 
 - 阶段：2 — 编辑主链。
-- WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：完成真实 multi-root Tauri 验收。
+- WIP：`F030` Editing, preview and hot-exit recovery。
+- 当前最小工作项：完成 F030 的固定 GitHub 调研与技术方案冻结。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -115,11 +115,14 @@
 - [x] 完成 Browser delete retained/partial 可见失败矩阵：`installMultiRootNativeIpcMock` 新增第四个只本地闭包消费的 `deleteIncompleteScenarios` 场景闭集，primary 根按需追加 `delete-retained.txt`、secondary 根按需追加含 `removed.txt`/`kept.txt` 的 `delete-partial` 目录；`workspace_commit_delete_entry` 在既有请求校验与正常删除语句之间插入按 FIFO 消费的 retained（零树变更、返回 `entryRetained`）与 partial（真实 `node.entries.delete("removed.txt")` 布尔结果推导 `removedEntries`、返回 `entryPartiallyDeleted`）终态分支，随后使批次失效，触发 coordinator 恰好一次的 best-effort cancel（该 cancel 被 fixture 已失效的 `activeDelete` 拒绝；拒绝语义由 mock 源码与单元层锁定，E2E 只断言 cancel 请求恰好出现一次、之后无第二轮 prepare/begin/commit，不断言其错误码）。实现期间的真实探针推翻了此前研究假设：右键 `Delete Permanently` 的 `ContextMenuHandler` 会在 `onWillRun` 时同步 `hideContextView` 并销毁其 `ActionRunner.onDidRun` 监听器，早于确认框之后才 settle 的 rejection，因此永远不会显示通知；改为与既有单根验收一致的键盘 `⌘Backspace` 触发，其 `abstractKeybindingService` 用持久的 `.then(undefined, err => notificationService.warn(err))` 可靠显示 Warning 级 toast。同一原因，`NotificationsAlerts` 只镜像 Error 级通知到控制台，故每个 phase 只有一条 BulkEditService 结构化 `console.error`（不含 `WORKSPACE_DELETE_INCOMPLETE` 名称，只是 provider 的通用 `Unavailable` 拒绝），总数为 2 而非最初设想的 4；Harness 更新 `validateWorkspaceMoveFailureBrowserFixture` 以适配新增第四参数，并新增 `validateWorkspaceDeleteFailureBrowserFixture` 锁定场景闭集、树种子、请求校验、retained/partial 分支与顺序、禁止 window 控制面。
 - [x] Delete 可见失败切片通过完整验收：新增单测 5 条（含 fixture 签名迁移修复），完整 `pnpm check` 通过 30 个前端测试文件、600 个用例、2277 个模块、2112 个 bundle source、203 项既有迁移债务与 Rust 255/255，全部 Browser E2E 14/14 通过；聚焦 `shows retained and partial permanent delete failures` 与合并 `shows retained and partial`（move + delete）重复 5 次均全部通过。两阶段各只有唯一一次 `prepare → begin → commit → cancel` 链、一个无 Retry 的去敏 Warning toast，retained 的 entry 与 partial 的 `delete-partial`/`kept.txt` 均按真实树终态可见、`removed.txt` 消失，且无 native dialog、`pageerror`、第二个确认框或伪成功事件。
 - [x] 完成 F020 delete 可见失败矩阵的独立对抗复核修复：复核给出 3 条 confirmed / 3 条 contested 的裁定，全部 confirmed 项直接采信并已修复。(1) `forbiddenWindowControls` 只锁字面 `window`/`testWindow` receiver、不追踪别名，可被 `const winAlias = window as unknown as Record<string, unknown>;` 之类的别名钩子绕过；新增 `validateWorkspaceBrowserFixtureWindowAuthority` 把 callback 内每个可达全局对象的标识符（`window`/`globalThis`/`self`/`top`/`frames`/`document`/`eval`/`Function`）锁死为唯一一次、必须落在被审计的 `testWindow` 声明语句内，`testWindow` 自身的引用也锁进固定语句 allowlist（`__TAURI_INTERNALS__` 赋值因内部含会让朴素 token scanner 失步的模板字面量，改用结构匹配而非全文本 pin，原因写在函数 JSDoc）；`parent` 因 fixture 内部合法本地遮蔽（`resolveParent` 的 `const parent = ...`）被移出禁用名单，属于按规格允许的收窄而非放宽合同。(2) commit case 可在 retained 分支前插入裸 `target.parent.entries.delete(target.name);`、建树处可插入无条件 `primaryEntries.push(...)` 污染初始树；两个既有验证器新增 `deleteIncompletePlan`/`moveIncompletePlan`/commit-case `target`/`primaryEntries`/`secondaryEntries` 的引用范围锁，只允许其标识符出现在审计过的声明、peek、terminal 分支等语句源码区间内。(3) peek 语句 `deleteIncompletePlan[0]`/`moveIncompletePlan[0]` 未被精确文本锁定，可静默改成 `[1]`；两个验证器都新增该语句的精确 normalizedText pin。(4) E2E 里 `expandDirectory("delete-partial")` 在其 `expectRootRefresh` 断言之前执行，可能自证；探针证实已展开子目录不会随根刷新自动重读，只有重新展开才触发，因此把根 `""` 断言移到展开前、"delete-partial" 断言移到展开后并如实标注为「重新展开触发」，docs/research 与本文件同步更正。(5) 「cancel 命中 `WORKSPACE_DELETE_PLAN_INVALID`」不可证伪（mock 不记录 reject、coordinator 空 catch 吞错误）；措辞收敛为只声称 cancel 请求出现恰好一次、之后无第二轮 prepare/begin/commit，不再声称观察到错误码。新增 hostile mutation 单测 7 条（P1 完整绕过、globalThis 变体、纯 plan 别名、delete/move peek 索引篡改、retained 分支前插入裸删除、建树处插入无条件 push），加固前均确认对基线返回空数组、加固后均确认真实触发对应新失败消息。验收：`vitest run tests/unit/boundary-contracts.test.mjs` 132/132（新增 7 条），`node scripts/plain/check-boundaries.mjs` 通过，聚焦 delete 用例与合并 `shows retained and partial` 重复 5 次（10/10）均通过，全部 Browser E2E 14/14 通过，完整 `pnpm check` 通过 30 个前端测试文件、607 个用例、2277 个模块、2112 个 bundle source、203 项既有迁移债务与 Rust 255/255。
+- [x] 分工切换与 `F020` 闭环：用户指示真实 Tauri 桌面（Computer Use / 人工驱动）验收自 2026-07-22 起不再由实现方执行，全部登记到新建 `docs/e2e-handover.md` 交接 Codex 统一执行并回写 evidence，`docs/testing.md`「真实 Tauri E2E」与 `AGENTS.md` 验收清单同步更新为指向该交接清单。`F020` 据此以现有 Browser E2E（14/14，含重复 5 次的 move+delete 失败矩阵 10/10）、Rust 255/255、独立对抗复核后 132/132 的 Harness 边界单测，以及既往真实单根桌面验收（绝对路径 `.app` 启动、目录选择器打开 workspace、空文件创建/31 字节精确保存/目录创建/同根重命名/文件复制并磁盘核对、外部增删经 FSEvents 首轮轮询收敛、DOM 确认框取消路径、用户即时确认后的正向永久删除并磁盘核实）闭环；真实 multi-root 桌面矩阵（双根投影、跨根磁盘写链、每根 FSEvents、root 生命周期）与 multi-root 永久删除桌面变体作为显式 `platformGaps` 登记为 `docs/e2e-handover.md` 的 E2E-001/E2E-002 交接 Codex 执行，`features.json` `F020` evidence 同步引用。本次真实桌面验收未能完成 multi-root 矩阵的原因如实记录：Computer Use 合成键盘在真人键鼠活动时会被让位中止，`pnpm tauri:dev:e2e` 的裸二进制无 `CFBundleIdentifier`、不经 LaunchServices 因而桌面自动化授权层结构性不可见、不可用于取样；两点均已写入 `docs/testing.md` 与 `docs/e2e-handover.md` 的执行环境纪律。
+- [x] 完成验收现场清理：临时 fixture、Computer Use 截图等探针产物与 3.6G 的 `src-tauri/target` 构建产物均已删除，工作树恢复干净，`git status --short` 无残留中间文件。
 
 ## 下一步
 
-1. 完成真实 multi-root Tauri 验收。
-2. 全部通过后写入 `features.json` evidence/status，完成 `F020` 并切换到下一个垂直切片。
+1. 完成 `F030` 的固定 GitHub 调研与技术方案冻结。
+2. `F030` 逐切片实现。
+3. 桌面 E2E 由 Codex 按 `docs/e2e-handover.md` 交接清单执行后回写对应 feature 的 evidence。
 
 ## 当前验收命令
 
@@ -137,8 +140,8 @@ pnpm test:e2e:browser -- workspace.spec.ts
 - 当前排除面 guard 在 Workbench `initialize` 后审计已注册贡献；未来引入延迟 contribution 时，必须扩展为生命周期恢复后或持续审计。
 - 工作区安全依赖已打开的 Rust 目录 capability；canonical path 只允许用于显示、去重与 watcher，不能退化为 `starts_with` 后调用 ambient `std::fs`。
 - VSIX 主题和 GitLens-like 功能有独立许可边界，第三方资源不得未经审计打包。
-- macOS 的 WKWebView 不能由普通浏览器 E2E 代替，最终必须真实启动应用。
-- Computer Use 按 `com.plain.editor` 绑定时可能自动拉起同 bundle id 的旧 debug `.app`；真实证据必须来自刚执行 `tauri:build:e2e` 的绝对 bundle 路径，并等待 Explorer ready 或明确 bootstrap error，不能把旧画面或瞬时空 Activity Bar 当成当前源码结果。
+- macOS 的 WKWebView 不能由普通浏览器 E2E 代替，最终仍须真实启动应用验收；该验收自 2026-07-22 起按 `docs/e2e-handover.md` 交接 Codex 统一执行，不再由实现方直接执行。
+- Computer Use 按 `com.plain.editor` 绑定时可能自动拉起同 bundle id 的旧 debug `.app`；真实证据必须来自刚执行 `tauri:build:e2e` 的绝对 bundle 路径，并等待 Explorer ready 或明确 bootstrap error，不能把旧画面或瞬时空 Activity Bar 当成当前源码结果；`pnpm tauri:dev:e2e` 的裸二进制结构性不可被桌面自动化授权识别，同样不能作为取样对象。这些执行纪律已固化进 `docs/e2e-handover.md` 与 `docs/testing.md`，由交接执行方（Codex）遵守。
 - Browser 与真实 WKWebView 均已证明当前 `IDialogService` 使用 Workbench DOM handler，且根 factory/Web 文件对话框未进入最终 bundle；菜单/快捷键取消与用户即时确认后的正向永久删除均已通过。
 - 若 native `prepare-delete` 已登记批次但 IPC 响应在前端收到 confirmation id 前丢失，前端无法主动 cancel；批次仍不可 begin/commit，由 Rust 的 120 秒单调 idle TTL、root/window 生命周期清理兜底。
 - watcher wake event 只是可丢失提示，权威状态在 Rust sticky generation；Browser mock 已覆盖定时拉取收敛，真实 macOS FSEvents/WKWebView 链也已覆盖外部新增与删除后的即时收敛，但 lost-wake 定时拉取仍只由可控 Browser mock 确定性验证。
