@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F040` Quick Open, workspace search and replace。
-- 当前最小工作项：完成 `F040` 的固定 GitHub 调研与技术方案冻结。
+- 当前最小工作项：实现并验收 F040 S1 前端搜索骨架切片。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -139,10 +139,12 @@
 - [x] 完成 `F030` S6 桌面项登记与 evidence 闭环：新增 `docs/e2e-handover.md` E2E-003（热退出恢复真实桌面矩阵：杀进程重启恢复、真实磁盘 `<app_local_data_dir>/backups/<64位身份>/` 目录审计、外部删除/保存冲突真实路径），交接 Codex 执行；同时如实登记已知边界——真实 Rust `WindowEvent::CloseRequested` 关窗握手（阻止关闭 → 等待 backup 落盘确认 → 放行关闭）尚未实现，`PlainWorkingCopyBackupTracker.onFinalBeforeShutdown` 恒 `false`，正常关窗最后一次节流备份可能未落盘，已在 E2E-003 声明为现状而非回归。`features.json` 的 `F030` 依此转 `complete` 并沿用 `F020` 证据格式补齐 `evidence`：`nativeScenarios` 如实说明本切片未新增真实桌面场景、继续复用 F020 已验收的单根编辑保存链，E2E-003 尚未执行；`platformGaps` 列出 E2E-003 交接、关窗握手缺口、S2 LRU 近似撤销未清空、S5 两文件 hostile-mutation 密度低于既往切片，以及一项新发现——`acceptance` 中「split」编辑器分屏与「image/Markdown 预览安全降级」在 S1-S6 全程均未有 Plain 侧专项改动或回归测试覆盖（前者是未触碰的上游默认行为，后者被 `docs/research/2026-07-22-editing-hot-exit.md` 明确排除出本次实现范围），`acceptanceResults` 对这两条逐字如实记录该留白而非过度声称已验证。WIP 切换到 `F040` Quick Open, workspace search and replace。
 - [x] 补齐 `F030` S6 收口审计发现的两处零覆盖：新增 3 个 Browser E2E（`installNativeIpcMock` 单根 mock 树新增 `notes.md`（纯文本）与 `icon.png`（真实 68 字节、CRC 校验通过的 1x1 PNG，经 `atob` 解码为原始字节而非文本编码——新增 `fileBytes`/`decodeBase64` 辅助，不影响任何既有测试的按名断言）。(1) split：真实上游 `workbench.action.splitEditor` 的 `Ctrl/Cmd+\` 键位（`SplitEditorAction`，未改动）触发后断言出现第二个 `.editor-group-container`（真实 DOM 标记：`EditorGroupView#setActive` 切换的 `active`/`inactive`），两侧各有同资源 tab；在新（active）侧编辑后另一侧 Monaco 视图瞬时同步、两侧 tab 同时变脏（共享同一 working copy）；`Ctrl/Cmd+S` 后两侧同步清脏且仅一次 `workspace_write_file`；关闭分屏侧唯一 tab 后该组因 `closeEmptyGroups`（默认 true）自动移除，回到单 group 且内容完好。(2) image 安全降级：PNG 的真实 0x00 字节触发真实 `detectEncodingFromBuffer` 二进制探测（非按文件名/扩展名特判），断言出现未改动的上游 `BinaryFileEditor` 占位面（`.monaco-editor-pane-placeholder`，含精确上游文案「The file is not displayed in the text editor because it is either binary or uses an unsupported text encoding.」与「Open Anyway」按钮），且面板下方无任何 `.monaco-editor`（无崩溃无空白）。(3) Markdown 安全降级：纯文本 `notes.md` 以普通 Monaco 文本编辑器打开，断言页面不存在任何 `.webview`（真实上游 webview DOM 标记，本仓库未依赖 `@codingame/monaco-vscode-webview-service-override` 且未装任何 markdown/media-preview 扩展，命令面板亦无「Markdown: Open Preview」），编辑保存路径与其余文件一致。三个新场景聚焦 `--repeat-each=3 --retries=0` 9/9 通过，探针阶段未发现任何真实缺陷（无需现场修复生产代码）。全量 `pnpm exec playwright test --retries=0` 22/22（较 S6 的 19/19 新增本切片 3 个场景）；`pnpm run check:features` 与 `feature-contract` 单测 5/5 复核通过；完整 `pnpm check` 全链路一次性通过，数字与 S5/S6 完全一致（33 个前端测试文件、650 个用例、2283 个前端模块、2118 个 bundle sources、203 个已记录迁移债务文件、Rust 293/293）——本切片未改动任何生产代码或 Rust 源码，仅新增/改写 Browser E2E fixture 与用例。据此改写 `features.json` 的 `F030`：`acceptanceResults` 中「split」与「image/Markdown 安全降级」两条从「记录留白」改写为引用本切片真实证据；`platformGaps` 移除对应留白项（E2E-003、真实关窗握手、S2 LRU 近似撤销未清空、S5 hostile-mutation 密度低于既往切片等仍然真实的项保留不变）。验收后按用户规则删除 `src-tauri/target` 等构建产物。
 
+- [x] 完成 `F040` 的固定 GitHub 调研与技术方案冻结（docs/research/2026-07-23-search-quickopen.md）：双路调研交叉复核确认——Cmd+P 是「有键位、无 provider」空壳，`AnythingQuickAccessProvider` 随未安装的 `search-service-override` 的 `search.contribution` 注册；该包默认根工厂对无 `file:` provider 的 Plain 会直接 `TypeError` 崩溃且两条兜底均为前端实现，禁止 spread、只允许窄子模块导入并由 `PlainSearchService` extends 未打补丁的 `SearchService` 基类为 `plain-workspace:` 注册 Rust-backed provider；`ignore::WalkBuilder` 与 rg sidecar 均违反 capability 纪律被排除（architecture.md 第 6 节旧 sidecar 决策将在 S5 修正），遍历手写有界版、匹配用进程内 `grep-searcher`（显式 NUL 二进制探测）+ 线性时间 `regex`（不支持 PCRE2/lookaround，如实标注）、gitignore 语义局部复用 `GitignoreBuilder`、glob 用 `globset`；文本搜索流式复用「wake 信号 + 显式 pull」先例（searchId/cursor/cancel-by-id/有界队列背压）；替换天然复用 bulk-edit → working copy → wv1/PLW1 保存链，无需新写路径；`search.followSymlinks` 上游默认 true 必须收窄。切片拆为 S1 前端骨架、S2 文件搜索、S3 文本搜索流式、S4 替换、S5 收口。
+
 ## 下一步
 
-1. `F040` Quick Open, workspace search and replace 的固定 GitHub 调研与技术方案冻结。
-2. `F040` 按调研冻结的方案逐切片实现（Quick Open、workspace 内容搜索/替换的 ignore/include-exclude 规则、流式可取消结果、替换前的文件版本校验）。
+1. 实现并验收 F040 S1 前端搜索骨架切片。
+2. 按方案顺序推进 S2 文件搜索、S3 文本搜索流式、S4 替换、S5 收口。
 3. Codex 按 `docs/e2e-handover.md` 交接清单（含 E2E-001/E2E-002/E2E-003）执行真实桌面 E2E 后，回写对应 feature（`F020`/`F030`）的 evidence。
 
 ## 当前验收命令
