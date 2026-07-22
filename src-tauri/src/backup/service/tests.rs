@@ -34,6 +34,19 @@ fn key(wire: &str) -> BackupKey {
     BackupKey::parse(wire).expect("valid key")
 }
 
+/// Independently reproduces the stable roots identity backup uses as its
+/// on-disk subdirectory name, from the same ambient paths a test authorized.
+/// Canonicalizes each path itself (mirroring what root authorization does
+/// internally) so this stays correct even when a platform's temp directory
+/// is itself a symlink (macOS's `/tmp` -> `/private/tmp`, for example).
+fn expected_identity_dir_name(ambient_paths: &[&std::path::Path]) -> String {
+    let canonical: Vec<PathBuf> = ambient_paths
+        .iter()
+        .map(|path| std::fs::canonicalize(path).expect("path canonicalizes"))
+        .collect();
+    crate::workspace::stable_roots_identity(&canonical).expect("non-empty root set has an identity")
+}
+
 /// Authorizes `window_label` with a single root at `root_path` and returns
 /// the fresh `WorkspaceService`.
 fn workspace_with_root(window_label: &str, root_path: &std::path::Path) -> WorkspaceService {
@@ -171,7 +184,7 @@ fn backup_content_survives_on_disk_even_after_the_workspace_window_itself_is_clo
     let root = TempDir::new().unwrap();
     let workspace = workspace_with_root("main", root.path());
     let backup = BackupService::new(base.path().to_path_buf());
-    let workspace_id = workspace.snapshot("main").unwrap().workspace_id().as_wire();
+    let identity_dir_name = expected_identity_dir_name(&[root.path()]);
 
     block_on(backup.write(&workspace, "main", key("alpha"), b"kept".to_vec())).unwrap();
     backup.close_window("main");
@@ -180,9 +193,163 @@ fn backup_content_survives_on_disk_even_after_the_workspace_window_itself_is_clo
     let on_disk = base
         .path()
         .join("backups")
-        .join(&workspace_id)
+        .join(&identity_dir_name)
         .join("alpha");
     assert_eq!(std::fs::read(on_disk).unwrap(), b"kept");
+}
+
+/// Directory-key assertion: the on-disk subdirectory name is exactly the
+/// stable roots identity — a 64-character lowercase hex SHA-256 digest of
+/// the sorted canonical root paths — never the window's per-session random
+/// `WorkspaceId`.
+#[test]
+fn the_backup_subdirectory_is_named_after_the_stable_roots_identity_not_the_session_workspace_id() {
+    let base = TempDir::new().unwrap();
+    let root = TempDir::new().unwrap();
+    let workspace = workspace_with_root("main", root.path());
+    let backup = BackupService::new(base.path().to_path_buf());
+    let identity_dir_name = expected_identity_dir_name(&[root.path()]);
+    let session_workspace_id = workspace.snapshot("main").unwrap().workspace_id().as_wire();
+
+    block_on(backup.write(&workspace, "main", key("alpha"), b"kept".to_vec())).unwrap();
+
+    assert_eq!(identity_dir_name.len(), 64);
+    assert!(identity_dir_name
+        .bytes()
+        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')));
+    assert_ne!(identity_dir_name, session_workspace_id);
+    assert!(base
+        .path()
+        .join("backups")
+        .join(&identity_dir_name)
+        .join("alpha")
+        .is_file());
+    assert!(!base
+        .path()
+        .join("backups")
+        .join(&session_workspace_id)
+        .exists());
+}
+
+/// Restart simulation: a brand-new `WorkspaceService` (a fresh per-session
+/// random `WorkspaceId`, exactly like a fresh app launch) that reopens the
+/// exact same root reproduces the exact same identity/backup directory, so
+/// previously written content is found again with no additional wiring.
+#[test]
+fn reopening_the_same_root_in_a_fresh_service_reproduces_the_same_identity_and_backup_directory() {
+    let base = TempDir::new().unwrap();
+    let root = TempDir::new().unwrap();
+
+    let first_session = workspace_with_root("main", root.path());
+    let first_session_snapshot = first_session.snapshot("main").unwrap();
+    let backup = BackupService::new(base.path().to_path_buf());
+    block_on(backup.write(&first_session, "main", key("alpha"), b"kept".to_vec())).unwrap();
+    backup.close_window("main");
+    first_session.close_window("main");
+
+    // A fresh service/session, as if the whole application had restarted.
+    // Its per-session `WorkspaceId` and `RootId` are freshly random, so the
+    // raw snapshot differs from the first session's even though it is the
+    // exact same root directory.
+    let second_session = workspace_with_root("main", root.path());
+    assert_ne!(
+        first_session_snapshot,
+        second_session.snapshot("main").unwrap()
+    );
+
+    assert_eq!(
+        block_on(backup.read_all(&second_session, "main")).unwrap(),
+        vec![("alpha".to_owned(), b"kept".to_vec())],
+    );
+}
+
+/// Identity changes whenever the authorized root set changes (add, remove,
+/// replace), and a backup written under a superseded identity becomes
+/// unreachable through the new one — mirroring upstream's "workspace
+/// identity changed" semantics for hot-exit backups.
+#[test]
+fn the_stable_identity_changes_whenever_the_authorized_root_set_changes() {
+    let base = TempDir::new().unwrap();
+    let root_a = TempDir::new().unwrap();
+    let root_b = TempDir::new().unwrap();
+    let backup = BackupService::new(base.path().to_path_buf());
+
+    let workspace = workspace_with_root("main", root_a.path());
+    block_on(backup.write(&workspace, "main", key("alpha"), b"under-a".to_vec())).unwrap();
+    let identity_with_a_only = expected_identity_dir_name(&[root_a.path()]);
+
+    // Add a second root: the identity must change, and the previously
+    // written entry must not be visible through the new identity.
+    let picker = FakePicker::selected(vec![root_b.path().to_path_buf()]);
+    block_on(workspace.pick_roots("main", picker, WorkspacePickRootsMode::Add)).unwrap();
+    let identity_with_a_and_b = expected_identity_dir_name(&[root_a.path(), root_b.path()]);
+    assert_ne!(identity_with_a_only, identity_with_a_and_b);
+    assert!(block_on(backup.read_all(&workspace, "main"))
+        .unwrap()
+        .is_empty());
+
+    block_on(backup.write(&workspace, "main", key("beta"), b"under-a-and-b".to_vec())).unwrap();
+
+    // Replace back down to just `root_b`: the identity must change again,
+    // distinct from both prior identities.
+    let picker = FakePicker::selected(vec![root_b.path().to_path_buf()]);
+    block_on(workspace.pick_roots("main", picker, WorkspacePickRootsMode::Replace)).unwrap();
+    let identity_with_b_only = expected_identity_dir_name(&[root_b.path()]);
+    assert_ne!(identity_with_b_only, identity_with_a_only);
+    assert_ne!(identity_with_b_only, identity_with_a_and_b);
+    assert!(block_on(backup.read_all(&workspace, "main"))
+        .unwrap()
+        .is_empty());
+
+    // Every identity's own on-disk content is untouched and independently
+    // reachable by reauthorizing its exact root set.
+    assert_eq!(
+        std::fs::read(
+            base.path()
+                .join("backups")
+                .join(&identity_with_a_only)
+                .join("alpha")
+        )
+        .unwrap(),
+        b"under-a"
+    );
+    assert_eq!(
+        std::fs::read(
+            base.path()
+                .join("backups")
+                .join(&identity_with_a_and_b)
+                .join("beta")
+        )
+        .unwrap(),
+        b"under-a-and-b"
+    );
+}
+
+/// Concatenation-ambiguity adversarial case: two root sets whose paths
+/// concatenate to the same raw bytes (`["/a/b", "/c"]` vs. `["/a", "/b/c"]`)
+/// must never collide, because each path is hashed with its own explicit
+/// length prefix rather than joined by a separator character.
+#[test]
+fn root_sets_that_would_naively_concatenate_identically_never_collide() {
+    let left = [PathBuf::from("/a/b"), PathBuf::from("/c")];
+    let right = [PathBuf::from("/a"), PathBuf::from("/b/c")];
+    let naive_concat = |paths: &[PathBuf]| -> String {
+        paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    };
+    assert_eq!(
+        naive_concat(&left),
+        naive_concat(&right),
+        "test fixture sanity: the two sets really do share a naive concatenation"
+    );
+
+    let left_identity =
+        crate::workspace::stable_roots_identity(&left).expect("non-empty set has an identity");
+    let right_identity =
+        crate::workspace::stable_roots_identity(&right).expect("non-empty set has an identity");
+    assert_ne!(left_identity, right_identity);
 }
 
 #[test]

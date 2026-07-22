@@ -110,6 +110,90 @@ async function installNativeIpcMock(
 			let versionSerial = 1;
 			const nextVersion = (): string =>
 				`wv1:${(versionSerial++).toString(16).padStart(64, "0")}`;
+			// Hot-exit backup store: unlike the rest of this fixture's in-memory
+			// state, this must survive `page.reload()` (a fresh `addInitScript`
+			// execution) to prove restoration across a simulated restart, so it
+			// round-trips through `sessionStorage` (which the browser itself, not
+			// this script, preserves across a same-tab reload) rather than living
+			// only in this closure's `Map`.
+			const BACKUP_STORAGE_KEY = "__plain_test_backup_store__";
+			const loadBackupEntries = (): Map<string, Uint8Array> => {
+				const raw = sessionStorage.getItem(BACKUP_STORAGE_KEY);
+				if (raw === null) {
+					return new Map();
+				}
+				try {
+					const parsed = JSON.parse(raw) as Array<[string, number[]]>;
+					return new Map(
+						parsed.map(([key, bytes]) => [key, Uint8Array.from(bytes)]),
+					);
+				} catch {
+					return new Map();
+				}
+			};
+			const backupEntries = loadBackupEntries();
+			const persistBackupEntries = (): void => {
+				sessionStorage.setItem(
+					BACKUP_STORAGE_KEY,
+					JSON.stringify(
+						[...backupEntries.entries()].map(([key, bytes]) => [
+							key,
+							Array.from(bytes),
+						]),
+					),
+				);
+			};
+			const plbkFrame = (
+				value: Uint8Array,
+			): { key: string; content: Uint8Array } => {
+				if (
+					value.byteLength < 9 ||
+					value[0] !== 0x50 ||
+					value[1] !== 0x4c ||
+					value[2] !== 0x42 ||
+					value[3] !== 0x4b
+				) {
+					throw new Error("Malformed PLBK browser test frame.");
+				}
+				const view = new DataView(
+					value.buffer,
+					value.byteOffset,
+					value.byteLength,
+				);
+				const keyLength = value[4]!;
+				const contentLength = view.getUint32(5, false);
+				if (9 + keyLength + contentLength !== value.byteLength) {
+					throw new Error("Malformed PLBK browser test frame length.");
+				}
+				const key = decoder.decode(value.slice(9, 9 + keyLength));
+				const content = value.slice(9 + keyLength);
+				return { key, content };
+			};
+			const encodeBackupReadAllFrame = (): Uint8Array => {
+				const entries = [...backupEntries.entries()];
+				let total = 8;
+				const encoded = entries.map(([key, bytes]) => {
+					const keyBytes = encoder.encode(key);
+					total += 5 + keyBytes.byteLength + bytes.byteLength;
+					return { keyBytes, bytes };
+				});
+				const frame = new Uint8Array(total);
+				const view = new DataView(frame.buffer);
+				frame.set([0x50, 0x4c, 0x42, 0x41], 0); // "PLBA"
+				view.setUint32(4, entries.length, false);
+				let offset = 8;
+				for (const { keyBytes, bytes } of encoded) {
+					frame[offset] = keyBytes.byteLength;
+					offset += 1;
+					view.setUint32(offset, bytes.byteLength, false);
+					offset += 4;
+					frame.set(keyBytes, offset);
+					offset += keyBytes.byteLength;
+					frame.set(bytes, offset);
+					offset += bytes.byteLength;
+				}
+				return frame;
+			};
 			const file = (content: string): MockFile => ({
 				kind: "file",
 				bytes: encoder.encode(content),
@@ -475,6 +559,19 @@ async function installNativeIpcMock(
 							},
 						};
 					}
+					if (command === "backup_write") {
+						if (!(args instanceof Uint8Array)) {
+							throw new Error("Expected one raw PLBK browser test frame.");
+						}
+						const frame = plbkFrame(args);
+						calls.push({
+							command,
+							args: { key: frame.key, contentHex: hexFromBytes(frame.content) },
+						});
+						backupEntries.set(frame.key, frame.content.slice());
+						persistBackupEntries();
+						return null;
+					}
 					if (args instanceof Uint8Array) {
 						throw new Error(`Unexpected raw Tauri test command: ${command}`);
 					}
@@ -787,6 +884,26 @@ async function installNativeIpcMock(
 								? frame.buffer
 								: [...frame];
 						}
+						case "backup_read_all": {
+							const frame = encodeBackupReadAllFrame();
+							return rawReadTransport === "arrayBuffer"
+								? frame.buffer
+								: [...frame];
+						}
+						case "backup_discard": {
+							const key = (args.request as { key?: string } | undefined)?.key;
+							if (typeof key !== "string") {
+								throw new Error("Malformed backup_discard test request.");
+							}
+							backupEntries.delete(key);
+							persistBackupEntries();
+							return null;
+						}
+						case "backup_discard_all": {
+							backupEntries.clear();
+							persistBackupEntries();
+							return null;
+						}
 						default:
 							throw new Error(`Unexpected Tauri test command: ${command}`);
 					}
@@ -878,6 +995,64 @@ async function installMultiRootNativeIpcMock(
 			});
 			const encoder = new TextEncoder();
 			const decoder = new TextDecoder();
+			// This fixture never exercises a reload, so (unlike
+			// installNativeIpcMock's own hot-exit backup store) this one is
+			// purely in-memory: its only job is to let the real backup
+			// tracker's schedule/discard lifecycle, now active across every
+			// fixture, complete without hitting the closed `default:` case
+			// below whenever a multi-root test edits or saves a file.
+			const backupEntries = new Map<string, Uint8Array>();
+			const plbkFrame = (
+				value: Uint8Array,
+			): { key: string; content: Uint8Array } => {
+				if (
+					value.byteLength < 9 ||
+					value[0] !== 0x50 ||
+					value[1] !== 0x4c ||
+					value[2] !== 0x42 ||
+					value[3] !== 0x4b
+				) {
+					throw new Error("Malformed PLBK multi-root test frame.");
+				}
+				const view = new DataView(
+					value.buffer,
+					value.byteOffset,
+					value.byteLength,
+				);
+				const keyLength = value[4]!;
+				const contentLength = view.getUint32(5, false);
+				if (9 + keyLength + contentLength !== value.byteLength) {
+					throw new Error("Malformed PLBK multi-root test frame length.");
+				}
+				const key = decoder.decode(value.slice(9, 9 + keyLength));
+				const content = value.slice(9 + keyLength);
+				return { key, content };
+			};
+			const encodeBackupReadAllFrame = (): Uint8Array => {
+				const entries = [...backupEntries.entries()];
+				let total = 8;
+				const encoded = entries.map(([key, bytes]) => {
+					const keyBytes = encoder.encode(key);
+					total += 5 + keyBytes.byteLength + bytes.byteLength;
+					return { keyBytes, bytes };
+				});
+				const frame = new Uint8Array(total);
+				const view = new DataView(frame.buffer);
+				frame.set([0x50, 0x4c, 0x42, 0x41], 0); // "PLBA"
+				view.setUint32(4, entries.length, false);
+				let offset = 8;
+				for (const { keyBytes, bytes } of encoded) {
+					frame[offset] = keyBytes.byteLength;
+					offset += 1;
+					view.setUint32(offset, bytes.byteLength, false);
+					offset += 4;
+					frame.set(keyBytes, offset);
+					offset += keyBytes.byteLength;
+					frame.set(bytes, offset);
+					offset += bytes.byteLength;
+				}
+				return frame;
+			};
 			const moveIncompletePlan = [...moveIncompleteScenarios];
 			const deleteIncompletePlan = [...deleteIncompleteScenarios];
 			let versionSerial = 101;
@@ -1326,6 +1501,14 @@ async function installMultiRootNativeIpcMock(
 								version: node.version,
 							},
 						};
+					}
+					if (command === "backup_write") {
+						if (!(args instanceof Uint8Array)) {
+							throw new Error("Expected one raw PLBK multi-root test frame.");
+						}
+						const frame = plbkFrame(args);
+						backupEntries.set(frame.key, frame.content.slice());
+						return null;
 					}
 					if (args instanceof Uint8Array) {
 						throw new Error(`Unexpected raw Tauri test command: ${command}`);
@@ -1921,6 +2104,19 @@ async function installMultiRootNativeIpcMock(
 							}
 							return plr1Frame(node.bytes, node.version).buffer;
 						}
+						case "backup_read_all":
+							return encodeBackupReadAllFrame().buffer;
+						case "backup_discard": {
+							const key = (args.request as { key?: string } | undefined)?.key;
+							if (typeof key !== "string") {
+								throw new Error("Malformed backup_discard test request.");
+							}
+							backupEntries.delete(key);
+							return null;
+						}
+						case "backup_discard_all":
+							backupEntries.clear();
+							return null;
 						default:
 							throw new Error(
 								`Unexpected Tauri multi-root test command: ${command}`,
@@ -5242,4 +5438,134 @@ test("shows a Reload/Save As/Details save-conflict notification when an external
 	expect(consoleErrors[1]).toBe(
 		"Failed to save 'README.md'. Reload the file before saving again, or use Save As to preserve your edits.",
 	);
+});
+
+test("restores an unsaved edit as a dirty editor after a simulated hot-exit reload, and stops restoring it once saved", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported");
+
+	const explorer = await openNativeWorkspaceExplorer(page);
+	const readme = explorer.getByRole("treeitem", {
+		name: "README.md",
+		exact: true,
+	});
+	// Double-click opens directly as a pinned (not preview) tab, matching S1's
+	// established explorer-double-click semantics and avoiding any interaction
+	// with the preview-tab-replacement path this test does not exercise.
+	await readme.dblclick();
+	const editor = page
+		.getByRole("code")
+		.filter({ hasText: "Read-only Explorer fixture." });
+	await expect(editor).toBeVisible();
+	const activeTab = page.locator(".tabs-container .tab.active");
+	await expect(activeTab).not.toHaveClass(/dirty/);
+
+	await page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "Read-only Explorer fixture." })
+		.click();
+	await page.keyboard.press("End");
+	await page.keyboard.type("unsaved-hot-exit-edit");
+	await expect(activeTab).toHaveClass(/dirty/);
+
+	// `files.autoSave` is off, so `hasShortAutoSaveDelay()` is false and the
+	// tracker's default backup schedule delay is 1000ms; wait for the
+	// resulting backup_write to actually land on the (sessionStorage-backed)
+	// mock store before simulating a restart.
+	await expect
+		.poll(
+			async () =>
+				page.evaluate(() => {
+					const testWindow = window as unknown as Window & {
+						__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+					};
+					return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+						({ command }) => command === "backup_write",
+					).length;
+				}),
+			{ timeout: 5_000 },
+		)
+		.toBe(1);
+
+	// Simulate a hot exit + restart: reload re-runs this fixture's
+	// `addInitScript` from scratch (fresh in-memory workspace tree, fresh
+	// call log), but the backup store round-trips through `sessionStorage`,
+	// which the reload itself preserves.
+	await page.reload();
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	await executePaletteCommand(page, "Open Folder", "File: Open Folder...");
+
+	const restoredTab = page.locator(".tabs-container .tab", {
+		hasText: "README.md",
+	});
+	await expect(restoredTab).toBeVisible();
+	await expect(restoredTab).toHaveClass(/dirty/);
+	await expect(
+		page.getByRole("code").filter({
+			hasText: "Read-only Explorer fixture.unsaved-hot-exit-edit",
+		}),
+	).toBeVisible();
+
+	// Saving discards the backup (the base tracker's own onDidChangeDirty ->
+	// discardBackup path, inherited unmodified): a subsequent reload must not
+	// restore it again.
+	await page.keyboard.press("ControlOrMeta+S");
+	await expect
+		.poll(async () =>
+			page.evaluate(() => {
+				const testWindow = window as unknown as Window & {
+					__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+				};
+				return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+					({ command }) => command === "workspace_write_file",
+				).length;
+			}),
+		)
+		.toBe(1);
+	await expect(restoredTab).not.toHaveClass(/dirty/);
+	await expect
+		.poll(async () =>
+			page.evaluate(() => {
+				const testWindow = window as unknown as Window & {
+					__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+				};
+				return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+					({ command }) => command === "backup_discard",
+				).length;
+			}),
+		)
+		.toBe(1);
+
+	await page.reload();
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	await executePaletteCommand(page, "Open Folder", "File: Open Folder...");
+	// No backup remains, and nothing was manually reopened: no tab of any
+	// kind should exist for this fresh workspace re-adoption.
+	await expect(page.locator(".tabs-container .tab")).toHaveCount(0);
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
 });

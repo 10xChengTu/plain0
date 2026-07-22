@@ -135,6 +135,14 @@ const WORKING_COPY_OVERRIDE_ROOT_MODULE =
 	"@codingame/monaco-vscode-working-copy-service-override";
 const WORKING_COPY_SERVICE_IMPLEMENTATION_MODULE = `${WORKING_COPY_OVERRIDE_ROOT_MODULE}/vscode/vs/workbench/services/workingCopy/common/workingCopyService`;
 const WORKING_COPY_EDITOR_SERVICE_IMPLEMENTATION_MODULE = `${WORKING_COPY_OVERRIDE_ROOT_MODULE}/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService`;
+// app/services/plain-workspace-backup-tracker.ts extends the package's
+// exact, side-effect-free common/workingCopyBackupTracker submodule (see
+// that file's own doc comment for the side-effect audit); it is the only
+// other file permitted to reference the working-copy override.
+const ALLOWED_WORKING_COPY_OVERRIDE_IMPORT_PATHS = new Set([
+	"app/services.ts",
+	"app/services/plain-workspace-backup-tracker.ts",
+]);
 
 function staticStringValue(node) {
 	if (
@@ -278,9 +286,12 @@ export function validateWorkingCopyOverrideImportBoundary(
 	visit(sourceFile);
 	const normalizedPath = relativePath.replaceAll("\\", "/");
 	const failures = [];
-	if (referencesWorkingCopyOverride && normalizedPath !== "app/services.ts") {
+	if (
+		referencesWorkingCopyOverride &&
+		!ALLOWED_WORKING_COPY_OVERRIDE_IMPORT_PATHS.has(normalizedPath)
+	) {
 		failures.push(
-			`${normalizedPath} imports the working-copy override outside app/services.ts`,
+			`${normalizedPath} imports the working-copy override outside its audited files`,
 		);
 	}
 	if (referencesAggregatingEntryPoint) {
@@ -651,6 +662,11 @@ export function validateDialogServiceOverride(source) {
 			className: "WorkingCopyEditorService",
 			thirdArgIsTrue: false,
 		},
+		{
+			tokenName: "IWorkingCopyBackupService",
+			className: "PlainWorkingCopyBackupService",
+			thirdArgIsTrue: false,
+		},
 	]);
 	function matchesMiddleServiceDescriptor(property, spec) {
 		if (
@@ -949,6 +965,10 @@ export function validateWorkspaceProviderBootstrap(source) {
 			"registerWorkspaceDeleteCoordinator",
 		],
 		["./platform/tauri", "createBridge"],
+		[
+			"./services/plain-workspace-backup-service",
+			"configurePlainWorkingCopyBackupBridge",
+		],
 	]) {
 		if (countExactNamedImport(moduleName, importedName) !== 1) {
 			failures.push(
@@ -974,6 +994,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 		"registerCustomProvider",
 		"initialize",
 		"PLAIN_WORKSPACE_SCHEME",
+		"configurePlainWorkingCopyBackupBridge",
 	]);
 	let hasCriticalBootstrapShadow = false;
 	function bindingContainsCriticalName(name) {
@@ -1204,7 +1225,8 @@ export function validateWorkspaceProviderBootstrap(source) {
 			ts.isIdentifier(parent.expression) &&
 			(parent.expression.text === "createPlainWorkspaceFileSystemProvider" ||
 				parent.expression.text === "registerWorkspaceDeleteCoordinator" ||
-				parent.expression.text === "registerWorkspaceCommands")
+				parent.expression.text === "registerWorkspaceCommands" ||
+				parent.expression.text === "configurePlainWorkingCopyBackupBridge")
 		);
 	}
 	function isAllowedWorkspaceProviderIdentifier(node) {

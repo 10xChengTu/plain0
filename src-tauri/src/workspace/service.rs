@@ -19,7 +19,7 @@ use super::watcher::{
     WindowWatcher,
 };
 use super::writer;
-use super::{RootId, WorkspaceId, WorkspaceRootLease, WorkspaceScope};
+use super::{RootId, WorkspaceId, WorkspaceRootLease, WorkspaceRootsIdentity, WorkspaceScope};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::delete::{DeleteBatchReceipt, DeleteSelection};
@@ -60,6 +60,17 @@ impl WorkspaceService {
 
     pub fn snapshot(&self, window_label: &str) -> Result<WorkspaceSnapshot, CommandError> {
         self.scope_for_window(window_label)?.snapshot()
+    }
+
+    /// The stable identity of `window_label`'s currently authorized root set
+    /// (see [`WorkspaceRootsIdentity`]); `None` when zero roots are
+    /// authorized. Used only by the backup domain to key its per-root-set
+    /// storage directory; never exposed over IPC.
+    pub(crate) fn stable_identity(
+        &self,
+        window_label: &str,
+    ) -> Result<Option<WorkspaceRootsIdentity>, CommandError> {
+        self.scope_for_window(window_label)?.stable_identity()
     }
 
     pub async fn pick_roots<P: DirectoryPicker>(
@@ -618,6 +629,12 @@ impl WindowWorkspace {
         let state = lock(&self.state)?;
         ensure_open(&state)?;
         Ok(state.scope.snapshot())
+    }
+
+    fn stable_identity(&self) -> Result<Option<WorkspaceRootsIdentity>, CommandError> {
+        let state = lock(&self.state)?;
+        ensure_open(&state)?;
+        Ok(state.scope.stable_identity())
     }
 
     fn begin_picker(&self) -> Result<u64, CommandError> {

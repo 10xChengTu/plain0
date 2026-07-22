@@ -14,11 +14,14 @@ import { IDialogService } from "@codingame/monaco-vscode-api/vscode/vs/platform/
 import { SyncDescriptor } from "@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors";
 import { IWorkspacesService } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspaces/common/workspaces.service";
 import { ILanguageStatusService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/languageStatus/common/languageStatusService.service";
+import { IWorkingCopyBackupService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyBackup.service";
 import { IWorkingCopyEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService.service";
 import { IWorkingCopyService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyService.service";
 import { IWorkspaceEditingService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workspaces/common/workspaceEditing.service";
 
 import { EmptyLanguageStatusService } from "./services/empty-language-status";
+import { PlainWorkingCopyBackupService } from "./services/plain-workspace-backup-service";
+import "./services/plain-workspace-backup-tracker";
 import {
 	PlainWorkspaceEditingService,
 	PlainWorkspacesService,
@@ -38,9 +41,16 @@ import {
  * IFileService.cloneFile() on every save to snapshot local history, which
  * Plain's own files-service patch always rejects for plain-workspace
  * resources (clone is unsupported), producing an unhandled rejection on every
- * save. IWorkingCopyBackupService therefore also stays untouched here: it
- * keeps resolving to the existing missing-services.js no-op stub; the real
- * Rust-backed backup service lands in a later slice (S4/S5).
+ * save.
+ *
+ * IWorkingCopyBackupService is now Plain's own Rust-backed
+ * PlainWorkingCopyBackupService (./services/plain-workspace-backup-service)
+ * rather than the missing-services.js no-op stub. Its restoration tracker
+ * (PlainWorkingCopyBackupTracker, registered as an import-time side effect of
+ * ./services/plain-workspace-backup-tracker below) extends the working-copy
+ * override's exact, side-effect-free WorkingCopyBackupTracker submodule —
+ * never the packaged BrowserWorkingCopyBackupTracker, whose beforeunload-only
+ * shutdown veto does not fit Tauri's native window close.
  */
 export function createServiceOverrides() {
 	return {
@@ -69,6 +79,11 @@ export function createServiceOverrides() {
 		),
 		[IWorkingCopyEditorService.toString()]: new SyncDescriptor(
 			WorkingCopyEditorService,
+			[],
+			false,
+		),
+		[IWorkingCopyBackupService.toString()]: new SyncDescriptor(
+			PlainWorkingCopyBackupService,
 			[],
 			false,
 		),

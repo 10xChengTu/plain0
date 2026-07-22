@@ -25,6 +25,7 @@ import { createWorkspaceTopologyCoordinator } from "./features/workspace/workspa
 import { configureMonacoEnvironment } from "./monaco-environment";
 import { createBridge, normalizeCommandError } from "./platform/tauri";
 import { createServiceOverrides } from "./services";
+import { configurePlainWorkingCopyBackupBridge } from "./services/plain-workspace-backup-service";
 import "./styles.css";
 
 async function bootstrap(): Promise<void> {
@@ -95,6 +96,7 @@ async function bootstrap(): Promise<void> {
 	document.body.dataset.plainRuntime = runtime.runtime;
 	document.body.dataset.plainIpcVersion = String(runtime.ipcVersion);
 
+	configurePlainWorkingCopyBackupBridge(bridge);
 	await initialize(createServiceOverrides(), container, {
 		productConfiguration: {
 			nameShort: "Plain",

@@ -7,12 +7,19 @@ use cap_std::fs::Dir;
 
 use crate::error::CommandError;
 use crate::workspace::service::WorkspaceService;
-use crate::workspace::WorkspaceId;
+use crate::workspace::WorkspaceRootsIdentity;
 
 use super::{backup_unavailable, store, BackupKey};
 
 /// Rust-authoritative backup persistence domain, scoped to
-/// `<app_local_data_dir>/backups/<workspace-id>/`.
+/// `<app_local_data_dir>/backups/<stable-roots-identity>/`.
+///
+/// The subdirectory name is the window's current [`WorkspaceRootsIdentity`]:
+/// a hash of the sorted canonical paths of every authorized root, not the
+/// per-session random `WorkspaceId`. This makes the backup directory
+/// reproducible across restarts for the same open folder(s) — the whole
+/// point of hot-exit recovery — and gives every distinct root set (or an
+/// empty one) its own naturally isolated, never-colliding location.
 ///
 /// The storage root is opened ambiently exactly once (lazily, on first use)
 /// via `Dir::open_ambient_dir` and cached; every further operation, for every
@@ -32,7 +39,7 @@ struct BackupState {
 }
 
 struct WindowBackupDir {
-    workspace_id: WorkspaceId,
+    identity: WorkspaceRootsIdentity,
     dir: Dir,
 }
 
@@ -55,13 +62,13 @@ impl BackupService {
         key: BackupKey,
         content: Vec<u8>,
     ) -> Result<(), CommandError> {
-        let workspace_id = authorized_workspace_id(workspace, window_label)?;
+        let identity = authorized_workspace_identity(workspace, window_label)?;
         let window_label = window_label.to_owned();
         let state = Arc::clone(&self.state);
         tauri::async_runtime::spawn_blocking(move || {
             let _gate = lock(&state.gate)?;
             let dir = state
-                .workspace_dir(&window_label, workspace_id, true)?
+                .workspace_dir(&window_label, identity, true)?
                 .ok_or_else(backup_unavailable)?;
             store::write_entry(&dir, &key, &content)
         })
@@ -74,12 +81,12 @@ impl BackupService {
         workspace: &WorkspaceService,
         window_label: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, CommandError> {
-        let workspace_id = authorized_workspace_id(workspace, window_label)?;
+        let identity = authorized_workspace_identity(workspace, window_label)?;
         let window_label = window_label.to_owned();
         let state = Arc::clone(&self.state);
         tauri::async_runtime::spawn_blocking(move || {
             let _gate = lock(&state.gate)?;
-            match state.workspace_dir(&window_label, workspace_id, false)? {
+            match state.workspace_dir(&window_label, identity, false)? {
                 Some(dir) => store::read_all_entries(&dir),
                 None => Ok(Vec::new()),
             }
@@ -94,12 +101,12 @@ impl BackupService {
         window_label: &str,
         key: BackupKey,
     ) -> Result<(), CommandError> {
-        let workspace_id = authorized_workspace_id(workspace, window_label)?;
+        let identity = authorized_workspace_identity(workspace, window_label)?;
         let window_label = window_label.to_owned();
         let state = Arc::clone(&self.state);
         tauri::async_runtime::spawn_blocking(move || {
             let _gate = lock(&state.gate)?;
-            match state.workspace_dir(&window_label, workspace_id, false)? {
+            match state.workspace_dir(&window_label, identity, false)? {
                 Some(dir) => store::discard_entry(&dir, &key),
                 None => Ok(()),
             }
@@ -113,12 +120,12 @@ impl BackupService {
         workspace: &WorkspaceService,
         window_label: &str,
     ) -> Result<(), CommandError> {
-        let workspace_id = authorized_workspace_id(workspace, window_label)?;
+        let identity = authorized_workspace_identity(workspace, window_label)?;
         let window_label = window_label.to_owned();
         let state = Arc::clone(&self.state);
         tauri::async_runtime::spawn_blocking(move || {
             let _gate = lock(&state.gate)?;
-            match state.workspace_dir(&window_label, workspace_id, false)? {
+            match state.workspace_dir(&window_label, identity, false)? {
                 Some(dir) => store::discard_all_entries(&dir),
                 None => Ok(()),
             }
@@ -140,28 +147,30 @@ impl BackupService {
     }
 }
 
-fn authorized_workspace_id(
+/// Returns this window's current [`WorkspaceRootsIdentity`], failing closed
+/// with `BACKUP_UNAVAILABLE` for the `EMPTY` workspace (zero authorized
+/// roots) — there is no stable identity, and thus no backup directory, for
+/// an empty workspace.
+fn authorized_workspace_identity(
     workspace: &WorkspaceService,
     window_label: &str,
-) -> Result<WorkspaceId, CommandError> {
-    let snapshot = workspace.snapshot(window_label)?;
-    if snapshot.roots().is_empty() {
-        return Err(backup_unavailable());
-    }
-    Ok(snapshot.workspace_id())
+) -> Result<WorkspaceRootsIdentity, CommandError> {
+    workspace
+        .stable_identity(window_label)?
+        .ok_or_else(backup_unavailable)
 }
 
 impl BackupState {
     fn workspace_dir(
         &self,
         window_label: &str,
-        workspace_id: WorkspaceId,
+        identity: WorkspaceRootsIdentity,
         create: bool,
     ) -> Result<Option<Dir>, CommandError> {
         {
             let cache = lock(&self.window_dirs)?;
             if let Some(cached) = cache.get(window_label) {
-                if cached.workspace_id == workspace_id {
+                if cached.identity == identity {
                     return cached
                         .dir
                         .try_clone()
@@ -172,16 +181,16 @@ impl BackupState {
         }
 
         let root = self.ensure_root()?;
-        let name = workspace_id.as_wire();
+        let name = identity.as_dir_name();
         let dir = if create {
-            match root.create_dir(&name) {
+            match root.create_dir(name) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(_) => return Err(backup_unavailable()),
             }
-            Some(root.open_dir(&name).map_err(|_| backup_unavailable())?)
+            Some(root.open_dir(name).map_err(|_| backup_unavailable())?)
         } else {
-            match root.open_dir(&name) {
+            match root.open_dir(name) {
                 Ok(dir) => Some(dir),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                 Err(_) => return Err(backup_unavailable()),
@@ -194,7 +203,7 @@ impl BackupState {
             cache.insert(
                 window_label.to_owned(),
                 WindowBackupDir {
-                    workspace_id,
+                    identity,
                     dir: cached,
                 },
             );

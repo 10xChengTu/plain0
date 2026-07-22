@@ -183,10 +183,12 @@ import { IDialogService } from "@codingame/monaco-vscode-api/vscode/vs/platform/
 import { SyncDescriptor } from "@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors";
 import { IWorkspacesService } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspaces/common/workspaces.service";
 import { ILanguageStatusService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/languageStatus/common/languageStatusService.service";
+import { IWorkingCopyBackupService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyBackup.service";
 import { IWorkingCopyEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService.service";
 import { IWorkingCopyService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyService.service";
 import { IWorkspaceEditingService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workspaces/common/workspaceEditing.service";
 import { EmptyLanguageStatusService } from "./services/empty-language-status";
+import { PlainWorkingCopyBackupService } from "./services/plain-workspace-backup-service";
 import { PlainWorkspaceEditingService, PlainWorkspacesService } from "./services/plain-workspace-services";
 
 export function createServiceOverrides() {
@@ -216,6 +218,11 @@ export function createServiceOverrides() {
     ),
     [IWorkingCopyEditorService.toString()]: new SyncDescriptor(
       WorkingCopyEditorService,
+      [],
+      false,
+    ),
+    [IWorkingCopyBackupService.toString()]: new SyncDescriptor(
+      PlainWorkingCopyBackupService,
       [],
       false,
     ),
@@ -749,7 +756,7 @@ describe("Plain Workbench service override Harness", () => {
 			"app/features/unsafe-working-copy.ts",
 		);
 		expect(outsideServices).toContain(
-			"app/features/unsafe-working-copy.ts imports the working-copy override outside app/services.ts",
+			"app/features/unsafe-working-copy.ts imports the working-copy override outside its audited files",
 		);
 
 		const wrongModule = workingCopyServiceOverridesFixture.replace(
@@ -6525,6 +6532,7 @@ import { registerCustomProvider } from "@codingame/monaco-vscode-files-service-o
 import { createPlainWorkspaceFileSystemProvider, PLAIN_WORKSPACE_SCHEME } from "./features/workspace/file-system-provider";
 import { registerWorkspaceDeleteCoordinator } from "./features/workspace/delete-coordinator";
 import { createBridge } from "./platform/tauri";
+import { configurePlainWorkingCopyBackupBridge } from "./services/plain-workspace-backup-service";
 
 async function bootstrap() {
 const bridge = createBridge();
@@ -6542,6 +6550,7 @@ const initialWorkspaceSnapshot = await bridge.workspaceSnapshot();
 window.addEventListener("pagehide", () => {
   workspaceDeleteCoordinator.dispose();
 }, { once: true });
+configurePlainWorkingCopyBackupBridge(bridge);
 await initialize(createServiceOverrides(), container, { enableWorkspaceTrust: false });
 }
 `;
