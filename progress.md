@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F030` Editing, preview and hot-exit recovery。
-- 当前最小工作项：完成 F030 的固定 GitHub 调研与技术方案冻结。
+- 当前最小工作项：实现并验收 S1 preview/固定 tab 证据切片。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -117,11 +117,12 @@
 - [x] 完成 F020 delete 可见失败矩阵的独立对抗复核修复：复核给出 3 条 confirmed / 3 条 contested 的裁定，全部 confirmed 项直接采信并已修复。(1) `forbiddenWindowControls` 只锁字面 `window`/`testWindow` receiver、不追踪别名，可被 `const winAlias = window as unknown as Record<string, unknown>;` 之类的别名钩子绕过；新增 `validateWorkspaceBrowserFixtureWindowAuthority` 把 callback 内每个可达全局对象的标识符（`window`/`globalThis`/`self`/`top`/`frames`/`document`/`eval`/`Function`）锁死为唯一一次、必须落在被审计的 `testWindow` 声明语句内，`testWindow` 自身的引用也锁进固定语句 allowlist（`__TAURI_INTERNALS__` 赋值因内部含会让朴素 token scanner 失步的模板字面量，改用结构匹配而非全文本 pin，原因写在函数 JSDoc）；`parent` 因 fixture 内部合法本地遮蔽（`resolveParent` 的 `const parent = ...`）被移出禁用名单，属于按规格允许的收窄而非放宽合同。(2) commit case 可在 retained 分支前插入裸 `target.parent.entries.delete(target.name);`、建树处可插入无条件 `primaryEntries.push(...)` 污染初始树；两个既有验证器新增 `deleteIncompletePlan`/`moveIncompletePlan`/commit-case `target`/`primaryEntries`/`secondaryEntries` 的引用范围锁，只允许其标识符出现在审计过的声明、peek、terminal 分支等语句源码区间内。(3) peek 语句 `deleteIncompletePlan[0]`/`moveIncompletePlan[0]` 未被精确文本锁定，可静默改成 `[1]`；两个验证器都新增该语句的精确 normalizedText pin。(4) E2E 里 `expandDirectory("delete-partial")` 在其 `expectRootRefresh` 断言之前执行，可能自证；探针证实已展开子目录不会随根刷新自动重读，只有重新展开才触发，因此把根 `""` 断言移到展开前、"delete-partial" 断言移到展开后并如实标注为「重新展开触发」，docs/research 与本文件同步更正。(5) 「cancel 命中 `WORKSPACE_DELETE_PLAN_INVALID`」不可证伪（mock 不记录 reject、coordinator 空 catch 吞错误）；措辞收敛为只声称 cancel 请求出现恰好一次、之后无第二轮 prepare/begin/commit，不再声称观察到错误码。新增 hostile mutation 单测 7 条（P1 完整绕过、globalThis 变体、纯 plan 别名、delete/move peek 索引篡改、retained 分支前插入裸删除、建树处插入无条件 push），加固前均确认对基线返回空数组、加固后均确认真实触发对应新失败消息。验收：`vitest run tests/unit/boundary-contracts.test.mjs` 132/132（新增 7 条），`node scripts/plain/check-boundaries.mjs` 通过，聚焦 delete 用例与合并 `shows retained and partial` 重复 5 次（10/10）均通过，全部 Browser E2E 14/14 通过，完整 `pnpm check` 通过 30 个前端测试文件、607 个用例、2277 个模块、2112 个 bundle source、203 项既有迁移债务与 Rust 255/255。
 - [x] 分工切换与 `F020` 闭环：用户指示真实 Tauri 桌面（Computer Use / 人工驱动）验收自 2026-07-22 起不再由实现方执行，全部登记到新建 `docs/e2e-handover.md` 交接 Codex 统一执行并回写 evidence，`docs/testing.md`「真实 Tauri E2E」与 `AGENTS.md` 验收清单同步更新为指向该交接清单。`F020` 据此以现有 Browser E2E（14/14，含重复 5 次的 move+delete 失败矩阵 10/10）、Rust 255/255、独立对抗复核后 132/132 的 Harness 边界单测，以及既往真实单根桌面验收（绝对路径 `.app` 启动、目录选择器打开 workspace、空文件创建/31 字节精确保存/目录创建/同根重命名/文件复制并磁盘核对、外部增删经 FSEvents 首轮轮询收敛、DOM 确认框取消路径、用户即时确认后的正向永久删除并磁盘核实）闭环；真实 multi-root 桌面矩阵（双根投影、跨根磁盘写链、每根 FSEvents、root 生命周期）与 multi-root 永久删除桌面变体作为显式 `platformGaps` 登记为 `docs/e2e-handover.md` 的 E2E-001/E2E-002 交接 Codex 执行，`features.json` `F020` evidence 同步引用。本次真实桌面验收未能完成 multi-root 矩阵的原因如实记录：Computer Use 合成键盘在真人键鼠活动时会被让位中止，`pnpm tauri:dev:e2e` 的裸二进制无 `CFBundleIdentifier`、不经 LaunchServices 因而桌面自动化授权层结构性不可见、不可用于取样；两点均已写入 `docs/testing.md` 与 `docs/e2e-handover.md` 的执行环境纪律。
 - [x] 完成验收现场清理：临时 fixture、Computer Use 截图等探针产物与 3.6G 的 `src-tauri/target` 构建产物均已删除，工作树恢复干净，`git status --short` 无残留中间文件。
+- [x] 完成 `F030` 的固定 GitHub 调研与技术方案冻结（docs/research/2026-07-22-editing-hot-exit.md）：双路调研（固定源码 + 仓库审计）交叉复核并裁决矛盾——`missing-services.js` 已为 working copy 系列服务注册桩实现，编辑/保存今日可用（Browser E2E 14/14 为经验证据），F030 是「桩升级为真服务」而非「从不可用到可用」；preview/固定 tab 的真实上游链已随 workbench/view-common override 连锁引入且 `enablePreview` 默认 true；orphan 判定只认精确本资源 `DELETED`（`UPDATED` 不参与、目录 `DELETED` 向下命中），Plain 粗粒度 watcher 因此对外部删除已打开文件无自动反应；保存冲突链（etag → `FILE_MODIFIED_SINCE` → Plain 自有 Reload/Save As/Details）已在、缺测试证据。冻结三个决策：外部删除用「已打开 watch 集合的有界 stat 复核 → 精确单资源 DELETED」；working-copy 以 `@codingame/monaco-vscode-working-copy-service-override@35.0.1` 的 `storage: null` 组合激活（排除假 `editor-service-override` 与 IndexedDB 持久层）；hot-exit backup 新建 Rust capability 域（app data 目录、staged 原子写、per-window gate、窗口销毁清理）+ `PlainWorkingCopyBackupService` 填坑 + 自定义 tracker（不依赖 `beforeunload`），真实关窗握手与杀进程恢复登记交接清单。切片拆为 S1 preview 证据、S2 外部删除精确 DELETED、S3 working-copy 激活、S4 Rust backup 域、S5 恢复链、S6 桌面项登记。
 
 ## 下一步
 
-1. 完成 `F030` 的固定 GitHub 调研与技术方案冻结。
-2. `F030` 逐切片实现。
+1. 实现并验收 S1 preview/固定 tab 证据切片。
+2. 按方案顺序推进 S2-S5，S6 桌面项登记 `docs/e2e-handover.md`。
 3. 桌面 E2E 由 Codex 按 `docs/e2e-handover.md` 交接清单执行后回写对应 feature 的 evidence。
 
 ## 当前验收命令
