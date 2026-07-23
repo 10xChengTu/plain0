@@ -1377,7 +1377,9 @@ export function validateWorkspaceProviderBootstrap(source) {
 				parent.expression.text === "registerWorkspaceDeleteCoordinator" ||
 				parent.expression.text === "registerWorkspaceCommands" ||
 				parent.expression.text === "configurePlainWorkingCopyBackupBridge" ||
-				parent.expression.text === "configurePlainSearchBridge")
+				parent.expression.text === "configurePlainSearchBridge" ||
+				parent.expression.text === "consumeImportedThemePackages" ||
+				parent.expression.text === "registerPlainThemeCommands")
 		);
 	}
 	function isAllowedWorkspaceProviderIdentifier(node) {
@@ -5575,6 +5577,24 @@ function stageCleanupCallsAreExact(relativePath, source) {
 					/\bself\s*\.\s*root\s*\.\s*$/,
 					"&self.stage_name",
 				),
+			)
+		);
+	}
+	if (relativePath === "src-tauri/src/theme/library.rs") {
+		return (
+			removeFileCalls.length === 1 &&
+			exactMethodCall(
+				source,
+				removeFileCalls[0],
+				/\bdir\s*\.\s*$/,
+				"child_path",
+			) &&
+			removeDirectoryCalls.length === 2 &&
+			removeDirectoryCalls.some((call) =>
+				exactMethodCall(source, call, /\bdir\s*\.\s*$/, "child_path"),
+			) &&
+			removeDirectoryCalls.some((call) =>
+				exactMethodCall(source, call, /\broot\s*\.\s*$/, "&name"),
 			)
 		);
 	}

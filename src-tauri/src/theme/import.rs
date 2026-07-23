@@ -77,14 +77,18 @@ fn finalize(staged: Staging<'_>, files: Vec<String>) -> Result<ImportedThemePack
 
     // Shared across every `contributes.themes[]` entry in this one import —
     // see `theme_json`'s module docs for why this is deliberately not reset
-    // per entry the way include-chain cycle detection is.
+    // per entry the way include-chain cycle detection is. `resources`
+    // accumulates the exact same way, becoming the stored record's read
+    // whitelist for `F050` S3's `theme_read_resource`.
     let mut budget = MAX_INCLUDE_CHAIN_FILES;
+    let mut resources = BTreeSet::new();
     for theme in &validated.themes {
         theme_json::validate_theme_contribution_document(
             &staged,
             &file_set,
             &theme.path,
             &mut budget,
+            &mut resources,
         )?;
     }
 
@@ -106,6 +110,7 @@ fn finalize(staged: Staging<'_>, files: Vec<String>) -> Result<ImportedThemePack
         icon_themes: validated.icon_themes.clone(),
         product_icon_themes: validated.product_icon_themes.clone(),
         contains_code: validated.contains_code,
+        resources: resources.into_iter().collect(),
     };
     let bytes = serde_json::to_vec(&record).map_err(|_| theme_io_failed())?;
 

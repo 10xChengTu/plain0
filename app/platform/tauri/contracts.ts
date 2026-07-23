@@ -316,6 +316,44 @@ export interface BackupEntry {
 	readonly bytes: Uint8Array;
 }
 
+/** The four upstream `ThemeTypeSelector` values a `contributes.themes[]`
+ * entry's `uiTheme` may name — see `src-tauri/src/theme/manifest.rs`'s
+ * `UiTheme` enum, whose `serde` renames these exact wire strings. */
+export type ThemeUiTheme = "vs" | "vs-dark" | "hc-black" | "hc-light";
+
+export interface ThemeContribution {
+	readonly label: string | null;
+	readonly uiTheme: ThemeUiTheme;
+	/** Package-relative wire path, e.g. `"themes/dark.json"`. */
+	readonly path: string;
+}
+
+/**
+ * One imported theme package's validated summary. `resources` is the exact
+ * whitelist `theme_read_resource` checks a `relativePath` against for this
+ * package (main document, `include` chain, `tokenColors` `.tmTheme`
+ * target) — every file the frontend needs to fetch and `registerFileUrl`
+ * to make the package's themes actually loadable.
+ */
+export interface ThemePackageSummary {
+	readonly id: string;
+	readonly publisher: string;
+	readonly name: string;
+	readonly version: string;
+	readonly themes: readonly ThemeContribution[];
+	readonly resources: readonly string[];
+	readonly containsCode: boolean;
+}
+
+export type ThemeImportResult =
+	| Readonly<{ status: "imported"; package: ThemePackageSummary }>
+	| Readonly<{ status: "cancelled" }>;
+
+export interface ThemeListResult {
+	readonly packages: readonly ThemePackageSummary[];
+	readonly skipped: number;
+}
+
 export type Unlisten = () => void | Promise<void>;
 
 export interface PlainBridge {
@@ -431,4 +469,22 @@ export interface PlainBridge {
 	backupReadAll(): Promise<readonly BackupEntry[]>;
 	backupDiscard(key: string): Promise<void>;
 	backupDiscardAll(): Promise<void>;
+	/** Prompts for a `.vsix` file via a native dialog and imports it. The
+	 * file dialog only ever opens from this explicit, user-triggered call —
+	 * never from startup or any implicit path. */
+	themeImportVsix(): Promise<ThemeImportResult>;
+	/** Prompts for an already-unpacked theme package directory via a native
+	 * dialog and imports it. */
+	themeImportDirectory(): Promise<ThemeImportResult>;
+	themeList(): Promise<ThemeListResult>;
+	/** Reads one resource's bytes out of an imported package, whitelisted
+	 * against that exact package's own `resources` (see
+	 * `ThemePackageSummary`'s doc comment). */
+	themeReadResource(
+		packageId: string,
+		relativePath: string,
+	): Promise<Uint8Array>;
+	/** Removes an imported package by id. Idempotent — removing an unknown
+	 * or already-removed id succeeds without error. */
+	themeRemove(packageId: string): Promise<void>;
 }

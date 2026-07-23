@@ -75,6 +75,35 @@ type TestMultiRootWatchAcknowledgements = readonly [
 	secondary: number,
 ];
 
+interface TestThemeContribution {
+	readonly label: string | null;
+	readonly uiTheme: "vs" | "vs-dark" | "hc-black" | "hc-light";
+	readonly path: string;
+}
+
+interface TestThemePackageSummary {
+	readonly id: string;
+	readonly publisher: string;
+	readonly name: string;
+	readonly version: string;
+	readonly themes: readonly TestThemeContribution[];
+	readonly resources: readonly string[];
+	readonly containsCode: boolean;
+}
+
+interface TestThemePackageFixture {
+	readonly summary: TestThemePackageSummary;
+	readonly resourceContents: Readonly<Record<string, string>>;
+}
+
+type TestThemeImportOutcome =
+	| Readonly<{ status: "cancelled" }>
+	| Readonly<{ status: "imported"; fixture: TestThemePackageFixture }>
+	// Not a real `ThemeImportResult` shape — a Playwright-only extension so a
+	// test can script a *failed* import (Rust would reject via a thrown
+	// `CommandError`, never a success-shaped result).
+	| Readonly<{ status: "failed"; code: string; message: string }>;
+
 async function installNativeIpcMock(
 	page: Page,
 	rawReadTransport: RawReadTransport,
@@ -95,6 +124,14 @@ async function installNativeIpcMock(
 	// same-tick mock that would otherwise complete before the next
 	// Playwright action runs. Only the cancellation test passes this.
 	textSearchPollDelayMsForTest = 0,
+	// Pre-seeds the theme library as if these packages were already imported
+	// in a previous session (consumed by `theme_list`). Only F050 S3's own
+	// theme tests pass this.
+	themeLibraryFixtureForTest: readonly TestThemePackageFixture[] = [],
+	// Consumed in order by `theme_import_vsix`/`theme_import_directory`; an
+	// empty queue falls back to `{ status: "cancelled" }`. Only F050 S3's own
+	// theme tests pass this.
+	themeImportOutcomesForTest: readonly TestThemeImportOutcome[] = [],
 ): Promise<void> {
 	await page.addInitScript(
 		({
@@ -105,6 +142,8 @@ async function installNativeIpcMock(
 			extraFiles,
 			textSearchMaxMatchesForTest,
 			textSearchPollDelayMsForTest,
+			themeLibraryFixtureForTest,
+			themeImportOutcomesForTest,
 		}) => {
 			const calls: Array<{
 				command: string;
@@ -1042,6 +1081,34 @@ async function installNativeIpcMock(
 					emitWatchWake();
 				}
 			};
+			const themePackages = new Map<string, TestThemePackageSummary>();
+			const themeResourceContents = new Map<string, Map<string, string>>();
+			const seedThemePackage = (fixture: TestThemePackageFixture): void => {
+				themePackages.set(fixture.summary.id, fixture.summary);
+				themeResourceContents.set(
+					fixture.summary.id,
+					new Map(Object.entries(fixture.resourceContents)),
+				);
+			};
+			for (const fixture of themeLibraryFixtureForTest) {
+				seedThemePackage(fixture);
+			}
+			const scriptedThemeImports = [...themeImportOutcomesForTest];
+			const themeImportFromScript = (): unknown => {
+				const outcome = scriptedThemeImports.shift();
+				if (outcome === undefined || outcome.status === "cancelled") {
+					return { status: "cancelled" };
+				}
+				if (outcome.status === "failed") {
+					throw { code: outcome.code, message: outcome.message };
+				}
+				seedThemePackage(outcome.fixture);
+				return { status: "imported", package: outcome.fixture.summary };
+			};
+			const themeResourceNotFound = () => ({
+				code: "THEME_RESOURCE_NOT_FOUND",
+				message: "The requested theme package resource is not available.",
+			});
 			testWindow.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
 				unregisterListener() {},
 			};
@@ -1554,6 +1621,53 @@ async function installNativeIpcMock(
 							persistBackupEntries();
 							return null;
 						}
+						case "theme_import_vsix":
+						case "theme_import_directory":
+							return themeImportFromScript();
+						case "theme_list": {
+							const packages = [...themePackages.values()].sort(
+								(left, right) =>
+									left.id < right.id ? -1 : left.id > right.id ? 1 : 0,
+							);
+							return { packages, skipped: 0 };
+						}
+						case "theme_read_resource": {
+							const themeRequest = args.request as
+								{ packageId?: string; relativePath?: string } | undefined;
+							const summary =
+								themeRequest?.packageId === undefined
+									? undefined
+									: themePackages.get(themeRequest.packageId);
+							const resources =
+								themeRequest?.packageId === undefined
+									? undefined
+									: themeResourceContents.get(themeRequest.packageId);
+							const content =
+								themeRequest?.relativePath === undefined
+									? undefined
+									: resources?.get(themeRequest.relativePath);
+							if (
+								summary === undefined ||
+								themeRequest?.relativePath === undefined ||
+								!summary.resources.includes(themeRequest.relativePath) ||
+								content === undefined
+							) {
+								throw themeResourceNotFound();
+							}
+							const themeBytes = encoder.encode(content);
+							return rawReadTransport === "arrayBuffer"
+								? themeBytes.buffer
+								: [...themeBytes];
+						}
+						case "theme_remove": {
+							const themeRequest = args.request as
+								{ packageId?: string } | undefined;
+							if (themeRequest?.packageId !== undefined) {
+								themePackages.delete(themeRequest.packageId);
+								themeResourceContents.delete(themeRequest.packageId);
+							}
+							return null;
+						}
 						default:
 							throw new Error(`Unexpected Tauri test command: ${command}`);
 					}
@@ -1568,6 +1682,8 @@ async function installNativeIpcMock(
 			extraFiles,
 			textSearchMaxMatchesForTest,
 			textSearchPollDelayMsForTest,
+			themeLibraryFixtureForTest,
+			themeImportOutcomesForTest,
 		},
 	);
 }
@@ -7496,4 +7612,271 @@ test("previews a theme live on navigation, restores on Escape, and applies for r
 
 	expect(pageErrors).toEqual([]);
 	expect(consoleErrors).toEqual([]);
+});
+
+// `F050` S3: a theme package "already imported" in a previous session (via
+// `themeLibraryFixtureForTest`, standing in for `theme_list` returning a
+// package Rust's own library already has on disk) must reappear in the
+// picker at this session's own startup — and actually applying it must run
+// the real `ColorThemeData`/`extension-file:` resource-loading path (a
+// distinctive `editor.background`, not a stubbed value).
+const IMPORTED_FANCY_DARK_FIXTURE = Object.freeze({
+	summary: Object.freeze({
+		id: "acme.fancy-dark@1.0.0",
+		publisher: "acme",
+		name: "fancy-dark",
+		version: "1.0.0",
+		themes: Object.freeze([
+			Object.freeze({
+				label: "My Fancy Dark",
+				uiTheme: "vs-dark" as const,
+				path: "themes/fancy-dark.json",
+			}),
+		]),
+		resources: Object.freeze(["themes/fancy-dark.json"]),
+		containsCode: false,
+	}),
+	resourceContents: Object.freeze({
+		"themes/fancy-dark.json": JSON.stringify({
+			colors: { "editor.background": "#123456" },
+		}),
+	}),
+});
+
+test("lists an already-imported theme package at startup and applies it for real", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await installNativeIpcMock(page, "arrayBuffer", "readonly", {}, 20_000, 0, [
+		IMPORTED_FANCY_DARK_FIXTURE,
+	]);
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	const picker = await openColorThemePicker(page);
+	const importedRow = picker
+		.locator(".quick-input-list .monaco-list-row")
+		.filter({ hasText: "My Fancy Dark" });
+	await expect(importedRow).toHaveCount(1);
+	await importedRow.click();
+	await expect(picker).toBeHidden();
+
+	await expect
+		.poll(async () => (await workbenchThemeState(page)).editorBackground)
+		.toBe("#123456");
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("imports a VSIX via the Command Palette, shows a success toast, and the theme appears in the picker", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[{ status: "imported", fixture: IMPORTED_FANCY_DARK_FIXTURE }],
+	);
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	await executePaletteCommand(
+		page,
+		"Import Color Theme (VSIX)",
+		"Plain: Import Color Theme (VSIX)...",
+	);
+
+	const toasts = page.locator(".notifications-toasts .notification-toast");
+	await expect(toasts).toHaveCount(1);
+	await expect(toasts.first()).toContainText("acme.fancy-dark@1.0.0");
+
+	const picker = await openColorThemePicker(page);
+	await expect(
+		picker
+			.locator(".quick-input-list .monaco-list-row")
+			.filter({ hasText: "My Fancy Dark" }),
+	).toHaveCount(1);
+	await page.keyboard.press("Escape");
+	await expect(picker).toBeHidden();
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("removes an imported theme package via the Command Palette and falls back to Dark Modern when it was active", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await installNativeIpcMock(page, "arrayBuffer", "readonly", {}, 20_000, 0, [
+		IMPORTED_FANCY_DARK_FIXTURE,
+	]);
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	// Select the imported theme first, so removal has to fall back.
+	const themePicker = await openColorThemePicker(page);
+	await themePicker
+		.locator(".quick-input-list .monaco-list-row")
+		.filter({ hasText: "My Fancy Dark" })
+		.click();
+	await expect(themePicker).toBeHidden();
+	await expect
+		.poll(async () => (await workbenchThemeState(page)).editorBackground)
+		.toBe("#123456");
+
+	await page.keyboard.press("ControlOrMeta+Shift+P");
+	const palette = page.locator(".quick-input-widget");
+	await expect(palette).toBeVisible();
+	await palette
+		.locator("input")
+		.pressSequentially("Remove Imported Color Theme");
+	const removeCommand = palette.getByText(
+		"Plain: Remove Imported Color Theme...",
+		{ exact: true },
+	);
+	await expect(removeCommand).toHaveCount(1);
+	await removeCommand.click();
+	await expect(palette.locator("input")).toHaveAttribute(
+		"placeholder",
+		"Select an imported theme package to remove",
+	);
+	await palette
+		.locator(".quick-input-list .monaco-list-row")
+		.filter({ hasText: "acme.fancy-dark@1.0.0" })
+		.click();
+
+	const confirmDialog = page.getByRole("dialog");
+	await expect(confirmDialog).toBeVisible();
+	await expect(confirmDialog).toContainText("acme.fancy-dark@1.0.0");
+	await confirmDialog
+		.getByRole("button", { name: "Remove", exact: true })
+		.click();
+	await expect(confirmDialog).toHaveCount(0);
+
+	const toasts = page.locator(".notifications-toasts .notification-toast");
+	await expect(toasts).toHaveCount(1);
+	await expect(toasts.first()).toContainText("acme.fancy-dark@1.0.0");
+
+	await expect
+		.poll(async () => (await workbenchThemeState(page)).editorBackground)
+		.toBe("#1f1f1f");
+	const fallbackState = await workbenchThemeState(page);
+	expect(fallbackState.classNames).toContain(DARK_MODERN.className);
+
+	const pickerAfterRemoval = await openColorThemePicker(page);
+	await expect(
+		pickerAfterRemoval
+			.locator(".quick-input-list .monaco-list-row")
+			.filter({ hasText: "My Fancy Dark" }),
+	).toHaveCount(0);
+	await page.keyboard.press("Escape");
+	await expect(pickerAfterRemoval).toBeHidden();
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("shows a desensitized error toast when importing a VSIX fails, without leaking the raw error code", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[
+			{
+				status: "failed",
+				code: "THEME_PACKAGE_NO_THEMES",
+				message:
+					"The theme package does not declare any contributes.themes entries.",
+			},
+		],
+	);
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	await executePaletteCommand(
+		page,
+		"Import Color Theme (VSIX)",
+		"Plain: Import Color Theme (VSIX)...",
+	);
+
+	const toasts = page.locator(".notifications-toasts .notification-toast");
+	await expect(toasts).toHaveCount(1);
+	const toast = toasts.first();
+	await expect(toast).toContainText(
+		"the theme package does not contribute any color themes",
+	);
+	const text = await toast.innerText();
+	expect(text).not.toContain("THEME_PACKAGE_NO_THEMES");
+
+	expect(pageErrors).toEqual([]);
+	// `NotificationsAlerts` mirrors every Error-severity toast to the console
+	// (see the same, already-established precedent a few hundred lines above
+	// for the permanent-delete failure toasts) — exactly one entry, matching
+	// this same desensitized text, not the raw `THEME_PACKAGE_NO_THEMES` code.
+	expect(consoleErrors).toHaveLength(1);
+	expect(consoleErrors[0]).toContain(
+		"the theme package does not contribute any color themes",
+	);
+	expect(consoleErrors[0]).not.toContain("THEME_PACKAGE_NO_THEMES");
 });

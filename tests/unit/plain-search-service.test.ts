@@ -78,6 +78,11 @@ function fakeBridge(
 		backupReadAll: notImplemented,
 		backupDiscard: notImplemented,
 		backupDiscardAll: notImplemented,
+		themeImportVsix: notImplemented,
+		themeImportDirectory: notImplemented,
+		themeList: notImplemented,
+		themeReadResource: notImplemented,
+		themeRemove: notImplemented,
 	};
 }
 
@@ -171,6 +176,11 @@ function fakeTextSearchBridge(
 		backupReadAll: notImplemented,
 		backupDiscard: notImplemented,
 		backupDiscardAll: notImplemented,
+		themeImportVsix: notImplemented,
+		themeImportDirectory: notImplemented,
+		themeList: notImplemented,
+		themeReadResource: notImplemented,
+		themeRemove: notImplemented,
 	};
 
 	return {

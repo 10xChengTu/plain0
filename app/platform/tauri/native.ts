@@ -52,6 +52,14 @@ import {
 	frozenWorkspaceSearchTextPollRequest,
 	frozenWorkspaceSearchTextStartRequest,
 } from "./search-codec";
+import {
+	decodeThemeImportResult,
+	decodeThemeListResult,
+	decodeThemeReadResourceBytes,
+	decodeThemeVoid,
+	frozenThemeReadResourceRequest,
+	frozenThemeRemoveRequest,
+} from "./theme-codec";
 
 export function createNativeBridge(): PlainBridge {
 	const workspaceWatcher = createWorkspaceWatcherManager({
@@ -317,6 +325,30 @@ export function createNativeBridge(): PlainBridge {
 			decodeBackupVoid(
 				await invoke<unknown>("backup_discard_all", { request: {} }),
 			);
+		},
+		themeImportVsix: async () =>
+			decodeThemeImportResult(
+				await invoke<unknown>("theme_import_vsix", { request: {} }),
+			),
+		themeImportDirectory: async () =>
+			decodeThemeImportResult(
+				await invoke<unknown>("theme_import_directory", { request: {} }),
+			),
+		themeList: async () =>
+			decodeThemeListResult(
+				await invoke<unknown>("theme_list", { request: {} }),
+			),
+		themeReadResource: async (packageId, relativePath) => {
+			const request = frozenThemeReadResourceRequest(packageId, relativePath);
+			return decodeThemeReadResourceBytes(
+				await invoke<ArrayBuffer | number[]>("theme_read_resource", {
+					request,
+				}),
+			);
+		},
+		themeRemove: async (packageId) => {
+			const request = frozenThemeRemoveRequest(packageId);
+			decodeThemeVoid(await invoke<unknown>("theme_remove", { request }));
 		},
 	};
 }

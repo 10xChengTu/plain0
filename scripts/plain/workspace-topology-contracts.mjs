@@ -222,6 +222,10 @@ const DIRECT_COMMAND_REGISTRATION_MANIFEST = Object.freeze([
 		relativePath: "app/features/themes/plain-theme-picker.ts",
 		count: 1,
 	}),
+	Object.freeze({
+		relativePath: "app/features/themes/plain-theme-commands.ts",
+		count: 3,
+	}),
 ]);
 
 // The pinned 35.0.1 packages expose deep wildcard modules, including modules
@@ -272,6 +276,17 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/features/search/search-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/search/browser/searchIcons",
 	"app/features/search/search-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search",
 	"app/features/search/search-contribution.ts:@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/contrib/search/browser/searchQuickAccess.contribution",
+	"app/features/themes/plain-theme-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions",
+	"app/features/themes/plain-theme-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands",
+	"app/features/themes/plain-theme-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service",
+	"app/features/themes/plain-theme-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service",
+	"app/features/themes/plain-theme-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput",
+	"app/features/themes/plain-theme-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service",
+	"app/features/themes/plain-theme-commands.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service",
+	"app/features/themes/plain-theme-import-coordinator.ts:@codingame/monaco-vscode-api/extensions",
+	"app/features/themes/plain-theme-import-coordinator.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
+	"app/features/themes/plain-theme-import-coordinator.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService",
+	"app/features/themes/plain-theme-import-coordinator.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service",
 	"app/features/themes/plain-theme-picker.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands",
 	"app/features/themes/plain-theme-picker.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput",
 	"app/features/themes/plain-theme-picker.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service",

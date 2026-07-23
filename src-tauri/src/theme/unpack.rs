@@ -51,7 +51,20 @@ use super::{
 const COPY_BUFFER_BYTES: usize = 64 * 1_024;
 
 /// The result of successfully unpacking and publishing a theme package.
+///
+/// `F050` S3 note: neither this type nor [`unpack_vsix`]/
+/// [`unpack_directory`]/[`Staging::publish`] below are reachable from any
+/// production call path any more — `theme::import` (S2) publishes under the
+/// package's real semantic identity via [`Staging::publish_as`] instead (see
+/// this module's own top-level doc comment for why). They are kept,
+/// deliberately unremoved, purely as what S1 already described as "safe
+/// bytes landed in a package directory, nothing more" — a standalone,
+/// self-contained unpack this module's own (frozen, S1-authored) test suite
+/// below continues to exercise directly. `dead_code` is allowed narrowly on
+/// this cluster rather than the whole module, so any *other* genuinely dead
+/// code introduced here later is still caught.
 #[derive(Debug, Eq, PartialEq)]
+#[allow(dead_code)]
 pub(crate) struct UnpackedTheme {
     /// The placeholder package directory id (see module docs).
     pub(crate) id: String,
@@ -63,6 +76,7 @@ pub(crate) struct UnpackedTheme {
 
 /// Safely unpacks an already-opened VSIX (zip) file into a fresh package
 /// directory under `root` (the theme library root).
+#[allow(dead_code)]
 pub(crate) fn unpack_vsix(root: &Dir, source: File) -> Result<UnpackedTheme, CommandError> {
     let (staged, files) = stage_vsix(root, source)?;
     staged.publish(files)
@@ -150,6 +164,7 @@ pub(crate) fn stage_vsix(
 /// process's authorized workspace roots) into a fresh package directory
 /// under `root`. Shares every limit and the staging/publish machinery with
 /// [`unpack_vsix`]; only the input enumeration differs.
+#[allow(dead_code)]
 pub(crate) fn unpack_directory(
     root: &Dir,
     source_path: &Path,
@@ -311,6 +326,9 @@ struct CreatedEntry {
 pub(crate) struct Staging<'root> {
     root: &'root Dir,
     stage_name: PathBuf,
+    // Only read by the now-production-unreachable `publish` below — see
+    // `UnpackedTheme`'s own doc comment for why this whole cluster stays.
+    #[allow(dead_code)]
     id: String,
     /// Memoized open handles for every directory created so far, keyed by
     /// package-relative path (`""` is the staging root itself).
@@ -455,6 +473,7 @@ impl<'root> Staging<'root> {
     /// consuming `self` so `Drop` becomes a no-op. An id collision (an
     /// astronomically unlikely UUIDv4 clash) mints a fresh id and retries
     /// rather than ever overwriting an existing package.
+    #[allow(dead_code)]
     fn publish(mut self, files: Vec<String>) -> Result<UnpackedTheme, CommandError> {
         for _ in 0..MAX_STAGING_ATTEMPTS {
             match self.root.rename(&self.stage_name, self.root, &self.id) {

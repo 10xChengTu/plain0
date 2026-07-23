@@ -15,22 +15,31 @@
 //! identity only once every check has passed, and is dropped (via the same
 //! `Staging` guard `unpack` already uses) otherwise — never a separate
 //! "publish under a placeholder id, then maybe delete a whole tree" step.
-//! Import UX (Tauri commands, file/directory pickers) is `F050` S3.
+//! `F050` S3 scope: close the import UX loop. `picker` adds a `FilePicker`
+//! abstraction (mirroring `workspace::picker`'s injectable `DirectoryPicker`)
+//! for the VSIX file dialog, plus a theme-domain directory picker for the
+//! unpacked-folder path; `service` wraps a single process-wide
+//! [`library::ThemeLibrary`] with the Tauri-facing orchestration (picker →
+//! import pipeline → library, or library → whitelisted resource read, or
+//! library → bounded removal); `dto` is the camelCase wire contract; and
+//! `commands` registers the five `theme_*` Tauri commands `lib.rs` exposes.
 //!
-//! Nothing in this domain is reachable from a Tauri command yet — that is
-//! this slice's deliberate scope boundary, driven entirely by the Rust test
-//! suite below. `dead_code` is allowed for the whole module accordingly;
-//! remove this once S3 registers the first `theme_import_*` command and
-//! wires it to `lib.rs`.
-#![allow(dead_code)]
+//! Nothing in this domain was reachable from a Tauri command before this
+//! slice — that was S1/S2's deliberate scope boundary. It is now, so the
+//! whole-module `dead_code` allowance those slices needed is gone.
 
+pub(crate) mod commands;
+pub(crate) mod dto;
 #[cfg(test)]
 pub(crate) mod fixtures;
 pub(crate) mod import;
 pub(crate) mod library;
 pub(crate) mod manifest;
+pub(crate) mod picker;
 pub(crate) mod record;
 pub(crate) mod relative_path;
+pub(crate) mod resource;
+pub(crate) mod service;
 pub(crate) mod theme_json;
 pub(crate) mod unpack;
 
@@ -249,6 +258,41 @@ pub(crate) fn theme_package_already_imported() -> CommandError {
     )
 }
 
+pub(crate) fn theme_pick_failed() -> CommandError {
+    CommandError::new(
+        "THEME_PICK_FAILED",
+        "The theme import file or folder picker could not be completed.",
+    )
+}
+
+pub(crate) fn theme_pick_path_unavailable() -> CommandError {
+    CommandError::new(
+        "THEME_PICK_PATH_UNAVAILABLE",
+        "The selected theme package source is unavailable.",
+    )
+}
+
+/// Covers both "no package exists at this id" and "the id argument itself is
+/// malformed" — deliberately the same code for both, rather than letting a
+/// caller distinguish a hostile/malformed selector from a merely-absent one.
+pub(crate) fn theme_package_not_found() -> CommandError {
+    CommandError::new(
+        "THEME_PACKAGE_NOT_FOUND",
+        "No imported theme package matches the given id.",
+    )
+}
+
+/// Covers both "this relative path is not in the package's validated
+/// resource whitelist" and "the whitelisted file is missing or unreadable on
+/// disk" — deliberately the same code for both, matching
+/// [`theme_package_not_found`]'s fail-closed, non-distinguishing rationale.
+pub(crate) fn theme_resource_not_found() -> CommandError {
+    CommandError::new(
+        "THEME_RESOURCE_NOT_FOUND",
+        "The requested theme package resource is not available.",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,6 +323,10 @@ mod tests {
             theme_include_invalid().code(),
             theme_tmtheme_invalid().code(),
             theme_package_already_imported().code(),
+            theme_pick_failed().code(),
+            theme_pick_path_unavailable().code(),
+            theme_package_not_found().code(),
+            theme_resource_not_found().code(),
         ];
         codes.sort_unstable();
         codes.dedup();
@@ -298,15 +346,19 @@ mod tests {
                 "THEME_MANIFEST_MISSING",
                 "THEME_PACKAGE_ALREADY_IMPORTED",
                 "THEME_PACKAGE_CORRUPT",
+                "THEME_PACKAGE_NOT_FOUND",
                 "THEME_PACKAGE_NO_THEMES",
                 "THEME_PACKAGE_TOO_LARGE",
                 "THEME_PACKAGE_UNSAFE_PATH",
+                "THEME_PICK_FAILED",
+                "THEME_PICK_PATH_UNAVAILABLE",
+                "THEME_RESOURCE_NOT_FOUND",
                 "THEME_STAGE_CLEANUP_FAILED",
                 "THEME_TMTHEME_INVALID",
                 "THEME_UNAVAILABLE",
             ],
             "every theme error code must be declared exactly once in this closed set \
-             (19 codes: 6 from S1 + 13 new in S2)"
+             (23 codes: 6 from S1 + 13 from S2 + 4 new in S3)"
         );
     }
 

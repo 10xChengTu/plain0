@@ -11,15 +11,16 @@
 //! needs import provenance, it can add the field then with its own tests
 //! for whatever clock source it picks.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use cap_fs_ext::DirExt;
 use cap_std::fs::Dir;
 
 use crate::error::CommandError;
+use crate::path_policy::RelativePath;
 
 use super::manifest::UiTheme;
-use super::theme_unavailable;
+use super::{theme_package_not_found, theme_unavailable};
 
 /// The manifest record's fixed filename inside a finalized package
 /// directory. Deliberately distinct from `package.json` (the *unpacked
@@ -49,6 +50,17 @@ pub(crate) struct StoredThemePackageManifest {
     #[serde(default)]
     pub(crate) product_icon_themes: Option<serde_json::Value>,
     pub(crate) contains_code: bool,
+    /// Every package-relative wire path `theme::import` actually opened and
+    /// validated while checking this package's `contributes.themes[]` —
+    /// every top-level `path`, every file reached through an `include`
+    /// chain, and every `.tmTheme` file reached through a `tokenColors`
+    /// string reference (see `theme_json`'s `resources` out-parameter).
+    /// Sorted, deduplicated. This is `F050` S3's read whitelist:
+    /// `theme_read_resource` only ever serves a relative path that appears
+    /// here — never an arbitrary member of the unpacked package (which would
+    /// include `package.json` and this domain's own `manifest.plain.json`,
+    /// neither of which any consumer needs or should be able to fetch raw).
+    pub(crate) resources: Vec<String>,
 }
 
 /// The result of enumerating the theme library: every package whose record
@@ -107,6 +119,39 @@ fn read_record(
         .read_to_string(RECORD_FILE_NAME)
         .map_err(|_| theme_unavailable())?;
     serde_json::from_str(&text).map_err(|_| theme_unavailable())
+}
+
+/// Validates that `package_id` is safe to use as a single library-root child
+/// directory name: exactly one [`RelativePath`] segment (no `/`, no `..`,
+/// none of the other rejected shapes `RelativePath::parse_wire` already
+/// guards). A hostile or malformed id is rejected with the exact same
+/// [`theme_package_not_found`] a merely-nonexistent id gets — see that
+/// function's own doc comment for why the two are never distinguished.
+pub(crate) fn validate_package_id(package_id: &str) -> Result<PathBuf, CommandError> {
+    let parsed = RelativePath::parse_wire(package_id).map_err(|_| theme_package_not_found())?;
+    if parsed.is_root() || package_id.contains('/') {
+        return Err(theme_package_not_found());
+    }
+    Ok(parsed.as_path().to_owned())
+}
+
+/// Reads exactly one package's stored record by id, validating the id shape
+/// first and rejecting a symlink masquerading as a package directory (same
+/// discipline as [`list_theme_packages`]'s own per-entry check). Every
+/// failure — malformed id, no such directory, a symlink, a non-directory, an
+/// unreadable or corrupt record — collapses to [`theme_package_not_found`].
+pub(crate) fn read_single_package(
+    root: &Dir,
+    package_id: &str,
+) -> Result<StoredThemePackageManifest, CommandError> {
+    let name = validate_package_id(package_id)?;
+    let metadata = root
+        .symlink_metadata(&name)
+        .map_err(|_| theme_package_not_found())?;
+    if !metadata.is_dir() {
+        return Err(theme_package_not_found());
+    }
+    read_record(root, &name).map_err(|_| theme_package_not_found())
 }
 
 #[cfg(test)]

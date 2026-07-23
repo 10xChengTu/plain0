@@ -161,6 +161,21 @@ function testBridge(
 		async backupDiscardAll() {
 			throw new Error("unused");
 		},
+		async themeImportVsix() {
+			throw new Error("unused");
+		},
+		async themeImportDirectory() {
+			throw new Error("unused");
+		},
+		async themeList() {
+			throw new Error("unused");
+		},
+		async themeReadResource() {
+			throw new Error("unused");
+		},
+		async themeRemove() {
+			throw new Error("unused");
+		},
 		...overrides,
 	};
 }

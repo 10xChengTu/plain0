@@ -89,6 +89,11 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		backupReadAll: vi.fn(),
 		backupDiscard: vi.fn(),
 		backupDiscardAll: vi.fn(),
+		themeImportVsix: vi.fn(),
+		themeImportDirectory: vi.fn(),
+		themeList: vi.fn(),
+		themeReadResource: vi.fn(),
+		themeRemove: vi.fn(),
 		...overrides,
 	};
 }
@@ -148,6 +153,11 @@ describe("workspace Workbench command overrides", () => {
 			backupReadAll: vi.fn(),
 			backupDiscard: vi.fn(),
 			backupDiscardAll: vi.fn(),
+			themeImportVsix: vi.fn(),
+			themeImportDirectory: vi.fn(),
+			themeList: vi.fn(),
+			themeReadResource: vi.fn(),
+			themeRemove: vi.fn(),
 		};
 		const contextValues = new Map<string, unknown>([
 			["openFolderWorkspaceSupport", false],

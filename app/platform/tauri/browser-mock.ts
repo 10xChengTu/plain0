@@ -3,6 +3,8 @@ import type {
 	CommandError,
 	PlainBridge,
 	RuntimeInfo,
+	ThemeImportResult,
+	ThemePackageSummary,
 	WorkspaceCapabilities,
 	WorkspaceCommitDeleteEntryRequest,
 	WorkspaceDeleteBatchPlan,
@@ -812,10 +814,38 @@ export interface BrowserMockBackupSeedEntryForTest {
 	readonly bytes: readonly number[];
 }
 
+/**
+ * A pre-validated theme package the browser mock exposes as if it had
+ * already gone through the real Rust unpack/validate/import pipeline — the
+ * mock never re-implements zip/JSONC/include-chain parsing (109 real Rust
+ * tests already cover that), it only exercises the frontend's own
+ * consumption (registerExtension/registerFileUrl wiring, registry/picker
+ * updates, toast feedback). `resourceContents` must have exactly one entry
+ * per `summary.resources` path (UTF-8 text, matching every resource this
+ * slice ever whitelists: theme JSON and `.tmTheme` documents).
+ */
+export interface BrowserMockThemePackageFixture {
+	readonly summary: ThemePackageSummary;
+	readonly resourceContents: Readonly<Record<string, string>>;
+}
+
+/** One scripted `theme_import_vsix`/`theme_import_directory` outcome,
+ * consumed in order (like `workspacePicks`) — the mock file/folder picker
+ * itself is never simulated byte-for-byte, only its end result. */
+export type BrowserMockThemeImportOutcome =
+	| Readonly<{ status: "cancelled" }>
+	| Readonly<{ status: "imported"; fixture: BrowserMockThemePackageFixture }>;
+
 export interface BrowserMockBridgeOptions {
 	readonly workspacePicks?: readonly BrowserMockWorkspacePick[];
 	/** Seeds the isolated in-memory backup store before first use. */
 	readonly backupFixtureForTest?: readonly BrowserMockBackupSeedEntryForTest[];
+	/** Seeds the isolated in-memory theme library before first use — as if
+	 * these packages had already been imported in a previous session. */
+	readonly themeLibraryFixtureForTest?: readonly BrowserMockThemePackageFixture[];
+	/** Consumed in order by `themeImportVsix`/`themeImportDirectory`; an
+	 * empty queue falls back to `{ status: "cancelled" }`. */
+	readonly themeImportOutcomesForTest?: readonly BrowserMockThemeImportOutcome[];
 	/** Browser-mock only bounded tree injected below the first mock root. */
 	readonly directoryCopyFixtureForTest?: BrowserMockDirectoryFixtureForTest;
 	/** May only lower production directory-copy budgets. */
@@ -1097,6 +1127,13 @@ function searchNotFound(): CommandError {
 	return commandError(
 		"WORKSPACE_SEARCH_NOT_FOUND",
 		"The workspace text search is no longer available.",
+	);
+}
+
+function themeResourceNotFound(): CommandError {
+	return commandError(
+		"THEME_RESOURCE_NOT_FOUND",
+		"The requested theme package resource is not available.",
 	);
 }
 
@@ -1922,6 +1959,30 @@ export function createBrowserMockBridge(
 			Uint8Array.from(seed.bytes),
 		);
 		backupEntries.set(key, content);
+	}
+	const themePackages = new Map<string, ThemePackageSummary>();
+	const themeResourceContents = new Map<string, ReadonlyMap<string, string>>();
+	function seedThemePackage(fixture: BrowserMockThemePackageFixture): void {
+		themePackages.set(fixture.summary.id, fixture.summary);
+		themeResourceContents.set(
+			fixture.summary.id,
+			new Map(Object.entries(fixture.resourceContents)),
+		);
+	}
+	for (const fixture of options.themeLibraryFixtureForTest ?? []) {
+		seedThemePackage(fixture);
+	}
+	const scriptedThemeImports = [...(options.themeImportOutcomesForTest ?? [])];
+	function themeImportFromScript(): ThemeImportResult {
+		const outcome = scriptedThemeImports.shift();
+		if (outcome === undefined || outcome.status === "cancelled") {
+			return Object.freeze({ status: "cancelled" });
+		}
+		seedThemePackage(outcome.fixture);
+		return Object.freeze({
+			status: "imported",
+			package: outcome.fixture.summary,
+		});
 	}
 	const trees = cloneMockTrees();
 	const directoryCopyLimits = resolveDirectoryCopyLimits(
@@ -5266,6 +5327,40 @@ export function createBrowserMockBridge(
 				throw backupUnavailable();
 			}
 			backupEntries.clear();
+		},
+		async themeImportVsix() {
+			return themeImportFromScript();
+		},
+		async themeImportDirectory() {
+			return themeImportFromScript();
+		},
+		async themeList() {
+			const packages = [...themePackages.values()].sort((left, right) =>
+				left.id < right.id ? -1 : left.id > right.id ? 1 : 0,
+			);
+			return Object.freeze({ packages: Object.freeze(packages), skipped: 0 });
+		},
+		async themeReadResource(packageId, relativePath) {
+			const summary = themePackages.get(packageId);
+			const resources = themeResourceContents.get(packageId);
+			if (
+				summary === undefined ||
+				resources === undefined ||
+				!summary.resources.includes(relativePath)
+			) {
+				throw themeResourceNotFound();
+			}
+			const content = resources.get(relativePath);
+			if (content === undefined) {
+				throw themeResourceNotFound();
+			}
+			return new TextEncoder().encode(content);
+		},
+		async themeRemove(packageId) {
+			// Idempotent, matching the Rust service: removing an unknown or
+			// already-removed id is a plain success.
+			themePackages.delete(packageId);
+			themeResourceContents.delete(packageId);
 		},
 	};
 }

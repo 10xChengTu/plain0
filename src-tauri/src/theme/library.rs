@@ -1,13 +1,19 @@
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
+use cap_fs_ext::DirExt;
 use cap_std::ambient_authority;
 use cap_std::fs::Dir;
 
 use crate::error::CommandError;
+use crate::path_policy::RelativePath;
 
-use super::record::{list_theme_packages, ThemeLibraryListing};
-use super::theme_unavailable;
+use super::record::{list_theme_packages, validate_package_id, ThemeLibraryListing};
+use super::{
+    resource, theme_io_failed, theme_package_too_large, theme_unavailable,
+    MAX_THEME_PACKAGE_ENTRIES,
+};
 
 /// Rust-authoritative theme package library rooted at
 /// `<app_local_data_dir>/themes/`.
@@ -69,6 +75,103 @@ impl ThemeLibrary {
         let root = self.ensure_root()?;
         list_theme_packages(&root)
     }
+
+    /// `F050` S3's whitelisted resource read — see `resource::read_resource`
+    /// for the full contract.
+    pub(crate) fn read_resource(
+        &self,
+        package_id: &str,
+        relative: &RelativePath,
+    ) -> Result<Vec<u8>, CommandError> {
+        let _guard = self.lock()?;
+        let root = self.ensure_root()?;
+        resource::read_resource(&root, package_id, relative)
+    }
+
+    /// Removes an imported package by id. Idempotent: removing an id that
+    /// does not name any package (never imported, already removed, or a
+    /// malformed selector) is a no-op success rather than an error — the
+    /// caller's post-condition ("this package is gone") already holds.
+    /// Shares this library's single process-wide gate with every import, so
+    /// a remove can never interleave with an in-flight import's staging
+    /// bookkeeping (or another remove's directory walk).
+    pub(crate) fn remove_package(&self, package_id: &str) -> Result<(), CommandError> {
+        let _guard = self.lock()?;
+        let root = self.ensure_root()?;
+
+        let Ok(name) = validate_package_id(package_id) else {
+            return Ok(());
+        };
+        let metadata = match root.symlink_metadata(&name) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(theme_io_failed()),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            // Never a package this domain itself created; refuse to touch
+            // it rather than silently treating it as "already gone".
+            return Err(theme_io_failed());
+        }
+
+        let mut entries_seen = 0_usize;
+        remove_directory_contents(&root, &name, &mut entries_seen, 0)?;
+        root.remove_dir(&name).map_err(|_| theme_io_failed())
+    }
+}
+
+/// Bounded, capability-relative, post-order removal of `name`'s contents
+/// (but not `name` itself — the caller removes the now-empty directory).
+/// Mirrors `unpack::stage_directory`'s own walk discipline: every directory
+/// is opened `nofollow`, a symlink anywhere in the tree is refused rather
+/// than followed or blindly unlinked, and both the total entry count
+/// ([`MAX_THEME_PACKAGE_ENTRIES`], the same cap import enforces — a package
+/// this domain itself created can never legitimately exceed it) and the
+/// recursion depth ([`crate::path_policy::MAX_RELATIVE_PATH_SEGMENTS`], the
+/// same cap every member's own relative path was already validated against
+/// at import time) are re-checked here rather than assumed from those
+/// import-time invariants alone.
+fn remove_directory_contents(
+    parent: &Dir,
+    name: &Path,
+    entries_seen: &mut usize,
+    depth: usize,
+) -> Result<(), CommandError> {
+    if depth > crate::path_policy::MAX_RELATIVE_PATH_SEGMENTS {
+        return Err(theme_package_too_large());
+    }
+    let dir = parent
+        .open_dir_nofollow(name)
+        .map_err(|_| theme_io_failed())?;
+    let mut child_names = Vec::new();
+    for entry in dir.entries().map_err(|_| theme_io_failed())? {
+        let entry = entry.map_err(|_| theme_io_failed())?;
+        *entries_seen = entries_seen
+            .checked_add(1)
+            .ok_or_else(theme_package_too_large)?;
+        if *entries_seen > MAX_THEME_PACKAGE_ENTRIES {
+            return Err(theme_package_too_large());
+        }
+        child_names.push(entry.file_name());
+    }
+
+    for child_name in child_names {
+        let child_path = Path::new(&child_name);
+        let metadata = dir
+            .symlink_metadata(child_path)
+            .map_err(|_| theme_io_failed())?;
+        if metadata.file_type().is_symlink() {
+            return Err(theme_io_failed());
+        }
+        if metadata.is_dir() {
+            remove_directory_contents(&dir, child_path, entries_seen, depth + 1)?;
+            dir.remove_dir(child_path).map_err(|_| theme_io_failed())?;
+        } else if metadata.is_file() {
+            dir.remove_file(child_path).map_err(|_| theme_io_failed())?;
+        } else {
+            return Err(theme_io_failed());
+        }
+    }
+    Ok(())
 }
 
 /// Creates `path`, and any missing ancestor, one level at a time. This is
@@ -94,51 +197,14 @@ fn ensure_directory_ambiently(path: &Path) -> std::io::Result<()> {
     }
 }
 
+// Kept as a separate `library/tests.rs` file (rather than an inline `mod
+// tests { ... }` block, S1's original shape) specifically so a real
+// `std::os::unix::fs::symlink` call in
+// `remove_package_refuses_to_touch_a_symlink_masquerading_as_a_package`
+// below — proving `remove_package` never follows or unlinks through a
+// symlinked entry — lands in a file `scripts/plain/boundary-contracts.mjs`'s
+// `WORKSPACE_TEST_SOURCE_PATTERN` (`tests.rs`) already exempts from the
+// production "no broad symlink creation helpers" scan, exactly like every
+// other `theme::*` submodule's own `*/tests.rs` file.
 #[cfg(test)]
-mod tests {
-    use tempfile::TempDir;
-
-    use super::ThemeLibrary;
-
-    #[test]
-    fn ensure_root_bootstraps_once_and_is_capability_relative_thereafter() {
-        let temp = TempDir::new().expect("tempdir creates");
-        let base_path = temp.path().join("app-local-data");
-        let library = ThemeLibrary::new(base_path.clone());
-
-        let first = library.ensure_root().expect("root bootstraps");
-        let second = library.ensure_root().expect("root reuses cache");
-
-        first
-            .create_dir("marker")
-            .expect("write through first handle");
-        assert!(
-            second.is_dir("marker"),
-            "second handle must observe writes made through the first, proving \
-             both come from the same bootstrapped root"
-        );
-        assert!(base_path.join("themes").is_dir());
-    }
-
-    #[test]
-    fn ensure_root_creates_missing_multi_level_app_local_data_dir() {
-        let temp = TempDir::new().expect("tempdir creates");
-        let base_path = temp.path().join("a").join("b").join("c");
-        let library = ThemeLibrary::new(base_path.clone());
-
-        library
-            .ensure_root()
-            .expect("root bootstraps through missing ancestors");
-        assert!(base_path.join("themes").is_dir());
-    }
-
-    #[test]
-    fn lock_serializes_and_is_reentrant_safe_across_calls() {
-        let temp = TempDir::new().expect("tempdir creates");
-        let library = ThemeLibrary::new(temp.path().to_path_buf());
-        {
-            let _guard = library.lock().expect("gate locks");
-        }
-        let _guard = library.lock().expect("gate locks again after release");
-    }
-}
+mod tests;

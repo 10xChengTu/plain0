@@ -54,6 +54,7 @@ fn successful_import_round_trips_through_list_packages() {
     assert_eq!(record.themes[0].path, "themes/dark.json");
     assert!(!record.contains_code);
     assert!(record.icon_themes.is_none());
+    assert_eq!(record.resources, vec!["themes/dark.json".to_owned()]);
 
     assert_eq!(
         library_entries(temp.path()),

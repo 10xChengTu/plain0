@@ -84,6 +84,11 @@ function createFakeBridge(overrides: Partial<PlainBridge> = {}): {
 			state.discardAllCalls += 1;
 			state.entries.clear();
 		},
+		themeImportVsix: notImplemented,
+		themeImportDirectory: notImplemented,
+		themeList: notImplemented,
+		themeReadResource: notImplemented,
+		themeRemove: notImplemented,
 		...overrides,
 	};
 	return { bridge, state };

@@ -9,6 +9,7 @@ pub mod workspace;
 
 use backup::service::BackupService;
 use error::CommandError;
+use theme::service::ThemeService;
 use workspace::service::WorkspaceService;
 
 const RUNTIME_READY_EVENT: &str = "plain://runtime-ready";
@@ -44,7 +45,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let base_path = app.path().app_local_data_dir()?;
-            app.manage(BackupService::new(base_path));
+            app.manage(BackupService::new(base_path.clone()));
+            app.manage(ThemeService::new(base_path));
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -83,6 +85,11 @@ pub fn run() {
             backup::commands::backup_read_all,
             backup::commands::backup_discard,
             backup::commands::backup_discard_all,
+            theme::commands::theme_import_vsix,
+            theme::commands::theme_import_directory,
+            theme::commands::theme_list,
+            theme::commands::theme_read_resource,
+            theme::commands::theme_remove,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Plain")

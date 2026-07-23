@@ -133,6 +133,53 @@ function hasThemeContributions(
  * monaco-vscode-theme-service-override`) — exactly what `applyDefaultColorTheme`
  * and `PlainThemePicker` (`./plain-theme-picker.ts`) both do.
  */
+/**
+ * Builds one registry entry the same way for every source (built-in at
+ * bootstrap, or an imported package's resource at `F050` S3 consumption
+ * time — see `plain-theme-import-coordinator.ts`): resolve the theme
+ * document's location under `extensionLocation`, construct the bare
+ * `ColorThemeData` instance directly (bypassing `ExtensionsRegistry`, see
+ * this module's own top-level doc comment on why that is always safe here),
+ * and freeze the entry.
+ */
+export function buildPlainThemeRegistryEntry(
+	extensionLocation: URI,
+	extensionData: ExtensionData,
+	theme: Readonly<{
+		readonly id?: string;
+		readonly label: string;
+		readonly uiTheme: IColorTheme["uiTheme"];
+		readonly path: string;
+	}>,
+): PlainThemeRegistryEntry {
+	const colorThemeLocation = URI.joinPath(extensionLocation, theme.path);
+	const data = ColorThemeData.fromExtensionTheme(
+		{
+			// `fromExtensionTheme`'s own fallback is `settingsId = theme.id ||
+			// label` — an empty string is exactly as falsy as `undefined` for
+			// that check, so this preserves the exact upstream semantics for a
+			// manifest that never had a theme-level `id` (F050 S3's imported
+			// packages never do — that field is out of scope, see `theme::
+			// manifest`) while still satisfying this constructor's own `id:
+			// string` (non-optional) parameter type.
+			id: theme.id ?? "",
+			label: theme.label,
+			path: theme.path,
+			uiTheme: theme.uiTheme as ThemeTypeSelector,
+			_watch: false,
+		},
+		colorThemeLocation,
+		extensionData,
+	);
+	return Object.freeze({
+		id: data.id,
+		label: data.label,
+		settingsId: data.settingsId,
+		uiTheme: theme.uiTheme,
+		data,
+	});
+}
+
 export async function createPlainThemeRegistry(
 	fileService: IFileService,
 ): Promise<readonly PlainThemeRegistryEntry[]> {
@@ -150,25 +197,12 @@ export async function createPlainThemeRegistry(
 		);
 		for (const theme of manifest.contributes.themes) {
 			const label = resolveNlsValue(theme.label, nlsBundle);
-			const colorThemeLocation = URI.joinPath(extension.location, theme.path);
-			const data = ColorThemeData.fromExtensionTheme(
-				{
+			entries.push(
+				buildPlainThemeRegistryEntry(extension.location, extensionData, {
 					id: theme.id,
 					label,
-					path: theme.path,
-					uiTheme: theme.uiTheme as ThemeTypeSelector,
-					_watch: false,
-				},
-				colorThemeLocation,
-				extensionData,
-			);
-			entries.push(
-				Object.freeze({
-					id: data.id,
-					label: data.label,
-					settingsId: data.settingsId,
 					uiTheme: theme.uiTheme,
-					data,
+					path: theme.path,
 				}),
 			);
 		}

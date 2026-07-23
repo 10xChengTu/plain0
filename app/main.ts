@@ -30,6 +30,11 @@ import {
 	registerPlainThemePicker,
 } from "./features/themes/plain-theme-picker";
 import { createPlainThemeRegistry } from "./features/themes/plain-theme-registry";
+import { registerPlainThemeCommands } from "./features/themes/plain-theme-commands";
+import {
+	consumeImportedThemePackages,
+	PlainThemeRegistryStore,
+} from "./features/themes/plain-theme-import-coordinator";
 import { configureMonacoEnvironment } from "./monaco-environment";
 import { createBridge, normalizeCommandError } from "./platform/tauri";
 import { configurePlainSearchBridge } from "./features/search/plain-search-service";
@@ -92,12 +97,15 @@ async function bootstrap(): Promise<void> {
 	});
 	let workspaceCommands:
 		ReturnType<typeof registerWorkspaceCommands> | undefined;
+	let themeCommandsRegistration:
+		ReturnType<typeof registerPlainThemeCommands> | undefined;
 	window.addEventListener(
 		"pagehide",
 		() => {
 			void stopListening();
 			workspaceCommands?.dispose();
 			workspaceDeleteCoordinator.dispose();
+			themeCommandsRegistration?.dispose();
 		},
 		{ once: true },
 	);
@@ -144,7 +152,28 @@ async function bootstrap(): Promise<void> {
 		await getService(IWorkbenchThemeService),
 		themeRegistry,
 	);
-	registerPlainThemePicker(themeRegistry);
+	const themeRegistryStore = new PlainThemeRegistryStore(themeRegistry);
+	let themePickerRegistration = registerPlainThemePicker(
+		themeRegistryStore.entries(),
+	);
+	const reRegisterThemePicker = (): void => {
+		themePickerRegistration.dispose();
+		themePickerRegistration = registerPlainThemePicker(
+			themeRegistryStore.entries(),
+		);
+	};
+	// Every previously-imported package (from an earlier session) must
+	// reappear in the picker after a restart — this is `F050` S3's own
+	// consumption scope, distinct from persisting *which* theme was
+	// selected (deferred to S4, see docs/research/2026-07-24-theme-
+	// compatibility.md's decision 3).
+	await consumeImportedThemePackages(bridge, themeRegistryStore);
+	reRegisterThemePicker();
+	themeCommandsRegistration = registerPlainThemeCommands(
+		bridge,
+		themeRegistryStore,
+		reRegisterThemePicker,
+	);
 
 	const surfaceSnapshot = enforceExcludedWorkbenchSurfaces();
 	document.body.dataset.plainSurfaceGuard = EXCLUDED_SURFACE_GUARD_MARKER;

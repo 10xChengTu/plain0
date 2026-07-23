@@ -24,7 +24,34 @@ macro_rules! validate_fixture {
         let (staged, files) = stage_vsix(&root, file).expect("fixture stages cleanly");
         let file_set: BTreeSet<String> = files.into_iter().collect();
         let mut budget = MAX_INCLUDE_CHAIN_FILES;
-        validate_theme_contribution_document(&staged, &file_set, &path($entry), &mut budget)
+        let mut resources = BTreeSet::new();
+        validate_theme_contribution_document(
+            &staged,
+            &file_set,
+            &path($entry),
+            &mut budget,
+            &mut resources,
+        )
+    }};
+}
+
+macro_rules! validate_fixture_with_resources {
+    ($fixture:expr, $entry:expr) => {{
+        let (_library_temp, root) = crate::theme::fixtures::open_temp_dir();
+        let bytes = $fixture.finish();
+        let (_source_temp, file) = vsix_source(&bytes);
+        let (staged, files) = stage_vsix(&root, file).expect("fixture stages cleanly");
+        let file_set: BTreeSet<String> = files.into_iter().collect();
+        let mut budget = MAX_INCLUDE_CHAIN_FILES;
+        let mut resources = BTreeSet::new();
+        let result = validate_theme_contribution_document(
+            &staged,
+            &file_set,
+            &path($entry),
+            &mut budget,
+            &mut resources,
+        );
+        (result, resources)
     }};
 }
 
@@ -242,6 +269,39 @@ fn a_top_level_contribution_path_may_point_directly_at_a_tmtheme_file() {
 }
 
 #[test]
+fn resources_collects_the_top_level_include_chain_and_tokencolors_tmtheme_target() {
+    let mut fixture = PackageFixture::new();
+    fixture.file(
+        "themes/a.json",
+        br#"{ "include": "./b.json", "tokenColors": "./dark.tmTheme" }"#,
+    );
+    fixture.file("themes/b.json", br#"{ "colors": {} }"#);
+    fixture.file("themes/dark.tmTheme", minimal_tmtheme().as_bytes());
+    let (result, resources) = validate_fixture_with_resources!(fixture, "themes/a.json");
+    result.expect("fixture validates");
+    assert_eq!(
+        resources.into_iter().collect::<Vec<_>>(),
+        vec![
+            "themes/a.json".to_owned(),
+            "themes/b.json".to_owned(),
+            "themes/dark.tmTheme".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn resources_records_a_bare_top_level_tmtheme_contribution() {
+    let mut fixture = PackageFixture::new();
+    fixture.file("themes/dark.tmTheme", minimal_tmtheme().as_bytes());
+    let (result, resources) = validate_fixture_with_resources!(fixture, "themes/dark.tmTheme");
+    result.expect("fixture validates");
+    assert_eq!(
+        resources.into_iter().collect::<Vec<_>>(),
+        vec!["themes/dark.tmTheme".to_owned()]
+    );
+}
+
+#[test]
 fn structurally_invalid_tmtheme_content_is_rejected() {
     for garbage in [
         &b"not xml at all"[..],
@@ -271,14 +331,36 @@ fn the_visited_set_resets_per_top_level_entry_so_two_entries_sharing_an_included
     let (staged, files) = stage_vsix(&root, file).expect("fixture stages cleanly");
     let file_set: BTreeSet<String> = files.into_iter().collect();
     let mut budget = MAX_INCLUDE_CHAIN_FILES;
+    let mut resources = BTreeSet::new();
 
-    validate_theme_contribution_document(&staged, &file_set, &path("themes/a.json"), &mut budget)
-        .expect("first entry's chain (including the shared file) validates");
-    validate_theme_contribution_document(&staged, &file_set, &path("themes/b.json"), &mut budget)
-        .expect(
-            "second, unrelated entry including the SAME shared file must not be treated as a \
-             cycle just because the first entry's now-discarded visited set already saw it",
-        );
+    validate_theme_contribution_document(
+        &staged,
+        &file_set,
+        &path("themes/a.json"),
+        &mut budget,
+        &mut resources,
+    )
+    .expect("first entry's chain (including the shared file) validates");
+    validate_theme_contribution_document(
+        &staged,
+        &file_set,
+        &path("themes/b.json"),
+        &mut budget,
+        &mut resources,
+    )
+    .expect(
+        "second, unrelated entry including the SAME shared file must not be treated as a \
+         cycle just because the first entry's now-discarded visited set already saw it",
+    );
+    assert_eq!(
+        resources.into_iter().collect::<Vec<_>>(),
+        vec![
+            "themes/a.json".to_owned(),
+            "themes/b.json".to_owned(),
+            "themes/shared-base.json".to_owned(),
+        ],
+        "the shared file is recorded once even though both entries opened it"
+    );
 }
 
 #[test]
@@ -303,6 +385,7 @@ fn the_file_count_budget_is_shared_across_every_entry_in_one_import() {
     let (staged, files) = stage_vsix(&root, file).expect("fixture stages cleanly");
     let file_set: BTreeSet<String> = files.into_iter().collect();
     let mut budget = MAX_INCLUDE_CHAIN_FILES;
+    let mut resources = BTreeSet::new();
 
     for index in 0..(total - 1) {
         validate_theme_contribution_document(
@@ -310,6 +393,7 @@ fn the_file_count_budget_is_shared_across_every_entry_in_one_import() {
             &file_set,
             &path(&format!("solo_{index}.json")),
             &mut budget,
+            &mut resources,
         )
         .unwrap_or_else(|error| {
             panic!(
@@ -328,6 +412,7 @@ fn the_file_count_budget_is_shared_across_every_entry_in_one_import() {
         &file_set,
         &path(&format!("solo_{}.json", total - 1)),
         &mut budget,
+        &mut resources,
     )
     .expect_err("the 65th distinct file must exceed the shared budget");
     assert_eq!(error.code(), "THEME_INCLUDE_TOO_MANY");

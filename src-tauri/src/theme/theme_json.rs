@@ -31,6 +31,17 @@
 //! collide. The file-count budget is the opposite: it is a single counter
 //! threaded across *every* entry in one package import, because it exists to
 //! bound total parse work for the whole import, not any one chain.
+//!
+//! `F050` S3 addition: every function here also threads a `resources: &mut
+//! BTreeSet<String>` out-parameter, shared (like `budget`) across every
+//! entry in one package import. Every document this module actually opens
+//! and validates — the top-level path, every `include` target, every
+//! `tokenColors` string's `.tmTheme` target — gets its wire path inserted.
+//! `theme::import` folds the final set into the stored record's own
+//! `resources` field: `F050` S3's `theme_read_resource` command whitelists
+//! reads against exactly this set, so it must be the precise closure of
+//! "every file this validation pass judged safe to open", no more and no
+//! less.
 
 use std::collections::{BTreeSet, HashSet};
 use std::io::Read;
@@ -53,20 +64,26 @@ use super::{
 /// shared across every entry in the same package import (see module docs);
 /// callers create ONE `let mut budget = MAX_INCLUDE_CHAIN_FILES;` for the
 /// whole import and pass `&mut budget` to this function once per entry.
+/// `resources` accumulates every document's wire path this call (and any
+/// earlier call for a previous entry) actually opened — see the module doc
+/// comment.
 pub(crate) fn validate_theme_contribution_document(
     staged: &Staging<'_>,
     files: &BTreeSet<String>,
     path: &RelativePath,
     budget: &mut usize,
+    resources: &mut BTreeSet<String>,
 ) -> Result<(), CommandError> {
     if is_tmtheme_path(path.as_wire()) {
         take_budget(budget)?;
+        resources.insert(path.as_wire().to_owned());
         return validate_tmtheme_file(staged, path);
     }
     let mut visited = HashSet::new();
-    validate_json_document(staged, files, path, &mut visited, 1, budget)
+    validate_json_document(staged, files, path, &mut visited, 1, budget, resources)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_json_document(
     staged: &Staging<'_>,
     files: &BTreeSet<String>,
@@ -74,6 +91,7 @@ fn validate_json_document(
     visited: &mut HashSet<RelativePath>,
     depth: usize,
     budget: &mut usize,
+    resources: &mut BTreeSet<String>,
 ) -> Result<(), CommandError> {
     if depth > MAX_INCLUDE_CHAIN_DEPTH {
         return Err(theme_include_too_deep());
@@ -82,6 +100,7 @@ fn validate_json_document(
         return Err(theme_include_cycle());
     }
     take_budget(budget)?;
+    resources.insert(path.as_wire().to_owned());
 
     let text = read_staged_text(staged, path)?;
     let value = parse_json_document(&text)?;
@@ -93,7 +112,7 @@ fn validate_json_document(
         validate_colors_object(colors)?;
     }
     if let Some(token_colors) = object.get("tokenColors") {
-        validate_token_colors(staged, files, path, token_colors, budget)?;
+        validate_token_colors(staged, files, path, token_colors, budget, resources)?;
     }
     if let Some(semantic) = object.get("semanticTokenColors") {
         if !matches!(semantic, JsonValue::Object(_)) {
@@ -110,7 +129,15 @@ fn validate_json_document(
             if !files.contains(include_path.as_wire()) {
                 return Err(theme_include_invalid());
             }
-            validate_json_document(staged, files, &include_path, visited, depth + 1, budget)
+            validate_json_document(
+                staged,
+                files,
+                &include_path,
+                visited,
+                depth + 1,
+                budget,
+                resources,
+            )
         }
         Some(_) => Err(theme_json_invalid()),
     }
@@ -122,6 +149,7 @@ fn validate_token_colors(
     current: &RelativePath,
     value: &JsonValue<'_>,
     budget: &mut usize,
+    resources: &mut BTreeSet<String>,
 ) -> Result<(), CommandError> {
     match value {
         JsonValue::Array(_) => Ok(()),
@@ -133,6 +161,7 @@ fn validate_token_colors(
                 return Err(theme_include_invalid());
             }
             take_budget(budget)?;
+            resources.insert(target.as_wire().to_owned());
             validate_tmtheme_file(staged, &target)
         }
         _ => Err(theme_json_invalid()),
