@@ -3,6 +3,7 @@ import type {
 	ThemeImportResult,
 	ThemeListResult,
 	ThemePackageSummary,
+	ThemeSelectionResult,
 	ThemeUiTheme,
 } from "./contracts";
 
@@ -23,6 +24,9 @@ const MAX_PACKAGE_ID_BYTES = 512;
  * `theme_read_resource` enforces server-side; this is a client-side sanity
  * bound on the decoded frame, never the sole enforcement. */
 const MAX_THEME_RESOURCE_BYTES = 8 * 1_024 * 1_024;
+/** Mirrors `theme::selection::MAX_THEME_SELECTION_ID_BYTES` — the exact cap
+ * `theme_set_selection` enforces server-side. */
+const MAX_THEME_SELECTION_ID_BYTES = 256;
 
 const utf8Encoder = new TextEncoder();
 
@@ -161,6 +165,49 @@ export function frozenThemeRemoveRequest(
 		);
 	}
 	return Object.freeze({ packageId });
+}
+
+/** Cheap client-side approximation of `theme::selection::validate_theme_
+ * selection_id`'s charset/length rules: non-empty, at most
+ * `MAX_THEME_SELECTION_ID_BYTES` UTF-8 bytes, and free of every C0/C1
+ * control character (`char::is_control`'s exact range: `U+0000..=U+001F`
+ * and `U+007F..=U+009F`) — mirrors the Rust check code-point by code-point
+ * rather than UTF-16 code unit by code unit, so a surrogate pair never
+ * misclassifies as a lone control character. Rust re-validates
+ * authoritatively; this only avoids sending an obviously-invalid id. */
+function isWellFormedThemeSelectionId(value: unknown): value is string {
+	if (typeof value !== "string" || value.length === 0) {
+		return false;
+	}
+	if (utf8Encoder.encode(value).byteLength > MAX_THEME_SELECTION_ID_BYTES) {
+		return false;
+	}
+	for (const character of value) {
+		const codePoint = character.codePointAt(0);
+		if (
+			codePoint === undefined ||
+			codePoint <= 0x1f ||
+			(codePoint >= 0x7f && codePoint <= 0x9f)
+		) {
+			return false;
+		}
+	}
+	return true;
+}
+
+export function frozenThemeSetSelectionRequest(
+	themeId: unknown,
+): Readonly<{ themeId: string | null }> {
+	if (themeId === null) {
+		return Object.freeze({ themeId: null });
+	}
+	if (!isWellFormedThemeSelectionId(themeId)) {
+		return requestViolation(
+			"THEME_SELECTION_INVALID",
+			"The theme selection id is empty, too long, or contains a control character.",
+		);
+	}
+	return Object.freeze({ themeId });
 }
 
 function isThemeUiTheme(value: unknown): value is ThemeUiTheme {
@@ -308,6 +355,22 @@ export function decodeThemeListResult(value: unknown): ThemeListResult {
 		);
 		rejectProxyObject(value);
 		return Object.freeze({ packages, skipped: value.skipped });
+	});
+}
+
+export function decodeThemeSelectionResult(
+	value: unknown,
+): ThemeSelectionResult {
+	return sanitizedDecode(() => {
+		if (
+			!isPlainObject(value) ||
+			!hasExactKeys(value, ["themeId"]) ||
+			(value.themeId !== null && typeof value.themeId !== "string")
+		) {
+			return violation();
+		}
+		rejectProxyObject(value);
+		return Object.freeze({ themeId: value.themeId as string | null });
 	});
 }
 

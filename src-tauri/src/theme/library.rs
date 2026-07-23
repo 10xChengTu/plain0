@@ -11,7 +11,7 @@ use crate::path_policy::RelativePath;
 
 use super::record::{list_theme_packages, validate_package_id, ThemeLibraryListing};
 use super::{
-    resource, theme_io_failed, theme_package_too_large, theme_unavailable,
+    resource, selection, theme_io_failed, theme_package_too_large, theme_unavailable,
     MAX_THEME_PACKAGE_ENTRIES,
 };
 
@@ -116,6 +116,26 @@ impl ThemeLibrary {
         let mut entries_seen = 0_usize;
         remove_directory_contents(&root, &name, &mut entries_seen, 0)?;
         root.remove_dir(&name).map_err(|_| theme_io_failed())
+    }
+
+    /// `F050` S4's persisted-selection read — see [`selection::read_selection`]
+    /// for the full contract. Shares this library's single gate with every
+    /// other operation, so a concurrent import/remove can never observe a
+    /// half-written selection file (not that a rename-based publish could
+    /// produce one anyway — the gate is defense in depth here, not the sole
+    /// safeguard).
+    pub(crate) fn get_selection(&self) -> Result<Option<String>, CommandError> {
+        let _guard = self.lock()?;
+        let root = self.ensure_root()?;
+        Ok(selection::read_selection(&root))
+    }
+
+    /// `F050` S4's persisted-selection write/clear — see
+    /// [`selection::write_selection`] for the full contract.
+    pub(crate) fn set_selection(&self, theme_id: Option<&str>) -> Result<(), CommandError> {
+        let _guard = self.lock()?;
+        let root = self.ensure_root()?;
+        selection::write_selection(&root, theme_id)
     }
 }
 

@@ -4,7 +4,7 @@ use crate::error::CommandError;
 
 use super::dto::{
     ThemeEmptyRequest, ThemeImportResult, ThemeListResult, ThemeReadResourceRequest,
-    ThemeRemoveRequest,
+    ThemeRemoveRequest, ThemeSelectionResult, ThemeSetSelectionRequest,
 };
 use super::picker::{TauriThemeDirectoryPicker, TauriThemeVsixPicker};
 use super::service::ThemeService;
@@ -62,6 +62,31 @@ pub(crate) async fn theme_remove(
     request: ThemeRemoveRequest,
 ) -> Result<(), CommandError> {
     service.remove(request.into_package_id()).await
+}
+
+/// Reads the persisted color theme selection (`{ themeId: null }` if none is
+/// stored). The frontend, not this domain, resolves `themeId` back against
+/// its own theme registry — see `theme::selection`'s module doc comment.
+#[tauri::command]
+pub(crate) async fn theme_get_selection(
+    service: State<'_, ThemeService>,
+    request: ThemeEmptyRequest,
+) -> Result<ThemeSelectionResult, CommandError> {
+    request.validate();
+    service.get_selection().await
+}
+
+/// Persists (`themeId` a non-null string) or clears (`themeId: null`) the
+/// color theme selection. A non-null `themeId` failing `theme::selection::
+/// validate_theme_selection_id`'s charset/length check rejects with
+/// `THEME_SELECTION_INVALID` and leaves whatever was previously persisted
+/// untouched.
+#[tauri::command]
+pub(crate) async fn theme_set_selection(
+    service: State<'_, ThemeService>,
+    request: ThemeSetSelectionRequest,
+) -> Result<(), CommandError> {
+    service.set_selection(request.into_theme_id()).await
 }
 
 #[cfg(test)]

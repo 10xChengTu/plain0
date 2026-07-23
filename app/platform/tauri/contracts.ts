@@ -354,6 +354,14 @@ export interface ThemeListResult {
 	readonly skipped: number;
 }
 
+/** `theme_get_selection`'s result: the persisted `ColorThemeData#settingsId`,
+ * or `null` if none is stored (never set, explicitly cleared, or the stored
+ * file was corrupt/invalid — Rust collapses all three to `null` rather than
+ * distinguishing them, see `src-tauri/src/theme/selection.rs`). */
+export interface ThemeSelectionResult {
+	readonly themeId: string | null;
+}
+
 export type Unlisten = () => void | Promise<void>;
 
 export interface PlainBridge {
@@ -487,4 +495,13 @@ export interface PlainBridge {
 	/** Removes an imported package by id. Idempotent — removing an unknown
 	 * or already-removed id succeeds without error. */
 	themeRemove(packageId: string): Promise<void>;
+	/** Reads the persisted color theme selection (`{ themeId: null }` if none
+	 * is stored). Never throws for "nothing is stored" — that is exactly
+	 * `themeId: null`, not a rejection. */
+	themeGetSelection(): Promise<ThemeSelectionResult>;
+	/** Persists (a non-null `themeId`) or clears (`null`) the color theme
+	 * selection. A non-null id that fails Rust's charset/length check
+	 * rejects with `THEME_SELECTION_INVALID` and leaves whatever was
+	 * previously persisted untouched. */
+	themeSetSelection(themeId: string | null): Promise<void>;
 }

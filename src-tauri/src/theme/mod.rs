@@ -24,8 +24,18 @@
 //! library → bounded removal); `dto` is the camelCase wire contract; and
 //! `commands` registers the five `theme_*` Tauri commands `lib.rs` exposes.
 //!
-//! Nothing in this domain was reachable from a Tauri command before this
-//! slice — that was S1/S2's deliberate scope boundary. It is now, so the
+//! `F050` S4 scope (this slice): cross-session persistence of *which* theme
+//! is selected. `selection` stores an opaque `settingsId` string (or its
+//! absence) at `<library root>/selection.plain.json`, behind the same
+//! `ThemeLibrary` gate every other mutation already uses; `theme_get_
+//! selection`/`theme_set_selection` are the two new `theme_*` commands this
+//! adds. The frontend owns matching a stored id back against its own theme
+//! registry — this domain never resolves, imports, or validates a
+//! `settingsId` against any actual theme document, it only stores and
+//! returns the opaque string.
+//!
+//! Nothing in this domain was reachable from a Tauri command before S3 —
+//! that was S1/S2's deliberate scope boundary. It is now, so the
 //! whole-module `dead_code` allowance those slices needed is gone.
 
 pub(crate) mod commands;
@@ -39,6 +49,7 @@ pub(crate) mod picker;
 pub(crate) mod record;
 pub(crate) mod relative_path;
 pub(crate) mod resource;
+pub(crate) mod selection;
 pub(crate) mod service;
 pub(crate) mod theme_json;
 pub(crate) mod unpack;
@@ -293,6 +304,18 @@ pub(crate) fn theme_resource_not_found() -> CommandError {
     )
 }
 
+/// A `theme_set_selection` request's non-null `themeId` failed
+/// [`selection::validate_theme_selection_id`]'s charset/length check — empty,
+/// over [`selection::MAX_THEME_SELECTION_ID_BYTES`], or containing a control
+/// character.
+pub(crate) fn theme_selection_invalid() -> CommandError {
+    CommandError::new(
+        "THEME_SELECTION_INVALID",
+        "The theme selection id is empty, too long, or contains a control \
+         character.",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,6 +350,7 @@ mod tests {
             theme_pick_path_unavailable().code(),
             theme_package_not_found().code(),
             theme_resource_not_found().code(),
+            theme_selection_invalid().code(),
         ];
         codes.sort_unstable();
         codes.dedup();
@@ -353,12 +377,13 @@ mod tests {
                 "THEME_PICK_FAILED",
                 "THEME_PICK_PATH_UNAVAILABLE",
                 "THEME_RESOURCE_NOT_FOUND",
+                "THEME_SELECTION_INVALID",
                 "THEME_STAGE_CLEANUP_FAILED",
                 "THEME_TMTHEME_INVALID",
                 "THEME_UNAVAILABLE",
             ],
             "every theme error code must be declared exactly once in this closed set \
-             (23 codes: 6 from S1 + 13 from S2 + 4 new in S3)"
+             (24 codes: 6 from S1 + 13 from S2 + 4 from S3 + 1 new in S4)"
         );
     }
 

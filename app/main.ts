@@ -27,6 +27,7 @@ import {
 import { createWorkspaceTopologyCoordinator } from "./features/workspace/workspace-projection";
 import {
 	applyDefaultColorTheme,
+	applyPersistedThemeSelection,
 	registerPlainThemePicker,
 } from "./features/themes/plain-theme-picker";
 import { createPlainThemeRegistry } from "./features/themes/plain-theme-registry";
@@ -148,27 +149,35 @@ async function bootstrap(): Promise<void> {
 	const themeRegistry = await createPlainThemeRegistry(
 		await getService(IFileService),
 	);
-	await applyDefaultColorTheme(
-		await getService(IWorkbenchThemeService),
-		themeRegistry,
-	);
+	const themeService = await getService(IWorkbenchThemeService);
+	await applyDefaultColorTheme(themeService, themeRegistry);
 	const themeRegistryStore = new PlainThemeRegistryStore(themeRegistry);
 	let themePickerRegistration = registerPlainThemePicker(
+		bridge,
 		themeRegistryStore.entries(),
 	);
 	const reRegisterThemePicker = (): void => {
 		themePickerRegistration.dispose();
 		themePickerRegistration = registerPlainThemePicker(
+			bridge,
 			themeRegistryStore.entries(),
 		);
 	};
 	// Every previously-imported package (from an earlier session) must
 	// reappear in the picker after a restart — this is `F050` S3's own
-	// consumption scope, distinct from persisting *which* theme was
-	// selected (deferred to S4, see docs/research/2026-07-24-theme-
-	// compatibility.md's decision 3).
+	// consumption scope.
 	await consumeImportedThemePackages(bridge, themeRegistryStore);
 	reRegisterThemePicker();
+	// `F050` S4: only once the registry reflects every built-in *and*
+	// already-imported entry can a persisted selection resolve against the
+	// full set it was originally chosen from — see `applyPersistedTheme
+	// Selection`'s own doc comment for why `null`/no-match falls back to the
+	// default `applyDefaultColorTheme` already applied above.
+	await applyPersistedThemeSelection(
+		bridge,
+		themeService,
+		themeRegistryStore.entries(),
+	);
 	themeCommandsRegistration = registerPlainThemeCommands(
 		bridge,
 		themeRegistryStore,

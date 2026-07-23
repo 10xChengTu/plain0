@@ -846,6 +846,12 @@ export interface BrowserMockBridgeOptions {
 	/** Consumed in order by `themeImportVsix`/`themeImportDirectory`; an
 	 * empty queue falls back to `{ status: "cancelled" }`. */
 	readonly themeImportOutcomesForTest?: readonly BrowserMockThemeImportOutcome[];
+	/** Seeds the isolated in-memory theme selection before first use — as if
+	 * `theme_set_selection` had already persisted this value (or `null`/
+	 * omitted for "nothing persisted yet") in a previous session. Consumed by
+	 * `themeGetSelection`; every later `themeSetSelection` call replaces it,
+	 * matching the real Rust store's own overwrite/clear semantics. */
+	readonly themeSelectionForTest?: string | null;
 	/** Browser-mock only bounded tree injected below the first mock root. */
 	readonly directoryCopyFixtureForTest?: BrowserMockDirectoryFixtureForTest;
 	/** May only lower production directory-copy budgets. */
@@ -1972,6 +1978,7 @@ export function createBrowserMockBridge(
 	for (const fixture of options.themeLibraryFixtureForTest ?? []) {
 		seedThemePackage(fixture);
 	}
+	let themeSelection: string | null = options.themeSelectionForTest ?? null;
 	const scriptedThemeImports = [...(options.themeImportOutcomesForTest ?? [])];
 	function themeImportFromScript(): ThemeImportResult {
 		const outcome = scriptedThemeImports.shift();
@@ -5361,6 +5368,12 @@ export function createBrowserMockBridge(
 			// already-removed id is a plain success.
 			themePackages.delete(packageId);
 			themeResourceContents.delete(packageId);
+		},
+		async themeGetSelection() {
+			return Object.freeze({ themeId: themeSelection });
+		},
+		async themeSetSelection(themeId) {
+			themeSelection = themeId;
 		},
 	};
 }

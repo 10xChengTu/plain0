@@ -10,6 +10,7 @@ import {
 } from "@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/theme";
 import { IWorkbenchThemeService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service";
 
+import type { PlainBridge } from "../../platform/tauri";
 import {
 	DARK_MODERN_SETTINGS_ID,
 	type PlainThemeRegistryEntry,
@@ -122,6 +123,89 @@ export async function applyDefaultColorTheme(
 }
 
 /**
+ * `F050` S4: best-effort persistence of the current theme selection.
+ * `themeId` is a `ColorThemeData#settingsId` to persist, or `null` to clear
+ * it back to "nothing stored" (Plain's default applies at the next boot).
+ * Never throws — a failed `theme_set_selection` call is reported to the
+ * console and otherwise swallowed, matching `applyDefaultColorTheme`'s own
+ * "must never fail to boot/operate over a theme-preference hiccup" rule.
+ * Called both by [`runSelectColorThemeQuickPick`]'s own Enter handler below
+ * and by `removeImportedThemePackage` (`./plain-theme-import-coordinator.ts`)
+ * when the removed package owned the currently active theme.
+ */
+export async function persistThemeSelectionBestEffort(
+	bridge: PlainBridge,
+	themeId: string | null,
+): Promise<void> {
+	try {
+		await bridge.themeSetSelection(themeId);
+	} catch (error) {
+		console.warn("Plain: failed to persist the color theme selection", error);
+	}
+}
+
+/**
+ * `F050` S4: resolves and applies whatever theme selection Rust has
+ * persisted from a previous session, once `registry` reflects every
+ * built-in *and* already-imported entry (so a selection pointing at an
+ * imported theme can resolve too — see `app/main.ts`'s bootstrap ordering).
+ *
+ * Three outcomes, matching this slice's own acceptance:
+ * - `themeId` is `null` (nothing was ever persisted, or it was already
+ *   cleared): nothing to do — `applyDefaultColorTheme` already applied
+ *   Plain's default earlier in bootstrap, and that default stands.
+ * - `themeId` matches a `registry` entry's `settingsId`: that theme is
+ *   applied for real (not a preview).
+ * - `themeId` is a non-null string that matches nothing in `registry`
+ *   (stale — its package was removed in a way that did not go through
+ *   `removeImportedThemePackage`'s own clearing path, or was imported in a
+ *   session this one never restored): reported to the console and the
+ *   stale value is cleared via [`persistThemeSelectionBestEffort`], leaving
+ *   the already-applied default in place rather than a broken reference
+ *   that would just repeat this same warning every future boot.
+ *
+ * Reading the persisted selection itself failing (the `theme_get_selection`
+ * call throwing) is treated the same as "nothing was ever persisted": a
+ * console warning, and the already-applied default stands — never a boot
+ * failure.
+ */
+export async function applyPersistedThemeSelection(
+	bridge: PlainBridge,
+	themeService: IWorkbenchThemeService,
+	registry: readonly PlainThemeRegistryEntry[],
+): Promise<void> {
+	let themeId: string | null;
+	try {
+		({ themeId } = await bridge.themeGetSelection());
+	} catch (error) {
+		console.warn(
+			"Plain: failed to read the persisted color theme selection",
+			error,
+		);
+		return;
+	}
+	if (themeId === null) {
+		return;
+	}
+	const entry = registry.find((candidate) => candidate.settingsId === themeId);
+	if (entry === undefined) {
+		console.warn(
+			`Plain: persisted color theme "${themeId}" is no longer available; falling back to the default`,
+		);
+		await persistThemeSelectionBestEffort(bridge, null);
+		return;
+	}
+	try {
+		await themeService.setColorTheme(entry.data, undefined);
+	} catch (error) {
+		console.warn(
+			"Plain: failed to apply the persisted color theme selection",
+			error,
+		);
+	}
+}
+
+/**
  * Plain's own Quick Pick for `workbench.action.selectTheme`, replacing the
  * vendor picker that upstream's `themes.contribution.js` registers (see
  * this module's own doc comment on `SELECT_COLOR_THEME_COMMAND_ID` for why
@@ -132,6 +216,7 @@ export async function applyDefaultColorTheme(
  * which Plain does not have (no `extensions-service-override`, no gallery).
  */
 async function runSelectColorThemeQuickPick(
+	bridge: PlainBridge,
 	quickInputService: IQuickInputService,
 	themeService: IWorkbenchThemeService,
 	registry: readonly PlainThemeRegistryEntry[],
@@ -171,6 +256,15 @@ async function runSelectColorThemeQuickPick(
 		void themeService
 			.setColorTheme(selected?.entry.data ?? originalTheme, undefined)
 			.catch(() => undefined);
+		// `F050` S4: Enter is the one user action that commits a selection —
+		// persist it (best-effort) whether the user actually picked a
+		// different entry or simply re-confirmed the one already active
+		// (`selected` undefined), matching `originalTheme.settingsId` either
+		// way.
+		void persistThemeSelectionBestEffort(
+			bridge,
+			selected?.entry.settingsId ?? originalTheme.settingsId,
+		);
 		quickPick.hide();
 	});
 
@@ -205,12 +299,14 @@ export interface PlainThemePickerRegistration {
  * registration this overrides already exists) — `app/main.ts` guarantees
  * this via import order. */
 export function registerPlainThemePicker(
+	bridge: PlainBridge,
 	registry: readonly PlainThemeRegistryEntry[],
 ): PlainThemePickerRegistration {
 	const registration = CommandsRegistry.registerCommand(
 		SELECT_COLOR_THEME_COMMAND_ID,
 		(accessor) =>
 			runSelectColorThemeQuickPick(
+				bridge,
 				accessor.get(IQuickInputService),
 				accessor.get(IWorkbenchThemeService),
 				registry,

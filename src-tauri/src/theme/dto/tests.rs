@@ -4,7 +4,8 @@ use crate::theme::record::{StoredThemeContribution, StoredThemePackageManifest};
 
 use super::{
     ThemeContributionSummary, ThemeEmptyRequest, ThemeImportResult, ThemeListResult,
-    ThemePackageSummary, ThemeReadResourceRequest, ThemeRemoveRequest,
+    ThemePackageSummary, ThemeReadResourceRequest, ThemeRemoveRequest, ThemeSelectionResult,
+    ThemeSetSelectionRequest,
 };
 
 fn sample_manifest() -> StoredThemePackageManifest {
@@ -143,6 +144,53 @@ fn remove_request_requires_package_id_and_rejects_extras() {
     assert!(
         serde_json::from_value::<ThemeRemoveRequest>(serde_json::json!({
             "packageId": "demo-publisher.demo-theme@1.0.0",
+            "extra": 1,
+        }))
+        .is_err()
+    );
+}
+
+#[test]
+fn selection_result_serializes_a_present_and_an_absent_theme_id() {
+    let present = ThemeSelectionResult::new(Some("Dark Modern".to_owned()));
+    assert_eq!(
+        serde_json::to_value(&present).unwrap()["themeId"],
+        "Dark Modern"
+    );
+
+    let absent = ThemeSelectionResult::new(None);
+    assert_eq!(
+        serde_json::to_value(&absent).unwrap()["themeId"],
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn set_selection_request_accepts_a_string_or_null_theme_id_and_rejects_extras() {
+    let present: ThemeSetSelectionRequest = serde_json::from_value(serde_json::json!({
+        "themeId": "Dark Modern",
+    }))
+    .expect("a string themeId parses");
+    assert_eq!(present.into_theme_id(), Some("Dark Modern".to_owned()));
+
+    let cleared: ThemeSetSelectionRequest = serde_json::from_value(serde_json::json!({
+        "themeId": null,
+    }))
+    .expect("an explicit null themeId parses");
+    assert_eq!(cleared.into_theme_id(), None);
+
+    // `serde`'s derive treats a missing `Option<T>` field the same as an
+    // explicit `null` for it — Plain's own frontend codec
+    // (`frozenThemeSetSelectionRequest`) always sends the key explicitly
+    // either way, but Rust does not additionally reject its absence, since
+    // "clear the selection" is exactly what an absent value would mean too.
+    let omitted: ThemeSetSelectionRequest =
+        serde_json::from_value(serde_json::json!({})).expect("an omitted themeId parses");
+    assert_eq!(omitted.into_theme_id(), None);
+
+    assert!(
+        serde_json::from_value::<ThemeSetSelectionRequest>(serde_json::json!({
+            "themeId": "Dark Modern",
             "extra": 1,
         }))
         .is_err()

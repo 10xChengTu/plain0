@@ -1379,7 +1379,9 @@ export function validateWorkspaceProviderBootstrap(source) {
 				parent.expression.text === "configurePlainWorkingCopyBackupBridge" ||
 				parent.expression.text === "configurePlainSearchBridge" ||
 				parent.expression.text === "consumeImportedThemePackages" ||
-				parent.expression.text === "registerPlainThemeCommands")
+				parent.expression.text === "registerPlainThemeCommands" ||
+				parent.expression.text === "registerPlainThemePicker" ||
+				parent.expression.text === "applyPersistedThemeSelection")
 		);
 	}
 	function isAllowedWorkspaceProviderIdentifier(node) {
@@ -5596,6 +5598,23 @@ function stageCleanupCallsAreExact(relativePath, source) {
 			removeDirectoryCalls.some((call) =>
 				exactMethodCall(source, call, /\broot\s*\.\s*$/, "&name"),
 			)
+		);
+	}
+	if (relativePath === "src-tauri/src/theme/selection.rs") {
+		return (
+			removeFileCalls.length === 2 &&
+			removeFileCalls.some((call) =>
+				exactMethodCall(
+					source,
+					call,
+					/\bself\s*\.\s*dir\s*\.\s*$/,
+					"&self.name",
+				),
+			) &&
+			removeFileCalls.some((call) =>
+				exactMethodCall(source, call, /\broot\s*\.\s*$/, "SELECTION_FILE_NAME"),
+			) &&
+			removeDirectoryCalls.length === 0
 		);
 	}
 	if (relativePath === BACKUP_STORE_PATH) {

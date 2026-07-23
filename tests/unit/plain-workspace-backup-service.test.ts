@@ -89,6 +89,8 @@ function createFakeBridge(overrides: Partial<PlainBridge> = {}): {
 		themeList: notImplemented,
 		themeReadResource: notImplemented,
 		themeRemove: notImplemented,
+		themeGetSelection: notImplemented,
+		themeSetSelection: notImplemented,
 		...overrides,
 	};
 	return { bridge, state };

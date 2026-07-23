@@ -79,6 +79,8 @@ function fakeBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		themeList: notImplemented,
 		themeReadResource: notImplemented,
 		themeRemove: notImplemented,
+		themeGetSelection: notImplemented,
+		themeSetSelection: notImplemented,
 		...overrides,
 	};
 }

@@ -90,6 +90,8 @@ pub fn run() {
             theme::commands::theme_list,
             theme::commands::theme_read_resource,
             theme::commands::theme_remove,
+            theme::commands::theme_get_selection,
+            theme::commands::theme_set_selection,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Plain")

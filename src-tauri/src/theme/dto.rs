@@ -140,5 +140,37 @@ impl ThemeRemoveRequest {
     }
 }
 
+/// `theme_get_selection`'s result: the persisted `settingsId`, or `null` if
+/// none is stored (never imported one, explicitly cleared, or the stored
+/// file was corrupt/invalid — see `theme::selection::read_selection`'s own
+/// doc comment for why all three collapse to the same `null`).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThemeSelectionResult {
+    theme_id: Option<String>,
+}
+
+impl ThemeSelectionResult {
+    pub(crate) fn new(theme_id: Option<String>) -> Self {
+        Self { theme_id }
+    }
+}
+
+/// `theme_set_selection`'s request: `themeId: null` clears the persisted
+/// selection (falling back to Plain's default theme on next boot); a
+/// non-null value replaces whatever was previously persisted, subject to
+/// `theme::selection::validate_theme_selection_id`'s charset/length check.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThemeSetSelectionRequest {
+    theme_id: Option<String>,
+}
+
+impl ThemeSetSelectionRequest {
+    pub(crate) fn into_theme_id(self) -> Option<String> {
+        self.theme_id
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -56,9 +56,11 @@ import {
 	decodeThemeImportResult,
 	decodeThemeListResult,
 	decodeThemeReadResourceBytes,
+	decodeThemeSelectionResult,
 	decodeThemeVoid,
 	frozenThemeReadResourceRequest,
 	frozenThemeRemoveRequest,
+	frozenThemeSetSelectionRequest,
 } from "./theme-codec";
 
 export function createNativeBridge(): PlainBridge {
@@ -349,6 +351,16 @@ export function createNativeBridge(): PlainBridge {
 		themeRemove: async (packageId) => {
 			const request = frozenThemeRemoveRequest(packageId);
 			decodeThemeVoid(await invoke<unknown>("theme_remove", { request }));
+		},
+		themeGetSelection: async () =>
+			decodeThemeSelectionResult(
+				await invoke<unknown>("theme_get_selection", { request: {} }),
+			),
+		themeSetSelection: async (themeId) => {
+			const request = frozenThemeSetSelectionRequest(themeId);
+			decodeThemeVoid(
+				await invoke<unknown>("theme_set_selection", { request }),
+			);
 		},
 	};
 }

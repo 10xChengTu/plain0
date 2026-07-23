@@ -299,6 +299,12 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async themeRemove() {
 			throw new Error("unused");
 		},
+		async themeGetSelection() {
+			throw new Error("unused");
+		},
+		async themeSetSelection() {
+			throw new Error("unused");
+		},
 		...overrides,
 	};
 }

@@ -214,3 +214,39 @@ fn remove_deletes_the_package_and_is_idempotent() {
     block_on(service.remove("never-existed.pkg@1.0.0".to_owned()))
         .expect("removing an unknown id is a no-op success");
 }
+
+#[test]
+fn get_and_set_selection_round_trip_through_the_service() {
+    let library_temp = TempDir::new().expect("library tempdir");
+    let service = ThemeService::new(library_temp.path().to_path_buf());
+
+    let initial = block_on(service.get_selection()).expect("read succeeds");
+    assert_eq!(
+        serde_json::to_value(&initial).unwrap()["themeId"],
+        serde_json::Value::Null
+    );
+
+    block_on(service.set_selection(Some("Dark Modern".to_owned()))).expect("write succeeds");
+    let selected = block_on(service.get_selection()).expect("read succeeds");
+    assert_eq!(
+        serde_json::to_value(&selected).unwrap()["themeId"],
+        "Dark Modern"
+    );
+
+    block_on(service.set_selection(None)).expect("clear succeeds");
+    let cleared = block_on(service.get_selection()).expect("read succeeds");
+    assert_eq!(
+        serde_json::to_value(&cleared).unwrap()["themeId"],
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn set_selection_propagates_an_invalid_id_rejection() {
+    let library_temp = TempDir::new().expect("library tempdir");
+    let service = ThemeService::new(library_temp.path().to_path_buf());
+
+    let error = block_on(service.set_selection(Some(String::new())))
+        .expect_err("an empty id must be rejected");
+    assert_eq!(error.code(), "THEME_SELECTION_INVALID");
+}

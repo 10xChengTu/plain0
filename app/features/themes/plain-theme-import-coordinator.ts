@@ -13,7 +13,10 @@ import type {
 	ThemePackageSummary,
 } from "../../platform/tauri";
 import { normalizeCommandError } from "../../platform/tauri";
-import { applyDefaultColorTheme } from "./plain-theme-picker";
+import {
+	applyDefaultColorTheme,
+	persistThemeSelectionBestEffort,
+} from "./plain-theme-picker";
 import {
 	buildPlainThemeRegistryEntry,
 	type PlainThemeRegistryEntry,
@@ -308,10 +311,14 @@ export function importThemePackageViaDirectory(
  * Removes an imported package: tells Rust to delete it (idempotent — see
  * `ThemeService::remove`'s own contract), tears down its `extension-file:`
  * registration and every blob URL, drops it from `store`, and — only if the
- * currently active color theme came from this exact package — falls back
- * to Dark Modern (Rust's own `remove` never touches theme *selection*, only
- * the library; this frontend-side fallback is this slice's whole
- * responsibility for that case).
+ * currently active color theme came from this exact package — falls back to
+ * Dark Modern and clears the persisted selection (`F050` S4; Rust's own
+ * `remove` never touches theme *selection*, only the library — this
+ * frontend-side fallback plus clear is this case's whole responsibility).
+ * Clearing (rather than leaving the now-dangling id persisted) means a
+ * restart never has to rediscover "this persisted selection is stale" via
+ * `applyPersistedThemeSelection`'s own warn-and-clear path — it is already
+ * gone.
  */
 export async function removeImportedThemePackage(
 	bridge: PlainBridge,
@@ -339,6 +346,7 @@ export async function removeImportedThemePackage(
 
 	if (currentThemeBelongsToRemovedPackage) {
 		await applyDefaultColorTheme(themeService, store.builtin);
+		await persistThemeSelectionBestEffort(bridge, null);
 	}
 }
 

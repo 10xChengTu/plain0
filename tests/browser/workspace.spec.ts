@@ -132,6 +132,11 @@ async function installNativeIpcMock(
 	// empty queue falls back to `{ status: "cancelled" }`. Only F050 S3's own
 	// theme tests pass this.
 	themeImportOutcomesForTest: readonly TestThemeImportOutcome[] = [],
+	// Pre-seeds the persisted color theme selection as if `theme_set_
+	// selection` had already stored this value (or `null`/omitted for
+	// "nothing persisted yet") in a previous session; consumed by
+	// `theme_get_selection`. Only F050 S4's own selection tests pass this.
+	themeSelectionForTest: string | null = null,
 ): Promise<void> {
 	await page.addInitScript(
 		({
@@ -144,6 +149,7 @@ async function installNativeIpcMock(
 			textSearchPollDelayMsForTest,
 			themeLibraryFixtureForTest,
 			themeImportOutcomesForTest,
+			themeSelectionForTest,
 		}) => {
 			const calls: Array<{
 				command: string;
@@ -1093,6 +1099,7 @@ async function installNativeIpcMock(
 			for (const fixture of themeLibraryFixtureForTest) {
 				seedThemePackage(fixture);
 			}
+			let themeSelection: string | null = themeSelectionForTest;
 			const scriptedThemeImports = [...themeImportOutcomesForTest];
 			const themeImportFromScript = (): unknown => {
 				const outcome = scriptedThemeImports.shift();
@@ -1668,6 +1675,14 @@ async function installNativeIpcMock(
 							}
 							return null;
 						}
+						case "theme_get_selection":
+							return { themeId: themeSelection };
+						case "theme_set_selection": {
+							const themeRequest = args.request as
+								{ themeId?: string | null } | undefined;
+							themeSelection = themeRequest?.themeId ?? null;
+							return null;
+						}
 						default:
 							throw new Error(`Unexpected Tauri test command: ${command}`);
 					}
@@ -1684,6 +1699,7 @@ async function installNativeIpcMock(
 			textSearchPollDelayMsForTest,
 			themeLibraryFixtureForTest,
 			themeImportOutcomesForTest,
+			themeSelectionForTest,
 		},
 	);
 }
@@ -7805,6 +7821,11 @@ test("removes an imported theme package via the Command Palette and falls back t
 	const fallbackState = await workbenchThemeState(page);
 	expect(fallbackState.classNames).toContain(DARK_MODERN.className);
 
+	// `F050` S4: the persisted selection must be cleared, not left pointing
+	// at the now-removed package's theme — first the selection from
+	// clicking "My Fancy Dark" above, then the clear on removal fallback.
+	expect(await themeSetSelectionCalls(page)).toEqual(["My Fancy Dark", null]);
+
 	const pickerAfterRemoval = await openColorThemePicker(page);
 	await expect(
 		pickerAfterRemoval
@@ -7879,4 +7900,152 @@ test("shows a desensitized error toast when importing a VSIX fails, without leak
 		"the theme package does not contribute any color themes",
 	);
 	expect(consoleErrors[0]).not.toContain("THEME_PACKAGE_NO_THEMES");
+});
+
+// `F050` S4: cross-session persistence of the selected color theme.
+async function themeSetSelectionCalls(
+	page: Page,
+): Promise<readonly (string | null)[]> {
+	return page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+		};
+		return testWindow.__PLAIN_TEST_TAURI_CALLS__
+			.filter(({ command }) => command === "theme_set_selection")
+			.map(
+				({ args }) =>
+					(args.request as { themeId?: string | null } | undefined)?.themeId ??
+					null,
+			);
+	});
+}
+
+test("boots directly on a theme whose id was already persisted from a previous session", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		"Light+",
+	);
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	const lightPlus = builtInTheme("Light+");
+	const state = await workbenchThemeState(page);
+	expect(state.classNames).toContain(lightPlus.className);
+	expect(state.classNames).not.toContain(DARK_MODERN.className);
+	expect(state.editorBackground).toBe("#ffffff");
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("persists the accepted theme's settingsId via theme_set_selection", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await installNativeIpcMock(page, "arrayBuffer");
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	expect(await themeSetSelectionCalls(page)).toEqual([]);
+
+	const picker = await openColorThemePicker(page);
+	const focusedRow = picker.locator(
+		".quick-input-list .monaco-list-row.focused",
+	);
+	const darkModernIndex = BUILT_IN_THEMES.findIndex(
+		({ label }) => label === "Dark Modern",
+	);
+	const lightPlusIndex = BUILT_IN_THEMES.findIndex(
+		({ label }) => label === "Light+",
+	);
+	for (let step = 0; step < lightPlusIndex - darkModernIndex; step += 1) {
+		await page.keyboard.press("ArrowDown");
+	}
+	await expect(focusedRow).toContainText("Light+");
+	await page.keyboard.press("Enter");
+	await expect(picker).toBeHidden();
+
+	// `Light+`'s manifest `id` and its resolved display label are the exact
+	// same string (see this file's own `BUILT_IN_THEMES`/upstream package.json
+	// cross-reference), so this is unambiguously the persisted `settingsId`.
+	expect(await themeSetSelectionCalls(page)).toEqual(["Light+"]);
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("falls back to Dark Modern with zero crash when the persisted selection id matches no known theme", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		"a-stale-theme-id-from-a-removed-package",
+	);
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	const state = await workbenchThemeState(page);
+	expect(state.classNames).toContain(DARK_MODERN.className);
+	expect(state.editorBackground).toBe("#1f1f1f");
+
+	// The stale id must be cleared (not left to keep triggering this same
+	// fallback on every future boot).
+	expect(await themeSetSelectionCalls(page)).toEqual([null]);
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
 });

@@ -17,7 +17,7 @@ use cap_std::fs::File;
 use crate::error::CommandError;
 use crate::path_policy::RelativePath;
 
-use super::dto::{ThemeImportResult, ThemeListResult, ThemePackageSummary};
+use super::dto::{ThemeImportResult, ThemeListResult, ThemePackageSummary, ThemeSelectionResult};
 use super::import;
 use super::library::ThemeLibrary;
 use super::picker::{
@@ -122,6 +122,25 @@ impl ThemeService {
     pub(crate) async fn remove(&self, package_id: String) -> Result<(), CommandError> {
         let library = Arc::clone(&self.library);
         tauri::async_runtime::spawn_blocking(move || library.remove_package(&package_id))
+            .await
+            .map_err(|_| theme_io_failed())?
+    }
+
+    /// `F050` S4's persisted-selection read — see
+    /// `ThemeLibrary::get_selection`'s own contract.
+    pub(crate) async fn get_selection(&self) -> Result<ThemeSelectionResult, CommandError> {
+        let library = Arc::clone(&self.library);
+        let theme_id = tauri::async_runtime::spawn_blocking(move || library.get_selection())
+            .await
+            .map_err(|_| theme_io_failed())??;
+        Ok(ThemeSelectionResult::new(theme_id))
+    }
+
+    /// `F050` S4's persisted-selection write/clear — see
+    /// `ThemeLibrary::set_selection`'s own contract.
+    pub(crate) async fn set_selection(&self, theme_id: Option<String>) -> Result<(), CommandError> {
+        let library = Arc::clone(&self.library);
+        tauri::async_runtime::spawn_blocking(move || library.set_selection(theme_id.as_deref()))
             .await
             .map_err(|_| theme_io_failed())?
     }

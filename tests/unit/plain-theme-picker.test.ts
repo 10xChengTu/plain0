@@ -22,9 +22,24 @@ import { ColorScheme } from "@codingame/monaco-vscode-api/vscode/vs/platform/the
 import type { PlainThemeRegistryEntry } from "../../app/features/themes/plain-theme-registry";
 import {
 	applyDefaultColorTheme,
+	applyPersistedThemeSelection,
+	persistThemeSelectionBestEffort,
 	registerPlainThemePicker,
 	SELECT_COLOR_THEME_COMMAND_ID,
 } from "../../app/features/themes/plain-theme-picker";
+import type { PlainBridge } from "../../app/platform/tauri";
+
+function notImplemented(): never {
+	throw new Error("not implemented in fake bridge for this test");
+}
+
+function fakeBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
+	return {
+		themeGetSelection: notImplemented,
+		themeSetSelection: notImplemented,
+		...overrides,
+	} as unknown as PlainBridge;
+}
 
 interface FakeColorThemeData {
 	readonly id: string;
@@ -46,9 +61,15 @@ function fakeEntry(
 	};
 }
 
-function fakeThemeService(currentThemeId: string) {
+function fakeThemeService(
+	currentThemeId: string,
+	currentSettingsId: string = currentThemeId,
+) {
 	return {
-		getColorTheme: vi.fn(() => ({ id: currentThemeId })),
+		getColorTheme: vi.fn(() => ({
+			id: currentThemeId,
+			settingsId: currentSettingsId,
+		})),
 		setColorTheme: vi.fn(async () => null),
 	};
 }
@@ -200,6 +221,146 @@ describe("applyDefaultColorTheme", () => {
 	});
 });
 
+describe("persistThemeSelectionBestEffort", () => {
+	it("calls theme_set_selection with the given id", async () => {
+		const themeSetSelection = vi.fn(async () => undefined);
+		await persistThemeSelectionBestEffort(
+			fakeBridge({ themeSetSelection }),
+			"Dark Modern",
+		);
+		expect(themeSetSelection).toHaveBeenCalledWith("Dark Modern");
+	});
+
+	it("calls theme_set_selection with null to clear", async () => {
+		const themeSetSelection = vi.fn(async () => undefined);
+		await persistThemeSelectionBestEffort(
+			fakeBridge({ themeSetSelection }),
+			null,
+		);
+		expect(themeSetSelection).toHaveBeenCalledWith(null);
+	});
+
+	it("warns and does not throw when the bridge call fails", async () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		const bridge = fakeBridge({
+			themeSetSelection: async () => {
+				throw new Error("boom");
+			},
+		});
+		await expect(
+			persistThemeSelectionBestEffort(bridge, "Dark Modern"),
+		).resolves.toBeUndefined();
+		expect(warn).toHaveBeenCalledTimes(1);
+		warn.mockRestore();
+	});
+});
+
+describe("applyPersistedThemeSelection", () => {
+	it("applies the registry entry matching the persisted settingsId", async () => {
+		const dark = fakeEntry("Dark Modern", ColorScheme.DARK);
+		const light = fakeEntry("Light+", ColorScheme.LIGHT);
+		const themeService = fakeThemeService(dark.data.id);
+		const bridge = fakeBridge({
+			themeGetSelection: async () => ({ themeId: "Light+" }),
+		});
+
+		await applyPersistedThemeSelection(
+			bridge,
+			themeService as never,
+			Object.freeze([dark, light]),
+		);
+
+		expect(themeService.setColorTheme).toHaveBeenCalledWith(
+			light.data,
+			undefined,
+		);
+	});
+
+	it("does nothing when nothing is persisted", async () => {
+		const dark = fakeEntry("Dark Modern", ColorScheme.DARK);
+		const themeService = fakeThemeService(dark.data.id);
+		const bridge = fakeBridge({
+			themeGetSelection: async () => ({ themeId: null }),
+		});
+
+		await applyPersistedThemeSelection(
+			bridge,
+			themeService as never,
+			Object.freeze([dark]),
+		);
+
+		expect(themeService.setColorTheme).not.toHaveBeenCalled();
+	});
+
+	it("warns, clears the stale selection, and leaves the default applied when the id matches nothing", async () => {
+		const dark = fakeEntry("Dark Modern", ColorScheme.DARK);
+		const themeService = fakeThemeService(dark.data.id);
+		const themeSetSelection = vi.fn(async () => undefined);
+		const bridge = fakeBridge({
+			themeGetSelection: async () => ({ themeId: "Ghost Theme" }),
+			themeSetSelection,
+		});
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+		await applyPersistedThemeSelection(
+			bridge,
+			themeService as never,
+			Object.freeze([dark]),
+		);
+
+		expect(themeService.setColorTheme).not.toHaveBeenCalled();
+		expect(themeSetSelection).toHaveBeenCalledWith(null);
+		expect(warn).toHaveBeenCalledTimes(1);
+		warn.mockRestore();
+	});
+
+	it("warns and does not throw when reading the persisted selection fails", async () => {
+		const dark = fakeEntry("Dark Modern", ColorScheme.DARK);
+		const themeService = fakeThemeService(dark.data.id);
+		const bridge = fakeBridge({
+			themeGetSelection: async () => {
+				throw new Error("boom");
+			},
+		});
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+		await expect(
+			applyPersistedThemeSelection(
+				bridge,
+				themeService as never,
+				Object.freeze([dark]),
+			),
+		).resolves.toBeUndefined();
+		expect(themeService.setColorTheme).not.toHaveBeenCalled();
+		expect(warn).toHaveBeenCalledTimes(1);
+		warn.mockRestore();
+	});
+
+	it("warns and does not throw when applying the matched theme fails", async () => {
+		const dark = fakeEntry("Dark Modern", ColorScheme.DARK);
+		const themeService = {
+			getColorTheme: vi.fn(),
+			setColorTheme: vi.fn(async () => {
+				throw new Error("boom");
+			}),
+		};
+		const bridge = fakeBridge({
+			themeGetSelection: async () => ({ themeId: "Dark Modern" }),
+		});
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+		await expect(
+			applyPersistedThemeSelection(
+				bridge,
+				themeService as never,
+				Object.freeze([dark]),
+			),
+		).resolves.toBeUndefined();
+		expect(warn).toHaveBeenCalledTimes(1);
+		warn.mockRestore();
+	});
+});
+
 describe("registerPlainThemePicker", () => {
 	let disposeRegistration: (() => void) | undefined;
 
@@ -208,8 +369,13 @@ describe("registerPlainThemePicker", () => {
 		disposeRegistration = undefined;
 	});
 
-	function register(registry: readonly PlainThemeRegistryEntry[]) {
-		const registration = registerPlainThemePicker(registry);
+	function register(
+		registry: readonly PlainThemeRegistryEntry[],
+		bridge: PlainBridge = fakeBridge({
+			themeSetSelection: async () => undefined,
+		}),
+	) {
+		const registration = registerPlainThemePicker(bridge, registry);
 		disposeRegistration = () => registration.dispose();
 		return registration;
 	}
@@ -218,8 +384,9 @@ describe("registerPlainThemePicker", () => {
 		registry: readonly PlainThemeRegistryEntry[],
 		quickPick: FakeQuickPick,
 		themeService: ReturnType<typeof fakeThemeService>,
+		bridge?: PlainBridge,
 	) {
-		register(registry);
+		register(registry, bridge);
 		const command = CommandsRegistry.getCommand(SELECT_COLOR_THEME_COMMAND_ID);
 		if (command === undefined) {
 			throw new Error("command was not registered");
@@ -295,13 +462,15 @@ describe("registerPlainThemePicker", () => {
 		await pending;
 	});
 
-	it("applies the selected theme and hides on accept, without restoring the original", async () => {
+	it("applies the selected theme, persists its settingsId, and hides on accept, without restoring the original", async () => {
 		const dark = fakeEntry("Dark Modern", ColorScheme.DARK);
 		const light = fakeEntry("Light+", ColorScheme.LIGHT);
 		const themeService = fakeThemeService(dark.data.id);
 		const quickPick = new FakeQuickPick();
+		const themeSetSelection = vi.fn(async () => undefined);
+		const bridge = fakeBridge({ themeSetSelection });
 
-		const pending = invoke([dark, light], quickPick, themeService);
+		const pending = invoke([dark, light], quickPick, themeService, bridge);
 		await Promise.resolve();
 
 		quickPick.selectedItems = [{ entry: light }];
@@ -316,20 +485,42 @@ describe("registerPlainThemePicker", () => {
 			{ id: dark.data.id },
 			undefined,
 		);
+		expect(themeSetSelection).toHaveBeenCalledWith("Light+");
 		expect(quickPick.disposed).toBe(true);
 	});
 
-	it("restores the original theme when dismissed without accepting", async () => {
+	it("persists the original theme's settingsId when Enter re-confirms without navigating", async () => {
 		const dark = fakeEntry("Dark Modern", ColorScheme.DARK);
 		const light = fakeEntry("Light+", ColorScheme.LIGHT);
-		const originalTheme = { id: dark.data.id };
+		const themeService = fakeThemeService(dark.data.id, dark.settingsId);
+		const quickPick = new FakeQuickPick();
+		const themeSetSelection = vi.fn(async () => undefined);
+		const bridge = fakeBridge({ themeSetSelection });
+
+		const pending = invoke([dark, light], quickPick, themeService, bridge);
+		await Promise.resolve();
+
+		// No `selectedItems` set — accepting without navigating away from the
+		// pre-selected active item.
+		quickPick.fireAccept();
+		await pending;
+
+		expect(themeSetSelection).toHaveBeenCalledWith("Dark Modern");
+	});
+
+	it("restores the original theme when dismissed without accepting, and never persists a selection", async () => {
+		const dark = fakeEntry("Dark Modern", ColorScheme.DARK);
+		const light = fakeEntry("Light+", ColorScheme.LIGHT);
+		const originalTheme = { id: dark.data.id, settingsId: dark.settingsId };
 		const themeService = {
 			getColorTheme: vi.fn(() => originalTheme),
 			setColorTheme: vi.fn(async () => null),
 		};
 		const quickPick = new FakeQuickPick();
+		const themeSetSelection = vi.fn(async () => undefined);
+		const bridge = fakeBridge({ themeSetSelection });
 
-		const pending = invoke([dark, light], quickPick, themeService);
+		const pending = invoke([dark, light], quickPick, themeService, bridge);
 		await Promise.resolve();
 
 		quickPick.fireActiveChange([{ entry: light }]);
@@ -347,5 +538,6 @@ describe("registerPlainThemePicker", () => {
 			undefined,
 		);
 		expect(quickPick.disposed).toBe(true);
+		expect(themeSetSelection).not.toHaveBeenCalled();
 	});
 });

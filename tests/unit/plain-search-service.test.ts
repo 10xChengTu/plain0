@@ -83,6 +83,8 @@ function fakeBridge(
 		themeList: notImplemented,
 		themeReadResource: notImplemented,
 		themeRemove: notImplemented,
+		themeGetSelection: notImplemented,
+		themeSetSelection: notImplemented,
 	};
 }
 
@@ -181,6 +183,8 @@ function fakeTextSearchBridge(
 		themeList: notImplemented,
 		themeReadResource: notImplemented,
 		themeRemove: notImplemented,
+		themeGetSelection: notImplemented,
+		themeSetSelection: notImplemented,
 	};
 
 	return {

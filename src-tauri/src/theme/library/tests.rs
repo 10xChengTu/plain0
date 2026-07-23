@@ -134,6 +134,64 @@ fn remove_package_refuses_to_touch_a_symlink_masquerading_as_a_package() {
 }
 
 #[test]
+fn get_and_set_selection_round_trip_through_the_public_api() {
+    let temp = TempDir::new().expect("tempdir");
+    let library = ThemeLibrary::new(temp.path().to_path_buf());
+
+    assert_eq!(library.get_selection().expect("read succeeds"), None);
+
+    library
+        .set_selection(Some("Dark Modern"))
+        .expect("write succeeds");
+    assert_eq!(
+        library.get_selection().expect("read succeeds"),
+        Some("Dark Modern".to_owned())
+    );
+
+    library.set_selection(None).expect("clear succeeds");
+    assert_eq!(library.get_selection().expect("read succeeds"), None);
+}
+
+#[test]
+fn set_selection_rejects_an_invalid_id_without_touching_the_library() {
+    let temp = TempDir::new().expect("tempdir");
+    let library = ThemeLibrary::new(temp.path().to_path_buf());
+    library
+        .set_selection(Some("Dark Modern"))
+        .expect("initial write succeeds");
+
+    let error = library
+        .set_selection(Some(""))
+        .expect_err("an empty id must be rejected");
+    assert_eq!(error.code(), "THEME_SELECTION_INVALID");
+    assert_eq!(
+        library.get_selection().expect("read succeeds"),
+        Some("Dark Modern".to_owned()),
+        "a rejected write must leave the previously persisted selection untouched"
+    );
+}
+
+#[test]
+fn a_persisted_selection_file_does_not_break_package_listing() {
+    let temp = TempDir::new().expect("tempdir");
+    let library = ThemeLibrary::new(temp.path().to_path_buf());
+    let id = import_demo_package(&library);
+    library
+        .set_selection(Some("Dark Modern"))
+        .expect("write succeeds");
+
+    // The selection file is a plain, non-directory sibling of every package
+    // directory directly under the library root — the exact shape
+    // `record::list_theme_packages` already tolerates (and counts toward
+    // `skipped`) for any stray non-package entry, so it neither hides nor
+    // corrupts the real package's own listing.
+    let listing = library.list_packages().expect("listing still succeeds");
+    assert_eq!(listing.packages.len(), 1);
+    assert_eq!(listing.packages[0].id, id);
+    assert_eq!(listing.skipped, 1);
+}
+
+#[test]
 fn remove_and_import_serialize_through_the_same_gate() {
     let temp = TempDir::new().expect("tempdir");
     let library = Arc::new(ThemeLibrary::new(temp.path().to_path_buf()));
