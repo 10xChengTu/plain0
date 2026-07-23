@@ -1803,6 +1803,7 @@ notify = "=8.2.0"
 rustix = { version = "=1.1.4", features = ["fs"] }
 sha2 = { version = "=0.10.9", default-features = false, features = [] }
 uuid = { version = "1.24.0", features = ["v4"] }
+zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 `;
 
 const exactRustixDependency = Object.freeze({
@@ -1880,6 +1881,17 @@ const exactGrepSearcherDependency = Object.freeze({
 	optional: false,
 });
 
+const exactZipDependency = Object.freeze({
+	name: "zip",
+	req: "=8.6.0",
+	kind: null,
+	rename: null,
+	target: null,
+	optional: false,
+	uses_default_features: false,
+	features: ["deflate-flate2-zlib-rs"],
+});
+
 function validateWorkspaceRustBoundary(
 	cargoSource,
 	rustSources,
@@ -1898,6 +1910,7 @@ function validateWorkspaceRustBoundary(
 			exactGrepMatcherDependency,
 			exactGrepRegexDependency,
 			exactGrepSearcherDependency,
+			exactZipDependency,
 			...cargoDependencies,
 		],
 		resolvedSha2Features,
@@ -2928,6 +2941,7 @@ fn copy_directory_for_test(limits: DirectoryCopyLimits, hooks: &mut Hooks) {
 			exactGrepMatcherDependency,
 			exactGrepRegexDependency,
 			exactGrepSearcherDependency,
+			exactZipDependency,
 		];
 		expect(
 			validateWorkspaceRustBoundaryContract(
@@ -3035,6 +3049,108 @@ fn copy_directory_for_test(limits: DirectoryCopyLimits, hooks: &mut Hooks) {
 			).toContain(
 				"resolved sha2@0.10.9 features must remain exactly default and std",
 			);
+		}
+	});
+
+	it("locks the sole direct zip edge, its minimal feature set and every Cargo metadata field", () => {
+		expect(
+			validateWorkspaceRustBoundary(workspaceCargo, workspaceSources),
+		).toEqual([]);
+
+		const cases = [
+			[
+				[exactRustixDependency],
+				"Cargo metadata must contain exactly one direct zip dependency",
+			],
+			[
+				[exactRustixDependency, exactZipDependency, exactZipDependency],
+				"Cargo metadata must contain exactly one direct zip dependency",
+			],
+			[
+				[exactRustixDependency, { ...exactZipDependency, req: "^8.6.0" }],
+				"the direct zip dependency must require exactly =8.6.0",
+			],
+			[
+				[exactRustixDependency, { ...exactZipDependency, rename: "vsix-zip" }],
+				"the direct zip dependency must remain unrenamed",
+			],
+			[
+				[exactRustixDependency, { ...exactZipDependency, kind: "dev" }],
+				"the direct zip dependency must be a normal runtime edge",
+			],
+			[
+				[exactRustixDependency, { ...exactZipDependency, kind: "build" }],
+				"the direct zip dependency must be a normal runtime edge",
+			],
+			[
+				[exactRustixDependency, { ...exactZipDependency, target: "cfg(unix)" }],
+				"the direct zip dependency must not be target-specific",
+			],
+			[
+				[exactRustixDependency, { ...exactZipDependency, optional: true }],
+				"the direct zip dependency must not be optional",
+			],
+			[
+				[
+					exactRustixDependency,
+					{ ...exactZipDependency, uses_default_features: true },
+				],
+				"the direct zip dependency must disable default features",
+			],
+			[
+				[exactRustixDependency, { ...exactZipDependency, features: [] }],
+				"the direct zip dependency must enable exactly the deflate-flate2-zlib-rs feature",
+			],
+			[
+				[
+					exactRustixDependency,
+					{
+						...exactZipDependency,
+						features: ["deflate-flate2-zlib-rs", "aes-crypto"],
+					},
+				],
+				"the direct zip dependency must enable exactly the deflate-flate2-zlib-rs feature",
+			],
+			[
+				[
+					exactRustixDependency,
+					{ ...exactZipDependency, features: ["deflate"] },
+				],
+				"the direct zip dependency must enable exactly the deflate-flate2-zlib-rs feature",
+			],
+		];
+		for (const [hostileDependencies, failure] of cases) {
+			expect(
+				validateWorkspaceRustBoundaryContract(
+					workspaceCargo,
+					workspaceSources,
+					hostileDependencies,
+				),
+			).toContain(failure);
+		}
+	});
+
+	it("locks the exact zip manifest declaration to the minimal deflate-only feature set", () => {
+		const declarationFailure =
+			'Cargo.toml must declare exactly one zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] } dependency';
+		for (const hostileDeclaration of [
+			'zip = "8.6.0"',
+			'zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }',
+			'zip = { version = "=8.6.0", default-features = true, features = ["deflate-flate2-zlib-rs"] }',
+			'zip = { version = "=8.6.0", default-features = false }',
+			'zip = { version = "=8.6.0", default-features = false, features = [] }',
+			'zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }',
+			'zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs", "time"] }',
+		]) {
+			expect(
+				validateWorkspaceRustBoundary(
+					workspaceCargo.replace(
+						'zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }',
+						hostileDeclaration,
+					),
+					workspaceSources,
+				),
+			).toContain(declarationFailure);
 		}
 	});
 
@@ -3204,6 +3320,7 @@ fn copy_directory_for_test(limits: DirectoryCopyLimits, hooks: &mut Hooks) {
 						exactGrepMatcherDependency,
 						exactGrepRegexDependency,
 						exactGrepSearcherDependency,
+						exactZipDependency,
 						ignoreDependency,
 					],
 					["default", "std"],

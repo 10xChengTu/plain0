@@ -26,6 +26,7 @@ sha2 = { version = "=0.10.9", default-features = false, features = [] }
 tauri = { version = "=2.11.5", features = [] }
 tauri-plugin-dialog = "2.7.1"
 uuid = { version = "1.24.0", features = ["v4"] }
+zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.186"

@@ -4,6 +4,7 @@ pub mod backup;
 pub mod error;
 pub mod path_policy;
 pub mod search;
+pub mod theme;
 pub mod workspace;
 
 use backup::service::BackupService;

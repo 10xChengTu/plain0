@@ -1885,6 +1885,9 @@ const RUSTIX_TARGET = 'cfg(any(target_os = "linux", target_os = "macos"))';
 const SHA2_VERSION = "0.10.9";
 const SHA2_REQUIREMENT = `=${SHA2_VERSION}`;
 const SHA2_RESOLVED_FEATURES = Object.freeze(["default", "std"]);
+const ZIP_VERSION = "8.6.0";
+const ZIP_REQUIREMENT = `=${ZIP_VERSION}`;
+const ZIP_FEATURES = Object.freeze(["deflate-flate2-zlib-rs"]);
 const FOLLOW_SYMLINKS_YES_PATTERN =
 	/\bFollowSymlinks\s*::\s*(?:Yes\b|\{[^}]*\bYes\b)/;
 const FORBIDDEN_DIRECTORY_DEPENDENCIES = Object.freeze([
@@ -2726,6 +2729,50 @@ export function validateWorkspaceRustBoundary(
 			"resolved sha2@0.10.9 features must remain exactly default and std",
 		);
 	}
+	const zipDeclarations = [
+		...cargoSource.matchAll(
+			/^zip = \{ version = "=8\.6\.0", default-features = false, features = \["deflate-flate2-zlib-rs"\] \}$/gm,
+		),
+	];
+	if (zipDeclarations.length !== 1) {
+		failures.push(
+			'Cargo.toml must declare exactly one zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] } dependency',
+		);
+	}
+	const zipDependencies = cargoDependencies.filter(
+		({ name }) => name === "zip",
+	);
+	if (zipDependencies.length !== 1) {
+		failures.push(
+			"Cargo metadata must contain exactly one direct zip dependency",
+		);
+	} else {
+		const [zipDependency] = zipDependencies;
+		if (zipDependency.req !== ZIP_REQUIREMENT) {
+			failures.push("the direct zip dependency must require exactly =8.6.0");
+		}
+		if (zipDependency.rename !== null) {
+			failures.push("the direct zip dependency must remain unrenamed");
+		}
+		if (zipDependency.kind !== null) {
+			failures.push("the direct zip dependency must be a normal runtime edge");
+		}
+		if (zipDependency.target !== null) {
+			failures.push("the direct zip dependency must not be target-specific");
+		}
+		if (zipDependency.optional !== false) {
+			failures.push("the direct zip dependency must not be optional");
+		}
+		if (zipDependency.uses_default_features !== false) {
+			failures.push("the direct zip dependency must disable default features");
+		}
+		if (!sameArray(zipDependency.features, ZIP_FEATURES)) {
+			failures.push(
+				"the direct zip dependency must enable exactly the deflate-flate2-zlib-rs feature",
+			);
+		}
+	}
+
 	const notifyDeclarations = [...cargoSource.matchAll(/^notify\s*=/gm)];
 	const notifyDependencies = cargoDependencies.filter(
 		({ name }) => name === "notify",
@@ -5451,6 +5498,29 @@ function stageCleanupCallsAreExact(relativePath, source) {
 				"stage",
 			) &&
 			removeDirectoryCalls.length === 0
+		);
+	}
+	if (relativePath === "src-tauri/src/theme/unpack.rs") {
+		return (
+			removeFileCalls.length === 1 &&
+			exactMethodCall(
+				source,
+				removeFileCalls[0],
+				/\bparent\s*\.\s*$/,
+				"&entry.name",
+			) &&
+			removeDirectoryCalls.length === 2 &&
+			removeDirectoryCalls.some((call) =>
+				exactMethodCall(source, call, /\bparent\s*\.\s*$/, "&entry.name"),
+			) &&
+			removeDirectoryCalls.some((call) =>
+				exactMethodCall(
+					source,
+					call,
+					/\bself\s*\.\s*root\s*\.\s*$/,
+					"&self.stage_name",
+				),
+			)
 		);
 	}
 	if (relativePath === BACKUP_STORE_PATH) {
