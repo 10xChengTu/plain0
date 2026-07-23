@@ -69,3 +69,14 @@
 ## 验收
 
 每切片：定向单元/Harness → 聚焦 Browser → 全量 Browser → 完整 `pnpm check`；S2 恶意 fixture 矩阵是 testing.md「VSIX zip-slip、zip bomb 上限、JSONC/include cycle、资源越界」要求的直接落点。桌面证据由 Codex 按交接清单执行。
+
+## 实施偏差记录（S0-S3，S4 收口时补记）
+
+本节从 progress.md 对应切片条目提炼，记录本方案在真实实现中被修正或补强的具体点——研究阶段的调研结论本身没有错，但下列细节是方案冻结时未预判、只有落地时才暴露的事实。
+
+1. **`IExtensionResourceLoaderService` 桩必须自建（S0）**：方案「决策 1」只规划了 `PlainThemeRegistry`/`PlainThemePicker` 两个新文件；实现时发现 `ColorThemeData#ensureLoaded`/`WorkbenchThemeService.setColorTheme` 都直接依赖 `IExtensionResourceLoaderService.readExtensionResource` 读主题 JSON 字节，而两个既有 override 包（`theme-service-override`/`files-service-override`）都未提供真实实现，只剩 `missing-services.js` 的全抛异常桩——不补上这一层，内置主题和后续导入的主题都无法真正加载。新增 `PlainExtensionResourceLoaderService`（唯一新增 `SyncDescriptor`）只包一层已有的 `IFileService`，未引入任何新的文件系统访问面。
+2. **内置主题标签在 `initialize()` 前注册时从未被翻译（S0）**：VS Code 自身的 `ExtensionManifestTranslator` 只在 `servicesInitialized` 之后的 `deltaExtensions` 分支运行；内置 `theme-defaults` 经 `registerExtension` 在 `initialize()` 之前注册，永远不会触发该分支，因此构建期 manifest 的 `label` 字段恒为未翻译的 `%key%` 占位符。方案原文未提及这一点；`createPlainThemeRegistry` 因此新增了逐扩展读取自身 `package.nls.json` 并手工解析 `%key%` 占位符的一步。
+3. **`enclosed_name()` 的 zip-slip 防护弱于研究文档的表述（S1）**：研究文档称 `zip` crate 的 `enclosed_name` 「内建 zip-slip 校验」；实现时发现它只挡「`../` 深度下溢」这一种越界，对纯粹的前导 `/` 绝对路径或 Windows 盘符前缀是「剥前缀当相对路径处理」而非拒绝（上游注释原话：「allows extraction of ZIP files with absolute paths」）。已通过独立的 `RelativePath::parse_wire` 校验层补足这一差距，不依赖该 API 的部分覆盖。
+4. **发布 rename 在「目标已存在」上的错误码有平台/文件系统差异（S2）**：`Staging::publish_as` 把已存在的目标包目录（`publisher.name@version` 语义身份冲突）identically 视为「重复导入」而拒绝，但底层 `rename(2)` 对「目标是已存在的非空目录」这一情形，在不同平台/文件系统上可能报告 `io::ErrorKind::AlreadyExists` 或 `DirectoryNotEmpty` 两种不同 kind（macOS 与多数 Linux 文件系统实测为后者）。两种 kind 均映射为同一个 `THEME_PACKAGE_ALREADY_IMPORTED`，方案原文未预判需要同时匹配两种 kind。
+5. **单一 `themes[].path` 白名单不足以覆盖 include 链与 tmTheme 引用，`resources` 清单随之扩展（S3）**：S2 阶段的 `StoredThemePackageManifest` 只记录每个 `contributes.themes[]` 条目自身的 `path`；实现 S3 的 `theme_read_resource` 白名单读时发现，一个主题文档可能通过 `include` 引用别的 JSON 文件，或通过 `tokenColors` 字符串引用一个 `.tmTheme` 文件，这些文件同样需要被前端 `registerFileUrl`，但当时的记录结构完全没有位置存放它们。为此扩展 `theme_json.rs` 的校验函数新增 `resources: &mut BTreeSet<String>` 出参，`import.rs` 收集后写入 `StoredThemePackageManifest` 新增的 `resources` 字段——这是研究文档「决策 2」命令闭集描述之外、落地时才发现必须扩展的存储结构。
+6. **`registerExtension` 在 `initialize()` 之后调用时 `canAddExtension` 恒短路，且不暴露 `location`（S3）**：研究文档「可用的官方 seam」一节确认了 `registerExtension`/`registerFileUrl` 是公开声明式 API，但未预判其在 Workbench 启动完成之后调用的具体行为——真实源码证实 `NullExtensionService.canAddExtension()` 恒返回 `false`，因此导入的包「加入 `IExtensionService`」这一步恒是无操作，永远不会出现在 `getBuiltinExtensions()` 等任何可枚举面（但完全不影响功能：`registerFileUrl` 走的是独立于该步骤的 `extension-file:` 虚拟树注册，与内置主题构建期产物同一条底层机制）；同时，由于这一步是空操作，`registerExtension` 的返回值不提供任何方式取回其 `location`——`plain-theme-import-coordinator.ts` 因此按内置主题同款公式（`${publisher}.${name}` + 固定 `/extension` 路径）本地重算，而不是读取返回值。

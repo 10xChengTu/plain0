@@ -1,6 +1,6 @@
 {
 	"schemaVersion": 3,
-	"updatedAt": "2026-07-23",
+	"updatedAt": "2026-07-24",
 	"currentPhase": 2,
 	"wipLimit": 1,
 	"features": [
@@ -272,19 +272,60 @@
 			"id": "F050",
 			"name": "VS Code color theme compatibility",
 			"phase": 2,
-			"status": "in_progress",
+			"status": "complete",
 			"acceptance": [
 				"Import local VSIX and unpacked theme directory",
 				"Apply workbench colors and TextMate token colors",
 				"JSONC, include and tmTheme fixtures pass",
 				"Extension code is never executed"
-			]
+			],
+			"evidence": {
+				"commands": ["pnpm check", "pnpm exec playwright test --retries=0"],
+				"results": [
+					"pnpm check passed in full on 2026-07-24: 43 frontend test files, 804 cases, 2305 frontend modules, 2139 bundle sources, 203 recorded migration-debt files (unchanged categories/SHA-256 since S3) and Rust 477/477 (up from 454 at the end of S3; +23 new: theme::selection's own read/write/round-trip/corruption/staging tests, ThemeLibrary::get_selection/set_selection, ThemeService::get_selection/set_selection, the two new dto types, and the one new THEME_SELECTION_INVALID closed-set entry).",
+					"All Browser E2E scenarios passed 42/42 (39 carried over from S0-S3 plus 3 new S4 scenarios: booting directly on a persisted non-default theme, persisting the accepted theme's settingsId via theme_set_selection, and falling back to Dark Modern with zero crash -- plus the persisted-selection-clearing assertion added to the existing S3 removal scenario -- when the stored id matches no known theme). The 3 new S4 scenarios additionally passed a focused repeat (--repeat-each=3, --retries=0, 12/12) before the full-suite run, matching every earlier slice's own acceptance discipline.",
+					"cargo fmt --check and cargo clippy --all-targets -- -D warnings both passed with zero diffs/warnings."
+				],
+				"nativeScenarios": [
+					"F050 introduces no changes to the native workspace file open/read/save IPC surface, so no native-desktop scenario was executed specifically for it -- the Rust theme domain (src-tauri/src/theme/) is entirely new, self-contained surface (VSIX/directory unpack, manifest/theme-document validation, the import/list/read-resource/remove/get-selection/set-selection commands) with no prior native evidence to inherit.",
+					"F050's own desktop matrix -- real system file-picker VSIX import, a real theme package fixture, cross-restart persistence of both the imported package library and the selected theme id, two hostile VSIX fixtures (zip-slip, no theme contributions) rejected with a desensitized toast and zero on-disk half-finished state, and removing the active imported theme falling back and clearing the persisted selection across a real restart -- is registered as E2E-005 in docs/e2e-handover.md and handed over to Codex for native execution; it has not yet been executed."
+				],
+				"platformGaps": [
+					"E2E-005 in docs/e2e-handover.md (real system file-picker VSIX import, cross-restart persistence of the imported library and the selected theme id, hostile VSIX rejection with on-disk verification, and remove-then-restart selection clearing) is handed over to Codex and not yet executed.",
+					"Imported theme packages never carry a contributes.themes[].id (S2's own manifest scope never captures a theme-level id at all): the registry and the persisted selection both use the resolved label (or a path-basename fallback) as the settingsId, matching upstream's own `settingsId = theme.id || label` fallback rule bit-for-bit rather than treating the missing field as a gap.",
+					"Icon themes and product icon themes (contributes.iconThemes/productIconThemes) are parsed and retained verbatim in the stored package record but never validated, resolved, or applied to any UI surface -- deliberately deferred whole to F060, now in_progress.",
+					"Plain does not follow the OS light/dark setting; the active theme only ever changes via explicit user selection (the Color Theme quick pick) or the one-time persisted-selection restore at boot -- a deliberate narrowing stated in the frozen research plan's exclusions, not an oversight.",
+					"There is no Settings UI of any kind; the persisted selection is exclusively read/written through the theme_get_selection/theme_set_selection command pair, never through a workbench.colorTheme configuration key (see docs/research/2026-07-24-theme-compatibility.md's decision 3 for why: the in-memory configuration service would still read a stale workbench.colorTheme value with no writer keeping it in sync, so no such key is ever registered).",
+					"installMultiRootNativeIpcMock (the separate multi-root Browser mock in tests/browser/workspace.spec.ts, independent of the installNativeIpcMock every theme scenario in this feature uses) still has no theme_list/theme_get_selection stubs -- a pre-existing S3 gap this slice did not need to close. Every multi-root scenario now additionally prints one theme_get_selection console.warn alongside S3's own theme_list one during bootstrap (both caught by the coordinator/picker's own best-effort fallback paths and asserted nowhere), rather than the assertions of any of those scenarios changing.",
+					"A persisted selection.plain.json file is a plain, non-package sibling directly under the theme library root, so once a selection has ever been written, Rust's own theme_list enumeration counts it toward its existing skipped tally (the same tolerance record::list_theme_packages already extends to a leftover staging directory) -- a benign accounting fact, covered by a dedicated Rust test, not a functional gap.",
+					"Windows and Linux native packaging remains F120.",
+					"Zeroing the monaco-vscode-api bundle migration debt remains F110."
+				],
+				"acceptanceResults": [
+					{
+						"acceptance": "Import local VSIX and unpacked theme directory",
+						"result": "F050 S1 built a bounded, capability-relative VSIX (zip) unpacker (zip crate, enclosed_name/is_symlink entry checks backstopped by Plain's own RelativePath::parse_wire since enclosed_name only catches `../` depth underflow and not absolute-path/drive-letter prefixes -- see the implementation-deviation record) with entry-count/per-entry/aggregate byte caps enforced against actually-read bytes, proven by 17 Rust tests covering zip-slip, symlink entries, oversized entries, oversized packages, zip bombs, corrupt/empty archives and clean round-trips; directory import (S1) shares the identical staging/limit machinery via an explicit non-recursive stack walk, covered by 4 more Rust tests. S2 layered manifest/theme-document validation on top (JSONC with exactly comments+trailing-commas, contributes.themes[] path/uiTheme validation, include-chain cycle/depth/file-count budgets, .tmTheme structural checks) with 19 further error-code tests. S3 exposed both paths as theme_import_vsix/theme_import_directory Tauri commands behind a real native file/directory picker, consumed end-to-end by the frontend (registerExtension/registerFileUrl against the imported package's own resource whitelist) and proven live by Browser E2E: importing a VSIX via the Command Palette shows a success toast and the new theme appears in the picker; a package already present from a prior session (via theme_list) reappears and applies for real at startup with its own distinctive editor.background. Real system file-picker exercise of both commands is registered as E2E-005, not yet executed."
+					},
+					{
+						"acceptance": "Apply workbench colors and TextMate token colors",
+						"result": "Plain never registers an extension-point handler at all (the upstream one is structurally unreachable under NullExtensionService, the root cause S0's own probe discovered and fixed): PlainThemeRegistry/PlainThemePicker construct ColorThemeData instances directly from each manifest's contributes.themes[] entry (built-in via getBuiltinExtensions(), imported via the S3 coordinator's local registerExtension/registerFileUrl call) and hand them straight to IWorkbenchThemeService.setColorTheme()'s own instanceof ColorThemeData fallback branch -- proven live by the S0 Browser E2E (`.monaco-workbench` carries real vs-dark/theme classes and a real `--vscode-editor-background` CSS variable instead of the previously-undiscovered unthemed placeholder) and by every subsequent slice's own scenarios reusing the identical apply path for imported themes. Applying colors requires a real IExtensionResourceLoaderService, which no existing override package provided (S0's own PlainExtensionResourceLoaderService closes that gap); token colors flow through the same ColorThemeData#ensureLoaded resource read. `.tmTheme` files are only structurally validated (S2), never parsed into token rules by this Rust domain -- token color application through .tmTheme (a tokenColors string reference) is exercised end-to-end by the S3 whitelist/registerFileUrl path but the actual TextMate scope-to-color resolution is entirely upstream Monaco/TextMate machinery this feature does not modify."
+					},
+					{
+						"acceptance": "JSONC, include and tmTheme fixtures pass",
+						"result": "S2's manifest.rs parses package.json and every theme document with jsonc-parser configured for exactly `{allow_comments: true, allow_trailing_commas: true}` and every other option explicitly false (compile-time const-asserted, not just tested) -- deliberately narrower than upstream's looser JSON5-adjacent dialect. include chains are walked with an explicit visited-set (cycle rejection) and a depth cap of 32, plus a whole-package file-count budget of 64 shared across every contributes.themes[] entry's own chain -- both caps independent by design (see the frozen research doc's decision 2). `.tmTheme` files get a structural-only check (`<?xml` header + `<plist` + `<dict` presence) rather than a full plist parse, a deliberate scope line (the bytes are never executed or otherwise consumed by this Rust domain -- the real XML-to-token-rule parsing is Monaco/TextMate's own job downstream of the whitelist read). All of this is proven by 20 Rust theme_json tests plus 19 manifest tests covering the exact error-code closed set (23 codes through S3, 24 after S4's own THEME_SELECTION_INVALID addition) -- zip-slip, symlink entries, oversized/mis-shaped documents, include cycles/depth/file-count overruns, and out-of-manifest path references are all covered by dedicated, independently-constructed fixtures (no binary zip/plist files committed to the repo; every fixture is built in-process)."
+					},
+					{
+						"acceptance": "Extension code is never executed",
+						"result": "The theme domain's manifest parser (manifest.rs) only ever checks whether main/browser/activationEvents are present (recording a single containsCode boolean) and never reads, evaluates, or otherwise consumes their string values; no Extension Host of any kind (local, worker, WASM, remote or sidecar) exists anywhere in Plain, and registerExtension is called with no second argument (the official, purely declarative form) both for the S0 built-in enumeration path and the S3 imported-package path -- confirmed by real-source inspection (not assumption) that its own 'add this extension to IExtensionService' branch is an unconditional no-op under NullExtensionService.canAddExtension(), so an imported manifest never becomes reachable through any extension-point/activation surface even in principle. contributes.iconThemes/productIconThemes are parsed and retained verbatim but never resolved into any UI-consuming code path (F060's own scope). Confirmed by the full acceptance suite's own zero-Extension-Host architecture guard (scripts/plain/check-boundaries.mjs's fixed monaco-vscode-extensions-service-override import ban) staying green across every S0-S4 slice."
+					}
+				]
+			}
 		},
 		{
 			"id": "F060",
 			"name": "VS Code file and product icon themes",
 			"phase": 2,
-			"status": "planned",
+			"status": "in_progress",
 			"acceptance": [
 				"File, folder and expanded icon precedence matches fixtures",
 				"Font and image resources stay inside the imported theme",
