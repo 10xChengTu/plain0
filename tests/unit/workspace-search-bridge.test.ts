@@ -107,7 +107,15 @@ describe("native streaming text search bridge (F040 S3)", () => {
 			batches: [
 				{
 					path: "a.ts",
-					matches: [{ line: 1, column: 1, length: 6, previewText: "needle" }],
+					matches: [
+						{
+							line: 1,
+							column: 1,
+							length: 6,
+							previewText: "needle",
+							absoluteColumn: 1,
+						},
+					],
 				},
 			],
 			nextCursor: 1,

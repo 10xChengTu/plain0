@@ -477,14 +477,21 @@ function ownObjectArraySnapshot<T>(
 function decodeTextSearchMatch(value: unknown): WorkspaceSearchTextMatch {
 	if (
 		!isPlainObject(value) ||
-		!hasExactKeys(value, ["line", "column", "length", "previewText"])
+		!hasExactKeys(value, [
+			"line",
+			"column",
+			"length",
+			"previewText",
+			"absoluteColumn",
+		])
 	) {
 		return violation();
 	}
 	if (
 		!isSafeNonNegativeInteger(value.line) ||
 		!isSafeNonNegativeInteger(value.column) ||
-		!isSafeNonNegativeInteger(value.length)
+		!isSafeNonNegativeInteger(value.length) ||
+		!isSafeNonNegativeInteger(value.absoluteColumn)
 	) {
 		return violation();
 	}
@@ -504,6 +511,7 @@ function decodeTextSearchMatch(value: unknown): WorkspaceSearchTextMatch {
 		column: value.column,
 		length: value.length,
 		previewText: value.previewText,
+		absoluteColumn: value.absoluteColumn,
 	});
 }
 

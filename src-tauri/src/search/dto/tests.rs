@@ -366,6 +366,7 @@ fn text_poll_result_serializes_the_exact_frozen_camel_case_contract() {
             5,
             6,
             "needle here".to_owned(),
+            5,
         )],
     );
     let result = WorkspaceSearchTextPollResult::new(
@@ -395,6 +396,7 @@ fn text_poll_result_serializes_the_exact_frozen_camel_case_contract() {
     assert_eq!(match_value["column"], 5);
     assert_eq!(match_value["length"], 6);
     assert_eq!(match_value["previewText"], "needle here");
+    assert_eq!(match_value["absoluteColumn"], 5);
 
     assert_eq!(result.next_cursor(), 7);
     assert!(!result.done());
@@ -406,6 +408,7 @@ fn text_poll_result_serializes_the_exact_frozen_camel_case_contract() {
         result.batches()[0].matches()[0].preview_text(),
         "needle here"
     );
+    assert_eq!(result.batches()[0].matches()[0].absolute_column(), 5);
 }
 
 #[test]

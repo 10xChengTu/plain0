@@ -627,6 +627,7 @@ async function installNativeIpcMock(
 					column: number;
 					length: number;
 					previewText: string;
+					absoluteColumn: number;
 				}>;
 			}
 			const searchTextMatches = (request: {
@@ -770,6 +771,7 @@ async function installNativeIpcMock(
 									column: column + 1,
 									length: found[0].length,
 									previewText,
+									absoluteColumn: found.index + 1,
 								});
 								remainingBudget -= 1;
 							}
@@ -6801,6 +6803,346 @@ test("shows a truncation banner past the match limit and a message for an invali
 	await searchInput.pressSequentially("(unclosed");
 	await expect(messages).not.toHaveText("", { timeout: 5_000 });
 	await expect(messages).toContainText("regular expression");
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+// --- F040 S4: replace (docs/research/2026-07-23-search-quickopen.md decision 3) ---
+
+/** UTF-8 byte hex of `text`, matching the exact encoding `workspace_write_file`
+ * calls capture their PLW1 frame content as (see `installNativeIpcMock`'s own
+ * `contentHex: hexFromBytes(frame.content)`). */
+function hexOfText(text: string): string {
+	return [...new TextEncoder().encode(text)]
+		.map((byte) => byte.toString(16).padStart(2, "0"))
+		.join("");
+}
+
+async function nativeWriteFileCalls(page: Page): Promise<
+	readonly {
+		readonly request: { readonly relativePath: string };
+		readonly contentHex: string;
+	}[]
+> {
+	return page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+		};
+		return testWindow.__PLAIN_TEST_TAURI_CALLS__
+			.filter(({ command }) => command === "workspace_write_file")
+			.map(({ args }) => args) as unknown as {
+			request: { relativePath: string };
+			contentHex: string;
+		}[];
+	});
+}
+
+test("replaces every match across multiple files (one already open in an editor) and saves through the versioned write chain", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported", {
+		"replace-a.txt": "needle one\nneedle two\n",
+		"replace-b.txt": "needle three\n",
+	});
+	const explorer = await openNativeWorkspaceExplorer(page);
+
+	// One of the two files is already open (and clean) in an editor before the
+	// search+replace even starts — proves the replace path both edits/saves a
+	// resource resolved fresh for the first time (replace-b.txt) *and*
+	// correctly reuses/edits an already-resolved, already-open model
+	// (replace-a.txt), syncing its live editor buffer rather than only the
+	// on-disk bytes.
+	await explorer
+		.getByRole("treeitem", { name: "replace-a.txt", exact: true })
+		.dblclick();
+	await expect(
+		page.getByRole("code").filter({ hasText: "needle one" }),
+	).toBeVisible();
+
+	await page.getByRole("tab", { name: /^Search/ }).click();
+	const searchInput = page.locator(".plain-search-view-input");
+	const replaceInput = page.locator(".plain-search-view-replace-input");
+	const status = page.locator(".plain-search-view-status");
+	const messages = page.locator(".plain-search-view-messages");
+	const fileGroups = page.locator(".plain-search-view-file");
+
+	await searchInput.pressSequentially("needle");
+	await expect(status).toHaveText("3 results in 2 files", { timeout: 5_000 });
+	await expect(fileGroups).toHaveCount(2);
+
+	await replaceInput.fill("cactus");
+	await page.locator(".plain-search-view-replace-all").click();
+
+	await expect(fileGroups).toHaveCount(0, { timeout: 5_000 });
+	await expect(messages).toHaveText("Replaced 3 matches.");
+
+	// The already-open editor's live buffer reflects the replacement and is
+	// clean again (saved, not just edited in memory).
+	await expect(
+		page.getByRole("code").filter({ hasText: "cactus one" }),
+	).toBeVisible();
+	await expect(
+		page.getByRole("code").filter({ hasText: "cactus two" }),
+	).toBeVisible();
+	const activeTab = page.locator(".tabs-container .tab.active");
+	await expect(activeTab).not.toHaveClass(/dirty/);
+
+	const writes = await nativeWriteFileCalls(page);
+	expect(writes).toHaveLength(2);
+	const byPath = new Map(
+		writes.map((write) => [write.request.relativePath, write.contentHex]),
+	);
+	expect(byPath.get("replace-a.txt")).toBe(
+		hexOfText("cactus one\ncactus two\n"),
+	);
+	expect(byPath.get("replace-b.txt")).toBe(hexOfText("cactus three\n"));
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("replaces only the single match a per-match Replace button targets, leaving its sibling match untouched", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported", {
+		"solo.txt": "needle alpha\nneedle beta\n",
+	});
+	await openNativeWorkspaceExplorer(page);
+
+	await page.getByRole("tab", { name: /^Search/ }).click();
+	const searchInput = page.locator(".plain-search-view-input");
+	const replaceInput = page.locator(".plain-search-view-replace-input");
+	const status = page.locator(".plain-search-view-status");
+
+	await searchInput.pressSequentially("needle");
+	await expect(status).toHaveText("2 results in 1 file", { timeout: 5_000 });
+
+	await replaceInput.fill("gamma");
+	const firstRow = page
+		.locator(".plain-search-view-match-row")
+		.filter({ hasText: "needle alpha" });
+	await firstRow.locator(".plain-search-view-replace-match").click();
+
+	await expect(status).toHaveText("1 result in 1 file", { timeout: 5_000 });
+	await expect(firstRow).toHaveCount(0);
+	await expect(
+		page
+			.locator(".plain-search-view-match-row")
+			.filter({ hasText: "needle beta" }),
+	).toHaveCount(1);
+	await expect(page.locator(".plain-search-view-file")).toHaveCount(1);
+
+	const writes = await nativeWriteFileCalls(page);
+	expect(writes).toHaveLength(1);
+	expect(writes[0]!.request.relativePath).toBe("solo.txt");
+	expect(writes[0]!.contentHex).toBe(hexOfText("gamma alpha\nneedle beta\n"));
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("keeps a version-conflicted file's replace visibly failed while a sibling file's replace still succeeds", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported", {
+		"conflict.txt": "needle stays\n",
+		"ok.txt": "needle also\n",
+	});
+	const explorer = await openNativeWorkspaceExplorer(page);
+
+	// Open conflict.txt first so its model resolves and caches a baseline
+	// version *before* the external rewrite below bumps the file's real
+	// version on the "server" (mock) side — exactly the precondition the
+	// existing manual-edit save-conflict test uses (see "shows a
+	// Reload/Save As/Details save-conflict notification..." above). The
+	// external rewrite intentionally reuses the exact same text so the
+	// match's line/column position is unaffected — this test is about a
+	// stale version at save time, not about content drifting out from under
+	// the search coordinates.
+	await explorer
+		.getByRole("treeitem", { name: "conflict.txt", exact: true })
+		.dblclick();
+	await expect(
+		page.getByRole("code").filter({ hasText: "needle stays" }),
+	).toBeVisible();
+	await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_EXTERNAL_WRITE__(
+				name: string,
+				content: string,
+				emitWake: boolean,
+			): void;
+		};
+		testWindow.__PLAIN_TEST_EXTERNAL_WRITE__(
+			"conflict.txt",
+			"needle stays\n",
+			false,
+		);
+	});
+
+	await page.getByRole("tab", { name: /^Search/ }).click();
+	const searchInput = page.locator(".plain-search-view-input");
+	const replaceInput = page.locator(".plain-search-view-replace-input");
+	const status = page.locator(".plain-search-view-status");
+	const messages = page.locator(".plain-search-view-messages");
+	const fileGroups = page.locator(".plain-search-view-file");
+
+	await searchInput.pressSequentially("needle");
+	await expect(status).toHaveText("2 results in 2 files", { timeout: 5_000 });
+
+	await replaceInput.fill("cactus");
+	await page.locator(".plain-search-view-replace-all").click();
+
+	// Partial success: ok.txt's group disappears (replaced), conflict.txt's
+	// stays with its match still present and a visible inline failure.
+	await expect(fileGroups).toHaveCount(1, { timeout: 5_000 });
+	await expect(fileGroups.filter({ hasText: "conflict.txt" })).toHaveCount(1);
+	await expect(fileGroups.filter({ hasText: "ok.txt" })).toHaveCount(0);
+	await expect(
+		fileGroups
+			.filter({ hasText: "conflict.txt" })
+			.locator(".plain-search-view-file-error"),
+	).toContainText("failed to save");
+	await expect(messages).toHaveText(
+		"Replaced 1 match. 1 replacement failed to save.",
+	);
+
+	// Same Reload/Save As/Details, no Retry/Overwrite conflict surface the
+	// manual-edit save path already shows — proving replace routes through
+	// the exact same TextFileSaveErrorHandler, not a bespoke replace dialog.
+	const toasts = page.locator(".notifications-toasts .notification-toast");
+	await expect(toasts).toHaveCount(1);
+	const toast = toasts.first();
+	await expect(toast).toContainText("Failed to save 'conflict.txt'");
+	await expect(
+		toast.getByRole("button", { name: "Reload", exact: true }),
+	).toHaveCount(1);
+	await expect(
+		toast.getByRole("button", { name: "Save As...", exact: true }),
+	).toHaveCount(1);
+	await expect(
+		toast.getByRole("button", { name: "Details", exact: true }),
+	).toHaveCount(1);
+	await expect(
+		toast.getByRole("button", { name: "Retry", exact: true }),
+	).toHaveCount(0);
+	await expect(toast.getByRole("button", { name: /Overwrite/ })).toHaveCount(0);
+
+	// The conflicted file's own editor is still open and still dirty (the
+	// bulk edit mutated it in memory, but the save failed) — the disk/mock
+	// tree therefore must not have been touched for it, while ok.txt's write
+	// went through normally.
+	const activeTab = page.locator(".tabs-container .tab.active");
+	await expect(activeTab).toHaveText(/^conflict\.txt/);
+	await expect(activeTab).toHaveClass(/dirty/);
+
+	const writes = await nativeWriteFileCalls(page);
+	expect(writes).toHaveLength(1);
+	expect(writes[0]!.request.relativePath).toBe("ok.txt");
+	expect(writes[0]!.contentHex).toBe(hexOfText("cactus also\n"));
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	// Same diagnostic-mirroring pattern as the manual-edit conflict test: the
+	// model's own trace of the save error, plus the notification's console
+	// mirror of the Error-severity toast.
+	expect(consoleErrors).toHaveLength(2);
+	expect(consoleErrors[0]).toContain("resulted in a save error");
+	expect(consoleErrors[0]).toContain("File Modified Since");
+	expect(consoleErrors[1]).toBe(
+		"Failed to save 'conflict.txt'. Reload the file before saving again, or use Save As to preserve your edits.",
+	);
+});
+
+test("replaces a match correctly using its absolute column even when the line is far longer than the 256-unit preview window", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	// Distinct padding characters on either side of the match: if replace ever
+	// used the preview-relative column (rebased to the match, per the F040 S3
+	// preview-windowing doc) instead of the absolute one, the edit would land
+	// at the wrong offset and corrupt one of the two padding runs in an
+	// easily distinguishable way, rather than cleanly replacing only
+	// "needle".
+	const before = "x".repeat(400);
+	const after = "y".repeat(400);
+	await installNativeIpcMock(page, "arrayBuffer", "supported", {
+		"long-line.txt": `${before}needle${after}\n`,
+	});
+	await openNativeWorkspaceExplorer(page);
+
+	await page.getByRole("tab", { name: /^Search/ }).click();
+	const searchInput = page.locator(".plain-search-view-input");
+	const replaceInput = page.locator(".plain-search-view-replace-input");
+	const status = page.locator(".plain-search-view-status");
+
+	await searchInput.pressSequentially("needle");
+	await expect(status).toHaveText("1 result in 1 file", { timeout: 5_000 });
+
+	await replaceInput.fill("cactus");
+	await page.locator(".plain-search-view-replace-match").click();
+
+	await expect(status).toHaveText("No results found.", { timeout: 5_000 });
+
+	const writes = await nativeWriteFileCalls(page);
+	expect(writes).toHaveLength(1);
+	expect(writes[0]!.request.relativePath).toBe("long-line.txt");
+	expect(writes[0]!.contentHex).toBe(hexOfText(`${before}cactus${after}\n`));
 
 	expect(nativeDialogs).toEqual([]);
 	expect(pageErrors).toEqual([]);

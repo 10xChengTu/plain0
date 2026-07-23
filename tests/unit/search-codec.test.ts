@@ -312,7 +312,13 @@ describe("streaming text search codec (F040 S3)", () => {
 				{
 					path: "src/main.ts",
 					matches: [
-						{ line: 1, column: 5, length: 6, previewText: "needle here" },
+						{
+							line: 1,
+							column: 5,
+							length: 6,
+							previewText: "needle here",
+							absoluteColumn: 5,
+						},
 					],
 				},
 			],
@@ -327,6 +333,7 @@ describe("streaming text search codec (F040 S3)", () => {
 			column: 5,
 			length: 6,
 			previewText: "needle here",
+			absoluteColumn: 5,
 		});
 		expect(Object.isFrozen(decoded)).toBe(true);
 		expect(Object.isFrozen(decoded.batches)).toBe(true);
@@ -356,7 +363,39 @@ describe("streaming text search codec (F040 S3)", () => {
 					{
 						path: "a.ts",
 						matches: [
-							{ line: 1, column: 1, length: 1, previewText: "x".repeat(257) },
+							{
+								line: 1,
+								column: 1,
+								length: 1,
+								previewText: "x".repeat(257),
+								absoluteColumn: 1,
+							},
+						],
+					},
+				],
+			},
+			{
+				...base(),
+				batches: [
+					{
+						path: "a.ts",
+						matches: [{ line: 1, column: 1, length: 1, previewText: "a" }],
+					},
+				],
+			},
+			{
+				...base(),
+				batches: [
+					{
+						path: "a.ts",
+						matches: [
+							{
+								line: 1,
+								column: 1,
+								length: 1,
+								previewText: "a",
+								absoluteColumn: -1,
+							},
 						],
 					},
 				],
@@ -375,7 +414,15 @@ describe("streaming text search codec (F040 S3)", () => {
 			[
 				{
 					path: "a.ts",
-					matches: [{ line: 1, column: 1, length: 1, previewText: "a" }],
+					matches: [
+						{
+							line: 1,
+							column: 1,
+							length: 1,
+							previewText: "a",
+							absoluteColumn: 1,
+						},
+					],
 				},
 			],
 			1,

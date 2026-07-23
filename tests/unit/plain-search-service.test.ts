@@ -9,8 +9,10 @@ import type {
 } from "../../app/platform/tauri/contracts";
 import {
 	configurePlainSearchBridge,
+	getReplaceMatchLocation,
 	PlainSearchService,
 } from "../../app/features/search/plain-search-service";
+import type { ITextSearchMatch } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search";
 
 const ROOT_A = "00000000-0000-4000-8000-000000000001";
 const ROOT_B = "00000000-0000-4000-8000-000000000002";
@@ -496,7 +498,15 @@ describe("PlainSearchService textSearch (F040 S3 streaming)", () => {
 			batches: [
 				{
 					path: "a.ts",
-					matches: [{ line: 1, column: 1, length: 6, previewText: "needle" }],
+					matches: [
+						{
+							line: 1,
+							column: 1,
+							length: 6,
+							previewText: "needle",
+							absoluteColumn: 1,
+						},
+					],
 				},
 			],
 			nextCursor: 1,
@@ -508,7 +518,15 @@ describe("PlainSearchService textSearch (F040 S3 streaming)", () => {
 			batches: [
 				{
 					path: "b.ts",
-					matches: [{ line: 2, column: 3, length: 6, previewText: "needle" }],
+					matches: [
+						{
+							line: 2,
+							column: 3,
+							length: 6,
+							previewText: "needle",
+							absoluteColumn: 3,
+						},
+					],
 				},
 			],
 			nextCursor: 2,
@@ -553,6 +571,62 @@ describe("PlainSearchService textSearch (F040 S3 streaming)", () => {
 			maxFileSize: null,
 		});
 		expect(fake.pollCalls.map((call) => call.cursor)).toEqual([0, 1]);
+	});
+
+	it("records each match's replace location from absoluteColumn, not the preview-relative column (F040 S4)", async () => {
+		const fake = fakeTextSearchBridge();
+		configurePlainSearchBridge(fake.bridge);
+		// Deliberately different from `column`/`length` alone would suggest,
+		// simulating a match whose preview window was rebased for a long
+		// line (see src-tauri/src/search/dto.rs's WorkspaceSearchTextMatch
+		// doc comment): if getReplaceMatchLocation ever used `column`
+		// instead of `absoluteColumn`, this range would come out as
+		// startColumn 2 instead of 401.
+		fake.enqueuePoll({
+			batches: [
+				{
+					path: "long.ts",
+					matches: [
+						{
+							line: 5,
+							column: 2,
+							length: 6,
+							previewText: "xneedlex",
+							absoluteColumn: 401,
+						},
+					],
+				},
+			],
+			nextCursor: 1,
+			done: true,
+			limitHit: false,
+			skipped: { binary: 0, oversize: 0 },
+		});
+		const provider = providerFor(createService());
+		let recordedMatch: ITextSearchMatch | undefined;
+
+		await provider.textSearch(textQuery("needle"), (progress: unknown) => {
+			const fileMatch = progress as {
+				resource: { path: string };
+				results?: ITextSearchMatch[];
+			};
+			recordedMatch = fileMatch.results?.[0];
+		});
+
+		expect(recordedMatch).toBeDefined();
+		const location = getReplaceMatchLocation(recordedMatch!);
+		expect(location).toBeDefined();
+		expect(location?.resource.path).toBe("/long.ts");
+		expect(location?.range).toEqual({
+			startLineNumber: 5,
+			startColumn: 401,
+			endLineNumber: 5,
+			endColumn: 407,
+		});
+	});
+
+	it("returns undefined for a match object this provider never constructed", () => {
+		expect(getReplaceMatchLocation({} as ITextSearchMatch)).toBeUndefined();
 	});
 
 	it("returns an empty result without starting a search when no plain-workspace folder or pattern is given", async () => {

@@ -20,6 +20,7 @@ import {
 	type ISearchResultProvider,
 	type ITextQuery,
 	type ITextSearchCompleteMessage,
+	type ITextSearchMatch,
 } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search";
 
 import { SearchService } from "@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/services/search/common/searchService";
@@ -141,25 +142,75 @@ function searchResultResource(rootId: string, relativePath: string): URI {
 }
 
 /**
+ * The precise, window-independent location of one text-search match: the
+ * resource it was found in plus a `Range` built from Rust's
+ * `absoluteColumn` (never its preview-relative `column` — see
+ * `WorkspaceSearchTextMatch`'s own doc comment in
+ * `src-tauri/src/search/dto.rs`). This is the only place that range is
+ * available — `textSearchFileMatch` below records it into
+ * `matchLocations` keyed by the exact `TextSearchMatch` instance handed to
+ * the Workbench, since the upstream `IFileMatch`/`ITextSearchMatch` shape
+ * itself has no room for a second, absolute range alongside the
+ * preview-relative one `OneLineRange`/`TextSearchMatch` already carry.
+ * `plain-search-view.ts`'s replace actions look this up via
+ * `getReplaceMatchLocation` for the exact same match object it is already
+ * iterating over to render.
+ */
+export interface ReplaceMatchLocation {
+	readonly resource: URI;
+	readonly range: {
+		readonly startLineNumber: number;
+		readonly startColumn: number;
+		readonly endLineNumber: number;
+		readonly endColumn: number;
+	};
+}
+
+const matchLocations = new WeakMap<ITextSearchMatch, ReplaceMatchLocation>();
+
+/**
+ * Looks up the precise, absolute-column replace location previously
+ * recorded for `match` by `textSearchFileMatch`. Returns `undefined` for any
+ * match object this provider did not itself construct (there is no other
+ * source of `ITextSearchMatch` instances in Plain).
+ */
+export function getReplaceMatchLocation(
+	match: ITextSearchMatch,
+): ReplaceMatchLocation | undefined {
+	return matchLocations.get(match);
+}
+
+/**
  * Converts one streamed `WorkspaceSearchTextBatch` (Rust's root-relative
  * path plus its own bounded, already-windowed `previewText`/`column`/
- * `length` — see `search::text_search`'s module doc) into upstream's
- * `IFileMatch` shape. `column`/`length` are already UTF-16 code units
- * relative to `previewText` (not the full line), matching what
- * `OneLineRange`/`TextSearchMatch` expect for a single-range preview.
+ * `length`, and its window-independent `absoluteColumn` — see
+ * `search::text_search`'s module doc) into upstream's `IFileMatch` shape.
+ * `column`/`length` are already UTF-16 code units relative to `previewText`
+ * (not the full line), matching what `OneLineRange`/`TextSearchMatch` expect
+ * for a single-range preview; each constructed match is also recorded into
+ * `matchLocations` using `absoluteColumn`, for replace (F040 S4) to consume.
  */
 function textSearchFileMatch(
 	rootId: string,
 	batch: WorkspaceSearchTextBatch,
 ): IFileMatch {
 	const resource = searchResultResource(rootId, batch.path);
-	const results = batch.matches.map(
-		(match) =>
-			new TextSearchMatch(
-				match.previewText,
-				new OneLineRange(match.line, match.column, match.column + match.length),
-			),
-	);
+	const results = batch.matches.map((match) => {
+		const textSearchMatch = new TextSearchMatch(
+			match.previewText,
+			new OneLineRange(match.line, match.column, match.column + match.length),
+		);
+		matchLocations.set(textSearchMatch, {
+			resource,
+			range: {
+				startLineNumber: match.line,
+				startColumn: match.absoluteColumn,
+				endLineNumber: match.line,
+				endColumn: match.absoluteColumn + match.length,
+			},
+		});
+		return textSearchMatch;
+	});
 	return { resource, results };
 }
 

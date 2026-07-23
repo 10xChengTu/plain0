@@ -4766,6 +4766,7 @@ export function createBrowserMockBridge(
 			readonly column: number;
 			readonly length: number;
 			readonly previewText: string;
+			readonly absoluteColumn: number;
 		}[];
 	}
 
@@ -4955,6 +4956,7 @@ export function createBrowserMockBridge(
 					column: number;
 					length: number;
 					previewText: string;
+					absoluteColumn: number;
 				}[] = [];
 				lineLoop: for (const [lineIndex, rawLine] of lines.entries()) {
 					const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
@@ -4972,6 +4974,7 @@ export function createBrowserMockBridge(
 							column: column + 1,
 							length: found[0].length,
 							previewText,
+							absoluteColumn: found.index + 1,
 						});
 						remainingBudget -= 1;
 					}

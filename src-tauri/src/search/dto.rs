@@ -294,6 +294,24 @@ impl WorkspaceSearchTextPollRequest {
 /// line.
 pub(crate) const TEXT_SEARCH_PREVIEW_MAX_UTF16_UNITS: usize = 256;
 
+/// One matched range within one searched file.
+///
+/// `column` is a **preview-relative** UTF-16 column (1-indexed, matching
+/// Monaco's own column unit): valid only for indexing into this same match's
+/// `previewText`, per the module doc's "Preview windowing" section. For a
+/// line short enough that the preview window starts at column 1, `column`
+/// and `absolute_column` coincide; for a match far into a line longer than
+/// [`TEXT_SEARCH_PREVIEW_MAX_UTF16_UNITS`], the preview window is rebased to
+/// start at the match itself, and `column` no longer reflects the match's
+/// real position in the file.
+///
+/// `absolute_column` is the same match's UTF-16 column (1-indexed) within
+/// the **actual, full source line**, independent of any preview-window
+/// truncation or rebasing — this is what a caller must use to build a
+/// precise edit `Range` (F040 S4 replace) or to jump a real editor selection
+/// to the match, regardless of how long the line is. `length` (in UTF-16
+/// code units) is identical either way, since window rebasing only shifts
+/// the reported start, never the match's own extent.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSearchTextMatch {
@@ -301,15 +319,23 @@ pub struct WorkspaceSearchTextMatch {
     column: u32,
     length: u32,
     preview_text: String,
+    absolute_column: u32,
 }
 
 impl WorkspaceSearchTextMatch {
-    pub(crate) const fn new(line: u32, column: u32, length: u32, preview_text: String) -> Self {
+    pub(crate) const fn new(
+        line: u32,
+        column: u32,
+        length: u32,
+        preview_text: String,
+        absolute_column: u32,
+    ) -> Self {
         Self {
             line,
             column,
             length,
             preview_text,
+            absolute_column,
         }
     }
 
@@ -331,6 +357,11 @@ impl WorkspaceSearchTextMatch {
     #[cfg(test)]
     pub(crate) fn preview_text(&self) -> &str {
         &self.preview_text
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn absolute_column(&self) -> u32 {
+        self.absolute_column
     }
 }
 

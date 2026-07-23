@@ -267,11 +267,21 @@ export interface WorkspaceSearchTextStartResult {
 	readonly searchId: string;
 }
 
+/**
+ * `column` is preview-relative (valid only for indexing into this same
+ * match's `previewText`); `absoluteColumn` is the same match's UTF-16
+ * column (1-indexed) within the actual, full source line, independent of
+ * any preview-window truncation/rebasing — see
+ * `src-tauri/src/search/dto.rs`'s `WorkspaceSearchTextMatch` doc comment.
+ * Building a precise edit range (F040 S4 replace) or a real editor jump
+ * target must use `absoluteColumn`, never `column`.
+ */
 export interface WorkspaceSearchTextMatch {
 	readonly line: number;
 	readonly column: number;
 	readonly length: number;
 	readonly previewText: string;
+	readonly absoluteColumn: number;
 }
 
 export interface WorkspaceSearchTextBatch {

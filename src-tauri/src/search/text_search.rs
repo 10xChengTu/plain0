@@ -75,6 +75,12 @@
 //! window. This keeps the invariant `column + length <= previewText.len()`
 //! (in UTF-16 units) always true — a match is never reported outside the
 //! text a caller is given to render it against.
+//!
+//! Because of this rebasing, `column` alone is *not* sufficient to build a
+//! precise edit range against the real file for a match on a long line — see
+//! [`super::dto::WorkspaceSearchTextMatch`]'s own doc comment for
+//! `absoluteColumn`, the window-independent counterpart this module also
+//! reports for exactly that purpose (F040 S4 replace).
 
 use std::io;
 use std::path::Path;
@@ -602,8 +608,11 @@ impl Sink for MatchCollector<'_> {
             let end_u16 = utf16_offset_for_byte(&offsets, candidate.end());
             let length_u16 = end_u16.saturating_sub(start_u16);
             let (preview_text, column) = build_preview(line, &offsets, start_u16, length_u16);
-            let (Ok(length), Ok(column)) = (u32::try_from(length_u16), u32::try_from(column))
-            else {
+            let (Ok(length), Ok(column), Ok(absolute_column)) = (
+                u32::try_from(length_u16),
+                u32::try_from(column),
+                u32::try_from(start_u16),
+            ) else {
                 return true;
             };
             matches.push(WorkspaceSearchTextMatch::new(
@@ -611,6 +620,7 @@ impl Sink for MatchCollector<'_> {
                 column.saturating_add(1),
                 length,
                 preview_text,
+                absolute_column.saturating_add(1),
             ));
             *remaining_budget -= 1;
             if *remaining_budget == 0 {

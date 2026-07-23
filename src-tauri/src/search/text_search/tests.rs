@@ -271,6 +271,75 @@ fn preview_window_stays_anchored_on_the_match_for_a_very_long_line() {
     assert_eq!(&preview[start..end], "needle");
 }
 
+/// F040 S4: `column` is rebased relative to the truncated preview window for
+/// a long line, but `absoluteColumn` must still point at the match's real
+/// position within the *full* line — the exact correctness point a replace
+/// edit range depends on. Proves both that `absoluteColumn` differs from
+/// `column` here (the window really did rebase) and that it independently
+/// locates "needle" in the untruncated original content.
+#[test]
+fn absolute_column_locates_the_match_in_the_full_line_even_when_the_preview_window_is_rebased() {
+    let temp = TempDir::new().unwrap();
+    let padding = "x".repeat(400);
+    let content = format!("{padding}needle{padding}\n");
+    fs::write(temp.path().join("long.txt"), &content).unwrap();
+    let lease = authorized_lease(temp.path());
+    let compiled = compile_query(&query(vec![lease.root_id()], "needle")).unwrap();
+
+    let mut handle = start(vec![lease], compiled, noop_wake());
+    let result = poll_until_done(&mut handle);
+    let matched = &result.batches()[0].matches()[0];
+
+    // The preview window was rebased to start at the match (proven by the
+    // sibling test above), so the preview-relative column must not equal the
+    // absolute one here.
+    assert_ne!(matched.column(), matched.absolute_column());
+
+    let full_line = format!("{padding}needle{padding}");
+    let start = matched.absolute_column() as usize - 1;
+    let end = start + matched.length() as usize;
+    assert_eq!(&full_line[start..end], "needle");
+    assert_eq!(start, padding.len());
+}
+
+/// A short line never truncates the preview window (it starts at column 1),
+/// so `column` and `absoluteColumn` must coincide exactly — the common case.
+#[test]
+fn absolute_column_matches_preview_column_for_a_short_line() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("a.txt"), "needle here\n").unwrap();
+    let lease = authorized_lease(temp.path());
+    let compiled = compile_query(&query(vec![lease.root_id()], "needle")).unwrap();
+
+    let mut handle = start(vec![lease], compiled, noop_wake());
+    let result = poll_until_done(&mut handle);
+    let matched = &result.batches()[0].matches()[0];
+    assert_eq!(matched.column(), matched.absolute_column());
+    assert_eq!(matched.absolute_column(), 1);
+}
+
+/// A multi-byte UTF-8 line (each `é` is 2 bytes but 1 UTF-16 code unit):
+/// proves `absoluteColumn` is computed in UTF-16 units against the full
+/// line, not raw bytes — an off-by-encoding error here would silently
+/// corrupt every replace on a non-ASCII line.
+#[test]
+fn absolute_column_is_utf16_code_units_not_bytes_on_a_multibyte_line() {
+    let temp = TempDir::new().unwrap();
+    // "café " is 5 chars / 6 bytes ('é' is 2 bytes) / 5 UTF-16 units.
+    fs::write(temp.path().join("a.txt"), "café needle\n").unwrap();
+    let lease = authorized_lease(temp.path());
+    let compiled = compile_query(&query(vec![lease.root_id()], "needle")).unwrap();
+
+    let mut handle = start(vec![lease], compiled, noop_wake());
+    let result = poll_until_done(&mut handle);
+    let matched = &result.batches()[0].matches()[0];
+    // 1-indexed UTF-16 column: "café " is 5 UTF-16 units, so "needle" starts
+    // at column 6 — not 7, which a naive byte-offset-based column would
+    // report instead.
+    assert_eq!(matched.absolute_column(), 6);
+    assert_eq!(matched.column(), matched.absolute_column());
+}
+
 #[test]
 fn cancelling_an_in_progress_search_stops_the_worker_and_frees_the_receiver() {
     let temp = TempDir::new().unwrap();

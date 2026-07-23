@@ -17,7 +17,13 @@ function batch(path: string): WorkspaceSearchTextBatch {
 	return Object.freeze({
 		path,
 		matches: [
-			Object.freeze({ line: 1, column: 1, length: 1, previewText: path }),
+			Object.freeze({
+				line: 1,
+				column: 1,
+				length: 1,
+				previewText: path,
+				absoluteColumn: 1,
+			}),
 		],
 	});
 }
