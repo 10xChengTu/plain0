@@ -101,6 +101,14 @@ pub(crate) fn minimal_theme_json() -> &'static str {
     r##"{ "colors": { "editor.background": "#1f1f1f" } }"##
 }
 
+/// A minimal, safe SVG document — usable as an icon theme's `iconPath`
+/// resource or a `format: "svg"` icon font glyph source in tests. Contains
+/// no script, event handler, or external reference, so it always passes
+/// `svg_sanitize::sanitize_svg_bytes`.
+pub(crate) fn minimal_safe_svg() -> &'static str {
+    r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M1 1h14v14H1z"/></svg>"#
+}
+
 /// A minimal, structurally valid `.tmTheme` property list.
 pub(crate) fn minimal_tmtheme() -> &'static str {
     r#"<?xml version="1.0" encoding="UTF-8"?>

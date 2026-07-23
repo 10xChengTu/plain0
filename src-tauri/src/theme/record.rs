@@ -22,6 +22,18 @@ use crate::path_policy::RelativePath;
 use super::manifest::UiTheme;
 use super::{theme_package_not_found, theme_unavailable};
 
+/// One stored `contributes.iconThemes[]`/`contributes.productIconThemes[]`
+/// entry — the on-disk mirror of `manifest::IconThemeContribution`, same
+/// snake_case/`RelativePath`-to-`String` treatment `StoredThemeContribution`
+/// already gets relative to its own `manifest::ThemeContribution` twin.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct StoredIconThemeContribution {
+    pub(crate) id: String,
+    pub(crate) label: Option<String>,
+    /// Package-relative wire path (`/`-separated), e.g. `"icons/theme.json"`.
+    pub(crate) path: String,
+}
+
 /// The manifest record's fixed filename inside a finalized package
 /// directory. Deliberately distinct from `package.json` (the *unpacked
 /// package's own* manifest, still present alongside this file) so the two
@@ -45,10 +57,18 @@ pub(crate) struct StoredThemePackageManifest {
     pub(crate) name: String,
     pub(crate) version: String,
     pub(crate) themes: Vec<StoredThemeContribution>,
-    #[serde(default)]
-    pub(crate) icon_themes: Option<serde_json::Value>,
-    #[serde(default)]
-    pub(crate) product_icon_themes: Option<serde_json::Value>,
+    /// `F060` S1: structurally validated, no longer an unexamined passthrough
+    /// `serde_json::Value` (F050's deliberate scope boundary — see
+    /// `manifest`'s own doc comment). Deliberately **not** `#[serde(default)]`:
+    /// there is no historical library to migrate (this local library has no
+    /// existing users), so a record written under the old F050 shape — where
+    /// this field could hold arbitrary passthrough JSON, e.g. an entry
+    /// missing a `path` string entirely — now fails to deserialize as this
+    /// stricter type and is treated exactly like any other corrupt record:
+    /// skipped and counted by `list_theme_packages`/`read_single_package`,
+    /// never a special migration path.
+    pub(crate) icon_themes: Vec<StoredIconThemeContribution>,
+    pub(crate) product_icon_themes: Vec<StoredIconThemeContribution>,
     pub(crate) contains_code: bool,
     /// Every package-relative wire path `theme::import` actually opened and
     /// validated while checking this package's `contributes.themes[]` —

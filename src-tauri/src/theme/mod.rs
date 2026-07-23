@@ -37,20 +37,42 @@
 //! Nothing in this domain was reachable from a Tauri command before S3 —
 //! that was S1/S2's deliberate scope boundary. It is now, so the
 //! whole-module `dead_code` allowance those slices needed is gone.
+//!
+//! `F060` S1 scope: `manifest`'s `contributes.iconThemes[]`/
+//! `contributes.productIconThemes[]` handling moves from an unvalidated
+//! passthrough (F050's deliberate scope boundary — see that field's own doc
+//! comment) to structured validation, mirroring `contributes.themes[]`'s own
+//! `{ path, uiTheme }` shape with `{ id, label?, path }` instead. Two new
+//! document validators, `icon_theme_json` and `product_icon_theme_json`,
+//! are `theme_json`'s icon-family counterparts: same staging session, same
+//! JSONC dialect, same `resources` out-parameter contract, but no `include`
+//! chain and upstream's own well-documented per-entry leniency for anything
+//! that is a pure display/association concern. Two more new modules,
+//! `svg_sanitize` and `font_check`, are content-level safety checks upstream
+//! never performs at all (a different trust model — see ADR 0002): every
+//! `.svg` resource (an `iconPath`, or a `fonts[].src[].path` declaring
+//! `format: "svg"`) is string-scan sanitized, and every other font format is
+//! checked against a closed set of magic byte signatures. This whole slice
+//! is pure Rust — no Tauri command, DTO, or frontend surface changes; that
+//! is `F060` S2's scope.
 
 pub(crate) mod commands;
 pub(crate) mod dto;
 #[cfg(test)]
 pub(crate) mod fixtures;
+pub(crate) mod font_check;
+pub(crate) mod icon_theme_json;
 pub(crate) mod import;
 pub(crate) mod library;
 pub(crate) mod manifest;
 pub(crate) mod picker;
+pub(crate) mod product_icon_theme_json;
 pub(crate) mod record;
 pub(crate) mod relative_path;
 pub(crate) mod resource;
 pub(crate) mod selection;
 pub(crate) mod service;
+pub(crate) mod svg_sanitize;
 pub(crate) mod theme_json;
 pub(crate) mod unpack;
 
@@ -97,6 +119,23 @@ pub(crate) const MAX_INCLUDE_CHAIN_DEPTH: usize = 32;
 /// any single chain's recursion, this bounds total parse work across a
 /// package that might declare many theme entries, each with a modest chain.
 pub(crate) const MAX_INCLUDE_CHAIN_FILES: usize = 64;
+
+/// Maximum total number of icon associations a single `contributes.
+/// iconThemes[].path`/`contributes.productIconThemes[].path` JSON document
+/// may declare: every `iconDefinitions` entry, plus every key across the
+/// seven map-shaped `IconsAssociation` fields (`fileExtensions`, `fileNames`,
+/// `folderNames`, `folderNamesExpanded`, `languageIds`, `rootFolderNames`,
+/// `rootFolderNamesExpanded`), summed across the top-level document and its
+/// optional `light`/`highContrast` overrides (see `icon_theme_json`'s own
+/// module docs for the exact accounting). This is independent of
+/// [`MAX_INCLUDE_CHAIN_FILES`] (which bounds files opened across a color
+/// theme's `include` chain, not entries inside one icon document) and of
+/// [`MAX_THEME_PACKAGE_ENTRIES`]/[`MAX_THEME_PACKAGE_BYTES`] (which bound the
+/// whole package, not one document) — upstream has no equivalent cap at all,
+/// this is Plain's own defense-in-depth ceiling against a single icon
+/// document crafted to make future CSS-generation-equivalent work
+/// unboundedly expensive.
+pub(crate) const MAX_ICON_ASSOCIATIONS: usize = 4096;
 
 /// The exact JSONC dialect Plain accepts for `package.json` and every theme
 /// JSON document: comments and trailing commas only — never the rest of the
@@ -193,10 +232,18 @@ pub(crate) fn theme_manifest_field_invalid() -> CommandError {
     )
 }
 
+/// `F060` broadens this from "no `contributes.themes` entries" to "no
+/// theme-family contribution at all": a package that declares only
+/// `contributes.iconThemes`/`contributes.productIconThemes` (and an empty or
+/// absent `contributes.themes`) is no longer rejected on this ground — this
+/// error now only fires when `themes`, `iconThemes` and `productIconThemes`
+/// are *all* empty or absent. See `manifest::parse_and_validate`'s own
+/// aggregate check for exactly where this is decided.
 pub(crate) fn theme_package_no_themes() -> CommandError {
     CommandError::new(
         "THEME_PACKAGE_NO_THEMES",
-        "The theme package does not declare any contributes.themes entries.",
+        "The theme package does not declare any themes, iconThemes or \
+         productIconThemes contribution.",
     )
 }
 
@@ -316,6 +363,88 @@ pub(crate) fn theme_selection_invalid() -> CommandError {
     )
 }
 
+/// `F060` S1: a `contributes.iconThemes[].path`/`contributes.
+/// productIconThemes[].path` file icon theme JSON document is not valid
+/// JSONC, or does not parse to a JSON object at all. Covers only the
+/// document-shape failure — a missing/unsafe *resource* it references gets
+/// [`theme_icon_resource_invalid`] instead, and an over-budget document gets
+/// [`theme_icon_too_many_associations`].
+pub(crate) fn theme_icon_json_invalid() -> CommandError {
+    CommandError::new(
+        "THEME_ICON_JSON_INVALID",
+        "A file icon theme JSON document is not a valid JSONC object.",
+    )
+}
+
+/// `F060` S1: an icon theme document's `iconDefinitions[].iconPath` or
+/// `fonts[].src[].path` (file icon or product icon theme, both share this
+/// code) resolves outside the package, or does not name a file actually
+/// present in this import's unpack manifest. Deliberately a hard,
+/// whole-package-rejecting failure — unlike a structurally malformed
+/// association entry, which `icon_theme_json`/`product_icon_theme_json`
+/// skip leniently — because once a JSON value is well-typed enough to be
+/// treated as a resource reference, its safety is a security boundary, never
+/// a leniency boundary. See those two modules' own doc comments.
+pub(crate) fn theme_icon_resource_invalid() -> CommandError {
+    CommandError::new(
+        "THEME_ICON_RESOURCE_INVALID",
+        "An icon theme's iconPath or font source path escapes the package \
+         or is not present in the unpacked package.",
+    )
+}
+
+/// `F060` S1: an icon theme JSON document's total association count (every
+/// `iconDefinitions` entry plus every map-shaped association key, see
+/// [`MAX_ICON_ASSOCIATIONS`]'s own doc comment for the exact accounting)
+/// exceeds the supported budget.
+pub(crate) fn theme_icon_too_many_associations() -> CommandError {
+    CommandError::new(
+        "THEME_ICON_TOO_MANY_ASSOCIATIONS",
+        "An icon theme JSON document exceeds the supported icon association \
+         budget.",
+    )
+}
+
+/// `F060` S1: a `contributes.productIconThemes[].path` document is not valid
+/// JSONC, does not parse to a JSON object, or is missing its required
+/// `fonts`/`iconDefinitions` fields — mirrors upstream's own
+/// `_loadProductIconThemeDocument` hard rejection for all three (see
+/// `product_icon_theme_json`'s own doc comment).
+pub(crate) fn theme_product_icon_json_invalid() -> CommandError {
+    CommandError::new(
+        "THEME_PRODUCT_ICON_JSON_INVALID",
+        "A product icon theme JSON document is not a valid JSONC object, or \
+         is missing its required fonts/iconDefinitions fields.",
+    )
+}
+
+/// `F060` S1: an SVG resource (an `iconPath`/`fonts[].src[].path` ending in
+/// `.svg`, or any font source declaring `format: "svg"`) failed
+/// [`svg_sanitize::sanitize_svg_bytes`] — it contains a disallowed script
+/// element, event-handler attribute, `<foreignObject>`, DOCTYPE/entity
+/// declaration, external `href`/`xlink:href` reference, or an unsafe
+/// `@import`/`url()` reference. See that module's own doc comment for the
+/// exact closed set of checks.
+pub(crate) fn theme_svg_unsafe() -> CommandError {
+    CommandError::new(
+        "THEME_SVG_UNSAFE",
+        "An SVG resource contains a disallowed script, event handler, \
+         external reference, or unsafe markup construct.",
+    )
+}
+
+/// `F060` S1: a non-SVG font resource's declared `fonts[].src[].format`
+/// does not match its actual file signature (see
+/// [`font_check::validate_font_bytes`]'s own doc comment for the exact
+/// closed set of recognized magic bytes per format).
+pub(crate) fn theme_font_invalid() -> CommandError {
+    CommandError::new(
+        "THEME_FONT_INVALID",
+        "A font resource's declared format does not match its actual file \
+         signature.",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,6 +480,12 @@ mod tests {
             theme_package_not_found().code(),
             theme_resource_not_found().code(),
             theme_selection_invalid().code(),
+            theme_icon_json_invalid().code(),
+            theme_icon_resource_invalid().code(),
+            theme_icon_too_many_associations().code(),
+            theme_product_icon_json_invalid().code(),
+            theme_svg_unsafe().code(),
+            theme_font_invalid().code(),
         ];
         codes.sort_unstable();
         codes.dedup();
@@ -359,6 +494,10 @@ mod tests {
             vec![
                 "THEME_CONTRIBUTION_INVALID",
                 "THEME_CONTRIBUTION_PATH_INVALID",
+                "THEME_FONT_INVALID",
+                "THEME_ICON_JSON_INVALID",
+                "THEME_ICON_RESOURCE_INVALID",
+                "THEME_ICON_TOO_MANY_ASSOCIATIONS",
                 "THEME_INCLUDE_CYCLE",
                 "THEME_INCLUDE_INVALID",
                 "THEME_INCLUDE_TOO_DEEP",
@@ -376,14 +515,16 @@ mod tests {
                 "THEME_PACKAGE_UNSAFE_PATH",
                 "THEME_PICK_FAILED",
                 "THEME_PICK_PATH_UNAVAILABLE",
+                "THEME_PRODUCT_ICON_JSON_INVALID",
                 "THEME_RESOURCE_NOT_FOUND",
                 "THEME_SELECTION_INVALID",
                 "THEME_STAGE_CLEANUP_FAILED",
+                "THEME_SVG_UNSAFE",
                 "THEME_TMTHEME_INVALID",
                 "THEME_UNAVAILABLE",
             ],
             "every theme error code must be declared exactly once in this closed set \
-             (24 codes: 6 from S1 + 13 from S2 + 4 from S3 + 1 new in S4)"
+             (30 codes: 6 from S1 + 13 from S2 + 4 from S3 + 1 from S4 + 6 new in F060 S1)"
         );
     }
 
@@ -391,5 +532,6 @@ mod tests {
     fn budget_constants_are_exactly_pinned() {
         assert_eq!(MAX_INCLUDE_CHAIN_DEPTH, 32);
         assert_eq!(MAX_INCLUDE_CHAIN_FILES, 64);
+        assert_eq!(MAX_ICON_ASSOCIATIONS, 4096);
     }
 }

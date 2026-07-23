@@ -7,8 +7,8 @@ use tempfile::TempDir;
 use crate::theme::manifest::UiTheme;
 
 use super::{
-    list_theme_packages, read_single_package, validate_package_id, StoredThemeContribution,
-    StoredThemePackageManifest, RECORD_FILE_NAME,
+    list_theme_packages, read_single_package, validate_package_id, StoredIconThemeContribution,
+    StoredThemeContribution, StoredThemePackageManifest, RECORD_FILE_NAME,
 };
 
 fn sample_record(id: &str) -> StoredThemePackageManifest {
@@ -22,8 +22,8 @@ fn sample_record(id: &str) -> StoredThemePackageManifest {
             ui_theme: UiTheme::Dark,
             path: "themes/dark.json".to_owned(),
         }],
-        icon_themes: None,
-        product_icon_themes: None,
+        icon_themes: Vec::new(),
+        product_icon_themes: Vec::new(),
         contains_code: false,
         resources: vec!["themes/dark.json".to_owned()],
     }
@@ -119,7 +119,16 @@ fn round_trips_every_stored_field_including_icon_themes_and_contains_code() {
     let temp = TempDir::new().expect("tempdir");
     let mut record = sample_record("demo-publisher.demo-theme@1.0.0");
     record.contains_code = true;
-    record.icon_themes = Some(serde_json::json!([{ "id": "demo-icons" }]));
+    record.icon_themes = vec![StoredIconThemeContribution {
+        id: "demo-icons".to_owned(),
+        label: Some("Demo Icons".to_owned()),
+        path: "icons/theme.json".to_owned(),
+    }];
+    record.product_icon_themes = vec![StoredIconThemeContribution {
+        id: "demo-product-icons".to_owned(),
+        label: None,
+        path: "producticons/theme.json".to_owned(),
+    }];
     record.themes[0].label = Some("%displayName%".to_owned());
     let id = record.id.clone();
     write_package(temp.path(), &id, &record);
@@ -128,6 +137,48 @@ fn round_trips_every_stored_field_including_icon_themes_and_contains_code() {
     let listing = list_theme_packages(&root).expect("listing succeeds");
     assert_eq!(listing.packages.len(), 1);
     assert_eq!(listing.packages[0], record);
+}
+
+/// `F060` S1's migration story: there is no historical library to actually
+/// migrate (this local library has no existing users — see `record`'s own
+/// doc comment on the `icon_themes`/`product_icon_themes` field), so a
+/// record written under F050's old shape (where these two fields held
+/// arbitrary passthrough `serde_json::Value` — here, an icon theme entry
+/// missing the `path` string the new `StoredIconThemeContribution` requires)
+/// simply fails to deserialize under the new, stricter type. `F050`'s own
+/// "one damaged package must never hide every other package" contract
+/// already covers this without any special-casing: it is skipped and
+/// counted exactly like any other corrupt record.
+#[test]
+fn a_record_written_under_the_old_f050_icon_themes_passthrough_shape_is_skipped_and_counted() {
+    let temp = TempDir::new().expect("tempdir");
+    let package_dir = temp.path().join("old-shape.pkg@1.0.0");
+    fs::create_dir(&package_dir).expect("create package dir");
+    // Every field a `StoredThemePackageManifest` still requires, but
+    // `icon_themes` holds F050's old passthrough shape: an array of
+    // arbitrary objects with no `path` field, which cannot deserialize into
+    // `Vec<StoredIconThemeContribution>` (a required, non-optional field).
+    let old_shaped_json = serde_json::json!({
+        "id": "old-shape.pkg@1.0.0",
+        "publisher": "old-shape",
+        "name": "pkg",
+        "version": "1.0.0",
+        "themes": [],
+        "icon_themes": [{ "id": "demo-icons" }],
+        "product_icon_themes": null,
+        "contains_code": false,
+        "resources": [],
+    });
+    fs::write(
+        package_dir.join(RECORD_FILE_NAME),
+        serde_json::to_vec(&old_shaped_json).expect("serialize"),
+    )
+    .expect("write old-shaped record");
+    let root = Dir::open_ambient_dir(temp.path(), ambient_authority()).expect("open root");
+
+    let listing = list_theme_packages(&root).expect("listing tolerates an old-shaped record");
+    assert_eq!(listing.skipped, 1);
+    assert!(listing.packages.is_empty());
 }
 
 #[test]

@@ -19,8 +19,8 @@ fn sample_manifest() -> StoredThemePackageManifest {
             ui_theme: UiTheme::Dark,
             path: "themes/dark.json".to_owned(),
         }],
-        icon_themes: None,
-        product_icon_themes: None,
+        icon_themes: Vec::new(),
+        product_icon_themes: Vec::new(),
         contains_code: true,
         resources: vec!["themes/dark.json".to_owned()],
     }

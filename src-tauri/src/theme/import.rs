@@ -19,6 +19,12 @@
 //!
 //! No Tauri command calls this yet — `F050` S3's scope — so every entry
 //! point here is exercised purely by this module's own Rust tests.
+//!
+//! `F060` S1 addition: `finalize` also walks `validated.icon_themes`/
+//! `validated.product_icon_themes` through `icon_theme_json`/
+//! `product_icon_theme_json`, folding their resources into the exact same
+//! shared `resources` accumulator used for `validated.themes` — one
+//! whitelist per package, not one per theme family.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -27,9 +33,14 @@ use cap_std::fs::File;
 
 use crate::error::CommandError;
 
+use super::icon_theme_json;
 use super::library::ThemeLibrary;
 use super::manifest;
-use super::record::{StoredThemeContribution, StoredThemePackageManifest, RECORD_FILE_NAME};
+use super::product_icon_theme_json;
+use super::record::{
+    StoredIconThemeContribution, StoredThemeContribution, StoredThemePackageManifest,
+    RECORD_FILE_NAME,
+};
 use super::theme_io_failed;
 use super::theme_json;
 use super::unpack::{self, Staging};
@@ -79,7 +90,10 @@ fn finalize(staged: Staging<'_>, files: Vec<String>) -> Result<ImportedThemePack
     // see `theme_json`'s module docs for why this is deliberately not reset
     // per entry the way include-chain cycle detection is. `resources`
     // accumulates the exact same way, becoming the stored record's read
-    // whitelist for `F050` S3's `theme_read_resource`.
+    // whitelist for `F050` S3's `theme_read_resource`. `F060` S1 folds
+    // `contributes.iconThemes[]`/`contributes.productIconThemes[]`
+    // validation into the exact same shared `resources` accumulator —
+    // there is one whitelist per package, not one per theme family.
     let mut budget = MAX_INCLUDE_CHAIN_FILES;
     let mut resources = BTreeSet::new();
     for theme in &validated.themes {
@@ -88,6 +102,22 @@ fn finalize(staged: Staging<'_>, files: Vec<String>) -> Result<ImportedThemePack
             &file_set,
             &theme.path,
             &mut budget,
+            &mut resources,
+        )?;
+    }
+    for icon_theme in &validated.icon_themes {
+        icon_theme_json::validate_icon_theme_document(
+            &staged,
+            &file_set,
+            &icon_theme.path,
+            &mut resources,
+        )?;
+    }
+    for product_icon_theme in &validated.product_icon_themes {
+        product_icon_theme_json::validate_product_icon_theme_document(
+            &staged,
+            &file_set,
+            &product_icon_theme.path,
             &mut resources,
         )?;
     }
@@ -107,8 +137,24 @@ fn finalize(staged: Staging<'_>, files: Vec<String>) -> Result<ImportedThemePack
                 path: contribution.path.as_wire().to_owned(),
             })
             .collect(),
-        icon_themes: validated.icon_themes.clone(),
-        product_icon_themes: validated.product_icon_themes.clone(),
+        icon_themes: validated
+            .icon_themes
+            .iter()
+            .map(|contribution| StoredIconThemeContribution {
+                id: contribution.id.clone(),
+                label: contribution.label.clone(),
+                path: contribution.path.as_wire().to_owned(),
+            })
+            .collect(),
+        product_icon_themes: validated
+            .product_icon_themes
+            .iter()
+            .map(|contribution| StoredIconThemeContribution {
+                id: contribution.id.clone(),
+                label: contribution.label.clone(),
+                path: contribution.path.as_wire().to_owned(),
+            })
+            .collect(),
         contains_code: validated.contains_code,
         resources: resources.into_iter().collect(),
     };
