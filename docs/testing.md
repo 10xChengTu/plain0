@@ -19,7 +19,7 @@
 
 - path canonicalization、symlink escape、workspace scope。
 - VSIX zip-slip、zip bomb 上限、JSONC/include cycle、资源越界。
-- `rg --json`、Git porcelain v2/NUL、diff/log/blame parser。
+- 搜索域的有界遍历预算、分层 gitignore/glob 语义、流式分批/背压/取消（进程内 `grep-searcher`，rg sidecar 已废弃，见 docs/architecture.md 第 6 节）、Git porcelain v2/NUL、diff/log/blame parser。
 - Git workspace trust gate 和 hardened background mode；恶意 helper/hook fixture 不得产生 marker。
 - PTY session 生命周期、resize/kill/exit 和事件序号。
 - DAP header/body fragmentation、多个 frame、错误长度、timeout/cancel。

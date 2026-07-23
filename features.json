@@ -222,18 +222,57 @@
 			"id": "F040",
 			"name": "Quick Open, workspace search and replace",
 			"phase": 2,
-			"status": "in_progress",
+			"status": "complete",
 			"acceptance": [
 				"File and content search honor ignore and include/exclude rules",
 				"Results stream and cancel without blocking the UI",
 				"Replace plan validates file versions before writes"
-			]
+			],
+			"evidence": {
+				"commands": ["pnpm check", "pnpm test:e2e:browser"],
+				"results": [
+					"pnpm check passed in full on 2026-07-23: 38 frontend test files, 725 cases, 2300 frontend modules, 2134 bundle sources, 203 recorded migration-debt files and Rust 345/345.",
+					"All Browser E2E scenarios passed 32/32 (31 carried over from S1-S4 plus 1 new F040 S5 scenario proving the search.exclude default excludes a node_modules directory from both Quick Open file search and Search view text search).",
+					"The new S5 scenario additionally passed a focused repeat (--repeat-each=3, --retries=0) before the full-suite run, matching every earlier slice's own acceptance discipline."
+				],
+				"nativeScenarios": [
+					"F040 introduces no changes to the native file open/read/save IPC surface: Quick Open's \"open match\" and every replace path's per-resource save both route through the exact same native workspace read and versioned-write (wv1/PLR1/PLW1) chain already validated at native desktop level during F020/F030's own acceptance (system folder picker, exact-byte CRUD, versioned save conflict handling). No native-desktop scenario was executed specifically for F040's own additions in this feature -- the bounded Rust file/text-search traversal, gitignore/exclude matching, streaming wake/poll/cancel protocol, and replace coordinator are all new Rust/TypeScript surface with no prior native evidence to inherit.",
+					"F040's own desktop matrix -- real large-directory search performance and cancellation responsiveness, real multi-layer .gitignore/search.exclude effectiveness at real disk scale, Cmd+P open-from-large-tree, and a real version-conflict replace path with on-disk verification -- is registered as E2E-004 in docs/e2e-handover.md and handed over to Codex for native execution; it has not yet been executed."
+				],
+				"platformGaps": [
+					"E2E-004 in docs/e2e-handover.md (real large-directory search performance/cancellation, real multi-layer .gitignore/search.exclude effectiveness, Cmd+P open-from-large-tree, and a real version-conflict replace path with on-disk verification) is handed over to Codex and not yet executed.",
+					"Rust's regex engine (the `regex` crate) is linear-time only: no PCRE2, lookaround, or backreference support in search patterns, narrower than upstream's optional PCRE2 mode; an invalid or unsupported pattern surfaces as a Warning message rather than being silently accepted or crashing.",
+					"Replace substitutes text literally and does not support `$1`-style capture-group backreferences in the replacement text -- Rust does not return capture groups to the frontend (a deliberate narrowing, stated alongside the regex limitation above, not hidden).",
+					"Replacing across multiple files produces one independent undo entry per file rather than one shared cross-file undo group -- a deliberate isolation trade-off (F040 S4) so one file's save failure never blocks or rolls back another file's successful replace.",
+					"`search.useIgnoreFiles`/`search.useGlobalIgnoreFiles`/`search.useParentIgnoreFiles` have no registered configuration schema; Rust's search domain hardcodes \"always honor .gitignore, never global/parent ignore files\" and reads no such flag from any request DTO, so registering a schema for settings neither side consumes was judged actively misleading rather than treated as a completeness gap (F040 S5 decision).",
+					"Symlink exclusion from search results is proven by 3 Rust unit tests (F040 S2) and one browser-mock-level unit test (tests/unit/workspace-search-bridge.test.ts, \"never reports a symlink as a match and never traverses through one\"), not by a live Browser/Playwright scenario -- the shared installNativeIpcMock fixture helper used by every Browser E2E test does not expose symlink-node injection through its extraFiles parameter, and adding that plumbing was judged to risk the ~30 other scenarios sharing it for marginal signal beyond the existing unit-level proof against the identical mock code.",
+					"\"Replace All in File\" (per-file granularity) shares its code path with \"Replace\" and \"Replace All\", both of which have dedicated Browser E2E coverage, but it has no dedicated Browser E2E scenario of its own (F040 S4 decision; unit tests and code review cover its shared logic).",
+					"An over-8-MiB unopened file's replace failure has no dedicated Browser E2E of its own; the underlying 8 MiB read limit itself is already covered by earlier workspace read slices (F020).",
+					"Root-relative search results are not paired with a rootId in the wire response (F040 S2 documented assumption): Plain currently only ever authorizes a single workspace root, so this has not caused an observable issue, but a future multi-root search would need this addressed first.",
+					"Windows and Linux native packaging remains F120.",
+					"Zeroing the monaco-vscode-api bundle migration debt remains F110."
+				],
+				"acceptanceResults": [
+					{
+						"acceptance": "File and content search honor ignore and include/exclude rules",
+						"result": "F040 S2's Rust file search honors .gitignore with per-directory layering (deepest layer wins; negation and nested overrides both tested) and applies search.exclude/files.exclude via excludeGlobs, proven end-to-end by the S2 Browser E2E (a .gitignore-ignored sibling file never appears in Quick Open, its non-ignored sibling does and opens on Enter) and by S3 reusing the identical gitignore/exclude plumbing for text search. F040 S5 additionally: (a) registered a minimal, real search.exclude configuration schema default (`**/node_modules`, `**/bower_components`, `**/*.code-search`, matching upstream exactly) -- previously absent because Plain deliberately never imports the ~30-key search.contribution.js (F040 S1 decision, to avoid its Chat-context side effect), so every search had silently included node_modules unless a workspace's own .gitignore happened to cover it; (b) discovered and fixed that PlainSearchView's hand-built text-search query never applied any exclude pattern at all -- only Quick Open's file search did, via the pre-existing files.exclude default and upstream QueryBuilder plumbing. Text search now merges files.exclude/search.exclude the same way Quick Open does; both paths are proven together by the new Browser E2E (\"excludes a node_modules directory from both Quick Open file search and Search view text search by default\"). The `filePattern` include is a Rust-side case-insensitive subsequence prefilter, not upstream's includePattern glob syntax. Rust hardcodes \"always honor .gitignore\" and intentionally exposes no search.useIgnoreFiles/useGlobalIgnoreFiles/useParentIgnoreFiles schema, since neither side consumes such a flag (see platformGaps). Symlinks are never followed or reported as search results, proven by 3 Rust unit tests (S2) plus one browser-mock-level unit test; see platformGaps for why this specific behavior is not additionally exercised as a live Browser/Playwright scenario."
+					},
+					{
+						"acceptance": "Results stream and cancel without blocking the UI",
+						"result": "F040 S3 implemented the streaming text-search protocol (workspace_search_text_start/poll/cancel: an explicit wake signal plus front-end pull, with bounded queue backpressure) and proved it with Browser E2E covering grouped multi-file streaming render, click-to-editor navigation, a new query cancelling an in-flight one (asserted via exactly one cancel call and two start calls against the native IPC call log), a truncation banner past search.maxResults, and an invalid-regex Warning message -- none of it blocks the UI: typing, cancelling and re-querying all stay responsive even against the mock's artificial per-poll delay. File search (Quick Open, S2) is a bounded single request-response with a client-side 512-result cap and stale-response discarding while the user keeps typing. What Browser-mock evidence cannot prove is real elapsed-time search performance over a large real directory tree, or cancellation responsiveness against genuine Rust thread scheduling rather than a scripted mock delay; that real-disk-scale evidence is registered as E2E-004 in docs/e2e-handover.md (step 1) and has not yet been executed."
+					},
+					{
+						"acceptance": "Replace plan validates file versions before writes",
+						"result": "F040 S4's replace coordinator calls the exact same versioned wv1/PLR1/PLW1 save chain every manual edit already uses (ITextFileService.files.get(resource)?.save()), so a version conflict encountered during replace surfaces through the identical FILE_MODIFIED_SINCE path as any other save -- proven by the Browser E2E (\"keeps a version-conflicted file's replace visibly failed while a sibling file's replace still succeeds\"): the conflicted file's replace fails visibly (inline error, its match retained) while an unrelated sibling file's replace succeeds and is verified on disk. Per-match Replace, per-file Replace All in File, and global Replace All all route through the same coordinator; Replace and Replace All each have dedicated Browser E2E coverage (including one already-open editor kept in sync and one long-line absolute-column case), while Replace All in File shares that same code path without a dedicated scenario of its own (see platformGaps). Known, stated narrowing rather than a hidden gap: replace text is substituted literally with no $1-style capture-group backreferences; replacing across multiple files produces one independent undo entry per file rather than one shared cross-file undo group (a deliberate isolation trade-off so one file's failure never blocks or rolls back another); an over-8-MiB unopened file's replace fails visibly through the existing bulk-edit/working-copy read-limit path but has no dedicated Browser E2E of its own."
+					}
+				]
+			}
 		},
 		{
 			"id": "F050",
 			"name": "VS Code color theme compatibility",
 			"phase": 2,
-			"status": "planned",
+			"status": "in_progress",
 			"acceptance": [
 				"Import local VSIX and unpacked theme directory",
 				"Apply workbench colors and TextMate token colors",
