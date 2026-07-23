@@ -8,6 +8,8 @@ import {
 } from "@codingame/monaco-vscode-api";
 import { reinitializeWorkspace } from "@codingame/monaco-vscode-configuration-service-override";
 import { registerCustomProvider } from "@codingame/monaco-vscode-files-service-override";
+import { IFileService } from "@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files.service";
+import { IWorkbenchThemeService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service";
 
 import { EXCLUDED_SURFACE_GUARD_MARKER } from "./excluded-surface-policy";
 import { enforceExcludedWorkbenchSurfaces } from "./excluded-surfaces";
@@ -23,6 +25,11 @@ import {
 	PLAIN_WORKSPACE_SCHEME,
 } from "./features/workspace/file-system-provider";
 import { createWorkspaceTopologyCoordinator } from "./features/workspace/workspace-projection";
+import {
+	applyDefaultColorTheme,
+	registerPlainThemePicker,
+} from "./features/themes/plain-theme-picker";
+import { createPlainThemeRegistry } from "./features/themes/plain-theme-registry";
 import { configureMonacoEnvironment } from "./monaco-environment";
 import { createBridge, normalizeCommandError } from "./platform/tauri";
 import { configurePlainSearchBridge } from "./features/search/plain-search-service";
@@ -129,6 +136,16 @@ async function bootstrap(): Promise<void> {
 		await getService(IContextKeyService),
 		workspaceTopologyCoordinator,
 	);
+
+	const themeRegistry = await createPlainThemeRegistry(
+		await getService(IFileService),
+	);
+	await applyDefaultColorTheme(
+		await getService(IWorkbenchThemeService),
+		themeRegistry,
+	);
+	registerPlainThemePicker(themeRegistry);
+
 	const surfaceSnapshot = enforceExcludedWorkbenchSurfaces();
 	document.body.dataset.plainSurfaceGuard = EXCLUDED_SURFACE_GUARD_MARKER;
 	if (import.meta.env.DEV) {

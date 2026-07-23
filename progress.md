@@ -1,12 +1,12 @@
 # Plain 重写进度
 
-更新时间：2026-07-23
+更新时间：2026-07-24
 
 ## 当前状态
 
 - 阶段：2 — 编辑主链。
 - WIP：`F050` VS Code color theme compatibility。
-- 当前最小工作项：实现并验收 F050 S0 内置主题激活与选择器切片。
+- 当前最小工作项：实现并验收 F050 S1 Rust VSIX 安全解包切片。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -157,11 +157,13 @@
 - [x] 完成 `F040` evidence 闭环：`features.json` 的 `F040` 转为 `complete`，按 `F030` 模板补齐五段式 `evidence`（`commands` 为 `pnpm check`/`pnpm test:e2e:browser`；`results` 贴最终真实数字；`nativeScenarios` 说明本 feature 未新增 F040 专属原生场景、Quick Open 打开文件与替换保存复用 F020/F030 已验收的原生读写链，`F040` 自身矩阵登记为 E2E-004 交接 Codex；`platformGaps` 列出 E2E-004、正则不支持 PCRE2/lookaround、替换不支持捕获组反向引用、跨文件无共享 undo 分组、`search.useIgnoreFiles` 系三键刻意不注册的理由、symlink 排除的证据层级说明、「Replace All in File」与超限文件替换缺少专属 Browser E2E、root 相对路径未与 rootId 配对的既有假设，以及 F110/F120 既有留白；`acceptanceResults` 逐字对应三条 acceptance，从 S2/S3/S4/S5 的 progress 条目与 Browser E2E 断言提炼）。`F050` 转为 `in_progress`；`updatedAt` 保持 `2026-07-23`。
 
 - [x] 完成 `F050` 的固定 GitHub 调研与技术方案冻结（docs/research/2026-07-24-theme-compatibility.md）：双路调研 + 运行时探针三方交叉。探针坐实一个此前未记录的静默架构缺口——应用一直运行在 `createUnloadedThemeForThemeType` 的裸 `vs` 占位符上（CSS 变量为空、主题选择器 Quick Pick 恒空、零报错），根因是 theme-defaults 经 `registerExtension` 进入的 `builtinExtensions` 数组在 `NullExtensionService` 下没有任何消费者、extension point 分发链整体断裂。方案不引入被禁的 extensions-service-override，改用官方 seam：`getBuiltinExtensions()`（AGENTS.md 允许的惰性静态 contribution registry 读取面）+ `setColorTheme(ColorThemeData 实例)` 直构直用 + `registerExtension`/`registerFileUrl` 官方声明式 API（`extension-file:` 只读闭合树，与被禁的 `file:` overlay 无关）消费导入主题。上游两处安全空白必须 Rust 自建：include 链无循环/深度防护（纯递归、自环即挂起）、Code OSS 自带 zip 解包是前缀判断 + 跟随符号链接的反面教材——采用 `zip` crate 的 `enclosed_name`/`is_symlink`/逐条目大小校验 + cap-std 相对写入，JSONC 用 `jsonc-parser` 精确复刻上游方言（comments + 尾逗号）。主题选择跨会话保留由 Rust theme 域自带 selection 持久面承担（staged 原子写先例），不建通用 settings 域。切片拆为 S0 内置主题激活与选择器、S1 Rust VSIX 安全解包、S2 manifest/主题校验与恶意 fixture 矩阵、S3 导入 UX 与注册消费、S4 持久化与收口。
+- [x] 完成 `F050` S0 内置主题激活与选择器切片：新增 `app/features/themes/{plain-theme-registry.ts,plain-theme-picker.ts}`。`createPlainThemeRegistry` 在 `initialize()` 之后经 `getBuiltinExtensions()` 枚举含 `contributes.themes` 的内置 manifest（当前即 theme-defaults 的 10 项），逐扩展读取其自身 `extension-file://<publisher>.<name>/extension/package.nls.json` 解析 `%key%` NLS 占位符——探明构建期 manifest 的 `label` 字段从未被翻译（翻译只发生在 `servicesInitialized` 之后的 `deltaExtensions` 分支，内置主题在 `initialize()` 前注册永不触发该分支）——再用 `ColorThemeData.fromExtensionTheme` 就地构造裸实例（主题 JSON 定位到 `extension-file://<publisher>.<name>/extension/themes/<name>.json`，与 upstream 的 `joinPath(extensionLocation, theme.path)` 完全一致）。新增 Plain 自有 `PlainExtensionResourceLoaderService`（唯一新增 `SyncDescriptor`，插入既有 `createServiceOverrides` 闭集 `MIDDLE_SERVICE_DESCRIPTORS` 末位）包一层 `IFileService`，补上 `ColorThemeData#ensureLoaded`/`WorkbenchThemeService.setColorTheme` 真正需要的 `IExtensionResourceLoaderService` 实现——两个既有 override 包都未提供它，只剩 `missing-services.js` 的全抛异常桩，不补上任何主题（内置或未来导入）都无法真正加载。`PlainThemePicker` 复用 `app/features/workspace/commands.ts` 覆盖 `workbench.action.files.openFolder` 的同一先例：对 vendor 已用 `registerAction2` 注册的 `workbench.action.selectTheme`，用 `CommandsRegistry.registerCommand` 做后注册接管（`registerAction2` 底层同样只调用 `CommandsRegistry.registerCommand`；`CommandsRegistry` 用 `LinkedList#unshift` 入队、`getCommand` 取 `Iterable.first`，后注册者天然成为解析结果，vendor 那个恒空的 picker 不再可达）。真实 `IQuickInputService.createQuickPick` 按 dark/light/high-contrast 三组渲染（组内保留 manifest 原始顺序），方向键移动即时调用 `setColorTheme(..., "preview")` 预览，Esc 还原为打开前的主题，Enter 提交。bootstrap 在 Workbench 就绪后按 `settingsId === "Dark Modern"` 应用默认主题；未找到或加载失败仅 `console.warn`，不阻断启动。
+- [x] S0 切片通过完整 `pnpm check`：40 个 TypeScript/JavaScript 测试文件、745 个用例（新增 `plain-theme-registry.test.ts` 7 例、`plain-theme-picker.test.ts` 8 例、`boundary-contracts.test.mjs` +2 例、`workspace-topology-contracts.test.mjs` +3 例）、345 个 Rust 测试保持不变（本切片零 Rust 改动）、格式、双 TypeScript 类型检查、严格 lint、生产构建、架构与 bundle 基线全部通过；bundle `sourceCount` 从 2134 精确增至 2136（仅两个新增 Plain 源文件，`getBuiltinExtensions`/`ColorThemeData`/`ExtensionData`/quickInput 等全部深导入命中既有 `theme-service-override`/`theme-defaults-default-extension` 导入链，未拉入任何新 vendor 源），债务数 203、五个分类计数与 `debtSourceSha256` 均未变化。真实 Chromium Playwright 35/35（32 个既有 + 3 个新增）通过，`--repeat-each=3 --retries=0` 聚焦新测试 9/9 通过，零 `pageerror`；真实浏览器交叉核实：`.monaco-workbench` 默认带 `vs-dark vscode-theme-defaults-themes-dark_modern-json`、`--vscode-editor-background: #1f1f1f`（此前恒为裸 `vs` 且变量为空）；Color Theme Quick Pick 精确列出 10 项且分组顺序为 Dark 2026/Dark+/Dark Modern/Dark (Visual Studio)、Light 2026/Light+/Light Modern/Light (Visual Studio)、Dark High Contrast/Light High Contrast——其中 4 项的真实 NLS 标签与 manifest `id` 不同（如 "Visual Studio Dark" 的 `id` 对应 "Dark (Visual Studio)" 的真实 label），证明是翻译解析而非退化成 `id` 直用；方向键预览、Esc 还原、重开后 Enter 应用均在真实浏览器逐步验证生效。Harness 更新：`app/features/themes/` 两个新文件登记进 `ALLOWED_MONACO_APP_IMPORTS`/`DIRECT_COMMAND_REGISTRATION_MANIFEST`（并把后者的两处派生检查——`expectedCommandAuthorityImportKeys` 与逐条 manifest 校验——改为按「文件是否存在于当前被验证的 authority」判定，而非无条件要求，兼容既有仅传六个拓扑核心文件、不含新主题文件的窄范围测试场景，不减弱对六个核心文件本身的强制性）；`IFILE_SERVICE_TOKEN_EXEMPT_PATHS` 新增两个窄审计例外（`plain-theme-registry.ts`、`app/main.ts`），`getProvider` 派生检查对这两个例外同样不豁免；`check-boundaries.mjs` 新增对 `monaco-vscode-extensions-service-override` 字面导入的显式禁止（此前只有传递依赖补丁记录，没有 app/ 源码层面的直接导入禁令）。命令接管路线：`CommandsRegistry.registerCommand` 同 id 后注册（非新增 Plain 专属命令 + 锁定 vendor 空 picker 路线）。
 
 ## 下一步
 
-1. 实现并验收 F050 S0 内置主题激活与选择器切片。
-2. 按方案顺序推进 S1 VSIX 解包、S2 校验矩阵、S3 导入 UX、S4 持久化与收口。
+1. 实现并验收 F050 S1 Rust VSIX 安全解包切片。
+2. 按方案顺序推进 S2 校验矩阵、S3 导入 UX、S4 持久化与收口。
 3. Codex 按 `docs/e2e-handover.md` 交接清单（含 E2E-001/E2E-002/E2E-003/E2E-004）执行真实桌面 E2E 后，回写对应 feature（`F020`/`F030`/`F040`）的 evidence。
 
 ## 当前验收命令

@@ -218,6 +218,10 @@ const DIRECT_COMMAND_REGISTRATION_MANIFEST = Object.freeze([
 		relativePath: "app/features/workspace/commands.ts",
 		count: productContracts.length + 1,
 	}),
+	Object.freeze({
+		relativePath: "app/features/themes/plain-theme-picker.ts",
+		count: 1,
+	}),
 ]);
 
 // The pinned 35.0.1 packages expose deep wildcard modules, including modules
@@ -268,6 +272,19 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/features/search/search-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/search/browser/searchIcons",
 	"app/features/search/search-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search",
 	"app/features/search/search-contribution.ts:@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/contrib/search/browser/searchQuickAccess.contribution",
+	"app/features/themes/plain-theme-picker.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands",
+	"app/features/themes/plain-theme-picker.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput",
+	"app/features/themes/plain-theme-picker.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service",
+	"app/features/themes/plain-theme-picker.ts:@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/theme",
+	"app/features/themes/plain-theme-picker.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service",
+	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-api/extensions",
+	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
+	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-api/vscode/vs/platform/extensionResourceLoader/common/extensionResourceLoader.service",
+	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-api/vscode/vs/platform/extensions/common/extensions",
+	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files.service",
+	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/theme",
+	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/colorThemeData",
+	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService",
 	"app/features/workspace/commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands",
 	"app/features/workspace/commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands.service",
 	"app/features/workspace/commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextkey/common/contextkey.service",
@@ -289,10 +306,13 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/features/workspace/workspace-projection.ts:@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace",
 	"app/features/workspace/workspace-projection.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/browser/web.api",
 	"app/main.ts:@codingame/monaco-vscode-api",
+	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files.service",
+	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service",
 	"app/main.ts:@codingame/monaco-vscode-configuration-service-override",
 	"app/main.ts:@codingame/monaco-vscode-files-service-override",
 	"app/main.ts:@codingame/monaco-vscode-theme-defaults-default-extension",
 	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service",
+	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/platform/extensionResourceLoader/common/extensionResourceLoader.service",
 	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors",
 	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/platform/workspaces/common/workspaces.service",
 	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/languageStatus/common/languageStatusService.service",
@@ -4994,18 +5014,33 @@ function validateProviderBindingAuthority(authority, moduleImports) {
 	);
 }
 
+// `DIRECT_COMMAND_REGISTRATION_MANIFEST` entries are only mandatory when
+// either the caller supplied the complete app authority (`appSources`,
+// `authority.completeAppAuthority === true`) or the manifest's own file
+// happens to be part of whatever narrower fixed-file set the caller did
+// supply (some callers — e.g. the workspace-topology-only test fixtures —
+// intentionally pass just the small, fixed workspace-topology entrypoint
+// set, never app/features/themes/plain-theme-picker.ts). A manifest entry
+// for a file that is simply absent from a narrower, non-complete authority
+// is vacuously satisfied rather than failed; one that IS present is still
+// held to its exact registration count and shape, in either mode.
 function validateDirectCommandRegistrationManifest(authority, registrations) {
 	const manifestPaths = DIRECT_COMMAND_REGISTRATION_MANIFEST.map(
 		({ relativePath }) => relativePath,
 	);
-	const expectedCount = DIRECT_COMMAND_REGISTRATION_MANIFEST.reduce(
+	const relevantManifestEntries = DIRECT_COMMAND_REGISTRATION_MANIFEST.filter(
+		({ relativePath }) =>
+			authority.completeAppAuthority === true ||
+			authority.filesByPath[relativePath] !== undefined,
+	);
+	const expectedCount = relevantManifestEntries.reduce(
 		(total, { count }) => total + count,
 		0,
 	);
 	return (
 		new Set(manifestPaths).size === manifestPaths.length &&
 		registrations.length === expectedCount &&
-		DIRECT_COMMAND_REGISTRATION_MANIFEST.every(({ relativePath, count }) => {
+		relevantManifestEntries.every(({ relativePath, count }) => {
 			const sourceFile = authority.filesByPath[relativePath]?.sourceFile;
 			const sourceRegistrations = registrations.filter(
 				({ sourceFile }) => sourceFile.fileName === relativePath,
@@ -5267,11 +5302,16 @@ function validateTopologyAuthority(authority) {
 			);
 		},
 	);
+	// See validateDirectCommandRegistrationManifest's own doc comment: a
+	// manifest entry only contributes an expected CommandsRegistry import when
+	// its file is actually part of the authority being validated.
 	const expectedCommandAuthorityImportKeys = [
 		`app/excluded-surfaces.ts:${MONACO_API_MODULE}`,
-		...DIRECT_COMMAND_REGISTRATION_MANIFEST.map(
-			({ relativePath }) => `${relativePath}:${COMMAND_REGISTRY_MODULE}`,
-		),
+		...DIRECT_COMMAND_REGISTRATION_MANIFEST.filter(
+			({ relativePath }) =>
+				authority.completeAppAuthority === true ||
+				authority.filesByPath[relativePath] !== undefined,
+		).map(({ relativePath }) => `${relativePath}:${COMMAND_REGISTRY_MODULE}`),
 	].sort();
 	const hasClosedProviderBindings = validateProviderBindingAuthority(
 		authority,

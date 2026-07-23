@@ -357,6 +357,10 @@ const forbiddenSourcePatterns = [
 		/monaco-vscode-languages?-service-override[^'"]*/,
 		"language service override",
 	],
+	[
+		/monaco-vscode-extensions-service-override[^'"]*/,
+		"extensions service override (real Extension Host)",
+	],
 ];
 
 for (const file of appFiles) {

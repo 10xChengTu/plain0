@@ -451,6 +451,51 @@ createPlainWorkspaceFileSystemProvider();`,
 		).toEqual([]);
 	});
 
+	it("rejects an unauthorized monaco-vscode-api import from either theme file", () => {
+		for (const relativePath of [
+			"app/features/themes/plain-theme-registry.ts",
+			"app/features/themes/plain-theme-picker.ts",
+		]) {
+			expectFailure(
+				mutatedProductionAppSource(
+					relativePath,
+					(source) =>
+						`import { Registry } from "@codingame/monaco-vscode-api/vscode/vs/platform/registry/common/platform";\n${source}`,
+				),
+				WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+			);
+		}
+	});
+
+	it("rejects a second registerCommand call added to the theme picker file", () => {
+		expectFailure(
+			mutatedProductionAppSource(
+				"app/features/themes/plain-theme-picker.ts",
+				(source) =>
+					`${source}\nCommandsRegistry.registerCommand("plain.rogueThemeCommand", () => undefined);\n`,
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+	});
+
+	it("rejects a third, unaudited file registering commands directly", () => {
+		expectFailure(
+			{
+				...withAppSources(currentSources()),
+				appSources: [
+					...withAppSources(currentSources()).appSources,
+					{
+						relativePath: "app/features/themes/rogue-command.ts",
+						source: `import { CommandsRegistry } from "@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands";
+CommandsRegistry.registerCommand("plain.rogueThemeCommand", () => undefined);
+`,
+					},
+				],
+			},
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+	});
+
 	it("rejects duplicate providers and reversed fixed-scheme registration", () => {
 		const duplicateConfigurationFactory = mutated("main", (source) =>
 			replaceOnce(

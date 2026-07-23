@@ -810,6 +810,11 @@ export function validateDialogServiceOverride(source) {
 			className: "PlainSearchService",
 			thirdArgIsTrue: true,
 		},
+		{
+			tokenName: "IExtensionResourceLoaderService",
+			className: "PlainExtensionResourceLoaderService",
+			thirdArgIsTrue: false,
+		},
 	]);
 	function matchesMiddleServiceDescriptor(property, spec) {
 		if (
@@ -7150,14 +7155,33 @@ function collectTypeScriptBridgeAliases(sourceFile) {
 // ServiceIdentifier-decorator call each DI-constructed class must redeclare
 // for its own exact constructor — see that file's doc comment on why
 // PlainSearchService cannot inherit SearchService's dependency list).
-// This is the one narrow, audited exemption from the blanket "no app file
+// app/features/themes/plain-theme-registry.ts and app/main.ts are the second
+// audited exemption. Built-in (and, in a later slice, imported) color theme
+// resources live in the read-only, static `extension-file:` virtual tree
+// (registered by `registerFileUrl`/`registerExtensionFile`, a scheme wholly
+// distinct from `file:` or `plain-workspace:` — see the module doc comment
+// on PlainExtensionResourceLoaderService in plain-theme-registry.ts). Both
+// upstream's own `ColorThemeData#ensureLoaded`/`_loadColorTheme` (via
+// `IExtensionResourceLoaderService.readExtensionResource`) and Plain's own
+// NLS-bundle read (`readNlsBundle`, resolving `%placeholder%` labels) need a
+// real IFileService to read those already-registered bytes; no override
+// package provides one (see plain-theme-registry.ts's own doc comment), so
+// Plain's PlainExtensionResourceLoaderService wraps IFileService directly,
+// and app/main.ts resolves it once via `getService(IFileService)` to hand to
+// `createPlainThemeRegistry`. Neither file ever calls `.getProvider(...)` on
+// an IFileService-derived expression — the getProvider-derivation check
+// below is NOT exempted anywhere, including in these two files.
+//
+// This is the narrow, audited exemption set from the blanket "no app file
 // may reference IFileService" rule below; the getProvider-derivation check
-// three lines down is NOT exempted anywhere, including in this file — if
-// plain-search-service.ts (or anything it delegates to) ever called
+// three lines down is NOT exempted anywhere, including in these files — if
+// any exempted file (or anything it delegates to) ever called
 // `.getProvider(...)` on a fileService-derived expression, this function
 // would still fail it.
 const IFILE_SERVICE_TOKEN_EXEMPT_PATHS = new Set([
 	"app/features/search/plain-search-service.ts",
+	"app/features/themes/plain-theme-registry.ts",
+	"app/main.ts",
 ]);
 
 export function validateWorkspaceProviderRetrievalBoundary(appSources) {

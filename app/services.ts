@@ -11,6 +11,7 @@ import getWorkbenchServiceOverride from "@codingame/monaco-vscode-workbench-serv
 import { WorkingCopyEditorService } from "@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService";
 import { WorkingCopyService } from "@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyService";
 import { IDialogService } from "@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service";
+import { IExtensionResourceLoaderService } from "@codingame/monaco-vscode-api/vscode/vs/platform/extensionResourceLoader/common/extensionResourceLoader.service";
 import { SyncDescriptor } from "@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors";
 import { IWorkspacesService } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspaces/common/workspaces.service";
 import { ISearchService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search.service";
@@ -21,6 +22,7 @@ import { IWorkingCopyService } from "@codingame/monaco-vscode-api/vscode/vs/work
 import { IWorkspaceEditingService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workspaces/common/workspaceEditing.service";
 
 import { PlainSearchService } from "./features/search/plain-search-service";
+import { PlainExtensionResourceLoaderService } from "./features/themes/plain-theme-registry";
 import { EmptyLanguageStatusService } from "./services/empty-language-status";
 import { PlainWorkingCopyBackupService } from "./services/plain-workspace-backup-service";
 import "./services/plain-workspace-backup-tracker";
@@ -60,6 +62,15 @@ import {
  * rather than that package's aggregating default export/root factory — see
  * that file's own doc comment for why the root factory crashes with no
  * `file:` provider. The package is never spread here.
+ *
+ * IExtensionResourceLoaderService is Plain's own
+ * PlainExtensionResourceLoaderService (./features/themes/plain-theme-
+ * registry), a thin IFileService-backed reader — neither
+ * getThemeServiceOverride() nor getFilesServiceOverride() registers a real
+ * implementation for this token, leaving the missing-services.js stub
+ * (every method throws) in place, which would make every color theme
+ * (built-in or, in a later slice, imported) fail to load. See that file's
+ * own doc comment for why this is safe (it adds no new filesystem access).
  */
 export function createServiceOverrides() {
 	return {
@@ -100,6 +111,11 @@ export function createServiceOverrides() {
 			PlainSearchService,
 			[],
 			true,
+		),
+		[IExtensionResourceLoaderService.toString()]: new SyncDescriptor(
+			PlainExtensionResourceLoaderService,
+			[],
+			false,
 		),
 		[IDialogService.toString()]: new SyncDescriptor(
 			DialogService,

@@ -182,6 +182,7 @@ import getWorkbenchServiceOverride from "@codingame/monaco-vscode-workbench-serv
 import { WorkingCopyEditorService } from "@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService";
 import { WorkingCopyService } from "@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyService";
 import { IDialogService } from "@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service";
+import { IExtensionResourceLoaderService } from "@codingame/monaco-vscode-api/vscode/vs/platform/extensionResourceLoader/common/extensionResourceLoader.service";
 import { SyncDescriptor } from "@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors";
 import { IWorkspacesService } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspaces/common/workspaces.service";
 import { ISearchService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search.service";
@@ -191,6 +192,7 @@ import { IWorkingCopyEditorService } from "@codingame/monaco-vscode-api/vscode/v
 import { IWorkingCopyService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyService.service";
 import { IWorkspaceEditingService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workspaces/common/workspaceEditing.service";
 import { PlainSearchService } from "./features/search/plain-search-service";
+import { PlainExtensionResourceLoaderService } from "./features/themes/plain-theme-registry";
 import { EmptyLanguageStatusService } from "./services/empty-language-status";
 import { PlainWorkingCopyBackupService } from "./services/plain-workspace-backup-service";
 import { PlainWorkspaceEditingService, PlainWorkspacesService } from "./services/plain-workspace-services";
@@ -234,6 +236,11 @@ export function createServiceOverrides() {
       PlainSearchService,
       [],
       true,
+    ),
+    [IExtensionResourceLoaderService.toString()]: new SyncDescriptor(
+      PlainExtensionResourceLoaderService,
+      [],
+      false,
     ),
     [IDialogService.toString()]: new SyncDescriptor(
       DialogService,
@@ -5341,6 +5348,77 @@ void Reflect["g" + "et"](fileService, "get" + "Provider");`,
 		expect(failures).toContain(
 			`${relativePath} must not recover the registered workspace provider through getProvider`,
 		);
+	});
+
+	it("still rejects getProvider recovery from the two IFileService-exempt theme paths", () => {
+		// app/features/themes/plain-theme-registry.ts and app/main.ts are the
+		// only two files permitted to import/reference IFileService at all (see
+		// IFILE_SERVICE_TOKEN_EXEMPT_PATHS's own doc comment); that exemption is
+		// narrowly about reading extension-file: resources, never about
+		// recovering the registered plain-workspace: provider. Both exempt
+		// paths must still fail exactly like any other file the moment they
+		// derive `.getProvider(...)` from an IFileService-typed expression.
+		for (const relativePath of [
+			"app/features/themes/plain-theme-registry.ts",
+			"app/main.ts",
+		]) {
+			const hostileSource = `import { getService, IFileService } from "@codingame/monaco-vscode-api";
+async function recoverProvider() {
+  const fileService = await getService(IFileService);
+  return fileService.getProvider(PLAIN_WORKSPACE_SCHEME);
+}`;
+			const alreadyPresent = workspaceDeleteAppSources.some(
+				(entry) => entry.relativePath === relativePath,
+			);
+			const sources = alreadyPresent
+				? workspaceDeleteAppSources.map((entry) =>
+						entry.relativePath === relativePath
+							? { relativePath, source: hostileSource }
+							: entry,
+					)
+				: [
+						...workspaceDeleteAppSources,
+						{ relativePath, source: hostileSource },
+					];
+			const failures = validateWorkspaceDeleteTypeScriptBoundary(sources);
+			expect(
+				failures,
+				`${relativePath} must still reject getProvider recovery`,
+			).toContain(
+				`${relativePath} must not recover the registered workspace provider through getProvider`,
+			);
+		}
+	});
+
+	it("accepts real IFileService references from the two audited exempt theme paths without a getProvider call", () => {
+		// The production app/features/themes/plain-theme-registry.ts is not
+		// part of workspaceDeleteAppSources (only the fixed confirmed-delete
+		// entrypoint set is); read it fresh here purely to prove the exemption
+		// itself — not the getProvider ban — accepts a real IFileService
+		// consumer that never derives getProvider from it.
+		const registrySource = readFileSync(
+			new URL(
+				"../../app/features/themes/plain-theme-registry.ts",
+				import.meta.url,
+			),
+			"utf8",
+		);
+		expect(registrySource).toContain("IFileService");
+		expect(registrySource).not.toContain("getProvider");
+		const failures = validateWorkspaceDeleteTypeScriptBoundary([
+			...workspaceDeleteAppSources,
+			{
+				relativePath: "app/features/themes/plain-theme-registry.ts",
+				source: registrySource,
+			},
+		]);
+		expect(
+			failures.some((message) =>
+				message.includes(
+					"app/features/themes/plain-theme-registry.ts must not import or reference IFileService",
+				),
+			),
+		).toBe(false);
 	});
 
 	it("locks provider and bridge factories to their audited authority routes", () => {

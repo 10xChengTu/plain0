@@ -7219,3 +7219,281 @@ test("excludes a node_modules directory from both Quick Open file search and Sea
 	expect(pageErrors).toEqual([]);
 	expect(consoleErrors).toEqual([]);
 });
+
+async function workbenchThemeState(
+	page: Page,
+): Promise<{ classNames: readonly string[]; editorBackground: string }> {
+	return page.evaluate(() => {
+		const workbench = document.querySelector(".monaco-workbench");
+		if (workbench === null) {
+			throw new Error("'.monaco-workbench' element is missing");
+		}
+		return {
+			classNames: [...workbench.classList],
+			editorBackground: getComputedStyle(workbench)
+				.getPropertyValue("--vscode-editor-background")
+				.trim(),
+		};
+	});
+}
+
+// The 10 built-in theme-defaults themes' real, upstream-translated labels
+// (see app/features/themes/plain-theme-registry.ts's own doc comment on why
+// the raw manifest.contributes.themes[].label only ever holds an untranslated
+// `%key%` NLS placeholder before this feature resolves it) and each one's
+// exact `ColorThemeData#classNames` fragment (`toCSSSelector`'s
+// `${extensionId}-${themePath}` half of `id`, see plain-theme-registry.ts) —
+// frozen here so a regression in either resolution or class-naming shows up
+// as a concrete, named mismatch rather than a generic count failure.
+// Unlike executePaletteCommand's other call sites, accepting the "Preferences:
+// Color Theme" palette entry does not close the quick input widget at all —
+// Plain's own command handler (see app/features/themes/plain-theme-picker.ts)
+// synchronously opens a second quick pick (the theme picker itself) in the
+// very same `.quick-input-widget` DOM node, so it is never actually hidden
+// in between. executePaletteCommand's own `toBeHidden` postcondition would
+// therefore time out; this waits for the theme picker's own placeholder
+// instead of a hide/show transition that never happens.
+async function openColorThemePicker(page: Page): Promise<Locator> {
+	await page.keyboard.press("ControlOrMeta+Shift+P");
+	const picker = page.locator(".quick-input-widget");
+	await expect(picker).toBeVisible();
+	await picker.locator("input").pressSequentially("Color Theme");
+	const paletteCommand = picker.getByText("Preferences: Color Theme", {
+		exact: true,
+	});
+	await expect(paletteCommand).toHaveCount(1);
+	await paletteCommand.click();
+	await expect(picker.locator("input")).toHaveAttribute(
+		"placeholder",
+		"Select Color Theme",
+	);
+	return picker;
+}
+
+const BUILT_IN_THEMES = Object.freeze([
+	{
+		label: "Dark 2026",
+		className: "vscode-theme-defaults-themes-2026-dark-json",
+	},
+	{ label: "Dark+", className: "vscode-theme-defaults-themes-dark_plus-json" },
+	{
+		label: "Dark Modern",
+		className: "vscode-theme-defaults-themes-dark_modern-json",
+	},
+	{
+		label: "Dark (Visual Studio)",
+		className: "vscode-theme-defaults-themes-dark_vs-json",
+	},
+	{
+		label: "Light 2026",
+		className: "vscode-theme-defaults-themes-2026-light-json",
+	},
+	{
+		label: "Light+",
+		className: "vscode-theme-defaults-themes-light_plus-json",
+	},
+	{
+		label: "Light Modern",
+		className: "vscode-theme-defaults-themes-light_modern-json",
+	},
+	{
+		label: "Light (Visual Studio)",
+		className: "vscode-theme-defaults-themes-light_vs-json",
+	},
+	{
+		label: "Dark High Contrast",
+		className: "vscode-theme-defaults-themes-hc_black-json",
+	},
+	{
+		label: "Light High Contrast",
+		className: "vscode-theme-defaults-themes-hc_light-json",
+	},
+] as const);
+
+function builtInTheme(label: string): (typeof BUILT_IN_THEMES)[number] {
+	const theme = BUILT_IN_THEMES.find((candidate) => candidate.label === label);
+	if (theme === undefined) {
+		throw new Error(`unknown fixture theme label: ${label}`);
+	}
+	return theme;
+}
+
+const DARK_MODERN = builtInTheme("Dark Modern");
+
+test("boots on the real, loaded Dark Modern theme instead of the unthemed placeholder", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	// Before this feature, the Workbench booted on
+	// `ColorThemeData.createUnloadedThemeForThemeType`'s bare placeholder:
+	// `.monaco-workbench` carried only the generic `vs` class and
+	// `--vscode-editor-background` was empty. Both are now real.
+	const state = await workbenchThemeState(page);
+	expect(state.classNames).toEqual(
+		expect.arrayContaining(["vs-dark", DARK_MODERN.className]),
+	);
+	expect(state.classNames).not.toContain("vs");
+	expect(state.editorBackground).toBe("#1f1f1f");
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("lists all 10 built-in themes in their exact grouped order in the Color Theme quick pick", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	const picker = await openColorThemePicker(page);
+
+	const pickerRows = picker.locator(".quick-input-list .monaco-list-row");
+	await expect(pickerRows).toHaveCount(BUILT_IN_THEMES.length);
+	for (const { label } of BUILT_IN_THEMES) {
+		await expect(pickerRows.filter({ hasText: label })).toHaveCount(1);
+	}
+
+	// The currently active theme (Dark Modern, the bootstrap default) is
+	// pre-selected as the active/focused item, exactly like upstream's own
+	// picker pre-selects the current theme.
+	const focusedRow = picker.locator(
+		".quick-input-list .monaco-list-row.focused",
+	);
+	await expect(focusedRow).toHaveCount(1);
+	await expect(focusedRow).toContainText("Dark Modern");
+
+	const darkModernIndex = BUILT_IN_THEMES.findIndex(
+		({ label }) => label === "Dark Modern",
+	);
+	// Move to the very first row, then arrow-down through every remaining
+	// one: this proves the exact bucketed order (dark, then light, then
+	// high contrast — each bucket preserving the manifest's own contributed
+	// order, see plain-theme-picker.ts's own doc comment), not just that 10
+	// unordered rows with the right labels exist.
+	for (let step = 0; step < darkModernIndex; step += 1) {
+		await page.keyboard.press("ArrowUp");
+	}
+	for (const [index, { label }] of BUILT_IN_THEMES.entries()) {
+		await expect(focusedRow).toContainText(label);
+		if (index < BUILT_IN_THEMES.length - 1) {
+			await page.keyboard.press("ArrowDown");
+		}
+	}
+
+	await page.keyboard.press("Escape");
+	await expect(picker).toBeHidden();
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("previews a theme live on navigation, restores on Escape, and applies for real on Enter", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	const originalState = await workbenchThemeState(page);
+	expect(originalState.classNames).toContain(DARK_MODERN.className);
+
+	const picker = await openColorThemePicker(page);
+	const focusedRow = picker.locator(
+		".quick-input-list .monaco-list-row.focused",
+	);
+	await expect(focusedRow).toContainText("Dark Modern");
+
+	// Navigating to a Light theme applies it immediately, live, without
+	// closing the picker or waiting for Enter — a real preview, not a
+	// simulated one.
+	const lightPlus = builtInTheme("Light+");
+	const darkModernIndex = BUILT_IN_THEMES.findIndex(
+		({ label }) => label === "Dark Modern",
+	);
+	const lightPlusIndex = BUILT_IN_THEMES.findIndex(
+		({ label }) => label === "Light+",
+	);
+	for (let step = 0; step < lightPlusIndex - darkModernIndex; step += 1) {
+		await page.keyboard.press("ArrowDown");
+	}
+	await expect(focusedRow).toContainText("Light+");
+	await expect
+		.poll(async () => (await workbenchThemeState(page)).editorBackground)
+		.toBe("#ffffff");
+	const previewState = await workbenchThemeState(page);
+	expect(previewState.classNames).toContain(lightPlus.className);
+	expect(previewState.classNames).toContain("vs");
+
+	// Escape restores exactly the theme that was active before the picker
+	// opened — not merely "some" theme.
+	await page.keyboard.press("Escape");
+	await expect(picker).toBeHidden();
+	const afterEscapeState = await workbenchThemeState(page);
+	expect(afterEscapeState.classNames).toEqual(originalState.classNames);
+	expect(afterEscapeState.editorBackground).toBe(
+		originalState.editorBackground,
+	);
+
+	// Reopening (through the action's own configured keychord this time, not
+	// the palette) and accepting a different theme with Enter applies it for
+	// real: it must still be in effect after the picker itself has closed.
+	await page.keyboard.press("ControlOrMeta+K");
+	await page.keyboard.press("ControlOrMeta+T");
+	await expect(picker.locator("input")).toBeVisible();
+	const lightModern = builtInTheme("Light Modern");
+	const lightModernIndex = BUILT_IN_THEMES.findIndex(
+		({ label }) => label === "Light Modern",
+	);
+	for (let step = 0; step < lightModernIndex - darkModernIndex; step += 1) {
+		await page.keyboard.press("ArrowDown");
+	}
+	await expect(focusedRow).toContainText("Light Modern");
+	await page.keyboard.press("Enter");
+	await expect(picker).toBeHidden();
+	const appliedState = await workbenchThemeState(page);
+	expect(appliedState.classNames).toContain(lightModern.className);
+	expect(appliedState.editorBackground).toBe("#ffffff");
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
