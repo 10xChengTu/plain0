@@ -1,5 +1,6 @@
 import { addDisposableListener } from "@codingame/monaco-vscode-api/vscode/vs/base/browser/dom";
 import { CancellationTokenSource } from "@codingame/monaco-vscode-api/vscode/vs/base/common/cancellation";
+import type { IExpression } from "@codingame/monaco-vscode-api/vscode/vs/base/common/glob";
 import { toDisposable } from "@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle";
 import { IBulkEditService } from "@codingame/monaco-vscode-api/vscode/vs/editor/browser/services/bulkEditService.service";
 import { IConfigurationService } from "@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration.service";
@@ -336,6 +337,25 @@ export class PlainSearchView extends ViewPane {
 			.getWorkspace()
 			.folders.map((folder) => ({ folder: folder.uri }));
 
+		// This view builds its ITextQuery by hand rather than through
+		// upstream's QueryBuilder (see this file's own module doc comment for
+		// why), so it must reproduce QueryBuilder.getFolderQueryForRoot's own
+		// `getExcludes()` merge itself — search.exclude overrides files.exclude
+		// on key conflicts, matching upstream's `mixin(..., true)` — or
+		// `search.exclude`'s F040 S5 default (see search-contribution.ts) would
+		// silently apply to Quick Open file search but not to this view's text
+		// search, which found and fixed exactly that gap during this slice.
+		const filesExclude = this.configurationService.getValue<
+			IExpression | undefined
+		>("files.exclude");
+		const searchExclude = this.configurationService.getValue<
+			IExpression | undefined
+		>("search.exclude");
+		const excludePattern: IExpression = {
+			...filesExclude,
+			...searchExclude,
+		};
+
 		let fileCount = 0;
 		let matchCount = 0;
 		const onProgress = (progress: ISearchProgressItem): void => {
@@ -354,6 +374,7 @@ export class PlainSearchView extends ViewPane {
 					type: QueryType.Text,
 					folderQueries,
 					contentPattern: { pattern, isRegExp },
+					excludePattern,
 				},
 				tokenSource.token,
 				onProgress,

@@ -162,38 +162,38 @@ describe("feature completion contract", () => {
 			document.currentPhase = 3;
 		});
 		expectRejected((document) => {
-			document.features[5].status = "in_progress";
+			document.features[6].status = "in_progress";
 		});
 		expectRejected(
 			(document) => {
 				document.features[0].status = "planned";
 				delete document.features[0].evidence;
-				document.features[4].status = "planned";
+				document.features[5].status = "planned";
 				document.currentPhase = 0;
 			},
 			progressDocument.replace(
-				"- WIP：`F040` Quick Open, workspace search and replace。",
+				"- WIP：`F050` VS Code color theme compatibility。",
 				"- WIP：无。",
 			),
 		);
 
 		const blocked = cloneDocument();
-		blocked.features[4].status = "blocked";
-		blocked.features[4].blocker = "Waiting for an explicit external decision.";
+		blocked.features[5].status = "blocked";
+		blocked.features[5].blocker = "Waiting for an explicit external decision.";
 		const blockedProgress = progressDocument;
 		expect(validateFeatureContract(blocked, blockedProgress)).toMatchObject({
 			failures: [],
 			activeCount: 1,
 		});
-		blocked.features[4].blocker = " ";
+		blocked.features[5].blocker = " ";
 		expect(
 			validateFeatureContract(blocked, blockedProgress).failures.length,
 		).toBeGreaterThan(0);
 
 		const betweenItems = cloneDocument();
-		betweenItems.features[4].status = "planned";
+		betweenItems.features[5].status = "planned";
 		const betweenItemsProgress = progressDocument.replace(
-			"- WIP：`F040` Quick Open, workspace search and replace。",
+			"- WIP：`F050` VS Code color theme compatibility。",
 			"- WIP：无。",
 		);
 		expect(
@@ -201,15 +201,15 @@ describe("feature completion contract", () => {
 		).toMatchObject({ failures: [], activeCount: 0 });
 
 		for (const progress of [
-			progressDocument.replace("`F040`", "`F050`"),
+			progressDocument.replace("`F050`", "`F060`"),
 			progressDocument.replace(
-				"- WIP：`F040` Quick Open, workspace search and replace。",
+				"- WIP：`F050` VS Code color theme compatibility。",
 				"- WIP：无。",
 			),
 			progressDocument.replace("- WIP：", "- WIP:"),
 			progressDocument.replace(
-				"- WIP：`F040` Quick Open, workspace search and replace。",
-				"- WIP：`F040` Quick Open, workspace search and replace。\n- WIP：`F040` Quick Open, workspace search and replace。",
+				"- WIP：`F050` VS Code color theme compatibility。",
+				"- WIP：`F050` VS Code color theme compatibility。\n- WIP：`F050` VS Code color theme compatibility。",
 			),
 			progressDocument.replace("## 当前状态", "## 当前状态\n\n## 当前状态"),
 		]) {

@@ -7148,3 +7148,74 @@ test("replaces a match correctly using its absolute column even when the line is
 	expect(pageErrors).toEqual([]);
 	expect(consoleErrors).toEqual([]);
 });
+
+test("excludes a node_modules directory from both Quick Open file search and Search view text search by default", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	// A same-named file inside node_modules and a kept sibling outside it,
+	// neither covered by any .gitignore: proves the exclusion comes from
+	// F040 S5's real `search.exclude` schema default
+	// (`{"**/node_modules": true, ...}`, registered in
+	// app/features/search/search-contribution.ts) flowing through the
+	// already-working excludePattern plumbing, not from gitignore or a
+	// name-based special case.
+	await installNativeIpcMock(page, "arrayBuffer", "supported", {
+		"node_modules/dep/index.js":
+			"const excludedMarker = 'node-modules-should-not-be-found';\n",
+		"src/index.js": "const keptMarker = 'kept-marker-should-be-found';\n",
+	});
+	await openNativeWorkspaceExplorer(page);
+
+	// Quick Open file search: the node_modules copy of index.js never
+	// appears among the picks, only the kept sibling does.
+	const quickOpen = page.locator(".quick-input-widget");
+	const resultRows = quickOpen.locator(".quick-input-list .monaco-list-row");
+	await page.keyboard.press("ControlOrMeta+P");
+	await expect(quickOpen).toBeVisible();
+	await quickOpen.locator("input").pressSequentially("index.js");
+	// Exactly one pick: the picker's label/description/detail render as one
+	// concatenated text node ("index.jssrcfile results", no path separator),
+	// so identity is asserted by total count plus the absence of
+	// "node_modules" and the presence of the kept file's own directory name
+	// rather than a literal "src/index.js" substring.
+	await expect(resultRows).toHaveCount(1);
+	await expect(resultRows.filter({ hasText: "node_modules" })).toHaveCount(0);
+	await expect(resultRows.filter({ hasText: "src" })).toHaveCount(1);
+	await page.keyboard.press("Escape");
+	await expect(quickOpen).toBeHidden();
+
+	// Search view text search: searching for content that only exists
+	// inside node_modules finds nothing, while the kept file's own content
+	// is found normally.
+	await page.getByRole("tab", { name: /^Search/ }).click();
+	const searchInput = page.locator(".plain-search-view-input");
+	await expect(searchInput).toBeVisible();
+	const status = page.locator(".plain-search-view-status");
+	const fileGroups = page.locator(".plain-search-view-file");
+
+	await searchInput.pressSequentially("node-modules-should-not-be-found");
+	await expect(status).toHaveText("No results found.", { timeout: 5_000 });
+	await expect(fileGroups).toHaveCount(0);
+
+	await searchInput.fill("");
+	await searchInput.pressSequentially("kept-marker-should-be-found");
+	await expect(status).toHaveText("1 result in 1 file", { timeout: 5_000 });
+	await expect(fileGroups.filter({ hasText: "src/index.js" })).toHaveCount(1);
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});

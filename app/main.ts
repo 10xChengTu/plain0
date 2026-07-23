@@ -109,6 +109,16 @@ async function bootstrap(): Promise<void> {
 			"window.menuBarVisibility": "hidden",
 			"workbench.startupEditor": "none",
 			"files.autoSave": "off",
+			// Plain's Rust search domain (search::file_search/text_search) never
+			// follows symlinks out of an authorized root, unconditionally —
+			// there is no request field that could turn following on. Upstream
+			// defaults `search.followSymlinks` to `true`; overriding it here
+			// keeps the config surface honest about Plain's actual (narrower)
+			// behavior rather than silently contradicting it. See
+			// features/search/search-contribution.ts for the paired minimal
+			// schema registration this default needs to have any observable
+			// effect at all.
+			"search.followSymlinks": false,
 		},
 		enableWorkspaceTrust: false,
 		workspaceProvider: initialWorkspace.provider,

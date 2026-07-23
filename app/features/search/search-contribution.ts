@@ -1,3 +1,8 @@
+import {
+	ConfigurationScope,
+	Extensions as ConfigurationExtensions,
+	type IConfigurationRegistry,
+} from "@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configurationRegistry";
 import { SyncDescriptor } from "@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors";
 import { Registry } from "@codingame/monaco-vscode-api/vscode/vs/platform/registry/common/platform";
 import { ViewPaneContainer } from "@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/views/viewPaneContainer";
@@ -65,13 +70,15 @@ import { PlainSearchView } from "./plain-search-view";
  * excluded domain; the real bootstrap run that caught the `SearchView` issue
  * is the same run that confirms Cmd+P itself stays clean.
  *
- * Deliberately not reproduced in this slice: the ~30 `search.*`
- * configuration keys, the search view's actions/menus/keybindings/replace
- * UI, and the `%`-prefixed `TextSearchQuickAccess` quick-open provider. None
- * of those are required for this slice's acceptance (the Search view is
- * reachable via the Activity Bar and stays stable with empty results); they
- * are deferred to later F040 slices rather than hand-duplicated ahead of
- * need.
+ * Deliberately not reproduced: the search view's actions/menus/keybindings/
+ * replace UI (Plain's own `PlainSearchView` implements replace directly —
+ * see `plain-replace-coordinator.ts`) and the `%`-prefixed
+ * `TextSearchQuickAccess` quick-open provider. Not required for this
+ * slice's acceptance; deferred rather than hand-duplicated ahead of need.
+ *
+ * Of the ~30 upstream `search.*` configuration keys, F040 S5 hand-registers
+ * exactly two below (`search.exclude`, `search.followSymlinks`) — see that
+ * registration's own doc comment for why those two and not the rest.
  */
 const searchViewContainer = Registry.as<IViewContainersRegistry>(
 	Extensions.ViewContainersRegistry,
@@ -104,3 +111,76 @@ Registry.as<IViewsRegistry>(Extensions.ViewsRegistry).registerViews(
 	],
 	searchViewContainer,
 );
+
+/**
+ * Minimal, hand-written subset of the `search.*` configuration schema —
+ * exactly the two keys whose absence would make Plain's config surface
+ * actively misleading, not the ~30 upstream `search.contribution.js`
+ * registers wholesale (still not imported, per this file's own doc comment
+ * above).
+ *
+ * `search.exclude`: without a registered schema for this key,
+ * `QueryBuilder.getExcludes()` (see
+ * docs/research/2026-07-23-search-quickopen.md's queryBuilder findings)
+ * only ever sees `files.exclude` — already registered with real defaults
+ * by the existing Explorer service override import chain
+ * (`files.contribution._configuration.js`, confirmed at runtime: `.git`,
+ * `.svn`, `.hg`, `.DS_Store`, `Thumbs.db`) — and never
+ * `search.exclude`'s own upstream defaults (`node_modules`,
+ * `bower_components`, `*.code-search`). Every search would therefore
+ * silently include `node_modules` unless a workspace's own `.gitignore`
+ * happened to cover it. Registering the exact upstream default here closes
+ * that gap through the already-working `excludePattern` plumbing (see
+ * `plain-search-service.ts`'s `collectExcludeGlobs`) — no new Rust or
+ * bridge surface, no change to `search::file_search`/`search::text_search`.
+ *
+ * `search.followSymlinks`: registered as a plain boolean purely so that
+ * `app/main.ts`'s `configurationDefaults: { "search.followSymlinks": false
+ * }` is a *real* override rather than inert decoration. Without a
+ * registered schema, `DefaultConfiguration.resetConfigurationModel` (in
+ * `@codingame/monaco-vscode-configuration-service-override`) only ever
+ * visits `Registry.as(Extensions.Configuration).getConfigurationProperties()`
+ * keys when rebuilding its model; a `configurationDefaults` entry for an
+ * unregistered key is accepted by `registerDefaultConfigurations` but then
+ * never surfaces through `getValue()`, silently. Rust's search domain
+ * never follows symlinks out of an authorized root regardless of this
+ * setting's value — the schema exists so the setting, if ever inspected,
+ * says so honestly instead of either not existing or silently keeping
+ * upstream's `true` claim.
+ *
+ * Deliberately NOT registered: `search.useIgnoreFiles`,
+ * `search.useGlobalIgnoreFiles`, `search.useParentIgnoreFiles`. Rust's
+ * `search::file_search`/`search::text_search` hardcode "always honor
+ * `.gitignore`, never global/parent ignore files" (F040 S2 decision) and
+ * read no such flag from any request DTO — registering a schema for a
+ * setting neither side consumes would make the toggle *look* functional
+ * while silently doing nothing, which is the opposite of this
+ * registration's purpose.
+ */
+Registry.as<IConfigurationRegistry>(
+	ConfigurationExtensions.Configuration,
+).registerConfiguration({
+	id: "search",
+	order: 13,
+	title: "Search",
+	type: "object",
+	properties: {
+		"search.exclude": {
+			type: "object",
+			default: {
+				"**/node_modules": true,
+				"**/bower_components": true,
+				"**/*.code-search": true,
+			},
+			scope: ConfigurationScope.RESOURCE,
+			description:
+				"Glob patterns excluded from Quick Open file search and workspace text search. Inherits files.exclude.",
+		},
+		"search.followSymlinks": {
+			type: "boolean",
+			default: true,
+			description:
+				"Controls whether to follow symlinks while searching. Plain's search never follows symlinks out of a workspace root regardless of this value.",
+		},
+	},
+});

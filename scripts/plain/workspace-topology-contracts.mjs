@@ -242,6 +242,7 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/features/search/plain-search-service.ts:@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/services/search/common/searchService",
 	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/dom",
 	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/cancellation",
+	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/glob",
 	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle",
 	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/editor/browser/services/bulkEditService.service",
 	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration.service",
@@ -259,6 +260,7 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search",
 	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search.service",
 	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/textfile/common/textfiles.service",
+	"app/features/search/search-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configurationRegistry",
 	"app/features/search/search-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors",
 	"app/features/search/search-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/platform/registry/common/platform",
 	"app/features/search/search-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/views/viewPaneContainer",
@@ -1634,6 +1636,11 @@ function validateBootstrap(sourceFile) {
 						[
 							"files.autoSave",
 							(autoSave) => isExactStringLiteral(autoSave, "off"),
+						],
+						[
+							"search.followSymlinks",
+							(followSymlinks) =>
+								followSymlinks.kind === ts.SyntaxKind.FalseKeyword,
 						],
 					]),
 			],
