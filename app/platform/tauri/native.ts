@@ -41,6 +41,10 @@ import {
 	workspaceWriteResponseUnavailable,
 } from "./workspace-codec";
 import { createWorkspaceWatcherManager } from "./workspace-watcher";
+import {
+	decodeWorkspaceSearchFilesResult,
+	frozenWorkspaceSearchFilesRequest,
+} from "./search-codec";
 
 export function createNativeBridge(): PlainBridge {
 	const workspaceWatcher = createWorkspaceWatcherManager({
@@ -226,6 +230,22 @@ export function createNativeBridge(): PlainBridge {
 				}
 				return workspaceWriteResponseUnavailable();
 			}
+		},
+		workspaceSearchFiles: async (
+			roots,
+			filePattern,
+			excludeGlobs,
+			maxResults,
+		) => {
+			const request = frozenWorkspaceSearchFilesRequest(
+				roots,
+				filePattern,
+				excludeGlobs,
+				maxResults,
+			);
+			return decodeWorkspaceSearchFilesResult(
+				await invoke<unknown>("workspace_search_files", { request }),
+			);
 		},
 		backupWrite: async (key, bytes) => {
 			const frame = encodeBackupWriteRequest(key, bytes);

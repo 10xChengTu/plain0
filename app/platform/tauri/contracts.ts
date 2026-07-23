@@ -233,6 +233,19 @@ export type WorkspaceWriteResult =
 	  }>;
 
 /**
+ * Result of a bounded, `.gitignore`-respecting file-name search rooted at
+ * one or more workspace roots. `entries` are root-relative wire paths (see
+ * `frozenWorkspaceEntryRequest`'s `relativePath` convention) — this slice
+ * does not pair each entry with its root id because Plain currently
+ * authorizes exactly one workspace root at a time (see
+ * `WorkspaceSearchFilesRequest`'s own doc comment).
+ */
+export interface WorkspaceSearchFilesResult {
+	readonly entries: readonly string[];
+	readonly limitHit: boolean;
+}
+
+/**
  * One recovered backup entry. `bytes` is a freshly allocated snapshot: it
  * shares no backing storage with the bridge/mock and the caller may freely
  * mutate it.
@@ -302,6 +315,21 @@ export interface PlainBridge {
 		rootId: string,
 		relativePath: string,
 	): Promise<WorkspaceReadFileResult>;
+	/**
+	 * Bounded, read-only file-name search across `roots`. `filePattern` is a
+	 * plain (non-glob) fuzzy-search string, empty meaning "list everything";
+	 * `excludeGlobs` are extra glob patterns to prune (this slice always
+	 * respects `.gitignore` and does not expose an `includeGlobs`/
+	 * `useIgnoreFiles` toggle — see `docs/research/2026-07-23-search-quickopen.md`).
+	 * `maxResults` is clamped server-side to a safe range regardless of what
+	 * is requested.
+	 */
+	workspaceSearchFiles(
+		roots: readonly string[],
+		filePattern: string,
+		excludeGlobs: readonly string[],
+		maxResults: number,
+	): Promise<WorkspaceSearchFilesResult>;
 	workspaceWriteFile(
 		rootId: string,
 		relativePath: string,

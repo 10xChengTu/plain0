@@ -3,6 +3,7 @@ use tauri::{Emitter, Manager};
 pub mod backup;
 pub mod error;
 pub mod path_policy;
+pub mod search;
 pub mod workspace;
 
 use backup::service::BackupService;
@@ -73,6 +74,7 @@ pub fn run() {
             workspace::commands::workspace_cancel_delete,
             workspace::commands::workspace_begin_delete,
             workspace::commands::workspace_commit_delete_entry,
+            search::commands::workspace_search_files,
             backup::commands::backup_write,
             backup::commands::backup_read_all,
             backup::commands::backup_discard,

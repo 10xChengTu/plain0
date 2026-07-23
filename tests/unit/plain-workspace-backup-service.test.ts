@@ -61,6 +61,7 @@ function createFakeBridge(overrides: Partial<PlainBridge> = {}): {
 		workspaceReadDirectory: notImplemented,
 		workspaceReadFile: notImplemented,
 		workspaceWriteFile: notImplemented,
+		workspaceSearchFiles: notImplemented,
 		async backupWrite(key, bytes) {
 			state.writes.push({ key, bytes });
 			state.entries.set(key, bytes);

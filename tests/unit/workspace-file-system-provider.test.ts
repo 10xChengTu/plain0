@@ -257,6 +257,9 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async workspaceWriteFile() {
 			throw new Error("unused");
 		},
+		async workspaceSearchFiles() {
+			throw new Error("unused");
+		},
 		async backupWrite() {
 			throw new Error("unused");
 		},

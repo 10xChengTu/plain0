@@ -134,6 +134,9 @@ function testBridge(
 		async workspaceWriteFile() {
 			throw new Error("unused");
 		},
+		async workspaceSearchFiles() {
+			throw new Error("unused");
+		},
 		async backupWrite() {
 			throw new Error("unused");
 		},

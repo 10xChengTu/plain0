@@ -15,6 +15,7 @@ import type {
 	WorkspaceMoveIncompleteReason,
 	WorkspaceMoveResult,
 	WorkspaceRoot,
+	WorkspaceSearchFilesResult,
 	WorkspaceWatchPendingRoot,
 	WorkspaceWatchSyncRequest,
 	WorkspaceWatchWakeEvent,
@@ -25,6 +26,10 @@ import {
 	frozenBackupDiscardRequest,
 	frozenBackupWriteInputs,
 } from "./backup-codec";
+import {
+	frozenWorkspaceSearchFilesRequest,
+	frozenWorkspaceSearchFilesResult,
+} from "./search-codec";
 import {
 	compareWorkspaceEntryNames,
 	encodeWorkspaceWriteFileRequest,
@@ -90,6 +95,8 @@ const MAX_DELETE_NAME_PAYLOAD_BYTES = 2 * 1_024 * 1_024;
 const MAX_DELETE_SYMLINK_PAYLOAD_BYTES = 4 * 1_024;
 const MAX_DELETE_SYMLINK_TOTAL_BYTES = 2 * 1_024 * 1_024;
 const WORKSPACE_DELETE_IDLE_TTL_MS = 120_000;
+const MAX_MOCK_SEARCH_TREE_ENTRIES = 50_000;
+const MAX_MOCK_SEARCH_TREE_DEPTH = 256;
 const MOCK_MTIME = 1_700_000_000_000;
 const MOCK_CTIME = 1_699_999_000_000;
 const textEncoder = new TextEncoder();
@@ -451,6 +458,153 @@ function cloneMockTrees(): Map<string, MockDirectoryNode> {
 			cloneMockNode(root) as MockDirectoryNode,
 		]),
 	);
+}
+
+/**
+ * A deliberately simplified `.gitignore` line: this mock exists so Browser
+ * E2E fixtures can drop a `.gitignore` file into the tree and see file
+ * search honor it, not to re-implement gitignore's full glob grammar. Rust
+ * (`src-tauri/src/search/file_search.rs`) is the sole semantic authority;
+ * this only supports what the fixtures actually need: exact names,
+ * `*.ext` suffix globs, one literal path segment, negation (`!`), and a
+ * trailing `/` for directory-only rules.
+ */
+interface MockGitignoreRule {
+	readonly negate: boolean;
+	readonly dirOnly: boolean;
+	readonly pattern: string;
+}
+
+interface MockGitignoreLayer {
+	readonly wire: string;
+	readonly rules: readonly MockGitignoreRule[];
+}
+
+function parseMockGitignoreRules(
+	content: string,
+): readonly MockGitignoreRule[] {
+	return content
+		.split("\n")
+		.map((line) => line.replace(/\r$/, "").trim())
+		.filter((line) => line.length > 0 && !line.startsWith("#"))
+		.map((line): MockGitignoreRule => {
+			const negate = line.startsWith("!");
+			const withoutBang = negate ? line.slice(1) : line;
+			const dirOnly = withoutBang.endsWith("/");
+			const pattern = dirOnly ? withoutBang.slice(0, -1) : withoutBang;
+			return Object.freeze({ negate, dirOnly, pattern });
+		});
+}
+
+function mockGitignoreRuleMatches(
+	rule: MockGitignoreRule,
+	relativeToLayer: string,
+	isDir: boolean,
+): boolean {
+	if (rule.dirOnly && !isDir) {
+		return false;
+	}
+	if (rule.pattern.includes("/")) {
+		return (
+			relativeToLayer === rule.pattern ||
+			relativeToLayer.startsWith(`${rule.pattern}/`)
+		);
+	}
+	const segments = relativeToLayer.split("/");
+	const basename = segments.at(-1) ?? relativeToLayer;
+	if (rule.pattern.startsWith("*.")) {
+		return basename.endsWith(rule.pattern.slice(1));
+	}
+	return basename === rule.pattern || segments.includes(rule.pattern);
+}
+
+function mockGitignoreLayerFor(
+	directory: MockDirectoryNode,
+	wire: string,
+): MockGitignoreLayer {
+	const gitignoreNode = directory.entries.get(".gitignore");
+	let rules: readonly MockGitignoreRule[] = [];
+	if (gitignoreNode !== undefined && gitignoreNode.kind === "file") {
+		try {
+			rules = parseMockGitignoreRules(textDecoder.decode(gitignoreNode.bytes));
+		} catch {
+			rules = [];
+		}
+	}
+	return Object.freeze({ wire, rules });
+}
+
+/**
+ * Walks the `.gitignore` chain from most specific (deepest directory) to
+ * least specific (the search root), mirroring
+ * `search::file_search::matched_gitignore`'s precedence: the first layer
+ * with an opinion (ignore or negated re-include) wins.
+ */
+function mockPathIsGitignored(
+	chain: readonly MockGitignoreLayer[],
+	wire: string,
+	isDir: boolean,
+): boolean {
+	for (let index = chain.length - 1; index >= 0; index -= 1) {
+		const layer = chain[index]!;
+		const relative =
+			layer.wire.length === 0 ? wire : wire.slice(layer.wire.length + 1);
+		let matched: boolean | undefined;
+		for (const rule of layer.rules) {
+			if (mockGitignoreRuleMatches(rule, relative, isDir)) {
+				matched = !rule.negate;
+			}
+		}
+		if (matched !== undefined) {
+			return matched;
+		}
+	}
+	return false;
+}
+
+/**
+ * A deliberately small glob subset for mock `excludeGlobs`: `**\/name` (any
+ * depth), `**\/name/**` (anywhere under a directory named `name`), or a
+ * literal full-path match. Sufficient for E2E fixtures; Rust's `globset`
+ * matcher is the real implementation.
+ */
+function compileMockExcludeGlob(pattern: string): (wire: string) => boolean {
+	if (pattern.startsWith("**/") && pattern.endsWith("/**")) {
+		const middle = pattern.slice(3, -3);
+		return (wire) =>
+			wire === middle ||
+			wire.startsWith(`${middle}/`) ||
+			wire.split("/").includes(middle);
+	}
+	if (pattern.startsWith("**/")) {
+		const rest = pattern.slice(3);
+		return (wire) =>
+			wire === rest ||
+			wire.endsWith(`/${rest}`) ||
+			wire.split("/").includes(rest);
+	}
+	return (wire) => wire === pattern;
+}
+
+/** Cheap, non-scoring case-insensitive subsequence test; mirrors Rust's
+ * `is_subsequence` prefilter (both callers already lowercase their inputs). */
+function isMockSubsequence(pattern: string, haystack: string): boolean {
+	let haystackIndex = 0;
+	for (const patternChar of pattern) {
+		let found = false;
+		while (haystackIndex < haystack.length) {
+			const haystackChar = haystack[haystackIndex]!;
+			haystackIndex += 1;
+			if (haystackChar === patternChar) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			return false;
+		}
+	}
+	return true;
 }
 
 export type BrowserMockWorkspacePick = "selected" | "cancelled";
@@ -4430,6 +4584,121 @@ export function createBrowserMockBridge(
 		return result;
 	};
 
+	const searchWorkspaceFiles = (
+		request: Readonly<{
+			roots: readonly string[];
+			filePattern: string;
+			excludeGlobs: readonly string[];
+			maxResults: number;
+		}>,
+	): WorkspaceSearchFilesResult => {
+		const excludeMatchers = request.excludeGlobs.map(compileMockExcludeGlob);
+		const patternLower = request.filePattern.toLowerCase();
+		const entries: string[] = [];
+		let limitHit = false;
+		let visited = 0;
+
+		interface SearchFrame {
+			readonly directory: MockDirectoryNode;
+			readonly wire: string;
+			readonly depth: number;
+			readonly gitignoreChain: readonly MockGitignoreLayer[];
+			readonly names: readonly string[];
+			nextIndex: number;
+		}
+
+		// Mirrors WorkspaceService::search_files: every named root is leased
+		// (authorization-checked) up front, so an unauthorized root fails the
+		// whole request closed rather than being silently skipped.
+		for (const rootId of request.roots) {
+			if (!roots.has(rootId)) {
+				throw rootNotAuthorized();
+			}
+		}
+
+		rootsLoop: for (const rootId of request.roots) {
+			const root = trees.get(rootId);
+			if (root === undefined || root.kind !== "directory") {
+				continue;
+			}
+			const frames: SearchFrame[] = [
+				{
+					directory: root,
+					wire: "",
+					depth: 0,
+					gitignoreChain: [mockGitignoreLayerFor(root, "")],
+					names: [...root.entries.keys()].sort(compareWorkspaceEntryNames),
+					nextIndex: 0,
+				},
+			];
+
+			while (frames.length > 0) {
+				const frame = frames[frames.length - 1]!;
+				if (frame.nextIndex >= frame.names.length) {
+					frames.pop();
+					continue;
+				}
+				const name = frame.names[frame.nextIndex]!;
+				frame.nextIndex += 1;
+				visited += 1;
+				if (visited > MAX_MOCK_SEARCH_TREE_ENTRIES) {
+					limitHit = true;
+					break rootsLoop;
+				}
+				const child = frame.directory.entries.get(name);
+				if (child === undefined) {
+					continue;
+				}
+				const wire = frame.wire.length === 0 ? name : `${frame.wire}/${name}`;
+				const isDir = child.kind === "directory";
+				const excluded =
+					excludeMatchers.some((matches) => matches(wire)) ||
+					mockPathIsGitignored(frame.gitignoreChain, wire, isDir);
+
+				if (child.kind === "directory") {
+					if (excluded) {
+						continue;
+					}
+					const depth = frame.depth + 1;
+					if (depth > MAX_MOCK_SEARCH_TREE_DEPTH) {
+						limitHit = true;
+						continue;
+					}
+					frames.push({
+						directory: child,
+						wire,
+						depth,
+						gitignoreChain: [
+							...frame.gitignoreChain,
+							mockGitignoreLayerFor(child, wire),
+						],
+						names: [...child.entries.keys()].sort(compareWorkspaceEntryNames),
+						nextIndex: 0,
+					});
+				} else if (child.kind === "file") {
+					if (excluded) {
+						continue;
+					}
+					if (
+						patternLower.length > 0 &&
+						!isMockSubsequence(patternLower, wire.toLowerCase())
+					) {
+						continue;
+					}
+					entries.push(wire);
+					if (entries.length >= request.maxResults) {
+						limitHit = true;
+						break rootsLoop;
+					}
+				}
+				// Symlinks and other node kinds are never followed or
+				// reported, matching Rust's traversal policy.
+			}
+		}
+
+		return frozenWorkspaceSearchFilesResult(entries, limitHit);
+	};
+
 	return {
 		async runtimeInfo() {
 			queueMicrotask(() => {
@@ -4590,6 +4859,15 @@ export function createBrowserMockBridge(
 		},
 		async workspaceWriteFile(rootId, relativePath, expectedVersion, content) {
 			return writeWorkspaceFile(rootId, relativePath, expectedVersion, content);
+		},
+		async workspaceSearchFiles(roots_, filePattern, excludeGlobs, maxResults) {
+			const request = frozenWorkspaceSearchFilesRequest(
+				roots_,
+				filePattern,
+				excludeGlobs,
+				maxResults,
+			);
+			return searchWorkspaceFiles(request);
 		},
 		async backupWrite(key, bytes) {
 			if (roots.size === 0) {

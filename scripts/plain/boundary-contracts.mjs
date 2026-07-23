@@ -1112,6 +1112,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 			"./services/plain-workspace-backup-service",
 			"configurePlainWorkingCopyBackupBridge",
 		],
+		["./features/search/plain-search-service", "configurePlainSearchBridge"],
 	]) {
 		if (countExactNamedImport(moduleName, importedName) !== 1) {
 			failures.push(
@@ -1138,6 +1139,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 		"initialize",
 		"PLAIN_WORKSPACE_SCHEME",
 		"configurePlainWorkingCopyBackupBridge",
+		"configurePlainSearchBridge",
 	]);
 	let hasCriticalBootstrapShadow = false;
 	function bindingContainsCriticalName(name) {
@@ -1369,7 +1371,8 @@ export function validateWorkspaceProviderBootstrap(source) {
 			(parent.expression.text === "createPlainWorkspaceFileSystemProvider" ||
 				parent.expression.text === "registerWorkspaceDeleteCoordinator" ||
 				parent.expression.text === "registerWorkspaceCommands" ||
-				parent.expression.text === "configurePlainWorkingCopyBackupBridge")
+				parent.expression.text === "configurePlainWorkingCopyBackupBridge" ||
+				parent.expression.text === "configurePlainSearchBridge")
 		);
 	}
 	function isAllowedWorkspaceProviderIdentifier(node) {
@@ -1867,7 +1870,7 @@ export function validateMainCapability(capability) {
 }
 
 const WORKSPACE_RUST_SOURCE_PATTERN =
-	/^src-tauri\/src\/(?:path_policy\.rs|workspace\/.*\.rs)$/;
+	/^src-tauri\/src\/(?:path_policy\.rs|workspace\/.*\.rs|search\/.*\.rs)$/;
 const RUST_PRODUCTION_SOURCE_PATTERN = /^src-tauri\/src\/.*\.rs$/;
 const WORKSPACE_TEST_SOURCE_PATTERN = /(?:^|\/)tests\.rs$/;
 const WORKSPACE_VERSIONED_WRITER_PATH =
@@ -1912,6 +1915,10 @@ const WORKSPACE_DELETE_LIMITS = Object.freeze([
 	["MAX_DELETE_TREE_NAME_BYTES", 2 * 1_024 * 1_024, "usize"],
 	["MAX_DELETE_SYMLINK_BYTES", 4 * 1_024, "usize"],
 	["MAX_DELETE_TREE_SYMLINK_BYTES", 2 * 1_024 * 1_024, "usize"],
+]);
+const SEARCH_FILE_LIMITS = Object.freeze([
+	["MAX_SEARCH_TREE_ENTRIES", 50_000, "usize"],
+	["MAX_SEARCH_TREE_DEPTH", 256, "usize"],
 ]);
 
 function escapeRegularExpression(value) {
@@ -2739,6 +2746,31 @@ export function validateWorkspaceRustBoundary(
 		failures.push(
 			"Cargo.toml must not grant broad Tauri filesystem or shell authority",
 		);
+	}
+	for (const [dependency, requirement] of [
+		["globset", "=0.4.19"],
+		["ignore", "=0.4.31"],
+	]) {
+		if (
+			!cargoDependencyDeclaration(dependency, requirement).test(cargoSource)
+		) {
+			failures.push(`Cargo.toml must pin ${dependency} to ${requirement}`);
+		}
+		const dependencies = cargoDependencies.filter(
+			({ name }) => name === dependency,
+		);
+		const hasExactDependency = dependencies.some(
+			(candidate) =>
+				candidate.req === requirement &&
+				candidate.kind === null &&
+				candidate.rename === null &&
+				candidate.optional === false,
+		);
+		if (!hasExactDependency) {
+			failures.push(
+				`Cargo metadata must contain exactly one unrenamed runtime ${dependency} ${requirement} dependency`,
+			);
+		}
 	}
 
 	const usesCapFsExt = rustSources.some(({ relativePath, source }) => {
@@ -5002,6 +5034,126 @@ export function validateWorkspaceDeleteCommandRegistration(rustSources) {
 		}
 	}
 
+	return failures;
+}
+
+/**
+ * Mirrors the workspace copy/move/delete command-registration validators for
+ * the search domain's single command: `search/commands.rs` must define
+ * exactly one audited `workspace_search_files` Tauri command whose body does
+ * nothing but decode its request and route once through
+ * `WorkspaceService::search_files`, and `lib.rs` must register it exactly
+ * once. There is no closed-set-of-many check here because this slice
+ * registers exactly one search command.
+ */
+export function validateSearchCommandRegistration(rustSources) {
+	const failures = [];
+	const commandsSource = findRustSource(
+		rustSources,
+		"src-tauri/src/search/commands.rs",
+	);
+	const libSource = findRustSource(rustSources, "src-tauri/src/lib.rs");
+
+	if (commandsSource === undefined) {
+		return ["search command boundary requires search/commands.rs"];
+	}
+	const executableCommands = stripRustCommentsAndLiterals(commandsSource);
+	const commands = extractAuditedTauriCommands(
+		executableCommands,
+		"workspace_search_files",
+	);
+	if (commands.length !== 1) {
+		failures.push(
+			"search/commands.rs must define exactly one audited workspace_search_files Tauri command",
+		);
+	} else {
+		const [command] = commands;
+		const normalizedParameters = command.parameters
+			.replaceAll(/\s+/g, "")
+			.replace(/,$/, "");
+		const expectedParameters =
+			"window:WebviewWindow,service:State<'_,WorkspaceService>,request:WorkspaceSearchFilesRequest";
+		const expectedReturn = "->Result<WorkspaceSearchFilesResult,CommandError>";
+		if (
+			normalizedParameters !== expectedParameters ||
+			command.returnType.replaceAll(/\s+/g, "") !== expectedReturn
+		) {
+			failures.push(
+				"workspace_search_files must accept request: WorkspaceSearchFilesRequest and return Result<WorkspaceSearchFilesResult, CommandError>",
+			);
+		}
+		const normalizedBody = command.body
+			.replaceAll(/\s+/g, "")
+			.replace(/;$/, "");
+		if (
+			normalizedBody !==
+			"letquery=request.into_parts()?;WorkspaceService::search_files(service.inner(),window.label(),query).await"
+		) {
+			failures.push(
+				"workspace_search_files must contain only its DTO decode and a single WorkspaceService::search_files route",
+			);
+		}
+	}
+
+	if (libSource === undefined) {
+		failures.push("search command boundary requires src-tauri/src/lib.rs");
+		return failures;
+	}
+	const executableLib = stripRustCommentsAndLiterals(libSource);
+	const handlerBodies = [
+		...executableLib.matchAll(
+			/\.invoke_handler\s*\(\s*tauri\s*::\s*generate_handler\s*!\s*\[([\s\S]*?)\]\s*\)/g,
+		),
+	];
+	const commandPath =
+		/\bsearch\s*::\s*commands\s*::\s*workspace_search_files\b/g;
+	const registrations = [...executableLib.matchAll(commandPath)];
+	const registeredInHandler =
+		handlerBodies.length === 1 &&
+		/\bsearch\s*::\s*commands\s*::\s*workspace_search_files\b/.test(
+			handlerBodies[0][1],
+		);
+	if (registrations.length !== 1 || !registeredInHandler) {
+		failures.push(
+			"src-tauri/src/lib.rs must register search::commands::workspace_search_files exactly once in generate_handler",
+		);
+	}
+
+	return failures;
+}
+
+/**
+ * Locks `search/file_search.rs`'s traversal budget constants to their
+ * audited exact values, mirroring `WORKSPACE_COPY_LIMITS`/
+ * `WORKSPACE_DELETE_LIMITS`: a silent widening of either constant must fail
+ * this check rather than quietly changing the search domain's resource
+ * ceiling.
+ */
+export function validateSearchFileBudgetConstants(rustSources) {
+	const fileSearchSource = findRustSource(
+		rustSources,
+		"src-tauri/src/search/file_search.rs",
+	);
+	if (fileSearchSource === undefined) {
+		return ["search budget boundary requires search/file_search.rs"];
+	}
+	const executableSource = stripRustCommentsAndLiterals(fileSearchSource);
+	const failures = [];
+	for (const [name, value, integerType] of SEARCH_FILE_LIMITS) {
+		const declarations = findWorkspaceCopyLimitDeclarations(
+			executableSource,
+			name,
+			integerType,
+		);
+		if (
+			declarations.length !== 1 ||
+			evaluateSmallRustIntegerExpression(declarations[0]) !== value
+		) {
+			failures.push(
+				`search/file_search.rs must define exactly one ${name}: ${integerType} = ${value}`,
+			);
+		}
+	}
 	return failures;
 }
 

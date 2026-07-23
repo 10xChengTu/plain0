@@ -1786,6 +1786,8 @@ describe("workspace watcher Harness", () => {
 const workspaceCargo = `
 [dependencies]
 cap-std = "4.0.2"
+globset = "=0.4.19"
+ignore = "=0.4.31"
 libc = "0.2.186"
 notify = "=8.2.0"
 rustix = { version = "=1.1.4", features = ["fs"] }
@@ -1823,6 +1825,24 @@ const exactNotifyDependency = Object.freeze({
 	features: [],
 });
 
+const exactGlobsetDependency = Object.freeze({
+	name: "globset",
+	req: "=0.4.19",
+	kind: null,
+	rename: null,
+	target: null,
+	optional: false,
+});
+
+const exactIgnoreDependency = Object.freeze({
+	name: "ignore",
+	req: "=0.4.31",
+	kind: null,
+	rename: null,
+	target: null,
+	optional: false,
+});
+
 function validateWorkspaceRustBoundary(
 	cargoSource,
 	rustSources,
@@ -1836,6 +1856,8 @@ function validateWorkspaceRustBoundary(
 			exactRustixDependency,
 			exactSha2Dependency,
 			exactNotifyDependency,
+			exactGlobsetDependency,
+			exactIgnoreDependency,
 			...cargoDependencies,
 		],
 		resolvedSha2Features,
@@ -2861,6 +2883,8 @@ fn copy_directory_for_test(limits: DirectoryCopyLimits, hooks: &mut Hooks) {
 			exactRustixDependency,
 			exactSha2Dependency,
 			exactNotifyDependency,
+			exactGlobsetDependency,
+			exactIgnoreDependency,
 		];
 		expect(
 			validateWorkspaceRustBoundaryContract(
@@ -3115,14 +3139,28 @@ fn copy_directory_for_test(limits: DirectoryCopyLimits, hooks: &mut Hooks) {
 			'use ignore::{self as ig}; fn search() { ig::Walk::new("."); }',
 			"use search_ignore::WalkBuilder; fn search() {}",
 		]) {
+			// Bypasses the local wrapper's always-prepended exact `ignore`
+			// dependency (matching the notify-edge-case precedent above): this
+			// scenario tests a *renamed* `ignore` dependency in isolation, and
+			// a second, default-shaped `ignore` entry would spuriously trip the
+			// new exactly-one-`ignore`-dependency check unrelated to what this
+			// test exercises.
 			expect(
-				validateWorkspaceRustBoundary(
+				validateWorkspaceRustBoundaryContract(
 					workspaceCargo,
 					[
 						...workspaceSources,
 						{ relativePath: "src-tauri/src/search.rs", source },
 					],
-					[ignoreDependency],
+					[
+						exactRustixDependency,
+						exactSha2Dependency,
+						exactNotifyDependency,
+						exactGlobsetDependency,
+						exactIgnoreDependency,
+						ignoreDependency,
+					],
+					["default", "std"],
 				),
 			).toEqual([]);
 		}
@@ -6654,6 +6692,7 @@ import { registerCustomProvider } from "@codingame/monaco-vscode-files-service-o
 import { createPlainWorkspaceFileSystemProvider, PLAIN_WORKSPACE_SCHEME } from "./features/workspace/file-system-provider";
 import { registerWorkspaceDeleteCoordinator } from "./features/workspace/delete-coordinator";
 import { createBridge } from "./platform/tauri";
+import { configurePlainSearchBridge } from "./features/search/plain-search-service";
 import { configurePlainWorkingCopyBackupBridge } from "./services/plain-workspace-backup-service";
 
 async function bootstrap() {
@@ -6673,6 +6712,7 @@ window.addEventListener("pagehide", () => {
   workspaceDeleteCoordinator.dispose();
 }, { once: true });
 configurePlainWorkingCopyBackupBridge(bridge);
+configurePlainSearchBridge(bridge);
 await initialize(createServiceOverrides(), container, { enableWorkspaceTrust: false });
 }
 `;

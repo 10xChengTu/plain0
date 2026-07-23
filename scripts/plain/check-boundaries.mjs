@@ -11,6 +11,8 @@ import {
 	validateNotificationOverrideImportBoundary,
 	validateFrontendEntrypointScripts,
 	validateMainCapability,
+	validateSearchCommandRegistration,
+	validateSearchFileBudgetConstants,
 	validateSearchOverrideImportBoundary,
 	validateTauriApiBoundary,
 	validateTauriConfiguration,
@@ -692,6 +694,12 @@ for (const failure of validateWorkspaceDeleteCommandRegistration(rustSources)) {
 	fail(failure);
 }
 for (const failure of validateWorkspaceDeleteBoundary(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateSearchCommandRegistration(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateSearchFileBudgetConstants(rustSources)) {
 	fail(failure);
 }
 

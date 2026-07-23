@@ -79,9 +79,15 @@ async function installNativeIpcMock(
 	page: Page,
 	rawReadTransport: RawReadTransport,
 	mode: NativeIpcMockMode = "readonly",
+	// Extra root-relative files/directories to seed on top of the fixed
+	// fixture below, keyed by relative path (nested paths create their
+	// intermediate directories). Only the file-search test currently passes
+	// this — every other existing call site keeps the exact unmodified
+	// fixture it always had.
+	extraFiles: Readonly<Record<string, string>> = {},
 ): Promise<void> {
 	await page.addInitScript(
-		({ goldenRead, mode, rawReadTransport, pngBase64 }) => {
+		({ goldenRead, mode, rawReadTransport, pngBase64, extraFiles }) => {
 			const calls: Array<{
 				command: string;
 				args: Record<string, unknown>;
@@ -240,6 +246,29 @@ async function installNativeIpcMock(
 				["icon.png", fileBytes(decodeBase64(pngBase64))],
 				["src", directory([["main.ts", file("export const plain = true;\n")]])],
 			]);
+			const ensureNestedFile = (
+				relativePath: string,
+				content: string,
+			): void => {
+				const segments = relativePath.split("/");
+				let parent: MockDirectory = root;
+				for (let index = 0; index < segments.length - 1; index += 1) {
+					const segment = segments[index]!;
+					let next = parent.entries.get(segment);
+					if (next === undefined) {
+						next = directory([]);
+						parent.entries.set(segment, next);
+					}
+					if (next.kind !== "directory") {
+						throw new Error("Invalid extra test fixture path.");
+					}
+					parent = next;
+				}
+				parent.entries.set(segments.at(-1)!, file(content));
+			};
+			for (const [relativePath, content] of Object.entries(extraFiles)) {
+				ensureNestedFile(relativePath, content);
+			}
 			const entryNotFound = () => ({
 				code: "ENTRY_NOT_FOUND",
 				message: "The workspace entry does not exist.",
@@ -302,6 +331,229 @@ async function installNativeIpcMock(
 					descendants += descendantEntries(child);
 				}
 				return descendants;
+			};
+			// Deliberately simplified `.gitignore`/exclude-glob support for
+			// `workspace_search_files`: this fixture exists to prove Quick Open
+			// renders real results end-to-end, not to re-implement gitignore's
+			// grammar (Rust's search::file_search is the semantic authority; see
+			// docs/research/2026-07-23-search-quickopen.md).
+			interface MockGitignoreRule {
+				negate: boolean;
+				dirOnly: boolean;
+				pattern: string;
+			}
+			interface MockGitignoreLayer {
+				wire: string;
+				rules: MockGitignoreRule[];
+			}
+			const decodeUtf8Lenient = (bytes: Uint8Array): string => {
+				try {
+					return decoder.decode(bytes);
+				} catch {
+					return "";
+				}
+			};
+			const parseGitignoreRules = (content: string): MockGitignoreRule[] =>
+				content
+					.split("\n")
+					.map((line) => line.replace(/\r$/, "").trim())
+					.filter((line) => line.length > 0 && !line.startsWith("#"))
+					.map((line) => {
+						const negate = line.startsWith("!");
+						const withoutBang = negate ? line.slice(1) : line;
+						const dirOnly = withoutBang.endsWith("/");
+						const pattern = dirOnly ? withoutBang.slice(0, -1) : withoutBang;
+						return { negate, dirOnly, pattern };
+					});
+			const gitignoreRuleMatches = (
+				rule: MockGitignoreRule,
+				relative: string,
+				isDir: boolean,
+			): boolean => {
+				if (rule.dirOnly && !isDir) {
+					return false;
+				}
+				if (rule.pattern.includes("/")) {
+					return (
+						relative === rule.pattern || relative.startsWith(`${rule.pattern}/`)
+					);
+				}
+				const segments = relative.split("/");
+				const basename = segments.at(-1) ?? relative;
+				if (rule.pattern.startsWith("*.")) {
+					return basename.endsWith(rule.pattern.slice(1));
+				}
+				return basename === rule.pattern || segments.includes(rule.pattern);
+			};
+			const gitignoreLayerFor = (
+				directory: MockDirectory,
+				wire: string,
+			): MockGitignoreLayer => {
+				const node = directory.entries.get(".gitignore");
+				const rules =
+					node !== undefined && node.kind === "file"
+						? parseGitignoreRules(decodeUtf8Lenient(node.bytes))
+						: [];
+				return { wire, rules };
+			};
+			const pathIsGitignored = (
+				chain: readonly MockGitignoreLayer[],
+				wire: string,
+				isDir: boolean,
+			): boolean => {
+				for (let index = chain.length - 1; index >= 0; index -= 1) {
+					const layer = chain[index]!;
+					const relative =
+						layer.wire.length === 0 ? wire : wire.slice(layer.wire.length + 1);
+					let matched: boolean | undefined;
+					for (const rule of layer.rules) {
+						if (gitignoreRuleMatches(rule, relative, isDir)) {
+							matched = !rule.negate;
+						}
+					}
+					if (matched !== undefined) {
+						return matched;
+					}
+				}
+				return false;
+			};
+			const compileExcludeGlob = (
+				pattern: string,
+			): ((wire: string) => boolean) => {
+				if (pattern.startsWith("**/") && pattern.endsWith("/**")) {
+					const middle = pattern.slice(3, -3);
+					return (wire) =>
+						wire === middle ||
+						wire.startsWith(`${middle}/`) ||
+						wire.split("/").includes(middle);
+				}
+				if (pattern.startsWith("**/")) {
+					const rest = pattern.slice(3);
+					return (wire) =>
+						wire === rest ||
+						wire.endsWith(`/${rest}`) ||
+						wire.split("/").includes(rest);
+				}
+				return (wire) => wire === pattern;
+			};
+			const isMockSearchSubsequence = (
+				pattern: string,
+				haystack: string,
+			): boolean => {
+				let haystackIndex = 0;
+				for (const patternChar of pattern) {
+					let found = false;
+					while (haystackIndex < haystack.length) {
+						const haystackChar = haystack[haystackIndex]!;
+						haystackIndex += 1;
+						if (haystackChar === patternChar) {
+							found = true;
+							break;
+						}
+					}
+					if (!found) {
+						return false;
+					}
+				}
+				return true;
+			};
+			const MAX_MOCK_SEARCH_ENTRIES = 50_000;
+			const MAX_MOCK_SEARCH_DEPTH = 256;
+			const searchFiles = (
+				requestRoots: readonly string[],
+				filePattern: string,
+				excludeGlobs: readonly string[],
+				maxResults: number,
+			): { entries: string[]; limitHit: boolean } => {
+				const excludeMatchers = excludeGlobs.map(compileExcludeGlob);
+				const patternLower = filePattern.toLowerCase();
+				const entries: string[] = [];
+				let limitHit = false;
+				let visited = 0;
+				interface SearchFrame {
+					directory: MockDirectory;
+					wire: string;
+					depth: number;
+					gitignoreChain: MockGitignoreLayer[];
+					names: string[];
+					nextIndex: number;
+				}
+				rootsLoop: for (const requestedRootId of requestRoots) {
+					if (requestedRootId !== rootId) {
+						continue;
+					}
+					const frames: SearchFrame[] = [
+						{
+							directory: root,
+							wire: "",
+							depth: 0,
+							gitignoreChain: [gitignoreLayerFor(root, "")],
+							names: [...root.entries.keys()].sort(),
+							nextIndex: 0,
+						},
+					];
+					while (frames.length > 0) {
+						const frame = frames[frames.length - 1]!;
+						if (frame.nextIndex >= frame.names.length) {
+							frames.pop();
+							continue;
+						}
+						const name = frame.names[frame.nextIndex]!;
+						frame.nextIndex += 1;
+						visited += 1;
+						if (visited > MAX_MOCK_SEARCH_ENTRIES) {
+							limitHit = true;
+							break rootsLoop;
+						}
+						const child = frame.directory.entries.get(name);
+						if (child === undefined) {
+							continue;
+						}
+						const wire =
+							frame.wire.length === 0 ? name : `${frame.wire}/${name}`;
+						const isDir = child.kind === "directory";
+						const excluded =
+							excludeMatchers.some((matches) => matches(wire)) ||
+							pathIsGitignored(frame.gitignoreChain, wire, isDir);
+						if (child.kind === "directory") {
+							if (excluded) {
+								continue;
+							}
+							const depth = frame.depth + 1;
+							if (depth > MAX_MOCK_SEARCH_DEPTH) {
+								limitHit = true;
+								continue;
+							}
+							frames.push({
+								directory: child,
+								wire,
+								depth,
+								gitignoreChain: [
+									...frame.gitignoreChain,
+									gitignoreLayerFor(child, wire),
+								],
+								names: [...child.entries.keys()].sort(),
+								nextIndex: 0,
+							});
+						} else if (child.kind === "file") {
+							if (excluded) {
+								continue;
+							}
+							if (
+								patternLower.length > 0 &&
+								!isMockSearchSubsequence(patternLower, wire.toLowerCase())
+							) {
+								continue;
+							}
+							entries.push(wire);
+							if (entries.length >= maxResults) {
+								limitHit = true;
+								break rootsLoop;
+							}
+						}
+					}
+				}
+				return { entries, limitHit };
 			};
 			const bytesFromHex = (hex: string): Uint8Array => {
 				const bytes = new Uint8Array(hex.length / 2);
@@ -896,6 +1148,34 @@ async function installNativeIpcMock(
 								);
 							return { entries };
 						}
+						case "workspace_search_files": {
+							const search = args.request as
+								| {
+										roots?: readonly string[];
+										filePattern?: string;
+										excludeGlobs?: readonly string[];
+										maxResults?: number;
+								  }
+								| undefined;
+							if (
+								search === undefined ||
+								!Array.isArray(search.roots) ||
+								search.roots.length === 0 ||
+								typeof search.filePattern !== "string" ||
+								!Array.isArray(search.excludeGlobs) ||
+								typeof search.maxResults !== "number"
+							) {
+								throw new Error(
+									"Malformed workspace_search_files test request.",
+								);
+							}
+							return searchFiles(
+								search.roots,
+								search.filePattern,
+								search.excludeGlobs,
+								search.maxResults,
+							);
+						}
 						case "workspace_read_file": {
 							const relativePath = request?.relativePath ?? "";
 							if (request?.rootId !== rootId) {
@@ -946,6 +1226,7 @@ async function installNativeIpcMock(
 			mode,
 			rawReadTransport,
 			pngBase64: MINIMAL_PNG_BASE64,
+			extraFiles,
 		},
 	);
 }
@@ -5870,7 +6151,14 @@ test("opens Quick Open with Cmd+P and stays stable while typing, including on an
 		nativeDialogs.push(dialog.message());
 		void dialog.dismiss();
 	});
-	await installNativeIpcMock(page, "arrayBuffer", "supported");
+	// A nested directory with its own `.gitignore` (ignoring one sibling
+	// file): proves file search both walks into subdirectories and honors
+	// `.gitignore`, not just the flat root fixture.
+	await installNativeIpcMock(page, "arrayBuffer", "supported", {
+		"notes-archive/.gitignore": "secret.txt\n",
+		"notes-archive/secret.txt": "hidden contents\n",
+		"notes-archive/visible.txt": "visible contents\n",
+	});
 	await openNativeWorkspaceExplorer(page);
 
 	const quickOpen = page.locator(".quick-input-widget");
@@ -5885,13 +6173,47 @@ test("opens Quick Open with Cmd+P and stays stable while typing, including on an
 	const noMatchingResultsRow = quickOpen
 		.locator(".quick-input-list .monaco-list-row")
 		.filter({ hasText: "No matching results" });
+	const resultRows = quickOpen.locator(".quick-input-list .monaco-list-row");
 
+	// PlainSearchService's fileSearch now routes through the Rust search
+	// domain (see app/features/search/plain-search-service.ts and
+	// src-tauri/src/search/file_search.rs): a real, non-ignored match must
+	// appear.
 	await quickOpen.locator("input").pressSequentially("readme");
-	// PlainSearchService's fileSearch always resolves to an empty result set
-	// (see app/features/search/plain-search-service.ts), so AnythingQuick
-	// AccessProvider never lists README.md itself; the panel must simply stay
-	// open, show the upstream empty-results row, and stay free of a native
-	// error surface while a query is typed.
+	await expect(resultRows.filter({ hasText: "README.md" })).toHaveCount(1);
+	await expect(noMatchingResultsRow).toHaveCount(0);
+	await page.keyboard.press("Escape");
+	await expect(quickOpen).toBeHidden();
+
+	// The `.gitignore`-ignored file never appears...
+	await page.keyboard.press("ControlOrMeta+P");
+	await expect(quickOpen).toBeVisible();
+	await quickOpen.locator("input").pressSequentially("secret");
+	await expect(quickOpen).toBeVisible();
+	await expect(resultRows).toHaveCount(1);
+	await expect(noMatchingResultsRow).toHaveCount(1);
+	await page.keyboard.press("Escape");
+	await expect(quickOpen).toBeHidden();
+
+	// ...while its non-ignored sibling in the same directory does, and
+	// selecting it with Enter opens the file in the editor.
+	await page.keyboard.press("ControlOrMeta+P");
+	await expect(quickOpen).toBeVisible();
+	await quickOpen.locator("input").pressSequentially("visible");
+	const visiblePick = resultRows.filter({ hasText: "visible.txt" });
+	await expect(visiblePick).toHaveCount(1);
+	await expect(noMatchingResultsRow).toHaveCount(0);
+	await page.keyboard.press("Enter");
+	await expect(quickOpen).toBeHidden();
+	await expect(
+		page.getByRole("code").filter({ hasText: "visible contents" }),
+	).toBeVisible();
+
+	// A fragment matching nothing at all still renders the upstream
+	// empty-results row rather than an error.
+	await page.keyboard.press("ControlOrMeta+P");
+	await expect(quickOpen).toBeVisible();
+	await quickOpen.locator("input").pressSequentially("zzz-no-such-file");
 	await expect(quickOpen).toBeVisible();
 	await expect(
 		quickOpen.locator(".quick-input-list .monaco-list-row"),

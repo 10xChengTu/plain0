@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 
 use crate::error::CommandError;
 use crate::path_policy::RelativePath;
+use crate::search::dto::{WorkspaceSearchFilesQuery, WorkspaceSearchFilesResult};
+use crate::search::file_search;
 
 use super::dto::{
     DeleteConfirmationId, DeleteEntryId, WorkspaceDeleteBatchPlan, WorkspaceDeleteResult,
@@ -149,6 +151,32 @@ impl WorkspaceService {
             reader::read_file(&lease, &relative_path)?.into_plr1_frame()
         })
         .await
+    }
+
+    /// Read-only, multi-root file search. Does not take the mutation gate
+    /// (search never writes anything): every named root is leased once up
+    /// front, the bounded traversal runs on a blocking thread, and every
+    /// leased root is revalidated afterward exactly like [`Self::run_reader`]
+    /// does for a single root. If any root was revoked while the traversal
+    /// was in flight, the revoked-root error wins over a successful result.
+    pub async fn search_files(
+        &self,
+        window_label: &str,
+        query: WorkspaceSearchFilesQuery,
+    ) -> Result<WorkspaceSearchFilesResult, CommandError> {
+        let workspace = self.scope_for_window(window_label)?;
+        let mut leases = Vec::with_capacity(query.roots.len());
+        for root_id in &query.roots {
+            leases.push(workspace.lease(*root_id)?);
+        }
+        let leased_root_ids: Vec<RootId> = leases.iter().map(WorkspaceRootLease::root_id).collect();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            file_search::search_roots(&leases, &query)
+        })
+        .await
+        .map_err(|_| workspace_read_failed());
+        workspace.validate_leases(&leased_root_ids)?;
+        result?
     }
 
     pub async fn write_file(

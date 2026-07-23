@@ -227,6 +227,8 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/excluded-surfaces.ts:@codingame/monaco-vscode-api/monaco",
 	"app/excluded-surfaces.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/views",
 	"app/features/search/plain-search-service.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/cancellation",
+	"app/features/search/plain-search-service.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/glob",
+	"app/features/search/plain-search-service.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
 	"app/features/search/plain-search-service.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/services/model.service",
 	"app/features/search/plain-search-service.ts:@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files.service",
 	"app/features/search/plain-search-service.ts:@codingame/monaco-vscode-api/vscode/vs/platform/log/common/log.service",
