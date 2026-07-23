@@ -1888,6 +1888,9 @@ const SHA2_RESOLVED_FEATURES = Object.freeze(["default", "std"]);
 const ZIP_VERSION = "8.6.0";
 const ZIP_REQUIREMENT = `=${ZIP_VERSION}`;
 const ZIP_FEATURES = Object.freeze(["deflate-flate2-zlib-rs"]);
+const JSONC_PARSER_VERSION = "0.33.0";
+const JSONC_PARSER_REQUIREMENT = `=${JSONC_PARSER_VERSION}`;
+const JSONC_PARSER_FEATURES = Object.freeze([]);
 const FOLLOW_SYMLINKS_YES_PATTERN =
 	/\bFollowSymlinks\s*::\s*(?:Yes\b|\{[^}]*\bYes\b)/;
 const FORBIDDEN_DIRECTORY_DEPENDENCIES = Object.freeze([
@@ -2769,6 +2772,58 @@ export function validateWorkspaceRustBoundary(
 		if (!sameArray(zipDependency.features, ZIP_FEATURES)) {
 			failures.push(
 				"the direct zip dependency must enable exactly the deflate-flate2-zlib-rs feature",
+			);
+		}
+	}
+
+	const jsoncParserDeclarations = [
+		...cargoSource.matchAll(
+			/^jsonc-parser = \{ version = "=0\.33\.0", default-features = false, features = \[\] \}$/gm,
+		),
+	];
+	if (jsoncParserDeclarations.length !== 1) {
+		failures.push(
+			'Cargo.toml must declare exactly one jsonc-parser = { version = "=0.33.0", default-features = false, features = [] } dependency',
+		);
+	}
+	const jsoncParserDependencies = cargoDependencies.filter(
+		({ name }) => name === "jsonc-parser",
+	);
+	if (jsoncParserDependencies.length !== 1) {
+		failures.push(
+			"Cargo metadata must contain exactly one direct jsonc-parser dependency",
+		);
+	} else {
+		const [jsoncParserDependency] = jsoncParserDependencies;
+		if (jsoncParserDependency.req !== JSONC_PARSER_REQUIREMENT) {
+			failures.push(
+				"the direct jsonc-parser dependency must require exactly =0.33.0",
+			);
+		}
+		if (jsoncParserDependency.rename !== null) {
+			failures.push("the direct jsonc-parser dependency must remain unrenamed");
+		}
+		if (jsoncParserDependency.kind !== null) {
+			failures.push(
+				"the direct jsonc-parser dependency must be a normal runtime edge",
+			);
+		}
+		if (jsoncParserDependency.target !== null) {
+			failures.push(
+				"the direct jsonc-parser dependency must not be target-specific",
+			);
+		}
+		if (jsoncParserDependency.optional !== false) {
+			failures.push("the direct jsonc-parser dependency must not be optional");
+		}
+		if (jsoncParserDependency.uses_default_features !== false) {
+			failures.push(
+				"the direct jsonc-parser dependency must disable default features",
+			);
+		}
+		if (!sameArray(jsoncParserDependency.features, JSONC_PARSER_FEATURES)) {
+			failures.push(
+				"the direct jsonc-parser dependency must enable no explicit features",
 			);
 		}
 	}

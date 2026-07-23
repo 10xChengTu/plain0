@@ -6,6 +6,7 @@ use cap_std::fs::Dir;
 
 use crate::error::CommandError;
 
+use super::record::{list_theme_packages, ThemeLibraryListing};
 use super::theme_unavailable;
 
 /// Rust-authoritative theme package library rooted at
@@ -56,6 +57,17 @@ impl ThemeLibrary {
         let clone = dir.try_clone().map_err(|_| theme_unavailable())?;
         *root = Some(dir);
         Ok(clone)
+    }
+
+    /// The `theme_list`-shaped library enumeration: every finalized package
+    /// with a readable `manifest.plain.json` record, plus a count of
+    /// anything skipped (a corrupt record, a leftover staging directory
+    /// from a crashed import, ...). See `record::list_theme_packages` for
+    /// the actual walk.
+    pub(crate) fn list_packages(&self) -> Result<ThemeLibraryListing, CommandError> {
+        let _guard = self.lock()?;
+        let root = self.ensure_root()?;
+        list_theme_packages(&root)
     }
 }
 

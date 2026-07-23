@@ -1798,6 +1798,7 @@ grep-matcher = "=0.1.9"
 grep-regex = "=0.1.14"
 grep-searcher = "=0.1.17"
 ignore = "=0.4.31"
+jsonc-parser = { version = "=0.33.0", default-features = false, features = [] }
 libc = "0.2.186"
 notify = "=8.2.0"
 rustix = { version = "=1.1.4", features = ["fs"] }
@@ -1892,6 +1893,17 @@ const exactZipDependency = Object.freeze({
 	features: ["deflate-flate2-zlib-rs"],
 });
 
+const exactJsoncParserDependency = Object.freeze({
+	name: "jsonc-parser",
+	req: "=0.33.0",
+	kind: null,
+	rename: null,
+	target: null,
+	optional: false,
+	uses_default_features: false,
+	features: [],
+});
+
 function validateWorkspaceRustBoundary(
 	cargoSource,
 	rustSources,
@@ -1911,6 +1923,7 @@ function validateWorkspaceRustBoundary(
 			exactGrepRegexDependency,
 			exactGrepSearcherDependency,
 			exactZipDependency,
+			exactJsoncParserDependency,
 			...cargoDependencies,
 		],
 		resolvedSha2Features,
@@ -2942,6 +2955,7 @@ fn copy_directory_for_test(limits: DirectoryCopyLimits, hooks: &mut Hooks) {
 			exactGrepRegexDependency,
 			exactGrepSearcherDependency,
 			exactZipDependency,
+			exactJsoncParserDependency,
 		];
 		expect(
 			validateWorkspaceRustBoundaryContract(
@@ -3154,6 +3168,111 @@ fn copy_directory_for_test(limits: DirectoryCopyLimits, hooks: &mut Hooks) {
 		}
 	});
 
+	it("locks the sole direct jsonc-parser edge, its zero-feature footprint and every Cargo metadata field", () => {
+		expect(
+			validateWorkspaceRustBoundary(workspaceCargo, workspaceSources),
+		).toEqual([]);
+
+		const cases = [
+			[
+				[exactRustixDependency],
+				"Cargo metadata must contain exactly one direct jsonc-parser dependency",
+			],
+			[
+				[
+					exactRustixDependency,
+					exactJsoncParserDependency,
+					exactJsoncParserDependency,
+				],
+				"Cargo metadata must contain exactly one direct jsonc-parser dependency",
+			],
+			[
+				[
+					exactRustixDependency,
+					{ ...exactJsoncParserDependency, req: "^0.33.0" },
+				],
+				"the direct jsonc-parser dependency must require exactly =0.33.0",
+			],
+			[
+				[
+					exactRustixDependency,
+					{ ...exactJsoncParserDependency, rename: "jsonc" },
+				],
+				"the direct jsonc-parser dependency must remain unrenamed",
+			],
+			[
+				[exactRustixDependency, { ...exactJsoncParserDependency, kind: "dev" }],
+				"the direct jsonc-parser dependency must be a normal runtime edge",
+			],
+			[
+				[
+					exactRustixDependency,
+					{ ...exactJsoncParserDependency, kind: "build" },
+				],
+				"the direct jsonc-parser dependency must be a normal runtime edge",
+			],
+			[
+				[
+					exactRustixDependency,
+					{ ...exactJsoncParserDependency, target: "cfg(unix)" },
+				],
+				"the direct jsonc-parser dependency must not be target-specific",
+			],
+			[
+				[
+					exactRustixDependency,
+					{ ...exactJsoncParserDependency, optional: true },
+				],
+				"the direct jsonc-parser dependency must not be optional",
+			],
+			[
+				[
+					exactRustixDependency,
+					{ ...exactJsoncParserDependency, uses_default_features: true },
+				],
+				"the direct jsonc-parser dependency must disable default features",
+			],
+			[
+				[
+					exactRustixDependency,
+					{ ...exactJsoncParserDependency, features: ["cst"] },
+				],
+				"the direct jsonc-parser dependency must enable no explicit features",
+			],
+		];
+		for (const [hostileDependencies, failure] of cases) {
+			expect(
+				validateWorkspaceRustBoundaryContract(
+					workspaceCargo,
+					workspaceSources,
+					hostileDependencies,
+				),
+			).toContain(failure);
+		}
+	});
+
+	it("locks the exact jsonc-parser manifest declaration to zero explicit features", () => {
+		const declarationFailure =
+			'Cargo.toml must declare exactly one jsonc-parser = { version = "=0.33.0", default-features = false, features = [] } dependency';
+		for (const hostileDeclaration of [
+			'jsonc-parser = "0.33.0"',
+			'jsonc-parser = { version = "0.33.0", default-features = false, features = [] }',
+			'jsonc-parser = { version = "=0.33.0", default-features = true, features = [] }',
+			'jsonc-parser = { version = "=0.33.0", default-features = false }',
+			'jsonc-parser = { version = "=0.33.0", default-features = false, features = ["cst"] }',
+		]) {
+			expect(
+				validateWorkspaceRustBoundary(
+					workspaceCargo.replace(
+						'jsonc-parser = { version = "=0.33.0", default-features = false, features = [] }',
+						hostileDeclaration,
+					),
+					workspaceSources,
+				),
+			).toContain(declarationFailure);
+		}
+	});
+
 	it("requires an exact cap-fs-ext pin only when the copy implementation introduces it", () => {
 		const failure =
 			"Cargo metadata must contain exactly one unrenamed runtime cap-fs-ext =4.0.2 dependency";
@@ -3321,6 +3440,7 @@ fn copy_directory_for_test(limits: DirectoryCopyLimits, hooks: &mut Hooks) {
 						exactGrepRegexDependency,
 						exactGrepSearcherDependency,
 						exactZipDependency,
+						exactJsoncParserDependency,
 						ignoreDependency,
 					],
 					["default", "std"],

@@ -2,13 +2,20 @@
 //!
 //! `F050` S1 scope: safely unpack a VSIX (zip) or an already-unpacked
 //! directory into the theme package library, enforcing bounded entry
-//! count/size/name limits and rejecting zip-slip and symlink entries. This
-//! module intentionally stops at "safe bytes landed in a package
-//! directory" — `contributes.themes`/JSONC/include-chain validation is
-//! `F050` S2, and import UX/registration is S3. No Tauri command is
-//! exposed yet: everything here is a plain library function driven by Rust
-//! tests, matching the S1 slice's frozen design (see
-//! `docs/research/2026-07-24-theme-compatibility.md`).
+//! count/size/name limits and rejecting zip-slip and symlink entries.
+//!
+//! `F050` S2 scope (this slice): close the "staging → validated →
+//! semantically identified" loop. `manifest` parses and validates
+//! `extension/package.json` (JSONC), `theme_json` validates each
+//! `contributes.themes[].path` document (JSON include chains and `.tmTheme`
+//! structural checks), `record` defines the on-disk stored manifest and the
+//! library-enumeration function, and `import` ties unpack + manifest +
+//! theme_json + record together into one staging session per import: the
+//! staged tree is renamed directly into its final `publisher.name@version`
+//! identity only once every check has passed, and is dropped (via the same
+//! `Staging` guard `unpack` already uses) otherwise — never a separate
+//! "publish under a placeholder id, then maybe delete a whole tree" step.
+//! Import UX (Tauri commands, file/directory pickers) is `F050` S3.
 //!
 //! Nothing in this domain is reachable from a Tauri command yet — that is
 //! this slice's deliberate scope boundary, driven entirely by the Rust test
@@ -17,7 +24,14 @@
 //! wires it to `lib.rs`.
 #![allow(dead_code)]
 
+#[cfg(test)]
+pub(crate) mod fixtures;
+pub(crate) mod import;
 pub(crate) mod library;
+pub(crate) mod manifest;
+pub(crate) mod record;
+pub(crate) mod relative_path;
+pub(crate) mod theme_json;
 pub(crate) mod unpack;
 
 /// Maximum number of entries a single theme package (VSIX central
@@ -47,6 +61,51 @@ const EXTENSION_PREFIX: &str = "extension/";
 
 const STAGE_PREFIX: &str = ".plain-theme-";
 const MAX_STAGING_ATTEMPTS: usize = 16;
+
+/// Maximum `include` chain recursion depth for a single
+/// `contributes.themes[]` document (the top-level document itself counts as
+/// depth `1`). Mirrors the zip-slip precedent: upstream `_loadColorTheme` is
+/// a bare recursive loader with no cycle or depth guard at all, so Plain
+/// enforces both before ever handing a parsed document to anything else.
+pub(crate) const MAX_INCLUDE_CHAIN_DEPTH: usize = 32;
+
+/// Maximum number of distinct files (JSON theme documents walked via
+/// `include`, plus `.tmTheme` leaves reached via a top-level `path` or a
+/// `tokenColors` string reference) opened across a *whole package import* —
+/// every `contributes.themes[]` entry shares one counter. This is
+/// deliberately independent from [`MAX_INCLUDE_CHAIN_DEPTH`]: depth bounds
+/// any single chain's recursion, this bounds total parse work across a
+/// package that might declare many theme entries, each with a modest chain.
+pub(crate) const MAX_INCLUDE_CHAIN_FILES: usize = 64;
+
+/// The exact JSONC dialect Plain accepts for `package.json` and every theme
+/// JSON document: comments and trailing commas only — never the rest of the
+/// upstream parser's much looser JSON5-adjacent surface (single-quoted
+/// strings, hex/unary-plus numbers, loose property names, missing commas).
+pub(crate) const JSONC_PARSE_OPTIONS: jsonc_parser::ParseOptions = jsonc_parser::ParseOptions {
+    allow_comments: true,
+    allow_trailing_commas: true,
+    allow_loose_object_property_names: false,
+    allow_missing_commas: false,
+    allow_single_quoted_strings: false,
+    allow_hexadecimal_numbers: false,
+    allow_unary_plus_numbers: false,
+};
+
+// Compile-time (not merely test-time) proof that `JSONC_PARSE_OPTIONS` is
+// exactly comments + trailing commas and nothing else from the upstream
+// parser's much looser JSON5-adjacent surface: a `const` block fails the
+// build itself if any field ever drifts, which is a strictly stronger
+// guarantee than a runtime assertion over the same already-`const` value.
+const _: () = {
+    assert!(JSONC_PARSE_OPTIONS.allow_comments);
+    assert!(JSONC_PARSE_OPTIONS.allow_trailing_commas);
+    assert!(!JSONC_PARSE_OPTIONS.allow_loose_object_property_names);
+    assert!(!JSONC_PARSE_OPTIONS.allow_missing_commas);
+    assert!(!JSONC_PARSE_OPTIONS.allow_single_quoted_strings);
+    assert!(!JSONC_PARSE_OPTIONS.allow_hexadecimal_numbers);
+    assert!(!JSONC_PARSE_OPTIONS.allow_unary_plus_numbers);
+};
 
 use crate::error::CommandError;
 
@@ -90,4 +149,170 @@ pub(crate) fn theme_stage_cleanup_failed() -> CommandError {
         "THEME_STAGE_CLEANUP_FAILED",
         "The theme import staging area could not be cleaned up.",
     )
+}
+
+pub(crate) fn theme_manifest_missing() -> CommandError {
+    CommandError::new(
+        "THEME_MANIFEST_MISSING",
+        "The theme package does not contain an extension/package.json manifest.",
+    )
+}
+
+pub(crate) fn theme_manifest_invalid() -> CommandError {
+    CommandError::new(
+        "THEME_MANIFEST_INVALID",
+        "The theme package manifest is not a valid JSONC object.",
+    )
+}
+
+pub(crate) fn theme_manifest_field_invalid() -> CommandError {
+    CommandError::new(
+        "THEME_MANIFEST_FIELD_INVALID",
+        "The theme package manifest is missing a required field or the field \
+         does not match the allowed character set.",
+    )
+}
+
+pub(crate) fn theme_package_no_themes() -> CommandError {
+    CommandError::new(
+        "THEME_PACKAGE_NO_THEMES",
+        "The theme package does not declare any contributes.themes entries.",
+    )
+}
+
+pub(crate) fn theme_contribution_invalid() -> CommandError {
+    CommandError::new(
+        "THEME_CONTRIBUTION_INVALID",
+        "A contributes.themes entry is malformed.",
+    )
+}
+
+pub(crate) fn theme_contribution_path_invalid() -> CommandError {
+    CommandError::new(
+        "THEME_CONTRIBUTION_PATH_INVALID",
+        "A contributes.themes entry's path escapes the package or is not \
+         present in the unpacked package.",
+    )
+}
+
+pub(crate) fn theme_json_invalid() -> CommandError {
+    CommandError::new(
+        "THEME_JSON_INVALID",
+        "A theme JSON document is not valid JSONC or has a malformed \
+         colors/tokenColors/semanticTokenColors/include shape.",
+    )
+}
+
+pub(crate) fn theme_include_cycle() -> CommandError {
+    CommandError::new(
+        "THEME_INCLUDE_CYCLE",
+        "A theme document's include chain refers back to a document already \
+         visited in this chain.",
+    )
+}
+
+pub(crate) fn theme_include_too_deep() -> CommandError {
+    CommandError::new(
+        "THEME_INCLUDE_TOO_DEEP",
+        "A theme document's include chain exceeds the supported nesting depth.",
+    )
+}
+
+pub(crate) fn theme_include_too_many() -> CommandError {
+    CommandError::new(
+        "THEME_INCLUDE_TOO_MANY",
+        "Validating this package's theme documents would open more files \
+         than the supported budget.",
+    )
+}
+
+pub(crate) fn theme_include_invalid() -> CommandError {
+    CommandError::new(
+        "THEME_INCLUDE_INVALID",
+        "A theme document's include or tokenColors reference escapes the \
+         package or is not present in the unpacked package.",
+    )
+}
+
+pub(crate) fn theme_tmtheme_invalid() -> CommandError {
+    CommandError::new(
+        "THEME_TMTHEME_INVALID",
+        "A .tmTheme file is not a structurally valid property list.",
+    )
+}
+
+pub(crate) fn theme_package_already_imported() -> CommandError {
+    CommandError::new(
+        "THEME_PACKAGE_ALREADY_IMPORTED",
+        "A theme package with the same publisher, name and version is \
+         already imported.",
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The exhaustive, closed set of theme-domain error codes. Any new
+    /// error constructor added to this module must be added here too, or
+    /// this test fails — the same "closed set" discipline other domains
+    /// apply to their own error codes.
+    #[test]
+    fn error_codes_are_the_exact_closed_set() {
+        let mut codes: Vec<&'static str> = vec![
+            theme_unavailable().code(),
+            theme_package_corrupt().code(),
+            theme_package_unsafe_path().code(),
+            theme_package_too_large().code(),
+            theme_io_failed().code(),
+            theme_stage_cleanup_failed().code(),
+            theme_manifest_missing().code(),
+            theme_manifest_invalid().code(),
+            theme_manifest_field_invalid().code(),
+            theme_package_no_themes().code(),
+            theme_contribution_invalid().code(),
+            theme_contribution_path_invalid().code(),
+            theme_json_invalid().code(),
+            theme_include_cycle().code(),
+            theme_include_too_deep().code(),
+            theme_include_too_many().code(),
+            theme_include_invalid().code(),
+            theme_tmtheme_invalid().code(),
+            theme_package_already_imported().code(),
+        ];
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(
+            codes,
+            vec![
+                "THEME_CONTRIBUTION_INVALID",
+                "THEME_CONTRIBUTION_PATH_INVALID",
+                "THEME_INCLUDE_CYCLE",
+                "THEME_INCLUDE_INVALID",
+                "THEME_INCLUDE_TOO_DEEP",
+                "THEME_INCLUDE_TOO_MANY",
+                "THEME_IO_FAILED",
+                "THEME_JSON_INVALID",
+                "THEME_MANIFEST_FIELD_INVALID",
+                "THEME_MANIFEST_INVALID",
+                "THEME_MANIFEST_MISSING",
+                "THEME_PACKAGE_ALREADY_IMPORTED",
+                "THEME_PACKAGE_CORRUPT",
+                "THEME_PACKAGE_NO_THEMES",
+                "THEME_PACKAGE_TOO_LARGE",
+                "THEME_PACKAGE_UNSAFE_PATH",
+                "THEME_STAGE_CLEANUP_FAILED",
+                "THEME_TMTHEME_INVALID",
+                "THEME_UNAVAILABLE",
+            ],
+            "every theme error code must be declared exactly once in this closed set \
+             (19 codes: 6 from S1 + 13 new in S2)"
+        );
+    }
+
+    #[test]
+    fn budget_constants_are_exactly_pinned() {
+        assert_eq!(MAX_INCLUDE_CHAIN_DEPTH, 32);
+        assert_eq!(MAX_INCLUDE_CHAIN_FILES, 64);
+    }
 }

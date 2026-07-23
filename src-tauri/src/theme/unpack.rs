@@ -9,13 +9,23 @@
 //! written into it are removed by `Staging`'s `Drop` guard, exactly mirroring
 //! `backup::store::Stage` and `workspace::directory_copy::StagedTree`.
 //!
-//! S1 finalizes a package under a fresh random id (`Uuid::new_v4`), not yet
-//! its `publisher.name@version` identity — that requires the manifest/theme
-//! JSON parsing that is `F050` S2's scope. This is a deliberate two-phase
-//! design: S1 owns "unpack safely, publish under a placeholder id"; S2 will
-//! read `extension/package.json` out of the now-published (but not yet
-//! semantically validated) directory and decide whether to keep it,
-//! re-key it, or discard it.
+//! `unpack_vsix`/`unpack_directory` finalize a package under a fresh random
+//! id (`Uuid::new_v4`) — a standalone, fully self-contained unpack that
+//! never looks at `extension/package.json` at all, kept exactly as S1 left
+//! it (and still covered by S1's own test suite below) for its own sake as
+//! "safe bytes landed in a package directory, nothing more".
+//!
+//! `F050` S2's import pipeline (`theme::import`) does not call either of
+//! those two functions: it calls the lower-level [`stage_vsix`]/
+//! [`stage_directory`] instead, which do everything the S1 functions do
+//! *except* the final publish rename. This keeps exactly one `Staging`
+//! session alive across unpack → manifest parse → theme JSON validation,
+//! so a validation failure is cleaned up by the very same tracked-entry
+//! `Drop` guard S1 already relies on — never a second pass that has to
+//! rediscover and delete an already-published, arbitrarily deep directory
+//! tree. Only once every check has passed does `theme::import` rename the
+//! still-staged tree directly into its final `publisher.name@version`
+//! identity via [`Staging::publish_as`].
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -32,9 +42,10 @@ use crate::error::CommandError;
 use crate::path_policy::RelativePath;
 
 use super::{
-    theme_io_failed, theme_package_corrupt, theme_package_too_large, theme_package_unsafe_path,
-    theme_stage_cleanup_failed, EXTENSION_PREFIX, MAX_STAGING_ATTEMPTS, MAX_THEME_ENTRY_BYTES,
-    MAX_THEME_ENTRY_NAME_BYTES, MAX_THEME_PACKAGE_BYTES, MAX_THEME_PACKAGE_ENTRIES, STAGE_PREFIX,
+    theme_io_failed, theme_package_already_imported, theme_package_corrupt,
+    theme_package_too_large, theme_package_unsafe_path, theme_stage_cleanup_failed,
+    EXTENSION_PREFIX, MAX_STAGING_ATTEMPTS, MAX_THEME_ENTRY_BYTES, MAX_THEME_ENTRY_NAME_BYTES,
+    MAX_THEME_PACKAGE_BYTES, MAX_THEME_PACKAGE_ENTRIES, STAGE_PREFIX,
 };
 
 const COPY_BUFFER_BYTES: usize = 64 * 1_024;
@@ -52,7 +63,18 @@ pub(crate) struct UnpackedTheme {
 
 /// Safely unpacks an already-opened VSIX (zip) file into a fresh package
 /// directory under `root` (the theme library root).
-pub(crate) fn unpack_vsix(root: &Dir, mut source: File) -> Result<UnpackedTheme, CommandError> {
+pub(crate) fn unpack_vsix(root: &Dir, source: File) -> Result<UnpackedTheme, CommandError> {
+    let (staged, files) = stage_vsix(root, source)?;
+    staged.publish(files)
+}
+
+/// Builds a validated, staged package tree from an already-opened VSIX
+/// (zip) file, without publishing it. See the module docs for why `F050`
+/// S2's import pipeline uses this instead of [`unpack_vsix`].
+pub(crate) fn stage_vsix(
+    root: &Dir,
+    mut source: File,
+) -> Result<(Staging<'_>, Vec<String>), CommandError> {
     source
         .seek(SeekFrom::Start(0))
         .map_err(|_| theme_io_failed())?;
@@ -120,7 +142,7 @@ pub(crate) fn unpack_vsix(root: &Dir, mut source: File) -> Result<UnpackedTheme,
     }
 
     files.sort();
-    staged.publish(files)
+    Ok((staged, files))
 }
 
 /// Safely copies an already-unpacked theme directory (picked by the user via
@@ -132,6 +154,17 @@ pub(crate) fn unpack_directory(
     root: &Dir,
     source_path: &Path,
 ) -> Result<UnpackedTheme, CommandError> {
+    let (staged, files) = stage_directory(root, source_path)?;
+    staged.publish(files)
+}
+
+/// Builds a validated, staged package tree from an already-unpacked source
+/// directory, without publishing it. See the module docs for why `F050` S2's
+/// import pipeline uses this instead of [`unpack_directory`].
+pub(crate) fn stage_directory<'root>(
+    root: &'root Dir,
+    source_path: &Path,
+) -> Result<(Staging<'root>, Vec<String>), CommandError> {
     let source_root =
         Dir::open_ambient_dir(source_path, ambient_authority()).map_err(|_| theme_io_failed())?;
 
@@ -222,7 +255,7 @@ pub(crate) fn unpack_directory(
     }
 
     files.sort();
-    staged.publish(files)
+    Ok((staged, files))
 }
 
 fn collect_sorted_names(dir: &Dir) -> Result<Vec<String>, CommandError> {
@@ -270,7 +303,12 @@ struct CreatedEntry {
 /// A private, high-entropy staging directory inside the theme library root,
 /// filled one validated member at a time and published with a single
 /// rename. Every directory created (staging root included) is `0700`.
-struct Staging<'root> {
+///
+/// `pub(crate)` (rather than private to this module) so `theme::import` can
+/// hold a still-active `Staging` across `manifest`/`theme_json` validation
+/// before deciding whether to [`Staging::publish_as`] it or simply drop it —
+/// see the module docs.
+pub(crate) struct Staging<'root> {
     root: &'root Dir,
     stage_name: PathBuf,
     id: String,
@@ -435,6 +473,104 @@ impl<'root> Staging<'root> {
             }
         }
         Err(theme_io_failed())
+    }
+
+    /// Renames the fully built staging directory into place as the caller's
+    /// chosen `id` (the package's `publisher.name@version` semantic
+    /// identity), consuming `self` so `Drop` becomes a no-op on success.
+    ///
+    /// Unlike [`Staging::publish`], an `id` collision is never raced past
+    /// with a fresh id: a directory already present at that exact semantic
+    /// identity means a genuine duplicate import, not an entropy collision,
+    /// so it is rejected outright. On any error `self` is still dropped at
+    /// the end of this call with `active` still `true`, so the normal
+    /// tracked-entry cleanup removes everything this staging session wrote —
+    /// the duplicate-import case leaves the *existing* published package
+    /// completely untouched.
+    pub(crate) fn publish_as(mut self, id: &str) -> Result<(), CommandError> {
+        match self.root.rename(&self.stage_name, self.root, id) {
+            Ok(()) => {
+                self.active = false;
+                Ok(())
+            }
+            // A rename onto an existing directory can surface as either
+            // kind depending on the platform/filesystem: `AlreadyExists`
+            // (e.g. an empty existing target on some platforms) or
+            // `DirectoryNotEmpty` (confirmed the actual kind on macOS/most
+            // Linux filesystems for a non-empty existing target — which a
+            // genuinely already-published package directory always is,
+            // since it holds at least `package.json` and this domain's own
+            // stored record). Either way it means the exact same thing: a
+            // package already lives at this semantic identity.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty
+                ) =>
+            {
+                Err(theme_package_already_imported())
+            }
+            Err(_) => Err(theme_io_failed()),
+        }
+    }
+
+    /// Opens an already-staged file for reading, nofollow. `relative` must
+    /// name a file this same `Staging` session already wrote via
+    /// [`Staging::write_file`] or [`Staging::write_new_file`] — its parent
+    /// must therefore already be a memoized directory.
+    pub(crate) fn open_file_read(&self, relative: &Path) -> Result<File, CommandError> {
+        let parent_key = relative.parent().unwrap_or(Path::new("")).to_path_buf();
+        let name = relative.file_name().ok_or_else(theme_package_unsafe_path)?;
+        let parent = self
+            .dirs
+            .get(&parent_key)
+            .ok_or_else(theme_package_unsafe_path)?;
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        parent
+            .open_with(name, &options)
+            .map_err(|_| theme_io_failed())
+    }
+
+    /// Writes a brand-new, Plain-authored file (never attacker content — the
+    /// only caller is `theme::import` writing its own serialized
+    /// `manifest.plain.json` record) directly from an in-memory buffer.
+    /// `create_new` means this also safely rejects the (extremely unlikely
+    /// but not impossible) case of an unpacked package that already shipped
+    /// its own same-named file at this path — that path fails the whole
+    /// import rather than silently overwriting attacker-controlled content.
+    pub(crate) fn write_new_file(
+        &mut self,
+        relative: &Path,
+        contents: &[u8],
+    ) -> Result<(), CommandError> {
+        let parent_key = relative.parent().unwrap_or(Path::new("")).to_path_buf();
+        let name = relative.file_name().ok_or_else(theme_package_unsafe_path)?;
+        let parent = self
+            .dirs
+            .get(&parent_key)
+            .ok_or_else(theme_package_unsafe_path)?;
+
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        let mut file = parent.open_with(name, &options).map_err(|error| {
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                theme_package_unsafe_path()
+            } else {
+                theme_io_failed()
+            }
+        })?;
+        self.created.push(CreatedEntry {
+            parent: parent_key,
+            name: name.to_owned(),
+            is_dir: false,
+        });
+        file.write_all(contents).map_err(|_| theme_io_failed())?;
+        Ok(())
     }
 
     /// Removes every entry this staging tree created, in reverse creation
