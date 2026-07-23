@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F050` VS Code color theme compatibility。
-- 当前最小工作项：完成 F050 的固定 GitHub 调研与技术方案冻结。
+- 当前最小工作项：实现并验收 F050 S0 内置主题激活与选择器切片。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -156,10 +156,13 @@
 - [x] 完成 `F040` S5 文档修正：`docs/architecture.md` 第 6 节「搜索」与第 2 节进程模型图，把「第一阶段固定版本 ripgrep sidecar 并解析 `rg --json`」修正为「进程内 `grep-searcher`/`grep-regex` + 手写有界 DFS 遍历，无外部 rg 子进程」，引用 `docs/research/2026-07-23-search-quickopen.md` 决策 2 的完整排除理由（外部 rg 会自行 ambient 遍历、无法纳入 capability root handle 权威）。`docs/e2e-handover.md` 新增 E2E-004（F040 Quick Open/搜索/替换的真实桌面矩阵：真实大目录搜索性能与流式取消、真实多层 `.gitignore`/`search.exclude` 生效、Cmd+P 大目录内文件打开、含版本冲突路径的替换与磁盘核对），沿用既有条目格式与执行纪律引用，交接 Codex。研究文档 `2026-07-23-search-quickopen.md` 新增「实施偏差记录」章节，如实补记 S1-S4 的四处只能靠实跑发现的偏差（S1 官方 `SearchView` 因 `NotebookEditor` 顶层副作用撞排除面而改自建 `PlainSearchView`；S4 `ReplaceService` 对上游 `SearchModel` 树的鸭子类型耦合而改自建 `plain-replace-coordinator.ts`；S4 已打开文件的 live-model 结果顶替与其 preview `source` 0-index 坐标修正；S3/S4 preview 相对坐标改为 Rust 新增的 `absoluteColumn`），以及本切片自身发现的两处（S2 `files.exclude` 注册范围表述更正、Search 视图 exclude 缺口修复），均不回改 S1-S4 的历史 `progress.md` 条目本身。
 - [x] 完成 `F040` evidence 闭环：`features.json` 的 `F040` 转为 `complete`，按 `F030` 模板补齐五段式 `evidence`（`commands` 为 `pnpm check`/`pnpm test:e2e:browser`；`results` 贴最终真实数字；`nativeScenarios` 说明本 feature 未新增 F040 专属原生场景、Quick Open 打开文件与替换保存复用 F020/F030 已验收的原生读写链，`F040` 自身矩阵登记为 E2E-004 交接 Codex；`platformGaps` 列出 E2E-004、正则不支持 PCRE2/lookaround、替换不支持捕获组反向引用、跨文件无共享 undo 分组、`search.useIgnoreFiles` 系三键刻意不注册的理由、symlink 排除的证据层级说明、「Replace All in File」与超限文件替换缺少专属 Browser E2E、root 相对路径未与 rootId 配对的既有假设，以及 F110/F120 既有留白；`acceptanceResults` 逐字对应三条 acceptance，从 S2/S3/S4/S5 的 progress 条目与 Browser E2E 断言提炼）。`F050` 转为 `in_progress`；`updatedAt` 保持 `2026-07-23`。
 
+- [x] 完成 `F050` 的固定 GitHub 调研与技术方案冻结（docs/research/2026-07-24-theme-compatibility.md）：双路调研 + 运行时探针三方交叉。探针坐实一个此前未记录的静默架构缺口——应用一直运行在 `createUnloadedThemeForThemeType` 的裸 `vs` 占位符上（CSS 变量为空、主题选择器 Quick Pick 恒空、零报错），根因是 theme-defaults 经 `registerExtension` 进入的 `builtinExtensions` 数组在 `NullExtensionService` 下没有任何消费者、extension point 分发链整体断裂。方案不引入被禁的 extensions-service-override，改用官方 seam：`getBuiltinExtensions()`（AGENTS.md 允许的惰性静态 contribution registry 读取面）+ `setColorTheme(ColorThemeData 实例)` 直构直用 + `registerExtension`/`registerFileUrl` 官方声明式 API（`extension-file:` 只读闭合树，与被禁的 `file:` overlay 无关）消费导入主题。上游两处安全空白必须 Rust 自建：include 链无循环/深度防护（纯递归、自环即挂起）、Code OSS 自带 zip 解包是前缀判断 + 跟随符号链接的反面教材——采用 `zip` crate 的 `enclosed_name`/`is_symlink`/逐条目大小校验 + cap-std 相对写入，JSONC 用 `jsonc-parser` 精确复刻上游方言（comments + 尾逗号）。主题选择跨会话保留由 Rust theme 域自带 selection 持久面承担（staged 原子写先例），不建通用 settings 域。切片拆为 S0 内置主题激活与选择器、S1 Rust VSIX 安全解包、S2 manifest/主题校验与恶意 fixture 矩阵、S3 导入 UX 与注册消费、S4 持久化与收口。
+
 ## 下一步
 
-1. F050（VS Code color theme compatibility）：完成固定 GitHub 调研（Code OSS 主题/TextMate/icon-theme 现有实现、VSIX 解包与 JSONC 解析先例）与技术方案冻结，明确切片拆分。
-2. Codex 按 `docs/e2e-handover.md` 交接清单（含 E2E-001/E2E-002/E2E-003/E2E-004）执行真实桌面 E2E 后，回写对应 feature（`F020`/`F030`/`F040`）的 evidence。
+1. 实现并验收 F050 S0 内置主题激活与选择器切片。
+2. 按方案顺序推进 S1 VSIX 解包、S2 校验矩阵、S3 导入 UX、S4 持久化与收口。
+3. Codex 按 `docs/e2e-handover.md` 交接清单（含 E2E-001/E2E-002/E2E-003/E2E-004）执行真实桌面 E2E 后，回写对应 feature（`F020`/`F030`/`F040`）的 evidence。
 
 ## 当前验收命令
 
