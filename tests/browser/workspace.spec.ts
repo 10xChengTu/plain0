@@ -85,9 +85,27 @@ async function installNativeIpcMock(
 	// this — every other existing call site keeps the exact unmodified
 	// fixture it always had.
 	extraFiles: Readonly<Record<string, string>> = {},
+	// Lowers the streaming text search match budget so `limitHit` is
+	// reachable with a small fixture instead of a real 20,000-match one.
+	// Only the streaming text search test passes this.
+	textSearchMaxMatchesForTest = 20_000,
+	// Artificially delays each workspace_search_text_poll response by this
+	// many milliseconds, so a test can deterministically observe a search
+	// still in flight (and exercise cancelling it) instead of racing a
+	// same-tick mock that would otherwise complete before the next
+	// Playwright action runs. Only the cancellation test passes this.
+	textSearchPollDelayMsForTest = 0,
 ): Promise<void> {
 	await page.addInitScript(
-		({ goldenRead, mode, rawReadTransport, pngBase64, extraFiles }) => {
+		({
+			goldenRead,
+			mode,
+			rawReadTransport,
+			pngBase64,
+			extraFiles,
+			textSearchMaxMatchesForTest,
+			textSearchPollDelayMsForTest,
+		}) => {
 			const calls: Array<{
 				command: string;
 				args: Record<string, unknown>;
@@ -284,6 +302,19 @@ async function installNativeIpcMock(
 			const invalidDeletePlan = () => ({
 				code: "WORKSPACE_DELETE_PLAN_INVALID",
 				message: "The workspace delete plan is invalid.",
+			});
+			const searchNotFound = () => ({
+				code: "WORKSPACE_SEARCH_NOT_FOUND",
+				message: "The workspace text search is no longer available.",
+			});
+			const invalidSearchRequest = () => ({
+				code: "INVALID_SEARCH_REQUEST",
+				message: "The workspace text search request is invalid.",
+			});
+			const invalidSearchRegex = () => ({
+				code: "INVALID_SEARCH_REGEX",
+				message:
+					"The workspace text search pattern is not a valid regular expression.",
 			});
 			const pathSegments = (relativePath: string): readonly string[] =>
 				relativePath.length === 0 ? [] : relativePath.split("/");
@@ -555,6 +586,205 @@ async function installNativeIpcMock(
 				}
 				return { entries, limitHit };
 			};
+			const TEXT_SEARCH_PREVIEW_MAX_UTF16_UNITS = 256;
+			const buildTextSearchPreview = (
+				line: string,
+				matchStart: number,
+				matchLength: number,
+			): { previewText: string; column: number } => {
+				const matchEnd = matchStart + matchLength;
+				const windowStart =
+					matchEnd <= TEXT_SEARCH_PREVIEW_MAX_UTF16_UNITS ? 0 : matchStart;
+				const windowEnd = Math.min(
+					windowStart + TEXT_SEARCH_PREVIEW_MAX_UTF16_UNITS,
+					line.length,
+				);
+				return {
+					previewText: line.slice(windowStart, windowEnd),
+					column: matchStart - windowStart,
+				};
+			};
+			const escapeTextSearchRegExp = (value: string): string =>
+				value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			const compileTextSearchMatcher = (
+				pattern: string,
+				isRegExp: boolean,
+				isCaseSensitive: boolean,
+				isWordMatch: boolean,
+			): RegExp => {
+				const source = isRegExp ? pattern : escapeTextSearchRegExp(pattern);
+				const wrapped = isWordMatch ? `\\b(?:${source})\\b` : source;
+				try {
+					return new RegExp(wrapped, isCaseSensitive ? "gu" : "giu");
+				} catch {
+					throw invalidSearchRegex();
+				}
+			};
+			interface TextSearchBatch {
+				path: string;
+				matches: Array<{
+					line: number;
+					column: number;
+					length: number;
+					previewText: string;
+				}>;
+			}
+			const searchTextMatches = (request: {
+				roots?: readonly string[];
+				pattern?: string;
+				isRegExp?: boolean;
+				isCaseSensitive?: boolean;
+				isWordMatch?: boolean;
+				excludeGlobs?: readonly string[];
+				maxResults?: number;
+				maxFileSize?: number | null;
+			}): {
+				pending: TextSearchBatch[];
+				limitHit: boolean;
+				skippedBinary: number;
+				skippedOversize: number;
+			} => {
+				const requestRoots = request.roots ?? [];
+				const matcher = compileTextSearchMatcher(
+					request.pattern ?? "",
+					request.isRegExp ?? false,
+					request.isCaseSensitive ?? false,
+					request.isWordMatch ?? false,
+				);
+				const excludeMatchers = (request.excludeGlobs ?? []).map(
+					compileExcludeGlob,
+				);
+				const maxFileSize = request.maxFileSize ?? 8 * 1_024 * 1_024;
+				const maxResults = Math.min(
+					request.maxResults ?? textSearchMaxMatchesForTest,
+					textSearchMaxMatchesForTest,
+				);
+
+				const pending: TextSearchBatch[] = [];
+				let limitHit = false;
+				let skippedBinary = 0;
+				let skippedOversize = 0;
+				let remainingBudget = maxResults;
+				let visited = 0;
+				interface SearchFrame {
+					directory: MockDirectory;
+					wire: string;
+					depth: number;
+					gitignoreChain: MockGitignoreLayer[];
+					names: string[];
+					nextIndex: number;
+				}
+
+				rootsLoop: for (const requestedRootId of requestRoots) {
+					if (requestedRootId !== rootId) {
+						continue;
+					}
+					const frames: SearchFrame[] = [
+						{
+							directory: root,
+							wire: "",
+							depth: 0,
+							gitignoreChain: [gitignoreLayerFor(root, "")],
+							names: [...root.entries.keys()].sort(),
+							nextIndex: 0,
+						},
+					];
+					while (frames.length > 0) {
+						const frame = frames[frames.length - 1]!;
+						if (frame.nextIndex >= frame.names.length) {
+							frames.pop();
+							continue;
+						}
+						const name = frame.names[frame.nextIndex]!;
+						frame.nextIndex += 1;
+						visited += 1;
+						if (visited > MAX_MOCK_SEARCH_ENTRIES) {
+							limitHit = true;
+							break rootsLoop;
+						}
+						const child = frame.directory.entries.get(name);
+						if (child === undefined) {
+							continue;
+						}
+						const wire =
+							frame.wire.length === 0 ? name : `${frame.wire}/${name}`;
+						const isDir = child.kind === "directory";
+						const excluded =
+							excludeMatchers.some((matches) => matches(wire)) ||
+							pathIsGitignored(frame.gitignoreChain, wire, isDir);
+						if (child.kind === "directory") {
+							if (excluded) {
+								continue;
+							}
+							const depth = frame.depth + 1;
+							if (depth > MAX_MOCK_SEARCH_DEPTH) {
+								limitHit = true;
+								continue;
+							}
+							frames.push({
+								directory: child,
+								wire,
+								depth,
+								gitignoreChain: [
+									...frame.gitignoreChain,
+									gitignoreLayerFor(child, wire),
+								],
+								names: [...child.entries.keys()].sort(),
+								nextIndex: 0,
+							});
+							continue;
+						}
+						if (child.kind !== "file" || excluded) {
+							continue;
+						}
+						if (remainingBudget <= 0) {
+							limitHit = true;
+							break rootsLoop;
+						}
+						if (child.bytes.byteLength > maxFileSize) {
+							skippedOversize += 1;
+							continue;
+						}
+						if (child.bytes.includes(0)) {
+							skippedBinary += 1;
+							continue;
+						}
+						const text = decodeUtf8Lenient(child.bytes);
+						const lines = text.split("\n");
+						const matches: TextSearchBatch["matches"] = [];
+						lineLoop: for (const [lineIndex, rawLine] of lines.entries()) {
+							const line = rawLine.endsWith("\r")
+								? rawLine.slice(0, -1)
+								: rawLine;
+							for (const found of line.matchAll(matcher)) {
+								if (remainingBudget <= 0) {
+									break lineLoop;
+								}
+								const { previewText, column } = buildTextSearchPreview(
+									line,
+									found.index,
+									found[0].length,
+								);
+								matches.push({
+									line: lineIndex + 1,
+									column: column + 1,
+									length: found[0].length,
+									previewText,
+								});
+								remainingBudget -= 1;
+							}
+						}
+						if (matches.length > 0) {
+							pending.push({ path: wire, matches });
+						}
+						if (remainingBudget <= 0) {
+							limitHit = true;
+							break rootsLoop;
+						}
+					}
+				}
+				return { pending, limitHit, skippedBinary, skippedOversize };
+			};
 			const bytesFromHex = (hex: string): Uint8Array => {
 				const bytes = new Uint8Array(hex.length / 2);
 				for (let index = 0; index < bytes.length; index += 1) {
@@ -661,6 +891,16 @@ async function installNativeIpcMock(
 						phase: "prepared" | "executing";
 				  }
 				| undefined;
+			let activeTextSearch:
+				| {
+						searchId: string;
+						pending: TextSearchBatch[];
+						deliveredCursor: number;
+						limitHit: boolean;
+						skippedBinary: number;
+						skippedOversize: number;
+				  }
+				| undefined;
 			let nextCallbackId = 0;
 			let nextEventId = 0;
 			const callbacks = new Map<
@@ -700,6 +940,22 @@ async function installNativeIpcMock(
 						event: registration.event,
 						id: eventId,
 						payload: { workspaceId },
+					});
+					if (transformed?.once === true) {
+						callbacks.delete(registration.handlerId);
+					}
+				}
+			};
+			const emitTextSearchWake = (searchId: string): void => {
+				for (const [eventId, registration] of eventHandlers) {
+					if (registration.event !== "plain://workspace-search-text-wake") {
+						continue;
+					}
+					const transformed = callbacks.get(registration.handlerId);
+					transformed?.callback({
+						event: registration.event,
+						id: eventId,
+						payload: { searchId },
 					});
 					if (transformed?.once === true) {
 						callbacks.delete(registration.handlerId);
@@ -1176,6 +1432,87 @@ async function installNativeIpcMock(
 								search.maxResults,
 							);
 						}
+						case "workspace_search_text_start": {
+							const search = args.request as
+								| {
+										roots?: readonly string[];
+										pattern?: string;
+										isRegExp?: boolean;
+										isCaseSensitive?: boolean;
+										isWordMatch?: boolean;
+										excludeGlobs?: readonly string[];
+										maxResults?: number;
+										maxFileSize?: number | null;
+								  }
+								| undefined;
+							if (search === undefined || !Array.isArray(search.roots)) {
+								throw new Error(
+									"Malformed workspace_search_text_start test request.",
+								);
+							}
+							const { pending, limitHit, skippedBinary, skippedOversize } =
+								searchTextMatches(search);
+							const searchId = crypto.randomUUID();
+							activeTextSearch = {
+								searchId,
+								pending,
+								deliveredCursor: 0,
+								limitHit,
+								skippedBinary,
+								skippedOversize,
+							};
+							if (pending.length > 0) {
+								emitTextSearchWake(searchId);
+							}
+							return { searchId };
+						}
+						case "workspace_search_text_poll": {
+							if (textSearchPollDelayMsForTest > 0) {
+								await new Promise((resolve) =>
+									setTimeout(resolve, textSearchPollDelayMsForTest),
+								);
+							}
+							const poll = args.request as
+								{ searchId?: string; cursor?: number } | undefined;
+							if (
+								activeTextSearch === undefined ||
+								poll?.searchId !== activeTextSearch.searchId
+							) {
+								throw searchNotFound();
+							}
+							if (poll.cursor !== activeTextSearch.deliveredCursor) {
+								throw invalidSearchRequest();
+							}
+							// One batch per poll: exercises genuine multi-poll
+							// streaming instead of delivering everything at once.
+							const delivered = activeTextSearch.pending.splice(0, 1);
+							activeTextSearch.deliveredCursor += delivered.length;
+							const done = activeTextSearch.pending.length === 0;
+							if (!done) {
+								emitTextSearchWake(activeTextSearch.searchId);
+							}
+							return {
+								batches: delivered,
+								nextCursor: activeTextSearch.deliveredCursor,
+								done,
+								limitHit: activeTextSearch.limitHit,
+								skipped: {
+									binary: activeTextSearch.skippedBinary,
+									oversize: activeTextSearch.skippedOversize,
+								},
+							};
+						}
+						case "workspace_search_text_cancel": {
+							const cancel = args.request as { searchId?: string } | undefined;
+							if (
+								activeTextSearch === undefined ||
+								cancel?.searchId !== activeTextSearch.searchId
+							) {
+								throw searchNotFound();
+							}
+							activeTextSearch = undefined;
+							return null;
+						}
 						case "workspace_read_file": {
 							const relativePath = request?.relativePath ?? "";
 							if (request?.rootId !== rootId) {
@@ -1227,6 +1564,8 @@ async function installNativeIpcMock(
 			rawReadTransport,
 			pngBase64: MINIMAL_PNG_BASE64,
 			extraFiles,
+			textSearchMaxMatchesForTest,
+			textSearchPollDelayMsForTest,
 		},
 	);
 }
@@ -6271,12 +6610,197 @@ test("shows a Search icon in the Activity Bar, opens the Search view, and stays 
 	await expect(searchInput).toBeVisible();
 	const status = page.locator(".plain-search-view-status");
 
-	await searchInput.pressSequentially("Read-only");
+	await searchInput.pressSequentially("zzz-no-such-term");
 	await expect(status).toHaveText("No results found.", { timeout: 5_000 });
 	await expect(page.locator(".plain-search-view-body")).toBeVisible();
 
 	await searchInput.fill("");
 	await expect(status).toHaveText("");
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("streams grouped text search results across files and opens a match in the editor", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	// Two files sharing a term: proves file search's mock streams *grouped*
+	// results across more than one file, not just a single-file smoke test.
+	// The mock's own default of one batch per poll (see
+	// `installNativeIpcMock`'s `searchTextMatches`/`workspace_search_text_poll`
+	// case) already exercises genuine multi-poll delivery underneath; this
+	// test asserts the end-to-end, full-stack outcome (both groups render
+	// with the right content, a click navigates correctly, a new query
+	// cancels the old one) rather than re-proving the batching protocol
+	// itself, which the Rust and browser-mock unit suites already cover in
+	// much finer-grained detail.
+	await installNativeIpcMock(page, "arrayBuffer", "supported", {
+		"notes-archive/needle-a.txt": "needle one\n",
+		"notes-archive/needle-b.txt": "needle two\n",
+	});
+	await openNativeWorkspaceExplorer(page);
+
+	await page.getByRole("tab", { name: /^Search/ }).click();
+	const searchInput = page.locator(".plain-search-view-input");
+	await expect(searchInput).toBeVisible();
+	const status = page.locator(".plain-search-view-status");
+	const fileGroups = page.locator(".plain-search-view-file");
+
+	await searchInput.pressSequentially("needle");
+	await expect(status).toHaveText("2 results in 2 files", { timeout: 5_000 });
+	await expect(fileGroups).toHaveCount(2);
+	await expect(
+		fileGroups.filter({ hasText: "notes-archive/needle-a.txt" }),
+	).toHaveCount(1);
+	await expect(
+		fileGroups.filter({ hasText: "notes-archive/needle-b.txt" }),
+	).toHaveCount(1);
+
+	const firstMatch = page
+		.locator(".plain-search-view-match")
+		.filter({ hasText: "needle one" });
+	await expect(firstMatch).toBeVisible();
+	await firstMatch.click();
+	await expect(
+		page.getByRole("tab", { name: /^needle-a\.txt(?:,.*)?$/ }),
+	).toBeVisible();
+	await expect(
+		page.getByRole("code").filter({ hasText: "needle one" }),
+	).toBeVisible();
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("cancels the previous search as soon as the query changes while it is still streaming", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	// A per-poll delay keeps the first search reliably still in flight (not
+	// yet naturally completed) at the moment the second query is typed,
+	// instead of racing a same-tick mock that could otherwise finish first.
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"supported",
+		{
+			"notes-archive/needle-a.txt": "needle one\n",
+			"notes-archive/needle-b.txt": "needle two\n",
+		},
+		20_000,
+		200,
+	);
+	await openNativeWorkspaceExplorer(page);
+
+	await page.getByRole("tab", { name: /^Search/ }).click();
+	const searchInput = page.locator(".plain-search-view-input");
+	await expect(searchInput).toBeVisible();
+	const status = page.locator(".plain-search-view-status");
+
+	await searchInput.pressSequentially("needle");
+	// The first poll response (200ms artificial delay) has not resolved yet,
+	// so the search is still genuinely in flight here.
+	await expect(status).toHaveText("Searching…", { timeout: 5_000 });
+
+	await searchInput.fill("");
+	await searchInput.pressSequentially("nothing-matches-this");
+	await expect(status).toHaveText("No results found.", { timeout: 5_000 });
+
+	const calls = (await page.evaluate(
+		() =>
+			(
+				window as unknown as {
+					__PLAIN_TEST_TAURI_CALLS__: readonly {
+						command: string;
+						args: Record<string, unknown>;
+					}[];
+				}
+			).__PLAIN_TEST_TAURI_CALLS__,
+	)) as readonly { command: string; args: Record<string, unknown> }[];
+	const cancelCalls = calls.filter(
+		(call) => call.command === "workspace_search_text_cancel",
+	);
+	const startCalls = calls.filter(
+		(call) => call.command === "workspace_search_text_start",
+	);
+	expect(cancelCalls.length).toBeGreaterThanOrEqual(1);
+	expect(startCalls.length).toBe(2);
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("shows a truncation banner past the match limit and a message for an invalid regular expression", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"supported",
+		{
+			"notes-archive/one.txt": "needle\n",
+			"notes-archive/two.txt": "needle\n",
+			"notes-archive/three.txt": "needle\n",
+		},
+		2,
+	);
+	await openNativeWorkspaceExplorer(page);
+
+	await page.getByRole("tab", { name: /^Search/ }).click();
+	const searchInput = page.locator(".plain-search-view-input");
+	const messages = page.locator(".plain-search-view-messages");
+	const status = page.locator(".plain-search-view-status");
+
+	await searchInput.pressSequentially("needle");
+	await expect(status).toHaveText("2 results in 2 files", { timeout: 5_000 });
+	await expect(messages).toContainText("Too many results", { timeout: 5_000 });
+
+	await searchInput.fill("");
+	await page.locator(".plain-search-view-regex-toggle").check();
+	await searchInput.pressSequentially("(unclosed");
+	await expect(messages).not.toHaveText("", { timeout: 5_000 });
+	await expect(messages).toContainText("regular expression");
 
 	expect(nativeDialogs).toEqual([]);
 	expect(pageErrors).toEqual([]);

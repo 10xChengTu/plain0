@@ -9,22 +9,40 @@ import { IModelService } from "@codingame/monaco-vscode-api/vscode/vs/editor/com
 import { IEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service";
 import { IExtensionService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions.service";
 import {
+	OneLineRange,
 	SearchProviderType,
+	TextSearchCompleteMessageType,
+	TextSearchMatch,
+	type IFileMatch,
 	type IFileQuery,
 	type ISearchComplete,
 	type ISearchProgressItem,
 	type ISearchResultProvider,
 	type ITextQuery,
+	type ITextSearchCompleteMessage,
 } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search";
 
 import { SearchService } from "@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/services/search/common/searchService";
 
-import type { PlainBridge } from "../../platform/tauri/contracts";
+import type {
+	PlainBridge,
+	WorkspaceSearchTextBatch,
+} from "../../platform/tauri/contracts";
+import { normalizeCommandError } from "../../platform/tauri/errors";
+import { runTextSearchStream } from "../../platform/tauri/text-search-stream";
 
 /** Client-side backstop mirroring upstream `AnythingQuickAccessProvider.
  * MAX_RESULTS`; Rust clamps to its own, independent hard cap regardless of
  * what this sends. */
 const MAX_FILE_SEARCH_RESULTS = 512;
+
+/** Client-side backstop mirroring upstream `search.maxResults`'s own default
+ * (20000); Rust's `search::text_search` clamps to the exact same hard cap
+ * regardless of what this sends — see `MAX_TEXT_SEARCH_RESULTS_HARD_CAP` in
+ * `src-tauri/src/search/dto.rs`. Unlike file search's 512, this is not a
+ * smaller UI-imposed limit layered on top of a larger Rust ceiling; it *is*
+ * the real, user-visible limit on both sides. */
+const MAX_TEXT_SEARCH_RESULTS = 20_000;
 
 let configuredBridge: PlainBridge | undefined;
 
@@ -122,6 +140,29 @@ function searchResultResource(rootId: string, relativePath: string): URI {
 	});
 }
 
+/**
+ * Converts one streamed `WorkspaceSearchTextBatch` (Rust's root-relative
+ * path plus its own bounded, already-windowed `previewText`/`column`/
+ * `length` — see `search::text_search`'s module doc) into upstream's
+ * `IFileMatch` shape. `column`/`length` are already UTF-16 code units
+ * relative to `previewText` (not the full line), matching what
+ * `OneLineRange`/`TextSearchMatch` expect for a single-range preview.
+ */
+function textSearchFileMatch(
+	rootId: string,
+	batch: WorkspaceSearchTextBatch,
+): IFileMatch {
+	const resource = searchResultResource(rootId, batch.path);
+	const results = batch.matches.map(
+		(match) =>
+			new TextSearchMatch(
+				match.previewText,
+				new OneLineRange(match.line, match.column, match.column + match.length),
+			),
+	);
+	return { resource, results };
+}
+
 // Not imported from ../workspace/file-system-provider: that module's
 // PLAIN_WORKSPACE_SCHEME/createPlainWorkspaceFileSystemProvider/
 // PlainWorkspaceFileSystemProvider triple is a closed import contract owned
@@ -150,6 +191,11 @@ class PlainSearchResultProvider implements ISearchResultProvider {
 	 * overwriting a newer one's result; defense-in-depth alongside whatever
 	 * `token` cancellation upstream already provides. */
 	#sequence = 0;
+	/** Same guard as `#sequence`, kept separate because a new Quick Open
+	 * (fileSearch) query must not invalidate an in-flight Search view
+	 * (textSearch) query or vice versa — they are independent UI surfaces
+	 * sharing one provider instance. */
+	#textSearchSequence = 0;
 
 	async getAIName(): Promise<string | undefined> {
 		return undefined;
@@ -196,11 +242,82 @@ class PlainSearchResultProvider implements ISearchResultProvider {
 	}
 
 	async textSearch(
-		_query: ITextQuery,
-		_onProgress?: (progress: ISearchProgressItem) => void,
-		_token?: CancellationToken,
+		query: ITextQuery,
+		onProgress?: (progress: ISearchProgressItem) => void,
+		token?: CancellationToken,
 	): Promise<ISearchComplete> {
-		return { results: [], messages: [] };
+		const roots = plainWorkspaceRoots(query);
+		const pattern = query.contentPattern.pattern;
+		if (roots.length === 0 || pattern.length === 0) {
+			return { results: [], messages: [] };
+		}
+		const excludeGlobs = collectExcludeGlobs(query);
+		const requestedMaxResults = query.maxResults;
+		const maxResults =
+			requestedMaxResults === undefined
+				? MAX_TEXT_SEARCH_RESULTS
+				: Math.min(MAX_TEXT_SEARCH_RESULTS, requestedMaxResults);
+
+		this.#textSearchSequence += 1;
+		const sequence = this.#textSearchSequence;
+		const primaryRoot = roots[0]!;
+		const isStale = (): boolean =>
+			sequence !== this.#textSearchSequence ||
+			token?.isCancellationRequested === true;
+
+		const results: IFileMatch[] = [];
+		try {
+			const outcome = await runTextSearchStream(
+				requireBridge(),
+				{
+					roots,
+					pattern,
+					isRegExp: query.contentPattern.isRegExp ?? false,
+					isCaseSensitive: query.contentPattern.isCaseSensitive ?? false,
+					isWordMatch: query.contentPattern.isWordMatch ?? false,
+					excludeGlobs,
+					maxResults,
+					maxFileSize: null,
+				},
+				(batch) => {
+					if (isStale()) {
+						return;
+					}
+					const fileMatch = textSearchFileMatch(primaryRoot, batch);
+					results.push(fileMatch);
+					onProgress?.(fileMatch);
+				},
+				token,
+			);
+			if (isStale()) {
+				return { results: [], messages: [] };
+			}
+			const messages: ITextSearchCompleteMessage[] = [];
+			if (outcome.skipped.binary > 0 || outcome.skipped.oversize > 0) {
+				messages.push({
+					text: `Skipped ${outcome.skipped.binary} binary and ${outcome.skipped.oversize} oversized file(s).`,
+					type: TextSearchCompleteMessageType.Information,
+				});
+			}
+			return { results, limitHit: outcome.limitHit, messages };
+		} catch (error) {
+			if (isStale()) {
+				return { results: [], messages: [] };
+			}
+			const commandError = normalizeCommandError(error);
+			if (commandError.code === "INVALID_SEARCH_REGEX") {
+				return {
+					results: [],
+					messages: [
+						{
+							text: commandError.message,
+							type: TextSearchCompleteMessageType.Warning,
+						},
+					],
+				};
+			}
+			throw error;
+		}
 	}
 
 	async clearCache(_cacheKey: string): Promise<void> {

@@ -14,6 +14,8 @@ import {
 	validateSearchCommandRegistration,
 	validateSearchFileBudgetConstants,
 	validateSearchOverrideImportBoundary,
+	validateSearchTextBudgetConstants,
+	validateSearchTextCommandRegistration,
 	validateTauriApiBoundary,
 	validateTauriConfiguration,
 	validateTauriConfigurationFiles,
@@ -700,6 +702,12 @@ for (const failure of validateSearchCommandRegistration(rustSources)) {
 	fail(failure);
 }
 for (const failure of validateSearchFileBudgetConstants(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateSearchTextCommandRegistration(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateSearchTextBudgetConstants(rustSources)) {
 	fail(failure);
 }
 

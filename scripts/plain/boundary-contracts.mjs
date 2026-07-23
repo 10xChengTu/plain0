@@ -2750,6 +2750,9 @@ export function validateWorkspaceRustBoundary(
 	for (const [dependency, requirement] of [
 		["globset", "=0.4.19"],
 		["ignore", "=0.4.31"],
+		["grep-matcher", "=0.1.9"],
+		["grep-regex", "=0.1.14"],
+		["grep-searcher", "=0.1.17"],
 	]) {
 		if (
 			!cargoDependencyDeclaration(dependency, requirement).test(cargoSource)
@@ -5123,6 +5126,114 @@ export function validateSearchCommandRegistration(rustSources) {
 }
 
 /**
+ * Locks the three F040 S3 streaming text search commands
+ * (`workspace_search_text_start/poll/cancel`) to their audited exact
+ * signatures, bodies and single `generate_handler!` registration — the same
+ * exact-body-pinning technique `validateSearchCommandRegistration` already
+ * uses for `workspace_search_files`, so a silent edit that bypasses the DTO
+ * decode or routes to something other than the one audited
+ * `WorkspaceService` method fails this check rather than only being caught
+ * by chance in review.
+ */
+export function validateSearchTextCommandRegistration(rustSources) {
+	const failures = [];
+	const commandsSource = findRustSource(
+		rustSources,
+		"src-tauri/src/search/commands.rs",
+	);
+	const libSource = findRustSource(rustSources, "src-tauri/src/lib.rs");
+
+	if (commandsSource === undefined) {
+		return ["search text command boundary requires search/commands.rs"];
+	}
+	const executableCommands = stripRustCommentsAndLiterals(commandsSource);
+
+	const expected = [
+		{
+			name: "workspace_search_text_start",
+			parameters:
+				"window:WebviewWindow,service:State<'_,WorkspaceService>,request:WorkspaceSearchTextStartRequest",
+			returnType: "->Result<WorkspaceSearchTextStartResult,CommandError>",
+			body: "letquery=request.into_parts()?;letapp=window.app_handle().clone();letwindow_label=window.label().to_owned();letwake_sink:Arc<dynFn(SearchId)+Send+Sync>=Arc::new(move|search_id:SearchId|{let_=app.emit_to(EventTarget::webview_window(window_label.clone()),WORKSPACE_SEARCH_TEXT_WAKE_EVENT,WorkspaceSearchTextWakeEvent::new(search_id),);});service.inner().search_text_start(window.label(),query,wake_sink)",
+		},
+		{
+			name: "workspace_search_text_poll",
+			parameters:
+				"window:WebviewWindow,service:State<'_,WorkspaceService>,request:WorkspaceSearchTextPollRequest",
+			returnType: "->Result<WorkspaceSearchTextPollResult,CommandError>",
+			body: "let(search_id,cursor)=request.into_parts()?;service.inner().search_text_poll(window.label(),search_id,cursor)",
+		},
+		{
+			name: "workspace_search_text_cancel",
+			parameters:
+				"window:WebviewWindow,service:State<'_,WorkspaceService>,request:WorkspaceSearchTextCancelRequest",
+			returnType: "->Result<(),CommandError>",
+			body: "service.inner().search_text_cancel(window.label(),request.search_id())",
+		},
+	];
+
+	for (const { name, parameters, returnType, body } of expected) {
+		const commands = extractAuditedTauriCommands(executableCommands, name);
+		if (commands.length !== 1) {
+			failures.push(
+				`search/commands.rs must define exactly one audited ${name} Tauri command`,
+			);
+			continue;
+		}
+		const [command] = commands;
+		const normalizedParameters = command.parameters
+			.replaceAll(/\s+/g, "")
+			.replace(/,$/, "");
+		if (
+			normalizedParameters !== parameters ||
+			command.returnType.replaceAll(/\s+/g, "") !== returnType
+		) {
+			failures.push(
+				`${name} must accept request: its own DTO and return the audited Result type`,
+			);
+		}
+		const normalizedBody = command.body
+			.replaceAll(/\s+/g, "")
+			.replace(/;$/, "");
+		if (normalizedBody !== body) {
+			failures.push(
+				`${name} must contain only its audited DTO decode and single WorkspaceService route`,
+			);
+		}
+	}
+
+	if (libSource === undefined) {
+		failures.push("search text command boundary requires src-tauri/src/lib.rs");
+		return failures;
+	}
+	const executableLib = stripRustCommentsAndLiterals(libSource);
+	const handlerBodies = [
+		...executableLib.matchAll(
+			/\.invoke_handler\s*\(\s*tauri\s*::\s*generate_handler\s*!\s*\[([\s\S]*?)\]\s*\)/g,
+		),
+	];
+	for (const { name } of expected) {
+		const commandPath = new RegExp(
+			`\\bsearch\\s*::\\s*commands\\s*::\\s*${name}\\b`,
+			"g",
+		);
+		const registrations = [...executableLib.matchAll(commandPath)];
+		const registeredInHandler =
+			handlerBodies.length === 1 &&
+			new RegExp(`\\bsearch\\s*::\\s*commands\\s*::\\s*${name}\\b`).test(
+				handlerBodies[0][1],
+			);
+		if (registrations.length !== 1 || !registeredInHandler) {
+			failures.push(
+				`src-tauri/src/lib.rs must register search::commands::${name} exactly once in generate_handler`,
+			);
+		}
+	}
+
+	return failures;
+}
+
+/**
  * Locks `search/file_search.rs`'s traversal budget constants to their
  * audited exact values, mirroring `WORKSPACE_COPY_LIMITS`/
  * `WORKSPACE_DELETE_LIMITS`: a silent widening of either constant must fail
@@ -5154,6 +5265,74 @@ export function validateSearchFileBudgetConstants(rustSources) {
 			);
 		}
 	}
+	return failures;
+}
+
+const SEARCH_TEXT_LIMITS = Object.freeze([
+	[
+		"SEARCH_BATCH_QUEUE_CAPACITY",
+		512,
+		"usize",
+		"src-tauri/src/search/text_search.rs",
+	],
+	[
+		"MAX_TEXT_SEARCH_RESULTS_HARD_CAP",
+		20_000,
+		"u32",
+		"src-tauri/src/search/dto.rs",
+	],
+]);
+
+/**
+ * Locks the F040 S3 streaming text search budget constants (the batch
+ * backpressure queue capacity and the results hard cap) to their audited
+ * exact values, plus the window-scoped idle-search TTL in
+ * `workspace/service.rs` — mirroring `validateSearchFileBudgetConstants`'s
+ * rationale but also covering `SEARCH_TASK_IDLE_TTL`, which is a
+ * `Duration::from_secs(...)` call rather than a plain integer literal and so
+ * cannot go through `evaluateSmallRustIntegerExpression`.
+ */
+export function validateSearchTextBudgetConstants(rustSources) {
+	const failures = [];
+	for (const [name, value, integerType, path] of SEARCH_TEXT_LIMITS) {
+		const fileSource = findRustSource(rustSources, path);
+		if (fileSource === undefined) {
+			failures.push(`search text budget boundary requires ${path}`);
+			continue;
+		}
+		const executableSource = stripRustCommentsAndLiterals(fileSource);
+		const declarations = findWorkspaceCopyLimitDeclarations(
+			executableSource,
+			name,
+			integerType,
+		);
+		if (
+			declarations.length !== 1 ||
+			evaluateSmallRustIntegerExpression(declarations[0]) !== value
+		) {
+			failures.push(
+				`${path} must define exactly one ${name}: ${integerType} = ${value}`,
+			);
+		}
+	}
+
+	const serviceSource = findRustSource(
+		rustSources,
+		"src-tauri/src/workspace/service.rs",
+	);
+	if (serviceSource === undefined) {
+		failures.push("search text budget boundary requires workspace/service.rs");
+		return failures;
+	}
+	const executableService = stripRustCommentsAndLiterals(serviceSource);
+	const ttlPattern =
+		/^const\s+SEARCH_TASK_IDLE_TTL\s*:\s*Duration\s*=\s*Duration::from_secs\(\s*120\s*\)\s*;/m;
+	if (!ttlPattern.test(executableService)) {
+		failures.push(
+			"workspace/service.rs must define exactly one SEARCH_TASK_IDLE_TTL: Duration = Duration::from_secs(120)",
+		);
+	}
+
 	return failures;
 }
 

@@ -260,6 +260,18 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async workspaceSearchFiles() {
 			throw new Error("unused");
 		},
+		async workspaceSearchTextStart() {
+			throw new Error("unused");
+		},
+		async workspaceSearchTextPoll() {
+			throw new Error("unused");
+		},
+		async workspaceSearchTextCancel() {
+			throw new Error("unused");
+		},
+		workspaceSearchTextWatch() {
+			return () => {};
+		},
 		async backupWrite() {
 			throw new Error("unused");
 		},

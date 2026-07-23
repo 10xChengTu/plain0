@@ -1787,6 +1787,9 @@ const workspaceCargo = `
 [dependencies]
 cap-std = "4.0.2"
 globset = "=0.4.19"
+grep-matcher = "=0.1.9"
+grep-regex = "=0.1.14"
+grep-searcher = "=0.1.17"
 ignore = "=0.4.31"
 libc = "0.2.186"
 notify = "=8.2.0"
@@ -1843,6 +1846,33 @@ const exactIgnoreDependency = Object.freeze({
 	optional: false,
 });
 
+const exactGrepMatcherDependency = Object.freeze({
+	name: "grep-matcher",
+	req: "=0.1.9",
+	kind: null,
+	rename: null,
+	target: null,
+	optional: false,
+});
+
+const exactGrepRegexDependency = Object.freeze({
+	name: "grep-regex",
+	req: "=0.1.14",
+	kind: null,
+	rename: null,
+	target: null,
+	optional: false,
+});
+
+const exactGrepSearcherDependency = Object.freeze({
+	name: "grep-searcher",
+	req: "=0.1.17",
+	kind: null,
+	rename: null,
+	target: null,
+	optional: false,
+});
+
 function validateWorkspaceRustBoundary(
 	cargoSource,
 	rustSources,
@@ -1858,6 +1888,9 @@ function validateWorkspaceRustBoundary(
 			exactNotifyDependency,
 			exactGlobsetDependency,
 			exactIgnoreDependency,
+			exactGrepMatcherDependency,
+			exactGrepRegexDependency,
+			exactGrepSearcherDependency,
 			...cargoDependencies,
 		],
 		resolvedSha2Features,
@@ -2885,6 +2918,9 @@ fn copy_directory_for_test(limits: DirectoryCopyLimits, hooks: &mut Hooks) {
 			exactNotifyDependency,
 			exactGlobsetDependency,
 			exactIgnoreDependency,
+			exactGrepMatcherDependency,
+			exactGrepRegexDependency,
+			exactGrepSearcherDependency,
 		];
 		expect(
 			validateWorkspaceRustBoundaryContract(
@@ -3158,6 +3194,9 @@ fn copy_directory_for_test(limits: DirectoryCopyLimits, hooks: &mut Hooks) {
 						exactNotifyDependency,
 						exactGlobsetDependency,
 						exactIgnoreDependency,
+						exactGrepMatcherDependency,
+						exactGrepRegexDependency,
+						exactGrepSearcherDependency,
 						ignoreDependency,
 					],
 					["default", "std"],

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import {
 	RUNTIME_READY_EVENT,
+	WORKSPACE_SEARCH_TEXT_WAKE_EVENT,
 	WORKSPACE_WATCH_WAKE_EVENT,
 	type PlainBridge,
 } from "./contracts";
@@ -43,7 +44,13 @@ import {
 import { createWorkspaceWatcherManager } from "./workspace-watcher";
 import {
 	decodeWorkspaceSearchFilesResult,
+	decodeWorkspaceSearchTextPollResult,
+	decodeWorkspaceSearchTextStartResult,
+	decodeWorkspaceSearchTextWakeEvent,
 	frozenWorkspaceSearchFilesRequest,
+	frozenWorkspaceSearchTextCancelRequest,
+	frozenWorkspaceSearchTextPollRequest,
+	frozenWorkspaceSearchTextStartRequest,
 } from "./search-codec";
 
 export function createNativeBridge(): PlainBridge {
@@ -246,6 +253,50 @@ export function createNativeBridge(): PlainBridge {
 			return decodeWorkspaceSearchFilesResult(
 				await invoke<unknown>("workspace_search_files", { request }),
 			);
+		},
+		workspaceSearchTextStart: async (candidate) => {
+			const request = frozenWorkspaceSearchTextStartRequest(
+				candidate.roots,
+				candidate.pattern,
+				candidate.isRegExp,
+				candidate.isCaseSensitive,
+				candidate.isWordMatch,
+				candidate.excludeGlobs,
+				candidate.maxResults,
+				candidate.maxFileSize,
+			);
+			return decodeWorkspaceSearchTextStartResult(
+				await invoke<unknown>("workspace_search_text_start", { request }),
+			);
+		},
+		workspaceSearchTextPoll: async (searchId, cursor) => {
+			const request = frozenWorkspaceSearchTextPollRequest(searchId, cursor);
+			return decodeWorkspaceSearchTextPollResult(
+				await invoke<unknown>("workspace_search_text_poll", { request }),
+			);
+		},
+		workspaceSearchTextCancel: async (searchId) => {
+			const request = frozenWorkspaceSearchTextCancelRequest(searchId);
+			decodeWorkspaceVoid(
+				await invoke<unknown>("workspace_search_text_cancel", { request }),
+			);
+		},
+		workspaceSearchTextWatch: (listener) => {
+			let unlisten: (() => void) | undefined;
+			let disposed = false;
+			void listen<unknown>(WORKSPACE_SEARCH_TEXT_WAKE_EVENT, (event) => {
+				listener(decodeWorkspaceSearchTextWakeEvent(event.payload).searchId);
+			}).then((resolved) => {
+				if (disposed) {
+					void resolved();
+					return;
+				}
+				unlisten = resolved;
+			});
+			return () => {
+				disposed = true;
+				unlisten?.();
+			};
 		},
 		backupWrite: async (key, bytes) => {
 			const frame = encodeBackupWriteRequest(key, bytes);

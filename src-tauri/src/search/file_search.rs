@@ -31,15 +31,21 @@ pub(crate) const MAX_SEARCH_TREE_ENTRIES: usize = 50_000;
 /// Maximum directory nesting depth below any requested root. Exceeding this
 /// also stops the whole search and sets `limitHit`.
 pub(crate) const MAX_SEARCH_TREE_DEPTH: usize = 256;
-const MAX_SEARCH_ENTRY_NAME_BYTES: usize = 1_024;
+pub(crate) const MAX_SEARCH_ENTRY_NAME_BYTES: usize = 1_024;
 /// `.gitignore` files larger than this are skipped entirely (treated as if
 /// absent) rather than failing the search; they still count once against
 /// [`MAX_SEARCH_TREE_ENTRIES`] like any other directory entry.
 const MAX_SEARCH_GITIGNORE_BYTES: usize = 8 * 1_024 * 1_024;
 const GITIGNORE_FILE_NAME: &str = ".gitignore";
 
+/// Shared with `search::text_search`, which reuses this module's bounded
+/// traversal (budgets, gitignore layering, exclude globs, name validation) to
+/// enumerate candidate files, rather than re-implementing it — see that
+/// module's doc comment for why the outer per-file action differs (streaming
+/// grep vs. name collection) even though the walk itself is one
+/// implementation.
 #[derive(Clone, Copy, Eq, PartialEq)]
-enum EntryKind {
+pub(crate) enum EntryKind {
     File,
     Directory,
     Symlink,
@@ -54,7 +60,7 @@ struct ScanFrame {
     names: std::vec::IntoIter<(String, EntryKind)>,
 }
 
-struct BudgetExceeded;
+pub(crate) struct BudgetExceeded;
 
 /// Runs one file-search query against already-leased roots. Read-only: never
 /// creates, writes, renames or deletes anything, and never re-derives a path
@@ -179,7 +185,7 @@ pub(crate) fn search_roots(
     Ok(WorkspaceSearchFilesResult::new(entries, limit_hit))
 }
 
-fn collect_entries(
+pub(crate) fn collect_entries(
     directory: &Dir,
     visited: &mut usize,
 ) -> Result<Vec<(String, EntryKind)>, BudgetExceeded> {
@@ -222,7 +228,7 @@ fn collect_entries(
     Ok(names)
 }
 
-fn compile_exclude_globs(patterns: &[String]) -> Result<GlobSet, CommandError> {
+pub(crate) fn compile_exclude_globs(patterns: &[String]) -> Result<GlobSet, CommandError> {
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
         let glob = GlobBuilder::new(pattern)
@@ -239,7 +245,7 @@ fn compile_exclude_globs(patterns: &[String]) -> Result<GlobSet, CommandError> {
 /// itself). Matching a descendant strips this directory's own prefix before
 /// testing patterns, so callers always pass the full root-relative wire path
 /// of the candidate — never a path relative to this one directory.
-fn read_gitignore(directory: &Dir, wire_root: &str) -> Gitignore {
+pub(crate) fn read_gitignore(directory: &Dir, wire_root: &str) -> Gitignore {
     let mut builder = GitignoreBuilder::new(wire_root);
     if let Some(bytes) = read_gitignore_bytes(directory) {
         if let Ok(text) = std::str::from_utf8(&bytes) {
@@ -277,7 +283,7 @@ fn read_gitignore_bytes(directory: &Dir) -> Option<Vec<u8>> {
 /// directory) to least specific (the search root), returning the first
 /// opinion found — matching `git`'s own precedence, where a closer
 /// `.gitignore` (including a `!` re-include) overrides a more distant one.
-fn matched_gitignore(chain: &[Gitignore], wire: &str, is_dir: bool) -> bool {
+pub(crate) fn matched_gitignore(chain: &[Gitignore], wire: &str, is_dir: bool) -> bool {
     for gitignore in chain.iter().rev() {
         match gitignore.matched(wire, is_dir) {
             Match::None => continue,

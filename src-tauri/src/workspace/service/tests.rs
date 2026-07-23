@@ -2838,6 +2838,321 @@ fn concurrent_identical_delete_commits_consume_at_most_once() {
     assert_entry_absent(&entry);
 }
 
+// --- Streaming text search (F040 S3) ----------------------------------------
+
+fn text_query(root_id: RootId, pattern: &str) -> crate::search::dto::WorkspaceSearchTextQuery {
+    crate::search::dto::WorkspaceSearchTextQuery {
+        roots: vec![root_id],
+        pattern: pattern.to_owned(),
+        is_reg_exp: false,
+        is_case_sensitive: false,
+        is_word_match: false,
+        exclude_globs: Vec::new(),
+        max_results: 20_000,
+        max_file_size: 8 * 1_024 * 1_024,
+    }
+}
+
+fn noop_search_wake() -> Arc<dyn Fn(crate::search::dto::SearchId) + Send + Sync> {
+    Arc::new(|_| {})
+}
+
+fn poll_search_until_done(
+    service: &WorkspaceService,
+    window_label: &str,
+    search_id: crate::search::dto::SearchId,
+) -> crate::search::dto::WorkspaceSearchTextPollResult {
+    let mut cursor = 0_u64;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let result = service
+            .search_text_poll(window_label, search_id, cursor)
+            .unwrap();
+        cursor = result.next_cursor();
+        if result.done() {
+            return result;
+        }
+        assert!(Instant::now() < deadline, "search never completed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_new_search_supersedes_the_previous_one_for_the_same_window() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::write(root.join("a.txt"), b"needle").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+
+    let first = service
+        .search_text_start("main", text_query(root_id, "needle"), noop_search_wake())
+        .unwrap();
+    let second = service
+        .search_text_start("main", text_query(root_id, "needle"), noop_search_wake())
+        .unwrap();
+
+    assert_ne!(
+        extract_search_id(&first),
+        extract_search_id(&second),
+        "each start must mint a fresh search id"
+    );
+    assert_eq!(
+        service
+            .search_text_poll("main", extract_search_id(&first), 0)
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_SEARCH_NOT_FOUND",
+        "the superseded search must no longer be pollable"
+    );
+    let result = poll_search_until_done(&service, "main", extract_search_id(&second));
+    assert_eq!(result.batches().len(), 1);
+}
+
+#[test]
+fn root_revocation_terminates_the_active_search() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::write(root.join("a.txt"), b"needle").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+
+    let start = service
+        .search_text_start("main", text_query(root_id, "needle"), noop_search_wake())
+        .unwrap();
+    let search_id = extract_search_id(&start);
+    service.remove_root("main", root_id).unwrap();
+
+    assert_eq!(
+        service
+            .search_text_poll("main", search_id, 0)
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_SEARCH_NOT_FOUND"
+    );
+}
+
+#[test]
+fn window_close_reclaims_the_active_search() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::write(root.join("a.txt"), b"needle").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+
+    let start = service
+        .search_text_start("main", text_query(root_id, "needle"), noop_search_wake())
+        .unwrap();
+    let search_id = extract_search_id(&start);
+    service.close_window("main");
+
+    // The window itself no longer exists, so this creates a brand new,
+    // empty one — observably identical to "the search is gone", which is
+    // exactly the guarantee window close must provide.
+    assert_eq!(
+        service
+            .search_text_poll("main", search_id, 0)
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_SEARCH_NOT_FOUND"
+    );
+}
+
+#[test]
+fn cancel_is_idempotent_and_rejects_unknown_or_already_cancelled_ids() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::write(root.join("a.txt"), b"needle").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+
+    let start = service
+        .search_text_start("main", text_query(root_id, "needle"), noop_search_wake())
+        .unwrap();
+    let search_id = extract_search_id(&start);
+
+    service.search_text_cancel("main", search_id).unwrap();
+    assert_eq!(
+        service
+            .search_text_cancel("main", search_id)
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_SEARCH_NOT_FOUND",
+        "cancelling an already-cancelled search must not silently succeed"
+    );
+    assert_eq!(
+        service
+            .search_text_poll("main", search_id, 0)
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_SEARCH_NOT_FOUND"
+    );
+
+    let never_started = crate::search::dto::SearchId::new();
+    assert_eq!(
+        service
+            .search_text_cancel("main", never_started)
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_SEARCH_NOT_FOUND"
+    );
+}
+
+#[test]
+fn a_search_id_is_scoped_to_the_window_that_started_it() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::write(root.join("a.txt"), b"needle").unwrap();
+    let service = WorkspaceService::new();
+    let first_selected = block_on(service.pick_roots(
+        "first",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let first_root_id = first_selected.snapshot().roots()[0].root_id();
+    block_on(service.pick_roots(
+        "second",
+        FakePicker::selected(vec![root]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+
+    let start = service
+        .search_text_start(
+            "first",
+            text_query(first_root_id, "needle"),
+            noop_search_wake(),
+        )
+        .unwrap();
+    let search_id = extract_search_id(&start);
+
+    assert_eq!(
+        service
+            .search_text_poll("second", search_id, 0)
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_SEARCH_NOT_FOUND",
+        "a search id from one window must not be pollable from another"
+    );
+    let result = poll_search_until_done(&service, "first", search_id);
+    assert_eq!(result.batches().len(), 1);
+}
+
+#[test]
+fn a_naturally_completed_search_lingers_until_its_idle_ttl_then_is_reclaimed() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::write(root.join("a.txt"), b"needle").unwrap();
+    let now = Arc::new(Mutex::new(Instant::now()));
+    let clock_now = Arc::clone(&now);
+    let service =
+        WorkspaceService::with_search_clock(Arc::new(move || *clock_now.lock().expect("clock")));
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+
+    let start = service
+        .search_text_start("main", text_query(root_id, "needle"), noop_search_wake())
+        .unwrap();
+    let search_id = extract_search_id(&start);
+    let result = poll_search_until_done(&service, "main", search_id);
+    assert!(result.done());
+    let cursor = result.next_cursor();
+
+    // Still well within the TTL: the completed search must remain pollable.
+    let base = *now.lock().unwrap();
+    *now.lock().unwrap() = base + Duration::from_secs(119);
+    let still_there = service.search_text_poll("main", search_id, cursor).unwrap();
+    assert!(still_there.done());
+    assert!(still_there.batches().is_empty());
+
+    // Past the TTL measured from that last poll: reclaimed.
+    *now.lock().unwrap() = base + Duration::from_secs(119 + 121);
+    assert_eq!(
+        service
+            .search_text_poll("main", search_id, cursor)
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_SEARCH_NOT_FOUND"
+    );
+}
+
+#[test]
+fn the_wake_sink_is_invoked_with_the_search_id_the_start_call_returned() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::write(root.join("a.txt"), b"needle").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+
+    let (tx, rx) = mpsc::channel::<crate::search::dto::SearchId>();
+    let start = service
+        .search_text_start(
+            "main",
+            text_query(root_id, "needle"),
+            Arc::new(move |woken_id| {
+                let _ = tx.send(woken_id);
+            }),
+        )
+        .unwrap();
+    let search_id = extract_search_id(&start);
+
+    let woken = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the wake sink should fire at least once for a matching search");
+    assert_eq!(woken, search_id);
+    let _ = poll_search_until_done(&service, "main", search_id);
+}
+
+/// `WorkspaceSearchTextStartResult`'s only field is a private, redacted
+/// `SearchId` — the public API deliberately gives tests no direct accessor
+/// (mirroring how delete confirmation ids are treated), so this helper
+/// extracts it the one way available from outside `search::dto`: decoding
+/// the serialized wire form, which is exactly what the real IPC boundary
+/// does too.
+fn extract_search_id(
+    start: &crate::search::dto::WorkspaceSearchTextStartResult,
+) -> crate::search::dto::SearchId {
+    let value = serde_json::to_value(start).unwrap();
+    let wire = value["searchId"].as_str().unwrap();
+    serde_json::from_value(serde_json::json!(wire)).unwrap()
+}
+
 fn create_directory(temp: &TempDir, name: &str) -> PathBuf {
     let path = temp.path().join(name);
     std::fs::create_dir(&path).unwrap();

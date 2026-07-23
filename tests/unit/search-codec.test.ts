@@ -2,8 +2,15 @@ import { describe, expect, it } from "vitest";
 
 import {
 	decodeWorkspaceSearchFilesResult,
+	decodeWorkspaceSearchTextPollResult,
+	decodeWorkspaceSearchTextStartResult,
+	decodeWorkspaceSearchTextWakeEvent,
 	frozenWorkspaceSearchFilesRequest,
 	frozenWorkspaceSearchFilesResult,
+	frozenWorkspaceSearchTextCancelRequest,
+	frozenWorkspaceSearchTextPollRequest,
+	frozenWorkspaceSearchTextPollResult,
+	frozenWorkspaceSearchTextStartRequest,
 } from "../../app/platform/tauri/search-codec";
 
 const rootId = "00000000-0000-4000-8000-000000000101";
@@ -150,5 +157,246 @@ describe("search codec", () => {
 		expect(result.entries).not.toBe(source);
 		source[0] = "changed";
 		expect(result.entries[0]).toBe("a.txt");
+	});
+});
+
+describe("streaming text search codec (F040 S3)", () => {
+	it("builds a frozen own-data start request from valid inputs, defaulting maxFileSize", () => {
+		const request = frozenWorkspaceSearchTextStartRequest(
+			[rootId],
+			"needle",
+			false,
+			false,
+			false,
+			["**/node_modules"],
+			512,
+			null,
+		);
+		expect(request).toEqual({
+			roots: [rootId],
+			pattern: "needle",
+			isRegExp: false,
+			isCaseSensitive: false,
+			isWordMatch: false,
+			excludeGlobs: ["**/node_modules"],
+			maxResults: 512,
+			maxFileSize: null,
+		});
+		expect(Object.isFrozen(request)).toBe(true);
+	});
+
+	it("rejects an empty pattern and clamps maxResults/maxFileSize", () => {
+		expect(() =>
+			frozenWorkspaceSearchTextStartRequest(
+				[rootId],
+				"",
+				false,
+				false,
+				false,
+				[],
+				512,
+				null,
+			),
+		).toThrowError(expect.objectContaining({ code: "INVALID_SEARCH_REQUEST" }));
+
+		expect(
+			frozenWorkspaceSearchTextStartRequest(
+				[rootId],
+				"needle",
+				false,
+				false,
+				false,
+				[],
+				4_000_000_000,
+				null,
+			).maxResults,
+		).toBe(20_000);
+		expect(
+			frozenWorkspaceSearchTextStartRequest(
+				[rootId],
+				"needle",
+				false,
+				false,
+				false,
+				[],
+				0,
+				null,
+			).maxResults,
+		).toBe(1);
+		expect(
+			frozenWorkspaceSearchTextStartRequest(
+				[rootId],
+				"needle",
+				false,
+				false,
+				false,
+				[],
+				512,
+				0,
+			).maxFileSize,
+		).toBe(1);
+		expect(
+			frozenWorkspaceSearchTextStartRequest(
+				[rootId],
+				"needle",
+				false,
+				false,
+				false,
+				[],
+				512,
+				Number.MAX_SAFE_INTEGER,
+			).maxFileSize,
+		).toBe(64 * 1_024 * 1_024);
+	});
+
+	it("rejects non-strict-boolean flags", () => {
+		for (const flags of [
+			[1, false, false],
+			[false, "true", false],
+			[false, false, undefined],
+		]) {
+			expect(() =>
+				frozenWorkspaceSearchTextStartRequest(
+					[rootId],
+					"needle",
+					flags[0],
+					flags[1],
+					flags[2],
+					[],
+					512,
+					null,
+				),
+			).toThrowError(
+				expect.objectContaining({ code: "INVALID_SEARCH_REQUEST" }),
+			);
+		}
+	});
+
+	it("decodes a well-formed start result and rejects a non-UUID or extra field", () => {
+		const decoded = decodeWorkspaceSearchTextStartResult({ searchId: rootId });
+		expect(decoded).toEqual({ searchId: rootId });
+		expect(Object.isFrozen(decoded)).toBe(true);
+		for (const value of [
+			{ searchId: "not-a-uuid" },
+			{ searchId: rootId, extra: 1 },
+			{},
+			null,
+		]) {
+			expect(() => decodeWorkspaceSearchTextStartResult(value)).toThrowError(
+				expect.objectContaining(contractError),
+			);
+		}
+	});
+
+	it("builds and validates poll/cancel requests", () => {
+		const poll = frozenWorkspaceSearchTextPollRequest(rootId, 3);
+		expect(poll).toEqual({ searchId: rootId, cursor: 3 });
+		expect(Object.isFrozen(poll)).toBe(true);
+		expect(() => frozenWorkspaceSearchTextPollRequest(rootId, -1)).toThrowError(
+			expect.objectContaining({ code: "INVALID_SEARCH_REQUEST" }),
+		);
+		expect(() =>
+			frozenWorkspaceSearchTextPollRequest("not-a-uuid", 0),
+		).toThrowError(expect.objectContaining({ code: "INVALID_SEARCH_REQUEST" }));
+
+		const cancel = frozenWorkspaceSearchTextCancelRequest(rootId);
+		expect(cancel).toEqual({ searchId: rootId });
+		expect(() => frozenWorkspaceSearchTextCancelRequest("bad")).toThrowError(
+			expect.objectContaining({ code: "INVALID_SEARCH_REQUEST" }),
+		);
+	});
+
+	it("decodes a well-formed poll result with nested batches/matches and freezes every level", () => {
+		const decoded = decodeWorkspaceSearchTextPollResult({
+			batches: [
+				{
+					path: "src/main.ts",
+					matches: [
+						{ line: 1, column: 5, length: 6, previewText: "needle here" },
+					],
+				},
+			],
+			nextCursor: 1,
+			done: true,
+			limitHit: false,
+			skipped: { binary: 0, oversize: 0 },
+		});
+		expect(decoded.batches[0]?.path).toBe("src/main.ts");
+		expect(decoded.batches[0]?.matches[0]).toEqual({
+			line: 1,
+			column: 5,
+			length: 6,
+			previewText: "needle here",
+		});
+		expect(Object.isFrozen(decoded)).toBe(true);
+		expect(Object.isFrozen(decoded.batches)).toBe(true);
+		expect(Object.isFrozen(decoded.batches[0])).toBe(true);
+		expect(Object.isFrozen(decoded.batches[0]?.matches)).toBe(true);
+	});
+
+	it("rejects a poll result with extra/missing/mistyped fields, oversized previewText, or Proxy nesting", () => {
+		const base = () => ({
+			batches: [],
+			nextCursor: 0,
+			done: false,
+			limitHit: false,
+			skipped: { binary: 0, oversize: 0 },
+		});
+		for (const value of [
+			{ ...base(), extra: 1 },
+			{ ...base(), nextCursor: -1 },
+			{ ...base(), done: "false" },
+			{
+				...base(),
+				batches: [{ path: "", matches: [] }],
+			},
+			{
+				...base(),
+				batches: [
+					{
+						path: "a.ts",
+						matches: [
+							{ line: 1, column: 1, length: 1, previewText: "x".repeat(257) },
+						],
+					},
+				],
+			},
+			{ ...base(), skipped: { binary: -1, oversize: 0 } },
+			{ ...base(), batches: new Proxy([], {}) },
+		]) {
+			expect(() => decodeWorkspaceSearchTextPollResult(value)).toThrowError(
+				expect.objectContaining(contractError),
+			);
+		}
+	});
+
+	it("frozenWorkspaceSearchTextPollResult round-trips owned batch/match objects through the same decoder", () => {
+		const result = frozenWorkspaceSearchTextPollResult(
+			[
+				{
+					path: "a.ts",
+					matches: [{ line: 1, column: 1, length: 1, previewText: "a" }],
+				},
+			],
+			1,
+			true,
+			false,
+			{ binary: 1, oversize: 2 },
+		);
+		expect(result.batches[0]?.path).toBe("a.ts");
+		expect(result.skipped).toEqual({ binary: 1, oversize: 2 });
+	});
+
+	it("decodes a well-formed wake event and rejects a non-UUID or extra field", () => {
+		const decoded = decodeWorkspaceSearchTextWakeEvent({ searchId: rootId });
+		expect(decoded).toEqual({ searchId: rootId });
+		for (const value of [
+			{ searchId: "bad" },
+			{ searchId: rootId, extra: true },
+		]) {
+			expect(() => decodeWorkspaceSearchTextWakeEvent(value)).toThrowError(
+				expect.objectContaining(contractError),
+			);
+		}
 	});
 });

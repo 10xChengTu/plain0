@@ -1,4 +1,13 @@
-import type { WorkspaceSearchFilesResult } from "./contracts";
+import type {
+	WorkspaceSearchFilesResult,
+	WorkspaceSearchTextBatch,
+	WorkspaceSearchTextMatch,
+	WorkspaceSearchTextPollResult,
+	WorkspaceSearchTextSkipped,
+	WorkspaceSearchTextStartRequest,
+	WorkspaceSearchTextStartResult,
+	WorkspaceSearchTextWakeEvent,
+} from "./contracts";
 
 const UUID_V4_PATTERN =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -7,6 +16,15 @@ const MAX_SEARCH_PATTERN_BYTES = 4_096;
 const MAX_SEARCH_EXCLUDE_GLOBS = 64;
 const MAX_SEARCH_EXCLUDE_GLOB_BYTES = 1_024;
 const MAX_SEARCH_RESULTS_HARD_CAP = 2_048;
+// --- Streaming text search (F040 S3) — mirrors search::dto's exact wire
+// constants; see src-tauri/src/search/dto.rs for the authoritative values.
+const MAX_TEXT_SEARCH_RESULTS_HARD_CAP = 20_000;
+const MAX_TEXT_SEARCH_MAX_FILE_SIZE_HARD_CAP = 64 * 1_024 * 1_024;
+const TEXT_SEARCH_PREVIEW_MAX_UTF16_UNITS = 256;
+/** Mirrors `search::text_search::SEARCH_BATCH_QUEUE_CAPACITY`: the most
+ * batches a single poll response can ever contain (the channel itself never
+ * buffers more than this many unconsumed). */
+const MAX_TEXT_SEARCH_BATCHES_PER_POLL = 512;
 const CONTRACT_ERROR_MESSAGE =
 	"Native IPC returned a payload that violates the Plain search contract.";
 
@@ -245,5 +263,380 @@ export function frozenWorkspaceSearchFilesResult(
 	return decodeWorkspaceSearchFilesResult({
 		entries: [...entries],
 		limitHit,
+	});
+}
+
+// --- Streaming text search (F040 S3) ----------------------------------------
+
+function isSafeNonNegativeInteger(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function frozenSearchId(value: unknown): string {
+	if (!isUuidV4(value)) {
+		return requestViolation(
+			"INVALID_SEARCH_REQUEST",
+			"The workspace text search request is invalid.",
+		);
+	}
+	return value;
+}
+
+function frozenTextSearchPattern(pattern: unknown): string {
+	if (
+		typeof pattern !== "string" ||
+		pattern.length === 0 ||
+		pattern.length > MAX_SEARCH_PATTERN_BYTES
+	) {
+		return requestViolation(
+			"INVALID_SEARCH_REQUEST",
+			"The workspace text search request is invalid.",
+		);
+	}
+	return pattern;
+}
+
+function frozenStrictBoolean(value: unknown): boolean {
+	if (typeof value !== "boolean") {
+		return requestViolation(
+			"INVALID_SEARCH_REQUEST",
+			"The workspace text search request is invalid.",
+		);
+	}
+	return value;
+}
+
+function frozenTextSearchMaxResults(maxResults: unknown): number {
+	if (
+		typeof maxResults !== "number" ||
+		!Number.isSafeInteger(maxResults) ||
+		maxResults < 0
+	) {
+		return requestViolation(
+			"INVALID_SEARCH_REQUEST",
+			"The workspace text search request is invalid.",
+		);
+	}
+	return Math.min(Math.max(maxResults, 1), MAX_TEXT_SEARCH_RESULTS_HARD_CAP);
+}
+
+function frozenTextSearchMaxFileSize(maxFileSize: unknown): number | null {
+	if (maxFileSize === null || maxFileSize === undefined) {
+		return null;
+	}
+	if (
+		typeof maxFileSize !== "number" ||
+		!Number.isSafeInteger(maxFileSize) ||
+		maxFileSize < 0
+	) {
+		return requestViolation(
+			"INVALID_SEARCH_REQUEST",
+			"The workspace text search request is invalid.",
+		);
+	}
+	return Math.min(
+		Math.max(maxFileSize, 1),
+		MAX_TEXT_SEARCH_MAX_FILE_SIZE_HARD_CAP,
+	);
+}
+
+function frozenTextSearchCursor(cursor: unknown): number {
+	if (
+		typeof cursor !== "number" ||
+		!Number.isSafeInteger(cursor) ||
+		cursor < 0
+	) {
+		return requestViolation(
+			"INVALID_SEARCH_REQUEST",
+			"The workspace text search request is invalid.",
+		);
+	}
+	return cursor;
+}
+
+/**
+ * Validates and freezes a `workspace_search_text_start` request's own-data
+ * fields, independent of transport — the same shared-by-both-transports
+ * pattern `frozenWorkspaceSearchFilesRequest` already establishes.
+ */
+export function frozenWorkspaceSearchTextStartRequest(
+	roots: unknown,
+	pattern: unknown,
+	isRegExp: unknown,
+	isCaseSensitive: unknown,
+	isWordMatch: unknown,
+	excludeGlobs: unknown,
+	maxResults: unknown,
+	maxFileSize: unknown,
+): WorkspaceSearchTextStartRequest {
+	return Object.freeze({
+		roots: frozenSearchRoots(roots),
+		pattern: frozenTextSearchPattern(pattern),
+		isRegExp: frozenStrictBoolean(isRegExp),
+		isCaseSensitive: frozenStrictBoolean(isCaseSensitive),
+		isWordMatch: frozenStrictBoolean(isWordMatch),
+		excludeGlobs: frozenSearchExcludeGlobs(excludeGlobs),
+		maxResults: frozenTextSearchMaxResults(maxResults),
+		maxFileSize: frozenTextSearchMaxFileSize(maxFileSize),
+	});
+}
+
+/**
+ * Decodes a `workspace_search_text_start` response: an own-data, exactly
+ * `{ searchId }` object.
+ */
+export function decodeWorkspaceSearchTextStartResult(
+	value: unknown,
+): WorkspaceSearchTextStartResult {
+	if (!isPlainObject(value) || !hasExactKeys(value, ["searchId"])) {
+		return violation();
+	}
+	if (!isUuidV4(value.searchId)) {
+		return violation();
+	}
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze({ searchId: value.searchId });
+}
+
+export function frozenWorkspaceSearchTextPollRequest(
+	searchId: unknown,
+	cursor: unknown,
+): Readonly<{ searchId: string; cursor: number }> {
+	return Object.freeze({
+		searchId: frozenSearchId(searchId),
+		cursor: frozenTextSearchCursor(cursor),
+	});
+}
+
+export function frozenWorkspaceSearchTextCancelRequest(
+	searchId: unknown,
+): Readonly<{ searchId: string }> {
+	return Object.freeze({ searchId: frozenSearchId(searchId) });
+}
+
+/**
+ * Validates and freezes an own-data array of plain objects, each decoded by
+ * `decodeElement`. Generalizes `ownStringArraySnapshot`'s own-data rigor
+ * (exact `Array.prototype`, exact-count property descriptors, no getters)
+ * to elements that are themselves objects rather than bare strings.
+ */
+function ownObjectArraySnapshot<T>(
+	value: unknown,
+	maxLength: number,
+	decodeElement: (element: unknown) => T,
+): readonly T[] {
+	if (typeof value !== "object" || value === null || !Array.isArray(value)) {
+		return violation();
+	}
+	if (Object.getPrototypeOf(value) !== Array.prototype) {
+		return violation();
+	}
+	const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+	if (
+		lengthDescriptor === undefined ||
+		!("value" in lengthDescriptor) ||
+		!Number.isSafeInteger(lengthDescriptor.value) ||
+		(lengthDescriptor.value as number) < 0 ||
+		(lengthDescriptor.value as number) > maxLength
+	) {
+		return violation();
+	}
+	const length = lengthDescriptor.value as number;
+	const descriptors = Object.getOwnPropertyDescriptors(value);
+	if (Reflect.ownKeys(descriptors).length !== length + 1) {
+		return violation();
+	}
+
+	const items: T[] = [];
+	for (let index = 0; index < length; index += 1) {
+		const descriptor = (descriptors as Record<string, PropertyDescriptor>)[
+			String(index)
+		];
+		if (
+			descriptor === undefined ||
+			!("value" in descriptor) ||
+			descriptor.get !== undefined ||
+			descriptor.set !== undefined
+		) {
+			return violation();
+		}
+		items.push(decodeElement(descriptor.value));
+	}
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze(items);
+}
+
+function decodeTextSearchMatch(value: unknown): WorkspaceSearchTextMatch {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, ["line", "column", "length", "previewText"])
+	) {
+		return violation();
+	}
+	if (
+		!isSafeNonNegativeInteger(value.line) ||
+		!isSafeNonNegativeInteger(value.column) ||
+		!isSafeNonNegativeInteger(value.length)
+	) {
+		return violation();
+	}
+	if (
+		typeof value.previewText !== "string" ||
+		value.previewText.length > TEXT_SEARCH_PREVIEW_MAX_UTF16_UNITS
+	) {
+		return violation();
+	}
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze({
+		line: value.line,
+		column: value.column,
+		length: value.length,
+		previewText: value.previewText,
+	});
+}
+
+function decodeTextSearchBatch(value: unknown): WorkspaceSearchTextBatch {
+	if (!isPlainObject(value) || !hasExactKeys(value, ["path", "matches"])) {
+		return violation();
+	}
+	if (
+		typeof value.path !== "string" ||
+		value.path.length === 0 ||
+		value.path.length > MAX_SEARCH_PATTERN_BYTES
+	) {
+		return violation();
+	}
+	const matches = ownObjectArraySnapshot(
+		value.matches,
+		MAX_TEXT_SEARCH_RESULTS_HARD_CAP,
+		decodeTextSearchMatch,
+	);
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze({ path: value.path, matches });
+}
+
+function decodeTextSearchSkipped(value: unknown): WorkspaceSearchTextSkipped {
+	if (!isPlainObject(value) || !hasExactKeys(value, ["binary", "oversize"])) {
+		return violation();
+	}
+	if (
+		!isSafeNonNegativeInteger(value.binary) ||
+		!isSafeNonNegativeInteger(value.oversize)
+	) {
+		return violation();
+	}
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze({ binary: value.binary, oversize: value.oversize });
+}
+
+/**
+ * Decodes a `workspace_search_text_poll` response: an own-data, exactly
+ * `{ batches, nextCursor, done, limitHit, skipped }` object.
+ */
+export function decodeWorkspaceSearchTextPollResult(
+	value: unknown,
+): WorkspaceSearchTextPollResult {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, [
+			"batches",
+			"nextCursor",
+			"done",
+			"limitHit",
+			"skipped",
+		])
+	) {
+		return violation();
+	}
+	const batches = ownObjectArraySnapshot(
+		value.batches,
+		MAX_TEXT_SEARCH_BATCHES_PER_POLL,
+		decodeTextSearchBatch,
+	);
+	if (!isSafeNonNegativeInteger(value.nextCursor)) {
+		return violation();
+	}
+	if (typeof value.done !== "boolean" || typeof value.limitHit !== "boolean") {
+		return violation();
+	}
+	const skipped = decodeTextSearchSkipped(value.skipped);
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze({
+		batches,
+		nextCursor: value.nextCursor,
+		done: value.done,
+		limitHit: value.limitHit,
+		skipped,
+	});
+}
+
+/**
+ * Decodes a `workspace_search_text_wake` event payload: an own-data, exactly
+ * `{ searchId }` object.
+ */
+export function decodeWorkspaceSearchTextWakeEvent(
+	value: unknown,
+): WorkspaceSearchTextWakeEvent {
+	if (!isPlainObject(value) || !hasExactKeys(value, ["searchId"])) {
+		return violation();
+	}
+	if (!isUuidV4(value.searchId)) {
+		return violation();
+	}
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze({ searchId: value.searchId });
+}
+
+/**
+ * Builds a frozen `workspace_search_text_poll` response directly, for the
+ * browser mock (which has no wire boundary to round-trip through).
+ */
+export function frozenWorkspaceSearchTextPollResult(
+	batches: readonly {
+		readonly path: string;
+		readonly matches: readonly WorkspaceSearchTextMatch[];
+	}[],
+	nextCursor: number,
+	done: boolean,
+	limitHit: boolean,
+	skipped: WorkspaceSearchTextSkipped,
+): WorkspaceSearchTextPollResult {
+	return decodeWorkspaceSearchTextPollResult({
+		batches: batches.map((batch) => ({
+			path: batch.path,
+			matches: batch.matches.map((match) => ({ ...match })),
+		})),
+		nextCursor,
+		done,
+		limitHit,
+		skipped: { ...skipped },
 	});
 }

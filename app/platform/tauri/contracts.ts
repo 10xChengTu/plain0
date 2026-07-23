@@ -1,6 +1,8 @@
 export const RUNTIME_READY_EVENT = "plain://runtime-ready" as const;
 export const WORKSPACE_WATCH_WAKE_EVENT =
 	"plain://workspace-watch-wake" as const;
+export const WORKSPACE_SEARCH_TEXT_WAKE_EVENT =
+	"plain://workspace-search-text-wake" as const;
 
 export interface RuntimeInfo {
 	application: "Plain";
@@ -246,6 +248,55 @@ export interface WorkspaceSearchFilesResult {
 }
 
 /**
+ * Request shape for `workspace_search_text_start` (F040 S3 streaming text
+ * search). `maxFileSize` is optional; omitting it (or passing `null`) uses
+ * Rust's own 8 MiB default.
+ */
+export interface WorkspaceSearchTextStartRequest {
+	readonly roots: readonly string[];
+	readonly pattern: string;
+	readonly isRegExp: boolean;
+	readonly isCaseSensitive: boolean;
+	readonly isWordMatch: boolean;
+	readonly excludeGlobs: readonly string[];
+	readonly maxResults: number;
+	readonly maxFileSize: number | null;
+}
+
+export interface WorkspaceSearchTextStartResult {
+	readonly searchId: string;
+}
+
+export interface WorkspaceSearchTextMatch {
+	readonly line: number;
+	readonly column: number;
+	readonly length: number;
+	readonly previewText: string;
+}
+
+export interface WorkspaceSearchTextBatch {
+	readonly path: string;
+	readonly matches: readonly WorkspaceSearchTextMatch[];
+}
+
+export interface WorkspaceSearchTextSkipped {
+	readonly binary: number;
+	readonly oversize: number;
+}
+
+export interface WorkspaceSearchTextPollResult {
+	readonly batches: readonly WorkspaceSearchTextBatch[];
+	readonly nextCursor: number;
+	readonly done: boolean;
+	readonly limitHit: boolean;
+	readonly skipped: WorkspaceSearchTextSkipped;
+}
+
+export interface WorkspaceSearchTextWakeEvent {
+	readonly searchId: string;
+}
+
+/**
  * One recovered backup entry. `bytes` is a freshly allocated snapshot: it
  * shares no backing storage with the bridge/mock and the caller may freely
  * mutate it.
@@ -330,6 +381,36 @@ export interface PlainBridge {
 		excludeGlobs: readonly string[],
 		maxResults: number,
 	): Promise<WorkspaceSearchFilesResult>;
+	/**
+	 * Starts one streaming full-text search (F040 S3). Starting a new one for
+	 * the same window supersedes whatever search (active or lingering-done)
+	 * that window already had — the caller does not need to cancel the old
+	 * one first. Listen for `workspaceSearchTextWatch`'s wake hints and call
+	 * `workspaceSearchTextPoll` to pull results.
+	 */
+	workspaceSearchTextStart(
+		request: WorkspaceSearchTextStartRequest,
+	): Promise<WorkspaceSearchTextStartResult>;
+	/**
+	 * Drains whatever batches `searchId` has produced since `cursor` (never
+	 * blocks). `cursor` must equal the last `nextCursor` this search
+	 * returned (0 for the first call).
+	 */
+	workspaceSearchTextPoll(
+		searchId: string,
+		cursor: number,
+	): Promise<WorkspaceSearchTextPollResult>;
+	/** Idempotent-to-call, but not idempotent in outcome: cancelling an
+	 * already-cancelled/unknown/expired search rejects. */
+	workspaceSearchTextCancel(searchId: string): Promise<void>;
+	/**
+	 * Registers a listener for the fire-and-forget wake hint that a search
+	 * has new batches ready to poll. The listener receives the searchId the
+	 * hint belongs to; a caller that only cares about its own current search
+	 * must compare it itself (a hint for a superseded search may still
+	 * arrive after the fact).
+	 */
+	workspaceSearchTextWatch(listener: (searchId: string) => void): Unlisten;
 	workspaceWriteFile(
 		rootId: string,
 		relativePath: string,

@@ -27,8 +27,11 @@ import {
 	frozenBackupWriteInputs,
 } from "./backup-codec";
 import {
+	decodeWorkspaceSearchTextStartResult,
 	frozenWorkspaceSearchFilesRequest,
 	frozenWorkspaceSearchFilesResult,
+	frozenWorkspaceSearchTextPollResult,
+	frozenWorkspaceSearchTextStartRequest,
 } from "./search-codec";
 import {
 	compareWorkspaceEntryNames,
@@ -900,6 +903,13 @@ export interface BrowserMockBridgeOptions {
 	readonly onWorkspaceWatchControllerForTest?: (
 		controller: BrowserMockWorkspaceWatchControllerForTest,
 	) => void;
+	/** Lowers the streaming text search match budget so `limitHit` is
+	 * reachable with a small fixture instead of 20,000 real matches. */
+	readonly textSearchMaxMatchesForTest?: number;
+	/** How many batches `workspaceSearchTextPoll` delivers per call; defaults
+	 * to 1 so tests can observe genuine multi-poll streaming instead of
+	 * everything arriving in a single response. */
+	readonly textSearchBatchesPerPollForTest?: number;
 }
 
 interface CapturedBrowserMockWorkspaceMoveSeams {
@@ -1073,6 +1083,27 @@ function fileTooLarge(): CommandError {
 	return commandError(
 		"FILE_TOO_LARGE",
 		"The workspace file exceeds the supported read limit.",
+	);
+}
+
+function invalidSearchRegex(): CommandError {
+	return commandError(
+		"INVALID_SEARCH_REGEX",
+		"The workspace text search pattern is not a valid regular expression.",
+	);
+}
+
+function searchNotFound(): CommandError {
+	return commandError(
+		"WORKSPACE_SEARCH_NOT_FOUND",
+		"The workspace text search is no longer available.",
+	);
+}
+
+function invalidSearchRequest(): CommandError {
+	return commandError(
+		"INVALID_SEARCH_REQUEST",
+		"The workspace text search request is invalid.",
 	);
 }
 
@@ -4699,6 +4730,267 @@ export function createBrowserMockBridge(
 		return frozenWorkspaceSearchFilesResult(entries, limitHit);
 	};
 
+	// --- Streaming text search (F040 S3) ------------------------------------
+
+	const MAX_MOCK_TEXT_SEARCH_MATCHES =
+		options.textSearchMaxMatchesForTest ?? 20_000;
+	const MOCK_TEXT_SEARCH_BATCHES_PER_POLL =
+		options.textSearchBatchesPerPollForTest ?? 1;
+	const lenientTextDecoder = new TextDecoder("utf-8", { fatal: false });
+	const issuedTextSearchIds = new Set<string>();
+	const nextTextSearchId = (): string => {
+		for (let attempt = 0; attempt < 16; attempt += 1) {
+			const bytes = new Uint8Array(16);
+			globalThis.crypto.getRandomValues(bytes);
+			bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+			bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+			const hex = [...bytes]
+				.map((value) => value.toString(16).padStart(2, "0"))
+				.join("");
+			const id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(
+				12,
+				16,
+			)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+			if (!issuedTextSearchIds.has(id)) {
+				issuedTextSearchIds.add(id);
+				return id;
+			}
+		}
+		throw new Error("Browser mock text-search id generation failed.");
+	};
+
+	interface MockTextSearchBatch {
+		readonly path: string;
+		readonly matches: readonly {
+			readonly line: number;
+			readonly column: number;
+			readonly length: number;
+			readonly previewText: string;
+		}[];
+	}
+
+	interface MockTextSearch {
+		readonly searchId: string;
+		pending: MockTextSearchBatch[];
+		deliveredCursor: number;
+		readonly limitHit: boolean;
+		readonly skippedBinary: number;
+		readonly skippedOversize: number;
+	}
+
+	let activeTextSearch: MockTextSearch | undefined;
+	const textSearchWakeListeners = new Set<(searchId: string) => void>();
+	const emitTextSearchWake = (searchId: string): void => {
+		queueMicrotask(() => {
+			for (const listener of textSearchWakeListeners) {
+				listener(searchId);
+			}
+		});
+	};
+
+	const TEXT_SEARCH_PREVIEW_MAX_UTF16_UNITS = 256;
+
+	const buildMockPreview = (
+		line: string,
+		matchStart: number,
+		matchLength: number,
+	): { previewText: string; column: number } => {
+		const matchEnd = matchStart + matchLength;
+		const windowStart =
+			matchEnd <= TEXT_SEARCH_PREVIEW_MAX_UTF16_UNITS ? 0 : matchStart;
+		const windowEnd = Math.min(
+			windowStart + TEXT_SEARCH_PREVIEW_MAX_UTF16_UNITS,
+			line.length,
+		);
+		return {
+			previewText: line.slice(windowStart, windowEnd),
+			column: matchStart - windowStart,
+		};
+	};
+
+	const escapeMockRegExp = (value: string): string =>
+		value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+	const compileMockTextMatcher = (
+		pattern: string,
+		isRegExp: boolean,
+		isCaseSensitive: boolean,
+		isWordMatch: boolean,
+	): RegExp => {
+		const source = isRegExp ? pattern : escapeMockRegExp(pattern);
+		const wrapped = isWordMatch ? `\\b(?:${source})\\b` : source;
+		try {
+			return new RegExp(wrapped, isCaseSensitive ? "gu" : "giu");
+		} catch {
+			throw invalidSearchRegex();
+		}
+	};
+
+	const searchWorkspaceTextMatches = (
+		request: Readonly<{
+			roots: readonly string[];
+			pattern: string;
+			isRegExp: boolean;
+			isCaseSensitive: boolean;
+			isWordMatch: boolean;
+			excludeGlobs: readonly string[];
+			maxResults: number;
+			maxFileSize: number | null;
+		}>,
+	): Omit<MockTextSearch, "searchId" | "deliveredCursor"> => {
+		for (const rootId of request.roots) {
+			if (!roots.has(rootId)) {
+				throw rootNotAuthorized();
+			}
+		}
+		const matcher = compileMockTextMatcher(
+			request.pattern,
+			request.isRegExp,
+			request.isCaseSensitive,
+			request.isWordMatch,
+		);
+		const excludeMatchers = request.excludeGlobs.map(compileMockExcludeGlob);
+		const maxFileSize = request.maxFileSize ?? 8 * 1_024 * 1_024;
+		const maxResults = Math.min(
+			request.maxResults,
+			MAX_MOCK_TEXT_SEARCH_MATCHES,
+		);
+
+		const pending: MockTextSearchBatch[] = [];
+		let limitHit = false;
+		let skippedBinary = 0;
+		let skippedOversize = 0;
+		let remainingBudget = maxResults;
+		let visited = 0;
+
+		interface SearchFrame {
+			readonly directory: MockDirectoryNode;
+			readonly wire: string;
+			readonly depth: number;
+			readonly gitignoreChain: readonly MockGitignoreLayer[];
+			readonly names: readonly string[];
+			nextIndex: number;
+		}
+
+		rootsLoop: for (const rootId of request.roots) {
+			const root = trees.get(rootId);
+			if (root === undefined || root.kind !== "directory") {
+				continue;
+			}
+			const frames: SearchFrame[] = [
+				{
+					directory: root,
+					wire: "",
+					depth: 0,
+					gitignoreChain: [mockGitignoreLayerFor(root, "")],
+					names: [...root.entries.keys()].sort(compareWorkspaceEntryNames),
+					nextIndex: 0,
+				},
+			];
+
+			while (frames.length > 0) {
+				const frame = frames[frames.length - 1]!;
+				if (frame.nextIndex >= frame.names.length) {
+					frames.pop();
+					continue;
+				}
+				const name = frame.names[frame.nextIndex]!;
+				frame.nextIndex += 1;
+				visited += 1;
+				if (visited > MAX_MOCK_SEARCH_TREE_ENTRIES) {
+					limitHit = true;
+					break rootsLoop;
+				}
+				const child = frame.directory.entries.get(name);
+				if (child === undefined) {
+					continue;
+				}
+				const wire = frame.wire.length === 0 ? name : `${frame.wire}/${name}`;
+				const isDir = child.kind === "directory";
+				const excluded =
+					excludeMatchers.some((matches) => matches(wire)) ||
+					mockPathIsGitignored(frame.gitignoreChain, wire, isDir);
+
+				if (child.kind === "directory") {
+					if (excluded) {
+						continue;
+					}
+					const depth = frame.depth + 1;
+					if (depth > MAX_MOCK_SEARCH_TREE_DEPTH) {
+						limitHit = true;
+						continue;
+					}
+					frames.push({
+						directory: child,
+						wire,
+						depth,
+						gitignoreChain: [
+							...frame.gitignoreChain,
+							mockGitignoreLayerFor(child, wire),
+						],
+						names: [...child.entries.keys()].sort(compareWorkspaceEntryNames),
+						nextIndex: 0,
+					});
+					continue;
+				}
+				if (child.kind !== "file" || excluded) {
+					continue;
+				}
+				if (remainingBudget <= 0) {
+					limitHit = true;
+					break rootsLoop;
+				}
+				if (child.bytes.byteLength > maxFileSize) {
+					skippedOversize += 1;
+					continue;
+				}
+				if (child.bytes.includes(0)) {
+					skippedBinary += 1;
+					continue;
+				}
+				const text = lenientTextDecoder.decode(child.bytes);
+				const lines = text.split("\n");
+				const matches: {
+					line: number;
+					column: number;
+					length: number;
+					previewText: string;
+				}[] = [];
+				lineLoop: for (const [lineIndex, rawLine] of lines.entries()) {
+					const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+					for (const found of line.matchAll(matcher)) {
+						if (remainingBudget <= 0) {
+							break lineLoop;
+						}
+						const { previewText, column } = buildMockPreview(
+							line,
+							found.index,
+							found[0].length,
+						);
+						matches.push({
+							line: lineIndex + 1,
+							column: column + 1,
+							length: found[0].length,
+							previewText,
+						});
+						remainingBudget -= 1;
+					}
+				}
+				if (matches.length > 0) {
+					pending.push(
+						Object.freeze({ path: wire, matches: Object.freeze(matches) }),
+					);
+				}
+				if (remainingBudget <= 0) {
+					limitHit = true;
+					break rootsLoop;
+				}
+			}
+		}
+
+		return { pending, limitHit, skippedBinary, skippedOversize };
+	};
+
 	return {
 		async runtimeInfo() {
 			queueMicrotask(() => {
@@ -4868,6 +5160,78 @@ export function createBrowserMockBridge(
 				maxResults,
 			);
 			return searchWorkspaceFiles(request);
+		},
+		async workspaceSearchTextStart(candidate) {
+			const request = frozenWorkspaceSearchTextStartRequest(
+				candidate.roots,
+				candidate.pattern,
+				candidate.isRegExp,
+				candidate.isCaseSensitive,
+				candidate.isWordMatch,
+				candidate.excludeGlobs,
+				candidate.maxResults,
+				candidate.maxFileSize,
+			);
+			// A new start always supersedes whatever this window already had,
+			// active or lingering-done — mirrors the Rust service's contract.
+			const { pending, limitHit, skippedBinary, skippedOversize } =
+				searchWorkspaceTextMatches(request);
+			const searchId = nextTextSearchId();
+			activeTextSearch = {
+				searchId,
+				pending,
+				deliveredCursor: 0,
+				limitHit,
+				skippedBinary,
+				skippedOversize,
+			};
+			if (pending.length > 0) {
+				emitTextSearchWake(searchId);
+			}
+			return decodeWorkspaceSearchTextStartResult({ searchId });
+		},
+		async workspaceSearchTextPoll(searchId, cursor) {
+			if (
+				activeTextSearch === undefined ||
+				activeTextSearch.searchId !== searchId
+			) {
+				throw searchNotFound();
+			}
+			const search = activeTextSearch;
+			if (cursor !== search.deliveredCursor) {
+				throw invalidSearchRequest();
+			}
+			const delivered = search.pending.splice(
+				0,
+				MOCK_TEXT_SEARCH_BATCHES_PER_POLL,
+			);
+			search.deliveredCursor += delivered.length;
+			const done = search.pending.length === 0;
+			if (!done) {
+				emitTextSearchWake(searchId);
+			}
+			return frozenWorkspaceSearchTextPollResult(
+				delivered,
+				search.deliveredCursor,
+				done,
+				search.limitHit,
+				{ binary: search.skippedBinary, oversize: search.skippedOversize },
+			);
+		},
+		async workspaceSearchTextCancel(searchId) {
+			if (
+				activeTextSearch === undefined ||
+				activeTextSearch.searchId !== searchId
+			) {
+				throw searchNotFound();
+			}
+			activeTextSearch = undefined;
+		},
+		workspaceSearchTextWatch(listener) {
+			textSearchWakeListeners.add(listener);
+			return () => {
+				textSearchWakeListeners.delete(listener);
+			};
 		},
 		async backupWrite(key, bytes) {
 			if (roots.size === 0) {
