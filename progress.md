@@ -6,7 +6,7 @@
 
 - 阶段：3 — 终端与 Git。
 - WIP：`F080` Core Git workflow。
-- 当前最小工作项：完成 F080 的固定 GitHub 调研与技术方案冻结。
+- 当前最小工作项：实现并验收 F080 S0 边界加固 + git 域骨架切片。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -205,10 +205,13 @@
 
 - [x] F070 压测/背压/分片证据 + 收口切片通过完整验收，贴真实数字（本会话亲自复跑，非仅采信自述）：①`cargo fmt --check`/`cargo clippy --all-targets -- -D warnings` 均 0 警告通过。②`cargo test`：**637/637**（较上一切片的 634 新增 3 个——本切片新增的三个分片测试；`terminal::vt::` 域单独复跑 **22/22**）。③`pnpm exec vitest run`：**50** 个测试文件、**1024** 个用例（与上一切片逐字不变，确认零 `app/**` 改动）。④`node scripts/plain/check-boundaries.mjs`：**44 app sources**、**89 Rust sources**、**15 pinned runtime dependencies**（三者均与上一切片逐字不变）。⑤新增 Browser 场景聚焦重跑 `--repeat-each=3 --retries=0`：**3/3** 通过。⑥全量 `pnpm exec playwright test --retries=0`：**63/63** 通过（较上一切片的 62/62 新增本切片这 1 个场景，零回归）。⑦`pnpm exec vite build`/`node scripts/plain/check-bundle.mjs`：**2150 sources, 203 tracked transitional debt sources**（`sourceCount`/debt 计数/分类/`debtSourceSha256` 均与上一切片逐字不变，确认本切片零可达 bundle 改动）。⑧完整 `pnpm check` 端到端一次性通过（`format:check`/双 TypeScript 类型检查/`oxlint --deny-warnings`/`check:features`/`test:unit` 1024/1024/`build:frontend`/`check:architecture`/`check:bundle`/`rust:fmt`/`rust:clippy`/`rust:test` 637/637，exit code 0）。验收后删除 `src-tauri/target`、`dist` 与 Playwright `test-results/`；`.ghostty-vendor/`（gitignored）保留复用；无 `tmp-`/`temp-` 残留；`git status` 仅本切片改动集。**F070 收口**：`features.json` 的 `F070` 转为 `complete`，按既有模板补齐五段式 `evidence`（`nativeScenarios` 登记 E2E-007 交接并如实说明 Browser mock 证据边界；`platformGaps` 收录 E2E-007、终端内查找已判定两平台均不成立、scrollback 无逐字颜色、split 封顶 2 且不递归、无 shell integration/会话持久化/Windows 排除、libghostty-vt 与 binding 均 pre-1.0、DOM MVP 未升级 WebGL 及其依据；`acceptanceResults` 逐字对应 3 条 acceptance）；`F080` 转为 `in_progress`。
 
+- [x] 完成 `F080` 的固定 GitHub 调研与技术方案冻结（docs/research/2026-07-25-core-git.md）：双路调研 + 仓库审计交叉。决定性产品边界发现（S1 级）——`scm-service-override@35.0.1` 的 `scm.contribution.js` 无条件 import + 注册 `SCMHistoryItemContextContribution`，它注入 `IChatContextPickService` 为必需依赖，不装 chat override 会在贡献实例化阶段崩溃（功能阻断非仅政策），`scmInput.js` 另挂 AI 生成 commit/解冲突按钮。方案：安装 scm override + 新增第 5 份可审计 pnpm patch 物理剥离这些 Chat/AI import 与注册（有 4 份既有 patch 先例；回退为不消费 scm.contribution 自建无 AI view 注册）。审计另发现排除面缺口：`excluded-surfaces` 快照无 contributionIds 维度、正则漏掉 `generateCommitMessage` 类非 chat 字样 AI 命令——方案加固为「patch 剥离 + 运行时 guard 双保险」。Rust git 域用系统 CLI（无 git2/gix，Cargo 加机器禁令）、硬化 exec（`GIT_OPTIONAL_LOCKS=0`/`core.hooksPath=`空/`core.fsmonitor=`/`--no-ext-diff --no-textconv`/`GIT_TERMINAL_PROMPT=0`/locale 固定）、所有子进程入口复用 F070 `require_trusted`；spawn guard 文案需从 PTY 的 `CommandBuilder` 修订为 git 受限封装。status 按 ADR 用 `--porcelain=v2 -z --branch`，hunk stage 复用上游架构（Monaco 算新内容 → `hash-object`+`update-index`，无需自写 patch 应用）。前端 `PlainScmProvider implements ISCMProvider` + `git:` 只读 provider + quick-diff gutter（纯 service seam 不经扩展宿主）。切片：S0 边界加固+git 骨架、S1 status/diff 解析、S2 SCM override+provider、S3 stage/commit/discard、S4 fetch/pull/push+确认+收口。F090 = blame/history/graph/compare/refs/stash/worktree 增强。
+
 ## 下一步
 
-1. F080 Core Git workflow：先完成固定 GitHub 调研与技术方案冻结（复用已落地的 trust 门），再按方案切片实现 status/diff/hunk stage/commit/fetch/pull/push、locale 无关解析、未信任 workspace 禁止执行 Git 或配置的 helper 进程、后台读禁止执行 hooks/fsmonitor/external diff/textconv/credential helper、破坏性操作预览影响并要求确认。
-2. 之后 F090 Git history/blame 工具。
+1. 实现并验收 F080 S0 边界加固 + git 域骨架切片。
+2. 按方案推进 S1 status/diff 解析 → S2 SCM override+provider → S3 stage/commit/discard → S4 fetch/pull/push+确认+收口。
+3. 之后 F090 Git history/blame 工具。
 
 ## 当前验收命令
 
