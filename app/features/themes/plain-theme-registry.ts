@@ -3,12 +3,28 @@ import {
 	type IExtensionManifest,
 } from "@codingame/monaco-vscode-api/extensions";
 import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
-import type { IColorTheme } from "@codingame/monaco-vscode-api/vscode/vs/platform/extensions/common/extensions";
+import type {
+	IColorTheme,
+	IIconTheme,
+	IProductTheme,
+} from "@codingame/monaco-vscode-api/vscode/vs/platform/extensions/common/extensions";
 import { IFileService } from "@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files.service";
 import type { ThemeTypeSelector } from "@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/theme";
 import { IExtensionResourceLoaderService } from "@codingame/monaco-vscode-api/vscode/vs/platform/extensionResourceLoader/common/extensionResourceLoader.service";
 import { ColorThemeData } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/colorThemeData";
 import { ExtensionData } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService";
+// `FileIconThemeData`/`ProductIconThemeData` (unlike `ColorThemeData`) are not
+// re-exported from `@codingame/monaco-vscode-api` itself — they only exist
+// inside the override package's own `browser/` folder (confirmed via that
+// package's own source: `workbenchThemeService.js`'s browser implementation
+// imports both from the sibling `./fileIconThemeData.js`/
+// `./productIconThemeData.js` files, never from `monaco-vscode-api`). Both
+// modules are pure data-class definitions with no side effects at import
+// time (mirrors why a deep import of `colorThemeData` is safe) — this is not
+// the forbidden `getThemeServiceOverride()` default export `app/services.ts`
+// already imports once for its contribution side effects.
+import { FileIconThemeData } from "@codingame/monaco-vscode-theme-service-override/vscode/vs/workbench/services/themes/browser/fileIconThemeData";
+import { ProductIconThemeData } from "@codingame/monaco-vscode-theme-service-override/vscode/vs/workbench/services/themes/browser/productIconThemeData";
 
 /**
  * The settingsId (upstream's `contributes.themes[].id`, matching what
@@ -17,6 +33,21 @@ import { ExtensionData } from "@codingame/monaco-vscode-api/vscode/vs/workbench/
  * `applyDefaultColorTheme` in `./plain-theme-picker.ts`.
  */
 export const DARK_MODERN_SETTINGS_ID = "Dark Modern" as const;
+
+/**
+ * The settingsId (`contributes.iconThemes[].id`) of the file icon theme
+ * Plain applies at bootstrap, before any user selection — see
+ * `applyDefaultFileIconTheme` in `./plain-theme-picker.ts`. `theme-defaults`
+ * (the sole built-in extension `app/main.ts` imports) contributes exactly
+ * one file icon theme under this id (`./fileicons/vs_minimal-icon-theme.json`,
+ * labelled `%minimalIconThemeLabel%` — "Minimal (Visual Studio Code)");
+ * confirmed by reading that package's own build-time manifest object, not
+ * assumed. Upstream's own default (`ThemeSettingDefaults.FILE_ICON_THEME`,
+ * `"vs-seti"`) belongs to the separate `vscode-theme-seti` extension, which
+ * Plain does not bundle — there is no seam to reach it, so this is Plain's
+ * own default rather than a port of upstream's.
+ */
+export const VS_MINIMAL_FILE_ICON_THEME_SETTINGS_ID = "vs-minimal" as const;
 
 /** One built-in (or, in a later slice, imported) color theme entry Plain
  * knows how to apply. `data` is a bare `ColorThemeData` instance constructed
@@ -102,6 +133,51 @@ function hasThemeContributions(
 } {
 	const themes = manifest.contributes?.themes;
 	return Array.isArray(themes) && themes.length > 0;
+}
+
+function hasIconThemeContributions(
+	manifest: IExtensionManifest,
+): manifest is IExtensionManifest & {
+	contributes: { iconThemes: readonly IIconTheme[] };
+} {
+	const iconThemes = manifest.contributes?.iconThemes;
+	return Array.isArray(iconThemes) && iconThemes.length > 0;
+}
+
+function hasProductIconThemeContributions(
+	manifest: IExtensionManifest,
+): manifest is IExtensionManifest & {
+	contributes: { productIconThemes: readonly IProductTheme[] };
+} {
+	const productIconThemes = manifest.contributes?.productIconThemes;
+	return Array.isArray(productIconThemes) && productIconThemes.length > 0;
+}
+
+/** One built-in file icon theme entry Plain knows how to apply — the
+ * `FileIconThemeData` analogue of `PlainThemeRegistryEntry`. `settingsId` is
+ * always the manifest's own `contributes.iconThemes[].id` verbatim: unlike
+ * `ColorThemeData#settingsId`'s `theme.id || label` fallback,
+ * `FileIconThemeData.fromExtensionTheme`'s `settingsId = iconTheme.id` has no
+ * fallback — upstream's own `ThemeRegistry` for this axis is constructed
+ * with `idRequired = true` (confirmed in `workbenchThemeService.js`'s
+ * `fileIconThemeRegistry` construction), so an entry actually built from a
+ * manifest contribution never has a missing id in the first place. */
+export interface PlainFileIconThemeRegistryEntry {
+	readonly id: string;
+	readonly label: string;
+	readonly settingsId: string;
+	readonly data: FileIconThemeData;
+}
+
+/** The `ProductIconThemeData` analogue of `PlainFileIconThemeRegistryEntry` —
+ * same `idRequired = true` guarantee applies (see that interface's own doc
+ * comment), confirmed via `workbenchThemeService.js`'s
+ * `productIconThemeRegistry` construction. */
+export interface PlainProductIconThemeRegistryEntry {
+	readonly id: string;
+	readonly label: string;
+	readonly settingsId: string;
+	readonly data: ProductIconThemeData;
 }
 
 /**
@@ -204,6 +280,154 @@ export async function createPlainThemeRegistry(
 					uiTheme: theme.uiTheme,
 					path: theme.path,
 				}),
+			);
+		}
+	}
+	return Object.freeze(entries);
+}
+
+/** `buildPlainThemeRegistryEntry`'s `FileIconThemeData` analogue. There is
+ * no imported-package consumption side yet (`F060` S2's own scope is
+ * built-in activation only — see `docs/research/2026-07-24-icon-themes.md`'s
+ * "实施偏差记录" for why: the Rust `theme_list`/`theme_import_*` wire
+ * contract does not project `iconThemes`/`productIconThemes` onto
+ * `ThemePackageSummary` yet, only `theme::record::StoredThemePackageManifest`
+ * carries them — extending the wire contract is a `src-tauri/src/theme/
+ * dto.rs` change, out of this slice's scope), but this is still exported
+ * (rather than kept as a private implementation detail of
+ * `createPlainFileIconThemeRegistry` below) for the same reason
+ * `buildPlainThemeRegistryEntry` is: a future slice's import consumption can
+ * reuse it verbatim once that wire contract exists. */
+export function buildPlainFileIconThemeRegistryEntry(
+	extensionLocation: URI,
+	extensionData: ExtensionData,
+	theme: Readonly<{
+		readonly id: string;
+		readonly label: string;
+		readonly path: string;
+	}>,
+): PlainFileIconThemeRegistryEntry {
+	const location = URI.joinPath(extensionLocation, theme.path);
+	const data = FileIconThemeData.fromExtensionTheme(
+		{
+			id: theme.id,
+			label: theme.label,
+			path: theme.path,
+			_watch: false,
+		},
+		location,
+		extensionData,
+	);
+	return Object.freeze({
+		id: data.id,
+		label: data.label,
+		// See `PlainFileIconThemeRegistryEntry`'s own doc comment: this axis's
+		// `settingsId` is always `theme.id` verbatim, never a `label` fallback.
+		settingsId: theme.id,
+		data,
+	});
+}
+
+/** `buildPlainThemeRegistryEntry`'s `ProductIconThemeData` analogue — see
+ * `buildPlainFileIconThemeRegistryEntry`'s own doc comment for why imported
+ * packages are out of scope here too. */
+export function buildPlainProductIconThemeRegistryEntry(
+	extensionLocation: URI,
+	extensionData: ExtensionData,
+	theme: Readonly<{
+		readonly id: string;
+		readonly label: string;
+		readonly path: string;
+	}>,
+): PlainProductIconThemeRegistryEntry {
+	const location = URI.joinPath(extensionLocation, theme.path);
+	const data = ProductIconThemeData.fromExtensionTheme(
+		{
+			id: theme.id,
+			label: theme.label,
+			path: theme.path,
+			_watch: false,
+		},
+		location,
+		extensionData,
+	);
+	return Object.freeze({
+		id: data.id,
+		label: data.label,
+		settingsId: theme.id,
+		data,
+	});
+}
+
+/** Enumerates every built-in file icon theme the same way
+ * `createPlainThemeRegistry` enumerates color themes — see that function's
+ * own doc comment for the full explanation of `getBuiltinExtensions()`/NLS
+ * resolution shared by both. Today this is exactly `theme-defaults`'s single
+ * `vs-minimal` contribution (see `VS_MINIMAL_FILE_ICON_THEME_SETTINGS_ID`'s
+ * own doc comment). */
+export async function createPlainFileIconThemeRegistry(
+	fileService: IFileService,
+): Promise<readonly PlainFileIconThemeRegistryEntry[]> {
+	const entries: PlainFileIconThemeRegistryEntry[] = [];
+	for (const extension of getBuiltinExtensions()) {
+		const manifest = extension.manifest;
+		if (!hasIconThemeContributions(manifest)) {
+			continue;
+		}
+		const nlsBundle = await readNlsBundle(fileService, extension.location);
+		const extensionData = ExtensionData.fromName(
+			manifest.publisher,
+			manifest.name,
+			true,
+		);
+		for (const theme of manifest.contributes.iconThemes) {
+			const label = resolveNlsValue(theme.label, nlsBundle);
+			entries.push(
+				buildPlainFileIconThemeRegistryEntry(
+					extension.location,
+					extensionData,
+					{
+						id: theme.id,
+						label,
+						path: theme.path,
+					},
+				),
+			);
+		}
+	}
+	return Object.freeze(entries);
+}
+
+/** `createPlainFileIconThemeRegistry`'s product icon theme analogue. Today
+ * this always returns an empty array: `theme-defaults` (the sole built-in
+ * extension) contributes no `productIconThemes` (confirmed by reading its
+ * own build-time manifest object — the field is entirely absent), so
+ * `PlainThemePicker`'s product icon theme Quick Pick only ever offers
+ * "Default" (`ProductIconThemeData.defaultTheme`, always available without
+ * any registry entry — see `./plain-theme-picker.ts`). */
+export async function createPlainProductIconThemeRegistry(
+	fileService: IFileService,
+): Promise<readonly PlainProductIconThemeRegistryEntry[]> {
+	const entries: PlainProductIconThemeRegistryEntry[] = [];
+	for (const extension of getBuiltinExtensions()) {
+		const manifest = extension.manifest;
+		if (!hasProductIconThemeContributions(manifest)) {
+			continue;
+		}
+		const nlsBundle = await readNlsBundle(fileService, extension.location);
+		const extensionData = ExtensionData.fromName(
+			manifest.publisher,
+			manifest.name,
+			true,
+		);
+		for (const theme of manifest.contributes.productIconThemes) {
+			const label = resolveNlsValue(theme.label, nlsBundle);
+			entries.push(
+				buildPlainProductIconThemeRegistryEntry(
+					extension.location,
+					extensionData,
+					{ id: theme.id, label, path: theme.path },
+				),
 			);
 		}
 	}

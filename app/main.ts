@@ -27,10 +27,18 @@ import {
 import { createWorkspaceTopologyCoordinator } from "./features/workspace/workspace-projection";
 import {
 	applyDefaultColorTheme,
+	applyDefaultFileIconTheme,
+	applyDefaultProductIconTheme,
 	applyPersistedThemeSelection,
+	registerPlainFileIconThemePicker,
+	registerPlainProductIconThemePicker,
 	registerPlainThemePicker,
 } from "./features/themes/plain-theme-picker";
-import { createPlainThemeRegistry } from "./features/themes/plain-theme-registry";
+import {
+	createPlainFileIconThemeRegistry,
+	createPlainProductIconThemeRegistry,
+	createPlainThemeRegistry,
+} from "./features/themes/plain-theme-registry";
 import { registerPlainThemeCommands } from "./features/themes/plain-theme-commands";
 import {
 	consumeImportedThemePackages,
@@ -100,6 +108,10 @@ async function bootstrap(): Promise<void> {
 		ReturnType<typeof registerWorkspaceCommands> | undefined;
 	let themeCommandsRegistration:
 		ReturnType<typeof registerPlainThemeCommands> | undefined;
+	let fileIconThemePickerRegistration:
+		ReturnType<typeof registerPlainFileIconThemePicker> | undefined;
+	let productIconThemePickerRegistration:
+		ReturnType<typeof registerPlainProductIconThemePicker> | undefined;
 	window.addEventListener(
 		"pagehide",
 		() => {
@@ -107,6 +119,8 @@ async function bootstrap(): Promise<void> {
 			workspaceCommands?.dispose();
 			workspaceDeleteCoordinator.dispose();
 			themeCommandsRegistration?.dispose();
+			fileIconThemePickerRegistration?.dispose();
+			productIconThemePickerRegistration?.dispose();
 		},
 		{ once: true },
 	);
@@ -146,9 +160,8 @@ async function bootstrap(): Promise<void> {
 		workspaceTopologyCoordinator,
 	);
 
-	const themeRegistry = await createPlainThemeRegistry(
-		await getService(IFileService),
-	);
+	const themeFileService = await getService(IFileService);
+	const themeRegistry = await createPlainThemeRegistry(themeFileService);
 	const themeService = await getService(IWorkbenchThemeService);
 	await applyDefaultColorTheme(themeService, themeRegistry);
 	const themeRegistryStore = new PlainThemeRegistryStore(themeRegistry);
@@ -182,6 +195,24 @@ async function bootstrap(): Promise<void> {
 		bridge,
 		themeRegistryStore,
 		reRegisterThemePicker,
+	);
+
+	// `F060` S2: built-in file/product icon theme activation. Both registries
+	// are static after bootstrap (imported-package icon theme consumption is
+	// out of this slice's scope — see `buildPlainFileIconThemeRegistryEntry`'s
+	// own doc comment in `plain-theme-registry.ts`), so unlike the color theme
+	// picker above there is no re-registration hook to wire up.
+	const fileIconThemeRegistry =
+		await createPlainFileIconThemeRegistry(themeFileService);
+	const productIconThemeRegistry =
+		await createPlainProductIconThemeRegistry(themeFileService);
+	await applyDefaultFileIconTheme(themeService, fileIconThemeRegistry);
+	await applyDefaultProductIconTheme(themeService);
+	fileIconThemePickerRegistration = registerPlainFileIconThemePicker(
+		fileIconThemeRegistry,
+	);
+	productIconThemePickerRegistration = registerPlainProductIconThemePicker(
+		productIconThemeRegistry,
 	);
 
 	const surfaceSnapshot = enforceExcludedWorkbenchSurfaces();

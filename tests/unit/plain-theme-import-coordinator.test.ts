@@ -433,4 +433,76 @@ describe("themeCommandErrorMessage", () => {
 			"Plain: could not complete the theme operation (IPC_FAILED).",
 		);
 	});
+
+	// `F060` S1's six icon/product icon theme validation error codes — every
+	// one gets its own specific, non-leaking sentence, not the generic
+	// "could not complete the theme operation (CODE)" fallback.
+	it.each([
+		["THEME_ICON_JSON_INVALID"],
+		["THEME_ICON_RESOURCE_INVALID"],
+		["THEME_ICON_TOO_MANY_ASSOCIATIONS"],
+		["THEME_PRODUCT_ICON_JSON_INVALID"],
+		["THEME_SVG_UNSAFE"],
+		["THEME_FONT_INVALID"],
+	])("maps %s to a specific sentence, not the generic fallback", (code) => {
+		const message = themeCommandErrorMessage({ code, message: "raw" });
+		expect(
+			message.startsWith("Plain: could not complete the theme operation"),
+		).toBe(false);
+		expect(message.startsWith("Plain: ")).toBe(true);
+	});
+});
+
+describe("mimeTypeForResource (via registerImportedPackage's blob creation)", () => {
+	function capturedBlobTypes(): {
+		types: string[];
+		restore: () => void;
+	} {
+		const types: string[] = [];
+		const original = URL.createObjectURL;
+		URL.createObjectURL = ((blob: Blob) => {
+			types.push(blob.type);
+			return original.call(URL, blob);
+		}) as typeof URL.createObjectURL;
+		return {
+			types,
+			restore: () => {
+				URL.createObjectURL = original;
+			},
+		};
+	}
+
+	it.each([
+		["themes/base.tmtheme", "application/xml"],
+		["fileicons/images/folder-dark.svg", "image/svg+xml"],
+		["fileicons/fonts/glyphs.woff2", "font/woff2"],
+		["fileicons/fonts/glyphs.woff", "font/woff"],
+		["fileicons/fonts/glyphs.ttf", "font/ttf"],
+		["fileicons/fonts/glyphs.otf", "font/otf"],
+		["fileicons/vs-minimal-icon-theme.json", "application/json"],
+		// Case-insensitive: a hostile/unusual-cased manifest path still maps
+		// correctly rather than falling through to the JSON default.
+		["THEMES/BASE.TMTHEME", "application/xml"],
+		["FONTS/GLYPHS.WOFF2", "font/woff2"],
+	])("maps %s to %s", async (resourcePath, expectedMimeType) => {
+		const { types, restore } = capturedBlobTypes();
+		try {
+			const store = new PlainThemeRegistryStore([]);
+			const pkg = samplePackage({
+				id: "mime-test.pkg@1.0.0",
+				name: "mime-test",
+				themes: [],
+				resources: [resourcePath],
+			});
+			const bridge = fakeBridge({
+				themeReadResource: async () => new Uint8Array([1, 2, 3]),
+				themeImportVsix: async () =>
+					({ status: "imported", package: pkg }) satisfies ThemeImportResult,
+			});
+			await importThemePackageViaVsix(bridge, store);
+			expect(types).toEqual([expectedMimeType]);
+		} finally {
+			restore();
+		}
+	});
 });

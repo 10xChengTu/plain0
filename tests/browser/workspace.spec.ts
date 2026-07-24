@@ -7601,7 +7601,20 @@ test("previews a theme live on navigation, restores on Escape, and applies for r
 	await page.keyboard.press("Escape");
 	await expect(picker).toBeHidden();
 	const afterEscapeState = await workbenchThemeState(page);
-	expect(afterEscapeState.classNames).toEqual(originalState.classNames);
+	// Set equality, not array equality: `F060` S2's own `file-icons-enabled`
+	// class is added once at bootstrap and never touched again by a color
+	// theme restore, but `WorkbenchThemeService.applyAndSetColorTheme`'s own
+	// `classList.remove(...)`/`classList.add(...)` pair (see
+	// `workbenchThemeService.js`) always re-appends the *color* theme's own
+	// classes at the end of `.monaco-workbench`'s `DOMTokenList` — which
+	// shifts `file-icons-enabled`'s position among the reported class names
+	// relative to them without changing which classes are actually present.
+	// `classList` order has no CSS meaning (specificity, not attribute
+	// order, decides which rules apply), so comparing as sets is the
+	// faithful assertion here, not an order-sensitive array `toEqual`.
+	expect([...afterEscapeState.classNames].sort()).toEqual(
+		[...originalState.classNames].sort(),
+	);
 	expect(afterEscapeState.editorBackground).toBe(
 		originalState.editorBackground,
 	);
@@ -8045,6 +8058,232 @@ test("falls back to Dark Modern with zero crash when the persisted selection id 
 	// The stale id must be cleared (not left to keep triggering this same
 	// fallback on every future boot).
 	expect(await themeSetSelectionCalls(page)).toEqual([null]);
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+// `F060` S2: built-in file/product icon theme activation. Real-browser probe
+// (recorded before this feature landed, not assumed): `.monaco-workbench`
+// never carried the vendor's own `file-icons-enabled` class, and the
+// `contributedFileIconTheme`/`contributedProductIconTheme` `<style>`
+// elements the vendor's own `_applyRules` always creates in `<head>` stayed
+// present-but-permanently-empty — the Workbench booted with file icons
+// structurally disabled, exactly mirroring `F050`'s own "unloaded theme
+// placeholder" root cause for color themes.
+
+/** Reads the computed `::before` `background-image` of the `.monaco-icon-
+ * label` belonging to the Explorer row whose visible name is `rowName` —
+ * this is the exact CSS Plain's activated file icon theme targets (see
+ * `fileIconThemeData.js`'s `.show-file-icons .file-icon::before`/`.folder-
+ * icon::before`/`.rootfolder-icon::before` selectors), independent of
+ * whichever specific icon-definition SVG a given row resolves to. */
+async function explorerRowIconBackgroundImage(
+	page: Page,
+	rowName: string,
+): Promise<string> {
+	return page.evaluate((name) => {
+		const rows = [...document.querySelectorAll(".monaco-list-row")];
+		const row = rows.find(
+			(candidate) =>
+				candidate.querySelector(".label-name")?.textContent === name,
+		);
+		if (row === undefined) {
+			throw new Error(`Explorer row not found: ${name}`);
+		}
+		const label = row.querySelector(".monaco-icon-label");
+		if (label === null) {
+			throw new Error(`icon label not found for Explorer row: ${name}`);
+		}
+		return getComputedStyle(label, "::before").backgroundImage;
+	}, rowName);
+}
+
+test("renders the vs-minimal file icon theme on real Explorer file and folder icons", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await installNativeIpcMock(page, "arrayBuffer");
+	const explorer = await openNativeWorkspaceExplorer(page);
+	await expect(
+		explorer.getByRole("treeitem", { name: "README.md" }),
+	).toBeVisible();
+
+	const state = await workbenchThemeState(page);
+	expect(state.classNames).toContain("file-icons-enabled");
+
+	// A regular file, a regular folder, and the workspace root folder each
+	// carry a distinct icon-definition in `vs-minimal`'s own JSON
+	// (`file`/`folder`/`rootFolder`) — all three must resolve to a real,
+	// non-empty background image, not merely one of them.
+	for (const rowName of ["README.md", "src", "native-workspace"]) {
+		const backgroundImage = await explorerRowIconBackgroundImage(page, rowName);
+		expect(backgroundImage).not.toBe("none");
+		expect(backgroundImage.length).toBeGreaterThan(0);
+	}
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+async function openFileIconThemePicker(page: Page): Promise<Locator> {
+	await page.keyboard.press("ControlOrMeta+Shift+P");
+	const picker = page.locator(".quick-input-widget");
+	await expect(picker).toBeVisible();
+	await picker.locator("input").pressSequentially("File Icon Theme");
+	const paletteCommand = picker.getByText("Preferences: File Icon Theme", {
+		exact: true,
+	});
+	await expect(paletteCommand).toHaveCount(1);
+	await paletteCommand.click();
+	await expect(picker.locator("input")).toHaveAttribute(
+		"placeholder",
+		"Select File Icon Theme (Up/Down Keys to Preview)",
+	);
+	return picker;
+}
+
+test("lists vs-minimal and None in the File Icon Theme quick pick; None disables icons and switching back re-enables them", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await installNativeIpcMock(page, "arrayBuffer");
+	await openNativeWorkspaceExplorer(page);
+	const originalBackgroundImage = await explorerRowIconBackgroundImage(
+		page,
+		"README.md",
+	);
+	expect(originalBackgroundImage).not.toBe("none");
+
+	const picker = await openFileIconThemePicker(page);
+	const pickerRows = picker.locator(".quick-input-list .monaco-list-row");
+	await expect(pickerRows).toHaveCount(2);
+	await expect(pickerRows.filter({ hasText: "None" })).toHaveCount(1);
+	await expect(
+		pickerRows.filter({ hasText: "Minimal (Visual Studio Code)" }),
+	).toHaveCount(1);
+
+	// `vs-minimal` (Plain's own bootstrap default — see
+	// `VS_MINIMAL_FILE_ICON_THEME_SETTINGS_ID`) is pre-selected as the
+	// active/focused item, mirroring the Color Theme picker's own
+	// pre-selection of the currently active theme.
+	const focusedRow = picker.locator(
+		".quick-input-list .monaco-list-row.focused",
+	);
+	await expect(focusedRow).toContainText("Minimal (Visual Studio Code)");
+
+	// "None" is always the first row (see `noFileIconThemeItem`'s own doc
+	// comment) — one ArrowUp from the pre-selected Minimal entry reaches it.
+	await page.keyboard.press("ArrowUp");
+	await expect(focusedRow).toContainText("None");
+	await expect
+		.poll(() => explorerRowIconBackgroundImage(page, "README.md"))
+		.toBe("none");
+	await page.keyboard.press("Enter");
+	await expect(picker).toBeHidden();
+	expect(await explorerRowIconBackgroundImage(page, "README.md")).toBe("none");
+	expect((await workbenchThemeState(page)).classNames).not.toContain(
+		"file-icons-enabled",
+	);
+
+	// Reopening and switching back to Minimal re-enables real icons.
+	const secondPicker = await openFileIconThemePicker(page);
+	const secondFocusedRow = secondPicker.locator(
+		".quick-input-list .monaco-list-row.focused",
+	);
+	await expect(secondFocusedRow).toContainText("None");
+	await page.keyboard.press("ArrowDown");
+	await expect(secondFocusedRow).toContainText("Minimal (Visual Studio Code)");
+	await page.keyboard.press("Enter");
+	await expect(secondPicker).toBeHidden();
+	await expect
+		.poll(() => explorerRowIconBackgroundImage(page, "README.md"))
+		.not.toBe("none");
+	expect((await workbenchThemeState(page)).classNames).toContain(
+		"file-icons-enabled",
+	);
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+async function openProductIconThemePicker(page: Page): Promise<Locator> {
+	await page.keyboard.press("ControlOrMeta+Shift+P");
+	const picker = page.locator(".quick-input-widget");
+	await expect(picker).toBeVisible();
+	await picker.locator("input").pressSequentially("Product Icon Theme");
+	const paletteCommand = picker.getByText("Preferences: Product Icon Theme", {
+		exact: true,
+	});
+	await expect(paletteCommand).toHaveCount(1);
+	await paletteCommand.click();
+	await expect(picker.locator("input")).toHaveAttribute(
+		"placeholder",
+		"Select Product Icon Theme (Up/Down Keys to Preview)",
+	);
+	return picker;
+}
+
+test("lists only Default in the Product Icon Theme quick pick, and applying it leaves codicons rendering", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	// `theme-defaults` (the sole built-in extension) contributes no
+	// `productIconThemes` at all (confirmed by reading its own build-time
+	// manifest object — see `createPlainProductIconThemeRegistry`'s own doc
+	// comment) — the picker offers exactly the always-available "Default"
+	// entry, never zero rows.
+	const picker = await openProductIconThemePicker(page);
+	const pickerRows = picker.locator(".quick-input-list .monaco-list-row");
+	await expect(pickerRows).toHaveCount(1);
+	await expect(pickerRows.filter({ hasText: "Default" })).toHaveCount(1);
+	const focusedRow = picker.locator(
+		".quick-input-list .monaco-list-row.focused",
+	);
+	await expect(focusedRow).toContainText("Default");
+
+	// The Explorer/Search/Settings activity bar tabs render entirely through
+	// built-in codicons Plain never overrides — applying "Default" (a no-op:
+	// it clears any custom `contributedProductIconTheme` rules, and there
+	// were none to begin with) must never disturb their rendering.
+	await page.keyboard.press("Enter");
+	await expect(picker).toBeHidden();
+	await expect(page.getByRole("tab", { name: /^Explorer / })).toBeVisible();
+	await expect(page.getByRole("tab", { name: /^Search/ })).toBeVisible();
+	expect(await page.locator(".contributedProductIconTheme").textContent()).toBe(
+		"",
+	);
 
 	expect(pageErrors).toEqual([]);
 	expect(consoleErrors).toEqual([]);

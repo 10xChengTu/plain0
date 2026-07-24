@@ -19,15 +19,31 @@ vi.mock("@codingame/monaco-vscode-api/extensions", () => ({
 import { CommandsRegistry } from "@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands";
 import { ColorScheme } from "@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/theme";
 
-import type { PlainThemeRegistryEntry } from "../../app/features/themes/plain-theme-registry";
+import type {
+	PlainFileIconThemeRegistryEntry,
+	PlainProductIconThemeRegistryEntry,
+	PlainThemeRegistryEntry,
+} from "../../app/features/themes/plain-theme-registry";
 import {
 	applyDefaultColorTheme,
+	applyDefaultFileIconTheme,
+	applyDefaultProductIconTheme,
 	applyPersistedThemeSelection,
 	persistThemeSelectionBestEffort,
+	registerPlainFileIconThemePicker,
+	registerPlainProductIconThemePicker,
 	registerPlainThemePicker,
 	SELECT_COLOR_THEME_COMMAND_ID,
+	SELECT_FILE_ICON_THEME_COMMAND_ID,
+	SELECT_PRODUCT_ICON_THEME_COMMAND_ID,
 } from "../../app/features/themes/plain-theme-picker";
 import type { PlainBridge } from "../../app/platform/tauri";
+// Real, unmocked classes — both are pure data-class modules with no
+// side-effecting import (see plain-theme-registry.ts's own doc comment on
+// the identical deep imports), so — like `ColorThemeData` in plain-theme-
+// registry.test.ts — there is nothing to stub here.
+import { FileIconThemeData } from "@codingame/monaco-vscode-theme-service-override/vscode/vs/workbench/services/themes/browser/fileIconThemeData";
+import { ProductIconThemeData } from "@codingame/monaco-vscode-theme-service-override/vscode/vs/workbench/services/themes/browser/productIconThemeData";
 
 function notImplemented(): never {
 	throw new Error("not implemented in fake bridge for this test");
@@ -58,6 +74,46 @@ function fakeEntry(
 		settingsId,
 		uiTheme: "vs-dark",
 		data: data as unknown as PlainThemeRegistryEntry["data"],
+	};
+}
+
+function fakeFileIconEntry(
+	settingsId: string,
+	label = settingsId,
+): PlainFileIconThemeRegistryEntry {
+	const data = { id: `id-${settingsId}` };
+	return {
+		id: data.id,
+		label,
+		settingsId,
+		data: data as unknown as PlainFileIconThemeRegistryEntry["data"],
+	};
+}
+
+function fakeProductIconEntry(
+	settingsId: string,
+	label = settingsId,
+): PlainProductIconThemeRegistryEntry {
+	const data = { id: `id-${settingsId}` };
+	return {
+		id: data.id,
+		label,
+		settingsId,
+		data: data as unknown as PlainProductIconThemeRegistryEntry["data"],
+	};
+}
+
+function fakeFileIconThemeService(currentThemeId: string) {
+	return {
+		getFileIconTheme: vi.fn(() => ({ id: currentThemeId })),
+		setFileIconTheme: vi.fn(async () => undefined),
+	};
+}
+
+function fakeProductIconThemeService(currentThemeId: string) {
+	return {
+		getProductIconTheme: vi.fn(() => ({ id: currentThemeId })),
+		setProductIconTheme: vi.fn(async () => undefined),
 	};
 }
 
@@ -539,5 +595,350 @@ describe("registerPlainThemePicker", () => {
 		);
 		expect(quickPick.disposed).toBe(true);
 		expect(themeSetSelection).not.toHaveBeenCalled();
+	});
+});
+
+describe("applyDefaultFileIconTheme", () => {
+	it("applies the vs-minimal entry as a normal (non-preview) theme change", async () => {
+		const vsMinimal = fakeFileIconEntry("vs-minimal");
+		const other = fakeFileIconEntry("other-theme");
+		const themeService = { setFileIconTheme: vi.fn(async () => undefined) };
+
+		await applyDefaultFileIconTheme(
+			themeService as never,
+			Object.freeze([other, vsMinimal]),
+		);
+
+		expect(themeService.setFileIconTheme).toHaveBeenCalledTimes(1);
+		expect(themeService.setFileIconTheme).toHaveBeenCalledWith(
+			vsMinimal.data,
+			undefined,
+		);
+	});
+
+	it("warns and does not throw when vs-minimal is absent from the registry", async () => {
+		const themeService = { setFileIconTheme: vi.fn(async () => undefined) };
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+		await expect(
+			applyDefaultFileIconTheme(
+				themeService as never,
+				Object.freeze([fakeFileIconEntry("other-theme")]),
+			),
+		).resolves.toBeUndefined();
+
+		expect(themeService.setFileIconTheme).not.toHaveBeenCalled();
+		expect(warn).toHaveBeenCalledTimes(1);
+		warn.mockRestore();
+	});
+
+	it("warns and does not throw when applying the default theme fails", async () => {
+		const vsMinimal = fakeFileIconEntry("vs-minimal");
+		const themeService = {
+			setFileIconTheme: vi.fn(async () => {
+				throw new Error("read failed");
+			}),
+		};
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+		await expect(
+			applyDefaultFileIconTheme(
+				themeService as never,
+				Object.freeze([vsMinimal]),
+			),
+		).resolves.toBeUndefined();
+
+		expect(warn).toHaveBeenCalledTimes(1);
+		warn.mockRestore();
+	});
+});
+
+describe("applyDefaultProductIconTheme", () => {
+	it("resolves the always-available Default singleton via undefined, not a registry lookup", async () => {
+		const themeService = { setProductIconTheme: vi.fn(async () => undefined) };
+
+		await applyDefaultProductIconTheme(themeService as never);
+
+		expect(themeService.setProductIconTheme).toHaveBeenCalledTimes(1);
+		expect(themeService.setProductIconTheme).toHaveBeenCalledWith(
+			undefined,
+			undefined,
+		);
+	});
+
+	it("warns and does not throw when applying it fails", async () => {
+		const themeService = {
+			setProductIconTheme: vi.fn(async () => {
+				throw new Error("boom");
+			}),
+		};
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+		await expect(
+			applyDefaultProductIconTheme(themeService as never),
+		).resolves.toBeUndefined();
+
+		expect(warn).toHaveBeenCalledTimes(1);
+		warn.mockRestore();
+	});
+});
+
+describe("registerPlainFileIconThemePicker", () => {
+	let disposeRegistration: (() => void) | undefined;
+
+	afterEach(() => {
+		disposeRegistration?.();
+		disposeRegistration = undefined;
+	});
+
+	function register(registry: readonly PlainFileIconThemeRegistryEntry[]) {
+		const registration = registerPlainFileIconThemePicker(registry);
+		disposeRegistration = () => registration.dispose();
+		return registration;
+	}
+
+	async function invoke(
+		registry: readonly PlainFileIconThemeRegistryEntry[],
+		quickPick: FakeQuickPick,
+		themeService: ReturnType<typeof fakeFileIconThemeService>,
+	) {
+		register(registry);
+		const command = CommandsRegistry.getCommand(
+			SELECT_FILE_ICON_THEME_COMMAND_ID,
+		);
+		if (command === undefined) {
+			throw new Error("command was not registered");
+		}
+		const quickInputService = fakeQuickInputService(quickPick);
+		return command.handler(
+			fakeAccessor(quickInputService, themeService) as Parameters<
+				typeof command.handler
+			>[0],
+		);
+	}
+
+	it("takes over the exact vendor command id", () => {
+		register([]);
+		const command = CommandsRegistry.getCommand(
+			SELECT_FILE_ICON_THEME_COMMAND_ID,
+		);
+		expect(command).toBeDefined();
+		expect(SELECT_FILE_ICON_THEME_COMMAND_ID).toBe(
+			"workbench.action.selectIconTheme",
+		);
+	});
+
+	it("always shows, offering None first, even with an empty registry", async () => {
+		const quickPick = new FakeQuickPick();
+		const themeService = fakeFileIconThemeService("");
+
+		const pending = invoke([], quickPick, themeService);
+		await Promise.resolve();
+
+		expect(quickPick.shown).toBe(true);
+		expect(quickPick.items).toEqual([
+			{ type: "separator", label: "File icon themes" },
+			expect.objectContaining({ id: "", label: "None" }),
+		]);
+		// None (id "") is the real `FileIconThemeData.noIconTheme` singleton —
+		// not a stand-in placeholder.
+		const [, noneItem] = quickPick.items as Array<{ data: unknown }>;
+		expect(noneItem?.data).toBe(FileIconThemeData.noIconTheme);
+
+		quickPick.hide();
+		await pending;
+	});
+
+	it("pre-selects the currently active registry entry and previews on active change", async () => {
+		const vsMinimal = fakeFileIconEntry("vs-minimal");
+		const other = fakeFileIconEntry("other-theme");
+		const themeService = fakeFileIconThemeService(vsMinimal.data.id);
+		const quickPick = new FakeQuickPick();
+
+		const pending = invoke([other, vsMinimal], quickPick, themeService);
+		await Promise.resolve();
+
+		expect(quickPick.activeItems).toEqual([
+			expect.objectContaining({ data: vsMinimal.data }),
+		]);
+
+		quickPick.fireActiveChange([{ data: other.data }]);
+		expect(themeService.setFileIconTheme).toHaveBeenCalledWith(
+			other.data,
+			"preview",
+		);
+
+		quickPick.hide();
+		await pending;
+	});
+
+	it("applies None on accept when the user navigates to it, disabling file icons", async () => {
+		const vsMinimal = fakeFileIconEntry("vs-minimal");
+		const themeService = fakeFileIconThemeService(vsMinimal.data.id);
+		const quickPick = new FakeQuickPick();
+
+		const pending = invoke([vsMinimal], quickPick, themeService);
+		await Promise.resolve();
+
+		quickPick.selectedItems = [
+			{ id: "", label: "None", data: FileIconThemeData.noIconTheme },
+		];
+		quickPick.fireAccept();
+		await pending;
+
+		expect(themeService.setFileIconTheme).toHaveBeenCalledWith(
+			FileIconThemeData.noIconTheme,
+			undefined,
+		);
+		expect(quickPick.disposed).toBe(true);
+	});
+
+	it("restores the original theme when dismissed without accepting", async () => {
+		const vsMinimal = fakeFileIconEntry("vs-minimal");
+		const other = fakeFileIconEntry("other-theme");
+		const originalTheme = { id: vsMinimal.data.id };
+		const themeService = {
+			getFileIconTheme: vi.fn(() => originalTheme),
+			setFileIconTheme: vi.fn(async () => undefined),
+		};
+		const quickPick = new FakeQuickPick();
+
+		const pending = invoke([vsMinimal, other], quickPick, themeService);
+		await Promise.resolve();
+
+		quickPick.fireActiveChange([{ data: other.data }]);
+		expect(themeService.setFileIconTheme).toHaveBeenCalledWith(
+			other.data,
+			"preview",
+		);
+
+		quickPick.hide();
+		await pending;
+
+		expect(themeService.setFileIconTheme).toHaveBeenLastCalledWith(
+			originalTheme,
+			undefined,
+		);
+		expect(quickPick.disposed).toBe(true);
+	});
+});
+
+describe("registerPlainProductIconThemePicker", () => {
+	let disposeRegistration: (() => void) | undefined;
+
+	afterEach(() => {
+		disposeRegistration?.();
+		disposeRegistration = undefined;
+	});
+
+	function register(registry: readonly PlainProductIconThemeRegistryEntry[]) {
+		const registration = registerPlainProductIconThemePicker(registry);
+		disposeRegistration = () => registration.dispose();
+		return registration;
+	}
+
+	async function invoke(
+		registry: readonly PlainProductIconThemeRegistryEntry[],
+		quickPick: FakeQuickPick,
+		themeService: ReturnType<typeof fakeProductIconThemeService>,
+	) {
+		register(registry);
+		const command = CommandsRegistry.getCommand(
+			SELECT_PRODUCT_ICON_THEME_COMMAND_ID,
+		);
+		if (command === undefined) {
+			throw new Error("command was not registered");
+		}
+		const quickInputService = fakeQuickInputService(quickPick);
+		return command.handler(
+			fakeAccessor(quickInputService, themeService) as Parameters<
+				typeof command.handler
+			>[0],
+		);
+	}
+
+	it("takes over the exact vendor command id", () => {
+		register([]);
+		const command = CommandsRegistry.getCommand(
+			SELECT_PRODUCT_ICON_THEME_COMMAND_ID,
+		);
+		expect(command).toBeDefined();
+		expect(SELECT_PRODUCT_ICON_THEME_COMMAND_ID).toBe(
+			"workbench.action.selectProductIconTheme",
+		);
+	});
+
+	it("always shows, offering Default first, even with an empty registry", async () => {
+		const quickPick = new FakeQuickPick();
+		const themeService = fakeProductIconThemeService(
+			ProductIconThemeData.defaultTheme.id,
+		);
+
+		const pending = invoke([], quickPick, themeService);
+		await Promise.resolve();
+
+		expect(quickPick.shown).toBe(true);
+		expect(quickPick.items).toEqual([
+			{ type: "separator", label: "Product icon themes" },
+			expect.objectContaining({ label: "Default" }),
+		]);
+		const [, defaultItem] = quickPick.items as Array<{ data: unknown }>;
+		expect(defaultItem?.data).toBe(ProductIconThemeData.defaultTheme);
+		// Pre-selected: the fake theme service's current id matches Default's.
+		expect(quickPick.activeItems).toEqual([
+			expect.objectContaining({ label: "Default" }),
+		]);
+
+		quickPick.hide();
+		await pending;
+	});
+
+	it("applies a registered entry on accept and does not disturb Default's own id", async () => {
+		const acme = fakeProductIconEntry("Acme Product Icons");
+		const themeService = fakeProductIconThemeService(
+			ProductIconThemeData.defaultTheme.id,
+		);
+		const quickPick = new FakeQuickPick();
+
+		const pending = invoke([acme], quickPick, themeService);
+		await Promise.resolve();
+
+		quickPick.selectedItems = [{ data: acme.data }];
+		quickPick.fireAccept();
+		await pending;
+
+		expect(themeService.setProductIconTheme).toHaveBeenCalledWith(
+			acme.data,
+			undefined,
+		);
+		expect(quickPick.disposed).toBe(true);
+	});
+
+	it("restores the original theme when dismissed without accepting", async () => {
+		const acme = fakeProductIconEntry("Acme Product Icons");
+		const originalTheme = { id: ProductIconThemeData.defaultTheme.id };
+		const themeService = {
+			getProductIconTheme: vi.fn(() => originalTheme),
+			setProductIconTheme: vi.fn(async () => undefined),
+		};
+		const quickPick = new FakeQuickPick();
+
+		const pending = invoke([acme], quickPick, themeService);
+		await Promise.resolve();
+
+		quickPick.fireActiveChange([{ data: acme.data }]);
+		expect(themeService.setProductIconTheme).toHaveBeenCalledWith(
+			acme.data,
+			"preview",
+		);
+
+		quickPick.hide();
+		await pending;
+
+		expect(themeService.setProductIconTheme).toHaveBeenLastCalledWith(
+			originalTheme,
+			undefined,
+		);
+		expect(quickPick.disposed).toBe(true);
 	});
 });

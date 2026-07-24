@@ -67,10 +67,44 @@ function basenameOf(path: string): string {
 	return segments.at(-1) ?? path;
 }
 
+/**
+ * `F060` S1's icon/product icon theme validation already folds every
+ * `iconPath`/font `src[].path` it accepts into the same package-wide
+ * `resources` whitelist color theme documents use (see `theme::import::
+ * finalize`'s doc comment on the shared `BTreeSet<String>` accumulator) —
+ * `theme_read_resource` will already serve an SVG glyph or a font file's raw
+ * bytes today for any package whose validated icon/product icon theme
+ * references one, even though `ThemePackageSummary` itself does not yet
+ * project the icon/product icon *contribution* metadata (id/label/path)
+ * needed to know *that* a resource is one — see `buildPlainFileIconThemeRegistryEntry`'s
+ * own doc comment. Extending the extension-to-MIME mapping here is therefore
+ * real and exercised today, not speculative: any such resource `registerFileUrl`
+ * is called for (today only reachable through a color theme's own `include`/
+ * `tokenColors` chain) must carry the exact MIME its bytes actually are,
+ * matching the closed format set `theme::font_check`/`theme::svg_sanitize`
+ * validated it against.
+ */
 function mimeTypeForResource(path: string): string {
-	return path.toLowerCase().endsWith(".tmtheme")
-		? "application/xml"
-		: "application/json";
+	const lowerCasePath = path.toLowerCase();
+	if (lowerCasePath.endsWith(".tmtheme")) {
+		return "application/xml";
+	}
+	if (lowerCasePath.endsWith(".svg")) {
+		return "image/svg+xml";
+	}
+	if (lowerCasePath.endsWith(".woff2")) {
+		return "font/woff2";
+	}
+	if (lowerCasePath.endsWith(".woff")) {
+		return "font/woff";
+	}
+	if (lowerCasePath.endsWith(".ttf")) {
+		return "font/ttf";
+	}
+	if (lowerCasePath.endsWith(".otf")) {
+		return "font/otf";
+	}
+	return "application/json";
 }
 
 /**
@@ -384,6 +418,21 @@ const THEME_COMMAND_ERROR_MESSAGES: Readonly<Record<string, string>> =
 			"Plain: one of the theme package's TextMate theme files is not valid.",
 		THEME_PACKAGE_ALREADY_IMPORTED:
 			"Plain: this theme package is already imported.",
+		// `F060` S1's six icon/product icon theme validation error codes (see
+		// `docs/research/2026-07-24-icon-themes.md`'s "调研结论" and the `F060`
+		// S1 `progress.md` entry for the exact Rust validation each maps to).
+		THEME_ICON_JSON_INVALID:
+			"Plain: one of the theme package's file icon theme documents is not valid.",
+		THEME_ICON_RESOURCE_INVALID:
+			"Plain: one of the theme package's file icon theme resources is missing or invalid.",
+		THEME_ICON_TOO_MANY_ASSOCIATIONS:
+			"Plain: one of the theme package's file icon themes defines too many icon associations.",
+		THEME_PRODUCT_ICON_JSON_INVALID:
+			"Plain: one of the theme package's product icon theme documents is not valid.",
+		THEME_SVG_UNSAFE:
+			"Plain: one of the theme package's SVG resources was rejected as unsafe.",
+		THEME_FONT_INVALID:
+			"Plain: one of the theme package's font resources is not a valid font file.",
 		THEME_PICK_FAILED: "Plain: the file/folder picker could not be completed.",
 		THEME_PICK_PATH_UNAVAILABLE:
 			"Plain: the selected item could not be accessed.",

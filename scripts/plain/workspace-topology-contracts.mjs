@@ -220,7 +220,7 @@ const DIRECT_COMMAND_REGISTRATION_MANIFEST = Object.freeze([
 	}),
 	Object.freeze({
 		relativePath: "app/features/themes/plain-theme-picker.ts",
-		count: 1,
+		count: 3,
 	}),
 	Object.freeze({
 		relativePath: "app/features/themes/plain-theme-commands.ts",
@@ -292,6 +292,8 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/features/themes/plain-theme-picker.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service",
 	"app/features/themes/plain-theme-picker.ts:@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/theme",
 	"app/features/themes/plain-theme-picker.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service",
+	"app/features/themes/plain-theme-picker.ts:@codingame/monaco-vscode-theme-service-override/vscode/vs/workbench/services/themes/browser/fileIconThemeData",
+	"app/features/themes/plain-theme-picker.ts:@codingame/monaco-vscode-theme-service-override/vscode/vs/workbench/services/themes/browser/productIconThemeData",
 	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-api/extensions",
 	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
 	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-api/vscode/vs/platform/extensionResourceLoader/common/extensionResourceLoader.service",
@@ -300,6 +302,8 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/theme",
 	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/colorThemeData",
 	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService",
+	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-theme-service-override/vscode/vs/workbench/services/themes/browser/fileIconThemeData",
+	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-theme-service-override/vscode/vs/workbench/services/themes/browser/productIconThemeData",
 	"app/features/workspace/commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands",
 	"app/features/workspace/commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands.service",
 	"app/features/workspace/commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextkey/common/contextkey.service",
