@@ -109,6 +109,18 @@ impl WorkspaceService {
         self.scope_for_window(window_label)?.stable_identity()
     }
 
+    /// The canonical filesystem path backing each of `window_label`'s
+    /// currently authorized roots, in authorization order; see
+    /// [`super::WorkspaceScope::root_canonical_paths`] for the exact
+    /// contract and why this exists (currently: the terminal domain's `cwd`
+    /// validation). Never exposed over IPC.
+    pub(crate) fn root_canonical_paths(
+        &self,
+        window_label: &str,
+    ) -> Result<Vec<(RootId, std::path::PathBuf)>, CommandError> {
+        self.scope_for_window(window_label)?.root_canonical_paths()
+    }
+
     pub async fn pick_roots<P: DirectoryPicker>(
         &self,
         window_label: &str,
@@ -820,6 +832,12 @@ impl WindowWorkspace {
         let state = lock(&self.state)?;
         ensure_open(&state)?;
         Ok(state.scope.stable_identity())
+    }
+
+    fn root_canonical_paths(&self) -> Result<Vec<(RootId, std::path::PathBuf)>, CommandError> {
+        let state = lock(&self.state)?;
+        ensure_open(&state)?;
+        Ok(state.scope.root_canonical_paths())
     }
 
     fn begin_picker(&self) -> Result<u64, CommandError> {

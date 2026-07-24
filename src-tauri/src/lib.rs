@@ -4,12 +4,16 @@ pub mod backup;
 pub mod error;
 pub mod path_policy;
 pub mod search;
+pub mod terminal;
 pub mod theme;
+pub mod trust;
 pub mod workspace;
 
 use backup::service::BackupService;
 use error::CommandError;
+use terminal::service::TerminalService;
 use theme::service::ThemeService;
+use trust::service::TrustService;
 use workspace::service::WorkspaceService;
 
 const RUNTIME_READY_EVENT: &str = "plain://runtime-ready";
@@ -42,11 +46,13 @@ fn runtime_info(app: tauri::AppHandle) -> Result<RuntimeInfo, CommandError> {
 pub fn run() {
     tauri::Builder::default()
         .manage(WorkspaceService::new())
+        .manage(TerminalService::new())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let base_path = app.path().app_local_data_dir()?;
             app.manage(BackupService::new(base_path.clone()));
-            app.manage(ThemeService::new(base_path));
+            app.manage(ThemeService::new(base_path.clone()));
+            app.manage(TrustService::new(base_path));
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -55,6 +61,9 @@ pub fn run() {
                     .state::<WorkspaceService>()
                     .close_window(window.label());
                 window.state::<BackupService>().close_window(window.label());
+                window
+                    .state::<TerminalService>()
+                    .close_window(window.label());
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -85,6 +94,14 @@ pub fn run() {
             backup::commands::backup_read_all,
             backup::commands::backup_discard,
             backup::commands::backup_discard_all,
+            trust::commands::workspace_trust_state,
+            trust::commands::workspace_trust_grant,
+            trust::commands::workspace_trust_revoke,
+            terminal::commands::terminal_start,
+            terminal::commands::terminal_input,
+            terminal::commands::terminal_resize,
+            terminal::commands::terminal_ack,
+            terminal::commands::terminal_kill,
             theme::commands::theme_import_vsix,
             theme::commands::theme_import_directory,
             theme::commands::theme_list,

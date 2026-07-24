@@ -20,6 +20,8 @@ import {
 	validateTauriConfiguration,
 	validateTauriConfigurationFiles,
 	validateTauriE2EConfiguration,
+	validateTerminalRustBoundary,
+	validateTrustTerminalCommandRegistration,
 	validateWorkspaceBrowserFixtureWindowAuthority,
 	validateWorkspaceCapabilitiesBoundary,
 	validateWorkspaceCopyCommandRegistration,
@@ -712,6 +714,16 @@ for (const failure of validateSearchTextCommandRegistration(rustSources)) {
 	fail(failure);
 }
 for (const failure of validateSearchTextBudgetConstants(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateTerminalRustBoundary(
+	rustSources,
+	cargo,
+	cargoDependencies,
+)) {
+	fail(failure);
+}
+for (const failure of validateTrustTerminalCommandRegistration(rustSources)) {
 	fail(failure);
 }
 

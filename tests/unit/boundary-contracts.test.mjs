@@ -32,6 +32,8 @@ import {
 	validateWorkspaceVersionedWriteBoundary,
 	validateWorkspaceWatcherBoundary,
 	validateWorkingCopyOverrideImportBoundary,
+	validateTerminalRustBoundary,
+	validateTrustTerminalCommandRegistration,
 } from "../../scripts/plain/boundary-contracts.mjs";
 
 const baselineWindow = {
@@ -8213,6 +8215,334 @@ describe("Plain PLW1 versioned-write harness", () => {
 			),
 		).toContain(
 			"WorkspaceWriteResult decoder must accept only Rust-representable targetPublished cross-fields",
+		);
+	});
+});
+
+describe("Plain F070 S1 trust/terminal Rust boundary contracts", () => {
+	const terminalCargo = `
+[dependencies]
+portable-pty = "=0.9.0"
+`;
+
+	const exactPortablePtyDependency = Object.freeze({
+		name: "portable-pty",
+		req: "=0.9.0",
+		kind: null,
+		rename: null,
+		target: null,
+		optional: false,
+	});
+
+	const terminalModSource = `
+pub(crate) const MAX_TERMINAL_SESSIONS_PER_WINDOW: usize = 16;
+`;
+	const terminalFlowSource = `
+pub(crate) const TERMINAL_FLOW_HIGH_WATER_MARK: usize = 100_000;
+pub(crate) const TERMINAL_FLOW_LOW_WATER_MARK: usize = 5_000;
+`;
+	const terminalServiceConstsSource = `
+const TERMINAL_CHUNK_QUEUE_CAPACITY: usize = 256;
+const TERMINAL_READ_BUFFER_BYTES: usize = 8192;
+
+fn spawn_via_command_builder() {
+    let mut command = portable_pty::CommandBuilder::new("test-fixture-program");
+    command.args(["--flag", "value"]);
+}
+`;
+	const terminalShellSource = `
+pub(crate) const TERMINAL_ENV_PASSTHROUGH_NAMES: &[&str] =
+    &["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR"];
+pub(crate) const TERMINAL_ENV_LC_PREFIX: &str = "LC_";
+pub(crate) const TERMINAL_ENV_TERM: (&str, &str) = ("TERM", "xterm-256color");
+pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor");
+`;
+
+	const baselineTerminalRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/terminal/mod.rs",
+			source: terminalModSource,
+		},
+		{
+			relativePath: "src-tauri/src/terminal/flow.rs",
+			source: terminalFlowSource,
+		},
+		{
+			relativePath: "src-tauri/src/terminal/service.rs",
+			source: terminalServiceConstsSource,
+		},
+		{
+			relativePath: "src-tauri/src/terminal/shell.rs",
+			source: terminalShellSource,
+		},
+	]);
+
+	function withHostileTerminalFile(relativePath, source) {
+		return [...baselineTerminalRustSources, { relativePath, source }];
+	}
+
+	it("passes for a clean terminal domain with the exact pinned dependency", () => {
+		expect(
+			validateTerminalRustBoundary(baselineTerminalRustSources, terminalCargo, [
+				exactPortablePtyDependency,
+			]),
+		).toEqual([]);
+	});
+
+	it("requires the exact portable-pty =0.9.0 pin in Cargo.toml and metadata", () => {
+		expect(
+			validateTerminalRustBoundary(
+				baselineTerminalRustSources,
+				"[dependencies]\n",
+				[exactPortablePtyDependency],
+			),
+		).toContain("Cargo.toml must pin portable-pty to =0.9.0");
+		expect(
+			validateTerminalRustBoundary(baselineTerminalRustSources, terminalCargo, [
+				{ ...exactPortablePtyDependency, req: "0.9" },
+			]),
+		).toContain(
+			"Cargo metadata must contain exactly one unrenamed runtime portable-pty =0.9.0 dependency",
+		);
+		expect(
+			validateTerminalRustBoundary(baselineTerminalRustSources, terminalCargo, [
+				{ ...exactPortablePtyDependency, rename: "pty" },
+			]),
+		).toContain(
+			"Cargo metadata must contain exactly one unrenamed runtime portable-pty =0.9.0 dependency",
+		);
+	});
+
+	it("rejects a direct spawn-bypass dependency even if portable-pty is also present", () => {
+		expect(
+			validateTerminalRustBoundary(baselineTerminalRustSources, terminalCargo, [
+				exactPortablePtyDependency,
+				{ name: "duct", req: "0.13", kind: null, rename: null },
+			]),
+		).toContain(
+			"Cargo metadata must not contain direct spawn-bypass dependency duct, including renamed dependencies",
+		);
+	});
+
+	it("rejects std::process::Command in a production terminal source file", () => {
+		const failures = validateTerminalRustBoundary(
+			withHostileTerminalFile(
+				"src-tauri/src/terminal/hostile.rs",
+				'fn run() {\n    let _ = std::process::Command::new("ls");\n}\n',
+			),
+			terminalCargo,
+			[exactPortablePtyDependency],
+		);
+		expect(
+			failures.some((failure) =>
+				failure.includes(
+					"src-tauri/src/terminal/hostile.rs must not spawn subprocesses via std::process::Command",
+				),
+			),
+		).toBe(true);
+	});
+
+	it('rejects a shell "-c" argument in a production terminal source file', () => {
+		const failures = validateTerminalRustBoundary(
+			withHostileTerminalFile(
+				"src-tauri/src/terminal/hostile.rs",
+				'fn run(mut command: portable_pty::CommandBuilder) {\n    command.arg("-c");\n}\n',
+			),
+			terminalCargo,
+			[exactPortablePtyDependency],
+		);
+		expect(
+			failures.some((failure) =>
+				failure.includes(
+					'src-tauri/src/terminal/hostile.rs must not pass a shell "-c" argument',
+				),
+			),
+		).toBe(true);
+	});
+
+	it('does not flag std::process::Command or "-c" mentioned only in a doc comment', () => {
+		const failures = validateTerminalRustBoundary(
+			withHostileTerminalFile(
+				"src-tauri/src/terminal/documented.rs",
+				'//! Never use std::process::Command or .arg("-c") in this domain.\nfn run() {}\n',
+			),
+			terminalCargo,
+			[exactPortablePtyDependency],
+		);
+		expect(failures).toEqual([]);
+	});
+
+	it("exempts a tests.rs-suffixed fixture file from the spawn guard", () => {
+		const failures = validateTerminalRustBoundary(
+			withHostileTerminalFile(
+				"src-tauri/src/terminal/service/tests.rs",
+				'fn spawn_fixture() {\n    let mut c = portable_pty::CommandBuilder::new("sh");\n    c.args(["-c", "echo hi"]);\n}\n',
+			),
+			terminalCargo,
+			[exactPortablePtyDependency],
+		);
+		expect(failures).toEqual([]);
+	});
+
+	it("locks the flow-control/session-limit/queue/buffer budget constants exactly", () => {
+		const wrongHighWaterMark = withHostileTerminalFile(
+			"src-tauri/src/terminal/flow.rs",
+			"pub(crate) const TERMINAL_FLOW_HIGH_WATER_MARK: usize = 50_000;\npub(crate) const TERMINAL_FLOW_LOW_WATER_MARK: usize = 5_000;\n",
+		).filter(
+			(entry) => entry.relativePath !== "src-tauri/src/terminal/flow.rs",
+		);
+		wrongHighWaterMark.push({
+			relativePath: "src-tauri/src/terminal/flow.rs",
+			source:
+				"pub(crate) const TERMINAL_FLOW_HIGH_WATER_MARK: usize = 50_000;\npub(crate) const TERMINAL_FLOW_LOW_WATER_MARK: usize = 5_000;\n",
+		});
+		expect(
+			validateTerminalRustBoundary(wrongHighWaterMark, terminalCargo, [
+				exactPortablePtyDependency,
+			]),
+		).toContain(
+			"src-tauri/src/terminal/flow.rs must define exactly one TERMINAL_FLOW_HIGH_WATER_MARK: usize = 100000",
+		);
+
+		const missingSessionLimit = baselineTerminalRustSources.filter(
+			(entry) => entry.relativePath !== "src-tauri/src/terminal/mod.rs",
+		);
+		expect(
+			validateTerminalRustBoundary(missingSessionLimit, terminalCargo, [
+				exactPortablePtyDependency,
+			]),
+		).toContain(
+			"terminal budget boundary requires src-tauri/src/terminal/mod.rs",
+		);
+	});
+
+	it("locks the environment allowlist name list and the two fixed overrides exactly", () => {
+		const widenedAllowlist = baselineTerminalRustSources
+			.filter(
+				(entry) => entry.relativePath !== "src-tauri/src/terminal/shell.rs",
+			)
+			.concat({
+				relativePath: "src-tauri/src/terminal/shell.rs",
+				source: `
+pub(crate) const TERMINAL_ENV_PASSTHROUGH_NAMES: &[&str] =
+    &["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "SECRET_TOKEN"];
+pub(crate) const TERMINAL_ENV_LC_PREFIX: &str = "LC_";
+pub(crate) const TERMINAL_ENV_TERM: (&str, &str) = ("TERM", "xterm-256color");
+pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor");
+`,
+			});
+		expect(
+			validateTerminalRustBoundary(widenedAllowlist, terminalCargo, [
+				exactPortablePtyDependency,
+			]),
+		).toContain(
+			"terminal/shell.rs must define TERMINAL_ENV_PASSTHROUGH_NAMES as exactly the audited name list",
+		);
+
+		const wrongTerm = baselineTerminalRustSources
+			.filter(
+				(entry) => entry.relativePath !== "src-tauri/src/terminal/shell.rs",
+			)
+			.concat({
+				relativePath: "src-tauri/src/terminal/shell.rs",
+				source: `
+pub(crate) const TERMINAL_ENV_PASSTHROUGH_NAMES: &[&str] =
+    &["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR"];
+pub(crate) const TERMINAL_ENV_LC_PREFIX: &str = "LC_";
+pub(crate) const TERMINAL_ENV_TERM: (&str, &str) = ("TERM", "dumb");
+pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor");
+`,
+			});
+		expect(
+			validateTerminalRustBoundary(wrongTerm, terminalCargo, [
+				exactPortablePtyDependency,
+			]),
+		).toContain(
+			'terminal/shell.rs must define TERMINAL_ENV_TERM: (&str, &str) = ("TERM", "xterm-256color")',
+		);
+	});
+
+	const trustCommandsSource = readFileSync(
+		new URL("../../src-tauri/src/trust/commands.rs", import.meta.url),
+		"utf8",
+	);
+	const terminalCommandsSource = readFileSync(
+		new URL("../../src-tauri/src/terminal/commands.rs", import.meta.url),
+		"utf8",
+	);
+	const libSource = readFileSync(
+		new URL("../../src-tauri/src/lib.rs", import.meta.url),
+		"utf8",
+	);
+
+	const baselineCommandRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/trust/commands.rs",
+			source: trustCommandsSource,
+		},
+		{
+			relativePath: "src-tauri/src/terminal/commands.rs",
+			source: terminalCommandsSource,
+		},
+		{ relativePath: "src-tauri/src/lib.rs", source: libSource },
+	]);
+
+	it("passes for the real, unmodified trust and terminal command files", () => {
+		expect(
+			validateTrustTerminalCommandRegistration(baselineCommandRustSources),
+		).toEqual([]);
+	});
+
+	it("fails if a trust command's body is rewired to a different service call", () => {
+		const rewired = baselineCommandRustSources.map((entry) =>
+			entry.relativePath === "src-tauri/src/trust/commands.rs"
+				? {
+						...entry,
+						source: entry.source.replace(
+							".is_trusted(workspace.inner(), window.label())",
+							'.is_trusted(workspace.inner(), "main")',
+						),
+					}
+				: entry,
+		);
+		expect(validateTrustTerminalCommandRegistration(rewired)).toContain(
+			"workspace_trust_state must contain only its audited DTO decode and single service route",
+		);
+	});
+
+	it("fails if a terminal command is missing from lib.rs's generate_handler", () => {
+		const missingRegistration = baselineCommandRustSources.map((entry) =>
+			entry.relativePath === "src-tauri/src/lib.rs"
+				? {
+						...entry,
+						source: entry.source.replace(
+							"            terminal::commands::terminal_kill,\n",
+							"",
+						),
+					}
+				: entry,
+		);
+		expect(
+			validateTrustTerminalCommandRegistration(missingRegistration),
+		).toContain(
+			"src-tauri/src/lib.rs must register terminal::commands::terminal_kill exactly once in generate_handler",
+		);
+	});
+
+	it("fails if a command is registered a second time (duplicate registration)", () => {
+		const duplicated = baselineCommandRustSources.map((entry) =>
+			entry.relativePath === "src-tauri/src/lib.rs"
+				? {
+						...entry,
+						source: entry.source.replace(
+							"            terminal::commands::terminal_kill,\n",
+							"            terminal::commands::terminal_kill,\n            terminal::commands::terminal_kill,\n",
+						),
+					}
+				: entry,
+		);
+		expect(validateTrustTerminalCommandRegistration(duplicated)).toContain(
+			"src-tauri/src/lib.rs must register terminal::commands::terminal_kill exactly once in generate_handler",
 		);
 	});
 });

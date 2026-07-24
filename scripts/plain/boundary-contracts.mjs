@@ -5451,6 +5451,424 @@ export function validateSearchTextBudgetConstants(rustSources) {
 	return failures;
 }
 
+const FORBIDDEN_SPAWN_BYPASS_DEPENDENCIES = Object.freeze([
+	"async-process",
+	"duct",
+	"execute",
+	"run_script",
+	"shell-words",
+	"subprocess",
+	"xshell",
+]);
+
+const TERMINAL_BUDGET_LIMITS = Object.freeze([
+	[
+		"MAX_TERMINAL_SESSIONS_PER_WINDOW",
+		16,
+		"usize",
+		"src-tauri/src/terminal/mod.rs",
+	],
+	[
+		"TERMINAL_FLOW_HIGH_WATER_MARK",
+		100_000,
+		"usize",
+		"src-tauri/src/terminal/flow.rs",
+	],
+	[
+		"TERMINAL_FLOW_LOW_WATER_MARK",
+		5_000,
+		"usize",
+		"src-tauri/src/terminal/flow.rs",
+	],
+	[
+		"TERMINAL_CHUNK_QUEUE_CAPACITY",
+		256,
+		"usize",
+		"src-tauri/src/terminal/service.rs",
+	],
+	[
+		"TERMINAL_READ_BUFFER_BYTES",
+		8192,
+		"usize",
+		"src-tauri/src/terminal/service.rs",
+	],
+]);
+
+const TERMINAL_ENV_PASSTHROUGH_NAMES_LOCK = Object.freeze([
+	"PATH",
+	"HOME",
+	"USER",
+	"LOGNAME",
+	"SHELL",
+	"LANG",
+	"TMPDIR",
+]);
+
+const SPAWN_GUARDED_DOMAIN_PATTERN =
+	/^src-tauri\/src\/(?:terminal|git)\/.*\.rs$/;
+
+/**
+ * Comments-only variant of `stripRustCommentsAndLiterals`: masks `//`/`/* *​/`
+ * comments but leaves string/char literal *contents* intact. Used only by
+ * the spawn-guard's `.arg("-c")` detection below, which — unlike every other
+ * check in this file that calls `stripRustCommentsAndLiterals` — genuinely
+ * needs to see the literal text inside a string, not just avoid false
+ * positives from an identifier that happens to appear inside a comment or
+ * doc string. Reusing the full comment-and-literal stripper here would
+ * blank out the very `"-c"` text this check exists to find.
+ */
+function stripRustCommentsOnly(source) {
+	const output = source.split("");
+	const mask = (start, end) => {
+		for (let index = start; index < end; index += 1) {
+			if (output[index] !== "\n" && output[index] !== "\r") {
+				output[index] = " ";
+			}
+		}
+	};
+	let index = 0;
+	while (index < source.length) {
+		if (source.startsWith("//", index)) {
+			const end = source.indexOf("\n", index + 2);
+			const boundary = end < 0 ? source.length : end;
+			mask(index, boundary);
+			index = boundary;
+			continue;
+		}
+		if (source.startsWith("/*", index)) {
+			let depth = 1;
+			let cursor = index + 2;
+			while (cursor < source.length && depth > 0) {
+				if (source.startsWith("/*", cursor)) {
+					depth += 1;
+					cursor += 2;
+				} else if (source.startsWith("*/", cursor)) {
+					depth -= 1;
+					cursor += 2;
+				} else {
+					cursor += 1;
+				}
+			}
+			mask(index, cursor);
+			index = cursor;
+			continue;
+		}
+		index += 1;
+	}
+	return output.join("");
+}
+
+/**
+ * Locks the terminal (and future `git::`) domain's subprocess-spawning
+ * contract described in `docs/research/2026-07-24-pty-terminal.md`:
+ * `portable-pty` pinned to an exact version, and every non-test source file
+ * under the guarded domains forbidden from using `std::process::Command`
+ * directly or invoking a shell with a `-c`/string-interpreter argument —
+ * the same two mechanical red flags the delete domain's own
+ * `FORBIDDEN_DELETE_BYPASS_DEPENDENCIES` precedent guards against for a
+ * different bypass shape. Also locks the domain's flow-control/session-
+ * limit/env-allowlist constants exactly, mirroring
+ * `validateSearchTextBudgetConstants`'s own precedent for a different
+ * domain's streaming protocol.
+ */
+export function validateTerminalRustBoundary(
+	rustSources,
+	cargoSource,
+	cargoDependencies = [],
+) {
+	const failures = [];
+
+	if (!cargoDependencyDeclaration("portable-pty", "=0.9.0").test(cargoSource)) {
+		failures.push("Cargo.toml must pin portable-pty to =0.9.0");
+	}
+	const portablePtyDependencies = cargoDependencies.filter(
+		({ name }) => name === "portable-pty",
+	);
+	const hasExactPortablePty = portablePtyDependencies.some(
+		(candidate) =>
+			candidate.req === "=0.9.0" &&
+			candidate.kind === null &&
+			candidate.rename === null &&
+			candidate.target === null &&
+			candidate.optional === false,
+	);
+	if (!hasExactPortablePty) {
+		failures.push(
+			"Cargo metadata must contain exactly one unrenamed runtime portable-pty =0.9.0 dependency",
+		);
+	}
+	for (const dependency of FORBIDDEN_SPAWN_BYPASS_DEPENDENCIES) {
+		if (cargoDependencies.some(({ name }) => name === dependency)) {
+			failures.push(
+				`Cargo metadata must not contain direct spawn-bypass dependency ${dependency}, including renamed dependencies`,
+			);
+		}
+	}
+
+	for (const { relativePath, source } of rustSources) {
+		const normalizedPath = relativePath.replaceAll("\\", "/");
+		if (
+			!SPAWN_GUARDED_DOMAIN_PATTERN.test(normalizedPath) ||
+			WORKSPACE_TEST_SOURCE_PATTERN.test(normalizedPath)
+		) {
+			continue;
+		}
+		const executableSource = stripRustCommentsAndLiterals(source);
+		if (/\bprocess\s*::\s*Command\b/.test(executableSource)) {
+			failures.push(
+				`${normalizedPath} must not spawn subprocesses via std::process::Command; use portable_pty::CommandBuilder`,
+			);
+		}
+		const commentsOnlySource = stripRustCommentsOnly(source);
+		if (/\.args?\s*\(\s*\[?\s*"-c"/.test(commentsOnlySource)) {
+			failures.push(`${normalizedPath} must not pass a shell "-c" argument`);
+		}
+	}
+
+	for (const [name, value, integerType, path] of TERMINAL_BUDGET_LIMITS) {
+		const fileSource = findRustSource(rustSources, path);
+		if (fileSource === undefined) {
+			failures.push(`terminal budget boundary requires ${path}`);
+			continue;
+		}
+		const executableSource = stripRustCommentsAndLiterals(fileSource);
+		const declarations = findWorkspaceCopyLimitDeclarations(
+			executableSource,
+			name,
+			integerType,
+		);
+		if (
+			declarations.length !== 1 ||
+			evaluateSmallRustIntegerExpression(declarations[0]) !== value
+		) {
+			failures.push(
+				`${path} must define exactly one ${name}: ${integerType} = ${value}`,
+			);
+		}
+	}
+
+	const shellSource = findRustSource(
+		rustSources,
+		"src-tauri/src/terminal/shell.rs",
+	);
+	if (shellSource === undefined) {
+		failures.push("terminal env allowlist boundary requires terminal/shell.rs");
+		return failures;
+	}
+	const namesMatch =
+		/pub\(crate\)\s+const\s+TERMINAL_ENV_PASSTHROUGH_NAMES\s*:\s*&\[&str\]\s*=\s*&\[([^\]]*)\]\s*;/.exec(
+			shellSource,
+		);
+	const names = namesMatch?.[1]
+		.split(",")
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0)
+		.map((entry) => entry.replace(/^"|"$/g, ""));
+	if (
+		namesMatch === null ||
+		!sameArray(names, TERMINAL_ENV_PASSTHROUGH_NAMES_LOCK)
+	) {
+		failures.push(
+			"terminal/shell.rs must define TERMINAL_ENV_PASSTHROUGH_NAMES as exactly the audited name list",
+		);
+	}
+	if (
+		!/pub\(crate\)\s+const\s+TERMINAL_ENV_LC_PREFIX\s*:\s*&str\s*=\s*"LC_"\s*;/.test(
+			shellSource,
+		)
+	) {
+		failures.push(
+			'terminal/shell.rs must define TERMINAL_ENV_LC_PREFIX: &str = "LC_"',
+		);
+	}
+	if (
+		!/pub\(crate\)\s+const\s+TERMINAL_ENV_TERM\s*:\s*\(&str,\s*&str\)\s*=\s*\(\s*"TERM"\s*,\s*"xterm-256color"\s*\)\s*;/.test(
+			shellSource,
+		)
+	) {
+		failures.push(
+			'terminal/shell.rs must define TERMINAL_ENV_TERM: (&str, &str) = ("TERM", "xterm-256color")',
+		);
+	}
+	if (
+		!/pub\(crate\)\s+const\s+TERMINAL_ENV_COLORTERM\s*:\s*\(&str,\s*&str\)\s*=\s*\(\s*"COLORTERM"\s*,\s*"truecolor"\s*\)\s*;/.test(
+			shellSource,
+		)
+	) {
+		failures.push(
+			'terminal/shell.rs must define TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor")',
+		);
+	}
+
+	return failures;
+}
+
+const TRUST_COMMAND_CONTRACTS = Object.freeze([
+	{
+		file: "src-tauri/src/trust/commands.rs",
+		name: "workspace_trust_state",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:WorkspaceTrustStateRequest",
+		returnType: "->Result<WorkspaceTrustState,CommandError>",
+		body: "request.validate();lettrusted=trust.inner().is_trusted(workspace.inner(),window.label()).await?;Ok(WorkspaceTrustState::new(trusted))",
+	},
+	{
+		file: "src-tauri/src/trust/commands.rs",
+		name: "workspace_trust_grant",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:WorkspaceTrustGrantRequest",
+		returnType: "->Result<WorkspaceTrustState,CommandError>",
+		body: "request.validate();trust.inner().grant(workspace.inner(),window.label()).await?;Ok(WorkspaceTrustState::new(true))",
+	},
+	{
+		file: "src-tauri/src/trust/commands.rs",
+		name: "workspace_trust_revoke",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:WorkspaceTrustRevokeRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "request.validate();trust.inner().revoke(workspace.inner(),window.label()).await",
+	},
+]);
+
+const TERMINAL_COMMAND_CONTRACTS = Object.freeze([
+	{
+		file: "src-tauri/src/terminal/commands.rs",
+		name: "terminal_start",
+		parameters:
+			"window:WebviewWindow,terminal:State<'_,TerminalService>,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:TerminalStartRequest",
+		returnType: "->Result<TerminalStartResult,CommandError>",
+		body: "letquery=request.into_parts()?;letsession_id=terminal.inner().start(trust.inner(),workspace.inner(),window.label(),query.cwd,query.cols,query.rows,).await?;Ok(TerminalStartResult::new(session_id))",
+	},
+	{
+		file: "src-tauri/src/terminal/commands.rs",
+		name: "terminal_input",
+		parameters:
+			"window:WebviewWindow,terminal:State<'_,TerminalService>,request:TerminalInputRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(session_id,data)=request.into_parts()?;terminal.inner().input(window.label(),session_id,data).await",
+	},
+	{
+		file: "src-tauri/src/terminal/commands.rs",
+		name: "terminal_resize",
+		parameters:
+			"window:WebviewWindow,terminal:State<'_,TerminalService>,request:TerminalResizeRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(session_id,cols,rows)=request.into_parts()?;terminal.inner().resize(window.label(),session_id,cols,rows).await",
+	},
+	{
+		file: "src-tauri/src/terminal/commands.rs",
+		name: "terminal_ack",
+		parameters:
+			"window:WebviewWindow,terminal:State<'_,TerminalService>,request:TerminalAckRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(session_id,byte_count)=request.into_parts();terminal.inner().ack(window.label(),session_id,byte_count)",
+	},
+	{
+		file: "src-tauri/src/terminal/commands.rs",
+		name: "terminal_kill",
+		parameters:
+			"window:WebviewWindow,terminal:State<'_,TerminalService>,request:TerminalKillRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(session_id,immediate)=request.into_parts();terminal.inner().kill(window.label(),session_id,immediate).await",
+	},
+]);
+
+/**
+ * Locks the F070 S1 trust (3) and terminal (5) commands to their audited
+ * exact signatures, bodies and single `generate_handler!` registration —
+ * the same exact-body-pinning technique `validateSearchCommandRegistration`/
+ * `validateSearchTextCommandRegistration` already use, extended to a closed
+ * set spanning two command files at once so a command silently added,
+ * removed, duplicated or rewired to a different service method fails this
+ * check rather than only being caught by chance in review.
+ */
+export function validateTrustTerminalCommandRegistration(rustSources) {
+	const failures = [];
+	const libSource = findRustSource(rustSources, "src-tauri/src/lib.rs");
+	const contracts = [...TRUST_COMMAND_CONTRACTS, ...TERMINAL_COMMAND_CONTRACTS];
+	const sourceCache = new Map();
+
+	for (const contract of contracts) {
+		if (!sourceCache.has(contract.file)) {
+			sourceCache.set(
+				contract.file,
+				findRustSource(rustSources, contract.file),
+			);
+		}
+		const fileSource = sourceCache.get(contract.file);
+		if (fileSource === undefined) {
+			failures.push(`command registration boundary requires ${contract.file}`);
+			continue;
+		}
+		const executableSource = stripRustCommentsAndLiterals(fileSource);
+		const commands = extractAuditedTauriCommands(
+			executableSource,
+			contract.name,
+		);
+		if (commands.length !== 1) {
+			failures.push(
+				`${contract.file} must define exactly one audited ${contract.name} Tauri command`,
+			);
+			continue;
+		}
+		const [command] = commands;
+		const normalizedParameters = command.parameters
+			.replaceAll(/\s+/g, "")
+			.replace(/,$/, "");
+		if (
+			normalizedParameters !== contract.parameters ||
+			command.returnType.replaceAll(/\s+/g, "") !== contract.returnType
+		) {
+			failures.push(
+				`${contract.name} must accept its audited parameters and return the audited Result type`,
+			);
+		}
+		const normalizedBody = command.body
+			.replaceAll(/\s+/g, "")
+			.replace(/;$/, "");
+		if (normalizedBody !== contract.body) {
+			failures.push(
+				`${contract.name} must contain only its audited DTO decode and single service route`,
+			);
+		}
+	}
+
+	if (libSource === undefined) {
+		failures.push(
+			"command registration boundary requires src-tauri/src/lib.rs",
+		);
+		return failures;
+	}
+	const executableLib = stripRustCommentsAndLiterals(libSource);
+	const handlerBodies = [
+		...executableLib.matchAll(
+			/\.invoke_handler\s*\(\s*tauri\s*::\s*generate_handler\s*!\s*\[([\s\S]*?)\]\s*\)/g,
+		),
+	];
+	for (const contract of contracts) {
+		const modulePrefix = contract.file.includes("/trust/")
+			? "trust"
+			: "terminal";
+		const commandPath = new RegExp(
+			`\\b${modulePrefix}\\s*::\\s*commands\\s*::\\s*${contract.name}\\b`,
+			"g",
+		);
+		const registrations = [...executableLib.matchAll(commandPath)];
+		const registeredInHandler =
+			handlerBodies.length === 1 &&
+			new RegExp(
+				`\\b${modulePrefix}\\s*::\\s*commands\\s*::\\s*${contract.name}\\b`,
+			).test(handlerBodies[0][1]);
+		if (registrations.length !== 1 || !registeredInHandler) {
+			failures.push(
+				`src-tauri/src/lib.rs must register ${modulePrefix}::commands::${contract.name} exactly once in generate_handler`,
+			);
+		}
+	}
+
+	return failures;
+}
+
 function extractNamedImplBodies(source, typeName) {
 	const bodies = [];
 	const pattern = new RegExp(
@@ -5617,6 +6035,18 @@ function stageCleanupCallsAreExact(relativePath, source) {
 			) &&
 			removeFileCalls.some((call) =>
 				exactMethodCall(source, call, /\broot\s*\.\s*$/, "SELECTION_FILE_NAME"),
+			) &&
+			removeDirectoryCalls.length === 0
+		);
+	}
+	if (relativePath === "src-tauri/src/trust/store.rs") {
+		return (
+			removeFileCalls.length === 1 &&
+			exactMethodCall(
+				source,
+				removeFileCalls[0],
+				/\bself\s*\.\s*dir\s*\.\s*$/,
+				"&self.name",
 			) &&
 			removeDirectoryCalls.length === 0
 		);

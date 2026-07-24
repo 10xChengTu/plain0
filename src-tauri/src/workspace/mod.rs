@@ -495,6 +495,33 @@ impl WorkspaceScope {
         self.order.clone()
     }
 
+    /// The canonicalized ambient path backing each currently authorized
+    /// root, in the same authorization order [`Self::root_ids`] reports
+    /// (index 0 is "the first root", the fallback a caller that needs *some*
+    /// default directory but was not given an explicit one can use).
+    ///
+    /// Used only by native domains that need to reason about "which real
+    /// directories are currently open" for a purpose other than file
+    /// capability I/O — currently: the terminal domain's `cwd` spawn-
+    /// parameter validation (see `terminal::service::resolve_cwd`), which
+    /// the F070 research doc's decision 2 documents as an intentionally
+    /// different security boundary from capability-relative file access
+    /// (spawning a subprocess with a given working directory is ambient
+    /// process authority, not capability-relative I/O, so validating it via
+    /// `canonicalize` + `starts_with` against this list is the sanctioned
+    /// check here — never a template for bypassing the capability-relative
+    /// rule elsewhere). Never serialized to the WebView.
+    pub(crate) fn root_canonical_paths(&self) -> Vec<(RootId, PathBuf)> {
+        self.order
+            .iter()
+            .filter_map(|root_id| {
+                self.roots
+                    .get(root_id)
+                    .map(|root| (*root_id, root.canonical_path.clone()))
+            })
+            .collect()
+    }
+
     pub fn remove(&mut self, root_id: RootId) -> Result<(), CommandError> {
         if !self.roots.contains_key(&root_id) {
             return Err(root_not_authorized());
