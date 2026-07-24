@@ -98,6 +98,16 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		themeSetSelection: vi.fn(),
 		themeSetFileIconThemeSelection: vi.fn(),
 		themeSetProductIconThemeSelection: vi.fn(),
+		terminalStart: vi.fn(),
+		terminalInput: vi.fn(),
+		terminalResize: vi.fn(),
+		terminalAck: vi.fn(),
+		terminalKill: vi.fn(),
+		terminalWatchData: vi.fn(),
+		terminalWatchExit: vi.fn(),
+		workspaceTrustState: vi.fn(),
+		workspaceTrustGrant: vi.fn(),
+		workspaceTrustRevoke: vi.fn(),
 		...overrides,
 	};
 }
@@ -166,6 +176,16 @@ describe("workspace Workbench command overrides", () => {
 			themeSetSelection: vi.fn(),
 			themeSetFileIconThemeSelection: vi.fn(),
 			themeSetProductIconThemeSelection: vi.fn(),
+			terminalStart: vi.fn(),
+			terminalInput: vi.fn(),
+			terminalResize: vi.fn(),
+			terminalAck: vi.fn(),
+			terminalKill: vi.fn(),
+			terminalWatchData: vi.fn(),
+			terminalWatchExit: vi.fn(),
+			workspaceTrustState: vi.fn(),
+			workspaceTrustGrant: vi.fn(),
+			workspaceTrustRevoke: vi.fn(),
 		};
 		const contextValues = new Map<string, unknown>([
 			["openFolderWorkspaceSupport", false],

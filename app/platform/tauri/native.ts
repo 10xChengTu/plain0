@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 
 import {
 	RUNTIME_READY_EVENT,
+	TERMINAL_DATA_EVENT,
+	TERMINAL_EXIT_EVENT,
 	WORKSPACE_SEARCH_TEXT_WAKE_EVENT,
 	WORKSPACE_WATCH_WAKE_EVENT,
 	type PlainBridge,
@@ -64,6 +66,19 @@ import {
 	frozenThemeSetProductIconThemeSelectionRequest,
 	frozenThemeSetSelectionRequest,
 } from "./theme-codec";
+import {
+	decodeTerminalDataEvent,
+	decodeTerminalExitEvent,
+	decodeTerminalStartResult,
+	decodeTerminalVoid,
+	decodeWorkspaceTrustState,
+	decodeWorkspaceTrustVoid,
+	frozenTerminalAckRequest,
+	frozenTerminalInputRequest,
+	frozenTerminalKillRequest,
+	frozenTerminalResizeRequest,
+	frozenTerminalStartRequest,
+} from "./terminal-codec";
 
 export function createNativeBridge(): PlainBridge {
 	const workspaceWatcher = createWorkspaceWatcherManager({
@@ -376,6 +391,75 @@ export function createNativeBridge(): PlainBridge {
 				frozenThemeSetProductIconThemeSelectionRequest(productIconThemeId);
 			decodeThemeVoid(
 				await invoke<unknown>("theme_set_selection", { request }),
+			);
+		},
+		terminalStart: async (cwd, cols, rows) => {
+			const request = frozenTerminalStartRequest(cwd, cols, rows);
+			return decodeTerminalStartResult(
+				await invoke<unknown>("terminal_start", { request }),
+			);
+		},
+		terminalInput: async (sessionId, data) => {
+			const request = frozenTerminalInputRequest(sessionId, data);
+			decodeTerminalVoid(await invoke<unknown>("terminal_input", { request }));
+		},
+		terminalResize: async (sessionId, cols, rows) => {
+			const request = frozenTerminalResizeRequest(sessionId, cols, rows);
+			decodeTerminalVoid(await invoke<unknown>("terminal_resize", { request }));
+		},
+		terminalAck: async (sessionId, byteCount) => {
+			const request = frozenTerminalAckRequest(sessionId, byteCount);
+			decodeTerminalVoid(await invoke<unknown>("terminal_ack", { request }));
+		},
+		terminalKill: async (sessionId, immediate) => {
+			const request = frozenTerminalKillRequest(sessionId, immediate);
+			decodeTerminalVoid(await invoke<unknown>("terminal_kill", { request }));
+		},
+		terminalWatchData: (listener) => {
+			let unlisten: (() => void) | undefined;
+			let disposed = false;
+			void listen<unknown>(TERMINAL_DATA_EVENT, (event) => {
+				listener(decodeTerminalDataEvent(event.payload));
+			}).then((resolved) => {
+				if (disposed) {
+					void resolved();
+					return;
+				}
+				unlisten = resolved;
+			});
+			return () => {
+				disposed = true;
+				unlisten?.();
+			};
+		},
+		terminalWatchExit: (listener) => {
+			let unlisten: (() => void) | undefined;
+			let disposed = false;
+			void listen<unknown>(TERMINAL_EXIT_EVENT, (event) => {
+				listener(decodeTerminalExitEvent(event.payload));
+			}).then((resolved) => {
+				if (disposed) {
+					void resolved();
+					return;
+				}
+				unlisten = resolved;
+			});
+			return () => {
+				disposed = true;
+				unlisten?.();
+			};
+		},
+		workspaceTrustState: async () =>
+			decodeWorkspaceTrustState(
+				await invoke<unknown>("workspace_trust_state", { request: {} }),
+			),
+		workspaceTrustGrant: async () =>
+			decodeWorkspaceTrustState(
+				await invoke<unknown>("workspace_trust_grant", { request: {} }),
+			),
+		workspaceTrustRevoke: async () => {
+			decodeWorkspaceTrustVoid(
+				await invoke<unknown>("workspace_trust_revoke", { request: {} }),
 			);
 		},
 	};

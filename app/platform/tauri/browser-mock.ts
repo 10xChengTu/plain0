@@ -3,6 +3,8 @@ import type {
 	CommandError,
 	PlainBridge,
 	RuntimeInfo,
+	TerminalDataEvent,
+	TerminalExitEvent,
 	ThemeImportResult,
 	ThemePackageSummary,
 	WorkspaceCapabilities,
@@ -66,6 +68,17 @@ import {
 	createWorkspaceWatcherManager,
 	type WorkspaceWatcherTransport,
 } from "./workspace-watcher";
+import {
+	decodeTerminalStartResult,
+	decodeWorkspaceTrustState,
+	frozenTerminalAckRequest,
+	frozenTerminalDataEvent,
+	frozenTerminalExitEvent,
+	frozenTerminalInputRequest,
+	frozenTerminalKillRequest,
+	frozenTerminalResizeRequest,
+	frozenTerminalStartRequest,
+} from "./terminal-codec";
 
 const runtimeInfo: RuntimeInfo = Object.freeze({
 	application: "Plain",
@@ -952,6 +965,56 @@ export interface BrowserMockBridgeOptions {
 	 * to 1 so tests can observe genuine multi-poll streaming instead of
 	 * everything arriving in a single response. */
 	readonly textSearchBatchesPerPollForTest?: number;
+	/** Initial execution-trust state for the current (non-empty) workspace;
+	 * defaults to `false`, matching the real `TrustService`'s own "granted
+	 * trust does not carry over automatically" semantics. Always reported
+	 * `false` regardless of this value whenever there is no open root —
+	 * mirrors `TrustService::is_trusted`'s `EMPTY`-workspace short-circuit. */
+	readonly terminalTrustedForTest?: boolean;
+	/** Runs once per `terminalStart` call, handing the caller a controller
+	 * scoped to *that* session so tests/E2E can inject output, simulate
+	 * exit, and inspect backpressure state — see
+	 * `BrowserMockTerminalSessionController`. */
+	readonly onTerminalSessionForTest?: (
+		controller: BrowserMockTerminalSessionController,
+	) => void;
+}
+
+/**
+ * Per-session control surface for the deterministic fake PTY `terminalStart`
+ * creates in the browser mock (F070 S2) — handed to
+ * `onTerminalSessionForTest` the instant a session starts. Each session
+ * (indeed each bridge instance) has fully independent state; nothing here is
+ * shared across sessions or across separate `createBrowserMockBridge` calls.
+ */
+export interface BrowserMockTerminalSessionController {
+	readonly sessionId: string;
+	/**
+	 * Enqueues `bytes` as one output chunk, subject to the same high/low
+	 * water mark pause/resume policy `terminal::flow::FlowControl` enforces
+	 * for a real session (see this module's `MOCK_TERMINAL_FLOW_*`
+	 * constants, which mirror the Rust constants exactly): once enough
+	 * unacknowledged output has queued up, further pushed chunks sit in an
+	 * internal queue and are not delivered to `terminalWatchData` listeners
+	 * until enough of them are acknowledged via `terminalAck` — this is how
+	 * a caller drives (and observes) real backpressure deterministically,
+	 * e.g. by pushing a large scripted burst of output.
+	 */
+	pushOutput(bytes: Uint8Array): void;
+	/**
+	 * Reports the session as exited with `exitCode` (idempotent after the
+	 * first call — later calls are ignored). Does not discard or flush any
+	 * not-yet-delivered (paused) queued output: this mirrors the real
+	 * exit-vs-last-chunk race `src-tauri/src/terminal/service.rs`'s module
+	 * doc documents rather than "fixing" it away, so this mock stays a
+	 * faithful stand-in for that behavior in E2E tests.
+	 */
+	finish(exitCode: number): void;
+	/** Whether the session's simulated reader is currently paused for
+	 * backpressure. */
+	isPausedForTest(): boolean;
+	/** The session's current unacknowledged output byte count. */
+	unackedBytesForTest(): number;
 }
 
 interface CapturedBrowserMockWorkspaceMoveSeams {
@@ -4857,6 +4920,180 @@ export function createBrowserMockBridge(
 		readonly skippedOversize: number;
 	}
 
+	// --- Terminal + execution trust (F070 S2 IPC bridge) ---------------------
+
+	/** Mirrors `terminal::flow::TERMINAL_FLOW_HIGH_WATER_MARK`/
+	 * `_LOW_WATER_MARK` exactly, so a caller exercising backpressure through
+	 * this mock observes the same real thresholds a live session would. */
+	const MOCK_TERMINAL_FLOW_HIGH_WATER_MARK = 100_000;
+	const MOCK_TERMINAL_FLOW_LOW_WATER_MARK = 5_000;
+	/** Approximates the conventional Unix "128 + signal" shell reporting for
+	 * a killed process (SIGKILL = 9) — an approximation for mock purposes
+	 * only, not a guarantee of byte-for-byte parity with `portable_pty`'s
+	 * real exit-code encoding for a killed child. */
+	const MOCK_TERMINAL_KILLED_EXIT_CODE = 137;
+
+	let terminalTrusted = options.terminalTrustedForTest ?? false;
+	const terminalDataListeners = new Set<(event: TerminalDataEvent) => void>();
+	const terminalExitListeners = new Set<(event: TerminalExitEvent) => void>();
+
+	interface MockTerminalSession {
+		readonly sessionId: string;
+		sequence: number;
+		unackedBytes: number;
+		paused: boolean;
+		exited: boolean;
+		readonly queue: Uint8Array[];
+	}
+
+	const terminalSessions = new Map<string, MockTerminalSession>();
+	const issuedTerminalSessionIds = new Set<string>();
+	const nextTerminalSessionId = (): string => {
+		for (let attempt = 0; attempt < 16; attempt += 1) {
+			const bytes = new Uint8Array(16);
+			globalThis.crypto.getRandomValues(bytes);
+			bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+			bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+			const hex = [...bytes]
+				.map((value) => value.toString(16).padStart(2, "0"))
+				.join("");
+			const id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(
+				12,
+				16,
+			)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+			if (!issuedTerminalSessionIds.has(id)) {
+				issuedTerminalSessionIds.add(id);
+				return id;
+			}
+		}
+		throw new Error("Browser mock terminal session id generation failed.");
+	};
+
+	function terminalNotTrusted(): CommandError {
+		return commandError(
+			"WORKSPACE_NOT_TRUSTED",
+			"This workspace has not been granted execution trust.",
+		);
+	}
+
+	function trustUnavailable(): CommandError {
+		return commandError(
+			"TRUST_UNAVAILABLE",
+			"The workspace trust store is not available for this window.",
+		);
+	}
+
+	function terminalSessionNotFound(): CommandError {
+		return commandError(
+			"TERMINAL_SESSION_NOT_FOUND",
+			"The requested terminal session does not exist for this window.",
+		);
+	}
+
+	function terminalIoFailed(): CommandError {
+		return commandError("IO_FAILED", "The terminal session could not be used.");
+	}
+
+	function getMockTerminalSession(sessionId: string): MockTerminalSession {
+		const session = terminalSessions.get(sessionId);
+		if (session === undefined) {
+			throw terminalSessionNotFound();
+		}
+		return session;
+	}
+
+	/** Delivers as many queued chunks as the high-water mark currently
+	 * allows, pausing once it is reached — the mock analogue of
+	 * `terminal::flow::FlowControl` gating the real reader thread. */
+	function pumpMockTerminalSession(session: MockTerminalSession): void {
+		while (!session.paused && session.queue.length > 0) {
+			const bytes = session.queue.shift()!;
+			const event = frozenTerminalDataEvent(
+				session.sessionId,
+				session.sequence,
+				bytes,
+			);
+			session.sequence += 1;
+			session.unackedBytes += bytes.byteLength;
+			if (session.unackedBytes >= MOCK_TERMINAL_FLOW_HIGH_WATER_MARK) {
+				session.paused = true;
+			}
+			queueMicrotask(() => {
+				for (const listener of terminalDataListeners) {
+					listener(event);
+				}
+			});
+		}
+	}
+
+	function ackMockTerminalSession(
+		session: MockTerminalSession,
+		byteCount: number,
+	): void {
+		session.unackedBytes = Math.max(0, session.unackedBytes - byteCount);
+		if (
+			session.paused &&
+			session.unackedBytes <= MOCK_TERMINAL_FLOW_LOW_WATER_MARK
+		) {
+			session.paused = false;
+			pumpMockTerminalSession(session);
+		}
+	}
+
+	/** Reports `session` as exited exactly once — shared by the test
+	 * controller's `finish` and `terminalKill`'s own exit notification, so a
+	 * natural `finish()` that raced ahead of a `terminalKill` call is never
+	 * overwritten or double-reported (mirrors the real one-shot exit-event
+	 * contract). Deliberately does not touch `session.queue`: any not-yet-
+	 * delivered (paused) output stays queued, mirroring the real exit-vs-
+	 * last-chunk race `terminal::service`'s module doc documents rather than
+	 * "fixing" it away. */
+	function finishMockTerminalSession(
+		session: MockTerminalSession,
+		exitCode: number,
+	): void {
+		if (session.exited) {
+			return;
+		}
+		session.exited = true;
+		const event = frozenTerminalExitEvent(session.sessionId, exitCode);
+		queueMicrotask(() => {
+			for (const listener of terminalExitListeners) {
+				listener(event);
+			}
+		});
+	}
+
+	function startMockTerminalSession(): MockTerminalSession {
+		const sessionId = nextTerminalSessionId();
+		const session: MockTerminalSession = {
+			sessionId,
+			sequence: 0,
+			unackedBytes: 0,
+			paused: false,
+			exited: false,
+			queue: [],
+		};
+		terminalSessions.set(sessionId, session);
+		const controller: BrowserMockTerminalSessionController = Object.freeze({
+			sessionId,
+			pushOutput(bytes: Uint8Array): void {
+				if (session.exited) {
+					return;
+				}
+				session.queue.push(Uint8Array.from(bytes));
+				pumpMockTerminalSession(session);
+			},
+			finish(exitCode: number): void {
+				finishMockTerminalSession(session, exitCode);
+			},
+			isPausedForTest: (): boolean => session.paused,
+			unackedBytesForTest: (): number => session.unackedBytes,
+		});
+		options.onTerminalSessionForTest?.(controller);
+		return session;
+	}
+
 	let activeTextSearch: MockTextSearch | undefined;
 	const textSearchWakeListeners = new Set<(searchId: string) => void>();
 	const emitTextSearchWake = (searchId: string): void => {
@@ -5394,6 +5631,68 @@ export function createBrowserMockBridge(
 		},
 		async themeSetProductIconThemeSelection(productIconThemeId) {
 			productIconThemeSelection = productIconThemeId;
+		},
+		async terminalStart(cwd, cols, rows) {
+			frozenTerminalStartRequest(cwd, cols, rows);
+			if (roots.size === 0 || !terminalTrusted) {
+				throw terminalNotTrusted();
+			}
+			const session = startMockTerminalSession();
+			return decodeTerminalStartResult({ sessionId: session.sessionId });
+		},
+		async terminalInput(sessionId, data) {
+			const request = frozenTerminalInputRequest(sessionId, data);
+			const session = getMockTerminalSession(request.sessionId);
+			if (session.exited) {
+				throw terminalIoFailed();
+			}
+			session.queue.push(Uint8Array.from(request.data));
+			pumpMockTerminalSession(session);
+		},
+		async terminalResize(sessionId, cols, rows) {
+			const request = frozenTerminalResizeRequest(sessionId, cols, rows);
+			getMockTerminalSession(request.sessionId);
+		},
+		async terminalAck(sessionId, byteCount) {
+			const request = frozenTerminalAckRequest(sessionId, byteCount);
+			const session = getMockTerminalSession(request.sessionId);
+			ackMockTerminalSession(session, request.byteCount);
+		},
+		async terminalKill(sessionId, immediate) {
+			const request = frozenTerminalKillRequest(sessionId, immediate);
+			const session = getMockTerminalSession(request.sessionId);
+			finishMockTerminalSession(session, MOCK_TERMINAL_KILLED_EXIT_CODE);
+			terminalSessions.delete(request.sessionId);
+		},
+		terminalWatchData(listener) {
+			terminalDataListeners.add(listener);
+			return () => {
+				terminalDataListeners.delete(listener);
+			};
+		},
+		terminalWatchExit(listener) {
+			terminalExitListeners.add(listener);
+			return () => {
+				terminalExitListeners.delete(listener);
+			};
+		},
+		async workspaceTrustState() {
+			return decodeWorkspaceTrustState({
+				trusted: roots.size === 0 ? false : terminalTrusted,
+			});
+		},
+		async workspaceTrustGrant() {
+			if (roots.size === 0) {
+				throw trustUnavailable();
+			}
+			terminalTrusted = true;
+			return decodeWorkspaceTrustState({ trusted: true });
+		},
+		async workspaceTrustRevoke() {
+			if (roots.size === 0) {
+				throw trustUnavailable();
+			}
+			terminalTrusted = false;
 		},
 	};
 }

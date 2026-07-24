@@ -87,6 +87,16 @@ function fakeBridge(
 		themeSetSelection: notImplemented,
 		themeSetFileIconThemeSelection: notImplemented,
 		themeSetProductIconThemeSelection: notImplemented,
+		terminalStart: notImplemented,
+		terminalInput: notImplemented,
+		terminalResize: notImplemented,
+		terminalAck: notImplemented,
+		terminalKill: notImplemented,
+		terminalWatchData: notImplemented,
+		terminalWatchExit: notImplemented,
+		workspaceTrustState: notImplemented,
+		workspaceTrustGrant: notImplemented,
+		workspaceTrustRevoke: notImplemented,
 	};
 }
 
@@ -189,6 +199,16 @@ function fakeTextSearchBridge(
 		themeSetSelection: notImplemented,
 		themeSetFileIconThemeSelection: notImplemented,
 		themeSetProductIconThemeSelection: notImplemented,
+		terminalStart: notImplemented,
+		terminalInput: notImplemented,
+		terminalResize: notImplemented,
+		terminalAck: notImplemented,
+		terminalKill: notImplemented,
+		terminalWatchData: notImplemented,
+		terminalWatchExit: notImplemented,
+		workspaceTrustState: notImplemented,
+		workspaceTrustGrant: notImplemented,
+		workspaceTrustRevoke: notImplemented,
 	};
 
 	return {

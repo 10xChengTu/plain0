@@ -3,6 +3,10 @@ export const WORKSPACE_WATCH_WAKE_EVENT =
 	"plain://workspace-watch-wake" as const;
 export const WORKSPACE_SEARCH_TEXT_WAKE_EVENT =
 	"plain://workspace-search-text-wake" as const;
+/** F070 S2: streamed pty output — see `TerminalDataEvent`'s doc comment. */
+export const TERMINAL_DATA_EVENT = "plain://terminal-data" as const;
+/** F070 S2: one-shot session exit notification — see `TerminalExitEvent`. */
+export const TERMINAL_EXIT_EVENT = "plain://terminal-exit" as const;
 
 export interface RuntimeInfo {
 	application: "Plain";
@@ -306,6 +310,50 @@ export interface WorkspaceSearchTextWakeEvent {
 	readonly searchId: string;
 }
 
+// --- Terminal (F070 S2 IPC bridge) ------------------------------------------
+
+export interface TerminalStartResult {
+	readonly sessionId: string;
+}
+
+/**
+ * Decoded `plain://terminal-data` event payload: one already-read pty output
+ * chunk, in the exact order and with the exact `sequence`
+ * `src-tauri/src/terminal/service.rs`'s reader thread produced it. `bytes` is
+ * a freshly allocated snapshot — see `BackupEntry`'s own doc comment for the
+ * same no-shared-backing-storage contract. See
+ * `src-tauri/src/terminal/dto.rs`'s `TerminalDataEvent` doc comment for why
+ * the wire encoding underneath this decoded shape is base64, not a raw
+ * `ArrayBuffer`/`number[]` transport (that dual transport is specific to
+ * Tauri *command* responses; events always JSON-serialize).
+ */
+export interface TerminalDataEvent {
+	readonly sessionId: string;
+	readonly sequence: number;
+	readonly bytes: Uint8Array;
+}
+
+/**
+ * Decoded `plain://terminal-exit` event payload. Arriving `sessionId` may
+ * name a session that has already been (or is concurrently being) killed
+ * from this side — that races against the process actually exiting on its
+ * own — so a listener that already forgot about `sessionId` should simply
+ * ignore the event, not treat it as a contract violation. See
+ * `terminal-stream.ts`'s doc comment for why this event is *not* proof that
+ * no further `TerminalDataEvent` for the same session will arrive.
+ */
+export interface TerminalExitEvent {
+	readonly sessionId: string;
+	readonly exitCode: number;
+}
+
+/** Response shape shared by `workspace_trust_state`/`workspace_trust_grant`
+ * — see `src-tauri/src/trust/commands.rs`'s `WorkspaceTrustState` doc
+ * comment for why grant always reports `trusted: true` on success. */
+export interface WorkspaceTrustState {
+	readonly trusted: boolean;
+}
+
 /**
  * One recovered backup entry. `bytes` is a freshly allocated snapshot: it
  * shares no backing storage with the bridge/mock and the caller may freely
@@ -546,4 +594,48 @@ export interface PlainBridge {
 	themeSetProductIconThemeSelection(
 		productIconThemeId: string | null,
 	): Promise<void>;
+	/** Starts a new interactive terminal session (F070 S2). `cwd: null` uses
+	 * the current workspace's first authorized root — see
+	 * `src-tauri/src/terminal/service.rs`'s `resolve_cwd`. Rejects with
+	 * `WORKSPACE_NOT_TRUSTED` if the current workspace has not been granted
+	 * execution trust (see `workspaceTrustGrant`). */
+	terminalStart(
+		cwd: string | null,
+		cols: number,
+		rows: number,
+	): Promise<TerminalStartResult>;
+	/** Writes `data` to the session's pty (keystrokes/pasted input). */
+	terminalInput(sessionId: string, data: Uint8Array): Promise<void>;
+	terminalResize(sessionId: string, cols: number, rows: number): Promise<void>;
+	/** Acknowledges `byteCount` previously-delivered output bytes, resuming a
+	 * paused session's reader once enough has been acknowledged — see
+	 * `terminal-stream.ts`'s doc comment for the backpressure contract. */
+	terminalAck(sessionId: string, byteCount: number): Promise<void>;
+	/** `immediate: true` waits for full teardown before resolving;
+	 * `immediate: false` still signals the kill immediately but does not
+	 * wait — see `TerminalService::kill`'s doc comment. */
+	terminalKill(sessionId: string, immediate: boolean): Promise<void>;
+	/** Registers a listener for every terminal session's streamed output in
+	 * this window. The listener receives the full decoded event (including
+	 * `sessionId`) and must filter for the session(s) it cares about itself
+	 * — mirrors `workspaceSearchTextWatch`'s own single-listener-for-every-id
+	 * precedent. Prefer `terminal-stream.ts`'s per-session wrapper over
+	 * calling this directly. */
+	terminalWatchData(listener: (event: TerminalDataEvent) => void): Unlisten;
+	/** Registers a listener for every terminal session's exit notification in
+	 * this window. Same all-sessions-in-one-listener shape as
+	 * `terminalWatchData`. */
+	terminalWatchExit(listener: (event: TerminalExitEvent) => void): Unlisten;
+	/** Reads whether the current workspace currently has execution trust
+	 * granted (`false`, never a rejection, for the `EMPTY` workspace). */
+	workspaceTrustState(): Promise<WorkspaceTrustState>;
+	/** Grants execution trust to the current workspace's exact root set.
+	 * Rejects with `TRUST_UNAVAILABLE` for the `EMPTY` workspace (nothing to
+	 * grant trust to). */
+	workspaceTrustGrant(): Promise<WorkspaceTrustState>;
+	/** Revokes execution trust for the current workspace. Idempotent:
+	 * revoking an already-untrusted workspace succeeds silently. Rejects
+	 * with `TRUST_UNAVAILABLE` for the `EMPTY` workspace, same as
+	 * `workspaceTrustGrant`. */
+	workspaceTrustRevoke(): Promise<void>;
 }

@@ -5737,7 +5737,7 @@ const TERMINAL_COMMAND_CONTRACTS = Object.freeze([
 		parameters:
 			"window:WebviewWindow,terminal:State<'_,TerminalService>,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:TerminalStartRequest",
 		returnType: "->Result<TerminalStartResult,CommandError>",
-		body: "letquery=request.into_parts()?;letsession_id=terminal.inner().start(trust.inner(),workspace.inner(),window.label(),query.cwd,query.cols,query.rows,).await?;Ok(TerminalStartResult::new(session_id))",
+		body: "letquery=request.into_parts()?;letsink:Arc<dynTerminalOutputSink>=Arc::new(WindowEmitSink{app:window.app_handle().clone(),window_label:window.label().to_owned(),});letsession_id=terminal.inner().start(trust.inner(),workspace.inner(),window.label(),query.cwd,query.cols,query.rows,sink,).await?;Ok(TerminalStartResult::new(session_id))",
 	},
 	{
 		file: "src-tauri/src/terminal/commands.rs",
@@ -5867,6 +5867,255 @@ export function validateTrustTerminalCommandRegistration(rustSources) {
 	}
 
 	return failures;
+}
+
+/**
+ * Locks the F070 S2 terminal IPC bridge: the `TerminalDataEvent`/
+ * `TerminalExitEvent` Rust struct bodies and the two `plain://terminal-*`
+ * event name consts (mirroring `WorkspaceWatchWakeEvent`'s own
+ * `structBody(...)`/wake-event-const precedent in
+ * `validateWorkspaceWatcherBoundary`), `WindowEmitSink`'s two methods each
+ * emitting exactly once through the audited event/constructor, the frozen
+ * `PlainBridge` terminal/trust method surface (a fixed 10-method count so a
+ * silently added/removed/renamed bridge method fails this check), and the
+ * TypeScript event decoders' own-data/Proxy-rejection/freeze shape plus
+ * native's exactly-once `listen` wiring for each event.
+ */
+export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
+	const failures = [];
+	const dto = findRustSource(rustSources, "src-tauri/src/terminal/dto.rs");
+	const commands = findRustSource(
+		rustSources,
+		"src-tauri/src/terminal/commands.rs",
+	);
+	const appSource = (expectedPath) =>
+		appSources.find(
+			({ relativePath }) => relativePath.replaceAll("\\", "/") === expectedPath,
+		)?.source;
+	const compact = (value) => value?.replaceAll(/\s+/g, "") ?? "";
+
+	const executableDto =
+		dto === undefined ? undefined : stripRustCommentsAndLiterals(dto);
+	const structBody = (name) => {
+		if (executableDto === undefined) {
+			return undefined;
+		}
+		const bodies = watcherRustStructBodies(executableDto, name);
+		return bodies.length === 1 ? compact(bodies[0].body) : undefined;
+	};
+	if (
+		structBody("TerminalDataEvent") !==
+			"session_id:TerminalSessionId,sequence:u64,bytes:String," ||
+		structBody("TerminalExitEvent") !==
+			"session_id:TerminalSessionId,exit_code:u32,"
+	) {
+		failures.push(
+			"TerminalDataEvent/TerminalExitEvent must expose only their exact audited fields",
+		);
+	}
+
+	if (
+		commands === undefined ||
+		!/\bpub\s*\(\s*crate\s*\)\s+const\s+TERMINAL_DATA_EVENT\s*:\s*&str\s*=\s*"plain:\/\/terminal-data"\s*;/.test(
+			commands,
+		) ||
+		!/\bpub\s*\(\s*crate\s*\)\s+const\s+TERMINAL_EXIT_EVENT\s*:\s*&str\s*=\s*"plain:\/\/terminal-exit"\s*;/.test(
+			commands,
+		)
+	) {
+		failures.push(
+			'terminal/commands.rs must define TERMINAL_DATA_EVENT = "plain://terminal-data" and TERMINAL_EXIT_EVENT = "plain://terminal-exit"',
+		);
+	}
+
+	const executableCommands =
+		commands === undefined ? undefined : stripRustCommentsAndLiterals(commands);
+
+	const emitChunk =
+		executableCommands === undefined
+			? undefined
+			: extractRustFunctions(executableCommands, "emit_chunk")[0];
+	const emitExit =
+		executableCommands === undefined
+			? undefined
+			: extractRustFunctions(executableCommands, "emit_exit")[0];
+	const emitChunkBody = compact(emitChunk?.body);
+	const emitExitBody = compact(emitExit?.body);
+	if (
+		emitChunk === undefined ||
+		[...emitChunkBody.matchAll(/\.emit_to\(/g)].length !== 1 ||
+		!emitChunkBody.includes(
+			"EventTarget::webview_window(self.window_label.clone())",
+		) ||
+		!emitChunkBody.includes("TERMINAL_DATA_EVENT") ||
+		!emitChunkBody.includes(
+			"TerminalDataEvent::new(session_id,chunk.sequence,&chunk.bytes)",
+		) ||
+		/[^_]\.emit\(/.test(emitChunkBody)
+	) {
+		failures.push(
+			"WindowEmitSink::emit_chunk must emit_to exactly one window-targeted TerminalDataEvent built from the chunk it was given",
+		);
+	}
+	if (
+		emitExit === undefined ||
+		[...emitExitBody.matchAll(/\.emit_to\(/g)].length !== 1 ||
+		!emitExitBody.includes(
+			"EventTarget::webview_window(self.window_label.clone())",
+		) ||
+		!emitExitBody.includes("TERMINAL_EXIT_EVENT") ||
+		!emitExitBody.includes(
+			"TerminalExitEvent::new(session_id,status.exit_code)",
+		) ||
+		/[^_]\.emit\(/.test(emitExitBody)
+	) {
+		failures.push(
+			"WindowEmitSink::emit_exit must emit_to exactly one window-targeted TerminalExitEvent built from the status it was given",
+		);
+	}
+
+	const contracts = appSource("app/platform/tauri/contracts.ts");
+	const contractsFile =
+		contracts === undefined
+			? undefined
+			: ts.createSourceFile(
+					"contracts.ts",
+					contracts,
+					ts.ScriptTarget.Latest,
+					true,
+					ts.ScriptKind.TS,
+				);
+	if (
+		contracts === undefined ||
+		!/export\s+const\s+TERMINAL_DATA_EVENT\s*=\s*"plain:\/\/terminal-data"\s+as\s+const\s*;/.test(
+			contracts,
+		) ||
+		!/export\s+const\s+TERMINAL_EXIT_EVENT\s*=\s*"plain:\/\/terminal-exit"\s+as\s+const\s*;/.test(
+			contracts,
+		)
+	) {
+		failures.push(
+			"contracts.ts must declare the exact TERMINAL_DATA_EVENT/TERMINAL_EXIT_EVENT wire strings",
+		);
+	}
+	const plainBridgeInterfaces =
+		contractsFile?.statements.filter(
+			(statement) =>
+				ts.isInterfaceDeclaration(statement) &&
+				statement.name.text === "PlainBridge",
+		) ?? [];
+	const TERMINAL_BRIDGE_METHOD_NAMES = [
+		"terminalStart",
+		"terminalInput",
+		"terminalResize",
+		"terminalAck",
+		"terminalKill",
+		"terminalWatchData",
+		"terminalWatchExit",
+		"workspaceTrustState",
+		"workspaceTrustGrant",
+		"workspaceTrustRevoke",
+	];
+	const bridgeMembers =
+		plainBridgeInterfaces[0]?.members.filter((member) =>
+			TERMINAL_BRIDGE_METHOD_NAMES.includes(typeScriptStaticName(member.name)),
+		) ?? [];
+	const bridgeMemberNames = bridgeMembers
+		.map((member) => typeScriptStaticName(member.name))
+		.sort();
+	if (
+		plainBridgeInterfaces.length !== 1 ||
+		bridgeMembers.length !== TERMINAL_BRIDGE_METHOD_NAMES.length ||
+		!bridgeMembers.every((member) => ts.isMethodSignature(member)) ||
+		JSON.stringify(bridgeMemberNames) !==
+			JSON.stringify([...TERMINAL_BRIDGE_METHOD_NAMES].sort())
+	) {
+		failures.push(
+			"PlainBridge must expose exactly the ten audited terminal/trust methods, no more and no fewer",
+		);
+	}
+
+	const terminalCodec = appSource("app/platform/tauri/terminal-codec.ts");
+	const decoderBody = (name) => {
+		if (terminalCodec === undefined) {
+			return undefined;
+		}
+		const functions = extractRustLikeTypeScriptFunctionBodies(
+			terminalCodec,
+			name,
+		);
+		return functions.length === 1 ? functions[0] : undefined;
+	};
+	for (const name of [
+		"decodeTerminalDataEvent",
+		"decodeTerminalExitEvent",
+		"decodeWorkspaceTrustState",
+	]) {
+		const body = decoderBody(name);
+		if (
+			body === undefined ||
+			!body.includes("hasExactKeys(") ||
+			!body.includes("rejectProxyObject(") ||
+			!body.includes("Object.freeze(")
+		) {
+			failures.push(
+				`terminal-codec.ts's ${name} must validate exact own-data keys, reject Proxy wrapping, and freeze its result`,
+			);
+		}
+	}
+
+	const native = appSource("app/platform/tauri/native.ts");
+	if (
+		native === undefined ||
+		[...native.matchAll(/\blisten<unknown>\(\s*TERMINAL_DATA_EVENT\b/g)]
+			.length !== 1 ||
+		[...native.matchAll(/\blisten<unknown>\(\s*TERMINAL_EXIT_EVENT\b/g)]
+			.length !== 1 ||
+		!native.includes("decodeTerminalDataEvent(event.payload)") ||
+		!native.includes("decodeTerminalExitEvent(event.payload)")
+	) {
+		failures.push(
+			"native.ts must listen for TERMINAL_DATA_EVENT/TERMINAL_EXIT_EVENT exactly once each, decoded through the audited decoders",
+		);
+	}
+
+	return failures;
+}
+
+/**
+ * Finds every top-level `function <name>(...) { ... }` declaration's body
+ * text in a TypeScript source string — a lightweight, brace-matching
+ * sibling of [`extractRustFunctions`] for this file's occasional
+ * string-level (rather than full AST) TypeScript checks.
+ */
+function extractRustLikeTypeScriptFunctionBodies(source, functionName) {
+	const bodies = [];
+	const pattern = new RegExp(
+		`\\bfunction\\s+${escapeRegularExpression(functionName)}\\s*\\(`,
+		"g",
+	);
+	for (const match of source.matchAll(pattern)) {
+		const parameterOpen = match.index + match[0].length - 1;
+		const parameterClose = findMatchingDelimiter(
+			source,
+			parameterOpen,
+			"(",
+			")",
+		);
+		if (parameterClose === undefined) {
+			continue;
+		}
+		const bodyOpen = source.indexOf("{", parameterClose + 1);
+		if (bodyOpen < 0) {
+			continue;
+		}
+		const bodyClose = findMatchingDelimiter(source, bodyOpen, "{", "}");
+		if (bodyClose === undefined) {
+			continue;
+		}
+		bodies.push(source.slice(bodyOpen + 1, bodyClose));
+	}
+	return bodies;
 }
 
 function extractNamedImplBodies(source, typeName) {

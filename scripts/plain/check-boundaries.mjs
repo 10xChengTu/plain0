@@ -20,6 +20,7 @@ import {
 	validateTauriConfiguration,
 	validateTauriConfigurationFiles,
 	validateTauriE2EConfiguration,
+	validateTerminalIpcBridgeBoundary,
 	validateTerminalRustBoundary,
 	validateTrustTerminalCommandRegistration,
 	validateWorkspaceBrowserFixtureWindowAuthority,
@@ -724,6 +725,12 @@ for (const failure of validateTerminalRustBoundary(
 	fail(failure);
 }
 for (const failure of validateTrustTerminalCommandRegistration(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateTerminalIpcBridgeBoundary(
+	rustSources,
+	appSources,
+)) {
 	fail(failure);
 }
 

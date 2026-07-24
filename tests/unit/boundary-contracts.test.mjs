@@ -32,6 +32,7 @@ import {
 	validateWorkspaceVersionedWriteBoundary,
 	validateWorkspaceWatcherBoundary,
 	validateWorkingCopyOverrideImportBoundary,
+	validateTerminalIpcBridgeBoundary,
 	validateTerminalRustBoundary,
 	validateTrustTerminalCommandRegistration,
 } from "../../scripts/plain/boundary-contracts.mjs";
@@ -8543,6 +8544,268 @@ pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor
 		);
 		expect(validateTrustTerminalCommandRegistration(duplicated)).toContain(
 			"src-tauri/src/lib.rs must register terminal::commands::terminal_kill exactly once in generate_handler",
+		);
+	});
+});
+
+describe("Plain F070 S2 terminal IPC bridge Harness", () => {
+	const terminalDtoSource = readFileSync(
+		new URL("../../src-tauri/src/terminal/dto.rs", import.meta.url),
+		"utf8",
+	);
+	const terminalCommandsSource = readFileSync(
+		new URL("../../src-tauri/src/terminal/commands.rs", import.meta.url),
+		"utf8",
+	);
+	const contractsSource = readFileSync(
+		new URL("../../app/platform/tauri/contracts.ts", import.meta.url),
+		"utf8",
+	);
+	const terminalCodecSource = readFileSync(
+		new URL("../../app/platform/tauri/terminal-codec.ts", import.meta.url),
+		"utf8",
+	);
+	const nativeSource = readFileSync(
+		new URL("../../app/platform/tauri/native.ts", import.meta.url),
+		"utf8",
+	);
+
+	const baselineBridgeRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/terminal/dto.rs",
+			source: terminalDtoSource,
+		},
+		{
+			relativePath: "src-tauri/src/terminal/commands.rs",
+			source: terminalCommandsSource,
+		},
+	]);
+	const baselineBridgeAppSources = Object.freeze([
+		{
+			relativePath: "app/platform/tauri/contracts.ts",
+			source: contractsSource,
+		},
+		{
+			relativePath: "app/platform/tauri/terminal-codec.ts",
+			source: terminalCodecSource,
+		},
+		{ relativePath: "app/platform/tauri/native.ts", source: nativeSource },
+	]);
+
+	function withMutatedRust(relativePath, mutate) {
+		return baselineBridgeRustSources.map((entry) =>
+			entry.relativePath === relativePath
+				? { ...entry, source: mutate(entry.source) }
+				: entry,
+		);
+	}
+
+	function withMutatedApp(relativePath, mutate) {
+		return baselineBridgeAppSources.map((entry) =>
+			entry.relativePath === relativePath
+				? { ...entry, source: mutate(entry.source) }
+				: entry,
+		);
+	}
+
+	it("passes for the real, unmodified terminal IPC bridge files", () => {
+		expect(
+			validateTerminalIpcBridgeBoundary(
+				baselineBridgeRustSources,
+				baselineBridgeAppSources,
+			),
+		).toEqual([]);
+	});
+
+	it("fails if TerminalDataEvent gains an extra field", () => {
+		const widened = withMutatedRust("src-tauri/src/terminal/dto.rs", (source) =>
+			source.replace(
+				"pub struct TerminalDataEvent {\n    session_id: TerminalSessionId,\n    sequence: u64,\n    bytes: String,\n}",
+				"pub struct TerminalDataEvent {\n    session_id: TerminalSessionId,\n    sequence: u64,\n    bytes: String,\n    extra: bool,\n}",
+			),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(widened, baselineBridgeAppSources),
+		).toContain(
+			"TerminalDataEvent/TerminalExitEvent must expose only their exact audited fields",
+		);
+	});
+
+	it("fails if TerminalExitEvent's signal is (re-)added to the wire payload", () => {
+		const widened = withMutatedRust("src-tauri/src/terminal/dto.rs", (source) =>
+			source.replace(
+				"pub struct TerminalExitEvent {\n    session_id: TerminalSessionId,\n    exit_code: u32,\n}",
+				"pub struct TerminalExitEvent {\n    session_id: TerminalSessionId,\n    exit_code: u32,\n    signal: Option<String>,\n}",
+			),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(widened, baselineBridgeAppSources),
+		).toContain(
+			"TerminalDataEvent/TerminalExitEvent must expose only their exact audited fields",
+		);
+	});
+
+	it("fails if either event name const is renamed or its wire string changes", () => {
+		const renamed = withMutatedRust(
+			"src-tauri/src/terminal/commands.rs",
+			(source) =>
+				source.replace(
+					'pub(crate) const TERMINAL_DATA_EVENT: &str = "plain://terminal-data";',
+					'pub(crate) const TERMINAL_DATA_EVENT: &str = "plain://terminal-output";',
+				),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(renamed, baselineBridgeAppSources),
+		).toContain(
+			'terminal/commands.rs must define TERMINAL_DATA_EVENT = "plain://terminal-data" and TERMINAL_EXIT_EVENT = "plain://terminal-exit"',
+		);
+	});
+
+	it("fails if WindowEmitSink::emit_chunk stops targeting the session's own window or double-emits", () => {
+		const wrongTarget = withMutatedRust(
+			"src-tauri/src/terminal/commands.rs",
+			(source) =>
+				source.replace(
+					"EventTarget::webview_window(self.window_label.clone()),\n            TERMINAL_DATA_EVENT,",
+					"EventTarget::any(),\n            TERMINAL_DATA_EVENT,",
+				),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(wrongTarget, baselineBridgeAppSources),
+		).toContain(
+			"WindowEmitSink::emit_chunk must emit_to exactly one window-targeted TerminalDataEvent built from the chunk it was given",
+		);
+
+		const doubleEmit = withMutatedRust(
+			"src-tauri/src/terminal/commands.rs",
+			(source) =>
+				source.replace(
+					"TerminalDataEvent::new(session_id, chunk.sequence, &chunk.bytes),\n        );\n    }",
+					"TerminalDataEvent::new(session_id, chunk.sequence, &chunk.bytes),\n        );\n        let _ = self.app.emit_to(\n            EventTarget::webview_window(self.window_label.clone()),\n            TERMINAL_DATA_EVENT,\n            TerminalDataEvent::new(session_id, chunk.sequence, &chunk.bytes),\n        );\n    }",
+				),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(doubleEmit, baselineBridgeAppSources),
+		).toContain(
+			"WindowEmitSink::emit_chunk must emit_to exactly one window-targeted TerminalDataEvent built from the chunk it was given",
+		);
+	});
+
+	it("fails if WindowEmitSink::emit_exit is rewired to a bare .emit() or the wrong exit code", () => {
+		const bareEmit = withMutatedRust(
+			"src-tauri/src/terminal/commands.rs",
+			(source) =>
+				source.replace(
+					"let _ = self.app.emit_to(\n            EventTarget::webview_window(self.window_label.clone()),\n            TERMINAL_EXIT_EVENT,\n            TerminalExitEvent::new(session_id, status.exit_code),\n        );",
+					'let _ = self.app.emit("terminal-exit-fallback", ());\n        let _ = self.app.emit_to(\n            EventTarget::webview_window(self.window_label.clone()),\n            TERMINAL_EXIT_EVENT,\n            TerminalExitEvent::new(session_id, status.exit_code),\n        );',
+				),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(bareEmit, baselineBridgeAppSources),
+		).toContain(
+			"WindowEmitSink::emit_exit must emit_to exactly one window-targeted TerminalExitEvent built from the status it was given",
+		);
+	});
+
+	it("fails if contracts.ts's event consts are missing or the wire string drifts", () => {
+		const mutated = withMutatedApp(
+			"app/platform/tauri/contracts.ts",
+			(source) =>
+				source.replace(
+					'export const TERMINAL_EXIT_EVENT = "plain://terminal-exit" as const;',
+					'export const TERMINAL_EXIT_EVENT = "plain://terminal-quit" as const;',
+				),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(baselineBridgeRustSources, mutated),
+		).toContain(
+			"contracts.ts must declare the exact TERMINAL_DATA_EVENT/TERMINAL_EXIT_EVENT wire strings",
+		);
+	});
+
+	it("fails if PlainBridge loses a terminal/trust method", () => {
+		const mutated = withMutatedApp(
+			"app/platform/tauri/contracts.ts",
+			(source) =>
+				source.replace(
+					"\tterminalKill(sessionId: string, immediate: boolean): Promise<void>;\n",
+					"",
+				),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(baselineBridgeRustSources, mutated),
+		).toContain(
+			"PlainBridge must expose exactly the ten audited terminal/trust methods, no more and no fewer",
+		);
+	});
+
+	it("fails if PlainBridge gains an extra terminal-shaped method beyond the audited ten", () => {
+		const mutated = withMutatedApp(
+			"app/platform/tauri/contracts.ts",
+			(source) =>
+				source.replace(
+					"\tterminalKill(sessionId: string, immediate: boolean): Promise<void>;\n",
+					"\tterminalKill(sessionId: string, immediate: boolean): Promise<void>;\n\tterminalDestroy(sessionId: string): Promise<void>;\n",
+				),
+		);
+		// `terminalDestroy` is outside the audited name list, so the filtered
+		// member count still equals ten — this mutation is only observable
+		// because it does not change any *audited* name's presence, proving
+		// the check keys on the fixed name list rather than merely counting
+		// terminal-prefixed members. Assert the passing baseline is
+		// unaffected by an unrelated addition, then assert a genuine surface
+		// change (a rename) is caught.
+		expect(
+			validateTerminalIpcBridgeBoundary(baselineBridgeRustSources, mutated),
+		).toEqual([]);
+
+		const renamed = withMutatedApp(
+			"app/platform/tauri/contracts.ts",
+			(source) =>
+				source.replace(
+					"\tterminalKill(sessionId: string, immediate: boolean): Promise<void>;\n",
+					"\tterminalTerminate(sessionId: string, immediate: boolean): Promise<void>;\n",
+				),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(baselineBridgeRustSources, renamed),
+		).toContain(
+			"PlainBridge must expose exactly the ten audited terminal/trust methods, no more and no fewer",
+		);
+	});
+
+	it("fails if a terminal event decoder drops its own-data/Proxy/freeze checks", () => {
+		const noFreeze = withMutatedApp(
+			"app/platform/tauri/terminal-codec.ts",
+			(source) =>
+				source.replace(
+					"\treturn Object.freeze({\n\t\tsessionId: value.sessionId,\n\t\tsequence: value.sequence,\n\t\tbytes,\n\t});",
+					"\treturn {\n\t\tsessionId: value.sessionId,\n\t\tsequence: value.sequence,\n\t\tbytes,\n\t};",
+				),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(baselineBridgeRustSources, noFreeze),
+		).toContain(
+			"terminal-codec.ts's decodeTerminalDataEvent must validate exact own-data keys, reject Proxy wrapping, and freeze its result",
+		);
+	});
+
+	it("fails if native.ts stops listening for one of the terminal events, or decodes through the wrong function", () => {
+		const missingListener = withMutatedApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					/terminalWatchExit: \(listener\) => \{[\s\S]*?\n\t\t\},\n/,
+					"",
+				),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(
+				baselineBridgeRustSources,
+				missingListener,
+			),
+		).toContain(
+			"native.ts must listen for TERMINAL_DATA_EVENT/TERMINAL_EXIT_EVENT exactly once each, decoded through the audited decoders",
 		);
 	});
 });

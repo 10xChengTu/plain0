@@ -188,6 +188,36 @@ function testBridge(
 		async themeSetProductIconThemeSelection() {
 			throw new Error("unused");
 		},
+		async terminalStart() {
+			throw new Error("unused");
+		},
+		async terminalInput() {
+			throw new Error("unused");
+		},
+		async terminalResize() {
+			throw new Error("unused");
+		},
+		async terminalAck() {
+			throw new Error("unused");
+		},
+		async terminalKill() {
+			throw new Error("unused");
+		},
+		terminalWatchData() {
+			throw new Error("unused");
+		},
+		terminalWatchExit() {
+			throw new Error("unused");
+		},
+		async workspaceTrustState() {
+			throw new Error("unused");
+		},
+		async workspaceTrustGrant() {
+			throw new Error("unused");
+		},
+		async workspaceTrustRevoke() {
+			throw new Error("unused");
+		},
 		...overrides,
 	};
 }

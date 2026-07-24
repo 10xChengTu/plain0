@@ -24,11 +24,11 @@
 //!    killed; see [`spawn_session`]'s doc for why the parent process's own
 //!    slave handle is dropped immediately after spawn) or a genuine error.
 //! 2. **delivery** (`plain-terminal-emit-<id>`) — drains the channel and
-//!    calls [`TerminalOutputSink::emit_chunk`] for each chunk. This is S1's
-//!    stand-in for the real `app.emit_to(...)` call F070 S2 will make here
-//!    instead — the thread/channel structure itself does not change, only
-//!    what "delivery" means. Ends once the channel disconnects (the reader
-//!    thread ended) and is fully drained.
+//!    calls [`TerminalOutputSink::emit_chunk`] for each chunk. F070 S2 wires
+//!    this to a real `app.emit_to(...)` (`terminal::commands::WindowEmitSink`)
+//!    — the thread/channel structure itself did not change, only what
+//!    "delivery" means. Ends once the channel disconnects (the reader thread
+//!    ended) and is fully drained.
 //! 3. **waiter** (`plain-terminal-wait-<id>`) — owns the `Child` and calls
 //!    its blocking `wait()`. `Child::kill`/`wait` cannot both be called
 //!    through the same object from different threads without one blocking
@@ -39,6 +39,21 @@
 //!    [`flow::FlowControl::cancel`] as a belt-and-suspenders wake for the
 //!    reader (normally redundant with the EOF it will already see) and
 //!    reports the exit status via [`TerminalOutputSink::emit_exit`].
+//!
+//!    **Known ordering caveat** (documented, not fixed, in F070 S2): this
+//!    thread's `emit_exit` call is *not* synchronized with the delivery
+//!    thread having drained every chunk the reader ever produced — `wait()`
+//!    returning and the reader thread observing real pty EOF are woken by
+//!    the same underlying "child has exited" kernel event through two
+//!    independent syscalls (`waitpid` vs `read`) with no ordering primitive
+//!    between them, so a real emitted `plain://terminal-exit` can in
+//!    principle reach the frontend interleaved with (or fractionally before)
+//!    the session's very last `plain://terminal-data` chunk. Fixing this
+//!    would mean the waiter joining the reader's own completion before
+//!    emitting exit, which is a thread-model change out of this slice's
+//!    scope (see `terminal::commands` module doc); the mitigation lives in
+//!    `app/platform/tauri/terminal-stream.ts` instead, which does not treat
+//!    "exit observed" as "no more data will arrive".
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -98,21 +113,18 @@ impl From<portable_pty::ExitStatus> for TerminalExitStatus {
     }
 }
 
-/// Output-delivery seam: S1's stand-in for the real Tauri `emit_to` call
-/// F070 S2 will make here instead (see the module doc). Exactly one
-/// implementation exists in production ([`NullSink`], used by
-/// `TerminalService::start`); tests inject a recording implementation to
-/// observe chunks/exit deterministically without a live `AppHandle`.
+/// Output-delivery seam: the real implementation
+/// (`terminal::commands::WindowEmitSink`, F070 S2) calls the real Tauri
+/// `emit_to` for both methods below (see the module doc); tests inject a
+/// recording implementation instead, to observe chunks/exit deterministically
+/// without a live `AppHandle`. The command layer builds the production sink
+/// (it is the one place with access to a `WebviewWindow`/`AppHandle`) and
+/// passes it into [`TerminalService::start`] — mirroring exactly how
+/// `search::commands::workspace_search_text_start` builds its own `wake_sink`
+/// closure and hands it to `WorkspaceService::search_text_start`.
 pub(crate) trait TerminalOutputSink: Send + Sync {
     fn emit_chunk(&self, session_id: TerminalSessionId, chunk: TerminalChunk);
     fn emit_exit(&self, session_id: TerminalSessionId, status: TerminalExitStatus);
-}
-
-struct NullSink;
-
-impl TerminalOutputSink for NullSink {
-    fn emit_chunk(&self, _session_id: TerminalSessionId, _chunk: TerminalChunk) {}
-    fn emit_exit(&self, _session_id: TerminalSessionId, _status: TerminalExitStatus) {}
 }
 
 struct SessionThreads {
@@ -158,7 +170,11 @@ impl TerminalService {
     /// `shell::detect_shell`) as an interactive session. Checks
     /// `trust.require_trusted` before ever touching `portable_pty` — "trust
     /// gate before spawn", exactly as `docs/research/2026-07-24-pty-terminal.md`
-    /// requires.
+    /// requires. `sink` is the caller-supplied (production: real `emit_to`;
+    /// tests: recording) output destination for this one session — see
+    /// [`TerminalOutputSink`]'s doc for why the command layer, not this
+    /// method, is what constructs it.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         &self,
         trust: &TrustService,
@@ -167,20 +183,14 @@ impl TerminalService {
         cwd: Option<String>,
         cols: u16,
         rows: u16,
+        sink: Arc<dyn TerminalOutputSink>,
     ) -> Result<TerminalSessionId, CommandError> {
         trust.require_trusted(workspace, window_label).await?;
         let resolved_cwd = resolve_cwd(workspace, window_label, cwd)?;
         let shell_path = shell::detect_shell(std::env::var("SHELL").ok().as_deref());
         let command = CommandBuilder::new(&shell_path);
-        self.spawn_session(
-            window_label,
-            resolved_cwd,
-            command,
-            cols,
-            rows,
-            Arc::new(NullSink),
-        )
-        .await
+        self.spawn_session(window_label, resolved_cwd, command, cols, rows, sink)
+            .await
     }
 
     /// Test-only seam: identical to [`Self::start`] except the caller
