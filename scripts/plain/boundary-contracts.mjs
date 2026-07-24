@@ -5481,12 +5481,6 @@ const TERMINAL_BUDGET_LIMITS = Object.freeze([
 		"src-tauri/src/terminal/flow.rs",
 	],
 	[
-		"TERMINAL_CHUNK_QUEUE_CAPACITY",
-		256,
-		"usize",
-		"src-tauri/src/terminal/service.rs",
-	],
-	[
 		"TERMINAL_READ_BUFFER_BYTES",
 		8192,
 		"usize",
@@ -5774,11 +5768,27 @@ const TERMINAL_COMMAND_CONTRACTS = Object.freeze([
 	},
 	{
 		file: "src-tauri/src/terminal/commands.rs",
-		name: "terminal_input",
+		name: "terminal_input_text",
 		parameters:
-			"window:WebviewWindow,terminal:State<'_,TerminalService>,request:TerminalInputRequest",
+			"window:WebviewWindow,terminal:State<'_,TerminalService>,request:TerminalInputTextRequest",
 		returnType: "->Result<(),CommandError>",
-		body: "let(session_id,data)=request.into_parts()?;terminal.inner().input(window.label(),session_id,data).await",
+		body: "let(session_id,text)=request.into_parts()?;terminal.inner().input_text(window.label(),session_id,text).await",
+	},
+	{
+		file: "src-tauri/src/terminal/commands.rs",
+		name: "terminal_input_key",
+		parameters:
+			"window:WebviewWindow,terminal:State<'_,TerminalService>,request:TerminalInputKeyRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(session_id,input)=request.into_parts()?;terminal.inner().input_key(window.label(),session_id,input).await",
+	},
+	{
+		file: "src-tauri/src/terminal/commands.rs",
+		name: "terminal_focus",
+		parameters:
+			"window:WebviewWindow,terminal:State<'_,TerminalService>,request:TerminalFocusRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(session_id,focused)=request.into_parts();terminal.inner().focus(window.label(),session_id,focused).await",
 	},
 	{
 		file: "src-tauri/src/terminal/commands.rs",
@@ -5794,7 +5804,15 @@ const TERMINAL_COMMAND_CONTRACTS = Object.freeze([
 		parameters:
 			"window:WebviewWindow,terminal:State<'_,TerminalService>,request:TerminalAckRequest",
 		returnType: "->Result<(),CommandError>",
-		body: "let(session_id,byte_count)=request.into_parts();terminal.inner().ack(window.label(),session_id,byte_count)",
+		body: "let(session_id,sequence)=request.into_parts();terminal.inner().ack(window.label(),session_id,sequence)",
+	},
+	{
+		file: "src-tauri/src/terminal/commands.rs",
+		name: "terminal_scrollback",
+		parameters:
+			"window:WebviewWindow,terminal:State<'_,TerminalService>,request:TerminalScrollbackRequest",
+		returnType: "->Result<TerminalScrollbackResult,CommandError>",
+		body: "let(session_id,start,count)=request.into_parts()?;letrows=terminal.inner().scrollback(window.label(),session_id,start,count).await?;Ok(TerminalScrollbackResult::new(rows))",
 	},
 	{
 		file: "src-tauri/src/terminal/commands.rs",
@@ -5807,8 +5825,10 @@ const TERMINAL_COMMAND_CONTRACTS = Object.freeze([
 ]);
 
 /**
- * Locks the F070 S1 trust (3) and terminal (5) commands to their audited
- * exact signatures, bodies and single `generate_handler!` registration —
+ * Locks the trust (3) and terminal (6, since F070's "IPC 改造" slice split
+ * `terminal_input` into `terminal_input_text`/`terminal_input_key` and added
+ * `terminal_focus`/`terminal_scrollback`) commands to their audited exact
+ * signatures, bodies and single `generate_handler!` registration —
  * the same exact-body-pinning technique `validateSearchCommandRegistration`/
  * `validateSearchTextCommandRegistration` already use, extended to a closed
  * set spanning two command files at once so a command silently added,
@@ -5903,16 +5923,17 @@ export function validateTrustTerminalCommandRegistration(rustSources) {
 }
 
 /**
- * Locks the F070 S2 terminal IPC bridge: the `TerminalDataEvent`/
- * `TerminalExitEvent` Rust struct bodies and the two `plain://terminal-*`
- * event name consts (mirroring `WorkspaceWatchWakeEvent`'s own
- * `structBody(...)`/wake-event-const precedent in
- * `validateWorkspaceWatcherBoundary`), `WindowEmitSink`'s two methods each
- * emitting exactly once through the audited event/constructor, the frozen
- * `PlainBridge` terminal/trust method surface (a fixed 10-method count so a
- * silently added/removed/renamed bridge method fails this check), and the
- * TypeScript event decoders' own-data/Proxy-rejection/freeze shape plus
- * native's exactly-once `listen` wiring for each event.
+ * Locks the terminal IPC bridge (F070's "IPC 改造" slice, superseding S2's
+ * raw-byte shapes): the `TerminalDataEvent`/`TerminalExitEvent` Rust struct
+ * bodies and the two `plain://terminal-*` event name consts (mirroring
+ * `WorkspaceWatchWakeEvent`'s own `structBody(...)`/wake-event-const
+ * precedent in `validateWorkspaceWatcherBoundary`), `WindowEmitSink`'s two
+ * methods each emitting exactly once through the audited event/constructor,
+ * the frozen `PlainBridge` terminal/trust method surface (a fixed 13-method
+ * count so a silently added/removed/renamed bridge method fails this
+ * check), and the TypeScript event/result decoders' own-data/Proxy-
+ * rejection/freeze shape plus native's exactly-once `listen` wiring for
+ * each event.
  */
 export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 	const failures = [];
@@ -5938,7 +5959,7 @@ export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 	};
 	if (
 		structBody("TerminalDataEvent") !==
-			"session_id:TerminalSessionId,sequence:u64,bytes:String," ||
+			"session_id:TerminalSessionId,sequence:u64,frame:TerminalFrame," ||
 		structBody("TerminalExitEvent") !==
 			"session_id:TerminalSessionId,exit_code:u32,"
 	) {
@@ -5964,30 +5985,30 @@ export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 	const executableCommands =
 		commands === undefined ? undefined : stripRustCommentsAndLiterals(commands);
 
-	const emitChunk =
+	const emitFrame =
 		executableCommands === undefined
 			? undefined
-			: extractRustFunctions(executableCommands, "emit_chunk")[0];
+			: extractRustFunctions(executableCommands, "emit_frame")[0];
 	const emitExit =
 		executableCommands === undefined
 			? undefined
 			: extractRustFunctions(executableCommands, "emit_exit")[0];
-	const emitChunkBody = compact(emitChunk?.body);
+	const emitFrameBody = compact(emitFrame?.body);
 	const emitExitBody = compact(emitExit?.body);
 	if (
-		emitChunk === undefined ||
-		[...emitChunkBody.matchAll(/\.emit_to\(/g)].length !== 1 ||
-		!emitChunkBody.includes(
+		emitFrame === undefined ||
+		[...emitFrameBody.matchAll(/\.emit_to\(/g)].length !== 1 ||
+		!emitFrameBody.includes(
 			"EventTarget::webview_window(self.window_label.clone())",
 		) ||
-		!emitChunkBody.includes("TERMINAL_DATA_EVENT") ||
-		!emitChunkBody.includes(
-			"TerminalDataEvent::new(session_id,chunk.sequence,&chunk.bytes)",
+		!emitFrameBody.includes("TERMINAL_DATA_EVENT") ||
+		!emitFrameBody.includes(
+			"TerminalDataEvent::new(session_id,sequence,frame)",
 		) ||
-		/[^_]\.emit\(/.test(emitChunkBody)
+		/[^_]\.emit\(/.test(emitFrameBody)
 	) {
 		failures.push(
-			"WindowEmitSink::emit_chunk must emit_to exactly one window-targeted TerminalDataEvent built from the chunk it was given",
+			"WindowEmitSink::emit_frame must emit_to exactly one window-targeted TerminalDataEvent built from the frame it was given",
 		);
 	}
 	if (
@@ -6039,9 +6060,12 @@ export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 		) ?? [];
 	const TERMINAL_BRIDGE_METHOD_NAMES = [
 		"terminalStart",
-		"terminalInput",
+		"terminalInputText",
+		"terminalInputKey",
+		"terminalFocus",
 		"terminalResize",
 		"terminalAck",
+		"terminalScrollback",
 		"terminalKill",
 		"terminalWatchData",
 		"terminalWatchExit",
@@ -6064,7 +6088,7 @@ export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 			JSON.stringify([...TERMINAL_BRIDGE_METHOD_NAMES].sort())
 	) {
 		failures.push(
-			"PlainBridge must expose exactly the ten audited terminal/trust methods, no more and no fewer",
+			"PlainBridge must expose exactly the thirteen audited terminal/trust methods, no more and no fewer",
 		);
 	}
 
@@ -6082,6 +6106,7 @@ export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 	for (const name of [
 		"decodeTerminalDataEvent",
 		"decodeTerminalExitEvent",
+		"decodeTerminalScrollbackResult",
 		"decodeWorkspaceTrustState",
 	]) {
 		const body = decoderBody(name);

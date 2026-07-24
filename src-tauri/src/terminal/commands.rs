@@ -7,43 +7,44 @@ use crate::trust::service::TrustService;
 use crate::workspace::service::WorkspaceService;
 
 use super::dto::{
-    TerminalAckRequest, TerminalDataEvent, TerminalExitEvent, TerminalInputRequest,
-    TerminalKillRequest, TerminalResizeRequest, TerminalSessionId, TerminalStartRequest,
+    TerminalAckRequest, TerminalDataEvent, TerminalExitEvent, TerminalFocusRequest,
+    TerminalInputKeyRequest, TerminalInputTextRequest, TerminalKillRequest, TerminalResizeRequest,
+    TerminalScrollbackRequest, TerminalScrollbackResult, TerminalSessionId, TerminalStartRequest,
     TerminalStartResult,
 };
-use super::service::{TerminalChunk, TerminalExitStatus, TerminalOutputSink, TerminalService};
+use super::service::{TerminalExitStatus, TerminalOutputSink, TerminalService};
+use super::vt;
 
-/// Window-targeted terminal output events (F070 S2). Mirrors
+/// Window-targeted terminal output events. Mirrors
 /// `search::commands::WORKSPACE_SEARCH_TEXT_WAKE_EVENT`'s exact `emit_to`
-/// precedent, except these two events carry the actual output/exit payload
+/// precedent, except these two events carry the actual frame/exit payload
 /// rather than a bare wake hint the frontend must separately poll to
 /// resolve: every `plain://terminal-data` delivery is itself the
-/// authoritative next chunk of a session's output (ordered by
+/// authoritative next frame of a session's render state (ordered by
 /// `TerminalDataEvent`'s `sequence`, not re-fetchable), and
 /// `plain://terminal-exit` is the session's one-shot terminal notification.
 pub(crate) const TERMINAL_DATA_EVENT: &str = "plain://terminal-data";
 pub(crate) const TERMINAL_EXIT_EVENT: &str = "plain://terminal-exit";
 
-/// Real production [`TerminalOutputSink`]: emits every chunk/exit straight
+/// Real production [`TerminalOutputSink`]: emits every frame/exit straight
 /// to the session's own window. Built once per [`terminal_start`] call (the
 /// only place with access to a live `WebviewWindow`/`AppHandle`) and shared
-/// by that session's reader-delivery and waiter threads for its whole
-/// lifetime — see `service.rs`'s module doc for why those two threads each
-/// independently call `emit_chunk`/`emit_exit`, and for the documented
-/// exit-vs-last-chunk ordering caveat that follows from that independence
-/// (this sink does not attempt to fix it; `terminal-stream.ts` is where the
-/// mitigation lives).
+/// by that session's vt/waiter threads for its whole lifetime — see
+/// `service.rs`'s module doc for why those two threads each independently
+/// call `emit_frame`/`emit_exit`, and for the documented exit-vs-last-frame
+/// ordering caveat that follows from that independence (this sink does not
+/// attempt to fix it; `terminal-stream.ts` is where the mitigation lives).
 struct WindowEmitSink {
     app: AppHandle,
     window_label: String,
 }
 
 impl TerminalOutputSink for WindowEmitSink {
-    fn emit_chunk(&self, session_id: TerminalSessionId, chunk: TerminalChunk) {
+    fn emit_frame(&self, session_id: TerminalSessionId, sequence: u64, frame: vt::DirtyFrame) {
         let _ = self.app.emit_to(
             EventTarget::webview_window(self.window_label.clone()),
             TERMINAL_DATA_EVENT,
-            TerminalDataEvent::new(session_id, chunk.sequence, &chunk.bytes),
+            TerminalDataEvent::new(session_id, sequence, frame),
         );
     }
 
@@ -85,15 +86,41 @@ pub(crate) async fn terminal_start(
 }
 
 #[tauri::command]
-pub(crate) async fn terminal_input(
+pub(crate) async fn terminal_input_text(
     window: WebviewWindow,
     terminal: State<'_, TerminalService>,
-    request: TerminalInputRequest,
+    request: TerminalInputTextRequest,
 ) -> Result<(), CommandError> {
-    let (session_id, data) = request.into_parts()?;
+    let (session_id, text) = request.into_parts()?;
     terminal
         .inner()
-        .input(window.label(), session_id, data)
+        .input_text(window.label(), session_id, text)
+        .await
+}
+
+#[tauri::command]
+pub(crate) async fn terminal_input_key(
+    window: WebviewWindow,
+    terminal: State<'_, TerminalService>,
+    request: TerminalInputKeyRequest,
+) -> Result<(), CommandError> {
+    let (session_id, input) = request.into_parts()?;
+    terminal
+        .inner()
+        .input_key(window.label(), session_id, input)
+        .await
+}
+
+#[tauri::command]
+pub(crate) async fn terminal_focus(
+    window: WebviewWindow,
+    terminal: State<'_, TerminalService>,
+    request: TerminalFocusRequest,
+) -> Result<(), CommandError> {
+    let (session_id, focused) = request.into_parts();
+    terminal
+        .inner()
+        .focus(window.label(), session_id, focused)
         .await
 }
 
@@ -116,8 +143,22 @@ pub(crate) async fn terminal_ack(
     terminal: State<'_, TerminalService>,
     request: TerminalAckRequest,
 ) -> Result<(), CommandError> {
-    let (session_id, byte_count) = request.into_parts();
-    terminal.inner().ack(window.label(), session_id, byte_count)
+    let (session_id, sequence) = request.into_parts();
+    terminal.inner().ack(window.label(), session_id, sequence)
+}
+
+#[tauri::command]
+pub(crate) async fn terminal_scrollback(
+    window: WebviewWindow,
+    terminal: State<'_, TerminalService>,
+    request: TerminalScrollbackRequest,
+) -> Result<TerminalScrollbackResult, CommandError> {
+    let (session_id, start, count) = request.into_parts()?;
+    let rows = terminal
+        .inner()
+        .scrollback(window.label(), session_id, start, count)
+        .await?;
+    Ok(TerminalScrollbackResult::new(rows))
 }
 
 #[tauri::command]

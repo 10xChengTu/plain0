@@ -3,9 +3,10 @@ export const WORKSPACE_WATCH_WAKE_EVENT =
 	"plain://workspace-watch-wake" as const;
 export const WORKSPACE_SEARCH_TEXT_WAKE_EVENT =
 	"plain://workspace-search-text-wake" as const;
-/** F070 S2: streamed pty output — see `TerminalDataEvent`'s doc comment. */
+/** F070 "IPC 改造": streamed render-state frames — see `TerminalDataEvent`'s
+ * doc comment. */
 export const TERMINAL_DATA_EVENT = "plain://terminal-data" as const;
-/** F070 S2: one-shot session exit notification — see `TerminalExitEvent`. */
+/** One-shot session exit notification — see `TerminalExitEvent`. */
 export const TERMINAL_EXIT_EVENT = "plain://terminal-exit" as const;
 
 export interface RuntimeInfo {
@@ -310,27 +311,126 @@ export interface WorkspaceSearchTextWakeEvent {
 	readonly searchId: string;
 }
 
-// --- Terminal (F070 S2 IPC bridge) ------------------------------------------
+// --- Terminal (F070 "IPC 改造": render-state frames + structured input) -----
 
 export interface TerminalStartResult {
 	readonly sessionId: string;
 }
 
+/** Wire projection of `libghostty_vt::style::RgbColor`. */
+export interface TerminalRgb {
+	readonly r: number;
+	readonly g: number;
+	readonly b: number;
+}
+
+/** Wire projection of `libghostty_vt::style::Underline`. */
+export type TerminalUnderline =
+	"none" | "single" | "double" | "curly" | "dotted" | "dashed";
+
 /**
- * Decoded `plain://terminal-data` event payload: one already-read pty output
- * chunk, in the exact order and with the exact `sequence`
- * `src-tauri/src/terminal/service.rs`'s reader thread produced it. `bytes` is
- * a freshly allocated snapshot — see `BackupEntry`'s own doc comment for the
- * same no-shared-backing-storage contract. See
- * `src-tauri/src/terminal/dto.rs`'s `TerminalDataEvent` doc comment for why
- * the wire encoding underneath this decoded shape is base64, not a raw
- * `ArrayBuffer`/`number[]` transport (that dual transport is specific to
- * Tauri *command* responses; events always JSON-serialize).
+ * Wire projection of `libghostty_vt::style::Style`'s boolean attribute flags
+ * plus `underline`. Deliberately omits `fg_color`/`bg_color`/
+ * `underline_color` — see `TerminalCell.fg`/`bg` (already-resolved RGB) and
+ * `src-tauri/src/terminal/dto.rs`'s `TerminalStyle` doc comment.
+ */
+export interface TerminalStyle {
+	readonly bold: boolean;
+	readonly italic: boolean;
+	readonly faint: boolean;
+	readonly blink: boolean;
+	readonly inverse: boolean;
+	readonly invisible: boolean;
+	readonly strikethrough: boolean;
+	readonly overline: boolean;
+	readonly underline: TerminalUnderline;
+}
+
+/**
+ * Wire projection of one `terminal::vt::DirtyCell`. `graphemes` is the
+ * cell's base codepoint plus any combining marks, already joined into a
+ * single string by Rust. `fg`/`bg` are already-resolved RGB (`null` means
+ * "use the frame's `colors.foreground`/`background` default", not "no
+ * color") — never a palette index a decoder here would need to resolve.
+ */
+export interface TerminalCell {
+	readonly graphemes: string;
+	readonly fg: TerminalRgb | null;
+	readonly bg: TerminalRgb | null;
+	readonly style: TerminalStyle;
+}
+
+/** Wire projection of one `terminal::vt::DirtyRow`. */
+export interface TerminalRow {
+	readonly rowIndex: number;
+	readonly cells: readonly TerminalCell[];
+}
+
+/** Wire projection of `libghostty_vt::render::CursorViewport`. */
+export interface TerminalCursorViewport {
+	readonly x: number;
+	readonly y: number;
+	readonly atWideTail: boolean;
+}
+
+/** Wire projection of `libghostty_vt::render::CursorVisualStyle`. */
+export type TerminalCursorStyle = "bar" | "block" | "underline" | "blockHollow";
+
+/** Wire projection of a `terminal::vt::DirtyFrame`'s cursor fields. */
+export interface TerminalCursor {
+	readonly visible: boolean;
+	readonly blinking: boolean;
+	readonly viewport: TerminalCursorViewport | null;
+	readonly style: TerminalCursorStyle;
+}
+
+/**
+ * Wire projection of `libghostty_vt::render::Colors`. Deliberately omits the
+ * full 256-entry palette — every cell's `fg`/`bg` is already fully resolved
+ * (see `TerminalCell`'s doc comment), so a renderer only ever needs these
+ * three as the frame-level defaults for cells with no explicit color.
+ */
+export interface TerminalColors {
+	readonly background: TerminalRgb;
+	readonly foreground: TerminalRgb;
+	readonly cursor: TerminalRgb | null;
+}
+
+/** Wire projection of `libghostty_vt::render::Dirty`. */
+export type TerminalDirty = "clean" | "partial" | "full";
+
+/**
+ * Wire projection of a `terminal::vt::DirtyFrame` — `plain://terminal-data`'s
+ * payload (F070 "IPC 改造", replacing S2's raw-byte placeholder). `rowsData`
+ * lists only the rows that actually changed since the last frame this
+ * session emitted (or, when `dirty` is `"full"`, every row) — a renderer
+ * must apply these incrementally onto its own retained grid, not treat a
+ * frame as a complete screen snapshot by itself. See
+ * `src-tauri/src/terminal/dto.rs`'s `TerminalFrame` doc comment for why this
+ * is structured JSON rather than a packed binary frame.
+ */
+export interface TerminalFrame {
+	readonly dirty: TerminalDirty;
+	readonly cols: number;
+	readonly rows: number;
+	readonly cursor: TerminalCursor;
+	readonly colors: TerminalColors;
+	readonly rowsData: readonly TerminalRow[];
+}
+
+/**
+ * Decoded `plain://terminal-data` event payload: one emitted [`TerminalFrame`],
+ * in the exact order and with the exact `sequence`
+ * `src-tauri/src/terminal/service.rs`'s vt thread assigned it — monotonic
+ * per session, incremented once per *emitted* frame (content coalesced
+ * while emission credit was exhausted does not get its own sequence
+ * number — see that module's "VT → frontend frame delivery backpressure"
+ * doc section).
  */
 export interface TerminalDataEvent {
 	readonly sessionId: string;
 	readonly sequence: number;
-	readonly bytes: Uint8Array;
+	readonly frame: TerminalFrame;
 }
 
 /**
@@ -345,6 +445,25 @@ export interface TerminalDataEvent {
 export interface TerminalExitEvent {
 	readonly sessionId: string;
 	readonly exitCode: number;
+}
+
+/** Wire projection of one `terminal::vt::ScrollbackCell` — lighter than
+ * `TerminalCell`: no resolved `fg`/`bg` (see
+ * `src-tauri/src/terminal/vt.rs`'s `VtSession::scrollback_rows` doc). */
+export interface TerminalScrollbackCell {
+	readonly graphemes: string;
+	readonly style: TerminalStyle;
+}
+
+/** Wire projection of one `terminal::vt::ScrollbackRow`. */
+export interface TerminalScrollbackRow {
+	readonly rowIndex: number;
+	readonly cells: readonly TerminalScrollbackCell[];
+}
+
+/** `terminal_scrollback` response. */
+export interface TerminalScrollbackResult {
+	readonly rows: readonly TerminalScrollbackRow[];
 }
 
 /** Response shape shared by `workspace_trust_state`/`workspace_trust_grant`
@@ -594,8 +713,8 @@ export interface PlainBridge {
 	themeSetProductIconThemeSelection(
 		productIconThemeId: string | null,
 	): Promise<void>;
-	/** Starts a new interactive terminal session (F070 S2). `cwd: null` uses
-	 * the current workspace's first authorized root — see
+	/** Starts a new interactive terminal session. `cwd: null` uses the
+	 * current workspace's first authorized root — see
 	 * `src-tauri/src/terminal/service.rs`'s `resolve_cwd`. Rejects with
 	 * `WORKSPACE_NOT_TRUSTED` if the current workspace has not been granted
 	 * execution trust (see `workspaceTrustGrant`). */
@@ -604,21 +723,57 @@ export interface PlainBridge {
 		cols: number,
 		rows: number,
 	): Promise<TerminalStartResult>;
-	/** Writes `data` to the session's pty (keystrokes/pasted input). */
-	terminalInput(sessionId: string, data: Uint8Array): Promise<void>;
+	/** Writes `text` (an IME composition commit, or a pasted block) to the
+	 * session's pty as its own UTF-8 bytes — no key encoding involved,
+	 * unlike `terminalInputKey`. */
+	terminalInputText(sessionId: string, text: string): Promise<void>;
+	/** Encodes one structured key event through `libghostty-vt`'s own key
+	 * encoder and writes the resulting bytes to the session's pty. `action`/
+	 * `key` are the literal `libghostty_vt::key::{Action,Key}` `#[repr(u32)]`
+	 * enum discriminant values; `mods` is a strict `libghostty_vt::key::Mods`
+	 * bitmask (unknown bits rejected) — see
+	 * `src-tauri/src/terminal/dto.rs`'s `TerminalInputKeyRequest` doc comment
+	 * for why this is not a hand-maintained name lookup. */
+	terminalInputKey(
+		sessionId: string,
+		action: number,
+		key: number,
+		mods: number,
+		utf8: string | null,
+	): Promise<void>;
+	/** Reports a focus gained/lost transition. Writes the encoded focus
+	 * escape sequence to the pty only if the session's live terminal
+	 * currently has focus-reporting mode (DEC 1004) enabled; otherwise a
+	 * silent no-op. */
+	terminalFocus(sessionId: string, focused: boolean): Promise<void>;
 	terminalResize(sessionId: string, cols: number, rows: number): Promise<void>;
-	/** Acknowledges `byteCount` previously-delivered output bytes, resuming a
-	 * paused session's reader once enough has been acknowledged — see
-	 * `terminal-stream.ts`'s doc comment for the backpressure contract. */
-	terminalAck(sessionId: string, byteCount: number): Promise<void>;
+	/** Acknowledges every `plain://terminal-data` frame up through
+	 * `sequence` (**not** a byte count — see
+	 * `src-tauri/src/terminal/dto.rs`'s `TerminalAckRequest` doc comment),
+	 * freeing the vt thread's single-frame-in-flight emission credit —
+	 * see `terminal-stream.ts`'s doc comment for the backpressure
+	 * contract. */
+	terminalAck(sessionId: string, sequence: number): Promise<void>;
+	/** Pulls up to `count` scrollback rows starting at history row `start`
+	 * (`0` = oldest retained line). A `start` past the end of retained
+	 * scrollback is not an error — it simply yields fewer, possibly zero,
+	 * rows; see `src-tauri/src/terminal/vt.rs`'s `VtSession::scrollback_rows`
+	 * doc comment for why retained history may be considerably less than
+	 * the configured cap for wide/richly-styled content. */
+	terminalScrollback(
+		sessionId: string,
+		start: number,
+		count: number,
+	): Promise<TerminalScrollbackResult>;
 	/** `immediate: true` waits for full teardown before resolving;
 	 * `immediate: false` still signals the kill immediately but does not
 	 * wait — see `TerminalService::kill`'s doc comment. */
 	terminalKill(sessionId: string, immediate: boolean): Promise<void>;
-	/** Registers a listener for every terminal session's streamed output in
-	 * this window. The listener receives the full decoded event (including
-	 * `sessionId`) and must filter for the session(s) it cares about itself
-	 * — mirrors `workspaceSearchTextWatch`'s own single-listener-for-every-id
+	/** Registers a listener for every terminal session's streamed
+	 * render-state frames in this window. The listener receives the full
+	 * decoded event (including `sessionId`) and must filter for the
+	 * session(s) it cares about itself — mirrors
+	 * `workspaceSearchTextWatch`'s own single-listener-for-every-id
 	 * precedent. Prefer `terminal-stream.ts`'s per-session wrapper over
 	 * calling this directly. */
 	terminalWatchData(listener: (event: TerminalDataEvent) => void): Unlisten;

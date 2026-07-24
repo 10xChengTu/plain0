@@ -2,6 +2,8 @@ import type {
 	PlainBridge,
 	TerminalDataEvent,
 	TerminalExitEvent,
+	TerminalFrame,
+	TerminalScrollbackResult,
 } from "./contracts";
 
 /**
@@ -12,9 +14,12 @@ import type {
 export type TerminalStreamTransport = Pick<
 	PlainBridge,
 	| "terminalStart"
-	| "terminalInput"
+	| "terminalInputText"
+	| "terminalInputKey"
+	| "terminalFocus"
 	| "terminalResize"
 	| "terminalAck"
+	| "terminalScrollback"
 	| "terminalKill"
 	| "terminalWatchData"
 	| "terminalWatchExit"
@@ -27,30 +32,52 @@ export interface TerminalStreamStartRequest {
 }
 
 export interface TerminalStreamHandlers {
-	/** Called with each chunk's raw bytes, in delivery order (see the module
-	 * doc's ordering/dedupe note). */
-	readonly onData: (bytes: Uint8Array) => void;
+	/** Called with each emitted render-state frame, in delivery order (see
+	 * the module doc's ordering/dedupe note). A frame's `rowsData` lists
+	 * only the rows that changed since the last one this session emitted
+	 * (or every row, when `dirty` is `"full"`) — the caller is responsible
+	 * for applying it onto its own retained grid. */
+	readonly onFrame: (frame: TerminalFrame) => void;
 	/** Called once, the first time this session's exit is observed. Does
-	 * *not* imply `onData` will never fire again for this session — see the
-	 * module doc. */
+	 * *not* imply `onFrame` will never fire again for this session — see
+	 * the module doc. */
 	readonly onExit: (exitCode: number) => void;
 }
 
 export interface TerminalStream {
 	readonly sessionId: string;
-	/** Writes `data` to the session's pty (keystrokes/pasted input). */
-	write(data: Uint8Array): Promise<void>;
+	/** Writes `text` (an IME composition commit, or a pasted block) to the
+	 * session's pty as its own UTF-8 bytes — no key encoding involved. */
+	writeText(text: string): Promise<void>;
+	/** Encodes one structured key event through `libghostty-vt`'s own key
+	 * encoder and writes the resulting bytes to the session's pty. See
+	 * `PlainBridge.terminalInputKey`'s doc comment for what `action`/`key`/
+	 * `mods` mean. */
+	writeKey(
+		action: number,
+		key: number,
+		mods: number,
+		utf8: string | null,
+	): Promise<void>;
+	/** Reports a focus gained/lost transition — a silent no-op unless the
+	 * session's live terminal currently has focus-reporting mode enabled. */
+	focus(focused: boolean): Promise<void>;
 	resize(cols: number, rows: number): Promise<void>;
-	/** Acknowledges `byteCount` bytes of output this caller has now finished
-	 * consuming (e.g. handed off to a terminal renderer), resuming a paused
-	 * session's reader once enough has been acknowledged — see
+	/** Acknowledges every frame up through `sequence` this caller has now
+	 * finished consuming (e.g. applied to a retained grid and painted),
+	 * freeing the vt thread's single-frame-in-flight emission credit — see
 	 * `flow::FlowControl`'s doc comment in `src-tauri/src/terminal/flow.rs`
-	 * for the high/low water mark this drives. This module has no built-in
-	 * ack policy of its own (it never calls this on the caller's behalf):
-	 * exactly when a "batch" is considered consumed is a rendering concern
-	 * that belongs to whatever calls `write`/observes `onData`, not to this
+	 * for the *separate*, byte-level PTY → VT gate this is not the same as
+	 * (that leg is driven entirely by the vt thread itself now — see
+	 * `src-tauri/src/terminal/service.rs`'s module doc). This module has no
+	 * built-in ack policy of its own (it never calls this on the caller's
+	 * behalf): exactly when a frame is considered "consumed" is a rendering
+	 * concern that belongs to whatever calls `onFrame`, not to this
 	 * transport-level bridge. */
-	ack(byteCount: number): Promise<void>;
+	ack(sequence: number): Promise<void>;
+	/** Pulls up to `count` scrollback rows starting at history row `start`
+	 * — see `PlainBridge.terminalScrollback`'s doc comment. */
+	scrollback(start: number, count: number): Promise<TerminalScrollbackResult>;
 	/** `immediate: true` waits for full teardown before resolving. */
 	kill(immediate: boolean): Promise<void>;
 	/** Stops listening to this session's events. Does not kill the session —
@@ -60,11 +87,11 @@ export interface TerminalStream {
 }
 
 /**
- * Opens one terminal session and wires its push-delivered output/exit events
- * to `handlers` — the push-stream analogue of `text-search-stream.ts`'s
- * `runTextSearchStream`. Unlike that poll/cursor protocol, there is no
- * "re-fetch": every `plain://terminal-data` delivery for this session is
- * itself the next authoritative chunk of output.
+ * Opens one terminal session and wires its push-delivered render-state
+ * frames/exit events to `handlers` — the push-stream analogue of
+ * `text-search-stream.ts`'s `runTextSearchStream`. Unlike that poll/cursor
+ * protocol, there is no "re-fetch": every `plain://terminal-data` delivery
+ * for this session is itself the next authoritative frame.
  *
  * # Listening before the session id is known
  *
@@ -74,23 +101,23 @@ export interface TerminalStream {
  * because a spawned shell can produce output before that call's promise
  * settles; events observed before the session id is known are buffered and
  * replayed (filtered to this session) the instant it becomes known, rather
- * than risking losing a real chunk to that race.
+ * than risking losing a real frame to that race.
  *
  * # Ordering, dedupe, and the exit/data race
  *
- * A single session's chunk delivery is already strictly ordered by the Rust
- * side (`terminal::service`'s single delivery thread — see that module's
- * doc), so this layer's `sequence` tracking exists only as a defensive
- * backstop against a transport-level exact duplicate, not to reorder
- * anything; a genuine gap (a chunk this stream never received) cannot be
- * recovered from here — the same "cannot invent missing data" limit
- * `search`'s poll/cursor protocol has for a lost wake, via a different
- * mechanism.
+ * A single session's frame delivery is already strictly ordered by the Rust
+ * side (`terminal::service`'s vt thread is the sole emitter — see that
+ * module's doc), so this layer's `sequence` tracking exists only as a
+ * defensive backstop against a transport-level exact duplicate, not to
+ * reorder anything; a genuine gap (a frame this stream never received)
+ * cannot be recovered from here — the same "cannot invent missing data"
+ * limit `search`'s poll/cursor protocol has for a lost wake, via a
+ * different mechanism.
  *
  * `onExit` fires the moment `plain://terminal-exit` arrives for this
- * session, but that does **not** mean no further `onData` will fire — the
- * Rust side's exit-reporting thread is not synchronized with its delivery
- * thread having drained every chunk the reader ever produced (see
+ * session, but that does **not** mean no further `onFrame` will fire — the
+ * Rust side's exit-reporting thread is not synchronized with the vt thread
+ * having drained and emitted every frame the reader ever produced (see
  * `terminal::service`'s module doc for the exact race). Callers must not
  * treat "exited" as license to stop reading; call `dispose()` once truly
  * done with the session.
@@ -112,7 +139,7 @@ export async function openTerminalStream(
 			return;
 		}
 		nextExpectedSequence = event.sequence + 1;
-		handlers.onData(event.bytes);
+		handlers.onFrame(event.frame);
 	}
 
 	const unlistenData = transport.terminalWatchData((event) => {
@@ -163,11 +190,29 @@ export async function openTerminalStream(
 	const openedSessionId = sessionId;
 	return {
 		sessionId: openedSessionId,
-		async write(data) {
+		async writeText(text) {
 			if (disposed) {
 				return;
 			}
-			await transport.terminalInput(openedSessionId, data);
+			await transport.terminalInputText(openedSessionId, text);
+		},
+		async writeKey(action, key, mods, utf8) {
+			if (disposed) {
+				return;
+			}
+			await transport.terminalInputKey(
+				openedSessionId,
+				action,
+				key,
+				mods,
+				utf8,
+			);
+		},
+		async focus(focused) {
+			if (disposed) {
+				return;
+			}
+			await transport.terminalFocus(openedSessionId, focused);
 		},
 		async resize(cols, rows) {
 			if (disposed) {
@@ -175,11 +220,14 @@ export async function openTerminalStream(
 			}
 			await transport.terminalResize(openedSessionId, cols, rows);
 		},
-		async ack(byteCount) {
+		async ack(sequence) {
 			if (disposed) {
 				return;
 			}
-			await transport.terminalAck(openedSessionId, byteCount);
+			await transport.terminalAck(openedSessionId, sequence);
+		},
+		async scrollback(start, count) {
+			return transport.terminalScrollback(openedSessionId, start, count);
 		},
 		async kill(immediate) {
 			await transport.terminalKill(openedSessionId, immediate);

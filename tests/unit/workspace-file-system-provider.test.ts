@@ -314,13 +314,22 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async terminalStart() {
 			throw new Error("unused");
 		},
-		async terminalInput() {
+		async terminalInputText() {
+			throw new Error("unused");
+		},
+		async terminalInputKey() {
+			throw new Error("unused");
+		},
+		async terminalFocus() {
 			throw new Error("unused");
 		},
 		async terminalResize() {
 			throw new Error("unused");
 		},
 		async terminalAck() {
+			throw new Error("unused");
+		},
+		async terminalScrollback() {
 			throw new Error("unused");
 		},
 		async terminalKill() {

@@ -5,6 +5,8 @@ import type {
 	RuntimeInfo,
 	TerminalDataEvent,
 	TerminalExitEvent,
+	TerminalRgb,
+	TerminalStyle,
 	ThemeImportResult,
 	ThemePackageSummary,
 	WorkspaceCapabilities,
@@ -69,14 +71,18 @@ import {
 	type WorkspaceWatcherTransport,
 } from "./workspace-watcher";
 import {
+	decodeTerminalScrollbackResult,
 	decodeTerminalStartResult,
 	decodeWorkspaceTrustState,
 	frozenTerminalAckRequest,
 	frozenTerminalDataEvent,
 	frozenTerminalExitEvent,
-	frozenTerminalInputRequest,
+	frozenTerminalFocusRequest,
+	frozenTerminalInputKeyRequest,
+	frozenTerminalInputTextRequest,
 	frozenTerminalKillRequest,
 	frozenTerminalResizeRequest,
+	frozenTerminalScrollbackRequest,
 	frozenTerminalStartRequest,
 } from "./terminal-codec";
 
@@ -972,9 +978,9 @@ export interface BrowserMockBridgeOptions {
 	 * mirrors `TrustService::is_trusted`'s `EMPTY`-workspace short-circuit. */
 	readonly terminalTrustedForTest?: boolean;
 	/** Runs once per `terminalStart` call, handing the caller a controller
-	 * scoped to *that* session so tests/E2E can inject output, simulate
-	 * exit, and inspect backpressure state — see
-	 * `BrowserMockTerminalSessionController`. */
+	 * scoped to *that* session so tests/E2E can inject extra output, force a
+	 * resize, simulate exit, and inspect the frame emission credit gate —
+	 * see `BrowserMockTerminalSessionController`. */
 	readonly onTerminalSessionForTest?: (
 		controller: BrowserMockTerminalSessionController,
 	) => void;
@@ -982,39 +988,50 @@ export interface BrowserMockBridgeOptions {
 
 /**
  * Per-session control surface for the deterministic fake PTY `terminalStart`
- * creates in the browser mock (F070 S2) — handed to
- * `onTerminalSessionForTest` the instant a session starts. Each session
- * (indeed each bridge instance) has fully independent state; nothing here is
- * shared across sessions or across separate `createBrowserMockBridge` calls.
+ * creates in the browser mock — handed to `onTerminalSessionForTest` the
+ * instant a session starts. Each session (indeed each bridge instance) has
+ * fully independent state; nothing here is shared across sessions or across
+ * separate `createBrowserMockBridge` calls.
+ *
+ * This mock's fake PTY is deliberately minimal — a single-row "echo" grid,
+ * not a real VT emulator (no newline/scrollback/cursor-movement handling) —
+ * per F070's "IPC 改造" slice's own scope: it exists to give a real
+ * consuming renderer (a later slice) structurally correct `TerminalFrame`s
+ * to develop and test against, not to reproduce `libghostty-vt`'s actual
+ * terminal semantics. It does, however, faithfully mirror the *protocol*:
+ * the same single-frame-in-flight emission credit gate real sessions use
+ * (see `src-tauri/src/terminal/service.rs`'s module doc) governs when a
+ * pushed/echoed change actually gets delivered to `terminalWatchData`
+ * listeners.
  */
 export interface BrowserMockTerminalSessionController {
 	readonly sessionId: string;
 	/**
-	 * Enqueues `bytes` as one output chunk, subject to the same high/low
-	 * water mark pause/resume policy `terminal::flow::FlowControl` enforces
-	 * for a real session (see this module's `MOCK_TERMINAL_FLOW_*`
-	 * constants, which mirror the Rust constants exactly): once enough
-	 * unacknowledged output has queued up, further pushed chunks sit in an
-	 * internal queue and are not delivered to `terminalWatchData` listeners
-	 * until enough of them are acknowledged via `terminalAck` — this is how
-	 * a caller drives (and observes) real backpressure deterministically,
-	 * e.g. by pushing a large scripted burst of output.
+	 * Appends `text` to the session's single echo row and attempts an
+	 * emission, subject to the same single-frame-in-flight credit gate a
+	 * real session's vt thread enforces: if a previously emitted frame is
+	 * still unacknowledged, this queues the change (coalesced into
+	 * whatever the *next* eligible frame reports) rather than emitting
+	 * immediately — this is how a caller drives (and observes) real
+	 * frame-delivery backpressure deterministically.
 	 */
-	pushOutput(bytes: Uint8Array): void;
+	pushOutput(text: string): void;
 	/**
 	 * Reports the session as exited with `exitCode` (idempotent after the
-	 * first call — later calls are ignored). Does not discard or flush any
-	 * not-yet-delivered (paused) queued output: this mirrors the real
-	 * exit-vs-last-chunk race `src-tauri/src/terminal/service.rs`'s module
+	 * first call — later calls are ignored). Does not force-flush any
+	 * not-yet-emitted (credit-gated) pending content: this mirrors the real
+	 * exit-vs-last-frame race `src-tauri/src/terminal/service.rs`'s module
 	 * doc documents rather than "fixing" it away, so this mock stays a
 	 * faithful stand-in for that behavior in E2E tests.
 	 */
 	finish(exitCode: number): void;
-	/** Whether the session's simulated reader is currently paused for
-	 * backpressure. */
-	isPausedForTest(): boolean;
-	/** The session's current unacknowledged output byte count. */
-	unackedBytesForTest(): number;
+	/** Whether a previously emitted frame is currently unacknowledged (the
+	 * mock analogue of the real single-frame-in-flight emission credit
+	 * gate being exhausted). */
+	isAwaitingAckForTest(): boolean;
+	/** The sequence number of the most recently emitted frame, or `null` if
+	 * none has been emitted yet. */
+	lastEmittedSequenceForTest(): number | null;
 }
 
 interface CapturedBrowserMockWorkspaceMoveSeams {
@@ -4920,18 +4937,38 @@ export function createBrowserMockBridge(
 		readonly skippedOversize: number;
 	}
 
-	// --- Terminal + execution trust (F070 S2 IPC bridge) ---------------------
+	// --- Terminal + execution trust (F070 "IPC 改造": render-state frames) ---
 
-	/** Mirrors `terminal::flow::TERMINAL_FLOW_HIGH_WATER_MARK`/
-	 * `_LOW_WATER_MARK` exactly, so a caller exercising backpressure through
-	 * this mock observes the same real thresholds a live session would. */
-	const MOCK_TERMINAL_FLOW_HIGH_WATER_MARK = 100_000;
-	const MOCK_TERMINAL_FLOW_LOW_WATER_MARK = 5_000;
 	/** Approximates the conventional Unix "128 + signal" shell reporting for
 	 * a killed process (SIGKILL = 9) — an approximation for mock purposes
 	 * only, not a guarantee of byte-for-byte parity with `portable_pty`'s
 	 * real exit-code encoding for a killed child. */
 	const MOCK_TERMINAL_KILLED_EXIT_CODE = 137;
+	/** Fixed neutral color scheme every mock frame reports — this mock does
+	 * not model SGR styling at all (see
+	 * `BrowserMockTerminalSessionController`'s doc comment), so every cell
+	 * is unstyled and every frame's `colors` are these same two constants. */
+	const MOCK_TERMINAL_BACKGROUND: TerminalRgb = Object.freeze({
+		r: 0,
+		g: 0,
+		b: 0,
+	});
+	const MOCK_TERMINAL_FOREGROUND: TerminalRgb = Object.freeze({
+		r: 229,
+		g: 229,
+		b: 229,
+	});
+	const MOCK_TERMINAL_DEFAULT_STYLE: TerminalStyle = Object.freeze({
+		bold: false,
+		italic: false,
+		faint: false,
+		blink: false,
+		inverse: false,
+		invisible: false,
+		strikethrough: false,
+		overline: false,
+		underline: "none",
+	});
 
 	let terminalTrusted = options.terminalTrustedForTest ?? false;
 	const terminalDataListeners = new Set<(event: TerminalDataEvent) => void>();
@@ -4939,11 +4976,27 @@ export function createBrowserMockBridge(
 
 	interface MockTerminalSession {
 		readonly sessionId: string;
-		sequence: number;
-		unackedBytes: number;
-		paused: boolean;
+		cols: number;
+		rows: number;
+		/** The mock's entire fake PTY state: one echo row's text — see
+		 * `BrowserMockTerminalSessionController`'s doc comment for why this
+		 * is deliberately not a real VT grid. */
+		line: string;
 		exited: boolean;
-		readonly queue: Uint8Array[];
+		nextSequence: number;
+		lastEmittedSequence: number | null;
+		/** Mirrors the real vt thread's single-frame-in-flight emission
+		 * credit gate (`FrameEmitGate` in `src-tauri/src/terminal/service.rs`). */
+		awaitingAck: boolean;
+		/** Set on construction and after every resize; forces the next
+		 * eligible frame to report `dirty: "full"` — mirrors
+		 * `vt::VtSession::resize`'s guarantee (and matches the real crate's
+		 * own construction-time behavior: its very first frame is always a
+		 * full redraw). */
+		forceFull: boolean;
+		/** Whether `line` has changed since the last frame this session
+		 * emitted. */
+		dirty: boolean;
 	}
 
 	const terminalSessions = new Map<string, MockTerminalSession>();
@@ -5002,51 +5055,116 @@ export function createBrowserMockBridge(
 		return session;
 	}
 
-	/** Delivers as many queued chunks as the high-water mark currently
-	 * allows, pausing once it is reached — the mock analogue of
-	 * `terminal::flow::FlowControl` gating the real reader thread. */
-	function pumpMockTerminalSession(session: MockTerminalSession): void {
-		while (!session.paused && session.queue.length > 0) {
-			const bytes = session.queue.shift()!;
-			const event = frozenTerminalDataEvent(
-				session.sessionId,
-				session.sequence,
-				bytes,
-			);
-			session.sequence += 1;
-			session.unackedBytes += bytes.byteLength;
-			if (session.unackedBytes >= MOCK_TERMINAL_FLOW_HIGH_WATER_MARK) {
-				session.paused = true;
+	/** Builds this session's single-row frame value at its current state —
+	 * an own-data plain object handed to `frozenTerminalDataEvent`, which
+	 * re-validates and freezes it through the same decoder a real wire
+	 * payload goes through. */
+	function buildMockTerminalFrameValue(
+		session: MockTerminalSession,
+		dirty: "full" | "partial",
+	): unknown {
+		const cells = [...session.line].map((character) => ({
+			graphemes: character,
+			fg: null,
+			bg: null,
+			style: MOCK_TERMINAL_DEFAULT_STYLE,
+		}));
+		return {
+			dirty,
+			cols: session.cols,
+			rows: session.rows,
+			cursor: {
+				visible: true,
+				blinking: false,
+				viewport: { x: cells.length, y: 0, atWideTail: false },
+				style: "block",
+			},
+			colors: {
+				background: MOCK_TERMINAL_BACKGROUND,
+				foreground: MOCK_TERMINAL_FOREGROUND,
+				cursor: null,
+			},
+			rowsData: [{ rowIndex: 0, cells }],
+		};
+	}
+
+	/** Attempts to snapshot and emit a frame right now — the mock analogue
+	 * of `FrameEmitGate::try_take_frame` + `attempt_emit`
+	 * (`src-tauri/src/terminal/service.rs`): a no-op whenever a previously
+	 * emitted frame is still unacknowledged, or nothing has actually
+	 * changed since the last one (and this is not a forced full redraw). */
+	function attemptEmitMockTerminalFrame(session: MockTerminalSession): void {
+		if (session.awaitingAck || (!session.dirty && !session.forceFull)) {
+			return;
+		}
+		const dirty: "full" | "partial" = session.forceFull ? "full" : "partial";
+		const sequence = session.nextSequence;
+		session.nextSequence += 1;
+		session.lastEmittedSequence = sequence;
+		session.awaitingAck = true;
+		session.forceFull = false;
+		session.dirty = false;
+		const event = frozenTerminalDataEvent(
+			session.sessionId,
+			sequence,
+			buildMockTerminalFrameValue(session, dirty),
+		);
+		queueMicrotask(() => {
+			for (const listener of terminalDataListeners) {
+				listener(event);
 			}
-			queueMicrotask(() => {
-				for (const listener of terminalDataListeners) {
-					listener(event);
-				}
-			});
+		});
+	}
+
+	/** Frees the emission credit once the frontend has acked up through
+	 * `sequence` — mirrors `FrameEmitGate::ack`'s tolerant contract (a stale
+	 * or duplicate ack below the last emitted sequence is simply ignored). */
+	function ackMockTerminalSession(
+		session: MockTerminalSession,
+		sequence: number,
+	): void {
+		if (
+			session.lastEmittedSequence !== null &&
+			sequence >= session.lastEmittedSequence
+		) {
+			session.awaitingAck = false;
+			attemptEmitMockTerminalFrame(session);
 		}
 	}
 
-	function ackMockTerminalSession(
+	/** Appends `text` to the session's echo row and attempts an emission —
+	 * shared by `terminalInputText`'s own echo, `terminalInputKey`'s
+	 * `utf8`-only echo, and `pushOutput`'s test-only injection. */
+	function pushMockTerminalOutput(
 		session: MockTerminalSession,
-		byteCount: number,
+		text: string,
 	): void {
-		session.unackedBytes = Math.max(0, session.unackedBytes - byteCount);
-		if (
-			session.paused &&
-			session.unackedBytes <= MOCK_TERMINAL_FLOW_LOW_WATER_MARK
-		) {
-			session.paused = false;
-			pumpMockTerminalSession(session);
+		if (session.exited || text.length === 0) {
+			return;
 		}
+		session.line += text;
+		session.dirty = true;
+		attemptEmitMockTerminalFrame(session);
+	}
+
+	function resizeMockTerminalSession(
+		session: MockTerminalSession,
+		cols: number,
+		rows: number,
+	): void {
+		session.cols = cols;
+		session.rows = rows;
+		session.forceFull = true;
+		attemptEmitMockTerminalFrame(session);
 	}
 
 	/** Reports `session` as exited exactly once — shared by the test
 	 * controller's `finish` and `terminalKill`'s own exit notification, so a
 	 * natural `finish()` that raced ahead of a `terminalKill` call is never
 	 * overwritten or double-reported (mirrors the real one-shot exit-event
-	 * contract). Deliberately does not touch `session.queue`: any not-yet-
-	 * delivered (paused) output stays queued, mirroring the real exit-vs-
-	 * last-chunk race `terminal::service`'s module doc documents rather than
+	 * contract). Deliberately does not force-flush any not-yet-emitted
+	 * (credit-gated) pending content: this mirrors the real exit-vs-last-
+	 * frame race `terminal::service`'s module doc documents rather than
 	 * "fixing" it away. */
 	function finishMockTerminalSession(
 		session: MockTerminalSession,
@@ -5064,31 +5182,35 @@ export function createBrowserMockBridge(
 		});
 	}
 
-	function startMockTerminalSession(): MockTerminalSession {
+	function startMockTerminalSession(
+		cols: number,
+		rows: number,
+	): MockTerminalSession {
 		const sessionId = nextTerminalSessionId();
 		const session: MockTerminalSession = {
 			sessionId,
-			sequence: 0,
-			unackedBytes: 0,
-			paused: false,
+			cols,
+			rows,
+			line: "",
 			exited: false,
-			queue: [],
+			nextSequence: 0,
+			lastEmittedSequence: null,
+			awaitingAck: false,
+			forceFull: true,
+			dirty: false,
 		};
 		terminalSessions.set(sessionId, session);
 		const controller: BrowserMockTerminalSessionController = Object.freeze({
 			sessionId,
-			pushOutput(bytes: Uint8Array): void {
-				if (session.exited) {
-					return;
-				}
-				session.queue.push(Uint8Array.from(bytes));
-				pumpMockTerminalSession(session);
+			pushOutput(text: string): void {
+				pushMockTerminalOutput(session, text);
 			},
 			finish(exitCode: number): void {
 				finishMockTerminalSession(session, exitCode);
 			},
-			isPausedForTest: (): boolean => session.paused,
-			unackedBytesForTest: (): number => session.unackedBytes,
+			isAwaitingAckForTest: (): boolean => session.awaitingAck,
+			lastEmittedSequenceForTest: (): number | null =>
+				session.lastEmittedSequence,
 		});
 		options.onTerminalSessionForTest?.(controller);
 		return session;
@@ -5633,30 +5755,68 @@ export function createBrowserMockBridge(
 			productIconThemeSelection = productIconThemeId;
 		},
 		async terminalStart(cwd, cols, rows) {
-			frozenTerminalStartRequest(cwd, cols, rows);
+			const request = frozenTerminalStartRequest(cwd, cols, rows);
 			if (roots.size === 0 || !terminalTrusted) {
 				throw terminalNotTrusted();
 			}
-			const session = startMockTerminalSession();
+			const session = startMockTerminalSession(request.cols, request.rows);
 			return decodeTerminalStartResult({ sessionId: session.sessionId });
 		},
-		async terminalInput(sessionId, data) {
-			const request = frozenTerminalInputRequest(sessionId, data);
+		async terminalInputText(sessionId, text) {
+			const request = frozenTerminalInputTextRequest(sessionId, text);
 			const session = getMockTerminalSession(request.sessionId);
 			if (session.exited) {
 				throw terminalIoFailed();
 			}
-			session.queue.push(Uint8Array.from(request.data));
-			pumpMockTerminalSession(session);
+			// This minimal echo mock reflects written text straight back as
+			// output — see `BrowserMockTerminalSessionController`'s doc
+			// comment for why this is not a real shell's own echo decision.
+			pushMockTerminalOutput(session, request.text);
+		},
+		async terminalInputKey(sessionId, action, key, mods, utf8) {
+			const request = frozenTerminalInputKeyRequest(
+				sessionId,
+				action,
+				key,
+				mods,
+				utf8,
+			);
+			const session = getMockTerminalSession(request.sessionId);
+			if (session.exited) {
+				throw terminalIoFailed();
+			}
+			// This mock does not replicate `libghostty-vt`'s key encoding
+			// matrix (see `BrowserMockTerminalSessionController`'s doc
+			// comment) — it only echoes the key event's own `utf8` text, if
+			// any, approximating how a printable character key would look
+			// once round-tripped through a real shell.
+			if (request.utf8 !== null) {
+				pushMockTerminalOutput(session, request.utf8);
+			}
+		},
+		async terminalFocus(sessionId, focused) {
+			const request = frozenTerminalFocusRequest(sessionId, focused);
+			getMockTerminalSession(request.sessionId);
+			// Always a silent no-op: this mock never enables DEC 1004,
+			// matching a real terminal's default —see
+			// `TerminalModesSnapshot::focus_reporting_enabled`'s doc.
 		},
 		async terminalResize(sessionId, cols, rows) {
 			const request = frozenTerminalResizeRequest(sessionId, cols, rows);
-			getMockTerminalSession(request.sessionId);
-		},
-		async terminalAck(sessionId, byteCount) {
-			const request = frozenTerminalAckRequest(sessionId, byteCount);
 			const session = getMockTerminalSession(request.sessionId);
-			ackMockTerminalSession(session, request.byteCount);
+			resizeMockTerminalSession(session, request.cols, request.rows);
+		},
+		async terminalAck(sessionId, sequence) {
+			const request = frozenTerminalAckRequest(sessionId, sequence);
+			const session = getMockTerminalSession(request.sessionId);
+			ackMockTerminalSession(session, request.sequence);
+		},
+		async terminalScrollback(sessionId, start, count) {
+			const request = frozenTerminalScrollbackRequest(sessionId, start, count);
+			getMockTerminalSession(request.sessionId);
+			// This mock keeps no scrollback history — a single echo row only
+			// (see `BrowserMockTerminalSessionController`'s doc comment).
+			return decodeTerminalScrollbackResult({ rows: [] });
 		},
 		async terminalKill(sessionId, immediate) {
 			const request = frozenTerminalKillRequest(sessionId, immediate);

@@ -1,7 +1,21 @@
 import type {
+	TerminalCell,
+	TerminalColors,
+	TerminalCursor,
+	TerminalCursorStyle,
+	TerminalCursorViewport,
 	TerminalDataEvent,
+	TerminalDirty,
 	TerminalExitEvent,
+	TerminalFrame,
+	TerminalRgb,
+	TerminalRow,
+	TerminalScrollbackCell,
+	TerminalScrollbackResult,
+	TerminalScrollbackRow,
 	TerminalStartResult,
+	TerminalStyle,
+	TerminalUnderline,
 	WorkspaceTrustState,
 } from "./contracts";
 
@@ -9,40 +23,32 @@ const UUID_V4_PATTERN =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 /** Mirrors `terminal::dto::MAX_TERMINAL_DIMENSION`. */
 const MAX_TERMINAL_DIMENSION = 2_000;
-/** Mirrors `terminal::dto::MAX_TERMINAL_INPUT_BYTES`. */
+/** Mirrors `terminal::dto::MAX_TERMINAL_INPUT_BYTES` — a UTF-8 byte-length
+ * ceiling on `terminal_input_text`'s `text` field. */
 const MAX_TERMINAL_INPUT_BYTES = 1_024 * 1_024;
-/** `byteCount`'s Rust wire type is `u32`; anything outside this range could
- * never deserialize there, so it is rejected here rather than sent. */
+/** Mirrors `terminal::dto::MAX_TERMINAL_KEY_UTF8_BYTES`. */
+const MAX_TERMINAL_KEY_UTF8_BYTES = 64;
+/** Mirrors `terminal::dto::MAX_TERMINAL_SCROLLBACK_REQUEST_ROWS`. */
+const MAX_TERMINAL_SCROLLBACK_REQUEST_ROWS = 10_000;
+/** A frame can never report more rows than `MAX_TERMINAL_DIMENSION`, nor a
+ * row more cells than that same bound (it doubles as the max column count
+ * `terminal_start`/`terminal_resize` accept). */
+const MAX_TERMINAL_ROWS_PER_FRAME = MAX_TERMINAL_DIMENSION;
+const MAX_TERMINAL_CELLS_PER_ROW = MAX_TERMINAL_DIMENSION;
+/** `action`/`key`'s wire type is Rust's `u32`; anything outside this range
+ * could never deserialize there. */
 const MAX_U32 = 0xff_ff_ff_ff;
-/** Mirrors `terminal::service::TERMINAL_READ_BUFFER_BYTES` (8192): the
- * largest a single pty read — and therefore a single `TerminalDataEvent`
- * chunk — can ever be. Expressed here as the base64-encoded length this
- * decoder actually measures: `ceil(8192 / 3) * 4 = 10924` characters. */
-const MAX_TERMINAL_DATA_BASE64_LENGTH = 10_924;
-const BASE64_PATTERN =
-	/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==)?$/;
+/** `mods`'s wire type is Rust's `u16`. */
+const MAX_U16 = 0xff_ff;
+
 const CONTRACT_ERROR_MESSAGE =
 	"Native IPC returned a payload that violates the Plain terminal contract.";
 
-const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
-const typedArrayBufferGetter = Object.getOwnPropertyDescriptor(
-	typedArrayPrototype,
-	"buffer",
-)?.get;
-const typedArrayByteLengthGetter = Object.getOwnPropertyDescriptor(
-	typedArrayPrototype,
-	"byteLength",
-)?.get;
-const typedArrayByteOffsetGetter = Object.getOwnPropertyDescriptor(
-	typedArrayPrototype,
-	"byteOffset",
-)?.get;
-const typedArraySet = Uint8Array.prototype.set;
-const arrayBufferByteLengthGetter = Object.getOwnPropertyDescriptor(
-	ArrayBuffer.prototype,
-	"byteLength",
-)?.get;
-const arrayBufferSlice = ArrayBuffer.prototype.slice;
+const textEncoder = new TextEncoder();
+
+function utf8ByteLength(text: string): number {
+	return textEncoder.encode(text).length;
+}
 
 class TerminalIpcContractViolation extends Error {
 	readonly code = "IPC_CONTRACT_VIOLATION";
@@ -94,8 +100,69 @@ function hasExactKeys(
 	);
 }
 
+/**
+ * Validates and freezes an own-data array of plain objects, each decoded by
+ * `decodeElement`. Mirrors `search-codec.ts`'s `ownObjectArraySnapshot`:
+ * exact `Array.prototype`, exact-count property descriptors, no getters —
+ * so a Proxy or a sparse/getter-laden array cannot lie about its own
+ * length or elements.
+ */
+function ownObjectArraySnapshot<T>(
+	value: unknown,
+	maxLength: number,
+	decodeElement: (element: unknown) => T,
+): readonly T[] {
+	if (typeof value !== "object" || value === null || !Array.isArray(value)) {
+		return violation();
+	}
+	if (Object.getPrototypeOf(value) !== Array.prototype) {
+		return violation();
+	}
+	const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+	if (
+		lengthDescriptor === undefined ||
+		!("value" in lengthDescriptor) ||
+		!Number.isSafeInteger(lengthDescriptor.value) ||
+		(lengthDescriptor.value as number) < 0 ||
+		(lengthDescriptor.value as number) > maxLength
+	) {
+		return violation();
+	}
+	const length = lengthDescriptor.value as number;
+	const descriptors = Object.getOwnPropertyDescriptors(value);
+	if (Reflect.ownKeys(descriptors).length !== length + 1) {
+		return violation();
+	}
+
+	const items: T[] = [];
+	for (let index = 0; index < length; index += 1) {
+		const descriptor = (descriptors as Record<string, PropertyDescriptor>)[
+			String(index)
+		];
+		if (
+			descriptor === undefined ||
+			!("value" in descriptor) ||
+			descriptor.get !== undefined ||
+			descriptor.set !== undefined
+		) {
+			return violation();
+		}
+		items.push(decodeElement(descriptor.value));
+	}
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze(items);
+}
+
 function isUuidV4(value: unknown): value is string {
 	return typeof value === "string" && UUID_V4_PATTERN.test(value);
+}
+
+function isSafeNonNegativeInteger(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function frozenSessionId(value: unknown): string {
@@ -127,13 +194,22 @@ function frozenDimension(value: unknown): number {
 	return value;
 }
 
-function frozenByteCount(value: unknown): number {
-	if (
-		typeof value !== "number" ||
-		!Number.isSafeInteger(value) ||
-		value < 0 ||
-		value > MAX_U32
-	) {
+function frozenU32(value: unknown): number {
+	if (!isSafeNonNegativeInteger(value) || value > MAX_U32) {
+		return invalidTerminalRequest();
+	}
+	return value;
+}
+
+function frozenU16(value: unknown): number {
+	if (!isSafeNonNegativeInteger(value) || value > MAX_U16) {
+		return invalidTerminalRequest();
+	}
+	return value;
+}
+
+function frozenSequence(value: unknown): number {
+	if (!isSafeNonNegativeInteger(value)) {
 		return invalidTerminalRequest();
 	}
 	return value;
@@ -144,71 +220,6 @@ function frozenImmediate(value: unknown): boolean {
 		return invalidTerminalRequest();
 	}
 	return value;
-}
-
-/**
- * Validates and snapshots an own-data `Uint8Array` the exact way
- * `backup-codec.ts`'s `backupContentSnapshot` does (typed-array-prototype
- * descriptor reads rather than direct property access, so a Proxy or
- * poisoned-prototype value cannot lie about its own length/backing buffer).
- * Rejects anything that is not a genuine, non-detached `Uint8Array`.
- */
-function terminalInputSnapshot(value: unknown): Uint8Array {
-	let buffer: ArrayBuffer;
-	let byteLength: number;
-	let byteOffset: number;
-	try {
-		if (
-			typeof value !== "object" ||
-			value === null ||
-			Object.getPrototypeOf(value) !== Uint8Array.prototype ||
-			typedArrayBufferGetter === undefined ||
-			typedArrayByteLengthGetter === undefined ||
-			typedArrayByteOffsetGetter === undefined ||
-			arrayBufferByteLengthGetter === undefined
-		) {
-			return invalidTerminalRequest();
-		}
-		buffer = Reflect.apply(typedArrayBufferGetter, value, []) as ArrayBuffer;
-		byteLength = Reflect.apply(typedArrayByteLengthGetter, value, []) as number;
-		byteOffset = Reflect.apply(typedArrayByteOffsetGetter, value, []) as number;
-		if (
-			Object.getPrototypeOf(buffer) !== ArrayBuffer.prototype ||
-			!Number.isSafeInteger(byteLength) ||
-			byteLength < 0 ||
-			!Number.isSafeInteger(byteOffset) ||
-			byteOffset < 0
-		) {
-			return invalidTerminalRequest();
-		}
-		const bufferByteLength = Reflect.apply(
-			arrayBufferByteLengthGetter,
-			buffer,
-			[],
-		) as number;
-		if (
-			!Number.isSafeInteger(bufferByteLength) ||
-			byteOffset + byteLength > bufferByteLength
-		) {
-			return invalidTerminalRequest();
-		}
-		// A zero-length detached ArrayBuffer otherwise looks identical to a
-		// valid empty view through the length getters.
-		Reflect.apply(arrayBufferSlice, buffer, [0, 0]);
-	} catch {
-		return invalidTerminalRequest();
-	}
-
-	if (byteLength > MAX_TERMINAL_INPUT_BYTES) {
-		return invalidTerminalRequest();
-	}
-	try {
-		const snapshot = new Uint8Array(byteLength);
-		Reflect.apply(typedArraySet, snapshot, [value, 0]);
-		return snapshot;
-	} catch {
-		return invalidTerminalRequest();
-	}
 }
 
 /**
@@ -230,23 +241,78 @@ export function frozenTerminalStartRequest(
 }
 
 /**
- * Validates a `terminal_input` request and produces the exact wire shape
- * `TerminalInputRequest::data: Vec<u8>` expects today: a dense JSON
- * `number[]` (see `src-tauri/src/terminal/dto.rs`'s module doc — this is the
- * one placeholder encoding this slice deliberately leaves as-is, since input
- * volume/frequency is nowhere near the streamed-output side this slice's
- * transport-efficiency evaluation was about; see this slice's final report).
+ * Validates a `terminal_input_text` request: raw text (an IME composition
+ * commit, or a pasted block) written to the pty as its own UTF-8 bytes.
  */
-export function frozenTerminalInputRequest(
+export function frozenTerminalInputTextRequest(
 	sessionId: unknown,
-	data: unknown,
-): Readonly<{ sessionId: string; data: readonly number[] }> {
+	text: unknown,
+): Readonly<{ sessionId: string; text: string }> {
 	const validSessionId = frozenSessionId(sessionId);
-	const snapshot = terminalInputSnapshot(data);
+	if (
+		typeof text !== "string" ||
+		utf8ByteLength(text) > MAX_TERMINAL_INPUT_BYTES
+	) {
+		return invalidTerminalRequest();
+	}
+	return Object.freeze({ sessionId: validSessionId, text });
+}
+
+/**
+ * Validates a `terminal_input_key` request. `action`/`key` are the literal
+ * `libghostty_vt::key::{Action,Key}` `#[repr(u32)]` enum discriminant
+ * values — this codec only checks they are in-range `u32`s, not that they
+ * name a currently-defined variant (Rust's own `TryFrom` is the
+ * authoritative check for that; duplicating its ~180-variant vocabulary
+ * here would be pure churn for no additional safety, since an out-of-range
+ * value is rejected by Rust either way). `mods` is a `u16` bitmask.
+ */
+export function frozenTerminalInputKeyRequest(
+	sessionId: unknown,
+	action: unknown,
+	key: unknown,
+	mods: unknown,
+	utf8: unknown,
+): Readonly<{
+	sessionId: string;
+	action: number;
+	key: number;
+	mods: number;
+	utf8: string | null;
+}> {
+	const validSessionId = frozenSessionId(sessionId);
+	const validAction = frozenU32(action);
+	const validKey = frozenU32(key);
+	const validMods = frozenU16(mods);
+	let validUtf8: string | null;
+	if (utf8 === null || utf8 === undefined) {
+		validUtf8 = null;
+	} else if (
+		typeof utf8 === "string" &&
+		utf8ByteLength(utf8) <= MAX_TERMINAL_KEY_UTF8_BYTES
+	) {
+		validUtf8 = utf8;
+	} else {
+		return invalidTerminalRequest();
+	}
 	return Object.freeze({
 		sessionId: validSessionId,
-		data: Object.freeze(Array.from(snapshot)),
+		action: validAction,
+		key: validKey,
+		mods: validMods,
+		utf8: validUtf8,
 	});
+}
+
+export function frozenTerminalFocusRequest(
+	sessionId: unknown,
+	focused: unknown,
+): Readonly<{ sessionId: string; focused: boolean }> {
+	const validSessionId = frozenSessionId(sessionId);
+	if (typeof focused !== "boolean") {
+		return invalidTerminalRequest();
+	}
+	return Object.freeze({ sessionId: validSessionId, focused });
 }
 
 export function frozenTerminalResizeRequest(
@@ -261,13 +327,19 @@ export function frozenTerminalResizeRequest(
 	});
 }
 
+/**
+ * Validates a `terminal_ack` request. `sequence` acknowledges every
+ * `plain://terminal-data` frame up through it — **not** a byte count (see
+ * `src-tauri/src/terminal/dto.rs`'s `TerminalAckRequest` doc comment for
+ * why this changed from S2's `byteCount`).
+ */
 export function frozenTerminalAckRequest(
 	sessionId: unknown,
-	byteCount: unknown,
-): Readonly<{ sessionId: string; byteCount: number }> {
+	sequence: unknown,
+): Readonly<{ sessionId: string; sequence: number }> {
 	return Object.freeze({
 		sessionId: frozenSessionId(sessionId),
-		byteCount: frozenByteCount(byteCount),
+		sequence: frozenSequence(sequence),
 	});
 }
 
@@ -279,6 +351,27 @@ export function frozenTerminalKillRequest(
 		sessionId: frozenSessionId(sessionId),
 		immediate: frozenImmediate(immediate),
 	});
+}
+
+/** Validates a `terminal_scrollback` request. */
+export function frozenTerminalScrollbackRequest(
+	sessionId: unknown,
+	start: unknown,
+	count: unknown,
+): Readonly<{ sessionId: string; start: number; count: number }> {
+	const validSessionId = frozenSessionId(sessionId);
+	if (!isSafeNonNegativeInteger(start)) {
+		return invalidTerminalRequest();
+	}
+	if (
+		typeof count !== "number" ||
+		!Number.isSafeInteger(count) ||
+		count <= 0 ||
+		count > MAX_TERMINAL_SCROLLBACK_REQUEST_ROWS
+	) {
+		return invalidTerminalRequest();
+	}
+	return Object.freeze({ sessionId: validSessionId, start, count });
 }
 
 /**
@@ -300,60 +393,315 @@ export function decodeTerminalStartResult(value: unknown): TerminalStartResult {
 	return Object.freeze({ sessionId: value.sessionId });
 }
 
-/** Decodes the `void` (JSON `null`) result of `terminal_input`/
- * `terminal_resize`/`terminal_ack`/`terminal_kill`. */
+/** Decodes the `void` (JSON `null`) result of `terminal_input_text`/
+ * `terminal_input_key`/`terminal_focus`/`terminal_resize`/`terminal_ack`/
+ * `terminal_kill`. */
 export function decodeTerminalVoid(value: unknown): void {
 	if (value !== null) {
 		violation();
 	}
 }
 
-function decodeBase64Bytes(value: unknown): Uint8Array {
-	if (
-		typeof value !== "string" ||
-		value.length > MAX_TERMINAL_DATA_BASE64_LENGTH ||
-		value.length % 4 !== 0 ||
-		!BASE64_PATTERN.test(value)
-	) {
+const UNDERLINE_VALUES: readonly TerminalUnderline[] = Object.freeze([
+	"none",
+	"single",
+	"double",
+	"curly",
+	"dotted",
+	"dashed",
+]);
+const CURSOR_STYLE_VALUES: readonly TerminalCursorStyle[] = Object.freeze([
+	"bar",
+	"block",
+	"underline",
+	"blockHollow",
+]);
+const DIRTY_VALUES: readonly TerminalDirty[] = Object.freeze([
+	"clean",
+	"partial",
+	"full",
+]);
+
+function isOneOf<T extends string>(
+	value: unknown,
+	allowed: readonly T[],
+): value is T {
+	return (
+		typeof value === "string" && (allowed as readonly string[]).includes(value)
+	);
+}
+
+function isByteValue(value: unknown): value is number {
+	return (
+		typeof value === "number" &&
+		Number.isInteger(value) &&
+		value >= 0 &&
+		value <= 255
+	);
+}
+
+function decodeRgb(value: unknown): TerminalRgb {
+	if (!isPlainObject(value) || !hasExactKeys(value, ["r", "g", "b"])) {
 		return violation();
 	}
-	let binary: string;
+	if (!isByteValue(value.r) || !isByteValue(value.g) || !isByteValue(value.b)) {
+		return violation();
+	}
 	try {
-		binary = atob(value);
+		rejectProxyObject(value);
 	} catch {
 		return violation();
 	}
-	const bytes = new Uint8Array(binary.length);
-	for (let index = 0; index < binary.length; index += 1) {
-		bytes[index] = binary.charCodeAt(index);
+	return Object.freeze({ r: value.r, g: value.g, b: value.b });
+}
+
+function decodeNullableRgb(value: unknown): TerminalRgb | null {
+	if (value === null) {
+		return null;
 	}
-	return bytes;
+	return decodeRgb(value);
+}
+
+function decodeUnderline(value: unknown): TerminalUnderline {
+	if (!isOneOf(value, UNDERLINE_VALUES)) {
+		return violation();
+	}
+	return value;
+}
+
+const STYLE_BOOLEAN_KEYS = Object.freeze([
+	"bold",
+	"italic",
+	"faint",
+	"blink",
+	"inverse",
+	"invisible",
+	"strikethrough",
+	"overline",
+] as const);
+
+function decodeStyle(value: unknown): TerminalStyle {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, [...STYLE_BOOLEAN_KEYS, "underline"])
+	) {
+		return violation();
+	}
+	for (const key of STYLE_BOOLEAN_KEYS) {
+		if (typeof value[key] !== "boolean") {
+			return violation();
+		}
+	}
+	const underline = decodeUnderline(value.underline);
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze({
+		bold: value.bold as boolean,
+		italic: value.italic as boolean,
+		faint: value.faint as boolean,
+		blink: value.blink as boolean,
+		inverse: value.inverse as boolean,
+		invisible: value.invisible as boolean,
+		strikethrough: value.strikethrough as boolean,
+		overline: value.overline as boolean,
+		underline,
+	});
+}
+
+function decodeCell(value: unknown): TerminalCell {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, ["graphemes", "fg", "bg", "style"])
+	) {
+		return violation();
+	}
+	if (typeof value.graphemes !== "string") {
+		return violation();
+	}
+	const fg = decodeNullableRgb(value.fg);
+	const bg = decodeNullableRgb(value.bg);
+	const style = decodeStyle(value.style);
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze({ graphemes: value.graphemes, fg, bg, style });
+}
+
+function decodeRow(value: unknown): TerminalRow {
+	if (!isPlainObject(value) || !hasExactKeys(value, ["rowIndex", "cells"])) {
+		return violation();
+	}
+	if (!isSafeNonNegativeInteger(value.rowIndex)) {
+		return violation();
+	}
+	const cells = ownObjectArraySnapshot(
+		value.cells,
+		MAX_TERMINAL_CELLS_PER_ROW,
+		decodeCell,
+	);
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze({ rowIndex: value.rowIndex, cells });
+}
+
+function decodeCursorViewport(value: unknown): TerminalCursorViewport {
+	if (!isPlainObject(value) || !hasExactKeys(value, ["x", "y", "atWideTail"])) {
+		return violation();
+	}
+	if (
+		!isSafeNonNegativeInteger(value.x) ||
+		!isSafeNonNegativeInteger(value.y)
+	) {
+		return violation();
+	}
+	if (typeof value.atWideTail !== "boolean") {
+		return violation();
+	}
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze({
+		x: value.x,
+		y: value.y,
+		atWideTail: value.atWideTail,
+	});
+}
+
+function decodeCursor(value: unknown): TerminalCursor {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, ["visible", "blinking", "viewport", "style"])
+	) {
+		return violation();
+	}
+	if (
+		typeof value.visible !== "boolean" ||
+		typeof value.blinking !== "boolean"
+	) {
+		return violation();
+	}
+	const viewport =
+		value.viewport === null ? null : decodeCursorViewport(value.viewport);
+	if (!isOneOf(value.style, CURSOR_STYLE_VALUES)) {
+		return violation();
+	}
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze({
+		visible: value.visible,
+		blinking: value.blinking,
+		viewport,
+		style: value.style,
+	});
+}
+
+function decodeColors(value: unknown): TerminalColors {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, ["background", "foreground", "cursor"])
+	) {
+		return violation();
+	}
+	const background = decodeRgb(value.background);
+	const foreground = decodeRgb(value.foreground);
+	const cursor = decodeNullableRgb(value.cursor);
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze({ background, foreground, cursor });
+}
+
+function decodeFrame(value: unknown): TerminalFrame {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, [
+			"dirty",
+			"cols",
+			"rows",
+			"cursor",
+			"colors",
+			"rowsData",
+		])
+	) {
+		return violation();
+	}
+	if (!isOneOf(value.dirty, DIRTY_VALUES)) {
+		return violation();
+	}
+	const cols = frozenDimensionForDecode(value.cols);
+	const rows = frozenDimensionForDecode(value.rows);
+	const cursor = decodeCursor(value.cursor);
+	const colors = decodeColors(value.colors);
+	const rowsData = ownObjectArraySnapshot(
+		value.rowsData,
+		MAX_TERMINAL_ROWS_PER_FRAME,
+		decodeRow,
+	);
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze({
+		dirty: value.dirty,
+		cols,
+		rows,
+		cursor,
+		colors,
+		rowsData,
+	});
+}
+
+/** Same dimension bound as request-side validation, but reports a decode
+ * `violation()` (an untrusted-response contract break) rather than an
+ * `INVALID_TERMINAL_REQUEST` (an outgoing-request rejection) — the two
+ * error shapes this file distinguishes throughout. */
+function frozenDimensionForDecode(value: unknown): number {
+	if (
+		typeof value !== "number" ||
+		!Number.isSafeInteger(value) ||
+		value <= 0 ||
+		value > MAX_TERMINAL_DIMENSION
+	) {
+		return violation();
+	}
+	return value;
 }
 
 /**
  * Decodes a `plain://terminal-data` event payload: an own-data, exactly
- * `{ sessionId, sequence, bytes }` object, `bytes` base64-decoded into a
- * fresh `Uint8Array` snapshot — see `TerminalDataEvent`'s doc comment in
- * `contracts.ts` for why base64 rather than `ArrayBuffer`/`number[]`.
+ * `{ sessionId, sequence, frame }` object, `frame` recursively validated
+ * field-by-field (see `decodeFrame`).
  */
 export function decodeTerminalDataEvent(value: unknown): TerminalDataEvent {
 	if (
 		!isPlainObject(value) ||
-		!hasExactKeys(value, ["sessionId", "sequence", "bytes"])
+		!hasExactKeys(value, ["sessionId", "sequence", "frame"])
 	) {
 		return violation();
 	}
 	if (!isUuidV4(value.sessionId)) {
 		return violation();
 	}
-	if (
-		typeof value.sequence !== "number" ||
-		!Number.isSafeInteger(value.sequence) ||
-		value.sequence < 0
-	) {
+	if (!isSafeNonNegativeInteger(value.sequence)) {
 		return violation();
 	}
-	const bytes = decodeBase64Bytes(value.bytes);
+	const frame = decodeFrame(value.frame);
 	try {
 		rejectProxyObject(value);
 	} catch {
@@ -362,35 +710,32 @@ export function decodeTerminalDataEvent(value: unknown): TerminalDataEvent {
 	return Object.freeze({
 		sessionId: value.sessionId,
 		sequence: value.sequence,
-		bytes,
+		frame,
 	});
 }
 
 /**
- * Builds a frozen `TerminalDataEvent` directly from an already-`Uint8Array`
- * payload, for the browser mock — which has no wire boundary to round-trip
- * through (there is no base64 layer to encode into and back out of, unlike
- * `TerminalDataEvent.bytes`'s real transport). Mirrors
- * `search-codec.ts`'s `frozenWorkspaceSearchFilesResult`'s own
- * "for-the-mock, skips the wire encoding" precedent.
+ * Builds a frozen `TerminalDataEvent` directly from an already-shaped
+ * `frame` value, for the browser mock — which has no wire boundary to
+ * round-trip through. Reuses `decodeFrame`'s exact validation (so a mock
+ * bug that produces a malformed frame fails loudly, the same as a real
+ * malformed wire payload would), mirroring `search-codec.ts`'s
+ * `frozenWorkspaceSearchFilesResult`'s own "for-the-mock, skips the wire
+ * encoding" precedent.
  */
 export function frozenTerminalDataEvent(
 	sessionId: unknown,
 	sequence: unknown,
-	bytes: unknown,
+	frame: unknown,
 ): TerminalDataEvent {
 	if (!isUuidV4(sessionId)) {
 		return violation();
 	}
-	if (
-		typeof sequence !== "number" ||
-		!Number.isSafeInteger(sequence) ||
-		sequence < 0
-	) {
+	if (!isSafeNonNegativeInteger(sequence)) {
 		return violation();
 	}
-	const snapshot = terminalInputSnapshot(bytes);
-	return Object.freeze({ sessionId, sequence, bytes: snapshot });
+	const decodedFrame = decodeFrame(frame);
+	return Object.freeze({ sessionId, sequence, frame: decodedFrame });
 }
 
 /**
@@ -447,6 +792,62 @@ export function decodeTerminalExitEvent(value: unknown): TerminalExitEvent {
 		sessionId: value.sessionId,
 		exitCode: value.exitCode,
 	});
+}
+
+function decodeScrollbackCell(value: unknown): TerminalScrollbackCell {
+	if (!isPlainObject(value) || !hasExactKeys(value, ["graphemes", "style"])) {
+		return violation();
+	}
+	if (typeof value.graphemes !== "string") {
+		return violation();
+	}
+	const style = decodeStyle(value.style);
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze({ graphemes: value.graphemes, style });
+}
+
+function decodeScrollbackRow(value: unknown): TerminalScrollbackRow {
+	if (!isPlainObject(value) || !hasExactKeys(value, ["rowIndex", "cells"])) {
+		return violation();
+	}
+	if (!isSafeNonNegativeInteger(value.rowIndex)) {
+		return violation();
+	}
+	const cells = ownObjectArraySnapshot(
+		value.cells,
+		MAX_TERMINAL_CELLS_PER_ROW,
+		decodeScrollbackCell,
+	);
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze({ rowIndex: value.rowIndex, cells });
+}
+
+/** Decodes a `terminal_scrollback` response. */
+export function decodeTerminalScrollbackResult(
+	value: unknown,
+): TerminalScrollbackResult {
+	if (!isPlainObject(value) || !hasExactKeys(value, ["rows"])) {
+		return violation();
+	}
+	const rows = ownObjectArraySnapshot(
+		value.rows,
+		MAX_TERMINAL_SCROLLBACK_REQUEST_ROWS,
+		decodeScrollbackRow,
+	);
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze({ rows });
 }
 
 /**

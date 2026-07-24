@@ -8688,8 +8688,8 @@ describe("Plain F070 S2 terminal IPC bridge Harness", () => {
 	it("fails if TerminalDataEvent gains an extra field", () => {
 		const widened = withMutatedRust("src-tauri/src/terminal/dto.rs", (source) =>
 			source.replace(
-				"pub struct TerminalDataEvent {\n    session_id: TerminalSessionId,\n    sequence: u64,\n    bytes: String,\n}",
-				"pub struct TerminalDataEvent {\n    session_id: TerminalSessionId,\n    sequence: u64,\n    bytes: String,\n    extra: bool,\n}",
+				"pub struct TerminalDataEvent {\n    session_id: TerminalSessionId,\n    sequence: u64,\n    frame: TerminalFrame,\n}",
+				"pub struct TerminalDataEvent {\n    session_id: TerminalSessionId,\n    sequence: u64,\n    frame: TerminalFrame,\n    extra: bool,\n}",
 			),
 		);
 		expect(
@@ -8729,7 +8729,7 @@ describe("Plain F070 S2 terminal IPC bridge Harness", () => {
 		);
 	});
 
-	it("fails if WindowEmitSink::emit_chunk stops targeting the session's own window or double-emits", () => {
+	it("fails if WindowEmitSink::emit_frame stops targeting the session's own window or double-emits", () => {
 		const wrongTarget = withMutatedRust(
 			"src-tauri/src/terminal/commands.rs",
 			(source) =>
@@ -8741,21 +8741,21 @@ describe("Plain F070 S2 terminal IPC bridge Harness", () => {
 		expect(
 			validateTerminalIpcBridgeBoundary(wrongTarget, baselineBridgeAppSources),
 		).toContain(
-			"WindowEmitSink::emit_chunk must emit_to exactly one window-targeted TerminalDataEvent built from the chunk it was given",
+			"WindowEmitSink::emit_frame must emit_to exactly one window-targeted TerminalDataEvent built from the frame it was given",
 		);
 
 		const doubleEmit = withMutatedRust(
 			"src-tauri/src/terminal/commands.rs",
 			(source) =>
 				source.replace(
-					"TerminalDataEvent::new(session_id, chunk.sequence, &chunk.bytes),\n        );\n    }",
-					"TerminalDataEvent::new(session_id, chunk.sequence, &chunk.bytes),\n        );\n        let _ = self.app.emit_to(\n            EventTarget::webview_window(self.window_label.clone()),\n            TERMINAL_DATA_EVENT,\n            TerminalDataEvent::new(session_id, chunk.sequence, &chunk.bytes),\n        );\n    }",
+					"TerminalDataEvent::new(session_id, sequence, frame),\n        );\n    }",
+					"TerminalDataEvent::new(session_id, sequence, frame),\n        );\n        let _ = self.app.emit_to(\n            EventTarget::webview_window(self.window_label.clone()),\n            TERMINAL_DATA_EVENT,\n            TerminalDataEvent::new(session_id, sequence, frame),\n        );\n    }",
 				),
 		);
 		expect(
 			validateTerminalIpcBridgeBoundary(doubleEmit, baselineBridgeAppSources),
 		).toContain(
-			"WindowEmitSink::emit_chunk must emit_to exactly one window-targeted TerminalDataEvent built from the chunk it was given",
+			"WindowEmitSink::emit_frame must emit_to exactly one window-targeted TerminalDataEvent built from the frame it was given",
 		);
 	});
 
@@ -8803,11 +8803,11 @@ describe("Plain F070 S2 terminal IPC bridge Harness", () => {
 		expect(
 			validateTerminalIpcBridgeBoundary(baselineBridgeRustSources, mutated),
 		).toContain(
-			"PlainBridge must expose exactly the ten audited terminal/trust methods, no more and no fewer",
+			"PlainBridge must expose exactly the thirteen audited terminal/trust methods, no more and no fewer",
 		);
 	});
 
-	it("fails if PlainBridge gains an extra terminal-shaped method beyond the audited ten", () => {
+	it("fails if PlainBridge gains an extra terminal-shaped method beyond the audited thirteen", () => {
 		const mutated = withMutatedApp(
 			"app/platform/tauri/contracts.ts",
 			(source) =>
@@ -8817,7 +8817,7 @@ describe("Plain F070 S2 terminal IPC bridge Harness", () => {
 				),
 		);
 		// `terminalDestroy` is outside the audited name list, so the filtered
-		// member count still equals ten — this mutation is only observable
+		// member count still equals thirteen — this mutation is only observable
 		// because it does not change any *audited* name's presence, proving
 		// the check keys on the fixed name list rather than merely counting
 		// terminal-prefixed members. Assert the passing baseline is
@@ -8838,7 +8838,7 @@ describe("Plain F070 S2 terminal IPC bridge Harness", () => {
 		expect(
 			validateTerminalIpcBridgeBoundary(baselineBridgeRustSources, renamed),
 		).toContain(
-			"PlainBridge must expose exactly the ten audited terminal/trust methods, no more and no fewer",
+			"PlainBridge must expose exactly the thirteen audited terminal/trust methods, no more and no fewer",
 		);
 	});
 
@@ -8847,8 +8847,8 @@ describe("Plain F070 S2 terminal IPC bridge Harness", () => {
 			"app/platform/tauri/terminal-codec.ts",
 			(source) =>
 				source.replace(
-					"\treturn Object.freeze({\n\t\tsessionId: value.sessionId,\n\t\tsequence: value.sequence,\n\t\tbytes,\n\t});",
-					"\treturn {\n\t\tsessionId: value.sessionId,\n\t\tsequence: value.sequence,\n\t\tbytes,\n\t};",
+					"\treturn Object.freeze({\n\t\tsessionId: value.sessionId,\n\t\tsequence: value.sequence,\n\t\tframe,\n\t});",
+					"\treturn {\n\t\tsessionId: value.sessionId,\n\t\tsequence: value.sequence,\n\t\tframe,\n\t};",
 				),
 		);
 		expect(

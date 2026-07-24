@@ -69,14 +69,18 @@ import {
 import {
 	decodeTerminalDataEvent,
 	decodeTerminalExitEvent,
+	decodeTerminalScrollbackResult,
 	decodeTerminalStartResult,
 	decodeTerminalVoid,
 	decodeWorkspaceTrustState,
 	decodeWorkspaceTrustVoid,
 	frozenTerminalAckRequest,
-	frozenTerminalInputRequest,
+	frozenTerminalFocusRequest,
+	frozenTerminalInputKeyRequest,
+	frozenTerminalInputTextRequest,
 	frozenTerminalKillRequest,
 	frozenTerminalResizeRequest,
+	frozenTerminalScrollbackRequest,
 	frozenTerminalStartRequest,
 } from "./terminal-codec";
 
@@ -399,17 +403,41 @@ export function createNativeBridge(): PlainBridge {
 				await invoke<unknown>("terminal_start", { request }),
 			);
 		},
-		terminalInput: async (sessionId, data) => {
-			const request = frozenTerminalInputRequest(sessionId, data);
-			decodeTerminalVoid(await invoke<unknown>("terminal_input", { request }));
+		terminalInputText: async (sessionId, text) => {
+			const request = frozenTerminalInputTextRequest(sessionId, text);
+			decodeTerminalVoid(
+				await invoke<unknown>("terminal_input_text", { request }),
+			);
+		},
+		terminalInputKey: async (sessionId, action, key, mods, utf8) => {
+			const request = frozenTerminalInputKeyRequest(
+				sessionId,
+				action,
+				key,
+				mods,
+				utf8,
+			);
+			decodeTerminalVoid(
+				await invoke<unknown>("terminal_input_key", { request }),
+			);
+		},
+		terminalFocus: async (sessionId, focused) => {
+			const request = frozenTerminalFocusRequest(sessionId, focused);
+			decodeTerminalVoid(await invoke<unknown>("terminal_focus", { request }));
 		},
 		terminalResize: async (sessionId, cols, rows) => {
 			const request = frozenTerminalResizeRequest(sessionId, cols, rows);
 			decodeTerminalVoid(await invoke<unknown>("terminal_resize", { request }));
 		},
-		terminalAck: async (sessionId, byteCount) => {
-			const request = frozenTerminalAckRequest(sessionId, byteCount);
+		terminalAck: async (sessionId, sequence) => {
+			const request = frozenTerminalAckRequest(sessionId, sequence);
 			decodeTerminalVoid(await invoke<unknown>("terminal_ack", { request }));
+		},
+		terminalScrollback: async (sessionId, start, count) => {
+			const request = frozenTerminalScrollbackRequest(sessionId, start, count);
+			return decodeTerminalScrollbackResult(
+				await invoke<unknown>("terminal_scrollback", { request }),
+			);
 		},
 		terminalKill: async (sessionId, immediate) => {
 			const request = frozenTerminalKillRequest(sessionId, immediate);

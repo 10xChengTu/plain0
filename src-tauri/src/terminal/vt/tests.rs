@@ -348,3 +348,82 @@ fn focus_gained_and_lost_encode_to_csi_i_and_csi_o() {
         b"\x1b[O"
     );
 }
+
+/// Documents a real, empirically-verified behavior discovered while
+/// implementing F070's "IPC 改造" slice's `terminal_scrollback` command:
+/// [`TERMINAL_VT_MAX_SCROLLBACK_LINES`] is an *upper bound* Ghostty accepts
+/// at construction, not a guarantee that exactly that many lines survive.
+/// Feeding 3,000 unique, fully-styled-width lines (far under the configured
+/// 10,000-line cap) into an 80x24 session and asking for every retained
+/// scrollback row back reliably returns *far fewer than 3,000* — this
+/// crate's own scrollback storage appears to be governed by an internal
+/// memory/page budget rather than a literal per-row count, so wider/more
+/// distinct-content rows are retained in smaller quantity than blank or
+/// highly-repetitive ones would be. This test does not assert an exact
+/// count (that number is an implementation detail of the vendored Ghostty
+/// build, not a contract this module makes) — only the properties this
+/// module's own callers can actually rely on: retention never exceeds the
+/// configured cap, whatever is retained is contiguous and in the correct
+/// order, and the oldest lines are what get evicted first (never the
+/// newest). See `terminal::service::tests`' throughput test for how a
+/// caller-level consumer accounts for this instead of assuming unbounded
+/// retention.
+#[test]
+fn scrollback_retention_is_bounded_by_an_internal_budget_not_only_the_configured_line_cap() {
+    let mut session = VtSession::new(80, 24).unwrap();
+    let fed_lines = 3_000_u32;
+    for i in 0..fed_lines {
+        session
+            .feed(format!("line-{i:04}-0123456789012345678901234567890123456789\r\n").as_bytes());
+    }
+    let rows = session
+        .scrollback_rows(0, TERMINAL_VT_MAX_SCROLLBACK_LINES)
+        .unwrap();
+
+    assert!(
+        !rows.is_empty(),
+        "some scrollback should have been retained"
+    );
+    assert!(
+        rows.len() < fed_lines as usize,
+        "retention must never exceed what was actually fed"
+    );
+    assert!(
+        rows.len() <= TERMINAL_VT_MAX_SCROLLBACK_LINES,
+        "retention must never exceed the configured cap"
+    );
+
+    // Whatever is retained must be a contiguous, correctly-ordered *suffix*
+    // of the fed lines (the oldest lines are what get evicted, never a gap
+    // in the middle or the newest content).
+    let first_index: u32 = {
+        let text: String = rows[0]
+            .cells
+            .iter()
+            .flat_map(|cell| cell.graphemes.iter())
+            .collect();
+        text.strip_prefix("line-")
+            .and_then(|rest| rest.get(0..4))
+            .and_then(|digits| digits.parse().ok())
+            .expect("retained row text starts with a parseable line index")
+    };
+    for (offset, row) in rows.iter().enumerate() {
+        let expected = format!("line-{:04}-", first_index + offset as u32);
+        let text: String = row
+            .cells
+            .iter()
+            .flat_map(|cell| cell.graphemes.iter())
+            .collect();
+        assert!(
+            text.starts_with(&expected),
+            "retained scrollback rows must be contiguous and in order: expected prefix {expected:?}, got {text:?}"
+        );
+    }
+    // The viewport itself (not queried here) holds the final 23 content
+    // lines plus one trailing blank row (the cursor's new, not-yet-written
+    // line after the last fed `\r\n`) — 24 rows total, matching the
+    // session's configured height — so the last retained scrollback row
+    // must be exactly the line just before those final 23.
+    let last_index = first_index + rows.len() as u32 - 1;
+    assert_eq!(last_index, fed_lines - 23 - 1);
+}

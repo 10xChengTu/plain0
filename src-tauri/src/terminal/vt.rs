@@ -19,9 +19,9 @@
 //! `key::Encoder`, `key::Event`, `mouse::Encoder`, `mouse::Event`, ...) is
 //! neither `Send` nor `Sync`. The Rust compiler enforces this for us — none
 //! of these types can be stored in the `Send + Sync` `Arc<TerminalSession>`
-//! that `service.rs` shares across its reader/delivery/waiter/vt threads, and
-//! none can be moved into a closure that runs on a different thread than the
-//! one that created them.
+//! that `service.rs` shares across its reader/waiter/vt threads, and none can
+//! be moved into a closure that runs on a different thread than the one that
+//! created them.
 //!
 //! [`VtSession`] is therefore designed to live entirely on one thread: in
 //! production that is `service.rs`'s dedicated per-session **vt** thread — a
@@ -49,14 +49,14 @@
 //! cross threads. What they cannot safely do is stay synchronized with a
 //! *live* `Terminal`'s modes (e.g. DECCKM cursor-key-application, Kitty
 //! keyboard flags) the way `key::Encoder::set_options_from_terminal` would,
-//! because that terminal only exists on the vt thread. This slice accepts an
-//! explicit, plain-data `KeyEncodeModes`/`MouseEncodeModes` snapshot instead
-//! of a live `&Terminal` for exactly this reason: a later slice wiring real
-//! `terminal_input` IPC can have the vt thread publish a small `Copy` modes
-//! snapshot (mirroring how `DirtyFrame` is published) for the IPC command's
-//! thread to read and pass in here, without the two
-//! non-`Send` object graphs (encoder, terminal) ever touching each other
-//! across threads.
+//! because that terminal only exists on the vt thread. This module therefore
+//! accepts an explicit, plain-data `KeyEncodeModes`/`MouseEncodeModes`
+//! snapshot instead of a live `&Terminal`: `service.rs`'s vt thread answers a
+//! `VtCommand::ModesRequest` by publishing a [`TerminalModesSnapshot`] (a
+//! small `Copy` struct, mirroring how `DirtyFrame` is published) for the
+//! `terminal_input_key`/`terminal_focus` command's own thread to read and
+//! pass in here, without the two non-`Send` object graphs (encoder,
+//! terminal) ever touching each other across threads.
 //!
 //! # Dirty tracking
 //!
@@ -84,20 +84,32 @@
 //! (bounded by [`TERMINAL_VT_MAX_SCROLLBACK_LINES`], configured at
 //! construction) and is never part of [`DirtyFrame`], which only ever
 //! describes the current viewport. [`VtSession::scrollback_rows`] is the
-//! on-demand "pull" counterpart for content above the viewport — a caller
-//! (a future slice's `terminal_scrollback` IPC command, say) asks for a
-//! specific range of history rows only when it actually needs to render
-//! them (e.g. the user scrolled up), rather than this module ever pushing
-//! scrollback content unprompted. No caller wires this to IPC yet in this
-//! slice; it exists as a tested, working interface for that later slice to
-//! call into.
+//! on-demand "pull" counterpart for content above the viewport — the
+//! `terminal_scrollback` IPC command asks for a specific range of history
+//! rows only when it actually needs to render them (e.g. the user scrolled
+//! up), rather than this module ever pushing scrollback content unprompted.
+//!
+//! **`TERMINAL_VT_MAX_SCROLLBACK_LINES` is an upper bound, not a guarantee**
+//! — this module's own test
+//! (`scrollback_retention_is_bounded_by_an_internal_budget_not_only_the_configured_line_cap`)
+//! empirically verified that feeding far fewer lines than the configured cap
+//! (3,000 unique, fully-styled-width lines against a 10,000-line cap) still
+//! evicts the oldest ones once retained content grows large enough:
+//! `libghostty-vt`'s scrollback storage appears to be governed by an
+//! internal memory/page budget rather than a literal per-row count, so
+//! wider/more visually distinct rows are retained in smaller quantity than
+//! blank or highly-repetitive ones would be. Any caller pulling scrollback
+//! at scale (see `terminal::service::tests`' own throughput test) must treat
+//! "the oldest requested rows may already be gone" as a normal outcome, not
+//! an error — exactly as [`VtSession::scrollback_rows`]'s own doc already
+//! describes for a `start` that runs off the end.
 
 use libghostty_vt::render::{
     CellIterator, Colors, CursorViewport, CursorVisualStyle, Dirty, RowIterator, Snapshot,
 };
 use libghostty_vt::screen::GridRef;
 use libghostty_vt::style::{RgbColor, Style};
-use libghostty_vt::terminal::{Options as TerminalOptions, Point, PointCoordinate};
+use libghostty_vt::terminal::{Mode, Options as TerminalOptions, Point, PointCoordinate};
 use libghostty_vt::{focus, key, mouse};
 use libghostty_vt::{Error as VtFfiError, RenderState, Terminal};
 
@@ -211,13 +223,11 @@ impl VtSession {
     /// Resizes the terminal, and guarantees the next [`Self::dirty_frame`]
     /// call reports a full-frame redraw (see the module doc).
     ///
-    /// Not yet called from `service.rs`'s production reader thread — see the
-    /// module doc's "Thread safety" section for why hooking
-    /// `TerminalService::resize` up to a live session's `VtSession` needs a
-    /// cross-thread hand-off design of its own, deferred to F070's "IPC 改造"
-    /// slice alongside the rest of the input/IPC wiring. Fully covered by
-    /// this module's own tests in the meantime.
-    #[allow(dead_code)]
+    /// Called from `service.rs`'s vt thread in response to a
+    /// `VtCommand::Resize` hand-off from `TerminalService::resize` (F070's
+    /// "IPC 改造" slice) — the real pty master resize happens independently
+    /// (and unconditionally) in `service.rs`; this call only keeps the VT
+    /// mirror's own viewport in sync with it.
     pub(crate) fn resize(&mut self, cols: u16, rows: u16) -> Result<(), VtError> {
         if cols == 0 || rows == 0 {
             return Err(VtError::InvalidDimensions);
@@ -265,10 +275,10 @@ impl VtSession {
     /// [`libghostty_vt::style::StyleColor`]) and resolve colors themselves
     /// if/when needed.
     ///
-    /// No caller wires this to IPC yet — see the module doc's "Scrollback"
-    /// section: it exists as a tested, working interface for a later slice
-    /// (a `terminal_scrollback`-style command) to call into.
-    #[allow(dead_code)]
+    /// Called from `service.rs`'s vt thread in response to a
+    /// `VtCommand::ScrollbackRequest` (F070's "IPC 改造" slice's
+    /// `terminal_scrollback` command) — see the module doc's "Scrollback"
+    /// section.
     pub(crate) fn scrollback_rows(
         &self,
         start: usize,
@@ -297,6 +307,45 @@ impl VtSession {
         }
         Ok(rows)
     }
+
+    /// Reads every live terminal mode this domain's input encoders need —
+    /// see [`TerminalModesSnapshot`]'s doc. Called from `service.rs`'s vt
+    /// thread in response to a `VtCommand::ModesRequest` hand-off (F070's
+    /// "IPC 改造" slice): the requesting thread (whichever one is handling a
+    /// `terminal_input_key`/`terminal_focus` command) cannot read a live
+    /// `Terminal` itself (see the module doc's "Thread safety" section), so
+    /// it asks the vt thread for a plain-data snapshot instead, then calls
+    /// [`encode_key_event`]/[`encode_focus_event`] itself with that snapshot.
+    pub(crate) fn modes_snapshot(&self) -> TerminalModesSnapshot {
+        TerminalModesSnapshot {
+            key: KeyEncodeModes {
+                cursor_key_application: self.terminal.mode(Mode::DECCKM).unwrap_or(false),
+                keypad_key_application: self.terminal.mode(Mode::KEYPAD_KEYS).unwrap_or(false),
+                alt_esc_prefix: self.terminal.mode(Mode::ALT_ESC_PREFIX).unwrap_or(false),
+                kitty_flags: self
+                    .terminal
+                    .kitty_keyboard_flags()
+                    .unwrap_or(key::KittyKeyFlags::DISABLED),
+            },
+            focus_reporting_enabled: self.terminal.mode(Mode::FOCUS_EVENT).unwrap_or(false),
+        }
+    }
+}
+
+/// A snapshot of every live terminal mode this domain's input encoders need
+/// — the same four fields [`key::Encoder::set_options_from_terminal`] itself
+/// reads (see [`KeyEncodeModes`]'s doc), plus whether focus-reporting (DEC
+/// mode 1004) is currently enabled, which [`encode_focus_event`]'s caller
+/// needs in order to decide whether writing a focus escape sequence to the
+/// pty is meaningful for whatever program is currently running in it. Read
+/// from a live [`Terminal`] by [`VtSession::modes_snapshot`] — the vt thread
+/// is the only thread ever allowed to touch one (see the module doc) — and
+/// handed as plain `Copy` data to whichever thread is handling the input
+/// command that needs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TerminalModesSnapshot {
+    pub(crate) key: KeyEncodeModes,
+    pub(crate) focus_reporting_enabled: bool,
 }
 
 /// One cell's worth of owned, `Send`-safe render-state content — the base
@@ -343,10 +392,7 @@ pub(crate) struct DirtyFrame {
 }
 
 /// One scrollback row read via [`VtSession::scrollback_rows`]. See that
-/// method's doc for why this is lighter-weight than [`DirtyRow`], and for
-/// why `#[allow(dead_code)]` appears on this cluster (not yet wired to a
-/// production call site).
-#[allow(dead_code)]
+/// method's doc for why this is lighter-weight than [`DirtyRow`].
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ScrollbackRow {
     pub(crate) row_index: usize,
@@ -355,7 +401,6 @@ pub(crate) struct ScrollbackRow {
 
 /// One scrollback cell: see [`VtSession::scrollback_rows`]'s doc for why
 /// this omits resolved colors/selection that [`DirtyCell`] carries.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ScrollbackCell {
     pub(crate) graphemes: Vec<char>,
@@ -426,8 +471,7 @@ fn frame_from_snapshot<'alloc>(
 /// as needed — the same retry-on-`OutOfSpace` pattern
 /// `render::CellIteration::graphemes` uses internally, reimplemented here
 /// because [`GridRef`] only exposes the fixed-buffer variant. Only called
-/// from [`VtSession::scrollback_rows`], hence the same `allow(dead_code)`.
-#[allow(dead_code)]
+/// from [`VtSession::scrollback_rows`].
 fn read_grid_ref_graphemes(grid_ref: &GridRef<'_>) -> Result<Vec<char>, VtError> {
     let mut buf = vec!['\0'; 2];
     loop {
@@ -447,11 +491,8 @@ fn read_grid_ref_graphemes(grid_ref: &GridRef<'_>) -> Result<Vec<char>, VtError>
 /// safety" section for why. [`encode_key_event`] builds the real,
 /// thread-confined `key::Event`/`key::Encoder` from this internally.
 ///
-/// This whole key/mouse/focus encoding cluster (through
-/// [`encode_focus_event`] below) is exercised by this module's own tests
-/// but not yet called from any production IPC command — that wiring is
-/// F070's "IPC 改造" slice, per the module doc's "Thread safety" section.
-#[allow(dead_code)]
+/// Built by `terminal::commands::terminal_input_key` (F070's "IPC 改造"
+/// slice) from a `TerminalInputKeyRequest`'s validated fields.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct KeyInput {
     pub(crate) action: key::Action,
@@ -463,7 +504,6 @@ pub(crate) struct KeyInput {
     pub(crate) utf8: Option<String>,
 }
 
-#[allow(dead_code)]
 impl KeyInput {
     pub(crate) fn new(action: key::Action, key: key::Key, mods: key::Mods) -> Self {
         Self {
@@ -485,8 +525,8 @@ impl KeyInput {
 /// from a `Terminal` — plain `Copy` data so it can cross threads safely
 /// (see the module doc's "Thread safety" section). `Default` matches a
 /// terminal that has not enabled any of these modes, i.e. the state a
-/// freshly-created [`VtSession`] starts in.
-#[allow(dead_code)]
+/// freshly-created [`VtSession`] starts in. Populated for a *live* session
+/// via [`VtSession::modes_snapshot`] (part of [`TerminalModesSnapshot`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct KeyEncodeModes {
     pub(crate) cursor_key_application: bool,
@@ -510,7 +550,6 @@ impl Default for KeyEncodeModes {
 /// written to the pty. See the module doc's "Thread safety" section: this
 /// constructs, uses, and drops its `key::Encoder`/`key::Event` entirely
 /// within this one call, so it is safe to call from any single thread.
-#[allow(dead_code)]
 pub(crate) fn encode_key_event(
     input: &KeyInput,
     modes: KeyEncodeModes,
@@ -540,6 +579,21 @@ pub(crate) fn encode_key_event(
 /// counterpart to [`KeyInput`], for the same reason (see the module doc's
 /// "Thread safety" section). Not `PartialEq`: `mouse::Position` (a plain FFI
 /// `f32` pair) does not implement it upstream.
+///
+/// Deliberately **not** wired to a `terminal_input_mouse` IPC command in
+/// F070's "IPC 改造" slice, unlike [`KeyInput`]/[`encode_focus_event`]:
+/// unlike key modes (four independent booleans/flags read directly off the
+/// terminal) or focus reporting (a single mode bit), correctly driving
+/// [`MouseEncodeModes::tracking_mode`]/`format` from live terminal state
+/// requires inferring an effective tracking mode from *several*
+/// simultaneously-settable DEC mouse modes (`X10_MOUSE`/`NORMAL_MOUSE`/
+/// `BUTTON_MOUSE`/`ANY_MOUSE`, `SGR_MOUSE`/`UTF8_MOUSE` for format) with a
+/// precedence order this domain has not yet audited against a real
+/// program's expectations — and there is no consuming renderer yet either
+/// (that lands in a later "WebView 渲染" slice) to exercise it against. This
+/// cluster stays a tested, working, but IPC-unwired interface, exactly like
+/// [`Self`]/[`MouseEncodeModes`]/[`encode_mouse_event`] were for the whole
+/// key/mouse/focus cluster before this slice wired key and focus.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MouseInput {
@@ -594,8 +648,9 @@ pub(crate) fn encode_mouse_event(
 /// bytes that should be written to the pty. Unlike key/mouse encoding this
 /// needs no encoder state at all (`libghostty_vt::focus::Event::encode` is
 /// already a pure function on a plain enum) — wrapped here only so callers
-/// have one consistent `vt::encode_*` entry point per input kind.
-#[allow(dead_code)]
+/// have one consistent `vt::encode_*` entry point per input kind. Called by
+/// `terminal::commands::terminal_focus`, gated on
+/// `TerminalModesSnapshot::focus_reporting_enabled` (see that struct's doc).
 pub(crate) fn encode_focus_event(event: focus::Event) -> Result<Vec<u8>, VtError> {
     let mut buf = [0_u8; 8];
     let written = event.encode(&mut buf)?;

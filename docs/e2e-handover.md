@@ -153,13 +153,25 @@ fixture（临时目录中构造，不提交仓库）：
      	"engines": { "vscode": "*" },
      	"contributes": {
      		"themes": [
-     			{ "label": "E2E Icon Demo Dark", "uiTheme": "vs-dark", "path": "./themes/demo-dark.json" }
+     			{
+     				"label": "E2E Icon Demo Dark",
+     				"uiTheme": "vs-dark",
+     				"path": "./themes/demo-dark.json"
+     			}
      		],
      		"iconThemes": [
-     			{ "id": "e2e-demo-icons", "label": "E2E Demo Icons", "path": "./fileicons/demo-icon-theme.json" }
+     			{
+     				"id": "e2e-demo-icons",
+     				"label": "E2E Demo Icons",
+     				"path": "./fileicons/demo-icon-theme.json"
+     			}
      		],
      		"productIconThemes": [
-     			{ "id": "e2e-demo-picons", "label": "E2E Demo Product Icons", "path": "./picons/demo-picon-theme.json" }
+     			{
+     				"id": "e2e-demo-picons",
+     				"label": "E2E Demo Product Icons",
+     				"path": "./picons/demo-picon-theme.json"
+     			}
      		]
      	}
      }
