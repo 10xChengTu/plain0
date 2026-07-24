@@ -162,38 +162,38 @@ describe("feature completion contract", () => {
 			document.currentPhase = 2;
 		});
 		expectRejected((document) => {
-			document.features[8].status = "in_progress";
+			document.features[9].status = "in_progress";
 		});
 		expectRejected(
 			(document) => {
 				document.features[0].status = "planned";
 				delete document.features[0].evidence;
-				document.features[7].status = "planned";
+				document.features[8].status = "planned";
 				document.currentPhase = 0;
 			},
 			progressDocument.replace(
-				"- WIP：`F070` Rust PTY terminal。",
+				"- WIP：`F080` Core Git workflow。",
 				"- WIP：无。",
 			),
 		);
 
 		const blocked = cloneDocument();
-		blocked.features[7].status = "blocked";
-		blocked.features[7].blocker = "Waiting for an explicit external decision.";
+		blocked.features[8].status = "blocked";
+		blocked.features[8].blocker = "Waiting for an explicit external decision.";
 		const blockedProgress = progressDocument;
 		expect(validateFeatureContract(blocked, blockedProgress)).toMatchObject({
 			failures: [],
 			activeCount: 1,
 		});
-		blocked.features[7].blocker = " ";
+		blocked.features[8].blocker = " ";
 		expect(
 			validateFeatureContract(blocked, blockedProgress).failures.length,
 		).toBeGreaterThan(0);
 
 		const betweenItems = cloneDocument();
-		betweenItems.features[7].status = "planned";
+		betweenItems.features[8].status = "planned";
 		const betweenItemsProgress = progressDocument.replace(
-			"- WIP：`F070` Rust PTY terminal。",
+			"- WIP：`F080` Core Git workflow。",
 			"- WIP：无。",
 		);
 		expect(
@@ -201,15 +201,15 @@ describe("feature completion contract", () => {
 		).toMatchObject({ failures: [], activeCount: 0 });
 
 		for (const progress of [
-			progressDocument.replace("`F070`", "`F060`"),
+			progressDocument.replace("`F080`", "`F070`"),
 			progressDocument.replace(
-				"- WIP：`F070` Rust PTY terminal。",
+				"- WIP：`F080` Core Git workflow。",
 				"- WIP：无。",
 			),
 			progressDocument.replace("- WIP：", "- WIP:"),
 			progressDocument.replace(
-				"- WIP：`F070` Rust PTY terminal。",
-				"- WIP：`F070` Rust PTY terminal。\n- WIP：`F070` Rust PTY terminal。",
+				"- WIP：`F080` Core Git workflow。",
+				"- WIP：`F080` Core Git workflow。\n- WIP：`F080` Core Git workflow。",
 			),
 			progressDocument.replace("## 当前状态", "## 当前状态\n\n## 当前状态"),
 		]) {

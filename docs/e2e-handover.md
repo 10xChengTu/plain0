@@ -200,8 +200,37 @@ fixture（临时目录中构造，不提交仓库）：
 
 完成后：将结果写入 `features.json` F060 evidence（`nativeScenarios` 追加、`platformGaps` 移除本条目对应缺口）。
 
+### E2E-007 · F070 真实桌面终端矩阵（真实 shell、resize、多 tab/split、trust、高吞吐）
+
+状态：待执行。Browser mock 层已全部闭合（S1 trust/PTY 域 Rust 测试：`stable_roots_identity` 持久化 grant/revoke/is_trusted、`FlowControl` 高低水位 hysteresis 单元测试与真实子进程吞吐测试 `output_well_beyond_the_high_water_mark_still_arrives_completely_and_in_order`——2,200 行/约 112 KiB、远超 100,000 字节高水位，验证真实暂停/恢复、字节不丢、序列号严格连续；VT 集成 `vt.rs` 分片测试——一个 SGR 转义序列在两次 `feed()` 调用间的全部 17 个可能切分点、以及逐字节切分，均与整段一次喂入结果逐位相同，另加一个跨两次 `feed()` 拆分的多字节 UTF-8 字符正确解码；IPC 改造的帧级单帧信用背压 `frame_emission_is_gated_until_the_previous_frame_is_acked`；WebView DOM 渲染 + trust UX 与多 tab/split/scrollback 的全部 Browser E2E；本切片新增的高吞吐 mock Browser E2E——500 行无让出的突发写入被单帧信用门合并为个位数 `terminal_ack` 往返、内容不丢、页面在突发后仍立即响应键盘输入，见 `tests/browser/workspace.spec.ts` 与 `src-tauri/src/terminal/{flow.rs,vt/tests.rs,service/tests.rs}`）；本条目补真实 shell 进程、真实 WKWebView 渲染管线、真实操作系统调度下的高吞吐与多进程生命周期这几个 mock/单元测试无法替代的维度。
+
+fixture（临时目录中创建，不提交仓库）：
+
+- 一个空目录作为未信任的 workspace 根（专用于步骤 1 的 trust 矩阵，避免与已有信任状态的目录混用）。
+- 一个约 50-100 MiB 的临时大文件（用于步骤 5 高吞吐 `cat`；`yes` 命令本身不需要 fixture）。
+
+步骤与断言：
+
+1. 未信任 workspace 的 trust 确认与禁用文案：Open Folder 打开上述全新临时空目录（从未对其执行过信任授权）→ Panel `Plain: Create Terminal` → 断言弹出确认对话框，文案含 "Trust this workspace to run a terminal?"；点击 Cancel → 断言终端保持禁用并显示「已拒绝信任」的解释文案（区别于「空 workspace」的另一种禁用文案——参照 Browser E2E 已验证的两种文案分支）；再次执行 `Plain: Create Terminal` → 这次点击 Trust & Continue → 断言终端真正 spawn 出一个真实 shell（而不是继续停留在禁用态）。
+2. 真实 shell 交互：终端就绪后聚焦其隐藏 `<textarea>` 输入 `pwd` 回车，断言回显内容等于该 workspace root 的 canonical 磁盘路径（真实 `cwd`，非 mock 值）；再输入一条产生可辨识输出的命令（如 `echo plain-e2e-terminal-probe`），断言终端网格中出现该文本。
+3. resize：调整应用窗口尺寸（或拖拽 Panel 高度），断言终端行列数随真实布局变化——输入 `stty size` 回车，断言回显的行列数与调整后的真实像素尺寸/cell 尺寸换算一致（真实字体度量与 DPI 缩放只有真机可验证，Browser mock 只验证了「resize 信号触发新 `terminal_resize` 调用」这条前端链路）。
+4. 多 tab/split 生命周期：`Plain: Create Terminal` 新建第二个 tab，确认两个 tab 各自是独立的真实 shell 进程（在 tab 1 输入一条命令，断言其输出只出现在 tab 1，不出现在 tab 2）；`Plain: Split Terminal Right`（或 Down）在当前 tab 内建立第二个 pane，确认两个 pane 同样各自独立可交互；用 tab 自己的 `×` 关闭其中一个 tab，随即用 shell 层核对（如 `ps -ef | grep <shell 可执行文件>`，或应用自身 Activity Monitor 观察进程列表）确认该 tab 的子进程已真正终止，而未关闭的 tab/pane 不受影响、仍可继续交互。
+5. 高吞吐命令下 UI 不卡死：在一个 tab 内运行 `yes`（或 `cat` 步骤 fixture 里的大文件）几秒钟，期间断言应用仍可响应——能切换到另一个 tab、能点击菜单/命令面板、窗口能正常拖拽/最小化，不出现「无响应应用」的系统级提示；用 Ctrl+C 中断该命令，断言终端恢复到可交互的提示符状态；用 shell 层粗略核对该 Tauri 进程的内存占用在命令运行期间保持有界（不无限增长），核对方式与结论记入报告即可，不要求精确数值阈值。
+6. 退出语义：完全退出应用（Cmd+Q）前，用 shell 层核对所有 tab/split 对应的子进程仍存活；退出后立即用 shell 层核对这些子进程已全部消失（无残留 zombie 或孤儿进程）——对应 acceptance 第二条「Multiple tabs and splits clean up on window close」的真实进程层证据（Rust 侧 `close_window` 的并发 kill+join 已由单元测试覆盖，本步骤验证的是真实操作系统进程树层面的观感）。
+7. 每步 UI 断言后尽量用 shell 层核对真实进程/输出，而不仅凭 UI 呈现下结论。
+8. 清理：退出应用；删除未信任 workspace fixture 目录、大文件 fixture、截图与 `src-tauri/target`。
+
+已知边界（执行方须知）：
+
+- 终端内「查找」（acceptance 第一条 search 的一半）在代码级复核后已判定两个平台在当前实现下都不成立——Ctrl+F 在 Windows/Linux 上会被本域自己的按键转发当作真实终端控制序列编码并拦截，macOS 上 WKWebView 也不提供开箱即用的页内查找；Browser E2E 只验证并保证了「可被原生选中」这一半。本条目不需要专门验证「查找」，观察到没有查找功能属预期，不算新发现的缺陷。
+- scrollback 历史行无逐字色彩保真度、split 封顶 2 个 pane 且不支持递归再分割、停留在历史视图时新输入不自动跳回实时、无 shell integration（OSC 133/633）、无会话持久化/重连、Windows 平台留给 F120——均为已记录的既定收窄，参见 progress.md F070 多 tab/split/scrollback 切片条目，出现属预期。
+- libghostty-vt 与其 Rust binding 均 pre-1.0（API 可能变动）、构建依赖 Zig 0.15.x 与 `.ghostty-vendor/` 本地离线 checkout；这些是供应链层面的已知约束，与本条目桌面验收本身无关，执行方无需重新验证构建过程，只需确保执行机已具备本仓库既有的 `pnpm check` 构建能力。
+- 「高吞吐下不卡死」的量化机制证据（PTY→VT 字节级背压的真实吞吐测试、VT→前端单帧信用门、Browser 层 500 行 burst 合并为个位数帧）已在 Rust/Browser 测试层验证了背压机制本身是真实生效的；本条目验证的是这套机制在真实进程调度、真实 WKWebView 渲染管线下的端到端主观观感（应用不卡死、菜单可点、窗口可拖动），这是 mock 层无法替代的最后一环，而不是重新证明背压算法本身。
+
+完成后：将结果写入 `features.json` F070 evidence（`nativeScenarios` 追加、`platformGaps` 移除本条目对应缺口；若未执行则如实标注「已登记未执行」，不得凭本条目文字描述代替真实结果）。
+
 ## 后续条目（随切片追加）
 
 - F030 遗留：真实 `CloseRequested` 关窗握手协议实现后，补「正常关窗 → 重开恢复」的桌面验收变体。
-- F070 PTY、F080-F090 Git、F100 DAP 的真实桌面矩阵按 docs/testing.md「真实 Tauri E2E」清单逐项登记。
+- F080-F090 Git、F100 DAP 的真实桌面矩阵按 docs/testing.md「真实 Tauri E2E」清单逐项登记。
 - F120/F130 发布与全量原生回归。
