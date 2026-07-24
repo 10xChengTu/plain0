@@ -37,3 +37,137 @@ body[data-plain-ready="error"] #plain-bootstrap-status {
 	border-color: #f14c4c;
 	color: #f8d7da;
 }
+
+/* F070 "WebView DOM 渲染 + trust UX" — functional-only styling (grid
+ * alignment, cursor positioning and the hidden input surface are load
+ * bearing; nothing here is decorative polish), mirroring PlainSearchView's
+ * own precedent of leaving visual chrome for a later slice. */
+.plain-terminal-view-body {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	position: relative;
+}
+
+.plain-terminal-status {
+	padding: 0.25rem 0.75rem;
+	font-size: 0.85rem;
+	color: #cccccc;
+}
+
+.plain-terminal-status:empty {
+	display: none;
+}
+
+.plain-terminal-surface-wrapper {
+	position: relative;
+	flex: 1 1 auto;
+	overflow: auto;
+}
+
+.plain-terminal-surface {
+	position: relative;
+	font-family:
+		ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+	font-size: 13px;
+	line-height: 18px;
+	color: var(--plain-terminal-fg, #cccccc);
+	background: var(--plain-terminal-bg, #000000);
+}
+
+.plain-terminal-grid {
+	position: relative;
+}
+
+.plain-terminal-row {
+	white-space: pre;
+	height: 18px;
+}
+
+.plain-terminal-cell {
+	color: var(--plain-terminal-cell-fg, var(--plain-terminal-fg, inherit));
+	background-color: var(--plain-terminal-cell-bg, transparent);
+}
+
+.plain-terminal-cell--bold {
+	font-weight: bold;
+}
+
+.plain-terminal-cell--italic {
+	font-style: italic;
+}
+
+.plain-terminal-cell--faint {
+	opacity: 0.6;
+}
+
+.plain-terminal-cell--invisible {
+	opacity: 0;
+}
+
+.plain-terminal-cell--blink {
+	animation: plain-terminal-blink 1s steps(1) infinite;
+}
+
+.plain-terminal-cursor {
+	position: absolute;
+	top: 0;
+	left: 0;
+	display: none;
+	pointer-events: none;
+	box-sizing: border-box;
+}
+
+.plain-terminal-cursor--block {
+	background: rgba(204, 204, 204, 0.6);
+}
+
+.plain-terminal-cursor--block-hollow {
+	border: 1px solid rgba(204, 204, 204, 0.8);
+}
+
+.plain-terminal-cursor--bar {
+	border-left: 2px solid rgba(204, 204, 204, 0.9);
+}
+
+.plain-terminal-cursor--underline {
+	border-bottom: 2px solid rgba(204, 204, 204, 0.9);
+	background: transparent;
+}
+
+.plain-terminal-cursor--blinking {
+	animation: plain-terminal-cursor-blink 1s steps(1) infinite;
+}
+
+.plain-terminal-measure-probe {
+	position: absolute;
+	top: -9999px;
+	left: -9999px;
+	visibility: hidden;
+	white-space: pre;
+}
+
+.plain-terminal-input {
+	position: absolute;
+	top: 0;
+	left: 0;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	border: 0;
+	opacity: 0;
+	overflow: hidden;
+	resize: none;
+}
+
+@keyframes plain-terminal-blink {
+	50% {
+		opacity: 0;
+	}
+}
+
+@keyframes plain-terminal-cursor-blink {
+	50% {
+		opacity: 0;
+	}
+}

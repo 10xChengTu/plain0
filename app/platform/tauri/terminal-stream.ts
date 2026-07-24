@@ -36,8 +36,13 @@ export interface TerminalStreamHandlers {
 	 * the module doc's ordering/dedupe note). A frame's `rowsData` lists
 	 * only the rows that changed since the last one this session emitted
 	 * (or every row, when `dirty` is `"full"`) — the caller is responsible
-	 * for applying it onto its own retained grid. */
-	readonly onFrame: (frame: TerminalFrame) => void;
+	 * for applying it onto its own retained grid. `sequence` is this frame's
+	 * own monotonic delivery number (see `TerminalDataEvent.sequence`'s doc
+	 * comment) — passed through unmodified so a rendering-layer caller can
+	 * drive `TerminalStream.ack` once it has actually consumed (e.g. painted)
+	 * the frame, exactly the "rendering concern" this module's own doc
+	 * comment defers to callers rather than building an ack policy in here. */
+	readonly onFrame: (frame: TerminalFrame, sequence: number) => void;
 	/** Called once, the first time this session's exit is observed. Does
 	 * *not* imply `onFrame` will never fire again for this session — see
 	 * the module doc. */
@@ -139,7 +144,7 @@ export async function openTerminalStream(
 			return;
 		}
 		nextExpectedSequence = event.sequence + 1;
-		handlers.onFrame(event.frame);
+		handlers.onFrame(event.frame, event.sequence);
 	}
 
 	const unlistenData = transport.terminalWatchData((event) => {

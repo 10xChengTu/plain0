@@ -153,6 +153,13 @@ async function installNativeIpcMock(
 	// Only F060 S3's own icon selection tests pass these.
 	fileIconThemeSelectionForTest: string | null = null,
 	productIconThemeSelectionForTest: string | null = null,
+	// F070 "WebView DOM 渲染 + trust UX": pre-seeds this window's execution
+	// trust state for the one fixed native root, exactly mirroring
+	// `TrustService`/the browser mock's own `terminalTrustedForTest` (see
+	// `app/platform/tauri/browser-mock.ts`'s doc comment) — granted trust
+	// never carries over automatically, so this defaults to `false`. Only
+	// this slice's own terminal tests pass this.
+	terminalTrustedForTest = false,
 ): Promise<void> {
 	await page.addInitScript(
 		({
@@ -168,6 +175,7 @@ async function installNativeIpcMock(
 			themeSelectionForTest,
 			fileIconThemeSelectionForTest,
 			productIconThemeSelectionForTest,
+			terminalTrustedForTest,
 		}) => {
 			const calls: Array<{
 				command: string;
@@ -1137,6 +1145,214 @@ async function installNativeIpcMock(
 				code: "THEME_RESOURCE_NOT_FOUND",
 				message: "The requested theme package resource is not available.",
 			});
+
+			// --- F070 "WebView DOM 渲染 + trust UX": deterministic fake PTY ---
+			// A from-scratch fake mirroring `app/platform/tauri/browser-mock.ts`'s
+			// own `BrowserMockTerminalSessionController` *semantics* (session
+			// state, echo behavior, frame-level single-outstanding-frame
+			// backpressure) rather than reusing that module directly — this
+			// fixture drives the real `native.ts` transport (base64 events,
+			// `terminal-codec.ts` decode) the same way every other domain here
+			// does, not the browser-mock fallback path `createBridge()` only
+			// takes when `__TAURI_INTERNALS__` is entirely absent.
+			let terminalTrusted = terminalTrustedForTest;
+			interface FakeTerminalSession {
+				sessionId: string;
+				cols: number;
+				rows: number;
+				lines: string[];
+				cursorCol: number;
+				cursorRow: number;
+				nextSequence: number;
+				awaitingAck: boolean;
+				pendingEmit: boolean;
+			}
+			const terminalSessions = new Map<string, FakeTerminalSession>();
+			let terminalSessionSerial = 401;
+			let lastStartedTerminalSessionId: string | undefined;
+			const nextTerminalSessionId = (): string =>
+				`00000000-0000-4000-8000-${(terminalSessionSerial++)
+					.toString()
+					.padStart(12, "0")}`;
+			const DEFAULT_TERMINAL_STYLE = Object.freeze({
+				bold: false,
+				italic: false,
+				faint: false,
+				blink: false,
+				inverse: false,
+				invisible: false,
+				strikethrough: false,
+				overline: false,
+				underline: "none",
+			});
+			function terminalFrameValue(session: FakeTerminalSession): unknown {
+				return {
+					dirty: "full",
+					cols: session.cols,
+					rows: session.rows,
+					cursor: {
+						visible: true,
+						blinking: false,
+						viewport: {
+							x: session.cursorCol,
+							y: session.cursorRow,
+							atWideTail: false,
+						},
+						style: "block",
+					},
+					colors: {
+						background: { r: 0, g: 0, b: 0 },
+						foreground: { r: 229, g: 229, b: 229 },
+						cursor: null,
+					},
+					rowsData: session.lines.map((line, rowIndex) => ({
+						rowIndex,
+						cells: Array.from({ length: session.cols }, (_unused, col) => ({
+							graphemes: line[col] ?? "",
+							fg: null,
+							bg: null,
+							style: DEFAULT_TERMINAL_STYLE,
+						})),
+					})),
+				};
+			}
+			function emitTerminalFrame(session: FakeTerminalSession): void {
+				const sequence = session.nextSequence;
+				session.nextSequence += 1;
+				const payload = {
+					sessionId: session.sessionId,
+					sequence,
+					frame: terminalFrameValue(session),
+				};
+				for (const [eventId, registration] of eventHandlers) {
+					if (registration.event !== "plain://terminal-data") {
+						continue;
+					}
+					const transformed = callbacks.get(registration.handlerId);
+					transformed?.callback({
+						event: registration.event,
+						id: eventId,
+						payload,
+					});
+					if (transformed?.once === true) {
+						callbacks.delete(registration.handlerId);
+					}
+				}
+			}
+			function emitTerminalExit(
+				session: FakeTerminalSession,
+				exitCode: number,
+			): void {
+				const payload = { sessionId: session.sessionId, exitCode };
+				for (const [eventId, registration] of eventHandlers) {
+					if (registration.event !== "plain://terminal-exit") {
+						continue;
+					}
+					const transformed = callbacks.get(registration.handlerId);
+					transformed?.callback({
+						event: registration.event,
+						id: eventId,
+						payload,
+					});
+					if (transformed?.once === true) {
+						callbacks.delete(registration.handlerId);
+					}
+				}
+			}
+			function requestTerminalEmit(session: FakeTerminalSession): void {
+				if (session.awaitingAck) {
+					session.pendingEmit = true;
+					return;
+				}
+				session.awaitingAck = true;
+				session.pendingEmit = false;
+				emitTerminalFrame(session);
+			}
+			function terminalAppendText(
+				session: FakeTerminalSession,
+				text: string,
+			): void {
+				for (const character of text) {
+					if (character === "\n" || character === "\r") {
+						session.cursorRow = Math.min(
+							session.rows - 1,
+							session.cursorRow + 1,
+						);
+						session.cursorCol = 0;
+						continue;
+					}
+					const line = session.lines[session.cursorRow] ?? "";
+					session.lines[session.cursorRow] =
+						line.slice(0, session.cursorCol) +
+						character +
+						line.slice(session.cursorCol + 1);
+					session.cursorCol += 1;
+					if (session.cursorCol >= session.cols) {
+						session.cursorCol = 0;
+						session.cursorRow = Math.min(
+							session.rows - 1,
+							session.cursorRow + 1,
+						);
+					}
+				}
+			}
+			function terminalBackspace(session: FakeTerminalSession): void {
+				if (session.cursorCol === 0) {
+					return;
+				}
+				session.cursorCol -= 1;
+				const line = session.lines[session.cursorRow] ?? "";
+				session.lines[session.cursorRow] =
+					line.slice(0, session.cursorCol) + line.slice(session.cursorCol + 1);
+			}
+			function terminalNotTrusted() {
+				return {
+					code: "WORKSPACE_NOT_TRUSTED",
+					message: "This workspace has not been granted execution trust.",
+				};
+			}
+			function terminalSessionNotFound() {
+				return {
+					code: "TERMINAL_SESSION_NOT_FOUND",
+					message:
+						"The requested terminal session does not exist for this window.",
+				};
+			}
+			function getFakeTerminalSession(sessionId: unknown): FakeTerminalSession {
+				const session =
+					typeof sessionId === "string"
+						? terminalSessions.get(sessionId)
+						: undefined;
+				if (session === undefined) {
+					throw terminalSessionNotFound();
+				}
+				return session;
+			}
+			(
+				window as unknown as Window & {
+					__PLAIN_TEST_TERMINAL_PUSH__(text: string): void;
+					__PLAIN_TEST_TERMINAL_LAST_SESSION_ID__(): string | undefined;
+				}
+			).__PLAIN_TEST_TERMINAL_PUSH__ = (text: string) => {
+				if (lastStartedTerminalSessionId === undefined) {
+					throw new Error("No terminal session has been started yet.");
+				}
+				const session = terminalSessions.get(lastStartedTerminalSessionId);
+				if (session === undefined) {
+					throw new Error(
+						"The last started terminal session no longer exists.",
+					);
+				}
+				terminalAppendText(session, text);
+				requestTerminalEmit(session);
+			};
+			(
+				window as unknown as Window & {
+					__PLAIN_TEST_TERMINAL_LAST_SESSION_ID__(): string | undefined;
+				}
+			).__PLAIN_TEST_TERMINAL_LAST_SESSION_ID__ = () =>
+				lastStartedTerminalSessionId;
+
 			testWindow.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
 				unregisterListener() {},
 			};
@@ -1725,6 +1941,129 @@ async function installNativeIpcMock(
 							}
 							return null;
 						}
+						case "workspace_trust_state":
+							return { trusted: terminalTrusted };
+						case "workspace_trust_grant":
+							terminalTrusted = true;
+							return { trusted: true };
+						case "workspace_trust_revoke":
+							terminalTrusted = false;
+							return null;
+						case "terminal_start": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							const startRequest = args.request as
+								{ cols?: number; rows?: number } | undefined;
+							const sessionId = nextTerminalSessionId();
+							const session: FakeTerminalSession = {
+								sessionId,
+								cols: startRequest?.cols ?? 80,
+								rows: startRequest?.rows ?? 24,
+								lines: [],
+								cursorCol: 0,
+								cursorRow: 0,
+								nextSequence: 0,
+								awaitingAck: false,
+								pendingEmit: false,
+							};
+							terminalSessions.set(sessionId, session);
+							lastStartedTerminalSessionId = sessionId;
+							return { sessionId };
+						}
+						case "terminal_input_text": {
+							const inputRequest = args.request as
+								{ sessionId?: string; text?: string } | undefined;
+							const session = getFakeTerminalSession(inputRequest?.sessionId);
+							terminalAppendText(session, inputRequest?.text ?? "");
+							requestTerminalEmit(session);
+							return null;
+						}
+						case "terminal_input_key": {
+							const inputRequest = args.request as
+								| {
+										sessionId?: string;
+										action?: number;
+										key?: number;
+										utf8?: string | null;
+								  }
+								| undefined;
+							const session = getFakeTerminalSession(inputRequest?.sessionId);
+							// Only "press" (1) mutates the fake grid — matches this
+							// fixture's simplified echo semantics (see the module
+							// doc above); release/repeat are still accepted (and
+							// still observable via `__PLAIN_TEST_TAURI_CALLS__`) but
+							// have no visual effect here.
+							if (inputRequest?.action === 1) {
+								if (
+									typeof inputRequest.utf8 === "string" &&
+									inputRequest.utf8.length > 0
+								) {
+									terminalAppendText(session, inputRequest.utf8);
+								} else if (inputRequest.key === 58 /* Enter */) {
+									terminalAppendText(session, "\n");
+								} else if (inputRequest.key === 53 /* Backspace */) {
+									terminalBackspace(session);
+								}
+							}
+							requestTerminalEmit(session);
+							return null;
+						}
+						case "terminal_focus": {
+							const focusRequest = args.request as
+								{ sessionId?: string } | undefined;
+							getFakeTerminalSession(focusRequest?.sessionId);
+							return null;
+						}
+						case "terminal_resize": {
+							const resizeRequest = args.request as
+								| { sessionId?: string; cols?: number; rows?: number }
+								| undefined;
+							const session = getFakeTerminalSession(resizeRequest?.sessionId);
+							session.cols = resizeRequest?.cols ?? session.cols;
+							session.rows = resizeRequest?.rows ?? session.rows;
+							session.lines.length = Math.min(
+								session.lines.length,
+								session.rows,
+							);
+							session.cursorRow = Math.min(
+								session.cursorRow,
+								Math.max(0, session.rows - 1),
+							);
+							session.cursorCol = Math.min(
+								session.cursorCol,
+								Math.max(0, session.cols - 1),
+							);
+							// A resize always produces a fresh full frame in the real
+							// implementation regardless of outstanding-ack state —
+							// mirrored here by emitting immediately rather than
+							// through `requestTerminalEmit`'s single-outstanding
+							// gate.
+							session.awaitingAck = true;
+							session.pendingEmit = false;
+							emitTerminalFrame(session);
+							return null;
+						}
+						case "terminal_ack": {
+							const ackRequest = args.request as
+								{ sessionId?: string } | undefined;
+							const session = getFakeTerminalSession(ackRequest?.sessionId);
+							session.awaitingAck = false;
+							if (session.pendingEmit) {
+								requestTerminalEmit(session);
+							}
+							return null;
+						}
+						case "terminal_scrollback":
+							return { rows: [] };
+						case "terminal_kill": {
+							const killRequest = args.request as
+								{ sessionId?: string } | undefined;
+							const session = getFakeTerminalSession(killRequest?.sessionId);
+							terminalSessions.delete(session.sessionId);
+							emitTerminalExit(session, 137);
+							return null;
+						}
 						default:
 							throw new Error(`Unexpected Tauri test command: ${command}`);
 					}
@@ -1744,6 +2083,7 @@ async function installNativeIpcMock(
 			themeSelectionForTest,
 			fileIconThemeSelectionForTest,
 			productIconThemeSelectionForTest,
+			terminalTrustedForTest,
 		},
 	);
 }
@@ -8719,4 +9059,315 @@ test("falls back the file icon and product icon theme to their own defaults with
 
 	expect(pageErrors).toEqual([]);
 	expect(consoleErrors).toEqual([]);
+});
+
+// --- F070 "WebView DOM 渲染 + trust UX" -------------------------------------
+
+async function terminalCallsFor(
+	page: Page,
+	command: string,
+): Promise<readonly TestTauriInvocation[]> {
+	return page.evaluate((command) => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+		};
+		return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+			(invocation) => invocation.command === command,
+		);
+	}, command);
+}
+
+async function pushTerminalOutput(page: Page, text: string): Promise<void> {
+	await page.evaluate((text) => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TERMINAL_PUSH__(text: string): void;
+		};
+		testWindow.__PLAIN_TEST_TERMINAL_PUSH__(text);
+	}, text);
+}
+
+async function createTerminal(page: Page): Promise<void> {
+	await executePaletteCommand(
+		page,
+		"Create Terminal",
+		"Plain: Create Terminal",
+	);
+}
+
+test("opens a trusted terminal, renders a pushed frame, and echoes typed input", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+
+	const surface = page.locator(".plain-terminal-surface");
+	await expect(surface).toBeVisible();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+
+	await pushTerminalOutput(page, "hello");
+	await expect(page.locator(".plain-terminal-grid")).toContainText("hello");
+
+	const input = page.locator(".plain-terminal-input");
+	await input.focus();
+	await page.keyboard.type("abc");
+
+	await expect
+		.poll(
+			async () =>
+				(await terminalCallsFor(page, "terminal_input_key")).filter(
+					({ args }) =>
+						typeof args.request === "object" &&
+						args.request !== null &&
+						typeof (args.request as { utf8?: unknown }).utf8 === "string",
+				).length,
+		)
+		.toBeGreaterThanOrEqual(3);
+	await expect(page.locator(".plain-terminal-grid")).toContainText("helloabc");
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("resizes the terminal grid to match the panel's real size", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+	await expect(page.locator(".plain-terminal-surface")).toBeVisible();
+
+	const startCalls = await terminalCallsFor(page, "terminal_start");
+	expect(startCalls).toHaveLength(1);
+	const initialRequest = startCalls[0]?.args.request as
+		{ cols?: number; rows?: number } | undefined;
+	const initialCols = initialRequest?.cols;
+	expect(typeof initialCols).toBe("number");
+
+	const viewport = page.viewportSize();
+	await page.setViewportSize({
+		width: (viewport?.width ?? 1280) + 480,
+		height: viewport?.height ?? 720,
+	});
+
+	await expect
+		.poll(async () => {
+			const resizeCalls = await terminalCallsFor(page, "terminal_resize");
+			return resizeCalls.some(({ args }) => {
+				const request = args.request as
+					{ cols?: number; rows?: number } | undefined;
+				return (
+					typeof request?.cols === "number" &&
+					typeof request.rows === "number" &&
+					request.cols > 0 &&
+					request.rows > 0 &&
+					request.cols !== initialCols
+				);
+			});
+		})
+		.toBe(true);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("prompts for workspace trust before starting a terminal and starts it once granted", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(page, "arrayBuffer", "readonly");
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+
+	const confirmDialog = page.getByRole("dialog");
+	await expect(confirmDialog).toBeVisible();
+	await expect(confirmDialog).toContainText(
+		"Trust this workspace to run a terminal?",
+	);
+	expect(await terminalCallsFor(page, "terminal_start")).toEqual([]);
+
+	await confirmDialog
+		.getByRole("button", { name: "Trust & Continue", exact: true })
+		.click();
+	await expect(confirmDialog).toHaveCount(0);
+
+	await expect
+		.poll(
+			async () =>
+				(await terminalCallsFor(page, "workspace_trust_grant")).length,
+		)
+		.toBe(1);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+	await expect(page.locator(".plain-terminal-surface")).toBeVisible();
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("leaves the terminal disabled with an explanation when the trust dialog is declined", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(page, "arrayBuffer", "readonly");
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+
+	const confirmDialog = page.getByRole("dialog");
+	await expect(confirmDialog).toBeVisible();
+	await confirmDialog
+		.getByRole("button", { name: "Cancel", exact: true })
+		.click();
+	await expect(confirmDialog).toHaveCount(0);
+
+	await expect(page.locator(".plain-terminal-status")).toHaveText(
+		"Terminal is disabled until you trust this workspace.",
+	);
+	expect(await terminalCallsFor(page, "workspace_trust_grant")).toEqual([]);
+	expect(await terminalCallsFor(page, "terminal_start")).toEqual([]);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("explains that a folder must be open first, for an empty workspace, and never starts a terminal", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(page, "arrayBuffer", "readonly");
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	await createTerminal(page);
+
+	const infoDialog = page.getByRole("dialog");
+	await expect(infoDialog).toBeVisible();
+	await expect(infoDialog).toContainText(
+		"Plain needs an open folder before it can start a terminal.",
+	);
+	await infoDialog.getByRole("button", { name: "OK", exact: true }).click();
+	await expect(infoDialog).toHaveCount(0);
+
+	await expect(page.locator(".plain-terminal-status")).toHaveText(
+		"Open a folder to use the terminal.",
+	);
+	expect(await terminalCallsFor(page, "workspace_trust_state")).toEqual([]);
+	expect(await terminalCallsFor(page, "terminal_start")).toEqual([]);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("sends only the final IME-committed text, never intermediate composition state", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+	await expect(page.locator(".plain-terminal-surface")).toBeVisible();
+
+	const input = page.locator(".plain-terminal-input");
+	await input.focus();
+	// `Locator.dispatchEvent` does not construct a real `CompositionEvent`
+	// for these event names (its own generic event-type map does not cover
+	// composition events), so `.data` would not survive the round trip —
+	// dispatch genuine `CompositionEvent`s directly in-page instead.
+	await input.evaluate((element) => {
+		const fire = (type: string, data: string): void => {
+			element.dispatchEvent(new CompositionEvent(type, { data }));
+		};
+		fire("compositionstart", "");
+		fire("compositionupdate", "n");
+		fire("compositionupdate", "ni");
+		fire("compositionupdate", "nih");
+		fire("compositionend", "你好");
+	});
+
+	await expect
+		.poll(
+			async () => (await terminalCallsFor(page, "terminal_input_text")).length,
+		)
+		.toBe(1);
+	const textCalls = await terminalCallsFor(page, "terminal_input_text");
+	expect(
+		(textCalls[0]?.args.request as { text?: string } | undefined)?.text,
+	).toBe("你好");
+	await expect(page.locator(".plain-terminal-grid")).toContainText("你好");
+
+	// No intermediate composition text ever reached `terminal_input_key`
+	// either — it is gated on `TerminalImeController.active`, not just
+	// `terminal_input_text`.
+	const keyCallsWithText = (
+		await terminalCallsFor(page, "terminal_input_key")
+	).filter(
+		({ args }) =>
+			typeof args.request === "object" &&
+			args.request !== null &&
+			typeof (args.request as { utf8?: unknown }).utf8 === "string",
+	);
+	expect(keyCallsWithText).toEqual([]);
+
+	expect(pageErrors).toEqual([]);
 });

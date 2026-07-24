@@ -1378,6 +1378,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 				parent.expression.text === "registerWorkspaceCommands" ||
 				parent.expression.text === "configurePlainWorkingCopyBackupBridge" ||
 				parent.expression.text === "configurePlainSearchBridge" ||
+				parent.expression.text === "configurePlainTerminalBridge" ||
 				parent.expression.text === "consumeImportedThemePackages" ||
 				parent.expression.text === "registerPlainThemeCommands" ||
 				parent.expression.text === "registerPlainThemePicker" ||

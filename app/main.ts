@@ -14,6 +14,9 @@ import { IWorkbenchThemeService } from "@codingame/monaco-vscode-api/vscode/vs/w
 import { EXCLUDED_SURFACE_GUARD_MARKER } from "./excluded-surface-policy";
 import { enforceExcludedWorkbenchSurfaces } from "./excluded-surfaces";
 import "./features/search/search-contribution";
+import "./features/terminal/terminal-contribution";
+import { registerPlainTerminalCommands } from "./features/terminal/plain-terminal-commands";
+import { configurePlainTerminalBridge } from "./features/terminal/plain-terminal-view";
 import { registerWorkspaceCommands } from "./features/workspace/commands";
 import { registerWorkspaceDeleteCoordinator } from "./features/workspace/delete-coordinator";
 import {
@@ -114,6 +117,8 @@ async function bootstrap(): Promise<void> {
 		ReturnType<typeof registerPlainFileIconThemePicker> | undefined;
 	let productIconThemePickerRegistration:
 		ReturnType<typeof registerPlainProductIconThemePicker> | undefined;
+	let terminalCommandsRegistration:
+		ReturnType<typeof registerPlainTerminalCommands> | undefined;
 	window.addEventListener(
 		"pagehide",
 		() => {
@@ -123,6 +128,7 @@ async function bootstrap(): Promise<void> {
 			themeCommandsRegistration?.dispose();
 			fileIconThemePickerRegistration?.dispose();
 			productIconThemePickerRegistration?.dispose();
+			terminalCommandsRegistration?.dispose();
 		},
 		{ once: true },
 	);
@@ -132,6 +138,7 @@ async function bootstrap(): Promise<void> {
 
 	configurePlainWorkingCopyBackupBridge(bridge);
 	configurePlainSearchBridge(bridge);
+	configurePlainTerminalBridge(bridge);
 	await initialize(createServiceOverrides(), container, {
 		productConfiguration: {
 			nameShort: "Plain",
@@ -161,6 +168,7 @@ async function bootstrap(): Promise<void> {
 		await getService(IContextKeyService),
 		workspaceTopologyCoordinator,
 	);
+	terminalCommandsRegistration = registerPlainTerminalCommands();
 
 	const themeFileService = await getService(IFileService);
 	const themeRegistry = await createPlainThemeRegistry(themeFileService);
