@@ -228,7 +228,7 @@ const DIRECT_COMMAND_REGISTRATION_MANIFEST = Object.freeze([
 	}),
 	Object.freeze({
 		relativePath: "app/features/terminal/plain-terminal-commands.ts",
-		count: 1,
+		count: 4,
 	}),
 ]);
 

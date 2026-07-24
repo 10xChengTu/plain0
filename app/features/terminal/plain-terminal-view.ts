@@ -17,75 +17,82 @@ import {
 import { IViewDescriptorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/common/views.service";
 
 import type { PlainBridge } from "../../platform/tauri/contracts";
+import { TerminalPaneController } from "./plain-terminal-pane";
 import {
-	openTerminalStream,
-	type TerminalStream,
-} from "../../platform/tauri/terminal-stream";
-import {
-	encodeTerminalKeyEvent,
-	TerminalImeController,
-} from "./plain-terminal-input";
-import { PlainTerminalRenderer } from "./plain-terminal-renderer";
-import {
-	resolveTerminalTrust,
-	TERMINAL_TRUST_DECLINED_STATUS_MESSAGE,
-	TERMINAL_TRUST_EMPTY_WORKSPACE_STATUS_MESSAGE,
-} from "./plain-terminal-trust";
+	type TerminalSplitOrientation,
+	TerminalTabsModel,
+} from "./plain-terminal-tabs";
 
 /**
- * Plain's own, hand-written terminal view pane (F070 "WebView DOM 渲染 +
- * trust UX") — built from scratch on the bare `ViewPane` base class, the
- * same precedent `PlainSearchView` established (see that file's own module
- * doc comment): Plain never imports
- * `@codingame/monaco-vscode-terminal-service-override` or xterm.js at all
- * (see `docs/research/2026-07-24-libghostty-terminal.md`'s background
- * section for why — that package's own import graph unconditionally
- * registers Chat/Copilot-CLI/Extensions/SCM-chat commands, independently
- * confirmed by a real Playwright bootstrap run against
- * `enforceExcludedWorkbenchSurfaces()`).
+ * Plain's own, hand-written terminal view pane. Originally (F070 "WebView
+ * DOM 渲染 + trust UX") this managed exactly one PTY session inline; this
+ * slice (F070 "多 tab/split/scrollback + 生命周期") turns it into a small
+ * tab strip self-managed by [`TerminalTabsModel`], each tab holding one or
+ * two [`TerminalPaneController`]s (a split) — see that model's own module
+ * doc for why this is one self-managing view rather than N registered
+ * `IViewsRegistry` views. Built from scratch on the bare `ViewPane` base
+ * class, the same precedent `PlainSearchView` established: Plain never
+ * imports `@codingame/monaco-vscode-terminal-service-override` or xterm.js
+ * at all (see `docs/research/2026-07-24-libghostty-terminal.md`'s background
+ * section).
  *
  * # Bridge wiring
  *
  * Like `plain-search-service.ts`'s `configurePlainSearchBridge`, the
- * `PlainBridge` this view needs cannot be a normal constructor parameter
- * (the DI container has no way to supply it) — `configurePlainTerminalBridge`
- * must be called exactly once, before this view is ever rendered, mirroring
- * that same established pattern.
+ * `PlainBridge` this view needs cannot be a normal constructor parameter —
+ * `configurePlainTerminalBridge` must be called exactly once, before this
+ * view is ever rendered.
  *
- * # Session lifecycle (this slice: exactly one session per view instance)
+ * # Sizing: measure, don't duplicate CSS's own flex math
  *
- * `layoutBody` (not a `ResizeObserver` on this view's own container) is the
- * resize signal this view acts on: `ViewPane`/`Pane` already receives a
- * `layoutBody(height, width)` call from the Workbench's own SplitView/Panel
- * layout pipeline whenever this view's allotted space changes (initial
- * layout, a sash drag, a window resize, …) — adding a second, independent
- * `ResizeObserver` alongside that would just be a redundant, potentially
- * racing signal for the same underlying event. The very first `layoutBody`
- * call (which is also the first time this view's body has a real,
- * non-zero size) is what actually starts the session — not `renderBody`,
- * whose container may still be zero-sized at that point.
+ * `layoutBody` (not a `ResizeObserver` on this view's own container) is
+ * still the top-level resize signal this view acts on — unchanged reasoning
+ * from the prior slice (`ViewPane`/`Pane` already receives a
+ * `layoutBody(height, width)` call from the Workbench's own layout
+ * pipeline). Below that top level, though, a split tab's two panes are laid
+ * out purely by CSS flexbox (`.plain-terminal-panecontainer`'s
+ * `flex-direction`, each `.plain-terminal-pane`'s `flex: 1 1 0`) — there is
+ * no Workbench-provided layout signal at that finer, self-managed
+ * granularity for this view to reuse. Rather than reimplementing that
+ * arithmetic (and risking it drifting from whatever the CSS actually
+ * renders), [`#layoutActivePanes`] simply reads each visible pane wrapper's
+ * own `getBoundingClientRect()` — a synchronous, same-tick measurement taken
+ * only at the handful of points this view itself already knows a layout
+ * pass is needed (a `layoutBody` call, or right after this view's own
+ * tab/split DOM mutation), never a second independent async signal racing
+ * `layoutBody` the way an actual `ResizeObserver` would.
  *
- * No reconnect/persistence story exists yet (deliberately out of scope —
- * see the research doc's "不做" list): disposing this view kills its
- * session outright.
+ * # Lifecycle: hidden retains, closed releases
+ *
+ * Switching away from a tab (or the whole Panel becoming not-visible while
+ * this view is simply not rendered, never disposed) never kills that tab's
+ * session — only an explicit close (a tab's own close button, `Plain: Kill
+ * Terminal`, this view being disposed, or the whole window closing via
+ * Rust's `TerminalService::close_window`) does. This falls out of the
+ * existing architecture with no extra code: a `ViewPane` that becomes
+ * invisible is not disposed by the Workbench (only genuinely destroying the
+ * view, e.g. the window closing, calls `dispose()`), so simply not tearing
+ * anything down on a mere visibility change already gives "hidden retains" —
+ * this view additionally applies the same rule to switching between its own
+ * self-managed tabs (an inactive tab's pane(s) keep running, just
+ * `display: none`), for the same reason a real browser tab or VS Code's own
+ * terminal tabs do not kill a shell just because it is not the foreground
+ * one right now.
  */
 export class PlainTerminalView extends ViewPane {
 	static readonly ID = "plain.workbench.view.terminal";
 
-	/** Guards async continuations (trust resolution, `terminalStart`) from
-	 * touching state after this view has been disposed — the same pattern
-	 * `PlainSearchView` uses for its own in-flight search. */
-	#generation = 0;
-	#started = false;
+	readonly #tabsModel = new TerminalTabsModel();
+	readonly #panes = new Map<string, TerminalPaneController>();
+	readonly #paneElements = new Map<string, HTMLElement>();
+	readonly #tabRecords = new Map<
+		string,
+		{ readonly tabButton: HTMLElement; readonly paneContainer: HTMLElement }
+	>();
 
-	#renderer: PlainTerminalRenderer | undefined;
-	#stream: TerminalStream | undefined;
-	#statusElement: HTMLElement | undefined;
-	#surfaceElement: HTMLElement | undefined;
-	#inputElement: HTMLTextAreaElement | undefined;
-	readonly #ime = new TerminalImeController();
-	#lastRequestedCols = 0;
-	#lastRequestedRows = 0;
+	#tabListElement: HTMLElement | undefined;
+	#paneAreaElement: HTMLElement | undefined;
+	#emptyStateElement: HTMLElement | undefined;
 
 	constructor(
 		options: IViewPaneOptions,
@@ -119,260 +126,284 @@ export class PlainTerminalView extends ViewPane {
 		super.renderBody(container);
 		container.classList.add("plain-terminal-view-body");
 
-		const status = document.createElement("div");
-		status.className = "plain-terminal-status";
-		status.setAttribute("role", "status");
+		const tabStrip = document.createElement("div");
+		tabStrip.className = "plain-terminal-tabstrip";
+		tabStrip.setAttribute("role", "tablist");
 
-		const surface = document.createElement("div");
-		surface.className = "plain-terminal-surface-wrapper";
+		const tabList = document.createElement("div");
+		tabList.className = "plain-terminal-tablist";
+		tabStrip.append(tabList);
 
-		// The single always-focused, visually hidden input surface: real
-		// `keydown`/`keyup`/`compositionstart`/`compositionupdate`/
-		// `compositionend`/`paste` events all need an editable element to
-		// fire reliably (a plain non-editable `<div>` does not reliably
-		// trigger IME composition in every browser) — the same "hidden
-		// textarea" technique most from-scratch terminal front-ends use.
-		const input = document.createElement("textarea");
-		input.className = "plain-terminal-input";
-		input.setAttribute("aria-label", "Terminal input");
-		input.setAttribute("autocomplete", "off");
-		input.setAttribute("autocorrect", "off");
-		input.setAttribute("autocapitalize", "off");
-		input.setAttribute("spellcheck", "false");
-		input.setAttribute("wrap", "off");
-		input.rows = 1;
+		const newTabButton = document.createElement("button");
+		newTabButton.type = "button";
+		newTabButton.className = "plain-terminal-tab-new";
+		newTabButton.setAttribute("aria-label", "New Terminal");
+		newTabButton.textContent = "+";
+		this._register(
+			addDisposableListener(newTabButton, "click", () => {
+				this.openNewTab();
+			}),
+		);
+		tabStrip.append(newTabButton);
 
-		container.append(status, surface, input);
-		this.#statusElement = status;
-		this.#surfaceElement = surface;
-		this.#inputElement = input;
+		const splitRightButton = document.createElement("button");
+		splitRightButton.type = "button";
+		splitRightButton.className = "plain-terminal-split-button";
+		splitRightButton.setAttribute("aria-label", "Split Terminal Right");
+		splitRightButton.textContent = "⬓";
+		this._register(
+			addDisposableListener(splitRightButton, "click", () => {
+				this.splitActiveTab("row");
+			}),
+		);
+		tabStrip.append(splitRightButton);
 
-		this.#renderer = new PlainTerminalRenderer({
-			container: surface,
-			onFramePainted: (sequence) => {
-				void this.#stream?.ack(sequence);
-			},
-		});
+		const splitDownButton = document.createElement("button");
+		splitDownButton.type = "button";
+		splitDownButton.className = "plain-terminal-split-button";
+		splitDownButton.setAttribute("aria-label", "Split Terminal Down");
+		splitDownButton.textContent = "⬒";
+		this._register(
+			addDisposableListener(splitDownButton, "click", () => {
+				this.splitActiveTab("column");
+			}),
+		);
+		tabStrip.append(splitDownButton);
 
-		this.#registerInputListeners(input);
+		const paneArea = document.createElement("div");
+		paneArea.className = "plain-terminal-panearea";
+
+		const emptyState = document.createElement("div");
+		emptyState.className = "plain-terminal-empty-state";
+		emptyState.textContent = "No terminals open.";
+		paneArea.append(emptyState);
+
+		container.append(tabStrip, paneArea);
+		this.#tabListElement = tabList;
+		this.#paneAreaElement = paneArea;
+		this.#emptyStateElement = emptyState;
 
 		this._register(
 			toDisposable(() => {
-				this.#generation += 1;
-				const stream = this.#stream;
-				this.#stream = undefined;
-				if (stream !== undefined) {
-					stream.dispose();
-					stream.kill(false).catch(() => {});
+				for (const pane of this.#panes.values()) {
+					pane.dispose();
 				}
-				this.#renderer?.dispose();
+				this.#panes.clear();
+				this.#paneElements.clear();
+				this.#tabRecords.clear();
 			}),
 		);
+
+		this.#syncTabVisibility();
 	}
 
 	protected override layoutBody(height: number, width: number): void {
 		super.layoutBody(height, width);
-		const surface = this.#surfaceElement;
-		if (surface === undefined || this.#renderer === undefined) {
+		const paneArea = this.#paneAreaElement;
+		if (paneArea === undefined) {
 			return;
 		}
-		surface.style.width = `${width}px`;
-		surface.style.height = `${height}px`;
-
-		const cellSize = this.#renderer.measureCellSizePx();
-		// A pane can be asked to lay out at a transient zero size — most
-		// commonly the very first `layoutBody` call, fired while the Panel
-		// reveal/expand animation has not yet settled to its real size (VS
-		// Code's own layout pipeline lays out every part, including ones
-		// still mid-reveal). Dividing by a zero-width probe measurement
-		// would otherwise produce `NaN`/`Infinity` cols/rows, which
-		// `frozenTerminalStartRequest`/`frozenTerminalResizeRequest` rightly
-		// reject as an invalid request — skip entirely and wait for the
-		// next, real `layoutBody` call instead of ever sending one.
-		if (
-			width <= 0 ||
-			height <= 0 ||
-			!Number.isFinite(cellSize.width) ||
-			!Number.isFinite(cellSize.height) ||
-			cellSize.width <= 0 ||
-			cellSize.height <= 0
-		) {
-			return;
-		}
-		const cols = Math.max(1, Math.floor(width / cellSize.width));
-		const rows = Math.max(1, Math.floor(height / cellSize.height));
-
-		if (!this.#started) {
-			this.#started = true;
-			this.#lastRequestedCols = cols;
-			this.#lastRequestedRows = rows;
-			void this.startSession(cols, rows);
-			return;
-		}
-		if (cols !== this.#lastRequestedCols || rows !== this.#lastRequestedRows) {
-			this.#lastRequestedCols = cols;
-			this.#lastRequestedRows = rows;
-			void this.#stream?.resize(cols, rows);
-		}
+		paneArea.style.width = `${width}px`;
+		paneArea.style.height = `${height}px`;
+		this.#layoutActivePanes();
 	}
 
 	override focus(): void {
 		super.focus();
-		this.#inputElement?.focus();
+		const activeTabId = this.#tabsModel.activeTabId;
+		if (activeTabId === undefined) {
+			return;
+		}
+		const paneId = this.#tabsModel.getTab(activeTabId)?.paneIds[0];
+		if (paneId !== undefined) {
+			this.#panes.get(paneId)?.focus();
+		}
 	}
 
-	private async startSession(cols: number, rows: number): Promise<void> {
-		const generation = this.#generation;
+	/** Creates a new tab (one pane), makes it active, and lays it out
+	 * immediately if this view already has a real size. `Plain: Create
+	 * Terminal` calls this every time it runs (after revealing/opening this
+	 * view) — see `plain-terminal-commands.ts`. */
+	openNewTab(): void {
+		const { tabId, paneId } = this.#tabsModel.createTab();
+		this.#createTabRecord(tabId);
+		this.#createPane(paneId, tabId);
+		this.#activateTab(tabId);
+	}
+
+	/** Closes the currently active tab (killing every one of its panes'
+	 * sessions) and activates whatever tab the model says is next, or shows
+	 * the empty state if none remain. A no-op if there is no active tab. */
+	closeActiveTab(): void {
+		const activeTabId = this.#tabsModel.activeTabId;
+		if (activeTabId === undefined) {
+			return;
+		}
+		this.#closeTab(activeTabId);
+	}
+
+	/** Splits the active tab along `orientation`, adding one more pane (this
+	 * slice caps a tab at two panes — see `TerminalTabsModel`'s own doc). A
+	 * no-op if there is no active tab, or it is already split. */
+	splitActiveTab(orientation: TerminalSplitOrientation): void {
+		const activeTabId = this.#tabsModel.activeTabId;
+		if (activeTabId === undefined) {
+			return;
+		}
+		const paneId = this.#tabsModel.splitTab(activeTabId, orientation);
+		if (paneId === undefined) {
+			return;
+		}
+		this.#createPane(paneId, activeTabId);
+		const record = this.#tabRecords.get(activeTabId);
+		if (record !== undefined) {
+			record.paneContainer.dataset.split = orientation;
+		}
+		this.#layoutActivePanes();
+	}
+
+	#createTabRecord(tabId: string): void {
+		const paneArea = this.#paneAreaElement;
+		if (paneArea === undefined) {
+			return;
+		}
+		const tabButton = document.createElement("div");
+		tabButton.className = "plain-terminal-tab";
+		tabButton.setAttribute("role", "tab");
+		tabButton.dataset.terminalTabId = tabId;
+		tabButton.dataset.active = "false";
+
+		const label = document.createElement("span");
+		label.className = "plain-terminal-tab-label";
+		label.textContent = this.#tabsModel.getTab(tabId)?.title ?? "Terminal";
+		tabButton.append(label);
+
+		const closeButton = document.createElement("button");
+		closeButton.type = "button";
+		closeButton.className = "plain-terminal-tab-close";
+		closeButton.setAttribute("aria-label", `Close ${label.textContent}`);
+		closeButton.textContent = "×";
+		this._register(
+			addDisposableListener(closeButton, "click", (event) => {
+				event.stopPropagation();
+				this.#closeTab(tabId);
+			}),
+		);
+		tabButton.append(closeButton);
+
+		this._register(
+			addDisposableListener(tabButton, "click", () => {
+				this.#activateTab(tabId);
+			}),
+		);
+
+		this.#tabListElement?.append(tabButton);
+
+		const paneContainer = document.createElement("div");
+		paneContainer.className = "plain-terminal-panecontainer";
+		paneContainer.dataset.terminalTabId = tabId;
+		paneContainer.dataset.active = "false";
+		paneContainer.dataset.split = "single";
+		paneArea.append(paneContainer);
+
+		this.#tabRecords.set(tabId, { tabButton, paneContainer });
+	}
+
+	#createPane(paneId: string, tabId: string): void {
+		const record = this.#tabRecords.get(tabId);
+		if (record === undefined) {
+			return;
+		}
+		const paneElement = document.createElement("div");
+		paneElement.dataset.terminalPaneId = paneId;
+		record.paneContainer.append(paneElement);
+		this.#paneElements.set(paneId, paneElement);
+
 		const bridge = requireTerminalBridge();
-		const isEmptyWorkspace =
-			this.workspaceContextService.getWorkspace().folders.length === 0;
-
-		const decision = await resolveTerminalTrust(
+		const controller = new TerminalPaneController({
+			container: paneElement,
 			bridge,
-			this.dialogService,
-			isEmptyWorkspace,
-		);
-		if (generation !== this.#generation) {
-			return;
-		}
-		if (decision.kind === "empty-workspace") {
-			this.#showStatus(TERMINAL_TRUST_EMPTY_WORKSPACE_STATUS_MESSAGE);
-			return;
-		}
-		if (decision.kind === "declined") {
-			this.#showStatus(TERMINAL_TRUST_DECLINED_STATUS_MESSAGE);
-			return;
-		}
-		this.#showStatus(undefined);
-
-		const stream = await openTerminalStream(
-			bridge,
-			{ cwd: null, cols, rows },
-			{
-				onFrame: (frame, sequence) => {
-					if (generation !== this.#generation) {
-						return;
-					}
-					this.#renderer?.applyFrame(frame, sequence);
-				},
-				onExit: () => {
-					// This slice renders no explicit "process exited" banner yet
-					// (see the class doc comment's "out of scope" note) — the
-					// last painted frame simply stays on screen. `onFrame` may
-					// still fire after this — see `terminal-stream.ts`'s own doc
-					// comment — so nothing is torn down here.
-				},
-			},
-		);
-		if (generation !== this.#generation) {
-			stream.dispose();
-			stream.kill(false).catch(() => {});
-			return;
-		}
-		this.#stream = stream;
-		void stream.focus(true);
-		this.#inputElement?.focus();
+			dialogService: this.dialogService,
+			isEmptyWorkspace: () =>
+				this.workspaceContextService.getWorkspace().folders.length === 0,
+		});
+		this.#panes.set(paneId, controller);
 	}
 
-	#showStatus(message: string | undefined): void {
-		const status = this.#statusElement;
-		if (status === undefined) {
+	#activateTab(tabId: string): void {
+		if (!this.#tabsModel.switchTab(tabId)) {
 			return;
 		}
-		status.textContent = message ?? "";
+		this.#syncTabVisibility();
+		this.#layoutActivePanes();
+		const paneId = this.#tabsModel.getTab(tabId)?.paneIds[0];
+		if (paneId !== undefined) {
+			this.#panes.get(paneId)?.focus();
+		}
 	}
 
-	#registerInputListeners(input: HTMLTextAreaElement): void {
-		const forwardKey = (
-			event: KeyboardEvent,
-			direction: "down" | "up",
-		): void => {
-			if (this.#ime.active) {
-				return;
-			}
-			const encoded = encodeTerminalKeyEvent(event, direction);
-			if (encoded === null) {
-				return;
-			}
-			event.preventDefault();
-			void this.#stream?.writeKey(
-				encoded.action,
-				encoded.key,
-				encoded.mods,
-				encoded.utf8,
-			);
-		};
+	#closeTab(tabId: string): void {
+		const closed = this.#tabsModel.closeTab(tabId);
+		if (closed === undefined) {
+			return;
+		}
+		for (const paneId of closed.closedPaneIds) {
+			this.#panes.get(paneId)?.dispose();
+			this.#panes.delete(paneId);
+			this.#paneElements.delete(paneId);
+		}
+		const record = this.#tabRecords.get(tabId);
+		record?.tabButton.remove();
+		record?.paneContainer.remove();
+		this.#tabRecords.delete(tabId);
 
-		this._register(
-			addDisposableListener(input, "keydown", (event) => {
-				forwardKey(event, "down");
-			}),
-		);
-		this._register(
-			addDisposableListener(input, "keyup", (event) => {
-				forwardKey(event, "up");
-			}),
-		);
-		this._register(
-			addDisposableListener(input, "compositionstart", () => {
-				this.#ime.start();
-			}),
-		);
-		this._register(
-			addDisposableListener(input, "compositionupdate", (event) => {
-				// `event.data` is typed as a non-nullable `string` by the DOM
-				// lib, but defensively coerced here anyway — a synthetic
-				// composition event (browser automation, or a future
-				// non-conforming platform) is not guaranteed to actually carry
-				// one.
-				this.#ime.update({ data: event.data ?? "" });
-			}),
-		);
-		this._register(
-			addDisposableListener(input, "compositionend", (event) => {
-				const text = this.#ime.end({ data: event.data ?? "" });
-				input.value = "";
-				if (text.length > 0) {
-					void this.#stream?.writeText(text);
-				}
-			}),
-		);
-		this._register(
-			addDisposableListener(input, "paste", (event) => {
-				event.preventDefault();
-				const text = event.clipboardData?.getData("text/plain") ?? "";
-				if (text.length > 0) {
-					void this.#stream?.writeText(text);
-				}
-			}),
-		);
-		// Fallback catch-all: normal typing is always prevented at `keydown`
-		// (so it never reaches the textarea's own value) and paste is
-		// handled above, so this should only ever fire for an edge case
-		// (e.g. a platform committing IME text without a `compositionend`,
-		// or a drag-and-drop text drop) — see the module doc's IME section.
-		this._register(
-			addDisposableListener(input, "input", () => {
-				if (this.#ime.active) {
-					return;
-				}
-				const { value } = input;
-				if (value.length > 0) {
-					input.value = "";
-					void this.#stream?.writeText(value);
-				}
-			}),
-		);
-		this._register(
-			addDisposableListener(input, "focus", () => {
-				void this.#stream?.focus(true);
-			}),
-		);
-		this._register(
-			addDisposableListener(input, "blur", () => {
-				void this.#stream?.focus(false);
-			}),
-		);
+		this.#syncTabVisibility();
+		if (closed.nextActiveTabId !== undefined) {
+			this.#layoutActivePanes();
+			const nextPaneId = this.#tabsModel.getTab(closed.nextActiveTabId)
+				?.paneIds[0];
+			if (nextPaneId !== undefined) {
+				this.#panes.get(nextPaneId)?.focus();
+			}
+		}
+	}
+
+	/** Toggles every tab button's/pane container's `data-active` attribute
+	 * (the CSS hook that shows exactly one pane container and highlights
+	 * exactly one tab button) and the empty-state placeholder to match the
+	 * model's current `activeTabId`/tab count. */
+	#syncTabVisibility(): void {
+		const activeTabId = this.#tabsModel.activeTabId;
+		for (const [tabId, record] of this.#tabRecords) {
+			const active = tabId === activeTabId;
+			record.tabButton.dataset.active = active ? "true" : "false";
+			record.paneContainer.dataset.active = active ? "true" : "false";
+		}
+		const emptyState = this.#emptyStateElement;
+		if (emptyState !== undefined) {
+			emptyState.style.display =
+				this.#tabsModel.tabs.length === 0 ? "flex" : "none";
+		}
+	}
+
+	#layoutActivePanes(): void {
+		const activeTabId = this.#tabsModel.activeTabId;
+		if (activeTabId === undefined) {
+			return;
+		}
+		const tab = this.#tabsModel.getTab(activeTabId);
+		if (tab === undefined) {
+			return;
+		}
+		for (const paneId of tab.paneIds) {
+			const paneElement = this.#paneElements.get(paneId);
+			const controller = this.#panes.get(paneId);
+			if (paneElement === undefined || controller === undefined) {
+				continue;
+			}
+			const rect = paneElement.getBoundingClientRect();
+			controller.layout(rect.width, rect.height);
+		}
 	}
 }
 

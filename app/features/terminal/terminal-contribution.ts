@@ -24,10 +24,15 @@ export const TERMINAL_VIEW_ID = PlainTerminalView.ID;
  * override/xterm.js). This is a from-scratch registration, not an import of
  * any upstream `terminal.contribution.js` — that file (part of
  * `@codingame/monaco-vscode-terminal-service-override`, never imported by
- * Plain at all) additionally wires xterm.js, shell integration, task
- * integration, and tab/split UI this slice deliberately does not build yet
- * (see `docs/research/2026-07-24-libghostty-terminal.md`'s slice list: "多
- * tab/split + 生命周期 + scrollback" is the next slice).
+ * Plain at all) additionally wires xterm.js, shell integration and task
+ * integration this domain does not build at all.
+ *
+ * Multiple tabs and splits (F070 "多 tab/split/scrollback + 生命周期" slice)
+ * are *not* multiple registered views/view-containers — this remains
+ * exactly one view container and one view pane, which self-manages a small
+ * tab strip internally (see `plain-terminal-view.ts`'s own module doc for
+ * why: registering N views for N open terminals has no supported "do this
+ * at runtime" upstream API and was rejected).
  *
  * `doNotRegisterOpenCommand: true` mirrors `search-contribution.ts`'s own
  * choice: Plain registers its own `Plain: Create Terminal` command instead

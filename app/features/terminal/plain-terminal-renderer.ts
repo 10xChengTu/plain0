@@ -5,6 +5,7 @@ import type {
 	TerminalCursorStyle,
 	TerminalFrame,
 	TerminalRgb,
+	TerminalScrollbackRow,
 	TerminalStyle,
 } from "../../platform/tauri/contracts";
 
@@ -29,6 +30,28 @@ import type {
  *   division of labor `PlainSearchView` (DOM-heavy, no dedicated unit test
  *   file) vs. `plain-search-service.ts` (DOM-free, unit-tested) already
  *   establishes for this repository.
+ *
+ * # Scrollback view mode (F070 "多 tab/split/scrollback" slice)
+ *
+ * [`PlainTerminalRenderer`] can show one of two things at a time: the
+ * normal, continuously-updated live viewport (unchanged from the prior
+ * slice), or a fetched window of [`TerminalScrollbackRow`]s via
+ * [`showScrollbackRows`] — never both. While showing history,
+ * [`applyFrame`] still updates the retained [`TerminalGridModel`] (so
+ * `TerminalPaneController.scrollController`'s eventual [`showLive`] call
+ * repaints current content immediately, with nothing lost) and still drives
+ * the same `onFramePainted` ack callback (so VT → frontend frame backpressure
+ * keeps flowing even while a pane is parked in history — see
+ * `src-tauri/src/terminal/service.rs`'s "VT → frontend frame delivery
+ * backpressure" section), it just skips repainting the on-screen grid/cursor
+ * — exactly what `docs/research/2026-07-24-libghostty-terminal.md`'s "新输出
+ * 到达时若在历史位置不强制跳底" design requires. A resize arriving while in
+ * history mode (`frame.dirty === "full"` or a dimension change) is the one
+ * case that forces an implicit return to live: the cached history window's
+ * row/column shape would otherwise no longer match the grid it was painted
+ * into, and resizing while manually scrolled is a rare enough interaction
+ * that "snap back to live" is a reasonable, simple resolution rather than
+ * re-fetching/re-aligning a stale scrollback window.
  */
 
 const BLANK_STYLE: TerminalStyle = Object.freeze({
@@ -68,6 +91,31 @@ function normalizedRowCells(
 		result.push(cells[index] ?? BLANK_CELL);
 	}
 	return result;
+}
+
+/**
+ * Adapts one [`TerminalScrollbackRow`] into the same [`TerminalCell`] shape
+ * the live grid paints — `fg`/`bg` are always `null` (a scrollback cell
+ * carries no resolved color at all; see that type's own doc comment for why
+ * — palette resolution only happens for the live viewport), so history text
+ * paints in the pane's default foreground/background plus whatever
+ * bold/italic/underline/etc. attributes its `style` does carry. This is a
+ * deliberate scope limit for this slice (documented, not a bug): full
+ * per-cell scrollback color fidelity would need a `src-tauri` DTO change
+ * (resolving `libghostty_vt::style::StyleColor` against a captured palette)
+ * this slice does not make — see the F070 "多 tab/split/scrollback" slice
+ * report for the reasoning.
+ */
+function scrollbackCellAsTerminalCell(cell: {
+	readonly graphemes: string;
+	readonly style: TerminalStyle;
+}): TerminalCell {
+	return Object.freeze({
+		graphemes: cell.graphemes,
+		fg: null,
+		bg: null,
+		style: cell.style,
+	});
 }
 
 export interface TerminalGridApplyResult {
@@ -337,6 +385,8 @@ export class PlainTerminalRenderer {
 	#pendingRows = new Set<number>();
 	#pendingSequence: number | undefined;
 	#paintScheduled = false;
+	/** See the module doc's "Scrollback view mode" section. */
+	#viewMode: "live" | "history" = "live";
 
 	constructor(options: PlainTerminalRendererOptions) {
 		this.#container = options.container;
@@ -378,6 +428,84 @@ export class PlainTerminalRenderer {
 		return Object.freeze({ width: rect.width / 50, height: rect.height });
 	}
 
+	/** The live grid's current row/column count — `TerminalPaneController`
+	 * uses these to size its scrollback fetch window (see
+	 * `plain-terminal-pane.ts`), not just for layout. */
+	get rows(): number {
+		return this.#model.rows;
+	}
+
+	get cols(): number {
+		return this.#model.cols;
+	}
+
+	/** `true` while showing a fetched scrollback window instead of the live
+	 * viewport — see the module doc's "Scrollback view mode" section. */
+	get isViewingHistory(): boolean {
+		return this.#viewMode === "history";
+	}
+
+	/**
+	 * Paints `rows` (oldest first, at most [`rows`][PlainTerminalRenderer#rows]
+	 * entries — see the module doc) as a static scrollback window, hiding the
+	 * cursor, and stops applying further live paints until [`showLive`] is
+	 * called again. Fewer rows than the viewport height are padded with
+	 * blank rows *above* the real content, so the newest of `rows` always
+	 * lands on the viewport's bottom line — the same "not enough history yet"
+	 * blank space a real terminal shows near the very top of its scrollback.
+	 */
+	showScrollbackRows(rows: readonly TerminalScrollbackRow[]): void {
+		if (this.#rowElements.length === 0) {
+			// No live frame has painted yet (so there is no row DOM to reuse,
+			// and no sensible cols/rows to align against) — scrolling before a
+			// session has ever rendered anything is a no-op.
+			return;
+		}
+		this.#viewMode = "history";
+		const viewportRows = this.#model.rows;
+		const cols = this.#model.cols;
+		const visible = rows.slice(Math.max(0, rows.length - viewportRows));
+		const padCount = Math.max(0, viewportRows - visible.length);
+		const colors = this.#model.colors;
+		if (colors === undefined) {
+			return;
+		}
+		for (let index = 0; index < padCount; index += 1) {
+			const rowElement = this.#rowElements[index];
+			if (rowElement !== undefined) {
+				this.#paintRowCells(rowElement, blankRow(cols), colors);
+			}
+		}
+		for (const [offset, row] of visible.entries()) {
+			const rowElement = this.#rowElements[padCount + offset];
+			if (rowElement === undefined) {
+				continue;
+			}
+			const cells = normalizedRowCells(
+				row.cells.map(scrollbackCellAsTerminalCell),
+				cols,
+			);
+			this.#paintRowCells(rowElement, cells, colors);
+		}
+		this.#cursorElement.style.display = "none";
+	}
+
+	/** Returns to the live viewport, immediately repainting every row (and
+	 * the cursor) from the retained model's *current* state — frames kept
+	 * updating that model the whole time a pane was showing history (see the
+	 * module doc), so this reflects up-to-the-moment content, not whatever
+	 * was last live before scrolling away. A no-op if already live. */
+	showLive(): void {
+		if (this.#viewMode === "live") {
+			return;
+		}
+		this.#viewMode = "live";
+		for (let rowIndex = 0; rowIndex < this.#model.rows; rowIndex += 1) {
+			this.#paintRow(rowIndex);
+		}
+		this.#paintCursor();
+	}
+
 	/** Applies one frame onto the retained model, then schedules (but does
 	 * not immediately perform) a DOM paint — see the class doc comment for
 	 * why multiple calls within one animation frame coalesce into a single
@@ -411,6 +539,25 @@ export class PlainTerminalRenderer {
 		this.#pendingRebuild = false;
 		this.#pendingRows = new Set();
 		this.#pendingSequence = undefined;
+
+		if (this.#viewMode === "history" && rebuild) {
+			// Dimensions changed (or a full redraw arrived) while a pane was
+			// showing history — the cached window's shape no longer matches
+			// the grid it was painted into. See the module doc's "Scrollback
+			// view mode" section for why falling back to live here (rather
+			// than trying to re-align a stale window) is this slice's chosen
+			// behavior.
+			this.#viewMode = "live";
+		} else if (this.#viewMode === "history") {
+			// Model already absorbed this frame above (via `applyFrame`); the
+			// on-screen history view itself is left untouched, but backpressure
+			// still needs this frame acked exactly as if it had been painted —
+			// see the module doc.
+			if (sequence !== undefined) {
+				this.#onFramePainted(sequence);
+			}
+			return;
+		}
 
 		const colors = this.#model.colors;
 		if (colors === undefined) {
@@ -460,6 +607,18 @@ export class PlainTerminalRenderer {
 		) {
 			return;
 		}
+		this.#paintRowCells(rowElement, cells, colors);
+	}
+
+	/** Shared by the live-model path ([`#paintRow`]) and the scrollback path
+	 * ([`showScrollbackRows`]) — paints an arbitrary cell array into
+	 * `rowElement`, reusing its existing `<span>` run elements where
+	 * possible. */
+	#paintRowCells(
+		rowElement: HTMLElement,
+		cells: readonly TerminalCell[],
+		colors: TerminalColors,
+	): void {
 		const runs = groupRowRuns(cells);
 		const spans = rowElement.children;
 		while (spans.length > runs.length) {

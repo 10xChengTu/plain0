@@ -49,6 +49,113 @@ body[data-plain-ready="error"] #plain-bootstrap-status {
 	position: relative;
 }
 
+/* F070 "多 tab/split/scrollback" — tab strip + split pane layout. Functional
+ * styling only, same precedent as the rest of this domain's CSS. */
+.plain-terminal-tabstrip {
+	display: flex;
+	flex: 0 0 auto;
+	align-items: center;
+	gap: 2px;
+	padding: 2px 4px;
+	border-bottom: 1px solid #3c3c3c;
+	background: #1f1f1f;
+}
+
+.plain-terminal-tablist {
+	display: flex;
+	flex: 1 1 auto;
+	overflow-x: auto;
+	gap: 2px;
+}
+
+.plain-terminal-tab {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 3px 6px;
+	border-radius: 3px;
+	white-space: nowrap;
+	cursor: pointer;
+	color: #cccccc;
+}
+
+.plain-terminal-tab[data-active="true"] {
+	background: #37373d;
+}
+
+.plain-terminal-tab-label {
+	font-size: 0.8rem;
+}
+
+.plain-terminal-tab-close,
+.plain-terminal-tab-new,
+.plain-terminal-split-button {
+	flex: 0 0 auto;
+	border: 0;
+	background: transparent;
+	color: #cccccc;
+	cursor: pointer;
+	line-height: 1;
+	padding: 2px 6px;
+	border-radius: 3px;
+}
+
+.plain-terminal-tab-close:hover,
+.plain-terminal-tab-new:hover,
+.plain-terminal-split-button:hover {
+	background: #37373d;
+}
+
+.plain-terminal-panearea {
+	position: relative;
+	flex: 1 1 auto;
+	overflow: hidden;
+}
+
+.plain-terminal-panecontainer {
+	position: absolute;
+	inset: 0;
+	display: flex;
+}
+
+.plain-terminal-panecontainer[data-active="false"] {
+	display: none;
+}
+
+.plain-terminal-panecontainer[data-split="column"] {
+	flex-direction: column;
+}
+
+.plain-terminal-panecontainer[data-split="row"]
+	> .plain-terminal-pane
+	+ .plain-terminal-pane {
+	border-left: 1px solid #3c3c3c;
+}
+
+.plain-terminal-panecontainer[data-split="column"]
+	> .plain-terminal-pane
+	+ .plain-terminal-pane {
+	border-top: 1px solid #3c3c3c;
+}
+
+.plain-terminal-empty-state {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	height: 100%;
+	color: #808080;
+	font-size: 0.85rem;
+}
+
+.plain-terminal-pane {
+	position: relative;
+	flex: 1 1 0;
+	min-width: 0;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+}
+
 .plain-terminal-status {
 	padding: 0.25rem 0.75rem;
 	font-size: 0.85rem;
