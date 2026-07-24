@@ -4,10 +4,12 @@
 //!
 //! # Per-session thread model
 //!
-//! Every session owns exactly three dedicated OS threads, mirroring
-//! `search::text_search`'s "one dedicated thread per streaming task"
-//! precedent but split into three roles because a PTY session has three
-//! independent things that can each block indefinitely on their own:
+//! Every session owns three dedicated OS threads for its core pty lifecycle
+//! (plus a fourth, independent one for VT integration — see the "VT
+//! integration" section below), mirroring `search::text_search`'s "one
+//! dedicated thread per streaming task" precedent but split into three roles
+//! because a PTY session has three independent things that can each block
+//! indefinitely on their own:
 //!
 //! 1. **reader** (`plain-terminal-<id>`) — the only thread that ever calls
 //!    the blocking `read()` on the pty master. Before every read it calls
@@ -54,11 +56,63 @@
 //!    scope (see `terminal::commands` module doc); the mitigation lives in
 //!    `app/platform/tauri/terminal-stream.ts` instead, which does not treat
 //!    "exit observed" as "no more data will arrive".
+//!
+//! # VT integration (F070 "VT 集成" slice)
+//!
+//! Every session also owns a fourth thread, **vt** (`plain-terminal-vt-<id>`)
+//! — the sole owner, for the session's whole lifetime, of a [`vt::VtSession`]
+//! (a `libghostty-vt` terminal mirroring the same bytes the raw pty-echo path
+//! above already delivers). `libghostty-vt`'s types are not `Send`/`Sync`
+//! (see `vt.rs`'s module doc), so `VtSession` must be confined to exactly one
+//! thread; this is a *separate* thread from the reader — not the reader
+//! itself — for a load-bearing reason: real `libghostty-vt` `feed`/render
+//! calls measured multiple milliseconds *per call* under a debug-mode Zig
+//! build (`cargo test`'s default profile — see `build.rs`'s
+//! `zig_optimize_mode()`), which is negligible for a human typing but easily
+//! adds up to whole seconds against the high-throughput byte volumes this
+//! domain's own flow-control/backpressure tests deliberately generate. Doing
+//! this work inline in the reader thread's loop measurably slowed the
+//! *entire* pty read cycle and broke those tests' timing assumptions in
+//! practice (confirmed by running them before settling on this design).
+//! Giving the VT mirror its own thread means the reader's loop — and every
+//! test in `service/tests.rs` that depends on its exact timing/throughput —
+//! is completely unaffected by how fast or slow VT processing happens to be.
+//!
+//! The reader thread forwards a clone of every chunk's bytes to the vt
+//! thread over an **unbounded** channel (deliberately not the bounded
+//! `sync_channel` the reader/delivery channel uses): a `send` on an
+//! unbounded channel never blocks, so even if the vt thread falls behind,
+//! the reader is never slowed or paused by it — this is a strictly
+//! *best-effort* mirror, not a component the reader depends on. The vt
+//! thread's own queue backlog is bounded in practice by how much output ever
+//! passes through a single session (the same real, finite pty byte stream
+//! the rest of this domain already handles), not by anything unbounded in
+//! principle.
+//!
+//! What crosses back is the fully-owned, `Send`-safe [`vt::DirtyFrame`] the
+//! vt thread produces after each `feed`: it is written into
+//! [`TerminalSession::vt_frame`], a `Mutex` any other thread may read (today:
+//! this domain's own tests; a later "IPC 改造" slice's `terminal_start`/event
+//! wiring). Both `VtSession` construction and each `feed`/`dirty_frame` pass
+//! are best-effort in the same sense as the rest of this section: a
+//! construction failure (e.g. out of memory) simply leaves this session's VT
+//! mirror absent for its whole lifetime, and a `dirty_frame` failure just
+//! skips that one update — neither ever affects the reader/delivery/waiter
+//! threads or the raw-byte pipeline they run, since this integration's own
+//! correctness must never regress the pty session itself. The vt thread
+//! ends once its channel disconnects (the reader thread — the sole holder of
+//! the sending half — has ended), exactly mirroring how the delivery thread
+//! already ends once *its* channel disconnects.
+//!
+//! `resize` is not yet wired to the vt thread's `VtSession` (only
+//! `PtySize`/the real pty master resize below is): that hand-off, along with
+//! the input-encoding IPC command, is deferred to F070's "IPC 改造" slice;
+//! `VtSession::resize`'s own behavior is unit-tested directly in `vt.rs`.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 
@@ -71,6 +125,7 @@ use crate::workspace::service::WorkspaceService;
 use super::dto::TerminalSessionId;
 use super::flow::FlowControl;
 use super::shell;
+use super::vt;
 use super::{
     terminal_cwd_invalid, terminal_io_failed, terminal_session_limit_exceeded,
     terminal_session_not_found, terminal_unavailable, MAX_TERMINAL_SESSIONS_PER_WINDOW,
@@ -131,6 +186,7 @@ struct SessionThreads {
     reader: Option<JoinHandle<()>>,
     delivery: Option<JoinHandle<()>>,
     waiter: Option<JoinHandle<()>>,
+    vt: Option<JoinHandle<()>>,
 }
 
 struct TerminalSession {
@@ -139,6 +195,17 @@ struct TerminalSession {
     writer: Mutex<Box<dyn Write + Send>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     threads: Mutex<SessionThreads>,
+    /// The reader thread's latest [`vt::DirtyFrame`], if its [`vt::VtSession`]
+    /// constructed successfully — see the module doc's "VT integration"
+    /// section. `Arc` (rather than a plain field) so a clone can be moved
+    /// into the reader thread's closure independently of the rest of this
+    /// struct, which that thread otherwise never touches. Written by every
+    /// reader thread in production; only read today by
+    /// `TerminalService::latest_vt_frame_for_test` (`#[cfg(test)]`) — a real
+    /// production reader is added once F070's "IPC 改造" slice wires it to
+    /// an event.
+    #[allow(dead_code)]
+    vt_frame: Arc<Mutex<Option<vt::DirtyFrame>>>,
 }
 
 /// Rust-authoritative PTY terminal domain, `.manage()`d exactly once by
@@ -288,6 +355,7 @@ impl TerminalService {
 
             let session_id = TerminalSessionId::new();
             let flow = Arc::new(FlowControl::new());
+            let vt_frame = Arc::new(Mutex::new(None));
             let session = Arc::new(TerminalSession {
                 flow: Arc::clone(&flow),
                 master: Mutex::new(pair.master),
@@ -297,16 +365,23 @@ impl TerminalService {
                     reader: None,
                     delivery: None,
                     waiter: None,
+                    vt: None,
                 }),
+                vt_frame: Arc::clone(&vt_frame),
             });
 
             let (sender, receiver) =
                 mpsc::sync_channel::<TerminalChunk>(TERMINAL_CHUNK_QUEUE_CAPACITY);
+            // Deliberately *unbounded* — see the module doc's "VT
+            // integration" section for why a `send` here must never block
+            // the reader thread, no matter how far behind the vt thread
+            // falls.
+            let (vt_sender, vt_receiver) = mpsc::channel::<Vec<u8>>();
 
             let reader_flow = Arc::clone(&flow);
             let reader_thread = std::thread::Builder::new()
                 .name(format!("plain-terminal-{}", session_id.as_wire()))
-                .spawn(move || run_reader(reader, &reader_flow, &sender))
+                .spawn(move || run_reader(reader, &reader_flow, &sender, &vt_sender))
                 .ok();
 
             let delivery_sink = Arc::clone(&sink);
@@ -329,11 +404,17 @@ impl TerminalService {
                 })
                 .ok();
 
+            let vt_thread = std::thread::Builder::new()
+                .name(format!("plain-terminal-vt-{}", session_id.as_wire()))
+                .spawn(move || run_vt(cols, rows, &vt_receiver, &vt_frame))
+                .ok();
+
             {
                 let mut threads = lock(&session.threads);
                 threads.reader = reader_thread;
                 threads.delivery = delivery_thread;
                 threads.waiter = waiter_thread;
+                threads.vt = vt_thread;
             }
 
             sessions.insert(session_id, session);
@@ -490,6 +571,22 @@ impl TerminalService {
         let session = self.get_session(window_label, session_id)?;
         Ok(session.flow.is_paused())
     }
+
+    /// The vt thread's most recently published [`vt::DirtyFrame`] for
+    /// this session, if its `VtSession` has produced one yet — see the
+    /// module doc's "VT integration" section. `None` either means no VT
+    /// update has landed yet (a benign race the caller should simply retry)
+    /// or that this session's `VtSession` failed to construct.
+    #[cfg(test)]
+    pub(crate) fn latest_vt_frame_for_test(
+        &self,
+        window_label: &str,
+        session_id: TerminalSessionId,
+    ) -> Result<Option<vt::DirtyFrame>, CommandError> {
+        let session = self.get_session(window_label, session_id)?;
+        let frame = lock(&session.vt_frame).clone();
+        Ok(frame)
+    }
 }
 
 /// Resolves and validates `cwd`: if provided, it must canonicalize to a path
@@ -532,6 +629,7 @@ fn run_reader(
     mut reader: Box<dyn Read + Send>,
     flow: &FlowControl,
     sender: &SyncSender<TerminalChunk>,
+    vt_sender: &Sender<Vec<u8>>,
 ) {
     let mut sequence: u64 = 0;
     let mut buffer = [0_u8; TERMINAL_READ_BUFFER_BYTES];
@@ -544,13 +642,51 @@ fn run_reader(
             Ok(read) => read,
         };
         flow.record_read(read);
+        let bytes = &buffer[..read];
+
+        // The raw byte chunk goes to the delivery thread exactly as it
+        // always has in this domain — this loop's shape/timing is otherwise
+        // completely unchanged from before the VT integration existed. The
+        // `vt_sender` forward below is a cheap, non-blocking hand-off to a
+        // fully independent thread — see the module doc's "VT integration"
+        // section for why this is deliberately not the same work done
+        // inline here.
         let chunk = TerminalChunk {
             sequence,
-            bytes: buffer[..read].to_vec(),
+            bytes: bytes.to_vec(),
         };
         sequence = sequence.wrapping_add(1);
         if sender.send(chunk).is_err() {
             return;
+        }
+
+        // Best-effort: a disconnected receiver (the vt thread ended, e.g.
+        // its `VtSession` failed to construct) just means this session runs
+        // without a VT mirror from then on — never a reason to stop reading
+        // the pty itself.
+        let _ = vt_sender.send(bytes.to_vec());
+    }
+}
+
+/// Owns this session's [`vt::VtSession`] for the session's whole lifetime —
+/// see the module doc's "VT integration" section for why this lives on its
+/// own thread rather than inside [`run_reader`]. Ends once `receiver`
+/// disconnects, i.e. once the reader thread (the sole holder of the sending
+/// half) has ended — mirroring exactly how [`run_delivery`] ends once *its*
+/// channel disconnects.
+fn run_vt(
+    cols: u16,
+    rows: u16,
+    receiver: &Receiver<Vec<u8>>,
+    vt_frame: &Mutex<Option<vt::DirtyFrame>>,
+) {
+    let Ok(mut session) = vt::VtSession::new(cols, rows) else {
+        return;
+    };
+    while let Ok(bytes) = receiver.recv() {
+        session.feed(&bytes);
+        if let Ok(frame) = session.dirty_frame() {
+            *lock(vt_frame) = Some(frame);
         }
     }
 }
@@ -608,10 +744,18 @@ fn terminate_session(session: &TerminalSession, join: bool) {
         if let Some(handle) = threads.waiter.take() {
             let _ = handle.join();
         }
+        // Joined last and always after the reader: the vt thread's own
+        // shutdown is driven by the reader thread dropping its `Sender`
+        // (see `run_vt`'s doc), so joining it before the reader would just
+        // mean waiting on a channel that has not disconnected yet.
+        if let Some(handle) = threads.vt.take() {
+            let _ = handle.join();
+        }
     } else {
         threads.reader = None;
         threads.delivery = None;
         threads.waiter = None;
+        threads.vt = None;
     }
 }
 

@@ -8224,11 +8224,21 @@ describe("Plain F070 S1 trust/terminal Rust boundary contracts", () => {
 	const terminalCargo = `
 [dependencies]
 portable-pty = "=0.9.0"
+libghostty-vt = "=0.2.1"
 `;
 
 	const exactPortablePtyDependency = Object.freeze({
 		name: "portable-pty",
 		req: "=0.9.0",
+		kind: null,
+		rename: null,
+		target: null,
+		optional: false,
+	});
+
+	const exactLibghosttyVtDependency = Object.freeze({
+		name: "libghostty-vt",
+		req: "=0.2.1",
 		kind: null,
 		rename: null,
 		target: null,
@@ -8258,6 +8268,9 @@ pub(crate) const TERMINAL_ENV_LC_PREFIX: &str = "LC_";
 pub(crate) const TERMINAL_ENV_TERM: (&str, &str) = ("TERM", "xterm-256color");
 pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor");
 `;
+	const terminalVtSource = `
+pub(crate) const TERMINAL_VT_MAX_SCROLLBACK_LINES: usize = 10_000;
+`;
 
 	const baselineTerminalRustSources = Object.freeze([
 		{
@@ -8276,6 +8289,10 @@ pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor
 			relativePath: "src-tauri/src/terminal/shell.rs",
 			source: terminalShellSource,
 		},
+		{
+			relativePath: "src-tauri/src/terminal/vt.rs",
+			source: terminalVtSource,
+		},
 	]);
 
 	function withHostileTerminalFile(relativePath, source) {
@@ -8286,6 +8303,7 @@ pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor
 		expect(
 			validateTerminalRustBoundary(baselineTerminalRustSources, terminalCargo, [
 				exactPortablePtyDependency,
+				exactLibghosttyVtDependency,
 			]),
 		).toEqual([]);
 	});
@@ -8295,7 +8313,7 @@ pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor
 			validateTerminalRustBoundary(
 				baselineTerminalRustSources,
 				"[dependencies]\n",
-				[exactPortablePtyDependency],
+				[exactPortablePtyDependency, exactLibghosttyVtDependency],
 			),
 		).toContain("Cargo.toml must pin portable-pty to =0.9.0");
 		expect(
@@ -8311,6 +8329,32 @@ pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor
 			]),
 		).toContain(
 			"Cargo metadata must contain exactly one unrenamed runtime portable-pty =0.9.0 dependency",
+		);
+	});
+
+	it("requires the exact libghostty-vt =0.2.1 pin in Cargo.toml and metadata (F070 VT 集成)", () => {
+		expect(
+			validateTerminalRustBoundary(
+				baselineTerminalRustSources,
+				'[dependencies]\nportable-pty = "=0.9.0"\n',
+				[exactPortablePtyDependency, exactLibghosttyVtDependency],
+			),
+		).toContain("Cargo.toml must pin libghostty-vt to =0.2.1");
+		expect(
+			validateTerminalRustBoundary(baselineTerminalRustSources, terminalCargo, [
+				exactPortablePtyDependency,
+				{ ...exactLibghosttyVtDependency, req: "0.2" },
+			]),
+		).toContain(
+			"Cargo metadata must contain exactly one unrenamed runtime libghostty-vt =0.2.1 dependency",
+		);
+		expect(
+			validateTerminalRustBoundary(baselineTerminalRustSources, terminalCargo, [
+				exactPortablePtyDependency,
+				{ ...exactLibghosttyVtDependency, rename: "ghostty_vt" },
+			]),
+		).toContain(
+			"Cargo metadata must contain exactly one unrenamed runtime libghostty-vt =0.2.1 dependency",
 		);
 	});
 
@@ -8332,7 +8376,7 @@ pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor
 				'fn run() {\n    let _ = std::process::Command::new("ls");\n}\n',
 			),
 			terminalCargo,
-			[exactPortablePtyDependency],
+			[exactPortablePtyDependency, exactLibghosttyVtDependency],
 		);
 		expect(
 			failures.some((failure) =>
@@ -8350,7 +8394,7 @@ pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor
 				'fn run(mut command: portable_pty::CommandBuilder) {\n    command.arg("-c");\n}\n',
 			),
 			terminalCargo,
-			[exactPortablePtyDependency],
+			[exactPortablePtyDependency, exactLibghosttyVtDependency],
 		);
 		expect(
 			failures.some((failure) =>
@@ -8368,7 +8412,7 @@ pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor
 				'//! Never use std::process::Command or .arg("-c") in this domain.\nfn run() {}\n',
 			),
 			terminalCargo,
-			[exactPortablePtyDependency],
+			[exactPortablePtyDependency, exactLibghosttyVtDependency],
 		);
 		expect(failures).toEqual([]);
 	});
@@ -8380,7 +8424,7 @@ pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor
 				'fn spawn_fixture() {\n    let mut c = portable_pty::CommandBuilder::new("sh");\n    c.args(["-c", "echo hi"]);\n}\n',
 			),
 			terminalCargo,
-			[exactPortablePtyDependency],
+			[exactPortablePtyDependency, exactLibghosttyVtDependency],
 		);
 		expect(failures).toEqual([]);
 	});
@@ -8400,6 +8444,7 @@ pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor
 		expect(
 			validateTerminalRustBoundary(wrongHighWaterMark, terminalCargo, [
 				exactPortablePtyDependency,
+				exactLibghosttyVtDependency,
 			]),
 		).toContain(
 			"src-tauri/src/terminal/flow.rs must define exactly one TERMINAL_FLOW_HIGH_WATER_MARK: usize = 100000",
@@ -8411,9 +8456,30 @@ pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor
 		expect(
 			validateTerminalRustBoundary(missingSessionLimit, terminalCargo, [
 				exactPortablePtyDependency,
+				exactLibghosttyVtDependency,
 			]),
 		).toContain(
 			"terminal budget boundary requires src-tauri/src/terminal/mod.rs",
+		);
+
+		// F070 "VT 集成" slice: the scrollback cap is a budget constant of the
+		// same kind, locked the same way.
+		const wrongScrollbackCap = withHostileTerminalFile(
+			"src-tauri/src/terminal/vt.rs",
+			"pub(crate) const TERMINAL_VT_MAX_SCROLLBACK_LINES: usize = 5_000;\n",
+		).filter((entry) => entry.relativePath !== "src-tauri/src/terminal/vt.rs");
+		wrongScrollbackCap.push({
+			relativePath: "src-tauri/src/terminal/vt.rs",
+			source:
+				"pub(crate) const TERMINAL_VT_MAX_SCROLLBACK_LINES: usize = 5_000;\n",
+		});
+		expect(
+			validateTerminalRustBoundary(wrongScrollbackCap, terminalCargo, [
+				exactPortablePtyDependency,
+				exactLibghosttyVtDependency,
+			]),
+		).toContain(
+			"src-tauri/src/terminal/vt.rs must define exactly one TERMINAL_VT_MAX_SCROLLBACK_LINES: usize = 10000",
 		);
 	});
 
@@ -8435,6 +8501,7 @@ pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor
 		expect(
 			validateTerminalRustBoundary(widenedAllowlist, terminalCargo, [
 				exactPortablePtyDependency,
+				exactLibghosttyVtDependency,
 			]),
 		).toContain(
 			"terminal/shell.rs must define TERMINAL_ENV_PASSTHROUGH_NAMES as exactly the audited name list",
@@ -8457,6 +8524,7 @@ pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor
 		expect(
 			validateTerminalRustBoundary(wrongTerm, terminalCargo, [
 				exactPortablePtyDependency,
+				exactLibghosttyVtDependency,
 			]),
 		).toContain(
 			'terminal/shell.rs must define TERMINAL_ENV_TERM: (&str, &str) = ("TERM", "xterm-256color")',

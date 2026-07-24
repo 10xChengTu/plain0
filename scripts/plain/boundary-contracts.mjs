@@ -5492,6 +5492,12 @@ const TERMINAL_BUDGET_LIMITS = Object.freeze([
 		"usize",
 		"src-tauri/src/terminal/service.rs",
 	],
+	[
+		"TERMINAL_VT_MAX_SCROLLBACK_LINES",
+		10_000,
+		"usize",
+		"src-tauri/src/terminal/vt.rs",
+	],
 ]);
 
 const TERMINAL_ENV_PASSTHROUGH_NAMES_LOCK = Object.freeze([
@@ -5595,6 +5601,33 @@ export function validateTerminalRustBoundary(
 	if (!hasExactPortablePty) {
 		failures.push(
 			"Cargo metadata must contain exactly one unrenamed runtime portable-pty =0.9.0 dependency",
+		);
+	}
+
+	// F070 "VT 集成" slice (docs/research/2026-07-24-libghostty-terminal.md):
+	// `libghostty-vt` is a pre-1.0 FFI crate pinned to an exact version for
+	// the same reason `portable-pty` is above — an unpinned range could pull
+	// in a breaking API change (or a different pinned Ghostty commit inside
+	// `libghostty-vt-sys`'s build.rs) silently.
+	if (
+		!cargoDependencyDeclaration("libghostty-vt", "=0.2.1").test(cargoSource)
+	) {
+		failures.push("Cargo.toml must pin libghostty-vt to =0.2.1");
+	}
+	const libghosttyVtDependencies = cargoDependencies.filter(
+		({ name }) => name === "libghostty-vt",
+	);
+	const hasExactLibghosttyVt = libghosttyVtDependencies.some(
+		(candidate) =>
+			candidate.req === "=0.2.1" &&
+			candidate.kind === null &&
+			candidate.rename === null &&
+			candidate.target === null &&
+			candidate.optional === false,
+	);
+	if (!hasExactLibghosttyVt) {
+		failures.push(
+			"Cargo metadata must contain exactly one unrenamed runtime libghostty-vt =0.2.1 dependency",
 		);
 	}
 	for (const dependency of FORBIDDEN_SPAWN_BYPASS_DEPENDENCIES) {

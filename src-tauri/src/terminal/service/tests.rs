@@ -205,6 +205,63 @@ fn echo_round_trip_through_cat() {
     block_on(terminal.kill("main", session_id, true)).unwrap();
 }
 
+/// Exercises the VT integration (F070 "VT 集成" slice) through the real
+/// session machinery, not just `vt.rs`'s own isolated unit tests: feeding a
+/// live session's pty output through to a `latest_vt_frame_for_test`-visible
+/// `DirtyFrame`, and confirming the VT mirror's per-session state
+/// disappears alongside the rest of the session on `kill` — i.e. it does
+/// not outlive (or otherwise interfere with) the existing S1 session
+/// lifecycle this test file's other cases already cover.
+#[test]
+fn vt_dirty_frame_reflects_real_session_output_and_is_gone_after_kill() {
+    let root = TempDir::new().unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
+    let terminal = TerminalService::new();
+    let sink = RecordingSink::new();
+
+    let session_id = start_test_session(
+        &terminal,
+        &trust,
+        &workspace,
+        "main",
+        CommandBuilder::new("cat"),
+        Arc::clone(&sink),
+    );
+
+    block_on(terminal.input("main", session_id, b"vt-integration-probe\n".to_vec())).unwrap();
+
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            terminal
+                .latest_vt_frame_for_test("main", session_id)
+                .ok()
+                .flatten()
+                .is_some_and(|frame| {
+                    frame.rows_data.iter().any(|row| {
+                        row.cells
+                            .iter()
+                            .flat_map(|cell| cell.graphemes.iter())
+                            .collect::<String>()
+                            .contains("vt-integration-probe")
+                    })
+                })
+        }),
+        "the VT mirror should observe the same output the raw byte sink does"
+    );
+
+    block_on(terminal.kill("main", session_id, true)).unwrap();
+
+    assert_eq!(
+        terminal
+            .latest_vt_frame_for_test("main", session_id)
+            .unwrap_err()
+            .code(),
+        "TERMINAL_SESSION_NOT_FOUND",
+        "the VT mirror's state must not outlive the killed session"
+    );
+}
+
 #[test]
 fn high_output_pauses_the_reader_until_acked() {
     let root = TempDir::new().unwrap();

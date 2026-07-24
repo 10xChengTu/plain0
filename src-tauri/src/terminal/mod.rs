@@ -24,6 +24,7 @@ pub(crate) mod dto;
 mod flow;
 pub(crate) mod service;
 mod shell;
+mod vt;
 
 /// Maximum number of terminal sessions a single window may have open at
 /// once (running or already-exited but not yet cleaned up — see

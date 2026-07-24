@@ -52,3 +52,9 @@ dist
 .github/prompts/*.local.prompt.md
 .agents/skills/.local/
 .github/skills/.local/
+
+# F070: pinned local Ghostty source checkout used to build `libghostty-vt`
+# offline/reproducibly (see docs/research/2026-07-24-libghostty-terminal.md
+# and scripts/plain/ghostty-vendor-setup.mjs). Not vendored into the repo:
+# ~151 MiB of upstream source, auto-cloned on first `pnpm check`.
+/.ghostty-vendor/

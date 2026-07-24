@@ -31,8 +31,9 @@
     "test:unit": "vitest run",
     "test:e2e:browser": "playwright test",
     "rust:fmt": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
-    "rust:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
-    "rust:test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "ghostty:vendor:setup": "node scripts/plain/ghostty-vendor-setup.mjs",
+    "rust:clippy": "pnpm ghostty:vendor:setup && env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
+    "rust:test": "pnpm ghostty:vendor:setup && env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy cargo test --manifest-path src-tauri/Cargo.toml",
     "check": "pnpm format:check && pnpm typecheck && pnpm lint && pnpm check:features && pnpm test:unit && pnpm build:frontend && pnpm check:architecture && pnpm check:bundle && pnpm rust:fmt && pnpm rust:clippy && pnpm rust:test"
   },
   "dependencies": {
