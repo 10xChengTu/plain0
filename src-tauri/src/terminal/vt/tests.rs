@@ -427,3 +427,102 @@ fn scrollback_retention_is_bounded_by_an_internal_budget_not_only_the_configured
     let last_index = first_index + rows.len() as u32 - 1;
     assert_eq!(last_index, fed_lines - 23 - 1);
 }
+
+// ---------------------------------------------------------------------
+// Output fragmentation: a real pty reader's fixed-size read buffer can
+// split any byte stream — including in the middle of an escape sequence or
+// a multi-byte UTF-8 character — at an arbitrary offset. `VtSession::feed`
+// is called once per `read()` in production (`service.rs`'s reader
+// thread), so `libghostty-vt`'s own parser, not this module, is what must
+// carry state across that boundary correctly; these tests prove it does,
+// directly at the `feed()` level rather than only opportunistically via a
+// real (timing-dependent) pty in `terminal::service::tests`.
+// ---------------------------------------------------------------------
+
+#[test]
+fn feeding_an_escape_sequence_split_across_two_reads_parses_identically_regardless_of_the_split_point(
+) {
+    // The exact byte stream `feeding_sgr_and_newlines_produces_correct_dirty_row_content`
+    // feeds in a single call — re-fed here split into exactly two `feed()`
+    // calls, at *every* possible byte offset (including the two degenerate
+    // splits, an empty first or second call), so every way a pty reader
+    // could split this stream — including squarely inside the `\x1b[31m`/
+    // `\x1b[0m` escape sequences or the trailing `\r\n` — is covered by one
+    // test.
+    let script: &[u8] = b"Hi\x1b[31mRed\x1b[0m\r\n";
+
+    let mut reference = VtSession::new(10, 3).unwrap();
+    reference.feed(script);
+    let reference_frame = reference.dirty_frame().unwrap();
+
+    for split in 0..=script.len() {
+        let mut session = VtSession::new(10, 3).unwrap();
+        session.feed(&script[..split]);
+        session.feed(&script[split..]);
+        let frame = session.dirty_frame().unwrap();
+        assert_eq!(
+            frame,
+            reference_frame,
+            "splitting the byte stream into two feed() calls at offset {split} (of {}) must \
+             parse identically to feeding it in one call",
+            script.len()
+        );
+    }
+}
+
+#[test]
+fn feeding_the_same_bytes_one_byte_at_a_time_produces_an_identical_dirty_frame_to_one_call() {
+    // A stricter, complementary variant of the two-way split above: every
+    // byte arrives in its own `feed()` call, the worst-case fragmentation a
+    // reader could ever produce (one byte per `read()`), and the result
+    // must still be byte-for-byte identical to feeding the whole script at
+    // once.
+    let script: &[u8] = b"Hi\x1b[31mRed\x1b[0m\r\n";
+
+    let mut whole = VtSession::new(10, 3).unwrap();
+    whole.feed(script);
+    let whole_frame = whole.dirty_frame().unwrap();
+
+    let mut fragmented = VtSession::new(10, 3).unwrap();
+    for byte in script {
+        fragmented.feed(std::slice::from_ref(byte));
+    }
+    let fragmented_frame = fragmented.dirty_frame().unwrap();
+
+    assert_eq!(
+        fragmented_frame, whole_frame,
+        "feeding the same bytes one at a time must produce an identical DirtyFrame to feeding \
+         them in one call"
+    );
+}
+
+#[test]
+fn feeding_a_multi_byte_utf8_character_split_across_two_feed_calls_still_decodes_correctly() {
+    // "é" (U+00E9) encodes as the two UTF-8 bytes 0xC3 0xA9 — a real pty
+    // reader's fixed-size read buffer can just as easily split a read in
+    // the middle of a multi-byte UTF-8 sequence as in the middle of an
+    // escape sequence.
+    let bytes = "é".as_bytes();
+    assert_eq!(bytes.len(), 2, "test assumption: a 2-byte UTF-8 character");
+
+    let mut session = VtSession::new(10, 3).unwrap();
+    session.feed(&bytes[..1]);
+    session.feed(&bytes[1..]);
+
+    let frame = session.dirty_frame().unwrap();
+    let row0 = frame
+        .rows_data
+        .iter()
+        .find(|row| row.row_index == 0)
+        .expect("row 0 is dirty");
+    let text: String = row0
+        .cells
+        .iter()
+        .flat_map(|cell| cell.graphemes.iter())
+        .collect();
+    assert!(
+        text.starts_with('é'),
+        "a UTF-8 character split across two feed() calls must still decode to the complete \
+         character rather than mojibake or a dropped cell: got {text:?}"
+    );
+}

@@ -9147,6 +9147,31 @@ async function pushTerminalOutput(
 	);
 }
 
+/** Pushes every one of `lines` (each newline-terminated) via its own
+ * `__PLAIN_TEST_TERMINAL_PUSH__` call, all within a single synchronous
+ * `page.evaluate` turn -- the same "many writes with no yield in between"
+ * shape a real pty reader flooding output at OS speed produces, without
+ * Playwright's own per-call round-trip overhead making a large burst
+ * impractically slow to simulate (see the high-throughput backpressure test
+ * below). */
+async function pushTerminalOutputBurst(
+	page: Page,
+	lines: readonly string[],
+	sessionId?: string,
+): Promise<void> {
+	await page.evaluate(
+		({ lines, sessionId }) => {
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_TERMINAL_PUSH__(text: string, sessionId?: string): void;
+			};
+			for (const line of lines) {
+				testWindow.__PLAIN_TEST_TERMINAL_PUSH__(`${line}\n`, sessionId);
+			}
+		},
+		{ lines, sessionId },
+	);
+}
+
 /** Every currently-live fake session id, in the order `terminal_start`
  * created them — lets a multi-tab/split test target a specific tab/pane's
  * session without guessing at IPC-call ordering. */
@@ -9500,6 +9525,90 @@ test("terminal output is real, selectable DOM text (native Selection/Range over 
 	expect(selectedText).toContain("selectable-terminal-text");
 
 	expect(pageErrors).toEqual([]);
+});
+
+// F070 "压测与收口": a real interactive shell session can flood far more
+// output in one burst than the single-frame-in-flight emission credit
+// (`FrameEmitGate`, `src-tauri/src/terminal/service.rs`'s vt thread) or this
+// fixture's own mirrored `awaitingAck`/`pendingEmit` gate is designed to
+// forward as individual frames -- this is exactly the scenario the gate
+// exists to absorb. This test proves the coalescing behavior end to end
+// through the real frontend transport/renderer (not just the Rust-side gate
+// unit tests in `src-tauri/src/terminal/service/tests.rs`): the burst's
+// final content still arrives (nothing silently dropped), the number of
+// real frame/ack round trips stays small regardless of how many lines were
+// pushed (proving frames were genuinely coalesced, not merely fast), and the
+// page keeps accepting keyboard input immediately afterward (proving the
+// render loop was never stalled waiting on the flood).
+test("a high-throughput burst of output is coalesced by the single-frame credit gate instead of stalling the UI or dropping content", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+	await expect(page.locator(".plain-terminal-surface")).toBeVisible();
+
+	// Far more lines than any real interactive shell would produce between
+	// two animation frames, pushed with no yield in between (see
+	// `pushTerminalOutputBurst`'s own doc comment).
+	const lineCount = 500;
+	const lines = Array.from(
+		{ length: lineCount },
+		(_unused, index) => `burst-${String(index).padStart(4, "0")}`,
+	);
+	await pushTerminalOutputBurst(page, lines);
+
+	const grid = page.locator(".plain-terminal-grid");
+	// The last pushed line must eventually be visible -- proving the burst's
+	// content reached the screen, only coalesced rather than dropped -- and
+	// must do so quickly (well inside a tight timeout), proving the render
+	// loop was not blocked waiting on anything.
+	await expect(grid).toContainText(
+		`burst-${String(lineCount - 1).padStart(4, "0")}`,
+		{ timeout: 3_000 },
+	);
+
+	// The real evidence the credit gate did its job rather than merely "not
+	// crashing": one frame/ack round trip per pushed line would mean
+	// hundreds of them; the gate coalesces the entire burst (fed
+	// synchronously, with no chance for a paint+ack to interleave mid-burst)
+	// into a small, bounded number regardless of how many lines were pushed.
+	const ackCalls = await terminalCallsFor(page, "terminal_ack");
+	expect(ackCalls.length).toBeGreaterThan(0);
+	expect(ackCalls.length).toBeLessThan(10);
+
+	// The page must have stayed responsive: typing into the terminal's own
+	// input right after the burst must still work normally rather than
+	// queueing up behind a stalled render loop.
+	const input = page.locator(".plain-terminal-input").first();
+	await input.focus();
+	await page.keyboard.type("still-responsive");
+	await expect(grid).toContainText("still-responsive");
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
 });
 
 function terminalKillSessionIds(
