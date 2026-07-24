@@ -6,7 +6,7 @@
 
 - 阶段：3 — 终端与 Git。
 - WIP：`F070` Rust PTY terminal。
-- 当前最小工作项：F070 libghostty 终端 SP spike（go/no-go 门）——Rust FFI libghostty-vt、离线构建、拿到网格一帧。
+- 当前最小工作项：F070 VT 集成切片——先把 libghostty-vt 构建接进 `pnpm check` 使其在本机代理/离线下可复现（gating），再接 PTY→feed→render-state。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -189,10 +189,12 @@
 
 - [x] 冻结 F070 终端渲染前端新方案（docs/research/2026-07-24-libghostty-terminal.md）：两路调研合并。VT 核心用 `libghostty-vt`（headless C ABI，MIT，提供终端状态 + 增量 Render State 脏追踪 + key/mouse/focus 输入编码；Rust binding crate 活跃但与本体均 pre-1.0），Zig 0.15.x 构建期依赖（本机已装 0.15.2）、锁 Ghostty 源 commit + `GHOSTTY_SOURCE_DIR` 离线可复现构建；退路为纯 Rust `alacritty_terminal`/`vte`（零 FFI/零 Zig，架构不变）。渲染层不复用 xterm.js renderer（parser/renderer 耦合无公开自定义 buffer 路径），MVP 用 wterm 风格 DOM 渲染（白得原生选择/查找/无障碍），按真实压测数据决定是否升级 beamterm/WebGL；原生 surface 叠加因与 DOM 面板布局根本冲突（macOS 几何同步 + Linux X11/Wayland 分裂）否决为首选。同步协议采用 libghostty-vt 内建 Render State（dirty 行序列化经 base64 事件推 WebView，scrollback 留 Rust 按需拉），输入用 libghostty-vt 自带编码器（仅 IME 组合态在 DOM 层自处理）。复用 S1 PTY 域（字节改为先 feed 进 VT 核心）与 S2 IPC 骨架（data 事件语义从原始字节改为 render-state dirty 行）。切片：SP spike（go/no-go）、VT 集成、IPC 改造、WebView DOM 渲染 + trust UX、多 tab/split/scrollback、压测 + 可选 WebGL + 收口。
 
+- [x] F070 SP spike 判定 **GO**（仓库外临时验证，未改生产文件，产物已清理，工作树干净）：`cargo add libghostty-vt`（v0.2.1，MIT/Apache，`libghostty-vt-sys` build.rs shell out `zig build` 仅编 vt-only 切片、默认静态链接）后 `vt_write(b"hello\x1b[31mRED\x1b[0m")` → 经 RenderState 逐 cell 读回，「hello」默认前景、「RED」解析为 Ghostty 内置调色板 ANSI-red `#cc6666`，证明 FFI/VT 解析/SGR/render-state 遍历全链路正常。Zig 0.15.2（本机已装）兼容；`GHOSTTY_SOURCE_DIR` 指向本地 Ghostty checkout 实测可完全跳过 git clone、19s 离线可复现构建。**关键运营发现**：本机 `HTTP_PROXY=127.0.0.1:7897` 会让 Zig 自带 HTTP 客户端 fetch 依赖（如 `uucode`）返回 400（curl/git 正常穿代理），`env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY` 清代理后稳定成功——非 libghostty 缺陷、是本机代理兼容问题，但意味着把该 crate 接进 src-tauri 后 `cargo build`/`pnpm check` 必须先解决代理/离线/zig 缓存预置，否则构建失败。最小 API 形状（lending iterator、非 std）、pinned Ghostty commit `a887df42`、接线建议与风险（两层 pre-1.0、非线程安全、仅验 macOS host）均记入 spike 报告。退路 `alacritty_terminal`/`vte` 未启用。
+
 ## 下一步
 
-1. 执行 F070 SP spike：Rust FFI `libghostty-vt`、离线锁源构建、feed 字节→读回网格→测试断言、确认 `pnpm check`/cargo 在 Zig 依赖下可复现构建。这是 go/no-go 门；失败即启用 `alacritty_terminal`/`vte` 退路并报告。
-2. spike 通过后按方案推进 VT 集成 → IPC 改造 → WebView DOM 渲染 + trust UX → 多 tab/split/scrollback → 压测/收口。
+1. F070 VT 集成切片：先解决 libghostty-vt 在本机代理/离线/Zig 缓存下接进 `pnpm check` 的可复现构建（gating，解决不了就停下报告、评估退路），再把 PTY 字节 feed 进 libghostty-vt、暴露网格快照 + dirty 行序列化 + 输入编码，全套 Rust 测试。
+2. 之后按方案推进 IPC 改造 → WebView DOM 渲染 + trust UX → 多 tab/split/scrollback → 压测/收口。
 3. 之后 F080 Git（复用已落地的 trust 门）。
 
 ## 当前验收命令
