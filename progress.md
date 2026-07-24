@@ -6,7 +6,7 @@
 
 - 阶段：3 — 终端与 Git。
 - WIP：`F070` Rust PTY terminal。
-- 当前最小工作项：冻结 F070 终端渲染前端的新技术方案（基于 libghostty-vt 自建终端，放弃被 AI 污染的官方 override）；S1（trust 门 + Rust PTY 核心）与 S2（IPC 桥接）已提交且仍是新路线的地基。
+- 当前最小工作项：F070 libghostty 终端 SP spike（go/no-go 门）——Rust FFI libghostty-vt、离线构建、拿到网格一帧。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -187,10 +187,12 @@
 
 - [x] F070 S3（前端 backend 接线）尝试后阻塞并已完整回退（工作树回到 HEAD、验收全绿 vitest 945/cargo 599/Playwright 50）：对 `@codingame/monaco-vscode-terminal-service-override@35.0.1` 默认导出做完整间接导入链审计 + 真实 Playwright 启动实证，确认其导入链（跨 terminal-service-override/xterm-common/xterm-addons-common 三包）会在 `terminal.contribution`/`terminalTabbedView`/`terminalInitialHint`/`scmHistoryChatContext` 等文件顶层**无条件** `CommandsRegistry.registerCommand` 注册 8 个 Chat/Copilot-CLI/Extensions/SCM-chat 命令（`workbench.action.chat.*`、`_chat.resizeImage`、`workbench.extensions.action.showExtensions*`、`workbench.scm.action.graph.*ToChat` 等），被 Plain 既有运行时 `enforceExcludedWorkbenchSurfaces()` guard 判定 bootstrap 失败；空 service stub 只能修 DI 未注册、无法阻止命令被注册，唯一出路是改 patches 或彻底不引入该包——与用户「去除所有 AI 功能」硬边界直接冲突。据此**用户裁定改用 libghostty 自建终端**（不用官方 override、也不用 xterm.js）。双路调研已启动：libghostty 现已把 VT 核心拆为独立 headless 库 `libghostty-vt`（喂字节→出网格状态、零依赖 C ABI、MIT、有活跃 Rust binding crate），官方认可「headless VT + 自渲染」方向且有近似先例 `vscode-bootty`（VS Code webview + libghostty-vt WASM + Canvas2D）；但两层均 pre-1.0（API 会变）、需引入 Zig 构建期依赖、无生产级验证；成熟退路是纯 Rust 的 `alacritty_terminal`/`vte`（零 FFI、零 Zig）。S1 的 Rust PTY 域（spawn/背压/trust）与 S2 的 IPC 桥接是新路线仍需的地基，不受影响。渲染架构第二路调研（网格状态→WebView 渲染落地方式）进行中，两路合并后再冻结新方案。
 
+- [x] 冻结 F070 终端渲染前端新方案（docs/research/2026-07-24-libghostty-terminal.md）：两路调研合并。VT 核心用 `libghostty-vt`（headless C ABI，MIT，提供终端状态 + 增量 Render State 脏追踪 + key/mouse/focus 输入编码；Rust binding crate 活跃但与本体均 pre-1.0），Zig 0.15.x 构建期依赖（本机已装 0.15.2）、锁 Ghostty 源 commit + `GHOSTTY_SOURCE_DIR` 离线可复现构建；退路为纯 Rust `alacritty_terminal`/`vte`（零 FFI/零 Zig，架构不变）。渲染层不复用 xterm.js renderer（parser/renderer 耦合无公开自定义 buffer 路径），MVP 用 wterm 风格 DOM 渲染（白得原生选择/查找/无障碍），按真实压测数据决定是否升级 beamterm/WebGL；原生 surface 叠加因与 DOM 面板布局根本冲突（macOS 几何同步 + Linux X11/Wayland 分裂）否决为首选。同步协议采用 libghostty-vt 内建 Render State（dirty 行序列化经 base64 事件推 WebView，scrollback 留 Rust 按需拉），输入用 libghostty-vt 自带编码器（仅 IME 组合态在 DOM 层自处理）。复用 S1 PTY 域（字节改为先 feed 进 VT 核心）与 S2 IPC 骨架（data 事件语义从原始字节改为 render-state dirty 行）。切片：SP spike（go/no-go）、VT 集成、IPC 改造、WebView DOM 渲染 + trust UX、多 tab/split/scrollback、压测 + 可选 WebGL + 收口。
+
 ## 下一步
 
-1. 合并两路 libghostty 调研，冻结 F070 终端渲染新方案（libghostty-vt headless 核心的集成形态、网格→WebView 渲染层、与已建 Rust PTY 域/IPC 桥接的对接、Zig 构建期依赖与许可证记录、成熟退路判定）。
-2. 按新方案逐切片实现终端渲染与前端接入，替换原 S3/S4；trust UX 与背压/分片验收仍在范围内。
+1. 执行 F070 SP spike：Rust FFI `libghostty-vt`、离线锁源构建、feed 字节→读回网格→测试断言、确认 `pnpm check`/cargo 在 Zig 依赖下可复现构建。这是 go/no-go 门；失败即启用 `alacritty_terminal`/`vte` 退路并报告。
+2. spike 通过后按方案推进 VT 集成 → IPC 改造 → WebView DOM 渲染 + trust UX → 多 tab/split/scrollback → 压测/收口。
 3. 之后 F080 Git（复用已落地的 trust 门）。
 
 ## 当前验收命令
