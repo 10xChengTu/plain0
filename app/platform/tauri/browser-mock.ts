@@ -852,6 +852,12 @@ export interface BrowserMockBridgeOptions {
 	 * `themeGetSelection`; every later `themeSetSelection` call replaces it,
 	 * matching the real Rust store's own overwrite/clear semantics. */
 	readonly themeSelectionForTest?: string | null;
+	/** `F060` S3: the file icon theme axis analogue of
+	 * `themeSelectionForTest` — seeds the in-memory `fileIconThemeId`
+	 * returned by `themeGetSelection`, independent of the color axis. */
+	readonly fileIconThemeSelectionForTest?: string | null;
+	/** `F060` S3: the product icon theme axis analogue. */
+	readonly productIconThemeSelectionForTest?: string | null;
 	/** Browser-mock only bounded tree injected below the first mock root. */
 	readonly directoryCopyFixtureForTest?: BrowserMockDirectoryFixtureForTest;
 	/** May only lower production directory-copy budgets. */
@@ -1979,6 +1985,10 @@ export function createBrowserMockBridge(
 		seedThemePackage(fixture);
 	}
 	let themeSelection: string | null = options.themeSelectionForTest ?? null;
+	let fileIconThemeSelection: string | null =
+		options.fileIconThemeSelectionForTest ?? null;
+	let productIconThemeSelection: string | null =
+		options.productIconThemeSelectionForTest ?? null;
 	const scriptedThemeImports = [...(options.themeImportOutcomesForTest ?? [])];
 	function themeImportFromScript(): ThemeImportResult {
 		const outcome = scriptedThemeImports.shift();
@@ -5370,10 +5380,20 @@ export function createBrowserMockBridge(
 			themeResourceContents.delete(packageId);
 		},
 		async themeGetSelection() {
-			return Object.freeze({ themeId: themeSelection });
+			return Object.freeze({
+				themeId: themeSelection,
+				fileIconThemeId: fileIconThemeSelection,
+				productIconThemeId: productIconThemeSelection,
+			});
 		},
 		async themeSetSelection(themeId) {
 			themeSelection = themeId;
+		},
+		async themeSetFileIconThemeSelection(fileIconThemeId) {
+			fileIconThemeSelection = fileIconThemeId;
+		},
+		async themeSetProductIconThemeSelection(productIconThemeId) {
+			productIconThemeSelection = productIconThemeId;
 		},
 	};
 }

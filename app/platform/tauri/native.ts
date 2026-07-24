@@ -60,6 +60,8 @@ import {
 	decodeThemeVoid,
 	frozenThemeReadResourceRequest,
 	frozenThemeRemoveRequest,
+	frozenThemeSetFileIconThemeSelectionRequest,
+	frozenThemeSetProductIconThemeSelectionRequest,
 	frozenThemeSetSelectionRequest,
 } from "./theme-codec";
 
@@ -358,6 +360,20 @@ export function createNativeBridge(): PlainBridge {
 			),
 		themeSetSelection: async (themeId) => {
 			const request = frozenThemeSetSelectionRequest(themeId);
+			decodeThemeVoid(
+				await invoke<unknown>("theme_set_selection", { request }),
+			);
+		},
+		themeSetFileIconThemeSelection: async (fileIconThemeId) => {
+			const request =
+				frozenThemeSetFileIconThemeSelectionRequest(fileIconThemeId);
+			decodeThemeVoid(
+				await invoke<unknown>("theme_set_selection", { request }),
+			);
+		},
+		themeSetProductIconThemeSelection: async (productIconThemeId) => {
+			const request =
+				frozenThemeSetProductIconThemeSelectionRequest(productIconThemeId);
 			decodeThemeVoid(
 				await invoke<unknown>("theme_set_selection", { request }),
 			);

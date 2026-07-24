@@ -28,7 +28,11 @@ import {
 	applyDefaultColorTheme,
 	applyDefaultFileIconTheme,
 	applyDefaultProductIconTheme,
+	applyPersistedFileIconThemeSelection,
+	applyPersistedProductIconThemeSelection,
 	applyPersistedThemeSelection,
+	persistFileIconThemeSelectionBestEffort,
+	persistProductIconThemeSelectionBestEffort,
 	persistThemeSelectionBestEffort,
 	registerPlainFileIconThemePicker,
 	registerPlainProductIconThemePicker,
@@ -53,6 +57,8 @@ function fakeBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 	return {
 		themeGetSelection: notImplemented,
 		themeSetSelection: notImplemented,
+		themeSetFileIconThemeSelection: notImplemented,
+		themeSetProductIconThemeSelection: notImplemented,
 		...overrides,
 	} as unknown as PlainBridge;
 }
@@ -317,7 +323,11 @@ describe("applyPersistedThemeSelection", () => {
 		const light = fakeEntry("Light+", ColorScheme.LIGHT);
 		const themeService = fakeThemeService(dark.data.id);
 		const bridge = fakeBridge({
-			themeGetSelection: async () => ({ themeId: "Light+" }),
+			themeGetSelection: async () => ({
+				themeId: "Light+",
+				fileIconThemeId: null,
+				productIconThemeId: null,
+			}),
 		});
 
 		await applyPersistedThemeSelection(
@@ -336,7 +346,11 @@ describe("applyPersistedThemeSelection", () => {
 		const dark = fakeEntry("Dark Modern", ColorScheme.DARK);
 		const themeService = fakeThemeService(dark.data.id);
 		const bridge = fakeBridge({
-			themeGetSelection: async () => ({ themeId: null }),
+			themeGetSelection: async () => ({
+				themeId: null,
+				fileIconThemeId: null,
+				productIconThemeId: null,
+			}),
 		});
 
 		await applyPersistedThemeSelection(
@@ -353,7 +367,11 @@ describe("applyPersistedThemeSelection", () => {
 		const themeService = fakeThemeService(dark.data.id);
 		const themeSetSelection = vi.fn(async () => undefined);
 		const bridge = fakeBridge({
-			themeGetSelection: async () => ({ themeId: "Ghost Theme" }),
+			themeGetSelection: async () => ({
+				themeId: "Ghost Theme",
+				fileIconThemeId: null,
+				productIconThemeId: null,
+			}),
 			themeSetSelection,
 		});
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -401,7 +419,11 @@ describe("applyPersistedThemeSelection", () => {
 			}),
 		};
 		const bridge = fakeBridge({
-			themeGetSelection: async () => ({ themeId: "Dark Modern" }),
+			themeGetSelection: async () => ({
+				themeId: "Dark Modern",
+				fileIconThemeId: null,
+				productIconThemeId: null,
+			}),
 		});
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
@@ -410,6 +432,366 @@ describe("applyPersistedThemeSelection", () => {
 				bridge,
 				themeService as never,
 				Object.freeze([dark]),
+			),
+		).resolves.toBeUndefined();
+		expect(warn).toHaveBeenCalledTimes(1);
+		warn.mockRestore();
+	});
+});
+
+describe("persistFileIconThemeSelectionBestEffort", () => {
+	it("calls theme_set_selection with the given id", async () => {
+		const themeSetFileIconThemeSelection = vi.fn(async () => undefined);
+		await persistFileIconThemeSelectionBestEffort(
+			fakeBridge({ themeSetFileIconThemeSelection }),
+			"vs-minimal",
+		);
+		expect(themeSetFileIconThemeSelection).toHaveBeenCalledWith("vs-minimal");
+	});
+
+	it("calls theme_set_selection with null to clear", async () => {
+		const themeSetFileIconThemeSelection = vi.fn(async () => undefined);
+		await persistFileIconThemeSelectionBestEffort(
+			fakeBridge({ themeSetFileIconThemeSelection }),
+			null,
+		);
+		expect(themeSetFileIconThemeSelection).toHaveBeenCalledWith(null);
+	});
+
+	it("warns and does not throw when the bridge call fails", async () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		const bridge = fakeBridge({
+			themeSetFileIconThemeSelection: async () => {
+				throw new Error("boom");
+			},
+		});
+		await expect(
+			persistFileIconThemeSelectionBestEffort(bridge, "vs-minimal"),
+		).resolves.toBeUndefined();
+		expect(warn).toHaveBeenCalledTimes(1);
+		warn.mockRestore();
+	});
+});
+
+describe("persistProductIconThemeSelectionBestEffort", () => {
+	it("calls theme_set_selection with the given id", async () => {
+		const themeSetProductIconThemeSelection = vi.fn(async () => undefined);
+		await persistProductIconThemeSelectionBestEffort(
+			fakeBridge({ themeSetProductIconThemeSelection }),
+			"acme.icons",
+		);
+		expect(themeSetProductIconThemeSelection).toHaveBeenCalledWith(
+			"acme.icons",
+		);
+	});
+
+	it("calls theme_set_selection with null to clear", async () => {
+		const themeSetProductIconThemeSelection = vi.fn(async () => undefined);
+		await persistProductIconThemeSelectionBestEffort(
+			fakeBridge({ themeSetProductIconThemeSelection }),
+			null,
+		);
+		expect(themeSetProductIconThemeSelection).toHaveBeenCalledWith(null);
+	});
+
+	it("warns and does not throw when the bridge call fails", async () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		const bridge = fakeBridge({
+			themeSetProductIconThemeSelection: async () => {
+				throw new Error("boom");
+			},
+		});
+		await expect(
+			persistProductIconThemeSelectionBestEffort(bridge, "acme.icons"),
+		).resolves.toBeUndefined();
+		expect(warn).toHaveBeenCalledTimes(1);
+		warn.mockRestore();
+	});
+});
+
+describe("applyPersistedFileIconThemeSelection", () => {
+	it("applies the registry entry matching the persisted settingsId", async () => {
+		const vsMinimal = fakeFileIconEntry("vs-minimal");
+		const themeService = fakeFileIconThemeService("id-other");
+		const bridge = fakeBridge({
+			themeGetSelection: async () => ({
+				themeId: null,
+				fileIconThemeId: "vs-minimal",
+				productIconThemeId: null,
+			}),
+		});
+
+		await applyPersistedFileIconThemeSelection(
+			bridge,
+			themeService as never,
+			Object.freeze([vsMinimal]),
+		);
+
+		expect(themeService.setFileIconTheme).toHaveBeenCalledWith(
+			vsMinimal.data,
+			undefined,
+		);
+	});
+
+	it("does nothing when nothing is persisted", async () => {
+		const themeService = fakeFileIconThemeService("id-vs-minimal");
+		const bridge = fakeBridge({
+			themeGetSelection: async () => ({
+				themeId: null,
+				fileIconThemeId: null,
+				productIconThemeId: null,
+			}),
+		});
+
+		await applyPersistedFileIconThemeSelection(
+			bridge,
+			themeService as never,
+			Object.freeze([]),
+		);
+
+		expect(themeService.setFileIconTheme).not.toHaveBeenCalled();
+	});
+
+	it("applies the real noIconTheme singleton (never a registry lookup) for the None sentinel", async () => {
+		const themeService = fakeFileIconThemeService("id-vs-minimal");
+		const bridge = fakeBridge({
+			themeGetSelection: async () => ({
+				themeId: null,
+				fileIconThemeId: "plain:no-file-icon-theme",
+				productIconThemeId: null,
+			}),
+		});
+
+		await applyPersistedFileIconThemeSelection(
+			bridge,
+			themeService as never,
+			Object.freeze([]),
+		);
+
+		expect(themeService.setFileIconTheme).toHaveBeenCalledWith(
+			FileIconThemeData.noIconTheme,
+			undefined,
+		);
+	});
+
+	it("warns, clears the stale selection, and leaves the default applied when the id matches nothing", async () => {
+		const themeService = fakeFileIconThemeService("id-vs-minimal");
+		const themeSetFileIconThemeSelection = vi.fn(async () => undefined);
+		const bridge = fakeBridge({
+			themeGetSelection: async () => ({
+				themeId: null,
+				fileIconThemeId: "ghost-icons",
+				productIconThemeId: null,
+			}),
+			themeSetFileIconThemeSelection,
+		});
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+		await applyPersistedFileIconThemeSelection(
+			bridge,
+			themeService as never,
+			Object.freeze([]),
+		);
+
+		expect(themeService.setFileIconTheme).not.toHaveBeenCalled();
+		expect(themeSetFileIconThemeSelection).toHaveBeenCalledWith(null);
+		expect(warn).toHaveBeenCalledTimes(1);
+		warn.mockRestore();
+	});
+
+	it("warns and does not throw when reading the persisted selection fails", async () => {
+		const themeService = fakeFileIconThemeService("id-vs-minimal");
+		const bridge = fakeBridge({
+			themeGetSelection: async () => {
+				throw new Error("boom");
+			},
+		});
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+		await expect(
+			applyPersistedFileIconThemeSelection(
+				bridge,
+				themeService as never,
+				Object.freeze([]),
+			),
+		).resolves.toBeUndefined();
+		expect(themeService.setFileIconTheme).not.toHaveBeenCalled();
+		expect(warn).toHaveBeenCalledTimes(1);
+		warn.mockRestore();
+	});
+
+	it("warns and does not throw when applying the matched theme fails", async () => {
+		const vsMinimal = fakeFileIconEntry("vs-minimal");
+		const themeService = {
+			getFileIconTheme: vi.fn(),
+			setFileIconTheme: vi.fn(async () => {
+				throw new Error("boom");
+			}),
+		};
+		const bridge = fakeBridge({
+			themeGetSelection: async () => ({
+				themeId: null,
+				fileIconThemeId: "vs-minimal",
+				productIconThemeId: null,
+			}),
+		});
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+		await expect(
+			applyPersistedFileIconThemeSelection(
+				bridge,
+				themeService as never,
+				Object.freeze([vsMinimal]),
+			),
+		).resolves.toBeUndefined();
+		expect(warn).toHaveBeenCalledTimes(1);
+		warn.mockRestore();
+	});
+});
+
+describe("applyPersistedProductIconThemeSelection", () => {
+	it("applies the registry entry matching the persisted settingsId", async () => {
+		const acme = fakeProductIconEntry("acme.icons");
+		const themeService = fakeProductIconThemeService(
+			ProductIconThemeData.defaultTheme.id,
+		);
+		const bridge = fakeBridge({
+			themeGetSelection: async () => ({
+				themeId: null,
+				fileIconThemeId: null,
+				productIconThemeId: "acme.icons",
+			}),
+		});
+
+		await applyPersistedProductIconThemeSelection(
+			bridge,
+			themeService as never,
+			Object.freeze([acme]),
+		);
+
+		expect(themeService.setProductIconTheme).toHaveBeenCalledWith(
+			acme.data,
+			undefined,
+		);
+	});
+
+	it("does nothing when nothing is persisted", async () => {
+		const themeService = fakeProductIconThemeService(
+			ProductIconThemeData.defaultTheme.id,
+		);
+		const bridge = fakeBridge({
+			themeGetSelection: async () => ({
+				themeId: null,
+				fileIconThemeId: null,
+				productIconThemeId: null,
+			}),
+		});
+
+		await applyPersistedProductIconThemeSelection(
+			bridge,
+			themeService as never,
+			Object.freeze([]),
+		);
+
+		expect(themeService.setProductIconTheme).not.toHaveBeenCalled();
+	});
+
+	it("applies the real defaultTheme singleton (never a registry lookup) for the Default sentinel", async () => {
+		const themeService = fakeProductIconThemeService(
+			ProductIconThemeData.defaultTheme.id,
+		);
+		const bridge = fakeBridge({
+			themeGetSelection: async () => ({
+				themeId: null,
+				fileIconThemeId: null,
+				productIconThemeId: "plain:default-product-icon-theme",
+			}),
+		});
+
+		await applyPersistedProductIconThemeSelection(
+			bridge,
+			themeService as never,
+			Object.freeze([]),
+		);
+
+		expect(themeService.setProductIconTheme).toHaveBeenCalledWith(
+			ProductIconThemeData.defaultTheme,
+			undefined,
+		);
+	});
+
+	it("warns, clears the stale selection, and leaves the default applied when the id matches nothing", async () => {
+		const themeService = fakeProductIconThemeService(
+			ProductIconThemeData.defaultTheme.id,
+		);
+		const themeSetProductIconThemeSelection = vi.fn(async () => undefined);
+		const bridge = fakeBridge({
+			themeGetSelection: async () => ({
+				themeId: null,
+				fileIconThemeId: null,
+				productIconThemeId: "ghost-icons",
+			}),
+			themeSetProductIconThemeSelection,
+		});
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+		await applyPersistedProductIconThemeSelection(
+			bridge,
+			themeService as never,
+			Object.freeze([]),
+		);
+
+		expect(themeService.setProductIconTheme).not.toHaveBeenCalled();
+		expect(themeSetProductIconThemeSelection).toHaveBeenCalledWith(null);
+		expect(warn).toHaveBeenCalledTimes(1);
+		warn.mockRestore();
+	});
+
+	it("warns and does not throw when reading the persisted selection fails", async () => {
+		const themeService = fakeProductIconThemeService(
+			ProductIconThemeData.defaultTheme.id,
+		);
+		const bridge = fakeBridge({
+			themeGetSelection: async () => {
+				throw new Error("boom");
+			},
+		});
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+		await expect(
+			applyPersistedProductIconThemeSelection(
+				bridge,
+				themeService as never,
+				Object.freeze([]),
+			),
+		).resolves.toBeUndefined();
+		expect(themeService.setProductIconTheme).not.toHaveBeenCalled();
+		expect(warn).toHaveBeenCalledTimes(1);
+		warn.mockRestore();
+	});
+
+	it("warns and does not throw when applying the matched theme fails", async () => {
+		const acme = fakeProductIconEntry("acme.icons");
+		const themeService = {
+			getProductIconTheme: vi.fn(),
+			setProductIconTheme: vi.fn(async () => {
+				throw new Error("boom");
+			}),
+		};
+		const bridge = fakeBridge({
+			themeGetSelection: async () => ({
+				themeId: null,
+				fileIconThemeId: null,
+				productIconThemeId: "acme.icons",
+			}),
+		});
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+		await expect(
+			applyPersistedProductIconThemeSelection(
+				bridge,
+				themeService as never,
+				Object.freeze([acme]),
 			),
 		).resolves.toBeUndefined();
 		expect(warn).toHaveBeenCalledTimes(1);
@@ -691,8 +1073,11 @@ describe("registerPlainFileIconThemePicker", () => {
 		disposeRegistration = undefined;
 	});
 
-	function register(registry: readonly PlainFileIconThemeRegistryEntry[]) {
-		const registration = registerPlainFileIconThemePicker(registry);
+	function register(
+		registry: readonly PlainFileIconThemeRegistryEntry[],
+		bridge: PlainBridge = fakeBridge(),
+	) {
+		const registration = registerPlainFileIconThemePicker(bridge, registry);
 		disposeRegistration = () => registration.dispose();
 		return registration;
 	}
@@ -701,8 +1086,9 @@ describe("registerPlainFileIconThemePicker", () => {
 		registry: readonly PlainFileIconThemeRegistryEntry[],
 		quickPick: FakeQuickPick,
 		themeService: ReturnType<typeof fakeFileIconThemeService>,
+		bridge: PlainBridge = fakeBridge(),
 	) {
-		register(registry);
+		register(registry, bridge);
 		const command = CommandsRegistry.getCommand(
 			SELECT_FILE_ICON_THEME_COMMAND_ID,
 		);
@@ -772,12 +1158,14 @@ describe("registerPlainFileIconThemePicker", () => {
 		await pending;
 	});
 
-	it("applies None on accept when the user navigates to it, disabling file icons", async () => {
+	it("applies None on accept when the user navigates to it, disabling file icons, and persists the None sentinel", async () => {
 		const vsMinimal = fakeFileIconEntry("vs-minimal");
 		const themeService = fakeFileIconThemeService(vsMinimal.data.id);
 		const quickPick = new FakeQuickPick();
+		const themeSetFileIconThemeSelection = vi.fn(async () => undefined);
+		const bridge = fakeBridge({ themeSetFileIconThemeSelection });
 
-		const pending = invoke([vsMinimal], quickPick, themeService);
+		const pending = invoke([vsMinimal], quickPick, themeService, bridge);
 		await Promise.resolve();
 
 		quickPick.selectedItems = [
@@ -791,6 +1179,51 @@ describe("registerPlainFileIconThemePicker", () => {
 			undefined,
 		);
 		expect(quickPick.disposed).toBe(true);
+		// `""` (upstream's own id for "None") is never sent to `theme_set_
+		// selection` directly — it must be mapped to the reserved sentinel (see
+		// `NO_FILE_ICON_THEME_SELECTION_ID`'s own doc comment for why).
+		expect(themeSetFileIconThemeSelection).toHaveBeenCalledWith(
+			"plain:no-file-icon-theme",
+		);
+	});
+
+	it("persists a registered entry's settingsId on accept", async () => {
+		const vsMinimal = fakeFileIconEntry("vs-minimal");
+		const themeService = fakeFileIconThemeService(vsMinimal.data.id);
+		const quickPick = new FakeQuickPick();
+		const themeSetFileIconThemeSelection = vi.fn(async () => undefined);
+		const bridge = fakeBridge({ themeSetFileIconThemeSelection });
+
+		const pending = invoke([vsMinimal], quickPick, themeService, bridge);
+		await Promise.resolve();
+
+		quickPick.selectedItems = [{ id: "vs-minimal", data: vsMinimal.data }];
+		quickPick.fireAccept();
+		await pending;
+
+		expect(themeSetFileIconThemeSelection).toHaveBeenCalledWith("vs-minimal");
+	});
+
+	it("persists best-effort and swallows a failure", async () => {
+		const vsMinimal = fakeFileIconEntry("vs-minimal");
+		const themeService = fakeFileIconThemeService(vsMinimal.data.id);
+		const quickPick = new FakeQuickPick();
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		const bridge = fakeBridge({
+			themeSetFileIconThemeSelection: async () => {
+				throw new Error("boom");
+			},
+		});
+
+		const pending = invoke([vsMinimal], quickPick, themeService, bridge);
+		await Promise.resolve();
+
+		quickPick.selectedItems = [{ id: "vs-minimal", data: vsMinimal.data }];
+		quickPick.fireAccept();
+		await expect(pending).resolves.toBeUndefined();
+
+		expect(warn).toHaveBeenCalledTimes(1);
+		warn.mockRestore();
 	});
 
 	it("restores the original theme when dismissed without accepting", async () => {
@@ -831,8 +1264,11 @@ describe("registerPlainProductIconThemePicker", () => {
 		disposeRegistration = undefined;
 	});
 
-	function register(registry: readonly PlainProductIconThemeRegistryEntry[]) {
-		const registration = registerPlainProductIconThemePicker(registry);
+	function register(
+		registry: readonly PlainProductIconThemeRegistryEntry[],
+		bridge: PlainBridge = fakeBridge(),
+	) {
+		const registration = registerPlainProductIconThemePicker(bridge, registry);
 		disposeRegistration = () => registration.dispose();
 		return registration;
 	}
@@ -841,8 +1277,9 @@ describe("registerPlainProductIconThemePicker", () => {
 		registry: readonly PlainProductIconThemeRegistryEntry[],
 		quickPick: FakeQuickPick,
 		themeService: ReturnType<typeof fakeProductIconThemeService>,
+		bridge: PlainBridge = fakeBridge(),
 	) {
-		register(registry);
+		register(registry, bridge);
 		const command = CommandsRegistry.getCommand(
 			SELECT_PRODUCT_ICON_THEME_COMMAND_ID,
 		);
@@ -893,17 +1330,19 @@ describe("registerPlainProductIconThemePicker", () => {
 		await pending;
 	});
 
-	it("applies a registered entry on accept and does not disturb Default's own id", async () => {
+	it("applies a registered entry on accept, does not disturb Default's own id, and persists its settingsId", async () => {
 		const acme = fakeProductIconEntry("Acme Product Icons");
 		const themeService = fakeProductIconThemeService(
 			ProductIconThemeData.defaultTheme.id,
 		);
 		const quickPick = new FakeQuickPick();
+		const themeSetProductIconThemeSelection = vi.fn(async () => undefined);
+		const bridge = fakeBridge({ themeSetProductIconThemeSelection });
 
-		const pending = invoke([acme], quickPick, themeService);
+		const pending = invoke([acme], quickPick, themeService, bridge);
 		await Promise.resolve();
 
-		quickPick.selectedItems = [{ data: acme.data }];
+		quickPick.selectedItems = [{ id: acme.settingsId, data: acme.data }];
 		quickPick.fireAccept();
 		await pending;
 
@@ -912,6 +1351,31 @@ describe("registerPlainProductIconThemePicker", () => {
 			undefined,
 		);
 		expect(quickPick.disposed).toBe(true);
+		expect(themeSetProductIconThemeSelection).toHaveBeenCalledWith(
+			"Acme Product Icons",
+		);
+	});
+
+	it("persists the Default sentinel (never a bare empty string) when Default is accepted", async () => {
+		const themeService = fakeProductIconThemeService(
+			ProductIconThemeData.defaultTheme.id,
+		);
+		const quickPick = new FakeQuickPick();
+		const themeSetProductIconThemeSelection = vi.fn(async () => undefined);
+		const bridge = fakeBridge({ themeSetProductIconThemeSelection });
+
+		const pending = invoke([], quickPick, themeService, bridge);
+		await Promise.resolve();
+
+		quickPick.selectedItems = [
+			{ id: "", label: "Default", data: ProductIconThemeData.defaultTheme },
+		];
+		quickPick.fireAccept();
+		await pending;
+
+		expect(themeSetProductIconThemeSelection).toHaveBeenCalledWith(
+			"plain:default-product-icon-theme",
+		);
 	});
 
 	it("restores the original theme when dismissed without accepting", async () => {

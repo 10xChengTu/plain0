@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use crate::path_policy::RelativePath;
+use crate::theme::dto::ThemeSetSelectionRequest;
 use crate::theme::fixtures::{minimal_manifest, minimal_theme_json, PackageFixture};
 use crate::theme::picker::{
     FilePicker, FilePickerFuture, FilePickerResult, ThemeDirectoryPicker,
@@ -14,6 +15,10 @@ use super::ThemeService;
 
 fn block_on<F: Future>(future: F) -> F::Output {
     tauri::async_runtime::block_on(future)
+}
+
+fn set_selection_request(value: serde_json::Value) -> ThemeSetSelectionRequest {
+    serde_json::from_value(value).expect("a well-formed ThemeSetSelectionRequest body")
 }
 
 struct FakeFilePicker {
@@ -221,24 +226,39 @@ fn get_and_set_selection_round_trip_through_the_service() {
     let service = ThemeService::new(library_temp.path().to_path_buf());
 
     let initial = block_on(service.get_selection()).expect("read succeeds");
-    assert_eq!(
-        serde_json::to_value(&initial).unwrap()["themeId"],
-        serde_json::Value::Null
-    );
+    let initial_value = serde_json::to_value(&initial).unwrap();
+    assert_eq!(initial_value["themeId"], serde_json::Value::Null);
+    assert_eq!(initial_value["fileIconThemeId"], serde_json::Value::Null);
+    assert_eq!(initial_value["productIconThemeId"], serde_json::Value::Null);
 
-    block_on(service.set_selection(Some("Dark Modern".to_owned()))).expect("write succeeds");
+    block_on(
+        service.set_selection(set_selection_request(serde_json::json!({
+            "themeId": "Dark Modern",
+            "fileIconThemeId": "vs-minimal",
+        }))),
+    )
+    .expect("write succeeds");
     let selected = block_on(service.get_selection()).expect("read succeeds");
+    let selected_value = serde_json::to_value(&selected).unwrap();
+    assert_eq!(selected_value["themeId"], "Dark Modern");
+    assert_eq!(selected_value["fileIconThemeId"], "vs-minimal");
     assert_eq!(
-        serde_json::to_value(&selected).unwrap()["themeId"],
-        "Dark Modern"
-    );
-
-    block_on(service.set_selection(None)).expect("clear succeeds");
-    let cleared = block_on(service.get_selection()).expect("read succeeds");
-    assert_eq!(
-        serde_json::to_value(&cleared).unwrap()["themeId"],
+        selected_value["productIconThemeId"],
         serde_json::Value::Null
     );
+
+    // Omitting `themeId` here must leave it untouched while clearing
+    // `fileIconThemeId` alone.
+    block_on(
+        service.set_selection(set_selection_request(serde_json::json!({
+            "fileIconThemeId": null,
+        }))),
+    )
+    .expect("clear succeeds");
+    let cleared = block_on(service.get_selection()).expect("read succeeds");
+    let cleared_value = serde_json::to_value(&cleared).unwrap();
+    assert_eq!(cleared_value["themeId"], "Dark Modern");
+    assert_eq!(cleared_value["fileIconThemeId"], serde_json::Value::Null);
 }
 
 #[test]
@@ -246,7 +266,11 @@ fn set_selection_propagates_an_invalid_id_rejection() {
     let library_temp = TempDir::new().expect("library tempdir");
     let service = ThemeService::new(library_temp.path().to_path_buf());
 
-    let error = block_on(service.set_selection(Some(String::new())))
-        .expect_err("an empty id must be rejected");
+    let error = block_on(
+        service.set_selection(set_selection_request(serde_json::json!({
+            "themeId": "",
+        }))),
+    )
+    .expect_err("an empty id must be rejected");
     assert_eq!(error.code(), "THEME_SELECTION_INVALID");
 }

@@ -55,6 +55,18 @@
 //! checked against a closed set of magic byte signatures. This whole slice
 //! is pure Rust — no Tauri command, DTO, or frontend surface changes; that
 //! is `F060` S2's scope.
+//!
+//! `F060` S3 scope: close the two gaps S2's own doc comments left explicit.
+//! First, `dto`'s `ThemePackageSummary` now projects `iconThemes`/
+//! `productIconThemes` (structurally validated by S1, stored by `record`
+//! since S1, but never once put on the wire until now) — see `dto`'s own
+//! `IconThemeContributionSummary` doc comment. Second, `selection` grows
+//! from one axis (`themeId`) to three (`themeId`, `fileIconThemeId`,
+//! `productIconThemeId`), all three living in the same
+//! `selection.plain.json` file behind the same atomic rename, with a
+//! per-field partial-update contract for `theme_set_selection` — see
+//! `selection`'s own module doc comment for the full "why per-field, not
+//! whole-record-replace" rationale and the exact leave/clear/set semantics.
 
 pub(crate) mod commands;
 pub(crate) mod dto;
@@ -351,7 +363,8 @@ pub(crate) fn theme_resource_not_found() -> CommandError {
     )
 }
 
-/// A `theme_set_selection` request's non-null `themeId` failed
+/// A `theme_set_selection` request's non-null id — on any of the three axes
+/// (`themeId`, `fileIconThemeId`, `productIconThemeId`) — failed
 /// [`selection::validate_theme_selection_id`]'s charset/length check — empty,
 /// over [`selection::MAX_THEME_SELECTION_ID_BYTES`], or containing a control
 /// character.

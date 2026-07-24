@@ -85,6 +85,8 @@ function fakeBridge(
 		themeRemove: notImplemented,
 		themeGetSelection: notImplemented,
 		themeSetSelection: notImplemented,
+		themeSetFileIconThemeSelection: notImplemented,
+		themeSetProductIconThemeSelection: notImplemented,
 	};
 }
 
@@ -185,6 +187,8 @@ function fakeTextSearchBridge(
 		themeRemove: notImplemented,
 		themeGetSelection: notImplemented,
 		themeSetSelection: notImplemented,
+		themeSetFileIconThemeSelection: notImplemented,
+		themeSetProductIconThemeSelection: notImplemented,
 	};
 
 	return {

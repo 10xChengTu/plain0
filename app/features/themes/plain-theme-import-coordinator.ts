@@ -9,16 +9,25 @@ import { ExtensionData } from "@codingame/monaco-vscode-api/vscode/vs/workbench/
 
 import type {
 	PlainBridge,
+	ThemeIconContribution,
 	ThemeImportResult,
 	ThemePackageSummary,
 } from "../../platform/tauri";
 import { normalizeCommandError } from "../../platform/tauri";
 import {
 	applyDefaultColorTheme,
+	applyDefaultFileIconTheme,
+	applyDefaultProductIconTheme,
+	persistFileIconThemeSelectionBestEffort,
+	persistProductIconThemeSelectionBestEffort,
 	persistThemeSelectionBestEffort,
 } from "./plain-theme-picker";
 import {
+	buildPlainFileIconThemeRegistryEntry,
+	buildPlainProductIconThemeRegistryEntry,
 	buildPlainThemeRegistryEntry,
+	type PlainFileIconThemeRegistryEntry,
+	type PlainProductIconThemeRegistryEntry,
 	type PlainThemeRegistryEntry,
 } from "./plain-theme-registry";
 
@@ -107,13 +116,35 @@ function mimeTypeForResource(path: string): string {
 	return "application/json";
 }
 
+/** Maps one `ThemeIconContribution` (`iconThemes[]`/`productIconThemes[]`)
+ * into the manifest shape `registerExtension`/`buildPlain{FileIcon,
+ * ProductIcon}ThemeRegistryEntry` expect. Unlike `contributes.themes[]`,
+ * `id` is always present and never falls back to a basename — see
+ * `PlainFileIconThemeRegistryEntry`'s own doc comment on why this axis's
+ * `settingsId` is always the manifest's own `id` verbatim. */
+function toManifestIconTheme(
+	theme: ThemeIconContribution,
+): Readonly<{ id: string; label: string; path: string }> {
+	return Object.freeze({
+		id: theme.id,
+		label: theme.label ?? basenameOf(theme.path),
+		path: theme.path,
+	});
+}
+
 /**
  * Builds the minimal, purely declarative `IExtensionManifest` `theme_read_
  * resource`'s consumer needs to call `registerExtension` — deliberately
  * omitting `main`/`browser`/`activationEvents` entirely (Plain's Rust layer
  * never even reads their *values*, only records whether they were present;
  * this manifest never gives them anywhere to be read from in the first
- * place) and `iconThemes`/`productIconThemes` (F060's own scope).
+ * place). `F060` S3 adds `iconThemes`/`productIconThemes` (previously
+ * omitted as out of `F050`'s scope — see this function's own `git blame`
+ * for the F060 S1/S2 history): a package's manifest already lists them
+ * (Rust's own `contributes.iconThemes[]`/`productIconThemes[]` structural
+ * validation, `F060` S1), and `ThemePackageSummary` now actually projects
+ * them (`F060` S3's own DTO fix), so there is no reason left to hide them
+ * from the extension manifest `registerImportedPackage` builds below.
  */
 function buildImportedManifest(pkg: ThemePackageSummary): IExtensionManifest {
 	return Object.freeze({
@@ -137,6 +168,8 @@ function buildImportedManifest(pkg: ThemePackageSummary): IExtensionManifest {
 					path: theme.path,
 				});
 			}),
+			iconThemes: pkg.iconThemes.map(toManifestIconTheme),
+			productIconThemes: pkg.productIconThemes.map(toManifestIconTheme),
 		}),
 	}) as unknown as IExtensionManifest;
 }
@@ -155,26 +188,77 @@ interface ImportedPackageHandle {
  * each keyed by package id so a specific import can be replaced or removed
  * independently. `entries()` is what every re-registration of the theme
  * picker (see `plain-theme-commands.ts`) reads.
+ *
+ * `F060` S3 extends this from color-only to all three theme axes: file icon
+ * and product icon builtin/imported entries are tracked the exact same
+ * shape as the color axis, just under their own private maps/getters —
+ * `registerImportedPackage` always calls all three `setImported*` methods
+ * for a package (an axis a package does not contribute simply gets an empty
+ * array, never a skipped call), so `importedPackageIds()` — still keyed off
+ * the color map, which is therefore always populated for every imported
+ * package regardless of which axes it actually uses — continues to name
+ * every imported package, color-only or not. The two new constructor
+ * parameters default to an empty array so every pre-`F060` call site
+ * (`new PlainThemeRegistryStore([...])`, color builtins only) keeps
+ * compiling and behaving exactly as before.
  */
 export class PlainThemeRegistryStore {
 	readonly #builtin: readonly PlainThemeRegistryEntry[];
+	readonly #builtinFileIcon: readonly PlainFileIconThemeRegistryEntry[];
+	readonly #builtinProductIcon: readonly PlainProductIconThemeRegistryEntry[];
 	readonly #importedByPackage = new Map<
 		string,
 		readonly PlainThemeRegistryEntry[]
 	>();
+	readonly #importedFileIconByPackage = new Map<
+		string,
+		readonly PlainFileIconThemeRegistryEntry[]
+	>();
+	readonly #importedProductIconByPackage = new Map<
+		string,
+		readonly PlainProductIconThemeRegistryEntry[]
+	>();
 
-	constructor(builtin: readonly PlainThemeRegistryEntry[]) {
+	constructor(
+		builtin: readonly PlainThemeRegistryEntry[],
+		builtinFileIcon: readonly PlainFileIconThemeRegistryEntry[] = [],
+		builtinProductIcon: readonly PlainProductIconThemeRegistryEntry[] = [],
+	) {
 		this.#builtin = builtin;
+		this.#builtinFileIcon = builtinFileIcon;
+		this.#builtinProductIcon = builtinProductIcon;
 	}
 
 	get builtin(): readonly PlainThemeRegistryEntry[] {
 		return this.#builtin;
 	}
 
+	get builtinFileIcon(): readonly PlainFileIconThemeRegistryEntry[] {
+		return this.#builtinFileIcon;
+	}
+
+	get builtinProductIcon(): readonly PlainProductIconThemeRegistryEntry[] {
+		return this.#builtinProductIcon;
+	}
+
 	entries(): readonly PlainThemeRegistryEntry[] {
 		return Object.freeze([
 			...this.#builtin,
 			...[...this.#importedByPackage.values()].flat(),
+		]);
+	}
+
+	fileIconEntries(): readonly PlainFileIconThemeRegistryEntry[] {
+		return Object.freeze([
+			...this.#builtinFileIcon,
+			...[...this.#importedFileIconByPackage.values()].flat(),
+		]);
+	}
+
+	productIconEntries(): readonly PlainProductIconThemeRegistryEntry[] {
+		return Object.freeze([
+			...this.#builtinProductIcon,
+			...[...this.#importedProductIconByPackage.values()].flat(),
 		]);
 	}
 
@@ -188,6 +272,18 @@ export class PlainThemeRegistryStore {
 		return this.#importedByPackage.get(packageId);
 	}
 
+	importedFileIconEntries(
+		packageId: string,
+	): readonly PlainFileIconThemeRegistryEntry[] | undefined {
+		return this.#importedFileIconByPackage.get(packageId);
+	}
+
+	importedProductIconEntries(
+		packageId: string,
+	): readonly PlainProductIconThemeRegistryEntry[] | undefined {
+		return this.#importedProductIconByPackage.get(packageId);
+	}
+
 	setImported(
 		packageId: string,
 		entries: readonly PlainThemeRegistryEntry[],
@@ -195,8 +291,24 @@ export class PlainThemeRegistryStore {
 		this.#importedByPackage.set(packageId, entries);
 	}
 
+	setImportedFileIcon(
+		packageId: string,
+		entries: readonly PlainFileIconThemeRegistryEntry[],
+	): void {
+		this.#importedFileIconByPackage.set(packageId, entries);
+	}
+
+	setImportedProductIcon(
+		packageId: string,
+		entries: readonly PlainProductIconThemeRegistryEntry[],
+	): void {
+		this.#importedProductIconByPackage.set(packageId, entries);
+	}
+
 	removeImported(packageId: string): void {
 		this.#importedByPackage.delete(packageId);
+		this.#importedFileIconByPackage.delete(packageId);
+		this.#importedProductIconByPackage.delete(packageId);
 	}
 }
 
@@ -267,6 +379,23 @@ async function registerImportedPackage(
 			path: theme.path,
 		});
 	});
+	// `F060` S3: an imported package's `iconThemes`/`productIconThemes` — both
+	// axes always require `id` (see `toManifestIconTheme`'s own doc comment),
+	// so no basename fallback is needed here the way `themes` needs one.
+	const fileIconEntries = pkg.iconThemes.map((theme) =>
+		buildPlainFileIconThemeRegistryEntry(
+			location,
+			extensionData,
+			toManifestIconTheme(theme),
+		),
+	);
+	const productIconEntries = pkg.productIconThemes.map((theme) =>
+		buildPlainProductIconThemeRegistryEntry(
+			location,
+			extensionData,
+			toManifestIconTheme(theme),
+		),
+	);
 
 	// Defensive: a re-registration of an id already present (should not
 	// normally happen — Rust rejects duplicate imports, and a package is
@@ -284,6 +413,8 @@ async function registerImportedPackage(
 		blobUrls: Object.freeze(blobUrls),
 	});
 	store.setImported(pkg.id, Object.freeze(entries));
+	store.setImportedFileIcon(pkg.id, Object.freeze(fileIconEntries));
+	store.setImportedProductIcon(pkg.id, Object.freeze(productIconEntries));
 }
 
 /** Consumed once at startup (`main.ts`): every already-imported package
@@ -344,15 +475,19 @@ export function importThemePackageViaDirectory(
 /**
  * Removes an imported package: tells Rust to delete it (idempotent — see
  * `ThemeService::remove`'s own contract), tears down its `extension-file:`
- * registration and every blob URL, drops it from `store`, and — only if the
- * currently active color theme came from this exact package — falls back to
- * Dark Modern and clears the persisted selection (`F050` S4; Rust's own
- * `remove` never touches theme *selection*, only the library — this
- * frontend-side fallback plus clear is this case's whole responsibility).
- * Clearing (rather than leaving the now-dangling id persisted) means a
- * restart never has to rediscover "this persisted selection is stale" via
- * `applyPersistedThemeSelection`'s own warn-and-clear path — it is already
- * gone.
+ * registration and every blob URL, drops it from `store`, and — independently
+ * per axis, for whichever of the three (color, file icon, product icon) was
+ * currently active *and* came from this exact package — falls back to that
+ * axis's own default and clears its persisted selection (`F050` S4 for
+ * color, `F060` S3 extending the same pattern to the two icon axes; Rust's
+ * own `remove` never touches theme *selection* on any axis, only the
+ * library — this frontend-side fallback plus clear is this case's whole
+ * responsibility). Clearing (rather than leaving the now-dangling id
+ * persisted) means a restart never has to rediscover "this persisted
+ * selection is stale" via `applyPersisted*Selection`'s own warn-and-clear
+ * path — it is already gone. The three axes are evaluated and applied
+ * independently: a package that owns the active color theme but not the
+ * active file icon theme only falls back and clears the color axis.
  */
 export async function removeImportedThemePackage(
 	bridge: PlainBridge,
@@ -362,11 +497,24 @@ export async function removeImportedThemePackage(
 ): Promise<void> {
 	await bridge.themeRemove(packageId);
 
-	const removedEntries = store.importedEntries(packageId) ?? [];
+	const removedColorEntries = store.importedEntries(packageId) ?? [];
+	const removedFileIconEntries = store.importedFileIconEntries(packageId) ?? [];
+	const removedProductIconEntries =
+		store.importedProductIconEntries(packageId) ?? [];
 	const currentThemeId = themeService.getColorTheme().id;
-	const currentThemeBelongsToRemovedPackage = removedEntries.some(
+	const currentFileIconThemeId = themeService.getFileIconTheme().id;
+	const currentProductIconThemeId = themeService.getProductIconTheme().id;
+	const currentThemeBelongsToRemovedPackage = removedColorEntries.some(
 		(entry) => entry.data.id === currentThemeId,
 	);
+	const currentFileIconThemeBelongsToRemovedPackage =
+		removedFileIconEntries.some(
+			(entry) => entry.data.id === currentFileIconThemeId,
+		);
+	const currentProductIconThemeBelongsToRemovedPackage =
+		removedProductIconEntries.some(
+			(entry) => entry.data.id === currentProductIconThemeId,
+		);
 
 	store.removeImported(packageId);
 	const handle = handlesByPackage.get(packageId);
@@ -381,6 +529,14 @@ export async function removeImportedThemePackage(
 	if (currentThemeBelongsToRemovedPackage) {
 		await applyDefaultColorTheme(themeService, store.builtin);
 		await persistThemeSelectionBestEffort(bridge, null);
+	}
+	if (currentFileIconThemeBelongsToRemovedPackage) {
+		await applyDefaultFileIconTheme(themeService, store.builtinFileIcon);
+		await persistFileIconThemeSelectionBestEffort(bridge, null);
+	}
+	if (currentProductIconThemeBelongsToRemovedPackage) {
+		await applyDefaultProductIconTheme(themeService);
+		await persistProductIconThemeSelectionBestEffort(bridge, null);
 	}
 }
 

@@ -18,6 +18,8 @@ import { ProductIconThemeData } from "@codingame/monaco-vscode-theme-service-ove
 import type { PlainBridge } from "../../platform/tauri";
 import {
 	DARK_MODERN_SETTINGS_ID,
+	DEFAULT_PRODUCT_ICON_THEME_SELECTION_ID,
+	NO_FILE_ICON_THEME_SELECTION_ID,
 	VS_MINIMAL_FILE_ICON_THEME_SETTINGS_ID,
 	type PlainFileIconThemeRegistryEntry,
 	type PlainProductIconThemeRegistryEntry,
@@ -280,6 +282,170 @@ export async function applyPersistedThemeSelection(
 }
 
 /**
+ * `F060` S3: best-effort persistence of the current file icon theme
+ * selection, mirroring `persistThemeSelectionBestEffort` exactly (same
+ * never-throws contract). `fileIconThemeId` is a `FileIconThemeData#
+ * settingsId` to persist, `NO_FILE_ICON_THEME_SELECTION_ID` for the explicit
+ * "None" choice (see that constant's own doc comment for why a bare `""`
+ * cannot be sent), or `null` to clear the axis entirely (falling back to
+ * the `vs-minimal` bootstrap default on next boot).
+ */
+export async function persistFileIconThemeSelectionBestEffort(
+	bridge: PlainBridge,
+	fileIconThemeId: string | null,
+): Promise<void> {
+	try {
+		await bridge.themeSetFileIconThemeSelection(fileIconThemeId);
+	} catch (error) {
+		console.warn(
+			"Plain: failed to persist the file icon theme selection",
+			error,
+		);
+	}
+}
+
+/** `F060` S3: the product icon theme analogue of
+ * `persistFileIconThemeSelectionBestEffort` — see
+ * `DEFAULT_PRODUCT_ICON_THEME_SELECTION_ID`'s own doc comment for the
+ * "Default" sentinel this persists instead of a bare `""`. */
+export async function persistProductIconThemeSelectionBestEffort(
+	bridge: PlainBridge,
+	productIconThemeId: string | null,
+): Promise<void> {
+	try {
+		await bridge.themeSetProductIconThemeSelection(productIconThemeId);
+	} catch (error) {
+		console.warn(
+			"Plain: failed to persist the product icon theme selection",
+			error,
+		);
+	}
+}
+
+/**
+ * `F060` S3: resolves and applies a previous session's persisted file icon
+ * theme selection, mirroring `applyPersistedThemeSelection`'s exact three
+ * outcomes (nothing persisted → leave the already-applied `vs-minimal`
+ * bootstrap default; persisted id matches a registry entry → apply it for
+ * real; persisted id matches nothing → warn, clear, leave the default
+ * standing) with one additional, file-icon-specific case:
+ * `NO_FILE_ICON_THEME_SELECTION_ID` is not looked up in `registry` at all —
+ * it always resolves to the real upstream `FileIconThemeData.noIconTheme`
+ * singleton, the same instance the picker's own "None" item applies (see
+ * `noFileIconThemeItem`'s doc comment).
+ */
+export async function applyPersistedFileIconThemeSelection(
+	bridge: PlainBridge,
+	themeService: IWorkbenchThemeService,
+	registry: readonly PlainFileIconThemeRegistryEntry[],
+): Promise<void> {
+	let fileIconThemeId: string | null;
+	try {
+		({ fileIconThemeId } = await bridge.themeGetSelection());
+	} catch (error) {
+		console.warn(
+			"Plain: failed to read the persisted file icon theme selection",
+			error,
+		);
+		return;
+	}
+	if (fileIconThemeId === null) {
+		return;
+	}
+	if (fileIconThemeId === NO_FILE_ICON_THEME_SELECTION_ID) {
+		try {
+			await themeService.setFileIconTheme(
+				FileIconThemeData.noIconTheme,
+				undefined,
+			);
+		} catch (error) {
+			console.warn(
+				"Plain: failed to apply the persisted file icon theme selection",
+				error,
+			);
+		}
+		return;
+	}
+	const entry = registry.find(
+		(candidate) => candidate.settingsId === fileIconThemeId,
+	);
+	if (entry === undefined) {
+		console.warn(
+			`Plain: persisted file icon theme "${fileIconThemeId}" is no longer available; falling back to the default`,
+		);
+		await persistFileIconThemeSelectionBestEffort(bridge, null);
+		return;
+	}
+	try {
+		await themeService.setFileIconTheme(entry.data, undefined);
+	} catch (error) {
+		console.warn(
+			"Plain: failed to apply the persisted file icon theme selection",
+			error,
+		);
+	}
+}
+
+/**
+ * `F060` S3: the product icon theme analogue of
+ * `applyPersistedFileIconThemeSelection`. `DEFAULT_PRODUCT_ICON_THEME_
+ * SELECTION_ID` resolves to `ProductIconThemeData.defaultTheme` directly
+ * (same "Default" singleton the picker's own first item applies — see
+ * `defaultProductIconThemeItem`'s doc comment), without a registry lookup.
+ */
+export async function applyPersistedProductIconThemeSelection(
+	bridge: PlainBridge,
+	themeService: IWorkbenchThemeService,
+	registry: readonly PlainProductIconThemeRegistryEntry[],
+): Promise<void> {
+	let productIconThemeId: string | null;
+	try {
+		({ productIconThemeId } = await bridge.themeGetSelection());
+	} catch (error) {
+		console.warn(
+			"Plain: failed to read the persisted product icon theme selection",
+			error,
+		);
+		return;
+	}
+	if (productIconThemeId === null) {
+		return;
+	}
+	if (productIconThemeId === DEFAULT_PRODUCT_ICON_THEME_SELECTION_ID) {
+		try {
+			await themeService.setProductIconTheme(
+				ProductIconThemeData.defaultTheme,
+				undefined,
+			);
+		} catch (error) {
+			console.warn(
+				"Plain: failed to apply the persisted product icon theme selection",
+				error,
+			);
+		}
+		return;
+	}
+	const entry = registry.find(
+		(candidate) => candidate.settingsId === productIconThemeId,
+	);
+	if (entry === undefined) {
+		console.warn(
+			`Plain: persisted product icon theme "${productIconThemeId}" is no longer available; falling back to the default`,
+		);
+		await persistProductIconThemeSelectionBestEffort(bridge, null);
+		return;
+	}
+	try {
+		await themeService.setProductIconTheme(entry.data, undefined);
+	} catch (error) {
+		console.warn(
+			"Plain: failed to apply the persisted product icon theme selection",
+			error,
+		);
+	}
+}
+
+/**
  * Plain's own Quick Pick for `workbench.action.selectTheme`, replacing the
  * vendor picker that upstream's `themes.contribution.js` registers (see
  * this module's own doc comment on `SELECT_COLOR_THEME_COMMAND_ID` for why
@@ -436,6 +602,14 @@ function buildFileIconThemeQuickPickItems(
 	return Object.freeze(items);
 }
 
+/** Maps a file icon theme quick pick item's `id` (upstream's `""` for
+ * "None", or a real `settingsId`) to what gets persisted — see
+ * `NO_FILE_ICON_THEME_SELECTION_ID`'s own doc comment for why `""` itself
+ * cannot be sent to `theme_set_selection`. */
+function toPersistedFileIconThemeId(id: string): string {
+	return id === "" ? NO_FILE_ICON_THEME_SELECTION_ID : id;
+}
+
 /**
  * Plain's own Quick Pick for `workbench.action.selectIconTheme` — same
  * preview/Escape-restores/Enter-commits semantics as
@@ -443,9 +617,12 @@ function buildFileIconThemeQuickPickItems(
  * `noFileIconThemeItem`'s own doc comment for its exact upstream-matching
  * semantics). Unlike the color theme picker this never short-circuits on an
  * empty `registry`: "None" is always a valid, meaningful choice even when no
- * file icon theme is registered at all.
+ * file icon theme is registered at all. `F060` S3: Enter also persists the
+ * accepted choice (best-effort), mirroring `runSelectColorThemeQuickPick`'s
+ * own persistence on accept.
  */
 async function runSelectFileIconThemeQuickPick(
+	bridge: PlainBridge,
 	quickInputService: IQuickInputService,
 	themeService: IWorkbenchThemeService,
 	registry: readonly PlainFileIconThemeRegistryEntry[],
@@ -483,6 +660,10 @@ async function runSelectFileIconThemeQuickPick(
 		void themeService
 			.setFileIconTheme(selected?.data ?? originalTheme, undefined)
 			.catch(() => undefined);
+		void persistFileIconThemeSelectionBestEffort(
+			bridge,
+			toPersistedFileIconThemeId(selected?.id ?? originalTheme.id),
+		);
 		quickPick.hide();
 	});
 
@@ -508,16 +689,18 @@ async function runSelectFileIconThemeQuickPick(
 
 /** Registers Plain's takeover of `workbench.action.selectIconTheme` — same
  * same-id-re-registration mechanism as `registerPlainThemePicker` (see
- * `SELECT_FILE_ICON_THEME_COMMAND_ID`'s own doc comment). Persisting the
- * user's selection (`F060` S3) is not this slice's scope: unlike
- * `registerPlainThemePicker`, this never calls back into a `PlainBridge`. */
+ * `SELECT_FILE_ICON_THEME_COMMAND_ID`'s own doc comment). `F060` S3: now
+ * calls back into `bridge` to persist the accepted selection, mirroring
+ * `registerPlainThemePicker`. */
 export function registerPlainFileIconThemePicker(
+	bridge: PlainBridge,
 	registry: readonly PlainFileIconThemeRegistryEntry[],
 ): PlainThemePickerRegistration {
 	const registration = CommandsRegistry.registerCommand(
 		SELECT_FILE_ICON_THEME_COMMAND_ID,
 		(accessor) =>
 			runSelectFileIconThemeQuickPick(
+				bridge,
 				accessor.get(IQuickInputService),
 				accessor.get(IWorkbenchThemeService),
 				registry,
@@ -570,11 +753,20 @@ function buildProductIconThemeQuickPickItems(
 	return Object.freeze(items);
 }
 
+/** Maps a product icon theme quick pick item's `id` (upstream's `""` for
+ * "Default", or a real `settingsId`) to what gets persisted — see
+ * `DEFAULT_PRODUCT_ICON_THEME_SELECTION_ID`'s own doc comment. */
+function toPersistedProductIconThemeId(id: string): string {
+	return id === "" ? DEFAULT_PRODUCT_ICON_THEME_SELECTION_ID : id;
+}
+
 /** Plain's own Quick Pick for `workbench.action.selectProductIconTheme` —
  * same shape as `runSelectFileIconThemeQuickPick`, with "Default" always
  * offered first instead of "None" (a product icon theme is never fully
- * "disabled", only reset to built-in codicons). */
+ * "disabled", only reset to built-in codicons). `F060` S3: Enter also
+ * persists the accepted choice (best-effort). */
 async function runSelectProductIconThemeQuickPick(
+	bridge: PlainBridge,
 	quickInputService: IQuickInputService,
 	themeService: IWorkbenchThemeService,
 	registry: readonly PlainProductIconThemeRegistryEntry[],
@@ -612,6 +804,10 @@ async function runSelectProductIconThemeQuickPick(
 		void themeService
 			.setProductIconTheme(selected?.data ?? originalTheme, undefined)
 			.catch(() => undefined);
+		void persistProductIconThemeSelectionBestEffort(
+			bridge,
+			toPersistedProductIconThemeId(selected?.id ?? originalTheme.id),
+		);
 		quickPick.hide();
 	});
 
@@ -636,14 +832,17 @@ async function runSelectProductIconThemeQuickPick(
 }
 
 /** Registers Plain's takeover of `workbench.action.selectProductIconTheme` —
- * same mechanism as `registerPlainFileIconThemePicker`. */
+ * same mechanism as `registerPlainFileIconThemePicker`, including `F060` S3's
+ * persist-on-accept. */
 export function registerPlainProductIconThemePicker(
+	bridge: PlainBridge,
 	registry: readonly PlainProductIconThemeRegistryEntry[],
 ): PlainThemePickerRegistration {
 	const registration = CommandsRegistry.registerCommand(
 		SELECT_PRODUCT_ICON_THEME_COMMAND_ID,
 		(accessor) =>
 			runSelectProductIconThemeQuickPick(
+				bridge,
 				accessor.get(IQuickInputService),
 				accessor.get(IWorkbenchThemeService),
 				registry,

@@ -81,12 +81,23 @@ interface TestThemeContribution {
 	readonly path: string;
 }
 
+/** `F060` S3: one `contributes.iconThemes[]`/`contributes.
+ * productIconThemes[]` entry — mirrors `ThemeIconContribution`
+ * (`app/platform/tauri/contracts.ts`). */
+interface TestThemeIconContribution {
+	readonly id: string;
+	readonly label: string | null;
+	readonly path: string;
+}
+
 interface TestThemePackageSummary {
 	readonly id: string;
 	readonly publisher: string;
 	readonly name: string;
 	readonly version: string;
 	readonly themes: readonly TestThemeContribution[];
+	readonly iconThemes: readonly TestThemeIconContribution[];
+	readonly productIconThemes: readonly TestThemeIconContribution[];
 	readonly resources: readonly string[];
 	readonly containsCode: boolean;
 }
@@ -137,6 +148,11 @@ async function installNativeIpcMock(
 	// "nothing persisted yet") in a previous session; consumed by
 	// `theme_get_selection`. Only F050 S4's own selection tests pass this.
 	themeSelectionForTest: string | null = null,
+	// `F060` S3: the file icon/product icon theme axis analogues of
+	// `themeSelectionForTest` — independent, own-axis persisted selections.
+	// Only F060 S3's own icon selection tests pass these.
+	fileIconThemeSelectionForTest: string | null = null,
+	productIconThemeSelectionForTest: string | null = null,
 ): Promise<void> {
 	await page.addInitScript(
 		({
@@ -150,6 +166,8 @@ async function installNativeIpcMock(
 			themeLibraryFixtureForTest,
 			themeImportOutcomesForTest,
 			themeSelectionForTest,
+			fileIconThemeSelectionForTest,
+			productIconThemeSelectionForTest,
 		}) => {
 			const calls: Array<{
 				command: string;
@@ -1100,6 +1118,9 @@ async function installNativeIpcMock(
 				seedThemePackage(fixture);
 			}
 			let themeSelection: string | null = themeSelectionForTest;
+			let fileIconThemeSelection: string | null = fileIconThemeSelectionForTest;
+			let productIconThemeSelection: string | null =
+				productIconThemeSelectionForTest;
 			const scriptedThemeImports = [...themeImportOutcomesForTest];
 			const themeImportFromScript = (): unknown => {
 				const outcome = scriptedThemeImports.shift();
@@ -1676,11 +1697,32 @@ async function installNativeIpcMock(
 							return null;
 						}
 						case "theme_get_selection":
-							return { themeId: themeSelection };
+							return {
+								themeId: themeSelection,
+								fileIconThemeId: fileIconThemeSelection,
+								productIconThemeId: productIconThemeSelection,
+							};
 						case "theme_set_selection": {
-							const themeRequest = args.request as
-								{ themeId?: string | null } | undefined;
-							themeSelection = themeRequest?.themeId ?? null;
+							// `F060` S3: mirrors Rust's own per-field update
+							// semantics — a field this exact request object does
+							// not carry at all leaves that axis untouched (only
+							// an explicitly-present key, `null` or a string,
+							// updates it). See `theme::selection`'s module doc
+							// comment for the full rationale.
+							const themeRequest = (args.request ?? {}) as Record<
+								string,
+								string | null | undefined
+							>;
+							if ("themeId" in themeRequest) {
+								themeSelection = themeRequest.themeId ?? null;
+							}
+							if ("fileIconThemeId" in themeRequest) {
+								fileIconThemeSelection = themeRequest.fileIconThemeId ?? null;
+							}
+							if ("productIconThemeId" in themeRequest) {
+								productIconThemeSelection =
+									themeRequest.productIconThemeId ?? null;
+							}
 							return null;
 						}
 						default:
@@ -1700,6 +1742,8 @@ async function installNativeIpcMock(
 			themeLibraryFixtureForTest,
 			themeImportOutcomesForTest,
 			themeSelectionForTest,
+			fileIconThemeSelectionForTest,
+			productIconThemeSelectionForTest,
 		},
 	);
 }
@@ -7662,6 +7706,8 @@ const IMPORTED_FANCY_DARK_FIXTURE = Object.freeze({
 				path: "themes/fancy-dark.json",
 			}),
 		]),
+		iconThemes: Object.freeze([]),
+		productIconThemes: Object.freeze([]),
 		resources: Object.freeze(["themes/fancy-dark.json"]),
 		containsCode: false,
 	}),
@@ -7669,6 +7715,84 @@ const IMPORTED_FANCY_DARK_FIXTURE = Object.freeze({
 		"themes/fancy-dark.json": JSON.stringify({
 			colors: { "editor.background": "#123456" },
 		}),
+	}),
+});
+
+// `F060` S3: a theme package that contributes a color theme, a file icon
+// theme and a product icon theme together — closing the S2 gap where an
+// imported package's icon themes were validated and stored by Rust but
+// never projected onto the wire, so the frontend had no way to discover or
+// apply them (see `docs/research/2026-07-24-icon-themes.md`'s "实施偏差记录").
+const IMPORTED_FANCY_ICONS_FIXTURE = Object.freeze({
+	summary: Object.freeze({
+		id: "acme.fancy-icons@1.0.0",
+		publisher: "acme",
+		name: "fancy-icons",
+		version: "1.0.0",
+		themes: Object.freeze([
+			Object.freeze({
+				label: "Fancy Icons Theme",
+				uiTheme: "vs-dark" as const,
+				path: "themes/fancy-icons.json",
+			}),
+		]),
+		iconThemes: Object.freeze([
+			Object.freeze({
+				id: "acme.fancy-file-icons",
+				label: "Fancy File Icons",
+				path: "fileicons/fancy-file-icons.json",
+			}),
+		]),
+		productIconThemes: Object.freeze([
+			Object.freeze({
+				id: "acme.fancy-product-icons",
+				label: "Fancy Product Icons",
+				path: "picons/fancy-product-icons.json",
+			}),
+		]),
+		resources: Object.freeze([
+			"themes/fancy-icons.json",
+			"fileicons/fancy-file-icons.json",
+			"fileicons/fancy-file.svg",
+			"picons/fancy-product-icons.json",
+			"picons/fancy-font.woff",
+		]),
+		containsCode: false,
+	}),
+	resourceContents: Object.freeze({
+		"themes/fancy-icons.json": JSON.stringify({
+			colors: { "editor.background": "#654321" },
+		}),
+		"fileicons/fancy-file-icons.json": JSON.stringify({
+			iconDefinitions: {
+				_file: { iconPath: "./fancy-file.svg" },
+			},
+			file: "_file",
+		}),
+		"fileicons/fancy-file.svg":
+			'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16"/></svg>',
+		// `fonts` must be non-empty with a valid `id`/`src` (upstream's own
+		// `_loadProductIconThemeDocument` rejects `{ iconDefinitions, fonts:
+		// [] }` outright — "Must contain iconDefinitions and fonts" — real
+		// browser probe, not assumed; mirrors F060 S1's own Rust validation,
+		// which never accepts an empty `fonts[]` either).
+		"picons/fancy-product-icons.json": JSON.stringify({
+			iconDefinitions: {},
+			fonts: [
+				{
+					id: "fancy-font",
+					// Real, valid `fontWeightRegex`/`fontStyleRegex` values (see
+					// `@codingame/monaco-vscode-api`'s `iconRegistry.ts`) — an
+					// omitted or invalid weight/style still logs a genuine
+					// `console.error` ("Invalid font weight/style ... Ignoring
+					// setting"), confirmed by a real browser probe, not assumed.
+					weight: "normal",
+					style: "normal",
+					src: [{ path: "./fancy-font.woff", format: "woff" }],
+				},
+			],
+		}),
+		"picons/fancy-font.woff": "wOFF-fake-bytes-for-test-fixture-only",
 	}),
 });
 
@@ -7915,22 +8039,55 @@ test("shows a desensitized error toast when importing a VSIX fails, without leak
 	expect(consoleErrors[0]).not.toContain("THEME_PACKAGE_NO_THEMES");
 });
 
-// `F050` S4: cross-session persistence of the selected color theme.
-async function themeSetSelectionCalls(
+/**
+ * `F050` S4: cross-session persistence of the selected color theme.
+ *
+ * `F060` S3 fix: a `theme_set_selection` call now only ever carries the one
+ * axis it actually changed (see `theme::selection`'s own module doc comment
+ * on the per-field update contract) — so this must only count a call as
+ * touching `field` when the exact request object carries that key, never
+ * every `theme_set_selection` call regardless of which axis it was about.
+ * The three axis-specific wrappers below share this one implementation.
+ */
+async function themeSetSelectionCallsForField(
 	page: Page,
+	field: "themeId" | "fileIconThemeId" | "productIconThemeId",
 ): Promise<readonly (string | null)[]> {
-	return page.evaluate(() => {
+	return page.evaluate((field) => {
 		const testWindow = window as unknown as Window & {
 			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
 		};
 		return testWindow.__PLAIN_TEST_TAURI_CALLS__
-			.filter(({ command }) => command === "theme_set_selection")
+			.filter(
+				({ command, args }) =>
+					command === "theme_set_selection" &&
+					typeof args.request === "object" &&
+					args.request !== null &&
+					field in (args.request as Record<string, unknown>),
+			)
 			.map(
 				({ args }) =>
-					(args.request as { themeId?: string | null } | undefined)?.themeId ??
-					null,
+					(args.request as Record<string, string | null>)[field] ?? null,
 			);
-	});
+	}, field);
+}
+
+function themeSetSelectionCalls(
+	page: Page,
+): Promise<readonly (string | null)[]> {
+	return themeSetSelectionCallsForField(page, "themeId");
+}
+
+function fileIconThemeSetSelectionCalls(
+	page: Page,
+): Promise<readonly (string | null)[]> {
+	return themeSetSelectionCallsForField(page, "fileIconThemeId");
+}
+
+function productIconThemeSetSelectionCalls(
+	page: Page,
+): Promise<readonly (string | null)[]> {
+	return themeSetSelectionCallsForField(page, "productIconThemeId");
 }
 
 test("boots directly on a theme whose id was already persisted from a previous session", async ({
@@ -8284,6 +8441,281 @@ test("lists only Default in the Product Icon Theme quick pick, and applying it l
 	expect(await page.locator(".contributedProductIconTheme").textContent()).toBe(
 		"",
 	);
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+// `F060` S3, part A: closes the S2 gap where an imported package's file
+// icon/product icon themes were validated and stored by Rust (F060 S1) but
+// never projected onto the wire (`ThemePackageSummary` lacked
+// `iconThemes`/`productIconThemes`), so the frontend had no way to discover
+// or apply them — see `docs/research/2026-07-24-icon-themes.md`'s "实施偏差
+// 记录" and `src-tauri/src/theme/dto.rs`'s `IconThemeContributionSummary`.
+test("discovers an imported package's file icon theme and product icon theme in their quick picks, and applying each is real", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await installNativeIpcMock(page, "arrayBuffer", "readonly", {}, 20_000, 0, [
+		IMPORTED_FANCY_ICONS_FIXTURE,
+	]);
+	await openNativeWorkspaceExplorer(page);
+
+	const filePicker = await openFileIconThemePicker(page);
+	const fancyFileIconRow = filePicker
+		.locator(".quick-input-list .monaco-list-row")
+		.filter({ hasText: "Fancy File Icons" });
+	await expect(fancyFileIconRow).toHaveCount(1);
+	await fancyFileIconRow.click();
+	await expect(filePicker).toBeHidden();
+
+	// Applied for real: `file-icons-enabled` stays set, and README.md's row
+	// (the imported theme's own `iconDefinitions` only define the `file`
+	// role, matched here) now resolves to a real, non-empty background
+	// image — the theme's own SVG resource, not `vs-minimal`'s.
+	expect((await workbenchThemeState(page)).classNames).toContain(
+		"file-icons-enabled",
+	);
+	await expect
+		.poll(() => explorerRowIconBackgroundImage(page, "README.md"))
+		.not.toBe("none");
+
+	// Reopening the picker and finding "Fancy File Icons" pre-selected
+	// proves `getFileIconTheme()` now really returns this entry, not merely
+	// that `setFileIconTheme` was called with it.
+	const filePickerAfter = await openFileIconThemePicker(page);
+	await expect(
+		filePickerAfter.locator(".quick-input-list .monaco-list-row.focused"),
+	).toContainText("Fancy File Icons");
+	await page.keyboard.press("Escape");
+	await expect(filePickerAfter).toBeHidden();
+
+	const productPicker = await openProductIconThemePicker(page);
+	const fancyProductIconRow = productPicker
+		.locator(".quick-input-list .monaco-list-row")
+		.filter({ hasText: "Fancy Product Icons" });
+	await expect(fancyProductIconRow).toHaveCount(1);
+	await fancyProductIconRow.click();
+	await expect(productPicker).toBeHidden();
+
+	// Applying it must never disturb the built-in codicons the Activity Bar
+	// tabs render through (same zero-crash bar the built-in "Default" case
+	// already holds itself to).
+	await expect(page.getByRole("tab", { name: /^Explorer / })).toBeVisible();
+	await expect(page.getByRole("tab", { name: /^Search/ })).toBeVisible();
+
+	const productPickerAfter = await openProductIconThemePicker(page);
+	await expect(
+		productPickerAfter.locator(".quick-input-list .monaco-list-row.focused"),
+	).toContainText("Fancy Product Icons");
+	await page.keyboard.press("Escape");
+	await expect(productPickerAfter).toBeHidden();
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+// `F060` S3, part B: preset selections on all three axes (one of them —
+// the color theme — resolving against an imported package, closing the
+// same S2 discovery gap from the selection-resolution side) must all take
+// effect together at this session's own startup.
+test("boots directly on persisted color, file icon and product icon theme selections from a previous session, including one from an imported package", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[IMPORTED_FANCY_ICONS_FIXTURE],
+		[],
+		"Fancy Icons Theme",
+		"acme.fancy-file-icons",
+		"acme.fancy-product-icons",
+	);
+	await openNativeWorkspaceExplorer(page);
+
+	const state = await workbenchThemeState(page);
+	expect(state.editorBackground).toBe("#654321");
+	expect(state.classNames).not.toContain(DARK_MODERN.className);
+	expect(state.classNames).toContain("file-icons-enabled");
+
+	const filePicker = await openFileIconThemePicker(page);
+	await expect(
+		filePicker.locator(".quick-input-list .monaco-list-row.focused"),
+	).toContainText("Fancy File Icons");
+	await page.keyboard.press("Escape");
+	await expect(filePicker).toBeHidden();
+
+	const productPicker = await openProductIconThemePicker(page);
+	await expect(
+		productPicker.locator(".quick-input-list .monaco-list-row.focused"),
+	).toContainText("Fancy Product Icons");
+	await page.keyboard.press("Escape");
+	await expect(productPicker).toBeHidden();
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("boots with icons disabled (the persisted None sentinel) and with Default (the persisted Default sentinel), never resurrecting the vs-minimal bootstrap default", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		"plain:no-file-icon-theme",
+		"plain:default-product-icon-theme",
+	);
+	await openNativeWorkspaceExplorer(page);
+
+	// Explicit "None" must actually disable icons on boot — not merely leave
+	// the `vs-minimal` bootstrap default standing (which is exactly what a
+	// bare `null` would do instead; see `NO_FILE_ICON_THEME_SELECTION_ID`'s
+	// own doc comment).
+	expect((await workbenchThemeState(page)).classNames).not.toContain(
+		"file-icons-enabled",
+	);
+	expect(await explorerRowIconBackgroundImage(page, "README.md")).toBe("none");
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("persists the accepted file icon and product icon theme selections via theme_set_selection, including the None/Default sentinels", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await installNativeIpcMock(page, "arrayBuffer");
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	expect(await fileIconThemeSetSelectionCalls(page)).toEqual([]);
+	expect(await productIconThemeSetSelectionCalls(page)).toEqual([]);
+
+	// File icon theme: switch to "None".
+	const filePicker = await openFileIconThemePicker(page);
+	await page.keyboard.press("ArrowUp");
+	await expect(
+		filePicker.locator(".quick-input-list .monaco-list-row.focused"),
+	).toContainText("None");
+	await page.keyboard.press("Enter");
+	await expect(filePicker).toBeHidden();
+	// `""` (upstream's own id for "None") is never sent on the wire — the
+	// reserved sentinel is, so a restart can tell "explicitly disabled" apart
+	// from "never touched this axis" (see this file's own boot test above).
+	expect(await fileIconThemeSetSelectionCalls(page)).toEqual([
+		"plain:no-file-icon-theme",
+	]);
+	// The color and product icon axes must never be touched by this call.
+	expect(await themeSetSelectionCalls(page)).toEqual([]);
+	expect(await productIconThemeSetSelectionCalls(page)).toEqual([]);
+
+	// Product icon theme: re-confirm "Default" (the only entry) with Enter.
+	const productPicker = await openProductIconThemePicker(page);
+	await page.keyboard.press("Enter");
+	await expect(productPicker).toBeHidden();
+	expect(await productIconThemeSetSelectionCalls(page)).toEqual([
+		"plain:default-product-icon-theme",
+	]);
+	expect(await fileIconThemeSetSelectionCalls(page)).toEqual([
+		"plain:no-file-icon-theme",
+	]);
+	expect(await themeSetSelectionCalls(page)).toEqual([]);
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("falls back the file icon and product icon theme to their own defaults with zero crash when their persisted selection ids match nothing, independently of the color axis", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		"a-stale-file-icon-theme-id-from-a-removed-package",
+		"a-stale-product-icon-theme-id-from-a-removed-package",
+	);
+	await openNativeWorkspaceExplorer(page);
+
+	// Both stale ids fall back to whatever `applyDefault{FileIcon,ProductIcon}
+	// Theme` already applied at bootstrap (`vs-minimal`/Default) — never a
+	// crash, and never left standing to repeat the same fallback every boot.
+	const state = await workbenchThemeState(page);
+	expect(state.classNames).toContain("file-icons-enabled");
+	expect(state.classNames).toContain(DARK_MODERN.className);
+	await expect
+		.poll(() => explorerRowIconBackgroundImage(page, "README.md"))
+		.not.toBe("none");
+
+	expect(await fileIconThemeSetSelectionCalls(page)).toEqual([null]);
+	expect(await productIconThemeSetSelectionCalls(page)).toEqual([null]);
+	// The color axis (never seeded with a stale id in this test) must stay
+	// untouched.
+	expect(await themeSetSelectionCalls(page)).toEqual([]);
 
 	expect(pageErrors).toEqual([]);
 	expect(consoleErrors).toEqual([]);

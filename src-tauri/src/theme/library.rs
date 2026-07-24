@@ -118,24 +118,28 @@ impl ThemeLibrary {
         root.remove_dir(&name).map_err(|_| theme_io_failed())
     }
 
-    /// `F050` S4's persisted-selection read — see [`selection::read_selection`]
-    /// for the full contract. Shares this library's single gate with every
-    /// other operation, so a concurrent import/remove can never observe a
-    /// half-written selection file (not that a rename-based publish could
-    /// produce one anyway — the gate is defense in depth here, not the sole
-    /// safeguard).
-    pub(crate) fn get_selection(&self) -> Result<Option<String>, CommandError> {
+    /// `F050` S4's persisted-selection read, extended by `F060` S3 to all
+    /// three axes — see [`selection::read_selection`] for the full contract.
+    /// Shares this library's single gate with every other operation, so a
+    /// concurrent import/remove can never observe a half-written selection
+    /// file (not that a rename-based publish could produce one anyway — the
+    /// gate is defense in depth here, not the sole safeguard).
+    pub(crate) fn get_selection(&self) -> Result<selection::PersistedThemeSelection, CommandError> {
         let _guard = self.lock()?;
         let root = self.ensure_root()?;
         Ok(selection::read_selection(&root))
     }
 
-    /// `F050` S4's persisted-selection write/clear — see
-    /// [`selection::write_selection`] for the full contract.
-    pub(crate) fn set_selection(&self, theme_id: Option<&str>) -> Result<(), CommandError> {
+    /// `F050` S4's persisted-selection write/clear, extended by `F060` S3 to
+    /// a per-axis partial update — see [`selection::write_selection`] for the
+    /// full contract.
+    pub(crate) fn set_selection(
+        &self,
+        update: selection::SelectionUpdate<'_>,
+    ) -> Result<(), CommandError> {
         let _guard = self.lock()?;
         let root = self.ensure_root()?;
-        selection::write_selection(&root, theme_id)
+        selection::write_selection(&root, update)
     }
 }
 

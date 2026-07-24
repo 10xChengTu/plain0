@@ -1,5 +1,6 @@
 import type {
 	ThemeContribution,
+	ThemeIconContribution,
 	ThemeImportResult,
 	ThemeListResult,
 	ThemePackageSummary,
@@ -195,19 +196,54 @@ function isWellFormedThemeSelectionId(value: unknown): value is string {
 	return true;
 }
 
-export function frozenThemeSetSelectionRequest(
-	themeId: unknown,
-): Readonly<{ themeId: string | null }> {
-	if (themeId === null) {
-		return Object.freeze({ themeId: null });
+/**
+ * Builds a `theme_set_selection` request touching exactly one axis (the
+ * request's `field` key), leaving the other two entirely absent from the
+ * JSON body — Rust's own per-field update semantics (`theme::selection`'s
+ * module doc comment) treat an absent key as "leave this axis untouched",
+ * so this is what makes each of the three `themeSet*Selection` bridge
+ * methods independent of one another and of each other's current value.
+ */
+function frozenSelectionFieldRequest<K extends string>(
+	field: K,
+	value: unknown,
+): Readonly<Record<K, string | null>> {
+	if (value === null) {
+		return Object.freeze({ [field]: null }) as Readonly<
+			Record<K, string | null>
+		>;
 	}
-	if (!isWellFormedThemeSelectionId(themeId)) {
+	if (!isWellFormedThemeSelectionId(value)) {
 		return requestViolation(
 			"THEME_SELECTION_INVALID",
 			"The theme selection id is empty, too long, or contains a control character.",
 		);
 	}
-	return Object.freeze({ themeId });
+	return Object.freeze({ [field]: value }) as Readonly<
+		Record<K, string | null>
+	>;
+}
+
+export function frozenThemeSetSelectionRequest(
+	themeId: unknown,
+): Readonly<{ themeId: string | null }> {
+	return frozenSelectionFieldRequest("themeId", themeId);
+}
+
+/** `F060` S3: the file icon theme axis analogue of
+ * `frozenThemeSetSelectionRequest` — see `frozenSelectionFieldRequest`'s
+ * own doc comment for why this never touches the other two axes. */
+export function frozenThemeSetFileIconThemeSelectionRequest(
+	fileIconThemeId: unknown,
+): Readonly<{ fileIconThemeId: string | null }> {
+	return frozenSelectionFieldRequest("fileIconThemeId", fileIconThemeId);
+}
+
+/** `F060` S3: the product icon theme axis analogue. */
+export function frozenThemeSetProductIconThemeSelectionRequest(
+	productIconThemeId: unknown,
+): Readonly<{ productIconThemeId: string | null }> {
+	return frozenSelectionFieldRequest("productIconThemeId", productIconThemeId);
 }
 
 function isThemeUiTheme(value: unknown): value is ThemeUiTheme {
@@ -252,6 +288,45 @@ function decodeThemeContributionArray(
 	return Object.freeze(value.map((entry) => decodeThemeContribution(entry)));
 }
 
+/** `F060` S3: decodes one `contributes.iconThemes[]`/`contributes.
+ * productIconThemes[]` entry — the `ThemeIconContribution` analogue of
+ * `decodeThemeContribution`, differing only in the closed key set (`id`
+ * instead of `uiTheme`). */
+function decodeThemeIconContribution(value: unknown): ThemeIconContribution {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, ["id", "label", "path"]) ||
+		typeof value.id !== "string" ||
+		(value.label !== null && typeof value.label !== "string") ||
+		typeof value.path !== "string"
+	) {
+		return violation();
+	}
+	rejectProxyObject(value);
+	return Object.freeze({
+		id: value.id,
+		label: value.label as string | null,
+		path: value.path,
+	});
+}
+
+function decodeThemeIconContributionArray(
+	value: unknown,
+): readonly ThemeIconContribution[] {
+	if (
+		typeof value !== "object" ||
+		value === null ||
+		!Array.isArray(value) ||
+		Object.getPrototypeOf(value) !== Array.prototype
+	) {
+		return violation();
+	}
+	rejectProxyObject(value);
+	return Object.freeze(
+		value.map((entry) => decodeThemeIconContribution(entry)),
+	);
+}
+
 function decodeStringArray(value: unknown): readonly string[] {
 	if (
 		typeof value !== "object" ||
@@ -277,6 +352,8 @@ function decodeThemePackageSummary(value: unknown): ThemePackageSummary {
 			"name",
 			"version",
 			"themes",
+			"iconThemes",
+			"productIconThemes",
 			"resources",
 			"containsCode",
 		]) ||
@@ -289,6 +366,10 @@ function decodeThemePackageSummary(value: unknown): ThemePackageSummary {
 		return violation();
 	}
 	const themes = decodeThemeContributionArray(value.themes);
+	const iconThemes = decodeThemeIconContributionArray(value.iconThemes);
+	const productIconThemes = decodeThemeIconContributionArray(
+		value.productIconThemes,
+	);
 	const resources = decodeStringArray(value.resources);
 	rejectProxyObject(value);
 	return Object.freeze({
@@ -297,6 +378,8 @@ function decodeThemePackageSummary(value: unknown): ThemePackageSummary {
 		name: value.name,
 		version: value.version,
 		themes,
+		iconThemes,
+		productIconThemes,
 		resources,
 		containsCode: value.containsCode,
 	});
@@ -364,13 +447,25 @@ export function decodeThemeSelectionResult(
 	return sanitizedDecode(() => {
 		if (
 			!isPlainObject(value) ||
-			!hasExactKeys(value, ["themeId"]) ||
-			(value.themeId !== null && typeof value.themeId !== "string")
+			!hasExactKeys(value, [
+				"themeId",
+				"fileIconThemeId",
+				"productIconThemeId",
+			]) ||
+			(value.themeId !== null && typeof value.themeId !== "string") ||
+			(value.fileIconThemeId !== null &&
+				typeof value.fileIconThemeId !== "string") ||
+			(value.productIconThemeId !== null &&
+				typeof value.productIconThemeId !== "string")
 		) {
 			return violation();
 		}
 		rejectProxyObject(value);
-		return Object.freeze({ themeId: value.themeId as string | null });
+		return Object.freeze({
+			themeId: value.themeId as string | null,
+			fileIconThemeId: value.fileIconThemeId as string | null,
+			productIconThemeId: value.productIconThemeId as string | null,
+		});
 	});
 }
 

@@ -29,6 +29,8 @@ import {
 	applyDefaultColorTheme,
 	applyDefaultFileIconTheme,
 	applyDefaultProductIconTheme,
+	applyPersistedFileIconThemeSelection,
+	applyPersistedProductIconThemeSelection,
 	applyPersistedThemeSelection,
 	registerPlainFileIconThemePicker,
 	registerPlainProductIconThemePicker,
@@ -162,12 +164,34 @@ async function bootstrap(): Promise<void> {
 
 	const themeFileService = await getService(IFileService);
 	const themeRegistry = await createPlainThemeRegistry(themeFileService);
+	// `F060` S2's built-in file/product icon registries — constructed here
+	// (rather than after the color theme block, as S2 originally had it) so
+	// `F060` S3's unified `PlainThemeRegistryStore` below can be built once
+	// with all three built-in axes together.
+	const fileIconThemeRegistry =
+		await createPlainFileIconThemeRegistry(themeFileService);
+	const productIconThemeRegistry =
+		await createPlainProductIconThemeRegistry(themeFileService);
 	const themeService = await getService(IWorkbenchThemeService);
 	await applyDefaultColorTheme(themeService, themeRegistry);
-	const themeRegistryStore = new PlainThemeRegistryStore(themeRegistry);
+	await applyDefaultFileIconTheme(themeService, fileIconThemeRegistry);
+	await applyDefaultProductIconTheme(themeService);
+	const themeRegistryStore = new PlainThemeRegistryStore(
+		themeRegistry,
+		fileIconThemeRegistry,
+		productIconThemeRegistry,
+	);
 	let themePickerRegistration = registerPlainThemePicker(
 		bridge,
 		themeRegistryStore.entries(),
+	);
+	fileIconThemePickerRegistration = registerPlainFileIconThemePicker(
+		bridge,
+		themeRegistryStore.fileIconEntries(),
+	);
+	productIconThemePickerRegistration = registerPlainProductIconThemePicker(
+		bridge,
+		themeRegistryStore.productIconEntries(),
 	);
 	const reRegisterThemePicker = (): void => {
 		themePickerRegistration.dispose();
@@ -176,43 +200,60 @@ async function bootstrap(): Promise<void> {
 			themeRegistryStore.entries(),
 		);
 	};
+	const reRegisterFileIconThemePicker = (): void => {
+		fileIconThemePickerRegistration?.dispose();
+		fileIconThemePickerRegistration = registerPlainFileIconThemePicker(
+			bridge,
+			themeRegistryStore.fileIconEntries(),
+		);
+	};
+	const reRegisterProductIconThemePicker = (): void => {
+		productIconThemePickerRegistration?.dispose();
+		productIconThemePickerRegistration = registerPlainProductIconThemePicker(
+			bridge,
+			themeRegistryStore.productIconEntries(),
+		);
+	};
+	// `F060` S3: a single import or removal can touch any/all of the three
+	// axes at once (one VSIX may declare a color theme, a file icon theme
+	// and a product icon theme together), so `registerPlainThemeCommands`'s
+	// one re-registration callback re-registers all three pickers, not just
+	// the color one `F050` S3 originally wired up.
+	const reRegisterAllThemePickers = (): void => {
+		reRegisterThemePicker();
+		reRegisterFileIconThemePicker();
+		reRegisterProductIconThemePicker();
+	};
 	// Every previously-imported package (from an earlier session) must
 	// reappear in the picker after a restart — this is `F050` S3's own
-	// consumption scope.
+	// consumption scope, extended by `F060` S3 to the two icon axes.
 	await consumeImportedThemePackages(bridge, themeRegistryStore);
-	reRegisterThemePicker();
-	// `F050` S4: only once the registry reflects every built-in *and*
-	// already-imported entry can a persisted selection resolve against the
-	// full set it was originally chosen from — see `applyPersistedTheme
-	// Selection`'s own doc comment for why `null`/no-match falls back to the
-	// default `applyDefaultColorTheme` already applied above.
+	reRegisterAllThemePickers();
+	// `F050` S4/`F060` S3: only once each registry reflects every built-in
+	// *and* already-imported entry can a persisted selection resolve against
+	// the full set it was originally chosen from — see
+	// `applyPersistedThemeSelection`'s own doc comment for why `null`/
+	// no-match falls back to the default already applied above (same
+	// contract for the two `applyPersisted*IconThemeSelection` siblings).
 	await applyPersistedThemeSelection(
 		bridge,
 		themeService,
 		themeRegistryStore.entries(),
 	);
+	await applyPersistedFileIconThemeSelection(
+		bridge,
+		themeService,
+		themeRegistryStore.fileIconEntries(),
+	);
+	await applyPersistedProductIconThemeSelection(
+		bridge,
+		themeService,
+		themeRegistryStore.productIconEntries(),
+	);
 	themeCommandsRegistration = registerPlainThemeCommands(
 		bridge,
 		themeRegistryStore,
-		reRegisterThemePicker,
-	);
-
-	// `F060` S2: built-in file/product icon theme activation. Both registries
-	// are static after bootstrap (imported-package icon theme consumption is
-	// out of this slice's scope — see `buildPlainFileIconThemeRegistryEntry`'s
-	// own doc comment in `plain-theme-registry.ts`), so unlike the color theme
-	// picker above there is no re-registration hook to wire up.
-	const fileIconThemeRegistry =
-		await createPlainFileIconThemeRegistry(themeFileService);
-	const productIconThemeRegistry =
-		await createPlainProductIconThemeRegistry(themeFileService);
-	await applyDefaultFileIconTheme(themeService, fileIconThemeRegistry);
-	await applyDefaultProductIconTheme(themeService);
-	fileIconThemePickerRegistration = registerPlainFileIconThemePicker(
-		fileIconThemeRegistry,
-	);
-	productIconThemePickerRegistration = registerPlainProductIconThemePicker(
-		productIconThemeRegistry,
+		reRegisterAllThemePickers,
 	);
 
 	const surfaceSnapshot = enforceExcludedWorkbenchSurfaces();

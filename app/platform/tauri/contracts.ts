@@ -329,11 +329,30 @@ export interface ThemeContribution {
 }
 
 /**
+ * One `contributes.iconThemes[]`/`contributes.productIconThemes[]` entry —
+ * the `F060` S3 wire projection of `src-tauri/src/theme/dto.rs`'s
+ * `IconThemeContributionSummary`. Unlike `ThemeContribution`, `id` is
+ * always present and is always this axis's `settingsId` verbatim (no
+ * `label` fallback — see `plain-theme-registry.ts`'s own doc comment on
+ * `PlainFileIconThemeRegistryEntry`/`PlainProductIconThemeRegistryEntry`
+ * for why upstream's `ThemeRegistry` for these two axes is `idRequired`).
+ */
+export interface ThemeIconContribution {
+	readonly id: string;
+	readonly label: string | null;
+	/** Package-relative wire path, e.g. `"fileicons/icons.json"`. */
+	readonly path: string;
+}
+
+/**
  * One imported theme package's validated summary. `resources` is the exact
  * whitelist `theme_read_resource` checks a `relativePath` against for this
  * package (main document, `include` chain, `tokenColors` `.tmTheme`
- * target) — every file the frontend needs to fetch and `registerFileUrl`
- * to make the package's themes actually loadable.
+ * target, icon `iconPath`/font `src`) — every file the frontend needs to
+ * fetch and `registerFileUrl` to make the package's themes actually
+ * loadable. `iconThemes`/`productIconThemes` (`F060` S3) are always
+ * present, empty arrays when the package contributes none of that axis —
+ * never omitted.
  */
 export interface ThemePackageSummary {
 	readonly id: string;
@@ -341,6 +360,8 @@ export interface ThemePackageSummary {
 	readonly name: string;
 	readonly version: string;
 	readonly themes: readonly ThemeContribution[];
+	readonly iconThemes: readonly ThemeIconContribution[];
+	readonly productIconThemes: readonly ThemeIconContribution[];
 	readonly resources: readonly string[];
 	readonly containsCode: boolean;
 }
@@ -354,12 +375,18 @@ export interface ThemeListResult {
 	readonly skipped: number;
 }
 
-/** `theme_get_selection`'s result: the persisted `ColorThemeData#settingsId`,
- * or `null` if none is stored (never set, explicitly cleared, or the stored
- * file was corrupt/invalid — Rust collapses all three to `null` rather than
- * distinguishing them, see `src-tauri/src/theme/selection.rs`). */
+/** `theme_get_selection`'s result: the persisted `settingsId` for each of
+ * Plain's three theme axes — color (`ColorThemeData`), file icon
+ * (`FileIconThemeData`) and product icon (`ProductIconThemeData`), `F060`
+ * S3 extending this from the single `themeId` field `F050` S4 introduced —
+ * or `null` per axis if nothing is stored for it (never set, explicitly
+ * cleared, or the stored value was corrupt/invalid — Rust collapses all
+ * three reasons to `null`, independently per axis, see
+ * `src-tauri/src/theme/selection.rs`). */
 export interface ThemeSelectionResult {
 	readonly themeId: string | null;
+	readonly fileIconThemeId: string | null;
+	readonly productIconThemeId: string | null;
 }
 
 export type Unlisten = () => void | Promise<void>;
@@ -500,8 +527,23 @@ export interface PlainBridge {
 	 * `themeId: null`, not a rejection. */
 	themeGetSelection(): Promise<ThemeSelectionResult>;
 	/** Persists (a non-null `themeId`) or clears (`null`) the color theme
-	 * selection. A non-null id that fails Rust's charset/length check
+	 * selection, leaving the file icon/product icon axes exactly as they
+	 * were (each of the three `themeSet*Selection` methods below sends only
+	 * its own field on the wire — see `theme::selection`'s own module doc
+	 * comment for why `theme_set_selection`'s per-field update semantics
+	 * make that safe). A non-null id that fails Rust's charset/length check
 	 * rejects with `THEME_SELECTION_INVALID` and leaves whatever was
 	 * previously persisted untouched. */
 	themeSetSelection(themeId: string | null): Promise<void>;
+	/** Persists (a non-null `fileIconThemeId`) or clears (`null`) the file
+	 * icon theme selection, leaving the color/product icon axes untouched.
+	 * Same validation/rejection contract as `themeSetSelection`. */
+	themeSetFileIconThemeSelection(fileIconThemeId: string | null): Promise<void>;
+	/** Persists (a non-null `productIconThemeId`) or clears (`null`) the
+	 * product icon theme selection, leaving the color/file icon axes
+	 * untouched. Same validation/rejection contract as
+	 * `themeSetSelection`. */
+	themeSetProductIconThemeSelection(
+		productIconThemeId: string | null,
+	): Promise<void>;
 }

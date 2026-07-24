@@ -76,17 +76,20 @@ pub(crate) async fn theme_get_selection(
     service.get_selection().await
 }
 
-/// Persists (`themeId` a non-null string) or clears (`themeId: null`) the
-/// color theme selection. A non-null `themeId` failing `theme::selection::
-/// validate_theme_selection_id`'s charset/length check rejects with
-/// `THEME_SELECTION_INVALID` and leaves whatever was previously persisted
-/// untouched.
+/// Persists or clears any subset of the three theme selection axes
+/// (`themeId`, `fileIconThemeId`, `productIconThemeId`) in one call — a
+/// field omitted from the request leaves that axis untouched, `null` clears
+/// it, and a non-null string sets it. Any provided non-null id failing
+/// `theme::selection::validate_theme_selection_id`'s charset/length check
+/// rejects the whole request with `THEME_SELECTION_INVALID`, leaving every
+/// axis (including any other, individually valid, change in the same
+/// request) exactly as it was.
 #[tauri::command]
 pub(crate) async fn theme_set_selection(
     service: State<'_, ThemeService>,
     request: ThemeSetSelectionRequest,
 ) -> Result<(), CommandError> {
-    service.set_selection(request.into_theme_id()).await
+    service.set_selection(request).await
 }
 
 #[cfg(test)]

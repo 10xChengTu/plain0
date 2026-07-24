@@ -81,6 +81,8 @@ function fakeBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		themeRemove: notImplemented,
 		themeGetSelection: notImplemented,
 		themeSetSelection: notImplemented,
+		themeSetFileIconThemeSelection: notImplemented,
+		themeSetProductIconThemeSelection: notImplemented,
 		...overrides,
 	};
 }
@@ -96,6 +98,8 @@ function samplePackage(
 		themes: [
 			{ label: "Demo Dark", uiTheme: "vs-dark", path: "themes/dark.json" },
 		],
+		iconThemes: [],
+		productIconThemes: [],
 		resources: ["themes/dark.json"],
 		containsCode: false,
 		...overrides,
@@ -170,6 +174,76 @@ describe("PlainThemeRegistryStore", () => {
 		expect(store.importedPackageIds()).toEqual([]);
 	});
 
+	it("omitting the two icon-axis constructor arguments defaults them to empty (pre-F060 call sites keep working)", () => {
+		const store = new PlainThemeRegistryStore([]);
+		expect(store.builtinFileIcon).toEqual([]);
+		expect(store.builtinProductIcon).toEqual([]);
+		expect(store.fileIconEntries()).toEqual([]);
+		expect(store.productIconEntries()).toEqual([]);
+	});
+
+	it("`F060` S3: tracks the file icon and product icon axes independently of the color axis and of each other", () => {
+		const builtinFileIcon = {
+			id: "vs-minimal-id",
+			label: "Minimal",
+			settingsId: "vs-minimal",
+			data: {} as never,
+		};
+		const builtinProductIcon = {
+			id: "default-product-icon-id",
+			label: "Default",
+			settingsId: "",
+			data: {} as never,
+		};
+		const store = new PlainThemeRegistryStore(
+			[],
+			[builtinFileIcon],
+			[builtinProductIcon],
+		);
+		expect(store.fileIconEntries()).toEqual([builtinFileIcon]);
+		expect(store.productIconEntries()).toEqual([builtinProductIcon]);
+
+		const importedFileIcon = {
+			id: "acme.icons-id",
+			label: "Acme Icons",
+			settingsId: "acme.icons",
+			data: {} as never,
+		};
+		const importedProductIcon = {
+			id: "acme.picons-id",
+			label: "Acme Product Icons",
+			settingsId: "acme.picons",
+			data: {} as never,
+		};
+		store.setImportedFileIcon("demo.pkg@1.0.0", [importedFileIcon]);
+		store.setImportedProductIcon("demo.pkg@1.0.0", [importedProductIcon]);
+		// A package that contributes icon axes but no color theme still never
+		// appears via `setImported` (color) alone — `importedPackageIds()`
+		// itself is unaffected by this test, which only exercises the two icon
+		// axis maps directly.
+		expect(store.fileIconEntries()).toEqual([
+			builtinFileIcon,
+			importedFileIcon,
+		]);
+		expect(store.productIconEntries()).toEqual([
+			builtinProductIcon,
+			importedProductIcon,
+		]);
+		expect(store.importedFileIconEntries("demo.pkg@1.0.0")).toEqual([
+			importedFileIcon,
+		]);
+		expect(store.importedProductIconEntries("demo.pkg@1.0.0")).toEqual([
+			importedProductIcon,
+		]);
+		expect(store.importedFileIconEntries("unknown")).toBeUndefined();
+
+		store.removeImported("demo.pkg@1.0.0");
+		expect(store.fileIconEntries()).toEqual([builtinFileIcon]);
+		expect(store.productIconEntries()).toEqual([builtinProductIcon]);
+		expect(store.importedFileIconEntries("demo.pkg@1.0.0")).toBeUndefined();
+		expect(store.importedProductIconEntries("demo.pkg@1.0.0")).toBeUndefined();
+	});
+
 	it("sorts importedPackageIds", () => {
 		const store = new PlainThemeRegistryStore([]);
 		store.setImported("z.pkg@1.0.0", []);
@@ -218,6 +292,55 @@ describe("importThemePackageViaVsix / importThemePackageViaDirectory", () => {
 		expect(entries).toHaveLength(1);
 		expect(entries?.[0]?.uiTheme).toBe("vs-dark");
 		expect(store.entries()).toHaveLength(1);
+	});
+
+	it("registers a package's iconThemes/productIconThemes into the store's own two axes (the `F060` S3 gap this closes)", async () => {
+		trackObjectUrls();
+		const store = new PlainThemeRegistryStore([]);
+		const pkg = samplePackage({
+			id: "icon-register-test.pkg@1.0.0",
+			name: "icon-register-test",
+			themes: [],
+			iconThemes: [
+				{
+					id: "acme.icons",
+					label: "Acme Icons",
+					path: "fileicons/icons.json",
+				},
+			],
+			productIconThemes: [
+				{ id: "acme.picons", label: null, path: "picons/theme.json" },
+			],
+			resources: ["fileicons/icons.json", "picons/theme.json"],
+		});
+		const bridge = fakeBridge({
+			themeReadResource: async () =>
+				new TextEncoder().encode(
+					JSON.stringify({ iconDefinitions: {}, fonts: [] }),
+				),
+			themeImportVsix: async () =>
+				({ status: "imported", package: pkg }) satisfies ThemeImportResult,
+		});
+
+		await importThemePackageViaVsix(bridge, store);
+
+		const fileIconEntries = store.importedFileIconEntries(pkg.id);
+		expect(fileIconEntries).toHaveLength(1);
+		expect(fileIconEntries?.[0]?.settingsId).toBe("acme.icons");
+		expect(fileIconEntries?.[0]?.label).toBe("Acme Icons");
+
+		const productIconEntries = store.importedProductIconEntries(pkg.id);
+		expect(productIconEntries).toHaveLength(1);
+		expect(productIconEntries?.[0]?.settingsId).toBe("acme.picons");
+		// No label was given — falls back to the resource path's basename,
+		// mirroring the color theme axis's own no-label fallback.
+		expect(productIconEntries?.[0]?.label).toBe("theme.json");
+
+		expect(store.fileIconEntries()).toEqual(fileIconEntries);
+		expect(store.productIconEntries()).toEqual(productIconEntries);
+		// A color-theme-less package still registers cleanly with an empty
+		// color axis.
+		expect(store.importedEntries(pkg.id)).toEqual([]);
 	});
 
 	it("importThemePackageViaDirectory follows the same path", async () => {
@@ -316,10 +439,18 @@ describe("consumeImportedThemePackages", () => {
 });
 
 describe("removeImportedThemePackage", () => {
-	function fakeThemeService(currentThemeId: string) {
+	function fakeThemeService(
+		currentThemeId: string,
+		currentFileIconThemeId = "unrelated-file-icon-theme-id",
+		currentProductIconThemeId = "unrelated-product-icon-theme-id",
+	) {
 		return {
 			getColorTheme: vi.fn(() => ({ id: currentThemeId })),
 			setColorTheme: vi.fn(async () => null),
+			getFileIconTheme: vi.fn(() => ({ id: currentFileIconThemeId })),
+			setFileIconTheme: vi.fn(async () => undefined),
+			getProductIconTheme: vi.fn(() => ({ id: currentProductIconThemeId })),
+			setProductIconTheme: vi.fn(async () => undefined),
 		};
 	}
 
@@ -354,6 +485,8 @@ describe("removeImportedThemePackage", () => {
 		expect(registeredExtensions[0]?.dispose).toHaveBeenCalledTimes(1);
 		expect(revokedObjectUrls).toEqual(blobUrlsBefore);
 		expect(themeService.setColorTheme).not.toHaveBeenCalled();
+		expect(themeService.setFileIconTheme).not.toHaveBeenCalled();
+		expect(themeService.setProductIconTheme).not.toHaveBeenCalled();
 	});
 
 	it("falls back to Dark Modern when the currently active theme belonged to the removed package", async () => {
@@ -393,6 +526,111 @@ describe("removeImportedThemePackage", () => {
 			expect.objectContaining({ id: "dark-modern-id" }),
 			undefined,
 		);
+		// A package that only contributes a color theme must not disturb either
+		// icon axis.
+		expect(themeService.setFileIconTheme).not.toHaveBeenCalled();
+		expect(themeService.setProductIconTheme).not.toHaveBeenCalled();
+	});
+
+	it("falls back the file icon theme and clears its persisted selection when it belonged to the removed package, independently of the color axis", async () => {
+		trackObjectUrls();
+		const vsMinimalBuiltin = {
+			id: "vs-minimal-builtin-id",
+			label: "Minimal",
+			settingsId: "vs-minimal",
+			data: { id: "vs-minimal-builtin-id" } as never,
+		};
+		const store = new PlainThemeRegistryStore([], [vsMinimalBuiltin]);
+		const pkg = samplePackage({
+			id: "icon-fallback-test.pkg@1.0.0",
+			name: "icon-fallback-test",
+			themes: [],
+			iconThemes: [
+				{ id: "acme.icons", label: "Acme Icons", path: "fileicons/icons.json" },
+			],
+			resources: ["fileicons/icons.json"],
+		});
+		const themeRemove = vi.fn(async () => undefined);
+		const themeSetFileIconThemeSelection = vi.fn(async () => undefined);
+		const bridge = bridgeWithResourceBytes({
+			themeImportVsix: async () =>
+				({ status: "imported", package: pkg }) satisfies ThemeImportResult,
+			themeRemove,
+			themeSetFileIconThemeSelection,
+		});
+		await importThemePackageViaVsix(bridge, store);
+		const importedFileIconEntries = store.importedFileIconEntries(pkg.id);
+		const activeFileIconThemeId = importedFileIconEntries?.[0]?.data
+			.id as string;
+
+		const themeService = fakeThemeService(
+			"unrelated-color-theme-id",
+			activeFileIconThemeId,
+		);
+		await removeImportedThemePackage(
+			bridge,
+			store,
+			themeService as never,
+			pkg.id,
+		);
+
+		expect(themeService.setFileIconTheme).toHaveBeenCalledWith(
+			expect.objectContaining({ id: "vs-minimal-builtin-id" }),
+			undefined,
+		);
+		expect(themeSetFileIconThemeSelection).toHaveBeenCalledWith(null);
+		expect(themeService.setColorTheme).not.toHaveBeenCalled();
+		expect(themeService.setProductIconTheme).not.toHaveBeenCalled();
+	});
+
+	it("falls back the product icon theme and clears its persisted selection when it belonged to the removed package", async () => {
+		trackObjectUrls();
+		const store = new PlainThemeRegistryStore([]);
+		const pkg = samplePackage({
+			id: "product-icon-fallback-test.pkg@1.0.0",
+			name: "product-icon-fallback-test",
+			themes: [],
+			productIconThemes: [
+				{ id: "acme.picons", label: null, path: "picons/theme.json" },
+			],
+			resources: ["picons/theme.json"],
+		});
+		const themeRemove = vi.fn(async () => undefined);
+		const themeSetProductIconThemeSelection = vi.fn(async () => undefined);
+		const bridge = bridgeWithResourceBytes({
+			themeImportVsix: async () =>
+				({ status: "imported", package: pkg }) satisfies ThemeImportResult,
+			themeRemove,
+			themeSetProductIconThemeSelection,
+		});
+		await importThemePackageViaVsix(bridge, store);
+		const importedProductIconEntries = store.importedProductIconEntries(pkg.id);
+		const activeProductIconThemeId = importedProductIconEntries?.[0]?.data
+			.id as string;
+
+		const themeService = fakeThemeService(
+			"unrelated-color-theme-id",
+			"unrelated-file-icon-theme-id",
+			activeProductIconThemeId,
+		);
+		await removeImportedThemePackage(
+			bridge,
+			store,
+			themeService as never,
+			pkg.id,
+		);
+
+		// `applyDefaultProductIconTheme` passes `undefined` (which upstream's
+		// own `internalSetProductIconTheme` resolves to the
+		// `ProductIconThemeData.defaultTheme` singleton) — see that function's
+		// own doc comment in `plain-theme-picker.ts`.
+		expect(themeService.setProductIconTheme).toHaveBeenCalledWith(
+			undefined,
+			undefined,
+		);
+		expect(themeSetProductIconThemeSelection).toHaveBeenCalledWith(null);
+		expect(themeService.setColorTheme).not.toHaveBeenCalled();
+		expect(themeService.setFileIconTheme).not.toHaveBeenCalled();
 	});
 
 	it("is safe to call for an id that was never imported (idempotent remove)", async () => {

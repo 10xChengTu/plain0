@@ -7,8 +7,16 @@ use tempfile::TempDir;
 use crate::path_policy::RelativePath;
 use crate::theme::fixtures::{minimal_manifest, minimal_theme_json, vsix_source, PackageFixture};
 use crate::theme::import::import_vsix;
+use crate::theme::selection::SelectionUpdate;
 
 use super::ThemeLibrary;
+
+fn color_update(id: Option<&str>) -> SelectionUpdate<'_> {
+    SelectionUpdate {
+        theme_id: Some(id),
+        ..Default::default()
+    }
+}
 
 const ONE_DARK_THEME: &str = r#"[{"uiTheme":"vs-dark","path":"./themes/dark.json"}]"#;
 
@@ -138,18 +146,61 @@ fn get_and_set_selection_round_trip_through_the_public_api() {
     let temp = TempDir::new().expect("tempdir");
     let library = ThemeLibrary::new(temp.path().to_path_buf());
 
-    assert_eq!(library.get_selection().expect("read succeeds"), None);
+    assert_eq!(
+        library.get_selection().expect("read succeeds").theme_id,
+        None
+    );
 
     library
-        .set_selection(Some("Dark Modern"))
+        .set_selection(color_update(Some("Dark Modern")))
         .expect("write succeeds");
     assert_eq!(
-        library.get_selection().expect("read succeeds"),
+        library.get_selection().expect("read succeeds").theme_id,
         Some("Dark Modern".to_owned())
     );
 
-    library.set_selection(None).expect("clear succeeds");
-    assert_eq!(library.get_selection().expect("read succeeds"), None);
+    library
+        .set_selection(color_update(None))
+        .expect("clear succeeds");
+    assert_eq!(
+        library.get_selection().expect("read succeeds").theme_id,
+        None
+    );
+}
+
+#[test]
+fn get_and_set_selection_covers_the_file_icon_and_product_icon_axes_too() {
+    let temp = TempDir::new().expect("tempdir");
+    let library = ThemeLibrary::new(temp.path().to_path_buf());
+
+    library
+        .set_selection(SelectionUpdate {
+            theme_id: Some(Some("Dark Modern")),
+            file_icon_theme_id: Some(Some("vs-minimal")),
+            product_icon_theme_id: Some(Some("acme.icons")),
+        })
+        .expect("write succeeds");
+    let selection = library.get_selection().expect("read succeeds");
+    assert_eq!(selection.theme_id, Some("Dark Modern".to_owned()));
+    assert_eq!(selection.file_icon_theme_id, Some("vs-minimal".to_owned()));
+    assert_eq!(
+        selection.product_icon_theme_id,
+        Some("acme.icons".to_owned())
+    );
+
+    library
+        .set_selection(SelectionUpdate {
+            file_icon_theme_id: Some(None),
+            ..Default::default()
+        })
+        .expect("clearing one axis succeeds");
+    let after_clear = library.get_selection().expect("read succeeds");
+    assert_eq!(after_clear.theme_id, Some("Dark Modern".to_owned()));
+    assert_eq!(after_clear.file_icon_theme_id, None);
+    assert_eq!(
+        after_clear.product_icon_theme_id,
+        Some("acme.icons".to_owned())
+    );
 }
 
 #[test]
@@ -157,15 +208,15 @@ fn set_selection_rejects_an_invalid_id_without_touching_the_library() {
     let temp = TempDir::new().expect("tempdir");
     let library = ThemeLibrary::new(temp.path().to_path_buf());
     library
-        .set_selection(Some("Dark Modern"))
+        .set_selection(color_update(Some("Dark Modern")))
         .expect("initial write succeeds");
 
     let error = library
-        .set_selection(Some(""))
+        .set_selection(color_update(Some("")))
         .expect_err("an empty id must be rejected");
     assert_eq!(error.code(), "THEME_SELECTION_INVALID");
     assert_eq!(
-        library.get_selection().expect("read succeeds"),
+        library.get_selection().expect("read succeeds").theme_id,
         Some("Dark Modern".to_owned()),
         "a rejected write must leave the previously persisted selection untouched"
     );
@@ -177,7 +228,7 @@ fn a_persisted_selection_file_does_not_break_package_listing() {
     let library = ThemeLibrary::new(temp.path().to_path_buf());
     let id = import_demo_package(&library);
     library
-        .set_selection(Some("Dark Modern"))
+        .set_selection(color_update(Some("Dark Modern")))
         .expect("write succeeds");
 
     // The selection file is a plain, non-directory sibling of every package

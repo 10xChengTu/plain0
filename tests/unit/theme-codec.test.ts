@@ -4,9 +4,13 @@ import {
 	decodeThemeImportResult,
 	decodeThemeListResult,
 	decodeThemeReadResourceBytes,
+	decodeThemeSelectionResult,
 	decodeThemeVoid,
 	frozenThemeReadResourceRequest,
 	frozenThemeRemoveRequest,
+	frozenThemeSetFileIconThemeSelectionRequest,
+	frozenThemeSetProductIconThemeSelectionRequest,
+	frozenThemeSetSelectionRequest,
 } from "../../app/platform/tauri/theme-codec";
 
 const contractError = { code: "IPC_CONTRACT_VIOLATION" };
@@ -23,7 +27,18 @@ const samplePackage = Object.freeze({
 			path: "themes/dark.json",
 		}),
 	]),
-	resources: Object.freeze(["themes/dark.json"]),
+	iconThemes: Object.freeze([
+		Object.freeze({
+			id: "demo-icons",
+			label: "Demo Icons",
+			path: "fileicons/demo-icon-theme.json",
+		}),
+	]),
+	productIconThemes: Object.freeze([]),
+	resources: Object.freeze([
+		"themes/dark.json",
+		"fileicons/demo-icon-theme.json",
+	]),
 	containsCode: false,
 });
 
@@ -90,6 +105,58 @@ describe("theme codec requests", () => {
 		expect(() => frozenThemeRemoveRequest("a/b")).toThrowError(
 			expect.objectContaining({ code: "THEME_PACKAGE_NOT_FOUND" }),
 		);
+	});
+});
+
+// `F060` S3: each of the three theme selection axes builds a request that
+// only ever carries its own field — see `frozenSelectionFieldRequest`'s own
+// doc comment for why an absent sibling field (not merely a `null` one) is
+// what makes Rust's per-field update semantics leave the other two axes
+// untouched.
+describe.each([
+	["frozenThemeSetSelectionRequest", frozenThemeSetSelectionRequest, "themeId"],
+	[
+		"frozenThemeSetFileIconThemeSelectionRequest",
+		frozenThemeSetFileIconThemeSelectionRequest,
+		"fileIconThemeId",
+	],
+	[
+		"frozenThemeSetProductIconThemeSelectionRequest",
+		frozenThemeSetProductIconThemeSelectionRequest,
+		"productIconThemeId",
+	],
+] as const)("%s", (_name, build, field) => {
+	it("builds a frozen request carrying only its own field for a valid id", () => {
+		const request = build("Dark Modern");
+		expect(request).toEqual({ [field]: "Dark Modern" });
+		expect(Object.keys(request)).toEqual([field]);
+		expect(Object.isFrozen(request)).toBe(true);
+	});
+
+	it("builds a frozen request carrying only its own field for null", () => {
+		const request = build(null);
+		expect(request).toEqual({ [field]: null });
+		expect(Object.keys(request)).toEqual([field]);
+	});
+
+	it("rejects an empty, over-long, or control-character id", () => {
+		for (const value of [
+			"",
+			"a".repeat(257),
+			"line\nbreak",
+			"nul\u{0}byte",
+			123,
+			undefined,
+		]) {
+			expect(() => build(value)).toThrowError(
+				expect.objectContaining({ code: "THEME_SELECTION_INVALID" }),
+			);
+		}
+	});
+
+	it("accepts an id at the exact 256-byte limit", () => {
+		const maxId = "a".repeat(256);
+		expect(build(maxId)).toEqual({ [field]: maxId });
 	});
 });
 
@@ -234,5 +301,141 @@ describe("decodeThemeReadResourceBytes", () => {
 				expect.objectContaining(contractError),
 			);
 		}
+	});
+});
+
+describe("decodeThemeSelectionResult", () => {
+	it("decodes all three axes present", () => {
+		expect(
+			decodeThemeSelectionResult({
+				themeId: "Dark Modern",
+				fileIconThemeId: "vs-minimal",
+				productIconThemeId: null,
+			}),
+		).toEqual({
+			themeId: "Dark Modern",
+			fileIconThemeId: "vs-minimal",
+			productIconThemeId: null,
+		});
+	});
+
+	it("decodes all three axes absent (null)", () => {
+		expect(
+			decodeThemeSelectionResult({
+				themeId: null,
+				fileIconThemeId: null,
+				productIconThemeId: null,
+			}),
+		).toEqual({
+			themeId: null,
+			fileIconThemeId: null,
+			productIconThemeId: null,
+		});
+	});
+
+	it("rejects a response missing one of the three fields", () => {
+		expect(() =>
+			decodeThemeSelectionResult({
+				themeId: null,
+				fileIconThemeId: null,
+			}),
+		).toThrowError(expect.objectContaining(contractError));
+	});
+
+	it("rejects a response carrying an extra field", () => {
+		expect(() =>
+			decodeThemeSelectionResult({
+				themeId: null,
+				fileIconThemeId: null,
+				productIconThemeId: null,
+				extra: 1,
+			}),
+		).toThrowError(expect.objectContaining(contractError));
+	});
+
+	it("rejects a non-string, non-null value on any axis", () => {
+		for (const field of [
+			"themeId",
+			"fileIconThemeId",
+			"productIconThemeId",
+		] as const) {
+			expect(() =>
+				decodeThemeSelectionResult({
+					themeId: null,
+					fileIconThemeId: null,
+					productIconThemeId: null,
+					[field]: 1,
+				}),
+			).toThrowError(expect.objectContaining(contractError));
+		}
+	});
+});
+
+// `F060` S3: `iconThemes`/`productIconThemes` decode with the same closed-key
+// discipline every other array-of-objects field in this contract already
+// gets.
+describe("decodeThemeListResult icon/product icon contribution decoding", () => {
+	it("decodes a package whose iconThemes/productIconThemes are both populated", () => {
+		const pkg = {
+			...samplePackage,
+			productIconThemes: [
+				{ id: "acme.picons", label: null, path: "picons/theme.json" },
+			],
+		};
+		const result = decodeThemeListResult({ packages: [pkg], skipped: 0 });
+		expect(result.packages[0]?.iconThemes).toEqual([
+			{
+				id: "demo-icons",
+				label: "Demo Icons",
+				path: "fileicons/demo-icon-theme.json",
+			},
+		]);
+		expect(result.packages[0]?.productIconThemes).toEqual([
+			{ id: "acme.picons", label: null, path: "picons/theme.json" },
+		]);
+	});
+
+	it("rejects an icon theme contribution missing a required field", () => {
+		const pkg = {
+			...samplePackage,
+			iconThemes: [
+				{ label: "Demo Icons", path: "fileicons/demo-icon-theme.json" },
+			],
+		};
+		expect(() =>
+			decodeThemeListResult({ packages: [pkg], skipped: 0 }),
+		).toThrowError(expect.objectContaining(contractError));
+	});
+
+	it("rejects an icon theme contribution carrying an extra field", () => {
+		const pkg = {
+			...samplePackage,
+			iconThemes: [
+				{
+					id: "demo-icons",
+					label: "Demo Icons",
+					path: "fileicons/demo-icon-theme.json",
+					extra: 1,
+				},
+			],
+		};
+		expect(() =>
+			decodeThemeListResult({ packages: [pkg], skipped: 0 }),
+		).toThrowError(expect.objectContaining(contractError));
+	});
+
+	it("rejects a non-array iconThemes/productIconThemes field", () => {
+		expect(() =>
+			decodeThemeListResult({
+				packages: [{ ...samplePackage, iconThemes: "not-an-array" }],
+				skipped: 0,
+			}),
+		).toThrowError(expect.objectContaining(contractError));
+		expect(() =>
+			decodeThemeListResult({
+				packages: [{ ...samplePackage, productIconThemes: "not-an-array" }],
+				skipped: 0,
+			}),
+		).toThrowError(expect.objectContaining(contractError));
 	});
 });

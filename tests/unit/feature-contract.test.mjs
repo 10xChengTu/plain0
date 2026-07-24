@@ -159,41 +159,41 @@ describe("feature completion contract", () => {
 
 	it("derives phase, counts blocked work and requires the exact progress WIP", () => {
 		expectRejected((document) => {
-			document.currentPhase = 3;
+			document.currentPhase = 2;
 		});
 		expectRejected((document) => {
-			document.features[7].status = "in_progress";
+			document.features[8].status = "in_progress";
 		});
 		expectRejected(
 			(document) => {
 				document.features[0].status = "planned";
 				delete document.features[0].evidence;
-				document.features[6].status = "planned";
+				document.features[7].status = "planned";
 				document.currentPhase = 0;
 			},
 			progressDocument.replace(
-				"- WIP：`F060` VS Code file and product icon themes。",
+				"- WIP：`F070` Rust PTY terminal。",
 				"- WIP：无。",
 			),
 		);
 
 		const blocked = cloneDocument();
-		blocked.features[6].status = "blocked";
-		blocked.features[6].blocker = "Waiting for an explicit external decision.";
+		blocked.features[7].status = "blocked";
+		blocked.features[7].blocker = "Waiting for an explicit external decision.";
 		const blockedProgress = progressDocument;
 		expect(validateFeatureContract(blocked, blockedProgress)).toMatchObject({
 			failures: [],
 			activeCount: 1,
 		});
-		blocked.features[6].blocker = " ";
+		blocked.features[7].blocker = " ";
 		expect(
 			validateFeatureContract(blocked, blockedProgress).failures.length,
 		).toBeGreaterThan(0);
 
 		const betweenItems = cloneDocument();
-		betweenItems.features[6].status = "planned";
+		betweenItems.features[7].status = "planned";
 		const betweenItemsProgress = progressDocument.replace(
-			"- WIP：`F060` VS Code file and product icon themes。",
+			"- WIP：`F070` Rust PTY terminal。",
 			"- WIP：无。",
 		);
 		expect(
@@ -201,15 +201,15 @@ describe("feature completion contract", () => {
 		).toMatchObject({ failures: [], activeCount: 0 });
 
 		for (const progress of [
-			progressDocument.replace("`F060`", "`F070`"),
+			progressDocument.replace("`F070`", "`F060`"),
 			progressDocument.replace(
-				"- WIP：`F060` VS Code file and product icon themes。",
+				"- WIP：`F070` Rust PTY terminal。",
 				"- WIP：无。",
 			),
 			progressDocument.replace("- WIP：", "- WIP:"),
 			progressDocument.replace(
-				"- WIP：`F060` VS Code file and product icon themes。",
-				"- WIP：`F060` VS Code file and product icon themes。\n- WIP：`F060` VS Code file and product icon themes。",
+				"- WIP：`F070` Rust PTY terminal。",
+				"- WIP：`F070` Rust PTY terminal。\n- WIP：`F070` Rust PTY terminal。",
 			),
 			progressDocument.replace("## 当前状态", "## 当前状态\n\n## 当前状态"),
 		]) {

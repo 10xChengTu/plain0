@@ -49,6 +49,45 @@ export const DARK_MODERN_SETTINGS_ID = "Dark Modern" as const;
  */
 export const VS_MINIMAL_FILE_ICON_THEME_SETTINGS_ID = "vs-minimal" as const;
 
+/**
+ * `F060` S3: the persisted-selection sentinel for "the user explicitly
+ * picked 'None'" in the File Icon Theme quick pick. Upstream's own "None"
+ * item (see `plain-theme-picker.ts`'s `noFileIconThemeItem`) carries
+ * `id: ""` — the exact same empty string `FileIconThemeData.noIconTheme`
+ * itself uses as its `settingsId` — but `theme::selection::
+ * validate_theme_selection_id` rejects an empty id outright (the same
+ * charset/length check every persisted selection axis shares), so `""`
+ * itself can never be written to `selection.plain.json`. Persisting this
+ * distinct, non-empty, reserved string instead lets a restart tell "the
+ * user never touched this axis, keep applying the vs-minimal bootstrap
+ * default" (`fileIconThemeId: null`) apart from "the user explicitly
+ * disabled file icons" (this sentinel) — collapsing the latter into `null`
+ * would silently resurrect vs-minimal on every future boot, contradicting
+ * the choice the user actually made. Chosen to be visually distinct from
+ * any real `contributes.iconThemes[].id` (which are simple package-defined
+ * identifiers, never namespaced like this) so a collision is not a
+ * practical concern.
+ */
+export const NO_FILE_ICON_THEME_SELECTION_ID =
+	"plain:no-file-icon-theme" as const;
+
+/**
+ * `F060` S3: the product icon theme analogue of
+ * `NO_FILE_ICON_THEME_SELECTION_ID` — persisted when the user explicitly
+ * picks "Default" (`ProductIconThemeData.defaultTheme`, `id: ""`) in the
+ * Product Icon Theme quick pick. Unlike the file icon axis, "Default" is
+ * already Plain's own bootstrap default (`applyDefaultProductIconTheme`
+ * always applies it, and there is no built-in non-default product icon
+ * theme to fall back away from), so in practice persisting this sentinel
+ * and persisting nothing (`null`) both resolve to the same visible result
+ * today — but the sentinel still records the user's explicit choice
+ * distinctly from "never touched this axis", matching the file icon axis's
+ * own contract and remaining correct once an imported package can ever
+ * contribute a non-default product icon theme to fall back away from.
+ */
+export const DEFAULT_PRODUCT_ICON_THEME_SELECTION_ID =
+	"plain:default-product-icon-theme" as const;
+
 /** One built-in (or, in a later slice, imported) color theme entry Plain
  * knows how to apply. `data` is a bare `ColorThemeData` instance constructed
  * the same way upstream's (never-running, see this module's own doc comment
@@ -286,18 +325,15 @@ export async function createPlainThemeRegistry(
 	return Object.freeze(entries);
 }
 
-/** `buildPlainThemeRegistryEntry`'s `FileIconThemeData` analogue. There is
- * no imported-package consumption side yet (`F060` S2's own scope is
- * built-in activation only — see `docs/research/2026-07-24-icon-themes.md`'s
- * "实施偏差记录" for why: the Rust `theme_list`/`theme_import_*` wire
- * contract does not project `iconThemes`/`productIconThemes` onto
- * `ThemePackageSummary` yet, only `theme::record::StoredThemePackageManifest`
- * carries them — extending the wire contract is a `src-tauri/src/theme/
- * dto.rs` change, out of this slice's scope), but this is still exported
- * (rather than kept as a private implementation detail of
- * `createPlainFileIconThemeRegistry` below) for the same reason
- * `buildPlainThemeRegistryEntry` is: a future slice's import consumption can
- * reuse it verbatim once that wire contract exists. */
+/** `buildPlainThemeRegistryEntry`'s `FileIconThemeData` analogue, shared by
+ * built-in enumeration (`createPlainFileIconThemeRegistry` below) and, as of
+ * `F060` S3, imported-package consumption too (see `plain-theme-import-
+ * coordinator.ts`'s `registerImportedPackage`, which builds an entry from
+ * each of `ThemePackageSummary.iconThemes` the same way this function
+ * already builds one from a built-in extension's own manifest contribution
+ * — the S2 gap this closes was purely the Rust wire contract not projecting
+ * `iconThemes`/`productIconThemes` yet, fixed in `src-tauri/src/theme/
+ * dto.rs`, never anything on this exact function). */
 export function buildPlainFileIconThemeRegistryEntry(
 	extensionLocation: URI,
 	extensionData: ExtensionData,
@@ -329,8 +365,8 @@ export function buildPlainFileIconThemeRegistryEntry(
 }
 
 /** `buildPlainThemeRegistryEntry`'s `ProductIconThemeData` analogue — see
- * `buildPlainFileIconThemeRegistryEntry`'s own doc comment for why imported
- * packages are out of scope here too. */
+ * `buildPlainFileIconThemeRegistryEntry`'s own doc comment: shared by
+ * built-in enumeration and, since `F060` S3, imported-package consumption. */
 export function buildPlainProductIconThemeRegistryEntry(
 	extensionLocation: URI,
 	extensionData: ExtensionData,

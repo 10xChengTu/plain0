@@ -1381,7 +1381,11 @@ export function validateWorkspaceProviderBootstrap(source) {
 				parent.expression.text === "consumeImportedThemePackages" ||
 				parent.expression.text === "registerPlainThemeCommands" ||
 				parent.expression.text === "registerPlainThemePicker" ||
-				parent.expression.text === "applyPersistedThemeSelection")
+				parent.expression.text === "registerPlainFileIconThemePicker" ||
+				parent.expression.text === "registerPlainProductIconThemePicker" ||
+				parent.expression.text === "applyPersistedThemeSelection" ||
+				parent.expression.text === "applyPersistedFileIconThemeSelection" ||
+				parent.expression.text === "applyPersistedProductIconThemeSelection")
 		);
 	}
 	function isAllowedWorkspaceProviderIdentifier(node) {
