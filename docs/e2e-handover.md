@@ -137,8 +137,59 @@ fixture（临时目录中构造，不提交仓库）：
 
 完成后：将结果写入 `features.json` F050 evidence（`nativeScenarios` 追加、`platformGaps` 移除本条目对应缺口）。
 
+### E2E-006 · F060 文件与产品图标主题的真实桌面矩阵
+
+状态：待执行。Browser mock 层已全部闭合（S1 Rust 校验管线含 SVG 净化/字体 magic bytes/恶意 fixture 矩阵；S2 内置 `vs-minimal` 真实 DOM 渲染与两个 Quick Pick 激活；S3 导入包 `iconThemes`/`productIconThemes` 的 DTO 投影、双 icon selection 跨会话持久化、启动应用、None/Default 保留 sentinel、失效回退，见 progress.md 与 `tests/browser/workspace.spec.ts`）；本条目补真实系统文件选择器、真实 SVG/字体文件在真实 WKWebView 中的渲染，以及真实进程重启持久化——这些是 Rust 单元测试与 Browser mock 都无法替代的维度。复用 E2E-005 已验证过的 VSIX 构造与系统选择器路径，不重复该矩阵。
+
+fixture（临时目录中构造，不提交仓库）：
+
+- 一个真实、最小但同时携带三类贡献的合法 VSIX（复用 E2E-005 的 zip 打包步骤）：
+  1. `icon-theme-demo/extension/package.json`：
+     ```json
+     {
+     	"name": "icon-theme-demo",
+     	"publisher": "plain-e2e",
+     	"version": "1.0.0",
+     	"engines": { "vscode": "*" },
+     	"contributes": {
+     		"themes": [
+     			{ "label": "E2E Icon Demo Dark", "uiTheme": "vs-dark", "path": "./themes/demo-dark.json" }
+     		],
+     		"iconThemes": [
+     			{ "id": "e2e-demo-icons", "label": "E2E Demo Icons", "path": "./fileicons/demo-icon-theme.json" }
+     		],
+     		"productIconThemes": [
+     			{ "id": "e2e-demo-picons", "label": "E2E Demo Product Icons", "path": "./picons/demo-picon-theme.json" }
+     		]
+     	}
+     }
+     ```
+  2. `themes/demo-dark.json`：`{"colors": {"editor.background": "#0a0a0a"}, "tokenColors": []}`。
+  3. `fileicons/demo-icon-theme.json`：`iconDefinitions` 至少含 `_file`（`iconPath` 指向同目录下一个真实、视觉上有辨识度的 `.svg`，例如一个纯色矩形或一个明显不同于 `vs-minimal` 默认图形的形状）、`_folder`，并把 `file`/`folder` 映射到它们；再放一个真实 `.svg` 资源文件。
+  4. `picons/demo-picon-theme.json`：`iconDefinitions` 至少覆盖一个真实会被渲染的 codicon id（例如 Explorer 图标用到的那个），`fonts` 非空且指向同目录下一个真实字体文件（`.woff`/`.woff2`，真实合法的字体二进制，不是伪造字节——这是与本文档「实施偏差记录」第 6 条一致的真实性要求，否则上游会在真实浏览器里拒绝或警告）。
+  5. 按 E2E-005 的 `zip -r` 步骤打包为 `icon-theme-demo.vsix`。
+- 一个恶意 SVG VSIX：复用上面的合法内容，只把 `_file` 的 `iconPath` 换成一个含 `<script>alert(1)</script>` 或 `onload="alert(1)"` 事件属性的 `.svg`。
+
+步骤与断言：
+
+1. 真实系统文件选择器导入：命令面板 `Plain: Import Color Theme (VSIX)...` 选择 `icon-theme-demo.vsix`；断言导入成功 toast 含 `plain-e2e.icon-theme-demo@1.0.0`。
+2. 三类主题真实生效：`Preferences: File Icon Theme` 列出 "E2E Demo Icons" 并选中，Explorer 中文件/目录行的 `.monaco-icon-label::before` `background-image` 变为该主题自己的 SVG（肉眼与 CSS 均可核对，非 `vs-minimal` 默认图形）；`Preferences: Product Icon Theme` 列出 "E2E Demo Product Icons" 并选中，Activity Bar 对应图标真实变化为该主题字体渲染的字形（不是回退到内置 codicon）；`Preferences: Color Theme` 应用 "E2E Icon Demo Dark"，`--vscode-editor-background` 为 `#0a0a0a`。
+3. 三轴重启保持：**完全退出（Cmd+Q）并重新启动**（真实进程重启，非页面 reload）；重开同一份用户数据目录后应用启动完成时三个轴应已分别是上一步选中的主题，不需要用户重新选择；用 shell 核对 `<app_local_data_dir>/themes/selection.plain.json` 同时含 `themeId`/`fileIconThemeId`/`productIconThemeId` 三个字段且均指向该导入包。
+4. 恶意 SVG 包拒绝且去敏：导入恶意 SVG VSIX，断言被拒绝、错误 toast 不含内部错误码原文（`THEME_SVG_UNSAFE`）或文件系统路径；用 shell 核对 `<app_local_data_dir>/themes/` 下无该失败导入的半成品目录或 `.plain-theme-*.tmp` 残留。
+5. 每步 UI 断言后用 shell 在磁盘核对 `<app_local_data_dir>/themes/` 的实际内容（该包目录内 SVG/字体资源字节、`selection.plain.json` 内容）。
+6. 清理：退出应用；删除 fixture VSIX、本次测试新建的主题库内容、截图与 `src-tauri/target`；遵循既有隔离 WebView profile/临时用户数据目录惯例，不得污染真实用户数据。
+
+已知边界（执行方须知）：
+
+- 本条目只验收 VSIX 路径，不复核目录导入（与 E2E-005 相同的既定收窄）。
+- `embedded-opentype`（EOT）字体格式在 Rust 校验闭集下恒被拒绝（S1 已知限制），fixture 不使用该格式。
+- None/Default 的持久化保留 sentinel（`plain:no-file-icon-theme`/`plain:default-product-icon-theme`）是纯前端持久化编码细节，本条目不需要专门验证——只要三轴重启后行为符合预期（步骤 3）即已覆盖其真实效果；无需在磁盘上断言 sentinel 字面值。
+- 图标/字体资源的 MIME 映射、SVG 净化规则闭集、字体 magic bytes 闭集已在 Rust 单元测试与 Browser mock 层逐项覆盖（见 progress.md F060 S1/S2/S3 条目），本条目不重复整张矩阵，只挑「真实文件在真实 WKWebView 中确实渲染」与「真实进程重启持久化」两个 mock 无法替代的维度。
+
+完成后：将结果写入 `features.json` F060 evidence（`nativeScenarios` 追加、`platformGaps` 移除本条目对应缺口）。
+
 ## 后续条目（随切片追加）
 
 - F030 遗留：真实 `CloseRequested` 关窗握手协议实现后，补「正常关窗 → 重开恢复」的桌面验收变体。
-- F060 图标主题、F070 PTY、F080-F090 Git、F100 DAP 的真实桌面矩阵按 docs/testing.md「真实 Tauri E2E」清单逐项登记。
+- F070 PTY、F080-F090 Git、F100 DAP 的真实桌面矩阵按 docs/testing.md「真实 Tauri E2E」清单逐项登记。
 - F120/F130 发布与全量原生回归。
