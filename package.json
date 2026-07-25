@@ -44,6 +44,7 @@
     "@codingame/monaco-vscode-files-service-override": "35.0.1",
     "@codingame/monaco-vscode-model-service-override": "35.0.1",
     "@codingame/monaco-vscode-notifications-service-override": "35.0.1",
+    "@codingame/monaco-vscode-scm-service-override": "35.0.1",
     "@codingame/monaco-vscode-search-service-override": "35.0.1",
     "@codingame/monaco-vscode-textmate-service-override": "35.0.1",
     "@codingame/monaco-vscode-theme-defaults-default-extension": "35.0.1",

@@ -5,6 +5,7 @@ import getExplorerServiceOverride from "@codingame/monaco-vscode-explorer-servic
 import getFilesServiceOverride from "@codingame/monaco-vscode-files-service-override";
 import getModelServiceOverride from "@codingame/monaco-vscode-model-service-override";
 import getNotificationServiceOverride from "@codingame/monaco-vscode-notifications-service-override";
+import { SCMService } from "@codingame/monaco-vscode-scm-service-override/vscode/vs/workbench/contrib/scm/common/scmService";
 import getTextmateServiceOverride from "@codingame/monaco-vscode-textmate-service-override";
 import getThemeServiceOverride from "@codingame/monaco-vscode-theme-service-override";
 import getWorkbenchServiceOverride from "@codingame/monaco-vscode-workbench-service-override";
@@ -14,6 +15,7 @@ import { IDialogService } from "@codingame/monaco-vscode-api/vscode/vs/platform/
 import { IExtensionResourceLoaderService } from "@codingame/monaco-vscode-api/vscode/vs/platform/extensionResourceLoader/common/extensionResourceLoader.service";
 import { SyncDescriptor } from "@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors";
 import { IWorkspacesService } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspaces/common/workspaces.service";
+import { ISCMService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/scm/common/scm.service";
 import { ISearchService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search.service";
 import { ILanguageStatusService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/languageStatus/common/languageStatusService.service";
 import { IWorkingCopyBackupService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyBackup.service";
@@ -71,6 +73,17 @@ import {
  * (every method throws) in place, which would make every color theme
  * (built-in or, in a later slice, imported) fail to load. See that file's
  * own doc comment for why this is safe (it adds no new filesystem access).
+ *
+ * ISCMService is bound directly to
+ * `@codingame/monaco-vscode-scm-service-override`'s exact
+ * `common/scmService.js` submodule (`SCMService` — audited clean of any
+ * Chat/AI import, unlike that package's `browser/scm.contribution.js` and
+ * `browser/scmInput.js`/`browser/quickDiffModel.js` siblings), never that
+ * package's own aggregating `index.js` default export — the same
+ * "extends/binds the exact clean submodule, never the package root" shape
+ * `ISearchService`'s own binding above already established. See
+ * `app/features/scm/plain-scm-view.ts`'s module doc comment for the full
+ * audit trail of why the package root is never imported at all.
  */
 export function createServiceOverrides() {
 	return {
@@ -117,6 +130,7 @@ export function createServiceOverrides() {
 			[],
 			false,
 		),
+		[ISCMService.toString()]: new SyncDescriptor(SCMService, [], true),
 		[IDialogService.toString()]: new SyncDescriptor(
 			DialogService,
 			undefined,

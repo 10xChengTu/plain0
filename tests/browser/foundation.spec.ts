@@ -13,6 +13,15 @@ const excludedCommands = [
 	"Measure Extension Host Latency",
 	"Open Installed Web Extensions Resource",
 	"Browse Color Themes in Marketplace",
+	// `F080` S2: real upstream `@codingame/monaco-vscode-scm-service-override`
+	// titles (`scm.contribution.js`'s "Resolve Conflicts with AI" action,
+	// `scmInput.js`'s AI commit-message generation) — never registered at
+	// all in this bundle, since Plain's own `PlainScmView`
+	// (`app/features/scm/plain-scm-view.ts`) never imports that vendor
+	// contribution file. See that module's own doc comment for the full
+	// audit trail.
+	"Resolve Conflicts with AI",
+	"Generate Commit Message",
 ];
 
 async function expectCommandUnavailable(

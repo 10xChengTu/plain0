@@ -8,6 +8,8 @@ import {
 } from "@codingame/monaco-vscode-api";
 import { reinitializeWorkspace } from "@codingame/monaco-vscode-configuration-service-override";
 import { registerCustomProvider } from "@codingame/monaco-vscode-files-service-override";
+import { IModelService } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/services/model.service";
+import { ITextModelService } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/services/resolverService.service";
 import { IFileService } from "@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files.service";
 import { IWorkbenchThemeService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service";
 
@@ -17,6 +19,11 @@ import "./features/search/search-contribution";
 import "./features/terminal/terminal-contribution";
 import { registerPlainTerminalCommands } from "./features/terminal/plain-terminal-commands";
 import { configurePlainTerminalBridge } from "./features/terminal/plain-terminal-view";
+import { encodeGitResourceUri, GIT_URI_SCHEME } from "./features/scm/git-uri";
+import { createPlainGitTextModelContentProvider } from "./features/scm/plain-git-content-provider";
+import { registerPlainScmCommands } from "./features/scm/plain-scm-commands";
+import { configurePlainScmBridge } from "./features/scm/plain-scm-view";
+import "./features/scm/scm-contribution";
 import { registerWorkspaceCommands } from "./features/workspace/commands";
 import { registerWorkspaceDeleteCoordinator } from "./features/workspace/delete-coordinator";
 import {
@@ -119,6 +126,8 @@ async function bootstrap(): Promise<void> {
 		ReturnType<typeof registerPlainProductIconThemePicker> | undefined;
 	let terminalCommandsRegistration:
 		ReturnType<typeof registerPlainTerminalCommands> | undefined;
+	let scmCommandsRegistration:
+		ReturnType<typeof registerPlainScmCommands> | undefined;
 	window.addEventListener(
 		"pagehide",
 		() => {
@@ -129,6 +138,7 @@ async function bootstrap(): Promise<void> {
 			fileIconThemePickerRegistration?.dispose();
 			productIconThemePickerRegistration?.dispose();
 			terminalCommandsRegistration?.dispose();
+			scmCommandsRegistration?.dispose();
 		},
 		{ once: true },
 	);
@@ -139,6 +149,7 @@ async function bootstrap(): Promise<void> {
 	configurePlainWorkingCopyBackupBridge(bridge);
 	configurePlainSearchBridge(bridge);
 	configurePlainTerminalBridge(bridge);
+	configurePlainScmBridge(bridge);
 	await initialize(createServiceOverrides(), container, {
 		productConfiguration: {
 			nameShort: "Plain",
@@ -169,6 +180,50 @@ async function bootstrap(): Promise<void> {
 		workspaceTopologyCoordinator,
 	);
 	terminalCommandsRegistration = registerPlainTerminalCommands();
+	scmCommandsRegistration = registerPlainScmCommands();
+
+	// `F080` S2: the `git:` read-only content provider (decision 4) — a
+	// `PlainScmProvider.getOriginalResource` URI is only ever resolved once
+	// something (a future diff editor, this slice's Browser E2E) asks
+	// `ITextModelService` to create a model reference for it; registering
+	// here (rather than lazily inside the view) means it is available the
+	// moment any `git:` URI exists, independent of whether the Source
+	// Control view itself has ever been opened.
+	const textModelService = await getService(ITextModelService);
+	const modelServiceForGitContent = await getService(IModelService);
+	const gitContentProvider = createPlainGitTextModelContentProvider(
+		bridge,
+		modelServiceForGitContent,
+	);
+	textModelService.registerTextModelContentProvider(
+		GIT_URI_SCHEME,
+		gitContentProvider,
+	);
+	// DEV-only Browser E2E diagnostic hook — mirrors
+	// `window.__PLAIN_WORKBENCH_SURFACES__` below (same `import.meta.env.DEV`
+	// gate, same "real Chromium can resolve internal Workbench state that
+	// Playwright itself has no other way to reach" purpose): resolves a
+	// `git:` URI through the exact same registered `ITextModelService`
+	// `PlainScmProvider.getOriginalResource` itself returns, proving the
+	// `git_show_blob` → content-provider → model pipeline end to end rather
+	// than only unit-testing `PlainGitTextModelContentProvider` in isolation.
+	if (import.meta.env.DEV) {
+		(
+			window as unknown as Record<string, unknown>
+		).__PLAIN_TEST_RESOLVE_GIT_TEXT__ = async (
+			rev: "head" | "index",
+			relativePath: string,
+		): Promise<string | null> => {
+			const reference = await textModelService.createModelReference(
+				encodeGitResourceUri(rev, relativePath),
+			);
+			try {
+				return reference.object.textEditorModel.getValue();
+			} finally {
+				reference.dispose();
+			}
+		};
+	}
 
 	const themeFileService = await getService(IFileService);
 	const themeRegistry = await createPlainThemeRegistry(themeFileService);

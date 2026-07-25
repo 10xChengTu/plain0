@@ -815,6 +815,11 @@ export function validateDialogServiceOverride(source) {
 			className: "PlainExtensionResourceLoaderService",
 			thirdArgIsTrue: false,
 		},
+		{
+			tokenName: "ISCMService",
+			className: "SCMService",
+			thirdArgIsTrue: true,
+		},
 	]);
 	function matchesMiddleServiceDescriptor(property, spec) {
 		if (
@@ -1379,6 +1384,8 @@ export function validateWorkspaceProviderBootstrap(source) {
 				parent.expression.text === "configurePlainWorkingCopyBackupBridge" ||
 				parent.expression.text === "configurePlainSearchBridge" ||
 				parent.expression.text === "configurePlainTerminalBridge" ||
+				parent.expression.text === "configurePlainScmBridge" ||
+				parent.expression.text === "createPlainGitTextModelContentProvider" ||
 				parent.expression.text === "consumeImportedThemePackages" ||
 				parent.expression.text === "registerPlainThemeCommands" ||
 				parent.expression.text === "registerPlainThemePicker" ||

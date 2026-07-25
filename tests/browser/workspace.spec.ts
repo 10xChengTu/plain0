@@ -115,6 +115,33 @@ type TestThemeImportOutcome =
 	// `CommandError`, never a success-shaped result).
 	| Readonly<{ status: "failed"; code: string; message: string }>;
 
+/** `F080` S2: deterministic `git_status`/`git_show_blob` responses for
+ * `PlainScmView`/`PlainGitTextModelContentProvider` scenarios — the same
+ * fields `app/platform/tauri/browser-mock.ts`'s real
+ * `BrowserMockGitFixtureForTest` models, reproduced here because this file's
+ * mock drives the real `native.ts` transport rather than reusing
+ * `browser-mock.ts` (see `installNativeIpcMock`'s own module doc comment). */
+interface TestGitStatusEntry {
+	readonly type:
+		"ordinary" | "renameOrCopy" | "unmerged" | "untracked" | "ignored";
+	readonly indexStatus?: string;
+	readonly worktreeStatus?: string;
+	readonly path: string;
+	readonly origPath?: string;
+}
+interface TestGitFixture {
+	readonly branch?: Readonly<{
+		oid: string;
+		head: string;
+		upstream: Readonly<{ name: string; ahead: number; behind: number }> | null;
+	}>;
+	readonly entries?: readonly TestGitStatusEntry[];
+	readonly blobs?: Readonly<
+		Record<string, Partial<Record<"head" | "index", string>>>
+	>;
+	readonly noRepositoryForTest?: boolean;
+}
+
 async function installNativeIpcMock(
 	page: Page,
 	rawReadTransport: RawReadTransport,
@@ -160,6 +187,11 @@ async function installNativeIpcMock(
 	// never carries over automatically, so this defaults to `false`. Only
 	// this slice's own terminal tests pass this.
 	terminalTrustedForTest = false,
+	// `F080` S2: seeds `git_status`/`git_show_blob` responses for
+	// `PlainScmView`/`PlainGitTextModelContentProvider` scenarios. Only this
+	// slice's own SCM tests pass this; every other existing call site keeps
+	// the default clean-repository-on-`main` fixture.
+	gitFixtureForTest: TestGitFixture = {},
 ): Promise<void> {
 	await page.addInitScript(
 		({
@@ -176,6 +208,7 @@ async function installNativeIpcMock(
 			fileIconThemeSelectionForTest,
 			productIconThemeSelectionForTest,
 			terminalTrustedForTest,
+			gitFixtureForTest,
 		}) => {
 			const calls: Array<{
 				command: string;
@@ -1330,6 +1363,76 @@ async function installNativeIpcMock(
 					message: "This workspace has not been granted execution trust.",
 				};
 			}
+			function gitNoRepository() {
+				return {
+					code: "GIT_NO_REPOSITORY",
+					message: "The current workspace root is not a Git repository.",
+				};
+			}
+			// Expands this file's own deliberately-terse `TestGitStatusEntry`
+			// (`type`/`indexStatus`/`worktreeStatus`/`path`/`origPath` only) into
+			// the full `GitStatusEntryWire` shape `git-codec.ts`'s
+			// `decodeGitStatusEntry` strictly requires (`hasExactKeys` — an
+			// entry missing `submodule`/`modeHead`/`hashHead`/etc. would be
+			// rejected as an `IPC_CONTRACT_VIOLATION`, not silently accepted).
+			// The filled-in mode/hash/submodule defaults are inert placeholders
+			// no scenario in this file inspects.
+			function fullGitStatusEntry(entry: TestGitStatusEntry) {
+				const submodule = {
+					isSubmodule: false,
+					commitChanged: false,
+					trackedChanged: false,
+					untrackedChanged: false,
+				};
+				if (entry.type === "untracked" || entry.type === "ignored") {
+					return { type: entry.type, path: entry.path };
+				}
+				if (entry.type === "unmerged") {
+					return {
+						type: "unmerged",
+						indexStatus: entry.indexStatus ?? "U",
+						worktreeStatus: entry.worktreeStatus ?? "U",
+						submodule,
+						modeStage1: "100644",
+						modeStage2: "100644",
+						modeStage3: "100644",
+						modeWorktree: "100644",
+						hashStage1: "a".repeat(40),
+						hashStage2: "b".repeat(40),
+						hashStage3: "c".repeat(40),
+						path: entry.path,
+					};
+				}
+				if (entry.type === "renameOrCopy") {
+					return {
+						type: "renameOrCopy",
+						indexStatus: entry.indexStatus ?? ".",
+						worktreeStatus: entry.worktreeStatus ?? ".",
+						submodule,
+						modeHead: "100644",
+						modeIndex: "100644",
+						modeWorktree: "100644",
+						hashHead: "a".repeat(40),
+						hashIndex: "b".repeat(40),
+						renameOrCopyKind: "rename",
+						similarity: 100,
+						path: entry.path,
+						origPath: entry.origPath ?? entry.path,
+					};
+				}
+				return {
+					type: "ordinary",
+					indexStatus: entry.indexStatus ?? ".",
+					worktreeStatus: entry.worktreeStatus ?? ".",
+					submodule,
+					modeHead: "100644",
+					modeIndex: "100644",
+					modeWorktree: "100644",
+					hashHead: "a".repeat(40),
+					hashIndex: "b".repeat(40),
+					path: entry.path,
+				};
+			}
 			function terminalSessionNotFound() {
 				return {
 					code: "TERMINAL_SESSION_NOT_FOUND",
@@ -2118,6 +2221,55 @@ async function installNativeIpcMock(
 							emitTerminalExit(session, 137);
 							return null;
 						}
+						case "git_status": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							return {
+								branch: gitFixtureForTest.branch ?? {
+									oid: "0".repeat(40),
+									head: "main",
+									upstream: null,
+								},
+								entries: (gitFixtureForTest.entries ?? []).map(
+									fullGitStatusEntry,
+								),
+							};
+						}
+						case "git_diff_files": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							return { entries: [] };
+						}
+						case "git_show_blob": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							const showRequest = args.request as
+								{ rev?: "head" | "index"; path?: string } | undefined;
+							const rev = showRequest?.rev;
+							const showPath = showRequest?.path;
+							const text =
+								rev !== undefined && showPath !== undefined
+									? gitFixtureForTest.blobs?.[showPath]?.[rev]
+									: undefined;
+							return {
+								content:
+									text === undefined
+										? null
+										: Array.from(new TextEncoder().encode(text)),
+							};
+						}
 						default:
 							throw new Error(`Unexpected Tauri test command: ${command}`);
 					}
@@ -2138,6 +2290,7 @@ async function installNativeIpcMock(
 			fileIconThemeSelectionForTest,
 			productIconThemeSelectionForTest,
 			terminalTrustedForTest,
+			gitFixtureForTest,
 		},
 	);
 }
@@ -9967,6 +10120,317 @@ test("reloading the page while multiple terminal tabs (including a split) are op
 		"data-plain-ready",
 		"true",
 		{ timeout: 60_000 },
+	);
+
+	expect(pageErrors).toEqual([]);
+});
+
+// --- F080 S2: SCM override introduction + PlainScmProvider ---------------
+
+async function openScmView(page: Page): Promise<Locator> {
+	const scmActivityIcon = page.getByRole("tab", { name: /^Source Control/ });
+	await expect(scmActivityIcon).toHaveCount(1);
+	await scmActivityIcon.click();
+	const body = page.locator(".plain-scm-view-body");
+	await expect(body).toBeVisible();
+	return body;
+}
+
+test("Source Control is reachable from the Activity Bar and shows a clear disabled message for an untrusted workspace, never spawning git", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(page, "arrayBuffer");
+	await openNativeWorkspaceExplorer(page);
+	await openScmView(page);
+
+	await expect(page.locator(".plain-scm-view-message")).toHaveText(
+		/execution trust/,
+	);
+	await expect(
+		page.locator(".plain-scm-view-changes .plain-scm-view-resource"),
+	).toHaveCount(0);
+	await expect(
+		page.locator(".plain-scm-view-staged .plain-scm-view-resource"),
+	).toHaveCount(0);
+	expect(await terminalCallsFor(page, "git_status")).toEqual([]);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("Source Control shows a clear disabled message for a trusted workspace that is not a Git repository", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{ noRepositoryForTest: true },
+	);
+	await openNativeWorkspaceExplorer(page);
+	await openScmView(page);
+
+	await expect(page.locator(".plain-scm-view-message")).toHaveText(
+		/not a Git repository/,
+	);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("Source Control renders Changes and Staged Changes resource groups from a deterministic git status fixture, and opens a resource on click", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		// A real mock file at the same relative path a resource's `sourceUri`
+		// resolves to, so clicking it below opens a genuine editor with real
+		// content rather than a file-not-found error tab.
+		{ "src/unstaged.ts": "console.log('unstaged');\n" },
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{
+			branch: {
+				oid: "1".repeat(40),
+				head: "main",
+				upstream: { name: "origin/main", ahead: 1, behind: 2 },
+			},
+			entries: [
+				// Unstaged-only modification: Changes only.
+				{ type: "ordinary", worktreeStatus: "M", path: "src/unstaged.ts" },
+				// Staged-and-unstaged: both groups (real "MM" semantics).
+				{
+					type: "ordinary",
+					indexStatus: "M",
+					worktreeStatus: "M",
+					path: "src/both.ts",
+				},
+				// Staged addition: Staged only.
+				{ type: "ordinary", indexStatus: "A", path: "src/added.ts" },
+				// Untracked: Changes only, synthetic "?" status.
+				{ type: "untracked", path: "new-file.txt" },
+				// Staged rename: Staged only, with an origPath tooltip.
+				{
+					type: "renameOrCopy",
+					indexStatus: "R",
+					path: "src/renamed-to.ts",
+					origPath: "src/renamed-from.ts",
+				},
+				// Ignored: dropped entirely, appears in neither group.
+				{ type: "ignored", path: "dist/" },
+			],
+		},
+	);
+	await openNativeWorkspaceExplorer(page);
+	const body = await openScmView(page);
+
+	await expect(page.locator(".plain-scm-view-message")).toHaveText("");
+	await expect(page.locator(".plain-scm-view-branch")).toHaveText("main ↓2 ↑1");
+
+	const changes = body.locator(
+		".plain-scm-view-changes .plain-scm-view-resource",
+	);
+	const staged = body.locator(
+		".plain-scm-view-staged .plain-scm-view-resource",
+	);
+	// Changes: unstaged.ts, both.ts, new-file.txt (ignored dropped).
+	await expect(changes).toHaveCount(3);
+	// Staged: both.ts, added.ts, renamed-to.ts.
+	await expect(staged).toHaveCount(3);
+	await expect(changes).toContainText([
+		"src/unstaged.ts",
+		"src/both.ts",
+		"new-file.txt",
+	]);
+	await expect(staged).toContainText([
+		"src/both.ts",
+		"src/added.ts",
+		"src/renamed-to.ts",
+	]);
+
+	const renamedButton = staged.getByText("src/renamed-to.ts");
+	await expect(renamedButton).toHaveAttribute(
+		"title",
+		/Renamed \(from src\/renamed-from\.ts\)/,
+	);
+
+	await changes.getByText("src/unstaged.ts").click();
+	const editorTab = page.getByRole("tab", { name: /^unstaged\.ts(?:,.*)?$/ });
+	await expect(editorTab).toBeVisible();
+	await expect(page.locator(".monaco-editor").last()).toContainText(
+		"console.log('unstaged');",
+	);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("Plain: Refresh Source Control re-runs git_status for the already-open view", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await openScmView(page);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_status")).length)
+		.toBe(1);
+
+	await executePaletteCommand(
+		page,
+		"Refresh Source Control",
+		"Plain: Refresh Source Control",
+	);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_status")).length)
+		.toBe(2);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("git: read-only content is resolvable through the registered ITextModelContentProvider, for both head and index revisions", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{
+			blobs: {
+				"src/a.ts": {
+					head: "export const a = 1;\n",
+					index: "export const a = 2;\n",
+				},
+			},
+		},
+	);
+	await openNativeWorkspaceExplorer(page);
+
+	const headText = await page.evaluate(() =>
+		(
+			window as unknown as {
+				__PLAIN_TEST_RESOLVE_GIT_TEXT__(
+					rev: "head" | "index",
+					path: string,
+				): Promise<string | null>;
+			}
+		).__PLAIN_TEST_RESOLVE_GIT_TEXT__("head", "src/a.ts"),
+	);
+	expect(headText).toBe("export const a = 1;\n");
+
+	const indexText = await page.evaluate(() =>
+		(
+			window as unknown as {
+				__PLAIN_TEST_RESOLVE_GIT_TEXT__(
+					rev: "head" | "index",
+					path: string,
+				): Promise<string | null>;
+			}
+		).__PLAIN_TEST_RESOLVE_GIT_TEXT__("index", "src/a.ts"),
+	);
+	expect(indexText).toBe("export const a = 2;\n");
+
+	const calls = await terminalCallsFor(page, "git_show_blob");
+	expect(calls.length).toBeGreaterThanOrEqual(2);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("no AI/Chat-related SCM command exists in the command palette", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{ entries: [{ type: "unmerged", path: "src/conflict.ts" }] },
+	);
+	await openNativeWorkspaceExplorer(page);
+	await openScmView(page);
+
+	for (const label of [
+		"Resolve Conflicts with AI",
+		"Generate Commit Message",
+		"View Source Control Graph",
+	]) {
+		await page.keyboard.press("ControlOrMeta+Shift+P");
+		const palette = page.locator(".quick-input-widget");
+		await expect(palette).toBeVisible();
+		await palette.locator("input").fill(label);
+		await expect(palette).not.toContainText(label);
+		await page.keyboard.press("Escape");
+	}
+
+	const surfaceSnapshot = await page.evaluate(
+		() => window.__PLAIN_WORKBENCH_SURFACES__,
+	);
+	expect(
+		(surfaceSnapshot as { commandIds: readonly string[] } | undefined)
+			?.commandIds ?? [],
+	).not.toEqual(
+		expect.arrayContaining([expect.stringMatching(/scm.*chat|chat.*scm/i)]),
 	);
 
 	expect(pageErrors).toEqual([]);
