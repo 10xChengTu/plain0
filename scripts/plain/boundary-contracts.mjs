@@ -5462,6 +5462,49 @@ const FORBIDDEN_SPAWN_BYPASS_DEPENDENCIES = Object.freeze([
 	"xshell",
 ]);
 
+/**
+ * ADR `docs/decisions/0003-native-git-and-generic-dap.md`'s "系统 Git CLI
+ * 为唯一写操作权威" / "不混用 git2/gix" decision, upgraded from a doc-only
+ * convention to a machine guard (`F080` S0): none of these libgit2/gix
+ * bindings may appear as a Cargo dependency, under any rename, full stop —
+ * not even as a read-only cache, which the ADR explicitly gates behind a
+ * future benchmark-proven need, never an ambient dependency.
+ */
+const FORBIDDEN_GIT_LIBRARY_DEPENDENCIES = Object.freeze([
+	"git2",
+	"gix",
+	"libgit2-sys",
+]);
+
+/**
+ * The Git domain's sole audited `std::process::Command` wrapper (`F080` S0
+ * of `docs/research/2026-07-25-core-git.md`) — every other file under
+ * `src-tauri/src/git/` remains mechanically forbidden from naming
+ * `std::process::Command` at all, exactly like every file under
+ * `src-tauri/src/terminal/` always has been. Chosen as a single fixed path
+ * (rather than e.g. any file matching `exec*.rs`) so the allowlist is one
+ * unambiguous, greppable line, not a pattern someone could widen by
+ * dropping in a second file that happens to match.
+ */
+const GIT_EXEC_WRAPPER_PATH = "src-tauri/src/git/exec.rs";
+
+const GIT_DOMAIN_SOURCE_PATTERN = /^src-tauri\/src\/git\/.*\.rs$/;
+
+/**
+ * Program names [`GIT_EXEC_WRAPPER_PATH`] must never pass to
+ * `Command::new`, even though it is otherwise exempt from the
+ * `std::process::Command` ban below: the one-file allowlist only closes
+ * half the bypass a hostile edit could exploit — nothing else would stop
+ * that same file from quietly becoming `Command::new("sh").arg("-c", ...)`
+ * instead. Deliberately a small, explicit denylist of common shell
+ * interpreters (not a "must equal exactly `git`" allowlist coupled to a
+ * single literal-match regex) because the wrapper legitimately needs
+ * `-c key=value` git-config-override arguments — a shell "-c" would be the
+ * actual bypass to catch, not the token "-c" itself.
+ */
+const GIT_EXEC_SHELL_INTERPRETER_PATTERN =
+	/Command::new\s*\(\s*"(?:sh|bash|zsh|dash|ksh|csh|tcsh|cmd|cmd\.exe|powershell|powershell\.exe|pwsh)"\s*\)/;
+
 const TERMINAL_BUDGET_LIMITS = Object.freeze([
 	[
 		"MAX_TERMINAL_SESSIONS_PER_WINDOW",
@@ -5560,17 +5603,24 @@ function stripRustCommentsOnly(source) {
 }
 
 /**
- * Locks the terminal (and future `git::`) domain's subprocess-spawning
- * contract described in `docs/research/2026-07-24-pty-terminal.md`:
- * `portable-pty` pinned to an exact version, and every non-test source file
- * under the guarded domains forbidden from using `std::process::Command`
- * directly or invoking a shell with a `-c`/string-interpreter argument —
- * the same two mechanical red flags the delete domain's own
- * `FORBIDDEN_DELETE_BYPASS_DEPENDENCIES` precedent guards against for a
- * different bypass shape. Also locks the domain's flow-control/session-
- * limit/env-allowlist constants exactly, mirroring
- * `validateSearchTextBudgetConstants`'s own precedent for a different
- * domain's streaming protocol.
+ * Locks the terminal *and* `git::` domains' subprocess-spawning contracts —
+ * `docs/research/2026-07-24-pty-terminal.md` for the former,
+ * `docs/research/2026-07-25-core-git.md`/ADR 0003 for the latter. Kept as
+ * one function (not split into a `validateGitRustBoundary` sibling) because
+ * the two domains share the exact same `SPAWN_GUARDED_DOMAIN_PATTERN`
+ * sweep and the same two mechanical red flags below; splitting it would
+ * duplicate that sweep for a cosmetic naming win. `portable-pty` is pinned
+ * to an exact version for the terminal domain; every non-test source file
+ * under both guarded domains is forbidden from using `std::process::Command`
+ * directly — except [`GIT_EXEC_WRAPPER_PATH`], the git domain's own single
+ * audited wrapper (see that constant's doc) — or invoking a shell with a
+ * `-c`/string-interpreter argument, the same two mechanical red flags the
+ * delete domain's own `FORBIDDEN_DELETE_BYPASS_DEPENDENCIES` precedent
+ * guards against for a different bypass shape. Also locks
+ * [`FORBIDDEN_GIT_LIBRARY_DEPENDENCIES`] (git2/gix/libgit2-sys) and the
+ * terminal domain's flow-control/session-limit/env-allowlist constants
+ * exactly, mirroring `validateSearchTextBudgetConstants`'s own precedent
+ * for a different domain's streaming protocol.
  */
 export function validateTerminalRustBoundary(
 	rustSources,
@@ -5632,6 +5682,13 @@ export function validateTerminalRustBoundary(
 			);
 		}
 	}
+	for (const dependency of FORBIDDEN_GIT_LIBRARY_DEPENDENCIES) {
+		if (cargoDependencies.some(({ name }) => name === dependency)) {
+			failures.push(
+				`Cargo metadata must not contain forbidden git library dependency ${dependency}, including renamed dependencies (ADR 0003: the system Git CLI is the sole write authority, never git2/gix)`,
+			);
+		}
+	}
 
 	for (const { relativePath, source } of rustSources) {
 		const normalizedPath = relativePath.replaceAll("\\", "/");
@@ -5641,13 +5698,39 @@ export function validateTerminalRustBoundary(
 		) {
 			continue;
 		}
+		const isGitDomain = GIT_DOMAIN_SOURCE_PATTERN.test(normalizedPath);
+		const isAuditedGitExecWrapper = normalizedPath === GIT_EXEC_WRAPPER_PATH;
 		const executableSource = stripRustCommentsAndLiterals(source);
-		if (/\bprocess\s*::\s*Command\b/.test(executableSource)) {
+		if (
+			!isAuditedGitExecWrapper &&
+			/\bprocess\s*::\s*Command\b/.test(executableSource)
+		) {
+			const guidance = isGitDomain
+				? `use the sole audited ${GIT_EXEC_WRAPPER_PATH} wrapper`
+				: "use portable_pty::CommandBuilder";
 			failures.push(
-				`${normalizedPath} must not spawn subprocesses via std::process::Command; use portable_pty::CommandBuilder`,
+				`${normalizedPath} must not spawn subprocesses via std::process::Command; ${guidance}`,
 			);
 		}
+		// Comments-only (not `stripRustCommentsAndLiterals`) from here on:
+		// both the `Command::new("git")` and shell-interpreter checks below,
+		// like the pre-existing "-c" check, need to see actual string
+		// literal *contents* — `stripRustCommentsAndLiterals` blanks those
+		// out too (it only leaves code structure intact), which would make
+		// `"git"`/`"sh"` invisible to a naive check against its output.
 		const commentsOnlySource = stripRustCommentsOnly(source);
+		if (isAuditedGitExecWrapper) {
+			if (GIT_EXEC_SHELL_INTERPRETER_PATTERN.test(commentsOnlySource)) {
+				failures.push(
+					`${GIT_EXEC_WRAPPER_PATH} must not spawn a shell interpreter — it may only invoke the git binary directly`,
+				);
+			}
+			if (!/Command::new\s*\(\s*"git"\s*\)/.test(commentsOnlySource)) {
+				failures.push(
+					`${GIT_EXEC_WRAPPER_PATH} must invoke Command::new("git") literally`,
+				);
+			}
+		}
 		if (/\.args?\s*\(\s*\[?\s*"-c"/.test(commentsOnlySource)) {
 			failures.push(`${normalizedPath} must not pass a shell "-c" argument`);
 		}
@@ -6135,6 +6218,396 @@ export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 	) {
 		failures.push(
 			"native.ts must listen for TERMINAL_DATA_EVENT/TERMINAL_EXIT_EVENT exactly once each, decoded through the audited decoders",
+		);
+	}
+
+	return failures;
+}
+
+/**
+ * `F080` S1's three git IPC commands (`docs/research/2026-07-25-core-git.md`)
+ * — same exact-body-pinning technique as [`TRUST_COMMAND_CONTRACTS`]/
+ * [`TERMINAL_COMMAND_CONTRACTS`], kept as its own const/function pair (not
+ * folded into [`validateTrustTerminalCommandRegistration`]) because this
+ * domain's commands live in a third file (`src-tauri/src/git/commands.rs`)
+ * and register through a still-open `generate_handler!` call already
+ * validated once per contract set below.
+ */
+const GIT_COMMAND_CONTRACTS = Object.freeze([
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_status",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitStatusRequest",
+		returnType: "->Result<GitStatusResult,CommandError>",
+		body: "request.validate();letresult=status::git_status(trust.inner(),workspace.inner(),window.label()).await?;Ok(GitStatusResult::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_diff_files",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitDiffFilesRequest",
+		returnType: "->Result<GitDiffFilesResult,CommandError>",
+		body: "letcached=request.into_parts();letentries=diff::diff_files(trust.inner(),workspace.inner(),window.label(),cached).await?;Ok(GitDiffFilesResult::new(entries))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_show_blob",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitShowBlobRequest",
+		returnType: "->Result<GitShowBlobResult,CommandError>",
+		body: "let(rev,path)=request.into_parts()?;letcontent=diff::show_blob(trust.inner(),workspace.inner(),window.label(),rev,&path).await?;Ok(GitShowBlobResult::new(content))",
+	},
+]);
+
+/**
+ * Locks the three `F080` S1 git commands to their audited exact signatures,
+ * bodies and single `generate_handler!` registration — mirrors
+ * `validateTrustTerminalCommandRegistration`'s exact technique.
+ */
+export function validateGitCommandRegistration(rustSources) {
+	const failures = [];
+	const libSource = findRustSource(rustSources, "src-tauri/src/lib.rs");
+
+	for (const contract of GIT_COMMAND_CONTRACTS) {
+		const fileSource = findRustSource(rustSources, contract.file);
+		if (fileSource === undefined) {
+			failures.push(`command registration boundary requires ${contract.file}`);
+			continue;
+		}
+		const executableSource = stripRustCommentsAndLiterals(fileSource);
+		const commands = extractAuditedTauriCommands(
+			executableSource,
+			contract.name,
+		);
+		if (commands.length !== 1) {
+			failures.push(
+				`${contract.file} must define exactly one audited ${contract.name} Tauri command`,
+			);
+			continue;
+		}
+		const [command] = commands;
+		const normalizedParameters = command.parameters
+			.replaceAll(/\s+/g, "")
+			.replace(/,$/, "");
+		if (
+			normalizedParameters !== contract.parameters ||
+			command.returnType.replaceAll(/\s+/g, "") !== contract.returnType
+		) {
+			failures.push(
+				`${contract.name} must accept its audited parameters and return the audited Result type`,
+			);
+		}
+		const normalizedBody = command.body
+			.replaceAll(/\s+/g, "")
+			.replace(/;$/, "");
+		if (normalizedBody !== contract.body) {
+			failures.push(
+				`${contract.name} must contain only its audited DTO decode and single service route`,
+			);
+		}
+	}
+
+	if (libSource === undefined) {
+		failures.push(
+			"command registration boundary requires src-tauri/src/lib.rs",
+		);
+		return failures;
+	}
+	const executableLib = stripRustCommentsAndLiterals(libSource);
+	const handlerBodies = [
+		...executableLib.matchAll(
+			/\.invoke_handler\s*\(\s*tauri\s*::\s*generate_handler\s*!\s*\[([\s\S]*?)\]\s*\)/g,
+		),
+	];
+	if (handlerBodies.length !== 1) {
+		failures.push(
+			"lib.rs must register commands through exactly one generate_handler! call",
+		);
+		return failures;
+	}
+	const [handlerBody] = handlerBodies;
+	for (const contract of GIT_COMMAND_CONTRACTS) {
+		const commandPath = new RegExp(
+			`\\bgit\\s*::\\s*commands\\s*::\\s*${escapeRegularExpression(contract.name)}\\b`,
+		);
+		if (!commandPath.test(handlerBody[1])) {
+			failures.push(
+				`generate_handler! must register git::commands::${contract.name} exactly once`,
+			);
+		}
+	}
+	return failures;
+}
+
+/**
+ * Comments-only variant of [`watcherRustStructBodies`] for a Rust `enum`
+ * declaration's whole variant-list text (between its outermost `{`/`}`) —
+ * used to lock [`GitStatusEntryWire`]'s five-variant discriminated union
+ * exactly, the same "brace-match then compare whitespace-stripped text"
+ * technique `watcherRustStructBodies` already establishes for a struct.
+ */
+function watcherRustEnumBodies(source, name) {
+	if (source === undefined) {
+		return [];
+	}
+	const bodies = [];
+	const pattern = new RegExp(
+		`\\b(?:pub(?:\\s*\\([^)]*\\))?\\s+)?enum\\s+${escapeRegularExpression(name)}\\b`,
+		"g",
+	);
+	for (const match of source.matchAll(pattern)) {
+		const bodyOpen = source.indexOf("{", match.index + match[0].length);
+		if (bodyOpen < 0) {
+			continue;
+		}
+		const bodyClose = findMatchingDelimiter(source, bodyOpen, "{", "}");
+		if (bodyClose !== undefined) {
+			bodies.push({
+				start: match.index,
+				body: source.slice(bodyOpen + 1, bodyClose),
+			});
+		}
+	}
+	return bodies;
+}
+
+/**
+ * Locks `F080` S1's git domain: the three hardened, audited argument-list
+ * constants (`status.rs`'s `GIT_STATUS_ARGS`, `diff.rs`'s
+ * `GIT_DIFF_BASE_ARGS`/`GIT_SHOW_BASE_ARGS`) and the wire DTO struct/enum
+ * shapes (`dto.rs`'s `GitBranchWire`/`GitSubmoduleStateWire`/
+ * `GitStatusEntryWire`/`GitDiffFileEntryWire`/`GitShowBlobResult`) exactly —
+ * a command silently gaining/losing a hardening flag, or a DTO silently
+ * gaining/losing/renaming a field, fails this check rather than only being
+ * caught by chance in review.
+ */
+export function validateGitRustBoundary(rustSources) {
+	const failures = [];
+	const statusSource = findRustSource(
+		rustSources,
+		"src-tauri/src/git/status.rs",
+	);
+	const diffSource = findRustSource(rustSources, "src-tauri/src/git/diff.rs");
+	const dtoSource = findRustSource(rustSources, "src-tauri/src/git/dto.rs");
+
+	if (statusSource === undefined || diffSource === undefined) {
+		failures.push("git boundary requires status.rs and diff.rs");
+		return failures;
+	}
+	// Comments-only (not `stripRustCommentsAndLiterals`, which blanks string
+	// literal *contents* too — see that function's own doc comment): this
+	// check must see the actual `"status"`/`"--porcelain=v2"`/etc. argument
+	// text, exactly like the pre-existing spawn-guard's `"-c"` check in
+	// `validateTerminalRustBoundary` needs `stripRustCommentsOnly` for the
+	// same reason.
+	const executableStatus = stripRustCommentsOnly(statusSource);
+	const executableDiff = stripRustCommentsOnly(diffSource);
+
+	const argsConstant = (source, name) => {
+		const constantPattern = new RegExp(
+			`pub\\s*\\(\\s*crate\\s*\\)\\s+const\\s+${escapeRegularExpression(name)}\\s*:\\s*&\\[&str\\]\\s*=\\s*&\\[([^\\]]*)\\]\\s*;`,
+		);
+		const match = constantPattern.exec(source);
+		if (match === null) {
+			return undefined;
+		}
+		return match[1]
+			.split(",")
+			.map((entry) => entry.trim())
+			.filter((entry) => entry.length > 0)
+			.map((entry) => entry.replace(/^"|"$/g, ""));
+	};
+
+	const statusArgs = argsConstant(executableStatus, "GIT_STATUS_ARGS");
+	if (
+		!sameArray(statusArgs, [
+			"status",
+			"--porcelain=v2",
+			"-z",
+			"--branch",
+			"--ignored",
+		])
+	) {
+		failures.push(
+			"status.rs must define GIT_STATUS_ARGS as exactly the audited status argument list",
+		);
+	}
+	const diffBaseArgs = argsConstant(executableDiff, "GIT_DIFF_BASE_ARGS");
+	if (
+		!sameArray(diffBaseArgs, [
+			"diff",
+			"--no-color",
+			"-z",
+			"-M",
+			"--no-textconv",
+			"--no-ext-diff",
+		])
+	) {
+		failures.push(
+			"diff.rs must define GIT_DIFF_BASE_ARGS as exactly the audited diff argument list",
+		);
+	}
+	const showBaseArgs = argsConstant(executableDiff, "GIT_SHOW_BASE_ARGS");
+	if (
+		!sameArray(showBaseArgs, [
+			"show",
+			"--no-color",
+			"--no-textconv",
+			"--no-ext-diff",
+		])
+	) {
+		failures.push(
+			"diff.rs must define GIT_SHOW_BASE_ARGS as exactly the audited show argument list",
+		);
+	}
+
+	if (dtoSource === undefined) {
+		failures.push("git boundary requires dto.rs");
+		return failures;
+	}
+	const executableDto = stripRustCommentsAndLiterals(dtoSource);
+	const compact = (value) => value?.replaceAll(/\s+/g, "") ?? "";
+	const structBody = (name) => {
+		const bodies = watcherRustStructBodies(executableDto, name);
+		return bodies.length === 1 ? compact(bodies[0].body) : undefined;
+	};
+	const enumBody = (name) => {
+		const bodies = watcherRustEnumBodies(executableDto, name);
+		return bodies.length === 1 ? compact(bodies[0].body) : undefined;
+	};
+
+	if (
+		structBody("GitSubmoduleStateWire") !==
+		"is_submodule:bool,commit_changed:bool,tracked_changed:bool,untracked_changed:bool,"
+	) {
+		failures.push(
+			"GitSubmoduleStateWire must expose only its exact audited four boolean fields",
+		);
+	}
+	if (
+		structBody("GitBranchWire") !==
+		"oid:String,head:String,upstream:Option<GitBranchUpstreamWire>,"
+	) {
+		failures.push("GitBranchWire must expose only its exact audited fields");
+	}
+	if (
+		structBody("GitDiffFileEntryWire") !==
+		"kind:GitDiffStatusKindWire,similarity:Option<u16>,path:String,orig_path:Option<String>,added:Option<u64>,deleted:Option<u64>,binary:bool,"
+	) {
+		failures.push(
+			"GitDiffFileEntryWire must expose only its exact audited fields",
+		);
+	}
+	if (structBody("GitShowBlobResult") !== "content:Option<Vec<u8>>,") {
+		failures.push(
+			"GitShowBlobResult must expose only its exact audited content field",
+		);
+	}
+	const expectedStatusEntryWire =
+		"Ordinary{index_status:char,worktree_status:char,submodule:GitSubmoduleStateWire,mode_head:String,mode_index:String,mode_worktree:String,hash_head:String,hash_index:String,path:String,},RenameOrCopy{index_status:char,worktree_status:char,submodule:GitSubmoduleStateWire,mode_head:String,mode_index:String,mode_worktree:String,hash_head:String,hash_index:String,rename_or_copy_kind:GitRenameOrCopyKindWire,similarity:u16,path:String,orig_path:String,},Unmerged{index_status:char,worktree_status:char,submodule:GitSubmoduleStateWire,mode_stage1:String,mode_stage2:String,mode_stage3:String,mode_worktree:String,hash_stage1:String,hash_stage2:String,hash_stage3:String,path:String,},Untracked{path:String,},Ignored{path:String,},";
+	if (enumBody("GitStatusEntryWire") !== expectedStatusEntryWire) {
+		failures.push(
+			"GitStatusEntryWire must expose exactly its five audited variants with their exact fields",
+		);
+	}
+
+	return failures;
+}
+
+const GIT_BRIDGE_METHOD_NAMES = ["gitStatus", "gitDiffFiles", "gitShowBlob"];
+
+/**
+ * Locks `F080` S1's TypeScript surface: `PlainBridge` exposes exactly the
+ * three audited git methods, `git-codec.ts`'s decoders validate exact
+ * own-data keys/reject Proxy wrapping/freeze their result (same rigor
+ * `validateTerminalIpcBridgeBoundary` already locks for the terminal
+ * domain), and `native.ts` routes each through `invoke` with its audited
+ * command name.
+ */
+export function validateGitIpcBridgeBoundary(rustSources, appSources) {
+	const failures = [];
+	const appSource = (expectedPath) =>
+		appSources.find(
+			({ relativePath }) => relativePath.replaceAll("\\", "/") === expectedPath,
+		)?.source;
+
+	const contracts = appSource("app/platform/tauri/contracts.ts");
+	const contractsFile =
+		contracts === undefined
+			? undefined
+			: ts.createSourceFile(
+					"contracts.ts",
+					contracts,
+					ts.ScriptTarget.Latest,
+					true,
+					ts.ScriptKind.TS,
+				);
+	const plainBridgeInterfaces =
+		contractsFile?.statements.filter(
+			(statement) =>
+				ts.isInterfaceDeclaration(statement) &&
+				statement.name.text === "PlainBridge",
+		) ?? [];
+	const bridgeMembers =
+		plainBridgeInterfaces[0]?.members.filter((member) =>
+			GIT_BRIDGE_METHOD_NAMES.includes(typeScriptStaticName(member.name)),
+		) ?? [];
+	const bridgeMemberNames = bridgeMembers
+		.map((member) => typeScriptStaticName(member.name))
+		.sort();
+	if (
+		plainBridgeInterfaces.length !== 1 ||
+		bridgeMembers.length !== GIT_BRIDGE_METHOD_NAMES.length ||
+		!bridgeMembers.every((member) => ts.isMethodSignature(member)) ||
+		JSON.stringify(bridgeMemberNames) !==
+			JSON.stringify([...GIT_BRIDGE_METHOD_NAMES].sort())
+	) {
+		failures.push(
+			"PlainBridge must expose exactly the three audited git methods, no more and no fewer",
+		);
+	}
+
+	const gitCodec = appSource("app/platform/tauri/git-codec.ts");
+	const decoderBody = (name) => {
+		if (gitCodec === undefined) {
+			return undefined;
+		}
+		const functions = extractRustLikeTypeScriptFunctionBodies(gitCodec, name);
+		return functions.length === 1 ? functions[0] : undefined;
+	};
+	for (const name of [
+		"decodeGitStatusResult",
+		"decodeGitDiffFilesResult",
+		"decodeGitShowBlobResult",
+	]) {
+		const body = decoderBody(name);
+		if (
+			body === undefined ||
+			!body.includes("hasExactKeys(") ||
+			!body.includes("rejectProxyObject(") ||
+			!body.includes("Object.freeze(")
+		) {
+			failures.push(
+				`git-codec.ts's ${name} must validate exact own-data keys, reject Proxy wrapping, and freeze its result`,
+			);
+		}
+	}
+
+	const native = appSource("app/platform/tauri/native.ts");
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_status"/g)].length !== 1 ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_diff_files"/g)].length !==
+			1 ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_show_blob"/g)].length !==
+			1 ||
+		!native.includes("decodeGitStatusResult(") ||
+		!native.includes("decodeGitDiffFilesResult(") ||
+		!native.includes("decodeGitShowBlobResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_status/git_diff_files/git_show_blob exactly once each, decoded through the audited decoders",
 		);
 	}
 
@@ -7087,18 +7560,31 @@ export function validateWorkspaceMoveBoundary(rustSources) {
 				`${normalizedPath} must not use broad, open-directory or direct unlink deletion`,
 			);
 		}
+		// `src-tauri/src/git/exec.rs` is exempt from this specific check
+		// only: it is the git domain's one audited `std::process::Command`
+		// wrapper (`F080` S0), separately and more precisely locked down by
+		// `validateTerminalRustBoundary` (literal `Command::new("git")`
+		// only, no other program, no shell interpreter — see
+		// `GIT_EXEC_WRAPPER_PATH`'s doc). This check's actual purpose —
+		// preventing the *workspace/theme/backup* domains' capability-based
+		// deletion from being bypassed via a raw process/shell spawn — does
+		// not apply to a file that spawns nothing but `git` and never calls
+		// `remove_file`/`remove_dir` at all (confirmed immediately below by
+		// this same loop's UFCS/broad-deletion checks, which still run for
+		// it unexempted).
 		if (
-			/\b(?:std|tokio|async_process)\s*::\s*(?:\{[^;}]*\bprocess\b|process\b)|\btauri_plugin_shell\b|\b(?:Command|Shell)\s*::\s*new\s*\(/s.test(
+			normalizedPath !== GIT_EXEC_WRAPPER_PATH &&
+			(/\b(?:std|tokio|async_process)\s*::\s*(?:\{[^;}]*\bprocess\b|process\b)|\btauri_plugin_shell\b|\b(?:Command|Shell)\s*::\s*new\s*\(/s.test(
 				executableSource,
 			) ||
-			/\b(?:async_process|duct|subprocess|xshell)\b/.test(executableSource) ||
-			/\b(?:libc|nix)\s*::(?:\s*[A-Za-z_]\w*\s*::)*\s*(?:remove|rmdir|system|posix_spawn|execv|execve|fork)\b/.test(
-				executableSource,
-			) ||
-			/\bextern\s+"C"\s*\{[^}]*\bfn\s+(?:remove|rmdir|system|posix_spawn|execv|execve|fork)\b/s.test(
-				executableSource,
-			) ||
-			/\b(?:use\s+std\s+as\b|extern\s+crate\s+std\b)/.test(executableSource)
+				/\b(?:async_process|duct|subprocess|xshell)\b/.test(executableSource) ||
+				/\b(?:libc|nix)\s*::(?:\s*[A-Za-z_]\w*\s*::)*\s*(?:remove|rmdir|system|posix_spawn|execv|execve|fork)\b/.test(
+					executableSource,
+				) ||
+				/\bextern\s+"C"\s*\{[^}]*\bfn\s+(?:remove|rmdir|system|posix_spawn|execv|execve|fork)\b/s.test(
+					executableSource,
+				) ||
+				/\b(?:use\s+std\s+as\b|extern\s+crate\s+std\b)/.test(executableSource))
 		) {
 			failures.push(
 				`${normalizedPath} must not use process or shell deletion bypasses`,

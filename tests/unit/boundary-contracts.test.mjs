@@ -35,6 +35,9 @@ import {
 	validateTerminalIpcBridgeBoundary,
 	validateTerminalRustBoundary,
 	validateTrustTerminalCommandRegistration,
+	validateGitCommandRegistration,
+	validateGitIpcBridgeBoundary,
+	validateGitRustBoundary,
 } from "../../scripts/plain/boundary-contracts.mjs";
 
 const baselineWindow = {
@@ -8616,6 +8619,322 @@ pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor
 	});
 });
 
+describe("Plain F080 S0 git spawn guard and git2/gix ban Harness", () => {
+	const gitCargo = `
+[dependencies]
+portable-pty = "=0.9.0"
+libghostty-vt = "=0.2.1"
+`;
+
+	const exactPortablePtyDependency = Object.freeze({
+		name: "portable-pty",
+		req: "=0.9.0",
+		kind: null,
+		rename: null,
+		target: null,
+		optional: false,
+	});
+
+	const exactLibghosttyVtDependency = Object.freeze({
+		name: "libghostty-vt",
+		req: "=0.2.1",
+		kind: null,
+		rename: null,
+		target: null,
+		optional: false,
+	});
+
+	const baselineDependencies = Object.freeze([
+		exactPortablePtyDependency,
+		exactLibghosttyVtDependency,
+	]);
+
+	// A minimal but complete terminal-domain baseline (identical in spirit
+	// to the F070 S1 block's own `baselineTerminalRustSources`, duplicated
+	// here rather than shared across `describe` blocks — see
+	// `text_search.rs`'s own "small helper duplication over cross-module
+	// coupling" precedent for why that trade-off is deliberate elsewhere in
+	// this codebase) — every one of `validateTerminalRustBoundary`'s
+	// terminal-specific checks (budget constants, env allowlist) must also
+	// pass unrelated to the git-domain assertions this block cares about.
+	const terminalBaseline = Object.freeze([
+		{
+			relativePath: "src-tauri/src/terminal/mod.rs",
+			source:
+				"pub(crate) const MAX_TERMINAL_SESSIONS_PER_WINDOW: usize = 16;\n",
+		},
+		{
+			relativePath: "src-tauri/src/terminal/flow.rs",
+			source:
+				"pub(crate) const TERMINAL_FLOW_HIGH_WATER_MARK: usize = 100_000;\npub(crate) const TERMINAL_FLOW_LOW_WATER_MARK: usize = 5_000;\n",
+		},
+		{
+			relativePath: "src-tauri/src/terminal/service.rs",
+			source:
+				'const TERMINAL_CHUNK_QUEUE_CAPACITY: usize = 256;\nconst TERMINAL_READ_BUFFER_BYTES: usize = 8192;\n\nfn spawn_via_command_builder() {\n    let mut command = portable_pty::CommandBuilder::new("test-fixture-program");\n    command.args(["--flag", "value"]);\n}\n',
+		},
+		{
+			relativePath: "src-tauri/src/terminal/shell.rs",
+			source:
+				'pub(crate) const TERMINAL_ENV_PASSTHROUGH_NAMES: &[&str] =\n    &["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR"];\npub(crate) const TERMINAL_ENV_LC_PREFIX: &str = "LC_";\npub(crate) const TERMINAL_ENV_TERM: (&str, &str) = ("TERM", "xterm-256color");\npub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor");\n',
+		},
+		{
+			relativePath: "src-tauri/src/terminal/vt.rs",
+			source:
+				"pub(crate) const TERMINAL_VT_MAX_SCROLLBACK_LINES: usize = 10_000;\n",
+		},
+	]);
+
+	// A minimal but "compliant and reasonable" stand-in for the real
+	// `src-tauri/src/git/exec.rs`: spawns only `Command::new("git")`, never
+	// a shell interpreter.
+	const validGitExecSource = `
+use std::process::Command;
+
+pub(crate) fn run_git(args: &[String]) {
+    let mut command = Command::new("git");
+    let mut hardening_args: Vec<String> = Vec::new();
+    hardening_args.push("-c".to_owned());
+    hardening_args.push("core.fsmonitor=".to_owned());
+    command.args(&hardening_args);
+    command.args(args);
+}
+`;
+
+	function baselineGitRustSources(extraGitFiles = []) {
+		return [
+			...terminalBaseline,
+			{ relativePath: "src-tauri/src/git/exec.rs", source: validGitExecSource },
+			...extraGitFiles,
+		];
+	}
+
+	it("passes for a clean git exec wrapper alongside the terminal domain", () => {
+		expect(
+			validateTerminalRustBoundary(
+				baselineGitRustSources(),
+				gitCargo,
+				baselineDependencies,
+			),
+		).toEqual([]);
+	});
+
+	it("allows exactly src-tauri/src/git/exec.rs to spawn std::process::Command", () => {
+		const failures = validateTerminalRustBoundary(
+			baselineGitRustSources(),
+			gitCargo,
+			baselineDependencies,
+		);
+		expect(
+			failures.some((failure) => failure.includes("src-tauri/src/git/exec.rs")),
+		).toBe(false);
+	});
+
+	it("rejects std::process::Command in any other git domain file, pointing at exec.rs", () => {
+		const failures = validateTerminalRustBoundary(
+			baselineGitRustSources([
+				{
+					relativePath: "src-tauri/src/git/discovery.rs",
+					source:
+						'fn bypass() {\n    let _ = std::process::Command::new("git");\n}\n',
+				},
+			]),
+			gitCargo,
+			baselineDependencies,
+		);
+		expect(
+			failures.some((failure) =>
+				failure.includes(
+					"src-tauri/src/git/discovery.rs must not spawn subprocesses via std::process::Command; use the sole audited src-tauri/src/git/exec.rs wrapper",
+				),
+			),
+		).toBe(true);
+	});
+
+	it("still rejects std::process::Command in the terminal domain with the portable_pty message (no regression)", () => {
+		const failures = validateTerminalRustBoundary(
+			[
+				...baselineGitRustSources(),
+				{
+					relativePath: "src-tauri/src/terminal/hostile.rs",
+					source:
+						'fn run() {\n    let _ = std::process::Command::new("ls");\n}\n',
+				},
+			],
+			gitCargo,
+			baselineDependencies,
+		);
+		expect(
+			failures.some((failure) =>
+				failure.includes(
+					"src-tauri/src/terminal/hostile.rs must not spawn subprocesses via std::process::Command; use portable_pty::CommandBuilder",
+				),
+			),
+		).toBe(true);
+	});
+
+	it('rejects exec.rs if it does not literally invoke Command::new("git")', () => {
+		const failures = validateTerminalRustBoundary(
+			[
+				...terminalBaseline,
+				{
+					relativePath: "src-tauri/src/git/exec.rs",
+					source:
+						'use std::process::Command;\n\nfn run_git(program: &str) {\n    let mut command = Command::new(program);\n    command.arg("status");\n}\n',
+				},
+			],
+			gitCargo,
+			baselineDependencies,
+		);
+		expect(failures).toContain(
+			'src-tauri/src/git/exec.rs must invoke Command::new("git") literally',
+		);
+	});
+
+	it("rejects exec.rs if it spawns a shell interpreter", () => {
+		const failures = validateTerminalRustBoundary(
+			[
+				...terminalBaseline,
+				{
+					relativePath: "src-tauri/src/git/exec.rs",
+					source:
+						'use std::process::Command;\n\nfn run_git() {\n    let mut command = Command::new("git");\n    let _ = command;\n    let mut shell = Command::new("sh");\n    shell.arg("-c");\n}\n',
+				},
+			],
+			gitCargo,
+			baselineDependencies,
+		);
+		expect(
+			failures.some((failure) =>
+				failure.includes(
+					"src-tauri/src/git/exec.rs must not spawn a shell interpreter",
+				),
+			),
+		).toBe(true);
+	});
+
+	it("hostile mutation: a second git file smuggling std::process::Command alongside a compliant exec.rs is still caught", () => {
+		const failures = validateTerminalRustBoundary(
+			baselineGitRustSources([
+				{
+					relativePath: "src-tauri/src/git/service.rs",
+					source:
+						'fn hostile_bypass() {\n    let _ = std::process::Command::new("curl");\n}\n',
+				},
+			]),
+			gitCargo,
+			baselineDependencies,
+		);
+		expect(
+			failures.some((failure) =>
+				failure.includes(
+					"src-tauri/src/git/service.rs must not spawn subprocesses",
+				),
+			),
+		).toBe(true);
+		// The compliant exec.rs itself must still be unaffected — no
+		// failure whose *subject* (leading path) is exec.rs, though the
+		// service.rs failure's own guidance text legitimately mentions
+		// exec.rs by name (as the wrapper callers should use instead).
+		expect(
+			failures.some((failure) =>
+				failure.startsWith("src-tauri/src/git/exec.rs "),
+			),
+		).toBe(false);
+	});
+
+	it("a tests.rs-suffixed git fixture is exempt from the spawn guard, exactly like the terminal domain's carve-out", () => {
+		const failures = validateTerminalRustBoundary(
+			baselineGitRustSources([
+				{
+					relativePath: "src-tauri/src/git/exec/tests.rs",
+					source:
+						'fn spawn_fixture() {\n    let _ = std::process::Command::new("git").arg("-c").status();\n}\n',
+				},
+			]),
+			gitCargo,
+			baselineDependencies,
+		);
+		expect(failures).toEqual([]);
+	});
+
+	it.each(["git2", "gix", "libgit2-sys"])(
+		"rejects the forbidden git library dependency %s, including renamed",
+		(dependency) => {
+			const failures = validateTerminalRustBoundary(
+				baselineGitRustSources(),
+				gitCargo,
+				[
+					...baselineDependencies,
+					{ name: dependency, req: "1.0", kind: null, rename: null },
+				],
+			);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						`Cargo metadata must not contain forbidden git library dependency ${dependency}, including renamed dependencies`,
+					),
+				),
+			).toBe(true);
+
+			const renamed = validateTerminalRustBoundary(
+				baselineGitRustSources(),
+				gitCargo,
+				[
+					...baselineDependencies,
+					{ name: dependency, req: "1.0", kind: null, rename: "renamed_away" },
+				],
+			);
+			expect(
+				renamed.some((failure) =>
+					failure.includes(
+						`Cargo metadata must not contain forbidden git library dependency ${dependency}`,
+					),
+				),
+			).toBe(true);
+		},
+	);
+
+	it("passes when no forbidden git library dependency is present", () => {
+		expect(
+			validateTerminalRustBoundary(
+				baselineGitRustSources(),
+				gitCargo,
+				baselineDependencies,
+			),
+		).toEqual([]);
+	});
+
+	// `validateWorkspaceMoveBoundary` independently sweeps *every*
+	// production Rust file for raw process/shell deletion bypasses (a
+	// check that predates the git domain and is unrelated to the spawn
+	// guard above) — its regex for `Command::new(`/`std::process` would,
+	// without a matching exemption there, also flag the audited git exec
+	// wrapper. Locking both sides of that interaction here so a future
+	// edit to either check cannot silently reopen it.
+	it("does not trip the workspace move/delete boundary's process-bypass check for the audited git exec wrapper", () => {
+		const withExecWrapper = [
+			...workspaceMoveSources,
+			{ relativePath: "src-tauri/src/git/exec.rs", source: validGitExecSource },
+		];
+		expect(validateWorkspaceMoveBoundary(withExecWrapper)).toEqual([]);
+	});
+
+	it("still flags an unaudited git file's raw process/shell spawn via the move/delete boundary check", () => {
+		const hostile = [
+			...workspaceMoveSources,
+			{
+				relativePath: "src-tauri/src/git/discovery.rs",
+				source:
+					'fn bypass() {\n    let _ = std::process::Command::new("rm");\n}\n',
+			},
+		];
+		expect(validateWorkspaceMoveBoundary(hostile)).toContain(
+			"src-tauri/src/git/discovery.rs must not use process or shell deletion bypasses",
+		);
+	});
+});
+
 describe("Plain F070 S2 terminal IPC bridge Harness", () => {
 	const terminalDtoSource = readFileSync(
 		new URL("../../src-tauri/src/terminal/dto.rs", import.meta.url),
@@ -8874,6 +9193,316 @@ describe("Plain F070 S2 terminal IPC bridge Harness", () => {
 			),
 		).toContain(
 			"native.ts must listen for TERMINAL_DATA_EVENT/TERMINAL_EXIT_EVENT exactly once each, decoded through the audited decoders",
+		);
+	});
+});
+
+describe("Plain F080 S1 git command registration Harness", () => {
+	const gitCommandsSource = readFileSync(
+		new URL("../../src-tauri/src/git/commands.rs", import.meta.url),
+		"utf8",
+	);
+	const libSourceForGit = readFileSync(
+		new URL("../../src-tauri/src/lib.rs", import.meta.url),
+		"utf8",
+	);
+
+	const baselineGitCommandRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/git/commands.rs",
+			source: gitCommandsSource,
+		},
+		{ relativePath: "src-tauri/src/lib.rs", source: libSourceForGit },
+	]);
+
+	function withMutatedGitCommandSource(relativePath, mutate) {
+		return baselineGitCommandRustSources.map((entry) =>
+			entry.relativePath === relativePath
+				? { ...entry, source: mutate(entry.source) }
+				: entry,
+		);
+	}
+
+	it("passes for the real, unmodified git command files", () => {
+		expect(
+			validateGitCommandRegistration(baselineGitCommandRustSources),
+		).toEqual([]);
+	});
+
+	it("fails if git_status's body is rewired to a different service call", () => {
+		const rewired = withMutatedGitCommandSource(
+			"src-tauri/src/git/commands.rs",
+			(source) =>
+				source.replace(
+					"status::git_status(trust.inner(), workspace.inner(), window.label())",
+					'status::git_status(trust.inner(), workspace.inner(), "main")',
+				),
+		);
+		expect(validateGitCommandRegistration(rewired)).toContain(
+			"git_status must contain only its audited DTO decode and single service route",
+		);
+	});
+
+	it("fails if git_diff_files loses its request.into_parts() cached wiring", () => {
+		const rewired = withMutatedGitCommandSource(
+			"src-tauri/src/git/commands.rs",
+			(source) =>
+				source.replace(
+					"let cached = request.into_parts();",
+					"let cached = true;",
+				),
+		);
+		expect(validateGitCommandRegistration(rewired)).toContain(
+			"git_diff_files must contain only its audited DTO decode and single service route",
+		);
+	});
+
+	it("fails if git_show_blob is missing from lib.rs's generate_handler", () => {
+		const missingRegistration = withMutatedGitCommandSource(
+			"src-tauri/src/lib.rs",
+			(source) =>
+				source.replace("            git::commands::git_show_blob,\n", ""),
+		);
+		expect(validateGitCommandRegistration(missingRegistration)).toContain(
+			"generate_handler! must register git::commands::git_show_blob exactly once",
+		);
+	});
+
+	it("fails if a git command file is missing entirely", () => {
+		const missingFile = baselineGitCommandRustSources.filter(
+			(entry) => entry.relativePath !== "src-tauri/src/git/commands.rs",
+		);
+		expect(validateGitCommandRegistration(missingFile)).toContain(
+			"command registration boundary requires src-tauri/src/git/commands.rs",
+		);
+	});
+});
+
+describe("Plain F080 S1 git Rust args/DTO boundary Harness", () => {
+	const gitStatusSource = readFileSync(
+		new URL("../../src-tauri/src/git/status.rs", import.meta.url),
+		"utf8",
+	);
+	const gitDiffSource = readFileSync(
+		new URL("../../src-tauri/src/git/diff.rs", import.meta.url),
+		"utf8",
+	);
+	const gitDtoSource = readFileSync(
+		new URL("../../src-tauri/src/git/dto.rs", import.meta.url),
+		"utf8",
+	);
+
+	const baselineGitRustSources = Object.freeze([
+		{ relativePath: "src-tauri/src/git/status.rs", source: gitStatusSource },
+		{ relativePath: "src-tauri/src/git/diff.rs", source: gitDiffSource },
+		{ relativePath: "src-tauri/src/git/dto.rs", source: gitDtoSource },
+	]);
+
+	function withMutatedGitRustSource(relativePath, mutate) {
+		return baselineGitRustSources.map((entry) =>
+			entry.relativePath === relativePath
+				? { ...entry, source: mutate(entry.source) }
+				: entry,
+		);
+	}
+
+	it("passes for the real, unmodified git status/diff/dto files", () => {
+		expect(validateGitRustBoundary(baselineGitRustSources)).toEqual([]);
+	});
+
+	it("fails if GIT_STATUS_ARGS drops --ignored", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/status.rs",
+			(source) => source.replace('"--ignored"', '"--ignored-typo"'),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"status.rs must define GIT_STATUS_ARGS as exactly the audited status argument list",
+		);
+	});
+
+	it("fails if GIT_DIFF_BASE_ARGS drops the -M rename-detection flag", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/diff.rs",
+			(source) => source.replace('"-M",', ""),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"diff.rs must define GIT_DIFF_BASE_ARGS as exactly the audited diff argument list",
+		);
+	});
+
+	it("fails if GIT_SHOW_BASE_ARGS drops --no-textconv", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/diff.rs",
+			(source) => source.replace('"--no-textconv", ', ""),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"diff.rs must define GIT_SHOW_BASE_ARGS as exactly the audited show argument list",
+		);
+	});
+
+	it("fails if GitSubmoduleStateWire gains an extra field", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"untracked_changed: bool,\n}",
+					"untracked_changed: bool,\n    extra_flag: bool,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitSubmoduleStateWire must expose only its exact audited four boolean fields",
+		);
+	});
+
+	it("fails if GitStatusEntryWire loses the Ignored variant", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) => source.replace(/,\s*Ignored\s*\{\s*path:\s*String,\s*\}/, ""),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitStatusEntryWire must expose exactly its five audited variants with their exact fields",
+		);
+	});
+
+	it("fails if GitDiffFileEntryWire's binary field is renamed", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) => source.replace("binary: bool,\n}", "is_binary: bool,\n}"),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitDiffFileEntryWire must expose only its exact audited fields",
+		);
+	});
+
+	it("fails if dto.rs is missing entirely", () => {
+		const missingDto = baselineGitRustSources.filter(
+			(entry) => entry.relativePath !== "src-tauri/src/git/dto.rs",
+		);
+		expect(validateGitRustBoundary(missingDto)).toContain(
+			"git boundary requires dto.rs",
+		);
+	});
+});
+
+describe("Plain F080 S1 git IPC bridge Harness", () => {
+	const gitCommandsSourceForBridge = readFileSync(
+		new URL("../../src-tauri/src/git/commands.rs", import.meta.url),
+		"utf8",
+	);
+	const gitDtoSourceForBridge = readFileSync(
+		new URL("../../src-tauri/src/git/dto.rs", import.meta.url),
+		"utf8",
+	);
+	const contractsSourceForGit = readFileSync(
+		new URL("../../app/platform/tauri/contracts.ts", import.meta.url),
+		"utf8",
+	);
+	const gitCodecSource = readFileSync(
+		new URL("../../app/platform/tauri/git-codec.ts", import.meta.url),
+		"utf8",
+	);
+	const nativeSourceForGit = readFileSync(
+		new URL("../../app/platform/tauri/native.ts", import.meta.url),
+		"utf8",
+	);
+
+	const baselineGitBridgeRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/git/commands.rs",
+			source: gitCommandsSourceForBridge,
+		},
+		{ relativePath: "src-tauri/src/git/dto.rs", source: gitDtoSourceForBridge },
+	]);
+	const baselineGitBridgeAppSources = Object.freeze([
+		{
+			relativePath: "app/platform/tauri/contracts.ts",
+			source: contractsSourceForGit,
+		},
+		{ relativePath: "app/platform/tauri/git-codec.ts", source: gitCodecSource },
+		{
+			relativePath: "app/platform/tauri/native.ts",
+			source: nativeSourceForGit,
+		},
+	]);
+
+	function withMutatedGitApp(relativePath, mutate) {
+		return baselineGitBridgeAppSources.map((entry) =>
+			entry.relativePath === relativePath
+				? { ...entry, source: mutate(entry.source) }
+				: entry,
+		);
+	}
+
+	it("passes for the real, unmodified git bridge files", () => {
+		expect(
+			validateGitIpcBridgeBoundary(
+				baselineGitBridgeRustSources,
+				baselineGitBridgeAppSources,
+			),
+		).toEqual([]);
+	});
+
+	it("fails if PlainBridge loses gitShowBlob", () => {
+		const widened = withMutatedGitApp(
+			"app/platform/tauri/contracts.ts",
+			(source) =>
+				source.replace(
+					/\tgitShowBlob\(rev: GitBlobRev, path: string\): Promise<GitShowBlobResult>;\n/,
+					"",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
+		).toContain(
+			"PlainBridge must expose exactly the three audited git methods, no more and no fewer",
+		);
+	});
+
+	it("fails if git-codec.ts's decodeGitStatusResult stops rejecting Proxy wrapping", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/git-codec.ts",
+			(source) =>
+				source.replace(
+					/export function decodeGitStatusResult\(value: unknown\): GitStatusResult \{\n\treturn sanitizedDecode\(\(\) => \{[\s\S]*?\n\t\}\);\n\}/,
+					"export function decodeGitStatusResult(value) { return value; }",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"git-codec.ts's decodeGitStatusResult must validate exact own-data keys, reject Proxy wrapping, and freeze its result",
+		);
+	});
+
+	it("fails if native.ts stops decoding git_diff_files through the audited decoder", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					"decodeGitDiffFilesResult(",
+					"JSON.parse(JSON.stringify(",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"native.ts must invoke git_status/git_diff_files/git_show_blob exactly once each, decoded through the audited decoders",
+		);
+	});
+
+	it("fails if native.ts invokes git_status a second time", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					'await invoke<unknown>("git_status", { request: {} })',
+					'await invoke<unknown>("git_status", { request: {} }); await invoke<unknown>("git_status", { request: {} })',
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"native.ts must invoke git_status/git_diff_files/git_show_blob exactly once each, decoded through the audited decoders",
 		);
 	});
 });

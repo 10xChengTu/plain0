@@ -2,6 +2,7 @@ use tauri::{Emitter, Manager};
 
 pub mod backup;
 pub mod error;
+pub mod git;
 pub mod path_policy;
 pub mod search;
 pub mod terminal;
@@ -86,6 +87,9 @@ pub fn run() {
             workspace::commands::workspace_cancel_delete,
             workspace::commands::workspace_begin_delete,
             workspace::commands::workspace_commit_delete_entry,
+            git::commands::git_status,
+            git::commands::git_diff_files,
+            git::commands::git_show_blob,
             search::commands::workspace_search_files,
             search::commands::workspace_search_text_start,
             search::commands::workspace_search_text_poll,

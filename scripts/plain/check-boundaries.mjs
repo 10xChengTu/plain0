@@ -10,6 +10,9 @@ import {
 	validateDialogSurfaceBoundary,
 	validateNotificationOverrideImportBoundary,
 	validateFrontendEntrypointScripts,
+	validateGitCommandRegistration,
+	validateGitIpcBridgeBoundary,
+	validateGitRustBoundary,
 	validateMainCapability,
 	validateSearchCommandRegistration,
 	validateSearchFileBudgetConstants,
@@ -731,6 +734,15 @@ for (const failure of validateTerminalIpcBridgeBoundary(
 	rustSources,
 	appSources,
 )) {
+	fail(failure);
+}
+for (const failure of validateGitCommandRegistration(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateGitRustBoundary(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateGitIpcBridgeBoundary(rustSources, appSources)) {
 	fail(failure);
 }
 

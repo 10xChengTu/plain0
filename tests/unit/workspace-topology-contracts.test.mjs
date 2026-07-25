@@ -1495,6 +1495,42 @@ export function captureWorkbenchSurfaces`,
 		);
 	});
 
+	// `F080` S0's excluded-surface depth hardening added a third
+	// `Registry.as(...)` read (the `WorkbenchContributionsRegistry`
+	// singleton) to `app/excluded-surfaces.ts` — locking both directions of
+	// that change: exactly three reads (not a fourth, unaccounted one) and
+	// that read must specifically target `WorkbenchContributionExtensions.Workbench`.
+	it("rejects an extra unaccounted Registry.as read added to the excluded-surface command reader", () => {
+		const sources = mutated("excludedSurfaces", (source) =>
+			replaceOnce(
+				source,
+				"export function captureWorkbenchSurfaces",
+				`const extraRegistryRead = Registry.as<any>("platform.someOtherRegistry");
+void extraRegistryRead;
+
+export function captureWorkbenchSurfaces`,
+			),
+		);
+		expectFailure(
+			withAppSources(sources),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+	});
+
+	it("rejects the contribution registry read if it targets a different property than Workbench", () => {
+		const sources = mutated("excludedSurfaces", (source) =>
+			replaceOnce(
+				source,
+				"WorkbenchContributionExtensions.Workbench,",
+				"WorkbenchContributionExtensions.NotWorkbench,",
+			),
+		);
+		expectFailure(
+			withAppSources(sources),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+	});
+
 	it("rejects shadowing or reassigning the pick-roots mode closure", () => {
 		expectFailure(
 			mutated("commands", (source) =>

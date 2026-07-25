@@ -237,6 +237,7 @@ const DIRECT_COMMAND_REGISTRATION_MANIFEST = Object.freeze([
 // allowlist key: another app module cannot reuse an otherwise approved import.
 const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/excluded-surfaces.ts:@codingame/monaco-vscode-api/monaco",
+	"app/excluded-surfaces.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/contributions",
 	"app/excluded-surfaces.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/views",
 	"app/features/search/plain-replace-coordinator.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
 	"app/features/search/plain-replace-coordinator.ts:@codingame/monaco-vscode-api/vscode/vs/editor/browser/services/bulkEditService",
@@ -3623,6 +3624,17 @@ function validateGuardedCommands(sourceFile) {
 	);
 }
 
+// `F080` S0's excluded-surface depth hardening
+// (`docs/research/2026-07-25-core-git.md` decision 2) adds a *third*
+// `Registry.as(...)` read to `app/excluded-surfaces.ts` — the
+// `WorkbenchContributionsRegistry` singleton, keyed by a second
+// "Extensions" namespace import (aliased `WorkbenchContributionExtensions`,
+// mirroring the existing `ViewExtensions` alias for the view-registry
+// pair) so its own `Extensions.Workbench` property never collides with
+// `ViewExtensions`'s. This function's closed-shape check is extended
+// alongside it: exactly three `Registry.as(...)` reads total, and every
+// "Registry"/"ViewExtensions"/"WorkbenchContributionExtensions" identifier
+// reference accounted for.
 function validateCommandRegistryReader(sourceFile) {
 	const commandRegistryImport = namedImportLocalIdentifier(
 		sourceFile,
@@ -3639,6 +3651,12 @@ function validateCommandRegistryReader(sourceFile) {
 		"@codingame/monaco-vscode-api/vscode/vs/workbench/common/views",
 		"Extensions",
 		"ViewExtensions",
+	);
+	const workbenchContributionExtensionsImport = namedImportLocalIdentifier(
+		sourceFile,
+		"@codingame/monaco-vscode-api/vscode/vs/workbench/common/contributions",
+		"Extensions",
+		"WorkbenchContributionExtensions",
 	);
 	const reads = callWithChain(sourceFile, ["CommandsRegistry", "getCommands"]);
 	const read = reads.length === 1 ? reads[0] : undefined;
@@ -3667,13 +3685,41 @@ function validateCommandRegistryReader(sourceFile) {
 			return { receiver, viewExtensionsReceiver };
 		},
 	);
+	const contributionRegistryMatches = registryReads.filter(
+		(call) =>
+			call.arguments.length === 1 &&
+			sameChain(call.arguments[0], [
+				"WorkbenchContributionExtensions",
+				"Workbench",
+			]),
+	);
+	const contributionRegistryCall =
+		contributionRegistryMatches.length === 1
+			? contributionRegistryMatches[0]
+			: undefined;
+	const contributionRegistryReceiver = directMethodReceiver(
+		contributionRegistryCall,
+		"Registry",
+		"as",
+	);
+	const contributionRegistryArgument = ts.isCallExpression(
+		contributionRegistryCall,
+	)
+		? unwrapExpression(contributionRegistryCall.arguments[0])
+		: undefined;
+	const workbenchContributionExtensionsReceiver =
+		contributionRegistryArgument !== undefined &&
+		ts.isPropertyAccessExpression(contributionRegistryArgument)
+			? unwrapExpression(contributionRegistryArgument.expression)
+			: undefined;
 	return (
 		commandRegistryImport !== undefined &&
 		registryImport !== undefined &&
 		viewExtensionsImport !== undefined &&
+		workbenchContributionExtensionsImport !== undefined &&
 		readReceiver !== undefined &&
 		read.arguments.length === 0 &&
-		registryReads.length === registryReadContracts.length &&
+		registryReads.length === registryReadContracts.length + 1 &&
 		registryReadContracts.every(
 			({ receiver, viewExtensionsReceiver }) =>
 				receiver !== undefined &&
@@ -3681,6 +3727,11 @@ function validateCommandRegistryReader(sourceFile) {
 				ts.isIdentifier(viewExtensionsReceiver) &&
 				viewExtensionsReceiver.text === "ViewExtensions",
 		) &&
+		contributionRegistryReceiver !== undefined &&
+		workbenchContributionExtensionsReceiver !== undefined &&
+		ts.isIdentifier(workbenchContributionExtensionsReceiver) &&
+		workbenchContributionExtensionsReceiver.text ===
+			"WorkbenchContributionExtensions" &&
 		hasExactIdentifierReferences(sourceFile, "CommandsRegistry", [
 			commandRegistryImport,
 			readReceiver,
@@ -3688,13 +3739,22 @@ function validateCommandRegistryReader(sourceFile) {
 		hasExactIdentifierReferences(sourceFile, "Registry", [
 			registryImport,
 			...registryReadContracts.map(({ receiver }) => receiver),
+			contributionRegistryReceiver,
 		]) &&
 		hasExactIdentifierReferences(sourceFile, "ViewExtensions", [
 			viewExtensionsImport,
 			...registryReadContracts.map(
 				({ viewExtensionsReceiver }) => viewExtensionsReceiver,
 			),
-		])
+		]) &&
+		hasExactIdentifierReferences(
+			sourceFile,
+			"WorkbenchContributionExtensions",
+			[
+				workbenchContributionExtensionsImport,
+				workbenchContributionExtensionsReceiver,
+			],
+		)
 	);
 }
 
