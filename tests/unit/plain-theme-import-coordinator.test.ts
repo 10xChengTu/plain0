@@ -96,6 +96,9 @@ function fakeBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		workspaceTrustState: notImplemented,
 		workspaceTrustGrant: notImplemented,
 		workspaceTrustRevoke: notImplemented,
+		gitStatus: notImplemented,
+		gitDiffFiles: notImplemented,
+		gitShowBlob: notImplemented,
 		...overrides,
 	};
 }

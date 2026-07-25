@@ -111,6 +111,9 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		workspaceTrustState: vi.fn(),
 		workspaceTrustGrant: vi.fn(),
 		workspaceTrustRevoke: vi.fn(),
+		gitStatus: vi.fn(),
+		gitDiffFiles: vi.fn(),
+		gitShowBlob: vi.fn(),
 		...overrides,
 	};
 }
@@ -192,6 +195,9 @@ describe("workspace Workbench command overrides", () => {
 			workspaceTrustState: vi.fn(),
 			workspaceTrustGrant: vi.fn(),
 			workspaceTrustRevoke: vi.fn(),
+			gitStatus: vi.fn(),
+			gitDiffFiles: vi.fn(),
+			gitShowBlob: vi.fn(),
 		};
 		const contextValues = new Map<string, unknown>([
 			["openFolderWorkspaceSupport", false],

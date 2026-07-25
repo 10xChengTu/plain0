@@ -1,6 +1,9 @@
 import type {
 	BackupEntry,
 	CommandError,
+	GitBlobRev,
+	GitDiffFilesResult,
+	GitStatusResult,
 	PlainBridge,
 	RuntimeInfo,
 	TerminalDataEvent,
@@ -27,6 +30,11 @@ import type {
 	WorkspaceWatchWakeEvent,
 	WorkspaceWriteResult,
 } from "./contracts";
+import {
+	frozenGitDiffFilesRequest,
+	frozenGitShowBlobRequest,
+	frozenGitShowBlobResult,
+} from "./git-codec";
 import {
 	backupUnavailable,
 	frozenBackupDiscardRequest,
@@ -984,6 +992,45 @@ export interface BrowserMockBridgeOptions {
 	readonly onTerminalSessionForTest?: (
 		controller: BrowserMockTerminalSessionController,
 	) => void;
+	/** `F080` S1: seeds the deterministic `gitStatus`/`gitDiffFiles`/
+	 * `gitShowBlob` responses — see `BrowserMockGitFixtureForTest`. */
+	readonly gitFixtureForTest?: BrowserMockGitFixtureForTest;
+}
+
+/**
+ * Deterministic, injectable `git_status`/`git_diff_files`/`git_show_blob`
+ * responses for the browser mock (`F080` S1) — this mock never re-implements
+ * porcelain-v2/numstat parsing (the real Rust parsers already have thorough
+ * fixture coverage in `src-tauri/src/git/status/tests.rs`/
+ * `src-tauri/src/git/diff/tests.rs`); it only exists so a consuming frontend
+ * (`PlainScmProvider`, `F080` S2) has structurally correct, scriptable
+ * responses to develop and test against, gated by the same shared
+ * workspace-trust flag `terminalTrustedForTest` already models (git and
+ * terminal share one `TrustService` in the real Rust implementation, so the
+ * mock does not model a second, independent trust flag).
+ */
+export interface BrowserMockGitFixtureForTest {
+	/** Defaults to a clean repository on branch `"main"` with no upstream and
+	 * no entries. */
+	readonly status?: GitStatusResult;
+	/** Defaults to `{ entries: [] }` for whichever of `cached`/`worktree` is
+	 * omitted. */
+	readonly diffFiles?: Readonly<{
+		readonly cached?: GitDiffFilesResult;
+		readonly worktree?: GitDiffFilesResult;
+	}>;
+	/** Keyed by repository-toplevel-relative path, then by `GitBlobRev`; a
+	 * missing rev for an otherwise-present path key (or a missing path key
+	 * entirely) means "no such version" (`{ content: null }`), matching the
+	 * real `git_show_blob` not-found outcome — never a rejection. Values are
+	 * UTF-8 text, encoded to bytes by the mock. */
+	readonly blobs?: Readonly<
+		Record<string, Partial<Record<GitBlobRev, string>>>
+	>;
+	/** When `true`, every git method rejects with `GIT_NO_REPOSITORY` instead
+	 * of returning fixture data — simulates a trusted workspace root that is
+	 * not (or no longer) a Git working tree. */
+	readonly noRepositoryForTest?: boolean;
 }
 
 /**
@@ -5036,6 +5083,29 @@ export function createBrowserMockBridge(
 		);
 	}
 
+	function gitNoRepository(): CommandError {
+		return commandError(
+			"GIT_NO_REPOSITORY",
+			"The current workspace root is not a Git repository.",
+		);
+	}
+
+	const gitFixture = options.gitFixtureForTest ?? {};
+	const defaultGitStatus: GitStatusResult = Object.freeze({
+		branch: Object.freeze({
+			oid: "0".repeat(40),
+			head: "main",
+			upstream: null,
+		}),
+		entries: Object.freeze([]),
+	});
+	const defaultGitDiffFiles: GitDiffFilesResult = Object.freeze({
+		entries: [],
+	});
+	const gitBlobs = new Map<string, Partial<Record<GitBlobRev, string>>>(
+		Object.entries(gitFixture.blobs ?? {}),
+	);
+
 	function terminalSessionNotFound(): CommandError {
 		return commandError(
 			"TERMINAL_SESSION_NOT_FOUND",
@@ -5853,6 +5923,40 @@ export function createBrowserMockBridge(
 				throw trustUnavailable();
 			}
 			terminalTrusted = false;
+		},
+		async gitStatus() {
+			if (roots.size === 0 || !terminalTrusted) {
+				throw terminalNotTrusted();
+			}
+			if (gitFixture.noRepositoryForTest === true) {
+				throw gitNoRepository();
+			}
+			return gitFixture.status ?? defaultGitStatus;
+		},
+		async gitDiffFiles(cached_) {
+			const request = frozenGitDiffFilesRequest(cached_);
+			if (roots.size === 0 || !terminalTrusted) {
+				throw terminalNotTrusted();
+			}
+			if (gitFixture.noRepositoryForTest === true) {
+				throw gitNoRepository();
+			}
+			return request.cached
+				? (gitFixture.diffFiles?.cached ?? defaultGitDiffFiles)
+				: (gitFixture.diffFiles?.worktree ?? defaultGitDiffFiles);
+		},
+		async gitShowBlob(rev_, path_) {
+			const request = frozenGitShowBlobRequest(rev_, path_);
+			if (roots.size === 0 || !terminalTrusted) {
+				throw terminalNotTrusted();
+			}
+			if (gitFixture.noRepositoryForTest === true) {
+				throw gitNoRepository();
+			}
+			const content = gitBlobs.get(request.path)?.[request.rev];
+			return frozenGitShowBlobResult(
+				content === undefined ? null : new TextEncoder().encode(content),
+			);
 		},
 	};
 }

@@ -83,6 +83,13 @@ import {
 	frozenTerminalScrollbackRequest,
 	frozenTerminalStartRequest,
 } from "./terminal-codec";
+import {
+	decodeGitDiffFilesResult,
+	decodeGitShowBlobResult,
+	decodeGitStatusResult,
+	frozenGitDiffFilesRequest,
+	frozenGitShowBlobRequest,
+} from "./git-codec";
 
 export function createNativeBridge(): PlainBridge {
 	const workspaceWatcher = createWorkspaceWatcherManager({
@@ -488,6 +495,22 @@ export function createNativeBridge(): PlainBridge {
 		workspaceTrustRevoke: async () => {
 			decodeWorkspaceTrustVoid(
 				await invoke<unknown>("workspace_trust_revoke", { request: {} }),
+			);
+		},
+		gitStatus: async () =>
+			decodeGitStatusResult(
+				await invoke<unknown>("git_status", { request: {} }),
+			),
+		gitDiffFiles: async (cached) => {
+			const request = frozenGitDiffFilesRequest(cached);
+			return decodeGitDiffFilesResult(
+				await invoke<unknown>("git_diff_files", { request }),
+			);
+		},
+		gitShowBlob: async (rev, path) => {
+			const request = frozenGitShowBlobRequest(rev, path);
+			return decodeGitShowBlobResult(
+				await invoke<unknown>("git_show_blob", { request }),
 			);
 		},
 	};

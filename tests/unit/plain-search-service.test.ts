@@ -100,6 +100,9 @@ function fakeBridge(
 		workspaceTrustState: notImplemented,
 		workspaceTrustGrant: notImplemented,
 		workspaceTrustRevoke: notImplemented,
+		gitStatus: notImplemented,
+		gitDiffFiles: notImplemented,
+		gitShowBlob: notImplemented,
 	};
 }
 
@@ -215,6 +218,9 @@ function fakeTextSearchBridge(
 		workspaceTrustState: notImplemented,
 		workspaceTrustGrant: notImplemented,
 		workspaceTrustRevoke: notImplemented,
+		gitStatus: notImplemented,
+		gitDiffFiles: notImplemented,
+		gitShowBlob: notImplemented,
 	};
 
 	return {

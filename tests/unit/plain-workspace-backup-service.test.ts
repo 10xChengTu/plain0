@@ -106,6 +106,9 @@ function createFakeBridge(overrides: Partial<PlainBridge> = {}): {
 		workspaceTrustState: notImplemented,
 		workspaceTrustGrant: notImplemented,
 		workspaceTrustRevoke: notImplemented,
+		gitStatus: notImplemented,
+		gitDiffFiles: notImplemented,
+		gitShowBlob: notImplemented,
 		...overrides,
 	};
 	return { bridge, state };

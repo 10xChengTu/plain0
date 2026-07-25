@@ -350,6 +350,15 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async workspaceTrustRevoke() {
 			throw new Error("unused");
 		},
+		async gitStatus() {
+			throw new Error("unused");
+		},
+		async gitDiffFiles() {
+			throw new Error("unused");
+		},
+		async gitShowBlob() {
+			throw new Error("unused");
+		},
 		...overrides,
 	};
 }

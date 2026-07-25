@@ -556,6 +556,142 @@ export interface ThemeSelectionResult {
 	readonly productIconThemeId: string | null;
 }
 
+// --- Git (F080 S1: status/diff parsing + DTO + IPC) -------------------------
+
+/** Wire projection of `git::status::SubmoduleState`'s four independent
+ * `<sub>` field axes — see `src-tauri/src/git/status.rs`'s own doc comment. */
+export interface GitSubmoduleState {
+	readonly isSubmodule: boolean;
+	readonly commitChanged: boolean;
+	readonly trackedChanged: boolean;
+	readonly untrackedChanged: boolean;
+}
+
+export interface GitBranchUpstream {
+	readonly name: string;
+	readonly ahead: number;
+	readonly behind: number;
+}
+
+/**
+ * `oid`/`head` are git's own literal tokens (`"(initial)"`/`"(detached)"`)
+ * verbatim when there is no commit yet / HEAD is detached, rather than a
+ * separate boolean flag — see `src-tauri/src/git/dto.rs`'s `GitBranchWire`
+ * doc comment for why this flat encoding is unambiguous (neither token can
+ * collide with a real oid or branch name).
+ */
+export interface GitBranch {
+	readonly oid: string;
+	readonly head: string;
+	readonly upstream: GitBranchUpstream | null;
+}
+
+export type GitRenameOrCopyKind = "rename" | "copy";
+
+/**
+ * Wire projection of `git::status::StatusEntry` — a discriminated union
+ * tagged by `type`, matching `git::dto::GitStatusEntryWire`'s exact
+ * `#[serde(tag = "type")]` shape. `indexStatus`/`worktreeStatus` are the raw
+ * single-character porcelain-v2 `XY` codes (e.g. `"M"`, `"."`, `"D"`, `"U"`),
+ * not decoded further — see `docs/research/2026-07-25-core-git.md`'s S1
+ * section for the full format.
+ */
+export type GitStatusEntry =
+	| Readonly<{
+			type: "ordinary";
+			indexStatus: string;
+			worktreeStatus: string;
+			submodule: GitSubmoduleState;
+			modeHead: string;
+			modeIndex: string;
+			modeWorktree: string;
+			hashHead: string;
+			hashIndex: string;
+			path: string;
+	  }>
+	| Readonly<{
+			type: "renameOrCopy";
+			indexStatus: string;
+			worktreeStatus: string;
+			submodule: GitSubmoduleState;
+			modeHead: string;
+			modeIndex: string;
+			modeWorktree: string;
+			hashHead: string;
+			hashIndex: string;
+			renameOrCopyKind: GitRenameOrCopyKind;
+			similarity: number;
+			path: string;
+			origPath: string;
+	  }>
+	| Readonly<{
+			type: "unmerged";
+			indexStatus: string;
+			worktreeStatus: string;
+			submodule: GitSubmoduleState;
+			modeStage1: string;
+			modeStage2: string;
+			modeStage3: string;
+			modeWorktree: string;
+			hashStage1: string;
+			hashStage2: string;
+			hashStage3: string;
+			path: string;
+	  }>
+	| Readonly<{ type: "untracked"; path: string }>
+	| Readonly<{ type: "ignored"; path: string }>;
+
+export interface GitStatusResult {
+	readonly branch: GitBranch;
+	readonly entries: readonly GitStatusEntry[];
+}
+
+export type GitDiffStatusKind =
+	| "added"
+	| "copied"
+	| "deleted"
+	| "modified"
+	| "renamed"
+	| "typeChanged"
+	| "unmerged"
+	| "unknown";
+
+/**
+ * Wire projection of one `git::diff::DiffFileEntry`, joined from a separate
+ * `--name-status`/`--numstat` invocation pair server-side (see
+ * `src-tauri/src/git/diff.rs`'s `merge_diff_files` doc comment) —
+ * `added`/`deleted` are `null` exactly when `binary` is `true`.
+ */
+export interface GitDiffFileEntry {
+	readonly kind: GitDiffStatusKind;
+	readonly similarity: number | null;
+	readonly path: string;
+	readonly origPath: string | null;
+	readonly added: number | null;
+	readonly deleted: number | null;
+	readonly binary: boolean;
+}
+
+export interface GitDiffFilesResult {
+	readonly entries: readonly GitDiffFileEntry[];
+}
+
+/** The closed set of revisions `git_show_blob` accepts — never an arbitrary
+ * revision string (that would turn the command into a general-purpose
+ * `git_run`, exactly what ADR 0003 forbids). */
+export type GitBlobRev = "head" | "index";
+
+/**
+ * `content` is `null` exactly when git reported (via one of three
+ * distinguishable stderr messages) that no such version of the path exists
+ * — an expected, common outcome (e.g. a new untracked file has no `HEAD`
+ * version), not an error. See `src-tauri/src/git/diff.rs`'s `show_blob` doc
+ * comment.
+ */
+export interface GitShowBlobResult {
+	readonly content: Uint8Array | null;
+}
+
 export type Unlisten = () => void | Promise<void>;
 
 export interface PlainBridge {
@@ -793,4 +929,21 @@ export interface PlainBridge {
 	 * with `TRUST_UNAVAILABLE` for the `EMPTY` workspace, same as
 	 * `workspaceTrustGrant`. */
 	workspaceTrustRevoke(): Promise<void>;
+	/** Resolves the current window's single authorized workspace root as a
+	 * Git repository (via `git rev-parse --show-toplevel`) and runs `git
+	 * status --porcelain=v2 -z --branch --ignored`. Rejects with
+	 * `WORKSPACE_NOT_TRUSTED` if the workspace has not been granted execution
+	 * trust, or `GIT_NO_REPOSITORY` if the trusted root is not a Git working
+	 * tree. */
+	gitStatus(): Promise<GitStatusResult>;
+	/** Lists file-level diff entries (`cached: true` for the index-vs-HEAD
+	 * diff, `false` for the worktree-vs-index diff) — see
+	 * `src-tauri/src/git/diff.rs`'s `diff_files` doc comment for the
+	 * two-invocation-join caveat. Same trust/repository rejections as
+	 * `gitStatus`. */
+	gitDiffFiles(cached: boolean): Promise<GitDiffFilesResult>;
+	/** Reads one version of `path` (repository-toplevel-relative). Same
+	 * trust/repository rejections as `gitStatus`; a missing version of an
+	 * otherwise-valid path is `{ content: null }`, not a rejection. */
+	gitShowBlob(rev: GitBlobRev, path: string): Promise<GitShowBlobResult>;
 }
