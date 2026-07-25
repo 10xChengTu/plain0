@@ -4,9 +4,11 @@ import { IModelService } from "@codingame/monaco-vscode-api/vscode/vs/editor/com
 import { IConfigurationService } from "@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration.service";
 import { IContextKeyService } from "@codingame/monaco-vscode-api/vscode/vs/platform/contextkey/common/contextkey.service";
 import { IContextMenuService } from "@codingame/monaco-vscode-api/vscode/vs/platform/contextview/browser/contextView.service";
+import { IDialogService } from "@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service";
 import { IHoverService } from "@codingame/monaco-vscode-api/vscode/vs/platform/hover/browser/hover.service";
 import { IInstantiationService } from "@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/instantiation";
 import { IKeybindingService } from "@codingame/monaco-vscode-api/vscode/vs/platform/keybinding/common/keybinding.service";
+import { INotificationService } from "@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service";
 import { IOpenerService } from "@codingame/monaco-vscode-api/vscode/vs/platform/opener/common/opener.service";
 import { IThemeService } from "@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/themeService.service";
 import { IWorkspaceContextService } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace.service";
@@ -28,7 +30,8 @@ import type {
 	PlainBridge,
 } from "../../platform/tauri/contracts";
 import { normalizeCommandError } from "../../platform/tauri/errors";
-import { PlainScmProvider } from "./plain-scm-provider";
+import { resolveDiscardConfirmation } from "./plain-scm-discard";
+import { PlainScmProvider, PlainScmResource } from "./plain-scm-provider";
 
 const PLAIN_GIT_PROVIDER_ID = "plain-git";
 
@@ -66,6 +69,15 @@ let configuredBridge: PlainBridge | undefined;
  */
 export function configurePlainScmBridge(bridge: PlainBridge): void {
 	configuredBridge = bridge;
+}
+
+/** `F080` S3: lets `plain-scm-commands.ts`'s
+ * `plain.scm.stageActiveFileFirstHunk` command reach the same configured
+ * bridge this view uses, without a second module-level bridge slot. Returns
+ * `undefined` before `configurePlainScmBridge` has ever been called, exactly
+ * like `configuredBridge` itself. */
+export function getConfiguredPlainScmBridge(): PlainBridge | undefined {
+	return configuredBridge;
 }
 
 /**
@@ -127,8 +139,17 @@ export class PlainScmView extends ViewPane {
 	#messageElement: HTMLElement | undefined;
 	#branchElement: HTMLElement | undefined;
 	#inputElement: HTMLTextAreaElement | undefined;
+	#amendCheckbox: HTMLInputElement | undefined;
+	#commitButton: HTMLButtonElement | undefined;
+	#stageAllButton: HTMLButtonElement | undefined;
+	#discardAllButton: HTMLButtonElement | undefined;
+	#unstageAllButton: HTMLButtonElement | undefined;
 	#workingTreeList: HTMLElement | undefined;
 	#stagedList: HTMLElement | undefined;
+	/** Set while a commit/stage/unstage/discard call is in flight, so a
+	 * second click cannot race the first — cleared (and followed by a
+	 * `refresh()`) once the call settles either way. */
+	#mutationInFlight = false;
 
 	constructor(
 		options: IViewPaneOptions,
@@ -145,6 +166,8 @@ export class PlainScmView extends ViewPane {
 		private readonly scmService: ISCMService,
 		private readonly modelService: IModelService,
 		private readonly editorService: IEditorService,
+		private readonly dialogService: IDialogService,
+		private readonly notificationService: INotificationService,
 	) {
 		super(
 			options,
@@ -184,16 +207,80 @@ export class PlainScmView extends ViewPane {
 			}),
 		);
 
+		const commitRow = document.createElement("div");
+		commitRow.className = "plain-scm-view-commit-row";
+
+		const amendLabel = document.createElement("label");
+		amendLabel.className = "plain-scm-view-amend-label";
+		const amendCheckbox = document.createElement("input");
+		amendCheckbox.type = "checkbox";
+		amendCheckbox.setAttribute("aria-label", "Amend");
+		this.#amendCheckbox = amendCheckbox;
+		amendLabel.append(amendCheckbox, document.createTextNode(" Amend"));
+
+		const commitButton = document.createElement("button");
+		commitButton.type = "button";
+		commitButton.className = "plain-scm-view-commit-button";
+		commitButton.textContent = "Commit";
+		this.#commitButton = commitButton;
+		this._register(
+			addDisposableListener(commitButton, "click", () => {
+				void this.commitChanges();
+			}),
+		);
+		commitRow.append(amendLabel, commitButton);
+
 		const workingTreeHeading = document.createElement("div");
 		workingTreeHeading.className = "plain-scm-view-group-heading";
-		workingTreeHeading.textContent = "Changes";
+		const workingTreeLabel = document.createElement("span");
+		workingTreeLabel.textContent = "Changes";
+		const stageAllButton = document.createElement("button");
+		stageAllButton.type = "button";
+		stageAllButton.className = "plain-scm-view-group-action";
+		stageAllButton.textContent = "Stage All";
+		this.#stageAllButton = stageAllButton;
+		this._register(
+			addDisposableListener(stageAllButton, "click", (event) => {
+				event.stopPropagation();
+				void this.stageAllWorkingTree();
+			}),
+		);
+		const discardAllButton = document.createElement("button");
+		discardAllButton.type = "button";
+		discardAllButton.className = "plain-scm-view-group-action";
+		discardAllButton.textContent = "Discard All";
+		this.#discardAllButton = discardAllButton;
+		this._register(
+			addDisposableListener(discardAllButton, "click", (event) => {
+				event.stopPropagation();
+				void this.discardAllWorkingTree();
+			}),
+		);
+		workingTreeHeading.append(
+			workingTreeLabel,
+			stageAllButton,
+			discardAllButton,
+		);
 		const workingTreeList = document.createElement("ul");
 		workingTreeList.className = "plain-scm-view-group plain-scm-view-changes";
 		this.#workingTreeList = workingTreeList;
 
 		const stagedHeading = document.createElement("div");
 		stagedHeading.className = "plain-scm-view-group-heading";
-		stagedHeading.textContent = "Staged Changes";
+		const stagedLabel = document.createElement("span");
+		stagedLabel.textContent = "Staged Changes";
+		const unstageAllButton = document.createElement("button");
+		unstageAllButton.type = "button";
+		unstageAllButton.className = "plain-scm-view-group-action";
+		unstageAllButton.textContent = "Unstage All";
+		this.#unstageAllButton = unstageAllButton;
+		this._register(
+			addDisposableListener(unstageAllButton, "click", (event) => {
+				event.stopPropagation();
+				void this.unstageAllStaged();
+			}),
+		);
+		stagedHeading.append(stagedLabel, unstageAllButton);
 		const stagedList = document.createElement("ul");
 		stagedList.className = "plain-scm-view-group plain-scm-view-staged";
 		this.#stagedList = stagedList;
@@ -202,6 +289,7 @@ export class PlainScmView extends ViewPane {
 			branch,
 			message,
 			input,
+			commitRow,
 			workingTreeHeading,
 			workingTreeList,
 			stagedHeading,
@@ -304,12 +392,18 @@ export class PlainScmView extends ViewPane {
 			this.#messageElement === undefined ||
 			this.#branchElement === undefined ||
 			this.#inputElement === undefined ||
+			this.#amendCheckbox === undefined ||
+			this.#commitButton === undefined ||
+			this.#stageAllButton === undefined ||
+			this.#discardAllButton === undefined ||
+			this.#unstageAllButton === undefined ||
 			this.#workingTreeList === undefined ||
 			this.#stagedList === undefined
 		) {
 			return;
 		}
-		if (this.#disabledReason !== undefined || this.#provider === undefined) {
+		const provider = this.#provider;
+		if (this.#disabledReason !== undefined || provider === undefined) {
 			this.#messageElement.textContent =
 				this.#disabledReason !== undefined
 					? DISABLED_MESSAGES[this.#disabledReason]
@@ -317,6 +411,11 @@ export class PlainScmView extends ViewPane {
 			this.#branchElement.textContent = "";
 			this.#inputElement.value = "";
 			this.#inputElement.disabled = true;
+			this.#amendCheckbox.disabled = true;
+			this.#commitButton.disabled = true;
+			this.#stageAllButton.disabled = true;
+			this.#discardAllButton.disabled = true;
+			this.#unstageAllButton.disabled = true;
 			this.#workingTreeList.replaceChildren();
 			this.#stagedList.replaceChildren();
 			return;
@@ -325,22 +424,158 @@ export class PlainScmView extends ViewPane {
 		this.#messageElement.textContent = "";
 		this.#branchElement.textContent =
 			this.#lastBranch !== undefined ? formatBranchLabel(this.#lastBranch) : "";
-		this.#inputElement.disabled = false;
+		const controlsDisabled = this.#mutationInFlight;
+		this.#inputElement.disabled = controlsDisabled;
+		this.#amendCheckbox.disabled = controlsDisabled;
+		this.#commitButton.disabled = controlsDisabled;
+		this.#stageAllButton.disabled = controlsDisabled;
+		this.#discardAllButton.disabled = controlsDisabled;
+		this.#unstageAllButton.disabled = controlsDisabled;
 		if (this.#repository !== undefined) {
 			this.#inputElement.value = this.#repository.input.value;
 		}
 
-		const [workingTreeGroup, stagedGroup] = this.#provider.groups;
+		const [workingTreeGroup, stagedGroup] = provider.groups;
 		this.#workingTreeList.replaceChildren(
-			...renderResourceItems(workingTreeGroup, (resource) => {
-				void resource.open(false);
+			...renderResourceItems(workingTreeGroup, controlsDisabled, {
+				onActivate: (resource) => {
+					void resource.open(false);
+				},
+				onStage: (resource) => {
+					void this.stageResource(resource.relativePath);
+				},
+				onDiscard: (resource) => {
+					void this.discardResources([resource.relativePath]);
+				},
 			}),
 		);
 		this.#stagedList.replaceChildren(
-			...renderResourceItems(stagedGroup, (resource) => {
-				void resource.open(false);
+			...renderResourceItems(stagedGroup, controlsDisabled, {
+				onActivate: (resource) => {
+					void resource.open(false);
+				},
+				onUnstage: (resource) => {
+					void this.unstageResource(resource.relativePath);
+				},
 			}),
 		);
+	}
+
+	/** Runs `mutation`, disabling every control for its duration (see
+	 * `#mutationInFlight`) and always ending in a `refresh()` — success or
+	 * failure — so the view never shows a stale status after a write. Errors
+	 * are reported via `INotificationService`, never left as an unhandled
+	 * rejection or a silently stale UI. */
+	private async runGitMutation(
+		mutation: (bridge: PlainBridge) => Promise<void>,
+	): Promise<void> {
+		if (configuredBridge === undefined || this.#mutationInFlight) {
+			return;
+		}
+		this.#mutationInFlight = true;
+		this.renderState();
+		try {
+			await mutation(configuredBridge);
+		} catch (error) {
+			this.notificationService.error(normalizeCommandError(error).message);
+		} finally {
+			this.#mutationInFlight = false;
+			await this.refresh();
+		}
+	}
+
+	private async stageResource(relativePath: string): Promise<void> {
+		await this.runGitMutation((bridge) => bridge.gitStagePaths([relativePath]));
+	}
+
+	private async unstageResource(relativePath: string): Promise<void> {
+		await this.runGitMutation((bridge) =>
+			bridge.gitUnstagePaths([relativePath]),
+		);
+	}
+
+	private async stageAllWorkingTree(): Promise<void> {
+		const paths = this.#discardableWorkingTreePaths(true);
+		if (paths.length === 0) {
+			return;
+		}
+		await this.runGitMutation((bridge) => bridge.gitStagePaths(paths));
+	}
+
+	private async unstageAllStaged(): Promise<void> {
+		const group = this.#provider?.groups[1];
+		const paths = (group?.resources ?? [])
+			.filter(
+				(resource): resource is PlainScmResource =>
+					resource instanceof PlainScmResource,
+			)
+			.map((resource) => resource.relativePath);
+		if (paths.length === 0) {
+			return;
+		}
+		await this.runGitMutation((bridge) => bridge.gitUnstagePaths(paths));
+	}
+
+	/** Every Working Tree resource's relative path — `includeUndiscardable`
+	 * controls whether untracked/conflicted entries (which `gitStagePaths`
+	 * can stage but `gitDiscardPaths` cannot discard — see
+	 * `PlainScmResource.statusChar`'s own doc comment) are included. */
+	#discardableWorkingTreePaths(includeUndiscardable: boolean): string[] {
+		const group = this.#provider?.groups[0];
+		return (group?.resources ?? [])
+			.filter(
+				(resource): resource is PlainScmResource =>
+					resource instanceof PlainScmResource,
+			)
+			.filter(
+				(resource) =>
+					includeUndiscardable ||
+					(!resource.isConflict && resource.statusChar !== "?"),
+			)
+			.map((resource) => resource.relativePath);
+	}
+
+	/** Requires explicit confirmation before ever calling `gitDiscardPaths` —
+	 * acceptance criterion 5's "破坏性动作预览影响 + 要求确认". The actual
+	 * confirm/decline decision (message/detail construction and the
+	 * no-op/confirmed/declined state machine) lives in the DOM/service-free
+	 * `plain-scm-discard.ts` — see that module's own doc comment for why it
+	 * is unit-tested there directly rather than only through this view. */
+	private async discardResources(
+		relativePaths: readonly string[],
+	): Promise<void> {
+		const decision = await resolveDiscardConfirmation(
+			this.dialogService,
+			relativePaths,
+		);
+		if (decision.kind !== "confirmed") {
+			return;
+		}
+		await this.runGitMutation((bridge) =>
+			bridge.gitDiscardPaths(relativePaths),
+		);
+	}
+
+	private async discardAllWorkingTree(): Promise<void> {
+		await this.discardResources(this.#discardableWorkingTreePaths(false));
+	}
+
+	/** Reads the live `ISCMInput` value (kept in sync with `#inputElement` by
+	 * the `renderBody`-registered `input` listener) rather than
+	 * `#inputElement.value` directly — the two are equivalent today, but
+	 * routing through the repository's own input is the same seam a future
+	 * "commit via Command Palette while the view is not focused" path would
+	 * need anyway. */
+	private async commitChanges(): Promise<void> {
+		const message = this.#repository?.input.value ?? this.#inputElement?.value;
+		if (message === undefined) {
+			return;
+		}
+		const amend = this.#amendCheckbox?.checked ?? false;
+		await this.runGitMutation(async (bridge) => {
+			await bridge.gitCommit(message, amend);
+			this.#repository?.input.setValue("", true);
+		});
 	}
 }
 
@@ -364,9 +599,22 @@ function formatBranchLabel(branch: GitStatusResult["branch"]): string {
 	return parts.join(" ");
 }
 
+interface ResourceItemActions {
+	readonly onActivate: (resource: ISCMResource) => void;
+	/** Present only for Working Tree resources. */
+	readonly onStage?: (resource: PlainScmResource) => void;
+	/** Present only for Working Tree resources whose `statusChar` is not
+	 * `"?"` and are not conflicted — see `PlainScmView.
+	 * #discardableWorkingTreePaths`'s own doc comment for why. */
+	readonly onDiscard?: (resource: PlainScmResource) => void;
+	/** Present only for Staged resources. */
+	readonly onUnstage?: (resource: PlainScmResource) => void;
+}
+
 function renderResourceItems(
 	group: ISCMResourceGroup | undefined,
-	onActivate: (resource: ISCMResource) => void,
+	controlsDisabled: boolean,
+	actions: ResourceItemActions,
 ): HTMLLIElement[] {
 	if (group === undefined) {
 		return [];
@@ -379,10 +627,55 @@ function renderResourceItems(
 		button.className = "plain-scm-view-resource-button";
 		button.title = resource.decorations.tooltip ?? "";
 		button.textContent = resource.sourceUri.path.replace(/^\//, "");
-		button.addEventListener("click", () => onActivate(resource));
+		button.addEventListener("click", () => actions.onActivate(resource));
 		item.append(button);
+
+		if (resource instanceof PlainScmResource) {
+			if (actions.onStage !== undefined) {
+				item.append(
+					createResourceActionButton("Stage", controlsDisabled, () =>
+						actions.onStage?.(resource),
+					),
+				);
+			}
+			if (
+				actions.onDiscard !== undefined &&
+				!resource.isConflict &&
+				resource.statusChar !== "?"
+			) {
+				item.append(
+					createResourceActionButton("Discard", controlsDisabled, () =>
+						actions.onDiscard?.(resource),
+					),
+				);
+			}
+			if (actions.onUnstage !== undefined) {
+				item.append(
+					createResourceActionButton("Unstage", controlsDisabled, () =>
+						actions.onUnstage?.(resource),
+					),
+				);
+			}
+		}
 		return item;
 	});
+}
+
+function createResourceActionButton(
+	label: string,
+	disabled: boolean,
+	onClick: () => void,
+): HTMLButtonElement {
+	const button = document.createElement("button");
+	button.type = "button";
+	button.className = "plain-scm-view-resource-action";
+	button.textContent = label;
+	button.disabled = disabled;
+	button.addEventListener("click", (event) => {
+		event.stopPropagation();
+		onClick();
+	});
+	return button;
 }
 
 Object.freeze(PlainScmView.prototype);
@@ -400,3 +693,5 @@ IWorkspaceContextService(PlainScmView, undefined, 10);
 ISCMService(PlainScmView, undefined, 11);
 IModelService(PlainScmView, undefined, 12);
 IEditorService(PlainScmView, undefined, 13);
+IDialogService(PlainScmView, undefined, 14);
+INotificationService(PlainScmView, undefined, 15);

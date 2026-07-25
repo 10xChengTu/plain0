@@ -6265,6 +6265,46 @@ const GIT_COMMAND_CONTRACTS = Object.freeze([
 		returnType: "->Result<GitShowBlobResult,CommandError>",
 		body: "let(rev,path)=request.into_parts()?;letcontent=diff::show_blob(trust.inner(),workspace.inner(),window.label(),rev,&path).await?;Ok(GitShowBlobResult::new(content))",
 	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_stage_paths",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitStagePathsRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "letpaths=request.into_parts()?;stage::stage_paths(trust.inner(),workspace.inner(),window.label(),&paths).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_unstage_paths",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitUnstagePathsRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "letpaths=request.into_parts()?;stage::unstage_paths(trust.inner(),workspace.inner(),window.label(),&paths).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_stage_blob",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitStageBlobRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(path,content)=request.into_parts()?;stage::stage_blob(trust.inner(),workspace.inner(),window.label(),&path,content,).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_commit",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitCommitRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(message,amend)=request.into_parts()?;commit::commit(trust.inner(),workspace.inner(),window.label(),&message,amend,).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_discard_paths",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitDiscardPathsRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "letpaths=request.into_parts()?;discard::discard_paths(trust.inner(),workspace.inner(),window.label(),&paths).await",
+	},
 ]);
 
 /**
@@ -6519,18 +6559,126 @@ export function validateGitRustBoundary(rustSources) {
 		);
 	}
 
+	// --- F080 S3 write commands --------------------------------------------
+	if (
+		structBody("GitStagePathsRequest") !== "paths:Vec<String>," ||
+		structBody("GitUnstagePathsRequest") !== "paths:Vec<String>," ||
+		structBody("GitDiscardPathsRequest") !== "paths:Vec<String>,"
+	) {
+		failures.push(
+			"GitStagePathsRequest/GitUnstagePathsRequest/GitDiscardPathsRequest must expose only their exact audited paths field",
+		);
+	}
+	if (structBody("GitStageBlobRequest") !== "path:String,content:Vec<u8>,") {
+		failures.push(
+			"GitStageBlobRequest must expose only its exact audited path/content fields",
+		);
+	}
+	if (structBody("GitCommitRequest") !== "message:String,amend:bool,") {
+		failures.push(
+			"GitCommitRequest must expose only its exact audited message/amend fields",
+		);
+	}
+
+	const commitSource = findRustSource(
+		rustSources,
+		"src-tauri/src/git/commit.rs",
+	);
+	const discardSource = findRustSource(
+		rustSources,
+		"src-tauri/src/git/discard.rs",
+	);
+	if (commitSource === undefined || discardSource === undefined) {
+		failures.push("git boundary requires commit.rs and discard.rs");
+		return failures;
+	}
+	const executableCommit = stripRustCommentsOnly(commitSource);
+	const executableDiscard = stripRustCommentsOnly(discardSource);
+	const commitArgs = argsConstant(executableCommit, "GIT_COMMIT_ARGS");
+	if (
+		!sameArray(commitArgs, [
+			"-c",
+			"user.useConfigOnly=true",
+			"commit",
+			"--quiet",
+			"--file",
+			"-",
+		])
+	) {
+		failures.push(
+			"commit.rs must define GIT_COMMIT_ARGS as exactly the audited commit argument list",
+		);
+	}
+	const discardArgs = argsConstant(executableDiscard, "GIT_DISCARD_ARGS");
+	if (!sameArray(discardArgs, ["checkout", "-q"])) {
+		failures.push(
+			"discard.rs must define GIT_DISCARD_ARGS as exactly the audited discard argument list",
+		);
+	}
+
 	return failures;
 }
 
-const GIT_BRIDGE_METHOD_NAMES = ["gitStatus", "gitDiffFiles", "gitShowBlob"];
+/**
+ * `F080` S1's three read methods, plus `F080` S3's five write methods
+ * (`git_stage_paths`/`git_unstage_paths`/`git_stage_blob`/`git_commit`/
+ * `git_discard_paths`) — the write half deliberately shares this same
+ * closed-list lock rather than getting a parallel "S3 bridge methods" const,
+ * for the same reason `GIT_COMMAND_CONTRACTS` above holds all eight Rust
+ * commands in one array: `PlainBridge`'s git surface is one audited whole,
+ * not two independently-sized ones.
+ */
+const GIT_BRIDGE_METHOD_NAMES = [
+	"gitStatus",
+	"gitDiffFiles",
+	"gitShowBlob",
+	"gitStagePaths",
+	"gitUnstagePaths",
+	"gitStageBlob",
+	"gitCommit",
+	"gitDiscardPaths",
+];
 
 /**
- * Locks `F080` S1's TypeScript surface: `PlainBridge` exposes exactly the
- * three audited git methods, `git-codec.ts`'s decoders validate exact
- * own-data keys/reject Proxy wrapping/freeze their result (same rigor
- * `validateTerminalIpcBridgeBoundary` already locks for the terminal
- * domain), and `native.ts` routes each through `invoke` with its audited
- * command name.
+ * The five `F080` S3 write commands, mapped to their exact command-name
+ * string and the audited frontend `frozen*Request` builder `native.ts` must
+ * route the call's arguments through before invoking — mirrors
+ * `frozenGitDiffFilesRequest`/`frozenGitShowBlobRequest`'s existing S1
+ * precedent for validating a request's shape at the TypeScript boundary
+ * before it ever reaches `invoke`.
+ */
+const GIT_WRITE_COMMAND_CONTRACTS = Object.freeze([
+	Object.freeze({
+		command: "git_stage_paths",
+		requestBuilder: "frozenGitStagePathsRequest",
+	}),
+	Object.freeze({
+		command: "git_unstage_paths",
+		requestBuilder: "frozenGitUnstagePathsRequest",
+	}),
+	Object.freeze({
+		command: "git_stage_blob",
+		requestBuilder: "frozenGitStageBlobRequest",
+	}),
+	Object.freeze({
+		command: "git_commit",
+		requestBuilder: "frozenGitCommitRequest",
+	}),
+	Object.freeze({
+		command: "git_discard_paths",
+		requestBuilder: "frozenGitDiscardPathsRequest",
+	}),
+]);
+
+/**
+ * Locks `F080` S1+S3's TypeScript surface: `PlainBridge` exposes exactly the
+ * eight audited git methods, `git-codec.ts`'s three read-result decoders
+ * validate exact own-data keys/reject Proxy wrapping/freeze their result
+ * (same rigor `validateTerminalIpcBridgeBoundary` already locks for the
+ * terminal domain), and `native.ts` routes each of the eight through
+ * `invoke` with its audited command name — the three reads through their
+ * audited decoders, the five writes through their audited `frozen*Request`
+ * builders and `decodeGitVoid`.
  */
 export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 	const failures = [];
@@ -6571,7 +6719,7 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 			JSON.stringify([...GIT_BRIDGE_METHOD_NAMES].sort())
 	) {
 		failures.push(
-			"PlainBridge must expose exactly the three audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the eight audited git methods, no more and no fewer",
 		);
 	}
 
@@ -6615,6 +6763,27 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 	) {
 		failures.push(
 			"native.ts must invoke git_status/git_diff_files/git_show_blob exactly once each, decoded through the audited decoders",
+		);
+	}
+
+	for (const { command, requestBuilder } of GIT_WRITE_COMMAND_CONTRACTS) {
+		const invokePattern = new RegExp(
+			`\\binvoke<unknown>\\(\\s*"${command}"`,
+			"g",
+		);
+		if (
+			native === undefined ||
+			[...native.matchAll(invokePattern)].length !== 1 ||
+			!native.includes(`${requestBuilder}(`)
+		) {
+			failures.push(
+				`native.ts must invoke ${command} exactly once, routed through ${requestBuilder}`,
+			);
+		}
+	}
+	if (native === undefined || !native.includes("decodeGitVoid(")) {
+		failures.push(
+			"native.ts must decode every F080 S3 git write command's response through decodeGitVoid",
 		);
 	}
 

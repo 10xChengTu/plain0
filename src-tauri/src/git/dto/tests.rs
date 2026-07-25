@@ -1,6 +1,7 @@
 use super::{
-    GitBlobRevWire, GitDiffFilesRequest, GitDiffFilesResult, GitShowBlobRequest, GitShowBlobResult,
-    GitStatusResult,
+    GitBlobRevWire, GitCommitRequest, GitDiffFilesRequest, GitDiffFilesResult,
+    GitDiscardPathsRequest, GitShowBlobRequest, GitShowBlobResult, GitStageBlobRequest,
+    GitStagePathsRequest, GitStatusResult, GitUnstagePathsRequest,
 };
 use crate::git::diff::{DiffFileEntry, DiffStatusKind};
 use crate::git::status::{
@@ -200,4 +201,157 @@ fn git_show_blob_result_serializes_content_as_a_byte_array_or_null() {
 
     let not_found = serde_json::to_value(GitShowBlobResult::new(None)).unwrap();
     assert!(not_found["content"].is_null());
+}
+
+// --- git_stage_paths / git_unstage_paths / git_discard_paths ---------------
+
+#[test]
+fn git_stage_paths_request_accepts_a_non_empty_path_list() {
+    let request: GitStagePathsRequest =
+        serde_json::from_value(serde_json::json!({ "paths": ["a.txt", "b.txt"] }))
+            .expect("deserializes");
+    let paths = request.into_parts().expect("valid paths accepted");
+    assert_eq!(paths, vec!["a.txt".to_owned(), "b.txt".to_owned()]);
+}
+
+#[test]
+fn git_stage_paths_request_rejects_an_empty_list() {
+    let request: GitStagePathsRequest =
+        serde_json::from_value(serde_json::json!({ "paths": [] })).expect("deserializes");
+    let error = request
+        .into_parts()
+        .expect_err("empty list must be rejected");
+    assert_eq!(error.code(), "GIT_MUTATE_PATHS_INVALID_REQUEST");
+}
+
+#[test]
+fn git_stage_paths_request_rejects_a_traversal_or_absolute_path() {
+    for hostile in ["../outside.txt", "/etc/passwd", "a/../../b"] {
+        let request: GitStagePathsRequest =
+            serde_json::from_value(serde_json::json!({ "paths": [hostile] }))
+                .expect("deserializes");
+        let error = request
+            .into_parts()
+            .expect_err("hostile path must be rejected");
+        assert_eq!(error.code(), "GIT_MUTATE_PATHS_INVALID_REQUEST");
+    }
+}
+
+#[test]
+fn git_stage_paths_request_rejects_unknown_fields() {
+    let rejected: Result<GitStagePathsRequest, _> =
+        serde_json::from_value(serde_json::json!({ "paths": ["a.txt"], "extra": 1 }));
+    assert!(rejected.is_err());
+}
+
+#[test]
+fn git_unstage_paths_request_accepts_and_validates_like_stage() {
+    let request: GitUnstagePathsRequest =
+        serde_json::from_value(serde_json::json!({ "paths": ["a.txt"] })).expect("deserializes");
+    assert_eq!(request.into_parts().unwrap(), vec!["a.txt".to_owned()]);
+
+    let rejected: GitUnstagePathsRequest =
+        serde_json::from_value(serde_json::json!({ "paths": [] })).expect("deserializes");
+    assert_eq!(
+        rejected.into_parts().unwrap_err().code(),
+        "GIT_MUTATE_PATHS_INVALID_REQUEST"
+    );
+}
+
+#[test]
+fn git_discard_paths_request_accepts_and_validates_like_stage() {
+    let request: GitDiscardPathsRequest =
+        serde_json::from_value(serde_json::json!({ "paths": ["a.txt"] })).expect("deserializes");
+    assert_eq!(request.into_parts().unwrap(), vec!["a.txt".to_owned()]);
+
+    let rejected: GitDiscardPathsRequest =
+        serde_json::from_value(serde_json::json!({ "paths": ["/abs"] })).expect("deserializes");
+    assert_eq!(
+        rejected.into_parts().unwrap_err().code(),
+        "GIT_MUTATE_PATHS_INVALID_REQUEST"
+    );
+}
+
+// --- git_stage_blob ----------------------------------------------------------
+
+#[test]
+fn git_stage_blob_request_accepts_a_valid_path_and_content() {
+    let request: GitStageBlobRequest =
+        serde_json::from_value(serde_json::json!({ "path": "a.txt", "content": [1, 2, 3] }))
+            .expect("deserializes");
+    let (path, content) = request.into_parts().expect("valid request accepted");
+    assert_eq!(path, "a.txt");
+    assert_eq!(content, vec![1, 2, 3]);
+}
+
+#[test]
+fn git_stage_blob_request_rejects_an_invalid_path() {
+    let request: GitStageBlobRequest =
+        serde_json::from_value(serde_json::json!({ "path": "../outside.txt", "content": [] }))
+            .expect("deserializes");
+    let error = request
+        .into_parts()
+        .expect_err("invalid path must be rejected");
+    assert_eq!(error.code(), "GIT_STAGE_BLOB_INVALID_REQUEST");
+}
+
+#[test]
+fn git_stage_blob_request_rejects_oversized_content() {
+    let oversized = vec![0_u8; 8 * 1024 * 1024 + 1];
+    let request = GitStageBlobRequest {
+        path: "a.txt".to_owned(),
+        content: oversized,
+    };
+    let error = request
+        .into_parts()
+        .expect_err("oversized content must be rejected");
+    assert_eq!(error.code(), "GIT_STAGE_BLOB_INVALID_REQUEST");
+}
+
+// --- git_commit --------------------------------------------------------------
+
+#[test]
+fn git_commit_request_accepts_a_message_and_amend_flag() {
+    let request: GitCommitRequest =
+        serde_json::from_value(serde_json::json!({ "message": "feat: x", "amend": true }))
+            .expect("deserializes");
+    let (message, amend) = request.into_parts().expect("valid request accepted");
+    assert_eq!(message, "feat: x");
+    assert!(amend);
+}
+
+#[test]
+fn git_commit_request_rejects_an_empty_or_whitespace_only_message() {
+    for message in ["", "   ", "\n\t"] {
+        let request = GitCommitRequest {
+            message: message.to_owned(),
+            amend: false,
+        };
+        let error = request
+            .into_parts()
+            .expect_err("empty/whitespace message must be rejected");
+        assert_eq!(error.code(), "GIT_COMMIT_INVALID_REQUEST");
+    }
+}
+
+#[test]
+fn git_commit_request_rejects_an_oversized_message() {
+    let request = GitCommitRequest {
+        message: "a".repeat(100_001),
+        amend: false,
+    };
+    let error = request
+        .into_parts()
+        .expect_err("oversized message must be rejected");
+    assert_eq!(error.code(), "GIT_COMMIT_INVALID_REQUEST");
+}
+
+#[test]
+fn git_commit_request_rejects_unknown_fields() {
+    let rejected: Result<GitCommitRequest, _> = serde_json::from_value(serde_json::json!({
+        "message": "x",
+        "amend": false,
+        "extra": 1
+    }));
+    assert!(rejected.is_err());
 }

@@ -595,3 +595,185 @@ export function frozenGitShowBlobResult(
 		content: content === null ? null : Array.from(content),
 	});
 }
+
+// --- F080 S3 write commands --------------------------------------------
+
+// Defensive ceilings mirroring the Rust-side ones exactly (see
+// `src-tauri/src/git/dto.rs`'s `MAX_GIT_MUTATE_PATHS`/
+// `MAX_GIT_MUTATE_PATH_BYTES`/`MAX_GIT_STAGE_BLOB_BYTES`/
+// `MAX_GIT_COMMIT_MESSAGE_BYTES`) — Rust is the authoritative validator
+// (including the `..`/absolute-path rejection this TypeScript layer does not
+// duplicate); these exist only to reject a structurally hostile/runaway
+// argument before it is ever sent over IPC.
+const MAX_GIT_MUTATE_PATHS = 4_096;
+const MAX_GIT_MUTATE_PATH_CHARS = 4_096;
+const MAX_GIT_STAGE_BLOB_CONTENT_BYTES = 8 * 1_024 * 1_024;
+const MAX_GIT_COMMIT_MESSAGE_CHARS = 100_000;
+
+function gitMutatePathsInvalid(): never {
+	return requestViolation(
+		"GIT_MUTATE_PATHS_INVALID_REQUEST",
+		"The path list is empty, too large, or contains an invalid path.",
+	);
+}
+
+function isValidGitMutatePath(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		value.length <= MAX_GIT_MUTATE_PATH_CHARS
+	);
+}
+
+/**
+ * Shared by `frozenGitStagePathsRequest`/`frozenGitUnstagePathsRequest`/
+ * `frozenGitDiscardPathsRequest` — validates `paths` is a real (non-Proxy,
+ * non-sparse, no accessor properties) own-data array of 1..
+ * `MAX_GIT_MUTATE_PATHS` non-empty strings, the same rigor
+ * `ownObjectArraySnapshot` above already establishes for a *read* response
+ * array, applied here to a *write* request array.
+ */
+function frozenGitMutatePathsRequest(
+	paths: unknown,
+): Readonly<{ paths: readonly string[] }> {
+	if (typeof paths !== "object" || paths === null || !Array.isArray(paths)) {
+		return gitMutatePathsInvalid();
+	}
+	if (Object.getPrototypeOf(paths) !== Array.prototype) {
+		return gitMutatePathsInvalid();
+	}
+	const lengthDescriptor = Object.getOwnPropertyDescriptor(paths, "length");
+	if (
+		lengthDescriptor === undefined ||
+		!("value" in lengthDescriptor) ||
+		!Number.isSafeInteger(lengthDescriptor.value) ||
+		(lengthDescriptor.value as number) < 1 ||
+		(lengthDescriptor.value as number) > MAX_GIT_MUTATE_PATHS
+	) {
+		return gitMutatePathsInvalid();
+	}
+	const length = lengthDescriptor.value as number;
+	const descriptors = Object.getOwnPropertyDescriptors(paths);
+	if (Reflect.ownKeys(descriptors).length !== length + 1) {
+		return gitMutatePathsInvalid();
+	}
+	const collected: string[] = [];
+	for (let index = 0; index < length; index += 1) {
+		const descriptor = (descriptors as Record<string, PropertyDescriptor>)[
+			String(index)
+		];
+		if (
+			descriptor === undefined ||
+			!("value" in descriptor) ||
+			descriptor.get !== undefined ||
+			descriptor.set !== undefined ||
+			!isValidGitMutatePath(descriptor.value)
+		) {
+			return gitMutatePathsInvalid();
+		}
+		collected.push(descriptor.value);
+	}
+	try {
+		// A default-trap Proxy over a real array is transparent to every
+		// check above (`Array.isArray`, prototype, own property descriptors
+		// all pass through unchanged) — only `structuredClone` inside
+		// `rejectProxyObject` actually distinguishes it, and does so by
+		// throwing a raw, un-coded `DataCloneError` rather than returning a
+		// boolean. That raw error must never escape this request-builder
+		// boundary as anything other than the same structured
+		// `GIT_MUTATE_PATHS_INVALID_REQUEST` every other rejection above
+		// already uses.
+		rejectProxyObject(paths);
+	} catch {
+		return gitMutatePathsInvalid();
+	}
+	return Object.freeze({ paths: Object.freeze(collected) });
+}
+
+export function frozenGitStagePathsRequest(
+	paths: unknown,
+): Readonly<{ paths: readonly string[] }> {
+	return frozenGitMutatePathsRequest(paths);
+}
+
+export function frozenGitUnstagePathsRequest(
+	paths: unknown,
+): Readonly<{ paths: readonly string[] }> {
+	return frozenGitMutatePathsRequest(paths);
+}
+
+export function frozenGitDiscardPathsRequest(
+	paths: unknown,
+): Readonly<{ paths: readonly string[] }> {
+	return frozenGitMutatePathsRequest(paths);
+}
+
+function gitStageBlobRequestInvalid(): never {
+	return requestViolation(
+		"GIT_STAGE_BLOB_INVALID_REQUEST",
+		"The git stage blob request is invalid.",
+	);
+}
+
+/**
+ * `content` is accepted only as a real `Uint8Array` (never a Proxy, never a
+ * plain array standing in for one) and converted to a plain `number[]` for
+ * the wire — `Vec<u8>` on the Rust side serializes as a JSON array of
+ * numbers, matching `GitShowBlobResult.content`'s own encoding.
+ */
+export function frozenGitStageBlobRequest(
+	path: unknown,
+	content: unknown,
+): Readonly<{ path: string; content: readonly number[] }> {
+	if (!isValidGitMutatePath(path)) {
+		return gitStageBlobRequestInvalid();
+	}
+	if (!(content instanceof Uint8Array)) {
+		return gitStageBlobRequestInvalid();
+	}
+	if (content.byteLength > MAX_GIT_STAGE_BLOB_CONTENT_BYTES) {
+		return gitStageBlobRequestInvalid();
+	}
+	return Object.freeze({
+		path,
+		content: Object.freeze(Array.from(content)),
+	});
+}
+
+function gitCommitRequestInvalid(): never {
+	return requestViolation(
+		"GIT_COMMIT_INVALID_REQUEST",
+		"The commit message is empty or too large.",
+	);
+}
+
+export function frozenGitCommitRequest(
+	message: unknown,
+	amend: unknown,
+): Readonly<{ message: string; amend: boolean }> {
+	if (
+		typeof message !== "string" ||
+		message.trim().length === 0 ||
+		message.length > MAX_GIT_COMMIT_MESSAGE_CHARS
+	) {
+		return gitCommitRequestInvalid();
+	}
+	if (typeof amend !== "boolean") {
+		return gitCommitRequestInvalid();
+	}
+	return Object.freeze({ message, amend });
+}
+
+/** Decodes a `git_stage_paths`/`git_unstage_paths`/`git_stage_blob`/
+ * `git_commit`/`git_discard_paths` response — every one of these Rust
+ * commands returns `Result<(), CommandError>`, which serializes to the JSON
+ * literal `null` on success (mirrors `decodeWorkspaceVoid`/
+ * `decodeTerminalVoid`'s identical contract for this codebase's other
+ * void-returning write commands). */
+export function decodeGitVoid(value: unknown): void {
+	return sanitizedDecode(() => {
+		if (value !== null) {
+			return violation();
+		}
+	});
+}

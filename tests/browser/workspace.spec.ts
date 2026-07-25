@@ -1433,6 +1433,179 @@ async function installNativeIpcMock(
 					path: entry.path,
 				};
 			}
+
+			// --- F080 S3: mutable stage/unstage/commit/discard simulation -----
+			//
+			// Same simulation shape as `app/platform/tauri/browser-mock.ts`'s own
+			// (see that file's identically-named-in-spirit helpers) — reproduced
+			// here rather than imported because this fixture drives the real
+			// `native.ts` transport directly (see this function's own module doc
+			// comment), not `browser-mock.ts`. `mockGitEntries`/`mockGitBranch`
+			// start from the static `gitFixtureForTest` and are mutated in place
+			// by the five write-command cases below; `git_status` (mutated below
+			// to stop returning the static fixture verbatim) always reflects the
+			// current mutated state.
+			let mockGitBranch = gitFixtureForTest.branch ?? {
+				oid: "0".repeat(40),
+				head: "main",
+				upstream: null,
+			};
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			let mockGitEntries: any[] = (gitFixtureForTest.entries ?? []).map(
+				fullGitStatusEntry,
+			);
+			let mockGitCommitCounter = 0;
+			const MOCK_ZERO_HASH = "0".repeat(40);
+			const MOCK_ZERO_SUBMODULE = {
+				isSubmodule: false,
+				commitChanged: false,
+				trackedChanged: false,
+				untrackedChanged: false,
+			};
+
+			function gitCommitNothingToCommit() {
+				return {
+					code: "GIT_COMMIT_NOTHING_TO_COMMIT",
+					message: "There are no staged changes to commit.",
+				};
+			}
+			function gitDiscardFailed() {
+				return {
+					code: "GIT_DISCARD_FAILED",
+					message: "git checkout did not complete successfully.",
+				};
+			}
+			function findMockGitEntryIndex(path: string): number {
+				return mockGitEntries.findIndex(
+					(entry) =>
+						(entry.type === "ordinary" ||
+							entry.type === "renameOrCopy" ||
+							entry.type === "untracked") &&
+						entry.path === path,
+				);
+			}
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			function newMockOrdinaryEntry(
+				indexStatus: string,
+				worktreeStatus: string,
+				path: string,
+			): any {
+				return {
+					type: "ordinary",
+					indexStatus,
+					worktreeStatus,
+					submodule: MOCK_ZERO_SUBMODULE,
+					modeHead: "100644",
+					modeIndex: "100644",
+					modeWorktree: "100644",
+					hashHead: MOCK_ZERO_HASH,
+					hashIndex: MOCK_ZERO_HASH,
+					path,
+				};
+			}
+			function stageOneMockGitPath(path: string, wholeFile: boolean): void {
+				const index = findMockGitEntryIndex(path);
+				if (index === -1) {
+					return;
+				}
+				const entry = mockGitEntries[index];
+				if (entry.type === "untracked") {
+					mockGitEntries[index] = newMockOrdinaryEntry(
+						"A",
+						wholeFile ? "." : "M",
+						path,
+					);
+					return;
+				}
+				if (entry.worktreeStatus === ".") {
+					return;
+				}
+				mockGitEntries[index] = {
+					...entry,
+					indexStatus: entry.worktreeStatus,
+					worktreeStatus: wholeFile ? "." : entry.worktreeStatus,
+				};
+			}
+			function unstageOneMockGitPath(path: string): void {
+				const index = findMockGitEntryIndex(path);
+				if (index === -1) {
+					return;
+				}
+				const entry = mockGitEntries[index];
+				if (entry.type !== "ordinary" && entry.type !== "renameOrCopy") {
+					return;
+				}
+				if (entry.indexStatus === ".") {
+					return;
+				}
+				if (entry.indexStatus === "A" && entry.worktreeStatus === ".") {
+					mockGitEntries[index] = { type: "untracked", path };
+					return;
+				}
+				mockGitEntries[index] = {
+					...entry,
+					worktreeStatus: entry.indexStatus,
+					indexStatus: ".",
+				};
+			}
+			function mockGitPathIsDiscardable(path: string): boolean {
+				const index = findMockGitEntryIndex(path);
+				if (index === -1) {
+					return false;
+				}
+				const entry = mockGitEntries[index];
+				return (
+					(entry.type === "ordinary" || entry.type === "renameOrCopy") &&
+					entry.worktreeStatus !== "."
+				);
+			}
+			function discardOneMockGitPath(path: string): void {
+				const index = findMockGitEntryIndex(path);
+				if (index === -1) {
+					return;
+				}
+				const entry = mockGitEntries[index];
+				if (entry.type !== "ordinary" && entry.type !== "renameOrCopy") {
+					return;
+				}
+				if (entry.indexStatus === ".") {
+					mockGitEntries.splice(index, 1);
+				} else {
+					mockGitEntries[index] = { ...entry, worktreeStatus: "." };
+				}
+			}
+			function mockGitHasStagedChanges(): boolean {
+				return mockGitEntries.some(
+					(entry) =>
+						(entry.type === "ordinary" || entry.type === "renameOrCopy") &&
+						entry.indexStatus !== ".",
+				);
+			}
+			function commitMockGitStagedEntries(): void {
+				// eslint-disable-next-line @typescript-eslint/no-explicit-any
+				const nextEntries: any[] = [];
+				for (const entry of mockGitEntries) {
+					if (entry.type === "ordinary" || entry.type === "renameOrCopy") {
+						if (entry.indexStatus === ".") {
+							nextEntries.push(entry);
+							continue;
+						}
+						if (entry.worktreeStatus === ".") {
+							continue;
+						}
+						nextEntries.push({ ...entry, indexStatus: "." });
+						continue;
+					}
+					nextEntries.push(entry);
+				}
+				mockGitEntries = nextEntries;
+				mockGitCommitCounter += 1;
+				mockGitBranch = {
+					...mockGitBranch,
+					oid: mockGitCommitCounter.toString(16).padStart(40, "0"),
+				};
+			}
+
 			function terminalSessionNotFound() {
 				return {
 					code: "TERMINAL_SESSION_NOT_FOUND",
@@ -2229,14 +2402,8 @@ async function installNativeIpcMock(
 								throw gitNoRepository();
 							}
 							return {
-								branch: gitFixtureForTest.branch ?? {
-									oid: "0".repeat(40),
-									head: "main",
-									upstream: null,
-								},
-								entries: (gitFixtureForTest.entries ?? []).map(
-									fullGitStatusEntry,
-								),
+								branch: mockGitBranch,
+								entries: mockGitEntries,
 							};
 						}
 						case "git_diff_files": {
@@ -2269,6 +2436,78 @@ async function installNativeIpcMock(
 										? null
 										: Array.from(new TextEncoder().encode(text)),
 							};
+						}
+						case "git_stage_paths": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							const request = args.request as { paths?: string[] } | undefined;
+							for (const path of request?.paths ?? []) {
+								stageOneMockGitPath(path, true);
+							}
+							return null;
+						}
+						case "git_unstage_paths": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							const request = args.request as { paths?: string[] } | undefined;
+							for (const path of request?.paths ?? []) {
+								unstageOneMockGitPath(path);
+							}
+							return null;
+						}
+						case "git_stage_blob": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							const request = args.request as
+								{ path?: string; content?: number[] } | undefined;
+							if (request?.path !== undefined) {
+								stageOneMockGitPath(request.path, false);
+							}
+							return null;
+						}
+						case "git_commit": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							const request = args.request as
+								{ message?: string; amend?: boolean } | undefined;
+							if (request?.amend !== true && !mockGitHasStagedChanges()) {
+								throw gitCommitNothingToCommit();
+							}
+							commitMockGitStagedEntries();
+							return null;
+						}
+						case "git_discard_paths": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							const request = args.request as { paths?: string[] } | undefined;
+							const paths = request?.paths ?? [];
+							if (!paths.every((path) => mockGitPathIsDiscardable(path))) {
+								throw gitDiscardFailed();
+							}
+							for (const path of paths) {
+								discardOneMockGitPath(path);
+							}
+							return null;
 						}
 						default:
 							throw new Error(`Unexpected Tauri test command: ${command}`);
@@ -10382,6 +10621,375 @@ test("git: read-only content is resolvable through the registered ITextModelCont
 
 	const calls = await terminalCallsFor(page, "git_show_blob");
 	expect(calls.length).toBeGreaterThanOrEqual(2);
+
+	expect(pageErrors).toEqual([]);
+});
+
+// --- F080 S3: stage/unstage/commit/discard --------------------------------
+
+test("Stage moves a Working Tree resource into Staged Changes, and Unstage moves it back", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{
+			entries: [
+				{ type: "ordinary", worktreeStatus: "M", path: "src/unstaged.ts" },
+			],
+		},
+	);
+	await openNativeWorkspaceExplorer(page);
+	const body = await openScmView(page);
+
+	const changes = body.locator(
+		".plain-scm-view-changes .plain-scm-view-resource",
+	);
+	const staged = body.locator(
+		".plain-scm-view-staged .plain-scm-view-resource",
+	);
+	await expect(changes).toHaveCount(1);
+	await expect(staged).toHaveCount(0);
+
+	await changes.getByRole("button", { name: "Stage", exact: true }).click();
+
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_stage_paths")).length)
+		.toBe(1);
+	await expect(changes).toHaveCount(0);
+	await expect(staged).toHaveCount(1);
+	await expect(staged).toContainText("src/unstaged.ts");
+
+	const stageCall = (await terminalCallsFor(page, "git_stage_paths"))[0]!;
+	expect(stageCall.args.request).toEqual({ paths: ["src/unstaged.ts"] });
+
+	await staged.getByRole("button", { name: "Unstage", exact: true }).click();
+	await expect
+		.poll(
+			async () => (await terminalCallsFor(page, "git_unstage_paths")).length,
+		)
+		.toBe(1);
+	await expect(staged).toHaveCount(0);
+	await expect(changes).toHaveCount(1);
+	await expect(changes).toContainText("src/unstaged.ts");
+
+	const unstageCall = (await terminalCallsFor(page, "git_unstage_paths"))[0]!;
+	expect(unstageCall.args.request).toEqual({ paths: ["src/unstaged.ts"] });
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("Stage All and Unstage All act on every Working Tree/Staged resource at once", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{
+			entries: [
+				{ type: "ordinary", worktreeStatus: "M", path: "a.ts" },
+				{ type: "ordinary", worktreeStatus: "M", path: "b.ts" },
+			],
+		},
+	);
+	await openNativeWorkspaceExplorer(page);
+	const body = await openScmView(page);
+
+	const changes = body.locator(
+		".plain-scm-view-changes .plain-scm-view-resource",
+	);
+	const staged = body.locator(
+		".plain-scm-view-staged .plain-scm-view-resource",
+	);
+	await expect(changes).toHaveCount(2);
+
+	await page.getByRole("button", { name: "Stage All", exact: true }).click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_stage_paths")).length)
+		.toBe(1);
+	await expect(staged).toHaveCount(2);
+	await expect(changes).toHaveCount(0);
+	const stageAllCall = (await terminalCallsFor(page, "git_stage_paths"))[0]!;
+	expect(stageAllCall.args.request).toEqual({ paths: ["a.ts", "b.ts"] });
+
+	await page.getByRole("button", { name: "Unstage All", exact: true }).click();
+	await expect
+		.poll(
+			async () => (await terminalCallsFor(page, "git_unstage_paths")).length,
+		)
+		.toBe(1);
+	await expect(changes).toHaveCount(2);
+	await expect(staged).toHaveCount(0);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("Discard requires confirmation naming the affected file, performs no call when declined, and discards when confirmed", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{
+			entries: [
+				{ type: "ordinary", worktreeStatus: "M", path: "src/dirty.ts" },
+			],
+		},
+	);
+	await openNativeWorkspaceExplorer(page);
+	const body = await openScmView(page);
+	const changes = body.locator(
+		".plain-scm-view-changes .plain-scm-view-resource",
+	);
+	await expect(changes).toHaveCount(1);
+
+	// Decline: no bridge call at all, resource still present.
+	await changes.getByRole("button", { name: "Discard", exact: true }).click();
+	const declineDialog = page.getByRole("dialog");
+	await expect(declineDialog).toBeVisible();
+	await expect(declineDialog).toContainText(
+		'Discard changes in "src/dirty.ts"?',
+	);
+	await expect(declineDialog).toContainText("This cannot be undone");
+	await declineDialog
+		.getByRole("button", { name: "Cancel", exact: true })
+		.click();
+	await expect(declineDialog).toHaveCount(0);
+	expect(await terminalCallsFor(page, "git_discard_paths")).toEqual([]);
+	await expect(changes).toHaveCount(1);
+
+	// Confirm: exactly one call, resource removed from Changes.
+	await changes.getByRole("button", { name: "Discard", exact: true }).click();
+	const confirmDialog = page.getByRole("dialog");
+	await expect(confirmDialog).toBeVisible();
+	await confirmDialog
+		.getByRole("button", { name: "Discard Changes", exact: true })
+		.click();
+	await expect(confirmDialog).toHaveCount(0);
+	await expect
+		.poll(
+			async () => (await terminalCallsFor(page, "git_discard_paths")).length,
+		)
+		.toBe(1);
+	await expect(changes).toHaveCount(0);
+	const discardCall = (await terminalCallsFor(page, "git_discard_paths"))[0]!;
+	expect(discardCall.args.request).toEqual({ paths: ["src/dirty.ts"] });
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("Discard All confirms once for every discardable file and excludes untracked entries", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{
+			entries: [
+				{ type: "ordinary", worktreeStatus: "M", path: "a.ts" },
+				{ type: "ordinary", worktreeStatus: "M", path: "b.ts" },
+				{ type: "untracked", path: "new.txt" },
+			],
+		},
+	);
+	await openNativeWorkspaceExplorer(page);
+	const body = await openScmView(page);
+	const changes = body.locator(
+		".plain-scm-view-changes .plain-scm-view-resource",
+	);
+	await expect(changes).toHaveCount(3);
+
+	await page.getByRole("button", { name: "Discard All", exact: true }).click();
+	const dialog = page.getByRole("dialog");
+	await expect(dialog).toBeVisible();
+	await expect(dialog).toContainText("a.ts");
+	await expect(dialog).toContainText("b.ts");
+	await dialog
+		.getByRole("button", { name: "Discard Changes", exact: true })
+		.click();
+	await expect(dialog).toHaveCount(0);
+
+	await expect
+		.poll(
+			async () => (await terminalCallsFor(page, "git_discard_paths")).length,
+		)
+		.toBe(1);
+	const call = (await terminalCallsFor(page, "git_discard_paths"))[0]!;
+	// Untracked "new.txt" is never included — it has no index/HEAD version to
+	// discard back to (mirrors `src-tauri/src/git/discard.rs`'s own scope).
+	expect(call.args.request).toEqual({ paths: ["a.ts", "b.ts"] });
+	await expect(changes).toHaveCount(1);
+	await expect(changes).toContainText("new.txt");
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("commits the typed message via the Commit button, clears the input, and supports Amend", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{
+			entries: [{ type: "ordinary", indexStatus: "M", path: "src/staged.ts" }],
+		},
+	);
+	await openNativeWorkspaceExplorer(page);
+	const body = await openScmView(page);
+
+	const input = body.locator(".plain-scm-view-input");
+	await input.fill("feat: a real commit message");
+	await body.getByRole("button", { name: "Commit", exact: true }).click();
+
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_commit")).length)
+		.toBe(1);
+	const commitCall = (await terminalCallsFor(page, "git_commit"))[0]!;
+	expect(commitCall.args.request).toEqual({
+		message: "feat: a real commit message",
+		amend: false,
+	});
+	await expect(input).toHaveValue("");
+	await expect(
+		body.locator(".plain-scm-view-staged .plain-scm-view-resource"),
+	).toHaveCount(0);
+
+	// Amend: check the box, type a message, commit again.
+	await input.fill("feat: amended message");
+	await body.getByRole("checkbox", { name: "Amend" }).check();
+	await body.getByRole("button", { name: "Commit", exact: true }).click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_commit")).length)
+		.toBe(2);
+	const amendCall = (await terminalCallsFor(page, "git_commit"))[1]!;
+	expect(amendCall.args.request).toEqual({
+		message: "feat: amended message",
+		amend: true,
+	});
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("Plain: Stage First Change in Active File (Hunk) computes the hunk-applied content via Monaco's diff engine and calls git_stage_blob", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		// The working-tree (on-disk) content `workspaceReadFile` serves.
+		{ "src/hunk.ts": "ONE\ntwo\nTHREE\n" },
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{
+			entries: [{ type: "ordinary", worktreeStatus: "M", path: "src/hunk.ts" }],
+			// The index version `gitShowBlob("index", …)` serves — two
+			// independent hunks against the working-tree content above.
+			blobs: { "src/hunk.ts": { index: "one\ntwo\nthree\n" } },
+		},
+	);
+	await openNativeWorkspaceExplorer(page);
+	const body = await openScmView(page);
+
+	await body
+		.locator(".plain-scm-view-changes .plain-scm-view-resource")
+		.getByText("src/hunk.ts")
+		.click();
+	const editorTab = page.getByRole("tab", { name: /^hunk\.ts(?:,.*)?$/ });
+	await expect(editorTab).toBeVisible();
+
+	await executePaletteCommand(
+		page,
+		"Stage First Change",
+		"Plain: Stage First Change in Active File (Hunk)",
+	);
+
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_stage_blob")).length)
+		.toBe(1);
+	const call = (await terminalCallsFor(page, "git_stage_blob"))[0]!;
+	const request = call.args.request as { path: string; content: number[] };
+	expect(request.path).toBe("src/hunk.ts");
+	// Only the first hunk ("one" -> "ONE") applied; the second ("three" ->
+	// "THREE") left as the original index content — proves this used
+	// Monaco's real per-hunk diff, not a whole-file copy.
+	expect(new TextDecoder().decode(new Uint8Array(request.content))).toBe(
+		"ONE\ntwo\nthree\n",
+	);
 
 	expect(pageErrors).toEqual([]);
 });

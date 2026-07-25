@@ -39,25 +39,30 @@
 //! discovery escalate to actually spawning `git rev-parse --show-toplevel`
 //! to confirm the filesystem marker.
 //!
-//! # Write/network modes are deliberately unimplemented, not fail-open
+//! # Write mode is active; network mode is still deliberately unimplemented
 //!
-//! [`exec::GitExecMode`] already enumerates `Write` and `Network` alongside
-//! `BackgroundRead` (decision 3's full command set — status/diff/hunk
-//! stage/commit/discard/fetch/pull/push — needs all three eventually), but
-//! `exec::run_git` fails closed with [`git_exec_mode_unsupported`] for the
-//! latter two: allowing hooks/credential-helper/SSH passthrough for
-//! user-initiated writes and network operations is explicitly a later
-//! `F080` slice's job (S3 stage/commit/discard, S4 fetch/pull/push), never
-//! something this skeleton silently permits.
+//! [`exec::GitExecMode`] enumerates `BackgroundRead`, `Write` and `Network`
+//! (decision 3's full command set — status/diff/hunk stage/commit/discard/
+//! fetch/pull/push — needs all three). `F080` S0 implemented only
+//! `BackgroundRead`; `F080` S3 (this slice) activates `Write` for
+//! [`stage`]/[`commit`]/[`discard`] — see `exec::harden_write`'s own doc
+//! comment for exactly how it differs from `harden_background_read`.
+//! `exec::run_git` still fails closed with [`git_exec_mode_unsupported`] for
+//! `Network`: allowing credential-helper/SSH passthrough for fetch/pull/push
+//! is explicitly `F080` S4's job, never something this slice silently
+//! permits.
 
 use crate::error::CommandError;
 
 pub(crate) mod commands;
+pub(crate) mod commit;
 pub(crate) mod diff;
+pub(crate) mod discard;
 pub(crate) mod discovery;
 pub mod dto;
 pub(crate) mod exec;
 pub(crate) mod repo;
+pub(crate) mod stage;
 pub(crate) mod status;
 pub(crate) mod wire;
 

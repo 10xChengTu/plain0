@@ -28,7 +28,7 @@
 //! parameter (as opposed to the `cap_std`-relative reads/writes the
 //! `workspace` domain's *file content* operations must use).
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,21 +42,22 @@ use super::{
     git_exec_timeout, git_exec_unavailable,
 };
 
-/// Hardening profile [`run_git`] applies. Only [`GitExecMode::BackgroundRead`]
-/// is implemented in this slice (`F080` S0) — see the module doc on
-/// [`super`] for why `Write`/`Network` are enumerated but always rejected
-/// for now.
+/// Hardening profile [`run_git`] applies. [`GitExecMode::BackgroundRead`]
+/// (`F080` S0) and [`GitExecMode::Write`] (`F080` S3) are both implemented;
+/// `Network` is enumerated but still always rejected — see the module doc on
+/// [`super`] for why.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GitExecMode {
     /// Automatic, non-user-initiated reads (status/diff/blame/log/rev-parse
     /// style commands): hooks, fsmonitor, external diff/textconv and any
     /// credential/SSH prompt are all disabled — see [`harden_background_read`].
     BackgroundRead,
-    /// User-initiated writes (stage/commit/discard). Not implemented yet —
-    /// [`run_git`] rejects it. Constructing this variant is only meaningful
-    /// once a later `F080` slice (S3) adds the write command surface; keep
-    /// this `#[allow(dead_code)]` until that slice starts constructing it.
-    #[allow(dead_code)]
+    /// User-initiated writes (`F080` S3: stage/unstage/hunk-stage/commit/
+    /// discard). Unlike [`GitExecMode::BackgroundRead`], hooks and fsmonitor
+    /// are deliberately **not** overridden — a user-initiated write should
+    /// respect the repository's own configuration (ADR 0003, a product
+    /// decision, not an oversight). See [`harden_write`] for the precise
+    /// difference from [`harden_background_read`].
     Write,
     /// Network operations (fetch/pull/push). Not implemented yet —
     /// [`run_git`] rejects it. Constructing this variant is only meaningful
@@ -177,6 +178,100 @@ fn run_git_with_limits(
     timeout: Duration,
     output_cap_bytes: usize,
 ) -> Result<GitExecOutput, CommandError> {
+    let mut command = build_git_command(repo_dir, args, mode, false)?;
+    let child = command.spawn().map_err(|_| git_exec_unavailable())?;
+    wait_with_limits(child, cancel, timeout, output_cap_bytes)
+}
+
+/// Identical to [`run_git`] except `stdin` is written to the child's stdin
+/// pipe (and the pipe is then closed, signaling EOF) — needed for
+/// `git hash-object --stdin` (hunk-level stage blob content) and
+/// `git commit --file -` (commit message), both of which take their payload
+/// over stdin rather than as a command-line argument (per
+/// `docs/research/2026-07-25-core-git.md`'s hunk-stage/commit architecture
+/// notes — a commit message in particular must never appear as an argv
+/// element, e.g. a `-`-prefixed message line being misread as a flag).
+pub(crate) fn run_git_with_stdin(
+    repo_dir: &Path,
+    args: &[String],
+    mode: GitExecMode,
+    cancel: &AtomicBool,
+    stdin: &[u8],
+) -> Result<GitExecOutput, CommandError> {
+    run_git_with_stdin_and_limits(
+        repo_dir,
+        args,
+        mode,
+        cancel,
+        stdin,
+        GIT_EXEC_TIMEOUT,
+        GIT_EXEC_OUTPUT_CAP_BYTES,
+    )
+}
+
+/// Test-only seam onto the stdin-capable spawn path — mirrors
+/// [`run_git_with_limits_for_test`]'s exact rationale.
+#[cfg(test)]
+pub(crate) fn run_git_with_stdin_and_limits_for_test(
+    repo_dir: &Path,
+    args: &[String],
+    mode: GitExecMode,
+    cancel: &AtomicBool,
+    stdin: &[u8],
+    timeout: Duration,
+    output_cap_bytes: usize,
+) -> Result<GitExecOutput, CommandError> {
+    run_git_with_stdin_and_limits(
+        repo_dir,
+        args,
+        mode,
+        cancel,
+        stdin,
+        timeout,
+        output_cap_bytes,
+    )
+}
+
+fn run_git_with_stdin_and_limits(
+    repo_dir: &Path,
+    args: &[String],
+    mode: GitExecMode,
+    cancel: &AtomicBool,
+    stdin: &[u8],
+    timeout: Duration,
+    output_cap_bytes: usize,
+) -> Result<GitExecOutput, CommandError> {
+    let mut command = build_git_command(repo_dir, args, mode, true)?;
+    let mut child = command.spawn().map_err(|_| git_exec_unavailable())?;
+    let mut stdin_pipe = child.stdin.take().expect("stdin is always piped here");
+    let stdin_bytes = stdin.to_vec();
+    // A dedicated writer thread, exactly like the dedicated stdout/stderr
+    // reader threads in `spawn_capped_reader` below: writing from the main
+    // thread while also needing to poll/drain stdout/stderr would risk a
+    // pipe-buffer deadlock the moment `stdin` exceeds the OS pipe buffer size
+    // (a commit message or a several-MB hunk blob both plausibly can).
+    // Dropping `stdin_pipe` at the end of this closure closes the write end,
+    // signaling EOF to the child — required for `hash-object`/`commit --file
+    // -` to stop reading and proceed.
+    let writer_handle = std::thread::spawn(move || {
+        let _ = stdin_pipe.write_all(&stdin_bytes);
+    });
+
+    let result = wait_with_limits(child, cancel, timeout, output_cap_bytes);
+    let _ = writer_handle.join();
+    result
+}
+
+/// Builds (but does not spawn) the hardened `git` [`Command`] shared by every
+/// [`run_git`]/[`run_git_with_stdin`] call — the one place `Command::new`
+/// appears in this file, applying [`GitExecMode`]'s hardening profile and
+/// validating `repo_dir` first (see the module doc's "cwd validation split").
+fn build_git_command(
+    repo_dir: &Path,
+    args: &[String],
+    mode: GitExecMode,
+    has_stdin: bool,
+) -> Result<Command, CommandError> {
     let canonical_dir = std::fs::canonicalize(repo_dir).map_err(|_| git_cwd_invalid())?;
     if !canonical_dir.is_dir() {
         return Err(git_cwd_invalid());
@@ -184,20 +279,23 @@ fn run_git_with_limits(
 
     let mut command = Command::new("git");
     command.current_dir(&canonical_dir);
-    command.stdin(Stdio::null());
+    command.stdin(if has_stdin {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
     command.env_clear();
 
     match mode {
         GitExecMode::BackgroundRead => harden_background_read(&mut command),
-        GitExecMode::Write | GitExecMode::Network => return Err(git_exec_mode_unsupported()),
+        GitExecMode::Write => harden_write(&mut command),
+        GitExecMode::Network => return Err(git_exec_mode_unsupported()),
     }
 
     command.args(args);
-
-    let child = command.spawn().map_err(|_| git_exec_unavailable())?;
-    wait_with_limits(child, cancel, timeout, output_cap_bytes)
+    Ok(command)
 }
 
 /// Applies every fixed background-read hardening flag described in
@@ -253,6 +351,46 @@ fn harden_background_read(command: &mut Command) {
     hardening_args.push("-c".to_owned());
     hardening_args.push("core.fsmonitor=".to_owned());
     command.args(&hardening_args);
+}
+
+/// Hardening applied for [`GitExecMode::Write`] (`F080` S3: stage/unstage/
+/// hunk-stage/commit/discard — every one of these is a direct result of the
+/// *user* invoking a Plain command, never an automatic background poll).
+///
+/// The precise, deliberate difference from [`harden_background_read`]:
+/// - **Not** applied here: the `-c core.hooksPath=<disabled>` and
+///   `-c core.fsmonitor=` overrides. ADR 0003 ("用户发起的 commit 等本地写
+///   操作可使用相应 hooks/filters") means a user-initiated write must respect
+///   the repository's own hooks/fsmonitor configuration — a real
+///   `pre-commit`/`commit-msg`/`post-commit` hook genuinely runs under this
+///   mode. See `stage/tests.rs`'s/`commit/tests.rs`'s hook-fires fixture for
+///   the executable proof this is intentional, contrasted with
+///   `exec/tests.rs`'s existing `background_read_disables_a_malicious_*`
+///   tests (which must keep passing completely unchanged — this function
+///   must never weaken [`harden_background_read`] itself).
+/// - **Not** applied here: `GIT_OPTIONAL_LOCKS=0`. That override exists only
+///   to skip *opportunistic* locking a background read has no business
+///   taking (e.g. an ahead/behind ref-lock refresh `status` may attempt);
+///   every write command in this mode genuinely needs git's own normal index/
+///   ref locking to do its job at all.
+/// - **Still** applied here (this mode's own defense-in-depth floor, not a
+///   functional restriction): `GIT_TERMINAL_PROMPT=0`/`GIT_ASKPASS` (none of
+///   this slice's write commands ever touch a remote or need credentials —
+///   stage/commit/discard are always local — so suppressing an interactive
+///   credential prompt costs nothing while still closing off an unexpected
+///   hang if some unusual hook tried to reach a remote) and the fixed
+///   `LANG`/`LC_ALL` locale (parser stability reasoning identical to
+///   [`harden_background_read`]).
+fn harden_write(command: &mut Command) {
+    for name in ["PATH", "HOME"] {
+        if let Ok(value) = std::env::var(name) {
+            command.env(name, value);
+        }
+    }
+    command.env("GIT_TERMINAL_PROMPT", "0");
+    command.env("GIT_ASKPASS", GIT_ASKPASS_REJECT_PROGRAM);
+    command.env("LANG", "en_US.UTF-8");
+    command.env("LC_ALL", "en_US.UTF-8");
 }
 
 /// Which of the three race-y ways [`wait_with_limits`]'s poll loop can end.

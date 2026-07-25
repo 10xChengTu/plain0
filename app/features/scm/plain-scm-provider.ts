@@ -163,10 +163,33 @@ export function classifyStatusEntries(entries: readonly GitStatusEntry[]): {
 	});
 }
 
-class PlainScmResource implements ISCMResource {
+/** Exported (unlike the module-private `PlainScmResourceGroup`) so
+ * `plain-scm-view.ts` can recover `relativePath`/`isConflict` for a resource
+ * it only ever receives back as the vendor `ISCMResource` interface type
+ * (from `ISCMResourceGroup.resources`) — an `instanceof` check against this
+ * concrete class is how the view's own Stage/Unstage/Discard button handlers
+ * (`F080` S3) know which repository-relative path to send to `PlainBridge`,
+ * without recomputing it from `sourceUri`/`rootUri` URI math a second time. */
+export class PlainScmResource implements ISCMResource {
 	readonly sourceUri: URI;
 	readonly decorations: ISCMResourceDecorations;
 	readonly contextValue: string | undefined;
+	/** Repository-toplevel-relative path — the exact string `PlainBridge`'s
+	 * `gitStagePaths`/`gitUnstagePaths`/`gitStageBlob`/`gitDiscardPaths` all
+	 * expect. */
+	readonly relativePath: string;
+	/** `true` for an unmerged (conflicted) entry — mirrors
+	 * `ResourceDescriptor.isConflict`; `plain-scm-view.ts` uses this (rather
+	 * than re-deriving it from `contextValue === "conflict"`) to decide
+	 * whether Discard applies to a resource the same way `contextValue !==
+	 * "?"` already excludes untracked ones. */
+	readonly isConflict: boolean;
+	/** The single status character this resource represents — `"?"` for an
+	 * untracked entry, `"U"` for unmerged, otherwise the real porcelain-v2
+	 * `X`/`Y` letter. `plain-scm-view.ts` uses this to decide whether
+	 * Discard applies (never for `"?"`, which has no index/HEAD version to
+	 * restore from — see `src-tauri/src/git/discard.rs`'s own doc comment). */
+	readonly statusChar: string;
 	// Untyped (inferred `undefined`) rather than an explicit `Command |
 	// undefined` annotation — deliberately never imports the real `Command`
 	// type from `@codingame/monaco-vscode-api/vscode/vs/editor/common/
@@ -188,6 +211,9 @@ class PlainScmResource implements ISCMResource {
 		private readonly editorOpener: PlainScmEditorOpener,
 	) {
 		this.sourceUri = URI.joinPath(rootUri, descriptor.relativePath);
+		this.relativePath = descriptor.relativePath;
+		this.isConflict = descriptor.isConflict;
+		this.statusChar = descriptor.statusChar;
 		this.contextValue = descriptor.isConflict
 			? "conflict"
 			: descriptor.statusChar;
@@ -371,8 +397,12 @@ export class PlainScmProvider implements ISCMProvider {
 /** Repository-toplevel-relative path of `uri` under `rootUri`, or `undefined`
  * if `uri` is not (a descendant of) `rootUri` at all — mirrors `IUri
  * IdentityService.extUri.relativePath`'s contract without pulling that
- * service in for what is, here, a same-scheme same-authority prefix check. */
-function relativePathUnder(rootUri: URI, uri: URI): string | undefined {
+ * service in for what is, here, a same-scheme same-authority prefix check.
+ * Exported (`F080` S3) so `plain-scm-commands.ts`'s
+ * `plain.scm.stageActiveFileFirstHunk` command can map the active editor's
+ * `URI` to the same repository-relative path string `PlainBridge`'s git
+ * methods expect, without a second URI-math implementation. */
+export function relativePathUnder(rootUri: URI, uri: URI): string | undefined {
 	if (uri.scheme !== rootUri.scheme || uri.authority !== rootUri.authority) {
 		return undefined;
 	}

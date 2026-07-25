@@ -9279,9 +9279,45 @@ describe("Plain F080 S1 git command registration Harness", () => {
 			"command registration boundary requires src-tauri/src/git/commands.rs",
 		);
 	});
+
+	it("fails if git_commit's body is rewired to skip amend", () => {
+		const rewired = withMutatedGitCommandSource(
+			"src-tauri/src/git/commands.rs",
+			(source) =>
+				source.replace(
+					"let (message, amend) = request.into_parts()?;",
+					"let (message, _amend) = request.into_parts()?;\n    let amend = false;",
+				),
+		);
+		expect(validateGitCommandRegistration(rewired)).toContain(
+			"git_commit must contain only its audited DTO decode and single service route",
+		);
+	});
+
+	it("fails if git_stage_blob is missing from lib.rs's generate_handler", () => {
+		const missingRegistration = withMutatedGitCommandSource(
+			"src-tauri/src/lib.rs",
+			(source) =>
+				source.replace("            git::commands::git_stage_blob,\n", ""),
+		);
+		expect(validateGitCommandRegistration(missingRegistration)).toContain(
+			"generate_handler! must register git::commands::git_stage_blob exactly once",
+		);
+	});
+
+	it("fails if git_discard_paths is missing from lib.rs's generate_handler", () => {
+		const missingRegistration = withMutatedGitCommandSource(
+			"src-tauri/src/lib.rs",
+			(source) =>
+				source.replace("            git::commands::git_discard_paths,\n", ""),
+		);
+		expect(validateGitCommandRegistration(missingRegistration)).toContain(
+			"generate_handler! must register git::commands::git_discard_paths exactly once",
+		);
+	});
 });
 
-describe("Plain F080 S1 git Rust args/DTO boundary Harness", () => {
+describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
 	const gitStatusSource = readFileSync(
 		new URL("../../src-tauri/src/git/status.rs", import.meta.url),
 		"utf8",
@@ -9294,11 +9330,21 @@ describe("Plain F080 S1 git Rust args/DTO boundary Harness", () => {
 		new URL("../../src-tauri/src/git/dto.rs", import.meta.url),
 		"utf8",
 	);
+	const gitCommitSource = readFileSync(
+		new URL("../../src-tauri/src/git/commit.rs", import.meta.url),
+		"utf8",
+	);
+	const gitDiscardSource = readFileSync(
+		new URL("../../src-tauri/src/git/discard.rs", import.meta.url),
+		"utf8",
+	);
 
 	const baselineGitRustSources = Object.freeze([
 		{ relativePath: "src-tauri/src/git/status.rs", source: gitStatusSource },
 		{ relativePath: "src-tauri/src/git/diff.rs", source: gitDiffSource },
 		{ relativePath: "src-tauri/src/git/dto.rs", source: gitDtoSource },
+		{ relativePath: "src-tauri/src/git/commit.rs", source: gitCommitSource },
+		{ relativePath: "src-tauri/src/git/discard.rs", source: gitDiscardSource },
 	]);
 
 	function withMutatedGitRustSource(relativePath, mutate) {
@@ -9385,6 +9431,77 @@ describe("Plain F080 S1 git Rust args/DTO boundary Harness", () => {
 			"git boundary requires dto.rs",
 		);
 	});
+
+	it("fails if GIT_COMMIT_ARGS drops user.useConfigOnly=true", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/commit.rs",
+			(source) => source.replace('"user.useConfigOnly=true",', ""),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"commit.rs must define GIT_COMMIT_ARGS as exactly the audited commit argument list",
+		);
+	});
+
+	it("fails if GIT_DISCARD_ARGS drops -q", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/discard.rs",
+			(source) => source.replace('"checkout", "-q"', '"checkout"'),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"discard.rs must define GIT_DISCARD_ARGS as exactly the audited discard argument list",
+		);
+	});
+
+	it("fails if GitStagePathsRequest gains an extra field", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"pub struct GitStagePathsRequest {\n    paths: Vec<String>,\n}",
+					"pub struct GitStagePathsRequest {\n    paths: Vec<String>,\n    extra: bool,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitStagePathsRequest/GitUnstagePathsRequest/GitDiscardPathsRequest must expose only their exact audited paths field",
+		);
+	});
+
+	it("fails if GitStageBlobRequest's content field is renamed", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"pub struct GitStageBlobRequest {\n    path: String,\n    content: Vec<u8>,\n}",
+					"pub struct GitStageBlobRequest {\n    path: String,\n    bytes: Vec<u8>,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitStageBlobRequest must expose only its exact audited path/content fields",
+		);
+	});
+
+	it("fails if GitCommitRequest's amend field is renamed", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"pub struct GitCommitRequest {\n    message: String,\n    amend: bool,\n}",
+					"pub struct GitCommitRequest {\n    message: String,\n    is_amend: bool,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitCommitRequest must expose only its exact audited message/amend fields",
+		);
+	});
+
+	it("fails if commit.rs is missing entirely", () => {
+		const missingCommit = baselineGitRustSources.filter(
+			(entry) => entry.relativePath !== "src-tauri/src/git/commit.rs",
+		);
+		expect(validateGitRustBoundary(missingCommit)).toContain(
+			"git boundary requires commit.rs and discard.rs",
+		);
+	});
 });
 
 describe("Plain F080 S1 git IPC bridge Harness", () => {
@@ -9457,7 +9574,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the three audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the eight audited git methods, no more and no fewer",
 		);
 	});
 
@@ -9506,6 +9623,67 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
 		).toContain(
 			"native.ts must invoke git_status/git_diff_files/git_show_blob exactly once each, decoded through the audited decoders",
+		);
+	});
+
+	it("fails if PlainBridge loses gitCommit", () => {
+		const widened = withMutatedGitApp(
+			"app/platform/tauri/contracts.ts",
+			(source) =>
+				source.replace(
+					"\tgitCommit(message: string, amend: boolean): Promise<void>;\n",
+					"",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
+		).toContain(
+			"PlainBridge must expose exactly the eight audited git methods, no more and no fewer",
+		);
+	});
+
+	it("fails if native.ts invokes git_discard_paths a second time", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					'decodeGitVoid(await invoke<unknown>("git_discard_paths", { request }));',
+					'decodeGitVoid(await invoke<unknown>("git_discard_paths", { request })); decodeGitVoid(await invoke<unknown>("git_discard_paths", { request }));',
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"native.ts must invoke git_discard_paths exactly once, routed through frozenGitDiscardPathsRequest",
+		);
+	});
+
+	it("fails if native.ts stops routing git_stage_blob through frozenGitStageBlobRequest", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					"const request = frozenGitStageBlobRequest(path, content);",
+					"const request = { path, content: Array.from(content) };",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"native.ts must invoke git_stage_blob exactly once, routed through frozenGitStageBlobRequest",
+		);
+	});
+
+	it("fails if native.ts stops decoding a git write command's response through decodeGitVoid", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replaceAll("decodeGitVoid(", "JSON.parse(JSON.stringify("),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"native.ts must decode every F080 S3 git write command's response through decodeGitVoid",
 		);
 	});
 });

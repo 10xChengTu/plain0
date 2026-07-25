@@ -359,6 +359,21 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async gitShowBlob() {
 			throw new Error("unused");
 		},
+		async gitStagePaths() {
+			throw new Error("unused");
+		},
+		async gitUnstagePaths() {
+			throw new Error("unused");
+		},
+		async gitStageBlob() {
+			throw new Error("unused");
+		},
+		async gitCommit() {
+			throw new Error("unused");
+		},
+		async gitDiscardPaths() {
+			throw new Error("unused");
+		},
 		...overrides,
 	};
 }

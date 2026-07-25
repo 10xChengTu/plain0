@@ -946,4 +946,44 @@ export interface PlainBridge {
 	 * trust/repository rejections as `gitStatus`; a missing version of an
 	 * otherwise-valid path is `{ content: null }`, not a rejection. */
 	gitShowBlob(rev: GitBlobRev, path: string): Promise<GitShowBlobResult>;
+	/** `F080` S3: `git add -A -- <paths...>` — stages every kind of
+	 * working-tree change (modified/added/deleted) for exactly the given
+	 * repository-toplevel-relative paths. Same trust/repository rejections as
+	 * `gitStatus`; rejects with `GIT_MUTATE_PATHS_INVALID_REQUEST` for an
+	 * empty list or an invalid (absolute, `..`-traversing, or oversized)
+	 * path. */
+	gitStagePaths(paths: readonly string[]): Promise<void>;
+	/** `F080` S3: `git reset -q -- <paths...>` — unstages exactly the given
+	 * paths, leaving working-tree content untouched. Same
+	 * rejections as `gitStagePaths`. */
+	gitUnstagePaths(paths: readonly string[]): Promise<void>;
+	/** `F080` S3 hunk-level stage: hashes `content` (the file's complete new
+	 * content after applying one or more selected hunks — computed by the
+	 * frontend's Monaco diff engine, never a unified-diff patch) into the
+	 * object database and writes it into the index at `path`, without
+	 * touching the working tree. See `src-tauri/src/git/stage.rs`'s
+	 * `stage_blob` doc comment for the exact `hash-object`/`update-index`
+	 * mechanics and mode-resolution rule. Rejects with
+	 * `GIT_STAGE_BLOB_CONTENT_TOO_LARGE` above 8 MiB, or
+	 * `GIT_STAGE_BLOB_INVALID_PATH` for an invalid path. */
+	gitStageBlob(path: string, content: Uint8Array): Promise<void>;
+	/** `F080` S3: `git -c user.useConfigOnly=true commit --quiet --file -
+	 * [--amend]` — `message` travels over stdin, never a command-line
+	 * argument. Rejects with `GIT_COMMIT_EMPTY_MESSAGE` for an empty/
+	 * whitespace-only message, `GIT_COMMIT_NOTHING_TO_COMMIT` when nothing is
+	 * staged, or `GIT_COMMIT_FAILED` for any other failure (including a
+	 * blocking `pre-commit`/`commit-msg` hook — hooks are *not* suppressed
+	 * for this user-initiated write, unlike `gitStatus`'s background read).
+	 */
+	gitCommit(message: string, amend: boolean): Promise<void>;
+	/** `F080` S3, **destructive**: `git checkout -q -- <paths...>` — restores
+	 * exactly the given paths' working-tree content to the index's version,
+	 * discarding unstaged edits. This call performs the discard
+	 * unconditionally; the caller must have already confirmed with the user
+	 * (see `IDialogService.confirm` in `app/features/scm/plain-scm-view.ts`)
+	 * before invoking it. Empirically all-or-nothing: if any path in the
+	 * batch cannot be resolved (e.g. an untracked path), the whole call
+	 * rejects with `GIT_DISCARD_FAILED` and none of the paths are touched.
+	 * Same path-list validation rejections as `gitStagePaths`. */
+	gitDiscardPaths(paths: readonly string[]): Promise<void>;
 }

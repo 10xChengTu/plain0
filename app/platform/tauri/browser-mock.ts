@@ -2,7 +2,9 @@ import type {
 	BackupEntry,
 	CommandError,
 	GitBlobRev,
+	GitBranch,
 	GitDiffFilesResult,
+	GitStatusEntry,
 	GitStatusResult,
 	PlainBridge,
 	RuntimeInfo,
@@ -31,9 +33,14 @@ import type {
 	WorkspaceWriteResult,
 } from "./contracts";
 import {
+	frozenGitCommitRequest,
 	frozenGitDiffFilesRequest,
+	frozenGitDiscardPathsRequest,
 	frozenGitShowBlobRequest,
 	frozenGitShowBlobResult,
+	frozenGitStageBlobRequest,
+	frozenGitStagePathsRequest,
+	frozenGitUnstagePathsRequest,
 } from "./git-codec";
 import {
 	backupUnavailable,
@@ -5106,6 +5113,215 @@ export function createBrowserMockBridge(
 		Object.entries(gitFixture.blobs ?? {}),
 	);
 
+	// --- F080 S3: mutable stage/unstage/commit/discard simulation ---------
+	//
+	// `gitBranch`/`gitEntries` start from the injected fixture (or the clean
+	// default) and are mutated in place by `gitStagePaths`/`gitUnstagePaths`/
+	// `gitStageBlob`/`gitCommit`/`gitDiscardPaths` below — this mock never
+	// re-implements real git plumbing (no hashing, no index file), only
+	// enough of porcelain-v2's index/worktree status-character semantics to
+	// let a consuming frontend (`PlainScmProvider`) observe a believable
+	// state transition after each write call. The Rust-side fixtures in
+	// `src-tauri/src/git/stage/tests.rs`/`commit/tests.rs`/`discard/tests.rs`
+	// are this slice's authoritative correctness evidence; this simulation
+	// only needs to be self-consistent enough for frontend development and
+	// Browser E2E to exercise the full click-through flow.
+	let gitBranch: GitBranch = (gitFixture.status ?? defaultGitStatus).branch;
+	let gitEntries: GitStatusEntry[] = (
+		gitFixture.status ?? defaultGitStatus
+	).entries.map((entry) => ({ ...entry }));
+	let gitCommitCounter = 0;
+
+	const ZERO_GIT_HASH = "0".repeat(40);
+	const ZERO_GIT_SUBMODULE = Object.freeze({
+		isSubmodule: false,
+		commitChanged: false,
+		trackedChanged: false,
+		untrackedChanged: false,
+	});
+
+	function gitMutateUnavailable(): CommandError | undefined {
+		if (roots.size === 0 || !terminalTrusted) {
+			return terminalNotTrusted();
+		}
+		if (gitFixture.noRepositoryForTest === true) {
+			return gitNoRepository();
+		}
+		return undefined;
+	}
+
+	function gitDiscardFailed(): CommandError {
+		return commandError(
+			"GIT_DISCARD_FAILED",
+			"git checkout did not complete successfully.",
+		);
+	}
+
+	function gitCommitNothingToCommit(): CommandError {
+		return commandError(
+			"GIT_COMMIT_NOTHING_TO_COMMIT",
+			"There are no staged changes to commit.",
+		);
+	}
+
+	function findGitEntryIndex(path: string): number {
+		return gitEntries.findIndex(
+			(entry) =>
+				(entry.type === "ordinary" ||
+					entry.type === "renameOrCopy" ||
+					entry.type === "untracked") &&
+				entry.path === path,
+		);
+	}
+
+	function newOrdinaryGitEntry(
+		indexStatus: string,
+		worktreeStatus: string,
+		path: string,
+	): GitStatusEntry {
+		return {
+			type: "ordinary",
+			indexStatus,
+			worktreeStatus,
+			submodule: ZERO_GIT_SUBMODULE,
+			modeHead: "100644",
+			modeIndex: "100644",
+			modeWorktree: "100644",
+			hashHead: ZERO_GIT_HASH,
+			hashIndex: ZERO_GIT_HASH,
+			path,
+		};
+	}
+
+	/** Moves the worktree-side change at `path` (partly, when `wholeFile` is
+	 * `false`) onto the index side — `gitStagePaths` (`git add -A`) always
+	 * passes `wholeFile: true` (worktree status clears to `.`); `gitStageBlob`
+	 * (hunk-level) passes `false`, deliberately leaving the worktree status
+	 * exactly as it was, simulating the real `MM`-shaped partial stage
+	 * `src-tauri/src/git/stage/tests.rs`'s
+	 * `stage_blob_partially_stages_a_file_and_status_reports_mm` proves
+	 * server-side. */
+	function gitStageOnePath(path: string, wholeFile: boolean): void {
+		const index = findGitEntryIndex(path);
+		if (index === -1) {
+			return;
+		}
+		const entry = gitEntries[index]!;
+		if (entry.type === "untracked") {
+			gitEntries[index] = newOrdinaryGitEntry("A", wholeFile ? "." : "M", path);
+			return;
+		}
+		if (entry.type !== "ordinary" && entry.type !== "renameOrCopy") {
+			return;
+		}
+		if (entry.worktreeStatus === ".") {
+			return;
+		}
+		gitEntries[index] = {
+			...entry,
+			indexStatus: entry.worktreeStatus,
+			worktreeStatus: wholeFile ? "." : entry.worktreeStatus,
+		};
+	}
+
+	function gitUnstageOnePath(path: string): void {
+		const index = findGitEntryIndex(path);
+		if (index === -1) {
+			return;
+		}
+		const entry = gitEntries[index]!;
+		if (entry.type !== "ordinary" && entry.type !== "renameOrCopy") {
+			return;
+		}
+		if (entry.indexStatus === ".") {
+			return;
+		}
+		if (entry.indexStatus === "A" && entry.worktreeStatus === ".") {
+			gitEntries[index] = { type: "untracked", path };
+			return;
+		}
+		gitEntries[index] = {
+			...entry,
+			worktreeStatus: entry.indexStatus,
+			indexStatus: ".",
+		};
+	}
+
+	/** `true` only when `path` currently has a worktree-side change a discard
+	 * could meaningfully restore — mirrors real `git checkout -q --`'s
+	 * pathspec-resolution-before-touching-anything semantics
+	 * (`src-tauri/src/git/discard/tests.rs`'s
+	 * `discard_paths_is_all_or_nothing_when_one_path_is_untracked`): an
+	 * untracked path (or a path with no worktree change at all) cannot be
+	 * discarded, and `gitDiscardPaths` below checks every path with this
+	 * function *before* mutating any of them. */
+	function gitPathIsDiscardable(path: string): boolean {
+		const index = findGitEntryIndex(path);
+		if (index === -1) {
+			return false;
+		}
+		const entry = gitEntries[index]!;
+		return (
+			(entry.type === "ordinary" || entry.type === "renameOrCopy") &&
+			entry.worktreeStatus !== "."
+		);
+	}
+
+	function gitDiscardOnePath(path: string): void {
+		const index = findGitEntryIndex(path);
+		if (index === -1) {
+			return;
+		}
+		const entry = gitEntries[index]!;
+		if (entry.type !== "ordinary" && entry.type !== "renameOrCopy") {
+			return;
+		}
+		if (entry.indexStatus === ".") {
+			gitEntries.splice(index, 1);
+		} else {
+			gitEntries[index] = { ...entry, worktreeStatus: "." };
+		}
+	}
+
+	function gitHasStagedChanges(): boolean {
+		return gitEntries.some(
+			(entry) =>
+				(entry.type === "ordinary" || entry.type === "renameOrCopy") &&
+				entry.indexStatus !== ".",
+		);
+	}
+
+	/** Drops every fully-committed entry (both axes now `.`) and clears the
+	 * index axis of every remaining one — the same "commit only touches the
+	 * staged half" semantics `git commit` has in reality. Also advances a
+	 * fake, deterministic commit oid so `gitStatus().branch.oid` visibly
+	 * changes after a commit, matching real `git commit` always producing a
+	 * new oid (including `--amend`, which still replaces the oid even though
+	 * the tree may be identical). */
+	function gitCommitStagedEntries(): void {
+		const nextEntries: GitStatusEntry[] = [];
+		for (const entry of gitEntries) {
+			if (entry.type === "ordinary" || entry.type === "renameOrCopy") {
+				if (entry.indexStatus === ".") {
+					nextEntries.push(entry);
+					continue;
+				}
+				if (entry.worktreeStatus === ".") {
+					continue;
+				}
+				nextEntries.push({ ...entry, indexStatus: "." });
+				continue;
+			}
+			nextEntries.push(entry);
+		}
+		gitEntries = nextEntries;
+		gitCommitCounter += 1;
+		gitBranch = {
+			...gitBranch,
+			oid: gitCommitCounter.toString(16).padStart(40, "0"),
+		};
+	}
+
 	function terminalSessionNotFound(): CommandError {
 		return commandError(
 			"TERMINAL_SESSION_NOT_FOUND",
@@ -5925,21 +6141,20 @@ export function createBrowserMockBridge(
 			terminalTrusted = false;
 		},
 		async gitStatus() {
-			if (roots.size === 0 || !terminalTrusted) {
-				throw terminalNotTrusted();
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
 			}
-			if (gitFixture.noRepositoryForTest === true) {
-				throw gitNoRepository();
-			}
-			return gitFixture.status ?? defaultGitStatus;
+			return Object.freeze({
+				branch: gitBranch,
+				entries: Object.freeze(gitEntries.map((entry) => ({ ...entry }))),
+			});
 		},
 		async gitDiffFiles(cached_) {
 			const request = frozenGitDiffFilesRequest(cached_);
-			if (roots.size === 0 || !terminalTrusted) {
-				throw terminalNotTrusted();
-			}
-			if (gitFixture.noRepositoryForTest === true) {
-				throw gitNoRepository();
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
 			}
 			return request.cached
 				? (gitFixture.diffFiles?.cached ?? defaultGitDiffFiles)
@@ -5947,16 +6162,68 @@ export function createBrowserMockBridge(
 		},
 		async gitShowBlob(rev_, path_) {
 			const request = frozenGitShowBlobRequest(rev_, path_);
-			if (roots.size === 0 || !terminalTrusted) {
-				throw terminalNotTrusted();
-			}
-			if (gitFixture.noRepositoryForTest === true) {
-				throw gitNoRepository();
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
 			}
 			const content = gitBlobs.get(request.path)?.[request.rev];
 			return frozenGitShowBlobResult(
 				content === undefined ? null : new TextEncoder().encode(content),
 			);
+		},
+		async gitStagePaths(paths_) {
+			const request = frozenGitStagePathsRequest(paths_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			for (const path of request.paths) {
+				gitStageOnePath(path, true);
+			}
+		},
+		async gitUnstagePaths(paths_) {
+			const request = frozenGitUnstagePathsRequest(paths_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			for (const path of request.paths) {
+				gitUnstageOnePath(path);
+			}
+		},
+		async gitStageBlob(path_, content_) {
+			const request = frozenGitStageBlobRequest(path_, content_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			gitStageOnePath(request.path, false);
+		},
+		async gitCommit(message_, amend_) {
+			const request = frozenGitCommitRequest(message_, amend_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			if (!request.amend && !gitHasStagedChanges()) {
+				throw gitCommitNothingToCommit();
+			}
+			gitCommitStagedEntries();
+		},
+		async gitDiscardPaths(paths_) {
+			const request = frozenGitDiscardPathsRequest(paths_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			// All-or-nothing, mirroring real `git checkout -q --`: every path
+			// must resolve before any of them are touched.
+			if (!request.paths.every((path) => gitPathIsDiscardable(path))) {
+				throw gitDiscardFailed();
+			}
+			for (const path of request.paths) {
+				gitDiscardOnePath(path);
+			}
 		},
 	};
 }

@@ -99,6 +99,11 @@ function fakeBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		gitStatus: notImplemented,
 		gitDiffFiles: notImplemented,
 		gitShowBlob: notImplemented,
+		gitStagePaths: notImplemented,
+		gitUnstagePaths: notImplemented,
+		gitStageBlob: notImplemented,
+		gitCommit: notImplemented,
+		gitDiscardPaths: notImplemented,
 		...overrides,
 	};
 }

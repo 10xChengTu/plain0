@@ -4,9 +4,15 @@ import {
 	decodeGitDiffFilesResult,
 	decodeGitShowBlobResult,
 	decodeGitStatusResult,
+	decodeGitVoid,
+	frozenGitCommitRequest,
 	frozenGitDiffFilesRequest,
+	frozenGitDiscardPathsRequest,
 	frozenGitShowBlobRequest,
 	frozenGitShowBlobResult,
+	frozenGitStageBlobRequest,
+	frozenGitStagePathsRequest,
+	frozenGitUnstagePathsRequest,
 } from "../../app/platform/tauri/git-codec";
 
 const contractError = { code: "IPC_CONTRACT_VIOLATION" };
@@ -335,5 +341,130 @@ describe("git show blob codec", () => {
 
 		const notFound = frozenGitShowBlobResult(null);
 		expect(notFound.content).toBeNull();
+	});
+});
+
+// --- F080 S3 write command codecs -------------------------------------
+
+const mutatePathsInvalid = { code: "GIT_MUTATE_PATHS_INVALID_REQUEST" };
+
+describe.each([
+	["frozenGitStagePathsRequest", frozenGitStagePathsRequest],
+	["frozenGitUnstagePathsRequest", frozenGitUnstagePathsRequest],
+	["frozenGitDiscardPathsRequest", frozenGitDiscardPathsRequest],
+] as const)("%s", (_name, build) => {
+	it("accepts a non-empty array of valid paths and freezes the result", () => {
+		const result = build(["a.txt", "b/c.txt"]);
+		expect(result).toEqual({ paths: ["a.txt", "b/c.txt"] });
+		expect(Object.isFrozen(result)).toBe(true);
+		expect(Object.isFrozen(result.paths)).toBe(true);
+	});
+
+	it("rejects an empty array", () => {
+		expect(() => build([])).toThrowError(
+			expect.objectContaining(mutatePathsInvalid),
+		);
+	});
+
+	it("rejects a non-array, a Proxy-wrapped array, or a getter-based array", () => {
+		expect(() => build("a.txt")).toThrowError(
+			expect.objectContaining(mutatePathsInvalid),
+		);
+		expect(() => build(new Proxy(["a.txt"], {}))).toThrowError(
+			expect.objectContaining(mutatePathsInvalid),
+		);
+		const getterArray: unknown[] = [];
+		Object.defineProperty(getterArray, "0", {
+			enumerable: true,
+			get: () => "a.txt",
+		});
+		Object.defineProperty(getterArray, "length", { value: 1 });
+		expect(() => build(getterArray)).toThrowError(
+			expect.objectContaining(mutatePathsInvalid),
+		);
+	});
+
+	it("rejects an array containing a non-string, empty string, or oversized path", () => {
+		for (const hostile of [["a.txt", 1], [""], ["a".repeat(4_097)]]) {
+			expect(() => build(hostile)).toThrowError(
+				expect.objectContaining(mutatePathsInvalid),
+			);
+		}
+	});
+});
+
+describe("frozenGitStageBlobRequest", () => {
+	it("accepts a valid path and Uint8Array content, converted to a plain number array", () => {
+		const result = frozenGitStageBlobRequest(
+			"a.txt",
+			new Uint8Array([1, 2, 3]),
+		);
+		expect(result).toEqual({ path: "a.txt", content: [1, 2, 3] });
+		expect(Object.isFrozen(result)).toBe(true);
+		expect(Object.isFrozen(result.content)).toBe(true);
+	});
+
+	it("rejects an empty or oversized path", () => {
+		const invalidRequest = { code: "GIT_STAGE_BLOB_INVALID_REQUEST" };
+		expect(() => frozenGitStageBlobRequest("", new Uint8Array())).toThrowError(
+			expect.objectContaining(invalidRequest),
+		);
+		expect(() =>
+			frozenGitStageBlobRequest("a".repeat(4_097), new Uint8Array()),
+		).toThrowError(expect.objectContaining(invalidRequest));
+	});
+
+	it("rejects content that is not a Uint8Array, or exceeds 8 MiB", () => {
+		const invalidRequest = { code: "GIT_STAGE_BLOB_INVALID_REQUEST" };
+		expect(() => frozenGitStageBlobRequest("a.txt", [1, 2, 3])).toThrowError(
+			expect.objectContaining(invalidRequest),
+		);
+		expect(() =>
+			frozenGitStageBlobRequest("a.txt", new Uint8Array(8 * 1024 * 1024 + 1)),
+		).toThrowError(expect.objectContaining(invalidRequest));
+	});
+});
+
+describe("frozenGitCommitRequest", () => {
+	it("accepts a non-empty message and boolean amend", () => {
+		expect(frozenGitCommitRequest("feat: x", true)).toEqual({
+			message: "feat: x",
+			amend: true,
+		});
+		expect(frozenGitCommitRequest("feat: x", false)).toEqual({
+			message: "feat: x",
+			amend: false,
+		});
+	});
+
+	it("rejects an empty, whitespace-only, or oversized message", () => {
+		const invalidRequest = { code: "GIT_COMMIT_INVALID_REQUEST" };
+		for (const message of ["", "   ", "\n\t", "a".repeat(100_001)]) {
+			expect(() => frozenGitCommitRequest(message, false)).toThrowError(
+				expect.objectContaining(invalidRequest),
+			);
+		}
+	});
+
+	it("rejects a non-boolean amend", () => {
+		expect(() =>
+			frozenGitCommitRequest("feat: x", "true" as unknown as boolean),
+		).toThrowError(
+			expect.objectContaining({ code: "GIT_COMMIT_INVALID_REQUEST" }),
+		);
+	});
+});
+
+describe("decodeGitVoid", () => {
+	it("accepts a literal null", () => {
+		expect(decodeGitVoid(null)).toBeUndefined();
+	});
+
+	it("rejects any non-null value", () => {
+		for (const value of [undefined, {}, "ok", 0, false]) {
+			expect(() => decodeGitVoid(value)).toThrowError(
+				expect.objectContaining(contractError),
+			);
+		}
 	});
 });

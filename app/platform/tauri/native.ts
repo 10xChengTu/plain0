@@ -87,8 +87,14 @@ import {
 	decodeGitDiffFilesResult,
 	decodeGitShowBlobResult,
 	decodeGitStatusResult,
+	decodeGitVoid,
+	frozenGitCommitRequest,
 	frozenGitDiffFilesRequest,
+	frozenGitDiscardPathsRequest,
 	frozenGitShowBlobRequest,
+	frozenGitStageBlobRequest,
+	frozenGitStagePathsRequest,
+	frozenGitUnstagePathsRequest,
 } from "./git-codec";
 
 export function createNativeBridge(): PlainBridge {
@@ -512,6 +518,26 @@ export function createNativeBridge(): PlainBridge {
 			return decodeGitShowBlobResult(
 				await invoke<unknown>("git_show_blob", { request }),
 			);
+		},
+		gitStagePaths: async (paths) => {
+			const request = frozenGitStagePathsRequest(paths);
+			decodeGitVoid(await invoke<unknown>("git_stage_paths", { request }));
+		},
+		gitUnstagePaths: async (paths) => {
+			const request = frozenGitUnstagePathsRequest(paths);
+			decodeGitVoid(await invoke<unknown>("git_unstage_paths", { request }));
+		},
+		gitStageBlob: async (path, content) => {
+			const request = frozenGitStageBlobRequest(path, content);
+			decodeGitVoid(await invoke<unknown>("git_stage_blob", { request }));
+		},
+		gitCommit: async (message, amend) => {
+			const request = frozenGitCommitRequest(message, amend);
+			decodeGitVoid(await invoke<unknown>("git_commit", { request }));
+		},
+		gitDiscardPaths: async (paths) => {
+			const request = frozenGitDiscardPathsRequest(paths);
+			decodeGitVoid(await invoke<unknown>("git_discard_paths", { request }));
 		},
 	};
 }

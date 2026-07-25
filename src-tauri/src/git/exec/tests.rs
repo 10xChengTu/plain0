@@ -39,7 +39,10 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 
-use super::{run_git, run_git_with_limits_for_test, GitExecMode};
+use super::{
+    run_git, run_git_with_limits_for_test, run_git_with_stdin,
+    run_git_with_stdin_and_limits_for_test, GitExecMode,
+};
 
 /// Whether a `git` binary is reachable on `PATH` at all — every test in
 /// this module is a no-op skip (not a failure) when it is not, per the
@@ -152,21 +155,76 @@ fn nonexistent_repo_dir_is_rejected_as_cwd_invalid() {
 }
 
 #[test]
-fn write_mode_is_rejected_without_spawning() {
+fn write_mode_executes_a_simple_command_successfully() {
+    if !git_available() {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
+    // `F080` S3 activates `GitExecMode::Write` (S0 only ever rejected it) —
+    // this is the write-mode analogue of
+    // `run_git_executes_a_simple_read_only_command_successfully`.
+    let repo = init_repo();
+    let cancel = AtomicBool::new(false);
+    let output = run_git(
+        repo.path(),
+        &["status".to_owned(), "--porcelain=v2".to_owned()],
+        GitExecMode::Write,
+        &cancel,
+    )
+    .expect("Write mode executes a simple command successfully");
+    assert_eq!(output.exit_code, 0);
+}
+
+#[test]
+fn run_git_with_stdin_writes_the_full_payload_to_the_child() {
     if !git_available() {
         eprintln!("skipping: git not found on PATH");
         return;
     }
     let repo = init_repo();
     let cancel = AtomicBool::new(false);
-    let error = run_git(
+    // `git hash-object --stdin` echoes the SHA-1 of whatever it reads from
+    // stdin — a direct, content-addressed proof the full payload (not a
+    // truncated prefix) reached the child, exercising the exact stdin path
+    // `git::stage::stage_blob` (`F080` S3) depends on.
+    let payload = b"hello from run_git_with_stdin\n".repeat(1000);
+    let output = run_git_with_stdin(
         repo.path(),
-        &["status".to_owned()],
+        &["hash-object".to_owned(), "--stdin".to_owned()],
         GitExecMode::Write,
         &cancel,
+        &payload,
     )
-    .expect_err("Write mode is not implemented in F080 S0");
-    assert_eq!(error.code(), "GIT_EXEC_MODE_UNSUPPORTED");
+    .expect("run_git_with_stdin succeeds");
+    assert_eq!(output.exit_code, 0);
+    let reported_hash = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+
+    let independent_hash_output = raw_git_hash_object_stdin(repo.path(), &payload);
+    assert_eq!(reported_hash, independent_hash_output);
+}
+
+/// Independently hashes `payload` via a raw, unhardened `git hash-object
+/// --stdin` invocation (never `-w`, so nothing is written to the object
+/// database) — used only to cross-check
+/// [`run_git_with_stdin_writes_the_full_payload_to_the_child`]'s result
+/// against a ground truth computed a completely different way.
+fn raw_git_hash_object_stdin(dir: &Path, payload: &[u8]) -> String {
+    let mut child = Command::new("git")
+        .current_dir(dir)
+        .args(["hash-object", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("raw git hash-object spawns");
+    child
+        .stdin
+        .take()
+        .expect("stdin piped")
+        .write_all(payload)
+        .expect("write payload");
+    let output = child.wait_with_output().expect("raw git hash-object waits");
+    assert!(output.status.success());
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
 #[test]
@@ -349,6 +407,52 @@ mod hostile_fixtures {
             .status()
             .expect("touch spawns");
         assert!(status.success(), "touch must succeed");
+    }
+
+    /// The safety-core contrast this slice's report is built around:
+    /// the *exact same* hostile `core.hooksPath` fixture
+    /// [`background_read_disables_a_malicious_hooks_path_hook`] proves is
+    /// neutralized under [`GitExecMode::BackgroundRead`] must, under
+    /// [`GitExecMode::Write`] (`F080` S3), actually fire — because for a
+    /// write, that "malicious" hook is just the repository's own configured
+    /// hook, and ADR 0003 says a user-initiated write must respect it.
+    #[test]
+    fn write_mode_allows_the_repositorys_own_hooks_path_hook_to_fire() {
+        if !git_available() {
+            eprintln!("skipping: git not found on PATH");
+            return;
+        }
+        let repo = init_repo();
+        let scripts = TempDir::new().expect("tempdir");
+        let hooks_dir = scripts.path().join("hooks");
+        std::fs::create_dir_all(&hooks_dir).expect("create hooks dir");
+        let marker = scripts.path().join("post-index-change-fired");
+        marker_script(&hooks_dir, "post-index-change", &marker);
+
+        std::fs::write(repo.path().join("tracked.txt"), "content").unwrap();
+        raw_git_ok(repo.path(), &["add", "tracked.txt"]);
+        raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "init"]);
+        raw_git_ok(
+            repo.path(),
+            &["config", "core.hooksPath", hooks_dir.to_str().unwrap()],
+        );
+
+        filetime_touch(&repo.path().join("tracked.txt"));
+        assert!(!marker.exists());
+        let cancel = AtomicBool::new(false);
+        let output = run_git(
+            repo.path(),
+            &["status".to_owned(), "--porcelain=v2".to_owned()],
+            GitExecMode::Write,
+            &cancel,
+        )
+        .expect("write-mode status still succeeds");
+        assert_eq!(output.exit_code, 0);
+        assert!(
+            marker.exists(),
+            "GitExecMode::Write must respect the repository's own core.hooksPath hook — \
+             this is the deliberate contrast with background_read_disables_a_malicious_hooks_path_hook"
+        );
     }
 
     #[test]
@@ -576,6 +680,48 @@ mod hostile_fixtures {
             10_000_000,
         )
         .expect_err("a slow invocation must time out");
+        assert_eq!(error.code(), "GIT_EXEC_TIMEOUT");
+    }
+
+    /// The stdin-writer code path (`run_git_with_stdin`/
+    /// `run_git_with_stdin_and_limits`) shares `wait_with_limits` with the
+    /// no-stdin path — this proves the timeout/kill machinery still applies
+    /// correctly when a stdin-writer thread is also in flight (not just that
+    /// the writer thread itself doesn't hang the caller).
+    #[test]
+    fn run_git_with_stdin_also_times_out_a_slow_child() {
+        if !git_available() {
+            eprintln!("skipping: git not found on PATH");
+            return;
+        }
+        let repo = init_repo();
+        let scripts = TempDir::new().expect("tempdir");
+        let script_path = scripts.path().join("slow-diff-external.sh");
+        write_executable_script(&script_path, "sleep 5\necho slow-diff-output");
+
+        std::fs::write(repo.path().join("a.txt"), "one\n").unwrap();
+        raw_git_ok(repo.path(), &["add", "a.txt"]);
+        raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "init"]);
+        std::fs::write(repo.path().join("a.txt"), "two\n").unwrap();
+        raw_git_ok(
+            repo.path(),
+            &["config", "diff.external", script_path.to_str().unwrap()],
+        );
+
+        let cancel = AtomicBool::new(false);
+        // `git diff` never reads stdin, so this payload is simply never
+        // consumed — proving the writer thread completing (or not) has no
+        // bearing on the timeout firing correctly.
+        let error = run_git_with_stdin_and_limits_for_test(
+            repo.path(),
+            &["diff".to_owned()],
+            GitExecMode::BackgroundRead,
+            &cancel,
+            b"unread stdin payload",
+            Duration::from_millis(150),
+            10_000_000,
+        )
+        .expect_err("a slow invocation must time out even on the stdin-capable path");
         assert_eq!(error.code(), "GIT_EXEC_TIMEOUT");
     }
 

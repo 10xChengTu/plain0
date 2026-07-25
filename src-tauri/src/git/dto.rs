@@ -366,5 +366,162 @@ impl GitShowBlobResult {
     }
 }
 
+// --- git_stage_paths / git_unstage_paths / git_discard_paths (F080 S3) -----
+//
+// The three "whole-file path list" write commands share one request shape
+// and one validation routine — a caller-supplied path is rejected (not
+// silently dropped) if it is empty, exceeds a defensive length ceiling, is
+// absolute, or contains a `..` path segment. The `--` separator every
+// `stage`/`discard` domain function places before these paths (see
+// `git::stage`/`git::discard`) already stops a `-`-prefixed path from being
+// misread as a git option — this check is a second, independent line of
+// defense against a path smuggled from outside the repository, not a
+// duplicate of that mechanism.
+
+/// Defensive ceiling on how many paths one stage/unstage/discard call may
+/// name — git itself imposes no such limit; this exists only to reject a
+/// structurally hostile/runaway batch, mirroring `git-codec.ts`'s own
+/// hostile-input-ceiling precedent for this same domain.
+const MAX_GIT_MUTATE_PATHS: usize = 4_096;
+/// Defensive per-path length ceiling — mirrors
+/// `diff::MAX_GIT_SHOW_BLOB_PATH_BYTES`'s exact reasoning for this domain's
+/// other path-carrying requests.
+pub(crate) const MAX_GIT_MUTATE_PATH_BYTES: usize = 4_096;
+
+fn git_mutate_paths_invalid_request() -> CommandError {
+    CommandError::new(
+        "GIT_MUTATE_PATHS_INVALID_REQUEST",
+        "The path list is empty, too large, or contains an invalid path.",
+    )
+}
+
+/// Shared by every path-carrying write request in this module (list or
+/// single) — public at `pub(crate)` so `git::stage`/`git::commit`/
+/// `git::discard` can apply the exact same rule again on their own
+/// already-decoded `&str`/`&[String]` inputs, the same "validated again at
+/// the domain-function layer, not just the wire layer" duplication
+/// `diff::show_blob` already establishes for `GIT_SHOW_BLOB_INVALID_PATH`.
+pub(crate) fn is_valid_mutate_path(path: &str) -> bool {
+    if path.is_empty() || path.len() > MAX_GIT_MUTATE_PATH_BYTES {
+        return false;
+    }
+    if path.starts_with('/') {
+        return false;
+    }
+    !path.split('/').any(|segment| segment == "..")
+}
+
+fn validate_mutate_paths(paths: &[String]) -> Result<(), CommandError> {
+    if paths.is_empty() || paths.len() > MAX_GIT_MUTATE_PATHS {
+        return Err(git_mutate_paths_invalid_request());
+    }
+    if !paths.iter().all(|path| is_valid_mutate_path(path)) {
+        return Err(git_mutate_paths_invalid_request());
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitStagePathsRequest {
+    paths: Vec<String>,
+}
+
+impl GitStagePathsRequest {
+    pub(crate) fn into_parts(self) -> Result<Vec<String>, CommandError> {
+        validate_mutate_paths(&self.paths)?;
+        Ok(self.paths)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitUnstagePathsRequest {
+    paths: Vec<String>,
+}
+
+impl GitUnstagePathsRequest {
+    pub(crate) fn into_parts(self) -> Result<Vec<String>, CommandError> {
+        validate_mutate_paths(&self.paths)?;
+        Ok(self.paths)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitDiscardPathsRequest {
+    paths: Vec<String>,
+}
+
+impl GitDiscardPathsRequest {
+    pub(crate) fn into_parts(self) -> Result<Vec<String>, CommandError> {
+        validate_mutate_paths(&self.paths)?;
+        Ok(self.paths)
+    }
+}
+
+// --- git_stage_blob (F080 S3 hunk-level stage) ------------------------------
+
+/// Mirrors `diff::MAX_GIT_SHOW_BLOB_BYTES` — the same 8 MiB "whole file
+/// version in one IPC round-trip" ceiling, applied here to the *new* content
+/// a caller wants written as a blob rather than a version being read back.
+pub(crate) const MAX_GIT_STAGE_BLOB_BYTES: usize = 8 * 1024 * 1024;
+
+fn git_stage_blob_invalid_request() -> CommandError {
+    CommandError::new(
+        "GIT_STAGE_BLOB_INVALID_REQUEST",
+        "The git stage blob request is invalid.",
+    )
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitStageBlobRequest {
+    path: String,
+    content: Vec<u8>,
+}
+
+impl GitStageBlobRequest {
+    pub(crate) fn into_parts(self) -> Result<(String, Vec<u8>), CommandError> {
+        if !is_valid_mutate_path(&self.path) {
+            return Err(git_stage_blob_invalid_request());
+        }
+        if self.content.len() > MAX_GIT_STAGE_BLOB_BYTES {
+            return Err(git_stage_blob_invalid_request());
+        }
+        Ok((self.path, self.content))
+    }
+}
+
+// --- git_commit ------------------------------------------------------------
+
+/// Defensive ceiling on a commit message's byte length — git itself has no
+/// hard limit; this exists only to reject a structurally hostile/runaway
+/// message, exactly like every other size ceiling in this module.
+pub(crate) const MAX_GIT_COMMIT_MESSAGE_BYTES: usize = 100_000;
+
+fn git_commit_invalid_request() -> CommandError {
+    CommandError::new(
+        "GIT_COMMIT_INVALID_REQUEST",
+        "The commit message is empty or too large.",
+    )
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitCommitRequest {
+    message: String,
+    amend: bool,
+}
+
+impl GitCommitRequest {
+    pub(crate) fn into_parts(self) -> Result<(String, bool), CommandError> {
+        if self.message.trim().is_empty() || self.message.len() > MAX_GIT_COMMIT_MESSAGE_BYTES {
+            return Err(git_commit_invalid_request());
+        }
+        Ok((self.message, self.amend))
+    }
+}
+
 #[cfg(test)]
 mod tests;

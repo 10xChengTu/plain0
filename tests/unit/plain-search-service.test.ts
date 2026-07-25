@@ -103,6 +103,11 @@ function fakeBridge(
 		gitStatus: notImplemented,
 		gitDiffFiles: notImplemented,
 		gitShowBlob: notImplemented,
+		gitStagePaths: notImplemented,
+		gitUnstagePaths: notImplemented,
+		gitStageBlob: notImplemented,
+		gitCommit: notImplemented,
+		gitDiscardPaths: notImplemented,
 	};
 }
 
@@ -221,6 +226,11 @@ function fakeTextSearchBridge(
 		gitStatus: notImplemented,
 		gitDiffFiles: notImplemented,
 		gitShowBlob: notImplemented,
+		gitStagePaths: notImplemented,
+		gitUnstagePaths: notImplemented,
+		gitStageBlob: notImplemented,
+		gitCommit: notImplemented,
+		gitDiscardPaths: notImplemented,
 	};
 
 	return {
