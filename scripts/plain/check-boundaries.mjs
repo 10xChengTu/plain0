@@ -11,6 +11,7 @@ import {
 	validateNotificationOverrideImportBoundary,
 	validateFrontendEntrypointScripts,
 	validateGitCommandRegistration,
+	validateGitDiscardConfirmationBoundary,
 	validateGitIpcBridgeBoundary,
 	validateGitRustBoundary,
 	validateMainCapability,
@@ -744,6 +745,9 @@ for (const failure of validateGitRustBoundary(rustSources)) {
 	fail(failure);
 }
 for (const failure of validateGitIpcBridgeBoundary(rustSources, appSources)) {
+	fail(failure);
+}
+for (const failure of validateGitDiscardConfirmationBoundary(appSources)) {
 	fail(failure);
 }
 

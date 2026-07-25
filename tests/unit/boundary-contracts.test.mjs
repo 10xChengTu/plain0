@@ -36,6 +36,7 @@ import {
 	validateTerminalRustBoundary,
 	validateTrustTerminalCommandRegistration,
 	validateGitCommandRegistration,
+	validateGitDiscardConfirmationBoundary,
 	validateGitIpcBridgeBoundary,
 	validateGitRustBoundary,
 } from "../../scripts/plain/boundary-contracts.mjs";
@@ -9684,6 +9685,229 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
 		).toContain(
 			"native.ts must decode every F080 S3 git write command's response through decodeGitVoid",
+		);
+	});
+});
+
+const gitDiscardAppPaths = [
+	"app/platform/tauri/contracts.ts",
+	"app/platform/tauri/native.ts",
+	"app/platform/tauri/browser-mock.ts",
+	"app/features/scm/plain-scm-view.ts",
+	"app/features/scm/plain-scm-discard.ts",
+];
+const gitDiscardAppSources = gitDiscardAppPaths.map((relativePath) => ({
+	relativePath,
+	source: readFileSync(
+		new URL(`../../${relativePath}`, import.meta.url),
+		"utf8",
+	),
+}));
+
+function replaceGitDiscardAppSource(relativePath, from, to) {
+	return mutateWorkspaceSource(gitDiscardAppSources, relativePath, (source) => {
+		if (!source.includes(from)) {
+			throw new Error(
+				`${relativePath} git discard mutation fixture no longer matches production`,
+			);
+		}
+		return source.replace(from, to);
+	});
+}
+
+describe("Plain F080 S3 git discard confirmation boundary Harness", () => {
+	it("accepts the production single confirmed discardResources route", () => {
+		expect(
+			validateGitDiscardConfirmationBoundary(gitDiscardAppSources),
+		).toEqual([]);
+	});
+
+	it("requires every audited file to be present", () => {
+		expect(validateGitDiscardConfirmationBoundary([])).toContain(
+			"git discard confirmation boundary requires app/features/scm/plain-scm-view.ts",
+		);
+	});
+
+	it("rejects a second gitDiscardPaths call site anywhere else in app/", () => {
+		const relativePath = "app/features/scm/plain-scm-discard-bypass.ts";
+		const hostile = [
+			...gitDiscardAppSources,
+			{
+				relativePath,
+				source: `import type { PlainBridge } from "../../platform/tauri/contracts";
+export async function bypassDiscard(bridge: PlainBridge): Promise<void> {
+	await bridge.gitDiscardPaths(["README.md"]);
+}`,
+			},
+		];
+		expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
+			`${relativePath} must not consume gitDiscardPaths outside PlainScmView.discardResources's single audited call site`,
+		);
+	});
+
+	it("rejects a second call site inside plain-scm-view.ts outside discardResources", () => {
+		const hostile = replaceGitDiscardAppSource(
+			"app/features/scm/plain-scm-view.ts",
+			"private async discardAllWorkingTree(): Promise<void> {\n\t\tawait this.discardResources(this.#discardableWorkingTreePaths(false));\n\t}",
+			`private async discardAllWorkingTree(): Promise<void> {
+		await this.discardResources(this.#discardableWorkingTreePaths(false));
+	}
+
+	private async bypassDiscard(bridge: PlainBridge, relativePaths: readonly string[]): Promise<void> {
+		await bridge.gitDiscardPaths(relativePaths);
+	}`,
+		);
+		expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
+			"app/features/scm/plain-scm-view.ts must not consume gitDiscardPaths outside PlainScmView.discardResources's single audited call site",
+		);
+	});
+
+	it("rejects a duplicated gitDiscardPaths call inside discardResources itself", () => {
+		const hostile = replaceGitDiscardAppSource(
+			"app/features/scm/plain-scm-view.ts",
+			`await this.runGitMutation((bridge) =>
+			bridge.gitDiscardPaths(relativePaths),
+		);`,
+			`await this.runGitMutation((bridge) =>
+			bridge.gitDiscardPaths(relativePaths),
+		);
+		await this.runGitMutation((bridge) =>
+			bridge.gitDiscardPaths(relativePaths),
+		);`,
+		);
+		expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
+			"gitDiscardPaths must have exactly one production call site, inside PlainScmView.discardResources",
+		);
+	});
+
+	it("rejects computed/bracket access to gitDiscardPaths", () => {
+		const hostile = replaceGitDiscardAppSource(
+			"app/features/scm/plain-scm-view.ts",
+			"bridge.gitDiscardPaths(relativePaths)",
+			'bridge["gitDiscardPaths"](relativePaths)',
+		);
+		expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
+			"app/features/scm/plain-scm-view.ts must not consume gitDiscardPaths outside PlainScmView.discardResources's single audited call site",
+		);
+	});
+
+	it("rejects a missing or renamed gitDiscardPaths bridge declaration", () => {
+		const hostile = replaceGitDiscardAppSource(
+			"app/platform/tauri/native.ts",
+			"gitDiscardPaths: async (paths) => {",
+			"gitDiscardPathsRenamed: async (paths) => {",
+		);
+		expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
+			"app/platform/tauri/native.ts must declare gitDiscardPaths exactly once in its audited bridge surface",
+		);
+	});
+
+	it("rejects a duplicated gitDiscardPaths bridge declaration", () => {
+		const hostile = mutateWorkspaceSource(
+			gitDiscardAppSources,
+			"app/platform/tauri/browser-mock.ts",
+			(source) =>
+				`${source}\nconst duplicateGitDiscardMock = { async gitDiscardPaths(paths) { return; } };`,
+		);
+		expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
+			"app/platform/tauri/browser-mock.ts must declare gitDiscardPaths exactly once in its audited bridge surface",
+		);
+	});
+
+	it("rejects any shape of discardResources that does not await, check, then call in that exact order", () => {
+		const cases = [
+			[
+				'if (decision.kind !== "confirmed") {',
+				'if (decision.kind === "confirmed") {',
+			],
+			[
+				`const decision = await resolveDiscardConfirmation(
+			this.dialogService,
+			relativePaths,
+		);
+		if (decision.kind !== "confirmed") {
+			return;
+		}
+		await this.runGitMutation((bridge) =>
+			bridge.gitDiscardPaths(relativePaths),
+		);`,
+				`await this.runGitMutation((bridge) =>
+			bridge.gitDiscardPaths(relativePaths),
+		);
+		const decision = await resolveDiscardConfirmation(
+			this.dialogService,
+			relativePaths,
+		);
+		if (decision.kind !== "confirmed") {
+			return;
+		}`,
+			],
+		];
+		const failure =
+			'PlainScmView.discardResources must await resolveDiscardConfirmation, return unless its result is exactly "confirmed", and only then call bridge.gitDiscardPaths — no other shape may reach the discard bridge call';
+		for (const [from, to] of cases) {
+			const hostile = replaceGitDiscardAppSource(
+				"app/features/scm/plain-scm-view.ts",
+				from,
+				to,
+			);
+			expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
+				failure,
+			);
+		}
+	});
+
+	it("rejects plain-scm-discard.ts importing anything at all", () => {
+		const hostile = mutateWorkspaceSource(
+			gitDiscardAppSources,
+			"app/features/scm/plain-scm-discard.ts",
+			(source) => `import { invoke } from "@tauri-apps/api/core";\n${source}`,
+		);
+		expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
+			"plain-scm-discard.ts must not import anything — it only ever decides whether the caller may discard, and an import is the only way it could ever reach a bridge or service to perform the discard itself",
+		);
+	});
+
+	it("rejects a new top-level declaration added to plain-scm-discard.ts", () => {
+		const hostile = mutateWorkspaceSource(
+			gitDiscardAppSources,
+			"app/features/scm/plain-scm-discard.ts",
+			(source) => `${source}\nexport function leakedHelper(): void {}`,
+		);
+		expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
+			"plain-scm-discard.ts must retain its exact audited top-level surface — no new declaration can quietly add a way for this decide-only module to reach a bridge",
+		);
+	});
+
+	it("rejects resolveDiscardConfirmation skipping the dialog for a non-empty path list", () => {
+		const hostile = replaceGitDiscardAppSource(
+			"app/features/scm/plain-scm-discard.ts",
+			"if (relativePaths.length === 0) {",
+			"if (relativePaths.length === 0 || relativePaths.length < 5) {",
+		);
+		expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
+			"resolveDiscardConfirmation must, for a non-empty path list, unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited no-op/confirm/decline shape",
+		);
+	});
+
+	it("rejects resolveDiscardConfirmation calling a bridge method itself", () => {
+		const hostile = replaceGitDiscardAppSource(
+			"app/features/scm/plain-scm-discard.ts",
+			`export async function resolveDiscardConfirmation(
+	dialogService: DiscardConfirmDialogService,
+	relativePaths: readonly string[],
+): Promise<DiscardDecision> {
+	if (relativePaths.length === 0) {`,
+			`export async function resolveDiscardConfirmation(
+	dialogService: DiscardConfirmDialogService,
+	relativePaths: readonly string[],
+	bridge: { gitDiscardPaths(paths: readonly string[]): Promise<void> },
+): Promise<DiscardDecision> {
+	await bridge.gitDiscardPaths(relativePaths);
+	if (relativePaths.length === 0) {`,
+		);
+		expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
+			"resolveDiscardConfirmation must, for a non-empty path list, unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited no-op/confirm/decline shape",
 		);
 	});
 });

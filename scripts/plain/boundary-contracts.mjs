@@ -6790,6 +6790,373 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 	return failures;
 }
 
+const GIT_DISCARD_VIEW_PATH = "app/features/scm/plain-scm-view.ts";
+const GIT_DISCARD_MODULE_PATH = "app/features/scm/plain-scm-discard.ts";
+
+/**
+ * The three files that may reference the `gitDiscardPaths` identifier at all
+ * without it being a business call: `contracts.ts` declares the `PlainBridge`
+ * method signature, `native.ts` defines the real bridge's forwarding
+ * implementation (routing to the `git_discard_paths` Tauri command), and
+ * `browser-mock.ts` defines the in-browser mock's implementation. None of
+ * these three is a *call* to `gitDiscardPaths` — mirrors how
+ * `validateWorkspaceDeleteTypeScriptBoundary`'s `declarationPaths` separates
+ * "defines/forwards" from "invokes" for the confirmed-delete bridge methods.
+ */
+const GIT_DISCARD_DECLARATION_PATHS = Object.freeze([
+	"app/platform/tauri/contracts.ts",
+	"app/platform/tauri/native.ts",
+	"app/platform/tauri/browser-mock.ts",
+]);
+
+/**
+ * `F080` S3's `gitDiscardPaths` is an irreversible working-tree write (see
+ * `PlainBridge.gitDiscardPaths`'s own doc comment: "This call performs the
+ * discard unconditionally; the caller must have already confirmed with the
+ * user"). Nothing at the Rust command or bridge-interface layer enforces
+ * that — today it holds only because `PlainScmView.discardResources` is the
+ * sole caller and it always awaits `resolveDiscardConfirmation` first. A
+ * later slice (F090's planned blame/history/graph SCM views) could easily
+ * grow a second call site that skips the gate, and `pnpm check` would stay
+ * green. This mirrors `validateWorkspaceDeleteTypeScriptBoundary`'s
+ * confirmed-delete precedent for this codebase's *other* irreversible write,
+ * at the same rigor: lock the bridge method to its one production call site
+ * (`PlainScmView.discardResources`), lock that call site's exact
+ * confirm-then-call body shape, and lock `plain-scm-discard.ts`'s own
+ * audited module face so it can never grow a bridge call or a
+ * dialog-skipping branch of its own.
+ */
+export function validateGitDiscardConfirmationBoundary(appSources) {
+	const failures = [];
+	const normalizedSources = new Map(
+		appSources.map(({ relativePath, source }) => [
+			relativePath.replaceAll("\\", "/"),
+			source,
+		]),
+	);
+	const requiredPaths = Object.freeze([
+		...GIT_DISCARD_DECLARATION_PATHS,
+		GIT_DISCARD_VIEW_PATH,
+		GIT_DISCARD_MODULE_PATH,
+	]);
+	for (const relativePath of requiredPaths) {
+		if (!normalizedSources.has(relativePath)) {
+			failures.push(
+				`git discard confirmation boundary requires ${relativePath}`,
+			);
+		}
+	}
+
+	function containingMethodName(node) {
+		let current = node.parent;
+		while (current !== undefined) {
+			if (
+				ts.isMethodDeclaration(current) ||
+				ts.isFunctionDeclaration(current)
+			) {
+				return typeScriptStaticName(current.name);
+			}
+			current = current.parent;
+		}
+		return undefined;
+	}
+
+	const declarationCounts = new Map(
+		GIT_DISCARD_DECLARATION_PATHS.map((relativePath) => [relativePath, 0]),
+	);
+	let auditedCallCount = 0;
+
+	for (const [normalizedPath, source] of normalizedSources) {
+		if (!normalizedPath.endsWith(".ts") && !normalizedPath.endsWith(".tsx")) {
+			continue;
+		}
+		const sourceFile = ts.createSourceFile(
+			normalizedPath,
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			normalizedPath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+		);
+		const isKnownBridge = collectTypeScriptBridgeAliases(sourceFile);
+
+		function visit(node) {
+			const referencesMethod =
+				(ts.isIdentifier(node) && node.text === "gitDiscardPaths") ||
+				((ts.isStringLiteral(node) ||
+					ts.isNoSubstitutionTemplateLiteral(node)) &&
+					node.text === "gitDiscardPaths");
+			if (referencesMethod) {
+				const parent = node.parent;
+				const isAllowedDeclaration =
+					(normalizedPath === "app/platform/tauri/contracts.ts" &&
+						ts.isMethodSignature(parent) &&
+						parent.name === node) ||
+					(normalizedPath === "app/platform/tauri/native.ts" &&
+						ts.isPropertyAssignment(parent) &&
+						parent.name === node) ||
+					(normalizedPath === "app/platform/tauri/browser-mock.ts" &&
+						(ts.isMethodDeclaration(parent) ||
+							ts.isPropertyAssignment(parent)) &&
+						parent.name === node);
+				if (isAllowedDeclaration) {
+					declarationCounts.set(
+						normalizedPath,
+						declarationCounts.get(normalizedPath) + 1,
+					);
+				} else {
+					const propertyAccess = ts.isIdentifier(node) ? parent : undefined;
+					const directCall =
+						propertyAccess !== undefined &&
+						ts.isPropertyAccessExpression(propertyAccess) &&
+						propertyAccess.name === node &&
+						ts.isCallExpression(propertyAccess.parent) &&
+						propertyAccess.parent.expression === propertyAccess &&
+						isKnownBridge(propertyAccess.expression)
+							? propertyAccess.parent
+							: undefined;
+					const isAuditedCall =
+						directCall !== undefined &&
+						normalizedPath === GIT_DISCARD_VIEW_PATH &&
+						containingMethodName(node) === "discardResources" &&
+						directCall.arguments.length === 1 &&
+						directCall.arguments[0]
+							.getText(sourceFile)
+							.replaceAll(/\s+/g, "") === "relativePaths";
+					if (isAuditedCall) {
+						auditedCallCount += 1;
+					} else {
+						failures.push(
+							`${normalizedPath} must not consume gitDiscardPaths outside PlainScmView.discardResources's single audited call site`,
+						);
+					}
+				}
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(sourceFile);
+	}
+
+	for (const [relativePath, count] of declarationCounts) {
+		if (count !== 1) {
+			failures.push(
+				`${relativePath} must declare gitDiscardPaths exactly once in its audited bridge surface`,
+			);
+		}
+	}
+	if (auditedCallCount !== 1) {
+		failures.push(
+			"gitDiscardPaths must have exactly one production call site, inside PlainScmView.discardResources",
+		);
+	}
+
+	const viewSource = normalizedSources.get(GIT_DISCARD_VIEW_PATH);
+	if (viewSource !== undefined) {
+		failures.push(...validateDiscardResourcesGuardedCall(viewSource));
+	}
+	const discardModuleSource = normalizedSources.get(GIT_DISCARD_MODULE_PATH);
+	if (discardModuleSource !== undefined) {
+		failures.push(
+			...validateDiscardConfirmationModuleFace(discardModuleSource),
+		);
+	}
+
+	return [...new Set(failures)];
+}
+
+/**
+ * Locks `PlainScmView.discardResources` to the exact "await the
+ * confirmation, return unless it is exactly `\"confirmed\"`, only then call
+ * the discard bridge" shape — mirrors
+ * `workspaceDeleteCommandBodyIsExact`/`exactFunctionBody`'s own "precise
+ * method body" technique for this codebase's other irreversible write.
+ * There is deliberately no looser structural check (e.g. "confirm is called
+ * somewhere before the discard call"): a fixed body is the only way to rule
+ * out a second, differently-shaped bridge call slipping in unnoticed.
+ */
+function validateDiscardResourcesGuardedCall(source) {
+	const sourceFile = ts.createSourceFile(
+		GIT_DISCARD_VIEW_PATH,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["plain-scm-view.ts must remain valid TypeScript"];
+	}
+	const methods = [];
+	function visit(node) {
+		if (
+			ts.isMethodDeclaration(node) &&
+			typeScriptStaticName(node.name) === "discardResources"
+		) {
+			methods.push(node);
+		}
+		ts.forEachChild(node, visit);
+	}
+	visit(sourceFile);
+	const expectedBody = `{
+		const decision = await resolveDiscardConfirmation(
+			this.dialogService,
+			relativePaths,
+		);
+		if (decision.kind !== "confirmed") {
+			return;
+		}
+		await this.runGitMutation((bridge) =>
+			bridge.gitDiscardPaths(relativePaths),
+		);
+	}`.replaceAll(/\s+/g, "");
+	if (
+		methods.length !== 1 ||
+		methods[0].body === undefined ||
+		methods[0].body.getText(sourceFile).replaceAll(/\s+/g, "") !== expectedBody
+	) {
+		return [
+			'PlainScmView.discardResources must await resolveDiscardConfirmation, return unless its result is exactly "confirmed", and only then call bridge.gitDiscardPaths — no other shape may reach the discard bridge call',
+		];
+	}
+	return [];
+}
+
+/**
+ * Locks `plain-scm-discard.ts`'s own audited module face: it must import
+ * nothing at all (the module doc comment's "DOM/service-free" claim,
+ * enforced structurally — an import is the only way this module could ever
+ * reach a bridge, `invoke`, or a real Workbench service to perform the
+ * discard itself rather than merely deciding whether the caller may), its
+ * top-level declarations must match the exact audited set (so a future edit
+ * cannot quietly add a helper that reaches a bridge), and
+ * `resolveDiscardConfirmation` itself must match the exact audited
+ * no-op/confirm/decline body — which simultaneously proves it never calls a
+ * bridge method and never has a branch that skips the dialog for a
+ * non-empty path list. Mirrors
+ * `validateWorkspaceDeleteCoordinatorRoute`'s own import/top-level/exact-body
+ * locks for `delete-coordinator.ts`.
+ */
+function validateDiscardConfirmationModuleFace(source) {
+	const failures = [];
+	const sourceFile = ts.createSourceFile(
+		GIT_DISCARD_MODULE_PATH,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["plain-scm-discard.ts must remain valid TypeScript"];
+	}
+
+	if (
+		sourceFile.statements.some((statement) => ts.isImportDeclaration(statement))
+	) {
+		failures.push(
+			"plain-scm-discard.ts must not import anything — it only ever decides whether the caller may discard, and an import is the only way it could ever reach a bridge or service to perform the discard itself",
+		);
+	}
+
+	const expectedTopLevel = new Map([
+		["DiscardConfirmDialogService", { kind: "interface", exported: true }],
+		["MAX_NAMED_PATHS_IN_DETAIL", { kind: "variable", exported: false }],
+		["discardConfirmationMessage", { kind: "function", exported: true }],
+		["discardConfirmationDetail", { kind: "function", exported: true }],
+		["DISCARD_CONFIRM_PRIMARY_BUTTON", { kind: "variable", exported: true }],
+		["DiscardDecision", { kind: "type", exported: true }],
+		[
+			"resolveDiscardConfirmation",
+			{ kind: "function", exported: true, async: true },
+		],
+	]);
+	const topLevelCounts = new Map(
+		[...expectedTopLevel].map(([name]) => [name, 0]),
+	);
+	let topLevelIsExact = true;
+	for (const statement of sourceFile.statements) {
+		if (ts.isImportDeclaration(statement)) {
+			continue;
+		}
+		let name;
+		let kind;
+		if (ts.isVariableStatement(statement)) {
+			if (statement.declarationList.declarations.length !== 1) {
+				topLevelIsExact = false;
+				continue;
+			}
+			name = statement.declarationList.declarations[0].name;
+			kind = "variable";
+		} else if (ts.isFunctionDeclaration(statement)) {
+			name = statement.name;
+			kind = "function";
+		} else if (ts.isInterfaceDeclaration(statement)) {
+			name = statement.name;
+			kind = "interface";
+		} else if (ts.isTypeAliasDeclaration(statement)) {
+			name = statement.name;
+			kind = "type";
+		} else {
+			topLevelIsExact = false;
+			continue;
+		}
+		const expected = ts.isIdentifier(name)
+			? expectedTopLevel.get(name.text)
+			: undefined;
+		const modifierKinds = (statement.modifiers ?? []).map(
+			(modifier) => modifier.kind,
+		);
+		const expectedModifiers = [
+			...(expected?.exported ? [ts.SyntaxKind.ExportKeyword] : []),
+			...(expected?.async ? [ts.SyntaxKind.AsyncKeyword] : []),
+		];
+		if (
+			expected === undefined ||
+			expected.kind !== kind ||
+			!sameArray(modifierKinds, expectedModifiers)
+		) {
+			topLevelIsExact = false;
+		} else {
+			topLevelCounts.set(name.text, topLevelCounts.get(name.text) + 1);
+		}
+	}
+	if (
+		!topLevelIsExact ||
+		[...topLevelCounts.values()].some((count) => count !== 1)
+	) {
+		failures.push(
+			"plain-scm-discard.ts must retain its exact audited top-level surface — no new declaration can quietly add a way for this decide-only module to reach a bridge",
+		);
+	}
+
+	const resolveFunctions = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "resolveDiscardConfirmation",
+	);
+	const expectedResolveBody = `{
+		if (relativePaths.length === 0) {
+			return Object.freeze({ kind: "no-op" });
+		}
+		const confirmation = await dialogService.confirm({
+			message: discardConfirmationMessage(relativePaths),
+			detail: discardConfirmationDetail(relativePaths),
+			primaryButton: DISCARD_CONFIRM_PRIMARY_BUTTON,
+		});
+		return Object.freeze({
+			kind: confirmation.confirmed ? "confirmed" : "declined",
+		});
+	}`.replaceAll(/\s+/g, "");
+	if (
+		resolveFunctions.length !== 1 ||
+		resolveFunctions[0].body === undefined ||
+		resolveFunctions[0].body.getText(sourceFile).replaceAll(/\s+/g, "") !==
+			expectedResolveBody
+	) {
+		failures.push(
+			"resolveDiscardConfirmation must, for a non-empty path list, unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited no-op/confirm/decline shape",
+		);
+	}
+	return failures;
+}
+
 /**
  * Finds every top-level `function <name>(...) { ... }` declaration's body
  * text in a TypeScript source string — a lightweight, brace-matching
