@@ -10,6 +10,14 @@
 //! (fetch/pull/push, each gated by a mandatory ahead/behind preview + confirm
 //! step — see [`network`]'s own module doc comment).
 //!
+//! `F090` (`docs/research/2026-07-26-git-history.md`) builds history/blame
+//! tools on top of this same foundation. S0 added [`blame`] (inline blame +
+//! age heatmap). S1 adds [`log`] (file/line history: [`log::file_history`]/
+//! [`log::line_history_list`]/[`log::line_history_detail`]) — see that
+//! module's own doc comment for its format-string safety design and the
+//! empirically-discovered deviation from the frozen plan's original
+//! drill-down sketch.
+//!
 //! # Subprocess spawning is `exec::run_git`-only
 //!
 //! Every subprocess this domain spawns goes through [`exec::run_git`] —
@@ -63,6 +71,7 @@ pub(crate) mod discard;
 pub(crate) mod discovery;
 pub mod dto;
 pub(crate) mod exec;
+pub(crate) mod log;
 pub(crate) mod network;
 pub(crate) mod repo;
 pub(crate) mod stage;

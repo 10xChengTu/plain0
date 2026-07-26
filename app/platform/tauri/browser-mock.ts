@@ -7,6 +7,9 @@ import type {
 	GitBlobRev,
 	GitBranch,
 	GitDiffFilesResult,
+	GitHistoryEntry,
+	GitHistoryListResult,
+	GitLineHistoryDetail,
 	GitNetworkPreviewResult,
 	GitStatusEntry,
 	GitStatusResult,
@@ -42,6 +45,9 @@ import {
 	frozenGitCommitRequest,
 	frozenGitDiffFilesRequest,
 	frozenGitDiscardPathsRequest,
+	frozenGitFileHistoryRequest,
+	frozenGitLineHistoryDetailRequest,
+	frozenGitLineHistoryListRequest,
 	frozenGitNetworkPreviewRequest,
 	frozenGitPushRequest,
 	frozenGitShowBlobRequest,
@@ -1062,6 +1068,32 @@ export interface BrowserMockGitFixtureForTest {
 	 * `git log` call, which would reject an unknown sha outright — see
 	 * `src-tauri/src/git/blame.rs`'s `blame_commit_messages` doc comment). */
 	readonly blameCommitMessages?: Readonly<Record<string, string>>;
+	/** `F090` S1: seeds the deterministic `gitFileHistory` response, keyed by
+	 * repository-toplevel-relative path — a missing path key defaults to
+	 * `{ entries: [], truncated: false }`. Like `blame` above, this mock never
+	 * re-implements `git log --follow`'s own rename-heuristic traversal (the
+	 * real parser's thorough fixture coverage, including its rename fixture,
+	 * lives in `src-tauri/src/git/log/tests.rs`); it only exists so a
+	 * consuming frontend has structurally correct, scriptable responses to
+	 * develop and test the history sidebar against. */
+	readonly fileHistory?: Readonly<Record<string, GitHistoryListResult>>;
+	/** `F090` S1: seeds the deterministic `gitLineHistoryList` response, keyed
+	 * by path only (a missing path key defaults to `{ entries: [], truncated:
+	 * false }`) — unlike the real `-L<range>` command, this mock has no real
+	 * per-line git history to slice, so the same fixture is returned
+	 * regardless of the requested range. */
+	readonly lineHistoryList?: Readonly<Record<string, GitHistoryListResult>>;
+	/** `F090` S1: seeds the deterministic `gitLineHistoryDetail` response,
+	 * keyed by commit sha (the sha a `lineHistoryList` entry reports) — a sha
+	 * with no fixture entry falls back to a synthesized minimal `diffText`
+	 * (`commit <sha>\n\n    <message>\n`) built from that same
+	 * `lineHistoryList` entry, so a caller does not need to seed both maps
+	 * just to exercise the click-through flow. `gitLineHistoryDetail` still
+	 * enforces the real `skip`/`expectedSha` contract against whatever
+	 * `lineHistoryList` fixture is seeded (`GIT_LINE_HISTORY_DETAIL_NOT_FOUND`/
+	 * `GIT_LINE_HISTORY_DETAIL_STALE_INDEX`), exactly like the real Rust
+	 * implementation. */
+	readonly lineHistoryDetail?: Readonly<Record<string, GitLineHistoryDetail>>;
 	/** When `true`, every git method rejects with `GIT_NO_REPOSITORY` instead
 	 * of returning fixture data — simulates a trusted workspace root that is
 	 * not (or no longer) a Git working tree. */
@@ -5187,6 +5219,19 @@ export function createBrowserMockBridge(
 	const gitBlameCommitMessages = new Map<string, string>(
 		Object.entries(gitFixture.blameCommitMessages ?? {}),
 	);
+	const defaultGitHistoryList: GitHistoryListResult = Object.freeze({
+		entries: Object.freeze([]),
+		truncated: false,
+	});
+	const gitFileHistoryFixtures = new Map<string, GitHistoryListResult>(
+		Object.entries(gitFixture.fileHistory ?? {}),
+	);
+	const gitLineHistoryListFixtures = new Map<string, GitHistoryListResult>(
+		Object.entries(gitFixture.lineHistoryList ?? {}),
+	);
+	const gitLineHistoryDetailFixtures = new Map<string, GitLineHistoryDetail>(
+		Object.entries(gitFixture.lineHistoryDetail ?? {}),
+	);
 
 	// --- F080 S3: mutable stage/unstage/commit/discard simulation ---------
 	//
@@ -6432,6 +6477,64 @@ export function createBrowserMockBridge(
 				}
 			}
 			return Object.freeze({ messages });
+		},
+		async gitFileHistory(path_) {
+			const request = frozenGitFileHistoryRequest(path_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return gitFileHistoryFixtures.get(request.path) ?? defaultGitHistoryList;
+		},
+		async gitLineHistoryList(path_, range_) {
+			const request = frozenGitLineHistoryListRequest(path_, range_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			// This mock has no real per-line git history to slice by range — the
+			// seeded fixture (keyed by path only) is returned regardless of the
+			// requested range, exactly like `gitFileHistory`'s own "one fixture
+			// per path" simplicity — see `BrowserMockGitFixtureForTest.
+			// lineHistoryList`'s own doc comment.
+			return (
+				gitLineHistoryListFixtures.get(request.path) ?? defaultGitHistoryList
+			);
+		},
+		async gitLineHistoryDetail(path_, range_, skip_, expectedSha_) {
+			const request = frozenGitLineHistoryDetailRequest(
+				path_,
+				range_,
+				skip_,
+				expectedSha_,
+			);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const list =
+				gitLineHistoryListFixtures.get(request.path) ?? defaultGitHistoryList;
+			const entry: GitHistoryEntry | undefined = list.entries[request.skip];
+			if (entry === undefined) {
+				throw commandError(
+					"GIT_LINE_HISTORY_DETAIL_NOT_FOUND",
+					"No commit exists at the requested position in this line's history.",
+				);
+			}
+			if (entry.sha !== request.expectedSha) {
+				throw commandError(
+					"GIT_LINE_HISTORY_DETAIL_STALE_INDEX",
+					"The line's history has changed since it was listed; refresh and try again.",
+				);
+			}
+			const seeded = gitLineHistoryDetailFixtures.get(entry.sha);
+			if (seeded !== undefined) {
+				return seeded;
+			}
+			return Object.freeze({
+				sha: entry.sha,
+				diffText: `commit ${entry.sha}\n\n    ${entry.message}\n`,
+			});
 		},
 	};
 }

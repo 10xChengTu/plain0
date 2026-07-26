@@ -272,6 +272,15 @@ function testBridge(
 		async gitBlameCommitMessages() {
 			throw new Error("unused");
 		},
+		async gitFileHistory() {
+			throw new Error("unused");
+		},
+		async gitLineHistoryList() {
+			throw new Error("unused");
+		},
+		async gitLineHistoryDetail() {
+			throw new Error("unused");
+		},
 		...overrides,
 	};
 }

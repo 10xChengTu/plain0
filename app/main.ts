@@ -24,6 +24,7 @@ import { configurePlainTerminalBridge } from "./features/terminal/plain-terminal
 import { encodeGitResourceUri, GIT_URI_SCHEME } from "./features/scm/git-uri";
 import { createPlainGitBlameContribution } from "./features/scm/plain-git-blame-contribution";
 import { createPlainGitTextModelContentProvider } from "./features/scm/plain-git-content-provider";
+import { configurePlainGitHistoryBridge } from "./features/scm/plain-git-history-view";
 import { registerPlainScmCommands } from "./features/scm/plain-scm-commands";
 import { configurePlainScmBridge } from "./features/scm/plain-scm-view";
 import "./features/scm/scm-contribution";
@@ -156,6 +157,7 @@ async function bootstrap(): Promise<void> {
 	configurePlainSearchBridge(bridge);
 	configurePlainTerminalBridge(bridge);
 	configurePlainScmBridge(bridge);
+	configurePlainGitHistoryBridge(bridge);
 	await initialize(createServiceOverrides(), container, {
 		productConfiguration: {
 			nameShort: "Plain",

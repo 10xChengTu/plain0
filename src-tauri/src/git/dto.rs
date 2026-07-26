@@ -13,6 +13,7 @@ use crate::error::CommandError;
 
 use super::blame::{BlameCommitHeader, BlameLineRange, BlameResult, BLAME_UNCOMMITTED_SHA};
 use super::diff::{DiffFileEntry, DiffStatusKind, GitBlobRev};
+use super::log::{HistoryEntry, HistoryList, LineHistoryDetail, LineRange};
 use super::network::NetworkOperation;
 use super::status::{
     BranchHead, BranchInfo, BranchOid, GitStatus, RenameOrCopyKind, StatusEntry, SubmoduleState,
@@ -792,6 +793,149 @@ pub struct GitBlameCommitMessagesResult {
 impl GitBlameCommitMessagesResult {
     pub(crate) const fn new(messages: HashMap<String, String>) -> Self {
         Self { messages }
+    }
+}
+
+// --- git_file_history / git_line_history_list / git_line_history_detail
+// (F090 S1) -------------------------------------------------------------
+
+fn git_log_invalid_request() -> CommandError {
+    CommandError::new("GIT_LOG_INVALID_REQUEST", "The git log request is invalid.")
+}
+
+/// Mirrors `log::is_lowercase_hex40` — kept as its own independent copy
+/// here, exactly like `MAX_GIT_MUTATE_PATH_BYTES` above is this file's own
+/// copy of a ceiling also enforced deeper in the stack (see
+/// `git::commit`'s module doc comment for why domain functions re-validate
+/// what the DTO layer already checked, and vice versa here: the DTO layer
+/// rejects a malformed `expectedSha` before ever resolving a repository).
+fn is_lowercase_hex40(bytes: &[u8]) -> bool {
+    bytes.len() == 40
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitFileHistoryRequest {
+    path: String,
+}
+
+impl GitFileHistoryRequest {
+    pub(crate) fn into_parts(self) -> Result<String, CommandError> {
+        if !is_valid_mutate_path(&self.path) {
+            return Err(git_log_invalid_request());
+        }
+        Ok(self.path)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitLogLineRangeWire {
+    start: u32,
+    end: u32,
+}
+
+fn line_range_from_wire(value: GitLogLineRangeWire) -> Result<LineRange, CommandError> {
+    if value.start == 0 || value.end < value.start {
+        return Err(git_log_invalid_request());
+    }
+    Ok(LineRange {
+        start: value.start,
+        end: value.end,
+    })
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitLineHistoryListRequest {
+    path: String,
+    range: GitLogLineRangeWire,
+}
+
+impl GitLineHistoryListRequest {
+    pub(crate) fn into_parts(self) -> Result<(String, LineRange), CommandError> {
+        if !is_valid_mutate_path(&self.path) {
+            return Err(git_log_invalid_request());
+        }
+        let range = line_range_from_wire(self.range)?;
+        Ok((self.path, range))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitLineHistoryDetailRequest {
+    path: String,
+    range: GitLogLineRangeWire,
+    skip: u32,
+    expected_sha: String,
+}
+
+impl GitLineHistoryDetailRequest {
+    pub(crate) fn into_parts(self) -> Result<(String, LineRange, u32, String), CommandError> {
+        if !is_valid_mutate_path(&self.path) {
+            return Err(git_log_invalid_request());
+        }
+        let range = line_range_from_wire(self.range)?;
+        if !is_lowercase_hex40(self.expected_sha.as_bytes()) {
+            return Err(git_log_invalid_request());
+        }
+        Ok((self.path, range, self.skip, self.expected_sha))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHistoryEntryWire {
+    sha: String,
+    message: String,
+}
+
+impl From<HistoryEntry> for GitHistoryEntryWire {
+    fn from(value: HistoryEntry) -> Self {
+        Self {
+            sha: value.sha,
+            message: value.message,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHistoryListResultWire {
+    entries: Vec<GitHistoryEntryWire>,
+    truncated: bool,
+}
+
+impl From<HistoryList> for GitHistoryListResultWire {
+    fn from(value: HistoryList) -> Self {
+        Self {
+            entries: value
+                .entries
+                .into_iter()
+                .map(GitHistoryEntryWire::from)
+                .collect(),
+            truncated: value.truncated,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitLineHistoryDetailResultWire {
+    sha: String,
+    diff_text: String,
+}
+
+impl From<LineHistoryDetail> for GitLineHistoryDetailResultWire {
+    fn from(value: LineHistoryDetail) -> Self {
+        Self {
+            sha: value.sha,
+            diff_text: value.diff_text,
+        }
     }
 }
 

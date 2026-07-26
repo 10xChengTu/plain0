@@ -785,6 +785,53 @@ export interface GitBlameCommitMessagesResult {
 	readonly messages: Readonly<Record<string, string>>;
 }
 
+// --- Git file/line history (F090 S1: `git::log`) ----------------------------
+
+/** A 1-based, inclusive line range for [`gitLineHistoryList`]/
+ * [`gitLineHistoryDetail`] — unlike [`GitBlameLineRange`] (optional,
+ * `null` means whole-file), this is always required: line history has no
+ * "whole file" mode (that is [`gitFileHistory`]). Kept as its own
+ * independent type, not a reuse of `GitBlameLineRange`, mirroring
+ * `src-tauri/src/git/log.rs`'s own `LineRange` (a separate type from
+ * `blame::BlameLineRange`, same shape, different meaning). */
+export interface GitLogLineRange {
+	readonly start: number;
+	readonly end: number;
+}
+
+/** One commit's `sha` + full message body (`%B`) — deliberately *not* an
+ * author/date-bearing type: see `src-tauri/src/git/log.rs`'s own module doc
+ * comment for why this domain's list-producing commands never fetch a
+ * second free-text field (author name) alongside the message body in one
+ * `%x1f`-delimited `git log --format` record (only one such field can ever
+ * be safely last). A caller wanting the message's first line for a compact
+ * row derives it itself (e.g. `message.split("\n")[0]`). */
+export interface GitHistoryEntry {
+	readonly sha: string;
+	readonly message: string;
+}
+
+/** Result shape shared by [`gitFileHistory`] and [`gitLineHistoryList`] —
+ * both are "ordered commit list" queries against the same underlying
+ * sha+full-body format, differing only in which `git log` invocation
+ * produced them. `truncated` is `true` when more commits actually matched
+ * than were returned (a defensive response-size ceiling, not a git limit —
+ * see `src-tauri/src/git/log.rs`'s `MAX_HISTORY_ENTRIES`). */
+export interface GitHistoryListResult {
+	readonly entries: readonly GitHistoryEntry[];
+	readonly truncated: boolean;
+}
+
+/** The raw, human-readable `git log -p`-style text (commit header, author,
+ * date, message, and the unified diff hunk) for one [`gitLineHistoryList`]
+ * entry, drilled into via [`gitLineHistoryDetail`] — deliberately
+ * preformatted display text, never field-parsed by this domain (see that
+ * method's own doc comment for why). */
+export interface GitLineHistoryDetail {
+	readonly sha: string;
+	readonly diffText: string;
+}
+
 export type Unlisten = () => void | Promise<void>;
 
 export interface PlainBridge {
@@ -1149,4 +1196,45 @@ export interface PlainBridge {
 	gitBlameCommitMessages(
 		shas: readonly string[],
 	): Promise<GitBlameCommitMessagesResult>;
+	/** `F090` S1: `git log -z --format=%H%x1f%B --no-patch --follow -- <path>`
+	 * — the whole-file commit list, newest first. `--follow` is git's own
+	 * documented *heuristic* rename tracker, not a guarantee (see
+	 * `src-tauri/src/git/log.rs`'s own module doc comment). A path with no
+	 * history at all (never committed, or never existed) is **not** a
+	 * rejection — it resolves to `{ entries: [], truncated: false }`. Same
+	 * trust/repository rejections as `gitStatus`. */
+	gitFileHistory(path: string): Promise<GitHistoryListResult>;
+	/** `F090` S1: `git log -z --format=%H%x1f%B --no-patch -L<range>:<path>` —
+	 * the commit list touching one specific line range, newest first (this
+	 * already crosses a rename on its own, by default, for the tracked line —
+	 * seeing both the commit that last changed it *and* the earlier commit
+	 * that introduced it). Same trust/repository rejections as `gitStatus`;
+	 * rejects with `GIT_LOG_INVALID_RANGE` for a structurally invalid range,
+	 * `GIT_LINE_HISTORY_PATH_NOT_FOUND` for a path absent at the current
+	 * revision, or `GIT_LINE_HISTORY_RANGE_OUT_OF_BOUNDS` when `range` exceeds
+	 * the file's current line count. */
+	gitLineHistoryList(
+		path: string,
+		range: GitLogLineRange,
+	): Promise<GitHistoryListResult>;
+	/** `F090` S1: drills into one `gitLineHistoryList(path, range)` entry's
+	 * actual diff hunk. `skip` is the zero-based position of the desired entry
+	 * within that *same* call's own result order (`entries[skip]`) —
+	 * **not** an arbitrary commit-ish; see `src-tauri/src/git/log.rs`'s own
+	 * module doc comment for why a bare `<sha>` positional does not work
+	 * across a rename, and why this re-walks the identical `-L` query instead,
+	 * narrowed to one record via `--skip`/`--max-count=1`. `expectedSha` must
+	 * be `entries[skip].sha` from that same list call; rejects with
+	 * `GIT_LINE_HISTORY_DETAIL_STALE_INDEX` if the underlying history shifted
+	 * between the list fetch and this call (a new commit landing on the same
+	 * line), rather than silently showing the wrong commit's diff, or
+	 * `GIT_LINE_HISTORY_DETAIL_NOT_FOUND` if no entry exists at `skip` at all
+	 * (e.g. a stale, now-out-of-range position). Same range/path rejections as
+	 * `gitLineHistoryList`. */
+	gitLineHistoryDetail(
+		path: string,
+		range: GitLogLineRange,
+		skip: number,
+		expectedSha: string,
+	): Promise<GitLineHistoryDetail>;
 }

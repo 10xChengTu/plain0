@@ -121,6 +121,9 @@ function createFakeBridge(overrides: Partial<PlainBridge> = {}): {
 		gitNetworkCancel: notImplemented,
 		gitBlameFile: notImplemented,
 		gitBlameCommitMessages: notImplemented,
+		gitFileHistory: notImplemented,
+		gitLineHistoryList: notImplemented,
+		gitLineHistoryDetail: notImplemented,
 		...overrides,
 	};
 	return { bridge, state };

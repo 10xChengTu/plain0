@@ -113,7 +113,22 @@ GIT_LOG_COMMIT_META_ARGS = ["log", "-z", "--format=%H%x1f%B", "--no-patch"]
                           其他元数据若需要，必须各自独立取或改用不可被内容伪造的编码。
 GIT_LOG_FILE_HISTORY_ARGS = GIT_LOG_COMMIT_META_ARGS + ["--follow", "--", <path>]
 GIT_LOG_LINE_HISTORY_ARGS = GIT_LOG_COMMIT_META_ARGS + ["-L<start>,<end>:<path>"]
-                        （drill-down 单条：["log", "-1", "-L<start>,<end>:<path>", <sha>]，不再需要 --no-patch）
+                        ★ S1 实测修正一：`--follow` 与 `-L` **互斥**，不能叠加
+                          （`fatal: --follow requires exactly one pathspec`）。
+                          故 line-history 变体不带 `--follow`，只有 file-history 带。
+                        ★ S1 实测修正二：本文档原写的 drill-down 形状
+                          ["log", "-1", "-L<start>,<end>:<path>", <sha>] **实测不可用**。
+                          `-L<range>:<path>` 的 <path> 是相对**遍历起点**解析的：一旦
+                          <sha> 是某次 rename 之前的提交，那棵树里并不存在"当前(rename 后)
+                          路径名"，git 直接 `fatal: There is no path <path> in the commit`。
+                          已用真实 rename fixture 复现并固化为永久回归测试。
+                          改用的形状：重跑与 list **完全相同**的命令（隐式锚定 HEAD，
+                          因此路径始终按当前名解析），再用 `--skip=<n> --max-count=1`
+                          截取第 n 条；<n> 是调用方已持有的 list 下标。为覆盖"list 之后
+                          仓库又有新提交导致下标漂移"的竞态，调用方必须同时传入期望 sha，
+                          服务端校验落地 commit 与之一致，不一致返回
+                          GIT_LINE_HISTORY_DETAIL_STALE_INDEX；下标越界时 git 退出码为 0
+                          且输出为空(已实测)，映射为 GIT_LINE_HISTORY_DETAIL_NOT_FOUND。
 GIT_SHOW_COMMIT_ARGS  = ["show", "--no-color", "--no-textconv", "--no-ext-diff",
                           "--first-parent", "--name-status"]（复用 F080 diff 双调用模式再加 --numstat 变体取增删行数）
 GIT_LOG_GRAPH_ARGS    = ["log", "-z", "--format=<FIXED, 含 %H%x1f%P%x1f...>", "--all"|"--branches"（不用 --all，因其会带出 refs/stash，见实测）]
@@ -172,7 +187,7 @@ F090 acceptance 第 3 条明确要求"stash、worktree 工作流通过 fixture"�
 ## 切片拆分（参考 F080 粒度,每片可独立验收、独立提交）
 
 1. **S0 blame 核心 + age heatmap**：Rust `git::blame` 模块（`--line-porcelain --root -c core.quotePath=false [-L] [-c]`,批量 `git log --no-walk` 元数据）、`GIT_HISTORY_COMMAND_CONTRACTS` 的 blame 子集、`validateGitBlameHardeningArgs`；前端 Monaco decoration + hover provider + age 颜色插值；含恶意含 LF/非 ASCII 文件名的 fixture（如实测出的行为超出可解析范围,记录为已知限制而非阻塞本切片）。
-2. **S1 文件与行历史**：`git::log` 模块的三个变体（file-history 用 `--follow`、line-history-list 用 `--no-patch -L`、line-history-detail 用 `-1 -L <sha>`）；前端侧栏列表 + 点开展示具体 diff hunk；含 rename fixture（验证 `--follow` 与默认 `-L` 追踪行为的实测结论）。
+2. **S1 文件与行历史**（**已完成**；line-history-detail 的实际形状见上方 ★ S1 实测修正二，不是这里原写的 `-1 -L <sha>`）：`git::log` 模块的三个变体（file-history 用 `--follow`、line-history-list 用 `--no-patch -L`、line-history-detail 用 `--skip=<n> --max-count=1` + 期望 sha 校验）；前端侧栏列表 + 点开展示具体 diff hunk；含 rename fixture（验证 `--follow` 与默认 `-L` 追踪行为的实测结论）。
 3. **S2 compare / commit 详情**：`show-commit`（强制 `--first-parent`)命令、merge 提交 fixture（验证空 diff 陷阱已被规避）；安装 `multi-diff-editor-service-override`、自建 `plain-git-commit:` resolver 接入 `MultiDiffEditorItem[]`；bundle 债务基线核对（零意外新增 debt source,同 F080 S2 对 scm override 的验证纪律）。
 4. **S3 graph + refs**：`git::log`（graph 用途,parents/refs 字段)+ `git::refs`（`for-each-ref`）模块；前端 SVG swimlane 布局算法（自建实现)+ refs 侧栏；性能基准（构造合成大仓库或浅克隆真实大仓库,给出真实数字而非只引用他人报告）。
 5. **S4 stash 工作流**：`git::stash` 模块（list/show 只读 + push/apply/pop/drop 写)+ `validateGitStashConfirmationBoundary`；前端 stash 面板 + 确认对话框（pop/drop 走确认,push/apply 走提示不强确认）。

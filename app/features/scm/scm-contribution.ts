@@ -9,12 +9,19 @@ import {
 	type IViewsRegistry,
 } from "@codingame/monaco-vscode-api/vscode/vs/workbench/common/views";
 
+import { PlainGitHistoryView } from "./plain-git-history-view";
 import { PlainScmView } from "./plain-scm-view";
 
 /** `Plain: Refresh Source Control` reveals this view via
  * `IViewsService.openView` — see `plain-scm-commands.ts`. */
 export const SCM_VIEW_CONTAINER_ID = "plain.workbench.viewContainer.scm";
 export const SCM_VIEW_ID = PlainScmView.ID;
+/** `F090` S1: `PlainGitHistoryView`'s registered id — kept in the same
+ * Source Control view container as `PlainScmView` (see
+ * `registerViews`'s own call below), matching the GitLens-style information
+ * architecture convention the frozen research doc cites as an interaction
+ * *reference* only ("历史归在源码管理面板下") — never any of its code. */
+export const GIT_HISTORY_VIEW_ID = PlainGitHistoryView.ID;
 
 /**
  * Registers exactly one Sidebar view container and its one view pane —
@@ -60,6 +67,14 @@ Registry.as<IViewsRegistry>(Extensions.ViewsRegistry).registerViews(
 			name: { value: "Source Control", original: "Source Control" },
 			ctorDescriptor: new SyncDescriptor(PlainScmView),
 			canToggleVisibility: false,
+			canMoveView: true,
+		},
+		{
+			id: GIT_HISTORY_VIEW_ID,
+			containerIcon: Codicon.history,
+			name: { value: "History", original: "History" },
+			ctorDescriptor: new SyncDescriptor(PlainGitHistoryView),
+			canToggleVisibility: true,
 			canMoveView: true,
 		},
 	],

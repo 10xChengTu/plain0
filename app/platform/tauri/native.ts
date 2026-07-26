@@ -87,6 +87,8 @@ import {
 	decodeGitBlameCommitMessagesResult,
 	decodeGitBlameFileResult,
 	decodeGitDiffFilesResult,
+	decodeGitHistoryListResult,
+	decodeGitLineHistoryDetailResult,
 	decodeGitNetworkPreviewResult,
 	decodeGitShowBlobResult,
 	decodeGitStatusResult,
@@ -96,6 +98,9 @@ import {
 	frozenGitCommitRequest,
 	frozenGitDiffFilesRequest,
 	frozenGitDiscardPathsRequest,
+	frozenGitFileHistoryRequest,
+	frozenGitLineHistoryDetailRequest,
+	frozenGitLineHistoryListRequest,
 	frozenGitNetworkPreviewRequest,
 	frozenGitPushRequest,
 	frozenGitShowBlobRequest,
@@ -577,6 +582,29 @@ export function createNativeBridge(): PlainBridge {
 			const request = frozenGitBlameCommitMessagesRequest(shas);
 			return decodeGitBlameCommitMessagesResult(
 				await invoke<unknown>("git_blame_commit_messages", { request }),
+			);
+		},
+		gitFileHistory: async (path) => {
+			const request = frozenGitFileHistoryRequest(path);
+			return decodeGitHistoryListResult(
+				await invoke<unknown>("git_file_history", { request }),
+			);
+		},
+		gitLineHistoryList: async (path, range) => {
+			const request = frozenGitLineHistoryListRequest(path, range);
+			return decodeGitHistoryListResult(
+				await invoke<unknown>("git_line_history_list", { request }),
+			);
+		},
+		gitLineHistoryDetail: async (path, range, skip, expectedSha) => {
+			const request = frozenGitLineHistoryDetailRequest(
+				path,
+				range,
+				skip,
+				expectedSha,
+			);
+			return decodeGitLineHistoryDetailResult(
+				await invoke<unknown>("git_line_history_detail", { request }),
 			);
 		},
 	};

@@ -9349,6 +9349,10 @@ describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
 		new URL("../../src-tauri/src/git/exec.rs", import.meta.url),
 		"utf8",
 	);
+	const gitLogSourceForRustBoundary = readFileSync(
+		new URL("../../src-tauri/src/git/log.rs", import.meta.url),
+		"utf8",
+	);
 
 	const baselineGitRustSources = Object.freeze([
 		{ relativePath: "src-tauri/src/git/status.rs", source: gitStatusSource },
@@ -9360,6 +9364,10 @@ describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
 		{
 			relativePath: "src-tauri/src/git/exec.rs",
 			source: gitExecSourceForRustBoundary,
+		},
+		{
+			relativePath: "src-tauri/src/git/log.rs",
+			source: gitLogSourceForRustBoundary,
 		},
 	]);
 
@@ -9984,7 +9992,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the fifteen audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the eighteen audited git methods, no more and no fewer",
 		);
 	});
 
@@ -10048,7 +10056,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the fifteen audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the eighteen audited git methods, no more and no fewer",
 		);
 	});
 
@@ -10109,7 +10117,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the fifteen audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the eighteen audited git methods, no more and no fewer",
 		);
 	});
 
@@ -10122,7 +10130,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the fifteen audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the eighteen audited git methods, no more and no fewer",
 		);
 	});
 

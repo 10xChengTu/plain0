@@ -30,11 +30,13 @@ use super::discard;
 use super::dto::{
     GitBlameCommitMessagesRequest, GitBlameCommitMessagesResult, GitBlameFileRequest,
     GitBlameFileResult, GitCommitRequest, GitDiffFilesRequest, GitDiffFilesResult,
-    GitDiscardPathsRequest, GitFetchRequest, GitNetworkCancelRequest, GitNetworkPreviewRequest,
-    GitNetworkPreviewResult, GitPullRequest, GitPushRequest, GitShowBlobRequest, GitShowBlobResult,
-    GitStageBlobRequest, GitStagePathsRequest, GitStatusRequest, GitStatusResult,
-    GitUnstagePathsRequest,
+    GitDiscardPathsRequest, GitFetchRequest, GitFileHistoryRequest, GitHistoryListResultWire,
+    GitLineHistoryDetailRequest, GitLineHistoryDetailResultWire, GitLineHistoryListRequest,
+    GitNetworkCancelRequest, GitNetworkPreviewRequest, GitNetworkPreviewResult, GitPullRequest,
+    GitPushRequest, GitShowBlobRequest, GitShowBlobResult, GitStageBlobRequest,
+    GitStagePathsRequest, GitStatusRequest, GitStatusResult, GitUnstagePathsRequest,
 };
+use super::log;
 use super::network::{self, GitNetworkService};
 use super::stage;
 use super::status;
@@ -245,6 +247,58 @@ pub(crate) async fn git_blame_commit_messages(
         blame::blame_commit_messages(trust.inner(), workspace.inner(), window.label(), &shas)
             .await?;
     Ok(GitBlameCommitMessagesResult::new(messages))
+}
+
+#[tauri::command]
+pub(crate) async fn git_file_history(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    request: GitFileHistoryRequest,
+) -> Result<GitHistoryListResultWire, CommandError> {
+    let path = request.into_parts()?;
+    let result = log::file_history(trust.inner(), workspace.inner(), window.label(), &path).await?;
+    Ok(GitHistoryListResultWire::from(result))
+}
+
+#[tauri::command]
+pub(crate) async fn git_line_history_list(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    request: GitLineHistoryListRequest,
+) -> Result<GitHistoryListResultWire, CommandError> {
+    let (path, range) = request.into_parts()?;
+    let result = log::line_history_list(
+        trust.inner(),
+        workspace.inner(),
+        window.label(),
+        &path,
+        range,
+    )
+    .await?;
+    Ok(GitHistoryListResultWire::from(result))
+}
+
+#[tauri::command]
+pub(crate) async fn git_line_history_detail(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    request: GitLineHistoryDetailRequest,
+) -> Result<GitLineHistoryDetailResultWire, CommandError> {
+    let (path, range, skip, expected_sha) = request.into_parts()?;
+    let result = log::line_history_detail(
+        trust.inner(),
+        workspace.inner(),
+        window.label(),
+        &path,
+        range,
+        skip,
+        &expected_sha,
+    )
+    .await?;
+    Ok(GitLineHistoryDetailResultWire::from(result))
 }
 
 #[tauri::command]

@@ -11,6 +11,10 @@ import type {
 	GitDiffFileEntry,
 	GitDiffFilesResult,
 	GitDiffStatusKind,
+	GitHistoryEntry,
+	GitHistoryListResult,
+	GitLineHistoryDetail,
+	GitLogLineRange,
 	GitNetworkOperation,
 	GitNetworkPreviewResult,
 	GitRenameOrCopyKind,
@@ -1187,5 +1191,187 @@ export function decodeGitBlameCommitMessagesResult(
 		);
 		rejectProxyObject(value);
 		return Object.freeze({ messages });
+	});
+}
+
+// --- F090 S1: git file/line history (`git::log`) ----------------------------
+
+// Defensive decode-side ceiling — a real response is already capped
+// server-side by `src-tauri/src/git/log.rs`'s own `MAX_HISTORY_ENTRIES`
+// (500), so this exists only to reject a structurally hostile/runaway
+// payload with generous headroom, mirroring `MAX_GIT_BLAME_ENTRIES`'s own
+// "far above the real ceiling" rationale.
+const MAX_GIT_HISTORY_ENTRIES = 10_000;
+/** Mirrors `src-tauri/src/git/exec.rs`'s `GIT_EXEC_OUTPUT_CAP_BYTES` — a
+ * `gitLineHistoryDetail` response's `diffText` can never exceed one
+ * invocation's own captured-output cap. */
+const MAX_GIT_LINE_HISTORY_DETAIL_DIFF_TEXT_CHARS = 10_000_000;
+
+function gitFileHistoryRequestInvalid(): never {
+	return requestViolation(
+		"GIT_LOG_INVALID_REQUEST",
+		"The git file history request is invalid.",
+	);
+}
+
+/** Builds a frozen `git_file_history` request. */
+export function frozenGitFileHistoryRequest(
+	path: unknown,
+): Readonly<{ path: string }> {
+	if (
+		typeof path !== "string" ||
+		path.length === 0 ||
+		path.length > MAX_GIT_MUTATE_PATH_CHARS
+	) {
+		return gitFileHistoryRequestInvalid();
+	}
+	return Object.freeze({ path });
+}
+
+function isValidGitLogLineRange(value: unknown): value is GitLogLineRange {
+	return (
+		isPlainObject(value) &&
+		hasExactKeys(value, ["start", "end"]) &&
+		isSafeNonNegativeInteger(value.start) &&
+		isSafeNonNegativeInteger(value.end) &&
+		value.start >= 1 &&
+		value.end >= value.start
+	);
+}
+
+function gitLineHistoryListRequestInvalid(): never {
+	return requestViolation(
+		"GIT_LOG_INVALID_REQUEST",
+		"The git line history list request is invalid.",
+	);
+}
+
+/** Builds a frozen `git_line_history_list` request — unlike
+ * `frozenGitBlameFileRequest`'s `range`, this one is never `null`: line
+ * history has no whole-file mode (that is `gitFileHistory`). */
+export function frozenGitLineHistoryListRequest(
+	path: unknown,
+	range: unknown,
+): Readonly<{ path: string; range: GitLogLineRange }> {
+	if (
+		typeof path !== "string" ||
+		path.length === 0 ||
+		path.length > MAX_GIT_MUTATE_PATH_CHARS
+	) {
+		return gitLineHistoryListRequestInvalid();
+	}
+	if (!isValidGitLogLineRange(range)) {
+		return gitLineHistoryListRequestInvalid();
+	}
+	return Object.freeze({
+		path,
+		range: Object.freeze({ start: range.start, end: range.end }),
+	});
+}
+
+function gitLineHistoryDetailRequestInvalid(): never {
+	return requestViolation(
+		"GIT_LOG_INVALID_REQUEST",
+		"The git line history detail request is invalid.",
+	);
+}
+
+/** Builds a frozen `git_line_history_detail` request. `skip` must be a safe
+ * non-negative integer (the zero-based position within a previously-fetched
+ * `gitLineHistoryList` call's own result order — never an arbitrary index);
+ * `expectedSha` must be a real, exactly 40-lowercase-hex commit id (the sha
+ * that same list entry reported) — see `PlainBridge.gitLineHistoryDetail`'s
+ * own doc comment for why this is required, not optional. */
+export function frozenGitLineHistoryDetailRequest(
+	path: unknown,
+	range: unknown,
+	skip: unknown,
+	expectedSha: unknown,
+): Readonly<{
+	path: string;
+	range: GitLogLineRange;
+	skip: number;
+	expectedSha: string;
+}> {
+	if (
+		typeof path !== "string" ||
+		path.length === 0 ||
+		path.length > MAX_GIT_MUTATE_PATH_CHARS
+	) {
+		return gitLineHistoryDetailRequestInvalid();
+	}
+	if (!isValidGitLogLineRange(range)) {
+		return gitLineHistoryDetailRequestInvalid();
+	}
+	if (!isSafeNonNegativeInteger(skip)) {
+		return gitLineHistoryDetailRequestInvalid();
+	}
+	if (!isGitBlameSha(expectedSha)) {
+		return gitLineHistoryDetailRequestInvalid();
+	}
+	return Object.freeze({
+		path,
+		range: Object.freeze({ start: range.start, end: range.end }),
+		skip,
+		expectedSha,
+	});
+}
+
+function decodeGitHistoryEntry(value: unknown): GitHistoryEntry {
+	if (!isPlainObject(value) || !hasExactKeys(value, ["sha", "message"])) {
+		return violation();
+	}
+	if (!isGitBlameSha(value.sha) || typeof value.message !== "string") {
+		return violation();
+	}
+	const entry = { sha: value.sha, message: value.message };
+	rejectProxyObject(value);
+	return Object.freeze(entry);
+}
+
+/** Decodes a `git_file_history`/`git_line_history_list` response — both
+ * commands share this one result shape (see `GitHistoryListResult`'s own
+ * doc comment). */
+export function decodeGitHistoryListResult(
+	value: unknown,
+): GitHistoryListResult {
+	return sanitizedDecode(() => {
+		if (
+			!isPlainObject(value) ||
+			!hasExactKeys(value, ["entries", "truncated"])
+		) {
+			return violation();
+		}
+		if (typeof value.truncated !== "boolean") {
+			return violation();
+		}
+		const entries = ownObjectArraySnapshot(
+			value.entries,
+			MAX_GIT_HISTORY_ENTRIES,
+			decodeGitHistoryEntry,
+		);
+		rejectProxyObject(value);
+		return Object.freeze({ entries, truncated: value.truncated });
+	});
+}
+
+/** Decodes a `git_line_history_detail` response. */
+export function decodeGitLineHistoryDetailResult(
+	value: unknown,
+): GitLineHistoryDetail {
+	return sanitizedDecode(() => {
+		if (!isPlainObject(value) || !hasExactKeys(value, ["sha", "diffText"])) {
+			return violation();
+		}
+		if (
+			!isGitBlameSha(value.sha) ||
+			typeof value.diffText !== "string" ||
+			value.diffText.length > MAX_GIT_LINE_HISTORY_DETAIL_DIFF_TEXT_CHARS
+		) {
+			return violation();
+		}
+		const result = { sha: value.sha, diffText: value.diffText };
+		rejectProxyObject(value);
+		return Object.freeze(result);
 	});
 }

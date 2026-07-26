@@ -115,6 +115,9 @@ function fakeBridge(
 		gitNetworkCancel: notImplemented,
 		gitBlameFile: notImplemented,
 		gitBlameCommitMessages: notImplemented,
+		gitFileHistory: notImplemented,
+		gitLineHistoryList: notImplemented,
+		gitLineHistoryDetail: notImplemented,
 	};
 }
 
@@ -245,6 +248,9 @@ function fakeTextSearchBridge(
 		gitNetworkCancel: notImplemented,
 		gitBlameFile: notImplemented,
 		gitBlameCommitMessages: notImplemented,
+		gitFileHistory: notImplemented,
+		gitLineHistoryList: notImplemented,
+		gitLineHistoryDetail: notImplemented,
 	};
 
 	return {

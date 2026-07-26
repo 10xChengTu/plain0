@@ -1385,6 +1385,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 				parent.expression.text === "configurePlainSearchBridge" ||
 				parent.expression.text === "configurePlainTerminalBridge" ||
 				parent.expression.text === "configurePlainScmBridge" ||
+				parent.expression.text === "configurePlainGitHistoryBridge" ||
 				parent.expression.text === "createPlainGitTextModelContentProvider" ||
 				parent.expression.text === "createPlainGitBlameContribution" ||
 				parent.expression.text === "consumeImportedThemePackages" ||
@@ -6362,17 +6363,44 @@ const GIT_COMMAND_CONTRACTS = Object.freeze([
 		returnType: "->Result<GitBlameCommitMessagesResult,CommandError>",
 		body: "letshas=request.into_parts()?;letmessages=blame::blame_commit_messages(trust.inner(),workspace.inner(),window.label(),&shas).await?;Ok(GitBlameCommitMessagesResult::new(messages))",
 	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_file_history",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitFileHistoryRequest",
+		returnType: "->Result<GitHistoryListResultWire,CommandError>",
+		body: "letpath=request.into_parts()?;letresult=log::file_history(trust.inner(),workspace.inner(),window.label(),&path).await?;Ok(GitHistoryListResultWire::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_line_history_list",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitLineHistoryListRequest",
+		returnType: "->Result<GitHistoryListResultWire,CommandError>",
+		body: "let(path,range)=request.into_parts()?;letresult=log::line_history_list(trust.inner(),workspace.inner(),window.label(),&path,range,).await?;Ok(GitHistoryListResultWire::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_line_history_detail",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitLineHistoryDetailRequest",
+		returnType: "->Result<GitLineHistoryDetailResultWire,CommandError>",
+		body: "let(path,range,skip,expected_sha)=request.into_parts()?;letresult=log::line_history_detail(trust.inner(),workspace.inner(),window.label(),&path,range,skip,&expected_sha,).await?;Ok(GitLineHistoryDetailResultWire::from(result))",
+	},
 ]);
 
 /**
- * Locks all fifteen git commands (`F080` S1's three reads, S3's five
- * writes, S4's five network commands, and `F090` S0's two read-only blame
- * commands — `git_blame_file`/`git_blame_commit_messages`, added to this
- * same closed array rather than a parallel `GIT_HISTORY_COMMAND_CONTRACTS`,
- * per the existing "`PlainBridge`'s git surface is one audited whole, not
- * several independently-sized ones" rationale documented below at
- * `GIT_BRIDGE_METHOD_NAMES`) to their audited exact signatures, bodies and
- * single `generate_handler!` registration — mirrors
+ * Locks all eighteen git commands (`F080` S1's three reads, S3's five
+ * writes, S4's five network commands, `F090` S0's two read-only blame
+ * commands — `git_blame_file`/`git_blame_commit_messages` — and `F090` S1's
+ * three read-only file/line-history commands —
+ * `git_file_history`/`git_line_history_list`/`git_line_history_detail`,
+ * added to this same closed array rather than a parallel
+ * `GIT_HISTORY_COMMAND_CONTRACTS`, per the existing "`PlainBridge`'s git
+ * surface is one audited whole, not several independently-sized ones"
+ * rationale documented below at `GIT_BRIDGE_METHOD_NAMES`) to their audited
+ * exact signatures, bodies and single `generate_handler!` registration —
+ * mirrors
  * `validateTrustTerminalCommandRegistration`'s exact technique.
  */
 export function validateGitCommandRegistration(rustSources) {
@@ -6904,6 +6932,53 @@ export function validateGitRustBoundary(rustSources) {
 		);
 	}
 
+	// --- F090 S1: file/line history (`git::log`) ---------------------------
+	const logSource = findRustSource(rustSources, "src-tauri/src/git/log.rs");
+	if (logSource === undefined) {
+		failures.push("git boundary requires log.rs");
+		return failures;
+	}
+	const executableLog = stripRustCommentsOnly(logSource);
+	const logCommitMetaArgs = argsConstant(
+		executableLog,
+		"GIT_LOG_COMMIT_META_ARGS",
+	);
+	if (
+		!sameArray(logCommitMetaArgs, [
+			"log",
+			"-z",
+			"--format=%H%x1f%B",
+			"--no-patch",
+		])
+	) {
+		failures.push(
+			"log.rs must define GIT_LOG_COMMIT_META_ARGS as exactly the audited " +
+				"sha+full-message-body format — a second free-text field (e.g. author " +
+				"name) positioned before the body would reintroduce the exact field-shift " +
+				"vulnerability F090 S0 found and fixed for blame's own hover-metadata fetch",
+		);
+	}
+
+	if (
+		structBody("GitFileHistoryRequest") !== "path:String," ||
+		structBody("GitLogLineRangeWire") !== "start:u32,end:u32," ||
+		structBody("GitLineHistoryListRequest") !==
+			"path:String,range:GitLogLineRangeWire," ||
+		structBody("GitLineHistoryDetailRequest") !==
+			"path:String,range:GitLogLineRangeWire,skip:u32,expected_sha:String," ||
+		structBody("GitHistoryEntryWire") !== "sha:String,message:String," ||
+		structBody("GitHistoryListResultWire") !==
+			"entries:Vec<GitHistoryEntryWire>,truncated:bool," ||
+		structBody("GitLineHistoryDetailResultWire") !==
+			"sha:String,diff_text:String,"
+	) {
+		failures.push(
+			"GitFileHistoryRequest/GitLogLineRangeWire/GitLineHistoryListRequest/" +
+				"GitLineHistoryDetailRequest/GitHistoryEntryWire/GitHistoryListResultWire/" +
+				"GitLineHistoryDetailResultWire must expose only their exact audited fields",
+		);
+	}
+
 	return failures;
 }
 
@@ -6966,11 +7041,13 @@ export function validateGitBlameHardeningArgs(rustSources) {
  * (`git_stage_paths`/`git_unstage_paths`/`git_stage_blob`/`git_commit`/
  * `git_discard_paths`), `F080` S4's five network methods
  * (`git_network_preview`/`git_fetch`/`git_pull`/`git_push`/
- * `git_network_cancel`), and `F090` S0's two read-only blame methods
- * (`gitBlameFile`/`gitBlameCommitMessages`) — every slice deliberately
+ * `git_network_cancel`), `F090` S0's two read-only blame methods
+ * (`gitBlameFile`/`gitBlameCommitMessages`), and `F090` S1's three
+ * read-only file/line-history methods (`gitFileHistory`/
+ * `gitLineHistoryList`/`gitLineHistoryDetail`) — every slice deliberately
  * shares this same closed-list lock rather than getting its own parallel
  * "S_ bridge methods" const, for the same reason `GIT_COMMAND_CONTRACTS`
- * above holds all fifteen Rust commands in one array: `PlainBridge`'s git
+ * above holds all eighteen Rust commands in one array: `PlainBridge`'s git
  * surface is one audited whole, not several independently-sized ones.
  */
 const GIT_BRIDGE_METHOD_NAMES = [
@@ -6989,6 +7066,9 @@ const GIT_BRIDGE_METHOD_NAMES = [
 	"gitNetworkCancel",
 	"gitBlameFile",
 	"gitBlameCommitMessages",
+	"gitFileHistory",
+	"gitLineHistoryList",
+	"gitLineHistoryDetail",
 ];
 
 /**
@@ -7044,15 +7124,15 @@ const GIT_NO_ARG_COMMAND_CONTRACTS = Object.freeze([
 ]);
 
 /**
- * Locks `F080` S1+S3+S4's TypeScript surface: `PlainBridge` exposes exactly
- * the thirteen audited git methods, `git-codec.ts`'s four read-result
+ * Locks `F080` S1+S3+S4 and `F090` S0+S1's TypeScript surface: `PlainBridge`
+ * exposes exactly the eighteen audited git methods, `git-codec.ts`'s read-result
  * decoders validate exact own-data keys/reject Proxy wrapping/freeze their
  * result (same rigor `validateTerminalIpcBridgeBoundary` already locks for
- * the terminal domain), and `native.ts` routes each of the thirteen through
- * `invoke` with its audited command name — the four reads through their
- * audited decoders, the six writes (`GIT_WRITE_COMMAND_CONTRACTS`) through
- * their audited `frozen*Request` builders and `decodeGitVoid`, and the three
- * no-payload network commands (`GIT_NO_ARG_COMMAND_CONTRACTS`) invoked
+ * the terminal domain), and `native.ts` routes each read/write through
+ * `invoke` with its audited command name — the reads through their
+ * audited decoders, the six mutating writes (`GIT_WRITE_COMMAND_CONTRACTS`)
+ * through their audited `frozen*Request` builders and `decodeGitVoid`, and the
+ * three no-payload network commands (`GIT_NO_ARG_COMMAND_CONTRACTS`) invoked
  * exactly once each.
  */
 export function validateGitIpcBridgeBoundary(rustSources, appSources) {
@@ -7094,7 +7174,7 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 			JSON.stringify([...GIT_BRIDGE_METHOD_NAMES].sort())
 	) {
 		failures.push(
-			"PlainBridge must expose exactly the fifteen audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the eighteen audited git methods, no more and no fewer",
 		);
 	}
 
@@ -7113,6 +7193,8 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 		"decodeGitNetworkPreviewResult",
 		"decodeGitBlameFileResult",
 		"decodeGitBlameCommitMessagesResult",
+		"decodeGitHistoryListResult",
+		"decodeGitLineHistoryDetailResult",
 	]) {
 		const body = decoderBody(name);
 		if (
@@ -7174,6 +7256,39 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 	) {
 		failures.push(
 			"native.ts must invoke git_blame_commit_messages exactly once, routed through frozenGitBlameCommitMessagesRequest and decoded through decodeGitBlameCommitMessagesResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_file_history"/g)].length !==
+			1 ||
+		!native.includes("frozenGitFileHistoryRequest(") ||
+		!native.includes("decodeGitHistoryListResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_file_history exactly once, routed through frozenGitFileHistoryRequest and decoded through decodeGitHistoryListResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_line_history_list"/g)]
+			.length !== 1 ||
+		!native.includes("frozenGitLineHistoryListRequest(") ||
+		!native.includes("decodeGitHistoryListResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_line_history_list exactly once, routed through frozenGitLineHistoryListRequest and decoded through decodeGitHistoryListResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_line_history_detail"/g)]
+			.length !== 1 ||
+		!native.includes("frozenGitLineHistoryDetailRequest(") ||
+		!native.includes("decodeGitLineHistoryDetailResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_line_history_detail exactly once, routed through frozenGitLineHistoryDetailRequest and decoded through decodeGitLineHistoryDetailResult",
 		);
 	}
 
