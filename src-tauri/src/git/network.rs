@@ -1,23 +1,51 @@
-//! `F080` S4: fetch/pull/push, each targeting exactly the current branch's
-//! configured upstream (`@{upstream}`) — the same thing bare `git fetch`/
-//! `git pull`/`git push` (no arguments) already resolve to on their own, so
-//! this domain never re-implements git's own remote/refspec resolution
-//! logic (ADR 0003: never a general-purpose `git_run`).
+//! `F080` S4: fetch/pull/push, running the plain, unscoped `git fetch`/
+//! `git pull`/`git push` (no remote/refspec arguments) this domain's audited
+//! [`GIT_FETCH_ARGS`]/[`GIT_PULL_ARGS`]/[`GIT_PUSH_ARGS`]/[`GIT_PUSH_FORCE_ARGS`]
+//! constants are — this domain never re-implements git's own remote/refspec
+//! resolution logic, and never re-scopes what those bare commands would
+//! otherwise do (ADR 0003: never a general-purpose `git_run`).
 //!
-//! # Deliberate scope: one upstream, not an arbitrary remote/branch picker
+//! # `@{upstream}` is a precondition check, not a scope guarantee on the network operation itself
 //!
-//! `pull`/`push` fail closed with [`git_network_no_upstream`] when the
-//! current branch has no upstream configured — the same thing running the
-//! real bare command would do anyway (verified empirically: `git push` with
-//! no upstream fails with "The current branch … has no upstream branch";
-//! `git pull` fails with "no tracking information"), so this is not an extra
-//! restriction, just an earlier, cleaner one before ever spawning the write.
+//! An earlier version of this doc claimed fetch/pull/push each "precisely
+//! target the current branch's configured upstream". That is not what the
+//! code actually does, and is not true in general — verified empirically
+//! (this slice's own report, a real local bare remote with multiple
+//! branches): a bare `git fetch --quiet` (exactly [`GIT_FETCH_ARGS`], no
+//! remote/refspec arguments) updates **every** remote-tracking ref the
+//! remote's own configured `remote.<name>.fetch` refspec covers — a branch
+//! that is not the current branch's upstream at all still gets its tracking
+//! ref updated by a plain fetch, confirmed directly. Likewise a bare
+//! `git push --quiet` only happens to touch just the current branch's own
+//! upstream because of *today's default* `push.default=simple` — this is a
+//! repository/git-installation configuration default this code does not
+//! control, not a guarantee this code enforces: with `push.default=matching`
+//! configured (a legitimate, real git setting), the exact same bare
+//! `git push --quiet` uploads *every* locally matching branch, not just the
+//! current one, also confirmed directly against a real fixture.
+//!
+//! What genuinely *is* scoped to `@{upstream}` is exactly two things, both
+//! preconditions/derived reads rather than the network operations
+//! themselves: (1) [`preview`]'s own ahead/behind computation, and (2)
+//! `pull`'s own implicit merge step is a merge of `@{upstream}` into
+//! `HEAD` by definition, once the (unscoped) fetch that pull performs
+//! first has updated it. `pull`/`push` fail closed with
+//! [`git_network_no_upstream`] when the current branch has no upstream
+//! configured at all — the same thing running the real bare command would
+//! do anyway (verified empirically: `git push` with no upstream fails with
+//! "The current branch … has no upstream branch"; `git pull` fails with "no
+//! tracking information") — so this is a precondition check, not an extra
+//! restriction beyond what bare git already refuses.
+//!
+//! # Deliberate scope: no arbitrary remote/branch picker
+//!
 //! `fetch` tolerates a missing upstream (bare `git fetch` genuinely still
 //! works without one, per git's own docs: it falls back to the `origin`
 //! remote) — see [`preview`]'s own doc comment. A UI for choosing a
-//! different remote/branch than the configured upstream, or for creating one
-//! (`--set-upstream`), is out of scope for this slice — a disclosed
-//! narrowing, not an oversight.
+//! different remote/branch than whatever the repository's own
+//! remote/refspec/`push.default` configuration resolves to, or for setting
+//! an upstream (`--set-upstream`), is out of scope for this slice — a
+//! disclosed narrowing, not an oversight.
 //!
 //! # Preview + confirm is mandatory and never fail-open
 //!

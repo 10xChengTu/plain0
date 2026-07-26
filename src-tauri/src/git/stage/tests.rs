@@ -231,6 +231,199 @@ fn stage_paths_stages_paths_with_spaces_non_ascii_and_a_leading_dash() {
     );
 }
 
+// ---------------------------------------------------------------------
+// Pathspec-glob-expansion regression (same fix/defect class as
+// `discard::tests`'s glob tests): `--` only stops *option* parsing, never
+// git's own pathspec-magic glob expansion, so an unhardened `git add -A --
+// 'a*.txt'`/`git reset -q -- 'a*.txt'` would silently touch every sibling
+// file whose name happens to match the glob too. `stage_paths`/
+// `unstage_paths` go through `exec::apply_universal_hardening`
+// (`GIT_LITERAL_PATHSPECS=1`), so only the literally-named target is
+// affected.
+// ---------------------------------------------------------------------
+
+#[test]
+fn stage_paths_stages_only_the_literal_glob_named_file_not_wildcard_siblings() {
+    if !git_available() {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
+    let repo = init_repo();
+    raw_git_ok(
+        repo.path(),
+        &["commit", "--quiet", "--allow-empty", "-m", "init"],
+    );
+    for name in ["a1.txt", "a2.txt", "a*.txt"] {
+        std::fs::write(repo.path().join(name), "content\n").unwrap();
+    }
+
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
+    block_on(stage_paths(
+        &trust,
+        &workspace,
+        "main",
+        &["a*.txt".to_owned()],
+    ))
+    .expect("stage_paths succeeds for the literal glob-named file");
+
+    let status = porcelain_status(repo.path());
+    assert!(
+        status
+            .split('\0')
+            .any(|record| record.starts_with("1 A.") && record.ends_with("a*.txt")),
+        "expected a*.txt staged as an addition, got: {status}"
+    );
+    for name in ["a1.txt", "a2.txt"] {
+        assert!(
+            status.contains(&format!("? {name}")),
+            "expected {name} to remain untracked (unstaged) — a wildcard-matching sibling must \
+             never be silently staged, got: {status}"
+        );
+    }
+}
+
+#[test]
+fn unstage_paths_unstages_only_the_literal_glob_named_file_not_wildcard_siblings() {
+    if !git_available() {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
+    let repo = init_repo();
+    raw_git_ok(
+        repo.path(),
+        &["commit", "--quiet", "--allow-empty", "-m", "init"],
+    );
+    for name in ["a1.txt", "a2.txt", "a*.txt"] {
+        std::fs::write(repo.path().join(name), "content\n").unwrap();
+    }
+    raw_git_ok(repo.path(), &["add", "a1.txt", "a2.txt", "a*.txt"]);
+
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
+    block_on(unstage_paths(
+        &trust,
+        &workspace,
+        "main",
+        &["a*.txt".to_owned()],
+    ))
+    .expect("unstage_paths succeeds for the literal glob-named file");
+
+    let status = porcelain_status(repo.path());
+    assert!(
+        status.contains("? a*.txt"),
+        "expected a*.txt back to untracked, got: {status}"
+    );
+    for name in ["a1.txt", "a2.txt"] {
+        assert!(
+            status
+                .split('\0')
+                .any(|record| record.starts_with("1 A.") && record.ends_with(name)),
+            "expected {name} to remain staged — a wildcard-matching sibling must never be \
+             silently unstaged, got: {status}"
+        );
+    }
+}
+
+/// `resolve_blob_mode`'s `git ls-files -s -- <path>` call is exactly the
+/// same pathspec-glob-expansion defect class: proves it would resolve the
+/// WRONG file's mode when unpatched. `b1.txt` (executable, mode `100755`)
+/// sorts *before* the literal target `b?.txt` (regular, mode `100644`) in
+/// git's own path ordering (`'1'` is `0x31`, `'?'` is `0x3F`), so an
+/// unhardened `ls-files -s -- 'b?.txt'` — which pathspec-glob-matches both
+/// files, since `?` matches any single character including a literal `?` —
+/// lists the executable sibling's entry *first*; `resolve_blob_mode` only
+/// ever reads the first line, so it would observably resolve mode `100755`
+/// for a target that is actually `100644`.
+#[test]
+fn control_unhardened_ls_files_glob_matches_multiple_files_and_lists_the_wrong_one_first() {
+    if !git_available() {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
+    let repo = init_repo();
+    let exec_path = repo.path().join("b1.txt");
+    std::fs::write(&exec_path, "exec\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&exec_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&exec_path, perms).unwrap();
+    }
+    std::fs::write(repo.path().join("b?.txt"), "regular\n").unwrap();
+    raw_git_ok(repo.path(), &["add", "b1.txt", "b?.txt"]);
+    raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "init"]);
+
+    // Control: a bare, unhardened `git ls-files -s -- 'b?.txt'` (the exact
+    // shape `resolve_blob_mode` uses, minus GIT_LITERAL_PATHSPECS) matches
+    // BOTH files via glob-magic, listing the executable sibling first.
+    let output = raw_git(repo.path(), &["ls-files", "-s", "--", "b?.txt"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "control: pathspec glob-magic must match both files, proving the vulnerability is \
+         real: {stdout}"
+    );
+    assert!(
+        lines[0].starts_with("100755"),
+        "control: the executable sibling must sort/appear first, proving resolve_blob_mode \
+         would read its mode instead of the target's own: {stdout}"
+    );
+}
+
+/// The hardened contrast to the control above: `stage_blob`'s
+/// `resolve_blob_mode` must resolve `b?.txt`'s own (non-executable) mode
+/// despite the executable, glob-matching `b1.txt` sibling sorting first in
+/// an unhardened listing.
+#[test]
+fn stage_blob_resolves_the_correct_mode_for_a_glob_named_path_despite_an_executable_sibling() {
+    if !git_available() {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
+    let repo = init_repo();
+    let exec_path = repo.path().join("b1.txt");
+    std::fs::write(&exec_path, "exec\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&exec_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&exec_path, perms).unwrap();
+    }
+    std::fs::write(repo.path().join("b?.txt"), "regular\n").unwrap();
+    raw_git_ok(repo.path(), &["add", "b1.txt", "b?.txt"]);
+    raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "init"]);
+
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
+    block_on(stage_blob(
+        &trust,
+        &workspace,
+        "main",
+        "b?.txt",
+        b"new content\n".to_vec(),
+    ))
+    .expect("stage_blob succeeds for the literal glob-named file");
+
+    // Query the *whole* index (not a pathspec-restricted query, so this
+    // verification step itself is not subject to the same glob-matching
+    // ambiguity) and find the exact entry for `b?.txt` by its unique
+    // filename suffix.
+    let ls_all = raw_git(repo.path(), &["ls-files", "-s"]);
+    let ls_output = String::from_utf8_lossy(&ls_all.stdout);
+    let target_line = ls_output
+        .lines()
+        .find(|line| line.ends_with("b?.txt"))
+        .expect("b?.txt entry present in the index");
+    assert!(
+        target_line.starts_with("100644"),
+        "expected the literal target's own (non-executable) mode to be preserved despite an \
+         executable glob-matching sibling, got: {target_line}"
+    );
+}
+
 /// The core evidence this slice's report is built around: a hunk-level
 /// `stage_blob` call (`hash-object` + `update-index`) leaves the file
 /// **partially** staged — `git status` must report it with a non-`.`

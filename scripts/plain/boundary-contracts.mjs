@@ -6461,6 +6461,45 @@ function watcherRustEnumBodies(source, name) {
 }
 
 /**
+ * Extracts a Rust `fn NAME(...) { ... }` function's body text (comments-only
+ * stripped source expected as input, so string-literal content stays visible
+ * exactly like [`watcherRustEnumBodies`] needs) by locating the parameter
+ * list via [`findMatchingDelimiter`] first (so a return-type arrow or nested
+ * generic in the signature can't confuse the search for the body's opening
+ * `{`), then matching that opening brace to its close the same way. Returns
+ * `undefined` if `name` is not found or the file's braces do not balance —
+ * callers should already have a "the whole file exists" failure path for
+ * that.
+ */
+function rustFunctionBody(source, name) {
+	const pattern = new RegExp(
+		`\\bfn\\s+${escapeRegularExpression(name)}\\s*\\(`,
+	);
+	const match = pattern.exec(source);
+	if (match === null) {
+		return undefined;
+	}
+	const parameterOpen = match.index + match[0].length - 1;
+	const parameterClose = findMatchingDelimiter(source, parameterOpen, "(", ")");
+	if (parameterClose === undefined) {
+		return undefined;
+	}
+	const bodyOpen = source.indexOf("{", parameterClose + 1);
+	if (bodyOpen < 0) {
+		return undefined;
+	}
+	const bodyClose = findMatchingDelimiter(source, bodyOpen, "{", "}");
+	if (bodyClose === undefined) {
+		return undefined;
+	}
+	return {
+		start: bodyOpen,
+		end: bodyClose,
+		body: source.slice(bodyOpen, bodyClose + 1),
+	};
+}
+
+/**
  * Locks `F080` S1's git domain: the three hardened, audited argument-list
  * constants (`status.rs`'s `GIT_STATUS_ARGS`, `diff.rs`'s
  * `GIT_DIFF_BASE_ARGS`/`GIT_SHOW_BASE_ARGS`) and the wire DTO struct/enum
@@ -6738,13 +6777,23 @@ export function validateGitRustBoundary(rustSources) {
 	// Belt-and-suspenders textual scan: the two `argsConstant` locks above
 	// already fully pin every element of both push-argument constants, so
 	// this only catches a *third*, differently-named constant (or an inline
-	// `.args([...])` literal) smuggling in a bare `--force` token elsewhere in
-	// this file — `--force-with-lease` itself contains the substring
-	// `--force`, so the negative lookahead is required to avoid a false
-	// positive against the audited constant's own literal.
-	if (/"--force"(?!-with-lease)/.test(executableNetwork)) {
+	// `.args([...])` literal) smuggling in a bare `--force` token anywhere in
+	// the git Rust domain — not just `network.rs` (broadened post-review;
+	// confirmed empirically zero false positives: no other file under
+	// `src-tauri/src/git/` contains the literal quoted string `"--force"` at
+	// all, so widening this scan costs nothing). `--force-with-lease` itself
+	// contains the substring `--force`, so the negative lookahead is
+	// required to avoid a false positive against the audited constant's own
+	// literal.
+	const gitDomainSourcesForForceScan = rustSources.filter((entry) =>
+		GIT_DOMAIN_SOURCE_PATTERN.test(entry.relativePath.replaceAll("\\", "/")),
+	);
+	const bareForceLiteralFoundIn = gitDomainSourcesForForceScan.find((entry) =>
+		/"--force"(?!-with-lease)/.test(stripRustCommentsOnly(entry.source)),
+	);
+	if (bareForceLiteralFoundIn !== undefined) {
 		failures.push(
-			"network.rs must never pass a bare --force argument to git push — only --force-with-lease",
+			`${bareForceLiteralFoundIn.relativePath} must never pass a bare --force argument to git push — only --force-with-lease`,
 		);
 	}
 
@@ -6767,6 +6816,69 @@ export function validateGitRustBoundary(rustSources) {
 	) {
 		failures.push(
 			"exec.rs must define GIT_NETWORK_ENV_PASSTHROUGH_NAMES as exactly PATH/HOME/SSH_AUTH_SOCK",
+		);
+	}
+
+	// Post-review fix: `GIT_LITERAL_PATHSPECS=1` (defeats the pathspec-glob-
+	// expansion data-loss defect a `--` separator alone does not stop) must
+	// be set exactly once, unconditionally, in the one shared pre-dispatch
+	// function (`apply_universal_hardening`) — never duplicated into, or
+	// narrowed to live only inside, one of `harden_background_read`/
+	// `harden_write`/`harden_network`. Comments-only (not
+	// `stripRustCommentsAndLiterals`) because this needs to see the actual
+	// `"GIT_LITERAL_PATHSPECS"`/`"1"` string-literal text, exactly like the
+	// `GIT_NETWORK_ENV_PASSTHROUGH_NAMES` check just above.
+	const execCommentsOnlyForPathspecs =
+		stripRustCommentsOnly(execSourceForNetwork);
+	const literalPathspecsOccurrences = (
+		execCommentsOnlyForPathspecs.match(/GIT_LITERAL_PATHSPECS/g) ?? []
+	).length;
+	const universalHardeningBody = rustFunctionBody(
+		execCommentsOnlyForPathspecs,
+		"apply_universal_hardening",
+	);
+	const universalHardeningSetsLiteralPathspecs =
+		universalHardeningBody !== undefined &&
+		/\.env\s*\(\s*"GIT_LITERAL_PATHSPECS"\s*,\s*"1"\s*\)/.test(
+			universalHardeningBody.body,
+		);
+	const literalPathspecsLeaksIntoAModeHardener = [
+		"harden_background_read",
+		"harden_write",
+		"harden_network",
+	].some((name) => {
+		const body = rustFunctionBody(execCommentsOnlyForPathspecs, name);
+		return body !== undefined && body.body.includes("GIT_LITERAL_PATHSPECS");
+	});
+	// `apply_universal_hardening` defining the env var correctly is not
+	// enough on its own — `build_git_command` must actually call it, and
+	// before the `match mode { ... }` dispatch (so it truly applies to
+	// every `GitExecMode`, not just whichever arm happens to run after it).
+	const buildGitCommandBody = rustFunctionBody(
+		execCommentsOnlyForPathspecs,
+		"build_git_command",
+	);
+	const buildGitCommandCallsUniversalHardeningBeforeDispatch = (() => {
+		if (buildGitCommandBody === undefined) {
+			return false;
+		}
+		const callIndex = buildGitCommandBody.body.indexOf(
+			"apply_universal_hardening(",
+		);
+		const matchIndex = buildGitCommandBody.body.indexOf("match mode");
+		return callIndex >= 0 && matchIndex >= 0 && callIndex < matchIndex;
+	})();
+	if (
+		literalPathspecsOccurrences !== 1 ||
+		!universalHardeningSetsLiteralPathspecs ||
+		literalPathspecsLeaksIntoAModeHardener ||
+		!buildGitCommandCallsUniversalHardeningBeforeDispatch
+	) {
+		failures.push(
+			"exec.rs must set GIT_LITERAL_PATHSPECS=1 exactly once, unconditionally, inside " +
+				"apply_universal_hardening, and build_git_command must call it before dispatching " +
+				"on GitExecMode — never duplicated or narrowed into a single GitExecMode's own " +
+				"harden_* function",
 		);
 	}
 

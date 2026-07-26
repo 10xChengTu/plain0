@@ -195,6 +195,199 @@ fn discard_paths_rejects_a_path_traversal_segment() {
     assert_eq!(error.code(), "GIT_MUTATE_PATHS_INVALID_REQUEST");
 }
 
+// ---------------------------------------------------------------------
+// Pathspec-glob-expansion regression (fix for the highest-severity data-loss
+// defect found in review): `--` only stops *option* parsing, never git's own
+// pathspec-magic glob expansion, so a bare, unhardened `git checkout -q --
+// 'a*.txt'` reverts every sibling file whose name happens to match the
+// glob, not just the literally-named file the UI showed/confirmed. Each
+// test below has its own control (a bare, unhardened invocation identical
+// in shape to `GIT_DISCARD_ARGS` but without `GIT_LITERAL_PATHSPECS=1`)
+// proving the vulnerability is real, then proves `discard_paths` (which
+// goes through `exec::apply_universal_hardening`) reverts only the
+// literally-named target.
+// ---------------------------------------------------------------------
+
+#[test]
+fn discard_paths_reverts_only_the_literal_star_named_file_not_wildcard_siblings() {
+    if !git_available() {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
+    let repo = init_repo();
+    for name in ["a1.txt", "a2.txt", "a*.txt"] {
+        std::fs::write(repo.path().join(name), "orig\n").unwrap();
+    }
+    raw_git_ok(repo.path(), &["add", "a1.txt", "a2.txt", "a*.txt"]);
+    raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "init"]);
+    for name in ["a1.txt", "a2.txt", "a*.txt"] {
+        std::fs::write(repo.path().join(name), "changed\n").unwrap();
+    }
+
+    // Control: a bare, unhardened `git checkout -q -- 'a*.txt'` — the exact
+    // shape of GIT_DISCARD_ARGS, minus GIT_LITERAL_PATHSPECS=1 — reverts
+    // ALL THREE files, proving the vulnerability is real absent the fix.
+    raw_git_ok(repo.path(), &["checkout", "-q", "--", "a*.txt"]);
+    for name in ["a1.txt", "a2.txt", "a*.txt"] {
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join(name)).unwrap(),
+            "orig\n",
+            "control: {name} must ALSO revert absent GIT_LITERAL_PATHSPECS, proving the \
+             vulnerability is real"
+        );
+    }
+
+    // Re-dirty all three for the hardened run through the real production
+    // code path.
+    for name in ["a1.txt", "a2.txt", "a*.txt"] {
+        std::fs::write(repo.path().join(name), "changed\n").unwrap();
+    }
+
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
+    block_on(discard_paths(
+        &trust,
+        &workspace,
+        "main",
+        &["a*.txt".to_owned()],
+    ))
+    .expect("discard_paths succeeds for the literal glob-named file");
+
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("a*.txt")).unwrap(),
+        "orig\n",
+        "the literally-named target must revert"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("a1.txt")).unwrap(),
+        "changed\n",
+        "sibling a1.txt must SURVIVE — this is the fix under test"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("a2.txt")).unwrap(),
+        "changed\n",
+        "sibling a2.txt must SURVIVE — this is the fix under test"
+    );
+}
+
+#[test]
+fn discard_paths_reverts_only_the_literal_question_mark_named_file_not_wildcard_siblings() {
+    if !git_available() {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
+    let repo = init_repo();
+    for name in ["b1.txt", "b2.txt", "b?.txt"] {
+        std::fs::write(repo.path().join(name), "orig\n").unwrap();
+    }
+    raw_git_ok(repo.path(), &["add", "b1.txt", "b2.txt", "b?.txt"]);
+    raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "init"]);
+    for name in ["b1.txt", "b2.txt", "b?.txt"] {
+        std::fs::write(repo.path().join(name), "changed\n").unwrap();
+    }
+
+    // Control: `?` matches exactly one arbitrary character as pathspec
+    // glob-magic, so `b1.txt`/`b2.txt` both match the pattern `b?.txt` —
+    // proving the vulnerability is real for this wildcard character too.
+    raw_git_ok(repo.path(), &["checkout", "-q", "--", "b?.txt"]);
+    for name in ["b1.txt", "b2.txt", "b?.txt"] {
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join(name)).unwrap(),
+            "orig\n",
+            "control: {name} must ALSO revert absent GIT_LITERAL_PATHSPECS, proving the \
+             vulnerability is real"
+        );
+    }
+
+    for name in ["b1.txt", "b2.txt", "b?.txt"] {
+        std::fs::write(repo.path().join(name), "changed\n").unwrap();
+    }
+
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
+    block_on(discard_paths(
+        &trust,
+        &workspace,
+        "main",
+        &["b?.txt".to_owned()],
+    ))
+    .expect("discard_paths succeeds for the literal glob-named file");
+
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("b?.txt")).unwrap(),
+        "orig\n",
+        "the literally-named target must revert"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("b1.txt")).unwrap(),
+        "changed\n",
+        "sibling b1.txt must SURVIVE — this is the fix under test"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("b2.txt")).unwrap(),
+        "changed\n",
+        "sibling b2.txt must SURVIVE — this is the fix under test"
+    );
+}
+
+#[test]
+fn discard_paths_reverts_only_the_literal_bracket_named_file_not_a_wildcard_sibling() {
+    if !git_available() {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
+    let repo = init_repo();
+    // The pathspec-magic glob character class `[x]` matches exactly the
+    // single character `x` — so the *literal* filename `c[x].txt` and a
+    // sibling literally named `cx.txt` are the pair that demonstrates
+    // collateral damage for `[`, confirmed empirically (this slice's
+    // report): `git checkout -q -- 'c[x].txt'` unhardened reverts both.
+    for name in ["cx.txt", "c[x].txt"] {
+        std::fs::write(repo.path().join(name), "orig\n").unwrap();
+    }
+    raw_git_ok(repo.path(), &["add", "cx.txt", "c[x].txt"]);
+    raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "init"]);
+    for name in ["cx.txt", "c[x].txt"] {
+        std::fs::write(repo.path().join(name), "changed\n").unwrap();
+    }
+
+    // Control.
+    raw_git_ok(repo.path(), &["checkout", "-q", "--", "c[x].txt"]);
+    for name in ["cx.txt", "c[x].txt"] {
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join(name)).unwrap(),
+            "orig\n",
+            "control: {name} must ALSO revert absent GIT_LITERAL_PATHSPECS, proving the \
+             vulnerability is real"
+        );
+    }
+
+    for name in ["cx.txt", "c[x].txt"] {
+        std::fs::write(repo.path().join(name), "changed\n").unwrap();
+    }
+
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
+    block_on(discard_paths(
+        &trust,
+        &workspace,
+        "main",
+        &["c[x].txt".to_owned()],
+    ))
+    .expect("discard_paths succeeds for the literal glob-named file");
+
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("c[x].txt")).unwrap(),
+        "orig\n",
+        "the literally-named target must revert"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("cx.txt")).unwrap(),
+        "changed\n",
+        "sibling cx.txt must SURVIVE — this is the fix under test"
+    );
+}
+
 #[test]
 fn discard_paths_rejects_when_workspace_is_not_trusted() {
     let repo = init_repo();

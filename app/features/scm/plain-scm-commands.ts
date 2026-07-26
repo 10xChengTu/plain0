@@ -9,7 +9,10 @@ import { IEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench
 import { IViewsService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/views/common/viewsService.service";
 
 import { normalizeCommandError } from "../../platform/tauri/errors";
-import { computeContentAfterApplyingHunk } from "./hunk-stage";
+import {
+	computeContentAfterApplyingHunk,
+	decodeLosslessUtf8,
+} from "./hunk-stage";
 import { relativePathUnder } from "./plain-scm-provider";
 import { getConfiguredPlainScmBridge, PlainScmView } from "./plain-scm-view";
 import { SCM_VIEW_ID } from "./scm-contribution";
@@ -45,8 +48,6 @@ export const REFRESH_SCM_COMMAND_ID = "plain.scm.refresh";
  */
 export const STAGE_ACTIVE_FILE_FIRST_HUNK_COMMAND_ID =
 	"plain.scm.stageActiveFileFirstHunk";
-
-const utf8Decoder = new TextDecoder();
 
 async function runStageActiveFileFirstHunk(
 	editorService: IEditorService,
@@ -92,8 +93,14 @@ async function runStageActiveFileFirstHunk(
 		const originalText =
 			originalResult.content === null
 				? ""
-				: utf8Decoder.decode(originalResult.content);
-		const modifiedText = utf8Decoder.decode(modifiedFile.value.copy());
+				: decodeLosslessUtf8(originalResult.content);
+		const modifiedText = decodeLosslessUtf8(modifiedFile.value.copy());
+		if (originalText === undefined || modifiedText === undefined) {
+			notificationService.error(
+				`Plain: cannot stage a hunk in "${relativePath}" — its content cannot be losslessly represented as text (byte-order mark, non-UTF-8 encoding, or invalid UTF-8 bytes). Stage the whole file instead.`,
+			);
+			return;
+		}
 		const hunkContent = computeContentAfterApplyingHunk(
 			originalText,
 			modifiedText,

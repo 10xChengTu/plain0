@@ -79,3 +79,48 @@ export function countHunks(originalText: string, modifiedText: string): number {
 		});
 	return diff.changes.length;
 }
+
+/**
+ * Decodes `bytes` as UTF-8 only when doing so is provably lossless — i.e.
+ * re-encoding the decoded string reproduces `bytes` exactly, byte for byte.
+ * Returns `undefined` otherwise, rather than silently corrupting content the
+ * way a plain `new TextDecoder().decode(bytes)` would: the default decoder
+ * both strips a leading UTF-8 BOM and replaces invalid byte sequences with
+ * U+FFFD, and either transformation is irreversible once the result is later
+ * re-encoded and written back out (as `plain-scm-commands.ts`'s hunk-stage
+ * path does, via `bridge.gitStageBlob`).
+ *
+ * `ignoreBOM: true` is what makes this safe for BOM-prefixed files: it makes
+ * a leading BOM decode into an ordinary U+FEFF character *in* the returned
+ * string (instead of the default's silent-eat behavior), so re-encoding
+ * reproduces the original 3 BOM bytes instead of dropping them.
+ *
+ * `fatal: true` makes the decoder throw on any invalid UTF-8 byte sequence
+ * — including non-standard WTF-8-style lone-surrogate encodings — instead of
+ * substituting U+FFFD, so this function can catch that and refuse instead of
+ * corrupting. The byte-for-byte round-trip check after a successful decode
+ * is a second, independent safety net (in principle every string a strict
+ * UTF-8 decoder can produce re-encodes byte-identically, but checking rather
+ * than assuming keeps this function honest against edge cases in either
+ * platform's implementation).
+ */
+export function decodeLosslessUtf8(bytes: Uint8Array): string | undefined {
+	let decoded: string;
+	try {
+		decoded = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+			bytes,
+		);
+	} catch {
+		return undefined;
+	}
+	const reencoded = new TextEncoder().encode(decoded);
+	if (reencoded.length !== bytes.length) {
+		return undefined;
+	}
+	for (let i = 0; i < reencoded.length; i++) {
+		if (reencoded[i] !== bytes[i]) {
+			return undefined;
+		}
+	}
+	return decoded;
+}

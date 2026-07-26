@@ -42,6 +42,7 @@ use tempfile::TempDir;
 use super::{
     run_git, run_git_network_with_limits_for_test, run_git_with_limits_for_test,
     run_git_with_stdin, run_git_with_stdin_and_limits_for_test, GitExecMode,
+    GIT_EXEC_NETWORK_TIMEOUT, GIT_EXEC_TIMEOUT,
 };
 
 /// Whether a `git` binary is reachable on `PATH` at all — every test in
@@ -399,6 +400,16 @@ fn network_mode_env_passthrough_is_exactly_the_closed_set() {
 /// depends on never happening).
 #[test]
 fn every_exec_mode_forces_english_locale_regardless_of_a_hostile_ambient_locale() {
+    // `GitExecMode::BackgroundRead` now genuinely spawns a real
+    // `git config --list -z` bootstrap subprocess as part of
+    // `build_git_command` (see `harden_background_read`'s own doc comment),
+    // so — unlike when this test was first written — it now needs a real
+    // `git` binary too, not just for `write_mode_forces_english_locale_in_a_
+    // real_spawned_subprocess` below.
+    if !git_available() {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
     with_env_vars(
         &[
             ("LANG", Some("fr_FR.UTF-8")),
@@ -436,6 +447,53 @@ fn every_exec_mode_forces_english_locale_regardless_of_a_hostile_ambient_locale(
             }
         },
     );
+}
+
+/// Introspection-only complement to the discard/stage-level real-fixture
+/// tests (those are the tests that matter — they prove the actual attack
+/// surface is closed; this one only proves the underlying mechanism reaches
+/// every mode's built [`Command`], mirroring
+/// `network_mode_env_passthrough_is_exactly_the_closed_set`'s own
+/// introspection-only style): [`super::apply_universal_hardening`]'s
+/// `GIT_LITERAL_PATHSPECS=1` must be present for all three [`GitExecMode`]s,
+/// not narrowed to a subset — this is the same universal-hardening
+/// guarantee `scripts/plain/boundary-contracts.mjs`'s AST lock enforces
+/// statically, checked here dynamically against the real built `Command`.
+#[test]
+fn every_exec_mode_sets_git_literal_pathspecs() {
+    // Unlike the pure in-memory introspection tests above,
+    // `GitExecMode::BackgroundRead` now genuinely spawns a real
+    // `git config --list -z` bootstrap subprocess as part of
+    // `build_git_command` (see `harden_background_read`'s own doc comment),
+    // so this test needs a real `git` binary too.
+    if !git_available() {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
+    let repo = TempDir::new().expect("tempdir");
+    for mode in [
+        GitExecMode::BackgroundRead,
+        GitExecMode::Write,
+        GitExecMode::Network,
+    ] {
+        let command = super::build_git_command(repo.path(), &["status".to_owned()], mode, false)
+            .expect("build_git_command succeeds");
+        let envs: std::collections::HashMap<String, Option<String>> = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            envs.get("GIT_LITERAL_PATHSPECS").and_then(|v| v.as_deref()),
+            Some("1"),
+            "{mode:?} must set GIT_LITERAL_PATHSPECS=1 — this is the universal, unconditional \
+             hardening every GitExecMode shares, not something only one mode applies"
+        );
+    }
 }
 
 /// Real-subprocess complement to the introspection-only test above: proves
@@ -732,6 +790,409 @@ mod hostile_fixtures {
         );
     }
 
+    // -----------------------------------------------------------------
+    // Attribute-driven content filters (`filter.<name>.clean`/`.smudge`/
+    // `.process`) — the vector `harden_background_read`'s filter-
+    // neutralization step closes. See that function's own doc comment for
+    // the full design; these tests mirror the `core.hooksPath` contrast
+    // pair above exactly (hardened-disables / write-mode-still-respects),
+    // plus the `include.path`-precedence and fail-closed-bootstrap
+    // properties specific to this fix.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn background_read_disables_a_malicious_filter_clean_command() {
+        if !git_available() {
+            eprintln!("skipping: git not found on PATH");
+            return;
+        }
+        let repo = init_repo();
+        let scripts = TempDir::new().expect("tempdir");
+        let marker = scripts.path().join("filter-clean-fired");
+        let script = marker_script_exit_zero(scripts.path(), "filter-clean.sh", &marker);
+
+        std::fs::write(repo.path().join("a.txt"), "one\n").unwrap();
+        raw_git_ok(repo.path(), &["add", "a.txt"]);
+        raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "init"]);
+        std::fs::write(repo.path().join(".gitattributes"), "*.txt filter=hostile\n").unwrap();
+        raw_git_ok(repo.path(), &["add", ".gitattributes"]);
+        raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "attrs"]);
+        raw_git_ok(
+            repo.path(),
+            &["config", "filter.hostile.clean", script.to_str().unwrap()],
+        );
+
+        // Bumping the tracked file's mtime makes `git status` genuinely
+        // re-hash (and therefore re-`clean`) it — the exact same technique
+        // `background_read_disables_a_malicious_hooks_path_hook` uses for
+        // `post-index-change`, and exactly the real-world trigger (a normal
+        // editor save) this slice's report is built around.
+        filetime_touch(&repo.path().join("a.txt"));
+
+        // Control: an unhardened `git status` genuinely invokes the
+        // configured clean filter.
+        assert!(!marker.exists());
+        raw_git_ok(repo.path(), &["status"]);
+        assert!(
+            marker.exists(),
+            "control run must prove the malicious filter.hostile.clean fires absent hardening"
+        );
+        std::fs::remove_file(&marker).unwrap();
+
+        // Hardened: `run_git`'s BackgroundRead mode discovers
+        // `filter.hostile.clean` via its config-list bootstrap and
+        // neutralizes it, so the malicious command must never run.
+        filetime_touch(&repo.path().join("a.txt"));
+        let cancel = AtomicBool::new(false);
+        let output = run_git(
+            repo.path(),
+            &["status".to_owned(), "--porcelain=v2".to_owned()],
+            GitExecMode::BackgroundRead,
+            &cancel,
+        )
+        .expect("hardened status still succeeds");
+        assert_eq!(output.exit_code, 0);
+        assert!(
+            !marker.exists(),
+            "hardened background read must not invoke the malicious filter.hostile.clean command"
+        );
+    }
+
+    /// The safety-core contrast this fix's evidence is built around,
+    /// mirroring `write_mode_allows_the_repositorys_own_hooks_path_hook_to_fire`:
+    /// the exact same hostile `filter.hostile.clean` fixture must, under
+    /// `GitExecMode::Write`, actually fire — a real user-initiated write
+    /// (e.g. `git commit`, which re-hashes working-tree content the same
+    /// way `git status` does) must respect the repository's own configured
+    /// filters (ADR 0003), and git-lfs itself is exactly this shape of
+    /// filter.
+    #[test]
+    fn write_mode_allows_the_repositorys_own_filter_clean_command_to_fire() {
+        if !git_available() {
+            eprintln!("skipping: git not found on PATH");
+            return;
+        }
+        let repo = init_repo();
+        let scripts = TempDir::new().expect("tempdir");
+        let marker = scripts.path().join("filter-clean-fired");
+        let script = marker_script_exit_zero(scripts.path(), "filter-clean.sh", &marker);
+
+        std::fs::write(repo.path().join("a.txt"), "one\n").unwrap();
+        raw_git_ok(repo.path(), &["add", "a.txt"]);
+        raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "init"]);
+        std::fs::write(repo.path().join(".gitattributes"), "*.txt filter=hostile\n").unwrap();
+        raw_git_ok(repo.path(), &["add", ".gitattributes"]);
+        raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "attrs"]);
+        raw_git_ok(
+            repo.path(),
+            &["config", "filter.hostile.clean", script.to_str().unwrap()],
+        );
+
+        filetime_touch(&repo.path().join("a.txt"));
+        assert!(!marker.exists());
+        let cancel = AtomicBool::new(false);
+        let output = run_git(
+            repo.path(),
+            &["status".to_owned(), "--porcelain=v2".to_owned()],
+            GitExecMode::Write,
+            &cancel,
+        )
+        .expect("write-mode status still succeeds");
+        assert_eq!(output.exit_code, 0);
+        assert!(
+            marker.exists(),
+            "GitExecMode::Write must respect the repository's own filter.hostile.clean command — \
+             this is the deliberate contrast with background_read_disables_a_malicious_filter_clean_command"
+        );
+    }
+
+    /// Smudge fires in the opposite direction from clean — object database
+    /// content being *populated into* the working tree (`checkout`, `reset
+    /// --hard`, a fresh `clone`), not on `status`/`diff`/`show`'s own
+    /// re-hash-and-compare path (confirmed empirically: neither fires
+    /// smudge — see this slice's report). No command this domain's own
+    /// higher-level modules ever issue under `GitExecMode::BackgroundRead`
+    /// populates working-tree content from the object database at all —
+    /// `discard::discard_paths`'s `checkout -q --` (the one command in this
+    /// domain that *would* trigger smudge) only ever runs under
+    /// `GitExecMode::Write`. So this test calls `run_git` directly with raw
+    /// `checkout` arguments under `BackgroundRead` — exactly like every
+    /// other test in this module calls `run_git` with raw args rather than
+    /// through a higher-level domain module — to prove `exec.rs`'s own
+    /// hardening is complete at the *mechanism* level (defense-in-depth
+    /// against a future BackgroundRead caller that populates content),
+    /// rather than claiming this is a live, currently-reachable attack
+    /// surface today (it is not, and this doc comment says so plainly).
+    #[test]
+    fn background_read_disables_a_malicious_filter_smudge_command_via_checkout() {
+        if !git_available() {
+            eprintln!("skipping: git not found on PATH");
+            return;
+        }
+        let repo = init_repo();
+        let scripts = TempDir::new().expect("tempdir");
+        let marker = scripts.path().join("filter-smudge-fired");
+        let script = marker_script_exit_zero(scripts.path(), "filter-smudge.sh", &marker);
+
+        raw_git_ok(repo.path(), &["config", "filter.hostile.clean", "cat"]);
+        raw_git_ok(
+            repo.path(),
+            &["config", "filter.hostile.smudge", script.to_str().unwrap()],
+        );
+        std::fs::write(repo.path().join(".gitattributes"), "*.txt filter=hostile\n").unwrap();
+        raw_git_ok(repo.path(), &["add", ".gitattributes"]);
+        std::fs::write(repo.path().join("a.txt"), "one\n").unwrap();
+        raw_git_ok(repo.path(), &["add", "a.txt"]);
+        raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "init"]);
+
+        // Control: deleting the working-tree file and running an
+        // unhardened `git checkout -- a.txt` to repopulate it genuinely
+        // invokes the configured smudge filter.
+        std::fs::remove_file(repo.path().join("a.txt")).unwrap();
+        assert!(!marker.exists());
+        raw_git_ok(repo.path(), &["checkout", "--", "a.txt"]);
+        assert!(
+            marker.exists(),
+            "control run must prove the malicious filter.hostile.smudge fires absent hardening"
+        );
+        std::fs::remove_file(&marker).unwrap();
+
+        // Hardened.
+        std::fs::remove_file(repo.path().join("a.txt")).unwrap();
+        let cancel = AtomicBool::new(false);
+        let output = run_git(
+            repo.path(),
+            &["checkout".to_owned(), "--".to_owned(), "a.txt".to_owned()],
+            GitExecMode::BackgroundRead,
+            &cancel,
+        )
+        .expect("hardened checkout still succeeds");
+        assert_eq!(output.exit_code, 0);
+        assert!(
+            !marker.exists(),
+            "hardened BackgroundRead must not invoke the malicious filter.hostile.smudge command"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("a.txt")).unwrap(),
+            "one\n"
+        );
+    }
+
+    /// Command-line `-c` overrides beat every other config source,
+    /// including an `include.path`-included file — confirmed here against a
+    /// filter defined *only* in an included config file (never in the
+    /// repository's own local `.git/config`), proving `run_git`'s
+    /// discovery-then-neutralize mechanism (`git config --list -z`, which
+    /// itself also honors `include.path`, then a command-line `-c` override
+    /// for whatever it finds) is not fooled by a hostile repository hiding
+    /// its filter definition behind an include.
+    #[test]
+    fn background_read_neutralizes_a_filter_defined_only_in_an_included_config_file() {
+        if !git_available() {
+            eprintln!("skipping: git not found on PATH");
+            return;
+        }
+        let repo = init_repo();
+        let scripts = TempDir::new().expect("tempdir");
+        let marker = scripts.path().join("included-filter-clean-fired");
+        let script = marker_script_exit_zero(scripts.path(), "included-filter-clean.sh", &marker);
+
+        // `.gitattributes`/`a.txt` are added and committed *before* the
+        // filter is configured at all — mirroring
+        // `background_read_disables_a_malicious_filter_clean_command`'s own
+        // ordering — so this setup's own `git add`/`git commit` calls never
+        // themselves invoke the (not-yet-configured) clean filter and
+        // prematurely create `marker`.
+        std::fs::write(repo.path().join(".gitattributes"), "*.txt filter=hostile\n").unwrap();
+        raw_git_ok(repo.path(), &["add", ".gitattributes"]);
+        std::fs::write(repo.path().join("a.txt"), "one\n").unwrap();
+        raw_git_ok(repo.path(), &["add", "a.txt"]);
+        raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "init"]);
+
+        let included_config = scripts.path().join("included.gitconfig");
+        raw_git_ok(
+            scripts.path(),
+            &[
+                "config",
+                "-f",
+                included_config.to_str().unwrap(),
+                "filter.hostile.clean",
+                script.to_str().unwrap(),
+            ],
+        );
+        raw_git_ok(
+            repo.path(),
+            &[
+                "config",
+                "--add",
+                "include.path",
+                included_config.to_str().unwrap(),
+            ],
+        );
+
+        // Control: unhardened status genuinely invokes the include.path-
+        // included filter (the repository's *own* local .git/config never
+        // mentions `filter.hostile` at all).
+        filetime_touch(&repo.path().join("a.txt"));
+        assert!(!marker.exists());
+        raw_git_ok(repo.path(), &["status"]);
+        assert!(
+            marker.exists(),
+            "control run must prove the include.path-included filter.hostile.clean fires absent hardening"
+        );
+        std::fs::remove_file(&marker).unwrap();
+
+        // Hardened.
+        filetime_touch(&repo.path().join("a.txt"));
+        let cancel = AtomicBool::new(false);
+        let output = run_git(
+            repo.path(),
+            &["status".to_owned(), "--porcelain=v2".to_owned()],
+            GitExecMode::BackgroundRead,
+            &cancel,
+        )
+        .expect("hardened status still succeeds");
+        assert_eq!(output.exit_code, 0);
+        assert!(
+            !marker.exists(),
+            "hardened background read must neutralize a filter defined only in an \
+             include.path-included config file, not just the repository's own local config"
+        );
+    }
+
+    /// A non-zero exit from the filter-discovery bootstrap (`git config
+    /// --list -z`) must be a **hard failure**, never silently treated as "no
+    /// filters configured" — the fail-open direction ADR 0003 forbids. A
+    /// malformed `.git/config` line is a real, empirically confirmed way to
+    /// make `git config --list` itself exit non-zero (`fatal: bad config
+    /// line N`, exit 128 — verified against the real binary in this slice's
+    /// report). There is no meaningful "unhardened control" for this
+    /// specific property the way the hostile-filter tests above have one —
+    /// this is not itself an executable vulnerability (a malformed config
+    /// that breaks `git config --list` breaks *every* git invocation reading
+    /// that same config identically, including the "real" command, so there
+    /// is no config shape where the bootstrap fails but a hostile filter
+    /// would otherwise still resolve and fire); it is a defensive-correctness
+    /// property. The meaningful, observable assertion: before this fix,
+    /// `run_git` on this exact fixture would have returned `Ok(GitExecOutput
+    /// { exit_code: 128, .. })` (a non-zero exit is ordinary data — see this
+    /// module's own `GitExecOutput` doc comment — since `git status` itself
+    /// simply fails on the malformed config); after this fix, the bootstrap
+    /// step's own failure is escalated to a structured `CommandError`
+    /// *before* the real command is ever attempted.
+    #[test]
+    fn background_read_fails_closed_when_the_filter_discovery_bootstrap_itself_fails() {
+        if !git_available() {
+            eprintln!("skipping: git not found on PATH");
+            return;
+        }
+        let repo = init_repo();
+        let config_path = repo.path().join(".git").join("config");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&config_path)
+            .expect("open .git/config for appending");
+        writeln!(file, "[this is not valid ini !!!").expect("append malformed config line");
+        drop(file);
+
+        let cancel = AtomicBool::new(false);
+        let error = run_git(
+            repo.path(),
+            &["status".to_owned(), "--porcelain=v2".to_owned()],
+            GitExecMode::BackgroundRead,
+            &cancel,
+        )
+        .expect_err(
+            "a BackgroundRead call must fail closed with a structured CommandError when its own \
+             filter-discovery bootstrap cannot read repository config, rather than silently \
+             proceeding as if no filters were configured",
+        );
+        assert_eq!(error.code(), "GIT_EXEC_FILTER_DISCOVERY_FAILED");
+    }
+
+    /// Config-key reachability enumeration finding (this slice's report):
+    /// confirms empirically that real git 2.50.1 does **not** let
+    /// `alias.<name>` shadow an *already-existing builtin* subcommand of the
+    /// same name — every literal first argument this domain's own source
+    /// ever passes to `run_git` is exercised here (grepped from every
+    /// `GIT_*_ARGS` constant and every dynamically built `args` vector across
+    /// `src-tauri/src/git/*.rs`). `git <builtin> --help` is used as the
+    /// no-side-effect probe for each (git intercepts `--help` before running
+    /// the subcommand's own logic, for both a real builtin and a shadowing
+    /// alias, so this is a safe, non-destructive way to observe which one
+    /// actually ran). `alias.mystatus` (a genuinely non-builtin name) is a
+    /// positive control proving the fixture's aliasing mechanism itself does
+    /// work — without it, "no marker fired" could just as easily mean
+    /// "aliasing is broken in this fixture" as "aliasing cannot shadow
+    /// builtins". No neutralization was added for `alias.*` because there is
+    /// nothing to neutralize: this vector is not reachable at all for any
+    /// command this domain issues.
+    #[test]
+    fn git_aliases_do_not_shadow_this_domains_builtin_subcommands() {
+        if !git_available() {
+            eprintln!("skipping: git not found on PATH");
+            return;
+        }
+        let repo = init_repo();
+        std::fs::write(repo.path().join("a.txt"), "hi\n").unwrap();
+        raw_git_ok(repo.path(), &["add", "a.txt"]);
+        raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "init"]);
+
+        const BUILTIN_NAMES: &[&str] = &[
+            "status",
+            "diff",
+            "rev-parse",
+            "ls-files",
+            "show",
+            "config",
+            "add",
+            "reset",
+            "hash-object",
+            "update-index",
+            "commit",
+            "checkout",
+            "fetch",
+            "pull",
+            "push",
+        ];
+        for name in BUILTIN_NAMES {
+            raw_git_ok(
+                repo.path(),
+                &[
+                    "config",
+                    &format!("alias.{name}"),
+                    &format!("!touch alias-{name}-fired.txt"),
+                ],
+            );
+        }
+        raw_git_ok(
+            repo.path(),
+            &[
+                "config",
+                "alias.mystatus",
+                "!touch alias-mystatus-fired.txt",
+            ],
+        );
+
+        // Positive control: a genuinely non-builtin alias name really does
+        // fire, proving the fixture mechanism itself works.
+        let _ = raw_git(repo.path(), &["mystatus"]);
+        assert!(
+            repo.path().join("alias-mystatus-fired.txt").exists(),
+            "sanity: a non-builtin alias name must fire — otherwise this fixture proves nothing"
+        );
+
+        for name in BUILTIN_NAMES {
+            let _ = raw_git(repo.path(), &[name, "--help"]);
+        }
+        for name in BUILTIN_NAMES {
+            assert!(
+                !repo.path().join(format!("alias-{name}-fired.txt")).exists(),
+                "alias.{name} must not have shadowed the real builtin {name} subcommand"
+            );
+        }
+    }
+
     #[test]
     fn caller_supplied_no_ext_diff_disables_a_malicious_diff_external() {
         if !git_available() {
@@ -834,22 +1295,27 @@ mod hostile_fixtures {
         );
     }
 
-    /// Scope note: unlike the four vectors above, a malicious
-    /// `credential.helper`/`core.sshCommand` cannot be forced to fire
-    /// through this slice's actual command surface at all — `status`/
-    /// `diff`/`rev-parse` never touch a remote or ask for credentials
-    /// regardless of hardening (confirmed empirically: they do not fire
-    /// even *without* any override), and the one git mode that *would*
-    /// touch a remote (`GitExecMode::Network`) is deliberately stubbed to
-    /// always fail closed without spawning in this slice (see
-    /// `network_mode_is_rejected_without_spawning`). This test therefore
-    /// proves the narrower, still-real claim: with both configured
-    /// maliciously, this domain's actual background-read command surface
-    /// never invokes either. Exercising `GIT_TERMINAL_PROMPT`/`GIT_ASKPASS`
-    /// against a genuine credential negotiation is deferred to the slice
-    /// that implements fetch/pull/push.
+    /// Scope note (renamed from `background_read_never_reaches_a_malicious_
+    /// credential_helper_or_ssh_command` — this slice's evidence-accuracy
+    /// review flagged the old name as implying a hardening-vs-unhardened
+    /// contrast that does not exist for this vector): unlike the four
+    /// vectors above, a malicious `credential.helper`/`core.sshCommand`
+    /// cannot be forced to fire through `GitExecMode::BackgroundRead`'s
+    /// actual command surface at all — `status`/`diff`/`rev-parse` never
+    /// touch a remote or ask for credentials regardless of hardening
+    /// (confirmed empirically: they do not fire even *without* any
+    /// override, so there is no meaningful "control" run to contrast
+    /// against — this is not "hardening neutralizes a vector that would
+    /// otherwise fire", it is "this vector is not reachable via this
+    /// command surface at all". `GitExecMode::Network` — the one mode in
+    /// this domain that legitimately does touch credentials/SSH, activated
+    /// by a later `F080` slice after this test was originally written — is
+    /// exercised separately and in full by `network_mode_fixtures` below,
+    /// including real hostile-`core.askPass` control/hardened pairs
+    /// (`control_hostile_core_askpass_fires_without_a_git_askpass_override`/
+    /// `network_mode_git_askpass_blocks_a_hostile_core_askpass_when_credential_helper_is_incomplete`).
     #[test]
-    fn background_read_never_reaches_a_malicious_credential_helper_or_ssh_command() {
+    fn credential_helper_and_ssh_command_are_unreachable_via_the_background_read_command_surface() {
         if !git_available() {
             eprintln!("skipping: git not found on PATH");
             return;
@@ -908,6 +1374,7 @@ mod hostile_fixtures {
 
         let repo_path = repo.path().to_path_buf();
         let cancel = AtomicBool::new(false);
+        let start = std::time::Instant::now();
         std::thread::scope(|scope| {
             let handle = scope.spawn(|| {
                 run_git_with_limits_for_test(
@@ -925,6 +1392,97 @@ mod hostile_fixtures {
             let error = result.expect_err("a cancelled invocation must be an error");
             assert_eq!(error.code(), "GIT_EXEC_CANCELLED");
         });
+        // The load-bearing regression assertion for the `wait_with_limits`
+        // reader-join fix (see that function's own doc comment): the
+        // `diff.external` script here is a *grandchild* of the killed `git`
+        // process (git execs it directly, its stdout wired straight to the
+        // same piped fd our reader thread reads) and keeps sleeping for
+        // ~4.8s more of its own `sleep 5` after `git` itself is killed and
+        // reaped on cancellation ~200ms in. Before this fix, `wait_with_limits`'s
+        // final `stdout_handle.join()`/`stderr_handle.join()` blocked on that
+        // orphaned grandchild's own pipe close, and this exact test measured
+        // ~5.56s real wall-clock (via `cargo test ... -- --nocapture`) despite
+        // "cancelling" almost instantly. 4 seconds is a generous margin over
+        // the ~200ms cancel delay plus [`super::GIT_EXEC_READER_DRAIN_GRACE`]
+        // (500ms) plus scheduling slack observed under the full parallel
+        // test suite (785+ tests forking subprocesses concurrently pushes
+        // this measurably higher than an isolated single-test run) —
+        // comfortably under the child's remaining ~4.8s sleep, so this
+        // assertion only passes when the reader join is genuinely bounded,
+        // not merely "eventually returns".
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "cancellation must return within a small bounded window even though the orphaned \
+             diff.external grandchild keeps the output pipe open for its own remaining ~4.8s \
+             sleep — took {elapsed:?}"
+        );
+    }
+
+    /// A dedicated test for the general shape of the `wait_with_limits`
+    /// reader-join fix, deliberately *not* going through cancellation or a
+    /// timeout at all: `diff.external` here forks a **detached** background
+    /// subshell (`(sleep 8; echo …) &` then `exit 0`) that inherits the same
+    /// piped stdout/stderr and keeps them open, while the immediate
+    /// `diff.external` process itself — and therefore the top-level `git`
+    /// process our Rust code spawns, which waits for it synchronously —
+    /// exits almost instantly (confirmed with a standalone shell
+    /// reproduction in this slice's report: well under a second of
+    /// real overhead). So `run_git`'s own poll loop reaches a perfectly
+    /// ordinary `ExecOutcome::Exited` almost immediately, with no cancel or
+    /// timeout ever firing — proving the reader-join bound applies to *any*
+    /// exit path, not just the cancel/timeout branches the test above
+    /// exercises.
+    #[test]
+    fn run_git_returns_promptly_even_when_a_detached_grandchild_keeps_the_output_pipe_open() {
+        if !git_available() {
+            eprintln!("skipping: git not found on PATH");
+            return;
+        }
+        let repo = init_repo();
+        let scripts = TempDir::new().expect("tempdir");
+        let script_path = scripts.path().join("detaching-diff-external.sh");
+        write_executable_script(
+            &script_path,
+            "(sleep 8; echo late-output-from-detached-grandchild) &\nexit 0",
+        );
+
+        std::fs::write(repo.path().join("a.txt"), "one\n").unwrap();
+        raw_git_ok(repo.path(), &["add", "a.txt"]);
+        raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "init"]);
+        std::fs::write(repo.path().join("a.txt"), "two\n").unwrap();
+        raw_git_ok(
+            repo.path(),
+            &["config", "diff.external", script_path.to_str().unwrap()],
+        );
+
+        let cancel = AtomicBool::new(false);
+        let start = std::time::Instant::now();
+        let output = run_git_with_limits_for_test(
+            repo.path(),
+            &["diff".to_owned()],
+            GitExecMode::BackgroundRead,
+            &cancel,
+            Duration::from_secs(30),
+            10_000_000,
+        )
+        .expect("an ordinary, uncancelled diff must still succeed even with a detached grandchild");
+        let elapsed = start.elapsed();
+        assert_eq!(output.exit_code, 0);
+        // 5s (not a tighter bound like 2s): measured in isolation this
+        // returns in ~1.35s, but under the full parallel test suite (785+
+        // tests, many concurrently forking subprocesses) scheduling
+        // contention alone pushed this as high as ~3.5s in practice — still
+        // comfortably bounded, just not as tight as a single-test run.
+        // 5s stays well clear of that observed contention noise while
+        // remaining sharply distinguishing from the unbounded-join bug this
+        // test guards against (which would take close to the full 8s the
+        // detached grandchild actually sleeps for).
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "run_git must return within a small bounded window despite a detached grandchild \
+             holding the output pipe open for 8 more seconds in the background — took {elapsed:?}"
+        );
     }
 
     #[test]
@@ -1033,6 +1591,58 @@ mod hostile_fixtures {
         )
         .expect_err("output exceeding the cap must be rejected");
         assert_eq!(error.code(), "GIT_EXEC_OUTPUT_LIMIT_EXCEEDED");
+    }
+
+    /// The normal-case complement to the two orphan/detached-grandchild
+    /// tests above: proves [`super::GIT_EXEC_READER_DRAIN_GRACE`]'s bounded
+    /// wait never truncates a large, entirely legitimate payload with no
+    /// grandchild involved at all. 9,000,000 bytes is deliberately just
+    /// under the real production [`super::GIT_EXEC_OUTPUT_CAP_BYTES`]
+    /// ceiling (10,000,000) — the exact shape the grace window must never
+    /// interfere with in ordinary operation.
+    #[test]
+    fn large_legitimate_output_is_captured_in_full_without_truncation() {
+        if !git_available() {
+            eprintln!("skipping: git not found on PATH");
+            return;
+        }
+        let repo = init_repo();
+        let scripts = TempDir::new().expect("tempdir");
+        let script_path = scripts.path().join("large-diff-external.sh");
+        write_executable_script(&script_path, "head -c 9000000 /dev/zero");
+
+        std::fs::write(repo.path().join("a.txt"), "one\n").unwrap();
+        raw_git_ok(repo.path(), &["add", "a.txt"]);
+        raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "init"]);
+        std::fs::write(repo.path().join("a.txt"), "two\n").unwrap();
+        raw_git_ok(
+            repo.path(),
+            &["config", "diff.external", script_path.to_str().unwrap()],
+        );
+
+        let cancel = AtomicBool::new(false);
+        let start = std::time::Instant::now();
+        let output = run_git_with_limits_for_test(
+            repo.path(),
+            &["diff".to_owned()],
+            GitExecMode::BackgroundRead,
+            &cancel,
+            Duration::from_secs(30),
+            10_000_000,
+        )
+        .expect("a large but under-cap legitimate payload must succeed");
+        let elapsed = start.elapsed();
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(
+            output.stdout.len(),
+            9_000_000,
+            "the full legitimate payload must be captured, not truncated by the bounded \
+             reader-join grace period"
+        );
+        eprintln!(
+            "large_legitimate_output_is_captured_in_full_without_truncation: 9,000,000 bytes \
+             drained in {elapsed:?} (no grandchild involved)"
+        );
     }
 }
 
@@ -1460,8 +2070,29 @@ mod network_mode_fixtures {
         });
     }
 
+    /// Renamed from `network_mode_uses_its_own_longer_timeout_not_the_local_
+    /// ceiling` (this slice's evidence-accuracy review flagged the old name
+    /// as overselling what the body actually proves): the body below only
+    /// ever exercises an *injected* short timeout via
+    /// [`run_git_network_with_limits_for_test`], which never touches
+    /// [`GIT_EXEC_TIMEOUT`]/[`GIT_EXEC_NETWORK_TIMEOUT`] at all — it does
+    /// not, by itself, compare Network mode's real default timeout against
+    /// the shorter local-mode ceiling. This version keeps that generic
+    /// timeout-mechanism proof (Network mode's `wait_with_limits` path
+    /// genuinely honors whatever timeout it's given) and adds the actual,
+    /// previously-missing comparison as a direct constant assertion —
+    /// `GIT_EXEC_NETWORK_TIMEOUT` (300s) really is longer than
+    /// `GIT_EXEC_TIMEOUT` (30s), the concrete claim the old name made
+    /// without ever checking it.
     #[test]
-    fn network_mode_uses_its_own_longer_timeout_not_the_local_ceiling() {
+    fn network_mode_accepts_an_injected_timeout_and_its_real_default_is_longer_than_the_local_ceiling(
+    ) {
+        assert!(
+            GIT_EXEC_NETWORK_TIMEOUT > GIT_EXEC_TIMEOUT,
+            "GitExecMode::Network's default timeout must genuinely be longer than every other \
+             mode's — GIT_EXEC_NETWORK_TIMEOUT={GIT_EXEC_NETWORK_TIMEOUT:?}, \
+             GIT_EXEC_TIMEOUT={GIT_EXEC_TIMEOUT:?}"
+        );
         if !git_available() {
             eprintln!("skipping: git not found on PATH");
             return;

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
 	computeContentAfterApplyingHunk,
 	countHunks,
+	decodeLosslessUtf8,
 } from "../../app/features/scm/hunk-stage";
 
 describe("computeContentAfterApplyingHunk", () => {
@@ -74,5 +75,49 @@ describe("countHunks", () => {
 
 	it("counts one for a single contiguous change", () => {
 		expect(countHunks("one\ntwo\nthree", "one\nTWO\nthree")).toBe(1);
+	});
+});
+
+describe("decodeLosslessUtf8", () => {
+	it("decodes a UTF-8 BOM prefix into a leading U+FEFF and round-trips exactly", () => {
+		const bytes = new Uint8Array([
+			0xef,
+			0xbb,
+			0xbf,
+			...new TextEncoder().encode("hello"),
+		]);
+		const decoded = decodeLosslessUtf8(bytes);
+		expect(decoded).not.toBeUndefined();
+		expect(decoded?.startsWith("﻿")).toBe(true);
+		expect(new TextEncoder().encode(decoded as string)).toEqual(bytes);
+	});
+
+	it("refuses invalid UTF-8 (a Latin-1 byte sequence with a dangling lead byte)", () => {
+		// "Hell" followed by a lone 0xE9 — a Latin-1 "é" byte that is an
+		// incomplete/invalid UTF-8 lead byte in this position.
+		const bytes = new Uint8Array([...new TextEncoder().encode("Hell"), 0xe9]);
+		expect(decodeLosslessUtf8(bytes)).toBeUndefined();
+	});
+
+	it("refuses a lone-surrogate WTF-8-style byte sequence", () => {
+		// Non-standard 3-byte WTF-8 encoding of a lone UTF-16 high surrogate
+		// U+D800 — real UTF-8 forbids surrogate code points entirely.
+		const bytes = new Uint8Array([0xed, 0xa0, 0x80]);
+		expect(decodeLosslessUtf8(bytes)).toBeUndefined();
+	});
+
+	it("decodes plain ASCII with no BOM and round-trips exactly (regression guard)", () => {
+		const bytes = new TextEncoder().encode("hello world");
+		const decoded = decodeLosslessUtf8(bytes);
+		expect(decoded).toBe("hello world");
+		expect(new TextEncoder().encode(decoded as string)).toEqual(bytes);
+	});
+
+	it("decodes valid non-ASCII UTF-8 with no BOM and round-trips exactly", () => {
+		const original = "café 😀";
+		const bytes = new TextEncoder().encode(original);
+		const decoded = decodeLosslessUtf8(bytes);
+		expect(decoded).toBe(original);
+		expect(new TextEncoder().encode(decoded as string)).toEqual(bytes);
 	});
 });

@@ -9654,7 +9654,7 @@ describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
 			"network.rs must define GIT_PUSH_FORCE_ARGS as exactly the audited force-with-lease argument list (never bare --force)",
 		);
 		expect(failures).toContain(
-			"network.rs must never pass a bare --force argument to git push — only --force-with-lease",
+			"src-tauri/src/git/network.rs must never pass a bare --force argument to git push — only --force-with-lease",
 		);
 	});
 
@@ -9665,7 +9665,30 @@ describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
 				`${source}\npub(crate) const GIT_HOSTILE_FORCE_ARGS: &[&str] = &["push", "--force"];\n`,
 		);
 		expect(validateGitRustBoundary(mutated)).toContain(
-			"network.rs must never pass a bare --force argument to git push — only --force-with-lease",
+			"src-tauri/src/git/network.rs must never pass a bare --force argument to git push — only --force-with-lease",
+		);
+	});
+
+	// Post-review fix: the bare-`--force` scan was previously scoped only to
+	// `network.rs`'s own source (`executableNetwork`), not the whole git
+	// Rust domain, despite the evidence text this Harness backs originally
+	// claiming domain-wide coverage. Broadened to scan every git-domain
+	// source file (confirmed empirically zero false positives: no other
+	// file under `src-tauri/src/git/` contains the literal quoted string
+	// `"--force"` at all) — this test proves a bare `--force` literal
+	// smuggled into a *different* git-domain file (not `network.rs`) is now
+	// also caught, which the pre-fix, network.rs-only scan could not do.
+	it("fails if a bare --force literal is smuggled into a different git-domain file entirely", () => {
+		const mutated = [
+			...baselineGitRustSources,
+			{
+				relativePath: "src-tauri/src/git/stage.rs",
+				source:
+					'pub(crate) const GIT_HOSTILE_FORCE_ARGS: &[&str] = &["push", "--force"];',
+			},
+		];
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"src-tauri/src/git/stage.rs must never pass a bare --force argument to git push — only --force-with-lease",
 		);
 	});
 
@@ -9692,6 +9715,108 @@ describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
 		expect(validateGitRustBoundary(missingNetwork)).toContain(
 			"git boundary requires network.rs and exec.rs",
 		);
+	});
+
+	// Post-review fix: GIT_LITERAL_PATHSPECS=1 must live exactly once,
+	// unconditionally, inside apply_universal_hardening — never removed,
+	// duplicated, or narrowed into a single GitExecMode's own harden_*
+	// function. Each mutation below targets a different way that guarantee
+	// could silently erode.
+	describe("GIT_LITERAL_PATHSPECS universal-hardening lock", () => {
+		it("fails if GIT_LITERAL_PATHSPECS is removed entirely", () => {
+			const mutated = withMutatedGitRustSource(
+				"src-tauri/src/git/exec.rs",
+				(source) =>
+					source.replace(
+						'    command.env("GIT_LITERAL_PATHSPECS", "1");\n',
+						"",
+					),
+			);
+			expect(validateGitRustBoundary(mutated)).toContain(
+				"exec.rs must set GIT_LITERAL_PATHSPECS=1 exactly once, unconditionally, inside " +
+					"apply_universal_hardening, and build_git_command must call it before " +
+					"dispatching on GitExecMode — never duplicated or narrowed into a single " +
+					"GitExecMode's own harden_* function",
+			);
+		});
+
+		it("fails if GIT_LITERAL_PATHSPECS is narrowed into only harden_write, removed from apply_universal_hardening", () => {
+			const mutated = withMutatedGitRustSource(
+				"src-tauri/src/git/exec.rs",
+				(source) =>
+					source
+						.replace(
+							'fn apply_universal_hardening(command: &mut Command) {\n    command.env("GIT_LITERAL_PATHSPECS", "1");\n}',
+							"fn apply_universal_hardening(command: &mut Command) {}",
+						)
+						.replace(
+							"fn harden_write(command: &mut Command) {",
+							'fn harden_write(command: &mut Command) {\n    command.env("GIT_LITERAL_PATHSPECS", "1");',
+						),
+			);
+			expect(validateGitRustBoundary(mutated)).toContain(
+				"exec.rs must set GIT_LITERAL_PATHSPECS=1 exactly once, unconditionally, inside " +
+					"apply_universal_hardening, and build_git_command must call it before " +
+					"dispatching on GitExecMode — never duplicated or narrowed into a single " +
+					"GitExecMode's own harden_* function",
+			);
+		});
+
+		it("fails if GIT_LITERAL_PATHSPECS is duplicated into harden_write alongside apply_universal_hardening", () => {
+			const mutated = withMutatedGitRustSource(
+				"src-tauri/src/git/exec.rs",
+				(source) =>
+					source.replace(
+						"fn harden_write(command: &mut Command) {",
+						'fn harden_write(command: &mut Command) {\n    command.env("GIT_LITERAL_PATHSPECS", "1");',
+					),
+			);
+			expect(validateGitRustBoundary(mutated)).toContain(
+				"exec.rs must set GIT_LITERAL_PATHSPECS=1 exactly once, unconditionally, inside " +
+					"apply_universal_hardening, and build_git_command must call it before " +
+					"dispatching on GitExecMode — never duplicated or narrowed into a single " +
+					"GitExecMode's own harden_* function",
+			);
+		});
+
+		it("fails if build_git_command's call to apply_universal_hardening is removed", () => {
+			const mutated = withMutatedGitRustSource(
+				"src-tauri/src/git/exec.rs",
+				(source) =>
+					source.replace(
+						"    apply_universal_hardening(&mut command);\n\n    match mode {",
+						"    match mode {",
+					),
+			);
+			expect(validateGitRustBoundary(mutated)).toContain(
+				"exec.rs must set GIT_LITERAL_PATHSPECS=1 exactly once, unconditionally, inside " +
+					"apply_universal_hardening, and build_git_command must call it before " +
+					"dispatching on GitExecMode — never duplicated or narrowed into a single " +
+					"GitExecMode's own harden_* function",
+			);
+		});
+
+		it("fails if build_git_command calls apply_universal_hardening only after the match dispatch", () => {
+			const mutated = withMutatedGitRustSource(
+				"src-tauri/src/git/exec.rs",
+				(source) =>
+					source
+						.replace(
+							"    apply_universal_hardening(&mut command);\n\n    match mode {",
+							"    match mode {",
+						)
+						.replace(
+							"    command.args(args);\n    Ok(command)\n}",
+							"    apply_universal_hardening(&mut command);\n    command.args(args);\n    Ok(command)\n}",
+						),
+			);
+			expect(validateGitRustBoundary(mutated)).toContain(
+				"exec.rs must set GIT_LITERAL_PATHSPECS=1 exactly once, unconditionally, inside " +
+					"apply_universal_hardening, and build_git_command must call it before " +
+					"dispatching on GitExecMode — never duplicated or narrowed into a single " +
+					"GitExecMode's own harden_* function",
+			);
+		});
 	});
 });
 

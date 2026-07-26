@@ -103,6 +103,22 @@ pub(crate) fn git_exec_output_limit_exceeded() -> CommandError {
     )
 }
 
+/// Returned when [`exec::run_git`]'s `GitExecMode::BackgroundRead` bootstrap
+/// step (`git config --list -z`, used to discover which `filter.<name>`
+/// drivers must be neutralized before the real command spawns — see
+/// `exec::harden_background_read`'s own doc comment) itself fails to spawn or
+/// exits non-zero. Deliberately a **hard failure**, never silently treated as
+/// "no filters configured": ADR 0003 forbids a fail-open fallback, and
+/// treating an unreadable/unparseable config as "nothing to neutralize"
+/// would be exactly that.
+pub(crate) fn git_exec_filter_discovery_failed() -> CommandError {
+    CommandError::new(
+        "GIT_EXEC_FILTER_DISCOVERY_FAILED",
+        "The git subprocess could not read repository configuration to determine which \
+         content filters must be neutralized for a background read.",
+    )
+}
+
 /// `F080` S1: returned by [`repo::resolve_repo_toplevel`] whenever the
 /// current window's authorized workspace root does not resolve to a
 /// confirmed Git working tree — either there is no authorized root at all
@@ -121,8 +137,8 @@ pub(crate) fn git_no_repository() -> CommandError {
 #[cfg(test)]
 mod tests {
     use super::{
-        git_cwd_invalid, git_exec_cancelled, git_exec_output_limit_exceeded, git_exec_timeout,
-        git_exec_unavailable, git_no_repository,
+        git_cwd_invalid, git_exec_cancelled, git_exec_filter_discovery_failed,
+        git_exec_output_limit_exceeded, git_exec_timeout, git_exec_unavailable, git_no_repository,
     };
 
     #[test]
@@ -136,5 +152,9 @@ mod tests {
             "GIT_EXEC_OUTPUT_LIMIT_EXCEEDED"
         );
         assert_eq!(git_no_repository().code(), "GIT_NO_REPOSITORY");
+        assert_eq!(
+            git_exec_filter_discovery_failed().code(),
+            "GIT_EXEC_FILTER_DISCOVERY_FAILED"
+        );
     }
 }
