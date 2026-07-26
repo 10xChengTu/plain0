@@ -278,3 +278,55 @@ body[data-plain-ready="error"] #plain-bootstrap-status {
 		opacity: 0;
 	}
 }
+
+/* `F090` S0 inline git blame decoration — age heatmap colors, own palette
+ * (not GitLens's — see `docs/research/2026-07-26-git-history.md`'s own
+ * "调色板颜色本身应走 Plain 自己的主题色系统...但仍需自行设计" note). Six
+ * fixed buckets from `--plain-git-blame-age-0` (the file's most recently
+ * touched lines) through `--plain-git-blame-age-5` (its oldest), warm→cool,
+ * computed by `blameAgeBucketIndex` in `app/features/scm/plain-git-blame.ts`.
+ * A CSS custom property per bucket (rather than one interpolated inline
+ * style per decoration) keeps this a fixed, auditable palette instead of an
+ * unbounded set of dynamically generated colors, and leaves room for a
+ * future theme-token integration to override these six variables without
+ * touching the decoration-building code at all. */
+:root {
+	--plain-git-blame-age-0: #d98a3d;
+	--plain-git-blame-age-1: #c98a52;
+	--plain-git-blame-age-2: #b48a6b;
+	--plain-git-blame-age-3: #8a8a94;
+	--plain-git-blame-age-4: #6a86a8;
+	--plain-git-blame-age-5: #4d79b3;
+}
+
+.plain-git-blame-inline {
+	opacity: 0.7;
+	font-style: italic;
+	margin-left: 1rem;
+	pointer-events: none;
+	white-space: pre;
+}
+
+.plain-git-blame-age-0 {
+	color: var(--plain-git-blame-age-0);
+}
+
+.plain-git-blame-age-1 {
+	color: var(--plain-git-blame-age-1);
+}
+
+.plain-git-blame-age-2 {
+	color: var(--plain-git-blame-age-2);
+}
+
+.plain-git-blame-age-3 {
+	color: var(--plain-git-blame-age-3);
+}
+
+.plain-git-blame-age-4 {
+	color: var(--plain-git-blame-age-4);
+}
+
+.plain-git-blame-age-5 {
+	color: var(--plain-git-blame-age-5);
+}

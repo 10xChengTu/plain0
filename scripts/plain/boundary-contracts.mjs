@@ -1386,6 +1386,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 				parent.expression.text === "configurePlainTerminalBridge" ||
 				parent.expression.text === "configurePlainScmBridge" ||
 				parent.expression.text === "createPlainGitTextModelContentProvider" ||
+				parent.expression.text === "createPlainGitBlameContribution" ||
 				parent.expression.text === "consumeImportedThemePackages" ||
 				parent.expression.text === "registerPlainThemeCommands" ||
 				parent.expression.text === "registerPlainThemePicker" ||
@@ -6345,12 +6346,33 @@ const GIT_COMMAND_CONTRACTS = Object.freeze([
 		returnType: "->Result<(),CommandError>",
 		body: "request.validate();network_service.inner().request_cancel(window.label());Ok(())",
 	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_blame_file",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitBlameFileRequest",
+		returnType: "->Result<GitBlameFileResult,CommandError>",
+		body: "let(path,range)=request.into_parts()?;letresult=blame::blame_file(trust.inner(),workspace.inner(),window.label(),&path,range,).await?;Ok(GitBlameFileResult::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_blame_commit_messages",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitBlameCommitMessagesRequest",
+		returnType: "->Result<GitBlameCommitMessagesResult,CommandError>",
+		body: "letshas=request.into_parts()?;letmessages=blame::blame_commit_messages(trust.inner(),workspace.inner(),window.label(),&shas).await?;Ok(GitBlameCommitMessagesResult::new(messages))",
+	},
 ]);
 
 /**
- * Locks all thirteen `F080` git commands (S1's three reads, S3's five
- * writes, S4's five network commands) to their audited exact signatures,
- * bodies and single `generate_handler!` registration — mirrors
+ * Locks all fifteen git commands (`F080` S1's three reads, S3's five
+ * writes, S4's five network commands, and `F090` S0's two read-only blame
+ * commands — `git_blame_file`/`git_blame_commit_messages`, added to this
+ * same closed array rather than a parallel `GIT_HISTORY_COMMAND_CONTRACTS`,
+ * per the existing "`PlainBridge`'s git surface is one audited whole, not
+ * several independently-sized ones" rationale documented below at
+ * `GIT_BRIDGE_METHOD_NAMES`) to their audited exact signatures, bodies and
+ * single `generate_handler!` registration — mirrors
  * `validateTrustTerminalCommandRegistration`'s exact technique.
  */
 export function validateGitCommandRegistration(rustSources) {
@@ -6886,15 +6908,70 @@ export function validateGitRustBoundary(rustSources) {
 }
 
 /**
+ * `F090` S0's dedicated hardening lock for `git blame` — kept as its own
+ * exported function (not folded into `validateGitRustBoundary`'s generic
+ * `argsConstant` checks) precisely because the research doc's own warning
+ * is that this is easy to conflate with an already-covered case: `status`/
+ * `diff` get their NUL-safe, unquoted path output from `-z` alone, so it
+ * would be a natural (but wrong) assumption that blame's own `-z` does the
+ * same. It does not — verified empirically (`blame.rs`'s own module doc
+ * comment, `blame/tests.rs`'s `blame_hardened_call_recovers_the_real_filename_
+ * while_an_unhardened_control_is_octal_escaped` control-group test): git
+ * blame's `filename`/`previous` path fields are only unescaped when `-c
+ * core.quotePath=false` is explicitly set, and that override must be a
+ * *global* option positioned before the `blame` subcommand token (`-c`
+ * placed after `blame` is a *different*, blame-specific flag — annotate-
+ * compatibility mode — not the config-override flag; confirmed empirically
+ * against real git 2.50.1, which is why `GIT_BLAME_BASE_ARGS` itself is
+ * ordered `-c`, `core.quotePath=false` *first*, `blame` second, unlike the
+ * research doc's original un-verified sketch).
+ */
+export function validateGitBlameHardeningArgs(rustSources) {
+	const failures = [];
+	const blameSource = findRustSource(rustSources, "src-tauri/src/git/blame.rs");
+	if (blameSource === undefined) {
+		failures.push("git boundary requires blame.rs");
+		return failures;
+	}
+	const executableBlame = stripRustCommentsOnly(blameSource);
+	const constantPattern =
+		/pub\s*\(\s*crate\s*\)\s+const\s+GIT_BLAME_BASE_ARGS\s*:\s*&\[&str\]\s*=\s*&\[([^\]]*)\]\s*;/;
+	const match = constantPattern.exec(executableBlame);
+	const args = match?.[1]
+		?.split(",")
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0)
+		.map((entry) => entry.replace(/^"|"$/g, ""));
+	if (
+		match === null ||
+		!sameArray(args, [
+			"-c",
+			"core.quotePath=false",
+			"blame",
+			"--line-porcelain",
+			"--root",
+		])
+	) {
+		failures.push(
+			"blame.rs must define GIT_BLAME_BASE_ARGS as exactly the audited blame argument list, " +
+				"with -c core.quotePath=false positioned as a global option before the blame subcommand " +
+				"token (not after it, where -c means something else entirely to git blame)",
+		);
+	}
+	return failures;
+}
+
+/**
  * `F080` S1's three read methods, `F080` S3's five write methods
  * (`git_stage_paths`/`git_unstage_paths`/`git_stage_blob`/`git_commit`/
- * `git_discard_paths`), and `F080` S4's five network methods
+ * `git_discard_paths`), `F080` S4's five network methods
  * (`git_network_preview`/`git_fetch`/`git_pull`/`git_push`/
- * `git_network_cancel`) — every slice deliberately shares this same
- * closed-list lock rather than getting its own parallel "S_ bridge methods"
- * const, for the same reason `GIT_COMMAND_CONTRACTS` above holds all
- * thirteen Rust commands in one array: `PlainBridge`'s git surface is one
- * audited whole, not several independently-sized ones.
+ * `git_network_cancel`), and `F090` S0's two read-only blame methods
+ * (`gitBlameFile`/`gitBlameCommitMessages`) — every slice deliberately
+ * shares this same closed-list lock rather than getting its own parallel
+ * "S_ bridge methods" const, for the same reason `GIT_COMMAND_CONTRACTS`
+ * above holds all fifteen Rust commands in one array: `PlainBridge`'s git
+ * surface is one audited whole, not several independently-sized ones.
  */
 const GIT_BRIDGE_METHOD_NAMES = [
 	"gitStatus",
@@ -6910,6 +6987,8 @@ const GIT_BRIDGE_METHOD_NAMES = [
 	"gitPull",
 	"gitPush",
 	"gitNetworkCancel",
+	"gitBlameFile",
+	"gitBlameCommitMessages",
 ];
 
 /**
@@ -7015,7 +7094,7 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 			JSON.stringify([...GIT_BRIDGE_METHOD_NAMES].sort())
 	) {
 		failures.push(
-			"PlainBridge must expose exactly the thirteen audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifteen audited git methods, no more and no fewer",
 		);
 	}
 
@@ -7032,6 +7111,8 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 		"decodeGitDiffFilesResult",
 		"decodeGitShowBlobResult",
 		"decodeGitNetworkPreviewResult",
+		"decodeGitBlameFileResult",
+		"decodeGitBlameCommitMessagesResult",
 	]) {
 		const body = decoderBody(name);
 		if (
@@ -7071,6 +7152,28 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 	) {
 		failures.push(
 			"native.ts must invoke git_network_preview exactly once, routed through frozenGitNetworkPreviewRequest and decoded through decodeGitNetworkPreviewResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_blame_file"/g)].length !==
+			1 ||
+		!native.includes("frozenGitBlameFileRequest(") ||
+		!native.includes("decodeGitBlameFileResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_blame_file exactly once, routed through frozenGitBlameFileRequest and decoded through decodeGitBlameFileResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_blame_commit_messages"/g)]
+			.length !== 1 ||
+		!native.includes("frozenGitBlameCommitMessagesRequest(") ||
+		!native.includes("decodeGitBlameCommitMessagesResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_blame_commit_messages exactly once, routed through frozenGitBlameCommitMessagesRequest and decoded through decodeGitBlameCommitMessagesResult",
 		);
 	}
 

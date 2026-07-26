@@ -96,10 +96,21 @@ F090 与 F080 的关键差异：F080 五条 acceptance 全部与"当前工作区
 除 stash/worktree 的写操作外，F090 每个只读能力都是参数写死的专用命令，复用 F080 的 `GIT_*_ARGS` 常量 + AST 契约锁定模式，禁止通用 `git_run`：
 
 ```
-GIT_BLAME_BASE_ARGS   = ["blame", "--line-porcelain", "--root", "-c", "core.quotePath=false"]
+GIT_BLAME_BASE_ARGS   = ["-c", "core.quotePath=false", "blame", "--line-porcelain", "--root"]
                         （+ 可选 "-L<start>,<end>"，+ 可选 <rev>，+ "--", <path>）
-GIT_LOG_COMMIT_META_ARGS = ["log", "-z", "--format=<FIXED>", "--no-patch"]
-                        （FIXED 形如 %H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%s%x1f%b，%b 放最后，内嵌 %n/LF 不影响 -z 记录边界）
+                        ★ S0 实测修正：上面这个顺序是对的，本文档原先把 "-c"/"core.quotePath=false"
+                          排在 "blame" 之后——真实 git 2.50.1 会把它理解成 blame 自己的 -c
+                          （annotate 兼容模式）而非全局配置覆盖，直接 fatal: bad revision
+                          'core.quotePath=false'。git 的全局 -c 必须排在子命令之前。
+GIT_LOG_COMMIT_META_ARGS = ["log", "-z", "--format=%H%x1f%B", "--no-patch"]
+                        ★ S0 实测修正：本文档原先设计的多字段格式
+                          （%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%s%x1f%b）有真实的字段错位漏洞，
+                          已用敌意 commit 复现：git config user.name 通过一次完全正常的
+                          git commit 就能接受任意字节，**包括格式串自己的分隔符 0x1f**；
+                          一旦作者名夹带该字节，它后面的所有字段全部错位。这与 F080 审查
+                          发现的 pathspec/filter 属同一类问题——攻击者可控数据进入结构化协议。
+                          改为 sha 后只留一个字段（%B）吸收其余全部字节，结构上不可能错位；
+                          其他元数据若需要，必须各自独立取或改用不可被内容伪造的编码。
 GIT_LOG_FILE_HISTORY_ARGS = GIT_LOG_COMMIT_META_ARGS + ["--follow", "--", <path>]
 GIT_LOG_LINE_HISTORY_ARGS = GIT_LOG_COMMIT_META_ARGS + ["-L<start>,<end>:<path>"]
                         （drill-down 单条：["log", "-1", "-L<start>,<end>:<path>", <sha>]，不再需要 --no-patch）
@@ -182,7 +193,12 @@ F090 acceptance 第 3 条明确要求"stash、worktree 工作流通过 fixture"�
    - 仍待 S5 实测确认的细节:`git worktree add` 要求目标路径不存在或为空目录,需确认"父目录已存在 + 子段不存在"这一组合在真实 git 下的确切行为与报错文案,并映射为结构化错误码。
 
 2. **大仓库真实性能数字缺失**：本文档引用的"GitLab 报告 8 秒级 blame 耗时"等是第三方公开报告,不是本机实测,必须在 S3/实施阶段用真实大仓库基准替换。
-3. **blame 对含 LF/非法 UTF-8 文件名的真实失败模式未验证**：已确认 `-c core.quotePath=false` 是必须的硬化项,但没有构造出真实含字面 LF 的文件名(macOS APFS 文件系统层面可能直接拒绝创建这类文件名,同 F080 S1 已记录的相同平台限制),该风险留待 Linux CI 或专门构造环境验证。
+3. ~~**blame 对含 LF/非法 UTF-8 文件名的真实失败模式未验证**~~ —— **S0 实施阶段已实测证伪本条的前提并完成验证**。本条原文断言"macOS APFS 文件系统层面可能直接拒绝创建这类文件名,同 F080 S1 已记录的相同平台限制"——**这个假设是错的**：字面 `\n` 在 Rust 里就是合法字符串内容,`std::fs::write` 直接就能在 APFS 上创建含字面 LF 的文件名,不需要任何 `OsStr`/字节层技巧。S0 已用真实的字面 LF 文件名验证了 blame 解析路径。
+
+   **连带纠正**：F080 S1 当年记录的"同一平台限制"同样不成立(它把一个未尝试的假设写成了已知平台限制),该处结论应视为已被本次实测推翻。教训:凡是"本平台做不到所以没测"的结论,必须真的尝试过一次再写进文档——否则它会像本例一样被下游切片继承为既定事实。
+
+   仍然成立的部分：`-c core.quotePath=false` **必须**但**不充分**——它只影响 `>=0x80` 字节是否做八进制转义;文件名中的字面双引号/反斜杠/tab/控制字节无论该开关如何都会被 git 转义,因此解析器必须实现完整的 C 风格反转义(含 3 位八进制),不能依赖"开了这个 flag 就总是拿到原始字节"。S0 已按此实现。
+
 4. **`stash show`/`worktree list` 是否需要 `-c core.quotePath=false`**：本次基于 blame 的实测结果推断适用同一转义规则,但未针对这两个命令单独构造 fixture 验证,标注为待实施确认。
 5. **Graph 视图的性能上限**：swimlane 算法是 O(n × 活跃泳道数)增量维护,活跃泳道数在拥有大量长期并行分支的仓库里可能增长,需要一个"最多同时渲染 N 条泳道,超出折叠"的降级策略,具体阈值留给实施阶段依据真实基准决定。
 6. **stash 的 `--include-untracked`/`--keep-index` 等变体是否要在 v1 暴露**：本文档只锁定最基础的 `push -m <msg>`,更多选项（含未跟踪文件、保留暂存区）是否纳入 v1 UI 留给实施阶段按最小可用范围判断。

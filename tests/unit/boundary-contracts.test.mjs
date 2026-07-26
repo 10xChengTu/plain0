@@ -35,6 +35,7 @@ import {
 	validateTerminalIpcBridgeBoundary,
 	validateTerminalRustBoundary,
 	validateTrustTerminalCommandRegistration,
+	validateGitBlameHardeningArgs,
 	validateGitCommandRegistration,
 	validateGitDiscardConfirmationBoundary,
 	validateGitIpcBridgeBoundary,
@@ -9820,6 +9821,99 @@ describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
 	});
 });
 
+describe("Plain F090 S0 git blame hardening args Harness", () => {
+	const gitBlameSource = readFileSync(
+		new URL("../../src-tauri/src/git/blame.rs", import.meta.url),
+		"utf8",
+	);
+	const baselineGitBlameRustSources = Object.freeze([
+		{ relativePath: "src-tauri/src/git/blame.rs", source: gitBlameSource },
+	]);
+
+	function withMutatedGitBlameSource(mutate) {
+		return baselineGitBlameRustSources.map((entry) => ({
+			...entry,
+			source: mutate(entry.source),
+		}));
+	}
+
+	it("passes for the real, unmodified blame.rs file", () => {
+		expect(validateGitBlameHardeningArgs(baselineGitBlameRustSources)).toEqual(
+			[],
+		);
+	});
+
+	it("fails if blame.rs is missing entirely", () => {
+		expect(validateGitBlameHardeningArgs([])).toContain(
+			"git boundary requires blame.rs",
+		);
+	});
+
+	it("fails if -c core.quotePath=false is dropped from GIT_BLAME_BASE_ARGS", () => {
+		const mutated = withMutatedGitBlameSource((source) =>
+			source.replace(
+				'"-c",\n    "core.quotePath=false",\n    "blame",',
+				'"blame",',
+			),
+		);
+		expect(validateGitBlameHardeningArgs(mutated)).toContain(
+			"blame.rs must define GIT_BLAME_BASE_ARGS as exactly the audited blame argument list, " +
+				"with -c core.quotePath=false positioned as a global option before the blame subcommand " +
+				"token (not after it, where -c means something else entirely to git blame)",
+		);
+	});
+
+	it("fails if -c core.quotePath=false is moved after the blame subcommand token (the exact regression this contract exists to catch)", () => {
+		const mutated = withMutatedGitBlameSource((source) =>
+			source.replace(
+				'"-c",\n    "core.quotePath=false",\n    "blame",\n    "--line-porcelain",\n    "--root",',
+				'"blame",\n    "--line-porcelain",\n    "--root",\n    "-c",\n    "core.quotePath=false",',
+			),
+		);
+		expect(validateGitBlameHardeningArgs(mutated)).toContain(
+			"blame.rs must define GIT_BLAME_BASE_ARGS as exactly the audited blame argument list, " +
+				"with -c core.quotePath=false positioned as a global option before the blame subcommand " +
+				"token (not after it, where -c means something else entirely to git blame)",
+		);
+	});
+
+	it("fails if --root is dropped from GIT_BLAME_BASE_ARGS", () => {
+		const mutated = withMutatedGitBlameSource((source) =>
+			source.replace('"--root",\n', ""),
+		);
+		expect(validateGitBlameHardeningArgs(mutated)).toContain(
+			"blame.rs must define GIT_BLAME_BASE_ARGS as exactly the audited blame argument list, " +
+				"with -c core.quotePath=false positioned as a global option before the blame subcommand " +
+				"token (not after it, where -c means something else entirely to git blame)",
+		);
+	});
+
+	it("fails if --line-porcelain is weakened to --porcelain", () => {
+		const mutated = withMutatedGitBlameSource((source) =>
+			source.replace(
+				'"blame",\n    "--line-porcelain",\n    "--root",',
+				'"blame",\n    "--porcelain",\n    "--root",',
+			),
+		);
+		expect(validateGitBlameHardeningArgs(mutated)).toContain(
+			"blame.rs must define GIT_BLAME_BASE_ARGS as exactly the audited blame argument list, " +
+				"with -c core.quotePath=false positioned as a global option before the blame subcommand " +
+				"token (not after it, where -c means something else entirely to git blame)",
+		);
+	});
+
+	it("fails if GIT_BLAME_BASE_ARGS is renamed away entirely", () => {
+		const mutated = withMutatedGitBlameSource((source) =>
+			source.replace(/GIT_BLAME_BASE_ARGS/g, "GIT_BLAME_RENAMED_ARGS"),
+		);
+		expect(validateGitBlameHardeningArgs(mutated)).toContain(
+			"blame.rs must define GIT_BLAME_BASE_ARGS as exactly the audited blame argument list, " +
+				"with -c core.quotePath=false positioned as a global option before the blame subcommand " +
+				"token (not after it, where -c means something else entirely to git blame)",
+		);
+	});
+});
+
 describe("Plain F080 S1 git IPC bridge Harness", () => {
 	const gitCommandsSourceForBridge = readFileSync(
 		new URL("../../src-tauri/src/git/commands.rs", import.meta.url),
@@ -9890,7 +9984,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the thirteen audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifteen audited git methods, no more and no fewer",
 		);
 	});
 
@@ -9954,7 +10048,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the thirteen audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifteen audited git methods, no more and no fewer",
 		);
 	});
 
@@ -10015,7 +10109,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the thirteen audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifteen audited git methods, no more and no fewer",
 		);
 	});
 
@@ -10028,7 +10122,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the thirteen audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifteen audited git methods, no more and no fewer",
 		);
 	});
 

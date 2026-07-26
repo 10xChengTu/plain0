@@ -717,6 +717,74 @@ export interface GitNetworkPreviewResult {
 	readonly behind: number | null;
 }
 
+// --- Git blame (F090 S0: blame core + age heatmap) --------------------------
+
+/** A 1-based, inclusive `-L<start>,<end>` viewport range for [`gitBlameFile`]
+ * — omit entirely for whole-file blame. See
+ * `src-tauri/src/git/blame.rs`'s `BlameLineRange` doc comment. */
+export interface GitBlameLineRange {
+	readonly start: number;
+	readonly end: number;
+}
+
+/** Wire projection of `git::blame::BlameCommitHeader` — the fields
+ * `--line-porcelain` repeats for every line of a given commit, deduplicated
+ * server-side into [`GitBlameFileResult.commits`] keyed by sha.
+ * `summary` is the message's first line only; a hover wanting the full body
+ * must call `gitBlameCommitMessages` with this commit's sha. */
+export interface GitBlameCommitHeader {
+	readonly author: string;
+	readonly authorMail: string;
+	/** Unix seconds — the `age` half of the age heatmap. */
+	readonly authorTime: number;
+	readonly authorTz: string;
+	readonly committer: string;
+	readonly committerMail: string;
+	readonly committerTime: number;
+	readonly committerTz: string;
+	readonly summary: string;
+}
+
+export interface GitBlamePrevious {
+	readonly sha: string;
+	readonly path: string;
+}
+
+/**
+ * Wire projection of one `git::blame::BlameLineEntry`. `filename` (and
+ * `previous`'s path) are kept per line rather than folded into
+ * `GitBlameCommitHeader`: a rename-and-edit commit's own lines can
+ * legitimately report two different `filename` values within one blame
+ * response (pre-rename lines show the old path, the commit's own new lines
+ * show the new path) — see `src-tauri/src/git/blame.rs`'s `BlameLineEntry`
+ * doc comment. `isUncommitted` is `true` exactly when this line reflects an
+ * uncommitted working-tree change (`commitSha` is then a git-internal
+ * all-zero sentinel the server already hides behind this boolean — never
+ * compare `commitSha` against a literal sentinel string in frontend code).
+ */
+export interface GitBlameLineEntry {
+	readonly commitSha: string;
+	readonly isUncommitted: boolean;
+	readonly origLine: number;
+	readonly finalLine: number;
+	readonly isBoundary: boolean;
+	readonly filename: string;
+	readonly previous: GitBlamePrevious | null;
+}
+
+export interface GitBlameFileResult {
+	readonly entries: readonly GitBlameLineEntry[];
+	readonly commits: Readonly<Record<string, GitBlameCommitHeader>>;
+}
+
+/** Keyed by commit sha; a sha not present in the map (e.g. because the
+ * caller mistakenly included the uncommitted sentinel, which `gitStatus`'s
+ * own `GitBlameLineEntry.isUncommitted` already lets callers filter out
+ * before calling) simply never appears — never a partial/placeholder entry. */
+export interface GitBlameCommitMessagesResult {
+	readonly messages: Readonly<Record<string, string>>;
+}
+
 export type Unlisten = () => void | Promise<void>;
 
 export interface PlainBridge {
@@ -1057,4 +1125,28 @@ export interface PlainBridge {
 	 * timeout means a stuck fetch/pull/push needs a real way to abort early).
 	 * Never rejects. */
 	gitNetworkCancel(): Promise<void>;
+	/** `F090` S0: `git blame --line-porcelain --root -c core.quotePath=false
+	 * [-L<range>] -- <path>` — `path` is repository-toplevel-relative, `range`
+	 * omitted means whole-file blame. Same trust/repository rejections as
+	 * `gitStatus`; rejects with `GIT_BLAME_PATH_NOT_FOUND` for a path absent
+	 * from both the working tree and the repository's history,
+	 * `GIT_BLAME_INVALID_RANGE` for a structurally invalid range (`start` `<
+	 * 1` or `end < start`), or `GIT_BLAME_RANGE_OUT_OF_BOUNDS` when `range`
+	 * exceeds the file's current line count. */
+	gitBlameFile(
+		path: string,
+		range: GitBlameLineRange | null,
+	): Promise<GitBlameFileResult>;
+	/** `F090` S0: batch `git log --no-walk` fetch of each requested commit's
+	 * full message body (blame's own `summary` is only the first line) — for
+	 * the inline-blame hover feature. Every sha must be a real, exactly
+	 * 40-lowercase-hex commit id; never the `isUncommitted` sentinel a
+	 * `gitBlameFile` line may report (callers must filter that out first —
+	 * there is no commit object to look up for it). Rejects with
+	 * `GIT_BLAME_COMMIT_MESSAGES_INVALID_REQUEST` for an empty-after-filter
+	 * malformed entry, an oversized batch, or the sentinel; an empty `shas`
+	 * array itself is valid and simply resolves to `{ messages: {} }`. */
+	gitBlameCommitMessages(
+		shas: readonly string[],
+	): Promise<GitBlameCommitMessagesResult>;
 }

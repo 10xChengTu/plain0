@@ -23,14 +23,17 @@ use crate::error::CommandError;
 use crate::trust::service::TrustService;
 use crate::workspace::service::WorkspaceService;
 
+use super::blame;
 use super::commit;
 use super::diff;
 use super::discard;
 use super::dto::{
-    GitCommitRequest, GitDiffFilesRequest, GitDiffFilesResult, GitDiscardPathsRequest,
-    GitFetchRequest, GitNetworkCancelRequest, GitNetworkPreviewRequest, GitNetworkPreviewResult,
-    GitPullRequest, GitPushRequest, GitShowBlobRequest, GitShowBlobResult, GitStageBlobRequest,
-    GitStagePathsRequest, GitStatusRequest, GitStatusResult, GitUnstagePathsRequest,
+    GitBlameCommitMessagesRequest, GitBlameCommitMessagesResult, GitBlameFileRequest,
+    GitBlameFileResult, GitCommitRequest, GitDiffFilesRequest, GitDiffFilesResult,
+    GitDiscardPathsRequest, GitFetchRequest, GitNetworkCancelRequest, GitNetworkPreviewRequest,
+    GitNetworkPreviewResult, GitPullRequest, GitPushRequest, GitShowBlobRequest, GitShowBlobResult,
+    GitStageBlobRequest, GitStagePathsRequest, GitStatusRequest, GitStatusResult,
+    GitUnstagePathsRequest,
 };
 use super::network::{self, GitNetworkService};
 use super::stage;
@@ -209,6 +212,39 @@ pub(crate) async fn git_push(
         force,
     )
     .await
+}
+
+#[tauri::command]
+pub(crate) async fn git_blame_file(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    request: GitBlameFileRequest,
+) -> Result<GitBlameFileResult, CommandError> {
+    let (path, range) = request.into_parts()?;
+    let result = blame::blame_file(
+        trust.inner(),
+        workspace.inner(),
+        window.label(),
+        &path,
+        range,
+    )
+    .await?;
+    Ok(GitBlameFileResult::from(result))
+}
+
+#[tauri::command]
+pub(crate) async fn git_blame_commit_messages(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    request: GitBlameCommitMessagesRequest,
+) -> Result<GitBlameCommitMessagesResult, CommandError> {
+    let shas = request.into_parts()?;
+    let messages =
+        blame::blame_commit_messages(trust.inner(), workspace.inner(), window.label(), &shas)
+            .await?;
+    Ok(GitBlameCommitMessagesResult::new(messages))
 }
 
 #[tauri::command]

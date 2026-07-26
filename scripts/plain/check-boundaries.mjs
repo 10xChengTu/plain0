@@ -10,6 +10,7 @@ import {
 	validateDialogSurfaceBoundary,
 	validateNotificationOverrideImportBoundary,
 	validateFrontendEntrypointScripts,
+	validateGitBlameHardeningArgs,
 	validateGitCommandRegistration,
 	validateGitDiscardConfirmationBoundary,
 	validateGitIpcBridgeBoundary,
@@ -743,6 +744,9 @@ for (const failure of validateGitCommandRegistration(rustSources)) {
 	fail(failure);
 }
 for (const failure of validateGitRustBoundary(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateGitBlameHardeningArgs(rustSources)) {
 	fail(failure);
 }
 for (const failure of validateGitIpcBridgeBoundary(rustSources, appSources)) {

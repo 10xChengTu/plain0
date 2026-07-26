@@ -8,8 +8,10 @@ import {
 } from "@codingame/monaco-vscode-api";
 import { reinitializeWorkspace } from "@codingame/monaco-vscode-configuration-service-override";
 import { registerCustomProvider } from "@codingame/monaco-vscode-files-service-override";
+import { ICodeEditorService } from "@codingame/monaco-vscode-api/vscode/vs/editor/browser/services/codeEditorService.service";
 import { IModelService } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/services/model.service";
 import { ITextModelService } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/services/resolverService.service";
+import { ILanguageFeaturesService } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/services/languageFeatures.service";
 import { IFileService } from "@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files.service";
 import { IWorkbenchThemeService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service";
 
@@ -20,6 +22,7 @@ import "./features/terminal/terminal-contribution";
 import { registerPlainTerminalCommands } from "./features/terminal/plain-terminal-commands";
 import { configurePlainTerminalBridge } from "./features/terminal/plain-terminal-view";
 import { encodeGitResourceUri, GIT_URI_SCHEME } from "./features/scm/git-uri";
+import { createPlainGitBlameContribution } from "./features/scm/plain-git-blame-contribution";
 import { createPlainGitTextModelContentProvider } from "./features/scm/plain-git-content-provider";
 import { registerPlainScmCommands } from "./features/scm/plain-scm-commands";
 import { configurePlainScmBridge } from "./features/scm/plain-scm-view";
@@ -128,6 +131,8 @@ async function bootstrap(): Promise<void> {
 		ReturnType<typeof registerPlainTerminalCommands> | undefined;
 	let scmCommandsRegistration:
 		ReturnType<typeof registerPlainScmCommands> | undefined;
+	let gitBlameContributionRegistration:
+		ReturnType<typeof createPlainGitBlameContribution> | undefined;
 	window.addEventListener(
 		"pagehide",
 		() => {
@@ -139,6 +144,7 @@ async function bootstrap(): Promise<void> {
 			productIconThemePickerRegistration?.dispose();
 			terminalCommandsRegistration?.dispose();
 			scmCommandsRegistration?.dispose();
+			gitBlameContributionRegistration?.dispose();
 		},
 		{ once: true },
 	);
@@ -181,6 +187,14 @@ async function bootstrap(): Promise<void> {
 	);
 	terminalCommandsRegistration = registerPlainTerminalCommands();
 	scmCommandsRegistration = registerPlainScmCommands();
+	// `F090` S0: inline blame decoration + hover + age heatmap — see
+	// `plain-git-blame-contribution.ts`'s own module doc comment.
+	gitBlameContributionRegistration = createPlainGitBlameContribution(
+		bridge,
+		await getService(ICodeEditorService),
+		await getService(ILanguageFeaturesService),
+		await getService(IWorkspaceContextService),
+	);
 
 	// `F080` S2: the `git:` read-only content provider (decision 4) — a
 	// `PlainScmProvider.getOriginalResource` URI is only ever resolved once

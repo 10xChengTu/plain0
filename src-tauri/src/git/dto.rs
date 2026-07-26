@@ -5,10 +5,13 @@
 //! (the Tauri IPC wire is JSON, which requires valid UTF-8) rather than a
 //! silent one.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::CommandError;
 
+use super::blame::{BlameCommitHeader, BlameLineRange, BlameResult, BLAME_UNCOMMITTED_SHA};
 use super::diff::{DiffFileEntry, DiffStatusKind, GitBlobRev};
 use super::network::NetworkOperation;
 use super::status::{
@@ -613,6 +616,183 @@ pub struct GitNetworkCancelRequest {}
 
 impl GitNetworkCancelRequest {
     pub const fn validate(self) {}
+}
+
+// --- git_blame_file / git_blame_commit_messages (F090 S0) -------------------
+
+/// Defensive ceiling on how many shas one `git_blame_commit_messages` call
+/// may request — mirrors `blame::MAX_BLAME_COMMIT_MESSAGE_SHAS` (kept as an
+/// independent wire-layer constant rather than re-exported, exactly like
+/// `MAX_GIT_MUTATE_PATHS` above is this file's own copy of a ceiling also
+/// enforced deeper in the stack).
+const MAX_GIT_BLAME_COMMIT_MESSAGE_SHAS: usize = 4_096;
+
+fn git_blame_file_invalid_request() -> CommandError {
+    CommandError::new(
+        "GIT_BLAME_FILE_INVALID_REQUEST",
+        "The git blame file request is invalid.",
+    )
+}
+
+fn git_blame_commit_messages_invalid_request() -> CommandError {
+    CommandError::new(
+        "GIT_BLAME_COMMIT_MESSAGES_INVALID_REQUEST",
+        "The commit sha list is empty, too large, or contains an invalid entry.",
+    )
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitBlameLineRangeWire {
+    start: u32,
+    end: u32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitBlameFileRequest {
+    path: String,
+    range: Option<GitBlameLineRangeWire>,
+}
+
+impl GitBlameFileRequest {
+    pub(crate) fn into_parts(self) -> Result<(String, Option<BlameLineRange>), CommandError> {
+        if !is_valid_mutate_path(&self.path) {
+            return Err(git_blame_file_invalid_request());
+        }
+        let range = match self.range {
+            None => None,
+            Some(range) => {
+                if range.start == 0 || range.end < range.start {
+                    return Err(git_blame_file_invalid_request());
+                }
+                Some(BlameLineRange {
+                    start: range.start,
+                    end: range.end,
+                })
+            }
+        };
+        Ok((self.path, range))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBlameCommitHeaderWire {
+    author: String,
+    author_mail: String,
+    author_time: i64,
+    author_tz: String,
+    committer: String,
+    committer_mail: String,
+    committer_time: i64,
+    committer_tz: String,
+    summary: String,
+}
+
+impl From<BlameCommitHeader> for GitBlameCommitHeaderWire {
+    fn from(value: BlameCommitHeader) -> Self {
+        Self {
+            author: value.author,
+            author_mail: value.author_mail,
+            author_time: value.author_time,
+            author_tz: value.author_tz,
+            committer: value.committer,
+            committer_mail: value.committer_mail,
+            committer_time: value.committer_time,
+            committer_tz: value.committer_tz,
+            summary: value.summary,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBlamePreviousWire {
+    sha: String,
+    path: String,
+}
+
+/// `isUncommitted` is derived here (from comparing `commitSha` against
+/// [`BLAME_UNCOMMITTED_SHA`]) rather than left for the frontend to hardcode
+/// the 40-zero sentinel itself — the same "derive a boolean at the wire
+/// boundary rather than leak a sentinel-value convention to the caller"
+/// discipline `GitBranchWire`'s own doc comment applies to
+/// `"(initial)"`/`"(detached)"` (there the tokens are kept verbatim because
+/// they cannot collide with a real value and the frontend already documents
+/// the convention; here the sentinel is purely an implementation artifact of
+/// how git denotes "no commit yet", so it is fully hidden instead).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBlameLineEntryWire {
+    commit_sha: String,
+    is_uncommitted: bool,
+    orig_line: u32,
+    final_line: u32,
+    is_boundary: bool,
+    filename: String,
+    previous: Option<GitBlamePreviousWire>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBlameFileResult {
+    entries: Vec<GitBlameLineEntryWire>,
+    commits: HashMap<String, GitBlameCommitHeaderWire>,
+}
+
+impl From<BlameResult> for GitBlameFileResult {
+    fn from(value: BlameResult) -> Self {
+        let entries = value
+            .entries
+            .into_iter()
+            .map(|entry| GitBlameLineEntryWire {
+                is_uncommitted: entry.commit_sha == BLAME_UNCOMMITTED_SHA,
+                commit_sha: entry.commit_sha,
+                orig_line: entry.orig_line,
+                final_line: entry.final_line,
+                is_boundary: entry.is_boundary,
+                filename: entry.filename.to_wire_lossy(),
+                previous: entry.previous.map(|previous| GitBlamePreviousWire {
+                    sha: previous.sha,
+                    path: previous.path.to_wire_lossy(),
+                }),
+            })
+            .collect();
+        let commits = value
+            .commits
+            .into_iter()
+            .map(|(sha, header)| (sha, GitBlameCommitHeaderWire::from(header)))
+            .collect();
+        Self { entries, commits }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitBlameCommitMessagesRequest {
+    shas: Vec<String>,
+}
+
+impl GitBlameCommitMessagesRequest {
+    pub(crate) fn into_parts(self) -> Result<Vec<String>, CommandError> {
+        if self.shas.len() > MAX_GIT_BLAME_COMMIT_MESSAGE_SHAS {
+            return Err(git_blame_commit_messages_invalid_request());
+        }
+        Ok(self.shas)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBlameCommitMessagesResult {
+    messages: HashMap<String, String>,
+}
+
+impl GitBlameCommitMessagesResult {
+    pub(crate) const fn new(messages: HashMap<String, String>) -> Self {
+        Self { messages }
+    }
 }
 
 #[cfg(test)]

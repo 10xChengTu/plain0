@@ -102,6 +102,8 @@ pub fn run() {
             git::commands::git_pull,
             git::commands::git_push,
             git::commands::git_network_cancel,
+            git::commands::git_blame_file,
+            git::commands::git_blame_commit_messages,
             search::commands::workspace_search_files,
             search::commands::workspace_search_text_start,
             search::commands::workspace_search_text_poll,

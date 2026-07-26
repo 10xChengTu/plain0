@@ -1,4 +1,10 @@
 import type {
+	GitBlameCommitHeader,
+	GitBlameCommitMessagesResult,
+	GitBlameFileResult,
+	GitBlameLineEntry,
+	GitBlameLineRange,
+	GitBlamePrevious,
 	GitBlobRev,
 	GitBranch,
 	GitBranchUpstream,
@@ -864,4 +870,322 @@ export function frozenGitPushRequest(
 		return gitPushRequestInvalid();
 	}
 	return Object.freeze({ force });
+}
+
+// --- F090 S0: git blame (blame core + age heatmap) --------------------------
+
+// Defensive ceilings — mirrors `MAX_GIT_STATUS_ENTRIES`'s own "reject a
+// structurally hostile/runaway payload" rationale for this domain's other
+// arrays; a real blame response is bounded far below these in practice by
+// `src-tauri/src/git/exec.rs`'s 10 MB per-invocation output cap.
+const MAX_GIT_BLAME_ENTRIES = 2_000_000;
+const MAX_GIT_BLAME_COMMITS = 2_000_000;
+const MAX_GIT_BLAME_COMMIT_MESSAGE_SHAS = 4_096;
+/** A git sha1 is always exactly 40 lowercase hex characters — both
+ * `commitSha`/`previous.sha` on the read side and every entry of a
+ * `gitBlameCommitMessages` request on the write side are validated against
+ * this exact pattern (not merely "a 40-character string" — an all-digit or
+ * uppercase-hex string of the right length is not a real sha), mirroring
+ * `MAX_GIT_SHOW_BLOB_PATH_CHARS`'s own "a defensive ceiling that happens to
+ * be exact for a fixed-format field" precedent. */
+const GIT_BLAME_SHA_PATTERN = /^[0-9a-f]{40}$/;
+
+function isGitBlameSha(value: unknown): value is string {
+	return typeof value === "string" && GIT_BLAME_SHA_PATTERN.test(value);
+}
+
+function gitBlameFileRequestInvalid(): never {
+	return requestViolation(
+		"GIT_BLAME_FILE_INVALID_REQUEST",
+		"The git blame file request is invalid.",
+	);
+}
+
+function isValidGitBlameRange(value: unknown): value is GitBlameLineRange {
+	return (
+		isPlainObject(value) &&
+		hasExactKeys(value, ["start", "end"]) &&
+		isSafeNonNegativeInteger(value.start) &&
+		isSafeNonNegativeInteger(value.end) &&
+		value.start >= 1 &&
+		value.end >= value.start
+	);
+}
+
+/** Builds a frozen `git_blame_file` request. `range` is `null` for
+ * whole-file blame — see `GitBlameLineRange`'s own doc comment. */
+export function frozenGitBlameFileRequest(
+	path: unknown,
+	range: unknown,
+): Readonly<{ path: string; range: GitBlameLineRange | null }> {
+	if (
+		typeof path !== "string" ||
+		path.length === 0 ||
+		path.length > MAX_GIT_MUTATE_PATH_CHARS
+	) {
+		return gitBlameFileRequestInvalid();
+	}
+	if (range !== null && !isValidGitBlameRange(range)) {
+		return gitBlameFileRequestInvalid();
+	}
+	return Object.freeze({
+		path,
+		range:
+			range === null
+				? null
+				: Object.freeze({ start: range.start, end: range.end }),
+	});
+}
+
+function decodeGitBlamePrevious(value: unknown): GitBlamePrevious {
+	if (!isPlainObject(value) || !hasExactKeys(value, ["sha", "path"])) {
+		return violation();
+	}
+	if (!isGitBlameSha(value.sha)) {
+		return violation();
+	}
+	const previous = { sha: value.sha, path: decodeGitPath(value.path) };
+	rejectProxyObject(value);
+	return Object.freeze(previous);
+}
+
+function decodeGitBlameLineEntry(value: unknown): GitBlameLineEntry {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, [
+			"commitSha",
+			"isUncommitted",
+			"origLine",
+			"finalLine",
+			"isBoundary",
+			"filename",
+			"previous",
+		])
+	) {
+		return violation();
+	}
+	if (
+		!isGitBlameSha(value.commitSha) ||
+		typeof value.isUncommitted !== "boolean" ||
+		typeof value.isBoundary !== "boolean" ||
+		!isSafeNonNegativeInteger(value.origLine) ||
+		!isSafeNonNegativeInteger(value.finalLine) ||
+		(value.previous !== null && !isPlainObject(value.previous))
+	) {
+		return violation();
+	}
+	const entry = {
+		commitSha: value.commitSha,
+		isUncommitted: value.isUncommitted,
+		origLine: value.origLine,
+		finalLine: value.finalLine,
+		isBoundary: value.isBoundary,
+		filename: decodeGitPath(value.filename),
+		previous:
+			value.previous === null ? null : decodeGitBlamePrevious(value.previous),
+	};
+	rejectProxyObject(value);
+	return Object.freeze(entry);
+}
+
+function decodeGitBlameCommitHeader(value: unknown): GitBlameCommitHeader {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, [
+			"author",
+			"authorMail",
+			"authorTime",
+			"authorTz",
+			"committer",
+			"committerMail",
+			"committerTime",
+			"committerTz",
+			"summary",
+		])
+	) {
+		return violation();
+	}
+	if (
+		typeof value.author !== "string" ||
+		typeof value.authorMail !== "string" ||
+		typeof value.authorTz !== "string" ||
+		typeof value.committer !== "string" ||
+		typeof value.committerMail !== "string" ||
+		typeof value.committerTz !== "string" ||
+		typeof value.summary !== "string" ||
+		typeof value.authorTime !== "number" ||
+		!Number.isSafeInteger(value.authorTime) ||
+		typeof value.committerTime !== "number" ||
+		!Number.isSafeInteger(value.committerTime)
+	) {
+		return violation();
+	}
+	const header = {
+		author: value.author,
+		authorMail: value.authorMail,
+		authorTime: value.authorTime,
+		authorTz: value.authorTz,
+		committer: value.committer,
+		committerMail: value.committerMail,
+		committerTime: value.committerTime,
+		committerTz: value.committerTz,
+		summary: value.summary,
+	};
+	rejectProxyObject(value);
+	return Object.freeze(header);
+}
+
+/** Own-data, non-Proxy, string-keyed record snapshot with a per-value
+ * decoder and a hostile-input entry-count ceiling — the dictionary-shaped
+ * analogue of `ownObjectArraySnapshot` above (that one validates a real
+ * array's own numeric-index descriptors; a `HashMap<String, _>` on the Rust
+ * side instead serializes as a plain object with arbitrary string keys, so
+ * this walks `Reflect.ownKeys`/`Object.getOwnPropertyDescriptors` directly,
+ * mirroring `workspace-codec.ts`'s `ownPlainDataSnapshot` for a different
+ * domain's own dynamic-key object). */
+function ownGitRecordSnapshot<T>(
+	value: unknown,
+	maxEntries: number,
+	decodeValue: (entry: unknown) => T,
+): Readonly<Record<string, T>> {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return violation();
+	}
+	const prototype = Object.getPrototypeOf(value);
+	if (prototype !== Object.prototype && prototype !== null) {
+		return violation();
+	}
+	const descriptors = Object.getOwnPropertyDescriptors(value);
+	const keys = Reflect.ownKeys(descriptors);
+	if (keys.length > maxEntries) {
+		return violation();
+	}
+	const snapshot: Record<string, T> = Object.create(null);
+	for (const key of keys) {
+		if (typeof key !== "string") {
+			return violation();
+		}
+		const descriptor = descriptors[key];
+		if (
+			descriptor === undefined ||
+			!("value" in descriptor) ||
+			descriptor.get !== undefined ||
+			descriptor.set !== undefined
+		) {
+			return violation();
+		}
+		snapshot[key] = decodeValue(descriptor.value);
+	}
+	return Object.freeze(snapshot);
+}
+
+/** Decodes a `git_blame_file` response: an own-data, exactly
+ * `{ entries, commits }` object. */
+export function decodeGitBlameFileResult(value: unknown): GitBlameFileResult {
+	return sanitizedDecode(() => {
+		if (!isPlainObject(value) || !hasExactKeys(value, ["entries", "commits"])) {
+			return violation();
+		}
+		const entries = ownObjectArraySnapshot(
+			value.entries,
+			MAX_GIT_BLAME_ENTRIES,
+			decodeGitBlameLineEntry,
+		);
+		const commits = ownGitRecordSnapshot(
+			value.commits,
+			MAX_GIT_BLAME_COMMITS,
+			decodeGitBlameCommitHeader,
+		);
+		rejectProxyObject(value);
+		return Object.freeze({ entries, commits });
+	});
+}
+
+function gitBlameCommitMessagesRequestInvalid(): never {
+	return requestViolation(
+		"GIT_BLAME_COMMIT_MESSAGES_INVALID_REQUEST",
+		"The commit sha list is empty, too large, or contains an invalid entry.",
+	);
+}
+
+/** Builds a frozen `git_blame_commit_messages` request — same
+ * non-Proxy/non-sparse/no-accessor rigor as `frozenGitMutatePathsRequest`,
+ * applied to a sha list rather than a path list (and, unlike that one, an
+ * empty list is valid here — see `PlainBridge.gitBlameCommitMessages`'s own
+ * doc comment). */
+export function frozenGitBlameCommitMessagesRequest(
+	shas: unknown,
+): Readonly<{ shas: readonly string[] }> {
+	if (typeof shas !== "object" || shas === null || !Array.isArray(shas)) {
+		return gitBlameCommitMessagesRequestInvalid();
+	}
+	if (Object.getPrototypeOf(shas) !== Array.prototype) {
+		return gitBlameCommitMessagesRequestInvalid();
+	}
+	const lengthDescriptor = Object.getOwnPropertyDescriptor(shas, "length");
+	if (
+		lengthDescriptor === undefined ||
+		!("value" in lengthDescriptor) ||
+		!Number.isSafeInteger(lengthDescriptor.value) ||
+		(lengthDescriptor.value as number) < 0 ||
+		(lengthDescriptor.value as number) > MAX_GIT_BLAME_COMMIT_MESSAGE_SHAS
+	) {
+		return gitBlameCommitMessagesRequestInvalid();
+	}
+	const length = lengthDescriptor.value as number;
+	const descriptors = Object.getOwnPropertyDescriptors(shas);
+	if (Reflect.ownKeys(descriptors).length !== length + 1) {
+		return gitBlameCommitMessagesRequestInvalid();
+	}
+	const collected: string[] = [];
+	for (let index = 0; index < length; index += 1) {
+		const descriptor = (descriptors as Record<string, PropertyDescriptor>)[
+			String(index)
+		];
+		if (
+			descriptor === undefined ||
+			!("value" in descriptor) ||
+			descriptor.get !== undefined ||
+			descriptor.set !== undefined ||
+			!isGitBlameSha(descriptor.value)
+		) {
+			return gitBlameCommitMessagesRequestInvalid();
+		}
+		collected.push(descriptor.value);
+	}
+	try {
+		// See `frozenGitMutatePathsRequest`'s identical try/catch for why a
+		// Proxy-detection failure must be re-coded as this request builder's
+		// own structured violation rather than letting a raw
+		// `DataCloneError` escape.
+		rejectProxyObject(shas);
+	} catch {
+		return gitBlameCommitMessagesRequestInvalid();
+	}
+	return Object.freeze({ shas: Object.freeze(collected) });
+}
+
+/** Decodes a `git_blame_commit_messages` response: an own-data, exactly
+ * `{ messages }` object whose `messages` value is itself a string-keyed
+ * record of sha -> full commit message body. */
+export function decodeGitBlameCommitMessagesResult(
+	value: unknown,
+): GitBlameCommitMessagesResult {
+	return sanitizedDecode(() => {
+		if (!isPlainObject(value) || !hasExactKeys(value, ["messages"])) {
+			return violation();
+		}
+		const messages = ownGitRecordSnapshot(
+			value.messages,
+			MAX_GIT_BLAME_COMMIT_MESSAGE_SHAS,
+			(entry) => {
+				if (typeof entry !== "string") {
+					return violation();
+				}
+				return entry;
+			},
+		);
+		rejectProxyObject(value);
+		return Object.freeze({ messages });
+	});
 }

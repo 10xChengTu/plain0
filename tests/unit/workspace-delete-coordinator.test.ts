@@ -266,6 +266,12 @@ function testBridge(
 		async gitNetworkCancel() {
 			throw new Error("unused");
 		},
+		async gitBlameFile() {
+			throw new Error("unused");
+		},
+		async gitBlameCommitMessages() {
+			throw new Error("unused");
+		},
 		...overrides,
 	};
 }

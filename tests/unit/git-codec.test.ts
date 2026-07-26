@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import {
+	decodeGitBlameCommitMessagesResult,
+	decodeGitBlameFileResult,
 	decodeGitDiffFilesResult,
 	decodeGitNetworkPreviewResult,
 	decodeGitShowBlobResult,
 	decodeGitStatusResult,
 	decodeGitVoid,
+	frozenGitBlameCommitMessagesRequest,
+	frozenGitBlameFileRequest,
 	frozenGitCommitRequest,
 	frozenGitDiffFilesRequest,
 	frozenGitDiscardPathsRequest,
@@ -567,5 +571,247 @@ describe("decodeGitVoid", () => {
 				expect.objectContaining(contractError),
 			);
 		}
+	});
+});
+
+// --- F090 S0: git blame ------------------------------------------------------
+
+const SHA_A = "a".repeat(40);
+const SHA_B = "b".repeat(40);
+
+function sampleBlameCommitHeader(overrides: Record<string, unknown> = {}) {
+	return {
+		author: "Author A",
+		authorMail: "<a@example.com>",
+		authorTime: 1_700_000_000,
+		authorTz: "+0800",
+		committer: "Author A",
+		committerMail: "<a@example.com>",
+		committerTime: 1_700_000_000,
+		committerTz: "+0800",
+		summary: "initial commit",
+		...overrides,
+	};
+}
+
+function sampleBlameLineEntry(overrides: Record<string, unknown> = {}) {
+	return {
+		commitSha: SHA_A,
+		isUncommitted: false,
+		origLine: 1,
+		finalLine: 1,
+		isBoundary: false,
+		filename: "a.txt",
+		previous: null,
+		...overrides,
+	};
+}
+
+function sampleBlameFileResult() {
+	return {
+		entries: [sampleBlameLineEntry()],
+		commits: { [SHA_A]: sampleBlameCommitHeader() },
+	};
+}
+
+const blameFileInvalidRequest = { code: "GIT_BLAME_FILE_INVALID_REQUEST" };
+const blameCommitMessagesInvalidRequest = {
+	code: "GIT_BLAME_COMMIT_MESSAGES_INVALID_REQUEST",
+};
+
+describe("frozenGitBlameFileRequest", () => {
+	it("accepts a valid path with a null range", () => {
+		const result = frozenGitBlameFileRequest("a.txt", null);
+		expect(result).toEqual({ path: "a.txt", range: null });
+		expect(Object.isFrozen(result)).toBe(true);
+	});
+
+	it("accepts a valid path with a valid range and freezes it", () => {
+		const result = frozenGitBlameFileRequest("a.txt", { start: 2, end: 4 });
+		expect(result).toEqual({ path: "a.txt", range: { start: 2, end: 4 } });
+		expect(Object.isFrozen(result.range)).toBe(true);
+	});
+
+	it("rejects an empty, oversized, or non-string path", () => {
+		for (const path of ["", "a".repeat(4_097), 1, null, undefined]) {
+			expect(() => frozenGitBlameFileRequest(path, null)).toThrowError(
+				expect.objectContaining(blameFileInvalidRequest),
+			);
+		}
+	});
+
+	it("rejects a structurally invalid range", () => {
+		for (const range of [
+			{ start: 0, end: 1 },
+			{ start: 5, end: 2 },
+			{ start: 1 },
+			{ start: 1, end: 1, extra: true },
+			{ start: "1", end: 2 },
+			"not-an-object",
+		]) {
+			expect(() => frozenGitBlameFileRequest("a.txt", range)).toThrowError(
+				expect.objectContaining(blameFileInvalidRequest),
+			);
+		}
+	});
+});
+
+describe("decodeGitBlameFileResult", () => {
+	it("decodes a valid result and freezes entries/commits", () => {
+		const result = decodeGitBlameFileResult(sampleBlameFileResult());
+		expect(result).toEqual(sampleBlameFileResult());
+		expect(Object.isFrozen(result)).toBe(true);
+		expect(Object.isFrozen(result.entries)).toBe(true);
+		expect(Object.isFrozen(result.commits)).toBe(true);
+	});
+
+	it("decodes a line entry with a previous pointer", () => {
+		const value = {
+			entries: [
+				sampleBlameLineEntry({
+					commitSha: SHA_B,
+					previous: { sha: SHA_A, path: "old.txt" },
+				}),
+			],
+			commits: { [SHA_B]: sampleBlameCommitHeader() },
+		};
+		const result = decodeGitBlameFileResult(value);
+		expect(result.entries[0]?.previous).toEqual({
+			sha: SHA_A,
+			path: "old.txt",
+		});
+	});
+
+	it("rejects a payload missing entries/commits or with extra keys", () => {
+		expect(() => decodeGitBlameFileResult({ entries: [] })).toThrowError(
+			expect.objectContaining(contractError),
+		);
+		expect(() =>
+			decodeGitBlameFileResult({ ...sampleBlameFileResult(), extra: 1 }),
+		).toThrowError(expect.objectContaining(contractError));
+	});
+
+	it("rejects a line entry with a malformed commitSha length", () => {
+		expect(() =>
+			decodeGitBlameFileResult({
+				entries: [sampleBlameLineEntry({ commitSha: "deadbeef" })],
+				commits: {},
+			}),
+		).toThrowError(expect.objectContaining(contractError));
+	});
+
+	it("rejects a commit header missing a required field", () => {
+		const { summary: _summary, ...withoutSummary } = sampleBlameCommitHeader();
+		expect(() =>
+			decodeGitBlameFileResult({
+				entries: [sampleBlameLineEntry()],
+				commits: { [SHA_A]: withoutSummary },
+			}),
+		).toThrowError(expect.objectContaining(contractError));
+	});
+
+	it("rejects a Proxy-wrapped result, entries array, or commits record", () => {
+		expect(() =>
+			decodeGitBlameFileResult(new Proxy(sampleBlameFileResult(), {})),
+		).toThrowError(expect.objectContaining(contractError));
+		expect(() =>
+			decodeGitBlameFileResult({
+				entries: new Proxy([sampleBlameLineEntry()], {}),
+				commits: { [SHA_A]: sampleBlameCommitHeader() },
+			}),
+		).toThrowError(expect.objectContaining(contractError));
+		expect(() =>
+			decodeGitBlameFileResult({
+				entries: [sampleBlameLineEntry()],
+				commits: new Proxy({ [SHA_A]: sampleBlameCommitHeader() }, {}),
+			}),
+		).toThrowError(expect.objectContaining(contractError));
+	});
+});
+
+describe("frozenGitBlameCommitMessagesRequest", () => {
+	it("accepts an empty array", () => {
+		const result = frozenGitBlameCommitMessagesRequest([]);
+		expect(result).toEqual({ shas: [] });
+		expect(Object.isFrozen(result.shas)).toBe(true);
+	});
+
+	it("accepts a non-empty array of valid 40-hex shas", () => {
+		const result = frozenGitBlameCommitMessagesRequest([SHA_A, SHA_B]);
+		expect(result).toEqual({ shas: [SHA_A, SHA_B] });
+	});
+
+	it("rejects a non-array, Proxy-wrapped array, or getter-based array", () => {
+		expect(() => frozenGitBlameCommitMessagesRequest(SHA_A)).toThrowError(
+			expect.objectContaining(blameCommitMessagesInvalidRequest),
+		);
+		expect(() =>
+			frozenGitBlameCommitMessagesRequest(new Proxy([SHA_A], {})),
+		).toThrowError(expect.objectContaining(blameCommitMessagesInvalidRequest));
+		const getterArray: unknown[] = [];
+		Object.defineProperty(getterArray, "0", {
+			enumerable: true,
+			get: () => SHA_A,
+		});
+		Object.defineProperty(getterArray, "length", { value: 1 });
+		expect(() => frozenGitBlameCommitMessagesRequest(getterArray)).toThrowError(
+			expect.objectContaining(blameCommitMessagesInvalidRequest),
+		);
+	});
+
+	it("rejects an array containing a malformed sha (wrong length, uppercase, or non-string)", () => {
+		for (const hostile of [
+			[SHA_A, "deadbeef"],
+			[SHA_A.toUpperCase()],
+			[SHA_A, 1],
+			["0".repeat(41)],
+		]) {
+			expect(() => frozenGitBlameCommitMessagesRequest(hostile)).toThrowError(
+				expect.objectContaining(blameCommitMessagesInvalidRequest),
+			);
+		}
+	});
+});
+
+describe("decodeGitBlameCommitMessagesResult", () => {
+	it("decodes a valid messages record and freezes it", () => {
+		const result = decodeGitBlameCommitMessagesResult({
+			messages: { [SHA_A]: "subject\n\nbody\n" },
+		});
+		expect(result).toEqual({ messages: { [SHA_A]: "subject\n\nbody\n" } });
+		expect(Object.isFrozen(result.messages)).toBe(true);
+	});
+
+	it("decodes an empty messages record", () => {
+		const result = decodeGitBlameCommitMessagesResult({ messages: {} });
+		expect(result).toEqual({ messages: {} });
+	});
+
+	it("rejects a payload missing messages or with extra keys", () => {
+		expect(() => decodeGitBlameCommitMessagesResult({})).toThrowError(
+			expect.objectContaining(contractError),
+		);
+		expect(() =>
+			decodeGitBlameCommitMessagesResult({ messages: {}, extra: 1 }),
+		).toThrowError(expect.objectContaining(contractError));
+	});
+
+	it("rejects a non-string message value", () => {
+		expect(() =>
+			decodeGitBlameCommitMessagesResult({ messages: { [SHA_A]: 1 } }),
+		).toThrowError(expect.objectContaining(contractError));
+	});
+
+	it("rejects a Proxy-wrapped result or messages record", () => {
+		expect(() =>
+			decodeGitBlameCommitMessagesResult(
+				new Proxy({ messages: { [SHA_A]: "x" } }, {}),
+			),
+		).toThrowError(expect.objectContaining(contractError));
+		expect(() =>
+			decodeGitBlameCommitMessagesResult({
+				messages: new Proxy({ [SHA_A]: "x" }, {}),
+			}),
+		).toThrowError(expect.objectContaining(contractError));
 	});
 });

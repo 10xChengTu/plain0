@@ -113,6 +113,8 @@ function fakeBridge(
 		gitPull: notImplemented,
 		gitPush: notImplemented,
 		gitNetworkCancel: notImplemented,
+		gitBlameFile: notImplemented,
+		gitBlameCommitMessages: notImplemented,
 	};
 }
 
@@ -241,6 +243,8 @@ function fakeTextSearchBridge(
 		gitPull: notImplemented,
 		gitPush: notImplemented,
 		gitNetworkCancel: notImplemented,
+		gitBlameFile: notImplemented,
+		gitBlameCommitMessages: notImplemented,
 	};
 
 	return {

@@ -84,11 +84,15 @@ import {
 	frozenTerminalStartRequest,
 } from "./terminal-codec";
 import {
+	decodeGitBlameCommitMessagesResult,
+	decodeGitBlameFileResult,
 	decodeGitDiffFilesResult,
 	decodeGitNetworkPreviewResult,
 	decodeGitShowBlobResult,
 	decodeGitStatusResult,
 	decodeGitVoid,
+	frozenGitBlameCommitMessagesRequest,
+	frozenGitBlameFileRequest,
 	frozenGitCommitRequest,
 	frozenGitDiffFilesRequest,
 	frozenGitDiscardPathsRequest,
@@ -561,6 +565,18 @@ export function createNativeBridge(): PlainBridge {
 		gitNetworkCancel: async () => {
 			decodeGitVoid(
 				await invoke<unknown>("git_network_cancel", { request: {} }),
+			);
+		},
+		gitBlameFile: async (path, range) => {
+			const request = frozenGitBlameFileRequest(path, range);
+			return decodeGitBlameFileResult(
+				await invoke<unknown>("git_blame_file", { request }),
+			);
+		},
+		gitBlameCommitMessages: async (shas) => {
+			const request = frozenGitBlameCommitMessagesRequest(shas);
+			return decodeGitBlameCommitMessagesResult(
+				await invoke<unknown>("git_blame_commit_messages", { request }),
 			);
 		},
 	};

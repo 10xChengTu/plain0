@@ -55,6 +55,7 @@
 
 use crate::error::CommandError;
 
+pub(crate) mod blame;
 pub(crate) mod commands;
 pub(crate) mod commit;
 pub(crate) mod diff;

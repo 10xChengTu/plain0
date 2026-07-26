@@ -1,6 +1,9 @@
 import type {
 	BackupEntry,
 	CommandError,
+	GitBlameCommitHeader,
+	GitBlameFileResult,
+	GitBlameLineEntry,
 	GitBlobRev,
 	GitBranch,
 	GitDiffFilesResult,
@@ -34,6 +37,8 @@ import type {
 	WorkspaceWriteResult,
 } from "./contracts";
 import {
+	frozenGitBlameCommitMessagesRequest,
+	frozenGitBlameFileRequest,
 	frozenGitCommitRequest,
 	frozenGitDiffFilesRequest,
 	frozenGitDiscardPathsRequest,
@@ -1037,6 +1042,26 @@ export interface BrowserMockGitFixtureForTest {
 	readonly blobs?: Readonly<
 		Record<string, Partial<Record<GitBlobRev, string>>>
 	>;
+	/** `F090` S0: seeds the deterministic `gitBlameFile` response, keyed by
+	 * repository-toplevel-relative path — a missing path key defaults to
+	 * `{ entries: [], commits: {} }` (an empty, harmless default, mirroring
+	 * `diffFiles`'s own `defaultGitDiffFiles`). Unlike the real Rust parser,
+	 * this mock never re-implements `--line-porcelain` parsing (the real
+	 * parser's fixture coverage lives in
+	 * `src-tauri/src/git/blame/tests.rs`); it only exists so a consuming
+	 * frontend has structurally correct, scriptable responses to develop and
+	 * test the inline-blame/hover/age-heatmap UI against. A `gitBlameFile`
+	 * call with a non-null `range` filters the seeded fixture's own entries
+	 * down to `finalLine` within `[start, end]` — real range-scoped `-L`
+	 * blame is otherwise unmodeled. */
+	readonly blame?: Readonly<Record<string, GitBlameFileResult>>;
+	/** `F090` S0: seeds the deterministic `gitBlameCommitMessages` response,
+	 * keyed by commit sha -> full message body. A sha with no fixture entry
+	 * is simply absent from the response's `messages` map (this mock has no
+	 * real commit history to validate a sha against, unlike the real
+	 * `git log` call, which would reject an unknown sha outright — see
+	 * `src-tauri/src/git/blame.rs`'s `blame_commit_messages` doc comment). */
+	readonly blameCommitMessages?: Readonly<Record<string, string>>;
 	/** When `true`, every git method rejects with `GIT_NO_REPOSITORY` instead
 	 * of returning fixture data — simulates a trusted workspace root that is
 	 * not (or no longer) a Git working tree. */
@@ -5152,6 +5177,16 @@ export function createBrowserMockBridge(
 	const gitBlobs = new Map<string, Partial<Record<GitBlobRev, string>>>(
 		Object.entries(gitFixture.blobs ?? {}),
 	);
+	const defaultGitBlameFile: GitBlameFileResult = Object.freeze({
+		entries: Object.freeze([]),
+		commits: Object.freeze({}),
+	});
+	const gitBlameFixtures = new Map<string, GitBlameFileResult>(
+		Object.entries(gitFixture.blame ?? {}),
+	);
+	const gitBlameCommitMessages = new Map<string, string>(
+		Object.entries(gitFixture.blameCommitMessages ?? {}),
+	);
 
 	// --- F080 S3: mutable stage/unstage/commit/discard simulation ---------
 	//
@@ -6359,6 +6394,44 @@ export function createBrowserMockBridge(
 			// long-running subprocess to interrupt), so there is never
 			// anything in flight to actually cancel — a harmless no-op,
 			// matching the real bridge method's own idempotent contract.
+		},
+		async gitBlameFile(path_, range_) {
+			const request = frozenGitBlameFileRequest(path_, range_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const fixture = gitBlameFixtures.get(request.path) ?? defaultGitBlameFile;
+			if (request.range === null) {
+				return fixture;
+			}
+			const { start, end } = request.range;
+			const entries: GitBlameLineEntry[] = fixture.entries.filter(
+				(entry) => entry.finalLine >= start && entry.finalLine <= end,
+			);
+			const commitShas = new Set(entries.map((entry) => entry.commitSha));
+			const commits: Record<string, GitBlameCommitHeader> = {};
+			for (const [sha, header] of Object.entries(fixture.commits)) {
+				if (commitShas.has(sha)) {
+					commits[sha] = header;
+				}
+			}
+			return Object.freeze({ entries: Object.freeze(entries), commits });
+		},
+		async gitBlameCommitMessages(shas_) {
+			const request = frozenGitBlameCommitMessagesRequest(shas_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const messages: Record<string, string> = {};
+			for (const sha of request.shas) {
+				const message = gitBlameCommitMessages.get(sha);
+				if (message !== undefined) {
+					messages[sha] = message;
+				}
+			}
+			return Object.freeze({ messages });
 		},
 	};
 }
