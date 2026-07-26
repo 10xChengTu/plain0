@@ -38,6 +38,7 @@ import {
 	validateGitCommandRegistration,
 	validateGitDiscardConfirmationBoundary,
 	validateGitIpcBridgeBoundary,
+	validateGitNetworkConfirmationBoundary,
 	validateGitRustBoundary,
 } from "../../scripts/plain/boundary-contracts.mjs";
 
@@ -9339,6 +9340,14 @@ describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
 		new URL("../../src-tauri/src/git/discard.rs", import.meta.url),
 		"utf8",
 	);
+	const gitNetworkSource = readFileSync(
+		new URL("../../src-tauri/src/git/network.rs", import.meta.url),
+		"utf8",
+	);
+	const gitExecSourceForRustBoundary = readFileSync(
+		new URL("../../src-tauri/src/git/exec.rs", import.meta.url),
+		"utf8",
+	);
 
 	const baselineGitRustSources = Object.freeze([
 		{ relativePath: "src-tauri/src/git/status.rs", source: gitStatusSource },
@@ -9346,6 +9355,11 @@ describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
 		{ relativePath: "src-tauri/src/git/dto.rs", source: gitDtoSource },
 		{ relativePath: "src-tauri/src/git/commit.rs", source: gitCommitSource },
 		{ relativePath: "src-tauri/src/git/discard.rs", source: gitDiscardSource },
+		{ relativePath: "src-tauri/src/git/network.rs", source: gitNetworkSource },
+		{
+			relativePath: "src-tauri/src/git/exec.rs",
+			source: gitExecSourceForRustBoundary,
+		},
 	]);
 
 	function withMutatedGitRustSource(relativePath, mutate) {
@@ -9503,6 +9517,182 @@ describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
 			"git boundary requires commit.rs and discard.rs",
 		);
 	});
+
+	it("fails if GitNetworkPreviewRequest gains an extra field", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"pub struct GitNetworkPreviewRequest {\n    operation: GitNetworkOperationWire,\n}",
+					"pub struct GitNetworkPreviewRequest {\n    operation: GitNetworkOperationWire,\n    extra: bool,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitNetworkPreviewRequest must expose only its exact audited operation field",
+		);
+	});
+
+	it("fails if GitNetworkPreviewResult's behind field is renamed", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"pub struct GitNetworkPreviewResult {\n    upstream: Option<String>,\n    ahead: Option<u64>,\n    behind: Option<u64>,\n}",
+					"pub struct GitNetworkPreviewResult {\n    upstream: Option<String>,\n    ahead: Option<u64>,\n    remaining: Option<u64>,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitNetworkPreviewResult must expose only its exact audited upstream/ahead/behind fields",
+		);
+	});
+
+	it("fails if GitNetworkOperationWire loses the Push variant", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"pub enum GitNetworkOperationWire {\n    Fetch,\n    Pull,\n    Push,\n}",
+					"pub enum GitNetworkOperationWire {\n    Fetch,\n    Pull,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitNetworkOperationWire must expose exactly its three audited Fetch/Pull/Push variants",
+		);
+	});
+
+	it("fails if GitFetchRequest gains a field", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"pub struct GitFetchRequest {}",
+					"pub struct GitFetchRequest {\n    remote: String,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitFetchRequest/GitPullRequest must remain empty structs",
+		);
+	});
+
+	it("fails if GitPushRequest's force field is renamed", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"pub struct GitPushRequest {\n    force: bool,\n}",
+					"pub struct GitPushRequest {\n    isForce: bool,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitPushRequest must expose only its exact audited force field",
+		);
+	});
+
+	it("fails if GitNetworkCancelRequest gains a field", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"pub struct GitNetworkCancelRequest {}",
+					"pub struct GitNetworkCancelRequest {\n    force: bool,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitNetworkCancelRequest must remain an empty struct",
+		);
+	});
+
+	it("fails if GIT_FETCH_ARGS drops --quiet", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/network.rs",
+			(source) =>
+				source.replace(
+					'pub(crate) const GIT_FETCH_ARGS: &[&str] = &["fetch", "--quiet"];',
+					'pub(crate) const GIT_FETCH_ARGS: &[&str] = &["fetch"];',
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"network.rs must define GIT_FETCH_ARGS as exactly the audited fetch argument list",
+		);
+	});
+
+	it("fails if GIT_PULL_ARGS gains an unaudited reconcile-strategy flag", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/network.rs",
+			(source) =>
+				source.replace(
+					'pub(crate) const GIT_PULL_ARGS: &[&str] = &["pull", "--quiet"];',
+					'pub(crate) const GIT_PULL_ARGS: &[&str] = &["pull", "--quiet", "--no-rebase"];',
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"network.rs must define GIT_PULL_ARGS as exactly the audited pull argument list",
+		);
+	});
+
+	it("fails if GIT_PUSH_ARGS gains an unaudited flag", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/network.rs",
+			(source) =>
+				source.replace(
+					'pub(crate) const GIT_PUSH_ARGS: &[&str] = &["push", "--quiet"];',
+					'pub(crate) const GIT_PUSH_ARGS: &[&str] = &["push", "--quiet", "--force"];',
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"network.rs must define GIT_PUSH_ARGS as exactly the audited push argument list",
+		);
+	});
+
+	it("fails if GIT_PUSH_FORCE_ARGS uses bare --force instead of --force-with-lease", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/network.rs",
+			(source) => source.replace('"--force-with-lease"', '"--force"'),
+		);
+		const failures = validateGitRustBoundary(mutated);
+		expect(failures).toContain(
+			"network.rs must define GIT_PUSH_FORCE_ARGS as exactly the audited force-with-lease argument list (never bare --force)",
+		);
+		expect(failures).toContain(
+			"network.rs must never pass a bare --force argument to git push — only --force-with-lease",
+		);
+	});
+
+	it("fails if a second, bare --force literal is smuggled in anywhere in network.rs", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/network.rs",
+			(source) =>
+				`${source}\npub(crate) const GIT_HOSTILE_FORCE_ARGS: &[&str] = &["push", "--force"];\n`,
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"network.rs must never pass a bare --force argument to git push — only --force-with-lease",
+		);
+	});
+
+	it("fails if GIT_NETWORK_ENV_PASSTHROUGH_NAMES gains an unaudited variable", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/exec.rs",
+			(source) =>
+				source.replace(
+					'pub(crate) const GIT_NETWORK_ENV_PASSTHROUGH_NAMES: &[&str] = &["PATH", "HOME", "SSH_AUTH_SOCK"];',
+					'pub(crate) const GIT_NETWORK_ENV_PASSTHROUGH_NAMES: &[&str] = &["PATH", "HOME", "SSH_AUTH_SOCK", "SSH_AGENT_PID"];',
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"exec.rs must define GIT_NETWORK_ENV_PASSTHROUGH_NAMES as exactly PATH/HOME/SSH_AUTH_SOCK",
+		);
+	});
+
+	it("fails if network.rs or exec.rs is missing entirely", () => {
+		const missingNetwork = baselineGitRustSources.filter(
+			(entry) =>
+				entry.relativePath !== "src-tauri/src/git/network.rs" &&
+				entry.relativePath !== "src-tauri/src/git/exec.rs",
+		);
+		expect(validateGitRustBoundary(missingNetwork)).toContain(
+			"git boundary requires network.rs and exec.rs",
+		);
+	});
 });
 
 describe("Plain F080 S1 git IPC bridge Harness", () => {
@@ -9575,7 +9765,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the eight audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the thirteen audited git methods, no more and no fewer",
 		);
 	});
 
@@ -9639,7 +9829,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the eight audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the thirteen audited git methods, no more and no fewer",
 		);
 	});
 
@@ -9684,7 +9874,98 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
 		).toContain(
-			"native.ts must decode every F080 S3 git write command's response through decodeGitVoid",
+			"native.ts must decode every F080 S3/S4 git void-returning command's response through decodeGitVoid",
+		);
+	});
+
+	it("fails if PlainBridge loses gitNetworkPreview", () => {
+		const widened = withMutatedGitApp(
+			"app/platform/tauri/contracts.ts",
+			(source) =>
+				source.replace(
+					/\tgitNetworkPreview\(\n\t\toperation: GitNetworkOperation,\n\t\): Promise<GitNetworkPreviewResult>;\n/,
+					"",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
+		).toContain(
+			"PlainBridge must expose exactly the thirteen audited git methods, no more and no fewer",
+		);
+	});
+
+	it("fails if PlainBridge loses gitPush", () => {
+		const widened = withMutatedGitApp(
+			"app/platform/tauri/contracts.ts",
+			(source) =>
+				source.replace("\tgitPush(force: boolean): Promise<void>;\n", ""),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
+		).toContain(
+			"PlainBridge must expose exactly the thirteen audited git methods, no more and no fewer",
+		);
+	});
+
+	it("fails if git-codec.ts's decodeGitNetworkPreviewResult stops freezing its result", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/git-codec.ts",
+			(source) =>
+				source.replace(
+					/export function decodeGitNetworkPreviewResult\(\n\tvalue: unknown,\n\): GitNetworkPreviewResult \{\n\treturn sanitizedDecode\(\(\) => \{[\s\S]*?\n\t\}\);\n\}/,
+					"export function decodeGitNetworkPreviewResult(value) { return value; }",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"git-codec.ts's decodeGitNetworkPreviewResult must validate exact own-data keys, reject Proxy wrapping, and freeze its result",
+		);
+	});
+
+	it("fails if native.ts stops routing git_network_preview through its audited builder/decoder", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					"const request = frozenGitNetworkPreviewRequest(operation);",
+					"const request = { operation };",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"native.ts must invoke git_network_preview exactly once, routed through frozenGitNetworkPreviewRequest and decoded through decodeGitNetworkPreviewResult",
+		);
+	});
+
+	it("fails if native.ts invokes git_fetch a second time", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					'decodeGitVoid(await invoke<unknown>("git_fetch", { request: {} }));',
+					'decodeGitVoid(await invoke<unknown>("git_fetch", { request: {} })); decodeGitVoid(await invoke<unknown>("git_fetch", { request: {} }));',
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain("native.ts must invoke git_fetch exactly once");
+	});
+
+	it("fails if native.ts stops routing git_push through frozenGitPushRequest", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					"const request = frozenGitPushRequest(force);",
+					"const request = { force };",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"native.ts must invoke git_push exactly once, routed through frozenGitPushRequest",
 		);
 	});
 });
@@ -9908,6 +10189,189 @@ export async function bypassDiscard(bridge: PlainBridge): Promise<void> {
 		);
 		expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
 			"resolveDiscardConfirmation must, for a non-empty path list, unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited no-op/confirm/decline shape",
+		);
+	});
+});
+
+const gitNetworkAppPaths = [
+	"app/platform/tauri/contracts.ts",
+	"app/platform/tauri/native.ts",
+	"app/platform/tauri/browser-mock.ts",
+	"app/features/scm/plain-scm-view.ts",
+	"app/features/scm/plain-scm-network.ts",
+];
+const gitNetworkAppSources = gitNetworkAppPaths.map((relativePath) => ({
+	relativePath,
+	source: readFileSync(
+		new URL(`../../${relativePath}`, import.meta.url),
+		"utf8",
+	),
+}));
+
+function replaceGitNetworkAppSource(relativePath, from, to) {
+	return mutateWorkspaceSource(gitNetworkAppSources, relativePath, (source) => {
+		if (!source.includes(from)) {
+			throw new Error(
+				`${relativePath} git network mutation fixture no longer matches production`,
+			);
+		}
+		return source.replace(from, to);
+	});
+}
+
+describe("Plain F080 S4 git network confirmation boundary Harness", () => {
+	it("accepts the production single confirmed fetch/pull/push routes", () => {
+		expect(
+			validateGitNetworkConfirmationBoundary(gitNetworkAppSources),
+		).toEqual([]);
+	});
+
+	it("requires every audited file to be present", () => {
+		expect(validateGitNetworkConfirmationBoundary([])).toContain(
+			"git network confirmation boundary requires app/features/scm/plain-scm-network.ts",
+		);
+	});
+
+	it("rejects a second gitFetch call site anywhere else in app/", () => {
+		const relativePath = "app/features/scm/plain-scm-network-bypass.ts";
+		const hostile = [
+			...gitNetworkAppSources,
+			{
+				relativePath,
+				source: `import type { PlainBridge } from "../../platform/tauri/contracts";
+export async function bypassFetch(bridge: PlainBridge): Promise<void> {
+	await bridge.gitFetch();
+}`,
+			},
+		];
+		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
+			`${relativePath} must not consume gitFetch outside PlainScmView.fetchFromRemote's single audited call site`,
+		);
+	});
+
+	it("rejects a second gitPush call site inside plain-scm-view.ts outside pushToRemote", () => {
+		const hostile = replaceGitNetworkAppSource(
+			"app/features/scm/plain-scm-view.ts",
+			"private async commitChanges(): Promise<void> {",
+			`private async bypassPush(bridge: PlainBridge): Promise<void> {
+		await bridge.gitPush(false);
+	}
+
+	private async commitChanges(): Promise<void> {`,
+		);
+		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
+			"app/features/scm/plain-scm-view.ts must not consume gitPush outside PlainScmView.pushToRemote's single audited call site",
+		);
+	});
+
+	it("rejects a duplicated gitPull call inside pullFromRemote itself", () => {
+		const hostile = replaceGitNetworkAppSource(
+			"app/features/scm/plain-scm-view.ts",
+			"await this.runNetworkMutation((bridge) => bridge.gitPull());",
+			`await this.runNetworkMutation((bridge) => bridge.gitPull());
+		await this.runNetworkMutation((bridge) => bridge.gitPull());`,
+		);
+		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
+			"gitPull must have exactly one production call site, inside PlainScmView.pullFromRemote",
+		);
+	});
+
+	it("rejects computed/bracket access to gitFetch", () => {
+		const hostile = replaceGitNetworkAppSource(
+			"app/features/scm/plain-scm-view.ts",
+			"bridge.gitFetch()",
+			'bridge["gitFetch"]()',
+		);
+		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
+			"app/features/scm/plain-scm-view.ts must not consume gitFetch outside PlainScmView.fetchFromRemote's single audited call site",
+		);
+	});
+
+	it("rejects a missing or renamed gitPush bridge declaration", () => {
+		const hostile = replaceGitNetworkAppSource(
+			"app/platform/tauri/native.ts",
+			"gitPush: async (force) => {",
+			"gitPushRenamed: async (force) => {",
+		);
+		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
+			"app/platform/tauri/native.ts must declare gitPush exactly once in its audited bridge surface",
+		);
+	});
+
+	it("rejects a duplicated gitFetch bridge declaration", () => {
+		const hostile = mutateWorkspaceSource(
+			gitNetworkAppSources,
+			"app/platform/tauri/browser-mock.ts",
+			(source) =>
+				`${source}\nconst duplicateGitFetchMock = { async gitFetch() { return; } };`,
+		);
+		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
+			"app/platform/tauri/browser-mock.ts must declare gitFetch exactly once in its audited bridge surface",
+		);
+	});
+
+	it("rejects any shape of fetchFromRemote that does not preview, check, confirm, check, then call in that exact order", () => {
+		const hostile = replaceGitNetworkAppSource(
+			"app/features/scm/plain-scm-view.ts",
+			'if (decision.kind !== "confirmed") {\n\t\t\treturn;\n\t\t}\n\t\tawait this.runNetworkMutation((bridge) => bridge.gitFetch());',
+			'if (decision.kind === "confirmed") {\n\t\t\treturn;\n\t\t}\n\t\tawait this.runNetworkMutation((bridge) => bridge.gitFetch());',
+		);
+		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
+			"PlainScmView.fetchFromRemote must match its exact audited preview-then-confirm-then-call shape — no other shape may reach the network bridge call",
+		);
+	});
+
+	it("rejects pushToRemote skipping the force-checkbox read", () => {
+		const hostile = replaceGitNetworkAppSource(
+			"app/features/scm/plain-scm-view.ts",
+			"const force = this.#forcePushCheckbox?.checked ?? false;",
+			"const force = false;",
+		);
+		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
+			"PlainScmView.pushToRemote must match its exact audited preview-then-confirm-then-call shape — no other shape may reach the network bridge call",
+		);
+	});
+
+	it("rejects plain-scm-network.ts importing anything at all", () => {
+		const hostile = mutateWorkspaceSource(
+			gitNetworkAppSources,
+			"app/features/scm/plain-scm-network.ts",
+			(source) => `import { invoke } from "@tauri-apps/api/core";\n${source}`,
+		);
+		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
+			"plain-scm-network.ts must not import anything — it only ever decides whether the caller may fetch/pull/push, and an import is the only way it could ever reach a bridge or service to perform the network write itself",
+		);
+	});
+
+	it("rejects a new top-level declaration added to plain-scm-network.ts", () => {
+		const hostile = mutateWorkspaceSource(
+			gitNetworkAppSources,
+			"app/features/scm/plain-scm-network.ts",
+			(source) => `${source}\nexport function leakedHelper(): void {}`,
+		);
+		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
+			"plain-scm-network.ts must retain its exact audited top-level surface — no new declaration can quietly add a way for this decide-only module to reach a bridge",
+		);
+	});
+
+	it("rejects resolveNetworkConfirmation calling a bridge method itself", () => {
+		const hostile = replaceGitNetworkAppSource(
+			"app/features/scm/plain-scm-network.ts",
+			`export async function resolveNetworkConfirmation(
+	dialogService: NetworkConfirmDialogService,
+	request: NetworkConfirmationRequest,
+): Promise<NetworkConfirmDecision> {
+	const confirmation = await dialogService.confirm({`,
+			`export async function resolveNetworkConfirmation(
+	dialogService: NetworkConfirmDialogService,
+	request: NetworkConfirmationRequest,
+	bridge: { gitFetch(): Promise<void> },
+): Promise<NetworkConfirmDecision> {
+	await bridge.gitFetch();
+	const confirmation = await dialogService.confirm({`,
+		);
+		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
+			"resolveNetworkConfirmation must unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited shape",
 		);
 	});
 });

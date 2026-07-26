@@ -6305,10 +6305,51 @@ const GIT_COMMAND_CONTRACTS = Object.freeze([
 		returnType: "->Result<(),CommandError>",
 		body: "letpaths=request.into_parts()?;discard::discard_paths(trust.inner(),workspace.inner(),window.label(),&paths).await",
 	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_network_preview",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitNetworkPreviewRequest",
+		returnType: "->Result<GitNetworkPreviewResult,CommandError>",
+		body: "letoperation=request.into_parts();letresult=network::preview(trust.inner(),workspace.inner(),window.label(),operation).await?;Ok(GitNetworkPreviewResult::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_fetch",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,network_service:State<'_,GitNetworkService>,request:GitFetchRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "request.validate();network::fetch(trust.inner(),workspace.inner(),network_service.inner(),window.label(),).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_pull",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,network_service:State<'_,GitNetworkService>,request:GitPullRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "request.validate();network::pull(trust.inner(),workspace.inner(),network_service.inner(),window.label(),).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_push",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,network_service:State<'_,GitNetworkService>,request:GitPushRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "letforce=request.into_parts();network::push(trust.inner(),workspace.inner(),network_service.inner(),window.label(),force,).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_network_cancel",
+		parameters:
+			"window:WebviewWindow,network_service:State<'_,GitNetworkService>,request:GitNetworkCancelRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "request.validate();network_service.inner().request_cancel(window.label());Ok(())",
+	},
 ]);
 
 /**
- * Locks the three `F080` S1 git commands to their audited exact signatures,
+ * Locks all thirteen `F080` git commands (S1's three reads, S3's five
+ * writes, S4's five network commands) to their audited exact signatures,
  * bodies and single `generate_handler!` registration — mirrors
  * `validateTrustTerminalCommandRegistration`'s exact technique.
  */
@@ -6616,17 +6657,132 @@ export function validateGitRustBoundary(rustSources) {
 		);
 	}
 
+	// --- F080 S4 network commands -------------------------------------------
+	if (
+		structBody("GitNetworkPreviewRequest") !==
+		"operation:GitNetworkOperationWire,"
+	) {
+		failures.push(
+			"GitNetworkPreviewRequest must expose only its exact audited operation field",
+		);
+	}
+	if (
+		structBody("GitNetworkPreviewResult") !==
+		"upstream:Option<String>,ahead:Option<u64>,behind:Option<u64>,"
+	) {
+		failures.push(
+			"GitNetworkPreviewResult must expose only its exact audited upstream/ahead/behind fields",
+		);
+	}
+	const networkOperationWireBody = enumBody("GitNetworkOperationWire");
+	if (
+		networkOperationWireBody !== "Fetch,Pull,Push," &&
+		networkOperationWireBody !== "Fetch,Pull,Push"
+	) {
+		failures.push(
+			"GitNetworkOperationWire must expose exactly its three audited Fetch/Pull/Push variants",
+		);
+	}
+	if (
+		structBody("GitFetchRequest") !== "" ||
+		structBody("GitPullRequest") !== ""
+	) {
+		failures.push("GitFetchRequest/GitPullRequest must remain empty structs");
+	}
+	if (structBody("GitPushRequest") !== "force:bool,") {
+		failures.push(
+			"GitPushRequest must expose only its exact audited force field",
+		);
+	}
+	if (structBody("GitNetworkCancelRequest") !== "") {
+		failures.push("GitNetworkCancelRequest must remain an empty struct");
+	}
+
+	const networkSource = findRustSource(
+		rustSources,
+		"src-tauri/src/git/network.rs",
+	);
+	const execSourceForNetwork = findRustSource(
+		rustSources,
+		"src-tauri/src/git/exec.rs",
+	);
+	if (networkSource === undefined || execSourceForNetwork === undefined) {
+		failures.push("git boundary requires network.rs and exec.rs");
+		return failures;
+	}
+	const executableNetwork = stripRustCommentsOnly(networkSource);
+	const fetchArgs = argsConstant(executableNetwork, "GIT_FETCH_ARGS");
+	if (!sameArray(fetchArgs, ["fetch", "--quiet"])) {
+		failures.push(
+			"network.rs must define GIT_FETCH_ARGS as exactly the audited fetch argument list",
+		);
+	}
+	const pullArgs = argsConstant(executableNetwork, "GIT_PULL_ARGS");
+	if (!sameArray(pullArgs, ["pull", "--quiet"])) {
+		failures.push(
+			"network.rs must define GIT_PULL_ARGS as exactly the audited pull argument list",
+		);
+	}
+	const pushArgs = argsConstant(executableNetwork, "GIT_PUSH_ARGS");
+	if (!sameArray(pushArgs, ["push", "--quiet"])) {
+		failures.push(
+			"network.rs must define GIT_PUSH_ARGS as exactly the audited push argument list",
+		);
+	}
+	const pushForceArgs = argsConstant(executableNetwork, "GIT_PUSH_FORCE_ARGS");
+	if (!sameArray(pushForceArgs, ["push", "--quiet", "--force-with-lease"])) {
+		failures.push(
+			"network.rs must define GIT_PUSH_FORCE_ARGS as exactly the audited force-with-lease argument list (never bare --force)",
+		);
+	}
+	// Belt-and-suspenders textual scan: the two `argsConstant` locks above
+	// already fully pin every element of both push-argument constants, so
+	// this only catches a *third*, differently-named constant (or an inline
+	// `.args([...])` literal) smuggling in a bare `--force` token elsewhere in
+	// this file — `--force-with-lease` itself contains the substring
+	// `--force`, so the negative lookahead is required to avoid a false
+	// positive against the audited constant's own literal.
+	if (/"--force"(?!-with-lease)/.test(executableNetwork)) {
+		failures.push(
+			"network.rs must never pass a bare --force argument to git push — only --force-with-lease",
+		);
+	}
+
+	// Raw source (not `stripRustCommentsAndLiterals`, which blanks string
+	// literal *contents* too) — mirrors `validateTerminalRustBoundary`'s own
+	// `TERMINAL_ENV_PASSTHROUGH_NAMES_LOCK` check against `shell.rs`, which
+	// needs to see the actual `"PATH"`/`"HOME"`/etc. literal text.
+	const networkEnvNamesMatch =
+		/pub\(crate\)\s+const\s+GIT_NETWORK_ENV_PASSTHROUGH_NAMES\s*:\s*&\[&str\]\s*=\s*&\[([^\]]*)\]\s*;/.exec(
+			execSourceForNetwork,
+		);
+	const networkEnvNames = networkEnvNamesMatch?.[1]
+		.split(",")
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0)
+		.map((entry) => entry.replace(/^"|"$/g, ""));
+	if (
+		networkEnvNamesMatch === null ||
+		!sameArray(networkEnvNames, ["PATH", "HOME", "SSH_AUTH_SOCK"])
+	) {
+		failures.push(
+			"exec.rs must define GIT_NETWORK_ENV_PASSTHROUGH_NAMES as exactly PATH/HOME/SSH_AUTH_SOCK",
+		);
+	}
+
 	return failures;
 }
 
 /**
- * `F080` S1's three read methods, plus `F080` S3's five write methods
+ * `F080` S1's three read methods, `F080` S3's five write methods
  * (`git_stage_paths`/`git_unstage_paths`/`git_stage_blob`/`git_commit`/
- * `git_discard_paths`) — the write half deliberately shares this same
- * closed-list lock rather than getting a parallel "S3 bridge methods" const,
- * for the same reason `GIT_COMMAND_CONTRACTS` above holds all eight Rust
- * commands in one array: `PlainBridge`'s git surface is one audited whole,
- * not two independently-sized ones.
+ * `git_discard_paths`), and `F080` S4's five network methods
+ * (`git_network_preview`/`git_fetch`/`git_pull`/`git_push`/
+ * `git_network_cancel`) — every slice deliberately shares this same
+ * closed-list lock rather than getting its own parallel "S_ bridge methods"
+ * const, for the same reason `GIT_COMMAND_CONTRACTS` above holds all
+ * thirteen Rust commands in one array: `PlainBridge`'s git surface is one
+ * audited whole, not several independently-sized ones.
  */
 const GIT_BRIDGE_METHOD_NAMES = [
 	"gitStatus",
@@ -6637,15 +6793,24 @@ const GIT_BRIDGE_METHOD_NAMES = [
 	"gitStageBlob",
 	"gitCommit",
 	"gitDiscardPaths",
+	"gitNetworkPreview",
+	"gitFetch",
+	"gitPull",
+	"gitPush",
+	"gitNetworkCancel",
 ];
 
 /**
- * The five `F080` S3 write commands, mapped to their exact command-name
- * string and the audited frontend `frozen*Request` builder `native.ts` must
- * route the call's arguments through before invoking — mirrors
- * `frozenGitDiffFilesRequest`/`frozenGitShowBlobRequest`'s existing S1
- * precedent for validating a request's shape at the TypeScript boundary
- * before it ever reaches `invoke`.
+ * The five `F080` S3 write commands, plus `F080` S4's `git_push` (the one
+ * S4 command that carries a payload — `force`), mapped to their exact
+ * command-name string and the audited frontend `frozen*Request` builder
+ * `native.ts` must route the call's arguments through before invoking —
+ * mirrors `frozenGitDiffFilesRequest`/`frozenGitShowBlobRequest`'s existing
+ * S1 precedent for validating a request's shape at the TypeScript boundary
+ * before it ever reaches `invoke`. `git_fetch`/`git_pull`/
+ * `git_network_cancel` take no payload at all (an empty `{}` request, same
+ * shape as `git_status`) and so have no builder to route through — see
+ * [`GIT_NO_ARG_COMMAND_CONTRACTS`] for those three instead.
  */
 const GIT_WRITE_COMMAND_CONTRACTS = Object.freeze([
 	Object.freeze({
@@ -6668,17 +6833,36 @@ const GIT_WRITE_COMMAND_CONTRACTS = Object.freeze([
 		command: "git_discard_paths",
 		requestBuilder: "frozenGitDiscardPathsRequest",
 	}),
+	Object.freeze({
+		command: "git_push",
+		requestBuilder: "frozenGitPushRequest",
+	}),
 ]);
 
 /**
- * Locks `F080` S1+S3's TypeScript surface: `PlainBridge` exposes exactly the
- * eight audited git methods, `git-codec.ts`'s three read-result decoders
- * validate exact own-data keys/reject Proxy wrapping/freeze their result
- * (same rigor `validateTerminalIpcBridgeBoundary` already locks for the
- * terminal domain), and `native.ts` routes each of the eight through
- * `invoke` with its audited command name — the three reads through their
- * audited decoders, the five writes through their audited `frozen*Request`
- * builders and `decodeGitVoid`.
+ * `F080` S4's three no-payload network commands (`git_fetch`/`git_pull`/
+ * `git_network_cancel`) — same "invoked exactly once" rigor
+ * [`GIT_WRITE_COMMAND_CONTRACTS`] applies, but with no request builder to
+ * check (mirrors how `git_status` itself, S1's own no-payload read, is
+ * checked below: invocation count only).
+ */
+const GIT_NO_ARG_COMMAND_CONTRACTS = Object.freeze([
+	"git_fetch",
+	"git_pull",
+	"git_network_cancel",
+]);
+
+/**
+ * Locks `F080` S1+S3+S4's TypeScript surface: `PlainBridge` exposes exactly
+ * the thirteen audited git methods, `git-codec.ts`'s four read-result
+ * decoders validate exact own-data keys/reject Proxy wrapping/freeze their
+ * result (same rigor `validateTerminalIpcBridgeBoundary` already locks for
+ * the terminal domain), and `native.ts` routes each of the thirteen through
+ * `invoke` with its audited command name — the four reads through their
+ * audited decoders, the six writes (`GIT_WRITE_COMMAND_CONTRACTS`) through
+ * their audited `frozen*Request` builders and `decodeGitVoid`, and the three
+ * no-payload network commands (`GIT_NO_ARG_COMMAND_CONTRACTS`) invoked
+ * exactly once each.
  */
 export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 	const failures = [];
@@ -6719,7 +6903,7 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 			JSON.stringify([...GIT_BRIDGE_METHOD_NAMES].sort())
 	) {
 		failures.push(
-			"PlainBridge must expose exactly the eight audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the thirteen audited git methods, no more and no fewer",
 		);
 	}
 
@@ -6735,6 +6919,7 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 		"decodeGitStatusResult",
 		"decodeGitDiffFilesResult",
 		"decodeGitShowBlobResult",
+		"decodeGitNetworkPreviewResult",
 	]) {
 		const body = decoderBody(name);
 		if (
@@ -6765,6 +6950,17 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 			"native.ts must invoke git_status/git_diff_files/git_show_blob exactly once each, decoded through the audited decoders",
 		);
 	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_network_preview"/g)]
+			.length !== 1 ||
+		!native.includes("frozenGitNetworkPreviewRequest(") ||
+		!native.includes("decodeGitNetworkPreviewResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_network_preview exactly once, routed through frozenGitNetworkPreviewRequest and decoded through decodeGitNetworkPreviewResult",
+		);
+	}
 
 	for (const { command, requestBuilder } of GIT_WRITE_COMMAND_CONTRACTS) {
 		const invokePattern = new RegExp(
@@ -6781,9 +6977,21 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 			);
 		}
 	}
+	for (const command of GIT_NO_ARG_COMMAND_CONTRACTS) {
+		const invokePattern = new RegExp(
+			`\\binvoke<unknown>\\(\\s*"${command}"`,
+			"g",
+		);
+		if (
+			native === undefined ||
+			[...native.matchAll(invokePattern)].length !== 1
+		) {
+			failures.push(`native.ts must invoke ${command} exactly once`);
+		}
+	}
 	if (native === undefined || !native.includes("decodeGitVoid(")) {
 		failures.push(
-			"native.ts must decode every F080 S3 git write command's response through decodeGitVoid",
+			"native.ts must decode every F080 S3/S4 git void-returning command's response through decodeGitVoid",
 		);
 	}
 
@@ -7152,6 +7360,437 @@ function validateDiscardConfirmationModuleFace(source) {
 	) {
 		failures.push(
 			"resolveDiscardConfirmation must, for a non-empty path list, unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited no-op/confirm/decline shape",
+		);
+	}
+	return failures;
+}
+
+const GIT_NETWORK_MODULE_PATH = "app/features/scm/plain-scm-network.ts";
+
+/**
+ * `F080` S4's three confirm-gated network bridge methods, each mapped to the
+ * one `PlainScmView` method allowed to call it and the exact argument list
+ * that call must pass — mirrors `GIT_DISCARD_DECLARATION_PATHS`'s "declares
+ * vs. calls" split, generalized from discard's single bridge method to
+ * three (`gitFetch`/`gitPull`/`gitPush`), one audit entry each.
+ */
+const GIT_NETWORK_BRIDGE_METHOD_AUDITS = Object.freeze([
+	Object.freeze({
+		bridgeMethod: "gitFetch",
+		containingMethod: "fetchFromRemote",
+		argumentTexts: Object.freeze([]),
+	}),
+	Object.freeze({
+		bridgeMethod: "gitPull",
+		containingMethod: "pullFromRemote",
+		argumentTexts: Object.freeze([]),
+	}),
+	Object.freeze({
+		bridgeMethod: "gitPush",
+		containingMethod: "pushToRemote",
+		argumentTexts: Object.freeze(["force"]),
+	}),
+]);
+
+/**
+ * `F080` S4's `gitFetch`/`gitPull`/`gitPush` are each a network write ADR
+ * 0003 requires a preview + confirmation for before ever running (acceptance
+ * criterion 5) — the same "nothing at the Rust/bridge-interface layer
+ * enforces this, only one audited call site per method does" situation
+ * `validateGitDiscardConfirmationBoundary` already locks for `F080` S3's
+ * `gitDiscardPaths`, generalized here from one bridge method to three. Locks:
+ * each method's bridge declaration to its audited three files
+ * (`GIT_DISCARD_DECLARATION_PATHS`, reused — same contracts.ts/native.ts/
+ * browser-mock.ts split as discard), each method's single production call
+ * site to its own audited `PlainScmView` method with the exact argument list
+ * `GIT_NETWORK_BRIDGE_METHOD_AUDITS` names, that call site's exact
+ * preview-then-confirm-then-call body shape, and `plain-scm-network.ts`'s
+ * own audited module face (mirrors `validateDiscardConfirmationModuleFace`).
+ */
+export function validateGitNetworkConfirmationBoundary(appSources) {
+	const failures = [];
+	const normalizedSources = new Map(
+		appSources.map(({ relativePath, source }) => [
+			relativePath.replaceAll("\\", "/"),
+			source,
+		]),
+	);
+	const requiredPaths = Object.freeze([
+		...GIT_DISCARD_DECLARATION_PATHS,
+		GIT_DISCARD_VIEW_PATH,
+		GIT_NETWORK_MODULE_PATH,
+	]);
+	for (const relativePath of requiredPaths) {
+		if (!normalizedSources.has(relativePath)) {
+			failures.push(
+				`git network confirmation boundary requires ${relativePath}`,
+			);
+		}
+	}
+
+	function containingMethodName(node) {
+		let current = node.parent;
+		while (current !== undefined) {
+			if (
+				ts.isMethodDeclaration(current) ||
+				ts.isFunctionDeclaration(current)
+			) {
+				return typeScriptStaticName(current.name);
+			}
+			current = current.parent;
+		}
+		return undefined;
+	}
+
+	const bridgeMethodNames = GIT_NETWORK_BRIDGE_METHOD_AUDITS.map(
+		(audit) => audit.bridgeMethod,
+	);
+	const declarationCounts = new Map(
+		GIT_DISCARD_DECLARATION_PATHS.flatMap((relativePath) =>
+			bridgeMethodNames.map((bridgeMethod) => [
+				`${relativePath}:${bridgeMethod}`,
+				0,
+			]),
+		),
+	);
+	const auditedCallCounts = new Map(
+		bridgeMethodNames.map((bridgeMethod) => [bridgeMethod, 0]),
+	);
+
+	for (const [normalizedPath, source] of normalizedSources) {
+		if (!normalizedPath.endsWith(".ts") && !normalizedPath.endsWith(".tsx")) {
+			continue;
+		}
+		const sourceFile = ts.createSourceFile(
+			normalizedPath,
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			normalizedPath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+		);
+		const isKnownBridge = collectTypeScriptBridgeAliases(sourceFile);
+
+		function visit(node) {
+			const isNameLike =
+				ts.isIdentifier(node) ||
+				ts.isStringLiteral(node) ||
+				ts.isNoSubstitutionTemplateLiteral(node);
+			const audit = isNameLike
+				? GIT_NETWORK_BRIDGE_METHOD_AUDITS.find(
+						(candidate) => candidate.bridgeMethod === node.text,
+					)
+				: undefined;
+			if (audit !== undefined) {
+				const bridgeMethod = audit.bridgeMethod;
+				const parent = node.parent;
+				const isAllowedDeclaration =
+					(normalizedPath === "app/platform/tauri/contracts.ts" &&
+						ts.isMethodSignature(parent) &&
+						parent.name === node) ||
+					(normalizedPath === "app/platform/tauri/native.ts" &&
+						ts.isPropertyAssignment(parent) &&
+						parent.name === node) ||
+					(normalizedPath === "app/platform/tauri/browser-mock.ts" &&
+						(ts.isMethodDeclaration(parent) ||
+							ts.isPropertyAssignment(parent)) &&
+						parent.name === node);
+				if (isAllowedDeclaration) {
+					const key = `${normalizedPath}:${bridgeMethod}`;
+					declarationCounts.set(key, declarationCounts.get(key) + 1);
+				} else {
+					const propertyAccess = ts.isIdentifier(node) ? parent : undefined;
+					const directCall =
+						propertyAccess !== undefined &&
+						ts.isPropertyAccessExpression(propertyAccess) &&
+						propertyAccess.name === node &&
+						ts.isCallExpression(propertyAccess.parent) &&
+						propertyAccess.parent.expression === propertyAccess &&
+						isKnownBridge(propertyAccess.expression)
+							? propertyAccess.parent
+							: undefined;
+					const argumentTexts =
+						directCall?.arguments.map((argument) =>
+							argument.getText(sourceFile).replaceAll(/\s+/g, ""),
+						) ?? [];
+					const isAuditedCall =
+						directCall !== undefined &&
+						normalizedPath === GIT_DISCARD_VIEW_PATH &&
+						containingMethodName(node) === audit.containingMethod &&
+						sameArray(argumentTexts, audit.argumentTexts);
+					if (isAuditedCall) {
+						auditedCallCounts.set(
+							bridgeMethod,
+							auditedCallCounts.get(bridgeMethod) + 1,
+						);
+					} else {
+						failures.push(
+							`${normalizedPath} must not consume ${bridgeMethod} outside PlainScmView.${audit.containingMethod}'s single audited call site`,
+						);
+					}
+				}
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(sourceFile);
+	}
+
+	for (const [key, count] of declarationCounts) {
+		if (count !== 1) {
+			const [relativePath, bridgeMethod] = key.split(":");
+			failures.push(
+				`${relativePath} must declare ${bridgeMethod} exactly once in its audited bridge surface`,
+			);
+		}
+	}
+	for (const audit of GIT_NETWORK_BRIDGE_METHOD_AUDITS) {
+		if (auditedCallCounts.get(audit.bridgeMethod) !== 1) {
+			failures.push(
+				`${audit.bridgeMethod} must have exactly one production call site, inside PlainScmView.${audit.containingMethod}`,
+			);
+		}
+	}
+
+	const viewSource = normalizedSources.get(GIT_DISCARD_VIEW_PATH);
+	if (viewSource !== undefined) {
+		failures.push(...validateNetworkMutationGuardedCalls(viewSource));
+	}
+	const networkModuleSource = normalizedSources.get(GIT_NETWORK_MODULE_PATH);
+	if (networkModuleSource !== undefined) {
+		failures.push(
+			...validateNetworkConfirmationModuleFace(networkModuleSource),
+		);
+	}
+
+	return [...new Set(failures)];
+}
+
+/**
+ * Locks `PlainScmView.fetchFromRemote`/`pullFromRemote`/`pushToRemote` to
+ * their exact "compute the preview, bail if unavailable, await the
+ * confirmation, bail unless exactly `\"confirmed\"`, only then call the
+ * network bridge" shapes — the `F080` S4 analogue of
+ * `validateDiscardResourcesGuardedCall`, one audited body per method instead
+ * of one overall (`pushToRemote`'s differs by reading the force checkbox and
+ * passing `force` through both the preview kind and the bridge call).
+ */
+function validateNetworkMutationGuardedCalls(source) {
+	const sourceFile = ts.createSourceFile(
+		GIT_DISCARD_VIEW_PATH,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["plain-scm-view.ts must remain valid TypeScript"];
+	}
+
+	function methodBody(name) {
+		const methods = [];
+		function visit(node) {
+			if (
+				ts.isMethodDeclaration(node) &&
+				typeScriptStaticName(node.name) === name
+			) {
+				methods.push(node);
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(sourceFile);
+		return methods.length === 1 ? methods[0].body : undefined;
+	}
+
+	const expectedBodies = {
+		fetchFromRemote: `{
+			const preview = await this.previewNetworkOperation("fetch");
+			if (preview === undefined) {
+				return;
+			}
+			const decision = await resolveNetworkConfirmation(this.dialogService, {
+				kind: "fetch",
+				preview,
+			});
+			if (decision.kind !== "confirmed") {
+				return;
+			}
+			await this.runNetworkMutation((bridge) => bridge.gitFetch());
+		}`,
+		pullFromRemote: `{
+			const preview = await this.previewNetworkOperation("pull");
+			if (preview === undefined) {
+				return;
+			}
+			const decision = await resolveNetworkConfirmation(this.dialogService, {
+				kind: "pull",
+				preview,
+			});
+			if (decision.kind !== "confirmed") {
+				return;
+			}
+			await this.runNetworkMutation((bridge) => bridge.gitPull());
+		}`,
+		pushToRemote: `{
+			const force = this.#forcePushCheckbox?.checked ?? false;
+			const kind = force ? "forcePush" : "push";
+			const preview = await this.previewNetworkOperation(kind);
+			if (preview === undefined) {
+				return;
+			}
+			const decision = await resolveNetworkConfirmation(this.dialogService, {
+				kind,
+				preview,
+			});
+			if (decision.kind !== "confirmed") {
+				return;
+			}
+			await this.runNetworkMutation((bridge) => bridge.gitPush(force));
+		}`,
+	};
+
+	const failures = [];
+	for (const [name, expectedBody] of Object.entries(expectedBodies)) {
+		const body = methodBody(name);
+		const normalizedExpected = expectedBody.replaceAll(/\s+/g, "");
+		if (
+			body === undefined ||
+			body.getText(sourceFile).replaceAll(/\s+/g, "") !== normalizedExpected
+		) {
+			failures.push(
+				`PlainScmView.${name} must match its exact audited preview-then-confirm-then-call shape — no other shape may reach the network bridge call`,
+			);
+		}
+	}
+	return failures;
+}
+
+/**
+ * Locks `plain-scm-network.ts`'s own audited module face: it must import
+ * nothing at all (an import is the only way this module could ever reach a
+ * bridge or a real Workbench service to perform a network write itself), its
+ * top-level declarations must match the exact audited set, and
+ * `resolveNetworkConfirmation` itself must match the exact audited body —
+ * which simultaneously proves it never calls a bridge method and never has a
+ * branch that skips the dialog. Mirrors
+ * `validateDiscardConfirmationModuleFace`'s exact technique.
+ */
+function validateNetworkConfirmationModuleFace(source) {
+	const failures = [];
+	const sourceFile = ts.createSourceFile(
+		GIT_NETWORK_MODULE_PATH,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["plain-scm-network.ts must remain valid TypeScript"];
+	}
+
+	if (
+		sourceFile.statements.some((statement) => ts.isImportDeclaration(statement))
+	) {
+		failures.push(
+			"plain-scm-network.ts must not import anything — it only ever decides whether the caller may fetch/pull/push, and an import is the only way it could ever reach a bridge or service to perform the network write itself",
+		);
+	}
+
+	const expectedTopLevel = new Map([
+		["NetworkConfirmDialogService", { kind: "interface", exported: true }],
+		["NetworkConfirmationKind", { kind: "type", exported: true }],
+		["NetworkConfirmationPreview", { kind: "interface", exported: true }],
+		["NetworkConfirmationRequest", { kind: "interface", exported: true }],
+		["describeUpstream", { kind: "function", exported: false }],
+		["networkConfirmationMessage", { kind: "function", exported: true }],
+		["networkConfirmationDetail", { kind: "function", exported: true }],
+		["NETWORK_CONFIRM_PRIMARY_BUTTON", { kind: "variable", exported: true }],
+		["NetworkConfirmDecision", { kind: "type", exported: true }],
+		[
+			"resolveNetworkConfirmation",
+			{ kind: "function", exported: true, async: true },
+		],
+	]);
+	const topLevelCounts = new Map(
+		[...expectedTopLevel].map(([name]) => [name, 0]),
+	);
+	let topLevelIsExact = true;
+	for (const statement of sourceFile.statements) {
+		if (ts.isImportDeclaration(statement)) {
+			continue;
+		}
+		let name;
+		let kind;
+		if (ts.isVariableStatement(statement)) {
+			if (statement.declarationList.declarations.length !== 1) {
+				topLevelIsExact = false;
+				continue;
+			}
+			name = statement.declarationList.declarations[0].name;
+			kind = "variable";
+		} else if (ts.isFunctionDeclaration(statement)) {
+			name = statement.name;
+			kind = "function";
+		} else if (ts.isInterfaceDeclaration(statement)) {
+			name = statement.name;
+			kind = "interface";
+		} else if (ts.isTypeAliasDeclaration(statement)) {
+			name = statement.name;
+			kind = "type";
+		} else {
+			topLevelIsExact = false;
+			continue;
+		}
+		const expected = ts.isIdentifier(name)
+			? expectedTopLevel.get(name.text)
+			: undefined;
+		const modifierKinds = (statement.modifiers ?? []).map(
+			(modifier) => modifier.kind,
+		);
+		const expectedModifiers = [
+			...(expected?.exported ? [ts.SyntaxKind.ExportKeyword] : []),
+			...(expected?.async ? [ts.SyntaxKind.AsyncKeyword] : []),
+		];
+		if (
+			expected === undefined ||
+			expected.kind !== kind ||
+			!sameArray(modifierKinds, expectedModifiers)
+		) {
+			topLevelIsExact = false;
+		} else {
+			topLevelCounts.set(name.text, topLevelCounts.get(name.text) + 1);
+		}
+	}
+	if (
+		!topLevelIsExact ||
+		[...topLevelCounts.values()].some((count) => count !== 1)
+	) {
+		failures.push(
+			"plain-scm-network.ts must retain its exact audited top-level surface — no new declaration can quietly add a way for this decide-only module to reach a bridge",
+		);
+	}
+
+	const resolveFunctions = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "resolveNetworkConfirmation",
+	);
+	const expectedResolveBody = `{
+		const confirmation = await dialogService.confirm({
+			message: networkConfirmationMessage(request),
+			detail: networkConfirmationDetail(request),
+			primaryButton: NETWORK_CONFIRM_PRIMARY_BUTTON[request.kind],
+		});
+		return Object.freeze({
+			kind: confirmation.confirmed ? "confirmed" : "declined",
+		});
+	}`.replaceAll(/\s+/g, "");
+	if (
+		resolveFunctions.length !== 1 ||
+		resolveFunctions[0].body === undefined ||
+		resolveFunctions[0].body.getText(sourceFile).replaceAll(/\s+/g, "") !==
+			expectedResolveBody
+	) {
+		failures.push(
+			"resolveNetworkConfirmation must unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited shape",
 		);
 	}
 	return failures;

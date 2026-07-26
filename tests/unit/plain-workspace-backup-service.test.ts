@@ -114,6 +114,11 @@ function createFakeBridge(overrides: Partial<PlainBridge> = {}): {
 		gitStageBlob: notImplemented,
 		gitCommit: notImplemented,
 		gitDiscardPaths: notImplemented,
+		gitNetworkPreview: notImplemented,
+		gitFetch: notImplemented,
+		gitPull: notImplemented,
+		gitPush: notImplemented,
+		gitNetworkCancel: notImplemented,
 		...overrides,
 	};
 	return { bridge, state };

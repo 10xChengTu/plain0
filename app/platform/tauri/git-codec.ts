@@ -5,6 +5,8 @@ import type {
 	GitDiffFileEntry,
 	GitDiffFilesResult,
 	GitDiffStatusKind,
+	GitNetworkOperation,
+	GitNetworkPreviewResult,
 	GitRenameOrCopyKind,
 	GitShowBlobResult,
 	GitStatusEntry,
@@ -765,15 +767,101 @@ export function frozenGitCommitRequest(
 }
 
 /** Decodes a `git_stage_paths`/`git_unstage_paths`/`git_stage_blob`/
- * `git_commit`/`git_discard_paths` response — every one of these Rust
- * commands returns `Result<(), CommandError>`, which serializes to the JSON
- * literal `null` on success (mirrors `decodeWorkspaceVoid`/
- * `decodeTerminalVoid`'s identical contract for this codebase's other
- * void-returning write commands). */
+ * `git_commit`/`git_discard_paths`/`git_fetch`/`git_pull`/`git_push`/
+ * `git_network_cancel` response — every one of these Rust commands returns
+ * `Result<(), CommandError>`, which serializes to the JSON literal `null` on
+ * success (mirrors `decodeWorkspaceVoid`/`decodeTerminalVoid`'s identical
+ * contract for this codebase's other void-returning write commands). */
 export function decodeGitVoid(value: unknown): void {
 	return sanitizedDecode(() => {
 		if (value !== null) {
 			return violation();
 		}
 	});
+}
+
+// --- F080 S4: git_network_preview / git_fetch / git_pull / git_push -------
+
+const GIT_NETWORK_OPERATIONS = new Set<GitNetworkOperation>([
+	"fetch",
+	"pull",
+	"push",
+]);
+
+function isGitNetworkOperation(value: unknown): value is GitNetworkOperation {
+	return (
+		typeof value === "string" &&
+		GIT_NETWORK_OPERATIONS.has(value as GitNetworkOperation)
+	);
+}
+
+function gitNetworkPreviewRequestInvalid(): never {
+	return requestViolation(
+		"GIT_NETWORK_PREVIEW_INVALID_REQUEST",
+		"The git network preview request is invalid.",
+	);
+}
+
+export function frozenGitNetworkPreviewRequest(
+	operation: unknown,
+): Readonly<{ operation: GitNetworkOperation }> {
+	if (!isGitNetworkOperation(operation)) {
+		return gitNetworkPreviewRequestInvalid();
+	}
+	return Object.freeze({ operation });
+}
+
+function decodeOptionalAheadBehindCount(value: unknown): number | null {
+	if (value === null) {
+		return null;
+	}
+	if (!isSafeNonNegativeInteger(value)) {
+		return violation();
+	}
+	return value;
+}
+
+/** Decodes a `git_network_preview` response: an own-data, exactly
+ * `{ upstream, ahead, behind }` object — `upstream` is a non-empty string or
+ * `null`, `ahead`/`behind` are each a safe non-negative integer or `null`,
+ * and all three are `null` together or none of them are (this codec only
+ * validates each field's own shape; `GitNetworkPreviewResult`'s own doc
+ * comment explains why the three are only ever jointly null). */
+export function decodeGitNetworkPreviewResult(
+	value: unknown,
+): GitNetworkPreviewResult {
+	return sanitizedDecode(() => {
+		if (
+			!isPlainObject(value) ||
+			!hasExactKeys(value, ["upstream", "ahead", "behind"])
+		) {
+			return violation();
+		}
+		if (value.upstream !== null && typeof value.upstream !== "string") {
+			return violation();
+		}
+		const result = {
+			upstream: value.upstream as string | null,
+			ahead: decodeOptionalAheadBehindCount(value.ahead),
+			behind: decodeOptionalAheadBehindCount(value.behind),
+		};
+		rejectProxyObject(value);
+		return Object.freeze(result);
+	});
+}
+
+function gitPushRequestInvalid(): never {
+	return requestViolation(
+		"GIT_PUSH_INVALID_REQUEST",
+		"The git push request is invalid.",
+	);
+}
+
+export function frozenGitPushRequest(
+	force: unknown,
+): Readonly<{ force: boolean }> {
+	if (typeof force !== "boolean") {
+		return gitPushRequestInvalid();
+	}
+	return Object.freeze({ force });
 }

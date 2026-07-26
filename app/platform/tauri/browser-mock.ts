@@ -4,6 +4,7 @@ import type {
 	GitBlobRev,
 	GitBranch,
 	GitDiffFilesResult,
+	GitNetworkPreviewResult,
 	GitStatusEntry,
 	GitStatusResult,
 	PlainBridge,
@@ -36,6 +37,8 @@ import {
 	frozenGitCommitRequest,
 	frozenGitDiffFilesRequest,
 	frozenGitDiscardPathsRequest,
+	frozenGitNetworkPreviewRequest,
+	frozenGitPushRequest,
 	frozenGitShowBlobRequest,
 	frozenGitShowBlobResult,
 	frozenGitStageBlobRequest,
@@ -1038,6 +1041,43 @@ export interface BrowserMockGitFixtureForTest {
 	 * of returning fixture data — simulates a trusted workspace root that is
 	 * not (or no longer) a Git working tree. */
 	readonly noRepositoryForTest?: boolean;
+	/** `F080` S4: seeds the deterministic `gitNetworkPreview`/`gitFetch`/
+	 * `gitPull`/`gitPush` simulation — see
+	 * `BrowserMockGitNetworkFixtureForTest`. */
+	readonly networkForTest?: BrowserMockGitNetworkFixtureForTest;
+}
+
+/**
+ * Deterministic, injectable `git_network_preview`/`git_fetch`/`git_pull`/
+ * `git_push` simulation (`F080` S4) — like `BrowserMockGitFixtureForTest`'s
+ * own doc comment says of the S1/S3 git fixtures, this mock never
+ * re-implements real ahead/behind or non-fast-forward semantics (the real
+ * Rust parsers/porcelain behavior already have thorough fixture coverage in
+ * `src-tauri/src/git/network/tests.rs`); it only exists so a consuming
+ * frontend (`PlainScmView`) has structurally correct, scriptable responses to
+ * develop and test the confirm-then-call UI flow against.
+ */
+export interface BrowserMockGitNetworkFixtureForTest {
+	/** Defaults to `"origin/main"`. `null` simulates no upstream configured —
+	 * matches the real `GIT_NETWORK_NO_UPSTREAM` preview rejection for
+	 * `"pull"`/`"push"`, and the real `{ upstream: null, ahead: null, behind:
+	 * null }` outcome for `"fetch"`. */
+	readonly upstream?: string | null;
+	/** Defaults to `0`. Mutated in place: a mock `gitPush` resets this to `0`
+	 * on success, mirroring `ahead` clearing once local commits are actually
+	 * uploaded. */
+	readonly ahead?: number;
+	/** Defaults to `0`. Mutated in place: a mock `gitPull` resets this to `0`
+	 * on success (simulating the remote's commits being merged in); a mock
+	 * `gitPush` rejects with `GIT_PUSH_REJECTED` while this is still nonzero
+	 * and `force` is `false` — the same non-fast-forward shape a real stale
+	 * remote-tracking ref produces. */
+	readonly behind?: number;
+	/** When `true`, a mock `gitPush(true)` (force) rejects with
+	 * `GIT_PUSH_REJECTED` regardless of `behind` — simulates a stale
+	 * `--force-with-lease` lease, letting Browser E2E exercise the
+	 * force-push-rejected path without modeling a real divergent remote. */
+	readonly forcePushRejectedForTest?: boolean;
 }
 
 /**
@@ -5140,6 +5180,20 @@ export function createBrowserMockBridge(
 		untrackedChanged: false,
 	});
 
+	// --- F080 S4: mutable fetch/pull/push simulation -----------------------
+	//
+	// See `BrowserMockGitNetworkFixtureForTest`'s own doc comment for why this
+	// never re-implements real ahead/behind or non-fast-forward semantics —
+	// `src-tauri/src/git/network/tests.rs` is this slice's authoritative
+	// correctness evidence.
+	const gitNetworkFixture = gitFixture.networkForTest ?? {};
+	let gitNetworkUpstream: string | null =
+		gitNetworkFixture.upstream === undefined
+			? "origin/main"
+			: gitNetworkFixture.upstream;
+	let gitNetworkAhead = gitNetworkFixture.ahead ?? 0;
+	let gitNetworkBehind = gitNetworkFixture.behind ?? 0;
+
 	function gitMutateUnavailable(): CommandError | undefined {
 		if (roots.size === 0 || !terminalTrusted) {
 			return terminalNotTrusted();
@@ -5148,6 +5202,20 @@ export function createBrowserMockBridge(
 			return gitNoRepository();
 		}
 		return undefined;
+	}
+
+	function gitNetworkNoUpstream(): CommandError {
+		return commandError(
+			"GIT_NETWORK_NO_UPSTREAM",
+			"The current branch has no upstream configured.",
+		);
+	}
+
+	function gitPushRejected(): CommandError {
+		return commandError(
+			"GIT_PUSH_REJECTED",
+			"The remote rejected the push (it has commits this branch does not).",
+		);
 	}
 
 	function gitDiscardFailed(): CommandError {
@@ -6224,6 +6292,73 @@ export function createBrowserMockBridge(
 			for (const path of request.paths) {
 				gitDiscardOnePath(path);
 			}
+		},
+		async gitNetworkPreview(operation_): Promise<GitNetworkPreviewResult> {
+			const request = frozenGitNetworkPreviewRequest(operation_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			if (gitNetworkUpstream === null) {
+				if (request.operation === "fetch") {
+					return Object.freeze({
+						upstream: null,
+						ahead: null,
+						behind: null,
+					});
+				}
+				throw gitNetworkNoUpstream();
+			}
+			return Object.freeze({
+				upstream: gitNetworkUpstream,
+				ahead: gitNetworkAhead,
+				behind: gitNetworkBehind,
+			});
+		},
+		async gitFetch() {
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			// A real fetch only updates the remote-tracking ref, never the
+			// local branch/ahead-behind-vs-HEAD numbers this simulation
+			// tracks — see `BrowserMockGitNetworkFixtureForTest`'s own doc
+			// comment for why this mock does not model a separate remote
+			// state to fetch new data from.
+		},
+		async gitPull() {
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			if (gitNetworkUpstream === null) {
+				throw gitNetworkNoUpstream();
+			}
+			gitNetworkBehind = 0;
+		},
+		async gitPush(force_) {
+			const request = frozenGitPushRequest(force_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			if (gitNetworkUpstream === null) {
+				throw gitNetworkNoUpstream();
+			}
+			if (request.force) {
+				if (gitNetworkFixture.forcePushRejectedForTest === true) {
+					throw gitPushRejected();
+				}
+			} else if (gitNetworkBehind > 0) {
+				throw gitPushRejected();
+			}
+			gitNetworkAhead = 0;
+		},
+		async gitNetworkCancel() {
+			// This mock resolves every network call synchronously-ish (no real
+			// long-running subprocess to interrupt), so there is never
+			// anything in flight to actually cancel — a harmless no-op,
+			// matching the real bridge method's own idempotent contract.
 		},
 	};
 }

@@ -374,6 +374,21 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async gitDiscardPaths() {
 			throw new Error("unused");
 		},
+		async gitNetworkPreview() {
+			throw new Error("unused");
+		},
+		async gitFetch() {
+			throw new Error("unused");
+		},
+		async gitPull() {
+			throw new Error("unused");
+		},
+		async gitPush() {
+			throw new Error("unused");
+		},
+		async gitNetworkCancel() {
+			throw new Error("unused");
+		},
 		...overrides,
 	};
 }

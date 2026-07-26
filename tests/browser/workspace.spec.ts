@@ -142,6 +142,38 @@ interface TestGitFixture {
 	readonly noRepositoryForTest?: boolean;
 }
 
+/** `F080` S4: seeds `git_network_preview`/`git_fetch`/`git_pull`/`git_push`
+ * responses for `PlainScmView`'s fetch/pull/push confirm-then-mutate flow —
+ * the same fields `app/platform/tauri/browser-mock.ts`'s own
+ * `BrowserMockGitNetworkFixtureForTest` models (see that interface's doc
+ * comment for why this mock never re-implements real ahead/behind or
+ * non-fast-forward semantics), reproduced here for the same reason
+ * `TestGitFixture` itself is reproduced rather than imported: this fixture
+ * drives the real `native.ts` transport directly, not `browser-mock.ts`. Adds
+ * one Playwright-only field, `delayMs`, with no `browser-mock.ts` analogue:
+ * that mock's calls all resolve same-tick (nothing to usefully delay),
+ * whereas a Browser E2E test needs a way to deterministically observe a
+ * fetch/pull/push still in flight to exercise the Cancel button and
+ * `git_network_cancel`. */
+interface TestGitNetworkFixture {
+	/** Defaults to `"origin/main"`. `null` simulates no upstream configured —
+	 * matches the real `GIT_NETWORK_NO_UPSTREAM` preview rejection for
+	 * `"pull"`/`"push"`, and the real `{ upstream: null, ahead: null, behind:
+	 * null }` outcome for `"fetch"`. */
+	readonly upstream?: string | null;
+	/** Defaults to `0`. */
+	readonly ahead?: number;
+	/** Defaults to `0`. A mock `git_push` rejects with `GIT_PUSH_REJECTED`
+	 * while this is still nonzero and `force` is `false`. */
+	readonly behind?: number;
+	/** When `true`, a mock force push (`git_push` with `force: true`) always
+	 * rejects with `GIT_PUSH_REJECTED`, regardless of `behind`. */
+	readonly forcePushRejectedForTest?: boolean;
+	/** Defaults to `0`. When nonzero, `git_fetch`/`git_pull`/`git_push` await
+	 * this many milliseconds before resolving/rejecting. */
+	readonly delayMs?: number;
+}
+
 async function installNativeIpcMock(
 	page: Page,
 	rawReadTransport: RawReadTransport,
@@ -192,6 +224,11 @@ async function installNativeIpcMock(
 	// slice's own SCM tests pass this; every other existing call site keeps
 	// the default clean-repository-on-`main` fixture.
 	gitFixtureForTest: TestGitFixture = {},
+	// `F080` S4: seeds the deterministic `git_network_preview`/`git_fetch`/
+	// `git_pull`/`git_push`/`git_network_cancel` simulation. Only this
+	// slice's own fetch/pull/push tests pass this; every other existing call
+	// site keeps the default (`"origin/main"`, 0 ahead, 0 behind, no delay).
+	gitNetworkFixtureForTest: TestGitNetworkFixture = {},
 ): Promise<void> {
 	await page.addInitScript(
 		({
@@ -209,6 +246,7 @@ async function installNativeIpcMock(
 			productIconThemeSelectionForTest,
 			terminalTrustedForTest,
 			gitFixtureForTest,
+			gitNetworkFixtureForTest,
 		}) => {
 			const calls: Array<{
 				command: string;
@@ -1475,6 +1513,33 @@ async function installNativeIpcMock(
 					message: "git checkout did not complete successfully.",
 				};
 			}
+
+			// --- F080 S4: mutable fetch/pull/push simulation -------------------
+			//
+			// Same simulation shape as `app/platform/tauri/browser-mock.ts`'s own
+			// `BrowserMockGitNetworkFixtureForTest` — reproduced here rather than
+			// imported, for the same reason the S3 stage/unstage/commit/discard
+			// simulation above is: this fixture drives the real `native.ts`
+			// transport directly, not `browser-mock.ts`.
+			let mockGitNetworkUpstream: string | null =
+				gitNetworkFixtureForTest.upstream === undefined
+					? "origin/main"
+					: gitNetworkFixtureForTest.upstream;
+			let mockGitNetworkAhead = gitNetworkFixtureForTest.ahead ?? 0;
+			let mockGitNetworkBehind = gitNetworkFixtureForTest.behind ?? 0;
+			function gitNetworkNoUpstream() {
+				return {
+					code: "GIT_NETWORK_NO_UPSTREAM",
+					message: "The current branch has no upstream configured.",
+				};
+			}
+			function gitPushRejected() {
+				return {
+					code: "GIT_PUSH_REJECTED",
+					message:
+						"The remote rejected the push (it has commits this branch does not).",
+				};
+			}
 			function findMockGitEntryIndex(path: string): number {
 				return mockGitEntries.findIndex(
 					(entry) =>
@@ -2509,6 +2574,97 @@ async function installNativeIpcMock(
 							}
 							return null;
 						}
+						case "git_network_preview": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							const previewRequest = args.request as
+								{ operation?: "fetch" | "pull" | "push" } | undefined;
+							if (mockGitNetworkUpstream === null) {
+								if (previewRequest?.operation === "fetch") {
+									return { upstream: null, ahead: null, behind: null };
+								}
+								throw gitNetworkNoUpstream();
+							}
+							return {
+								upstream: mockGitNetworkUpstream,
+								ahead: mockGitNetworkAhead,
+								behind: mockGitNetworkBehind,
+							};
+						}
+						case "git_fetch": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							if (gitNetworkFixtureForTest.delayMs) {
+								await new Promise((resolve) =>
+									setTimeout(resolve, gitNetworkFixtureForTest.delayMs),
+								);
+							}
+							// A real fetch only updates the remote-tracking ref, never
+							// the local branch/ahead-behind-vs-HEAD numbers this
+							// simulation tracks — mirrors `browser-mock.ts`'s own
+							// `gitFetch`, which is a no-op success regardless of
+							// upstream state.
+							return null;
+						}
+						case "git_pull": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							if (gitNetworkFixtureForTest.delayMs) {
+								await new Promise((resolve) =>
+									setTimeout(resolve, gitNetworkFixtureForTest.delayMs),
+								);
+							}
+							if (mockGitNetworkUpstream === null) {
+								throw gitNetworkNoUpstream();
+							}
+							mockGitNetworkBehind = 0;
+							return null;
+						}
+						case "git_push": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							if (gitNetworkFixtureForTest.delayMs) {
+								await new Promise((resolve) =>
+									setTimeout(resolve, gitNetworkFixtureForTest.delayMs),
+								);
+							}
+							const pushRequest = args.request as
+								{ force?: boolean } | undefined;
+							const force = pushRequest?.force === true;
+							if (mockGitNetworkUpstream === null) {
+								throw gitNetworkNoUpstream();
+							}
+							if (force) {
+								if (
+									gitNetworkFixtureForTest.forcePushRejectedForTest === true
+								) {
+									throw gitPushRejected();
+								}
+							} else if (mockGitNetworkBehind > 0) {
+								throw gitPushRejected();
+							}
+							mockGitNetworkAhead = 0;
+							return null;
+						}
+						case "git_network_cancel": {
+							return null;
+						}
 						default:
 							throw new Error(`Unexpected Tauri test command: ${command}`);
 					}
@@ -2530,6 +2686,7 @@ async function installNativeIpcMock(
 			productIconThemeSelectionForTest,
 			terminalTrustedForTest,
 			gitFixtureForTest,
+			gitNetworkFixtureForTest,
 		},
 	);
 }
@@ -10931,6 +11088,256 @@ test("commits the typed message via the Commit button, clears the input, and sup
 		message: "feat: amended message",
 		amend: true,
 	});
+
+	expect(pageErrors).toEqual([]);
+});
+
+// --- F080 S4: fetch/pull/push with mandatory preview+confirm --------------
+
+test("Network fetch requires confirmation naming the upstream and ahead/behind counts, performs no call when declined, and fetches when confirmed", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{},
+		{ upstream: "origin/main", ahead: 2, behind: 1 },
+	);
+	await openNativeWorkspaceExplorer(page);
+	const body = await openScmView(page);
+
+	// Decline: no bridge call at all.
+	await body.getByRole("button", { name: "Fetch", exact: true }).click();
+	const declineDialog = page.getByRole("dialog");
+	await expect(declineDialog).toBeVisible();
+	await expect(declineDialog).toContainText("Fetch from origin/main?");
+	await expect(declineDialog).toContainText(
+		"2 commit(s) ahead, 1 commit(s) behind.",
+	);
+	await declineDialog
+		.getByRole("button", { name: "Cancel", exact: true })
+		.click();
+	await expect(declineDialog).toHaveCount(0);
+	expect(await terminalCallsFor(page, "git_fetch")).toEqual([]);
+
+	// Confirm: exactly one call.
+	await body.getByRole("button", { name: "Fetch", exact: true }).click();
+	const confirmDialog = page.getByRole("dialog");
+	await expect(confirmDialog).toBeVisible();
+	await confirmDialog
+		.getByRole("button", { name: "Fetch", exact: true })
+		.click();
+	await expect(confirmDialog).toHaveCount(0);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_fetch")).length)
+		.toBe(1);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("Network push sends force: false when the Force checkbox is left unchecked", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{},
+		{ upstream: "origin/main", ahead: 1, behind: 0 },
+	);
+	await openNativeWorkspaceExplorer(page);
+	const body = await openScmView(page);
+
+	await body.getByRole("button", { name: "Push", exact: true }).click();
+	const dialog = page.getByRole("dialog");
+	await expect(dialog).toBeVisible();
+	await expect(dialog).toContainText("Push to origin/main?");
+	await dialog.getByRole("button", { name: "Push", exact: true }).click();
+	await expect(dialog).toHaveCount(0);
+
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_push")).length)
+		.toBe(1);
+	const call = (await terminalCallsFor(page, "git_push"))[0]!;
+	expect(call.args.request).toEqual({ force: false });
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("Network force push shows distinct wording naming --force-with-lease, has a distinct Force Push button, and sends force: true", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{},
+		{ upstream: "origin/main", ahead: 1, behind: 0 },
+	);
+	await openNativeWorkspaceExplorer(page);
+	const body = await openScmView(page);
+
+	await body.getByRole("checkbox", { name: "Force Push (with lease)" }).check();
+	await body.getByRole("button", { name: "Push", exact: true }).click();
+	const dialog = page.getByRole("dialog");
+	await expect(dialog).toBeVisible();
+	await expect(dialog).toContainText("Force push to origin/main?");
+	await expect(dialog).toContainText("--force-with-lease");
+	await expect(dialog).toContainText("cannot be undone");
+	// The two confirm dialogs must be distinguishable: an exact-name "Push"
+	// query must not also match the force-push dialog's "Force Push" button.
+	await expect(
+		dialog.getByRole("button", { name: "Push", exact: true }),
+	).toHaveCount(0);
+	await dialog.getByRole("button", { name: "Force Push", exact: true }).click();
+	await expect(dialog).toHaveCount(0);
+
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_push")).length)
+		.toBe(1);
+	const call = (await terminalCallsFor(page, "git_push"))[0]!;
+	expect(call.args.request).toEqual({ force: true });
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("Network pull fails closed when there is no upstream: no dialog ever appears, no bridge call is made, and a notification toast reports it", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{},
+		{ upstream: null },
+	);
+	await openNativeWorkspaceExplorer(page);
+	const body = await openScmView(page);
+
+	await body.getByRole("button", { name: "Pull", exact: true }).click();
+
+	const toasts = page.locator(".notifications-toasts .notification-toast");
+	await expect(toasts).toHaveCount(1);
+	await expect(toasts.first()).toContainText("no upstream configured");
+
+	// The fail-closed contract this proves: the confirm dialog must never
+	// have appeared, and the mutating bridge call must never have been made.
+	// Scoped to `.monaco-dialog-box` (the real `IDialogService.confirm` modal's
+	// own class) rather than a bare `page.getByRole("dialog")`: the
+	// notification toast just asserted above is *itself* a `role="dialog"`
+	// list row (`.monaco-list-row`, Monaco's list widget convention for rich
+	// list items), so an unscoped role query would find that toast and
+	// produce a false pass here.
+	await expect(page.locator(".monaco-dialog-box")).toHaveCount(0);
+	expect(await terminalCallsFor(page, "git_pull")).toEqual([]);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("Network Cancel becomes enabled during an in-flight fetch and triggers git_network_cancel", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{},
+		{ delayMs: 500 },
+	);
+	await openNativeWorkspaceExplorer(page);
+	const body = await openScmView(page);
+
+	const cancelButton = body.getByRole("button", {
+		name: "Cancel",
+		exact: true,
+	});
+	await expect(cancelButton).toBeDisabled();
+
+	await body.getByRole("button", { name: "Fetch", exact: true }).click();
+	const dialog = page.getByRole("dialog");
+	await expect(dialog).toBeVisible();
+	await dialog.getByRole("button", { name: "Fetch", exact: true }).click();
+	await expect(dialog).toHaveCount(0);
+
+	// The fetch is now in flight (the mock's `git_fetch` handler is awaiting
+	// its 500ms delay) — Cancel must be enabled for this whole window.
+	await expect(cancelButton).toBeEnabled();
+	await cancelButton.click();
+	await expect
+		.poll(
+			async () => (await terminalCallsFor(page, "git_network_cancel")).length,
+		)
+		.toBe(1);
+
+	// The mock does not actually interrupt the in-flight delayed promise (see
+	// `TestGitNetworkFixture`'s own doc comment) — only that the cancel call
+	// was made. Wait for the fetch to actually resolve on its own and confirm
+	// Cancel goes back to disabled and nothing threw along the way.
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_fetch")).length)
+		.toBe(1);
+	await expect(cancelButton).toBeDisabled();
 
 	expect(pageErrors).toEqual([]);
 });

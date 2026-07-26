@@ -692,6 +692,31 @@ export interface GitShowBlobResult {
 	readonly content: Uint8Array | null;
 }
 
+// --- Git network (F080 S4: fetch/pull/push preview + confirm) ---------------
+
+/** Which network operation a [`GitNetworkPreviewResult`] is being computed
+ * for — only `"fetch"` tolerates a missing upstream (a bare `git fetch`
+ * genuinely still works without one); `"pull"`/`"push"` reject instead. See
+ * `src-tauri/src/git/network.rs`'s own module doc comment. */
+export type GitNetworkOperation = "fetch" | "pull" | "push";
+
+/**
+ * The ahead/behind preview a confirmation dialog must show before ever
+ * calling `gitFetch`/`gitPull`/`gitPush` — acceptance criterion 5's "预览影响"
+ * half for this domain's network operations, mirroring `gitDiscardPaths`'s
+ * own confirm-before-call discipline (`app/features/scm/plain-scm-network.ts`).
+ * `upstream`/`ahead`/`behind` are all `null` together only for a `"fetch"`
+ * preview against a branch with no upstream configured — there is nothing
+ * local to compare against. Reflects the *last known* remote-tracking state
+ * (as of the last fetch), not necessarily the shared remote's true current
+ * state — see `src-tauri/src/git/network.rs`'s `preview` doc comment.
+ */
+export interface GitNetworkPreviewResult {
+	readonly upstream: string | null;
+	readonly ahead: number | null;
+	readonly behind: number | null;
+}
+
 export type Unlisten = () => void | Promise<void>;
 
 export interface PlainBridge {
@@ -986,4 +1011,50 @@ export interface PlainBridge {
 	 * rejects with `GIT_DISCARD_FAILED` and none of the paths are touched.
 	 * Same path-list validation rejections as `gitStagePaths`. */
 	gitDiscardPaths(paths: readonly string[]): Promise<void>;
+	/** `F080` S4: computes the ahead/behind preview for `operation` — never
+	 * spawns a network subprocess itself (both underlying git invocations are
+	 * pure local-ref/local-object-database reads). Same trust/repository
+	 * rejections as `gitStatus`; rejects with `GIT_NETWORK_NO_UPSTREAM` for
+	 * `operation: "pull"` or `"push"` when the current branch has no upstream
+	 * configured (`"fetch"` instead resolves to `{ upstream: null, ahead:
+	 * null, behind: null }` in that case — see `GitNetworkPreviewResult`'s own
+	 * doc comment). Callers must always call this and route its result
+	 * through a confirmation dialog before ever calling `gitFetch`/`gitPull`/
+	 * `gitPush` — see `app/features/scm/plain-scm-network.ts`. */
+	gitNetworkPreview(
+		operation: GitNetworkOperation,
+	): Promise<GitNetworkPreviewResult>;
+	/** `F080` S4: `git fetch --quiet` (no explicit remote — resolves to the
+	 * current branch's configured remote, or `origin`, exactly like a bare
+	 * `git fetch` typed at a real terminal). Rejects with `GIT_FETCH_FAILED`
+	 * on any other failure. Never called without a preceding, user-confirmed
+	 * `gitNetworkPreview("fetch")` call. */
+	gitFetch(): Promise<void>;
+	/** `F080` S4: `git pull --quiet` against the current branch's configured
+	 * upstream. Rejects with `GIT_NETWORK_NO_UPSTREAM` if none is configured,
+	 * `GIT_PULL_NEEDS_STRATEGY` if the branches have diverged and no
+	 * merge/rebase/fast-forward-only reconcile strategy is configured (this
+	 * domain never auto-configures one on the caller's behalf — ADR 0003), or
+	 * `GIT_PULL_FAILED` for any other failure. Never called without a
+	 * preceding, user-confirmed `gitNetworkPreview("pull")` call. */
+	gitPull(): Promise<void>;
+	/** `F080` S4, **network-destructive when `force` is true**: `git push
+	 * --quiet` (or, with `force: true`, `git push --quiet --force-with-lease`
+	 * — never bare `--force`, see `src-tauri/src/git/network.rs`'s own module
+	 * doc comment) against the current branch's configured upstream. Rejects
+	 * with `GIT_NETWORK_NO_UPSTREAM` if none is configured, `GIT_PUSH_REJECTED`
+	 * if the remote has commits this branch does not (a stale
+	 * `--force-with-lease` "lease" included), or `GIT_PUSH_FAILED` for any
+	 * other failure. Never called without a preceding, user-confirmed
+	 * `gitNetworkPreview("push")` call — `force: true` requires its own,
+	 * separately-worded confirmation (see
+	 * `app/features/scm/plain-scm-network.ts`'s `"forcePush"` kind). */
+	gitPush(force: boolean): Promise<void>;
+	/** `F080` S4: best-effort, idempotent request to cancel whatever
+	 * `gitFetch`/`gitPull`/`gitPush` call is currently in flight for this
+	 * window (a no-op if none is) — the user-reachable half of this domain's
+	 * cooperative network-exec cancellation (`GitExecMode::Network`'s longer
+	 * timeout means a stuck fetch/pull/push needs a real way to abort early).
+	 * Never rejects. */
+	gitNetworkCancel(): Promise<void>;
 }

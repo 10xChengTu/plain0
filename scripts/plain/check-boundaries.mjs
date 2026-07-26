@@ -13,6 +13,7 @@ import {
 	validateGitCommandRegistration,
 	validateGitDiscardConfirmationBoundary,
 	validateGitIpcBridgeBoundary,
+	validateGitNetworkConfirmationBoundary,
 	validateGitRustBoundary,
 	validateMainCapability,
 	validateSearchCommandRegistration,
@@ -748,6 +749,9 @@ for (const failure of validateGitIpcBridgeBoundary(rustSources, appSources)) {
 	fail(failure);
 }
 for (const failure of validateGitDiscardConfirmationBoundary(appSources)) {
+	fail(failure);
+}
+for (const failure of validateGitNetworkConfirmationBoundary(appSources)) {
 	fail(failure);
 }
 

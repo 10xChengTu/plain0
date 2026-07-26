@@ -38,14 +38,13 @@ use std::time::{Duration, Instant};
 use crate::error::CommandError;
 
 use super::{
-    git_cwd_invalid, git_exec_cancelled, git_exec_mode_unsupported, git_exec_output_limit_exceeded,
-    git_exec_timeout, git_exec_unavailable,
+    git_cwd_invalid, git_exec_cancelled, git_exec_output_limit_exceeded, git_exec_timeout,
+    git_exec_unavailable,
 };
 
-/// Hardening profile [`run_git`] applies. [`GitExecMode::BackgroundRead`]
-/// (`F080` S0) and [`GitExecMode::Write`] (`F080` S3) are both implemented;
-/// `Network` is enumerated but still always rejected — see the module doc on
-/// [`super`] for why.
+/// Hardening profile [`run_git`]/[`run_git_network`] applies.
+/// [`GitExecMode::BackgroundRead`] (`F080` S0), [`GitExecMode::Write`]
+/// (`F080` S3) and [`GitExecMode::Network`] (`F080` S4) are all implemented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GitExecMode {
     /// Automatic, non-user-initiated reads (status/diff/blame/log/rev-parse
@@ -59,11 +58,17 @@ pub(crate) enum GitExecMode {
     /// decision, not an oversight). See [`harden_write`] for the precise
     /// difference from [`harden_background_read`].
     Write,
-    /// Network operations (fetch/pull/push). Not implemented yet —
-    /// [`run_git`] rejects it. Constructing this variant is only meaningful
-    /// once a later `F080` slice (S4) adds the network command surface; keep
-    /// this `#[allow(dead_code)]` until that slice starts constructing it.
-    #[allow(dead_code)]
+    /// User-initiated network operations (`F080` S4: fetch/pull/push) — the
+    /// first mode that legitimately needs to authenticate against a remote.
+    /// Like [`GitExecMode::Write`], hooks/fsmonitor/locking are left at the
+    /// repository's own configuration; unlike either other mode, `SSH_AUTH_SOCK`
+    /// is passed through so `ssh-agent`-based authentication works at all.
+    /// See [`harden_network`] for the full, audited rationale — every
+    /// passthrough/override decision there is backed by an empirical test in
+    /// `tests.rs`, not asserted from memory. Always spawned through
+    /// [`run_git_network`] (never [`run_git`]/[`run_git_with_stdin`]), which
+    /// applies [`GIT_EXEC_NETWORK_TIMEOUT`] instead of the much shorter
+    /// [`GIT_EXEC_TIMEOUT`] every other mode uses.
     Network,
 }
 
@@ -93,6 +98,17 @@ const GIT_EXEC_OUTPUT_CAP_BYTES: usize = 10_000_000;
 /// Wall-clock ceiling for a single background-read invocation before it is
 /// killed and [`git_exec_timeout`] is returned.
 const GIT_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Wall-clock ceiling for a single [`GitExecMode::Network`] invocation
+/// (fetch/pull/push) — reusing [`GIT_EXEC_TIMEOUT`] (sized for a local
+/// status/diff/commit) would kill a perfectly healthy slow clone/push over a
+/// high-latency remote or a large object transfer. [`wait_with_limits`]'s
+/// cooperative cancellation check runs on the exact same poll cadence
+/// regardless of which timeout is in effect, so this longer ceiling does not
+/// weaken a user's ability to abort a stuck network operation early — the
+/// cancel flag, not this timeout, is the real "let the user give up sooner"
+/// mechanism for this mode.
+const GIT_EXEC_NETWORK_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// How often the exit/cancel/timeout poll loop in [`wait_with_limits`] wakes
 /// up — small enough that cancellation and timeout are both noticed
@@ -209,6 +225,30 @@ pub(crate) fn run_git_with_stdin(
     )
 }
 
+/// Test-only seam onto [`run_git_network`]: identical except the timeout and
+/// per-stream output cap are caller-supplied instead of the fixed
+/// [`GIT_EXEC_NETWORK_TIMEOUT`]/[`GIT_EXEC_OUTPUT_CAP_BYTES`] constants —
+/// mirrors [`run_git_with_limits_for_test`]'s exact rationale, needed so a
+/// timeout/cancellation test for this mode runs in milliseconds instead of
+/// actually waiting out a real 300-second production timeout.
+#[cfg(test)]
+pub(crate) fn run_git_network_with_limits_for_test(
+    repo_dir: &Path,
+    args: &[String],
+    cancel: &AtomicBool,
+    timeout: Duration,
+    output_cap_bytes: usize,
+) -> Result<GitExecOutput, CommandError> {
+    run_git_with_limits(
+        repo_dir,
+        args,
+        GitExecMode::Network,
+        cancel,
+        timeout,
+        output_cap_bytes,
+    )
+}
+
 /// Test-only seam onto the stdin-capable spawn path — mirrors
 /// [`run_git_with_limits_for_test`]'s exact rationale.
 #[cfg(test)]
@@ -262,6 +302,29 @@ fn run_git_with_stdin_and_limits(
     result
 }
 
+/// Runs `git` under [`GitExecMode::Network`] (`F080` S4: fetch/pull/push) —
+/// the sole entry point for that mode, exactly like [`run_git`] is the sole
+/// entry point that ever implicitly means [`GitExecMode::BackgroundRead`]/
+/// [`GitExecMode::Write`] elsewhere in this domain's write/read call sites.
+/// Applies [`GIT_EXEC_NETWORK_TIMEOUT`] instead of [`run_git`]'s
+/// [`GIT_EXEC_TIMEOUT`] — see that constant's own doc comment — but is
+/// otherwise identical in shape (same output cap, same cooperative
+/// cancellation via `cancel`).
+pub(crate) fn run_git_network(
+    repo_dir: &Path,
+    args: &[String],
+    cancel: &AtomicBool,
+) -> Result<GitExecOutput, CommandError> {
+    run_git_with_limits(
+        repo_dir,
+        args,
+        GitExecMode::Network,
+        cancel,
+        GIT_EXEC_NETWORK_TIMEOUT,
+        GIT_EXEC_OUTPUT_CAP_BYTES,
+    )
+}
+
 /// Builds (but does not spawn) the hardened `git` [`Command`] shared by every
 /// [`run_git`]/[`run_git_with_stdin`] call — the one place `Command::new`
 /// appears in this file, applying [`GitExecMode`]'s hardening profile and
@@ -291,7 +354,7 @@ fn build_git_command(
     match mode {
         GitExecMode::BackgroundRead => harden_background_read(&mut command),
         GitExecMode::Write => harden_write(&mut command),
-        GitExecMode::Network => return Err(git_exec_mode_unsupported()),
+        GitExecMode::Network => harden_network(&mut command),
     }
 
     command.args(args);
@@ -383,6 +446,106 @@ fn harden_background_read(command: &mut Command) {
 ///   [`harden_background_read`]).
 fn harden_write(command: &mut Command) {
     for name in ["PATH", "HOME"] {
+        if let Ok(value) = std::env::var(name) {
+            command.env(name, value);
+        }
+    }
+    command.env("GIT_TERMINAL_PROMPT", "0");
+    command.env("GIT_ASKPASS", GIT_ASKPASS_REJECT_PROGRAM);
+    command.env("LANG", "en_US.UTF-8");
+    command.env("LC_ALL", "en_US.UTF-8");
+}
+
+/// The exact, audited environment-variable passthrough closed set for
+/// [`GitExecMode::Network`] — locked by `scripts/plain/boundary-contracts.mjs`
+/// exactly like `terminal/shell.rs`'s `TERMINAL_ENV_PASSTHROUGH_NAMES`, so a
+/// future edit cannot silently widen it. See [`harden_network`]'s own doc
+/// comment for why each of these three (and no others) is here.
+pub(crate) const GIT_NETWORK_ENV_PASSTHROUGH_NAMES: &[&str] = &["PATH", "HOME", "SSH_AUTH_SOCK"];
+
+/// Hardening applied for [`GitExecMode::Network`] (`F080` S4: fetch/pull/
+/// push) — the first mode in this domain that legitimately needs to
+/// authenticate against a remote. Structurally closest to [`harden_write`]
+/// (hooks/fsmonitor/`GIT_OPTIONAL_LOCKS` are left alone for the same reasons
+/// documented there — a user-initiated network write should respect the
+/// repository's own `pre-push` hook and needs git's normal ref locking), with
+/// two deliberate deltas:
+///
+/// # Passthrough set: `PATH`/`HOME`/`SSH_AUTH_SOCK`, and nothing else
+///
+/// [`GIT_NETWORK_ENV_PASSTHROUGH_NAMES`] is an intentional, minimal closed
+/// set — not "whatever the ambient process happened to have":
+/// - `PATH`/`HOME`: identical reasoning to every other mode in this file
+///   (resolve the `git` binary itself; locate global gitconfig/credential
+///   stores under `HOME`).
+/// - `SSH_AUTH_SOCK`: the *only* variable an SSH client needs to reach a
+///   running `ssh-agent` over its Unix-domain socket. Verified empirically
+///   (this slice's own report) against a real `ssh-agent`: `ssh-add -l`
+///   against an agent holding a real key succeeds with `SSH_AUTH_SOCK` set
+///   and fails ("Could not open a connection to your authentication agent")
+///   the instant it is unset — exactly what `env_clear()` does to every
+///   `git fetch`/`push` over an `ssh://` remote without this passthrough.
+///   Separately confirmed against real `git` itself (not just `ssh-add`): a
+///   real `git fetch ssh://…` with `core.sshCommand` pointed at a script
+///   that records its own environment shows `SSH_AUTH_SOCK` reaching the
+///   child exactly when this passthrough set includes it.
+/// - **Deliberately *not* passed**: `SSH_AGENT_PID`. That variable exists
+///   only so `ssh-agent -s`'s own shell-eval output can later `kill` the
+///   agent it started (`ssh-agent -k`); the SSH *client* never reads it to
+///   authenticate — only the `SSH_AUTH_SOCK` socket path is consulted for
+///   that. Passing it would grow the closed set for zero capability gain, so
+///   it is left out on purpose, not by oversight.
+///
+/// # Credential helpers and SSH agent are allowed to run
+///
+/// Unlike [`harden_background_read`] (which never touches a remote at all),
+/// this mode's whole point is a user-explicit network operation — matching
+/// ADR 0003's "用户显式写/网络操作才放行 hooks/filters/credential/SSH". Concretely:
+/// this function does not touch `credential.helper` at all (so a configured
+/// macOS `osxkeychain` helper, or any other helper the repository/global git
+/// config already names, runs exactly as it would from a real terminal), and
+/// `SSH_AUTH_SOCK` above lets a configured `ssh-agent` authenticate normally.
+///
+/// # `GIT_TERMINAL_PROMPT=0` and `GIT_ASKPASS` are still both set
+///
+/// A GUI application has no controlling TTY for git to prompt on — allowing
+/// an interactive prompt here would not surface a real UI, it would simply
+/// hang the child process forever. This slice deliberately does **not**
+/// build a credential-entry UI of its own (see the module doc / this slice's
+/// report for that explicit, disclosed scope limit): a missing/incomplete
+/// credential must fail cleanly and quickly, never hang.
+///
+/// `GIT_ASKPASS` staying pinned to [`GIT_ASKPASS_REJECT_PROGRAM`] is *not*
+/// redundant with `GIT_TERMINAL_PROMPT=0`, and this was verified empirically
+/// (this slice's own report; real `git credential fill` transcripts, no
+/// network involved — `git credential fill` exercises the exact same
+/// credential-resolution subsystem `fetch`/`pull`/`push` use, without
+/// needing a real remote):
+/// 1. A fully-satisfying `credential.helper` response means askpass is never
+///    consulted at all, by either mechanism — proven against a helper that
+///    supplies both `username` and `password`: a hostile `core.askPass`
+///    configured alongside it never fires. So allowing credential helpers to
+///    run (above) does not get silently defeated by keeping `GIT_ASKPASS`
+///    pinned here.
+/// 2. The `GIT_ASKPASS` *environment variable* takes precedence over the
+///    repository's own `core.askPass` *configuration* — proven against a
+///    second credential helper that supplies only a `username` (forcing git
+///    to seek the missing `password` elsewhere): with no `GIT_ASKPASS` env
+///    var set at all, a hostile `core.askPass` genuinely fires. This is the
+///    same category of attack `exec/tests.rs`'s existing hostile
+///    `core.hooksPath`/`core.fsmonitor` fixtures already establish for other
+///    config keys — a malicious *repository* could set `core.askPass` to an
+///    exfiltration script, and `GIT_TERMINAL_PROMPT=0` alone does **not**
+///    stop it from running. Pinning `GIT_ASKPASS` to
+///    [`GIT_ASKPASS_REJECT_PROGRAM`] restores fail-closed behavior: the
+///    reject program runs instead (exits non-zero immediately, no prompt, no
+///    hang), and the hostile `core.askPass` is never invoked.
+///
+/// So the combination is not belt-and-suspenders redundancy: `GIT_ASKPASS`
+/// closes a real config-level bypass that `GIT_TERMINAL_PROMPT=0` alone does
+/// not.
+fn harden_network(command: &mut Command) {
+    for name in GIT_NETWORK_ENV_PASSTHROUGH_NAMES {
         if let Ok(value) = std::env::var(name) {
             command.env(name, value);
         }

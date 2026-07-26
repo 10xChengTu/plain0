@@ -1,6 +1,8 @@
 //! `F080` S1 git IPC read commands (`git_status`, `git_diff_files`,
-//! `git_show_blob`) and `F080` S3 git IPC write commands (`git_stage_paths`,
-//! `git_unstage_paths`, `git_stage_blob`, `git_commit`, `git_discard_paths`).
+//! `git_show_blob`), `F080` S3 git IPC write commands (`git_stage_paths`,
+//! `git_unstage_paths`, `git_stage_blob`, `git_commit`, `git_discard_paths`)
+//! and `F080` S4 git IPC network commands (`git_network_preview`,
+//! `git_fetch`, `git_pull`, `git_push`, `git_network_cancel`).
 //! Every command routes through the current window's `TrustService`/
 //! `WorkspaceService` state exactly like `terminal::commands` does, and every
 //! actual repository/spawn resolution happens inside
@@ -8,8 +10,10 @@
 //! [`super::diff::diff_files`]/[`super::diff::show_blob`]/
 //! [`super::stage::stage_paths`]/[`super::stage::unstage_paths`]/
 //! [`super::stage::stage_blob`]/[`super::commit::commit`]/
-//! [`super::discard::discard_paths`]) — this file is only the audited
-//! DTO-decode-and-single-service-route wiring, matching the exact shape
+//! [`super::discard::discard_paths`]/[`super::network::preview`]/
+//! [`super::network::fetch`]/[`super::network::pull`]/[`super::network::push`])
+//! — this file is only the audited DTO-decode-and-single-service-route
+//! wiring, matching the exact shape
 //! `scripts/plain/boundary-contracts.mjs`'s command-registration locks expect
 //! elsewhere in this codebase.
 
@@ -24,9 +28,11 @@ use super::diff;
 use super::discard;
 use super::dto::{
     GitCommitRequest, GitDiffFilesRequest, GitDiffFilesResult, GitDiscardPathsRequest,
-    GitShowBlobRequest, GitShowBlobResult, GitStageBlobRequest, GitStagePathsRequest,
-    GitStatusRequest, GitStatusResult, GitUnstagePathsRequest,
+    GitFetchRequest, GitNetworkCancelRequest, GitNetworkPreviewRequest, GitNetworkPreviewResult,
+    GitPullRequest, GitPushRequest, GitShowBlobRequest, GitShowBlobResult, GitStageBlobRequest,
+    GitStagePathsRequest, GitStatusRequest, GitStatusResult, GitUnstagePathsRequest,
 };
+use super::network::{self, GitNetworkService};
 use super::stage;
 use super::status;
 
@@ -135,4 +141,83 @@ pub(crate) async fn git_discard_paths(
 ) -> Result<(), CommandError> {
     let paths = request.into_parts()?;
     discard::discard_paths(trust.inner(), workspace.inner(), window.label(), &paths).await
+}
+
+#[tauri::command]
+pub(crate) async fn git_network_preview(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    request: GitNetworkPreviewRequest,
+) -> Result<GitNetworkPreviewResult, CommandError> {
+    let operation = request.into_parts();
+    let result =
+        network::preview(trust.inner(), workspace.inner(), window.label(), operation).await?;
+    Ok(GitNetworkPreviewResult::from(result))
+}
+
+#[tauri::command]
+pub(crate) async fn git_fetch(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    network_service: State<'_, GitNetworkService>,
+    request: GitFetchRequest,
+) -> Result<(), CommandError> {
+    request.validate();
+    network::fetch(
+        trust.inner(),
+        workspace.inner(),
+        network_service.inner(),
+        window.label(),
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn git_pull(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    network_service: State<'_, GitNetworkService>,
+    request: GitPullRequest,
+) -> Result<(), CommandError> {
+    request.validate();
+    network::pull(
+        trust.inner(),
+        workspace.inner(),
+        network_service.inner(),
+        window.label(),
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn git_push(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    network_service: State<'_, GitNetworkService>,
+    request: GitPushRequest,
+) -> Result<(), CommandError> {
+    let force = request.into_parts();
+    network::push(
+        trust.inner(),
+        workspace.inner(),
+        network_service.inner(),
+        window.label(),
+        force,
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn git_network_cancel(
+    window: WebviewWindow,
+    network_service: State<'_, GitNetworkService>,
+    request: GitNetworkCancelRequest,
+) -> Result<(), CommandError> {
+    request.validate();
+    network_service.inner().request_cancel(window.label());
+    Ok(())
 }

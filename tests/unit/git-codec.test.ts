@@ -2,12 +2,15 @@ import { describe, expect, it } from "vitest";
 
 import {
 	decodeGitDiffFilesResult,
+	decodeGitNetworkPreviewResult,
 	decodeGitShowBlobResult,
 	decodeGitStatusResult,
 	decodeGitVoid,
 	frozenGitCommitRequest,
 	frozenGitDiffFilesRequest,
 	frozenGitDiscardPathsRequest,
+	frozenGitNetworkPreviewRequest,
+	frozenGitPushRequest,
 	frozenGitShowBlobRequest,
 	frozenGitShowBlobResult,
 	frozenGitStageBlobRequest,
@@ -452,6 +455,104 @@ describe("frozenGitCommitRequest", () => {
 		).toThrowError(
 			expect.objectContaining({ code: "GIT_COMMIT_INVALID_REQUEST" }),
 		);
+	});
+});
+
+describe("frozenGitNetworkPreviewRequest", () => {
+	it("accepts each of the three audited operations", () => {
+		for (const operation of ["fetch", "pull", "push"] as const) {
+			expect(frozenGitNetworkPreviewRequest(operation)).toEqual({
+				operation,
+			});
+		}
+	});
+
+	it("rejects anything outside the closed operation set", () => {
+		const invalidRequest = { code: "GIT_NETWORK_PREVIEW_INVALID_REQUEST" };
+		for (const value of ["forcePush", "", "FETCH", 1, null, undefined]) {
+			expect(() => frozenGitNetworkPreviewRequest(value)).toThrowError(
+				expect.objectContaining(invalidRequest),
+			);
+		}
+	});
+});
+
+describe("decodeGitNetworkPreviewResult", () => {
+	it("accepts a full preview with an upstream and ahead/behind counts", () => {
+		const result = decodeGitNetworkPreviewResult({
+			upstream: "origin/main",
+			ahead: 2,
+			behind: 1,
+		});
+		expect(result).toEqual({ upstream: "origin/main", ahead: 2, behind: 1 });
+		expect(Object.isFrozen(result)).toBe(true);
+	});
+
+	it("accepts the all-null shape (fetch preview with no upstream configured)", () => {
+		const result = decodeGitNetworkPreviewResult({
+			upstream: null,
+			ahead: null,
+			behind: null,
+		});
+		expect(result).toEqual({ upstream: null, ahead: null, behind: null });
+	});
+
+	it("rejects an object missing or adding keys", () => {
+		expect(() =>
+			decodeGitNetworkPreviewResult({ upstream: null, ahead: null }),
+		).toThrowError(expect.objectContaining(contractError));
+		expect(() =>
+			decodeGitNetworkPreviewResult({
+				upstream: null,
+				ahead: null,
+				behind: null,
+				extra: 1,
+			}),
+		).toThrowError(expect.objectContaining(contractError));
+	});
+
+	it("rejects a non-string non-null upstream, or a negative/non-integer count", () => {
+		expect(() =>
+			decodeGitNetworkPreviewResult({ upstream: 1, ahead: null, behind: null }),
+		).toThrowError(expect.objectContaining(contractError));
+		expect(() =>
+			decodeGitNetworkPreviewResult({
+				upstream: "origin/main",
+				ahead: -1,
+				behind: 0,
+			}),
+		).toThrowError(expect.objectContaining(contractError));
+		expect(() =>
+			decodeGitNetworkPreviewResult({
+				upstream: "origin/main",
+				ahead: 1.5,
+				behind: 0,
+			}),
+		).toThrowError(expect.objectContaining(contractError));
+	});
+
+	it("rejects a Proxy-wrapped payload", () => {
+		const target = { upstream: "origin/main", ahead: 0, behind: 0 };
+		const proxy = new Proxy(target, {});
+		expect(() => decodeGitNetworkPreviewResult(proxy)).toThrowError(
+			expect.objectContaining(contractError),
+		);
+	});
+});
+
+describe("frozenGitPushRequest", () => {
+	it("accepts a boolean force flag", () => {
+		expect(frozenGitPushRequest(true)).toEqual({ force: true });
+		expect(frozenGitPushRequest(false)).toEqual({ force: false });
+	});
+
+	it("rejects a non-boolean force flag", () => {
+		const invalidRequest = { code: "GIT_PUSH_INVALID_REQUEST" };
+		for (const value of ["true", 1, null, undefined]) {
+			expect(() => frozenGitPushRequest(value)).toThrowError(
+				expect.objectContaining(invalidRequest),
+			);
+		}
 	});
 });
 

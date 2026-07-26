@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::CommandError;
 
 use super::diff::{DiffFileEntry, DiffStatusKind, GitBlobRev};
+use super::network::NetworkOperation;
 use super::status::{
     BranchHead, BranchInfo, BranchOid, GitStatus, RenameOrCopyKind, StatusEntry, SubmoduleState,
 };
@@ -521,6 +522,97 @@ impl GitCommitRequest {
         }
         Ok((self.message, self.amend))
     }
+}
+
+// --- git_network_preview / git_fetch / git_pull / git_push / git_network_cancel
+// (F080 S4) -------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum GitNetworkOperationWire {
+    Fetch,
+    Pull,
+    Push,
+}
+
+impl From<GitNetworkOperationWire> for NetworkOperation {
+    fn from(value: GitNetworkOperationWire) -> Self {
+        match value {
+            GitNetworkOperationWire::Fetch => Self::Fetch,
+            GitNetworkOperationWire::Pull => Self::Pull,
+            GitNetworkOperationWire::Push => Self::Push,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitNetworkPreviewRequest {
+    operation: GitNetworkOperationWire,
+}
+
+impl GitNetworkPreviewRequest {
+    pub(crate) const fn into_parts(self) -> NetworkOperation {
+        match self.operation {
+            GitNetworkOperationWire::Fetch => NetworkOperation::Fetch,
+            GitNetworkOperationWire::Pull => NetworkOperation::Pull,
+            GitNetworkOperationWire::Push => NetworkOperation::Push,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitNetworkPreviewResult {
+    upstream: Option<String>,
+    ahead: Option<u64>,
+    behind: Option<u64>,
+}
+
+impl From<super::network::NetworkPreview> for GitNetworkPreviewResult {
+    fn from(value: super::network::NetworkPreview) -> Self {
+        Self {
+            upstream: value.upstream,
+            ahead: value.ahead,
+            behind: value.behind,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitFetchRequest {}
+
+impl GitFetchRequest {
+    pub const fn validate(self) {}
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitPullRequest {}
+
+impl GitPullRequest {
+    pub const fn validate(self) {}
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitPushRequest {
+    force: bool,
+}
+
+impl GitPushRequest {
+    pub(crate) const fn into_parts(self) -> bool {
+        self.force
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitNetworkCancelRequest {}
+
+impl GitNetworkCancelRequest {
+    pub const fn validate(self) {}
 }
 
 #[cfg(test)]

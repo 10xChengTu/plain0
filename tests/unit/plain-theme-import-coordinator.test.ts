@@ -104,6 +104,11 @@ function fakeBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		gitStageBlob: notImplemented,
 		gitCommit: notImplemented,
 		gitDiscardPaths: notImplemented,
+		gitNetworkPreview: notImplemented,
+		gitFetch: notImplemented,
+		gitPull: notImplemented,
+		gitPush: notImplemented,
+		gitNetworkCancel: notImplemented,
 		...overrides,
 	};
 }

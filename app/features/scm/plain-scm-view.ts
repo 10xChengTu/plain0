@@ -26,11 +26,17 @@ import { ISCMService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/co
 import { IEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service";
 
 import type {
+	GitNetworkOperation,
+	GitNetworkPreviewResult,
 	GitStatusResult,
 	PlainBridge,
 } from "../../platform/tauri/contracts";
 import { normalizeCommandError } from "../../platform/tauri/errors";
 import { resolveDiscardConfirmation } from "./plain-scm-discard";
+import {
+	resolveNetworkConfirmation,
+	type NetworkConfirmationKind,
+} from "./plain-scm-network";
 import { PlainScmProvider, PlainScmResource } from "./plain-scm-provider";
 
 const PLAIN_GIT_PROVIDER_ID = "plain-git";
@@ -146,10 +152,23 @@ export class PlainScmView extends ViewPane {
 	#unstageAllButton: HTMLButtonElement | undefined;
 	#workingTreeList: HTMLElement | undefined;
 	#stagedList: HTMLElement | undefined;
+	#fetchButton: HTMLButtonElement | undefined;
+	#pullButton: HTMLButtonElement | undefined;
+	#pushButton: HTMLButtonElement | undefined;
+	#forcePushCheckbox: HTMLInputElement | undefined;
+	#cancelNetworkButton: HTMLButtonElement | undefined;
 	/** Set while a commit/stage/unstage/discard call is in flight, so a
 	 * second click cannot race the first — cleared (and followed by a
 	 * `refresh()`) once the call settles either way. */
 	#mutationInFlight = false;
+	/** Set only while a `fetch`/`pull`/`push` call specifically is in flight
+	 * (a subset of `#mutationInFlight`) — controls whether
+	 * `#cancelNetworkButton` is enabled. `F080` S4's own user-reachable half
+	 * of `GitExecMode::Network`'s cooperative cancellation: this mode's
+	 * timeout is much longer than any local write's, so a stuck fetch/pull/
+	 * push needs a real way to abort early (see
+	 * `PlainBridge.gitNetworkCancel`'s own doc comment). */
+	#networkMutationInFlight = false;
 
 	constructor(
 		options: IViewPaneOptions,
@@ -190,6 +209,69 @@ export class PlainScmView extends ViewPane {
 		const branch = document.createElement("div");
 		branch.className = "plain-scm-view-branch";
 		this.#branchElement = branch;
+
+		const networkRow = document.createElement("div");
+		networkRow.className = "plain-scm-view-network-row";
+
+		const fetchButton = document.createElement("button");
+		fetchButton.type = "button";
+		fetchButton.className = "plain-scm-view-network-action";
+		fetchButton.textContent = "Fetch";
+		this.#fetchButton = fetchButton;
+		this._register(
+			addDisposableListener(fetchButton, "click", () => {
+				void this.fetchFromRemote();
+			}),
+		);
+
+		const pullButton = document.createElement("button");
+		pullButton.type = "button";
+		pullButton.className = "plain-scm-view-network-action";
+		pullButton.textContent = "Pull";
+		this.#pullButton = pullButton;
+		this._register(
+			addDisposableListener(pullButton, "click", () => {
+				void this.pullFromRemote();
+			}),
+		);
+
+		const pushButton = document.createElement("button");
+		pushButton.type = "button";
+		pushButton.className = "plain-scm-view-network-action";
+		pushButton.textContent = "Push";
+		this.#pushButton = pushButton;
+		this._register(
+			addDisposableListener(pushButton, "click", () => {
+				void this.pushToRemote();
+			}),
+		);
+
+		const forcePushLabel = document.createElement("label");
+		forcePushLabel.className = "plain-scm-view-force-push-label";
+		const forcePushCheckbox = document.createElement("input");
+		forcePushCheckbox.type = "checkbox";
+		forcePushCheckbox.setAttribute("aria-label", "Force Push (with lease)");
+		this.#forcePushCheckbox = forcePushCheckbox;
+		forcePushLabel.append(forcePushCheckbox, document.createTextNode(" Force"));
+
+		const cancelNetworkButton = document.createElement("button");
+		cancelNetworkButton.type = "button";
+		cancelNetworkButton.className = "plain-scm-view-network-cancel";
+		cancelNetworkButton.textContent = "Cancel";
+		this.#cancelNetworkButton = cancelNetworkButton;
+		this._register(
+			addDisposableListener(cancelNetworkButton, "click", () => {
+				this.cancelNetworkOperation();
+			}),
+		);
+
+		networkRow.append(
+			fetchButton,
+			pullButton,
+			forcePushLabel,
+			pushButton,
+			cancelNetworkButton,
+		);
 
 		const message = document.createElement("div");
 		message.className = "plain-scm-view-message";
@@ -287,6 +369,7 @@ export class PlainScmView extends ViewPane {
 
 		container.append(
 			branch,
+			networkRow,
 			message,
 			input,
 			commitRow,
@@ -398,7 +481,12 @@ export class PlainScmView extends ViewPane {
 			this.#discardAllButton === undefined ||
 			this.#unstageAllButton === undefined ||
 			this.#workingTreeList === undefined ||
-			this.#stagedList === undefined
+			this.#stagedList === undefined ||
+			this.#fetchButton === undefined ||
+			this.#pullButton === undefined ||
+			this.#pushButton === undefined ||
+			this.#forcePushCheckbox === undefined ||
+			this.#cancelNetworkButton === undefined
 		) {
 			return;
 		}
@@ -416,6 +504,11 @@ export class PlainScmView extends ViewPane {
 			this.#stageAllButton.disabled = true;
 			this.#discardAllButton.disabled = true;
 			this.#unstageAllButton.disabled = true;
+			this.#fetchButton.disabled = true;
+			this.#pullButton.disabled = true;
+			this.#pushButton.disabled = true;
+			this.#forcePushCheckbox.disabled = true;
+			this.#cancelNetworkButton.disabled = true;
 			this.#workingTreeList.replaceChildren();
 			this.#stagedList.replaceChildren();
 			return;
@@ -431,6 +524,11 @@ export class PlainScmView extends ViewPane {
 		this.#stageAllButton.disabled = controlsDisabled;
 		this.#discardAllButton.disabled = controlsDisabled;
 		this.#unstageAllButton.disabled = controlsDisabled;
+		this.#fetchButton.disabled = controlsDisabled;
+		this.#pullButton.disabled = controlsDisabled;
+		this.#pushButton.disabled = controlsDisabled;
+		this.#forcePushCheckbox.disabled = controlsDisabled;
+		this.#cancelNetworkButton.disabled = !this.#networkMutationInFlight;
 		if (this.#repository !== undefined) {
 			this.#inputElement.value = this.#repository.input.value;
 		}
@@ -558,6 +656,105 @@ export class PlainScmView extends ViewPane {
 
 	private async discardAllWorkingTree(): Promise<void> {
 		await this.discardResources(this.#discardableWorkingTreePaths(false));
+	}
+
+	/** Runs a network `mutation` (`gitFetch`/`gitPull`/`gitPush`), tracking
+	 * `#networkMutationInFlight` (so `#cancelNetworkButton` becomes enabled)
+	 * in addition to everything `runGitMutation` already does. */
+	private async runNetworkMutation(
+		mutation: (bridge: PlainBridge) => Promise<void>,
+	): Promise<void> {
+		if (configuredBridge === undefined || this.#mutationInFlight) {
+			return;
+		}
+		this.#mutationInFlight = true;
+		this.#networkMutationInFlight = true;
+		this.renderState();
+		try {
+			await mutation(configuredBridge);
+		} catch (error) {
+			this.notificationService.error(normalizeCommandError(error).message);
+		} finally {
+			this.#mutationInFlight = false;
+			this.#networkMutationInFlight = false;
+			await this.refresh();
+		}
+	}
+
+	/** Computes the ahead/behind preview for `kind` — never calls
+	 * `gitFetch`/`gitPull`/`gitPush` itself. Returns `undefined` (reporting
+	 * the error, never falling back to executing anyway) whenever the
+	 * preview cannot be computed, satisfying acceptance criterion 5's "不得
+	 * fail-open": a caller that gets `undefined` back must not proceed. */
+	private async previewNetworkOperation(
+		kind: NetworkConfirmationKind,
+	): Promise<GitNetworkPreviewResult | undefined> {
+		if (configuredBridge === undefined) {
+			return undefined;
+		}
+		const operation: GitNetworkOperation = kind === "forcePush" ? "push" : kind;
+		try {
+			return await configuredBridge.gitNetworkPreview(operation);
+		} catch (error) {
+			this.notificationService.error(normalizeCommandError(error).message);
+			return undefined;
+		}
+	}
+
+	/** Best-effort: requests cancellation of whatever `fetch`/`pull`/`push`
+	 * call is currently in flight (a no-op if none is). Never itself resolves
+	 * the in-flight call — that call's own `await` (inside
+	 * `runNetworkMutation`) settles on its own once the cancelled subprocess
+	 * actually exits. */
+	private cancelNetworkOperation(): void {
+		void configuredBridge?.gitNetworkCancel();
+	}
+
+	private async fetchFromRemote(): Promise<void> {
+		const preview = await this.previewNetworkOperation("fetch");
+		if (preview === undefined) {
+			return;
+		}
+		const decision = await resolveNetworkConfirmation(this.dialogService, {
+			kind: "fetch",
+			preview,
+		});
+		if (decision.kind !== "confirmed") {
+			return;
+		}
+		await this.runNetworkMutation((bridge) => bridge.gitFetch());
+	}
+
+	private async pullFromRemote(): Promise<void> {
+		const preview = await this.previewNetworkOperation("pull");
+		if (preview === undefined) {
+			return;
+		}
+		const decision = await resolveNetworkConfirmation(this.dialogService, {
+			kind: "pull",
+			preview,
+		});
+		if (decision.kind !== "confirmed") {
+			return;
+		}
+		await this.runNetworkMutation((bridge) => bridge.gitPull());
+	}
+
+	private async pushToRemote(): Promise<void> {
+		const force = this.#forcePushCheckbox?.checked ?? false;
+		const kind = force ? "forcePush" : "push";
+		const preview = await this.previewNetworkOperation(kind);
+		if (preview === undefined) {
+			return;
+		}
+		const decision = await resolveNetworkConfirmation(this.dialogService, {
+			kind,
+			preview,
+		});
+		if (decision.kind !== "confirmed") {
+			return;
+		}
+		await this.runNetworkMutation((bridge) => bridge.gitPush(force));
 	}
 
 	/** Reads the live `ISCMInput` value (kept in sync with `#inputElement` by

@@ -1,6 +1,6 @@
 # 端到端桌面验收交接清单（Codex 执行）
 
-更新时间：2026-07-24
+更新时间：2026-07-26
 
 ## 分工模式
 
@@ -228,6 +228,38 @@ fixture（临时目录中创建，不提交仓库）：
 - 「高吞吐下不卡死」的量化机制证据（PTY→VT 字节级背压的真实吞吐测试、VT→前端单帧信用门、Browser 层 500 行 burst 合并为个位数帧）已在 Rust/Browser 测试层验证了背压机制本身是真实生效的；本条目验证的是这套机制在真实进程调度、真实 WKWebView 渲染管线下的端到端主观观感（应用不卡死、菜单可点、窗口可拖动），这是 mock 层无法替代的最后一环，而不是重新证明背压算法本身。
 
 完成后：将结果写入 `features.json` F070 evidence（`nativeScenarios` 追加、`platformGaps` 移除本条目对应缺口；若未执行则如实标注「已登记未执行」，不得凭本条目文字描述代替真实结果）。
+
+### E2E-008 · F080 S4 真实凭证/SSH agent/远端网络矩阵（fetch/pull/push）
+
+状态：待执行。本切片（S4）的机制层证据已全部闭合，且刻意选择了**完全不触网**的证明手法：`src-tauri/src/git/exec/tests.rs`（`network_mode_fixtures` 模块）用真实 `git` 二进制 + 真实本机 `ssh-agent`（`ssh-add -l` 在 `SSH_AUTH_SOCK` 存在/缺失两种状态下的真实差异）+ `core.sshCommand` 替身脚本证明 `SSH_AUTH_SOCK` 确实透传到子进程环境；用真实 `git credential fill`（无网络的本地凭据子系统调用）证明 `GIT_ASKPASS` 拒绝程序确实优先于仓库自身 `core.askPass` 配置生效、且一个完整满足的 `credential.helper` 响应能让 askpass 全程不被咨询；用真实 `pre-push` hook + 本地 `git init --bare` 充当"远端"证明网络模式放行仓库自身 hooks。`src-tauri/src/git/network/tests.rs` 用同样的本地 bare 仓库手法覆盖 fetch/pull/push 的 porcelain 正确性（ahead/behind 预览、fast-forward、divergence 拒绝、`--force-with-lease` 的合法/过期两种结果）与 `GitNetworkService::request_cancel` 的取消标志本身。Browser E2E 覆盖了预览+确认 UI 全链路（fetch/pull/push 三种确认文案、force push 的独立措辞与按钮、无 upstream 时 pull/push 预览 fail-closed、从不弹窗也从不调用桥接方法、Cancel 按钮在真实进行中的调用期间可点击并触发 `gitNetworkCancel`）。本条目补的是这些机制层证据无法触达的维度：**真实凭据存储**（macOS Keychain/`git-credential-osxkeychain`）、**真实 ssh-agent 对真实远端的完整握手**、**真实网络远端**上的 fetch/pull/push、以及认证失败/凭据缺失时的真实用户可见文案——这些都需要真实桌面 + 真实（或至少真实协议层的）远端，Rust 单元测试和 Browser mock 都无法替代。
+
+fixture（临时目录/临时远端中创建，不提交仓库；具体凭据由执行人自备，不得写入仓库或本清单）：
+
+- 一个真实可写的远程 Git 仓库，通过 **HTTPS**（例如执行人自己名下的一个临时 GitHub/GitLab 仓库）访问，且执行机的 macOS Keychain 中已有一条对应的 `git-credential-osxkeychain` 凭据（可提前用真实终端跑一次 `git push` 触发系统凭据存储弹窗并保存，来预置这条 Keychain 记录）。
+- 同一个远程仓库的 **SSH** 形式远端（`git@host:owner/repo.git`），且执行机已有一个加载进真实 `ssh-agent`（`ssh-add -l` 能看到）的部署密钥或个人密钥，对该仓库有推送权限。
+- 一个本地 clone，以及至少一次「从另一个 clone 抢先推送」的操作，用于制造真实的 divergence（force-with-lease 的过期 lease 场景）。
+- 一个刻意**没有**保存凭据、没有加载 SSH key 的干净测试账号或临时 keychain 项（用于步骤 4 的失败路径）——若难以构造，可改用一个执行人明确无权限的公开仓库（如某个随机开源仓库）充当"权限拒绝"替身，两者都能验证「认证/授权失败必须干净报错，不得挂起」这条核心断言，择一即可，如实记录用了哪一种。
+
+步骤与断言：
+
+1. **HTTPS + Keychain 凭据真实 fetch/pull**：Open Folder 打开上述 HTTPS 远端的本地 clone → 打开 Source Control → 点击 Fetch → 断言预览对话框显示真实的 upstream 名称与 ahead/behind 数字（可用一个平行的真实终端 `git rev-list --left-right --count '@{upstream}...HEAD'` 交叉核对数字完全一致）→ 确认 → 断言真实网络请求发生（可用 `git -C <repo> log -1 origin/<branch>` 之类核对远程追踪分支确有更新，或用系统网络监控粗略确认有出站流量）、UI 无异常挂起、无我们自建的密码输入框弹出（S4 明确不做凭据 UI，应完全依赖系统 Keychain 静默完成）。Pull 同理：确认后断言本地分支被真实快进/合并。
+2. **macOS Keychain 首次访问授权对话框的真实交互**（若触发）：若该 Keychain 凭据此前从未被这个具体的 Plain.app 二进制访问过，macOS 可能弹出系统级"是否允许 Plain 访问钥匙串项目"的原生授权对话框——断言这个系统对话框确实需要一次人工点击"始终允许"/"允许"才能继续（而不是我们应用自己的 UI），记录这次交互对整体流程耗时与 UX 的真实影响；确认后续同一会话内的操作不再重复弹出。如实记录该对话框是否出现、出现时机与外观，这是本条目要摸清的一个未知维度，而不是预设结论。
+3. **SSH + ssh-agent 真实 fetch/push**：把 remote 切到 SSH 形式（或用第二个 clone），重复步骤 1 的 Fetch/Pull 流程，并额外做一次真实 **Push**（先在本地提交一个可安全撤销的小改动，如追加一行注释到某个非核心文件，推送后再撤销/删除该提交并强制同步回原状，不得污染真实仓库历史）→ 断言 push 预览显示正确的 ahead 数、确认后 push 真实成功、远端可通过网页或另一次 `git ls-remote` 观察到新 commit。核对整个过程中从未有终端风格的 passphrase 提示卡在后台（GUI 应用没有 tty，S4 的硬化专门防止这个）。
+4. **认证/授权失败的真实文案，且不得挂起**：用 fixture 中准备好的"无凭据"或"无权限"远端仓库，点击 Fetch 或 Push → 断言应用在合理时间内（不应等到 `GIT_EXEC_NETWORK_TIMEOUT` 的 300 秒上限，真实的认证失败通常几秒内返回）展示一条清晰的错误通知（而不是无响应或原始不可读的 git stderr 堆栈），UI 恢复可交互、可以立即重试或切换到其他视图。这一步是本条目最核心的断言——S4 明确没有做自己的凭据输入 UI，必须验证「干净失败」这个替代承诺在真实系统上真的成立，而不是想象中的行为。
+5. **真实 divergence 下 force-with-lease 的合法与过期两种结果**：用两个 clone 制造真实 divergence（clone A 先推送一个新 commit，clone B 在未 fetch 的情况下 `--amend` 自己的最新 commit）→ 在 clone B 里先尝试普通 Push → 断言被拒绝（`GIT_PUSH_REJECTED` 对应的错误通知，提示已有真实历史差异）→ 勾选 Force 复选框（UI 文案含 "cannot be undone"/"--force-with-lease"、按钮为独立的 "Force Push"）→ 确认 → 因为 clone B 自己的 lease（它上次看到的远程状态）其实早已过期（clone A 已经先推送过），断言这次 force push **仍然被拒绝**（真实 `--force-with-lease` 的过期 lease 语义，不是网络层失败）。之后在 clone B 里先 Fetch 一次更新 lease，再重复 force push，断言这次真实成功、远端历史真的被改写为 clone B 的版本。核对全程从未退化为裸 `--force`（该选项在本应用中根本不存在，不需要专门断言"没有裸 force 选项"——UI 上确实找不到）。
+6. **Cancel 一个真实卡住的 fetch**：找一种真实、可控地制造"慢" fetch 的方式（例如对一个体积明显较大的真实仓库做首次 fetch、或临时降低本机网络带宽/开代理限速——具体手法由执行人视现场条件选择，如实记录采用的方法）→ 点击 Fetch 并确认 → 在其明显仍在进行中时点击 Cancel 按钮 → 断言：(a) 该次 fetch 调用最终以取消/失败告终而不是继续挂起等到完成或 300 秒超时；(b) 用 shell 层核对对应的 `git` 子进程确已被终止（不是仅仅前端不再等待，底层进程仍在跑）；(c) UI 恢复到可交互状态、可以立即发起新的操作。这是 S4 的"用户必须能中止一个卡住的 fetch"要求在真实操作系统进程调度下的最终证据，机制本身（取消标志 + `wait_with_limits` 轮询）已由 Rust 单元测试证明，本步骤证明的是它在真实慢速网络场景下确实达成预期效果。
+7. 每步 UI 断言后尽量用一个平行的真实终端（`git log`/`git rev-parse`/`git ls-remote`/`ps`）交叉核对，而不仅凭 UI 呈现下结论。
+8. 清理：退出应用；撤销/清理步骤 3、5 中对真实远端仓库做的任何试验性 commit（不得在共享或生产仓库历史中留下测试痕迹，优先使用执行人自己专门为此创建的临时仓库）；删除本地 clone fixture、截图、`src-tauri/target`；若为测试目的临时调低过网络带宽或加过代理限速，执行完后必须恢复。
+
+已知边界（执行方须知）：
+
+- S4 明确没有实现自己的凭据输入 UI——步骤 1/2/4 验证的正是「完全依赖系统凭据存储 + 干净失败」这一有意收窄的承诺是否在真实系统上成立，而不是缺陷。
+- `GIT_NETWORK_ENV_PASSTHROUGH_NAMES` 只透传 `PATH`/`HOME`/`SSH_AUTH_SOCK`，不透传 `SSH_AGENT_PID`——真实 ssh-agent 场景下这不应造成任何功能性影响（SSH 客户端认证只需要 `SSH_AUTH_SOCK`），若步骤 3 观察到与此不符的现象需如实记录为新发现，不得预设"不可能有问题"。
+- fetch/pull/push 目前只针对当前分支的已配置 upstream（`@{upstream}`），没有"选择任意远端/分支"或"设置 upstream"的 UI——若执行人期望这类操作，应确认这是已记录的范围收窄而非缺陷（见 `src-tauri/src/git/network.rs` 模块文档）。
+- 预览的 ahead/behind 数字反映的是"上次已知的远程追踪分支状态"，不是实时的远端真实状态（除非刚做过 fetch）——步骤 5 的过期 lease 场景正是这一点的直接体现，属预期设计，不是 bug。
+- 本条目不重复验证 hooks/fsmonitor/credential/SSH 硬化本身是否生效（那是 S0-S4 的 Rust hostile-fixture 测试职责，已完整覆盖且经真实 `git 2.50.1` 二进制验证）；本条目验证的是这些机制在真实凭据存储、真实网络远端、真实操作系统调度下的端到端可用性与用户可见效果。
+
+完成后：将结果写入 `features.json` F080 evidence（`nativeScenarios` 追加、`platformGaps` 移除本条目对应缺口；若未执行则如实标注「已登记未执行」，不得凭本条目文字描述代替真实结果）。
 
 ## 后续条目（随切片追加）
 

@@ -16,6 +16,23 @@ function cloneDocument() {
 	return structuredClone(featureDocument);
 }
 
+/** Index of the single `in_progress` feature, and of the first `planned` one
+ * after it. Derived rather than hard-coded: every WIP advance used to require
+ * hand-bumping the literal indices in the WIP/blocked cases below, and
+ * forgetting to do so failed this file in a way that looks like a real
+ * contract regression but is only a stale fixture (it happened again when
+ * `F080` closed and `F090` opened). Deriving them keeps each assertion
+ * exactly as strong while making it survive the next advance. */
+const ACTIVE_INDEX = featureDocument.features.findIndex(
+	(feature) => feature.status === "in_progress",
+);
+const NEXT_PLANNED_INDEX = featureDocument.features.findIndex(
+	(feature, index) => index > ACTIVE_INDEX && feature.status === "planned",
+);
+/** The exact `progress.md` WIP line the contract requires for the currently
+ * active feature, rebuilt from `features.json` for the same reason. */
+const WIP_LINE = `- WIP：\`${featureDocument.features[ACTIVE_INDEX].id}\` ${featureDocument.features[ACTIVE_INDEX].name}。`;
+
 function failuresAfter(mutate, progress = progressDocument) {
 	const document = cloneDocument();
 	mutate(document);
@@ -162,38 +179,39 @@ describe("feature completion contract", () => {
 			document.currentPhase = 2;
 		});
 		expectRejected((document) => {
-			document.features[9].status = "in_progress";
+			document.features[NEXT_PLANNED_INDEX].status = "in_progress";
 		});
 		expectRejected(
 			(document) => {
 				document.features[0].status = "planned";
 				delete document.features[0].evidence;
-				document.features[8].status = "planned";
+				document.features[ACTIVE_INDEX].status = "planned";
 				document.currentPhase = 0;
 			},
 			progressDocument.replace(
-				"- WIP：`F080` Core Git workflow。",
+				`- WIP：\`${featureDocument.features[ACTIVE_INDEX].id}\` ${featureDocument.features[ACTIVE_INDEX].name}。`,
 				"- WIP：无。",
 			),
 		);
 
 		const blocked = cloneDocument();
-		blocked.features[8].status = "blocked";
-		blocked.features[8].blocker = "Waiting for an explicit external decision.";
+		blocked.features[ACTIVE_INDEX].status = "blocked";
+		blocked.features[ACTIVE_INDEX].blocker =
+			"Waiting for an explicit external decision.";
 		const blockedProgress = progressDocument;
 		expect(validateFeatureContract(blocked, blockedProgress)).toMatchObject({
 			failures: [],
 			activeCount: 1,
 		});
-		blocked.features[8].blocker = " ";
+		blocked.features[ACTIVE_INDEX].blocker = " ";
 		expect(
 			validateFeatureContract(blocked, blockedProgress).failures.length,
 		).toBeGreaterThan(0);
 
 		const betweenItems = cloneDocument();
-		betweenItems.features[8].status = "planned";
+		betweenItems.features[ACTIVE_INDEX].status = "planned";
 		const betweenItemsProgress = progressDocument.replace(
-			"- WIP：`F080` Core Git workflow。",
+			WIP_LINE,
 			"- WIP：无。",
 		);
 		expect(
@@ -201,16 +219,13 @@ describe("feature completion contract", () => {
 		).toMatchObject({ failures: [], activeCount: 0 });
 
 		for (const progress of [
-			progressDocument.replace("`F080`", "`F070`"),
 			progressDocument.replace(
-				"- WIP：`F080` Core Git workflow。",
-				"- WIP：无。",
+				`\`${featureDocument.features[ACTIVE_INDEX].id}\``,
+				`\`${featureDocument.features[ACTIVE_INDEX - 1].id}\``,
 			),
+			progressDocument.replace(WIP_LINE, "- WIP：无。"),
 			progressDocument.replace("- WIP：", "- WIP:"),
-			progressDocument.replace(
-				"- WIP：`F080` Core Git workflow。",
-				"- WIP：`F080` Core Git workflow。\n- WIP：`F080` Core Git workflow。",
-			),
+			progressDocument.replace(WIP_LINE, `${WIP_LINE}\n${WIP_LINE}`),
 			progressDocument.replace("## 当前状态", "## 当前状态\n\n## 当前状态"),
 		]) {
 			expect(

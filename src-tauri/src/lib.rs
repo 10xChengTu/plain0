@@ -12,6 +12,7 @@ pub mod workspace;
 
 use backup::service::BackupService;
 use error::CommandError;
+use git::network::GitNetworkService;
 use terminal::service::TerminalService;
 use theme::service::ThemeService;
 use trust::service::TrustService;
@@ -48,6 +49,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(WorkspaceService::new())
         .manage(TerminalService::new())
+        .manage(GitNetworkService::new())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let base_path = app.path().app_local_data_dir()?;
@@ -95,6 +97,11 @@ pub fn run() {
             git::commands::git_stage_blob,
             git::commands::git_commit,
             git::commands::git_discard_paths,
+            git::commands::git_network_preview,
+            git::commands::git_fetch,
+            git::commands::git_pull,
+            git::commands::git_push,
+            git::commands::git_network_cancel,
             search::commands::workspace_search_files,
             search::commands::workspace_search_text_start,
             search::commands::workspace_search_text_poll,

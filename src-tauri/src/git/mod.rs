@@ -1,14 +1,14 @@
-//! Rust Git domain (`F080` S0+S1 of `docs/research/2026-07-25-core-git.md`,
-//! itself building on ADR `docs/decisions/0003-native-git-and-generic-dap.md`).
+//! Rust Git domain (`F080` of `docs/research/2026-07-25-core-git.md`, itself
+//! building on ADR `docs/decisions/0003-native-git-and-generic-dap.md`).
 //! S0 built the hardened spawn primitive ([`exec::run_git`]) and repository
 //! discovery ([`discovery::discover_repository`]), both pure Rust exercised
-//! only by `#[cfg(test)]`. S1 adds the porcelain-v2/diff parsers
+//! only by `#[cfg(test)]`. S1 added the porcelain-v2/diff parsers
 //! ([`status`]/[`diff`]), the repository-resolution helper shared by every
-//! command ([`repo::resolve_repo_toplevel`], the wiring
-//! `discover_repository`'s own doc comment predicted), the wire DTOs
-//! ([`dto`]) and the three Tauri commands this domain now registers
-//! ([`commands::git_status`]/[`commands::git_diff_files`]/
-//! [`commands::git_show_blob`]).
+//! command ([`repo::resolve_repo_toplevel`]) and the wire DTOs ([`dto`]). S3
+//! activated [`exec::GitExecMode::Write`] for [`stage`]/[`commit`]/
+//! [`discard`]. S4 activates [`exec::GitExecMode::Network`] for [`network`]
+//! (fetch/pull/push, each gated by a mandatory ahead/behind preview + confirm
+//! step — see [`network`]'s own module doc comment).
 //!
 //! # Subprocess spawning is `exec::run_git`-only
 //!
@@ -39,18 +39,19 @@
 //! discovery escalate to actually spawning `git rev-parse --show-toplevel`
 //! to confirm the filesystem marker.
 //!
-//! # Write mode is active; network mode is still deliberately unimplemented
+//! # All three exec modes are now active
 //!
 //! [`exec::GitExecMode`] enumerates `BackgroundRead`, `Write` and `Network`
 //! (decision 3's full command set — status/diff/hunk stage/commit/discard/
-//! fetch/pull/push — needs all three). `F080` S0 implemented only
-//! `BackgroundRead`; `F080` S3 (this slice) activates `Write` for
-//! [`stage`]/[`commit`]/[`discard`] — see `exec::harden_write`'s own doc
-//! comment for exactly how it differs from `harden_background_read`.
-//! `exec::run_git` still fails closed with [`git_exec_mode_unsupported`] for
-//! `Network`: allowing credential-helper/SSH passthrough for fetch/pull/push
-//! is explicitly `F080` S4's job, never something this slice silently
-//! permits.
+//! fetch/pull/push — needs all three, and all three are now implemented).
+//! `BackgroundRead` (`F080` S0) suppresses hooks/fsmonitor/external diff/
+//! textconv/credential prompts entirely. `Write` (`F080` S3, [`stage`]/
+//! [`commit`]/[`discard`]) and `Network` (`F080` S4, [`network`]) both
+//! respect the repository's own hooks/fsmonitor configuration (a
+//! user-initiated action, per ADR 0003) but differ in credential/SSH
+//! handling — see `exec::harden_write`/`exec::harden_network`'s own doc
+//! comments for the precise deltas from `harden_background_read` and from
+//! each other.
 
 use crate::error::CommandError;
 
@@ -61,6 +62,7 @@ pub(crate) mod discard;
 pub(crate) mod discovery;
 pub mod dto;
 pub(crate) mod exec;
+pub(crate) mod network;
 pub(crate) mod repo;
 pub(crate) mod stage;
 pub(crate) mod status;
@@ -116,18 +118,11 @@ pub(crate) fn git_no_repository() -> CommandError {
     )
 }
 
-pub(crate) fn git_exec_mode_unsupported() -> CommandError {
-    CommandError::new(
-        "GIT_EXEC_MODE_UNSUPPORTED",
-        "This git execution mode is not implemented yet.",
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        git_cwd_invalid, git_exec_cancelled, git_exec_mode_unsupported,
-        git_exec_output_limit_exceeded, git_exec_timeout, git_exec_unavailable, git_no_repository,
+        git_cwd_invalid, git_exec_cancelled, git_exec_output_limit_exceeded, git_exec_timeout,
+        git_exec_unavailable, git_no_repository,
     };
 
     #[test]
@@ -139,10 +134,6 @@ mod tests {
         assert_eq!(
             git_exec_output_limit_exceeded().code(),
             "GIT_EXEC_OUTPUT_LIMIT_EXCEEDED"
-        );
-        assert_eq!(
-            git_exec_mode_unsupported().code(),
-            "GIT_EXEC_MODE_UNSUPPORTED"
         );
         assert_eq!(git_no_repository().code(), "GIT_NO_REPOSITORY");
     }

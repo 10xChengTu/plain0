@@ -85,12 +85,15 @@ import {
 } from "./terminal-codec";
 import {
 	decodeGitDiffFilesResult,
+	decodeGitNetworkPreviewResult,
 	decodeGitShowBlobResult,
 	decodeGitStatusResult,
 	decodeGitVoid,
 	frozenGitCommitRequest,
 	frozenGitDiffFilesRequest,
 	frozenGitDiscardPathsRequest,
+	frozenGitNetworkPreviewRequest,
+	frozenGitPushRequest,
 	frozenGitShowBlobRequest,
 	frozenGitStageBlobRequest,
 	frozenGitStagePathsRequest,
@@ -538,6 +541,27 @@ export function createNativeBridge(): PlainBridge {
 		gitDiscardPaths: async (paths) => {
 			const request = frozenGitDiscardPathsRequest(paths);
 			decodeGitVoid(await invoke<unknown>("git_discard_paths", { request }));
+		},
+		gitNetworkPreview: async (operation) => {
+			const request = frozenGitNetworkPreviewRequest(operation);
+			return decodeGitNetworkPreviewResult(
+				await invoke<unknown>("git_network_preview", { request }),
+			);
+		},
+		gitFetch: async () => {
+			decodeGitVoid(await invoke<unknown>("git_fetch", { request: {} }));
+		},
+		gitPull: async () => {
+			decodeGitVoid(await invoke<unknown>("git_pull", { request: {} }));
+		},
+		gitPush: async (force) => {
+			const request = frozenGitPushRequest(force);
+			decodeGitVoid(await invoke<unknown>("git_push", { request }));
+		},
+		gitNetworkCancel: async () => {
+			decodeGitVoid(
+				await invoke<unknown>("git_network_cancel", { request: {} }),
+			);
 		},
 	};
 }

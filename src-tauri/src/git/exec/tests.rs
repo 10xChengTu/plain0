@@ -40,8 +40,8 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 use super::{
-    run_git, run_git_with_limits_for_test, run_git_with_stdin,
-    run_git_with_stdin_and_limits_for_test, GitExecMode,
+    run_git, run_git_network_with_limits_for_test, run_git_with_limits_for_test,
+    run_git_with_stdin, run_git_with_stdin_and_limits_for_test, GitExecMode,
 };
 
 /// Whether a `git` binary is reachable on `PATH` at all — every test in
@@ -228,21 +228,298 @@ fn raw_git_hash_object_stdin(dir: &Path, payload: &[u8]) -> String {
 }
 
 #[test]
-fn network_mode_is_rejected_without_spawning() {
+fn network_mode_executes_a_simple_command_successfully() {
     if !git_available() {
         eprintln!("skipping: git not found on PATH");
         return;
     }
+    // `F080` S4 activates `GitExecMode::Network` (S0 through S3 only ever
+    // rejected it with `GIT_EXEC_MODE_UNSUPPORTED`) — this is the
+    // network-mode analogue of `write_mode_executes_a_simple_command_successfully`.
+    // A plain local `rev-parse` never touches a remote, so this only proves
+    // the hardening profile itself does not break an ordinary invocation —
+    // the network-specific hardening (SSH/credential/hook behavior, longer
+    // timeout) is covered by the dedicated tests below.
     let repo = init_repo();
     let cancel = AtomicBool::new(false);
-    let error = run_git(
+    let output = run_git(
         repo.path(),
-        &["status".to_owned()],
+        &["rev-parse".to_owned(), "--show-toplevel".to_owned()],
         GitExecMode::Network,
         &cancel,
     )
-    .expect_err("Network mode is not implemented in F080 S0");
-    assert_eq!(error.code(), "GIT_EXEC_MODE_UNSUPPORTED");
+    .expect("Network mode executes a simple command successfully");
+    assert_eq!(output.exit_code, 0);
+}
+
+/// Guards every test below that mutates process-wide environment variables
+/// (`std::env::set_var`/`remove_var` affect the whole process, and `cargo
+/// test` runs tests on multiple threads within one process): serializes them
+/// against each other so none can observe another's in-flight mutation. No
+/// other test in this codebase reads or writes `SSH_AUTH_SOCK` or the
+/// synthetic key used below, so this mutex only ever needs to coordinate
+/// with itself.
+static NETWORK_ENV_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Runs `body` with every `(name, value)` pair in `overrides` applied to the
+/// process environment (`Some(value)` sets it, `None` removes it), restoring
+/// each name's exact prior state (present-with-value, or absent) once `body`
+/// returns — including when `body` panics, via the lock's own poison
+/// recovery on the *next* call, not a `Drop` guard (kept intentionally
+/// simple: every caller below is a single straight-line test body, none
+/// early-returns before reaching the restore step).
+fn with_env_vars<R>(overrides: &[(&str, Option<&str>)], body: impl FnOnce() -> R) -> R {
+    let _guard = NETWORK_ENV_MUTATION_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let previous: Vec<(String, Option<String>)> = overrides
+        .iter()
+        .map(|(name, _)| ((*name).to_owned(), std::env::var(name).ok()))
+        .collect();
+    for (name, value) in overrides {
+        match value {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+    }
+    let result = body();
+    for (name, value) in previous {
+        match value {
+            Some(value) => std::env::set_var(&name, value),
+            None => std::env::remove_var(&name),
+        }
+    }
+    result
+}
+
+/// Direct introspection of [`super::build_git_command`]'s constructed
+/// [`std::process::Command`] (no subprocess spawn needed) — proves
+/// [`GitExecMode::Network`]'s environment passthrough is *exactly*
+/// [`super::GIT_NETWORK_ENV_PASSTHROUGH_NAMES`]'s three names plus the fixed
+/// `GIT_TERMINAL_PROMPT`/`GIT_ASKPASS`/`LANG`/`LC_ALL` overrides — neither a
+/// synthetic ambient variable outside that list, nor `SSH_AGENT_PID` (the
+/// name [`super::harden_network`]'s own doc comment explains is deliberately
+/// excluded), ever reaches the child. The real end-to-end proof that
+/// `SSH_AUTH_SOCK` specifically reaches a genuine spawned `git` subprocess —
+/// this test only proves the `Command` is *built* correctly — is
+/// `network_mode_fixtures::ssh_auth_sock_reaches_a_real_git_subprocess_via_core_ssh_command`
+/// below.
+#[test]
+fn network_mode_env_passthrough_is_exactly_the_closed_set() {
+    with_env_vars(
+        &[
+            ("SSH_AUTH_SOCK", Some("/tmp/plain-test-fake-agent.sock")),
+            ("SSH_AGENT_PID", Some("424242")),
+            ("PLAIN_TEST_NETWORK_ENV_LEAK_CHECK", Some("should-not-leak")),
+        ],
+        || {
+            let repo = TempDir::new().expect("tempdir");
+            let command = super::build_git_command(
+                repo.path(),
+                &["status".to_owned()],
+                GitExecMode::Network,
+                false,
+            )
+            .expect("build_git_command succeeds for Network mode");
+            let envs: std::collections::HashMap<String, Option<String>> = command
+                .get_envs()
+                .map(|(key, value)| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.map(|value| value.to_string_lossy().into_owned()),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                envs.get("SSH_AUTH_SOCK").and_then(|value| value.as_deref()),
+                Some("/tmp/plain-test-fake-agent.sock"),
+                "Network mode must pass SSH_AUTH_SOCK through when present"
+            );
+            assert!(
+                !envs.contains_key("SSH_AGENT_PID"),
+                "Network mode must not pass through SSH_AGENT_PID — the SSH client itself \
+                 never reads it, only ssh-agent's own shell-eval output does (see \
+                 harden_network's own doc comment)"
+            );
+            assert!(
+                !envs.contains_key("PLAIN_TEST_NETWORK_ENV_LEAK_CHECK"),
+                "Network mode must not pass through a variable outside its audited closed set"
+            );
+            assert_eq!(
+                envs.get("GIT_TERMINAL_PROMPT").and_then(|v| v.as_deref()),
+                Some("0")
+            );
+            assert!(envs.contains_key("GIT_ASKPASS"));
+            assert_eq!(
+                envs.get("LANG").and_then(|v| v.as_deref()),
+                Some("en_US.UTF-8")
+            );
+            assert_eq!(
+                envs.get("LC_ALL").and_then(|v| v.as_deref()),
+                Some("en_US.UTF-8")
+            );
+        },
+    );
+}
+
+/// Locale regression evidence for acceptance criterion 2 ("Git output
+/// parsing is independent of locale"), applying to all three exec modes —
+/// not only `Network`, since the fixed `LANG`/`LC_ALL` override is common
+/// code shared by [`harden_background_read`]/[`harden_write`]/
+/// [`harden_network`].
+///
+/// **Why this test exists instead of asserting on real localized `git`
+/// output**: this workspace's own `git` binary (`/usr/bin/git`, Apple Git
+/// 2.50.1) is a real, verified negative — `git version --build-options`
+/// lists no `gettext` feature, and forcing `LANG=fr_FR.UTF-8`/
+/// `LC_ALL=fr_FR.UTF-8` on a real invocation produces byte-identical English
+/// output (confirmed by hand while writing this test: `git status
+/// --porcelain=v2` and `git help` are both unaffected). So this binary
+/// cannot produce a genuinely localized message to parse either correctly or
+/// incorrectly — a test that ran a real command and merely asserted the
+/// output was still English would be vacuous here, not evidence.
+///
+/// What *is* real and testable on any machine, regardless of whether the
+/// local `git` binary has i18n compiled in: this module's own
+/// `LANG`/`LC_ALL` handling is an **unconditional override**, not a
+/// conditional passthrough like `PATH`/`HOME`/`SSH_AUTH_SOCK` (which only
+/// forward an ambient value when present, see
+/// `network_mode_env_passthrough_is_exactly_the_closed_set` above). This
+/// test proves exactly that distinction: it sets a hostile, non-English
+/// ambient `LANG`/`LC_ALL` in the *test process itself* (mimicking a real
+/// end user's own machine locale, e.g. `fr_FR.UTF-8`/`de_DE.UTF-8`), then
+/// confirms every one of the three `GitExecMode`s still builds a command
+/// with exactly `LANG=en_US.UTF-8`/`LC_ALL=en_US.UTF-8` — proving the
+/// override is not merely coincidentally correct on this developer's own
+/// already-English-locale machine, but genuinely independent of whatever
+/// locale the end user's real OS is configured with (a Linux distro's git,
+/// which very commonly *does* ship gettext, would otherwise localize
+/// `git`'s stderr — exactly what `network::pull`/`network::push`'s stderr
+/// substring matching, e.g. `git_pull_needs_strategy`/`git_push_rejected`,
+/// depends on never happening).
+#[test]
+fn every_exec_mode_forces_english_locale_regardless_of_a_hostile_ambient_locale() {
+    with_env_vars(
+        &[
+            ("LANG", Some("fr_FR.UTF-8")),
+            ("LC_ALL", Some("de_DE.UTF-8")),
+        ],
+        || {
+            let repo = TempDir::new().expect("tempdir");
+            for mode in [
+                GitExecMode::BackgroundRead,
+                GitExecMode::Write,
+                GitExecMode::Network,
+            ] {
+                let command =
+                    super::build_git_command(repo.path(), &["status".to_owned()], mode, false)
+                        .expect("build_git_command succeeds");
+                let envs: std::collections::HashMap<String, Option<String>> = command
+                    .get_envs()
+                    .map(|(key, value)| {
+                        (
+                            key.to_string_lossy().into_owned(),
+                            value.map(|value| value.to_string_lossy().into_owned()),
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    envs.get("LANG").and_then(|value| value.as_deref()),
+                    Some("en_US.UTF-8"),
+                    "{mode:?} must force LANG=en_US.UTF-8 regardless of a hostile ambient LANG"
+                );
+                assert_eq!(
+                    envs.get("LC_ALL").and_then(|value| value.as_deref()),
+                    Some("en_US.UTF-8"),
+                    "{mode:?} must force LC_ALL=en_US.UTF-8 regardless of a hostile ambient LC_ALL"
+                );
+            }
+        },
+    );
+}
+
+/// Real-subprocess complement to the introspection-only test above: proves
+/// the forced `LANG`/`LC_ALL` actually reach a genuine spawned `git` child
+/// (not just the `Command` value this module builds in memory), reusing
+/// `hostile_fixtures`'s own `core.hooksPath` hook technique — a
+/// `post-index-change` hook script that echoes its own `$LANG`/`$LC_ALL`
+/// into a marker file, invoked by a real `git status` under
+/// [`GitExecMode::Write`] (hooks only fire under `Write`/`Network`, not
+/// `BackgroundRead` — see `harden_write`'s own doc comment; `Write` is used
+/// here purely because it is the mode `hostile_fixtures` already has a
+/// working hook fixture for, and `harden_write`/`harden_network` set
+/// `LANG`/`LC_ALL` identically, so this evidence transfers directly to
+/// `Network` — already proven independently by the introspection test
+/// above).
+#[cfg(unix)]
+#[test]
+fn write_mode_forces_english_locale_in_a_real_spawned_subprocess() {
+    if !git_available() {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
+    with_env_vars(
+        &[
+            ("LANG", Some("fr_FR.UTF-8")),
+            ("LC_ALL", Some("de_DE.UTF-8")),
+        ],
+        || {
+            let repo = init_repo();
+            let scripts = TempDir::new().expect("tempdir");
+            let hooks_dir = scripts.path().join("hooks");
+            std::fs::create_dir_all(&hooks_dir).expect("create hooks dir");
+            let marker = scripts.path().join("locale-seen");
+            let script_path = hooks_dir.join("post-index-change");
+            let mut file = std::fs::File::create(&script_path).expect("create hook script");
+            std::io::Write::write_all(
+                &mut file,
+                format!(
+                    "#!/bin/sh\necho \"LANG=$LANG LC_ALL=$LC_ALL\" > '{}'\n",
+                    marker.display()
+                )
+                .as_bytes(),
+            )
+            .expect("write hook script");
+            drop(file);
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let mut perms = std::fs::metadata(&script_path)
+                    .expect("script metadata")
+                    .permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&script_path, perms).expect("chmod hook executable");
+            }
+            let cancel = AtomicBool::new(false);
+            std::fs::write(repo.path().join("tracked.txt"), "content").unwrap();
+            raw_git_ok(repo.path(), &["add", "tracked.txt"]);
+            raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "init"]);
+            raw_git_ok(
+                repo.path(),
+                &["config", "core.hooksPath", hooks_dir.to_str().unwrap()],
+            );
+            // Bump the tracked file's mtime so `git status` genuinely
+            // rewrites the index and fires `post-index-change` — same
+            // technique `hostile_fixtures::background_read_disables_a_
+            // malicious_hooks_path_hook` already establishes.
+            let touch_status = Command::new("touch")
+                .arg(repo.path().join("tracked.txt"))
+                .status()
+                .expect("touch spawns");
+            assert!(touch_status.success());
+
+            let output = run_git(
+                repo.path(),
+                &["status".to_owned(), "--porcelain=v2".to_owned()],
+                GitExecMode::Write,
+                &cancel,
+            )
+            .expect("write-mode status succeeds");
+            assert_eq!(output.exit_code, 0);
+            let recorded = std::fs::read_to_string(&marker)
+                .expect("hook fired and wrote the marker file under Write mode");
+            assert_eq!(recorded.trim(), "LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8");
+        },
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -756,5 +1033,468 @@ mod hostile_fixtures {
         )
         .expect_err("output exceeding the cap must be rejected");
         assert_eq!(error.code(), "GIT_EXEC_OUTPUT_LIMIT_EXCEEDED");
+    }
+}
+
+// ---------------------------------------------------------------------
+// `F080` S4: `GitExecMode::Network` hardening evidence — SSH agent
+// passthrough, the `GIT_ASKPASS`/credential-helper precedence claim (verified
+// empirically, not asserted from memory — see `harden_network`'s own doc
+// comment), the repository's own `pre-push` hook being allowed to fire (the
+// direct network-mode analogue of `hostile_fixtures`'s
+// `write_mode_allows_the_repositorys_own_hooks_path_hook_to_fire`), and this
+// mode's own longer timeout/cancellation. `#[cfg(unix)]` for the same reason
+// as `hostile_fixtures`: every test here configures an executable shell
+// script (hook, `core.sshCommand`, credential helper, or `core.askPass`) and
+// depends on POSIX shebang execution and executable permission bits.
+// ---------------------------------------------------------------------
+
+#[cfg(unix)]
+mod network_mode_fixtures {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    fn write_executable_script(path: &Path, body: &str) {
+        let mut file = std::fs::File::create(path).expect("create script file");
+        file.write_all(format!("#!/bin/sh\n{body}\n").as_bytes())
+            .expect("write script body");
+        drop(file);
+        let mut perms = std::fs::metadata(path)
+            .expect("script metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).expect("chmod script executable");
+    }
+
+    /// A fake `ssh` replacement (`core.sshCommand` fully substitutes for the
+    /// real `ssh` binary — git execs it directly with the connection
+    /// arguments, no DNS lookup or real network I/O ever happens) that
+    /// records whatever `SSH_AUTH_SOCK` it sees in its own environment to
+    /// `marker`, then fails (there is no real remote at
+    /// `ssh://git@example.invalid`) — exactly the technique
+    /// `docs/research/2026-07-25-core-git.md`'s S4 section and this slice's
+    /// own report describe for proving env passthrough reaches a real `git`
+    /// subprocess without any actual network access.
+    fn fake_ssh_recording_auth_sock(scripts_dir: &Path, marker: &Path) -> PathBuf {
+        let script_path = scripts_dir.join("fake-ssh.sh");
+        write_executable_script(
+            &script_path,
+            &format!(
+                "echo \"SSH_AUTH_SOCK=$SSH_AUTH_SOCK\" > '{}'\nexit 1",
+                marker.display()
+            ),
+        );
+        script_path
+    }
+
+    fn repo_with_fake_ssh_remote(marker: &Path) -> (TempDir, TempDir) {
+        let repo = init_repo();
+        let scripts = TempDir::new().expect("tempdir");
+        let script = fake_ssh_recording_auth_sock(scripts.path(), marker);
+        raw_git_ok(
+            repo.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "ssh://git@example.invalid/repo.git",
+            ],
+        );
+        raw_git_ok(
+            repo.path(),
+            &["config", "core.sshCommand", script.to_str().unwrap()],
+        );
+        (repo, scripts)
+    }
+
+    #[test]
+    fn ssh_auth_sock_reaches_a_real_git_subprocess_via_core_ssh_command() {
+        if !git_available() {
+            eprintln!("skipping: git not found on PATH");
+            return;
+        }
+        with_env_vars(
+            &[("SSH_AUTH_SOCK", Some("/tmp/plain-test-marker-sock"))],
+            || {
+                let marker_dir = TempDir::new().expect("tempdir");
+                let marker = marker_dir.path().join("ssh-auth-sock-seen");
+                let (repo, _scripts) = repo_with_fake_ssh_remote(&marker);
+
+                let cancel = AtomicBool::new(false);
+                // The fetch itself always fails — `fake-ssh.sh` exits 1 and there
+                // is no real remote — this test only cares about what
+                // environment actually reached the subprocess `core.sshCommand`
+                // invoked, proven by the marker file it writes.
+                let _ = run_git(
+                    repo.path(),
+                    &["fetch".to_owned(), "origin".to_owned()],
+                    GitExecMode::Network,
+                    &cancel,
+                );
+                let recorded = std::fs::read_to_string(&marker).expect("marker file written");
+                assert_eq!(recorded.trim(), "SSH_AUTH_SOCK=/tmp/plain-test-marker-sock");
+            },
+        );
+    }
+
+    /// Companion/control to the test above (same fixture, opposite ambient
+    /// state): with no `SSH_AUTH_SOCK` in the environment at all, the fake
+    /// `ssh` replacement must see it genuinely absent — proving the
+    /// passthrough is conditional on ambient presence (matching
+    /// `harden_background_read`/`harden_write`'s existing `PATH`/`HOME`
+    /// passthrough pattern), not a hard-coded or invented value.
+    #[test]
+    fn network_mode_does_not_invent_an_ssh_auth_sock_when_ambient_env_has_none() {
+        if !git_available() {
+            eprintln!("skipping: git not found on PATH");
+            return;
+        }
+        with_env_vars(&[("SSH_AUTH_SOCK", None)], || {
+            let marker_dir = TempDir::new().expect("tempdir");
+            let marker = marker_dir.path().join("ssh-auth-sock-seen");
+            let (repo, _scripts) = repo_with_fake_ssh_remote(&marker);
+
+            let cancel = AtomicBool::new(false);
+            let _ = run_git(
+                repo.path(),
+                &["fetch".to_owned(), "origin".to_owned()],
+                GitExecMode::Network,
+                &cancel,
+            );
+            let recorded = std::fs::read_to_string(&marker).expect("marker file written");
+            assert_eq!(recorded.trim(), "SSH_AUTH_SOCK=");
+        });
+    }
+
+    fn credential_helper_full(scripts_dir: &Path) -> PathBuf {
+        let script_path = scripts_dir.join("cred-helper-full.sh");
+        write_executable_script(
+            &script_path,
+            "echo username=bot\necho password=secret-from-helper",
+        );
+        script_path
+    }
+
+    fn credential_helper_partial(scripts_dir: &Path) -> PathBuf {
+        let script_path = scripts_dir.join("cred-helper-partial.sh");
+        write_executable_script(&script_path, "echo username=bot");
+        script_path
+    }
+
+    /// A hostile `core.askPass` marker: touches `marker` and (unlike
+    /// `hostile_fixtures::marker_script`) always exits *zero* with a
+    /// plausible password line — so if it does fire, `git credential fill`
+    /// completes rather than failing on the helper's own exit code, keeping
+    /// "did it fire" (the marker file) and "did the whole command fail"
+    /// independently observable.
+    fn hostile_askpass_marker(scripts_dir: &Path, marker: &Path) -> PathBuf {
+        let script_path = scripts_dir.join("askpass-marker.sh");
+        write_executable_script(
+            &script_path,
+            &format!(
+                "touch '{}'\necho password-from-hostile-askpass",
+                marker.display()
+            ),
+        );
+        script_path
+    }
+
+    /// Empirical control proving the fixture below is real: with **no**
+    /// `GIT_ASKPASS` environment override at all (i.e. relying only on
+    /// `GIT_TERMINAL_PROMPT=0`, exactly the gap this slice's report found), a
+    /// hostile `core.askPass` **does** fire when the configured
+    /// `credential.helper` supplies an incomplete credential (username only).
+    /// This is the same category of attack `hostile_fixtures`'s
+    /// `core.hooksPath`/`core.fsmonitor` fixtures already establish for other
+    /// config keys — a malicious *repository* setting `core.askPass` to an
+    /// exfiltration script — proven directly against the real `git 2.50.1`
+    /// binary via `git credential fill` (no network involved).
+    #[test]
+    fn control_hostile_core_askpass_fires_without_a_git_askpass_override() {
+        if !git_available() {
+            eprintln!("skipping: git not found on PATH");
+            return;
+        }
+        let repo = init_repo();
+        let scripts = TempDir::new().expect("tempdir");
+        let marker = scripts.path().join("askpass-fired");
+        let helper = credential_helper_partial(scripts.path());
+        let askpass = hostile_askpass_marker(scripts.path(), &marker);
+        raw_git_ok(
+            repo.path(),
+            &["config", "credential.helper", helper.to_str().unwrap()],
+        );
+        raw_git_ok(
+            repo.path(),
+            &["config", "core.askPass", askpass.to_str().unwrap()],
+        );
+
+        assert!(!marker.exists());
+        let output = Command::new("git")
+            .current_dir(repo.path())
+            .args(["credential", "fill"])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env_remove("GIT_ASKPASS")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write as _;
+                child
+                    .stdin
+                    .take()
+                    .expect("stdin piped")
+                    .write_all(b"protocol=https\nhost=example.invalid\n")?;
+                child.wait_with_output()
+            })
+            .expect("raw git credential fill spawns");
+        assert!(output.status.success());
+        assert!(
+            marker.exists(),
+            "control run must prove the hostile core.askPass fires when GIT_ASKPASS is unset \
+             and the credential helper is incomplete"
+        );
+    }
+
+    /// The hardened contrast to the control above: under
+    /// [`GitExecMode::Network`], the same incomplete `credential.helper` +
+    /// hostile `core.askPass` must **not** let the hostile script fire —
+    /// `GIT_ASKPASS` pinned to the reject program takes precedence over
+    /// `core.askPass` and fails the credential lookup cleanly instead.
+    #[test]
+    fn network_mode_git_askpass_blocks_a_hostile_core_askpass_when_credential_helper_is_incomplete()
+    {
+        if !git_available() {
+            eprintln!("skipping: git not found on PATH");
+            return;
+        }
+        let repo = init_repo();
+        let scripts = TempDir::new().expect("tempdir");
+        let marker = scripts.path().join("askpass-fired");
+        let helper = credential_helper_partial(scripts.path());
+        let askpass = hostile_askpass_marker(scripts.path(), &marker);
+        raw_git_ok(
+            repo.path(),
+            &["config", "credential.helper", helper.to_str().unwrap()],
+        );
+        raw_git_ok(
+            repo.path(),
+            &["config", "core.askPass", askpass.to_str().unwrap()],
+        );
+
+        assert!(!marker.exists());
+        let cancel = AtomicBool::new(false);
+        let output = run_git_with_stdin(
+            repo.path(),
+            &["credential".to_owned(), "fill".to_owned()],
+            GitExecMode::Network,
+            &cancel,
+            b"protocol=https\nhost=example.invalid\n",
+        )
+        .expect("run_git_with_stdin itself succeeds even though git's own exit is non-zero");
+        assert_ne!(
+            output.exit_code, 0,
+            "the credential lookup must fail cleanly, not hang or succeed with a hostile password"
+        );
+        assert!(
+            !marker.exists(),
+            "GitExecMode::Network's GIT_ASKPASS override must prevent the hostile core.askPass \
+             from ever firing — this is the direct contrast with the control test above"
+        );
+    }
+
+    /// Proves the other half of the claim in [`super::super::harden_network`]'s
+    /// doc comment: when the configured `credential.helper` fully supplies a
+    /// credential (both `username` and `password`), askpass — hostile or
+    /// not — is never consulted at all, and the helper's own credential is
+    /// what `git credential fill` reports. This is the "credential helpers
+    /// are allowed to run and work normally" half of network-mode hardening;
+    /// the two tests above are the "a hostile askpass config cannot bypass
+    /// that" half.
+    #[test]
+    fn network_mode_never_invokes_askpass_when_credential_helper_fully_supplies_credentials() {
+        if !git_available() {
+            eprintln!("skipping: git not found on PATH");
+            return;
+        }
+        let repo = init_repo();
+        let scripts = TempDir::new().expect("tempdir");
+        let marker = scripts.path().join("askpass-fired");
+        let helper = credential_helper_full(scripts.path());
+        let askpass = hostile_askpass_marker(scripts.path(), &marker);
+        raw_git_ok(
+            repo.path(),
+            &["config", "credential.helper", helper.to_str().unwrap()],
+        );
+        raw_git_ok(
+            repo.path(),
+            &["config", "core.askPass", askpass.to_str().unwrap()],
+        );
+
+        assert!(!marker.exists());
+        let cancel = AtomicBool::new(false);
+        let output = run_git_with_stdin(
+            repo.path(),
+            &["credential".to_owned(), "fill".to_owned()],
+            GitExecMode::Network,
+            &cancel,
+            b"protocol=https\nhost=example.invalid\n",
+        )
+        .expect("run_git_with_stdin succeeds");
+        assert_eq!(output.exit_code, 0);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("username=bot"));
+        assert!(stdout.contains("password=secret-from-helper"));
+        assert!(
+            !marker.exists(),
+            "a fully-satisfying credential.helper response must mean askpass is never invoked, \
+             hostile or not"
+        );
+    }
+
+    /// Direct network-mode analogue of
+    /// `hostile_fixtures::write_mode_allows_the_repositorys_own_hooks_path_hook_to_fire`:
+    /// a real (local, non-network) push to a real bare "remote" must let the
+    /// repository's own configured `pre-push` hook fire — ADR 0003's "用户
+    /// 显式写/网络操作才放行 hooks" applies to network mode exactly as it does to
+    /// write mode.
+    #[test]
+    fn network_mode_allows_the_repositorys_own_pre_push_hook_to_fire() {
+        if !git_available() {
+            eprintln!("skipping: git not found on PATH");
+            return;
+        }
+        let remote = TempDir::new().expect("tempdir");
+        raw_git_ok(remote.path(), &["init", "--quiet", "--bare"]);
+
+        let repo = init_repo();
+        std::fs::write(repo.path().join("a.txt"), "one\n").unwrap();
+        raw_git_ok(repo.path(), &["add", "a.txt"]);
+        raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "init"]);
+        raw_git_ok(
+            repo.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote.path().to_str().expect("utf8 tempdir path"),
+            ],
+        );
+
+        let scripts = TempDir::new().expect("tempdir");
+        let hooks_dir = scripts.path().join("hooks");
+        std::fs::create_dir_all(&hooks_dir).expect("create hooks dir");
+        let marker = scripts.path().join("pre-push-fired");
+        write_executable_script(
+            &hooks_dir.join("pre-push"),
+            &format!("touch '{}'", marker.display()),
+        );
+        raw_git_ok(
+            repo.path(),
+            &["config", "core.hooksPath", hooks_dir.to_str().unwrap()],
+        );
+
+        assert!(!marker.exists());
+        let cancel = AtomicBool::new(false);
+        let output = run_git(
+            repo.path(),
+            &[
+                "push".to_owned(),
+                "origin".to_owned(),
+                "HEAD:refs/heads/main".to_owned(),
+            ],
+            GitExecMode::Network,
+            &cancel,
+        )
+        .expect("network-mode push to a local bare remote still succeeds");
+        assert_eq!(output.exit_code, 0);
+        assert!(
+            marker.exists(),
+            "GitExecMode::Network must respect the repository's own core.hooksPath pre-push hook"
+        );
+    }
+
+    #[test]
+    fn network_mode_can_be_cancelled_and_reports_cancelled() {
+        if !git_available() {
+            eprintln!("skipping: git not found on PATH");
+            return;
+        }
+        let scripts = TempDir::new().expect("tempdir");
+        let script_path = scripts.path().join("slow-ssh.sh");
+        write_executable_script(&script_path, "sleep 5\nexit 1");
+        let repo = init_repo();
+        raw_git_ok(
+            repo.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "ssh://git@example.invalid/repo.git",
+            ],
+        );
+        raw_git_ok(
+            repo.path(),
+            &["config", "core.sshCommand", script_path.to_str().unwrap()],
+        );
+
+        let repo_path = repo.path().to_path_buf();
+        let cancel = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                run_git_network_with_limits_for_test(
+                    &repo_path,
+                    &["fetch".to_owned(), "origin".to_owned()],
+                    &cancel,
+                    Duration::from_secs(30),
+                    10_000_000,
+                )
+            });
+            std::thread::sleep(Duration::from_millis(200));
+            cancel.store(true, Ordering::SeqCst);
+            let result = handle.join().expect("worker thread does not panic");
+            let error = result.expect_err("a cancelled invocation must be an error");
+            assert_eq!(error.code(), "GIT_EXEC_CANCELLED");
+        });
+    }
+
+    #[test]
+    fn network_mode_uses_its_own_longer_timeout_not_the_local_ceiling() {
+        if !git_available() {
+            eprintln!("skipping: git not found on PATH");
+            return;
+        }
+        let scripts = TempDir::new().expect("tempdir");
+        let script_path = scripts.path().join("slow-ssh.sh");
+        write_executable_script(&script_path, "sleep 5\nexit 1");
+        let repo = init_repo();
+        raw_git_ok(
+            repo.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "ssh://git@example.invalid/repo.git",
+            ],
+        );
+        raw_git_ok(
+            repo.path(),
+            &["config", "core.sshCommand", script_path.to_str().unwrap()],
+        );
+
+        let cancel = AtomicBool::new(false);
+        let error = run_git_network_with_limits_for_test(
+            repo.path(),
+            &["fetch".to_owned(), "origin".to_owned()],
+            &cancel,
+            Duration::from_millis(150),
+            10_000_000,
+        )
+        .expect_err(
+            "a slow network invocation must still time out under an injected short ceiling",
+        );
+        assert_eq!(error.code(), "GIT_EXEC_TIMEOUT");
     }
 }

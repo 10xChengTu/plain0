@@ -108,6 +108,11 @@ function fakeBridge(
 		gitStageBlob: notImplemented,
 		gitCommit: notImplemented,
 		gitDiscardPaths: notImplemented,
+		gitNetworkPreview: notImplemented,
+		gitFetch: notImplemented,
+		gitPull: notImplemented,
+		gitPush: notImplemented,
+		gitNetworkCancel: notImplemented,
 	};
 }
 
@@ -231,6 +236,11 @@ function fakeTextSearchBridge(
 		gitStageBlob: notImplemented,
 		gitCommit: notImplemented,
 		gitDiscardPaths: notImplemented,
+		gitNetworkPreview: notImplemented,
+		gitFetch: notImplemented,
+		gitPull: notImplemented,
+		gitPush: notImplemented,
+		gitNetworkCancel: notImplemented,
 	};
 
 	return {
