@@ -8622,6 +8622,19 @@ test("previews a theme live on navigation, restores on Escape, and applies for r
 	await expect(focusedRow).toContainText("Light Modern");
 	await page.keyboard.press("Enter");
 	await expect(picker).toBeHidden();
+	// The picker hiding is NOT a barrier for "the accepted theme is fully
+	// applied": `QuickPick.accept()` hides the widget synchronously while
+	// `WorkbenchThemeService.applyAndSetColorTheme` finishes asynchronously.
+	// Sampling `workbenchThemeState` immediately after `toBeHidden()` was a
+	// real race — reproduced at 1 failure in 6 isolated repeats, always on
+	// the `classNames` assertion below, never on the focus assertion above.
+	// It had previously been written off twice as "pre-existing environmental
+	// flakiness". Poll for the applied class the same way the live-preview
+	// half of this test already polls for `editorBackground`, then snapshot
+	// once for the remaining assertions.
+	await expect
+		.poll(async () => (await workbenchThemeState(page)).classNames)
+		.toContain(lightModern.className);
 	const appliedState = await workbenchThemeState(page);
 	expect(appliedState.classNames).toContain(lightModern.className);
 	expect(appliedState.editorBackground).toBe("#ffffff");
