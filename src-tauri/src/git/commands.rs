@@ -33,11 +33,13 @@ use super::dto::{
     GitDiscardPathsRequest, GitFetchRequest, GitFileHistoryRequest, GitHistoryListResultWire,
     GitLineHistoryDetailRequest, GitLineHistoryDetailResultWire, GitLineHistoryListRequest,
     GitNetworkCancelRequest, GitNetworkPreviewRequest, GitNetworkPreviewResult, GitPullRequest,
-    GitPushRequest, GitShowBlobRequest, GitShowBlobResult, GitStageBlobRequest,
-    GitStagePathsRequest, GitStatusRequest, GitStatusResult, GitUnstagePathsRequest,
+    GitPushRequest, GitShowBlobRequest, GitShowBlobResult, GitShowCommitBlobRequest,
+    GitShowCommitRequest, GitShowCommitResult, GitStageBlobRequest, GitStagePathsRequest,
+    GitStatusRequest, GitStatusResult, GitUnstagePathsRequest,
 };
 use super::log;
 use super::network::{self, GitNetworkService};
+use super::show_commit;
 use super::stage;
 use super::status;
 
@@ -299,6 +301,38 @@ pub(crate) async fn git_line_history_detail(
     )
     .await?;
     Ok(GitLineHistoryDetailResultWire::from(result))
+}
+
+#[tauri::command]
+pub(crate) async fn git_show_commit(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    request: GitShowCommitRequest,
+) -> Result<GitShowCommitResult, CommandError> {
+    let sha = request.into_parts()?;
+    let result =
+        show_commit::show_commit(trust.inner(), workspace.inner(), window.label(), &sha).await?;
+    Ok(GitShowCommitResult::from(result))
+}
+
+#[tauri::command]
+pub(crate) async fn git_show_commit_blob(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    request: GitShowCommitBlobRequest,
+) -> Result<GitShowBlobResult, CommandError> {
+    let (sha, path) = request.into_parts()?;
+    let content = show_commit::show_commit_blob(
+        trust.inner(),
+        workspace.inner(),
+        window.label(),
+        &sha,
+        &path,
+    )
+    .await?;
+    Ok(GitShowBlobResult::new(content))
 }
 
 #[tauri::command]

@@ -16,7 +16,9 @@ import {
 	validateGitIpcBridgeBoundary,
 	validateGitNetworkConfirmationBoundary,
 	validateGitRustBoundary,
+	validateGitShowCommitFirstParentBoundary,
 	validateMainCapability,
+	validateMultiDiffEditorOverrideImportBoundary,
 	validateSearchCommandRegistration,
 	validateSearchFileBudgetConstants,
 	validateSearchOverrideImportBoundary,
@@ -69,6 +71,7 @@ const allowedDependencies = new Map([
 	["@codingame/monaco-vscode-explorer-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-files-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-model-service-override", "35.0.1"],
+	["@codingame/monaco-vscode-multi-diff-editor-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-notifications-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-scm-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-search-service-override", "35.0.1"],
@@ -411,6 +414,12 @@ for (const file of appFiles) {
 	)) {
 		fail(failure);
 	}
+	for (const failure of validateMultiDiffEditorOverrideImportBoundary(
+		source,
+		relative,
+	)) {
+		fail(failure);
+	}
 	if (
 		relative.replaceAll("\\", "/") !== "app/main.ts" &&
 		/\bregisterCustomProvider\s*\(/.test(source)
@@ -747,6 +756,9 @@ for (const failure of validateGitRustBoundary(rustSources)) {
 	fail(failure);
 }
 for (const failure of validateGitBlameHardeningArgs(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateGitShowCommitFirstParentBoundary(rustSources)) {
 	fail(failure);
 }
 for (const failure of validateGitIpcBridgeBoundary(rustSources, appSources)) {

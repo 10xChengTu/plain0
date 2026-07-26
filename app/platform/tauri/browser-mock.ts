@@ -11,6 +11,7 @@ import type {
 	GitHistoryListResult,
 	GitLineHistoryDetail,
 	GitNetworkPreviewResult,
+	GitShowCommitResult,
 	GitStatusEntry,
 	GitStatusResult,
 	PlainBridge,
@@ -52,6 +53,8 @@ import {
 	frozenGitPushRequest,
 	frozenGitShowBlobRequest,
 	frozenGitShowBlobResult,
+	frozenGitShowCommitBlobRequest,
+	frozenGitShowCommitRequest,
 	frozenGitStageBlobRequest,
 	frozenGitStagePathsRequest,
 	frozenGitUnstagePathsRequest,
@@ -1094,6 +1097,27 @@ export interface BrowserMockGitFixtureForTest {
 	 * `GIT_LINE_HISTORY_DETAIL_STALE_INDEX`), exactly like the real Rust
 	 * implementation. */
 	readonly lineHistoryDetail?: Readonly<Record<string, GitLineHistoryDetail>>;
+	/** `F090` S2: seeds the deterministic `gitShowCommit` response, keyed by
+	 * commit sha — a missing sha key defaults to `{ sha: <requested>,
+	 * parentSha: null, files: [] }` (an empty, harmless default, mirroring
+	 * `blame`'s own `defaultGitBlameFile` precedent). This mock never
+	 * re-implements the real two-explicit-revision `git diff`/empty-tree
+	 * resolution (the real Rust parser's thorough fixture coverage, including
+	 * its clean-merge control groups, lives in
+	 * `src-tauri/src/git/show_commit/tests.rs`); it only exists so a
+	 * consuming frontend (the multi-diff commit-detail resolver) has
+	 * structurally correct, scriptable responses to develop and test
+	 * against. */
+	readonly showCommit?: Readonly<Record<string, GitShowCommitResult>>;
+	/** `F090` S2: seeds the deterministic `gitShowCommitBlob` response, keyed
+	 * by commit sha and then by repository-toplevel-relative path — a missing
+	 * sha or path key means "no such version" (`{ content: null }`), matching
+	 * `gitShowCommitBlob`'s real not-found outcome (never a rejection),
+	 * mirroring `blobs`'s own convention for `gitShowBlob`. Values are UTF-8
+	 * text, encoded to bytes by the mock. */
+	readonly commitBlobs?: Readonly<
+		Record<string, Readonly<Record<string, string>>>
+	>;
 	/** When `true`, every git method rejects with `GIT_NO_REPOSITORY` instead
 	 * of returning fixture data — simulates a trusted workspace root that is
 	 * not (or no longer) a Git working tree. */
@@ -5232,6 +5256,12 @@ export function createBrowserMockBridge(
 	const gitLineHistoryDetailFixtures = new Map<string, GitLineHistoryDetail>(
 		Object.entries(gitFixture.lineHistoryDetail ?? {}),
 	);
+	const gitShowCommitFixtures = new Map<string, GitShowCommitResult>(
+		Object.entries(gitFixture.showCommit ?? {}),
+	);
+	const gitCommitBlobs = new Map<string, Readonly<Record<string, string>>>(
+		Object.entries(gitFixture.commitBlobs ?? {}),
+	);
 
 	// --- F080 S3: mutable stage/unstage/commit/discard simulation ---------
 	//
@@ -6535,6 +6565,32 @@ export function createBrowserMockBridge(
 				sha: entry.sha,
 				diffText: `commit ${entry.sha}\n\n    ${entry.message}\n`,
 			});
+		},
+		async gitShowCommit(sha_) {
+			const request = frozenGitShowCommitRequest(sha_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return (
+				gitShowCommitFixtures.get(request.sha) ??
+				Object.freeze({
+					sha: request.sha,
+					parentSha: null,
+					files: Object.freeze([]),
+				})
+			);
+		},
+		async gitShowCommitBlob(sha_, path_) {
+			const request = frozenGitShowCommitBlobRequest(sha_, path_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const content = gitCommitBlobs.get(request.sha)?.[request.path];
+			return frozenGitShowBlobResult(
+				content === undefined ? null : new TextEncoder().encode(content),
+			);
 		},
 	};
 }

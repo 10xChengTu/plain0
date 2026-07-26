@@ -8,12 +8,20 @@ const PATCH_CONTRACTS = Object.freeze([
 		integrity:
 			"sha512-pJMSRMI0m5Mvx54u6iBGh+iad9KqfICnwAcjswNJOO7Xt1OXm5xILcM32VkMe4UX0YmrGAvYc0WVKWL8I9O4ng==",
 		directImporter: true,
-		// 26, not 25: `F080` S2 installs
+		// 27, not 26: `F080` S2 installs
 		// `@codingame/monaco-vscode-scm-service-override@35.0.1`, whose own
 		// pnpm-lock.yaml snapshot block depends on this exact patched
 		// `@codingame/monaco-vscode-api` — one more edge, same audited patch
-		// hash as every other edge below.
-		snapshotEdgeCount: 26,
+		// hash as every other edge below. `F090` S2 installs
+		// `@codingame/monaco-vscode-multi-diff-editor-service-override@35.0.1`,
+		// whose own snapshot block depends on this exact same patched
+		// `@codingame/monaco-vscode-api` too — one more edge again (confirmed
+		// against the real pnpm-lock.yaml: its snapshot entry declares exactly
+		// one dependency, `'@codingame/monaco-vscode-api':
+		// 35.0.1(patch_hash=184ceed9...)`, the identical audited hash every
+		// other edge here already shares — not a second, divergent patch
+		// variant).
+		snapshotEdgeCount: 27,
 		shape: Object.freeze([
 			"diff --git a/services.js b/services.js",
 			"@@ -24,7 +24,6 @@ import './vscode/src/vs/workbench/contrib/inlayHints/browser/inlayHintsAccessibi",

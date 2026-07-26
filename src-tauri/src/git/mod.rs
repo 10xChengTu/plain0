@@ -12,11 +12,13 @@
 //!
 //! `F090` (`docs/research/2026-07-26-git-history.md`) builds history/blame
 //! tools on top of this same foundation. S0 added [`blame`] (inline blame +
-//! age heatmap). S1 adds [`log`] (file/line history: [`log::file_history`]/
+//! age heatmap). S1 added [`log`] (file/line history: [`log::file_history`]/
 //! [`log::line_history_list`]/[`log::line_history_detail`]) — see that
 //! module's own doc comment for its format-string safety design and the
 //! empirically-discovered deviation from the frozen plan's original
-//! drill-down sketch.
+//! drill-down sketch. S2 adds [`show_commit`] (commit-detail file list for
+//! the multi-diff editor) — see that module's own doc comment for why it
+//! never spawns `git show` at all, unlike the frozen plan's original sketch.
 //!
 //! # Subprocess spawning is `exec::run_git`-only
 //!
@@ -74,6 +76,7 @@ pub(crate) mod exec;
 pub(crate) mod log;
 pub(crate) mod network;
 pub(crate) mod repo;
+pub(crate) mod show_commit;
 pub(crate) mod stage;
 pub(crate) mod status;
 pub(crate) mod wire;

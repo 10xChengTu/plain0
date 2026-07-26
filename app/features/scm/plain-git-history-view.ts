@@ -17,6 +17,7 @@ import { IEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench
 
 import type { PlainBridge } from "../../platform/tauri/contracts";
 import { normalizeCommandError } from "../../platform/tauri/errors";
+import { encodeGitCommitSourceUri } from "./plain-git-commit-detail";
 import {
 	historyEntrySummary,
 	PlainGitHistoryController,
@@ -293,6 +294,26 @@ export class PlainGitHistoryView extends ViewPane {
 				body.className = "plain-git-history-view-item-body";
 				body.textContent = entry.message;
 				item.append(body);
+
+				// `F090` S2: opens the commit's changed-file list as a
+				// multi-diff editor — `IEditorService.openEditor` with a
+				// `multiDiffSource` is resolved by
+				// `PlainGitCommitMultiDiffSourceResolver` (registered once,
+				// globally, in `main.ts`), never a direct call into this
+				// view's own rendering.
+				const viewFilesButton = document.createElement("button");
+				viewFilesButton.type = "button";
+				viewFilesButton.className = "plain-git-history-view-item-action";
+				viewFilesButton.textContent = "View Changed Files";
+				this._register(
+					addDisposableListener(viewFilesButton, "click", () => {
+						void this.editorService.openEditor({
+							multiDiffSource: encodeGitCommitSourceUri(entry.sha),
+							label: `Commit ${shortCommitSha(entry.sha)}`,
+						});
+					}),
+				);
+				item.append(viewFilesButton);
 			}
 			list.append(item);
 		});

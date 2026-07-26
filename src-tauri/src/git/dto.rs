@@ -15,6 +15,7 @@ use super::blame::{BlameCommitHeader, BlameLineRange, BlameResult, BLAME_UNCOMMI
 use super::diff::{DiffFileEntry, DiffStatusKind, GitBlobRev};
 use super::log::{HistoryEntry, HistoryList, LineHistoryDetail, LineRange};
 use super::network::NetworkOperation;
+use super::show_commit::ShowCommitResult;
 use super::status::{
     BranchHead, BranchInfo, BranchOid, GitStatus, RenameOrCopyKind, StatusEntry, SubmoduleState,
 };
@@ -936,6 +937,87 @@ impl From<LineHistoryDetail> for GitLineHistoryDetailResultWire {
             sha: value.sha,
             diff_text: value.diff_text,
         }
+    }
+}
+
+// --- git_show_commit / git_show_commit_blob (F090 S2) -----------------------
+
+fn git_show_commit_invalid_request() -> CommandError {
+    CommandError::new(
+        "GIT_SHOW_COMMIT_INVALID_REQUEST",
+        "The git show commit request is invalid.",
+    )
+}
+
+fn git_show_commit_blob_invalid_request() -> CommandError {
+    CommandError::new(
+        "GIT_SHOW_COMMIT_BLOB_INVALID_REQUEST",
+        "The git show commit blob request is invalid.",
+    )
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitShowCommitRequest {
+    sha: String,
+}
+
+impl GitShowCommitRequest {
+    pub(crate) fn into_parts(self) -> Result<String, CommandError> {
+        if !is_lowercase_hex40(self.sha.as_bytes()) {
+            return Err(git_show_commit_invalid_request());
+        }
+        Ok(self.sha)
+    }
+}
+
+/// Wire projection of one `git::show_commit::ShowCommitResult` — `files`
+/// reuses [`GitDiffFileEntryWire`] verbatim (the exact same wire shape
+/// [`GitDiffFilesResult`] already exposes): `show_commit`'s file list is
+/// built from the identical `git::diff::DiffFileEntry` domain type
+/// `diff_files` produces, just from a different pair of `git diff`
+/// invocations server-side (see `show_commit.rs`'s own module doc comment)
+/// — there is no reason for the wire shape to diverge, and reusing it means
+/// the frontend's existing `decodeGitDiffFileEntry`-style decoding logic
+/// (already thoroughly tested against `git_diff_files`) applies unchanged.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitShowCommitResult {
+    sha: String,
+    parent_sha: Option<String>,
+    files: Vec<GitDiffFileEntryWire>,
+}
+
+impl From<ShowCommitResult> for GitShowCommitResult {
+    fn from(value: ShowCommitResult) -> Self {
+        Self {
+            sha: value.sha,
+            parent_sha: value.parent_sha,
+            files: value
+                .files
+                .into_iter()
+                .map(GitDiffFileEntryWire::from)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitShowCommitBlobRequest {
+    sha: String,
+    path: String,
+}
+
+impl GitShowCommitBlobRequest {
+    pub(crate) fn into_parts(self) -> Result<(String, String), CommandError> {
+        if !is_lowercase_hex40(self.sha.as_bytes()) {
+            return Err(git_show_commit_blob_invalid_request());
+        }
+        if self.path.is_empty() || self.path.len() > MAX_GIT_SHOW_BLOB_PATH_BYTES {
+            return Err(git_show_commit_blob_invalid_request());
+        }
+        Ok((self.sha, self.path))
     }
 }
 

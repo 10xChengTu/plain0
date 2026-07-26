@@ -91,6 +91,7 @@ import {
 	decodeGitLineHistoryDetailResult,
 	decodeGitNetworkPreviewResult,
 	decodeGitShowBlobResult,
+	decodeGitShowCommitResult,
 	decodeGitStatusResult,
 	decodeGitVoid,
 	frozenGitBlameCommitMessagesRequest,
@@ -104,6 +105,8 @@ import {
 	frozenGitNetworkPreviewRequest,
 	frozenGitPushRequest,
 	frozenGitShowBlobRequest,
+	frozenGitShowCommitBlobRequest,
+	frozenGitShowCommitRequest,
 	frozenGitStageBlobRequest,
 	frozenGitStagePathsRequest,
 	frozenGitUnstagePathsRequest,
@@ -605,6 +608,18 @@ export function createNativeBridge(): PlainBridge {
 			);
 			return decodeGitLineHistoryDetailResult(
 				await invoke<unknown>("git_line_history_detail", { request }),
+			);
+		},
+		gitShowCommit: async (sha) => {
+			const request = frozenGitShowCommitRequest(sha);
+			return decodeGitShowCommitResult(
+				await invoke<unknown>("git_show_commit", { request }),
+			);
+		},
+		gitShowCommitBlob: async (sha, path) => {
+			const request = frozenGitShowCommitBlobRequest(sha, path);
+			return decodeGitShowBlobResult(
+				await invoke<unknown>("git_show_commit_blob", { request }),
 			);
 		},
 	};

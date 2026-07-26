@@ -12,6 +12,7 @@ import { ICodeEditorService } from "@codingame/monaco-vscode-api/vscode/vs/edito
 import { IModelService } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/services/model.service";
 import { ITextModelService } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/services/resolverService.service";
 import { ILanguageFeaturesService } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/services/languageFeatures.service";
+import { IMultiDiffSourceResolverService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/multiDiffEditor/browser/multiDiffSourceResolverService.service";
 import { IFileService } from "@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files.service";
 import { IWorkbenchThemeService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service";
 
@@ -23,6 +24,11 @@ import { registerPlainTerminalCommands } from "./features/terminal/plain-termina
 import { configurePlainTerminalBridge } from "./features/terminal/plain-terminal-view";
 import { encodeGitResourceUri, GIT_URI_SCHEME } from "./features/scm/git-uri";
 import { createPlainGitBlameContribution } from "./features/scm/plain-git-blame-contribution";
+import {
+	createPlainGitCommitBlobContentProvider,
+	createPlainGitCommitMultiDiffSourceResolver,
+	PLAIN_GIT_COMMIT_BLOB_SCHEME,
+} from "./features/scm/plain-git-commit-detail";
 import { createPlainGitTextModelContentProvider } from "./features/scm/plain-git-content-provider";
 import { configurePlainGitHistoryBridge } from "./features/scm/plain-git-history-view";
 import { registerPlainScmCommands } from "./features/scm/plain-scm-commands";
@@ -240,6 +246,29 @@ async function bootstrap(): Promise<void> {
 			}
 		};
 	}
+
+	// `F090` S2: the `plain-git-commit-blob:` read-only content provider and
+	// the `plain-git-commit:` multi-diff source resolver — registered here for
+	// the same "available independent of whether any view has opened it yet"
+	// reason as the `git:` provider immediately above. Never touches
+	// `PlainScmProvider.historyProvider` (still `constObservable(undefined)`)
+	// and never consumes the multi-diff-editor override's own bundled
+	// `ScmMultiDiffSourceResolverContribution` — see `plain-git-commit-
+	// detail.ts`'s own module doc comment for the full audit trail.
+	const gitCommitBlobContentProvider = createPlainGitCommitBlobContentProvider(
+		bridge,
+		modelServiceForGitContent,
+	);
+	textModelService.registerTextModelContentProvider(
+		PLAIN_GIT_COMMIT_BLOB_SCHEME,
+		gitCommitBlobContentProvider,
+	);
+	const multiDiffSourceResolverService = await getService(
+		IMultiDiffSourceResolverService,
+	);
+	multiDiffSourceResolverService.registerResolver(
+		createPlainGitCommitMultiDiffSourceResolver(bridge),
+	);
 
 	const themeFileService = await getService(IFileService);
 	const themeRegistry = await createPlainThemeRegistry(themeFileService);

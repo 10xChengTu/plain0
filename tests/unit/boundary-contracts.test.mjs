@@ -41,6 +41,8 @@ import {
 	validateGitIpcBridgeBoundary,
 	validateGitNetworkConfirmationBoundary,
 	validateGitRustBoundary,
+	validateGitShowCommitFirstParentBoundary,
+	validateMultiDiffEditorOverrideImportBoundary,
 } from "../../scripts/plain/boundary-contracts.mjs";
 
 const baselineWindow = {
@@ -140,6 +142,7 @@ import { DialogService } from "@codingame/monaco-vscode-dialogs-service-override
 import getExplorerServiceOverride from "@codingame/monaco-vscode-explorer-service-override";
 import getFilesServiceOverride from "@codingame/monaco-vscode-files-service-override";
 import getModelServiceOverride from "@codingame/monaco-vscode-model-service-override";
+import getMultiDiffEditorServiceOverride from "@codingame/monaco-vscode-multi-diff-editor-service-override";
 import getNotificationServiceOverride from "@codingame/monaco-vscode-notifications-service-override";
 import getTextmateServiceOverride from "@codingame/monaco-vscode-textmate-service-override";
 import getThemeServiceOverride from "@codingame/monaco-vscode-theme-service-override";
@@ -159,6 +162,7 @@ export function createServiceOverrides() {
     ...getExplorerServiceOverride(),
     ...getThemeServiceOverride(),
     ...getTextmateServiceOverride(),
+    ...getMultiDiffEditorServiceOverride(),
     [IDialogService.toString()]: new SyncDescriptor(
       DialogService,
       undefined,
@@ -184,6 +188,7 @@ import { DialogService } from "@codingame/monaco-vscode-dialogs-service-override
 import getExplorerServiceOverride from "@codingame/monaco-vscode-explorer-service-override";
 import getFilesServiceOverride from "@codingame/monaco-vscode-files-service-override";
 import getModelServiceOverride from "@codingame/monaco-vscode-model-service-override";
+import getMultiDiffEditorServiceOverride from "@codingame/monaco-vscode-multi-diff-editor-service-override";
 import getNotificationServiceOverride from "@codingame/monaco-vscode-notifications-service-override";
 import getTextmateServiceOverride from "@codingame/monaco-vscode-textmate-service-override";
 import getThemeServiceOverride from "@codingame/monaco-vscode-theme-service-override";
@@ -218,6 +223,7 @@ export function createServiceOverrides() {
     ...getExplorerServiceOverride(),
     ...getThemeServiceOverride(),
     ...getTextmateServiceOverride(),
+    ...getMultiDiffEditorServiceOverride(),
     [IWorkspaceEditingService.toString()]: new SyncDescriptor(
       PlainWorkspaceEditingService,
       [],
@@ -1096,6 +1102,40 @@ describe("Plain Workbench service override Harness", () => {
 		expect(validateDialogServiceOverride(movedSelection)).toContain(
 			"createServiceOverrides must keep IDialogService as the final Workbench override before language status",
 		);
+	});
+
+	it("locks the multi-diff-editor override import to app/services.ts only (F090 S2)", () => {
+		expect(validateDialogServiceOverride(baselineServiceOverrides)).toEqual([]);
+		expect(
+			validateMultiDiffEditorOverrideImportBoundary(
+				baselineServiceOverrides,
+				"app/services.ts",
+			),
+		).toEqual([]);
+		for (const source of [
+			'import multiDiff from "@codingame/monaco-vscode-multi-diff-editor-service-override";',
+			'void import("@codingame/monaco-vscode-multi-diff-editor-service-override/vscode/vs/workbench/contrib/multiDiffEditor/browser/multiDiffEditor.contribution");',
+			'export * from "@codingame/monaco-vscode-multi-diff-editor-service-override";',
+			'const unsafeModule = "@codingame/monaco-vscode-multi-diff-editor-service-override";',
+		]) {
+			expect(
+				validateMultiDiffEditorOverrideImportBoundary(
+					source,
+					"app/features/scm/unsafe-multi-diff.ts",
+				),
+			).toEqual([
+				"app/features/scm/unsafe-multi-diff.ts imports the multi-diff-editor override outside app/services.ts",
+			]);
+		}
+		// The resolver/content-provider file only imports base-package types
+		// (never the override package itself) — confirms this boundary does
+		// not misfire against the file that is its main reason for existing.
+		expect(
+			validateMultiDiffEditorOverrideImportBoundary(
+				'import { MultiDiffEditorItem } from "@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/multiDiffEditor/browser/multiDiffSourceResolverService";',
+				"app/features/scm/plain-git-commit-detail.ts",
+			),
+		).toEqual([]);
 	});
 
 	it("rejects indirect construction, file services and global confirm fallbacks", () => {
@@ -9353,6 +9393,10 @@ describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
 		new URL("../../src-tauri/src/git/log.rs", import.meta.url),
 		"utf8",
 	);
+	const gitShowCommitSourceForRustBoundary = readFileSync(
+		new URL("../../src-tauri/src/git/show_commit.rs", import.meta.url),
+		"utf8",
+	);
 
 	const baselineGitRustSources = Object.freeze([
 		{ relativePath: "src-tauri/src/git/status.rs", source: gitStatusSource },
@@ -9368,6 +9412,10 @@ describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
 		{
 			relativePath: "src-tauri/src/git/log.rs",
 			source: gitLogSourceForRustBoundary,
+		},
+		{
+			relativePath: "src-tauri/src/git/show_commit.rs",
+			source: gitShowCommitSourceForRustBoundary,
 		},
 	]);
 
@@ -9922,6 +9970,101 @@ describe("Plain F090 S0 git blame hardening args Harness", () => {
 	});
 });
 
+describe("Plain F090 S2 git show-commit first-parent boundary Harness", () => {
+	const gitShowCommitSource = readFileSync(
+		new URL("../../src-tauri/src/git/show_commit.rs", import.meta.url),
+		"utf8",
+	);
+	const baselineGitShowCommitRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/git/show_commit.rs",
+			source: gitShowCommitSource,
+		},
+	]);
+
+	function withMutatedGitShowCommitSource(mutate) {
+		return baselineGitShowCommitRustSources.map((entry) => ({
+			...entry,
+			source: mutate(entry.source),
+		}));
+	}
+
+	it("passes for the real, unmodified show_commit.rs file", () => {
+		expect(
+			validateGitShowCommitFirstParentBoundary(
+				baselineGitShowCommitRustSources,
+			),
+		).toEqual([]);
+	});
+
+	it("fails if show_commit.rs is missing entirely", () => {
+		expect(validateGitShowCommitFirstParentBoundary([])).toContain(
+			"git boundary requires show_commit.rs",
+		);
+	});
+
+	it('fails if a literal "show" subcommand string is smuggled in anywhere in the file', () => {
+		const mutated = withMutatedGitShowCommitSource(
+			(source) => `${source}\nconst UNUSED_SHOW_MARKER: &str = "show";\n`,
+		);
+		expect(validateGitShowCommitFirstParentBoundary(mutated)).toContain(
+			'show_commit.rs must never spawn `git show` (the literal string "show" must not ' +
+				"appear anywhere in its executable source) — see this file's own module doc " +
+				"comment for why a plain two-explicit-revision `git diff` replaces it entirely",
+		);
+	});
+
+	it("fails if verify_commit_exists is called after resolve_first_parent instead of before (the exact regression this contract exists to catch)", () => {
+		const mutated = withMutatedGitShowCommitSource((source) =>
+			source.replace(
+				"    verify_commit_exists(&repo_dir, sha).await?;\n    let parent_sha = resolve_first_parent(&repo_dir, sha).await?;\n",
+				"    let parent_sha = resolve_first_parent(&repo_dir, sha).await?;\n    verify_commit_exists(&repo_dir, sha).await?;\n",
+			),
+		);
+		expect(validateGitShowCommitFirstParentBoundary(mutated)).toContain(
+			"show_commit's own function body must call verify_commit_exists strictly before " +
+				"resolve_first_parent — neither %P nor --parents output alone can distinguish a " +
+				"non-existent/non-commit object from a genuine root commit",
+		);
+	});
+
+	it("fails if verify_commit_exists is removed from show_commit entirely", () => {
+		const mutated = withMutatedGitShowCommitSource((source) =>
+			source.replace("    verify_commit_exists(&repo_dir, sha).await?;\n", ""),
+		);
+		expect(validateGitShowCommitFirstParentBoundary(mutated)).toContain(
+			"show_commit's own function body must call verify_commit_exists strictly before " +
+				"resolve_first_parent — neither %P nor --parents output alone can distinguish a " +
+				"non-existent/non-commit object from a genuine root commit",
+		);
+	});
+
+	it("fails if base_revision is built from a bare sha instead of parent_sha.as_deref().unwrap_or(EMPTY_TREE_SHA)", () => {
+		const mutated = withMutatedGitShowCommitSource((source) =>
+			source.replace(
+				"let base_revision: &str = parent_sha.as_deref().unwrap_or(EMPTY_TREE_SHA);",
+				"let base_revision: &str = sha;",
+			),
+		);
+		expect(validateGitShowCommitFirstParentBoundary(mutated)).toContain(
+			"show_commit's own base_revision must be built from parent_sha.as_deref().unwrap_or(EMPTY_TREE_SHA) " +
+				"— never a bare sha positional or a sha^-style revspec suffix",
+		);
+	});
+
+	it("fails if show_commit is renamed away, losing the function this contract inspects", () => {
+		const mutated = withMutatedGitShowCommitSource((source) =>
+			source.replace(
+				"pub(crate) async fn show_commit(",
+				"pub(crate) async fn show_commit_renamed(",
+			),
+		);
+		expect(validateGitShowCommitFirstParentBoundary(mutated)).toContain(
+			"show_commit.rs must define a show_commit function",
+		);
+	});
+});
+
 describe("Plain F080 S1 git IPC bridge Harness", () => {
 	const gitCommandsSourceForBridge = readFileSync(
 		new URL("../../src-tauri/src/git/commands.rs", import.meta.url),
@@ -9992,7 +10135,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the eighteen audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the twenty audited git methods, no more and no fewer",
 		);
 	});
 
@@ -10056,7 +10199,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the eighteen audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the twenty audited git methods, no more and no fewer",
 		);
 	});
 
@@ -10117,7 +10260,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the eighteen audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the twenty audited git methods, no more and no fewer",
 		);
 	});
 
@@ -10130,7 +10273,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the eighteen audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the twenty audited git methods, no more and no fewer",
 		);
 	});
 

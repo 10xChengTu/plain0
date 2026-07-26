@@ -121,6 +121,11 @@ const EXPECTED_SERVICE_OVERRIDE_CALLS = Object.freeze([
 	"getExplorerServiceOverride",
 	"getThemeServiceOverride",
 	"getTextmateServiceOverride",
+	// `F090` S2: the multi-diff-editor override's own zero-argument factory
+	// — see `validateMultiDiffEditorOverrideImportBoundary`'s own doc
+	// comment for the chat/AI-cleanliness audit that justifies calling it
+	// directly here, exactly like every sibling override above.
+	"getMultiDiffEditorServiceOverride",
 ]);
 // Working-copy-service-override's default export unconditionally imports
 // browser/workingCopyBackupService.js and common/workingCopyHistoryService.js,
@@ -445,6 +450,81 @@ export function validateWorkingCopyOverrideImportBoundary(
 		);
 	}
 	return failures;
+}
+
+/**
+ * `F090` S2 installs `@codingame/monaco-vscode-multi-diff-editor-service-
+ * override@35.0.1` — the first new vendor override this feature adds (see
+ * `docs/research/2026-07-26-git-history.md`'s own chat/AI-coupling audit).
+ * Confirmed clean by reading the real, installed tarball (not merely the
+ * research doc's own summary): its only file (`index.js`) does
+ * `getServiceOverride() { return { [IMultiDiffSourceResolverService...]:
+ * new SyncDescriptor(MultiDiffSourceResolverService, [], true) }; }` and a
+ * side-effect import of `multiDiffEditor.contribution.js` (which itself only
+ * registers the multi-diff editor pane, its actions, and the base package's
+ * own `ScmMultiDiffSourceResolverContribution`/`OpenScmGroupAction` — audited
+ * zero chat/copilot references, only `ISCMService`/`IEditorService`/
+ * `IActivityService` dependencies) — this override package is therefore
+ * called directly, exactly like every sibling override in
+ * `app/services.ts`'s `createServiceOverrides` (never an aggregating-entry-
+ * point exception the way `working-copy-service-override`'s own factory
+ * needs). Plain's own resolver (`plain-git-commit-detail.ts`) and view code
+ * never import this override package at all — they only import
+ * `IMultiDiffSourceResolverService`/`IMultiDiffSourceResolver`/
+ * `MultiDiffEditorItem` from the *base* `@codingame/monaco-vscode-api`
+ * package (already unrestricted by this boundary; those types live there,
+ * not in the override package itself) — so `app/services.ts` is this
+ * package's *only* legitimate reference anywhere in `app/`.
+ */
+const MULTI_DIFF_EDITOR_OVERRIDE_ROOT_MODULE =
+	"@codingame/monaco-vscode-multi-diff-editor-service-override";
+
+function isMultiDiffEditorOverrideModule(moduleName) {
+	return (
+		moduleName === MULTI_DIFF_EDITOR_OVERRIDE_ROOT_MODULE ||
+		moduleName.startsWith(`${MULTI_DIFF_EDITOR_OVERRIDE_ROOT_MODULE}/`)
+	);
+}
+
+export function validateMultiDiffEditorOverrideImportBoundary(
+	source,
+	relativePath,
+) {
+	const sourceFile = ts.createSourceFile(
+		relativePath,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	let referencesMultiDiffEditorOverride = false;
+	function visit(node) {
+		if (
+			ts.isStringLiteralLike(node) &&
+			isMultiDiffEditorOverrideModule(node.text)
+		) {
+			referencesMultiDiffEditorOverride = true;
+		}
+		if (
+			ts.isCallExpression(node) &&
+			node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+			node.arguments.length > 0 &&
+			isMultiDiffEditorOverrideModule(
+				staticStringValue(node.arguments[0]) ?? "",
+			)
+		) {
+			referencesMultiDiffEditorOverride = true;
+		}
+		ts.forEachChild(node, visit);
+	}
+	visit(sourceFile);
+	const normalizedPath = relativePath.replaceAll("\\", "/");
+	return referencesMultiDiffEditorOverride &&
+		normalizedPath !== "app/services.ts"
+		? [
+				`${normalizedPath} imports the multi-diff-editor override outside app/services.ts`,
+			]
+		: [];
 }
 
 export function validateDialogSurfaceBoundary(source, relativePath) {
@@ -1388,6 +1468,9 @@ export function validateWorkspaceProviderBootstrap(source) {
 				parent.expression.text === "configurePlainGitHistoryBridge" ||
 				parent.expression.text === "createPlainGitTextModelContentProvider" ||
 				parent.expression.text === "createPlainGitBlameContribution" ||
+				parent.expression.text === "createPlainGitCommitBlobContentProvider" ||
+				parent.expression.text ===
+					"createPlainGitCommitMultiDiffSourceResolver" ||
 				parent.expression.text === "consumeImportedThemePackages" ||
 				parent.expression.text === "registerPlainThemeCommands" ||
 				parent.expression.text === "registerPlainThemePicker" ||
@@ -6387,20 +6470,37 @@ const GIT_COMMAND_CONTRACTS = Object.freeze([
 		returnType: "->Result<GitLineHistoryDetailResultWire,CommandError>",
 		body: "let(path,range,skip,expected_sha)=request.into_parts()?;letresult=log::line_history_detail(trust.inner(),workspace.inner(),window.label(),&path,range,skip,&expected_sha,).await?;Ok(GitLineHistoryDetailResultWire::from(result))",
 	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_show_commit",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitShowCommitRequest",
+		returnType: "->Result<GitShowCommitResult,CommandError>",
+		body: "letsha=request.into_parts()?;letresult=show_commit::show_commit(trust.inner(),workspace.inner(),window.label(),&sha).await?;Ok(GitShowCommitResult::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_show_commit_blob",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitShowCommitBlobRequest",
+		returnType: "->Result<GitShowBlobResult,CommandError>",
+		body: "let(sha,path)=request.into_parts()?;letcontent=show_commit::show_commit_blob(trust.inner(),workspace.inner(),window.label(),&sha,&path,).await?;Ok(GitShowBlobResult::new(content))",
+	},
 ]);
 
 /**
- * Locks all eighteen git commands (`F080` S1's three reads, S3's five
+ * Locks all twenty git commands (`F080` S1's three reads, S3's five
  * writes, S4's five network commands, `F090` S0's two read-only blame
- * commands — `git_blame_file`/`git_blame_commit_messages` — and `F090` S1's
+ * commands — `git_blame_file`/`git_blame_commit_messages` —, `F090` S1's
  * three read-only file/line-history commands —
- * `git_file_history`/`git_line_history_list`/`git_line_history_detail`,
- * added to this same closed array rather than a parallel
- * `GIT_HISTORY_COMMAND_CONTRACTS`, per the existing "`PlainBridge`'s git
- * surface is one audited whole, not several independently-sized ones"
- * rationale documented below at `GIT_BRIDGE_METHOD_NAMES`) to their audited
- * exact signatures, bodies and single `generate_handler!` registration —
- * mirrors
+ * `git_file_history`/`git_line_history_list`/`git_line_history_detail` — and
+ * `F090` S2's two read-only commit-detail commands —
+ * `git_show_commit`/`git_show_commit_blob` —, added to this same closed
+ * array rather than a parallel `GIT_HISTORY_COMMAND_CONTRACTS`, per the
+ * existing "`PlainBridge`'s git surface is one audited whole, not several
+ * independently-sized ones" rationale documented below at
+ * `GIT_BRIDGE_METHOD_NAMES`) to their audited exact signatures, bodies and
+ * single `generate_handler!` registration — mirrors
  * `validateTrustTerminalCommandRegistration`'s exact technique.
  */
 export function validateGitCommandRegistration(rustSources) {
@@ -6979,6 +7079,63 @@ export function validateGitRustBoundary(rustSources) {
 		);
 	}
 
+	// --- F090 S2: commit-detail file list (`git::show_commit`) -------------
+	const showCommitSource = findRustSource(
+		rustSources,
+		"src-tauri/src/git/show_commit.rs",
+	);
+	if (showCommitSource === undefined) {
+		failures.push("git boundary requires show_commit.rs");
+		return failures;
+	}
+	const executableShowCommit = stripRustCommentsOnly(showCommitSource);
+	const showCommitDiffBaseArgs = argsConstant(
+		executableShowCommit,
+		"GIT_SHOW_COMMIT_DIFF_BASE_ARGS",
+	);
+	if (
+		!sameArray(showCommitDiffBaseArgs, [
+			"diff",
+			"--no-color",
+			"-z",
+			"-M",
+			"-C",
+			"--find-copies-harder",
+			"--no-textconv",
+			"--no-ext-diff",
+		])
+	) {
+		failures.push(
+			"show_commit.rs must define GIT_SHOW_COMMIT_DIFF_BASE_ARGS as exactly the audited " +
+				"two-explicit-revision git diff argument list — never the literal show " +
+				"subcommand (see validateGitShowCommitFirstParentBoundary for the dedicated, " +
+				"stronger lock on that specific invariant)",
+		);
+	}
+	const emptyTreeShaMatch =
+		/pub\s*\(\s*crate\s*\)\s+const\s+EMPTY_TREE_SHA\s*:\s*&\s*str\s*=\s*"([^"]*)"\s*;/.exec(
+			executableShowCommit,
+		);
+	if (
+		emptyTreeShaMatch === null ||
+		emptyTreeShaMatch[1] !== "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+	) {
+		failures.push(
+			"show_commit.rs must define EMPTY_TREE_SHA as exactly git's own well-known empty-tree object id",
+		);
+	}
+
+	if (
+		structBody("GitShowCommitRequest") !== "sha:String," ||
+		structBody("GitShowCommitResult") !==
+			"sha:String,parent_sha:Option<String>,files:Vec<GitDiffFileEntryWire>," ||
+		structBody("GitShowCommitBlobRequest") !== "sha:String,path:String,"
+	) {
+		failures.push(
+			"GitShowCommitRequest/GitShowCommitResult/GitShowCommitBlobRequest must expose only their exact audited fields",
+		);
+	}
+
 	return failures;
 }
 
@@ -7037,18 +7194,101 @@ export function validateGitBlameHardeningArgs(rustSources) {
 }
 
 /**
+ * `F090` S2's dedicated lock for `show_commit.rs`'s own empirically-
+ * discovered deviation from the frozen plan — kept as its own exported
+ * function (not folded into `validateGitRustBoundary`'s generic
+ * `argsConstant`/`structBody` checks) for exactly the same reason
+ * `validateGitBlameHardeningArgs` is: the frozen plan's own sketch
+ * (`git show <sha> --first-parent --name-status`) is the *natural*,
+ * easy-to-reach-for shape, and nothing about `GIT_SHOW_COMMIT_DIFF_BASE_ARGS`
+ * containing `"diff"` instead of `"show"` alone proves a future edit could
+ * not add a second, parallel invocation elsewhere in the same file that goes
+ * back to spawning `git show`. This function re-scans the *entire* file for
+ * the literal subcommand token `"show"` (comments-only stripped, so an actual
+ * quoted string literal — not prose in a doc comment — would be required to
+ * trip it; confirmed zero legitimate occurrences in the audited file, every
+ * real use of the word "show" in `show_commit.rs` today lives in a doc
+ * comment or an identifier like `GIT_SHOW_COMMIT_INVALID_SHA`, neither of
+ * which this pattern can match) and additionally locks the call-order
+ * invariant that makes the two-explicit-revision `git diff` approach actually
+ * correct: `show_commit` must call `verify_commit_exists` before
+ * `resolve_first_parent` (see `show_commit.rs`'s own module doc comment for
+ * why neither `%P` nor `--parents` output alone can tell a non-existent/
+ * non-commit object apart from a genuine root commit), and the diff
+ * invocations' own base revision must be built from `parent_sha`/
+ * `EMPTY_TREE_SHA` — never a bare `sha` positional or a `sha^`-style revspec
+ * suffix (the frozen plan's original, empirically-falsified drill-down
+ * shape for a *different* command, `log::line_history_detail`, which this
+ * lock also guards `show_commit.rs` against silently reintroducing here).
+ */
+export function validateGitShowCommitFirstParentBoundary(rustSources) {
+	const failures = [];
+	const showCommitSource = findRustSource(
+		rustSources,
+		"src-tauri/src/git/show_commit.rs",
+	);
+	if (showCommitSource === undefined) {
+		failures.push("git boundary requires show_commit.rs");
+		return failures;
+	}
+	const executableShowCommit = stripRustCommentsOnly(showCommitSource);
+	if (/"show"/.test(executableShowCommit)) {
+		failures.push(
+			'show_commit.rs must never spawn `git show` (the literal string "show" must not ' +
+				"appear anywhere in its executable source) — see this file's own module doc " +
+				"comment for why a plain two-explicit-revision `git diff` replaces it entirely",
+		);
+	}
+
+	const showCommitBody = rustFunctionBody(executableShowCommit, "show_commit");
+	if (showCommitBody === undefined) {
+		failures.push("show_commit.rs must define a show_commit function");
+		return failures;
+	}
+	const verifyCallIndex = showCommitBody.body.indexOf("verify_commit_exists(");
+	const resolveParentCallIndex = showCommitBody.body.indexOf(
+		"resolve_first_parent(",
+	);
+	if (
+		verifyCallIndex < 0 ||
+		resolveParentCallIndex < 0 ||
+		verifyCallIndex >= resolveParentCallIndex
+	) {
+		failures.push(
+			"show_commit's own function body must call verify_commit_exists strictly before " +
+				"resolve_first_parent — neither %P nor --parents output alone can distinguish a " +
+				"non-existent/non-commit object from a genuine root commit",
+		);
+	}
+	const baseRevisionMatch =
+		/base_revision\s*:\s*&\s*str\s*=\s*parent_sha\s*\.\s*as_deref\s*\(\s*\)\s*\.\s*unwrap_or\s*\(\s*EMPTY_TREE_SHA\s*\)\s*;/.exec(
+			showCommitBody.body,
+		);
+	if (baseRevisionMatch === null) {
+		failures.push(
+			"show_commit's own base_revision must be built from parent_sha.as_deref().unwrap_or(EMPTY_TREE_SHA) " +
+				"— never a bare sha positional or a sha^-style revspec suffix",
+		);
+	}
+
+	return failures;
+}
+
+/**
  * `F080` S1's three read methods, `F080` S3's five write methods
  * (`git_stage_paths`/`git_unstage_paths`/`git_stage_blob`/`git_commit`/
  * `git_discard_paths`), `F080` S4's five network methods
  * (`git_network_preview`/`git_fetch`/`git_pull`/`git_push`/
  * `git_network_cancel`), `F090` S0's two read-only blame methods
- * (`gitBlameFile`/`gitBlameCommitMessages`), and `F090` S1's three
+ * (`gitBlameFile`/`gitBlameCommitMessages`), `F090` S1's three
  * read-only file/line-history methods (`gitFileHistory`/
- * `gitLineHistoryList`/`gitLineHistoryDetail`) — every slice deliberately
- * shares this same closed-list lock rather than getting its own parallel
- * "S_ bridge methods" const, for the same reason `GIT_COMMAND_CONTRACTS`
- * above holds all eighteen Rust commands in one array: `PlainBridge`'s git
- * surface is one audited whole, not several independently-sized ones.
+ * `gitLineHistoryList`/`gitLineHistoryDetail`), and `F090` S2's two
+ * read-only commit-detail methods (`gitShowCommit`/`gitShowCommitBlob`) —
+ * every slice deliberately shares this same closed-list lock rather than
+ * getting its own parallel "S_ bridge methods" const, for the same reason
+ * `GIT_COMMAND_CONTRACTS` above holds all twenty Rust commands in one array:
+ * `PlainBridge`'s git surface is one audited whole, not several
+ * independently-sized ones.
  */
 const GIT_BRIDGE_METHOD_NAMES = [
 	"gitStatus",
@@ -7069,6 +7309,8 @@ const GIT_BRIDGE_METHOD_NAMES = [
 	"gitFileHistory",
 	"gitLineHistoryList",
 	"gitLineHistoryDetail",
+	"gitShowCommit",
+	"gitShowCommitBlob",
 ];
 
 /**
@@ -7124,8 +7366,8 @@ const GIT_NO_ARG_COMMAND_CONTRACTS = Object.freeze([
 ]);
 
 /**
- * Locks `F080` S1+S3+S4 and `F090` S0+S1's TypeScript surface: `PlainBridge`
- * exposes exactly the eighteen audited git methods, `git-codec.ts`'s read-result
+ * Locks `F080` S1+S3+S4 and `F090` S0+S1+S2's TypeScript surface: `PlainBridge`
+ * exposes exactly the twenty audited git methods, `git-codec.ts`'s read-result
  * decoders validate exact own-data keys/reject Proxy wrapping/freeze their
  * result (same rigor `validateTerminalIpcBridgeBoundary` already locks for
  * the terminal domain), and `native.ts` routes each read/write through
@@ -7174,7 +7416,7 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 			JSON.stringify([...GIT_BRIDGE_METHOD_NAMES].sort())
 	) {
 		failures.push(
-			"PlainBridge must expose exactly the eighteen audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the twenty audited git methods, no more and no fewer",
 		);
 	}
 
@@ -7195,6 +7437,7 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 		"decodeGitBlameCommitMessagesResult",
 		"decodeGitHistoryListResult",
 		"decodeGitLineHistoryDetailResult",
+		"decodeGitShowCommitResult",
 	]) {
 		const body = decoderBody(name);
 		if (
@@ -7289,6 +7532,33 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 	) {
 		failures.push(
 			"native.ts must invoke git_line_history_detail exactly once, routed through frozenGitLineHistoryDetailRequest and decoded through decodeGitLineHistoryDetailResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_show_commit"/g)].length !==
+			1 ||
+		!native.includes("frozenGitShowCommitRequest(") ||
+		!native.includes("decodeGitShowCommitResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_show_commit exactly once, routed through frozenGitShowCommitRequest and decoded through decodeGitShowCommitResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_show_commit_blob"/g)]
+			.length !== 1 ||
+		!native.includes("frozenGitShowCommitBlobRequest(") ||
+		// Reuses `decodeGitShowBlobResult` verbatim — `git_show_commit_blob`
+		// returns the exact same `{ content }` wire shape `git_show_blob`
+		// does (see `dto.rs`'s `GitShowCommitBlobRequest`'s own module
+		// comment), so this is deliberately not a third, near-duplicate
+		// decoder.
+		!native.includes("decodeGitShowBlobResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_show_commit_blob exactly once, routed through frozenGitShowCommitBlobRequest and decoded through decodeGitShowBlobResult",
 		);
 	}
 

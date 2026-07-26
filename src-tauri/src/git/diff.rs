@@ -70,6 +70,18 @@ fn git_show_blob_invalid_path() -> CommandError {
     )
 }
 
+/// Mirrors `log::is_lowercase_hex40`/`show_commit::is_lowercase_hex40` — this
+/// module's own independent copy, per this codebase's established
+/// per-domain-function duplication convention (see `dto.rs`'s own comment on
+/// its copy of the same check for why re-validating rather than importing is
+/// deliberate here).
+fn is_lowercase_hex40(bytes: &[u8]) -> bool {
+    bytes.len() == 40
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+}
+
 fn git_show_blob_failed() -> CommandError {
     CommandError::new(
         "GIT_SHOW_BLOB_FAILED",
@@ -104,7 +116,7 @@ fn diff_status_kind(byte: u8) -> Result<DiffStatusKind, CommandError> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct NameStatusEntry {
+pub(crate) struct NameStatusEntry {
     kind: DiffStatusKind,
     similarity: Option<u16>,
     path: GitPathBuf,
@@ -112,7 +124,7 @@ struct NameStatusEntry {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct NumstatEntry {
+pub(crate) struct NumstatEntry {
     added: Option<u64>,
     deleted: Option<u64>,
     path: GitPathBuf,
@@ -131,8 +143,16 @@ pub(crate) struct DiffFileEntry {
 
 /// Tokenizes `--name-status -z` output: pure `NUL`-record fields, no `TAB`
 /// nesting at all — see the module doc's "Two independent tokenizers"
-/// section.
-fn parse_name_status(output: &[u8]) -> Result<Vec<NameStatusEntry>, CommandError> {
+/// section. `pub(crate)` (not module-private) so [`super::show_commit`] can
+/// reuse this exact tokenizer for its own two-explicit-revision `git diff`
+/// invocation — the `--name-status -z`/`--numstat -z` wire shape is identical
+/// regardless of *which* two things are being diffed (working tree vs index,
+/// or one commit vs its resolved first parent), so re-parsing it from
+/// scratch in `show_commit.rs` would be pure duplication, not an independent
+/// safety boundary the way each domain's own `git`-argument *constant* is
+/// (see `show_commit.rs`'s own module doc comment for why its argument
+/// constant is still its own, independently audited copy).
+pub(crate) fn parse_name_status(output: &[u8]) -> Result<Vec<NameStatusEntry>, CommandError> {
     let mut entries = Vec::new();
     let mut iter = split_nul_records(output).into_iter();
     while let Some(status_token) = iter.next() {
@@ -179,8 +199,9 @@ fn parse_numstat_count(field: &[u8]) -> Result<Option<u64>, CommandError> {
 /// Tokenizes `--numstat -z` output: `TAB`-separated fields *within* a
 /// record, `NUL`-separated records — the opposite nesting from
 /// `--name-status`. See the module doc's "Two independent tokenizers"
-/// section for the rename/binary special cases this implements.
-fn parse_numstat(output: &[u8]) -> Result<Vec<NumstatEntry>, CommandError> {
+/// section for the rename/binary special cases this implements. `pub(crate)`
+/// for the same reason as [`parse_name_status`].
+pub(crate) fn parse_numstat(output: &[u8]) -> Result<Vec<NumstatEntry>, CommandError> {
     let mut entries = Vec::new();
     let mut iter = split_nul_records(output).into_iter();
     while let Some(record) = iter.next() {
@@ -234,8 +255,9 @@ fn parse_numstat(output: &[u8]) -> Result<Vec<NumstatEntry>, CommandError> {
 /// inherent, momentary-staleness limitation of a two-invocation read (not a
 /// correctness bug this function can fix on its own): a `--numstat` miss
 /// simply reports `binary: true`/`None` counts for that entry rather than
-/// failing the whole request.
-fn merge_diff_files(
+/// failing the whole request. `pub(crate)` for the same reason as
+/// [`parse_name_status`]/[`parse_numstat`].
+pub(crate) fn merge_diff_files(
     name_status_entries: Vec<NameStatusEntry>,
     numstat_entries: Vec<NumstatEntry>,
 ) -> Vec<DiffFileEntry> {
@@ -324,10 +346,27 @@ pub(crate) async fn diff_files(
 /// The closed set of revisions [`show_blob`] accepts — deliberately not an
 /// arbitrary revision string (that would turn this into a general-purpose
 /// `git_run`, exactly what ADR 0003 forbids).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// [`GitBlobRev::Commit`] was added by `F090` S2 for
+/// [`super::show_commit`]'s multi-diff resolver, which needs "this path's
+/// content at an arbitrary *historical* commit" (the commit itself, or its
+/// resolved first parent), not just `HEAD`/the index. The sha it carries is
+/// never an arbitrary caller-supplied string: every construction site
+/// validates it as exactly 40 lowercase hex characters first (either the
+/// `show_commit` request's own validated `sha`, or a parent sha
+/// [`super::show_commit::resolve_first_parent`] itself derived from git's own
+/// `%P` output) — this variant does not reopen the "no arbitrary revspec"
+/// door [`GitBlobRev`]'s own doc comment closes; it only widens the *closed
+/// set* to include "a specific, already-validated commit", exactly as
+/// concrete as `Head`/`Index` already are. The wire-level `GitShowBlobRequest`
+/// (`dto.rs`) is untouched and still only ever decodes to `Head`/`Index` —
+/// this variant is constructed exclusively from the new, separate
+/// `git_show_commit_blob` command's own request DTO.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum GitBlobRev {
     Head,
     Index,
+    Commit(String),
 }
 
 /// Reads one version of `path` via `git show`. Returns `Ok(None)` — not an
@@ -360,10 +399,22 @@ pub(crate) async fn show_blob(
     if path.is_empty() || path.len() > MAX_GIT_SHOW_BLOB_PATH_BYTES {
         return Err(git_show_blob_invalid_path());
     }
+    if let GitBlobRev::Commit(sha) = &rev {
+        // Independently re-validated here (not merely trusted from the
+        // caller) — mirrors this function's own `path` re-check above and
+        // the codebase-wide "each layer re-validates what an earlier layer
+        // already checked" convention (see `git::commit`'s module doc
+        // comment). A malformed sha reaching this point would otherwise be
+        // embedded verbatim into a revspec string below.
+        if !is_lowercase_hex40(sha.as_bytes()) {
+            return Err(git_show_blob_invalid_path());
+        }
+    }
     let repo_dir = resolve_repo_toplevel(trust, workspace, window_label).await?;
-    let revspec = match rev {
+    let revspec = match &rev {
         GitBlobRev::Head => format!("HEAD:./{path}"),
         GitBlobRev::Index => format!(":0:./{path}"),
+        GitBlobRev::Commit(sha) => format!("{sha}:./{path}"),
     };
     let mut args: Vec<String> = GIT_SHOW_BASE_ARGS
         .iter()

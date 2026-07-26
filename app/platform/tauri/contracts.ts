@@ -832,6 +832,27 @@ export interface GitLineHistoryDetail {
 	readonly diffText: string;
 }
 
+// --- Git commit detail (F090 S2: `git::show_commit`) ------------------------
+
+/**
+ * Wire projection of `git::show_commit::ShowCommitResult` — `files` reuses
+ * [`GitDiffFileEntry`] verbatim (the exact same shape [`GitDiffFilesResult`]
+ * already exposes): `show_commit`'s file list is built from the identical
+ * `git::diff::DiffFileEntry` domain type `gitDiffFiles` produces, just from a
+ * different pair of `git diff` invocations server-side — see
+ * `src-tauri/src/git/show_commit.rs`'s own module doc comment for why this
+ * never runs `git show` at all despite the name. `parentSha` is `null` only
+ * for a root commit (zero parents); every file in that case is inherently
+ * `kind: "added"` (the diff ran against git's own empty-tree object), so a
+ * caller never needs a distinct "no parent" branch when deciding whether a
+ * file's original side exists.
+ */
+export interface GitShowCommitResult {
+	readonly sha: string;
+	readonly parentSha: string | null;
+	readonly files: readonly GitDiffFileEntry[];
+}
+
 export type Unlisten = () => void | Promise<void>;
 
 export interface PlainBridge {
@@ -1237,4 +1258,24 @@ export interface PlainBridge {
 		skip: number,
 		expectedSha: string,
 	): Promise<GitLineHistoryDetail>;
+	/** `F090` S2: resolves `sha`'s file-level change list against its first
+	 * parent (or git's own well-known empty-tree object for a root commit) —
+	 * see `src-tauri/src/git/show_commit.rs`'s own module doc comment for why
+	 * this never runs `git show`'s combined-diff default (which is misleading
+	 * empty for a clean merge commit) despite the name. `sha` must be a real,
+	 * exactly 40-lowercase-hex commit id. Same trust/repository rejections as
+	 * `gitStatus`; rejects with `GIT_SHOW_COMMIT_INVALID_SHA` for a malformed
+	 * sha, or `GIT_SHOW_COMMIT_NOT_FOUND` for a sha that does not resolve to a
+	 * real commit object (including a syntactically valid sha naming a real
+	 * blob/tree instead). */
+	gitShowCommit(sha: string): Promise<GitShowCommitResult>;
+	/** `F090` S2: reads one version of `path` at an arbitrary, already-
+	 * validated commit `sha` — the multi-diff resolver's own content-fetch
+	 * primitive for each changed file's original/modified side (the commit
+	 * itself for the modified side, its resolved `GitShowCommitResult.
+	 * parentSha` for the original side). Same shape and not-found semantics as
+	 * `gitShowBlob` (`{ content: null }`, not a rejection, when the path does
+	 * not exist at that revision) — reuses that exact result type rather than
+	 * a near-duplicate one. */
+	gitShowCommitBlob(sha: string, path: string): Promise<GitShowBlobResult>;
 }

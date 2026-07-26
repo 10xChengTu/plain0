@@ -4,6 +4,7 @@ import { DialogService } from "@codingame/monaco-vscode-dialogs-service-override
 import getExplorerServiceOverride from "@codingame/monaco-vscode-explorer-service-override";
 import getFilesServiceOverride from "@codingame/monaco-vscode-files-service-override";
 import getModelServiceOverride from "@codingame/monaco-vscode-model-service-override";
+import getMultiDiffEditorServiceOverride from "@codingame/monaco-vscode-multi-diff-editor-service-override";
 import getNotificationServiceOverride from "@codingame/monaco-vscode-notifications-service-override";
 import { SCMService } from "@codingame/monaco-vscode-scm-service-override/vscode/vs/workbench/contrib/scm/common/scmService";
 import getTextmateServiceOverride from "@codingame/monaco-vscode-textmate-service-override";
@@ -84,6 +85,14 @@ import {
  * `ISearchService`'s own binding above already established. See
  * `app/features/scm/plain-scm-view.ts`'s module doc comment for the full
  * audit trail of why the package root is never imported at all.
+ *
+ * `getMultiDiffEditorServiceOverride` (`F090` S2) is called directly, exactly
+ * like every other override above — its own default export is audited clean
+ * of any Chat/AI reference (see
+ * `scripts/plain/boundary-contracts.mjs`'s
+ * `validateMultiDiffEditorOverrideImportBoundary` for the full audit trail);
+ * unlike `ISCMService`'s own binding, there is no "extends the exact clean
+ * submodule instead" exception needed here at all.
  */
 export function createServiceOverrides() {
 	return {
@@ -95,6 +104,7 @@ export function createServiceOverrides() {
 		...getExplorerServiceOverride(),
 		...getThemeServiceOverride(),
 		...getTextmateServiceOverride(),
+		...getMultiDiffEditorServiceOverride(),
 		[IWorkspaceEditingService.toString()]: new SyncDescriptor(
 			PlainWorkspaceEditingService,
 			[],

@@ -37,6 +37,9 @@ importers:
       '@codingame/monaco-vscode-model-service-override':
         specifier: 35.0.1
         version: 35.0.1
+      '@codingame/monaco-vscode-multi-diff-editor-service-override':
+        specifier: 35.0.1
+        version: 35.0.1
       '@codingame/monaco-vscode-notifications-service-override':
         specifier: 35.0.1
         version: 35.0.1
@@ -136,6 +139,9 @@ packages:
 
   '@codingame/monaco-vscode-model-service-override@35.0.1':
     resolution: {integrity: sha512-lRWmcs/d03gMEatYCZj0h3ze9Nl6R7V/0rhPrmut79/TBRTsdGQHMdZReHSfu3NlSkrze07JI6g8+j9T1GrSdw==}
+
+  '@codingame/monaco-vscode-multi-diff-editor-service-override@35.0.1':
+    resolution: {integrity: sha512-F2fiMCvzf1UYmrZXH8Y14L6U8SALSgCifUjWynhop362rNE2HaF8+ec7Cb6rh/2CILWd1OZA6i+rwy05Gvq4Pg==}
 
   '@codingame/monaco-vscode-notifications-service-override@35.0.1':
     resolution: {integrity: sha512-1mj4178dS8DUX5TgI1YnotK4bBRvHCHCYvjKTQXZLoHG2LtuzQG+pZiX2IuJ+eFk47C/hrsx2ylpvaUOj5mgSg==}
@@ -943,6 +949,10 @@ snapshots:
       '@codingame/monaco-vscode-api': 35.0.1(patch_hash=184ceed92b82bccb869ca91bc322e6c01740d8eb85cd9ddde47484e8959858f6)
 
   '@codingame/monaco-vscode-model-service-override@35.0.1':
+    dependencies:
+      '@codingame/monaco-vscode-api': 35.0.1(patch_hash=184ceed92b82bccb869ca91bc322e6c01740d8eb85cd9ddde47484e8959858f6)
+
+  '@codingame/monaco-vscode-multi-diff-editor-service-override@35.0.1':
     dependencies:
       '@codingame/monaco-vscode-api': 35.0.1(patch_hash=184ceed92b82bccb869ca91bc322e6c01740d8eb85cd9ddde47484e8959858f6)
 

@@ -131,6 +131,29 @@ GIT_LOG_LINE_HISTORY_ARGS = GIT_LOG_COMMIT_META_ARGS + ["-L<start>,<end>:<path>"
                           且输出为空(已实测)，映射为 GIT_LINE_HISTORY_DETAIL_NOT_FOUND。
 GIT_SHOW_COMMIT_ARGS  = ["show", "--no-color", "--no-textconv", "--no-ext-diff",
                           "--first-parent", "--name-status"]（复用 F080 diff 双调用模式再加 --numstat 变体取增删行数）
+                        ★ S2 实测修正：上面这个形状不可用——真实 git 2.50.1 的
+                          `git show ... --name-status` 会在 -z 的 NUL 记录数据之前
+                          先输出一段人类可读、LF 终止、含攻击者可控自由文本 commit
+                          message 的头部（`commit <sha>`/`Merge: <p1> <p2>`/
+                          `Author:`/`Date:`），与 `diff --name-status -z`（从第一字节起
+                          纯 NUL 记录）形状完全不同；且 `--no-patch` 不能与
+                          `--name-status` 同时用于 `git show`（`fatal: options
+                          '--name-only', '--name-status', '--check', and '-s'
+                          cannot be used together`），无法像 S1 的 `log -L --no-patch`
+                          那样压成纯元数据。改为：`show_commit` 从不调用 `git show`；
+                          解析 sha 的第一父提交（`git log -1 -z --format=%P --no-patch
+                          <sha>`，%P 是 git 自己计算的定长十六进制+空格字段，不同于
+                          %an/%s/%B，天然不需要 %x1f 分隔符防护）后，对
+                          <parent-or-empty-tree-sha>/<sha> 两个显式版本号跑一次纯
+                          `git diff --name-status -z`/`--numstat -z`（复用
+                          super::diff 已审计的两次调用模式），根提交（零父）用 git 自身
+                          固定空树 sha `4b825dc642cb6eb9a060e54bf8d69288fbee4904`
+                          代替父提交——已实测确认与 `git show --first-parent` 剥离头部
+                          后逐字节相同。另需 `-C --find-copies-harder`（而非只有
+                          `-M`）才能检测到源文件完全未改动的拷贝，且需要独立的
+                          `git rev-parse --verify -q <sha>^{commit}` 存在性闸门（%P/
+                          --parents 都无法区分"不是提交"与"零父根提交"，两者均静默
+                          exit 0 空输出）。详见 progress.md 的 F090 S2 条目。
 GIT_LOG_GRAPH_ARGS    = ["log", "-z", "--format=<FIXED, 含 %H%x1f%P%x1f...>", "--all"|"--branches"（不用 --all，因其会带出 refs/stash，见实测）]
 GIT_FOR_EACH_REF_ARGS = ["for-each-ref", "--format=<FIXED，含 %00>", "refs/heads", "refs/tags", "refs/remotes"]
 GIT_STASH_LIST_ARGS   = ["stash", "list", "-z", "--format=<FIXED>"]
@@ -188,7 +211,7 @@ F090 acceptance 第 3 条明确要求"stash、worktree 工作流通过 fixture"�
 
 1. **S0 blame 核心 + age heatmap**：Rust `git::blame` 模块（`--line-porcelain --root -c core.quotePath=false [-L] [-c]`,批量 `git log --no-walk` 元数据）、`GIT_HISTORY_COMMAND_CONTRACTS` 的 blame 子集、`validateGitBlameHardeningArgs`；前端 Monaco decoration + hover provider + age 颜色插值；含恶意含 LF/非 ASCII 文件名的 fixture（如实测出的行为超出可解析范围,记录为已知限制而非阻塞本切片）。
 2. **S1 文件与行历史**（**已完成**；line-history-detail 的实际形状见上方 ★ S1 实测修正二，不是这里原写的 `-1 -L <sha>`）：`git::log` 模块的三个变体（file-history 用 `--follow`、line-history-list 用 `--no-patch -L`、line-history-detail 用 `--skip=<n> --max-count=1` + 期望 sha 校验）；前端侧栏列表 + 点开展示具体 diff hunk；含 rename fixture（验证 `--follow` 与默认 `-L` 追踪行为的实测结论）。
-3. **S2 compare / commit 详情**：`show-commit`（强制 `--first-parent`)命令、merge 提交 fixture（验证空 diff 陷阱已被规避）；安装 `multi-diff-editor-service-override`、自建 `plain-git-commit:` resolver 接入 `MultiDiffEditorItem[]`；bundle 债务基线核对（零意外新增 debt source,同 F080 S2 对 scm override 的验证纪律）。
+3. **S2 compare / commit 详情**（**已完成**；`show_commit` 的实际形状见上方 ★ S2 实测修正，不是这里原写的 `git show --first-parent --name-status`）：`show_commit(sha)` 命令（内部从不调用 `git show`，改为两个显式版本号的 `git diff`）、merge 提交 fixture（含两个独立控制组，验证空 diff 陷阱已被规避）；安装 `multi-diff-editor-service-override`、自建 `plain-git-commit:`/`plain-git-commit-blob:` resolver 接入 `MultiDiffEditorItem[]`；bundle 债务基线核对——实测 `sourceCount` +15（全部为 vendor 多文件 diff 相关文件，含调研阶段未覆盖到的 `editor/browser/widget/multiDiffEditor/` 核心 widget 文件）、`debtSourceCount`/`categoryCounts`/`debtSourceSha256` 零漂移。
 4. **S3 graph + refs**：`git::log`（graph 用途,parents/refs 字段)+ `git::refs`（`for-each-ref`）模块；前端 SVG swimlane 布局算法（自建实现)+ refs 侧栏；性能基准（构造合成大仓库或浅克隆真实大仓库,给出真实数字而非只引用他人报告）。
 5. **S4 stash 工作流**：`git::stash` 模块（list/show 只读 + push/apply/pop/drop 写)+ `validateGitStashConfirmationBoundary`；前端 stash 面板 + 确认对话框（pop/drop 走确认,push/apply 走提示不强确认）。
 6. **S5 worktree 工作流**：`git::worktree` 模块（list 只读 + add/remove 写,remove 的"先探测脏状态再确认"两阶段调用)+ `validateGitWorktreeConfirmationBoundary`；`worktree add` 的落盘路径 workspace capability 边界校验（**授权模型已由主导会话裁定,见"风险与未知项"第 1 条:原生选择器选父目录 + `RelativePath::join_child` 校验单层子段;本切片只需实施,不需再做架构决策**）；前端 worktree 面板。

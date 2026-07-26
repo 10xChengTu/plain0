@@ -19,6 +19,7 @@ import type {
 	GitNetworkPreviewResult,
 	GitRenameOrCopyKind,
 	GitShowBlobResult,
+	GitShowCommitResult,
 	GitStatusEntry,
 	GitStatusResult,
 	GitSubmoduleState,
@@ -1374,4 +1375,85 @@ export function decodeGitLineHistoryDetailResult(
 		rejectProxyObject(value);
 		return Object.freeze(result);
 	});
+}
+
+// --- F090 S2: git commit detail (`git::show_commit`) ------------------------
+
+function gitShowCommitRequestInvalid(): never {
+	return requestViolation(
+		"GIT_SHOW_COMMIT_INVALID_REQUEST",
+		"The git show commit request is invalid.",
+	);
+}
+
+/** Builds a frozen `git_show_commit` request. `sha` must be a real, exactly
+ * 40-lowercase-hex commit id — mirrors `frozenGitLineHistoryDetailRequest`'s
+ * own `expectedSha` validation via the same `isGitBlameSha` check. */
+export function frozenGitShowCommitRequest(
+	sha: unknown,
+): Readonly<{ sha: string }> {
+	if (!isGitBlameSha(sha)) {
+		return gitShowCommitRequestInvalid();
+	}
+	return Object.freeze({ sha });
+}
+
+/** Decodes a `git_show_commit` response: an own-data, exactly
+ * `{ sha, parentSha, files }` object. `files` reuses the exact same
+ * `decodeGitDiffFileEntry` element decoder `decodeGitDiffFilesResult` already
+ * uses — see `GitShowCommitResult`'s own doc comment for why the wire shape
+ * is identical. */
+export function decodeGitShowCommitResult(value: unknown): GitShowCommitResult {
+	return sanitizedDecode(() => {
+		if (
+			!isPlainObject(value) ||
+			!hasExactKeys(value, ["sha", "parentSha", "files"])
+		) {
+			return violation();
+		}
+		if (
+			!isGitBlameSha(value.sha) ||
+			(value.parentSha !== null && !isGitBlameSha(value.parentSha))
+		) {
+			return violation();
+		}
+		const files = ownObjectArraySnapshot(
+			value.files,
+			MAX_GIT_STATUS_ENTRIES,
+			decodeGitDiffFileEntry,
+		);
+		rejectProxyObject(value);
+		return Object.freeze({
+			sha: value.sha,
+			parentSha: value.parentSha,
+			files,
+		});
+	});
+}
+
+function gitShowCommitBlobRequestInvalid(): never {
+	return requestViolation(
+		"GIT_SHOW_COMMIT_BLOB_INVALID_REQUEST",
+		"The git show commit blob request is invalid.",
+	);
+}
+
+/** Builds a frozen `git_show_commit_blob` request. Its response is decoded
+ * through the existing `decodeGitShowBlobResult` (identical `{ content }`
+ * wire shape to `git_show_blob`) — never a near-duplicate decoder. */
+export function frozenGitShowCommitBlobRequest(
+	sha: unknown,
+	path: unknown,
+): Readonly<{ sha: string; path: string }> {
+	if (!isGitBlameSha(sha)) {
+		return gitShowCommitBlobRequestInvalid();
+	}
+	if (
+		typeof path !== "string" ||
+		path.length === 0 ||
+		path.length > MAX_GIT_MUTATE_PATH_CHARS
+	) {
+		return gitShowCommitBlobRequestInvalid();
+	}
+	return Object.freeze({ sha, path });
 }

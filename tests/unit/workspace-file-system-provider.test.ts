@@ -404,6 +404,12 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async gitLineHistoryDetail() {
 			throw new Error("unused");
 		},
+		async gitShowCommit() {
+			throw new Error("unused");
+		},
+		async gitShowCommitBlob() {
+			throw new Error("unused");
+		},
 		...overrides,
 	};
 }
