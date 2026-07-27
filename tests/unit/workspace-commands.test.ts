@@ -131,6 +131,8 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		gitLineHistoryDetail: vi.fn(),
 		gitShowCommit: vi.fn(),
 		gitShowCommitBlob: vi.fn(),
+		gitLogGraph: vi.fn(),
+		gitRefsList: vi.fn(),
 		...overrides,
 	};
 }
@@ -232,6 +234,8 @@ describe("workspace Workbench command overrides", () => {
 			gitLineHistoryDetail: vi.fn(),
 			gitShowCommit: vi.fn(),
 			gitShowCommitBlob: vi.fn(),
+			gitLogGraph: vi.fn(),
+			gitRefsList: vi.fn(),
 		};
 		const contextValues = new Map<string, unknown>([
 			["openFolderWorkspaceSupport", false],

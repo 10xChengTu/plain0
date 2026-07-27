@@ -116,6 +116,8 @@ function fakeBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		gitLineHistoryDetail: notImplemented,
 		gitShowCommit: notImplemented,
 		gitShowCommitBlob: notImplemented,
+		gitLogGraph: notImplemented,
+		gitRefsList: notImplemented,
 		...overrides,
 	};
 }

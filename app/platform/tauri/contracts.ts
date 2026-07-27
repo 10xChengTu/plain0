@@ -853,6 +853,69 @@ export interface GitShowCommitResult {
 	readonly files: readonly GitDiffFileEntry[];
 }
 
+// --- Git graph + refs (F090 S3: `git::log::log_graph` + `git::refs`) --------
+
+/** One `git log --topo-order --branches --tags --remotes` DAG node —
+ * `parents` is empty for a root commit, one element for an ordinary commit,
+ * two for a normal merge, or three-or-more for an octopus merge. `subject`
+ * is the commit message's first line only (see
+ * `src-tauri/src/git/log.rs`'s own module doc comment for why this command
+ * never fetches the full body alongside `sha`/`parents` in the same
+ * `%x1f`-delimited record — a caller wanting the full message already has
+ * `gitBlameCommitMessages` for an on-demand batch fetch). This command
+ * deliberately never asks git for ref/branch/tag decoration (`%d`/`%D`) —
+ * a caller wanting to badge a node with the refs pointing at it joins this
+ * result against a separately-fetched [`gitRefsList`] result by comparing
+ * `sha` against that result's own `targetSha`/`peeledSha`, entirely
+ * client-side (see `plain-git-graph-layout.ts`'s own `buildRefBadgesBySha`). */
+export interface GitGraphNode {
+	readonly sha: string;
+	readonly parents: readonly string[];
+	readonly subject: string;
+}
+
+/** `truncated` is `true` when more commits actually matched the caller's own
+ * requested `maxCount` than were returned — the same "capped, not
+ * exhaustive" meaning [`GitHistoryListResult.truncated`] already carries for
+ * this domain. */
+export interface GitLogGraphResult {
+	readonly nodes: readonly GitGraphNode[];
+	readonly truncated: boolean;
+}
+
+/** Which of the three requested namespaces a [`GitRefEntry`] came from —
+ * mirrors `src-tauri/src/git/refs.rs`'s own `RefGroupKind`. */
+export type GitRefKind = "branch" | "remoteBranch" | "tag";
+
+/** One `for-each-ref` record. `peeledSha`/`isAnnotatedTag` are only ever
+ * meaningfully paired together: an annotated tag has `isAnnotatedTag: true`
+ * and `peeledSha` set to the commit it ultimately points at; a lightweight
+ * tag (or a branch/remote-tracking ref) has `isAnnotatedTag: false` and
+ * `peeledSha: null` — never a same-commit sentinel. `upstream` is `null` for
+ * both "no upstream configured" and "not a local branch at all" (a caller
+ * already knows `kind` for the latter) — see
+ * `src-tauri/src/git/refs.rs`'s own `RefEntry` doc comment for the full
+ * rationale, including why ref names are plain `string` here rather than
+ * needing the byte-safe modeling this domain's *path* fields use (git's own
+ * ref-name grammar forbids every ASCII control byte, so a ref name can
+ * never contain anything the wire boundary's UTF-8 requirement would need
+ * to lossily project away — unlike a Linux path, which can). */
+export interface GitRefEntry {
+	readonly kind: GitRefKind;
+	readonly fullName: string;
+	readonly shortName: string;
+	readonly targetSha: string;
+	readonly isAnnotatedTag: boolean;
+	readonly peeledSha: string | null;
+	readonly upstream: string | null;
+	readonly isHead: boolean;
+}
+
+export interface GitRefsListResult {
+	readonly entries: readonly GitRefEntry[];
+	readonly truncated: boolean;
+}
+
 export type Unlisten = () => void | Promise<void>;
 
 export interface PlainBridge {
@@ -1278,4 +1341,17 @@ export interface PlainBridge {
 	 * not exist at that revision) — reuses that exact result type rather than
 	 * a near-duplicate one. */
 	gitShowCommitBlob(sha: string, path: string): Promise<GitShowBlobResult>;
+	/** `F090` S3: `git log -z --format=%H%x1f%P%x1f%s --no-patch --topo-order
+	 * --branches --tags --remotes --max-count=<maxCount+1>` — the graph
+	 * view's own DAG source. `maxCount` must be a positive integer (the
+	 * caller's own display window); rejects with
+	 * `GIT_LOG_GRAPH_INVALID_REQUEST` for zero or an excessive value. Same
+	 * trust/repository rejections as `gitStatus`. */
+	gitLogGraph(maxCount: number): Promise<GitLogGraphResult>;
+	/** `F090` S3: `git for-each-ref --format=... refs/heads refs/tags
+	 * refs/remotes` — the refs sidebar's own data source, and the graph
+	 * view's own ref-badge join source (see `GitGraphNode`'s own doc
+	 * comment). Takes no parameters. Same trust/repository rejections as
+	 * `gitStatus`. */
+	gitRefsList(): Promise<GitRefsListResult>;
 }

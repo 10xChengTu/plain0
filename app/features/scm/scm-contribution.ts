@@ -9,6 +9,7 @@ import {
 	type IViewsRegistry,
 } from "@codingame/monaco-vscode-api/vscode/vs/workbench/common/views";
 
+import { PlainGitGraphView } from "./plain-git-graph-view";
 import { PlainGitHistoryView } from "./plain-git-history-view";
 import { PlainScmView } from "./plain-scm-view";
 
@@ -22,6 +23,12 @@ export const SCM_VIEW_ID = PlainScmView.ID;
  * architecture convention the frozen research doc cites as an interaction
  * *reference* only ("历史归在源码管理面板下") — never any of its code. */
 export const GIT_HISTORY_VIEW_ID = PlainGitHistoryView.ID;
+/** `F090` S3: `PlainGitGraphView`'s registered id — same Source Control view
+ * container as `PlainScmView`/`PlainGitHistoryView` (see `registerViews`'s
+ * own call below), same "GitLens-style information architecture as an
+ * interaction *reference* only" rationale [`GIT_HISTORY_VIEW_ID`]'s own
+ * comment records. */
+export const GIT_GRAPH_VIEW_ID = PlainGitGraphView.ID;
 
 /**
  * Registers exactly one Sidebar view container and its one view pane —
@@ -74,6 +81,14 @@ Registry.as<IViewsRegistry>(Extensions.ViewsRegistry).registerViews(
 			containerIcon: Codicon.history,
 			name: { value: "History", original: "History" },
 			ctorDescriptor: new SyncDescriptor(PlainGitHistoryView),
+			canToggleVisibility: true,
+			canMoveView: true,
+		},
+		{
+			id: GIT_GRAPH_VIEW_ID,
+			containerIcon: Codicon.gitCommit,
+			name: { value: "Graph", original: "Graph" },
+			ctorDescriptor: new SyncDescriptor(PlainGitGraphView),
 			canToggleVisibility: true,
 			canMoveView: true,
 		},

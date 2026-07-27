@@ -14,7 +14,8 @@ use std::process::Command;
 use tempfile::TempDir;
 
 use super::{
-    file_history, line_history_detail, line_history_list, parse_history_entries, LineRange,
+    file_history, line_history_detail, line_history_list, log_graph, parse_graph_entries,
+    parse_history_entries, LineRange,
 };
 use crate::trust::service::TrustService;
 use crate::workspace::dto::WorkspacePickRootsMode;
@@ -932,4 +933,476 @@ fn line_history_detail_rejects_an_invalid_range_before_ever_invoking_git() {
     ))
     .expect_err("start > end is rejected");
     assert_eq!(error.code(), "GIT_LOG_INVALID_RANGE");
+}
+
+// --- F090 S3: log_graph -----------------------------------------------------
+//
+// Every fixture below spawns a *real* `git` binary (mirroring this file's own
+// header rationale); several are control-group fixtures proving a specific
+// design decision (topo-order, the `--branches --tags --remotes` scope, the
+// single-absorbing-subject-field format string) genuinely changes behavior
+// relative to a naive/differently-shaped alternative, not merely that the
+// chosen shape happens to pass.
+
+#[test]
+fn log_graph_topo_orders_a_multi_branch_merge_dag_including_an_octopus_merge() {
+    if !git_available() {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
+    let repo = init_repo();
+    std::fs::write(repo.path().join("a.txt"), "a1\n").unwrap();
+    raw_git_ok(repo.path(), &["add", "a.txt"]);
+    raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "root"]);
+    let root_sha = head_sha(repo.path());
+
+    std::fs::write(repo.path().join("a.txt"), "a1\na2\n").unwrap();
+    raw_git_ok(repo.path(), &["commit", "--quiet", "-am", "mainchange"]);
+    let main_tip_sha = head_sha(repo.path());
+
+    raw_git_ok(repo.path(), &["checkout", "--quiet", "-b", "bA", &root_sha]);
+    std::fs::write(repo.path().join("b.txt"), "b\n").unwrap();
+    raw_git_ok(repo.path(), &["add", "b.txt"]);
+    raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "ba"]);
+    let a_tip_sha = head_sha(repo.path());
+
+    raw_git_ok(repo.path(), &["checkout", "--quiet", "-b", "bB", &root_sha]);
+    std::fs::write(repo.path().join("c.txt"), "c\n").unwrap();
+    raw_git_ok(repo.path(), &["add", "c.txt"]);
+    raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "bb"]);
+    let b_tip_sha = head_sha(repo.path());
+
+    raw_git_ok(repo.path(), &["checkout", "--quiet", "-b", "bC", &root_sha]);
+    std::fs::write(repo.path().join("d.txt"), "d\n").unwrap();
+    raw_git_ok(repo.path(), &["add", "d.txt"]);
+    raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "bc"]);
+    let c_tip_sha = head_sha(repo.path());
+
+    raw_git_ok(repo.path(), &["checkout", "--quiet", "main"]);
+    raw_git_ok(
+        repo.path(),
+        &["merge", "--quiet", "--no-edit", "bA", "bB", "bC"],
+    );
+    let merge_sha = head_sha(repo.path());
+    assert_ne!(
+        merge_sha, main_tip_sha,
+        "the octopus merge must actually create a new commit"
+    );
+
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
+    let result = block_on(log_graph(&trust, &workspace, "main", 100)).expect("log_graph succeeds");
+
+    assert_eq!(
+        result.nodes.len(),
+        6,
+        "root + mainchange + 3 branch tips + the octopus merge itself"
+    );
+    assert!(!result.truncated);
+
+    // `--topo-order`'s own guarantee: a commit is never shown until all of
+    // its children have been shown. The merge commit has no children at all
+    // (it is the tip), so it must be the very first record; the root commit
+    // is every other commit's ancestor, so it must be the very last.
+    assert_eq!(
+        result.nodes[0].sha, merge_sha,
+        "the octopus merge has no children, so topo-order emits it first"
+    );
+    assert_eq!(
+        result.nodes[0].parents,
+        vec![
+            main_tip_sha.clone(),
+            a_tip_sha.clone(),
+            b_tip_sha.clone(),
+            c_tip_sha.clone(),
+        ],
+        "parent order must be first-parent (the previous HEAD) then the merge \
+         command's own branch argument order — confirmed against real git output"
+    );
+    assert_eq!(
+        result.nodes.last().unwrap().sha,
+        root_sha,
+        "the root commit is every other commit's ancestor, so topo-order emits it last"
+    );
+    assert_eq!(
+        result.nodes.last().unwrap().parents,
+        Vec::<String>::new(),
+        "a root commit has zero parents"
+    );
+
+    let ordinary_parent_counts: Vec<usize> = result
+        .nodes
+        .iter()
+        .filter(|node| node.sha != merge_sha && node.sha != root_sha)
+        .map(|node| node.parents.len())
+        .collect();
+    assert!(
+        ordinary_parent_counts.iter().all(|&count| count == 1),
+        "every non-merge, non-root commit has exactly one parent"
+    );
+
+    let shas: std::collections::HashSet<&str> =
+        result.nodes.iter().map(|node| node.sha.as_str()).collect();
+    for expected in [
+        &merge_sha,
+        &main_tip_sha,
+        &a_tip_sha,
+        &b_tip_sha,
+        &c_tip_sha,
+        &root_sha,
+    ] {
+        assert!(shas.contains(expected.as_str()), "missing {expected}");
+    }
+}
+
+#[test]
+fn log_graph_excludes_a_commit_reachable_only_from_a_detached_head() {
+    if !git_available() {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
+    let repo = init_repo();
+    std::fs::write(repo.path().join("f.txt"), "1\n").unwrap();
+    raw_git_ok(repo.path(), &["add", "f.txt"]);
+    raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "on-branch"]);
+    let branch_sha = head_sha(repo.path());
+
+    raw_git_ok(repo.path(), &["checkout", "--quiet", &branch_sha]);
+    std::fs::write(repo.path().join("f.txt"), "2\n").unwrap();
+    raw_git_ok(repo.path(), &["commit", "--quiet", "-am", "detached-only"]);
+    let detached_sha = head_sha(repo.path());
+    assert_ne!(detached_sha, branch_sha);
+
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
+    let result = block_on(log_graph(&trust, &workspace, "main", 100)).expect("log_graph succeeds");
+
+    let shas: Vec<&str> = result.nodes.iter().map(|node| node.sha.as_str()).collect();
+    assert!(
+        shas.contains(&branch_sha.as_str()),
+        "the commit still reachable from a real branch must appear"
+    );
+    assert!(
+        !shas.contains(&detached_sha.as_str()),
+        "a commit reachable only from a detached HEAD (no branch/tag/remote-tracking \
+         ref points at it) is invisible to `--branches --tags --remotes`, by design — \
+         see this module's own doc comment's ref-namespace-scope section"
+    );
+}
+
+#[test]
+fn log_graph_is_unaffected_by_a_real_non_ascii_branch_name_existing_in_the_repository() {
+    if !git_available() {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
+    let repo = init_repo();
+    std::fs::write(repo.path().join("f.txt"), "1\n").unwrap();
+    raw_git_ok(repo.path(), &["add", "f.txt"]);
+    raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "root"]);
+    let root_sha = head_sha(repo.path());
+
+    // A real, deliberately weird-bytes branch name — this command never
+    // decodes ref names at all (see this module's own doc comment's
+    // "deliberately never asks git for ref/branch/tag decoration" section),
+    // so this only confirms the scan itself does not choke on its existence.
+    raw_git_ok(repo.path(), &["branch", "分支-emoji-🎉"]);
+
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
+    let result = block_on(log_graph(&trust, &workspace, "main", 100))
+        .expect("log_graph tolerates a real non-ASCII branch name existing in the repository");
+    assert_eq!(result.nodes.len(), 1);
+    assert_eq!(result.nodes[0].sha, root_sha);
+}
+
+#[test]
+fn log_graph_is_immune_to_a_hostile_subject_line_containing_a_unit_separator_byte() {
+    if !git_available() {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
+    let repo = init_repo();
+    std::fs::write(repo.path().join("f.txt"), "x\n").unwrap();
+    raw_git_ok(repo.path(), &["add", "f.txt"]);
+    let hostile_subject = format!(
+        "Hostile subject with an embedded {} unit-separator byte, then more subject text.",
+        '\u{1f}'
+    );
+    let commit = Command::new("git")
+        .current_dir(repo.path())
+        .args(["commit", "--quiet", "-F", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(hostile_subject.as_bytes())?;
+            child.wait_with_output()
+        })
+        .expect("git commit with hostile subject spawns");
+    assert!(
+        commit.status.success(),
+        "hostile commit failed: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+    let sha = head_sha(repo.path());
+
+    // Confirm the premise against real git before trusting the parser's own
+    // result — mirrors `file_history_is_immune_to_a_hostile_commit_message...`
+    // 's identical discipline: for a genuinely single-line message, `%s`
+    // returns the hostile byte verbatim.
+    let raw_check = Command::new("git")
+        .current_dir(repo.path())
+        .args(["log", "-1", "--format=%s"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&raw_check.stdout).trim_end_matches('\n'),
+        hostile_subject
+    );
+
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
+    let result = block_on(log_graph(&trust, &workspace, "main", 10))
+        .expect("log_graph succeeds despite the hostile subject");
+    assert_eq!(result.nodes.len(), 1);
+    assert_eq!(result.nodes[0].sha, sha);
+    assert_eq!(
+        result.nodes[0].subject, hostile_subject,
+        "the full subject must be recovered verbatim, embedded separator included"
+    );
+}
+
+/// Pure-function control group: demonstrates that a *naive* "split every
+/// occurrence of the delimiter" parser really would be corrupted by a
+/// subject containing an embedded `0x1f` byte, while the real
+/// [`parse_graph_entries`] (which only splits on the *first two*
+/// occurrences) is not — the same technique
+/// `parse_history_entries_splitn_is_not_confused_by_an_embedded_separator...`
+/// establishes above, independently re-verified against this module's own
+/// three-field graph parser rather than assumed to transfer.
+#[test]
+fn parse_graph_entries_splitn_is_not_confused_by_an_embedded_separator_in_the_subject_while_a_naive_full_split_would_be(
+) {
+    let sha = "a".repeat(40);
+    let parent1 = "b".repeat(40);
+    let parent2 = "c".repeat(40);
+    let subject_with_embedded_separator = format!("subject with a {} char in it", '\u{1f}');
+    let mut record = sha.clone().into_bytes();
+    record.push(0x1f);
+    record.extend_from_slice(parent1.as_bytes());
+    record.push(b' ');
+    record.extend_from_slice(parent2.as_bytes());
+    record.push(0x1f);
+    record.extend_from_slice(subject_with_embedded_separator.as_bytes());
+    let mut output = record.clone();
+    output.push(0);
+
+    let result = parse_graph_entries(&output, 500).expect("parses");
+    assert_eq!(result.nodes.len(), 1);
+    assert_eq!(result.nodes[0].sha, sha);
+    assert_eq!(result.nodes[0].parents, vec![parent1, parent2]);
+    assert_eq!(result.nodes[0].subject, subject_with_embedded_separator);
+
+    // Control: a naive parser that splits on *every* 0x1f occurrence would
+    // instead see 4 fields (3 delimiters: the two structural ones plus the
+    // one embedded in the subject), not 3 — demonstrating the vulnerability
+    // this test's sibling integration test proves is reachable via entirely
+    // normal git usage (a hostile commit subject), not just a synthetic byte
+    // string.
+    let naive_fields: Vec<&[u8]> = record.split(|&byte| byte == 0x1f).collect();
+    assert_eq!(
+        naive_fields.len(),
+        4,
+        "the naive full-split approach really would misparse this record into an extra field"
+    );
+}
+
+#[test]
+fn log_graph_excludes_a_real_stash_entry() {
+    if !git_available() {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
+    let repo = init_repo();
+    std::fs::write(repo.path().join("f.txt"), "1\n").unwrap();
+    raw_git_ok(repo.path(), &["add", "f.txt"]);
+    raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "root"]);
+    std::fs::write(repo.path().join("f.txt"), "2\n").unwrap();
+    raw_git_ok(repo.path(), &["stash", "push", "--quiet", "-m", "wip"]);
+    let stash_sha = String::from_utf8(raw_git(repo.path(), &["rev-parse", "refs/stash"]).stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
+    let result = block_on(log_graph(&trust, &workspace, "main", 100)).expect("log_graph succeeds");
+    let shas: Vec<&str> = result.nodes.iter().map(|node| node.sha.as_str()).collect();
+    assert!(
+        !shas.contains(&stash_sha.as_str()),
+        "a real `git stash push`'s own commit must never appear in \
+         `--branches --tags --remotes` output"
+    );
+}
+
+#[test]
+fn log_graph_of_a_repository_with_zero_commits_is_an_empty_non_error_result() {
+    if !git_available() {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
+    let repo = init_repo();
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
+    let result = block_on(log_graph(&trust, &workspace, "main", 100))
+        .expect("log_graph succeeds on a repository with zero commits");
+    assert!(result.nodes.is_empty());
+    assert!(!result.truncated);
+}
+
+#[test]
+fn log_graph_caps_at_the_callers_max_count_and_reports_truncated() {
+    if !git_available() {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
+    let repo = init_repo();
+    let mut shas = Vec::new();
+    for message in ["one", "two", "three"] {
+        std::fs::write(repo.path().join("f.txt"), message).unwrap();
+        raw_git_ok(repo.path(), &["add", "f.txt"]);
+        raw_git_ok(repo.path(), &["commit", "--quiet", "-m", message]);
+        shas.push(head_sha(repo.path()));
+    }
+
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
+    let result = block_on(log_graph(&trust, &workspace, "main", 2)).expect("log_graph succeeds");
+    assert_eq!(result.nodes.len(), 2);
+    assert!(result.truncated);
+    assert_eq!(result.nodes[0].sha, shas[2], "newest first");
+    assert_eq!(result.nodes[1].sha, shas[1]);
+}
+
+#[test]
+fn log_graph_rejects_a_zero_max_count_before_ever_invoking_git() {
+    let trust_base = TempDir::new().unwrap();
+    let workspace = WorkspaceService::new();
+    let trust = TrustService::new(trust_base.path().to_path_buf());
+    let error =
+        block_on(log_graph(&trust, &workspace, "main", 0)).expect_err("max_count=0 is rejected");
+    assert_eq!(error.code(), "GIT_LOG_GRAPH_INVALID_REQUEST");
+}
+
+#[test]
+fn log_graph_rejects_a_max_count_above_the_defensive_ceiling_before_ever_invoking_git() {
+    let trust_base = TempDir::new().unwrap();
+    let workspace = WorkspaceService::new();
+    let trust = TrustService::new(trust_base.path().to_path_buf());
+    let error = block_on(log_graph(&trust, &workspace, "main", 5_001))
+        .expect_err("max_count above MAX_GRAPH_MAX_COUNT is rejected");
+    assert_eq!(error.code(), "GIT_LOG_GRAPH_INVALID_REQUEST");
+}
+
+// --- parse_graph_entries: pure-function edge cases --------------------------
+
+#[test]
+fn parse_graph_entries_of_empty_output_is_zero_nodes_not_truncated() {
+    let result = parse_graph_entries(b"", 500).expect("parses");
+    assert!(result.nodes.is_empty());
+    assert!(!result.truncated);
+}
+
+#[test]
+fn parse_graph_entries_parses_a_root_commits_empty_parents_field() {
+    let sha = "a".repeat(40);
+    let mut output = sha.clone().into_bytes();
+    output.push(0x1f);
+    output.push(0x1f);
+    output.extend_from_slice(b"root");
+    output.push(0);
+    let result = parse_graph_entries(&output, 500).expect("parses");
+    assert_eq!(result.nodes.len(), 1);
+    assert_eq!(result.nodes[0].sha, sha);
+    assert_eq!(result.nodes[0].parents, Vec::<String>::new());
+}
+
+#[test]
+fn parse_graph_entries_parses_multiple_space_separated_parents() {
+    let sha = "a".repeat(40);
+    let p1 = "b".repeat(40);
+    let p2 = "c".repeat(40);
+    let p3 = "d".repeat(40);
+    let mut output = sha.into_bytes();
+    output.push(0x1f);
+    output.extend_from_slice(format!("{p1} {p2} {p3}").as_bytes());
+    output.push(0x1f);
+    output.extend_from_slice(b"octopus");
+    output.push(0);
+    let result = parse_graph_entries(&output, 500).expect("parses");
+    assert_eq!(result.nodes[0].parents, vec![p1, p2, p3]);
+}
+
+#[test]
+fn parse_graph_entries_rejects_a_record_missing_the_subject_separator() {
+    let sha = "a".repeat(40);
+    let mut output = sha.into_bytes();
+    output.push(0x1f);
+    output.extend_from_slice(b"only-one-field-after-sha");
+    output.push(0);
+    let error =
+        parse_graph_entries(&output, 500).expect_err("missing second separator is rejected");
+    assert_eq!(error.code(), "GIT_LOG_GRAPH_PARSE_FAILED");
+}
+
+#[test]
+fn parse_graph_entries_rejects_a_sha_that_is_not_lowercase_hex40() {
+    let uppercase_sha = "A".repeat(40);
+    let mut output = uppercase_sha.into_bytes();
+    output.push(0x1f);
+    output.push(0x1f);
+    output.extend_from_slice(b"subject");
+    output.push(0);
+    let error = parse_graph_entries(&output, 500).expect_err("uppercase hex sha is rejected");
+    assert_eq!(error.code(), "GIT_LOG_GRAPH_PARSE_FAILED");
+}
+
+#[test]
+fn parse_graph_entries_rejects_a_parent_token_that_is_not_lowercase_hex40() {
+    let sha = "a".repeat(40);
+    let mut output = sha.into_bytes();
+    output.push(0x1f);
+    output.extend_from_slice(b"not-a-real-parent-sha");
+    output.push(0x1f);
+    output.extend_from_slice(b"subject");
+    output.push(0);
+    let error = parse_graph_entries(&output, 500).expect_err("malformed parent token is rejected");
+    assert_eq!(error.code(), "GIT_LOG_GRAPH_PARSE_FAILED");
+}
+
+#[test]
+fn parse_graph_entries_caps_at_the_defensive_ceiling_and_reports_truncated() {
+    // Hand-constructed (not spawned through real git — this exercises only
+    // this module's own pure truncation logic, mirroring
+    // `parse_history_entries_caps_at_the_defensive_ceiling_and_reports_truncated`'s
+    // identical rationale above): 10 distinct, well-formed records, capped at 5.
+    let mut output = Vec::new();
+    for index in 0..10u32 {
+        let sha = format!("{index:040x}");
+        output.extend_from_slice(sha.as_bytes());
+        output.push(0x1f);
+        output.push(0x1f);
+        output.extend_from_slice(format!("subject {index}").as_bytes());
+        output.push(0);
+    }
+    let result = parse_graph_entries(&output, 5).expect("parses");
+    assert_eq!(result.nodes.len(), 5);
+    assert!(result.truncated);
 }

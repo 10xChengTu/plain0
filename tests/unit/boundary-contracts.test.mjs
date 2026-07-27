@@ -39,7 +39,9 @@ import {
 	validateGitCommandRegistration,
 	validateGitDiscardConfirmationBoundary,
 	validateGitIpcBridgeBoundary,
+	validateGitLogGraphFormatStringBoundary,
 	validateGitNetworkConfirmationBoundary,
+	validateGitRefsFieldSafetyBoundary,
 	validateGitRustBoundary,
 	validateGitShowCommitFirstParentBoundary,
 	validateMultiDiffEditorOverrideImportBoundary,
@@ -9358,6 +9360,31 @@ describe("Plain F080 S1 git command registration Harness", () => {
 			"generate_handler! must register git::commands::git_discard_paths exactly once",
 		);
 	});
+
+	it("fails if git_log_graph's body is rewired to skip the max_count validation", () => {
+		const rewired = withMutatedGitCommandSource(
+			"src-tauri/src/git/commands.rs",
+			(source) =>
+				source.replace(
+					"let max_count = request.into_parts()?;",
+					"let max_count = 100;",
+				),
+		);
+		expect(validateGitCommandRegistration(rewired)).toContain(
+			"git_log_graph must contain only its audited DTO decode and single service route",
+		);
+	});
+
+	it("fails if git_refs_list is missing from lib.rs's generate_handler", () => {
+		const missingRegistration = withMutatedGitCommandSource(
+			"src-tauri/src/lib.rs",
+			(source) =>
+				source.replace("            git::commands::git_refs_list,\n", ""),
+		);
+		expect(validateGitCommandRegistration(missingRegistration)).toContain(
+			"generate_handler! must register git::commands::git_refs_list exactly once",
+		);
+	});
 });
 
 describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
@@ -9875,6 +9902,74 @@ describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
 			);
 		});
 	});
+
+	// --- F090 S3: graph (`git::log::log_graph`) + refs (`git::refs`) DTOs ---
+
+	it("fails if GitLogGraphRequest gains an extra field", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"pub struct GitLogGraphRequest {\n    max_count: u32,\n}",
+					"pub struct GitLogGraphRequest {\n    max_count: u32,\n    extra_flag: bool,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitLogGraphRequest/GitGraphNodeWire/GitLogGraphResultWire must expose only their exact audited fields",
+		);
+	});
+
+	it("fails if GitGraphNodeWire loses its parents field", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"    sha: String,\n    parents: Vec<String>,\n    subject: String,\n}",
+					"    sha: String,\n    subject: String,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitLogGraphRequest/GitGraphNodeWire/GitLogGraphResultWire must expose only their exact audited fields",
+		);
+	});
+
+	it("fails if GitRefsListRequest gains a field, no longer remaining an empty struct", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"pub struct GitRefsListRequest {}",
+					"pub struct GitRefsListRequest {\n    max_count: u32,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitRefsListRequest must remain an empty struct",
+		);
+	});
+
+	it("fails if GitRefKindWire loses the RemoteBranch variant", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) => source.replace("    RemoteBranch,\n", ""),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitRefKindWire must expose exactly its three audited Branch/RemoteBranch/Tag variants",
+		);
+	});
+
+	it("fails if GitRefEntryWire's upstream field is renamed", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"    upstream: Option<String>,\n    is_head: bool,\n}",
+					"    tracking_ref: Option<String>,\n    is_head: bool,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitRefEntryWire/GitRefsListResultWire must expose only their exact audited fields",
+		);
+	});
 });
 
 describe("Plain F090 S0 git blame hardening args Harness", () => {
@@ -10065,6 +10160,192 @@ describe("Plain F090 S2 git show-commit first-parent boundary Harness", () => {
 	});
 });
 
+describe("Plain F090 S3 git log-graph format-string boundary Harness", () => {
+	const gitLogSourceForGraphBoundary = readFileSync(
+		new URL("../../src-tauri/src/git/log.rs", import.meta.url),
+		"utf8",
+	);
+	const baselineGitLogGraphRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/git/log.rs",
+			source: gitLogSourceForGraphBoundary,
+		},
+	]);
+
+	function withMutatedGitLogGraphSource(mutate) {
+		return baselineGitLogGraphRustSources.map((entry) => ({
+			...entry,
+			source: mutate(entry.source),
+		}));
+	}
+
+	it("passes for the real, unmodified log.rs file", () => {
+		expect(
+			validateGitLogGraphFormatStringBoundary(baselineGitLogGraphRustSources),
+		).toEqual([]);
+	});
+
+	it("fails if log.rs is missing entirely", () => {
+		expect(validateGitLogGraphFormatStringBoundary([])).toContain(
+			"git boundary requires log.rs",
+		);
+	});
+
+	it("fails if GIT_LOG_GRAPH_ARGS drops --topo-order", () => {
+		const mutated = withMutatedGitLogGraphSource((source) =>
+			source.replace('"--topo-order",\n    "--branches"', '"--branches"'),
+		);
+		expect(validateGitLogGraphFormatStringBoundary(mutated)).toContain(
+			"log.rs must define GIT_LOG_GRAPH_ARGS as exactly the audited graph format string — " +
+				"%s (the one attacker-controlled free-text field) must be positioned strictly last, " +
+				"after the two fixed-shape, git-computed %H/%P fields, and the ref-namespace scope " +
+				"must remain --branches --tags --remotes (never --all, which also walks refs/stash)",
+		);
+	});
+
+	it("fails if GIT_LOG_GRAPH_ARGS's format string moves %s before %P (the exact field-shift regression this contract exists to catch)", () => {
+		const mutated = withMutatedGitLogGraphSource((source) =>
+			source.replace('"--format=%H%x1f%P%x1f%s"', '"--format=%H%x1f%s%x1f%P"'),
+		);
+		expect(validateGitLogGraphFormatStringBoundary(mutated)).toContain(
+			"log.rs must define GIT_LOG_GRAPH_ARGS as exactly the audited graph format string — " +
+				"%s (the one attacker-controlled free-text field) must be positioned strictly last, " +
+				"after the two fixed-shape, git-computed %H/%P fields, and the ref-namespace scope " +
+				"must remain --branches --tags --remotes (never --all, which also walks refs/stash)",
+		);
+	});
+
+	it("fails if GIT_LOG_GRAPH_ARGS switches from --branches --tags --remotes to --all", () => {
+		const mutated = withMutatedGitLogGraphSource((source) =>
+			source.replace(
+				'"--branches",\n    "--tags",\n    "--remotes",',
+				'"--all",',
+			),
+		);
+		expect(validateGitLogGraphFormatStringBoundary(mutated)).toContain(
+			"log.rs must define GIT_LOG_GRAPH_ARGS as exactly the audited graph format string — " +
+				"%s (the one attacker-controlled free-text field) must be positioned strictly last, " +
+				"after the two fixed-shape, git-computed %H/%P fields, and the ref-namespace scope " +
+				"must remain --branches --tags --remotes (never --all, which also walks refs/stash)",
+		);
+	});
+
+	it("fails if parse_graph_entries's bounded splitn(3, ...) is widened to an unbounded split (the exact regression this contract exists to catch)", () => {
+		const mutated = withMutatedGitLogGraphSource((source) =>
+			source.replace(
+				"let mut parts = record.splitn(3, |&byte| byte == 0x1f);",
+				"let mut parts = record.split(|&byte| byte == 0x1f);",
+			),
+		);
+		expect(validateGitLogGraphFormatStringBoundary(mutated)).toContain(
+			"parse_graph_entries must split each record with a bounded splitn(3, ...) — leaving " +
+				"the subject field's own further bytes (including an attacker-embedded 0x1f) " +
+				"untouched — never an unbounded split",
+		);
+		// Control: this same mutated source now also trips the *second* guard
+		// (the exact naive-full-split shape this contract independently bans),
+		// proving both checks are real and not merely mutually redundant phrasing.
+		expect(validateGitLogGraphFormatStringBoundary(mutated)).toContain(
+			"parse_graph_entries must never fall back to an unbounded split on 0x1f anywhere in " +
+				"its own body — this is exactly the field-shift vulnerability this command's format " +
+				"string is designed to avoid",
+		);
+	});
+
+	it("fails if parse_graph_entries is renamed away, losing the function this contract inspects", () => {
+		const mutated = withMutatedGitLogGraphSource((source) =>
+			source.replace(
+				"fn parse_graph_entries(",
+				"fn parse_graph_entries_renamed(",
+			),
+		);
+		expect(validateGitLogGraphFormatStringBoundary(mutated)).toContain(
+			"log.rs must define a parse_graph_entries function",
+		);
+	});
+});
+
+describe("Plain F090 S3 git refs field-safety boundary Harness", () => {
+	const gitRefsSourceForFieldSafetyBoundary = readFileSync(
+		new URL("../../src-tauri/src/git/refs.rs", import.meta.url),
+		"utf8",
+	);
+	const baselineGitRefsRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/git/refs.rs",
+			source: gitRefsSourceForFieldSafetyBoundary,
+		},
+	]);
+
+	function withMutatedGitRefsSource(mutate) {
+		return baselineGitRefsRustSources.map((entry) => ({
+			...entry,
+			source: mutate(entry.source),
+		}));
+	}
+
+	it("passes for the real, unmodified refs.rs file", () => {
+		expect(
+			validateGitRefsFieldSafetyBoundary(baselineGitRefsRustSources),
+		).toEqual([]);
+	});
+
+	it("fails if refs.rs is missing entirely", () => {
+		expect(validateGitRefsFieldSafetyBoundary([])).toContain(
+			"git boundary requires refs.rs",
+		);
+	});
+
+	it("fails if GIT_FOR_EACH_REF_ARGS drops refs/remotes from its scope", () => {
+		const mutated = withMutatedGitRefsSource((source) =>
+			source.replace('\n    "refs/remotes",', ""),
+		);
+		expect(validateGitRefsFieldSafetyBoundary(mutated)).toContain(
+			"refs.rs must define GIT_FOR_EACH_REF_ARGS as exactly the audited six-field " +
+				"for-each-ref format string, scoped to refs/heads, refs/tags and refs/remotes only " +
+				"(never --all, which also walks refs/stash)",
+		);
+	});
+
+	it("fails if parse_refs's plain NUL split is narrowed to a bounded splitn (the exact regression this contract exists to catch, mirror image of the log_graph one)", () => {
+		const mutated = withMutatedGitRefsSource((source) =>
+			source.replace(
+				"let fields: Vec<&[u8]> = line.split(|&byte| byte == 0u8).collect();",
+				"let fields: Vec<&[u8]> = line.splitn(6, |&byte| byte == 0u8).collect();",
+			),
+		);
+		expect(validateGitRefsFieldSafetyBoundary(mutated)).toContain(
+			"parse_refs must never use a bounded splitn anywhere in its own body — doing so would " +
+				"misleadingly suggest this command's fields carry the same attacker-controlled-" +
+				"content risk log/blame's own format strings do, which this module's own doc " +
+				"comment establishes they structurally do not",
+		);
+	});
+
+	it("fails if parse_refs stops splitting on a plain NUL byte entirely", () => {
+		const mutated = withMutatedGitRefsSource((source) =>
+			source.replace(
+				"let fields: Vec<&[u8]> = line.split(|&byte| byte == 0u8).collect();",
+				"let fields: Vec<&[u8]> = line.split(|&byte| byte == b' ').collect();",
+			),
+		);
+		expect(validateGitRefsFieldSafetyBoundary(mutated)).toContain(
+			"parse_refs must split each record's fields on a plain, unbounded NUL split — every " +
+				"field here is structurally NUL-free by git's own ref-name grammar (see refs.rs's " +
+				"own module doc comment), so no single-absorbing-field workaround is needed",
+		);
+	});
+
+	it("fails if parse_refs is renamed away, losing the function this contract inspects", () => {
+		const mutated = withMutatedGitRefsSource((source) =>
+			source.replace("fn parse_refs(", "fn parse_refs_renamed("),
+		);
+		expect(validateGitRefsFieldSafetyBoundary(mutated)).toContain(
+			"refs.rs must define a parse_refs function",
+		);
+	});
+});
+
 describe("Plain F080 S1 git IPC bridge Harness", () => {
 	const gitCommandsSourceForBridge = readFileSync(
 		new URL("../../src-tauri/src/git/commands.rs", import.meta.url),
@@ -10135,7 +10416,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the twenty audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the twenty-two audited git methods, no more and no fewer",
 		);
 	});
 
@@ -10199,7 +10480,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the twenty audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the twenty-two audited git methods, no more and no fewer",
 		);
 	});
 
@@ -10260,7 +10541,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the twenty audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the twenty-two audited git methods, no more and no fewer",
 		);
 	});
 
@@ -10273,7 +10554,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the twenty audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the twenty-two audited git methods, no more and no fewer",
 		);
 	});
 
@@ -10336,6 +10617,83 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
 		).toContain(
 			"native.ts must invoke git_push exactly once, routed through frozenGitPushRequest",
+		);
+	});
+
+	it("fails if PlainBridge loses gitLogGraph", () => {
+		const widened = withMutatedGitApp(
+			"app/platform/tauri/contracts.ts",
+			(source) =>
+				source.replace(
+					"\tgitLogGraph(maxCount: number): Promise<GitLogGraphResult>;\n",
+					"",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
+		).toContain(
+			"PlainBridge must expose exactly the twenty-two audited git methods, no more and no fewer",
+		);
+	});
+
+	it("fails if PlainBridge loses gitRefsList", () => {
+		const widened = withMutatedGitApp(
+			"app/platform/tauri/contracts.ts",
+			(source) =>
+				source.replace("\tgitRefsList(): Promise<GitRefsListResult>;\n", ""),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
+		).toContain(
+			"PlainBridge must expose exactly the twenty-two audited git methods, no more and no fewer",
+		);
+	});
+
+	it("fails if native.ts stops routing git_log_graph through its audited builder/decoder", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					"const request = frozenGitLogGraphRequest(maxCount);",
+					"const request = { maxCount };",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"native.ts must invoke git_log_graph exactly once, routed through frozenGitLogGraphRequest and decoded through decodeGitLogGraphResult",
+		);
+	});
+
+	it("fails if native.ts invokes git_refs_list a second time", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					'await invoke<unknown>("git_refs_list", { request: {} })',
+					'await invoke<unknown>("git_refs_list", { request: {} }); await invoke<unknown>("git_refs_list", { request: {} })',
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"native.ts must invoke git_refs_list exactly once, decoded through decodeGitRefsListResult",
+		);
+	});
+
+	it("fails if git-codec.ts's decodeGitRefsListResult stops rejecting Proxy wrapping", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/git-codec.ts",
+			(source) =>
+				source.replace(
+					/export function decodeGitRefsListResult\(value: unknown\): GitRefsListResult \{\n\treturn sanitizedDecode\(\(\) => \{[\s\S]*?\n\t\}\);\n\}/,
+					"export function decodeGitRefsListResult(value) { return value; }",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"git-codec.ts's decodeGitRefsListResult must validate exact own-data keys, reject Proxy wrapping, and freeze its result",
 		);
 	});
 });

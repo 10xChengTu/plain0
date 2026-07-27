@@ -287,6 +287,12 @@ function testBridge(
 		async gitShowCommitBlob() {
 			throw new Error("unused");
 		},
+		async gitLogGraph() {
+			throw new Error("unused");
+		},
+		async gitRefsList() {
+			throw new Error("unused");
+		},
 		...overrides,
 	};
 }

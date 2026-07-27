@@ -120,6 +120,8 @@ function fakeBridge(
 		gitLineHistoryDetail: notImplemented,
 		gitShowCommit: notImplemented,
 		gitShowCommitBlob: notImplemented,
+		gitLogGraph: notImplemented,
+		gitRefsList: notImplemented,
 	};
 }
 
@@ -255,6 +257,8 @@ function fakeTextSearchBridge(
 		gitLineHistoryDetail: notImplemented,
 		gitShowCommit: notImplemented,
 		gitShowCommitBlob: notImplemented,
+		gitLogGraph: notImplemented,
+		gitRefsList: notImplemented,
 	};
 
 	return {

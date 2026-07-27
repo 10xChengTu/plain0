@@ -19,6 +19,12 @@
 //! drill-down sketch. S2 adds [`show_commit`] (commit-detail file list for
 //! the multi-diff editor) — see that module's own doc comment for why it
 //! never spawns `git show` at all, unlike the frozen plan's original sketch.
+//! S3 adds [`log::log_graph`] (the graph view's own DAG source, extending
+//! [`log`]) and [`refs`] (`for-each-ref`, the refs sidebar and the graph
+//! view's ref-badge join source) — see those modules' own doc comments for
+//! why each command's own multi-field format string is safe by a different
+//! mechanism (one absorbing free-text field for `log_graph`; every field
+//! structurally NUL-free by ref-name grammar for `refs`).
 //!
 //! # Subprocess spawning is `exec::run_git`-only
 //!
@@ -75,6 +81,7 @@ pub mod dto;
 pub(crate) mod exec;
 pub(crate) mod log;
 pub(crate) mod network;
+pub(crate) mod refs;
 pub(crate) mod repo;
 pub(crate) mod show_commit;
 pub(crate) mod stage;

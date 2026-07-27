@@ -10,7 +10,9 @@ import type {
 	GitHistoryEntry,
 	GitHistoryListResult,
 	GitLineHistoryDetail,
+	GitLogGraphResult,
 	GitNetworkPreviewResult,
+	GitRefsListResult,
 	GitShowCommitResult,
 	GitStatusEntry,
 	GitStatusResult,
@@ -49,6 +51,7 @@ import {
 	frozenGitFileHistoryRequest,
 	frozenGitLineHistoryDetailRequest,
 	frozenGitLineHistoryListRequest,
+	frozenGitLogGraphRequest,
 	frozenGitNetworkPreviewRequest,
 	frozenGitPushRequest,
 	frozenGitShowBlobRequest,
@@ -1118,6 +1121,23 @@ export interface BrowserMockGitFixtureForTest {
 	readonly commitBlobs?: Readonly<
 		Record<string, Readonly<Record<string, string>>>
 	>;
+	/** `F090` S3: seeds the deterministic `gitLogGraph` response, returned
+	 * regardless of the requested `maxCount` (defaults to `{ nodes: [],
+	 * truncated: false }`) — like `blame`/`fileHistory` above, this mock never
+	 * re-implements the real `--topo-order` DAG walk or swimlane assignment
+	 * (the real Rust parser's thorough fixture coverage, including its
+	 * octopus-merge fixture, lives in `src-tauri/src/git/log/tests.rs`; the
+	 * frontend swimlane layout algorithm's own coverage lives in
+	 * `plain-git-graph-layout.test.ts`); it only exists so a consuming
+	 * frontend has structurally correct, scriptable responses to develop and
+	 * test the graph view against. */
+	readonly graphForTest?: GitLogGraphResult;
+	/** `F090` S3: seeds the deterministic `gitRefsList` response (defaults to
+	 * `{ entries: [], truncated: false }`) — same "structurally correct
+	 * fixture, not a re-implementation" scope as `graphForTest` above (the
+	 * real Rust parser's thorough fixture coverage lives in
+	 * `src-tauri/src/git/refs/tests.rs`). */
+	readonly refsForTest?: GitRefsListResult;
 	/** When `true`, every git method rejects with `GIT_NO_REPOSITORY` instead
 	 * of returning fixture data — simulates a trusted workspace root that is
 	 * not (or no longer) a Git working tree. */
@@ -5262,6 +5282,16 @@ export function createBrowserMockBridge(
 	const gitCommitBlobs = new Map<string, Readonly<Record<string, string>>>(
 		Object.entries(gitFixture.commitBlobs ?? {}),
 	);
+	const defaultGitLogGraphResult: GitLogGraphResult = Object.freeze({
+		nodes: Object.freeze([]),
+		truncated: false,
+	});
+	const gitGraphResult = gitFixture.graphForTest ?? defaultGitLogGraphResult;
+	const defaultGitRefsListResult: GitRefsListResult = Object.freeze({
+		entries: Object.freeze([]),
+		truncated: false,
+	});
+	const gitRefsListResult = gitFixture.refsForTest ?? defaultGitRefsListResult;
 
 	// --- F080 S3: mutable stage/unstage/commit/discard simulation ---------
 	//
@@ -6591,6 +6621,26 @@ export function createBrowserMockBridge(
 			return frozenGitShowBlobResult(
 				content === undefined ? null : new TextEncoder().encode(content),
 			);
+		},
+		async gitLogGraph(maxCount_) {
+			// This mock has no real commit history to walk/cap by `maxCount` —
+			// the seeded fixture (or the empty default) is returned as-is,
+			// exactly like `gitFileHistory`'s own "one fixture regardless of
+			// the requested range" simplicity — see `BrowserMockGitFixtureForTest.
+			// graphForTest`'s own doc comment.
+			frozenGitLogGraphRequest(maxCount_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return gitGraphResult;
+		},
+		async gitRefsList() {
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return gitRefsListResult;
 		},
 	};
 }

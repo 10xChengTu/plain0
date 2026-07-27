@@ -1466,6 +1466,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 				parent.expression.text === "configurePlainTerminalBridge" ||
 				parent.expression.text === "configurePlainScmBridge" ||
 				parent.expression.text === "configurePlainGitHistoryBridge" ||
+				parent.expression.text === "configurePlainGitGraphBridge" ||
 				parent.expression.text === "createPlainGitTextModelContentProvider" ||
 				parent.expression.text === "createPlainGitBlameContribution" ||
 				parent.expression.text === "createPlainGitCommitBlobContentProvider" ||
@@ -6486,19 +6487,36 @@ const GIT_COMMAND_CONTRACTS = Object.freeze([
 		returnType: "->Result<GitShowBlobResult,CommandError>",
 		body: "let(sha,path)=request.into_parts()?;letcontent=show_commit::show_commit_blob(trust.inner(),workspace.inner(),window.label(),&sha,&path,).await?;Ok(GitShowBlobResult::new(content))",
 	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_log_graph",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitLogGraphRequest",
+		returnType: "->Result<GitLogGraphResultWire,CommandError>",
+		body: "letmax_count=request.into_parts()?;letresult=log::log_graph(trust.inner(),workspace.inner(),window.label(),max_count).await?;Ok(GitLogGraphResultWire::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_refs_list",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitRefsListRequest",
+		returnType: "->Result<GitRefsListResultWire,CommandError>",
+		body: "request.validate();letresult=refs::list_refs(trust.inner(),workspace.inner(),window.label()).await?;Ok(GitRefsListResultWire::from(result))",
+	},
 ]);
 
 /**
- * Locks all twenty git commands (`F080` S1's three reads, S3's five
+ * Locks all twenty-two git commands (`F080` S1's three reads, S3's five
  * writes, S4's five network commands, `F090` S0's two read-only blame
  * commands — `git_blame_file`/`git_blame_commit_messages` —, `F090` S1's
  * three read-only file/line-history commands —
- * `git_file_history`/`git_line_history_list`/`git_line_history_detail` — and
+ * `git_file_history`/`git_line_history_list`/`git_line_history_detail` —,
  * `F090` S2's two read-only commit-detail commands —
- * `git_show_commit`/`git_show_commit_blob` —, added to this same closed
- * array rather than a parallel `GIT_HISTORY_COMMAND_CONTRACTS`, per the
- * existing "`PlainBridge`'s git surface is one audited whole, not several
- * independently-sized ones" rationale documented below at
+ * `git_show_commit`/`git_show_commit_blob` — and `F090` S3's two read-only
+ * graph/refs commands — `git_log_graph`/`git_refs_list` —, added to this
+ * same closed array rather than a parallel `GIT_HISTORY_COMMAND_CONTRACTS`,
+ * per the existing "`PlainBridge`'s git surface is one audited whole, not
+ * several independently-sized ones" rationale documented below at
  * `GIT_BRIDGE_METHOD_NAMES`) to their audited exact signatures, bodies and
  * single `generate_handler!` registration — mirrors
  * `validateTrustTerminalCommandRegistration`'s exact technique.
@@ -7136,6 +7154,50 @@ export function validateGitRustBoundary(rustSources) {
 		);
 	}
 
+	// --- F090 S3: graph (`git::log::log_graph`) + refs (`git::refs`) -------
+	//
+	// `GIT_LOG_GRAPH_ARGS`/`GIT_FOR_EACH_REF_ARGS` themselves get their own
+	// *dedicated* lock (`validateGitLogGraphFormatStringBoundary`/
+	// `validateGitRefsFieldSafetyBoundary` below) — the same "exported on its
+	// own, not folded in here" treatment `validateGitBlameHardeningArgs`/
+	// `validateGitShowCommitFirstParentBoundary` already get, because each
+	// has its own easy-to-miss field-safety footgun beyond plain array
+	// equality. This section only locks the wire DTO shapes.
+	if (
+		structBody("GitLogGraphRequest") !== "max_count:u32," ||
+		structBody("GitGraphNodeWire") !==
+			"sha:String,parents:Vec<String>,subject:String," ||
+		structBody("GitLogGraphResultWire") !==
+			"nodes:Vec<GitGraphNodeWire>,truncated:bool,"
+	) {
+		failures.push(
+			"GitLogGraphRequest/GitGraphNodeWire/GitLogGraphResultWire must expose only their exact audited fields",
+		);
+	}
+	if (structBody("GitRefsListRequest") !== "") {
+		failures.push("GitRefsListRequest must remain an empty struct");
+	}
+	const refKindWireBody = enumBody("GitRefKindWire");
+	if (
+		refKindWireBody !== "Branch,RemoteBranch,Tag," &&
+		refKindWireBody !== "Branch,RemoteBranch,Tag"
+	) {
+		failures.push(
+			"GitRefKindWire must expose exactly its three audited Branch/RemoteBranch/Tag variants",
+		);
+	}
+	if (
+		structBody("GitRefEntryWire") !==
+			"kind:GitRefKindWire,full_name:String,short_name:String,target_sha:String," +
+				"is_annotated_tag:bool,peeled_sha:Option<String>,upstream:Option<String>,is_head:bool," ||
+		structBody("GitRefsListResultWire") !==
+			"entries:Vec<GitRefEntryWire>,truncated:bool,"
+	) {
+		failures.push(
+			"GitRefEntryWire/GitRefsListResultWire must expose only their exact audited fields",
+		);
+	}
+
 	return failures;
 }
 
@@ -7275,6 +7337,162 @@ export function validateGitShowCommitFirstParentBoundary(rustSources) {
 }
 
 /**
+ * `F090` S3's dedicated lock for `log.rs`'s graph command — kept as its own
+ * exported function (not folded into `validateGitRustBoundary`'s generic
+ * `argsConstant` checks) for the same reason `validateGitBlameHardeningArgs`
+ * is: `GIT_LOG_GRAPH_ARGS`'s own format string
+ * (`%H%x1f%P%x1f%s`) has an easy-to-miss footgun a plain array-equality
+ * check does not fully guard — a future edit could insert a second
+ * free-text field (e.g. `%an`) *before* `%s`, which would still leave the
+ * array "looking similar" in a diff but reintroduce exactly the
+ * delimiter-shift vulnerability `GIT_LOG_COMMIT_META_ARGS` itself was
+ * fixed to avoid (see `log.rs`'s own module doc comment, "F090 S3: the
+ * graph command's own format-string safety design"). This function
+ * therefore locks two things together: the exact argument list itself, and
+ * that `parse_graph_entries` actually parses it the safe way — a bounded
+ * `splitn(3, ...)` (so the one attacker-controlled field, `%s`, safely
+ * absorbs everything after the second delimiter, embedded `0x1f` bytes
+ * included) rather than an unbounded split that would misparse a hostile
+ * subject line into extra fields (proven reachable via entirely normal git
+ * usage by `tests.rs`'s own
+ * `log_graph_is_immune_to_a_hostile_subject_line_containing_a_unit_separator_byte`
+ * fixture and its pure-function naive-split control group).
+ */
+export function validateGitLogGraphFormatStringBoundary(rustSources) {
+	const failures = [];
+	const logSource = findRustSource(rustSources, "src-tauri/src/git/log.rs");
+	if (logSource === undefined) {
+		failures.push("git boundary requires log.rs");
+		return failures;
+	}
+	const executableLog = stripRustCommentsOnly(logSource);
+	const constantPattern =
+		/pub\s*\(\s*crate\s*\)\s+const\s+GIT_LOG_GRAPH_ARGS\s*:\s*&\[&str\]\s*=\s*&\[([^\]]*)\]\s*;/;
+	const match = constantPattern.exec(executableLog);
+	const args = match?.[1]
+		?.split(",")
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0)
+		.map((entry) => entry.replace(/^"|"$/g, ""));
+	if (
+		match === null ||
+		!sameArray(args, [
+			"log",
+			"-z",
+			"--format=%H%x1f%P%x1f%s",
+			"--no-patch",
+			"--topo-order",
+			"--branches",
+			"--tags",
+			"--remotes",
+		])
+	) {
+		failures.push(
+			"log.rs must define GIT_LOG_GRAPH_ARGS as exactly the audited graph format string — " +
+				"%s (the one attacker-controlled free-text field) must be positioned strictly last, " +
+				"after the two fixed-shape, git-computed %H/%P fields, and the ref-namespace scope " +
+				"must remain --branches --tags --remotes (never --all, which also walks refs/stash)",
+		);
+	}
+
+	const parseGraphEntriesBody = rustFunctionBody(
+		executableLog,
+		"parse_graph_entries",
+	);
+	if (parseGraphEntriesBody === undefined) {
+		failures.push("log.rs must define a parse_graph_entries function");
+		return failures;
+	}
+	if (!parseGraphEntriesBody.body.includes("splitn(3")) {
+		failures.push(
+			"parse_graph_entries must split each record with a bounded splitn(3, ...) — leaving " +
+				"the subject field's own further bytes (including an attacker-embedded 0x1f) " +
+				"untouched — never an unbounded split",
+		);
+	}
+	if (parseGraphEntriesBody.body.includes(".split(|&byte| byte == 0x1f)")) {
+		failures.push(
+			"parse_graph_entries must never fall back to an unbounded split on 0x1f anywhere in " +
+				"its own body — this is exactly the field-shift vulnerability this command's format " +
+				"string is designed to avoid",
+		);
+	}
+
+	return failures;
+}
+
+/**
+ * `F090` S3's dedicated lock for `refs.rs` — kept as its own exported
+ * function for the mirror-image reason `validateGitLogGraphFormatStringBoundary`
+ * is: where `log`/`blame`'s own format strings need a single absorbing
+ * free-text field because their content is genuinely attacker-controlled,
+ * `for-each-ref`'s six fields are (per `refs.rs`'s own module doc comment)
+ * structurally NUL-free *by git's own ref-name grammar* — no field ever
+ * needs (or should) absorb an embedded separator. This function locks the
+ * exact `GIT_FOR_EACH_REF_ARGS` format string/scope, and that `parse_refs`
+ * actually takes advantage of that structural guarantee (a plain,
+ * unbounded NUL split) rather than defensively (and misleadingly) using a
+ * bounded `splitn` as if this command's fields carried the same risk
+ * `log`/`blame`'s do.
+ */
+export function validateGitRefsFieldSafetyBoundary(rustSources) {
+	const failures = [];
+	const refsSource = findRustSource(rustSources, "src-tauri/src/git/refs.rs");
+	if (refsSource === undefined) {
+		failures.push("git boundary requires refs.rs");
+		return failures;
+	}
+	const executableRefs = stripRustCommentsOnly(refsSource);
+	const constantPattern =
+		/pub\s*\(\s*crate\s*\)\s+const\s+GIT_FOR_EACH_REF_ARGS\s*:\s*&\[&str\]\s*=\s*&\[([^\]]*)\]\s*;/;
+	const match = constantPattern.exec(executableRefs);
+	const args = match?.[1]
+		?.split(",")
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0)
+		.map((entry) => entry.replace(/^"|"$/g, ""));
+	if (
+		match === null ||
+		!sameArray(args, [
+			"for-each-ref",
+			"--format=%(refname)%00%(objecttype)%00%(objectname)%00%(*objectname)%00%(upstream)%00%(HEAD)",
+			"refs/heads",
+			"refs/tags",
+			"refs/remotes",
+		])
+	) {
+		failures.push(
+			"refs.rs must define GIT_FOR_EACH_REF_ARGS as exactly the audited six-field " +
+				"for-each-ref format string, scoped to refs/heads, refs/tags and refs/remotes only " +
+				"(never --all, which also walks refs/stash)",
+		);
+	}
+
+	const parseRefsBody = rustFunctionBody(executableRefs, "parse_refs");
+	if (parseRefsBody === undefined) {
+		failures.push("refs.rs must define a parse_refs function");
+		return failures;
+	}
+	if (!parseRefsBody.body.includes(".split(|&byte| byte == 0u8)")) {
+		failures.push(
+			"parse_refs must split each record's fields on a plain, unbounded NUL split — every " +
+				"field here is structurally NUL-free by git's own ref-name grammar (see refs.rs's " +
+				"own module doc comment), so no single-absorbing-field workaround is needed",
+		);
+	}
+	if (parseRefsBody.body.includes("splitn(")) {
+		failures.push(
+			"parse_refs must never use a bounded splitn anywhere in its own body — doing so would " +
+				"misleadingly suggest this command's fields carry the same attacker-controlled-" +
+				"content risk log/blame's own format strings do, which this module's own doc " +
+				"comment establishes they structurally do not",
+		);
+	}
+
+	return failures;
+}
+
+/**
  * `F080` S1's three read methods, `F080` S3's five write methods
  * (`git_stage_paths`/`git_unstage_paths`/`git_stage_blob`/`git_commit`/
  * `git_discard_paths`), `F080` S4's five network methods
@@ -7282,13 +7500,14 @@ export function validateGitShowCommitFirstParentBoundary(rustSources) {
  * `git_network_cancel`), `F090` S0's two read-only blame methods
  * (`gitBlameFile`/`gitBlameCommitMessages`), `F090` S1's three
  * read-only file/line-history methods (`gitFileHistory`/
- * `gitLineHistoryList`/`gitLineHistoryDetail`), and `F090` S2's two
- * read-only commit-detail methods (`gitShowCommit`/`gitShowCommitBlob`) —
- * every slice deliberately shares this same closed-list lock rather than
- * getting its own parallel "S_ bridge methods" const, for the same reason
- * `GIT_COMMAND_CONTRACTS` above holds all twenty Rust commands in one array:
- * `PlainBridge`'s git surface is one audited whole, not several
- * independently-sized ones.
+ * `gitLineHistoryList`/`gitLineHistoryDetail`), `F090` S2's two
+ * read-only commit-detail methods (`gitShowCommit`/`gitShowCommitBlob`),
+ * and `F090` S3's two read-only graph/refs methods (`gitLogGraph`/
+ * `gitRefsList`) — every slice deliberately shares this same closed-list
+ * lock rather than getting its own parallel "S_ bridge methods" const, for
+ * the same reason `GIT_COMMAND_CONTRACTS` above holds all twenty-two Rust
+ * commands in one array: `PlainBridge`'s git surface is one audited whole,
+ * not several independently-sized ones.
  */
 const GIT_BRIDGE_METHOD_NAMES = [
 	"gitStatus",
@@ -7311,6 +7530,8 @@ const GIT_BRIDGE_METHOD_NAMES = [
 	"gitLineHistoryDetail",
 	"gitShowCommit",
 	"gitShowCommitBlob",
+	"gitLogGraph",
+	"gitRefsList",
 ];
 
 /**
@@ -7366,16 +7587,20 @@ const GIT_NO_ARG_COMMAND_CONTRACTS = Object.freeze([
 ]);
 
 /**
- * Locks `F080` S1+S3+S4 and `F090` S0+S1+S2's TypeScript surface: `PlainBridge`
- * exposes exactly the twenty audited git methods, `git-codec.ts`'s read-result
- * decoders validate exact own-data keys/reject Proxy wrapping/freeze their
- * result (same rigor `validateTerminalIpcBridgeBoundary` already locks for
- * the terminal domain), and `native.ts` routes each read/write through
- * `invoke` with its audited command name — the reads through their
- * audited decoders, the six mutating writes (`GIT_WRITE_COMMAND_CONTRACTS`)
- * through their audited `frozen*Request` builders and `decodeGitVoid`, and the
- * three no-payload network commands (`GIT_NO_ARG_COMMAND_CONTRACTS`) invoked
- * exactly once each.
+ * Locks `F080` S1+S3+S4 and `F090` S0+S1+S2+S3's TypeScript surface:
+ * `PlainBridge` exposes exactly the twenty-two audited git methods,
+ * `git-codec.ts`'s read-result decoders validate exact own-data keys/reject
+ * Proxy wrapping/freeze their result (same rigor
+ * `validateTerminalIpcBridgeBoundary` already locks for the terminal
+ * domain), and `native.ts` routes each read/write through `invoke` with its
+ * audited command name — the reads through their audited decoders, the six
+ * mutating writes (`GIT_WRITE_COMMAND_CONTRACTS`) through their audited
+ * `frozen*Request` builders and `decodeGitVoid`, and the three no-payload
+ * network commands (`GIT_NO_ARG_COMMAND_CONTRACTS`) invoked exactly once
+ * each. `git_refs_list` (`F090` S3) is a fourth no-payload read, but unlike
+ * those three it returns a real decoded result rather than void, so it gets
+ * its own dedicated check just below rather than joining
+ * `GIT_NO_ARG_COMMAND_CONTRACTS`.
  */
 export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 	const failures = [];
@@ -7416,7 +7641,7 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 			JSON.stringify([...GIT_BRIDGE_METHOD_NAMES].sort())
 	) {
 		failures.push(
-			"PlainBridge must expose exactly the twenty audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the twenty-two audited git methods, no more and no fewer",
 		);
 	}
 
@@ -7438,6 +7663,8 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 		"decodeGitHistoryListResult",
 		"decodeGitLineHistoryDetailResult",
 		"decodeGitShowCommitResult",
+		"decodeGitLogGraphResult",
+		"decodeGitRefsListResult",
 	]) {
 		const body = decoderBody(name);
 		if (
@@ -7559,6 +7786,32 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 	) {
 		failures.push(
 			"native.ts must invoke git_show_commit_blob exactly once, routed through frozenGitShowCommitBlobRequest and decoded through decodeGitShowBlobResult",
+		);
+	}
+
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_log_graph"/g)].length !==
+			1 ||
+		!native.includes("frozenGitLogGraphRequest(") ||
+		!native.includes("decodeGitLogGraphResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_log_graph exactly once, routed through frozenGitLogGraphRequest and decoded through decodeGitLogGraphResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_refs_list"/g)].length !==
+			1 ||
+		// `git_refs_list` takes no payload at all (the same `{ request: {} }`
+		// shape `git_fetch`/`git_pull`/`git_network_cancel` use) — there is no
+		// `frozenGitRefsListRequest` builder to route through, only its result
+		// decoder.
+		!native.includes("decodeGitRefsListResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_refs_list exactly once, decoded through decodeGitRefsListResult",
 		);
 	}
 

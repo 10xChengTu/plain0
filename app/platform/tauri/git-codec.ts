@@ -11,12 +11,17 @@ import type {
 	GitDiffFileEntry,
 	GitDiffFilesResult,
 	GitDiffStatusKind,
+	GitGraphNode,
 	GitHistoryEntry,
 	GitHistoryListResult,
 	GitLineHistoryDetail,
+	GitLogGraphResult,
 	GitLogLineRange,
 	GitNetworkOperation,
 	GitNetworkPreviewResult,
+	GitRefEntry,
+	GitRefKind,
+	GitRefsListResult,
 	GitRenameOrCopyKind,
 	GitShowBlobResult,
 	GitShowCommitResult,
@@ -1456,4 +1461,177 @@ export function frozenGitShowCommitBlobRequest(
 		return gitShowCommitBlobRequestInvalid();
 	}
 	return Object.freeze({ sha, path });
+}
+
+// --- F090 S3: graph (`git::log::log_graph`) ---------------------------------
+
+/** Mirrors `src-tauri/src/git/log.rs`'s own `MAX_GRAPH_MAX_COUNT` and
+ * `dto.rs`'s own independent wire-layer copy `MAX_GIT_LOG_GRAPH_MAX_COUNT` —
+ * this frontend codec keeps its own third independent copy for the same
+ * "defense in depth, each layer re-validates" reason `isValidGitLogLineRange`
+ * above validates a range the Rust side will also independently reject. */
+const MAX_GIT_LOG_GRAPH_MAX_COUNT = 5_000;
+/** Defensive decode-side ceiling on how many nodes a single response can
+ * report — a real response is already capped server-side by the caller's
+ * own requested `maxCount` (itself bounded by `MAX_GIT_LOG_GRAPH_MAX_COUNT`
+ * above), so this exists only to reject a structurally hostile/runaway
+ * payload with generous headroom, mirroring `MAX_GIT_HISTORY_ENTRIES`'s own
+ * "far above the real ceiling" rationale. */
+const MAX_GIT_GRAPH_NODES = 10_000;
+/** Defensive decode-side ceiling on how many parents a single node's
+ * `parents` array can report — real git has no fixed limit on an octopus
+ * merge's parent count, so this exists only to reject a structurally
+ * hostile/runaway payload. */
+const MAX_GIT_GRAPH_PARENTS_PER_NODE = 1_000;
+
+function gitLogGraphRequestInvalid(): never {
+	return requestViolation(
+		"GIT_LOG_GRAPH_INVALID_REQUEST",
+		"The git log graph request is invalid.",
+	);
+}
+
+/** Builds a frozen `git_log_graph` request. `maxCount` must be a positive
+ * safe integer no greater than `MAX_GIT_LOG_GRAPH_MAX_COUNT`. */
+export function frozenGitLogGraphRequest(
+	maxCount: unknown,
+): Readonly<{ maxCount: number }> {
+	if (
+		!isSafeNonNegativeInteger(maxCount) ||
+		maxCount === 0 ||
+		maxCount > MAX_GIT_LOG_GRAPH_MAX_COUNT
+	) {
+		return gitLogGraphRequestInvalid();
+	}
+	return Object.freeze({ maxCount });
+}
+
+function decodeGitGraphNode(value: unknown): GitGraphNode {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, ["sha", "parents", "subject"])
+	) {
+		return violation();
+	}
+	if (!isGitBlameSha(value.sha) || typeof value.subject !== "string") {
+		return violation();
+	}
+	const parents = ownObjectArraySnapshot(
+		value.parents,
+		MAX_GIT_GRAPH_PARENTS_PER_NODE,
+		(parent) => (isGitBlameSha(parent) ? parent : violation()),
+	);
+	const node = { sha: value.sha, parents, subject: value.subject };
+	rejectProxyObject(value);
+	return Object.freeze(node);
+}
+
+/** Decodes a `git_log_graph` response: an own-data, exactly
+ * `{ nodes, truncated }` object. */
+export function decodeGitLogGraphResult(value: unknown): GitLogGraphResult {
+	return sanitizedDecode(() => {
+		if (!isPlainObject(value) || !hasExactKeys(value, ["nodes", "truncated"])) {
+			return violation();
+		}
+		if (typeof value.truncated !== "boolean") {
+			return violation();
+		}
+		const nodes = ownObjectArraySnapshot(
+			value.nodes,
+			MAX_GIT_GRAPH_NODES,
+			decodeGitGraphNode,
+		);
+		const result = { nodes, truncated: value.truncated };
+		rejectProxyObject(value);
+		return Object.freeze(result);
+	});
+}
+
+// --- F090 S3: refs (`git::refs::list_refs`) ---------------------------------
+
+/** Mirrors `src-tauri/src/git/refs.rs`'s own `MAX_REF_ENTRIES` (10,000) —
+ * this decode-side ceiling exists only to reject a structurally hostile/
+ * runaway payload, with generous headroom above the real server-side cap,
+ * mirroring `MAX_GIT_GRAPH_NODES`'s identical rationale just above. */
+const MAX_GIT_REFS_ENTRIES = 20_000;
+/** Defensive decode-side ceiling on a single ref name's/upstream's length —
+ * git itself imposes no fixed limit, mirroring `MAX_GIT_PATH_CHARS`'s own
+ * "hostile-input ceiling, not an expected value" precedent for this
+ * domain's path fields. */
+const MAX_GIT_REF_NAME_CHARS = 65_536;
+
+function isGitRefKind(value: unknown): value is GitRefKind {
+	return value === "branch" || value === "remoteBranch" || value === "tag";
+}
+
+function isValidGitRefName(value: unknown): value is string {
+	return typeof value === "string" && value.length <= MAX_GIT_REF_NAME_CHARS;
+}
+
+function decodeGitRefEntry(value: unknown): GitRefEntry {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, [
+			"kind",
+			"fullName",
+			"shortName",
+			"targetSha",
+			"isAnnotatedTag",
+			"peeledSha",
+			"upstream",
+			"isHead",
+		])
+	) {
+		return violation();
+	}
+	if (
+		!isGitRefKind(value.kind) ||
+		!isValidGitRefName(value.fullName) ||
+		!isValidGitRefName(value.shortName) ||
+		!isGitBlameSha(value.targetSha) ||
+		typeof value.isAnnotatedTag !== "boolean" ||
+		(value.peeledSha !== null && !isGitBlameSha(value.peeledSha)) ||
+		(value.upstream !== null && !isValidGitRefName(value.upstream)) ||
+		typeof value.isHead !== "boolean"
+	) {
+		return violation();
+	}
+	const entry = {
+		kind: value.kind,
+		fullName: value.fullName,
+		shortName: value.shortName,
+		targetSha: value.targetSha,
+		isAnnotatedTag: value.isAnnotatedTag,
+		peeledSha: value.peeledSha,
+		upstream: value.upstream,
+		isHead: value.isHead,
+	};
+	rejectProxyObject(value);
+	return Object.freeze(entry);
+}
+
+/** Decodes a `git_refs_list` response: an own-data, exactly
+ * `{ entries, truncated }` object. `git_refs_list` itself takes no request
+ * payload at all (mirrors `git_fetch`/`git_pull`/`git_network_cancel`'s own
+ * `{}` shape) — there is no corresponding `frozenGitRefsListRequest`. */
+export function decodeGitRefsListResult(value: unknown): GitRefsListResult {
+	return sanitizedDecode(() => {
+		if (
+			!isPlainObject(value) ||
+			!hasExactKeys(value, ["entries", "truncated"])
+		) {
+			return violation();
+		}
+		if (typeof value.truncated !== "boolean") {
+			return violation();
+		}
+		const entries = ownObjectArraySnapshot(
+			value.entries,
+			MAX_GIT_REFS_ENTRIES,
+			decodeGitRefEntry,
+		);
+		const result = { entries, truncated: value.truncated };
+		rejectProxyObject(value);
+		return Object.freeze(result);
+	});
 }

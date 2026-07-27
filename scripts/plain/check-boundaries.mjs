@@ -14,7 +14,9 @@ import {
 	validateGitCommandRegistration,
 	validateGitDiscardConfirmationBoundary,
 	validateGitIpcBridgeBoundary,
+	validateGitLogGraphFormatStringBoundary,
 	validateGitNetworkConfirmationBoundary,
+	validateGitRefsFieldSafetyBoundary,
 	validateGitRustBoundary,
 	validateGitShowCommitFirstParentBoundary,
 	validateMainCapability,
@@ -759,6 +761,12 @@ for (const failure of validateGitBlameHardeningArgs(rustSources)) {
 	fail(failure);
 }
 for (const failure of validateGitShowCommitFirstParentBoundary(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateGitLogGraphFormatStringBoundary(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateGitRefsFieldSafetyBoundary(rustSources)) {
 	fail(failure);
 }
 for (const failure of validateGitIpcBridgeBoundary(rustSources, appSources)) {

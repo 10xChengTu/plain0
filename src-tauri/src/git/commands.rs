@@ -32,13 +32,15 @@ use super::dto::{
     GitBlameFileResult, GitCommitRequest, GitDiffFilesRequest, GitDiffFilesResult,
     GitDiscardPathsRequest, GitFetchRequest, GitFileHistoryRequest, GitHistoryListResultWire,
     GitLineHistoryDetailRequest, GitLineHistoryDetailResultWire, GitLineHistoryListRequest,
-    GitNetworkCancelRequest, GitNetworkPreviewRequest, GitNetworkPreviewResult, GitPullRequest,
-    GitPushRequest, GitShowBlobRequest, GitShowBlobResult, GitShowCommitBlobRequest,
+    GitLogGraphRequest, GitLogGraphResultWire, GitNetworkCancelRequest, GitNetworkPreviewRequest,
+    GitNetworkPreviewResult, GitPullRequest, GitPushRequest, GitRefsListRequest,
+    GitRefsListResultWire, GitShowBlobRequest, GitShowBlobResult, GitShowCommitBlobRequest,
     GitShowCommitRequest, GitShowCommitResult, GitStageBlobRequest, GitStagePathsRequest,
     GitStatusRequest, GitStatusResult, GitUnstagePathsRequest,
 };
 use super::log;
 use super::network::{self, GitNetworkService};
+use super::refs;
 use super::show_commit;
 use super::stage;
 use super::status;
@@ -344,4 +346,29 @@ pub(crate) async fn git_network_cancel(
     request.validate();
     network_service.inner().request_cancel(window.label());
     Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn git_log_graph(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    request: GitLogGraphRequest,
+) -> Result<GitLogGraphResultWire, CommandError> {
+    let max_count = request.into_parts()?;
+    let result =
+        log::log_graph(trust.inner(), workspace.inner(), window.label(), max_count).await?;
+    Ok(GitLogGraphResultWire::from(result))
+}
+
+#[tauri::command]
+pub(crate) async fn git_refs_list(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    request: GitRefsListRequest,
+) -> Result<GitRefsListResultWire, CommandError> {
+    request.validate();
+    let result = refs::list_refs(trust.inner(), workspace.inner(), window.label()).await?;
+    Ok(GitRefsListResultWire::from(result))
 }

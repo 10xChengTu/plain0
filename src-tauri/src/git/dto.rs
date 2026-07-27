@@ -13,8 +13,9 @@ use crate::error::CommandError;
 
 use super::blame::{BlameCommitHeader, BlameLineRange, BlameResult, BLAME_UNCOMMITTED_SHA};
 use super::diff::{DiffFileEntry, DiffStatusKind, GitBlobRev};
-use super::log::{HistoryEntry, HistoryList, LineHistoryDetail, LineRange};
+use super::log::{GraphList, GraphNode, HistoryEntry, HistoryList, LineHistoryDetail, LineRange};
 use super::network::NetworkOperation;
+use super::refs::{RefEntry, RefGroupKind, RefList};
 use super::show_commit::ShowCommitResult;
 use super::status::{
     BranchHead, BranchInfo, BranchOid, GitStatus, RenameOrCopyKind, StatusEntry, SubmoduleState,
@@ -1018,6 +1019,158 @@ impl GitShowCommitBlobRequest {
             return Err(git_show_commit_blob_invalid_request());
         }
         Ok((self.sha, self.path))
+    }
+}
+
+// --- git_log_graph (F090 S3) -------------------------------------------------
+
+/// Mirrors `log::MAX_GRAPH_MAX_COUNT` — kept as its own independent wire-layer
+/// copy, exactly like `MAX_GIT_MUTATE_PATH_BYTES` above is this file's own
+/// copy of a ceiling also enforced deeper in the stack (see `git::commit`'s
+/// module doc comment for why domain functions re-validate what the DTO
+/// layer already checked, and vice versa here).
+const MAX_GIT_LOG_GRAPH_MAX_COUNT: u32 = 5_000;
+
+fn git_log_graph_invalid_request() -> CommandError {
+    CommandError::new(
+        "GIT_LOG_GRAPH_INVALID_REQUEST",
+        "The requested max_count is zero or exceeds the allowed ceiling.",
+    )
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitLogGraphRequest {
+    max_count: u32,
+}
+
+impl GitLogGraphRequest {
+    pub(crate) fn into_parts(self) -> Result<u32, CommandError> {
+        if self.max_count == 0 || self.max_count > MAX_GIT_LOG_GRAPH_MAX_COUNT {
+            return Err(git_log_graph_invalid_request());
+        }
+        Ok(self.max_count)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitGraphNodeWire {
+    sha: String,
+    parents: Vec<String>,
+    subject: String,
+}
+
+impl From<GraphNode> for GitGraphNodeWire {
+    fn from(value: GraphNode) -> Self {
+        Self {
+            sha: value.sha,
+            parents: value.parents,
+            subject: value.subject,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitLogGraphResultWire {
+    nodes: Vec<GitGraphNodeWire>,
+    truncated: bool,
+}
+
+impl From<GraphList> for GitLogGraphResultWire {
+    fn from(value: GraphList) -> Self {
+        Self {
+            nodes: value
+                .nodes
+                .into_iter()
+                .map(GitGraphNodeWire::from)
+                .collect(),
+            truncated: value.truncated,
+        }
+    }
+}
+
+// --- git_refs_list (F090 S3) -------------------------------------------------
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitRefsListRequest {}
+
+impl GitRefsListRequest {
+    pub const fn validate(self) {}
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitRefKindWire {
+    Branch,
+    RemoteBranch,
+    Tag,
+}
+
+impl From<RefGroupKind> for GitRefKindWire {
+    fn from(value: RefGroupKind) -> Self {
+        match value {
+            RefGroupKind::Branch => Self::Branch,
+            RefGroupKind::RemoteBranch => Self::RemoteBranch,
+            RefGroupKind::Tag => Self::Tag,
+        }
+    }
+}
+
+/// `upstream`/`peeledSha` are `None` (never an empty-string sentinel) for
+/// "not applicable" — see `refs::RefEntry`'s own doc comment for why this
+/// mirrors `status.rs`'s existing `Option`-for-absence convention rather than
+/// `GitBranchWire`'s different "verbatim git-native token" one (there the
+/// tokens `"(initial)"`/`"(detached)"` cannot collide with a real value and
+/// are already a documented frontend convention; here the sentinel would be
+/// purely this wire layer's own invention, so it is avoided entirely).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRefEntryWire {
+    kind: GitRefKindWire,
+    full_name: String,
+    short_name: String,
+    target_sha: String,
+    is_annotated_tag: bool,
+    peeled_sha: Option<String>,
+    upstream: Option<String>,
+    is_head: bool,
+}
+
+impl From<RefEntry> for GitRefEntryWire {
+    fn from(value: RefEntry) -> Self {
+        Self {
+            kind: value.kind.into(),
+            full_name: value.full_name.to_wire_lossy(),
+            short_name: value.short_name.to_wire_lossy(),
+            target_sha: value.target_sha,
+            is_annotated_tag: value.is_annotated_tag,
+            peeled_sha: value.peeled_sha,
+            upstream: value.upstream.map(|upstream| upstream.to_wire_lossy()),
+            is_head: value.is_head,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRefsListResultWire {
+    entries: Vec<GitRefEntryWire>,
+    truncated: bool,
+}
+
+impl From<RefList> for GitRefsListResultWire {
+    fn from(value: RefList) -> Self {
+        Self {
+            entries: value
+                .entries
+                .into_iter()
+                .map(GitRefEntryWire::from)
+                .collect(),
+            truncated: value.truncated,
+        }
     }
 }
 

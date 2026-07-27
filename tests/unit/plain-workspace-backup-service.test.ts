@@ -126,6 +126,8 @@ function createFakeBridge(overrides: Partial<PlainBridge> = {}): {
 		gitLineHistoryDetail: notImplemented,
 		gitShowCommit: notImplemented,
 		gitShowCommitBlob: notImplemented,
+		gitLogGraph: notImplemented,
+		gitRefsList: notImplemented,
 		...overrides,
 	};
 	return { bridge, state };

@@ -85,6 +85,85 @@
 //! "raw text, not a structured field extraction" approach this module's own
 //! report explains sidesteps needing a second unsafe-field-in-the-middle
 //! design for author/date at all.
+//!
+//! # `F090` S3: the graph command's own format-string safety design (distinct from the list commands above)
+//!
+//! [`log_graph`]'s [`GIT_LOG_GRAPH_ARGS`] needs two fields the list-producing
+//! commands above never do: `%P` (parent shas, for the DAG's own edges) and a
+//! human-displayable subject line. Naively appending `%an`/`%ae` (author
+//! name/email) or any other free-text field *before* an existing free-text
+//! field would reintroduce exactly the delimiter-shift vulnerability
+//! [`GIT_LOG_COMMIT_META_ARGS`]'s own doc comment (above) already documents
+//! and fixes — this module does not repeat that mistake here: the format is
+//! `%H%x1f%P%x1f%s`, and only **one** field, `%s` (the subject — attacker-
+//! controlled, exactly like `%B`), is free text, positioned strictly *last*.
+//! `%H` and `%P` are both git-computed, fixed hex-digit-and-space-only
+//! fields (never attacker-influenced — the same reasoning
+//! [`super::show_commit::resolve_first_parent`]'s own doc comment already
+//! applies to `%P`) — safe to match positionally ahead of the one absorbing
+//! field, exactly the "safe fields first, one absorbing free-text field
+//! last" shape [`GIT_LOG_COMMIT_META_ARGS`] itself establishes.
+//! [`parse_graph_entries`]'s `splitn(3, ..)` (not an unbounded split) is what
+//! makes this safe regardless of what `%s` itself contains, including a
+//! further embedded `0x1f` byte — see `tests.rs`'s own hostile fixture
+//! (`log_graph_is_immune_to_a_hostile_subject_line_containing_a_unit_separator_byte`)
+//! and its pure-function naive-split control group
+//! (`parse_graph_entries_splitn_is_not_confused_by_an_embedded_separator_in_the_subject_while_a_naive_full_split_would_be`),
+//! mirroring [`parse_history_entries`]'s own identical pair above.
+//!
+//! This module deliberately never asks git for ref/branch/tag decoration
+//! (`%d`/`%D`) at all, for either format string — see
+//! `docs/research/2026-07-26-git-history.md`'s own "不建议解析
+//! `git log --format=%D`" finding: decoration text is free-form,
+//! comma-and-arrow-joined human display text whose *own* separator (`", "`)
+//! is not a delimiter git guarantees absent from a ref name the way a fixed
+//! record separator is guaranteed absent from every one of `for-each-ref`'s
+//! own fields (see [`super::refs`]'s own module doc comment for why *that*
+//! command's fields need no such care). A graph node's ref badges are
+//! instead computed entirely by the frontend, by comparing this command's
+//! own node shas against a separately-fetched [`super::refs::list_refs`]
+//! result's `target_sha`/`peeled_sha` — two independent, narrowly-safe data
+//! sources joined by a plain sha equality check, never by parsing one
+//! command's own decoration text.
+//!
+//! # `--topo-order`, not the default order
+//!
+//! A caller-visible swimlane layout (the frontend's own
+//! `plain-git-graph-layout.ts`) needs every commit's parent(s) to still be
+//! *unprocessed* (not yet emitted) at the moment that commit itself is
+//! emitted, so it can correctly assign/continue a lane for each parent as it
+//! is reached — this is exactly what git's own `--topo-order` guarantees ("a
+//! commit is not shown until all of its children have been shown"; see
+//! `git-log(1)`'s own documentation). Plain `git log`'s *default* order (no
+//! explicit `--topo-order`/`--date-order`) is a close cousin (reverse
+//! chronological by commit date) but does not carry this same hard
+//! guarantee — a backdated commit or clock skew between two parallel
+//! branches could in principle show a parent before all of its children.
+//! Confirmed empirically (this slice's own report) that a real octopus merge
+//! (3 parents) plus two independently-created side branches produces the
+//! merge commit itself as the very first record under `--topo-order`, with
+//! every one of its ancestors following later — see `tests.rs`'s own
+//! multi-branch-merge DAG fixture.
+//!
+//! # Ref-namespace scope: `--branches --tags --remotes`, never `--all`
+//!
+//! `--all` additionally walks `refs/stash` (a real, distinct top-level ref
+//! namespace, not a subset of `refs/heads`/`refs/tags`/`refs/remotes`) —
+//! confirmed empirically (this slice's own report, and `tests.rs`'s own
+//! `log_graph_excludes_a_real_stash_entry`) that a real `git stash push`'s
+//! own commit is walkable from `refs/stash` but never appears in this
+//! command's own `--branches --tags --remotes` output, matching the frozen
+//! research doc's own "不用 --all，因其会带出 refs/stash，见实测" note.
+//!
+//! # Empty-repository / no-matching-ref case: exit 0, empty output, not an error
+//!
+//! Confirmed empirically (mirroring [`file_history`]'s own identical finding
+//! for a path with no history): a repository with zero commits at all (or
+//! with commits but zero refs under any of the three requested namespaces —
+//! a fully detached-HEAD-only state, unusual but possible) makes
+//! [`GIT_LOG_GRAPH_ARGS`] exit `0` with empty stdout, not a failure — this
+//! resolves to an empty, non-truncated [`GraphList`], never
+//! [`git_log_graph_failed`].
 
 use std::sync::atomic::AtomicBool;
 
@@ -484,6 +563,160 @@ pub(crate) async fn line_history_detail(
         }),
         None => Err(git_line_history_detail_stale_index()),
     }
+}
+
+// --- F090 S3: log_graph -----------------------------------------------------
+
+/// The exact, audited base `git log` argument list [`log_graph`] uses — see
+/// this module's own doc comment ("F090 S3: the graph command's own
+/// format-string safety design") for the full field-safety, ordering and
+/// ref-namespace-scope rationale. Locked by
+/// `scripts/plain/boundary-contracts.mjs`'s
+/// `validateGitLogGraphFormatStringBoundary`.
+pub(crate) const GIT_LOG_GRAPH_ARGS: &[&str] = &[
+    "log",
+    "-z",
+    "--format=%H%x1f%P%x1f%s",
+    "--no-patch",
+    "--topo-order",
+    "--branches",
+    "--tags",
+    "--remotes",
+];
+
+/// Defensive ceiling on the caller-requested `max_count` for a single
+/// [`log_graph`] call — exists only to reject a structurally hostile/runaway
+/// request, not to model any real per-view display limit (the caller's own
+/// `max_count`, itself bounded by this ceiling, is the real display budget).
+const MAX_GRAPH_MAX_COUNT: u32 = 5_000;
+
+fn git_log_graph_invalid_request() -> CommandError {
+    CommandError::new(
+        "GIT_LOG_GRAPH_INVALID_REQUEST",
+        "The requested max_count is zero or exceeds the allowed ceiling.",
+    )
+}
+
+fn git_log_graph_failed() -> CommandError {
+    CommandError::new(
+        "GIT_LOG_GRAPH_FAILED",
+        "git log did not complete successfully.",
+    )
+}
+
+fn git_log_graph_parse_failed() -> CommandError {
+    CommandError::new(
+        "GIT_LOG_GRAPH_PARSE_FAILED",
+        "The git log graph output could not be parsed.",
+    )
+}
+
+/// One DAG node — `parents` is empty for a root commit, one element for an
+/// ordinary commit, two for a normal merge, or three-or-more for an octopus
+/// merge (see `tests.rs`'s own fixture covering all four shapes). `subject`
+/// is the commit message's first line only (git's own `%s` convention) — a
+/// caller wanting the full body already has
+/// [`blame_commit_messages`](super::blame::blame_commit_messages) for an
+/// on-demand batch fetch, exactly like
+/// [`super::blame::BlameCommitHeader::summary`]'s own "full body is a
+/// separate, on-demand fetch" precedent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct GraphNode {
+    pub(crate) sha: String,
+    pub(crate) parents: Vec<String>,
+    pub(crate) subject: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct GraphList {
+    pub(crate) nodes: Vec<GraphNode>,
+    /// `true` when more commits actually matched the caller's own requested
+    /// `max_count` than were returned — the same "capped, not exhaustive"
+    /// meaning [`HistoryList::truncated`] already carries for this domain.
+    pub(crate) truncated: bool,
+}
+
+/// Parses [`GIT_LOG_GRAPH_ARGS`]'s NUL-record output, requested with
+/// `--max-count={max_nodes + 1}` so truncation is detectable without a
+/// second round trip — exactly [`parse_history_entries`]'s own technique,
+/// applied to this command's three-field (not two-field) record shape.
+fn parse_graph_entries(output: &[u8], max_nodes: usize) -> Result<GraphList, CommandError> {
+    let mut nodes = Vec::new();
+    for record in split_nul_records(output) {
+        if record.is_empty() {
+            continue;
+        }
+        // Exactly `parse_history_entries`'s own "split on the first N-1
+        // separators only" technique (here N=3), so the one free-text field
+        // (`subject`, last) safely absorbs every remaining byte of the
+        // record regardless of what it contains — see this module's own doc
+        // comment for the full rationale.
+        let mut parts = record.splitn(3, |&byte| byte == 0x1f);
+        let sha_bytes = parts.next().ok_or_else(git_log_graph_parse_failed)?;
+        let parents_bytes = parts.next().ok_or_else(git_log_graph_parse_failed)?;
+        let subject_bytes = parts.next().ok_or_else(git_log_graph_parse_failed)?;
+        if !is_lowercase_hex40(sha_bytes) {
+            return Err(git_log_graph_parse_failed());
+        }
+        let sha = String::from_utf8(sha_bytes.to_vec()).expect("hex digits are ASCII");
+        let mut parents = Vec::new();
+        if !parents_bytes.is_empty() {
+            for token in parents_bytes.split(|&byte| byte == b' ') {
+                if !is_lowercase_hex40(token) {
+                    return Err(git_log_graph_parse_failed());
+                }
+                parents.push(String::from_utf8(token.to_vec()).expect("hex digits are ASCII"));
+            }
+        }
+        let subject = String::from_utf8_lossy(subject_bytes).into_owned();
+        nodes.push(GraphNode {
+            sha,
+            parents,
+            subject,
+        });
+    }
+    let truncated = nodes.len() > max_nodes;
+    if truncated {
+        nodes.truncate(max_nodes);
+    }
+    Ok(GraphList { nodes, truncated })
+}
+
+/// `git log -z --format=%H%x1f%P%x1f%s --no-patch --topo-order --branches
+/// --tags --remotes --max-count=<max_count+1>` — the graph view's own DAG
+/// source. `max_count` must be nonzero and at most [`MAX_GRAPH_MAX_COUNT`];
+/// the caller (the graph view) picks the real display window within that
+/// ceiling. Runs under [`GitExecMode::BackgroundRead`] through [`run_git`],
+/// exactly like every other read in this domain — no new exec path. See
+/// this module's own doc comment for the full format-string-safety,
+/// ordering and ref-namespace-scope rationale.
+pub(crate) async fn log_graph(
+    trust: &TrustService,
+    workspace: &WorkspaceService,
+    window_label: &str,
+    max_count: u32,
+) -> Result<GraphList, CommandError> {
+    if max_count == 0 || max_count > MAX_GRAPH_MAX_COUNT {
+        return Err(git_log_graph_invalid_request());
+    }
+    let repo_dir = resolve_repo_toplevel(trust, workspace, window_label).await?;
+    let mut args: Vec<String> = GIT_LOG_GRAPH_ARGS
+        .iter()
+        .map(|arg| (*arg).to_owned())
+        .collect();
+    args.push(format!("--max-count={}", u64::from(max_count) + 1));
+
+    let cancel = AtomicBool::new(false);
+    let output = tauri::async_runtime::spawn_blocking(move || {
+        run_git(&repo_dir, &args, GitExecMode::BackgroundRead, &cancel)
+    })
+    .await
+    .map_err(|_| git_exec_unavailable())??;
+
+    if output.exit_code != 0 {
+        return Err(git_log_graph_failed());
+    }
+    parse_graph_entries(&output.stdout, max_count as usize)
 }
 
 #[cfg(test)]

@@ -109,6 +109,8 @@ pub fn run() {
             git::commands::git_line_history_detail,
             git::commands::git_show_commit,
             git::commands::git_show_commit_blob,
+            git::commands::git_log_graph,
+            git::commands::git_refs_list,
             search::commands::workspace_search_files,
             search::commands::workspace_search_text_start,
             search::commands::workspace_search_text_poll,
