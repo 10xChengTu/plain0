@@ -94,6 +94,10 @@ import {
 	decodeGitRefsListResult,
 	decodeGitShowBlobResult,
 	decodeGitShowCommitResult,
+	decodeGitStashApplyOutcome,
+	decodeGitStashListResult,
+	decodeGitStashPushOutcome,
+	decodeGitStashShowResult,
 	decodeGitStatusResult,
 	decodeGitVoid,
 	frozenGitBlameCommitMessagesRequest,
@@ -112,6 +116,11 @@ import {
 	frozenGitShowCommitRequest,
 	frozenGitStageBlobRequest,
 	frozenGitStagePathsRequest,
+	frozenGitStashApplyRequest,
+	frozenGitStashDropRequest,
+	frozenGitStashPopRequest,
+	frozenGitStashPushRequest,
+	frozenGitStashShowRequest,
 	frozenGitUnstagePathsRequest,
 } from "./git-codec";
 
@@ -634,6 +643,41 @@ export function createNativeBridge(): PlainBridge {
 		gitRefsList: async () => {
 			return decodeGitRefsListResult(
 				await invoke<unknown>("git_refs_list", { request: {} }),
+			);
+		},
+		gitStashList: async () => {
+			return decodeGitStashListResult(
+				await invoke<unknown>("git_stash_list", { request: {} }),
+			);
+		},
+		gitStashShow: async (sha) => {
+			const request = frozenGitStashShowRequest(sha);
+			return decodeGitStashShowResult(
+				await invoke<unknown>("git_stash_show", { request }),
+			);
+		},
+		gitStashPush: async (message, includeUntracked) => {
+			const request = frozenGitStashPushRequest(message, includeUntracked);
+			return decodeGitStashPushOutcome(
+				await invoke<unknown>("git_stash_push", { request }),
+			);
+		},
+		gitStashApply: async (sha, useIndex) => {
+			const request = frozenGitStashApplyRequest(sha, useIndex);
+			return decodeGitStashApplyOutcome(
+				await invoke<unknown>("git_stash_apply", { request }),
+			);
+		},
+		gitStashPop: async (sha, useIndex) => {
+			const request = frozenGitStashPopRequest(sha, useIndex);
+			return decodeGitStashApplyOutcome(
+				await invoke<unknown>("git_stash_pop", { request }),
+			);
+		},
+		gitStashDrop: async (sha) => {
+			const request = frozenGitStashDropRequest(sha);
+			return decodeGitVoid(
+				await invoke<unknown>("git_stash_drop", { request }),
 			);
 		},
 	};

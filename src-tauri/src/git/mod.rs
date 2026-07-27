@@ -24,7 +24,15 @@
 //! view's ref-badge join source) — see those modules' own doc comments for
 //! why each command's own multi-field format string is safe by a different
 //! mechanism (one absorbing free-text field for `log_graph`; every field
-//! structurally NUL-free by ref-name grammar for `refs`).
+//! structurally NUL-free by ref-name grammar for `refs`). S4 adds [`stash`]
+//! (stash list/show, both read-only, plus the push/apply/pop/drop write
+//! workflow) — see that module's own doc comment for its own field-safety
+//! design (a stash message is entirely user-supplied, unlike `refs`' grammar-
+//! constrained fields, so it reuses `log`'s "one absorbing field, positioned
+//! last" technique) and for why sha-based addressing only eliminates the
+//! frozen plan's anticipated "index shifts after drop" race for `show`/
+//! `apply`, not for `pop`/`drop` (git's own command grammar rejects a bare
+//! sha for those two specifically).
 //!
 //! # Subprocess spawning is `exec::run_git`-only
 //!
@@ -85,6 +93,7 @@ pub(crate) mod refs;
 pub(crate) mod repo;
 pub(crate) mod show_commit;
 pub(crate) mod stage;
+pub(crate) mod stash;
 pub(crate) mod status;
 pub(crate) mod wire;
 

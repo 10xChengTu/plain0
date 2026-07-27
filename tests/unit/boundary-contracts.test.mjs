@@ -44,6 +44,8 @@ import {
 	validateGitRefsFieldSafetyBoundary,
 	validateGitRustBoundary,
 	validateGitShowCommitFirstParentBoundary,
+	validateGitStashConfirmationBoundary,
+	validateGitStashMessageFieldSafetyBoundary,
 	validateMultiDiffEditorOverrideImportBoundary,
 } from "../../scripts/plain/boundary-contracts.mjs";
 
@@ -9424,6 +9426,10 @@ describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
 		new URL("../../src-tauri/src/git/show_commit.rs", import.meta.url),
 		"utf8",
 	);
+	const gitStashSourceForRustBoundary = readFileSync(
+		new URL("../../src-tauri/src/git/stash.rs", import.meta.url),
+		"utf8",
+	);
 
 	const baselineGitRustSources = Object.freeze([
 		{ relativePath: "src-tauri/src/git/status.rs", source: gitStatusSource },
@@ -9443,6 +9449,10 @@ describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
 		{
 			relativePath: "src-tauri/src/git/show_commit.rs",
 			source: gitShowCommitSourceForRustBoundary,
+		},
+		{
+			relativePath: "src-tauri/src/git/stash.rs",
+			source: gitStashSourceForRustBoundary,
 		},
 	]);
 
@@ -10416,7 +10426,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the twenty-two audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the twenty-eight audited git methods, no more and no fewer",
 		);
 	});
 
@@ -10480,7 +10490,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the twenty-two audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the twenty-eight audited git methods, no more and no fewer",
 		);
 	});
 
@@ -10541,7 +10551,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the twenty-two audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the twenty-eight audited git methods, no more and no fewer",
 		);
 	});
 
@@ -10554,7 +10564,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the twenty-two audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the twenty-eight audited git methods, no more and no fewer",
 		);
 	});
 
@@ -10632,7 +10642,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the twenty-two audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the twenty-eight audited git methods, no more and no fewer",
 		);
 	});
 
@@ -10645,7 +10655,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the twenty-two audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the twenty-eight audited git methods, no more and no fewer",
 		);
 	});
 
@@ -11100,6 +11110,286 @@ export async function bypassFetch(bridge: PlainBridge): Promise<void> {
 		);
 		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
 			"resolveNetworkConfirmation must unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited shape",
+		);
+	});
+});
+
+describe("Plain F090 S4 git stash message field-safety boundary Harness", () => {
+	const gitStashSourceForFieldSafety = readFileSync(
+		new URL("../../src-tauri/src/git/stash.rs", import.meta.url),
+		"utf8",
+	);
+	const baselineGitStashFieldSafetyRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/git/stash.rs",
+			source: gitStashSourceForFieldSafety,
+		},
+	]);
+
+	function withMutatedGitStashSource(mutate) {
+		return baselineGitStashFieldSafetyRustSources.map((entry) => ({
+			...entry,
+			source: mutate(entry.source),
+		}));
+	}
+
+	it("passes for the real, unmodified stash.rs file", () => {
+		expect(
+			validateGitStashMessageFieldSafetyBoundary(
+				baselineGitStashFieldSafetyRustSources,
+			),
+		).toEqual([]);
+	});
+
+	it("fails if stash.rs is missing entirely", () => {
+		expect(validateGitStashMessageFieldSafetyBoundary([])).toContain(
+			"git boundary requires stash.rs",
+		);
+	});
+
+	it("fails if GIT_STASH_LIST_ARGS drops -z", () => {
+		const mutated = withMutatedGitStashSource((source) =>
+			source.replace(
+				'&["stash", "list", "-z", "--format=%gd%x1f%H%x1f%ct%x1f%B"]',
+				'&["stash", "list", "--format=%gd%x1f%H%x1f%ct%x1f%B"]',
+			),
+		);
+		expect(validateGitStashMessageFieldSafetyBoundary(mutated)).toContain(
+			"stash.rs must define GIT_STASH_LIST_ARGS as exactly the audited format string — " +
+				"%B (the one attacker-controlled free-text field) must be positioned strictly last, " +
+				"after the three fixed-shape, git-computed %gd/%H/%ct fields",
+		);
+	});
+
+	it("fails if GIT_STASH_LIST_ARGS's format string moves %B before %ct (the exact field-shift regression this contract exists to catch)", () => {
+		const mutated = withMutatedGitStashSource((source) =>
+			source.replace(
+				'"--format=%gd%x1f%H%x1f%ct%x1f%B"',
+				'"--format=%gd%x1f%H%x1f%B%x1f%ct"',
+			),
+		);
+		expect(validateGitStashMessageFieldSafetyBoundary(mutated)).toContain(
+			"stash.rs must define GIT_STASH_LIST_ARGS as exactly the audited format string — " +
+				"%B (the one attacker-controlled free-text field) must be positioned strictly last, " +
+				"after the three fixed-shape, git-computed %gd/%H/%ct fields",
+		);
+	});
+
+	it("fails if parse_stash_list's bounded splitn(4, ...) is widened to an unbounded split (the exact regression this contract exists to catch)", () => {
+		const mutated = withMutatedGitStashSource((source) =>
+			source.replace(
+				"let mut parts = record.splitn(4, |&byte| byte == 0x1f);",
+				"let mut parts = record.split(|&byte| byte == 0x1f);",
+			),
+		);
+		expect(validateGitStashMessageFieldSafetyBoundary(mutated)).toContain(
+			"parse_stash_list must split each record with a bounded splitn(4, ...) — leaving " +
+				"the message field's own further bytes (including an attacker-embedded 0x1f) " +
+				"untouched — never an unbounded split",
+		);
+		// Control: this same mutated source now also trips the *second* guard
+		// (the exact naive-full-split shape this contract independently bans),
+		// proving both checks are real and not merely mutually redundant phrasing.
+		expect(validateGitStashMessageFieldSafetyBoundary(mutated)).toContain(
+			"parse_stash_list must never fall back to an unbounded split on 0x1f anywhere in " +
+				"its own body — this is exactly the field-shift vulnerability this command's format " +
+				"string is designed to avoid",
+		);
+	});
+
+	it("fails if parse_stash_list is renamed away, losing the function this contract inspects", () => {
+		const mutated = withMutatedGitStashSource((source) =>
+			source.replace("fn parse_stash_list(", "fn parse_stash_list_renamed("),
+		);
+		expect(validateGitStashMessageFieldSafetyBoundary(mutated)).toContain(
+			"stash.rs must define a parse_stash_list function",
+		);
+	});
+});
+
+const gitStashAppPaths = [
+	"app/platform/tauri/contracts.ts",
+	"app/platform/tauri/native.ts",
+	"app/platform/tauri/browser-mock.ts",
+	"app/features/scm/plain-git-stash-view.ts",
+	"app/features/scm/plain-scm-stash.ts",
+];
+const gitStashAppSources = gitStashAppPaths.map((relativePath) => ({
+	relativePath,
+	source: readFileSync(
+		new URL(`../../${relativePath}`, import.meta.url),
+		"utf8",
+	),
+}));
+
+function replaceGitStashAppSource(relativePath, from, to) {
+	return mutateWorkspaceSource(gitStashAppSources, relativePath, (source) => {
+		if (!source.includes(from)) {
+			throw new Error(
+				`${relativePath} git stash mutation fixture no longer matches production`,
+			);
+		}
+		return source.replace(from, to);
+	});
+}
+
+describe("Plain F090 S4 git stash confirmation boundary Harness", () => {
+	it("accepts the production single confirmed pop/drop routes", () => {
+		expect(validateGitStashConfirmationBoundary(gitStashAppSources)).toEqual(
+			[],
+		);
+	});
+
+	it("requires every audited file to be present", () => {
+		expect(validateGitStashConfirmationBoundary([])).toContain(
+			"git stash confirmation boundary requires app/features/scm/plain-scm-stash.ts",
+		);
+	});
+
+	it("rejects a second gitStashPop call site anywhere else in app/", () => {
+		const relativePath = "app/features/scm/plain-git-stash-bypass.ts";
+		const hostile = [
+			...gitStashAppSources,
+			{
+				relativePath,
+				source: `import type { PlainBridge } from "../../platform/tauri/contracts";
+export async function bypassPop(bridge: PlainBridge): Promise<void> {
+	await bridge.gitStashPop("a".repeat(40), false);
+}`,
+			},
+		];
+		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
+			`${relativePath} must not consume gitStashPop outside PlainGitStashView.popEntry's single audited call site`,
+		);
+	});
+
+	it("rejects a second gitStashDrop call site inside plain-git-stash-view.ts outside dropEntry", () => {
+		const hostile = replaceGitStashAppSource(
+			"app/features/scm/plain-git-stash-view.ts",
+			"private async showEntry(entry: GitStashEntry): Promise<void> {",
+			`private async bypassDrop(bridge: PlainBridge): Promise<void> {
+		await bridge.gitStashDrop("a".repeat(40));
+	}
+
+	private async showEntry(entry: GitStashEntry): Promise<void> {`,
+		);
+		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
+			"app/features/scm/plain-git-stash-view.ts must not consume gitStashDrop outside PlainGitStashView.dropEntry's single audited call site",
+		);
+	});
+
+	it("rejects a duplicated gitStashPop call inside popEntry itself", () => {
+		const hostile = replaceGitStashAppSource(
+			"app/features/scm/plain-git-stash-view.ts",
+			`const outcome = await this.#runStashMutation((bridge) =>
+			bridge.gitStashPop(entry.sha, false),
+		);`,
+			`const outcome = await this.#runStashMutation((bridge) =>
+			bridge.gitStashPop(entry.sha, false),
+		);
+		await this.#runStashMutation((bridge) => bridge.gitStashPop(entry.sha, false));`,
+		);
+		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
+			"gitStashPop must have exactly one production call site, inside PlainGitStashView.popEntry",
+		);
+	});
+
+	it("rejects computed/bracket access to gitStashDrop", () => {
+		const hostile = replaceGitStashAppSource(
+			"app/features/scm/plain-git-stash-view.ts",
+			"await this.#runStashMutation((bridge) => bridge.gitStashDrop(entry.sha));",
+			'await this.#runStashMutation((bridge) => bridge["gitStashDrop"](entry.sha));',
+		);
+		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
+			"app/features/scm/plain-git-stash-view.ts must not consume gitStashDrop outside PlainGitStashView.dropEntry's single audited call site",
+		);
+	});
+
+	it("rejects a missing or renamed gitStashPop bridge declaration", () => {
+		const hostile = replaceGitStashAppSource(
+			"app/platform/tauri/native.ts",
+			"gitStashPop: async (sha, useIndex) => {",
+			"gitStashPopRenamed: async (sha, useIndex) => {",
+		);
+		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
+			"app/platform/tauri/native.ts must declare gitStashPop exactly once in its audited bridge surface",
+		);
+	});
+
+	it("rejects a duplicated gitStashDrop bridge declaration", () => {
+		const hostile = mutateWorkspaceSource(
+			gitStashAppSources,
+			"app/platform/tauri/browser-mock.ts",
+			(source) =>
+				`${source}\nconst duplicateGitStashDropMock = { async gitStashDrop() { return; } };`,
+		);
+		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
+			"app/platform/tauri/browser-mock.ts must declare gitStashDrop exactly once in its audited bridge surface",
+		);
+	});
+
+	it("rejects popEntry skipping the confirmation gate", () => {
+		const hostile = replaceGitStashAppSource(
+			"app/features/scm/plain-git-stash-view.ts",
+			'if (decision.kind !== "confirmed") {\n\t\t\treturn;\n\t\t}\n\t\tconst outcome = await this.#runStashMutation((bridge) =>\n\t\t\tbridge.gitStashPop(entry.sha, false),\n\t\t);',
+			'if (decision.kind === "confirmed") {\n\t\t\treturn;\n\t\t}\n\t\tconst outcome = await this.#runStashMutation((bridge) =>\n\t\t\tbridge.gitStashPop(entry.sha, false),\n\t\t);',
+		);
+		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
+			"PlainGitStashView.popEntry must match its exact audited confirm-then-call shape — no other shape may reach the stash bridge call",
+		);
+	});
+
+	it("rejects dropEntry skipping the confirmation gate", () => {
+		const hostile = replaceGitStashAppSource(
+			"app/features/scm/plain-git-stash-view.ts",
+			'if (decision.kind !== "confirmed") {\n\t\t\treturn;\n\t\t}\n\t\tawait this.#runStashMutation((bridge) => bridge.gitStashDrop(entry.sha));',
+			'if (decision.kind === "confirmed") {\n\t\t\treturn;\n\t\t}\n\t\tawait this.#runStashMutation((bridge) => bridge.gitStashDrop(entry.sha));',
+		);
+		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
+			"PlainGitStashView.dropEntry must match its exact audited confirm-then-call shape — no other shape may reach the stash bridge call",
+		);
+	});
+
+	it("rejects plain-scm-stash.ts importing anything at all", () => {
+		const hostile = mutateWorkspaceSource(
+			gitStashAppSources,
+			"app/features/scm/plain-scm-stash.ts",
+			(source) => `import { invoke } from "@tauri-apps/api/core";\n${source}`,
+		);
+		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
+			"plain-scm-stash.ts must not import anything — it only ever decides whether the caller may pop/drop a stash entry, and an import is the only way it could ever reach a bridge or service to perform the write itself",
+		);
+	});
+
+	it("rejects a new top-level declaration added to plain-scm-stash.ts", () => {
+		const hostile = mutateWorkspaceSource(
+			gitStashAppSources,
+			"app/features/scm/plain-scm-stash.ts",
+			(source) => `${source}\nexport function leakedHelper(): void {}`,
+		);
+		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
+			"plain-scm-stash.ts must retain its exact audited top-level surface — no new declaration can quietly add a way for this decide-only module to reach a bridge",
+		);
+	});
+
+	it("rejects resolveStashConfirmation calling a bridge method itself", () => {
+		const hostile = replaceGitStashAppSource(
+			"app/features/scm/plain-scm-stash.ts",
+			`export async function resolveStashConfirmation(
+	dialogService: StashConfirmDialogService,
+	request: StashConfirmationRequest,
+): Promise<StashConfirmDecision> {
+	const confirmation = await dialogService.confirm({`,
+			`export async function resolveStashConfirmation(
+	dialogService: StashConfirmDialogService,
+	request: StashConfirmationRequest,
+	bridge: { gitStashDrop(sha: string): Promise<void> },
+): Promise<StashConfirmDecision> {
+	await bridge.gitStashDrop("a".repeat(40));
+	const confirmation = await dialogService.confirm({`,
+		);
+		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
+			"resolveStashConfirmation must unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited shape",
 		);
 	});
 });

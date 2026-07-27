@@ -36,13 +36,17 @@ use super::dto::{
     GitNetworkPreviewResult, GitPullRequest, GitPushRequest, GitRefsListRequest,
     GitRefsListResultWire, GitShowBlobRequest, GitShowBlobResult, GitShowCommitBlobRequest,
     GitShowCommitRequest, GitShowCommitResult, GitStageBlobRequest, GitStagePathsRequest,
-    GitStatusRequest, GitStatusResult, GitUnstagePathsRequest,
+    GitStashApplyOutcomeWire, GitStashApplyRequest, GitStashDropRequest, GitStashListRequest,
+    GitStashListResultWire, GitStashPopRequest, GitStashPushOutcomeWire, GitStashPushRequest,
+    GitStashShowRequest, GitStashShowResultWire, GitStatusRequest, GitStatusResult,
+    GitUnstagePathsRequest,
 };
 use super::log;
 use super::network::{self, GitNetworkService};
 use super::refs;
 use super::show_commit;
 use super::stage;
+use super::stash;
 use super::status;
 
 #[tauri::command]
@@ -371,4 +375,102 @@ pub(crate) async fn git_refs_list(
     request.validate();
     let result = refs::list_refs(trust.inner(), workspace.inner(), window.label()).await?;
     Ok(GitRefsListResultWire::from(result))
+}
+
+#[tauri::command]
+pub(crate) async fn git_stash_list(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    request: GitStashListRequest,
+) -> Result<GitStashListResultWire, CommandError> {
+    request.validate();
+    let result = stash::list_stashes(trust.inner(), workspace.inner(), window.label()).await?;
+    Ok(GitStashListResultWire::from(result))
+}
+
+#[tauri::command]
+pub(crate) async fn git_stash_show(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    request: GitStashShowRequest,
+) -> Result<GitStashShowResultWire, CommandError> {
+    let sha = request.into_parts()?;
+    let result = stash::show_stash(trust.inner(), workspace.inner(), window.label(), &sha).await?;
+    Ok(GitStashShowResultWire::from(result))
+}
+
+#[tauri::command]
+pub(crate) async fn git_stash_push(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    request: GitStashPushRequest,
+) -> Result<GitStashPushOutcomeWire, CommandError> {
+    let (message, include_untracked) = request.into_parts()?;
+    let outcome = stash::push_stash(
+        trust.inner(),
+        workspace.inner(),
+        window.label(),
+        &message,
+        include_untracked,
+    )
+    .await?;
+    Ok(GitStashPushOutcomeWire::from(outcome))
+}
+
+#[tauri::command]
+pub(crate) async fn git_stash_apply(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    request: GitStashApplyRequest,
+) -> Result<GitStashApplyOutcomeWire, CommandError> {
+    let (sha, use_index) = request.into_parts()?;
+    let outcome = stash::apply_stash(
+        trust.inner(),
+        workspace.inner(),
+        window.label(),
+        &sha,
+        use_index,
+    )
+    .await?;
+    Ok(GitStashApplyOutcomeWire::from(outcome))
+}
+
+#[tauri::command]
+pub(crate) async fn git_stash_pop(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    request: GitStashPopRequest,
+) -> Result<GitStashApplyOutcomeWire, CommandError> {
+    let (expected_sha, use_index) = request.into_parts()?;
+    let outcome = stash::pop_stash(
+        trust.inner(),
+        workspace.inner(),
+        window.label(),
+        &expected_sha,
+        use_index,
+    )
+    .await?;
+    Ok(GitStashApplyOutcomeWire::from(outcome))
+}
+
+#[tauri::command]
+pub(crate) async fn git_stash_drop(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    request: GitStashDropRequest,
+) -> Result<(), CommandError> {
+    let expected_sha = request.into_parts()?;
+    stash::drop_stash(
+        trust.inner(),
+        workspace.inner(),
+        window.label(),
+        &expected_sha,
+    )
+    .await
 }

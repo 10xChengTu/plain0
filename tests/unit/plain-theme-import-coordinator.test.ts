@@ -118,6 +118,12 @@ function fakeBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		gitShowCommitBlob: notImplemented,
 		gitLogGraph: notImplemented,
 		gitRefsList: notImplemented,
+		gitStashList: notImplemented,
+		gitStashShow: notImplemented,
+		gitStashPush: notImplemented,
+		gitStashApply: notImplemented,
+		gitStashPop: notImplemented,
+		gitStashDrop: notImplemented,
 		...overrides,
 	};
 }

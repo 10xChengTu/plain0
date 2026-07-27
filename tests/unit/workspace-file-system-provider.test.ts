@@ -416,6 +416,24 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async gitRefsList() {
 			throw new Error("unused");
 		},
+		async gitStashList() {
+			throw new Error("unused");
+		},
+		async gitStashShow() {
+			throw new Error("unused");
+		},
+		async gitStashPush() {
+			throw new Error("unused");
+		},
+		async gitStashApply() {
+			throw new Error("unused");
+		},
+		async gitStashPop() {
+			throw new Error("unused");
+		},
+		async gitStashDrop() {
+			throw new Error("unused");
+		},
 		...overrides,
 	};
 }

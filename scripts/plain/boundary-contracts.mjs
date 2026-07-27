@@ -1467,6 +1467,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 				parent.expression.text === "configurePlainScmBridge" ||
 				parent.expression.text === "configurePlainGitHistoryBridge" ||
 				parent.expression.text === "configurePlainGitGraphBridge" ||
+				parent.expression.text === "configurePlainGitStashBridge" ||
 				parent.expression.text === "createPlainGitTextModelContentProvider" ||
 				parent.expression.text === "createPlainGitBlameContribution" ||
 				parent.expression.text === "createPlainGitCommitBlobContentProvider" ||
@@ -6503,19 +6504,70 @@ const GIT_COMMAND_CONTRACTS = Object.freeze([
 		returnType: "->Result<GitRefsListResultWire,CommandError>",
 		body: "request.validate();letresult=refs::list_refs(trust.inner(),workspace.inner(),window.label()).await?;Ok(GitRefsListResultWire::from(result))",
 	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_stash_list",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitStashListRequest",
+		returnType: "->Result<GitStashListResultWire,CommandError>",
+		body: "request.validate();letresult=stash::list_stashes(trust.inner(),workspace.inner(),window.label()).await?;Ok(GitStashListResultWire::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_stash_show",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitStashShowRequest",
+		returnType: "->Result<GitStashShowResultWire,CommandError>",
+		body: "letsha=request.into_parts()?;letresult=stash::show_stash(trust.inner(),workspace.inner(),window.label(),&sha).await?;Ok(GitStashShowResultWire::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_stash_push",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitStashPushRequest",
+		returnType: "->Result<GitStashPushOutcomeWire,CommandError>",
+		body: "let(message,include_untracked)=request.into_parts()?;letoutcome=stash::push_stash(trust.inner(),workspace.inner(),window.label(),&message,include_untracked,).await?;Ok(GitStashPushOutcomeWire::from(outcome))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_stash_apply",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitStashApplyRequest",
+		returnType: "->Result<GitStashApplyOutcomeWire,CommandError>",
+		body: "let(sha,use_index)=request.into_parts()?;letoutcome=stash::apply_stash(trust.inner(),workspace.inner(),window.label(),&sha,use_index,).await?;Ok(GitStashApplyOutcomeWire::from(outcome))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_stash_pop",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitStashPopRequest",
+		returnType: "->Result<GitStashApplyOutcomeWire,CommandError>",
+		body: "let(expected_sha,use_index)=request.into_parts()?;letoutcome=stash::pop_stash(trust.inner(),workspace.inner(),window.label(),&expected_sha,use_index,).await?;Ok(GitStashApplyOutcomeWire::from(outcome))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_stash_drop",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitStashDropRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "letexpected_sha=request.into_parts()?;stash::drop_stash(trust.inner(),workspace.inner(),window.label(),&expected_sha,).await",
+	},
 ]);
 
 /**
- * Locks all twenty-two git commands (`F080` S1's three reads, S3's five
+ * Locks all twenty-eight git commands (`F080` S1's three reads, S3's five
  * writes, S4's five network commands, `F090` S0's two read-only blame
  * commands — `git_blame_file`/`git_blame_commit_messages` —, `F090` S1's
  * three read-only file/line-history commands —
  * `git_file_history`/`git_line_history_list`/`git_line_history_detail` —,
  * `F090` S2's two read-only commit-detail commands —
- * `git_show_commit`/`git_show_commit_blob` — and `F090` S3's two read-only
- * graph/refs commands — `git_log_graph`/`git_refs_list` —, added to this
- * same closed array rather than a parallel `GIT_HISTORY_COMMAND_CONTRACTS`,
- * per the existing "`PlainBridge`'s git surface is one audited whole, not
+ * `git_show_commit`/`git_show_commit_blob` —, `F090` S3's two read-only
+ * graph/refs commands — `git_log_graph`/`git_refs_list` — and `F090` S4's six
+ * stash commands (two read-only — `git_stash_list`/`git_stash_show` — and
+ * four writes — `git_stash_push`/`git_stash_apply`/`git_stash_pop`/
+ * `git_stash_drop`) —, added to this same closed array rather than a
+ * parallel `GIT_HISTORY_COMMAND_CONTRACTS`, per the existing "`PlainBridge`'s
+ * git surface is one audited whole, not
  * several independently-sized ones" rationale documented below at
  * `GIT_BRIDGE_METHOD_NAMES`) to their audited exact signatures, bodies and
  * single `generate_handler!` registration — mirrors
@@ -7198,6 +7250,134 @@ export function validateGitRustBoundary(rustSources) {
 		);
 	}
 
+	// --- F090 S4: stash (`git::stash`) --------------------------------------
+	//
+	// `GIT_STASH_LIST_ARGS` itself gets its own *dedicated* lock
+	// (`validateGitStashMessageFieldSafetyBoundary` below) — the same
+	// "exported on its own, not folded in here" treatment
+	// `validateGitBlameHardeningArgs`/`validateGitLogGraphFormatStringBoundary`
+	// already get, because it has its own easy-to-miss field-safety footgun
+	// (a stash message is entirely user-supplied, unlike `refs`' grammar-
+	// constrained fields) beyond plain array equality. This section locks
+	// every other `GIT_STASH_*_ARGS` constant (plain array equality is
+	// sufficient for each: none of them has a free-text field to absorb) and
+	// the wire DTO shapes.
+	const stashSource = findRustSource(rustSources, "src-tauri/src/git/stash.rs");
+	if (stashSource === undefined) {
+		failures.push("git boundary requires stash.rs");
+		return failures;
+	}
+	const executableStash = stripRustCommentsOnly(stashSource);
+	const stashArgsChecks = [
+		[
+			"GIT_STASH_SHOW_NAME_STATUS_ARGS",
+			[
+				"stash",
+				"show",
+				"--no-color",
+				"-z",
+				"-u",
+				"-M",
+				"-C",
+				"--find-copies-harder",
+				"--no-textconv",
+				"--no-ext-diff",
+				"--name-status",
+			],
+		],
+		[
+			"GIT_STASH_SHOW_NUMSTAT_ARGS",
+			[
+				"stash",
+				"show",
+				"--no-color",
+				"-z",
+				"-u",
+				"-M",
+				"-C",
+				"--find-copies-harder",
+				"--no-textconv",
+				"--no-ext-diff",
+				"--numstat",
+			],
+		],
+		["GIT_STASH_PUSH_ARGS", ["stash", "push"]],
+		[
+			"GIT_STASH_PUSH_INCLUDE_UNTRACKED_ARGS",
+			["stash", "push", "--include-untracked"],
+		],
+		["GIT_STASH_APPLY_ARGS", ["stash", "apply"]],
+		["GIT_STASH_APPLY_INDEX_ARGS", ["stash", "apply", "--index"]],
+		["GIT_STASH_POP_ARGS", ["stash", "pop"]],
+		["GIT_STASH_POP_INDEX_ARGS", ["stash", "pop", "--index"]],
+		["GIT_STASH_DROP_ARGS", ["stash", "drop"]],
+	];
+	for (const [constantName, expected] of stashArgsChecks) {
+		if (!sameArray(argsConstant(executableStash, constantName), expected)) {
+			failures.push(
+				`stash.rs must define ${constantName} as exactly the audited argument list`,
+			);
+		}
+	}
+
+	if (
+		structBody("GitStashListRequest") !== "" ||
+		structBody("GitStashEntryWire") !==
+			"index:u32,sha:String,committer_time:i64,message:String," ||
+		structBody("GitStashListResultWire") !==
+			"entries:Vec<GitStashEntryWire>,truncated:bool,"
+	) {
+		failures.push(
+			"GitStashListRequest/GitStashEntryWire/GitStashListResultWire must expose only their exact audited fields",
+		);
+	}
+	if (
+		structBody("GitStashShowRequest") !== "sha:String," ||
+		structBody("GitStashShowResultWire") !==
+			"sha:String,parent_sha:Option<String>,files:Vec<GitDiffFileEntryWire>,"
+	) {
+		failures.push(
+			"GitStashShowRequest/GitStashShowResultWire must expose only their exact audited fields",
+		);
+	}
+	if (
+		structBody("GitStashPushRequest") !==
+		"message:String,include_untracked:bool,"
+	) {
+		failures.push(
+			"GitStashPushRequest must expose only its exact audited fields",
+		);
+	}
+	const stashPushOutcomeBody = enumBody("GitStashPushOutcomeWire");
+	if (
+		stashPushOutcomeBody !== "Created,NoLocalChanges," &&
+		stashPushOutcomeBody !== "Created,NoLocalChanges"
+	) {
+		failures.push(
+			"GitStashPushOutcomeWire must expose exactly its two audited Created/NoLocalChanges variants",
+		);
+	}
+	if (
+		structBody("GitStashApplyRequest") !== "sha:String,use_index:bool," ||
+		structBody("GitStashPopRequest") !==
+			"expected_sha:String,use_index:bool," ||
+		structBody("GitStashDropRequest") !== "expected_sha:String,"
+	) {
+		failures.push(
+			"GitStashApplyRequest/GitStashPopRequest/GitStashDropRequest must expose only their exact audited fields",
+		);
+	}
+	const stashApplyOutcomeBody = enumBody("GitStashApplyOutcomeWire");
+	if (
+		stashApplyOutcomeBody !==
+			"Applied,Conflict{conflicted_paths:Vec<String>}," &&
+		stashApplyOutcomeBody !== "Applied,Conflict{conflicted_paths:Vec<String>}"
+	) {
+		failures.push(
+			"GitStashApplyOutcomeWire must expose exactly its two audited Applied/Conflict variants",
+		);
+	}
+
 	return failures;
 }
 
@@ -7493,6 +7673,82 @@ export function validateGitRefsFieldSafetyBoundary(rustSources) {
 }
 
 /**
+ * `F090` S4's dedicated lock for `stash.rs`'s own list command — kept as its
+ * own exported function (not folded into `validateGitRustBoundary`'s generic
+ * `argsConstant` checks) for the same reason
+ * `validateGitLogGraphFormatStringBoundary` is: a stash entry's own message
+ * is entirely user-supplied (`git stash push -m <message>` accepts arbitrary
+ * bytes, including this format string's own `0x1f` separator — confirmed
+ * empirically, this slice's own report), so `GIT_STASH_LIST_ARGS` needs the
+ * same "one absorbing free-text field, positioned last" discipline
+ * `GIT_LOG_COMMIT_META_ARGS`/`GIT_LOG_GRAPH_ARGS` already established for
+ * this domain, and a plain array-equality check alone would not catch a
+ * future edit that silently reordered the fields or added a second free-text
+ * one before `%B`. This function locks two things together: the exact
+ * argument list itself, and that `parse_stash_list` actually parses it the
+ * safe way — a bounded `splitn(4, ...)` (so the one attacker-controlled
+ * field, `%B`, safely absorbs everything after the third delimiter, embedded
+ * `0x1f` bytes included) rather than an unbounded split that would misparse
+ * a hostile message into extra fields (proven reachable via entirely normal
+ * git usage by `tests.rs`'s own
+ * `list_stashes_is_immune_to_a_hostile_message_containing_a_unit_separator_byte`
+ * fixture and its pure-function naive-split control group,
+ * `parse_stash_list_splitn_is_not_confused_by_a_message_containing_an_embedded_separator_byte`).
+ */
+export function validateGitStashMessageFieldSafetyBoundary(rustSources) {
+	const failures = [];
+	const stashSource = findRustSource(rustSources, "src-tauri/src/git/stash.rs");
+	if (stashSource === undefined) {
+		failures.push("git boundary requires stash.rs");
+		return failures;
+	}
+	const executableStash = stripRustCommentsOnly(stashSource);
+	const constantPattern =
+		/pub\s*\(\s*crate\s*\)\s+const\s+GIT_STASH_LIST_ARGS\s*:\s*&\[&str\]\s*=\s*&\[([^\]]*)\]\s*;/;
+	const match = constantPattern.exec(executableStash);
+	const args = match?.[1]
+		?.split(",")
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0)
+		.map((entry) => entry.replace(/^"|"$/g, ""));
+	if (
+		match === null ||
+		!sameArray(args, ["stash", "list", "-z", "--format=%gd%x1f%H%x1f%ct%x1f%B"])
+	) {
+		failures.push(
+			"stash.rs must define GIT_STASH_LIST_ARGS as exactly the audited format string — " +
+				"%B (the one attacker-controlled free-text field) must be positioned strictly last, " +
+				"after the three fixed-shape, git-computed %gd/%H/%ct fields",
+		);
+	}
+
+	const parseStashListBody = rustFunctionBody(
+		executableStash,
+		"parse_stash_list",
+	);
+	if (parseStashListBody === undefined) {
+		failures.push("stash.rs must define a parse_stash_list function");
+		return failures;
+	}
+	if (!parseStashListBody.body.includes("splitn(4")) {
+		failures.push(
+			"parse_stash_list must split each record with a bounded splitn(4, ...) — leaving " +
+				"the message field's own further bytes (including an attacker-embedded 0x1f) " +
+				"untouched — never an unbounded split",
+		);
+	}
+	if (parseStashListBody.body.includes(".split(|&byte| byte == 0x1f)")) {
+		failures.push(
+			"parse_stash_list must never fall back to an unbounded split on 0x1f anywhere in " +
+				"its own body — this is exactly the field-shift vulnerability this command's format " +
+				"string is designed to avoid",
+		);
+	}
+
+	return failures;
+}
+
+/**
  * `F080` S1's three read methods, `F080` S3's five write methods
  * (`git_stage_paths`/`git_unstage_paths`/`git_stage_blob`/`git_commit`/
  * `git_discard_paths`), `F080` S4's five network methods
@@ -7502,10 +7758,12 @@ export function validateGitRefsFieldSafetyBoundary(rustSources) {
  * read-only file/line-history methods (`gitFileHistory`/
  * `gitLineHistoryList`/`gitLineHistoryDetail`), `F090` S2's two
  * read-only commit-detail methods (`gitShowCommit`/`gitShowCommitBlob`),
- * and `F090` S3's two read-only graph/refs methods (`gitLogGraph`/
- * `gitRefsList`) — every slice deliberately shares this same closed-list
+ * `F090` S3's two read-only graph/refs methods (`gitLogGraph`/
+ * `gitRefsList`), and `F090` S4's six stash methods (`gitStashList`/
+ * `gitStashShow`/`gitStashPush`/`gitStashApply`/`gitStashPop`/
+ * `gitStashDrop`) — every slice deliberately shares this same closed-list
  * lock rather than getting its own parallel "S_ bridge methods" const, for
- * the same reason `GIT_COMMAND_CONTRACTS` above holds all twenty-two Rust
+ * the same reason `GIT_COMMAND_CONTRACTS` above holds all twenty-eight Rust
  * commands in one array: `PlainBridge`'s git surface is one audited whole,
  * not several independently-sized ones.
  */
@@ -7532,6 +7790,12 @@ const GIT_BRIDGE_METHOD_NAMES = [
 	"gitShowCommitBlob",
 	"gitLogGraph",
 	"gitRefsList",
+	"gitStashList",
+	"gitStashShow",
+	"gitStashPush",
+	"gitStashApply",
+	"gitStashPop",
+	"gitStashDrop",
 ];
 
 /**
@@ -7571,6 +7835,10 @@ const GIT_WRITE_COMMAND_CONTRACTS = Object.freeze([
 		command: "git_push",
 		requestBuilder: "frozenGitPushRequest",
 	}),
+	Object.freeze({
+		command: "git_stash_drop",
+		requestBuilder: "frozenGitStashDropRequest",
+	}),
 ]);
 
 /**
@@ -7587,14 +7855,15 @@ const GIT_NO_ARG_COMMAND_CONTRACTS = Object.freeze([
 ]);
 
 /**
- * Locks `F080` S1+S3+S4 and `F090` S0+S1+S2+S3's TypeScript surface:
- * `PlainBridge` exposes exactly the twenty-two audited git methods,
+ * Locks `F080` S1+S3+S4 and `F090` S0+S1+S2+S3+S4's TypeScript surface:
+ * `PlainBridge` exposes exactly the twenty-eight audited git methods,
  * `git-codec.ts`'s read-result decoders validate exact own-data keys/reject
  * Proxy wrapping/freeze their result (same rigor
  * `validateTerminalIpcBridgeBoundary` already locks for the terminal
  * domain), and `native.ts` routes each read/write through `invoke` with its
- * audited command name — the reads through their audited decoders, the six
- * mutating writes (`GIT_WRITE_COMMAND_CONTRACTS`) through their audited
+ * audited command name — the reads through their audited decoders, the
+ * seven mutating writes (`GIT_WRITE_COMMAND_CONTRACTS`, including `F090`
+ * S4's own void-returning `git_stash_drop`) through their audited
  * `frozen*Request` builders and `decodeGitVoid`, and the three no-payload
  * network commands (`GIT_NO_ARG_COMMAND_CONTRACTS`) invoked exactly once
  * each. `git_refs_list` (`F090` S3) is a fourth no-payload read, but unlike
@@ -7641,7 +7910,7 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 			JSON.stringify([...GIT_BRIDGE_METHOD_NAMES].sort())
 	) {
 		failures.push(
-			"PlainBridge must expose exactly the twenty-two audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the twenty-eight audited git methods, no more and no fewer",
 		);
 	}
 
@@ -7665,6 +7934,9 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 		"decodeGitShowCommitResult",
 		"decodeGitLogGraphResult",
 		"decodeGitRefsListResult",
+		"decodeGitStashListResult",
+		"decodeGitStashShowResult",
+		"decodeGitStashApplyOutcome",
 	]) {
 		const body = decoderBody(name);
 		if (
@@ -7675,6 +7947,22 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 		) {
 			failures.push(
 				`git-codec.ts's ${name} must validate exact own-data keys, reject Proxy wrapping, and freeze its result`,
+			);
+		}
+	}
+	// `decodeGitStashPushOutcome` decodes a bare own-data string (one of the
+	// two audited outcomes), not a `{ ... }` object — `hasExactKeys`/
+	// `rejectProxyObject`/`Object.freeze` do not apply to it, so it gets its
+	// own, differently-shaped check rather than joining the loop above.
+	{
+		const body = decoderBody("decodeGitStashPushOutcome");
+		if (
+			body === undefined ||
+			!body.includes('typeof value !== "string"') ||
+			!body.includes("GIT_STASH_PUSH_OUTCOMES.has(")
+		) {
+			failures.push(
+				"git-codec.ts's decodeGitStashPushOutcome must validate value is one of the exact two audited outcome strings",
 			);
 		}
 	}
@@ -7812,6 +8100,65 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 	) {
 		failures.push(
 			"native.ts must invoke git_refs_list exactly once, decoded through decodeGitRefsListResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_stash_list"/g)].length !==
+			1 ||
+		// `git_stash_list` takes no payload at all — same shape as
+		// `git_refs_list` above, no `frozenGitStashListRequest` builder exists.
+		!native.includes("decodeGitStashListResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_stash_list exactly once, decoded through decodeGitStashListResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_stash_show"/g)].length !==
+			1 ||
+		!native.includes("frozenGitStashShowRequest(") ||
+		!native.includes("decodeGitStashShowResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_stash_show exactly once, routed through frozenGitStashShowRequest and decoded through decodeGitStashShowResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_stash_push"/g)].length !==
+			1 ||
+		!native.includes("frozenGitStashPushRequest(") ||
+		!native.includes("decodeGitStashPushOutcome(")
+	) {
+		failures.push(
+			"native.ts must invoke git_stash_push exactly once, routed through frozenGitStashPushRequest and decoded through decodeGitStashPushOutcome",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_stash_apply"/g)].length !==
+			1 ||
+		!native.includes("frozenGitStashApplyRequest(") ||
+		// `decodeGitStashApplyOutcome` is shared verbatim with `git_stash_pop`
+		// below — see `GitStashApplyOutcome`'s own doc comment for why the two
+		// bridge methods' response shape is identical.
+		!native.includes("decodeGitStashApplyOutcome(")
+	) {
+		failures.push(
+			"native.ts must invoke git_stash_apply exactly once, routed through frozenGitStashApplyRequest and decoded through decodeGitStashApplyOutcome",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_stash_pop"/g)].length !==
+			1 ||
+		!native.includes("frozenGitStashPopRequest(") ||
+		!native.includes("decodeGitStashApplyOutcome(")
+	) {
+		failures.push(
+			"native.ts must invoke git_stash_pop exactly once, routed through frozenGitStashPopRequest and decoded through decodeGitStashApplyOutcome",
 		);
 	}
 
@@ -8644,6 +8991,414 @@ function validateNetworkConfirmationModuleFace(source) {
 	) {
 		failures.push(
 			"resolveNetworkConfirmation must unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited shape",
+		);
+	}
+	return failures;
+}
+
+const GIT_STASH_VIEW_PATH = "app/features/scm/plain-git-stash-view.ts";
+const GIT_STASH_MODULE_PATH = "app/features/scm/plain-scm-stash.ts";
+
+/**
+ * `F090` S4's two confirm-gated stash bridge methods, each mapped to the one
+ * `PlainGitStashView` method allowed to call it and the exact argument list
+ * that call must pass — mirrors `GIT_NETWORK_BRIDGE_METHOD_AUDITS`'s exact
+ * shape, generalized from `PlainScmView`'s three network methods to
+ * `PlainGitStashView`'s two stash ones. Only `gitStashPop`/`gitStashDrop` are
+ * here — `gitStashPush`/`gitStashApply` are this feature's own "提示,不强确认"
+ * half (see `plain-scm-stash.ts`'s own module doc comment) and so have no
+ * confirmation gate to lock.
+ */
+const GIT_STASH_BRIDGE_METHOD_AUDITS = Object.freeze([
+	Object.freeze({
+		bridgeMethod: "gitStashPop",
+		containingMethod: "popEntry",
+		argumentTexts: Object.freeze(["entry.sha", "false"]),
+	}),
+	Object.freeze({
+		bridgeMethod: "gitStashDrop",
+		containingMethod: "dropEntry",
+		argumentTexts: Object.freeze(["entry.sha"]),
+	}),
+]);
+
+/**
+ * `F090` S4's `gitStashPop`/`gitStashDrop` are each an irreversible-or-
+ * effectively-irreversible write this feature's own frozen plan requires a
+ * confirmation dialog before ever running — the same "nothing at the Rust/
+ * bridge-interface layer enforces this, only one audited call site per
+ * method does" situation `validateGitDiscardConfirmationBoundary`/
+ * `validateGitNetworkConfirmationBoundary` already lock for this codebase's
+ * other two irreversible writes, generalized here to a *third* view file
+ * (`PlainGitStashView`, not `PlainScmView`) and confirmation module
+ * (`plain-scm-stash.ts`, not `plain-scm-discard.ts`/`plain-scm-network.ts`).
+ * Locks: each method's bridge declaration to its audited three files
+ * (`GIT_DISCARD_DECLARATION_PATHS`, reused — same contracts.ts/native.ts/
+ * browser-mock.ts split as discard/network), each method's single
+ * production call site to its own audited `PlainGitStashView` method with
+ * the exact argument list `GIT_STASH_BRIDGE_METHOD_AUDITS` names, that call
+ * site's exact confirm-then-call body shape, and `plain-scm-stash.ts`'s own
+ * audited module face (mirrors `validateNetworkConfirmationModuleFace`).
+ */
+export function validateGitStashConfirmationBoundary(appSources) {
+	const failures = [];
+	const normalizedSources = new Map(
+		appSources.map(({ relativePath, source }) => [
+			relativePath.replaceAll("\\", "/"),
+			source,
+		]),
+	);
+	const requiredPaths = Object.freeze([
+		...GIT_DISCARD_DECLARATION_PATHS,
+		GIT_STASH_VIEW_PATH,
+		GIT_STASH_MODULE_PATH,
+	]);
+	for (const relativePath of requiredPaths) {
+		if (!normalizedSources.has(relativePath)) {
+			failures.push(`git stash confirmation boundary requires ${relativePath}`);
+		}
+	}
+
+	function containingMethodName(node) {
+		let current = node.parent;
+		while (current !== undefined) {
+			if (
+				ts.isMethodDeclaration(current) ||
+				ts.isFunctionDeclaration(current)
+			) {
+				return typeScriptStaticName(current.name);
+			}
+			current = current.parent;
+		}
+		return undefined;
+	}
+
+	const bridgeMethodNames = GIT_STASH_BRIDGE_METHOD_AUDITS.map(
+		(audit) => audit.bridgeMethod,
+	);
+	const declarationCounts = new Map(
+		GIT_DISCARD_DECLARATION_PATHS.flatMap((relativePath) =>
+			bridgeMethodNames.map((bridgeMethod) => [
+				`${relativePath}:${bridgeMethod}`,
+				0,
+			]),
+		),
+	);
+	const auditedCallCounts = new Map(
+		bridgeMethodNames.map((bridgeMethod) => [bridgeMethod, 0]),
+	);
+
+	for (const [normalizedPath, source] of normalizedSources) {
+		if (!normalizedPath.endsWith(".ts") && !normalizedPath.endsWith(".tsx")) {
+			continue;
+		}
+		const sourceFile = ts.createSourceFile(
+			normalizedPath,
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			normalizedPath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+		);
+		const isKnownBridge = collectTypeScriptBridgeAliases(sourceFile);
+
+		function visit(node) {
+			const isNameLike =
+				ts.isIdentifier(node) ||
+				ts.isStringLiteral(node) ||
+				ts.isNoSubstitutionTemplateLiteral(node);
+			const audit = isNameLike
+				? GIT_STASH_BRIDGE_METHOD_AUDITS.find(
+						(candidate) => candidate.bridgeMethod === node.text,
+					)
+				: undefined;
+			if (audit !== undefined) {
+				const bridgeMethod = audit.bridgeMethod;
+				const parent = node.parent;
+				const isAllowedDeclaration =
+					(normalizedPath === "app/platform/tauri/contracts.ts" &&
+						ts.isMethodSignature(parent) &&
+						parent.name === node) ||
+					(normalizedPath === "app/platform/tauri/native.ts" &&
+						ts.isPropertyAssignment(parent) &&
+						parent.name === node) ||
+					(normalizedPath === "app/platform/tauri/browser-mock.ts" &&
+						(ts.isMethodDeclaration(parent) ||
+							ts.isPropertyAssignment(parent)) &&
+						parent.name === node);
+				if (isAllowedDeclaration) {
+					const key = `${normalizedPath}:${bridgeMethod}`;
+					declarationCounts.set(key, declarationCounts.get(key) + 1);
+				} else {
+					const propertyAccess = ts.isIdentifier(node) ? parent : undefined;
+					const directCall =
+						propertyAccess !== undefined &&
+						ts.isPropertyAccessExpression(propertyAccess) &&
+						propertyAccess.name === node &&
+						ts.isCallExpression(propertyAccess.parent) &&
+						propertyAccess.parent.expression === propertyAccess &&
+						isKnownBridge(propertyAccess.expression)
+							? propertyAccess.parent
+							: undefined;
+					const argumentTexts =
+						directCall?.arguments.map((argument) =>
+							argument.getText(sourceFile).replaceAll(/\s+/g, ""),
+						) ?? [];
+					const isAuditedCall =
+						directCall !== undefined &&
+						normalizedPath === GIT_STASH_VIEW_PATH &&
+						containingMethodName(node) === audit.containingMethod &&
+						sameArray(argumentTexts, audit.argumentTexts);
+					if (isAuditedCall) {
+						auditedCallCounts.set(
+							bridgeMethod,
+							auditedCallCounts.get(bridgeMethod) + 1,
+						);
+					} else {
+						failures.push(
+							`${normalizedPath} must not consume ${bridgeMethod} outside PlainGitStashView.${audit.containingMethod}'s single audited call site`,
+						);
+					}
+				}
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(sourceFile);
+	}
+
+	for (const [key, count] of declarationCounts) {
+		if (count !== 1) {
+			const [relativePath, bridgeMethod] = key.split(":");
+			failures.push(
+				`${relativePath} must declare ${bridgeMethod} exactly once in its audited bridge surface`,
+			);
+		}
+	}
+	for (const audit of GIT_STASH_BRIDGE_METHOD_AUDITS) {
+		if (auditedCallCounts.get(audit.bridgeMethod) !== 1) {
+			failures.push(
+				`${audit.bridgeMethod} must have exactly one production call site, inside PlainGitStashView.${audit.containingMethod}`,
+			);
+		}
+	}
+
+	const viewSource = normalizedSources.get(GIT_STASH_VIEW_PATH);
+	if (viewSource !== undefined) {
+		failures.push(...validateStashMutationGuardedCalls(viewSource));
+	}
+	const stashModuleSource = normalizedSources.get(GIT_STASH_MODULE_PATH);
+	if (stashModuleSource !== undefined) {
+		failures.push(...validateStashConfirmationModuleFace(stashModuleSource));
+	}
+
+	return [...new Set(failures)];
+}
+
+/**
+ * Locks `PlainGitStashView.popEntry`/`dropEntry` to their exact "await the
+ * confirmation, return unless it is exactly `\"confirmed\"`, only then call
+ * the stash bridge (and, for `popEntry`, render a conflict outcome
+ * afterward)" shapes — mirrors `validateNetworkMutationGuardedCalls`'s own
+ * "one audited body per method" technique.
+ */
+function validateStashMutationGuardedCalls(source) {
+	const sourceFile = ts.createSourceFile(
+		GIT_STASH_VIEW_PATH,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["plain-git-stash-view.ts must remain valid TypeScript"];
+	}
+
+	function methodBody(name) {
+		const methods = [];
+		function visit(node) {
+			if (
+				ts.isMethodDeclaration(node) &&
+				typeScriptStaticName(node.name) === name
+			) {
+				methods.push(node);
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(sourceFile);
+		return methods.length === 1 ? methods[0].body : undefined;
+	}
+
+	const expectedBodies = {
+		popEntry: `{
+			const decision = await resolveStashConfirmation(this.dialogService, {
+				kind: "pop",
+				entryLabel: stashEntryLabel(entry),
+			});
+			if (decision.kind !== "confirmed") {
+				return;
+			}
+			const outcome = await this.#runStashMutation((bridge) =>
+				bridge.gitStashPop(entry.sha, false),
+			);
+			if (outcome?.kind === "conflict") {
+				this.#setDetail(
+					\`Conflict popping \${stashEntryLabel(entry)} (kept in the stash list):\\n\${outcome.conflictedPaths.join("\\n")}\`,
+				);
+			}
+		}`,
+		dropEntry: `{
+			const decision = await resolveStashConfirmation(this.dialogService, {
+				kind: "drop",
+				entryLabel: stashEntryLabel(entry),
+			});
+			if (decision.kind !== "confirmed") {
+				return;
+			}
+			await this.#runStashMutation((bridge) => bridge.gitStashDrop(entry.sha));
+		}`,
+	};
+
+	const failures = [];
+	for (const [name, expectedBody] of Object.entries(expectedBodies)) {
+		const body = methodBody(name);
+		const normalizedExpected = expectedBody.replaceAll(/\s+/g, "");
+		if (
+			body === undefined ||
+			body.getText(sourceFile).replaceAll(/\s+/g, "") !== normalizedExpected
+		) {
+			failures.push(
+				`PlainGitStashView.${name} must match its exact audited confirm-then-call shape — no other shape may reach the stash bridge call`,
+			);
+		}
+	}
+	return failures;
+}
+
+/**
+ * Locks `plain-scm-stash.ts`'s own audited module face: it must import
+ * nothing at all (an import is the only way this module could ever reach a
+ * bridge or a real Workbench service to perform the stash write itself), its
+ * top-level declarations must match the exact audited set, and
+ * `resolveStashConfirmation` itself must match the exact audited body —
+ * which simultaneously proves it never calls a bridge method and never has a
+ * branch that skips the dialog for either `kind`. Mirrors
+ * `validateNetworkConfirmationModuleFace`'s exact technique.
+ */
+function validateStashConfirmationModuleFace(source) {
+	const failures = [];
+	const sourceFile = ts.createSourceFile(
+		GIT_STASH_MODULE_PATH,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["plain-scm-stash.ts must remain valid TypeScript"];
+	}
+
+	if (
+		sourceFile.statements.some((statement) => ts.isImportDeclaration(statement))
+	) {
+		failures.push(
+			"plain-scm-stash.ts must not import anything — it only ever decides whether the caller may pop/drop a stash entry, and an import is the only way it could ever reach a bridge or service to perform the write itself",
+		);
+	}
+
+	const expectedTopLevel = new Map([
+		["StashConfirmDialogService", { kind: "interface", exported: true }],
+		["StashConfirmationKind", { kind: "type", exported: true }],
+		["StashConfirmationRequest", { kind: "interface", exported: true }],
+		["stashConfirmationMessage", { kind: "function", exported: true }],
+		["stashConfirmationDetail", { kind: "function", exported: true }],
+		["STASH_CONFIRM_PRIMARY_BUTTON", { kind: "variable", exported: true }],
+		["StashConfirmDecision", { kind: "type", exported: true }],
+		[
+			"resolveStashConfirmation",
+			{ kind: "function", exported: true, async: true },
+		],
+	]);
+	const topLevelCounts = new Map(
+		[...expectedTopLevel].map(([name]) => [name, 0]),
+	);
+	let topLevelIsExact = true;
+	for (const statement of sourceFile.statements) {
+		if (ts.isImportDeclaration(statement)) {
+			continue;
+		}
+		let name;
+		let kind;
+		if (ts.isVariableStatement(statement)) {
+			if (statement.declarationList.declarations.length !== 1) {
+				topLevelIsExact = false;
+				continue;
+			}
+			name = statement.declarationList.declarations[0].name;
+			kind = "variable";
+		} else if (ts.isFunctionDeclaration(statement)) {
+			name = statement.name;
+			kind = "function";
+		} else if (ts.isInterfaceDeclaration(statement)) {
+			name = statement.name;
+			kind = "interface";
+		} else if (ts.isTypeAliasDeclaration(statement)) {
+			name = statement.name;
+			kind = "type";
+		} else {
+			topLevelIsExact = false;
+			continue;
+		}
+		const expected = ts.isIdentifier(name)
+			? expectedTopLevel.get(name.text)
+			: undefined;
+		const modifierKinds = (statement.modifiers ?? []).map(
+			(modifier) => modifier.kind,
+		);
+		const expectedModifiers = [
+			...(expected?.exported ? [ts.SyntaxKind.ExportKeyword] : []),
+			...(expected?.async ? [ts.SyntaxKind.AsyncKeyword] : []),
+		];
+		if (
+			expected === undefined ||
+			expected.kind !== kind ||
+			!sameArray(modifierKinds, expectedModifiers)
+		) {
+			topLevelIsExact = false;
+		} else {
+			topLevelCounts.set(name.text, topLevelCounts.get(name.text) + 1);
+		}
+	}
+	if (
+		!topLevelIsExact ||
+		[...topLevelCounts.values()].some((count) => count !== 1)
+	) {
+		failures.push(
+			"plain-scm-stash.ts must retain its exact audited top-level surface — no new declaration can quietly add a way for this decide-only module to reach a bridge",
+		);
+	}
+
+	const resolveFunctions = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "resolveStashConfirmation",
+	);
+	const expectedResolveBody = `{
+		const confirmation = await dialogService.confirm({
+			message: stashConfirmationMessage(request),
+			detail: stashConfirmationDetail(request),
+			primaryButton: STASH_CONFIRM_PRIMARY_BUTTON[request.kind],
+		});
+		return Object.freeze({
+			kind: confirmation.confirmed ? "confirmed" : "declined",
+		});
+	}`.replaceAll(/\s+/g, "");
+	if (
+		resolveFunctions.length !== 1 ||
+		resolveFunctions[0].body === undefined ||
+		resolveFunctions[0].body.getText(sourceFile).replaceAll(/\s+/g, "") !==
+			expectedResolveBody
+	) {
+		failures.push(
+			"resolveStashConfirmation must unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited shape",
 		);
 	}
 	return failures;

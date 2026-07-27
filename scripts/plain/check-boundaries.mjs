@@ -19,6 +19,8 @@ import {
 	validateGitRefsFieldSafetyBoundary,
 	validateGitRustBoundary,
 	validateGitShowCommitFirstParentBoundary,
+	validateGitStashConfirmationBoundary,
+	validateGitStashMessageFieldSafetyBoundary,
 	validateMainCapability,
 	validateMultiDiffEditorOverrideImportBoundary,
 	validateSearchCommandRegistration,
@@ -776,6 +778,12 @@ for (const failure of validateGitDiscardConfirmationBoundary(appSources)) {
 	fail(failure);
 }
 for (const failure of validateGitNetworkConfirmationBoundary(appSources)) {
+	fail(failure);
+}
+for (const failure of validateGitStashMessageFieldSafetyBoundary(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateGitStashConfirmationBoundary(appSources)) {
 	fail(failure);
 }
 

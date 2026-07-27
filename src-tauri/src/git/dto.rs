@@ -17,6 +17,7 @@ use super::log::{GraphList, GraphNode, HistoryEntry, HistoryList, LineHistoryDet
 use super::network::NetworkOperation;
 use super::refs::{RefEntry, RefGroupKind, RefList};
 use super::show_commit::ShowCommitResult;
+use super::stash::{StashApplyOutcome, StashEntry, StashList, StashPushOutcome, StashShowResult};
 use super::status::{
     BranchHead, BranchInfo, BranchOid, GitStatus, RenameOrCopyKind, StatusEntry, SubmoduleState,
 };
@@ -1171,6 +1172,257 @@ impl From<RefList> for GitRefsListResultWire {
                 .collect(),
             truncated: value.truncated,
         }
+    }
+}
+
+// --- git_stash_list / git_stash_show / git_stash_push / git_stash_apply /
+// git_stash_pop / git_stash_drop (F090 S4) -----------------------------------
+//
+// Reuses this file's own single `is_lowercase_hex40` (defined above, next to
+// `GitFileHistoryRequest`) — this file's own established convention is one
+// module-scoped copy shared by every request DTO in `dto.rs` itself, not a
+// fresh per-section copy (unlike each *domain* module under `src-tauri/src/git/`,
+// which does keep its own independent copy per this codebase's established
+// per-domain-function duplication convention).
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitStashListRequest {}
+
+impl GitStashListRequest {
+    pub const fn validate(self) {}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitStashEntryWire {
+    index: u32,
+    sha: String,
+    committer_time: i64,
+    message: String,
+}
+
+impl From<StashEntry> for GitStashEntryWire {
+    fn from(value: StashEntry) -> Self {
+        Self {
+            index: value.index,
+            sha: value.sha,
+            committer_time: value.committer_time,
+            message: value.message,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitStashListResultWire {
+    entries: Vec<GitStashEntryWire>,
+    truncated: bool,
+}
+
+impl From<StashList> for GitStashListResultWire {
+    fn from(value: StashList) -> Self {
+        Self {
+            entries: value
+                .entries
+                .into_iter()
+                .map(GitStashEntryWire::from)
+                .collect(),
+            truncated: value.truncated,
+        }
+    }
+}
+
+fn git_stash_show_invalid_request() -> CommandError {
+    CommandError::new(
+        "GIT_STASH_SHOW_INVALID_REQUEST",
+        "The git stash show request is invalid.",
+    )
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitStashShowRequest {
+    sha: String,
+}
+
+impl GitStashShowRequest {
+    pub(crate) fn into_parts(self) -> Result<String, CommandError> {
+        if !is_lowercase_hex40(self.sha.as_bytes()) {
+            return Err(git_stash_show_invalid_request());
+        }
+        Ok(self.sha)
+    }
+}
+
+/// `files` reuses [`GitDiffFileEntryWire`] verbatim — the exact same wire
+/// shape [`GitDiffFilesResult`]/[`GitShowCommitResult`] already expose (see
+/// `stash.rs`'s own module doc comment for why `stash::show_stash` produces
+/// the identical `DiffFileEntry` domain type).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitStashShowResultWire {
+    sha: String,
+    parent_sha: Option<String>,
+    files: Vec<GitDiffFileEntryWire>,
+}
+
+impl From<StashShowResult> for GitStashShowResultWire {
+    fn from(value: StashShowResult) -> Self {
+        Self {
+            sha: value.sha,
+            parent_sha: value.parent_sha,
+            files: value
+                .files
+                .into_iter()
+                .map(GitDiffFileEntryWire::from)
+                .collect(),
+        }
+    }
+}
+
+fn git_stash_push_invalid_request() -> CommandError {
+    CommandError::new(
+        "GIT_STASH_PUSH_INVALID_REQUEST",
+        "The stash message is empty or too large.",
+    )
+}
+
+/// Mirrors `stash::MAX_GIT_STASH_MESSAGE_BYTES` — this file's own
+/// independent copy, exactly like `MAX_GIT_COMMIT_MESSAGE_BYTES` above is its
+/// own copy of a ceiling also enforced deeper in the stack.
+const MAX_GIT_STASH_MESSAGE_BYTES: usize = 100_000;
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitStashPushRequest {
+    message: String,
+    include_untracked: bool,
+}
+
+impl GitStashPushRequest {
+    pub(crate) fn into_parts(self) -> Result<(String, bool), CommandError> {
+        if self.message.trim().is_empty() || self.message.len() > MAX_GIT_STASH_MESSAGE_BYTES {
+            return Err(git_stash_push_invalid_request());
+        }
+        Ok((self.message, self.include_untracked))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitStashPushOutcomeWire {
+    Created,
+    NoLocalChanges,
+}
+
+impl From<StashPushOutcome> for GitStashPushOutcomeWire {
+    fn from(value: StashPushOutcome) -> Self {
+        match value {
+            StashPushOutcome::Created => Self::Created,
+            StashPushOutcome::NoLocalChanges => Self::NoLocalChanges,
+        }
+    }
+}
+
+fn git_stash_apply_invalid_request() -> CommandError {
+    CommandError::new(
+        "GIT_STASH_APPLY_INVALID_REQUEST",
+        "The git stash apply request is invalid.",
+    )
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitStashApplyRequest {
+    sha: String,
+    use_index: bool,
+}
+
+impl GitStashApplyRequest {
+    pub(crate) fn into_parts(self) -> Result<(String, bool), CommandError> {
+        if !is_lowercase_hex40(self.sha.as_bytes()) {
+            return Err(git_stash_apply_invalid_request());
+        }
+        Ok((self.sha, self.use_index))
+    }
+}
+
+fn git_stash_pop_invalid_request() -> CommandError {
+    CommandError::new(
+        "GIT_STASH_POP_INVALID_REQUEST",
+        "The git stash pop request is invalid.",
+    )
+}
+
+/// Unlike [`GitStashApplyRequest`], the field is named `expected_sha` (not
+/// `sha`) — mirrors `GitLineHistoryDetailRequest`'s identical naming choice
+/// for the same reason: this is a caller-held identity being *verified*
+/// against a freshly re-resolved `stash@{N}`, not a value trusted blindly
+/// (see `stash.rs`'s own module doc comment for the full rationale).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitStashPopRequest {
+    expected_sha: String,
+    use_index: bool,
+}
+
+impl GitStashPopRequest {
+    pub(crate) fn into_parts(self) -> Result<(String, bool), CommandError> {
+        if !is_lowercase_hex40(self.expected_sha.as_bytes()) {
+            return Err(git_stash_pop_invalid_request());
+        }
+        Ok((self.expected_sha, self.use_index))
+    }
+}
+
+/// Shared wire projection of [`StashApplyOutcome`] for both `git_stash_apply`
+/// and `git_stash_pop` — mirrors the domain type's own "shared result shape"
+/// rationale (see `stash.rs`'s own doc comment on [`StashApplyOutcome`]).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum GitStashApplyOutcomeWire {
+    Applied,
+    Conflict { conflicted_paths: Vec<String> },
+}
+
+impl From<StashApplyOutcome> for GitStashApplyOutcomeWire {
+    fn from(value: StashApplyOutcome) -> Self {
+        match value {
+            StashApplyOutcome::Applied => Self::Applied,
+            StashApplyOutcome::Conflict { conflicted_paths } => Self::Conflict {
+                conflicted_paths: conflicted_paths
+                    .into_iter()
+                    .map(|path| path.to_wire_lossy())
+                    .collect(),
+            },
+        }
+    }
+}
+
+fn git_stash_drop_invalid_request() -> CommandError {
+    CommandError::new(
+        "GIT_STASH_DROP_INVALID_REQUEST",
+        "The git stash drop request is invalid.",
+    )
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitStashDropRequest {
+    expected_sha: String,
+}
+
+impl GitStashDropRequest {
+    pub(crate) fn into_parts(self) -> Result<String, CommandError> {
+        if !is_lowercase_hex40(self.expected_sha.as_bytes()) {
+            return Err(git_stash_drop_invalid_request());
+        }
+        Ok(self.expected_sha)
     }
 }
 

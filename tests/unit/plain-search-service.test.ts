@@ -122,6 +122,12 @@ function fakeBridge(
 		gitShowCommitBlob: notImplemented,
 		gitLogGraph: notImplemented,
 		gitRefsList: notImplemented,
+		gitStashList: notImplemented,
+		gitStashShow: notImplemented,
+		gitStashPush: notImplemented,
+		gitStashApply: notImplemented,
+		gitStashPop: notImplemented,
+		gitStashDrop: notImplemented,
 	};
 }
 
@@ -259,6 +265,12 @@ function fakeTextSearchBridge(
 		gitShowCommitBlob: notImplemented,
 		gitLogGraph: notImplemented,
 		gitRefsList: notImplemented,
+		gitStashList: notImplemented,
+		gitStashShow: notImplemented,
+		gitStashPush: notImplemented,
+		gitStashApply: notImplemented,
+		gitStashPop: notImplemented,
+		gitStashDrop: notImplemented,
 	};
 
 	return {

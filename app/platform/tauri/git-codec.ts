@@ -25,6 +25,11 @@ import type {
 	GitRenameOrCopyKind,
 	GitShowBlobResult,
 	GitShowCommitResult,
+	GitStashApplyOutcome,
+	GitStashEntry,
+	GitStashListResult,
+	GitStashPushOutcome,
+	GitStashShowResult,
 	GitStatusEntry,
 	GitStatusResult,
 	GitSubmoduleState,
@@ -1633,5 +1638,278 @@ export function decodeGitRefsListResult(value: unknown): GitRefsListResult {
 		const result = { entries, truncated: value.truncated };
 		rejectProxyObject(value);
 		return Object.freeze(result);
+	});
+}
+
+// --- F090 S4: stash (`git::stash`) -------------------------------------------
+
+/** Mirrors `src-tauri/src/git/stash.rs`'s own `MAX_STASH_ENTRIES` (10,000) —
+ * this decode-side ceiling exists only to reject a structurally hostile/
+ * runaway payload, with generous headroom above the real server-side cap,
+ * mirroring `MAX_GIT_REFS_ENTRIES`'s identical rationale. */
+const MAX_GIT_STASH_ENTRIES = 20_000;
+/** Mirrors `stash::MAX_GIT_STASH_MESSAGE_BYTES`/`dto.rs`'s own independent
+ * copy — this frontend codec keeps its own third independent copy, the same
+ * "defense in depth, each layer re-validates" reason `MAX_GIT_COMMIT_MESSAGE_CHARS`
+ * above validates a message the Rust side will also independently reject. */
+const MAX_GIT_STASH_MESSAGE_CHARS = 100_000;
+/** Defensive ceiling on how many conflicted paths one `gitStashApply`/
+ * `gitStashPop` conflict outcome can report — mirrors `MAX_GIT_MUTATE_PATHS`'s
+ * own "bound a pathological response size" rationale. */
+const MAX_GIT_STASH_CONFLICTED_PATHS = 200_000;
+
+/** `committerTime` is a Unix timestamp that, unlike every other integer
+ * field this codec validates, is not constrained to be non-negative (git
+ * itself does not forbid an author/committer date before 1970) — its own
+ * type predicate, distinct from `isSafeNonNegativeInteger`. */
+function isSafeInteger(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value);
+}
+
+function decodeGitStashEntry(value: unknown): GitStashEntry {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, ["index", "sha", "committerTime", "message"])
+	) {
+		return violation();
+	}
+	if (
+		!isSafeNonNegativeInteger(value.index) ||
+		!isGitBlameSha(value.sha) ||
+		!isSafeInteger(value.committerTime) ||
+		typeof value.message !== "string"
+	) {
+		return violation();
+	}
+	const entry = {
+		index: value.index,
+		sha: value.sha,
+		committerTime: value.committerTime,
+		message: value.message,
+	};
+	rejectProxyObject(value);
+	return Object.freeze(entry);
+}
+
+/** Decodes a `git_stash_list` response: an own-data, exactly
+ * `{ entries, truncated }` object. `git_stash_list` itself takes no request
+ * payload at all (mirrors `git_refs_list`'s own `{}` shape) — there is no
+ * corresponding `frozenGitStashListRequest`. */
+export function decodeGitStashListResult(value: unknown): GitStashListResult {
+	return sanitizedDecode(() => {
+		if (
+			!isPlainObject(value) ||
+			!hasExactKeys(value, ["entries", "truncated"])
+		) {
+			return violation();
+		}
+		if (typeof value.truncated !== "boolean") {
+			return violation();
+		}
+		const entries = ownObjectArraySnapshot(
+			value.entries,
+			MAX_GIT_STASH_ENTRIES,
+			decodeGitStashEntry,
+		);
+		const result = { entries, truncated: value.truncated };
+		rejectProxyObject(value);
+		return Object.freeze(result);
+	});
+}
+
+function gitStashShowRequestInvalid(): never {
+	return requestViolation(
+		"GIT_STASH_SHOW_INVALID_REQUEST",
+		"The git stash show request is invalid.",
+	);
+}
+
+/** Builds a frozen `git_stash_show` request. `sha` must be a real, exactly
+ * 40-lowercase-hex commit id — mirrors `frozenGitShowCommitRequest`'s own
+ * validation via the same `isGitBlameSha` check. */
+export function frozenGitStashShowRequest(
+	sha: unknown,
+): Readonly<{ sha: string }> {
+	if (!isGitBlameSha(sha)) {
+		return gitStashShowRequestInvalid();
+	}
+	return Object.freeze({ sha });
+}
+
+/** Decodes a `git_stash_show` response: an own-data, exactly
+ * `{ sha, parentSha, files }` object — reuses the exact same
+ * `decodeGitDiffFileEntry` element decoder `decodeGitShowCommitResult`
+ * already uses (see `GitStashShowResult`'s own doc comment for why the wire
+ * shape is identical). */
+export function decodeGitStashShowResult(value: unknown): GitStashShowResult {
+	return sanitizedDecode(() => {
+		if (
+			!isPlainObject(value) ||
+			!hasExactKeys(value, ["sha", "parentSha", "files"])
+		) {
+			return violation();
+		}
+		if (
+			!isGitBlameSha(value.sha) ||
+			(value.parentSha !== null && !isGitBlameSha(value.parentSha))
+		) {
+			return violation();
+		}
+		const files = ownObjectArraySnapshot(
+			value.files,
+			MAX_GIT_STATUS_ENTRIES,
+			decodeGitDiffFileEntry,
+		);
+		rejectProxyObject(value);
+		return Object.freeze({
+			sha: value.sha,
+			parentSha: value.parentSha,
+			files,
+		});
+	});
+}
+
+function gitStashPushRequestInvalid(): never {
+	return requestViolation(
+		"GIT_STASH_PUSH_INVALID_REQUEST",
+		"The stash message is empty or too large.",
+	);
+}
+
+/** Builds a frozen `git_stash_push` request — mirrors `frozenGitCommitRequest`'s
+ * own message validation (non-empty after trimming, bounded length), with
+ * `includeUntracked` in place of `amend`. */
+export function frozenGitStashPushRequest(
+	message: unknown,
+	includeUntracked: unknown,
+): Readonly<{ message: string; includeUntracked: boolean }> {
+	if (
+		typeof message !== "string" ||
+		message.trim().length === 0 ||
+		message.length > MAX_GIT_STASH_MESSAGE_CHARS
+	) {
+		return gitStashPushRequestInvalid();
+	}
+	if (typeof includeUntracked !== "boolean") {
+		return gitStashPushRequestInvalid();
+	}
+	return Object.freeze({ message, includeUntracked });
+}
+
+const GIT_STASH_PUSH_OUTCOMES = new Set<GitStashPushOutcome>([
+	"created",
+	"noLocalChanges",
+]);
+
+/** Decodes a `git_stash_push` response: a bare own-data string, one of the
+ * exact two audited outcomes — mirrors `GitRefKindWire`'s own "fieldless enum
+ * serializes as a plain string" convention (unlike `GitStashApplyOutcomeWire`,
+ * neither variant carries data, so there is no `"kind"` tag object here). */
+export function decodeGitStashPushOutcome(value: unknown): GitStashPushOutcome {
+	return sanitizedDecode(() => {
+		if (
+			typeof value !== "string" ||
+			!GIT_STASH_PUSH_OUTCOMES.has(value as GitStashPushOutcome)
+		) {
+			return violation();
+		}
+		return value as GitStashPushOutcome;
+	});
+}
+
+function gitStashApplyRequestInvalid(): never {
+	return requestViolation(
+		"GIT_STASH_APPLY_INVALID_REQUEST",
+		"The git stash apply request is invalid.",
+	);
+}
+
+export function frozenGitStashApplyRequest(
+	sha: unknown,
+	useIndex: unknown,
+): Readonly<{ sha: string; useIndex: boolean }> {
+	if (!isGitBlameSha(sha)) {
+		return gitStashApplyRequestInvalid();
+	}
+	if (typeof useIndex !== "boolean") {
+		return gitStashApplyRequestInvalid();
+	}
+	return Object.freeze({ sha, useIndex });
+}
+
+function gitStashPopRequestInvalid(): never {
+	return requestViolation(
+		"GIT_STASH_POP_INVALID_REQUEST",
+		"The git stash pop request is invalid.",
+	);
+}
+
+/** Unlike `frozenGitStashApplyRequest`, the field is named `expectedSha` (not
+ * `sha`) — mirrors `GitStashPopRequest`'s identical naming choice server-side
+ * (see `src-tauri/src/git/dto.rs`'s own doc comment on that field). */
+export function frozenGitStashPopRequest(
+	expectedSha: unknown,
+	useIndex: unknown,
+): Readonly<{ expectedSha: string; useIndex: boolean }> {
+	if (!isGitBlameSha(expectedSha)) {
+		return gitStashPopRequestInvalid();
+	}
+	if (typeof useIndex !== "boolean") {
+		return gitStashPopRequestInvalid();
+	}
+	return Object.freeze({ expectedSha, useIndex });
+}
+
+function gitStashDropRequestInvalid(): never {
+	return requestViolation(
+		"GIT_STASH_DROP_INVALID_REQUEST",
+		"The git stash drop request is invalid.",
+	);
+}
+
+export function frozenGitStashDropRequest(
+	expectedSha: unknown,
+): Readonly<{ expectedSha: string }> {
+	if (!isGitBlameSha(expectedSha)) {
+		return gitStashDropRequestInvalid();
+	}
+	return Object.freeze({ expectedSha });
+}
+
+/** Decodes a `git_stash_apply`/`git_stash_pop` response — an own-data,
+ * exactly `{ kind: "applied" }` or `{ kind: "conflict", conflictedPaths }`
+ * object (mirrors `decodeGitStatusEntry`'s own `"type"`-discriminated-union
+ * decoding technique, applied here to the `"kind"` tag
+ * `GitStashApplyOutcomeWire` uses instead). Shared by both bridge methods —
+ * see `GitStashApplyOutcome`'s own doc comment for why the wire shape is
+ * identical for both. */
+export function decodeGitStashApplyOutcome(
+	value: unknown,
+): GitStashApplyOutcome {
+	return sanitizedDecode(() => {
+		if (!isPlainObject(value) || typeof value.kind !== "string") {
+			return violation();
+		}
+		if (value.kind === "applied") {
+			if (!hasExactKeys(value, ["kind"])) {
+				return violation();
+			}
+			rejectProxyObject(value);
+			return Object.freeze({ kind: "applied" as const });
+		}
+		if (value.kind === "conflict") {
+			if (!hasExactKeys(value, ["kind", "conflictedPaths"])) {
+				return violation();
+			}
+			const conflictedPaths = ownObjectArraySnapshot(
+				value.conflictedPaths,
+				MAX_GIT_STASH_CONFLICTED_PATHS,
+				(path) => (typeof path === "string" ? path : violation()),
+			);
+			const outcome = { kind: "conflict" as const, conflictedPaths };
+			rejectProxyObject(value);
+			return Object.freeze(outcome);
+		}
+		return violation();
 	});
 }

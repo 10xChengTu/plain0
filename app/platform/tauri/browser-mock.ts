@@ -14,6 +14,9 @@ import type {
 	GitNetworkPreviewResult,
 	GitRefsListResult,
 	GitShowCommitResult,
+	GitStashEntry,
+	GitStashListResult,
+	GitStashShowResult,
 	GitStatusEntry,
 	GitStatusResult,
 	PlainBridge,
@@ -60,6 +63,11 @@ import {
 	frozenGitShowCommitRequest,
 	frozenGitStageBlobRequest,
 	frozenGitStagePathsRequest,
+	frozenGitStashApplyRequest,
+	frozenGitStashDropRequest,
+	frozenGitStashPopRequest,
+	frozenGitStashPushRequest,
+	frozenGitStashShowRequest,
 	frozenGitUnstagePathsRequest,
 } from "./git-codec";
 import {
@@ -1138,6 +1146,33 @@ export interface BrowserMockGitFixtureForTest {
 	 * real Rust parser's thorough fixture coverage lives in
 	 * `src-tauri/src/git/refs/tests.rs`). */
 	readonly refsForTest?: GitRefsListResult;
+	/** `F090` S4: seeds the initial, mutable `gitStashList` state (defaults to
+	 * `[]`) — `gitStashPush`/`gitStashApply`/`gitStashPop`/`gitStashDrop` all
+	 * mutate this in place (unshift on push, splice on a successful pop/drop),
+	 * mirroring `gitEntries`'s own "mutable simulation, not a re-implementation
+	 * of real git plumbing" scope for `F080` S3's stage/commit/discard mock —
+	 * the real Rust parser's thorough fixture coverage (including the
+	 * index-shift race and the hostile-message field-safety proof) lives in
+	 * `src-tauri/src/git/stash/tests.rs`; this mock only exists so a consuming
+	 * frontend has structurally correct, scriptable responses to develop and
+	 * test the stash panel against. `index` on each seeded entry is ignored
+	 * (recomputed from array position on every `gitStashList` call, exactly
+	 * like the real Rust `%gd` invariant). */
+	readonly stashForTest?: readonly GitStashEntry[];
+	/** `F090` S4: seeds the deterministic `gitStashShow` response, keyed by
+	 * stash sha — a sha present in `stashForTest` but missing here defaults to
+	 * `{ sha, parentSha: null, files: [] }` (an empty, harmless default,
+	 * mirroring `showCommit`'s own default). A sha absent from `stashForTest`
+	 * entirely rejects with `GIT_STASH_NOT_FOUND`, matching the real
+	 * not-a-stash-like-commit rejection. */
+	readonly stashShowForTest?: Readonly<Record<string, GitStashShowResult>>;
+	/** `F090` S4: seeds a forced `{ kind: "conflict", conflictedPaths }`
+	 * outcome for `gitStashApply`/`gitStashPop`, keyed by stash sha — a sha
+	 * with no entry here always applies/pops cleanly. A conflicting *pop*
+	 * correctly leaves the entry in `stashForTest`'s own mutable list
+	 * untouched (mirrors the real `git stash pop`'s "kept on conflict"
+	 * semantics this feature's own acceptance criteria require). */
+	readonly stashConflictForTest?: Readonly<Record<string, readonly string[]>>;
 	/** When `true`, every git method rejects with `GIT_NO_REPOSITORY` instead
 	 * of returning fixture data — simulates a trusted workspace root that is
 	 * not (or no longer) a Git working tree. */
@@ -5293,6 +5328,41 @@ export function createBrowserMockBridge(
 	});
 	const gitRefsListResult = gitFixture.refsForTest ?? defaultGitRefsListResult;
 
+	// --- F090 S4: mutable stash list simulation ----------------------------
+	//
+	// See `BrowserMockGitFixtureForTest.stashForTest`'s own doc comment for
+	// why this never re-implements real stash-commit plumbing (no parent
+	// resolution, no reflog) — `src-tauri/src/git/stash/tests.rs` is this
+	// slice's authoritative correctness evidence; this array only needs to be
+	// self-consistent enough for a consuming frontend to develop and test the
+	// full push/apply/pop/drop click-through flow against.
+	let gitStashEntries: GitStashEntry[] = (gitFixture.stashForTest ?? []).map(
+		(entry) => ({ ...entry }),
+	);
+	const gitStashShowFixtures = new Map<string, GitStashShowResult>(
+		Object.entries(gitFixture.stashShowForTest ?? {}),
+	);
+	const gitStashConflictFixtures = new Map<string, readonly string[]>(
+		Object.entries(gitFixture.stashConflictForTest ?? {}),
+	);
+	let gitStashCounter = 0;
+
+	function gitStashNotFound(): CommandError {
+		return commandError(
+			"GIT_STASH_NOT_FOUND",
+			"No stash entry with the requested identity exists.",
+		);
+	}
+
+	function gitStashListSnapshot(): GitStashListResult {
+		return Object.freeze({
+			entries: Object.freeze(
+				gitStashEntries.map((entry, index) => ({ ...entry, index })),
+			),
+			truncated: false,
+		});
+	}
+
 	// --- F080 S3: mutable stage/unstage/commit/discard simulation ---------
 	//
 	// `gitBranch`/`gitEntries` start from the injected fixture (or the clean
@@ -6641,6 +6711,101 @@ export function createBrowserMockBridge(
 				throw unavailable;
 			}
 			return gitRefsListResult;
+		},
+		async gitStashList() {
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return gitStashListSnapshot();
+		},
+		async gitStashShow(sha_) {
+			const request = frozenGitStashShowRequest(sha_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			if (!gitStashEntries.some((entry) => entry.sha === request.sha)) {
+				throw gitStashNotFound();
+			}
+			return (
+				gitStashShowFixtures.get(request.sha) ??
+				Object.freeze({
+					sha: request.sha,
+					parentSha: null,
+					files: Object.freeze([]),
+				})
+			);
+		},
+		async gitStashPush(message_, includeUntracked_) {
+			const request = frozenGitStashPushRequest(message_, includeUntracked_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			gitStashCounter += 1;
+			const sha = `f0${gitStashCounter.toString(16).padStart(38, "0")}`;
+			gitStashEntries.unshift({
+				index: 0,
+				sha,
+				committerTime: Math.floor(Date.now() / 1000),
+				message: request.message,
+			});
+			return "created";
+		},
+		async gitStashApply(sha_, useIndex_) {
+			const request = frozenGitStashApplyRequest(sha_, useIndex_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			if (!gitStashEntries.some((entry) => entry.sha === request.sha)) {
+				throw gitStashNotFound();
+			}
+			const conflictedPaths = gitStashConflictFixtures.get(request.sha);
+			if (conflictedPaths !== undefined) {
+				return Object.freeze({
+					kind: "conflict" as const,
+					conflictedPaths,
+				});
+			}
+			return Object.freeze({ kind: "applied" as const });
+		},
+		async gitStashPop(sha_, useIndex_) {
+			const request = frozenGitStashPopRequest(sha_, useIndex_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const index = gitStashEntries.findIndex(
+				(entry) => entry.sha === request.expectedSha,
+			);
+			if (index === -1) {
+				throw gitStashNotFound();
+			}
+			const conflictedPaths = gitStashConflictFixtures.get(request.expectedSha);
+			if (conflictedPaths !== undefined) {
+				return Object.freeze({
+					kind: "conflict" as const,
+					conflictedPaths,
+				});
+			}
+			gitStashEntries.splice(index, 1);
+			return Object.freeze({ kind: "applied" as const });
+		},
+		async gitStashDrop(sha_) {
+			const request = frozenGitStashDropRequest(sha_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const index = gitStashEntries.findIndex(
+				(entry) => entry.sha === request.expectedSha,
+			);
+			if (index === -1) {
+				throw gitStashNotFound();
+			}
+			gitStashEntries.splice(index, 1);
 		},
 	};
 }

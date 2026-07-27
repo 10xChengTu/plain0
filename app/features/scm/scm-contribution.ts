@@ -11,6 +11,7 @@ import {
 
 import { PlainGitGraphView } from "./plain-git-graph-view";
 import { PlainGitHistoryView } from "./plain-git-history-view";
+import { PlainGitStashView } from "./plain-git-stash-view";
 import { PlainScmView } from "./plain-scm-view";
 
 /** `Plain: Refresh Source Control` reveals this view via
@@ -29,6 +30,11 @@ export const GIT_HISTORY_VIEW_ID = PlainGitHistoryView.ID;
  * interaction *reference* only" rationale [`GIT_HISTORY_VIEW_ID`]'s own
  * comment records. */
 export const GIT_GRAPH_VIEW_ID = PlainGitGraphView.ID;
+/** `F090` S4: `PlainGitStashView`'s registered id — same Source Control view
+ * container as its siblings above (see `registerViews`'s own call below),
+ * same "GitLens-style information architecture as an interaction *reference*
+ * only" rationale [`GIT_HISTORY_VIEW_ID`]'s own comment records. */
+export const GIT_STASH_VIEW_ID = PlainGitStashView.ID;
 
 /**
  * Registers exactly one Sidebar view container and its one view pane —
@@ -89,6 +95,14 @@ Registry.as<IViewsRegistry>(Extensions.ViewsRegistry).registerViews(
 			containerIcon: Codicon.gitCommit,
 			name: { value: "Graph", original: "Graph" },
 			ctorDescriptor: new SyncDescriptor(PlainGitGraphView),
+			canToggleVisibility: true,
+			canMoveView: true,
+		},
+		{
+			id: GIT_STASH_VIEW_ID,
+			containerIcon: Codicon.archive,
+			name: { value: "Stashes", original: "Stashes" },
+			ctorDescriptor: new SyncDescriptor(PlainGitStashView),
 			canToggleVisibility: true,
 			canMoveView: true,
 		},

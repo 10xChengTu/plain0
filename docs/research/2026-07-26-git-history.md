@@ -217,6 +217,22 @@ F090 acceptance 第 3 条明确要求"stash、worktree 工作流通过 fixture"�
 6. **S5 worktree 工作流**：`git::worktree` 模块（list 只读 + add/remove 写,remove 的"先探测脏状态再确认"两阶段调用)+ `validateGitWorktreeConfirmationBoundary`；`worktree add` 的落盘路径 workspace capability 边界校验（**授权模型已由主导会话裁定,见"风险与未知项"第 1 条:原生选择器选父目录 + `RelativePath::join_child` 校验单层子段;本切片只需实施,不需再做架构决策**）；前端 worktree 面板。
 7. **S6 收口**：跨切片 evidence 闭环、`docs/e2e-handover.md` 新增条目、真实大仓库性能基准的最终数字回填、`features.json` F090 转 complete（均由主导会话操作,不在本文档范围）。
 
+## ⚠ 跨切片必读：`GIT_LITERAL_PATHSPECS=1` 会静默破坏依赖 git 内部隐式 pathspec 的命令
+
+**S4 实测发现，凡本域新增 git 命令都必须逐条排查这一项。** F080 的安全修复给 `exec.rs` 的 `apply_universal_hardening` 加了无条件、全模式的 `GIT_LITERAL_PATHSPECS=1`（用于堵住 discard 把 `a*.txt` 当 glob 从而连带销毁 `a1.txt`/`a2.txt` 的真实数据丢失漏洞）。S4 发现它会让 `git stash push --include-untracked` **静默半失败**：stash 条目正常创建、未跟踪内容也正确捕获进 stash commit，但**未跟踪文件不会从工作区删除**，且退出码与输出**均报告成功**——调用方无从察觉。根因是 git 内部用来选中"全部未跟踪文件"以便事后删除的那个默认 pathspec 表达式，依赖的正是该变量禁用掉的 glob/magic 语义。
+
+- **排查方法**：用 `env -i` 构造与 `build_git_command` 完全一致的环境，对该变量做单变量二分（S4 即以此定位，并以 5/5 重复确认确定性）。
+- **正确修法**：给该命令补一个显式的字面 pathspec（S4 用 `-- .`，并对 `push` 的**所有**分支统一加、不做两条略有差异的代码路径），**绝不削弱 `GIT_LITERAL_PATHSPECS=1` 本身**——那会静默重开 F080 那个数据丢失漏洞。
+- **高危特征**：任何"对全部文件生效但不要求调用方显式给出 pathspec"的命令（git 内部会自行合成 pathspec）。本域已确认受影响：`stash push`。已确认**不**受影响：`status`/`diff`/`blame`/`log`/`show`/`stage`/`unstage`/`discard`（这些都由调用方显式传字面路径，字面语义正是所需）、`for-each-ref`（其模式是 ref pattern 而非 pathspec）。
+- **新增命令时必须做的事**：写一个在**真实硬化环境下**跑通的集成测试并附控制组，而不是只在裸 git 下验证——S4 这个 bug 在裸 git 下完全不出现。
+
+## ⚠ 跨切片必读：自建 `ViewPane` 必须声明**全部**构造参数的 DI 装饰器，不能只声明自己新增的那几个
+
+**S4 实测发现，凡新增自建视图（含 F100 及以后）都适用。** `@codingame/monaco-vscode-api` 的 DI 装饰器存储在一个类**首次被装饰**时是**替换**而非追加依赖数组。因此子类若只给自己额外新增的服务标注装饰器（例如只标 index 10/11），基类 `ViewPane` 那九个参数的装饰器信息会被整体覆盖掉——后果不是"该视图坏掉"，而是 **SCM 容器内全部四个视图的构造一起失败**（S4 首轮全量 Playwright 因此一次性挂掉 16 个用例，且失败面**没有一个与 stash 相关**，极难从症状反推）。
+
+- **正确写法**：把全部 11 个 index 的装饰器一并声明，包括继承自 `ViewPane` 的那九个。
+- **为什么必须跑全量 E2E**：这个 bug 在单元测试与该视图自身的用例里都不出现，只有在同容器的**其他**视图被构造时才炸——S4 正是靠"每个切片必须跑全量 `pnpm test:e2e:browser`"这条纪律才发现的，根因则通过阅读 vendored 的 `instantiation.js` 源码确认。
+
 ## 风险与未知项清单
 
 1. ~~**`worktree add` 的落盘路径授权模型是全新架构问题**~~ —— **已由主导会话裁定,S5 按此实施,不再是开放问题**。原始问题陈述保留于此以说明裁定理由：F080 全部写操作都在"已授权的单一 workspace root 内部"操作文件（stage/commit/discard 都不创建 root 外的新路径）,`worktree add <path>` 却要在**任意**文件系统路径创建一个新的工作目录——这个新路径既不在当前授权 root 内（通常故意选在 root 外,例如兄弟目录）,也没有经过 workspace 的目录选择器走 capability 流程。

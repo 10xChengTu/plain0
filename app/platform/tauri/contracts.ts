@@ -916,6 +916,69 @@ export interface GitRefsListResult {
 	readonly truncated: boolean;
 }
 
+// --- Git stash (F090 S4: `git::stash`) ---------------------------------------
+
+/**
+ * One `git stash list` entry. `index` is the entry's own `stash@{N}` position
+ * at the moment it was listed — display-only (e.g. rendering `"#0"`); no
+ * stash write command in this domain ever accepts it back as an input (see
+ * `src-tauri/src/git/stash.rs`'s own module doc comment for why: dropping an
+ * entry shifts every later entry's own index, so every write here is
+ * addressed by `sha` instead, which never shifts). `message` is the full
+ * commit body (`%B`), mirroring `GitHistoryEntry.message`'s identical
+ * "full body, not just the first line" convention.
+ */
+export interface GitStashEntry {
+	readonly index: number;
+	readonly sha: string;
+	readonly committerTime: number;
+	readonly message: string;
+}
+
+export interface GitStashListResult {
+	readonly entries: readonly GitStashEntry[];
+	readonly truncated: boolean;
+}
+
+/**
+ * `files` reuses [`GitDiffFileEntry`] verbatim — the exact same shape
+ * [`GitDiffFilesResult`]/[`GitShowCommitResult`] already expose (see
+ * `src-tauri/src/git/stash.rs`'s own module doc comment for why
+ * `gitStashShow`'s file list is built from the identical `DiffFileEntry`
+ * domain type). `parentSha` is `null` only when the stash's own base commit
+ * is itself a root commit (zero parents) — mirrors `GitShowCommitResult`'s
+ * identical convention.
+ */
+export interface GitStashShowResult {
+	readonly sha: string;
+	readonly parentSha: string | null;
+	readonly files: readonly GitDiffFileEntry[];
+}
+
+/** `"noLocalChanges"` is `git stash push`'s own documented "nothing to save"
+ * outcome (an untracked-only tree pushed without `includeUntracked`) — not
+ * an error, and not distinguishable from a real push by exit code alone; see
+ * `src-tauri/src/git/stash.rs`'s own module doc comment for why `--quiet`
+ * could not be used here (it silently swallows this exact outcome's own
+ * stdout text, the only way this domain can detect it at all). */
+export type GitStashPushOutcome = "created" | "noLocalChanges";
+
+/**
+ * Shared result shape for [`gitStashApply`]/[`gitStashPop`] — mirrors
+ * `stash::StashApplyOutcome`'s own "shared, since the conflict/success shape
+ * is identical" rationale server-side. `conflictedPaths` is read back from a
+ * fresh `git status` (never parsed out of apply/pop's own free-text conflict
+ * output) — see that Rust type's own doc comment. Whether the underlying
+ * stash *entry* was itself removed afterward is not encoded here (implied
+ * entirely by which method was called: `gitStashApply` never removes it,
+ * `gitStashPop` removes it only on `"applied"`, never on `"conflict"` — the
+ * stash entry is deliberately kept on a conflicting pop, mirroring `git
+ * stash pop`'s own documented behavior).
+ */
+export type GitStashApplyOutcome =
+	| Readonly<{ kind: "applied" }>
+	| Readonly<{ kind: "conflict"; conflictedPaths: readonly string[] }>;
+
 export type Unlisten = () => void | Promise<void>;
 
 export interface PlainBridge {
@@ -1354,4 +1417,81 @@ export interface PlainBridge {
 	 * comment). Takes no parameters. Same trust/repository rejections as
 	 * `gitStatus`. */
 	gitRefsList(): Promise<GitRefsListResult>;
+	/** `F090` S4: `git stash list -z --format=%gd%x1f%H%x1f%ct%x1f%B` — the
+	 * stash panel's own data source, newest first. Takes no parameters. Same
+	 * trust/repository rejections as `gitStatus`. */
+	gitStashList(): Promise<GitStashListResult>;
+	/** `F090` S4: `git stash show --name-status/--numstat -z -u -M -C
+	 * --find-copies-harder <sha>` — one stash entry's own file-level change
+	 * list. `sha` must be a real, exactly 40-lowercase-hex commit id
+	 * belonging to a real stash-like entry. Same trust/repository rejections
+	 * as `gitStatus`; rejects with `GIT_STASH_NOT_FOUND` for a malformed or
+	 * nonexistent sha (including a syntactically valid sha naming a real
+	 * commit that is not itself a stash entry). */
+	gitStashShow(sha: string): Promise<GitStashShowResult>;
+	/** `F090` S4: `git stash push -m <message> [--include-untracked] -- .` —
+	 * moves the current working tree's uncommitted changes into a new stash
+	 * entry. This is a low-severity write per this feature's own frozen plan
+	 * (nothing is lost — the change is only ever *moved*, never discarded) so
+	 * this call has no confirmation gate of its own; the caller's own UI
+	 * still shows a static, non-blocking notice before the button is pressed
+	 * (see `plain-scm-stash.ts`'s own module doc comment for why only
+	 * `gitStashPop`/`gitStashDrop` get a real confirmation dialog). Rejects
+	 * with `GIT_STASH_PUSH_EMPTY_MESSAGE`/`GIT_STASH_PUSH_MESSAGE_TOO_LARGE`
+	 * for a malformed `message`, or `GIT_STASH_PUSH_NO_INITIAL_COMMIT` when
+	 * the repository has no commits yet to base a stash on. Same trust/
+	 * repository rejections as `gitStatus`. */
+	gitStashPush(
+		message: string,
+		includeUntracked: boolean,
+	): Promise<GitStashPushOutcome>;
+	/** `F090` S4: `git stash apply [--index] <sha>` — applies a stash entry's
+	 * changes without removing it from the list. Unlike `gitStashPop`, `sha`
+	 * may be passed straight through to git (confirmed empirically that
+	 * `apply` accepts any commit that looks like a stash entry, unlike `pop`/
+	 * `drop`) — see `src-tauri/src/git/stash.rs`'s own module doc comment.
+	 * Never confirmed by this call itself (see `gitStashPush`'s own doc
+	 * comment for the same "low severity per the frozen plan" reasoning —
+	 * applying never removes the entry, so at worst it can be re-applied or
+	 * dropped afterward); a conflict is reported as data (`{ kind: "conflict",
+	 * ... }`), not an error. Rejects with `GIT_STASH_NOT_FOUND` for a
+	 * malformed or nonexistent sha, or `GIT_STASH_APPLY_WOULD_OVERWRITE` when
+	 * uncommitted local changes to the same paths would be silently
+	 * clobbered (a different, preemptive failure mode from a true content
+	 * conflict — git detects this before ever attempting a merge). Same
+	 * trust/repository rejections as `gitStatus`. */
+	gitStashApply(sha: string, useIndex: boolean): Promise<GitStashApplyOutcome>;
+	/** `F090` S4: `git stash pop [--index] stash@{N}` — applies a stash
+	 * entry's changes and, only on success, removes it from the list. `sha`
+	 * is re-resolved to a fresh `stash@{N}` server-side immediately before
+	 * acting (git's own grammar rejects a bare sha for `pop`, unlike `apply` —
+	 * see `src-tauri/src/git/stash.rs`'s own module doc comment for the full
+	 * rationale, including why this is *safer* than passing a caller-tracked
+	 * index directly). This call performs the pop unconditionally; the caller
+	 * must have already confirmed with the user via
+	 * `resolveStashConfirmation(dialogService, { kind: "pop", ... })` (see
+	 * `plain-scm-stash.ts`) — this mirrors `gitDiscardPaths`'s own "confirm
+	 * first, this call never re-confirms" contract for this codebase's other
+	 * irreversible writes. A conflict is reported as data (`{ kind:
+	 * "conflict", ... }`, the stash entry deliberately *kept* — see
+	 * `GitStashApplyOutcome`'s own doc comment), not an error. Rejects with
+	 * `GIT_STASH_NOT_FOUND` when no entry with this sha currently exists (the
+	 * disclosed, narrow race this domain accepts: dropped/popped by another
+	 * process between the caller's last list and this call), or
+	 * `GIT_STASH_POP_WOULD_OVERWRITE` for the same preemptive-failure case
+	 * `gitStashApply` documents. Same trust/repository rejections as
+	 * `gitStatus`. */
+	gitStashPop(sha: string, useIndex: boolean): Promise<GitStashApplyOutcome>;
+	/** `F090` S4: `git stash drop stash@{N}` — permanently, irreversibly
+	 * discards a stash entry (unlike `gitStashPop`, there is no successful
+	 * "applied" outcome at all: this call either drops the entry or rejects).
+	 * `sha` is re-resolved to a fresh `stash@{N}` immediately before acting,
+	 * exactly like `gitStashPop` (same rationale, same doc comment). This
+	 * call performs the drop unconditionally; the caller must have already
+	 * confirmed with the user via `resolveStashConfirmation(dialogService, {
+	 * kind: "drop", ... })` — the same "confirm first, this call never
+	 * re-confirms" contract `gitStashPop`/`gitDiscardPaths` already establish.
+	 * Rejects with `GIT_STASH_NOT_FOUND` when no entry with this sha
+	 * currently exists. Same trust/repository rejections as `gitStatus`. */
+	gitStashDrop(sha: string): Promise<void>;
 }
