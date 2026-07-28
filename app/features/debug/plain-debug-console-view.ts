@@ -54,8 +54,50 @@ function outputTextFromBody(body: unknown): string | undefined {
 	return typeof output === "string" ? output : undefined;
 }
 
+/** `F100` S5 — a real `output` event's own backpressure-gate sequence (see
+ * `src-tauri/src/debug/output_gate.rs`'s module doc), present on every real
+ * `output` delivery this gate actually emits. `undefined` for a body this
+ * view cannot make sense of at all (handled the same way as a missing
+ * `output` text — forwarded/rendered best-effort, never acked). */
+function outputSequenceFromBody(body: unknown): number | undefined {
+	if (typeof body !== "object" || body === null || Array.isArray(body)) {
+		return undefined;
+	}
+	const sequence = (body as Record<string, unknown>).sequence;
+	return typeof sequence === "number" && Number.isSafeInteger(sequence)
+		? sequence
+		: undefined;
+}
+
+/** `F100` S5 — decodes a `plain/outputElided` notification's body. `null`
+ * (not `undefined`, matching this view's own `#setMessage` convention below)
+ * signals a malformed body this view cannot render, so the caller can decide
+ * whether to still show a generic fallback notice. */
+interface ElidedOutputInfo {
+	readonly elidedBytes: number;
+	readonly elidedLines: number;
+}
+
+function elidedOutputInfoFromBody(body: unknown): ElidedOutputInfo | undefined {
+	if (typeof body !== "object" || body === null || Array.isArray(body)) {
+		return undefined;
+	}
+	const record = body as Record<string, unknown>;
+	const elidedBytes = record.elidedBytes;
+	const elidedLines = record.elidedLines;
+	if (
+		typeof elidedBytes !== "number" ||
+		!Number.isSafeInteger(elidedBytes) ||
+		typeof elidedLines !== "number" ||
+		!Number.isSafeInteger(elidedLines)
+	) {
+		return undefined;
+	}
+	return { elidedBytes, elidedLines };
+}
+
 interface ConsoleLine {
-	readonly kind: "input" | "result" | "error" | OutputCategory;
+	readonly kind: "input" | "result" | "error" | "elided" | OutputCategory;
 	readonly text: string;
 }
 
@@ -89,6 +131,13 @@ interface ConsoleLine {
  *    visually), but `telemetry` is **never rendered at all** — per this
  *    slice's own task instructions, telemetry categories are adapter-
  *    internal usage/analytics data, not something a user asked to see.
+ *
+ * `F100` S5 adds a third: every real `output` event is acked
+ * (`PlainBridge.debugOutputAck`) right after being rendered, and
+ * `plain/outputElided` — `src-tauri/src/debug/output_gate.rs`'s own honest
+ * "some output was dropped while the adapter outran the display" signal — is
+ * rendered as its own distinct console line (`ConsoleLine.kind === "elided"`)
+ * rather than a silent gap; see `#handleEvent`'s own doc comment.
  *
  * No constructor parameter beyond `ViewPane`'s own base nine — same
  * zero-own-declarations exemption `PlainDebugCallStackView`'s own doc
@@ -209,8 +258,29 @@ export class PlainDebugConsoleView extends ViewPane {
 	 * cannot be recovered by any later state change; this is the "本应不展示
 	 * 给用户" requirement enforced structurally, not just visually hidden via
 	 * CSS.
+	 *
+	 * `F100` S5 — this is also the one production caller of
+	 * `PlainBridge.debugOutputAck`: every real `output` event this view
+	 * renders is immediately acked (best-effort — a rejected ack is not
+	 * itself surfaced as a console error; see the inline `.catch()` below),
+	 * freeing emission credit for whatever `src-tauri/src/debug/output_gate.rs`'s
+	 * backpressure gate is currently holding back for this session. A
+	 * `plain/outputElided` notification — the gate's own honest "some output
+	 * was dropped" signal — is rendered as its own distinct console line
+	 * rather than silently leaving a gap in the output.
 	 */
 	#handleEvent(event: DebugEventPayload): void {
+		if (event.event === "plain/outputElided") {
+			const elided = elidedOutputInfoFromBody(event.body);
+			if (elided === undefined) {
+				return;
+			}
+			this.#pushLine({
+				kind: "elided",
+				text: `Plain: omitted ${elided.elidedBytes} byte(s) / ${elided.elidedLines} line(s) of output here (the adapter produced output faster than it could be displayed).`,
+			});
+			return;
+		}
 		if (event.event !== "output") {
 			return;
 		}
@@ -223,6 +293,18 @@ export class PlainDebugConsoleView extends ViewPane {
 			return;
 		}
 		this.#pushLine({ kind: category, text });
+		const sequence = outputSequenceFromBody(event.body);
+		if (sequence !== undefined) {
+			getPlainDebugRuntime()
+				?.bridge.debugOutputAck(event.sessionId, sequence)
+				.catch(() => {
+					// Best-effort: a stale/failed ack must not itself become
+					// an unhandled promise rejection on this shared page (F090
+					// S0's own recorded lesson) — the gate's own tolerant
+					// contract means a lost ack only delays a future flush,
+					// it never corrupts anything.
+				});
+		}
 	}
 
 	#pushLine(line: ConsoleLine): void {

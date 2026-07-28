@@ -54,13 +54,55 @@
 //! both happen for the same session (typically in that order), and both get
 //! reported — they are not conflated into one signal.
 //!
-//! # What this slice deliberately does not implement
+//! # `F100` S5 — per-request timeouts, classified, not one-size-fits-all
 //!
-//! Per-request timeouts, `output`-event backpressure and mid-session
-//! large-object benchmarking are explicitly `F100` S5's job (frozen research
-//! doc "决策 4") — [`DebugSession::wait_for_response`] blocks until either a
-//! real response arrives or the session ends (transport death), with no
-//! independent timeout of its own.
+//! Every wait that can block forever if the adapter is merely unresponsive
+//! (not dead — the session-end path already handles that) now has a finite
+//! bound, closing the gap the module doc above used to disclose as
+//! deliberately unimplemented. The classification is not a single global
+//! timeout because `docs/research/2026-07-28-generic-dap.md`'s own real
+//! `debugpy` capture proved one specific wait is *legitimately* long-lived:
+//! `launch`/`attach`'s own response is deferred by spec until after
+//! `configurationDone`'s response arrives (see "handshake ordering" above) —
+//! applying the same short budget to it as to an ordinary request would fail
+//! a healthy adapter simply because starting the debuggee itself
+//! (compiling, container startup, attaching to a remote process, …)
+//! legitimately takes longer than one interactive round trip. So there are
+//! exactly two named budgets, never a bare literal `Duration` at a call site:
+//!
+//! - [`DEBUG_REQUEST_TIMEOUT`] (30s, matching `git::exec::GIT_EXEC_TIMEOUT`'s
+//!   own magnitude) — every step [`run_handshake`] does *not* defer
+//!   (`initialize`, the `initialized` event wait, each `setBreakpoints`,
+//!   `configurationDone`) and every post-handshake interactive/step-control
+//!   request `super::service::DebugSessionService::send_request` issues
+//!   (`stackTrace`/`scopes`/`variables`/`evaluate`/`continue`/…). See
+//!   `debug::mod`'s own S5 report for the real large-payload benchmark
+//!   numbers backing 30s as generous headroom, not a value picked to just
+//!   clear measured latency.
+//! - [`DEBUG_LAUNCH_TIMEOUT`] (300s) — `launch`/`attach`'s own response only,
+//!   awaited last in [`run_handshake`], per the paragraph above. Still
+//!   finite: this slice's own requirement is that *every* pending request
+//!   fails deterministically, never hangs forever, even the one whose
+//!   response is expected to be slow.
+//!
+//! Both are threaded through [`HandshakeConfig`] as explicit fields (not
+//! hardcoded inside [`run_handshake`] itself) so `session::tests` can exercise
+//! the real classification logic with real (tiny) durations instead of
+//! waiting out the real production values — see that module's own
+//! `basic_handshake_config` and the classification control-group pair
+//! (`only_launchs_own_response_gets_the_generous_timeout_budget`/
+//! `every_other_handshake_step_still_gets_the_ordinary_short_timeout_budget`).
+//! A timed-out request's [`PendingTable`] entry is proactively discarded (see
+//! [`DebugSession::wait_for_response_with_timeout`]) so a late reply arriving
+//! afterward is simply an unmatched stray (the same outcome
+//! [`PendingTable::resolve`]'s own doc comment already describes for any
+//! other unmatched reply) rather than leaking memory for the rest of a
+//! long-lived session.
+//!
+//! `output`-event backpressure ([`super::output_gate`]) and mid-session
+//! large-object benchmarking are the other two pieces of `F100` S5 — see that
+//! module's own doc for the gate, and `debug::mod`'s S5 report for the real
+//! benchmark numbers.
 //!
 //! # `F100` S4 — real reverse-request handling, without touching every
 //! existing `DebugSession::start` call site
@@ -84,9 +126,10 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -94,8 +137,23 @@ use crate::error::CommandError;
 
 use super::dto::DebugSessionId;
 use super::framing::FrameDecoder;
+use super::output_gate::{OutputGate, OutputGateOutcome};
 use super::protocol::{self, Capabilities, IncomingMessage, ProtocolError, ResponseEnvelope};
-use super::{debug_handshake_failed, debug_session_ended, debug_transport_unavailable};
+use super::{
+    debug_handshake_failed, debug_request_timed_out, debug_session_ended,
+    debug_transport_unavailable,
+};
+
+/// Wall-clock bound on an ordinary (non-`launch`/`attach`) DAP request's
+/// response — see the module doc's "`F100` S5" section for the full
+/// classification rationale and why this is 30s (matching
+/// `git::exec::GIT_EXEC_TIMEOUT`'s own magnitude).
+pub(crate) const DEBUG_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Wall-clock bound on `launch`/`attach`'s *own* response only — see the
+/// module doc's "`F100` S5" section for why this is deliberately much longer
+/// than [`DEBUG_REQUEST_TIMEOUT`], not the same budget applied everywhere.
+pub(crate) const DEBUG_LAUNCH_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Bytes requested per blocking `read()` call against the session's
 /// transport — mirrors `terminal::service::TERMINAL_READ_BUFFER_BYTES`'s
@@ -223,17 +281,15 @@ impl ReverseRequestHandler for NullReverseRequestHandler {
 
 /// One still-outstanding request's reply channel — created by
 /// [`DebugSession::send_request`], resolved by the reader thread (a real
-/// reply) or dropped wholesale on session end (every blocked
-/// [`PendingResponse::recv`] then observes a disconnected channel, mapped to
-/// [`debug_session_ended`] — see [`PendingTable::fail_all`]).
+/// reply), dropped wholesale on session end (every blocked
+/// [`DebugSession::wait_for_response_with_timeout`] then observes a
+/// disconnected channel, mapped to [`debug_session_ended`] — see
+/// [`PendingTable::fail_all`]), or timed out (see that method's own doc
+/// comment) — `seq` is kept alongside the receiver purely so a timed-out wait
+/// can discard its own now-useless table entry.
 pub(crate) struct PendingResponse {
+    seq: i64,
     receiver: Receiver<ResponseEnvelope>,
-}
-
-impl PendingResponse {
-    fn recv(self) -> Result<ResponseEnvelope, CommandError> {
-        self.receiver.recv().map_err(|_| debug_session_ended())
-    }
 }
 
 struct PendingTable {
@@ -250,21 +306,27 @@ impl PendingTable {
     fn register(&self, seq: i64) -> PendingResponse {
         let (sender, receiver) = sync_channel(1);
         lock(&self.entries).insert(seq, sender);
-        PendingResponse { receiver }
+        PendingResponse { seq, receiver }
     }
 
-    /// Removes a registration nobody will ever resolve (the write that was
-    /// supposed to prompt a reply itself failed) — without this, a failed
-    /// write would otherwise leak an entry until session end.
+    /// Removes a registration nobody will ever resolve — either the write
+    /// that was supposed to prompt a reply itself failed, or (`F100` S5) a
+    /// caller gave up waiting once [`DEBUG_REQUEST_TIMEOUT`]/[`DEBUG_LAUNCH_TIMEOUT`]
+    /// elapsed. Without this, either case would otherwise leak an entry for
+    /// the rest of the session's lifetime — a real risk once every wait is no
+    /// longer unbounded (a chatty caller issuing many requests a slow adapter
+    /// never answers could otherwise accumulate one stale entry per timeout,
+    /// for as long as the session itself stays alive).
     fn discard(&self, seq: i64) {
         lock(&self.entries).remove(&seq);
     }
 
     /// Resolves the pending entry for `response.request_seq`, if any — a
     /// response with no matching pending entry (a stray/duplicate/late
-    /// reply, or one for a request whose caller already gave up) is simply
-    /// not delivered anywhere; the reader thread's caller decides whether
-    /// that itself is worth a diagnostic (see [`run_reader`]).
+    /// reply, one for a request whose caller already gave up on disconnect,
+    /// or one that arrives after [`Self::discard`] already timed it out) is
+    /// simply not delivered anywhere; the reader thread's caller decides
+    /// whether that itself is worth a diagnostic (see [`run_reader`]).
     fn resolve(&self, response: ResponseEnvelope) -> bool {
         let sender = lock(&self.entries).remove(&response.request_seq);
         match sender {
@@ -274,9 +336,12 @@ impl PendingTable {
     }
 
     /// Drops every still-pending sender. Every blocked
-    /// [`PendingResponse::recv`] then observes a disconnected channel
-    /// (`Err`), never a hang — this is the whole mechanism by which session
-    /// end unblocks in-flight requests without needing per-request timeouts.
+    /// [`DebugSession::wait_for_response_with_timeout`] then observes a
+    /// disconnected channel (`Err`) immediately, rather than waiting out its
+    /// own timeout — session end is a strictly faster, independent path to
+    /// the same "stop waiting" outcome, not a replacement for per-request
+    /// timeouts (a live session with an unresponsive adapter never reaches
+    /// this at all).
     fn fail_all(&self) {
         lock(&self.entries).clear();
     }
@@ -325,18 +390,31 @@ impl SessionSignal {
         self.condvar.notify_all();
     }
 
-    fn wait_for_initialized(&self) -> Result<(), CommandError> {
-        let mut state = lock(&self.state);
-        while !state.initialized && state.ended.is_none() {
-            state = self
-                .condvar
-                .wait(state)
-                .unwrap_or_else(PoisonError::into_inner);
-        }
+    /// Blocks until `initialized` fires, the session ends, or `timeout`
+    /// elapses first — `F100` S5 added `timeout` (see the module doc's own
+    /// "`F100` S5" section: this wait risked hanging forever against a live-
+    /// but-unresponsive adapter exactly like an unbounded
+    /// [`DebugSession::wait_for_response_with_timeout`] would have). Uses
+    /// [`Condvar::wait_timeout_while`] rather than the previous plain
+    /// `wait` loop so a real `mark_ended`/`fire_initialized` notification
+    /// still wakes this immediately, regardless of how much of `timeout`
+    /// remains — the timeout is a ceiling on "stuck with nothing happening
+    /// at all", never a floor on how fast a real signal is observed.
+    fn wait_for_initialized(&self, timeout: Duration) -> Result<(), CommandError> {
+        let state = lock(&self.state);
+        let (state, wait_result) = self
+            .condvar
+            .wait_timeout_while(state, timeout, |state| {
+                !state.initialized && state.ended.is_none()
+            })
+            .unwrap_or_else(PoisonError::into_inner);
         if state.initialized {
             Ok(())
-        } else {
+        } else if state.ended.is_some() {
             Err(debug_session_ended())
+        } else {
+            debug_assert!(wait_result.timed_out());
+            Err(debug_request_timed_out("initialized"))
         }
     }
 }
@@ -354,6 +432,18 @@ pub(crate) struct DebugSession {
     reader_thread: Mutex<Option<JoinHandle<()>>>,
     teardown: Box<dyn Fn() + Send + Sync>,
     reverse_requests: Arc<dyn ReverseRequestHandler>,
+    /// `F100` S5's `output`-event backpressure gate (see [`super::output_gate`]'s
+    /// own module doc) — one per session, consulted by [`dispatch_message`]
+    /// for every real `output` event and drained by [`Self::ack_output`].
+    output_gate: OutputGate,
+    /// A second, session-owned clone of the same sink [`run_reader`]'s
+    /// closure already holds — needed *only* by [`Self::ack_output`], which
+    /// runs on an unrelated call stack (a `debug_output_ack` command
+    /// invocation, not the reader thread) and therefore cannot reach the
+    /// `sink` parameter [`run_reader`]/[`dispatch_message`] were given
+    /// directly; every other event-emission path in this module keeps using
+    /// the threaded-through `sink` parameter unchanged.
+    sink: Arc<dyn DebugEventSink>,
 }
 
 impl DebugSession {
@@ -413,6 +503,8 @@ impl DebugSession {
             reader_thread: Mutex::new(None),
             teardown,
             reverse_requests,
+            output_gate: OutputGate::new(),
+            sink: Arc::clone(&sink),
         });
 
         let reader_session = Arc::clone(&session);
@@ -445,19 +537,71 @@ impl DebugSession {
         Ok(pending)
     }
 
-    /// Blocks until `pending`'s response arrives, or the session ends first
-    /// (mapped to [`debug_session_ended`]) — see [`PendingResponse::recv`].
-    pub(crate) fn wait_for_response(
+    /// Blocks until `pending`'s response arrives, the session ends first
+    /// (mapped to [`debug_session_ended`]), or `timeout` elapses first
+    /// (mapped to [`debug_request_timed_out`], carrying `command` so a
+    /// caller gets an actionable "which request timed out" diagnostic) — see
+    /// the module doc's "`F100` S5" section for why every call site passes
+    /// one of exactly two named durations
+    /// ([`DEBUG_REQUEST_TIMEOUT`]/[`DEBUG_LAUNCH_TIMEOUT`]), never a bare
+    /// literal. On timeout, `pending`'s own table entry is proactively
+    /// discarded — see [`PendingTable::discard`]'s own doc comment for why
+    /// (a live session must not accumulate one stale entry per timed-out
+    /// request for the rest of its lifetime).
+    pub(crate) fn wait_for_response_with_timeout(
         &self,
         pending: PendingResponse,
+        timeout: Duration,
+        command: &str,
     ) -> Result<ResponseEnvelope, CommandError> {
-        pending.recv()
+        match pending.receiver.recv_timeout(timeout) {
+            Ok(response) => Ok(response),
+            Err(RecvTimeoutError::Timeout) => {
+                self.pending.discard(pending.seq);
+                Err(debug_request_timed_out(command))
+            }
+            Err(RecvTimeoutError::Disconnected) => Err(debug_session_ended()),
+        }
     }
 
-    /// Blocks until the `initialized` event has fired, or the session ends
-    /// first — see [`SessionSignal::wait_for_initialized`].
-    pub(crate) fn wait_for_initialized(&self) -> Result<(), CommandError> {
-        self.signal.wait_for_initialized()
+    /// Blocks until the `initialized` event has fired, the session ends
+    /// first, or `timeout` elapses first — see
+    /// [`SessionSignal::wait_for_initialized`].
+    pub(crate) fn wait_for_initialized(&self, timeout: Duration) -> Result<(), CommandError> {
+        self.signal.wait_for_initialized(timeout)
+    }
+
+    /// `F100` S5 — acknowledges having processed a gated `output` event
+    /// through `sequence` (see [`super::output_gate`]'s own module doc),
+    /// flushing whatever content the gate is now able to release as real
+    /// `output` events (each preceded by a `plain/outputElided` notice if any
+    /// content was actually dropped while gated) via [`Self::sink`] — the
+    /// one reason this session keeps its own `sink` clone alongside the one
+    /// [`run_reader`] holds (this runs on a `debug_output_ack` command's own
+    /// call stack, not the reader thread).
+    pub(crate) fn ack_output(&self, session_id: DebugSessionId, sequence: u64) {
+        for flushed in self.output_gate.ack(sequence) {
+            if flushed.elided_bytes > 0 || flushed.elided_lines > 0 {
+                self.sink.emit_event(
+                    session_id,
+                    "plain/outputElided".to_owned(),
+                    Some(json!({
+                        "category": flushed.category,
+                        "elidedBytes": flushed.elided_bytes,
+                        "elidedLines": flushed.elided_lines,
+                    })),
+                );
+            }
+            self.sink.emit_event(
+                session_id,
+                "output".to_owned(),
+                Some(json!({
+                    "category": flushed.category,
+                    "output": flushed.text,
+                    "sequence": flushed.sequence,
+                })),
+            );
+        }
     }
 
     /// The negotiated [`Capabilities`] from the `initialize` response, once
@@ -547,6 +691,60 @@ impl DebugSession {
         );
         let _ = self.write_framed(&framed);
     }
+
+    /// `F100` S5 — routes a real DAP `output` event through
+    /// [`Self::output_gate`] instead of forwarding it straight to `sink` (the
+    /// path every other event kind still takes) — see [`super::output_gate`]'s
+    /// own module doc for the gate's merge/elide contract. A body this gate
+    /// cannot make sense of at all (missing/non-string `output` field) is
+    /// forwarded unmodified and ungated: this is "an event this module
+    /// doesn't understand", not something to silently drop, mirroring
+    /// `dispatch_message`'s own `Err(error)` branch's "surface a diagnostic,
+    /// do not swallow" stance for a different kind of malformed input.
+    fn handle_output_event(
+        &self,
+        sink: &Arc<dyn DebugEventSink>,
+        session_id: DebugSessionId,
+        body: Option<Value>,
+    ) {
+        let Some(text) = output_text_from_body(body.as_ref()) else {
+            sink.emit_event(session_id, "output".to_owned(), body);
+            return;
+        };
+        let category = output_category_from_body(body.as_ref());
+        if let OutputGateOutcome::Emit(sequence) = self.output_gate.on_output(&category, &text) {
+            sink.emit_event(
+                session_id,
+                "output".to_owned(),
+                Some(json!({
+                    "category": category,
+                    "output": text,
+                    "sequence": sequence,
+                })),
+            );
+        }
+    }
+}
+
+/// Per spec, an `OutputEvent.body` with no `category` at all defaults to
+/// `"console"` — mirrors `app/features/debug/plain-debug-console-view.ts`'s
+/// own `outputCategoryFromBody` on the frontend side of the exact same wire
+/// shape.
+fn output_category_from_body(body: Option<&Value>) -> String {
+    body.and_then(Value::as_object)
+        .and_then(|object| object.get("category"))
+        .and_then(Value::as_str)
+        .unwrap_or("console")
+        .to_owned()
+}
+
+/// `None` when `body` is missing an `output` string entirely — the module
+/// doc's "an event this gate cannot make sense of" case.
+fn output_text_from_body(body: Option<&Value>) -> Option<String> {
+    body.and_then(Value::as_object)?
+        .get("output")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// The reader thread body — see the module doc's overview. Reads arbitrarily
@@ -596,7 +794,11 @@ fn dispatch_message(
             if event.event == "initialized" {
                 session.signal.fire_initialized();
             }
-            sink.emit_event(session_id, event.event, event.body);
+            if event.event == "output" {
+                session.handle_output_event(sink, session_id, event.body);
+            } else {
+                sink.emit_event(session_id, event.event, event.body);
+            }
         }
         Ok(IncomingMessage::Request(request)) => {
             sink.emit_event(
@@ -681,6 +883,20 @@ pub(crate) struct HandshakeConfig {
     /// Zero or more `setBreakpoints` requests to send during configuration,
     /// each awaited in turn before `configurationDone` — see the module doc.
     pub(crate) breakpoints: Vec<SourceBreakpoints>,
+    /// `F100` S5 — the bound applied to every handshake step *other than*
+    /// `launch`/`attach`'s own response (`initialize`, the `initialized`
+    /// event wait, each `setBreakpoints`, `configurationDone`). The real
+    /// production caller (`super::service::DebugSessionService::start_session`)
+    /// always passes [`DEBUG_REQUEST_TIMEOUT`]; `session::tests` passes small
+    /// values directly to exercise the real classification logic without
+    /// waiting out real production durations — see the module doc's "`F100`
+    /// S5" section.
+    pub(crate) request_timeout: Duration,
+    /// `F100` S5 — the (deliberately much longer) bound applied only to
+    /// awaiting `launch`/`attach`'s own response, per the module doc's
+    /// "`F100` S5" section. The real production caller always passes
+    /// [`DEBUG_LAUNCH_TIMEOUT`].
+    pub(crate) launch_timeout: Duration,
 }
 
 /// Runs the full handshake this module exists to get right — see the module
@@ -704,7 +920,11 @@ pub(crate) fn run_handshake(
         "locale": "en-US",
     });
     let initialize_pending = session.send_request("initialize", Some(initialize_arguments))?;
-    let initialize_response = session.wait_for_response(initialize_pending)?;
+    let initialize_response = session.wait_for_response_with_timeout(
+        initialize_pending,
+        config.request_timeout,
+        "initialize",
+    )?;
     if !initialize_response.success {
         return Err(debug_handshake_failed(
             "initialize",
@@ -718,11 +938,15 @@ pub(crate) fn run_handshake(
     let launch_command = config.request.as_command();
     let launch_pending = session.send_request(launch_command, Some(config.arguments))?;
 
-    session.wait_for_initialized()?;
+    session.wait_for_initialized(config.request_timeout)?;
 
     for breakpoints in config.breakpoints {
         let pending = session.send_request("setBreakpoints", Some(breakpoints.arguments))?;
-        let response = session.wait_for_response(pending)?;
+        let response = session.wait_for_response_with_timeout(
+            pending,
+            config.request_timeout,
+            "setBreakpoints",
+        )?;
         if !response.success {
             return Err(debug_handshake_failed(
                 "setBreakpoints",
@@ -732,7 +956,11 @@ pub(crate) fn run_handshake(
     }
 
     let configuration_done_pending = session.send_request("configurationDone", None)?;
-    let configuration_done_response = session.wait_for_response(configuration_done_pending)?;
+    let configuration_done_response = session.wait_for_response_with_timeout(
+        configuration_done_pending,
+        config.request_timeout,
+        "configurationDone",
+    )?;
     if !configuration_done_response.success {
         return Err(debug_handshake_failed(
             "configurationDone",
@@ -743,8 +971,14 @@ pub(crate) fn run_handshake(
     // Only now do we await `launch`/`attach`'s own response — it may
     // already be sitting in the channel (the real adapter behavior the
     // module doc describes), or it may arrive after this call starts
-    // blocking; either way this is the exact same blocking receive.
-    let launch_response = session.wait_for_response(launch_pending)?;
+    // blocking; either way this is the exact same blocking receive, just
+    // with the deliberately generous `launch_timeout` budget rather than
+    // `request_timeout` — see the module doc's "`F100` S5" section.
+    let launch_response = session.wait_for_response_with_timeout(
+        launch_pending,
+        config.launch_timeout,
+        launch_command,
+    )?;
     if !launch_response.success {
         return Err(debug_handshake_failed(
             launch_command,

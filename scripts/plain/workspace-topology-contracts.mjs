@@ -576,6 +576,8 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/features/debug/plain-debug-console-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/themeService.service",
 	"app/features/debug/plain-debug-console-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/views/viewPane",
 	"app/features/debug/plain-debug-console-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/views.service",
+	"app/features/debug/plain-debug-session-alerts.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/contributions",
+	"app/features/debug/plain-debug-session-alerts.ts:@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service",
 	"app/features/debug/plain-debug-terminal-integration.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/contributions",
 	"app/features/debug/plain-debug-terminal-integration.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/views/common/viewsService.service",
 	"app/features/debug/plain-debug-variables-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/dom",

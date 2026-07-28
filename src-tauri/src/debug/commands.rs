@@ -4,11 +4,14 @@
 //! `debug_disconnect` — the real session-lifecycle surface. `F100` S3 added
 //! the *interactive* debugging surface: `debug_set_breakpoints`/
 //! `debug_stack_trace`/`debug_scopes`/`debug_variables`/`debug_evaluate`.
-//! `F100` S4 (this slice) adds the last five: execution/step control
+//! `F100` S4 added five more: execution/step control
 //! (`debug_continue`/`debug_next`/`debug_step_in`/`debug_step_out`/
 //! `debug_pause`) — plus real `runInTerminal` reverse-request handling, which
-//! is not a new `#[tauri::command]` at all (see below). Read this comment
-//! before adding a seventeenth command.
+//! is not a new `#[tauri::command]` at all (see below). `F100` S5 (this
+//! slice) adds exactly one more — `debug_output_ack` — the frontend's own
+//! acknowledgement of a gated `output` event (see `super::output_gate`'s own
+//! module doc); this brings the total to seventeen real commands (3 + 3 + 5 +
+//! 5 + 1). Read this comment before adding an eighteenth.
 //!
 //! # `F100` S3's five commands (unchanged this slice)
 //!
@@ -89,10 +92,11 @@ use super::confirm::ConfirmationService;
 use super::debug_run_in_terminal_arguments_invalid;
 use super::dto::{
     self, AdapterConfirmationSubject, DebugContinueResult, DebugEvaluateRequest,
-    DebugEvaluateResult, DebugEventPayload, DebugScopesRequest, DebugScopesResult, DebugSessionId,
-    DebugSessionIdRequest, DebugSessionStartRequest, DebugSessionStartResult,
-    DebugSetBreakpointsRequest, DebugSetBreakpointsResult, DebugStackTraceRequest,
-    DebugStackTraceResult, DebugThreadRequest, DebugVariablesRequest, DebugVariablesResult,
+    DebugEvaluateResult, DebugEventPayload, DebugOutputAckRequest, DebugScopesRequest,
+    DebugScopesResult, DebugSessionId, DebugSessionIdRequest, DebugSessionStartRequest,
+    DebugSessionStartResult, DebugSetBreakpointsRequest, DebugSetBreakpointsResult,
+    DebugStackTraceRequest, DebugStackTraceResult, DebugThreadRequest, DebugVariablesRequest,
+    DebugVariablesResult,
 };
 use super::service::DebugSessionService;
 use super::session::{
@@ -500,6 +504,30 @@ pub(crate) async fn debug_pause(
         .inner()
         .send_request(window.label(), query.session_id, "pause", query.arguments)
         .await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
+// `F100` S5 — `output`-event backpressure ack. See `super::output_gate`'s own
+// module doc for the gate this acknowledges.
+// ---------------------------------------------------------------------
+
+/// Acknowledges every gated `output` event through `sequence` — see
+/// [`super::session::DebugSession::ack_output`]. Always succeeds (including
+/// for a session that no longer exists — see
+/// [`DebugSessionService::ack_output`]'s own doc comment for why that race is
+/// tolerated, not an error).
+#[tauri::command]
+pub(crate) async fn debug_output_ack(
+    window: WebviewWindow,
+    debug_sessions: State<'_, DebugSessionService>,
+    request: DebugOutputAckRequest,
+) -> Result<(), CommandError> {
+    let (session_id, sequence) = request.into_parts();
+    debug_sessions
+        .inner()
+        .ack_output(window.label(), session_id, sequence)
+        .await;
     Ok(())
 }
 

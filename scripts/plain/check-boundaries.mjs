@@ -12,6 +12,7 @@ import {
 	validateDebugFramingBounds,
 	validateDebugRunInTerminalBoundary,
 	validateDebugSpawnConstructionShape,
+	validateDebugTcpCompanionSpawnBoundary,
 	validateDialogOverrideImportBoundary,
 	validateDialogServiceOverride,
 	validateDialogSurfaceBoundary,
@@ -805,6 +806,9 @@ for (const failure of validateDebugAdapterSpawnBoundary(rustSources)) {
 	fail(failure);
 }
 for (const failure of validateDebugAdapterConnectBoundary(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateDebugTcpCompanionSpawnBoundary(rustSources)) {
 	fail(failure);
 }
 for (const failure of validateDebugSpawnConstructionShape(rustSources)) {

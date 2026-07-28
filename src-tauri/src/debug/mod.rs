@@ -31,58 +31,100 @@
 //!    `debug_disconnect` — completing the command surface S1's own module
 //!    doc already named as what S2 would add.
 //!
-//! # This slice's answer to S1's open "spawn-then-connect" question: connect-only, by decision, not by omission
+//! # `F100` S5 — robustness (per-request timeouts, `output` backpressure, real benchmarks)
+//!
+//! S2's own module doc (immediately above) disclosed four things this slice
+//! did not implement: per-request timeouts, `output`-event backpressure,
+//! adapter-crash-mid-session detection, and real large-object benchmarks.
+//! `F100` S5 closes all four:
+//!
+//! 1. **Per-request timeouts** — [`session`]'s own module doc ("`F100` S5"
+//!    section) has the full classification rationale: every wait that could
+//!    previously hang forever against a merely-unresponsive (not dead)
+//!    adapter now has a finite bound, via exactly two named durations
+//!    ([`session::DEBUG_REQUEST_TIMEOUT`]/[`session::DEBUG_LAUNCH_TIMEOUT`]),
+//!    never a one-size-fits-all number.
+//! 2. **Adapter-crash/mid-session-exit detection** was already fully covered
+//!    by S2's own [`session::SessionEndReason`]/[`session::DebugEventSink::emit_session_ended`]
+//!    mechanism (a reader thread observing EOF/an I/O error/an unrecoverable
+//!    framing error) — what S5 actually adds is wiring that already-real
+//!    signal to a **frontend-visible presentation** (`app/features/debug/plain-debug-session-alerts.ts`'s
+//!    `PlainDebugSessionAlerts` contribution), since S2/S3/S4 left
+//!    `plain/sessionEnded` forwarded only as far as `DebugSessionController`
+//!    clearing its own state — a user watching the UI had no way to tell "the
+//!    adapter crashed" apart from "I clicked disconnect".
+//! 3. **`output`-event backpressure** — [`output_gate`] (a new module),
+//!    wired into [`session::dispatch_message`]'s own `output`-event special
+//!    case and acknowledged via the new `debug_output_ack` command
+//!    ([`commands::debug_output_ack`]) — see that module's own doc for the
+//!    merge/elide/cap design and why it deliberately does not reuse
+//!    `terminal::flow::FlowControl` verbatim.
+//! 4. **Real benchmark numbers** — `debug::service::tests`'s own
+//!    `real_large_call_stack_and_large_variables_array_benchmark`/
+//!    `output_backpressure_gate_holds_a_real_flood_and_reports_elision_on_ack`
+//!    measure a real spawned Python mock adapter's 2000-frame `stackTrace`
+//!    and 50,000-element `variables` round trips, and a 6,000-event
+//!    (~1.2 MiB) `output` flood — real, machine-measured numbers, not
+//!    third-party citations or an "untested" placeholder; see this slice's
+//!    own final report for the measured figures.
+//!
+//! # S1's open "spawn-then-connect" question: `F100` S5's resolution
 //!
 //! S1 left open whether the TCP transport should compose with spawning
 //! ("Plain starts the adapter process, which itself opens a TCP listener,
 //! and Plain then connects to the port it opened") or stay connect-only
 //! ("the adapter is already running externally; Plain only ever connects
-//! out"). Now that [`service::DebugSessionService`] actually has the session
-//! state machine needed to sequence such a thing, this slice's concrete
-//! decision is **connect-only, matching S1's existing scope** —
-//! [`service::DebugSessionService::start_session`]'s TCP branch calls
-//! [`tcp::connect_adapter`] alone, never [`exec::spawn_adapter`]. This is a
-//! disclosed, deliberate narrowing, not an oversight: implementing
-//! spawn-then-connect properly surfaced a real design snag while drafting
-//! this slice, worth recording rather than papering over. [`exec::spawn_adapter`]
+//! out"). S2 chose connect-only for `service::DebugSessionService::start_session`'s
+//! production TCP branch (still true today — it calls
+//! [`tcp::connect_adapter`] alone, never any spawn primitive) and identified
+//! the exact reason a naive fix would be unsafe: [`exec::spawn_adapter`]
 //! hardcodes `AdapterTransportKind::Stdio` when building the confirmation
 //! subject it checks (`scripts/plain/boundary-contracts.mjs`'s
 //! `validateDebugAdapterSpawnBoundary` mechanically locks this — correctly,
 //! for the ordinary case where the spawned process's own stdio *is* the DAP
-//! transport). A "spawn a companion process that will itself open a TCP
-//! listener elsewhere" use case would need to confirm that spawn under the
-//! **`Tcp`** confirmation subject instead (the one the user actually
-//! confirmed for this TCP session) — reusing `spawn_adapter` as-is would
-//! silently demand (or silently reuse) a *different* confirmation record
-//! than the one governing the session the user is actually starting, which
-//! is exactly the kind of confirmation-identity confusion `docs/research/2026-07-28-generic-dap.md`'s
-//! "主导会话裁定" item 2 was written to prevent. Fixing this correctly needs a
-//! second, `Tcp`-confirmed spawn entry point distinct from `spawn_adapter`
-//! (not a generalization of `spawn_adapter` itself, which must keep hardcoding
-//! `Stdio` for its own real use case) — a real, buildable fix, not a
-//! blocked question, but one this slice declines to rush in alongside
-//! everything else S2 already delivers. **Recommendation for whoever picks
-//! this up next**: implement it as a small, separate addition — a
-//! `Tcp`-confirmed companion-spawn primitive in `exec` (or a thin sibling
-//! function), invoked from `start_session`'s TCP branch only when the
-//! resolved request explicitly opts in (e.g. a `spawn_before_connect: bool`
-//! alongside the existing `command`/`args`/`host`/`port` fields), with a
-//! bounded connect-retry loop after spawning (a real listener needs a moment
-//! to come up; a bare `TcpStream::connect` can observe `ECONNREFUSED`
-//! near-instantly rather than actually waiting out
-//! [`tcp::DEBUG_ADAPTER_TCP_CONNECT_TIMEOUT`]). This only covers a
-//! statically-known `host`/`port` (the common real case — e.g. `debugpy.adapter
-//! --port 5678`); genuinely discovering an OS-assigned ephemeral port
-//! (`--port 0`) from an adapter's own stdout announcement is adapter-specific
-//! and not something this recommendation covers either.
+//! transport); reusing it as-is for a "spawn a companion process that will
+//! itself open a TCP listener elsewhere" use case would silently demand (or
+//! silently reuse) a *different* confirmation record than the one governing
+//! the TCP session the user is actually starting — exactly the kind of
+//! confirmation-identity confusion `docs/research/2026-07-28-generic-dap.md`'s
+//! "主导会话裁定" item 2 was written to prevent.
+//!
+//! `F100` S5 builds the primitive this fix needs: [`exec::spawn_adapter_as_tcp_companion`]
+//! is byte-for-byte [`exec::spawn_adapter`]'s twin except the one line that
+//! matters — its confirmation subject is built with `AdapterTransportKind::Tcp`,
+//! never `::Stdio` — and `scripts/plain/boundary-contracts.mjs`'s new
+//! `validateDebugTcpCompanionSpawnBoundary` mechanically locks that fact so it
+//! can never silently regress. `exec::tests` proves the isolation holds in
+//! both directions: a subject confirmed only for `Stdio` cannot authorize a
+//! `Tcp`-companion spawn, and (the reverse, not previously tested at all)
+//! a subject confirmed only for `Tcp` cannot authorize an ordinary
+//! [`exec::spawn_adapter`] call either.
+//!
+//! **Still deliberately not wired to any production entry point** — this is
+//! disclosed scope, not an oversight, weighed and decided this slice: actually
+//! composing "spawn, then connect" needs a bounded connect-retry loop after
+//! spawning (a real listener needs a moment to come up; a bare
+//! `TcpStream::connect` can observe `ECONNREFUSED` near-instantly rather than
+//! actually waiting out [`tcp::DEBUG_ADAPTER_TCP_CONNECT_TIMEOUT`]) *and* a
+//! real config surface (a `spawnBeforeConnect: bool`-style wire field, parsed
+//! by the frontend's adapter-config module, threaded through
+//! `DebugSessionStartRequest`) — neither of which any `F100` acceptance
+//! criterion or this slice's own robustness scope (per-request timeouts,
+//! session-end presentation, `output` backpressure, real benchmarks) actually
+//! requires, and genuinely discovering an OS-assigned ephemeral port
+//! (`--port 0`) from an adapter's own stdout announcement remains
+//! adapter-specific and unsolved by this primitive either way. Building
+//! `spawn_adapter_as_tcp_companion` now, correctly gated and tested in
+//! isolation with zero production caller, mirrors this exact domain's own
+//! S0/S1 precedent ([`exec::spawn_adapter`]/[`tcp::connect_adapter`]
+//! themselves had zero production callers until S2 gave them one) —
+//! **recommendation for whoever picks this up next**: add the config field,
+//! the connect-retry loop, and wire `start_session`'s TCP branch to call this
+//! primitive first when the resolved request opts in.
 //!
 //! Adapter-config parsing (`.plain/debug-adapters.json`/`.vscode/launch.json`'s
 //! inline `plainAdapter` block) is still frontend-only per the frozen doc's
-//! own "决策 1" — see `app/features/debug/plain-debug-adapter-config.ts`. No
-//! `app/` UI is wired to the new commands yet (`F100` S3/S4's job, per the
-//! frozen doc's own slice breakdown: "S2...可以先用一个 DEV-only 诊断钩子...
-//! 不急着接 UI") — see this slice's own final report for the explicit,
-//! disclosed narrowing this implies.
+//! own "决策 1" — see `app/features/debug/plain-debug-adapter-config.ts`.
 //!
 //! # Subprocess spawning is `exec::spawn_adapter`-only; TCP connecting is `tcp::connect_adapter`-only
 //!
@@ -117,19 +159,24 @@
 //! `terminal` has a precedent for, so there is no existing verbatim error to
 //! reuse.
 //!
-//! # The one remaining dead-code annotation is deliberate, not stray
+//! # The remaining dead-code annotations are deliberate, not stray
 //!
 //! S0/S1 left a trail of `#[allow(dead_code)]` items across [`framing`],
 //! [`exec`] and [`tcp`], each naming which future slice would add the real
-//! caller. This slice ([`service::DebugSessionService::start_session`]) is
-//! that caller for essentially all of them — [`framing::FrameDecoder`],
+//! caller. S2 ([`service::DebugSessionService::start_session`]) was that
+//! caller for essentially all of them — [`framing::FrameDecoder`],
 //! [`exec::spawn_adapter`]/`spawn_adapter_sync`/`apply_env_passthrough`/
 //! `spawn_stderr_capture`, [`exec::AdapterHandle`]'s `kill`/`take_io`, and
 //! [`tcp::connect_adapter`]/`connect_adapter_sync` are all genuinely live in
-//! production now, so their annotations have been removed rather than left
-//! stale. The one that remains is [`exec::AdapterHandle::stderr_tail`] — see
-//! its own doc comment: no caller anywhere yet, even in tests, kept for a
-//! later slice wanting to surface a running adapter's stderr diagnostics.
+//! production now, so their annotations were removed rather than left stale.
+//! Two remain, each with its own doc comment explaining why: (1)
+//! [`exec::AdapterHandle::stderr_tail`] — no caller anywhere yet, even in
+//! tests, kept for a later slice wanting to surface a running adapter's
+//! stderr diagnostics; (2) `F100` S5's own
+//! [`exec::spawn_adapter_as_tcp_companion`] — every caller today is a
+//! `#[cfg(test)]` fixture, by this slice's own deliberate choice not to wire
+//! it into any production entry point yet (see the "S1's open
+//! spawn-then-connect question" section below for why).
 
 use crate::error::CommandError;
 
@@ -139,6 +186,7 @@ mod confirm_store;
 pub mod dto;
 pub(crate) mod exec;
 pub(crate) mod framing;
+pub(crate) mod output_gate;
 pub(crate) mod protocol;
 pub(crate) mod service;
 pub(crate) mod session;
@@ -256,6 +304,28 @@ pub(crate) fn debug_transport_unavailable() -> CommandError {
     )
 }
 
+/// `F100` S5 — returned by [`session::DebugSession::wait_for_response_with_timeout`]/
+/// `wait_for_initialized` when [`session::DEBUG_REQUEST_TIMEOUT`]/
+/// [`session::DEBUG_LAUNCH_TIMEOUT`] elapses before a real response/event
+/// ever arrives, *and the session itself is still alive* — distinct from
+/// [`debug_session_ended`] (the transport already died; no timeout needed to
+/// explain that) and from [`debug_handshake_failed`]/[`debug_request_failed`]
+/// (the adapter *did* reply, just with `success: false`): this is "Plain gave
+/// up waiting for a reply that may still arrive later, from an adapter that
+/// is, as far as anyone can tell, still running." `step` names which request
+/// timed out (`"initialize"`/`"setBreakpoints"`/`"configurationDone"`/the
+/// literal `launch`-or-`attach` command during the handshake; the DAP command
+/// name itself — `"stackTrace"`/`"variables"`/`"continue"`/… — for a
+/// post-handshake interactive request), mirroring
+/// [`debug_handshake_failed`]/[`debug_request_failed`]'s own "carry which
+/// command" precedent.
+pub(crate) fn debug_request_timed_out(step: &str) -> CommandError {
+    CommandError::new(
+        "DEBUG_REQUEST_TIMED_OUT",
+        format!("Timed out waiting for the debug adapter's response to '{step}'."),
+    )
+}
+
 /// Returned by [`session::DebugSession::wait_for_response`]/`wait_for_initialized`
 /// when the session's transport closes (or an unrecoverable framing error
 /// occurs) before the awaited response/event ever arrives — see
@@ -362,8 +432,9 @@ mod tests {
         confirmation_unavailable, debug_adapter_cancelled, debug_adapter_connect_failed,
         debug_adapter_not_confirmed, debug_adapter_response_malformed,
         debug_adapter_spawn_unavailable, debug_adapter_startup_crashed, debug_handshake_failed,
-        debug_request_failed, debug_run_in_terminal_arguments_invalid, debug_session_ended,
-        debug_session_not_found, debug_session_request_invalid, debug_transport_unavailable,
+        debug_request_failed, debug_request_timed_out, debug_run_in_terminal_arguments_invalid,
+        debug_session_ended, debug_session_not_found, debug_session_request_invalid,
+        debug_transport_unavailable,
     };
 
     #[test]
@@ -411,6 +482,16 @@ mod tests {
             debug_adapter_response_malformed().code(),
             "DEBUG_ADAPTER_RESPONSE_MALFORMED"
         );
+        assert_eq!(
+            debug_request_timed_out("variables").code(),
+            "DEBUG_REQUEST_TIMED_OUT"
+        );
+    }
+
+    #[test]
+    fn request_timed_out_message_names_the_step() {
+        let error = debug_request_timed_out("configurationDone");
+        assert!(error.message().contains("configurationDone"));
     }
 
     #[test]

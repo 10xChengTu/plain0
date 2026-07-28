@@ -147,6 +147,7 @@ function fakeBridge(
 		debugStepIn: notImplemented,
 		debugStepOut: notImplemented,
 		debugPause: notImplemented,
+		debugOutputAck: notImplemented,
 		debugWatchEvent: notImplemented,
 	};
 }
@@ -310,6 +311,7 @@ function fakeTextSearchBridge(
 		debugStepIn: notImplemented,
 		debugStepOut: notImplemented,
 		debugPause: notImplemented,
+		debugOutputAck: notImplemented,
 		debugWatchEvent: notImplemented,
 	};
 

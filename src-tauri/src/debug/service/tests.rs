@@ -393,12 +393,31 @@ while True:
     elif command == "stackTrace":
         start_frame = arguments.get("startFrame", 0)
         levels = arguments.get("levels")
-        end = start_frame + levels if levels else len(STACK_FRAMES)
-        write_message({
-            "seq": next_seq(), "type": "response", "request_seq": request_seq,
-            "success": True, "command": "stackTrace",
-            "body": {"stackFrames": STACK_FRAMES[start_frame:end], "totalFrames": len(STACK_FRAMES)},
-        })
+        # `F100` S5's own real large-object benchmark: `threadId: 999999` is a
+        # sentinel this mock alone understands (never sent by any production
+        # code path — real thread ids come from the adapter's own `stopped`/
+        # `thread` events), requesting a genuinely deep (2000-frame) call
+        # stack in one response rather than the 5-frame default above.
+        if arguments.get("threadId") == 999999:
+            total = 2000
+            end = min(start_frame + levels, total) if levels else total
+            frames = [
+                {"id": i, "name": "deep_frame_%d" % i, "line": i, "column": 1,
+                 "source": {"path": "/tmp/deep.py", "name": "deep.py"}}
+                for i in range(start_frame, end)
+            ]
+            write_message({
+                "seq": next_seq(), "type": "response", "request_seq": request_seq,
+                "success": True, "command": "stackTrace",
+                "body": {"stackFrames": frames, "totalFrames": total},
+            })
+        else:
+            end = start_frame + levels if levels else len(STACK_FRAMES)
+            write_message({
+                "seq": next_seq(), "type": "response", "request_seq": request_seq,
+                "success": True, "command": "stackTrace",
+                "body": {"stackFrames": STACK_FRAMES[start_frame:end], "totalFrames": len(STACK_FRAMES)},
+            })
     elif command == "scopes":
         frame_id = arguments.get("frameId")
         if frame_id == 1:
@@ -428,6 +447,19 @@ while True:
             variables = [
                 {"name": "item_%d" % i, "value": str(i), "variablesReference": 0}
                 for i in range(start, min(end, 5000))
+            ]
+        elif reference == 999999:
+            # `F100` S5's own real large-object benchmark: a 50,000-element
+            # synthetic array under a sentinel reference this mock alone
+            # understands, well beyond the 5,000-element pagination scenario
+            # `F100` S3 already covers above.
+            start = arguments.get("start", 0) or 0
+            count = arguments.get("count")
+            total = 50000
+            end = min(start + count, total) if count else total
+            variables = [
+                {"name": "item_%d" % i, "value": str(i), "variablesReference": 0}
+                for i in range(start, end)
             ]
         else:
             variables = []
@@ -499,6 +531,30 @@ while True:
             "success": True, "command": "disconnect",
         })
         break
+    elif command == "floodOutput":
+        # `F100` S5's own real backpressure benchmark: a custom, non-DAP
+        # command this test-only mock alone understands (never a real DAP
+        # request), fired directly via `send_request_with_timeout_for_test`
+        # rather than any production command — floods `count` real `output`
+        # events of `lineBytes` bytes each *before* ever replying, exactly
+        # the "adapter writes to stdout in a tight loop" scenario
+        # `output_gate`'s own module doc names.
+        count = arguments.get("count", 0)
+        line_bytes = arguments.get("lineBytes", 8)
+        line = ("x" * max(line_bytes - 1, 0)) + "\n"
+        for _ in range(count):
+            write_message({"seq": next_seq(), "type": "event", "event": "output", "body": {"category": "stdout", "output": line}})
+        write_message({
+            "seq": next_seq(), "type": "response", "request_seq": request_seq,
+            "success": True, "command": "floodOutput",
+        })
+    elif command == "neverReplies":
+        # `F100` S5's own real per-request-timeout benchmark/proof: a
+        # deliberately unanswered command — the adapter process stays alive
+        # and responsive to *other* requests, it simply never answers this
+        # one, mirroring a genuinely slow/hung single request rather than a
+        # dead adapter.
+        pass
     else:
         write_message({
             "seq": next_seq(), "type": "response", "request_seq": request_seq,
@@ -1407,4 +1463,266 @@ fn start_session_still_requires_confirmation_before_ever_attempting_to_connect()
     ));
     assert_eq!(result.unwrap_err().code(), "DEBUG_ADAPTER_NOT_CONFIRMED");
     assert_eq!(service.session_count_for_test(window_label), 0);
+}
+
+// ---------------------------------------------------------------------
+// `F100` S5 — per-request timeout, `output`-event backpressure, and real
+// large-object benchmarks, all exercised over a real spawned Python
+// subprocess (not just `debug::session::tests`'s in-memory mock) — see
+// `PYTHON_MOCK_ADAPTER_SCRIPT`'s own `floodOutput`/`neverReplies`/sentinel
+// `threadId: 999999`/`variablesReference: 999999` additions for what this
+// section's tests actually drive.
+// ---------------------------------------------------------------------
+
+/// Starts a real handshake against a fresh Python subprocess and returns
+/// everything the tests below need — factored out purely because every test
+/// in this section needs the identical setup and none of them care about the
+/// negotiated capabilities. Returns `None` (never panics) when `python3`
+/// cannot be found, mirroring every other real-subprocess test's own skip
+/// convention.
+fn start_real_python_session(
+    window_label: &str,
+) -> Option<(
+    TrustedConfirmedFixture,
+    DebugSessionService,
+    std::sync::Arc<RecordingSink>,
+    DebugSessionId,
+)> {
+    let python3 = resolve_python3()?;
+    let descriptor = AdapterSpawnDescriptor {
+        command: python3.to_string_lossy().into_owned(),
+        args: vec!["-c".to_owned(), PYTHON_MOCK_ADAPTER_SCRIPT.to_owned()],
+    };
+    let fixture = trusted_and_confirmed(window_label, &descriptor, AdapterTransportKind::Stdio);
+    let service = DebugSessionService::new();
+    let (sink, sink_for_session) = recording_sink();
+    let (session_id, _capabilities) = block_on(service.start_session(
+        &fixture.trust,
+        &fixture.workspace,
+        window_label,
+        &fixture.confirmation,
+        LaunchRequestKind::Launch,
+        SessionTransportRequest::Stdio {
+            command: descriptor.command.clone(),
+            args: descriptor.args.clone(),
+        },
+        "mock-python".to_owned(),
+        json!({}),
+        Vec::new(),
+        sink_for_session,
+        noop_reverse_requests(),
+    ))
+    .expect("handshake succeeds");
+    // The fixture (its temp trust/confirmation directories) is handed back
+    // to the caller so it stays alive for the rest of that test — dropping
+    // it early would not affect the *already-granted* in-memory trust/
+    // confirmation state these services hold, but keeping it alive avoids
+    // relying on that implementation detail.
+    Some((fixture, service, sink, session_id))
+}
+
+#[test]
+fn debug_request_timed_out_surfaces_end_to_end_over_a_real_spawned_process_when_the_adapter_never_replies(
+) {
+    let window_label = "main";
+    let Some((_fixture, service, _sink, session_id)) = start_real_python_session(window_label)
+    else {
+        eprintln!(
+            "skipping debug_request_timed_out_surfaces_end_to_end_over_a_real_spawned_process_when_the_adapter_never_replies: \
+             python3 not found"
+        );
+        return;
+    };
+
+    let start = Instant::now();
+    let error = block_on(service.send_request_with_timeout_for_test(
+        window_label,
+        session_id,
+        "neverReplies",
+        json!({}),
+        Duration::from_millis(200),
+    ))
+    .expect_err("a request the real adapter process never answers must time out");
+    let elapsed = start.elapsed();
+    assert_eq!(error.code(), "DEBUG_REQUEST_TIMED_OUT");
+    eprintln!(
+        "[F100 S5 benchmark] real-subprocess request timeout: waited {elapsed:?} for a 200ms \
+         budget against a genuinely unresponsive (but alive) real adapter process"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "must not wait meaningfully longer than the timeout"
+    );
+
+    // The adapter process is still alive and responsive to *other* requests
+    // (`neverReplies` only ever ignores that one specific command) — proving
+    // the timeout did not corrupt the session or leave it unusable.
+    let evaluate_body = block_on(service.send_request(
+        window_label,
+        session_id,
+        "evaluate",
+        json!({"expression": "1", "context": "repl"}),
+    ))
+    .expect("the session remains fully usable after an earlier request timed out");
+    assert!(evaluate_body.get("result").is_some());
+
+    block_on(service.disconnect(window_label, session_id)).expect("disconnect succeeds");
+}
+
+/// `F100` S5's own real, measured large-object benchmark numbers — a
+/// 2000-frame call stack and a 50,000-element variables array, both fetched
+/// in a single unpaginated response from a real spawned process (not a
+/// synthetic in-Rust construction), reporting real elapsed milliseconds
+/// rather than citing third-party numbers. Bounded by generous (not
+/// tight-fitted-to-measurement) assertions so this stays a real regression
+/// guard rather than a flaky benchmark.
+#[test]
+fn real_large_call_stack_and_large_variables_array_benchmark() {
+    let window_label = "main";
+    let Some((_fixture, service, _sink, session_id)) = start_real_python_session(window_label)
+    else {
+        eprintln!(
+            "skipping real_large_call_stack_and_large_variables_array_benchmark: python3 not found"
+        );
+        return;
+    };
+
+    let stack_start = Instant::now();
+    let stack_body = block_on(service.send_request(
+        window_label,
+        session_id,
+        "stackTrace",
+        json!({"threadId": 999999}),
+    ))
+    .expect("deep stackTrace succeeds");
+    let stack_elapsed = stack_start.elapsed();
+    let stack = crate::debug::dto::parse_stack_trace_response(&stack_body)
+        .expect("well-formed stackTrace response");
+    assert_eq!(stack.stack_frames.len(), 2000);
+    assert_eq!(stack.total_frames, Some(2000));
+    eprintln!(
+        "[F100 S5 benchmark] real 2000-frame stackTrace round trip (real spawned Python \
+         subprocess, real pipe, real Rust parse): {stack_elapsed:?}"
+    );
+    assert!(
+        stack_elapsed < Duration::from_secs(5),
+        "a 2000-frame stack trace must not take multiple seconds on this machine"
+    );
+
+    let variables_start = Instant::now();
+    let variables_body = block_on(service.send_request(
+        window_label,
+        session_id,
+        "variables",
+        json!({"variablesReference": 999999}),
+    ))
+    .expect("large variables page succeeds");
+    let variables_elapsed = variables_start.elapsed();
+    let variables = crate::debug::dto::parse_variables_response(&variables_body)
+        .expect("well-formed variables response");
+    assert_eq!(variables.variables.len(), 50_000);
+    eprintln!(
+        "[F100 S5 benchmark] real 50,000-element variables round trip (real spawned Python \
+         subprocess, real pipe, real Rust parse): {variables_elapsed:?}"
+    );
+    assert!(
+        variables_elapsed < Duration::from_secs(5),
+        "a 50,000-element variables response must not take multiple seconds on this machine"
+    );
+
+    block_on(service.disconnect(window_label, session_id)).expect("disconnect succeeds");
+}
+
+/// Real, end-to-end proof of `output_gate::OutputGate`'s backpressure — a
+/// real spawned Python process floods 6,000 `output` events of 200 bytes
+/// each (≈1.2 MiB, deliberately past [`crate::debug::output_gate::DEBUG_OUTPUT_MERGE_CAP_BYTES`]'s
+/// 1 MiB cap) *before* this test ever acks a single one, then acks and
+/// observes the merged, capped flush plus a `plain/outputElided` notice —
+/// exactly the "如实呈现,不静默丢数据" contract this gate exists to provide.
+#[test]
+fn output_backpressure_gate_holds_a_real_flood_and_reports_elision_on_ack() {
+    let window_label = "main";
+    let Some((_fixture, service, sink, session_id)) = start_real_python_session(window_label)
+    else {
+        eprintln!("skipping output_backpressure_gate_holds_a_real_flood_and_reports_elision_on_ack: python3 not found");
+        return;
+    };
+
+    let flood_start = Instant::now();
+    block_on(service.send_request_with_timeout_for_test(
+        window_label,
+        session_id,
+        "floodOutput",
+        json!({"count": 6000, "lineBytes": 200}),
+        Duration::from_secs(15),
+    ))
+    .expect("the real adapter process floods every event and then still replies");
+    let flood_elapsed = flood_start.elapsed();
+    eprintln!(
+        "[F100 S5 benchmark] real 6,000-event (~1.2 MiB) output flood from a real spawned \
+         process, through the real reader thread and backpressure gate: {flood_elapsed:?}"
+    );
+
+    // The gate must have held the vast majority of those 6,000 events back —
+    // only up to the high-water mark's worth of *real* `output` sink
+    // deliveries should have happened, proving the frontend-facing channel
+    // was never asked to carry anywhere near 6,000 IPC events for one flood.
+    let output_events_before_ack = sink
+        .events_snapshot()
+        .into_iter()
+        .filter(|(id, name, _)| *id == session_id && name == "output")
+        .count();
+    assert!(
+        output_events_before_ack
+            <= crate::debug::output_gate::DEBUG_OUTPUT_HIGH_WATER_EVENTS as usize,
+        "expected at most {} real output deliveries before any ack, got {output_events_before_ack}",
+        crate::debug::output_gate::DEBUG_OUTPUT_HIGH_WATER_EVENTS
+    );
+    eprintln!(
+        "[F100 S5 benchmark] {output_events_before_ack} real output deliveries reached the \
+         sink for a 6,000-event flood (the rest were merged/held by the backpressure gate)"
+    );
+
+    // Ack through the highest sequence emitted so far, freeing credit for the
+    // gate to flush its merged backlog.
+    block_on(service.ack_output(
+        window_label,
+        session_id,
+        crate::debug::output_gate::DEBUG_OUTPUT_HIGH_WATER_EVENTS,
+    ));
+
+    assert!(
+        wait_until(
+            || sink
+                .events_snapshot()
+                .iter()
+                .any(|(id, name, _)| *id == session_id && name == "plain/outputElided"),
+            Duration::from_secs(5)
+        ),
+        "expected an honest elision notice once the merged backlog (which exceeded the 1 MiB \
+         per-category cap) is finally flushed — silently dropping the excess without telling \
+         the user is exactly what this gate exists to avoid"
+    );
+    let events = sink.events_snapshot();
+    let elided = events
+        .iter()
+        .find(|(id, name, _)| *id == session_id && name == "plain/outputElided")
+        .expect("elision notice present")
+        .2
+        .clone()
+        .expect("elision notice carries a body");
+    let elided_bytes = elided
+        .get("elidedBytes")
+        .and_then(Value::as_u64)
+        .expect("elidedBytes present");
+    assert!(
+        elided_bytes > 0,
+        "some bytes must genuinely have been elided at this scale"
+    );
+    eprintln!(
+        "[F100 S5 benchmark] elision notice reported {elided_bytes} elided bytes for a flood \
+         that exceeded the per-category merge cap"
+    );
+
+    block_on(service.disconnect(window_label, session_id)).expect("disconnect succeeds");
 }

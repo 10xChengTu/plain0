@@ -827,6 +827,33 @@ export function decodeDebugStepVoid(value: unknown): void {
 	}
 }
 
+// ---------------------------------------------------------------------
+// `F100` S5 — `output`-event backpressure ack.
+// ---------------------------------------------------------------------
+
+/** Encodes `debug_output_ack`'s request. `sequence` only needs to be a safe
+ * non-negative integer — any value (including one beyond what has ever
+ * actually been emitted) is handled tolerantly server-side (see
+ * `PlainBridge.debugOutputAck`'s own doc comment), so this encoder does not
+ * additionally reject an out-of-range value the way it would for a field
+ * with a real invariant to protect. */
+export function frozenDebugOutputAckRequest(
+	sessionId: unknown,
+	sequence: number,
+): Readonly<Record<string, unknown>> {
+	if (!isSafeNonNegativeInteger(sequence)) {
+		return debugSessionRequestInvalid();
+	}
+	return Object.freeze({ sessionId: frozenSessionId(sessionId), sequence });
+}
+
+/** Decodes the `void` (JSON `null`) result of `debug_output_ack`. */
+export function decodeDebugOutputAckVoid(value: unknown): void {
+	if (value !== null) {
+		violation();
+	}
+}
+
 const MAX_DEBUG_EVENT_NAME_CHARS = 4_096;
 
 /** Decodes one `plain://debug-event` delivery — `body` is deliberately not

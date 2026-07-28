@@ -165,6 +165,8 @@ impl DebugSessionService {
             request,
             arguments,
             breakpoints,
+            request_timeout: session::DEBUG_REQUEST_TIMEOUT,
+            launch_timeout: session::DEBUG_LAUNCH_TIMEOUT,
         };
         let handshake_result = tauri::async_runtime::spawn_blocking(move || {
             session::run_handshake(&handshake_session, handshake_config)
@@ -232,10 +234,37 @@ impl DebugSessionService {
         command: &'static str,
         arguments: Value,
     ) -> Result<Value, CommandError> {
+        self.send_request_with_timeout(
+            window_label,
+            session_id,
+            command,
+            arguments,
+            session::DEBUG_REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    /// The shared implementation behind [`Self::send_request`] — factored out
+    /// purely so `service::tests` can exercise the exact same production
+    /// request/timeout/response-mapping logic with a small, injected timeout
+    /// (proving `DEBUG_REQUEST_TIMED_OUT` really does surface end to end
+    /// through a real spawned adapter) without waiting out
+    /// [`session::DEBUG_REQUEST_TIMEOUT`]'s real 30-second production value —
+    /// `#[cfg(test)]`-only callers use this directly; every non-test caller
+    /// only ever reaches this through [`Self::send_request`], which always
+    /// passes the one named production constant.
+    async fn send_request_with_timeout(
+        &self,
+        window_label: &str,
+        session_id: DebugSessionId,
+        command: &'static str,
+        arguments: Value,
+        timeout: std::time::Duration,
+    ) -> Result<Value, CommandError> {
         let session = self.session_for(window_label, session_id)?;
         let response = tauri::async_runtime::spawn_blocking(move || {
             let pending = session.send_request(command, Some(arguments))?;
-            session.wait_for_response(pending)
+            session.wait_for_response_with_timeout(pending, timeout, command)
         })
         .await
         .map_err(|_| debug_transport_unavailable())??;
@@ -246,6 +275,32 @@ impl DebugSessionService {
             ));
         }
         Ok(response.body.unwrap_or(Value::Null))
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn send_request_with_timeout_for_test(
+        &self,
+        window_label: &str,
+        session_id: DebugSessionId,
+        command: &'static str,
+        arguments: Value,
+        timeout: std::time::Duration,
+    ) -> Result<Value, CommandError> {
+        self.send_request_with_timeout(window_label, session_id, command, arguments, timeout)
+            .await
+    }
+
+    /// `F100` S5 — acknowledges a gated `output` event (see
+    /// [`super::output_gate`]'s own module doc) through `sequence`, forwarding
+    /// to [`DebugSession::ack_output`]. Silently a no-op for a session that no
+    /// longer exists (already disconnected, or ended on its own) — an ack
+    /// racing a session's own natural end is expected, not an error a caller
+    /// needs to handle specially, mirroring `terminal_ack`'s own tolerant
+    /// precedent for the identical race.
+    pub async fn ack_output(&self, window_label: &str, session_id: DebugSessionId, sequence: u64) {
+        if let Ok(session) = self.session_for(window_label, session_id) {
+            session.ack_output(session_id, sequence);
+        }
     }
 
     /// Tears down a live session and removes it from this window's table.

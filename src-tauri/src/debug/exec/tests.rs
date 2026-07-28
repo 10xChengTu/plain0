@@ -42,7 +42,8 @@ use crate::workspace::picker::{DirectoryPicker, DirectoryPickerFuture, Directory
 use crate::workspace::service::WorkspaceService;
 
 use super::{
-    apply_env_passthrough, spawn_adapter, spawn_adapter_sync, DEBUG_ADAPTER_ENV_PASSTHROUGH_NAMES,
+    apply_env_passthrough, spawn_adapter, spawn_adapter_as_tcp_companion, spawn_adapter_sync,
+    DEBUG_ADAPTER_ENV_PASSTHROUGH_NAMES,
 };
 
 fn block_on<F: std::future::Future>(future: F) -> F::Output {
@@ -557,5 +558,148 @@ fn spawn_adapter_rejects_a_descriptor_whose_args_differ_from_what_was_confirmed(
     assert!(
         !canary.exists(),
         "confirming one argv must never silently authorize spawning a descriptor with different args"
+    );
+}
+
+// ---------------------------------------------------------------------
+// `F100` S5 — `spawn_adapter_as_tcp_companion`: the `Tcp`-confirmed
+// companion-spawn primitive. The two tests below are the confirmation-
+// identity-isolation proof `debug::mod`'s own module doc calls for —
+// same descriptor, same trusted workspace, only the confirmed *transport
+// variant* differs, with the opposite outcome each time — plus a positive
+// control proving the matching-variant case genuinely does spawn.
+// ---------------------------------------------------------------------
+
+#[test]
+fn spawn_adapter_as_tcp_companion_rejects_a_subject_confirmed_only_for_stdio_transport() {
+    let root = TempDir::new().unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let canary_dir = TempDir::new().unwrap();
+    let canary = canary_dir.path().join("should-not-exist");
+
+    let workspace = workspace_with_root("main", root.path());
+    let trust = TrustService::new(trust_base.path().to_path_buf());
+    block_on(trust.grant(&workspace, "main")).expect("grant succeeds");
+    let (_confirm_base, confirmation) = unconfirmed_confirmation_service();
+
+    let descriptor = AdapterSpawnDescriptor {
+        command: "/bin/sh".to_owned(),
+        args: vec!["-c".to_owned(), format!(": > '{}'", canary.display())],
+    };
+    // Confirmed for `Stdio` only — never for `Tcp`.
+    block_on(confirmation.grant(
+        &workspace,
+        "main",
+        &descriptor.confirmation_subject(AdapterTransportKind::Stdio),
+    ))
+    .expect("confirmation grant succeeds");
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let result = block_on(spawn_adapter_as_tcp_companion(
+        &trust,
+        &workspace,
+        "main",
+        &confirmation,
+        &descriptor,
+        cancel,
+    ));
+    assert_eq!(result.unwrap_err().code(), "DEBUG_ADAPTER_NOT_CONFIRMED");
+    assert!(
+        !canary.exists(),
+        "a confirmation granted only for the Stdio transport variant must never be silently \
+         reused to authorize a Tcp-companion spawn of the identical (command, args)"
+    );
+}
+
+/// The exact reverse of the test above — a subject confirmed only for `Tcp`
+/// must not authorize an ordinary (`Stdio`-transport) [`spawn_adapter`] call
+/// either. Together the pair proves the isolation holds in both directions,
+/// not just the one this slice's own task instructions happened to name
+/// first.
+#[test]
+fn spawn_adapter_rejects_a_subject_confirmed_only_for_tcp_transport() {
+    let root = TempDir::new().unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let canary_dir = TempDir::new().unwrap();
+    let canary = canary_dir.path().join("should-not-exist");
+
+    let workspace = workspace_with_root("main", root.path());
+    let trust = TrustService::new(trust_base.path().to_path_buf());
+    block_on(trust.grant(&workspace, "main")).expect("grant succeeds");
+    let (_confirm_base, confirmation) = unconfirmed_confirmation_service();
+
+    let descriptor = AdapterSpawnDescriptor {
+        command: "/bin/sh".to_owned(),
+        args: vec!["-c".to_owned(), format!(": > '{}'", canary.display())],
+    };
+    // Confirmed for `Tcp` only — never for `Stdio`.
+    block_on(confirmation.grant(
+        &workspace,
+        "main",
+        &descriptor.confirmation_subject(AdapterTransportKind::Tcp),
+    ))
+    .expect("confirmation grant succeeds");
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let result = block_on(spawn_adapter(
+        &trust,
+        &workspace,
+        "main",
+        &confirmation,
+        &descriptor,
+        cancel,
+    ));
+    assert_eq!(result.unwrap_err().code(), "DEBUG_ADAPTER_NOT_CONFIRMED");
+    assert!(
+        !canary.exists(),
+        "a confirmation granted only for the Tcp transport variant must never be silently \
+         reused to authorize an ordinary Stdio spawn_adapter call of the identical (command, args)"
+    );
+}
+
+/// Positive control for the pair above: the *same* descriptor, with real
+/// trust granted and the exact matching `Tcp` subject confirmed, genuinely
+/// does spawn via [`spawn_adapter_as_tcp_companion`] — proving the negative
+/// results above mean "the wrong confirmation variant was rejected", not
+/// "this fixture never runs regardless".
+#[test]
+fn spawn_adapter_as_tcp_companion_positive_control_spawns_once_trusted_and_tcp_confirmed() {
+    let root = TempDir::new().unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let canary_dir = TempDir::new().unwrap();
+    let canary = canary_dir.path().join("should-exist");
+
+    let workspace = workspace_with_root("main", root.path());
+    let trust = TrustService::new(trust_base.path().to_path_buf());
+    block_on(trust.grant(&workspace, "main")).expect("grant succeeds");
+    let (_confirm_base, confirmation) = unconfirmed_confirmation_service();
+
+    let descriptor = AdapterSpawnDescriptor {
+        command: "/bin/sh".to_owned(),
+        args: vec!["-c".to_owned(), format!(": > '{}'", canary.display())],
+    };
+    block_on(confirmation.grant(
+        &workspace,
+        "main",
+        &descriptor.confirmation_subject(AdapterTransportKind::Tcp),
+    ))
+    .expect("confirmation grant succeeds");
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let result = block_on(spawn_adapter_as_tcp_companion(
+        &trust,
+        &workspace,
+        "main",
+        &confirmation,
+        &descriptor,
+        cancel,
+    ));
+    // A `touch`-only script exits almost immediately, so this is reported as
+    // a startup crash — expected, and beside the point of this test: what
+    // matters here is only that the fixture command genuinely ran.
+    assert_eq!(result.unwrap_err().code(), "DEBUG_ADAPTER_STARTUP_CRASHED");
+    assert!(
+        canary.exists(),
+        "with real trust granted and the matching Tcp subject confirmed, spawn_adapter_as_tcp_companion must actually run the fixture command"
     );
 }

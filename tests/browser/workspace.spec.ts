@@ -2979,6 +2979,18 @@ async function installNativeIpcMock(
 							}
 							return null;
 						}
+						case "debug_output_ack": {
+							// `F100` S5 — this mock does not itself reimplement
+							// `output_gate.rs`'s real merge/elide backlog (the
+							// Playwright tests below drive the gate's
+							// *frontend-visible effects* directly via
+							// `__PLAIN_TEST_EMIT_DEBUG_EVENT__`, and assert this
+							// real command actually fires with the right
+							// `sequence` via `terminalCallsFor`); acking a live
+							// session is otherwise a harmless no-op here,
+							// mirroring `terminal_ack`'s own tolerant shape.
+							return null;
+						}
 						case "terminal_start": {
 							if (!terminalTrusted) {
 								throw terminalNotTrusted();
@@ -14252,6 +14264,138 @@ test("a real runInTerminal reverse request surfaces as a visible, distinctly-tit
 		(await terminalCallsFor(page, "terminal_kill"))[0]!.args.request,
 	).toEqual({ sessionId: terminalSessionId, immediate: false });
 	await expect(debugTab).toHaveCount(0);
+
+	expect(pageErrors).toEqual([]);
+});
+
+/** `F100` S5's own real notification-toast assertion for `plain/sessionEnded`
+ * — see `plain-debug-session-alerts.ts`'s own module doc for why a
+ * deliberate `Plain: Stop Debugging` never triggers it (proven here as the
+ * control-group half of this same test): `DebugSessionController.disconnect`
+ * clears its own state to `null` *before* any teardown-triggered
+ * `plain/sessionEnded` could arrive, so `#handleEvent` drops it, and this
+ * mock's own `debug_disconnect` case does not even attempt to emit one. */
+test("shows a distinct notification naming the real reason when a debug session ends unexpectedly, but not when the user deliberately stops debugging", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(page, "arrayBuffer", "readonly", {
+		"main.py": DEBUG_MAIN_PY,
+		".vscode/launch.json": DEBUG_LAUNCH_JSON,
+	});
+
+	const toasts = page.locator(".notifications-toasts .notification-toast");
+	const transportClosedToast = toasts.filter({
+		hasText: "the debug adapter's connection closed unexpectedly",
+	});
+	const malformedFrameToast = toasts.filter({
+		hasText: "sent a malformed message and the debugging session had to end",
+	});
+
+	// Control, run *first* (before any session-ended toast has ever
+	// appeared, so there is nothing pre-existing to roll off and no risk of
+	// a stale earlier toast producing a false pass): a deliberate `Plain:
+	// Stop Debugging` must show no such notification at all.
+	await launchDebugSessionThroughBothDialogs(page);
+	await executePaletteCommand(page, "Stop Debugging", "Plain: Stop Debugging");
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "debug_disconnect")).length)
+		.toBe(1);
+	await expect(toasts).toHaveCount(0);
+
+	// Meaningful interaction 1: a real `transportClosed` session end shows a
+	// notification naming that exact reason. Asserted immediately after
+	// firing (rather than kept around to compare against later toasts): this
+	// Workbench's own notification service does not guarantee an indefinite
+	// backlog of toasts stays visible forever, so each reason is checked at
+	// the moment it actually happens, matching how a real user would
+	// perceive it.
+	const firstSessionId = await launchDebugSessionThroughBothDialogs(page);
+	await emitDebugTestEvent(page, firstSessionId, "plain/sessionEnded", {
+		reason: "transportClosed",
+	});
+	await expect(transportClosedToast).toHaveCount(1);
+	await expect(malformedFrameToast).toHaveCount(0);
+
+	// Meaningful interaction 2: a distinct real reason (`malformedFrame`, a
+	// fresh session so `DebugSessionController`'s own state is live again)
+	// shows genuinely different text, not a copy-pasted generic message.
+	const secondSessionId = await launchDebugSessionThroughBothDialogs(page);
+	await emitDebugTestEvent(page, secondSessionId, "plain/sessionEnded", {
+		reason: "malformedFrame",
+	});
+	await expect(malformedFrameToast).toHaveCount(1);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("Debug Console acks every real output event it renders and shows an honest elision notice for content the backpressure gate had to drop, in the real order it arrived", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(page, "arrayBuffer", "readonly", {
+		"main.py": DEBUG_MAIN_PY,
+		".vscode/launch.json": DEBUG_LAUNCH_JSON,
+	});
+
+	const sessionId = await launchDebugSessionThroughBothDialogs(page);
+	await executePaletteCommand(page, "Debug Console", "Plain: Debug Console");
+	const lines = page.locator(".plain-debug-console-view-line");
+
+	// Meaningful interaction 1: a real, immediately-emitted `output` event
+	// (carrying the backpressure gate's own `sequence` field — see
+	// `src-tauri/src/debug/output_gate.rs`) is both rendered *and* really
+	// acked through the real `debug_output_ack` command (not merely
+	// rendered) — proving `PlainDebugConsoleView` is the genuine production
+	// caller `PlainBridge.debugOutputAck`'s own doc comment describes.
+	await emitDebugTestEvent(page, sessionId, "output", {
+		category: "stdout",
+		output: "first line",
+		sequence: 1,
+	});
+	await expect(lines).toHaveCount(1);
+	await expect(lines.first()).toHaveText("first line");
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "debug_output_ack")).length)
+		.toBe(1);
+	expect(
+		(await terminalCallsFor(page, "debug_output_ack"))[0]!.args.request,
+	).toEqual({ sessionId, sequence: 1 });
+
+	// Meaningful interaction 2: `plain/outputElided` — the gate's own honest
+	// "some output was dropped" signal, fired once real content genuinely
+	// exceeded its per-category merge cap while gated — renders as its own
+	// real, visible line naming both real numbers, never a silent gap.
+	await emitDebugTestEvent(page, sessionId, "plain/outputElided", {
+		category: "stdout",
+		elidedBytes: 138_624,
+		elidedLines: 512,
+	});
+	await expect(lines).toHaveCount(2);
+	await expect(lines.nth(1)).toContainText("138624");
+	await expect(lines.nth(1)).toContainText("512");
+
+	// Meaningful interaction 3: the merged flush that follows the elision
+	// notice (a later `sequence`) renders *after* it, in real arrival order,
+	// and is itself acked too — proving the console keeps consuming output
+	// normally after an elision, rather than getting stuck.
+	await emitDebugTestEvent(page, sessionId, "output", {
+		category: "stdout",
+		output: "resumed after the gap",
+		sequence: 2,
+	});
+	await expect(lines).toHaveCount(3);
+	await expect(lines.nth(2)).toHaveText("resumed after the gap");
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "debug_output_ack")).length)
+		.toBe(2);
+	expect(
+		(await terminalCallsFor(page, "debug_output_ack"))[1]!.args.request,
+	).toEqual({ sessionId, sequence: 2 });
 
 	expect(pageErrors).toEqual([]);
 });

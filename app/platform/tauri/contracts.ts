@@ -649,7 +649,22 @@ export interface DebugContinueResult {
  * (`event` is the bare DAP event name, e.g. `"stopped"`) and Plain's own
  * `plain/`-prefixed synthetic notifications (`"plain/sessionEnded"`,
  * `"plain/reverseRequest/…"`, `"plain/protocolError"`) under the same single
- * channel — see `src-tauri/src/debug/session.rs`'s module doc for why. */
+ * channel — see `src-tauri/src/debug/session.rs`'s module doc for why.
+ *
+ * `F100` S5 additions, both still carried inside `body` (this envelope
+ * itself is unchanged) — see `src-tauri/src/debug/output_gate.rs`'s own
+ * module doc for the full backpressure design:
+ * - Every real `event === "output"` delivery's `body` now also carries a
+ *   `sequence: number` field (monotonic per session, assigned only to
+ *   events this gate actually emits — content merged while gated never gets
+ *   its own sequence number) that a consumer must pass to
+ *   `PlainBridge.debugOutputAck` once it has finished handling the event.
+ * - `event === "plain/outputElided"` is a new synthetic notification (never
+ *   gated/acked itself), `body: { category: string, elidedBytes: number,
+ *   elidedLines: number }` — emitted immediately before a merged `output`
+ *   flush whose content actually had to be truncated, so a consumer can
+ *   honestly tell the user some output was dropped rather than silently
+ *   showing a gap. */
 export interface DebugEventPayload {
 	readonly sessionId: string;
 	readonly event: string;
@@ -1899,6 +1914,16 @@ export interface PlainBridge {
 	debugStepOut(sessionId: string, threadId: number): Promise<void>;
 	/** Interrupts a running thread. */
 	debugPause(sessionId: string, threadId: number): Promise<void>;
+	/** `F100` S5 — acknowledges a gated `output` event through `sequence`,
+	 * freeing emission credit in `src-tauri/src/debug/output_gate.rs`'s
+	 * backpressure gate — see `DebugEventPayload`'s own doc comment for the
+	 * `sequence` field this acks against, and
+	 * `plain-debug-console-view.ts`'s own module doc for the one production
+	 * caller (acks immediately after rendering each `output` line it
+	 * receives). Tolerant of a stale/duplicate/out-of-order `sequence` and of
+	 * a `sessionId` that no longer names a live session (mirrors
+	 * `terminalAck`'s identical tolerant contract for the same kind of race). */
+	debugOutputAck(sessionId: string, sequence: number): Promise<void>;
 	/** Registers a listener for every live debug session's streamed
 	 * `plain://debug-event` deliveries in this window — mirrors
 	 * `terminalWatchData`'s own all-sessions-in-one-listener shape; the

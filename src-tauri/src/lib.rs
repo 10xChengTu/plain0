@@ -173,6 +173,7 @@ pub fn run() {
             debug::commands::debug_step_in,
             debug::commands::debug_step_out,
             debug::commands::debug_pause,
+            debug::commands::debug_output_ack,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Plain")

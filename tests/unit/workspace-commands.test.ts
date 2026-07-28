@@ -158,6 +158,7 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		debugStepIn: vi.fn(),
 		debugStepOut: vi.fn(),
 		debugPause: vi.fn(),
+		debugOutputAck: vi.fn(),
 		debugWatchEvent: vi.fn(),
 		...overrides,
 	};
@@ -287,6 +288,7 @@ describe("workspace Workbench command overrides", () => {
 			debugStepIn: vi.fn(),
 			debugStepOut: vi.fn(),
 			debugPause: vi.fn(),
+			debugOutputAck: vi.fn(),
 			debugWatchEvent: vi.fn(),
 		};
 		const contextValues = new Map<string, unknown>([

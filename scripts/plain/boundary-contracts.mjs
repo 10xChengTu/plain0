@@ -19126,6 +19126,42 @@ export function validateDebugAdapterConnectBoundary(rustSources) {
 }
 
 /**
+ * `F100` S5 — the third sibling of [`validateDebugAdapterSpawnBoundary`]/
+ * [`validateDebugAdapterConnectBoundary`]: locks `debug/exec.rs`'s
+ * `spawn_adapter_as_tcp_companion` (the `Tcp`-confirmed companion-spawn
+ * primitive `debug::mod`'s own module doc names as S2's open recommendation,
+ * now built) to the identical trust-then-confirmation double-gate prefix —
+ * except keyed on `AdapterTransportKind::Tcp`, never `::Stdio`. This is the
+ * mechanical lock proving the one line that actually matters (which
+ * transport variant the confirmation subject is built with) can never
+ * silently regress back to `Stdio` — which would reintroduce exactly the
+ * confirmation-identity-confusion trap this whole primitive exists to avoid.
+ */
+export function validateDebugTcpCompanionSpawnBoundary(rustSources) {
+	const execSource = findRustSource(rustSources, "src-tauri/src/debug/exec.rs");
+	if (execSource === undefined) {
+		return ["debug tcp companion spawn boundary requires debug/exec.rs"];
+	}
+	const commentsOnly = stripRustCommentsOnly(execSource);
+	const spawnCompanion = rustFunctionBody(
+		commentsOnly,
+		"spawn_adapter_as_tcp_companion",
+	);
+	if (spawnCompanion === undefined) {
+		return ["debug/exec.rs must define spawn_adapter_as_tcp_companion"];
+	}
+	const body = spawnCompanion.body
+		.replace(/^\{/, "")
+		.replace(/\}$/, "")
+		.trimStart();
+	const failure = validateTrustThenConfirmationGatePrefix(body, "Tcp");
+	if (failure !== undefined) {
+		return [`debug/exec.rs spawn_adapter_as_tcp_companion ${failure}`];
+	}
+	return [];
+}
+
+/**
  * Locks `debug/exec.rs`'s `spawn_adapter_sync` function body — the function
  * that actually builds and spawns the child process — to the fixed
  * `Command::new(&descriptor.command)` / `.args(&descriptor.args)`
@@ -19381,6 +19417,16 @@ const DEBUG_COMMAND_CONTRACTS = Object.freeze([
 			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugThreadRequest",
 		returnType: "->Result<(),CommandError>",
 		body: "letquery=request.into_parts();debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments).await?;Ok(())",
+	},
+	// `F100` S5 — the `output`-event backpressure ack (`debug/commands.rs`'s
+	// own module doc, "`F100` S5" section).
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_output_ack",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugOutputAckRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(session_id,sequence)=request.into_parts();debug_sessions.inner().ack_output(window.label(),session_id,sequence).await;Ok(())",
 	},
 ]);
 

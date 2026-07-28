@@ -52,6 +52,7 @@ import {
 	validateDebugAdapterConfirmationBoundary,
 	validateDebugAdapterConnectBoundary,
 	validateDebugAdapterSpawnBoundary,
+	validateDebugTcpCompanionSpawnBoundary,
 	validateDebugCommandRegistration,
 	validateDebugRunInTerminalBoundary,
 	validateDebugSpawnConstructionShape,
@@ -11781,7 +11782,7 @@ IDialogService(PlainGitWorktreeView, undefined, 12);`,
 	});
 });
 
-describe("Plain F100 S0/S1 debug adapter spawn/connect/framing boundary Harness", () => {
+describe("Plain F100 S0/S1/S5 debug adapter spawn/connect/framing boundary Harness", () => {
 	const debugExecSource = readFileSync(
 		new URL("../../src-tauri/src/debug/exec.rs", import.meta.url),
 		"utf8",
@@ -12006,6 +12007,108 @@ describe("Plain F100 S0/S1 debug adapter spawn/connect/framing boundary Harness"
 				},
 			);
 			const failures = validateDebugAdapterConnectBoundary(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"must call confirmation.require_confirmed(workspace, window_label, &subject).await? (subject built via descriptor.confirmation_subject(AdapterTransportKind::Tcp)) as its literal second statement",
+					),
+				),
+			).toBe(true);
+		});
+	});
+
+	describe("validateDebugTcpCompanionSpawnBoundary", () => {
+		const companionTrustCheckAnchor =
+			"    trust.require_trusted(workspace, window_label).await?;\n" +
+			"    let subject = descriptor.confirmation_subject(AdapterTransportKind::Tcp);\n" +
+			"    confirmation\n" +
+			"        .require_confirmed(workspace, window_label, &subject)\n" +
+			"        .await?;\n" +
+			"    let descriptor = descriptor.clone();";
+
+		it("passes for the real, unmodified debug/exec.rs", () => {
+			expect(
+				validateDebugTcpCompanionSpawnBoundary(baselineDebugRustSources),
+			).toEqual([]);
+		});
+
+		it("requires debug/exec.rs to be present", () => {
+			expect(validateDebugTcpCompanionSpawnBoundary([])).toEqual([
+				"debug tcp companion spawn boundary requires debug/exec.rs",
+			]);
+		});
+
+		it("requires a spawn_adapter_as_tcp_companion function to exist", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) =>
+					source.replace(
+						"pub(crate) async fn spawn_adapter_as_tcp_companion(",
+						"pub(crate) async fn spawn_adapter_as_tcp_companion_renamed(",
+					),
+			);
+			expect(validateDebugTcpCompanionSpawnBoundary(mutated)).toEqual([
+				"debug/exec.rs must define spawn_adapter_as_tcp_companion",
+			]);
+		});
+
+		it("rejects a spawn_adapter_as_tcp_companion body that spawns before checking trust", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(companionTrustCheckAnchor)).toBe(true);
+					return source.replace(
+						companionTrustCheckAnchor,
+						"    let descriptor = descriptor.clone();\n    trust.require_trusted(workspace, window_label).await?;",
+					);
+				},
+			);
+			const failures = validateDebugTcpCompanionSpawnBoundary(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"spawn_adapter_as_tcp_companion must call trust.require_trusted(workspace, window_label).await? as its literal first statement",
+					),
+				),
+			).toBe(true);
+		});
+
+		it("rejects spawn_adapter_as_tcp_companion when the confirmation check is missing entirely (trust alone is not enough)", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(companionTrustCheckAnchor)).toBe(true);
+					return source.replace(
+						companionTrustCheckAnchor,
+						"    trust.require_trusted(workspace, window_label).await?;\n    let descriptor = descriptor.clone();",
+					);
+				},
+			);
+			const failures = validateDebugTcpCompanionSpawnBoundary(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"must call confirmation.require_confirmed(workspace, window_label, &subject).await? (subject built via descriptor.confirmation_subject(AdapterTransportKind::Tcp)) as its literal second statement",
+					),
+				),
+			).toBe(true);
+		});
+
+		it("rejects spawn_adapter_as_tcp_companion when it is confirmed via the Stdio variant instead of Tcp (the exact confusion this primitive exists to prevent)", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(companionTrustCheckAnchor)).toBe(true);
+					return source.replace(
+						companionTrustCheckAnchor,
+						companionTrustCheckAnchor.replace(
+							"AdapterTransportKind::Tcp",
+							"AdapterTransportKind::Stdio",
+						),
+					);
+				},
+			);
+			const failures = validateDebugTcpCompanionSpawnBoundary(mutated);
 			expect(
 				failures.some((failure) =>
 					failure.includes(

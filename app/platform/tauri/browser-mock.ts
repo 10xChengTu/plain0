@@ -130,6 +130,7 @@ import {
 	decodeDebugAdapterConfirmationVoid,
 	frozenDebugAdapterConfirmationRequest,
 	frozenDebugEvaluateRequest,
+	frozenDebugOutputAckRequest,
 	frozenDebugScopesRequest,
 	frozenDebugSessionIdRequest,
 	frozenDebugSessionStartRequest,
@@ -5413,6 +5414,155 @@ export function createBrowserMockBridge(
 	const issuedDebugSessionIds = new Set<string>();
 	const debugEventListeners = new Set<(event: DebugEventPayload) => void>();
 
+	// `F100` S5 — a deliberately small-scale mirror of
+	// `src-tauri/src/debug/output_gate.rs`'s real backpressure gate, for the
+	// same reason `MockTerminalSession`'s own single-frame-in-flight credit
+	// gate mirrors `terminal::service`'s real one: this mock never
+	// re-implements a real DAP adapter, but a consuming frontend (the Debug
+	// Console view) needs to be able to genuinely drive and observe real
+	// gate/ack behavior in a Browser test, not just receive a canned,
+	// already-flushed fixture. Deliberately much smaller watermarks/caps than
+	// the real Rust constants (`DEBUG_OUTPUT_MOCK_HIGH_WATER_EVENTS`/
+	// `DEBUG_OUTPUT_MOCK_MERGE_CAP_BYTES`) so a Browser test can trigger real
+	// backpressure with a handful of events rather than needing to actually
+	// send tens of thousands.
+	const DEBUG_OUTPUT_MOCK_HIGH_WATER_EVENTS = 4;
+	const DEBUG_OUTPUT_MOCK_MERGE_CAP_BYTES = 256;
+	interface MockDebugOutputMergedCategory {
+		text: string;
+		elidedBytes: number;
+		elidedLines: number;
+	}
+	interface MockDebugOutputGate {
+		nextSequence: number;
+		highestEmitted: number;
+		highestAcked: number;
+		merged: Map<string, MockDebugOutputMergedCategory>;
+	}
+	const debugOutputGates = new Map<string, MockDebugOutputGate>();
+
+	function mockDebugOutputGate(sessionId: string): MockDebugOutputGate {
+		let gate = debugOutputGates.get(sessionId);
+		if (gate === undefined) {
+			gate = {
+				nextSequence: 1,
+				highestEmitted: 0,
+				highestAcked: 0,
+				merged: new Map(),
+			};
+			debugOutputGates.set(sessionId, gate);
+		}
+		return gate;
+	}
+
+	function mockDebugOutputUnacked(gate: MockDebugOutputGate): number {
+		return gate.highestEmitted - gate.highestAcked;
+	}
+
+	function mockDebugOutputCategory(body: unknown): string {
+		if (typeof body !== "object" || body === null || Array.isArray(body)) {
+			return "console";
+		}
+		const category = (body as Record<string, unknown>).category;
+		return typeof category === "string" ? category : "console";
+	}
+
+	function mockDebugOutputText(body: unknown): string | undefined {
+		if (typeof body !== "object" || body === null || Array.isArray(body)) {
+			return undefined;
+		}
+		const output = (body as Record<string, unknown>).output;
+		return typeof output === "string" ? output : undefined;
+	}
+
+	function mergeMockDebugOutput(
+		gate: MockDebugOutputGate,
+		category: string,
+		text: string,
+	): void {
+		const entry = gate.merged.get(category) ?? {
+			text: "",
+			elidedBytes: 0,
+			elidedLines: 0,
+		};
+		entry.text += text;
+		if (entry.text.length > DEBUG_OUTPUT_MOCK_MERGE_CAP_BYTES) {
+			const overflow = entry.text.length - DEBUG_OUTPUT_MOCK_MERGE_CAP_BYTES;
+			const dropped = entry.text.slice(0, overflow);
+			entry.text = entry.text.slice(overflow);
+			entry.elidedBytes += dropped.length;
+			entry.elidedLines += (dropped.match(/\n/gu) ?? []).length;
+		}
+		gate.merged.set(category, entry);
+	}
+
+	/** Emits every merged category this mock's own credit currently allows —
+	 * mirrors `OutputGate::ack`'s "drain as many as credit permits" contract. */
+	function flushMockDebugOutput(
+		sessionId: string,
+		gate: MockDebugOutputGate,
+	): void {
+		while (
+			gate.merged.size > 0 &&
+			mockDebugOutputUnacked(gate) < DEBUG_OUTPUT_MOCK_HIGH_WATER_EVENTS
+		) {
+			const nextCategory = gate.merged.keys().next().value;
+			if (nextCategory === undefined) {
+				break;
+			}
+			const entry = gate.merged.get(nextCategory);
+			gate.merged.delete(nextCategory);
+			if (entry === undefined) {
+				break;
+			}
+			if (entry.elidedBytes > 0) {
+				emitMockDebugEvent(sessionId, "plain/outputElided", {
+					category: nextCategory,
+					elidedBytes: entry.elidedBytes,
+					elidedLines: entry.elidedLines,
+				});
+			}
+			const sequence = gate.nextSequence;
+			gate.nextSequence += 1;
+			gate.highestEmitted = sequence;
+			emitMockDebugEvent(sessionId, "output", {
+				category: nextCategory,
+				output: entry.text,
+				sequence,
+			});
+		}
+	}
+
+	/** The mock counterpart of `DebugSession::handle_output_event` — routes a
+	 * real `output` event through the gate instead of forwarding it straight
+	 * through, so a Browser test can genuinely drive backpressure by pushing
+	 * more than `DEBUG_OUTPUT_MOCK_HIGH_WATER_EVENTS` events via
+	 * `BrowserMockDebugSessionController.emitEvent("output", …)`. */
+	function handleMockDebugOutputEvent(sessionId: string, body: unknown): void {
+		const text = mockDebugOutputText(body);
+		if (text === undefined) {
+			emitMockDebugEvent(sessionId, "output", body);
+			return;
+		}
+		const category = mockDebugOutputCategory(body);
+		const gate = mockDebugOutputGate(sessionId);
+		if (
+			gate.merged.size === 0 &&
+			mockDebugOutputUnacked(gate) < DEBUG_OUTPUT_MOCK_HIGH_WATER_EVENTS
+		) {
+			const sequence = gate.nextSequence;
+			gate.nextSequence += 1;
+			gate.highestEmitted = sequence;
+			emitMockDebugEvent(sessionId, "output", {
+				category,
+				output: text,
+				sequence,
+			});
+			return;
+		}
+		mergeMockDebugOutput(gate, category, text);
+	}
+
 	const nextDebugSessionId = (): string => {
 		for (let attempt = 0; attempt < 16; attempt += 1) {
 			const bytes = new Uint8Array(16);
@@ -5493,9 +5643,19 @@ export function createBrowserMockBridge(
 				if (!liveDebugSessions.has(sessionId)) {
 					return;
 				}
+				if (event === "output") {
+					// `F100` S5 — routed through the mock's own backpressure
+					// gate instead of forwarded straight through, so a
+					// Browser test can genuinely drive/observe real gate/ack
+					// behavior — see `handleMockDebugOutputEvent`'s own doc
+					// comment.
+					handleMockDebugOutputEvent(sessionId, body);
+					return;
+				}
 				emitMockDebugEvent(sessionId, event, body);
 			},
 			finish(): void {
+				debugOutputGates.delete(sessionId);
 				if (!liveDebugSessions.delete(sessionId)) {
 					return;
 				}
@@ -7414,6 +7574,22 @@ export function createBrowserMockBridge(
 		async debugPause(sessionId, threadId) {
 			const request = frozenDebugThreadRequest(sessionId, threadId);
 			requireLiveMockDebugSession(request.sessionId as string);
+		},
+		async debugOutputAck(sessionId, sequence) {
+			const request = frozenDebugOutputAckRequest(sessionId, sequence);
+			const id = request.sessionId as string;
+			if (!liveDebugSessions.has(id)) {
+				// Mirrors the real service's own tolerant race: acking a
+				// session that already ended is a harmless no-op, not an
+				// error.
+				return;
+			}
+			const gate = mockDebugOutputGate(id);
+			gate.highestAcked = Math.max(
+				gate.highestAcked,
+				Math.min(request.sequence as number, gate.highestEmitted),
+			);
+			flushMockDebugOutput(id, gate);
 		},
 		debugWatchEvent(listener) {
 			debugEventListeners.add(listener);

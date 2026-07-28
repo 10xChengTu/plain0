@@ -491,6 +491,9 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async debugPause() {
 			throw new Error("unused");
 		},
+		async debugOutputAck() {
+			throw new Error("unused");
+		},
 		debugWatchEvent() {
 			throw new Error("unused");
 		},

@@ -1177,6 +1177,34 @@ pub(crate) fn parse_run_in_terminal_arguments(
     })
 }
 
+// ---------------------------------------------------------------------
+// `F100` S5 — `output`-event backpressure ack. See `super::output_gate`'s
+// own module doc for the gate this acknowledges.
+// ---------------------------------------------------------------------
+
+/// `debug_output_ack`'s request — acknowledges every gated `output` event
+/// through `sequence` (see [`super::session::DebugSession::ack_output`]).
+/// `sequence` is a bare `u64` (not further validated beyond what `serde`
+/// itself already requires of the wire type) — any value, including one
+/// beyond what has ever actually been emitted, is handled tolerantly by
+/// [`super::output_gate::OutputGate::ack`] (clamped, never a request-shape
+/// rejection), mirroring `TerminalAckRequest`'s identical "no separate
+/// validation beyond the type itself" precedent for the same kind of
+/// monotonic-sequence ack.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct DebugOutputAckRequest {
+    pub session_id: DebugSessionId,
+    pub sequence: u64,
+}
+
+impl DebugOutputAckRequest {
+    pub(crate) fn into_parts(self) -> (DebugSessionId, u64) {
+        (self.session_id, self.sequence)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -1185,10 +1213,10 @@ mod tests {
         parse_continue_response, parse_evaluate_response, parse_run_in_terminal_arguments,
         parse_scopes_response, parse_set_breakpoints_response, parse_stack_trace_response,
         parse_variables_response, AdapterTransportKind, DebugEvaluateContext, DebugEvaluateRequest,
-        DebugScopesRequest, DebugSessionId, DebugSessionStartRequest, DebugSetBreakpointsRequest,
-        DebugStackTraceRequest, DebugThreadRequest, DebugVariablesFilter, DebugVariablesRequest,
-        LineBreakpointRequest, SessionTransportRequest, SourceBreakpointsRequest,
-        MAX_RUN_IN_TERMINAL_ARGS,
+        DebugOutputAckRequest, DebugScopesRequest, DebugSessionId, DebugSessionStartRequest,
+        DebugSetBreakpointsRequest, DebugStackTraceRequest, DebugThreadRequest,
+        DebugVariablesFilter, DebugVariablesRequest, LineBreakpointRequest,
+        SessionTransportRequest, SourceBreakpointsRequest, MAX_RUN_IN_TERMINAL_ARGS,
     };
     use crate::debug::session::LaunchRequestKind;
     use serde_json::Value;
@@ -1863,5 +1891,28 @@ mod tests {
             .collect();
         let arguments = json!({"cwd": "/tmp", "args": oversized});
         assert!(parse_run_in_terminal_arguments(Some(&arguments)).is_none());
+    }
+
+    #[test]
+    fn debug_output_ack_request_parses_and_splits_into_parts() {
+        let value = json!({"sessionId": VALID_ID, "sequence": 42});
+        let request: DebugOutputAckRequest =
+            serde_json::from_value(value).expect("well-formed request parses");
+        let (session_id, sequence) = request.into_parts();
+        assert_eq!(session_id.as_wire(), VALID_ID);
+        assert_eq!(sequence, 42);
+    }
+
+    #[test]
+    fn debug_output_ack_request_rejects_unknown_fields() {
+        let mut value = json!({"sessionId": VALID_ID, "sequence": 1});
+        value["extra"] = json!(true);
+        assert!(serde_json::from_value::<DebugOutputAckRequest>(value).is_err());
+    }
+
+    #[test]
+    fn debug_output_ack_request_rejects_a_negative_sequence() {
+        let value = json!({"sessionId": VALID_ID, "sequence": -1});
+        assert!(serde_json::from_value::<DebugOutputAckRequest>(value).is_err());
     }
 }

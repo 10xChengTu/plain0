@@ -317,12 +317,24 @@ fn wait_until(mut condition: impl FnMut() -> bool, timeout: Duration) -> bool {
     }
 }
 
+/// Every test in this file that does not specifically exercise `F100` S5's
+/// timeout classification uses generous (but still finite — see the module
+/// doc's own "every pending request must fail deterministically" requirement)
+/// 5-second budgets for both, matching `run_handshake_within`'s own outer
+/// 5-second safety net below — real production code always uses
+/// [`super::DEBUG_REQUEST_TIMEOUT`]/[`super::DEBUG_LAUNCH_TIMEOUT`] instead
+/// (see `service.rs`'s `start_session`).
+const TEST_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const TEST_LAUNCH_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn basic_handshake_config(arguments: Value) -> HandshakeConfig {
     HandshakeConfig {
         adapter_id: "mock".to_owned(),
         request: LaunchRequestKind::Launch,
         arguments,
         breakpoints: Vec::new(),
+        request_timeout: TEST_REQUEST_TIMEOUT,
+        launch_timeout: TEST_LAUNCH_TIMEOUT,
     }
 }
 
@@ -466,6 +478,8 @@ fn attach_requests_send_the_literal_attach_command_not_launch() {
         request: LaunchRequestKind::Attach,
         arguments: json!({"processId": 1234}),
         breakpoints: Vec::new(),
+        request_timeout: TEST_REQUEST_TIMEOUT,
+        launch_timeout: TEST_LAUNCH_TIMEOUT,
     };
     run_handshake_within(session, config, Duration::from_secs(5))
         .expect("the handshake must not hang")
@@ -534,6 +548,8 @@ fn the_handshake_sends_one_set_breakpoints_request_per_configured_source_before_
         request: LaunchRequestKind::Launch,
         arguments: json!({}),
         breakpoints,
+        request_timeout: TEST_REQUEST_TIMEOUT,
+        launch_timeout: TEST_LAUNCH_TIMEOUT,
     };
     run_handshake_within(session, config, Duration::from_secs(5))
         .expect("the handshake must not hang")
@@ -618,10 +634,10 @@ fn responses_correlate_by_request_seq_even_when_the_adapters_own_seq_is_always_z
     );
 
     let first_response = session
-        .wait_for_response(first_pending)
+        .wait_for_response_with_timeout(first_pending, Duration::from_secs(5), "threads")
         .expect("resolves to the threads response, not the stackTrace one");
     let second_response = session
-        .wait_for_response(second_pending)
+        .wait_for_response_with_timeout(second_pending, Duration::from_secs(5), "stackTrace")
         .expect("resolves to the stackTrace response, not the threads one");
     assert_eq!(first_response.command, "threads");
     assert_eq!(second_response.command, "stackTrace");
@@ -732,7 +748,7 @@ fn dropping_the_transport_fails_every_pending_request_and_notifies_the_sink_exac
     drop(adapter);
 
     let error = session
-        .wait_for_response(pending)
+        .wait_for_response_with_timeout(pending, Duration::from_secs(5), "threads")
         .expect_err("a dropped transport must fail the pending request, not hang");
     assert_eq!(error.code(), "DEBUG_SESSION_ENDED");
 
@@ -787,6 +803,13 @@ fn every_required_event_type_is_forwarded_verbatim_in_order() {
         Box::new(|| {}),
     );
 
+    // `output`'s own body is asserted separately below — `F100` S5's
+    // backpressure gate (`super::super::output_gate`) attaches a `sequence`
+    // field to every real `output` event it actually emits, so its body is
+    // no longer byte-for-byte what the adapter itself sent (every *other*
+    // event kind here is still forwarded completely verbatim, unmodified by
+    // the gate — see `dispatch_message`'s own "only `output` is special-
+    // cased" branch).
     let expected = [
         ("stopped", json!({"reason": "breakpoint", "threadId": 1})),
         (
@@ -809,7 +832,14 @@ fn every_required_event_type_is_forwarded_verbatim_in_order() {
     let events = sink.events_snapshot();
     for (recorded, (name, body)) in events.iter().zip(expected.iter()) {
         assert_eq!(&recorded.1, name);
-        assert_eq!(recorded.2.as_ref(), Some(body));
+        if *name == "output" {
+            assert_eq!(
+                recorded.2.as_ref(),
+                Some(&json!({"category": "stdout", "output": "sum=7\n", "sequence": 1}))
+            );
+        } else {
+            assert_eq!(recorded.2.as_ref(), Some(body));
+        }
     }
 }
 
@@ -842,9 +872,13 @@ fn a_single_malformed_json_message_is_surfaced_as_a_diagnostic_and_does_not_end_
     let events = sink.events_snapshot();
     assert_eq!(events[0].1, "plain/protocolError");
     assert_eq!(events[1].1, "output");
+    // `sequence: 1` — the first (and, in this test, only) real `output`
+    // event this fresh session's backpressure gate ever emits — see
+    // `every_required_event_type_is_forwarded_verbatim_in_order`'s own
+    // comment for why `output` alone carries this extra field.
     assert_eq!(
         events[1].2,
-        Some(json!({"category": "stdout", "output": "hi\n"}))
+        Some(json!({"category": "stdout", "output": "hi\n", "sequence": 1}))
     );
     assert!(
         sink.ended_snapshot().is_empty(),
@@ -1006,6 +1040,264 @@ fn an_unrecognized_command_still_falls_back_to_the_automatic_decline_even_with_a
     assert_eq!(response.request_seq, 3);
     assert_eq!(response.command, "startDebugging");
     assert!(!response.success);
+}
+
+// ---------------------------------------------------------------------
+// `F100` S5 — per-request timeout classification. See the module doc's own
+// "`F100` S5" section for the full rationale; the pair of tests below
+// (`only_launchs_own_response_gets_the_generous_timeout_budget`/
+// `every_other_handshake_step_still_gets_the_ordinary_short_timeout_budget`)
+// is the control-group proof the classification is real and bidirectional —
+// same mock harness, same short `request_timeout`, only *which* step is
+// delayed differs, with the opposite outcome each time.
+// ---------------------------------------------------------------------
+
+#[test]
+fn wait_for_response_with_timeout_fails_deterministically_when_no_reply_ever_arrives_but_the_session_stays_alive(
+) {
+    let ((client_reader, client_writer), mut adapter) = duplex_pair();
+    let session_id = DebugSessionId::new();
+    let (_sink, sink) = sink_pair();
+    let session = DebugSession::start(
+        session_id,
+        client_reader,
+        client_writer,
+        sink,
+        Box::new(|| {}),
+    );
+
+    let pending = session
+        .send_request("threads", None)
+        .expect("write succeeds");
+    let _ = adapter.recv_request(); // observed by the mock adapter, deliberately never answered
+
+    let start = Instant::now();
+    let error = session
+        .wait_for_response_with_timeout(pending, Duration::from_millis(80), "threads")
+        .expect_err("a request the adapter never answers must time out, not hang forever");
+    let elapsed = start.elapsed();
+    assert_eq!(error.code(), "DEBUG_REQUEST_TIMED_OUT");
+    assert!(error.message().contains("threads"));
+    assert!(
+        elapsed >= Duration::from_millis(80),
+        "must actually wait out the full timeout, not fire early"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "must not wait meaningfully longer than the timeout either"
+    );
+
+    // The adapter (never dropped — the session is still alive) is free to
+    // keep running; this session simply never uses it again.
+    drop(adapter);
+}
+
+#[test]
+fn a_timed_out_requests_pending_entry_is_discarded_so_a_later_request_is_unaffected() {
+    let ((client_reader, client_writer), mut adapter) = duplex_pair();
+    let session_id = DebugSessionId::new();
+    let (_sink, sink) = sink_pair();
+    let session = DebugSession::start(
+        session_id,
+        client_reader,
+        client_writer,
+        sink,
+        Box::new(|| {}),
+    );
+
+    let stale_pending = session
+        .send_request("threads", None)
+        .expect("write succeeds");
+    let (stale_seq, stale_command, _) = adapter.recv_request();
+    assert_eq!(stale_command, "threads");
+    let error = session
+        .wait_for_response_with_timeout(stale_pending, Duration::from_millis(50), "threads")
+        .expect_err("never-answered request times out");
+    assert_eq!(error.code(), "DEBUG_REQUEST_TIMED_OUT");
+
+    // A brand new request, sent after the timeout, must resolve normally —
+    // proving the timed-out entry's cleanup did not corrupt the table for
+    // anything sent afterward.
+    let fresh_pending = session
+        .send_request("stackTrace", Some(json!({"threadId": 1})))
+        .expect("write succeeds");
+    let (fresh_seq, fresh_command, _) = adapter.recv_request();
+    assert_eq!(fresh_command, "stackTrace");
+    assert_ne!(stale_seq, fresh_seq);
+
+    // The adapter now replies to the *stale* (already timed-out) request
+    // first — a stray late reply that must simply be unmatched — and only
+    // then to the fresh one.
+    adapter.send_response(
+        0,
+        stale_seq,
+        "threads",
+        true,
+        None,
+        Some(json!({"threads": []})),
+    );
+    adapter.send_response(
+        0,
+        fresh_seq,
+        "stackTrace",
+        true,
+        None,
+        Some(json!({"stackFrames": []})),
+    );
+
+    let fresh_response = session
+        .wait_for_response_with_timeout(fresh_pending, Duration::from_secs(5), "stackTrace")
+        .expect("the fresh request must still resolve to its own real reply");
+    assert_eq!(fresh_response.command, "stackTrace");
+}
+
+#[test]
+fn only_launchs_own_response_gets_the_generous_timeout_budget() {
+    let ((client_reader, client_writer), mut adapter) = duplex_pair();
+    let session_id = DebugSessionId::new();
+    let (_sink, sink) = sink_pair();
+    let session = DebugSession::start(
+        session_id,
+        client_reader,
+        client_writer,
+        sink,
+        Box::new(|| {}),
+    );
+
+    let short_request_timeout = Duration::from_millis(100);
+    let long_launch_timeout = Duration::from_secs(2);
+    // Longer than `launch`'s own deliberate delay below, comfortably bounding
+    // a real bug (a regression back to "await launch's response immediately")
+    // without making a correct implementation wait unreasonably long either.
+    let launch_delay = Duration::from_millis(400);
+
+    let adapter_thread = std::thread::spawn(move || {
+        let (init_seq, _) = adapter.expect_request("initialize");
+        adapter.send_response(1, init_seq, "initialize", true, None, Some(json!({})));
+        let (launch_seq, _) = adapter.expect_request("launch");
+        adapter.send_event(2, "initialized", None);
+        let (config_done_seq, _) = adapter.expect_request("configurationDone");
+        adapter.send_response(3, config_done_seq, "configurationDone", true, None, None);
+        // Deliberately delayed past `short_request_timeout` but still well
+        // within `long_launch_timeout` — the real `debugpy` shape this
+        // domain's own handshake ordering exists to tolerate.
+        std::thread::sleep(launch_delay);
+        adapter.send_response(4, launch_seq, "launch", true, None, None);
+    });
+
+    let config = HandshakeConfig {
+        adapter_id: "mock".to_owned(),
+        request: LaunchRequestKind::Launch,
+        arguments: json!({}),
+        breakpoints: Vec::new(),
+        request_timeout: short_request_timeout,
+        launch_timeout: long_launch_timeout,
+    };
+    run_handshake_within(session, config, Duration::from_secs(5))
+        .expect("the handshake must not hang")
+        .expect(
+            "launch's own response must be judged against the generous launch_timeout, not the \
+             short request_timeout — a real, healthy adapter must not be failed here",
+        );
+    adapter_thread.join().unwrap();
+}
+
+#[test]
+fn every_other_handshake_step_still_gets_the_ordinary_short_timeout_budget() {
+    let ((client_reader, client_writer), mut adapter) = duplex_pair();
+    let session_id = DebugSessionId::new();
+    let (_sink, sink) = sink_pair();
+    let session = DebugSession::start(
+        session_id,
+        client_reader,
+        client_writer,
+        sink,
+        Box::new(|| {}),
+    );
+
+    let short_request_timeout = Duration::from_millis(100);
+    let long_launch_timeout = Duration::from_secs(2);
+    // The exact same delay `only_launchs_own_response_gets_the_generous_timeout_budget`
+    // applies to `launch` — but this time applied to `configurationDone`
+    // instead, which must NOT be exempted from `short_request_timeout`. This
+    // is the control-group half of the pair: identical harness, identical
+    // delay, only *which* step is delayed (and therefore the outcome)
+    // differs.
+    let config_done_delay = Duration::from_millis(400);
+
+    let adapter_thread = std::thread::spawn(move || {
+        let (init_seq, _) = adapter.expect_request("initialize");
+        adapter.send_response(1, init_seq, "initialize", true, None, Some(json!({})));
+        let (launch_seq, _) = adapter.expect_request("launch");
+        adapter.send_event(2, "initialized", None);
+        let (config_done_seq, _) = adapter.expect_request("configurationDone");
+        std::thread::sleep(config_done_delay);
+        adapter.send_response(3, config_done_seq, "configurationDone", true, None, None);
+        adapter.send_response(4, launch_seq, "launch", true, None, None);
+    });
+
+    let config = HandshakeConfig {
+        adapter_id: "mock".to_owned(),
+        request: LaunchRequestKind::Launch,
+        arguments: json!({}),
+        breakpoints: Vec::new(),
+        request_timeout: short_request_timeout,
+        launch_timeout: long_launch_timeout,
+    };
+    let error = run_handshake_within(session, config, Duration::from_secs(5))
+        .expect("the handshake must not hang — it must fail with a timeout, not hang forever")
+        .expect_err(
+            "configurationDone is an ordinary step; it must be judged against the short \
+             request_timeout, exactly like every other non-launch/attach step",
+        );
+    assert_eq!(error.code(), "DEBUG_REQUEST_TIMED_OUT");
+    assert!(error.message().contains("configurationDone"));
+    adapter_thread.join().unwrap();
+}
+
+#[test]
+fn wait_for_initialized_times_out_independently_of_the_session_ending() {
+    let ((client_reader, client_writer), mut adapter) = duplex_pair();
+    let session_id = DebugSessionId::new();
+    let (_sink, sink) = sink_pair();
+    let session = DebugSession::start(
+        session_id,
+        client_reader,
+        client_writer,
+        sink,
+        Box::new(|| {}),
+    );
+
+    let adapter_thread = std::thread::spawn(move || {
+        let (init_seq, _) = adapter.expect_request("initialize");
+        adapter.send_response(1, init_seq, "initialize", true, None, Some(json!({})));
+        let _ = adapter.expect_request("launch");
+        // Deliberately never sends `initialized` and never drops the
+        // transport either — the adapter (and the transport) both stay
+        // alive; only this one event never arrives. The sleep is
+        // comfortably longer than `request_timeout` below (so the timeout
+        // genuinely fires while everything is still alive) but short enough
+        // to keep this test fast.
+        std::thread::sleep(Duration::from_millis(400));
+    });
+
+    let config = HandshakeConfig {
+        adapter_id: "mock".to_owned(),
+        request: LaunchRequestKind::Launch,
+        arguments: json!({}),
+        breakpoints: Vec::new(),
+        request_timeout: Duration::from_millis(100),
+        launch_timeout: Duration::from_secs(5),
+    };
+    let error = run_handshake_within(session, config, Duration::from_secs(5))
+        .expect("the handshake must not hang")
+        .expect_err("a missing `initialized` event, with the session still alive, must time out");
+    assert_eq!(
+        error.code(),
+        "DEBUG_REQUEST_TIMED_OUT",
+        "must be a timeout, not DEBUG_SESSION_ENDED — the transport never actually closed"
+    );
+    adapter_thread.join().unwrap();
 }
 
 // ---------------------------------------------------------------------

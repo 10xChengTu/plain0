@@ -310,6 +310,54 @@ pub(crate) async fn spawn_adapter(
         .map_err(|_| debug_adapter_spawn_unavailable())?
 }
 
+/// `F100` S5 — the `Tcp`-confirmed companion-spawn primitive `debug::mod`'s
+/// own module doc named as S2's open recommendation, now built: identical to
+/// [`spawn_adapter`] in every respect (same trust-then-confirmation ordering,
+/// same [`spawn_adapter_sync`] hardened construction, same
+/// `validateDebugSpawnConstructionShape`/`validateDebugAdapterSpawnBoundary`
+/// mechanical locks — both functions share the exact literal two-statement
+/// gate prefix those contracts already require of any `debug::exec` spawn
+/// entry point) **except the one line that matters**: the confirmation
+/// subject this checks is built with [`AdapterTransportKind::Tcp`], never
+/// [`AdapterTransportKind::Stdio`]. This is the whole fix for the
+/// confirmation-identity-confusion trap `debug::mod`'s own module doc
+/// describes — a caller wanting to spawn a companion process that will
+/// itself open a TCP listener (rather than treating the spawned process's own
+/// stdio as the DAP transport) must go through *this* entry point, not
+/// [`spawn_adapter`], so the confirmation dialog/check is keyed against the
+/// `Tcp` variant the user actually confirmed for this session, never silently
+/// reusing (or demanding) a `Stdio` confirmation record instead.
+///
+/// **Deliberately has no production caller yet** — see `debug::mod`'s own
+/// module doc for why: composing this with an actual bounded connect-retry
+/// loop and wiring it into `service::DebugSessionService::start_session`'s
+/// TCP branch needs a real `spawnBeforeConnect`-style config surface (parsing,
+/// frontend UI, a new wire field) this slice's own scope does not otherwise
+/// require — building the primitive now, correctly gated and tested in
+/// isolation, mirrors this exact domain's own S0/S1 precedent
+/// ([`spawn_adapter`]/[`super::tcp::connect_adapter`] themselves had zero
+/// production callers until S2 gave them one). `#[allow(dead_code)]`: every
+/// caller today is a `#[cfg(test)]` fixture in `exec::tests`.
+#[allow(dead_code)]
+pub(crate) async fn spawn_adapter_as_tcp_companion(
+    trust: &TrustService,
+    workspace: &WorkspaceService,
+    window_label: &str,
+    confirmation: &ConfirmationService,
+    descriptor: &dto::AdapterSpawnDescriptor,
+    cancel: Arc<AtomicBool>,
+) -> Result<AdapterHandle, CommandError> {
+    trust.require_trusted(workspace, window_label).await?;
+    let subject = descriptor.confirmation_subject(AdapterTransportKind::Tcp);
+    confirmation
+        .require_confirmed(workspace, window_label, &subject)
+        .await?;
+    let descriptor = descriptor.clone();
+    tauri::async_runtime::spawn_blocking(move || spawn_adapter_sync(&descriptor, &cancel))
+        .await
+        .map_err(|_| debug_adapter_spawn_unavailable())?
+}
+
 /// The actual hardened build-and-spawn step — see the module doc for the
 /// startup-crash-detection/stderr-cap contract this implements.
 /// `scripts/plain/boundary-contracts.mjs`'s
