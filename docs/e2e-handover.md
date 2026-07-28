@@ -1,6 +1,6 @@
 # 端到端桌面验收交接清单（Codex 执行）
 
-更新时间：2026-07-26
+更新时间：2026-07-28
 
 ## 分工模式
 
@@ -303,8 +303,42 @@ fixture（临时目录中创建，不提交仓库）：
 
 完成后：将结果写入 `features.json` F090 evidence（`nativeScenarios` 追加、`platformGaps` 移除本条目对应缺口；若未执行则如实标注「已登记未执行」，不得凭本条目文字描述代替真实结果；若发现"执行方须知"提到的两个 bug 在真实桌面上仍有残留表现，必须作为阻塞发现单独报告，不得归入本条目的常规完成流程）。
 
+### E2E-010 · F100 真实原生调试器与真实桌面 DAP 全链路矩阵
+
+状态：待执行。本条目补的是 F100 全部六个实现切片（S0-S5）里，Rust 单元测试、真实子进程集成测试与 Browser mock 都无法替代的几个维度。**如实声明本条目的起点**：F100 是本项目迄今唯一一个**完全没有任何真实桌面（Computer Use）验收证据**的已完成 feature——S0 调研阶段确实用一个手写零依赖 Python 分帧客户端跑通了真实 `lldb-dap`（`initialize`/Capabilities 握手成功，但真正启动被调试进程在该沙箱环境下完全挂起）与真实 `debugpy`（完整端到端会话，含真实断点命中）的协议层握手，S2-S5 的全部 Rust 集成测试也都针对真实 spawn 的 Python mock adapter 子进程与真实 TCP socket，但这些都不是"在一个真实运行的 Plain.app 桌面会话里"的证据；本条目要补的正是这最后一环。
+
+fixture（临时目录中创建，不提交仓库；具体路径由执行人自备）：
+
+- 一个真实、最小的 Python 调试目标程序（含至少一个可断点的函数、一次会打印到 stdout 的输出），配套 `.vscode/launch.json`（`type: "debugpy"` 一条配置，`console` 字段先留空/`internalConsole` 用于步骤 2，另建一份 `console: "integratedTerminal"` 的变体用于步骤 4——这是 debugpy 真实支持、本项目研究阶段从未构造过的字段值，用于真实触发 `runInTerminal`）与 `.plain/debug-adapters.json`（`type: "debugpy"`，`command` 指向执行机真实 `python3` 绝对路径，`args: ["-m", "debugpy.adapter"]`）。
+- 一个真实、最小的原生调试目标（例如一个用 `clang`/`swiftc` 编译出的小可执行文件，含一个可断点的函数），配套指向执行机真实 `lldb-dap` 绝对路径（通常是 Xcode Command Line Tools 自带的 `/Applications/Xcode.app/Contents/Developer/usr/bin/lldb-dap` 或等价路径）的 `.plain/debug-adapters.json` 条目与对应 `.vscode/launch.json` 配置。
+- 一个真实、有意造出深调用栈/大变量的 Python 程序（例如一个递归到约 2000 层深度的函数、或持有一个约 5 万元素数组/列表的作用域），用于步骤 5 与 S5 的合成基准数字做主观体感交叉核对（不要求精确复现毫秒数，只需数量级合理）。
+- 一个真实、会向 stdout 高频输出的 Python 程序（例如一个几万次循环的 `print`），用于步骤 6 与 S5 精确的 flood 基准数字（6000 条约 1.2MiB、ack 前仅投递 64 条、丢弃 138624 字节）做主观体感交叉核对。
+- 一个从未对 Plain.app 这个具体二进制授予过信任的全新临时 workspace 根目录（专用于步骤 1 的 trust + 首次确认门矩阵）。
+
+步骤与断言：
+
+1. **trust + 首次确认门的真实首次交互**：在上述全新临时 workspace 根（含 debugpy 的 `.vscode/launch.json`/`.plain/debug-adapters.json`）执行 `Plain: Start Debugging`；断言弹出真实信任确认对话框（文案含"Trust this workspace to run a debug adapter?"）；点击 Cancel/Decline，断言回落到"未信任"禁用态且文案区分于"空 workspace"；重新执行命令并这次同意信任，断言随即弹出**适配器确认对话框**，文案含真实、完整的命令行（真实 `python3` 绝对路径 + `-m debugpy.adapter`）、transport 标签（`stdio`）与配置来源字符串；确认后断言真实 debugpy 会话已启动（而非停留在确认态或报错）。**再次**对同一 workspace 执行 `Plain: Start Debugging`，断言这次两道门都不再弹出（已持久化的确认状态生效）。
+2. **真实 debugpy 端到端**（调研阶段已用手写客户端跑通协议层，但从未在真实 Plain 应用里跑过，这是本步骤要补的空白）：点击编辑器 glyph margin 设置一个真实行断点，断言真实命中（调用栈视图自动刷新并选中第一帧）；展开变量视图核对真实值；添加一条 Watch 表达式并核对真实求值结果；依次点击 Continue/Step Over/Step Into/Step Out，断言每一步真实生效（行高亮/调用栈随之更新）；打开 Debug Console，输入一条表达式，断言真实 REPL 求值结果出现；断言目标程序的真实 stdout 输出出现在 Debug Console 中；Continue 至程序自然退出，断言会话正常结束（区别于步骤 7 要验证的异常终止通知）。
+3. **真实 `lldb-dap` 原生调试（明确允许"跑不起来"，须如实记录而非强行跑通）**：对上述原生编译目标执行 `Plain: Start Debugging`。**已知依赖，执行前必读**：本 feature 调研阶段已实测发现，本机沙箱环境下 `lldb-dap` 的 `initialize`/Capabilities 握手能成功，但真正 `launch` 启动被调试进程会完全挂起（120 秒超时无任何响应）；独立验证还发现连最基础的交互式 `lldb ./sample` + `run` 在同一沙箱下也完全挂起——这**很可能**是该环境对 `ptrace`/`task_for_pid` 类系统调用的限制。**更进一步，这是一个纯打包层前提**：即使在真实、非沙箱的桌面环境下，一个已签名的 macOS 应用要让自己 spawn 的子进程（`lldb-dap`）对另一个子进程（被调试目标）成功调用 `task_for_pid`，通常需要该应用自身的代码签名 entitlements 包含 `com.apple.security.cs.debugger` 之类的调试权限，否则会被系统安全机制拒绝——这与 Plain 自己的 trust/确认逻辑是否正确完全无关，属于 `F120`"Branding, packaging, notices and release checks"的打包/签名范畴，F100 本身不解决它。**因此**：若执行机上用于验收的 Plain.app 构建尚未获得这一 entitlement（大概率是当前状态，因为 F120 尚未开始），本步骤预期会在 `launch` 阶段挂起或失败——这不是 F100 的回归，如实记录"因缺少签名 entitlement 而未能验证"并停止本步骤，不得为了"跑通"而采取任何绕开签名/权限检查的手段；若执行机的 Plain.app 构建**已经**具备该 entitlement（例如 F120 已完成后重新执行本条目），则应完整验证断点命中、调用栈（含原生帧）、变量（原生类型）、单步——并将"原生调试器真实可用"作为一个正向新证据记录。
+4. **真实 `runInTerminal` 触发**：使用步骤 fixture 中 `console: "integratedTerminal"` 的 debugpy launch 配置执行 `Plain: Start Debugging`——这是本 feature 研究阶段与 S4 实现阶段都从未构造过的真实触发场景（S4 的 `runInTerminal` 实现与集成测试全部针对一个自造的 mock adapter，从未被真实 debugpy 或 lldb-dap 触发过）。断言：终端面板被真实强制拉出（即使此前从未打开过），出现一个标题形如 `Debug: <title>` 的新标签页；目标程序的真实 stdout/stdin 通过这个终端标签页流转（而非出现在 Debug Console 里）；该标签页可像普通终端标签页一样被用户点击关闭；关闭后 Debug 会话本身的其余状态不受影响（或按预期一并结束，如实记录二者中哪一种是真实观察到的行为，不预设）。
+5. **真实大规模程序的主观体感——深调用栈/大变量**：对深递归/大数组 fixture 设置断点使其触发，断言调用栈视图能正常展开到真实深度、变量视图能正常分页展开真实大数组；主观评价响应是否流畅（无明显卡顿、无假死），并与 S5 的合成基准数字（2000 帧栈 12.607125ms/约 239KB 响应体、5 万元素数组 146.759709ms/约 3.23MB 响应体）做数量级上的合理性交叉核对，而非要求精确复现——如果真实体感明显比这个数量级预测的更慢，如实记录为需要进一步调查的信号，而非直接归因于"预期内"。
+6. **真实高频 `output` 事件的主观体感**：运行高频 stdout fixture，断言 Debug Console 在洪泛期间仍可交互（可滚动、可继续输入下一条 REPL 表达式）、断言洪泛结束后出现的 `plain/outputElided`-等价提示（如果触发）文案人类可读；与 S5 精确基准数字（6000 条约 1.2MiB flood 耗时 71.826417ms、ack 前仅投递 64 条、ack 后报告丢弃 138624 字节）做数量级合理性交叉核对。
+7. **进程生命周期与清理**：Stop Debugging 后，用 shell 层核对 debugpy adapter 子进程与被调试目标进程均已真正终止（无残留）；对仍在运行的调试会话直接 Cmd+Q 退出整个应用，同样用 shell 层核对全部相关子进程（adapter、debuggee、若步骤 4 创建了终端会话则含其 shell 子进程）已消失，无残留 zombie/孤儿进程。
+8. 每步 UI 断言后尽量用 shell 层交叉核对（`ps`、读取真实 stdout 内容等），而不仅凭 UI 呈现下结论。
+9. 清理：退出应用；删除全部 fixture（Python/原生目标程序、`.vscode/launch.json`、`.plain/debug-adapters.json`）、截图与 `src-tauri/target`；确认执行前用于原生调试步骤准备的编译产物已删除，不留在临时目录之外的位置。
+
+已知边界（执行方须知）：
+
+- 步骤 3（真实 `lldb-dap`）预期可能因缺少 `com.apple.security.cs.debugger` 签名 entitlement 而无法完整验证——这是已知的、记录在案的 F120 前置依赖，不是本条目或 F100 的回归，执行方应如实记录"阻塞于签名前提"而非强行寻找绕过手段。
+- 步骤 4（`runInTerminal`）与 F100 S4 的 Rust/Browser 证据完全不同源——那些证据全部针对一个自造 mock adapter；本步骤是这条路径**首次**被一个真实 DAP adapter（debugpy）触发,若观察到与 mock 场景不一致的行为（例如 debugpy 实际发送的 `RunInTerminalRequestArguments` 字段形状与预期不同），应如实记录为新发现,而非预设"应该和 mock 一样"。
+- `runInTerminal` 的 `kind: "external"` 分支、Disassembly 视图、`hitCondition` 命中次数条件断点、多 launch 配置的 QuickPick 选择器均为已记录的既定收窄（见 `features.json` F100 `platformGaps`），本条目不需要专门验证这些缺口，出现属预期。
+- TCP "先 spawn 再连接"编排（`spawn_adapter_as_tcp_companion`）尚未接入任何生产路径，本条目不需要验证 TCP 场景——F100 v1 的 TCP 支持假设 adapter 已由外部先行启动，本条目全程使用 stdio 传输的 debugpy/lldb-dap。
+- DAP 协议本身不提供取消 in-flight 请求的机制，如果本条目执行中观察到某个慢请求"无法取消"，这是协议层限制，不是缺陷。
+
+完成后：将结果写入 `features.json` F100 evidence（`nativeScenarios` 追加、`platformGaps` 移除本条目对应缺口；若步骤 3 因签名 entitlement 缺失而未能验证，如实标注"阻塞于 F120 签名前提，已登记未执行"，不得视为回归；若步骤 4 发现 mock adapter 从未暴露过的真实差异，必须作为独立发现单独报告，不得归入本条目的常规完成流程）。
+
 ## 后续条目（随切片追加）
 
 - F030 遗留：真实 `CloseRequested` 关窗握手协议实现后，补「正常关窗 → 重开恢复」的桌面验收变体。
-- F080-F090 Git、F100 DAP 的真实桌面矩阵按 docs/testing.md「真实 Tauri E2E」清单逐项登记。
+- F080/F090 Git 与 Git 历史/blame 工具的真实桌面矩阵已按 docs/testing.md「真实 Tauri E2E」清单登记（分别为 E2E-008、E2E-009）。
 - F120/F130 发布与全量原生回归。
