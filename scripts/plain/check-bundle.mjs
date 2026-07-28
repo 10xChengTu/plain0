@@ -1,7 +1,12 @@
-import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+import {
+	classifyDebtSources,
+	evaluateBundleBaseline,
+	normalizeSource,
+} from "./bundle-baseline-contracts.mjs";
 
 const root = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -24,28 +29,6 @@ async function walk(directory) {
 	}
 	return files;
 }
-
-function normalizeSource(source) {
-	return source
-		.replaceAll("\\", "/")
-		.replace(/^.*?node_modules\/\.pnpm\/[^/]+\/node_modules\//, "node_modules/")
-		.replace(/^(?:\.\.\/)+/, "");
-}
-
-const categories = {
-	chatAgent: (source) =>
-		/\/(?:chat|inlineChat|agentHost|agentEditorComments)\//i.test(source),
-	mcp: (source) => /\/mcp\//i.test(source),
-	authAccount: (source) =>
-		/\/(?:authentication|accounts?)\//i.test(source) ||
-		/\/(?:defaultAccount|globalCompositeBar)\.js$/i.test(source),
-	syncEditSessions: (source) =>
-		/\/(?:userDataSync|editSessions)\//i.test(source),
-	extensionRuntime: (source) =>
-		/\/(?:extensions|extensionManagement|extensionGallery|extensionHost)(?:\/|[A-Z])/i.test(
-			source,
-		),
-};
 
 const forbiddenHostSources = [
 	"webWorkerExtensionHost.js",
@@ -128,21 +111,13 @@ for (const command of forbiddenCommandIds) {
 }
 
 const sortedSources = [...sources].sort();
-const debtSources = sortedSources.filter((source) =>
-	Object.values(categories).some((matches) => matches(source)),
-);
+const { byCategory, debtSources } = classifyDebtSources(sortedSources);
 const actual = {
 	sourceCount: sortedSources.length,
 	debtSourceCount: debtSources.length,
 	categoryCounts: Object.fromEntries(
-		Object.entries(categories).map(([name, matches]) => [
-			name,
-			sortedSources.filter(matches).length,
-		]),
+		Object.entries(byCategory).map(([name, list]) => [name, list.length]),
 	),
-	debtSourceSha256: createHash("sha256")
-		.update(debtSources.join("\n"))
-		.digest("hex"),
 };
 
 if (process.argv.includes("--print")) {
@@ -151,19 +126,12 @@ if (process.argv.includes("--print")) {
 	const baseline = JSON.parse(
 		await readFile(path.join(root, "docs/bundle-baseline.json"), "utf8"),
 	);
-	for (const key of ["sourceCount", "debtSourceCount", "debtSourceSha256"]) {
-		if (baseline[key] !== actual[key]) {
-			fail(
-				`bundle baseline ${key} changed: expected ${baseline[key]}, got ${actual[key]}`,
-			);
-		}
-	}
-	for (const [category, count] of Object.entries(actual.categoryCounts)) {
-		if (baseline.categoryCounts?.[category] !== count) {
-			fail(
-				`bundle baseline ${category} changed: expected ${baseline.categoryCounts?.[category]}, got ${count}`,
-			);
-		}
+	const { failures: ratchetFailures } = evaluateBundleBaseline(
+		sortedSources,
+		baseline,
+	);
+	for (const failure of ratchetFailures) {
+		fail(failure);
 	}
 
 	const featureDocument = JSON.parse(

@@ -1,17 +1,1078 @@
 {
-	"schemaVersion": 1,
+	"schemaVersion": 2,
 	"dependencyVersion": "35.0.1",
-	"mode": "F010-transitional",
+	"mode": "F110-ratchet",
 	"sourceCount": 2208,
-	"debtSourceCount": 203,
-	"categoryCounts": {
-		"chatAgent": 121,
+	"debtSourceCount": 260,
+	"categoryCeilings": {
+		"chatAgent": 122,
 		"mcp": 16,
 		"authAccount": 11,
 		"syncEditSessions": 8,
-		"extensionRuntime": 47
+		"extensionRuntime": 47,
+		"notebook": 23,
+		"tasks": 1,
+		"testing": 9,
+		"remote": 11,
+		"languagePacks": 2,
+		"languageDetection": 2,
+		"treeSitter": 8
 	},
-	"debtSourceSha256": "03208818d455dabc60ddc6d2185e54bb8427303f7bd0ac111ac4d29d43c02b8b",
-	"strictModeFeature": "F110",
-	"note": "Only unreachable compatibility stubs and the hostless static theme registry may remain before F110."
+	"debtSources": [
+		{
+			"category": "authAccount",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/browser/parts/globalCompositeBar.js"
+		},
+		{
+			"category": "authAccount",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/authentication/browser/authenticationAccessService.service.js"
+		},
+		{
+			"category": "authAccount",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/authentication/browser/authenticationMcpAccessService.service.js"
+		},
+		{
+			"category": "authAccount",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/authentication/browser/authenticationMcpService.service.js"
+		},
+		{
+			"category": "authAccount",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/authentication/browser/authenticationMcpUsageService.service.js"
+		},
+		{
+			"category": "authAccount",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/authentication/browser/authenticationService.js"
+		},
+		{
+			"category": "authAccount",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/authentication/browser/authenticationUsageService.service.js"
+		},
+		{
+			"category": "authAccount",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/authentication/common/authentication.js"
+		},
+		{
+			"category": "authAccount",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/authentication/common/authentication.service.js"
+		},
+		{
+			"category": "authAccount",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/authentication/common/authenticationQuery.service.js"
+		},
+		{
+			"category": "authAccount",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/authentication/common/dynamicAuthenticationProviderStorage.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/agentHost/browser/nullAgentHostService.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/agentHost/browser/nullSshRemoteAgentHostService.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/agentHost/common/agentHostConnectionsService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/agentHost/common/agentHostResourceService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/agentHost/common/agentHostUri.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/agentHost/common/agentService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/agentHost/common/remoteAgentHostService.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/agentHost/common/remoteAgentHostService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/agentHost/common/sshRemoteAgentHost.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/agentHost/common/state/protocol/channels-changeset/commands.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/agentHost/common/state/protocol/channels-changeset/state.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/agentHost/common/state/protocol/channels-chat/state.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/agentHost/common/state/protocol/channels-resource-watch/state.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/agentHost/common/state/protocol/channels-root/state.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/agentHost/common/state/protocol/channels-session/commands.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/agentHost/common/state/protocol/channels-session/state.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/agentHost/common/state/protocol/channels-terminal/state.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/agentHost/common/state/protocol/common/commands.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/agentHost/common/state/protocolUpgrade.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/agentHost/common/state/sessionProtocol.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/agentHost/common/state/sessionState.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/actions/chatConstants.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/actions/exportAgentHostDebugLogsAction.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/agentSessions/agentHost/agentHostActiveClientService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/agentSessions/agentHost/agentHostCustomizationService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/agentSessions/agentHost/agentHostNewSessionFolderService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/agentSessions/agentHost/agentHostSessionWorkingDirectoryResolver.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/agentSessions/agentHost/agentHostToolSetEnablementService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/agentSessions/agentHost/agentHostUntitledProvisionalSessionService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/agentSessions/agentSessionsService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/agentSessions/experiments/agentSessionProjectionService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/agentSessions/experiments/agentTitleBarStatusService.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/agentSessions/experiments/agentTitleBarStatusService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/aiCustomization/aiCustomizationItemsModel.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/attachments/chatAttachmentResolveService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/attachments/chatAttachmentWidgetRegistry.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/attachments/chatContextPickService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/chat.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorContextKeys.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingExplanationModelManager.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/chatGoalSummaryService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/chatImageCarouselService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/chatOutputItemRenderer.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/chatResponseFileChangesService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/chatStatus/chatStatusItemService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/chatTipService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/contextContrib/chatContextService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/planReviewFeedback/planReviewFeedbackService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/tools/chatToolRiskAssessmentService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/voiceClient/micCaptureService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/voiceClient/ttsPlaybackService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/voiceClient/voiceSessionController.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/voiceClient/voiceToolDispatchService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatMarkdownAnchorService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatOutputPartStateCache.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatTextEditContentPart.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/widget/input/chatInputNotificationService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/browser/widget/input/chatPhoneInputPresenter.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/actions/chatContextKeys.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/aiCustomizationWorkspaceService.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/aiCustomizationWorkspaceService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/attachments/chatVariables.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/chatDebugService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/chatModes.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/chatService/chatService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/chatSessionsService.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/chatSessionsService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/constants.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/customizationHarnessService.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/customizationHarnessService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/editing/chatCodeMapperService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/editing/chatEditingService.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/editing/chatEditingService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/enablement.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/ignoredFiles.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/languageModels.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/languageModelsConfiguration.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/languageModelStats.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/model/chatTransferService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/model/chatUri.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/participants/chatAgents.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/participants/chatSlashCommands.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/plugins/agentPluginRepositoryService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/plugins/agentPluginService.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/plugins/agentPluginService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/plugins/pluginGitService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/plugins/pluginInstallService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/plugins/pluginMarketplaceService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/plugins/workspacePluginSettingsService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/promptSyntax/config/config.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/promptSyntax/config/promptFileLocations.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/promptSyntax/hookClaudeCompat.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/promptSyntax/hookCompatibility.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/promptSyntax/hookCopilotCliCompat.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/promptSyntax/hookSchema.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/promptSyntax/hookTypes.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/promptSyntax/languageProviders/promptFileAttributes.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/promptSyntax/promptFileParser.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/promptSyntax/promptTypes.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/promptSyntax/service/extensionPromptFileService.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/promptSyntax/service/promptsService.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/promptSyntax/service/promptsService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/promptSyntax/service/promptsServiceImpl.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/promptSyntax/utils/promptFilesLocator.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/tools/chatArtifactsService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/tools/chatTodoListService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/tools/languageModelToolsConfirmationService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/tools/languageModelToolsService.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/tools/languageModelToolsService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/tools/promptTsxTypes.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/tools/toolResultCompressor.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/voiceClient/voiceClientService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/voicePlaybackService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/widget/chatLayoutService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/widget/chatResponseResourceFileSystemProvider.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/widget/chatWidgetHistoryService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/inlineChat/browser/inlineChatSessionService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/remoteCodingAgents/common/remoteCodingAgentsService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/agentEditorComments/common/agentEditorComments.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/agentHost/common/agentHostFileSystemService.service.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/chat/common/chatEntitlementService.js"
+		},
+		{
+			"category": "chatAgent",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/chat/common/chatEntitlementService.service.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/debug/common/extensionHostDebug.service.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensionManagement/common/extensionGalleryManifest.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensionManagement/common/extensionGalleryManifest.service.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensionManagement/common/extensionManagement.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensionManagement/common/extensionManagement.service.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensionManagement/common/extensionManagementUtil.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensionManagement/common/extensionNls.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensionManagement/common/extensionsProfileScannerService.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensionManagement/common/extensionsProfileScannerService.service.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensionManagement/common/extensionsScannerService.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensionManagement/common/extensionsScannerService.service.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensionManagement/common/extensionStorage.service.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensionManagement/common/implicitActivationEvents.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensions/common/extensions.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensions/common/extensions.service.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensions/common/extensionsApiProposals.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensions/common/extensionValidator.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/extensions/common/extensions.service.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensionManagement/browser/extensionBisect.service.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensionManagement/common/extensionFeatures.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensionManagement/common/extensionFeatures.service.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensionManagement/common/extensionManagement.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensionManagement/common/extensionManagement.service.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/browser/extensionUrlHandler.service.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/common/extensionDescriptionRegistry.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/common/extensionHostKind.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/common/extensionManifestPropertiesService.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/common/extensionManifestPropertiesService.service.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/common/extensionRunningLocation.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/common/extensions.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/common/extensions.service.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/common/extensionsRegistry.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/common/lazyPromise.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/common/proxyIdentifier.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/common/rpcProtocol.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/common/workspaceContains.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-extensions-service-override/vscode/src/vs/workbench/services/extensionManagement/browser/webExtensionsScannerService.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-extensions-service-override/vscode/src/vs/workbench/services/extensions/browser/extensionService.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-extensions-service-override/vscode/src/vs/workbench/services/extensions/browser/webWorkerFileSystemProvider.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-extensions-service-override/vscode/src/vs/workbench/services/extensions/common/abstractExtensionService.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-extensions-service-override/vscode/src/vs/workbench/services/extensions/common/extensionDevOptions.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-extensions-service-override/vscode/src/vs/workbench/services/extensions/common/extensionHostManager.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-extensions-service-override/vscode/src/vs/workbench/services/extensions/common/extensionRunningLocationTracker.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-extensions-service-override/vscode/src/vs/workbench/services/extensions/common/extensionsProposedApi.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-extensions-service-override/vscode/src/vs/workbench/services/extensions/common/extensionsUtil.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-extensions-service-override/vscode/src/vs/workbench/services/extensions/common/extHostCustomers.js"
+		},
+		{
+			"category": "extensionRuntime",
+			"source": "node_modules/@codingame/monaco-vscode-extensions-service-override/vscode/src/vs/workbench/services/extensions/common/lazyCreateExtensionHostManager.js"
+		},
+		{
+			"category": "languageDetection",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/languageDetection/common/languageDetectionWorkerService.js"
+		},
+		{
+			"category": "languageDetection",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/languageDetection/common/languageDetectionWorkerService.service.js"
+		},
+		{
+			"category": "languagePacks",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/languagePacks/common/languagePacks.service.js"
+		},
+		{
+			"category": "languagePacks",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/languagePacks/common/localizedStrings.js"
+		},
+		{
+			"category": "mcp",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/mcp/common/mcpGalleryManifest.js"
+		},
+		{
+			"category": "mcp",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/mcp/common/mcpGalleryManifest.service.js"
+		},
+		{
+			"category": "mcp",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/mcp/common/mcpManagement.js"
+		},
+		{
+			"category": "mcp",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/mcp/common/mcpManagement.service.js"
+		},
+		{
+			"category": "mcp",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/mcp/common/mcpManagementIpc.js"
+		},
+		{
+			"category": "mcp",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/mcp/common/mcpManagementService.js"
+		},
+		{
+			"category": "mcp",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/mcp/common/mcpPlatformTypes.js"
+		},
+		{
+			"category": "mcp",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/mcp/common/mcpResourceScannerService.service.js"
+		},
+		{
+			"category": "mcp",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/mcp/common/modelContextProtocol.js"
+		},
+		{
+			"category": "mcp",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/mcp/common/mcpGatewayService.service.js"
+		},
+		{
+			"category": "mcp",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/mcp/common/mcpRegistryTypes.service.js"
+		},
+		{
+			"category": "mcp",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/mcp/common/mcpSandboxService.service.js"
+		},
+		{
+			"category": "mcp",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/mcp/common/mcpTypes.js"
+		},
+		{
+			"category": "mcp",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/mcp/common/mcpTypes.service.js"
+		},
+		{
+			"category": "mcp",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/mcp/common/mcpWorkbenchManagementService.js"
+		},
+		{
+			"category": "mcp",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/mcp/common/mcpWorkbenchManagementService.service.js"
+		},
+		{
+			"category": "notebook",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/api/common/extHostTypes/notebooks.js"
+		},
+		{
+			"category": "notebook",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/notebook/browser/diff/inlineDiff/notebookOriginalCellModelFactory.service.js"
+		},
+		{
+			"category": "notebook",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/notebook/browser/diff/inlineDiff/notebookOriginalModelRefFactory.service.js"
+		},
+		{
+			"category": "notebook",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/notebook/browser/notebookBrowser.js"
+		},
+		{
+			"category": "notebook",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/notebook/browser/services/notebookEditorService.service.js"
+		},
+		{
+			"category": "notebook",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/notebook/browser/viewModel/notebookOutlineDataSourceFactory.service.js"
+		},
+		{
+			"category": "notebook",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/notebook/browser/viewModel/notebookOutlineEntryFactory.service.js"
+		},
+		{
+			"category": "notebook",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/notebook/common/notebookCellStatusBarService.service.js"
+		},
+		{
+			"category": "notebook",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/notebook/common/notebookCommon.js"
+		},
+		{
+			"category": "notebook",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/notebook/common/notebookEditorInput.js"
+		},
+		{
+			"category": "notebook",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/notebook/common/notebookEditorModelResolverService.service.js"
+		},
+		{
+			"category": "notebook",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/notebook/common/notebookExecutionService.service.js"
+		},
+		{
+			"category": "notebook",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/notebook/common/notebookExecutionStateService.service.js"
+		},
+		{
+			"category": "notebook",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/notebook/common/notebookKernelService.service.js"
+		},
+		{
+			"category": "notebook",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/notebook/common/notebookKeymapService.service.js"
+		},
+		{
+			"category": "notebook",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/notebook/common/notebookLoggingService.service.js"
+		},
+		{
+			"category": "notebook",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/notebook/common/notebookRendererMessagingService.service.js"
+		},
+		{
+			"category": "notebook",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/notebook/common/notebookService.js"
+		},
+		{
+			"category": "notebook",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/notebook/common/notebookService.service.js"
+		},
+		{
+			"category": "notebook",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/notebook/common/services/notebookWorkerService.service.js"
+		},
+		{
+			"category": "notebook",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/search/common/notebookSearch.service.js"
+		},
+		{
+			"category": "notebook",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/notebook/common/notebookDocumentService.js"
+		},
+		{
+			"category": "notebook",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/notebook/common/notebookDocumentService.service.js"
+		},
+		{
+			"category": "remote",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/remote/common/remoteAgentConnection.js"
+		},
+		{
+			"category": "remote",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/remote/common/remoteAuthorityResolver.js"
+		},
+		{
+			"category": "remote",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/remote/common/remoteAuthorityResolver.service.js"
+		},
+		{
+			"category": "remote",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/remote/common/remoteExtensionsScanner.service.js"
+		},
+		{
+			"category": "remote",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/remote/common/remoteHosts.js"
+		},
+		{
+			"category": "remote",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/remote/common/remoteSocketFactoryService.service.js"
+		},
+		{
+			"category": "remote",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/remote/common/remoteAgentService.service.js"
+		},
+		{
+			"category": "remote",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/remote/common/remoteExplorerService.js"
+		},
+		{
+			"category": "remote",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/remote/common/remoteExplorerService.service.js"
+		},
+		{
+			"category": "remote",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/remote/common/tunnelModel.js"
+		},
+		{
+			"category": "remote",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/userDataProfile/common/remoteUserDataProfiles.service.js"
+		},
+		{
+			"category": "syncEditSessions",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/userDataSync/common/ignoredExtensions.service.js"
+		},
+		{
+			"category": "syncEditSessions",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/userDataSync/common/userDataSync.js"
+		},
+		{
+			"category": "syncEditSessions",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/userDataSync/common/userDataSync.service.js"
+		},
+		{
+			"category": "syncEditSessions",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/userDataSync/common/userDataSyncAccount.service.js"
+		},
+		{
+			"category": "syncEditSessions",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/userDataSync/common/userDataSyncMachines.service.js"
+		},
+		{
+			"category": "syncEditSessions",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/editSessions/common/editSessions.service.js"
+		},
+		{
+			"category": "syncEditSessions",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/userDataSync/common/userDataSync.js"
+		},
+		{
+			"category": "syncEditSessions",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/userDataSync/common/userDataSync.service.js"
+		},
+		{
+			"category": "tasks",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/tasks/common/taskService.service.js"
+		},
+		{
+			"category": "testing",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/testing/common/testCoverageService.service.js"
+		},
+		{
+			"category": "testing",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/testing/common/testExplorerFilterState.service.js"
+		},
+		{
+			"category": "testing",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/testing/common/testingContinuousRunService.service.js"
+		},
+		{
+			"category": "testing",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/testing/common/testingDecorations.service.js"
+		},
+		{
+			"category": "testing",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/testing/common/testingPeekOpener.service.js"
+		},
+		{
+			"category": "testing",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/testing/common/testProfileService.service.js"
+		},
+		{
+			"category": "testing",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/testing/common/testResultService.service.js"
+		},
+		{
+			"category": "testing",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/testing/common/testResultStorage.service.js"
+		},
+		{
+			"category": "testing",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/testing/common/testService.service.js"
+		},
+		{
+			"category": "treeSitter",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/editor/common/model/tokens/treeSitter/cursorUtils.js"
+		},
+		{
+			"category": "treeSitter",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/editor/common/model/tokens/treeSitter/tokenStore.js"
+		},
+		{
+			"category": "treeSitter",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/editor/common/model/tokens/treeSitter/treeSitterSyntaxTokenBackend.js"
+		},
+		{
+			"category": "treeSitter",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/editor/common/model/tokens/treeSitter/treeSitterTokenizationImpl.js"
+		},
+		{
+			"category": "treeSitter",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/editor/common/model/tokens/treeSitter/treeSitterTree.js"
+		},
+		{
+			"category": "treeSitter",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/editor/common/services/treeSitter/treeSitterLibraryService.service.js"
+		},
+		{
+			"category": "treeSitter",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/editor/common/services/treeSitter/treeSitterThemeService.service.js"
+		},
+		{
+			"category": "treeSitter",
+			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/editor/standalone/browser/standaloneTreeSitterLibraryService.js"
+		}
+	],
+	"categoryNotes": {
+		"chatAgent": "Registered, one-shot, by @codingame/monaco-vscode-api/services.js's unconditional `import \"./missing-services.js\"` (docs/research/2026-07-28-legacy-retirement.md \"结论 1\"): every Chat/Copilot/Agent service token missing-services.js does not find an installed override for gets a Null/default registerSingleton stub here, whether or not any of Plain's 13 real override packages ever reference it (结论 2 confirmed 12/13 are clean; the scm-service-override exception was already known not to reach the real bundle). 121 of these 122 are workbench/contrib/{chat,inlineChat,agentEditorComments}/** or platform/agentHost/** stub/token files. The 122nd, workbench/contrib/remoteCodingAgents/common/remoteCodingAgentsService.service.js, was found during F110 S0's real-content audit: its stub (registerAgent/getRegisteredAgents/getAvailableAgents, all no-ops) sits in missing-services.js directly between ChatAttachmentResolveService and McpElicitationService and is genuinely an AI coding-agent registry despite the 'remote' spelling in its directory name -- classifying it under a bare remote keyword match would have repeated the exact globalCompositeBar.js filename-vs-content mismatch this research flagged as a trap. Expected floor after F110 S3: 0.",
+		"mcp": "Same missing-services.js mechanism as chatAgent, scoped to /mcp/ paths (MCP gallery/management/elicitation tokens and stubs). Expected floor after F110 S2: 0.",
+		"authAccount": "10 of 11 are workbench/services/authentication/** missing-services.js stubs (same mechanism, expected floor after F110 S2: 0). The 11th, workbench/browser/parts/globalCompositeBar.js, is matched by filename, not content: it is a real, currently-imported piece of Activity Bar layout (the account-menu 'Manage' gear icon), already behaviorally neutered by patches/@codingame__monaco-vscode-api@35.0.1.patch ('Plain intentionally has no accounts surface'). It stays non-zero until F110 S4 migrates the surviving gear-icon logic into app/ per the main session's decision point 2 ruling (migrate, do not delete the gear icon).",
+		"syncEditSessions": "Same missing-services.js mechanism as chatAgent, scoped to /userDataSync/ and /editSessions/ paths. Expected floor after F110 S2: 0.",
+		"extensionRuntime": "The most heterogeneous category (docs/research/2026-07-28-legacy-retirement.md \"结论 2\"): 34 are @codingame/monaco-vscode-api base-package missing-services.js stubs/tokens (e.g. extensions.js's NullExtensionService), but 13 are real, instantiated @codingame/monaco-vscode-extensions-service-override files (extensionService.js's real ExtensionServiceOverride, rpcProtocol.js, extensionHostManager.js, etc.) -- already deeply neutered by patches/@codingame__monaco-vscode-extensions-service-override@35.0.1.patch (DisabledExtensionHostFactory/DisabledExtensionHostKindPicker) so no host of any kind can ever be created, but the files and their RPC/lifecycle scaffolding remain. The main session's decision point 3 ruling accepts a non-zero floor here (replacing the vendor IExtensionService DI token is judged too risky for the benefit); F110 S5's evidence must enumerate whatever floor remains file-by-file with a behavioral-inertness argument for each, not just a total.",
+		"notebook": "Same missing-services.js mechanism as chatAgent (newly tracked in F110 S0 per the main session's decision point 4). 22 of 23 sit under a notebook/ directory segment; the 23rd, workbench/contrib/search/common/notebookSearch.service.js, bridges Search and Notebook from the generic search contribution directory. Expected floor after F110 S6: 0.",
+		"tasks": "Same missing-services.js mechanism as chatAgent (newly tracked in F110 S0). Single file: workbench/contrib/tasks/common/taskService.service.js. Expected floor after F110 S6: 0.",
+		"testing": "Same missing-services.js mechanism as chatAgent (newly tracked in F110 S0). All 9 sit under workbench/contrib/testing/common/. Expected floor after F110 S6: 0.",
+		"remote": "Same missing-services.js mechanism as chatAgent (newly tracked in F110 S0), scoped to the real remote-development/tunnel trees platform/remote/** and workbench/services/remote/**, plus remoteUserDataProfiles.service.js (a remote-authority profile resolver). Deliberately excludes two other files whose paths matched a naive remote keyword search during F110 S0's audit: workbench/contrib/remoteCodingAgents/common/remoteCodingAgentsService.service.js (real content is AI/Agent -- reclassified into chatAgent above) and @codingame/monaco-vscode-configuration-service-override's workbench/contrib/workspaces/browser/recentRemoteFolderPruner.js (a real, currently-imported contribution from a package Plain actually depends on, not a missing-services.js stub; app/excluded-surface-policy.ts already documents it as recently-opened-list housekeeping, not the Remote Development/tunnels surface -- counting it here would contradict that existing, already-audited judgment). Expected floor after F110 S6: 0.",
+		"languagePacks": "Same missing-services.js mechanism as chatAgent (newly tracked in F110 S0). Both files sit under platform/languagePacks/common/ (i18n language-pack download/localized-strings tokens, part of the acceptance #5 \"language environments\" scope per the main session ruling). Expected floor after F110 S6: 0.",
+		"languageDetection": "Same missing-services.js mechanism as chatAgent (newly tracked in F110 S0). Both files sit under workbench/services/languageDetection/common/ (automatic language detection, part of the acceptance #5 \"language environments\" scope per the main session ruling). Expected floor after F110 S6: 0.",
+		"treeSitter": "Same missing-services.js mechanism as chatAgent (newly tracked in F110 S0), part of the acceptance #5 \"language environments\" scope per the main session ruling (Plain uses static TextMate grammars, not tree-sitter). 7 of 8 sit under a treeSitter/ directory segment; the 8th, editor/standalone/browser/standaloneTreeSitterLibraryService.js, only carries the name as a camelCase filename infix. Expected floor after F110 S6: 0."
+	},
+	"note": "F110 S0 (docs/research/2026-07-28-legacy-retirement.md, decision points 4/5): this baseline is a ratchet, not a fixed value. scripts/plain/check-bundle.mjs fails a category only when its real debt-source count exceeds categoryCeilings[category], or when it contains a source path never catalogued in debtSources for that category before -- either signals a regression. A category shrinking (fewer or zero real members, all already present in debtSources) passes without editing this file; that is deliberate, so later F110 cleanup slices are never tempted to mask a regression by hand-editing a number. debtSources is the explicit, machine-generated floor list acceptance #5's own research called for (\"哪些文件还在、各自为什么还在\") -- see categoryNotes per category for why each group is still present and when it is expected to reach its floor. The previous schema (schemaVersion 1) locked debtSourceCount/categoryCounts to exact values plus a debtSourceSha256 of the joined debt-source list; that exact-match semantics is incompatible with a ratchet (any real decrease changes the hash, which would force a manual baseline edit on every legitimate cleanup -- the same 'edit the number to make it green' anti-pattern the ratchet exists to remove), so debtSourceSha256 has been dropped rather than kept as dead weight. debtSources supersedes it: unlike a hash, it is diffable, human-readable, and (via the per-category subset check) still catches a same-count swap of one tracked debt source for a different, previously-untracked one, which a bare numeric ceiling alone would miss."
 }
