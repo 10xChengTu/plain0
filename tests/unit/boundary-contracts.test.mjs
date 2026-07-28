@@ -49,6 +49,9 @@ import {
 	validateGitWorktreeConfirmationBoundary,
 	validateMultiDiffEditorOverrideImportBoundary,
 	validateViewPaneDependencyDecoratorBoundary,
+	validateDebugAdapterSpawnBoundary,
+	validateDebugSpawnConstructionShape,
+	validateDebugFramingBounds,
 } from "../../scripts/plain/boundary-contracts.mjs";
 
 const baselineWindow = {
@@ -11771,5 +11774,328 @@ IDialogService(PlainGitWorktreeView, undefined, 12);`,
 					failure.includes("11 parameter(s)"),
 			),
 		).toBe(true);
+	});
+});
+
+describe("Plain F100 S0 debug adapter spawn/framing boundary Harness", () => {
+	const debugExecSource = readFileSync(
+		new URL("../../src-tauri/src/debug/exec.rs", import.meta.url),
+		"utf8",
+	);
+	const debugFramingSource = readFileSync(
+		new URL("../../src-tauri/src/debug/framing.rs", import.meta.url),
+		"utf8",
+	);
+
+	const baselineDebugRustSources = Object.freeze([
+		{ relativePath: "src-tauri/src/debug/exec.rs", source: debugExecSource },
+		{
+			relativePath: "src-tauri/src/debug/framing.rs",
+			source: debugFramingSource,
+		},
+	]);
+
+	function withMutatedDebugSource(relativePath, mutate) {
+		return baselineDebugRustSources.map((entry) =>
+			entry.relativePath === relativePath
+				? { ...entry, source: mutate(entry.source) }
+				: entry,
+		);
+	}
+
+	const trustCheckAnchor =
+		"    trust.require_trusted(workspace, window_label).await?;\n    let descriptor = descriptor.clone();";
+	const constructionAnchor =
+		"    let mut command = Command::new(&descriptor.command);\n    command.args(&descriptor.args);";
+
+	describe("validateDebugAdapterSpawnBoundary", () => {
+		it("passes for the real, unmodified debug/exec.rs", () => {
+			expect(
+				validateDebugAdapterSpawnBoundary(baselineDebugRustSources),
+			).toEqual([]);
+		});
+
+		it("requires debug/exec.rs to be present", () => {
+			expect(validateDebugAdapterSpawnBoundary([])).toEqual([
+				"debug adapter spawn boundary requires debug/exec.rs",
+			]);
+		});
+
+		it("requires a spawn_adapter function to exist", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) =>
+					source.replace(
+						"pub(crate) async fn spawn_adapter(",
+						"pub(crate) async fn spawn_adapter_renamed(",
+					),
+			);
+			expect(validateDebugAdapterSpawnBoundary(mutated)).toEqual([
+				"debug/exec.rs must define spawn_adapter",
+			]);
+		});
+
+		it("rejects a spawn_adapter body that spawns before checking trust", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(trustCheckAnchor)).toBe(true);
+					return source.replace(
+						trustCheckAnchor,
+						"    let descriptor = descriptor.clone();\n    trust.require_trusted(workspace, window_label).await?;",
+					);
+				},
+			);
+			const failures = validateDebugAdapterSpawnBoundary(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"spawn_adapter must call trust.require_trusted(workspace, window_label).await? as its literal first statement",
+					),
+				),
+			).toBe(true);
+		});
+
+		it("rejects spawn_adapter when the trust check is missing entirely", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(trustCheckAnchor)).toBe(true);
+					return source.replace(
+						trustCheckAnchor,
+						"    let descriptor = descriptor.clone();",
+					);
+				},
+			);
+			const failures = validateDebugAdapterSpawnBoundary(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"spawn_adapter must call trust.require_trusted(workspace, window_label).await? as its literal first statement",
+					),
+				),
+			).toBe(true);
+		});
+	});
+
+	describe("validateDebugSpawnConstructionShape", () => {
+		it("passes for the real, unmodified debug/exec.rs", () => {
+			expect(
+				validateDebugSpawnConstructionShape(baselineDebugRustSources),
+			).toEqual([]);
+		});
+
+		it("requires debug/exec.rs to be present", () => {
+			expect(validateDebugSpawnConstructionShape([])).toEqual([
+				"debug spawn construction boundary requires debug/exec.rs",
+			]);
+		});
+
+		it("requires a spawn_adapter_sync function to exist", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) =>
+					source.replace(
+						"fn spawn_adapter_sync(",
+						"fn spawn_adapter_sync_renamed(",
+					),
+			);
+			expect(validateDebugSpawnConstructionShape(mutated)).toEqual([
+				"debug/exec.rs must define spawn_adapter_sync",
+			]);
+		});
+
+		it("rejects a shell interpreter passed to Command::new", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(constructionAnchor)).toBe(true);
+					return source.replace(
+						constructionAnchor,
+						`${constructionAnchor}\n    let _sh = Command::new("sh");`,
+					);
+				},
+			);
+			const failures = validateDebugSpawnConstructionShape(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes("must not spawn a shell interpreter"),
+				),
+			).toBe(true);
+		});
+
+		it("rejects format! feeding into the spawned command", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(constructionAnchor)).toBe(true);
+					return source.replace(
+						constructionAnchor,
+						`${constructionAnchor}\n    let _joined = format!("{} extra", descriptor.command);`,
+					);
+				},
+			);
+			const failures = validateDebugSpawnConstructionShape(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"must not build the spawned program or its arguments via format!",
+					),
+				),
+			).toBe(true);
+		});
+
+		it('rejects a shell "-c" literal argument', () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(constructionAnchor)).toBe(true);
+					return source.replace(
+						constructionAnchor,
+						`${constructionAnchor}\n    command.arg("-c");`,
+					);
+				},
+			);
+			const failures = validateDebugSpawnConstructionShape(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes('must not pass a shell "-c" argument'),
+				),
+			).toBe(true);
+		});
+
+		it("rejects a program name that is not Command::new(&descriptor.command)", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(constructionAnchor)).toBe(true);
+					return source.replace(
+						constructionAnchor,
+						'    let mut command = Command::new("hardcoded-adapter");\n    command.args(&descriptor.args);',
+					);
+				},
+			);
+			const failures = validateDebugSpawnConstructionShape(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"must construct the child process via Command::new(&descriptor.command)",
+					),
+				),
+			).toBe(true);
+		});
+
+		it("rejects an argv source that is not .args(&descriptor.args)", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(constructionAnchor)).toBe(true);
+					return source.replace(
+						constructionAnchor,
+						'    let mut command = Command::new(&descriptor.command);\n    command.args(["--flag"]);',
+					);
+				},
+			);
+			const failures = validateDebugSpawnConstructionShape(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes("must pass argv via .args(&descriptor.args)"),
+				),
+			).toBe(true);
+		});
+	});
+
+	describe("validateDebugFramingBounds", () => {
+		it("passes for the real, unmodified debug/framing.rs", () => {
+			expect(validateDebugFramingBounds(baselineDebugRustSources)).toEqual([]);
+		});
+
+		it("requires debug/framing.rs to be present", () => {
+			expect(validateDebugFramingBounds([])).toEqual([
+				"debug framing boundary requires debug/framing.rs",
+			]);
+		});
+
+		it("rejects a widened MAX_DAP_MESSAGE_BYTES", () => {
+			const anchor =
+				"pub(crate) const MAX_DAP_MESSAGE_BYTES: usize = 67_108_864; // 64 MiB";
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/framing.rs",
+				(source) => {
+					expect(source.includes(anchor)).toBe(true);
+					return source.replace(
+						anchor,
+						"pub(crate) const MAX_DAP_MESSAGE_BYTES: usize = 134_217_728; // 128 MiB",
+					);
+				},
+			);
+			expect(validateDebugFramingBounds(mutated)).toContain(
+				"debug/framing.rs must define exactly one MAX_DAP_MESSAGE_BYTES: usize = 67108864",
+			);
+		});
+
+		it("rejects a narrowed MAX_DAP_HEADER_BYTES", () => {
+			const anchor =
+				"pub(crate) const MAX_DAP_HEADER_BYTES: usize = 8_192; // 8 KiB";
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/framing.rs",
+				(source) => {
+					expect(source.includes(anchor)).toBe(true);
+					return source.replace(
+						anchor,
+						"pub(crate) const MAX_DAP_HEADER_BYTES: usize = 4_096; // 4 KiB",
+					);
+				},
+			);
+			expect(validateDebugFramingBounds(mutated)).toContain(
+				"debug/framing.rs must define exactly one MAX_DAP_HEADER_BYTES: usize = 8192",
+			);
+		});
+
+		it("rejects MAX_DAP_MESSAGE_BYTES being declared but never referenced by the decoder", () => {
+			const anchor = "if content_length > MAX_DAP_MESSAGE_BYTES {";
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/framing.rs",
+				(source) => {
+					expect(source.includes(anchor)).toBe(true);
+					return source.replace(anchor, "if content_length > 67_108_864 {");
+				},
+			);
+			const failures = validateDebugFramingBounds(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"must reference MAX_DAP_MESSAGE_BYTES in its decoder logic, not just declare it",
+					),
+				),
+			).toBe(true);
+		});
+
+		it("rejects MAX_DAP_HEADER_BYTES being declared but never referenced by the decoder", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/framing.rs",
+				(source) => {
+					const withoutFirstUse = source.replace(
+						"if self.buffer.len() > MAX_DAP_HEADER_BYTES {",
+						"if self.buffer.len() > 8_192 {",
+					);
+					expect(withoutFirstUse).not.toEqual(source);
+					const withoutSecondUse = withoutFirstUse.replace(
+						"if header_block_len > MAX_DAP_HEADER_BYTES {",
+						"if header_block_len > 8_192 {",
+					);
+					expect(withoutSecondUse).not.toEqual(withoutFirstUse);
+					return withoutSecondUse;
+				},
+			);
+			const failures = validateDebugFramingBounds(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"must reference MAX_DAP_HEADER_BYTES in its decoder logic, not just declare it",
+					),
+				),
+			).toBe(true);
+		});
 	});
 });

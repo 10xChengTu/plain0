@@ -5,6 +5,9 @@ import { fileURLToPath } from "node:url";
 
 import {
 	validateCapabilityFiles,
+	validateDebugAdapterSpawnBoundary,
+	validateDebugFramingBounds,
+	validateDebugSpawnConstructionShape,
 	validateDialogOverrideImportBoundary,
 	validateDialogServiceOverride,
 	validateDialogSurfaceBoundary,
@@ -792,6 +795,15 @@ for (const failure of validateGitStashConfirmationBoundary(appSources)) {
 	fail(failure);
 }
 for (const failure of validateGitWorktreeConfirmationBoundary(appSources)) {
+	fail(failure);
+}
+for (const failure of validateDebugAdapterSpawnBoundary(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateDebugSpawnConstructionShape(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateDebugFramingBounds(rustSources)) {
 	fail(failure);
 }
 

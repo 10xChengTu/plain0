@@ -5583,6 +5583,21 @@ const FORBIDDEN_GIT_LIBRARY_DEPENDENCIES = Object.freeze([
  */
 const GIT_EXEC_WRAPPER_PATH = "src-tauri/src/git/exec.rs";
 
+/**
+ * The `debug` domain's own sole audited `std::process::Command` wrapper
+ * (`F100` S0 of `docs/research/2026-07-28-generic-dap.md`) — the second (and,
+ * as of this slice, only other) legitimate process-spawning file in this
+ * codebase besides [`GIT_EXEC_WRAPPER_PATH`]. Separately and more precisely
+ * locked down by [`validateDebugAdapterSpawnBoundary`] (trust gate first) and
+ * [`validateDebugSpawnConstructionShape`] (fixed `Command::new(&descriptor.command)
+ * .args(&descriptor.args)` shape, no shell interpreter, no `format!`) —
+ * this constant only feeds the broad cross-domain "no capability-based
+ * deletion bypass via a raw process/shell spawn" sweep inside
+ * `validateWorkspaceMoveBoundary`, exactly like `GIT_EXEC_WRAPPER_PATH`
+ * already does for the git domain.
+ */
+const DEBUG_EXEC_WRAPPER_PATH = "src-tauri/src/debug/exec.rs";
+
 const GIT_DOMAIN_SOURCE_PATTERN = /^src-tauri\/src\/git\/.*\.rs$/;
 
 /**
@@ -10888,20 +10903,26 @@ export function validateWorkspaceMoveBoundary(rustSources) {
 				`${normalizedPath} must not use broad, open-directory or direct unlink deletion`,
 			);
 		}
-		// `src-tauri/src/git/exec.rs` is exempt from this specific check
-		// only: it is the git domain's one audited `std::process::Command`
-		// wrapper (`F080` S0), separately and more precisely locked down by
-		// `validateTerminalRustBoundary` (literal `Command::new("git")`
-		// only, no other program, no shell interpreter — see
-		// `GIT_EXEC_WRAPPER_PATH`'s doc). This check's actual purpose —
-		// preventing the *workspace/theme/backup* domains' capability-based
-		// deletion from being bypassed via a raw process/shell spawn — does
-		// not apply to a file that spawns nothing but `git` and never calls
-		// `remove_file`/`remove_dir` at all (confirmed immediately below by
-		// this same loop's UFCS/broad-deletion checks, which still run for
-		// it unexempted).
+		// `src-tauri/src/git/exec.rs` and `src-tauri/src/debug/exec.rs` are
+		// exempt from this specific check only: they are the git and `debug`
+		// domains' own sole audited `std::process::Command` wrappers
+		// (`F080` S0 / `F100` S0 respectively), separately and more precisely
+		// locked down by `validateTerminalRustBoundary` (git: literal
+		// `Command::new("git")` only, no other program, no shell interpreter
+		// — see `GIT_EXEC_WRAPPER_PATH`'s doc) and
+		// `validateDebugAdapterSpawnBoundary`/`validateDebugSpawnConstructionShape`
+		// (debug: trust gate first, fixed `Command::new(&descriptor.command)
+		// .args(&descriptor.args)` shape — see `DEBUG_EXEC_WRAPPER_PATH`'s
+		// doc). This check's actual purpose — preventing the
+		// *workspace/theme/backup* domains' capability-based deletion from
+		// being bypassed via a raw process/shell spawn — does not apply to
+		// either file: neither spawns anything but its own domain's audited
+		// program, and neither calls `remove_file`/`remove_dir` at all
+		// (confirmed immediately below by this same loop's UFCS/broad-
+		// deletion checks, which still run for both unexempted).
 		if (
 			normalizedPath !== GIT_EXEC_WRAPPER_PATH &&
+			normalizedPath !== DEBUG_EXEC_WRAPPER_PATH &&
 			(/\b(?:std|tokio|async_process)\s*::\s*(?:\{[^;}]*\bprocess\b|process\b)|\btauri_plugin_shell\b|\b(?:Command|Shell)\s*::\s*new\s*\(/s.test(
 				executableSource,
 			) ||
@@ -18964,4 +18985,165 @@ function viewPaneSubclassDecoratorFailures(
 	return [
 		`${className} (${normalizedPath}) declares ${declaredIndexes.size} of its own DI decorator(s) but its constructor has ${ctorParamCount} parameter(s) (${requiredDecoratorCount} injectable beyond the leading options argument) — every parameter this class's own constructor accepts beyond \`options\` must be redeclared as this class's own decorator (\`SomeService(${className}, undefined, <index>)\`, indices 1 through ${requiredDecoratorCount}), because \`@codingame/monaco-vscode-api\`'s decorator storage replaces — rather than appends to — the inherited dependency array the first time any decorator is ever called on a class. A partial or missing declaration silently leaves the undeclared parameters \`undefined\` at real construction time: this is exactly how F090 S4's PlainGitStashView (declared only its own two new services, wiping the nine base ViewPane parameters and breaking every sibling view in the same Source Control container) and F090 S6's PlainGitHistoryView (declared none at all, silently leaving its own two extra parameters undefined and disabling the commit-detail multi-diff feature since its introduction) both went undetected until a real end-to-end click finally exercised the broken view.`,
 	];
+}
+
+// ---------------------------------------------------------------------
+// F100 S0 (docs/research/2026-07-28-generic-dap.md): the `debug` domain's
+// framing state machine + hardened adapter-spawn primitive. Three new AST
+// contracts, per that document's "需要新增的 AST 契约清单" items 2/3/5 (items
+// 1/4/6 are later-slice work — S1's confirmation gate and command registry,
+// and the separately-landed harness-wide ViewPane decorator contract above).
+// ---------------------------------------------------------------------
+
+/**
+ * Locks `debug/exec.rs`'s `spawn_adapter` function body's very first
+ * statement (after argument binding) to be the
+ * `trust.require_trusted(workspace, window_label).await?` call — mirroring
+ * `terminal::service::TerminalService::start`/`git::discovery::discover_repository`'s
+ * existing "trust gate before spawn" discipline, but this is the **first**
+ * AST contract in this codebase that mechanically locks that ordering rather
+ * than relying on code review alone (there is no existing `validateGit*`/
+ * `validateTerminal*` sibling for this exact check — git/terminal's own
+ * trust-gate calls are one-shot/session-start spawns whose "first statement"
+ * shape was never previously locked as an AST contract either). Isolates the
+ * function body first via `rustFunctionBody` (comments-only source, so
+ * string literal content — irrelevant here — stays visible, matching this
+ * helper's existing contract) rather than regexing the whole file, so a
+ * `trust.require_trusted` appearing anywhere else (e.g. a doc comment, or a
+ * different function) can never produce a false pass.
+ */
+export function validateDebugAdapterSpawnBoundary(rustSources) {
+	const execSource = findRustSource(rustSources, "src-tauri/src/debug/exec.rs");
+	if (execSource === undefined) {
+		return ["debug adapter spawn boundary requires debug/exec.rs"];
+	}
+	const commentsOnly = stripRustCommentsOnly(execSource);
+	const spawnAdapter = rustFunctionBody(commentsOnly, "spawn_adapter");
+	if (spawnAdapter === undefined) {
+		return ["debug/exec.rs must define spawn_adapter"];
+	}
+	const body = spawnAdapter.body
+		.replace(/^\{/, "")
+		.replace(/\}$/, "")
+		.trimStart();
+	const trustCheckFirst =
+		/^trust\s*\.\s*require_trusted\s*\(\s*workspace\s*,\s*window_label\s*\)\s*\.\s*await\s*\?\s*;/.test(
+			body,
+		);
+	if (!trustCheckFirst) {
+		return [
+			"debug/exec.rs spawn_adapter must call trust.require_trusted(workspace, window_label).await? as its literal first statement, before any Command/spawn-related identifier appears in the function body",
+		];
+	}
+	return [];
+}
+
+/**
+ * Locks `debug/exec.rs`'s `spawn_adapter_sync` function body — the function
+ * that actually builds and spawns the child process — to the fixed
+ * `Command::new(&descriptor.command)` / `.args(&descriptor.args)`
+ * construction shape (both the program and the args must come from field
+ * access, never a literal or a formatted string), and forbids the same two
+ * mechanical red flags `validateTerminalRustBoundary` already polices for
+ * `git`/`terminal` (a shell-interpreter `Command::new` literal, an
+ * `.arg("-c")`/`.args([...,"-c",...])` literal), plus a `debug`-domain-
+ * specific one: no `format!`/string-concatenation may feed into the spawned
+ * command at all, even though (unlike every `GIT_*_ARGS` constant) the
+ * *content* of `descriptor.command`/`descriptor.args` here comes from
+ * caller-supplied configuration, not a fixed list this codebase writes —
+ * only the *construction mechanism* is fixed and audited here, matching
+ * `docs/research/2026-07-28-generic-dap.md`'s own "决策 1" reasoning for why
+ * that distinction is intentional, not a gap.
+ */
+export function validateDebugSpawnConstructionShape(rustSources) {
+	const failures = [];
+	const execSource = findRustSource(rustSources, "src-tauri/src/debug/exec.rs");
+	if (execSource === undefined) {
+		return ["debug spawn construction boundary requires debug/exec.rs"];
+	}
+	const commentsOnly = stripRustCommentsOnly(execSource);
+	const spawnAdapterSync = rustFunctionBody(commentsOnly, "spawn_adapter_sync");
+	if (spawnAdapterSync === undefined) {
+		return ["debug/exec.rs must define spawn_adapter_sync"];
+	}
+	const body = spawnAdapterSync.body;
+	if (GIT_EXEC_SHELL_INTERPRETER_PATTERN.test(body)) {
+		failures.push(
+			"debug/exec.rs spawn_adapter_sync must not spawn a shell interpreter — it may only invoke the caller-configured adapter executable directly",
+		);
+	}
+	if (/\bformat!\s*\(/.test(body)) {
+		failures.push(
+			"debug/exec.rs spawn_adapter_sync must not build the spawned program or its arguments via format!/string concatenation",
+		);
+	}
+	if (/\.args?\s*\(\s*\[?\s*"-c"/.test(body)) {
+		failures.push(
+			'debug/exec.rs spawn_adapter_sync must not pass a shell "-c" argument',
+		);
+	}
+	if (!/Command::new\s*\(\s*&descriptor\.command\s*\)/.test(body)) {
+		failures.push(
+			"debug/exec.rs spawn_adapter_sync must construct the child process via Command::new(&descriptor.command), never a literal or formatted program name",
+		);
+	}
+	if (!/\.args\s*\(\s*&descriptor\.args\s*\)/.test(body)) {
+		failures.push(
+			"debug/exec.rs spawn_adapter_sync must pass argv via .args(&descriptor.args), never a literal or formatted argument list",
+		);
+	}
+	return failures;
+}
+
+const DEBUG_FRAMING_BOUNDS_LIMITS = Object.freeze([
+	["MAX_DAP_MESSAGE_BYTES", 67_108_864, "usize"],
+	["MAX_DAP_HEADER_BYTES", 8_192, "usize"],
+]);
+
+/**
+ * Locks `debug/framing.rs`'s two message/header size ceilings to their
+ * audited exact values — mirroring `validateSearchFileBudgetConstants`'s
+ * `findWorkspaceCopyLimitDeclarations`/`evaluateSmallRustIntegerExpression`
+ * pattern exactly — and additionally cross-checks that each constant is
+ * actually *referenced* somewhere in the file beyond its own declaration
+ * line (a plain occurrence count greater than one), matching this file's
+ * existing lightweight-but-real style for "the constant is actually wired
+ * up, not merely declared and forgotten" (the same spirit as
+ * `validateTerminalRustBoundary`'s `TERMINAL_ENV_PASSTHROUGH_NAMES` lock,
+ * which likewise fails the whole file rather than just checking the
+ * constant exists in isolation).
+ */
+export function validateDebugFramingBounds(rustSources) {
+	const failures = [];
+	const framingSource = findRustSource(
+		rustSources,
+		"src-tauri/src/debug/framing.rs",
+	);
+	if (framingSource === undefined) {
+		return ["debug framing boundary requires debug/framing.rs"];
+	}
+	const executableSource = stripRustCommentsAndLiterals(framingSource);
+	for (const [name, value, integerType] of DEBUG_FRAMING_BOUNDS_LIMITS) {
+		const declarations = findWorkspaceCopyLimitDeclarations(
+			executableSource,
+			name,
+			integerType,
+		);
+		if (
+			declarations.length !== 1 ||
+			evaluateSmallRustIntegerExpression(declarations[0]) !== value
+		) {
+			failures.push(
+				`debug/framing.rs must define exactly one ${name}: ${integerType} = ${value}`,
+			);
+			continue;
+		}
+		const occurrences = executableSource.split(name).length - 1;
+		if (occurrences < 2) {
+			failures.push(
+				`debug/framing.rs must reference ${name} in its decoder logic, not just declare it`,
+			);
+		}
+	}
+	return failures;
 }

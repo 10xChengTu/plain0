@@ -1,6 +1,7 @@
 use tauri::{Emitter, Manager};
 
 pub mod backup;
+pub mod debug;
 pub mod error;
 pub mod git;
 pub mod path_policy;
