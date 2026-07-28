@@ -3,72 +3,85 @@
 //! `docs/decisions/0003-native-git-and-generic-dap.md`'s "Rust 实现编辑器侧
 //! DAP client" decision).
 //!
-//! # Scope of this slice (`F100` S0)
+//! # Scope of this slice (`F100` S1)
 //!
-//! S0 builds exactly three things, all exercised only by `#[cfg(test)]`
-//! fixtures — no real adapter interaction, no frontend/`app/` code, no
-//! adapter-config parsing, no first-run confirmation gate, no TCP transport,
-//! and no session/handshake orchestration. Every one of those is a later
-//! slice per the frozen research doc's own "切片拆分" section (S1 adds TCP
-//! transport + config parsing + the confirmation gate; S2 adds the real
-//! session lifecycle):
+//! S1 builds three things on top of S0's frame decoder + hardened spawn
+//! primitive — still no real session/handshake orchestration (S2's job) and
+//! still no `app/` UI (S3/S4's job):
 //!
-//! 1. [`framing`] — the stdio/TCP-agnostic `Content-Length` framing state
-//!    machine ([`framing::FrameDecoder`]) that every later slice's reader
-//!    loop will drive.
-//! 2. [`exec`] — this domain's hardened subprocess-spawn primitive
-//!    ([`exec::spawn_adapter`]), mirroring `git::exec`'s trust-gate-then-spawn
-//!    discipline and `terminal::service`'s long-lived-subprocess model (see
-//!    that module's own doc comment for the precise mix and why neither
-//!    existing domain's model transfers unmodified).
-//! 3. The trust gate itself, wired through [`exec::spawn_adapter`] — see that
-//!    function's doc comment for why `trust.require_trusted` is its literal
-//!    first statement.
+//! 1. [`tcp`] — the "Plain 主动连出去" TCP transport
+//!    ([`tcp::connect_adapter`]), reusing [`framing::FrameDecoder`] verbatim
+//!    (only the byte source changes — a `TcpStream` instead of a pipe) and
+//!    the identical trust-then-confirmation double gate [`exec::spawn_adapter`]
+//!    uses. "Plain 监听、等 adapter 连进来" is deliberately **not**
+//!    implemented — see [`tcp`]'s own module doc for why ("主导会话裁定" item
+//!    3: an unauthenticated local listen socket is a strictly weaker trust
+//!    model than either spawning or connecting out).
+//! 2. [`confirm`] — the first-run confirmation gate
+//!    ([`confirm::ConfirmationService`]), keyed on the exact
+//!    [`dto::AdapterConfirmationSubject`] `(command, args, transport)` triple
+//!    ("主导会话裁定" item 2), persisted per
+//!    [`crate::workspace::WorkspaceRootsIdentity`] and revocable — now wired
+//!    as the literal second statement (immediately after the trust check) in
+//!    both [`exec::spawn_adapter`] and [`tcp::connect_adapter`].
+//! 3. [`commands`] — the three real `#[tauri::command]`s this slice adds
+//!    (`debug_adapter_confirmation_state`/`_grant`/`_revoke`, all registered
+//!    in `lib.rs`'s `generate_handler!`) — see that module's own doc comment
+//!    for why these three, and *only* these three, are safe to expose ahead
+//!    of S2's real session lifecycle.
 //!
-//! # `commands.rs` is intentionally commandless in S0
+//! Adapter-config parsing (`.plain/debug-adapters.json`/`.vscode/launch.json`'s
+//! inline `plainAdapter` block) is frontend-only per the frozen doc's own
+//! "决策 1" ("读取这两份配置完全复用既有的 `workspace_read_file` 能力,不新增任
+//! 何 Rust 端文件读取代码") — see `app/features/debug/plain-debug-adapter-config.ts`.
 //!
-//! The frozen research doc's own "决策 1" explicitly assigns adapter-config
-//! parsing (`.plain/debug-adapters.json`/`.vscode/launch.json`'s inline
-//! `plainAdapter` block) and the first-run confirmation gate to S1, and says
-//! S0 only needs to "把接口留好并在注释里写明边界" (leave the interface in
-//! place, documented). Exposing a real `#[tauri::command]` in S0 would let a
-//! frontend reach an actual adapter spawn before anything has built the
-//! confirmation gate that must sit between "user asked to start a debug
-//! session" and "we actually spawn the adapter" — so [`commands`] is
-//! module-doc-only in this slice: zero `#[tauri::command]` functions, nothing
-//! registered in `lib.rs`'s `generate_handler!`. See that module's own doc
-//! comment for what S1 is expected to add there.
+//! # `commands.rs` still does not expose `debug_launch`/`debug_attach`
 //!
-//! # Subprocess spawning is `exec::spawn_adapter`-only
+//! Real session orchestration — actually driving [`exec::spawn_adapter`]/
+//! [`tcp::connect_adapter`] to hold a live, running debug session — is S2's
+//! job. This slice's three new commands only let the frontend query/grant/
+//! revoke a confirmation *decision*; they never themselves spawn or connect
+//! to anything. See [`commands`]'s own doc comment.
+//!
+//! # Subprocess spawning is `exec::spawn_adapter`-only; TCP connecting is `tcp::connect_adapter`-only
 //!
 //! Exactly like `git::` (whose own module doc makes the same claim for
 //! `exec::run_git`), every subprocess this domain ever spawns goes through
-//! [`exec::spawn_adapter`]/[`exec::spawn_adapter_sync`] — never
-//! `std::process::Command` directly anywhere else in this module tree, and
-//! never by asking a shell to interpret a concatenated command string.
+//! [`exec::spawn_adapter`]/[`exec::spawn_adapter_sync`], and every TCP
+//! connection through [`tcp::connect_adapter`]/[`tcp::connect_adapter_sync`]
+//! — never `std::process::Command`/`std::net::TcpStream::connect` directly
+//! anywhere else in this module tree, and never by asking a shell to
+//! interpret a concatenated command string.
 //! `scripts/plain/boundary-contracts.mjs`'s `validateDebugSpawnConstructionShape`
 //! mechanically locks the exact `Command::new(&descriptor.command)
-//! .args(&descriptor.args)` construction shape; `validateDebugAdapterSpawnBoundary`
-//! locks that the trust gate runs before any of it.
+//! .args(&descriptor.args)` construction shape; `validateDebugAdapterSpawnBoundary`/
+//! `validateDebugAdapterConnectBoundary` lock that the trust-then-confirmation
+//! gate runs, in that literal order, before any of it.
 //!
-//! # Trust gate before spawn
+//! # Trust *then* confirmation, before spawn or connect
 //!
-//! [`exec::spawn_adapter`] calls `TrustService::require_trusted` as its
-//! literal first statement, exactly like
-//! `terminal::service::TerminalService::start` and
+//! [`exec::spawn_adapter`]/[`tcp::connect_adapter`] both call
+//! `TrustService::require_trusted` as their literal first statement (exactly
+//! like `terminal::service::TerminalService::start`/
 //! `git::discovery::discover_repository` — `trust::mod`'s own module doc
-//! already names `F100`/DAP as the third consumer of this gate. Unlike
-//! inventing a new domain-specific "not trusted" error code, this domain
-//! propagates `require_trusted`'s own `WORKSPACE_NOT_TRUSTED` error verbatim
-//! — see [`exec::spawn_adapter`]'s own doc comment for why (this mirrors what
-//! `git`/`terminal` actually do today; neither of them wraps it either).
+//! already names `F100`/DAP as the third consumer of this gate), then
+//! `ConfirmationService::require_confirmed` as their literal second — the
+//! second, independent gate ADR 0003 requires. Unlike inventing a new
+//! domain-specific "not trusted" error code, this domain propagates
+//! `require_trusted`'s own `WORKSPACE_NOT_TRUSTED` error verbatim (mirroring
+//! what `git`/`terminal` actually do today), but the confirmation gate *does*
+//! get its own domain-specific code
+//! ([`debug_adapter_not_confirmed`]/`DEBUG_ADAPTER_NOT_CONFIRMED`) — unlike
+//! "not trusted", this is a genuinely new concept neither `git` nor
+//! `terminal` has a precedent for, so there is no existing verbatim error to
+//! reuse.
 //!
 //! # The dead-code annotations below are deliberate, not stray
 //!
 //! Because nothing outside this domain's own `#[cfg(test)]` fixtures calls
-//! into [`framing`]'s decoder or [`exec`]'s spawn primitive yet (there is no
-//! session reader loop — S2's job — and no confirmation-gated command — S1's
-//! job), the plain `pub(crate)` items here would be flagged as dead code by
+//! into [`framing`]'s decoder, [`exec`]'s spawn primitive or [`tcp`]'s connect
+//! primitive yet (there is no session reader loop — S2's job), the plain
+//! `pub(crate)` items here would be flagged as dead code by
 //! `cargo clippy --all-targets -- -D warnings`: `#[cfg(test)]` code does not
 //! exist at all in the non-test compilation unit dead-code analysis runs
 //! against. Every `#[allow(dead_code)]` in this module tree names, in an
@@ -80,9 +93,12 @@
 use crate::error::CommandError;
 
 pub(crate) mod commands;
+pub(crate) mod confirm;
+mod confirm_store;
 pub mod dto;
 pub(crate) mod exec;
 pub(crate) mod framing;
+pub(crate) mod tcp;
 
 /// Returned when [`exec::spawn_adapter_sync`]'s own `Command::spawn()` call
 /// fails outright (bad executable path, missing execute permission, …) — the
@@ -107,6 +123,47 @@ pub(crate) fn debug_adapter_cancelled() -> CommandError {
     CommandError::new(
         "DEBUG_ADAPTER_CANCELLED",
         "Starting the debug adapter was cancelled.",
+    )
+}
+
+/// Returned by [`confirm::ConfirmationService::require_confirmed`] when the
+/// caller's `(command, args, transport)` triple has not yet been confirmed
+/// for the current workspace — the actionable, structured failure mode
+/// `docs/research/2026-07-28-generic-dap.md`'s acceptance criterion 4 ("缺失
+/// 或未信任的 adapter 以可操作的确认失败") calls for on the confirmation side
+/// (missing/untrusted adapters get their own codes: `WORKSPACE_NOT_TRUSTED`
+/// propagated verbatim, and the config-resolution "adapter type not found"
+/// case the frontend config module reports). A caller seeing this code knows
+/// exactly what to do next: run the confirmation flow
+/// (`app/features/debug/plain-debug-adapter-confirmation.ts`'s
+/// `resolveDebugAdapterConfirmation`), then retry.
+pub(crate) fn debug_adapter_not_confirmed() -> CommandError {
+    CommandError::new(
+        "DEBUG_ADAPTER_NOT_CONFIRMED",
+        "This exact adapter command has not been confirmed for this workspace yet.",
+    )
+}
+
+/// Covers every confirmation-store failure mode: no stable workspace identity
+/// to key a grant/revoke against (the `EMPTY` workspace), and any I/O/
+/// (de)serialization failure reading or writing `confirm_store`'s persisted
+/// entries — mirroring `trust::trust_unavailable`/`backup::backup_unavailable`'s
+/// identical "fold every unrecoverable-differently case into one caller-facing
+/// code" precedent.
+pub(crate) fn confirmation_unavailable() -> CommandError {
+    CommandError::new(
+        "DEBUG_ADAPTER_CONFIRMATION_UNAVAILABLE",
+        "The debug adapter confirmation store is not available for this window.",
+    )
+}
+
+/// Returned when [`tcp::connect_adapter_sync`]'s own `TcpStream::connect`
+/// attempt fails outright (connection refused, DNS resolution failure, no
+/// route) — the TCP-transport analogue of [`debug_adapter_spawn_unavailable`].
+pub(crate) fn debug_adapter_connect_failed() -> CommandError {
+    CommandError::new(
+        "DEBUG_ADAPTER_CONNECT_FAILED",
+        "Could not connect to the debug adapter's TCP endpoint.",
     )
 }
 
@@ -146,7 +203,9 @@ pub(crate) fn debug_adapter_startup_crashed(
 #[cfg(test)]
 mod tests {
     use super::{
-        debug_adapter_cancelled, debug_adapter_spawn_unavailable, debug_adapter_startup_crashed,
+        confirmation_unavailable, debug_adapter_cancelled, debug_adapter_connect_failed,
+        debug_adapter_not_confirmed, debug_adapter_spawn_unavailable,
+        debug_adapter_startup_crashed,
     };
 
     #[test]
@@ -159,6 +218,18 @@ mod tests {
         assert_eq!(
             debug_adapter_startup_crashed(Some(1), b"boom").code(),
             "DEBUG_ADAPTER_STARTUP_CRASHED"
+        );
+        assert_eq!(
+            debug_adapter_not_confirmed().code(),
+            "DEBUG_ADAPTER_NOT_CONFIRMED"
+        );
+        assert_eq!(
+            confirmation_unavailable().code(),
+            "DEBUG_ADAPTER_CONFIRMATION_UNAVAILABLE"
+        );
+        assert_eq!(
+            debug_adapter_connect_failed().code(),
+            "DEBUG_ADAPTER_CONNECT_FAILED"
         );
     }
 

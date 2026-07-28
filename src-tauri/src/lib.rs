@@ -12,6 +12,7 @@ pub mod trust;
 pub mod workspace;
 
 use backup::service::BackupService;
+use debug::confirm::ConfirmationService;
 use error::CommandError;
 use git::network::GitNetworkService;
 use terminal::service::TerminalService;
@@ -56,7 +57,8 @@ pub fn run() {
             let base_path = app.path().app_local_data_dir()?;
             app.manage(BackupService::new(base_path.clone()));
             app.manage(ThemeService::new(base_path.clone()));
-            app.manage(TrustService::new(base_path));
+            app.manage(TrustService::new(base_path.clone()));
+            app.manage(ConfirmationService::new(base_path));
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -67,6 +69,9 @@ pub fn run() {
                 window.state::<BackupService>().close_window(window.label());
                 window
                     .state::<TerminalService>()
+                    .close_window(window.label());
+                window
+                    .state::<ConfirmationService>()
                     .close_window(window.label());
             }
         })
@@ -147,6 +152,9 @@ pub fn run() {
             theme::commands::theme_remove,
             theme::commands::theme_get_selection,
             theme::commands::theme_set_selection,
+            debug::commands::debug_adapter_confirmation_state,
+            debug::commands::debug_adapter_confirmation_grant,
+            debug::commands::debug_adapter_confirmation_revoke,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Plain")

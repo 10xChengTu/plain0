@@ -131,6 +131,9 @@ function fakeBridge(
 		gitWorktreeList: notImplemented,
 		gitWorktreeAdd: notImplemented,
 		gitWorktreeRemove: notImplemented,
+		debugAdapterConfirmationState: notImplemented,
+		debugAdapterConfirmationGrant: notImplemented,
+		debugAdapterConfirmationRevoke: notImplemented,
 	};
 }
 
@@ -277,6 +280,9 @@ function fakeTextSearchBridge(
 		gitWorktreeList: notImplemented,
 		gitWorktreeAdd: notImplemented,
 		gitWorktreeRemove: notImplemented,
+		debugAdapterConfirmationState: notImplemented,
+		debugAdapterConfirmationGrant: notImplemented,
+		debugAdapterConfirmationRevoke: notImplemented,
 	};
 
 	return {

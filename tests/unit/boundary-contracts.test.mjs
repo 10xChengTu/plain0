@@ -49,7 +49,10 @@ import {
 	validateGitWorktreeConfirmationBoundary,
 	validateMultiDiffEditorOverrideImportBoundary,
 	validateViewPaneDependencyDecoratorBoundary,
+	validateDebugAdapterConfirmationBoundary,
+	validateDebugAdapterConnectBoundary,
 	validateDebugAdapterSpawnBoundary,
+	validateDebugCommandRegistration,
 	validateDebugSpawnConstructionShape,
 	validateDebugFramingBounds,
 } from "../../scripts/plain/boundary-contracts.mjs";
@@ -11777,13 +11780,17 @@ IDialogService(PlainGitWorktreeView, undefined, 12);`,
 	});
 });
 
-describe("Plain F100 S0 debug adapter spawn/framing boundary Harness", () => {
+describe("Plain F100 S0/S1 debug adapter spawn/connect/framing boundary Harness", () => {
 	const debugExecSource = readFileSync(
 		new URL("../../src-tauri/src/debug/exec.rs", import.meta.url),
 		"utf8",
 	);
 	const debugFramingSource = readFileSync(
 		new URL("../../src-tauri/src/debug/framing.rs", import.meta.url),
+		"utf8",
+	);
+	const debugTcpSource = readFileSync(
+		new URL("../../src-tauri/src/debug/tcp.rs", import.meta.url),
 		"utf8",
 	);
 
@@ -11793,6 +11800,7 @@ describe("Plain F100 S0 debug adapter spawn/framing boundary Harness", () => {
 			relativePath: "src-tauri/src/debug/framing.rs",
 			source: debugFramingSource,
 		},
+		{ relativePath: "src-tauri/src/debug/tcp.rs", source: debugTcpSource },
 	]);
 
 	function withMutatedDebugSource(relativePath, mutate) {
@@ -11804,9 +11812,21 @@ describe("Plain F100 S0 debug adapter spawn/framing boundary Harness", () => {
 	}
 
 	const trustCheckAnchor =
-		"    trust.require_trusted(workspace, window_label).await?;\n    let descriptor = descriptor.clone();";
+		"    trust.require_trusted(workspace, window_label).await?;\n" +
+		"    let subject = descriptor.confirmation_subject(AdapterTransportKind::Stdio);\n" +
+		"    confirmation\n" +
+		"        .require_confirmed(workspace, window_label, &subject)\n" +
+		"        .await?;\n" +
+		"    let descriptor = descriptor.clone();";
 	const constructionAnchor =
 		"    let mut command = Command::new(&descriptor.command);\n    command.args(&descriptor.args);";
+	const connectTrustCheckAnchor =
+		"    trust.require_trusted(workspace, window_label).await?;\n" +
+		"    let subject = descriptor.confirmation_subject(AdapterTransportKind::Tcp);\n" +
+		"    confirmation\n" +
+		"        .require_confirmed(workspace, window_label, &subject)\n" +
+		"        .await?;\n" +
+		"    let tcp = tcp.clone();";
 
 	describe("validateDebugAdapterSpawnBoundary", () => {
 		it("passes for the real, unmodified debug/exec.rs", () => {
@@ -11872,6 +11892,123 @@ describe("Plain F100 S0 debug adapter spawn/framing boundary Harness", () => {
 				failures.some((failure) =>
 					failure.includes(
 						"spawn_adapter must call trust.require_trusted(workspace, window_label).await? as its literal first statement",
+					),
+				),
+			).toBe(true);
+		});
+
+		it("rejects spawn_adapter when the confirmation check is missing entirely (trust alone is not enough)", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(trustCheckAnchor)).toBe(true);
+					return source.replace(
+						trustCheckAnchor,
+						"    trust.require_trusted(workspace, window_label).await?;\n    let descriptor = descriptor.clone();",
+					);
+				},
+			);
+			const failures = validateDebugAdapterSpawnBoundary(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"must call confirmation.require_confirmed(workspace, window_label, &subject).await? (subject built via descriptor.confirmation_subject(AdapterTransportKind::Stdio)) as its literal second statement",
+					),
+				),
+			).toBe(true);
+		});
+
+		it("rejects spawn_adapter when the confirmation check runs before the trust check", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(trustCheckAnchor)).toBe(true);
+					return source.replace(
+						trustCheckAnchor,
+						"    let subject = descriptor.confirmation_subject(AdapterTransportKind::Stdio);\n" +
+							"    confirmation\n" +
+							"        .require_confirmed(workspace, window_label, &subject)\n" +
+							"        .await?;\n" +
+							"    trust.require_trusted(workspace, window_label).await?;\n" +
+							"    let descriptor = descriptor.clone();",
+					);
+				},
+			);
+			const failures = validateDebugAdapterSpawnBoundary(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"spawn_adapter must call trust.require_trusted(workspace, window_label).await? as its literal first statement",
+					),
+				),
+			).toBe(true);
+		});
+	});
+
+	describe("validateDebugAdapterConnectBoundary", () => {
+		it("passes for the real, unmodified debug/tcp.rs", () => {
+			expect(
+				validateDebugAdapterConnectBoundary(baselineDebugRustSources),
+			).toEqual([]);
+		});
+
+		it("requires debug/tcp.rs to be present", () => {
+			expect(validateDebugAdapterConnectBoundary([])).toEqual([
+				"debug adapter connect boundary requires debug/tcp.rs",
+			]);
+		});
+
+		it("requires a connect_adapter function to exist", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/tcp.rs",
+				(source) =>
+					source.replace(
+						"pub(crate) async fn connect_adapter(",
+						"pub(crate) async fn connect_adapter_renamed(",
+					),
+			);
+			expect(validateDebugAdapterConnectBoundary(mutated)).toEqual([
+				"debug/tcp.rs must define connect_adapter",
+			]);
+		});
+
+		it("rejects connect_adapter when the trust check is missing entirely", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/tcp.rs",
+				(source) => {
+					expect(source.includes(connectTrustCheckAnchor)).toBe(true);
+					return source.replace(
+						connectTrustCheckAnchor,
+						"    let tcp = tcp.clone();",
+					);
+				},
+			);
+			const failures = validateDebugAdapterConnectBoundary(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"connect_adapter must call trust.require_trusted(workspace, window_label).await? as its literal first statement",
+					),
+				),
+			).toBe(true);
+		});
+
+		it("rejects connect_adapter when the confirmation check is missing entirely (trust alone is not enough)", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/tcp.rs",
+				(source) => {
+					expect(source.includes(connectTrustCheckAnchor)).toBe(true);
+					return source.replace(
+						connectTrustCheckAnchor,
+						"    trust.require_trusted(workspace, window_label).await?;\n    let tcp = tcp.clone();",
+					);
+				},
+			);
+			const failures = validateDebugAdapterConnectBoundary(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"must call confirmation.require_confirmed(workspace, window_label, &subject).await? (subject built via descriptor.confirmation_subject(AdapterTransportKind::Tcp)) as its literal second statement",
 					),
 				),
 			).toBe(true);
@@ -12097,5 +12234,218 @@ describe("Plain F100 S0 debug adapter spawn/framing boundary Harness", () => {
 				),
 			).toBe(true);
 		});
+	});
+});
+
+describe("Plain F100 S1 debug adapter confirmation command registration Harness", () => {
+	const debugCommandsSource = readFileSync(
+		new URL("../../src-tauri/src/debug/commands.rs", import.meta.url),
+		"utf8",
+	);
+	const libSource = readFileSync(
+		new URL("../../src-tauri/src/lib.rs", import.meta.url),
+		"utf8",
+	);
+
+	const baselineCommandRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/debug/commands.rs",
+			source: debugCommandsSource,
+		},
+		{ relativePath: "src-tauri/src/lib.rs", source: libSource },
+	]);
+
+	it("passes for the real, unmodified debug command files", () => {
+		expect(
+			validateDebugCommandRegistration(baselineCommandRustSources),
+		).toEqual([]);
+	});
+
+	it("requires debug/commands.rs to be present", () => {
+		const missingFile = baselineCommandRustSources.filter(
+			(entry) => entry.relativePath !== "src-tauri/src/debug/commands.rs",
+		);
+		expect(validateDebugCommandRegistration(missingFile)).toContain(
+			"command registration boundary requires src-tauri/src/debug/commands.rs",
+		);
+	});
+
+	it("fails if debug_adapter_confirmation_state's body is rewired to a different service call", () => {
+		const rewired = baselineCommandRustSources.map((entry) =>
+			entry.relativePath === "src-tauri/src/debug/commands.rs"
+				? {
+						...entry,
+						source: entry.source.replace(
+							".is_confirmed(workspace.inner(), window.label(), &request)",
+							'.is_confirmed(workspace.inner(), "main", &request)',
+						),
+					}
+				: entry,
+		);
+		expect(validateDebugCommandRegistration(rewired)).toContain(
+			"debug_adapter_confirmation_state must contain only its audited confirmation-service route",
+		);
+	});
+
+	it("fails if a debug command is missing from lib.rs's generate_handler", () => {
+		const missingRegistration = baselineCommandRustSources.map((entry) =>
+			entry.relativePath === "src-tauri/src/lib.rs"
+				? {
+						...entry,
+						source: entry.source.replace(
+							"            debug::commands::debug_adapter_confirmation_revoke,\n",
+							"",
+						),
+					}
+				: entry,
+		);
+		expect(validateDebugCommandRegistration(missingRegistration)).toContain(
+			"src-tauri/src/lib.rs must register debug::commands::debug_adapter_confirmation_revoke exactly once in generate_handler",
+		);
+	});
+
+	it("fails if a debug command is registered a second time (duplicate registration)", () => {
+		const duplicated = baselineCommandRustSources.map((entry) =>
+			entry.relativePath === "src-tauri/src/lib.rs"
+				? {
+						...entry,
+						source: entry.source.replace(
+							"            debug::commands::debug_adapter_confirmation_revoke,\n",
+							"            debug::commands::debug_adapter_confirmation_revoke,\n            debug::commands::debug_adapter_confirmation_revoke,\n",
+						),
+					}
+				: entry,
+		);
+		expect(validateDebugCommandRegistration(duplicated)).toContain(
+			"src-tauri/src/lib.rs must register debug::commands::debug_adapter_confirmation_revoke exactly once in generate_handler",
+		);
+	});
+});
+
+describe("Plain F100 S1 debug adapter confirmation TypeScript boundary Harness", () => {
+	const requiredPaths = Object.freeze([
+		"app/platform/tauri/contracts.ts",
+		"app/platform/tauri/native.ts",
+		"app/platform/tauri/browser-mock.ts",
+		"app/features/debug/plain-debug-adapter-confirmation.ts",
+		"app/features/debug/plain-debug-adapter-launch.ts",
+	]);
+	const baselineAppSources = Object.freeze(
+		requiredPaths.map((relativePath) => ({
+			relativePath,
+			source: readFileSync(
+				new URL(`../../${relativePath}`, import.meta.url),
+				"utf8",
+			),
+		})),
+	);
+
+	function withMutatedSource(relativePath, mutate) {
+		return baselineAppSources.map((entry) =>
+			entry.relativePath === relativePath
+				? { ...entry, source: mutate(entry.source) }
+				: entry,
+		);
+	}
+
+	it("passes for the real, unmodified files", () => {
+		expect(
+			validateDebugAdapterConfirmationBoundary(baselineAppSources),
+		).toEqual([]);
+	});
+
+	it("requires every audited file to be present", () => {
+		for (const relativePath of requiredPaths) {
+			const missing = baselineAppSources.filter(
+				(entry) => entry.relativePath !== relativePath,
+			);
+			expect(validateDebugAdapterConfirmationBoundary(missing)).toContain(
+				`debug adapter confirmation boundary requires ${relativePath}`,
+			);
+		}
+	});
+
+	it("rejects a second call site for debugAdapterConfirmationState outside resolveDebugAdapterConfirmation", () => {
+		const mutated = withMutatedSource(
+			"app/features/debug/plain-debug-adapter-launch.ts",
+			(source) =>
+				source.replace(
+					"export async function prepareDebugAdapterLaunch(",
+					"function sneakyBridgeCall(bridge) { void bridge.debugAdapterConfirmationState({ command: '', args: [], transport: 'stdio' }); }\nexport async function prepareDebugAdapterLaunch(",
+				),
+		);
+		const failures = validateDebugAdapterConfirmationBoundary(mutated);
+		expect(
+			failures.some((failure) =>
+				failure.includes(
+					"must not consume debugAdapterConfirmationState outside resolveDebugAdapterConfirmation's single audited call site",
+				),
+			),
+		).toBe(true);
+	});
+
+	it("rejects a second call site for resolveDebugAdapterConfirmation outside prepareDebugAdapterLaunch", () => {
+		const mutated = withMutatedSource(
+			"app/features/debug/plain-debug-adapter-launch.ts",
+			(source) =>
+				`${source}\nasync function anotherCaller(bridge, dialogService) {\n\tawait resolveDebugAdapterConfirmation(bridge, dialogService, { subject: { command: "", args: [], transport: "stdio" }, configSource: "" });\n}\n`,
+		);
+		const failures = validateDebugAdapterConfirmationBoundary(mutated);
+		expect(
+			failures.some((failure) =>
+				failure.includes(
+					"must not call resolveDebugAdapterConfirmation outside plain-debug-adapter-launch.ts's prepareDebugAdapterLaunch",
+				),
+			),
+		).toBe(true);
+	});
+
+	it("rejects plain-debug-adapter-confirmation.ts gaining an import", () => {
+		const mutated = withMutatedSource(
+			"app/features/debug/plain-debug-adapter-confirmation.ts",
+			(source) => `import { readFileSync } from "node:fs";\n${source}`,
+		);
+		const failures = validateDebugAdapterConfirmationBoundary(mutated);
+		expect(
+			failures.some((failure) => failure.includes("must not import anything")),
+		).toBe(true);
+	});
+
+	it("rejects resolveDebugAdapterConfirmation skipping the dialog for an unconfirmed subject", () => {
+		const mutated = withMutatedSource(
+			"app/features/debug/plain-debug-adapter-confirmation.ts",
+			(source) =>
+				source.replace(
+					'if (state.confirmed) {\n\t\treturn Object.freeze({ kind: "already-confirmed" });\n\t}',
+					'if (state.confirmed || true) {\n\t\treturn Object.freeze({ kind: "already-confirmed" });\n\t}',
+				),
+		);
+		const failures = validateDebugAdapterConfirmationBoundary(mutated);
+		expect(
+			failures.some((failure) =>
+				failure.includes(
+					"must query the persisted decision first, always show the dialog for an unconfirmed subject",
+				),
+			),
+		).toBe(true);
+	});
+
+	it("rejects a declaration count other than exactly one per platform file", () => {
+		const mutated = withMutatedSource(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					"debugAdapterConfirmationState: async (descriptor) => {",
+					"debugAdapterConfirmationStateUnused: async (descriptor) => {",
+				),
+		);
+		const failures = validateDebugAdapterConfirmationBoundary(mutated);
+		expect(
+			failures.some((failure) =>
+				failure.includes(
+					"app/platform/tauri/native.ts must declare debugAdapterConfirmationState exactly once in its audited bridge surface",
+				),
+			),
+		).toBe(true);
 	});
 });

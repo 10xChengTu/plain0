@@ -112,7 +112,8 @@ use crate::error::CommandError;
 use crate::trust::service::TrustService;
 use crate::workspace::service::WorkspaceService;
 
-use super::dto;
+use super::confirm::ConfirmationService;
+use super::dto::{self, AdapterTransportKind};
 use super::{
     debug_adapter_cancelled, debug_adapter_spawn_unavailable, debug_adapter_startup_crashed,
 };
@@ -248,11 +249,12 @@ impl AdapterHandle {
     }
 }
 
-/// Trust-gated entry point — see the module doc's "Why a long-lived model"
-/// section for the overall shape this returns. Calls
-/// [`TrustService::require_trusted`] as its literal first statement, before
-/// any `Command`/spawn-related identifier appears anywhere in this function's
-/// body — `scripts/plain/boundary-contracts.mjs`'s
+/// Trust-*then*-confirmation-gated entry point — see the module doc's "Why a
+/// long-lived model" section for the overall shape this returns. Calls
+/// [`TrustService::require_trusted`] as its literal first statement, then
+/// [`ConfirmationService::require_confirmed`] as its literal second, both
+/// before any `Command`/spawn-related identifier appears anywhere in this
+/// function's body — `scripts/plain/boundary-contracts.mjs`'s
 /// `validateDebugAdapterSpawnBoundary` mechanically locks exactly this
 /// ordering. Propagates `require_trusted`'s own `WORKSPACE_NOT_TRUSTED` error
 /// verbatim rather than wrapping it in a debug-domain-specific code — this
@@ -260,26 +262,32 @@ impl AdapterHandle {
 /// `terminal::service::TerminalService::start` actually do today (neither of
 /// them wraps it either); inventing a new, never-actually-returned
 /// `DEBUG_ADAPTER_NOT_TRUSTED`-style code here purely to have a
-/// domain-flavored name would be decorative, not honest.
+/// domain-flavored name would be decorative, not honest. The confirmation
+/// check, by contrast, *does* get its own domain-specific
+/// `DEBUG_ADAPTER_NOT_CONFIRMED` code — see `super`'s module doc for why.
 ///
-/// Dispatches (once trust is confirmed) to [`spawn_adapter_sync`] via
+/// Dispatches (once both gates pass) to [`spawn_adapter_sync`] via
 /// `tauri::async_runtime::spawn_blocking`, exactly like
 /// `TerminalService::start`/`spawn_session` do for their own blocking spawn
 /// work.
 ///
-/// No production caller exists yet in this slice (S1 adds the first real
-/// caller, gated behind adapter-config parsing and the first-run
-/// confirmation gate — see the module doc on [`super`]); exercised today only
-/// by this module's own tests.
-#[allow(dead_code)] // No production caller until S1 adds the confirmation-gated entry point.
+/// No production caller exists yet in this slice (S2 adds the real session
+/// lifecycle that calls this as part of actually starting a debug session);
+/// exercised today only by this module's own tests.
+#[allow(dead_code)] // No production caller until S2 adds the real session lifecycle.
 pub(crate) async fn spawn_adapter(
     trust: &TrustService,
     workspace: &WorkspaceService,
     window_label: &str,
+    confirmation: &ConfirmationService,
     descriptor: &dto::AdapterSpawnDescriptor,
     cancel: Arc<AtomicBool>,
 ) -> Result<AdapterHandle, CommandError> {
     trust.require_trusted(workspace, window_label).await?;
+    let subject = descriptor.confirmation_subject(AdapterTransportKind::Stdio);
+    confirmation
+        .require_confirmed(workspace, window_label, &subject)
+        .await?;
     let descriptor = descriptor.clone();
     tauri::async_runtime::spawn_blocking(move || spawn_adapter_sync(&descriptor, &cancel))
         .await

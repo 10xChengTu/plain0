@@ -21,7 +21,7 @@
 //! convention (camelCase, `deny_unknown_fields`) even though nothing decodes
 //! one from the Tauri IPC boundary yet.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// `command` is always an absolute executable path the adapter-config format
 /// hands over verbatim — never `PATH`-resolved, never combined with `args`
@@ -35,4 +35,76 @@ use serde::Deserialize;
 pub struct AdapterSpawnDescriptor {
     pub command: String,
     pub args: Vec<String>,
+}
+
+impl AdapterSpawnDescriptor {
+    /// Builds the exact [`AdapterConfirmationSubject`] the first-run
+    /// confirmation gate (`F100` S1) checks/records for this descriptor under
+    /// `transport` — the sole place this crate constructs one from a spawn
+    /// descriptor, so [`super::exec::spawn_adapter`]/[`super::tcp::connect_adapter`]
+    /// both call this rather than each hand-assembling the three fields
+    /// themselves.
+    pub(crate) fn confirmation_subject(
+        &self,
+        transport: AdapterTransportKind,
+    ) -> AdapterConfirmationSubject {
+        AdapterConfirmationSubject {
+            command: self.command.clone(),
+            args: self.args.clone(),
+            transport,
+        }
+    }
+}
+
+/// A TCP `host:port` to connect to for a `"tcp"`-transport adapter (`F100`
+/// S1) — see `docs/research/2026-07-28-generic-dap.md`'s "主导会话裁定" item 3:
+/// v1 only ever *connects out* to this address (`TcpStream::connect`), never
+/// listens for an incoming connection. Deliberately **not** part of
+/// [`AdapterConfirmationSubject`]'s three-field identity — the frozen
+/// decision's dedup key is exactly `(command, args, transport)`, not
+/// `host`/`port`: many real adapters bind an ephemeral port per run (`--port
+/// 0`), and folding a value that legitimately changes every launch into the
+/// confirmation key would force a fresh confirmation dialog on every single
+/// debug session, defeating the point of "first-run" confirmation.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct TcpConnectDescriptor {
+    pub host: String,
+    pub port: u16,
+}
+
+/// Which byte-transport an adapter descriptor uses — `"stdio"` (the process's
+/// own stdin/stdout pipes, [`super::exec::spawn_adapter`]) or `"tcp"` (a
+/// [`TcpConnectDescriptor`], [`super::tcp::connect_adapter`]). Serializes as
+/// the bare lowercase word on the wire (`"stdio"`/`"tcp"`), matching the
+/// adapter-config format's own `transport` field
+/// (`docs/research/2026-07-28-generic-dap.md`'s "决策 1").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AdapterTransportKind {
+    Stdio,
+    Tcp,
+}
+
+/// The exact, precise identity the first-run confirmation gate is keyed on —
+/// "主导会话裁定" item 2's `(command 绝对路径, args 数组, transport)` triple,
+/// verbatim. Two subjects that differ in *any single field* are two distinct,
+/// independently-confirmable identities — this is the whole safety property
+/// [`super::confirm::ConfirmationService`] exists to provide (a silently
+/// edited `command` must never inherit an earlier confirmation).
+///
+/// Deliberately excludes `host`/`port` — see [`TcpConnectDescriptor`]'s own
+/// doc comment for why. This is also the wire shape the three
+/// `debug_adapter_confirmation_*` Tauri commands accept as their request body
+/// (camelCase, unknown fields rejected — the frontend confirmation resolver
+/// in `app/features/debug/plain-debug-adapter-confirmation.ts` sends exactly
+/// this shape).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct AdapterConfirmationSubject {
+    pub command: String,
+    pub args: Vec<String>,
+    pub transport: AdapterTransportKind,
 }

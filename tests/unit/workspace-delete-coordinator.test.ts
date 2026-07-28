@@ -320,6 +320,15 @@ function testBridge(
 		async gitWorktreeRemove() {
 			throw new Error("unused");
 		},
+		async debugAdapterConfirmationState() {
+			throw new Error("unused");
+		},
+		async debugAdapterConfirmationGrant() {
+			throw new Error("unused");
+		},
+		async debugAdapterConfirmationRevoke() {
+			throw new Error("unused");
+		},
 		...overrides,
 	};
 }

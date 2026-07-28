@@ -127,6 +127,9 @@ function fakeBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		gitWorktreeList: notImplemented,
 		gitWorktreeAdd: notImplemented,
 		gitWorktreeRemove: notImplemented,
+		debugAdapterConfirmationState: notImplemented,
+		debugAdapterConfirmationGrant: notImplemented,
+		debugAdapterConfirmationRevoke: notImplemented,
 		...overrides,
 	};
 }

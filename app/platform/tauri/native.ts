@@ -45,6 +45,11 @@ import {
 } from "./workspace-codec";
 import { createWorkspaceWatcherManager } from "./workspace-watcher";
 import {
+	decodeDebugAdapterConfirmationState,
+	decodeDebugAdapterConfirmationVoid,
+	frozenDebugAdapterConfirmationRequest,
+} from "./debug-codec";
+import {
 	decodeWorkspaceSearchFilesResult,
 	decodeWorkspaceSearchTextPollResult,
 	decodeWorkspaceSearchTextStartResult,
@@ -704,6 +709,24 @@ export function createNativeBridge(): PlainBridge {
 			const request = frozenGitWorktreeRemoveRequest(path, force);
 			return decodeGitWorktreeRemoveOutcome(
 				await invoke<unknown>("git_worktree_remove", { request }),
+			);
+		},
+		debugAdapterConfirmationState: async (descriptor) => {
+			const request = frozenDebugAdapterConfirmationRequest(descriptor);
+			return decodeDebugAdapterConfirmationState(
+				await invoke<unknown>("debug_adapter_confirmation_state", { request }),
+			);
+		},
+		debugAdapterConfirmationGrant: async (descriptor) => {
+			const request = frozenDebugAdapterConfirmationRequest(descriptor);
+			decodeDebugAdapterConfirmationVoid(
+				await invoke<unknown>("debug_adapter_confirmation_grant", { request }),
+			);
+		},
+		debugAdapterConfirmationRevoke: async (descriptor) => {
+			const request = frozenDebugAdapterConfirmationRequest(descriptor);
+			decodeDebugAdapterConfirmationVoid(
+				await invoke<unknown>("debug_adapter_confirmation_revoke", { request }),
 			);
 		},
 	};

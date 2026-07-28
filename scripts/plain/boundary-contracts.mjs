@@ -5598,6 +5598,16 @@ const GIT_EXEC_WRAPPER_PATH = "src-tauri/src/git/exec.rs";
  */
 const DEBUG_EXEC_WRAPPER_PATH = "src-tauri/src/debug/exec.rs";
 
+/**
+ * `F100` S1's own staged-atomic-write persistence file for the first-run
+ * confirmation gate (`src-tauri/src/debug/confirm_store.rs`) — added to
+ * [`stageCleanupCallsAreExact`]'s per-file allowlist alongside
+ * `backup/store.rs`/`trust/store.rs`, whose identical `Stage`-drop-cleanup
+ * shape this file deliberately mirrors (see that file's own module doc for
+ * why the duplication is intentional, not an oversight).
+ */
+const DEBUG_CONFIRM_STORE_PATH = "src-tauri/src/debug/confirm_store.rs";
+
 const GIT_DOMAIN_SOURCE_PATTERN = /^src-tauri\/src\/git\/.*\.rs$/;
 
 /**
@@ -10171,6 +10181,23 @@ function stageCleanupCallsAreExact(relativePath, source) {
 				removeFileCalls[0],
 				/\bself\s*\.\s*dir\s*\.\s*$/,
 				"&self.name",
+			) &&
+			removeDirectoryCalls.length === 0
+		);
+	}
+	if (relativePath === DEBUG_CONFIRM_STORE_PATH) {
+		return (
+			removeFileCalls.length === 2 &&
+			removeFileCalls.some((call) =>
+				exactMethodCall(
+					source,
+					call,
+					/\bself\s*\.\s*dir\s*\.\s*$/,
+					"&self.name",
+				),
+			) &&
+			removeFileCalls.some((call) =>
+				exactMethodCall(source, call, /\bdir\s*\.\s*$/, "&key"),
 			) &&
 			removeDirectoryCalls.length === 0
 		);
@@ -18996,21 +19023,55 @@ function viewPaneSubclassDecoratorFailures(
 // ---------------------------------------------------------------------
 
 /**
- * Locks `debug/exec.rs`'s `spawn_adapter` function body's very first
- * statement (after argument binding) to be the
- * `trust.require_trusted(workspace, window_label).await?` call — mirroring
- * `terminal::service::TerminalService::start`/`git::discovery::discover_repository`'s
- * existing "trust gate before spawn" discipline, but this is the **first**
- * AST contract in this codebase that mechanically locks that ordering rather
- * than relying on code review alone (there is no existing `validateGit*`/
- * `validateTerminal*` sibling for this exact check — git/terminal's own
- * trust-gate calls are one-shot/session-start spawns whose "first statement"
- * shape was never previously locked as an AST contract either). Isolates the
- * function body first via `rustFunctionBody` (comments-only source, so
- * string literal content — irrelevant here — stays visible, matching this
- * helper's existing contract) rather than regexing the whole file, so a
- * `trust.require_trusted` appearing anywhere else (e.g. a doc comment, or a
- * different function) can never produce a false pass.
+ * Shared prefix check for `F100` S1's trust-*then*-confirmation double gate:
+ * builds a whitespace-insensitive regex matching the exact three-statement
+ * prefix `trust.require_trusted(workspace, window_label).await?;` → `let
+ * subject = descriptor.confirmation_subject(AdapterTransportKind::<variant>);`
+ * → `confirmation.require_confirmed(workspace, window_label,
+ * &subject).await?;`, and reports which of the two gates (or their ordering)
+ * is missing. Shared by [`validateDebugAdapterSpawnBoundary`] (`exec.rs`'s
+ * `spawn_adapter`, `variant: "Stdio"`) and
+ * [`validateDebugAdapterConnectBoundary`] (`tcp.rs`'s `connect_adapter`,
+ * `variant: "Tcp"`) rather than duplicated, since both functions share this
+ * exact shape by design (see either module's own doc comment for why
+ * connecting out is gated identically to spawning).
+ */
+function validateTrustThenConfirmationGatePrefix(body, transportVariant) {
+	const trustCheckFirst =
+		/^trust\s*\.\s*require_trusted\s*\(\s*workspace\s*,\s*window_label\s*\)\s*\.\s*await\s*\?\s*;/.test(
+			body,
+		);
+	if (!trustCheckFirst) {
+		return "must call trust.require_trusted(workspace, window_label).await? as its literal first statement, before any spawn/connect-related identifier appears in the function body";
+	}
+	const confirmationCheckSecond = new RegExp(
+		`^trust\\s*\\.\\s*require_trusted\\s*\\(\\s*workspace\\s*,\\s*window_label\\s*\\)\\s*\\.\\s*await\\s*\\?\\s*;` +
+			`\\s*let\\s+subject\\s*=\\s*descriptor\\s*\\.\\s*confirmation_subject\\s*\\(\\s*AdapterTransportKind\\s*::\\s*${transportVariant}\\s*\\)\\s*;` +
+			`\\s*confirmation\\s*\\.\\s*require_confirmed\\s*\\(\\s*workspace\\s*,\\s*window_label\\s*,\\s*&subject\\s*\\)\\s*\\.\\s*await\\s*\\?\\s*;`,
+	).test(body);
+	if (!confirmationCheckSecond) {
+		return `must call confirmation.require_confirmed(workspace, window_label, &subject).await? (subject built via descriptor.confirmation_subject(AdapterTransportKind::${transportVariant})) as its literal second statement, immediately after the trust check`;
+	}
+	return undefined;
+}
+
+/**
+ * Locks `debug/exec.rs`'s `spawn_adapter` function body's first two
+ * statements (after argument binding) to be, in order,
+ * `trust.require_trusted(workspace, window_label).await?;` then
+ * `confirmation.require_confirmed(...)` — the `F100` S1 trust-then-
+ * confirmation double gate ADR 0003 requires (workspace trust alone is not
+ * enough; a trusted workspace still requires first-run confirmation of the
+ * exact `(command, args, transport)` triple before this function may touch
+ * `Command`). `F100` S0 originally locked only the trust check; this is the
+ * S1 extension, generalized via [`validateTrustThenConfirmationGatePrefix`]
+ * so [`validateDebugAdapterConnectBoundary`] can lock the identical shape for
+ * `tcp.rs`'s `connect_adapter`. Isolates the function body first via
+ * `rustFunctionBody` (comments-only source, so string literal content —
+ * irrelevant here — stays visible, matching this helper's existing contract)
+ * rather than regexing the whole file, so either check appearing anywhere
+ * else (e.g. a doc comment, or a different function) can never produce a
+ * false pass.
  */
 export function validateDebugAdapterSpawnBoundary(rustSources) {
 	const execSource = findRustSource(rustSources, "src-tauri/src/debug/exec.rs");
@@ -19026,14 +19087,39 @@ export function validateDebugAdapterSpawnBoundary(rustSources) {
 		.replace(/^\{/, "")
 		.replace(/\}$/, "")
 		.trimStart();
-	const trustCheckFirst =
-		/^trust\s*\.\s*require_trusted\s*\(\s*workspace\s*,\s*window_label\s*\)\s*\.\s*await\s*\?\s*;/.test(
-			body,
-		);
-	if (!trustCheckFirst) {
-		return [
-			"debug/exec.rs spawn_adapter must call trust.require_trusted(workspace, window_label).await? as its literal first statement, before any Command/spawn-related identifier appears in the function body",
-		];
+	const failure = validateTrustThenConfirmationGatePrefix(body, "Stdio");
+	if (failure !== undefined) {
+		return [`debug/exec.rs spawn_adapter ${failure}`];
+	}
+	return [];
+}
+
+/**
+ * The connect-side sibling of [`validateDebugAdapterSpawnBoundary`]: locks
+ * `debug/tcp.rs`'s `connect_adapter` function body to the identical
+ * trust-then-confirmation double-gate prefix (`AdapterTransportKind::Tcp`
+ * rather than `::Stdio`) — "对任意 host:port 说 DAP" 和 "spawn 任意程序" 是同
+ * 等级的信任委托 (`docs/research/2026-07-28-generic-dap.md`'s "主导会话裁定"
+ * item 3), so this function must be gated exactly as strictly as
+ * `spawn_adapter`, not merely by trust alone.
+ */
+export function validateDebugAdapterConnectBoundary(rustSources) {
+	const tcpSource = findRustSource(rustSources, "src-tauri/src/debug/tcp.rs");
+	if (tcpSource === undefined) {
+		return ["debug adapter connect boundary requires debug/tcp.rs"];
+	}
+	const commentsOnly = stripRustCommentsOnly(tcpSource);
+	const connectAdapter = rustFunctionBody(commentsOnly, "connect_adapter");
+	if (connectAdapter === undefined) {
+		return ["debug/tcp.rs must define connect_adapter"];
+	}
+	const body = connectAdapter.body
+		.replace(/^\{/, "")
+		.replace(/\}$/, "")
+		.trimStart();
+	const failure = validateTrustThenConfirmationGatePrefix(body, "Tcp");
+	if (failure !== undefined) {
+		return [`debug/tcp.rs connect_adapter ${failure}`];
 	}
 	return [];
 }
@@ -19146,4 +19232,631 @@ export function validateDebugFramingBounds(rustSources) {
 		}
 	}
 	return failures;
+}
+
+// ---------------------------------------------------------------------
+// F100 S1 — first-run confirmation gate's Tauri command surface, mirroring
+// TRUST_COMMAND_CONTRACTS/TERMINAL_COMMAND_CONTRACTS's exact-signature-and-
+// body pinning technique.
+// ---------------------------------------------------------------------
+
+const DEBUG_COMMAND_CONTRACTS = Object.freeze([
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_adapter_confirmation_state",
+		parameters:
+			"window:WebviewWindow,confirmation:State<'_,ConfirmationService>,workspace:State<'_,WorkspaceService>,request:AdapterConfirmationSubject",
+		returnType: "->Result<DebugAdapterConfirmationState,CommandError>",
+		body: "letconfirmed=confirmation.inner().is_confirmed(workspace.inner(),window.label(),&request).await?;Ok(DebugAdapterConfirmationState::new(confirmed))",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_adapter_confirmation_grant",
+		parameters:
+			"window:WebviewWindow,confirmation:State<'_,ConfirmationService>,workspace:State<'_,WorkspaceService>,request:AdapterConfirmationSubject",
+		returnType: "->Result<(),CommandError>",
+		body: "confirmation.inner().grant(workspace.inner(),window.label(),&request).await",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_adapter_confirmation_revoke",
+		parameters:
+			"window:WebviewWindow,confirmation:State<'_,ConfirmationService>,workspace:State<'_,WorkspaceService>,request:AdapterConfirmationSubject",
+		returnType: "->Result<(),CommandError>",
+		body: "confirmation.inner().revoke(workspace.inner(),window.label(),&request).await",
+	},
+]);
+
+/**
+ * `F100` S1's `DEBUG_COMMAND_CONTRACTS` registration lock — structurally
+ * identical to `validateTrustTerminalCommandRegistration` (exact
+ * parameters/returnType/body pinning per command, plus a single audited
+ * `generate_handler!` registration each), scoped to the three
+ * `debug_adapter_confirmation_*` commands this slice adds. A fourth
+ * `debug_*` command (`debug_launch`, etc.) silently added, removed, renamed
+ * or rewired to a different service method fails this check the moment it is
+ * added to `DEBUG_COMMAND_CONTRACTS` without a matching, audited definition —
+ * mirroring the exact discipline `commands.rs`'s own module doc requires
+ * ("read this comment before adding a fourth").
+ */
+export function validateDebugCommandRegistration(rustSources) {
+	const failures = [];
+	const libSource = findRustSource(rustSources, "src-tauri/src/lib.rs");
+	const sourceCache = new Map();
+
+	for (const contract of DEBUG_COMMAND_CONTRACTS) {
+		if (!sourceCache.has(contract.file)) {
+			sourceCache.set(
+				contract.file,
+				findRustSource(rustSources, contract.file),
+			);
+		}
+		const fileSource = sourceCache.get(contract.file);
+		if (fileSource === undefined) {
+			failures.push(`command registration boundary requires ${contract.file}`);
+			continue;
+		}
+		const executableSource = stripRustCommentsAndLiterals(fileSource);
+		const commands = extractAuditedTauriCommands(
+			executableSource,
+			contract.name,
+		);
+		if (commands.length !== 1) {
+			failures.push(
+				`${contract.file} must define exactly one audited ${contract.name} Tauri command`,
+			);
+			continue;
+		}
+		const [command] = commands;
+		const normalizedParameters = command.parameters
+			.replaceAll(/\s+/g, "")
+			.replace(/,$/, "");
+		if (
+			normalizedParameters !== contract.parameters ||
+			command.returnType.replaceAll(/\s+/g, "") !== contract.returnType
+		) {
+			failures.push(
+				`${contract.name} must accept its audited parameters and return the audited Result type`,
+			);
+		}
+		const normalizedBody = command.body
+			.replaceAll(/\s+/g, "")
+			.replace(/;$/, "");
+		if (normalizedBody !== contract.body) {
+			failures.push(
+				`${contract.name} must contain only its audited confirmation-service route`,
+			);
+		}
+	}
+
+	if (libSource === undefined) {
+		failures.push(
+			"command registration boundary requires src-tauri/src/lib.rs",
+		);
+		return failures;
+	}
+	const executableLib = stripRustCommentsAndLiterals(libSource);
+	const handlerBodies = [
+		...executableLib.matchAll(
+			/\.invoke_handler\s*\(\s*tauri\s*::\s*generate_handler\s*!\s*\[([\s\S]*?)\]\s*\)/g,
+		),
+	];
+	for (const contract of DEBUG_COMMAND_CONTRACTS) {
+		const commandPath = new RegExp(
+			`\\bdebug\\s*::\\s*commands\\s*::\\s*${contract.name}\\b`,
+			"g",
+		);
+		const registrations = [...executableLib.matchAll(commandPath)];
+		const registeredInHandler =
+			handlerBodies.length === 1 &&
+			new RegExp(
+				`\\bdebug\\s*::\\s*commands\\s*::\\s*${contract.name}\\b`,
+			).test(handlerBodies[0][1]);
+		if (registrations.length !== 1 || !registeredInHandler) {
+			failures.push(
+				`src-tauri/src/lib.rs must register debug::commands::${contract.name} exactly once in generate_handler`,
+			);
+		}
+	}
+
+	return failures;
+}
+
+// ---------------------------------------------------------------------
+// F100 S1 — first-run confirmation gate's TypeScript boundary, mirroring
+// validateGitDiscardConfirmationBoundary/validateGitNetworkConfirmationBoundary's
+// exact rigor for this codebase's newest confirm-before-native-execution flow.
+// ---------------------------------------------------------------------
+
+const DEBUG_ADAPTER_CONFIRMATION_MODULE_PATH =
+	"app/features/debug/plain-debug-adapter-confirmation.ts";
+const DEBUG_ADAPTER_LAUNCH_MODULE_PATH =
+	"app/features/debug/plain-debug-adapter-launch.ts";
+
+/**
+ * `F100` S1's two confirm-gated bridge methods, both audited to the *same*
+ * single containing function (`resolveDebugAdapterConfirmation`) — unlike
+ * `GIT_NETWORK_BRIDGE_METHOD_AUDITS`'s one-method-per-view-method shape, both
+ * calls here belong to the same state-machine step (query the persisted
+ * decision, then — only on the unconfirmed path, only after a real user
+ * answer — grant).
+ */
+const DEBUG_ADAPTER_CONFIRMATION_BRIDGE_METHOD_AUDITS = Object.freeze([
+	Object.freeze({
+		bridgeMethod: "debugAdapterConfirmationState",
+		containingMethod: "resolveDebugAdapterConfirmation",
+		argumentTexts: Object.freeze(["request.subject"]),
+	}),
+	Object.freeze({
+		bridgeMethod: "debugAdapterConfirmationGrant",
+		containingMethod: "resolveDebugAdapterConfirmation",
+		argumentTexts: Object.freeze(["request.subject"]),
+	}),
+]);
+
+/**
+ * Locks three independent facts, any one of whose violation would let an
+ * unconfirmed `(command, args, transport)` triple slip through silently:
+ *
+ * 1. `debugAdapterConfirmationState`/`debugAdapterConfirmationGrant` each
+ *    have exactly one production call site, both inside
+ *    `resolveDebugAdapterConfirmation`'s own body — never called directly
+ *    from `plain-debug-adapter-launch.ts` or anywhere else (the same
+ *    `declarationCounts`/`auditedCallCounts` technique
+ *    `validateGitNetworkConfirmationBoundary` uses, generalized to a single
+ *    shared containing function for both methods).
+ * 2. `plain-debug-adapter-confirmation.ts`'s own audited module face: no
+ *    imports at all (mirrors `validateNetworkConfirmationModuleFace` — an
+ *    import is the only way this decide-only module could ever reach a
+ *    bridge/dialog service itself), an exact top-level declaration set, and
+ *    `resolveDebugAdapterConfirmation`'s own body matching the exact audited
+ *    shape (query state; return early *without* showing the dialog only when
+ *    already confirmed; otherwise *always* show it; grant only after a real
+ *    `confirmed: true` answer).
+ * 3. `resolveDebugAdapterConfirmation` itself has exactly one production call
+ *    site — `plain-debug-adapter-launch.ts`'s `prepareDebugAdapterLaunch` —
+ *    and that function's own body matches its exact audited
+ *    resolve-then-gate shape (the "唯一生产调用点 + 调用点的精确方法体" the
+ *    frozen research doc's AST contract item 4 calls for).
+ */
+export function validateDebugAdapterConfirmationBoundary(appSources) {
+	const failures = [];
+	const normalizedSources = new Map(
+		appSources.map(({ relativePath, source }) => [
+			relativePath.replaceAll("\\", "/"),
+			source,
+		]),
+	);
+	const requiredPaths = Object.freeze([
+		...GIT_DISCARD_DECLARATION_PATHS,
+		DEBUG_ADAPTER_CONFIRMATION_MODULE_PATH,
+		DEBUG_ADAPTER_LAUNCH_MODULE_PATH,
+	]);
+	for (const relativePath of requiredPaths) {
+		if (!normalizedSources.has(relativePath)) {
+			failures.push(
+				`debug adapter confirmation boundary requires ${relativePath}`,
+			);
+		}
+	}
+
+	function containingFunctionName(node) {
+		let current = node.parent;
+		while (current !== undefined) {
+			if (
+				ts.isMethodDeclaration(current) ||
+				ts.isFunctionDeclaration(current)
+			) {
+				return typeScriptStaticName(current.name);
+			}
+			current = current.parent;
+		}
+		return undefined;
+	}
+
+	const bridgeMethodNames = DEBUG_ADAPTER_CONFIRMATION_BRIDGE_METHOD_AUDITS.map(
+		(audit) => audit.bridgeMethod,
+	);
+	const declarationCounts = new Map(
+		GIT_DISCARD_DECLARATION_PATHS.flatMap((relativePath) =>
+			bridgeMethodNames.map((bridgeMethod) => [
+				`${relativePath}:${bridgeMethod}`,
+				0,
+			]),
+		),
+	);
+	const auditedCallCounts = new Map(
+		bridgeMethodNames.map((bridgeMethod) => [bridgeMethod, 0]),
+	);
+	let resolveConfirmationCallCount = 0;
+
+	for (const [normalizedPath, source] of normalizedSources) {
+		if (!normalizedPath.endsWith(".ts") && !normalizedPath.endsWith(".tsx")) {
+			continue;
+		}
+		const sourceFile = ts.createSourceFile(
+			normalizedPath,
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			normalizedPath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+		);
+		const isKnownBridge = collectTypeScriptBridgeAliases(sourceFile);
+
+		function visit(node) {
+			const isNameLike =
+				ts.isIdentifier(node) ||
+				ts.isStringLiteral(node) ||
+				ts.isNoSubstitutionTemplateLiteral(node);
+			const audit = isNameLike
+				? DEBUG_ADAPTER_CONFIRMATION_BRIDGE_METHOD_AUDITS.find(
+						(candidate) => candidate.bridgeMethod === node.text,
+					)
+				: undefined;
+			if (audit !== undefined) {
+				const bridgeMethod = audit.bridgeMethod;
+				const parent = node.parent;
+				const isPlatformBridgeDeclaration =
+					(normalizedPath === "app/platform/tauri/contracts.ts" &&
+						ts.isMethodSignature(parent) &&
+						parent.name === node) ||
+					(normalizedPath === "app/platform/tauri/native.ts" &&
+						ts.isPropertyAssignment(parent) &&
+						parent.name === node) ||
+					(normalizedPath === "app/platform/tauri/browser-mock.ts" &&
+						(ts.isMethodDeclaration(parent) ||
+							ts.isPropertyAssignment(parent)) &&
+						parent.name === node);
+				// `plain-debug-adapter-confirmation.ts`'s own
+				// `DebugAdapterConfirmBridge` structural interface re-declares these
+				// two method names as method signatures (the narrow bridge shape
+				// this module needs) — a fourth, in-file declaration site
+				// `validateGitNetworkConfirmationBoundary`'s own
+				// `NetworkConfirmDialogService` sibling never needed (that
+				// interface only ever declares `confirm`, never the audited bridge
+				// method names themselves, because git's confirmation module never
+				// calls a bridge method at all — this one does, by design, so it
+				// must declare the shape it calls). Deliberately not counted in
+				// `declarationCounts` (that map only tracks the three platform
+				// files' exactly-once-each requirement) — this is a fourth,
+				// separately-legitimate reference that needs only to be excluded
+				// from the "must be an audited call" branch below, not counted
+				// anywhere.
+				const isOwnInterfaceDeclaration =
+					normalizedPath === DEBUG_ADAPTER_CONFIRMATION_MODULE_PATH &&
+					ts.isMethodSignature(parent) &&
+					parent.name === node;
+				if (isPlatformBridgeDeclaration) {
+					const key = `${normalizedPath}:${bridgeMethod}`;
+					declarationCounts.set(key, declarationCounts.get(key) + 1);
+				} else if (isOwnInterfaceDeclaration) {
+					// No-op: a legitimate structural-interface declaration, not a call.
+				} else {
+					const propertyAccess = ts.isIdentifier(node) ? parent : undefined;
+					const directCall =
+						propertyAccess !== undefined &&
+						ts.isPropertyAccessExpression(propertyAccess) &&
+						propertyAccess.name === node &&
+						ts.isCallExpression(propertyAccess.parent) &&
+						propertyAccess.parent.expression === propertyAccess &&
+						isKnownBridge(propertyAccess.expression)
+							? propertyAccess.parent
+							: undefined;
+					const argumentTexts =
+						directCall?.arguments.map((argument) =>
+							argument.getText(sourceFile).replaceAll(/\s+/g, ""),
+						) ?? [];
+					const isAuditedCall =
+						directCall !== undefined &&
+						normalizedPath === DEBUG_ADAPTER_CONFIRMATION_MODULE_PATH &&
+						containingFunctionName(node) === audit.containingMethod &&
+						sameArray(argumentTexts, audit.argumentTexts);
+					if (isAuditedCall) {
+						auditedCallCounts.set(
+							bridgeMethod,
+							auditedCallCounts.get(bridgeMethod) + 1,
+						);
+					} else {
+						failures.push(
+							`${normalizedPath} must not consume ${bridgeMethod} outside resolveDebugAdapterConfirmation's single audited call site`,
+						);
+					}
+				}
+			}
+			if (
+				ts.isIdentifier(node) &&
+				node.text === "resolveDebugAdapterConfirmation" &&
+				ts.isCallExpression(node.parent) &&
+				node.parent.expression === node
+			) {
+				if (
+					normalizedPath === DEBUG_ADAPTER_LAUNCH_MODULE_PATH &&
+					containingFunctionName(node) === "prepareDebugAdapterLaunch"
+				) {
+					resolveConfirmationCallCount += 1;
+				} else if (normalizedPath !== DEBUG_ADAPTER_CONFIRMATION_MODULE_PATH) {
+					failures.push(
+						`${normalizedPath} must not call resolveDebugAdapterConfirmation outside plain-debug-adapter-launch.ts's prepareDebugAdapterLaunch`,
+					);
+				}
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(sourceFile);
+	}
+
+	for (const [key, count] of declarationCounts) {
+		if (count !== 1) {
+			const [relativePath, bridgeMethod] = key.split(":");
+			failures.push(
+				`${relativePath} must declare ${bridgeMethod} exactly once in its audited bridge surface`,
+			);
+		}
+	}
+	for (const audit of DEBUG_ADAPTER_CONFIRMATION_BRIDGE_METHOD_AUDITS) {
+		if (auditedCallCounts.get(audit.bridgeMethod) !== 1) {
+			failures.push(
+				`${audit.bridgeMethod} must have exactly one production call site, inside resolveDebugAdapterConfirmation`,
+			);
+		}
+	}
+	if (resolveConfirmationCallCount !== 1) {
+		failures.push(
+			"resolveDebugAdapterConfirmation must have exactly one production call site, inside plain-debug-adapter-launch.ts's prepareDebugAdapterLaunch",
+		);
+	}
+
+	const confirmationModuleSource = normalizedSources.get(
+		DEBUG_ADAPTER_CONFIRMATION_MODULE_PATH,
+	);
+	if (confirmationModuleSource !== undefined) {
+		failures.push(
+			...validateDebugAdapterConfirmationModuleFace(confirmationModuleSource),
+		);
+	}
+	const launchModuleSource = normalizedSources.get(
+		DEBUG_ADAPTER_LAUNCH_MODULE_PATH,
+	);
+	if (launchModuleSource !== undefined) {
+		failures.push(...validateDebugAdapterLaunchGuardedCall(launchModuleSource));
+	}
+
+	return [...new Set(failures)];
+}
+
+/**
+ * Locks `plain-debug-adapter-confirmation.ts`'s own audited module face —
+ * mirrors `validateNetworkConfirmationModuleFace`'s exact technique: it must
+ * import nothing at all, its top-level declarations must match the exact
+ * audited set, and `resolveDebugAdapterConfirmation` itself must match the
+ * exact audited body — which simultaneously proves it never calls a bridge
+ * method itself outside the audited pattern and never has a branch that
+ * skips the dialog for an unconfirmed subject.
+ */
+function validateDebugAdapterConfirmationModuleFace(source) {
+	const failures = [];
+	const sourceFile = ts.createSourceFile(
+		DEBUG_ADAPTER_CONFIRMATION_MODULE_PATH,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["plain-debug-adapter-confirmation.ts must remain valid TypeScript"];
+	}
+
+	if (
+		sourceFile.statements.some((statement) => ts.isImportDeclaration(statement))
+	) {
+		failures.push(
+			"plain-debug-adapter-confirmation.ts must not import anything — it only ever decides whether the caller may proceed, and an import is the only way it could ever reach a bridge/dialog service itself",
+		);
+	}
+
+	const expectedTopLevel = new Map([
+		["DebugAdapterConfirmBridge", { kind: "interface", exported: true }],
+		["DebugAdapterConfirmDialogService", { kind: "interface", exported: true }],
+		["DebugAdapterConfirmationSubject", { kind: "interface", exported: true }],
+		["DebugAdapterConfirmationRequest", { kind: "interface", exported: true }],
+		["quoteArgIfNeeded", { kind: "function", exported: false }],
+		["debugAdapterCommandLine", { kind: "function", exported: true }],
+		["debugAdapterConfirmationMessage", { kind: "function", exported: true }],
+		["debugAdapterConfirmationDetail", { kind: "function", exported: true }],
+		[
+			"DEBUG_ADAPTER_CONFIRM_PRIMARY_BUTTON",
+			{ kind: "variable", exported: true },
+		],
+		["DebugAdapterConfirmDecision", { kind: "type", exported: true }],
+		[
+			"resolveDebugAdapterConfirmation",
+			{ kind: "function", exported: true, async: true },
+		],
+	]);
+	const topLevelCounts = new Map(
+		[...expectedTopLevel].map(([name]) => [name, 0]),
+	);
+	let topLevelIsExact = true;
+	for (const statement of sourceFile.statements) {
+		if (ts.isImportDeclaration(statement)) {
+			continue;
+		}
+		let name;
+		let kind;
+		if (ts.isVariableStatement(statement)) {
+			if (statement.declarationList.declarations.length !== 1) {
+				topLevelIsExact = false;
+				continue;
+			}
+			name = statement.declarationList.declarations[0].name;
+			kind = "variable";
+		} else if (ts.isFunctionDeclaration(statement)) {
+			name = statement.name;
+			kind = "function";
+		} else if (ts.isInterfaceDeclaration(statement)) {
+			name = statement.name;
+			kind = "interface";
+		} else if (ts.isTypeAliasDeclaration(statement)) {
+			name = statement.name;
+			kind = "type";
+		} else {
+			topLevelIsExact = false;
+			continue;
+		}
+		const expected = ts.isIdentifier(name)
+			? expectedTopLevel.get(name.text)
+			: undefined;
+		const modifierKinds = (statement.modifiers ?? []).map(
+			(modifier) => modifier.kind,
+		);
+		const expectedModifiers = [
+			...(expected?.exported ? [ts.SyntaxKind.ExportKeyword] : []),
+			...(expected?.async ? [ts.SyntaxKind.AsyncKeyword] : []),
+		];
+		if (
+			expected === undefined ||
+			expected.kind !== kind ||
+			!sameArray(modifierKinds, expectedModifiers)
+		) {
+			topLevelIsExact = false;
+		} else {
+			topLevelCounts.set(name.text, topLevelCounts.get(name.text) + 1);
+		}
+	}
+	if (
+		!topLevelIsExact ||
+		[...topLevelCounts.values()].some((count) => count !== 1)
+	) {
+		failures.push(
+			"plain-debug-adapter-confirmation.ts must retain its exact audited top-level surface — no new declaration can quietly add a way for this decide-only module to reach a bridge",
+		);
+	}
+
+	const resolveFunctions = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "resolveDebugAdapterConfirmation",
+	);
+	const expectedResolveBody = `{
+		const state = await bridge.debugAdapterConfirmationState(request.subject);
+		if (state.confirmed) {
+			return Object.freeze({ kind: "already-confirmed" });
+		}
+		const confirmation = await dialogService.confirm({
+			message: debugAdapterConfirmationMessage(request),
+			detail: debugAdapterConfirmationDetail(request),
+			primaryButton: DEBUG_ADAPTER_CONFIRM_PRIMARY_BUTTON,
+		});
+		if (!confirmation.confirmed) {
+			return Object.freeze({ kind: "declined" });
+		}
+		await bridge.debugAdapterConfirmationGrant(request.subject);
+		return Object.freeze({ kind: "confirmed" });
+	}`.replaceAll(/\s+/g, "");
+	if (
+		resolveFunctions.length !== 1 ||
+		resolveFunctions[0].body === undefined ||
+		resolveFunctions[0].body.getText(sourceFile).replaceAll(/\s+/g, "") !==
+			expectedResolveBody
+	) {
+		failures.push(
+			"resolveDebugAdapterConfirmation must query the persisted decision first, always show the dialog for an unconfirmed subject, and never call a bridge method itself outside the exact audited shape",
+		);
+	}
+	return failures;
+}
+
+/**
+ * Locks `plain-debug-adapter-launch.ts`'s `prepareDebugAdapterLaunch` to its
+ * exact "parse, resolve, gate-then-return" body shape — the "调用点的精确方法
+ * 体" half of the frozen research doc's AST contract item 4, mirroring
+ * `validateNetworkMutationGuardedCalls`'s per-function exact-body technique
+ * (applied here to a standalone exported function rather than a class
+ * method, since there is no `PlainDebugView` class yet in this slice).
+ */
+function validateDebugAdapterLaunchGuardedCall(source) {
+	const sourceFile = ts.createSourceFile(
+		DEBUG_ADAPTER_LAUNCH_MODULE_PATH,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["plain-debug-adapter-launch.ts must remain valid TypeScript"];
+	}
+
+	const functions = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "prepareDebugAdapterLaunch",
+	);
+	const expectedBody = `{
+		const registryResult =
+			registryBytes === null
+				? Object.freeze({ kind: "ok" as const, value: Object.freeze([]) })
+				: parseDebugAdapterRegistry(registryBytes);
+		if (registryResult.kind === "error") {
+			return Object.freeze({
+				kind: "invalid-registry",
+				reason: registryResult.reason,
+			});
+		}
+		const launchResult = parseLaunchConfigurations(launchConfigurationBytes);
+		if (launchResult.kind === "error") {
+			return Object.freeze({
+				kind: "invalid-launch-configuration",
+				reason: launchResult.reason,
+			});
+		}
+		const configuration = launchResult.value.find(
+			(candidate) => candidate.name === configurationName,
+		);
+		if (configuration === undefined) {
+			return Object.freeze({
+				kind: "configuration-not-found",
+				name: configurationName,
+			});
+		}
+		const resolved = resolveAdapterDescriptor(
+			configuration,
+			registryResult.value,
+		);
+		if (resolved.kind === "adapter-not-found") {
+			return Object.freeze({ kind: "adapter-not-found", type: resolved.type });
+		}
+		const decision = await resolveDebugAdapterConfirmation(
+			bridge,
+			dialogService,
+			{
+				subject: {
+					command: resolved.descriptor.command,
+					args: resolved.descriptor.args,
+					transport: resolved.descriptor.transport,
+				},
+				configSource: resolved.configSource,
+			},
+		);
+		if (decision.kind === "declined") {
+			return Object.freeze({ kind: "declined" });
+		}
+		return Object.freeze({
+			kind: "ready",
+			descriptor: resolved.descriptor,
+			configSource: resolved.configSource,
+			warnings: resolved.warnings,
+			launchArguments: configuration.launchArguments,
+		});
+	}`.replaceAll(/\s+/g, "");
+	if (
+		functions.length !== 1 ||
+		functions[0].body === undefined ||
+		functions[0].body.getText(sourceFile).replaceAll(/\s+/g, "") !==
+			expectedBody
+	) {
+		return [
+			"prepareDebugAdapterLaunch must match its exact audited parse-resolve-then-gate shape — no other shape may reach resolveDebugAdapterConfirmation",
+		];
+	}
+	return [];
 }

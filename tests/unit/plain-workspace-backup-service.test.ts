@@ -137,6 +137,9 @@ function createFakeBridge(overrides: Partial<PlainBridge> = {}): {
 		gitWorktreeList: notImplemented,
 		gitWorktreeAdd: notImplemented,
 		gitWorktreeRemove: notImplemented,
+		debugAdapterConfirmationState: notImplemented,
+		debugAdapterConfirmationGrant: notImplemented,
+		debugAdapterConfirmationRevoke: notImplemented,
 		...overrides,
 	};
 	return { bridge, state };

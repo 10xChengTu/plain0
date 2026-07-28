@@ -1,6 +1,7 @@
 import type {
 	BackupEntry,
 	CommandError,
+	DebugAdapterConfirmationSubject,
 	GitBlameCommitHeader,
 	GitBlameFileResult,
 	GitBlameLineEntry,
@@ -117,6 +118,11 @@ import {
 	createWorkspaceWatcherManager,
 	type WorkspaceWatcherTransport,
 } from "./workspace-watcher";
+import {
+	decodeDebugAdapterConfirmationState,
+	decodeDebugAdapterConfirmationVoid,
+	frozenDebugAdapterConfirmationRequest,
+} from "./debug-codec";
 import {
 	decodeTerminalScrollbackResult,
 	decodeTerminalStartResult,
@@ -5236,6 +5242,29 @@ export function createBrowserMockBridge(
 	const terminalDataListeners = new Set<(event: TerminalDataEvent) => void>();
 	const terminalExitListeners = new Set<(event: TerminalExitEvent) => void>();
 
+	/** `F100` S1 mock confirmation state — a workspace-independent set of
+	 * confirmed `(command, args, transport)` keys, mirroring `terminalTrusted`'s
+	 * own "gated on `roots.size === 0`, otherwise a plain in-memory flag" shape
+	 * (this mock, unlike real Rust, has no per-workspace-identity scoping —
+	 * every mocked window shares one fixture-global fake workspace already,
+	 * matching `terminalTrusted`'s identical simplification). */
+	const debugAdapterConfirmations = new Set<string>();
+	function debugAdapterConfirmationKey(
+		descriptor: DebugAdapterConfirmationSubject,
+	): string {
+		return JSON.stringify([
+			descriptor.command,
+			descriptor.args,
+			descriptor.transport,
+		]);
+	}
+	function debugAdapterConfirmationUnavailable(): CommandError {
+		return commandError(
+			"DEBUG_ADAPTER_CONFIRMATION_UNAVAILABLE",
+			"The debug adapter confirmation store is not available for this window.",
+		);
+	}
+
 	interface MockTerminalSession {
 		readonly sessionId: string;
 		cols: number;
@@ -6958,6 +6987,33 @@ export function createBrowserMockBridge(
 			);
 			gitWorktreeDirtyPaths.delete(request.path);
 			return "removed";
+		},
+		async debugAdapterConfirmationState(descriptor) {
+			const request = frozenDebugAdapterConfirmationRequest(descriptor);
+			return decodeDebugAdapterConfirmationState({
+				confirmed:
+					roots.size === 0
+						? false
+						: debugAdapterConfirmations.has(
+								debugAdapterConfirmationKey(request),
+							),
+			});
+		},
+		async debugAdapterConfirmationGrant(descriptor) {
+			if (roots.size === 0) {
+				throw debugAdapterConfirmationUnavailable();
+			}
+			const request = frozenDebugAdapterConfirmationRequest(descriptor);
+			debugAdapterConfirmations.add(debugAdapterConfirmationKey(request));
+			decodeDebugAdapterConfirmationVoid(null);
+		},
+		async debugAdapterConfirmationRevoke(descriptor) {
+			if (roots.size === 0) {
+				throw debugAdapterConfirmationUnavailable();
+			}
+			const request = frozenDebugAdapterConfirmationRequest(descriptor);
+			debugAdapterConfirmations.delete(debugAdapterConfirmationKey(request));
+			decodeDebugAdapterConfirmationVoid(null);
 		},
 	};
 }

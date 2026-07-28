@@ -34,7 +34,8 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
-use crate::debug::dto::AdapterSpawnDescriptor;
+use crate::debug::confirm::ConfirmationService;
+use crate::debug::dto::{AdapterSpawnDescriptor, AdapterTransportKind};
 use crate::trust::service::TrustService;
 use crate::workspace::dto::WorkspacePickRootsMode;
 use crate::workspace::picker::{DirectoryPicker, DirectoryPickerFuture, DirectoryPickerResult};
@@ -366,6 +367,12 @@ fn argv_elements_containing_shell_metacharacters_are_never_shell_interpreted() {
 // positive-control counterpart.
 // ---------------------------------------------------------------------
 
+fn unconfirmed_confirmation_service() -> (TempDir, ConfirmationService) {
+    let base = TempDir::new().unwrap();
+    let confirmation = ConfirmationService::new(base.path().to_path_buf());
+    (base, confirmation)
+}
+
 #[test]
 fn spawn_adapter_never_spawns_a_child_process_when_the_workspace_is_untrusted() {
     let root = TempDir::new().unwrap();
@@ -375,6 +382,7 @@ fn spawn_adapter_never_spawns_a_child_process_when_the_workspace_is_untrusted() 
 
     let workspace = workspace_with_root("main", root.path());
     let trust = TrustService::new(trust_base.path().to_path_buf());
+    let (_confirm_base, confirmation) = unconfirmed_confirmation_service();
     let descriptor = AdapterSpawnDescriptor {
         command: "/bin/sh".to_owned(),
         args: vec!["-c".to_owned(), format!(": > '{}'", canary.display())],
@@ -384,6 +392,7 @@ fn spawn_adapter_never_spawns_a_child_process_when_the_workspace_is_untrusted() 
         &trust,
         &workspace,
         "main",
+        &confirmation,
         &descriptor,
         cancel,
     ));
@@ -401,6 +410,7 @@ fn spawn_adapter_rejects_the_empty_workspace_without_spawning() {
     let canary = canary_dir.path().join("should-not-exist");
     let workspace = WorkspaceService::new();
     let trust = TrustService::new(trust_base.path().to_path_buf());
+    let (_confirm_base, confirmation) = unconfirmed_confirmation_service();
     let descriptor = AdapterSpawnDescriptor {
         command: "/bin/sh".to_owned(),
         args: vec!["-c".to_owned(), format!(": > '{}'", canary.display())],
@@ -410,6 +420,7 @@ fn spawn_adapter_rejects_the_empty_workspace_without_spawning() {
         &trust,
         &workspace,
         "main",
+        &confirmation,
         &descriptor,
         cancel,
     ));
@@ -417,12 +428,51 @@ fn spawn_adapter_rejects_the_empty_workspace_without_spawning() {
     assert!(!canary.exists());
 }
 
-/// Positive control for the two tests above: the *same* fixture descriptor,
-/// with real trust actually granted, genuinely does spawn and does touch the
-/// canary — proving the negative result above means "the trust gate stopped
-/// it", not "this fixture never runs regardless".
+// ---------------------------------------------------------------------
+// Confirmation gate — "never spawns when trusted but unconfirmed" proof
+// (canary file), plus its positive-control counterpart. Trust alone is not
+// enough: this proves the *second* gate independently stops the spawn even
+// once the *first* gate (trust) has already been satisfied.
+// ---------------------------------------------------------------------
+
 #[test]
-fn spawn_adapter_positive_control_the_same_descriptor_does_spawn_once_trusted() {
+fn spawn_adapter_never_spawns_when_trusted_but_not_confirmed() {
+    let root = TempDir::new().unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let canary_dir = TempDir::new().unwrap();
+    let canary = canary_dir.path().join("should-not-exist");
+
+    let workspace = workspace_with_root("main", root.path());
+    let trust = TrustService::new(trust_base.path().to_path_buf());
+    block_on(trust.grant(&workspace, "main")).expect("grant succeeds");
+    let (_confirm_base, confirmation) = unconfirmed_confirmation_service();
+
+    let descriptor = AdapterSpawnDescriptor {
+        command: "/bin/sh".to_owned(),
+        args: vec!["-c".to_owned(), format!(": > '{}'", canary.display())],
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let result = block_on(spawn_adapter(
+        &trust,
+        &workspace,
+        "main",
+        &confirmation,
+        &descriptor,
+        cancel,
+    ));
+    assert_eq!(result.unwrap_err().code(), "DEBUG_ADAPTER_NOT_CONFIRMED");
+    assert!(
+        !canary.exists(),
+        "an unconfirmed (command, args, transport) triple must never spawn, even in a trusted workspace"
+    );
+}
+
+/// Positive control: the *same* fixture descriptor, with real trust granted
+/// AND the exact matching subject confirmed, genuinely does spawn and does
+/// touch the canary — proving the negative result above means "the
+/// confirmation gate stopped it", not "this fixture never runs regardless".
+#[test]
+fn spawn_adapter_positive_control_the_same_descriptor_does_spawn_once_trusted_and_confirmed() {
     let root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let canary_dir = TempDir::new().unwrap();
@@ -431,16 +481,25 @@ fn spawn_adapter_positive_control_the_same_descriptor_does_spawn_once_trusted() 
     let workspace = workspace_with_root("main", root.path());
     let trust = TrustService::new(trust_base.path().to_path_buf());
     block_on(trust.grant(&workspace, "main")).expect("grant succeeds");
+    let (_confirm_base, confirmation) = unconfirmed_confirmation_service();
 
     let descriptor = AdapterSpawnDescriptor {
         command: "/bin/sh".to_owned(),
         args: vec!["-c".to_owned(), format!(": > '{}'", canary.display())],
     };
+    block_on(confirmation.grant(
+        &workspace,
+        "main",
+        &descriptor.confirmation_subject(AdapterTransportKind::Stdio),
+    ))
+    .expect("confirmation grant succeeds");
+
     let cancel = Arc::new(AtomicBool::new(false));
     let result = block_on(spawn_adapter(
         &trust,
         &workspace,
         "main",
+        &confirmation,
         &descriptor,
         cancel,
     ));
@@ -450,6 +509,53 @@ fn spawn_adapter_positive_control_the_same_descriptor_does_spawn_once_trusted() 
     assert_eq!(result.unwrap_err().code(), "DEBUG_ADAPTER_STARTUP_CRASHED");
     assert!(
         canary.exists(),
-        "with real trust granted, the identical descriptor's fixture command must actually run"
+        "with real trust granted and the matching subject confirmed, the identical descriptor's fixture command must actually run"
+    );
+}
+
+/// A confirmation granted for a *different* argv must not silently cover this
+/// descriptor — the spawn-level analogue of `confirm::tests`'s own
+/// per-component sensitivity proofs, exercised through the full gated entry
+/// point rather than the confirmation service alone.
+#[test]
+fn spawn_adapter_rejects_a_descriptor_whose_args_differ_from_what_was_confirmed() {
+    let root = TempDir::new().unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let canary_dir = TempDir::new().unwrap();
+    let canary = canary_dir.path().join("should-not-exist");
+
+    let workspace = workspace_with_root("main", root.path());
+    let trust = TrustService::new(trust_base.path().to_path_buf());
+    block_on(trust.grant(&workspace, "main")).expect("grant succeeds");
+    let (_confirm_base, confirmation) = unconfirmed_confirmation_service();
+
+    let confirmed_descriptor = AdapterSpawnDescriptor {
+        command: "/bin/sh".to_owned(),
+        args: vec!["-c".to_owned(), "exit 0".to_owned()],
+    };
+    block_on(confirmation.grant(
+        &workspace,
+        "main",
+        &confirmed_descriptor.confirmation_subject(AdapterTransportKind::Stdio),
+    ))
+    .expect("confirmation grant succeeds");
+
+    let edited_descriptor = AdapterSpawnDescriptor {
+        command: "/bin/sh".to_owned(),
+        args: vec!["-c".to_owned(), format!(": > '{}'", canary.display())],
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let result = block_on(spawn_adapter(
+        &trust,
+        &workspace,
+        "main",
+        &confirmation,
+        &edited_descriptor,
+        cancel,
+    ));
+    assert_eq!(result.unwrap_err().code(), "DEBUG_ADAPTER_NOT_CONFIRMED");
+    assert!(
+        !canary.exists(),
+        "confirming one argv must never silently authorize spawning a descriptor with different args"
     );
 }

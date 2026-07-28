@@ -473,6 +473,22 @@ export interface WorkspaceTrustState {
 	readonly trusted: boolean;
 }
 
+/** `F100` S1's first-run confirmation gate identity — the exact
+ * `(command, args, transport)` triple `src-tauri/src/debug/dto.rs`'s
+ * `AdapterConfirmationSubject` locks (deliberately excludes `host`/`port` —
+ * see that type's own doc comment for why). */
+export interface DebugAdapterConfirmationSubject {
+	readonly command: string;
+	readonly args: readonly string[];
+	readonly transport: "stdio" | "tcp";
+}
+
+/** Response shape for `debug_adapter_confirmation_state` — mirrors
+ * `WorkspaceTrustState`'s identical "read a persisted yes/no fact" shape. */
+export interface DebugAdapterConfirmationState {
+	readonly confirmed: boolean;
+}
+
 /**
  * One recovered backup entry. `bytes` is a freshly allocated snapshot: it
  * shares no backing storage with the bridge/mock and the caller may freely
@@ -1599,4 +1615,25 @@ export interface PlainBridge {
 		path: string,
 		force: boolean,
 	): Promise<GitWorktreeRemoveOutcome>;
+	/** `F100` S1: reads whether the exact `(command, args, transport)` triple
+	 * has already been confirmed for the current workspace — see
+	 * `src-tauri/src/debug/confirm.rs`'s module doc and
+	 * `app/features/debug/plain-debug-adapter-confirmation.ts`'s
+	 * `resolveDebugAdapterConfirmation`. `false`, never a rejection, for the
+	 * `EMPTY` workspace. */
+	debugAdapterConfirmationState(
+		descriptor: DebugAdapterConfirmationSubject,
+	): Promise<DebugAdapterConfirmationState>;
+	/** Persists confirmation for the exact triple, scoped to the current
+	 * workspace's stable roots identity. Rejects with
+	 * `DEBUG_ADAPTER_CONFIRMATION_UNAVAILABLE` for the `EMPTY` workspace. */
+	debugAdapterConfirmationGrant(
+		descriptor: DebugAdapterConfirmationSubject,
+	): Promise<void>;
+	/** Revokes a previously granted confirmation for the exact triple.
+	 * Idempotent — revoking a triple that was never (or no longer) confirmed
+	 * succeeds silently. */
+	debugAdapterConfirmationRevoke(
+		descriptor: DebugAdapterConfirmationSubject,
+	): Promise<void>;
 }

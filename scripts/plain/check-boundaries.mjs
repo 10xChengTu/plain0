@@ -5,7 +5,10 @@ import { fileURLToPath } from "node:url";
 
 import {
 	validateCapabilityFiles,
+	validateDebugAdapterConfirmationBoundary,
+	validateDebugAdapterConnectBoundary,
 	validateDebugAdapterSpawnBoundary,
+	validateDebugCommandRegistration,
 	validateDebugFramingBounds,
 	validateDebugSpawnConstructionShape,
 	validateDialogOverrideImportBoundary,
@@ -800,10 +803,19 @@ for (const failure of validateGitWorktreeConfirmationBoundary(appSources)) {
 for (const failure of validateDebugAdapterSpawnBoundary(rustSources)) {
 	fail(failure);
 }
+for (const failure of validateDebugAdapterConnectBoundary(rustSources)) {
+	fail(failure);
+}
 for (const failure of validateDebugSpawnConstructionShape(rustSources)) {
 	fail(failure);
 }
 for (const failure of validateDebugFramingBounds(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateDebugCommandRegistration(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateDebugAdapterConfirmationBoundary(appSources)) {
 	fail(failure);
 }
 

@@ -142,6 +142,9 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		gitWorktreeList: vi.fn(),
 		gitWorktreeAdd: vi.fn(),
 		gitWorktreeRemove: vi.fn(),
+		debugAdapterConfirmationState: vi.fn(),
+		debugAdapterConfirmationGrant: vi.fn(),
+		debugAdapterConfirmationRevoke: vi.fn(),
 		...overrides,
 	};
 }
@@ -254,6 +257,9 @@ describe("workspace Workbench command overrides", () => {
 			gitWorktreeList: vi.fn(),
 			gitWorktreeAdd: vi.fn(),
 			gitWorktreeRemove: vi.fn(),
+			debugAdapterConfirmationState: vi.fn(),
+			debugAdapterConfirmationGrant: vi.fn(),
+			debugAdapterConfirmationRevoke: vi.fn(),
 		};
 		const contextValues = new Map<string, unknown>([
 			["openFolderWorkspaceSupport", false],
