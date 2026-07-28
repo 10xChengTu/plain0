@@ -1020,19 +1020,178 @@ pub(crate) fn parse_evaluate_response(body: &Value) -> Result<DebugEvaluateResul
     })
 }
 
+// ---------------------------------------------------------------------
+// `F100` S4 — execution/step control (`continue`/`next`/`stepIn`/`stepOut`/
+// `pause`) and `runInTerminal` reverse-request handling.
+// ---------------------------------------------------------------------
+
+/// Shared `{sessionId, threadId}` request shape for every step/execution-
+/// control DAP request this domain sends — `continue`/`next`/`stepIn`/
+/// `stepOut`/`pause` all take, per spec, `arguments` that are exactly
+/// `{threadId: number, ...fields this domain does not send}`
+/// (`ContinueArguments`/`NextArguments`/`StepInArguments`/`StepOutArguments`/
+/// `PauseArguments`). One request DTO for all five keeps this file from
+/// repeating the identical shape four more times — see
+/// `super::commands`'s own module doc for why `stepIn`'s `targetId` (the
+/// "step into target" picker gated by `supportsStepInTargetsRequest`) and
+/// every request's optional `singleThread`/`granularity` fields are
+/// deliberately not exposed in this slice (a disclosed scope narrowing, not
+/// an oversight — real DAP defines no `supportsXxx` capability gating the
+/// *basic* five commands themselves; they are mandatory baseline requests
+/// every adapter must implement, confirmed by both real capability captures
+/// `docs/research/2026-07-28-generic-dap.md` recorded, neither of which
+/// contains any such field).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct DebugThreadRequest {
+    pub session_id: DebugSessionId,
+    pub thread_id: i64,
+}
+
+pub(crate) struct DebugThreadQuery {
+    pub(crate) session_id: DebugSessionId,
+    pub(crate) arguments: Value,
+}
+
+impl DebugThreadRequest {
+    pub(crate) fn into_parts(self) -> DebugThreadQuery {
+        DebugThreadQuery {
+            session_id: self.session_id,
+            arguments: serde_json::json!({ "threadId": self.thread_id }),
+        }
+    }
+}
+
+/// `debug_continue`'s response — `all_threads_continued` is the one
+/// meaningful field DAP's `ContinueResponse.body` defines. Per spec: "If this
+/// attribute is missing a value of `true` is assumed for backward
+/// compatibility" — [`parse_continue_response`] implements that exact
+/// default rather than treating a bodyless/fieldless response as `false` (a
+/// minimal, spec-compliant adapter need not send a body at all, and that must
+/// not be misread as "only this one thread resumed").
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugContinueResult {
+    pub all_threads_continued: bool,
+}
+
+pub(crate) fn parse_continue_response(body: &Value) -> Result<DebugContinueResult, CommandError> {
+    let all_threads_continued = body
+        .get("allThreadsContinued")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    Ok(DebugContinueResult {
+        all_threads_continued,
+    })
+}
+
+/// Defensive ceilings on a `runInTerminal` reverse request's own `args`/`env`
+/// — mirrors [`MAX_DEBUG_SESSION_ARGS`]'s "hostile-input backstop, not an
+/// expected value" intent. Unlike every other ceiling in this file, this data
+/// never crosses the Tauri IPC boundary at all (it arrives from the adapter
+/// subprocess over the DAP transport, parsed entirely on the reader thread) —
+/// but an already-trusted, already-spawned adapter can still be buggy or
+/// hostile, and this domain should not build an unbounded `CommandBuilder`
+/// any more than [`parse_variables_response`] should allocate without bound
+/// for a malformed adapter response.
+const MAX_RUN_IN_TERMINAL_ARGS: usize = 256;
+const MAX_RUN_IN_TERMINAL_ARG_BYTES: usize = 8_192;
+const MAX_RUN_IN_TERMINAL_ENV_ENTRIES: usize = 256;
+
+/// Parsed, validated shape of a `runInTerminal` reverse request's own
+/// `arguments` (DAP's `RunInTerminalRequestArguments`) — see
+/// `super::commands`'s `handle_run_in_terminal_reverse_request` for how this
+/// is actually acted on (spawning a real, visible `TerminalService` session,
+/// never a hidden second spawn path). `kind` (`"integrated"`/`"external"`) is
+/// deliberately not modeled here at all — Plain has exactly one terminal
+/// facility (the integrated one) and no "external terminal" concept to honor
+/// an `"external"` request with, so every `runInTerminal` request is served
+/// identically regardless of which `kind` it names; see that module's own
+/// doc comment for the full reasoning. `title` is carried through unparsed
+/// (an arbitrary adapter-supplied label) purely for the frontend to build a
+/// recognizable tab title from — this domain does not interpret it.
+/// `argsCanBeInterpretedByShell` is likewise never read: this domain always
+/// treats `args` as an already-tokenized argv (`args[0]` the program,
+/// `args[1..]` its own arguments), passed to `CommandBuilder` element-by-
+/// element, exactly like every other spawn this codebase performs — it never
+/// asks a shell to interpret anything, regardless of what an adapter's
+/// `argsCanBeInterpretedByShell` hint claims.
+pub(crate) struct RunInTerminalArguments {
+    pub(crate) cwd: String,
+    pub(crate) program: String,
+    pub(crate) args: Vec<String>,
+    pub(crate) env: Vec<(String, Option<String>)>,
+    pub(crate) title: Option<String>,
+}
+
+/// Parses one `runInTerminal` reverse request's raw `arguments` value.
+/// `None` for anything structurally invalid (missing `cwd`/`args`, a non-
+/// string `cwd`, an empty or oversized `args` array, a non-string `args`
+/// entry, an oversized `env` map, or an `env` entry whose value is neither a
+/// string nor `null`) — the caller (`handle_run_in_terminal_reverse_request`)
+/// turns a `None` into a real, structured `success: false` reply to the
+/// adapter rather than panicking or silently doing nothing.
+pub(crate) fn parse_run_in_terminal_arguments(
+    arguments: Option<&Value>,
+) -> Option<RunInTerminalArguments> {
+    let arguments = arguments?;
+    let cwd = arguments.get("cwd").and_then(Value::as_str)?.to_owned();
+    let args_value = arguments.get("args").and_then(Value::as_array)?;
+    if args_value.is_empty() || args_value.len() > MAX_RUN_IN_TERMINAL_ARGS {
+        return None;
+    }
+    let mut args_iter = args_value.iter();
+    let program = args_iter.next()?.as_str()?.to_owned();
+    let mut args = Vec::with_capacity(args_value.len() - 1);
+    for entry in args_iter {
+        let arg = entry.as_str()?;
+        if arg.len() > MAX_RUN_IN_TERMINAL_ARG_BYTES {
+            return None;
+        }
+        args.push(arg.to_owned());
+    }
+    let mut env = Vec::new();
+    if let Some(env_object) = arguments.get("env").and_then(Value::as_object) {
+        if env_object.len() > MAX_RUN_IN_TERMINAL_ENV_ENTRIES {
+            return None;
+        }
+        for (key, value) in env_object {
+            match value {
+                Value::Null => env.push((key.clone(), None)),
+                Value::String(value) => env.push((key.clone(), Some(value.clone()))),
+                _ => return None,
+            }
+        }
+    }
+    let title = arguments
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    Some(RunInTerminalArguments {
+        cwd,
+        program,
+        args,
+        env,
+        title,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
     use super::{
-        parse_evaluate_response, parse_scopes_response, parse_set_breakpoints_response,
-        parse_stack_trace_response, parse_variables_response, AdapterTransportKind,
-        DebugEvaluateContext, DebugEvaluateRequest, DebugScopesRequest, DebugSessionId,
-        DebugSessionStartRequest, DebugSetBreakpointsRequest, DebugStackTraceRequest,
-        DebugVariablesFilter, DebugVariablesRequest, LineBreakpointRequest,
-        SessionTransportRequest, SourceBreakpointsRequest,
+        parse_continue_response, parse_evaluate_response, parse_run_in_terminal_arguments,
+        parse_scopes_response, parse_set_breakpoints_response, parse_stack_trace_response,
+        parse_variables_response, AdapterTransportKind, DebugEvaluateContext, DebugEvaluateRequest,
+        DebugScopesRequest, DebugSessionId, DebugSessionStartRequest, DebugSetBreakpointsRequest,
+        DebugStackTraceRequest, DebugThreadRequest, DebugVariablesFilter, DebugVariablesRequest,
+        LineBreakpointRequest, SessionTransportRequest, SourceBreakpointsRequest,
+        MAX_RUN_IN_TERMINAL_ARGS,
     };
     use crate::debug::session::LaunchRequestKind;
+    use serde_json::Value;
 
     fn session_id() -> DebugSessionId {
         serde_json::from_value(serde_json::Value::String(VALID_ID.to_owned())).unwrap()
@@ -1602,5 +1761,107 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_value(variant).unwrap(), wire);
         }
+    }
+
+    // -----------------------------------------------------------------
+    // `F100` S4 — step control + `runInTerminal` argument parsing.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn debug_thread_request_builds_the_bare_thread_id_arguments_shape() {
+        let request = DebugThreadRequest {
+            session_id: session_id(),
+            thread_id: 7,
+        };
+        let query = request.into_parts();
+        assert_eq!(query.arguments, json!({"threadId": 7}));
+    }
+
+    #[test]
+    fn debug_thread_request_rejects_unknown_fields() {
+        let mut value = json!({"sessionId": VALID_ID, "threadId": 1});
+        value["singleThread"] = json!(true);
+        assert!(serde_json::from_value::<DebugThreadRequest>(value).is_err());
+    }
+
+    #[test]
+    fn parse_continue_response_defaults_all_threads_continued_to_true_when_absent() {
+        let result = parse_continue_response(&json!({})).expect("empty body parses");
+        assert!(result.all_threads_continued);
+    }
+
+    #[test]
+    fn parse_continue_response_honors_an_explicit_false() {
+        let result = parse_continue_response(&json!({"allThreadsContinued": false}))
+            .expect("well-formed body parses");
+        assert!(!result.all_threads_continued);
+    }
+
+    #[test]
+    fn parse_run_in_terminal_arguments_splits_the_program_from_its_own_args() {
+        let arguments = json!({
+            "kind": "integrated",
+            "title": "Run Program",
+            "cwd": "/tmp",
+            "args": ["python3", "-c", "print(1)"],
+            "env": {"FOO": "bar", "UNSET_ME": null},
+        });
+        let parsed =
+            parse_run_in_terminal_arguments(Some(&arguments)).expect("well-formed request parses");
+        assert_eq!(parsed.cwd, "/tmp");
+        assert_eq!(parsed.program, "python3");
+        assert_eq!(parsed.args, vec!["-c".to_owned(), "print(1)".to_owned()]);
+        assert_eq!(
+            parsed.env,
+            vec![
+                ("FOO".to_owned(), Some("bar".to_owned())),
+                ("UNSET_ME".to_owned(), None),
+            ]
+        );
+        assert_eq!(parsed.title.as_deref(), Some("Run Program"));
+    }
+
+    #[test]
+    fn parse_run_in_terminal_arguments_does_not_branch_on_kind() {
+        // `kind: "external"` must parse identically to `"integrated"` — see
+        // `RunInTerminalArguments`'s own doc comment for why this domain
+        // never models (or branches on) `kind` at all.
+        let external = json!({"cwd": "/tmp", "args": ["true"], "kind": "external"});
+        let integrated = json!({"cwd": "/tmp", "args": ["true"], "kind": "integrated"});
+        let missing = json!({"cwd": "/tmp", "args": ["true"]});
+        for arguments in [external, integrated, missing] {
+            let parsed = parse_run_in_terminal_arguments(Some(&arguments))
+                .expect("well-formed request parses regardless of kind");
+            assert_eq!(parsed.program, "true");
+        }
+    }
+
+    #[test]
+    fn parse_run_in_terminal_arguments_rejects_structurally_invalid_requests() {
+        assert!(parse_run_in_terminal_arguments(None).is_none());
+        assert!(parse_run_in_terminal_arguments(Some(&json!({}))).is_none());
+        assert!(
+            parse_run_in_terminal_arguments(Some(&json!({"cwd": "/tmp", "args": []}))).is_none()
+        );
+        assert!(
+            parse_run_in_terminal_arguments(Some(&json!({"cwd": "/tmp", "args": [1, 2]})))
+                .is_none()
+        );
+        assert!(
+            parse_run_in_terminal_arguments(Some(&json!({"cwd": 1, "args": ["true"]}))).is_none()
+        );
+        assert!(parse_run_in_terminal_arguments(Some(
+            &json!({"cwd": "/tmp", "args": ["true"], "env": {"FOO": 1}})
+        ))
+        .is_none());
+    }
+
+    #[test]
+    fn parse_run_in_terminal_arguments_enforces_the_args_ceiling() {
+        let oversized: Vec<Value> = (0..(MAX_RUN_IN_TERMINAL_ARGS + 1))
+            .map(|index| Value::from(format!("arg{index}")))
+            .collect();
+        let arguments = json!({"cwd": "/tmp", "args": oversized});
+        assert!(parse_run_in_terminal_arguments(Some(&arguments)).is_none());
     }
 }

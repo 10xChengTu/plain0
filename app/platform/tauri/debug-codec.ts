@@ -4,6 +4,7 @@ import type {
 	DebugAdapterTarget,
 	DebugBreakpointRequest,
 	DebugBreakpointResult,
+	DebugContinueResult,
 	DebugEvaluateContext,
 	DebugEvaluateResult,
 	DebugEventPayload,
@@ -782,6 +783,48 @@ export function decodeDebugEvaluateResult(value: unknown): DebugEvaluateResult {
 	};
 	rejectProxyObject(value);
 	return Object.freeze(result);
+}
+
+// ---------------------------------------------------------------------
+// `F100` S4 — execution/step control. All five share one request encoder
+// (`frozenDebugThreadRequest`) — see `src-tauri/src/debug/dto.rs`'s
+// `DebugThreadRequest` doc comment for why: every one of `continue`/`next`/
+// `stepIn`/`stepOut`/`pause` takes an identical `{sessionId, threadId}` wire
+// shape on this side too.
+// ---------------------------------------------------------------------
+
+/** Encodes `debug_continue`/`debug_next`/`debug_step_in`/`debug_step_out`/
+ * `debug_pause`'s shared request shape. */
+export function frozenDebugThreadRequest(
+	sessionId: unknown,
+	threadId: number,
+): Readonly<Record<string, unknown>> {
+	if (!isSafeInteger(threadId)) {
+		return debugSessionRequestInvalid();
+	}
+	return Object.freeze({ sessionId: frozenSessionId(sessionId), threadId });
+}
+
+export function decodeDebugContinueResult(value: unknown): DebugContinueResult {
+	if (!isPlainObject(value) || !hasExactKeys(value, ["allThreadsContinued"])) {
+		return violation();
+	}
+	if (typeof value.allThreadsContinued !== "boolean") {
+		return violation();
+	}
+	const result = { allThreadsContinued: value.allThreadsContinued };
+	rejectProxyObject(value);
+	return Object.freeze(result);
+}
+
+/** Decodes the `void` (JSON `null`) result `debug_next`/`debug_step_in`/
+ * `debug_step_out`/`debug_pause` all share — a separate function from
+ * `decodeDebugVoid` purely to keep this command group's own decode functions
+ * named after what they cover (both are a bare JSON `null` on the wire). */
+export function decodeDebugStepVoid(value: unknown): void {
+	if (value !== null) {
+		violation();
+	}
 }
 
 const MAX_DEBUG_EVENT_NAME_CHARS = 4_096;

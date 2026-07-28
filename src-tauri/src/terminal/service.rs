@@ -344,8 +344,10 @@ impl TerminalService {
         let resolved_cwd = resolve_cwd(workspace, window_label, cwd)?;
         let shell_path = shell::detect_shell(std::env::var("SHELL").ok().as_deref());
         let command = CommandBuilder::new(&shell_path);
-        self.spawn_session(window_label, resolved_cwd, command, cols, rows, sink)
-            .await
+        let (session_id, _pid) = self
+            .spawn_session(window_label, resolved_cwd, command, &[], cols, rows, sink)
+            .await?;
+        Ok(session_id)
     }
 
     /// Test-only seam: identical to [`Self::start`] except the caller
@@ -372,21 +374,111 @@ impl TerminalService {
     ) -> Result<TerminalSessionId, CommandError> {
         trust.require_trusted(workspace, window_label).await?;
         let resolved_cwd = resolve_cwd(workspace, window_label, cwd)?;
-        self.spawn_session(window_label, resolved_cwd, command, cols, rows, sink)
-            .await
+        let (session_id, _pid) = self
+            .spawn_session(window_label, resolved_cwd, command, &[], cols, rows, sink)
+            .await?;
+        Ok(session_id)
     }
 
+    /// `F100` S4's `runInTerminal` reverse-request entry point — **not** a
+    /// Tauri command (`terminal_start` continues to only ever run the
+    /// default shell); the sole caller is
+    /// `debug::commands::handle_run_in_terminal_reverse_request`, itself
+    /// invoked only from inside this crate's own reverse-request dispatch
+    /// (never reachable from the webview/IPC boundary directly) — see that
+    /// function's own doc comment for the full security reasoning (why no
+    /// second confirmation dialog, why visibility is the substitute).
+    ///
+    /// Unlike [`Self::start`] (which always runs the ambient default shell),
+    /// this runs `program`/`args` *directly* — DAP's `runInTerminal` names an
+    /// actual executable to run in a visible terminal, not "open a shell
+    /// here"; running it through a shell at all would be exactly the kind of
+    /// shell-interpretation this codebase's spawn primitives never do (see
+    /// `debug::dto::RunInTerminalArguments`'s own doc comment for why
+    /// `argsCanBeInterpretedByShell` is deliberately never consulted).
+    ///
+    /// `cwd` is resolved via [`resolve_program_cwd`] — **not**
+    /// [`resolve_cwd`]'s workspace-root containment check. This is a
+    /// deliberate difference, not an oversight: `resolve_cwd`'s containment
+    /// check exists to bound a `cwd` requested through the *webview-reachable*
+    /// `terminal_start` IPC command (an untrusted-in-principle caller must not
+    /// be able to name an arbitrary filesystem path as a spawn parameter).
+    /// `runInTerminal`'s `cwd` never crosses that boundary at all — it comes
+    /// from an adapter process this window has *already* spawned (past both
+    /// the trust gate and the first-run confirmation gate), which by that
+    /// point can already run anything, anywhere, as the current OS user
+    /// regardless of what this function does; reusing the containment check
+    /// here would only produce confusing failures for legitimate debuggees
+    /// whose own working directory is not a currently-open workspace root
+    /// (e.g. a globally installed script), without adding any real
+    /// restriction on an already-fully-trusted adapter.
+    ///
+    /// `env_overrides` are applied *after* the fixed allowlist
+    /// (`shell::apply_env_allowlist`) — additive/removing on top of it, per
+    /// DAP's own `env` semantics ("added to or removed from the default
+    /// environment"), never replacing it outright.
+    ///
+    /// Returns the new session id *and* the spawned child's own OS process id
+    /// (`None` if the platform could not report one) — the latter answers
+    /// DAP's `runInTerminal` response's `body.processId` with the debuggee's
+    /// real PID (this function never wraps the program in a shell, so the
+    /// immediate child *is* the debuggee itself — there is no separate "shell
+    /// process" to also report as `shellProcessId`).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_program(
+        &self,
+        trust: &TrustService,
+        workspace: &WorkspaceService,
+        window_label: &str,
+        cwd: String,
+        program: String,
+        args: Vec<String>,
+        env_overrides: Vec<(String, Option<String>)>,
+        cols: u16,
+        rows: u16,
+        sink: Arc<dyn TerminalOutputSink>,
+    ) -> Result<(TerminalSessionId, Option<u32>), CommandError> {
+        trust.require_trusted(workspace, window_label).await?;
+        let resolved_cwd = resolve_program_cwd(&cwd)?;
+        let mut command = CommandBuilder::new(&program);
+        command.args(&args);
+        self.spawn_session(
+            window_label,
+            resolved_cwd,
+            command,
+            &env_overrides,
+            cols,
+            rows,
+            sink,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_session(
         &self,
         window_label: &str,
         cwd: PathBuf,
         mut command: CommandBuilder,
+        extra_env: &[(String, Option<String>)],
         cols: u16,
         rows: u16,
         sink: Arc<dyn TerminalOutputSink>,
-    ) -> Result<TerminalSessionId, CommandError> {
+    ) -> Result<(TerminalSessionId, Option<u32>), CommandError> {
         command.cwd(&cwd);
         shell::apply_env_allowlist(&mut command, std::env::vars());
+        // Applied *after* the fixed allowlist, so a `runInTerminal` caller's
+        // own `env` (additions/removals "on top of the default environment",
+        // per DAP) can both add names the allowlist does not and remove ones
+        // it does — never the other way around (the allowlist itself is not
+        // weakened for the ordinary `start`/`start_with_command_for_test`
+        // callers, which both pass an empty slice here).
+        for (key, value) in extra_env {
+            match value {
+                Some(value) => command.env(key, value),
+                None => command.env_remove(key),
+            };
+        }
 
         let window_label = window_label.to_owned();
         let state = Arc::clone(&self.state);
@@ -419,6 +511,17 @@ impl TerminalService {
                 .slave
                 .spawn_command(command)
                 .map_err(|_| terminal_unavailable())?;
+            // Captured before `child` is moved into the waiter thread's
+            // closure below — `Child::process_id` only ever needs `&self`,
+            // but the waiter thread takes ownership for its whole lifetime
+            // (see [`run_waiter`]), so this is the last point this value is
+            // reachable at all. Since this session never wraps `command` in
+            // a shell (every caller — `start`/`start_with_command_for_test`/
+            // `start_program` — spawns the target program directly), this is
+            // always the real, immediate child process's own OS pid, never a
+            // shell's — the exact value `TerminalService::start_program`'s
+            // callers need to answer DAP's `runInTerminal` response.
+            let child_pid = child.process_id();
             // The parent no longer needs the slave end once the child has
             // it; dropping it *here* (rather than only when the whole pair
             // eventually drops) is what lets the master `read()` below
@@ -504,7 +607,7 @@ impl TerminalService {
             }
 
             sessions.insert(session_id, session);
-            Ok(session_id)
+            Ok((session_id, child_pid))
         })
         .await
         .map_err(|_| terminal_unavailable())?
@@ -816,6 +919,17 @@ fn resolve_cwd(
             }
         }
     }
+}
+
+/// [`TerminalService::start_program`]'s own `cwd` resolution — canonicalizes
+/// (rejecting anything that does not exist) but, unlike [`resolve_cwd`],
+/// deliberately does **not** check containment within any currently
+/// authorized workspace root. See [`TerminalService::start_program`]'s own
+/// doc comment for the full reasoning: that containment check exists to
+/// bound a `cwd` reachable from the untrusted-in-principle webview/IPC
+/// boundary, which a `runInTerminal` reverse request never crosses at all.
+fn resolve_program_cwd(cwd: &str) -> Result<PathBuf, CommandError> {
+    std::fs::canonicalize(cwd).map_err(|_| terminal_cwd_invalid())
 }
 
 /// Writes `data` to the session's pty master (i.e., feeds it to the child

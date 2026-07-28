@@ -3,7 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
 	decodeDebugAdapterConfirmationState,
 	decodeDebugAdapterConfirmationVoid,
+	decodeDebugContinueResult,
+	decodeDebugStepVoid,
 	frozenDebugAdapterConfirmationRequest,
+	frozenDebugThreadRequest,
 } from "../../app/platform/tauri/debug-codec";
 
 describe("frozenDebugAdapterConfirmationRequest", () => {
@@ -111,5 +114,64 @@ describe("decodeDebugAdapterConfirmationVoid", () => {
 		expect(() => decodeDebugAdapterConfirmationVoid(null)).not.toThrow();
 		expect(() => decodeDebugAdapterConfirmationVoid(undefined)).toThrow();
 		expect(() => decodeDebugAdapterConfirmationVoid({})).toThrow();
+	});
+});
+
+// ---------------------------------------------------------------------
+// `F100` S4 — execution/step control (`continue`/`next`/`stepIn`/`stepOut`/
+// `pause` share one request encoder — see `DebugThreadRequest`'s own doc
+// comment in `src-tauri/src/debug/dto.rs`).
+// ---------------------------------------------------------------------
+
+const VALID_SESSION_ID = "0d3f4b0e-6f1a-4c9d-9c3a-1a2b3c4d5e6f";
+
+describe("frozenDebugThreadRequest", () => {
+	it("encodes a well-formed sessionId/threadId pair", () => {
+		expect(frozenDebugThreadRequest(VALID_SESSION_ID, 7)).toEqual({
+			sessionId: VALID_SESSION_ID,
+			threadId: 7,
+		});
+	});
+
+	it("rejects a non-integer threadId", () => {
+		expect(() => frozenDebugThreadRequest(VALID_SESSION_ID, 1.5)).toThrow();
+	});
+
+	it("rejects a malformed sessionId", () => {
+		expect(() => frozenDebugThreadRequest("not-a-uuid", 1)).toThrow();
+	});
+});
+
+describe("decodeDebugContinueResult", () => {
+	it("accepts a well-formed result", () => {
+		expect(decodeDebugContinueResult({ allThreadsContinued: true })).toEqual({
+			allThreadsContinued: true,
+		});
+		expect(decodeDebugContinueResult({ allThreadsContinued: false })).toEqual({
+			allThreadsContinued: false,
+		});
+	});
+
+	it("rejects extra or mistyped fields", () => {
+		expect(() =>
+			decodeDebugContinueResult({ allThreadsContinued: true, extra: 1 }),
+		).toThrow();
+		expect(() =>
+			decodeDebugContinueResult({ allThreadsContinued: "yes" }),
+		).toThrow();
+		expect(() => decodeDebugContinueResult(null)).toThrow();
+	});
+
+	it("rejects a Proxy-wrapped response", () => {
+		const proxied = new Proxy({ allThreadsContinued: true }, {});
+		expect(() => decodeDebugContinueResult(proxied)).toThrow();
+	});
+});
+
+describe("decodeDebugStepVoid", () => {
+	it("accepts null and rejects anything else", () => {
+		expect(() => decodeDebugStepVoid(null)).not.toThrow();
+		expect(() => decodeDebugStepVoid(undefined)).toThrow();
+		expect(() => decodeDebugStepVoid({})).toThrow();
 	});
 });

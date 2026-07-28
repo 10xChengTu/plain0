@@ -30,6 +30,24 @@ import type { DebugSessionState } from "./plain-debug-session";
  * `DebugFrameSelection` (`plain-debug-runtime.ts`) the Variables/Watch views
  * read from — no direct dependency between the three views.
  *
+ * `F100` S4` adds the step-control toolbar here (reusing this same view's
+ * existing `onDidChangeState` wiring rather than "另起炉灶" a separate
+ * view/service, per this slice's own task instructions) — five buttons
+ * (Continue/Pause/Step Over/Step Into/Step Out) whose enabled state is
+ * derived purely from `DebugSessionState`: Continue/Step Over/Step
+ * Into/Step Out require `stoppedThreadId !== null` (there must be a
+ * concrete stopped thread to resume/step from — this is what the real DAP
+ * protocol requires, not an invented capability gate; see this view's own
+ * `#stepIn`/`#stepOut`/etc. handlers' doc comments for why `Capabilities`
+ * itself defines no `supportsStepIn`/`supportsContinue`/etc. field for these
+ * five baseline, protocol-mandatory requests), while Pause requires the
+ * debuggee to be *running* (`stoppedThreadId === null`) and a previously
+ * observed thread id to target (`lastKnownThreadId !== null`). Clicking
+ * Continue/a step button does **not** itself trigger a call-stack refresh —
+ * the existing `stopped` event will, once (if) the adapter emits one, via
+ * the exact same `#onStateChanged` path a real `stopped` already drives
+ * (see the module's own "复用 S3 的 stopped 事件联动" instruction).
+ *
  * No constructor parameter beyond `ViewPane`'s own base nine — this view
  * reports every error as inline status text (no `INotificationService`/
  * `IDialogService` needed), so it takes the same "zero own DI declarations,
@@ -46,6 +64,11 @@ export class PlainDebugCallStackView extends ViewPane {
 	#selectedFrameId: number | null = null;
 	#stateSubscription: { dispose(): void } | undefined;
 	#refreshToken = 0;
+	#continueButton: HTMLButtonElement | undefined;
+	#pauseButton: HTMLButtonElement | undefined;
+	#nextButton: HTMLButtonElement | undefined;
+	#stepInButton: HTMLButtonElement | undefined;
+	#stepOutButton: HTMLButtonElement | undefined;
 
 	constructor(
 		options: IViewPaneOptions,
@@ -77,6 +100,49 @@ export class PlainDebugCallStackView extends ViewPane {
 		super.renderBody(container);
 		container.classList.add("plain-debug-call-stack-view-body");
 
+		const toolbar = document.createElement("div");
+		toolbar.className = "plain-debug-call-stack-view-toolbar";
+		toolbar.setAttribute("role", "toolbar");
+		toolbar.setAttribute("aria-label", "Debug execution control");
+
+		const continueButton = this.#createToolbarButton(
+			"Continue",
+			"plain-debug-call-stack-view-continue",
+			() => void this.#continue(),
+		);
+		const pauseButton = this.#createToolbarButton(
+			"Pause",
+			"plain-debug-call-stack-view-pause",
+			() => void this.#pause(),
+		);
+		const nextButton = this.#createToolbarButton(
+			"Step Over",
+			"plain-debug-call-stack-view-next",
+			() => void this.#next(),
+		);
+		const stepInButton = this.#createToolbarButton(
+			"Step Into",
+			"plain-debug-call-stack-view-step-in",
+			() => void this.#stepIn(),
+		);
+		const stepOutButton = this.#createToolbarButton(
+			"Step Out",
+			"plain-debug-call-stack-view-step-out",
+			() => void this.#stepOut(),
+		);
+		this.#continueButton = continueButton;
+		this.#pauseButton = pauseButton;
+		this.#nextButton = nextButton;
+		this.#stepInButton = stepInButton;
+		this.#stepOutButton = stepOutButton;
+		toolbar.append(
+			continueButton,
+			pauseButton,
+			nextButton,
+			stepInButton,
+			stepOutButton,
+		);
+
 		const message = document.createElement("div");
 		message.className = "plain-debug-call-stack-view-message";
 		message.setAttribute("role", "status");
@@ -87,7 +153,8 @@ export class PlainDebugCallStackView extends ViewPane {
 		list.className = "plain-debug-call-stack-view-list";
 		this.#listElement = list;
 
-		container.append(message, list);
+		container.append(toolbar, message, list);
+		this.#updateToolbar(null);
 
 		const runtime = getPlainDebugRuntime();
 		if (runtime === undefined) {
@@ -99,7 +166,150 @@ export class PlainDebugCallStackView extends ViewPane {
 		void this.#onStateChanged(runtime.session.state);
 	}
 
+	#createToolbarButton(
+		label: string,
+		className: string,
+		onClick: () => void,
+	): HTMLButtonElement {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.className = `plain-debug-call-stack-view-toolbar-button ${className}`;
+		button.textContent = label;
+		button.disabled = true;
+		this._register(addDisposableListener(button, "click", onClick));
+		return button;
+	}
+
+	/**
+	 * Derives each button's enabled state purely from `state` — see the class
+	 * doc's own explanation of why Continue/Step Over/Step Into/Step Out need
+	 * a concrete stopped thread (`stoppedThreadId`) while Pause needs the
+	 * debuggee to be running with a previously observed thread
+	 * (`lastKnownThreadId`). No `Capabilities` field gates any of these five:
+	 * real DAP defines `continue`/`next`/`stepIn`/`stepOut`/`pause` as
+	 * mandatory baseline requests every adapter must implement (unlike the
+	 * genuinely optional `stepInTargets` target picker, gated by
+	 * `supportsStepInTargetsRequest`, which this view does not build) — both
+	 * real adapters this project captured (`lldb-dap`/`debugpy`) confirm this:
+	 * neither reports any `supportsStepIn`/`supportsContinue`/etc. field at
+	 * all in its `initialize` response.
+	 */
+	#updateToolbar(state: DebugSessionState | null): void {
+		const stopped = state?.stoppedThreadId ?? null;
+		const canStepFromStopped = stopped !== null;
+		const canPause =
+			state !== null && stopped === null && state.lastKnownThreadId !== null;
+		if (this.#continueButton !== undefined) {
+			this.#continueButton.disabled = !canStepFromStopped;
+		}
+		if (this.#nextButton !== undefined) {
+			this.#nextButton.disabled = !canStepFromStopped;
+		}
+		if (this.#stepInButton !== undefined) {
+			this.#stepInButton.disabled = !canStepFromStopped;
+		}
+		if (this.#stepOutButton !== undefined) {
+			this.#stepOutButton.disabled = !canStepFromStopped;
+		}
+		if (this.#pauseButton !== undefined) {
+			this.#pauseButton.disabled = !canPause;
+		}
+	}
+
+	/**
+	 * Every one of these five handlers must catch its own bridge call's
+	 * rejection (a real, expected outcome — an adapter rejecting a step
+	 * request because the debuggee is not actually stopped, e.g. — not a bug)
+	 * rather than letting it become an unhandled promise rejection: F090 S0's
+	 * own recorded lesson is that an uncaught rejection here would pollute
+	 * this shared page and produce failures in entirely unrelated later
+	 * tests. Reported via the same inline status line
+	 * `#refresh`/`#onStateChanged` already use for stack-trace/adapter
+	 * errors, so a real rejection is still visible to the user, not silently
+	 * swallowed.
+	 */
+	async #runStepCommand(
+		action: () => Promise<unknown> | undefined,
+	): Promise<void> {
+		try {
+			await action();
+		} catch (error) {
+			this.#setMessage(normalizeCommandError(error).message);
+		}
+	}
+
+	async #continue(): Promise<void> {
+		const state = getPlainDebugRuntime()?.session.state;
+		if (
+			state?.stoppedThreadId === undefined ||
+			state.stoppedThreadId === null
+		) {
+			return;
+		}
+		const threadId = state.stoppedThreadId;
+		await this.#runStepCommand(() =>
+			getPlainDebugRuntime()?.session.continue_(threadId),
+		);
+	}
+
+	async #next(): Promise<void> {
+		const state = getPlainDebugRuntime()?.session.state;
+		if (
+			state?.stoppedThreadId === undefined ||
+			state.stoppedThreadId === null
+		) {
+			return;
+		}
+		const threadId = state.stoppedThreadId;
+		await this.#runStepCommand(() =>
+			getPlainDebugRuntime()?.session.next(threadId),
+		);
+	}
+
+	async #stepIn(): Promise<void> {
+		const state = getPlainDebugRuntime()?.session.state;
+		if (
+			state?.stoppedThreadId === undefined ||
+			state.stoppedThreadId === null
+		) {
+			return;
+		}
+		const threadId = state.stoppedThreadId;
+		await this.#runStepCommand(() =>
+			getPlainDebugRuntime()?.session.stepIn(threadId),
+		);
+	}
+
+	async #stepOut(): Promise<void> {
+		const state = getPlainDebugRuntime()?.session.state;
+		if (
+			state?.stoppedThreadId === undefined ||
+			state.stoppedThreadId === null
+		) {
+			return;
+		}
+		const threadId = state.stoppedThreadId;
+		await this.#runStepCommand(() =>
+			getPlainDebugRuntime()?.session.stepOut(threadId),
+		);
+	}
+
+	async #pause(): Promise<void> {
+		const state = getPlainDebugRuntime()?.session.state;
+		if (
+			state?.lastKnownThreadId === undefined ||
+			state.lastKnownThreadId === null
+		) {
+			return;
+		}
+		const threadId = state.lastKnownThreadId;
+		await this.#runStepCommand(() =>
+			getPlainDebugRuntime()?.session.pause(threadId),
+		);
+	}
+
 	async #onStateChanged(state: DebugSessionState | null): Promise<void> {
+		this.#updateToolbar(state);
 		const token = (this.#refreshToken += 1);
 		if (state === null) {
 			this.#frames = [];

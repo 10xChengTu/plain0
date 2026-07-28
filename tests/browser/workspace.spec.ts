@@ -388,6 +388,14 @@ interface TestDebugFixture {
 			>
 		>
 	>;
+	/** `F100` S4: when `true`, every `debug_continue`/`debug_next`/
+	 * `debug_step_in`/`debug_step_out`/`debug_pause` call rejects with
+	 * `DEBUG_REQUEST_FAILED` (simulating a real adapter's "not stopped"
+	 * rejection) instead of succeeding — lets a test exercise the adversarial
+	 * "a step request issued while the session is not stopped" scenario this
+	 * feature's own acceptance criteria call out by name. Defaults to
+	 * `false` (every step command succeeds). */
+	readonly stepRequestsRejectedForTest?: boolean;
 }
 
 async function installNativeIpcMock(
@@ -1664,6 +1672,17 @@ async function installNativeIpcMock(
 						"The requested debug session does not exist for this window.",
 				};
 			}
+			// `F100` S4: the adversarial "step request issued while the session
+			// is not stopped" scenario — mirrors the real, spec-grounded
+			// rejection `src-tauri/src/debug/service/tests.rs`'s own
+			// `step_control_commands_send_their_own_distinct_dap_command_and_surface_a_not_stopped_rejection`
+			// exercises against a real spawned mock adapter.
+			function debugRequestFailedNotStopped(command: string) {
+				return {
+					code: "DEBUG_REQUEST_FAILED",
+					message: `The debug adapter rejected the '${command}' request: not stopped.`,
+				};
+			}
 			const liveDebugSessions = new Set<string>();
 			let debugSessionSerial = 601;
 			const nextDebugSessionId = (): string =>
@@ -2094,6 +2113,39 @@ async function installNativeIpcMock(
 			).__PLAIN_TEST_TERMINAL_SESSION_IDS__ = () => [
 				...terminalSessions.keys(),
 			];
+			(
+				window as unknown as Window & {
+					__PLAIN_TEST_CREATE_EXTERNAL_TERMINAL_SESSION__(
+						sessionId: string,
+						cols: number,
+						rows: number,
+					): void;
+				}
+			).__PLAIN_TEST_CREATE_EXTERNAL_TERMINAL_SESSION__ = (
+				sessionId,
+				cols,
+				rows,
+			) => {
+				// `F100` S4: simulates a `runInTerminal`-launched session Rust's own
+				// `TerminalService::start_program` already created — deliberately
+				// bypasses `terminal_start` entirely (the whole point of this test
+				// hook: the frontend must *attach* to an already-existing session,
+				// never spawn a second one). Real production `plain/runInTerminal`
+				// handling never calls `terminal_start` either — see
+				// `app/platform/tauri/terminal-stream.ts`'s `attachTerminalStream`.
+				terminalSessions.set(sessionId, {
+					sessionId,
+					cols,
+					rows,
+					lines: [],
+					scrollback: [],
+					cursorCol: 0,
+					cursorRow: 0,
+					nextSequence: 0,
+					awaitingAck: false,
+					pendingEmit: false,
+				});
+			};
 
 			testWindow.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
 				unregisterListener() {},
@@ -2889,6 +2941,43 @@ async function installNativeIpcMock(
 								namedVariables: null,
 								indexedVariables: null,
 							};
+						}
+						case "debug_continue": {
+							const continueRequest = args.request as
+								{ sessionId?: string; threadId?: number } | undefined;
+							if (!liveDebugSessions.has(continueRequest?.sessionId ?? "")) {
+								throw debugSessionNotFound();
+							}
+							if (debugFixtureForTest.stepRequestsRejectedForTest === true) {
+								throw debugRequestFailedNotStopped("continue");
+							}
+							return { allThreadsContinued: true };
+						}
+						case "debug_next":
+						case "debug_step_in":
+						case "debug_step_out":
+						case "debug_pause": {
+							const stepRequest = args.request as
+								{ sessionId?: string; threadId?: number } | undefined;
+							if (!liveDebugSessions.has(stepRequest?.sessionId ?? "")) {
+								throw debugSessionNotFound();
+							}
+							if (debugFixtureForTest.stepRequestsRejectedForTest === true) {
+								const dapCommandName = {
+									debug_next: "next",
+									debug_step_in: "stepIn",
+									debug_step_out: "stepOut",
+									debug_pause: "pause",
+								}[
+									command as
+										| "debug_next"
+										| "debug_step_in"
+										| "debug_step_out"
+										| "debug_pause"
+								];
+								throw debugRequestFailedNotStopped(dapCommandName);
+							}
+							return null;
 						}
 						case "terminal_start": {
 							if (!terminalTrusted) {
@@ -13278,6 +13367,30 @@ async function currentDebugSessionId(page: Page): Promise<string> {
 	return sessionId;
 }
 
+/** `F100` S4: simulates Rust's own `runInTerminal` handling having already
+ * created a real `TerminalService` session — see
+ * `__PLAIN_TEST_CREATE_EXTERNAL_TERMINAL_SESSION__`'s own comment in the
+ * mock for why this deliberately bypasses `terminal_start`. */
+async function createExternalTerminalSessionForTest(
+	page: Page,
+	sessionId: string,
+): Promise<void> {
+	await page.evaluate((sessionId) => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_CREATE_EXTERNAL_TERMINAL_SESSION__(
+				sessionId: string,
+				cols: number,
+				rows: number,
+			): void;
+		};
+		testWindow.__PLAIN_TEST_CREATE_EXTERNAL_TERMINAL_SESSION__(
+			sessionId,
+			80,
+			24,
+		);
+	}, sessionId);
+}
+
 test("Run and Debug view reveals Call Stack/Variables/Watch panes with real not-debugging status text", async ({
 	page,
 }) => {
@@ -13819,6 +13932,326 @@ test("breakpoint popup enables condition/log-point inputs when the adapter adver
 		path: "main.py",
 		breakpoints: [{ line: 6, condition: "total > 5", logMessage: null }],
 	});
+
+	expect(pageErrors).toEqual([]);
+});
+
+// --- `F100` S4 "步进控制 + Debug Console/REPL + runInTerminal" --------------
+
+async function launchDebugSessionThroughBothDialogs(
+	page: Page,
+): Promise<string> {
+	await openMainPy(page);
+	await openRunAndDebugView(page);
+	await executePaletteCommand(
+		page,
+		"Start Debugging",
+		"Plain: Start Debugging",
+	);
+	const dialog = page.getByRole("dialog");
+	await expect(dialog).toBeVisible();
+	await expect(dialog).toContainText(
+		"Trust this workspace to run a debug adapter?",
+	);
+	await dialog
+		.getByRole("button", { name: "Trust & Continue", exact: true })
+		.click();
+	await expect(dialog).toContainText('Run "/usr/bin/python3"?');
+	await dialog
+		.getByRole("button", { name: "Run Adapter", exact: true })
+		.click();
+	await expect(dialog).toHaveCount(0);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "debug_launch")).length)
+		.toBe(1);
+	return currentDebugSessionId(page);
+}
+
+test("step control toolbar enables Continue/Step buttons only while stopped and Pause only while running, and sends the exact DAP command for each", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(page, "arrayBuffer", "readonly", {
+		"main.py": DEBUG_MAIN_PY,
+		".vscode/launch.json": DEBUG_LAUNCH_JSON,
+	});
+
+	const sessionId = await launchDebugSessionThroughBothDialogs(page);
+
+	const continueButton = page.locator(".plain-debug-call-stack-view-continue");
+	const pauseButton = page.locator(".plain-debug-call-stack-view-pause");
+	const nextButton = page.locator(".plain-debug-call-stack-view-next");
+	const stepInButton = page.locator(".plain-debug-call-stack-view-step-in");
+	const stepOutButton = page.locator(".plain-debug-call-stack-view-step-out");
+
+	// Before any `stopped` event has ever fired: nothing is enabled (no known
+	// thread at all, let alone a stopped one).
+	await expect(continueButton).toBeDisabled();
+	await expect(nextButton).toBeDisabled();
+	await expect(stepInButton).toBeDisabled();
+	await expect(stepOutButton).toBeDisabled();
+	await expect(pauseButton).toBeDisabled();
+
+	// A real `stopped` event enables Continue/Step Over/Step Into/Step Out
+	// (there is now a concrete stopped thread to resume/step from) but not
+	// Pause (the debuggee is not running).
+	await emitDebugTestEvent(page, sessionId, "stopped", {
+		threadId: 1,
+		reason: "breakpoint",
+	});
+	await expect(continueButton).toBeEnabled();
+	await expect(nextButton).toBeEnabled();
+	await expect(stepInButton).toBeEnabled();
+	await expect(stepOutButton).toBeEnabled();
+	await expect(pauseButton).toBeDisabled();
+
+	// Meaningful interaction 1: Step Over really sends `debug_next` scoped to
+	// the exact stopped thread id.
+	await nextButton.click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "debug_next")).length)
+		.toBe(1);
+	expect((await terminalCallsFor(page, "debug_next"))[0]!.args.request).toEqual(
+		{ sessionId, threadId: 1 },
+	);
+
+	// Meaningful interaction 2: Step Into/Step Out each send their own,
+	// distinct real request too — not just `next`.
+	await stepInButton.click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "debug_step_in")).length)
+		.toBe(1);
+	expect(
+		(await terminalCallsFor(page, "debug_step_in"))[0]!.args.request,
+	).toEqual({ sessionId, threadId: 1 });
+	await stepOutButton.click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "debug_step_out")).length)
+		.toBe(1);
+	expect(
+		(await terminalCallsFor(page, "debug_step_out"))[0]!.args.request,
+	).toEqual({ sessionId, threadId: 1 });
+
+	// Meaningful interaction 3: Continue really sends `debug_continue`.
+	await continueButton.click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "debug_continue")).length)
+		.toBe(1);
+	expect(
+		(await terminalCallsFor(page, "debug_continue"))[0]!.args.request,
+	).toEqual({ sessionId, threadId: 1 });
+
+	// A real `continued` event flips the toolbar: steps disable, Pause
+	// enables — targeting `lastKnownThreadId`, which survives the reset to
+	// `stoppedThreadId: null` (this is the whole reason that field exists
+	// separately from `stoppedThreadId`).
+	await emitDebugTestEvent(page, sessionId, "continued", null);
+	await expect(continueButton).toBeDisabled();
+	await expect(nextButton).toBeDisabled();
+	await expect(stepInButton).toBeDisabled();
+	await expect(stepOutButton).toBeDisabled();
+	await expect(pauseButton).toBeEnabled();
+
+	// Meaningful interaction 4: Pause really sends `debug_pause` scoped to the
+	// last known thread id (1), even though the debuggee is now running (no
+	// `stoppedThreadId`).
+	await pauseButton.click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "debug_pause")).length)
+		.toBe(1);
+	expect(
+		(await terminalCallsFor(page, "debug_pause"))[0]!.args.request,
+	).toEqual({ sessionId, threadId: 1 });
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("a step request the adapter rejects because the session is not really stopped surfaces the real rejection message without an unhandled error", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{ "main.py": DEBUG_MAIN_PY, ".vscode/launch.json": DEBUG_LAUNCH_JSON },
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{ stepRequestsRejectedForTest: true },
+	);
+
+	const sessionId = await launchDebugSessionThroughBothDialogs(page);
+	await emitDebugTestEvent(page, sessionId, "stopped", {
+		threadId: 1,
+		reason: "breakpoint",
+	});
+
+	const nextButton = page.locator(".plain-debug-call-stack-view-next");
+	await expect(nextButton).toBeEnabled();
+	await nextButton.click();
+
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "debug_next")).length)
+		.toBe(1);
+	await expect(
+		page.locator(".plain-debug-call-stack-view-message"),
+	).toContainText("not stopped");
+
+	// The real adapter rejection is surfaced as inline status text, never an
+	// unhandled promise rejection reaching the page (F090 S0's own recorded
+	// lesson about exactly this class of bug).
+	expect(pageErrors).toEqual([]);
+});
+
+test("Debug Console evaluates an expression via debug_evaluate under context repl, renders stdout/stderr output, and never renders telemetry", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{ "main.py": DEBUG_MAIN_PY, ".vscode/launch.json": DEBUG_LAUNCH_JSON },
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{
+			evaluateByExpression: {
+				"1 + 1": {
+					result: "2",
+					type: "int",
+					variablesReference: 0,
+					namedVariables: null,
+					indexedVariables: null,
+				},
+			},
+		},
+	);
+
+	const sessionId = await launchDebugSessionThroughBothDialogs(page);
+
+	await executePaletteCommand(page, "Debug Console", "Plain: Debug Console");
+	const input = page.locator(".plain-debug-console-view-input");
+	await expect(input).toBeVisible();
+
+	// Meaningful interaction 1: submitting an expression really calls
+	// `debug_evaluate` under `context: "repl"` (the first real `"repl"`
+	// caller in this codebase — S3 only ever exercised `"watch"`), and the
+	// real scripted result appears in the console.
+	await input.fill("1 + 1");
+	await input.press("Enter");
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "debug_evaluate")).length)
+		.toBe(1);
+	expect(
+		(await terminalCallsFor(page, "debug_evaluate"))[0]!.args.request,
+	).toEqual({ sessionId, expression: "1 + 1", frameId: null, context: "repl" });
+	const lines = page.locator(".plain-debug-console-view-line");
+	await expect(lines).toHaveText(["> 1 + 1", "2 (int)"]);
+
+	// Meaningful interaction 2: real `output` events append with
+	// category-specific rendering; `telemetry` never renders at all — not
+	// merely hidden by CSS, the text never reaches the DOM.
+	await emitDebugTestEvent(page, sessionId, "output", {
+		category: "stdout",
+		output: "hello stdout",
+	});
+	await emitDebugTestEvent(page, sessionId, "output", {
+		category: "stderr",
+		output: "hello stderr",
+	});
+	await emitDebugTestEvent(page, sessionId, "output", {
+		category: "telemetry",
+		output: "should never appear",
+	});
+
+	await expect(lines).toHaveCount(4);
+	await expect(
+		page.locator(".plain-debug-console-view-line-stdout"),
+	).toHaveText("hello stdout");
+	await expect(
+		page.locator(".plain-debug-console-view-line-stderr"),
+	).toHaveText("hello stderr");
+	await expect(page.getByText("should never appear")).toHaveCount(0);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("a real runInTerminal reverse request surfaces as a visible, distinctly-titled terminal tab with real data flow that the user can kill through the ordinary terminal_kill path", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(page, "arrayBuffer", "readonly", {
+		"main.py": DEBUG_MAIN_PY,
+		".vscode/launch.json": DEBUG_LAUNCH_JSON,
+	});
+
+	const sessionId = await launchDebugSessionThroughBothDialogs(page);
+
+	// Simulates Rust's own `TerminalService::start_program` having already
+	// created a real terminal session (via `handle_run_in_terminal_reverse_request`)
+	// — this test never calls `terminal_start` at all, matching the real
+	// production flow's own "attach, never spawn a second session" contract.
+	const terminalSessionId = "00000000-0000-4000-8000-000000000999";
+	await createExternalTerminalSessionForTest(page, terminalSessionId);
+	await emitDebugTestEvent(page, sessionId, "plain/runInTerminal", {
+		terminalSessionId,
+		title: "/usr/bin/python3 main.py",
+		processId: 4242,
+	});
+
+	// Meaningful assertion 1: the terminal panel is forcibly revealed (the
+	// "可见性兜底" this feature's own design rests on in place of a second
+	// confirmation dialog) and shows a tab distinctly labeled as
+	// debug-launched — not a generic "Terminal N".
+	const debugTab = page.locator(".plain-terminal-tab", {
+		hasText: "Debug: /usr/bin/python3 main.py",
+	});
+	await expect(debugTab).toBeVisible();
+	await expect(page.locator(".plain-terminal-surface")).toBeVisible();
+
+	// Meaningful assertion 2: real data actually flows through this exact
+	// session id — proving this is a genuine, live terminal pane attached to
+	// the real session, not a static label with nothing behind it.
+	await pushTerminalOutput(page, "hello-from-debuggee", terminalSessionId);
+	await expect(page.locator(".plain-terminal-grid")).toContainText(
+		"hello-from-debuggee",
+	);
+
+	// Meaningful assertion 3: the user can kill it through the exact same
+	// ordinary path any other terminal tab uses — proving no hidden,
+	// debug-domain-only teardown path exists.
+	await debugTab.locator(".plain-terminal-tab-close").click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_kill")).length)
+		.toBe(1);
+	expect(
+		(await terminalCallsFor(page, "terminal_kill"))[0]!.args.request,
+	).toEqual({ sessionId: terminalSessionId, immediate: false });
+	await expect(debugTab).toHaveCount(0);
 
 	expect(pageErrors).toEqual([]);
 });

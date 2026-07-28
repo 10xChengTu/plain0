@@ -24,7 +24,15 @@ pub(crate) mod dto;
 mod flow;
 pub(crate) mod service;
 mod shell;
-mod vt;
+// `F100` S4: `pub(crate)` (rather than private) since
+// `debug::service::tests`'s own real-`TerminalService` `runInTerminal`
+// integration test needs to name `vt::DirtyFrame` to implement
+// `service::TerminalOutputSink` there — the same cross-domain reachability
+// `service`/`dto` already have, extended to this module purely so that one
+// data type is nameable from outside `terminal::`; `vt`'s actual VT-session
+// machinery remains this domain's own internal implementation detail
+// regardless of this path's visibility.
+pub(crate) mod vt;
 
 /// Maximum number of terminal sessions a single window may have open at
 /// once (running or already-exited but not yet cleaned up — see

@@ -78,6 +78,11 @@ function fakeBridge(
 			namedVariables: null,
 			indexedVariables: null,
 		})),
+		debugContinue: vi.fn(async () => ({ allThreadsContinued: true })),
+		debugNext: vi.fn(async () => {}),
+		debugStepIn: vi.fn(async () => {}),
+		debugStepOut: vi.fn(async () => {}),
+		debugPause: vi.fn(async () => {}),
 		debugWatchEvent: vi.fn((listener) => {
 			listeners.add(listener);
 			return () => {
@@ -163,6 +168,39 @@ describe("DebugSessionController", () => {
 		expect(controller.state?.stoppedThreadId).toBe(1);
 
 		emit({ sessionId: "session-1", event: "continued", body: null });
+		expect(controller.state?.stoppedThreadId).toBeNull();
+	});
+
+	it("lastKnownThreadId survives a continued event (unlike stoppedThreadId)", async () => {
+		const { bridge, emit } = fakeBridge();
+		const controller = new DebugSessionController(
+			bridge,
+			new DebugBreakpointStore(),
+		);
+		await controller.start("launch", STDIO_TARGET, "debugpy", {});
+		emit({ sessionId: "session-1", event: "stopped", body: { threadId: 7 } });
+		expect(controller.state?.lastKnownThreadId).toBe(7);
+
+		emit({ sessionId: "session-1", event: "continued", body: null });
+		expect(controller.state?.stoppedThreadId).toBeNull();
+		expect(controller.state?.lastKnownThreadId).toBe(7);
+	});
+
+	it("a thread event names a thread before any stopped event has ever fired", async () => {
+		const { bridge, emit } = fakeBridge();
+		const controller = new DebugSessionController(
+			bridge,
+			new DebugBreakpointStore(),
+		);
+		await controller.start("launch", STDIO_TARGET, "debugpy", {});
+		expect(controller.state?.lastKnownThreadId).toBeNull();
+
+		emit({
+			sessionId: "session-1",
+			event: "thread",
+			body: { reason: "started", threadId: 4 },
+		});
+		expect(controller.state?.lastKnownThreadId).toBe(4);
 		expect(controller.state?.stoppedThreadId).toBeNull();
 	});
 
@@ -305,6 +343,50 @@ describe("DebugSessionController", () => {
 			7,
 			"watch",
 		);
+	});
+
+	it("continue_/next/stepIn/stepOut/pause resolve to undefined/no-op with no live session, without calling the bridge", async () => {
+		const { bridge } = fakeBridge();
+		const controller = new DebugSessionController(
+			bridge,
+			new DebugBreakpointStore(),
+		);
+
+		await expect(controller.continue_(1)).resolves.toBeUndefined();
+		await controller.next(1);
+		await controller.stepIn(1);
+		await controller.stepOut(1);
+		await controller.pause(1);
+		expect(bridge.debugContinue).not.toHaveBeenCalled();
+		expect(bridge.debugNext).not.toHaveBeenCalled();
+		expect(bridge.debugStepIn).not.toHaveBeenCalled();
+		expect(bridge.debugStepOut).not.toHaveBeenCalled();
+		expect(bridge.debugPause).not.toHaveBeenCalled();
+	});
+
+	it("continue_/next/stepIn/stepOut/pause delegate to the bridge scoped to the live session id", async () => {
+		const { bridge } = fakeBridge();
+		const controller = new DebugSessionController(
+			bridge,
+			new DebugBreakpointStore(),
+		);
+		await controller.start("launch", STDIO_TARGET, "debugpy", {});
+
+		const continueResult = await controller.continue_(1);
+		expect(bridge.debugContinue).toHaveBeenCalledWith("session-1", 1);
+		expect(continueResult?.allThreadsContinued).toBe(true);
+
+		await controller.next(1);
+		expect(bridge.debugNext).toHaveBeenCalledWith("session-1", 1);
+
+		await controller.stepIn(1);
+		expect(bridge.debugStepIn).toHaveBeenCalledWith("session-1", 1);
+
+		await controller.stepOut(1);
+		expect(bridge.debugStepOut).toHaveBeenCalledWith("session-1", 1);
+
+		await controller.pause(1);
+		expect(bridge.debugPause).toHaveBeenCalledWith("session-1", 1);
 	});
 
 	it("disconnect clears state before awaiting the bridge call, and is a no-op with no live session", async () => {

@@ -60,13 +60,26 @@
 //! large-object benchmarking are explicitly `F100` S5's job (frozen research
 //! doc "决策 4") — [`DebugSession::wait_for_response`] blocks until either a
 //! real response arrives or the session ends (transport death), with no
-//! independent timeout of its own. Real `runInTerminal` handling (spawning an
-//! actual visible terminal and replying with a real process id) is `F100`
-//! S4's job — this slice's reverse-request handling only prevents an
-//! adapter's own request/response machinery from hanging forever waiting on
-//! a reply Plain will never otherwise send (see
-//! [`super::protocol::encode_response`]'s doc comment), forwarding the raw
-//! reverse request to the frontend as a diagnostic event in the meantime.
+//! independent timeout of its own.
+//!
+//! # `F100` S4 — real reverse-request handling, without touching every
+//! existing `DebugSession::start` call site
+//!
+//! S2/S3 left every reverse request (`runInTerminal` chief among them) with
+//! only an automatic decline — see [`DebugSession::decline_reverse_request`]
+//! — purely to keep an adapter's own request/response state machine from
+//! hanging forever on a reply Plain would otherwise never send. This slice
+//! adds a real, pluggable [`ReverseRequestHandler`] seam: [`dispatch_message`]
+//! consults it first, and only falls back to the automatic decline when the
+//! handler itself reports it does not recognize the command (`None`) — see
+//! `super::commands`'s `handle_run_in_terminal_reverse_request` for the one
+//! real implementation this slice adds (`runInTerminal`, wired to Plain's own
+//! `TerminalService`). [`DebugSession::start`] keeps its exact existing
+//! signature (still installing a null handler that recognizes nothing,
+//! preserving every prior test call site in `tests.rs` unchanged) —
+//! [`DebugSession::start_with_reverse_requests`] is the one new entry point
+//! `super::service::DebugSessionService::start_session` (this slice's only
+//! production caller) switches to.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -137,6 +150,75 @@ pub(crate) trait DebugEventSink: Send + Sync {
     /// Plain's own inferred "this session's transport is gone" signal — see
     /// the module doc.
     fn emit_session_ended(&self, session_id: DebugSessionId, reason: SessionEndReason);
+}
+
+/// `F100` S4's real reverse-request delivery seam — see the module doc's own
+/// "real reverse-request handling" section. Implemented once, in
+/// `super::commands` (`RunInTerminalReverseRequestHandler`, wrapping the
+/// free function `handle_run_in_terminal_reverse_request` so the exact same
+/// logic is reachable from both a real `AppHandle`-backed production caller
+/// and a plain, `AppHandle`-free integration test); every existing/future
+/// unrecognized command simply falls back to
+/// [`DebugSession::decline_reverse_request`] via [`NullReverseRequestHandler`].
+pub(crate) trait ReverseRequestHandler: Send + Sync {
+    /// Returns `None` for any `command` this handler does not implement —
+    /// the caller ([`dispatch_message`]) then falls back to
+    /// [`DebugSession::decline_reverse_request`]'s existing behavior. Runs on
+    /// the reader thread itself (synchronously) — a handler that needs to
+    /// call an `async` service (e.g. `TerminalService::start_program`) is
+    /// expected to bridge via `tauri::async_runtime::block_on`, exactly as
+    /// `RunInTerminalReverseRequestHandler` does.
+    fn handle(
+        &self,
+        session_id: DebugSessionId,
+        command: &str,
+        arguments: Option<&Value>,
+    ) -> Option<ReverseRequestOutcome>;
+}
+
+/// One reverse request's real, considered outcome — distinct from the
+/// automatic decline: `success: false` here still means a handler actually
+/// looked at the request and rejected it (e.g. a structurally invalid
+/// `runInTerminal` request, or the spawn itself failing), not "Plain does not
+/// implement this yet".
+pub(crate) struct ReverseRequestOutcome {
+    pub(crate) success: bool,
+    pub(crate) body: Option<Value>,
+    pub(crate) message: Option<String>,
+    /// An additional frontend-facing notification to emit via
+    /// [`DebugEventSink::emit_event`] alongside the adapter-facing reply
+    /// above, under a `plain/`-prefixed event name (same "cannot collide with
+    /// a real DAP event name" reasoning as [`SESSION_ENDED_EVENT_NAME`]) —
+    /// e.g. `runInTerminal`'s own successful outcome also tells the frontend
+    /// which already-`TerminalService`-backed terminal session it should
+    /// surface as a visible tab. `None` when a handler's outcome needs no
+    /// separate frontend notification.
+    pub(crate) notify: Option<(String, Value)>,
+}
+
+/// The default reverse-request handler [`DebugSession::start`] installs —
+/// recognizes nothing, so every reverse request keeps going through the
+/// pre-existing automatic-decline path. This is what lets every prior
+/// `DebugSession::start` call site in `tests.rs` (S2's own in-memory mock
+/// adapter fixtures) keep compiling and behaving identically, unaware this
+/// slice added a real handling path at all. `#[allow(dead_code)]`: this
+/// struct and [`DebugSession::start`] itself have no *production* caller in a
+/// non-test build (the sole production caller,
+/// `super::service::DebugSessionService::start_session`, always uses
+/// [`DebugSession::start_with_reverse_requests`] with a real handler) — every
+/// caller of the plain `start` is a `#[cfg(test)]` fixture in `session::tests`.
+#[allow(dead_code)]
+struct NullReverseRequestHandler;
+
+impl ReverseRequestHandler for NullReverseRequestHandler {
+    fn handle(
+        &self,
+        _session_id: DebugSessionId,
+        _command: &str,
+        _arguments: Option<&Value>,
+    ) -> Option<ReverseRequestOutcome> {
+        None
+    }
 }
 
 /// One still-outstanding request's reply channel — created by
@@ -271,6 +353,7 @@ pub(crate) struct DebugSession {
     signal: SessionSignal,
     reader_thread: Mutex<Option<JoinHandle<()>>>,
     teardown: Box<dyn Fn() + Send + Sync>,
+    reverse_requests: Arc<dyn ReverseRequestHandler>,
 }
 
 impl DebugSession {
@@ -283,13 +366,43 @@ impl DebugSession {
     /// exactly once by [`Self::shutdown`] to actually tear down the
     /// underlying transport (kill the child process, or shut down the TCP
     /// socket) — kept as an opaque closure so this module never needs to
-    /// know which transport kind it is holding.
+    /// know which transport kind it is holding. Installs
+    /// [`NullReverseRequestHandler`] — every existing caller (S2/S3's own
+    /// in-memory mock-adapter tests) keeps its exact prior "every reverse
+    /// request is declined" behavior; [`Self::start_with_reverse_requests`]
+    /// is the new entry point a caller wanting real reverse-request handling
+    /// (`F100` S4's `super::service::DebugSessionService::start_session`)
+    /// uses instead. `#[allow(dead_code)]`: no production caller in a
+    /// non-test build (see [`NullReverseRequestHandler`]'s own doc comment) —
+    /// every call site is a `#[cfg(test)]` fixture in `session::tests`.
+    #[allow(dead_code)]
     pub(crate) fn start(
         session_id: DebugSessionId,
         reader: Box<dyn Read + Send>,
         writer: Box<dyn Write + Send>,
         sink: Arc<dyn DebugEventSink>,
         teardown: Box<dyn Fn() + Send + Sync>,
+    ) -> Arc<DebugSession> {
+        Self::start_with_reverse_requests(
+            session_id,
+            reader,
+            writer,
+            sink,
+            teardown,
+            Arc::new(NullReverseRequestHandler),
+        )
+    }
+
+    /// Identical to [`Self::start`], except `reverse_requests` is a real
+    /// handler (rather than the null one) — see the module doc's "real
+    /// reverse-request handling" section.
+    pub(crate) fn start_with_reverse_requests(
+        session_id: DebugSessionId,
+        reader: Box<dyn Read + Send>,
+        writer: Box<dyn Write + Send>,
+        sink: Arc<dyn DebugEventSink>,
+        teardown: Box<dyn Fn() + Send + Sync>,
+        reverse_requests: Arc<dyn ReverseRequestHandler>,
     ) -> Arc<DebugSession> {
         let session = Arc::new(DebugSession {
             writer: Mutex::new(writer),
@@ -299,6 +412,7 @@ impl DebugSession {
             signal: SessionSignal::new(),
             reader_thread: Mutex::new(None),
             teardown,
+            reverse_requests,
         });
 
         let reader_session = Arc::clone(&session);
@@ -393,11 +507,12 @@ impl DebugSession {
         writer.flush().map_err(|_| debug_transport_unavailable())
     }
 
-    /// Replies to a reverse request the reader thread just forwarded as a
-    /// diagnostic event — see the module doc's "what this slice deliberately
-    /// does not implement" section. Best-effort: a write failure here is not
-    /// escalated (the reader loop's own next `read()` will surface any real
-    /// transport death through the normal session-end path).
+    /// Replies to a reverse request neither [`Self::reverse_requests`] nor
+    /// any earlier slice recognizes — the automatic decline, forwarded
+    /// alongside the diagnostic event [`dispatch_message`] always emits
+    /// first. Best-effort: a write failure here is not escalated (the reader
+    /// loop's own next `read()` will surface any real transport death through
+    /// the normal session-end path).
     fn decline_reverse_request(&self, request_seq: i64, command: &str) {
         let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
         let framed = protocol::encode_response(
@@ -407,6 +522,28 @@ impl DebugSession {
             false,
             Some("Plain does not yet handle this reverse request in this slice."),
             None,
+        );
+        let _ = self.write_framed(&framed);
+    }
+
+    /// Replies to a reverse request [`Self::reverse_requests`] actually
+    /// handled — a real, considered `success`/`body`/`message`, not the
+    /// automatic decline. Best-effort in the same way
+    /// [`Self::decline_reverse_request`] is.
+    fn reply_reverse_request(
+        &self,
+        request_seq: i64,
+        command: &str,
+        outcome: &ReverseRequestOutcome,
+    ) {
+        let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
+        let framed = protocol::encode_response(
+            seq,
+            request_seq,
+            command,
+            outcome.success,
+            outcome.message.as_deref(),
+            outcome.body.clone(),
         );
         let _ = self.write_framed(&framed);
     }
@@ -467,7 +604,19 @@ fn dispatch_message(
                 format!("plain/reverseRequest/{}", request.command),
                 Some(json!({ "seq": request.seq, "arguments": request.arguments })),
             );
-            session.decline_reverse_request(request.seq, &request.command);
+            match session.reverse_requests.handle(
+                session_id,
+                &request.command,
+                request.arguments.as_ref(),
+            ) {
+                Some(outcome) => {
+                    if let Some((event, notify_body)) = &outcome.notify {
+                        sink.emit_event(session_id, event.clone(), Some(notify_body.clone()));
+                    }
+                    session.reply_reverse_request(request.seq, &request.command, &outcome);
+                }
+                None => session.decline_reverse_request(request.seq, &request.command),
+            }
         }
         Err(error) => {
             sink.emit_event(

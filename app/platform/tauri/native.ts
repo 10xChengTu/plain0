@@ -48,12 +48,14 @@ import { createWorkspaceWatcherManager } from "./workspace-watcher";
 import {
 	decodeDebugAdapterConfirmationState,
 	decodeDebugAdapterConfirmationVoid,
+	decodeDebugContinueResult,
 	decodeDebugEvaluateResult,
 	decodeDebugEventPayload,
 	decodeDebugScopesResult,
 	decodeDebugSessionStartResult,
 	decodeDebugSetBreakpointsResult,
 	decodeDebugStackTraceResult,
+	decodeDebugStepVoid,
 	decodeDebugVariablesResult,
 	decodeDebugVoid,
 	frozenDebugAdapterConfirmationRequest,
@@ -63,6 +65,7 @@ import {
 	frozenDebugSessionStartRequest,
 	frozenDebugSetBreakpointsRequest,
 	frozenDebugStackTraceRequest,
+	frozenDebugThreadRequest,
 	frozenDebugVariablesRequest,
 } from "./debug-codec";
 import {
@@ -824,6 +827,28 @@ export function createNativeBridge(): PlainBridge {
 			return decodeDebugEvaluateResult(
 				await invoke<unknown>("debug_evaluate", { request }),
 			);
+		},
+		debugContinue: async (sessionId, threadId) => {
+			const request = frozenDebugThreadRequest(sessionId, threadId);
+			return decodeDebugContinueResult(
+				await invoke<unknown>("debug_continue", { request }),
+			);
+		},
+		debugNext: async (sessionId, threadId) => {
+			const request = frozenDebugThreadRequest(sessionId, threadId);
+			decodeDebugStepVoid(await invoke<unknown>("debug_next", { request }));
+		},
+		debugStepIn: async (sessionId, threadId) => {
+			const request = frozenDebugThreadRequest(sessionId, threadId);
+			decodeDebugStepVoid(await invoke<unknown>("debug_step_in", { request }));
+		},
+		debugStepOut: async (sessionId, threadId) => {
+			const request = frozenDebugThreadRequest(sessionId, threadId);
+			decodeDebugStepVoid(await invoke<unknown>("debug_step_out", { request }));
+		},
+		debugPause: async (sessionId, threadId) => {
+			const request = frozenDebugThreadRequest(sessionId, threadId);
+			decodeDebugStepVoid(await invoke<unknown>("debug_pause", { request }));
 		},
 		debugWatchEvent: (listener) => {
 			let unlisten: (() => void) | undefined;

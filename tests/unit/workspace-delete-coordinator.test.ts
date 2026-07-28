@@ -353,6 +353,21 @@ function testBridge(
 		async debugEvaluate() {
 			throw new Error("unused");
 		},
+		async debugContinue() {
+			throw new Error("unused");
+		},
+		async debugNext() {
+			throw new Error("unused");
+		},
+		async debugStepIn() {
+			throw new Error("unused");
+		},
+		async debugStepOut() {
+			throw new Error("unused");
+		},
+		async debugPause() {
+			throw new Error("unused");
+		},
 		debugWatchEvent() {
 			throw new Error("unused");
 		},

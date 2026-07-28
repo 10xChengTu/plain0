@@ -6,6 +6,7 @@ import { CommandsRegistry } from "@codingame/monaco-vscode-api/vscode/vs/platfor
 import { IDialogService } from "@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service";
 import { INotificationService } from "@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service";
 import { IWorkspaceContextService } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace.service";
+import { IViewsService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/views/common/viewsService.service";
 
 import type { DebugAdapterTarget } from "../../platform/tauri/contracts";
 import { normalizeCommandError } from "../../platform/tauri/errors";
@@ -14,6 +15,7 @@ import {
 	type AdapterDescriptor,
 } from "./plain-debug-adapter-config";
 import { prepareDebugAdapterLaunch } from "./plain-debug-adapter-launch";
+import { DEBUG_CONSOLE_VIEW_ID } from "./debug-contribution";
 import { getPlainDebugRuntime } from "./plain-debug-runtime";
 import { resolveDebugTrust } from "./plain-debug-trust";
 
@@ -23,6 +25,14 @@ import { resolveDebugTrust } from "./plain-debug-trust";
  * `debug-contribution.ts`'s own module doc comment). */
 export const START_DEBUGGING_COMMAND_ID = "plain.debug.start";
 export const STOP_DEBUGGING_COMMAND_ID = "plain.debug.stop";
+/** `F100` S4: `DEBUG_CONSOLE_VIEW_CONTAINER_ID`'s own doc comment
+ * (`debug-contribution.ts`) already explains why the Debug Console is its
+ * own Panel container with `doNotRegisterOpenCommand: true` — this is the
+ * one real command that actually reveals it (mirroring `Plain: Create
+ * Terminal`'s identical `IViewsService.openView` shape); without this, the
+ * Debug Console view would exist in the registry but have no way for a user
+ * to ever actually open it. */
+export const OPEN_DEBUG_CONSOLE_COMMAND_ID = "plain.debug.openConsole";
 
 const LAUNCH_CONFIG_PATH = ".vscode/launch.json";
 const ADAPTER_REGISTRY_PATH = ".plain/debug-adapters.json";
@@ -229,6 +239,12 @@ export function registerPlainDebugCommands(): { dispose(): void } {
 		CommandsRegistry.registerCommand(STOP_DEBUGGING_COMMAND_ID, (accessor) => {
 			void runStopDebugging(accessor.get(INotificationService));
 		}),
+		CommandsRegistry.registerCommand(
+			OPEN_DEBUG_CONSOLE_COMMAND_ID,
+			(accessor) => {
+				void accessor.get(IViewsService).openView(DEBUG_CONSOLE_VIEW_ID, true);
+			},
+		),
 		MenuRegistry.appendMenuItem(MenuId.CommandPalette, {
 			command: {
 				id: START_DEBUGGING_COMMAND_ID,
@@ -240,6 +256,13 @@ export function registerPlainDebugCommands(): { dispose(): void } {
 			command: {
 				id: STOP_DEBUGGING_COMMAND_ID,
 				title: "Stop Debugging",
+				category: "Plain",
+			},
+		}),
+		MenuRegistry.appendMenuItem(MenuId.CommandPalette, {
+			command: {
+				id: OPEN_DEBUG_CONSOLE_COMMAND_ID,
+				title: "Debug Console",
 				category: "Plain",
 			},
 		}),

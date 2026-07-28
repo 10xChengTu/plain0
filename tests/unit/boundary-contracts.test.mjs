@@ -53,6 +53,7 @@ import {
 	validateDebugAdapterConnectBoundary,
 	validateDebugAdapterSpawnBoundary,
 	validateDebugCommandRegistration,
+	validateDebugRunInTerminalBoundary,
 	validateDebugSpawnConstructionShape,
 	validateDebugFramingBounds,
 } from "../../scripts/plain/boundary-contracts.mjs";
@@ -12319,6 +12320,131 @@ describe("Plain F100 S1 debug adapter confirmation command registration Harness"
 		expect(validateDebugCommandRegistration(duplicated)).toContain(
 			"src-tauri/src/lib.rs must register debug::commands::debug_adapter_confirmation_revoke exactly once in generate_handler",
 		);
+	});
+});
+
+describe("Plain F100 S4 runInTerminal boundary Harness", () => {
+	const debugCommandsSource = readFileSync(
+		new URL("../../src-tauri/src/debug/commands.rs", import.meta.url),
+		"utf8",
+	);
+	const debugCommandsSourceOnly = Object.freeze([
+		{
+			relativePath: "src-tauri/src/debug/commands.rs",
+			source: debugCommandsSource,
+		},
+	]);
+
+	it("passes for the real, unmodified debug/commands.rs", () => {
+		expect(validateDebugRunInTerminalBoundary(debugCommandsSourceOnly)).toEqual(
+			[],
+		);
+	});
+
+	it("requires debug/commands.rs to be present", () => {
+		expect(validateDebugRunInTerminalBoundary([])).toEqual([
+			"debug runInTerminal boundary requires debug/commands.rs",
+		]);
+	});
+
+	it("requires handle_run_in_terminal_reverse_request to be defined", () => {
+		const mutated = [
+			{
+				relativePath: "src-tauri/src/debug/commands.rs",
+				source: debugCommandsSource.replace(
+					"pub(crate) fn handle_run_in_terminal_reverse_request(",
+					"pub(crate) fn renamed_handler(",
+				),
+			},
+		];
+		const failures = validateDebugRunInTerminalBoundary(mutated);
+		expect(failures).toContain(
+			"debug/commands.rs must define handle_run_in_terminal_reverse_request",
+		);
+		// Renaming only the function's own signature line leaves its body
+		// (and the `terminal.start_program(...)` call inside it) completely
+		// intact, so the crate-wide call-site count is unaffected by this
+		// particular mutation — this is a deliberately narrow test of the
+		// "is it defined at all" check in isolation, not a combined scenario.
+		expect(failures).toHaveLength(1);
+	});
+
+	it("fails if the handler stops calling terminal.start_program", () => {
+		const mutated = [
+			{
+				relativePath: "src-tauri/src/debug/commands.rs",
+				source: debugCommandsSource.replace(
+					"tauri::async_runtime::block_on(terminal.start_program(",
+					"tauri::async_runtime::block_on(terminal.start_something_else(",
+				),
+			},
+		];
+		expect(validateDebugRunInTerminalBoundary(mutated)).toContain(
+			"handle_run_in_terminal_reverse_request must call terminal.start_program(...) — the only sanctioned way to spawn a runInTerminal-launched process",
+		);
+	});
+
+	it("does not flag an unrelated Command::new elsewhere in the file as a runInTerminal bypass", () => {
+		const mutated = [
+			{
+				relativePath: "src-tauri/src/debug/commands.rs",
+				source: debugCommandsSource.replace(
+					"pub(crate) fn handle_run_in_terminal_reverse_request(",
+					'pub(crate) fn handle_run_in_terminal_reverse_request_marker() { let _ = std::process::Command::new("sh"); }\npub(crate) fn handle_run_in_terminal_reverse_request(',
+				),
+			},
+		];
+		// The injected marker function is a distinct, separate function (not
+		// inside the real handler's own body), so this proves the "no direct
+		// Command::new" check only inspects the handler's own isolated body
+		// (via `rustFunctionBody`), not the whole file — an unrelated
+		// `Command::new` elsewhere must not be mistaken for a runInTerminal
+		// bypass by this contract.
+		expect(validateDebugRunInTerminalBoundary(mutated)).toEqual([]);
+	});
+
+	it("fails if the handler's own body is rewritten to spawn a Command directly", () => {
+		const mutated = [
+			{
+				relativePath: "src-tauri/src/debug/commands.rs",
+				source: debugCommandsSource.replace(
+					"let result = tauri::async_runtime::block_on(terminal.start_program(",
+					'let _bypass = std::process::Command::new("sh");\n    let result = tauri::async_runtime::block_on(terminal.start_program(',
+				),
+			},
+		];
+		expect(validateDebugRunInTerminalBoundary(mutated)).toContain(
+			"handle_run_in_terminal_reverse_request must not construct a subprocess directly — it must delegate to TerminalService::start_program",
+		);
+	});
+
+	it("requires exactly one non-test start_program call site across the crate", () => {
+		const duplicated = [
+			...debugCommandsSourceOnly,
+			{
+				relativePath: "src-tauri/src/debug/duplicate.rs",
+				source: "fn other() { let _ = terminal.start_program(1); }",
+			},
+		];
+		const failures = validateDebugRunInTerminalBoundary(duplicated);
+		expect(
+			failures.some((failure) =>
+				failure.includes(
+					"TerminalService::start_program must have exactly one non-test production call site in src-tauri/src (found 2)",
+				),
+			),
+		).toBe(true);
+	});
+
+	it("excludes call sites inside *tests.rs files from the crate-wide count", () => {
+		const withTestCallSite = [
+			...debugCommandsSourceOnly,
+			{
+				relativePath: "src-tauri/src/debug/service/tests.rs",
+				source: "fn other() { let _ = terminal.start_program(1); }",
+			},
+		];
+		expect(validateDebugRunInTerminalBoundary(withTestCallSite)).toEqual([]);
 	});
 });
 

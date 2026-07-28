@@ -138,6 +138,11 @@ function fakeBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		debugScopes: notImplemented,
 		debugVariables: notImplemented,
 		debugEvaluate: notImplemented,
+		debugContinue: notImplemented,
+		debugNext: notImplemented,
+		debugStepIn: notImplemented,
+		debugStepOut: notImplemented,
+		debugPause: notImplemented,
 		debugWatchEvent: notImplemented,
 		...overrides,
 	};

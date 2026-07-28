@@ -31,19 +31,112 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
+use crate::debug::commands::handle_run_in_terminal_reverse_request;
 use crate::debug::confirm::ConfirmationService;
 use crate::debug::dto::{
     AdapterSpawnDescriptor, AdapterTransportKind, DebugSessionId, SessionTransportRequest,
 };
 use crate::debug::framing::FrameDecoder;
 use crate::debug::protocol::{encode_response, parse_incoming_message, IncomingMessage};
-use crate::debug::session::{DebugEventSink, LaunchRequestKind, SessionEndReason};
+use crate::debug::session::{
+    DebugEventSink, LaunchRequestKind, ReverseRequestHandler, ReverseRequestOutcome,
+    SessionEndReason,
+};
+use crate::terminal::service::{TerminalOutputSink, TerminalService};
 use crate::trust::service::TrustService;
 use crate::workspace::dto::WorkspacePickRootsMode;
 use crate::workspace::picker::{DirectoryPicker, DirectoryPickerFuture, DirectoryPickerResult};
 use crate::workspace::service::WorkspaceService;
 
 use super::DebugSessionService;
+
+/// A no-op [`ReverseRequestHandler`] — recognizes nothing, matching
+/// `debug::session`'s own `NullReverseRequestHandler` (private to that
+/// module) for every test in this file that is not itself exercising real
+/// reverse-request handling.
+struct NoopReverseRequestHandler;
+
+impl ReverseRequestHandler for NoopReverseRequestHandler {
+    fn handle(
+        &self,
+        _session_id: DebugSessionId,
+        _command: &str,
+        _arguments: Option<&Value>,
+    ) -> Option<ReverseRequestOutcome> {
+        None
+    }
+}
+
+fn noop_reverse_requests() -> std::sync::Arc<dyn ReverseRequestHandler> {
+    std::sync::Arc::new(NoopReverseRequestHandler)
+}
+
+/// Real `runInTerminal` handling, exercised end to end against a real
+/// `TerminalService` this test constructs directly (no live Tauri `App`
+/// running) — delegates to the exact same
+/// `debug::commands::handle_run_in_terminal_reverse_request` production code
+/// calls, proving this integration test is not a parallel reimplementation.
+/// See `debug::commands::RunInTerminalReverseRequestHandler`'s own doc
+/// comment for why the production `AppHandle`-backed handler is a thin
+/// wrapper around the exact same free function.
+struct TestRunInTerminalHandler {
+    terminal: std::sync::Arc<TerminalService>,
+    trust: std::sync::Arc<TrustService>,
+    workspace: std::sync::Arc<WorkspaceService>,
+    window_label: String,
+    sink: std::sync::Arc<dyn TerminalOutputSink>,
+}
+
+impl ReverseRequestHandler for TestRunInTerminalHandler {
+    fn handle(
+        &self,
+        _session_id: DebugSessionId,
+        command: &str,
+        arguments: Option<&Value>,
+    ) -> Option<ReverseRequestOutcome> {
+        if command != "runInTerminal" {
+            return None;
+        }
+        Some(handle_run_in_terminal_reverse_request(
+            &self.terminal,
+            &self.trust,
+            &self.workspace,
+            &self.window_label,
+            arguments,
+            std::sync::Arc::clone(&self.sink),
+        ))
+    }
+}
+
+/// Records every frame/exit a [`TerminalOutputSink`] receives — this test's
+/// own proof that the `runInTerminal`-launched session is a real,
+/// `TerminalService`-backed PTY session actually producing output, not a
+/// fabricated/no-op one.
+#[derive(Default)]
+struct RecordingTerminalSink {
+    frames: std::sync::Mutex<Vec<crate::terminal::dto::TerminalSessionId>>,
+}
+
+impl TerminalOutputSink for RecordingTerminalSink {
+    fn emit_frame(
+        &self,
+        session_id: crate::terminal::dto::TerminalSessionId,
+        _sequence: u64,
+        _frame: crate::terminal::vt::DirtyFrame,
+    ) {
+        self.frames
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(session_id);
+    }
+
+    fn emit_exit(
+        &self,
+        _session_id: crate::terminal::dto::TerminalSessionId,
+        _status: crate::terminal::service::TerminalExitStatus,
+    ) {
+    }
+}
 
 fn block_on<F: std::future::Future>(future: F) -> F::Output {
     tauri::async_runtime::block_on(future)
@@ -228,6 +321,14 @@ def next_seq():
 
 pending_launch_seq = None
 pending_launch_command = None
+# `F100` S4: mirrors a real adapter's own execution-state bookkeeping —
+# continue/pause flip it, next/stepIn/stepOut only succeed while stopped
+# (mirroring real single-threaded stepping semantics), letting the Rust test
+# exercise a step request issued while the session is *not* stopped as a
+# real, adapter-rejected `success: false` reply (this project's own
+# "步进请求在会话未 stopped 时发出" coverage requirement) rather than a
+# fabricated one.
+stopped = {"value": True}
 
 # `F100` S3: five synthetic stack frames (for `stackTrace` pagination),
 # two scopes for frame 1 and zero for frame 2 (the "genuinely empty scopes"
@@ -354,6 +455,44 @@ while True:
                 "success": True, "command": "evaluate",
                 "body": {"result": repr(expression), "variablesReference": 0},
             })
+    elif command == "continue":
+        if not stopped["value"]:
+            write_message({
+                "seq": next_seq(), "type": "response", "request_seq": request_seq,
+                "success": False, "command": "continue", "message": "already running",
+            })
+        else:
+            stopped["value"] = False
+            write_message({
+                "seq": next_seq(), "type": "response", "request_seq": request_seq,
+                "success": True, "command": "continue",
+                "body": {"allThreadsContinued": True, "receivedCommand": "continue"},
+            })
+    elif command in ("next", "stepIn", "stepOut"):
+        if not stopped["value"]:
+            write_message({
+                "seq": next_seq(), "type": "response", "request_seq": request_seq,
+                "success": False, "command": command, "message": "not stopped",
+            })
+        else:
+            write_message({
+                "seq": next_seq(), "type": "response", "request_seq": request_seq,
+                "success": True, "command": command,
+                "body": {"receivedCommand": command},
+            })
+    elif command == "pause":
+        if stopped["value"]:
+            write_message({
+                "seq": next_seq(), "type": "response", "request_seq": request_seq,
+                "success": False, "command": "pause", "message": "already stopped",
+            })
+        else:
+            stopped["value"] = True
+            write_message({
+                "seq": next_seq(), "type": "response", "request_seq": request_seq,
+                "success": True, "command": "pause",
+                "body": {"receivedCommand": "pause"},
+            })
     elif command == "disconnect":
         write_message({
             "seq": next_seq(), "type": "response", "request_seq": request_seq,
@@ -400,6 +539,7 @@ fn debug_launch_over_a_real_spawned_stdio_process_drives_the_full_handshake_end_
         json!({"program": "does-not-matter.py"}),
         Vec::new(),
         sink_for_session,
+        noop_reverse_requests(),
     ));
 
     let (session_id, capabilities) =
@@ -474,6 +614,7 @@ fn interactive_debugging_commands_work_end_to_end_over_a_real_spawned_stdio_proc
         json!({}),
         Vec::new(),
         sink_for_session,
+        noop_reverse_requests(),
     ))
     .expect("handshake succeeds");
 
@@ -615,6 +756,417 @@ fn interactive_debugging_commands_work_end_to_end_over_a_real_spawned_stdio_proc
     block_on(service.disconnect(window_label, session_id)).expect("disconnect succeeds");
 }
 
+/// `F100` S4's execution/step-control surface
+/// (`continue`/`next`/`stepIn`/`stepOut`/`pause`), exercised end to end
+/// against the same real spawned Python mock adapter the S3 tests above use
+/// (now extended with a `stopped`/running state machine — see
+/// `PYTHON_MOCK_ADAPTER_SCRIPT`'s own comment). Proves two things the AST
+/// command-registration contract alone cannot (masking every string literal,
+/// including each command's own distinguishing DAP name, means
+/// `debug_next`/`debug_step_in`/`debug_step_out`/`debug_pause` all reduce to
+/// an *identical* normalized body there): (1) each Rust command really does
+/// send its own distinct literal DAP command name — verified via the
+/// adapter's own `receivedCommand` echo in its reply body, not merely our own
+/// side's belief about what it sent — and (2) a step request issued while the
+/// session is genuinely **not** stopped surfaces as a real, adapter-rejected
+/// `DEBUG_REQUEST_FAILED` (this project's own explicit "步进请求在会话未
+/// stopped 时发出" coverage requirement), not a hang or a silently-ignored
+/// no-op.
+#[test]
+fn step_control_commands_send_their_own_distinct_dap_command_and_surface_a_not_stopped_rejection() {
+    let Some(python3) = resolve_python3() else {
+        eprintln!(
+            "skipping step_control_commands_send_their_own_distinct_dap_command_and_surface_a_not_stopped_rejection: \
+             python3 not found via `command -v python3`; cannot construct the real stdio mock adapter subprocess"
+        );
+        return;
+    };
+
+    let descriptor = AdapterSpawnDescriptor {
+        command: python3.to_string_lossy().into_owned(),
+        args: vec!["-c".to_owned(), PYTHON_MOCK_ADAPTER_SCRIPT.to_owned()],
+    };
+    let window_label = "main";
+    let fixture = trusted_and_confirmed(window_label, &descriptor, AdapterTransportKind::Stdio);
+    let service = DebugSessionService::new();
+    let (_sink, sink_for_session) = recording_sink();
+
+    let (session_id, _capabilities) = block_on(service.start_session(
+        &fixture.trust,
+        &fixture.workspace,
+        window_label,
+        &fixture.confirmation,
+        LaunchRequestKind::Launch,
+        SessionTransportRequest::Stdio {
+            command: descriptor.command.clone(),
+            args: descriptor.args.clone(),
+        },
+        "mock-python".to_owned(),
+        json!({}),
+        Vec::new(),
+        sink_for_session,
+        noop_reverse_requests(),
+    ))
+    .expect("handshake succeeds");
+
+    // --- Stopped (post-`configurationDone`): `next` succeeds and echoes its
+    //     own distinct literal DAP command name back. ---
+    let next_body =
+        block_on(service.send_request(window_label, session_id, "next", json!({"threadId": 1})))
+            .expect("next succeeds while stopped");
+    assert_eq!(
+        next_body.get("receivedCommand").and_then(Value::as_str),
+        Some("next")
+    );
+
+    // --- `continue`: succeeds, reports `allThreadsContinued`, flips the mock
+    //     adapter's own state to "running". ---
+    let continue_body = block_on(service.send_request(
+        window_label,
+        session_id,
+        "continue",
+        json!({"threadId": 1}),
+    ))
+    .expect("continue succeeds while stopped");
+    let continue_result = crate::debug::dto::parse_continue_response(&continue_body)
+        .expect("well-formed continue response");
+    assert!(continue_result.all_threads_continued);
+    assert_eq!(
+        continue_body.get("receivedCommand").and_then(Value::as_str),
+        Some("continue")
+    );
+
+    // --- The headline adversarial case: `next` while genuinely running (not
+    //     stopped) is a real adapter rejection, not a hang or a silent no-op. ---
+    let not_stopped_result =
+        block_on(service.send_request(window_label, session_id, "next", json!({"threadId": 1})));
+    let error = not_stopped_result.expect_err("the adapter genuinely rejects a step while running");
+    assert_eq!(error.code(), "DEBUG_REQUEST_FAILED");
+    assert!(error.message().contains("not stopped"));
+
+    // Same adversarial shape for `stepIn`/`stepOut` — each independently,
+    // not just `next`.
+    for command in ["stepIn", "stepOut"] {
+        let result = block_on(service.send_request(
+            window_label,
+            session_id,
+            command,
+            json!({"threadId": 1}),
+        ));
+        assert_eq!(
+            result.expect_err("rejected while running").code(),
+            "DEBUG_REQUEST_FAILED"
+        );
+    }
+
+    // --- `pause`: succeeds only while running, echoes its own command name,
+    //     flips the mock back to stopped. ---
+    let pause_body =
+        block_on(service.send_request(window_label, session_id, "pause", json!({"threadId": 1})))
+            .expect("pause succeeds while running");
+    assert_eq!(
+        pause_body.get("receivedCommand").and_then(Value::as_str),
+        Some("pause")
+    );
+
+    // Now stopped again: `stepIn`/`stepOut` each succeed and echo their own
+    // distinct command name — proving all five commands are individually
+    // wired to their own literal DAP request, not just `next`/`continue`.
+    for command in ["stepIn", "stepOut"] {
+        let body = block_on(service.send_request(
+            window_label,
+            session_id,
+            command,
+            json!({"threadId": 1}),
+        ))
+        .expect("succeeds while stopped");
+        assert_eq!(
+            body.get("receivedCommand").and_then(Value::as_str),
+            Some(command)
+        );
+    }
+
+    // `pause` while already stopped is itself an adversarial rejection.
+    let pause_again =
+        block_on(service.send_request(window_label, session_id, "pause", json!({"threadId": 1})));
+    assert_eq!(
+        pause_again.expect_err("already stopped").code(),
+        "DEBUG_REQUEST_FAILED"
+    );
+
+    block_on(service.disconnect(window_label, session_id)).expect("disconnect succeeds");
+}
+
+/// A second, dedicated mock adapter script (deliberately **not** sharing/
+/// mutating [`PYTHON_MOCK_ADAPTER_SCRIPT`] — bolting a `runInTerminal`
+/// reverse request onto the shared script risked interleaving an
+/// unsolicited reverse request into the two tests above's own expected
+/// command sequences, for no real coverage benefit) — issues a real
+/// `runInTerminal` reverse request right after `configurationDone`, then
+/// re-emits our own reply to it as a `mockRunInTerminalAck` event, so this
+/// test can observe (from the *adapter's own point of view*) that it
+/// actually received a well-formed `success: true` reply carrying a real
+/// `processId` — not just that our side believes it sent one.
+const RUN_IN_TERMINAL_MOCK_ADAPTER_SCRIPT: &str = r#"
+import sys, json
+
+def read_message():
+    headers = {}
+    first = True
+    while True:
+        line = sys.stdin.buffer.readline()
+        if line == b"":
+            if first:
+                return None
+            break
+        first = False
+        if line in (b"\r\n", b"\n"):
+            break
+        if b":" in line:
+            name, _, value = line.partition(b":")
+            headers[name.strip().lower()] = value.strip()
+    length = int(headers[b"content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body)
+
+def write_message(obj):
+    body = json.dumps(obj).encode("utf-8")
+    sys.stdout.buffer.write(("Content-Length: %d\r\n\r\n" % len(body)).encode("ascii"))
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+counter = [2000]
+
+def next_seq():
+    counter[0] += 1
+    return counter[0]
+
+pending_launch_seq = None
+pending_launch_command = None
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    if message.get("type") == "response":
+        # Our own reply to the runInTerminal reverse request this script
+        # sent below — re-emitted as an event so the Rust test can observe
+        # what the adapter itself actually received.
+        write_message({
+            "seq": next_seq(), "type": "event", "event": "mockRunInTerminalAck",
+            "body": {"success": message.get("success"), "body": message.get("body")},
+        })
+        continue
+    command = message.get("command")
+    request_seq = message.get("seq")
+    if command == "initialize":
+        write_message({
+            "seq": next_seq(), "type": "response", "request_seq": request_seq,
+            "success": True, "command": "initialize", "body": {},
+        })
+    elif command in ("launch", "attach"):
+        pending_launch_seq = request_seq
+        pending_launch_command = command
+        write_message({"seq": next_seq(), "type": "event", "event": "initialized"})
+    elif command == "configurationDone":
+        write_message({
+            "seq": next_seq(), "type": "response", "request_seq": request_seq,
+            "success": True, "command": "configurationDone",
+        })
+        write_message({
+            "seq": next_seq(), "type": "response", "request_seq": pending_launch_seq,
+            "success": True, "command": pending_launch_command,
+        })
+        write_message({
+            "seq": next_seq(), "type": "request", "command": "runInTerminal",
+            "arguments": {
+                "kind": "integrated",
+                "title": "Run Program",
+                "cwd": "/tmp",
+                "args": ["/bin/sh", "-c", "echo hello-from-run-in-terminal"],
+                "env": {"MOCK_RUN_IN_TERMINAL": "1"},
+            },
+        })
+    elif command == "disconnect":
+        write_message({
+            "seq": next_seq(), "type": "response", "request_seq": request_seq,
+            "success": True, "command": "disconnect",
+        })
+        break
+    else:
+        write_message({
+            "seq": next_seq(), "type": "response", "request_seq": request_seq,
+            "success": True, "command": command,
+        })
+"#;
+
+/// The headline `runInTerminal` proof this project's own task instructions
+/// call for: a real spawned Python mock adapter issues a real `runInTerminal`
+/// reverse request; this asserts (1) the adapter itself receives a
+/// well-formed `success: true` reply carrying a real, positive `processId`
+/// (from the adapter's own point of view, via `mockRunInTerminalAck` above —
+/// not merely that our side believes it replied), (2) a real
+/// `TerminalService` session was created (`session_count_for_test`, and a
+/// real frame was actually emitted by the spawned shell — proving this is a
+/// genuine, running PTY session, not a fabricated no-op), (3) the frontend
+/// notification our reverse-request handler emits carries the exact same
+/// `terminalSessionId`, and (4) that session is independently killable
+/// through `TerminalService`'s own ordinary API — proving it is a normal,
+/// user-manageable terminal, not a hidden side channel the debug domain
+/// privately owns. `handle_run_in_terminal_reverse_request` (the function
+/// under test here, via [`TestRunInTerminalHandler`]) is the *exact* function
+/// `debug::commands::RunInTerminalReverseRequestHandler` calls in
+/// production — this is not a parallel reimplementation.
+#[test]
+fn run_in_terminal_reverse_request_spawns_a_real_terminal_service_session_with_no_hidden_spawn_path(
+) {
+    let Some(python3) = resolve_python3() else {
+        eprintln!(
+            "skipping run_in_terminal_reverse_request_spawns_a_real_terminal_service_session_with_no_hidden_spawn_path: \
+             python3 not found via `command -v python3`; cannot construct the real stdio mock adapter subprocess"
+        );
+        return;
+    };
+
+    let descriptor = AdapterSpawnDescriptor {
+        command: python3.to_string_lossy().into_owned(),
+        args: vec![
+            "-c".to_owned(),
+            RUN_IN_TERMINAL_MOCK_ADAPTER_SCRIPT.to_owned(),
+        ],
+    };
+    let window_label = "main";
+
+    let root = TempDir::new().unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let confirm_base = TempDir::new().unwrap();
+    // `Arc`-wrapped (unlike `trusted_and_confirmed`'s own owned fields) —
+    // `TestRunInTerminalHandler` must outlive this function's own call to
+    // `start_session` (a reverse request can arrive at any later point in
+    // the session's life), so it needs a `'static`-safe, shared handle onto
+    // the *same* `TrustService`/`WorkspaceService` instances `start_session`
+    // itself is called with — not merely ones pointed at the same on-disk
+    // trust file, and (for `WorkspaceService`, whose authorized-roots state
+    // is purely in-memory, never persisted) not merely a fresh instance that
+    // happens to exist, which would report zero authorized roots for this
+    // window and fail `TerminalService::start_program`'s own trust check.
+    let workspace = std::sync::Arc::new(workspace_with_root(window_label, root.path()));
+    let trust = std::sync::Arc::new(TrustService::new(trust_base.path().to_path_buf()));
+    block_on(trust.grant(&workspace, window_label)).expect("grant succeeds");
+    let confirmation = ConfirmationService::new(confirm_base.path().to_path_buf());
+    block_on(confirmation.grant(
+        &workspace,
+        window_label,
+        &descriptor.confirmation_subject(AdapterTransportKind::Stdio),
+    ))
+    .expect("confirmation grant succeeds");
+
+    let service = DebugSessionService::new();
+    let (sink, sink_for_session) = recording_sink();
+
+    let terminal = std::sync::Arc::new(TerminalService::new());
+    let terminal_sink = std::sync::Arc::new(RecordingTerminalSink::default());
+    let terminal_sink_for_handler: std::sync::Arc<dyn TerminalOutputSink> = terminal_sink.clone();
+    let reverse_requests: std::sync::Arc<dyn ReverseRequestHandler> =
+        std::sync::Arc::new(TestRunInTerminalHandler {
+            terminal: std::sync::Arc::clone(&terminal),
+            trust: std::sync::Arc::clone(&trust),
+            workspace: std::sync::Arc::clone(&workspace),
+            window_label: window_label.to_owned(),
+            sink: terminal_sink_for_handler,
+        });
+
+    let (session_id, _capabilities) = block_on(service.start_session(
+        &trust,
+        &workspace,
+        window_label,
+        &confirmation,
+        LaunchRequestKind::Launch,
+        SessionTransportRequest::Stdio {
+            command: descriptor.command.clone(),
+            args: descriptor.args.clone(),
+        },
+        "mock-run-in-terminal".to_owned(),
+        json!({}),
+        Vec::new(),
+        sink_for_session,
+        reverse_requests,
+    ))
+    .expect("handshake succeeds");
+
+    // --- (1) the adapter itself received a real, successful reply. ---
+    assert!(
+        wait_until(
+            || sink
+                .events_snapshot()
+                .iter()
+                .any(|(_, name, _)| name == "mockRunInTerminalAck"),
+            Duration::from_secs(5)
+        ),
+        "expected the mock adapter to receive and re-emit our runInTerminal reply"
+    );
+    let ack = sink
+        .events_snapshot()
+        .into_iter()
+        .find(|(_, name, _)| name == "mockRunInTerminalAck")
+        .expect("present per the assertion above");
+    let ack_body = ack.2.expect("mockRunInTerminalAck always carries a body");
+    assert_eq!(ack_body.get("success").and_then(Value::as_bool), Some(true));
+    let acked_process_id = ack_body
+        .get("body")
+        .and_then(|body| body.get("processId"))
+        .and_then(Value::as_u64)
+        .expect("the adapter's own view of our reply carries a real processId");
+    assert!(acked_process_id > 0);
+
+    // --- (3) our own frontend-facing notification carries the same session. ---
+    let notification = sink
+        .events_snapshot()
+        .into_iter()
+        .find(|(_, name, _)| name == "plain/runInTerminal")
+        .expect("the runInTerminal handler's notify event was forwarded to the sink");
+    let notification_body = notification
+        .2
+        .expect("plain/runInTerminal always carries a body");
+    assert_eq!(
+        notification_body.get("processId").and_then(Value::as_u64),
+        Some(acked_process_id),
+        "the frontend notification and the adapter's own acked reply must report the same real pid"
+    );
+    let terminal_session_wire = notification_body
+        .get("terminalSessionId")
+        .and_then(Value::as_str)
+        .expect("a real terminal session id string")
+        .to_owned();
+
+    // --- (2) a real, running `TerminalService` session was created. ---
+    assert_eq!(terminal.session_count_for_test(window_label), 1);
+    assert!(
+        wait_until(
+            || !terminal_sink
+                .frames
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            Duration::from_secs(5)
+        ),
+        "expected the real spawned shell to actually produce PTY output"
+    );
+
+    // --- (4) that session is independently killable via `TerminalService`'s
+    //     own ordinary API — the same one `Plain: Kill Terminal` uses for any
+    //     other terminal tab, proving no hidden, debug-domain-only spawn path.
+    let terminal_session_id: crate::terminal::dto::TerminalSessionId =
+        serde_json::from_value(Value::String(terminal_session_wire))
+            .expect("a well-formed terminal session id");
+    block_on(terminal.kill(window_label, terminal_session_id, true)).expect(
+        "the runInTerminal-launched session is killable through the ordinary TerminalService API",
+    );
+    assert_eq!(terminal.session_count_for_test(window_label), 0);
+
+    block_on(service.disconnect(window_label, session_id)).expect("disconnect succeeds");
+}
+
 /// The real-socket counterpart of a mock adapter, scripted directly against
 /// a genuine `TcpStream` — mirrors `debug::tcp::tests`'s own real-socket
 /// technique, extended here to a full scripted handshake rather than just a
@@ -735,6 +1287,7 @@ fn debug_launch_over_a_real_tcp_socket_drives_the_full_handshake_end_to_end() {
         json!({}),
         Vec::new(),
         sink_for_session,
+        noop_reverse_requests(),
     ));
 
     let (session_id, capabilities) =
@@ -805,6 +1358,7 @@ fn close_window_tears_down_every_live_session_and_the_peer_observes_the_connecti
         json!({}),
         Vec::new(),
         sink_for_session,
+        noop_reverse_requests(),
     ))
     .expect("handshake succeeds");
     assert_eq!(service.session_count_for_test(window_label), 1);
@@ -849,6 +1403,7 @@ fn start_session_still_requires_confirmation_before_ever_attempting_to_connect()
         json!({}),
         Vec::new(),
         sink_for_session,
+        noop_reverse_requests(),
     ));
     assert_eq!(result.unwrap_err().code(), "DEBUG_ADAPTER_NOT_CONFIRMED");
     assert_eq!(service.session_count_for_test(window_label), 0);

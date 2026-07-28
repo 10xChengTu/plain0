@@ -50,7 +50,7 @@ use crate::error::CommandError;
 
 use super::{
     run_handshake, DebugEventSink, DebugSession, HandshakeConfig, LaunchRequestKind,
-    SessionEndReason, SourceBreakpoints,
+    ReverseRequestHandler, ReverseRequestOutcome, SessionEndReason, SourceBreakpoints,
 };
 
 // ---------------------------------------------------------------------
@@ -886,6 +886,125 @@ fn a_reverse_request_is_surfaced_to_the_sink_and_answered_so_the_adapter_is_neve
     let response = adapter.recv_response();
     assert_eq!(response.request_seq, 7);
     assert_eq!(response.command, "runInTerminal");
+    assert!(!response.success);
+}
+
+/// A test-only [`ReverseRequestHandler`] proving [`DebugSession`]'s own
+/// dispatch wiring (not `runInTerminal`'s real `TerminalService` logic,
+/// which is `debug::service::tests`'s job — see that file's own real-
+/// subprocess `runInTerminal` integration test) — recognizes exactly one
+/// command and returns a scripted [`ReverseRequestOutcome`], letting this
+/// test assert `dispatch_message` (1) actually calls the handler rather than
+/// unconditionally declining, (2) writes the handler's real `success`/`body`
+/// back to the adapter, and (3) forwards the handler's `notify` event to the
+/// frontend sink — all without needing a real `TerminalService`.
+struct ScriptedReverseRequestHandler {
+    recognized_command: &'static str,
+    outcome_body: Value,
+    notify: (String, Value),
+}
+
+impl ReverseRequestHandler for ScriptedReverseRequestHandler {
+    fn handle(
+        &self,
+        _session_id: DebugSessionId,
+        command: &str,
+        _arguments: Option<&Value>,
+    ) -> Option<ReverseRequestOutcome> {
+        if command != self.recognized_command {
+            return None;
+        }
+        Some(ReverseRequestOutcome {
+            success: true,
+            body: Some(self.outcome_body.clone()),
+            message: None,
+            notify: Some(self.notify.clone()),
+        })
+    }
+}
+
+#[test]
+fn a_recognized_reverse_request_gets_a_real_reply_and_a_frontend_notification() {
+    let ((client_reader, client_writer), mut adapter) = duplex_pair();
+    let session_id = DebugSessionId::new();
+    let (sink, sink_for_session) = sink_pair();
+    let handler = Arc::new(ScriptedReverseRequestHandler {
+        recognized_command: "runInTerminal",
+        outcome_body: json!({"processId": 4242}),
+        notify: (
+            "plain/runInTerminal".to_owned(),
+            json!({"terminalSessionId": "fake-terminal-session"}),
+        ),
+    });
+    let _session = DebugSession::start_with_reverse_requests(
+        session_id,
+        client_reader,
+        client_writer,
+        sink_for_session,
+        Box::new(|| {}),
+        handler,
+    );
+
+    adapter.send_reverse_request(
+        9,
+        "runInTerminal",
+        Some(json!({"cwd": "/tmp", "args": ["python3"]})),
+    );
+
+    let response = adapter.recv_response();
+    assert_eq!(response.request_seq, 9);
+    assert_eq!(response.command, "runInTerminal");
+    assert!(
+        response.success,
+        "a recognized reverse request must succeed"
+    );
+    assert_eq!(response.body, Some(json!({"processId": 4242})));
+
+    assert!(wait_until(
+        || sink
+            .events_snapshot()
+            .iter()
+            .any(|(_, name, _)| name == "plain/runInTerminal"),
+        Duration::from_secs(2)
+    ));
+    let events = sink.events_snapshot();
+    let notification = events
+        .iter()
+        .find(|(_, name, _)| name == "plain/runInTerminal")
+        .expect("the handler's notify event was forwarded to the frontend sink");
+    assert_eq!(
+        notification.2,
+        Some(json!({"terminalSessionId": "fake-terminal-session"}))
+    );
+}
+
+#[test]
+fn an_unrecognized_command_still_falls_back_to_the_automatic_decline_even_with_a_real_handler_installed(
+) {
+    let ((client_reader, client_writer), mut adapter) = duplex_pair();
+    let session_id = DebugSessionId::new();
+    let (_sink, sink_for_session) = sink_pair();
+    let handler = Arc::new(ScriptedReverseRequestHandler {
+        recognized_command: "runInTerminal",
+        outcome_body: json!({}),
+        notify: ("plain/runInTerminal".to_owned(), json!({})),
+    });
+    let _session = DebugSession::start_with_reverse_requests(
+        session_id,
+        client_reader,
+        client_writer,
+        sink_for_session,
+        Box::new(|| {}),
+        handler,
+    );
+
+    // A command the installed handler does not recognize — proves the
+    // fallback to the automatic decline is per-command, not "a real handler
+    // is installed, so nothing is ever declined again".
+    adapter.send_reverse_request(3, "startDebugging", Some(json!({})));
+    let response = adapter.recv_response();
+    assert_eq!(response.request_seq, 3);
+    assert_eq!(response.command, "startDebugging");
     assert!(!response.success);
 }
 

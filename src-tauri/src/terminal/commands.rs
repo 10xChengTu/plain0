@@ -34,9 +34,25 @@ pub(crate) const TERMINAL_EXIT_EVENT: &str = "plain://terminal-exit";
 /// call `emit_frame`/`emit_exit`, and for the documented exit-vs-last-frame
 /// ordering caveat that follows from that independence (this sink does not
 /// attempt to fix it; `terminal-stream.ts` is where the mitigation lives).
-struct WindowEmitSink {
+///
+/// `pub(crate)` (unlike every other item in this file) since `F100` S4's
+/// `debug::commands::RunInTerminalReverseRequestHandler` is a second,
+/// legitimate production caller — a `runInTerminal`-launched terminal session
+/// must emit under the *exact same* `TERMINAL_DATA_EVENT`/`TERMINAL_EXIT_EVENT`
+/// names an ordinary `Plain: Create Terminal` session does, so the frontend's
+/// existing `terminalWatchData`/`terminalWatchExit` listeners pick it up with
+/// no special-casing at all — reusing this struct (rather than a second,
+/// parallel implementation of the identical `emit_to` logic) is what
+/// guarantees that.
+pub(crate) struct WindowEmitSink {
     app: AppHandle,
     window_label: String,
+}
+
+impl WindowEmitSink {
+    pub(crate) fn new(app: AppHandle, window_label: String) -> Self {
+        Self { app, window_label }
+    }
 }
 
 impl TerminalOutputSink for WindowEmitSink {

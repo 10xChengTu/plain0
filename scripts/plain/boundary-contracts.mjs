@@ -19293,6 +19293,95 @@ const DEBUG_COMMAND_CONTRACTS = Object.freeze([
 		returnType: "->Result<(),CommandError>",
 		body: "debug_sessions.inner().disconnect(window.label(),request.into_parts()).await",
 	},
+	// `F100` S3 — the interactive debugging surface (`debug/mod.rs`'s own
+	// module doc). These five were registered in `generate_handler!` and
+	// shipped as part of S3's own delivery, but were never actually added to
+	// this contract array at the time — a real gap this slice (`F100` S4)
+	// discovered while extending this same array for its own five new
+	// commands, and backfills here rather than leaving it open, per this
+	// project's "如实核实,不能只凭自述结论" discipline.
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_set_breakpoints",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugSetBreakpointsRequest",
+		returnType: "->Result<DebugSetBreakpointsResult,CommandError>",
+		body: "letquery=request.into_parts()?;letbody=debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments,).await?;dto::parse_set_breakpoints_response(&body)",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_stack_trace",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugStackTraceRequest",
+		returnType: "->Result<DebugStackTraceResult,CommandError>",
+		body: "letquery=request.into_parts();letbody=debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments,).await?;dto::parse_stack_trace_response(&body)",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_scopes",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugScopesRequest",
+		returnType: "->Result<DebugScopesResult,CommandError>",
+		body: "letquery=request.into_parts();letbody=debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments).await?;dto::parse_scopes_response(&body)",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_variables",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugVariablesRequest",
+		returnType: "->Result<DebugVariablesResult,CommandError>",
+		body: "letquery=request.into_parts();letbody=debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments,).await?;dto::parse_variables_response(&body)",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_evaluate",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugEvaluateRequest",
+		returnType: "->Result<DebugEvaluateResult,CommandError>",
+		body: "letquery=request.into_parts()?;letbody=debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments,).await?;dto::parse_evaluate_response(&body)",
+	},
+	// `F100` S4 — execution/step control (`debug/commands.rs`'s own module
+	// doc, "`F100` S4's five step-control commands" section).
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_continue",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugThreadRequest",
+		returnType: "->Result<DebugContinueResult,CommandError>",
+		body: "letquery=request.into_parts();letbody=debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments,).await?;dto::parse_continue_response(&body)",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_next",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugThreadRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "letquery=request.into_parts();debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments).await?;Ok(())",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_step_in",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugThreadRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "letquery=request.into_parts();debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments).await?;Ok(())",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_step_out",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugThreadRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "letquery=request.into_parts();debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments).await?;Ok(())",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_pause",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugThreadRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "letquery=request.into_parts();debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments).await?;Ok(())",
+	},
 ]);
 
 /**
@@ -19385,6 +19474,78 @@ export function validateDebugCommandRegistration(rustSources) {
 				`src-tauri/src/lib.rs must register debug::commands::${contract.name} exactly once in generate_handler`,
 			);
 		}
+	}
+
+	return failures;
+}
+
+/**
+ * `F100` S4's real `runInTerminal` reverse-request handling boundary: locks
+ * `debug/commands.rs`'s `handle_run_in_terminal_reverse_request` to actually
+ * delegate to `TerminalService::start_program` (rather than constructing a
+ * subprocess itself — the "no hidden second spawn path" requirement the
+ * frozen research doc's "主导会话裁定" item 4 calls for), and cross-checks
+ * that `TerminalService::start_program` has *exactly one* non-test
+ * production call site anywhere in the crate — a second call site appearing
+ * anywhere (an accidental duplicate, or a genuinely new bypass) fails this
+ * immediately, the same "count the real call sites, don't just trust one
+ * audited-looking one" discipline `validateDebugCommandRegistration`'s own
+ * `generate_handler!` cross-check already applies.
+ */
+export function validateDebugRunInTerminalBoundary(rustSources) {
+	const failures = [];
+	const commandsSource = findRustSource(
+		rustSources,
+		"src-tauri/src/debug/commands.rs",
+	);
+	if (commandsSource === undefined) {
+		return ["debug runInTerminal boundary requires debug/commands.rs"];
+	}
+	const commentsOnly = stripRustCommentsOnly(commandsSource);
+	const handler = rustFunctionBody(
+		commentsOnly,
+		"handle_run_in_terminal_reverse_request",
+	);
+	if (handler === undefined) {
+		failures.push(
+			"debug/commands.rs must define handle_run_in_terminal_reverse_request",
+		);
+	} else {
+		const body = handler.body;
+		if (!/\bterminal\s*\.\s*start_program\s*\(/.test(body)) {
+			failures.push(
+				"handle_run_in_terminal_reverse_request must call terminal.start_program(...) — the only sanctioned way to spawn a runInTerminal-launched process",
+			);
+		}
+		if (
+			/\bCommand(Builder)?\s*::\s*new\s*\(/.test(body) ||
+			/std\s*::\s*process\s*::\s*Command/.test(body)
+		) {
+			failures.push(
+				"handle_run_in_terminal_reverse_request must not construct a subprocess directly — it must delegate to TerminalService::start_program",
+			);
+		}
+	}
+
+	let productionCallSites = 0;
+	for (const { relativePath, source } of rustSources) {
+		const normalizedPath = relativePath.replaceAll("\\", "/");
+		if (
+			!normalizedPath.startsWith("src-tauri/src/") ||
+			WORKSPACE_TEST_SOURCE_PATTERN.test(normalizedPath)
+		) {
+			continue;
+		}
+		const executableSource = stripRustCommentsAndLiterals(source);
+		const matches = executableSource.match(/\.start_program\s*\(/g);
+		if (matches !== null) {
+			productionCallSites += matches.length;
+		}
+	}
+	if (productionCallSites !== 1) {
+		failures.push(
+			`TerminalService::start_program must have exactly one non-test production call site in src-tauri/src (found ${productionCallSites})`,
+		);
 	}
 
 	return failures;

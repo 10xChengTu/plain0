@@ -38,6 +38,7 @@
 import type {
 	DebugAdapterTarget,
 	DebugBreakpointRequest,
+	DebugContinueResult,
 	DebugEvaluateContext,
 	DebugEvaluateResult,
 	DebugEventPayload,
@@ -67,6 +68,11 @@ export type DebugSessionBridge = Pick<
 	| "debugScopes"
 	| "debugVariables"
 	| "debugEvaluate"
+	| "debugContinue"
+	| "debugNext"
+	| "debugStepIn"
+	| "debugStepOut"
+	| "debugPause"
 	| "debugWatchEvent"
 >;
 
@@ -83,6 +89,16 @@ export interface DebugSessionState {
 	/** The thread a real `stopped` event most recently named, or `null` if
 	 * the debuggee is currently running (or has not stopped yet). */
 	readonly stoppedThreadId: number | null;
+	/** `F100` S4: the most recent thread id *any* `stopped` (or `thread`,
+	 * `reason: "started"`) event has named — unlike `stoppedThreadId`, this is
+	 * **not** cleared on `continued`; it only ever changes to a newer real
+	 * thread id or resets to `null` when the session itself restarts/ends.
+	 * The step-control toolbar (`plain-debug-call-stack-view.ts`) uses this,
+	 * not `stoppedThreadId`, as `pause`'s own target thread — `pause` is only
+	 * ever meaningful while the debuggee is *running* (when `stoppedThreadId`
+	 * is already `null`), so `stoppedThreadId` alone cannot answer "which
+	 * thread should a pause request target". */
+	readonly lastKnownThreadId: number | null;
 }
 
 export type DebugSessionChangeListener = (
@@ -154,14 +170,29 @@ export class DebugSessionController {
 			listener(event);
 		}
 		if (event.event === "stopped") {
+			const threadId = threadIdFromStoppedBody(event.body);
 			this.#setState({
 				...this.#state,
-				stoppedThreadId: threadIdFromStoppedBody(event.body),
+				stoppedThreadId: threadId,
+				lastKnownThreadId: threadId ?? this.#state.lastKnownThreadId,
 			});
 			return;
 		}
 		if (event.event === "continued") {
 			this.#setState({ ...this.#state, stoppedThreadId: null });
+			return;
+		}
+		if (event.event === "thread") {
+			// A real `started` thread event is the only other place a valid
+			// thread id can become known before the debuggee has ever actually
+			// stopped once — this domain does not otherwise track the full
+			// thread list (no `threads` request is implemented), but grabbing
+			// this one field from an event we already forward regardless costs
+			// nothing and gives `pause` a real target sooner.
+			const threadId = threadIdFromStoppedBody(event.body);
+			if (threadId !== null) {
+				this.#setState({ ...this.#state, lastKnownThreadId: threadId });
+			}
 			return;
 		}
 		if (event.event === SESSION_ENDED_EVENT_NAME) {
@@ -257,6 +288,7 @@ export class DebugSessionController {
 			sessionId: result.sessionId,
 			capabilities: result.capabilities,
 			stoppedThreadId: null,
+			lastKnownThreadId: null,
 		};
 		this.#setState(started);
 		await this.#pushEveryPath();
@@ -328,6 +360,54 @@ export class DebugSessionController {
 			frameId,
 			context,
 		);
+	}
+
+	/** Resumes execution of `threadId` — see `DebugContinueResult`'s own doc
+	 * comment for the `allThreadsContinued` default. A no-op returning
+	 * `undefined` if there is no live session (mirrors every other command
+	 * method above), *not* a thrown error — the toolbar itself is expected to
+	 * already gate these buttons on session/thread state via
+	 * `DebugSessionState`, so this defensive `undefined` return only matters
+	 * for a caller that did not check first. */
+	async continue_(threadId: number): Promise<DebugContinueResult | undefined> {
+		if (this.#state === null) {
+			return undefined;
+		}
+		return this.#bridge.debugContinue(this.#state.sessionId, threadId);
+	}
+
+	/** Steps over the current line ("step over"/`next` in DAP terms). */
+	async next(threadId: number): Promise<void> {
+		if (this.#state === null) {
+			return;
+		}
+		await this.#bridge.debugNext(this.#state.sessionId, threadId);
+	}
+
+	/** Steps into the current line's call ("step into"/`stepIn` in DAP
+	 * terms). */
+	async stepIn(threadId: number): Promise<void> {
+		if (this.#state === null) {
+			return;
+		}
+		await this.#bridge.debugStepIn(this.#state.sessionId, threadId);
+	}
+
+	/** Steps out of the current function ("step out"/`stepOut` in DAP
+	 * terms). */
+	async stepOut(threadId: number): Promise<void> {
+		if (this.#state === null) {
+			return;
+		}
+		await this.#bridge.debugStepOut(this.#state.sessionId, threadId);
+	}
+
+	/** Interrupts a running thread. */
+	async pause(threadId: number): Promise<void> {
+		if (this.#state === null) {
+			return;
+		}
+		await this.#bridge.debugPause(this.#state.sessionId, threadId);
 	}
 
 	dispose(): void {

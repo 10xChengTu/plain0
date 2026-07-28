@@ -22,6 +22,7 @@ import "./features/debug/debug-contribution";
 import { createPlainDebugBreakpointsContribution } from "./features/debug/plain-debug-breakpoints-contribution";
 import { registerPlainDebugCommands } from "./features/debug/plain-debug-commands";
 import { createAndConfigurePlainDebugRuntime } from "./features/debug/plain-debug-runtime";
+import "./features/debug/plain-debug-terminal-integration";
 import "./features/search/search-contribution";
 import "./features/terminal/terminal-contribution";
 import { registerPlainTerminalCommands } from "./features/terminal/plain-terminal-commands";

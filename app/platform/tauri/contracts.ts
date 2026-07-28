@@ -636,6 +636,15 @@ export interface DebugEvaluateResult {
 	readonly indexedVariables: number | null;
 }
 
+/** `F100` S4's `debugContinue` response — `allThreadsContinued` defaults to
+ * `true` when the adapter's own response omits it (per spec: "If this
+ * attribute is missing a value of `true` is assumed for backward
+ * compatibility"), matching `src-tauri/src/debug/dto.rs`'s
+ * `parse_continue_response` exactly. */
+export interface DebugContinueResult {
+	readonly allThreadsContinued: boolean;
+}
+
 /** `plain://debug-event`'s decoded payload — covers both real DAP events
  * (`event` is the bare DAP event name, e.g. `"stopped"`) and Plain's own
  * `plain/`-prefixed synthetic notifications (`"plain/sessionEnded"`,
@@ -1869,6 +1878,27 @@ export interface PlainBridge {
 		frameId: number | null,
 		context: DebugEvaluateContext,
 	): Promise<DebugEvaluateResult>;
+	/** `F100` S4: resumes execution of `threadId` (DAP's own default, absent a
+	 * `singleThread` override this domain never sends, is "every thread"; see
+	 * `DebugContinueResult.allThreadsContinued`'s own doc comment for the
+	 * exact default this implements). */
+	debugContinue(
+		sessionId: string,
+		threadId: number,
+	): Promise<DebugContinueResult>;
+	/** Steps over the current line ("step over"/`next` in DAP terms). */
+	debugNext(sessionId: string, threadId: number): Promise<void>;
+	/** Steps into the current line's call ("step into"/`stepIn` in DAP
+	 * terms). Never sends a `targetId` — the `stepInTargets` target picker
+	 * (gated by `Capabilities.supportsStepInTargetsRequest`) is out of scope;
+	 * see `plain-debug-call-stack-view.ts`'s own module doc for the full
+	 * reasoning. */
+	debugStepIn(sessionId: string, threadId: number): Promise<void>;
+	/** Steps out of the current function ("step out"/`stepOut` in DAP
+	 * terms). */
+	debugStepOut(sessionId: string, threadId: number): Promise<void>;
+	/** Interrupts a running thread. */
+	debugPause(sessionId: string, threadId: number): Promise<void>;
 	/** Registers a listener for every live debug session's streamed
 	 * `plain://debug-event` deliveries in this window — mirrors
 	 * `terminalWatchData`'s own all-sessions-in-one-listener shape; the

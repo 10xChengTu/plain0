@@ -108,9 +108,27 @@ export class TerminalTabsModel {
 	 * never reused after a close — two tabs never show the same title within
 	 * one view's lifetime, even after earlier ones were closed. */
 	createTab(): TerminalTabCreated {
+		return this.#createTabWithTitle(`Terminal ${this.#nextTabNumber}`);
+	}
+
+	/**
+	 * `F100` S4: identical to {@link createTab} except the title is caller-
+	 * supplied rather than the auto-generated `"Terminal N"` — used only for
+	 * a tab created by `PlainTerminalView.adoptExternalSession` (a
+	 * `runInTerminal`-launched session Rust already created; see that
+	 * method's own doc comment), so the tab strip visibly identifies it as
+	 * debug-launched rather than looking like an ordinary manually-created
+	 * terminal. Still consumes the same monotonic tab-number counter as
+	 * {@link createTab} (for a unique internal `tabId`, never for display),
+	 * so a later ordinary tab can never collide with this one's id.
+	 */
+	createExternalTab(title: string): TerminalTabCreated {
+		return this.#createTabWithTitle(title);
+	}
+
+	#createTabWithTitle(title: string): TerminalTabCreated {
 		const tabId = `plain-terminal-tab-${this.#nextTabNumber}`;
 		const paneId = this.#nextPaneId();
-		const title = `Terminal ${this.#nextTabNumber}`;
 		this.#nextTabNumber += 1;
 		this.#tabs.push({
 			id: tabId,

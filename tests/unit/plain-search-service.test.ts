@@ -142,6 +142,11 @@ function fakeBridge(
 		debugScopes: notImplemented,
 		debugVariables: notImplemented,
 		debugEvaluate: notImplemented,
+		debugContinue: notImplemented,
+		debugNext: notImplemented,
+		debugStepIn: notImplemented,
+		debugStepOut: notImplemented,
+		debugPause: notImplemented,
 		debugWatchEvent: notImplemented,
 	};
 }
@@ -300,6 +305,11 @@ function fakeTextSearchBridge(
 		debugScopes: notImplemented,
 		debugVariables: notImplemented,
 		debugEvaluate: notImplemented,
+		debugContinue: notImplemented,
+		debugNext: notImplemented,
+		debugStepIn: notImplemented,
+		debugStepOut: notImplemented,
+		debugPause: notImplemented,
 		debugWatchEvent: notImplemented,
 	};
 

@@ -1,8 +1,10 @@
 import type {
 	PlainBridge,
+	TerminalFrame,
 	TerminalScrollbackRow,
 } from "../../platform/tauri/contracts";
 import {
+	attachTerminalStream,
 	openTerminalStream,
 	type TerminalStream,
 } from "../../platform/tauri/terminal-stream";
@@ -111,6 +113,19 @@ export interface TerminalPaneOptions {
 	/** Read fresh at session-start time (not cached at construction) — the
 	 * same timing the prior single-session `PlainTerminalView` used. */
 	readonly isEmptyWorkspace: () => boolean;
+	/** `F100` S4: when set, this pane **attaches** to an already-existing
+	 * `TerminalService` session (created by Rust's own `runInTerminal`
+	 * reverse-request handling,
+	 * `debug::commands::handle_run_in_terminal_reverse_request`) via
+	 * `attachTerminalStream` instead of starting a brand new one via
+	 * `openTerminalStream`/`terminalStart` — see
+	 * `plain-debug-terminal-integration.ts`'s own doc comment for the full
+	 * flow from DAP reverse request to this option being set. Trust is still
+	 * resolved first, exactly like an ordinary pane (an already-live session
+	 * implies the workspace already passed a stricter debug-adapter trust
+	 * gate, but this pane's own empty-workspace/declined status text is
+	 * reused unconditionally for UI consistency across every pane kind). */
+	readonly existingSessionId?: string;
 }
 
 export class TerminalPaneController {
@@ -118,6 +133,7 @@ export class TerminalPaneController {
 	readonly #bridge: PlainBridge;
 	readonly #dialogService: TerminalTrustDialogService;
 	readonly #isEmptyWorkspace: () => boolean;
+	readonly #existingSessionId: string | undefined;
 	readonly #abort = new AbortController();
 	readonly #ime = new TerminalImeController();
 	readonly #scroll = new TerminalScrollController();
@@ -148,6 +164,7 @@ export class TerminalPaneController {
 		this.#bridge = options.bridge;
 		this.#dialogService = options.dialogService;
 		this.#isEmptyWorkspace = options.isEmptyWorkspace;
+		this.#existingSessionId = options.existingSessionId;
 		this.#container.classList.add("plain-terminal-pane");
 
 		const status = document.createElement("div");
@@ -262,25 +279,34 @@ export class TerminalPaneController {
 		}
 		this.#showStatus(undefined);
 
+		const handlers = {
+			onFrame: (frame: TerminalFrame, sequence: number) => {
+				if (generation !== this.#generation) {
+					return;
+				}
+				this.#renderer.applyFrame(frame, sequence);
+			},
+			onExit: () => {
+				// This slice renders no explicit "process exited" banner yet
+				// (mirrors the prior single-session view) — the last painted
+				// frame simply stays on screen.
+			},
+		};
+
 		let stream: TerminalStream;
 		try {
-			stream = await openTerminalStream(
-				this.#bridge,
-				{ cwd: null, cols, rows },
-				{
-					onFrame: (frame, sequence) => {
-						if (generation !== this.#generation) {
-							return;
-						}
-						this.#renderer.applyFrame(frame, sequence);
-					},
-					onExit: () => {
-						// This slice renders no explicit "process exited" banner yet
-						// (mirrors the prior single-session view) — the last painted
-						// frame simply stays on screen.
-					},
-				},
-			);
+			stream =
+				this.#existingSessionId !== undefined
+					? attachTerminalStream(
+							this.#bridge,
+							this.#existingSessionId,
+							handlers,
+						)
+					: await openTerminalStream(
+							this.#bridge,
+							{ cwd: null, cols, rows },
+							handlers,
+						);
 		} catch (error) {
 			if (generation !== this.#generation) {
 				return;
@@ -298,6 +324,16 @@ export class TerminalPaneController {
 			return;
 		}
 		this.#stream = stream;
+		if (this.#existingSessionId !== undefined) {
+			// The Rust side created this session with a fixed default geometry
+			// (`RUN_IN_TERMINAL_DEFAULT_COLS`/`ROWS` — DAP's own
+			// `RunInTerminalRequestArguments` carries no terminal size at all),
+			// since no pane existed yet to measure against. Now that this pane
+			// really has been laid out, resize to the real measured geometry —
+			// exactly the same catch-up an ordinary pane's own later resize
+			// calls already perform whenever its container's size changes.
+			void stream.resize(cols, rows).catch(() => {});
+		}
 		void stream.focus(true);
 		this.#inputElement.focus();
 	}

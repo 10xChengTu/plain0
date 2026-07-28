@@ -127,6 +127,71 @@ export interface TerminalStream {
  * treat "exited" as license to stop reading; call `dispose()` once truly
  * done with the session.
  */
+/**
+ * Builds the returned `TerminalStream` handle's method surface for
+ * `sessionId` — shared by `openTerminalStream` (session created by *this*
+ * call, via `terminalStart`) and `attachTerminalStream` (`F100` S4: session
+ * already exists, created by Rust's own `runInTerminal` reverse-request
+ * handling — see that function's own doc comment), so the two only differ in
+ * *how* they come to have a `sessionId` and how they wire up delivery, never
+ * in what a caller can subsequently do with the resulting handle.
+ */
+function buildStreamHandle(
+	transport: Omit<TerminalStreamTransport, "terminalStart">,
+	sessionId: string,
+	unlistenData: () => void,
+	unlistenExit: () => void,
+	disposedRef: { value: boolean },
+): TerminalStream {
+	return {
+		sessionId,
+		async writeText(text) {
+			if (disposedRef.value) {
+				return;
+			}
+			await transport.terminalInputText(sessionId, text);
+		},
+		async writeKey(action, key, mods, utf8) {
+			if (disposedRef.value) {
+				return;
+			}
+			await transport.terminalInputKey(sessionId, action, key, mods, utf8);
+		},
+		async focus(focused) {
+			if (disposedRef.value) {
+				return;
+			}
+			await transport.terminalFocus(sessionId, focused);
+		},
+		async resize(cols, rows) {
+			if (disposedRef.value) {
+				return;
+			}
+			await transport.terminalResize(sessionId, cols, rows);
+		},
+		async ack(sequence) {
+			if (disposedRef.value) {
+				return;
+			}
+			await transport.terminalAck(sessionId, sequence);
+		},
+		async scrollback(start, count) {
+			return transport.terminalScrollback(sessionId, start, count);
+		},
+		async kill(immediate) {
+			await transport.terminalKill(sessionId, immediate);
+		},
+		dispose() {
+			if (disposedRef.value) {
+				return;
+			}
+			disposedRef.value = true;
+			unlistenData();
+			unlistenExit();
+		},
+	};
+}
+
 export async function openTerminalStream(
 	transport: TerminalStreamTransport,
 	request: TerminalStreamStartRequest,
@@ -134,7 +199,7 @@ export async function openTerminalStream(
 ): Promise<TerminalStream> {
 	let sessionId: string | undefined;
 	let nextExpectedSequence = 0;
-	let disposed = false;
+	const disposedRef = { value: false };
 	const pendingData: TerminalDataEvent[] = [];
 	const pendingExit: TerminalExitEvent[] = [];
 
@@ -192,58 +257,66 @@ export async function openTerminalStream(
 	}
 	pendingExit.length = 0;
 
-	const openedSessionId = sessionId;
-	return {
-		sessionId: openedSessionId,
-		async writeText(text) {
-			if (disposed) {
-				return;
-			}
-			await transport.terminalInputText(openedSessionId, text);
-		},
-		async writeKey(action, key, mods, utf8) {
-			if (disposed) {
-				return;
-			}
-			await transport.terminalInputKey(
-				openedSessionId,
-				action,
-				key,
-				mods,
-				utf8,
-			);
-		},
-		async focus(focused) {
-			if (disposed) {
-				return;
-			}
-			await transport.terminalFocus(openedSessionId, focused);
-		},
-		async resize(cols, rows) {
-			if (disposed) {
-				return;
-			}
-			await transport.terminalResize(openedSessionId, cols, rows);
-		},
-		async ack(sequence) {
-			if (disposed) {
-				return;
-			}
-			await transport.terminalAck(openedSessionId, sequence);
-		},
-		async scrollback(start, count) {
-			return transport.terminalScrollback(openedSessionId, start, count);
-		},
-		async kill(immediate) {
-			await transport.terminalKill(openedSessionId, immediate);
-		},
-		dispose() {
-			if (disposed) {
-				return;
-			}
-			disposed = true;
-			unlistenData();
-			unlistenExit();
-		},
-	};
+	return buildStreamHandle(
+		transport,
+		sessionId,
+		unlistenData,
+		unlistenExit,
+		disposedRef,
+	);
+}
+
+/**
+ * `F100` S4: attaches to a terminal session that **already exists** —
+ * created not by this call (there is no `terminalStart` here at all) but by
+ * Rust's own `runInTerminal` reverse-request handling
+ * (`debug::commands::handle_run_in_terminal_reverse_request`, via
+ * `TerminalService::start_program`), which has already emitted a
+ * `"plain/runInTerminal"` notification (see
+ * `plain-debug-terminal-integration.ts`) carrying the real `sessionId` this
+ * function is handed. Because the session already exists, there is no
+ * "buffer events until the id is known" race to handle (unlike
+ * `openTerminalStream`, whose own id only becomes known after `terminalStart`
+ * resolves) — this function's own `terminalWatchData`/`terminalWatchExit`
+ * listeners can filter on `sessionId` from the very first event. Never calls
+ * `terminalStart`: `transport` intentionally excludes it (the type omits that
+ * one method) so a caller cannot accidentally spawn a *second*, unrelated
+ * session while believing it is attaching to the first — the whole point of
+ * "复用既有 TerminalService" is exactly one spawn, ever, per `runInTerminal`
+ * reverse request.
+ */
+export function attachTerminalStream(
+	transport: Omit<TerminalStreamTransport, "terminalStart">,
+	sessionId: string,
+	handlers: TerminalStreamHandlers,
+): TerminalStream {
+	let nextExpectedSequence = 0;
+	const disposedRef = { value: false };
+
+	function deliverData(event: TerminalDataEvent): void {
+		if (event.sequence < nextExpectedSequence) {
+			return;
+		}
+		nextExpectedSequence = event.sequence + 1;
+		handlers.onFrame(event.frame, event.sequence);
+	}
+
+	const unlistenData = transport.terminalWatchData((event) => {
+		if (event.sessionId === sessionId) {
+			deliverData(event);
+		}
+	});
+	const unlistenExit = transport.terminalWatchExit((event) => {
+		if (event.sessionId === sessionId) {
+			handlers.onExit(event.exitCode);
+		}
+	});
+
+	return buildStreamHandle(
+		transport,
+		sessionId,
+		unlistenData,
+		unlistenExit,
+		disposedRef,
+	);
 }

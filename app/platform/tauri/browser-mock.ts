@@ -135,6 +135,7 @@ import {
 	frozenDebugSessionStartRequest,
 	frozenDebugSetBreakpointsRequest,
 	frozenDebugStackTraceRequest,
+	frozenDebugThreadRequest,
 	frozenDebugVariablesRequest,
 } from "./debug-codec";
 import {
@@ -1356,13 +1357,15 @@ export interface BrowserMockDebugFixtureForTest {
  * Per-session control surface for the mock debug session `debugLaunch`/
  * `debugAttach` creates — handed to `onDebugSessionForTest` the instant a
  * session starts, mirroring `BrowserMockTerminalSessionController`'s own
- * "per-session push surface" shape. Unlike the terminal mock's fake PTY, this
- * mock does not simulate step/continue/pause execution control at all (that
- * is `F100` S4's own command surface, not yet implemented anywhere in this
- * domain) — it only pushes whatever DAP event a test scripts, exactly as a
- * real adapter would over `plain://debug-event`, which is precisely what the
- * call-stack view's own "`stopped` drives a refresh" wiring needs to
- * exercise.
+ * "per-session push surface" shape. It only pushes whatever DAP event a test
+ * scripts, exactly as a real adapter would over `plain://debug-event`, which
+ * is precisely what the call-stack view's own "`stopped` drives a refresh"
+ * wiring needs to exercise. `F100` S4's own `debugContinue`/`debugNext`/
+ * `debugStepIn`/`debugStepOut`/`debugPause` command surface is implemented
+ * elsewhere in this mock (always succeeding for any live session) — see
+ * those methods' own doc comment for why this mock does not additionally
+ * simulate the adversarial "not stopped" adapter rejection real Rust
+ * integration tests already cover.
  */
 export interface BrowserMockDebugSessionController {
 	readonly sessionId: string;
@@ -7379,6 +7382,38 @@ export function createBrowserMockBridge(
 				});
 			}
 			return Object.freeze({ ...fixture });
+		},
+		// `F100` S4 — execution/step control. Unlike the terminal mock's fake
+		// PTY, this mock does not simulate the adversarial "adapter rejects a
+		// step request because the debuggee is not actually stopped" case at
+		// all (that real, considered behavior is covered end to end against a
+		// real spawned mock adapter in
+		// `src-tauri/src/debug/service/tests.rs`'s
+		// `step_control_commands_send_their_own_distinct_dap_command_and_surface_a_not_stopped_rejection`)
+		// — every one of these five always succeeds for any live mock
+		// session, matching this mock's own stated scope (structurally
+		// correct, scriptable responses for local dev/manual exploration, not
+		// a faithful re-simulation of every real adapter behavior).
+		async debugContinue(sessionId, threadId) {
+			const request = frozenDebugThreadRequest(sessionId, threadId);
+			requireLiveMockDebugSession(request.sessionId as string);
+			return Object.freeze({ allThreadsContinued: true });
+		},
+		async debugNext(sessionId, threadId) {
+			const request = frozenDebugThreadRequest(sessionId, threadId);
+			requireLiveMockDebugSession(request.sessionId as string);
+		},
+		async debugStepIn(sessionId, threadId) {
+			const request = frozenDebugThreadRequest(sessionId, threadId);
+			requireLiveMockDebugSession(request.sessionId as string);
+		},
+		async debugStepOut(sessionId, threadId) {
+			const request = frozenDebugThreadRequest(sessionId, threadId);
+			requireLiveMockDebugSession(request.sessionId as string);
+		},
+		async debugPause(sessionId, threadId) {
+			const request = frozenDebugThreadRequest(sessionId, threadId);
+			requireLiveMockDebugSession(request.sessionId as string);
 		},
 		debugWatchEvent(listener) {
 			debugEventListeners.add(listener);

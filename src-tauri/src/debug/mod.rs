@@ -345,14 +345,25 @@ pub(crate) fn debug_adapter_response_malformed() -> CommandError {
     )
 }
 
+/// Returned by [`commands::handle_run_in_terminal_reverse_request`] (`F100`
+/// S4) as the `ReverseRequestOutcome::message` when a `runInTerminal`
+/// reverse request's own `arguments` fail
+/// [`dto::parse_run_in_terminal_arguments`] — a real, considered rejection
+/// reported back to the adapter (`success: false`), distinct from the
+/// automatic decline every *unrecognized* reverse request still gets.
+pub(crate) fn debug_run_in_terminal_arguments_invalid() -> &'static str {
+    "This runInTerminal request's arguments are missing required fields, exceed a size limit, or \
+     are otherwise malformed."
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         confirmation_unavailable, debug_adapter_cancelled, debug_adapter_connect_failed,
         debug_adapter_not_confirmed, debug_adapter_response_malformed,
         debug_adapter_spawn_unavailable, debug_adapter_startup_crashed, debug_handshake_failed,
-        debug_request_failed, debug_session_ended, debug_session_not_found,
-        debug_session_request_invalid, debug_transport_unavailable,
+        debug_request_failed, debug_run_in_terminal_arguments_invalid, debug_session_ended,
+        debug_session_not_found, debug_session_request_invalid, debug_transport_unavailable,
     };
 
     #[test]
@@ -448,5 +459,10 @@ mod tests {
     fn startup_crashed_message_trims_whitespace_only_stderr_to_empty() {
         let error = debug_adapter_startup_crashed(Some(1), b"   \n  ");
         assert!(error.message().contains("(empty)"));
+    }
+
+    #[test]
+    fn run_in_terminal_arguments_invalid_message_is_stable() {
+        assert!(debug_run_in_terminal_arguments_invalid().contains("runInTerminal"));
     }
 }

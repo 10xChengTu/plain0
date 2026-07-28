@@ -36,7 +36,9 @@ use crate::workspace::service::WorkspaceService;
 
 use super::confirm::ConfirmationService;
 use super::dto::{self, DebugSessionId, SessionTransportRequest};
-use super::session::{self, DebugEventSink, DebugSession, HandshakeConfig, LaunchRequestKind};
+use super::session::{
+    self, DebugEventSink, DebugSession, HandshakeConfig, LaunchRequestKind, ReverseRequestHandler,
+};
 use super::{debug_request_failed, debug_session_not_found, debug_transport_unavailable};
 
 /// Rust-authoritative live-session table, `.manage()`d exactly once by
@@ -72,7 +74,10 @@ impl DebugSessionService {
     /// once `launch`/`attach` has actually succeeded. On any handshake
     /// failure the session is torn down and its reader thread joined before
     /// the error is returned — a caller never has to separately clean up a
-    /// session that failed to become ready.
+    /// session that failed to become ready. `reverse_requests` (`F100` S4) is
+    /// installed via [`DebugSession::start_with_reverse_requests`] rather
+    /// than the plain [`DebugSession::start`] every prior slice used — see
+    /// that method's own doc comment.
     #[allow(clippy::too_many_arguments)]
     pub async fn start_session(
         &self,
@@ -86,6 +91,7 @@ impl DebugSessionService {
         arguments: Value,
         breakpoints: Vec<session::SourceBreakpoints>,
         sink: Arc<dyn DebugEventSink>,
+        reverse_requests: Arc<dyn ReverseRequestHandler>,
     ) -> Result<(DebugSessionId, Value), CommandError> {
         let cancel = Arc::new(AtomicBool::new(false));
         let (reader, writer, teardown) = match transport {
@@ -144,7 +150,14 @@ impl DebugSessionService {
         };
 
         let session_id = DebugSessionId::new();
-        let debug_session = DebugSession::start(session_id, reader, writer, sink, teardown);
+        let debug_session = DebugSession::start_with_reverse_requests(
+            session_id,
+            reader,
+            writer,
+            sink,
+            teardown,
+            reverse_requests,
+        );
 
         let handshake_session = Arc::clone(&debug_session);
         let handshake_config = HandshakeConfig {

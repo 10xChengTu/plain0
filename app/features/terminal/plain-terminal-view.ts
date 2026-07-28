@@ -231,6 +231,26 @@ export class PlainTerminalView extends ViewPane {
 		this.#activateTab(tabId);
 	}
 
+	/**
+	 * `F100` S4: creates a tab **attached** to `sessionId` — a
+	 * `TerminalService` session Rust's own `runInTerminal` reverse-request
+	 * handling already created (never a second, hidden spawn triggered by
+	 * this call) — titled `title` so the tab strip visibly identifies it as
+	 * debug-launched, per this feature's own "可见性兜底" requirement (see
+	 * `plain-debug-terminal-integration.ts`, this method's sole caller, for
+	 * the full flow from a real DAP `runInTerminal` reverse request to here).
+	 * Otherwise identical to {@link openNewTab}: makes the new tab active
+	 * and lays it out immediately — the user sees it appear and can
+	 * interact with (or close/kill) it exactly like any manually-created
+	 * terminal tab.
+	 */
+	adoptExternalSession(sessionId: string, title: string): void {
+		const { tabId, paneId } = this.#tabsModel.createExternalTab(title);
+		this.#createTabRecord(tabId);
+		this.#createPane(paneId, tabId, sessionId);
+		this.#activateTab(tabId);
+	}
+
 	/** Closes the currently active tab (killing every one of its panes'
 	 * sessions) and activates whatever tab the model says is next, or shows
 	 * the empty state if none remain. A no-op if there is no active tab. */
@@ -309,7 +329,7 @@ export class PlainTerminalView extends ViewPane {
 		this.#tabRecords.set(tabId, { tabButton, paneContainer });
 	}
 
-	#createPane(paneId: string, tabId: string): void {
+	#createPane(paneId: string, tabId: string, existingSessionId?: string): void {
 		const record = this.#tabRecords.get(tabId);
 		if (record === undefined) {
 			return;
@@ -326,6 +346,7 @@ export class PlainTerminalView extends ViewPane {
 			dialogService: this.dialogService,
 			isEmptyWorkspace: () =>
 				this.workspaceContextService.getWorkspace().folders.length === 0,
+			existingSessionId,
 		});
 		this.#panes.set(paneId, controller);
 	}

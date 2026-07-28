@@ -10,6 +10,7 @@ import {
 } from "@codingame/monaco-vscode-api/vscode/vs/workbench/common/views";
 
 import { PlainDebugCallStackView } from "./plain-debug-call-stack-view";
+import { PlainDebugConsoleView } from "./plain-debug-console-view";
 import { PlainDebugVariablesView } from "./plain-debug-variables-view";
 import { PlainDebugWatchView } from "./plain-debug-watch-view";
 
@@ -17,6 +18,14 @@ export const DEBUG_VIEW_CONTAINER_ID = "plain.workbench.viewContainer.debug";
 export const DEBUG_CALL_STACK_VIEW_ID = PlainDebugCallStackView.ID;
 export const DEBUG_VARIABLES_VIEW_ID = PlainDebugVariablesView.ID;
 export const DEBUG_WATCH_VIEW_ID = PlainDebugWatchView.ID;
+/** `F100` S4: the Debug Console lives in its own Panel-location container
+ * (mirroring `TERMINAL_VIEW_CONTAINER_ID`'s own Panel placement) rather than
+ * inside `DEBUG_VIEW_CONTAINER_ID`'s Sidebar container — this matches the
+ * conventional "Debug Console sits alongside Terminal/Output/Problems at the
+ * bottom" information architecture, not the "Run and Debug" sidebar. */
+export const DEBUG_CONSOLE_VIEW_CONTAINER_ID =
+	"plain.workbench.viewContainer.debugConsole";
+export const DEBUG_CONSOLE_VIEW_ID = PlainDebugConsoleView.ID;
 
 /**
  * Registers exactly one Sidebar view container and its three self-built view
@@ -83,4 +92,44 @@ Registry.as<IViewsRegistry>(Extensions.ViewsRegistry).registerViews(
 		},
 	],
 	debugViewContainer,
+);
+
+/**
+ * `F100` S4's Debug Console — a second, Panel-location container (see
+ * `DEBUG_CONSOLE_VIEW_CONTAINER_ID`'s own doc comment for why it is not
+ * folded into `debugViewContainer` above). `doNotRegisterOpenCommand: true`
+ * for the same reason every sibling container sets it — this domain reveals
+ * the view itself via `IViewsService.openView` from its own command/
+ * contribution wiring, never the auto-generated open command.
+ */
+const debugConsoleViewContainer = Registry.as<IViewContainersRegistry>(
+	Extensions.ViewContainersRegistry,
+).registerViewContainer(
+	{
+		id: DEBUG_CONSOLE_VIEW_CONTAINER_ID,
+		title: { value: "Debug Console", original: "Debug Console" },
+		ctorDescriptor: new SyncDescriptor(ViewPaneContainer, [
+			DEBUG_CONSOLE_VIEW_CONTAINER_ID,
+			{ mergeViewWithContainerWhenSingleView: true },
+		]),
+		hideIfEmpty: true,
+		icon: Codicon.debugConsole,
+		order: 3,
+	},
+	ViewContainerLocation.Panel,
+	{ doNotRegisterOpenCommand: true },
+);
+
+Registry.as<IViewsRegistry>(Extensions.ViewsRegistry).registerViews(
+	[
+		{
+			id: DEBUG_CONSOLE_VIEW_ID,
+			containerIcon: Codicon.debugConsole,
+			name: { value: "Debug Console", original: "Debug Console" },
+			ctorDescriptor: new SyncDescriptor(PlainDebugConsoleView),
+			canToggleVisibility: false,
+			canMoveView: true,
+		},
+	],
+	debugConsoleViewContainer,
 );

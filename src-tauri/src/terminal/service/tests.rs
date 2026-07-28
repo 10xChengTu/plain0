@@ -883,6 +883,163 @@ fn a_cwd_outside_every_authorized_root_is_rejected() {
 }
 
 // -----------------------------------------------------------------------
+// `F100` S4: `TerminalService::start_program` — the `runInTerminal`
+// entry point. Real `debug::commands::handle_run_in_terminal_reverse_request`
+// end-to-end coverage lives in `debug::service::tests`; these are this
+// domain's own, more focused tests of `start_program`'s three actual
+// divergences from `start`/`start_with_command_for_test`.
+// -----------------------------------------------------------------------
+
+/// Proves `start_program` runs `program`/`args` directly (no shell in
+/// between) and returns the real spawned process's own pid — an argv element
+/// containing shell metacharacters (`$(pwd)`) must appear *literally* in the
+/// child's own argv (visible via `echo "$1"`, which only echoes what its
+/// shell-script wrapper received as a single already-tokenized argument),
+/// never expanded, mirroring `debug::exec::tests`'s identical
+/// `argv_elements_containing_shell_metacharacters_are_never_shell_interpreted`
+/// proof for adapter spawning.
+#[test]
+fn start_program_runs_the_named_program_directly_and_reports_a_real_pid() {
+    let root = TempDir::new().unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
+    let terminal = TerminalService::new();
+    let sink = RecordingSink::new();
+
+    let (session_id, pid) = block_on(terminal.start_program(
+        &trust,
+        &workspace,
+        "main",
+        root.path().to_string_lossy().into_owned(),
+        "/bin/echo".to_owned(),
+        vec!["literal:$(pwd):end".to_owned()],
+        Vec::new(),
+        80,
+        24,
+        sink.clone(),
+    ))
+    .expect("start_program succeeds");
+    assert!(
+        pid.is_some_and(|pid| pid > 0),
+        "expected a real, positive pid, got {pid:?}"
+    );
+
+    assert!(
+        wait_for_rendered_text(
+            &terminal,
+            "main",
+            session_id,
+            &sink,
+            Duration::from_secs(10),
+            |text| text.contains("literal:$(pwd):end"),
+        ),
+        "expected the shell-metacharacter-laden arg to appear literal, unexpanded; got {:?}",
+        sink.rendered_screen_text()
+    );
+
+    block_on(terminal.kill("main", session_id, true)).expect("kill succeeds");
+}
+
+/// **Deliberate contrast with [`a_cwd_outside_every_authorized_root_is_rejected`]
+/// above** (the control group): the exact same "root only, `cwd` points
+/// somewhere else entirely" setup that `start_with_command_for_test` rejects
+/// with `TERMINAL_CWD_INVALID` must *succeed* through `start_program` — see
+/// [`TerminalService::start_program`]'s own doc comment for why this
+/// divergence is deliberate (the containment check exists to bound a
+/// webview-reachable `cwd`; `runInTerminal`'s `cwd` never crosses that
+/// boundary).
+#[test]
+fn start_program_accepts_a_cwd_outside_every_workspace_root_unlike_the_ordinary_start_path() {
+    let root = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
+    let terminal = TerminalService::new();
+    let sink = RecordingSink::new();
+
+    let (session_id, _pid) = block_on(terminal.start_program(
+        &trust,
+        &workspace,
+        "main",
+        outside.path().to_string_lossy().into_owned(),
+        "/bin/sh".to_owned(),
+        vec!["-c".to_owned(), "pwd".to_owned()],
+        Vec::new(),
+        80,
+        24,
+        sink.clone(),
+    ))
+    .expect("start_program accepts a cwd outside every authorized workspace root");
+
+    let expected = std::fs::canonicalize(outside.path()).unwrap();
+    assert!(
+        wait_for_rendered_text(
+            &terminal,
+            "main",
+            session_id,
+            &sink,
+            Duration::from_secs(10),
+            |text| text.trim() == expected.to_string_lossy().as_ref(),
+        ),
+        "got {:?}",
+        sink.rendered_screen_text()
+    );
+
+    block_on(terminal.kill("main", session_id, true)).expect("kill succeeds");
+}
+
+/// `env_overrides` apply *after* (on top of, per DAP's own "added to or
+/// removed from" `env` semantics — never replacing) the fixed allowlist:
+/// this test both adds a name the allowlist would never forward on its own
+/// and removes one the allowlist normally does forward.
+#[test]
+fn start_program_env_overrides_apply_on_top_of_the_fixed_allowlist() {
+    let root = TempDir::new().unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
+    let terminal = TerminalService::new();
+    let sink = RecordingSink::new();
+
+    let (session_id, _pid) = block_on(terminal.start_program(
+        &trust,
+        &workspace,
+        "main",
+        root.path().to_string_lossy().into_owned(),
+        "/bin/sh".to_owned(),
+        vec![
+            "-c".to_owned(),
+            "echo ADDED=$MOCK_RUN_IN_TERMINAL_VAR REMOVED=[$HOME]".to_owned(),
+        ],
+        vec![
+            (
+                "MOCK_RUN_IN_TERMINAL_VAR".to_owned(),
+                Some("hello".to_owned()),
+            ),
+            ("HOME".to_owned(), None),
+        ],
+        80,
+        24,
+        sink.clone(),
+    ))
+    .expect("start_program succeeds");
+
+    assert!(
+        wait_for_rendered_text(
+            &terminal,
+            "main",
+            session_id,
+            &sink,
+            Duration::from_secs(10),
+            |text| text.contains("ADDED=hello") && text.contains("REMOVED=[]"),
+        ),
+        "got {:?}",
+        sink.rendered_screen_text()
+    );
+
+    block_on(terminal.kill("main", session_id, true)).expect("kill succeeds");
+}
+
+// -----------------------------------------------------------------------
 // Structured key/focus input, scrollback
 // -----------------------------------------------------------------------
 

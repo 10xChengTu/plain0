@@ -1,12 +1,16 @@
 //! `F100` S1 added the first-run confirmation gate's own query/grant/revoke
 //! surface (`debug_adapter_confirmation_state`/`_grant`/`_revoke`). `F100` S2
 //! added exactly three more — `debug_launch`/`debug_attach`/
-//! `debug_disconnect` — the real session-lifecycle surface. `F100` S3 (this
-//! slice) adds the *interactive* debugging surface: `debug_set_breakpoints`/
+//! `debug_disconnect` — the real session-lifecycle surface. `F100` S3 added
+//! the *interactive* debugging surface: `debug_set_breakpoints`/
 //! `debug_stack_trace`/`debug_scopes`/`debug_variables`/`debug_evaluate`.
-//! Read this comment before adding a twelfth.
+//! `F100` S4 (this slice) adds the last five: execution/step control
+//! (`debug_continue`/`debug_next`/`debug_step_in`/`debug_step_out`/
+//! `debug_pause`) — plus real `runInTerminal` reverse-request handling, which
+//! is not a new `#[tauri::command]` at all (see below). Read this comment
+//! before adding a seventeenth command.
 //!
-//! # `F100` S3's five new commands
+//! # `F100` S3's five commands (unchanged this slice)
 //!
 //! Every one of these is a thin wrapper: convert the request DTO into a
 //! `(session_id, arguments)` pair via its own `into_parts`, call
@@ -24,17 +28,44 @@
 //! serialization logic across two call sites. `debug_evaluate`'s `context`
 //! field is a closed, spec-derived enum
 //! ([`super::dto::DebugEvaluateContext`]), not an arbitrary string — `F100`
-//! S3 only ever sends `context: "watch"` from the Watch view; `F100` S4's
-//! Debug Console is expected to be the first `"repl"` caller. Still out of
-//! scope, per the frozen research doc's own slice breakdown: `debug_continue`/
-//! `debug_next`/`debug_step_in`/`debug_step_out`/`debug_pause` (`F100` S4).
+//! S3 only ever sent `context: "watch"` from the Watch view; this slice's
+//! Debug Console is the first `"repl"` caller.
+//!
+//! # `F100` S4's five step-control commands
+//!
+//! `debug_continue`/`debug_next`/`debug_step_in`/`debug_step_out`/
+//! `debug_pause` share one request DTO ([`super::dto::DebugThreadRequest`] —
+//! see its own doc comment for why: real DAP defines no `supportsXxx`
+//! capability gating these five basic requests themselves, only optional
+//! *enhancements* this slice does not implement — `stepInTargets`'s target
+//! picker, gated by `supportsStepInTargetsRequest`, and the optional
+//! `granularity` field, gated by `supportsSteppingGranularity`). Only
+//! `debug_continue` has a meaningful response body
+//! ([`super::dto::DebugContinueResult`]); the other four discard the
+//! adapter's response body entirely (a bare `Ok(())` — DAP defines no useful
+//! fields on their own responses).
+//!
+//! # `runInTerminal` is not a new Tauri command
+//!
+//! Real `runInTerminal` handling (this slice's other major addition) is a
+//! **reverse**-request handler ([`RunInTerminalReverseRequestHandler`],
+//! implementing `super::session::ReverseRequestHandler`) wired into
+//! [`start_debug_session`]'s call to
+//! [`DebugSessionService::start_session`] — it never crosses the Tauri IPC
+//! boundary as its own command at all, because the frontend is never the one
+//! who decides to call it: an *adapter* decides to send this reverse request,
+//! mid-session, and Rust must answer it without a frontend round trip (per
+//! the frozen research doc's "主导会话裁定" item 4). See
+//! [`handle_run_in_terminal_reverse_request`]'s own doc comment for the full
+//! design (why no second confirmation dialog, how visibility is the
+//! substitute, why `kind: "external"` is treated identically to
+//! `"integrated"`).
 //!
 //! # Why `debug_launch`/`debug_attach`/`debug_disconnect` finally have a real caller
 //!
-//! S2 disclosed these three as having zero frontend callers. `F100` S3 is the
-//! first slice to add `app/` UI at all, so it is also the first to give these
-//! three a real production caller (`app/features/debug/plain-debug-session.ts`)
-//! — see this slice's own final report for the exact orchestration.
+//! S2 disclosed these three as having zero frontend callers. `F100` S3 was
+//! the first slice to add `app/` UI at all, giving these three a real
+//! production caller (`app/features/debug/plain-debug-session.ts`).
 //!
 //! # Adapter-config parsing stays entirely in the frontend
 //!
@@ -50,19 +81,24 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter, EventTarget, Manager, State, WebviewWindow};
 
 use crate::error::CommandError;
+use crate::terminal::service::{TerminalOutputSink, TerminalService};
 use crate::trust::service::TrustService;
 use crate::workspace::service::WorkspaceService;
 
 use super::confirm::ConfirmationService;
+use super::debug_run_in_terminal_arguments_invalid;
 use super::dto::{
-    self, AdapterConfirmationSubject, DebugEvaluateRequest, DebugEvaluateResult, DebugEventPayload,
-    DebugScopesRequest, DebugScopesResult, DebugSessionId, DebugSessionIdRequest,
-    DebugSessionStartRequest, DebugSessionStartResult, DebugSetBreakpointsRequest,
-    DebugSetBreakpointsResult, DebugStackTraceRequest, DebugStackTraceResult,
-    DebugVariablesRequest, DebugVariablesResult,
+    self, AdapterConfirmationSubject, DebugContinueResult, DebugEvaluateRequest,
+    DebugEvaluateResult, DebugEventPayload, DebugScopesRequest, DebugScopesResult, DebugSessionId,
+    DebugSessionIdRequest, DebugSessionStartRequest, DebugSessionStartResult,
+    DebugSetBreakpointsRequest, DebugSetBreakpointsResult, DebugStackTraceRequest,
+    DebugStackTraceResult, DebugThreadRequest, DebugVariablesRequest, DebugVariablesResult,
 };
 use super::service::DebugSessionService;
-use super::session::{DebugEventSink, LaunchRequestKind, SessionEndReason};
+use super::session::{
+    DebugEventSink, LaunchRequestKind, ReverseRequestHandler, ReverseRequestOutcome,
+    SessionEndReason,
+};
 
 /// Response shape for `debug_adapter_confirmation_state` — an own-data,
 /// exactly `{ confirmed }` object, mirroring `trust::commands::WorkspaceTrustState`'s
@@ -238,6 +274,11 @@ async fn start_debug_session(
         app: window.app_handle().clone(),
         window_label: window.label().to_owned(),
     });
+    let reverse_requests: Arc<dyn ReverseRequestHandler> =
+        Arc::new(RunInTerminalReverseRequestHandler {
+            app: window.app_handle().clone(),
+            window_label: window.label().to_owned(),
+        });
     let (session_id, capabilities) = debug_sessions
         .inner()
         .start_session(
@@ -251,6 +292,7 @@ async fn start_debug_session(
             query.arguments,
             query.breakpoints,
             sink,
+            reverse_requests,
         )
         .await?;
     Ok(DebugSessionStartResult::new(session_id, capabilities))
@@ -370,6 +412,241 @@ pub(crate) async fn debug_evaluate(
         )
         .await?;
     dto::parse_evaluate_response(&body)
+}
+
+// ---------------------------------------------------------------------
+// `F100` S4 — execution/step control. See the module doc's own
+// "`F100` S4's five step-control commands" section.
+// ---------------------------------------------------------------------
+
+/// Resumes execution of the given thread (or, per DAP's own default, every
+/// thread — see [`super::dto::DebugContinueResult`]'s own doc comment for the
+/// `allThreadsContinued` default this domain implements).
+#[tauri::command]
+pub(crate) async fn debug_continue(
+    window: WebviewWindow,
+    debug_sessions: State<'_, DebugSessionService>,
+    request: DebugThreadRequest,
+) -> Result<DebugContinueResult, CommandError> {
+    let query = request.into_parts();
+    let body = debug_sessions
+        .inner()
+        .send_request(
+            window.label(),
+            query.session_id,
+            "continue",
+            query.arguments,
+        )
+        .await?;
+    dto::parse_continue_response(&body)
+}
+
+/// Steps over the current line ("step over"/`next` in DAP terms).
+#[tauri::command]
+pub(crate) async fn debug_next(
+    window: WebviewWindow,
+    debug_sessions: State<'_, DebugSessionService>,
+    request: DebugThreadRequest,
+) -> Result<(), CommandError> {
+    let query = request.into_parts();
+    debug_sessions
+        .inner()
+        .send_request(window.label(), query.session_id, "next", query.arguments)
+        .await?;
+    Ok(())
+}
+
+/// Steps into the current line's call ("step into"/`stepIn` in DAP terms).
+/// Never sends `targetId` — see the module doc's own step-control section for
+/// why `stepInTargets`' target picker is out of scope this slice.
+#[tauri::command]
+pub(crate) async fn debug_step_in(
+    window: WebviewWindow,
+    debug_sessions: State<'_, DebugSessionService>,
+    request: DebugThreadRequest,
+) -> Result<(), CommandError> {
+    let query = request.into_parts();
+    debug_sessions
+        .inner()
+        .send_request(window.label(), query.session_id, "stepIn", query.arguments)
+        .await?;
+    Ok(())
+}
+
+/// Steps out of the current function ("step out"/`stepOut` in DAP terms).
+#[tauri::command]
+pub(crate) async fn debug_step_out(
+    window: WebviewWindow,
+    debug_sessions: State<'_, DebugSessionService>,
+    request: DebugThreadRequest,
+) -> Result<(), CommandError> {
+    let query = request.into_parts();
+    debug_sessions
+        .inner()
+        .send_request(window.label(), query.session_id, "stepOut", query.arguments)
+        .await?;
+    Ok(())
+}
+
+/// Interrupts a running thread.
+#[tauri::command]
+pub(crate) async fn debug_pause(
+    window: WebviewWindow,
+    debug_sessions: State<'_, DebugSessionService>,
+    request: DebugThreadRequest,
+) -> Result<(), CommandError> {
+    let query = request.into_parts();
+    debug_sessions
+        .inner()
+        .send_request(window.label(), query.session_id, "pause", query.arguments)
+        .await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
+// `F100` S4 — real `runInTerminal` reverse-request handling. See the module
+// doc's own "`runInTerminal` is not a new Tauri command" section.
+// ---------------------------------------------------------------------
+
+/// A freshly `runInTerminal`-launched session's pty starts at this fixed size
+/// — DAP's `RunInTerminalRequestArguments` carries no columns/rows of its
+/// own (it names a `cwd`/`args`/`env` to run, not a terminal geometry), and
+/// there is no live editor-measured pane to size against yet (the frontend
+/// tab this creates does not exist until
+/// [`ReverseRequestOutcome::notify`] reaches it) — matches a common ordinary
+/// terminal default; the frontend can still resize it once its own pane has
+/// a real, measured size, exactly like an ordinary `Plain: Create Terminal`
+/// session does on its very first layout pass.
+const RUN_IN_TERMINAL_DEFAULT_COLS: u16 = 80;
+const RUN_IN_TERMINAL_DEFAULT_ROWS: u16 = 24;
+
+/// Real `runInTerminal` handling — see the module doc's own "runInTerminal is
+/// not a new Tauri command" section for the full design (no second
+/// confirmation, visibility as the substitute, `kind` never distinguished,
+/// no shell interpretation of `args`).
+///
+/// Deliberately `AppHandle`-free: [`RunInTerminalReverseRequestHandler`] (the
+/// production `ReverseRequestHandler` impl below) is the only thing that
+/// needs an `AppHandle` — purely to fetch `terminal`/`trust`/`workspace` via
+/// `AppHandle::state::<T>()` (mirroring `lib.rs`'s own
+/// `window.state::<T>()` window-close-cleanup precedent) and to build the
+/// real [`crate::terminal::commands::WindowEmitSink`] a freshly spawned
+/// session needs before calling this. Keeping *this* function free of that
+/// dependency is what lets `debug::service::tests`'s own real-subprocess
+/// `runInTerminal` integration test call it directly against a
+/// `TerminalService`/`TrustService`/`WorkspaceService` it constructs itself,
+/// with no live Tauri `App` running at all — exactly the same reason
+/// `handle_run_in_terminal_reverse_request`'s sibling command functions above
+/// are themselves thin wrappers around `DebugSessionService` methods that
+/// take plain references, not `State<'_, T>`.
+pub(crate) fn handle_run_in_terminal_reverse_request(
+    terminal: &TerminalService,
+    trust: &TrustService,
+    workspace: &WorkspaceService,
+    window_label: &str,
+    arguments: Option<&Value>,
+    sink: Arc<dyn TerminalOutputSink>,
+) -> ReverseRequestOutcome {
+    let Some(parsed) = dto::parse_run_in_terminal_arguments(arguments) else {
+        return ReverseRequestOutcome {
+            success: false,
+            body: None,
+            message: Some(debug_run_in_terminal_arguments_invalid().to_owned()),
+            notify: None,
+        };
+    };
+    let title = parsed.title.clone().unwrap_or_else(|| {
+        let mut command_line = parsed.program.clone();
+        for arg in &parsed.args {
+            command_line.push(' ');
+            command_line.push_str(arg);
+        }
+        command_line
+    });
+    let result = tauri::async_runtime::block_on(terminal.start_program(
+        trust,
+        workspace,
+        window_label,
+        parsed.cwd,
+        parsed.program,
+        parsed.args,
+        parsed.env,
+        RUN_IN_TERMINAL_DEFAULT_COLS,
+        RUN_IN_TERMINAL_DEFAULT_ROWS,
+        sink,
+    ));
+    match result {
+        Ok((terminal_session_id, process_id)) => {
+            let notify_body = serde_json::json!({
+                "terminalSessionId": terminal_session_id.as_wire(),
+                "title": title,
+                "processId": process_id,
+            });
+            let mut response_body = serde_json::Map::new();
+            if let Some(process_id) = process_id {
+                response_body.insert("processId".to_owned(), Value::from(process_id));
+            }
+            ReverseRequestOutcome {
+                success: true,
+                body: Some(Value::Object(response_body)),
+                message: None,
+                notify: Some(("plain/runInTerminal".to_owned(), notify_body)),
+            }
+        }
+        Err(error) => ReverseRequestOutcome {
+            success: false,
+            body: None,
+            message: Some(error.message().to_owned()),
+            notify: None,
+        },
+    }
+}
+
+/// Production [`ReverseRequestHandler`] for `runInTerminal` — built once per
+/// [`debug_launch`]/[`debug_attach`] call (the only place with access to a
+/// live `WebviewWindow`/`AppHandle`) and shared by that session's reader
+/// thread for its whole lifetime, mirroring [`DebugWindowEventSink`]'s
+/// identical construction-time shape. Fetches
+/// `TerminalService`/`TrustService`/`WorkspaceService` fresh from
+/// `self.app.state::<T>()` on every call (rather than capturing them once at
+/// construction time) — the same on-demand pattern `lib.rs`'s own
+/// `window.state::<T>()` window-close-cleanup callbacks already use — since
+/// none of those three services derive `Clone`, and this handler must
+/// outlive any single Tauri command invocation's own `State<'_, T>` borrow
+/// (a reverse request can arrive at any point in a session that may run for
+/// minutes or hours).
+struct RunInTerminalReverseRequestHandler {
+    app: AppHandle,
+    window_label: String,
+}
+
+impl ReverseRequestHandler for RunInTerminalReverseRequestHandler {
+    fn handle(
+        &self,
+        _session_id: DebugSessionId,
+        command: &str,
+        arguments: Option<&Value>,
+    ) -> Option<ReverseRequestOutcome> {
+        if command != "runInTerminal" {
+            return None;
+        }
+        let terminal = self.app.state::<TerminalService>();
+        let trust = self.app.state::<TrustService>();
+        let workspace = self.app.state::<WorkspaceService>();
+        let sink: Arc<dyn TerminalOutputSink> =
+            Arc::new(crate::terminal::commands::WindowEmitSink::new(
+                self.app.clone(),
+                self.window_label.clone(),
+            ));
+        Some(handle_run_in_terminal_reverse_request(
+            terminal.inner(),
+            trust.inner(),
+            workspace.inner(),
+            &self.window_label,
+            arguments,
+            sink,
+        ))
+    }
 }
 
 #[cfg(test)]

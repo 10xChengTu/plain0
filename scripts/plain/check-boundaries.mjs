@@ -10,6 +10,7 @@ import {
 	validateDebugAdapterSpawnBoundary,
 	validateDebugCommandRegistration,
 	validateDebugFramingBounds,
+	validateDebugRunInTerminalBoundary,
 	validateDebugSpawnConstructionShape,
 	validateDialogOverrideImportBoundary,
 	validateDialogServiceOverride,
@@ -813,6 +814,9 @@ for (const failure of validateDebugFramingBounds(rustSources)) {
 	fail(failure);
 }
 for (const failure of validateDebugCommandRegistration(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateDebugRunInTerminalBoundary(rustSources)) {
 	fail(failure);
 }
 for (const failure of validateDebugAdapterConfirmationBoundary(appSources)) {
