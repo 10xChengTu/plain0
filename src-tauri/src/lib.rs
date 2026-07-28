@@ -13,6 +13,7 @@ pub mod workspace;
 
 use backup::service::BackupService;
 use debug::confirm::ConfirmationService;
+use debug::service::DebugSessionService;
 use error::CommandError;
 use git::network::GitNetworkService;
 use terminal::service::TerminalService;
@@ -52,6 +53,7 @@ pub fn run() {
         .manage(WorkspaceService::new())
         .manage(TerminalService::new())
         .manage(GitNetworkService::new())
+        .manage(DebugSessionService::new())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let base_path = app.path().app_local_data_dir()?;
@@ -72,6 +74,9 @@ pub fn run() {
                     .close_window(window.label());
                 window
                     .state::<ConfirmationService>()
+                    .close_window(window.label());
+                window
+                    .state::<DebugSessionService>()
                     .close_window(window.label());
             }
         })
@@ -155,6 +160,9 @@ pub fn run() {
             debug::commands::debug_adapter_confirmation_state,
             debug::commands::debug_adapter_confirmation_grant,
             debug::commands::debug_adapter_confirmation_revoke,
+            debug::commands::debug_launch,
+            debug::commands::debug_attach,
+            debug::commands::debug_disconnect,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Plain")

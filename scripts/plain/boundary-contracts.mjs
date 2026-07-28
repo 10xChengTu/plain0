@@ -19265,6 +19265,33 @@ const DEBUG_COMMAND_CONTRACTS = Object.freeze([
 		returnType: "->Result<(),CommandError>",
 		body: "confirmation.inner().revoke(workspace.inner(),window.label(),&request).await",
 	},
+	// `F100` S2 — the real session-lifecycle surface (`debug/mod.rs`'s own
+	// module doc), completing the command set S1's `commands.rs` module doc
+	// already named as what S2 would add.
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_launch",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,confirmation:State<'_,ConfirmationService>,request:DebugSessionStartRequest",
+		returnType: "->Result<DebugSessionStartResult,CommandError>",
+		body: "start_debug_session(window,debug_sessions,trust,workspace,confirmation,request,LaunchRequestKind::Launch,).await",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_attach",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,confirmation:State<'_,ConfirmationService>,request:DebugSessionStartRequest",
+		returnType: "->Result<DebugSessionStartResult,CommandError>",
+		body: "start_debug_session(window,debug_sessions,trust,workspace,confirmation,request,LaunchRequestKind::Attach,).await",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_disconnect",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugSessionIdRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "debug_sessions.inner().disconnect(window.label(),request.into_parts()).await",
+	},
 ]);
 
 /**

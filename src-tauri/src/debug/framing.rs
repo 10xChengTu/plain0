@@ -138,16 +138,13 @@ enum DecoderState {
 /// a small state enum tracking whether it is currently scanning for a header
 /// terminator or waiting for a known-length body.
 ///
-/// No production caller exists yet in this slice — S2's session reader loop
-/// is the first real caller (see the module doc on [`super`]); exercised
-/// today only by `tests`.
-#[allow(dead_code)] // No production caller until S2's session reader loop exists.
+/// Real production caller: `super::session::run_reader` (`F100` S2's session
+/// reader loop).
 pub(crate) struct FrameDecoder {
     buffer: Vec<u8>,
     state: DecoderState,
 }
 
-#[allow(dead_code)] // No production caller until S2's session reader loop exists.
 impl FrameDecoder {
     pub(crate) fn new() -> Self {
         Self {

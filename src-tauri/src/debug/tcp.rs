@@ -102,10 +102,8 @@ const DEBUG_ADAPTER_TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// `scripts/plain/boundary-contracts.mjs`'s `validateDebugAdapterConnectBoundary`
 /// mechanically locks exactly this ordering.
 ///
-/// No production caller exists yet in this slice (S2 adds the real session
-/// lifecycle that calls this as part of actually starting a TCP-transport
-/// debug session); exercised today only by this module's own tests.
-#[allow(dead_code)] // No production caller until S2 adds the real session lifecycle.
+/// Real production caller: `super::service::DebugSessionService::start_session`'s
+/// TCP-transport branch (`F100` S2).
 pub(crate) async fn connect_adapter(
     trust: &TrustService,
     workspace: &WorkspaceService,
@@ -133,9 +131,7 @@ pub(crate) async fn connect_adapter(
 /// address in turn within the shared [`DEBUG_ADAPTER_TCP_CONNECT_TIMEOUT`]
 /// budget.
 ///
-/// No production caller exists yet in this slice — see [`connect_adapter`]'s
-/// own doc comment; exercised today only by this module's own tests.
-#[allow(dead_code)] // No production caller until connect_adapter's own caller exists (see its doc).
+/// Real production caller: [`connect_adapter`].
 fn connect_adapter_sync(
     descriptor: &dto::TcpConnectDescriptor,
     cancel: &AtomicBool,

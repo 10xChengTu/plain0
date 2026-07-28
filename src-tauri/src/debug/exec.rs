@@ -211,29 +211,27 @@ const DEBUG_ADAPTER_STDERR_CAP_BYTES: usize = 1_000_000;
 /// — mirrors `git::exec::GIT_EXEC_READ_BUFFER_BYTES`'s exact value.
 const DEBUG_ADAPTER_STDERR_READ_BUFFER_BYTES: usize = 8192;
 
-/// A live spawned adapter process handle — see the module doc for why this
-/// intentionally has no reader/writer/waiter session machinery yet (S2's
-/// job). Holds the [`Child`] (so [`Self::kill`] can terminate it at any
-/// later point) plus the shared, continuously-updated stderr-capture buffer
-/// described in the module doc.
+/// A live spawned adapter process handle. Holds the [`Child`] (so
+/// [`Self::kill`] can terminate it at any later point, and so
+/// [`Self::take_io`] can hand its stdin/stdout to the real DAP session — see
+/// [`super::session::DebugSession::start`]) plus the shared,
+/// continuously-updated stderr-capture buffer described in the module doc.
 ///
-/// No production caller exists yet in this slice — S1 adds the first real
-/// caller of [`spawn_adapter`], which is what actually produces one of these;
-/// exercised today only by this module's own tests.
-#[allow(dead_code)] // No production caller until S1 adds the confirmation-gated entry point.
+/// Real production caller: `super::service::DebugSessionService::start_session`
+/// (`F100` S2) — the first slice to actually drive a live debug session.
 #[derive(Debug)]
 pub(crate) struct AdapterHandle {
     child: Mutex<Child>,
     stderr_tail: Arc<Mutex<Vec<u8>>>,
 }
 
-#[allow(dead_code)] // No production caller until S1 adds the confirmation-gated entry point.
 impl AdapterHandle {
     /// Terminates the adapter process immediately and waits for it to be
-    /// reaped. No production caller yet — S2's session teardown is where this
-    /// is expected to get wired in (mirroring
-    /// `terminal::service::terminate_session`'s own kill step); exercised
-    /// today only by this module's own tests.
+    /// reaped — the `teardown` closure
+    /// `super::service::DebugSessionService::start_session` wires into
+    /// [`super::session::DebugSession::start`] for a stdio-transport session
+    /// calls this, mirroring `terminal::service::terminate_session`'s own
+    /// kill step.
     pub(crate) fn kill(&self) {
         let mut child = lock(&self.child);
         let _ = child.kill();
@@ -241,11 +239,31 @@ impl AdapterHandle {
     }
 
     /// The stderr capture buffer's current contents, up to
-    /// [`DEBUG_ADAPTER_STDERR_CAP_BYTES`] — exposed for tests (and, later,
-    /// for a real caller wanting to surface adapter diagnostic output to the
-    /// user).
+    /// [`DEBUG_ADAPTER_STDERR_CAP_BYTES`] — no caller anywhere yet (even in
+    /// this module's own tests, which assert on
+    /// [`super::debug_adapter_startup_crashed`]'s captured message instead of
+    /// reading this back directly); kept for a later slice wanting to
+    /// surface a still-running adapter's stderr diagnostics to the user.
+    #[allow(dead_code)] // No caller yet — see the doc comment above.
     pub(crate) fn stderr_tail(&self) -> Vec<u8> {
         lock(&self.stderr_tail).clone()
+    }
+
+    /// Takes this process's stdin/stdout out of the underlying [`Child`] for
+    /// the caller's exclusive use as the real DAP wire transport — see
+    /// `super::service::DebugSessionService::start_session`'s stdio branch,
+    /// which passes the returned pair straight to
+    /// [`super::session::DebugSession::start`] as its reader/writer. May only
+    /// meaningfully be called once per handle: `Child::stdin`/`stdout` are
+    /// themselves `Option`s that `take()` empties, so a second call observes
+    /// `None` — mirrors `terminal::service::spawn_session`'s identical
+    /// single-use `take_writer`/`try_clone_reader` precedent for its own pty
+    /// master.
+    pub(crate) fn take_io(&self) -> Option<(std::process::ChildStdin, std::process::ChildStdout)> {
+        let mut child = lock(&self.child);
+        let stdin = child.stdin.take()?;
+        let stdout = child.stdout.take()?;
+        Some((stdin, stdout))
     }
 }
 
@@ -271,10 +289,8 @@ impl AdapterHandle {
 /// `TerminalService::start`/`spawn_session` do for their own blocking spawn
 /// work.
 ///
-/// No production caller exists yet in this slice (S2 adds the real session
-/// lifecycle that calls this as part of actually starting a debug session);
-/// exercised today only by this module's own tests.
-#[allow(dead_code)] // No production caller until S2 adds the real session lifecycle.
+/// Real production caller: `super::service::DebugSessionService::start_session`'s
+/// stdio-transport branch (`F100` S2).
 pub(crate) async fn spawn_adapter(
     trust: &TrustService,
     workspace: &WorkspaceService,
@@ -318,10 +334,7 @@ pub(crate) async fn spawn_adapter(
 /// the sole production caller ([`spawn_adapter_sync`]) passes
 /// `std::env::vars()` verbatim.
 ///
-/// No production caller exists yet in this slice — see
-/// [`spawn_adapter_sync`]'s own doc comment; exercised today only by this
-/// module's own tests.
-#[allow(dead_code)] // No production caller until spawn_adapter_sync itself has one.
+/// Real production caller: [`spawn_adapter_sync`].
 fn apply_env_passthrough(
     command: &mut Command,
     ambient: impl IntoIterator<Item = (String, String)>,
@@ -335,9 +348,7 @@ fn apply_env_passthrough(
     }
 }
 
-/// No production caller exists yet in this slice — see [`spawn_adapter`]'s
-/// own doc comment; exercised today only by this module's own tests.
-#[allow(dead_code)] // No production caller until spawn_adapter's own caller exists (see its doc).
+/// Real production caller: [`spawn_adapter`].
 fn spawn_adapter_sync(
     descriptor: &dto::AdapterSpawnDescriptor,
     cancel: &AtomicBool,
@@ -394,9 +405,7 @@ fn spawn_adapter_sync(
 /// continuously updates a shared buffer, unlike that function's one-shot,
 /// channel-reported-once shape.
 ///
-/// No production caller exists yet in this slice — see [`spawn_adapter_sync`]'s
-/// own doc comment; exercised today only by this module's own tests.
-#[allow(dead_code)] // No production caller until spawn_adapter_sync itself has one.
+/// Real production caller: [`spawn_adapter_sync`].
 fn spawn_stderr_capture(mut source: impl Read + Send + 'static) -> Arc<Mutex<Vec<u8>>> {
     let tail = Arc::new(Mutex::new(Vec::new()));
     let thread_tail = Arc::clone(&tail);

@@ -3,45 +3,86 @@
 //! `docs/decisions/0003-native-git-and-generic-dap.md`'s "Rust 实现编辑器侧
 //! DAP client" decision).
 //!
-//! # Scope of this slice (`F100` S1)
+//! # Scope of this slice (`F100` S2 — real session lifecycle)
 //!
-//! S1 builds three things on top of S0's frame decoder + hardened spawn
-//! primitive — still no real session/handshake orchestration (S2's job) and
-//! still no `app/` UI (S3/S4's job):
+//! S0 built the transport-agnostic frame decoder ([`framing`]); S1 built the
+//! TCP transport ([`tcp`]) and the first-run confirmation gate ([`confirm`]).
+//! Neither drove a real, live session — [`exec::spawn_adapter`]/
+//! [`tcp::connect_adapter`] had no production caller until now. S2 adds:
 //!
-//! 1. [`tcp`] — the "Plain 主动连出去" TCP transport
-//!    ([`tcp::connect_adapter`]), reusing [`framing::FrameDecoder`] verbatim
-//!    (only the byte source changes — a `TcpStream` instead of a pipe) and
-//!    the identical trust-then-confirmation double gate [`exec::spawn_adapter`]
-//!    uses. "Plain 监听、等 adapter 连进来" is deliberately **not**
-//!    implemented — see [`tcp`]'s own module doc for why ("主导会话裁定" item
-//!    3: an unauthenticated local listen socket is a strictly weaker trust
-//!    model than either spawning or connecting out).
-//! 2. [`confirm`] — the first-run confirmation gate
-//!    ([`confirm::ConfirmationService`]), keyed on the exact
-//!    [`dto::AdapterConfirmationSubject`] `(command, args, transport)` triple
-//!    ("主导会话裁定" item 2), persisted per
-//!    [`crate::workspace::WorkspaceRootsIdentity`] and revocable — now wired
-//!    as the literal second statement (immediately after the trust check) in
-//!    both [`exec::spawn_adapter`] and [`tcp::connect_adapter`].
-//! 3. [`commands`] — the three real `#[tauri::command]`s this slice adds
-//!    (`debug_adapter_confirmation_state`/`_grant`/`_revoke`, all registered
-//!    in `lib.rs`'s `generate_handler!`) — see that module's own doc comment
-//!    for why these three, and *only* these three, are safe to expose ahead
-//!    of S2's real session lifecycle.
+//! 1. [`protocol`] — DAP envelope parsing/encoding on top of [`framing`]'s
+//!    raw `Content-Length` bytes (`Response`/`Event`/reverse-`Request`
+//!    envelopes, [`protocol::Capabilities`] negotiation).
+//! 2. [`session`] — the real session lifecycle: a dedicated reader thread
+//!    per session, `request_seq`-keyed request/response correlation (never
+//!    the adapter's own `seq` — see [`protocol`]'s module doc for the real
+//!    `lldb-dap` `seq: 0` evidence that rules this out), the handshake
+//!    orchestration ([`session::run_handshake`]) this slice exists to get
+//!    right (see that module's own doc for the exact ordering
+//!    `docs/research/2026-07-28-generic-dap.md`'s real `debugpy` capture
+//!    proved: `launch`/`attach`'s response must not be awaited until after
+//!    `configurationDone`'s own response has arrived), and event dispatch
+//!    via [`session::DebugEventSink`].
+//! 3. [`service`] — [`service::DebugSessionService`], the per-window session
+//!    table mirroring `terminal::service::TerminalService`'s own shape:
+//!    resolves a request into either [`exec::spawn_adapter`] (stdio) or
+//!    [`tcp::connect_adapter`] (TCP).
+//! 4. Three new commands in [`commands`] — `debug_launch`/`debug_attach`/
+//!    `debug_disconnect` — completing the command surface S1's own module
+//!    doc already named as what S2 would add.
+//!
+//! # This slice's answer to S1's open "spawn-then-connect" question: connect-only, by decision, not by omission
+//!
+//! S1 left open whether the TCP transport should compose with spawning
+//! ("Plain starts the adapter process, which itself opens a TCP listener,
+//! and Plain then connects to the port it opened") or stay connect-only
+//! ("the adapter is already running externally; Plain only ever connects
+//! out"). Now that [`service::DebugSessionService`] actually has the session
+//! state machine needed to sequence such a thing, this slice's concrete
+//! decision is **connect-only, matching S1's existing scope** —
+//! [`service::DebugSessionService::start_session`]'s TCP branch calls
+//! [`tcp::connect_adapter`] alone, never [`exec::spawn_adapter`]. This is a
+//! disclosed, deliberate narrowing, not an oversight: implementing
+//! spawn-then-connect properly surfaced a real design snag while drafting
+//! this slice, worth recording rather than papering over. [`exec::spawn_adapter`]
+//! hardcodes `AdapterTransportKind::Stdio` when building the confirmation
+//! subject it checks (`scripts/plain/boundary-contracts.mjs`'s
+//! `validateDebugAdapterSpawnBoundary` mechanically locks this — correctly,
+//! for the ordinary case where the spawned process's own stdio *is* the DAP
+//! transport). A "spawn a companion process that will itself open a TCP
+//! listener elsewhere" use case would need to confirm that spawn under the
+//! **`Tcp`** confirmation subject instead (the one the user actually
+//! confirmed for this TCP session) — reusing `spawn_adapter` as-is would
+//! silently demand (or silently reuse) a *different* confirmation record
+//! than the one governing the session the user is actually starting, which
+//! is exactly the kind of confirmation-identity confusion `docs/research/2026-07-28-generic-dap.md`'s
+//! "主导会话裁定" item 2 was written to prevent. Fixing this correctly needs a
+//! second, `Tcp`-confirmed spawn entry point distinct from `spawn_adapter`
+//! (not a generalization of `spawn_adapter` itself, which must keep hardcoding
+//! `Stdio` for its own real use case) — a real, buildable fix, not a
+//! blocked question, but one this slice declines to rush in alongside
+//! everything else S2 already delivers. **Recommendation for whoever picks
+//! this up next**: implement it as a small, separate addition — a
+//! `Tcp`-confirmed companion-spawn primitive in `exec` (or a thin sibling
+//! function), invoked from `start_session`'s TCP branch only when the
+//! resolved request explicitly opts in (e.g. a `spawn_before_connect: bool`
+//! alongside the existing `command`/`args`/`host`/`port` fields), with a
+//! bounded connect-retry loop after spawning (a real listener needs a moment
+//! to come up; a bare `TcpStream::connect` can observe `ECONNREFUSED`
+//! near-instantly rather than actually waiting out
+//! [`tcp::DEBUG_ADAPTER_TCP_CONNECT_TIMEOUT`]). This only covers a
+//! statically-known `host`/`port` (the common real case — e.g. `debugpy.adapter
+//! --port 5678`); genuinely discovering an OS-assigned ephemeral port
+//! (`--port 0`) from an adapter's own stdout announcement is adapter-specific
+//! and not something this recommendation covers either.
 //!
 //! Adapter-config parsing (`.plain/debug-adapters.json`/`.vscode/launch.json`'s
-//! inline `plainAdapter` block) is frontend-only per the frozen doc's own
-//! "决策 1" ("读取这两份配置完全复用既有的 `workspace_read_file` 能力,不新增任
-//! 何 Rust 端文件读取代码") — see `app/features/debug/plain-debug-adapter-config.ts`.
-//!
-//! # `commands.rs` still does not expose `debug_launch`/`debug_attach`
-//!
-//! Real session orchestration — actually driving [`exec::spawn_adapter`]/
-//! [`tcp::connect_adapter`] to hold a live, running debug session — is S2's
-//! job. This slice's three new commands only let the frontend query/grant/
-//! revoke a confirmation *decision*; they never themselves spawn or connect
-//! to anything. See [`commands`]'s own doc comment.
+//! inline `plainAdapter` block) is still frontend-only per the frozen doc's
+//! own "决策 1" — see `app/features/debug/plain-debug-adapter-config.ts`. No
+//! `app/` UI is wired to the new commands yet (`F100` S3/S4's job, per the
+//! frozen doc's own slice breakdown: "S2...可以先用一个 DEV-only 诊断钩子...
+//! 不急着接 UI") — see this slice's own final report for the explicit,
+//! disclosed narrowing this implies.
 //!
 //! # Subprocess spawning is `exec::spawn_adapter`-only; TCP connecting is `tcp::connect_adapter`-only
 //!
@@ -76,19 +117,19 @@
 //! `terminal` has a precedent for, so there is no existing verbatim error to
 //! reuse.
 //!
-//! # The dead-code annotations below are deliberate, not stray
+//! # The one remaining dead-code annotation is deliberate, not stray
 //!
-//! Because nothing outside this domain's own `#[cfg(test)]` fixtures calls
-//! into [`framing`]'s decoder, [`exec`]'s spawn primitive or [`tcp`]'s connect
-//! primitive yet (there is no session reader loop — S2's job), the plain
-//! `pub(crate)` items here would be flagged as dead code by
-//! `cargo clippy --all-targets -- -D warnings`: `#[cfg(test)]` code does not
-//! exist at all in the non-test compilation unit dead-code analysis runs
-//! against. Every `#[allow(dead_code)]` in this module tree names, in an
-//! adjacent comment, which future slice adds the real caller — mirroring the
-//! existing precedent at `workspace::version::FileSystemKind`,
-//! `terminal::vt`'s several encoder/field annotations and
-//! `theme::unpack::unpack_directory`/`UnpackedTheme::publish`.
+//! S0/S1 left a trail of `#[allow(dead_code)]` items across [`framing`],
+//! [`exec`] and [`tcp`], each naming which future slice would add the real
+//! caller. This slice ([`service::DebugSessionService::start_session`]) is
+//! that caller for essentially all of them — [`framing::FrameDecoder`],
+//! [`exec::spawn_adapter`]/`spawn_adapter_sync`/`apply_env_passthrough`/
+//! `spawn_stderr_capture`, [`exec::AdapterHandle`]'s `kill`/`take_io`, and
+//! [`tcp::connect_adapter`]/`connect_adapter_sync` are all genuinely live in
+//! production now, so their annotations have been removed rather than left
+//! stale. The one that remains is [`exec::AdapterHandle::stderr_tail`] — see
+//! its own doc comment: no caller anywhere yet, even in tests, kept for a
+//! later slice wanting to surface a running adapter's stderr diagnostics.
 
 use crate::error::CommandError;
 
@@ -98,6 +139,9 @@ mod confirm_store;
 pub mod dto;
 pub(crate) mod exec;
 pub(crate) mod framing;
+pub(crate) mod protocol;
+pub(crate) mod service;
+pub(crate) mod session;
 pub(crate) mod tcp;
 
 /// Returned when [`exec::spawn_adapter_sync`]'s own `Command::spawn()` call
@@ -200,12 +244,79 @@ pub(crate) fn debug_adapter_startup_crashed(
     )
 }
 
+/// Returned when writing a request to (or reading a reply from) a live
+/// session's transport fails at the I/O level — [`session::DebugSession::send_request`]'s
+/// write failure path, and the `spawn_blocking`/`try_clone` join/setup
+/// failures in [`service::DebugSessionService::start_session`] that occur
+/// before a session even exists to report [`debug_session_ended`] instead.
+pub(crate) fn debug_transport_unavailable() -> CommandError {
+    CommandError::new(
+        "DEBUG_TRANSPORT_UNAVAILABLE",
+        "The debug session's transport could not be used.",
+    )
+}
+
+/// Returned by [`session::DebugSession::wait_for_response`]/`wait_for_initialized`
+/// when the session's transport closes (or an unrecoverable framing error
+/// occurs) before the awaited response/event ever arrives — see
+/// [`session::SessionEndReason`] for the two distinct underlying causes this
+/// one caller-facing code covers. This is what turns "the reader thread will
+/// never deliver what I'm waiting for" into a clean, immediate error instead
+/// of a permanent hang — no per-request timeout is needed for this case (see
+/// `session`'s own module doc for what per-request timeouts, deliberately
+/// *not* implemented in this slice, would additionally cover).
+pub(crate) fn debug_session_ended() -> CommandError {
+    CommandError::new(
+        "DEBUG_SESSION_ENDED",
+        "The debug session's transport closed before this operation completed.",
+    )
+}
+
+/// Returned by [`session::run_handshake`] when the adapter's own response to
+/// `initialize`/`launch`/`attach`/`setBreakpoints`/`configurationDone`
+/// reports `success: false` — the message carries which step failed and the
+/// adapter's own `message` field, if it sent one, so a caller gets an
+/// actionable diagnostic rather than a bare failure.
+pub(crate) fn debug_handshake_failed(step: &str, adapter_message: Option<&str>) -> CommandError {
+    let detail = match adapter_message {
+        Some(message) if !message.is_empty() => format!(": {message}"),
+        _ => String::new(),
+    };
+    CommandError::new(
+        "DEBUG_HANDSHAKE_FAILED",
+        format!("The debug adapter rejected the '{step}' step{detail}."),
+    )
+}
+
+/// Returned by [`service::DebugSessionService::disconnect`] when
+/// `session_id` does not name a live session for the current window — either
+/// it never existed, already ended on its own, or was already disconnected.
+pub(crate) fn debug_session_not_found() -> CommandError {
+    CommandError::new(
+        "DEBUG_SESSION_NOT_FOUND",
+        "The requested debug session does not exist for this window.",
+    )
+}
+
+/// Returned by [`dto::DebugSessionStartRequest::into_parts`] when the
+/// request itself is structurally invalid — a `tcp` transport missing
+/// `host`/`port` (or a `stdio` transport carrying either), an empty
+/// `command`, or any of the defensive size ceilings on `args`/
+/// `initialBreakpoints` exceeded.
+pub(crate) fn debug_session_request_invalid() -> CommandError {
+    CommandError::new(
+        "DEBUG_SESSION_REQUEST_INVALID",
+        "The debug session start request is missing required fields or exceeds a size limit.",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         confirmation_unavailable, debug_adapter_cancelled, debug_adapter_connect_failed,
         debug_adapter_not_confirmed, debug_adapter_spawn_unavailable,
-        debug_adapter_startup_crashed,
+        debug_adapter_startup_crashed, debug_handshake_failed, debug_session_ended,
+        debug_session_not_found, debug_session_request_invalid, debug_transport_unavailable,
     };
 
     #[test]
@@ -231,6 +342,34 @@ mod tests {
             debug_adapter_connect_failed().code(),
             "DEBUG_ADAPTER_CONNECT_FAILED"
         );
+        assert_eq!(
+            debug_transport_unavailable().code(),
+            "DEBUG_TRANSPORT_UNAVAILABLE"
+        );
+        assert_eq!(debug_session_ended().code(), "DEBUG_SESSION_ENDED");
+        assert_eq!(
+            debug_handshake_failed("initialize", None).code(),
+            "DEBUG_HANDSHAKE_FAILED"
+        );
+        assert_eq!(debug_session_not_found().code(), "DEBUG_SESSION_NOT_FOUND");
+        assert_eq!(
+            debug_session_request_invalid().code(),
+            "DEBUG_SESSION_REQUEST_INVALID"
+        );
+    }
+
+    #[test]
+    fn handshake_failed_includes_the_step_and_adapter_message_when_present() {
+        let error = debug_handshake_failed("configurationDone", Some("boom"));
+        assert!(error.message().contains("configurationDone"));
+        assert!(error.message().contains("boom"));
+    }
+
+    #[test]
+    fn handshake_failed_omits_the_colon_when_there_is_no_adapter_message() {
+        let error = debug_handshake_failed("initialize", None);
+        assert!(error.message().contains("initialize"));
+        assert!(!error.message().contains(": "));
     }
 
     #[test]
