@@ -18694,3 +18694,274 @@ export function validateWorkspaceVersionedWriteBoundary(
 		...validateVersionedWriteTypeScriptBoundary(appSources),
 	];
 }
+
+/**
+ * `ViewPane`'s own base constructor signature (`options: IViewPaneOptions`
+ * followed by these nine injected services, in this exact order), as it
+ * appears — byte-for-byte identical — at the head of every hand-written
+ * `app/` subclass audited for this contract
+ * (`plain-scm-view.ts`/`plain-search-view.ts`/`plain-git-graph-view.ts`/
+ * `plain-git-stash-view.ts`/`plain-git-worktree-view.ts`/
+ * `plain-git-history-view.ts`/`plain-terminal-view.ts`). It is hardcoded
+ * here, rather than parsed out of `@codingame/monaco-vscode-api` itself,
+ * because that package is vendor code outside this repo's own `app/`
+ * source set — the same reason every other args/DTO-shape contract in this
+ * file freezes an exact expected constant instead of deriving it from a
+ * dependency. If a future upgrade of the package ever changes `ViewPane`'s
+ * own constructor, every subclass's `super(...)` call already fails to
+ * compile before this contract would ever need to notice.
+ */
+const VIEW_PANE_BASE_INJECTED_SERVICE_TYPES = Object.freeze([
+	"IKeybindingService",
+	"IContextMenuService",
+	"IConfigurationService",
+	"IContextKeyService",
+	"IViewDescriptorService",
+	"IInstantiationService",
+	"IOpenerService",
+	"IThemeService",
+	"IHoverService",
+]);
+
+/**
+ * Locks the invariant that `F090` S4 and S6 each independently paid for in
+ * real, hard-to-diagnose production failures: every `app/` class that
+ * extends `ViewPane` must, in its own file, redeclare a DI decorator for
+ * *every* one of its own constructor parameters beyond the leading
+ * `options: IViewPaneOptions` — not only the parameters it adds beyond
+ * `ViewPane`'s own base nine.
+ *
+ * The reason a *partial* declaration is exactly as dangerous as *no*
+ * declaration at all: `@codingame/monaco-vscode-api`'s decorator storage
+ * (`instantiation.js`) creates a **fresh** `$di$dependencies` array the
+ * first time any decorator is ever called on a given class, rather than
+ * appending to whatever array `ViewPane`'s own prototype chain would
+ * otherwise make reachable. So the instant a subclass calls a decorator on
+ * itself even once, every one of its *other* injected parameters that
+ * weren't also redeclared silently reverts to `undefined` at real
+ * construction time — no compile error, no thrown exception at
+ * registration time, nothing a Rust fixture or a DOM-free unit test could
+ * ever observe.
+ *
+ * Two real incidents, both discovered only once a first real Playwright
+ * click finally exercised the broken view (`F090` S6's own retrospective):
+ *
+ * - **`F090` S4** — `PlainGitStashView` declared decorators only for the
+ *   two services it adds beyond the base nine (indices 10/11), leaving
+ *   indices 1-9 completely undeclared for this class. Because the base
+ *   nine were then missing, `IInstantiationService.createInstance` failed
+ *   to construct not just this view but *every sibling pane in the same
+ *   Source Control view container* — a single Playwright run fanned out
+ *   into 16 failing cases with none of their failure messages mentioning
+ *   stash at all, making the true root cause nearly unreadable from the
+ *   symptoms alone.
+ * - **`F090` S6** — `plain-git-history-view.ts` had never declared *any*
+ *   decorator at all since the view was first written in `F090` S1. This
+ *   one happened not to break sibling views (an entirely undeclared
+ *   subclass still inherits `ViewPane`'s own correct nine-entry array
+ *   unmodified), but this class's own two extra parameters
+ *   (`workspaceContextService`/`editorService`) were `undefined` on every
+ *   real construction from day one — and the "Show File History" /
+ *   "Show Line History" buttons this view exposes are also the *only*
+ *   entry point into `F090` S2's commit-detail multi-diff feature, which
+ *   therefore had never been reachable in a real Workbench either, for an
+ *   entire feature slice, until this defect was finally found.
+ *
+ * Both failures were invisible to every gate that ran at the time (Rust
+ * command fixtures, DOM-free frontend unit tests) because both only
+ * exercise pure logic, never a real `IInstantiationService.createInstance`
+ * call through a real Workbench. `F100` is about to add four or more new
+ * `ViewPane` subclasses (call stack/variables/watch/REPL); this contract
+ * exists so each of those starts out structurally incapable of repeating
+ * either failure mode, from the very first line, rather than depending on
+ * someone remembering to write a Playwright click for it eventually.
+ *
+ * Detection, per subclass:
+ *
+ * 1. Identify "extends `ViewPane`" by resolving, per file, the *local*
+ *    name the vendor `ViewPane` export is imported under (handles a
+ *    renaming import alias, `import { ViewPane as VP } from ...` — no
+ *    file in this repo currently renames it, but nothing here assumes
+ *    otherwise) from the same `.../views/viewPane` module every real
+ *    subclass imports it from, then matching class heritage clauses
+ *    against that local name.
+ * 2. A subclass with no constructor of its own adds no parameters and
+ *    therefore has nothing that could be under-declared; it is skipped.
+ * 3. Otherwise, walk the same source file (decorator declarations always
+ *    live in the same file as the class, immediately after
+ *    `Object.freeze(ClassName.prototype)` in every audited view) for
+ *    expressions of the shape `SomeService(ClassName, undefined, N)` —
+ *    this repo's actual, real declaration syntax (a plain function call
+ *    using the legacy parameter-decorator signature, *not* `@SomeService`
+ *    applied to a constructor parameter — confirmed by reading every
+ *    `extends ViewPane` file in `app/features/` before writing this
+ *    contract).  The count of such calls naming this class, and the set
+ *    of indices they declare, must be exactly `{1, 2, ..., N}` where `N`
+ *    is the constructor's own parameter count minus one (`options` itself
+ *    is never decorated in any audited file — it is supplied positionally
+ *    by the instantiation caller, not resolved by DI).
+ * 4. The sole exception: a subclass with **zero** of its own declarations
+ *    is still accepted, but *only* if its own injected parameter list
+ *    (everything after `options`) is structurally identical, name for
+ *    name, in order, to `VIEW_PANE_BASE_INJECTED_SERVICE_TYPES` — i.e. it
+ *    adds nothing beyond `ViewPane`'s own base signature, so the array it
+ *    silently inherits is already exactly correct for its own needs. This
+ *    is `PlainGitGraphView`'s real, currently-passing shape today: it is
+ *    the one audited view that adds no services beyond the base nine, and
+ *    is therefore the one place in this codebase where relying on
+ *    inheritance is actually sound rather than a repeat of the S6 defect.
+ *    The moment such a class ever adds even one more parameter without
+ *    also fully redeclaring, this exception stops applying and the
+ *    contract fails it — exactly the transition that silently broke
+ *    `plain-git-history-view.ts` in `F090` S1.
+ *
+ * Known scope limit: this only follows a heritage clause naming `ViewPane`
+ * directly. If a future change introduces an intermediate hand-written
+ * base class between `ViewPane` and a leaf view (e.g. a shared
+ * `PlainDebugViewBase`), this contract will not automatically walk that
+ * indirection to classify the leaf as a `ViewPane` descendant — no file in
+ * this repo does this today, so it is not a gap in current coverage, but
+ * it is one to close if `F100` (or later work) ever introduces such a
+ * base class.
+ */
+export function validateViewPaneDependencyDecoratorBoundary(appSources) {
+	const failures = [];
+	for (const { relativePath, source } of appSources) {
+		const normalizedPath = relativePath.replaceAll("\\", "/");
+		if (!normalizedPath.endsWith(".ts") && !normalizedPath.endsWith(".tsx")) {
+			continue;
+		}
+		const sourceFile = ts.createSourceFile(
+			normalizedPath,
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			normalizedPath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+		);
+
+		let viewPaneLocalName;
+		for (const statement of sourceFile.statements) {
+			if (
+				ts.isImportDeclaration(statement) &&
+				ts.isStringLiteral(statement.moduleSpecifier) &&
+				statement.moduleSpecifier.text.endsWith("/viewPane") &&
+				statement.importClause?.namedBindings !== undefined &&
+				ts.isNamedImports(statement.importClause.namedBindings)
+			) {
+				for (const element of statement.importClause.namedBindings.elements) {
+					if ((element.propertyName ?? element.name).text === "ViewPane") {
+						viewPaneLocalName = element.name.text;
+					}
+				}
+			}
+		}
+		if (viewPaneLocalName === undefined) {
+			continue;
+		}
+
+		function visit(node) {
+			if (
+				ts.isClassDeclaration(node) &&
+				node.name !== undefined &&
+				node.heritageClauses?.some(
+					(clause) =>
+						clause.token === ts.SyntaxKind.ExtendsKeyword &&
+						clause.types.some(
+							(type) =>
+								ts.isIdentifier(type.expression) &&
+								type.expression.text === viewPaneLocalName,
+						),
+				)
+			) {
+				failures.push(
+					...viewPaneSubclassDecoratorFailures(
+						node,
+						sourceFile,
+						normalizedPath,
+					),
+				);
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(sourceFile);
+	}
+	return [...new Set(failures)];
+}
+
+function viewPaneSubclassDecoratorFailures(
+	classNode,
+	sourceFile,
+	normalizedPath,
+) {
+	const className = classNode.name.text;
+	const constructor = classNode.members.find(
+		(member) =>
+			ts.isConstructorDeclaration(member) && member.body !== undefined,
+	);
+	if (constructor === undefined) {
+		return [];
+	}
+	const ctorParamCount = constructor.parameters.length;
+	if (ctorParamCount === 0) {
+		return [
+			`${className} (${normalizedPath}) extends ViewPane but declares a constructor with no parameters — it must still accept ViewPane's own options/base-service parameters`,
+		];
+	}
+	const requiredDecoratorCount = ctorParamCount - 1;
+
+	const declaredIndexes = new Set();
+	function visitForDecorators(node) {
+		if (
+			ts.isCallExpression(node) &&
+			ts.isIdentifier(node.expression) &&
+			node.arguments.length === 3 &&
+			ts.isIdentifier(node.arguments[0]) &&
+			node.arguments[0].text === className &&
+			ts.isIdentifier(node.arguments[1]) &&
+			node.arguments[1].text === "undefined" &&
+			ts.isNumericLiteral(node.arguments[2])
+		) {
+			declaredIndexes.add(node.arguments[2].text);
+		}
+		ts.forEachChild(node, visitForDecorators);
+	}
+	visitForDecorators(sourceFile);
+
+	const expectedIndexes = Array.from(
+		{ length: requiredDecoratorCount },
+		(_, index) => String(index + 1),
+	);
+	const declaredIndexesMatchExactly =
+		declaredIndexes.size === expectedIndexes.length &&
+		expectedIndexes.every((index) => declaredIndexes.has(index));
+
+	if (declaredIndexesMatchExactly) {
+		return [];
+	}
+
+	if (declaredIndexes.size === 0) {
+		const injectedParamTypeNames = constructor.parameters
+			.slice(1)
+			.map((param) =>
+				param.type !== undefined &&
+				ts.isTypeReferenceNode(param.type) &&
+				ts.isIdentifier(param.type.typeName)
+					? param.type.typeName.text
+					: undefined,
+			);
+		const matchesViewPaneBaseExactly =
+			injectedParamTypeNames.length ===
+				VIEW_PANE_BASE_INJECTED_SERVICE_TYPES.length &&
+			injectedParamTypeNames.every(
+				(typeName, index) =>
+					typeName === VIEW_PANE_BASE_INJECTED_SERVICE_TYPES[index],
+			);
+		if (matchesViewPaneBaseExactly) {
+			return [];
+		}
+	}
+
+	return [
+		`${className} (${normalizedPath}) declares ${declaredIndexes.size} of its own DI decorator(s) but its constructor has ${ctorParamCount} parameter(s) (${requiredDecoratorCount} injectable beyond the leading options argument) — every parameter this class's own constructor accepts beyond \`options\` must be redeclared as this class's own decorator (\`SomeService(${className}, undefined, <index>)\`, indices 1 through ${requiredDecoratorCount}), because \`@codingame/monaco-vscode-api\`'s decorator storage replaces — rather than appends to — the inherited dependency array the first time any decorator is ever called on a class. A partial or missing declaration silently leaves the undeclared parameters \`undefined\` at real construction time: this is exactly how F090 S4's PlainGitStashView (declared only its own two new services, wiping the nine base ViewPane parameters and breaking every sibling view in the same Source Control container) and F090 S6's PlainGitHistoryView (declared none at all, silently leaving its own two extra parameters undefined and disabling the commit-detail multi-diff feature since its introduction) both went undetected until a real end-to-end click finally exercised the broken view.`,
+	];
+}

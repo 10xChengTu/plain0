@@ -48,6 +48,7 @@ import {
 	validateWorkspaceMoveFailureBrowserFixture,
 	validateWorkspaceProviderBootstrap,
 	validateWorkspaceProviderCopyBoundary,
+	validateViewPaneDependencyDecoratorBoundary,
 	validateWorkspaceRustBoundary,
 	validateWorkspaceVersionedWriteBoundary,
 	validateWorkingCopyOverrideImportBoundary,
@@ -448,6 +449,9 @@ const appSources = await Promise.all(
 	})),
 );
 for (const failure of validateWorkspaceDeleteTypeScriptBoundary(appSources)) {
+	fail(failure);
+}
+for (const failure of validateViewPaneDependencyDecoratorBoundary(appSources)) {
 	fail(failure);
 }
 
