@@ -288,9 +288,10 @@ pub(crate) fn debug_handshake_failed(step: &str, adapter_message: Option<&str>) 
     )
 }
 
-/// Returned by [`service::DebugSessionService::disconnect`] when
-/// `session_id` does not name a live session for the current window — either
-/// it never existed, already ended on its own, or was already disconnected.
+/// Returned by [`service::DebugSessionService::disconnect`]/`send_request`
+/// (`F100` S3 added the latter caller) when `session_id` does not name a live
+/// session for the current window — either it never existed, already ended on
+/// its own, or was already disconnected.
 pub(crate) fn debug_session_not_found() -> CommandError {
     CommandError::new(
         "DEBUG_SESSION_NOT_FOUND",
@@ -302,7 +303,10 @@ pub(crate) fn debug_session_not_found() -> CommandError {
 /// request itself is structurally invalid — a `tcp` transport missing
 /// `host`/`port` (or a `stdio` transport carrying either), an empty
 /// `command`, or any of the defensive size ceilings on `args`/
-/// `initialBreakpoints` exceeded.
+/// `initialBreakpoints` exceeded. `F100` S3 reuses this same code for its own
+/// analogous request-shape failures (an empty `debug_set_breakpoints` path,
+/// an empty/oversized `debug_evaluate` expression, …) rather than inventing a
+/// second "request invalid" code for the same kind of failure.
 pub(crate) fn debug_session_request_invalid() -> CommandError {
     CommandError::new(
         "DEBUG_SESSION_REQUEST_INVALID",
@@ -310,13 +314,45 @@ pub(crate) fn debug_session_request_invalid() -> CommandError {
     )
 }
 
+/// Returned by [`service::DebugSessionService::send_request`] when the
+/// adapter's own response to an interactive request (`setBreakpoints`/
+/// `stackTrace`/`scopes`/`variables`/`evaluate`) reports `success: false` —
+/// the post-handshake analogue of [`debug_handshake_failed`], carrying which
+/// DAP command failed and the adapter's own `message`, if it sent one.
+pub(crate) fn debug_request_failed(command: &str, adapter_message: Option<&str>) -> CommandError {
+    let detail = match adapter_message {
+        Some(message) if !message.is_empty() => format!(": {message}"),
+        _ => String::new(),
+    };
+    CommandError::new(
+        "DEBUG_REQUEST_FAILED",
+        format!("The debug adapter rejected the '{command}' request{detail}."),
+    )
+}
+
+/// Returned by every `dto::parse_*_response` function (`F100` S3) when an
+/// adapter's own response body is structurally not what its DAP command's
+/// spec requires (e.g. `variables` missing its own `variables` array
+/// entirely, or a `Variable` entry missing its required `name`/`value`) —
+/// distinct from [`debug_request_failed`] (the adapter itself reported
+/// failure) and from [`debug_session_ended`] (the transport died before a
+/// response ever arrived): this is "a response arrived, the adapter claims
+/// success, but Plain cannot make sense of its shape".
+pub(crate) fn debug_adapter_response_malformed() -> CommandError {
+    CommandError::new(
+        "DEBUG_ADAPTER_RESPONSE_MALFORMED",
+        "The debug adapter's response did not match the shape its own request requires.",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         confirmation_unavailable, debug_adapter_cancelled, debug_adapter_connect_failed,
-        debug_adapter_not_confirmed, debug_adapter_spawn_unavailable,
-        debug_adapter_startup_crashed, debug_handshake_failed, debug_session_ended,
-        debug_session_not_found, debug_session_request_invalid, debug_transport_unavailable,
+        debug_adapter_not_confirmed, debug_adapter_response_malformed,
+        debug_adapter_spawn_unavailable, debug_adapter_startup_crashed, debug_handshake_failed,
+        debug_request_failed, debug_session_ended, debug_session_not_found,
+        debug_session_request_invalid, debug_transport_unavailable,
     };
 
     #[test]
@@ -356,6 +392,28 @@ mod tests {
             debug_session_request_invalid().code(),
             "DEBUG_SESSION_REQUEST_INVALID"
         );
+        assert_eq!(
+            debug_request_failed("stackTrace", None).code(),
+            "DEBUG_REQUEST_FAILED"
+        );
+        assert_eq!(
+            debug_adapter_response_malformed().code(),
+            "DEBUG_ADAPTER_RESPONSE_MALFORMED"
+        );
+    }
+
+    #[test]
+    fn request_failed_includes_the_command_and_adapter_message_when_present() {
+        let error = debug_request_failed("variables", Some("boom"));
+        assert!(error.message().contains("variables"));
+        assert!(error.message().contains("boom"));
+    }
+
+    #[test]
+    fn request_failed_omits_the_colon_when_there_is_no_adapter_message() {
+        let error = debug_request_failed("scopes", None);
+        assert!(error.message().contains("scopes"));
+        assert!(!error.message().contains(": "));
     }
 
     #[test]

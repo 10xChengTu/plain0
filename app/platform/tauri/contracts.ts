@@ -8,6 +8,11 @@ export const WORKSPACE_SEARCH_TEXT_WAKE_EVENT =
 export const TERMINAL_DATA_EVENT = "plain://terminal-data" as const;
 /** One-shot session exit notification — see `TerminalExitEvent`. */
 export const TERMINAL_EXIT_EVENT = "plain://terminal-exit" as const;
+/** `F100` S2/S3: every live debug session's streamed DAP events (and Plain's
+ * own `plain/`-prefixed synthetic notifications) in this window — see
+ * `DebugEventPayload`'s own doc comment. Mirrors
+ * `src-tauri/src/debug/commands.rs`'s `DEBUG_EVENT` constant. */
+export const DEBUG_EVENT = "plain://debug-event" as const;
 
 export interface RuntimeInfo {
 	application: "Plain";
@@ -487,6 +492,159 @@ export interface DebugAdapterConfirmationSubject {
  * `WorkspaceTrustState`'s identical "read a persisted yes/no fact" shape. */
 export interface DebugAdapterConfirmationState {
 	readonly confirmed: boolean;
+}
+
+// ---------------------------------------------------------------------
+// `F100` S3 — the real session-lifecycle and interactive-debugging wire
+// shapes (`debug_launch`/`debug_attach`/`debug_disconnect`/
+// `debug_set_breakpoints`/`debug_stack_trace`/`debug_scopes`/
+// `debug_variables`/`debug_evaluate`). Mirrors `src-tauri/src/debug/dto.rs`'s
+// own S2/S3 wire shapes.
+// ---------------------------------------------------------------------
+
+/** How a `debug_launch`/`debug_attach` call reaches an adapter — a
+ * discriminated union rather than an optional `host`/`port` pair, so an
+ * invalid combination (a `"tcp"` request missing `port`, a `"stdio"` request
+ * carrying one) is unrepresentable at the type level, not merely rejected at
+ * runtime — `src-tauri/src/debug/dto.rs`'s `SessionTransportRequest` enum has
+ * the identical shape once past its own `into_parts` validation. */
+export type DebugAdapterTarget =
+	| Readonly<{
+			readonly transport: "stdio";
+			readonly command: string;
+			readonly args: readonly string[];
+	  }>
+	| Readonly<{
+			readonly transport: "tcp";
+			readonly command: string;
+			readonly args: readonly string[];
+			readonly host: string;
+			readonly port: number;
+	  }>;
+
+/** `debug_launch`/`debug_attach`'s response — the new session's id plus its
+ * negotiated `Capabilities`, exposed as a raw object rather than a fixed,
+ * enumerated shape (mirrors
+ * `src-tauri/src/debug/protocol.rs`'s `Capabilities::as_value` doc comment:
+ * two real captured adapters report almost entirely disjoint `supportsXxx`
+ * sets). Callers query a specific capability with plain property access
+ * (`capabilities.supportsConditionalBreakpoints === true`) — absence and an
+ * explicit `false` are both "not supported", matching the Rust side's own
+ * `Capabilities::supports` contract. */
+export interface DebugSessionStartResult {
+	readonly sessionId: string;
+	readonly capabilities: Readonly<Record<string, unknown>>;
+}
+
+/** One line breakpoint sent to `debugSetBreakpoints` — `condition`/
+ * `logMessage` are sent regardless of whether the adapter actually
+ * advertised `supportsConditionalBreakpoints`/`supportsLogPoints` (the Rust
+ * side does not gate this — see `SourceBreakpointsRequest`'s own doc
+ * comment); the frontend's own breakpoint-editing UI is what must consult
+ * `DebugSessionStartResult.capabilities` before ever *offering* the
+ * condition/log-message input, per this feature's own acceptance criteria. */
+export interface DebugBreakpointRequest {
+	readonly line: number;
+	readonly condition: string | null;
+	readonly logMessage: string | null;
+}
+
+/** One DAP `Breakpoint` reply entry — `verified`/`line` may legitimately
+ * differ from what was requested: a real adapter may reject a line
+ * (`verified: false`, often with `message`) or silently relocate a verified
+ * one to the nearest executable line. Callers must always render this
+ * reported `line`, never the one they asked for. */
+export interface DebugBreakpointResult {
+	readonly verified: boolean;
+	readonly line: number | null;
+	readonly id: number | null;
+	readonly message: string | null;
+}
+
+export interface DebugSetBreakpointsResult {
+	readonly breakpoints: readonly DebugBreakpointResult[];
+}
+
+/** One DAP `StackFrame` — `sourcePath`/`sourceName` are both `null` for a
+ * frame with no resolvable source (e.g. deep in a native/library call). */
+export interface DebugStackFrame {
+	readonly id: number;
+	readonly name: string;
+	readonly line: number;
+	readonly column: number;
+	readonly sourcePath: string | null;
+	readonly sourceName: string | null;
+}
+
+/** `debug_stack_trace`'s response — `totalFrames` (when the adapter reports
+ * it) is the *full* call stack's depth, letting a caller build a "there are N
+ * more frames" affordance even when this particular page only returned a
+ * handful. */
+export interface DebugStackTraceResult {
+	readonly stackFrames: readonly DebugStackFrame[];
+	readonly totalFrames: number | null;
+}
+
+/** One DAP `Scope` — `variablesReference` is the handle a follow-up
+ * `debugVariables` call expands. */
+export interface DebugScope {
+	readonly name: string;
+	readonly variablesReference: number;
+	readonly namedVariables: number | null;
+	readonly indexedVariables: number | null;
+	readonly expensive: boolean;
+}
+
+/** `debug_scopes`'s response — an empty `scopes` array (a frame with no
+ * local state at all) is a normal, successful result, not an error. */
+export interface DebugScopesResult {
+	readonly scopes: readonly DebugScope[];
+}
+
+/** DAP's own `VariablesArguments.filter` enum — which slice of a
+ * `variablesReference`'s children to fetch (`null`/omitted means "both"). */
+export type DebugVariablesFilter = "indexed" | "named";
+
+/** One DAP `Variable` — `variablesReference` is `0` for a leaf value (the
+ * tree-expansion sentinel: no further children), non-zero for a
+ * further-expandable value a follow-up `debugVariables` call should target. */
+export interface DebugVariable {
+	readonly name: string;
+	readonly value: string;
+	readonly type: string | null;
+	readonly variablesReference: number;
+	readonly namedVariables: number | null;
+	readonly indexedVariables: number | null;
+}
+
+export interface DebugVariablesResult {
+	readonly variables: readonly DebugVariable[];
+}
+
+/** DAP's own `EvaluateArguments.context` enum, narrowed to the five
+ * documented values — `F100` S3 only ever sends `"watch"` (the Watch view's
+ * sole data source); `"repl"` is modeled now because it is part of the same
+ * closed spec enum, for `F100` S4's Debug Console to use later. */
+export type DebugEvaluateContext =
+	"watch" | "repl" | "hover" | "clipboard" | "variables";
+
+export interface DebugEvaluateResult {
+	readonly result: string;
+	readonly type: string | null;
+	readonly variablesReference: number;
+	readonly namedVariables: number | null;
+	readonly indexedVariables: number | null;
+}
+
+/** `plain://debug-event`'s decoded payload — covers both real DAP events
+ * (`event` is the bare DAP event name, e.g. `"stopped"`) and Plain's own
+ * `plain/`-prefixed synthetic notifications (`"plain/sessionEnded"`,
+ * `"plain/reverseRequest/…"`, `"plain/protocolError"`) under the same single
+ * channel — see `src-tauri/src/debug/session.rs`'s module doc for why. */
+export interface DebugEventPayload {
+	readonly sessionId: string;
+	readonly event: string;
+	readonly body: unknown;
 }
 
 /**
@@ -1636,4 +1794,85 @@ export interface PlainBridge {
 	debugAdapterConfirmationRevoke(
 		descriptor: DebugAdapterConfirmationSubject,
 	): Promise<void>;
+	/** `F100` S3: starts a new debug session by sending DAP's `launch` request
+	 * against `target`, with `adapterId` becoming `initialize`'s
+	 * `arguments.adapterID` and `launchArguments` forwarded verbatim as the
+	 * opaque, adapter-specific `launch` payload (ADR 0003's "adapter-specific
+	 * 配置透明透传"). Never sends any breakpoint at session-start time — see
+	 * `plain-debug-session.ts`'s own doc comment for why every breakpoint,
+	 * whether set before or after the session starts, always goes through
+	 * `debugSetBreakpoints` instead. Rejects with `WORKSPACE_NOT_TRUSTED` for
+	 * an untrusted workspace, `DEBUG_ADAPTER_NOT_CONFIRMED` for an
+	 * unconfirmed `(command, args, transport)` triple (see
+	 * `resolveDebugAdapterConfirmation`, which must always run first), or
+	 * `DEBUG_HANDSHAKE_FAILED` if the adapter itself rejects any handshake
+	 * step. */
+	debugLaunch(
+		target: DebugAdapterTarget,
+		adapterId: string,
+		launchArguments: Readonly<Record<string, unknown>>,
+	): Promise<DebugSessionStartResult>;
+	/** Identical contract to `debugLaunch`, sending DAP's `attach` request
+	 * instead of `launch`. */
+	debugAttach(
+		target: DebugAdapterTarget,
+		adapterId: string,
+		launchArguments: Readonly<Record<string, unknown>>,
+	): Promise<DebugSessionStartResult>;
+	/** Tears down a live debug session. Rejects with
+	 * `DEBUG_SESSION_NOT_FOUND` for a session id that never existed, already
+	 * ended on its own, or was already disconnected. */
+	debugDisconnect(sessionId: string): Promise<void>;
+	/** Runtime `setBreakpoints` for `path` — always the *complete* current
+	 * breakpoint set for that file (DAP's `setBreakpoints` request replaces,
+	 * never incrementally adds/removes), so a caller toggling one breakpoint
+	 * must resend every remaining one for the same path, not just the
+	 * changed entry. See `DebugBreakpointResult`'s own doc comment for why
+	 * the response's `verified`/`line` must always be trusted over what was
+	 * requested. */
+	debugSetBreakpoints(
+		sessionId: string,
+		path: string,
+		breakpoints: readonly DebugBreakpointRequest[],
+	): Promise<DebugSetBreakpointsResult>;
+	/** Fetches (a page of) `threadId`'s call stack. `startFrame`/`levels`
+	 * (either or both `null` meaning "from the top"/"every remaining frame")
+	 * are DAP's own `StackTraceArguments` pagination fields. */
+	debugStackTrace(
+		sessionId: string,
+		threadId: number,
+		startFrame: number | null,
+		levels: number | null,
+	): Promise<DebugStackTraceResult>;
+	/** Fetches the variable scopes available at stack frame `frameId` (a
+	 * `DebugStackFrame.id` a prior `debugStackTrace` response returned). */
+	debugScopes(sessionId: string, frameId: number): Promise<DebugScopesResult>;
+	/** Expands one `variablesReference` (a `DebugScope`'s or a previous
+	 * `DebugVariable`'s own reference handle — never `0`, which means "no
+	 * children" and should never reach this call). `start`/`count`/`filter`
+	 * (any or all `null`) are DAP's own pagination fields — the **lazy
+	 * expansion and pagination** contract this feature's acceptance criteria
+	 * require: a large indexed collection (e.g. a big array) should be
+	 * fetched one page at a time via `start`/`count`, not all at once. */
+	debugVariables(
+		sessionId: string,
+		variablesReference: number,
+		start: number | null,
+		count: number | null,
+		filter: DebugVariablesFilter | null,
+	): Promise<DebugVariablesResult>;
+	/** Evaluates `expression` under `context` (the Watch view always sends
+	 * `"watch"`), optionally scoped to `frameId`'s lexical context. */
+	debugEvaluate(
+		sessionId: string,
+		expression: string,
+		frameId: number | null,
+		context: DebugEvaluateContext,
+	): Promise<DebugEvaluateResult>;
+	/** Registers a listener for every live debug session's streamed
+	 * `plain://debug-event` deliveries in this window — mirrors
+	 * `terminalWatchData`'s own all-sessions-in-one-listener shape; the
+	 * listener receives the full decoded event (including `sessionId`) and
+	 * must filter for the session(s) it cares about itself. */
+	debugWatchEvent(listener: (event: DebugEventPayload) => void): Unlisten;
 }

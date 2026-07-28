@@ -134,6 +134,15 @@ function fakeBridge(
 		debugAdapterConfirmationState: notImplemented,
 		debugAdapterConfirmationGrant: notImplemented,
 		debugAdapterConfirmationRevoke: notImplemented,
+		debugLaunch: notImplemented,
+		debugAttach: notImplemented,
+		debugDisconnect: notImplemented,
+		debugSetBreakpoints: notImplemented,
+		debugStackTrace: notImplemented,
+		debugScopes: notImplemented,
+		debugVariables: notImplemented,
+		debugEvaluate: notImplemented,
+		debugWatchEvent: notImplemented,
 	};
 }
 
@@ -283,6 +292,15 @@ function fakeTextSearchBridge(
 		debugAdapterConfirmationState: notImplemented,
 		debugAdapterConfirmationGrant: notImplemented,
 		debugAdapterConfirmationRevoke: notImplemented,
+		debugLaunch: notImplemented,
+		debugAttach: notImplemented,
+		debugDisconnect: notImplemented,
+		debugSetBreakpoints: notImplemented,
+		debugStackTrace: notImplemented,
+		debugScopes: notImplemented,
+		debugVariables: notImplemented,
+		debugEvaluate: notImplemented,
+		debugWatchEvent: notImplemented,
 	};
 
 	return {

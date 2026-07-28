@@ -1481,7 +1481,8 @@ export function validateWorkspaceProviderBootstrap(source) {
 				parent.expression.text === "registerPlainProductIconThemePicker" ||
 				parent.expression.text === "applyPersistedThemeSelection" ||
 				parent.expression.text === "applyPersistedFileIconThemeSelection" ||
-				parent.expression.text === "applyPersistedProductIconThemeSelection")
+				parent.expression.text === "applyPersistedProductIconThemeSelection" ||
+				parent.expression.text === "createAndConfigurePlainDebugRuntime")
 		);
 	}
 	function isAllowedWorkspaceProviderIdentifier(node) {

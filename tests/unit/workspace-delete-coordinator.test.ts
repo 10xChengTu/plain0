@@ -329,6 +329,33 @@ function testBridge(
 		async debugAdapterConfirmationRevoke() {
 			throw new Error("unused");
 		},
+		async debugLaunch() {
+			throw new Error("unused");
+		},
+		async debugAttach() {
+			throw new Error("unused");
+		},
+		async debugDisconnect() {
+			throw new Error("unused");
+		},
+		async debugSetBreakpoints() {
+			throw new Error("unused");
+		},
+		async debugStackTrace() {
+			throw new Error("unused");
+		},
+		async debugScopes() {
+			throw new Error("unused");
+		},
+		async debugVariables() {
+			throw new Error("unused");
+		},
+		async debugEvaluate() {
+			throw new Error("unused");
+		},
+		debugWatchEvent() {
+			throw new Error("unused");
+		},
 		...overrides,
 	};
 }

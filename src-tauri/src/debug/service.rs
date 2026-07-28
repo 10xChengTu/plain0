@@ -37,7 +37,7 @@ use crate::workspace::service::WorkspaceService;
 use super::confirm::ConfirmationService;
 use super::dto::{self, DebugSessionId, SessionTransportRequest};
 use super::session::{self, DebugEventSink, DebugSession, HandshakeConfig, LaunchRequestKind};
-use super::{debug_session_not_found, debug_transport_unavailable};
+use super::{debug_request_failed, debug_session_not_found, debug_transport_unavailable};
 
 /// Rust-authoritative live-session table, `.manage()`d exactly once by
 /// `lib.rs`. See the module doc for the overall shape.
@@ -177,6 +177,62 @@ impl DebugSessionService {
         }
 
         Ok((session_id, capabilities.as_value()))
+    }
+
+    /// Looks up a still-live session by window + id — the shared lookup
+    /// [`Self::send_request`] and [`Self::disconnect`] both need. Returns a
+    /// cheap `Arc` clone (never holds the table lock beyond this call), so a
+    /// caller may use the returned session freely (including across an
+    /// `.await`) without risking a lock-ordering issue against a concurrent
+    /// `close_window`/`disconnect`.
+    fn session_for(
+        &self,
+        window_label: &str,
+        session_id: DebugSessionId,
+    ) -> Result<Arc<DebugSession>, CommandError> {
+        lock(&self.state.windows)
+            .get(window_label)
+            .and_then(|sessions| sessions.get(&session_id).cloned())
+            .ok_or_else(debug_session_not_found)
+    }
+
+    /// `F100` S3's generic interactive-request seam — every one of
+    /// `debug_set_breakpoints`/`debug_stack_trace`/`debug_scopes`/
+    /// `debug_variables`/`debug_evaluate` (`super::commands`) resolves its own
+    /// typed DTO into a `(command, arguments)` pair and calls this exactly
+    /// once, rather than each reimplementing "look up the session, send,
+    /// wait, map failure". `command` is always a literal DAP command name
+    /// supplied by this crate's own call sites (never caller-controlled) —
+    /// this is *not* a generic "send arbitrary DAP request" escape hatch (see
+    /// `debug/mod.rs`'s own module doc for why that distinction matters here,
+    /// mirroring `git`'s "no generic `git_run`" principle). Runs the blocking
+    /// send/receive on a `spawn_blocking` thread, exactly like
+    /// [`Self::start_session`]'s own handshake step, since
+    /// [`DebugSession::send_request`]/`wait_for_response` are synchronous.
+    /// Maps an adapter `success: false` reply to [`debug_request_failed`],
+    /// carrying the adapter's own message if it sent one — the post-handshake
+    /// analogue of [`run_handshake`]'s own per-step failure mapping.
+    pub async fn send_request(
+        &self,
+        window_label: &str,
+        session_id: DebugSessionId,
+        command: &'static str,
+        arguments: Value,
+    ) -> Result<Value, CommandError> {
+        let session = self.session_for(window_label, session_id)?;
+        let response = tauri::async_runtime::spawn_blocking(move || {
+            let pending = session.send_request(command, Some(arguments))?;
+            session.wait_for_response(pending)
+        })
+        .await
+        .map_err(|_| debug_transport_unavailable())??;
+        if !response.success {
+            return Err(debug_request_failed(
+                &response.command,
+                response.message.as_deref(),
+            ));
+        }
+        Ok(response.body.unwrap_or(Value::Null))
     }
 
     /// Tears down a live session and removes it from this window's table.

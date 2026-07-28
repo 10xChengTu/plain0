@@ -140,6 +140,15 @@ function createFakeBridge(overrides: Partial<PlainBridge> = {}): {
 		debugAdapterConfirmationState: notImplemented,
 		debugAdapterConfirmationGrant: notImplemented,
 		debugAdapterConfirmationRevoke: notImplemented,
+		debugLaunch: notImplemented,
+		debugAttach: notImplemented,
+		debugDisconnect: notImplemented,
+		debugSetBreakpoints: notImplemented,
+		debugStackTrace: notImplemented,
+		debugScopes: notImplemented,
+		debugVariables: notImplemented,
+		debugEvaluate: notImplemented,
+		debugWatchEvent: notImplemented,
 		...overrides,
 	};
 	return { bridge, state };

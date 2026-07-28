@@ -145,6 +145,15 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		debugAdapterConfirmationState: vi.fn(),
 		debugAdapterConfirmationGrant: vi.fn(),
 		debugAdapterConfirmationRevoke: vi.fn(),
+		debugLaunch: vi.fn(),
+		debugAttach: vi.fn(),
+		debugDisconnect: vi.fn(),
+		debugSetBreakpoints: vi.fn(),
+		debugStackTrace: vi.fn(),
+		debugScopes: vi.fn(),
+		debugVariables: vi.fn(),
+		debugEvaluate: vi.fn(),
+		debugWatchEvent: vi.fn(),
 		...overrides,
 	};
 }
@@ -260,6 +269,15 @@ describe("workspace Workbench command overrides", () => {
 			debugAdapterConfirmationState: vi.fn(),
 			debugAdapterConfirmationGrant: vi.fn(),
 			debugAdapterConfirmationRevoke: vi.fn(),
+			debugLaunch: vi.fn(),
+			debugAttach: vi.fn(),
+			debugDisconnect: vi.fn(),
+			debugSetBreakpoints: vi.fn(),
+			debugStackTrace: vi.fn(),
+			debugScopes: vi.fn(),
+			debugVariables: vi.fn(),
+			debugEvaluate: vi.fn(),
+			debugWatchEvent: vi.fn(),
 		};
 		const contextValues = new Map<string, unknown>([
 			["openFolderWorkspaceSupport", false],

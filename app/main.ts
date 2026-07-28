@@ -18,6 +18,10 @@ import { IWorkbenchThemeService } from "@codingame/monaco-vscode-api/vscode/vs/w
 
 import { EXCLUDED_SURFACE_GUARD_MARKER } from "./excluded-surface-policy";
 import { enforceExcludedWorkbenchSurfaces } from "./excluded-surfaces";
+import "./features/debug/debug-contribution";
+import { createPlainDebugBreakpointsContribution } from "./features/debug/plain-debug-breakpoints-contribution";
+import { registerPlainDebugCommands } from "./features/debug/plain-debug-commands";
+import { createAndConfigurePlainDebugRuntime } from "./features/debug/plain-debug-runtime";
 import "./features/search/search-contribution";
 import "./features/terminal/terminal-contribution";
 import { registerPlainTerminalCommands } from "./features/terminal/plain-terminal-commands";
@@ -143,6 +147,17 @@ async function bootstrap(): Promise<void> {
 		ReturnType<typeof registerPlainScmCommands> | undefined;
 	let gitBlameContributionRegistration:
 		ReturnType<typeof createPlainGitBlameContribution> | undefined;
+	let debugCommandsRegistration:
+		ReturnType<typeof registerPlainDebugCommands> | undefined;
+	let debugBreakpointsContributionRegistration:
+		ReturnType<typeof createPlainDebugBreakpointsContribution> | undefined;
+	// `F100` S3: constructed and configured here (before `initialize()`),
+	// exactly like every other `configuredBridge`-style singleton in this
+	// file — `debug-contribution.ts` registers the three debug `ViewPane`s'
+	// `ctorDescriptor`s at module-import time, long before the Workbench
+	// actually constructs one, so this must be ready the instant
+	// `initialize()` runs.
+	const debugRuntime = createAndConfigurePlainDebugRuntime(bridge);
 	window.addEventListener(
 		"pagehide",
 		() => {
@@ -155,6 +170,9 @@ async function bootstrap(): Promise<void> {
 			terminalCommandsRegistration?.dispose();
 			scmCommandsRegistration?.dispose();
 			gitBlameContributionRegistration?.dispose();
+			debugCommandsRegistration?.dispose();
+			debugBreakpointsContributionRegistration?.dispose();
+			debugRuntime.session.dispose();
 		},
 		{ once: true },
 	);
@@ -209,6 +227,17 @@ async function bootstrap(): Promise<void> {
 		await getService(ILanguageFeaturesService),
 		await getService(IWorkspaceContextService),
 	);
+
+	// `F100` S3: breakpoint glyph margin + "Plain: Start/Stop Debugging" —
+	// see `plain-debug-breakpoints-contribution.ts`'s own module doc comment.
+	debugCommandsRegistration = registerPlainDebugCommands();
+	debugBreakpointsContributionRegistration =
+		createPlainDebugBreakpointsContribution(
+			await getService(ICodeEditorService),
+			await getService(IWorkspaceContextService),
+			debugRuntime.breakpoints,
+			debugRuntime.session,
+		);
 
 	// `F080` S2: the `git:` read-only content provider (decision 4) — a
 	// `PlainScmProvider.getOriginalResource` URI is only ever resolved once

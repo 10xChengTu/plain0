@@ -330,3 +330,51 @@ body[data-plain-ready="error"] #plain-bootstrap-status {
 .plain-git-blame-age-5 {
 	color: var(--plain-git-blame-age-5);
 }
+
+/* `F100` S3: breakpoint glyph margin — see
+   `plain-debug-breakpoints-contribution.ts`'s module doc comment. */
+.plain-debug-breakpoint-glyph {
+	width: 0.7rem !important;
+	height: 0.7rem !important;
+	margin-left: 0.35rem;
+	border-radius: 50%;
+}
+
+.plain-debug-breakpoint-glyph-verified {
+	background-color: #e51400;
+}
+
+.plain-debug-breakpoint-glyph-unverified {
+	background-color: #a9a9a9;
+}
+
+.plain-debug-breakpoint-glyph-rejected {
+	background-color: #a9a9a9;
+	border: 1px solid #e51400;
+}
+
+.plain-debug-breakpoint-popup {
+	position: absolute;
+	z-index: 50;
+	top: 2rem;
+	left: 3rem;
+	display: flex;
+	flex-direction: column;
+	gap: 0.35rem;
+	padding: 0.5rem;
+	background: var(--vscode-editorWidget-background, #252526);
+	color: var(--vscode-editorWidget-foreground, #cccccc);
+	border: 1px solid var(--vscode-editorWidget-border, #454545);
+	border-radius: 0.25rem;
+	font-size: 0.85rem;
+}
+
+.plain-debug-breakpoint-popup label {
+	display: flex;
+	flex-direction: column;
+	gap: 0.15rem;
+}
+
+.plain-debug-breakpoint-popup input {
+	min-width: 14rem;
+}

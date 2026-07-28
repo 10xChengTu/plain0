@@ -300,6 +300,96 @@ interface TestGitNetworkFixture {
 	readonly delayMs?: number;
 }
 
+/** `F100` S3: the debug domain's own fixture types, reproduced from
+ * `app/platform/tauri/contracts.ts`'s wire shapes for the same reason every
+ * other `TestGit*`/`TestTheme*` type here is (see `installNativeIpcMock`'s
+ * own module doc comment: this file drives the real `native.ts` transport
+ * directly, never `app/platform/tauri/browser-mock.ts`). */
+interface TestDebugStackFrame {
+	readonly id: number;
+	readonly name: string;
+	readonly line: number;
+	readonly column: number;
+	readonly sourcePath: string | null;
+	readonly sourceName: string | null;
+}
+interface TestDebugScope {
+	readonly name: string;
+	readonly variablesReference: number;
+	readonly namedVariables: number | null;
+	readonly indexedVariables: number | null;
+	readonly expensive: boolean;
+}
+interface TestDebugVariable {
+	readonly name: string;
+	readonly value: string;
+	readonly type: string | null;
+	readonly variablesReference: number;
+	readonly namedVariables: number | null;
+	readonly indexedVariables: number | null;
+}
+interface TestDebugEvaluateResult {
+	readonly result: string;
+	readonly type: string | null;
+	readonly variablesReference: number;
+	readonly namedVariables: number | null;
+	readonly indexedVariables: number | null;
+}
+
+/**
+ * Deterministic `debug_launch`/`debug_attach`/`debug_set_breakpoints`/
+ * `debug_stack_trace`/`debug_scopes`/`debug_variables`/`debug_evaluate`
+ * responses (`F100` S3) — mirrors `app/platform/tauri/browser-mock.ts`'s own
+ * `BrowserMockDebugFixtureForTest`, reproduced here for the reason every
+ * other `Test*Fixture` interface in this file is (see
+ * `installNativeIpcMock`'s own module doc comment).
+ */
+interface TestDebugFixture {
+	/** The negotiated `Capabilities` every mock `debug_launch`/`debug_attach`
+	 * call returns — defaults to `{}` (every `supportsXxx` query answers
+	 * `false`). */
+	readonly capabilities?: Readonly<Record<string, unknown>>;
+	/** Keyed by `threadId` — sliced by `startFrame`/`levels` exactly like a
+	 * real adapter would. */
+	readonly stackFramesByThread?: Readonly<
+		Record<number, readonly TestDebugStackFrame[]>
+	>;
+	/** Keyed by `frameId` — a missing key defaults to an empty `scopes`
+	 * array. */
+	readonly scopesByFrame?: Readonly<Record<number, readonly TestDebugScope[]>>;
+	/** Keyed by `variablesReference` — sliced by `start`/`count` exactly like
+	 * a real adapter would, so a test can seed a large synthetic collection
+	 * and exercise real pagination. */
+	readonly variablesByReference?: Readonly<
+		Record<number, readonly TestDebugVariable[]>
+	>;
+	/** Keyed by the literal `expression` string — a missing key falls back to
+	 * `{ result: expression, type: null, variablesReference: 0, ... }`. */
+	readonly evaluateByExpression?: Readonly<
+		Record<string, TestDebugEvaluateResult>
+	>;
+	/** Keyed by `path`, then by the *requested* line number — lets a test
+	 * script an adapter moving a breakpoint to a different line
+	 * (`{ line: <different number> }`) or rejecting one outright
+	 * (`{ verified: false, message: "…" }`). A requested line with no
+	 * scripted outcome verifies as-is, at the requested line. */
+	readonly breakpointOutcomes?: Readonly<
+		Record<
+			string,
+			Readonly<
+				Record<
+					number,
+					Readonly<{
+						readonly verified?: boolean;
+						readonly line?: number;
+						readonly message?: string;
+					}>
+				>
+			>
+		>
+	>;
+}
+
 async function installNativeIpcMock(
 	page: Page,
 	rawReadTransport: RawReadTransport,
@@ -355,6 +445,12 @@ async function installNativeIpcMock(
 	// slice's own fetch/pull/push tests pass this; every other existing call
 	// site keeps the default (`"origin/main"`, 0 ahead, 0 behind, no delay).
 	gitNetworkFixtureForTest: TestGitNetworkFixture = {},
+	// `F100` S3: seeds the deterministic `debug_launch`/`debug_attach`/
+	// `debug_set_breakpoints`/`debug_stack_trace`/`debug_scopes`/
+	// `debug_variables`/`debug_evaluate` simulation. Only this slice's own
+	// debug tests pass this; every other existing call site keeps the
+	// default (empty capabilities, no scripted frames/scopes/variables).
+	debugFixtureForTest: TestDebugFixture = {},
 ): Promise<void> {
 	await page.addInitScript(
 		({
@@ -373,6 +469,7 @@ async function installNativeIpcMock(
 			terminalTrustedForTest,
 			gitFixtureForTest,
 			gitNetworkFixtureForTest,
+			debugFixtureForTest,
 		}) => {
 			const calls: Array<{
 				command: string;
@@ -1241,6 +1338,12 @@ async function installNativeIpcMock(
 					content: string,
 					emitWake: boolean,
 				): void;
+				__PLAIN_TEST_EMIT_DEBUG_EVENT__(
+					sessionId: string,
+					event: string,
+					body: unknown,
+				): void;
+				__PLAIN_TEST_DEBUG_SESSION_IDS__(): readonly string[];
 				__TAURI_EVENT_PLUGIN_INTERNALS__: {
 					unregisterListener(): void;
 				};
@@ -1533,6 +1636,76 @@ async function installNativeIpcMock(
 					message: "The current workspace root is not a Git repository.",
 				};
 			}
+
+			// --- `F100` S3: real session-lifecycle + interactive debugging mock. ---
+			const debugAdapterConfirmations = new Set<string>();
+			function debugAdapterConfirmationKey(request: {
+				command?: string;
+				args?: readonly string[];
+				transport?: string;
+			}): string {
+				return JSON.stringify([
+					request.command,
+					request.args,
+					request.transport,
+				]);
+			}
+			function debugAdapterNotConfirmed() {
+				return {
+					code: "DEBUG_ADAPTER_NOT_CONFIRMED",
+					message:
+						"This exact adapter command has not been confirmed for this workspace yet.",
+				};
+			}
+			function debugSessionNotFound() {
+				return {
+					code: "DEBUG_SESSION_NOT_FOUND",
+					message:
+						"The requested debug session does not exist for this window.",
+				};
+			}
+			const liveDebugSessions = new Set<string>();
+			let debugSessionSerial = 601;
+			const nextDebugSessionId = (): string =>
+				`00000000-0000-4000-8000-${(debugSessionSerial++)
+					.toString()
+					.padStart(12, "0")}`;
+			function emitDebugEvent(
+				sessionId: string,
+				event: string,
+				body: unknown,
+			): void {
+				const payload = { sessionId, event, body };
+				for (const [eventId, registration] of eventHandlers) {
+					if (registration.event !== "plain://debug-event") {
+						continue;
+					}
+					const transformed = callbacks.get(registration.handlerId);
+					transformed?.callback({
+						event: registration.event,
+						id: eventId,
+						payload,
+					});
+					if (transformed?.once === true) {
+						callbacks.delete(registration.handlerId);
+					}
+				}
+			}
+			// Test-only escape hatch (mirrors `__PLAIN_TEST_EXTERNAL_CREATE__` etc.
+			// above) letting a Playwright test push a synthetic DAP event (most
+			// commonly `stopped`) for a live mock session, exactly as a real
+			// adapter would over `plain://debug-event` — this is what lets a test
+			// exercise the call-stack view's real "`stopped` drives a refresh"
+			// wiring without a real adapter process.
+			testWindow.__PLAIN_TEST_EMIT_DEBUG_EVENT__ = (sessionId, event, body) => {
+				if (typeof sessionId !== "string" || typeof event !== "string") {
+					throw new Error("Invalid debug event test injection.");
+				}
+				emitDebugEvent(sessionId, event, body);
+			};
+			testWindow.__PLAIN_TEST_DEBUG_SESSION_IDS__ = () => [
+				...liveDebugSessions,
+			];
 			// Expands this file's own deliberately-terse `TestGitStatusEntry`
 			// (`type`/`indexStatus`/`worktreeStatus`/`path`/`origPath` only) into
 			// the full `GitStatusEntryWire` shape `git-codec.ts`'s
@@ -2518,6 +2691,205 @@ async function installNativeIpcMock(
 						case "workspace_trust_revoke":
 							terminalTrusted = false;
 							return null;
+						case "debug_adapter_confirmation_state": {
+							const confirmRequest = args.request as
+								| {
+										command?: string;
+										args?: readonly string[];
+										transport?: string;
+								  }
+								| undefined;
+							return {
+								confirmed: debugAdapterConfirmations.has(
+									debugAdapterConfirmationKey(confirmRequest ?? {}),
+								),
+							};
+						}
+						case "debug_adapter_confirmation_grant": {
+							const confirmRequest = args.request as
+								| {
+										command?: string;
+										args?: readonly string[];
+										transport?: string;
+								  }
+								| undefined;
+							debugAdapterConfirmations.add(
+								debugAdapterConfirmationKey(confirmRequest ?? {}),
+							);
+							return null;
+						}
+						case "debug_adapter_confirmation_revoke": {
+							const confirmRequest = args.request as
+								| {
+										command?: string;
+										args?: readonly string[];
+										transport?: string;
+								  }
+								| undefined;
+							debugAdapterConfirmations.delete(
+								debugAdapterConfirmationKey(confirmRequest ?? {}),
+							);
+							return null;
+						}
+						case "debug_launch":
+						case "debug_attach": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							const startRequest = args.request as
+								| {
+										command?: string;
+										args?: readonly string[];
+										transport?: string;
+								  }
+								| undefined;
+							if (
+								!debugAdapterConfirmations.has(
+									debugAdapterConfirmationKey(startRequest ?? {}),
+								)
+							) {
+								throw debugAdapterNotConfirmed();
+							}
+							const sessionId = nextDebugSessionId();
+							liveDebugSessions.add(sessionId);
+							return {
+								sessionId,
+								capabilities: debugFixtureForTest.capabilities ?? {},
+							};
+						}
+						case "debug_disconnect": {
+							const disconnectRequest = args.request as
+								{ sessionId?: string } | undefined;
+							if (
+								!liveDebugSessions.delete(disconnectRequest?.sessionId ?? "")
+							) {
+								throw debugSessionNotFound();
+							}
+							return null;
+						}
+						case "debug_set_breakpoints": {
+							const setBreakpointsRequest = args.request as
+								| {
+										sessionId?: string;
+										path?: string;
+										breakpoints?: readonly { line: number }[];
+								  }
+								| undefined;
+							if (
+								!liveDebugSessions.has(setBreakpointsRequest?.sessionId ?? "")
+							) {
+								throw debugSessionNotFound();
+							}
+							const outcomesForPath =
+								debugFixtureForTest.breakpointOutcomes?.[
+									setBreakpointsRequest?.path ?? ""
+								];
+							const reported = (setBreakpointsRequest?.breakpoints ?? []).map(
+								(entry) => {
+									const outcome = outcomesForPath?.[entry.line];
+									if (outcome?.verified === false) {
+										return {
+											verified: false,
+											line: null,
+											id: null,
+											message:
+												outcome.message ?? "Breakpoint could not be set.",
+										};
+									}
+									return {
+										verified: true,
+										line: outcome?.line ?? entry.line,
+										id: null,
+										message: null,
+									};
+								},
+							);
+							return { breakpoints: reported };
+						}
+						case "debug_stack_trace": {
+							const stackTraceRequest = args.request as
+								| {
+										sessionId?: string;
+										threadId?: number;
+										startFrame?: number | null;
+										levels?: number | null;
+								  }
+								| undefined;
+							if (!liveDebugSessions.has(stackTraceRequest?.sessionId ?? "")) {
+								throw debugSessionNotFound();
+							}
+							const allFrames =
+								debugFixtureForTest.stackFramesByThread?.[
+									stackTraceRequest?.threadId ?? -1
+								] ?? [];
+							const startFrame = stackTraceRequest?.startFrame ?? 0;
+							const levels = stackTraceRequest?.levels ?? null;
+							const slicedFrames =
+								levels === null
+									? allFrames.slice(startFrame)
+									: allFrames.slice(startFrame, startFrame + levels);
+							return {
+								stackFrames: slicedFrames,
+								totalFrames: allFrames.length,
+							};
+						}
+						case "debug_scopes": {
+							const scopesRequest = args.request as
+								{ sessionId?: string; frameId?: number } | undefined;
+							if (!liveDebugSessions.has(scopesRequest?.sessionId ?? "")) {
+								throw debugSessionNotFound();
+							}
+							return {
+								scopes:
+									debugFixtureForTest.scopesByFrame?.[
+										scopesRequest?.frameId ?? -1
+									] ?? [],
+							};
+						}
+						case "debug_variables": {
+							const variablesRequest = args.request as
+								| {
+										sessionId?: string;
+										variablesReference?: number;
+										start?: number | null;
+										count?: number | null;
+								  }
+								| undefined;
+							if (!liveDebugSessions.has(variablesRequest?.sessionId ?? "")) {
+								throw debugSessionNotFound();
+							}
+							const allVariables =
+								debugFixtureForTest.variablesByReference?.[
+									variablesRequest?.variablesReference ?? -1
+								] ?? [];
+							const startIndex = variablesRequest?.start ?? 0;
+							const count = variablesRequest?.count ?? null;
+							const slicedVariables =
+								count === null
+									? allVariables.slice(startIndex)
+									: allVariables.slice(startIndex, startIndex + count);
+							return { variables: slicedVariables };
+						}
+						case "debug_evaluate": {
+							const evaluateRequest = args.request as
+								{ sessionId?: string; expression?: string } | undefined;
+							if (!liveDebugSessions.has(evaluateRequest?.sessionId ?? "")) {
+								throw debugSessionNotFound();
+							}
+							const expression = evaluateRequest?.expression ?? "";
+							const scripted =
+								debugFixtureForTest.evaluateByExpression?.[expression];
+							if (scripted !== undefined) {
+								return scripted;
+							}
+							return {
+								result: expression,
+								type: null,
+								variablesReference: 0,
+								namedVariables: null,
+								indexedVariables: null,
+							};
+						}
 						case "terminal_start": {
 							if (!terminalTrusted) {
 								throw terminalNotTrusted();
@@ -3265,6 +3637,7 @@ async function installNativeIpcMock(
 			terminalTrustedForTest,
 			gitFixtureForTest,
 			gitNetworkFixtureForTest,
+			debugFixtureForTest,
 		},
 	);
 }
@@ -12794,6 +13167,658 @@ test("lists worktrees, adds a new one, and force-removes a dirty one after confi
 		"main — main (/workspace)",
 		"new-feature (/workspace-worktrees/new-feature)",
 	]);
+
+	expect(pageErrors).toEqual([]);
+});
+
+// --- `F100` S3 "断点 + 调用栈 + 变量/Watch" ----------------------------------
+
+const DEBUG_LAUNCH_JSON = JSON.stringify({
+	version: "0.2.0",
+	configurations: [
+		{
+			type: "python",
+			request: "launch",
+			name: "Debug main.py",
+			plainAdapter: {
+				transport: "stdio",
+				command: "/usr/bin/python3",
+				args: ["-m", "debugpy.adapter"],
+			},
+			program: "main.py",
+		},
+	],
+});
+
+// Line 6 is `    total = add(3, 4)` — the line every breakpoint test below
+// places its breakpoint on.
+const DEBUG_MAIN_PY =
+	"def add(a, b):\n    return a + b\n\n\ndef main():\n    total = add(3, 4)\n    print(total)\n\n\nmain()\n";
+
+async function openRunAndDebugView(page: Page): Promise<void> {
+	const activityIcon = page.getByRole("tab", { name: /^Run and Debug/ });
+	await expect(activityIcon).toHaveCount(1);
+	await activityIcon.click();
+}
+
+async function openMainPy(page: Page): Promise<void> {
+	const explorer = await openNativeWorkspaceExplorer(page);
+	await explorer
+		.getByRole("treeitem", { name: "main.py", exact: true })
+		.dblclick();
+	await expect(
+		page.getByRole("tab", { name: /^main\.py(?:,.*)?$/ }),
+	).toBeVisible();
+}
+
+/** Clicks (left, or right for the breakpoint context menu) inside the
+ * Monaco glyph margin at `lineText`'s vertical position — this project's
+ * first test ever to interact with the glyph margin, so there is no
+ * existing selector precedent to reuse; computed directly from Monaco's own
+ * real layout (`glyphMarginLeft: 0`, glyph margin strip immediately left of
+ * the line-numbers column — confirmed by reading
+ * `@codingame/monaco-vscode-api`'s own `editorOptions.js`/`layoutInfo`
+ * computation, not guessed). */
+async function clickGlyphMargin(
+	page: Page,
+	lineText: string,
+	button: "left" | "right" = "left",
+): Promise<void> {
+	const line = page.locator(".monaco-editor .view-line").filter({
+		hasText: lineText,
+	});
+	await expect(line).toHaveCount(1);
+	const lineBox = await line.boundingBox();
+	if (lineBox === null) {
+		throw new Error("Could not locate the target line's bounding box.");
+	}
+	const margin = page.locator(".monaco-editor .margin-view-overlays").first();
+	await expect(margin).toBeVisible();
+	const marginBox = await margin.boundingBox();
+	if (marginBox === null) {
+		throw new Error("Could not locate the glyph margin's bounding box.");
+	}
+	await page.mouse.click(marginBox.x + 6, lineBox.y + lineBox.height / 2, {
+		button,
+	});
+}
+
+async function emitDebugTestEvent(
+	page: Page,
+	sessionId: string,
+	event: string,
+	body: unknown,
+): Promise<void> {
+	await page.evaluate(
+		({ sessionId, event, body }) => {
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_EMIT_DEBUG_EVENT__(
+					sessionId: string,
+					event: string,
+					body: unknown,
+				): void;
+			};
+			testWindow.__PLAIN_TEST_EMIT_DEBUG_EVENT__(sessionId, event, body);
+		},
+		{ sessionId, event, body },
+	);
+}
+
+async function currentDebugSessionId(page: Page): Promise<string> {
+	const ids = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_DEBUG_SESSION_IDS__(): readonly string[];
+		};
+		return testWindow.__PLAIN_TEST_DEBUG_SESSION_IDS__();
+	});
+	const [sessionId] = ids;
+	if (sessionId === undefined) {
+		throw new Error("No live debug session exists yet.");
+	}
+	return sessionId;
+}
+
+test("Run and Debug view reveals Call Stack/Variables/Watch panes with real not-debugging status text", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(page, "arrayBuffer");
+	await openNativeWorkspaceExplorer(page);
+	await openRunAndDebugView(page);
+
+	await expect(page.locator(".plain-debug-call-stack-view-message")).toHaveText(
+		"Not debugging.",
+	);
+	await expect(page.locator(".plain-debug-variables-view-message")).toHaveText(
+		"No frame selected.",
+	);
+	await expect(page.locator(".plain-debug-watch-view-add-row")).toBeVisible();
+	await expect(page.locator(".plain-debug-watch-view-entry")).toHaveCount(0);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("places a breakpoint the adapter moves to another line, starts a session through both confirmation gates, and a real stopped event drives the call stack and a paginated variable tree", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	const bigVariables = Array.from({ length: 150 }, (_unused, index) => ({
+		name: `item_${index}`,
+		value: String(index),
+		type: null,
+		variablesReference: 0,
+		namedVariables: null,
+		indexedVariables: null,
+	}));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{ "main.py": DEBUG_MAIN_PY, ".vscode/launch.json": DEBUG_LAUNCH_JSON },
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{
+			stackFramesByThread: {
+				1: [
+					{
+						id: 1,
+						name: "main",
+						line: 6,
+						column: 5,
+						sourcePath: "main.py",
+						sourceName: "main.py",
+					},
+					{
+						id: 2,
+						name: "<module>",
+						line: 10,
+						column: 1,
+						sourcePath: "main.py",
+						sourceName: "main.py",
+					},
+				],
+			},
+			scopesByFrame: {
+				1: [
+					{
+						name: "Locals",
+						variablesReference: 100,
+						namedVariables: 2,
+						indexedVariables: null,
+						expensive: false,
+					},
+				],
+			},
+			variablesByReference: {
+				100: [
+					{
+						name: "a",
+						value: "3",
+						type: "int",
+						variablesReference: 0,
+						namedVariables: null,
+						indexedVariables: null,
+					},
+					{
+						name: "big",
+						value: "list[150]",
+						type: null,
+						variablesReference: 300,
+						namedVariables: null,
+						indexedVariables: 150,
+					},
+				],
+				300: bigVariables,
+			},
+			// The real adapter moves the requested breakpoint (line 6) to
+			// line 105 — this feature's own acceptance criteria call this
+			// scenario out by name.
+			breakpointOutcomes: {
+				"main.py": { 6: { line: 105 } },
+			},
+		},
+	);
+
+	await openMainPy(page);
+	// Meaningful interaction 1: left-click the glyph margin places a
+	// breakpoint, rendered immediately (before any session exists) as
+	// "unverified" — there is no adapter yet to have verified anything.
+	await clickGlyphMargin(page, "total = add(3, 4)");
+	const glyph = page.locator(".plain-debug-breakpoint-glyph");
+	await expect(glyph).toHaveCount(1);
+	await expect(glyph).toHaveClass(/plain-debug-breakpoint-glyph-unverified/);
+
+	await openRunAndDebugView(page);
+	await executePaletteCommand(
+		page,
+		"Start Debugging",
+		"Plain: Start Debugging",
+	);
+
+	// A single locator, tracked through both dialogs in turn — the adapter
+	// confirmation dialog can appear in the very same tick the trust dialog
+	// closes, so asserting an intermediate "zero dialogs visible" state
+	// between them would be racy; waiting for the *content* to change to
+	// each step's own expected text is what is actually deterministic here.
+	const dialog = page.getByRole("dialog");
+	await expect(dialog).toBeVisible();
+	await expect(dialog).toContainText(
+		"Trust this workspace to run a debug adapter?",
+	);
+	await dialog
+		.getByRole("button", { name: "Trust & Continue", exact: true })
+		.click();
+	await expect(dialog).toContainText('Run "/usr/bin/python3"?');
+	await dialog
+		.getByRole("button", { name: "Run Adapter", exact: true })
+		.click();
+	await expect(dialog).toHaveCount(0);
+
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "debug_launch")).length)
+		.toBe(1);
+	const sessionId = await currentDebugSessionId(page);
+
+	// The freshly-placed breakpoint is synced immediately once the session
+	// is ready — real data flow, not a canned response: the request carries
+	// this exact breakpoint, and the adapter's real (scripted) "moved to
+	// line 105" verdict is what flips the glyph's rendered class.
+	await expect
+		.poll(
+			async () =>
+				(await terminalCallsFor(page, "debug_set_breakpoints")).length,
+		)
+		.toBe(1);
+	const setBreakpointsCall = (
+		await terminalCallsFor(page, "debug_set_breakpoints")
+	)[0]!;
+	expect(setBreakpointsCall.args.request).toEqual({
+		sessionId,
+		path: "main.py",
+		breakpoints: [{ line: 6, condition: null, logMessage: null }],
+	});
+	await expect(glyph).toHaveClass(/plain-debug-breakpoint-glyph-verified/);
+	await expect(glyph).not.toHaveClass(
+		/plain-debug-breakpoint-glyph-unverified/,
+	);
+
+	// Meaningful interaction 2: a real `stopped` event (simulating the
+	// adapter hitting the breakpoint) drives a real `debug_stack_trace`
+	// fetch, rendering the two real, distinctly-named seeded frames.
+	await emitDebugTestEvent(page, sessionId, "stopped", {
+		threadId: 1,
+		reason: "breakpoint",
+	});
+
+	const frameButtons = page.locator(
+		".plain-debug-call-stack-view-frame-button",
+	);
+	await expect(frameButtons).toHaveText([
+		"main (main.py:6)",
+		"<module> (main.py:10)",
+	]);
+	const frameItems = page.locator(".plain-debug-call-stack-view-frame");
+	await expect(frameItems.nth(0)).toHaveClass(
+		/plain-debug-call-stack-view-frame-selected/,
+	);
+	await expect(frameItems.nth(1)).not.toHaveClass(
+		/plain-debug-call-stack-view-frame-selected/,
+	);
+
+	// The top frame auto-selects, which alone (no click needed) drives the
+	// Variables view to fetch real scopes for it.
+	const tree = page.locator(".plain-debug-variables-view-tree");
+	const localsNode = tree
+		.locator(":scope > .plain-debug-variables-node")
+		.filter({ hasText: "Locals" });
+	await expect(localsNode).toHaveCount(1);
+
+	// Meaningful interaction 3: expanding "Locals" issues a real
+	// `debug_variables` call and renders the real leaf/nested entries.
+	await localsNode
+		.locator(
+			":scope > .plain-debug-variables-row > .plain-debug-variables-toggle",
+		)
+		.click();
+	const localsChildren = localsNode.locator(
+		":scope > .plain-debug-variables-children > .plain-debug-variables-node",
+	);
+	await expect(localsChildren).toHaveCount(2);
+	await expect(localsChildren.filter({ hasText: "a: 3 (int)" })).toHaveCount(1);
+	const bigNode = localsChildren.filter({ hasText: "big: list[150]" });
+	await expect(bigNode).toHaveCount(1);
+
+	// Meaningful interaction 4: expanding the large "big" collection issues
+	// a real `debug_variables` call with `start`/`count` — this is the
+	// lazy-expansion-and-pagination contract itself, not a client-side
+	// slice of an already-fully-fetched array.
+	await bigNode
+		.locator(
+			":scope > .plain-debug-variables-row > .plain-debug-variables-toggle",
+		)
+		.click();
+	const bigChildren = bigNode.locator(
+		":scope > .plain-debug-variables-children > .plain-debug-variables-node",
+	);
+	await expect(bigChildren).toHaveCount(100);
+	await expect(bigChildren.first()).toHaveText("item_0: 0");
+	await expect(bigChildren.last()).toHaveText("item_99: 99");
+	// The button lives inside its own `<li>` wrapper (a grandchild of
+	// `.plain-debug-variables-children`, not a direct child) — a descendant
+	// combinator for the last segment, not `>`.
+	const loadMoreButton = bigNode.locator(
+		":scope > .plain-debug-variables-children .plain-debug-variables-load-more",
+	);
+	await expect(loadMoreButton).toHaveText("Load 50 more…");
+
+	// Meaningful interaction 5: "Load more" fetches the real next page
+	// (`start: 100, count: 100`), proving real pagination rather than a
+	// single oversized fetch.
+	await loadMoreButton.click();
+	await expect(bigChildren).toHaveCount(150);
+	await expect(bigChildren.last()).toHaveText("item_149: 149");
+	await expect(loadMoreButton).toHaveCount(0);
+	const variablesCalls = await terminalCallsFor(page, "debug_variables");
+	const bigReferenceCalls = variablesCalls.filter(
+		(call) =>
+			(call.args.request as { variablesReference?: number })
+				.variablesReference === 300,
+	);
+	expect(bigReferenceCalls.map((call) => call.args.request)).toEqual([
+		{
+			sessionId,
+			variablesReference: 300,
+			start: 0,
+			count: 100,
+			filter: null,
+		},
+		{
+			sessionId,
+			variablesReference: 300,
+			start: 100,
+			count: 100,
+			filter: null,
+		},
+	]);
+
+	// Meaningful interaction 6: selecting a different frame (frame 2, which
+	// has no seeded scopes) really refetches — the Variables view goes back
+	// to its empty-state message, proving the refresh is driven by real
+	// frame-selection state, not a one-shot fetch that never updates again.
+	await frameButtons.nth(1).click();
+	await expect(page.locator(".plain-debug-variables-view-message")).toHaveText(
+		"No variables.",
+	);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("Watch view evaluates added expressions via debug_evaluate under context watch", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{ "main.py": DEBUG_MAIN_PY, ".vscode/launch.json": DEBUG_LAUNCH_JSON },
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{},
+		{},
+		{
+			evaluateByExpression: {
+				"a + b": {
+					result: "7",
+					type: "int",
+					variablesReference: 0,
+					namedVariables: null,
+					indexedVariables: null,
+				},
+			},
+		},
+	);
+	await openNativeWorkspaceExplorer(page);
+	await openRunAndDebugView(page);
+	await executePaletteCommand(
+		page,
+		"Start Debugging",
+		"Plain: Start Debugging",
+	);
+	const adapterDialog = page.getByRole("dialog");
+	await expect(adapterDialog).toBeVisible();
+	await adapterDialog
+		.getByRole("button", { name: "Run Adapter", exact: true })
+		.click();
+	await expect(adapterDialog).toHaveCount(0);
+	const sessionId = await currentDebugSessionId(page);
+
+	// Meaningful interaction 1: adding an expression with a scripted fixture
+	// evaluates to its real result, via a real `debug_evaluate` call under
+	// `context: "watch"`.
+	const input = page.locator(".plain-debug-watch-view-input");
+	await input.fill("a + b");
+	await page.locator(".plain-debug-watch-view-add-button").click();
+	const entry = page
+		.locator(".plain-debug-watch-view-entry")
+		.filter({ hasText: "a + b" });
+	await expect(entry.locator(".plain-debug-watch-view-value")).toHaveText(
+		"7 (int)",
+	);
+	const evalCalls = await terminalCallsFor(page, "debug_evaluate");
+	expect(evalCalls).toHaveLength(1);
+	expect(evalCalls[0]!.args.request).toEqual({
+		sessionId,
+		expression: "a + b",
+		frameId: null,
+		context: "watch",
+	});
+
+	// Meaningful interaction 2: an expression with no scripted fixture falls
+	// back to the mock's real "echo the expression back" default — proving
+	// this is a genuine round trip, not a hardcoded UI string.
+	await input.fill("unscripted_expr");
+	await page.locator(".plain-debug-watch-view-add-button").click();
+	const entry2 = page
+		.locator(".plain-debug-watch-view-entry")
+		.filter({ hasText: "unscripted_expr" });
+	await expect(entry2.locator(".plain-debug-watch-view-value")).toHaveText(
+		"unscripted_expr",
+	);
+
+	// Meaningful interaction 3: removing an expression removes its row.
+	await entry.getByRole("button", { name: "Remove", exact: true }).click();
+	await expect(entry).toHaveCount(0);
+	await expect(entry2).toHaveCount(1);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("breakpoint popup disables condition/log-point inputs when the adapter's capabilities do not advertise support, and a rejected breakpoint renders distinctly", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{ "main.py": DEBUG_MAIN_PY, ".vscode/launch.json": DEBUG_LAUNCH_JSON },
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{},
+		{},
+		{
+			capabilities: {},
+			breakpointOutcomes: {
+				"main.py": { 6: { verified: false, message: "No code at this line." } },
+			},
+		},
+	);
+	await openMainPy(page);
+	await clickGlyphMargin(page, "total = add(3, 4)");
+	const glyph = page.locator(".plain-debug-breakpoint-glyph");
+	await expect(glyph).toHaveClass(/plain-debug-breakpoint-glyph-unverified/);
+
+	await executePaletteCommand(
+		page,
+		"Start Debugging",
+		"Plain: Start Debugging",
+	);
+	const adapterDialog = page.getByRole("dialog");
+	await expect(adapterDialog).toBeVisible();
+	await adapterDialog
+		.getByRole("button", { name: "Run Adapter", exact: true })
+		.click();
+	await expect(adapterDialog).toHaveCount(0);
+
+	await expect
+		.poll(
+			async () =>
+				(await terminalCallsFor(page, "debug_set_breakpoints")).length,
+		)
+		.toBe(1);
+	// The adapter rejected this breakpoint outright — a different rendered
+	// state than "verified" or "unverified" (not yet asked).
+	await expect(glyph).toHaveClass(/plain-debug-breakpoint-glyph-rejected/);
+
+	// Meaningful interaction: right-click opens the popup; both inputs are
+	// genuinely disabled (not merely styled) with an explanatory
+	// placeholder — the "capability not advertised" half of this feature's
+	// required control group (see the next test for the "supported" half).
+	await clickGlyphMargin(page, "total = add(3, 4)", "right");
+	const popup = page.locator(".plain-debug-breakpoint-popup");
+	await expect(popup).toBeVisible();
+	const conditionInput = popup.locator(
+		".plain-debug-breakpoint-popup-condition",
+	);
+	const logInput = popup.locator(".plain-debug-breakpoint-popup-log-message");
+	await expect(conditionInput).toBeDisabled();
+	await expect(logInput).toBeDisabled();
+	await expect(conditionInput).toHaveAttribute(
+		"placeholder",
+		"Not supported by this adapter",
+	);
+	await expect(logInput).toHaveAttribute(
+		"placeholder",
+		"Not supported by this adapter",
+	);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("breakpoint popup enables condition/log-point inputs when the adapter advertises support, and saving re-syncs the live session", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{ "main.py": DEBUG_MAIN_PY, ".vscode/launch.json": DEBUG_LAUNCH_JSON },
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{},
+		{},
+		{
+			capabilities: {
+				supportsConditionalBreakpoints: true,
+				supportsLogPoints: true,
+			},
+		},
+	);
+	await openMainPy(page);
+	await clickGlyphMargin(page, "total = add(3, 4)");
+
+	await executePaletteCommand(
+		page,
+		"Start Debugging",
+		"Plain: Start Debugging",
+	);
+	const adapterDialog = page.getByRole("dialog");
+	await expect(adapterDialog).toBeVisible();
+	await adapterDialog
+		.getByRole("button", { name: "Run Adapter", exact: true })
+		.click();
+	await expect(adapterDialog).toHaveCount(0);
+	const sessionId = await currentDebugSessionId(page);
+
+	await expect
+		.poll(
+			async () =>
+				(await terminalCallsFor(page, "debug_set_breakpoints")).length,
+		)
+		.toBe(1);
+
+	// Control-group counterpart to the previous test: same feature, same
+	// popup, but the live session's capabilities now really advertise
+	// support — the exact two inputs the previous test proved disabled are
+	// now genuinely enabled.
+	await clickGlyphMargin(page, "total = add(3, 4)", "right");
+	const popup = page.locator(".plain-debug-breakpoint-popup");
+	await expect(popup).toBeVisible();
+	const conditionInput = popup.locator(
+		".plain-debug-breakpoint-popup-condition",
+	);
+	const logInput = popup.locator(".plain-debug-breakpoint-popup-log-message");
+	await expect(conditionInput).toBeEnabled();
+	await expect(logInput).toBeEnabled();
+
+	// Meaningful interaction: typing a condition and saving re-syncs the
+	// breakpoint with the live session — a real second `debug_set_breakpoints`
+	// call carrying the real condition text, not just a local UI update.
+	await conditionInput.fill("total > 5");
+	await popup.locator(".plain-debug-breakpoint-popup-save").click();
+	await expect(popup).toHaveCount(0);
+
+	await expect
+		.poll(
+			async () =>
+				(await terminalCallsFor(page, "debug_set_breakpoints")).length,
+		)
+		.toBe(2);
+	const calls = await terminalCallsFor(page, "debug_set_breakpoints");
+	expect(calls[1]!.args.request).toEqual({
+		sessionId,
+		path: "main.py",
+		breakpoints: [{ line: 6, condition: "total > 5", logMessage: null }],
+	});
 
 	expect(pageErrors).toEqual([]);
 });

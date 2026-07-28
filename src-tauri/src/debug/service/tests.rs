@@ -229,12 +229,26 @@ def next_seq():
 pending_launch_seq = None
 pending_launch_command = None
 
+# `F100` S3: five synthetic stack frames (for `stackTrace` pagination),
+# two scopes for frame 1 and zero for frame 2 (the "genuinely empty scopes"
+# scenario), and a 5000-element synthetic "big" collection under
+# `variablesReference: 300` (the large-array/pagination scenario) — all
+# scripted directly in this same real subprocess so the interactive-command
+# tests below exercise a real spawned process, not just the in-memory mock
+# `debug::session::tests` already covers.
+STACK_FRAMES = [
+    {"id": i, "name": "frame%d" % i, "line": i * 10, "column": 1,
+     "source": {"path": "/tmp/prog.py", "name": "prog.py"}}
+    for i in range(1, 6)
+]
+
 while True:
     message = read_message()
     if message is None:
         break
     command = message.get("command")
     request_seq = message.get("seq")
+    arguments = message.get("arguments") or {}
     if command == "initialize":
         write_message({
             "seq": next_seq(), "type": "response", "request_seq": request_seq,
@@ -246,9 +260,24 @@ while True:
         pending_launch_command = command
         write_message({"seq": next_seq(), "type": "event", "event": "initialized"})
     elif command == "setBreakpoints":
+        # Real-adapter-like reply: a requested line of 5 gets moved to the
+        # nearest executable line (105); a requested line of 999 is rejected
+        # outright (`verified: false`); everything else verifies as-is —
+        # exactly the two adversarial behaviors this project's own research
+        # doc calls out by name ("adapter 回传的 verified 状态与实际落点行号
+        # 可能与请求不同——真实 adapter 会移动断点到最近可执行行").
+        reported = []
+        for entry in arguments.get("breakpoints", []):
+            line = entry.get("line")
+            if line == 5:
+                reported.append({"verified": True, "line": 105})
+            elif line == 999:
+                reported.append({"verified": False, "message": "no code on this line"})
+            else:
+                reported.append({"verified": True, "line": line})
         write_message({
             "seq": next_seq(), "type": "response", "request_seq": request_seq,
-            "success": True, "command": "setBreakpoints", "body": {"breakpoints": []},
+            "success": True, "command": "setBreakpoints", "body": {"breakpoints": reported},
         })
     elif command == "configurationDone":
         write_message({
@@ -260,6 +289,71 @@ while True:
             "success": True, "command": pending_launch_command,
         })
         write_message({"seq": next_seq(), "type": "event", "event": "stopped", "body": {"reason": "entry", "threadId": 1}})
+    elif command == "stackTrace":
+        start_frame = arguments.get("startFrame", 0)
+        levels = arguments.get("levels")
+        end = start_frame + levels if levels else len(STACK_FRAMES)
+        write_message({
+            "seq": next_seq(), "type": "response", "request_seq": request_seq,
+            "success": True, "command": "stackTrace",
+            "body": {"stackFrames": STACK_FRAMES[start_frame:end], "totalFrames": len(STACK_FRAMES)},
+        })
+    elif command == "scopes":
+        frame_id = arguments.get("frameId")
+        if frame_id == 1:
+            scopes = [
+                {"name": "Locals", "variablesReference": 100, "namedVariables": 2, "expensive": False},
+                {"name": "Globals", "variablesReference": 200, "namedVariables": 1, "expensive": False},
+            ]
+        else:
+            scopes = []
+        write_message({
+            "seq": next_seq(), "type": "response", "request_seq": request_seq,
+            "success": True, "command": "scopes", "body": {"scopes": scopes},
+        })
+    elif command == "variables":
+        reference = arguments.get("variablesReference")
+        if reference == 100:
+            variables = [
+                {"name": "a", "value": "3", "type": "int", "variablesReference": 0},
+                {"name": "big", "value": "list[5000]", "variablesReference": 300, "indexedVariables": 5000},
+            ]
+        elif reference == 200:
+            variables = [{"name": "PI", "value": "3.14", "type": "float", "variablesReference": 0}]
+        elif reference == 300:
+            start = arguments.get("start", 0) or 0
+            count = arguments.get("count")
+            end = start + count if count else 5000
+            variables = [
+                {"name": "item_%d" % i, "value": str(i), "variablesReference": 0}
+                for i in range(start, min(end, 5000))
+            ]
+        else:
+            variables = []
+        write_message({
+            "seq": next_seq(), "type": "response", "request_seq": request_seq,
+            "success": True, "command": "variables", "body": {"variables": variables},
+        })
+    elif command == "evaluate":
+        expression = arguments.get("expression")
+        if expression == "raise NameError":
+            write_message({
+                "seq": next_seq(), "type": "response", "request_seq": request_seq,
+                "success": False, "command": "evaluate",
+                "message": "NameError: name 'raise' is not defined",
+            })
+        elif expression == "a + b" and arguments.get("context") == "watch":
+            write_message({
+                "seq": next_seq(), "type": "response", "request_seq": request_seq,
+                "success": True, "command": "evaluate",
+                "body": {"result": "7", "type": "int", "variablesReference": 0},
+            })
+        else:
+            write_message({
+                "seq": next_seq(), "type": "response", "request_seq": request_seq,
+                "success": True, "command": "evaluate",
+                "body": {"result": repr(expression), "variablesReference": 0},
+            })
     elif command == "disconnect":
         write_message({
             "seq": next_seq(), "type": "response", "request_seq": request_seq,
@@ -331,6 +425,194 @@ fn debug_launch_over_a_real_spawned_stdio_process_drives_the_full_handshake_end_
 
     block_on(service.disconnect(window_label, session_id)).expect("disconnect succeeds");
     assert_eq!(service.session_count_for_test(window_label), 0);
+}
+
+/// `F100` S3: the interactive debugging surface (`send_request` — the
+/// generic seam `debug_set_breakpoints`/`debug_stack_trace`/`debug_scopes`/
+/// `debug_variables`/`debug_evaluate` all resolve to), exercised end to end
+/// against the *same* real spawned Python subprocess mock adapter the S2
+/// handshake test above uses (extended with `stackTrace`/`scopes`/
+/// `variables`/`evaluate` handling — see the script's own comments), proving
+/// this is real production wiring, not just the in-memory harness
+/// `debug::session::tests` already covers. Exercises every adversarial
+/// behavior this project's own research doc and this slice's task both call
+/// out by name: a breakpoint the adapter moves to a different line, one it
+/// rejects outright (`verified: false`), a genuinely empty `scopes` array,
+/// `variablesReference` pagination/slicing (`start`/`count`) against a
+/// synthetic 5000-element collection, and an adapter `success: false` reply
+/// mapped to `DEBUG_REQUEST_FAILED`.
+#[test]
+fn interactive_debugging_commands_work_end_to_end_over_a_real_spawned_stdio_process() {
+    let Some(python3) = resolve_python3() else {
+        eprintln!(
+            "skipping interactive_debugging_commands_work_end_to_end_over_a_real_spawned_stdio_process: \
+             python3 not found via `command -v python3`; cannot construct the real stdio mock adapter subprocess"
+        );
+        return;
+    };
+
+    let descriptor = AdapterSpawnDescriptor {
+        command: python3.to_string_lossy().into_owned(),
+        args: vec!["-c".to_owned(), PYTHON_MOCK_ADAPTER_SCRIPT.to_owned()],
+    };
+    let window_label = "main";
+    let fixture = trusted_and_confirmed(window_label, &descriptor, AdapterTransportKind::Stdio);
+    let service = DebugSessionService::new();
+    let (_sink, sink_for_session) = recording_sink();
+
+    let (session_id, _capabilities) = block_on(service.start_session(
+        &fixture.trust,
+        &fixture.workspace,
+        window_label,
+        &fixture.confirmation,
+        LaunchRequestKind::Launch,
+        SessionTransportRequest::Stdio {
+            command: descriptor.command.clone(),
+            args: descriptor.args.clone(),
+        },
+        "mock-python".to_owned(),
+        json!({}),
+        Vec::new(),
+        sink_for_session,
+    ))
+    .expect("handshake succeeds");
+
+    // --- setBreakpoints: a moved line and a rejected one, in one request. ---
+    let set_breakpoints_body = block_on(service.send_request(
+        window_label,
+        session_id,
+        "setBreakpoints",
+        json!({
+            "source": {"path": "/tmp/prog.py"},
+            "breakpoints": [{"line": 5}, {"line": 999}, {"line": 10}],
+        }),
+    ))
+    .expect("setBreakpoints succeeds");
+    let set_breakpoints = crate::debug::dto::parse_set_breakpoints_response(&set_breakpoints_body)
+        .expect("well-formed setBreakpoints response");
+    assert!(set_breakpoints.breakpoints[0].verified);
+    assert_eq!(set_breakpoints.breakpoints[0].line, Some(105));
+    assert!(!set_breakpoints.breakpoints[1].verified);
+    assert!(set_breakpoints.breakpoints[1]
+        .message
+        .as_deref()
+        .unwrap()
+        .contains("no code"));
+    assert!(set_breakpoints.breakpoints[2].verified);
+    assert_eq!(set_breakpoints.breakpoints[2].line, Some(10));
+
+    // --- stackTrace: pagination via startFrame/levels. ---
+    let full_stack_body = block_on(service.send_request(
+        window_label,
+        session_id,
+        "stackTrace",
+        json!({"threadId": 1}),
+    ))
+    .expect("stackTrace succeeds");
+    let full_stack = crate::debug::dto::parse_stack_trace_response(&full_stack_body)
+        .expect("well-formed stackTrace response");
+    assert_eq!(full_stack.stack_frames.len(), 5);
+    assert_eq!(full_stack.total_frames, Some(5));
+
+    let paged_stack_body = block_on(service.send_request(
+        window_label,
+        session_id,
+        "stackTrace",
+        json!({"threadId": 1, "startFrame": 2, "levels": 2}),
+    ))
+    .expect("paginated stackTrace succeeds");
+    let paged_stack = crate::debug::dto::parse_stack_trace_response(&paged_stack_body)
+        .expect("well-formed paginated stackTrace response");
+    assert_eq!(paged_stack.stack_frames.len(), 2);
+    assert_eq!(
+        paged_stack.stack_frames[0].id,
+        full_stack.stack_frames[2].id
+    );
+    assert_eq!(paged_stack.total_frames, Some(5));
+
+    // --- scopes: real content for frame 1, genuinely empty for frame 2. ---
+    let scopes_body =
+        block_on(service.send_request(window_label, session_id, "scopes", json!({"frameId": 1})))
+            .expect("scopes succeeds");
+    let scopes = crate::debug::dto::parse_scopes_response(&scopes_body)
+        .expect("well-formed scopes response");
+    assert_eq!(scopes.scopes.len(), 2);
+    assert_eq!(scopes.scopes[0].name, "Locals");
+    let locals_reference = scopes.scopes[0].variables_reference;
+
+    let empty_scopes_body =
+        block_on(service.send_request(window_label, session_id, "scopes", json!({"frameId": 2})))
+            .expect("scopes for a frame with no scopes still succeeds");
+    let empty_scopes = crate::debug::dto::parse_scopes_response(&empty_scopes_body)
+        .expect("well-formed empty scopes response");
+    assert!(empty_scopes.scopes.is_empty());
+
+    // --- variables: a leaf, a further-expandable nested reference, and real
+    //     start/count pagination against a synthetic 5000-element collection.
+    let locals_variables_body = block_on(service.send_request(
+        window_label,
+        session_id,
+        "variables",
+        json!({"variablesReference": locals_reference}),
+    ))
+    .expect("variables succeeds");
+    let locals_variables = crate::debug::dto::parse_variables_response(&locals_variables_body)
+        .expect("well-formed variables response");
+    assert_eq!(locals_variables.variables[0].name, "a");
+    assert_eq!(locals_variables.variables[0].variables_reference, 0);
+    let big_reference = locals_variables.variables[1].variables_reference;
+    assert_eq!(locals_variables.variables[1].indexed_variables, Some(5000));
+
+    let big_page_body = block_on(service.send_request(
+        window_label,
+        session_id,
+        "variables",
+        json!({"variablesReference": big_reference, "start": 4990, "count": 10}),
+    ))
+    .expect("paginated variables succeeds");
+    let big_page = crate::debug::dto::parse_variables_response(&big_page_body)
+        .expect("well-formed paginated variables response");
+    assert_eq!(big_page.variables.len(), 10);
+    assert_eq!(big_page.variables[0].name, "item_4990");
+    assert_eq!(big_page.variables[9].name, "item_4999");
+
+    // --- evaluate: a successful watch expression and an adapter-rejected one. ---
+    let evaluate_body = block_on(service.send_request(
+        window_label,
+        session_id,
+        "evaluate",
+        json!({"expression": "a + b", "context": "watch"}),
+    ))
+    .expect("evaluate succeeds");
+    let evaluate = crate::debug::dto::parse_evaluate_response(&evaluate_body)
+        .expect("well-formed evaluate response");
+    assert_eq!(evaluate.result, "7");
+    assert_eq!(evaluate.kind.as_deref(), Some("int"));
+
+    let failed_evaluate = block_on(service.send_request(
+        window_label,
+        session_id,
+        "evaluate",
+        json!({"expression": "raise NameError", "context": "watch"}),
+    ));
+    let error = failed_evaluate.expect_err("an adapter `success: false` reply must fail");
+    assert_eq!(error.code(), "DEBUG_REQUEST_FAILED");
+    assert!(error.message().contains("NameError"));
+
+    // --- an unknown session id is DEBUG_SESSION_NOT_FOUND, not a hang/panic. ---
+    let unknown_session = DebugSessionId::new();
+    let unknown_result = block_on(service.send_request(
+        window_label,
+        unknown_session,
+        "evaluate",
+        json!({"expression": "1", "context": "watch"}),
+    ));
+    assert_eq!(
+        unknown_result.unwrap_err().code(),
+        "DEBUG_SESSION_NOT_FOUND"
+    );
+
+    block_on(service.disconnect(window_label, session_id)).expect("disconnect succeeds");
 }
 
 /// The real-socket counterpart of a mock adapter, scripted directly against

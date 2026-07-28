@@ -2,6 +2,13 @@ import type {
 	BackupEntry,
 	CommandError,
 	DebugAdapterConfirmationSubject,
+	DebugAdapterTarget,
+	DebugEvaluateResult,
+	DebugEventPayload,
+	DebugScope,
+	DebugSessionStartResult,
+	DebugStackFrame,
+	DebugVariable,
 	GitBlameCommitHeader,
 	GitBlameFileResult,
 	GitBlameLineEntry,
@@ -122,6 +129,13 @@ import {
 	decodeDebugAdapterConfirmationState,
 	decodeDebugAdapterConfirmationVoid,
 	frozenDebugAdapterConfirmationRequest,
+	frozenDebugEvaluateRequest,
+	frozenDebugScopesRequest,
+	frozenDebugSessionIdRequest,
+	frozenDebugSessionStartRequest,
+	frozenDebugSetBreakpointsRequest,
+	frozenDebugStackTraceRequest,
+	frozenDebugVariablesRequest,
 } from "./debug-codec";
 import {
 	decodeTerminalScrollbackResult,
@@ -1040,6 +1054,18 @@ export interface BrowserMockBridgeOptions {
 	/** `F080` S1: seeds the deterministic `gitStatus`/`gitDiffFiles`/
 	 * `gitShowBlob` responses — see `BrowserMockGitFixtureForTest`. */
 	readonly gitFixtureForTest?: BrowserMockGitFixtureForTest;
+	/** `F100` S3: seeds the deterministic `debug_launch`/`debug_attach`/
+	 * `debug_set_breakpoints`/`debug_stack_trace`/`debug_scopes`/
+	 * `debug_variables`/`debug_evaluate` responses — see
+	 * `BrowserMockDebugFixtureForTest`. */
+	readonly debugFixtureForTest?: BrowserMockDebugFixtureForTest;
+	/** Runs once per `debugLaunch`/`debugAttach` call, handing the caller a
+	 * controller scoped to *that* session so tests/E2E can push synthetic DAP
+	 * events (`stopped`, `continued`, `output`, …) and simulate the transport
+	 * closing — see `BrowserMockDebugSessionController`. */
+	readonly onDebugSessionForTest?: (
+		controller: BrowserMockDebugSessionController,
+	) => void;
 }
 
 /**
@@ -1252,6 +1278,105 @@ export interface BrowserMockGitNetworkFixtureForTest {
 	 * `--force-with-lease` lease, letting Browser E2E exercise the
 	 * force-push-rejected path without modeling a real divergent remote. */
 	readonly forcePushRejectedForTest?: boolean;
+}
+
+/**
+ * Deterministic, injectable `debug_stack_trace`/`debug_scopes`/
+ * `debug_variables`/`debug_evaluate`/`debug_set_breakpoints` responses
+ * (`F100` S3) — like `BrowserMockGitFixtureForTest`'s own doc comment says of
+ * the git fixtures, this mock never re-implements a real DAP adapter (the
+ * real protocol-level behavior — handshake ordering, `request_seq`
+ * correlation, capability negotiation — has thorough fixture coverage in
+ * `src-tauri/src/debug/{session,service}/tests.rs`, including a real spawned
+ * Python mock adapter); it only exists so a consuming frontend (the call
+ * stack/variables/watch views) has structurally correct, scriptable
+ * responses to develop and test against. Every one of the by-id/by-reference
+ * maps below mirrors this mock's other fixtures' own "a missing key defaults
+ * to an empty, harmless result" convention rather than rejecting.
+ */
+export interface BrowserMockDebugFixtureForTest {
+	/** The negotiated `Capabilities` every mock `debugLaunch`/`debugAttach`
+	 * call returns — defaults to `{}` (every `supportsXxx` query answers
+	 * `false`), letting a test exercise the capability-gated
+	 * conditional-breakpoint/log-point UI's disabled path without seeding
+	 * anything, and its enabled path by setting e.g.
+	 * `{ supportsConditionalBreakpoints: true }`. */
+	readonly capabilities?: Readonly<Record<string, unknown>>;
+	/** Keyed by `threadId` — the full (unpaged) synthetic call stack
+	 * `debugStackTrace` slices by `startFrame`/`levels` exactly like a real
+	 * adapter would (this mock does implement real slicing, not a canned
+	 * per-call response, so a test can genuinely exercise pagination). A
+	 * missing `threadId` key defaults to an empty stack. */
+	readonly stackFramesByThread?: Readonly<
+		Record<number, readonly DebugStackFrame[]>
+	>;
+	/** Keyed by `frameId` — a missing key defaults to an empty `scopes` array
+	 * (the "genuinely empty scopes" scenario this feature's own acceptance
+	 * criteria call out), not an error. */
+	readonly scopesByFrame?: Readonly<Record<number, readonly DebugScope[]>>;
+	/** Keyed by `variablesReference` — the full (unpaged) synthetic children
+	 * list `debugVariables` slices by `start`/`count` exactly like a real
+	 * adapter would, letting a test seed a large synthetic collection (e.g.
+	 * a 5,000-element array) and exercise real pagination rather than a
+	 * canned per-call response. A missing reference defaults to an empty
+	 * list. */
+	readonly variablesByReference?: Readonly<
+		Record<number, readonly DebugVariable[]>
+	>;
+	/** Keyed by the literal `expression` string — a missing key falls back to
+	 * a harmless synthetic result (`{ result: expression, ... }`) rather than
+	 * rejecting, so a test only needs to seed the expressions it actually
+	 * cares about asserting on. */
+	readonly evaluateByExpression?: Readonly<Record<string, DebugEvaluateResult>>;
+	/** Keyed by `path`, then by the *requested* line number — lets a test
+	 * script the two adversarial `setBreakpoints` outcomes this feature's own
+	 * acceptance criteria name explicitly: an adapter moving a breakpoint to
+	 * a different line (`{ line: <different number> }`) and an adapter
+	 * rejecting one outright (`{ verified: false, message: "…" }`). A
+	 * requested line with no scripted outcome verifies as-is, at the
+	 * requested line. */
+	readonly breakpointOutcomes?: Readonly<
+		Record<
+			string,
+			Readonly<
+				Record<
+					number,
+					Readonly<{
+						readonly verified?: boolean;
+						readonly line?: number;
+						readonly message?: string;
+					}>
+				>
+			>
+		>
+	>;
+}
+
+/**
+ * Per-session control surface for the mock debug session `debugLaunch`/
+ * `debugAttach` creates — handed to `onDebugSessionForTest` the instant a
+ * session starts, mirroring `BrowserMockTerminalSessionController`'s own
+ * "per-session push surface" shape. Unlike the terminal mock's fake PTY, this
+ * mock does not simulate step/continue/pause execution control at all (that
+ * is `F100` S4's own command surface, not yet implemented anywhere in this
+ * domain) — it only pushes whatever DAP event a test scripts, exactly as a
+ * real adapter would over `plain://debug-event`, which is precisely what the
+ * call-stack view's own "`stopped` drives a refresh" wiring needs to
+ * exercise.
+ */
+export interface BrowserMockDebugSessionController {
+	readonly sessionId: string;
+	/** Pushes one DAP event (or one of Plain's own `plain/`-prefixed synthetic
+	 * notifications) to every current `debugWatchEvent` listener, exactly as
+	 * `src-tauri/src/debug/session.rs`'s `DebugEventSink::emit_event` would. */
+	emitEvent(event: string, body: unknown): void;
+	/** Simulates the transport closing: removes the session from this mock's
+	 * live-session table (so a further call against `sessionId` now rejects
+	 * with `DEBUG_SESSION_NOT_FOUND`, exactly like the real backend after
+	 * `close_window`/a crashed adapter) and pushes the reserved
+	 * `"plain/sessionEnded"` event, mirroring
+	 * `DebugEventSink::emit_session_ended`. Idempotent after the first call. */
+	finish(): void;
 }
 
 /**
@@ -5265,6 +5390,124 @@ export function createBrowserMockBridge(
 		);
 	}
 
+	// --- `F100` S3: real session-lifecycle + interactive debugging mock. ---
+
+	function debugAdapterNotConfirmed(): CommandError {
+		return commandError(
+			"DEBUG_ADAPTER_NOT_CONFIRMED",
+			"This exact adapter command has not been confirmed for this workspace yet.",
+		);
+	}
+
+	function debugSessionNotFound(): CommandError {
+		return commandError(
+			"DEBUG_SESSION_NOT_FOUND",
+			"The requested debug session does not exist for this window.",
+		);
+	}
+
+	const liveDebugSessions = new Set<string>();
+	const issuedDebugSessionIds = new Set<string>();
+	const debugEventListeners = new Set<(event: DebugEventPayload) => void>();
+
+	const nextDebugSessionId = (): string => {
+		for (let attempt = 0; attempt < 16; attempt += 1) {
+			const bytes = new Uint8Array(16);
+			globalThis.crypto.getRandomValues(bytes);
+			bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+			bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+			const hex = [...bytes]
+				.map((value) => value.toString(16).padStart(2, "0"))
+				.join("");
+			const id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(
+				12,
+				16,
+			)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+			if (!issuedDebugSessionIds.has(id)) {
+				issuedDebugSessionIds.add(id);
+				return id;
+			}
+		}
+		throw new Error("Browser mock debug session id generation failed.");
+	};
+
+	function requireLiveMockDebugSession(sessionId: string): void {
+		if (!liveDebugSessions.has(sessionId)) {
+			throw debugSessionNotFound();
+		}
+	}
+
+	function emitMockDebugEvent(
+		sessionId: string,
+		event: string,
+		body: unknown,
+	): void {
+		const payload: DebugEventPayload = Object.freeze({
+			sessionId,
+			event,
+			body,
+		});
+		for (const listener of debugEventListeners) {
+			listener(payload);
+		}
+	}
+
+	/** Shared by mock `debugLaunch`/`debugAttach` — see
+	 * `PlainBridge.debugLaunch`'s own doc comment for why neither ever sends
+	 * an initial breakpoint (this mock therefore never models
+	 * `initialBreakpoints` either). Enforces the exact same two gates the
+	 * real Rust `start_session` does, in the same order: workspace trust
+	 * first, then the exact `(command, args, transport)` confirmation —
+	 * never spawns/connects (there is nothing to spawn/connect in a browser
+	 * mock) until both pass. */
+	function startMockDebugSession(
+		target: DebugAdapterTarget,
+		adapterId: string,
+		launchArguments: Readonly<Record<string, unknown>>,
+	): DebugSessionStartResult {
+		const request = frozenDebugSessionStartRequest(
+			target,
+			adapterId,
+			launchArguments,
+		);
+		if (roots.size === 0 || !terminalTrusted) {
+			throw terminalNotTrusted();
+		}
+		const subject: DebugAdapterConfirmationSubject = Object.freeze({
+			command: request.command as string,
+			args: request.args as readonly string[],
+			transport: request.transport as "stdio" | "tcp",
+		});
+		if (!debugAdapterConfirmations.has(debugAdapterConfirmationKey(subject))) {
+			throw debugAdapterNotConfirmed();
+		}
+		const sessionId = nextDebugSessionId();
+		liveDebugSessions.add(sessionId);
+		const capabilities = { ...options.debugFixtureForTest?.capabilities };
+		const controller: BrowserMockDebugSessionController = Object.freeze({
+			sessionId,
+			emitEvent(event: string, body: unknown): void {
+				if (!liveDebugSessions.has(sessionId)) {
+					return;
+				}
+				emitMockDebugEvent(sessionId, event, body);
+			},
+			finish(): void {
+				if (!liveDebugSessions.delete(sessionId)) {
+					return;
+				}
+				emitMockDebugEvent(sessionId, "plain/sessionEnded", {
+					reason: "transportClosed",
+				});
+			},
+		});
+		options.onDebugSessionForTest?.(controller);
+		return Object.freeze({
+			sessionId,
+			capabilities: Object.freeze(capabilities),
+		});
+	}
+
 	interface MockTerminalSession {
 		readonly sessionId: string;
 		cols: number;
@@ -7014,6 +7257,134 @@ export function createBrowserMockBridge(
 			const request = frozenDebugAdapterConfirmationRequest(descriptor);
 			debugAdapterConfirmations.delete(debugAdapterConfirmationKey(request));
 			decodeDebugAdapterConfirmationVoid(null);
+		},
+		async debugLaunch(target, adapterId, launchArguments) {
+			return startMockDebugSession(target, adapterId, launchArguments);
+		},
+		async debugAttach(target, adapterId, launchArguments) {
+			return startMockDebugSession(target, adapterId, launchArguments);
+		},
+		async debugDisconnect(sessionId) {
+			const request = frozenDebugSessionIdRequest(sessionId);
+			requireLiveMockDebugSession(request.sessionId as string);
+			liveDebugSessions.delete(request.sessionId as string);
+		},
+		async debugSetBreakpoints(sessionId, path, breakpoints) {
+			const request = frozenDebugSetBreakpointsRequest(
+				sessionId,
+				path,
+				breakpoints,
+			);
+			requireLiveMockDebugSession(request.sessionId as string);
+			const outcomesForPath =
+				options.debugFixtureForTest?.breakpointOutcomes?.[
+					request.path as string
+				];
+			const requested = request.breakpoints as readonly { line: number }[];
+			const reported = requested.map((entry) => {
+				const outcome = outcomesForPath?.[entry.line];
+				if (outcome?.verified === false) {
+					return Object.freeze({
+						verified: false,
+						line: null,
+						id: null,
+						message: outcome.message ?? "Breakpoint could not be set.",
+					});
+				}
+				return Object.freeze({
+					verified: true,
+					line: outcome?.line ?? entry.line,
+					id: null,
+					message: null,
+				});
+			});
+			return Object.freeze({ breakpoints: Object.freeze(reported) });
+		},
+		async debugStackTrace(sessionId, threadId, startFrame, levels) {
+			const request = frozenDebugStackTraceRequest(
+				sessionId,
+				threadId,
+				startFrame,
+				levels,
+			);
+			requireLiveMockDebugSession(request.sessionId as string);
+			const all =
+				options.debugFixtureForTest?.stackFramesByThread?.[
+					request.threadId as number
+				] ?? [];
+			const start = (request.startFrame as number | null) ?? 0;
+			const levelsValue = request.levels as number | null;
+			const sliced =
+				levelsValue === null
+					? all.slice(start)
+					: all.slice(start, start + levelsValue);
+			return Object.freeze({
+				stackFrames: Object.freeze(sliced.map((frame) => ({ ...frame }))),
+				totalFrames: all.length,
+			});
+		},
+		async debugScopes(sessionId, frameId) {
+			const request = frozenDebugScopesRequest(sessionId, frameId);
+			requireLiveMockDebugSession(request.sessionId as string);
+			const scopes =
+				options.debugFixtureForTest?.scopesByFrame?.[
+					request.frameId as number
+				] ?? [];
+			return Object.freeze({
+				scopes: Object.freeze(scopes.map((scope) => ({ ...scope }))),
+			});
+		},
+		async debugVariables(sessionId, variablesReference, start, count, filter) {
+			const request = frozenDebugVariablesRequest(
+				sessionId,
+				variablesReference,
+				start,
+				count,
+				filter,
+			);
+			requireLiveMockDebugSession(request.sessionId as string);
+			const all =
+				options.debugFixtureForTest?.variablesByReference?.[
+					request.variablesReference as number
+				] ?? [];
+			const startIndex = (request.start as number | null) ?? 0;
+			const countValue = request.count as number | null;
+			const sliced =
+				countValue === null
+					? all.slice(startIndex)
+					: all.slice(startIndex, startIndex + countValue);
+			return Object.freeze({
+				variables: Object.freeze(sliced.map((variable) => ({ ...variable }))),
+			});
+		},
+		async debugEvaluate(sessionId, expression, frameId, context) {
+			const request = frozenDebugEvaluateRequest(
+				sessionId,
+				expression,
+				frameId,
+				context,
+			);
+			requireLiveMockDebugSession(request.sessionId as string);
+			const fixture =
+				options.debugFixtureForTest?.evaluateByExpression?.[
+					request.expression as string
+				];
+			if (fixture === undefined) {
+				return Object.freeze({
+					result: request.expression as string,
+					type: null,
+					variablesReference: 0,
+					namedVariables: null,
+					indexedVariables: null,
+				});
+			}
+			return Object.freeze({ ...fixture });
+		},
+		debugWatchEvent(listener) {
+			debugEventListeners.add(listener);
+			return () => {
+				debugEventListeners.delete(listener);
+			};
 		},
 	};
 }

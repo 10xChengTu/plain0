@@ -1,45 +1,40 @@
 //! `F100` S1 added the first-run confirmation gate's own query/grant/revoke
 //! surface (`debug_adapter_confirmation_state`/`_grant`/`_revoke`). `F100` S2
-//! adds exactly three more — `debug_launch`/`debug_attach`/`debug_disconnect`
-//! — the real session-lifecycle surface. Read this comment before adding a
-//! seventh.
+//! added exactly three more — `debug_launch`/`debug_attach`/
+//! `debug_disconnect` — the real session-lifecycle surface. `F100` S3 (this
+//! slice) adds the *interactive* debugging surface: `debug_set_breakpoints`/
+//! `debug_stack_trace`/`debug_scopes`/`debug_variables`/`debug_evaluate`.
+//! Read this comment before adding a twelfth.
 //!
-//! # Why `debug_launch`/`debug_attach`/`debug_disconnect`, and only these three, are new
+//! # `F100` S3's five new commands
 //!
-//! These are the minimal commands that actually start/stop a live session
-//! ([`super::service::DebugSessionService::start_session`]/`disconnect`) —
-//! `debug_launch`/`debug_attach` differ only in which literal DAP request
-//! they send (`"launch"` vs `"attach"`; see
-//! [`super::session::LaunchRequestKind`]), sharing the identical wire shape
-//! ([`super::dto::DebugSessionStartRequest`]) and query-building logic. Per
-//! `super::session`'s own module doc, driving the *interactive* debugging
-//! surface (`debug_set_breakpoints`/`debug_stack_trace`/`debug_scopes`/
-//! `debug_variables`/`debug_evaluate`/`debug_continue`/`debug_next`/
-//! `debug_step_in`/`debug_step_out`/`debug_pause`) remains out of scope —
-//! that is `F100` S3/S4's job, per the frozen research doc's own slice
-//! breakdown, once there is a UI to drive them from
-//! (`docs/research/2026-07-28-generic-dap.md`'s "S2...可以先用一个 DEV-only
-//! 诊断钩子验证全链路,不急着接 UI"). The one exception to "no generic escape
-//! hatch" here is the same one ADR 0003 already names: `arguments` on
-//! `debug_launch`/`debug_attach` is an opaque JSON payload, forwarded
-//! transparently into the DAP `launch`/`attach` request — that field is
-//! DAP's own already-open protocol surface, not a new escape hatch this
-//! domain invents. `initialBreakpoints` is similarly minimal wire plumbing
-//! for the handshake's "配置断点系列" step (see
-//! [`super::dto::SourceBreakpointsRequest`]'s own doc comment) — not the
-//! breakpoint feature/UI itself.
+//! Every one of these is a thin wrapper: convert the request DTO into a
+//! `(session_id, arguments)` pair via its own `into_parts`, call
+//! [`super::service::DebugSessionService::send_request`] with the one literal
+//! DAP command name each corresponds to, then parse the raw response body via
+//! the matching `dto::parse_*_response` function. None of these five take a
+//! caller-supplied DAP command name — the command string is always a literal
+//! in this file, matching `debug_launch`/`debug_attach`'s own "no generic
+//! escape hatch" shape. `debug_set_breakpoints` is deliberately independent
+//! of `debug_launch`/`debug_attach`'s own `initialBreakpoints` field (see
+//! [`super::dto::DebugSetBreakpointsRequest`]'s own doc comment) — it is the
+//! *only* path Plain's frontend uses to sync breakpoints with a live session,
+//! both for a breakpoint toggled before the session started and one toggled
+//! while it is already running, deliberately not duplicating that
+//! serialization logic across two call sites. `debug_evaluate`'s `context`
+//! field is a closed, spec-derived enum
+//! ([`super::dto::DebugEvaluateContext`]), not an arbitrary string — `F100`
+//! S3 only ever sends `context: "watch"` from the Watch view; `F100` S4's
+//! Debug Console is expected to be the first `"repl"` caller. Still out of
+//! scope, per the frozen research doc's own slice breakdown: `debug_continue`/
+//! `debug_next`/`debug_step_in`/`debug_step_out`/`debug_pause` (`F100` S4).
 //!
-//! # No `app/` UI consumes these commands yet
+//! # Why `debug_launch`/`debug_attach`/`debug_disconnect` finally have a real caller
 //!
-//! Exactly like [`super::exec::spawn_adapter`]/[`super::tcp::connect_adapter`]
-//! themselves had zero production callers across S0 *and* S1, these three
-//! commands have zero frontend callers as of S2 — this slice's own report
-//! discloses this explicitly as a deliberate, frozen-doc-sanctioned
-//! narrowing, not an oversight. They are registered in `lib.rs`'s
-//! `generate_handler!` and exercised by this domain's own Rust tests
-//! (`super::service::tests`), proving the whole IPC-reachable path
-//! type-checks and works end to end, exactly as S0's `commands.rs` did for
-//! `spawn_adapter` before S1 gave it its first real caller.
+//! S2 disclosed these three as having zero frontend callers. `F100` S3 is the
+//! first slice to add `app/` UI at all, so it is also the first to give these
+//! three a real production caller (`app/features/debug/plain-debug-session.ts`)
+//! — see this slice's own final report for the exact orchestration.
 //!
 //! # Adapter-config parsing stays entirely in the frontend
 //!
@@ -60,8 +55,11 @@ use crate::workspace::service::WorkspaceService;
 
 use super::confirm::ConfirmationService;
 use super::dto::{
-    AdapterConfirmationSubject, DebugEventPayload, DebugSessionId, DebugSessionIdRequest,
-    DebugSessionStartRequest, DebugSessionStartResult,
+    self, AdapterConfirmationSubject, DebugEvaluateRequest, DebugEvaluateResult, DebugEventPayload,
+    DebugScopesRequest, DebugScopesResult, DebugSessionId, DebugSessionIdRequest,
+    DebugSessionStartRequest, DebugSessionStartResult, DebugSetBreakpointsRequest,
+    DebugSetBreakpointsResult, DebugStackTraceRequest, DebugStackTraceResult,
+    DebugVariablesRequest, DebugVariablesResult,
 };
 use super::service::DebugSessionService;
 use super::session::{DebugEventSink, LaunchRequestKind, SessionEndReason};
@@ -269,6 +267,109 @@ pub(crate) async fn debug_disconnect(
         .inner()
         .disconnect(window.label(), request.into_parts())
         .await
+}
+
+/// Runtime `setBreakpoints` — see [`super::dto::DebugSetBreakpointsRequest`]'s
+/// own doc comment for why this is independent of `debug_launch`/
+/// `debug_attach`'s `initialBreakpoints` field.
+#[tauri::command]
+pub(crate) async fn debug_set_breakpoints(
+    window: WebviewWindow,
+    debug_sessions: State<'_, DebugSessionService>,
+    request: DebugSetBreakpointsRequest,
+) -> Result<DebugSetBreakpointsResult, CommandError> {
+    let query = request.into_parts()?;
+    let body = debug_sessions
+        .inner()
+        .send_request(
+            window.label(),
+            query.session_id,
+            "setBreakpoints",
+            query.arguments,
+        )
+        .await?;
+    dto::parse_set_breakpoints_response(&body)
+}
+
+/// Fetches (a page of) the call stack for one thread — see
+/// [`super::dto::DebugStackTraceRequest`]'s own doc comment for its
+/// `startFrame`/`levels` pagination fields.
+#[tauri::command]
+pub(crate) async fn debug_stack_trace(
+    window: WebviewWindow,
+    debug_sessions: State<'_, DebugSessionService>,
+    request: DebugStackTraceRequest,
+) -> Result<DebugStackTraceResult, CommandError> {
+    let query = request.into_parts();
+    let body = debug_sessions
+        .inner()
+        .send_request(
+            window.label(),
+            query.session_id,
+            "stackTrace",
+            query.arguments,
+        )
+        .await?;
+    dto::parse_stack_trace_response(&body)
+}
+
+/// Fetches the variable scopes available at one stack frame.
+#[tauri::command]
+pub(crate) async fn debug_scopes(
+    window: WebviewWindow,
+    debug_sessions: State<'_, DebugSessionService>,
+    request: DebugScopesRequest,
+) -> Result<DebugScopesResult, CommandError> {
+    let query = request.into_parts();
+    let body = debug_sessions
+        .inner()
+        .send_request(window.label(), query.session_id, "scopes", query.arguments)
+        .await?;
+    dto::parse_scopes_response(&body)
+}
+
+/// Expands one `variablesReference` — see
+/// [`super::dto::DebugVariablesRequest`]'s own doc comment for the lazy-
+/// expansion/pagination contract this implements.
+#[tauri::command]
+pub(crate) async fn debug_variables(
+    window: WebviewWindow,
+    debug_sessions: State<'_, DebugSessionService>,
+    request: DebugVariablesRequest,
+) -> Result<DebugVariablesResult, CommandError> {
+    let query = request.into_parts();
+    let body = debug_sessions
+        .inner()
+        .send_request(
+            window.label(),
+            query.session_id,
+            "variables",
+            query.arguments,
+        )
+        .await?;
+    dto::parse_variables_response(&body)
+}
+
+/// Evaluates an expression — the Watch view's own sole data source
+/// (`context: "watch"`); see [`super::dto::DebugEvaluateContext`]'s own doc
+/// comment for the other closed-enum context values this also accepts.
+#[tauri::command]
+pub(crate) async fn debug_evaluate(
+    window: WebviewWindow,
+    debug_sessions: State<'_, DebugSessionService>,
+    request: DebugEvaluateRequest,
+) -> Result<DebugEvaluateResult, CommandError> {
+    let query = request.into_parts()?;
+    let body = debug_sessions
+        .inner()
+        .send_request(
+            window.label(),
+            query.session_id,
+            "evaluate",
+            query.arguments,
+        )
+        .await?;
+    dto::parse_evaluate_response(&body)
 }
 
 #[cfg(test)]

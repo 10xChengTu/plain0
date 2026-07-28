@@ -2,6 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 
 import {
+	DEBUG_EVENT,
 	RUNTIME_READY_EVENT,
 	TERMINAL_DATA_EVENT,
 	TERMINAL_EXIT_EVENT,
@@ -47,7 +48,22 @@ import { createWorkspaceWatcherManager } from "./workspace-watcher";
 import {
 	decodeDebugAdapterConfirmationState,
 	decodeDebugAdapterConfirmationVoid,
+	decodeDebugEvaluateResult,
+	decodeDebugEventPayload,
+	decodeDebugScopesResult,
+	decodeDebugSessionStartResult,
+	decodeDebugSetBreakpointsResult,
+	decodeDebugStackTraceResult,
+	decodeDebugVariablesResult,
+	decodeDebugVoid,
 	frozenDebugAdapterConfirmationRequest,
+	frozenDebugEvaluateRequest,
+	frozenDebugScopesRequest,
+	frozenDebugSessionIdRequest,
+	frozenDebugSessionStartRequest,
+	frozenDebugSetBreakpointsRequest,
+	frozenDebugStackTraceRequest,
+	frozenDebugVariablesRequest,
 } from "./debug-codec";
 import {
 	decodeWorkspaceSearchFilesResult,
@@ -728,6 +744,103 @@ export function createNativeBridge(): PlainBridge {
 			decodeDebugAdapterConfirmationVoid(
 				await invoke<unknown>("debug_adapter_confirmation_revoke", { request }),
 			);
+		},
+		debugLaunch: async (target, adapterId, launchArguments) => {
+			const request = frozenDebugSessionStartRequest(
+				target,
+				adapterId,
+				launchArguments,
+			);
+			return decodeDebugSessionStartResult(
+				await invoke<unknown>("debug_launch", { request }),
+			);
+		},
+		debugAttach: async (target, adapterId, launchArguments) => {
+			const request = frozenDebugSessionStartRequest(
+				target,
+				adapterId,
+				launchArguments,
+			);
+			return decodeDebugSessionStartResult(
+				await invoke<unknown>("debug_attach", { request }),
+			);
+		},
+		debugDisconnect: async (sessionId) => {
+			const request = frozenDebugSessionIdRequest(sessionId);
+			decodeDebugVoid(await invoke<unknown>("debug_disconnect", { request }));
+		},
+		debugSetBreakpoints: async (sessionId, path, breakpoints) => {
+			const request = frozenDebugSetBreakpointsRequest(
+				sessionId,
+				path,
+				breakpoints,
+			);
+			return decodeDebugSetBreakpointsResult(
+				await invoke<unknown>("debug_set_breakpoints", { request }),
+			);
+		},
+		debugStackTrace: async (sessionId, threadId, startFrame, levels) => {
+			const request = frozenDebugStackTraceRequest(
+				sessionId,
+				threadId,
+				startFrame,
+				levels,
+			);
+			return decodeDebugStackTraceResult(
+				await invoke<unknown>("debug_stack_trace", { request }),
+			);
+		},
+		debugScopes: async (sessionId, frameId) => {
+			const request = frozenDebugScopesRequest(sessionId, frameId);
+			return decodeDebugScopesResult(
+				await invoke<unknown>("debug_scopes", { request }),
+			);
+		},
+		debugVariables: async (
+			sessionId,
+			variablesReference,
+			start,
+			count,
+			filter,
+		) => {
+			const request = frozenDebugVariablesRequest(
+				sessionId,
+				variablesReference,
+				start,
+				count,
+				filter,
+			);
+			return decodeDebugVariablesResult(
+				await invoke<unknown>("debug_variables", { request }),
+			);
+		},
+		debugEvaluate: async (sessionId, expression, frameId, context) => {
+			const request = frozenDebugEvaluateRequest(
+				sessionId,
+				expression,
+				frameId,
+				context,
+			);
+			return decodeDebugEvaluateResult(
+				await invoke<unknown>("debug_evaluate", { request }),
+			);
+		},
+		debugWatchEvent: (listener) => {
+			let unlisten: (() => void) | undefined;
+			let disposed = false;
+			void listen<unknown>(DEBUG_EVENT, (event) => {
+				listener(decodeDebugEventPayload(event.payload));
+			}).then((resolved) => {
+				if (disposed) {
+					void resolved();
+					return;
+				}
+				unlisten = resolved;
+			});
+			return () => {
+				disposed = true;
+				unlisten?.();
+			};
 		},
 	};
 }
