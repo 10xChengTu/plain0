@@ -370,3 +370,40 @@ function truncatedNoticeItem(): HTMLElement {
 	item.textContent = "Showing the most recent commits only.";
 	return item;
 }
+
+Object.freeze(PlainGitHistoryView.prototype);
+
+// Every constructor parameter must be redeclared here, not only the two this
+// class adds beyond `ViewPane`'s own base ten — the DI decorator's own
+// storage (`@codingame/monaco-vscode-api`'s `instantiation.js`) creates a
+// *fresh* `$di$dependencies` array the first time any decorator is called on
+// a given class, discarding whatever `ViewPane`'s own array would otherwise
+// have been reachable through prototype inheritance, rather than appending to
+// it. `F090` S6's own real, costly discovery of this exact defect: this
+// class had *never* had any decorator declared at all (unlike
+// `PlainGitStashView`'s/`PlainGitWorktreeView`'s already-correct "declared
+// some but not all" near-miss) — because `IInstantiationService.
+// createInstance` looks up a class's own dependency array only after walking
+// to the nearest ancestor that ever called a decorator on it, an
+// *undeclared* subclass like this one had actually been inheriting
+// `ViewPane`'s own correct 9-entry array unmodified, silently leaving indices
+// 10/11 (`workspaceContextService`/`editorService`) as `undefined` on every
+// real construction since this class was first written in `F090` S1 — a
+// defect distinct from, and never caught by, S4's later "some but not all"
+// discovery, and undetected until this slice's first-ever Browser E2E
+// coverage of this view actually clicked "Show File History" and hit
+// `this.editorService.activeEditor` on an `undefined` `editorService`.
+// Mirrors `PlainGitStashView`'s/`PlainGitWorktreeView`'s/`PlainScmView`'s own
+// identical, already-correct pattern of redeclaring every parameter index
+// from 1 through this class's own last extra service.
+IKeybindingService(PlainGitHistoryView, undefined, 1);
+IContextMenuService(PlainGitHistoryView, undefined, 2);
+IConfigurationService(PlainGitHistoryView, undefined, 3);
+IContextKeyService(PlainGitHistoryView, undefined, 4);
+IViewDescriptorService(PlainGitHistoryView, undefined, 5);
+IInstantiationService(PlainGitHistoryView, undefined, 6);
+IOpenerService(PlainGitHistoryView, undefined, 7);
+IThemeService(PlainGitHistoryView, undefined, 8);
+IHoverService(PlainGitHistoryView, undefined, 9);
+IWorkspaceContextService(PlainGitHistoryView, undefined, 10);
+IEditorService(PlainGitHistoryView, undefined, 11);

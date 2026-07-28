@@ -140,6 +140,132 @@ interface TestGitFixture {
 		Record<string, Partial<Record<"head" | "index", string>>>
 	>;
 	readonly noRepositoryForTest?: boolean;
+	// `F090` S6: seeds for the seven history/blame/graph/refs/stash/worktree
+	// views' own commands — same field shapes
+	// `app/platform/tauri/browser-mock.ts`'s own `BrowserMockGitFixtureForTest`
+	// models, reproduced here for the same reason every other field on this
+	// interface is (see `installNativeIpcMock`'s own module doc comment: this
+	// file drives the real `native.ts` transport directly, never
+	// `browser-mock.ts`).
+	readonly blame?: Readonly<Record<string, TestGitBlameFileResult>>;
+	readonly blameCommitMessages?: Readonly<Record<string, string>>;
+	readonly fileHistory?: Readonly<Record<string, TestGitHistoryListResult>>;
+	readonly lineHistoryList?: Readonly<Record<string, TestGitHistoryListResult>>;
+	readonly lineHistoryDetail?: Readonly<
+		Record<string, Readonly<{ sha: string; diffText: string }>>
+	>;
+	readonly showCommit?: Readonly<Record<string, TestGitShowCommitResult>>;
+	readonly commitBlobs?: Readonly<
+		Record<string, Readonly<Record<string, string>>>
+	>;
+	readonly graphForTest?: TestGitLogGraphResult;
+	readonly refsForTest?: TestGitRefsListResult;
+	readonly stashForTest?: readonly TestGitStashEntry[];
+	readonly stashShowForTest?: Readonly<Record<string, TestGitShowCommitResult>>;
+	readonly stashConflictForTest?: Readonly<Record<string, readonly string[]>>;
+	readonly worktreesForTest?: readonly TestGitWorktreeEntry[];
+	readonly worktreeAddCancelledForTest?: boolean;
+	readonly worktreeDirtyForTest?: readonly string[];
+}
+
+/** `F090` S6: the blame/history/commit-detail/graph/refs/stash/worktree
+ * fixture element types `TestGitFixture` above references — reproduced from
+ * `app/platform/tauri/contracts.ts`'s own wire shapes for the same reason
+ * `TestGitFixture` itself is (see `installNativeIpcMock`'s own module doc
+ * comment). */
+interface TestGitBlameCommitHeader {
+	readonly author: string;
+	readonly authorMail: string;
+	readonly authorTime: number;
+	readonly authorTz: string;
+	readonly committer: string;
+	readonly committerMail: string;
+	readonly committerTime: number;
+	readonly committerTz: string;
+	readonly summary: string;
+}
+interface TestGitBlameLineEntry {
+	readonly commitSha: string;
+	readonly isUncommitted: boolean;
+	readonly origLine: number;
+	readonly finalLine: number;
+	readonly isBoundary: boolean;
+	readonly filename: string;
+	readonly previous: Readonly<{ sha: string; path: string }> | null;
+}
+interface TestGitBlameFileResult {
+	readonly entries: readonly TestGitBlameLineEntry[];
+	readonly commits: Readonly<Record<string, TestGitBlameCommitHeader>>;
+}
+interface TestGitHistoryEntry {
+	readonly sha: string;
+	readonly message: string;
+}
+interface TestGitHistoryListResult {
+	readonly entries: readonly TestGitHistoryEntry[];
+	readonly truncated: boolean;
+}
+interface TestGitDiffFileEntry {
+	readonly kind:
+		| "added"
+		| "copied"
+		| "deleted"
+		| "modified"
+		| "renamed"
+		| "typeChanged"
+		| "unmerged"
+		| "unknown";
+	readonly similarity: number | null;
+	readonly path: string;
+	readonly origPath: string | null;
+	readonly added: number | null;
+	readonly deleted: number | null;
+	readonly binary: boolean;
+}
+interface TestGitShowCommitResult {
+	readonly sha: string;
+	readonly parentSha: string | null;
+	readonly files: readonly TestGitDiffFileEntry[];
+}
+interface TestGitGraphNode {
+	readonly sha: string;
+	readonly parents: readonly string[];
+	readonly subject: string;
+}
+interface TestGitLogGraphResult {
+	readonly nodes: readonly TestGitGraphNode[];
+	readonly truncated: boolean;
+}
+interface TestGitRefEntry {
+	readonly kind: "branch" | "remoteBranch" | "tag";
+	readonly fullName: string;
+	readonly shortName: string;
+	readonly targetSha: string;
+	readonly isAnnotatedTag: boolean;
+	readonly peeledSha: string | null;
+	readonly upstream: string | null;
+	readonly isHead: boolean;
+}
+interface TestGitRefsListResult {
+	readonly entries: readonly TestGitRefEntry[];
+	readonly truncated: boolean;
+}
+interface TestGitStashEntry {
+	readonly index: number;
+	readonly sha: string;
+	readonly committerTime: number;
+	readonly message: string;
+}
+interface TestGitWorktreeEntry {
+	readonly path: string;
+	readonly headSha: string | null;
+	readonly headState:
+		| Readonly<{ kind: "branch"; refName: string }>
+		| Readonly<{ kind: "detached" }>
+		| Readonly<{ kind: "bare" }>;
+	readonly lockReason: string | null;
+	readonly prunableReason: string | null;
+	readonly isMain: boolean;
 }
 
 /** `F080` S4: seeds `git_network_preview`/`git_fetch`/`git_pull`/`git_push`
@@ -1527,6 +1653,76 @@ async function installNativeIpcMock(
 					: gitNetworkFixtureForTest.upstream;
 			let mockGitNetworkAhead = gitNetworkFixtureForTest.ahead ?? 0;
 			let mockGitNetworkBehind = gitNetworkFixtureForTest.behind ?? 0;
+
+			// --- F090 S6: blame/history/commit-detail/graph/refs/stash/worktree
+			// simulation ---------------------------------------------------------
+			//
+			// Same simulation shape as `app/platform/tauri/browser-mock.ts`'s own
+			// (see that file's identically-named-in-spirit fixtures) —
+			// reproduced here rather than imported for the same reason the F080
+			// S3/S4 simulations above are. `stash`/`worktree` are the only two of
+			// these seven domains with real writes, so only they need mutable
+			// state; the rest are static per-key lookups exactly like
+			// `gitFixtureForTest.blobs` above.
+			const mockGitBlame = new Map<string, TestGitBlameFileResult>(
+				Object.entries(gitFixtureForTest.blame ?? {}),
+			);
+			const mockGitBlameCommitMessages = new Map<string, string>(
+				Object.entries(gitFixtureForTest.blameCommitMessages ?? {}),
+			);
+			const mockGitFileHistory = new Map<string, TestGitHistoryListResult>(
+				Object.entries(gitFixtureForTest.fileHistory ?? {}),
+			);
+			const mockGitLineHistoryList = new Map<string, TestGitHistoryListResult>(
+				Object.entries(gitFixtureForTest.lineHistoryList ?? {}),
+			);
+			const mockGitLineHistoryDetail = new Map<
+				string,
+				Readonly<{ sha: string; diffText: string }>
+			>(Object.entries(gitFixtureForTest.lineHistoryDetail ?? {}));
+			const mockGitShowCommit = new Map<string, TestGitShowCommitResult>(
+				Object.entries(gitFixtureForTest.showCommit ?? {}),
+			);
+			const mockGitCommitBlobs = new Map<
+				string,
+				Readonly<Record<string, string>>
+			>(Object.entries(gitFixtureForTest.commitBlobs ?? {}));
+			const mockGitGraph: TestGitLogGraphResult =
+				gitFixtureForTest.graphForTest ?? { nodes: [], truncated: false };
+			const mockGitRefs: TestGitRefsListResult =
+				gitFixtureForTest.refsForTest ?? { entries: [], truncated: false };
+			let mockGitStashEntries: TestGitStashEntry[] = (
+				gitFixtureForTest.stashForTest ?? []
+			).map((entry) => ({ ...entry }));
+			const mockGitStashShow = new Map<string, TestGitShowCommitResult>(
+				Object.entries(gitFixtureForTest.stashShowForTest ?? {}),
+			);
+			const mockGitStashConflicts = new Map<string, readonly string[]>(
+				Object.entries(gitFixtureForTest.stashConflictForTest ?? {}),
+			);
+			let mockGitStashCounter = 0;
+			function gitStashNotFound() {
+				return {
+					code: "GIT_STASH_NOT_FOUND",
+					message: "No stash entry with the requested identity exists.",
+				};
+			}
+			const defaultMockWorktreeEntry: TestGitWorktreeEntry = {
+				path: "/workspace",
+				headSha: "f".repeat(40),
+				headState: { kind: "branch", refName: "refs/heads/main" },
+				lockReason: null,
+				prunableReason: null,
+				isMain: true,
+			};
+			let mockGitWorktreeEntries: TestGitWorktreeEntry[] = (
+				gitFixtureForTest.worktreesForTest ?? [defaultMockWorktreeEntry]
+			).map((entry) => ({ ...entry }));
+			const mockGitWorktreeDirtyPaths = new Set<string>(
+				gitFixtureForTest.worktreeDirtyForTest ?? [],
+			);
+			let mockGitWorktreeCounter = 0;
+
 			function gitNetworkNoUpstream() {
 				return {
 					code: "GIT_NETWORK_NO_UPSTREAM",
@@ -2664,6 +2860,388 @@ async function installNativeIpcMock(
 						}
 						case "git_network_cancel": {
 							return null;
+						}
+						case "git_blame_file": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							const blameRequest = args.request as
+								| {
+										path?: string;
+										range?: { start: number; end: number } | null;
+								  }
+								| undefined;
+							const fixture = mockGitBlame.get(blameRequest?.path ?? "") ?? {
+								entries: [],
+								commits: {},
+							};
+							if (!blameRequest?.range) {
+								return fixture;
+							}
+							const { start, end } = blameRequest.range;
+							const entries = fixture.entries.filter(
+								(entry) => entry.finalLine >= start && entry.finalLine <= end,
+							);
+							const shas = new Set(entries.map((entry) => entry.commitSha));
+							const commits: Record<string, TestGitBlameCommitHeader> = {};
+							for (const [sha, header] of Object.entries(fixture.commits)) {
+								if (shas.has(sha)) {
+									commits[sha] = header;
+								}
+							}
+							return { entries, commits };
+						}
+						case "git_blame_commit_messages": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							const shasRequest = args.request as
+								{ shas?: string[] } | undefined;
+							const messages: Record<string, string> = {};
+							for (const sha of shasRequest?.shas ?? []) {
+								const message = mockGitBlameCommitMessages.get(sha);
+								if (message !== undefined) {
+									messages[sha] = message;
+								}
+							}
+							return { messages };
+						}
+						case "git_file_history": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							const historyRequest = args.request as
+								{ path?: string } | undefined;
+							return (
+								mockGitFileHistory.get(historyRequest?.path ?? "") ?? {
+									entries: [],
+									truncated: false,
+								}
+							);
+						}
+						case "git_line_history_list": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							const lineListRequest = args.request as
+								{ path?: string } | undefined;
+							return (
+								mockGitLineHistoryList.get(lineListRequest?.path ?? "") ?? {
+									entries: [],
+									truncated: false,
+								}
+							);
+						}
+						case "git_line_history_detail": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							const detailRequest = args.request as
+								| { path?: string; skip?: number; expectedSha?: string }
+								| undefined;
+							const list = mockGitLineHistoryList.get(
+								detailRequest?.path ?? "",
+							) ?? { entries: [], truncated: false };
+							const entry = list.entries[detailRequest?.skip ?? -1];
+							if (entry === undefined) {
+								throw {
+									code: "GIT_LINE_HISTORY_DETAIL_NOT_FOUND",
+									message:
+										"No commit exists at the requested position in this line's history.",
+								};
+							}
+							if (entry.sha !== detailRequest?.expectedSha) {
+								throw {
+									code: "GIT_LINE_HISTORY_DETAIL_STALE_INDEX",
+									message:
+										"The line's history has changed since it was listed; refresh and try again.",
+								};
+							}
+							return (
+								mockGitLineHistoryDetail.get(entry.sha) ?? {
+									sha: entry.sha,
+									diffText: `commit ${entry.sha}\n\n    ${entry.message}\n`,
+								}
+							);
+						}
+						case "git_show_commit": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							const showCommitRequest = args.request as
+								{ sha?: string } | undefined;
+							const sha = showCommitRequest?.sha ?? "";
+							return (
+								mockGitShowCommit.get(sha) ?? {
+									sha,
+									parentSha: null,
+									files: [],
+								}
+							);
+						}
+						case "git_show_commit_blob": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							const showBlobRequest = args.request as
+								{ sha?: string; path?: string } | undefined;
+							const content = mockGitCommitBlobs.get(
+								showBlobRequest?.sha ?? "",
+							)?.[showBlobRequest?.path ?? ""];
+							return {
+								content:
+									content === undefined
+										? null
+										: Array.from(new TextEncoder().encode(content)),
+							};
+						}
+						case "git_log_graph": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							return mockGitGraph;
+						}
+						case "git_refs_list": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							return mockGitRefs;
+						}
+						case "git_stash_list": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							return {
+								entries: mockGitStashEntries.map((entry, index) => ({
+									...entry,
+									index,
+								})),
+								truncated: false,
+							};
+						}
+						case "git_stash_show": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							const stashShowRequest = args.request as
+								{ sha?: string } | undefined;
+							const sha = stashShowRequest?.sha ?? "";
+							if (!mockGitStashEntries.some((entry) => entry.sha === sha)) {
+								throw gitStashNotFound();
+							}
+							return (
+								mockGitStashShow.get(sha) ?? {
+									sha,
+									parentSha: null,
+									files: [],
+								}
+							);
+						}
+						case "git_stash_push": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							const stashPushRequest = args.request as
+								{ message?: string } | undefined;
+							mockGitStashCounter += 1;
+							const sha = `f0${mockGitStashCounter.toString(16).padStart(38, "0")}`;
+							mockGitStashEntries.unshift({
+								index: 0,
+								sha,
+								committerTime: Math.floor(Date.now() / 1000),
+								message: stashPushRequest?.message ?? "",
+							});
+							return "created";
+						}
+						case "git_stash_apply": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							const stashApplyRequest = args.request as
+								{ sha?: string } | undefined;
+							const sha = stashApplyRequest?.sha ?? "";
+							if (!mockGitStashEntries.some((entry) => entry.sha === sha)) {
+								throw gitStashNotFound();
+							}
+							const conflictedPaths = mockGitStashConflicts.get(sha);
+							if (conflictedPaths !== undefined) {
+								return { kind: "conflict", conflictedPaths };
+							}
+							return { kind: "applied" };
+						}
+						case "git_stash_pop": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							const stashPopRequest = args.request as
+								{ expectedSha?: string } | undefined;
+							const expectedSha = stashPopRequest?.expectedSha ?? "";
+							const index = mockGitStashEntries.findIndex(
+								(entry) => entry.sha === expectedSha,
+							);
+							if (index === -1) {
+								throw gitStashNotFound();
+							}
+							const conflictedPaths = mockGitStashConflicts.get(expectedSha);
+							if (conflictedPaths !== undefined) {
+								return { kind: "conflict", conflictedPaths };
+							}
+							mockGitStashEntries.splice(index, 1);
+							return { kind: "applied" };
+						}
+						case "git_stash_drop": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							const stashDropRequest = args.request as
+								{ expectedSha?: string } | undefined;
+							const expectedSha = stashDropRequest?.expectedSha ?? "";
+							const index = mockGitStashEntries.findIndex(
+								(entry) => entry.sha === expectedSha,
+							);
+							if (index === -1) {
+								throw gitStashNotFound();
+							}
+							mockGitStashEntries.splice(index, 1);
+							return null;
+						}
+						case "git_worktree_list": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							return {
+								entries: mockGitWorktreeEntries.map((entry) => ({ ...entry })),
+								truncated: false,
+							};
+						}
+						case "git_worktree_add": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							const worktreeAddRequest = args.request as
+								| {
+										childSegment?: string;
+										detach?: boolean;
+										commitIsh?: string | null;
+								  }
+								| undefined;
+							if (gitFixtureForTest.worktreeAddCancelledForTest === true) {
+								return { kind: "pickerCancelled" };
+							}
+							mockGitWorktreeCounter += 1;
+							const worktreeSha = `a0${mockGitWorktreeCounter.toString(16).padStart(38, "0")}`;
+							const childSegment = worktreeAddRequest?.childSegment ?? "";
+							const worktreePath = `/workspace-worktrees/${childSegment}`;
+							mockGitWorktreeEntries.push({
+								path: worktreePath,
+								headSha: worktreeSha,
+								headState: worktreeAddRequest?.detach
+									? { kind: "detached" }
+									: {
+											kind: "branch",
+											refName: `refs/heads/${worktreeAddRequest?.commitIsh ?? childSegment}`,
+										},
+								lockReason: null,
+								prunableReason: null,
+								isMain: false,
+							});
+							return { kind: "added", path: worktreePath };
+						}
+						case "git_worktree_remove": {
+							if (!terminalTrusted) {
+								throw terminalNotTrusted();
+							}
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							const worktreeRemoveRequest = args.request as
+								{ path?: string; force?: boolean } | undefined;
+							const worktreeRemovePath = worktreeRemoveRequest?.path ?? "";
+							const worktreeEntry = mockGitWorktreeEntries.find(
+								(candidate) => candidate.path === worktreeRemovePath,
+							);
+							if (worktreeEntry === undefined) {
+								throw {
+									code: "GIT_WORKTREE_REMOVE_NOT_FOUND",
+									message:
+										"That path is not a registered worktree of this repository.",
+								};
+							}
+							if (worktreeEntry.isMain) {
+								throw {
+									code: "GIT_WORKTREE_REMOVE_IS_MAIN_WORKTREE",
+									message: "The main worktree cannot be removed.",
+								};
+							}
+							if (worktreeEntry.lockReason !== null) {
+								throw {
+									code: "GIT_WORKTREE_REMOVE_LOCKED",
+									message:
+										"This worktree is locked and must be unlocked before it can be removed.",
+								};
+							}
+							if (
+								!worktreeRemoveRequest?.force &&
+								mockGitWorktreeDirtyPaths.has(worktreeRemovePath)
+							) {
+								return "needsForce";
+							}
+							mockGitWorktreeEntries = mockGitWorktreeEntries.filter(
+								(candidate) => candidate.path !== worktreeRemovePath,
+							);
+							mockGitWorktreeDirtyPaths.delete(worktreeRemovePath);
+							return "removed";
 						}
 						default:
 							throw new Error(`Unexpected Tauri test command: ${command}`);
@@ -11460,6 +12038,762 @@ test("no AI/Chat-related SCM command exists in the command palette", async ({
 	).not.toEqual(
 		expect.arrayContaining([expect.stringMatching(/scm.*chat|chat.*scm/i)]),
 	);
+
+	expect(pageErrors).toEqual([]);
+});
+
+// --- F090 S6: Browser behavior coverage for the seven new views ------------
+//
+// S0-S5 each deliberately deferred this to Rust fixtures + frontend unit
+// tests (see progress.md's own per-slice "有意收窄/未做的部分" notes) — this
+// closing slice is what actually exercises blame/history/commit-detail/
+// graph/refs/stash/worktree end to end against this file's own reproduced
+// `native.ts` mock, the same way the F080 SCM tests above already do.
+
+test("annotates lines with real inline git blame decorations and shows the full commit message on hover", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	const blameSha = "a1".repeat(20);
+	// "2 days ago", with enough slack that the test's own real wall-clock
+	// runtime can never cross a day boundary and change the bucket.
+	const authorTime = Math.floor(Date.now() / 1000) - (2 * 86400 + 60);
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{ "src/blame.ts": "const one = 1;\nconst two = 2;" },
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{
+			blame: {
+				"src/blame.ts": {
+					entries: [
+						{
+							commitSha: blameSha,
+							isUncommitted: false,
+							origLine: 1,
+							finalLine: 1,
+							isBoundary: false,
+							filename: "src/blame.ts",
+							previous: null,
+						},
+						{
+							commitSha: blameSha,
+							isUncommitted: false,
+							origLine: 2,
+							finalLine: 2,
+							isBoundary: false,
+							filename: "src/blame.ts",
+							previous: null,
+						},
+					],
+					commits: {
+						[blameSha]: {
+							author: "Ada Lovelace",
+							authorMail: "<ada@example.com>",
+							authorTime,
+							authorTz: "+0000",
+							committer: "Ada Lovelace",
+							committerMail: "<ada@example.com>",
+							committerTime: authorTime,
+							committerTz: "+0000",
+							summary: "add constants",
+						},
+					},
+				},
+			},
+			blameCommitMessages: {
+				[blameSha]:
+					"add constants\n\nFull body explaining the two constants in detail.",
+			},
+		},
+	);
+	const explorer = await openNativeWorkspaceExplorer(page);
+	const src = explorer.getByRole("treeitem", { name: "src", exact: true });
+	await src.click();
+	await page.keyboard.press("ArrowRight");
+	await expect(src).toHaveAttribute("aria-expanded", "true");
+	await explorer
+		.getByRole("treeitem", { name: "blame.ts", exact: true })
+		.dblclick();
+	await expect(
+		page.getByRole("tab", { name: /^blame\.ts(?:,.*)?$/ }),
+	).toBeVisible();
+
+	// Real data flow: the decoration text is built entirely from the
+	// fixture's own author/summary/authorTime — not a placeholder — and the
+	// age-heatmap bucket class reflects that same authorTime.
+	const decoration = page.locator(".plain-git-blame-inline");
+	await expect(decoration).toHaveCount(2);
+	await expect(decoration.first()).toHaveText(
+		"Ada Lovelace, 2 days ago • add constants",
+	);
+	await expect(decoration.first()).toHaveClass(/plain-git-blame-age-0/);
+	await expect(decoration.last()).toHaveText(
+		"Ada Lovelace, 2 days ago • add constants",
+	);
+
+	// Meaningful interaction: hovering the annotated line fetches and shows
+	// the *full* commit message body via a real `git_blame_commit_messages`
+	// round trip. The hover provider keys only by line number (not column),
+	// so hovering the line's own real code text is enough to trigger it.
+	const line = page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "const one = 1;" });
+	await expect(line).toBeVisible();
+	await line.hover();
+	// Excludes the separate glyph-margin hover widget
+	// (`editor.contrib.modesGlyphHoverWidget`) — a distinct `.monaco-hover`
+	// element that always exists in the DOM (typically hidden) alongside the
+	// content hover this test actually triggers.
+	const hover = page.locator(
+		'.monaco-hover:not([widgetid="editor.contrib.modesGlyphHoverWidget"])',
+	);
+	await expect(hover).toBeVisible({ timeout: 10_000 });
+	await expect(hover).toContainText("Ada Lovelace");
+	await expect(hover).toContainText(blameSha.slice(0, 7));
+	await expect(hover).toContainText(
+		"Full body explaining the two constants in detail.",
+	);
+	await expect
+		.poll(
+			async () =>
+				(await terminalCallsFor(page, "git_blame_commit_messages")).length,
+		)
+		.toBeGreaterThan(0);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("shows file history with the real commit list and drills into a specific line-history revision's own diff", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	const fileHistorySha1 = "b1".repeat(20);
+	const fileHistorySha2 = "c2".repeat(20);
+	const lineHistorySha = "d3".repeat(20);
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{ "src/history.ts": "first line\nsecond line\n" },
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{
+			fileHistory: {
+				"src/history.ts": {
+					entries: [
+						{
+							sha: fileHistorySha1,
+							message:
+								"feat: add history\n\nAdds a real history entry for testing.",
+						},
+						{ sha: fileHistorySha2, message: "chore: init" },
+					],
+					truncated: false,
+				},
+			},
+			lineHistoryList: {
+				"src/history.ts": {
+					entries: [{ sha: lineHistorySha, message: "fix: correct line 1" }],
+					truncated: false,
+				},
+			},
+			lineHistoryDetail: {
+				[lineHistorySha]: {
+					sha: lineHistorySha,
+					diffText: "@@ -1 +1 @@\n-old first line\n+new first line\n",
+				},
+			},
+		},
+	);
+	const explorer = await openNativeWorkspaceExplorer(page);
+	const src = explorer.getByRole("treeitem", { name: "src", exact: true });
+	await src.click();
+	await page.keyboard.press("ArrowRight");
+	await expect(src).toHaveAttribute("aria-expanded", "true");
+	await explorer
+		.getByRole("treeitem", { name: "history.ts", exact: true })
+		.dblclick();
+	await expect(
+		page.getByRole("tab", { name: /^history\.ts(?:,.*)?$/ }),
+	).toBeVisible();
+
+	await openScmView(page);
+	await page
+		.getByRole("button", { name: "Show File History", exact: true })
+		.click();
+
+	const fileHistoryList = page.locator(".plain-git-history-view-list").first();
+	const fileHistoryItems = fileHistoryList.locator(
+		".plain-git-history-view-item",
+	);
+	await expect(fileHistoryItems).toHaveCount(2);
+	await expect(fileHistoryItems.nth(0)).toContainText(
+		fileHistorySha1.slice(0, 7),
+	);
+	await expect(fileHistoryItems.nth(0)).toContainText("feat: add history");
+	await expect(fileHistoryItems.nth(1)).toContainText("chore: init");
+
+	// Meaningful interaction 1: expanding a row reveals the *full* message
+	// body (already fetched, no extra round trip) alongside a real "View
+	// Changed Files" action that only appears once expanded.
+	await fileHistoryItems
+		.nth(0)
+		.locator(".plain-git-history-view-item-row")
+		.click();
+	await expect(fileHistoryItems.nth(0)).toContainText(
+		"Adds a real history entry for testing.",
+	);
+	await expect(
+		fileHistoryItems
+			.nth(0)
+			.getByRole("button", { name: "View Changed Files", exact: true }),
+	).toBeVisible();
+
+	await page.getByLabel("Start Line").fill("1");
+	await page.getByLabel("End Line").fill("1");
+	await page
+		.getByRole("button", { name: "Show Line History", exact: true })
+		.click();
+
+	const lineHistoryList = page.locator(".plain-git-history-view-list").nth(1);
+	const lineHistoryItems = lineHistoryList.locator(
+		".plain-git-history-view-item",
+	);
+	await expect(lineHistoryItems).toHaveCount(1);
+	await expect(lineHistoryItems.first()).toContainText("fix: correct line 1");
+
+	// Meaningful interaction 2: drilling into this specific revision fetches
+	// and renders its *own* diff hunk text, verified against the exact fixed
+	// fixture text (not merely "something appeared").
+	await lineHistoryItems.first().click();
+	await expect(page.locator(".plain-git-history-view-detail")).toHaveText(
+		"@@ -1 +1 @@\n-old first line\n+new first line\n",
+	);
+	await expect
+		.poll(
+			async () =>
+				(await terminalCallsFor(page, "git_line_history_detail")).length,
+		)
+		.toBe(1);
+	const detailCall = (
+		await terminalCallsFor(page, "git_line_history_detail")
+	)[0]!;
+	expect(detailCall.args.request).toEqual({
+		path: "src/history.ts",
+		range: { start: 1, end: 1 },
+		skip: 0,
+		expectedSha: lineHistorySha,
+	});
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("opens a commit's changed files as a real multi-diff editor from the History view", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	const commitSha = "9c".repeat(20);
+	const parentSha = "8b".repeat(20);
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{ "src/commit.ts": "touch file\n" },
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{
+			fileHistory: {
+				"src/commit.ts": {
+					entries: [
+						{
+							sha: commitSha,
+							message: "feat: multi-file change\n\nTouches three files.",
+						},
+					],
+					truncated: false,
+				},
+			},
+			showCommit: {
+				[commitSha]: {
+					sha: commitSha,
+					parentSha,
+					files: [
+						{
+							kind: "added",
+							similarity: null,
+							path: "src/added.ts",
+							origPath: null,
+							added: 5,
+							deleted: 0,
+							binary: false,
+						},
+						{
+							kind: "deleted",
+							similarity: null,
+							path: "src/deleted.ts",
+							origPath: null,
+							added: 0,
+							deleted: 3,
+							binary: false,
+						},
+						{
+							kind: "modified",
+							similarity: null,
+							path: "src/modified.ts",
+							origPath: null,
+							added: 2,
+							deleted: 1,
+							binary: false,
+						},
+					],
+				},
+			},
+			commitBlobs: {
+				[commitSha]: {
+					"src/added.ts": "added content\n",
+					"src/modified.ts": "after content\n",
+				},
+				[parentSha]: {
+					"src/deleted.ts": "deleted content\n",
+					"src/modified.ts": "before content\n",
+				},
+			},
+		},
+	);
+	const explorer = await openNativeWorkspaceExplorer(page);
+	const src = explorer.getByRole("treeitem", { name: "src", exact: true });
+	await src.click();
+	await page.keyboard.press("ArrowRight");
+	await expect(src).toHaveAttribute("aria-expanded", "true");
+	await explorer
+		.getByRole("treeitem", { name: "commit.ts", exact: true })
+		.dblclick();
+	await expect(
+		page.getByRole("tab", { name: /^commit\.ts(?:,.*)?$/ }),
+	).toBeVisible();
+
+	await openScmView(page);
+	await page
+		.getByRole("button", { name: "Show File History", exact: true })
+		.click();
+	const fileHistoryItem = page
+		.locator(".plain-git-history-view-list")
+		.first()
+		.locator(".plain-git-history-view-item")
+		.first();
+	await expect(fileHistoryItem).toContainText("feat: multi-file change");
+	await fileHistoryItem.locator(".plain-git-history-view-item-row").click();
+
+	// Meaningful interaction: opening the changed-file list as a real
+	// multi-diff editor, resolved by `PlainGitCommitMultiDiffSourceResolver`
+	// through a real `git_show_commit` round trip.
+	await fileHistoryItem
+		.getByRole("button", { name: "View Changed Files", exact: true })
+		.click();
+
+	const commitTab = page.getByRole("tab", {
+		name: new RegExp(`^Commit ${commitSha.slice(0, 7)}`),
+	});
+	await expect(commitTab).toBeVisible();
+	const multiDiffEditor = page.locator(".monaco-component.multiDiffEditor");
+	await expect(multiDiffEditor).toBeVisible();
+
+	// Real data flow: three distinct file panes, one per `GitShowCommitResult`
+	// file entry, titled with each file's own real basename — not a fixed
+	// placeholder count.
+	const fileTitles = multiDiffEditor.locator(".title.modified");
+	await expect(fileTitles).toHaveCount(3);
+	const titleTexts = await fileTitles.allTextContents();
+	expect(titleTexts.some((text) => text.includes("added.ts"))).toBe(true);
+	expect(titleTexts.some((text) => text.includes("deleted.ts"))).toBe(true);
+	expect(titleTexts.some((text) => text.includes("modified.ts"))).toBe(true);
+
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_show_commit")).length)
+		.toBeGreaterThan(0);
+	const showCommitCall = (await terminalCallsFor(page, "git_show_commit"))[0]!;
+	expect(showCommitCall.args.request).toEqual({ sha: commitSha });
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("draws the commit graph with the correct swimlane count and lists branches, remote branches and tags with head/upstream markers", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	// A merge with two parents that themselves share a common base — the
+	// smallest DAG shape that forces `computeGraphLayout` to actually open a
+	// second swimlane (see `plain-git-graph-layout.ts`'s own algorithm doc
+	// comment): merge -> [main, feature]; main -> base; feature -> base.
+	const shaMerge = `${"1".repeat(36)}aaaa`;
+	const shaMain = `${"2".repeat(36)}bbbb`;
+	const shaFeature = `${"3".repeat(36)}cccc`;
+	const shaBase = `${"4".repeat(36)}dddd`;
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{
+			graphForTest: {
+				nodes: [
+					{
+						sha: shaMerge,
+						parents: [shaMain, shaFeature],
+						subject: "Merge branch 'feature'",
+					},
+					{ sha: shaMain, parents: [shaBase], subject: "main commit" },
+					{ sha: shaFeature, parents: [shaBase], subject: "feature commit" },
+					{ sha: shaBase, parents: [], subject: "base commit" },
+				],
+				truncated: false,
+			},
+			refsForTest: {
+				entries: [
+					{
+						kind: "branch",
+						fullName: "refs/heads/main",
+						shortName: "main",
+						targetSha: shaMain,
+						isAnnotatedTag: false,
+						peeledSha: null,
+						upstream: "origin/main",
+						isHead: true,
+					},
+					{
+						kind: "remoteBranch",
+						fullName: "refs/remotes/origin/main",
+						shortName: "origin/main",
+						targetSha: shaMain,
+						isAnnotatedTag: false,
+						peeledSha: null,
+						upstream: null,
+						isHead: false,
+					},
+					{
+						kind: "tag",
+						fullName: "refs/tags/v1.0",
+						shortName: "v1.0",
+						targetSha: shaBase,
+						isAnnotatedTag: false,
+						peeledSha: null,
+						upstream: null,
+						isHead: false,
+					},
+				],
+				truncated: false,
+			},
+		},
+	);
+	await openNativeWorkspaceExplorer(page);
+	await openScmView(page);
+	await page
+		.getByRole("button", { name: "Refresh Graph", exact: true })
+		.click();
+
+	// Refs: real branches/remote-branches/tags lists, correctly grouped and
+	// marked with the current HEAD and its upstream — not a static fixture
+	// echoed verbatim (the grouping/sorting is real client-side logic).
+	const refLists = page.locator(".plain-git-graph-view-ref-list");
+	await expect(
+		refLists.nth(0).locator(".plain-git-graph-view-ref-item"),
+	).toHaveText(["* main -> origin/main"]);
+	await expect(
+		refLists.nth(1).locator(".plain-git-graph-view-ref-item"),
+	).toHaveText(["origin/main"]);
+	await expect(
+		refLists.nth(2).locator(".plain-git-graph-view-ref-item"),
+	).toHaveText(["v1.0"]);
+
+	// Graph: the correct node count and, crucially, the correct *swimlane*
+	// count — this is `computeGraphLayout`'s own real algorithm output, not
+	// merely "some SVG rendered". Merge/main/base share lane 0; feature gets
+	// its own lane 1, so exactly two distinct `cx` values should appear
+	// across the four nodes.
+	const svg = page.locator(".plain-git-graph-view-graph-scroll svg");
+	const circles = svg.locator("circle");
+	await expect(circles).toHaveCount(4);
+	const cxValues = await circles.evaluateAll((nodes) =>
+		nodes.map((node) => node.getAttribute("cx")),
+	);
+	expect(new Set(cxValues).size).toBe(2);
+
+	// Each node is labeled with its own real subject and the ref badges that
+	// actually join to it client-side (never git's own `%d`/`%D` decoration).
+	const nodeTexts = await svg.locator("text").allTextContents();
+	expect(
+		nodeTexts.some((text) => text.includes("Merge branch 'feature'")),
+	).toBe(true);
+	expect(
+		nodeTexts.some(
+			(text) =>
+				text.includes("main commit") && text.includes("[* main, origin/main]"),
+		),
+	).toBe(true);
+	expect(nodeTexts.some((text) => text.includes("feature commit"))).toBe(true);
+	expect(
+		nodeTexts.some(
+			(text) => text.includes("base commit") && text.includes("[tag: v1.0]"),
+		),
+	).toBe(true);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("lists stash entries from a real fixture, shows a stash's changed files, and pops one after confirmation", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	const stashSha = "e5".repeat(20);
+	const stashParentSha = "f6".repeat(20);
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{
+			stashForTest: [
+				{
+					index: 0,
+					sha: stashSha,
+					committerTime: Math.floor(Date.now() / 1000),
+					message: "WIP on main: fix login bug\n\nSome details.",
+				},
+			],
+			stashShowForTest: {
+				[stashSha]: {
+					sha: stashSha,
+					parentSha: stashParentSha,
+					files: [
+						{
+							kind: "modified",
+							similarity: null,
+							path: "src/stashed.ts",
+							origPath: null,
+							added: 3,
+							deleted: 1,
+							binary: false,
+						},
+					],
+				},
+			},
+		},
+	);
+	await openNativeWorkspaceExplorer(page);
+	await openScmView(page);
+
+	// Real data flow: the stash panel auto-loads on open (no button needed)
+	// and its label is built from the fixture's own index + message.
+	const entries = page.locator(".plain-git-stash-view-entry");
+	await expect(entries).toHaveCount(1);
+	await expect(page.locator(".plain-git-stash-view-entry-label")).toHaveText(
+		"#0 — WIP on main: fix login bug",
+	);
+
+	// Meaningful interaction 1: Show renders this stash's own real changed
+	// files (a genuine `git_stash_show` round trip), not a placeholder.
+	await entries
+		.first()
+		.getByRole("button", { name: "Show", exact: true })
+		.click();
+	const detail = page.locator(".plain-git-stash-view-detail");
+	await expect(detail).toContainText("src/stashed.ts");
+	await expect(detail).toContainText("+3 -1");
+
+	// Meaningful interaction 2: Pop always requires confirmation naming this
+	// specific entry before ever calling `git_stash_pop`.
+	await entries
+		.first()
+		.getByRole("button", { name: "Pop", exact: true })
+		.click();
+	const dialog = page.getByRole("dialog");
+	await expect(dialog).toBeVisible();
+	await expect(dialog).toContainText(
+		"Pop stash #0 — WIP on main: fix login bug?",
+	);
+	await expect(dialog).toContainText("the stash entry is kept");
+	expect(await terminalCallsFor(page, "git_stash_pop")).toEqual([]);
+	await dialog.getByRole("button", { name: "Pop Stash", exact: true }).click();
+	await expect(dialog).toHaveCount(0);
+
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_stash_pop")).length)
+		.toBe(1);
+	const popCall = (await terminalCallsFor(page, "git_stash_pop"))[0]!;
+	expect(popCall.args.request).toEqual({
+		expectedSha: stashSha,
+		useIndex: false,
+	});
+	await expect(entries).toHaveCount(0);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("lists worktrees, adds a new one, and force-removes a dirty one after confirmation", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	const mainWorktreePath = "/workspace";
+	const dirtyWorktreePath = "/workspace-worktrees/feature";
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{
+			worktreesForTest: [
+				{
+					path: mainWorktreePath,
+					headSha: "1".repeat(40),
+					headState: { kind: "branch", refName: "refs/heads/main" },
+					lockReason: null,
+					prunableReason: null,
+					isMain: true,
+				},
+				{
+					path: dirtyWorktreePath,
+					headSha: "2".repeat(40),
+					headState: { kind: "branch", refName: "refs/heads/feature-branch" },
+					lockReason: null,
+					prunableReason: null,
+					isMain: false,
+				},
+			],
+			worktreeDirtyForTest: [dirtyWorktreePath],
+		},
+	);
+	await openNativeWorkspaceExplorer(page);
+	await openScmView(page);
+
+	// Real data flow: the worktree panel auto-loads on open, labeling each
+	// entry from its own real path/branch/isMain fields.
+	const entries = page.locator(".plain-git-worktree-view-entry");
+	await expect(entries).toHaveCount(2);
+	const labels = page.locator(".plain-git-worktree-view-entry-label");
+	await expect(labels).toHaveText([
+		"main — main (/workspace)",
+		"feature-branch (/workspace-worktrees/feature)",
+	]);
+
+	// Meaningful interaction 1: Add Worktree — no confirmation dialog (this
+	// feature's own "低风险,不强确认" half), but a real new entry appears with
+	// the exact path the mock's own `git_worktree_add` outcome reports.
+	await page.getByLabel("New Worktree Folder Name").fill("new-feature");
+	await page.getByRole("button", { name: "Add Worktree", exact: true }).click();
+	await expect(entries).toHaveCount(3);
+	await expect(page.locator(".plain-git-worktree-view-detail")).toHaveText(
+		"Created worktree at /workspace-worktrees/new-feature",
+	);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_worktree_add")).length)
+		.toBe(1);
+	const addCall = (await terminalCallsFor(page, "git_worktree_add"))[0]!;
+	expect(addCall.args.request).toEqual({
+		childSegment: "new-feature",
+		detach: false,
+		commitIsh: null,
+	});
+
+	// Meaningful interaction 2: Remove on a dirty worktree tries an unforced
+	// removal first (no dialog yet), then requires explicit confirmation
+	// before the forced retry that actually discards its changes.
+	const dirtyEntry = page
+		.locator(".plain-git-worktree-view-entry")
+		.filter({ hasText: "feature-branch" });
+	await dirtyEntry.getByRole("button", { name: "Remove", exact: true }).click();
+	const dialog = page.getByRole("dialog");
+	await expect(dialog).toBeVisible();
+	await expect(dialog).toContainText(
+		'Force remove worktree at "feature-branch (/workspace-worktrees/feature)"?',
+	);
+	await expect(dialog).toContainText("cannot be undone");
+	await dialog
+		.getByRole("button", { name: "Force Remove", exact: true })
+		.click();
+	await expect(dialog).toHaveCount(0);
+
+	await expect
+		.poll(
+			async () => (await terminalCallsFor(page, "git_worktree_remove")).length,
+		)
+		.toBe(2);
+	const removeCalls = await terminalCallsFor(page, "git_worktree_remove");
+	expect(removeCalls[0]!.args.request).toEqual({
+		path: dirtyWorktreePath,
+		force: false,
+	});
+	expect(removeCalls[1]!.args.request).toEqual({
+		path: dirtyWorktreePath,
+		force: true,
+	});
+	await expect(entries).toHaveCount(2);
+	await expect(labels).toHaveText([
+		"main — main (/workspace)",
+		"new-feature (/workspace-worktrees/new-feature)",
+	]);
 
 	expect(pageErrors).toEqual([]);
 });

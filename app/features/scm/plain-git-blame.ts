@@ -278,6 +278,20 @@ export function buildBlameDecorations(
 			},
 			options: {
 				description: BLAME_DECORATION_DESCRIPTION,
+				// This decoration's own range is always zero-width by
+				// construction (`Position(line, MAX_SAFE_INTEGER)` clamps both
+				// ends to the same real end-of-line column) — `ITextModel`'s
+				// injected-text query (`getInjectedTextInInterval`, consulted by
+				// the view on every render) unconditionally drops any decoration
+				// whose range `isEmpty()` *unless* `showIfCollapsed` is set, even
+				// when it carries a real `after`/`before` payload. Omitting this
+				// left the inline blame decoration silently invisible in the
+				// real DOM despite `ITextModel.deltaDecorations` reporting a
+				// successful, well-formed decoration id — this feature's own
+				// first-ever Browser E2E coverage (`F090` S6) is what caught it;
+				// no unit test exercises a real `ITextModel`, so this went
+				// unnoticed since `F090` S0.
+				showIfCollapsed: true,
 				after: {
 					content: `  ${formatInlineBlameText(header, entry.isUncommitted, nowMs)}`,
 					inlineClassName: `plain-git-blame-inline plain-git-blame-age-${bucket}`,

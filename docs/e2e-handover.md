@@ -261,6 +261,48 @@ fixture（临时目录/临时远端中创建，不提交仓库；具体凭据由
 
 完成后：将结果写入 `features.json` F080 evidence（`nativeScenarios` 追加、`platformGaps` 移除本条目对应缺口；若未执行则如实标注「已登记未执行」，不得凭本条目文字描述代替真实结果）。
 
+### E2E-009 · F090 S6 真实大仓库体感、真实 worktree/stash 工作流与 multi-diff 编辑器
+
+状态：待执行。本条目补的是 F090 全部六个实现切片（blame/history/compare/graph+refs/stash/worktree）里，Browser mock 与 Rust 真实 fixture 都无法替代的几个维度：**真实大仓库上的响应体感**（S3 已用合成仓库测出精确毫秒数，但"感觉快不快"需要人在真实桌面上主观确认）、**真实 macOS 原生目录选择器**（`worktree add` 的落盘路径唯一交互入口）、**真实 stash pop 冲突**（Browser mock 的冲突模拟是脚本化的，不是真实 git 三方合并）、以及 **multi-diff 编辑器在真实多文件提交上的渲染**（`multi-diff-editor-service-override` 是本 feature 唯一新增的 vendor override 包，S2 交付时"未新增 Playwright/browser E2E 覆盖"，S6 虽然已经补齐了一个小型 mock 用例，但从未在真实仓库、真实文件系统内容上验证过）。
+
+**S6 本身发现并修复的两个真实产品 bug，执行方必须重点复核在真实桌面上是否同样已经生效**（均已提交，Browser mock 层已验证修复；但两者都是"运行时才炸"的类别,真实 WKWebView 与 Chromium 的渲染路径可能有细节差异,不能完全假设一致）：
+
+1. `PlainGitHistoryView`（`app/features/scm/plain-git-history-view.ts`，S1 引入）**自创建以来从未声明任何 DI 装饰器**——不同于 S4 那次"声明了一部分、漏了一部分"的已知故事，这次是**完全零声明**，导致该视图能从 `ViewPane` 基类的原型链正常继承前 9 个服务（因此不会像 S4 那样连累同容器的其他视图），但自己新增的 `workspaceContextService`/`editorService` 两个参数永远是 `undefined`——`Show File History`/`Show Line History`/`View Changed Files` 三个功能因此**自 S1 起从未真正工作过**，点击即抛 `Cannot read properties of undefined (reading 'activeEditor')`，只是从未被任何 Playwright 用例触达过,所以从未被发现。S2 交付的"commit 详情 multi-diff"功能的**唯一入口**正是这个视图的"View Changed Files"按钮,因此 S2 这整块功能事实上也从未被验证过真的能打开。已修复（补全 11 个装饰器声明）。
+2. `plain-git-blame.ts` 的 `buildBlameDecorations` 生成的装饰是一个刻意的**零宽区间**（`Position(line, MAX_SAFE_INTEGER)`），但没有设置 `showIfCollapsed: true`——真实 Monaco/vscode-api 的 `ITextModel.getInjectedTextInInterval`（视图每次渲染都会查询）对零宽区间的注入文本无条件过滤掉，除非这个字段显式为真。`editor.deltaDecorations(...)` 依旧会返回"成功"的装饰 id（这是最误导人的地方——没有任何异常、任何错误提示），但真实 DOM 里永远不会出现这行内 blame 文本。inline blame 装饰**自 S0 起从未在真实编辑器里显示过**，hover 由于走的是独立的 `languages.registerHoverProvider` 路径（按行号查找，不依赖装饰是否真的渲染）反而一直是好的——这也是为什么本次调研过程中"hover 有数据但装饰不可见"这个现象一度让人怀疑是两个独立问题。已修复（`options.showIfCollapsed = true`）。
+
+**执行方须知**：以上两个 bug 都是通过本切片*首次*针对这两块功能的真实 Playwright（Chromium/WKWebView 共享同一套 Blink/WebKit 排版内核语义，但不是同一份实现）用例发现的——真实桌面执行时，请把"blame 装饰真的出现在编辑器里"和"点击 History 视图任何按钮不报错"当作本条目的隐含前置断言，而不是想当然认为这两块基础功能没问题。
+
+fixture（临时目录中创建，不提交仓库）：
+
+- 一个真实的、有一定深度的本地 git 仓库（**不要求**S3 那种合成的 5 万/50 万提交量级——那属于性能数字本身，S3 已用真实 `git fast-import` 测过；这里需要的是一个开发者会真实使用的仓库,例如克隆一份本仓库自身的浅历史,或任意一个开发者本地已有的、有几百到几千次真实提交历史的项目),用于:
+  - blame 步骤：选一个有较长真实修改历史的源文件。
+  - graph/refs 步骤：确保该仓库至少有 2-3 个分支和几个 tag。
+  - 一个至少改动 3 个文件（含新增、删除、修改各一个）的真实历史提交，用于 multi-diff 步骤。
+- 一个独立的临时目录（**不在**上述仓库内部，作为 `worktree add` 步骤要选择的父目录）。
+- 为 stash 冲突步骤准备:同一个文件在工作区与目标切换分支上有真实冲突的编辑（具体手法见步骤 5)。
+
+步骤与断言：
+
+1. **真实 inline blame 装饰是否显示**：打开上述仓库,在编辑器中打开被选中的源文件,断言每一行（或至少可见视口内每一行）末尾出现淡色的 "作者名, 相对时间 • 摘要" 文本——这是本条目的隐含前置断言（见上文"执行方须知"）,若这里就已经不显示,不要继续执行本条目其余步骤,直接如实记录为回归。
+2. **真实体感：大文件/长历史 blame 与 age heatmap**：选择仓库里修改历史最长的一个源文件,滚动查看,主观评价装饰渲染是否流畅（不卡顿、无明显延迟)、age heatmap 的颜色梯度是否符合直觉（越新越暖）。
+3. **真实体感:graph 大仓库响应时间**：打开 Source Control 的 Graph 视图,点击 Refresh Graph,主观计时并记录从点击到 graph/refs 渲染完成的真实等待时间;与 S3 的合成仓库基准数字（5 万提交/0 ref ~134-138ms,50 万提交/1,201 ref ~2049-2208ms,真实瓶颈是 `--topo-order` 本身而非 ref 数量或 `maxCount`)做数量级上的合理性交叉核对,而非要求精确复现;如果真实仓库量级下体感明显比这个数量级预测的更慢,如实记录为需要进一步调查的信号,而不是直接归因于"预期内"。
+4. **真实 History/graph/refs 点击链路不报错**：依次点击 History 视图的 `Show File History`/`Show Line History`,展开一条记录后点击 `View Changed Files`,断言均正常打开且不出现任何 JS 异常（浏览器 devtools console 应无红色错误）——这是"执行方须知"第 1 条 bug 的隐含前置断言。
+5. **真实 multi-diff 编辑器渲染**：对上述"至少改动 3 个文件"的历史提交执行"View Changed Files",断言:multi-diff 编辑器真实打开、每个改动文件各有一个 diff 面板、新增文件的面板只显示"新增"侧内容、删除文件的面板只显示"删除前"内容、修改文件的面板正确显示两侧真实 diff（真实语法高亮、真实行号,而非空白面板）。
+6. **真实 worktree 创建（原生目录选择器 + macOS 沙箱授权）**：在 Worktrees 视图填入一个新文件夹名,点击 Add Worktree,断言弹出的是**真实系统原生**目录选择器（非任何模拟面板）;导航到上述准备好的临时父目录并选择;若这是应用**首次**尝试访问该目录,断言可能出现的 macOS 沙箱授权对话框（记录其是否出现、外观、对整体流程耗时的影响——这是一个需要如实记录的未知维度,而非预设结论,参考 E2E-008 步骤 2 对 Keychain 首次授权对话框的同类记录要求）;确认后断言新 worktree 真实出现在列表中,且用 shell 层核对该路径确实是一个真实的、可用 `git status` 查询的 git worktree（`git worktree list` 从仓库主目录应能看到它）。
+7. **真实 worktree 删除（含强制确认）**：对刚创建的 worktree 做一次真实修改（新建一个文件)后点击 Remove,断言:第一次点击（无 `--force`)因为有真实未跟踪内容而不会静默成功,UI 弹出确认对话框;确认后 worktree 真实从磁盘消失（shell 层核对目录不再存在、`git worktree list` 不再列出）。
+8. **真实 stash pop 冲突处理**：制造一个真实的 stash pop 冲突（例如:在分支 A 修改文件 X 某一行并 stash;切换到分支 B,同一行做不同修改并提交;切回分支 A,尝试 pop 该 stash）→ 断言:UI 侧展示的冲突文件列表与真实 `git status` 报告的冲突文件一致;该 stash 条目**依然保留**在列表中（未被误删——这是 `git stash pop` 冲突时的真实文档行为,Rust 侧已有单测覆盖这一语义,本步骤是它在真实 git 冲突机制下的最终验证）;手动解决冲突后,用 Drop 显式清理该 stash 条目,确认需要强确认对话框。
+9. 每步 UI 断言后尽量用一个平行的真实终端（`git log`/`git status`/`git worktree list`/`git stash list`)交叉核对,而不仅凭 UI 呈现下结论。
+10. 清理：退出应用；删除大仓库 fixture（如为专门克隆的临时副本)、worktree 临时父目录、截图与 `src-tauri/target`；确认原仓库的分支/stash/worktree 状态已复原（不得在真实开发者仓库历史中留下测试痕迹,优先使用专门为此克隆的临时仓库副本)。
+
+已知边界（执行方须知）：
+
+- Browser mock 的 stash 冲突（`stashConflictForTest`）与 worktree 脏检测（`worktreeDirtyForTest`）都是**脚本化断言**，不是真实 git 三方合并或真实文件系统脏检测——步骤 8 是这一简化在真实 git 语义下的唯一验证点。
+- graph 的"折叠泳道数超阈值"降级策略 S3 判定不实现（真实瓶颈在 git 子进程拓扑排序，不在前端渲染开销）——如果步骤 3 观察到大仓库下泳道特别多导致的渲染卡顿（而非等待 git 响应的卡顿），应如实记录为一个新发现，而不是预设"这属于已知限制"。
+- `worktree add` 不支持 `-b`/`-B` 显式命名新分支（S5 的既定收窄，见 progress.md），只支持"不给 commit-ish 时用 git 自己的默认启发式"或"给一个已存在的 commit-ish"两种；步骤 6 不需要验证命名分支的场景。
+- stash 的 `--include-untracked`/`--keep-index` 等非默认变体本条目不需要专门验证（S4 的既定范围收窄）。
+
+完成后：将结果写入 `features.json` F090 evidence（`nativeScenarios` 追加、`platformGaps` 移除本条目对应缺口；若未执行则如实标注「已登记未执行」，不得凭本条目文字描述代替真实结果；若发现"执行方须知"提到的两个 bug 在真实桌面上仍有残留表现，必须作为阻塞发现单独报告，不得归入本条目的常规完成流程）。
+
 ## 后续条目（随切片追加）
 
 - F030 遗留：真实 `CloseRequested` 关窗握手协议实现后，补「正常关窗 → 重开恢复」的桌面验收变体。
