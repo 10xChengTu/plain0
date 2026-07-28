@@ -979,6 +979,61 @@ export type GitStashApplyOutcome =
 	| Readonly<{ kind: "applied" }>
 	| Readonly<{ kind: "conflict"; conflictedPaths: readonly string[] }>;
 
+// --- Git worktree (F090 S5: `git::worktree`) --------------------------------
+
+/** Which of an attached branch, a detached commit, or a bare repository's own
+ * administrative worktree a [`GitWorktreeEntry`] currently has checked out —
+ * mirrors `src-tauri/src/git/worktree.rs`'s `WorktreeHeadState` verbatim. */
+export type GitWorktreeHeadState =
+	| Readonly<{ kind: "branch"; refName: string }>
+	| Readonly<{ kind: "detached" }>
+	| Readonly<{ kind: "bare" }>;
+
+/**
+ * One `git worktree list --porcelain -z` block. `headSha` is `null` only for
+ * a genuinely unborn `HEAD` or for `headState.kind === "bare"` (no `HEAD`
+ * line at all) — see `src-tauri/src/git/worktree.rs`'s own doc comment.
+ * `lockReason`/`prunableReason` are `null` for "not locked"/"not prunable"
+ * and a string (possibly empty, when git itself recorded no reason text)
+ * when they are. `isMain` is `true` for exactly the one entry git always
+ * lists first (confirmed empirically, `worktree.rs`'s own doc comment) —
+ * `worktree add`'s destination is always a *new* linked worktree, and this
+ * feature's own UI never offers the main entry itself for removal.
+ */
+export interface GitWorktreeEntry {
+	readonly path: string;
+	readonly headSha: string | null;
+	readonly headState: GitWorktreeHeadState;
+	readonly lockReason: string | null;
+	readonly prunableReason: string | null;
+	readonly isMain: boolean;
+}
+
+export interface GitWorktreeListResult {
+	readonly entries: readonly GitWorktreeEntry[];
+	readonly truncated: boolean;
+}
+
+/**
+ * `gitWorktreeAdd`'s own result — `"pickerCancelled"` when the native folder
+ * picker this call always invokes server-side was dismissed without a
+ * selection (not an error: mirrors `WorkspacePickResult`'s own cancellation
+ * modeling for the identical real user gesture); `"added"` carries the new
+ * worktree's own full, absolute filesystem path.
+ */
+export type GitWorktreeAddOutcome =
+	| Readonly<{ kind: "added"; path: string }>
+	| Readonly<{ kind: "pickerCancelled" }>;
+
+/** `gitWorktreeRemove`'s own result — see `src-tauri/src/git/worktree.rs`'s
+ * own doc comment for the full three-way clean/dirty/locked outcome split
+ * this feature implements: `"needsForce"` is not an error (a clean worktree
+ * is `"removed"` immediately; a dirty one reports `"needsForce"` so the
+ * caller can confirm before ever retrying with `force: true`), while a
+ * locked, main, or unregistered-path worktree instead rejects the call
+ * entirely (see `gitWorktreeRemove`'s own doc comment below). */
+export type GitWorktreeRemoveOutcome = "removed" | "needsForce";
+
 export type Unlisten = () => void | Promise<void>;
 
 export interface PlainBridge {
@@ -1494,4 +1549,54 @@ export interface PlainBridge {
 	 * Rejects with `GIT_STASH_NOT_FOUND` when no entry with this sha
 	 * currently exists. Same trust/repository rejections as `gitStatus`. */
 	gitStashDrop(sha: string): Promise<void>;
+	/** `F090` S5: `git worktree list --porcelain -z` — the worktree panel's own
+	 * data source; the main worktree is always `entries[0]`. Takes no
+	 * parameters. Same trust/repository rejections as `gitStatus`. */
+	gitWorktreeList(): Promise<GitWorktreeListResult>;
+	/** `F090` S5: `git worktree add [--detach] -- <path> [<commitIsh>]` —
+	 * creates a new linked worktree. `childSegment` must be a single,
+	 * non-empty path segment (no `/`) naming the new worktree's own leaf
+	 * directory; this call always pops a native folder-picker dialog
+	 * server-side first and joins that picked, already-authorized parent
+	 * directory with `childSegment` — the caller never supplies (and this
+	 * bridge method never accepts) a raw parent path (see
+	 * `src-tauri/src/git/worktree.rs`'s own module doc comment for the full
+	 * destination-authorization model). `commitIsh`, when given, must not be
+	 * empty or begin with `-`. Never confirmed by this call itself (a low-
+	 * severity write per this feature's own frozen plan — the native picker
+	 * is itself this action's own explicit gesture; see
+	 * `plain-git-worktree-view.ts`'s own module doc comment). Rejects with
+	 * `GIT_WORKTREE_ADD_INVALID_CHILD_SEGMENT`/`GIT_WORKTREE_ADD_INVALID_COMMIT_ISH`
+	 * for a malformed `childSegment`/`commitIsh`,
+	 * `GIT_WORKTREE_ADD_PARENT_UNAVAILABLE` when the picked folder cannot be
+	 * opened, `GIT_WORKTREE_ADD_TARGET_EXISTS` when the target already exists
+	 * as a non-empty directory or a file, `GIT_WORKTREE_ADD_BRANCH_IN_USE`
+	 * when `commitIsh` names a branch already checked out elsewhere, or
+	 * `GIT_WORKTREE_ADD_INVALID_REFERENCE` when `commitIsh` does not resolve
+	 * to a real commit. Same trust/repository rejections as `gitStatus`. */
+	gitWorktreeAdd(
+		childSegment: string,
+		detach: boolean,
+		commitIsh: string | null,
+	): Promise<GitWorktreeAddOutcome>;
+	/** `F090` S5: `git worktree remove [--force] -- <path>` — removes a linked
+	 * worktree. This call performs the removal unconditionally for whatever
+	 * `force` the caller passes; the caller must always try `force: false`
+	 * first and only retry with `force: true` after `resolveWorktreeConfirmation`
+	 * (`plain-scm-worktree.ts`) reports `"confirmed"` in response to a first
+	 * call reporting `"needsForce"` back — this mirrors `gitStashPop`'s own
+	 * "confirm first, this call never re-confirms" contract, applied here to
+	 * the *second* of two calls rather than the only one. Rejects with
+	 * `GIT_WORKTREE_REMOVE_LOCKED` when the worktree is locked (this feature
+	 * deliberately never auto-escalates to a second `--force`; see
+	 * `worktree.rs`'s own doc comment), `GIT_WORKTREE_REMOVE_IS_MAIN_WORKTREE`
+	 * when `path` names the repository's own main worktree, or
+	 * `GIT_WORKTREE_REMOVE_NOT_FOUND` when `path` does not name any worktree
+	 * registered to this repository (git's own safety net — an arbitrary
+	 * path can never destroy unrelated data, see `worktree.rs`'s own doc
+	 * comment). Same trust/repository rejections as `gitStatus`. */
+	gitWorktreeRemove(
+		path: string,
+		force: boolean,
+	): Promise<GitWorktreeRemoveOutcome>;
 }

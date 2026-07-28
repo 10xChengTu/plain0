@@ -434,6 +434,15 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async gitStashDrop() {
 			throw new Error("unused");
 		},
+		async gitWorktreeList() {
+			throw new Error("unused");
+		},
+		async gitWorktreeAdd() {
+			throw new Error("unused");
+		},
+		async gitWorktreeRemove() {
+			throw new Error("unused");
+		},
 		...overrides,
 	};
 }

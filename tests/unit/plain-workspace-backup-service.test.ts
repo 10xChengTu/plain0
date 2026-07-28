@@ -134,6 +134,9 @@ function createFakeBridge(overrides: Partial<PlainBridge> = {}): {
 		gitStashApply: notImplemented,
 		gitStashPop: notImplemented,
 		gitStashDrop: notImplemented,
+		gitWorktreeList: notImplemented,
+		gitWorktreeAdd: notImplemented,
+		gitWorktreeRemove: notImplemented,
 		...overrides,
 	};
 	return { bridge, state };

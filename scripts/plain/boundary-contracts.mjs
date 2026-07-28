@@ -1468,6 +1468,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 				parent.expression.text === "configurePlainGitHistoryBridge" ||
 				parent.expression.text === "configurePlainGitGraphBridge" ||
 				parent.expression.text === "configurePlainGitStashBridge" ||
+				parent.expression.text === "configurePlainGitWorktreeBridge" ||
 				parent.expression.text === "createPlainGitTextModelContentProvider" ||
 				parent.expression.text === "createPlainGitBlameContribution" ||
 				parent.expression.text === "createPlainGitCommitBlobContentProvider" ||
@@ -6552,20 +6553,46 @@ const GIT_COMMAND_CONTRACTS = Object.freeze([
 		returnType: "->Result<(),CommandError>",
 		body: "letexpected_sha=request.into_parts()?;stash::drop_stash(trust.inner(),workspace.inner(),window.label(),&expected_sha,).await",
 	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_worktree_list",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitWorktreeListRequest",
+		returnType: "->Result<GitWorktreeListResultWire,CommandError>",
+		body: "request.validate();letresult=worktree::list_worktrees(trust.inner(),workspace.inner(),window.label()).await?;Ok(GitWorktreeListResultWire::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_worktree_add",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitWorktreeAddRequest",
+		returnType: "->Result<GitWorktreeAddOutcomeWire,CommandError>",
+		body: "let(child_segment,detach,commit_ish)=request.into_parts()?;letpicker=TauriDirectoryPicker::new(window.clone());letoutcome=worktree::add_worktree(trust.inner(),workspace.inner(),window.label(),&picker,&child_segment,detach,commit_ish.as_deref(),).await?;Ok(GitWorktreeAddOutcomeWire::from(outcome))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_worktree_remove",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitWorktreeRemoveRequest",
+		returnType: "->Result<GitWorktreeRemoveOutcomeWire,CommandError>",
+		body: "let(path,force)=request.into_parts()?;letoutcome=worktree::remove_worktree(trust.inner(),workspace.inner(),window.label(),&path,force,).await?;Ok(GitWorktreeRemoveOutcomeWire::from(outcome))",
+	},
 ]);
 
 /**
- * Locks all twenty-eight git commands (`F080` S1's three reads, S3's five
+ * Locks all thirty-one git commands (`F080` S1's three reads, S3's five
  * writes, S4's five network commands, `F090` S0's two read-only blame
  * commands — `git_blame_file`/`git_blame_commit_messages` —, `F090` S1's
  * three read-only file/line-history commands —
  * `git_file_history`/`git_line_history_list`/`git_line_history_detail` —,
  * `F090` S2's two read-only commit-detail commands —
  * `git_show_commit`/`git_show_commit_blob` —, `F090` S3's two read-only
- * graph/refs commands — `git_log_graph`/`git_refs_list` — and `F090` S4's six
+ * graph/refs commands — `git_log_graph`/`git_refs_list` —, `F090` S4's six
  * stash commands (two read-only — `git_stash_list`/`git_stash_show` — and
  * four writes — `git_stash_push`/`git_stash_apply`/`git_stash_pop`/
- * `git_stash_drop`) —, added to this same closed array rather than a
+ * `git_stash_drop`) — and `F090` S5's three worktree commands (one read-only
+ * — `git_worktree_list` — and two writes — `git_worktree_add`/
+ * `git_worktree_remove`), added to this same closed array rather than a
  * parallel `GIT_HISTORY_COMMAND_CONTRACTS`, per the existing "`PlainBridge`'s
  * git surface is one audited whole, not
  * several independently-sized ones" rationale documented below at
@@ -6999,14 +7026,35 @@ export function validateGitRustBoundary(rustSources) {
 	// this only catches a *third*, differently-named constant (or an inline
 	// `.args([...])` literal) smuggling in a bare `--force` token anywhere in
 	// the git Rust domain — not just `network.rs` (broadened post-review;
-	// confirmed empirically zero false positives: no other file under
-	// `src-tauri/src/git/` contains the literal quoted string `"--force"` at
-	// all, so widening this scan costs nothing). `--force-with-lease` itself
-	// contains the substring `--force`, so the negative lookahead is
-	// required to avoid a false positive against the audited constant's own
-	// literal.
-	const gitDomainSourcesForForceScan = rustSources.filter((entry) =>
-		GIT_DOMAIN_SOURCE_PATTERN.test(entry.relativePath.replaceAll("\\", "/")),
+	// confirmed empirically zero false positives at the time: no other file
+	// under `src-tauri/src/git/` contained the literal quoted string
+	// `"--force"` at all, so widening this scan cost nothing). `--force-with-
+	// lease` itself contains the substring `--force`, so the negative
+	// lookahead is required to avoid a false positive against the audited
+	// constant's own literal.
+	//
+	// `F090` S5 found the one genuine exception this scan's own "zero false
+	// positives" premise did not anticipate: `worktree.rs`'s `remove_worktree`
+	// legitimately passes a bare `--force` to `git worktree remove` — a
+	// completely different subcommand from `push`, with no `--force-with-
+	// lease`-style safer equivalent at all (confirmed empirically,
+	// `worktree.rs`'s own module doc comment: a locked worktree requires it
+	// *twice*, a merely-dirty one once; `worktree remove` has no remote/lease
+	// concept for this flag to protect against in the first place — unlike
+	// `push`, which can silently clobber someone else's remote history, a
+	// local worktree removal's own two-phase probe-then-confirm flow is this
+	// feature's own, differently-shaped safeguard, see `plain-scm-worktree.ts`).
+	// `worktree.rs` is therefore excluded from this specific scan by name —
+	// not a weakening of the underlying push-only invariant this scan exists
+	// to protect (still enforced for every other file in the domain), and not
+	// a license for any *other* file to follow suit without the same
+	// disclosure and review.
+	const gitDomainSourcesForForceScan = rustSources.filter(
+		(entry) =>
+			GIT_DOMAIN_SOURCE_PATTERN.test(
+				entry.relativePath.replaceAll("\\", "/"),
+			) &&
+			!entry.relativePath.replaceAll("\\", "/").endsWith("/git/worktree.rs"),
 	);
 	const bareForceLiteralFoundIn = gitDomainSourcesForForceScan.find((entry) =>
 		/"--force"(?!-with-lease)/.test(stripRustCommentsOnly(entry.source)),
@@ -7375,6 +7423,83 @@ export function validateGitRustBoundary(rustSources) {
 	) {
 		failures.push(
 			"GitStashApplyOutcomeWire must expose exactly its two audited Applied/Conflict variants",
+		);
+	}
+
+	// --- F090 S5: worktree (`git::worktree`) --------------------------------
+	//
+	// None of `worktree.rs`'s three argument constants has a free-text field
+	// to absorb (`worktree list`'s porcelain format has no user-supplied
+	// content at all; `worktree add`/`worktree remove`'s own literal `--`
+	// separator is enforced by `GIT_WORKTREE_ADD_BASE_ARGS`'s own fixed shape,
+	// not a format string), so plain array equality is sufficient for all
+	// three — no dedicated field-safety function is needed here, unlike
+	// `validateGitBlameHardeningArgs`/`validateGitLogGraphFormatStringBoundary`/
+	// `validateGitStashMessageFieldSafetyBoundary`.
+	const worktreeSource = findRustSource(
+		rustSources,
+		"src-tauri/src/git/worktree.rs",
+	);
+	if (worktreeSource === undefined) {
+		failures.push("git boundary requires worktree.rs");
+		return failures;
+	}
+	const executableWorktree = stripRustCommentsOnly(worktreeSource);
+	const worktreeArgsChecks = [
+		["GIT_WORKTREE_LIST_ARGS", ["worktree", "list", "--porcelain", "-z"]],
+		["GIT_WORKTREE_ADD_BASE_ARGS", ["worktree", "add"]],
+		["GIT_WORKTREE_REMOVE_ARGS", ["worktree", "remove"]],
+	];
+	for (const [constantName, expected] of worktreeArgsChecks) {
+		if (!sameArray(argsConstant(executableWorktree, constantName), expected)) {
+			failures.push(
+				`worktree.rs must define ${constantName} as exactly the audited argument list`,
+			);
+		}
+	}
+
+	if (
+		structBody("GitWorktreeListRequest") !== "" ||
+		enumBody("GitWorktreeHeadStateWire") !==
+			"Branch{ref_name:String},Detached,Bare," ||
+		structBody("GitWorktreeEntryWire") !==
+			"path:String,head_sha:Option<String>,head_state:GitWorktreeHeadStateWire,lock_reason:Option<String>,prunable_reason:Option<String>,is_main:bool," ||
+		structBody("GitWorktreeListResultWire") !==
+			"entries:Vec<GitWorktreeEntryWire>,truncated:bool,"
+	) {
+		failures.push(
+			"GitWorktreeListRequest/GitWorktreeHeadStateWire/GitWorktreeEntryWire/GitWorktreeListResultWire must expose only their exact audited fields",
+		);
+	}
+	if (
+		structBody("GitWorktreeAddRequest") !==
+		"child_segment:String,detach:bool,commit_ish:Option<String>,"
+	) {
+		failures.push(
+			"GitWorktreeAddRequest must expose only its exact audited fields",
+		);
+	}
+	const worktreeAddOutcomeBody = enumBody("GitWorktreeAddOutcomeWire");
+	if (
+		worktreeAddOutcomeBody !== "Added{path:String},PickerCancelled," &&
+		worktreeAddOutcomeBody !== "Added{path:String},PickerCancelled"
+	) {
+		failures.push(
+			"GitWorktreeAddOutcomeWire must expose exactly its two audited Added/PickerCancelled variants",
+		);
+	}
+	if (structBody("GitWorktreeRemoveRequest") !== "path:String,force:bool,") {
+		failures.push(
+			"GitWorktreeRemoveRequest must expose only its exact audited fields",
+		);
+	}
+	const worktreeRemoveOutcomeBody = enumBody("GitWorktreeRemoveOutcomeWire");
+	if (
+		worktreeRemoveOutcomeBody !== "Removed,NeedsForce," &&
+		worktreeRemoveOutcomeBody !== "Removed,NeedsForce"
+	) {
+		failures.push(
+			"GitWorktreeRemoveOutcomeWire must expose exactly its two audited Removed/NeedsForce variants",
 		);
 	}
 
@@ -7759,13 +7884,14 @@ export function validateGitStashMessageFieldSafetyBoundary(rustSources) {
  * `gitLineHistoryList`/`gitLineHistoryDetail`), `F090` S2's two
  * read-only commit-detail methods (`gitShowCommit`/`gitShowCommitBlob`),
  * `F090` S3's two read-only graph/refs methods (`gitLogGraph`/
- * `gitRefsList`), and `F090` S4's six stash methods (`gitStashList`/
+ * `gitRefsList`), `F090` S4's six stash methods (`gitStashList`/
  * `gitStashShow`/`gitStashPush`/`gitStashApply`/`gitStashPop`/
- * `gitStashDrop`) — every slice deliberately shares this same closed-list
- * lock rather than getting its own parallel "S_ bridge methods" const, for
- * the same reason `GIT_COMMAND_CONTRACTS` above holds all twenty-eight Rust
- * commands in one array: `PlainBridge`'s git surface is one audited whole,
- * not several independently-sized ones.
+ * `gitStashDrop`), and `F090` S5's three worktree methods (`gitWorktreeList`/
+ * `gitWorktreeAdd`/`gitWorktreeRemove`) — every slice deliberately shares
+ * this same closed-list lock rather than getting its own parallel
+ * "S_ bridge methods" const, for the same reason `GIT_COMMAND_CONTRACTS`
+ * above holds all thirty-one Rust commands in one array: `PlainBridge`'s git
+ * surface is one audited whole, not several independently-sized ones.
  */
 const GIT_BRIDGE_METHOD_NAMES = [
 	"gitStatus",
@@ -7796,6 +7922,9 @@ const GIT_BRIDGE_METHOD_NAMES = [
 	"gitStashApply",
 	"gitStashPop",
 	"gitStashDrop",
+	"gitWorktreeList",
+	"gitWorktreeAdd",
+	"gitWorktreeRemove",
 ];
 
 /**
@@ -7855,8 +7984,8 @@ const GIT_NO_ARG_COMMAND_CONTRACTS = Object.freeze([
 ]);
 
 /**
- * Locks `F080` S1+S3+S4 and `F090` S0+S1+S2+S3+S4's TypeScript surface:
- * `PlainBridge` exposes exactly the twenty-eight audited git methods,
+ * Locks `F080` S1+S3+S4 and `F090` S0+S1+S2+S3+S4+S5's TypeScript surface:
+ * `PlainBridge` exposes exactly the thirty-one audited git methods,
  * `git-codec.ts`'s read-result decoders validate exact own-data keys/reject
  * Proxy wrapping/freeze their result (same rigor
  * `validateTerminalIpcBridgeBoundary` already locks for the terminal
@@ -7910,7 +8039,7 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 			JSON.stringify([...GIT_BRIDGE_METHOD_NAMES].sort())
 	) {
 		failures.push(
-			"PlainBridge must expose exactly the twenty-eight audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
 		);
 	}
 
@@ -7937,6 +8066,8 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 		"decodeGitStashListResult",
 		"decodeGitStashShowResult",
 		"decodeGitStashApplyOutcome",
+		"decodeGitWorktreeListResult",
+		"decodeGitWorktreeAddOutcome",
 	]) {
 		const body = decoderBody(name);
 		if (
@@ -7963,6 +8094,21 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 		) {
 			failures.push(
 				"git-codec.ts's decodeGitStashPushOutcome must validate value is one of the exact two audited outcome strings",
+			);
+		}
+	}
+	// `decodeGitWorktreeRemoveOutcome` decodes a bare own-data string (one of
+	// the two audited outcomes) — same differently-shaped check as
+	// `decodeGitStashPushOutcome` above, for the same reason.
+	{
+		const body = decoderBody("decodeGitWorktreeRemoveOutcome");
+		if (
+			body === undefined ||
+			!body.includes('typeof value !== "string"') ||
+			!body.includes("GIT_WORKTREE_REMOVE_OUTCOMES.has(")
+		) {
+			failures.push(
+				"git-codec.ts's decodeGitWorktreeRemoveOutcome must validate value is one of the exact two audited outcome strings",
 			);
 		}
 	}
@@ -8159,6 +8305,41 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 	) {
 		failures.push(
 			"native.ts must invoke git_stash_pop exactly once, routed through frozenGitStashPopRequest and decoded through decodeGitStashApplyOutcome",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_worktree_list"/g)]
+			.length !== 1 ||
+		// `git_worktree_list` takes no payload at all — same shape as
+		// `git_refs_list`/`git_stash_list` above, no
+		// `frozenGitWorktreeListRequest` builder exists.
+		!native.includes("decodeGitWorktreeListResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_worktree_list exactly once, decoded through decodeGitWorktreeListResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_worktree_add"/g)].length !==
+			1 ||
+		!native.includes("frozenGitWorktreeAddRequest(") ||
+		!native.includes("decodeGitWorktreeAddOutcome(")
+	) {
+		failures.push(
+			"native.ts must invoke git_worktree_add exactly once, routed through frozenGitWorktreeAddRequest and decoded through decodeGitWorktreeAddOutcome",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_worktree_remove"/g)]
+			.length !== 1 ||
+		!native.includes("frozenGitWorktreeRemoveRequest(") ||
+		!native.includes("decodeGitWorktreeRemoveOutcome(")
+	) {
+		failures.push(
+			"native.ts must invoke git_worktree_remove exactly once, routed through frozenGitWorktreeRemoveRequest and decoded through decodeGitWorktreeRemoveOutcome",
 		);
 	}
 
@@ -9399,6 +9580,363 @@ function validateStashConfirmationModuleFace(source) {
 	) {
 		failures.push(
 			"resolveStashConfirmation must unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited shape",
+		);
+	}
+	return failures;
+}
+
+const GIT_WORKTREE_VIEW_PATH = "app/features/scm/plain-git-worktree-view.ts";
+const GIT_WORKTREE_MODULE_PATH = "app/features/scm/plain-scm-worktree.ts";
+
+/**
+ * `F090` S5's `gitWorktreeRemove` is an irreversible write (when its second,
+ * forced call actually discards uncommitted content) this feature's own
+ * frozen plan requires a confirmation dialog before ever running with
+ * `force: true` — the same "nothing at the Rust/bridge-interface layer
+ * enforces this, only the audited call site does" situation
+ * `validateGitStashConfirmationBoundary` already locks, generalized here to a
+ * *fourth* view file (`PlainGitWorktreeView`) and confirmation module
+ * (`plain-scm-worktree.ts`). Unlike `validateGitStashConfirmationBoundary`'s
+ * `GIT_STASH_BRIDGE_METHOD_AUDITS` (one call site per audited bridge
+ * method), `gitWorktreeRemove` itself is called **twice** inside the same
+ * audited method (`PlainGitWorktreeView.removeEntry`'s own unforced probe,
+ * then its confirmed forced retry — see that method's own doc comment), so
+ * this contract counts exactly two valid occurrences there rather than one,
+ * and additionally pins `removeEntry`'s own exact body text (via
+ * [`validateWorktreeRemoveEntryGuardedCall`]) to prove the confirm-then-retry
+ * control flow is real, not merely "two calls somewhere in the method".
+ * Locks: `gitWorktreeRemove`'s bridge declaration to its audited three files
+ * (`GIT_DISCARD_DECLARATION_PATHS`, reused — same contracts.ts/native.ts/
+ * browser-mock.ts split as discard/network/stash), its two production call
+ * sites to `PlainGitWorktreeView.removeEntry` and nowhere else, that
+ * method's exact body shape, and `plain-scm-worktree.ts`'s own audited
+ * module face (mirrors `validateStashConfirmationModuleFace`).
+ */
+export function validateGitWorktreeConfirmationBoundary(appSources) {
+	const failures = [];
+	const normalizedSources = new Map(
+		appSources.map(({ relativePath, source }) => [
+			relativePath.replaceAll("\\", "/"),
+			source,
+		]),
+	);
+	const requiredPaths = Object.freeze([
+		...GIT_DISCARD_DECLARATION_PATHS,
+		GIT_WORKTREE_VIEW_PATH,
+		GIT_WORKTREE_MODULE_PATH,
+	]);
+	for (const relativePath of requiredPaths) {
+		if (!normalizedSources.has(relativePath)) {
+			failures.push(
+				`git worktree confirmation boundary requires ${relativePath}`,
+			);
+		}
+	}
+
+	function containingMethodName(node) {
+		let current = node.parent;
+		while (current !== undefined) {
+			if (
+				ts.isMethodDeclaration(current) ||
+				ts.isFunctionDeclaration(current)
+			) {
+				return typeScriptStaticName(current.name);
+			}
+			current = current.parent;
+		}
+		return undefined;
+	}
+
+	const declarationCounts = new Map(
+		GIT_DISCARD_DECLARATION_PATHS.map((relativePath) => [relativePath, 0]),
+	);
+	// `gitWorktreeRemove` is legitimately called twice inside the same
+	// audited method (see this function's own doc comment) — unlike every
+	// other confirm-gated bridge method this codebase locks, which expects
+	// exactly one production call site.
+	let auditedCallCount = 0;
+
+	for (const [normalizedPath, source] of normalizedSources) {
+		if (!normalizedPath.endsWith(".ts") && !normalizedPath.endsWith(".tsx")) {
+			continue;
+		}
+		const sourceFile = ts.createSourceFile(
+			normalizedPath,
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			normalizedPath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+		);
+		const isKnownBridge = collectTypeScriptBridgeAliases(sourceFile);
+
+		function visit(node) {
+			const referencesMethod =
+				(ts.isIdentifier(node) && node.text === "gitWorktreeRemove") ||
+				((ts.isStringLiteral(node) ||
+					ts.isNoSubstitutionTemplateLiteral(node)) &&
+					node.text === "gitWorktreeRemove");
+			if (referencesMethod) {
+				const parent = node.parent;
+				const isAllowedDeclaration =
+					(normalizedPath === "app/platform/tauri/contracts.ts" &&
+						ts.isMethodSignature(parent) &&
+						parent.name === node) ||
+					(normalizedPath === "app/platform/tauri/native.ts" &&
+						ts.isPropertyAssignment(parent) &&
+						parent.name === node) ||
+					(normalizedPath === "app/platform/tauri/browser-mock.ts" &&
+						(ts.isMethodDeclaration(parent) ||
+							ts.isPropertyAssignment(parent)) &&
+						parent.name === node);
+				if (isAllowedDeclaration) {
+					declarationCounts.set(
+						normalizedPath,
+						declarationCounts.get(normalizedPath) + 1,
+					);
+				} else {
+					const propertyAccess = ts.isIdentifier(node) ? parent : undefined;
+					const directCall =
+						propertyAccess !== undefined &&
+						ts.isPropertyAccessExpression(propertyAccess) &&
+						propertyAccess.name === node &&
+						ts.isCallExpression(propertyAccess.parent) &&
+						propertyAccess.parent.expression === propertyAccess &&
+						isKnownBridge(propertyAccess.expression)
+							? propertyAccess.parent
+							: undefined;
+					const isAuditedCall =
+						directCall !== undefined &&
+						normalizedPath === GIT_WORKTREE_VIEW_PATH &&
+						containingMethodName(node) === "removeEntry";
+					if (isAuditedCall) {
+						auditedCallCount += 1;
+					} else {
+						failures.push(
+							`${normalizedPath} must not consume gitWorktreeRemove outside PlainGitWorktreeView.removeEntry's two audited call sites`,
+						);
+					}
+				}
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(sourceFile);
+	}
+
+	for (const [relativePath, count] of declarationCounts) {
+		if (count !== 1) {
+			failures.push(
+				`${relativePath} must declare gitWorktreeRemove exactly once in its audited bridge surface`,
+			);
+		}
+	}
+	if (auditedCallCount !== 2) {
+		failures.push(
+			"gitWorktreeRemove must have exactly two production call sites, both inside PlainGitWorktreeView.removeEntry (the unforced probe and the confirmed forced retry)",
+		);
+	}
+
+	const viewSource = normalizedSources.get(GIT_WORKTREE_VIEW_PATH);
+	if (viewSource !== undefined) {
+		failures.push(...validateWorktreeRemoveEntryGuardedCall(viewSource));
+	}
+	const worktreeModuleSource = normalizedSources.get(GIT_WORKTREE_MODULE_PATH);
+	if (worktreeModuleSource !== undefined) {
+		failures.push(
+			...validateWorktreeConfirmationModuleFace(worktreeModuleSource),
+		);
+	}
+
+	return [...new Set(failures)];
+}
+
+/**
+ * Locks `PlainGitWorktreeView.removeEntry` to its exact "try unforced, return
+ * unless the outcome is exactly `\"needsForce\"`, await the confirmation,
+ * return unless it is exactly `\"confirmed\"`, only then retry forced" shape
+ * — mirrors `validateStashMutationGuardedCalls`'s own "one audited body per
+ * method" technique, applied here to a single method containing two calls to
+ * the same bridge method rather than one call each across two methods.
+ */
+function validateWorktreeRemoveEntryGuardedCall(source) {
+	const sourceFile = ts.createSourceFile(
+		GIT_WORKTREE_VIEW_PATH,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["plain-git-worktree-view.ts must remain valid TypeScript"];
+	}
+
+	const methods = [];
+	function visit(node) {
+		if (
+			ts.isMethodDeclaration(node) &&
+			typeScriptStaticName(node.name) === "removeEntry"
+		) {
+			methods.push(node);
+		}
+		ts.forEachChild(node, visit);
+	}
+	visit(sourceFile);
+
+	const expectedBody = `{
+		const outcome = await this.#runWorktreeMutation((bridge) =>
+			bridge.gitWorktreeRemove(entry.path, false),
+		);
+		if (outcome !== "needsForce") {
+			return;
+		}
+		const decision = await resolveWorktreeConfirmation(this.dialogService, {
+			kind: "removeDirty",
+			worktreeLabel: worktreeEntryLabel(entry),
+		});
+		if (decision.kind !== "confirmed") {
+			return;
+		}
+		await this.#runWorktreeMutation((bridge) =>
+			bridge.gitWorktreeRemove(entry.path, true),
+		);
+	}`.replaceAll(/\s+/g, "");
+	if (
+		methods.length !== 1 ||
+		methods[0].body === undefined ||
+		methods[0].body.getText(sourceFile).replaceAll(/\s+/g, "") !== expectedBody
+	) {
+		return [
+			"PlainGitWorktreeView.removeEntry must match its exact audited unforced-probe-then-confirm-then-forced-retry shape — no other shape may reach the gitWorktreeRemove bridge call",
+		];
+	}
+	return [];
+}
+
+/**
+ * Locks `plain-scm-worktree.ts`'s own audited module face: it must import
+ * nothing at all (an import is the only way this module could ever reach a
+ * bridge or a real Workbench service to perform the worktree removal
+ * itself), its top-level declarations must match the exact audited set, and
+ * `resolveWorktreeConfirmation` itself must match the exact audited body —
+ * which simultaneously proves it never calls a bridge method and never has a
+ * branch that skips the dialog. Mirrors
+ * `validateStashConfirmationModuleFace`'s exact technique.
+ */
+function validateWorktreeConfirmationModuleFace(source) {
+	const failures = [];
+	const sourceFile = ts.createSourceFile(
+		GIT_WORKTREE_MODULE_PATH,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["plain-scm-worktree.ts must remain valid TypeScript"];
+	}
+
+	if (
+		sourceFile.statements.some((statement) => ts.isImportDeclaration(statement))
+	) {
+		failures.push(
+			"plain-scm-worktree.ts must not import anything — it only ever decides whether the caller may retry a forced worktree removal, and an import is the only way it could ever reach a bridge or service to perform the write itself",
+		);
+	}
+
+	const expectedTopLevel = new Map([
+		["WorktreeConfirmDialogService", { kind: "interface", exported: true }],
+		["WorktreeConfirmationKind", { kind: "type", exported: true }],
+		["WorktreeConfirmationRequest", { kind: "interface", exported: true }],
+		["worktreeConfirmationMessage", { kind: "function", exported: true }],
+		["worktreeConfirmationDetail", { kind: "function", exported: true }],
+		["WORKTREE_CONFIRM_PRIMARY_BUTTON", { kind: "variable", exported: true }],
+		["WorktreeConfirmDecision", { kind: "type", exported: true }],
+		[
+			"resolveWorktreeConfirmation",
+			{ kind: "function", exported: true, async: true },
+		],
+	]);
+	const topLevelCounts = new Map(
+		[...expectedTopLevel].map(([name]) => [name, 0]),
+	);
+	let topLevelIsExact = true;
+	for (const statement of sourceFile.statements) {
+		if (ts.isImportDeclaration(statement)) {
+			continue;
+		}
+		let name;
+		let kind;
+		if (ts.isVariableStatement(statement)) {
+			if (statement.declarationList.declarations.length !== 1) {
+				topLevelIsExact = false;
+				continue;
+			}
+			name = statement.declarationList.declarations[0].name;
+			kind = "variable";
+		} else if (ts.isFunctionDeclaration(statement)) {
+			name = statement.name;
+			kind = "function";
+		} else if (ts.isInterfaceDeclaration(statement)) {
+			name = statement.name;
+			kind = "interface";
+		} else if (ts.isTypeAliasDeclaration(statement)) {
+			name = statement.name;
+			kind = "type";
+		} else {
+			topLevelIsExact = false;
+			continue;
+		}
+		const expected = ts.isIdentifier(name)
+			? expectedTopLevel.get(name.text)
+			: undefined;
+		const modifierKinds = (statement.modifiers ?? []).map(
+			(modifier) => modifier.kind,
+		);
+		const expectedModifiers = [
+			...(expected?.exported ? [ts.SyntaxKind.ExportKeyword] : []),
+			...(expected?.async ? [ts.SyntaxKind.AsyncKeyword] : []),
+		];
+		if (
+			expected === undefined ||
+			expected.kind !== kind ||
+			!sameArray(modifierKinds, expectedModifiers)
+		) {
+			topLevelIsExact = false;
+		} else {
+			topLevelCounts.set(name.text, topLevelCounts.get(name.text) + 1);
+		}
+	}
+	if (
+		!topLevelIsExact ||
+		[...topLevelCounts.values()].some((count) => count !== 1)
+	) {
+		failures.push(
+			"plain-scm-worktree.ts must retain its exact audited top-level surface — no new declaration can quietly add a way for this decide-only module to reach a bridge",
+		);
+	}
+
+	const resolveFunctions = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "resolveWorktreeConfirmation",
+	);
+	const expectedResolveBody = `{
+		const confirmation = await dialogService.confirm({
+			message: worktreeConfirmationMessage(request),
+			detail: worktreeConfirmationDetail(request),
+			primaryButton: WORKTREE_CONFIRM_PRIMARY_BUTTON[request.kind],
+		});
+		return Object.freeze({
+			kind: confirmation.confirmed ? "confirmed" : "declined",
+		});
+	}`.replaceAll(/\s+/g, "");
+	if (
+		resolveFunctions.length !== 1 ||
+		resolveFunctions[0].body === undefined ||
+		resolveFunctions[0].body.getText(sourceFile).replaceAll(/\s+/g, "") !==
+			expectedResolveBody
+	) {
+		failures.push(
+			"resolveWorktreeConfirmation must unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited shape",
 		);
 	}
 	return failures;

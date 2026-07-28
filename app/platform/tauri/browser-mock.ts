@@ -19,6 +19,8 @@ import type {
 	GitStashShowResult,
 	GitStatusEntry,
 	GitStatusResult,
+	GitWorktreeEntry,
+	GitWorktreeListResult,
 	PlainBridge,
 	RuntimeInfo,
 	TerminalDataEvent,
@@ -69,6 +71,8 @@ import {
 	frozenGitStashPushRequest,
 	frozenGitStashShowRequest,
 	frozenGitUnstagePathsRequest,
+	frozenGitWorktreeAddRequest,
+	frozenGitWorktreeRemoveRequest,
 } from "./git-codec";
 import {
 	backupUnavailable,
@@ -1173,6 +1177,34 @@ export interface BrowserMockGitFixtureForTest {
 	 * untouched (mirrors the real `git stash pop`'s "kept on conflict"
 	 * semantics this feature's own acceptance criteria require). */
 	readonly stashConflictForTest?: Readonly<Record<string, readonly string[]>>;
+	/** `F090` S5: seeds the initial, mutable `gitWorktreeList` state (defaults
+	 * to a single synthetic main-worktree entry, since a real repository
+	 * always has at least one) — `gitWorktreeAdd`/`gitWorktreeRemove` mutate
+	 * this in place, mirroring `stashForTest`'s own "mutable simulation, not a
+	 * re-implementation of real git plumbing" scope; the real Rust parser's
+	 * thorough fixture coverage (main/linked/detached/locked/prunable/
+	 * non-ASCII entries) lives in `src-tauri/src/git/worktree/tests.rs`. A
+	 * seeded entry's own `lockReason`/`isMain` are consulted by the mock
+	 * `gitWorktreeRemove` below (see that fixture's own doc comment) rather
+	 * than duplicating them into a second, parallel fixture shape. */
+	readonly worktreesForTest?: readonly GitWorktreeEntry[];
+	/** `F090` S5: when `true`, every `gitWorktreeAdd` call returns
+	 * `{ kind: "pickerCancelled" }` without mutating `worktreesForTest`'s own
+	 * list — simulates the native folder-picker dialog being dismissed
+	 * without a selection. A disclosed simplification (not a one-shot queue
+	 * like `BrowserMockWorkspacePick`'s own scripted outcomes): a consuming
+	 * test that needs "cancelled once, then succeeds" configures two separate
+	 * mock instances instead. */
+	readonly worktreeAddCancelledForTest?: boolean;
+	/** `F090` S5: the set of worktree paths (matched against
+	 * `worktreesForTest`'s own `path` field) `gitWorktreeRemove` reports
+	 * `"needsForce"` for when called with `force: false` — mirrors
+	 * `stashConflictForTest`'s own "seed a specific, scriptable non-default
+	 * outcome by identity" shape. Calling again with `force: true` for the
+	 * same path always succeeds and removes the entry (a locked or main
+	 * entry rejects regardless — see the mock `gitWorktreeRemove`'s own doc
+	 * comment). */
+	readonly worktreeDirtyForTest?: readonly string[];
 	/** When `true`, every git method rejects with `GIT_NO_REPOSITORY` instead
 	 * of returning fixture data — simulates a trusted workspace root that is
 	 * not (or no longer) a Git working tree. */
@@ -5363,6 +5395,61 @@ export function createBrowserMockBridge(
 		});
 	}
 
+	// --- F090 S5: mutable worktree list simulation --------------------------
+	//
+	// See `BrowserMockGitFixtureForTest.worktreesForTest`'s own doc comment for
+	// why this never re-implements real `git worktree` plumbing (no reflog, no
+	// actual filesystem directories) — `src-tauri/src/git/worktree/tests.rs`
+	// is this slice's authoritative correctness evidence; this array only
+	// needs to be self-consistent enough for a consuming frontend to develop
+	// and test the full add/remove click-through flow against.
+	const defaultWorktreeEntry: GitWorktreeEntry = Object.freeze({
+		path: "/workspace",
+		headSha: "f0".padEnd(40, "0"),
+		headState: Object.freeze({
+			kind: "branch" as const,
+			refName: "refs/heads/main",
+		}),
+		lockReason: null,
+		prunableReason: null,
+		isMain: true,
+	});
+	let gitWorktreeEntries: GitWorktreeEntry[] = (
+		gitFixture.worktreesForTest ?? [defaultWorktreeEntry]
+	).map((entry) => ({ ...entry }));
+	const gitWorktreeDirtyPaths = new Set<string>(
+		gitFixture.worktreeDirtyForTest ?? [],
+	);
+	let gitWorktreeCounter = 0;
+
+	function gitWorktreeListSnapshot(): GitWorktreeListResult {
+		return Object.freeze({
+			entries: Object.freeze(gitWorktreeEntries.map((entry) => ({ ...entry }))),
+			truncated: false,
+		});
+	}
+
+	function gitWorktreeRemoveIsMainWorktree(): CommandError {
+		return commandError(
+			"GIT_WORKTREE_REMOVE_IS_MAIN_WORKTREE",
+			"The main worktree cannot be removed.",
+		);
+	}
+
+	function gitWorktreeRemoveLocked(): CommandError {
+		return commandError(
+			"GIT_WORKTREE_REMOVE_LOCKED",
+			"This worktree is locked and must be unlocked before it can be removed.",
+		);
+	}
+
+	function gitWorktreeRemoveNotFound(): CommandError {
+		return commandError(
+			"GIT_WORKTREE_REMOVE_NOT_FOUND",
+			"That path is not a registered worktree of this repository.",
+		);
+	}
+
 	// --- F080 S3: mutable stage/unstage/commit/discard simulation ---------
 	//
 	// `gitBranch`/`gitEntries` start from the injected fixture (or the clean
@@ -6806,6 +6893,71 @@ export function createBrowserMockBridge(
 				throw gitStashNotFound();
 			}
 			gitStashEntries.splice(index, 1);
+		},
+		async gitWorktreeList() {
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return gitWorktreeListSnapshot();
+		},
+		async gitWorktreeAdd(childSegment_, detach_, commitIsh_) {
+			const request = frozenGitWorktreeAddRequest(
+				childSegment_,
+				detach_,
+				commitIsh_,
+			);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			if (gitFixture.worktreeAddCancelledForTest === true) {
+				return Object.freeze({ kind: "pickerCancelled" as const });
+			}
+			gitWorktreeCounter += 1;
+			const sha = `a0${gitWorktreeCounter.toString(16).padStart(38, "0")}`;
+			const path = `/workspace-worktrees/${request.childSegment}`;
+			gitWorktreeEntries.push({
+				path,
+				headSha: sha,
+				headState: request.detach
+					? { kind: "detached" as const }
+					: {
+							kind: "branch" as const,
+							refName: `refs/heads/${request.commitIsh ?? request.childSegment}`,
+						},
+				lockReason: null,
+				prunableReason: null,
+				isMain: false,
+			});
+			return Object.freeze({ kind: "added" as const, path });
+		},
+		async gitWorktreeRemove(path_, force_) {
+			const request = frozenGitWorktreeRemoveRequest(path_, force_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const entry = gitWorktreeEntries.find(
+				(candidate) => candidate.path === request.path,
+			);
+			if (entry === undefined) {
+				throw gitWorktreeRemoveNotFound();
+			}
+			if (entry.isMain) {
+				throw gitWorktreeRemoveIsMainWorktree();
+			}
+			if (entry.lockReason !== null) {
+				throw gitWorktreeRemoveLocked();
+			}
+			if (!request.force && gitWorktreeDirtyPaths.has(request.path)) {
+				return "needsForce";
+			}
+			gitWorktreeEntries = gitWorktreeEntries.filter(
+				(candidate) => candidate.path !== request.path,
+			);
+			gitWorktreeDirtyPaths.delete(request.path);
+			return "removed";
 		},
 	};
 }

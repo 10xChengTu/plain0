@@ -128,6 +128,9 @@ function fakeBridge(
 		gitStashApply: notImplemented,
 		gitStashPop: notImplemented,
 		gitStashDrop: notImplemented,
+		gitWorktreeList: notImplemented,
+		gitWorktreeAdd: notImplemented,
+		gitWorktreeRemove: notImplemented,
 	};
 }
 
@@ -271,6 +274,9 @@ function fakeTextSearchBridge(
 		gitStashApply: notImplemented,
 		gitStashPop: notImplemented,
 		gitStashDrop: notImplemented,
+		gitWorktreeList: notImplemented,
+		gitWorktreeAdd: notImplemented,
+		gitWorktreeRemove: notImplemented,
 	};
 
 	return {

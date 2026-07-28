@@ -33,6 +33,7 @@ import { createPlainGitTextModelContentProvider } from "./features/scm/plain-git
 import { configurePlainGitGraphBridge } from "./features/scm/plain-git-graph-view";
 import { configurePlainGitHistoryBridge } from "./features/scm/plain-git-history-view";
 import { configurePlainGitStashBridge } from "./features/scm/plain-git-stash-view";
+import { configurePlainGitWorktreeBridge } from "./features/scm/plain-git-worktree-view";
 import { registerPlainScmCommands } from "./features/scm/plain-scm-commands";
 import { configurePlainScmBridge } from "./features/scm/plain-scm-view";
 import "./features/scm/scm-contribution";
@@ -168,6 +169,7 @@ async function bootstrap(): Promise<void> {
 	configurePlainGitHistoryBridge(bridge);
 	configurePlainGitGraphBridge(bridge);
 	configurePlainGitStashBridge(bridge);
+	configurePlainGitWorktreeBridge(bridge);
 	await initialize(createServiceOverrides(), container, {
 		productConfiguration: {
 			nameShort: "Plain",

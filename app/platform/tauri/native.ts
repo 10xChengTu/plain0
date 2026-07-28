@@ -100,6 +100,9 @@ import {
 	decodeGitStashShowResult,
 	decodeGitStatusResult,
 	decodeGitVoid,
+	decodeGitWorktreeAddOutcome,
+	decodeGitWorktreeListResult,
+	decodeGitWorktreeRemoveOutcome,
 	frozenGitBlameCommitMessagesRequest,
 	frozenGitBlameFileRequest,
 	frozenGitCommitRequest,
@@ -122,6 +125,8 @@ import {
 	frozenGitStashPushRequest,
 	frozenGitStashShowRequest,
 	frozenGitUnstagePathsRequest,
+	frozenGitWorktreeAddRequest,
+	frozenGitWorktreeRemoveRequest,
 } from "./git-codec";
 
 export function createNativeBridge(): PlainBridge {
@@ -678,6 +683,27 @@ export function createNativeBridge(): PlainBridge {
 			const request = frozenGitStashDropRequest(sha);
 			return decodeGitVoid(
 				await invoke<unknown>("git_stash_drop", { request }),
+			);
+		},
+		gitWorktreeList: async () => {
+			return decodeGitWorktreeListResult(
+				await invoke<unknown>("git_worktree_list", { request: {} }),
+			);
+		},
+		gitWorktreeAdd: async (childSegment, detach, commitIsh) => {
+			const request = frozenGitWorktreeAddRequest(
+				childSegment,
+				detach,
+				commitIsh,
+			);
+			return decodeGitWorktreeAddOutcome(
+				await invoke<unknown>("git_worktree_add", { request }),
+			);
+		},
+		gitWorktreeRemove: async (path, force) => {
+			const request = frozenGitWorktreeRemoveRequest(path, force);
+			return decodeGitWorktreeRemoveOutcome(
+				await invoke<unknown>("git_worktree_remove", { request }),
 			);
 		},
 	};

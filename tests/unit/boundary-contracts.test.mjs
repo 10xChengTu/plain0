@@ -46,6 +46,7 @@ import {
 	validateGitShowCommitFirstParentBoundary,
 	validateGitStashConfirmationBoundary,
 	validateGitStashMessageFieldSafetyBoundary,
+	validateGitWorktreeConfirmationBoundary,
 	validateMultiDiffEditorOverrideImportBoundary,
 } from "../../scripts/plain/boundary-contracts.mjs";
 
@@ -9430,6 +9431,10 @@ describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
 		new URL("../../src-tauri/src/git/stash.rs", import.meta.url),
 		"utf8",
 	);
+	const gitWorktreeSourceForRustBoundary = readFileSync(
+		new URL("../../src-tauri/src/git/worktree.rs", import.meta.url),
+		"utf8",
+	);
 
 	const baselineGitRustSources = Object.freeze([
 		{ relativePath: "src-tauri/src/git/status.rs", source: gitStatusSource },
@@ -9453,6 +9458,10 @@ describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
 		{
 			relativePath: "src-tauri/src/git/stash.rs",
 			source: gitStashSourceForRustBoundary,
+		},
+		{
+			relativePath: "src-tauri/src/git/worktree.rs",
+			source: gitWorktreeSourceForRustBoundary,
 		},
 	]);
 
@@ -10426,7 +10435,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the twenty-eight audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
 		);
 	});
 
@@ -10490,7 +10499,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the twenty-eight audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
 		);
 	});
 
@@ -10551,7 +10560,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the twenty-eight audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
 		);
 	});
 
@@ -10564,7 +10573,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the twenty-eight audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
 		);
 	});
 
@@ -10642,7 +10651,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the twenty-eight audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
 		);
 	});
 
@@ -10655,7 +10664,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the twenty-eight audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
 		);
 	});
 
@@ -11390,6 +11399,184 @@ export async function bypassPop(bridge: PlainBridge): Promise<void> {
 		);
 		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
 			"resolveStashConfirmation must unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited shape",
+		);
+	});
+});
+
+const gitWorktreeAppPaths = [
+	"app/platform/tauri/contracts.ts",
+	"app/platform/tauri/native.ts",
+	"app/platform/tauri/browser-mock.ts",
+	"app/features/scm/plain-git-worktree-view.ts",
+	"app/features/scm/plain-scm-worktree.ts",
+];
+const gitWorktreeAppSources = gitWorktreeAppPaths.map((relativePath) => ({
+	relativePath,
+	source: readFileSync(
+		new URL(`../../${relativePath}`, import.meta.url),
+		"utf8",
+	),
+}));
+
+function replaceGitWorktreeAppSource(relativePath, from, to) {
+	return mutateWorkspaceSource(
+		gitWorktreeAppSources,
+		relativePath,
+		(source) => {
+			if (!source.includes(from)) {
+				throw new Error(
+					`${relativePath} git worktree mutation fixture no longer matches production`,
+				);
+			}
+			return source.replace(from, to);
+		},
+	);
+}
+
+describe("Plain F090 S5 git worktree confirmation boundary Harness", () => {
+	it("accepts the production two-call removeEntry route", () => {
+		expect(
+			validateGitWorktreeConfirmationBoundary(gitWorktreeAppSources),
+		).toEqual([]);
+	});
+
+	it("requires every audited file to be present", () => {
+		expect(validateGitWorktreeConfirmationBoundary([])).toContain(
+			"git worktree confirmation boundary requires app/features/scm/plain-scm-worktree.ts",
+		);
+	});
+
+	it("rejects a second gitWorktreeRemove call site anywhere else in app/", () => {
+		const relativePath = "app/features/scm/plain-git-worktree-bypass.ts";
+		const hostile = [
+			...gitWorktreeAppSources,
+			{
+				relativePath,
+				source: `import type { PlainBridge } from "../../platform/tauri/contracts";
+export async function bypassRemove(bridge: PlainBridge): Promise<void> {
+	await bridge.gitWorktreeRemove("/some/path", true);
+}`,
+			},
+		];
+		expect(validateGitWorktreeConfirmationBoundary(hostile)).toContain(
+			`${relativePath} must not consume gitWorktreeRemove outside PlainGitWorktreeView.removeEntry's two audited call sites`,
+		);
+	});
+
+	it("rejects a third gitWorktreeRemove call inside removeEntry itself", () => {
+		const hostile = replaceGitWorktreeAppSource(
+			"app/features/scm/plain-git-worktree-view.ts",
+			`await this.#runWorktreeMutation((bridge) =>
+			bridge.gitWorktreeRemove(entry.path, true),
+		);
+	}`,
+			`await this.#runWorktreeMutation((bridge) =>
+			bridge.gitWorktreeRemove(entry.path, true),
+		);
+		await this.#runWorktreeMutation((bridge) => bridge.gitWorktreeRemove(entry.path, true));
+	}`,
+		);
+		expect(validateGitWorktreeConfirmationBoundary(hostile)).toContain(
+			"gitWorktreeRemove must have exactly two production call sites, both inside PlainGitWorktreeView.removeEntry (the unforced probe and the confirmed forced retry)",
+		);
+	});
+
+	it("rejects computed/bracket access to gitWorktreeRemove", () => {
+		const hostile = replaceGitWorktreeAppSource(
+			"app/features/scm/plain-git-worktree-view.ts",
+			"bridge.gitWorktreeRemove(entry.path, true),",
+			'bridge["gitWorktreeRemove"](entry.path, true),',
+		);
+		expect(validateGitWorktreeConfirmationBoundary(hostile)).toContain(
+			"gitWorktreeRemove must have exactly two production call sites, both inside PlainGitWorktreeView.removeEntry (the unforced probe and the confirmed forced retry)",
+		);
+	});
+
+	it("rejects a missing or renamed gitWorktreeRemove bridge declaration", () => {
+		const hostile = replaceGitWorktreeAppSource(
+			"app/platform/tauri/native.ts",
+			"gitWorktreeRemove: async (path, force) => {",
+			"gitWorktreeRemoveRenamed: async (path, force) => {",
+		);
+		expect(validateGitWorktreeConfirmationBoundary(hostile)).toContain(
+			"app/platform/tauri/native.ts must declare gitWorktreeRemove exactly once in its audited bridge surface",
+		);
+	});
+
+	it("rejects a duplicated gitWorktreeRemove bridge declaration", () => {
+		const hostile = mutateWorkspaceSource(
+			gitWorktreeAppSources,
+			"app/platform/tauri/browser-mock.ts",
+			(source) =>
+				`${source}\nconst duplicateGitWorktreeRemoveMock = { async gitWorktreeRemove() { return "removed"; } };`,
+		);
+		expect(validateGitWorktreeConfirmationBoundary(hostile)).toContain(
+			"app/platform/tauri/browser-mock.ts must declare gitWorktreeRemove exactly once in its audited bridge surface",
+		);
+	});
+
+	it("rejects removeEntry skipping the confirmation gate", () => {
+		const hostile = replaceGitWorktreeAppSource(
+			"app/features/scm/plain-git-worktree-view.ts",
+			'if (decision.kind !== "confirmed") {\n\t\t\treturn;\n\t\t}\n\t\tawait this.#runWorktreeMutation((bridge) =>\n\t\t\tbridge.gitWorktreeRemove(entry.path, true),\n\t\t);',
+			'if (decision.kind === "confirmed") {\n\t\t\treturn;\n\t\t}\n\t\tawait this.#runWorktreeMutation((bridge) =>\n\t\t\tbridge.gitWorktreeRemove(entry.path, true),\n\t\t);',
+		);
+		expect(validateGitWorktreeConfirmationBoundary(hostile)).toContain(
+			"PlainGitWorktreeView.removeEntry must match its exact audited unforced-probe-then-confirm-then-forced-retry shape — no other shape may reach the gitWorktreeRemove bridge call",
+		);
+	});
+
+	it("rejects removeEntry skipping the needsForce check", () => {
+		const hostile = replaceGitWorktreeAppSource(
+			"app/features/scm/plain-git-worktree-view.ts",
+			'if (outcome !== "needsForce") {\n\t\t\treturn;\n\t\t}',
+			'if (outcome === "needsForce") {\n\t\t\treturn;\n\t\t}',
+		);
+		expect(validateGitWorktreeConfirmationBoundary(hostile)).toContain(
+			"PlainGitWorktreeView.removeEntry must match its exact audited unforced-probe-then-confirm-then-forced-retry shape — no other shape may reach the gitWorktreeRemove bridge call",
+		);
+	});
+
+	it("rejects plain-scm-worktree.ts importing anything at all", () => {
+		const hostile = mutateWorkspaceSource(
+			gitWorktreeAppSources,
+			"app/features/scm/plain-scm-worktree.ts",
+			(source) => `import { invoke } from "@tauri-apps/api/core";\n${source}`,
+		);
+		expect(validateGitWorktreeConfirmationBoundary(hostile)).toContain(
+			"plain-scm-worktree.ts must not import anything — it only ever decides whether the caller may retry a forced worktree removal, and an import is the only way it could ever reach a bridge or service to perform the write itself",
+		);
+	});
+
+	it("rejects a new top-level declaration added to plain-scm-worktree.ts", () => {
+		const hostile = mutateWorkspaceSource(
+			gitWorktreeAppSources,
+			"app/features/scm/plain-scm-worktree.ts",
+			(source) => `${source}\nexport function leakedHelper(): void {}`,
+		);
+		expect(validateGitWorktreeConfirmationBoundary(hostile)).toContain(
+			"plain-scm-worktree.ts must retain its exact audited top-level surface — no new declaration can quietly add a way for this decide-only module to reach a bridge",
+		);
+	});
+
+	it("rejects resolveWorktreeConfirmation calling a bridge method itself", () => {
+		const hostile = replaceGitWorktreeAppSource(
+			"app/features/scm/plain-scm-worktree.ts",
+			`export async function resolveWorktreeConfirmation(
+	dialogService: WorktreeConfirmDialogService,
+	request: WorktreeConfirmationRequest,
+): Promise<WorktreeConfirmDecision> {
+	const confirmation = await dialogService.confirm({`,
+			`export async function resolveWorktreeConfirmation(
+	dialogService: WorktreeConfirmDialogService,
+	request: WorktreeConfirmationRequest,
+	bridge: { gitWorktreeRemove(path: string, force: boolean): Promise<string> },
+): Promise<WorktreeConfirmDecision> {
+	await bridge.gitWorktreeRemove("/some/path", true);
+	const confirmation = await dialogService.confirm({`,
+		);
+		expect(validateGitWorktreeConfirmationBoundary(hostile)).toContain(
+			"resolveWorktreeConfirmation must unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited shape",
 		);
 	});
 });

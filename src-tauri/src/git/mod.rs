@@ -32,7 +32,12 @@
 //! last" technique) and for why sha-based addressing only eliminates the
 //! frozen plan's anticipated "index shifts after drop" race for `show`/
 //! `apply`, not for `pop`/`drop` (git's own command grammar rejects a bare
-//! sha for those two specifically).
+//! sha for those two specifically). S5 adds [`worktree`] (list/add/remove) —
+//! see that module's own doc comment for its destination-authorization model
+//! (a native folder picker plus a single validated
+//! [`crate::path_policy::RelativePath`] segment, never a caller-typed
+//! absolute path) and for the three-way clean/dirty/locked split
+//! `worktree::remove_worktree` implements.
 //!
 //! # Subprocess spawning is `exec::run_git`-only
 //!
@@ -96,6 +101,7 @@ pub(crate) mod stage;
 pub(crate) mod stash;
 pub(crate) mod status;
 pub(crate) mod wire;
+pub(crate) mod worktree;
 
 pub(crate) fn git_cwd_invalid() -> CommandError {
     CommandError::new(

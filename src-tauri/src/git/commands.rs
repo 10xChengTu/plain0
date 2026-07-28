@@ -21,6 +21,7 @@ use tauri::{State, WebviewWindow};
 
 use crate::error::CommandError;
 use crate::trust::service::TrustService;
+use crate::workspace::picker::TauriDirectoryPicker;
 use crate::workspace::service::WorkspaceService;
 
 use super::blame;
@@ -39,7 +40,9 @@ use super::dto::{
     GitStashApplyOutcomeWire, GitStashApplyRequest, GitStashDropRequest, GitStashListRequest,
     GitStashListResultWire, GitStashPopRequest, GitStashPushOutcomeWire, GitStashPushRequest,
     GitStashShowRequest, GitStashShowResultWire, GitStatusRequest, GitStatusResult,
-    GitUnstagePathsRequest,
+    GitUnstagePathsRequest, GitWorktreeAddOutcomeWire, GitWorktreeAddRequest,
+    GitWorktreeListRequest, GitWorktreeListResultWire, GitWorktreeRemoveOutcomeWire,
+    GitWorktreeRemoveRequest,
 };
 use super::log;
 use super::network::{self, GitNetworkService};
@@ -48,6 +51,7 @@ use super::show_commit;
 use super::stage;
 use super::stash;
 use super::status;
+use super::worktree;
 
 #[tauri::command]
 pub(crate) async fn git_status(
@@ -473,4 +477,57 @@ pub(crate) async fn git_stash_drop(
         &expected_sha,
     )
     .await
+}
+
+#[tauri::command]
+pub(crate) async fn git_worktree_list(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    request: GitWorktreeListRequest,
+) -> Result<GitWorktreeListResultWire, CommandError> {
+    request.validate();
+    let result = worktree::list_worktrees(trust.inner(), workspace.inner(), window.label()).await?;
+    Ok(GitWorktreeListResultWire::from(result))
+}
+
+#[tauri::command]
+pub(crate) async fn git_worktree_add(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    request: GitWorktreeAddRequest,
+) -> Result<GitWorktreeAddOutcomeWire, CommandError> {
+    let (child_segment, detach, commit_ish) = request.into_parts()?;
+    let picker = TauriDirectoryPicker::new(window.clone());
+    let outcome = worktree::add_worktree(
+        trust.inner(),
+        workspace.inner(),
+        window.label(),
+        &picker,
+        &child_segment,
+        detach,
+        commit_ish.as_deref(),
+    )
+    .await?;
+    Ok(GitWorktreeAddOutcomeWire::from(outcome))
+}
+
+#[tauri::command]
+pub(crate) async fn git_worktree_remove(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    request: GitWorktreeRemoveRequest,
+) -> Result<GitWorktreeRemoveOutcomeWire, CommandError> {
+    let (path, force) = request.into_parts()?;
+    let outcome = worktree::remove_worktree(
+        trust.inner(),
+        workspace.inner(),
+        window.label(),
+        &path,
+        force,
+    )
+    .await?;
+    Ok(GitWorktreeRemoveOutcomeWire::from(outcome))
 }

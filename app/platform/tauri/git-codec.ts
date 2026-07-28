@@ -33,6 +33,11 @@ import type {
 	GitStatusEntry,
 	GitStatusResult,
 	GitSubmoduleState,
+	GitWorktreeAddOutcome,
+	GitWorktreeEntry,
+	GitWorktreeHeadState,
+	GitWorktreeListResult,
+	GitWorktreeRemoveOutcome,
 } from "./contracts";
 
 // Defensive decode-side ceilings — git itself imposes no hard length limit
@@ -1911,5 +1916,268 @@ export function decodeGitStashApplyOutcome(
 			return Object.freeze(outcome);
 		}
 		return violation();
+	});
+}
+
+// --- F090 S5: worktree (`git::worktree`) -------------------------------------
+
+/** Mirrors `src-tauri/src/git/worktree.rs`'s own `MAX_WORKTREE_ENTRIES`
+ * (10,000) — this decode-side ceiling exists only to reject a structurally
+ * hostile/runaway payload, with generous headroom above the real server-side
+ * cap, mirroring `MAX_GIT_STASH_ENTRIES`'s identical rationale. */
+const MAX_GIT_WORKTREE_ENTRIES = 20_000;
+/** Mirrors `worktree::MAX_WORKTREE_COMMIT_ISH_BYTES`/`dto.rs`'s own
+ * independent copy — this frontend codec's own third independent copy, the
+ * same "defense in depth, each layer re-validates" reason
+ * `MAX_GIT_STASH_MESSAGE_CHARS` above validates a field the Rust side will
+ * also independently reject. */
+const MAX_GIT_WORKTREE_COMMIT_ISH_CHARS = 4_096;
+/** Mirrors `path_policy::MAX_RELATIVE_PATH_BYTES`/`dto.rs`'s own
+ * `MAX_WORKTREE_CHILD_SEGMENT_BYTES` — this codec's own independent copy. */
+const MAX_GIT_WORKTREE_CHILD_SEGMENT_CHARS = 4_096;
+/** Mirrors `dto.rs`'s own `MAX_WORKTREE_PATH_BYTES` — worktree paths are
+ * absolute filesystem paths, not repository-relative, so `MAX_GIT_PATH_CHARS`
+ * (sized for a tracked file path) is not reused here; this is its own,
+ * differently-scoped ceiling. */
+const MAX_GIT_WORKTREE_PATH_CHARS = 4_096;
+
+function decodeGitWorktreeHeadState(value: unknown): GitWorktreeHeadState {
+	if (!isPlainObject(value) || typeof value.kind !== "string") {
+		return violation();
+	}
+	if (value.kind === "branch") {
+		if (!hasExactKeys(value, ["kind", "refName"])) {
+			return violation();
+		}
+		if (
+			typeof value.refName !== "string" ||
+			value.refName.length > MAX_GIT_PATH_CHARS
+		) {
+			return violation();
+		}
+		const state = { kind: "branch" as const, refName: value.refName };
+		rejectProxyObject(value);
+		return Object.freeze(state);
+	}
+	if (value.kind === "detached") {
+		if (!hasExactKeys(value, ["kind"])) {
+			return violation();
+		}
+		rejectProxyObject(value);
+		return Object.freeze({ kind: "detached" as const });
+	}
+	if (value.kind === "bare") {
+		if (!hasExactKeys(value, ["kind"])) {
+			return violation();
+		}
+		rejectProxyObject(value);
+		return Object.freeze({ kind: "bare" as const });
+	}
+	return violation();
+}
+
+function decodeGitWorktreeEntry(value: unknown): GitWorktreeEntry {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, [
+			"path",
+			"headSha",
+			"headState",
+			"lockReason",
+			"prunableReason",
+			"isMain",
+		])
+	) {
+		return violation();
+	}
+	if (
+		typeof value.path !== "string" ||
+		value.path.length > MAX_GIT_WORKTREE_PATH_CHARS
+	) {
+		return violation();
+	}
+	if (value.headSha !== null && !isGitBlameSha(value.headSha)) {
+		return violation();
+	}
+	if (value.lockReason !== null && typeof value.lockReason !== "string") {
+		return violation();
+	}
+	if (
+		value.prunableReason !== null &&
+		typeof value.prunableReason !== "string"
+	) {
+		return violation();
+	}
+	if (typeof value.isMain !== "boolean") {
+		return violation();
+	}
+	const headState = decodeGitWorktreeHeadState(value.headState);
+	const entry = {
+		path: value.path,
+		headSha: value.headSha,
+		headState,
+		lockReason: value.lockReason,
+		prunableReason: value.prunableReason,
+		isMain: value.isMain,
+	};
+	rejectProxyObject(value);
+	return Object.freeze(entry);
+}
+
+/** Decodes a `git_worktree_list` response: an own-data, exactly
+ * `{ entries, truncated }` object. `git_worktree_list` itself takes no
+ * request payload at all (mirrors `git_refs_list`'s/`git_stash_list`'s own
+ * `{}` shape) — there is no corresponding `frozenGitWorktreeListRequest`. */
+export function decodeGitWorktreeListResult(
+	value: unknown,
+): GitWorktreeListResult {
+	return sanitizedDecode(() => {
+		if (
+			!isPlainObject(value) ||
+			!hasExactKeys(value, ["entries", "truncated"])
+		) {
+			return violation();
+		}
+		if (typeof value.truncated !== "boolean") {
+			return violation();
+		}
+		const entries = ownObjectArraySnapshot(
+			value.entries,
+			MAX_GIT_WORKTREE_ENTRIES,
+			decodeGitWorktreeEntry,
+		);
+		const result = { entries, truncated: value.truncated };
+		rejectProxyObject(value);
+		return Object.freeze(result);
+	});
+}
+
+function gitWorktreeAddRequestInvalid(): never {
+	return requestViolation(
+		"GIT_WORKTREE_ADD_INVALID_REQUEST",
+		"The new worktree's folder name or requested revision is invalid.",
+	);
+}
+
+/** Builds a frozen `git_worktree_add` request. `childSegment` must be a
+ * non-empty, bounded-length string with no `/` (a genuinely single path
+ * segment — see `src-tauri/src/git/worktree.rs`'s own doc comment for why
+ * this check happens here *and* again server-side); `commitIsh`, when not
+ * `null`, must be non-empty, bounded, and must not begin with `-` (mirrors
+ * `worktree::validate_worktree_commit_ish`'s own defense-in-depth check
+ * against the exact injection surface that module's own doc comment
+ * describes). */
+export function frozenGitWorktreeAddRequest(
+	childSegment: unknown,
+	detach: unknown,
+	commitIsh: unknown,
+): Readonly<{
+	childSegment: string;
+	detach: boolean;
+	commitIsh: string | null;
+}> {
+	if (
+		typeof childSegment !== "string" ||
+		childSegment.length === 0 ||
+		childSegment.length > MAX_GIT_WORKTREE_CHILD_SEGMENT_CHARS ||
+		childSegment.includes("/")
+	) {
+		return gitWorktreeAddRequestInvalid();
+	}
+	if (typeof detach !== "boolean") {
+		return gitWorktreeAddRequestInvalid();
+	}
+	if (commitIsh !== null) {
+		if (
+			typeof commitIsh !== "string" ||
+			commitIsh.length === 0 ||
+			commitIsh.length > MAX_GIT_WORKTREE_COMMIT_ISH_CHARS ||
+			commitIsh.startsWith("-")
+		) {
+			return gitWorktreeAddRequestInvalid();
+		}
+	}
+	return Object.freeze({ childSegment, detach, commitIsh });
+}
+
+/** Decodes a `git_worktree_add` response — an own-data, exactly
+ * `{ kind: "added", path }` or `{ kind: "pickerCancelled" }` object, mirroring
+ * `decodeGitStashApplyOutcome`'s own `"kind"`-discriminated decoding
+ * technique. */
+export function decodeGitWorktreeAddOutcome(
+	value: unknown,
+): GitWorktreeAddOutcome {
+	return sanitizedDecode(() => {
+		if (!isPlainObject(value) || typeof value.kind !== "string") {
+			return violation();
+		}
+		if (value.kind === "added") {
+			if (!hasExactKeys(value, ["kind", "path"])) {
+				return violation();
+			}
+			if (
+				typeof value.path !== "string" ||
+				value.path.length > MAX_GIT_WORKTREE_PATH_CHARS
+			) {
+				return violation();
+			}
+			const outcome = { kind: "added" as const, path: value.path };
+			rejectProxyObject(value);
+			return Object.freeze(outcome);
+		}
+		if (value.kind === "pickerCancelled") {
+			if (!hasExactKeys(value, ["kind"])) {
+				return violation();
+			}
+			rejectProxyObject(value);
+			return Object.freeze({ kind: "pickerCancelled" as const });
+		}
+		return violation();
+	});
+}
+
+function gitWorktreeRemoveRequestInvalid(): never {
+	return requestViolation(
+		"GIT_WORKTREE_REMOVE_INVALID_REQUEST",
+		"The worktree path is empty or too large.",
+	);
+}
+
+export function frozenGitWorktreeRemoveRequest(
+	path: unknown,
+	force: unknown,
+): Readonly<{ path: string; force: boolean }> {
+	if (
+		typeof path !== "string" ||
+		path.length === 0 ||
+		path.length > MAX_GIT_WORKTREE_PATH_CHARS
+	) {
+		return gitWorktreeRemoveRequestInvalid();
+	}
+	if (typeof force !== "boolean") {
+		return gitWorktreeRemoveRequestInvalid();
+	}
+	return Object.freeze({ path, force });
+}
+
+const GIT_WORKTREE_REMOVE_OUTCOMES = new Set<GitWorktreeRemoveOutcome>([
+	"removed",
+	"needsForce",
+]);
+
+/** Decodes a `git_worktree_remove` response: a bare own-data string, one of
+ * the exact two audited outcomes — mirrors `decodeGitStashPushOutcome`'s own
+ * "fieldless outcome serializes as a plain string" convention. */
+export function decodeGitWorktreeRemoveOutcome(
+	value: unknown,
+): GitWorktreeRemoveOutcome {
+	return sanitizedDecode(() => {
+		if (
+			typeof value !== "string" ||
+			!GIT_WORKTREE_REMOVE_OUTCOMES.has(value as GitWorktreeRemoveOutcome)
+		) {
+			return violation();
+		}
+		return value as GitWorktreeRemoveOutcome;
 	});
 }

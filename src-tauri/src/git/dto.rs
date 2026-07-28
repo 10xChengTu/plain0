@@ -21,6 +21,9 @@ use super::stash::{StashApplyOutcome, StashEntry, StashList, StashPushOutcome, S
 use super::status::{
     BranchHead, BranchInfo, BranchOid, GitStatus, RenameOrCopyKind, StatusEntry, SubmoduleState,
 };
+use super::worktree::{
+    WorktreeAddOutcome, WorktreeEntry, WorktreeHeadState, WorktreeList, WorktreeRemoveOutcome,
+};
 
 const MAX_GIT_SHOW_BLOB_PATH_BYTES: usize = 4_096;
 
@@ -1423,6 +1426,192 @@ impl GitStashDropRequest {
             return Err(git_stash_drop_invalid_request());
         }
         Ok(self.expected_sha)
+    }
+}
+
+// --- Git worktree (F090 S5: `git::worktree`) --------------------------------
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitWorktreeListRequest {}
+
+impl GitWorktreeListRequest {
+    pub const fn validate(self) {}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum GitWorktreeHeadStateWire {
+    Branch { ref_name: String },
+    Detached,
+    Bare,
+}
+
+impl From<WorktreeHeadState> for GitWorktreeHeadStateWire {
+    fn from(value: WorktreeHeadState) -> Self {
+        match value {
+            WorktreeHeadState::Branch { ref_name } => Self::Branch {
+                ref_name: ref_name.to_wire_lossy(),
+            },
+            WorktreeHeadState::Detached => Self::Detached,
+            WorktreeHeadState::Bare => Self::Bare,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitWorktreeEntryWire {
+    path: String,
+    head_sha: Option<String>,
+    head_state: GitWorktreeHeadStateWire,
+    lock_reason: Option<String>,
+    prunable_reason: Option<String>,
+    is_main: bool,
+}
+
+impl From<WorktreeEntry> for GitWorktreeEntryWire {
+    fn from(value: WorktreeEntry) -> Self {
+        Self {
+            path: value.path.to_wire_lossy(),
+            head_sha: value.head_sha,
+            head_state: GitWorktreeHeadStateWire::from(value.head_state),
+            lock_reason: value.locked_reason,
+            prunable_reason: value.prunable_reason,
+            is_main: value.is_main,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitWorktreeListResultWire {
+    entries: Vec<GitWorktreeEntryWire>,
+    truncated: bool,
+}
+
+impl From<WorktreeList> for GitWorktreeListResultWire {
+    fn from(value: WorktreeList) -> Self {
+        Self {
+            entries: value
+                .entries
+                .into_iter()
+                .map(GitWorktreeEntryWire::from)
+                .collect(),
+            truncated: value.truncated,
+        }
+    }
+}
+
+fn git_worktree_add_invalid_request() -> CommandError {
+    CommandError::new(
+        "GIT_WORKTREE_ADD_INVALID_REQUEST",
+        "The new worktree's folder name or requested revision is invalid.",
+    )
+}
+
+/// Mirrors `worktree::MAX_WORKTREE_COMMIT_ISH_BYTES` — this file's own
+/// independent copy, exactly like `MAX_GIT_COMMIT_MESSAGE_BYTES` above is its
+/// own copy of a ceiling also enforced deeper in the stack.
+const MAX_WORKTREE_COMMIT_ISH_BYTES: usize = 4_096;
+
+/// Mirrors `crate::path_policy::MAX_RELATIVE_PATH_BYTES` — a cheap, wire-level
+/// bound; the authoritative "is this a single, legal path segment" check is
+/// `worktree::validate_worktree_child_segment`'s own re-validation through
+/// `RelativePath::join_child`, exactly like every other domain function in
+/// this codebase that re-checks what its own DTO layer already bounded.
+const MAX_WORKTREE_CHILD_SEGMENT_BYTES: usize = 4_096;
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitWorktreeAddRequest {
+    child_segment: String,
+    detach: bool,
+    commit_ish: Option<String>,
+}
+
+impl GitWorktreeAddRequest {
+    pub(crate) fn into_parts(self) -> Result<(String, bool, Option<String>), CommandError> {
+        if self.child_segment.is_empty()
+            || self.child_segment.len() > MAX_WORKTREE_CHILD_SEGMENT_BYTES
+        {
+            return Err(git_worktree_add_invalid_request());
+        }
+        if let Some(commit_ish) = &self.commit_ish {
+            if commit_ish.is_empty() || commit_ish.len() > MAX_WORKTREE_COMMIT_ISH_BYTES {
+                return Err(git_worktree_add_invalid_request());
+            }
+        }
+        Ok((self.child_segment, self.detach, self.commit_ish))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum GitWorktreeAddOutcomeWire {
+    Added { path: String },
+    PickerCancelled,
+}
+
+impl From<WorktreeAddOutcome> for GitWorktreeAddOutcomeWire {
+    fn from(value: WorktreeAddOutcome) -> Self {
+        match value {
+            WorktreeAddOutcome::Added { path } => Self::Added { path },
+            WorktreeAddOutcome::PickerCancelled => Self::PickerCancelled,
+        }
+    }
+}
+
+fn git_worktree_remove_invalid_request() -> CommandError {
+    CommandError::new(
+        "GIT_WORKTREE_REMOVE_INVALID_REQUEST",
+        "The worktree path is empty or too large.",
+    )
+}
+
+/// Mirrors `worktree`'s own path handling — worktree paths are absolute
+/// filesystem paths (not repository-relative), so `MAX_GIT_MUTATE_PATH_BYTES`/
+/// `is_valid_mutate_path` (repo-relative-path-shaped) do not apply; this is
+/// its own, differently-scoped ceiling.
+const MAX_WORKTREE_PATH_BYTES: usize = 4_096;
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitWorktreeRemoveRequest {
+    path: String,
+    force: bool,
+}
+
+impl GitWorktreeRemoveRequest {
+    pub(crate) fn into_parts(self) -> Result<(String, bool), CommandError> {
+        if self.path.is_empty() || self.path.len() > MAX_WORKTREE_PATH_BYTES {
+            return Err(git_worktree_remove_invalid_request());
+        }
+        Ok((self.path, self.force))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitWorktreeRemoveOutcomeWire {
+    Removed,
+    NeedsForce,
+}
+
+impl From<WorktreeRemoveOutcome> for GitWorktreeRemoveOutcomeWire {
+    fn from(value: WorktreeRemoveOutcome) -> Self {
+        match value {
+            WorktreeRemoveOutcome::Removed => Self::Removed,
+            WorktreeRemoveOutcome::NeedsForce => Self::NeedsForce,
+        }
     }
 }
 

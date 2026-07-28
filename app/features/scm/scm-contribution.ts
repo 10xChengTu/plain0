@@ -12,6 +12,7 @@ import {
 import { PlainGitGraphView } from "./plain-git-graph-view";
 import { PlainGitHistoryView } from "./plain-git-history-view";
 import { PlainGitStashView } from "./plain-git-stash-view";
+import { PlainGitWorktreeView } from "./plain-git-worktree-view";
 import { PlainScmView } from "./plain-scm-view";
 
 /** `Plain: Refresh Source Control` reveals this view via
@@ -35,6 +36,11 @@ export const GIT_GRAPH_VIEW_ID = PlainGitGraphView.ID;
  * same "GitLens-style information architecture as an interaction *reference*
  * only" rationale [`GIT_HISTORY_VIEW_ID`]'s own comment records. */
 export const GIT_STASH_VIEW_ID = PlainGitStashView.ID;
+/** `F090` S5: `PlainGitWorktreeView`'s registered id — same Source Control
+ * view container as its siblings above (see `registerViews`'s own call
+ * below), same "GitLens-style information architecture as an interaction
+ * *reference* only" rationale [`GIT_HISTORY_VIEW_ID`]'s own comment records. */
+export const GIT_WORKTREE_VIEW_ID = PlainGitWorktreeView.ID;
 
 /**
  * Registers exactly one Sidebar view container and its one view pane —
@@ -103,6 +109,14 @@ Registry.as<IViewsRegistry>(Extensions.ViewsRegistry).registerViews(
 			containerIcon: Codicon.archive,
 			name: { value: "Stashes", original: "Stashes" },
 			ctorDescriptor: new SyncDescriptor(PlainGitStashView),
+			canToggleVisibility: true,
+			canMoveView: true,
+		},
+		{
+			id: GIT_WORKTREE_VIEW_ID,
+			containerIcon: Codicon.serverEnvironment,
+			name: { value: "Worktrees", original: "Worktrees" },
+			ctorDescriptor: new SyncDescriptor(PlainGitWorktreeView),
 			canToggleVisibility: true,
 			canMoveView: true,
 		},
