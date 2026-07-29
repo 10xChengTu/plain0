@@ -214,6 +214,13 @@ const requiredPatches = new Map([
 			marker: "Plain keeps the contribution schema constant",
 		},
 	],
+	[
+		"@codingame/monaco-vscode-view-title-bar-service-override@35.0.1",
+		{
+			file: "patches/@codingame__monaco-vscode-view-title-bar-service-override@35.0.1.patch",
+			marker: "PlainSimpleGlobalActivityActionViewItem",
+		},
+	],
 ]);
 
 const workspaceManifest = await readFile(

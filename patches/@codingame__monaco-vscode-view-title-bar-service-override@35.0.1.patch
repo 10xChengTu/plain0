@@ -1,0 +1,46 @@
+diff --git a/vscode/src/vs/workbench/browser/parts/titlebar/titlebarPart.js b/vscode/src/vs/workbench/browser/parts/titlebar/titlebarPart.js
+index 5238b41d4db547bc38353e6961919c553346e801..32c07fd366d47af5fbf3d1e4044db7275aac7e38 100644
+--- a/vscode/src/vs/workbench/browser/parts/titlebar/titlebarPart.js
++++ b/vscode/src/vs/workbench/browser/parts/titlebar/titlebarPart.js
+@@ -34,7 +34,7 @@ import { Categories } from '@codingame/monaco-vscode-api/vscode/vs/platform/acti
+ import { MenuWorkbenchToolBar, HiddenItemStrategy, WorkbenchToolBar } from '@codingame/monaco-vscode-api/vscode/vs/platform/actions/browser/toolbar';
+ import { IActionViewItemService } from '@codingame/monaco-vscode-api/vscode/vs/platform/actions/browser/actionViewItemService.service';
+ import { GLOBAL_ACTIVITY_ID, ACCOUNTS_ACTIVITY_ID } from '@codingame/monaco-vscode-api/vscode/vs/workbench/common/activity';
+-import { SimpleGlobalActivityActionViewItem, SimpleAccountActivityActionViewItem, isAccountsActionVisible, AccountsActivityActionViewItem } from '@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/globalCompositeBar';
++import { PlainSimpleGlobalActivityActionViewItem } from '../../../../../../../../../../../../../app/features/workbench/plain-global-composite-bar.ts';
+ import { HoverPosition } from '@codingame/monaco-vscode-api/vscode/vs/base/browser/ui/hover/hoverWidget';
+ import { IEditorGroupsService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorGroupsService.service';
+ import { Separator, ActionRunner } from '@codingame/monaco-vscode-api/vscode/vs/base/common/actions';
+@@ -476,12 +476,7 @@ let BrowserTitlebarPart = class BrowserTitlebarPart extends Part {
+         }
+         if (!this.isAuxiliary) {
+             if (action.id === GLOBAL_ACTIVITY_ID) {
+-                return this.instantiationService.createInstance(SimpleGlobalActivityActionViewItem, {
+-                    position: () => HoverPosition.BELOW
+-                }, options);
+-            }
+-            if (action.id === ACCOUNTS_ACTIVITY_ID) {
+-                return this.instantiationService.createInstance(SimpleAccountActivityActionViewItem, {
++                return this.instantiationService.createInstance(PlainSimpleGlobalActivityActionViewItem, {
+                     position: () => HoverPosition.BELOW
+                 }, options);
+             }
+@@ -586,9 +581,6 @@ let BrowserTitlebarPart = class BrowserTitlebarPart extends Part {
+                 fillInActionBarActions(trailingGroups, actions);
+             }
+             if (this.activityActionsEnabled) {
+-                if (isAccountsActionVisible(this.storageService)) {
+-                    actions.primary.push(ACCOUNTS_ACTIVITY_TILE_ACTION);
+-                }
+                 actions.primary.push(GLOBAL_ACTIVITY_TITLE_ACTION);
+             }
+             this.actionToolBar.setActions(prepareActions(actions.primary), prepareActions(actions.secondary));
+@@ -631,7 +623,7 @@ let BrowserTitlebarPart = class BrowserTitlebarPart extends Part {
+             if (this.activityActionsEnabled) {
+                 this.activityToolbarDisposables.add(this.storageService.onDidChangeValue(
+                     StorageScope.PROFILE,
+-                    AccountsActivityActionViewItem.ACCOUNTS_VISIBILITY_PREFERENCE_KEY,
++                    "workbench.activity.showAccounts",
+                     this._store
+                 )(() => updateToolBarActions()));
+             }

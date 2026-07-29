@@ -20,15 +20,8 @@ const root = path.resolve(
 
 const CLEAN_MISSING_SERVICES = `
 import { IUndoRedoService } from './vscode/src/vs/platform/undoRedo/common/undoRedo.service.js';
-import { IAuthenticationService } from './vscode/src/vs/workbench/services/authentication/common/authentication.service.js';
 class UndoRedoService {}
 registerSingleton(IUndoRedoService, UndoRedoService, InstantiationType.Delayed);
-class AuthenticationService {
-    constructor() {
-        this.getAccounts = async () => [];
-    }
-}
-registerSingleton(IAuthenticationService, AuthenticationService, InstantiationType.Delayed);
 `;
 
 const CLEAN_SERVICES = `
@@ -37,13 +30,14 @@ export { IHoverService } from './vscode/src/vs/platform/hover/browser/hover.serv
 `;
 
 // F110 S3: one hand-written, real `registerSingleton(...)` line per entry in
-// `KEPT_TOKEN_REGISTRATIONS` (S2's `IAuthenticationService` plus S3's seven
-// chat-family tokens), keyed by token so the reverse tests below can remove
-// exactly one at a time and assert the contract catches precisely that
-// removal -- not a hand test per token duplicated eight times.
+// `KEPT_TOKEN_REGISTRATIONS` (S3's seven chat-family tokens -- S2's
+// `IAuthenticationService` entry was removed from `KEPT_TOKEN_REGISTRATIONS`
+// itself in F110 S4, since nothing injects that token anymore once
+// `globalCompositeBar.js` migrated into `app/`), keyed by token so the
+// reverse tests below can remove exactly one at a time and assert the
+// contract catches precisely that removal -- not a hand test per token
+// duplicated seven times.
 const KEPT_REGISTRATION_LINE_BY_TOKEN = Object.freeze({
-	IAuthenticationService:
-		"registerSingleton(IAuthenticationService, AuthenticationService, InstantiationType.Delayed);",
 	IQuickChatService:
 		"registerSingleton(IQuickChatService, QuickChatService, InstantiationType.Delayed);",
 	IChatWidgetService:
@@ -60,15 +54,16 @@ const KEPT_REGISTRATION_LINE_BY_TOKEN = Object.freeze({
 		"registerSingleton(IAgentNetworkFilterService, AgentNetworkFilterService, InstantiationType.Delayed);",
 });
 
-// `IAuthenticationService` already has a registration inside
-// `CLEAN_MISSING_SERVICES` itself (S2's original fixture) -- only append the
-// seven S3 additions on top, so each kept token's registration line appears
-// exactly once and a single `.replace()` genuinely removes it.
-const CLEAN_MISSING_SERVICES_WITH_ALL_KEPT_REGISTRATIONS = `${CLEAN_MISSING_SERVICES}\n${KEPT_TOKEN_REGISTRATIONS.filter(
-	(kept) => kept.token !== "IAuthenticationService",
-)
-	.map((kept) => KEPT_REGISTRATION_LINE_BY_TOKEN[kept.token])
-	.join("\n")}\n`;
+// Appends one real `registerSingleton(...)` line per
+// `KEPT_TOKEN_REGISTRATIONS` entry (S3's seven chat-family tokens) on top of
+// `CLEAN_MISSING_SERVICES`, so each kept token's registration line appears
+// exactly once and a single `.replace()` genuinely removes it. No filter is
+// needed anymore: `KEPT_TOKEN_REGISTRATIONS` no longer contains an
+// `IAuthenticationService` entry at all (removed from the source module in
+// F110 S4), so every remaining entry needs its line appended.
+const CLEAN_MISSING_SERVICES_WITH_ALL_KEPT_REGISTRATIONS = `${CLEAN_MISSING_SERVICES}\n${KEPT_TOKEN_REGISTRATIONS.map(
+	(kept) => KEPT_REGISTRATION_LINE_BY_TOKEN[kept.token],
+).join("\n")}\n`;
 
 async function realVendorSources() {
 	const vendorApiRoot = path.join(
@@ -117,6 +112,13 @@ describe("checkMissingServicesShape", () => {
 		expect(failures[0]).toContain("IAuthenticationAccessService");
 	});
 
+	it("reports a violation when the removed IAuthenticationService token reappears", () => {
+		const mutated = `${CLEAN_MISSING_SERVICES_WITH_ALL_KEPT_REGISTRATIONS}\nregisterSingleton(IAuthenticationService, AuthenticationService, InstantiationType.Delayed);\n`;
+		const failures = checkMissingServicesShape(mutated);
+		expect(failures).toHaveLength(1);
+		expect(failures[0]).toContain("IAuthenticationService");
+	});
+
 	it("reports a violation when a removed chatAgent token reappears", () => {
 		const mutated = `${CLEAN_MISSING_SERVICES_WITH_ALL_KEPT_REGISTRATIONS}\nregisterSingleton(IChatService, ChatService, InstantiationType.Delayed);\n`;
 		const failures = checkMissingServicesShape(mutated);
@@ -161,12 +163,16 @@ describe("checkMissingServicesShape", () => {
 			expect(token).toMatch(/^[A-Za-z][A-Za-z0-9]*$/u);
 		}
 		// F110 S2: mcp(12) + syncEditSessions(14) + authAccount(8, excluding
-		// the kept IAuthenticationService and the out-of-scope
+		// the then-kept IAuthenticationService and the out-of-scope
 		// globalCompositeBar.js, which is not a registered token at all) = 34.
 		// F110 S3: 89 more tokens covering chat/inlineChat/agentHost/
 		// agentEditorComments/agentPlugins/agentsVoice, excluding the seven
 		// kept chat-family tokens in KEPT_TOKEN_REGISTRATIONS. 34 + 89 = 123.
-		expect(REMOVED_MISSING_SERVICES_TOKENS.length).toBe(123);
+		// F110 S4: globalCompositeBar.js's migration into app/ dropped its last
+		// real consumer of IAuthenticationService, so this 9th authAccount
+		// token is now removed too, with nothing left kept in that category.
+		// 123 + 1 = 124.
+		expect(REMOVED_MISSING_SERVICES_TOKENS.length).toBe(124);
 	});
 
 	it("none of the removed tokens is also one of the deliberately-kept tokens", () => {
@@ -260,8 +266,20 @@ describe("checkServicesReexportShape", () => {
 		expect(new Set(REMOVED_SERVICES_REEXPORT_TOKENS).size).toBe(
 			REMOVED_SERVICES_REEXPORT_TOKENS.length,
 		);
-		// F110 S2: 34 + 2 services.js-only names = 36.
-		// F110 S3: 57 of its 89 tokens are also re-exported. 36 + 57 = 93.
+		// Before F110 S4: 91 tokens survived the S3_MISSING_SERVICES_ONLY_NOT_REEXPORTED
+		// filter (123 REMOVED_MISSING_SERVICES_TOKENS - 32 filtered out, not yet
+		// including IAuthenticationService, which was not a
+		// REMOVED_MISSING_SERVICES_TOKENS member back then) + 2 hardcoded
+		// services.js-only names (IMcpManagementService, IAuthenticationService)
+		// = 93.
+		// After F110 S4: 92 tokens survive the same filter (124 - 32, NOW
+		// including IAuthenticationService, a genuine REMOVED_MISSING_SERVICES_TOKENS
+		// member as of this slice) + 1 hardcoded name (IMcpManagementService
+		// only, since IAuthenticationService's special-casing was folded into
+		// the general mechanism) = 93. Same total -- a reclassification of
+		// IAuthenticationService from "hardcoded services.js-only extra" to
+		// "ordinary filtered-spread member", not a net addition to the set of
+		// tokens this contract tracks.
 		expect(REMOVED_SERVICES_REEXPORT_TOKENS.length).toBe(93);
 	});
 

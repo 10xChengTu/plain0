@@ -40,6 +40,23 @@
 //    exactly as S2 kept `IAuthenticationService` for `globalCompositeBar.js`'s
 //    sake, just seven of them instead of one.
 //
+// `F110` S4 (same research document, "主导会话裁定" point 2) finally removes
+// `IAuthenticationService`'s own `import`/`class`/`registerSingleton`
+// three-part registration — the one token S2 could not remove because
+// `globalCompositeBar.js` injected it as a non-optional constructor
+// dependency (`AccountsActivityActionViewItem`). S4 migrates
+// `globalCompositeBar.js`'s surviving, reachable logic (the "Manage" gear)
+// into `app/features/workbench/plain-global-composite-bar.ts` as
+// `PlainGlobalCompositeBar`/`PlainGlobalActivityActionViewItem`, dropping
+// `AccountsActivityActionViewItem` entirely (that class's whole reason to
+// exist — the account UI branch — was already dead code from an earlier
+// patch; see that file's own doc comment). With no class anywhere in the
+// migrated code injecting `IAuthenticationService`, the registration this
+// slice previously had to keep is now provably unused, so
+// `REMOVED_MISSING_SERVICES_TOKENS`' `authAccount` section grows from 8 to 9
+// (all of them now removed) and `KEPT_TOKEN_REGISTRATIONS` shrinks from eight
+// entries to seven (S3's chat-family tokens only).
+//
 // `scripts/plain/workbench-patch-contracts.mjs` already locks the *patch
 // file's own bytes* (sha256) and its diff/hunk-header shape. That catches "a
 // human or agent hand-edited the `.patch` file (or ran `pnpm patch-commit`
@@ -64,8 +81,9 @@
 //
 // What this **can** prove: none of the removed tokens are reachable through
 // either of the two files this patch touches, and every token this slice
-// deliberately keeps bound (`IAuthenticationService` from S2, plus S3's seven
-// chat-family tokens) is still registered.
+// deliberately keeps bound (S3's seven chat-family tokens; F110 S4 removed
+// the last non-chat-family kept token, `IAuthenticationService`) is still
+// registered.
 //
 // What this **cannot** prove: that some *third*, not-yet-discovered
 // reachability path (a future vendor file added by an upstream version bump,
@@ -110,9 +128,10 @@ export const REMOVED_MISSING_SERVICES_TOKENS = Object.freeze([
 	"IUserDataSyncMachinesService",
 	"IEditSessionsLogService",
 	"IEditSessionsStorageService",
-	// authAccount (8 of the 9 non-globalCompositeBar registrations —
-	// IAuthenticationService, the 9th, is deliberately kept; see
-	// KEPT_TOKEN_REGISTRATIONS below)
+	// authAccount (all 9 non-globalCompositeBar registrations — F110 S4 removed
+	// the 9th, IAuthenticationService, once globalCompositeBar.js's migration
+	// into app/ dropped the only class that ever injected it as a non-optional
+	// constructor dependency; nothing is kept in this category anymore)
 	"IAuthenticationAccessService",
 	"IAuthenticationMcpAccessService",
 	"IAuthenticationMcpService",
@@ -121,6 +140,7 @@ export const REMOVED_MISSING_SERVICES_TOKENS = Object.freeze([
 	"IAuthenticationExtensionsService",
 	"IAuthenticationQueryService",
 	"IDynamicAuthenticationProviderStorageService",
+	"IAuthenticationService",
 
 	// --- F110 S3 (89 registrations/imports) ---
 	"AgentStatusMode",
@@ -260,30 +280,28 @@ const S3_MISSING_SERVICES_ONLY_NOT_REEXPORTED = Object.freeze([
 ]);
 
 // services.js's own `export { X } from 'Y'` facade re-exports a subset of
-// REMOVED_MISSING_SERVICES_TOKENS, plus (for S2 only) two names that were
-// never part of missing-services.js's own registration set at all:
+// REMOVED_MISSING_SERVICES_TOKENS, plus one name that was never part of
+// missing-services.js's own registration set at all:
 // - `IMcpManagementService`: the base token `IWorkbenchMcpManagementService`
 //   (already in the list above) is derived from via
 //   `refineServiceDecorator(IMcpManagementService)` in
 //   `mcpWorkbenchManagementService.service.js` — real consumer sweep found no
 //   other reachable reference to it once that refinement's own file is gone.
-// - `IAuthenticationService` itself: kept *registered* in
-//   missing-services.js (see below) but deliberately dropped from this one
-//   facade re-export line, since nothing in `app/` ever imports it from the
-//   bare `"@codingame/monaco-vscode-api"` package (only from the concrete
-//   `vscode/vs/workbench/services/authentication/common/authentication.service`
-//   path `globalCompositeBar.js` itself uses) — the underlying file stays
-//   reachable regardless of this specific re-export.
+// `IAuthenticationService` used to be a second such special case (F110 S2
+// kept its missing-services.js registration for globalCompositeBar.js's sake
+// but still dropped its services.js facade re-export, since nothing in
+// `app/` ever imported it from the bare `"@codingame/monaco-vscode-api"`
+// package). F110 S4 folded it into the general mechanism instead: now that
+// `IAuthenticationService` is a genuine `REMOVED_MISSING_SERVICES_TOKENS`
+// member (not excluded from `S3_MISSING_SERVICES_ONLY_NOT_REEXPORTED`), the
+// filtered spread below already includes it — no hardcoded second entry is
+// needed anymore.
 export const REMOVED_SERVICES_REEXPORT_TOKENS = Object.freeze([
 	...REMOVED_MISSING_SERVICES_TOKENS.filter(
 		(token) => !S3_MISSING_SERVICES_ONLY_NOT_REEXPORTED.includes(token),
 	),
 	"IMcpManagementService",
-	"IAuthenticationService",
 ]);
-
-const KEPT_AUTHENTICATION_SERVICE_REGISTRATION =
-	/registerSingleton\(\s*IAuthenticationService\s*,\s*AuthenticationService\s*,\s*InstantiationType\.Delayed\s*,?\s*\)/u;
 
 // F110 S3: seven chat-family tokens a real dependency-graph audit (restricted
 // to the actual, currently bundled 2179-source corpus, not a static grep
@@ -318,12 +336,6 @@ const KEPT_AUTHENTICATION_SERVICE_REGISTRATION =
 //   dependency-line removal, out of scope for this slice. Flagged as a
 //   follow-up candidate, not attempted here.
 export const KEPT_TOKEN_REGISTRATIONS = Object.freeze([
-	{
-		token: "IAuthenticationService",
-		pattern: KEPT_AUTHENTICATION_SERVICE_REGISTRATION,
-		reason:
-			"globalCompositeBar.js injects it as a non-optional constructor dependency (AccountsActivityActionViewItem/SimpleAccountActivityActionViewItem); removing it would leave the token unbound and throw at Activity Bar construction time",
-	},
 	{
 		token: "IQuickChatService",
 		pattern:

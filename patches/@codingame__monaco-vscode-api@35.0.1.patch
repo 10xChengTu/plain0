@@ -1,5 +1,5 @@
 diff --git a/missing-services.js b/missing-services.js
-index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e84925db05593 100644
+index a8aeec12161cb3ae3e3b3f807a5479145f48abca..dbb91d0b66b9fff171ae7b8671afd4e35d37195f 100644
 --- a/missing-services.js
 +++ b/missing-services.js
 @@ -70,8 +70,6 @@ import { IKeyboardLayoutService } from './vscode/src/vs/platform/keyboardLayout/
@@ -83,7 +83,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  import { IEnvironmentVariableService } from './vscode/src/vs/workbench/contrib/terminal/common/environmentVariable.service.js';
  import { ITerminalProfileService, ITerminalProfileResolverService } from './vscode/src/vs/workbench/contrib/terminal/common/terminal.service.js';
  import { ITerminalContributionService } from './vscode/src/vs/workbench/contrib/terminal/common/terminalExtensionPoints.service.js';
-@@ -206,17 +175,9 @@ import { IActivityService } from './vscode/src/vs/workbench/services/activity/co
+@@ -206,17 +175,8 @@ import { IActivityService } from './vscode/src/vs/workbench/services/activity/co
  import { IAiEmbeddingVectorService } from './vscode/src/vs/workbench/services/aiEmbeddingVector/common/aiEmbeddingVectorService.service.js';
  import { IAiRelatedInformationService } from './vscode/src/vs/workbench/services/aiRelatedInformation/common/aiRelatedInformation.service.js';
  import { IWorkbenchAssignmentService } from './vscode/src/vs/workbench/services/assignment/common/assignmentService.service.js';
@@ -95,14 +95,13 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
 -import { IAuthenticationService, IAuthenticationExtensionsService } from './vscode/src/vs/workbench/services/authentication/common/authentication.service.js';
 -import { IAuthenticationQueryService } from './vscode/src/vs/workbench/services/authentication/common/authenticationQuery.service.js';
 -import { IDynamicAuthenticationProviderStorageService } from './vscode/src/vs/workbench/services/authentication/common/dynamicAuthenticationProviderStorage.service.js';
-+import { IAuthenticationService } from './vscode/src/vs/workbench/services/authentication/common/authentication.service.js';
  import { IAuxiliaryWindowService } from './vscode/src/vs/workbench/services/auxiliaryWindow/browser/auxiliaryWindowService.service.js';
  import { IBannerService } from './vscode/src/vs/workbench/services/banner/browser/bannerService.service.js';
 -import { IChatEntitlementService } from './vscode/src/vs/workbench/services/chat/common/chatEntitlementService.service.js';
  import { IJSONEditingService } from './vscode/src/vs/workbench/services/configuration/common/jsonEditing.service.js';
  import { IConfigurationResolverService } from './vscode/src/vs/workbench/services/configurationResolver/common/configurationResolver.service.js';
  import { IDecorationsService } from './vscode/src/vs/workbench/services/decorations/common/decorations.service.js';
-@@ -250,7 +211,6 @@ import { ILifecycleService } from './vscode/src/vs/workbench/services/lifecycle/
+@@ -250,7 +210,6 @@ import { ILifecycleService } from './vscode/src/vs/workbench/services/lifecycle/
  import { AbstractLifecycleService } from './vscode/src/vs/workbench/services/lifecycle/common/lifecycleService.js';
  import { ILocaleService, IActiveLanguagePackService } from './vscode/src/vs/workbench/services/localization/common/locale.service.js';
  import { IDefaultLogLevelsService } from './vscode/src/vs/workbench/services/log/common/defaultLogLevels.service.js';
@@ -110,7 +109,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  import { INotebookDocumentService } from './vscode/src/vs/workbench/services/notebook/common/notebookDocumentService.service.js';
  import { IOutlineService } from './vscode/src/vs/workbench/services/outline/browser/outline.service.js';
  import { IOutputService } from './vscode/src/vs/workbench/services/output/common/output.service.js';
-@@ -275,8 +235,6 @@ import { IUserDataInitializationService } from './vscode/src/vs/workbench/servic
+@@ -275,8 +234,6 @@ import { IUserDataInitializationService } from './vscode/src/vs/workbench/servic
  import { IRemoteUserDataProfilesService } from './vscode/src/vs/workbench/services/userDataProfile/common/remoteUserDataProfiles.service.js';
  import { IUserDataProfileService, IUserDataProfileImportExportService, IUserDataProfileManagementService } from './vscode/src/vs/workbench/services/userDataProfile/common/userDataProfile.service.js';
  import { UserDataProfileService } from './vscode/src/vs/workbench/services/userDataProfile/common/userDataProfileService.js';
@@ -119,7 +118,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  import { IViewsService } from './vscode/src/vs/workbench/services/views/common/viewsService.service.js';
  import { IWorkingCopyBackupService } from './vscode/src/vs/workbench/services/workingCopy/common/workingCopyBackup.service.js';
  import { IWorkingCopyEditorService } from './vscode/src/vs/workbench/services/workingCopy/common/workingCopyEditorService.service.js';
-@@ -294,101 +252,32 @@ import { IDataChannelService } from './vscode/src/vs/platform/dataChannel/common
+@@ -294,101 +251,32 @@ import { IDataChannelService } from './vscode/src/vs/platform/dataChannel/common
  import { IDefaultAccountService } from './vscode/src/vs/platform/defaultAccount/common/defaultAccount.service.js';
  import { IImageResizeService } from './vscode/src/vs/platform/imageResize/common/imageResizeService.service.js';
  import { IMarkdownRendererService } from './vscode/src/vs/platform/markdown/browser/markdownRenderer.service.js';
@@ -221,7 +220,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  import { constObservable } from './vscode/src/vs/base/common/observableInternal/observables/constObservable.js';
  import { FileSystemProviderCapabilities } from './vscode/src/vs/platform/files/common/files.js';
  
-@@ -2455,40 +2344,6 @@ class ExtensionRecommendationsService {
+@@ -2455,40 +2343,6 @@ class ExtensionRecommendationsService {
      }
  }
  registerSingleton(IExtensionRecommendationsService, ExtensionRecommendationsService, InstantiationType.Eager);
@@ -262,7 +261,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class ExtensionRecommendationNotificationService {
      constructor() {
          this.ignoredRecommendations = [];
-@@ -3831,81 +3686,6 @@ class TerminalQuickFixService {
+@@ -3831,81 +3685,6 @@ class TerminalQuickFixService {
      }
  }
  registerSingleton(ITerminalQuickFixService, TerminalQuickFixService, InstantiationType.Delayed);
@@ -344,7 +343,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class KeybindingEditingService {
      constructor() {
          this.addKeybinding = unsupported;
-@@ -4153,155 +3933,6 @@ class WorkbenchAssignmentService {
+@@ -4153,155 +3932,6 @@ class WorkbenchAssignmentService {
      }
  }
  registerSingleton(IWorkbenchAssignmentService, WorkbenchAssignmentService, InstantiationType.Delayed);
@@ -500,7 +499,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class QuickChatService {
      constructor() {
          this.focused = false;
-@@ -4962,15 +4593,6 @@ __decorate([
+@@ -4962,15 +4592,6 @@ __decorate([
      Unsupported
  ], CommentService.prototype, "removeContinueOnComment", void 0);
  registerSingleton(ICommentService, CommentService, InstantiationType.Delayed);
@@ -516,7 +515,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class NotebookCellStatusBarService {
      constructor() {
          this.onDidChangeProviders = Event.None;
-@@ -5139,17 +4761,6 @@ __decorate([
+@@ -5139,17 +4760,6 @@ __decorate([
      Unsupported
  ], ExtensionBisectService.prototype, "reset", void 0);
  registerSingleton(IExtensionBisectService, ExtensionBisectService, InstantiationType.Eager);
@@ -534,10 +533,45 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class ChatWidgetService {
      constructor() {
          this.getWidgetsByLocations = () => [];
-@@ -5275,84 +4886,6 @@ __decorate([
+@@ -5240,119 +4850,6 @@ __decorate([
      Unsupported
- ], AuthenticationService.prototype, "removeSession", void 0);
- registerSingleton(IAuthenticationService, AuthenticationService, InstantiationType.Delayed);
+ ], RemoteExplorerService.prototype, "enablePortsFeatures", void 0);
+ registerSingleton(IRemoteExplorerService, RemoteExplorerService, InstantiationType.Delayed);
+-class AuthenticationService {
+-    constructor() {
+-        this.getAccounts = async () => [];
+-        this.onDidRegisterAuthenticationProvider = Event.None;
+-        this.onDidUnregisterAuthenticationProvider = Event.None;
+-        this.onDidChangeSessions = Event.None;
+-        this.onDidChangeDeclaredProviders = Event.None;
+-        this.declaredProviders = [];
+-        this.registerDeclaredAuthenticationProvider = () => { };
+-        this.unregisterDeclaredAuthenticationProvider = () => { };
+-        this.isAuthenticationProviderRegistered = () => false;
+-        this.registerAuthenticationProvider = () => { };
+-        this.unregisterAuthenticationProvider = () => { };
+-        this.getProviderIds = () => [];
+-        this.getProvider = unsupported;
+-        this.getSessions = async () => [];
+-        this.createSession = unsupported;
+-        this.removeSession = unsupported;
+-        this.getOrActivateProviderIdForServer = async () => undefined;
+-        this.registerAuthenticationProviderHostDelegate = () => Disposable.None;
+-        this.createDynamicAuthenticationProvider = async () => undefined;
+-        this.createOrGetXaaProvider = async () => undefined;
+-        this.isDynamicAuthenticationProvider = () => false;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], AuthenticationService.prototype, "getProvider", void 0);
+-__decorate([
+-    Unsupported
+-], AuthenticationService.prototype, "createSession", void 0);
+-__decorate([
+-    Unsupported
+-], AuthenticationService.prototype, "removeSession", void 0);
+-registerSingleton(IAuthenticationService, AuthenticationService, InstantiationType.Delayed);
 -class AuthenticationAccessService {
 -    constructor() {
 -        this.onDidChangeExtensionSessionAccess = Event.None;
@@ -619,7 +653,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class TimelineService {
      constructor() {
          this.onDidChangeProviders = Event.None;
-@@ -5724,124 +5257,6 @@ class NotebookSearchService {
+@@ -5724,124 +5221,6 @@ class NotebookSearchService {
      }
  }
  registerSingleton(INotebookSearchService, NotebookSearchService, InstantiationType.Delayed);
@@ -744,7 +778,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class AiRelatedInformationService {
      constructor() {
          this.isEnabled = () => false;
-@@ -6111,22 +5526,6 @@ __decorate([
+@@ -6111,22 +5490,6 @@ __decorate([
      Unsupported
  ], ChatAccessibilityService.prototype, "disposeRequest", void 0);
  registerSingleton(IChatAccessibilityService, ChatAccessibilityService, InstantiationType.Delayed);
@@ -767,7 +801,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class ChatCodeBlockContextProviderService {
      constructor() {
          this.providers = [];
-@@ -6134,19 +5533,6 @@ class ChatCodeBlockContextProviderService {
+@@ -6134,19 +5497,6 @@ class ChatCodeBlockContextProviderService {
      }
  }
  registerSingleton(IChatCodeBlockContextProviderService, ChatCodeBlockContextProviderService, InstantiationType.Delayed);
@@ -787,28 +821,37 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class NotebookEditorWorkerService {
      constructor() {
          this.canComputeDiff = () => false;
-@@ -6248,318 +5634,39 @@ __decorate([
+@@ -6248,318 +5598,39 @@ __decorate([
      Unsupported
  ], WalkthroughsService.prototype, "markWalkthroughOpened", void 0);
  registerSingleton(IWalkthroughsService, WalkthroughsService, InstantiationType.Delayed);
 -class UserDataSyncStoreManagementService {
--    constructor() {
++class UserDataProfileManagementService {
+     constructor() {
 -        this.onDidChangeUserDataSyncStore = Event.None;
 -        this.userDataSyncStore = undefined;
 -        this.switch = unsupported;
 -        this.getPreviousUserDataSyncStore = unsupported;
--    }
--}
--__decorate([
--    Unsupported
++        this.getDefaultProfileToUse = unsupported;
++        this.createProfile = unsupported;
++        this.createAndEnterProfile = unsupported;
++        this.createAndEnterTransientProfile = unsupported;
++        this.removeProfile = unsupported;
++        this.updateProfile = unsupported;
++        this.switchProfile = unsupported;
++        this.getBuiltinProfileTemplates = unsupported;
+     }
+ }
+ __decorate([
+     Unsupported
 -], UserDataSyncStoreManagementService.prototype, "switch", void 0);
--__decorate([
--    Unsupported
++], UserDataProfileManagementService.prototype, "getDefaultProfileToUse", void 0);
+ __decorate([
+     Unsupported
 -], UserDataSyncStoreManagementService.prototype, "getPreviousUserDataSyncStore", void 0);
 -registerSingleton(IUserDataSyncStoreManagementService, UserDataSyncStoreManagementService, InstantiationType.Delayed);
 -class UserDataSyncStoreService {
-+class UserDataProfileManagementService {
-     constructor() {
+-    constructor() {
 -        this.onDidChangeDonotMakeRequestsUntil = Event.None;
 -        this.donotMakeRequestsUntil = undefined;
 -        this.onTokenFailed = Event.None;
@@ -826,48 +869,39 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
 -        this.getActivityData = unsupported;
 -        this.clear = unsupported;
 -        this.getLatestData = async () => null;
-+        this.getDefaultProfileToUse = unsupported;
-+        this.createProfile = unsupported;
-+        this.createAndEnterProfile = unsupported;
-+        this.createAndEnterTransientProfile = unsupported;
-+        this.removeProfile = unsupported;
-+        this.updateProfile = unsupported;
-+        this.switchProfile = unsupported;
-+        this.getBuiltinProfileTemplates = unsupported;
-     }
- }
- __decorate([
-     Unsupported
--], UserDataSyncStoreService.prototype, "setAuthToken", void 0);
--__decorate([
--    Unsupported
--], UserDataSyncStoreService.prototype, "manifest", void 0);
--__decorate([
--    Unsupported
--], UserDataSyncStoreService.prototype, "readResource", void 0);
-+], UserDataProfileManagementService.prototype, "getDefaultProfileToUse", void 0);
- __decorate([
-     Unsupported
--], UserDataSyncStoreService.prototype, "writeResource", void 0);
+-    }
+-}
 +], UserDataProfileManagementService.prototype, "createProfile", void 0);
  __decorate([
      Unsupported
--], UserDataSyncStoreService.prototype, "deleteResource", void 0);
+-], UserDataSyncStoreService.prototype, "setAuthToken", void 0);
 +], UserDataProfileManagementService.prototype, "createAndEnterProfile", void 0);
  __decorate([
      Unsupported
--], UserDataSyncStoreService.prototype, "getAllResourceRefs", void 0);
+-], UserDataSyncStoreService.prototype, "manifest", void 0);
 +], UserDataProfileManagementService.prototype, "createAndEnterTransientProfile", void 0);
  __decorate([
      Unsupported
--], UserDataSyncStoreService.prototype, "resolveResourceContent", void 0);
+-], UserDataSyncStoreService.prototype, "readResource", void 0);
 +], UserDataProfileManagementService.prototype, "removeProfile", void 0);
  __decorate([
      Unsupported
--], UserDataSyncStoreService.prototype, "getAllCollections", void 0);
+-], UserDataSyncStoreService.prototype, "writeResource", void 0);
 +], UserDataProfileManagementService.prototype, "updateProfile", void 0);
  __decorate([
      Unsupported
+-], UserDataSyncStoreService.prototype, "deleteResource", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncStoreService.prototype, "getAllResourceRefs", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncStoreService.prototype, "resolveResourceContent", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncStoreService.prototype, "getAllCollections", void 0);
+-__decorate([
+-    Unsupported
 -], UserDataSyncStoreService.prototype, "createCollection", void 0);
 -__decorate([
 -    Unsupported
@@ -1122,7 +1156,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  __decorate([
      Unsupported
  ], UserDataProfileManagementService.prototype, "getBuiltinProfileTemplates", void 0);
-@@ -6634,84 +5741,6 @@ __decorate([
+@@ -6634,84 +5705,6 @@ __decorate([
      Unsupported
  ], DebugVisualizerService.prototype, "getApplicableFor", void 0);
  registerSingleton(IDebugVisualizerService, DebugVisualizerService, InstantiationType.Delayed);
@@ -1207,7 +1241,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class MultiDiffSourceResolverService {
      constructor() {
          this.registerResolver = () => Disposable.None;
-@@ -6827,112 +5856,6 @@ class TrustedDomainService {
+@@ -6827,112 +5820,6 @@ class TrustedDomainService {
      }
  }
  registerSingleton(ITrustedDomainService, TrustedDomainService, InstantiationType.Delayed);
@@ -1320,7 +1354,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class IssueFormService {
      constructor() {
          this.openReporter = unsupported;
-@@ -6966,37 +5889,6 @@ __decorate([
+@@ -6966,37 +5853,6 @@ __decorate([
      Unsupported
  ], IssueFormService.prototype, "submitIssue", void 0);
  registerSingleton(IIssueFormService, IssueFormService, InstantiationType.Delayed);
@@ -1358,7 +1392,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class ActionViewItemService {
      constructor() {
          this.onDidChange = Event.None;
-@@ -7005,13 +5897,6 @@ class ActionViewItemService {
+@@ -7005,13 +5861,6 @@ class ActionViewItemService {
      }
  }
  registerSingleton(IActionViewItemService, ActionViewItemService, InstantiationType.Delayed);
@@ -1372,20 +1406,18 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class AllowedExtensionsService {
      constructor() {
          this.onDidChangeAllowedExtensionsConfigValue = Event.None;
-@@ -7019,47 +5904,16 @@ class AllowedExtensionsService {
+@@ -7019,37 +5868,6 @@ class AllowedExtensionsService {
      }
  }
  registerSingleton(IAllowedExtensionsService, AllowedExtensionsService, InstantiationType.Delayed);
 -class ChatTransferService {
-+class NotebookOriginalCellModelFactory {
-     constructor() {
+-    constructor() {
 -        this.checkAndSetTransferredWorkspaceTrust = unsupported;
 -        this.addWorkspaceToTransferred = unsupported;
-+        this.getOrCreate = unsupported;
-     }
- }
- __decorate([
-     Unsupported
+-    }
+-}
+-__decorate([
+-    Unsupported
 -], ChatTransferService.prototype, "checkAndSetTransferredWorkspaceTrust", void 0);
 -__decorate([
 -    Unsupported
@@ -1409,23 +1441,10 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
 -    Unsupported
 -], ChatStatusItemService.prototype, "getEntries", void 0);
 -registerSingleton(IChatStatusItemService, ChatStatusItemService, InstantiationType.Delayed);
--class NotebookOriginalCellModelFactory {
--    constructor() {
--        this.getOrCreate = unsupported;
--    }
--}
--__decorate([
--    Unsupported
--], NotebookOriginalCellModelFactory.prototype, "getOrCreate", void 0);
--registerSingleton(INotebookOriginalCellModelFactory, NotebookOriginalCellModelFactory, InstantiationType.Delayed);
--class NotebookOriginalModelReferenceFactory {
-+], NotebookOriginalCellModelFactory.prototype, "getOrCreate", void 0);
-+registerSingleton(INotebookOriginalCellModelFactory, NotebookOriginalCellModelFactory, InstantiationType.Delayed);
-+class NotebookOriginalModelReferenceFactory {
+ class NotebookOriginalCellModelFactory {
      constructor() {
          this.getOrCreate = unsupported;
-     }
-@@ -7126,178 +5980,6 @@ __decorate([
+@@ -7126,178 +5944,6 @@ __decorate([
      Unsupported
  ], TerminalEditingService.prototype, "setEditingTerminal", void 0);
  registerSingleton(ITerminalEditingService, TerminalEditingService, InstantiationType.Delayed);
@@ -1604,7 +1623,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class ExtensionGalleryManifestService {
      constructor() {
          this.onDidChangeExtensionGalleryManifest = Event.None;
-@@ -7342,158 +6024,6 @@ __decorate([
+@@ -7342,158 +5988,6 @@ __decorate([
      Unsupported
  ], NullDefaultAccountService.prototype, "signIn", void 0);
  registerSingleton(IDefaultAccountService, NullDefaultAccountService, InstantiationType.Delayed);
@@ -1763,7 +1782,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class TreeSitterThemeService {
      constructor() {
          this.onChange = constObservable(undefined);
-@@ -7522,243 +6052,6 @@ __decorate([
+@@ -7522,243 +6016,6 @@ __decorate([
      Unsupported
  ], TreeSitterLibraryService.prototype, "createQuery", void 0);
  registerSingleton(ITreeSitterLibraryService, TreeSitterLibraryService, InstantiationType.Eager);
@@ -2007,7 +2026,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class ImageResizeService {
      constructor() {
          this.resizeImage = unsupported;
-@@ -7769,73 +6062,6 @@ __decorate([
+@@ -7769,73 +6026,6 @@ __decorate([
  ], ImageResizeService.prototype, "resizeImage", void 0);
  registerSingleton(IImageResizeService, ImageResizeService, InstantiationType.Delayed);
  registerSingleton(IDataChannelService, NullDataChannelService, InstantiationType.Delayed);
@@ -2081,7 +2100,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class AiEditTelemetryService {
      constructor() {
          this.createSuggestionId = unsupported;
-@@ -7847,14 +6073,6 @@ __decorate([
+@@ -7847,14 +6037,6 @@ __decorate([
      Unsupported
  ], AiEditTelemetryService.prototype, "createSuggestionId", void 0);
  registerSingleton(IAiEditTelemetryService, AiEditTelemetryService, InstantiationType.Delayed);
@@ -2096,7 +2115,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class InlineCompletionsUnificationService {
      constructor() {
          this.onDidStateChange = Event.None;
-@@ -7867,28 +6085,6 @@ __decorate([
+@@ -7867,28 +6049,6 @@ __decorate([
      Unsupported
  ], InlineCompletionsUnificationService.prototype, "state", null);
  registerSingleton(IInlineCompletionsUnificationService, InlineCompletionsUnificationService, InstantiationType.Delayed);
@@ -2125,7 +2144,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class MarkdownRendererService {
      constructor() {
          this.render = unsupported;
-@@ -7902,45 +6098,6 @@ __decorate([
+@@ -7902,45 +6062,6 @@ __decorate([
      Unsupported
  ], MarkdownRendererService.prototype, "setDefaultCodeBlockRenderer", void 0);
  registerSingleton(IMarkdownRendererService, MarkdownRendererService, InstantiationType.Delayed);
@@ -2171,7 +2190,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class RandomService {
      constructor() {
          this.generateUuid = unsupported;
-@@ -7954,228 +6111,16 @@ __decorate([
+@@ -7954,228 +6075,16 @@ __decorate([
      Unsupported
  ], RandomService.prototype, "generatePrefixedUuid", void 0);
  registerSingleton(IRandomService, RandomService, InstantiationType.Delayed);
@@ -2406,7 +2425,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class TerminalSandboxService {
      constructor() {
          this.isEnabled = async () => false;
-@@ -8225,241 +6170,6 @@ class MeteredConnectionService {
+@@ -8225,241 +6134,6 @@ class MeteredConnectionService {
      }
  }
  registerSingleton(IMeteredConnectionService, MeteredConnectionService, InstantiationType.Delayed);
@@ -2648,7 +2667,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class GitService {
      constructor() {
          this.repositories = [];
-@@ -8468,24 +6178,6 @@ class GitService {
+@@ -8468,24 +6142,6 @@ class GitService {
      }
  }
  registerSingleton(IGitService, GitService, InstantiationType.Delayed);
@@ -2673,7 +2692,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class PowerService {
      constructor() {
          this.onDidSuspend = Event.None;
-@@ -8506,39 +6198,6 @@ class PowerService {
+@@ -8506,39 +6162,6 @@ class PowerService {
      }
  }
  registerSingleton(IPowerService, PowerService, InstantiationType.Delayed);
@@ -2713,7 +2732,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class WebBrowserViewCDPService {
      constructor() {
          this.createSessionGroup = async () => {
-@@ -8551,54 +6210,6 @@ class WebBrowserViewCDPService {
+@@ -8551,54 +6174,6 @@ class WebBrowserViewCDPService {
      }
  }
  registerSingleton(IBrowserViewCDPService, WebBrowserViewCDPService, InstantiationType.Delayed);
@@ -2768,7 +2787,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class BrowserViewWorkbenchService {
      constructor() {
          this.willUseRemoteProxy = () => false;
-@@ -8678,139 +6289,6 @@ __decorate([
+@@ -8678,139 +6253,6 @@ __decorate([
      Unsupported
  ], SandboxHelperService.prototype, "buildWindowsMxcSandboxPayload", void 0);
  registerSingleton(ISandboxHelperService, SandboxHelperService, InstantiationType.Delayed);
@@ -2908,7 +2927,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class AgentNetworkFilterService {
      constructor() {
          this.isUriAllowed = () => false;
-@@ -8871,29 +6349,6 @@ __decorate([
+@@ -8871,29 +6313,6 @@ __decorate([
      Unsupported
  ], OnboardingScenarioService.prototype, "runScenario", void 0);
  registerSingleton(IOnboardingScenarioService, OnboardingScenarioService, InstantiationType.Delayed);
@@ -2938,7 +2957,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e8492
  class WindowsMxcTerminalSandboxRuntime {
      constructor() {
          this.getExecutablePath = unsupported;
-@@ -8950,178 +6405,3 @@ __decorate([
+@@ -8950,178 +6369,3 @@ __decorate([
      Unsupported
  ], GitHubUploadService.prototype, "uploadViaMobileApi", void 0);
  registerSingleton(IGitHubUploadService, GitHubUploadService, InstantiationType.Delayed);
@@ -4255,6 +4274,28 @@ index f2ec5c69b535ca68a99b4a11d9ccc2a8008a4571..6c2ca26da9bb2e6a9b8430f0056d109a
  CommandsRegistry.registerCommand("_workbench.removeFromRecentlyOpened", function(accessor, uri) {
      const workspacesService = accessor.get(IWorkspacesService);
      return workspacesService.removeRecentlyOpened([uri]);
+diff --git a/vscode/src/vs/workbench/browser/parts/activitybar/activitybarPart.js b/vscode/src/vs/workbench/browser/parts/activitybar/activitybarPart.js
+index 1a4c03bc369f8c85b495767d96e74ab294d374b8..b6f14e5aedd61e07ab4409f9def2ec025f34c784 100644
+--- a/vscode/src/vs/workbench/browser/parts/activitybar/activitybarPart.js
++++ b/vscode/src/vs/workbench/browser/parts/activitybar/activitybarPart.js
+@@ -35,7 +35,7 @@ import { StandardKeyboardEvent } from '../../../../base/browser/keyboardEvent.js
+ import { KeyCode } from '../../../../base/common/keyCodes.js';
+ import { HoverPosition } from '../../../../base/browser/ui/hover/hoverWidget.js';
+ import { PaneCompositeBar } from '../paneCompositeBar.js';
+-import { GlobalCompositeBar } from '../globalCompositeBar.js';
++import { PlainGlobalCompositeBar } from '../../../../../../../../../../../../../app/features/workbench/plain-global-composite-bar.ts';
+ import { IStorageService } from '../../../../platform/storage/common/storage.service.js';
+ import { MenuId, registerAction2, Action2, MenuRegistry } from '../../../../platform/actions/common/actions.js';
+ import { IMenuService } from '../../../../platform/actions/common/actions.service.js';
+@@ -294,7 +294,7 @@ let ActivityBarCompositeBar = class ActivityBarCompositeBar extends PaneComposit
+         this.keyboardNavigationDisposables = this._register(( new DisposableStore()));
+         if (showGlobalActivities) {
+             this.globalCompositeBar = this._register(instantiationService.createInstance(
+-                GlobalCompositeBar,
++                PlainGlobalCompositeBar,
+                 () => this.getContextMenuActions(),
+                 theme => this.options.colors(theme),
+                 this.options.activityHoverOptions
 diff --git a/vscode/src/vs/workbench/browser/parts/globalCompositeBar.js b/vscode/src/vs/workbench/browser/parts/globalCompositeBar.js
 index dbf2cd589ee4f869b69ffa850d0b8a11f1e656b4..a94a5a349e647b6b900e055c930c88828a8c238b 100644
 --- a/vscode/src/vs/workbench/browser/parts/globalCompositeBar.js

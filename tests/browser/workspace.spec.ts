@@ -14399,3 +14399,78 @@ test("Debug Console acks every real output event it renders and shows an honest 
 
 	expect(pageErrors).toEqual([]);
 });
+
+// --- `F110` S4 "globalCompositeBar migrated into app/" ---------------------
+
+test("the Manage gear renders in the Activity Bar, its context menu carries real Activity Bar Position content through the migrated composite bar, and its main menu opens without error", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await installNativeIpcMock(page, "arrayBuffer");
+	await openNativeWorkspaceExplorer(page);
+
+	// The "Manage" gear itself: `PlainGlobalCompositeBar`'s bottom composite
+	// bar action, rendered by `PlainGlobalActivityActionViewItem`
+	// (`app/features/workbench/plain-global-composite-bar.ts`). Selector found
+	// by inspecting the real rendered DOM (a throwaway
+	// `document.querySelectorAll('.activitybar [aria-label]')` dump against a
+	// real dev-server page), not guessed: the accessible name comes from
+	// `CompositeBarAction`'s own `name: "Manage"` (set in the ported
+	// constructor) and renders as `aria-label="Manage"` on the single
+	// `<li role="button">` activity item that Playwright's accessibility tree
+	// reports as `button "Manage"`.
+	const manageGear = page.getByRole("button", { name: "Manage" });
+	await expect(manageGear).toHaveCount(1);
+	await expect(manageGear).toBeVisible();
+
+	// Right-click: `PlainAbstractGlobalActivityActionViewItem.openContextMenu`
+	// -> `resolveContextMenuActions` -> the `contextMenuActionsProvider`
+	// closure `activitybarPart.js` passes into `PlainGlobalCompositeBar`'s
+	// constructor (`() => this.getContextMenuActions()`), which runs the
+	// vendor `ActivitybarPart`'s own unpatched `fillContextMenuActions` ->
+	// `getActivityBarContextMenuActions()`. "Activity Bar Position" is that
+	// menu's own `SubmenuAction` (real vendor code, confirmed by reading
+	// `activitybarPart.js` directly -- present regardless of this slice's
+	// patch, which only redirects which class gets constructed, not this
+	// closure). Seeing it here proves the ported `contextMenuActionsProvider`
+	// plumbing carries real content end to end through the patched
+	// `activitybarPart.js`, not merely that a DOM node with the right class
+	// renders.
+	await manageGear.click({ button: "right" });
+	await expect(
+		page.getByRole("menuitem", { name: "Activity Bar Position" }),
+	).toBeVisible();
+	await page.keyboard.press("Escape");
+	await expect(page.locator(".context-view")).toBeHidden();
+
+	// Left-click: `PlainAbstractGlobalActivityActionViewItem.run()` ->
+	// `resolveMainMenuActions` -> `menu.getActions()` against the real
+	// `MenuId.GlobalActivity` menu. This test's own brief assumed that menu is
+	// currently empty in this product; real inspection (right here, via the
+	// dev server, not assumed) found that assumption wrong: `@codingame/
+	// monaco-vscode-quickaccess-service-override`'s `quickAccess.
+	// contribution.js` registers a "Command Palette..." item and `@codingame/
+	// monaco-vscode-theme-service-override`'s `themes.contribution.js`
+	// registers a "Themes" submenu into `MenuId.GlobalActivity`, both real,
+	// always-on vendor registrations entirely unrelated to this slice's
+	// `authAccount` migration. So this asserts that real content, rather than
+	// only "no error was thrown".
+	await manageGear.click();
+	await expect(
+		page.getByRole("menuitem", { name: /^Command Palette/ }),
+	).toBeVisible();
+	await expect(page.getByRole("menuitem", { name: "Themes" })).toBeVisible();
+	await page.keyboard.press("Escape");
+	await expect(page.locator(".context-view")).toBeHidden();
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
