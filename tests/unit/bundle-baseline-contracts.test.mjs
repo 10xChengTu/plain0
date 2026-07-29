@@ -221,11 +221,16 @@ describe("evaluateBundleBaseline ratchet (docs/research/2026-07-28-legacy-retire
 		const sortedSources = baseline.debtSources
 			.map((entry) => entry.source)
 			.sort();
-		const knownTestingSource = baseline.debtSources.find(
-			(entry) => entry.category === "testing",
+		// `notebook` (not `testing`/`tasks`, both zeroed out by F110 S6, which
+		// would leave nothing to remove) is used here purely as an example
+		// category that still has both a positive ceiling and at least one
+		// catalogued debt source to drop -- the assertion below is generic to
+		// any such category, not specific to notebooks.
+		const knownNotebookSource = baseline.debtSources.find(
+			(entry) => entry.category === "notebook",
 		).source;
 		const shrunkSources = sortedSources.filter(
-			(source) => source !== knownTestingSource,
+			(source) => source !== knownNotebookSource,
 		);
 		// Deliberately reuse the unmodified real baseline -- decision point 5:
 		// "下降则无需改基线即可通过".
@@ -234,8 +239,8 @@ describe("evaluateBundleBaseline ratchet (docs/research/2026-07-28-legacy-retire
 			baseline,
 		);
 		expect(failures).toEqual([]);
-		expect(actual.categoryCounts.testing).toBe(
-			baseline.categoryCeilings.testing - 1,
+		expect(actual.categoryCounts.notebook).toBe(
+			baseline.categoryCeilings.notebook - 1,
 		);
 	});
 

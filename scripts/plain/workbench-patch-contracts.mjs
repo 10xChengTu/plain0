@@ -40,7 +40,49 @@ const PATCH_CONTRACTS = Object.freeze([
 		// registration is finally provably dead. See
 		// `scripts/plain/missing-services-patch-contract.mjs`'s own S4
 		// paragraph for the full token-count accounting.
-		sha256: "0f62d6839c73b77697d4253527fd882bbb6661dba4d94dfddda4e36976254578",
+		//
+		// `F110` S6 (same research document, "主导会话裁定" point 4 — the six
+		// categories `check-bundle.mjs` had never covered before `F110` S0
+		// added them) extends the same two-file surgery to 32 more tokens
+		// spanning `notebook`/`tasks`/`testing`/`remote`/`languagePacks`
+		// (`languageDetection`/`treeSitter` were deliberately left untouched —
+		// see below). Unlike every earlier slice, three tokens this slice's
+		// dependency-graph audit found are real, non-optional, always-reached
+		// consumers were deliberately *kept* registered despite being in one of
+		// this slice's five target categories — the same "share a real
+		// consumer, don't remove for zero benefit" judgment S2/S3/S5 already
+		// established for `IAuthenticationService`/the seven chat tokens/the
+		// nine `extensionRuntime` tokens: `IRemoteAgentService` (`remote`) is a
+		// non-optional constructor `__param` of `@codingame/monaco-vscode-base-service-override`'s
+		// `BrowserPathServiceOverride`/`LabelService` — both spread
+		// unconditionally into `services.js`'s own `initialize()` via that
+		// package's `getServiceOverride()` default export, so every real
+		// Workbench boot needs `IPathService`/`ILabelService`, which need this;
+		// `INotebookDocumentService` (`notebook`) is a non-optional `__param`
+		// of `workbench/browser/labels.js`'s `ResourceLabelWidget`, constructed
+		// by the universally-used `ResourceLabels`/`ResourceLabel` utility every
+		// file tab and Explorer row renders through; `ILanguageDetectionService`
+		// (`languageDetection`) is resolved unconditionally at the top of
+		// `editorStatus.js`'s real "Change Language Mode" command
+		// (`ChangeLanguageModeAction.run()`, `Ctrl+K Ctrl+M`, `f1: true`,
+		// already the same file/pattern `extensionRuntime`'s
+		// `IExtensionGalleryService` keep-reason cites). Removing any of these
+		// three would have reproduced this project's own `F110` S5 "hoverService
+		// depends on extensionService which is NOT registered" bootstrap-death
+		// class of failure. `languageDetection`'s 2 debt files and
+		// `treeSitter`'s 8 debt files are therefore both left at their `F110`
+		// S0 starting count — not because a token removal was attempted and
+		// reverted, but because this slice's dependency sweep found the
+		// registration removal would have zero debt-count benefit either way
+		// (both categories' vendor files are already unconditionally reachable
+		// through a path that has nothing to do with `missing-services.js` —
+		// `tokenizationTextModelPart.js`, part of every real `TextModel`, for
+		// `treeSitter`; `driver.js`'s `localizedStrings` default-import, for the
+		// one `languagePacks` file that remains). See
+		// `scripts/plain/missing-services-patch-contract.mjs`'s own S6
+		// paragraph and `docs/bundle-baseline.json`'s per-category
+		// `categoryNotes` for the full per-file accounting.
+		sha256: "9b22d0ee29e3f8c8dadf821345699e11459b4cf0b272c48d98d95d8fc057bd76",
 		integrity:
 			"sha512-pJMSRMI0m5Mvx54u6iBGh+iad9KqfICnwAcjswNJOO7Xt1OXm5xILcM32VkMe4UX0YmrGAvYc0WVKWL8I9O4ng==",
 		directImporter: true,
@@ -60,51 +102,69 @@ const PATCH_CONTRACTS = Object.freeze([
 		snapshotEdgeCount: 27,
 		shape: Object.freeze([
 			"diff --git a/missing-services.js b/missing-services.js",
-			"@@ -47,21 +47,15 @@ import { ActionWidgetService } from './vscode/src/vs/platform/actionWidget/brows",
-			"@@ -70,8 +64,6 @@ import { IKeyboardLayoutService } from './vscode/src/vs/platform/keyboardLayout/",
-			"@@ -96,11 +88,6 @@ import { IURLService } from './vscode/src/vs/platform/url/common/url.service.js'",
-			"@@ -112,42 +99,19 @@ import { StatusBarUpdateKind, IExtensionStatusBarItemService } from './vscode/sr",
-			"@@ -164,7 +128,6 @@ import { INotebookRendererMessagingService } from './vscode/src/vs/workbench/con",
-			"@@ -179,7 +142,7 @@ import { NoOpWorkspaceTagsService } from './vscode/src/vs/workbench/contrib/tags",
-			"@@ -206,17 +169,8 @@ import { IActivityService } from './vscode/src/vs/workbench/services/activity/co",
-			"@@ -227,16 +181,10 @@ import { IEditorGroupsService } from './vscode/src/vs/workbench/services/editor/",
-			"@@ -250,7 +198,6 @@ import { ILifecycleService } from './vscode/src/vs/workbench/services/lifecycle/",
-			"@@ -275,8 +222,6 @@ import { IUserDataInitializationService } from './vscode/src/vs/workbench/servic",
-			"@@ -294,101 +239,32 @@ import { IDataChannelService } from './vscode/src/vs/platform/dataChannel/common",
-			"@@ -1338,7 +1214,6 @@ class LanguageDetectionService {",
-			"@@ -1886,39 +1761,6 @@ __decorate([",
-			"@@ -2455,40 +2297,6 @@ class ExtensionRecommendationsService {",
-			"@@ -2528,80 +2336,6 @@ __decorate([",
-			"@@ -3026,14 +2760,6 @@ __decorate([",
-			"@@ -3100,28 +2826,6 @@ __decorate([",
-			"@@ -3831,81 +3535,6 @@ class TerminalQuickFixService {",
-			"@@ -4153,155 +3782,6 @@ class WorkbenchAssignmentService {",
-			"@@ -4716,55 +4196,6 @@ __decorate([",
-			"@@ -4852,13 +4283,6 @@ __decorate([",
-			"@@ -4962,15 +4386,6 @@ __decorate([",
-			"@@ -5119,37 +4534,6 @@ __decorate([",
-			"@@ -5240,139 +4624,26 @@ __decorate([",
-			"@@ -5724,124 +4995,6 @@ class NotebookSearchService {",
-			"@@ -6111,22 +5264,6 @@ __decorate([",
-			"@@ -6134,19 +5271,6 @@ class ChatCodeBlockContextProviderService {",
-			"@@ -6248,1934 +5372,453 @@ __decorate([",
-			"@@ -8225,241 +5868,6 @@ class MeteredConnectionService {",
-			"@@ -8468,24 +5876,6 @@ class GitService {",
-			"@@ -8506,39 +5896,6 @@ class PowerService {",
-			"@@ -8551,54 +5908,6 @@ class WebBrowserViewCDPService {",
-			"@@ -8678,139 +5987,6 @@ __decorate([",
-			"@@ -8871,29 +6047,6 @@ __decorate([",
-			"@@ -8950,178 +6103,3 @@ __decorate([",
+			"@@ -3,7 +3,6 @@ import { __decorate, __param } from './external/tslib/tslib.es6.js';",
+			"@@ -47,37 +46,26 @@ import { ActionWidgetService } from './vscode/src/vs/platform/actionWidget/brows",
+			"@@ -96,11 +84,6 @@ import { IURLService } from './vscode/src/vs/platform/url/common/url.service.js'",
+			"@@ -112,89 +95,40 @@ import { StatusBarUpdateKind, IExtensionStatusBarItemService } from './vscode/sr",
+			"@@ -206,17 +140,8 @@ import { IActivityService } from './vscode/src/vs/workbench/services/activity/co",
+			"@@ -227,16 +152,10 @@ import { IEditorGroupsService } from './vscode/src/vs/workbench/services/editor/",
+			"@@ -250,7 +169,6 @@ import { ILifecycleService } from './vscode/src/vs/workbench/services/lifecycle/",
+			"@@ -258,8 +176,6 @@ import { IPaneCompositePartService } from './vscode/src/vs/workbench/services/pa",
+			"@@ -272,11 +188,8 @@ import { ITitleService } from './vscode/src/vs/workbench/services/title/browser/",
+			"@@ -294,101 +207,31 @@ import { IDataChannelService } from './vscode/src/vs/platform/dataChannel/common",
+			"@@ -1338,7 +1181,6 @@ class LanguageDetectionService {",
+			"@@ -1886,39 +1728,6 @@ __decorate([",
+			"@@ -2053,95 +1862,6 @@ __decorate([",
+			"@@ -2186,6 +1906,44 @@ __decorate([",
+			"@@ -2455,40 +2213,6 @@ class ExtensionRecommendationsService {",
+			"@@ -2528,80 +2252,6 @@ __decorate([",
+			"@@ -3026,14 +2676,6 @@ __decorate([",
+			"@@ -3100,28 +2742,6 @@ __decorate([",
+			"@@ -3137,21 +2757,6 @@ class GlobalExtensionEnablementService {",
+			"@@ -3831,81 +3436,6 @@ class TerminalQuickFixService {",
+			"@@ -3944,76 +3474,6 @@ __decorate([",
+			"@@ -4049,34 +3509,6 @@ __decorate([",
+			"@@ -4086,26 +3518,6 @@ __decorate([",
+			"@@ -4153,156 +3565,7 @@ class WorkbenchAssignmentService {",
+			"@@ -4483,44 +3746,6 @@ __decorate([",
+			"@@ -4716,55 +3941,6 @@ __decorate([",
+			"@@ -4773,18 +3949,6 @@ class WorkspaceTrustEnablementService {",
+			"@@ -4796,16 +3960,6 @@ __decorate([",
+			"@@ -4852,13 +4006,6 @@ __decorate([",
+			"@@ -4962,100 +4109,6 @@ __decorate([",
+			"@@ -5109,47 +4162,6 @@ class ActiveLanguagePackService {",
+			"@@ -5180,277 +4192,37 @@ __decorate([",
+			"@@ -5542,80 +4314,6 @@ __decorate([",
+			"@@ -5641,63 +4339,6 @@ __decorate([",
+			"@@ -5709,139 +4350,6 @@ class UserDataInitializationService {",
+			"@@ -5901,201 +4409,52 @@ class SignService {",
+			"@@ -6111,22 +4470,6 @@ __decorate([",
+			"@@ -6134,89 +4477,6 @@ class ChatCodeBlockContextProviderService {",
+			"@@ -6229,1536 +4489,366 @@ class WalkthroughsService {",
+			"@@ -7769,73 +4859,6 @@ __decorate([",
+			"@@ -7847,14 +4870,6 @@ __decorate([",
+			"@@ -7867,28 +4882,6 @@ __decorate([",
+			"@@ -7902,45 +4895,6 @@ __decorate([",
+			"@@ -7954,228 +4908,16 @@ __decorate([",
+			"@@ -8225,241 +4967,6 @@ class MeteredConnectionService {",
+			"@@ -8468,24 +4975,6 @@ class GitService {",
+			"@@ -8506,39 +4995,6 @@ class PowerService {",
+			"@@ -8551,54 +5007,6 @@ class WebBrowserViewCDPService {",
+			"@@ -8678,139 +5086,6 @@ __decorate([",
+			"@@ -8871,29 +5146,6 @@ __decorate([",
+			"@@ -8950,178 +5202,3 @@ __decorate([",
 			"diff --git a/services.js b/services.js",
 			"@@ -24,7 +24,6 @@ import './vscode/src/vs/workbench/contrib/inlayHints/browser/inlayHintsAccessibi",
 			"@@ -106,7 +105,6 @@ import { initialize as initialize$1 } from './workbench.js';",
-			"@@ -197,19 +195,14 @@ export { ITunnelService } from './vscode/src/vs/platform/tunnel/common/tunnel.se",
-			"@@ -227,10 +220,6 @@ export { IURLService } from './vscode/src/vs/platform/url/common/url.service.js'",
-			"@@ -239,23 +228,11 @@ export { IExtensionStatusBarItemService, StatusBarUpdateKind } from './vscode/sr",
-			"@@ -313,24 +290,15 @@ export { IAccessibleViewInformationService } from './vscode/src/vs/workbench/ser",
-			"@@ -349,19 +317,14 @@ export { IUserDataInitializationService } from './vscode/src/vs/workbench/servic",
-			"@@ -376,87 +339,30 @@ export { IEditorCancellationTokens } from './vscode/src/vs/editor/contrib/editor",
-			"@@ -496,7 +402,6 @@ async function initialize(overrides, container = document.body, configuration =",
+			"@@ -175,11 +173,9 @@ export { IHistoryService } from './vscode/src/vs/workbench/services/history/comm",
+			"@@ -192,29 +188,22 @@ export { IWorkspaceTrustEnablementService, IWorkspaceTrustManagementService, IWo",
+			"@@ -227,10 +216,6 @@ export { IURLService } from './vscode/src/vs/platform/url/common/url.service.js'",
+			"@@ -239,54 +224,27 @@ export { IExtensionStatusBarItemService, StatusBarUpdateKind } from './vscode/sr",
+			"@@ -294,15 +252,6 @@ export { ITerminalContributionService } from './vscode/src/vs/workbench/contrib/",
+			"@@ -313,24 +262,15 @@ export { IAccessibleViewInformationService } from './vscode/src/vs/workbench/ser",
+			"@@ -346,22 +286,16 @@ export { ITimerService } from './vscode/src/vs/workbench/services/timer/browser/",
+			"@@ -376,87 +310,30 @@ export { IEditorCancellationTokens } from './vscode/src/vs/editor/contrib/editor",
+			"@@ -496,7 +373,6 @@ async function initialize(overrides, container = document.body, configuration =",
 			"diff --git a/vscode/src/vs/platform/files/common/files.d.ts b/vscode/src/vs/platform/files/common/files.d.ts",
 			"@@ -775,6 +775,40 @@ export declare class FileOperationError extends Error {",
 			"diff --git a/vscode/src/vs/platform/files/common/files.js b/vscode/src/vs/platform/files/common/files.js",

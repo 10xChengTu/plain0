@@ -38,7 +38,8 @@ export { IHoverService } from './vscode/src/vs/platform/hover/browser/hover.serv
 // contract catches precisely that removal -- not a hand test per token
 // duplicated seven times. F110 S5 adds nine more (extensionRuntime tokens
 // with a real non-optional consumer outside missing-services.js/services.js
-// itself).
+// itself). F110 S6 adds three more (IRemoteAgentService,
+// INotebookDocumentService, ILanguageDetectionService).
 const KEPT_REGISTRATION_LINE_BY_TOKEN = Object.freeze({
 	IQuickChatService:
 		"registerSingleton(IQuickChatService, QuickChatService, InstantiationType.Delayed);",
@@ -72,6 +73,12 @@ const KEPT_REGISTRATION_LINE_BY_TOKEN = Object.freeze({
 		"registerSingleton(IWebExtensionsScannerService, WebExtensionsScannerService, InstantiationType.Delayed);",
 	IWorkbenchExtensionManagementService:
 		"registerSingleton(IWorkbenchExtensionManagementService, WorkbenchExtensionManagementService, InstantiationType.Delayed);",
+	IRemoteAgentService:
+		"registerSingleton(IRemoteAgentService, RemoteAgentService, InstantiationType.Eager);",
+	INotebookDocumentService:
+		"registerSingleton(INotebookDocumentService, NotebookDocumentService, InstantiationType.Delayed);",
+	ILanguageDetectionService:
+		"registerSingleton(ILanguageDetectionService, LanguageDetectionService, InstantiationType.Eager);",
 });
 
 // Appends one real `registerSingleton(...)` line per
@@ -216,7 +223,14 @@ describe("checkMissingServicesShape", () => {
 		// IExtensionFeaturesManagementService, IExtensionGalleryManifestService,
 		// IExtensionService, NullExtensionService), excluding the nine kept
 		// extensionRuntime tokens in KEPT_TOKEN_REGISTRATIONS. 124 + 12 = 136.
-		expect(REMOVED_MISSING_SERVICES_TOKENS.length).toBe(136);
+		// F110 S6: 32 more tokens covering notebook(17)/tasks(1)/testing(9)/
+		// remote(4: IRemoteExtensionsScannerService, IRemoteSocketFactoryService,
+		// IRemoteExplorerService, IRemoteUserDataProfilesService)/
+		// languagePacks(1: ILanguagePackService), excluding the three kept
+		// tokens in KEPT_TOKEN_REGISTRATIONS (IRemoteAgentService,
+		// INotebookDocumentService, ILanguageDetectionService — all three
+		// registered but deliberately kept, not removed). 136 + 32 = 168.
+		expect(REMOVED_MISSING_SERVICES_TOKENS.length).toBe(168);
 	});
 
 	it("none of the removed tokens is also one of the deliberately-kept tokens", () => {
@@ -336,7 +350,13 @@ describe("checkServicesReexportShape", () => {
 		// services.js re-export too, S2-style) and none of them is in
 		// S3_MISSING_SERVICES_ONLY_NOT_REEXPORTED, so they flow straight
 		// through the filter. 93 + 12 = 105.
-		expect(REMOVED_SERVICES_REEXPORT_TOKENS.length).toBe(105);
+		// F110 S6: 30 of its 32 new tokens are also re-exported by services.js;
+		// the other 2 (INotebookCellOutlineDataSourceFactory,
+		// INotebookOutlineEntryFactory) are added to
+		// S3_MISSING_SERVICES_ONLY_NOT_REEXPORTED instead (confirmed by
+		// grepping the pre-patch services.js source: neither name has its own
+		// re-export line). 105 + 30 = 135.
+		expect(REMOVED_SERVICES_REEXPORT_TOKENS.length).toBe(135);
 	});
 
 	it("matches the real, currently-installed services.js with zero violations", async () => {

@@ -93,6 +93,68 @@
 // `services.js` stops importing it, since a real audit confirmed no other
 // installed package or `app/` source imports it at all.
 //
+// `F110` S6 (same research document, "主导会话裁定" point 4): extends the same
+// two-file surgery to 32 registrations covering the six categories `F110` S0
+// newly added to `check-bundle.mjs` (`notebook`/`tasks`/`testing`/`remote`/
+// `languagePacks`; `languageDetection`/`treeSitter` were deliberately left
+// untouched, see below). `tasks` and `testing` both reach a real floor of
+// zero. `notebook`/`remote`/`languagePacks` do not: a real dependency-graph
+// audit (restricted to the actual, currently bundled 2016-source corpus)
+// found each category's remaining files are kept alive by a real,
+// independent import chain that has nothing to do with any
+// `missing-services.js` registration — `workbench/contrib/notebook/common/notebookEditorInput.js`
+// is imported by `@codingame/monaco-vscode-view-common-service-override`'s
+// `customEditorInputFactory.js` purely for an `instanceof NotebookEditorInput`
+// check (never a construction site — confirmed by grepping the entire
+// installed dependency tree for `new NotebookEditorInput(` /
+// `NotebookEditorInput.getOrCreate(`, finding zero real call sites), which in
+// turn keeps `notebookCommon.js`/`notebookService.service.js`/
+// `notebookEditorModelResolverService.service.js` reachable regardless of
+// this slice's own token removal (their `registerSingleton` calls are still
+// safely gone; the *files* just have an unrelated reason to still exist);
+// `platform/remote/common/remoteHosts.js` is imported by four real,
+// always-reachable files (`platform/extensions/common/extensions.js`,
+// `platform/telemetry/common/telemetryUtils.js`,
+// `platform/workspaces/common/workspaces.js`,
+// `workbench/browser/contextkeys.js`) purely for its `getRemoteName`/
+// `getRemoteAuthority` pure URI-parsing helper functions, nothing
+// remote-development-specific; `platform/languagePacks/common/localizedStrings.js`
+// is imported by `workbench/services/driver/browser/driver.js` (VS Code's
+// built-in browser automation driver, unrelated to Plain's own Tauri/Playwright
+// harness) for three dialog-title string constants. See
+// `docs/bundle-baseline.json`'s `categoryNotes.notebook`/`categoryNotes.remote`/
+// `categoryNotes.languagePacks` for the full per-file accounting.
+//
+// This module's own share of that evidence is `KEPT_TOKEN_REGISTRATIONS`'
+// three new S6 entries below (`IRemoteAgentService`, `INotebookDocumentService`,
+// `ILanguageDetectionService` — all three real, non-optional, always-reached
+// consumers found *outside* missing-services.js/services.js's own facade,
+// each one load-bearing enough that removing it would have reproduced this
+// project's own F110 S5 "hoverService depends on extensionService which is
+// NOT registered" bootstrap-death failure class rather than merely left dead
+// code behind) — a real content check that none of these three registrations
+// have been silently deleted alongside the 32 that were.
+//
+// `languageDetection` (2 files) and `treeSitter` (8 files) are not touched by
+// this patch at all — not because a removal was attempted and reverted, but
+// because a real dependency-graph audit found removing their
+// `missing-services.js` registrations would have zero debt-count benefit
+// either way: both categories' vendor files are already unconditionally
+// reachable through a path with nothing to do with `missing-services.js`
+// (`editor/common/model/tokens/tokenizationTextModelPart.js`, part of every
+// real `TextModel`'s constructor, for `treeSitter`; `ILanguageDetectionService`
+// itself for the two `languageDetection` files, per the keep-reason above).
+// `treeSitter`'s own `ITreeSitterLibraryService`/`ITreeSitterThemeService`
+// registrations were left as-is for a second reason beyond zero benefit: a
+// real, entirely independent `registerSingleton(ITreeSitterLibraryService, ...)`
+// call already exists in `@codingame/monaco-vscode-api`'s own
+// `editor/standalone/browser/standaloneServices.js` (unconditionally loaded
+// via `@codingame/monaco-vscode-base-service-override`'s own bare side-effect
+// import of it), registering an equally-inert `StandaloneTreeSitterLibraryService`
+// whose own `supportsLanguage()` also unconditionally returns `false` — the
+// exact same behavior as `missing-services.js`'s own `TreeSitterLibraryService`
+// stub, confirmed by reading both classes' real source.
+//
 // `scripts/plain/workbench-patch-contracts.mjs` already locks the *patch
 // file's own bytes* (sha256) and its diff/hunk-header shape. That catches "a
 // human or agent hand-edited the `.patch` file (or ran `pnpm patch-commit`
@@ -118,8 +180,10 @@
 // What this **can** prove: none of the removed tokens are reachable through
 // either of the two files this patch touches, and every token this slice
 // deliberately keeps bound (S3's seven chat-family tokens; F110 S4 removed
-// the last non-chat-family kept token, `IAuthenticationService`) is still
-// registered.
+// the last non-chat-family kept token, `IAuthenticationService`; F110 S5's
+// nine `extensionRuntime` tokens; F110 S6's three tokens —
+// `IRemoteAgentService`/`INotebookDocumentService`/`ILanguageDetectionService`)
+// is still registered.
 //
 // What this **cannot** prove: that some *third*, not-yet-discovered
 // reachability path (a future vendor file added by an upstream version bump,
@@ -282,6 +346,42 @@ export const REMOVED_MISSING_SERVICES_TOKENS = Object.freeze([
 	"IExtensionGalleryManifestService",
 	"IExtensionService",
 	"NullExtensionService",
+
+	// --- F110 S6 (32 registrations, `notebook`/`tasks`/`testing`/`remote`/
+	// `languagePacks` -- `languageDetection`/`treeSitter` deliberately
+	// untouched, see `KEPT_TOKEN_REGISTRATIONS` below) ---
+	"INotebookOriginalCellModelFactory",
+	"INotebookOriginalModelReferenceFactory",
+	"INotebookEditorService",
+	"INotebookCellOutlineDataSourceFactory",
+	"INotebookCellStatusBarService",
+	"INotebookEditorModelResolverService",
+	"INotebookExecutionService",
+	"INotebookExecutionStateService",
+	"INotebookKernelService",
+	"INotebookKernelHistoryService",
+	"INotebookKeymapService",
+	"INotebookLoggingService",
+	"INotebookRendererMessagingService",
+	"INotebookService",
+	"INotebookEditorWorkerService",
+	"INotebookSearchService",
+	"INotebookOutlineEntryFactory",
+	"ITaskService",
+	"ITestCoverageService",
+	"ITestExplorerFilterState",
+	"ITestProfileService",
+	"ITestResultService",
+	"ITestResultStorage",
+	"ITestService",
+	"ITestingContinuousRunService",
+	"ITestingDecorationsService",
+	"ITestingPeekOpener",
+	"IRemoteExtensionsScannerService",
+	"IRemoteSocketFactoryService",
+	"IRemoteExplorerService",
+	"IRemoteUserDataProfilesService",
+	"ILanguagePackService",
 ]);
 
 // The 32 tokens above that are imported by missing-services.js but were
@@ -293,7 +393,10 @@ export const REMOVED_MISSING_SERVICES_TOKENS = Object.freeze([
 // as an explicit list (rather than silently computed) so a future slice
 // cannot accidentally assume every missing-services.js token has a services.js
 // mirror -- S2's 34 happened to (by coincidence, not necessity), S3's 89 do
-// not.
+// not. F110 S6 adds two more of its own (`INotebookCellOutlineDataSourceFactory`,
+// `INotebookOutlineEntryFactory` -- both real, both removed from
+// missing-services.js, neither ever had a services.js re-export line to begin
+// with, confirmed by grepping the pre-patch services.js source for each name).
 const S3_MISSING_SERVICES_ONLY_NOT_REEXPORTED = Object.freeze([
 	"AgentStatusMode",
 	"ChatEntitlement",
@@ -327,6 +430,10 @@ const S3_MISSING_SERVICES_ONLY_NOT_REEXPORTED = Object.freeze([
 	"ToolSet",
 	"VSCodeToolReference",
 	"createVSCodeHarnessDescriptor",
+
+	// --- F110 S6 ---
+	"INotebookCellOutlineDataSourceFactory",
+	"INotebookOutlineEntryFactory",
 ]);
 
 // services.js's own `export { X } from 'Y'` facade re-exports a subset of
@@ -509,6 +616,37 @@ export const KEPT_TOKEN_REGISTRATIONS = Object.freeze([
 			/registerSingleton\(\s*IWorkbenchExtensionManagementService\s*,\s*WorkbenchExtensionManagementService\s*,\s*InstantiationType\.\w+\s*,?\s*\)/u,
 		reason:
 			"shares extensionManagement.service.js's import line with IWorkbenchExtensionEnablementService, which must stay; no benefit to removing just this one",
+	},
+
+	// F110 S6: three tokens a real dependency-graph audit found are
+	// non-optional constructor dependencies of always-instantiated Plain
+	// features (or, for IRemoteAgentService, of always-spread base-service
+	// overrides) -- removing any of these would have reproduced this
+	// project's own F110 S5 "hoverService depends on extensionService which is
+	// NOT registered" bootstrap-death failure mode, not merely left dead code
+	// behind. See docs/bundle-baseline.json's categoryNotes.remote /
+	// categoryNotes.notebook / categoryNotes.languageDetection for the full
+	// discovery story.
+	{
+		token: "IRemoteAgentService",
+		pattern:
+			/registerSingleton\(\s*IRemoteAgentService\s*,\s*RemoteAgentService\s*,\s*InstantiationType\.\w+\s*,?\s*\)/u,
+		reason:
+			"non-optional __param of @codingame/monaco-vscode-base-service-override's BrowserPathServiceOverride (IPathService) and LabelService (ILabelService) -- both spread unconditionally into services.js's own initialize() via that package's getServiceOverride() default export, so every real Workbench boot needs it",
+	},
+	{
+		token: "INotebookDocumentService",
+		pattern:
+			/registerSingleton\(\s*INotebookDocumentService\s*,\s*NotebookDocumentService\s*,\s*InstantiationType\.\w+\s*,?\s*\)/u,
+		reason:
+			"non-optional __param of workbench/browser/labels.js's ResourceLabelWidget, constructed by the universally-used ResourceLabels/ResourceLabel utility every file tab and Explorer row renders through",
+	},
+	{
+		token: "ILanguageDetectionService",
+		pattern:
+			/registerSingleton\(\s*ILanguageDetectionService\s*,\s*LanguageDetectionService\s*,\s*InstantiationType\.\w+\s*,?\s*\)/u,
+		reason:
+			'resolved unconditionally via accessor.get(ILanguageDetectionService) at the top of ChangeLanguageModeAction.run() (editorStatus.js, the real "Change Language Mode" / Ctrl+K Ctrl+M command, f1: true) before any other logic runs -- the same file/pattern extensionRuntime\'s IExtensionGalleryService keep-reason already cites',
 	},
 ]);
 
