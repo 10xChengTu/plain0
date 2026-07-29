@@ -3,6 +3,7 @@ import { lstat, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { validateMacOSPackagingWorkflow } from "./ci-packaging-contract.mjs";
 import {
 	validateCapabilityFiles,
 	validateDebugAdapterConfirmationBoundary,
@@ -16,6 +17,7 @@ import {
 	validateDialogOverrideImportBoundary,
 	validateDialogServiceOverride,
 	validateDialogSurfaceBoundary,
+	validateEntitlementsBoundary,
 	validateNotificationOverrideImportBoundary,
 	validateFrontendEntrypointScripts,
 	validateGitBlameHardeningArgs,
@@ -635,6 +637,39 @@ if (!hasRealTauriConfigurationFiles) {
 	)) {
 		fail(failure);
 	}
+}
+
+// `F120` S5 (`docs/research/2026-07-29-branding-packaging.md` "结论 4.3",
+// "需要新增的 AST 契约" item 3): `src-tauri/Entitlements.plist` must exist and
+// declare exactly the audited entitlement set -- see
+// `validateEntitlementsBoundary`'s own doc comment for why this is a
+// hand-rolled, narrowly-scoped parser rather than a general plist library.
+const entitlementsPath = path.join(tauriRoot, "Entitlements.plist");
+try {
+	const entitlementsSource = await readFile(entitlementsPath, "utf8");
+	for (const failure of validateEntitlementsBoundary(entitlementsSource)) {
+		fail(failure);
+	}
+} catch {
+	fail(
+		"src-tauri/Entitlements.plist must exist and declare the audited hardened-runtime entitlement set",
+	);
+}
+
+// `F120` S6 (`docs/research/2026-07-29-branding-packaging.md` "结论 5",
+// "需要新增的 AST 契约" item 5): assert CI actually packages the app, not
+// just checks/tests it -- see `validateMacOSPackagingWorkflow`'s own doc
+// comment for why this is deliberately scoped to macOS only for now.
+const ciWorkflowPath = path.join(root, ".github/workflows/plain-ci.yml");
+try {
+	const ciWorkflowSource = await readFile(ciWorkflowPath, "utf8");
+	for (const failure of validateMacOSPackagingWorkflow(ciWorkflowSource)) {
+		fail(failure);
+	}
+} catch {
+	fail(
+		".github/workflows/plain-ci.yml must exist and run a real macOS tauri build",
+	);
 }
 
 const capabilitiesRoot = path.join(root, "src-tauri/capabilities");

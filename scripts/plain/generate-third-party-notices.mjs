@@ -22,9 +22,27 @@
 //     it is not added as a project dependency and does not affect
 //     `Cargo.lock`, `pnpm-lock.yaml`, or any pinned-dependency count).
 //
-// Usage: node scripts/plain/generate-third-party-notices.mjs
-// (writes ThirdPartyNotices.txt at the repo root; review the diff before
-// committing, the same as any other generated file.)
+// Usage:
+//   node scripts/plain/generate-third-party-notices.mjs
+//     (writes ThirdPartyNotices.txt at the repo root; review the diff
+//     before committing, the same as any other generated file.)
+//   node scripts/plain/generate-third-party-notices.mjs --check
+//     (F120 S7, "需要新增的 AST 契约" item 4, "declaration freshness": does
+//     NOT write anything -- regenerates the same content in memory from
+//     the real, current dependency graph and diffs it against the
+//     committed ThirdPartyNotices.txt, exiting non-zero if they differ.
+//     This is the "does the notices file still match what actually ships"
+//     drift detector the research document asked for, built by reusing
+//     this already-real generator rather than duplicating its
+//     `pnpm licenses list`/`cargo about` logic in a second module.
+//     Deliberately NOT wired into the default `pnpm check` chain: unlike
+//     every other `pnpm check` step, this one requires `cargo-about` to be
+//     separately installed as a machine-local tool (see prerequisites
+//     above) and re-resolves live dependency data on every run, rather
+//     than being a fast, offline, pure static check -- see
+//     `package.json`'s own `check:notices` script and this feature's
+//     evidence for the real, live-executed before/after proof that this
+//     mode actually detects drift.)
 
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -338,7 +356,7 @@ function buildRustSection(rustData) {
 // Assembly
 // ---------------------------------------------------------------------------
 
-function main() {
+function generateNoticesContent() {
 	const prodLicenses = getJsProdLicenses();
 	const jsBlocks = buildJsSection(prodLicenses);
 
@@ -391,10 +409,49 @@ function main() {
 	// output is uniform, matching this file's `.gitattributes eol=crlf`.
 	const normalized = content.replace(/\r\n/g, "\n").replace(/\n/g, "\r\n");
 
-	writeFileSync(OUTPUT_FILE, normalized, "utf8");
-	console.log(
-		`Wrote ${OUTPUT_FILE} (${jsPackageCount} JS packages, ${rustCrateCount} Rust crates, ${jsBlocks.length + rustBlocks.length} notice blocks).`,
+	return {
+		normalized,
+		jsPackageCount,
+		rustCrateCount,
+		blockCount: jsBlocks.length + rustBlocks.length,
+	};
+}
+
+function main() {
+	const checkOnly = process.argv.includes("--check");
+	const { normalized, jsPackageCount, rustCrateCount, blockCount } =
+		generateNoticesContent();
+
+	if (!checkOnly) {
+		writeFileSync(OUTPUT_FILE, normalized, "utf8");
+		console.log(
+			`Wrote ${OUTPUT_FILE} (${jsPackageCount} JS packages, ${rustCrateCount} Rust crates, ${blockCount} notice blocks).`,
+		);
+		return;
+	}
+
+	let committed;
+	try {
+		committed = readFileSync(OUTPUT_FILE, "utf8");
+	} catch {
+		console.error(
+			`ThirdPartyNotices.txt is missing at ${OUTPUT_FILE} -- run without --check to generate it.`,
+		);
+		process.exitCode = 1;
+		return;
+	}
+	if (committed === normalized) {
+		console.log(
+			`ThirdPartyNotices.txt is fresh: matches the real, current dependency graph (${jsPackageCount} JS packages, ${rustCrateCount} Rust crates, ${blockCount} notice blocks).`,
+		);
+		return;
+	}
+	console.error(
+		"ThirdPartyNotices.txt is stale: it no longer matches the real, current dependency graph " +
+			`(regenerating now would produce ${jsPackageCount} JS packages, ${rustCrateCount} Rust crates, ${blockCount} notice blocks). ` +
+			"Re-run `node scripts/plain/generate-third-party-notices.mjs` (without --check) and review/commit the diff.",
 	);
+	process.exitCode = 1;
 }
 
 main();

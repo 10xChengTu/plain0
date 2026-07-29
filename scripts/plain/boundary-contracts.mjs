@@ -99,6 +99,119 @@ const EXPECTED_PRODUCT_CONFIGURATION = Object.freeze({
 	serverApplicationName: "plain-server",
 });
 
+// `F120` S7 (`docs/research/2026-07-29-branding-packaging.md` "结论 6", "需要
+// 新增的 AST 契约" item 2): `validateTauriConfiguration` below used to check
+// nothing about `config.identifier` or `config.bundle` at all -- the research
+// document's own real reading of this function (as it stood before this
+// slice) confirmed the `bundle` segment was a complete blind spot: an
+// `identifier` reverted to a Code OSS-style value, a deleted `icon` array, a
+// missing `copyright`, or a changed `macOS.minimumSystemVersion` would all
+// pass `pnpm check` silently. `EXPECTED_BUNDLE_IDENTIFIER`/`EXPECTED_BUNDLE`
+// close that gap by locking the exact, currently-shipping shape byte for
+// byte (mirroring the same `sameObject`/`sameArray` exact-match style already
+// used for `EXPECTED_PRODUCTION_CSP` above, not a looser subset check).
+//
+// `bundle.macOS.entitlements` is included here (F120 S5, same research
+// document "结论 4.3"/"5.3"): it must always point at the audited
+// `Entitlements.plist` this same slice added, never silently drop out or
+// point somewhere else -- `validateEntitlementsBoundary` below is the
+// separate contract that locks that file's own contents.
+const EXPECTED_BUNDLE_IDENTIFIER = "com.plain.editor";
+const EXPECTED_BUNDLE = Object.freeze({
+	active: true,
+	targets: ["app", "dmg"],
+	category: "DeveloperTool",
+	copyright: "Copyright (c) 2026 Plain Contributors",
+	icon: [
+		"icons/32x32.png",
+		"icons/128x128.png",
+		"icons/128x128@2x.png",
+		"icons/icon.icns",
+		"icons/icon.ico",
+	],
+	macOS: {
+		minimumSystemVersion: "10.15",
+		entitlements: "Entitlements.plist",
+	},
+});
+
+// `F120` S5 (`docs/research/2026-07-29-branding-packaging.md` "结论 4.3",
+// "5.3", main-session ruling point 6): the closed, audited set of
+// hardened-runtime entitlements `src-tauri/Entitlements.plist` may declare.
+//
+// This explanation lives here rather than as a comment inside the plist
+// file itself for a real, empirically-discovered reason: a real
+// `codesign`-driven build of this exact file, with an explanatory XML
+// comment inside it, failed with `Failed to parse entitlements:
+// AMFIUnserializeXML: syntax error near line 13` -- Apple's own
+// entitlements parser (AMFI) is a stricter, separate path from the general
+// CoreFoundation plist parser `plutil -lint` uses, and rejects the literal
+// `--` sequence inside an XML comment (a real, long-standing XML-spec rule
+// -- "the string `--` MUST NOT occur within comments" -- that most
+// general-purpose XML tooling tolerates but AMFI does not). This project's
+// own prose style uses `--` as an em dash throughout, so any comment of
+// meaningful length was essentially guaranteed to trip this. The fix was
+// to keep `Entitlements.plist` itself comment-free (matching how
+// real-world entitlements files are conventionally authored anyway) and
+// move the rationale here instead.
+//
+// `com.apple.security.cs.allow-jit` is the one entry this file starts
+// with, because Tauri's own published guidance is unambiguous that it is
+// not optional once hardened runtime is enabled: WKWebView needs
+// JIT-compiled memory pages to run JavaScript at a usable speed, hardened
+// runtime blocks MAP_JIT allocation by default, and an app that omits this
+// entitlement after being notarized does not merely run slower, it can
+// crash on launch. Tauri's own `bundle.macOS.hardenedRuntime` config
+// defaults to `true` (confirmed by reading `@tauri-apps/cli`'s
+// `config.schema.json` locally), so this is a real, load-bearing
+// prerequisite the moment a real signing identity is configured, not a
+// speculative addition.
+//
+// `com.apple.security.cs.debugger` is deliberately NOT included. The
+// research document's "结论 4.4" raises a real technical correction to
+// F100's own recorded assumption: `task_for_pid` permission is evaluated
+// against the *calling* process (the DAP adapter binary Plain spawns, e.g.
+// `lldb-dap`), not against whichever process spawned that caller -- if
+// that holds, Plain.app itself never needs this entitlement at all, since
+// Plain only spawns an adapter and talks DAP over stdio/TCP, never calling
+// `task_for_pid` itself.
+//
+// This slice ran a real, bounded, reproducible experiment (not just cited
+// documentation) to test this in the only environment available here (an
+// automated, headless Bash sandbox, not a real interactive Mac session): a
+// small ad-hoc-signed C harness spawns a child and calls `task_for_pid` on
+// it. Without any entitlement, the call fails fast and cleanly
+// (`KERN_FAILURE`, no hang). Re-signed with only
+// `com.apple.security.cs.debugger` added, the identical call reliably
+// blocks and has to be force-killed -- reproduced twice. Real Apple `lldb`
+// itself (already signed by Apple with whatever entitlements it needs)
+// hangs identically at `process launch` in this same sandbox, and
+// `DevToolsSecurity -status` reports Developer Mode disabled here with no
+// passwordless path to enable it (enabling it would itself be a system
+// security setting change, out of bounds for an automated agent
+// regardless). Together this confirms the entitlement measurably changes
+// kernel-level behavior for the immediate caller regardless of what
+// spawned it (consistent with the research document's caller-based
+// correction), but also that this specific execution environment cannot
+// complete real native process debugging at all, for reasons independent
+// of any entitlement Plain.app itself carries. Neither finding proves the
+// adapter (not Plain.app) is the correct entitlement holder in a real,
+// unsandboxed, Developer-Mode-enabled session -- that still needs the
+// real-Mac verification the research document's "结论 4.4" and
+// `docs/e2e-handover.md`'s E2E-010 step 3 already call for. Adding
+// `com.apple.security.cs.debugger` now, before that verification, would be
+// exactly the "expand the attack surface on a guess" move the
+// main-session ruling's point 6 explicitly forbids. If real-Mac testing
+// later proves Plain.app itself needs it, add it then, with its own
+// threat-model note.
+//
+// Any future entitlement addition must extend this set deliberately (with
+// its own threat-model note, per `AGENTS.md`'s "new permissions need a
+// threat note and a test" rule), not slip in silently.
+const EXPECTED_ENTITLEMENTS = Object.freeze({
+	"com.apple.security.cs.allow-jit": true,
+});
+
 function isRecord(value) {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1999,6 +2112,69 @@ export function validateTauriConfiguration(config) {
 		}
 	}
 
+	if (config?.identifier !== EXPECTED_BUNDLE_IDENTIFIER) {
+		failures.push(
+			`Tauri bundle identifier must remain ${JSON.stringify(EXPECTED_BUNDLE_IDENTIFIER)}`,
+		);
+	}
+	if (!sameObject(config?.bundle, EXPECTED_BUNDLE)) {
+		failures.push(
+			"Tauri bundle configuration differs from the audited branding/packaging contract",
+		);
+	}
+
+	return failures;
+}
+
+// `F120` S5 (`docs/research/2026-07-29-branding-packaging.md` "结论 4.3",
+// "需要新增的 AST 契约" item 3): parses `src-tauri/Entitlements.plist` well
+// enough to lock its closed, audited key set -- this is a small, hand-rolled
+// parser scoped to exactly this project's own hand-authored file (a flat
+// `<dict>` of boolean-valued `<key>`/`<true/>`|`<false/>` pairs), not a
+// general XML/plist parser, since no `plist` parsing dependency exists in
+// this project and pulling one in for a five-line file would be a poor
+// trade. It intentionally does not validate the surrounding
+// `<?xml?>`/`<!DOCTYPE>`/`<plist>` wrapper -- `plutil -lint` (run by hand
+// during this slice) already proves the real file is well-formed XML, and
+// this contract's job is the *content*, not the container.
+export function validateEntitlementsBoundary(source) {
+	const failures = [];
+	const keyValuePattern = /<key>([^<]+)<\/key>\s*<(true|false)\s*\/>/g;
+	const seen = new Map();
+	for (const match of source.matchAll(keyValuePattern)) {
+		const [, key, boolText] = match;
+		if (seen.has(key)) {
+			failures.push(
+				`Entitlements.plist must not declare ${key} more than once`,
+			);
+			continue;
+		}
+		seen.set(key, boolText === "true");
+	}
+	if (seen.size === 0) {
+		failures.push(
+			"Entitlements.plist could not be parsed as a boolean-keyed plist dict -- it must declare at least the audited required entitlement set",
+		);
+		return failures;
+	}
+	for (const [key, expectedValue] of Object.entries(EXPECTED_ENTITLEMENTS)) {
+		if (!seen.has(key)) {
+			failures.push(
+				`Entitlements.plist is missing the required entitlement ${key}`,
+			);
+			continue;
+		}
+		if (seen.get(key) !== expectedValue) {
+			failures.push(`Entitlements.plist's ${key} must be ${expectedValue}`);
+		}
+	}
+	for (const key of seen.keys()) {
+		if (!Object.hasOwn(EXPECTED_ENTITLEMENTS, key)) {
+			failures.push(
+				`Entitlements.plist declares an unaudited entitlement ${key} -- new entitlements need a threat justification and test before being added (AGENTS.md), not a silent addition`,
+			);
+		}
+	}
 	return failures;
 }
 

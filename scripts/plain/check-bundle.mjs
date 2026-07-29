@@ -7,6 +7,7 @@ import {
 	evaluateBundleBaseline,
 	normalizeSource,
 } from "./bundle-baseline-contracts.mjs";
+import { findForbiddenBrandStrings } from "./forbidden-brand-strings.mjs";
 import { REMOVED_MISSING_SERVICES_TOKENS } from "./missing-services-patch-contract.mjs";
 
 const root = path.resolve(
@@ -109,6 +110,19 @@ for (const command of forbiddenCommandIds) {
 	if (javascript.includes(command)) {
 		fail(`final bundle registers excluded command: ${command}`);
 	}
+}
+
+// `F120` S7 (`docs/research/2026-07-29-branding-packaging.md` "需要新增的
+// AST 契约" item 1): see `scripts/plain/forbidden-brand-strings.mjs`'s own
+// doc comment for why this list is scoped the way it is -- real
+// verification found every one of the plan's originally-proposed nine
+// strings already, unavoidably present via the vendor `product.json.js`
+// data blob, the reverted dead `ProductService` class, and the bundled
+// codicon icon-name registry, none of which this feature can remove
+// without forking a vendor package. `FORBIDDEN_BRAND_STRINGS` covers what
+// this slice actually verified is genuinely absent today.
+for (const term of findForbiddenBrandStrings(javascript)) {
+	fail(`final bundle contains forbidden VS Code brand string: ${term}`);
 }
 
 // `F110` S2/S3/S4 (`docs/research/2026-07-28-legacy-retirement.md`, "验收如何

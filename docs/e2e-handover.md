@@ -1,6 +1,6 @@
 # 端到端桌面验收交接清单（Codex 执行）
 
-更新时间：2026-07-29（新增 E2E-011：F110 真实桌面排除面巡检与 extensionRuntime 手术后回归）
+更新时间：2026-07-30（新增 E2E-012：`F120` 品牌/打包/发布检查收口后仍需真实桌面/真实 CI 才能确认的维度）
 
 ## 分工模式
 
@@ -370,10 +370,27 @@ fixture（临时目录中构造，不提交仓库；可直接复用 E2E-005 已�
 
 完成后：将结果写入 `features.json` F110 evidence（`nativeScenarios` 追加、`platformGaps` 移除本条目对应缺口；若发现任何 Chat/Account/Sync/Extension-Host 相关入口真实可达，或步骤 7 复现 `deltaExtensions` 类异常，必须作为阻塞发现单独报告，不得归入本条目的常规完成流程）。
 
+### E2E-012 · F120 品牌/打包/发布检查收口后仍需真实桌面与真实 CI 才能确认的维度
+
+状态：待执行。`F120` S0–S7 已全部完成并转 `complete`（`features.json`），机器化契约（品牌覆盖面、bundle 段契约、entitlements 内容契约、品牌字符串扫描、声明新鲜度检查、CI 打包存在性检查）已全部落地并配真实反向测试，`pnpm check`/`pnpm test:e2e:browser`（98/98）均通过。但按本项目一贯纪律（"机器化契约通过不等于实机验证通过"），以下维度是本次收口**明确无法**从当前沙箱环境完成、且与已登记的 `E2E-010` 步骤 3（`com.apple.security.cs.debugger` 实机验证）不重复的真实缺口，登记于此：
+
+1. **ad-hoc 签名 + hardened runtime + JIT entitlement 构建的真实 GUI 验证**：本次收口只做到了——用 `APPLE_SIGNING_IDENTITY=-` 强制真实 ad-hoc 签名，`codesign -dv`/`codesign -d --entitlements -` 确认 `flags=0x10002(adhoc,runtime)` 与 `com.apple.security.cs.allow-jit=true` 真实生效，并把签名后的原始二进制（绕开 Finder/LaunchServices）直接启动，确认进程存活 4 秒无崩溃、无报错。这**不是**真实 GUI 验证——本条目需要真实通过 Finder/`open` 双击启动该构建，确认窗口真实出现、Workbench 正常渲染、编辑器可以真实输入文本（真实验证 JIT 在 hardened runtime 下确实让 WKWebView 的 JS 执行保持正常速度且不崩溃，而不只是"进程活着"这一较弱证据）。
+2. **CI `build-macos` job 的真实首跑**：本机已验证同一套命令序列（Zig 0.15.2、`pnpm ghostty:vendor:setup`、真实 `tauri build --bundles app`）能在本机成功产出真实 `Plain.app`，但 `mlugg/setup-zig@v1`/`dtolnay/rust-toolchain@stable`/`Swatinem/rust-cache@v2` 在真实 `macos-latest` runner 上的行为、与本仓库 Cargo workspace 的真实缓存交互、首跑真实耗时，均需要一次真实 PR 触发 CI 后才能确认。若首跑失败，应优先核对 Zig 安装步骤与 `ghostty:vendor:setup` 的联网行为（本项目已知 Zig 自身依赖抓取在某些网络环境下不稳定，见 `scripts/plain/ghostty-vendor-setup.mjs` 的注释）。
+3. **DMG 打包目标的真实 CI 行为（可选，非阻塞）**：本机真实测试发现 `pnpm tauri:build`（含 `dmg` target）会在 `bundle_dmg.sh` 的 Finder/AppleScript 自动化步骤上真实挂起（`ps` 核实进程卡死），`build-macos` job 因此故意只跑 `--bundles app`。判断这很可能是本次验证环境本身缺少交互式 Automation 会话所致，而非真实 GitHub Actions 环境的缺陷，但未经真实 CI 确证。若执行方希望恢复 `dmg` 打包，可在真实 CI 环境里先单独试跑 `tauri build --bundles dmg`，确认是否同样挂起；若不挂起，可以放心把 `build-macos` 步骤改回默认的 `pnpm tauri:build`（两个 target 都打）。
+4. **签名/公证挂起对验收范围的直接影响，供执行方规划 F130 时参考**：产品所有者已明确暂不投入 Apple Developer Program 账号，`F120` 只完成本地 ad-hoc 签名验证。这意味着任何"在另一台机器上安装运行"类验收（例如把构建产物发给另一个人在他们自己的 Mac 上首次打开）**做不到**——`spctl -a -vv` 在当前状态下会真实报 `rejected`（本次已验证，这是预期结果而非回归），真实公证后的 Gatekeeper 首次打开确认对话框流程完全无法验证。
+
+已知边界（执行方须知）：
+
+- 本条目不重复 `E2E-010` 步骤 3（真实 Mac、已启用 Developer Mode 环境下 `com.apple.security.cs.debugger` 是否真的需要）——那是该条目自己的责任；本条目步骤 1 只验证 JIT entitlement 本身在真实 GUI 会话下的效果，与调试器权限无关。
+- 图标仍是 Tauri 脚手架默认资产（`git log --diff-filter=A` 确认来自初始 `feat: init` 提交），不是本条目要验证的维度——那是一个需要产品所有者提供设计的独立事项，见 `features.json` F120 evidence 的 `platformGaps`。
+
+完成后：将结果写入 `features.json` F120 evidence（`nativeScenarios` 追加、`platformGaps` 移除本条目对应缺口；若步骤 1 发现真实 GUI 会话下 JIT/hardened runtime 组合确实导致崩溃或渲染异常，必须作为阻塞发现单独报告，不得归入本条目的常规完成流程；若步骤 2/3 的 CI 首跑暴露平台特定问题，如实记录具体失败原因而非笼统标注"待修"）。
+
 ## 后续条目（随切片追加）
 
 - F030 遗留：真实 `CloseRequested` 关窗握手协议实现后，补「正常关窗 → 重开恢复」的桌面验收变体。
 - F080/F090 Git 与 Git 历史/blame 工具的真实桌面矩阵已按 docs/testing.md「真实 Tauri E2E」清单登记（分别为 E2E-008、E2E-009）。
 - F100 通用 DAP 调试客户端的真实桌面矩阵已登记为 E2E-010。
 - F110 遗留子系统退役的真实桌面排除面巡检与 extensionRuntime 手术后回归已登记为 E2E-011。
-- F120/F130 发布与全量原生回归。
+- F120 品牌/打包/发布检查收口后仍需真实桌面与真实 CI 才能确认的维度已登记为 E2E-012。
+- F130 浏览器与原生端到端验收：应先清点 E2E-001 至 E2E-012 共 12 条待执行条目并重新规划执行顺序，而非假设可逐条独立执行。

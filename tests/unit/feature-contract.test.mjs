@@ -26,9 +26,22 @@ function cloneDocument() {
 const ACTIVE_INDEX = featureDocument.features.findIndex(
 	(feature) => feature.status === "in_progress",
 );
-const NEXT_PLANNED_INDEX = featureDocument.features.findIndex(
+const NEXT_PLANNED_INDEX_AFTER_ACTIVE = featureDocument.features.findIndex(
 	(feature, index) => index > ACTIVE_INDEX && feature.status === "planned",
 );
+/** `F120`'s own closeout is the first time the active feature (`F130`) is
+ * also the last entry in the whole list -- there is no `planned` feature
+ * left after it to find. When that happens, fall back to any other real
+ * feature index instead of crashing on `features[-1]`: the fixture below
+ * only needs a *second* feature to flip to `in_progress` to exercise "more
+ * than one active feature exceeds wipLimit", and that assertion does not
+ * depend on the second feature's prior status. */
+const NEXT_PLANNED_INDEX =
+	NEXT_PLANNED_INDEX_AFTER_ACTIVE === -1
+		? ACTIVE_INDEX === 0
+			? 1
+			: 0
+		: NEXT_PLANNED_INDEX_AFTER_ACTIVE;
 /** The exact `progress.md` WIP line the contract requires for the currently
  * active feature, rebuilt from `features.json` for the same reason. */
 const WIP_LINE = `- WIP：\`${featureDocument.features[ACTIVE_INDEX].id}\` ${featureDocument.features[ACTIVE_INDEX].name}。`;

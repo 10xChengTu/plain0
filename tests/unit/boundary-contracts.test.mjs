@@ -8,6 +8,7 @@ import {
 	validateDialogOverrideImportBoundary,
 	validateDialogServiceOverride,
 	validateDialogSurfaceBoundary,
+	validateEntitlementsBoundary,
 	validateNotificationOverrideImportBoundary,
 	validateFrontendEntrypointScripts,
 	validateMainCapability,
@@ -72,14 +73,34 @@ const baselineWindow = {
 	fullscreen: false,
 };
 
+const baselineBundle = {
+	active: true,
+	targets: ["app", "dmg"],
+	category: "DeveloperTool",
+	copyright: "Copyright (c) 2026 Plain Contributors",
+	icon: [
+		"icons/32x32.png",
+		"icons/128x128.png",
+		"icons/128x128@2x.png",
+		"icons/icon.icns",
+		"icons/icon.ico",
+	],
+	macOS: {
+		minimumSystemVersion: "10.15",
+		entitlements: "Entitlements.plist",
+	},
+};
+
 const baselineConfig = {
 	$schema: "https://schema.tauri.app/config/2",
+	identifier: "com.plain.editor",
 	build: {
 		beforeDevCommand: "pnpm dev",
 		devUrl: "http://127.0.0.1:1420",
 		beforeBuildCommand: "pnpm build",
 		frontendDist: "../dist",
 	},
+	bundle: baselineBundle,
 	app: {
 		withGlobalTauri: false,
 		windows: [baselineWindow],
@@ -514,6 +535,140 @@ describe("Plain Tauri boundary contracts", () => {
 		expect(validateTauriConfiguration(migratedProductionWindow)).toContain(
 			"the production main window must not migrate to a custom WebView data store",
 		);
+	});
+
+	// `F120` S7 ("需要新增的 AST 契约" item 2): `config.identifier` and
+	// `config.bundle` used to be a complete blind spot -- these reverse tests
+	// exercise every field the research document's "结论 6" named
+	// (identifier/icon/copyright/category/targets/macOS fields) plus the new
+	// `macOS.entitlements` path this same feature's S5 slice wired in.
+	it("locks the bundle identifier, icon, copyright and packaging shape", () => {
+		expect(validateTauriConfiguration(baselineConfig)).toEqual([]);
+
+		const revertedIdentifier = structuredClone(baselineConfig);
+		revertedIdentifier.identifier = "com.visualstudio.code.oss";
+		expect(validateTauriConfiguration(revertedIdentifier)).toContain(
+			'Tauri bundle identifier must remain "com.plain.editor"',
+		);
+
+		const missingBundle = structuredClone(baselineConfig);
+		delete missingBundle.bundle;
+		expect(validateTauriConfiguration(missingBundle)).toContain(
+			"Tauri bundle configuration differs from the audited branding/packaging contract",
+		);
+
+		for (const [path_, value] of [
+			[["active"], false],
+			[["targets"], ["app", "dmg", "msi"]],
+			[["category"], "Utility"],
+			[["copyright"], ""],
+			[["copyright"], "Copyright (c) 2015 - present Microsoft Corporation"],
+			[["icon"], []],
+			[["macOS", "minimumSystemVersion"], "10.13"],
+			[["macOS", "entitlements"], undefined],
+			[["macOS", "entitlements"], "Other.plist"],
+		]) {
+			const mutated = structuredClone(baselineConfig);
+			let target = mutated.bundle;
+			for (let i = 0; i < path_.length - 1; i++) {
+				target = target[path_[i]];
+			}
+			const lastKey = path_[path_.length - 1];
+			if (value === undefined) {
+				delete target[lastKey];
+			} else {
+				target[lastKey] = value;
+			}
+			expect(validateTauriConfiguration(mutated)).toContain(
+				"Tauri bundle configuration differs from the audited branding/packaging contract",
+			);
+		}
+
+		const extraBundleField = structuredClone(baselineConfig);
+		extraBundleField.bundle.resources = ["some/path"];
+		expect(validateTauriConfiguration(extraBundleField)).toContain(
+			"Tauri bundle configuration differs from the audited branding/packaging contract",
+		);
+
+		const extraMacOSField = structuredClone(baselineConfig);
+		extraMacOSField.bundle.macOS.hardenedRuntime = false;
+		expect(validateTauriConfiguration(extraMacOSField)).toContain(
+			"Tauri bundle configuration differs from the audited branding/packaging contract",
+		);
+	});
+
+	// `F120` S5 ("需要新增的 AST 契约" item 3): `validateEntitlementsBoundary`
+	// parses `src-tauri/Entitlements.plist`'s real, hand-authored shape (a
+	// flat dict of boolean-valued keys) and locks it to the closed, audited
+	// set -- these reverse tests cover every failure mode a future silent
+	// entitlement change could take.
+	const cleanEntitlements = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+</dict>
+</plist>
+`;
+
+	it("accepts only the exact audited entitlement set", () => {
+		expect(validateEntitlementsBoundary(cleanEntitlements)).toEqual([]);
+	});
+
+	it("validates the real, currently-committed src-tauri/Entitlements.plist with zero violations", () => {
+		const realEntitlements = readFileSync(
+			new URL("../../src-tauri/Entitlements.plist", import.meta.url),
+			"utf8",
+		);
+		expect(validateEntitlementsBoundary(realEntitlements)).toEqual([]);
+	});
+
+	it("rejects a missing required entitlement", () => {
+		// A dict with some *other* boolean entry (so it parses as a real,
+		// non-empty plist dict rather than tripping the separate
+		// "could not be parsed at all" failure below) but without the one
+		// audited, required key.
+		const withoutJit = cleanEntitlements.replace(
+			"<key>com.apple.security.cs.allow-jit</key>",
+			"<key>com.apple.security.cs.allow-unsigned-executable-memory</key>",
+		);
+		expect(validateEntitlementsBoundary(withoutJit)).toContain(
+			"Entitlements.plist is missing the required entitlement com.apple.security.cs.allow-jit",
+		);
+	});
+
+	it("rejects the required entitlement set to false", () => {
+		const disabledJit = cleanEntitlements.replace("<true/>", "<false/>");
+		expect(validateEntitlementsBoundary(disabledJit)).toContain(
+			"Entitlements.plist's com.apple.security.cs.allow-jit must be true",
+		);
+	});
+
+	it("rejects an unaudited additional entitlement, such as a speculatively-added debugger entitlement", () => {
+		const withDebugger = cleanEntitlements.replace(
+			"</dict>",
+			"\t<key>com.apple.security.cs.debugger</key>\n\t<true/>\n</dict>",
+		);
+		expect(validateEntitlementsBoundary(withDebugger)).toContain(
+			"Entitlements.plist declares an unaudited entitlement com.apple.security.cs.debugger -- new entitlements need a threat justification and test before being added (AGENTS.md), not a silent addition",
+		);
+	});
+
+	it("rejects a duplicated entitlement key", () => {
+		const duplicated = cleanEntitlements.replace(
+			"</dict>",
+			"\t<key>com.apple.security.cs.allow-jit</key>\n\t<true/>\n</dict>",
+		);
+		expect(validateEntitlementsBoundary(duplicated)).toContain(
+			"Entitlements.plist must not declare com.apple.security.cs.allow-jit more than once",
+		);
+	});
+
+	it("rejects a file that cannot be parsed as a boolean-keyed plist dict", () => {
+		expect(validateEntitlementsBoundary("not a plist at all")).toEqual([
+			"Entitlements.plist could not be parsed as a boolean-keyed plist dict -- it must declare at least the audited required entitlement set",
+		]);
 	});
 
 	it("isolates real Tauri acceptance without changing production state", () => {
