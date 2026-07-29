@@ -15,8 +15,13 @@ import { WorkingCopyService } from "@codingame/monaco-vscode-working-copy-servic
 import { IDialogService } from "@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service";
 import { IExtensionResourceLoaderService } from "@codingame/monaco-vscode-api/vscode/vs/platform/extensionResourceLoader/common/extensionResourceLoader.service";
 import { SyncDescriptor } from "@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors";
+import {
+	InstantiationType,
+	registerSingleton,
+} from "@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/extensions";
 import { IWorkspacesService } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspaces/common/workspaces.service";
 import { ISCMService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/scm/common/scm.service";
+import { IExtensionService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions.service";
 import { ISearchService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search.service";
 import { ILanguageStatusService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/languageStatus/common/languageStatusService.service";
 import { IWorkingCopyBackupService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyBackup.service";
@@ -27,6 +32,7 @@ import { IWorkspaceEditingService } from "@codingame/monaco-vscode-api/vscode/vs
 import { PlainSearchService } from "./features/search/plain-search-service";
 import { PlainExtensionResourceLoaderService } from "./features/themes/plain-theme-registry";
 import { EmptyLanguageStatusService } from "./services/empty-language-status";
+import { PlainNullExtensionService } from "./services/plain-null-extension-service";
 import { PlainWorkingCopyBackupService } from "./services/plain-workspace-backup-service";
 import "./services/plain-workspace-backup-tracker";
 import {
@@ -93,7 +99,66 @@ import {
  * `validateMultiDiffEditorOverrideImportBoundary` for the full audit trail);
  * unlike `ISCMService`'s own binding, there is no "extends the exact clean
  * submodule instead" exception needed here at all.
+ *
+ * `IExtensionService` (`F110` S5,
+ * `docs/research/2026-07-28-legacy-retirement.md`) is Plain's own
+ * PlainNullExtensionService (./services/plain-null-extension-service) rather
+ * than the real, instantiated `ExtensionServiceOverride` the vendor's own
+ * extensions-service-override package used to provide — that whole package
+ * (11 bundle sources) is no longer imported anywhere once `services.js`'s
+ * own `initialize()` stops spreading its `getServiceOverride()` output
+ * (patched out; see `patches/@codingame__monaco-vscode-api@35.0.1.patch`).
+ * `IExtensionService` itself cannot be dropped — dozens of always-constructed
+ * Workbench parts and this package's own top-level `extensions` subpath
+ * module (which Plain's theme-import feature uses) inject it as a
+ * non-optional dependency — see that class's own doc comment for the full
+ * audit trail and behavioral-parity argument.
+ *
+ * The `registerSingleton(IExtensionService, PlainNullExtensionService,
+ * InstantiationType.Eager)` call directly below this comment (not inside
+ * `createServiceOverrides()` itself) is not redundant with the
+ * `[IExtensionService.toString()]: new SyncDescriptor(PlainNullExtensionService,
+ * …)` entry inside the object literal further down. Vendor's own
+ * `StandaloneServices.initialize()`
+ * (`@codingame/monaco-vscode-api/vscode/src/vs/editor/standalone/browser/
+ * standaloneServices.js`) only ever *applies* an entry from the `overrides`
+ * object passed to it when its internal `serviceCollection` already holds
+ * some `SyncDescriptor` for that token (`if (r instanceof SyncDescriptor) {
+ * serviceCollection.set(...) }`); otherwise the override is silently
+ * dropped on the floor. That baseline `SyncDescriptor` is only ever
+ * populated from the global singleton registry
+ * (`getSingletonServiceDescriptors()`, written to exclusively by
+ * `registerSingleton()`) — both in `initialize()`'s own backfill loop and in
+ * the very first `serviceCollection` snapshot taken when
+ * `standaloneServices.js` itself first evaluates. Before this line existed,
+ * *nothing* ever called `registerSingleton(IExtensionService, …)` (F110 S5's
+ * patch deleted the vendor's own `registerSingleton(IExtensionService,
+ * NullExtensionService, InstantiationType.Eager)` line from
+ * `missing-services.js` without replacing it), so `IExtensionService` never
+ * got a baseline descriptor, the object-literal override below was silently
+ * dropped, and any consumer resolved through the global registry rather than
+ * through this file's own override map failed outright — concretely,
+ * `HoverService` (registered via `missing-services.js`'s own
+ * `registerSingleton(IHoverService, HoverService, InstantiationType.Delayed)`)
+ * lists `IExtensionService` as a required constructor dependency, so the very
+ * first hover anywhere crashed instantiation with "[createInstance]
+ * hoverService depends on extensionService which is NOT registered" — which
+ * failed Plain's bootstrap outright, since bootstrap itself synchronously
+ * resolves services that end up constructing `HoverService`. This statement
+ * must run before `initialize()` is ever called; as a top-level statement in
+ * this module, ordinary ES module evaluation order already guarantees that —
+ * `app/main.ts` imports `createServiceOverrides` from this file (a static
+ * import, so this whole module evaluates immediately) and only calls
+ * `initialize()` later, inside its own `async` bootstrap function, long after
+ * every statically imported module (this one included) has finished
+ * evaluating.
  */
+registerSingleton(
+	IExtensionService,
+	PlainNullExtensionService,
+	InstantiationType.Eager,
+);
+
 export function createServiceOverrides() {
 	return {
 		...getConfigurationServiceOverride(),
@@ -141,6 +206,11 @@ export function createServiceOverrides() {
 			false,
 		),
 		[ISCMService.toString()]: new SyncDescriptor(SCMService, [], true),
+		[IExtensionService.toString()]: new SyncDescriptor(
+			PlainNullExtensionService,
+			[],
+			true,
+		),
 		[IDialogService.toString()]: new SyncDescriptor(
 			DialogService,
 			undefined,

@@ -900,6 +900,11 @@ export function validateDialogServiceOverride(source) {
 			className: "SCMService",
 			thirdArgIsTrue: true,
 		},
+		{
+			tokenName: "IExtensionService",
+			className: "PlainNullExtensionService",
+			thirdArgIsTrue: true,
+		},
 	]);
 	function matchesMiddleServiceDescriptor(property, spec) {
 		if (

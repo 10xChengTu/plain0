@@ -484,8 +484,20 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service",
 	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/platform/extensionResourceLoader/common/extensionResourceLoader.service",
 	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors",
+	// `F110` S5: `registerSingleton`/`InstantiationType`. The patched
+	// `missing-services.js` no longer eagerly registers `IExtensionService`,
+	// and `initialize()`'s own services map is NOT an equivalent substitute —
+	// consumers resolved through the global singleton registry (`hoverService`
+	// among them) are constructed before that map applies, so binding only
+	// there left bootstrap dying with "hoverService depends on extensionService
+	// which is NOT registered" and 97 of 98 browser scenarios red while
+	// `pnpm check` stayed green. `app/services.ts` therefore performs the
+	// global registration itself, pointing at Plain's own
+	// `PlainNullExtensionService`.
+	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/extensions",
 	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/platform/workspaces/common/workspaces.service",
 	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/scm/common/scm.service",
+	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions.service",
 	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/languageStatus/common/languageStatusService.service",
 	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search.service",
 	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyBackup.service",
@@ -508,6 +520,12 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/services.ts:@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyService",
 	"app/services/empty-language-status.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/event",
 	"app/services/empty-language-status.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle",
+	"app/services/plain-null-extension-service.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/event",
+	"app/services/plain-null-extension-service.ts:@codingame/monaco-vscode-api/vscode/vs/platform/extensions/common/extensions",
+	"app/services/plain-null-extension-service.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensionHostKind",
+	"app/services/plain-null-extension-service.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions",
+	"app/services/plain-null-extension-service.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions.service",
+	"app/services/plain-null-extension-service.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensionsRegistry",
 	"app/services/plain-workspace-backup-service.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/buffer",
 	"app/services/plain-workspace-backup-service.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/cancellation",
 	"app/services/plain-workspace-backup-service.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/stream",

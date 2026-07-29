@@ -57,6 +57,42 @@
 // (all of them now removed) and `KEPT_TOKEN_REGISTRATIONS` shrinks from eight
 // entries to seven (S3's chat-family tokens only).
 //
+// `F110` S5 (same research document, "主导会话裁定" point 3): extends the same
+// two-file surgery to 12 `extensionRuntime` registrations
+// (`platform/debug/common/extensionHostDebug.service.js`'s
+// `IExtensionHostDebugService`; the platform-level
+// `extensionsScannerService.service.js`/`extensionsProfileScannerService.service.js`/
+// `extensions.service.js` (builtin scanner)/`extensionStorage.service.js`
+// tokens; the workbench-level `extensionManifestPropertiesService.service.js`/
+// `extensionUrlHandler.service.js`/`extensionBisect.service.js`/
+// `extensionFeatures.service.js`/`extensionGalleryManifest.service.js`
+// tokens; and — the one this slice's whole surgery centers on —
+// `IExtensionService`/`NullExtensionService` itself). Unlike every earlier
+// category, `extensionRuntime` is not driven to zero: `docs/bundle-baseline.json`'s
+// `categoryNotes.extensionRuntime` is the full per-file enumeration of what
+// remains and why. This module's own share of that evidence is
+// `KEPT_TOKEN_REGISTRATIONS`' nine new S5 entries below (real, currently
+// bundled, non-optional consumers a dependency-graph audit found *outside*
+// missing-services.js/services.js's own facade) — a real content check that
+// none of these nine registrations have been silently deleted alongside the
+// 12 that were.
+//
+// The `IExtensionService` removal is also paired with a third change this
+// module does not itself assert (out of its own scope: it only checks
+// `missing-services.js`/`services.js`): `services.js`'s `initialize()` no
+// longer spreads `getServiceOverride$4()` (the vendor's own
+// extensions-service-override package's default export) into the service
+// collection at all, and `app/services.ts`'s own `createServiceOverrides()`
+// now binds `IExtensionService` to `app/services/plain-null-extension-service.ts`'s
+// `PlainNullExtensionService` — Plain's own, directly testable inert
+// implementation, replacing what used to be a real, instantiated
+// `ExtensionServiceOverride` (host creation was already impossible via the
+// existing `DisabledExtensionHostFactory`/`DisabledExtensionHostKindPicker`
+// patch to that package, but the object itself was real). That whole
+// vendor package — 11 bundle sources — drops out of the bundle once
+// `services.js` stops importing it, since a real audit confirmed no other
+// installed package or `app/` source imports it at all.
+//
 // `scripts/plain/workbench-patch-contracts.mjs` already locks the *patch
 // file's own bytes* (sha256) and its diff/hunk-header shape. That catches "a
 // human or agent hand-edited the `.patch` file (or ran `pnpm patch-commit`
@@ -232,6 +268,20 @@ export const REMOVED_MISSING_SERVICES_TOKENS = Object.freeze([
 	"ToolSet",
 	"VSCodeToolReference",
 	"createVSCodeHarnessDescriptor",
+
+	// --- F110 S5 (12 registrations, `extensionRuntime`) ---
+	"IExtensionHostDebugService",
+	"IExtensionsScannerService",
+	"IExtensionsProfileScannerService",
+	"IBuiltinExtensionsScannerService",
+	"IExtensionStorageService",
+	"IExtensionManifestPropertiesService",
+	"IExtensionUrlHandler",
+	"IExtensionBisectService",
+	"IExtensionFeaturesManagementService",
+	"IExtensionGalleryManifestService",
+	"IExtensionService",
+	"NullExtensionService",
 ]);
 
 // The 32 tokens above that are imported by missing-services.js but were
@@ -384,6 +434,81 @@ export const KEPT_TOKEN_REGISTRATIONS = Object.freeze([
 			/registerSingleton\(\s*IAgentNetworkFilterService\s*,\s*AgentNetworkFilterService\s*,\s*InstantiationType\.\w+\s*,?\s*\)/u,
 		reason:
 			'non-optional __param of browserView.js\'s BrowserViewModel ("Share with Agent" + Playwright-based agent browser-observation bridge); removing it requires a deeper BrowserViewModel/IPlaywrightService refactor out of scope for this slice',
+	},
+
+	// F110 S5: nine extensionRuntime tokens a real dependency-graph audit
+	// (restricted to the actual, currently bundled 2015-source corpus, not a
+	// static grep over the whole vendor tree) found are non-optional
+	// constructor dependencies of always-instantiated Plain features, or
+	// (`IExtensionGalleryService`/`IExtensionsWorkbenchService`) resolved
+	// unconditionally via `accessor.get(...)` at the top of a real, always-
+	// registered command/editor-action `run()` method before any early
+	// return -- removing the registration would throw "service not
+	// registered" the instant that command runs, not just leave dead code
+	// behind. See `docs/bundle-baseline.json`'s `categoryNotes.extensionRuntime`
+	// for the full discovery story.
+	{
+		token: "IExtensionGalleryService",
+		pattern:
+			/registerSingleton\(\s*IExtensionGalleryService\s*,\s*ExtensionGalleryService\s*,\s*InstantiationType\.\w+\s*,?\s*\)/u,
+		reason:
+			'resolved unconditionally via accessor.get(IExtensionGalleryService) at the top of ChangeLanguageModeAction.run() (editorStatus.js, the real "Change Language Mode" / Ctrl+K Ctrl+M command, f1: true) before any other logic runs; also a non-optional __param of MarketplaceThemesPicker/InstalledThemesPicker (theme-service-override\'s themes.contribution.js)',
+	},
+	{
+		token: "IExtensionTipsService",
+		pattern:
+			/registerSingleton\(\s*IExtensionTipsService\s*,\s*ExtensionTipsService\s*,\s*InstantiationType\.\w+\s*,?\s*\)/u,
+		reason:
+			"shares platform/extensionManagement/common/extensionManagement.service.js's import line with IExtensionGalleryService, which must stay; no benefit to removing just this one",
+	},
+	{
+		token: "IGlobalExtensionEnablementService",
+		pattern:
+			/registerSingleton\(\s*IGlobalExtensionEnablementService\s*,\s*GlobalExtensionEnablementService\s*,\s*InstantiationType\.\w+\s*,?\s*\)/u,
+		reason:
+			"shares extensionManagement.service.js's import line with IExtensionGalleryService, which must stay; no benefit to removing just this one",
+	},
+	{
+		token: "IAllowedExtensionsService",
+		pattern:
+			/registerSingleton\(\s*IAllowedExtensionsService\s*,\s*AllowedExtensionsService\s*,\s*InstantiationType\.\w+\s*,?\s*\)/u,
+		reason:
+			"shares extensionManagement.service.js's import line with IExtensionGalleryService, which must stay; no benefit to removing just this one",
+	},
+	{
+		token: "IExtensionsWorkbenchService",
+		pattern:
+			/registerSingleton\(\s*IExtensionsWorkbenchService\s*,\s*ExtensionsWorkbenchService\s*,\s*InstantiationType\.\w+\s*,?\s*\)/u,
+		reason:
+			'resolved unconditionally via accessor.get(IExtensionsWorkbenchService) at the top of FormatDocumentMultipleAction.run() (formatActionsNone.js, the real "Format Document" / Shift+Alt+F fallback action, active whenever a document has no formatter) before any other logic runs; also a non-optional __param of MarketplaceThemesPicker/InstalledThemesPicker',
+	},
+	{
+		token: "IWorkbenchExtensionEnablementService",
+		pattern:
+			/registerSingleton\(\s*IWorkbenchExtensionEnablementService\s*,\s*WorkbenchExtensionEnablementService\s*,\s*InstantiationType\.\w+\s*,?\s*\)/u,
+		reason:
+			"non-optional __param of DefaultFormatter (formatActionsMultiple.js), a real, always-registered Workbench contribution that resolves conflicting formatters",
+	},
+	{
+		token: "IExtensionManagementServerService",
+		pattern:
+			/registerSingleton\(\s*IExtensionManagementServerService\s*,\s*ExtensionManagementServerService\s*,\s*InstantiationType\.\w+\s*,?\s*\)/u,
+		reason:
+			"shares workbench/services/extensionManagement/common/extensionManagement.service.js's import line with IWorkbenchExtensionEnablementService, which must stay; no benefit to removing just this one",
+	},
+	{
+		token: "IWebExtensionsScannerService",
+		pattern:
+			/registerSingleton\(\s*IWebExtensionsScannerService\s*,\s*WebExtensionsScannerService\s*,\s*InstantiationType\.\w+\s*,?\s*\)/u,
+		reason:
+			"shares extensionManagement.service.js's import line with IWorkbenchExtensionEnablementService, which must stay; no benefit to removing just this one",
+	},
+	{
+		token: "IWorkbenchExtensionManagementService",
+		pattern:
+			/registerSingleton\(\s*IWorkbenchExtensionManagementService\s*,\s*WorkbenchExtensionManagementService\s*,\s*InstantiationType\.\w+\s*,?\s*\)/u,
+		reason:
+			"shares extensionManagement.service.js's import line with IWorkbenchExtensionEnablementService, which must stay; no benefit to removing just this one",
 	},
 ]);
 

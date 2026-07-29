@@ -2,18 +2,18 @@
 	"schemaVersion": 2,
 	"dependencyVersion": "35.0.1",
 	"mode": "F110-ratchet",
-	"sourceCount": 2053,
-	"debtSourceCount": 113,
+	"sourceCount": 2016,
+	"debtSourceCount": 84,
 	"categoryCeilings": {
 		"chatAgent": 9,
 		"mcp": 0,
 		"authAccount": 1,
 		"syncEditSessions": 0,
-		"extensionRuntime": 47,
+		"extensionRuntime": 19,
 		"notebook": 23,
 		"tasks": 1,
 		"testing": 9,
-		"remote": 11,
+		"remote": 10,
 		"languagePacks": 2,
 		"languageDetection": 2,
 		"treeSitter": 8
@@ -61,18 +61,6 @@
 		},
 		{
 			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/debug/common/extensionHostDebug.service.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensionManagement/common/extensionGalleryManifest.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensionManagement/common/extensionGalleryManifest.service.js"
-		},
-		{
-			"category": "extensionRuntime",
 			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensionManagement/common/extensionManagement.js"
 		},
 		{
@@ -101,23 +89,11 @@
 		},
 		{
 			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensionManagement/common/extensionsScannerService.service.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensionManagement/common/extensionStorage.service.js"
-		},
-		{
-			"category": "extensionRuntime",
 			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensionManagement/common/implicitActivationEvents.js"
 		},
 		{
 			"category": "extensionRuntime",
 			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensions/common/extensions.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/extensions/common/extensions.service.js"
 		},
 		{
 			"category": "extensionRuntime",
@@ -133,15 +109,7 @@
 		},
 		{
 			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensionManagement/browser/extensionBisect.service.js"
-		},
-		{
-			"category": "extensionRuntime",
 			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensionManagement/common/extensionFeatures.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensionManagement/common/extensionFeatures.service.js"
 		},
 		{
 			"category": "extensionRuntime",
@@ -153,27 +121,7 @@
 		},
 		{
 			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/browser/extensionUrlHandler.service.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/common/extensionDescriptionRegistry.js"
-		},
-		{
-			"category": "extensionRuntime",
 			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/common/extensionHostKind.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/common/extensionManifestPropertiesService.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/common/extensionManifestPropertiesService.service.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/common/extensionRunningLocation.js"
 		},
 		{
 			"category": "extensionRuntime",
@@ -186,66 +134,6 @@
 		{
 			"category": "extensionRuntime",
 			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/common/extensionsRegistry.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/common/lazyPromise.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/common/proxyIdentifier.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/common/rpcProtocol.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/extensions/common/workspaceContains.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-extensions-service-override/vscode/src/vs/workbench/services/extensionManagement/browser/webExtensionsScannerService.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-extensions-service-override/vscode/src/vs/workbench/services/extensions/browser/extensionService.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-extensions-service-override/vscode/src/vs/workbench/services/extensions/browser/webWorkerFileSystemProvider.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-extensions-service-override/vscode/src/vs/workbench/services/extensions/common/abstractExtensionService.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-extensions-service-override/vscode/src/vs/workbench/services/extensions/common/extensionDevOptions.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-extensions-service-override/vscode/src/vs/workbench/services/extensions/common/extensionHostManager.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-extensions-service-override/vscode/src/vs/workbench/services/extensions/common/extensionRunningLocationTracker.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-extensions-service-override/vscode/src/vs/workbench/services/extensions/common/extensionsProposedApi.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-extensions-service-override/vscode/src/vs/workbench/services/extensions/common/extensionsUtil.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-extensions-service-override/vscode/src/vs/workbench/services/extensions/common/extHostCustomers.js"
-		},
-		{
-			"category": "extensionRuntime",
-			"source": "node_modules/@codingame/monaco-vscode-extensions-service-override/vscode/src/vs/workbench/services/extensions/common/lazyCreateExtensionHostManager.js"
 		},
 		{
 			"category": "languageDetection",
@@ -354,10 +242,6 @@
 		{
 			"category": "notebook",
 			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/notebook/common/notebookDocumentService.service.js"
-		},
-		{
-			"category": "remote",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/remote/common/remoteAgentConnection.js"
 		},
 		{
 			"category": "remote",
@@ -477,11 +361,11 @@
 		"mcp": "F110 S2 registered the missing-services.js/services.js mechanism for this category; F110 S3 closed the last file. The one file S2 left (platform/mcp/common/mcpPlatformTypes.js) was kept alive solely by workbench/contrib/chat/browser/agentSessions/agentHost/agentHostCustomizationService.service.js's import of IMcpServerConfiguration -- one of the 122 chatAgent debt sources S3 removed. Once that consumer's own missing-services.js/services.js registration was deleted, mcpPlatformTypes.js lost its only real importer (confirmed by dependency-graph audit against the real 2057-source bundle, not assumed) and dropped out on a real rebuild, exactly as S2's own categoryNotes predicted. 16 -> 1 (S2) -> 0 (S3).",
 		"authAccount": "F110 S2 removed the import/class/registerSingleton three-part registration for 8 of the 9 non-globalCompositeBar authAccount tokens from missing-services.js (IAuthenticationAccessService, IAuthenticationMcpAccessService, IAuthenticationMcpService, IAuthenticationMcpUsageService, IAuthenticationUsageService, IAuthenticationExtensionsService, IAuthenticationQueryService, IDynamicAuthenticationProviderStorageService), plus the matching services.js re-export lines. Verified by real rebuild: authAccount went 11 -> 5, not the naively-predicted 1 — a real dependency sweep (grepping every real, currently-bundled file for each token, not just the 13 override packages) found that globalCompositeBar.js (kept then; migrated in F110 S4, see below) has three of its own direct, real import-time dependencies into the authentication/** tree, entirely independent of missing-services.js: (a) common/authentication.js for the INTERNAL_AUTH_PROVIDER_PREFIX constant; (b) common/authentication.service.js for the IAuthenticationService decorator token itself, injected as globalCompositeBar.js's own non-optional constructor dependency (AccountsActivityActionViewItem/SimpleAccountActivityActionViewItem) — this is also why missing-services.js's IAuthenticationService registerSingleton was the one registration S2 deliberately did NOT remove, unlike every other authAccount/mcp/syncEditSessions token: removing it would have left the token unbound and thrown at Activity Bar construction time, the same 'constructor-required DI dependency' trap F080 S2 hit with IChatEditingService; (c) browser/authenticationService.js for the getCurrentAuthenticationSessionInfo function — and that file's own (never-instantiated, but still present) AuthenticationService class in turn imports browser/authenticationAccessService.service.js, which real rebuild confirmed stays reachable through that chain even though nothing requires IAuthenticationAccessService's DI binding itself. F110 S2's predicted floor was 5: globalCompositeBar.js + these 4 files, expected to zero out once F110 S4 migrated globalCompositeBar.js into app/. F110 S4's first pass did exactly that migration (activitybarPart.js's sole GlobalCompositeBar construction site now imports PlainGlobalCompositeBar/PlainGlobalActivityActionViewItem from app/features/workbench/plain-global-composite-bar.ts instead, and missing-services.js's IAuthenticationService import/class/registerSingleton triple — the one token S2 could not remove — is now fully deleted, verified by grep: zero remaining references) — but a real rebuild found authAccount stayed at 5, NOT the planned 0. Root cause, found only by real dependency-graph investigation after the ratchet didn't move: activitybarPart.js was never globalCompositeBar.js's only consumer. @codingame/monaco-vscode-view-title-bar-service-override's titlebarPart.js (a real, currently-reachable file — Plain's custom title bar, confirmed present in the dist source map with layout.contribution.darwin/win/linux) independently imports four names directly from '@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/globalCompositeBar': SimpleGlobalActivityActionViewItem (real and reachable — renders the same Manage gear inside the title bar/Command Center layout, gated on action.id === GLOBAL_ACTIVITY_ID with no dead condition guarding it) plus SimpleAccountActivityActionViewItem/isAccountsActionVisible/AccountsActivityActionViewItem (confirmed dead — grepping the real, currently-bundled @codingame packages found ACCOUNTS_ACTIVITY_ID is never used to register any action anywhere, so titlebarPart.js's own action.id === ACCOUNTS_ACTIVITY_ID branch never fires, mirroring globalCompositeBar.js's own already-dead account branch). This second consumer was missed by every earlier sweep (F110 S2's categoryNotes and this migrated file's own doc comment both claimed 'sole consumer'/'no consumer at all' for these exports, based on greps that evidently did not reach across every installed @codingame override package). Confirmed by a controlled before/after rebuild diff (reverting only the patch/lockfile, rebuilding, diffing the full source lists): the ONLY source-map change from that first pass was one net-new source, app/features/workbench/plain-global-composite-bar.ts (2057 -> 2058) — zero vendor files, including all 5 authAccount debt sources, dropped out.\n\nF110 S4's second pass closed this gap: patches/@codingame__monaco-vscode-view-title-bar-service-override@35.0.1.patch (the first-ever patch of this transitive-only package, pulled in by @codingame/monaco-vscode-workbench-service-override, which Plain does depend on directly) repoints titlebarPart.js's SimpleGlobalActivityActionViewItem import at this repo's own PlainSimpleGlobalActivityActionViewItem (app/features/workbench/plain-global-composite-bar.ts, a second port alongside PlainGlobalCompositeBar/PlainGlobalActivityActionViewItem, reusing the same DI-registration discipline), deletes the two branches that only ever served the already-dead account UI (the ACCOUNTS_ACTIVITY_ID SimpleAccountActivityActionViewItem construction, and the isAccountsActionVisible(...) guard — that helper is vendor code already neutered to always return false by the untouched globalCompositeBar.js hunk, so the guarded push was already unreachable regardless), and inlines AccountsActivityActionViewItem.ACCOUNTS_VISIBILITY_PREFERENCE_KEY's literal string value (\"workbench.activity.showAccounts\") so the last reference to that class's import could drop too. A real rebuild (controlled before/after diff, reverting only this new patch and rebuilding both ways) confirmed exactly 5 real files disappeared from the bundle and 0 were added: globalCompositeBar.js, authenticationAccessService.service.js, authenticationService.js and authentication.js (4 of the 5 catalogued authAccount debt sources) plus base/common/oauth.js — a genuinely new, previously-uncatalogued source that turned out to be reachable only through authenticationService.js/authentication.js's own import chain and was never itself classified into any of the 12 debt categories (its path is base/common/oauth.js, matching neither the /authentication|accounts?/ segment regex nor the defaultAccount.js/globalCompositeBar.js filename special case), so it is not listed as a debtSources entry here — it simply no longer appears anywhere in the real dist output.\n\nauthAccount reached 1, not 0: authentication.service.js itself remains reachable through a third, independent real consumer this slice's brief did not anticipate — @codingame/monaco-vscode-api's own workbench/services/chat/common/chatEntitlementService.js (already one of the 9 catalogued chatAgent debt sources, kept alive by chat/common/constants.js's Command Palette import chain, per chatAgent's own categoryNotes point 8). That file's ChatEntitlementRequests class takes IAuthenticationService as a non-optional __param (line ~829 of the real installed file), and its own top-level `import { IAuthenticationService } from '../../authentication/common/authentication.service.js'` line statically pulls authentication.service.js into the bundle the moment chatEntitlementService.js is loaded — completely independent of globalCompositeBar.js/titlebarPart.js, and undetectable by this slice's grep-the-vendor-tree method alone (chatEntitlementService.js was already known-and-accepted chatAgent debt; nobody had reason to re-audit its own import list for authAccount-relevant tokens until the ratchet on this specific category stopped moving). Real content inspection confirms this is inert at runtime, not a live risk: IChatEntitlementService's own registerSingleton registration was removed from missing-services.js back in F110 S3, so nothing in the running app ever asks the DI container to construct ChatEntitlementService (the only class whose constructor could reach ChatEntitlementRequests, itself only built lazily off a this.requests Lazy wrapper that is never forced) — the exact same 'real class in a real, reachable file, but never actually instantiated because its own DI registration was removed' pattern already established for AccountsActivityActionViewItem before this slice, just one level further down the same file's dependency graph. Per the main session's own standing instruction for this slice (do not invent a fourth vendor-package patch or a different architecture to force a floor of exactly 0), this one remaining file was left alone rather than adding a fifth, unplanned hunk to chatEntitlementService.js — categoryCeilings.authAccount is set to the real, honestly-measured floor of 1, and debtSources below lists only authentication.service.js. A future slice could close this true final gap by inlining IAuthenticationService's own decorator-token value as a plain string constant directly in chatEntitlementService.js (mirroring this slice's own ACCOUNTS_VISIBILITY_PREFERENCE_KEY inlining technique) or by auditing whether ChatEntitlementRequests' IAuthenticationService parameter can be dropped outright — neither was attempted here, as it falls outside F110 S4's authorized scope (the Activity Bar/title-bar Manage gear migration only).",
 		"syncEditSessions": "Same missing-services.js mechanism as chatAgent, scoped to /userDataSync/ and /editSessions/ paths. F110 S2 removed the import/class/registerSingleton three-part registration for all 14 registered syncEditSessions tokens from missing-services.js, plus the matching services.js re-export lines. A real dependency sweep (every real, currently-bundled non-override-package file, plus all 13 override packages) found zero required consumers outside missing-services.js/services.js's own facade. Verified by real rebuild: syncEditSessions reached its floor of 0.",
-		"extensionRuntime": "The most heterogeneous category (docs/research/2026-07-28-legacy-retirement.md \"结论 2\"): 34 are @codingame/monaco-vscode-api base-package missing-services.js stubs/tokens (e.g. extensions.js's NullExtensionService), but 13 are real, instantiated @codingame/monaco-vscode-extensions-service-override files (extensionService.js's real ExtensionServiceOverride, rpcProtocol.js, extensionHostManager.js, etc.) -- already deeply neutered by patches/@codingame__monaco-vscode-extensions-service-override@35.0.1.patch (DisabledExtensionHostFactory/DisabledExtensionHostKindPicker) so no host of any kind can ever be created, but the files and their RPC/lifecycle scaffolding remain. The main session's decision point 3 ruling accepts a non-zero floor here (replacing the vendor IExtensionService DI token is judged too risky for the benefit); F110 S5's evidence must enumerate whatever floor remains file-by-file with a behavioral-inertness argument for each, not just a total.",
+		"extensionRuntime": "F110 S5 (docs/research/2026-07-28-legacy-retirement.md, main session ruling point 3): patched services.js to stop importing/spreading @codingame/monaco-vscode-extensions-service-override's getServiceOverride() output at all (the only reachability path into the bundle for that whole vendor package -- confirmed by grepping every other installed @codingame/* package and app/ itself: nothing else imports it), and patched missing-services.js to remove the import/class/registerSingleton three-part registration for 12 tokens (IExtensionHostDebugService, IExtensionsScannerService, IExtensionsProfileScannerService, IBuiltinExtensionsScannerService, IExtensionStorageService, IExtensionManifestPropertiesService, IExtensionUrlHandler, IExtensionBisectService, IExtensionFeaturesManagementService, IExtensionGalleryManifestService, IExtensionService, NullExtensionService), plus the matching services.js re-export lines for all 12. app/services.ts now binds IExtensionService to a new, Plain-owned app/services/plain-null-extension-service.ts::PlainNullExtensionService instead of either vendor stub. Real rebuild: 47 -> 19, entirely from the 11-file extensions-service-override package dropping to 0 (confirmed via controlled before/after source-list diff: removing the services.js import alone, with no other change, already zeroed all 11 override-package sources) plus 17 of the 36 base-package files dropping out (28 total removed). As a side effect the same rebuild also dropped platform/remote/common/remoteAgentConnection.js out of the bundle (that file was only reachable via the real ExtensionServiceOverride constructor's IRemoteAgentService/IRemoteExtensionsScannerService dependencies) -- see categoryNotes.remote.\n\nPer the main session's ruling, extensionRuntime is not required to reach 0: replacing the vendor IExtensionService DI token itself (the only way to fully detach from these 19 files) was judged too deep a change for the benefit (nearly every real Workbench part injects that exact token). What follows is the required per-file enumeration of the floor -- not a total -- with why each file cannot be removed given that ruling, verified by a real dependency-graph audit against the actual, currently-bundled 2016-source corpus (not a static grep over the whole vendor tree, most of which never reaches the real bundle).\n\nREMOVED ENTIRELY (0 remain, was 11): every file under node_modules/@codingame/monaco-vscode-extensions-service-override/ -- webExtensionsScannerService.js, extensionService.js (the real ExtensionServiceOverride/ExtensionService class -- already neutered by the existing DisabledExtensionHostFactory/DisabledExtensionHostKindPicker patch, now not even imported), webWorkerFileSystemProvider.js, abstractExtensionService.js, extensionDevOptions.js, extensionHostManager.js, extensionRunningLocationTracker.js, extensionsProposedApi.js, extensionsUtil.js, extHostCustomers.js, lazyCreateExtensionHostManager.js. This is the strongest form of \"inert\": these files are not neutered stubs anymore, they are simply absent from the shipped bundle. As an uncatalogued bonus, three more @codingame/monaco-vscode-extensions-service-override files that were never separately tracked (not matching any of the 12 category regexes) also disappeared in the same rebuild: platform/extensionResourceLoader/browser/extensionResourceLoaderService.js, platform/extensionResourceLoader/common/extensionResourceLoader.js, and platform/lifecycle/common/lifecycle.js (all three were only reachable via that package's own index.js).\n\nREMAINING 19 (all @codingame/monaco-vscode-api base package; every reason below is a real, currently-bundled, non-optional dependency confirmed by reading the actual installed source, not assumed):\n\n1. workbench/services/extensions/common/extensions.service.js -- declares the IExtensionService decorator token itself. Cannot be dropped without replacing the vendor DI token (out of scope per the ruling): a real audit found it imported directly (deep path, not via services.js's facade) by activitybarPart.js, panecomposite.js, paneCompositeBar.js, paneCompositePart.js, auxiliaryBarPart.js, panelPart.js, sidebarPart.js, treeView.js, viewPaneContainer.js, viewsViewlet.js, explorerViewlet.js, folding.contribution.js, formatActionsMultiple.js, notebookEditorInput.js, languageService.js, keybindingsEditorModel.js, tunnelModel.js, textFileEditorModel.js, @codingame/monaco-vscode-configuration-service-override's configurationService.js and configurationResolverService.js, @codingame/monaco-vscode-search-service-override's searchService.js, @codingame/monaco-vscode-theme-service-override's workbenchThemeService.js, @codingame/monaco-vscode-workbench-service-override's layout.js, and Plain's own app/features/search/plain-search-service.ts -- dozens of always-constructed Workbench parts inject it as a non-optional constructor parameter. Plain's own app/services.ts now binds it to PlainNullExtensionService (see that class's own unit tests, tests/unit/plain-null-extension-service.test.ts, for the direct behavioral-inertness evidence: every event is Event.None and never fires, canAddExtension/canRemoveExtension are permanently false, activateByEvent/activateById/startExtensionHosts/setRemoteEnvironment are no-ops that merely resolve, and there is no code path anywhere in the class that could construct a host of any kind -- unlike the real ExtensionServiceOverride it replaces, which at least had disabled factories, this class has no host-related code at all).\n\n2. workbench/services/extensions/common/extensions.js -- declares NullExtensionService (no longer used or imported by anything: PlainNullExtensionService replaces it, confirmed by a real grep across the whole 2016-source corpus finding zero references to the name NullExtensionService anywhere). Stays reachable anyway because two real, always-registered files import a *different* export from this same file: workbench/api/browser/statusBarExtensionPoint.js and @codingame/monaco-vscode-configuration-service-override's workbench/api/common/configurationExtensionPoint.js both `import { isProposedApiEnabled } from '.../extensions.js'` directly (confirmed by reading both files' own import lines), and workbench/contrib/format/browser/formatActionsMultiple.js imports `toExtension` from it too. None of these three real consumers has anything to do with a real Extension Host; isProposedApiEnabled/toExtension are pure functions operating on already-decided extension descriptions.\n\n3. workbench/services/extensions/common/extensionsRegistry.js -- the declarative ExtensionsRegistry/registerExtensionPoint mechanism AGENTS.md sanctions for static theme/configuration/snippet contributions. Real, always-reachable consumers: statusBarExtensionPoint.js, jsonValidationExtensionPoint.js, snippetsService.js, languageService.js, remoteExplorerService.js, textMate/common/TMGrammars.js, themes/common/colorExtensionPoint.js, themes/common/iconExtensionPoint.js, themes/common/tokenClassificationExtensionPoint.js, @codingame/monaco-vscode-configuration-service-override's configurationExtensionPoint.js, @codingame/monaco-vscode-theme-service-override's themeExtensionPoints.js, and Plain's own app/features/themes/plain-theme-registry.ts. Every one of these registers purely declarative metadata (a JSON Schema shape, a color id, an icon id, a grammar association) -- none of them can execute code from an extension manifest.\n\n4. workbench/services/extensions/common/extensionHostKind.js -- declares the ExtensionHostKind enum. Real consumer: @codingame/monaco-vscode-api's own top-level extensions.js facade (registerExtension()) branches on ExtensionHostKind.Remote/LocalWebWorker/LocalProcess -- the same facade Plain's theme-package import feature calls. app/ itself never imports this enum (AGENTS.md forbids app/ from referencing ExtensionHostKind at all; app/services/plain-null-extension-service.ts's own getInspectPorts parameter is deliberately typed unknown instead, relying on TypeScript's bivariant method-parameter checking, specifically to honor that rule).\n\n5. platform/extensionManagement/common/implicitActivationEvents.js -- imported by both #2 (extensions.js) and #3 (extensionsRegistry.js) directly.\n\n6. workbench/contrib/extensions/common/extensions.service.js -- declares IExtensionsWorkbenchService. Kept: found by real audit to be resolved unconditionally via `accessor.get(IExtensionsWorkbenchService)` at the very top of FormatDocumentMultipleAction.run() (workbench/contrib/format/browser/formatActionsNone.js) -- the real \"Format Document\" fallback action bound to Shift+Alt+F, active precisely when a document has no formatter (an extremely common, always-registered editor action) -- and as a non-optional __param of MarketplaceThemesPicker/InstalledThemesPicker (@codingame/monaco-vscode-theme-service-override's themes.contribution.js). Removing the registration would throw \"service not registered\" the instant a user presses Shift+Alt+F on an unformatted file.\n\n7. workbench/services/extensionManagement/common/extensionManagement.service.js -- declares IExtensionManagementServerService/IWebExtensionsScannerService/IWorkbenchExtensionEnablementService/IWorkbenchExtensionManagementService (one shared import line/file, per missing-services.js's own source). Kept: IWorkbenchExtensionEnablementService is a non-optional __param of DefaultFormatter (workbench/contrib/format/browser/formatActionsMultiple.js), a real, always-registered Workbench contribution that resolves conflicting formatters. The other three tokens share this exact file and import line; removing only their registrations buys zero file-count benefit (the file stays regardless), so all four stay registered as a group -- the same \"share the file, no benefit to splitting\" precedent F110 S3 established for IQuickChatService's siblings.\n\n8. workbench/services/extensionManagement/common/extensionManagement.js -- declares the EnablementState enum, a real dependency of #7's own missing-services.js WorkbenchExtensionEnablementService stub and of DefaultFormatter's own extension-enablement checks.\n\n9. workbench/services/extensionManagement/common/extensionFeatures.js -- declares the Extensions (ExtensionFeaturesRegistry) namespace. Real, always-reachable consumers: workbench/api/common/jsonValidationExtensionPoint.js, workbench/services/language/common/languageService.js, @codingame/monaco-vscode-api's own themes/common/colorExtensionPoint.js, @codingame/monaco-vscode-configuration-service-override's configurationExtensionPoint.js, @codingame/monaco-vscode-theme-service-override's themeExtensionPoints.js -- all declarative registrations, same shape as #3.\n\n10. platform/extensionManagement/common/extensionManagement.service.js -- declares IExtensionGalleryService/IExtensionTipsService/IGlobalExtensionEnablementService/IAllowedExtensionsService (one shared import line/file). Kept: IExtensionGalleryService is resolved unconditionally via `accessor.get(IExtensionGalleryService)` at the top of ChangeLanguageModeAction.run() (workbench/browser/parts/editor/editorStatus.js, the real \"Change Language Mode\" command, Ctrl+K Ctrl+M, f1: true so it is always in the Command Palette) before any other logic in that method runs, and as a non-optional __param of MarketplaceThemesPicker/InstalledThemesPicker. The other three tokens share this file and import line; kept as a group for the same zero-benefit-to-split reason as #7.\n\n11. platform/extensionManagement/common/extensionsScannerService.js -- exports AbstractExtensionsScannerService, ExtensionManifestTranslator, ExtensionScannerInput, Translations. Kept: ExtensionManifestTranslator is imported directly by @codingame/monaco-vscode-api's own top-level extensions.js facade's registerExtension() function, which real-content inspection confirms is used to NLS-translate an imported theme package's manifest strings in Plain's own real, reachable app/features/themes/plain-theme-import-coordinator.ts flow (documented in that file's own registerImportedPackage() doc comment). Because ES modules execute in full on import regardless of which named export is actually used, importing ExtensionManifestTranslator also executes this file's AbstractExtensionsScannerService/ExtensionsScanner/CachedExtensionsScanner class declarations (and their own __decorate(...) calls) -- but a real audit of the entire 2016-source corpus confirms none of those three classes is ever registerSingleton'd or createInstance'd anywhere; they are declared but never constructed, exactly the same \"real class in a real reachable file, but never actually instantiated\" pattern F110 S4 already established for AccountsActivityActionViewItem.\n\n12. platform/extensionManagement/common/extensionsProfileScannerService.js -- exports AbstractExtensionsProfileScannerService, ExtensionsProfileScanningError, ExtensionsProfileScanningErrorCode. Kept: imported by #11 for ExtensionsProfileScanningError/ExtensionsProfileScanningErrorCode.\n\n13. platform/extensionManagement/common/extensionsProfileScannerService.service.js -- declares IExtensionsProfileScannerService. Kept: imported by #11's AbstractExtensionsScannerService/ExtensionsScanner/CachedExtensionsScanner constructors as a __param -- but, as in #11's own note, none of those three classes is ever actually DI-constructed anywhere in the real bundle, so this token declaration is reachable (the import statement executes as part of loading #11's module) but never resolved against a live container. See scripts/plain/check-bundle.mjs's own KNOWN_INERT_DEBT_TOKEN_STRINGS entry for this exact token (the one substring from this slice's 12 removed tokens that still has a real content-level hit in the final minified bundle, and why that hit is inert).\n\n14. platform/extensionManagement/common/extensionManagementUtil.js -- imported by both #11 (computeTargetPlatform/areSameExtensions/getGalleryExtensionId) and @codingame/monaco-vscode-api's own top-level extensions.js facade directly (getExtensionId, used by registerExtension() to compute a theme package's extension id).\n\n15. platform/extensionManagement/common/extensionNls.js -- imported by #11 (localizeManifest, the function ExtensionManifestTranslator.translateManifest() itself calls).\n\n16. platform/extensionManagement/common/extensionManagement.js -- imported by #11 (getTargetPlatform) and #12 (isIExtensionIdentifier).\n\n17. platform/extensions/common/extensionValidator.js -- imported by #11 (validateExtensionManifest).\n\n18. platform/extensions/common/extensions.js -- the foundational extension type/const file (ExtensionIdentifier, ExtensionType, TargetPlatform, EXTENSION_CATEGORIES, etc.). Real, pervasive consumer outside anything this slice touched: workbench/contrib/format/browser/formatActionsMultiple.js's own top-level `import { ExtensionIdentifier } from '.../platform/extensions/common/extensions.js'`, plus #11's own ExtensionType/ExtensionIdentifierMap/parseEnabledApiProposalNames/etc. imports. Completely independent of anything removed this slice.\n\n19. platform/extensions/common/extensionsApiProposals.js -- imported by #3 (extensionsRegistry.js).\n\nSummary of the floor's shape: none of the 19 remaining files is Extension-Host/RPC/worker/remote-host scaffolding anymore -- that entire class of file (the 11-file extensions-service-override package) is gone, not merely neutered. The 19 that remain are real dependencies of ordinary Workbench features Plain does ship (Format Document / Format Document with..., Change Language Mode, the declarative extension-point registry that configuration/snippets/color-themes/language-status/TextMate grammars/Plain's own theme registry all build on, and NLS translation of imported theme-package manifests) that happen to route through vendor's generic \"extension\" type system and DI token, plus the two files (#1, #2) that particular system's IExtensionService/NullExtensionService concepts live in. The single choke point that would let any of this reach a real third-party extension -- IExtensionService.canAddExtension() -- is proven permanently false by tests/unit/plain-null-extension-service.test.ts, and Plain's own PlainNullExtensionService provides no other code path that could construct or activate a host of any kind.",
 		"notebook": "Same missing-services.js mechanism as chatAgent (newly tracked in F110 S0 per the main session's decision point 4). 22 of 23 sit under a notebook/ directory segment; the 23rd, workbench/contrib/search/common/notebookSearch.service.js, bridges Search and Notebook from the generic search contribution directory. Expected floor after F110 S6: 0.",
 		"tasks": "Same missing-services.js mechanism as chatAgent (newly tracked in F110 S0). Single file: workbench/contrib/tasks/common/taskService.service.js. Expected floor after F110 S6: 0.",
 		"testing": "Same missing-services.js mechanism as chatAgent (newly tracked in F110 S0). All 9 sit under workbench/contrib/testing/common/. Expected floor after F110 S6: 0.",
-		"remote": "Same missing-services.js mechanism as chatAgent (newly tracked in F110 S0), scoped to the real remote-development/tunnel trees platform/remote/** and workbench/services/remote/**, plus remoteUserDataProfiles.service.js (a remote-authority profile resolver). Deliberately excludes two other files whose paths matched a naive remote keyword search during F110 S0's audit: workbench/contrib/remoteCodingAgents/common/remoteCodingAgentsService.service.js (real content is AI/Agent -- reclassified into chatAgent above) and @codingame/monaco-vscode-configuration-service-override's workbench/contrib/workspaces/browser/recentRemoteFolderPruner.js (a real, currently-imported contribution from a package Plain actually depends on, not a missing-services.js stub; app/excluded-surface-policy.ts already documents it as recently-opened-list housekeeping, not the Remote Development/tunnels surface -- counting it here would contradict that existing, already-audited judgment). Expected floor after F110 S6: 0.",
+		"remote": "Same missing-services.js mechanism as chatAgent (newly tracked in F110 S0), scoped to the real remote-development/tunnel trees platform/remote/** and workbench/services/remote/**, plus remoteUserDataProfiles.service.js (a remote-authority profile resolver). Deliberately excludes two other files whose paths matched a naive remote keyword search during F110 S0's audit: workbench/contrib/remoteCodingAgents/common/remoteCodingAgentsService.service.js (real content is AI/Agent -- reclassified into chatAgent above) and @codingame/monaco-vscode-configuration-service-override's workbench/contrib/workspaces/browser/recentRemoteFolderPruner.js (a real, currently-imported contribution from a package Plain actually depends on, not a missing-services.js stub; app/excluded-surface-policy.ts already documents it as recently-opened-list housekeeping, not the Remote Development/tunnels surface -- counting it here would contradict that existing, already-audited judgment). Expected floor after F110 S6: 0. F110 S5 (extensionRuntime surgery) incidentally dropped platform/remote/common/remoteAgentConnection.js out of the bundle too: real content inspection confirms it was only reachable via @codingame/monaco-vscode-extensions-service-override's real ExtensionServiceOverride constructor, which injected both IRemoteAgentService and IRemoteExtensionsScannerService as non-optional dependencies (that whole package is now gone -- see categoryNotes.extensionRuntime). Verified by a controlled before/after rebuild diff isolating just the services.js patch change: remote 11 -> 10, categoryCeilings.remote tightened to 10 and this file removed from the debtSources list below accordingly (it no longer appears anywhere in the real dist output).",
 		"languagePacks": "Same missing-services.js mechanism as chatAgent (newly tracked in F110 S0). Both files sit under platform/languagePacks/common/ (i18n language-pack download/localized-strings tokens, part of the acceptance #5 \"language environments\" scope per the main session ruling). Expected floor after F110 S6: 0.",
 		"languageDetection": "Same missing-services.js mechanism as chatAgent (newly tracked in F110 S0). Both files sit under workbench/services/languageDetection/common/ (automatic language detection, part of the acceptance #5 \"language environments\" scope per the main session ruling). Expected floor after F110 S6: 0.",
 		"treeSitter": "Same missing-services.js mechanism as chatAgent (newly tracked in F110 S0), part of the acceptance #5 \"language environments\" scope per the main session ruling (Plain uses static TextMate grammars, not tree-sitter). 7 of 8 sit under a treeSitter/ directory segment; the 8th, editor/standalone/browser/standaloneTreeSitterLibraryService.js, only carries the name as a camelCase filename infix. Expected floor after F110 S6: 0."

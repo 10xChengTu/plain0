@@ -36,7 +36,9 @@ export { IHoverService } from './vscode/src/vs/platform/hover/browser/hover.serv
 // `globalCompositeBar.js` migrated into `app/`), keyed by token so the
 // reverse tests below can remove exactly one at a time and assert the
 // contract catches precisely that removal -- not a hand test per token
-// duplicated seven times.
+// duplicated seven times. F110 S5 adds nine more (extensionRuntime tokens
+// with a real non-optional consumer outside missing-services.js/services.js
+// itself).
 const KEPT_REGISTRATION_LINE_BY_TOKEN = Object.freeze({
 	IQuickChatService:
 		"registerSingleton(IQuickChatService, QuickChatService, InstantiationType.Delayed);",
@@ -52,15 +54,34 @@ const KEPT_REGISTRATION_LINE_BY_TOKEN = Object.freeze({
 		"registerSingleton(IChatAgentNameService, ChatAgentNameService, InstantiationType.Delayed);",
 	IAgentNetworkFilterService:
 		"registerSingleton(IAgentNetworkFilterService, AgentNetworkFilterService, InstantiationType.Delayed);",
+	IExtensionGalleryService:
+		"registerSingleton(IExtensionGalleryService, ExtensionGalleryService, InstantiationType.Delayed);",
+	IExtensionTipsService:
+		"registerSingleton(IExtensionTipsService, ExtensionTipsService, InstantiationType.Delayed);",
+	IGlobalExtensionEnablementService:
+		"registerSingleton(IGlobalExtensionEnablementService, GlobalExtensionEnablementService, InstantiationType.Delayed);",
+	IAllowedExtensionsService:
+		"registerSingleton(IAllowedExtensionsService, AllowedExtensionsService, InstantiationType.Delayed);",
+	IExtensionsWorkbenchService:
+		"registerSingleton(IExtensionsWorkbenchService, ExtensionsWorkbenchService, InstantiationType.Delayed);",
+	IWorkbenchExtensionEnablementService:
+		"registerSingleton(IWorkbenchExtensionEnablementService, WorkbenchExtensionEnablementService, InstantiationType.Delayed);",
+	IExtensionManagementServerService:
+		"registerSingleton(IExtensionManagementServerService, ExtensionManagementServerService, InstantiationType.Delayed);",
+	IWebExtensionsScannerService:
+		"registerSingleton(IWebExtensionsScannerService, WebExtensionsScannerService, InstantiationType.Delayed);",
+	IWorkbenchExtensionManagementService:
+		"registerSingleton(IWorkbenchExtensionManagementService, WorkbenchExtensionManagementService, InstantiationType.Delayed);",
 });
 
 // Appends one real `registerSingleton(...)` line per
-// `KEPT_TOKEN_REGISTRATIONS` entry (S3's seven chat-family tokens) on top of
-// `CLEAN_MISSING_SERVICES`, so each kept token's registration line appears
-// exactly once and a single `.replace()` genuinely removes it. No filter is
-// needed anymore: `KEPT_TOKEN_REGISTRATIONS` no longer contains an
-// `IAuthenticationService` entry at all (removed from the source module in
-// F110 S4), so every remaining entry needs its line appended.
+// `KEPT_TOKEN_REGISTRATIONS` entry (S3's seven chat-family tokens plus S5's
+// nine extensionRuntime tokens) on top of `CLEAN_MISSING_SERVICES`, so each
+// kept token's registration line appears exactly once and a single
+// `.replace()` genuinely removes it. No filter is needed anymore:
+// `KEPT_TOKEN_REGISTRATIONS` no longer contains an `IAuthenticationService`
+// entry at all (removed from the source module in F110 S4), so every
+// remaining entry needs its line appended.
 const CLEAN_MISSING_SERVICES_WITH_ALL_KEPT_REGISTRATIONS = `${CLEAN_MISSING_SERVICES}\n${KEPT_TOKEN_REGISTRATIONS.map(
 	(kept) => KEPT_REGISTRATION_LINE_BY_TOKEN[kept.token],
 ).join("\n")}\n`;
@@ -126,6 +147,21 @@ describe("checkMissingServicesShape", () => {
 		expect(failures[0]).toContain("IChatService");
 	});
 
+	it("reports a violation when a removed extensionRuntime token reappears", () => {
+		const mutated = `${CLEAN_MISSING_SERVICES_WITH_ALL_KEPT_REGISTRATIONS}\nregisterSingleton(IExtensionBisectService, ExtensionBisectService, InstantiationType.Eager);\n`;
+		const failures = checkMissingServicesShape(mutated);
+		expect(failures).toHaveLength(1);
+		expect(failures[0]).toContain("IExtensionBisectService");
+	});
+
+	it("reports a violation when the removed IExtensionService/NullExtensionService registration reappears", () => {
+		const mutated = `${CLEAN_MISSING_SERVICES_WITH_ALL_KEPT_REGISTRATIONS}\nregisterSingleton(IExtensionService, NullExtensionService, InstantiationType.Eager);\n`;
+		const failures = checkMissingServicesShape(mutated);
+		expect(failures).toHaveLength(2);
+		expect(failures.some((f) => f.includes("IExtensionService"))).toBe(true);
+		expect(failures.some((f) => f.includes("NullExtensionService"))).toBe(true);
+	});
+
 	it("reports every reintroduced token at once, not just the first", () => {
 		const mutated = `${CLEAN_MISSING_SERVICES_WITH_ALL_KEPT_REGISTRATIONS}\nregisterSingleton(IMcpService, McpService, InstantiationType.Eager);\nregisterSingleton(IUserDataSyncMachinesService, UserDataSyncMachinesService, InstantiationType.Delayed);\n`;
 		const failures = checkMissingServicesShape(mutated);
@@ -172,7 +208,15 @@ describe("checkMissingServicesShape", () => {
 		// real consumer of IAuthenticationService, so this 9th authAccount
 		// token is now removed too, with nothing left kept in that category.
 		// 123 + 1 = 124.
-		expect(REMOVED_MISSING_SERVICES_TOKENS.length).toBe(124);
+		// F110 S5: 12 more tokens covering extensionRuntime
+		// (IExtensionHostDebugService, IExtensionsScannerService,
+		// IExtensionsProfileScannerService, IBuiltinExtensionsScannerService,
+		// IExtensionStorageService, IExtensionManifestPropertiesService,
+		// IExtensionUrlHandler, IExtensionBisectService,
+		// IExtensionFeaturesManagementService, IExtensionGalleryManifestService,
+		// IExtensionService, NullExtensionService), excluding the nine kept
+		// extensionRuntime tokens in KEPT_TOKEN_REGISTRATIONS. 124 + 12 = 136.
+		expect(REMOVED_MISSING_SERVICES_TOKENS.length).toBe(136);
 	});
 
 	it("none of the removed tokens is also one of the deliberately-kept tokens", () => {
@@ -232,6 +276,13 @@ describe("checkServicesReexportShape", () => {
 		expect(failures[0]).toContain("IMcpRegistry");
 	});
 
+	it("reports a violation when a removed extensionRuntime re-export reappears", () => {
+		const mutated = `${CLEAN_SERVICES}\nexport { IExtensionService } from './vscode/src/vs/workbench/services/extensions/common/extensions.service.js';\n`;
+		const failures = checkServicesReexportShape(mutated);
+		expect(failures).toHaveLength(1);
+		expect(failures[0]).toContain("IExtensionService");
+	});
+
 	it("reports a violation for the two services.js-only removed names (IMcpManagementService, IAuthenticationService)", () => {
 		const mutated = `${CLEAN_SERVICES}\nexport { IMcpGalleryService, IMcpManagementService } from './vscode/src/vs/platform/mcp/common/mcpManagement.service.js';\nexport { IAuthenticationExtensionsService, IAuthenticationService } from './vscode/src/vs/workbench/services/authentication/common/authentication.service.js';\n`;
 		const failures = checkServicesReexportShape(mutated);
@@ -280,7 +331,12 @@ describe("checkServicesReexportShape", () => {
 		// IAuthenticationService from "hardcoded services.js-only extra" to
 		// "ordinary filtered-spread member", not a net addition to the set of
 		// tokens this contract tracks.
-		expect(REMOVED_SERVICES_REEXPORT_TOKENS.length).toBe(93);
+		// F110 S5: all 12 new extensionRuntime tokens are also re-exported by
+		// services.js (unlike S3's mix, every one of these 12 happened to be a
+		// services.js re-export too, S2-style) and none of them is in
+		// S3_MISSING_SERVICES_ONLY_NOT_REEXPORTED, so they flow straight
+		// through the filter. 93 + 12 = 105.
+		expect(REMOVED_SERVICES_REEXPORT_TOKENS.length).toBe(105);
 	});
 
 	it("matches the real, currently-installed services.js with zero violations", async () => {

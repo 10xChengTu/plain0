@@ -190,6 +190,24 @@ for (const command of forbiddenCommandIds) {
 //   a substring of `contribLanguageModelToolSets`, an unrelated extension-API
 //   proposal-name string, not the removed `languageModelToolsService.js`
 //   `ToolSet` class.
+// - `IExtensionsProfileScannerService` (F110 S5) is the token *declaration*
+//   itself (`createDecorator("IExtensionsProfileScannerService")` inside
+//   `platform/extensionManagement/common/extensionsProfileScannerService.service.js`),
+//   confirmed by real content inspection (`grep -c` against the built
+//   `dist/**/*.js` finds exactly 1 occurrence, matching this one
+//   `createDecorator(...)` call site, no other hit). That file is one of the
+//   19 catalogued `extensionRuntime` debt sources kept alive by
+//   `platform/extensionManagement/common/extensionsScannerService.js`'s own
+//   real import chain (see `docs/bundle-baseline.json`'s
+//   `categoryNotes.extensionRuntime`) — whole-ES-module semantics mean
+//   importing that file's real, reachable `ExtensionManifestTranslator`
+//   export also executes its `import { IExtensionsProfileScannerService }`
+//   line and every other top-level declaration in the file, even though
+//   nothing anywhere in the real bundle ever resolves this specific token
+//   against a live DI container (`AbstractExtensionsScannerService`/
+//   `ExtensionsScanner`/`CachedExtensionsScanner`, the only three classes
+//   that take it as a constructor `__param`, are never `registerSingleton`'d
+//   or `createInstance`'d anywhere in the real, currently-bundled corpus).
 const KNOWN_INERT_DEBT_TOKEN_STRINGS = new Set([
 	"IAuthenticationExtensionsService",
 	"IAuthenticationService",
@@ -197,6 +215,7 @@ const KNOWN_INERT_DEBT_TOKEN_STRINGS = new Set([
 	"ChatEntitlement",
 	"Target",
 	"ToolSet",
+	"IExtensionsProfileScannerService",
 ]);
 const forbiddenDebtTokenStrings = REMOVED_MISSING_SERVICES_TOKENS.filter(
 	(token) => !KNOWN_INERT_DEBT_TOKEN_STRINGS.has(token),

@@ -215,6 +215,7 @@ import { IExtensionResourceLoaderService } from "@codingame/monaco-vscode-api/vs
 import { SyncDescriptor } from "@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors";
 import { IWorkspacesService } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspaces/common/workspaces.service";
 import { ISCMService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/scm/common/scm.service";
+import { IExtensionService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions.service";
 import { ISearchService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search.service";
 import { ILanguageStatusService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/languageStatus/common/languageStatusService.service";
 import { IWorkingCopyBackupService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyBackup.service";
@@ -224,6 +225,7 @@ import { IWorkspaceEditingService } from "@codingame/monaco-vscode-api/vscode/vs
 import { PlainSearchService } from "./features/search/plain-search-service";
 import { PlainExtensionResourceLoaderService } from "./features/themes/plain-theme-registry";
 import { EmptyLanguageStatusService } from "./services/empty-language-status";
+import { PlainNullExtensionService } from "./services/plain-null-extension-service";
 import { PlainWorkingCopyBackupService } from "./services/plain-workspace-backup-service";
 import { PlainWorkspaceEditingService, PlainWorkspacesService } from "./services/plain-workspace-services";
 
@@ -274,6 +276,11 @@ export function createServiceOverrides() {
       false,
     ),
     [ISCMService.toString()]: new SyncDescriptor(SCMService, [], true),
+    [IExtensionService.toString()]: new SyncDescriptor(
+      PlainNullExtensionService,
+      [],
+      true,
+    ),
     [IDialogService.toString()]: new SyncDescriptor(
       DialogService,
       undefined,
