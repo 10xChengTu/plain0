@@ -177,13 +177,24 @@
 // actually matters for correctness is the shape of what ends up running, not
 // what the patch's diff context happens to look like.
 //
+// `F120` S0 (`docs/research/2026-07-29-branding-packaging.md`, "结论 2.1")
+// adds a fourth kept token, `IProductService`, to `KEPT_TOKEN_REGISTRATIONS`
+// below — not because a real consumer was found by static dependency-graph
+// audit alone (the research document's static audit initially concluded the
+// opposite: that this registration was safely dead), but because a real,
+// full `pnpm test:e2e:browser` run attempting to remove it reproduced this
+// project's own F110 S5 "hoverService depends on extensionService which is
+// NOT registered" bootstrap-death failure class verbatim (this time:
+// "contextService depends on productService which is NOT registered"). See
+// that entry's own doc comment for the full account.
+//
 // What this **can** prove: none of the removed tokens are reachable through
 // either of the two files this patch touches, and every token this slice
 // deliberately keeps bound (S3's seven chat-family tokens; F110 S4 removed
 // the last non-chat-family kept token, `IAuthenticationService`; F110 S5's
 // nine `extensionRuntime` tokens; F110 S6's three tokens —
-// `IRemoteAgentService`/`INotebookDocumentService`/`ILanguageDetectionService`)
-// is still registered.
+// `IRemoteAgentService`/`INotebookDocumentService`/`ILanguageDetectionService`;
+// F120 S0's `IProductService`) is still registered.
 //
 // What this **cannot** prove: that some *third*, not-yet-discovered
 // reachability path (a future vendor file added by an upstream version bump,
@@ -647,6 +658,52 @@ export const KEPT_TOKEN_REGISTRATIONS = Object.freeze([
 			/registerSingleton\(\s*ILanguageDetectionService\s*,\s*LanguageDetectionService\s*,\s*InstantiationType\.\w+\s*,?\s*\)/u,
 		reason:
 			'resolved unconditionally via accessor.get(ILanguageDetectionService) at the top of ChangeLanguageModeAction.run() (editorStatus.js, the real "Change Language Mode" / Ctrl+K Ctrl+M command, f1: true) before any other logic runs -- the same file/pattern extensionRuntime\'s IExtensionGalleryService keep-reason already cites',
+	},
+
+	// `F120` S0 (`docs/research/2026-07-29-branding-packaging.md`, "结论 2.1"):
+	// a *second*, completely independent dead `class ProductService`
+	// (hardcoded `nameShort`/`nameLong` = `"Code - OSS Dev"`,
+	// `applicationName` = `"code-oss"`, etc.) is registered here via
+	// `registerSingleton(IProductService, ProductService, InstantiationType.Eager)`.
+	// The research document theorized this was fully superseded by
+	// `services.js`'s own `initialize()`, which constructs its own real
+	// `productService` object from `app/main.ts`'s `productConfiguration`
+	// override and binds it directly into the DI services map passed to
+	// `StandaloneServices.initialize(...)` -- and real `document.title ===
+	// "Plain"` evidence does confirm that override path is live for the
+	// *Workbench's own* consumers.
+	//
+	// A real, full `pnpm test:e2e:browser` run attempting to remove this
+	// registration (F120 S0's first implementation attempt) proved that
+	// theory incomplete: bootstrap died on nearly every scenario with
+	// `[createInstance] contextService depends on productService which is
+	// NOT registered.` -- the exact same failure *class* as this project's
+	// own F110 S5 "hoverService depends on extensionService which is NOT
+	// registered" incident (`progress.md`'s "本项目第四次'门全绿但功能坏了'"
+	// entry): some real, eagerly-constructed consumer resolves
+	// `IProductService` through the *global singleton registry*
+	// `missing-services.js` populates, at a point before `initialize()`'s own
+	// per-call services-map override could possibly apply. Removing this
+	// class's `registerSingleton` call left that global registry with zero
+	// binding for the token, which is a harder failure than merely serving
+	// stale Code OSS values -- it throws before the Workbench can render
+	// anything at all.
+	//
+	// F120 S0 therefore does **not** remove this registration -- it is kept
+	// here, in the same list every other real-but-inconvenient dependency in
+	// this file already lives in, rather than silently reverted with no
+	// record of why a future editor might be tempted to retry the same
+	// removal. See `app/main.ts`'s own `productConfiguration` doc comment and
+	// `docs/research/2026-07-29-branding-packaging.md` for the full account
+	// of what F120 S0 *did* change instead (the closed brand-field set
+	// `app/main.ts` overrides via `initialize()`'s own, genuinely-live
+	// per-call `productConfiguration`).
+	{
+		token: "IProductService",
+		pattern:
+			/registerSingleton\(\s*IProductService\s*,\s*ProductService\s*,\s*InstantiationType\.\w+\s*,?\s*\)/u,
+		reason:
+			'a real, eagerly-constructed consumer ("contextService" per the real DI error trace) resolves IProductService through this file\'s global singleton registry before app/main.ts\'s initialize()-scoped productConfiguration override could possibly apply -- confirmed by a real, full pnpm test:e2e:browser run that failed nearly every scenario with "[createInstance] contextService depends on productService which is NOT registered" the one time this registration was removed',
 	},
 ]);
 

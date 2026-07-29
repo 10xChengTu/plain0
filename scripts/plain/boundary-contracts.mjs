@@ -60,6 +60,45 @@ const EXPECTED_TAURI_CONFIG_FILES = Object.freeze([
 const TAURI_CONFIG_FILE_PATTERN =
 	/^(?:tauri(?:\.[^.]+)*\.conf\.(?:json|json5)|Tauri(?:\.[^.]+)?\.toml)$/;
 
+// `F120` S0 (`docs/research/2026-07-29-branding-packaging.md`, "5.1 品牌统一"):
+// the closed set of `IProductConfiguration` fields `app/main.ts` overrides via
+// `initialize(...)`'s `productConfiguration` option, and the exact literal
+// value audited for each. Two of these — `dataFolderName`/`urlProtocol` — are
+// security-relevant, not cosmetic: leaving them at their upstream Code OSS
+// defaults (`.vscode-oss`/`code-oss`) would make Plain read/write the same
+// user-data directory and register the same custom URL scheme as a real,
+// separately-installed VS Code on the same machine. The remaining fields
+// close off the vendor `product.json.js` blob's Code OSS-branded strings
+// (`applicationName`/`sharedDataFolderName`/`reportIssueUrl`/`licenseUrl`/
+// `serverApplicationName`) that `mixin()`'s shallow merge would otherwise
+// leave live on the real, currently-bundled `IProductService` singleton (see
+// the research document's "结论 2.1" for the real `document.title === "Plain"`
+// evidence that this override path is live, and its enumeration of exactly
+// which fields were previously left uncovered). `win32*`/`darwinBundleIdentifier`/
+// `defaultChatAgent`/`onboardingThemes`/`onboardingKeymaps` are deliberately
+// excluded — the research document confirmed each has zero real reference
+// anywhere in the installed `vs/` source tree (Electron-only fields, or a
+// dead GitHub Copilot onboarding blob), so covering them here would just be
+// unreachable dead configuration, not a real fix.
+//
+// `reportIssueUrl`/`licenseUrl` point at this repository's own real remote
+// (`git remote -v` → `https://github.com/10xChengTu/plain0`) rather than a
+// placeholder domain — the research document found no currently-reachable UI
+// consumer of either field (no "Report Issue"/About action registered in the
+// real bundle), but covers them defensively in case a future vendor upgrade
+// makes either reachable, per the plan's own "5.1" guidance.
+const EXPECTED_PRODUCT_CONFIGURATION = Object.freeze({
+	nameShort: "Plain",
+	nameLong: "Plain",
+	applicationName: "plain",
+	dataFolderName: ".plain",
+	sharedDataFolderName: ".plain-shared",
+	urlProtocol: "plain",
+	reportIssueUrl: "https://github.com/10xChengTu/plain0/issues/new",
+	licenseUrl: "https://github.com/10xChengTu/plain0/blob/main/LICENSE.txt",
+	serverApplicationName: "plain-server",
+});
+
 function isRecord(value) {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1786,6 +1825,114 @@ export function validateWorkspaceProviderBootstrap(source) {
 		);
 	}
 
+	return failures;
+}
+
+// `F120` S0: locks the closed set of brand fields `app/main.ts` overrides via
+// `initialize(...)`'s `productConfiguration` option against
+// `EXPECTED_PRODUCT_CONFIGURATION` above — every audited field must be
+// present with its exact literal value, and no unaudited field may be added.
+// This is deliberately a *separate* export from `validateWorkspaceProviderBootstrap`
+// (which asserts the bootstrap call *sequence*, not what's inside the
+// configuration object literal it passes) so a future refactor of one cannot
+// silently widen or narrow the other's blast radius. Reverse tests
+// (`tests/unit/boundary-contracts.test.mjs`) construct both a missing-field
+// and a reverted-to-Code-OSS-value mutation of each field and assert this
+// function reports the specific, actionable failure — not just "something is
+// wrong".
+export function validateProductConfigurationBoundary(source) {
+	const failures = [];
+	const sourceFile = ts.createSourceFile(
+		"main.ts",
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	const initializeCalls = [];
+	function visit(node) {
+		if (
+			ts.isCallExpression(node) &&
+			ts.isIdentifier(node.expression) &&
+			node.expression.text === "initialize" &&
+			node.arguments.length === 3
+		) {
+			initializeCalls.push(node);
+		}
+		ts.forEachChild(node, visit);
+	}
+	visit(sourceFile);
+	if (initializeCalls.length !== 1) {
+		return [
+			"app/main.ts must call the audited three-argument initialize(...) exactly once to configure productConfiguration",
+		];
+	}
+	const [initializeCall] = initializeCalls;
+	const configurationArgument = initializeCall.arguments[2];
+	if (!ts.isObjectLiteralExpression(configurationArgument)) {
+		return [
+			"app/main.ts's initialize(...) third argument must be a plain object literal",
+		];
+	}
+	const productConfigurationAssignments =
+		configurationArgument.properties.filter(
+			(property) =>
+				ts.isPropertyAssignment(property) &&
+				typeScriptStaticName(property.name) === "productConfiguration",
+		);
+	if (productConfigurationAssignments.length !== 1) {
+		return [
+			"app/main.ts's initialize(...) configuration must set productConfiguration exactly once",
+		];
+	}
+	const productConfiguration = productConfigurationAssignments[0].initializer;
+	if (!ts.isObjectLiteralExpression(productConfiguration)) {
+		return [
+			"app/main.ts's productConfiguration must be a plain object literal",
+		];
+	}
+	const seenKeys = new Set();
+	for (const property of productConfiguration.properties) {
+		if (!ts.isPropertyAssignment(property)) {
+			failures.push(
+				"app/main.ts's productConfiguration may only contain plain key: value assignments",
+			);
+			continue;
+		}
+		const key = typeScriptStaticName(property.name);
+		if (
+			key === undefined ||
+			!Object.hasOwn(EXPECTED_PRODUCT_CONFIGURATION, key)
+		) {
+			failures.push(
+				`app/main.ts's productConfiguration must not set an unaudited field${key !== undefined ? ` (${key})` : ""} -- F120 S0 fixed the closed brand-field set`,
+			);
+			continue;
+		}
+		if (seenKeys.has(key)) {
+			failures.push(
+				`app/main.ts's productConfiguration must not set ${key} more than once`,
+			);
+			continue;
+		}
+		seenKeys.add(key);
+		const expectedValue = EXPECTED_PRODUCT_CONFIGURATION[key];
+		if (
+			!ts.isStringLiteral(property.initializer) ||
+			property.initializer.text !== expectedValue
+		) {
+			failures.push(
+				`app/main.ts's productConfiguration.${key} must be the exact audited literal ${JSON.stringify(expectedValue)}`,
+			);
+		}
+	}
+	for (const key of Object.keys(EXPECTED_PRODUCT_CONFIGURATION)) {
+		if (!seenKeys.has(key)) {
+			failures.push(
+				`app/main.ts's productConfiguration is missing the required brand field ${key}`,
+			);
+		}
+	}
 	return failures;
 }
 

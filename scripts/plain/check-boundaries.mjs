@@ -32,6 +32,7 @@ import {
 	validateGitWorktreeConfirmationBoundary,
 	validateMainCapability,
 	validateMultiDiffEditorOverrideImportBoundary,
+	validateProductConfigurationBoundary,
 	validateSearchCommandRegistration,
 	validateSearchFileBudgetConstants,
 	validateSearchOverrideImportBoundary,
@@ -518,6 +519,9 @@ for (const failure of validateViewPaneDependencyDecoratorBoundary(appSources)) {
 
 const mainSource = await readFile(path.join(appRoot, "main.ts"), "utf8");
 for (const failure of validateWorkspaceProviderBootstrap(mainSource)) {
+	fail(failure);
+}
+for (const failure of validateProductConfigurationBoundary(mainSource)) {
 	fail(failure);
 }
 const servicesSource = await readFile(

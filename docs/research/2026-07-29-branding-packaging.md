@@ -311,10 +311,15 @@ Tauri CLI 自带签名+公证流程，通过环境变量驱动，无需额外自
 7. **CI 打包矩阵先只加 macOS**（决策点 9）。本机可预演、风险最低；现有 CI 从未跑过任何 `tauri build`，一次性上三平台等于把三类未知平台问题叠在同一个首跑里排查。macOS 跑通并稳定后再扩展。
 8. **`jschardet`：先补齐署名，不做替换评估**（决策点 10 的工程部分）。「bundle 里有它却没有署名」是明确、无争议的缺口，**且它独立于本次重写、早已存在**——先把这个确定的义务补上。是否因 LGPL 属于「需规避的风险类别」而替换，属于产品/法务判断，与补署名不冲突，可后续单独评估。**注意**：LGPL 动态链接豁免在 WebView 打包语境下是否适用，调研已明确标注为需法律专业判断，本裁定**不涉及**该问题，只处置「缺失署名」这一确定事实。
 
-### 明确挂起，等待产品所有者（实施方遇到时跳过并标注，不要自行决定）
+### 原挂起的两条，产品所有者已拍板
 
-- **决策点 4：版权归属人。** 顶层 `LICENSE.txt` 仍是「Copyright (c) 2015 - present Microsoft Corporation」，而 F110 S1 已物理删除 16,103 个文件的原始源码树。是维持提及 Microsoft 历史渊源、替换为 Plain 项目自己的声明、还是两者并存（注明「最初基于 Code OSS，后经重写」），是法律判断，**主导会话不代为决定**。在拍板前，`bundle.copyright` 与 `LICENSE.txt` 保持现状不动。
-- **决策点 7：是否投入 Apple Developer Program（$99/年）。** 这是付费授权决定。在拍板前，F120 只做到「entitlements 文件内容 + 本地 ad-hoc 签名验证」，**真正的公证可分发版本挂起**。这直接限定了 F130 能验收到什么程度，需在 F130 交接材料里如实写明。
+- **决策点 4：版权归属 —— 替换为 Plain 项目自己的版权声明。** 顶层 `LICENSE.txt` 的「Copyright (c) 2015 - present Microsoft Corporation」替换为 Plain 项目自己的版权行；`bundle.copyright` 同步填 Plain 项目的版权。
+
+  **实施方必须理解的区分（这是最容易出错的地方）**：替换 `LICENSE.txt` 的**版权行**与保留**第三方署名**是两件完全不同的义务，前者说的是「本项目自身的著作权归谁」，后者说的是「本项目分发了哪些他人的代码、必须如何致谢」。本产品仍在真实分发 15 个 `@codingame/monaco-vscode-*` 包（内含 Code OSS 的 MIT 代码）、`vscode-codicons`（CC-BY-4.0）、`jschardet`（LGPL-2.1+）、libghostty-vt（MIT/Apache-2.0 双许可）等第三方成分。**这些署名义务不因 `LICENSE.txt` 版权行的替换而消失，必须在 `ThirdPartyNotices.txt`/`cgmanifest.json`/`cglicenses.json` 里如实保留并补全。** 换句话说：改的是"这是谁的项目"，不是"这个项目用了谁的东西"。若实施中发现某条既有署名指向已被 F110 删除的组件，才可依据 `docs/f110-s1-legacy-source-removal-manifest.md` 移除——依据是"确实不再分发它"，而不是"我们换了版权行"。
+
+- **决策点 7：暂不投入 Apple Developer Program，只做本地 ad-hoc。** F120 只完成「entitlements 文件内容 + 本地 ad-hoc 签名验证」，产出可在本机运行但**无法分发给他人**的 `.app`；真正的签名+公证可分发版本明确挂起。
+
+  **对 F130 的直接影响，必须在交接材料里如实写明**：任何需要"在另一台机器上安装运行"的验收项都做不到；macOS Gatekeeper 相关行为无法验证；若后续实机验证证实原生调试确实依赖签名，则原生调试的端到端验收也一并受限。这是一个**已知且被接受的验收范围收窄**，不是遗漏。
 
 ## 技术方案
 
@@ -372,6 +377,17 @@ Tauri CLI 自带签名+公证流程，通过环境变量驱动，无需额外自
 6. **S5 macOS entitlements + 签名基础设施**：创建 `src-tauri/Entitlements.plist`（先只含 JIT 相关必需项)；对「结论 4.4」的修正意见做一次实机验证（需要一台可用的真实 Mac、非本次调研沙箱环境),确认 Plain.app 自身是否真的需要 `com.apple.security.cs.debugger`；补充 AST 契约第 3 条。这一步依赖产品所有者是否已获取 Apple Developer 账号,若未获取,可以只完成 entitlements 文件内容与本地 ad-hoc 验证,把真正的 Developer ID 签名+公证留到账号到位后。
 7. **S6 CI 打包矩阵**：`tauri.conf.json` 补齐三平台 `bundle.targets`；`plain-ci.yml` 新增 macOS/Windows runner 与真实 `tauri build` 步骤（或迁移到 `tauri-action`)；补充 AST 契约第 5 条。Windows/Linux 打包结果只能在真实 CI 里验证,本机无法本地复现。
 8. **S7 发布前检查清单收口**：落地 AST 契约第 1/2/4 条（品牌字符串扫描、`bundle` 段契约、声明新鲜度检查),并把发布前人工清单（AST 契约第 6 条)写入 `docs/testing.md`/`docs/e2e-handover.md`。
+
+## ⚠ 已知缺口：当前打包用的是 Tauri 脚手架默认图标，不是 Plain 自己的品牌资产
+
+**S0 实施后由主导会话核实并记录。** S0 把 `bundle.icon` 接上了 `src-tauri/icons/`（`32x32.png`/`128x128.png`/`128x128@2x.png`/`icon.icns`/`icon.ico`，五个文件真实存在），使打包产物从「完全没有图标」变成「有图标」。但 `git log --diff-filter=A` 确认这五个文件是初始 `feat: init` 提交带进来的 **Tauri 脚手架默认图标（Tauri logo）**，**不是为 Plain 设计的品牌资产**。
+
+对一个以「去 VS Code 品牌化」为目标的 feature 而言，这个状态是**换了一种别人的品牌**，而不是建立自己的品牌。如实记录为已知缺口：
+
+- **不是缺陷、不阻塞其余切片**：接上图标本身是 S0 的正确产出，比留空更好（无图标的 `.app` 在 Dock/Finder 里显示为通用占位）。
+- **但 F120 不能在图标仍是 Tauri logo 的状态下声称「品牌去 VS Code 化完成」**。F120 收口的 evidence 必须写明这一点，不得含糊带过。
+- **产出真正的 Plain 图标是设计任务，不是工程任务**，需要产品所有者提供或委托设计。在此之前，任何「品牌完成度」的表述都应显式排除图标这一项。
+- 另注：顶层 `resources/`（11M VS Code 品牌素材）按裁定第 5 条整体删除，**不得从中挑素材充当 Plain 图标**——那在品牌与许可两个层面都是错误方向。
 
 ## 风险与未知项清单
 

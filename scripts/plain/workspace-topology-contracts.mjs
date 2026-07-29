@@ -1922,12 +1922,50 @@ function validateBootstrap(sourceFile) {
 	const hasExactInitializeConfiguration =
 		initialWorkspaceName !== undefined &&
 		hasExactObjectShape(initializeConfiguration, [
+			// `F120` S0 (`docs/research/2026-07-29-branding-packaging.md`, "5.1
+			// 品牌统一"): expanded from the original two-field
+			// `{nameShort, nameLong}` shape to the full closed brand-field set.
+			// These nine literal values must stay byte-identical to
+			// `scripts/plain/boundary-contracts.mjs`'s own
+			// `EXPECTED_PRODUCT_CONFIGURATION` (that module's
+			// `validateProductConfigurationBoundary` is the primary,
+			// field-by-field contract with the full rationale for each value;
+			// this one only needs the closed shape to keep validating the
+			// surrounding bootstrap statement order/sequencing it was already
+			// responsible for).
 			[
 				"productConfiguration",
 				(value) =>
 					hasExactObjectShape(value, [
 						["nameShort", (name) => isExactStringLiteral(name, "Plain")],
 						["nameLong", (name) => isExactStringLiteral(name, "Plain")],
+						["applicationName", (name) => isExactStringLiteral(name, "plain")],
+						["dataFolderName", (name) => isExactStringLiteral(name, ".plain")],
+						[
+							"sharedDataFolderName",
+							(name) => isExactStringLiteral(name, ".plain-shared"),
+						],
+						["urlProtocol", (name) => isExactStringLiteral(name, "plain")],
+						[
+							"reportIssueUrl",
+							(name) =>
+								isExactStringLiteral(
+									name,
+									"https://github.com/10xChengTu/plain0/issues/new",
+								),
+						],
+						[
+							"licenseUrl",
+							(name) =>
+								isExactStringLiteral(
+									name,
+									"https://github.com/10xChengTu/plain0/blob/main/LICENSE.txt",
+								),
+						],
+						[
+							"serverApplicationName",
+							(name) => isExactStringLiteral(name, "plain-server"),
+						],
 					]),
 			],
 			[

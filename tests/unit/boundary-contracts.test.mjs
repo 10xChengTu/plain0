@@ -26,6 +26,7 @@ import {
 	validateWorkspaceMoveBoundary,
 	validateWorkspaceMoveCommandRegistration,
 	validateWorkspaceMoveFailureBrowserFixture,
+	validateProductConfigurationBoundary,
 	validateWorkspaceProviderBootstrap,
 	validateWorkspaceProviderCopyBoundary,
 	validateWorkspaceRustBoundary as validateWorkspaceRustBoundaryContract,
@@ -7434,6 +7435,201 @@ const workspaceDeleteCoordinator = registerWorkspaceDeleteCoordinator(
 		).toContain(
 			"Plain must keep VS Code workspace trust disabled in favor of Rust process trust",
 		);
+	});
+});
+
+// `F120` S0 (`docs/research/2026-07-29-branding-packaging.md`, "5.1 品牌统一"):
+// reverse tests for the closed brand-field set `app/main.ts`'s
+// `productConfiguration` must expose. `EXPECTED_PRODUCT_CONFIGURATION_FIXTURE`
+// mirrors `scripts/plain/boundary-contracts.mjs`'s own (unexported)
+// `EXPECTED_PRODUCT_CONFIGURATION` byte-for-byte -- kept as a second,
+// independently-typed literal (not an import) so a typo in one file can't
+// silently cancel out a matching typo in the other and still pass.
+describe("Plain product configuration boundary contract", () => {
+	const EXPECTED_PRODUCT_CONFIGURATION_FIXTURE = Object.freeze({
+		nameShort: "Plain",
+		nameLong: "Plain",
+		applicationName: "plain",
+		dataFolderName: ".plain",
+		sharedDataFolderName: ".plain-shared",
+		urlProtocol: "plain",
+		reportIssueUrl: "https://github.com/10xChengTu/plain0/issues/new",
+		licenseUrl: "https://github.com/10xChengTu/plain0/blob/main/LICENSE.txt",
+		serverApplicationName: "plain-server",
+	});
+
+	function bootstrapWithProductConfiguration(entries) {
+		const body = entries
+			.map(([key, value]) => `\t\t\t${key}: ${value},`)
+			.join("\n");
+		return `
+async function bootstrap() {
+	await initialize(createServiceOverrides(), container, {
+		productConfiguration: {
+${body}
+		},
+		enableWorkspaceTrust: false,
+	});
+}
+`;
+	}
+
+	const cleanSource = bootstrapWithProductConfiguration(
+		Object.entries(EXPECTED_PRODUCT_CONFIGURATION_FIXTURE).map(
+			([key, value]) => [key, JSON.stringify(value)],
+		),
+	);
+
+	it("reports no violations against the exact audited closed field set", () => {
+		expect(validateProductConfigurationBoundary(cleanSource)).toEqual([]);
+	});
+
+	it("matches the real, currently-committed app/main.ts with zero violations", () => {
+		const mainSource = readFileSync(
+			new URL("../../app/main.ts", import.meta.url),
+			"utf8",
+		);
+		expect(validateProductConfigurationBoundary(mainSource)).toEqual([]);
+	});
+
+	it("reports a violation when a field is missing entirely", () => {
+		const withoutDataFolderName = bootstrapWithProductConfiguration(
+			Object.entries(EXPECTED_PRODUCT_CONFIGURATION_FIXTURE)
+				.filter(([key]) => key !== "dataFolderName")
+				.map(([key, value]) => [key, JSON.stringify(value)]),
+		);
+		expect(
+			validateProductConfigurationBoundary(withoutDataFolderName),
+		).toContain(
+			"app/main.ts's productConfiguration is missing the required brand field dataFolderName",
+		);
+	});
+
+	// The two security-relevant fields (see the module's own
+	// EXPECTED_PRODUCT_CONFIGURATION doc comment) get their own explicit
+	// reverted-to-Code-OSS reverse tests: this is exactly the regression this
+	// contract exists to prevent, not merely a generic "wrong string" case.
+	it("reports a violation when dataFolderName is reverted to the Code OSS default", () => {
+		const reverted = bootstrapWithProductConfiguration(
+			Object.entries(EXPECTED_PRODUCT_CONFIGURATION_FIXTURE).map(
+				([key, value]) => [
+					key,
+					JSON.stringify(key === "dataFolderName" ? ".vscode-oss" : value),
+				],
+			),
+		);
+		expect(validateProductConfigurationBoundary(reverted)).toContain(
+			'app/main.ts\'s productConfiguration.dataFolderName must be the exact audited literal ".plain"',
+		);
+	});
+
+	it("reports a violation when urlProtocol is reverted to the Code OSS default", () => {
+		const reverted = bootstrapWithProductConfiguration(
+			Object.entries(EXPECTED_PRODUCT_CONFIGURATION_FIXTURE).map(
+				([key, value]) => [
+					key,
+					JSON.stringify(key === "urlProtocol" ? "code-oss" : value),
+				],
+			),
+		);
+		expect(validateProductConfigurationBoundary(reverted)).toContain(
+			'app/main.ts\'s productConfiguration.urlProtocol must be the exact audited literal "plain"',
+		);
+	});
+
+	it("reports a violation for every field independently reverted to its Code OSS value", () => {
+		const codeOssValues = Object.freeze({
+			nameShort: "Code - OSS",
+			nameLong: "Code - OSS",
+			applicationName: "code-oss",
+			dataFolderName: ".vscode-oss",
+			sharedDataFolderName: ".vscode-oss-shared",
+			urlProtocol: "code-oss",
+			reportIssueUrl: "https://github.com/microsoft/vscode/issues/new",
+			licenseUrl: "https://github.com/microsoft/vscode/blob/main/LICENSE.txt",
+			serverApplicationName: "code-server-oss",
+		});
+		for (const key of Object.keys(EXPECTED_PRODUCT_CONFIGURATION_FIXTURE)) {
+			const reverted = bootstrapWithProductConfiguration(
+				Object.entries(EXPECTED_PRODUCT_CONFIGURATION_FIXTURE).map(
+					([entryKey, value]) => [
+						entryKey,
+						JSON.stringify(entryKey === key ? codeOssValues[key] : value),
+					],
+				),
+			);
+			const failures = validateProductConfigurationBoundary(reverted);
+			expect(
+				failures,
+				`expected a failure when ${key} is reverted to its Code OSS value`,
+			).toContain(
+				`app/main.ts's productConfiguration.${key} must be the exact audited literal ${JSON.stringify(
+					EXPECTED_PRODUCT_CONFIGURATION_FIXTURE[key],
+				)}`,
+			);
+		}
+	});
+
+	it("reports a violation when an unaudited field is added", () => {
+		const withExtraField = bootstrapWithProductConfiguration([
+			...Object.entries(EXPECTED_PRODUCT_CONFIGURATION_FIXTURE).map(
+				([key, value]) => [key, JSON.stringify(value)],
+			),
+			["darwinBundleIdentifier", '"com.visualstudio.code.oss"'],
+		]);
+		expect(validateProductConfigurationBoundary(withExtraField)).toContain(
+			"app/main.ts's productConfiguration must not set an unaudited field (darwinBundleIdentifier) -- F120 S0 fixed the closed brand-field set",
+		);
+	});
+
+	it("reports a violation when a field is duplicated", () => {
+		const duplicated = bootstrapWithProductConfiguration([
+			...Object.entries(EXPECTED_PRODUCT_CONFIGURATION_FIXTURE).map(
+				([key, value]) => [key, JSON.stringify(value)],
+			),
+			["nameShort", '"Plain"'],
+		]);
+		expect(validateProductConfigurationBoundary(duplicated)).toContain(
+			"app/main.ts's productConfiguration must not set nameShort more than once",
+		);
+	});
+
+	it("reports a violation when productConfiguration is missing from the initialize(...) configuration", () => {
+		const source = `
+async function bootstrap() {
+	await initialize(createServiceOverrides(), container, {
+		enableWorkspaceTrust: false,
+	});
+}
+`;
+		expect(validateProductConfigurationBoundary(source)).toEqual([
+			"app/main.ts's initialize(...) configuration must set productConfiguration exactly once",
+		]);
+	});
+
+	it("reports a violation when initialize(...) is not called with exactly three arguments", () => {
+		const source = `
+async function bootstrap() {
+	await initialize(createServiceOverrides(), container);
+}
+`;
+		expect(validateProductConfigurationBoundary(source)).toEqual([
+			"app/main.ts must call the audited three-argument initialize(...) exactly once to configure productConfiguration",
+		]);
+	});
+
+	it("reports a violation when productConfiguration is not a plain object literal", () => {
+		const source = `
+async function bootstrap() {
+	await initialize(createServiceOverrides(), container, {
+		productConfiguration: getProductConfiguration(),
+		enableWorkspaceTrust: false,
+	});
+}
+`;
+		expect(validateProductConfigurationBoundary(source)).toEqual([
+			"app/main.ts's productConfiguration must be a plain object literal",
+		]);
 	});
 });
 

@@ -39,7 +39,12 @@ export { IHoverService } from './vscode/src/vs/platform/hover/browser/hover.serv
 // duplicated seven times. F110 S5 adds nine more (extensionRuntime tokens
 // with a real non-optional consumer outside missing-services.js/services.js
 // itself). F110 S6 adds three more (IRemoteAgentService,
-// INotebookDocumentService, ILanguageDetectionService).
+// INotebookDocumentService, ILanguageDetectionService). F120 S0 adds one more
+// (IProductService) -- discovered not by static dependency-graph audit but by
+// a real, full pnpm test:e2e:browser run: see KEPT_TOKEN_REGISTRATIONS' own
+// IProductService entry in scripts/plain/missing-services-patch-contract.mjs
+// for the "contextService depends on productService which is NOT registered"
+// failure this token's registration turned out to be load-bearing for.
 const KEPT_REGISTRATION_LINE_BY_TOKEN = Object.freeze({
 	IQuickChatService:
 		"registerSingleton(IQuickChatService, QuickChatService, InstantiationType.Delayed);",
@@ -79,6 +84,8 @@ const KEPT_REGISTRATION_LINE_BY_TOKEN = Object.freeze({
 		"registerSingleton(INotebookDocumentService, NotebookDocumentService, InstantiationType.Delayed);",
 	ILanguageDetectionService:
 		"registerSingleton(ILanguageDetectionService, LanguageDetectionService, InstantiationType.Eager);",
+	IProductService:
+		"registerSingleton(IProductService, ProductService, InstantiationType.Eager);",
 });
 
 // Appends one real `registerSingleton(...)` line per

@@ -191,9 +191,33 @@ async function bootstrap(): Promise<void> {
 	configurePlainGitStashBridge(bridge);
 	configurePlainGitWorktreeBridge(bridge);
 	await initialize(createServiceOverrides(), container, {
+		// `F120` S0 (`docs/research/2026-07-29-branding-packaging.md`, "结论
+		// 2.1"/"5.1"): the vendor `product.json.js` blob `initialize()` mixes
+		// in underneath this override still ships full Code OSS branding
+		// (`"Code - OSS"`, `code-oss`, `.vscode-oss`, microsoft.com URLs, a
+		// GitHub Copilot `defaultChatAgent` block, etc.) as the live,
+		// currently-bundled `IProductService` singleton's field values --
+		// `mixin()` only shallow-merges what is listed here on top of that
+		// blob, so every field Plain cares about must be named explicitly.
+		// `dataFolderName`/`urlProtocol` are security-relevant, not cosmetic:
+		// left at their Code OSS defaults, Plain would read/write the same
+		// user-data directory and claim the same URL scheme as a real,
+		// separately-installed VS Code on the same machine. This object is a
+		// closed set locked by `scripts/plain/boundary-contracts.mjs`'s
+		// `validateProductConfigurationBoundary` (see
+		// `EXPECTED_PRODUCT_CONFIGURATION` there for the field-by-field
+		// rationale) -- do not add or remove a field here without updating
+		// that lock in the same change.
 		productConfiguration: {
 			nameShort: "Plain",
 			nameLong: "Plain",
+			applicationName: "plain",
+			dataFolderName: ".plain",
+			sharedDataFolderName: ".plain-shared",
+			urlProtocol: "plain",
+			reportIssueUrl: "https://github.com/10xChengTu/plain0/issues/new",
+			licenseUrl: "https://github.com/10xChengTu/plain0/blob/main/LICENSE.txt",
+			serverApplicationName: "plain-server",
 		},
 		configurationDefaults: {
 			"window.menuBarVisibility": "hidden",

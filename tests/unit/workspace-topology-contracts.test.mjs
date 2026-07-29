@@ -1056,9 +1056,8 @@ Reflect.set(FileSystemProviderCapabilities, "FileReadWrite", 0);
 			mutated("main", (source) =>
 				replaceOnce(
 					source,
-					"await initialize(createServiceOverrides(), container, {\n\t\tproductConfiguration:",
-					`await initialize(createServiceOverrides(), container, {
-		commands: [{ id: "plain.extra", handler: () => undefined }],
+					"\n\t\tproductConfiguration:",
+					`\n\t\tcommands: [{ id: "plain.extra", handler: () => undefined }],
 		productConfiguration:`,
 				),
 			),
