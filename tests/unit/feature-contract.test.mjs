@@ -42,9 +42,17 @@ const NEXT_PLANNED_INDEX =
 			? 1
 			: 0
 		: NEXT_PLANNED_INDEX_AFTER_ACTIVE;
-/** The exact `progress.md` WIP line the contract requires for the currently
- * active feature, rebuilt from `features.json` for the same reason. */
-const WIP_LINE = `- WIP：\`${featureDocument.features[ACTIVE_INDEX].id}\` ${featureDocument.features[ACTIVE_INDEX].name}。`;
+/** The exact `progress.md` WIP line the contract requires for the current
+ * state, rebuilt from `features.json` for the same reason. `F130` completing
+ * leaves every feature `complete` and `ACTIVE_INDEX` at -1 (there is no
+ * `in_progress` feature left at all) -- the real, expected terminal state
+ * once every feature in the list is done -- so the line the contract
+ * requires in that state is the explicit "no WIP" sentinel rather than a
+ * feature reference. */
+const WIP_LINE =
+	ACTIVE_INDEX === -1
+		? "- WIP：无。"
+		: `- WIP：\`${featureDocument.features[ACTIVE_INDEX].id}\` ${featureDocument.features[ACTIVE_INDEX].name}。`;
 
 function failuresAfter(mutate, progress = progressDocument) {
 	const document = cloneDocument();
@@ -60,7 +68,15 @@ describe("feature completion contract", () => {
 	it("accepts the current schema v3 document and canonical progress WIP", () => {
 		const result = validateFeatureContract(featureDocument, progressDocument);
 
-		expect(result).toEqual({ failures: [], activeCount: 1 });
+		/** Derived, not hardcoded, for the same reason `ACTIVE_INDEX` is: once
+		 * every feature is `complete` (`F130`'s own terminal state) there is no
+		 * `in_progress`/`blocked` feature left and the real active count is 0,
+		 * not the 1 every prior feature's own WIP slice had. */
+		const expectedActiveCount = featureDocument.features.filter(
+			(feature) =>
+				feature.status === "in_progress" || feature.status === "blocked",
+		).length;
+		expect(result).toEqual({ failures: [], activeCount: expectedActiveCount });
 		expect(Object.isFrozen(result)).toBe(true);
 		expect(Object.isFrozen(result.failures)).toBe(true);
 	});
@@ -198,31 +214,53 @@ describe("feature completion contract", () => {
 			(document) => {
 				document.features[0].status = "planned";
 				delete document.features[0].evidence;
-				document.features[ACTIVE_INDEX].status = "planned";
+				if (ACTIVE_INDEX !== -1) {
+					document.features[ACTIVE_INDEX].status = "planned";
+					delete document.features[ACTIVE_INDEX].evidence;
+				}
 				document.currentPhase = 0;
 			},
-			progressDocument.replace(
-				`- WIP：\`${featureDocument.features[ACTIVE_INDEX].id}\` ${featureDocument.features[ACTIVE_INDEX].name}。`,
-				"- WIP：无。",
-			),
+			progressDocument.replace(WIP_LINE, "- WIP：无。"),
 		);
 
+		/** Blocked and between-items both need *some* real feature to
+		 * synthetically toggle away from `complete`, to keep exercising the
+		 * same invariants once every feature in the list really is complete
+		 * (`ACTIVE_INDEX === -1`, `F130`'s own terminal state, with no
+		 * `in_progress` feature left to reuse directly). Falls back to the
+		 * last feature: its phase already equals `currentPhase`, so flipping
+		 * just its own status can never itself trip the phase-derivation or
+		 * phase-regression checks exercised elsewhere in this file. Deleting
+		 * `evidence` unconditionally is safe either way -- a no-op when the
+		 * feature was already non-`complete` (the pre-`F130` in_progress
+		 * case), and required when it was `complete` (the post-`F130` case). */
+		const syntheticIndex =
+			ACTIVE_INDEX === -1 ? featureDocument.features.length - 1 : ACTIVE_INDEX;
+
 		const blocked = cloneDocument();
-		blocked.features[ACTIVE_INDEX].status = "blocked";
-		blocked.features[ACTIVE_INDEX].blocker =
+		blocked.features[syntheticIndex].status = "blocked";
+		delete blocked.features[syntheticIndex].evidence;
+		blocked.features[syntheticIndex].blocker =
 			"Waiting for an explicit external decision.";
-		const blockedProgress = progressDocument;
+		const blockedProgress =
+			ACTIVE_INDEX === -1
+				? progressDocument.replace(
+						WIP_LINE,
+						`- WIP：\`${blocked.features[syntheticIndex].id}\` ${blocked.features[syntheticIndex].name}。`,
+					)
+				: progressDocument;
 		expect(validateFeatureContract(blocked, blockedProgress)).toMatchObject({
 			failures: [],
 			activeCount: 1,
 		});
-		blocked.features[ACTIVE_INDEX].blocker = " ";
+		blocked.features[syntheticIndex].blocker = " ";
 		expect(
 			validateFeatureContract(blocked, blockedProgress).failures.length,
 		).toBeGreaterThan(0);
 
 		const betweenItems = cloneDocument();
-		betweenItems.features[ACTIVE_INDEX].status = "planned";
+		betweenItems.features[syntheticIndex].status = "planned";
+		delete betweenItems.features[syntheticIndex].evidence;
 		const betweenItemsProgress = progressDocument.replace(
 			WIP_LINE,
 			"- WIP：无。",
@@ -232,11 +270,18 @@ describe("feature completion contract", () => {
 		).toMatchObject({ failures: [], activeCount: 0 });
 
 		for (const progress of [
-			progressDocument.replace(
-				`\`${featureDocument.features[ACTIVE_INDEX].id}\``,
-				`\`${featureDocument.features[ACTIVE_INDEX - 1].id}\``,
-			),
-			progressDocument.replace(WIP_LINE, "- WIP：无。"),
+			ACTIVE_INDEX === -1
+				? progressDocument.replace(
+						"- WIP：无。",
+						`- WIP：\`${featureDocument.features[0].id}\` ${featureDocument.features[0].name}。`,
+					)
+				: progressDocument.replace(
+						`\`${featureDocument.features[ACTIVE_INDEX].id}\``,
+						`\`${featureDocument.features[ACTIVE_INDEX - 1].id}\``,
+					),
+			ACTIVE_INDEX === -1
+				? progressDocument.replace("- WIP：无。", "- WIP：无")
+				: progressDocument.replace(WIP_LINE, "- WIP：无。"),
 			progressDocument.replace("- WIP：", "- WIP:"),
 			progressDocument.replace(WIP_LINE, `${WIP_LINE}\n${WIP_LINE}`),
 			progressDocument.replace("## 当前状态", "## 当前状态\n\n## 当前状态"),
