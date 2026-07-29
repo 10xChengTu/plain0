@@ -35,7 +35,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 ## 目标架构地图
 
-以下目录从 `F010` 起逐步创建；当前真实工作树仍以旧 Code OSS 的 `src/`、`extensions/`、`build/` 和 `test/` 为主。不要把尚未创建的目标路径当成已存在实现。
+以下目录从 `F010` 起逐步创建，现在就是 Plain 真实工作树的主体。旧 Code OSS 的 `src/`、`extensions/`、`build/`、`test/`、`cli/`、`remote/` 等迁移期参考树已随 `F110` S1 物理删除（`git rm`，16,103 个跟踪文件、5,128,731 行），不再存在于工作树中；如需回溯迁移前行为，只能经 `git show f87cc64e:<path>`（删除前最后一次提交）查阅。不要把尚未创建的目标路径当成已存在实现。
 
 - `app/`：Plain 的 TypeScript WebView 入口、Workbench 组合、视图贡献和 Tauri bridge。
 - `@codingame/monaco-vscode-*`：按需安装的 Workbench/Monaco service packages；禁止整包导入所有功能。
@@ -45,7 +45,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 - `resources/`：经许可证审计的内置主题、TextMate grammar、图标和应用资源。
 - `tests/`：Rust 合同测试、浏览器 IPC mock E2E 和真实 Tauri 验收。
 - `docs/`：架构、范围、测试与 ADR 的系统记录。
-- 迁移期间的 `src/vs/`、`extensions/` 等旧 Code OSS 树只作为行为/资产/测试参考，最终必须退役。
+- 迁移期参考的旧 Code OSS `src/vs/`、`extensions/` 等树已随 `F110` S1 完成退役（物理删除，非归档保留）；`git` 历史是唯一的回溯来源。
 
 详细说明见 `docs/architecture.md`。
 
@@ -69,7 +69,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 - DAP 是 `Content-Length` framing 的独立协议，不得按 JSON-RPC 处理。
 - Tauri capability 采用最小权限；新增权限必须同时添加威胁说明和测试。
 - 禁止依赖或导入 `monaco-vscode-api` 的 AI、Chat、Auth、Sync、Gallery、Remote、Task、Testing 或 Notebook service packages。
-- `@codingame/monaco-vscode-api` 会传递依赖 extensions service；只允许把它当作惰性的静态 contribution registry，不得由 `app/` 直接导入该 service override，也不得创建 local、worker、WASM、remote 或 sidecar Extension Host。
+- `@codingame/monaco-vscode-extensions-service-override` 已随 `F110` S5 从 `services.js` 的 `initialize()` 门面里彻底移除（不再 `import`/展开该包的 `getServiceOverride()`），其进入 bundle 的唯一路径已被物理切断，而不只是运行时禁用；`IExtensionService` 改由 `app/services/plain-null-extension-service.ts` 的 `PlainNullExtensionService` 提供，并在 `app/services.ts` 里显式 `registerSingleton`。`app/` 仍只把 `@codingame/monaco-vscode-api` 当作惰性的静态 contribution registry 使用，不得创建 local、worker、WASM、remote 或 sidecar Extension Host。
 - 禁止 `vscode/localExtensionHost`、`extensionHost.worker`、`ExtensionHostKind`、`setLocalExtensionHost` 和 `enableWorkerExtensionHost: true` 等宿主入口或配置。
 
 ## 工作方式

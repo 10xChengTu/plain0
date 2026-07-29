@@ -250,21 +250,37 @@ if (process.argv.includes("--print")) {
 		fail(failure);
 	}
 
-	const featureDocument = JSON.parse(
-		await readFile(path.join(root, "features.json"), "utf8"),
-	);
-	if (
-		featureDocument.features.find((feature) => feature.id === "F110")
-			?.status === "complete"
-	) {
-		if (
-			sortedSources.some((source) => source.endsWith("/missing-services.js"))
-		) {
-			fail(
-				"F110 is complete but the transitional missing-services bundle remains",
-			);
-		}
-	}
+	// `F110` S7 closeout note (`docs/research/2026-07-28-legacy-retirement.md`,
+	// "主导会话裁定" point 1): this block used to fail the build once
+	// `features.json` marked F110 `complete` if any source path ended with
+	// `/missing-services.js`, written on this project's very first day
+	// (2026-07-18, commit `3fe6c358f`) before F110 had been researched at
+	// all. It assumed F110 might fully retire the `services.js`/
+	// `missing-services.js` bootstrap facade. The main session's own ruling
+	// on decision point 1 (patch surgery, not a facade rewrite) makes that
+	// assumption permanently false: `services.js` keeps its unconditional
+	// `import './missing-services.js'` line, and that file keeps
+	// registering roughly 80 legitimate, non-debt service stubs (
+	// `IHoverService`, `IUndoRedoService`, `IUriIdentityService`,
+	// `IKeyboardLayoutService` and the like) that were never in scope for
+	// removal — confirmed by a real `pnpm build:frontend` during F110 S7:
+	// `missing-services.js` is present in the real dist source map today and
+	// will remain present under this architecture regardless of how many
+	// debt tokens are stripped from its contents. Keeping this check would
+	// have made marking F110 `complete` fail `pnpm check` forever, for a
+	// file that is the intended, accepted final state rather than a
+	// residual.
+	//
+	// The assertion this block was reaching for — "prove F110 really
+	// removed the debt, not just the count" — is already made, more
+	// precisely, by `forbiddenDebtTokenStrings` above: it scans the entire
+	// built `dist/**/*.js` content (not just source-map file paths, and not
+	// gated on any feature status) for every token this feature's own
+	// patches removed from `missing-services.js`/`services.js`, and already
+	// runs on every `pnpm check`. That is a stronger, already-passing proof
+	// that the specific debt registrations are gone — proving a whole file
+	// vanished was never the right test once the decision was made to keep
+	// the file for its legitimate remaining content.
 }
 
 if (failures.length > 0) {

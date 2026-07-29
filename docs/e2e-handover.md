@@ -1,6 +1,6 @@
 # 端到端桌面验收交接清单（Codex 执行）
 
-更新时间：2026-07-28
+更新时间：2026-07-29（新增 E2E-011：F110 真实桌面排除面巡检与 extensionRuntime 手术后回归）
 
 ## 分工模式
 
@@ -337,8 +337,43 @@ fixture（临时目录中创建，不提交仓库；具体路径由执行人自�
 
 完成后：将结果写入 `features.json` F100 evidence（`nativeScenarios` 追加、`platformGaps` 移除本条目对应缺口；若步骤 3 因签名 entitlement 缺失而未能验证，如实标注"阻塞于 F120 签名前提，已登记未执行"，不得视为回归；若步骤 4 发现 mock adapter 从未暴露过的真实差异，必须作为独立发现单独报告，不得归入本条目的常规完成流程）。
 
+### E2E-011 · F110 真实桌面排除面巡检与 extensionRuntime 手术后回归
+
+状态：待执行。F110 全部七个实现切片（S0-S6）已把追踪债务从（补记的诚实基线）260 个 bundle source 降到 53 个，`mcp`/`syncEditSessions`/`tasks`/`testing` 四类真降到 0，`authAccount`（1）/`chatAgent`（9）/`extensionRuntime`（19）/`notebook`（9）/`remote`（4）/`languagePacks`（1）降到逐文件有据的诚实地板值，`languageDetection`（2）/`treeSitter`（8）经依赖图审计后有意保持零改动（删除对应注册要么命中真实硬依赖、要么零收益）——全部证据见 `docs/bundle-baseline.json` 的 `categoryNotes`。运行时排除面 guard（`app/excluded-surface-policy.ts`/`excluded-surfaces.ts`）在全部 98 个 Browser E2E 场景下从未触发过。**但这两层证据都不是真实桌面证据**：Browser mock 用的是确定性 Tauri IPC mock，不是真实 WKWebView 里的真实命令面板/菜单/设置渲染；`check:bundle` 证明的是"源文件是否进入产物"，不是"真实点开命令面板搜索一个词，会不会出现一条本不该存在的结果"。本条目补这最后一环——一次穷尽式的真实桌面人工巡检，加上 `extensionRuntime` 深度手术（F110 S5）后主题导入/替换/删除这条真实调用链的回归确认。
+
+**S5 发现的真实回归类别，执行方必须重点复核在真实桌面上是否同样成立**（已在 Browser mock 层修复并验证，但同一类"运行时才炸、`pnpm check` 全绿也测不出来"的缺陷这个 feature 本身就出现过四次，真实 WKWebView 与 Chromium 的模块加载/DI 时序可能有细节差异，不能想当然认为一致）：`app/services/plain-null-extension-service.ts` 的 `PlainNullExtensionService` 必须提供一个 `deltaExtensions` no-op（不属于 `IExtensionService` 正式接口，是 vendor 包顶层 `registerExtension()` 返回句柄的 `dispose()` 无条件调用的方法）——`app/features/themes/plain-theme-import-coordinator.ts` 在导入失败清理、替换已导入包、删除已导入包这三条真实路径都会调用该 `dispose()`；如果这个方法缺失或行为不对，真实表现是用户点击"删除已导入主题"时抛出 `extensionService.deltaExtensions is not a function`，而不是任何编译期或类型层面的提示。
+
+fixture（临时目录中构造，不提交仓库；可直接复用 E2E-005 已验证过的合法 VSIX 构造步骤）：
+
+- 一个真实、最小的合法主题包 VSIX `demo-theme-a.vsix`（复用 E2E-005 fixture 一节的 `package.json`/`themes/demo-dark.json`/`zip -r` 步骤，`publisher: "plain-e2e"`、`name: "demo-theme-a"`，背景色 `#0a0a0a`）。
+- 第二个真实、最小的合法主题包 VSIX `demo-theme-b.vsix`（同样构造，`name: "demo-theme-b"`，背景色改用一个不同、有辨识度的颜色，例如 `#141414`，用于下方"替换已导入包"步骤）。
+
+步骤与断言：
+
+1. **真实应用启动**：按 `docs/testing.md`/本清单「执行环境纪律」用 `pnpm tauri:build:e2e` 解析出的当前仓库绝对路径启动 `Plain.app`（不得按 bundle id 绑定），轮询至 Activity Bar 出现 Explorer 或 `#plain-bootstrap-status` 明确报错；断言启动过程中开发者工具/日志里**没有**出现 `PLAIN_EXCLUDED_SURFACE_GUARD_V1` 相关报错（该 guard 现在的定位是纵深防御，正常路径下永远不应触发——出现即是需要立即报告的回归，而不是"guard 生效了"的证明）。
+2. **命令面板穷尽式关键词巡检**：`Cmd+Shift+P` 打开命令面板，依次搜索以下关键词，逐个断言**零结果**或结果与关键词语义无关（例如搜索 "test" 若只命中与测试完全无关的词条属预期，需人工甄别而非机械断言零命中）：`chat`、`copilot`、`agent`、`mcp`、`language model`、`sign in`、`sign out`、`log in`、`account`、`sync`、`edit session`、`extension`（断言不出现任何"Install Extension"/"Show Marketplace"/"Extensions: Enable/Disable"类命令；`Format Document`/`Format Document With...`/`Change Language Mode` 等真实存在的命令允许出现，这些正是 `categoryNotes.extensionRuntime`/`categoryNotes.languageDetection` 记录的诚实地板文件背后的真实功能，出现属预期而非回归）、`gallery`、`marketplace`、`remote`（允许出现与"remote"字面无关但命令面板搜索算法可能模糊命中的词，需人工甄别）、`tunnel`、`notebook`、`task`（`workbench.action.tasks.*` 一类不应出现）、`test explorer`。
+3. **菜单栏/汉堡菜单人工巡检**：逐一展开 File/Edit/Selection/View/Go/Run/Terminal/Window/Help（或对应 hamburger 菜单等价结构）的每一级子菜单，人工确认没有任何 Chat/Copilot/Agent/MCP/Account/Sign in/Settings Sync 相关条目；`Preferences`/设置相关菜单下确认没有"Settings Sync"或账号登录入口。
+4. **设置（Settings UI 若可达）/命令面板 `Preferences: Open Settings` 关键词巡检**：搜索 `chat`、`copilot`、`sync`、`account`、`telemetry`，断言零命中或命中内容与这些功能面语义无关。
+5. **Activity Bar 巡检与 `Manage` 齿轮真实交互**（对应 F110 S4 迁移进 `app/` 的 `PlainGlobalCompositeBar`/`PlainGlobalActivityActionViewItem`）：确认 Activity Bar 底部只有一个 `aria-label="Manage"` 的复合按钮，**没有**独立的 Accounts 图标；左键点击，断言主菜单真实打开且至少含 "Command Palette..." 与 "Themes" 子菜单（这是 F110 S4 在 Browser E2E 中发现的真实菜单内容，本步骤是它在真实桌面渲染管线下的复核，而不是重新假设一个空菜单）；右键点击，断言上下文菜单含 "Activity Bar Position" 子菜单（`activitybarPart.js` 自身未被本 feature 改动的真实逻辑，证明 `PlainGlobalCompositeBar` 的回调确实原样转发，而不只是外观正确）。
+6. **标题栏紧凑变体的真实可达性核实**（F110 S4 在 Browser dev server 里确认当前产品配置下标题栏不渲染 `PlainSimpleGlobalActivityActionViewItem` 这一紧凑变体，但这个结论来自网页版 dev server，真实 macOS `Plain.app` 的原生标题栏/自定义标题栏配置是否相同**从未在真实桌面上确认过**）：观察真实应用窗口标题栏区域，如实记录是否出现紧凑版 Manage 齿轮；若出现，断言其左键点击的主菜单/右键上下文菜单内容与步骤 5 的 Activity Bar 变体等价（两者共享同一套 `PlainGlobalActivityActionViewItem`/`PlainSimpleGlobalActivityActionViewItem` 回调）；若不出现，与 F110 S4 的既有结论一致，记录为确认而非新发现。
+7. **`extensionRuntime` 深度手术后的主题导入/替换/删除真实回归**：命令面板 `Plain: Import Color Theme (VSIX)...` 导入 `demo-theme-a.vsix`（真实系统文件选择器），断言成功 toast、Color Theme Quick Pick 出现 "E2E Demo Dark" 且应用后 `--vscode-editor-background` 变为 `#0a0a0a`；再次执行导入命令选择 `demo-theme-b.vsix`（同一 `publisher`/包名前缀不同版本或替换流程，视实际 UI 呈现按"替换已导入包"这条真实路径操作），断言替换成功、旧包的 `dispose()` 真实执行且**没有**任何 `deltaExtensions is not a function` 或其他 JS 异常（开发者工具 console 应无红色错误）；命令面板 `Plain: Remove Imported Color Theme...` 删除 `demo-theme-b`，同样断言删除成功、无异常、主题回退为内置默认。三步操作全程留意开发者工具 console，一旦出现任何提及 `deltaExtensions`/`IExtensionService`/`extensionService` 的报错，必须作为阻塞发现单独报告，不得归入本条目的常规完成流程。
+8. 每步 UI 断言后尽量用一个平行的开发者工具 console 核对没有未预期的红色错误，而不仅凭 UI 呈现下结论。
+9. 清理：退出应用；删除 fixture VSIX、本次测试新建的主题库内容、截图与 `src-tauri/target`。
+
+已知边界（执行方须知）：
+
+- 本条目不重复验证 `mcp`/`syncEditSessions`/`chatAgent`/`authAccount`/`extensionRuntime`/`notebook`/`remote`/`languagePacks`/`languageDetection`/`treeSitter` 各类目里具体哪个 vendor 文件为何还在 bundle 里——那是 `docs/bundle-baseline.json` 的 `categoryNotes` 与真实构建分析的职责，已完整覆盖且逐文件有据；本条目验证的是这些诚实地板文件在真实桌面上确实只是惰性基础设施，不会让任何 Chat/Account/Sync/Extension-Host 相关 UI 变得可达。
+- 步骤 2/3/4 的"零命中"断言需要人工甄别而非机械字符串匹配——命令面板/设置搜索使用模糊匹配，一个关键词命中一条语义无关的真实命令（例如搜索 "remote" 命中一个偶然包含该子串但与 Remote Development 无关的命令）不算回归，如实记录即可。
+- `authAccount` 诚实地板值为 1（`authentication.service.js`，被 `chatAgent` 自己的地板文件 `chatEntitlementService.js` 钉住，真实内容审计已确认这条依赖惰性不可达——`IChatEntitlementService` 自身的 `registerSingleton` 早已被移除，运行中的应用从不会真正构造 `ChatEntitlementRequests`）；`extensionRuntime` 诚实地板值为 19（逐文件理由见 `categoryNotes.extensionRuntime`，均是 Format Document/Change Language Mode/声明式 `ExtensionsRegistry`/NLS 翻译等真实、非账号非 AI 的普通 Workbench 基础设施）——本条目步骤 2 允许 `Format Document`/`Format Document With...`/`Change Language Mode` 等命令出现，这不是缺陷。
+- F110 S1 删除的旧 Electron/Node 源码树（`src/`/`extensions/`/`build/`/`test/`/`cli/`/`remote/web`，16,103 个文件）是纯仓库卫生操作，不涉及运行时行为——本条目不需要专门验证这一条 acceptance，`pnpm tauri:build:e2e` 本身能成功产出可启动的 `Plain.app` 就已经是它的真实证据（旧树里没有任何文件参与真实构建路径）。
+- 若步骤 6 发现真实桌面标题栏确实渲染紧凑版 Manage 齿轮（与 F110 S4 基于网页版 dev server 的结论不同），应作为一条新发现独立记录，而不是预设"不可能，网页版已经验证过了"。
+
+完成后：将结果写入 `features.json` F110 evidence（`nativeScenarios` 追加、`platformGaps` 移除本条目对应缺口；若发现任何 Chat/Account/Sync/Extension-Host 相关入口真实可达，或步骤 7 复现 `deltaExtensions` 类异常，必须作为阻塞发现单独报告，不得归入本条目的常规完成流程）。
+
 ## 后续条目（随切片追加）
 
 - F030 遗留：真实 `CloseRequested` 关窗握手协议实现后，补「正常关窗 → 重开恢复」的桌面验收变体。
 - F080/F090 Git 与 Git 历史/blame 工具的真实桌面矩阵已按 docs/testing.md「真实 Tauri E2E」清单登记（分别为 E2E-008、E2E-009）。
+- F100 通用 DAP 调试客户端的真实桌面矩阵已登记为 E2E-010。
+- F110 遗留子系统退役的真实桌面排除面巡检与 extensionRuntime 手术后回归已登记为 E2E-011。
 - F120/F130 发布与全量原生回归。
