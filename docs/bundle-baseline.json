@@ -2,13 +2,13 @@
 	"schemaVersion": 2,
 	"dependencyVersion": "35.0.1",
 	"mode": "F110-ratchet",
-	"sourceCount": 2208,
-	"debtSourceCount": 260,
+	"sourceCount": 2179,
+	"debtSourceCount": 231,
 	"categoryCeilings": {
 		"chatAgent": 122,
-		"mcp": 16,
-		"authAccount": 11,
-		"syncEditSessions": 8,
+		"mcp": 1,
+		"authAccount": 5,
+		"syncEditSessions": 0,
 		"extensionRuntime": 47,
 		"notebook": 23,
 		"tasks": 1,
@@ -29,23 +29,7 @@
 		},
 		{
 			"category": "authAccount",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/authentication/browser/authenticationMcpAccessService.service.js"
-		},
-		{
-			"category": "authAccount",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/authentication/browser/authenticationMcpService.service.js"
-		},
-		{
-			"category": "authAccount",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/authentication/browser/authenticationMcpUsageService.service.js"
-		},
-		{
-			"category": "authAccount",
 			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/authentication/browser/authenticationService.js"
-		},
-		{
-			"category": "authAccount",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/authentication/browser/authenticationUsageService.service.js"
 		},
 		{
 			"category": "authAccount",
@@ -54,14 +38,6 @@
 		{
 			"category": "authAccount",
 			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/authentication/common/authentication.service.js"
-		},
-		{
-			"category": "authAccount",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/authentication/common/authenticationQuery.service.js"
-		},
-		{
-			"category": "authAccount",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/authentication/common/dynamicAuthenticationProviderStorage.service.js"
 		},
 		{
 			"category": "chatAgent",
@@ -757,67 +733,7 @@
 		},
 		{
 			"category": "mcp",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/mcp/common/mcpGalleryManifest.js"
-		},
-		{
-			"category": "mcp",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/mcp/common/mcpGalleryManifest.service.js"
-		},
-		{
-			"category": "mcp",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/mcp/common/mcpManagement.js"
-		},
-		{
-			"category": "mcp",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/mcp/common/mcpManagement.service.js"
-		},
-		{
-			"category": "mcp",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/mcp/common/mcpManagementIpc.js"
-		},
-		{
-			"category": "mcp",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/mcp/common/mcpManagementService.js"
-		},
-		{
-			"category": "mcp",
 			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/mcp/common/mcpPlatformTypes.js"
-		},
-		{
-			"category": "mcp",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/mcp/common/mcpResourceScannerService.service.js"
-		},
-		{
-			"category": "mcp",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/mcp/common/modelContextProtocol.js"
-		},
-		{
-			"category": "mcp",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/mcp/common/mcpGatewayService.service.js"
-		},
-		{
-			"category": "mcp",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/mcp/common/mcpRegistryTypes.service.js"
-		},
-		{
-			"category": "mcp",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/mcp/common/mcpSandboxService.service.js"
-		},
-		{
-			"category": "mcp",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/mcp/common/mcpTypes.js"
-		},
-		{
-			"category": "mcp",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/mcp/common/mcpTypes.service.js"
-		},
-		{
-			"category": "mcp",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/mcp/common/mcpWorkbenchManagementService.js"
-		},
-		{
-			"category": "mcp",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/mcp/common/mcpWorkbenchManagementService.service.js"
 		},
 		{
 			"category": "notebook",
@@ -956,38 +872,6 @@
 			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/userDataProfile/common/remoteUserDataProfiles.service.js"
 		},
 		{
-			"category": "syncEditSessions",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/userDataSync/common/ignoredExtensions.service.js"
-		},
-		{
-			"category": "syncEditSessions",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/userDataSync/common/userDataSync.js"
-		},
-		{
-			"category": "syncEditSessions",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/userDataSync/common/userDataSync.service.js"
-		},
-		{
-			"category": "syncEditSessions",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/userDataSync/common/userDataSyncAccount.service.js"
-		},
-		{
-			"category": "syncEditSessions",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/userDataSync/common/userDataSyncMachines.service.js"
-		},
-		{
-			"category": "syncEditSessions",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/editSessions/common/editSessions.service.js"
-		},
-		{
-			"category": "syncEditSessions",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/userDataSync/common/userDataSync.js"
-		},
-		{
-			"category": "syncEditSessions",
-			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/services/userDataSync/common/userDataSync.service.js"
-		},
-		{
 			"category": "tasks",
 			"source": "node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/tasks/common/taskService.service.js"
 		},
@@ -1062,9 +946,9 @@
 	],
 	"categoryNotes": {
 		"chatAgent": "Registered, one-shot, by @codingame/monaco-vscode-api/services.js's unconditional `import \"./missing-services.js\"` (docs/research/2026-07-28-legacy-retirement.md \"结论 1\"): every Chat/Copilot/Agent service token missing-services.js does not find an installed override for gets a Null/default registerSingleton stub here, whether or not any of Plain's 13 real override packages ever reference it (结论 2 confirmed 12/13 are clean; the scm-service-override exception was already known not to reach the real bundle). 121 of these 122 are workbench/contrib/{chat,inlineChat,agentEditorComments}/** or platform/agentHost/** stub/token files. The 122nd, workbench/contrib/remoteCodingAgents/common/remoteCodingAgentsService.service.js, was found during F110 S0's real-content audit: its stub (registerAgent/getRegisteredAgents/getAvailableAgents, all no-ops) sits in missing-services.js directly between ChatAttachmentResolveService and McpElicitationService and is genuinely an AI coding-agent registry despite the 'remote' spelling in its directory name -- classifying it under a bare remote keyword match would have repeated the exact globalCompositeBar.js filename-vs-content mismatch this research flagged as a trap. Expected floor after F110 S3: 0.",
-		"mcp": "Same missing-services.js mechanism as chatAgent, scoped to /mcp/ paths (MCP gallery/management/elicitation tokens and stubs). Expected floor after F110 S2: 0.",
-		"authAccount": "10 of 11 are workbench/services/authentication/** missing-services.js stubs (same mechanism, expected floor after F110 S2: 0). The 11th, workbench/browser/parts/globalCompositeBar.js, is matched by filename, not content: it is a real, currently-imported piece of Activity Bar layout (the account-menu 'Manage' gear icon), already behaviorally neutered by patches/@codingame__monaco-vscode-api@35.0.1.patch ('Plain intentionally has no accounts surface'). It stays non-zero until F110 S4 migrates the surviving gear-icon logic into app/ per the main session's decision point 2 ruling (migrate, do not delete the gear icon).",
-		"syncEditSessions": "Same missing-services.js mechanism as chatAgent, scoped to /userDataSync/ and /editSessions/ paths. Expected floor after F110 S2: 0.",
+		"mcp": "Same missing-services.js mechanism as chatAgent, scoped to /mcp/ paths (MCP gallery/management/elicitation tokens and stubs). F110 S2 removed the import/class/registerSingleton three-part registration for all 12 registered mcp tokens from missing-services.js, plus the matching `export { X } from 'Y'` re-export line from services.js for all of them (a second, independent reachability path this slice discovered empirically: deleting only the missing-services.js copy left every one of these files in the real dist bundle, since services.js's own re-export line keeps the underlying vendor file reachable regardless). Verified by real rebuild: mcp went 16 -> 1. The one file that remains, platform/mcp/common/mcpPlatformTypes.js, is kept alive by a real, currently-bundled chatAgent-category file (workbench/contrib/chat/browser/agentSessions/agentHost/agentHostCustomizationService.service.js, one of the 122 chatAgent debt sources) importing IMcpServerConfiguration from it — out of scope for F110 S2 (chatAgent is F110 S3's slice); this file is expected to become removable once S3 removes that chatAgent consumer, not before.",
+		"authAccount": "F110 S2 removed the import/class/registerSingleton three-part registration for 8 of the 9 non-globalCompositeBar authAccount tokens from missing-services.js (IAuthenticationAccessService, IAuthenticationMcpAccessService, IAuthenticationMcpService, IAuthenticationMcpUsageService, IAuthenticationUsageService, IAuthenticationExtensionsService, IAuthenticationQueryService, IDynamicAuthenticationProviderStorageService), plus the matching services.js re-export lines. Verified by real rebuild: authAccount went 11 -> 5, not the naively-predicted 1 — a real dependency sweep (grepping every real, currently-bundled file for each token, not just the 13 override packages) found that globalCompositeBar.js (kept; migrates to app/ in F110 S4, not this slice) has three of its own direct, real import-time dependencies into the authentication/** tree, entirely independent of missing-services.js: (a) common/authentication.js for the INTERNAL_AUTH_PROVIDER_PREFIX constant; (b) common/authentication.service.js for the IAuthenticationService decorator token itself, injected as globalCompositeBar.js's own non-optional constructor dependency (AccountsActivityActionViewItem/SimpleAccountActivityActionViewItem) — this is also why missing-services.js's IAuthenticationService registerSingleton is the one registration this slice deliberately did NOT remove, unlike every other authAccount/mcp/syncEditSessions token: removing it would leave the token unbound and throw at Activity Bar construction time, the same 'constructor-required DI dependency' trap F080 S2 hit with IChatEditingService; (c) browser/authenticationService.js for the getCurrentAuthenticationSessionInfo function — and that file's own (never-instantiated, but still present) AuthenticationService class in turn imports browser/authenticationAccessService.service.js, which real rebuild confirmed stays reachable through that chain even though nothing requires IAuthenticationAccessService's DI binding itself. The real floor is therefore 5: globalCompositeBar.js + these 4 files, all resolved by F110 S4's planned migration of globalCompositeBar.js into app/, not by this slice.",
+		"syncEditSessions": "Same missing-services.js mechanism as chatAgent, scoped to /userDataSync/ and /editSessions/ paths. F110 S2 removed the import/class/registerSingleton three-part registration for all 14 registered syncEditSessions tokens from missing-services.js, plus the matching services.js re-export lines. A real dependency sweep (every real, currently-bundled non-override-package file, plus all 13 override packages) found zero required consumers outside missing-services.js/services.js's own facade. Verified by real rebuild: syncEditSessions reached its floor of 0.",
 		"extensionRuntime": "The most heterogeneous category (docs/research/2026-07-28-legacy-retirement.md \"结论 2\"): 34 are @codingame/monaco-vscode-api base-package missing-services.js stubs/tokens (e.g. extensions.js's NullExtensionService), but 13 are real, instantiated @codingame/monaco-vscode-extensions-service-override files (extensionService.js's real ExtensionServiceOverride, rpcProtocol.js, extensionHostManager.js, etc.) -- already deeply neutered by patches/@codingame__monaco-vscode-extensions-service-override@35.0.1.patch (DisabledExtensionHostFactory/DisabledExtensionHostKindPicker) so no host of any kind can ever be created, but the files and their RPC/lifecycle scaffolding remain. The main session's decision point 3 ruling accepts a non-zero floor here (replacing the vendor IExtensionService DI token is judged too risky for the benefit); F110 S5's evidence must enumerate whatever floor remains file-by-file with a behavioral-inertness argument for each, not just a total.",
 		"notebook": "Same missing-services.js mechanism as chatAgent (newly tracked in F110 S0 per the main session's decision point 4). 22 of 23 sit under a notebook/ directory segment; the 23rd, workbench/contrib/search/common/notebookSearch.service.js, bridges Search and Notebook from the generic search contribution directory. Expected floor after F110 S6: 0.",
 		"tasks": "Same missing-services.js mechanism as chatAgent (newly tracked in F110 S0). Single file: workbench/contrib/tasks/common/taskService.service.js. Expected floor after F110 S6: 0.",

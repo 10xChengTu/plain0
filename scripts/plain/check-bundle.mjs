@@ -7,6 +7,7 @@ import {
 	evaluateBundleBaseline,
 	normalizeSource,
 } from "./bundle-baseline-contracts.mjs";
+import { REMOVED_MISSING_SERVICES_TOKENS } from "./missing-services-patch-contract.mjs";
 
 const root = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -107,6 +108,42 @@ if (!javascript.includes(requiredRuntimeGuard)) {
 for (const command of forbiddenCommandIds) {
 	if (javascript.includes(command)) {
 		fail(`final bundle registers excluded command: ${command}`);
+	}
+}
+
+// `F110` S2 (`docs/research/2026-07-28-legacy-retirement.md`, "验收如何证明真的没有了"):
+// the source-map-based `categorize by file path` check above only
+// proves a *file* is absent; it does not prove the token *strings* it
+// registered aren't lurking somewhere else in the final, minified `dist/**/*.js`
+// output under a different reachability path a source-map classification
+// pass would miss (e.g. inlined into a differently-named chunk). Every
+// removed mcp/syncEditSessions/authAccount decorator token name survives
+// minification verbatim as a string literal — `createDecorator("IFoo")`
+// always passes its argument as a literal, the same reason
+// `forbiddenCommandIds` above works for command ids. Two of the 34 tokens
+// `missing-services-patch-contract.mjs` tracks are deliberately excluded
+// here, not because this check can't see them but because their appearance
+// is already accounted for by `docs/bundle-baseline.json`'s explicit
+// `authAccount` floor list (verified by real content inspection, not
+// assumed): `IAuthenticationAccessService` is the token *declaration*
+// (`const IAuthenticationAccessService = createDecorator(...)`) inside
+// `authenticationAccessService.service.js`, one of the 5 catalogued
+// authAccount debt sources kept alive by `globalCompositeBar.js`'s own real
+// import chain; `IAuthenticationExtensionsService` is a
+// `createDecorator("IAuthenticationExtensionsService")` call whose result is
+// never assigned to a variable or exported (confirmed by reading the real
+// minified output) inside `authentication.service.js`, the file kept for
+// `IAuthenticationService`'s sake — both are inert leftovers of files this
+// slice's own dependency sweep already found a real reason to keep, not
+// evidence any removed registration crept back.
+const forbiddenDebtTokenStrings = REMOVED_MISSING_SERVICES_TOKENS.filter(
+	(token) =>
+		token !== "IAuthenticationAccessService" &&
+		token !== "IAuthenticationExtensionsService",
+);
+for (const token of forbiddenDebtTokenStrings) {
+	if (javascript.includes(token)) {
+		fail(`final bundle content contains removed F110 S2 debt token: ${token}`);
 	}
 }
 

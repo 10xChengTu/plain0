@@ -4,7 +4,26 @@ const PATCH_CONTRACTS = Object.freeze([
 	Object.freeze({
 		packageName: "@codingame/monaco-vscode-api@35.0.1",
 		patchPath: "patches/@codingame__monaco-vscode-api@35.0.1.patch",
-		sha256: "184ceed92b82bccb869ca91bc322e6c01740d8eb85cd9ddde47484e8959858f6",
+		// `F110` S2 (`docs/research/2026-07-28-legacy-retirement.md`, decision 1):
+		// added two new hunks on top of the pre-existing diff — a brand-new
+		// `missing-services.js` block (this file was never patched before) and
+		// an addition to the already-patched `services.js` block. Both remove
+		// the `import`/`class`/`registerSingleton` (or, for `services.js`,
+		// `export { X } from 'Y'` re-export) three-part registration for the
+		// `mcp` (16), `syncEditSessions` (8) and 9-of-10 non-`globalCompositeBar`
+		// `authAccount` debt-source tokens — see
+		// `scripts/plain/missing-services-patch-contract.mjs` for the paired
+		// shape assertion this sha/hunk lock does not by itself provide
+		// (detecting a *semantically* drifted but still-diff-shaped upstream
+		// file). `IAuthenticationService`'s own import/class/registerSingleton
+		// triple in `missing-services.js` is deliberately *not* removed:
+		// `globalCompositeBar.js` (kept, real Activity Bar code, unrelated to
+		// this patch) injects it as a non-optional constructor dependency
+		// (`AccountsActivityActionViewItem`/`SimpleAccountActivityActionViewItem`),
+		// so leaving it unbound would throw at Activity Bar construction time —
+		// this is the one token this slice's dependency sweep found with a real,
+		// currently-bundled required consumer outside `missing-services.js`.
+		sha256: "79dd52ce6475fa21b57c02f570644208458b1f4a5658f3743c663ffdea169212",
 		integrity:
 			"sha512-pJMSRMI0m5Mvx54u6iBGh+iad9KqfICnwAcjswNJOO7Xt1OXm5xILcM32VkMe4UX0YmrGAvYc0WVKWL8I9O4ng==",
 		directImporter: true,
@@ -23,8 +42,38 @@ const PATCH_CONTRACTS = Object.freeze([
 		// variant).
 		snapshotEdgeCount: 27,
 		shape: Object.freeze([
+			"diff --git a/missing-services.js b/missing-services.js",
+			"@@ -70,8 +70,6 @@ import { IKeyboardLayoutService } from './vscode/src/vs/platform/keyboardLayout/",
+			"@@ -96,11 +94,6 @@ import { IURLService } from './vscode/src/vs/platform/url/common/url.service.js'",
+			"@@ -137,7 +130,6 @@ import { ICommentService } from './vscode/src/vs/workbench/contrib/comments/brow",
+			"@@ -146,8 +138,6 @@ import { IInteractiveDocumentService } from './vscode/src/vs/workbench/contrib/i",
+			"@@ -206,14 +196,7 @@ import { IActivityService } from './vscode/src/vs/workbench/services/activity/co",
+			"@@ -250,7 +233,6 @@ import { ILifecycleService } from './vscode/src/vs/workbench/services/lifecycle/",
+			"@@ -275,8 +257,6 @@ import { IUserDataInitializationService } from './vscode/src/vs/workbench/servic",
+			"@@ -294,8 +274,6 @@ import { IDataChannelService } from './vscode/src/vs/platform/dataChannel/common",
+			"@@ -319,7 +297,6 @@ import { ToolSet, VSCodeToolReference, ToolDataSource } from './vscode/src/vs/wo",
+			"@@ -362,8 +339,6 @@ import { IToolResultCompressor } from './vscode/src/vs/workbench/contrib/chat/co",
+			"@@ -2455,40 +2430,6 @@ class ExtensionRecommendationsService {",
+			"@@ -3831,81 +3772,6 @@ class TerminalQuickFixService {",
+			"@@ -5139,17 +5005,6 @@ __decorate([",
+			"@@ -5275,84 +5130,6 @@ __decorate([",
+			"@@ -6248,285 +6025,6 @@ __decorate([",
+			"@@ -6634,84 +6132,6 @@ __decorate([",
+			"@@ -7220,84 +6640,6 @@ __decorate([",
+			"@@ -7342,151 +6684,6 @@ __decorate([",
+			"@@ -7565,15 +6762,6 @@ __decorate([",
+			"@@ -7582,74 +6770,6 @@ class RemoteCodingAgentsService {",
+			"@@ -7769,16 +6889,6 @@ __decorate([",
+			"@@ -7867,15 +6977,6 @@ __decorate([",
+			"@@ -8468,24 +7569,6 @@ class GitService {",
 			"diff --git a/services.js b/services.js",
 			"@@ -24,7 +24,6 @@ import './vscode/src/vs/workbench/contrib/inlayHints/browser/inlayHintsAccessibi",
+			"@@ -227,10 +226,6 @@ export { IURLService } from './vscode/src/vs/platform/url/common/url.service.js'",
+			"@@ -252,7 +247,6 @@ export { ILanguageModelsService } from './vscode/src/vs/workbench/contrib/chat/c",
+			"@@ -313,9 +307,6 @@ export { IAccessibleViewInformationService } from './vscode/src/vs/workbench/ser",
+			"@@ -349,8 +340,6 @@ export { IUserDataInitializationService } from './vscode/src/vs/workbench/servic",
+			"@@ -376,31 +365,20 @@ export { IEditorCancellationTokens } from './vscode/src/vs/editor/contrib/editor",
+			"@@ -421,8 +399,6 @@ export { IAgentPluginService } from './vscode/src/vs/workbench/contrib/chat/comm",
 			"diff --git a/vscode/src/vs/platform/files/common/files.d.ts b/vscode/src/vs/platform/files/common/files.d.ts",
 			"@@ -775,6 +775,40 @@ export declare class FileOperationError extends Error {",
 			"diff --git a/vscode/src/vs/platform/files/common/files.js b/vscode/src/vs/platform/files/common/files.js",

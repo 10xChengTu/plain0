@@ -298,6 +298,15 @@ remote:        6
 7. **S6 决策点 4 范围内的 `notebook`/`tasks`/`testing`/`remote`/`languagePacks`/`languageDetection` 清零**：手法与 S2/S3 相同（同样是 `missing-services.js` 三段式删除),体量不大（结论 6 统计约 55 个),可以合并到 S2/S3 一起做,也可以单独一片——本文档倾向单独一片,因为它是「此前完全没被追踪过」的新面,单独验收更容易在评审时看清楚这一片具体清掉了什么。
 8. **S7 收口**：跨切片 evidence 闭环；`docs/bundle-baseline.json` 最终形态确认（含每个非零 floor 的书面理由）；`AGENTS.md` 第 71-73 行措辞修正（结论 4）；`docs/e2e-handover.md` 新增条目（见「验收如何证明真的没有了」）；`features.json` F110 转 `complete`（均由主导会话操作)。
 
+## ⚠ 跨切片必读：`services.js` 的 re-export 是**第二条独立可达路径**，只删 `missing-services.js` 不够
+
+**S2 实测发现，本文档「调研结论」原先的机制描述不完整，后续每个清理切片都适用。** 本文档此前把债务来源归结为「`services.js` 无条件 `import './missing-services.js'`」这一条机制。S2 按此只 patch 了 `missing-services.js`，重建后发现 **`mcp` 只从 16 降到 8，而 `syncEditSessions`/`authAccount` 纹丝不动**。
+
+根因：`services.js` **自己还有一批 `export {X} from 'Y'` 具名 re-export**，构成一条与 `missing-services.js` 完全独立的可达路径。即使 `app/` 从不消费这些具名导出，只要这行 re-export 还在，被指向的文件就仍然进 bundle。S2 补删 `services.js` 里 22 行 re-export 之后，数字才真正下去。
+
+- **实施要求**：任何清理切片都必须**同时**处理这两条路径，并在重建后核对真实数字——**不要假设改一处就够了**。
+- **这也解释了为什么"数字下降"必须配合内容级扫描**：只删一条路径时数字会**部分**下降，看起来像是"生效了但还有残留"，极易被误判为正常收敛而非漏改。
+
 ## ⚠ 跨切片必读：`check-bundle.mjs` 的 category 归零不能只靠数字下降来判断成功
 
 删除 `missing-services.js` 里的 `registerSingleton`/`class`/`import` 三段式后，**必须重新跑一次真实 `pnpm build:frontend`**，而不是假设「删了源码,debt 计数就一定按预期下降」——Rolldown/Vite 的 tree-shaking 行为取决于是否还有其他任何路径引用同一个符号；F080/F090/F100 三份文档累计记录过 18 处「凭记忆写方案后被实测推翻」的教训，本次也已经在结论 2 里标注了至少两处「未逐一穷举确认」的风险点（`chatAgent` 121 个文件里的纯逻辑子模块是否被其他非 chat 代码意外复用；`extensionRuntime` 34 个基础包文件删除后的真实 floor 数字）。**每个切片的验收标准都应该是「真实重新构建 + 真实重新跑 `check:bundle` --print + 人工核对新的 debt 列表与预期逐条相符」，而不是「patch 看起来应该对，直接改 baseline 数字」。**

@@ -420,7 +420,7 @@ describe("exact Workbench patch contracts", () => {
 
 	it("rejects bare importer and snapshot edges even when comments repeat the hash", async () => {
 		const apiHash =
-			"184ceed92b82bccb869ca91bc322e6c01740d8eb85cd9ddde47484e8959858f6";
+			"79dd52ce6475fa21b57c02f570644208458b1f4a5658f3743c663ffdea169212";
 		const importerBare = await baseline();
 		importerBare.lockfile = `${importerBare.lockfile.replace(
 			`        version: 35.0.1(patch_hash=${apiHash})`,

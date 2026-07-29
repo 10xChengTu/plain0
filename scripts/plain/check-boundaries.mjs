@@ -61,6 +61,7 @@ import {
 	validateWorkspaceVersionedWriteBoundary,
 	validateWorkingCopyOverrideImportBoundary,
 } from "./boundary-contracts.mjs";
+import { validateMissingServicesPatchShape } from "./missing-services-patch-contract.mjs";
 import {
 	auditedWorkbenchPatchPaths,
 	validateWorkbenchPatchSet,
@@ -287,6 +288,51 @@ if (
 		workspaceManifest,
 		lockfile: lock,
 		patchSources,
+	})) {
+		fail(failure);
+	}
+}
+
+// `F110` S2 (`docs/research/2026-07-28-legacy-retirement.md`, "主导会话裁定"
+// point 1): the sha256/hunk-shape lock above proves the *patch file's own
+// bytes* haven't drifted; it does not prove the *currently-installed,
+// patch-applied* vendor files still have the shape this slice's
+// `mcp`/`syncEditSessions`/`authAccount` token removal assumed — a future
+// `@codingame/monaco-vscode-api` version bump could leave the patch applying
+// "successfully" (by diff-context coincidence) while the resulting file no
+// longer matches what was audited. Reading the real, installed (post-patch)
+// `missing-services.js`/`services.js` here and asserting their content
+// directly is the faster, more directly diagnostic first line of defense
+// `scripts/plain/missing-services-patch-contract.mjs`'s own module doc
+// comment describes — `check:bundle`'s per-category ratchet ceilings remain
+// the second, full-bundle-level line behind it.
+const vendorApiRoot = path.join(
+	root,
+	"node_modules/@codingame/monaco-vscode-api",
+);
+let vendorMissingServicesSource;
+let vendorServicesFacadeSource;
+try {
+	vendorMissingServicesSource = await readFile(
+		path.join(vendorApiRoot, "missing-services.js"),
+		"utf8",
+	);
+	vendorServicesFacadeSource = await readFile(
+		path.join(vendorApiRoot, "services.js"),
+		"utf8",
+	);
+} catch {
+	fail(
+		"node_modules/@codingame/monaco-vscode-api/missing-services.js or services.js is missing; run pnpm install first",
+	);
+}
+if (
+	vendorMissingServicesSource !== undefined &&
+	vendorServicesFacadeSource !== undefined
+) {
+	for (const failure of validateMissingServicesPatchShape({
+		missingServicesSource: vendorMissingServicesSource,
+		servicesSource: vendorServicesFacadeSource,
 	})) {
 		fail(failure);
 	}

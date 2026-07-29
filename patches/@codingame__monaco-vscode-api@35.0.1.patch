@@ -1,5 +1,1089 @@
+diff --git a/missing-services.js b/missing-services.js
+index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9f6108c78 100644
+--- a/missing-services.js
++++ b/missing-services.js
+@@ -70,8 +70,6 @@ import { IKeyboardLayoutService } from './vscode/src/vs/platform/keyboardLayout/
+ import { ILanguagePackService } from './vscode/src/vs/platform/languagePacks/common/languagePacks.service.js';
+ import { AbstractLoggerService, LogLevel, NullLogger } from './vscode/src/vs/platform/log/common/log.js';
+ import { ILoggerService } from './vscode/src/vs/platform/log/common/log.service.js';
+-import { IMcpGalleryService, IAllowedMcpServersService } from './vscode/src/vs/platform/mcp/common/mcpManagement.service.js';
+-import { IMcpResourceScannerService } from './vscode/src/vs/platform/mcp/common/mcpResourceScannerService.service.js';
+ import { NullPolicyService } from './vscode/src/vs/platform/policy/common/policy.js';
+ import { IPolicyService } from './vscode/src/vs/platform/policy/common/policy.service.js';
+ import { IProductService } from './vscode/src/vs/platform/product/common/productService.service.js';
+@@ -96,11 +94,6 @@ import { IURLService } from './vscode/src/vs/platform/url/common/url.service.js'
+ import { toUserDataProfile } from './vscode/src/vs/platform/userDataProfile/common/userDataProfile.js';
+ import { IUserDataProfilesService } from './vscode/src/vs/platform/userDataProfile/common/userDataProfile.service.js';
+ import { IUserDataProfileStorageService } from './vscode/src/vs/platform/userDataProfile/common/userDataProfileStorageService.service.js';
+-import { IIgnoredExtensionsManagementService } from './vscode/src/vs/platform/userDataSync/common/ignoredExtensions.service.js';
+-import { SyncStatus } from './vscode/src/vs/platform/userDataSync/common/userDataSync.js';
+-import { IUserDataAutoSyncService, IUserDataSyncEnablementService, IUserDataSyncStoreManagementService, IUserDataSyncStoreService, IUserDataSyncLogService, IUserDataSyncService, IUserDataSyncResourceProviderService, IUserDataSyncLocalStoreService, IUserDataSyncUtilService } from './vscode/src/vs/platform/userDataSync/common/userDataSync.service.js';
+-import { IUserDataSyncAccountService } from './vscode/src/vs/platform/userDataSync/common/userDataSyncAccount.service.js';
+-import { IUserDataSyncMachinesService } from './vscode/src/vs/platform/userDataSync/common/userDataSyncMachines.service.js';
+ import { NullWebContentExtractorService, NullSharedWebContentExtractorService } from './vscode/src/vs/platform/webContentExtractor/common/webContentExtractor.js';
+ import { IWebContentExtractorService, ISharedWebContentExtractorService } from './vscode/src/vs/platform/webContentExtractor/common/webContentExtractor.service.js';
+ import { ICanonicalUriService } from './vscode/src/vs/platform/workspace/common/canonicalUri.service.js';
+@@ -137,7 +130,6 @@ import { ICommentService } from './vscode/src/vs/workbench/contrib/comments/brow
+ import { ICustomEditorService } from './vscode/src/vs/workbench/contrib/customEditor/common/customEditor.service.js';
+ import { IDebugService } from './vscode/src/vs/workbench/contrib/debug/common/debug.service.js';
+ import { IDebugVisualizerService } from './vscode/src/vs/workbench/contrib/debug/common/debugVisualizers.service.js';
+-import { IEditSessionsLogService, IEditSessionsStorageService } from './vscode/src/vs/workbench/contrib/editSessions/common/editSessions.service.js';
+ import { IExtensionsWorkbenchService } from './vscode/src/vs/workbench/contrib/extensions/common/extensions.service.js';
+ import { IExternalUriOpenerService } from './vscode/src/vs/workbench/contrib/externalUriOpener/common/externalUriOpenerService.service.js';
+ import { IExplorerService } from './vscode/src/vs/workbench/contrib/files/browser/files.service.js';
+@@ -146,8 +138,6 @@ import { IInteractiveDocumentService } from './vscode/src/vs/workbench/contrib/i
+ import { IInteractiveHistoryService } from './vscode/src/vs/workbench/contrib/interactive/browser/interactiveHistoryService.service.js';
+ import { ITroubleshootIssueService } from './vscode/src/vs/workbench/contrib/issue/browser/issueTroubleshoot.service.js';
+ import { IWorkbenchIssueService, IIssueFormService } from './vscode/src/vs/workbench/contrib/issue/common/issue.service.js';
+-import { IMcpRegistry } from './vscode/src/vs/workbench/contrib/mcp/common/mcpRegistryTypes.service.js';
+-import { IMcpService, IMcpWorkbenchService, IMcpSamplingService, IMcpElicitationService } from './vscode/src/vs/workbench/contrib/mcp/common/mcpTypes.service.js';
+ import { IMultiDiffSourceResolverService } from './vscode/src/vs/workbench/contrib/multiDiffEditor/browser/multiDiffSourceResolverService.service.js';
+ import { INotebookOriginalCellModelFactory } from './vscode/src/vs/workbench/contrib/notebook/browser/diff/inlineDiff/notebookOriginalCellModelFactory.service.js';
+ import { INotebookOriginalModelReferenceFactory } from './vscode/src/vs/workbench/contrib/notebook/browser/diff/inlineDiff/notebookOriginalModelRefFactory.service.js';
+@@ -206,14 +196,7 @@ import { IActivityService } from './vscode/src/vs/workbench/services/activity/co
+ import { IAiEmbeddingVectorService } from './vscode/src/vs/workbench/services/aiEmbeddingVector/common/aiEmbeddingVectorService.service.js';
+ import { IAiRelatedInformationService } from './vscode/src/vs/workbench/services/aiRelatedInformation/common/aiRelatedInformation.service.js';
+ import { IWorkbenchAssignmentService } from './vscode/src/vs/workbench/services/assignment/common/assignmentService.service.js';
+-import { IAuthenticationAccessService } from './vscode/src/vs/workbench/services/authentication/browser/authenticationAccessService.service.js';
+-import { IAuthenticationMcpAccessService } from './vscode/src/vs/workbench/services/authentication/browser/authenticationMcpAccessService.service.js';
+-import { IAuthenticationMcpService } from './vscode/src/vs/workbench/services/authentication/browser/authenticationMcpService.service.js';
+-import { IAuthenticationMcpUsageService } from './vscode/src/vs/workbench/services/authentication/browser/authenticationMcpUsageService.service.js';
+-import { IAuthenticationUsageService } from './vscode/src/vs/workbench/services/authentication/browser/authenticationUsageService.service.js';
+-import { IAuthenticationService, IAuthenticationExtensionsService } from './vscode/src/vs/workbench/services/authentication/common/authentication.service.js';
+-import { IAuthenticationQueryService } from './vscode/src/vs/workbench/services/authentication/common/authenticationQuery.service.js';
+-import { IDynamicAuthenticationProviderStorageService } from './vscode/src/vs/workbench/services/authentication/common/dynamicAuthenticationProviderStorage.service.js';
++import { IAuthenticationService } from './vscode/src/vs/workbench/services/authentication/common/authentication.service.js';
+ import { IAuxiliaryWindowService } from './vscode/src/vs/workbench/services/auxiliaryWindow/browser/auxiliaryWindowService.service.js';
+ import { IBannerService } from './vscode/src/vs/workbench/services/banner/browser/bannerService.service.js';
+ import { IChatEntitlementService } from './vscode/src/vs/workbench/services/chat/common/chatEntitlementService.service.js';
+@@ -250,7 +233,6 @@ import { ILifecycleService } from './vscode/src/vs/workbench/services/lifecycle/
+ import { AbstractLifecycleService } from './vscode/src/vs/workbench/services/lifecycle/common/lifecycleService.js';
+ import { ILocaleService, IActiveLanguagePackService } from './vscode/src/vs/workbench/services/localization/common/locale.service.js';
+ import { IDefaultLogLevelsService } from './vscode/src/vs/workbench/services/log/common/defaultLogLevels.service.js';
+-import { IWorkbenchMcpManagementService } from './vscode/src/vs/workbench/services/mcp/common/mcpWorkbenchManagementService.service.js';
+ import { INotebookDocumentService } from './vscode/src/vs/workbench/services/notebook/common/notebookDocumentService.service.js';
+ import { IOutlineService } from './vscode/src/vs/workbench/services/outline/browser/outline.service.js';
+ import { IOutputService } from './vscode/src/vs/workbench/services/output/common/output.service.js';
+@@ -275,8 +257,6 @@ import { IUserDataInitializationService } from './vscode/src/vs/workbench/servic
+ import { IRemoteUserDataProfilesService } from './vscode/src/vs/workbench/services/userDataProfile/common/remoteUserDataProfiles.service.js';
+ import { IUserDataProfileService, IUserDataProfileImportExportService, IUserDataProfileManagementService } from './vscode/src/vs/workbench/services/userDataProfile/common/userDataProfile.service.js';
+ import { UserDataProfileService } from './vscode/src/vs/workbench/services/userDataProfile/common/userDataProfileService.js';
+-import { AccountStatus } from './vscode/src/vs/workbench/services/userDataSync/common/userDataSync.js';
+-import { IUserDataSyncWorkbenchService } from './vscode/src/vs/workbench/services/userDataSync/common/userDataSync.service.js';
+ import { IViewsService } from './vscode/src/vs/workbench/services/views/common/viewsService.service.js';
+ import { IWorkingCopyBackupService } from './vscode/src/vs/workbench/services/workingCopy/common/workingCopyBackup.service.js';
+ import { IWorkingCopyEditorService } from './vscode/src/vs/workbench/services/workingCopy/common/workingCopyEditorService.service.js';
+@@ -294,8 +274,6 @@ import { IDataChannelService } from './vscode/src/vs/platform/dataChannel/common
+ import { IDefaultAccountService } from './vscode/src/vs/platform/defaultAccount/common/defaultAccount.service.js';
+ import { IImageResizeService } from './vscode/src/vs/platform/imageResize/common/imageResizeService.service.js';
+ import { IMarkdownRendererService } from './vscode/src/vs/platform/markdown/browser/markdownRenderer.service.js';
+-import { McpGalleryManifestStatus } from './vscode/src/vs/platform/mcp/common/mcpGalleryManifest.js';
+-import { IMcpGalleryManifestService } from './vscode/src/vs/platform/mcp/common/mcpGalleryManifest.service.js';
+ import { IMeteredConnectionService } from './vscode/src/vs/platform/meteredConnection/common/meteredConnection.service.js';
+ import { IAgentSessionsService } from './vscode/src/vs/workbench/contrib/chat/browser/agentSessions/agentSessionsService.service.js';
+ import { IAgentSessionProjectionService } from './vscode/src/vs/workbench/contrib/chat/browser/agentSessions/experiments/agentSessionProjectionService.service.js';
+@@ -319,7 +297,6 @@ import { ToolSet, VSCodeToolReference, ToolDataSource } from './vscode/src/vs/wo
+ import { IChatLayoutService } from './vscode/src/vs/workbench/contrib/chat/common/widget/chatLayoutService.service.js';
+ import { IRandomService } from './vscode/src/vs/workbench/contrib/editTelemetry/browser/randomService.service.js';
+ import { IAiEditTelemetryService } from './vscode/src/vs/workbench/contrib/editTelemetry/browser/telemetry/aiEditTelemetry/aiEditTelemetryService.service.js';
+-import { LazyCollectionState } from './vscode/src/vs/workbench/contrib/mcp/common/mcpTypes.js';
+ import { INotebookOutlineEntryFactory } from './vscode/src/vs/workbench/contrib/notebook/browser/viewModel/notebookOutlineEntryFactory.service.js';
+ import { ISCMRepositorySelectionMode } from './vscode/src/vs/workbench/contrib/scm/common/scm.js';
+ import { ChatEntitlement } from './vscode/src/vs/workbench/services/chat/common/chatEntitlementService.js';
+@@ -362,8 +339,6 @@ import { IToolResultCompressor } from './vscode/src/vs/workbench/contrib/chat/co
+ import { IChatResponseResourceFileSystemProvider } from './vscode/src/vs/workbench/contrib/chat/common/widget/chatResponseResourceFileSystemProvider.service.js';
+ import { IGitService } from './vscode/src/vs/workbench/contrib/git/common/gitService.service.js';
+ import './vscode/src/vs/workbench/contrib/browserView/common/browserEditorInput.js';
+-import { IWorkbenchMcpGatewayService } from './vscode/src/vs/workbench/contrib/mcp/common/mcpGatewayService.service.js';
+-import { IMcpSandboxService } from './vscode/src/vs/workbench/contrib/mcp/common/mcpSandboxService.service.js';
+ import { IAgentHostTerminalService } from './vscode/src/vs/workbench/contrib/terminal/browser/agentHostTerminalService.service.js';
+ import { IMicCaptureService } from './vscode/src/vs/workbench/contrib/chat/browser/voiceClient/micCaptureService.service.js';
+ import { ITtsPlaybackService } from './vscode/src/vs/workbench/contrib/chat/browser/voiceClient/ttsPlaybackService.service.js';
+@@ -2455,40 +2430,6 @@ class ExtensionRecommendationsService {
+     }
+ }
+ registerSingleton(IExtensionRecommendationsService, ExtensionRecommendationsService, InstantiationType.Eager);
+-class UserDataAutoSyncService {
+-    constructor() {
+-        this.onError = Event.None;
+-        this.turnOn = unsupported;
+-        this.turnOff = unsupported;
+-        this.triggerSync = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], UserDataAutoSyncService.prototype, "turnOn", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataAutoSyncService.prototype, "turnOff", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataAutoSyncService.prototype, "triggerSync", void 0);
+-registerSingleton(IUserDataAutoSyncService, UserDataAutoSyncService, InstantiationType.Eager);
+-class IgnoredExtensionsManagementService {
+-    constructor() {
+-        this.getIgnoredExtensions = () => [];
+-        this.hasToNeverSyncExtension = () => false;
+-        this.hasToAlwaysSyncExtension = () => false;
+-        this.updateIgnoredExtensions = unsupported;
+-        this.updateSynchronizedExtensions = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], IgnoredExtensionsManagementService.prototype, "updateIgnoredExtensions", void 0);
+-__decorate([
+-    Unsupported
+-], IgnoredExtensionsManagementService.prototype, "updateSynchronizedExtensions", void 0);
+-registerSingleton(IIgnoredExtensionsManagementService, IgnoredExtensionsManagementService, InstantiationType.Eager);
+ class ExtensionRecommendationNotificationService {
+     constructor() {
+         this.ignoredRecommendations = [];
+@@ -3831,81 +3772,6 @@ class TerminalQuickFixService {
+     }
+ }
+ registerSingleton(ITerminalQuickFixService, TerminalQuickFixService, InstantiationType.Delayed);
+-class UserDataSyncWorkbenchService {
+-    constructor() {
+-        this.onDidTurnOnSync = Event.None;
+-        this.enabled = false;
+-        this.authenticationProviders = [];
+-        this.current = undefined;
+-        this.accountStatus = AccountStatus.Unavailable;
+-        this.onDidChangeAccountStatus = Event.None;
+-        this.turnOn = unsupported;
+-        this.turnoff = unsupported;
+-        this.signIn = unsupported;
+-        this.resetSyncedData = unsupported;
+-        this.showSyncActivity = unsupported;
+-        this.syncNow = unsupported;
+-        this.synchroniseUserDataSyncStoreType = unsupported;
+-        this.showConflicts = unsupported;
+-        this.accept = unsupported;
+-        this.getAllLogResources = unsupported;
+-        this.downloadSyncActivity = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], UserDataSyncWorkbenchService.prototype, "turnOn", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncWorkbenchService.prototype, "turnoff", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncWorkbenchService.prototype, "signIn", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncWorkbenchService.prototype, "resetSyncedData", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncWorkbenchService.prototype, "showSyncActivity", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncWorkbenchService.prototype, "syncNow", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncWorkbenchService.prototype, "synchroniseUserDataSyncStoreType", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncWorkbenchService.prototype, "showConflicts", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncWorkbenchService.prototype, "accept", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncWorkbenchService.prototype, "getAllLogResources", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncWorkbenchService.prototype, "downloadSyncActivity", void 0);
+-registerSingleton(IUserDataSyncWorkbenchService, UserDataSyncWorkbenchService, InstantiationType.Delayed);
+-class UserDataSyncEnablementService {
+-    constructor() {
+-        this.onDidChangeEnablement = Event.None;
+-        this.isEnabled = () => false;
+-        this.canToggleEnablement = () => false;
+-        this.setEnablement = unsupported;
+-        this.isResourceEnablementConfigured = () => false;
+-        this.onDidChangeResourceEnablement = Event.None;
+-        this.isResourceEnabled = () => false;
+-        this.setResourceEnablement = unsupported;
+-        this.getResourceSyncStateVersion = () => undefined;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], UserDataSyncEnablementService.prototype, "setEnablement", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncEnablementService.prototype, "setResourceEnablement", void 0);
+-registerSingleton(IUserDataSyncEnablementService, UserDataSyncEnablementService, InstantiationType.Delayed);
+ class KeybindingEditingService {
+     constructor() {
+         this.addKeybinding = unsupported;
+@@ -5139,17 +5005,6 @@ __decorate([
+     Unsupported
+ ], ExtensionBisectService.prototype, "reset", void 0);
+ registerSingleton(IExtensionBisectService, ExtensionBisectService, InstantiationType.Eager);
+-class UserDataSyncAccountService {
+-    constructor() {
+-        this.onTokenFailed = Event.None;
+-        this.account = undefined;
+-        this.onDidChangeAccount = Event.None;
+-        this.updateAccount = () => {
+-            return Promise.resolve();
+-        };
+-    }
+-}
+-registerSingleton(IUserDataSyncAccountService, UserDataSyncAccountService, InstantiationType.Eager);
+ class ChatWidgetService {
+     constructor() {
+         this.getWidgetsByLocations = () => [];
+@@ -5275,84 +5130,6 @@ __decorate([
+     Unsupported
+ ], AuthenticationService.prototype, "removeSession", void 0);
+ registerSingleton(IAuthenticationService, AuthenticationService, InstantiationType.Delayed);
+-class AuthenticationAccessService {
+-    constructor() {
+-        this.onDidChangeExtensionSessionAccess = Event.None;
+-        this.isAccessAllowed = () => false;
+-        this.readAllowedExtensions = () => [];
+-        this.updateAllowedExtensions = unsupported;
+-        this.removeAllowedExtensions = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], AuthenticationAccessService.prototype, "updateAllowedExtensions", void 0);
+-__decorate([
+-    Unsupported
+-], AuthenticationAccessService.prototype, "removeAllowedExtensions", void 0);
+-registerSingleton(IAuthenticationAccessService, AuthenticationAccessService, InstantiationType.Delayed);
+-class AuthenticationExtensionsService {
+-    constructor() {
+-        this.onDidChangeAccountPreference = Event.None;
+-        this.getAccountPreference = () => undefined;
+-        this.updateAccountPreference = unsupported;
+-        this.removeAccountPreference = unsupported;
+-        this.updateSessionPreference = unsupported;
+-        this.getSessionPreference = () => undefined;
+-        this.removeSessionPreference = unsupported;
+-        this.selectSession = unsupported;
+-        this.requestSessionAccess = unsupported;
+-        this.requestNewSession = unsupported;
+-        this.updateNewSessionRequests = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], AuthenticationExtensionsService.prototype, "updateAccountPreference", void 0);
+-__decorate([
+-    Unsupported
+-], AuthenticationExtensionsService.prototype, "removeAccountPreference", void 0);
+-__decorate([
+-    Unsupported
+-], AuthenticationExtensionsService.prototype, "updateSessionPreference", void 0);
+-__decorate([
+-    Unsupported
+-], AuthenticationExtensionsService.prototype, "removeSessionPreference", void 0);
+-__decorate([
+-    Unsupported
+-], AuthenticationExtensionsService.prototype, "selectSession", void 0);
+-__decorate([
+-    Unsupported
+-], AuthenticationExtensionsService.prototype, "requestSessionAccess", void 0);
+-__decorate([
+-    Unsupported
+-], AuthenticationExtensionsService.prototype, "requestNewSession", void 0);
+-__decorate([
+-    Unsupported
+-], AuthenticationExtensionsService.prototype, "updateNewSessionRequests", void 0);
+-registerSingleton(IAuthenticationExtensionsService, AuthenticationExtensionsService, InstantiationType.Delayed);
+-class AuthenticationUsageService {
+-    constructor() {
+-        this.initializeExtensionUsageCache = unsupported;
+-        this.extensionUsesAuth = async () => false;
+-        this.readAccountUsages = unsupported;
+-        this.removeAccountUsage = unsupported;
+-        this.addAccountUsage = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], AuthenticationUsageService.prototype, "initializeExtensionUsageCache", void 0);
+-__decorate([
+-    Unsupported
+-], AuthenticationUsageService.prototype, "readAccountUsages", void 0);
+-__decorate([
+-    Unsupported
+-], AuthenticationUsageService.prototype, "removeAccountUsage", void 0);
+-__decorate([
+-    Unsupported
+-], AuthenticationUsageService.prototype, "addAccountUsage", void 0);
+-registerSingleton(IAuthenticationUsageService, AuthenticationUsageService, InstantiationType.Delayed);
+ class TimelineService {
+     constructor() {
+         this.onDidChangeProviders = Event.None;
+@@ -6248,285 +6025,6 @@ __decorate([
+     Unsupported
+ ], WalkthroughsService.prototype, "markWalkthroughOpened", void 0);
+ registerSingleton(IWalkthroughsService, WalkthroughsService, InstantiationType.Delayed);
+-class UserDataSyncStoreManagementService {
+-    constructor() {
+-        this.onDidChangeUserDataSyncStore = Event.None;
+-        this.userDataSyncStore = undefined;
+-        this.switch = unsupported;
+-        this.getPreviousUserDataSyncStore = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], UserDataSyncStoreManagementService.prototype, "switch", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncStoreManagementService.prototype, "getPreviousUserDataSyncStore", void 0);
+-registerSingleton(IUserDataSyncStoreManagementService, UserDataSyncStoreManagementService, InstantiationType.Delayed);
+-class UserDataSyncStoreService {
+-    constructor() {
+-        this.onDidChangeDonotMakeRequestsUntil = Event.None;
+-        this.donotMakeRequestsUntil = undefined;
+-        this.onTokenFailed = Event.None;
+-        this.onTokenSucceed = Event.None;
+-        this.setAuthToken = unsupported;
+-        this.manifest = unsupported;
+-        this.readResource = unsupported;
+-        this.writeResource = unsupported;
+-        this.deleteResource = unsupported;
+-        this.getAllResourceRefs = unsupported;
+-        this.resolveResourceContent = unsupported;
+-        this.getAllCollections = unsupported;
+-        this.createCollection = unsupported;
+-        this.deleteCollection = unsupported;
+-        this.getActivityData = unsupported;
+-        this.clear = unsupported;
+-        this.getLatestData = async () => null;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], UserDataSyncStoreService.prototype, "setAuthToken", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncStoreService.prototype, "manifest", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncStoreService.prototype, "readResource", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncStoreService.prototype, "writeResource", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncStoreService.prototype, "deleteResource", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncStoreService.prototype, "getAllResourceRefs", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncStoreService.prototype, "resolveResourceContent", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncStoreService.prototype, "getAllCollections", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncStoreService.prototype, "createCollection", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncStoreService.prototype, "deleteCollection", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncStoreService.prototype, "getActivityData", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncStoreService.prototype, "clear", void 0);
+-registerSingleton(IUserDataSyncStoreService, UserDataSyncStoreService, InstantiationType.Delayed);
+-class UserDataSyncLogService {
+-    constructor() {
+-        this.onDidChangeLogLevel = Event.None;
+-        this.getLevel = unsupported;
+-        this.setLevel = unsupported;
+-        this.trace = unsupported;
+-        this.debug = unsupported;
+-        this.info = unsupported;
+-        this.warn = unsupported;
+-        this.error = unsupported;
+-        this.flush = unsupported;
+-        this.dispose = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], UserDataSyncLogService.prototype, "getLevel", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncLogService.prototype, "setLevel", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncLogService.prototype, "trace", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncLogService.prototype, "debug", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncLogService.prototype, "info", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncLogService.prototype, "warn", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncLogService.prototype, "error", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncLogService.prototype, "flush", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncLogService.prototype, "dispose", void 0);
+-registerSingleton(IUserDataSyncLogService, UserDataSyncLogService, InstantiationType.Delayed);
+-class UserDataSyncService {
+-    constructor() {
+-        this.status = SyncStatus.Uninitialized;
+-        this.onDidChangeStatus = Event.None;
+-        this.conflicts = [];
+-        this.onDidChangeConflicts = Event.None;
+-        this.onDidChangeLocal = Event.None;
+-        this.onSyncErrors = Event.None;
+-        this.onDidChangeLastSyncTime = Event.None;
+-        this.onDidResetRemote = Event.None;
+-        this.onDidResetLocal = Event.None;
+-        this.createSyncTask = unsupported;
+-        this.createManualSyncTask = unsupported;
+-        this.resolveContent = unsupported;
+-        this.accept = unsupported;
+-        this.reset = unsupported;
+-        this.resetRemote = unsupported;
+-        this.cleanUpRemoteData = unsupported;
+-        this.resetLocal = unsupported;
+-        this.hasLocalData = unsupported;
+-        this.hasPreviouslySynced = unsupported;
+-        this.replace = unsupported;
+-        this.saveRemoteActivityData = unsupported;
+-        this.extractActivityData = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], UserDataSyncService.prototype, "createSyncTask", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncService.prototype, "createManualSyncTask", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncService.prototype, "resolveContent", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncService.prototype, "accept", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncService.prototype, "reset", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncService.prototype, "resetRemote", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncService.prototype, "cleanUpRemoteData", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncService.prototype, "resetLocal", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncService.prototype, "hasLocalData", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncService.prototype, "hasPreviouslySynced", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncService.prototype, "replace", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncService.prototype, "saveRemoteActivityData", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncService.prototype, "extractActivityData", void 0);
+-registerSingleton(IUserDataSyncService, UserDataSyncService, InstantiationType.Delayed);
+-class UserDataSyncMachinesService {
+-    constructor() {
+-        this.onDidChange = Event.None;
+-        this.getMachines = unsupported;
+-        this.addCurrentMachine = unsupported;
+-        this.removeCurrentMachine = unsupported;
+-        this.renameMachine = unsupported;
+-        this.setEnablements = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], UserDataSyncMachinesService.prototype, "getMachines", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncMachinesService.prototype, "addCurrentMachine", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncMachinesService.prototype, "removeCurrentMachine", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncMachinesService.prototype, "renameMachine", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncMachinesService.prototype, "setEnablements", void 0);
+-registerSingleton(IUserDataSyncMachinesService, UserDataSyncMachinesService, InstantiationType.Delayed);
+-class UserDataSyncResourceProviderService {
+-    constructor() {
+-        this.getRemoteSyncedProfiles = unsupported;
+-        this.getLocalSyncedProfiles = unsupported;
+-        this.getRemoteSyncResourceHandles = unsupported;
+-        this.getLocalSyncResourceHandles = unsupported;
+-        this.getAssociatedResources = unsupported;
+-        this.getMachineId = unsupported;
+-        this.getLocalSyncedMachines = unsupported;
+-        this.resolveContent = unsupported;
+-        this.resolveUserDataSyncResource = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], UserDataSyncResourceProviderService.prototype, "getRemoteSyncedProfiles", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncResourceProviderService.prototype, "getLocalSyncedProfiles", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncResourceProviderService.prototype, "getRemoteSyncResourceHandles", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncResourceProviderService.prototype, "getLocalSyncResourceHandles", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncResourceProviderService.prototype, "getAssociatedResources", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncResourceProviderService.prototype, "getMachineId", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncResourceProviderService.prototype, "getLocalSyncedMachines", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncResourceProviderService.prototype, "resolveContent", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncResourceProviderService.prototype, "resolveUserDataSyncResource", void 0);
+-registerSingleton(IUserDataSyncResourceProviderService, UserDataSyncResourceProviderService, InstantiationType.Delayed);
+-class UserDataSyncLocalStoreService {
+-    constructor() {
+-        this.writeResource = unsupported;
+-        this.getAllResourceRefs = unsupported;
+-        this.resolveResourceContent = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], UserDataSyncLocalStoreService.prototype, "writeResource", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncLocalStoreService.prototype, "getAllResourceRefs", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncLocalStoreService.prototype, "resolveResourceContent", void 0);
+-registerSingleton(IUserDataSyncLocalStoreService, UserDataSyncLocalStoreService, InstantiationType.Delayed);
+-class UserDataSyncUtilService {
+-    constructor() {
+-        this.resolveDefaultCoreIgnoredSettings = async () => [];
+-        this.resolveUserBindings = unsupported;
+-        this.resolveFormattingOptions = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], UserDataSyncUtilService.prototype, "resolveUserBindings", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataSyncUtilService.prototype, "resolveFormattingOptions", void 0);
+-registerSingleton(IUserDataSyncUtilService, UserDataSyncUtilService, InstantiationType.Delayed);
+ class UserDataProfileManagementService {
+     constructor() {
+         this.getDefaultProfileToUse = unsupported;
+@@ -6634,84 +6132,6 @@ __decorate([
+     Unsupported
+ ], DebugVisualizerService.prototype, "getApplicableFor", void 0);
+ registerSingleton(IDebugVisualizerService, DebugVisualizerService, InstantiationType.Delayed);
+-class EditSessionsLogService {
+-    constructor() {
+-        this.onDidChangeLogLevel = Event.None;
+-        this.getLevel = unsupported;
+-        this.setLevel = unsupported;
+-        this.trace = unsupported;
+-        this.debug = unsupported;
+-        this.info = unsupported;
+-        this.warn = unsupported;
+-        this.error = unsupported;
+-        this.flush = unsupported;
+-        this.dispose = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], EditSessionsLogService.prototype, "getLevel", void 0);
+-__decorate([
+-    Unsupported
+-], EditSessionsLogService.prototype, "setLevel", void 0);
+-__decorate([
+-    Unsupported
+-], EditSessionsLogService.prototype, "trace", void 0);
+-__decorate([
+-    Unsupported
+-], EditSessionsLogService.prototype, "debug", void 0);
+-__decorate([
+-    Unsupported
+-], EditSessionsLogService.prototype, "info", void 0);
+-__decorate([
+-    Unsupported
+-], EditSessionsLogService.prototype, "warn", void 0);
+-__decorate([
+-    Unsupported
+-], EditSessionsLogService.prototype, "error", void 0);
+-__decorate([
+-    Unsupported
+-], EditSessionsLogService.prototype, "flush", void 0);
+-__decorate([
+-    Unsupported
+-], EditSessionsLogService.prototype, "dispose", void 0);
+-registerSingleton(IEditSessionsLogService, EditSessionsLogService, InstantiationType.Delayed);
+-class EditSessionsWorkbenchService {
+-    constructor() {
+-        this.SIZE_LIMIT = 0;
+-        this.isSignedIn = false;
+-        this.onDidSignIn = Event.None;
+-        this.onDidSignOut = Event.None;
+-        this.storeClient = undefined;
+-        this.lastReadResources = new Map();
+-        this.lastWrittenResources = new Map();
+-        this.initialize = unsupported;
+-        this.read = unsupported;
+-        this.write = unsupported;
+-        this.delete = unsupported;
+-        this.list = unsupported;
+-        this.getMachineById = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], EditSessionsWorkbenchService.prototype, "initialize", void 0);
+-__decorate([
+-    Unsupported
+-], EditSessionsWorkbenchService.prototype, "read", void 0);
+-__decorate([
+-    Unsupported
+-], EditSessionsWorkbenchService.prototype, "write", void 0);
+-__decorate([
+-    Unsupported
+-], EditSessionsWorkbenchService.prototype, "delete", void 0);
+-__decorate([
+-    Unsupported
+-], EditSessionsWorkbenchService.prototype, "list", void 0);
+-__decorate([
+-    Unsupported
+-], EditSessionsWorkbenchService.prototype, "getMachineById", void 0);
+-registerSingleton(IEditSessionsStorageService, EditSessionsWorkbenchService, InstantiationType.Delayed);
+ class MultiDiffSourceResolverService {
+     constructor() {
+         this.registerResolver = () => Disposable.None;
+@@ -7220,84 +6640,6 @@ __decorate([
+     Unsupported
+ ], PromptsService.prototype, "getDiscoveryInfo", void 0);
+ registerSingleton(IPromptsService, PromptsService, InstantiationType.Eager);
+-class McpRegistry {
+-    constructor() {
+-        this.onDidChangeInputs = Event.None;
+-        this.collections = constObservable([]);
+-        this.lazyCollectionState = constObservable({
+-            collections: [],
+-            state: LazyCollectionState.AllKnown
+-        });
+-        this.delegates = constObservable([]);
+-        this.discoverCollections = async () => [];
+-        this.registerCollection = () => Disposable.None;
+-        this.clearSavedInputs = unsupported;
+-        this.editSavedInput = unsupported;
+-        this.getSavedInputs = async () => ({});
+-        this.resolveConnection = async () => undefined;
+-        this.registerDelegate = () => {
+-            return Disposable.None;
+-        };
+-        this.setSavedInput = unsupported;
+-        this.getServerDefinition = () => constObservable({
+-            server: undefined,
+-            collection: undefined
+-        });
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], McpRegistry.prototype, "clearSavedInputs", void 0);
+-__decorate([
+-    Unsupported
+-], McpRegistry.prototype, "editSavedInput", void 0);
+-__decorate([
+-    Unsupported
+-], McpRegistry.prototype, "setSavedInput", void 0);
+-registerSingleton(IMcpRegistry, McpRegistry, InstantiationType.Eager);
+-class McpService {
+-    constructor() {
+-        this.resetCaches = unsupported;
+-        this.activateCollections = unsupported;
+-        this.resetTrust = unsupported;
+-        this.autostart = unsupported;
+-        this.cancelAutostart = unsupported;
+-    }
+-    get servers() {
+-        return unsupported();
+-    }
+-    get lazyCollectionState() {
+-        return unsupported();
+-    }
+-    get enablementModel() {
+-        return unsupported();
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], McpService.prototype, "servers", null);
+-__decorate([
+-    Unsupported
+-], McpService.prototype, "lazyCollectionState", null);
+-__decorate([
+-    Unsupported
+-], McpService.prototype, "resetCaches", void 0);
+-__decorate([
+-    Unsupported
+-], McpService.prototype, "activateCollections", void 0);
+-__decorate([
+-    Unsupported
+-], McpService.prototype, "resetTrust", void 0);
+-__decorate([
+-    Unsupported
+-], McpService.prototype, "autostart", void 0);
+-__decorate([
+-    Unsupported
+-], McpService.prototype, "cancelAutostart", void 0);
+-__decorate([
+-    Unsupported
+-], McpService.prototype, "enablementModel", null);
+-registerSingleton(IMcpService, McpService, InstantiationType.Eager);
+ class ExtensionGalleryManifestService {
+     constructor() {
+         this.onDidChangeExtensionGalleryManifest = Event.None;
+@@ -7342,151 +6684,6 @@ __decorate([
+     Unsupported
+ ], NullDefaultAccountService.prototype, "signIn", void 0);
+ registerSingleton(IDefaultAccountService, NullDefaultAccountService, InstantiationType.Delayed);
+-class DynamicAuthenticationProviderStorageService {
+-    constructor() {
+-        this.getClientRegistration = async () => undefined;
+-        this.storeClientRegistration = unsupported;
+-        this.getInteractedProviders = () => [];
+-        this.removeDynamicProvider = async () => undefined;
+-        this.getSessionsForDynamicAuthProvider = async () => undefined;
+-        this.setSessionsForDynamicAuthProvider = async () => undefined;
+-        this.onDidChangeTokens = Event.None;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], DynamicAuthenticationProviderStorageService.prototype, "storeClientRegistration", void 0);
+-registerSingleton(IDynamicAuthenticationProviderStorageService, DynamicAuthenticationProviderStorageService, InstantiationType.Eager);
+-class AuthenticationMcpService {
+-    constructor() {
+-        this.onDidChangeAccountPreference = Event.None;
+-        this.getAccountPreference = () => undefined;
+-        this.updateAccountPreference = () => undefined;
+-        this.removeAccountPreference = () => undefined;
+-        this.updateSessionPreference = () => undefined;
+-        this.getSessionPreference = () => undefined;
+-        this.removeSessionPreference = () => undefined;
+-        this.requestSessionAccess = () => undefined;
+-        this.requestNewSession = async () => undefined;
+-        this.selectSession = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], AuthenticationMcpService.prototype, "selectSession", void 0);
+-registerSingleton(IAuthenticationMcpService, AuthenticationMcpService, InstantiationType.Eager);
+-class AuthenticationMcpAccessService {
+-    constructor() {
+-        this.onDidChangeMcpSessionAccess = Event.None;
+-        this.isAccessAllowed = () => undefined;
+-        this.isAccessAllowedForUrl = () => undefined;
+-        this.readAllowedMcpServers = () => [];
+-        this.updateAllowedMcpServers = () => undefined;
+-        this.removeAllowedMcpServers = () => undefined;
+-    }
+-}
+-registerSingleton(IAuthenticationMcpAccessService, AuthenticationMcpAccessService, InstantiationType.Eager);
+-class AuthenticationMcpUsageService {
+-    constructor() {
+-        this.initializeUsageCache = async () => undefined;
+-        this.hasUsedAuth = async () => false;
+-        this.readAccountUsages = () => [];
+-        this.removeAccountUsage = () => undefined;
+-        this.addAccountUsage = () => undefined;
+-    }
+-}
+-registerSingleton(IAuthenticationMcpUsageService, AuthenticationMcpUsageService, InstantiationType.Eager);
+-class McpWorkbenchService {
+-    constructor() {
+-        this.onChange = Event.None;
+-        this.local = [];
+-        this.queryLocal = async () => [];
+-        this.queryGallery = unsupported;
+-        this.install = unsupported;
+-        this.uninstall = async () => undefined;
+-        this.open = async () => undefined;
+-        this.onReset = Event.None;
+-        this.getMcpConfigPath = unsupported;
+-        this.getEnabledLocalMcpServers = () => [];
+-        this.canInstall = unsupported;
+-        this.openSearch = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], McpWorkbenchService.prototype, "queryGallery", void 0);
+-__decorate([
+-    Unsupported
+-], McpWorkbenchService.prototype, "install", void 0);
+-__decorate([
+-    Unsupported
+-], McpWorkbenchService.prototype, "getMcpConfigPath", void 0);
+-__decorate([
+-    Unsupported
+-], McpWorkbenchService.prototype, "canInstall", void 0);
+-__decorate([
+-    Unsupported
+-], McpWorkbenchService.prototype, "openSearch", void 0);
+-registerSingleton(IMcpWorkbenchService, McpWorkbenchService, InstantiationType.Eager);
+-class McpGalleryService {
+-    constructor() {
+-        this.isEnabled = () => false;
+-        this.query = unsupported;
+-        this.getReadme = unsupported;
+-        this.getMcpServersFromGallery = async () => [];
+-        this.getMcpServer = async () => undefined;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], McpGalleryService.prototype, "query", void 0);
+-__decorate([
+-    Unsupported
+-], McpGalleryService.prototype, "getReadme", void 0);
+-registerSingleton(IMcpGalleryService, McpGalleryService, InstantiationType.Eager);
+-class McpSamplingService {
+-    constructor() {
+-        this.sample = unsupported;
+-        this.hasLogs = () => false;
+-        this.getLogText = unsupported;
+-        this.getConfig = unsupported;
+-        this.updateConfig = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], McpSamplingService.prototype, "sample", void 0);
+-__decorate([
+-    Unsupported
+-], McpSamplingService.prototype, "getLogText", void 0);
+-__decorate([
+-    Unsupported
+-], McpSamplingService.prototype, "getConfig", void 0);
+-__decorate([
+-    Unsupported
+-], McpSamplingService.prototype, "updateConfig", void 0);
+-registerSingleton(IMcpSamplingService, McpSamplingService, InstantiationType.Eager);
+-class McpResourceScannerService {
+-    constructor() {
+-        this.scanMcpServers = unsupported;
+-        this.addMcpServers = unsupported;
+-        this.removeMcpServers = unsupported;
+-        this.updateSandboxConfig = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], McpResourceScannerService.prototype, "scanMcpServers", void 0);
+-__decorate([
+-    Unsupported
+-], McpResourceScannerService.prototype, "addMcpServers", void 0);
+-__decorate([
+-    Unsupported
+-], McpResourceScannerService.prototype, "removeMcpServers", void 0);
+-__decorate([
+-    Unsupported
+-], McpResourceScannerService.prototype, "updateSandboxConfig", void 0);
+-registerSingleton(IMcpResourceScannerService, McpResourceScannerService, InstantiationType.Eager);
+ class ChatContextPickService {
+     constructor() {
+         this.items = [];
+@@ -7565,15 +6762,6 @@ __decorate([
+     Unsupported
+ ], ChatAttachmentResolveService.prototype, "resolveSourceControlHistoryItemAttachContext", void 0);
+ registerSingleton(IChatAttachmentResolveService, ChatAttachmentResolveService, InstantiationType.Eager);
+-class McpElicitationService {
+-    constructor() {
+-        this.elicit = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], McpElicitationService.prototype, "elicit", void 0);
+-registerSingleton(IMcpElicitationService, McpElicitationService, InstantiationType.Eager);
+ class RemoteCodingAgentsService {
+     constructor() {
+         this.registerAgent = () => { };
+@@ -7582,74 +6770,6 @@ class RemoteCodingAgentsService {
+     }
+ }
+ registerSingleton(IRemoteCodingAgentsService, RemoteCodingAgentsService, InstantiationType.Eager);
+-class AuthenticationQueryService {
+-    constructor() {
+-        this.onDidChangePreferences = Event.None;
+-        this.onDidChangeAccess = Event.None;
+-        this.provider = unsupported;
+-        this.extension = unsupported;
+-        this.mcpServer = unsupported;
+-        this.getProviderIds = unsupported;
+-        this.clearAllData = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], AuthenticationQueryService.prototype, "provider", void 0);
+-__decorate([
+-    Unsupported
+-], AuthenticationQueryService.prototype, "extension", void 0);
+-__decorate([
+-    Unsupported
+-], AuthenticationQueryService.prototype, "mcpServer", void 0);
+-__decorate([
+-    Unsupported
+-], AuthenticationQueryService.prototype, "getProviderIds", void 0);
+-__decorate([
+-    Unsupported
+-], AuthenticationQueryService.prototype, "clearAllData", void 0);
+-registerSingleton(IAuthenticationQueryService, AuthenticationQueryService, InstantiationType.Eager);
+-class WorkbenchMcpManagementService {
+-    constructor() {
+-        this.onDidInstallMcpServers = Event.None;
+-        this.onInstallMcpServerInCurrentProfile = Event.None;
+-        this.onDidInstallMcpServersInCurrentProfile = Event.None;
+-        this.onDidUpdateMcpServersInCurrentProfile = Event.None;
+-        this.onUninstallMcpServerInCurrentProfile = Event.None;
+-        this.onDidUninstallMcpServerInCurrentProfile = Event.None;
+-        this.onDidChangeProfile = Event.None;
+-        this.onInstallMcpServer = Event.None;
+-        this.onDidUpdateMcpServers = Event.None;
+-        this.onUninstallMcpServer = Event.None;
+-        this.onDidUninstallMcpServer = Event.None;
+-        this.getInstalled = async () => [];
+-        this.install = unsupported;
+-        this.installFromGallery = unsupported;
+-        this.updateMetadata = unsupported;
+-        this.uninstall = unsupported;
+-        this.canInstall = unsupported;
+-        this.getMcpServerConfigurationFromManifest = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], WorkbenchMcpManagementService.prototype, "install", void 0);
+-__decorate([
+-    Unsupported
+-], WorkbenchMcpManagementService.prototype, "installFromGallery", void 0);
+-__decorate([
+-    Unsupported
+-], WorkbenchMcpManagementService.prototype, "updateMetadata", void 0);
+-__decorate([
+-    Unsupported
+-], WorkbenchMcpManagementService.prototype, "uninstall", void 0);
+-__decorate([
+-    Unsupported
+-], WorkbenchMcpManagementService.prototype, "canInstall", void 0);
+-__decorate([
+-    Unsupported
+-], WorkbenchMcpManagementService.prototype, "getMcpServerConfigurationFromManifest", void 0);
+-registerSingleton(IWorkbenchMcpManagementService, WorkbenchMcpManagementService, InstantiationType.Eager);
+ class ChatTodoListService {
+     constructor() {
+         this.setTodos = unsupported;
+@@ -7769,16 +6889,6 @@ __decorate([
+ ], ImageResizeService.prototype, "resizeImage", void 0);
+ registerSingleton(IImageResizeService, ImageResizeService, InstantiationType.Delayed);
+ registerSingleton(IDataChannelService, NullDataChannelService, InstantiationType.Delayed);
+-class AllowedMcpServersService {
+-    constructor() {
+-        this.onDidChangeAllowedMcpServers = Event.None;
+-        this.isAllowed = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], AllowedMcpServersService.prototype, "isAllowed", void 0);
+-registerSingleton(IAllowedMcpServersService, AllowedMcpServersService, InstantiationType.Delayed);
+ class ChatLayoutService {
+     get fontFamily() {
+         return unsupported();
+@@ -7867,15 +6977,6 @@ __decorate([
+     Unsupported
+ ], InlineCompletionsUnificationService.prototype, "state", null);
+ registerSingleton(IInlineCompletionsUnificationService, InlineCompletionsUnificationService, InstantiationType.Delayed);
+-class McpGalleryManifestService {
+-    constructor() {
+-        this.mcpGalleryManifestStatus = McpGalleryManifestStatus.Unavailable;
+-        this.onDidChangeMcpGalleryManifestStatus = Event.None;
+-        this.onDidChangeMcpGalleryManifest = Event.None;
+-        this.getMcpGalleryManifest = async () => null;
+-    }
+-}
+-registerSingleton(IMcpGalleryManifestService, McpGalleryManifestService, InstantiationType.Delayed);
+ class ChatModeService {
+     constructor() {
+         this.getLocalModes = unsupported;
+@@ -8468,24 +7569,6 @@ class GitService {
+     }
+ }
+ registerSingleton(IGitService, GitService, InstantiationType.Delayed);
+-class McpSandboxService {
+-    constructor() {
+-        this.launchInSandboxIfEnabled = unsupported;
+-        this.isEnabled = async () => false;
+-        this.getSandboxConfigSuggestionMessage = () => undefined;
+-        this.applySandboxConfigSuggestion = async () => false;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], McpSandboxService.prototype, "launchInSandboxIfEnabled", void 0);
+-registerSingleton(IMcpSandboxService, McpSandboxService, InstantiationType.Delayed);
+-class WorkbenchMcpGatewayService {
+-    constructor() {
+-        this.createGateway = async () => undefined;
+-    }
+-}
+-registerSingleton(IWorkbenchMcpGatewayService, WorkbenchMcpGatewayService, InstantiationType.Delayed);
+ class PowerService {
+     constructor() {
+         this.onDidSuspend = Event.None;
 diff --git a/services.js b/services.js
-index 018691b598a8aa41da826da3e6a1100fa4929b97..ac7d4eb9521ed4c2d7ce38cb13060d904a47b6d4 100644
+index 018691b598a8aa41da826da3e6a1100fa4929b97..e5fe8b7ee0d0eab88a05e60ef60731f9879a8204 100644
 --- a/services.js
 +++ b/services.js
 @@ -24,7 +24,6 @@ import './vscode/src/vs/workbench/contrib/inlayHints/browser/inlayHintsAccessibi
@@ -10,6 +1094,85 @@ index 018691b598a8aa41da826da3e6a1100fa4929b97..ac7d4eb9521ed4c2d7ce38cb13060d90
  import './vscode/src/vs/workbench/contrib/dropOrPasteInto/browser/dropOrPasteInto.contribution.js';
  import './vscode/src/vs/workbench/contrib/meteredConnection/browser/meteredConnection.contribution.js';
  import './vscode/src/vs/workbench/contrib/inlineCompletions/browser/inlineCompletions.contribution.js';
+@@ -227,10 +226,6 @@ export { IURLService } from './vscode/src/vs/platform/url/common/url.service.js'
+ export { toUserDataProfile } from './vscode/src/vs/platform/userDataProfile/common/userDataProfile.js';
+ export { IUserDataProfilesService } from './vscode/src/vs/platform/userDataProfile/common/userDataProfile.service.js';
+ export { IUserDataProfileStorageService } from './vscode/src/vs/platform/userDataProfile/common/userDataProfileStorageService.service.js';
+-export { IIgnoredExtensionsManagementService } from './vscode/src/vs/platform/userDataSync/common/ignoredExtensions.service.js';
+-export { IUserDataAutoSyncService, IUserDataSyncEnablementService, IUserDataSyncLocalStoreService, IUserDataSyncLogService, IUserDataSyncResourceProviderService, IUserDataSyncService, IUserDataSyncStoreManagementService, IUserDataSyncStoreService, IUserDataSyncUtilService } from './vscode/src/vs/platform/userDataSync/common/userDataSync.service.js';
+-export { IUserDataSyncAccountService } from './vscode/src/vs/platform/userDataSync/common/userDataSyncAccount.service.js';
+-export { IUserDataSyncMachinesService } from './vscode/src/vs/platform/userDataSync/common/userDataSyncMachines.service.js';
+ export { ICanonicalUriService } from './vscode/src/vs/platform/workspace/common/canonicalUri.service.js';
+ export { IEditSessionIdentityService } from './vscode/src/vs/platform/workspace/common/editSessions.service.js';
+ export { WorkspaceTrustUriResponse } from './vscode/src/vs/platform/workspace/common/workspaceTrust.js';
+@@ -252,7 +247,6 @@ export { ILanguageModelsService } from './vscode/src/vs/workbench/contrib/chat/c
+ export { ICommentService } from './vscode/src/vs/workbench/contrib/comments/browser/commentService.service.js';
+ export { ICustomEditorService } from './vscode/src/vs/workbench/contrib/customEditor/common/customEditor.service.js';
+ export { IDebugVisualizerService } from './vscode/src/vs/workbench/contrib/debug/common/debugVisualizers.service.js';
+-export { IEditSessionsLogService, IEditSessionsStorageService } from './vscode/src/vs/workbench/contrib/editSessions/common/editSessions.service.js';
+ export { IExtensionsWorkbenchService } from './vscode/src/vs/workbench/contrib/extensions/common/extensions.service.js';
+ export { IExternalUriOpenerService } from './vscode/src/vs/workbench/contrib/externalUriOpener/common/externalUriOpenerService.service.js';
+ export { IInlineChatSessionService } from './vscode/src/vs/workbench/contrib/inlineChat/browser/inlineChatSessionService.service.js';
+@@ -313,9 +307,6 @@ export { IAccessibleViewInformationService } from './vscode/src/vs/workbench/ser
+ export { IAiEmbeddingVectorService } from './vscode/src/vs/workbench/services/aiEmbeddingVector/common/aiEmbeddingVectorService.service.js';
+ export { IAiRelatedInformationService } from './vscode/src/vs/workbench/services/aiRelatedInformation/common/aiRelatedInformation.service.js';
+ export { IWorkbenchAssignmentService } from './vscode/src/vs/workbench/services/assignment/common/assignmentService.service.js';
+-export { IAuthenticationAccessService } from './vscode/src/vs/workbench/services/authentication/browser/authenticationAccessService.service.js';
+-export { IAuthenticationUsageService } from './vscode/src/vs/workbench/services/authentication/browser/authenticationUsageService.service.js';
+-export { IAuthenticationExtensionsService, IAuthenticationService } from './vscode/src/vs/workbench/services/authentication/common/authentication.service.js';
+ export { IAuxiliaryWindowService } from './vscode/src/vs/workbench/services/auxiliaryWindow/browser/auxiliaryWindowService.service.js';
+ export { IJSONEditingService } from './vscode/src/vs/workbench/services/configuration/common/jsonEditing.service.js';
+ export { IConfigurationResolverService } from './vscode/src/vs/workbench/services/configurationResolver/common/configurationResolver.service.js';
+@@ -349,8 +340,6 @@ export { IUserDataInitializationService } from './vscode/src/vs/workbench/servic
+ export { IRemoteUserDataProfilesService } from './vscode/src/vs/workbench/services/userDataProfile/common/remoteUserDataProfiles.service.js';
+ export { IUserDataProfileImportExportService, IUserDataProfileManagementService, IUserDataProfileService } from './vscode/src/vs/workbench/services/userDataProfile/common/userDataProfile.service.js';
+ export { UserDataProfileService } from './vscode/src/vs/workbench/services/userDataProfile/common/userDataProfileService.js';
+-export { AccountStatus } from './vscode/src/vs/workbench/services/userDataSync/common/userDataSync.js';
+-export { IUserDataSyncWorkbenchService } from './vscode/src/vs/workbench/services/userDataSync/common/userDataSync.service.js';
+ export { IWorkingCopyBackupService } from './vscode/src/vs/workbench/services/workingCopy/common/workingCopyBackup.service.js';
+ export { IWorkingCopyEditorService } from './vscode/src/vs/workbench/services/workingCopy/common/workingCopyEditorService.service.js';
+ export { IWorkingCopyHistoryService } from './vscode/src/vs/workbench/services/workingCopy/common/workingCopyHistory.service.js';
+@@ -376,31 +365,20 @@ export { IEditorCancellationTokens } from './vscode/src/vs/editor/contrib/editor
+ export { IPeekViewService } from './vscode/src/vs/editor/contrib/peekView/browser/peekView.service.js';
+ export { IUndoRedoService } from './vscode/src/vs/platform/undoRedo/common/undoRedo.service.js';
+ export { IActionWidgetService } from './vscode/src/vs/platform/actionWidget/browser/actionWidget.service.js';
+-export { IMcpElicitationService, IMcpSamplingService, IMcpService, IMcpWorkbenchService } from './vscode/src/vs/workbench/contrib/mcp/common/mcpTypes.service.js';
+-export { IMcpResourceScannerService } from './vscode/src/vs/platform/mcp/common/mcpResourceScannerService.service.js';
+-export { IMcpRegistry } from './vscode/src/vs/workbench/contrib/mcp/common/mcpRegistryTypes.service.js';
+ export { IExtensionGalleryManifestService } from './vscode/src/vs/platform/extensionManagement/common/extensionGalleryManifest.service.js';
+ export { ISharedWebContentExtractorService, IWebContentExtractorService } from './vscode/src/vs/platform/webContentExtractor/common/webContentExtractor.service.js';
+ export { IDefaultAccountService } from './vscode/src/vs/platform/defaultAccount/common/defaultAccount.service.js';
+ export { IChatTransferService } from './vscode/src/vs/workbench/contrib/chat/common/model/chatTransferService.service.js';
+ export { IChatStatusItemService } from './vscode/src/vs/workbench/contrib/chat/browser/chatStatus/chatStatusItemService.service.js';
+ export { IAiSettingsSearchService } from './vscode/src/vs/workbench/services/aiSettingsSearch/common/aiSettingsSearch.service.js';
+-export { IDynamicAuthenticationProviderStorageService } from './vscode/src/vs/workbench/services/authentication/common/dynamicAuthenticationProviderStorage.service.js';
+-export { IAuthenticationMcpService } from './vscode/src/vs/workbench/services/authentication/browser/authenticationMcpService.service.js';
+-export { IAuthenticationMcpAccessService } from './vscode/src/vs/workbench/services/authentication/browser/authenticationMcpAccessService.service.js';
+-export { IAuthenticationMcpUsageService } from './vscode/src/vs/workbench/services/authentication/browser/authenticationMcpUsageService.service.js';
+ export { IChatContextPickService } from './vscode/src/vs/workbench/contrib/chat/browser/attachments/chatContextPickService.service.js';
+-export { IMcpGalleryService, IMcpManagementService } from './vscode/src/vs/platform/mcp/common/mcpManagement.service.js';
+ export { ITreeSitterThemeService } from './vscode/src/vs/editor/common/services/treeSitter/treeSitterThemeService.service.js';
+ export { ITreeSitterLibraryService } from './vscode/src/vs/editor/common/services/treeSitter/treeSitterLibraryService.service.js';
+ export { IChatAttachmentResolveService } from './vscode/src/vs/workbench/contrib/chat/browser/attachments/chatAttachmentResolveService.service.js';
+ export { IRemoteCodingAgentsService } from './vscode/src/vs/workbench/contrib/remoteCodingAgents/common/remoteCodingAgentsService.service.js';
+-export { IAuthenticationQueryService } from './vscode/src/vs/workbench/services/authentication/common/authenticationQuery.service.js';
+-export { IWorkbenchMcpManagementService } from './vscode/src/vs/workbench/services/mcp/common/mcpWorkbenchManagementService.service.js';
+ export { IChatLayoutService } from './vscode/src/vs/workbench/contrib/chat/common/widget/chatLayoutService.service.js';
+ export { IAiEditTelemetryService } from './vscode/src/vs/workbench/contrib/editTelemetry/browser/telemetry/aiEditTelemetry/aiEditTelemetryService.service.js';
+ export { IInlineCompletionsUnificationService } from './vscode/src/vs/workbench/services/inlineCompletions/common/inlineCompletionsUnification.service.js';
+-export { IMcpGalleryManifestService } from './vscode/src/vs/platform/mcp/common/mcpGalleryManifest.service.js';
+ export { IDataChannelService } from './vscode/src/vs/platform/dataChannel/common/dataChannel.service.js';
+ export { IProgressService } from './vscode/src/vs/platform/progress/common/progress.service.js';
+ export { IMarkdownRendererService } from './vscode/src/vs/platform/markdown/browser/markdownRenderer.service.js';
+@@ -421,8 +399,6 @@ export { IAgentPluginService } from './vscode/src/vs/workbench/contrib/chat/comm
+ export { IPluginInstallService } from './vscode/src/vs/workbench/contrib/chat/common/plugins/pluginInstallService.service.js';
+ export { IPluginMarketplaceService } from './vscode/src/vs/workbench/contrib/chat/common/plugins/pluginMarketplaceService.service.js';
+ export { IGitService } from './vscode/src/vs/workbench/contrib/git/common/gitService.service.js';
+-export { IWorkbenchMcpGatewayService } from './vscode/src/vs/workbench/contrib/mcp/common/mcpGatewayService.service.js';
+-export { IMcpSandboxService } from './vscode/src/vs/workbench/contrib/mcp/common/mcpSandboxService.service.js';
+ export { ICustomizationHarnessService } from './vscode/src/vs/workbench/contrib/chat/common/customizationHarnessService.service.js';
+ export { IAgentHostService } from './vscode/src/vs/platform/agentHost/common/agentService.service.js';
+ export { IAgentHostConnectionsService } from './vscode/src/vs/platform/agentHost/common/agentHostConnectionsService.service.js';
 diff --git a/vscode/src/vs/platform/files/common/files.d.ts b/vscode/src/vs/platform/files/common/files.d.ts
 index 217e68b81ae5b921ecb15f866edd5f861f081f2e..43b7a7b7294045784b0e051fec711f9b3c49ea0e 100644
 --- a/vscode/src/vs/platform/files/common/files.d.ts
