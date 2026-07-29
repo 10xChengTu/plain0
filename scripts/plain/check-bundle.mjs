@@ -111,39 +111,69 @@ for (const command of forbiddenCommandIds) {
 	}
 }
 
-// `F110` S2 (`docs/research/2026-07-28-legacy-retirement.md`, "验收如何证明真的没有了"):
+// `F110` S2/S3 (`docs/research/2026-07-28-legacy-retirement.md`, "验收如何证明真的没有了"):
 // the source-map-based `categorize by file path` check above only
 // proves a *file* is absent; it does not prove the token *strings* it
 // registered aren't lurking somewhere else in the final, minified `dist/**/*.js`
 // output under a different reachability path a source-map classification
 // pass would miss (e.g. inlined into a differently-named chunk). Every
-// removed mcp/syncEditSessions/authAccount decorator token name survives
-// minification verbatim as a string literal — `createDecorator("IFoo")`
-// always passes its argument as a literal, the same reason
-// `forbiddenCommandIds` above works for command ids. Two of the 34 tokens
-// `missing-services-patch-contract.mjs` tracks are deliberately excluded
-// here, not because this check can't see them but because their appearance
-// is already accounted for by `docs/bundle-baseline.json`'s explicit
-// `authAccount` floor list (verified by real content inspection, not
-// assumed): `IAuthenticationAccessService` is the token *declaration*
-// (`const IAuthenticationAccessService = createDecorator(...)`) inside
-// `authenticationAccessService.service.js`, one of the 5 catalogued
-// authAccount debt sources kept alive by `globalCompositeBar.js`'s own real
-// import chain; `IAuthenticationExtensionsService` is a
-// `createDecorator("IAuthenticationExtensionsService")` call whose result is
-// never assigned to a variable or exported (confirmed by reading the real
-// minified output) inside `authentication.service.js`, the file kept for
-// `IAuthenticationService`'s sake — both are inert leftovers of files this
-// slice's own dependency sweep already found a real reason to keep, not
-// evidence any removed registration crept back.
+// removed mcp/syncEditSessions/authAccount/chatAgent decorator token name
+// survives minification verbatim as a string literal —
+// `createDecorator("IFoo")` always passes its argument as a literal, the
+// same reason `forbiddenCommandIds` above works for command ids. A handful
+// of tokens `missing-services-patch-contract.mjs` tracks are deliberately
+// excluded here, not because this check can't see them but because their
+// appearance is already accounted for by `docs/bundle-baseline.json`'s
+// explicit per-category floor lists (verified by real content inspection,
+// not assumed) as inert leftovers of files this slice's own dependency
+// sweep already found a real, independent reason to keep — not evidence any
+// removed registration crept back:
+//
+// - `IAuthenticationAccessService` (S2) is the token *declaration*
+//   (`const IAuthenticationAccessService = createDecorator(...)`) inside
+//   `authenticationAccessService.service.js`, one of the 5 catalogued
+//   authAccount debt sources kept alive by `globalCompositeBar.js`'s own real
+//   import chain.
+// - `IAuthenticationExtensionsService` (S2) is a
+//   `createDecorator("IAuthenticationExtensionsService")` call whose result
+//   is never assigned to a variable or exported (confirmed by reading the
+//   real minified output) inside `authentication.service.js`, the file kept
+//   for `IAuthenticationService`'s sake.
+// - `SessionType` (S3) has no real occurrence of the removed enum itself —
+//   the only substring hits are `chatSessionType`/`matchSessionType`
+//   property names (confirmed by reading the real minified output) inside
+//   `chatSessionsService.js`, one of the 9 catalogued chatAgent debt sources
+//   kept alive by `commandsQuickAccess.js`'s (the Command Palette's) real
+//   import chain through `chat/common/constants.js`.
+// - `ChatEntitlement` (S3) similarly has no real occurrence of the removed
+//   enum — the only substring hits are `quotaChatEntitlement`/
+//   `quotaPremiumChatEntitlement` property names inside
+//   `chatEntitlementService.js`, kept alive by that same Command Palette
+//   chain (`constants.js` imports `ChatEntitlementContextKeys` from it).
+// - `Target` (S3) is excluded because it is too generic a bare word to be a
+//   reliable content-scan token in the first place: its real hits in the
+//   final bundle are an unrelated `ConfigurationTarget`-style enum member
+//   (`e.Target=\`Target\``) and the plain English error string "Configuration
+//   Target is required..." — neither is the removed `chat/common/promptSyntax/promptTypes.js`
+//   `Target` enum, which real content inspection confirmed is genuinely gone.
+// - `ToolSet` (S3) is excluded for the same reason: its only real hit is as
+//   a substring of `contribLanguageModelToolSets`, an unrelated extension-API
+//   proposal-name string, not the removed `languageModelToolsService.js`
+//   `ToolSet` class.
+const KNOWN_INERT_DEBT_TOKEN_STRINGS = new Set([
+	"IAuthenticationAccessService",
+	"IAuthenticationExtensionsService",
+	"SessionType",
+	"ChatEntitlement",
+	"Target",
+	"ToolSet",
+]);
 const forbiddenDebtTokenStrings = REMOVED_MISSING_SERVICES_TOKENS.filter(
-	(token) =>
-		token !== "IAuthenticationAccessService" &&
-		token !== "IAuthenticationExtensionsService",
+	(token) => !KNOWN_INERT_DEBT_TOKEN_STRINGS.has(token),
 );
 for (const token of forbiddenDebtTokenStrings) {
 	if (javascript.includes(token)) {
-		fail(`final bundle content contains removed F110 S2 debt token: ${token}`);
+		fail(`final bundle content contains removed F110 debt token: ${token}`);
 	}
 }
 

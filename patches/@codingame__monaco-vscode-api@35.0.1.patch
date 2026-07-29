@@ -1,5 +1,5 @@
 diff --git a/missing-services.js b/missing-services.js
-index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9f6108c78 100644
+index a8aeec12161cb3ae3e3b3f807a5479145f48abca..88bd533ec6bb7e896f9fafe3048e84925db05593 100644
 --- a/missing-services.js
 +++ b/missing-services.js
 @@ -70,8 +70,6 @@ import { IKeyboardLayoutService } from './vscode/src/vs/platform/keyboardLayout/
@@ -23,7 +23,32 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9
  import { NullWebContentExtractorService, NullSharedWebContentExtractorService } from './vscode/src/vs/platform/webContentExtractor/common/webContentExtractor.js';
  import { IWebContentExtractorService, ISharedWebContentExtractorService } from './vscode/src/vs/platform/webContentExtractor/common/webContentExtractor.service.js';
  import { ICanonicalUriService } from './vscode/src/vs/platform/workspace/common/canonicalUri.service.js';
-@@ -137,7 +130,6 @@ import { ICommentService } from './vscode/src/vs/workbench/contrib/comments/brow
+@@ -112,42 +105,19 @@ import { StatusBarUpdateKind, IExtensionStatusBarItemService } from './vscode/sr
+ import { IBreadcrumbsService } from './vscode/src/vs/workbench/browser/parts/editor/breadcrumbs.service.js';
+ import { DEFAULT_EDITOR_PART_OPTIONS } from './vscode/src/vs/workbench/browser/parts/editor/editor.js';
+ import { IViewDescriptorService } from './vscode/src/vs/workbench/common/views.service.js';
+-import { IChatAttachmentResolveService } from './vscode/src/vs/workbench/contrib/chat/browser/attachments/chatAttachmentResolveService.service.js';
+-import { IChatContextPickService } from './vscode/src/vs/workbench/contrib/chat/browser/attachments/chatContextPickService.service.js';
+ import { IQuickChatService, IChatWidgetService, IChatAccessibilityService, IChatCodeBlockContextProviderService } from './vscode/src/vs/workbench/contrib/chat/browser/chat.service.js';
+-import { IChatOutputRendererService } from './vscode/src/vs/workbench/contrib/chat/browser/chatOutputItemRenderer.service.js';
+-import { IChatMarkdownAnchorService } from './vscode/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatMarkdownAnchorService.service.js';
+-import { IChatVariablesService } from './vscode/src/vs/workbench/contrib/chat/common/attachments/chatVariables.service.js';
+-import { IChatService } from './vscode/src/vs/workbench/contrib/chat/common/chatService/chatService.service.js';
+-import { SessionType } from './vscode/src/vs/workbench/contrib/chat/common/chatSessionsService.js';
+-import { IChatSessionsService } from './vscode/src/vs/workbench/contrib/chat/common/chatSessionsService.service.js';
+-import { ICodeMapperService } from './vscode/src/vs/workbench/contrib/chat/common/editing/chatCodeMapperService.service.js';
+-import { IChatEditingService } from './vscode/src/vs/workbench/contrib/chat/common/editing/chatEditingService.service.js';
+-import { ILanguageModelIgnoredFilesService } from './vscode/src/vs/workbench/contrib/chat/common/ignoredFiles.service.js';
+-import { ILanguageModelStatsService } from './vscode/src/vs/workbench/contrib/chat/common/languageModelStats.service.js';
+-import { ILanguageModelsService } from './vscode/src/vs/workbench/contrib/chat/common/languageModels.service.js';
+-import { IChatTransferService } from './vscode/src/vs/workbench/contrib/chat/common/model/chatTransferService.service.js';
+ import { IChatAgentService, IChatAgentNameService } from './vscode/src/vs/workbench/contrib/chat/common/participants/chatAgents.service.js';
+-import { IChatSlashCommandService } from './vscode/src/vs/workbench/contrib/chat/common/participants/chatSlashCommands.service.js';
+-import { IPromptsService } from './vscode/src/vs/workbench/contrib/chat/common/promptSyntax/service/promptsService.service.js';
+-import { IChatTodoListService } from './vscode/src/vs/workbench/contrib/chat/common/tools/chatTodoListService.service.js';
+-import { ILanguageModelToolsService } from './vscode/src/vs/workbench/contrib/chat/common/tools/languageModelToolsService.service.js';
+-import { IChatWidgetHistoryService } from './vscode/src/vs/workbench/contrib/chat/common/widget/chatWidgetHistoryService.service.js';
+ import { ICommentService } from './vscode/src/vs/workbench/contrib/comments/browser/commentService.service.js';
  import { ICustomEditorService } from './vscode/src/vs/workbench/contrib/customEditor/common/customEditor.service.js';
  import { IDebugService } from './vscode/src/vs/workbench/contrib/debug/common/debug.service.js';
  import { IDebugVisualizerService } from './vscode/src/vs/workbench/contrib/debug/common/debugVisualizers.service.js';
@@ -31,7 +56,8 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9
  import { IExtensionsWorkbenchService } from './vscode/src/vs/workbench/contrib/extensions/common/extensions.service.js';
  import { IExternalUriOpenerService } from './vscode/src/vs/workbench/contrib/externalUriOpener/common/externalUriOpenerService.service.js';
  import { IExplorerService } from './vscode/src/vs/workbench/contrib/files/browser/files.service.js';
-@@ -146,8 +138,6 @@ import { IInteractiveDocumentService } from './vscode/src/vs/workbench/contrib/i
+-import { IInlineChatSessionService } from './vscode/src/vs/workbench/contrib/inlineChat/browser/inlineChatSessionService.service.js';
+ import { IInteractiveDocumentService } from './vscode/src/vs/workbench/contrib/interactive/browser/interactiveDocumentService.service.js';
  import { IInteractiveHistoryService } from './vscode/src/vs/workbench/contrib/interactive/browser/interactiveHistoryService.service.js';
  import { ITroubleshootIssueService } from './vscode/src/vs/workbench/contrib/issue/browser/issueTroubleshoot.service.js';
  import { IWorkbenchIssueService, IIssueFormService } from './vscode/src/vs/workbench/contrib/issue/common/issue.service.js';
@@ -40,7 +66,24 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9
  import { IMultiDiffSourceResolverService } from './vscode/src/vs/workbench/contrib/multiDiffEditor/browser/multiDiffSourceResolverService.service.js';
  import { INotebookOriginalCellModelFactory } from './vscode/src/vs/workbench/contrib/notebook/browser/diff/inlineDiff/notebookOriginalCellModelFactory.service.js';
  import { INotebookOriginalModelReferenceFactory } from './vscode/src/vs/workbench/contrib/notebook/browser/diff/inlineDiff/notebookOriginalModelRefFactory.service.js';
-@@ -206,14 +196,7 @@ import { IActivityService } from './vscode/src/vs/workbench/services/activity/co
+@@ -164,7 +134,6 @@ import { INotebookRendererMessagingService } from './vscode/src/vs/workbench/con
+ import { INotebookService } from './vscode/src/vs/workbench/contrib/notebook/common/notebookService.service.js';
+ import { INotebookEditorWorkerService } from './vscode/src/vs/workbench/contrib/notebook/common/services/notebookWorkerService.service.js';
+ import { IPreferencesSearchService } from './vscode/src/vs/workbench/contrib/preferences/common/preferences.service.js';
+-import { IRemoteCodingAgentsService } from './vscode/src/vs/workbench/contrib/remoteCodingAgents/common/remoteCodingAgentsService.service.js';
+ import { IQuickDiffModelService } from './vscode/src/vs/workbench/contrib/scm/browser/quickDiffModel.service.js';
+ import { IQuickDiffService } from './vscode/src/vs/workbench/contrib/scm/common/quickDiff.service.js';
+ import { ISCMService, ISCMViewService } from './vscode/src/vs/workbench/contrib/scm/common/scm.service.js';
+@@ -179,7 +148,7 @@ import { NoOpWorkspaceTagsService } from './vscode/src/vs/workbench/contrib/tags
+ import { IWorkspaceTagsService } from './vscode/src/vs/workbench/contrib/tags/common/workspaceTags.service.js';
+ import { ITaskService } from './vscode/src/vs/workbench/contrib/tasks/common/taskService.service.js';
+ import { TerminalConnectionState } from './vscode/src/vs/workbench/contrib/terminal/browser/terminal.js';
+-import { ITerminalService, ITerminalConfigurationService, ITerminalEditorService, ITerminalGroupService, ITerminalInstanceService, ITerminalEditingService, ITerminalChatService } from './vscode/src/vs/workbench/contrib/terminal/browser/terminal.service.js';
++import { ITerminalService, ITerminalConfigurationService, ITerminalEditorService, ITerminalGroupService, ITerminalInstanceService, ITerminalEditingService } from './vscode/src/vs/workbench/contrib/terminal/browser/terminal.service.js';
+ import { IEnvironmentVariableService } from './vscode/src/vs/workbench/contrib/terminal/common/environmentVariable.service.js';
+ import { ITerminalProfileService, ITerminalProfileResolverService } from './vscode/src/vs/workbench/contrib/terminal/common/terminal.service.js';
+ import { ITerminalContributionService } from './vscode/src/vs/workbench/contrib/terminal/common/terminalExtensionPoints.service.js';
+@@ -206,17 +175,9 @@ import { IActivityService } from './vscode/src/vs/workbench/services/activity/co
  import { IAiEmbeddingVectorService } from './vscode/src/vs/workbench/services/aiEmbeddingVector/common/aiEmbeddingVectorService.service.js';
  import { IAiRelatedInformationService } from './vscode/src/vs/workbench/services/aiRelatedInformation/common/aiRelatedInformation.service.js';
  import { IWorkbenchAssignmentService } from './vscode/src/vs/workbench/services/assignment/common/assignmentService.service.js';
@@ -55,8 +98,11 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9
 +import { IAuthenticationService } from './vscode/src/vs/workbench/services/authentication/common/authentication.service.js';
  import { IAuxiliaryWindowService } from './vscode/src/vs/workbench/services/auxiliaryWindow/browser/auxiliaryWindowService.service.js';
  import { IBannerService } from './vscode/src/vs/workbench/services/banner/browser/bannerService.service.js';
- import { IChatEntitlementService } from './vscode/src/vs/workbench/services/chat/common/chatEntitlementService.service.js';
-@@ -250,7 +233,6 @@ import { ILifecycleService } from './vscode/src/vs/workbench/services/lifecycle/
+-import { IChatEntitlementService } from './vscode/src/vs/workbench/services/chat/common/chatEntitlementService.service.js';
+ import { IJSONEditingService } from './vscode/src/vs/workbench/services/configuration/common/jsonEditing.service.js';
+ import { IConfigurationResolverService } from './vscode/src/vs/workbench/services/configurationResolver/common/configurationResolver.service.js';
+ import { IDecorationsService } from './vscode/src/vs/workbench/services/decorations/common/decorations.service.js';
+@@ -250,7 +211,6 @@ import { ILifecycleService } from './vscode/src/vs/workbench/services/lifecycle/
  import { AbstractLifecycleService } from './vscode/src/vs/workbench/services/lifecycle/common/lifecycleService.js';
  import { ILocaleService, IActiveLanguagePackService } from './vscode/src/vs/workbench/services/localization/common/locale.service.js';
  import { IDefaultLogLevelsService } from './vscode/src/vs/workbench/services/log/common/defaultLogLevels.service.js';
@@ -64,7 +110,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9
  import { INotebookDocumentService } from './vscode/src/vs/workbench/services/notebook/common/notebookDocumentService.service.js';
  import { IOutlineService } from './vscode/src/vs/workbench/services/outline/browser/outline.service.js';
  import { IOutputService } from './vscode/src/vs/workbench/services/output/common/output.service.js';
-@@ -275,8 +257,6 @@ import { IUserDataInitializationService } from './vscode/src/vs/workbench/servic
+@@ -275,8 +235,6 @@ import { IUserDataInitializationService } from './vscode/src/vs/workbench/servic
  import { IRemoteUserDataProfilesService } from './vscode/src/vs/workbench/services/userDataProfile/common/remoteUserDataProfiles.service.js';
  import { IUserDataProfileService, IUserDataProfileImportExportService, IUserDataProfileManagementService } from './vscode/src/vs/workbench/services/userDataProfile/common/userDataProfile.service.js';
  import { UserDataProfileService } from './vscode/src/vs/workbench/services/userDataProfile/common/userDataProfileService.js';
@@ -73,33 +119,109 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9
  import { IViewsService } from './vscode/src/vs/workbench/services/views/common/viewsService.service.js';
  import { IWorkingCopyBackupService } from './vscode/src/vs/workbench/services/workingCopy/common/workingCopyBackup.service.js';
  import { IWorkingCopyEditorService } from './vscode/src/vs/workbench/services/workingCopy/common/workingCopyEditorService.service.js';
-@@ -294,8 +274,6 @@ import { IDataChannelService } from './vscode/src/vs/platform/dataChannel/common
+@@ -294,101 +252,32 @@ import { IDataChannelService } from './vscode/src/vs/platform/dataChannel/common
  import { IDefaultAccountService } from './vscode/src/vs/platform/defaultAccount/common/defaultAccount.service.js';
  import { IImageResizeService } from './vscode/src/vs/platform/imageResize/common/imageResizeService.service.js';
  import { IMarkdownRendererService } from './vscode/src/vs/platform/markdown/browser/markdownRenderer.service.js';
 -import { McpGalleryManifestStatus } from './vscode/src/vs/platform/mcp/common/mcpGalleryManifest.js';
 -import { IMcpGalleryManifestService } from './vscode/src/vs/platform/mcp/common/mcpGalleryManifest.service.js';
  import { IMeteredConnectionService } from './vscode/src/vs/platform/meteredConnection/common/meteredConnection.service.js';
- import { IAgentSessionsService } from './vscode/src/vs/workbench/contrib/chat/browser/agentSessions/agentSessionsService.service.js';
- import { IAgentSessionProjectionService } from './vscode/src/vs/workbench/contrib/chat/browser/agentSessions/experiments/agentSessionProjectionService.service.js';
-@@ -319,7 +297,6 @@ import { ToolSet, VSCodeToolReference, ToolDataSource } from './vscode/src/vs/wo
- import { IChatLayoutService } from './vscode/src/vs/workbench/contrib/chat/common/widget/chatLayoutService.service.js';
+-import { IAgentSessionsService } from './vscode/src/vs/workbench/contrib/chat/browser/agentSessions/agentSessionsService.service.js';
+-import { IAgentSessionProjectionService } from './vscode/src/vs/workbench/contrib/chat/browser/agentSessions/experiments/agentSessionProjectionService.service.js';
+-import { AgentStatusMode } from './vscode/src/vs/workbench/contrib/chat/browser/agentSessions/experiments/agentTitleBarStatusService.js';
+-import { IAgentTitleBarStatusService } from './vscode/src/vs/workbench/contrib/chat/browser/agentSessions/experiments/agentTitleBarStatusService.service.js';
+-import { IChatEditingExplanationModelManager } from './vscode/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingExplanationModelManager.service.js';
+-import { IChatStatusItemService } from './vscode/src/vs/workbench/contrib/chat/browser/chatStatus/chatStatusItemService.service.js';
+-import { IChatTipService } from './vscode/src/vs/workbench/contrib/chat/browser/chatTipService.service.js';
+-import { IChatContextService } from './vscode/src/vs/workbench/contrib/chat/browser/contextContrib/chatContextService.service.js';
+-import { ICodeCompareModelService } from './vscode/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatTextEditContentPart.service.js';
+-import { IChatOutputPartStateCache } from './vscode/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatOutputPartStateCache.service.js';
+-import { IAICustomizationWorkspaceService } from './vscode/src/vs/workbench/contrib/chat/common/aiCustomizationWorkspaceService.service.js';
+-import { IChatModeService } from './vscode/src/vs/workbench/contrib/chat/common/chatModes.service.js';
+-import { ILanguageModelsConfigurationService } from './vscode/src/vs/workbench/contrib/chat/common/languageModelsConfiguration.service.js';
+-import { IAgentPluginRepositoryService } from './vscode/src/vs/workbench/contrib/chat/common/plugins/agentPluginRepositoryService.service.js';
+-import { IAgentPluginService } from './vscode/src/vs/workbench/contrib/chat/common/plugins/agentPluginService.service.js';
+-import { IPluginMarketplaceService } from './vscode/src/vs/workbench/contrib/chat/common/plugins/pluginMarketplaceService.service.js';
+-import { Target } from './vscode/src/vs/workbench/contrib/chat/common/promptSyntax/promptTypes.js';
+-import { ILanguageModelToolsConfirmationService } from './vscode/src/vs/workbench/contrib/chat/common/tools/languageModelToolsConfirmationService.service.js';
+-import { ToolSet, VSCodeToolReference, ToolDataSource } from './vscode/src/vs/workbench/contrib/chat/common/tools/languageModelToolsService.js';
+-import { IChatLayoutService } from './vscode/src/vs/workbench/contrib/chat/common/widget/chatLayoutService.service.js';
  import { IRandomService } from './vscode/src/vs/workbench/contrib/editTelemetry/browser/randomService.service.js';
  import { IAiEditTelemetryService } from './vscode/src/vs/workbench/contrib/editTelemetry/browser/telemetry/aiEditTelemetry/aiEditTelemetryService.service.js';
 -import { LazyCollectionState } from './vscode/src/vs/workbench/contrib/mcp/common/mcpTypes.js';
  import { INotebookOutlineEntryFactory } from './vscode/src/vs/workbench/contrib/notebook/browser/viewModel/notebookOutlineEntryFactory.service.js';
  import { ISCMRepositorySelectionMode } from './vscode/src/vs/workbench/contrib/scm/common/scm.js';
- import { ChatEntitlement } from './vscode/src/vs/workbench/services/chat/common/chatEntitlementService.js';
-@@ -362,8 +339,6 @@ import { IToolResultCompressor } from './vscode/src/vs/workbench/contrib/chat/co
- import { IChatResponseResourceFileSystemProvider } from './vscode/src/vs/workbench/contrib/chat/common/widget/chatResponseResourceFileSystemProvider.service.js';
+-import { ChatEntitlement } from './vscode/src/vs/workbench/services/chat/common/chatEntitlementService.js';
+ import { IInlineCompletionsUnificationService } from './vscode/src/vs/workbench/services/inlineCompletions/common/inlineCompletionsUnification.service.js';
+ import { IUserAttentionService } from './vscode/src/vs/workbench/services/userAttention/common/userAttentionService.service.js';
+ import { getBuiltInExtensionTranslationsUris, getExtensionIdProvidingCurrentLocale } from './l10n.js';
+ import { unsupported } from './tools.js';
+-import { NullAgentHostService } from './vscode/src/vs/platform/agentHost/browser/nullAgentHostService.js';
+-import { NullSSHRemoteAgentHostService } from './vscode/src/vs/platform/agentHost/browser/nullSshRemoteAgentHostService.js';
+-import { IAgentHostConnectionsService } from './vscode/src/vs/platform/agentHost/common/agentHostConnectionsService.service.js';
+-import { IAgentHostResourceService } from './vscode/src/vs/platform/agentHost/common/agentHostResourceService.service.js';
+-import { IAgentHostService } from './vscode/src/vs/platform/agentHost/common/agentService.service.js';
+-import { NullRemoteAgentHostService } from './vscode/src/vs/platform/agentHost/common/remoteAgentHostService.js';
+-import { IRemoteAgentHostService } from './vscode/src/vs/platform/agentHost/common/remoteAgentHostService.service.js';
+-import { ISSHRemoteAgentHostService } from './vscode/src/vs/platform/agentHost/common/sshRemoteAgentHost.service.js';
+ import { IAgentNetworkFilterService } from './vscode/src/vs/platform/networkFilter/common/networkFilterService.service.js';
+ import { ISandboxHelperService } from './vscode/src/vs/platform/sandbox/common/sandboxHelperService.service.js';
+ import { ITerminalSandboxService } from './vscode/src/vs/platform/sandbox/common/terminalSandboxService.service.js';
+ import { IBrowserViewCDPService, IBrowserViewWorkbenchService } from './vscode/src/vs/workbench/contrib/browserView/common/browserView.service.js';
+ import { IBrowserZoomService } from './vscode/src/vs/workbench/contrib/browserView/common/browserZoomService.service.js';
+-import { IAgentHostSessionWorkingDirectoryResolver } from './vscode/src/vs/workbench/contrib/chat/browser/agentSessions/agentHost/agentHostSessionWorkingDirectoryResolver.service.js';
+-import { IAgentHostNewSessionFolderService } from './vscode/src/vs/workbench/contrib/chat/browser/agentSessions/agentHost/agentHostNewSessionFolderService.service.js';
+-import { IAgentHostToolSetEnablementService } from './vscode/src/vs/workbench/contrib/chat/browser/agentSessions/agentHost/agentHostToolSetEnablementService.service.js';
+-import { IAICustomizationItemsModel } from './vscode/src/vs/workbench/contrib/chat/browser/aiCustomization/aiCustomizationItemsModel.service.js';
+-import { IChatAttachmentWidgetRegistry } from './vscode/src/vs/workbench/contrib/chat/browser/attachments/chatAttachmentWidgetRegistry.service.js';
+-import { IChatResponseFileChangesService } from './vscode/src/vs/workbench/contrib/chat/browser/chatResponseFileChangesService.service.js';
+-import { IPlanReviewFeedbackService } from './vscode/src/vs/workbench/contrib/chat/browser/planReviewFeedback/planReviewFeedbackService.service.js';
+-import { IChatToolRiskAssessmentService } from './vscode/src/vs/workbench/contrib/chat/browser/tools/chatToolRiskAssessmentService.service.js';
+-import { IChatInputNotificationService } from './vscode/src/vs/workbench/contrib/chat/browser/widget/input/chatInputNotificationService.service.js';
+-import { IChatPhoneInputPresenter } from './vscode/src/vs/workbench/contrib/chat/browser/widget/input/chatPhoneInputPresenter.service.js';
+-import { IChatImageCarouselService } from './vscode/src/vs/workbench/contrib/chat/browser/chatImageCarouselService.service.js';
+-import { IChatDebugService } from './vscode/src/vs/workbench/contrib/chat/common/chatDebugService.service.js';
+-import { createVSCodeHarnessDescriptor } from './vscode/src/vs/workbench/contrib/chat/common/customizationHarnessService.js';
+-import { ICustomizationHarnessService } from './vscode/src/vs/workbench/contrib/chat/common/customizationHarnessService.service.js';
+-import { IPluginGitService } from './vscode/src/vs/workbench/contrib/chat/common/plugins/pluginGitService.service.js';
+-import { IPluginInstallService } from './vscode/src/vs/workbench/contrib/chat/common/plugins/pluginInstallService.service.js';
+-import { IWorkspacePluginSettingsService } from './vscode/src/vs/workbench/contrib/chat/common/plugins/workspacePluginSettingsService.service.js';
+-import { IChatArtifactsService } from './vscode/src/vs/workbench/contrib/chat/common/tools/chatArtifactsService.service.js';
+-import { IToolResultCompressor } from './vscode/src/vs/workbench/contrib/chat/common/tools/toolResultCompressor.service.js';
+-import { IChatResponseResourceFileSystemProvider } from './vscode/src/vs/workbench/contrib/chat/common/widget/chatResponseResourceFileSystemProvider.service.js';
  import { IGitService } from './vscode/src/vs/workbench/contrib/git/common/gitService.service.js';
  import './vscode/src/vs/workbench/contrib/browserView/common/browserEditorInput.js';
 -import { IWorkbenchMcpGatewayService } from './vscode/src/vs/workbench/contrib/mcp/common/mcpGatewayService.service.js';
 -import { IMcpSandboxService } from './vscode/src/vs/workbench/contrib/mcp/common/mcpSandboxService.service.js';
  import { IAgentHostTerminalService } from './vscode/src/vs/workbench/contrib/terminal/browser/agentHostTerminalService.service.js';
- import { IMicCaptureService } from './vscode/src/vs/workbench/contrib/chat/browser/voiceClient/micCaptureService.service.js';
- import { ITtsPlaybackService } from './vscode/src/vs/workbench/contrib/chat/browser/voiceClient/ttsPlaybackService.service.js';
-@@ -2455,40 +2430,6 @@ class ExtensionRecommendationsService {
+-import { IMicCaptureService } from './vscode/src/vs/workbench/contrib/chat/browser/voiceClient/micCaptureService.service.js';
+-import { ITtsPlaybackService } from './vscode/src/vs/workbench/contrib/chat/browser/voiceClient/ttsPlaybackService.service.js';
+-import { IVoiceSessionController } from './vscode/src/vs/workbench/contrib/chat/browser/voiceClient/voiceSessionController.service.js';
+-import { IVoiceToolDispatchService } from './vscode/src/vs/workbench/contrib/chat/browser/voiceClient/voiceToolDispatchService.service.js';
+-import { IVoiceClientService } from './vscode/src/vs/workbench/contrib/chat/common/voiceClient/voiceClientService.service.js';
+-import { IVoicePlaybackService } from './vscode/src/vs/workbench/contrib/chat/common/voicePlaybackService.service.js';
+-import { IAgentsVoiceWindowService } from './vscode/src/vs/workbench/contrib/agentsVoice/common/agentsVoice.service.js';
+-import { IVoiceTranscriptStore } from './vscode/src/vs/workbench/contrib/agentsVoice/common/voiceTranscriptStore.service.js';
+ import { IOnboardingService } from './vscode/src/vs/workbench/contrib/welcomeOnboarding/common/onboardingService.service.js';
+ import { IOnboardingScenarioService } from './vscode/src/vs/workbench/contrib/onboarding/common/onboardingScenarioService.service.js';
+-import { IAgentHostFileSystemService } from './vscode/src/vs/workbench/services/agentHost/common/agentHostFileSystemService.service.js';
+-import { IAgentEditorCommentsBridge } from './vscode/src/vs/workbench/services/agentEditorComments/common/agentEditorComments.service.js';
+ import { IPowerService } from './vscode/src/vs/workbench/services/power/common/powerService.service.js';
+ import '@codingame/monaco-vscode-files-service-override';
+-import { IAgentHostDebugLogsExportService } from './vscode/src/vs/workbench/contrib/chat/browser/actions/exportAgentHostDebugLogsAction.service.js';
+-import { IAgentHostUntitledProvisionalSessionService } from './vscode/src/vs/workbench/contrib/chat/browser/agentSessions/agentHost/agentHostUntitledProvisionalSessionService.service.js';
+ import { IWindowsMxcTerminalSandboxRuntime } from './vscode/src/vs/platform/sandbox/common/terminalSandboxMxcRuntime.service.js';
+ import { IScreenshotService } from './vscode/src/vs/workbench/contrib/issue/browser/screenshotService.service.js';
+ import { IRecordingService } from './vscode/src/vs/workbench/contrib/issue/browser/recordingService.service.js';
+ import { RecordingState } from './vscode/src/vs/workbench/contrib/issue/browser/recordingService.js';
+ import { IGitHubUploadService } from './vscode/src/vs/workbench/contrib/issue/browser/githubUploadService.service.js';
+-import { IChatGoalSummaryService } from './vscode/src/vs/workbench/contrib/chat/browser/chatGoalSummaryService.service.js';
+-import { IAgentHostCustomizationService } from './vscode/src/vs/workbench/contrib/chat/browser/agentSessions/agentHost/agentHostCustomizationService.service.js';
+-import { IAgentHostActiveClientService } from './vscode/src/vs/workbench/contrib/chat/browser/agentSessions/agentHost/agentHostActiveClientService.service.js';
+ import { constObservable } from './vscode/src/vs/base/common/observableInternal/observables/constObservable.js';
+ import { FileSystemProviderCapabilities } from './vscode/src/vs/platform/files/common/files.js';
+ 
+@@ -2455,40 +2344,6 @@ class ExtensionRecommendationsService {
      }
  }
  registerSingleton(IExtensionRecommendationsService, ExtensionRecommendationsService, InstantiationType.Eager);
@@ -140,7 +262,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9
  class ExtensionRecommendationNotificationService {
      constructor() {
          this.ignoredRecommendations = [];
-@@ -3831,81 +3772,6 @@ class TerminalQuickFixService {
+@@ -3831,81 +3686,6 @@ class TerminalQuickFixService {
      }
  }
  registerSingleton(ITerminalQuickFixService, TerminalQuickFixService, InstantiationType.Delayed);
@@ -222,7 +344,179 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9
  class KeybindingEditingService {
      constructor() {
          this.addKeybinding = unsupported;
-@@ -5139,17 +5005,6 @@ __decorate([
+@@ -4153,155 +3933,6 @@ class WorkbenchAssignmentService {
+     }
+ }
+ registerSingleton(IWorkbenchAssignmentService, WorkbenchAssignmentService, InstantiationType.Delayed);
+-class ChatService {
+-    constructor() {
+-        this.activateDefaultAgent = unsupported;
+-        this.getChatStorageFolder = unsupported;
+-        this.logChatIndex = unsupported;
+-        this.setChatSessionTitle = unsupported;
+-        this.adoptRequest = unsupported;
+-        this.isEnabled = () => false;
+-        this.resendRequest = unsupported;
+-        this.clearAllHistoryEntries = unsupported;
+-        this.hasSessions = () => false;
+-        this.onDidDisposeSession = Event.None;
+-        this.transferChatSession = unsupported;
+-        this.startNewLocalSession = unsupported;
+-        this.getSession = () => undefined;
+-        this.sendRequest = unsupported;
+-        this.removeRequest = unsupported;
+-        this.cancelCurrentRequestForSession = unsupported;
+-        this.addCompleteRequest = unsupported;
+-        this.removeHistoryEntry = unsupported;
+-        this.onDidPerformUserAction = Event.None;
+-        this.notifyUserAction = unsupported;
+-        this.onDidSubmitRequest = Event.None;
+-        this.requestInProgressObs = constObservable(false);
+-        this.editingSessions = [];
+-        this.getLocalSessionHistory = async () => [];
+-        this.chatModels = constObservable([]);
+-        this.getLiveSessionItems = async () => [];
+-        this.getHistorySessionItems = async () => [];
+-        this.getMetadataForSession = async () => undefined;
+-        this.waitForModelDisposals = async () => { };
+-        this.setSaveModelsEnabled = unsupported;
+-        this.appendProgress = unsupported;
+-        this.transferredSessionResource = undefined;
+-        this.getSessionTitle = () => undefined;
+-        this.onDidCreateModel = Event.None;
+-        this.onDidReceiveQuestionCarouselAnswer = Event.None;
+-        this.notifyQuestionCarouselAnswer = unsupported;
+-        this.setYieldRequested = unsupported;
+-        this.removePendingRequest = unsupported;
+-        this.setPendingRequests = unsupported;
+-        this.processPendingRequests = unsupported;
+-        this.sendPendingRequestImmediately = unsupported;
+-        this.acquireExistingSession = () => undefined;
+-        this.acquireOrLoadSession = async () => undefined;
+-        this.loadSessionFromData = unsupported;
+-        this.setSessionTitle = unsupported;
+-        this.migrateRequests = unsupported;
+-        this.getChatModelReferenceDebugInfo = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "activateDefaultAgent", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "getChatStorageFolder", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "logChatIndex", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "setChatSessionTitle", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "adoptRequest", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "resendRequest", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "clearAllHistoryEntries", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "transferChatSession", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "startNewLocalSession", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "sendRequest", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "removeRequest", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "cancelCurrentRequestForSession", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "addCompleteRequest", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "removeHistoryEntry", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "notifyUserAction", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "setSaveModelsEnabled", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "appendProgress", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "notifyQuestionCarouselAnswer", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "setYieldRequested", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "removePendingRequest", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "setPendingRequests", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "processPendingRequests", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "sendPendingRequestImmediately", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "loadSessionFromData", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "setSessionTitle", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "migrateRequests", void 0);
+-__decorate([
+-    Unsupported
+-], ChatService.prototype, "getChatModelReferenceDebugInfo", void 0);
+-registerSingleton(IChatService, ChatService, InstantiationType.Delayed);
+-class ChatMarkdownAnchorService {
+-    constructor() {
+-        this.lastFocusedAnchor = undefined;
+-        this.register = () => Disposable.None;
+-    }
+-}
+-registerSingleton(IChatMarkdownAnchorService, ChatMarkdownAnchorService, InstantiationType.Delayed);
+-class LanguageModelStatsService {
+-    constructor() {
+-        this.update = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], LanguageModelStatsService.prototype, "update", void 0);
+-registerSingleton(ILanguageModelStatsService, LanguageModelStatsService, InstantiationType.Delayed);
+ class QuickChatService {
+     constructor() {
+         this.focused = false;
+@@ -4962,15 +4593,6 @@ __decorate([
+     Unsupported
+ ], CommentService.prototype, "removeContinueOnComment", void 0);
+ registerSingleton(ICommentService, CommentService, InstantiationType.Delayed);
+-class AgentEditorCommentsBridge {
+-    constructor() {
+-        this.onDidChangeComments = Event.None;
+-        this.getComments = () => [];
+-        this.addComment = () => { };
+-        this.registerProvider = () => Disposable.None;
+-    }
+-}
+-registerSingleton(IAgentEditorCommentsBridge, AgentEditorCommentsBridge, InstantiationType.Delayed);
+ class NotebookCellStatusBarService {
+     constructor() {
+         this.onDidChangeProviders = Event.None;
+@@ -5139,17 +4761,6 @@ __decorate([
      Unsupported
  ], ExtensionBisectService.prototype, "reset", void 0);
  registerSingleton(IExtensionBisectService, ExtensionBisectService, InstantiationType.Eager);
@@ -240,7 +534,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9
  class ChatWidgetService {
      constructor() {
          this.getWidgetsByLocations = () => [];
-@@ -5275,84 +5130,6 @@ __decorate([
+@@ -5275,84 +4886,6 @@ __decorate([
      Unsupported
  ], AuthenticationService.prototype, "removeSession", void 0);
  registerSingleton(IAuthenticationService, AuthenticationService, InstantiationType.Delayed);
@@ -325,7 +619,175 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9
  class TimelineService {
      constructor() {
          this.onDidChangeProviders = Event.None;
-@@ -6248,285 +6025,6 @@ __decorate([
+@@ -5724,124 +5257,6 @@ class NotebookSearchService {
+     }
+ }
+ registerSingleton(INotebookSearchService, NotebookSearchService, InstantiationType.Delayed);
+-class LanguageModelsService {
+-    constructor() {
+-        this.sendChatRequest = unsupported;
+-        this.selectLanguageModels = unsupported;
+-        this.computeTokenLength = unsupported;
+-        this.onDidChangeLanguageModels = Event.None;
+-        this.getLanguageModelIds = () => [];
+-        this.lookupLanguageModel = () => undefined;
+-        this.getVendors = () => [];
+-        this.registerLanguageModelProvider = () => Disposable.None;
+-        this.onDidChangeLanguageModelVendors = Event.None;
+-        this.lookupLanguageModelByQualifiedName = () => undefined;
+-        this.getLanguageModelGroups = () => [];
+-        this.hasResolvedVendor = () => false;
+-        this.deltaLanguageModelChatProviderDescriptors = unsupported;
+-        this.addLanguageModelsProviderGroup = unsupported;
+-        this.removeLanguageModelsProviderGroup = unsupported;
+-        this.configureLanguageModelsProviderGroup = unsupported;
+-        this.renameLanguageModelsProviderGroup = unsupported;
+-        this.updateLanguageModelsProviderGroupApiKey = unsupported;
+-        this.addLanguageModelsProviderGroupModel = unsupported;
+-        this.openLanguageModelsProviderGroupSettings = unsupported;
+-        this.migrateLanguageModelsProviderGroup = unsupported;
+-        this.getRecentlyUsedModelIds = () => [];
+-        this.addToRecentlyUsedList = () => { };
+-        this.clearRecentlyUsedList = () => { };
+-        this.getModelsControlManifest = unsupported;
+-        this.onDidChangeModelsControlManifest = Event.None;
+-        this.restrictedChatParticipants = constObservable({});
+-        this.getModelConfiguration = () => undefined;
+-        this.setModelConfiguration = async () => { };
+-        this.getModelConfigurationActions = () => [];
+-        this.configureModel = async () => { };
+-        this.getPinnedModelIds = () => [];
+-        this.pinModel = () => { };
+-        this.unpinModel = () => { };
+-        this.isModelPinned = () => false;
+-        this.onDidChangePinnedModels = Event.None;
+-        this.isModelHidden = () => false;
+-        this.isGroupHidden = () => false;
+-        this.setModelHidden = () => { };
+-        this.setGroupHidden = () => { };
+-        this.getHiddenModelIds = () => [];
+-        this.onDidChangeModelVisibility = Event.None;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], LanguageModelsService.prototype, "sendChatRequest", void 0);
+-__decorate([
+-    Unsupported
+-], LanguageModelsService.prototype, "selectLanguageModels", void 0);
+-__decorate([
+-    Unsupported
+-], LanguageModelsService.prototype, "computeTokenLength", void 0);
+-__decorate([
+-    Unsupported
+-], LanguageModelsService.prototype, "deltaLanguageModelChatProviderDescriptors", void 0);
+-__decorate([
+-    Unsupported
+-], LanguageModelsService.prototype, "addLanguageModelsProviderGroup", void 0);
+-__decorate([
+-    Unsupported
+-], LanguageModelsService.prototype, "removeLanguageModelsProviderGroup", void 0);
+-__decorate([
+-    Unsupported
+-], LanguageModelsService.prototype, "configureLanguageModelsProviderGroup", void 0);
+-__decorate([
+-    Unsupported
+-], LanguageModelsService.prototype, "renameLanguageModelsProviderGroup", void 0);
+-__decorate([
+-    Unsupported
+-], LanguageModelsService.prototype, "updateLanguageModelsProviderGroupApiKey", void 0);
+-__decorate([
+-    Unsupported
+-], LanguageModelsService.prototype, "addLanguageModelsProviderGroupModel", void 0);
+-__decorate([
+-    Unsupported
+-], LanguageModelsService.prototype, "openLanguageModelsProviderGroupSettings", void 0);
+-__decorate([
+-    Unsupported
+-], LanguageModelsService.prototype, "migrateLanguageModelsProviderGroup", void 0);
+-__decorate([
+-    Unsupported
+-], LanguageModelsService.prototype, "getModelsControlManifest", void 0);
+-registerSingleton(ILanguageModelsService, LanguageModelsService, InstantiationType.Delayed);
+-class ChatSlashCommandService {
+-    constructor() {
+-        this.onDidChangeCommands = Event.None;
+-        this.registerSlashCommand = () => Disposable.None;
+-        this.executeCommand = unsupported;
+-        this.getCommands = unsupported;
+-        this.hasCommand = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], ChatSlashCommandService.prototype, "executeCommand", void 0);
+-__decorate([
+-    Unsupported
+-], ChatSlashCommandService.prototype, "getCommands", void 0);
+-__decorate([
+-    Unsupported
+-], ChatSlashCommandService.prototype, "hasCommand", void 0);
+-registerSingleton(IChatSlashCommandService, ChatSlashCommandService, InstantiationType.Delayed);
+-class ChatVariablesService {
+-    constructor() {
+-        this.getDynamicVariables = unsupported;
+-        this.getSelectedToolAndToolSets = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], ChatVariablesService.prototype, "getDynamicVariables", void 0);
+-__decorate([
+-    Unsupported
+-], ChatVariablesService.prototype, "getSelectedToolAndToolSets", void 0);
+-registerSingleton(IChatVariablesService, ChatVariablesService, InstantiationType.Delayed);
+ class AiRelatedInformationService {
+     constructor() {
+         this.isEnabled = () => false;
+@@ -6111,22 +5526,6 @@ __decorate([
+     Unsupported
+ ], ChatAccessibilityService.prototype, "disposeRequest", void 0);
+ registerSingleton(IChatAccessibilityService, ChatAccessibilityService, InstantiationType.Delayed);
+-class ChatWidgetHistoryService {
+-    constructor() {
+-        this.clearHistory = unsupported;
+-        this.getHistory = () => [];
+-        this.onDidChangeHistory = Event.None;
+-        this.append = unsupported;
+-        this.moveHistory = () => { };
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], ChatWidgetHistoryService.prototype, "clearHistory", void 0);
+-__decorate([
+-    Unsupported
+-], ChatWidgetHistoryService.prototype, "append", void 0);
+-registerSingleton(IChatWidgetHistoryService, ChatWidgetHistoryService, InstantiationType.Delayed);
+ class ChatCodeBlockContextProviderService {
+     constructor() {
+         this.providers = [];
+@@ -6134,19 +5533,6 @@ class ChatCodeBlockContextProviderService {
+     }
+ }
+ registerSingleton(IChatCodeBlockContextProviderService, ChatCodeBlockContextProviderService, InstantiationType.Delayed);
+-class InlineChatSessionService {
+-    constructor() {
+-        this.onWillStartSession = Event.None;
+-        this.createSession = unsupported;
+-        this.onDidChangeSessions = Event.None;
+-        this.getSessionBySessionUri = () => undefined;
+-        this.getSessionByTextModel = () => undefined;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], InlineChatSessionService.prototype, "createSession", void 0);
+-registerSingleton(IInlineChatSessionService, InlineChatSessionService, InstantiationType.Delayed);
+ class NotebookEditorWorkerService {
+     constructor() {
+         this.canComputeDiff = () => false;
+@@ -6248,318 +5634,39 @@ __decorate([
      Unsupported
  ], WalkthroughsService.prototype, "markWalkthroughOpened", void 0);
  registerSingleton(IWalkthroughsService, WalkthroughsService, InstantiationType.Delayed);
@@ -345,7 +807,8 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9
 -], UserDataSyncStoreManagementService.prototype, "getPreviousUserDataSyncStore", void 0);
 -registerSingleton(IUserDataSyncStoreManagementService, UserDataSyncStoreManagementService, InstantiationType.Delayed);
 -class UserDataSyncStoreService {
--    constructor() {
++class UserDataProfileManagementService {
+     constructor() {
 -        this.onDidChangeDonotMakeRequestsUntil = Event.None;
 -        this.donotMakeRequestsUntil = undefined;
 -        this.onTokenFailed = Event.None;
@@ -363,10 +826,18 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9
 -        this.getActivityData = unsupported;
 -        this.clear = unsupported;
 -        this.getLatestData = async () => null;
--    }
--}
--__decorate([
--    Unsupported
++        this.getDefaultProfileToUse = unsupported;
++        this.createProfile = unsupported;
++        this.createAndEnterProfile = unsupported;
++        this.createAndEnterTransientProfile = unsupported;
++        this.removeProfile = unsupported;
++        this.updateProfile = unsupported;
++        this.switchProfile = unsupported;
++        this.getBuiltinProfileTemplates = unsupported;
+     }
+ }
+ __decorate([
+     Unsupported
 -], UserDataSyncStoreService.prototype, "setAuthToken", void 0);
 -__decorate([
 -    Unsupported
@@ -374,23 +845,29 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9
 -__decorate([
 -    Unsupported
 -], UserDataSyncStoreService.prototype, "readResource", void 0);
--__decorate([
--    Unsupported
++], UserDataProfileManagementService.prototype, "getDefaultProfileToUse", void 0);
+ __decorate([
+     Unsupported
 -], UserDataSyncStoreService.prototype, "writeResource", void 0);
--__decorate([
--    Unsupported
++], UserDataProfileManagementService.prototype, "createProfile", void 0);
+ __decorate([
+     Unsupported
 -], UserDataSyncStoreService.prototype, "deleteResource", void 0);
--__decorate([
--    Unsupported
++], UserDataProfileManagementService.prototype, "createAndEnterProfile", void 0);
+ __decorate([
+     Unsupported
 -], UserDataSyncStoreService.prototype, "getAllResourceRefs", void 0);
--__decorate([
--    Unsupported
++], UserDataProfileManagementService.prototype, "createAndEnterTransientProfile", void 0);
+ __decorate([
+     Unsupported
 -], UserDataSyncStoreService.prototype, "resolveResourceContent", void 0);
--__decorate([
--    Unsupported
++], UserDataProfileManagementService.prototype, "removeProfile", void 0);
+ __decorate([
+     Unsupported
 -], UserDataSyncStoreService.prototype, "getAllCollections", void 0);
--__decorate([
--    Unsupported
++], UserDataProfileManagementService.prototype, "updateProfile", void 0);
+ __decorate([
+     Unsupported
 -], UserDataSyncStoreService.prototype, "createCollection", void 0);
 -__decorate([
 -    Unsupported
@@ -608,10 +1085,44 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9
 -    Unsupported
 -], UserDataSyncUtilService.prototype, "resolveFormattingOptions", void 0);
 -registerSingleton(IUserDataSyncUtilService, UserDataSyncUtilService, InstantiationType.Delayed);
- class UserDataProfileManagementService {
-     constructor() {
-         this.getDefaultProfileToUse = unsupported;
-@@ -6634,84 +6132,6 @@ __decorate([
+-class UserDataProfileManagementService {
+-    constructor() {
+-        this.getDefaultProfileToUse = unsupported;
+-        this.createProfile = unsupported;
+-        this.createAndEnterProfile = unsupported;
+-        this.createAndEnterTransientProfile = unsupported;
+-        this.removeProfile = unsupported;
+-        this.updateProfile = unsupported;
+-        this.switchProfile = unsupported;
+-        this.getBuiltinProfileTemplates = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], UserDataProfileManagementService.prototype, "getDefaultProfileToUse", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataProfileManagementService.prototype, "createProfile", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataProfileManagementService.prototype, "createAndEnterProfile", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataProfileManagementService.prototype, "createAndEnterTransientProfile", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataProfileManagementService.prototype, "removeProfile", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataProfileManagementService.prototype, "updateProfile", void 0);
+-__decorate([
+-    Unsupported
+-], UserDataProfileManagementService.prototype, "switchProfile", void 0);
++], UserDataProfileManagementService.prototype, "switchProfile", void 0);
+ __decorate([
+     Unsupported
+ ], UserDataProfileManagementService.prototype, "getBuiltinProfileTemplates", void 0);
+@@ -6634,84 +5741,6 @@ __decorate([
      Unsupported
  ], DebugVisualizerService.prototype, "getApplicableFor", void 0);
  registerSingleton(IDebugVisualizerService, DebugVisualizerService, InstantiationType.Delayed);
@@ -696,10 +1207,322 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9
  class MultiDiffSourceResolverService {
      constructor() {
          this.registerResolver = () => Disposable.None;
-@@ -7220,84 +6640,6 @@ __decorate([
+@@ -6827,112 +5856,6 @@ class TrustedDomainService {
+     }
+ }
+ registerSingleton(ITrustedDomainService, TrustedDomainService, InstantiationType.Delayed);
+-class FakeKeybindingContextKey {
+-    constructor(defaultValue) {
+-        this._defaultValue = defaultValue;
+-        this._value = this._defaultValue;
+-    }
+-    set(value) {
+-        this._value = value;
+-    }
+-    reset() {
+-        this._value = this._defaultValue;
+-    }
+-    get() {
+-        return this._value;
+-    }
+-}
+-class FakeContextKeyService {
+-    constructor() {
+-        this.dispose = () => { };
+-        this._keys = new Map();
+-        this.createKey = (key, defaultValue) => {
+-            const ret = new FakeKeybindingContextKey(defaultValue);
+-            this._keys.set(key, ret);
+-            return ret;
+-        };
+-        this.contextMatchesRules = () => false;
+-        this.onDidChangeContext = Event.None;
+-        this.bufferChangeEvents = (callback) => {
+-            callback();
+-        };
+-        this.getContextKeyValue = (key) => {
+-            const value = this._keys.get(key);
+-            if (value) {
+-                return value.get();
+-            }
+-            return undefined;
+-        };
+-        this.getContext = () => ({ getValue: () => undefined });
+-        this.createScoped = () => this;
+-        this.createOverlay = () => this;
+-        this.updateParent = () => { };
+-    }
+-}
+-class LanguageModelToolsService {
+-    constructor() {
+-        this.getTool = () => undefined;
+-        this.getToolByName = () => undefined;
+-        this.onDidChangeTools = Event.None;
+-        this.registerToolData = () => Disposable.None;
+-        this.registerToolImplementation = () => Disposable.None;
+-        this.registerTool = () => Disposable.None;
+-        this.getTools = () => [];
+-        this.invokeTool = unsupported;
+-        this.cancelToolCallsForRequest = unsupported;
+-        this.getToolSetByName = () => undefined;
+-        this.createToolSet = unsupported;
+-        this.toolSets = constObservable([]);
+-        this.toToolAndToolSetEnablementMap = unsupported;
+-        this.getToolSet = () => undefined;
+-        this.toToolReferences = () => [];
+-        this.onDidPrepareToolCallBecomeUnresponsive = Event.None;
+-        this.flushToolUpdates = unsupported;
+-        this.vscodeToolSet = new ToolSet('vscode', VSCodeToolReference.vscode, Codicon.tools, ToolDataSource.Internal, undefined, undefined, undefined, undefined, undefined, new FakeContextKeyService());
+-        this.executeToolSet = new ToolSet('execute', VSCodeToolReference.vscode, Codicon.terminal, ToolDataSource.Internal, undefined, undefined, undefined, undefined, undefined, new FakeContextKeyService());
+-        this.readToolSet = new ToolSet('read', VSCodeToolReference.vscode, Codicon.eye, ToolDataSource.Internal, undefined, undefined, undefined, undefined, undefined, new FakeContextKeyService());
+-        this.agentToolSet = new ToolSet('read', VSCodeToolReference.vscode, Codicon.eye, ToolDataSource.Internal, undefined, undefined, undefined, undefined, undefined, new FakeContextKeyService());
+-        this.getFullReferenceNames = () => [];
+-        this.getFullReferenceName = (tool) => 'displayName' in tool ? tool.displayName : tool.referenceName;
+-        this.getFullReferenceNameMap = () => new Map();
+-        this.getToolByFullReferenceName = () => undefined;
+-        this.getDeprecatedFullReferenceNames = () => new Map();
+-        this.toFullReferenceNames = () => [];
+-        this.onDidInvokeTool = Event.None;
+-        this.observeTools = () => constObservable([]);
+-        this.getAllToolsIncludingDisabled = () => [];
+-        this.beginToolCall = () => undefined;
+-        this.updateToolStream = unsupported;
+-        this.getToolSetsForModel = () => [];
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], LanguageModelToolsService.prototype, "invokeTool", void 0);
+-__decorate([
+-    Unsupported
+-], LanguageModelToolsService.prototype, "cancelToolCallsForRequest", void 0);
+-__decorate([
+-    Unsupported
+-], LanguageModelToolsService.prototype, "createToolSet", void 0);
+-__decorate([
+-    Unsupported
+-], LanguageModelToolsService.prototype, "toToolAndToolSetEnablementMap", void 0);
+-__decorate([
+-    Unsupported
+-], LanguageModelToolsService.prototype, "flushToolUpdates", void 0);
+-__decorate([
+-    Unsupported
+-], LanguageModelToolsService.prototype, "updateToolStream", void 0);
+-registerSingleton(ILanguageModelToolsService, LanguageModelToolsService, InstantiationType.Delayed);
+-class NullToolResultCompressor {
+-    constructor() {
+-        this.registerFilter = () => { };
+-        this.maybeCompress = () => undefined;
+-        this.registerCache = () => { };
+-    }
+-}
+-registerSingleton(IToolResultCompressor, NullToolResultCompressor, InstantiationType.Delayed);
+ class IssueFormService {
+     constructor() {
+         this.openReporter = unsupported;
+@@ -6966,37 +5889,6 @@ __decorate([
      Unsupported
- ], PromptsService.prototype, "getDiscoveryInfo", void 0);
- registerSingleton(IPromptsService, PromptsService, InstantiationType.Eager);
+ ], IssueFormService.prototype, "submitIssue", void 0);
+ registerSingleton(IIssueFormService, IssueFormService, InstantiationType.Delayed);
+-class CodeMapperService {
+-    constructor() {
+-        this.providers = [];
+-        this.registerCodeMapperProvider = () => Disposable.None;
+-        this.mapCode = async () => undefined;
+-    }
+-}
+-registerSingleton(ICodeMapperService, CodeMapperService, InstantiationType.Delayed);
+-class ChatEditingService {
+-    constructor() {
+-        this.editingSessionsObs = constObservable([]);
+-        this.getEditingSession = () => undefined;
+-        this.startOrContinueGlobalEditingSession = unsupported;
+-        this.createEditingSession = unsupported;
+-        this.transferEditingSession = unsupported;
+-        this.registerEditingSessionProvider = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], ChatEditingService.prototype, "startOrContinueGlobalEditingSession", void 0);
+-__decorate([
+-    Unsupported
+-], ChatEditingService.prototype, "createEditingSession", void 0);
+-__decorate([
+-    Unsupported
+-], ChatEditingService.prototype, "transferEditingSession", void 0);
+-__decorate([
+-    Unsupported
+-], ChatEditingService.prototype, "registerEditingSessionProvider", void 0);
+-registerSingleton(IChatEditingService, ChatEditingService, InstantiationType.Delayed);
+ class ActionViewItemService {
+     constructor() {
+         this.onDidChange = Event.None;
+@@ -7005,13 +5897,6 @@ class ActionViewItemService {
+     }
+ }
+ registerSingleton(IActionViewItemService, ActionViewItemService, InstantiationType.Delayed);
+-class LanguageModelIgnoredFilesService {
+-    constructor() {
+-        this.fileIsIgnored = async () => false;
+-        this.registerIgnoredFileProvider = () => Disposable.None;
+-    }
+-}
+-registerSingleton(ILanguageModelIgnoredFilesService, LanguageModelIgnoredFilesService, InstantiationType.Delayed);
+ class AllowedExtensionsService {
+     constructor() {
+         this.onDidChangeAllowedExtensionsConfigValue = Event.None;
+@@ -7019,47 +5904,16 @@ class AllowedExtensionsService {
+     }
+ }
+ registerSingleton(IAllowedExtensionsService, AllowedExtensionsService, InstantiationType.Delayed);
+-class ChatTransferService {
++class NotebookOriginalCellModelFactory {
+     constructor() {
+-        this.checkAndSetTransferredWorkspaceTrust = unsupported;
+-        this.addWorkspaceToTransferred = unsupported;
++        this.getOrCreate = unsupported;
+     }
+ }
+ __decorate([
+     Unsupported
+-], ChatTransferService.prototype, "checkAndSetTransferredWorkspaceTrust", void 0);
+-__decorate([
+-    Unsupported
+-], ChatTransferService.prototype, "addWorkspaceToTransferred", void 0);
+-registerSingleton(IChatTransferService, ChatTransferService, InstantiationType.Delayed);
+-class ChatStatusItemService {
+-    constructor() {
+-        this.onDidChange = Event.None;
+-        this.setOrUpdateEntry = unsupported;
+-        this.deleteEntry = unsupported;
+-        this.getEntries = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], ChatStatusItemService.prototype, "setOrUpdateEntry", void 0);
+-__decorate([
+-    Unsupported
+-], ChatStatusItemService.prototype, "deleteEntry", void 0);
+-__decorate([
+-    Unsupported
+-], ChatStatusItemService.prototype, "getEntries", void 0);
+-registerSingleton(IChatStatusItemService, ChatStatusItemService, InstantiationType.Delayed);
+-class NotebookOriginalCellModelFactory {
+-    constructor() {
+-        this.getOrCreate = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], NotebookOriginalCellModelFactory.prototype, "getOrCreate", void 0);
+-registerSingleton(INotebookOriginalCellModelFactory, NotebookOriginalCellModelFactory, InstantiationType.Delayed);
+-class NotebookOriginalModelReferenceFactory {
++], NotebookOriginalCellModelFactory.prototype, "getOrCreate", void 0);
++registerSingleton(INotebookOriginalCellModelFactory, NotebookOriginalCellModelFactory, InstantiationType.Delayed);
++class NotebookOriginalModelReferenceFactory {
+     constructor() {
+         this.getOrCreate = unsupported;
+     }
+@@ -7126,178 +5980,6 @@ __decorate([
+     Unsupported
+ ], TerminalEditingService.prototype, "setEditingTerminal", void 0);
+ registerSingleton(ITerminalEditingService, TerminalEditingService, InstantiationType.Delayed);
+-class ChatEntitlementsService {
+-    constructor() {
+-        this.clientByokEnabled = false;
+-        this.organisations = undefined;
+-        this.isInternal = false;
+-        this.sku = undefined;
+-        this.onDidChangeEntitlement = Event.None;
+-        this.onDidChangeQuotaExceeded = Event.None;
+-        this.onDidChangeQuotaRemaining = Event.None;
+-        this.onDidChangeSentiment = Event.None;
+-        this.entitlement = ChatEntitlement.Unknown;
+-        this.quotas = {};
+-        this.sentiment = {
+-            installed: false,
+-            hidden: true,
+-            disabled: true,
+-            untrusted: false,
+-            later: false,
+-            registered: false
+-        };
+-        this.update = unsupported;
+-        this.entitlementObs = constObservable(this.entitlement);
+-        this.sentimentObs = constObservable(this.sentiment);
+-        this.onDidChangeAnonymous = Event.None;
+-        this.anonymous = false;
+-        this.anonymousObs = constObservable(false);
+-        this.copilotTrackingId = undefined;
+-        this.markAnonymousRateLimited = () => { };
+-        this.markSetupCompleted = () => { };
+-        this.acceptQuotas = () => { };
+-        this.clearQuotas = () => { };
+-        this.setForceHidden = () => { };
+-        this.hasByokModels = false;
+-        this.onDidChangeUsageBasedBilling = Event.None;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], ChatEntitlementsService.prototype, "update", void 0);
+-registerSingleton(IChatEntitlementService, ChatEntitlementsService, InstantiationType.Eager);
+-class PromptsService {
+-    constructor() {
+-        this.onDidChangeInstructions = Event.None;
+-        this.onDidChangeAgentInstructions = Event.None;
+-        this.onDidChangeSkills = Event.None;
+-        this.listPromptFiles = async () => [];
+-        this.getSourceFolders = async () => [];
+-        this.hasPromptSlashCommand = () => false;
+-        this.dispose = () => { };
+-        this.resolvePromptSlashCommand = async () => undefined;
+-        this.getParsedPromptFile = unsupported;
+-        this.listPromptFilesForStorage = async () => [];
+-        this.parseNew = unsupported;
+-        this.registerContributedFile = () => Disposable.None;
+-        this.getPromptLocationLabel = unsupported;
+-        this.getHooks = async () => undefined;
+-        this.onDidChangeCustomAgents = Event.None;
+-        this.getCustomAgents = async () => [];
+-        this.listNestedAgentMDs = async () => [];
+-        this.listAgentInstructions = async () => [];
+-        this.getAgentFileURIFromModeFile = () => undefined;
+-        this.getDisabledPromptFiles = () => new ResourceSet();
+-        this.setDisabledPromptFiles = unsupported;
+-        this.isValidSlashCommandName = () => false;
+-        this.onDidChangeSlashCommands = Event.None;
+-        this.getPromptSlashCommands = async () => [];
+-        this.getPromptSlashCommandName = unsupported;
+-        this.findAgentSkills = async () => undefined;
+-        this.getResolvedSourceFolders = async () => [];
+-        this.registerPromptFileProvider = () => Disposable.None;
+-        this.getInstructionFiles = async () => [];
+-        this.onDidChangeHooks = Event.None;
+-        this.getDiscoveryInfo = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], PromptsService.prototype, "getParsedPromptFile", void 0);
+-__decorate([
+-    Unsupported
+-], PromptsService.prototype, "parseNew", void 0);
+-__decorate([
+-    Unsupported
+-], PromptsService.prototype, "getPromptLocationLabel", void 0);
+-__decorate([
+-    Unsupported
+-], PromptsService.prototype, "setDisabledPromptFiles", void 0);
+-__decorate([
+-    Unsupported
+-], PromptsService.prototype, "getPromptSlashCommandName", void 0);
+-__decorate([
+-    Unsupported
+-], PromptsService.prototype, "getDiscoveryInfo", void 0);
+-registerSingleton(IPromptsService, PromptsService, InstantiationType.Eager);
 -class McpRegistry {
 -    constructor() {
 -        this.onDidChangeInputs = Event.None;
@@ -781,7 +1604,7 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9
  class ExtensionGalleryManifestService {
      constructor() {
          this.onDidChangeExtensionGalleryManifest = Event.None;
-@@ -7342,151 +6684,6 @@ __decorate([
+@@ -7342,158 +6024,6 @@ __decorate([
      Unsupported
  ], NullDefaultAccountService.prototype, "signIn", void 0);
  registerSingleton(IDefaultAccountService, NullDefaultAccountService, InstantiationType.Delayed);
@@ -930,13 +1753,63 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9
 -    Unsupported
 -], McpResourceScannerService.prototype, "updateSandboxConfig", void 0);
 -registerSingleton(IMcpResourceScannerService, McpResourceScannerService, InstantiationType.Eager);
- class ChatContextPickService {
+-class ChatContextPickService {
+-    constructor() {
+-        this.items = [];
+-        this.registerChatContextItem = () => Disposable.None;
+-    }
+-}
+-registerSingleton(IChatContextPickService, ChatContextPickService, InstantiationType.Eager);
+ class TreeSitterThemeService {
      constructor() {
-         this.items = [];
-@@ -7565,15 +6762,6 @@ __decorate([
+         this.onChange = constObservable(undefined);
+@@ -7522,243 +6052,6 @@ __decorate([
      Unsupported
- ], ChatAttachmentResolveService.prototype, "resolveSourceControlHistoryItemAttachContext", void 0);
- registerSingleton(IChatAttachmentResolveService, ChatAttachmentResolveService, InstantiationType.Eager);
+ ], TreeSitterLibraryService.prototype, "createQuery", void 0);
+ registerSingleton(ITreeSitterLibraryService, TreeSitterLibraryService, InstantiationType.Eager);
+-class ChatAttachmentResolveService {
+-    constructor() {
+-        this.resolveEditorAttachContext = unsupported;
+-        this.resolveUntitledEditorAttachContext = unsupported;
+-        this.resolveResourceAttachContext = unsupported;
+-        this.resolveBrowserViewAttachContext = async () => undefined;
+-        this.resolveImageEditorAttachContext = unsupported;
+-        this.resolveImageAttachContext = unsupported;
+-        this.resolveMarkerAttachContext = unsupported;
+-        this.resolveSymbolsAttachContext = unsupported;
+-        this.resolveNotebookOutputAttachContext = unsupported;
+-        this.resolveSourceControlHistoryItemAttachContext = unsupported;
+-        this.resolveDirectoryImages = async () => [];
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], ChatAttachmentResolveService.prototype, "resolveEditorAttachContext", void 0);
+-__decorate([
+-    Unsupported
+-], ChatAttachmentResolveService.prototype, "resolveUntitledEditorAttachContext", void 0);
+-__decorate([
+-    Unsupported
+-], ChatAttachmentResolveService.prototype, "resolveResourceAttachContext", void 0);
+-__decorate([
+-    Unsupported
+-], ChatAttachmentResolveService.prototype, "resolveImageEditorAttachContext", void 0);
+-__decorate([
+-    Unsupported
+-], ChatAttachmentResolveService.prototype, "resolveImageAttachContext", void 0);
+-__decorate([
+-    Unsupported
+-], ChatAttachmentResolveService.prototype, "resolveMarkerAttachContext", void 0);
+-__decorate([
+-    Unsupported
+-], ChatAttachmentResolveService.prototype, "resolveSymbolsAttachContext", void 0);
+-__decorate([
+-    Unsupported
+-], ChatAttachmentResolveService.prototype, "resolveNotebookOutputAttachContext", void 0);
+-__decorate([
+-    Unsupported
+-], ChatAttachmentResolveService.prototype, "resolveSourceControlHistoryItemAttachContext", void 0);
+-registerSingleton(IChatAttachmentResolveService, ChatAttachmentResolveService, InstantiationType.Eager);
 -class McpElicitationService {
 -    constructor() {
 -        this.elicit = unsupported;
@@ -946,13 +1819,14 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9
 -    Unsupported
 -], McpElicitationService.prototype, "elicit", void 0);
 -registerSingleton(IMcpElicitationService, McpElicitationService, InstantiationType.Eager);
- class RemoteCodingAgentsService {
-     constructor() {
-         this.registerAgent = () => { };
-@@ -7582,74 +6770,6 @@ class RemoteCodingAgentsService {
-     }
- }
- registerSingleton(IRemoteCodingAgentsService, RemoteCodingAgentsService, InstantiationType.Eager);
+-class RemoteCodingAgentsService {
+-    constructor() {
+-        this.registerAgent = () => { };
+-        this.getRegisteredAgents = () => [];
+-        this.getAvailableAgents = () => [];
+-    }
+-}
+-registerSingleton(IRemoteCodingAgentsService, RemoteCodingAgentsService, InstantiationType.Eager);
 -class AuthenticationQueryService {
 -    constructor() {
 -        this.onDidChangePreferences = Event.None;
@@ -1021,10 +1895,119 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9
 -    Unsupported
 -], WorkbenchMcpManagementService.prototype, "getMcpServerConfigurationFromManifest", void 0);
 -registerSingleton(IWorkbenchMcpManagementService, WorkbenchMcpManagementService, InstantiationType.Eager);
- class ChatTodoListService {
+-class ChatTodoListService {
+-    constructor() {
+-        this.setTodos = unsupported;
+-        this.getTodos = () => [];
+-        this.onDidUpdateTodos = Event.None;
+-        this.migrateTodos = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], ChatTodoListService.prototype, "setTodos", void 0);
+-__decorate([
+-    Unsupported
+-], ChatTodoListService.prototype, "migrateTodos", void 0);
+-registerSingleton(IChatTodoListService, ChatTodoListService, InstantiationType.Delayed);
+-class ChatOutputRendererService {
+-    constructor() {
+-        this.registerRenderer = () => Disposable.None;
+-        this.renderOutputPart = unsupported;
+-        this.hasCodeBlockRenderer = () => false;
+-        this.renderCodeBlock = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], ChatOutputRendererService.prototype, "renderOutputPart", void 0);
+-__decorate([
+-    Unsupported
+-], ChatOutputRendererService.prototype, "renderCodeBlock", void 0);
+-registerSingleton(IChatOutputRendererService, ChatOutputRendererService, InstantiationType.Delayed);
+-class ChatSessionsService {
+-    constructor() {
+-        this.onDidChangeInProgress = Event.None;
+-        this.getAllChatSessionContributions = () => [];
+-        this.getInProgress = () => [];
+-        this.onDidChangeItemsProviders = Event.None;
+-        this.onDidChangeSessionItems = Event.None;
+-        this.onDidChangeAvailability = Event.None;
+-        this.registerChatSessionContentProvider = () => Disposable.None;
+-        this.onDidChangeContentProviderSchemes = Event.None;
+-        this.getContentProviderSchemes = () => [];
+-        this.canResolveChatSession = async () => false;
+-        this.getOrCreateChatSession = unsupported;
+-        this.resolveChatResponseUri = (_sessionResource, href) => href;
+-        this.getSessionOption = () => undefined;
+-        this.setSessionOption = () => false;
+-        this.getCapabilitiesForSessionType = () => undefined;
+-        this.getOptionGroupsForSessionType = () => undefined;
+-        this.setOptionGroupsForSessionType = unsupported;
+-        this.getChatSessionContribution = () => undefined;
+-        this.activateChatSessionItemProvider = async () => undefined;
+-        this.onDidChangeSessionOptions = Event.None;
+-        this.onDidChangeOptionGroups = Event.None;
+-        this.getChatSessionItems = async function* () { };
+-        this.getCustomAgentTargetForSessionType = () => Target.Undefined;
+-        this.registerChatSessionItemController = () => Disposable.None;
+-        this.refreshChatSessionItems = async () => { };
+-        this.resolveChatSessionItem = async () => undefined;
+-        this.provideChatInputCompletions = async () => undefined;
+-        this.getChatInputCompletionTriggerCharacters = async () => undefined;
+-        this.requiresCustomModelsForSessionType = () => false;
+-        this.supportsAutoModelForSessionType = () => true;
+-        this.requiresCopilotSignInForSessionType = () => false;
+-        this.createNewChatSessionItem = async () => undefined;
+-        this.registerSessionResourceAlias = () => { };
+-        this.setMaterializedSessionResource = () => { };
+-        this.getMaterializedSessionResource = () => undefined;
+-        this.clearMaterializedSessionResource = () => { };
+-        this.registerChatSessionContribution = () => Disposable.None;
+-        this.getRegisteredChatSessionItemProviders = () => [];
+-        this.updateSessionOptions = unsupported;
+-        this.supportsDelegationForSessionType = () => false;
+-        this.sessionSupportsFork = () => false;
+-        this.sessionSupportsRename = () => false;
+-        this.forkChatSession = unsupported;
+-        this.renameChatSession = unsupported;
+-        this.deleteChatSessionItem = unsupported;
+-        this.getSessionOptions = () => undefined;
+-        this.onDidCommitSession = Event.None;
+-        this.fireSessionCommitted = unsupported;
+-        this.onDidChangeCustomizations = Event.None;
+-        this.registerCustomizationsProvider = () => Disposable.None;
+-        this.hasCustomizationsProvider = () => false;
+-        this.getCustomizations = async () => undefined;
+-        this.getNewChatSessionInputState = async () => undefined;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], ChatSessionsService.prototype, "getOrCreateChatSession", void 0);
+-__decorate([
+-    Unsupported
+-], ChatSessionsService.prototype, "setOptionGroupsForSessionType", void 0);
+-__decorate([
+-    Unsupported
+-], ChatSessionsService.prototype, "updateSessionOptions", void 0);
+-__decorate([
+-    Unsupported
+-], ChatSessionsService.prototype, "forkChatSession", void 0);
+-__decorate([
+-    Unsupported
+-], ChatSessionsService.prototype, "renameChatSession", void 0);
+-__decorate([
+-    Unsupported
+-], ChatSessionsService.prototype, "deleteChatSessionItem", void 0);
+-__decorate([
+-    Unsupported
+-], ChatSessionsService.prototype, "fireSessionCommitted", void 0);
+-registerSingleton(IChatSessionsService, ChatSessionsService, InstantiationType.Delayed);
+ class ImageResizeService {
      constructor() {
-         this.setTodos = unsupported;
-@@ -7769,16 +6889,6 @@ __decorate([
+         this.resizeImage = unsupported;
+@@ -7769,73 +6062,6 @@ __decorate([
  ], ImageResizeService.prototype, "resizeImage", void 0);
  registerSingleton(IImageResizeService, ImageResizeService, InstantiationType.Delayed);
  registerSingleton(IDataChannelService, NullDataChannelService, InstantiationType.Delayed);
@@ -1038,10 +2021,82 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9
 -    Unsupported
 -], AllowedMcpServersService.prototype, "isAllowed", void 0);
 -registerSingleton(IAllowedMcpServersService, AllowedMcpServersService, InstantiationType.Delayed);
- class ChatLayoutService {
-     get fontFamily() {
-         return unsupported();
-@@ -7867,15 +6977,6 @@ __decorate([
+-class ChatLayoutService {
+-    get fontFamily() {
+-        return unsupported();
+-    }
+-    get fontSize() {
+-        return unsupported();
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], ChatLayoutService.prototype, "fontFamily", null);
+-__decorate([
+-    Unsupported
+-], ChatLayoutService.prototype, "fontSize", null);
+-registerSingleton(IChatLayoutService, ChatLayoutService, InstantiationType.Delayed);
+-class NullPlanReviewFeedbackService {
+-    constructor() {
+-        this.onDidChangeFeedback = Event.None;
+-        this.onDidChangeNavigation = Event.None;
+-        this.onDidChangeRegistrations = Event.None;
+-        this.registerPlanReview = () => Disposable.None;
+-        this.isActivePlanReview = () => false;
+-        this.addFeedback = () => '';
+-        this.removeFeedback = () => { };
+-        this.updateFeedback = () => { };
+-        this.getFeedback = () => [];
+-        this.clearFeedback = () => { };
+-        this.getNextFeedback = () => undefined;
+-        this.getNavigationBearing = () => ({
+-            activeIdx: 0,
+-            totalCount: 0
+-        });
+-        this.setNavigationAnchor = () => { };
+-        this.submitAllFeedback = () => { };
+-    }
+-}
+-registerSingleton(IPlanReviewFeedbackService, NullPlanReviewFeedbackService, InstantiationType.Delayed);
+-class NullChatInputNotificationService {
+-    constructor() {
+-        this.onDidChange = Event.None;
+-        this.onDidDismiss = Event.None;
+-        this.setNotification = () => { };
+-        this.deleteNotification = () => { };
+-        this.dismissNotification = () => { };
+-        this.getActiveNotification = () => undefined;
+-        this.handleMessageSent = () => { };
+-    }
+-}
+-registerSingleton(IChatInputNotificationService, NullChatInputNotificationService, InstantiationType.Delayed);
+-class NullChatPhoneInputPresenter {
+-    constructor() {
+-        this.enabled = constObservable(false);
+-        this.showCombinedModeAndModelSheet = async () => { };
+-        this.setImpl = () => Disposable.None;
+-    }
+-}
+-registerSingleton(IChatPhoneInputPresenter, NullChatPhoneInputPresenter, InstantiationType.Delayed);
+ class AiEditTelemetryService {
+     constructor() {
+         this.createSuggestionId = unsupported;
+@@ -7847,14 +6073,6 @@ __decorate([
+     Unsupported
+ ], AiEditTelemetryService.prototype, "createSuggestionId", void 0);
+ registerSingleton(IAiEditTelemetryService, AiEditTelemetryService, InstantiationType.Delayed);
+-class NullChatToolRiskAssessmentService {
+-    constructor() {
+-        this.isEnabled = () => false;
+-        this.getCached = () => undefined;
+-        this.assess = async () => undefined;
+-    }
+-}
+-registerSingleton(IChatToolRiskAssessmentService, NullChatToolRiskAssessmentService, InstantiationType.Delayed);
+ class InlineCompletionsUnificationService {
+     constructor() {
+         this.onDidStateChange = Event.None;
+@@ -7867,28 +6085,6 @@ __decorate([
      Unsupported
  ], InlineCompletionsUnificationService.prototype, "state", null);
  registerSingleton(IInlineCompletionsUnificationService, InlineCompletionsUnificationService, InstantiationType.Delayed);
@@ -1054,10 +2109,546 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9
 -    }
 -}
 -registerSingleton(IMcpGalleryManifestService, McpGalleryManifestService, InstantiationType.Delayed);
- class ChatModeService {
+-class ChatModeService {
+-    constructor() {
+-        this.getLocalModes = unsupported;
+-        this.createModes = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], ChatModeService.prototype, "getLocalModes", void 0);
+-__decorate([
+-    Unsupported
+-], ChatModeService.prototype, "createModes", void 0);
+-registerSingleton(IChatModeService, ChatModeService, InstantiationType.Delayed);
+ class MarkdownRendererService {
      constructor() {
-         this.getLocalModes = unsupported;
-@@ -8468,24 +7569,6 @@ class GitService {
+         this.render = unsupported;
+@@ -7902,45 +6098,6 @@ __decorate([
+     Unsupported
+ ], MarkdownRendererService.prototype, "setDefaultCodeBlockRenderer", void 0);
+ registerSingleton(IMarkdownRendererService, MarkdownRendererService, InstantiationType.Delayed);
+-class LanguageModelToolsConfirmationService {
+-    constructor() {
+-        this.manageConfirmationPreferences = unsupported;
+-        this.registerConfirmationContribution = () => Disposable.None;
+-        this.resetToolAutoConfirmation = unsupported;
+-        this.getPreConfirmAction = () => undefined;
+-        this.getPostConfirmAction = () => undefined;
+-        this.getPreConfirmActions = () => [];
+-        this.getPostConfirmActions = () => [];
+-        this.toolCanManageConfirmation = () => false;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], LanguageModelToolsConfirmationService.prototype, "manageConfirmationPreferences", void 0);
+-__decorate([
+-    Unsupported
+-], LanguageModelToolsConfirmationService.prototype, "resetToolAutoConfirmation", void 0);
+-registerSingleton(ILanguageModelToolsConfirmationService, LanguageModelToolsConfirmationService, InstantiationType.Delayed);
+-class ChatContextService {
+-    constructor() {
+-        this.setChatContextProvider = () => { };
+-        this.registerChatWorkspaceContextProvider = () => Disposable.None;
+-        this.registerChatExplicitContextProvider = () => Disposable.None;
+-        this.registerChatResourceContextProvider = () => Disposable.None;
+-        this.unregisterChatContextProvider = () => { };
+-        this.contextForResource = async () => undefined;
+-        this.updateWorkspaceContextItems = () => { };
+-        this.getWorkspaceContextItems = () => [];
+-        this.resolveChatContext = async (context) => context;
+-        this.dispose = () => { };
+-        this.setExecuteCommandCallback = () => { };
+-        this.executeChatContextItemCommand = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], ChatContextService.prototype, "executeChatContextItemCommand", void 0);
+-registerSingleton(IChatContextService, ChatContextService, InstantiationType.Delayed);
+ class RandomService {
+     constructor() {
+         this.generateUuid = unsupported;
+@@ -7954,228 +6111,16 @@ __decorate([
+     Unsupported
+ ], RandomService.prototype, "generatePrefixedUuid", void 0);
+ registerSingleton(IRandomService, RandomService, InstantiationType.Delayed);
+-class TerminalChatService {
+-    constructor() {
+-        this.onDidRegisterTerminalInstanceWithToolSession = Event.None;
+-        this.registerTerminalInstanceWithToolSession = () => { };
+-        this.registerTerminalInstanceWithExecutionId = () => Disposable.None;
+-        this.getTerminalInstanceByToolSessionId = async () => undefined;
+-        this.getTerminalInstanceByExecutionId = () => undefined;
+-        this.getToolSessionTerminalInstances = () => [];
+-        this.getToolSessionIdForInstance = () => undefined;
+-        this.registerTerminalInstanceWithChatSession = () => { };
+-        this.isBackgroundTerminal = () => false;
+-        this.registerProgressPart = () => Disposable.None;
+-        this.setFocusedProgressPart = () => { };
+-        this.clearFocusedProgressPart = () => { };
+-        this.getFocusedProgressPart = () => undefined;
+-        this.getMostRecentProgressPart = () => undefined;
+-        this.setChatSessionAutoApproval = () => { };
+-        this.hasChatSessionAutoApproval = () => false;
+-        this.addSessionAutoApproveRule = () => { };
+-        this.getSessionAutoApproveRules = () => ({});
+-        this.getChatSessionResourceForInstance = () => undefined;
+-        this.continueInBackground = () => { };
+-        this.onDidContinueInBackground = Event.None;
+-        this.registerAhpCommandSource = () => Disposable.None;
+-        this.getAhpCommandSource = () => undefined;
+-    }
+-}
+-registerSingleton(ITerminalChatService, TerminalChatService, InstantiationType.Delayed);
+-class AgentSessionsModel {
+-    constructor() {
+-        this.onDidChangeSessionArchivedState = Event.None;
+-        this.resolved = false;
+-        this.onWillResolve = Event.None;
+-        this.onDidResolve = Event.None;
+-        this.onDidChangeSessions = Event.None;
+-        this.sessions = [];
+-        this.getSession = () => undefined;
+-        this.observeSession = () => constObservable(undefined);
+-        this.resolve = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], AgentSessionsModel.prototype, "resolve", void 0);
+-class AgentSessionsService {
+-    constructor() {
+-        this.model = new AgentSessionsModel();
+-        this.getSession = () => undefined;
+-        this.onDidChangeSessionArchivedState = Event.None;
+-    }
+-}
+-registerSingleton(IAgentSessionsService, AgentSessionsService, InstantiationType.Delayed);
+ class UserAttentionService {
+     constructor() {
+-        this.isVsCodeFocused = constObservable(false);
+-        this.isUserActive = constObservable(false);
+-        this.hasUserAttention = constObservable(false);
+-        this.totalFocusTimeMs = 0;
+-        this.fireAfterGivenFocusTimePassed = () => Disposable.None;
+-    }
+-}
+-registerSingleton(IUserAttentionService, UserAttentionService, InstantiationType.Delayed);
+-class CodeCompareModelService {
+-    constructor() {
+-        this.createModel = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], CodeCompareModelService.prototype, "createModel", void 0);
+-registerSingleton(ICodeCompareModelService, CodeCompareModelService, InstantiationType.Delayed);
+-class AgentSessionProjectionService {
+-    constructor() {
+-        this.isActive = false;
+-        this.activeSession = undefined;
+-        this.onDidChangeProjectionMode = Event.None;
+-        this.onDidChangeActiveSession = Event.None;
+-        this.enterProjection = unsupported;
+-        this.exitProjection = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], AgentSessionProjectionService.prototype, "enterProjection", void 0);
+-__decorate([
+-    Unsupported
+-], AgentSessionProjectionService.prototype, "exitProjection", void 0);
+-registerSingleton(IAgentSessionProjectionService, AgentSessionProjectionService, InstantiationType.Delayed);
+-class AgentTitleBarStatusService {
+-    constructor() {
+-        this.mode = AgentStatusMode.Default;
+-        this.sessionInfo = undefined;
+-        this.onDidChangeMode = Event.None;
+-        this.onDidChangeSessionInfo = Event.None;
+-        this.enterSessionMode = unsupported;
+-        this.enterSessionReadyMode = unsupported;
+-        this.exitSessionReadyMode = unsupported;
+-        this.exitSessionMode = unsupported;
+-        this.updateSessionTitle = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], AgentTitleBarStatusService.prototype, "enterSessionMode", void 0);
+-__decorate([
+-    Unsupported
+-], AgentTitleBarStatusService.prototype, "enterSessionReadyMode", void 0);
+-__decorate([
+-    Unsupported
+-], AgentTitleBarStatusService.prototype, "exitSessionReadyMode", void 0);
+-__decorate([
+-    Unsupported
+-], AgentTitleBarStatusService.prototype, "exitSessionMode", void 0);
+-__decorate([
+-    Unsupported
+-], AgentTitleBarStatusService.prototype, "updateSessionTitle", void 0);
+-registerSingleton(IAgentTitleBarStatusService, AgentTitleBarStatusService, InstantiationType.Delayed);
+-class LanguageModelsConfigurationService {
+-    constructor() {
+-        this.whenReady = Promise.resolve();
+-        this.onDidChangeLanguageModelGroups = Event.None;
+-        this.getLanguageModelsProviderGroups = () => [];
+-        this.addLanguageModelsProviderGroup = unsupported;
+-        this.updateLanguageModelsProviderGroup = unsupported;
+-        this.removeLanguageModelsProviderGroup = unsupported;
+-        this.configureLanguageModels = unsupported;
+-    }
+-    get configurationFile() {
+-        return unsupported();
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], LanguageModelsConfigurationService.prototype, "configurationFile", null);
+-__decorate([
+-    Unsupported
+-], LanguageModelsConfigurationService.prototype, "addLanguageModelsProviderGroup", void 0);
+-__decorate([
+-    Unsupported
+-], LanguageModelsConfigurationService.prototype, "updateLanguageModelsProviderGroup", void 0);
+-__decorate([
+-    Unsupported
+-], LanguageModelsConfigurationService.prototype, "removeLanguageModelsProviderGroup", void 0);
+-__decorate([
+-    Unsupported
+-], LanguageModelsConfigurationService.prototype, "configureLanguageModels", void 0);
+-registerSingleton(ILanguageModelsConfigurationService, LanguageModelsConfigurationService, InstantiationType.Delayed);
+-class ChatTipService {
+-    constructor() {
+-        this.onDidDismissTip = Event.None;
+-        this.onDidNavigateTip = Event.None;
+-        this.onDidHideTip = Event.None;
+-        this.onDidDisableTips = Event.None;
+-        this.getWelcomeTip = () => undefined;
+-        this.resetSession = unsupported;
+-        this.dismissTip = unsupported;
+-        this.hideTip = unsupported;
+-        this.disableTips = unsupported;
+-        this.navigateToNextTip = unsupported;
+-        this.navigateToPreviousTip = unsupported;
+-        this.hasMultipleTips = unsupported;
+-        this.clearDismissedTips = unsupported;
+-        this.dismissTipForSession = unsupported;
+-        this.hideTipsForSession = unsupported;
+-        this.getNextEligibleTip = unsupported;
+-        this.recordSlashCommandUsage = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], ChatTipService.prototype, "resetSession", void 0);
+-__decorate([
+-    Unsupported
+-], ChatTipService.prototype, "dismissTip", void 0);
+-__decorate([
+-    Unsupported
+-], ChatTipService.prototype, "hideTip", void 0);
+-__decorate([
+-    Unsupported
+-], ChatTipService.prototype, "disableTips", void 0);
+-__decorate([
+-    Unsupported
+-], ChatTipService.prototype, "navigateToNextTip", void 0);
+-__decorate([
+-    Unsupported
+-], ChatTipService.prototype, "navigateToPreviousTip", void 0);
+-__decorate([
+-    Unsupported
+-], ChatTipService.prototype, "hasMultipleTips", void 0);
+-__decorate([
+-    Unsupported
+-], ChatTipService.prototype, "clearDismissedTips", void 0);
+-__decorate([
+-    Unsupported
+-], ChatTipService.prototype, "dismissTipForSession", void 0);
+-__decorate([
+-    Unsupported
+-], ChatTipService.prototype, "hideTipsForSession", void 0);
+-__decorate([
+-    Unsupported
+-], ChatTipService.prototype, "getNextEligibleTip", void 0);
+-__decorate([
+-    Unsupported
+-], ChatTipService.prototype, "recordSlashCommandUsage", void 0);
+-registerSingleton(IChatTipService, ChatTipService, InstantiationType.Delayed);
+-class ChatEditingExplanationModelManager {
+-    constructor() {
+-        this.state = constObservable(new ResourceMap());
+-        this.generateExplanations = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], ChatEditingExplanationModelManager.prototype, "generateExplanations", void 0);
+-registerSingleton(IChatEditingExplanationModelManager, ChatEditingExplanationModelManager, InstantiationType.Delayed);
+-class ChatOutputPartStateCache {
+-    constructor() {
+-        this.get = () => undefined;
+-        this.set = () => { };
++        this.isVsCodeFocused = constObservable(false);
++        this.isUserActive = constObservable(false);
++        this.hasUserAttention = constObservable(false);
++        this.totalFocusTimeMs = 0;
++        this.fireAfterGivenFocusTimePassed = () => Disposable.None;
+     }
+ }
+-registerSingleton(IChatOutputPartStateCache, ChatOutputPartStateCache, InstantiationType.Delayed);
++registerSingleton(IUserAttentionService, UserAttentionService, InstantiationType.Delayed);
+ class TerminalSandboxService {
+     constructor() {
+         this.isEnabled = async () => false;
+@@ -8225,241 +6170,6 @@ class MeteredConnectionService {
+     }
+ }
+ registerSingleton(IMeteredConnectionService, MeteredConnectionService, InstantiationType.Delayed);
+-class AICustomizationWorkspaceService {
+-    constructor() {
+-        this.activeProjectRoot = constObservable(undefined);
+-        this.getActiveProjectRoot = () => undefined;
+-        this.managementSections = [];
+-        this.isSessionsWindow = false;
+-        this.commitFiles = unsupported;
+-        this.generateCustomization = unsupported;
+-        this.deleteFiles = unsupported;
+-        this.hasOverrideProjectRoot = constObservable(false);
+-        this.setOverrideProjectRoot = unsupported;
+-        this.clearOverrideProjectRoot = unsupported;
+-        this.getFilteredPromptSlashCommands = async () => [];
+-        this.getSkillUIIntegrations = () => new Map();
+-        this.welcomePageFeatures = {
+-            showGettingStartedBanner: false
+-        };
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], AICustomizationWorkspaceService.prototype, "commitFiles", void 0);
+-__decorate([
+-    Unsupported
+-], AICustomizationWorkspaceService.prototype, "generateCustomization", void 0);
+-__decorate([
+-    Unsupported
+-], AICustomizationWorkspaceService.prototype, "deleteFiles", void 0);
+-__decorate([
+-    Unsupported
+-], AICustomizationWorkspaceService.prototype, "setOverrideProjectRoot", void 0);
+-__decorate([
+-    Unsupported
+-], AICustomizationWorkspaceService.prototype, "clearOverrideProjectRoot", void 0);
+-registerSingleton(IAICustomizationWorkspaceService, AICustomizationWorkspaceService, InstantiationType.Delayed);
+-const nullAICustomizationItemSource = {
+-    sessionResource: URI.parse('ai-customization://null/source'),
+-    onDidAICustomizationItemsChange: Event.None,
+-    fetchProviderItems: async () => [],
+-    fetchAICustomizationItems: async () => [],
+-    dispose: () => { }
+-};
+-class NullAICustomizationItemsModel {
+-    constructor() {
+-        this.getItems = () => constObservable([]);
+-        this.getActiveItemSource = () => nullAICustomizationItemSource;
+-        this.getCount = () => constObservable(0);
+-        this.getPluginCount = () => constObservable(0);
+-        this.whenSectionLoaded = async () => { };
+-    }
+-}
+-registerSingleton(IAICustomizationItemsModel, NullAICustomizationItemsModel, InstantiationType.Delayed);
+-class AgentPluginService {
+-    constructor() {
+-        this.plugins = constObservable([]);
+-    }
+-    get enablementModel() {
+-        return unsupported();
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], AgentPluginService.prototype, "enablementModel", null);
+-registerSingleton(IAgentPluginService, AgentPluginService, InstantiationType.Delayed);
+-class PluginMarketplaceService {
+-    constructor() {
+-        this.onDidChangeMarketplaces = Event.None;
+-        this.fetchMarketplacePlugins = async () => [];
+-        this.getMarketplacePluginMetadata = () => undefined;
+-        this.installedPlugins = constObservable([]);
+-        this.addInstalledPlugin = unsupported;
+-        this.removeInstalledPlugin = unsupported;
+-        this.isMarketplaceTrusted = unsupported;
+-        this.trustMarketplace = unsupported;
+-        this.isStrictMarketplacePolicyActive = () => false;
+-        this.hasUpdatesAvailable = constObservable(false);
+-        this.lastFetchedPlugins = constObservable([]);
+-        this.recommendedPlugins = constObservable(new Set([]));
+-        this.clearUpdatesAvailable = () => { };
+-        this.readPluginsFromDirectory = async () => [];
+-        this.readSinglePluginManifest = async () => undefined;
+-        this.isPluginDirectory = async () => false;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], PluginMarketplaceService.prototype, "addInstalledPlugin", void 0);
+-__decorate([
+-    Unsupported
+-], PluginMarketplaceService.prototype, "removeInstalledPlugin", void 0);
+-__decorate([
+-    Unsupported
+-], PluginMarketplaceService.prototype, "isMarketplaceTrusted", void 0);
+-__decorate([
+-    Unsupported
+-], PluginMarketplaceService.prototype, "trustMarketplace", void 0);
+-registerSingleton(IPluginMarketplaceService, PluginMarketplaceService, InstantiationType.Delayed);
+-class AgentPluginRepositoryService {
+-    constructor() {
+-        this.getRepositoryUri = unsupported;
+-        this.getPluginInstallUri = unsupported;
+-        this.ensureRepository = unsupported;
+-        this.pullRepository = unsupported;
+-        this.getPluginSourceInstallUri = unsupported;
+-        this.ensurePluginSource = unsupported;
+-        this.updatePluginSource = unsupported;
+-        this.getPluginSource = unsupported;
+-        this.cleanupPluginSource = unsupported;
+-        this.fetchRepository = unsupported;
+-    }
+-    get agentPluginsHome() {
+-        return unsupported();
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], AgentPluginRepositoryService.prototype, "getRepositoryUri", void 0);
+-__decorate([
+-    Unsupported
+-], AgentPluginRepositoryService.prototype, "getPluginInstallUri", void 0);
+-__decorate([
+-    Unsupported
+-], AgentPluginRepositoryService.prototype, "ensureRepository", void 0);
+-__decorate([
+-    Unsupported
+-], AgentPluginRepositoryService.prototype, "pullRepository", void 0);
+-__decorate([
+-    Unsupported
+-], AgentPluginRepositoryService.prototype, "getPluginSourceInstallUri", void 0);
+-__decorate([
+-    Unsupported
+-], AgentPluginRepositoryService.prototype, "ensurePluginSource", void 0);
+-__decorate([
+-    Unsupported
+-], AgentPluginRepositoryService.prototype, "updatePluginSource", void 0);
+-__decorate([
+-    Unsupported
+-], AgentPluginRepositoryService.prototype, "getPluginSource", void 0);
+-__decorate([
+-    Unsupported
+-], AgentPluginRepositoryService.prototype, "cleanupPluginSource", void 0);
+-__decorate([
+-    Unsupported
+-], AgentPluginRepositoryService.prototype, "fetchRepository", void 0);
+-__decorate([
+-    Unsupported
+-], AgentPluginRepositoryService.prototype, "agentPluginsHome", null);
+-registerSingleton(IAgentPluginRepositoryService, AgentPluginRepositoryService, InstantiationType.Delayed);
+-class PluginInstallService {
+-    constructor() {
+-        this.installPlugin = unsupported;
+-        this.updatePlugin = unsupported;
+-        this.getPluginInstallUri = unsupported;
+-        this.installPluginFromSource = unsupported;
+-        this.validatePluginSource = unsupported;
+-        this.updateAllPlugins = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], PluginInstallService.prototype, "installPlugin", void 0);
+-__decorate([
+-    Unsupported
+-], PluginInstallService.prototype, "updatePlugin", void 0);
+-__decorate([
+-    Unsupported
+-], PluginInstallService.prototype, "getPluginInstallUri", void 0);
+-__decorate([
+-    Unsupported
+-], PluginInstallService.prototype, "installPluginFromSource", void 0);
+-__decorate([
+-    Unsupported
+-], PluginInstallService.prototype, "validatePluginSource", void 0);
+-__decorate([
+-    Unsupported
+-], PluginInstallService.prototype, "updateAllPlugins", void 0);
+-registerSingleton(IPluginInstallService, PluginInstallService, InstantiationType.Delayed);
+-class ChatAttachmentWidgetRegistry {
+-    constructor() {
+-        this.registerFactory = () => Disposable.None;
+-        this.createWidget = () => undefined;
+-    }
+-}
+-registerSingleton(IChatAttachmentWidgetRegistry, ChatAttachmentWidgetRegistry, InstantiationType.Delayed);
+-class ChatDebugService {
+-    constructor() {
+-        this.onDidAddEvent = Event.None;
+-        this.onDidEndSession = Event.None;
+-        this.log = () => { };
+-        this.addEvent = () => { };
+-        this.addProviderEvent = () => { };
+-        this.getEvents = () => [];
+-        this.getSessionResources = () => [];
+-        this.activeSessionResource = undefined;
+-        this.registerProvider = () => Disposable.None;
+-        this.invokeProviders = unsupported;
+-        this.endSession = unsupported;
+-        this.resolveEvent = unsupported;
+-        this.dispose = () => { };
+-        this.onDidClearProviderEvents = Event.None;
+-        this.hasInvokedProviders = () => false;
+-        this.exportLog = async () => undefined;
+-        this.importLog = unsupported;
+-        this.isCoreEvent = () => false;
+-        this.setImportedSessionTitle = unsupported;
+-        this.getImportedSessionTitle = unsupported;
+-        this.onDidChangeAvailableSessionResources = Event.None;
+-        this.addAvailableSessionResources = () => { };
+-        this.getAvailableSessionResources = () => [];
+-        this.registerAvailableSessionsFetcher = () => { };
+-        this.getHistoricalSessionTitle = () => undefined;
+-    }
+-    clear() {
+-        throw new Error('Method not implemented.');
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], ChatDebugService.prototype, "invokeProviders", void 0);
+-__decorate([
+-    Unsupported
+-], ChatDebugService.prototype, "endSession", void 0);
+-__decorate([
+-    Unsupported
+-], ChatDebugService.prototype, "resolveEvent", void 0);
+-__decorate([
+-    Unsupported
+-], ChatDebugService.prototype, "importLog", void 0);
+-__decorate([
+-    Unsupported
+-], ChatDebugService.prototype, "setImportedSessionTitle", void 0);
+-__decorate([
+-    Unsupported
+-], ChatDebugService.prototype, "getImportedSessionTitle", void 0);
+-registerSingleton(IChatDebugService, ChatDebugService, InstantiationType.Delayed);
+ class GitService {
+     constructor() {
+         this.repositories = [];
+@@ -8468,24 +6178,6 @@ class GitService {
      }
  }
  registerSingleton(IGitService, GitService, InstantiationType.Delayed);
@@ -1082,8 +2673,452 @@ index a8aeec12161cb3ae3e3b3f807a5479145f48abca..91c3a72b21954e8214cfd26d6fc854e9
  class PowerService {
      constructor() {
          this.onDidSuspend = Event.None;
+@@ -8506,39 +6198,6 @@ class PowerService {
+     }
+ }
+ registerSingleton(IPowerService, PowerService, InstantiationType.Delayed);
+-class ChatResponseResourceFileSystemProvider {
+-    constructor() {
+-        this.associate = unsupported;
+-        this.capabilities = FileSystemProviderCapabilities.None;
+-        this.onDidChangeCapabilities = Event.None;
+-        this.onDidChangeFile = Event.None;
+-        this.watch = () => Disposable.None;
+-        this.stat = unsupported;
+-        this.mkdir = unsupported;
+-        this.readdir = unsupported;
+-        this.delete = unsupported;
+-        this.rename = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], ChatResponseResourceFileSystemProvider.prototype, "associate", void 0);
+-__decorate([
+-    Unsupported
+-], ChatResponseResourceFileSystemProvider.prototype, "stat", void 0);
+-__decorate([
+-    Unsupported
+-], ChatResponseResourceFileSystemProvider.prototype, "mkdir", void 0);
+-__decorate([
+-    Unsupported
+-], ChatResponseResourceFileSystemProvider.prototype, "readdir", void 0);
+-__decorate([
+-    Unsupported
+-], ChatResponseResourceFileSystemProvider.prototype, "delete", void 0);
+-__decorate([
+-    Unsupported
+-], ChatResponseResourceFileSystemProvider.prototype, "rename", void 0);
+-registerSingleton(IChatResponseResourceFileSystemProvider, ChatResponseResourceFileSystemProvider, InstantiationType.Delayed);
+ class WebBrowserViewCDPService {
+     constructor() {
+         this.createSessionGroup = async () => {
+@@ -8551,54 +6210,6 @@ class WebBrowserViewCDPService {
+     }
+ }
+ registerSingleton(IBrowserViewCDPService, WebBrowserViewCDPService, InstantiationType.Delayed);
+-class CustomizationHarnessService {
+-    constructor() {
+-        this.activeSessionResource = constObservable(URI.parse('chat-session://local/default'));
+-        this.activeHarness = constObservable(SessionType.Local);
+-        this.availableHarnesses = constObservable([
+-            createVSCodeHarnessDescriptor()
+-        ]);
+-        this.onDidChangeSlashCommands = Event.None;
+-        this.onDidChangeCustomAgents = Event.None;
+-        this.findHarnessById = () => undefined;
+-        this.setActiveSession = () => { };
+-        this.getActiveDescriptor = unsupported;
+-        this.registerExternalHarness = () => Disposable.None;
+-        this.getSlashCommands = async () => [];
+-        this.getCustomAgents = async () => [];
+-        this.resolvePromptSlashCommand = async () => undefined;
+-        this.getSessionResourceForHarness = () => URI.parse('chat-session://local/default');
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], CustomizationHarnessService.prototype, "getActiveDescriptor", void 0);
+-registerSingleton(ICustomizationHarnessService, CustomizationHarnessService, InstantiationType.Delayed);
+-class ChatArtifactsService {
+-    constructor() {
+-        this.getArtifacts = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], ChatArtifactsService.prototype, "getArtifacts", void 0);
+-registerSingleton(IChatArtifactsService, ChatArtifactsService, InstantiationType.Delayed);
+-class WorkspacePluginSettingsService {
+-    constructor() {
+-        this.extraMarketplaces = constObservable([]);
+-        this.enabledPlugins = constObservable(new Map());
+-    }
+-}
+-registerSingleton(IWorkspacePluginSettingsService, WorkspacePluginSettingsService, InstantiationType.Delayed);
+-class ChatImageCarouselService {
+-    constructor() {
+-        this.openCarouselAtResource = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], ChatImageCarouselService.prototype, "openCarouselAtResource", void 0);
+-registerSingleton(IChatImageCarouselService, ChatImageCarouselService, InstantiationType.Delayed);
+ class BrowserViewWorkbenchService {
+     constructor() {
+         this.willUseRemoteProxy = () => false;
+@@ -8678,139 +6289,6 @@ __decorate([
+     Unsupported
+ ], SandboxHelperService.prototype, "buildWindowsMxcSandboxPayload", void 0);
+ registerSingleton(ISandboxHelperService, SandboxHelperService, InstantiationType.Delayed);
+-class NullAgentHostResourceService {
+-    constructor() {
+-        this.list = unsupported;
+-        this.read = unsupported;
+-        this.write = unsupported;
+-        this.del = unsupported;
+-        this.move = unsupported;
+-        this.copy = unsupported;
+-        this.resolve = unsupported;
+-        this.mkdir = unsupported;
+-        this.check = async () => false;
+-        this.request = async () => { };
+-        this.pendingFor = () => constObservable([]);
+-        this.allPending = constObservable([]);
+-        this.findPending = () => undefined;
+-        this.grantImplicitRead = () => Disposable.None;
+-        this.connectionClosed = () => { };
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], NullAgentHostResourceService.prototype, "list", void 0);
+-__decorate([
+-    Unsupported
+-], NullAgentHostResourceService.prototype, "read", void 0);
+-__decorate([
+-    Unsupported
+-], NullAgentHostResourceService.prototype, "write", void 0);
+-__decorate([
+-    Unsupported
+-], NullAgentHostResourceService.prototype, "del", void 0);
+-__decorate([
+-    Unsupported
+-], NullAgentHostResourceService.prototype, "move", void 0);
+-__decorate([
+-    Unsupported
+-], NullAgentHostResourceService.prototype, "copy", void 0);
+-__decorate([
+-    Unsupported
+-], NullAgentHostResourceService.prototype, "resolve", void 0);
+-__decorate([
+-    Unsupported
+-], NullAgentHostResourceService.prototype, "mkdir", void 0);
+-registerSingleton(IAgentHostService, NullAgentHostService, InstantiationType.Delayed);
+-registerSingleton(IAgentHostResourceService, NullAgentHostResourceService, InstantiationType.Delayed);
+-class AgentHostFileSystemService {
+-    constructor() {
+-        this.registerAuthority = () => Disposable.None;
+-        this.ensureSyncedCustomizationProvider = () => { };
+-    }
+-}
+-registerSingleton(IAgentHostFileSystemService, AgentHostFileSystemService, InstantiationType.Delayed);
+-registerSingleton(IRemoteAgentHostService, NullRemoteAgentHostService, InstantiationType.Delayed);
+-registerSingleton(ISSHRemoteAgentHostService, NullSSHRemoteAgentHostService, InstantiationType.Delayed);
+-class AgentHostSessionWorkingDirectoryResolver {
+-    constructor() {
+-        this.registerResolver = () => Disposable.None;
+-        this.resolve = () => undefined;
+-        this.isNewSession = () => true;
+-    }
+-}
+-registerSingleton(IAgentHostSessionWorkingDirectoryResolver, AgentHostSessionWorkingDirectoryResolver, InstantiationType.Delayed);
+-class AgentHostConnectionsService {
+-    constructor() {
+-        this.onDidChangeConnections = Event.None;
+-        this.connections = [];
+-        this.getConnectionByAuthority = () => undefined;
+-        this.getConnectionByAddress = () => undefined;
+-        this.resolveSessionResource = () => undefined;
+-    }
+-    get ambientConnection() {
+-        return unsupported();
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], AgentHostConnectionsService.prototype, "ambientConnection", null);
+-registerSingleton(IAgentHostConnectionsService, AgentHostConnectionsService, InstantiationType.Delayed);
+-class AgentHostNewSessionFolderService {
+-    constructor() {
+-        this.onDidChangeFolder = Event.None;
+-        this.getFolder = () => undefined;
+-        this.setFolder = () => { };
+-        this.clear = () => { };
+-        this.getDefaultFolder = () => undefined;
+-    }
+-}
+-registerSingleton(IAgentHostNewSessionFolderService, AgentHostNewSessionFolderService, InstantiationType.Delayed);
+-class AgentHostToolSetEnablementService {
+-    constructor() {
+-        this.observe = () => constObservable({ toolSets: new Map(), tools: new Map() });
+-        this.getState = () => ({
+-            toolSets: new Map(),
+-            tools: new Map()
+-        });
+-        this.setToolSetEnabled = () => { };
+-        this.setToolEnabled = () => { };
+-    }
+-}
+-registerSingleton(IAgentHostToolSetEnablementService, AgentHostToolSetEnablementService, InstantiationType.Delayed);
+-class PluginGitService {
+-    constructor() {
+-        this.cloneRepository = unsupported;
+-        this.pull = unsupported;
+-        this.checkout = unsupported;
+-        this.revParse = unsupported;
+-        this.fetch = unsupported;
+-        this.fetchRepository = unsupported;
+-        this.revListCount = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], PluginGitService.prototype, "cloneRepository", void 0);
+-__decorate([
+-    Unsupported
+-], PluginGitService.prototype, "pull", void 0);
+-__decorate([
+-    Unsupported
+-], PluginGitService.prototype, "checkout", void 0);
+-__decorate([
+-    Unsupported
+-], PluginGitService.prototype, "revParse", void 0);
+-__decorate([
+-    Unsupported
+-], PluginGitService.prototype, "fetch", void 0);
+-__decorate([
+-    Unsupported
+-], PluginGitService.prototype, "fetchRepository", void 0);
+-__decorate([
+-    Unsupported
+-], PluginGitService.prototype, "revListCount", void 0);
+-registerSingleton(IPluginGitService, PluginGitService, InstantiationType.Delayed);
+ class AgentNetworkFilterService {
+     constructor() {
+         this.isUriAllowed = () => false;
+@@ -8871,29 +6349,6 @@ __decorate([
+     Unsupported
+ ], OnboardingScenarioService.prototype, "runScenario", void 0);
+ registerSingleton(IOnboardingScenarioService, OnboardingScenarioService, InstantiationType.Delayed);
+-class AgentHostDebugLogsExportService {
+-    constructor() {
+-        this.save = unsupported;
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], AgentHostDebugLogsExportService.prototype, "save", void 0);
+-registerSingleton(IAgentHostDebugLogsExportService, AgentHostDebugLogsExportService, InstantiationType.Delayed);
+-class AgentHostUntitledProvisionalSessionService {
+-    constructor() {
+-        this.onDidChange = Event.None;
+-        this.get = () => undefined;
+-        this.getOrCreate = async () => undefined;
+-        this.waitForPending = async () => undefined;
+-        this.applyConfigChange = async () => undefined;
+-        this.tryRebind = async () => undefined;
+-        this.disposeSession = async () => { };
+-        this.getResolvedConfig = () => undefined;
+-        this.refreshResolvedConfig = async () => { };
+-    }
+-}
+-registerSingleton(IAgentHostUntitledProvisionalSessionService, AgentHostUntitledProvisionalSessionService, InstantiationType.Delayed);
+ class WindowsMxcTerminalSandboxRuntime {
+     constructor() {
+         this.getExecutablePath = unsupported;
+@@ -8950,178 +6405,3 @@ __decorate([
+     Unsupported
+ ], GitHubUploadService.prototype, "uploadViaMobileApi", void 0);
+ registerSingleton(IGitHubUploadService, GitHubUploadService, InstantiationType.Delayed);
+-class ChatGoalSummaryService {
+-    constructor() {
+-        this.summarize = async () => undefined;
+-    }
+-}
+-registerSingleton(IChatGoalSummaryService, ChatGoalSummaryService, InstantiationType.Delayed);
+-class ChatResponseFileChangesService {
+-    constructor() {
+-        this.registerProvider = () => Disposable.None;
+-        this.getChangesForRequest = () => undefined;
+-    }
+-}
+-registerSingleton(IChatResponseFileChangesService, ChatResponseFileChangesService, InstantiationType.Delayed);
+-class MicCaptureService {
+-    constructor() {
+-        this.prepare = () => { };
+-        this.startCapture = async () => { };
+-        this.stopCapture = () => { };
+-        this.isCapturing = false;
+-        this.onPttStart = Event.None;
+-        this.onPttAudioChunk = Event.None;
+-        this.onPttEnd = Event.None;
+-        this.onPttDiagnostic = Event.None;
+-        this.analyserNode = undefined;
+-        this.pttDown = async () => { };
+-        this.pttUp = () => { };
+-        this.isMuted = false;
+-        this.suppressUntil = () => { };
+-    }
+-}
+-registerSingleton(IMicCaptureService, MicCaptureService, InstantiationType.Delayed);
+-class TtsPlaybackService {
+-    constructor() {
+-        this.playAudioChunk = () => { };
+-        this.stopPlayback = () => { };
+-        this.isPlaying = false;
+-        this.onPlaybackStarted = Event.None;
+-        this.onPlaybackStopped = Event.None;
+-        this.getLastPlayedSamples = () => null;
+-        this.analyserNode = undefined;
+-        this.ensureContext = unsupported;
+-        this.closeContext = () => { };
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], TtsPlaybackService.prototype, "ensureContext", void 0);
+-registerSingleton(ITtsPlaybackService, TtsPlaybackService, InstantiationType.Delayed);
+-class VoiceClientService {
+-    constructor() {
+-        this.connect = async () => { };
+-        this.disconnect = () => { };
+-        this.sendPttStart = () => { };
+-        this.sendPttAudioChunk = () => { };
+-        this.sendPttEnd = () => { };
+-        this.sendPttDiagnostic = () => { };
+-        this.sendSessionContext = () => { };
+-        this.flushSessionContext = () => { };
+-        this.invalidateSessionCache = () => { };
+-        this.sendToolResult = () => { };
+-        this.sendSessionStateChange = () => { };
+-        this.stopSpeaking = () => { };
+-        this.sendStartSession = () => { };
+-        this.sendResumeSession = () => { };
+-        this.submitFeedback = async () => ({
+-            ok: false,
+-            error: 'Unsupported'
+-        });
+-        this.onTranscription = Event.None;
+-        this.onAudioResponse = Event.None;
+-        this.onToolCall = Event.None;
+-        this.onSpeechStarted = Event.None;
+-        this.onSessionInit = Event.None;
+-        this.onError = Event.None;
+-        this.onDidChangeConnectionState = Event.None;
+-        this.isConnected = false;
+-        this.isResuming = false;
+-        this.currentSessionId = undefined;
+-    }
+-}
+-registerSingleton(IVoiceClientService, VoiceClientService, InstantiationType.Delayed);
+-class VoiceSessionController {
+-    constructor() {
+-        this.voiceState = constObservable('idle');
+-        this.statusText = constObservable('');
+-        this.transcriptTurns = constObservable([]);
+-        this.isConnected = constObservable(false);
+-        this.isConnecting = constObservable(false);
+-        this.isReconnecting = constObservable(false);
+-        this.pendingToolConfirmations = constObservable([]);
+-        this.targetSession = constObservable(undefined);
+-        this.connect = async () => { };
+-        this.disconnect = () => { };
+-        this.pttDown = () => { };
+-        this.pttUp = () => { };
+-        this.markUserCancelled = () => { };
+-        this.setTargetSession = () => { };
+-        this.newSessionAsTarget = () => { };
+-        this.submitFeedback = async () => ({
+-            ok: false,
+-            error: 'Unsupported'
+-        });
+-        this.simulateConnection = () => { };
+-    }
+-}
+-registerSingleton(IVoiceSessionController, VoiceSessionController, InstantiationType.Delayed);
+-class VoiceToolDispatchService {
+-    constructor() {
+-        this.setDelegate = () => { };
+-        this.dispatchToolCall = async () => '';
+-    }
+-}
+-registerSingleton(IVoiceToolDispatchService, VoiceToolDispatchService, InstantiationType.Delayed);
+-class VoicePlaybackService {
+-    constructor() {
+-        this.speakingSession = constObservable(undefined);
+-        this.lastPlayedVersion = constObservable(0);
+-        this.notifyPlaybackStart = () => { };
+-        this.notifyPlaybackEnd = () => { };
+-        this.getLastPlayed = () => undefined;
+-        this.hasLastPlayed = () => false;
+-        this.replay = async () => { };
+-        this.stop = () => { };
+-    }
+-}
+-registerSingleton(IVoicePlaybackService, VoicePlaybackService, InstantiationType.Delayed);
+-class VoiceTranscriptStore {
+-    constructor() {
+-        this.appendTurn = async () => { };
+-        this.loadTurns = async () => [];
+-        this.getIndexEntry = () => undefined;
+-        this.archiveUpTo = async () => { };
+-        this.unarchive = async () => { };
+-        this.deleteAll = async () => { };
+-    }
+-}
+-registerSingleton(IVoiceTranscriptStore, VoiceTranscriptStore, InstantiationType.Delayed);
+-class AgentsVoiceWindowService {
+-    constructor() {
+-        this.isOpen = false;
+-        this.onDidChangeOpen = Event.None;
+-        this.openWindow = async () => { };
+-        this.closeWindow = () => { };
+-        this.toggleWindow = async () => { };
+-    }
+-}
+-registerSingleton(IAgentsVoiceWindowService, AgentsVoiceWindowService, InstantiationType.Delayed);
+-class AgentHostCustomizationService {
+-    constructor() {
+-        this.onDidChangeCustomAgents = Event.None;
+-        this.onDidChangeCustomizations = Event.None;
+-        this.getCustomAgents = () => [];
+-        this.getCustomizations = () => [];
+-        this.getWorkingDirectory = () => undefined;
+-        this.getMcpServers = () => [];
+-        this.addMcpServer = () => { };
+-        this.authenticateMcpServer = async () => false;
+-    }
+-}
+-registerSingleton(IAgentHostCustomizationService, AgentHostCustomizationService, InstantiationType.Delayed);
+-class AgentHostActiveClientService {
+-    constructor() {
+-        this.registerForAgent = unsupported;
+-        this.getActiveClient = unsupported;
+-        this.getCustomizations = () => constObservable([]);
+-        this.getClientTools = () => constObservable([]);
+-    }
+-}
+-__decorate([
+-    Unsupported
+-], AgentHostActiveClientService.prototype, "registerForAgent", void 0);
+-__decorate([
+-    Unsupported
+-], AgentHostActiveClientService.prototype, "getActiveClient", void 0);
+-registerSingleton(IAgentHostActiveClientService, AgentHostActiveClientService, InstantiationType.Delayed);
 diff --git a/services.js b/services.js
-index 018691b598a8aa41da826da3e6a1100fa4929b97..e5fe8b7ee0d0eab88a05e60ef60731f9879a8204 100644
+index 018691b598a8aa41da826da3e6a1100fa4929b97..94ee4920b1e3bfffbea4881defd404397c7a4585 100644
 --- a/services.js
 +++ b/services.js
 @@ -24,7 +24,6 @@ import './vscode/src/vs/workbench/contrib/inlayHints/browser/inlayHintsAccessibi
@@ -1105,15 +3140,31 @@ index 018691b598a8aa41da826da3e6a1100fa4929b97..e5fe8b7ee0d0eab88a05e60ef60731f9
  export { ICanonicalUriService } from './vscode/src/vs/platform/workspace/common/canonicalUri.service.js';
  export { IEditSessionIdentityService } from './vscode/src/vs/platform/workspace/common/editSessions.service.js';
  export { WorkspaceTrustUriResponse } from './vscode/src/vs/platform/workspace/common/workspaceTrust.js';
-@@ -252,7 +247,6 @@ export { ILanguageModelsService } from './vscode/src/vs/workbench/contrib/chat/c
+@@ -239,23 +234,11 @@ export { IExtensionStatusBarItemService, StatusBarUpdateKind } from './vscode/sr
+ export { DEFAULT_EDITOR_PART_OPTIONS } from './vscode/src/vs/workbench/browser/parts/editor/editor.js';
+ export { IChatAccessibilityService, IChatCodeBlockContextProviderService, IChatWidgetService, IQuickChatService } from './vscode/src/vs/workbench/contrib/chat/browser/chat.service.js';
+ export { IChatAgentNameService, IChatAgentService } from './vscode/src/vs/workbench/contrib/chat/common/participants/chatAgents.service.js';
+-export { ICodeMapperService } from './vscode/src/vs/workbench/contrib/chat/common/editing/chatCodeMapperService.service.js';
+-export { IChatEditingService } from './vscode/src/vs/workbench/contrib/chat/common/editing/chatEditingService.service.js';
+-export { IChatService } from './vscode/src/vs/workbench/contrib/chat/common/chatService/chatService.service.js';
+-export { IChatSlashCommandService } from './vscode/src/vs/workbench/contrib/chat/common/participants/chatSlashCommands.service.js';
+-export { IChatVariablesService } from './vscode/src/vs/workbench/contrib/chat/common/attachments/chatVariables.service.js';
+-export { IChatWidgetHistoryService } from './vscode/src/vs/workbench/contrib/chat/common/widget/chatWidgetHistoryService.service.js';
+-export { ILanguageModelIgnoredFilesService } from './vscode/src/vs/workbench/contrib/chat/common/ignoredFiles.service.js';
+-export { ILanguageModelStatsService } from './vscode/src/vs/workbench/contrib/chat/common/languageModelStats.service.js';
+-export { ILanguageModelToolsService } from './vscode/src/vs/workbench/contrib/chat/common/tools/languageModelToolsService.service.js';
+-export { ILanguageModelsService } from './vscode/src/vs/workbench/contrib/chat/common/languageModels.service.js';
  export { ICommentService } from './vscode/src/vs/workbench/contrib/comments/browser/commentService.service.js';
  export { ICustomEditorService } from './vscode/src/vs/workbench/contrib/customEditor/common/customEditor.service.js';
  export { IDebugVisualizerService } from './vscode/src/vs/workbench/contrib/debug/common/debugVisualizers.service.js';
 -export { IEditSessionsLogService, IEditSessionsStorageService } from './vscode/src/vs/workbench/contrib/editSessions/common/editSessions.service.js';
  export { IExtensionsWorkbenchService } from './vscode/src/vs/workbench/contrib/extensions/common/extensions.service.js';
  export { IExternalUriOpenerService } from './vscode/src/vs/workbench/contrib/externalUriOpener/common/externalUriOpenerService.service.js';
- export { IInlineChatSessionService } from './vscode/src/vs/workbench/contrib/inlineChat/browser/inlineChatSessionService.service.js';
-@@ -313,9 +307,6 @@ export { IAccessibleViewInformationService } from './vscode/src/vs/workbench/ser
+-export { IInlineChatSessionService } from './vscode/src/vs/workbench/contrib/inlineChat/browser/inlineChatSessionService.service.js';
+ export { IInteractiveDocumentService } from './vscode/src/vs/workbench/contrib/interactive/browser/interactiveDocumentService.service.js';
+ export { IInteractiveHistoryService } from './vscode/src/vs/workbench/contrib/interactive/browser/interactiveHistoryService.service.js';
+ export { ITroubleshootIssueService } from './vscode/src/vs/workbench/contrib/issue/browser/issueTroubleshoot.service.js';
+@@ -313,9 +296,6 @@ export { IAccessibleViewInformationService } from './vscode/src/vs/workbench/ser
  export { IAiEmbeddingVectorService } from './vscode/src/vs/workbench/services/aiEmbeddingVector/common/aiEmbeddingVectorService.service.js';
  export { IAiRelatedInformationService } from './vscode/src/vs/workbench/services/aiRelatedInformation/common/aiRelatedInformation.service.js';
  export { IWorkbenchAssignmentService } from './vscode/src/vs/workbench/services/assignment/common/assignmentService.service.js';
@@ -1123,7 +3174,7 @@ index 018691b598a8aa41da826da3e6a1100fa4929b97..e5fe8b7ee0d0eab88a05e60ef60731f9
  export { IAuxiliaryWindowService } from './vscode/src/vs/workbench/services/auxiliaryWindow/browser/auxiliaryWindowService.service.js';
  export { IJSONEditingService } from './vscode/src/vs/workbench/services/configuration/common/jsonEditing.service.js';
  export { IConfigurationResolverService } from './vscode/src/vs/workbench/services/configurationResolver/common/configurationResolver.service.js';
-@@ -349,8 +340,6 @@ export { IUserDataInitializationService } from './vscode/src/vs/workbench/servic
+@@ -349,19 +329,14 @@ export { IUserDataInitializationService } from './vscode/src/vs/workbench/servic
  export { IRemoteUserDataProfilesService } from './vscode/src/vs/workbench/services/userDataProfile/common/remoteUserDataProfiles.service.js';
  export { IUserDataProfileImportExportService, IUserDataProfileManagementService, IUserDataProfileService } from './vscode/src/vs/workbench/services/userDataProfile/common/userDataProfile.service.js';
  export { UserDataProfileService } from './vscode/src/vs/workbench/services/userDataProfile/common/userDataProfileService.js';
@@ -1132,7 +3183,18 @@ index 018691b598a8aa41da826da3e6a1100fa4929b97..e5fe8b7ee0d0eab88a05e60ef60731f9
  export { IWorkingCopyBackupService } from './vscode/src/vs/workbench/services/workingCopy/common/workingCopyBackup.service.js';
  export { IWorkingCopyEditorService } from './vscode/src/vs/workbench/services/workingCopy/common/workingCopyEditorService.service.js';
  export { IWorkingCopyHistoryService } from './vscode/src/vs/workbench/services/workingCopy/common/workingCopyHistory.service.js';
-@@ -376,31 +365,20 @@ export { IEditorCancellationTokens } from './vscode/src/vs/editor/contrib/editor
+ export { IWorkingCopyService } from './vscode/src/vs/workbench/services/workingCopy/common/workingCopyService.service.js';
+ export { IWorkspaceEditingService } from './vscode/src/vs/workbench/services/workspaces/common/workspaceEditing.service.js';
+ export { IWorkspaceIdentityService } from './vscode/src/vs/workbench/services/workspaces/common/workspaceIdentityService.service.js';
+-export { IChatMarkdownAnchorService } from './vscode/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatMarkdownAnchorService.service.js';
+ export { getBuiltInExtensionTranslationsUris, getExtensionIdProvidingCurrentLocale } from './l10n.js';
+ export { unsupported } from './tools.js';
+-export { IChatEntitlementService } from './vscode/src/vs/workbench/services/chat/common/chatEntitlementService.service.js';
+-export { IPromptsService } from './vscode/src/vs/workbench/contrib/chat/common/promptSyntax/service/promptsService.service.js';
+ export { ISuggestMemoryService } from './vscode/src/vs/editor/contrib/suggest/browser/suggestMemory.service.js';
+ export { LanguageConfigurationService } from './vscode/src/vs/editor/common/languages/languageConfigurationRegistry.js';
+ export { ISemanticTokensStylingService } from './vscode/src/vs/editor/common/services/semanticTokensStyling.service.js';
+@@ -376,87 +351,31 @@ export { IEditorCancellationTokens } from './vscode/src/vs/editor/contrib/editor
  export { IPeekViewService } from './vscode/src/vs/editor/contrib/peekView/browser/peekView.service.js';
  export { IUndoRedoService } from './vscode/src/vs/platform/undoRedo/common/undoRedo.service.js';
  export { IActionWidgetService } from './vscode/src/vs/platform/actionWidget/browser/actionWidget.service.js';
@@ -1142,37 +3204,84 @@ index 018691b598a8aa41da826da3e6a1100fa4929b97..e5fe8b7ee0d0eab88a05e60ef60731f9
  export { IExtensionGalleryManifestService } from './vscode/src/vs/platform/extensionManagement/common/extensionGalleryManifest.service.js';
  export { ISharedWebContentExtractorService, IWebContentExtractorService } from './vscode/src/vs/platform/webContentExtractor/common/webContentExtractor.service.js';
  export { IDefaultAccountService } from './vscode/src/vs/platform/defaultAccount/common/defaultAccount.service.js';
- export { IChatTransferService } from './vscode/src/vs/workbench/contrib/chat/common/model/chatTransferService.service.js';
- export { IChatStatusItemService } from './vscode/src/vs/workbench/contrib/chat/browser/chatStatus/chatStatusItemService.service.js';
+-export { IChatTransferService } from './vscode/src/vs/workbench/contrib/chat/common/model/chatTransferService.service.js';
+-export { IChatStatusItemService } from './vscode/src/vs/workbench/contrib/chat/browser/chatStatus/chatStatusItemService.service.js';
  export { IAiSettingsSearchService } from './vscode/src/vs/workbench/services/aiSettingsSearch/common/aiSettingsSearch.service.js';
 -export { IDynamicAuthenticationProviderStorageService } from './vscode/src/vs/workbench/services/authentication/common/dynamicAuthenticationProviderStorage.service.js';
 -export { IAuthenticationMcpService } from './vscode/src/vs/workbench/services/authentication/browser/authenticationMcpService.service.js';
 -export { IAuthenticationMcpAccessService } from './vscode/src/vs/workbench/services/authentication/browser/authenticationMcpAccessService.service.js';
 -export { IAuthenticationMcpUsageService } from './vscode/src/vs/workbench/services/authentication/browser/authenticationMcpUsageService.service.js';
- export { IChatContextPickService } from './vscode/src/vs/workbench/contrib/chat/browser/attachments/chatContextPickService.service.js';
+-export { IChatContextPickService } from './vscode/src/vs/workbench/contrib/chat/browser/attachments/chatContextPickService.service.js';
 -export { IMcpGalleryService, IMcpManagementService } from './vscode/src/vs/platform/mcp/common/mcpManagement.service.js';
  export { ITreeSitterThemeService } from './vscode/src/vs/editor/common/services/treeSitter/treeSitterThemeService.service.js';
  export { ITreeSitterLibraryService } from './vscode/src/vs/editor/common/services/treeSitter/treeSitterLibraryService.service.js';
- export { IChatAttachmentResolveService } from './vscode/src/vs/workbench/contrib/chat/browser/attachments/chatAttachmentResolveService.service.js';
- export { IRemoteCodingAgentsService } from './vscode/src/vs/workbench/contrib/remoteCodingAgents/common/remoteCodingAgentsService.service.js';
+-export { IChatAttachmentResolveService } from './vscode/src/vs/workbench/contrib/chat/browser/attachments/chatAttachmentResolveService.service.js';
+-export { IRemoteCodingAgentsService } from './vscode/src/vs/workbench/contrib/remoteCodingAgents/common/remoteCodingAgentsService.service.js';
 -export { IAuthenticationQueryService } from './vscode/src/vs/workbench/services/authentication/common/authenticationQuery.service.js';
 -export { IWorkbenchMcpManagementService } from './vscode/src/vs/workbench/services/mcp/common/mcpWorkbenchManagementService.service.js';
- export { IChatLayoutService } from './vscode/src/vs/workbench/contrib/chat/common/widget/chatLayoutService.service.js';
+-export { IChatLayoutService } from './vscode/src/vs/workbench/contrib/chat/common/widget/chatLayoutService.service.js';
  export { IAiEditTelemetryService } from './vscode/src/vs/workbench/contrib/editTelemetry/browser/telemetry/aiEditTelemetry/aiEditTelemetryService.service.js';
  export { IInlineCompletionsUnificationService } from './vscode/src/vs/workbench/services/inlineCompletions/common/inlineCompletionsUnification.service.js';
 -export { IMcpGalleryManifestService } from './vscode/src/vs/platform/mcp/common/mcpGalleryManifest.service.js';
  export { IDataChannelService } from './vscode/src/vs/platform/dataChannel/common/dataChannel.service.js';
  export { IProgressService } from './vscode/src/vs/platform/progress/common/progress.service.js';
  export { IMarkdownRendererService } from './vscode/src/vs/platform/markdown/browser/markdownRenderer.service.js';
-@@ -421,8 +399,6 @@ export { IAgentPluginService } from './vscode/src/vs/workbench/contrib/chat/comm
- export { IPluginInstallService } from './vscode/src/vs/workbench/contrib/chat/common/plugins/pluginInstallService.service.js';
- export { IPluginMarketplaceService } from './vscode/src/vs/workbench/contrib/chat/common/plugins/pluginMarketplaceService.service.js';
+-export { IChatContextService } from './vscode/src/vs/workbench/contrib/chat/browser/contextContrib/chatContextService.service.js';
+-export { ILanguageModelToolsConfirmationService } from './vscode/src/vs/workbench/contrib/chat/common/tools/languageModelToolsConfirmationService.service.js';
+ export { IRandomService } from './vscode/src/vs/workbench/contrib/editTelemetry/browser/randomService.service.js';
+ export { ISCMRepositorySelectionMode } from './vscode/src/vs/workbench/contrib/scm/common/scm.js';
+-export { IAgentSessionsService } from './vscode/src/vs/workbench/contrib/chat/browser/agentSessions/agentSessionsService.service.js';
+ export { IUserAttentionService } from './vscode/src/vs/workbench/services/userAttention/common/userAttentionService.service.js';
+-export { ICodeCompareModelService } from './vscode/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatTextEditContentPart.service.js';
+ export { IUserInteractionService } from './vscode/src/vs/platform/userInteraction/browser/userInteractionService.service.js';
+ export { IMeteredConnectionService } from './vscode/src/vs/platform/meteredConnection/common/meteredConnection.service.js';
+-export { IChatAttachmentWidgetRegistry } from './vscode/src/vs/workbench/contrib/chat/browser/attachments/chatAttachmentWidgetRegistry.service.js';
+-export { IAICustomizationWorkspaceService } from './vscode/src/vs/workbench/contrib/chat/common/aiCustomizationWorkspaceService.service.js';
+-export { IChatDebugService } from './vscode/src/vs/workbench/contrib/chat/common/chatDebugService.service.js';
+-export { IAgentPluginRepositoryService } from './vscode/src/vs/workbench/contrib/chat/common/plugins/agentPluginRepositoryService.service.js';
+-export { IAgentPluginService } from './vscode/src/vs/workbench/contrib/chat/common/plugins/agentPluginService.service.js';
+-export { IPluginInstallService } from './vscode/src/vs/workbench/contrib/chat/common/plugins/pluginInstallService.service.js';
+-export { IPluginMarketplaceService } from './vscode/src/vs/workbench/contrib/chat/common/plugins/pluginMarketplaceService.service.js';
  export { IGitService } from './vscode/src/vs/workbench/contrib/git/common/gitService.service.js';
 -export { IWorkbenchMcpGatewayService } from './vscode/src/vs/workbench/contrib/mcp/common/mcpGatewayService.service.js';
 -export { IMcpSandboxService } from './vscode/src/vs/workbench/contrib/mcp/common/mcpSandboxService.service.js';
- export { ICustomizationHarnessService } from './vscode/src/vs/workbench/contrib/chat/common/customizationHarnessService.service.js';
- export { IAgentHostService } from './vscode/src/vs/platform/agentHost/common/agentService.service.js';
- export { IAgentHostConnectionsService } from './vscode/src/vs/platform/agentHost/common/agentHostConnectionsService.service.js';
+-export { ICustomizationHarnessService } from './vscode/src/vs/workbench/contrib/chat/common/customizationHarnessService.service.js';
+-export { IAgentHostService } from './vscode/src/vs/platform/agentHost/common/agentService.service.js';
+-export { IAgentHostConnectionsService } from './vscode/src/vs/platform/agentHost/common/agentHostConnectionsService.service.js';
+-export { IRemoteAgentHostService } from './vscode/src/vs/platform/agentHost/common/remoteAgentHostService.service.js';
+-export { ISSHRemoteAgentHostService } from './vscode/src/vs/platform/agentHost/common/sshRemoteAgentHost.service.js';
+ export { IAgentNetworkFilterService } from './vscode/src/vs/platform/networkFilter/common/networkFilterService.service.js';
+ export { ITerminalSandboxService } from './vscode/src/vs/platform/sandbox/common/terminalSandboxService.service.js';
+-export { IAgentHostSessionWorkingDirectoryResolver } from './vscode/src/vs/workbench/contrib/chat/browser/agentSessions/agentHost/agentHostSessionWorkingDirectoryResolver.service.js';
+-export { IAgentHostNewSessionFolderService } from './vscode/src/vs/workbench/contrib/chat/browser/agentSessions/agentHost/agentHostNewSessionFolderService.service.js';
+-export { IAgentHostToolSetEnablementService } from './vscode/src/vs/workbench/contrib/chat/browser/agentSessions/agentHost/agentHostToolSetEnablementService.service.js';
+-export { IPluginGitService } from './vscode/src/vs/workbench/contrib/chat/common/plugins/pluginGitService.service.js';
+ export { IAgentHostTerminalService } from './vscode/src/vs/workbench/contrib/terminal/browser/agentHostTerminalService.service.js';
+-export { IChatResponseFileChangesService } from './vscode/src/vs/workbench/contrib/chat/browser/chatResponseFileChangesService.service.js';
+-export { IMicCaptureService } from './vscode/src/vs/workbench/contrib/chat/browser/voiceClient/micCaptureService.service.js';
+-export { ITtsPlaybackService } from './vscode/src/vs/workbench/contrib/chat/browser/voiceClient/ttsPlaybackService.service.js';
+-export { IVoiceSessionController } from './vscode/src/vs/workbench/contrib/chat/browser/voiceClient/voiceSessionController.service.js';
+-export { IVoiceToolDispatchService } from './vscode/src/vs/workbench/contrib/chat/browser/voiceClient/voiceToolDispatchService.service.js';
+-export { IVoiceClientService } from './vscode/src/vs/workbench/contrib/chat/common/voiceClient/voiceClientService.service.js';
+-export { IVoicePlaybackService } from './vscode/src/vs/workbench/contrib/chat/common/voicePlaybackService.service.js';
+-export { IVoiceTranscriptStore } from './vscode/src/vs/workbench/contrib/agentsVoice/common/voiceTranscriptStore.service.js';
+-export { IAgentsVoiceWindowService } from './vscode/src/vs/workbench/contrib/agentsVoice/common/agentsVoice.service.js';
+ export { IOnboardingService } from './vscode/src/vs/workbench/contrib/welcomeOnboarding/common/onboardingService.service.js';
+ export { IOnboardingScenarioService } from './vscode/src/vs/workbench/contrib/onboarding/common/onboardingScenarioService.service.js';
+-export { IAgentHostFileSystemService } from './vscode/src/vs/workbench/services/agentHost/common/agentHostFileSystemService.service.js';
+-export { IAgentHostUntitledProvisionalSessionService } from './vscode/src/vs/workbench/contrib/chat/browser/agentSessions/agentHost/agentHostUntitledProvisionalSessionService.service.js';
+-export { IChatOutputPartStateCache } from './vscode/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatOutputPartStateCache.service.js';
+-export { IAgentHostDebugLogsExportService } from './vscode/src/vs/workbench/contrib/chat/browser/actions/exportAgentHostDebugLogsAction.service.js';
+ export { IScreenshotService } from './vscode/src/vs/workbench/contrib/issue/browser/screenshotService.service.js';
+ export { IRecordingService } from './vscode/src/vs/workbench/contrib/issue/browser/recordingService.service.js';
+ export { IGitHubUploadService } from './vscode/src/vs/workbench/contrib/issue/browser/githubUploadService.service.js';
+-export { IChatGoalSummaryService } from './vscode/src/vs/workbench/contrib/chat/browser/chatGoalSummaryService.service.js';
+-export { IAgentHostCustomizationService } from './vscode/src/vs/workbench/contrib/chat/browser/agentSessions/agentHost/agentHostCustomizationService.service.js';
+-export { IAgentHostActiveClientService } from './vscode/src/vs/workbench/contrib/chat/browser/agentSessions/agentHost/agentHostActiveClientService.service.js';
+-export { IAgentEditorCommentsBridge } from './vscode/src/vs/workbench/services/agentEditorComments/common/agentEditorComments.service.js';
+ 
+ if (window.monacoVscodeApiBuildId != null && window.monacoVscodeApiBuildId !== "1.128.1-9ee83a9b-9044-45fc-9698-3cafc2653d08") {
+     throw new Error(`Another version of monaco-vscode-api has already been loaded. Trying to load ${"1.128.1-9ee83a9b-9044-45fc-9698-3cafc2653d08"}, ${window.monacoVscodeApiBuildId} is already loaded`);
 diff --git a/vscode/src/vs/platform/files/common/files.d.ts b/vscode/src/vs/platform/files/common/files.d.ts
 index 217e68b81ae5b921ecb15f866edd5f861f081f2e..43b7a7b7294045784b0e051fec711f9b3c49ea0e 100644
 --- a/vscode/src/vs/platform/files/common/files.d.ts
@@ -2246,6 +4355,54 @@ index dbf2cd589ee4f869b69ffa850d0b8a11f1e656b4..a94a5a349e647b6b900e055c930c8882
  }
  
  export { AccountsActivityActionViewItem, GlobalActivityActionViewItem, GlobalCompositeBar, SimpleAccountActivityActionViewItem, SimpleGlobalActivityActionViewItem, isAccountsActionVisible };
+diff --git a/vscode/src/vs/workbench/contrib/accessibility/browser/editorAccessibilityHelp.js b/vscode/src/vs/workbench/contrib/accessibility/browser/editorAccessibilityHelp.js
+index da6674b51e5255a61740542fd1ceb1c42bcb87a4..1786c1df3919cbee8a728875f099303d2df9ccf7 100644
+--- a/vscode/src/vs/workbench/contrib/accessibility/browser/editorAccessibilityHelp.js
++++ b/vscode/src/vs/workbench/contrib/accessibility/browser/editorAccessibilityHelp.js
+@@ -9,14 +9,12 @@ import { IContextKeyService } from '../../../../platform/contextkey/common/conte
+ import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+ import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.service.js';
+ import { AccessibilityHelpAction } from './accessibleViewActions.js';
+-import { ChatContextKeys } from '../../chat/common/actions/chatContextKeys.js';
+ import { CommentAccessibilityHelpNLS } from '../../comments/browser/commentsAccessibility.js';
+ import { CommentContextKeys } from '../../comments/common/commentContextKeys.js';
+ import { NEW_UNTITLED_FILE_COMMAND_ID } from '../../files/browser/fileConstants.js';
+ import { AccessibleViewProviderId, AccessibleViewType } from '../../../../platform/accessibility/browser/accessibleView.js';
+ import { IAccessibleViewService } from '../../../../platform/accessibility/browser/accessibleView.service.js';
+ import { AccessibilityVerbositySettingId } from './accessibilityConfiguration.js';
+-import { ctxHasEditorModification, ctxHasRequestInProgress } from '../../chat/browser/chatEditing/chatEditingEditorContextKeys.js';
+ import { IAccessibilityService } from '../../../../platform/accessibility/common/accessibility.service.js';
+ import { IConfigurationService } from '../../../../platform/configuration/common/configuration.service.js';
+ 
+@@ -140,19 +138,17 @@ function getCommentCommandInfo(keybindingService, contextKeyService, editor) {
+     }
+     return;
+ }
+-function getChatCommandInfo(keybindingService, contextKeyService) {
+-    if (ChatContextKeys.enabled.getValue(contextKeyService)) {
+-        return [AccessibilityHelpNLS.quickChat, AccessibilityHelpNLS.startInlineChat].join("\n");
+-    }
++function getChatCommandInfo() {
++    // Plain removes the Chat/Copilot surface entirely (F110 S3): there is no
++    // enabled chat participant to report on, so this always returns nothing
++    // instead of importing the (now-deleted) ChatContextKeys definitions.
+     return;
+ }
+-function getChatEditInfo(keybindingService, contextKeyService, editor) {
+-    const editorContext = contextKeyService.getContext(editor.getDomNode());
+-    if (editorContext.getValue(ctxHasEditorModification.key)) {
+-        return AccessibilityHelpNLS.chatEditorModification + "\n" + AccessibilityHelpNLS.chatEditActions;
+-    } else if (editorContext.getValue(ctxHasRequestInProgress.key)) {
+-        return AccessibilityHelpNLS.chatEditorRequestInProgress;
+-    }
++function getChatEditInfo() {
++    // Plain removes the Chat/Copilot surface entirely (F110 S3): there is no
++    // chat-editing session that could ever be in progress, so this always
++    // returns nothing instead of importing the (now-deleted)
++    // chatEditingEditorContextKeys definitions.
+     return;
+ }
+ 
 diff --git a/vscode/src/vs/workbench/contrib/files/browser/editors/textFileSaveErrorHandler.js b/vscode/src/vs/workbench/contrib/files/browser/editors/textFileSaveErrorHandler.js
 index 145182985cf7b0cde4731c5176834c70f74b1f41..adb80a904b389beded5b669634749e6aa27c19fa 100644
 --- a/vscode/src/vs/workbench/contrib/files/browser/editors/textFileSaveErrorHandler.js
@@ -2533,6 +4690,134 @@ index 8e1228dc28a1ffd502ac8e50429be96a3b4283b0..d7933998d5dcc038ebdd1417261792f5
      get mtime() {
          return this._mtime;
      }
+diff --git a/vscode/src/vs/workbench/contrib/inlineCompletions/browser/inlineCompletionLanguageStatusBarContribution.js b/vscode/src/vs/workbench/contrib/inlineCompletions/browser/inlineCompletionLanguageStatusBarContribution.js
+index 327b05e1bcf863ed544291fbab0800dada767158..b91e3d2ef77c213724f4549a4a8c6a96cb6fb4fb 100644
+--- a/vscode/src/vs/workbench/contrib/inlineCompletions/browser/inlineCompletionLanguageStatusBarContribution.js
++++ b/vscode/src/vs/workbench/contrib/inlineCompletions/browser/inlineCompletionLanguageStatusBarContribution.js
+@@ -1,20 +1,21 @@
+ 
+-import { __decorate, __param } from '../../../../../../../external/tslib/tslib.es6.js';
+ import { createHotClass } from '../../../../base/common/hotReloadHelpers.js';
+ import { Disposable } from '../../../../base/common/lifecycle.js';
+-import '../../../../base/common/observableInternal/index.js';
+-import Severity$1 from '../../../../base/common/severity.js';
+-import { isCodeEditor } from '../../../../editor/browser/editorBrowser.js';
+-import { InlineCompletionsController } from '../../../../editor/contrib/inlineCompletions/browser/controller/inlineCompletionsController.js';
+-import { localize } from '../../../../nls.js';
+-import { IChatEntitlementService } from '../../../services/chat/common/chatEntitlementService.service.js';
+-import { IEditorService } from '../../../services/editor/common/editorService.service.js';
+-import { ILanguageStatusService } from '../../../services/languageStatus/common/languageStatusService.service.js';
+-import { observableFromEvent } from '../../../../base/common/observableInternal/observables/observableFromEvent.js';
+-import { derived } from '../../../../base/common/observableInternal/observables/derived.js';
+-import { debouncedObservable } from '../../../../base/common/observableInternal/utils/utils.js';
+-import { autorunWithStore } from '../../../../base/common/observableInternal/reactions/autorun.js';
+ 
++// Plain (F110 S3): this contribution's entire reason for existing was a
++// Copilot-branded ("$(copilot) Inline completion available" / "Inline edit
++// available" / ...) status bar item, gated behind
++// `IChatEntitlementService#sentimentObs` (an AI/Copilot entitlement and
++// sentiment signal). Plain has no chat/Copilot/entitlement surface, so the
++// gate would otherwise be a hard, non-optional constructor dependency on a
++// removed service (`IChatEntitlementService`) for a status item that only
++// ever displayed AI-branded strings. Rather than leave that dependency
++// dangling (or leave the Copilot-branded label strings reachable in the
++// final bundle), this contribution is reduced to a no-op: it still
++// registers (so nothing that expects this class to exist as a workbench
++// contribution breaks), but never depends on any removed token, never
++// constructs a language status item, and never inspects the active editor
++// or its inline-completions state.
+ let InlineCompletionLanguageStatusBarContribution = class InlineCompletionLanguageStatusBarContribution extends Disposable {
+     static {
+         this.hot = createHotClass(this);
+@@ -22,87 +23,9 @@ let InlineCompletionLanguageStatusBarContribution = class InlineCompletionLangua
+     static {
+         this.Id = "vs.contrib.inlineCompletionLanguageStatusBarContribution";
+     }
+-    static {
+-        this.languageStatusBarDisposables = ( new Set());
+-    }
+-    constructor(_languageStatusService, _editorService, _chatEntitlementService) {
++    constructor() {
+         super();
+-        this._languageStatusService = _languageStatusService;
+-        this._editorService = _editorService;
+-        this._chatEntitlementService = _chatEntitlementService;
+-        this._activeEditor = observableFromEvent(
+-            this,
+-            _editorService.onDidActiveEditorChange,
+-            () => this._editorService.activeTextEditorControl
+-        );
+-        this._sentiment = this._chatEntitlementService.sentimentObs;
+-        this._state = derived(this, reader => {
+-            const editor = this._activeEditor.read(reader);
+-            if (!editor || !isCodeEditor(editor)) {
+-                return undefined;
+-            }
+-            const c = InlineCompletionsController.get(editor);
+-            const model = c?.model.read(reader);
+-            if (!model) {
+-                return undefined;
+-            }
+-            return {
+-                model,
+-                status: debouncedObservable(model.status, 300)
+-            };
+-        });
+-        this._register(autorunWithStore((reader, store) => {
+-            const sentiment = this._sentiment.read(reader);
+-            if (sentiment.hidden) {
+-                return;
+-            }
+-            const state = this._state.read(reader);
+-            if (!state) {
+-                return;
+-            }
+-            const status = state.status.read(reader);
+-            const statusMap = {
+-                loading: {
+-                    shortLabel: "",
+-                    label: ( localize(11378, "Loading...")),
+-                    loading: true
+-                },
+-                ghostText: {
+-                    shortLabel: "$(lightbulb)",
+-                    label: "$(copilot) " + ( localize(11379, "Inline completion available")),
+-                    loading: false
+-                },
+-                inlineEdit: {
+-                    shortLabel: "$(lightbulb-sparkle)",
+-                    label: "$(copilot) " + ( localize(11380, "Inline edit available")),
+-                    loading: false
+-                },
+-                noSuggestion: {
+-                    shortLabel: "$(circle-slash)",
+-                    label: "$(copilot) " + ( localize(11381, "No inline suggestion available")),
+-                    loading: false
+-                }
+-            };
+-            store.add(this._languageStatusService.addStatus({
+-                accessibilityInfo: undefined,
+-                busy: statusMap[status].loading,
+-                command: undefined,
+-                detail: ( localize(11382, "Inline suggestions")),
+-                id: "inlineSuggestions",
+-                label: {
+-                    value: statusMap[status].label,
+-                    shortValue: statusMap[status].shortLabel
+-                },
+-                name: ( localize(11383, "Inline Suggestions")),
+-                selector: {
+-                    pattern: state.model.textModel.uri.fsPath
+-                },
+-                severity: Severity$1.Info,
+-                source: "inlineSuggestions"
+-            }));
+-        }));
+     }
+ };
+-InlineCompletionLanguageStatusBarContribution = ( __decorate([( __param(0, ILanguageStatusService)), ( __param(1, IEditorService)), ( __param(2, IChatEntitlementService))], InlineCompletionLanguageStatusBarContribution));
+ 
+ export { InlineCompletionLanguageStatusBarContribution };
 diff --git a/vscode/src/vs/workbench/services/textfile/common/textFileEditorModel.js b/vscode/src/vs/workbench/services/textfile/common/textFileEditorModel.js
 index e743e309f1b308aebcb4559a12d9591bd0d49701..3d4bda71433542a808b6827671788e0573d4e653 100644
 --- a/vscode/src/vs/workbench/services/textfile/common/textFileEditorModel.js

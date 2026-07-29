@@ -11,6 +11,35 @@
 // underlying vendor file reachable regardless of whether
 // `missing-services.js` still registers anything against it).
 //
+// `F110` S3 (same research document, `chatAgent` clear-out, the largest and
+// most-populated of the six categories) extends the same two-file surgery to
+// 89 more tokens covering the `chat`/`inlineChat`/`agentHost`/
+// `agentEditorComments`/`agentPlugins`/`agentsVoice` trees. S3 also
+// discovered two things S2's smaller scope never surfaced:
+//
+// 1. Several tokens registered in `missing-services.js` are **not** ever
+//    re-exported by `services.js` at all (`REMOVED_MISSING_SERVICES_TOKENS`
+//    is therefore *not* a subset check against `REMOVED_SERVICES_REEXPORT_TOKENS`
+//    for S3's share — unlike S2's 34, where all 34 happened to also be
+//    re-exported).
+// 2. A real dependency-graph audit restricted to the *actual, currently
+//    bundled* 2179-source corpus (not a static grep over the whole vendor
+//    tree, which is dominated by false positives from generic filenames and
+//    dead vendor code that never reaches the real bundle) found **seven**
+//    chat-family tokens that real, always-instantiated Plain features
+//    depend on as **non-optional constructor parameters** — removing their
+//    registration would not just leave dead code behind, it would throw a
+//    "service not registered" error the moment a user opened the Command
+//    Palette (`Ctrl+Shift+P`) or Quick Open (`Ctrl+P` / Go to Symbol /
+//    Workspace Symbols), because `@codingame/monaco-vscode-quickaccess-service-override`'s
+//    `CommandsQuickAccessProvider` and `@codingame/monaco-vscode-api`'s own
+//    `AnythingQuickAccessProvider`/`GotoSymbolQuickAccessProvider`/
+//    `SymbolsQuickAccessProvider` inject `IChatAgentService`/`IChatWidgetService`
+//    (respectively) with no `optional()` wrapper. These seven are
+//    deliberately kept registered — see `KEPT_TOKEN_REGISTRATIONS` below —
+//    exactly as S2 kept `IAuthenticationService` for `globalCompositeBar.js`'s
+//    sake, just seven of them instead of one.
+//
 // `scripts/plain/workbench-patch-contracts.mjs` already locks the *patch
 // file's own bytes* (sha256) and its diff/hunk-header shape. That catches "a
 // human or agent hand-edited the `.patch` file (or ran `pnpm patch-commit`
@@ -34,10 +63,9 @@
 // what the patch's diff context happens to look like.
 //
 // What this **can** prove: none of the removed tokens are reachable through
-// either of the two files this patch touches, and the one token this slice
-// deliberately keeps bound (`IAuthenticationService`, required by
-// `globalCompositeBar.js`'s non-optional constructor dependency — see that
-// module's own audit trail) is still registered.
+// either of the two files this patch touches, and every token this slice
+// deliberately keeps bound (`IAuthenticationService` from S2, plus S3's seven
+// chat-family tokens) is still registered.
 //
 // What this **cannot** prove: that some *third*, not-yet-discovered
 // reachability path (a future vendor file added by an upstream version bump,
@@ -50,6 +78,7 @@
 // instead of a bare category-count delta), not a replacement for the ratchet.
 
 export const REMOVED_MISSING_SERVICES_TOKENS = Object.freeze([
+	// --- F110 S2 (34 registrations) ---
 	// mcp (12 registrations; the other 4 mcp debt files —
 	// mcpManagement.js, mcpManagementIpc.js, mcpManagementService.js,
 	// modelContextProtocol.js — were never separately registered, only
@@ -82,7 +111,8 @@ export const REMOVED_MISSING_SERVICES_TOKENS = Object.freeze([
 	"IEditSessionsLogService",
 	"IEditSessionsStorageService",
 	// authAccount (8 of the 9 non-globalCompositeBar registrations —
-	// IAuthenticationService, the 9th, is deliberately kept; see below)
+	// IAuthenticationService, the 9th, is deliberately kept; see
+	// KEPT_TOKEN_REGISTRATIONS below)
 	"IAuthenticationAccessService",
 	"IAuthenticationMcpAccessService",
 	"IAuthenticationMcpService",
@@ -91,11 +121,147 @@ export const REMOVED_MISSING_SERVICES_TOKENS = Object.freeze([
 	"IAuthenticationExtensionsService",
 	"IAuthenticationQueryService",
 	"IDynamicAuthenticationProviderStorageService",
+
+	// --- F110 S3 (89 registrations/imports) ---
+	"AgentStatusMode",
+	"ChatEntitlement",
+	"IAICustomizationItemsModel",
+	"IAICustomizationWorkspaceService",
+	"IAgentEditorCommentsBridge",
+	"IAgentHostActiveClientService",
+	"IAgentHostConnectionsService",
+	"IAgentHostCustomizationService",
+	"IAgentHostDebugLogsExportService",
+	"IAgentHostFileSystemService",
+	"IAgentHostNewSessionFolderService",
+	"IAgentHostResourceService",
+	"IAgentHostService",
+	"IAgentHostSessionWorkingDirectoryResolver",
+	"IAgentHostToolSetEnablementService",
+	"IAgentHostUntitledProvisionalSessionService",
+	"IAgentPluginRepositoryService",
+	"IAgentPluginService",
+	"IAgentSessionProjectionService",
+	"IAgentSessionsService",
+	"IAgentTitleBarStatusService",
+	"IAgentsVoiceWindowService",
+	"IChatArtifactsService",
+	"IChatAttachmentResolveService",
+	"IChatAttachmentWidgetRegistry",
+	"IChatContextPickService",
+	"IChatContextService",
+	"IChatDebugService",
+	"IChatEditingExplanationModelManager",
+	"IChatEditingService",
+	"IChatEntitlementService",
+	"IChatGoalSummaryService",
+	"IChatImageCarouselService",
+	"IChatInputNotificationService",
+	"IChatLayoutService",
+	"IChatMarkdownAnchorService",
+	"IChatModeService",
+	"IChatOutputPartStateCache",
+	"IChatOutputRendererService",
+	"IChatPhoneInputPresenter",
+	"IChatResponseFileChangesService",
+	"IChatResponseResourceFileSystemProvider",
+	"IChatService",
+	"IChatSessionsService",
+	"IChatSlashCommandService",
+	"IChatStatusItemService",
+	"IChatTipService",
+	"IChatTodoListService",
+	"IChatToolRiskAssessmentService",
+	"IChatTransferService",
+	"IChatVariablesService",
+	"IChatWidgetHistoryService",
+	"ICodeCompareModelService",
+	"ICodeMapperService",
+	"ICustomizationHarnessService",
+	"IInlineChatSessionService",
+	"ILanguageModelIgnoredFilesService",
+	"ILanguageModelStatsService",
+	"ILanguageModelToolsConfirmationService",
+	"ILanguageModelToolsService",
+	"ILanguageModelsConfigurationService",
+	"ILanguageModelsService",
+	"IMicCaptureService",
+	"IPlanReviewFeedbackService",
+	"IPluginGitService",
+	"IPluginInstallService",
+	"IPluginMarketplaceService",
+	"IPromptsService",
+	"IRemoteAgentHostService",
+	"IRemoteCodingAgentsService",
+	"ISSHRemoteAgentHostService",
+	"ITerminalChatService",
+	"IToolResultCompressor",
+	"ITtsPlaybackService",
+	"IVoiceClientService",
+	"IVoicePlaybackService",
+	"IVoiceSessionController",
+	"IVoiceToolDispatchService",
+	"IVoiceTranscriptStore",
+	"IWorkspacePluginSettingsService",
+	"NullAgentHostService",
+	"NullRemoteAgentHostService",
+	"NullSSHRemoteAgentHostService",
+	"SessionType",
+	"Target",
+	"ToolDataSource",
+	"ToolSet",
+	"VSCodeToolReference",
+	"createVSCodeHarnessDescriptor",
 ]);
 
-// services.js's own `export { X } from 'Y'` facade re-exports every token in
-// REMOVED_MISSING_SERVICES_TOKENS too, plus two more names that were never
-// part of missing-services.js's own registration set at all:
+// The 32 tokens above that are imported by missing-services.js but were
+// never *also* re-exported by services.js's facade (pure enums, plain
+// consts, or imported concrete classes used only as a registerSingleton
+// implementation argument, e.g. `NullAgentHostService`) -- removing them
+// from missing-services.js is sufficient on its own; there is no second
+// services.js re-export line to also delete for these specific names. Kept
+// as an explicit list (rather than silently computed) so a future slice
+// cannot accidentally assume every missing-services.js token has a services.js
+// mirror -- S2's 34 happened to (by coincidence, not necessity), S3's 89 do
+// not.
+const S3_MISSING_SERVICES_ONLY_NOT_REEXPORTED = Object.freeze([
+	"AgentStatusMode",
+	"ChatEntitlement",
+	"IAICustomizationItemsModel",
+	"IAgentHostResourceService",
+	"IAgentSessionProjectionService",
+	"IAgentTitleBarStatusService",
+	"IChatArtifactsService",
+	"IChatEditingExplanationModelManager",
+	"IChatImageCarouselService",
+	"IChatInputNotificationService",
+	"IChatModeService",
+	"IChatOutputRendererService",
+	"IChatPhoneInputPresenter",
+	"IChatResponseResourceFileSystemProvider",
+	"IChatSessionsService",
+	"IChatTipService",
+	"IChatTodoListService",
+	"IChatToolRiskAssessmentService",
+	"ILanguageModelsConfigurationService",
+	"IPlanReviewFeedbackService",
+	"ITerminalChatService",
+	"IToolResultCompressor",
+	"IWorkspacePluginSettingsService",
+	"NullAgentHostService",
+	"NullRemoteAgentHostService",
+	"NullSSHRemoteAgentHostService",
+	"SessionType",
+	"Target",
+	"ToolDataSource",
+	"ToolSet",
+	"VSCodeToolReference",
+	"createVSCodeHarnessDescriptor",
+]);
+
+// services.js's own `export { X } from 'Y'` facade re-exports a subset of
+// REMOVED_MISSING_SERVICES_TOKENS, plus (for S2 only) two names that were
+// never part of missing-services.js's own registration set at all:
 // - `IMcpManagementService`: the base token `IWorkbenchMcpManagementService`
 //   (already in the list above) is derived from via
 //   `refineServiceDecorator(IMcpManagementService)` in
@@ -109,13 +275,105 @@ export const REMOVED_MISSING_SERVICES_TOKENS = Object.freeze([
 //   path `globalCompositeBar.js` itself uses) — the underlying file stays
 //   reachable regardless of this specific re-export.
 export const REMOVED_SERVICES_REEXPORT_TOKENS = Object.freeze([
-	...REMOVED_MISSING_SERVICES_TOKENS,
+	...REMOVED_MISSING_SERVICES_TOKENS.filter(
+		(token) => !S3_MISSING_SERVICES_ONLY_NOT_REEXPORTED.includes(token),
+	),
 	"IMcpManagementService",
 	"IAuthenticationService",
 ]);
 
 const KEPT_AUTHENTICATION_SERVICE_REGISTRATION =
 	/registerSingleton\(\s*IAuthenticationService\s*,\s*AuthenticationService\s*,\s*InstantiationType\.Delayed\s*,?\s*\)/u;
+
+// F110 S3: seven chat-family tokens a real dependency-graph audit (restricted
+// to the actual, currently bundled 2179-source corpus, not a static grep
+// over the whole vendor tree) found are non-optional constructor
+// dependencies of always-instantiated Plain features:
+//
+// - `IQuickChatService`/`IChatWidgetService`/`IChatAccessibilityService`/
+//   `IChatCodeBlockContextProviderService` all come from the same
+//   `chat/browser/chat.service.js` file. `IChatWidgetService` alone is
+//   injected as a non-optional `__param` by THREE real, always-registered
+//   Quick Access providers: `AnythingQuickAccessProvider` ("Go to Anything",
+//   `@codingame/monaco-vscode-api`'s own `anythingQuickAccess.js`),
+//   `GotoSymbolQuickAccessProvider` ("Go to Symbol in File",
+//   `gotoSymbolQuickAccess.js`) and `SymbolsQuickAccessProvider` ("Go to
+//   Symbol in Workspace", `symbolsQuickAccess.js`). Since the file stays
+//   reachable regardless (for `IChatWidgetService`'s sake), and none of the
+//   other three tokens it exports has an independent reason to be removed,
+//   all four registrations are kept as a group rather than splitting the one
+//   file's import line for zero file-count benefit.
+// - `IChatAgentService` is a non-optional `__param` of
+//   `@codingame/monaco-vscode-quickaccess-service-override`'s
+//   `CommandsQuickAccessProvider` -- i.e. the Command Palette
+//   (`Ctrl+Shift+P`) itself. `IChatAgentNameService` shares the same
+//   `chat/common/participants/chatAgents.service.js` import line and has no
+//   independent reason to be removed either, so both stay.
+// - `IAgentNetworkFilterService` is a non-optional `__param` of
+//   `browserView.js`'s real `BrowserViewModel` ("Share with Agent" +
+//   Playwright-based agent browser-observation bridge). Untangling this
+//   would require refactoring `BrowserViewModel`'s tracked-sharing-state
+//   machinery (`IPlaywrightService` alone is threaded through five separate
+//   call sites in that class) -- a materially deeper surgery than a
+//   dependency-line removal, out of scope for this slice. Flagged as a
+//   follow-up candidate, not attempted here.
+export const KEPT_TOKEN_REGISTRATIONS = Object.freeze([
+	{
+		token: "IAuthenticationService",
+		pattern: KEPT_AUTHENTICATION_SERVICE_REGISTRATION,
+		reason:
+			"globalCompositeBar.js injects it as a non-optional constructor dependency (AccountsActivityActionViewItem/SimpleAccountActivityActionViewItem); removing it would leave the token unbound and throw at Activity Bar construction time",
+	},
+	{
+		token: "IQuickChatService",
+		pattern:
+			/registerSingleton\(\s*IQuickChatService\s*,\s*QuickChatService\s*,\s*InstantiationType\.\w+\s*,?\s*\)/u,
+		reason:
+			"AnythingQuickAccessProvider/GotoSymbolQuickAccessProvider/SymbolsQuickAccessProvider all import chat.service.js for the sibling IChatWidgetService token below, so the file stays reachable regardless; kept alongside it rather than split for zero benefit",
+	},
+	{
+		token: "IChatWidgetService",
+		pattern:
+			/registerSingleton\(\s*IChatWidgetService\s*,\s*ChatWidgetService\s*,\s*InstantiationType\.\w+\s*,?\s*\)/u,
+		reason:
+			"non-optional __param of AnythingQuickAccessProvider (anythingQuickAccess.js), GotoSymbolQuickAccessProvider (gotoSymbolQuickAccess.js) and SymbolsQuickAccessProvider (symbolsQuickAccess.js) -- three real, always-registered Quick Access providers (Go to Anything / Go to Symbol in File / Go to Symbol in Workspace)",
+	},
+	{
+		token: "IChatAccessibilityService",
+		pattern:
+			/registerSingleton\(\s*IChatAccessibilityService\s*,\s*ChatAccessibilityService\s*,\s*InstantiationType\.\w+\s*,?\s*\)/u,
+		reason:
+			"shares chat.service.js's import line with IQuickChatService/IChatWidgetService, which must stay; no benefit to removing just this one",
+	},
+	{
+		token: "IChatCodeBlockContextProviderService",
+		pattern:
+			/registerSingleton\(\s*IChatCodeBlockContextProviderService\s*,\s*ChatCodeBlockContextProviderService\s*,\s*InstantiationType\.\w+\s*,?\s*\)/u,
+		reason:
+			"shares chat.service.js's import line with IQuickChatService/IChatWidgetService, which must stay; no benefit to removing just this one",
+	},
+	{
+		token: "IChatAgentService",
+		pattern:
+			/registerSingleton\(\s*IChatAgentService\s*,\s*QuickChatAgentService\s*,\s*InstantiationType\.\w+\s*,?\s*\)/u,
+		reason:
+			"non-optional __param of @codingame/monaco-vscode-quickaccess-service-override's CommandsQuickAccessProvider -- the Command Palette (Ctrl+Shift+P) itself",
+	},
+	{
+		token: "IChatAgentNameService",
+		pattern:
+			/registerSingleton\(\s*IChatAgentNameService\s*,\s*ChatAgentNameService\s*,\s*InstantiationType\.\w+\s*,?\s*\)/u,
+		reason:
+			"shares chatAgents.service.js's import line with IChatAgentService, which must stay; no benefit to removing just this one",
+	},
+	{
+		token: "IAgentNetworkFilterService",
+		pattern:
+			/registerSingleton\(\s*IAgentNetworkFilterService\s*,\s*AgentNetworkFilterService\s*,\s*InstantiationType\.\w+\s*,?\s*\)/u,
+		reason:
+			'non-optional __param of browserView.js\'s BrowserViewModel ("Share with Agent" + Playwright-based agent browser-observation bridge); removing it requires a deeper BrowserViewModel/IPlaywrightService refactor out of scope for this slice',
+	},
+]);
 
 function findReintroducedTokens(source, tokens) {
 	const found = [];
@@ -129,9 +387,9 @@ function findReintroducedTokens(source, tokens) {
 
 /**
  * Checks the patched, currently-installed `missing-services.js` source for
- * this slice's two shape assumptions: none of the 34 removed tokens have
- * reappeared, and the one deliberately-kept `IAuthenticationService`
- * registration is still present.
+ * this slice's two shape assumptions: none of the removed tokens have
+ * reappeared, and every deliberately-kept registration
+ * (`KEPT_TOKEN_REGISTRATIONS`) is still present.
  */
 export function checkMissingServicesShape(missingServicesSource) {
 	const failures = [];
@@ -140,22 +398,23 @@ export function checkMissingServicesShape(missingServicesSource) {
 		REMOVED_MISSING_SERVICES_TOKENS,
 	)) {
 		failures.push(
-			`missing-services.js unexpectedly still references ${token} — F110 S2 removed its import/class/registerSingleton registration; either the patch failed to apply as assumed or upstream reintroduced this token through a different registration this patch's exact line ranges never touch`,
+			`missing-services.js unexpectedly still references ${token} — F110 removed its import/class/registerSingleton registration; either the patch failed to apply as assumed or upstream reintroduced this token through a different registration this patch's exact line ranges never touch`,
 		);
 	}
-	if (!KEPT_AUTHENTICATION_SERVICE_REGISTRATION.test(missingServicesSource)) {
-		failures.push(
-			"missing-services.js no longer registers IAuthenticationService — this binding is deliberately kept because globalCompositeBar.js injects it as a non-optional constructor dependency (AccountsActivityActionViewItem/SimpleAccountActivityActionViewItem); removing it would leave the token unbound and throw at Activity Bar construction time",
-		);
+	for (const kept of KEPT_TOKEN_REGISTRATIONS) {
+		if (!kept.pattern.test(missingServicesSource)) {
+			failures.push(
+				`missing-services.js no longer registers ${kept.token} — this binding is deliberately kept because ${kept.reason}`,
+			);
+		}
 	}
 	return failures;
 }
 
 /**
  * Checks the patched, currently-installed `services.js` source for this
- * slice's shape assumption: none of the 36 removed re-export tokens (the 34
- * missing-services.js tokens, plus IMcpManagementService and
- * IAuthenticationService) have reappeared as a facade re-export.
+ * slice's shape assumption: none of the removed re-export tokens have
+ * reappeared as a facade re-export.
  */
 export function checkServicesReexportShape(servicesSource) {
 	const failures = [];
@@ -164,7 +423,7 @@ export function checkServicesReexportShape(servicesSource) {
 		REMOVED_SERVICES_REEXPORT_TOKENS,
 	)) {
 		failures.push(
-			`services.js unexpectedly still re-exports ${token} — F110 S2 removed this facade re-export line; either the patch failed to apply as assumed or upstream reintroduced this token under a different re-export this patch's exact line deletions never touch`,
+			`services.js unexpectedly still re-exports ${token} — F110 removed this facade re-export line; either the patch failed to apply as assumed or upstream reintroduced this token under a different re-export this patch's exact line deletions never touch`,
 		);
 	}
 	return failures;

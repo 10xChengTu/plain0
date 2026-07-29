@@ -37,10 +37,40 @@ export const categories = {
 	// (acceptance #5). Classifying it under a naive `remote` keyword match
 	// would have repeated the exact `globalCompositeBar.js` filename-vs-
 	// content mismatch this research documented as a trap to avoid.
+	//
+	// `agentPlugins` and `agentsVoice` were added in F110 S3 after real
+	// dependency-graph audit found both were *already* reachable in the real
+	// bundle (independent of anything S3 touched) but matched by none of the
+	// 12 existing categories: `platform/agentPlugins/common/pluginParsers.js`
+	// parses Claude/Copilot/OpenPlugin-format AI agent plugin manifests and
+	// hook configs (real logic, not a stub) and is pulled in transitively via
+	// the chat prompt-syntax hook chain; `workbench/contrib/agentsVoice/**`
+	// (`agentsVoice.service.js`/`voiceTranscriptStore.service.js`) is a
+	// missing-services.js-registered AI voice-agent stub pair that was simply
+	// never covered by the directory alternation above. Both are genuinely
+	// AI/Agent debt despite not containing the literal segment `chat` or
+	// `agentHost`.
+	//
+	// `networkFilterService.service.js` is matched by filename, not
+	// directory shape (it lives under `platform/networkFilter/common/`, no
+	// `agent` or `chat` segment anywhere in its path) — the same
+	// content-vs-path-name mismatch `globalCompositeBar.js` already
+	// established a precedent for. Its token (`IAgentNetworkFilterService`,
+	// declared as `createDecorator("agentNetworkFilterService")`) and its
+	// missing-services.js stub gate an AI-agent capability: whether an
+	// external agent may be granted network access to a given URI. Found
+	// during F110 S3's real dependency-graph audit to be a genuine,
+	// non-optional constructor dependency of `browserView.js`'s real
+	// `BrowserViewModel` ("Share with Agent" + Playwright-based agent
+	// browser-observation bridge) — seeded here so it is honestly tracked as
+	// a floor rather than silently invisible; removing it requires the
+	// deeper `BrowserViewModel`/`IPlaywrightService` surgery documented in
+	// `docs/bundle-baseline.json`'s `categoryNotes.chatAgent`, out of scope
+	// for this slice.
 	chatAgent: (source) =>
-		/\/(?:chat|inlineChat|agentHost|agentEditorComments|remoteCodingAgents)\//i.test(
+		/\/(?:chat|inlineChat|agentHost|agentEditorComments|remoteCodingAgents|agentPlugins|agentsVoice)\//i.test(
 			source,
-		),
+		) || /\/networkFilterService\.service\.js$/i.test(source),
 	mcp: (source) => /\/mcp\//i.test(source),
 	// `globalCompositeBar.js` is matched by filename, not content: it is a
 	// real, currently-imported piece of Activity Bar layout (the "Manage"

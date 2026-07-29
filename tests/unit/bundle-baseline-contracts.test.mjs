@@ -167,24 +167,29 @@ describe("evaluateBundleBaseline ratchet (docs/research/2026-07-28-legacy-retire
 		const sortedSources = baseline.debtSources
 			.map((entry) => entry.source)
 			.sort();
-		// Simulate a category "rising": one previously-untracked mcp-shaped
-		// source appears in the real bundle. Also drop one already-known mcp
-		// source so the raw *count* stays exactly the same as the baseline
-		// ceiling -- proving this is caught by set membership, not just by a
-		// numeric ceiling comparison.
-		const knownMcpSource = baseline.debtSources.find(
-			(entry) => entry.category === "mcp",
+		// Simulate a category "rising": one previously-untracked chatAgent-
+		// shaped source appears in the real bundle. Also drop one already-known
+		// chatAgent source so the raw *count* stays exactly the same as the
+		// baseline ceiling -- proving this is caught by set membership, not
+		// just by a numeric ceiling comparison. (F110 S3 cleared `mcp` to a
+		// ceiling of 0, so it no longer has a member to swap out this way;
+		// `chatAgent` is the category this same scenario now exercises, and
+		// still has a real member set thanks to its own non-zero floor.)
+		const knownChatAgentSource = baseline.debtSources.find(
+			(entry) => entry.category === "chatAgent",
 		).source;
 		const grownSources = sortedSources
-			.filter((source) => source !== knownMcpSource)
+			.filter((source) => source !== knownChatAgentSource)
 			.concat(
-				"node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/mcp/common/mcpNeverSeenBefore.service.js",
+				"node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/chatNeverSeenBefore.service.js",
 			)
 			.sort();
 		const { failures, actual } = evaluateBundleBaseline(grownSources, baseline);
-		expect(actual.categoryCounts.mcp).toBe(baseline.categoryCeilings.mcp);
+		expect(actual.categoryCounts.chatAgent).toBe(
+			baseline.categoryCeilings.chatAgent,
+		);
 		expect(failures).toContain(
-			"bundle baseline mcp contains an untracked debt source: node_modules/@codingame/monaco-vscode-api/vscode/src/vs/platform/mcp/common/mcpNeverSeenBefore.service.js",
+			"bundle baseline chatAgent contains an untracked debt source: node_modules/@codingame/monaco-vscode-api/vscode/src/vs/workbench/contrib/chat/common/chatNeverSeenBefore.service.js",
 		);
 	});
 
