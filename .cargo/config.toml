@@ -1,0 +1,22 @@
+# F070 VT integration gating (docs/research/2026-07-24-libghostty-terminal.md):
+# `libghostty-vt-sys`'s build.rs (a transitive build-dependency of
+# `libghostty-vt`, see `src-tauri/Cargo.toml`) shells out to `zig build` and,
+# unless `GHOSTTY_SOURCE_DIR` is set, clones the ~151 MiB Ghostty repository
+# into `OUT_DIR` (i.e. `src-tauri/target/...`) on every clean build. Pointing
+# it at a stable, gitignored checkout outside `target/` means that clone only
+# ever happens once per machine, survives `rm -rf src-tauri/target`, and does
+# not depend on the network being reachable on every `cargo`/`pnpm check` run.
+#
+# This checkout does not create itself: `scripts/plain/ghostty-vendor-setup.mjs`
+# clones the exact pinned commit into `.ghostty-vendor/ghostty` the first time
+# it is missing, and is itself invoked automatically by the `rust:clippy` and
+# `rust:test` scripts in `package.json` before `cargo` runs — so plain
+# `pnpm check` provisions this without any manual step.
+#
+# `[env]` here applies to every `cargo`-invoked process, including build
+# scripts (which is exactly what `GHOSTTY_SOURCE_DIR` needs — it is read
+# inside `libghostty-vt-sys`'s `build.rs`), but does not affect any other
+# crate: it is an environment variable name specific to this one dependency,
+# harmless for every other build script to simply not read.
+[env]
+GHOSTTY_SOURCE_DIR = { value = ".ghostty-vendor/ghostty", relative = true }

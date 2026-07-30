@@ -7,6 +7,7 @@ use cap_std::ambient_authority;
 use cap_std::fs::Dir;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::error::CommandError;
@@ -92,6 +93,103 @@ impl Serialize for WorkspaceId {
     {
         serializer.serialize_str(&self.as_wire())
     }
+}
+
+/// A stable identity derived from the sorted canonical filesystem paths of
+/// every currently authorized workspace root.
+///
+/// Unlike [`WorkspaceId`] (a random identifier minted once per window/session
+/// and never persisted), this identity is a pure function of *which
+/// directories are open*: reopening the exact same set of roots — in any
+/// window, in any process, after a restart — always reproduces the same
+/// value, and changing the root set (add/remove/replace) always changes it.
+/// It carries no `Serialize` implementation and is never sent to the
+/// WebView; it exists purely to key Rust-internal, root-set-scoped storage
+/// (currently: the hot-exit backup directory).
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct WorkspaceRootsIdentity(String);
+
+impl WorkspaceRootsIdentity {
+    /// The identity rendered as a lowercase hex string, safe to use verbatim
+    /// as a single filesystem directory name (`[0-9a-f]{64}`).
+    pub(crate) fn as_dir_name(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for WorkspaceRootsIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("WorkspaceRootsIdentity")
+            .field(&self.0)
+            .finish()
+    }
+}
+
+/// Domain separator for [`stable_roots_identity`], so this hash can never
+/// collide with a digest computed for an unrelated purpose even if the input
+/// framing were ever reused.
+const ROOTS_IDENTITY_DOMAIN: &[u8] = b"plain.workspace.roots-identity.v1\0";
+
+/// Hashes a set of canonical root paths into a single stable, order- and
+/// ambiguity-free digest: `None` for an empty set (there is no stable
+/// identity for zero roots), otherwise the lowercase hex SHA-256 of the
+/// domain-separated, length-prefixed, lexicographically sorted paths.
+///
+/// Sorting first makes the result independent of authorization order (the
+/// same set of roots always hashes the same way regardless of which order
+/// they were opened in). Prefixing every path with its own byte length
+/// before hashing — rather than joining paths with a separator character —
+/// means two different root sets can never be confused by where one path
+/// ends and the next begins: `["/a/b", "/c"]` and `["/a", "/b/c"]` hash
+/// differently even though their naive concatenations are identical.
+pub(crate) fn stable_roots_identity(canonical_paths: &[PathBuf]) -> Option<String> {
+    if canonical_paths.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<&Path> = canonical_paths.iter().map(PathBuf::as_path).collect();
+    sorted.sort();
+
+    let mut hasher = Sha256::new();
+    hasher.update(ROOTS_IDENTITY_DOMAIN);
+    let path_count = u32::try_from(sorted.len()).unwrap_or(u32::MAX);
+    hasher.update(path_count.to_be_bytes());
+    for path in sorted {
+        let bytes = path_bytes(path);
+        let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        hasher.update(length.to_be_bytes());
+        hasher.update(&bytes);
+    }
+    Some(hex_encode(hasher.finalize().into()))
+}
+
+/// A lossless byte representation of a path, used only as hash input (never
+/// written to disk or a filename): raw OS bytes on Unix, raw UTF-16 code
+/// units (as little-endian byte pairs) on Windows, so no two distinct
+/// `OsString` values can ever collide.
+#[cfg(unix)]
+fn path_bytes(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(windows)]
+fn path_bytes(path: &Path) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+    path.as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect()
+}
+
+fn hex_encode(digest: [u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut token = String::with_capacity(64);
+    for byte in digest {
+        token.push(char::from(HEX[usize::from(byte >> 4)]));
+        token.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    token
 }
 
 impl fmt::Debug for RootId {
@@ -286,6 +384,7 @@ impl WorkspaceScope {
                     directory: candidate.directory,
                     display_name: candidate.display_name,
                     identity: candidate.identity,
+                    canonical_path: candidate.watch_path,
                 },
             );
             self.order.push(root_id);
@@ -345,6 +444,7 @@ impl WorkspaceScope {
                 directory: candidate.directory,
                 display_name: candidate.display_name,
                 identity: candidate.identity,
+                canonical_path: candidate.watch_path,
             },
         );
         self.order.push(root_id);
@@ -380,8 +480,46 @@ impl WorkspaceScope {
         self.workspace_id
     }
 
+    /// The stable identity of the currently authorized root set (see
+    /// [`WorkspaceRootsIdentity`]); `None` when zero roots are authorized.
+    pub(crate) fn stable_identity(&self) -> Option<WorkspaceRootsIdentity> {
+        let canonical_paths: Vec<PathBuf> = self
+            .roots
+            .values()
+            .map(|root| root.canonical_path.clone())
+            .collect();
+        stable_roots_identity(&canonical_paths).map(WorkspaceRootsIdentity)
+    }
+
     pub(crate) fn root_ids(&self) -> Vec<RootId> {
         self.order.clone()
+    }
+
+    /// The canonicalized ambient path backing each currently authorized
+    /// root, in the same authorization order [`Self::root_ids`] reports
+    /// (index 0 is "the first root", the fallback a caller that needs *some*
+    /// default directory but was not given an explicit one can use).
+    ///
+    /// Used only by native domains that need to reason about "which real
+    /// directories are currently open" for a purpose other than file
+    /// capability I/O — currently: the terminal domain's `cwd` spawn-
+    /// parameter validation (see `terminal::service::resolve_cwd`), which
+    /// the F070 research doc's decision 2 documents as an intentionally
+    /// different security boundary from capability-relative file access
+    /// (spawning a subprocess with a given working directory is ambient
+    /// process authority, not capability-relative I/O, so validating it via
+    /// `canonicalize` + `starts_with` against this list is the sanctioned
+    /// check here — never a template for bypassing the capability-relative
+    /// rule elsewhere). Never serialized to the WebView.
+    pub(crate) fn root_canonical_paths(&self) -> Vec<(RootId, PathBuf)> {
+        self.order
+            .iter()
+            .filter_map(|root_id| {
+                self.roots
+                    .get(root_id)
+                    .map(|root| (*root_id, root.canonical_path.clone()))
+            })
+            .collect()
     }
 
     pub fn remove(&mut self, root_id: RootId) -> Result<(), CommandError> {
@@ -438,6 +576,10 @@ struct WorkspaceRoot {
     directory: Dir,
     display_name: String,
     identity: DirectoryIdentity,
+    /// The canonicalized ambient path this root was authorized from. Used
+    /// only to derive [`WorkspaceRootsIdentity`]; never exposed outside this
+    /// module (in particular, never serialized to the WebView).
+    canonical_path: PathBuf,
 }
 
 struct PreparedWorkspaceRoot {

@@ -1,0 +1,1059 @@
+//! Wire request/response shapes for the terminal commands. F070's "IPC 改造"
+//! slice (docs/research/2026-07-24-libghostty-terminal.md) replaced the S2
+//! placeholder raw-byte `TerminalInputRequest`/`TerminalDataEvent` shapes
+//! with the render-state projection below: `plain://terminal-data` now
+//! carries a [`TerminalFrame`] (a serializable projection of
+//! `terminal::vt::DirtyFrame`) instead of raw pty bytes, and input is split
+//! into [`TerminalInputTextRequest`] (IME-committed/pasted text, written to
+//! the pty as-is) and [`TerminalInputKeyRequest`] (a structured key event,
+//! encoded through `libghostty-vt`'s own encoder before being written) —
+//! see this slice's final report for why.
+
+use std::fmt;
+
+use serde::de::Error as DeError;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use uuid::{Uuid, Variant};
+
+use libghostty_vt::key;
+use libghostty_vt::render::{Colors, CursorViewport, CursorVisualStyle, Dirty};
+use libghostty_vt::style::{RgbColor, Style, Underline};
+
+use crate::error::CommandError;
+
+use super::vt;
+
+/// Defensive ceiling on `cols`/`rows` for both `terminal_start` and
+/// `terminal_resize`: comfortably above any real display (a 16K monitor at
+/// a 4px-wide monospace font is nowhere near this many columns), purely a
+/// hostile-input backstop against a request trying to make Rust allocate an
+/// unreasonable pty geometry.
+const MAX_TERMINAL_DIMENSION: u16 = 2_000;
+/// Defensive ceiling on a single `terminal_input_text` call's UTF-8 byte
+/// length. Real keyboard/IME/paste input is a handful of bytes to a modest
+/// pasted block, well under this — a hostile-input backstop, not an
+/// expected value.
+const MAX_TERMINAL_INPUT_BYTES: usize = 1024 * 1024;
+/// Defensive ceiling on a single `terminal_input_key` call's optional
+/// `utf8` field: a real keyboard layout produces at most a handful of UTF-8
+/// bytes for one keypress (even a multi-codepoint grapheme), so this is a
+/// hostile-input backstop, not an expected value.
+const MAX_TERMINAL_KEY_UTF8_BYTES: usize = 64;
+/// Defensive ceiling on a single `terminal_scrollback` call's `count`:
+/// matches `terminal::vt::TERMINAL_VT_MAX_SCROLLBACK_LINES`, since no
+/// session ever retains more scrollback than that regardless of what is
+/// requested.
+const MAX_TERMINAL_SCROLLBACK_REQUEST_ROWS: u32 = 10_000;
+
+/// An opaque, window-bound identity for one terminal session. Validated the
+/// same strict way `search::dto::SearchId` is (exact-length, version-4,
+/// RFC4122 hyphenated string), and redacted in `Debug` for the same reason.
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct TerminalSessionId(Uuid);
+
+impl TerminalSessionId {
+    pub(crate) fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub fn as_wire(self) -> String {
+        self.0.hyphenated().to_string()
+    }
+}
+
+impl fmt::Debug for TerminalSessionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("terminal session id")
+            .field(&"<redacted>")
+            .finish()
+    }
+}
+
+impl Serialize for TerminalSessionId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.as_wire())
+    }
+}
+
+impl<'de> Deserialize<'de> for TerminalSessionId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = String::deserialize(deserializer)?;
+        let value =
+            Uuid::parse_str(&wire).map_err(|_| D::Error::custom("invalid terminal session id"))?;
+        if value.get_version_num() != 4
+            || value.get_variant() != Variant::RFC4122
+            || value.hyphenated().to_string() != wire
+        {
+            return Err(D::Error::custom("invalid terminal session id"));
+        }
+        Ok(Self(value))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TerminalStartRequest {
+    cwd: Option<String>,
+    cols: u16,
+    rows: u16,
+}
+
+#[derive(Debug)]
+pub(crate) struct TerminalStartQuery {
+    pub(crate) cwd: Option<String>,
+    pub(crate) cols: u16,
+    pub(crate) rows: u16,
+}
+
+impl TerminalStartRequest {
+    pub(crate) fn into_parts(self) -> Result<TerminalStartQuery, CommandError> {
+        validate_dimensions(self.cols, self.rows)?;
+        Ok(TerminalStartQuery {
+            cwd: self.cwd,
+            cols: self.cols,
+            rows: self.rows,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalStartResult {
+    session_id: TerminalSessionId,
+}
+
+impl TerminalStartResult {
+    pub(crate) fn new(session_id: TerminalSessionId) -> Self {
+        Self { session_id }
+    }
+}
+
+/// `terminal_input_text` request: raw text (an IME composition commit, or a
+/// pasted block) written to the pty as its own UTF-8 bytes — no key
+/// encoding involved, unlike [`TerminalInputKeyRequest`].
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TerminalInputTextRequest {
+    session_id: TerminalSessionId,
+    text: String,
+}
+
+impl TerminalInputTextRequest {
+    pub(crate) fn into_parts(self) -> Result<(TerminalSessionId, String), CommandError> {
+        if self.text.len() > MAX_TERMINAL_INPUT_BYTES {
+            return Err(invalid_terminal_request());
+        }
+        Ok((self.session_id, self.text))
+    }
+}
+
+/// `terminal_input_key` request: one structured key event, encoded through
+/// `libghostty-vt`'s own key encoder (see `terminal::vt::encode_key_event`)
+/// before being written to the pty. `action`/`key` are the literal
+/// `libghostty_vt::key::{Action,Key}` `#[repr(u32)]` enum discriminant
+/// values (validated via that crate's own derived `TryFrom<u32>`, not a
+/// hand-maintained name lookup); `mods` is a strict `libghostty_vt::key::Mods`
+/// bitmask (unknown bits rejected via `Mods::from_bits`, not silently
+/// truncated). Translating a DOM `KeyboardEvent` into these numeric values
+/// is the consuming WebView rendering slice's job, not this IPC contract's.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TerminalInputKeyRequest {
+    session_id: TerminalSessionId,
+    action: u32,
+    key: u32,
+    mods: u16,
+    utf8: Option<String>,
+}
+
+impl TerminalInputKeyRequest {
+    pub(crate) fn into_parts(self) -> Result<(TerminalSessionId, vt::KeyInput), CommandError> {
+        let action = key::Action::try_from(self.action).map_err(|_| invalid_terminal_request())?;
+        let key = key::Key::try_from(self.key).map_err(|_| invalid_terminal_request())?;
+        let mods = key::Mods::from_bits(self.mods).ok_or_else(invalid_terminal_request)?;
+        if self
+            .utf8
+            .as_ref()
+            .is_some_and(|text| text.len() > MAX_TERMINAL_KEY_UTF8_BYTES)
+        {
+            return Err(invalid_terminal_request());
+        }
+        let mut input = vt::KeyInput::new(action, key, mods);
+        if let Some(text) = self.utf8 {
+            input = input.with_utf8(text);
+        }
+        Ok((self.session_id, input))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TerminalResizeRequest {
+    session_id: TerminalSessionId,
+    cols: u16,
+    rows: u16,
+}
+
+impl TerminalResizeRequest {
+    pub(crate) fn into_parts(self) -> Result<(TerminalSessionId, u16, u16), CommandError> {
+        validate_dimensions(self.cols, self.rows)?;
+        Ok((self.session_id, self.cols, self.rows))
+    }
+}
+
+/// `terminal_focus` request: whether this window's terminal view just
+/// gained or lost focus. Encoded (via `terminal::vt::encode_focus_event`)
+/// and written to the pty only if the session's live terminal currently has
+/// focus-reporting mode (DEC 1004) enabled — see
+/// `terminal::vt::TerminalModesSnapshot::focus_reporting_enabled`.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TerminalFocusRequest {
+    session_id: TerminalSessionId,
+    focused: bool,
+}
+
+impl TerminalFocusRequest {
+    pub(crate) fn into_parts(self) -> (TerminalSessionId, bool) {
+        (self.session_id, self.focused)
+    }
+}
+
+/// `terminal_ack` request: acknowledges that the frontend has applied every
+/// `plain://terminal-data` frame up through `sequence`, freeing the vt
+/// thread's single-frame-in-flight emission credit (see `service.rs`'s
+/// module doc's "VT → frontend frame delivery backpressure" section) —
+/// **not** a byte count. An over-generous or duplicate ack (a `sequence`
+/// at or below what was already acked) is tolerated, not rejected, mirroring
+/// `flow::FlowControl::ack`'s own tolerant contract for the still-separate
+/// PTY → VT byte-level backpressure leg.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TerminalAckRequest {
+    session_id: TerminalSessionId,
+    sequence: u64,
+}
+
+impl TerminalAckRequest {
+    pub(crate) fn into_parts(self) -> (TerminalSessionId, u64) {
+        (self.session_id, self.sequence)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TerminalKillRequest {
+    session_id: TerminalSessionId,
+    immediate: bool,
+}
+
+impl TerminalKillRequest {
+    pub(crate) fn into_parts(self) -> (TerminalSessionId, bool) {
+        (self.session_id, self.immediate)
+    }
+}
+
+/// `terminal_scrollback` request: pulls up to `count` history rows starting
+/// at history row `start` (`0` = oldest retained line) — see
+/// `terminal::vt::VtSession::scrollback_rows`'s doc for the exact semantics
+/// this delegates to. `count` must be `1..=MAX_TERMINAL_SCROLLBACK_REQUEST_ROWS`;
+/// a `start` past the end of retained scrollback is not an error (it simply
+/// yields fewer, possibly zero, rows).
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TerminalScrollbackRequest {
+    session_id: TerminalSessionId,
+    start: u32,
+    count: u32,
+}
+
+impl TerminalScrollbackRequest {
+    pub(crate) fn into_parts(self) -> Result<(TerminalSessionId, usize, usize), CommandError> {
+        if self.count == 0 || self.count > MAX_TERMINAL_SCROLLBACK_REQUEST_ROWS {
+            return Err(invalid_terminal_request());
+        }
+        Ok((self.session_id, self.start as usize, self.count as usize))
+    }
+}
+
+/// Wire projection of [`libghostty_vt::style::RgbColor`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalRgb {
+    r: u8,
+    g: u8,
+    b: u8,
+}
+
+impl From<RgbColor> for TerminalRgb {
+    fn from(value: RgbColor) -> Self {
+        Self {
+            r: value.r,
+            g: value.g,
+            b: value.b,
+        }
+    }
+}
+
+/// Wire projection of [`libghostty_vt::style::Underline`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TerminalUnderline {
+    None,
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
+}
+
+impl From<Underline> for TerminalUnderline {
+    fn from(value: Underline) -> Self {
+        match value {
+            Underline::None => Self::None,
+            Underline::Single => Self::Single,
+            Underline::Double => Self::Double,
+            Underline::Curly => Self::Curly,
+            Underline::Dotted => Self::Dotted,
+            Underline::Dashed => Self::Dashed,
+            // `Underline` is `#[non_exhaustive]` upstream: fall back to
+            // "no underline" rather than fail the whole frame if a future
+            // libghostty-vt version adds a variant this module does not
+            // know about yet.
+            _ => Self::None,
+        }
+    }
+}
+
+/// Wire projection of [`libghostty_vt::style::Style`]'s boolean attribute
+/// flags plus `underline`. Deliberately omits `fg_color`/`bg_color`/
+/// `underline_color` (all `StyleColor`, i.e. palette-index-or-RGB-or-unset):
+/// [`TerminalCell`] already carries the *resolved* `fg`/`bg` RGB libghostty-vt
+/// itself computed (see `terminal::vt::DirtyCell::fg_rgb`/`bg_rgb`'s doc),
+/// which is what a renderer actually needs; a distinct underline color is
+/// not currently wire-projected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalStyle {
+    bold: bool,
+    italic: bool,
+    faint: bool,
+    blink: bool,
+    inverse: bool,
+    invisible: bool,
+    strikethrough: bool,
+    overline: bool,
+    underline: TerminalUnderline,
+}
+
+impl From<Style> for TerminalStyle {
+    fn from(value: Style) -> Self {
+        Self {
+            bold: value.bold,
+            italic: value.italic,
+            faint: value.faint,
+            blink: value.blink,
+            inverse: value.inverse,
+            invisible: value.invisible,
+            strikethrough: value.strikethrough,
+            overline: value.overline,
+            underline: value.underline.into(),
+        }
+    }
+}
+
+/// Wire projection of one [`terminal::vt::DirtyCell`]. `graphemes` is the
+/// cell's base codepoint plus any combining marks, joined into a single
+/// `String` (a JSON string already carries UTF-16/UTF-8 text losslessly, so
+/// there is no reason to wire-project this as a `char` array). Deliberately
+/// omits `DirtyCell::selected` — viewport selection rendering is not part of
+/// this slice.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalCell {
+    graphemes: String,
+    fg: Option<TerminalRgb>,
+    bg: Option<TerminalRgb>,
+    style: TerminalStyle,
+}
+
+impl From<vt::DirtyCell> for TerminalCell {
+    fn from(value: vt::DirtyCell) -> Self {
+        Self {
+            graphemes: value.graphemes.into_iter().collect(),
+            fg: value.fg_rgb.map(TerminalRgb::from),
+            bg: value.bg_rgb.map(TerminalRgb::from),
+            style: value.style.into(),
+        }
+    }
+}
+
+/// Wire projection of one [`terminal::vt::DirtyRow`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalRow {
+    row_index: u32,
+    cells: Vec<TerminalCell>,
+}
+
+impl From<vt::DirtyRow> for TerminalRow {
+    fn from(value: vt::DirtyRow) -> Self {
+        Self {
+            row_index: value.row_index as u32,
+            cells: value.cells.into_iter().map(TerminalCell::from).collect(),
+        }
+    }
+}
+
+/// Wire projection of [`libghostty_vt::render::CursorViewport`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalCursorViewport {
+    x: u16,
+    y: u16,
+    at_wide_tail: bool,
+}
+
+impl From<CursorViewport> for TerminalCursorViewport {
+    fn from(value: CursorViewport) -> Self {
+        Self {
+            x: value.x,
+            y: value.y,
+            at_wide_tail: value.at_wide_tail,
+        }
+    }
+}
+
+/// Wire projection of [`libghostty_vt::render::CursorVisualStyle`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TerminalCursorStyle {
+    Bar,
+    Block,
+    Underline,
+    BlockHollow,
+}
+
+impl From<CursorVisualStyle> for TerminalCursorStyle {
+    fn from(value: CursorVisualStyle) -> Self {
+        match value {
+            CursorVisualStyle::Bar => Self::Bar,
+            CursorVisualStyle::Block => Self::Block,
+            CursorVisualStyle::Underline => Self::Underline,
+            CursorVisualStyle::BlockHollow => Self::BlockHollow,
+            // `CursorVisualStyle` is `#[non_exhaustive]` upstream; see
+            // `TerminalUnderline::from`'s identical rationale.
+            _ => Self::Block,
+        }
+    }
+}
+
+/// Wire projection of a [`terminal::vt::DirtyFrame`]'s cursor fields.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalCursor {
+    visible: bool,
+    blinking: bool,
+    viewport: Option<TerminalCursorViewport>,
+    style: TerminalCursorStyle,
+}
+
+impl From<vt::CursorState> for TerminalCursor {
+    fn from(value: vt::CursorState) -> Self {
+        Self {
+            visible: value.visible,
+            blinking: value.blinking,
+            viewport: value.viewport.map(TerminalCursorViewport::from),
+            style: value.style.into(),
+        }
+    }
+}
+
+/// Wire projection of [`libghostty_vt::render::Colors`]. Deliberately omits
+/// `Colors::palette` (the full 256-entry color palette): every cell's
+/// `fg`/`bg` in [`TerminalCell`] is already fully resolved by libghostty-vt
+/// itself (palette lookups included), so a renderer never needs to resolve
+/// a palette index on its own — only `background`/`foreground`/`cursor` are
+/// needed, as the frame-level defaults to paint where a cell has no
+/// explicit color.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalColors {
+    background: TerminalRgb,
+    foreground: TerminalRgb,
+    cursor: Option<TerminalRgb>,
+}
+
+impl From<Colors> for TerminalColors {
+    fn from(value: Colors) -> Self {
+        Self {
+            background: value.background.into(),
+            foreground: value.foreground.into(),
+            cursor: value.cursor.map(TerminalRgb::from),
+        }
+    }
+}
+
+/// Wire projection of [`libghostty_vt::render::Dirty`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TerminalDirty {
+    Clean,
+    Partial,
+    Full,
+}
+
+impl From<Dirty> for TerminalDirty {
+    fn from(value: Dirty) -> Self {
+        match value {
+            Dirty::Clean => Self::Clean,
+            Dirty::Partial => Self::Partial,
+            Dirty::Full => Self::Full,
+        }
+    }
+}
+
+/// Wire projection of a [`terminal::vt::DirtyFrame`] — the render-state
+/// "what changed" snapshot that is `plain://terminal-data`'s payload as of
+/// F070's "IPC 改造" slice (replacing the S2 raw-byte placeholder). Encoded
+/// as structured JSON rather than a packed binary frame + base64: unlike
+/// S2's raw pty bytes (a high-frequency, fixed-shape byte stream, for which
+/// base64 was the right call), a dirty frame is emitted at most once per
+/// vt-thread emission credit (see `service.rs`'s module doc — heavily
+/// coalesced relative to raw bytes) and its cell grid has variable-length
+/// nested data (a variable number of dirty rows, each with a variable
+/// number of cells, each with a variable-length grapheme string and
+/// optional colors) that does not map onto a fixed binary layout as cleanly
+/// as a flat byte buffer did. Structured JSON keeps every field
+/// individually Harness-lockable (`hasExactKeys` per level) and trivially
+/// correct to decode, at some size cost this slice accepts given the
+/// frequency is already throttled — see this slice's final report for the
+/// full comparison.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalFrame {
+    dirty: TerminalDirty,
+    cols: u16,
+    rows: u16,
+    cursor: TerminalCursor,
+    colors: TerminalColors,
+    rows_data: Vec<TerminalRow>,
+}
+
+impl From<vt::DirtyFrame> for TerminalFrame {
+    fn from(value: vt::DirtyFrame) -> Self {
+        Self {
+            dirty: value.dirty.into(),
+            cols: value.cols,
+            rows: value.rows,
+            cursor: value.cursor.into(),
+            colors: value.colors.into(),
+            rows_data: value.rows_data.into_iter().map(TerminalRow::from).collect(),
+        }
+    }
+}
+
+/// `plain://terminal-data` event payload (F070 "IPC 改造" slice): one
+/// emitted [`TerminalFrame`], in the exact order and with the exact
+/// `sequence` `terminal::service`'s vt thread assigned it (monotonic per
+/// session, incremented once per *emitted* frame — not once per `feed`
+/// call, since intervening feeds while emission credit is exhausted are
+/// coalesced into the next frame rather than each getting their own
+/// sequence number).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalDataEvent {
+    session_id: TerminalSessionId,
+    sequence: u64,
+    frame: TerminalFrame,
+}
+
+impl TerminalDataEvent {
+    pub(crate) fn new(session_id: TerminalSessionId, sequence: u64, frame: vt::DirtyFrame) -> Self {
+        Self {
+            session_id,
+            sequence,
+            frame: frame.into(),
+        }
+    }
+}
+
+/// `plain://terminal-exit` event payload: exactly `{ sessionId, exitCode }`,
+/// deliberately omitting `TerminalExitStatus::signal` — the research doc's
+/// frozen decision only calls for these two fields, and a wider payload can
+/// always be added in a later slice without breaking this one (widening a
+/// `deny_unknown_fields`-free `Serialize`-only event payload is backward
+/// compatible for any decoder that itself only reads named keys).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalExitEvent {
+    session_id: TerminalSessionId,
+    exit_code: u32,
+}
+
+impl TerminalExitEvent {
+    pub(crate) const fn new(session_id: TerminalSessionId, exit_code: u32) -> Self {
+        Self {
+            session_id,
+            exit_code,
+        }
+    }
+}
+
+/// Wire projection of one [`terminal::vt::ScrollbackCell`]. Lighter than
+/// [`TerminalCell`]: see `terminal::vt::VtSession::scrollback_rows`'s doc
+/// for why scrollback rows do not carry resolved `fg`/`bg` RGB.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalScrollbackCell {
+    graphemes: String,
+    style: TerminalStyle,
+}
+
+impl From<vt::ScrollbackCell> for TerminalScrollbackCell {
+    fn from(value: vt::ScrollbackCell) -> Self {
+        Self {
+            graphemes: value.graphemes.into_iter().collect(),
+            style: value.style.into(),
+        }
+    }
+}
+
+/// Wire projection of one [`terminal::vt::ScrollbackRow`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalScrollbackRow {
+    row_index: u32,
+    cells: Vec<TerminalScrollbackCell>,
+}
+
+impl From<vt::ScrollbackRow> for TerminalScrollbackRow {
+    fn from(value: vt::ScrollbackRow) -> Self {
+        Self {
+            row_index: value.row_index as u32,
+            cells: value
+                .cells
+                .into_iter()
+                .map(TerminalScrollbackCell::from)
+                .collect(),
+        }
+    }
+}
+
+/// `terminal_scrollback` response.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalScrollbackResult {
+    rows: Vec<TerminalScrollbackRow>,
+}
+
+impl TerminalScrollbackResult {
+    pub(crate) fn new(rows: Vec<vt::ScrollbackRow>) -> Self {
+        Self {
+            rows: rows.into_iter().map(TerminalScrollbackRow::from).collect(),
+        }
+    }
+}
+
+fn validate_dimensions(cols: u16, rows: u16) -> Result<(), CommandError> {
+    if cols == 0 || rows == 0 || cols > MAX_TERMINAL_DIMENSION || rows > MAX_TERMINAL_DIMENSION {
+        return Err(invalid_terminal_request());
+    }
+    Ok(())
+}
+
+fn invalid_terminal_request() -> CommandError {
+    CommandError::new(
+        "INVALID_TERMINAL_REQUEST",
+        "The terminal request is invalid.",
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use libghostty_vt::key;
+    use libghostty_vt::render::{CursorVisualStyle, Dirty};
+    use libghostty_vt::style::{RgbColor, Style};
+
+    use super::{
+        TerminalAckRequest, TerminalFocusRequest, TerminalInputKeyRequest,
+        TerminalInputTextRequest, TerminalKillRequest, TerminalResizeRequest,
+        TerminalScrollbackRequest, TerminalStartRequest, MAX_TERMINAL_INPUT_BYTES,
+        MAX_TERMINAL_KEY_UTF8_BYTES, MAX_TERMINAL_SCROLLBACK_REQUEST_ROWS,
+    };
+    use crate::terminal::vt::{self, DirtyCell, DirtyFrame, DirtyRow};
+
+    const VALID_ID: &str = "0d3f4b0e-6f1a-4c9d-9c3a-1a2b3c4d5e6f";
+
+    fn valid_session_id() -> super::TerminalSessionId {
+        serde_json::from_value(serde_json::Value::String(VALID_ID.to_owned())).unwrap()
+    }
+
+    #[test]
+    fn every_terminal_request_rejects_extra_fields() {
+        assert!(
+            serde_json::from_value::<TerminalStartRequest>(serde_json::json!({
+                "cols": 80, "rows": 24, "extra": true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TerminalInputTextRequest>(serde_json::json!({
+                "sessionId": VALID_ID, "text": "hi", "extra": true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TerminalInputKeyRequest>(serde_json::json!({
+                "sessionId": VALID_ID, "action": 0, "key": 20, "mods": 0, "utf8": null, "extra": true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TerminalResizeRequest>(serde_json::json!({
+                "sessionId": VALID_ID, "cols": 80, "rows": 24, "extra": true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TerminalFocusRequest>(serde_json::json!({
+                "sessionId": VALID_ID, "focused": true, "extra": true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TerminalAckRequest>(serde_json::json!({
+                "sessionId": VALID_ID, "sequence": 10, "extra": true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TerminalKillRequest>(serde_json::json!({
+                "sessionId": VALID_ID, "immediate": true, "extra": true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TerminalScrollbackRequest>(serde_json::json!({
+                "sessionId": VALID_ID, "start": 0, "count": 10, "extra": true
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn start_request_accepts_missing_cwd_and_rejects_zero_or_oversized_dimensions() {
+        let request: TerminalStartRequest = serde_json::from_value(serde_json::json!({
+            "cols": 80, "rows": 24
+        }))
+        .unwrap();
+        let query = request.into_parts().unwrap();
+        assert_eq!(query.cwd, None);
+        assert_eq!(query.cols, 80);
+        assert_eq!(query.rows, 24);
+
+        for (cols, rows) in [(0, 24), (80, 0), (3_000, 24), (80, 3_000)] {
+            let request: TerminalStartRequest = serde_json::from_value(serde_json::json!({
+                "cols": cols, "rows": rows
+            }))
+            .unwrap();
+            assert_eq!(
+                request.into_parts().unwrap_err().code(),
+                "INVALID_TERMINAL_REQUEST"
+            );
+        }
+    }
+
+    #[test]
+    fn input_text_request_rejects_oversized_text() {
+        let oversized = "a".repeat(MAX_TERMINAL_INPUT_BYTES + 1);
+        let request = TerminalInputTextRequest {
+            session_id: valid_session_id(),
+            text: oversized,
+        };
+        assert_eq!(
+            request.into_parts().unwrap_err().code(),
+            "INVALID_TERMINAL_REQUEST"
+        );
+    }
+
+    #[test]
+    fn input_text_request_round_trips_a_valid_payload() {
+        let request: TerminalInputTextRequest = serde_json::from_value(serde_json::json!({
+            "sessionId": VALID_ID, "text": "hello"
+        }))
+        .unwrap();
+        let (session_id, text) = request.into_parts().unwrap();
+        assert_eq!(session_id, valid_session_id());
+        assert_eq!(text, "hello");
+    }
+
+    #[test]
+    fn input_key_request_rejects_unknown_action_key_or_mods_bits() {
+        // `action` out of `key::Action`'s valid discriminant range.
+        let request = TerminalInputKeyRequest {
+            session_id: valid_session_id(),
+            action: 999,
+            key: 20,
+            mods: 0,
+            utf8: None,
+        };
+        assert_eq!(
+            request.into_parts().unwrap_err().code(),
+            "INVALID_TERMINAL_REQUEST"
+        );
+
+        // `key` out of `key::Key`'s valid discriminant range.
+        let request = TerminalInputKeyRequest {
+            session_id: valid_session_id(),
+            action: 0,
+            key: 999_999,
+            mods: 0,
+            utf8: None,
+        };
+        assert_eq!(
+            request.into_parts().unwrap_err().code(),
+            "INVALID_TERMINAL_REQUEST"
+        );
+
+        // Every currently-defined `Mods` bit set except one unknown high bit.
+        let request = TerminalInputKeyRequest {
+            session_id: valid_session_id(),
+            action: 0,
+            key: 20,
+            mods: 0b1000_0000_0000_0000,
+            utf8: None,
+        };
+        assert_eq!(
+            request.into_parts().unwrap_err().code(),
+            "INVALID_TERMINAL_REQUEST"
+        );
+    }
+
+    #[test]
+    fn input_key_request_rejects_oversized_utf8() {
+        let request = TerminalInputKeyRequest {
+            session_id: valid_session_id(),
+            action: 0,
+            key: 20,
+            mods: 0,
+            utf8: Some("a".repeat(MAX_TERMINAL_KEY_UTF8_BYTES + 1)),
+        };
+        assert_eq!(
+            request.into_parts().unwrap_err().code(),
+            "INVALID_TERMINAL_REQUEST"
+        );
+    }
+
+    #[test]
+    fn input_key_request_resolves_a_valid_payload_into_a_key_input() {
+        let request = TerminalInputKeyRequest {
+            session_id: valid_session_id(),
+            action: key::Action::Press as u32,
+            key: key::Key::A as u32,
+            mods: key::Mods::CTRL.bits(),
+            utf8: Some("a".to_owned()),
+        };
+        let (session_id, input) = request.into_parts().unwrap();
+        assert_eq!(session_id, valid_session_id());
+        assert_eq!(input.action, key::Action::Press);
+        assert_eq!(input.key, key::Key::A);
+        assert_eq!(input.mods, key::Mods::CTRL);
+        assert_eq!(input.utf8.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn scrollback_request_rejects_zero_or_oversized_count() {
+        for count in [0, MAX_TERMINAL_SCROLLBACK_REQUEST_ROWS + 1] {
+            let request = TerminalScrollbackRequest {
+                session_id: valid_session_id(),
+                start: 0,
+                count,
+            };
+            assert_eq!(
+                request.into_parts().unwrap_err().code(),
+                "INVALID_TERMINAL_REQUEST"
+            );
+        }
+    }
+
+    #[test]
+    fn scrollback_request_accepts_a_valid_payload() {
+        let request = TerminalScrollbackRequest {
+            session_id: valid_session_id(),
+            start: 5,
+            count: 10,
+        };
+        let (session_id, start, count) = request.into_parts().unwrap();
+        assert_eq!(session_id, valid_session_id());
+        assert_eq!(start, 5);
+        assert_eq!(count, 10);
+    }
+
+    #[test]
+    fn focus_request_extracts_session_and_focused() {
+        let request = TerminalFocusRequest {
+            session_id: valid_session_id(),
+            focused: true,
+        };
+        assert_eq!(request.into_parts(), (valid_session_id(), true));
+    }
+
+    #[test]
+    fn ack_request_extracts_session_and_sequence() {
+        let request = TerminalAckRequest {
+            session_id: valid_session_id(),
+            sequence: 42,
+        };
+        assert_eq!(request.into_parts(), (valid_session_id(), 42));
+    }
+
+    #[test]
+    fn session_id_round_trips_and_rejects_malformed_wire_strings() {
+        let value: super::TerminalSessionId =
+            serde_json::from_value(serde_json::Value::String(VALID_ID.to_owned())).unwrap();
+        assert_eq!(serde_json::to_value(value).unwrap(), VALID_ID);
+
+        for malformed in [
+            "not-a-uuid",
+            "0D3F4B0E-6F1A-4C9D-9C3A-1A2B3C4D5E6F",
+            "0d3f4b0e6f1a4c9d9c3a1a2b3c4d5e6f",
+        ] {
+            assert!(
+                serde_json::from_value::<super::TerminalSessionId>(serde_json::Value::String(
+                    malformed.to_owned()
+                ))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn exit_event_is_exact_camel_case_and_omits_signal() {
+        let event = super::TerminalExitEvent::new(valid_session_id(), 130);
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({ "sessionId": VALID_ID, "exitCode": 130 })
+        );
+    }
+
+    fn sample_dirty_frame() -> DirtyFrame {
+        DirtyFrame {
+            dirty: Dirty::Partial,
+            cols: 10,
+            rows: 2,
+            cursor: vt::CursorState {
+                visible: true,
+                blinking: false,
+                viewport: Some(libghostty_vt::render::CursorViewport {
+                    x: 1,
+                    y: 0,
+                    at_wide_tail: false,
+                }),
+                style: CursorVisualStyle::Block,
+            },
+            colors: libghostty_vt::render::Colors {
+                background: RgbColor { r: 0, g: 0, b: 0 },
+                foreground: RgbColor {
+                    r: 255,
+                    g: 255,
+                    b: 255,
+                },
+                cursor: None,
+                palette: [RgbColor::default(); 256],
+            },
+            rows_data: vec![DirtyRow {
+                row_index: 0,
+                cells: vec![DirtyCell {
+                    graphemes: vec!['h', 'i'],
+                    style: Style::default(),
+                    fg_rgb: Some(RgbColor {
+                        r: 0xCC,
+                        g: 0x66,
+                        b: 0x66,
+                    }),
+                    bg_rgb: None,
+                    selected: false,
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn data_event_projects_the_dirty_frame_field_by_field() {
+        let event = super::TerminalDataEvent::new(valid_session_id(), 7, sample_dirty_frame());
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["sessionId"], VALID_ID);
+        assert_eq!(value["sequence"], 7);
+        let frame = &value["frame"];
+        assert_eq!(frame["dirty"], "partial");
+        assert_eq!(frame["cols"], 10);
+        assert_eq!(frame["rows"], 2);
+        assert_eq!(frame["cursor"]["visible"], true);
+        assert_eq!(frame["cursor"]["style"], "block");
+        assert_eq!(frame["cursor"]["viewport"]["x"], 1);
+        assert_eq!(
+            frame["colors"]["background"],
+            serde_json::json!({"r":0,"g":0,"b":0})
+        );
+        assert_eq!(frame["colors"]["cursor"], serde_json::Value::Null);
+        let row0 = &frame["rowsData"][0];
+        assert_eq!(row0["rowIndex"], 0);
+        assert_eq!(row0["cells"][0]["graphemes"], "hi");
+        assert_eq!(
+            row0["cells"][0]["fg"],
+            serde_json::json!({"r": 0xCC, "g": 0x66, "b": 0x66})
+        );
+        assert_eq!(row0["cells"][0]["bg"], serde_json::Value::Null);
+        assert_eq!(row0["cells"][0]["style"]["bold"], false);
+        assert_eq!(row0["cells"][0]["style"]["underline"], "none");
+        // Every field name is exactly what `hasExactKeys`-style TypeScript
+        // decoding expects — no extraneous, e.g. no raw `Colors::palette`.
+        assert_eq!(
+            frame
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["dirty", "cols", "rows", "cursor", "colors", "rowsData"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        );
+    }
+
+    #[test]
+    fn scrollback_result_projects_rows_without_resolved_colors() {
+        let rows = vec![vt::ScrollbackRow {
+            row_index: 3,
+            cells: vec![vt::ScrollbackCell {
+                graphemes: vec!['x'],
+                style: Style::default(),
+            }],
+        }];
+        let result = super::TerminalScrollbackResult::new(rows);
+        let value = serde_json::to_value(result).unwrap();
+        assert_eq!(value["rows"][0]["rowIndex"], 3);
+        assert_eq!(value["rows"][0]["cells"][0]["graphemes"], "x");
+        assert_eq!(
+            value["rows"][0]["cells"][0]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["graphemes", "style"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        );
+    }
+}

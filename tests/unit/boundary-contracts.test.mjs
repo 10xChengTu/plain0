@@ -8,26 +8,57 @@ import {
 	validateDialogOverrideImportBoundary,
 	validateDialogServiceOverride,
 	validateDialogSurfaceBoundary,
+	validateEntitlementsBoundary,
 	validateNotificationOverrideImportBoundary,
 	validateFrontendEntrypointScripts,
 	validateMainCapability,
+	validateSearchOverrideImportBoundary,
 	validateTauriApiBoundary,
 	validateTauriConfiguration,
 	validateTauriConfigurationFiles,
 	validateTauriE2EConfiguration,
+	validateWorkspaceBrowserFixtureWindowAuthority,
 	validateWorkspaceCapabilitiesBoundary,
 	validateWorkspaceCopyCommandRegistration,
 	validateWorkspaceDeleteBoundary,
 	validateWorkspaceDeleteCommandRegistration,
+	validateWorkspaceDeleteFailureBrowserFixture,
 	validateWorkspaceDeleteTypeScriptBoundary,
 	validateWorkspaceMoveBoundary,
 	validateWorkspaceMoveCommandRegistration,
 	validateWorkspaceMoveFailureBrowserFixture,
+	validateProductConfigurationBoundary,
 	validateWorkspaceProviderBootstrap,
 	validateWorkspaceProviderCopyBoundary,
 	validateWorkspaceRustBoundary as validateWorkspaceRustBoundaryContract,
 	validateWorkspaceVersionedWriteBoundary,
 	validateWorkspaceWatcherBoundary,
+	validateWorkingCopyOverrideImportBoundary,
+	validateTerminalIpcBridgeBoundary,
+	validateTerminalRustBoundary,
+	validateTrustTerminalCommandRegistration,
+	validateGitBlameHardeningArgs,
+	validateGitCommandRegistration,
+	validateGitDiscardConfirmationBoundary,
+	validateGitIpcBridgeBoundary,
+	validateGitLogGraphFormatStringBoundary,
+	validateGitNetworkConfirmationBoundary,
+	validateGitRefsFieldSafetyBoundary,
+	validateGitRustBoundary,
+	validateGitShowCommitFirstParentBoundary,
+	validateGitStashConfirmationBoundary,
+	validateGitStashMessageFieldSafetyBoundary,
+	validateGitWorktreeConfirmationBoundary,
+	validateMultiDiffEditorOverrideImportBoundary,
+	validateViewPaneDependencyDecoratorBoundary,
+	validateDebugAdapterConfirmationBoundary,
+	validateDebugAdapterConnectBoundary,
+	validateDebugAdapterSpawnBoundary,
+	validateDebugTcpCompanionSpawnBoundary,
+	validateDebugCommandRegistration,
+	validateDebugRunInTerminalBoundary,
+	validateDebugSpawnConstructionShape,
+	validateDebugFramingBounds,
 } from "../../scripts/plain/boundary-contracts.mjs";
 
 const baselineWindow = {
@@ -42,14 +73,34 @@ const baselineWindow = {
 	fullscreen: false,
 };
 
+const baselineBundle = {
+	active: true,
+	targets: ["app", "dmg"],
+	category: "DeveloperTool",
+	copyright: "Copyright (c) 2026 Plain Contributors",
+	icon: [
+		"icons/32x32.png",
+		"icons/128x128.png",
+		"icons/128x128@2x.png",
+		"icons/icon.icns",
+		"icons/icon.ico",
+	],
+	macOS: {
+		minimumSystemVersion: "10.15",
+		entitlements: "Entitlements.plist",
+	},
+};
+
 const baselineConfig = {
 	$schema: "https://schema.tauri.app/config/2",
+	identifier: "com.plain.editor",
 	build: {
 		beforeDevCommand: "pnpm dev",
 		devUrl: "http://127.0.0.1:1420",
 		beforeBuildCommand: "pnpm build",
 		frontendDist: "../dist",
 	},
+	bundle: baselineBundle,
 	app: {
 		withGlobalTauri: false,
 		windows: [baselineWindow],
@@ -127,6 +178,7 @@ import { DialogService } from "@codingame/monaco-vscode-dialogs-service-override
 import getExplorerServiceOverride from "@codingame/monaco-vscode-explorer-service-override";
 import getFilesServiceOverride from "@codingame/monaco-vscode-files-service-override";
 import getModelServiceOverride from "@codingame/monaco-vscode-model-service-override";
+import getMultiDiffEditorServiceOverride from "@codingame/monaco-vscode-multi-diff-editor-service-override";
 import getNotificationServiceOverride from "@codingame/monaco-vscode-notifications-service-override";
 import getTextmateServiceOverride from "@codingame/monaco-vscode-textmate-service-override";
 import getThemeServiceOverride from "@codingame/monaco-vscode-theme-service-override";
@@ -146,6 +198,111 @@ export function createServiceOverrides() {
     ...getExplorerServiceOverride(),
     ...getThemeServiceOverride(),
     ...getTextmateServiceOverride(),
+    ...getMultiDiffEditorServiceOverride(),
+    [IDialogService.toString()]: new SyncDescriptor(
+      DialogService,
+      undefined,
+      true,
+    ),
+    [ILanguageStatusService.toString()]: new SyncDescriptor(
+      EmptyLanguageStatusService,
+      [],
+      true,
+    ),
+  };
+}
+`;
+
+// Mirrors the real app/services.ts shape: the two Plain workspace
+// SyncDescriptors, the two hand-selected working-copy SyncDescriptors, the
+// Rust-backed backup SyncDescriptor, and the Plain search SyncDescriptor
+// must all be present together as the exact closed middle-descriptor set.
+const workingCopyServiceOverridesFixture = `
+import getConfigurationServiceOverride from "@codingame/monaco-vscode-configuration-service-override";
+import "@codingame/monaco-vscode-dialogs-service-override/vscode/vs/workbench/browser/parts/dialogs/dialog.web.contribution";
+import { DialogService } from "@codingame/monaco-vscode-dialogs-service-override/vscode/vs/workbench/services/dialogs/common/dialogService";
+import getExplorerServiceOverride from "@codingame/monaco-vscode-explorer-service-override";
+import getFilesServiceOverride from "@codingame/monaco-vscode-files-service-override";
+import getModelServiceOverride from "@codingame/monaco-vscode-model-service-override";
+import getMultiDiffEditorServiceOverride from "@codingame/monaco-vscode-multi-diff-editor-service-override";
+import getNotificationServiceOverride from "@codingame/monaco-vscode-notifications-service-override";
+import getTextmateServiceOverride from "@codingame/monaco-vscode-textmate-service-override";
+import getThemeServiceOverride from "@codingame/monaco-vscode-theme-service-override";
+import getWorkbenchServiceOverride from "@codingame/monaco-vscode-workbench-service-override";
+import { SCMService } from "@codingame/monaco-vscode-scm-service-override/vscode/vs/workbench/contrib/scm/common/scmService";
+import { WorkingCopyEditorService } from "@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService";
+import { WorkingCopyService } from "@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyService";
+import { IDialogService } from "@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service";
+import { IExtensionResourceLoaderService } from "@codingame/monaco-vscode-api/vscode/vs/platform/extensionResourceLoader/common/extensionResourceLoader.service";
+import { SyncDescriptor } from "@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors";
+import { IWorkspacesService } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspaces/common/workspaces.service";
+import { ISCMService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/scm/common/scm.service";
+import { IExtensionService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions.service";
+import { ISearchService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search.service";
+import { ILanguageStatusService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/languageStatus/common/languageStatusService.service";
+import { IWorkingCopyBackupService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyBackup.service";
+import { IWorkingCopyEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService.service";
+import { IWorkingCopyService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyService.service";
+import { IWorkspaceEditingService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workspaces/common/workspaceEditing.service";
+import { PlainSearchService } from "./features/search/plain-search-service";
+import { PlainExtensionResourceLoaderService } from "./features/themes/plain-theme-registry";
+import { EmptyLanguageStatusService } from "./services/empty-language-status";
+import { PlainNullExtensionService } from "./services/plain-null-extension-service";
+import { PlainWorkingCopyBackupService } from "./services/plain-workspace-backup-service";
+import { PlainWorkspaceEditingService, PlainWorkspacesService } from "./services/plain-workspace-services";
+
+export function createServiceOverrides() {
+  return {
+    ...getConfigurationServiceOverride(),
+    ...getFilesServiceOverride(),
+    ...getModelServiceOverride(),
+    ...getWorkbenchServiceOverride(),
+    ...getNotificationServiceOverride(),
+    ...getExplorerServiceOverride(),
+    ...getThemeServiceOverride(),
+    ...getTextmateServiceOverride(),
+    ...getMultiDiffEditorServiceOverride(),
+    [IWorkspaceEditingService.toString()]: new SyncDescriptor(
+      PlainWorkspaceEditingService,
+      [],
+      true,
+    ),
+    [IWorkspacesService.toString()]: new SyncDescriptor(
+      PlainWorkspacesService,
+      [],
+      true,
+    ),
+    [IWorkingCopyService.toString()]: new SyncDescriptor(
+      WorkingCopyService,
+      [],
+      false,
+    ),
+    [IWorkingCopyEditorService.toString()]: new SyncDescriptor(
+      WorkingCopyEditorService,
+      [],
+      false,
+    ),
+    [IWorkingCopyBackupService.toString()]: new SyncDescriptor(
+      PlainWorkingCopyBackupService,
+      [],
+      false,
+    ),
+    [ISearchService.toString()]: new SyncDescriptor(
+      PlainSearchService,
+      [],
+      true,
+    ),
+    [IExtensionResourceLoaderService.toString()]: new SyncDescriptor(
+      PlainExtensionResourceLoaderService,
+      [],
+      false,
+    ),
+    [ISCMService.toString()]: new SyncDescriptor(SCMService, [], true),
+    [IExtensionService.toString()]: new SyncDescriptor(
+      PlainNullExtensionService,
+      [],
+      true,
+    ),
     [IDialogService.toString()]: new SyncDescriptor(
       DialogService,
       undefined,
@@ -378,6 +535,140 @@ describe("Plain Tauri boundary contracts", () => {
 		expect(validateTauriConfiguration(migratedProductionWindow)).toContain(
 			"the production main window must not migrate to a custom WebView data store",
 		);
+	});
+
+	// `F120` S7 ("需要新增的 AST 契约" item 2): `config.identifier` and
+	// `config.bundle` used to be a complete blind spot -- these reverse tests
+	// exercise every field the research document's "结论 6" named
+	// (identifier/icon/copyright/category/targets/macOS fields) plus the new
+	// `macOS.entitlements` path this same feature's S5 slice wired in.
+	it("locks the bundle identifier, icon, copyright and packaging shape", () => {
+		expect(validateTauriConfiguration(baselineConfig)).toEqual([]);
+
+		const revertedIdentifier = structuredClone(baselineConfig);
+		revertedIdentifier.identifier = "com.visualstudio.code.oss";
+		expect(validateTauriConfiguration(revertedIdentifier)).toContain(
+			'Tauri bundle identifier must remain "com.plain.editor"',
+		);
+
+		const missingBundle = structuredClone(baselineConfig);
+		delete missingBundle.bundle;
+		expect(validateTauriConfiguration(missingBundle)).toContain(
+			"Tauri bundle configuration differs from the audited branding/packaging contract",
+		);
+
+		for (const [path_, value] of [
+			[["active"], false],
+			[["targets"], ["app", "dmg", "msi"]],
+			[["category"], "Utility"],
+			[["copyright"], ""],
+			[["copyright"], "Copyright (c) 2015 - present Microsoft Corporation"],
+			[["icon"], []],
+			[["macOS", "minimumSystemVersion"], "10.13"],
+			[["macOS", "entitlements"], undefined],
+			[["macOS", "entitlements"], "Other.plist"],
+		]) {
+			const mutated = structuredClone(baselineConfig);
+			let target = mutated.bundle;
+			for (let i = 0; i < path_.length - 1; i++) {
+				target = target[path_[i]];
+			}
+			const lastKey = path_[path_.length - 1];
+			if (value === undefined) {
+				delete target[lastKey];
+			} else {
+				target[lastKey] = value;
+			}
+			expect(validateTauriConfiguration(mutated)).toContain(
+				"Tauri bundle configuration differs from the audited branding/packaging contract",
+			);
+		}
+
+		const extraBundleField = structuredClone(baselineConfig);
+		extraBundleField.bundle.resources = ["some/path"];
+		expect(validateTauriConfiguration(extraBundleField)).toContain(
+			"Tauri bundle configuration differs from the audited branding/packaging contract",
+		);
+
+		const extraMacOSField = structuredClone(baselineConfig);
+		extraMacOSField.bundle.macOS.hardenedRuntime = false;
+		expect(validateTauriConfiguration(extraMacOSField)).toContain(
+			"Tauri bundle configuration differs from the audited branding/packaging contract",
+		);
+	});
+
+	// `F120` S5 ("需要新增的 AST 契约" item 3): `validateEntitlementsBoundary`
+	// parses `src-tauri/Entitlements.plist`'s real, hand-authored shape (a
+	// flat dict of boolean-valued keys) and locks it to the closed, audited
+	// set -- these reverse tests cover every failure mode a future silent
+	// entitlement change could take.
+	const cleanEntitlements = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+</dict>
+</plist>
+`;
+
+	it("accepts only the exact audited entitlement set", () => {
+		expect(validateEntitlementsBoundary(cleanEntitlements)).toEqual([]);
+	});
+
+	it("validates the real, currently-committed src-tauri/Entitlements.plist with zero violations", () => {
+		const realEntitlements = readFileSync(
+			new URL("../../src-tauri/Entitlements.plist", import.meta.url),
+			"utf8",
+		);
+		expect(validateEntitlementsBoundary(realEntitlements)).toEqual([]);
+	});
+
+	it("rejects a missing required entitlement", () => {
+		// A dict with some *other* boolean entry (so it parses as a real,
+		// non-empty plist dict rather than tripping the separate
+		// "could not be parsed at all" failure below) but without the one
+		// audited, required key.
+		const withoutJit = cleanEntitlements.replace(
+			"<key>com.apple.security.cs.allow-jit</key>",
+			"<key>com.apple.security.cs.allow-unsigned-executable-memory</key>",
+		);
+		expect(validateEntitlementsBoundary(withoutJit)).toContain(
+			"Entitlements.plist is missing the required entitlement com.apple.security.cs.allow-jit",
+		);
+	});
+
+	it("rejects the required entitlement set to false", () => {
+		const disabledJit = cleanEntitlements.replace("<true/>", "<false/>");
+		expect(validateEntitlementsBoundary(disabledJit)).toContain(
+			"Entitlements.plist's com.apple.security.cs.allow-jit must be true",
+		);
+	});
+
+	it("rejects an unaudited additional entitlement, such as a speculatively-added debugger entitlement", () => {
+		const withDebugger = cleanEntitlements.replace(
+			"</dict>",
+			"\t<key>com.apple.security.cs.debugger</key>\n\t<true/>\n</dict>",
+		);
+		expect(validateEntitlementsBoundary(withDebugger)).toContain(
+			"Entitlements.plist declares an unaudited entitlement com.apple.security.cs.debugger -- new entitlements need a threat justification and test before being added (AGENTS.md), not a silent addition",
+		);
+	});
+
+	it("rejects a duplicated entitlement key", () => {
+		const duplicated = cleanEntitlements.replace(
+			"</dict>",
+			"\t<key>com.apple.security.cs.allow-jit</key>\n\t<true/>\n</dict>",
+		);
+		expect(validateEntitlementsBoundary(duplicated)).toContain(
+			"Entitlements.plist must not declare com.apple.security.cs.allow-jit more than once",
+		);
+	});
+
+	it("rejects a file that cannot be parsed as a boolean-keyed plist dict", () => {
+		expect(validateEntitlementsBoundary("not a plist at all")).toEqual([
+			"Entitlements.plist could not be parsed as a boolean-keyed plist dict -- it must declare at least the audited required entitlement set",
+		]);
 	});
 
 	it("isolates real Tauri acceptance without changing production state", () => {
@@ -628,6 +919,227 @@ describe("Plain Workbench service override Harness", () => {
 		);
 	});
 
+	it("locks IWorkingCopyService/IWorkingCopyEditorService to their exact class subpaths, never the aggregating package entry point", () => {
+		expect(
+			validateDialogServiceOverride(workingCopyServiceOverridesFixture),
+		).toEqual([]);
+		expect(
+			validateWorkingCopyOverrideImportBoundary(
+				workingCopyServiceOverridesFixture,
+				"app/services.ts",
+			),
+		).toEqual([]);
+
+		const importFailure =
+			"app/services.ts must import only the exact WorkingCopyService and WorkingCopyEditorService class subpaths";
+		const referenceFailure =
+			"WorkingCopyService and WorkingCopyEditorService may appear only in their exact imports and audited descriptors";
+		const middleDescriptorFailure =
+			"createServiceOverrides must keep the exact hand-selected working-copy and workspace service descriptors";
+		const orderFailure =
+			"createServiceOverrides must keep IDialogService as the final Workbench override before language status";
+		const aggregatingEntryPointFailure =
+			"app/services.ts must not import the working-copy-service-override aggregating entry point";
+
+		// Swapping the exact submodule import for the package's aggregating
+		// default export must be rejected: that entry point unconditionally
+		// registers BrowserWorkingCopyBackupTracker and
+		// WorkingCopyHistoryTracker as real contributions, and the latter
+		// breaks every save with an unhandled cloneFile rejection.
+		const aggregatingImport = workingCopyServiceOverridesFixture
+			.replace(
+				'import { WorkingCopyEditorService } from "@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService";\nimport { WorkingCopyService } from "@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyService";\n',
+				'import getWorkingCopyServiceOverride from "@codingame/monaco-vscode-working-copy-service-override";\n',
+			)
+			.replace(
+				"    [IWorkingCopyService.toString()]: new SyncDescriptor(\n      WorkingCopyService,\n      [],\n      false,\n    ),\n    [IWorkingCopyEditorService.toString()]: new SyncDescriptor(\n      WorkingCopyEditorService,\n      [],\n      false,\n    ),\n",
+				"    ...getWorkingCopyServiceOverride({ storage: null }),\n",
+			);
+		expect(
+			validateWorkingCopyOverrideImportBoundary(
+				aggregatingImport,
+				"app/services.ts",
+			),
+		).toContain(aggregatingEntryPointFailure);
+
+		const outsideServices = validateWorkingCopyOverrideImportBoundary(
+			workingCopyServiceOverridesFixture,
+			"app/features/unsafe-working-copy.ts",
+		);
+		expect(outsideServices).toContain(
+			"app/features/unsafe-working-copy.ts imports the working-copy override outside its audited files",
+		);
+
+		const wrongModule = workingCopyServiceOverridesFixture.replace(
+			"@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyService",
+			"@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyServiceOther",
+		);
+		expect(validateDialogServiceOverride(wrongModule)).toContain(importFailure);
+
+		const aliasedClass = workingCopyServiceOverridesFixture.replace(
+			"import { WorkingCopyService } from",
+			"import { WorkingCopyService as UnsafeWorkingCopyService } from",
+		);
+		expect(validateDialogServiceOverride(aliasedClass)).toContain(
+			importFailure,
+		);
+
+		const thirdArgumentFlipped = workingCopyServiceOverridesFixture.replace(
+			"      WorkingCopyService,\n      [],\n      false,\n",
+			"      WorkingCopyService,\n      [],\n      true,\n",
+		);
+		expect(validateDialogServiceOverride(thirdArgumentFlipped)).toContain(
+			middleDescriptorFailure,
+		);
+
+		const missingWorkingCopyEditor = workingCopyServiceOverridesFixture
+			.replace(
+				'import { WorkingCopyEditorService } from "@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService";\n',
+				"",
+			)
+			.replace(
+				'import { IWorkingCopyEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService.service";\n',
+				"",
+			)
+			.replace(
+				"    [IWorkingCopyEditorService.toString()]: new SyncDescriptor(\n      WorkingCopyEditorService,\n      [],\n      false,\n    ),\n",
+				"",
+			);
+		expect(validateDialogServiceOverride(missingWorkingCopyEditor)).toEqual(
+			expect.arrayContaining([
+				importFailure,
+				referenceFailure,
+				middleDescriptorFailure,
+			]),
+		);
+
+		const reordered = workingCopyServiceOverridesFixture
+			.replace(
+				"    [IWorkingCopyService.toString()]: new SyncDescriptor(\n      WorkingCopyService,\n      [],\n      false,\n    ),\n    [IWorkingCopyEditorService.toString()]: new SyncDescriptor(\n      WorkingCopyEditorService,\n      [],\n      false,\n    ),\n",
+				"",
+			)
+			.replace(
+				"    [IDialogService.toString()]:",
+				"    [IWorkingCopyEditorService.toString()]: new SyncDescriptor(\n      WorkingCopyEditorService,\n      [],\n      false,\n    ),\n    [IWorkingCopyService.toString()]: new SyncDescriptor(\n      WorkingCopyService,\n      [],\n      false,\n    ),\n    [IDialogService.toString()]:",
+			);
+		expect(validateDialogServiceOverride(reordered)).toEqual(
+			expect.arrayContaining([middleDescriptorFailure, orderFailure]),
+		);
+	});
+
+	it("locks the search override to its two audited files and hard-rejects the aggregating entry point and search.contribution", () => {
+		const plainSearchServiceSource =
+			'import { SearchService } from "@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/services/search/common/searchService";\nexport class PlainSearchService extends SearchService {}\n';
+		const searchContributionSource =
+			'import "@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/contrib/search/browser/searchQuickAccess.contribution";\n';
+
+		// Both audited files, using only their exact narrow subpaths, pass.
+		expect(
+			validateSearchOverrideImportBoundary(
+				plainSearchServiceSource,
+				"app/features/search/plain-search-service.ts",
+			),
+		).toEqual([]);
+		expect(
+			validateSearchOverrideImportBoundary(
+				searchContributionSource,
+				"app/features/search/search-contribution.ts",
+			),
+		).toEqual([]);
+
+		const outsideAuditFailure =
+			"app/features/unsafe-search.ts imports the search override outside its audited files";
+		for (const source of [
+			plainSearchServiceSource,
+			searchContributionSource,
+			'import getServiceOverride from "@codingame/monaco-vscode-search-service-override";',
+			'void import("@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/services/search/common/searchService");',
+		]) {
+			expect(
+				validateSearchOverrideImportBoundary(
+					source,
+					"app/features/unsafe-search.ts",
+				),
+			).toContain(outsideAuditFailure);
+		}
+
+		// The aggregating default export must never be imported, in any file,
+		// static or dynamic, even one already on the audited allowlist: its
+		// CustomSearchService constructor throws a TypeError against Plain's
+		// file:-less FileService, and its two fallbacks are front-end file
+		// searchers hard-coded to the file: scheme.
+		const auditedPath = "app/features/search/plain-search-service.ts";
+		const aggregatingEntryPointFailure = `${auditedPath} must not import the search-service-override aggregating entry point`;
+		for (const source of [
+			'import getServiceOverride from "@codingame/monaco-vscode-search-service-override";',
+			'import * as searchOverride from "@codingame/monaco-vscode-search-service-override";',
+			'void import("@codingame/monaco-vscode-search-service-override");',
+			'void import("@codingame/monaco-vscode-search-service-" + "override");',
+		]) {
+			expect(
+				validateSearchOverrideImportBoundary(source, auditedPath),
+			).toContain(aggregatingEntryPointFailure);
+		}
+
+		// search.contribution.js (and searchEditor.contribution.js, which it
+		// unconditionally imports) is rejected even inside the two audited
+		// files: it eagerly registers SearchChatContextContribution as a real
+		// WorkbenchPhase.AfterRestored contribution wiring Search results into
+		// IChatContextPickService, a Chat/AI context-attachment surface the
+		// runtime excluded-surface guard cannot see (it only audits
+		// commandIds/viewContainerIds/viewIds, not
+		// registerWorkbenchContribution2 ids).
+		for (const [relativePath, moduleSpecifier] of [
+			[
+				"app/features/search/search-contribution.ts",
+				"@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/contrib/search/browser/search.contribution",
+			],
+			[
+				"app/features/search/search-contribution.ts",
+				"@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/contrib/searchEditor/browser/searchEditor.contribution",
+			],
+			[
+				"app/features/search/plain-search-service.ts",
+				"@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/contrib/search/browser/search.contribution",
+			],
+		]) {
+			expect(
+				validateSearchOverrideImportBoundary(
+					`import "${moduleSpecifier}";\n`,
+					relativePath,
+				),
+			).toContain(
+				`${relativePath} must not import the search.contribution/searchEditor.contribution modules`,
+			);
+		}
+
+		// plain-search-service.ts must import only the exact, unaliased
+		// SearchService named export from its exact class subpath — never a
+		// default/namespace import, a renamed binding, or the wrong subpath.
+		const exactImportFailure =
+			"app/features/search/plain-search-service.ts must import only the exact SearchService class subpath";
+		for (const mutatedSource of [
+			'import SearchService from "@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/services/search/common/searchService";\n',
+			'import * as searchServiceModule from "@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/services/search/common/searchService";\n',
+			'import { SearchService as UnsafeSearchService } from "@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/services/search/common/searchService";\n',
+			'import { SearchService } from "@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/services/search/common/searchServiceOther";\n',
+			'import type { SearchService } from "@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/services/search/common/searchService";\n',
+		]) {
+			expect(
+				validateSearchOverrideImportBoundary(
+					mutatedSource,
+					"app/features/search/plain-search-service.ts",
+				),
+			).toContain(exactImportFailure);
+		}
+		expect(
+			validateSearchOverrideImportBoundary(
+				plainSearchServiceSource,
+				"app/features/search/plain-search-service.ts",
+			),
+		).not.toContain(exactImportFailure);
+	});
+
 	it("rejects notification override references outside app/services.ts", () => {
 		for (const source of [
 			'import notifications from "@codingame/monaco-vscode-notifications-service-override";',
@@ -767,6 +1279,40 @@ describe("Plain Workbench service override Harness", () => {
 		expect(validateDialogServiceOverride(movedSelection)).toContain(
 			"createServiceOverrides must keep IDialogService as the final Workbench override before language status",
 		);
+	});
+
+	it("locks the multi-diff-editor override import to app/services.ts only (F090 S2)", () => {
+		expect(validateDialogServiceOverride(baselineServiceOverrides)).toEqual([]);
+		expect(
+			validateMultiDiffEditorOverrideImportBoundary(
+				baselineServiceOverrides,
+				"app/services.ts",
+			),
+		).toEqual([]);
+		for (const source of [
+			'import multiDiff from "@codingame/monaco-vscode-multi-diff-editor-service-override";',
+			'void import("@codingame/monaco-vscode-multi-diff-editor-service-override/vscode/vs/workbench/contrib/multiDiffEditor/browser/multiDiffEditor.contribution");',
+			'export * from "@codingame/monaco-vscode-multi-diff-editor-service-override";',
+			'const unsafeModule = "@codingame/monaco-vscode-multi-diff-editor-service-override";',
+		]) {
+			expect(
+				validateMultiDiffEditorOverrideImportBoundary(
+					source,
+					"app/features/scm/unsafe-multi-diff.ts",
+				),
+			).toEqual([
+				"app/features/scm/unsafe-multi-diff.ts imports the multi-diff-editor override outside app/services.ts",
+			]);
+		}
+		// The resolver/content-provider file only imports base-package types
+		// (never the override package itself) — confirms this boundary does
+		// not misfire against the file that is its main reason for existing.
+		expect(
+			validateMultiDiffEditorOverrideImportBoundary(
+				'import { MultiDiffEditorItem } from "@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/multiDiffEditor/browser/multiDiffSourceResolverService";',
+				"app/features/scm/plain-git-commit-detail.ts",
+			),
+		).toEqual([]);
 	});
 
 	it("rejects indirect construction, file services and global confirm fallbacks", () => {
@@ -1437,8 +1983,8 @@ describe("workspace watcher Harness", () => {
 				"const watch = this.#bridge.workspaceWatch;\n\t\tconst unlisten = watch(",
 			],
 			[
-				"const unlisten = this.#bridge.workspaceWatch(resolved.rootId, () => {\n\t\t\tthis.fireRootUpdated(resource);\n\t\t});",
-				"const unlisten = this.#bridge.workspaceWatch(resolved.rootId, () => {});\n\t\tthis.fireRootUpdated(resource);",
+				"const unlisten = this.#bridge.workspaceWatch(resolved.rootId, () => {\n\t\t\tthis.fireRootUpdated(resource);\n\t\t\tvoid this.reconcileWatchedPaths(resolved.rootId);\n\t\t});",
+				"const unlisten = this.#bridge.workspaceWatch(resolved.rootId, () => {\n\t\t\tvoid this.reconcileWatchedPaths(resolved.rootId);\n\t\t});\n\t\tthis.fireRootUpdated(resource);",
 			],
 		]) {
 			const hostile = replaceWatcherSource(
@@ -1476,11 +2022,18 @@ describe("workspace watcher Harness", () => {
 const workspaceCargo = `
 [dependencies]
 cap-std = "4.0.2"
+globset = "=0.4.19"
+grep-matcher = "=0.1.9"
+grep-regex = "=0.1.14"
+grep-searcher = "=0.1.17"
+ignore = "=0.4.31"
+jsonc-parser = { version = "=0.33.0", default-features = false, features = [] }
 libc = "0.2.186"
 notify = "=8.2.0"
 rustix = { version = "=1.1.4", features = ["fs"] }
 sha2 = { version = "=0.10.9", default-features = false, features = [] }
 uuid = { version = "1.24.0", features = ["v4"] }
+zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 `;
 
 const exactRustixDependency = Object.freeze({
@@ -1513,6 +2066,73 @@ const exactNotifyDependency = Object.freeze({
 	features: [],
 });
 
+const exactGlobsetDependency = Object.freeze({
+	name: "globset",
+	req: "=0.4.19",
+	kind: null,
+	rename: null,
+	target: null,
+	optional: false,
+});
+
+const exactIgnoreDependency = Object.freeze({
+	name: "ignore",
+	req: "=0.4.31",
+	kind: null,
+	rename: null,
+	target: null,
+	optional: false,
+});
+
+const exactGrepMatcherDependency = Object.freeze({
+	name: "grep-matcher",
+	req: "=0.1.9",
+	kind: null,
+	rename: null,
+	target: null,
+	optional: false,
+});
+
+const exactGrepRegexDependency = Object.freeze({
+	name: "grep-regex",
+	req: "=0.1.14",
+	kind: null,
+	rename: null,
+	target: null,
+	optional: false,
+});
+
+const exactGrepSearcherDependency = Object.freeze({
+	name: "grep-searcher",
+	req: "=0.1.17",
+	kind: null,
+	rename: null,
+	target: null,
+	optional: false,
+});
+
+const exactZipDependency = Object.freeze({
+	name: "zip",
+	req: "=8.6.0",
+	kind: null,
+	rename: null,
+	target: null,
+	optional: false,
+	uses_default_features: false,
+	features: ["deflate-flate2-zlib-rs"],
+});
+
+const exactJsoncParserDependency = Object.freeze({
+	name: "jsonc-parser",
+	req: "=0.33.0",
+	kind: null,
+	rename: null,
+	target: null,
+	optional: false,
+	uses_default_features: false,
+	features: [],
+});
+
 function validateWorkspaceRustBoundary(
 	cargoSource,
 	rustSources,
@@ -1526,6 +2146,13 @@ function validateWorkspaceRustBoundary(
 			exactRustixDependency,
 			exactSha2Dependency,
 			exactNotifyDependency,
+			exactGlobsetDependency,
+			exactIgnoreDependency,
+			exactGrepMatcherDependency,
+			exactGrepRegexDependency,
+			exactGrepSearcherDependency,
+			exactZipDependency,
+			exactJsoncParserDependency,
 			...cargoDependencies,
 		],
 		resolvedSha2Features,
@@ -2551,6 +3178,13 @@ fn copy_directory_for_test(limits: DirectoryCopyLimits, hooks: &mut Hooks) {
 			exactRustixDependency,
 			exactSha2Dependency,
 			exactNotifyDependency,
+			exactGlobsetDependency,
+			exactIgnoreDependency,
+			exactGrepMatcherDependency,
+			exactGrepRegexDependency,
+			exactGrepSearcherDependency,
+			exactZipDependency,
+			exactJsoncParserDependency,
 		];
 		expect(
 			validateWorkspaceRustBoundaryContract(
@@ -2658,6 +3292,213 @@ fn copy_directory_for_test(limits: DirectoryCopyLimits, hooks: &mut Hooks) {
 			).toContain(
 				"resolved sha2@0.10.9 features must remain exactly default and std",
 			);
+		}
+	});
+
+	it("locks the sole direct zip edge, its minimal feature set and every Cargo metadata field", () => {
+		expect(
+			validateWorkspaceRustBoundary(workspaceCargo, workspaceSources),
+		).toEqual([]);
+
+		const cases = [
+			[
+				[exactRustixDependency],
+				"Cargo metadata must contain exactly one direct zip dependency",
+			],
+			[
+				[exactRustixDependency, exactZipDependency, exactZipDependency],
+				"Cargo metadata must contain exactly one direct zip dependency",
+			],
+			[
+				[exactRustixDependency, { ...exactZipDependency, req: "^8.6.0" }],
+				"the direct zip dependency must require exactly =8.6.0",
+			],
+			[
+				[exactRustixDependency, { ...exactZipDependency, rename: "vsix-zip" }],
+				"the direct zip dependency must remain unrenamed",
+			],
+			[
+				[exactRustixDependency, { ...exactZipDependency, kind: "dev" }],
+				"the direct zip dependency must be a normal runtime edge",
+			],
+			[
+				[exactRustixDependency, { ...exactZipDependency, kind: "build" }],
+				"the direct zip dependency must be a normal runtime edge",
+			],
+			[
+				[exactRustixDependency, { ...exactZipDependency, target: "cfg(unix)" }],
+				"the direct zip dependency must not be target-specific",
+			],
+			[
+				[exactRustixDependency, { ...exactZipDependency, optional: true }],
+				"the direct zip dependency must not be optional",
+			],
+			[
+				[
+					exactRustixDependency,
+					{ ...exactZipDependency, uses_default_features: true },
+				],
+				"the direct zip dependency must disable default features",
+			],
+			[
+				[exactRustixDependency, { ...exactZipDependency, features: [] }],
+				"the direct zip dependency must enable exactly the deflate-flate2-zlib-rs feature",
+			],
+			[
+				[
+					exactRustixDependency,
+					{
+						...exactZipDependency,
+						features: ["deflate-flate2-zlib-rs", "aes-crypto"],
+					},
+				],
+				"the direct zip dependency must enable exactly the deflate-flate2-zlib-rs feature",
+			],
+			[
+				[
+					exactRustixDependency,
+					{ ...exactZipDependency, features: ["deflate"] },
+				],
+				"the direct zip dependency must enable exactly the deflate-flate2-zlib-rs feature",
+			],
+		];
+		for (const [hostileDependencies, failure] of cases) {
+			expect(
+				validateWorkspaceRustBoundaryContract(
+					workspaceCargo,
+					workspaceSources,
+					hostileDependencies,
+				),
+			).toContain(failure);
+		}
+	});
+
+	it("locks the exact zip manifest declaration to the minimal deflate-only feature set", () => {
+		const declarationFailure =
+			'Cargo.toml must declare exactly one zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] } dependency';
+		for (const hostileDeclaration of [
+			'zip = "8.6.0"',
+			'zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }',
+			'zip = { version = "=8.6.0", default-features = true, features = ["deflate-flate2-zlib-rs"] }',
+			'zip = { version = "=8.6.0", default-features = false }',
+			'zip = { version = "=8.6.0", default-features = false, features = [] }',
+			'zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }',
+			'zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs", "time"] }',
+		]) {
+			expect(
+				validateWorkspaceRustBoundary(
+					workspaceCargo.replace(
+						'zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }',
+						hostileDeclaration,
+					),
+					workspaceSources,
+				),
+			).toContain(declarationFailure);
+		}
+	});
+
+	it("locks the sole direct jsonc-parser edge, its zero-feature footprint and every Cargo metadata field", () => {
+		expect(
+			validateWorkspaceRustBoundary(workspaceCargo, workspaceSources),
+		).toEqual([]);
+
+		const cases = [
+			[
+				[exactRustixDependency],
+				"Cargo metadata must contain exactly one direct jsonc-parser dependency",
+			],
+			[
+				[
+					exactRustixDependency,
+					exactJsoncParserDependency,
+					exactJsoncParserDependency,
+				],
+				"Cargo metadata must contain exactly one direct jsonc-parser dependency",
+			],
+			[
+				[
+					exactRustixDependency,
+					{ ...exactJsoncParserDependency, req: "^0.33.0" },
+				],
+				"the direct jsonc-parser dependency must require exactly =0.33.0",
+			],
+			[
+				[
+					exactRustixDependency,
+					{ ...exactJsoncParserDependency, rename: "jsonc" },
+				],
+				"the direct jsonc-parser dependency must remain unrenamed",
+			],
+			[
+				[exactRustixDependency, { ...exactJsoncParserDependency, kind: "dev" }],
+				"the direct jsonc-parser dependency must be a normal runtime edge",
+			],
+			[
+				[
+					exactRustixDependency,
+					{ ...exactJsoncParserDependency, kind: "build" },
+				],
+				"the direct jsonc-parser dependency must be a normal runtime edge",
+			],
+			[
+				[
+					exactRustixDependency,
+					{ ...exactJsoncParserDependency, target: "cfg(unix)" },
+				],
+				"the direct jsonc-parser dependency must not be target-specific",
+			],
+			[
+				[
+					exactRustixDependency,
+					{ ...exactJsoncParserDependency, optional: true },
+				],
+				"the direct jsonc-parser dependency must not be optional",
+			],
+			[
+				[
+					exactRustixDependency,
+					{ ...exactJsoncParserDependency, uses_default_features: true },
+				],
+				"the direct jsonc-parser dependency must disable default features",
+			],
+			[
+				[
+					exactRustixDependency,
+					{ ...exactJsoncParserDependency, features: ["cst"] },
+				],
+				"the direct jsonc-parser dependency must enable no explicit features",
+			],
+		];
+		for (const [hostileDependencies, failure] of cases) {
+			expect(
+				validateWorkspaceRustBoundaryContract(
+					workspaceCargo,
+					workspaceSources,
+					hostileDependencies,
+				),
+			).toContain(failure);
+		}
+	});
+
+	it("locks the exact jsonc-parser manifest declaration to zero explicit features", () => {
+		const declarationFailure =
+			'Cargo.toml must declare exactly one jsonc-parser = { version = "=0.33.0", default-features = false, features = [] } dependency';
+		for (const hostileDeclaration of [
+			'jsonc-parser = "0.33.0"',
+			'jsonc-parser = { version = "0.33.0", default-features = false, features = [] }',
+			'jsonc-parser = { version = "=0.33.0", default-features = true, features = [] }',
+			'jsonc-parser = { version = "=0.33.0", default-features = false }',
+			'jsonc-parser = { version = "=0.33.0", default-features = false, features = ["cst"] }',
+		]) {
+			expect(
+				validateWorkspaceRustBoundary(
+					workspaceCargo.replace(
+						'jsonc-parser = { version = "=0.33.0", default-features = false, features = [] }',
+						hostileDeclaration,
+					),
+					workspaceSources,
+				),
+			).toContain(declarationFailure);
 		}
 	});
 
@@ -2805,14 +3646,33 @@ fn copy_directory_for_test(limits: DirectoryCopyLimits, hooks: &mut Hooks) {
 			'use ignore::{self as ig}; fn search() { ig::Walk::new("."); }',
 			"use search_ignore::WalkBuilder; fn search() {}",
 		]) {
+			// Bypasses the local wrapper's always-prepended exact `ignore`
+			// dependency (matching the notify-edge-case precedent above): this
+			// scenario tests a *renamed* `ignore` dependency in isolation, and
+			// a second, default-shaped `ignore` entry would spuriously trip the
+			// new exactly-one-`ignore`-dependency check unrelated to what this
+			// test exercises.
 			expect(
-				validateWorkspaceRustBoundary(
+				validateWorkspaceRustBoundaryContract(
 					workspaceCargo,
 					[
 						...workspaceSources,
 						{ relativePath: "src-tauri/src/search.rs", source },
 					],
-					[ignoreDependency],
+					[
+						exactRustixDependency,
+						exactSha2Dependency,
+						exactNotifyDependency,
+						exactGlobsetDependency,
+						exactIgnoreDependency,
+						exactGrepMatcherDependency,
+						exactGrepRegexDependency,
+						exactGrepSearcherDependency,
+						exactZipDependency,
+						exactJsoncParserDependency,
+						ignoreDependency,
+					],
+					["default", "std"],
 				),
 			).toEqual([]);
 		}
@@ -4956,6 +5816,77 @@ void Reflect["g" + "et"](fileService, "get" + "Provider");`,
 		);
 	});
 
+	it("still rejects getProvider recovery from the two IFileService-exempt theme paths", () => {
+		// app/features/themes/plain-theme-registry.ts and app/main.ts are the
+		// only two files permitted to import/reference IFileService at all (see
+		// IFILE_SERVICE_TOKEN_EXEMPT_PATHS's own doc comment); that exemption is
+		// narrowly about reading extension-file: resources, never about
+		// recovering the registered plain-workspace: provider. Both exempt
+		// paths must still fail exactly like any other file the moment they
+		// derive `.getProvider(...)` from an IFileService-typed expression.
+		for (const relativePath of [
+			"app/features/themes/plain-theme-registry.ts",
+			"app/main.ts",
+		]) {
+			const hostileSource = `import { getService, IFileService } from "@codingame/monaco-vscode-api";
+async function recoverProvider() {
+  const fileService = await getService(IFileService);
+  return fileService.getProvider(PLAIN_WORKSPACE_SCHEME);
+}`;
+			const alreadyPresent = workspaceDeleteAppSources.some(
+				(entry) => entry.relativePath === relativePath,
+			);
+			const sources = alreadyPresent
+				? workspaceDeleteAppSources.map((entry) =>
+						entry.relativePath === relativePath
+							? { relativePath, source: hostileSource }
+							: entry,
+					)
+				: [
+						...workspaceDeleteAppSources,
+						{ relativePath, source: hostileSource },
+					];
+			const failures = validateWorkspaceDeleteTypeScriptBoundary(sources);
+			expect(
+				failures,
+				`${relativePath} must still reject getProvider recovery`,
+			).toContain(
+				`${relativePath} must not recover the registered workspace provider through getProvider`,
+			);
+		}
+	});
+
+	it("accepts real IFileService references from the two audited exempt theme paths without a getProvider call", () => {
+		// The production app/features/themes/plain-theme-registry.ts is not
+		// part of workspaceDeleteAppSources (only the fixed confirmed-delete
+		// entrypoint set is); read it fresh here purely to prove the exemption
+		// itself — not the getProvider ban — accepts a real IFileService
+		// consumer that never derives getProvider from it.
+		const registrySource = readFileSync(
+			new URL(
+				"../../app/features/themes/plain-theme-registry.ts",
+				import.meta.url,
+			),
+			"utf8",
+		);
+		expect(registrySource).toContain("IFileService");
+		expect(registrySource).not.toContain("getProvider");
+		const failures = validateWorkspaceDeleteTypeScriptBoundary([
+			...workspaceDeleteAppSources,
+			{
+				relativePath: "app/features/themes/plain-theme-registry.ts",
+				source: registrySource,
+			},
+		]);
+		expect(
+			failures.some((message) =>
+				message.includes(
+					"app/features/themes/plain-theme-registry.ts must not import or reference IFileService",
+				),
+			),
+		).toBe(false);
+	});
+
 	it("locks provider and bridge factories to their audited authority routes", () => {
 		for (const [relativePath, source, expectedNames] of [
 			[
@@ -5190,7 +6121,7 @@ void tauri["create" + "BrowserMockBridge"]();`,
 			),
 			replaceWorkspaceDeleteAppSource(
 				"app/features/workspace/delete-coordinator.ts",
-				`		if (brandedError !== undefined) {
+				`\t\tif (brandedError !== undefined) {
 			try {
 				const notificationService = await getNotificationService();
 				notificationService.error(brandedError.message);
@@ -5200,7 +6131,7 @@ void tauri["create" + "BrowserMockBridge"]();`,
 			}
 		}
 		throw error;`,
-				`		const notificationService = await getNotificationService();
+				`\t\tconst notificationService = await getNotificationService();
 		if (brandedError !== undefined) {
 			try {
 				notificationService.error(brandedError.message);
@@ -5817,6 +6748,52 @@ function workspaceMoveOutcomeUnknown(): WorkspaceMoveOutcomeUnknownError {
 		);
 	});
 
+	it("audits the exact watch-state reconciliation closure introduced for external delete detection", () => {
+		const extraStat = mutateProvider(
+			"\tasync readdir(resource: URI): Promise<[string, FileType][]> {",
+			'\tasync readdir(resource: URI): Promise<[string, FileType][]> {\n\t\tvoid this.#bridge.workspaceStat("extra-root", "extra-path");',
+		);
+		expect(validateWorkspaceProviderCopyBoundary(extraStat)).toContain(
+			"workspaceStat must have exactly 2 fixed direct this.#bridge call site(s)",
+		);
+
+		const droppedReconcileStat = mutateProvider(
+			"\t\t\t\t\tawait this.#bridge.workspaceStat(rootId, relativePath);\n\t\t\t\t\tmissing = false;",
+			"\t\t\t\t\tmissing = false;",
+		);
+		expect(
+			validateWorkspaceProviderCopyBoundary(droppedReconcileStat),
+		).toContain(
+			"workspaceStat must have exactly 2 fixed direct this.#bridge call site(s)",
+		);
+
+		const extraFireDeleted = mutateProvider(
+			"\tasync readdir(resource: URI): Promise<[string, FileType][]> {",
+			"\tasync readdir(resource: URI): Promise<[string, FileType][]> {\n\t\tthis.fireDeleted(resource);",
+		);
+		expect(validateWorkspaceProviderCopyBoundary(extraFireDeleted)).toContain(
+			"provider change events must remain confined to the audited create, copy, rename, move and rescan closure",
+		);
+
+		const extraFireCreated = mutateProvider(
+			"\tasync readdir(resource: URI): Promise<[string, FileType][]> {",
+			"\tasync readdir(resource: URI): Promise<[string, FileType][]> {\n\t\tthis.fireCreated(resource);",
+		);
+		expect(validateWorkspaceProviderCopyBoundary(extraFireCreated)).toContain(
+			"provider change events must remain confined to the audited create, copy, rename, move and rescan closure",
+		);
+
+		const extraWatchStateReference = mutateProvider(
+			"\tasync readdir(resource: URI): Promise<[string, FileType][]> {",
+			"\tasync readdir(resource: URI): Promise<[string, FileType][]> {\n\t\tvoid this.#watchState.size;",
+		);
+		expect(
+			validateWorkspaceProviderCopyBoundary(extraWatchStateReference),
+		).toContain(
+			"Plain workspace native authority must remain sealed in the exact #bridge, #allowsMutationDispatch and #watchState private-field consumers",
+		);
+	});
+
 	it("locks create receipts, create errors and the frozen mutation URI helper", () => {
 		for (const [hostile, expected] of [
 			[
@@ -6165,60 +7142,52 @@ describe("Plain browser delete-failure fixture boundary", () => {
 		return workspaceBrowserFixture.replace(from, to);
 	}
 
-	it("accepts the local retained/partial multi-root delete fixture", () => {
+	it("accepts the local retained/partial multi-root fixture", () => {
 		expect(
-			validateWorkspaceMoveFailureBrowserFixture(workspaceBrowserFixture),
+			validateWorkspaceDeleteFailureBrowserFixture(workspaceBrowserFixture),
 		).toEqual([]);
 	});
 
-	it("rejects an expanded delete scenario set and a malformed fourth argument", () => {
+	it("rejects open scenario sets and raw receipt parameters", () => {
 		for (const hostile of [
 			mutateBrowserFixture(
 				'type TestMultiRootDeleteIncompleteScenario = "deleteRetained" | "deletePartial";',
 				'type TestMultiRootDeleteIncompleteScenario = "deleteRetained" | "deletePartial" | "deleteUnknown";',
 			),
 			mutateBrowserFixture(
-				"\tdeleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n): Promise<void> {",
-				"\tdeleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n): Promise<void> {",
-			),
-			mutateBrowserFixture(
-				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],",
-				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[],",
+				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n): Promise<void>",
+				'deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n\tstatus: string = "entryRetained",\n): Promise<void>',
 			),
 			mutateBrowserFixture(
 				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = []",
 				"deleteIncompleteScenarios: readonly string[] = []",
 			),
 		]) {
-			expect(validateWorkspaceMoveFailureBrowserFixture(hostile)).toContain(
+			expect(validateWorkspaceDeleteFailureBrowserFixture(hostile)).toContain(
 				"browser delete-failure fixture fourth argument must remain the closed deleteRetained/deletePartial scenario set",
 			);
 		}
 	});
 
-	it("keeps delete scenario state inside the one local addInitScript closure", () => {
+	it("keeps scenario state inside the one local addInitScript closure", () => {
 		for (const hostile of [
 			mutateBrowserFixture(
-				"\t\t\tconst deleteIncompletePlan = [...deleteIncompleteScenarios];",
-				"",
+				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n): Promise<void> {\n\tawait page.addInitScript(",
+				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n): Promise<void> {\n\tvoid deleteIncompleteScenarios;\n\tawait page.addInitScript(",
 			),
 			mutateBrowserFixture(
-				'if (deleteIncompleteScenarios.includes("deleteRetained")) {\n\t\t\t\tprimaryEntries.push([\n\t\t\t\t\t"delete-retained.txt",\n\t\t\t\t\tfile("Keep this retained delete target.\\n"),\n\t\t\t\t]);\n\t\t\t}',
-				'if (deleteIncompleteScenarios.includes("deleteRetained")) {\n\t\t\t\tprimaryEntries.push([\n\t\t\t\t\t"delete-retained-renamed.txt",\n\t\t\t\t\tfile("Keep this retained delete target.\\n"),\n\t\t\t\t]);\n\t\t\t}',
-			),
-			mutateBrowserFixture(
-				'if (deleteIncompleteScenarios.includes("deletePartial")) {\n\t\t\t\tsecondaryEntries.push([\n\t\t\t\t\t"delete-partial",\n\t\t\t\t\tdirectory([\n\t\t\t\t\t\t["removed.txt", file("Remove this delete child.\\n")],\n\t\t\t\t\t\t["kept.txt", file("Keep this delete child.\\n")],\n\t\t\t\t\t]),\n\t\t\t\t]);',
-				'if (deleteIncompleteScenarios.includes("deletePartial")) {\n\t\t\t\tsecondaryEntries.push([\n\t\t\t\t\t"delete-partial-renamed",\n\t\t\t\t\tdirectory([\n\t\t\t\t\t\t["removed.txt", file("Remove this delete child.\\n")],\n\t\t\t\t\t\t["kept.txt", file("Keep this delete child.\\n")],\n\t\t\t\t\t]),\n\t\t\t\t]);',
+				"\t\t\tdeleteIncompleteScenarios,\n\t\t\tworkspaceId: nativeWorkspaceId,",
+				"\t\t\tworkspaceId: nativeWorkspaceId,",
 			),
 			mutateBrowserFixture(
 				"const deleteIncompletePlan = [...deleteIncompleteScenarios];",
 				`const deleteIncompletePlan = [...deleteIncompleteScenarios];
-			const testDeleteWindow = window as unknown as Record<string, unknown>;
-			testDeleteWindow.__PLAIN_TEST_DELETE_FAILURE__ = () =>
-				deleteIncompletePlan.shift();`,
+				const testDeleteWindow = window as unknown as Record<string, unknown>;
+				testDeleteWindow.__PLAIN_TEST_DELETE_FAILURE__ = () =>
+					deleteIncompletePlan.shift();`,
 			),
 		]) {
-			const failures = validateWorkspaceMoveFailureBrowserFixture(hostile);
+			const failures = validateWorkspaceDeleteFailureBrowserFixture(hostile);
 			expect(
 				failures.some((failure) =>
 					/local to one audited multi-root addInitScript fixture|must not accept raw receipt fields or expose a window mutation control/.test(
@@ -6229,72 +7198,175 @@ describe("Plain browser delete-failure fixture boundary", () => {
 		}
 	});
 
-	it("locks fixed commit-entry requests for both delete phases", () => {
-		const wrongRetainedPath = mutateBrowserFixture(
-			'request.relativePath !== "delete-retained.txt"',
-			'request.relativePath !== "delete-retained-2.txt"',
+	it("locks fixed per-entry requests and ordered terminal branches", () => {
+		const wrongRequest = mutateBrowserFixture(
+			'activeDelete.relativePath !== "delete-retained.txt"',
+			'activeDelete.relativePath !== "other.txt"',
 		);
 		expect(
-			validateWorkspaceMoveFailureBrowserFixture(wrongRetainedPath),
+			validateWorkspaceDeleteFailureBrowserFixture(wrongRequest),
 		).toContain(
-			"browser delete-failure fixture must retain exact commit-entry request validation",
+			"browser delete-failure fixture must retain exact per-entry request validation",
 		);
 
-		const wrongPartialRoot = mutateBrowserFixture(
-			'plannedIncomplete === "deletePartial" &&\n\t\t\t\t\t\t\t\t(request.rootId !== secondaryRootId ||',
-			'plannedIncomplete === "deletePartial" &&\n\t\t\t\t\t\t\t\t(request.rootId !== primaryRootId ||',
+		const reorderedNormalDelete = mutateBrowserFixture(
+			"\t\t\t\t\t\t\tif (!target.parent.entries.delete(target.name)) {\n\t\t\t\t\t\t\t\tthrow entryNotFound();\n\t\t\t\t\t\t\t}\n",
+			"",
+		).replace(
+			'if (plannedDeleteIncomplete === "deleteRetained") {',
+			'if (!target.parent.entries.delete(target.name)) {\n\t\t\t\t\t\t\t\tthrow entryNotFound();\n\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\tif (plannedDeleteIncomplete === "deleteRetained") {',
 		);
 		expect(
-			validateWorkspaceMoveFailureBrowserFixture(wrongPartialRoot),
+			validateWorkspaceDeleteFailureBrowserFixture(reorderedNormalDelete),
 		).toContain(
-			"browser delete-failure fixture must retain exact commit-entry request validation",
+			"browser delete-failure fixture must invalidate the active batch before its ordered terminal scenario branches",
 		);
 	});
 
-	it("locks retained tree preservation, batch invalidation and boolean-derived partial deletion count", () => {
-		const retainedBranch =
-			'if (plannedIncomplete === "deleteRetained") {\n\t\t\t\t\t\t\t\tdeleteIncompletePlan.shift();\n\t\t\t\t\t\t\t\tactiveDelete = undefined;\n\t\t\t\t\t\t\t\treturn { status: "entryRetained", reason: "deleteFailed" };\n\t\t\t\t\t\t\t}';
-
-		const retainedMutation = mutateBrowserFixture(
-			retainedBranch,
-			'if (plannedIncomplete === "deleteRetained") {\n\t\t\t\t\t\t\t\ttarget.parent.entries.delete(target.name);\n\t\t\t\t\t\t\t\tdeleteIncompletePlan.shift();\n\t\t\t\t\t\t\t\tactiveDelete = undefined;\n\t\t\t\t\t\t\t\treturn { status: "entryRetained", reason: "deleteFailed" };\n\t\t\t\t\t\t\t}',
+	it("locks retained tree preservation and boolean-derived partial deletion count", () => {
+		const retainedDelete = mutateBrowserFixture(
+			'if (plannedDeleteIncomplete === "deleteRetained") {\n\t\t\t\t\t\t\t\tdeleteIncompletePlan.shift();',
+			'if (plannedDeleteIncomplete === "deleteRetained") {\n\t\t\t\t\t\t\t\ttarget.parent.entries.delete(target.name);\n\t\t\t\t\t\t\t\tdeleteIncompletePlan.shift();',
 		);
 		expect(
-			validateWorkspaceMoveFailureBrowserFixture(retainedMutation),
+			validateWorkspaceDeleteFailureBrowserFixture(retainedDelete),
 		).toContain(
-			"browser retained-delete fixture must leave the tree untouched and invalidate the active batch",
+			"browser retained-delete fixture must leave the tree untouched and return only its fixed receipt",
 		);
 
-		const retainedNoInvalidate = mutateBrowserFixture(
-			retainedBranch,
-			'if (plannedIncomplete === "deleteRetained") {\n\t\t\t\t\t\t\t\tdeleteIncompletePlan.shift();\n\t\t\t\t\t\t\t\treturn { status: "entryRetained", reason: "deleteFailed" };\n\t\t\t\t\t\t\t}',
-		);
-		expect(
-			validateWorkspaceMoveFailureBrowserFixture(retainedNoInvalidate),
-		).toContain(
-			"browser retained-delete fixture must leave the tree untouched and invalidate the active batch",
-		);
-
-		const forgedCountAnchor =
-			'const node = resolveNode(\n\t\t\t\t\t\t\t\t\tactiveDelete.rootId,\n\t\t\t\t\t\t\t\t\tactiveDelete.relativePath,\n\t\t\t\t\t\t\t\t);\n\t\t\t\t\t\t\t\tif (node.kind !== "directory") {\n\t\t\t\t\t\t\t\t\tthrow entryTypeMismatch();\n\t\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\t\tconst removedEntries = node.entries.delete("removed.txt")\n\t\t\t\t\t\t\t\t\t? 1\n\t\t\t\t\t\t\t\t\t: 0;';
 		const forgedCount = mutateBrowserFixture(
-			forgedCountAnchor,
-			'const node = resolveNode(\n\t\t\t\t\t\t\t\t\tactiveDelete.rootId,\n\t\t\t\t\t\t\t\t\tactiveDelete.relativePath,\n\t\t\t\t\t\t\t\t);\n\t\t\t\t\t\t\t\tif (node.kind !== "directory") {\n\t\t\t\t\t\t\t\t\tthrow entryTypeMismatch();\n\t\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\t\tconst removedEntries = 1;',
+			`const node = target.parent.entries.get(target.name);
+								if (node?.kind !== "directory") {
+									throw entryTypeMismatch();
+								}
+								const removedEntries = node.entries.delete("removed.txt")
+									? 1
+									: 0;`,
+			`const node = target.parent.entries.get(target.name);
+								if (node?.kind !== "directory") {
+									throw entryTypeMismatch();
+								}
+								const removedEntries = 1;`,
 		);
-		expect(validateWorkspaceMoveFailureBrowserFixture(forgedCount)).toContain(
+		expect(validateWorkspaceDeleteFailureBrowserFixture(forgedCount)).toContain(
 			"browser partial-delete fixture must delete removed.txt and derive removedEntries from that boolean result",
 		);
+	});
+});
 
-		const partialBranch =
-			'if (plannedIncomplete === "deletePartial") {\n\t\t\t\t\t\t\t\tconst node = resolveNode(\n\t\t\t\t\t\t\t\t\tactiveDelete.rootId,\n\t\t\t\t\t\t\t\t\tactiveDelete.relativePath,\n\t\t\t\t\t\t\t\t);\n\t\t\t\t\t\t\t\tif (node.kind !== "directory") {\n\t\t\t\t\t\t\t\t\tthrow entryTypeMismatch();\n\t\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\t\tconst removedEntries = node.entries.delete("removed.txt")\n\t\t\t\t\t\t\t\t\t? 1\n\t\t\t\t\t\t\t\t\t: 0;\n\t\t\t\t\t\t\t\tif (removedEntries !== 1 || !node.entries.has("kept.txt")) {\n\t\t\t\t\t\t\t\t\tthrow new Error(\n\t\t\t\t\t\t\t\t\t\t"Invalid partial delete browser test target tree.",\n\t\t\t\t\t\t\t\t\t);\n\t\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\t\tdeleteIncompletePlan.shift();\n\t\t\t\t\t\t\t\tactiveDelete = undefined;\n\t\t\t\t\t\t\t\treturn {\n\t\t\t\t\t\t\t\t\tstatus: "entryPartiallyDeleted",\n\t\t\t\t\t\t\t\t\treason: "deleteFailed",\n\t\t\t\t\t\t\t\t\tremovedEntries,\n\t\t\t\t\t\t\t\t};\n\t\t\t\t\t\t\t}';
-		const partialNoInvalidate = mutateBrowserFixture(
-			partialBranch,
-			partialBranch.replace("\t\t\t\t\t\t\t\tactiveDelete = undefined;\n", ""),
+describe("Plain browser workspace fixture window authority boundary", () => {
+	function mutateBrowserFixture(from, to) {
+		if (!workspaceBrowserFixture.includes(from)) {
+			throw new Error("browser workspace fixture no longer matches production");
+		}
+		return workspaceBrowserFixture.replace(from, to);
+	}
+
+	const windowAuthorityFailure =
+		"browser workspace fixture must reach the page window only through the audited testWindow surface";
+
+	it("accepts the local retained/partial multi-root fixture", () => {
+		expect(
+			validateWorkspaceBrowserFixtureWindowAuthority(workspaceBrowserFixture),
+		).toEqual([]);
+		expect(
+			validateWorkspaceMoveFailureBrowserFixture(workspaceBrowserFixture),
+		).toEqual([]);
+		expect(
+			validateWorkspaceDeleteFailureBrowserFixture(workspaceBrowserFixture),
+		).toEqual([]);
+	});
+
+	it("rejects a plan alias combined with a window-alias mutation hook", () => {
+		// The confirmed P1 bypass: reading the plan through an alias defeats the
+		// exact peek-statement text lock, and reaching the page window through
+		// a freshly declared alias (instead of the audited testWindow receiver)
+		// defeats the old receiver-name-based forbiddenWindowControls check.
+		// `const testWindow = window as unknown as Window & {` also opens many
+		// unrelated single-purpose addInitScript callbacks elsewhere in this
+		// file, so the anchor below pins the line that follows it
+		// (`__PLAIN_TEST_MULTI_ROOT_VERSION_TRANSITIONS__`, unique to the
+		// shared multi-root fixture) to make sure the mutation lands inside
+		// `installMultiRootNativeIpcMock` and not some other fixture.
+		const hostile = mutateBrowserFixture(
+			"\t\t\t\t\t\t\tconst plannedDeleteIncomplete = deleteIncompletePlan[0];",
+			"\t\t\t\t\t\t\tconst planAlias = deleteIncompletePlan;\n\t\t\t\t\t\t\tconst plannedDeleteIncomplete = planAlias[0];",
+		).replace(
+			"\t\t\tconst testWindow = window as unknown as Window & {\n\t\t\t\t__PLAIN_TEST_TAURI_CALLS__: typeof calls;\n\t\t\t\t__PLAIN_TEST_MULTI_ROOT_VERSION_TRANSITIONS__: typeof versionTransitions;",
+			"\t\t\tconst winAlias = window as unknown as Record<string, unknown>;\n\t\t\twinAlias.__PLAIN_TEST_DELETE_FAILURE__ = (next: string) => {\n\t\t\t\tplanAlias.length = 0;\n\t\t\t\tplanAlias.push(next);\n\t\t\t};\n\t\t\tconst testWindow = window as unknown as Window & {\n\t\t\t\t__PLAIN_TEST_TAURI_CALLS__: typeof calls;\n\t\t\t\t__PLAIN_TEST_MULTI_ROOT_VERSION_TRANSITIONS__: typeof versionTransitions;",
+		);
+		expect(validateWorkspaceBrowserFixtureWindowAuthority(hostile)).toContain(
+			windowAuthorityFailure,
+		);
+		expect(validateWorkspaceDeleteFailureBrowserFixture(hostile)).toContain(
+			"browser delete-failure fixture must peek deleteIncompletePlan[0] through one audited statement",
+		);
+		expect(validateWorkspaceDeleteFailureBrowserFixture(hostile)).toContain(
+			"browser delete-failure fixture must keep deleteIncompletePlan references inside its audited plan, peek and terminal branch statements",
+		);
+	});
+
+	it("rejects a globalThis alias hook even without touching moveIncompletePlan/deleteIncompletePlan", () => {
+		const hostile = mutateBrowserFixture(
+			"\t\t\tconst testWindow = window as unknown as Window & {\n\t\t\t\t__PLAIN_TEST_TAURI_CALLS__: typeof calls;\n\t\t\t\t__PLAIN_TEST_MULTI_ROOT_VERSION_TRANSITIONS__: typeof versionTransitions;",
+			"\t\t\tconst g = globalThis as unknown as Record<string, unknown>;\n\t\t\tg.__PLAIN_TEST_HOOK__ = () => {};\n\t\t\tconst testWindow = window as unknown as Window & {\n\t\t\t\t__PLAIN_TEST_TAURI_CALLS__: typeof calls;\n\t\t\t\t__PLAIN_TEST_MULTI_ROOT_VERSION_TRANSITIONS__: typeof versionTransitions;",
+		);
+		expect(validateWorkspaceBrowserFixtureWindowAuthority(hostile)).toContain(
+			windowAuthorityFailure,
+		);
+	});
+
+	it("rejects a bare plan alias even when the page window is untouched", () => {
+		const hostile = mutateBrowserFixture(
+			"\t\t\t\t\t\t\tconst plannedDeleteIncomplete = deleteIncompletePlan[0];",
+			"\t\t\t\t\t\t\tconst planAlias = deleteIncompletePlan;\n\t\t\t\t\t\t\tconst plannedDeleteIncomplete = planAlias[0];",
+		);
+		expect(validateWorkspaceBrowserFixtureWindowAuthority(hostile)).toEqual([]);
+		expect(validateWorkspaceDeleteFailureBrowserFixture(hostile)).toContain(
+			"browser delete-failure fixture must peek deleteIncompletePlan[0] through one audited statement",
+		);
+		expect(validateWorkspaceDeleteFailureBrowserFixture(hostile)).toContain(
+			"browser delete-failure fixture must keep deleteIncompletePlan references inside its audited plan, peek and terminal branch statements",
+		);
+	});
+
+	it("rejects peek index tampering on both failure plans", () => {
+		const hostileDelete = mutateBrowserFixture(
+			"\t\t\t\t\t\t\tconst plannedDeleteIncomplete = deleteIncompletePlan[0];",
+			"\t\t\t\t\t\t\tconst plannedDeleteIncomplete = deleteIncompletePlan[1];",
 		);
 		expect(
-			validateWorkspaceMoveFailureBrowserFixture(partialNoInvalidate),
+			validateWorkspaceDeleteFailureBrowserFixture(hostileDelete),
 		).toContain(
-			"browser partial-delete fixture must delete removed.txt and derive removedEntries from that boolean result",
+			"browser delete-failure fixture must peek deleteIncompletePlan[0] through one audited statement",
+		);
+
+		const hostileMove = mutateBrowserFixture(
+			"\t\t\t\t\t\t\tconst plannedIncomplete = moveIncompletePlan[0];",
+			"\t\t\t\t\t\t\tconst plannedIncomplete = moveIncompletePlan[1];",
+		);
+		expect(validateWorkspaceMoveFailureBrowserFixture(hostileMove)).toContain(
+			"browser move-failure fixture must peek moveIncompletePlan[0] through one audited statement",
+		);
+	});
+
+	it("rejects an unconditional delete inserted before the retained commit branch", () => {
+		const hostile = mutateBrowserFixture(
+			'\t\t\t\t\t\t\tif (plannedDeleteIncomplete === "deleteRetained") {',
+			'\t\t\t\t\t\t\ttarget.parent.entries.delete(target.name);\n\t\t\t\t\t\t\tif (plannedDeleteIncomplete === "deleteRetained") {',
+		);
+		expect(validateWorkspaceDeleteFailureBrowserFixture(hostile)).toContain(
+			"browser delete-failure fixture must keep commit-case target references inside its audited declaration and terminal branch statements",
+		);
+	});
+
+	it("rejects an unconditional primaryEntries.push inserted at tree-construction time", () => {
+		const hostile = mutateBrowserFixture(
+			"\t\t\tconst trees = new Map<string, MockDirectory>([",
+			'\t\t\tprimaryEntries.push(["extra-secret.txt", file("x\\n")]);\n\t\t\tconst trees = new Map<string, MockDirectory>([',
+		);
+		expect(validateWorkspaceDeleteFailureBrowserFixture(hostile)).toContain(
+			"browser delete-failure fixture must keep primaryEntries and secondaryEntries references inside their audited seed and tree-construction statements",
 		);
 	});
 });
@@ -6306,6 +7378,8 @@ import { registerCustomProvider } from "@codingame/monaco-vscode-files-service-o
 import { createPlainWorkspaceFileSystemProvider, PLAIN_WORKSPACE_SCHEME } from "./features/workspace/file-system-provider";
 import { registerWorkspaceDeleteCoordinator } from "./features/workspace/delete-coordinator";
 import { createBridge } from "./platform/tauri";
+import { configurePlainSearchBridge } from "./features/search/plain-search-service";
+import { configurePlainWorkingCopyBackupBridge } from "./services/plain-workspace-backup-service";
 
 async function bootstrap() {
 const bridge = createBridge();
@@ -6324,6 +7398,8 @@ const initialWorkspaceSnapshot = await bridge.workspaceSnapshot();
 window.addEventListener("pagehide", () => {
   workspaceDeleteCoordinator.dispose();
 }, { once: true });
+configurePlainWorkingCopyBackupBridge(bridge);
+configurePlainSearchBridge(bridge);
 await initialize(createServiceOverrides(), container, { enableWorkspaceTrust: false });
 }
 `;
@@ -6655,6 +7731,201 @@ const workspaceDeleteCoordinator = registerWorkspaceDeleteCoordinator(
 		).toContain(
 			"Plain must keep VS Code workspace trust disabled in favor of Rust process trust",
 		);
+	});
+});
+
+// `F120` S0 (`docs/research/2026-07-29-branding-packaging.md`, "5.1 品牌统一"):
+// reverse tests for the closed brand-field set `app/main.ts`'s
+// `productConfiguration` must expose. `EXPECTED_PRODUCT_CONFIGURATION_FIXTURE`
+// mirrors `scripts/plain/boundary-contracts.mjs`'s own (unexported)
+// `EXPECTED_PRODUCT_CONFIGURATION` byte-for-byte -- kept as a second,
+// independently-typed literal (not an import) so a typo in one file can't
+// silently cancel out a matching typo in the other and still pass.
+describe("Plain product configuration boundary contract", () => {
+	const EXPECTED_PRODUCT_CONFIGURATION_FIXTURE = Object.freeze({
+		nameShort: "Plain",
+		nameLong: "Plain",
+		applicationName: "plain",
+		dataFolderName: ".plain",
+		sharedDataFolderName: ".plain-shared",
+		urlProtocol: "plain",
+		reportIssueUrl: "https://github.com/10xChengTu/plain0/issues/new",
+		licenseUrl: "https://github.com/10xChengTu/plain0/blob/main/LICENSE.txt",
+		serverApplicationName: "plain-server",
+	});
+
+	function bootstrapWithProductConfiguration(entries) {
+		const body = entries
+			.map(([key, value]) => `\t\t\t${key}: ${value},`)
+			.join("\n");
+		return `
+async function bootstrap() {
+	await initialize(createServiceOverrides(), container, {
+		productConfiguration: {
+${body}
+		},
+		enableWorkspaceTrust: false,
+	});
+}
+`;
+	}
+
+	const cleanSource = bootstrapWithProductConfiguration(
+		Object.entries(EXPECTED_PRODUCT_CONFIGURATION_FIXTURE).map(
+			([key, value]) => [key, JSON.stringify(value)],
+		),
+	);
+
+	it("reports no violations against the exact audited closed field set", () => {
+		expect(validateProductConfigurationBoundary(cleanSource)).toEqual([]);
+	});
+
+	it("matches the real, currently-committed app/main.ts with zero violations", () => {
+		const mainSource = readFileSync(
+			new URL("../../app/main.ts", import.meta.url),
+			"utf8",
+		);
+		expect(validateProductConfigurationBoundary(mainSource)).toEqual([]);
+	});
+
+	it("reports a violation when a field is missing entirely", () => {
+		const withoutDataFolderName = bootstrapWithProductConfiguration(
+			Object.entries(EXPECTED_PRODUCT_CONFIGURATION_FIXTURE)
+				.filter(([key]) => key !== "dataFolderName")
+				.map(([key, value]) => [key, JSON.stringify(value)]),
+		);
+		expect(
+			validateProductConfigurationBoundary(withoutDataFolderName),
+		).toContain(
+			"app/main.ts's productConfiguration is missing the required brand field dataFolderName",
+		);
+	});
+
+	// The two security-relevant fields (see the module's own
+	// EXPECTED_PRODUCT_CONFIGURATION doc comment) get their own explicit
+	// reverted-to-Code-OSS reverse tests: this is exactly the regression this
+	// contract exists to prevent, not merely a generic "wrong string" case.
+	it("reports a violation when dataFolderName is reverted to the Code OSS default", () => {
+		const reverted = bootstrapWithProductConfiguration(
+			Object.entries(EXPECTED_PRODUCT_CONFIGURATION_FIXTURE).map(
+				([key, value]) => [
+					key,
+					JSON.stringify(key === "dataFolderName" ? ".vscode-oss" : value),
+				],
+			),
+		);
+		expect(validateProductConfigurationBoundary(reverted)).toContain(
+			'app/main.ts\'s productConfiguration.dataFolderName must be the exact audited literal ".plain"',
+		);
+	});
+
+	it("reports a violation when urlProtocol is reverted to the Code OSS default", () => {
+		const reverted = bootstrapWithProductConfiguration(
+			Object.entries(EXPECTED_PRODUCT_CONFIGURATION_FIXTURE).map(
+				([key, value]) => [
+					key,
+					JSON.stringify(key === "urlProtocol" ? "code-oss" : value),
+				],
+			),
+		);
+		expect(validateProductConfigurationBoundary(reverted)).toContain(
+			'app/main.ts\'s productConfiguration.urlProtocol must be the exact audited literal "plain"',
+		);
+	});
+
+	it("reports a violation for every field independently reverted to its Code OSS value", () => {
+		const codeOssValues = Object.freeze({
+			nameShort: "Code - OSS",
+			nameLong: "Code - OSS",
+			applicationName: "code-oss",
+			dataFolderName: ".vscode-oss",
+			sharedDataFolderName: ".vscode-oss-shared",
+			urlProtocol: "code-oss",
+			reportIssueUrl: "https://github.com/microsoft/vscode/issues/new",
+			licenseUrl: "https://github.com/microsoft/vscode/blob/main/LICENSE.txt",
+			serverApplicationName: "code-server-oss",
+		});
+		for (const key of Object.keys(EXPECTED_PRODUCT_CONFIGURATION_FIXTURE)) {
+			const reverted = bootstrapWithProductConfiguration(
+				Object.entries(EXPECTED_PRODUCT_CONFIGURATION_FIXTURE).map(
+					([entryKey, value]) => [
+						entryKey,
+						JSON.stringify(entryKey === key ? codeOssValues[key] : value),
+					],
+				),
+			);
+			const failures = validateProductConfigurationBoundary(reverted);
+			expect(
+				failures,
+				`expected a failure when ${key} is reverted to its Code OSS value`,
+			).toContain(
+				`app/main.ts's productConfiguration.${key} must be the exact audited literal ${JSON.stringify(
+					EXPECTED_PRODUCT_CONFIGURATION_FIXTURE[key],
+				)}`,
+			);
+		}
+	});
+
+	it("reports a violation when an unaudited field is added", () => {
+		const withExtraField = bootstrapWithProductConfiguration([
+			...Object.entries(EXPECTED_PRODUCT_CONFIGURATION_FIXTURE).map(
+				([key, value]) => [key, JSON.stringify(value)],
+			),
+			["darwinBundleIdentifier", '"com.visualstudio.code.oss"'],
+		]);
+		expect(validateProductConfigurationBoundary(withExtraField)).toContain(
+			"app/main.ts's productConfiguration must not set an unaudited field (darwinBundleIdentifier) -- F120 S0 fixed the closed brand-field set",
+		);
+	});
+
+	it("reports a violation when a field is duplicated", () => {
+		const duplicated = bootstrapWithProductConfiguration([
+			...Object.entries(EXPECTED_PRODUCT_CONFIGURATION_FIXTURE).map(
+				([key, value]) => [key, JSON.stringify(value)],
+			),
+			["nameShort", '"Plain"'],
+		]);
+		expect(validateProductConfigurationBoundary(duplicated)).toContain(
+			"app/main.ts's productConfiguration must not set nameShort more than once",
+		);
+	});
+
+	it("reports a violation when productConfiguration is missing from the initialize(...) configuration", () => {
+		const source = `
+async function bootstrap() {
+	await initialize(createServiceOverrides(), container, {
+		enableWorkspaceTrust: false,
+	});
+}
+`;
+		expect(validateProductConfigurationBoundary(source)).toEqual([
+			"app/main.ts's initialize(...) configuration must set productConfiguration exactly once",
+		]);
+	});
+
+	it("reports a violation when initialize(...) is not called with exactly three arguments", () => {
+		const source = `
+async function bootstrap() {
+	await initialize(createServiceOverrides(), container);
+}
+`;
+		expect(validateProductConfigurationBoundary(source)).toEqual([
+			"app/main.ts must call the audited three-argument initialize(...) exactly once to configure productConfiguration",
+		]);
+	});
+
+	it("reports a violation when productConfiguration is not a plain object literal", () => {
+		const source = `
+async function bootstrap() {
+	await initialize(createServiceOverrides(), container, {
+		productConfiguration: getProductConfiguration(),
+		enableWorkspaceTrust: false,
+	});
+}
+`;
+		expect(validateProductConfigurationBoundary(source)).toEqual([
+			"app/main.ts's productConfiguration must be a plain object literal",
+		]);
 	});
 });
 
@@ -7508,5 +8779,4401 @@ describe("Plain PLW1 versioned-write harness", () => {
 		).toContain(
 			"WorkspaceWriteResult decoder must accept only Rust-representable targetPublished cross-fields",
 		);
+	});
+});
+
+describe("Plain F070 S1 trust/terminal Rust boundary contracts", () => {
+	const terminalCargo = `
+[dependencies]
+portable-pty = "=0.9.0"
+libghostty-vt = "=0.2.1"
+`;
+
+	const exactPortablePtyDependency = Object.freeze({
+		name: "portable-pty",
+		req: "=0.9.0",
+		kind: null,
+		rename: null,
+		target: null,
+		optional: false,
+	});
+
+	const exactLibghosttyVtDependency = Object.freeze({
+		name: "libghostty-vt",
+		req: "=0.2.1",
+		kind: null,
+		rename: null,
+		target: null,
+		optional: false,
+	});
+
+	const terminalModSource = `
+pub(crate) const MAX_TERMINAL_SESSIONS_PER_WINDOW: usize = 16;
+`;
+	const terminalFlowSource = `
+pub(crate) const TERMINAL_FLOW_HIGH_WATER_MARK: usize = 100_000;
+pub(crate) const TERMINAL_FLOW_LOW_WATER_MARK: usize = 5_000;
+`;
+	const terminalServiceConstsSource = `
+const TERMINAL_CHUNK_QUEUE_CAPACITY: usize = 256;
+const TERMINAL_READ_BUFFER_BYTES: usize = 8192;
+
+fn spawn_via_command_builder() {
+    let mut command = portable_pty::CommandBuilder::new("test-fixture-program");
+    command.args(["--flag", "value"]);
+}
+`;
+	const terminalShellSource = `
+pub(crate) const TERMINAL_ENV_PASSTHROUGH_NAMES: &[&str] =
+    &["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR"];
+pub(crate) const TERMINAL_ENV_LC_PREFIX: &str = "LC_";
+pub(crate) const TERMINAL_ENV_TERM: (&str, &str) = ("TERM", "xterm-256color");
+pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor");
+`;
+	const terminalVtSource = `
+pub(crate) const TERMINAL_VT_MAX_SCROLLBACK_LINES: usize = 10_000;
+`;
+
+	const baselineTerminalRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/terminal/mod.rs",
+			source: terminalModSource,
+		},
+		{
+			relativePath: "src-tauri/src/terminal/flow.rs",
+			source: terminalFlowSource,
+		},
+		{
+			relativePath: "src-tauri/src/terminal/service.rs",
+			source: terminalServiceConstsSource,
+		},
+		{
+			relativePath: "src-tauri/src/terminal/shell.rs",
+			source: terminalShellSource,
+		},
+		{
+			relativePath: "src-tauri/src/terminal/vt.rs",
+			source: terminalVtSource,
+		},
+	]);
+
+	function withHostileTerminalFile(relativePath, source) {
+		return [...baselineTerminalRustSources, { relativePath, source }];
+	}
+
+	it("passes for a clean terminal domain with the exact pinned dependency", () => {
+		expect(
+			validateTerminalRustBoundary(baselineTerminalRustSources, terminalCargo, [
+				exactPortablePtyDependency,
+				exactLibghosttyVtDependency,
+			]),
+		).toEqual([]);
+	});
+
+	it("requires the exact portable-pty =0.9.0 pin in Cargo.toml and metadata", () => {
+		expect(
+			validateTerminalRustBoundary(
+				baselineTerminalRustSources,
+				"[dependencies]\n",
+				[exactPortablePtyDependency, exactLibghosttyVtDependency],
+			),
+		).toContain("Cargo.toml must pin portable-pty to =0.9.0");
+		expect(
+			validateTerminalRustBoundary(baselineTerminalRustSources, terminalCargo, [
+				{ ...exactPortablePtyDependency, req: "0.9" },
+			]),
+		).toContain(
+			"Cargo metadata must contain exactly one unrenamed runtime portable-pty =0.9.0 dependency",
+		);
+		expect(
+			validateTerminalRustBoundary(baselineTerminalRustSources, terminalCargo, [
+				{ ...exactPortablePtyDependency, rename: "pty" },
+			]),
+		).toContain(
+			"Cargo metadata must contain exactly one unrenamed runtime portable-pty =0.9.0 dependency",
+		);
+	});
+
+	it("requires the exact libghostty-vt =0.2.1 pin in Cargo.toml and metadata (F070 VT 集成)", () => {
+		expect(
+			validateTerminalRustBoundary(
+				baselineTerminalRustSources,
+				'[dependencies]\nportable-pty = "=0.9.0"\n',
+				[exactPortablePtyDependency, exactLibghosttyVtDependency],
+			),
+		).toContain("Cargo.toml must pin libghostty-vt to =0.2.1");
+		expect(
+			validateTerminalRustBoundary(baselineTerminalRustSources, terminalCargo, [
+				exactPortablePtyDependency,
+				{ ...exactLibghosttyVtDependency, req: "0.2" },
+			]),
+		).toContain(
+			"Cargo metadata must contain exactly one unrenamed runtime libghostty-vt =0.2.1 dependency",
+		);
+		expect(
+			validateTerminalRustBoundary(baselineTerminalRustSources, terminalCargo, [
+				exactPortablePtyDependency,
+				{ ...exactLibghosttyVtDependency, rename: "ghostty_vt" },
+			]),
+		).toContain(
+			"Cargo metadata must contain exactly one unrenamed runtime libghostty-vt =0.2.1 dependency",
+		);
+	});
+
+	it("rejects a direct spawn-bypass dependency even if portable-pty is also present", () => {
+		expect(
+			validateTerminalRustBoundary(baselineTerminalRustSources, terminalCargo, [
+				exactPortablePtyDependency,
+				{ name: "duct", req: "0.13", kind: null, rename: null },
+			]),
+		).toContain(
+			"Cargo metadata must not contain direct spawn-bypass dependency duct, including renamed dependencies",
+		);
+	});
+
+	it("rejects std::process::Command in a production terminal source file", () => {
+		const failures = validateTerminalRustBoundary(
+			withHostileTerminalFile(
+				"src-tauri/src/terminal/hostile.rs",
+				'fn run() {\n    let _ = std::process::Command::new("ls");\n}\n',
+			),
+			terminalCargo,
+			[exactPortablePtyDependency, exactLibghosttyVtDependency],
+		);
+		expect(
+			failures.some((failure) =>
+				failure.includes(
+					"src-tauri/src/terminal/hostile.rs must not spawn subprocesses via std::process::Command",
+				),
+			),
+		).toBe(true);
+	});
+
+	it('rejects a shell "-c" argument in a production terminal source file', () => {
+		const failures = validateTerminalRustBoundary(
+			withHostileTerminalFile(
+				"src-tauri/src/terminal/hostile.rs",
+				'fn run(mut command: portable_pty::CommandBuilder) {\n    command.arg("-c");\n}\n',
+			),
+			terminalCargo,
+			[exactPortablePtyDependency, exactLibghosttyVtDependency],
+		);
+		expect(
+			failures.some((failure) =>
+				failure.includes(
+					'src-tauri/src/terminal/hostile.rs must not pass a shell "-c" argument',
+				),
+			),
+		).toBe(true);
+	});
+
+	it('does not flag std::process::Command or "-c" mentioned only in a doc comment', () => {
+		const failures = validateTerminalRustBoundary(
+			withHostileTerminalFile(
+				"src-tauri/src/terminal/documented.rs",
+				'//! Never use std::process::Command or .arg("-c") in this domain.\nfn run() {}\n',
+			),
+			terminalCargo,
+			[exactPortablePtyDependency, exactLibghosttyVtDependency],
+		);
+		expect(failures).toEqual([]);
+	});
+
+	it("exempts a tests.rs-suffixed fixture file from the spawn guard", () => {
+		const failures = validateTerminalRustBoundary(
+			withHostileTerminalFile(
+				"src-tauri/src/terminal/service/tests.rs",
+				'fn spawn_fixture() {\n    let mut c = portable_pty::CommandBuilder::new("sh");\n    c.args(["-c", "echo hi"]);\n}\n',
+			),
+			terminalCargo,
+			[exactPortablePtyDependency, exactLibghosttyVtDependency],
+		);
+		expect(failures).toEqual([]);
+	});
+
+	it("locks the flow-control/session-limit/queue/buffer budget constants exactly", () => {
+		const wrongHighWaterMark = withHostileTerminalFile(
+			"src-tauri/src/terminal/flow.rs",
+			"pub(crate) const TERMINAL_FLOW_HIGH_WATER_MARK: usize = 50_000;\npub(crate) const TERMINAL_FLOW_LOW_WATER_MARK: usize = 5_000;\n",
+		).filter(
+			(entry) => entry.relativePath !== "src-tauri/src/terminal/flow.rs",
+		);
+		wrongHighWaterMark.push({
+			relativePath: "src-tauri/src/terminal/flow.rs",
+			source:
+				"pub(crate) const TERMINAL_FLOW_HIGH_WATER_MARK: usize = 50_000;\npub(crate) const TERMINAL_FLOW_LOW_WATER_MARK: usize = 5_000;\n",
+		});
+		expect(
+			validateTerminalRustBoundary(wrongHighWaterMark, terminalCargo, [
+				exactPortablePtyDependency,
+				exactLibghosttyVtDependency,
+			]),
+		).toContain(
+			"src-tauri/src/terminal/flow.rs must define exactly one TERMINAL_FLOW_HIGH_WATER_MARK: usize = 100000",
+		);
+
+		const missingSessionLimit = baselineTerminalRustSources.filter(
+			(entry) => entry.relativePath !== "src-tauri/src/terminal/mod.rs",
+		);
+		expect(
+			validateTerminalRustBoundary(missingSessionLimit, terminalCargo, [
+				exactPortablePtyDependency,
+				exactLibghosttyVtDependency,
+			]),
+		).toContain(
+			"terminal budget boundary requires src-tauri/src/terminal/mod.rs",
+		);
+
+		// F070 "VT 集成" slice: the scrollback cap is a budget constant of the
+		// same kind, locked the same way.
+		const wrongScrollbackCap = withHostileTerminalFile(
+			"src-tauri/src/terminal/vt.rs",
+			"pub(crate) const TERMINAL_VT_MAX_SCROLLBACK_LINES: usize = 5_000;\n",
+		).filter((entry) => entry.relativePath !== "src-tauri/src/terminal/vt.rs");
+		wrongScrollbackCap.push({
+			relativePath: "src-tauri/src/terminal/vt.rs",
+			source:
+				"pub(crate) const TERMINAL_VT_MAX_SCROLLBACK_LINES: usize = 5_000;\n",
+		});
+		expect(
+			validateTerminalRustBoundary(wrongScrollbackCap, terminalCargo, [
+				exactPortablePtyDependency,
+				exactLibghosttyVtDependency,
+			]),
+		).toContain(
+			"src-tauri/src/terminal/vt.rs must define exactly one TERMINAL_VT_MAX_SCROLLBACK_LINES: usize = 10000",
+		);
+	});
+
+	it("locks the environment allowlist name list and the two fixed overrides exactly", () => {
+		const widenedAllowlist = baselineTerminalRustSources
+			.filter(
+				(entry) => entry.relativePath !== "src-tauri/src/terminal/shell.rs",
+			)
+			.concat({
+				relativePath: "src-tauri/src/terminal/shell.rs",
+				source: `
+pub(crate) const TERMINAL_ENV_PASSTHROUGH_NAMES: &[&str] =
+    &["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "SECRET_TOKEN"];
+pub(crate) const TERMINAL_ENV_LC_PREFIX: &str = "LC_";
+pub(crate) const TERMINAL_ENV_TERM: (&str, &str) = ("TERM", "xterm-256color");
+pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor");
+`,
+			});
+		expect(
+			validateTerminalRustBoundary(widenedAllowlist, terminalCargo, [
+				exactPortablePtyDependency,
+				exactLibghosttyVtDependency,
+			]),
+		).toContain(
+			"terminal/shell.rs must define TERMINAL_ENV_PASSTHROUGH_NAMES as exactly the audited name list",
+		);
+
+		const wrongTerm = baselineTerminalRustSources
+			.filter(
+				(entry) => entry.relativePath !== "src-tauri/src/terminal/shell.rs",
+			)
+			.concat({
+				relativePath: "src-tauri/src/terminal/shell.rs",
+				source: `
+pub(crate) const TERMINAL_ENV_PASSTHROUGH_NAMES: &[&str] =
+    &["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR"];
+pub(crate) const TERMINAL_ENV_LC_PREFIX: &str = "LC_";
+pub(crate) const TERMINAL_ENV_TERM: (&str, &str) = ("TERM", "dumb");
+pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor");
+`,
+			});
+		expect(
+			validateTerminalRustBoundary(wrongTerm, terminalCargo, [
+				exactPortablePtyDependency,
+				exactLibghosttyVtDependency,
+			]),
+		).toContain(
+			'terminal/shell.rs must define TERMINAL_ENV_TERM: (&str, &str) = ("TERM", "xterm-256color")',
+		);
+	});
+
+	const trustCommandsSource = readFileSync(
+		new URL("../../src-tauri/src/trust/commands.rs", import.meta.url),
+		"utf8",
+	);
+	const terminalCommandsSource = readFileSync(
+		new URL("../../src-tauri/src/terminal/commands.rs", import.meta.url),
+		"utf8",
+	);
+	const libSource = readFileSync(
+		new URL("../../src-tauri/src/lib.rs", import.meta.url),
+		"utf8",
+	);
+
+	const baselineCommandRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/trust/commands.rs",
+			source: trustCommandsSource,
+		},
+		{
+			relativePath: "src-tauri/src/terminal/commands.rs",
+			source: terminalCommandsSource,
+		},
+		{ relativePath: "src-tauri/src/lib.rs", source: libSource },
+	]);
+
+	it("passes for the real, unmodified trust and terminal command files", () => {
+		expect(
+			validateTrustTerminalCommandRegistration(baselineCommandRustSources),
+		).toEqual([]);
+	});
+
+	it("fails if a trust command's body is rewired to a different service call", () => {
+		const rewired = baselineCommandRustSources.map((entry) =>
+			entry.relativePath === "src-tauri/src/trust/commands.rs"
+				? {
+						...entry,
+						source: entry.source.replace(
+							".is_trusted(workspace.inner(), window.label())",
+							'.is_trusted(workspace.inner(), "main")',
+						),
+					}
+				: entry,
+		);
+		expect(validateTrustTerminalCommandRegistration(rewired)).toContain(
+			"workspace_trust_state must contain only its audited DTO decode and single service route",
+		);
+	});
+
+	it("fails if a terminal command is missing from lib.rs's generate_handler", () => {
+		const missingRegistration = baselineCommandRustSources.map((entry) =>
+			entry.relativePath === "src-tauri/src/lib.rs"
+				? {
+						...entry,
+						source: entry.source.replace(
+							"            terminal::commands::terminal_kill,\n",
+							"",
+						),
+					}
+				: entry,
+		);
+		expect(
+			validateTrustTerminalCommandRegistration(missingRegistration),
+		).toContain(
+			"src-tauri/src/lib.rs must register terminal::commands::terminal_kill exactly once in generate_handler",
+		);
+	});
+
+	it("fails if a command is registered a second time (duplicate registration)", () => {
+		const duplicated = baselineCommandRustSources.map((entry) =>
+			entry.relativePath === "src-tauri/src/lib.rs"
+				? {
+						...entry,
+						source: entry.source.replace(
+							"            terminal::commands::terminal_kill,\n",
+							"            terminal::commands::terminal_kill,\n            terminal::commands::terminal_kill,\n",
+						),
+					}
+				: entry,
+		);
+		expect(validateTrustTerminalCommandRegistration(duplicated)).toContain(
+			"src-tauri/src/lib.rs must register terminal::commands::terminal_kill exactly once in generate_handler",
+		);
+	});
+});
+
+describe("Plain F080 S0 git spawn guard and git2/gix ban Harness", () => {
+	const gitCargo = `
+[dependencies]
+portable-pty = "=0.9.0"
+libghostty-vt = "=0.2.1"
+`;
+
+	const exactPortablePtyDependency = Object.freeze({
+		name: "portable-pty",
+		req: "=0.9.0",
+		kind: null,
+		rename: null,
+		target: null,
+		optional: false,
+	});
+
+	const exactLibghosttyVtDependency = Object.freeze({
+		name: "libghostty-vt",
+		req: "=0.2.1",
+		kind: null,
+		rename: null,
+		target: null,
+		optional: false,
+	});
+
+	const baselineDependencies = Object.freeze([
+		exactPortablePtyDependency,
+		exactLibghosttyVtDependency,
+	]);
+
+	// A minimal but complete terminal-domain baseline (identical in spirit
+	// to the F070 S1 block's own `baselineTerminalRustSources`, duplicated
+	// here rather than shared across `describe` blocks — see
+	// `text_search.rs`'s own "small helper duplication over cross-module
+	// coupling" precedent for why that trade-off is deliberate elsewhere in
+	// this codebase) — every one of `validateTerminalRustBoundary`'s
+	// terminal-specific checks (budget constants, env allowlist) must also
+	// pass unrelated to the git-domain assertions this block cares about.
+	const terminalBaseline = Object.freeze([
+		{
+			relativePath: "src-tauri/src/terminal/mod.rs",
+			source:
+				"pub(crate) const MAX_TERMINAL_SESSIONS_PER_WINDOW: usize = 16;\n",
+		},
+		{
+			relativePath: "src-tauri/src/terminal/flow.rs",
+			source:
+				"pub(crate) const TERMINAL_FLOW_HIGH_WATER_MARK: usize = 100_000;\npub(crate) const TERMINAL_FLOW_LOW_WATER_MARK: usize = 5_000;\n",
+		},
+		{
+			relativePath: "src-tauri/src/terminal/service.rs",
+			source:
+				'const TERMINAL_CHUNK_QUEUE_CAPACITY: usize = 256;\nconst TERMINAL_READ_BUFFER_BYTES: usize = 8192;\n\nfn spawn_via_command_builder() {\n    let mut command = portable_pty::CommandBuilder::new("test-fixture-program");\n    command.args(["--flag", "value"]);\n}\n',
+		},
+		{
+			relativePath: "src-tauri/src/terminal/shell.rs",
+			source:
+				'pub(crate) const TERMINAL_ENV_PASSTHROUGH_NAMES: &[&str] =\n    &["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR"];\npub(crate) const TERMINAL_ENV_LC_PREFIX: &str = "LC_";\npub(crate) const TERMINAL_ENV_TERM: (&str, &str) = ("TERM", "xterm-256color");\npub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor");\n',
+		},
+		{
+			relativePath: "src-tauri/src/terminal/vt.rs",
+			source:
+				"pub(crate) const TERMINAL_VT_MAX_SCROLLBACK_LINES: usize = 10_000;\n",
+		},
+	]);
+
+	// A minimal but "compliant and reasonable" stand-in for the real
+	// `src-tauri/src/git/exec.rs`: spawns only `Command::new("git")`, never
+	// a shell interpreter.
+	const validGitExecSource = `
+use std::process::Command;
+
+pub(crate) fn run_git(args: &[String]) {
+    let mut command = Command::new("git");
+    let mut hardening_args: Vec<String> = Vec::new();
+    hardening_args.push("-c".to_owned());
+    hardening_args.push("core.fsmonitor=".to_owned());
+    command.args(&hardening_args);
+    command.args(args);
+}
+`;
+
+	function baselineGitRustSources(extraGitFiles = []) {
+		return [
+			...terminalBaseline,
+			{ relativePath: "src-tauri/src/git/exec.rs", source: validGitExecSource },
+			...extraGitFiles,
+		];
+	}
+
+	it("passes for a clean git exec wrapper alongside the terminal domain", () => {
+		expect(
+			validateTerminalRustBoundary(
+				baselineGitRustSources(),
+				gitCargo,
+				baselineDependencies,
+			),
+		).toEqual([]);
+	});
+
+	it("allows exactly src-tauri/src/git/exec.rs to spawn std::process::Command", () => {
+		const failures = validateTerminalRustBoundary(
+			baselineGitRustSources(),
+			gitCargo,
+			baselineDependencies,
+		);
+		expect(
+			failures.some((failure) => failure.includes("src-tauri/src/git/exec.rs")),
+		).toBe(false);
+	});
+
+	it("rejects std::process::Command in any other git domain file, pointing at exec.rs", () => {
+		const failures = validateTerminalRustBoundary(
+			baselineGitRustSources([
+				{
+					relativePath: "src-tauri/src/git/discovery.rs",
+					source:
+						'fn bypass() {\n    let _ = std::process::Command::new("git");\n}\n',
+				},
+			]),
+			gitCargo,
+			baselineDependencies,
+		);
+		expect(
+			failures.some((failure) =>
+				failure.includes(
+					"src-tauri/src/git/discovery.rs must not spawn subprocesses via std::process::Command; use the sole audited src-tauri/src/git/exec.rs wrapper",
+				),
+			),
+		).toBe(true);
+	});
+
+	it("still rejects std::process::Command in the terminal domain with the portable_pty message (no regression)", () => {
+		const failures = validateTerminalRustBoundary(
+			[
+				...baselineGitRustSources(),
+				{
+					relativePath: "src-tauri/src/terminal/hostile.rs",
+					source:
+						'fn run() {\n    let _ = std::process::Command::new("ls");\n}\n',
+				},
+			],
+			gitCargo,
+			baselineDependencies,
+		);
+		expect(
+			failures.some((failure) =>
+				failure.includes(
+					"src-tauri/src/terminal/hostile.rs must not spawn subprocesses via std::process::Command; use portable_pty::CommandBuilder",
+				),
+			),
+		).toBe(true);
+	});
+
+	it('rejects exec.rs if it does not literally invoke Command::new("git")', () => {
+		const failures = validateTerminalRustBoundary(
+			[
+				...terminalBaseline,
+				{
+					relativePath: "src-tauri/src/git/exec.rs",
+					source:
+						'use std::process::Command;\n\nfn run_git(program: &str) {\n    let mut command = Command::new(program);\n    command.arg("status");\n}\n',
+				},
+			],
+			gitCargo,
+			baselineDependencies,
+		);
+		expect(failures).toContain(
+			'src-tauri/src/git/exec.rs must invoke Command::new("git") literally',
+		);
+	});
+
+	it("rejects exec.rs if it spawns a shell interpreter", () => {
+		const failures = validateTerminalRustBoundary(
+			[
+				...terminalBaseline,
+				{
+					relativePath: "src-tauri/src/git/exec.rs",
+					source:
+						'use std::process::Command;\n\nfn run_git() {\n    let mut command = Command::new("git");\n    let _ = command;\n    let mut shell = Command::new("sh");\n    shell.arg("-c");\n}\n',
+				},
+			],
+			gitCargo,
+			baselineDependencies,
+		);
+		expect(
+			failures.some((failure) =>
+				failure.includes(
+					"src-tauri/src/git/exec.rs must not spawn a shell interpreter",
+				),
+			),
+		).toBe(true);
+	});
+
+	it("hostile mutation: a second git file smuggling std::process::Command alongside a compliant exec.rs is still caught", () => {
+		const failures = validateTerminalRustBoundary(
+			baselineGitRustSources([
+				{
+					relativePath: "src-tauri/src/git/service.rs",
+					source:
+						'fn hostile_bypass() {\n    let _ = std::process::Command::new("curl");\n}\n',
+				},
+			]),
+			gitCargo,
+			baselineDependencies,
+		);
+		expect(
+			failures.some((failure) =>
+				failure.includes(
+					"src-tauri/src/git/service.rs must not spawn subprocesses",
+				),
+			),
+		).toBe(true);
+		// The compliant exec.rs itself must still be unaffected — no
+		// failure whose *subject* (leading path) is exec.rs, though the
+		// service.rs failure's own guidance text legitimately mentions
+		// exec.rs by name (as the wrapper callers should use instead).
+		expect(
+			failures.some((failure) =>
+				failure.startsWith("src-tauri/src/git/exec.rs "),
+			),
+		).toBe(false);
+	});
+
+	it("a tests.rs-suffixed git fixture is exempt from the spawn guard, exactly like the terminal domain's carve-out", () => {
+		const failures = validateTerminalRustBoundary(
+			baselineGitRustSources([
+				{
+					relativePath: "src-tauri/src/git/exec/tests.rs",
+					source:
+						'fn spawn_fixture() {\n    let _ = std::process::Command::new("git").arg("-c").status();\n}\n',
+				},
+			]),
+			gitCargo,
+			baselineDependencies,
+		);
+		expect(failures).toEqual([]);
+	});
+
+	it.each(["git2", "gix", "libgit2-sys"])(
+		"rejects the forbidden git library dependency %s, including renamed",
+		(dependency) => {
+			const failures = validateTerminalRustBoundary(
+				baselineGitRustSources(),
+				gitCargo,
+				[
+					...baselineDependencies,
+					{ name: dependency, req: "1.0", kind: null, rename: null },
+				],
+			);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						`Cargo metadata must not contain forbidden git library dependency ${dependency}, including renamed dependencies`,
+					),
+				),
+			).toBe(true);
+
+			const renamed = validateTerminalRustBoundary(
+				baselineGitRustSources(),
+				gitCargo,
+				[
+					...baselineDependencies,
+					{ name: dependency, req: "1.0", kind: null, rename: "renamed_away" },
+				],
+			);
+			expect(
+				renamed.some((failure) =>
+					failure.includes(
+						`Cargo metadata must not contain forbidden git library dependency ${dependency}`,
+					),
+				),
+			).toBe(true);
+		},
+	);
+
+	it("passes when no forbidden git library dependency is present", () => {
+		expect(
+			validateTerminalRustBoundary(
+				baselineGitRustSources(),
+				gitCargo,
+				baselineDependencies,
+			),
+		).toEqual([]);
+	});
+
+	// `validateWorkspaceMoveBoundary` independently sweeps *every*
+	// production Rust file for raw process/shell deletion bypasses (a
+	// check that predates the git domain and is unrelated to the spawn
+	// guard above) — its regex for `Command::new(`/`std::process` would,
+	// without a matching exemption there, also flag the audited git exec
+	// wrapper. Locking both sides of that interaction here so a future
+	// edit to either check cannot silently reopen it.
+	it("does not trip the workspace move/delete boundary's process-bypass check for the audited git exec wrapper", () => {
+		const withExecWrapper = [
+			...workspaceMoveSources,
+			{ relativePath: "src-tauri/src/git/exec.rs", source: validGitExecSource },
+		];
+		expect(validateWorkspaceMoveBoundary(withExecWrapper)).toEqual([]);
+	});
+
+	it("still flags an unaudited git file's raw process/shell spawn via the move/delete boundary check", () => {
+		const hostile = [
+			...workspaceMoveSources,
+			{
+				relativePath: "src-tauri/src/git/discovery.rs",
+				source:
+					'fn bypass() {\n    let _ = std::process::Command::new("rm");\n}\n',
+			},
+		];
+		expect(validateWorkspaceMoveBoundary(hostile)).toContain(
+			"src-tauri/src/git/discovery.rs must not use process or shell deletion bypasses",
+		);
+	});
+});
+
+describe("Plain F070 S2 terminal IPC bridge Harness", () => {
+	const terminalDtoSource = readFileSync(
+		new URL("../../src-tauri/src/terminal/dto.rs", import.meta.url),
+		"utf8",
+	);
+	const terminalCommandsSource = readFileSync(
+		new URL("../../src-tauri/src/terminal/commands.rs", import.meta.url),
+		"utf8",
+	);
+	const contractsSource = readFileSync(
+		new URL("../../app/platform/tauri/contracts.ts", import.meta.url),
+		"utf8",
+	);
+	const terminalCodecSource = readFileSync(
+		new URL("../../app/platform/tauri/terminal-codec.ts", import.meta.url),
+		"utf8",
+	);
+	const nativeSource = readFileSync(
+		new URL("../../app/platform/tauri/native.ts", import.meta.url),
+		"utf8",
+	);
+
+	const baselineBridgeRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/terminal/dto.rs",
+			source: terminalDtoSource,
+		},
+		{
+			relativePath: "src-tauri/src/terminal/commands.rs",
+			source: terminalCommandsSource,
+		},
+	]);
+	const baselineBridgeAppSources = Object.freeze([
+		{
+			relativePath: "app/platform/tauri/contracts.ts",
+			source: contractsSource,
+		},
+		{
+			relativePath: "app/platform/tauri/terminal-codec.ts",
+			source: terminalCodecSource,
+		},
+		{ relativePath: "app/platform/tauri/native.ts", source: nativeSource },
+	]);
+
+	function withMutatedRust(relativePath, mutate) {
+		return baselineBridgeRustSources.map((entry) =>
+			entry.relativePath === relativePath
+				? { ...entry, source: mutate(entry.source) }
+				: entry,
+		);
+	}
+
+	function withMutatedApp(relativePath, mutate) {
+		return baselineBridgeAppSources.map((entry) =>
+			entry.relativePath === relativePath
+				? { ...entry, source: mutate(entry.source) }
+				: entry,
+		);
+	}
+
+	it("passes for the real, unmodified terminal IPC bridge files", () => {
+		expect(
+			validateTerminalIpcBridgeBoundary(
+				baselineBridgeRustSources,
+				baselineBridgeAppSources,
+			),
+		).toEqual([]);
+	});
+
+	it("fails if TerminalDataEvent gains an extra field", () => {
+		const widened = withMutatedRust("src-tauri/src/terminal/dto.rs", (source) =>
+			source.replace(
+				"pub struct TerminalDataEvent {\n    session_id: TerminalSessionId,\n    sequence: u64,\n    frame: TerminalFrame,\n}",
+				"pub struct TerminalDataEvent {\n    session_id: TerminalSessionId,\n    sequence: u64,\n    frame: TerminalFrame,\n    extra: bool,\n}",
+			),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(widened, baselineBridgeAppSources),
+		).toContain(
+			"TerminalDataEvent/TerminalExitEvent must expose only their exact audited fields",
+		);
+	});
+
+	it("fails if TerminalExitEvent's signal is (re-)added to the wire payload", () => {
+		const widened = withMutatedRust("src-tauri/src/terminal/dto.rs", (source) =>
+			source.replace(
+				"pub struct TerminalExitEvent {\n    session_id: TerminalSessionId,\n    exit_code: u32,\n}",
+				"pub struct TerminalExitEvent {\n    session_id: TerminalSessionId,\n    exit_code: u32,\n    signal: Option<String>,\n}",
+			),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(widened, baselineBridgeAppSources),
+		).toContain(
+			"TerminalDataEvent/TerminalExitEvent must expose only their exact audited fields",
+		);
+	});
+
+	it("fails if either event name const is renamed or its wire string changes", () => {
+		const renamed = withMutatedRust(
+			"src-tauri/src/terminal/commands.rs",
+			(source) =>
+				source.replace(
+					'pub(crate) const TERMINAL_DATA_EVENT: &str = "plain://terminal-data";',
+					'pub(crate) const TERMINAL_DATA_EVENT: &str = "plain://terminal-output";',
+				),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(renamed, baselineBridgeAppSources),
+		).toContain(
+			'terminal/commands.rs must define TERMINAL_DATA_EVENT = "plain://terminal-data" and TERMINAL_EXIT_EVENT = "plain://terminal-exit"',
+		);
+	});
+
+	it("fails if WindowEmitSink::emit_frame stops targeting the session's own window or double-emits", () => {
+		const wrongTarget = withMutatedRust(
+			"src-tauri/src/terminal/commands.rs",
+			(source) =>
+				source.replace(
+					"EventTarget::webview_window(self.window_label.clone()),\n            TERMINAL_DATA_EVENT,",
+					"EventTarget::any(),\n            TERMINAL_DATA_EVENT,",
+				),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(wrongTarget, baselineBridgeAppSources),
+		).toContain(
+			"WindowEmitSink::emit_frame must emit_to exactly one window-targeted TerminalDataEvent built from the frame it was given",
+		);
+
+		const doubleEmit = withMutatedRust(
+			"src-tauri/src/terminal/commands.rs",
+			(source) =>
+				source.replace(
+					"TerminalDataEvent::new(session_id, sequence, frame),\n        );\n    }",
+					"TerminalDataEvent::new(session_id, sequence, frame),\n        );\n        let _ = self.app.emit_to(\n            EventTarget::webview_window(self.window_label.clone()),\n            TERMINAL_DATA_EVENT,\n            TerminalDataEvent::new(session_id, sequence, frame),\n        );\n    }",
+				),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(doubleEmit, baselineBridgeAppSources),
+		).toContain(
+			"WindowEmitSink::emit_frame must emit_to exactly one window-targeted TerminalDataEvent built from the frame it was given",
+		);
+	});
+
+	it("fails if WindowEmitSink::emit_exit is rewired to a bare .emit() or the wrong exit code", () => {
+		const bareEmit = withMutatedRust(
+			"src-tauri/src/terminal/commands.rs",
+			(source) =>
+				source.replace(
+					"let _ = self.app.emit_to(\n            EventTarget::webview_window(self.window_label.clone()),\n            TERMINAL_EXIT_EVENT,\n            TerminalExitEvent::new(session_id, status.exit_code),\n        );",
+					'let _ = self.app.emit("terminal-exit-fallback", ());\n        let _ = self.app.emit_to(\n            EventTarget::webview_window(self.window_label.clone()),\n            TERMINAL_EXIT_EVENT,\n            TerminalExitEvent::new(session_id, status.exit_code),\n        );',
+				),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(bareEmit, baselineBridgeAppSources),
+		).toContain(
+			"WindowEmitSink::emit_exit must emit_to exactly one window-targeted TerminalExitEvent built from the status it was given",
+		);
+	});
+
+	it("fails if contracts.ts's event consts are missing or the wire string drifts", () => {
+		const mutated = withMutatedApp(
+			"app/platform/tauri/contracts.ts",
+			(source) =>
+				source.replace(
+					'export const TERMINAL_EXIT_EVENT = "plain://terminal-exit" as const;',
+					'export const TERMINAL_EXIT_EVENT = "plain://terminal-quit" as const;',
+				),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(baselineBridgeRustSources, mutated),
+		).toContain(
+			"contracts.ts must declare the exact TERMINAL_DATA_EVENT/TERMINAL_EXIT_EVENT wire strings",
+		);
+	});
+
+	it("fails if PlainBridge loses a terminal/trust method", () => {
+		const mutated = withMutatedApp(
+			"app/platform/tauri/contracts.ts",
+			(source) =>
+				source.replace(
+					"\tterminalKill(sessionId: string, immediate: boolean): Promise<void>;\n",
+					"",
+				),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(baselineBridgeRustSources, mutated),
+		).toContain(
+			"PlainBridge must expose exactly the thirteen audited terminal/trust methods, no more and no fewer",
+		);
+	});
+
+	it("fails if PlainBridge gains an extra terminal-shaped method beyond the audited thirteen", () => {
+		const mutated = withMutatedApp(
+			"app/platform/tauri/contracts.ts",
+			(source) =>
+				source.replace(
+					"\tterminalKill(sessionId: string, immediate: boolean): Promise<void>;\n",
+					"\tterminalKill(sessionId: string, immediate: boolean): Promise<void>;\n\tterminalDestroy(sessionId: string): Promise<void>;\n",
+				),
+		);
+		// `terminalDestroy` is outside the audited name list, so the filtered
+		// member count still equals thirteen — this mutation is only observable
+		// because it does not change any *audited* name's presence, proving
+		// the check keys on the fixed name list rather than merely counting
+		// terminal-prefixed members. Assert the passing baseline is
+		// unaffected by an unrelated addition, then assert a genuine surface
+		// change (a rename) is caught.
+		expect(
+			validateTerminalIpcBridgeBoundary(baselineBridgeRustSources, mutated),
+		).toEqual([]);
+
+		const renamed = withMutatedApp(
+			"app/platform/tauri/contracts.ts",
+			(source) =>
+				source.replace(
+					"\tterminalKill(sessionId: string, immediate: boolean): Promise<void>;\n",
+					"\tterminalTerminate(sessionId: string, immediate: boolean): Promise<void>;\n",
+				),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(baselineBridgeRustSources, renamed),
+		).toContain(
+			"PlainBridge must expose exactly the thirteen audited terminal/trust methods, no more and no fewer",
+		);
+	});
+
+	it("fails if a terminal event decoder drops its own-data/Proxy/freeze checks", () => {
+		const noFreeze = withMutatedApp(
+			"app/platform/tauri/terminal-codec.ts",
+			(source) =>
+				source.replace(
+					"\treturn Object.freeze({\n\t\tsessionId: value.sessionId,\n\t\tsequence: value.sequence,\n\t\tframe,\n\t});",
+					"\treturn {\n\t\tsessionId: value.sessionId,\n\t\tsequence: value.sequence,\n\t\tframe,\n\t};",
+				),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(baselineBridgeRustSources, noFreeze),
+		).toContain(
+			"terminal-codec.ts's decodeTerminalDataEvent must validate exact own-data keys, reject Proxy wrapping, and freeze its result",
+		);
+	});
+
+	it("fails if native.ts stops listening for one of the terminal events, or decodes through the wrong function", () => {
+		const missingListener = withMutatedApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					/terminalWatchExit: \(listener\) => \{[\s\S]*?\n\t\t\},\n/,
+					"",
+				),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(
+				baselineBridgeRustSources,
+				missingListener,
+			),
+		).toContain(
+			"native.ts must listen for TERMINAL_DATA_EVENT/TERMINAL_EXIT_EVENT exactly once each, decoded through the audited decoders",
+		);
+	});
+});
+
+describe("Plain F080 S1 git command registration Harness", () => {
+	const gitCommandsSource = readFileSync(
+		new URL("../../src-tauri/src/git/commands.rs", import.meta.url),
+		"utf8",
+	);
+	const libSourceForGit = readFileSync(
+		new URL("../../src-tauri/src/lib.rs", import.meta.url),
+		"utf8",
+	);
+
+	const baselineGitCommandRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/git/commands.rs",
+			source: gitCommandsSource,
+		},
+		{ relativePath: "src-tauri/src/lib.rs", source: libSourceForGit },
+	]);
+
+	function withMutatedGitCommandSource(relativePath, mutate) {
+		return baselineGitCommandRustSources.map((entry) =>
+			entry.relativePath === relativePath
+				? { ...entry, source: mutate(entry.source) }
+				: entry,
+		);
+	}
+
+	it("passes for the real, unmodified git command files", () => {
+		expect(
+			validateGitCommandRegistration(baselineGitCommandRustSources),
+		).toEqual([]);
+	});
+
+	it("fails if git_status's body is rewired to a different service call", () => {
+		const rewired = withMutatedGitCommandSource(
+			"src-tauri/src/git/commands.rs",
+			(source) =>
+				source.replace(
+					"status::git_status(trust.inner(), workspace.inner(), window.label())",
+					'status::git_status(trust.inner(), workspace.inner(), "main")',
+				),
+		);
+		expect(validateGitCommandRegistration(rewired)).toContain(
+			"git_status must contain only its audited DTO decode and single service route",
+		);
+	});
+
+	it("fails if git_diff_files loses its request.into_parts() cached wiring", () => {
+		const rewired = withMutatedGitCommandSource(
+			"src-tauri/src/git/commands.rs",
+			(source) =>
+				source.replace(
+					"let cached = request.into_parts();",
+					"let cached = true;",
+				),
+		);
+		expect(validateGitCommandRegistration(rewired)).toContain(
+			"git_diff_files must contain only its audited DTO decode and single service route",
+		);
+	});
+
+	it("fails if git_show_blob is missing from lib.rs's generate_handler", () => {
+		const missingRegistration = withMutatedGitCommandSource(
+			"src-tauri/src/lib.rs",
+			(source) =>
+				source.replace("            git::commands::git_show_blob,\n", ""),
+		);
+		expect(validateGitCommandRegistration(missingRegistration)).toContain(
+			"generate_handler! must register git::commands::git_show_blob exactly once",
+		);
+	});
+
+	it("fails if a git command file is missing entirely", () => {
+		const missingFile = baselineGitCommandRustSources.filter(
+			(entry) => entry.relativePath !== "src-tauri/src/git/commands.rs",
+		);
+		expect(validateGitCommandRegistration(missingFile)).toContain(
+			"command registration boundary requires src-tauri/src/git/commands.rs",
+		);
+	});
+
+	it("fails if git_commit's body is rewired to skip amend", () => {
+		const rewired = withMutatedGitCommandSource(
+			"src-tauri/src/git/commands.rs",
+			(source) =>
+				source.replace(
+					"let (message, amend) = request.into_parts()?;",
+					"let (message, _amend) = request.into_parts()?;\n    let amend = false;",
+				),
+		);
+		expect(validateGitCommandRegistration(rewired)).toContain(
+			"git_commit must contain only its audited DTO decode and single service route",
+		);
+	});
+
+	it("fails if git_stage_blob is missing from lib.rs's generate_handler", () => {
+		const missingRegistration = withMutatedGitCommandSource(
+			"src-tauri/src/lib.rs",
+			(source) =>
+				source.replace("            git::commands::git_stage_blob,\n", ""),
+		);
+		expect(validateGitCommandRegistration(missingRegistration)).toContain(
+			"generate_handler! must register git::commands::git_stage_blob exactly once",
+		);
+	});
+
+	it("fails if git_discard_paths is missing from lib.rs's generate_handler", () => {
+		const missingRegistration = withMutatedGitCommandSource(
+			"src-tauri/src/lib.rs",
+			(source) =>
+				source.replace("            git::commands::git_discard_paths,\n", ""),
+		);
+		expect(validateGitCommandRegistration(missingRegistration)).toContain(
+			"generate_handler! must register git::commands::git_discard_paths exactly once",
+		);
+	});
+
+	it("fails if git_log_graph's body is rewired to skip the max_count validation", () => {
+		const rewired = withMutatedGitCommandSource(
+			"src-tauri/src/git/commands.rs",
+			(source) =>
+				source.replace(
+					"let max_count = request.into_parts()?;",
+					"let max_count = 100;",
+				),
+		);
+		expect(validateGitCommandRegistration(rewired)).toContain(
+			"git_log_graph must contain only its audited DTO decode and single service route",
+		);
+	});
+
+	it("fails if git_refs_list is missing from lib.rs's generate_handler", () => {
+		const missingRegistration = withMutatedGitCommandSource(
+			"src-tauri/src/lib.rs",
+			(source) =>
+				source.replace("            git::commands::git_refs_list,\n", ""),
+		);
+		expect(validateGitCommandRegistration(missingRegistration)).toContain(
+			"generate_handler! must register git::commands::git_refs_list exactly once",
+		);
+	});
+});
+
+describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
+	const gitStatusSource = readFileSync(
+		new URL("../../src-tauri/src/git/status.rs", import.meta.url),
+		"utf8",
+	);
+	const gitDiffSource = readFileSync(
+		new URL("../../src-tauri/src/git/diff.rs", import.meta.url),
+		"utf8",
+	);
+	const gitDtoSource = readFileSync(
+		new URL("../../src-tauri/src/git/dto.rs", import.meta.url),
+		"utf8",
+	);
+	const gitCommitSource = readFileSync(
+		new URL("../../src-tauri/src/git/commit.rs", import.meta.url),
+		"utf8",
+	);
+	const gitDiscardSource = readFileSync(
+		new URL("../../src-tauri/src/git/discard.rs", import.meta.url),
+		"utf8",
+	);
+	const gitNetworkSource = readFileSync(
+		new URL("../../src-tauri/src/git/network.rs", import.meta.url),
+		"utf8",
+	);
+	const gitExecSourceForRustBoundary = readFileSync(
+		new URL("../../src-tauri/src/git/exec.rs", import.meta.url),
+		"utf8",
+	);
+	const gitLogSourceForRustBoundary = readFileSync(
+		new URL("../../src-tauri/src/git/log.rs", import.meta.url),
+		"utf8",
+	);
+	const gitShowCommitSourceForRustBoundary = readFileSync(
+		new URL("../../src-tauri/src/git/show_commit.rs", import.meta.url),
+		"utf8",
+	);
+	const gitStashSourceForRustBoundary = readFileSync(
+		new URL("../../src-tauri/src/git/stash.rs", import.meta.url),
+		"utf8",
+	);
+	const gitWorktreeSourceForRustBoundary = readFileSync(
+		new URL("../../src-tauri/src/git/worktree.rs", import.meta.url),
+		"utf8",
+	);
+
+	const baselineGitRustSources = Object.freeze([
+		{ relativePath: "src-tauri/src/git/status.rs", source: gitStatusSource },
+		{ relativePath: "src-tauri/src/git/diff.rs", source: gitDiffSource },
+		{ relativePath: "src-tauri/src/git/dto.rs", source: gitDtoSource },
+		{ relativePath: "src-tauri/src/git/commit.rs", source: gitCommitSource },
+		{ relativePath: "src-tauri/src/git/discard.rs", source: gitDiscardSource },
+		{ relativePath: "src-tauri/src/git/network.rs", source: gitNetworkSource },
+		{
+			relativePath: "src-tauri/src/git/exec.rs",
+			source: gitExecSourceForRustBoundary,
+		},
+		{
+			relativePath: "src-tauri/src/git/log.rs",
+			source: gitLogSourceForRustBoundary,
+		},
+		{
+			relativePath: "src-tauri/src/git/show_commit.rs",
+			source: gitShowCommitSourceForRustBoundary,
+		},
+		{
+			relativePath: "src-tauri/src/git/stash.rs",
+			source: gitStashSourceForRustBoundary,
+		},
+		{
+			relativePath: "src-tauri/src/git/worktree.rs",
+			source: gitWorktreeSourceForRustBoundary,
+		},
+	]);
+
+	function withMutatedGitRustSource(relativePath, mutate) {
+		return baselineGitRustSources.map((entry) =>
+			entry.relativePath === relativePath
+				? { ...entry, source: mutate(entry.source) }
+				: entry,
+		);
+	}
+
+	it("passes for the real, unmodified git status/diff/dto files", () => {
+		expect(validateGitRustBoundary(baselineGitRustSources)).toEqual([]);
+	});
+
+	it("fails if GIT_STATUS_ARGS drops --ignored", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/status.rs",
+			(source) => source.replace('"--ignored"', '"--ignored-typo"'),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"status.rs must define GIT_STATUS_ARGS as exactly the audited status argument list",
+		);
+	});
+
+	it("fails if GIT_DIFF_BASE_ARGS drops the -M rename-detection flag", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/diff.rs",
+			(source) => source.replace('"-M",', ""),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"diff.rs must define GIT_DIFF_BASE_ARGS as exactly the audited diff argument list",
+		);
+	});
+
+	it("fails if GIT_SHOW_BASE_ARGS drops --no-textconv", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/diff.rs",
+			(source) => source.replace('"--no-textconv", ', ""),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"diff.rs must define GIT_SHOW_BASE_ARGS as exactly the audited show argument list",
+		);
+	});
+
+	it("fails if GitSubmoduleStateWire gains an extra field", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"untracked_changed: bool,\n}",
+					"untracked_changed: bool,\n    extra_flag: bool,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitSubmoduleStateWire must expose only its exact audited four boolean fields",
+		);
+	});
+
+	it("fails if GitStatusEntryWire loses the Ignored variant", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) => source.replace(/,\s*Ignored\s*\{\s*path:\s*String,\s*\}/, ""),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitStatusEntryWire must expose exactly its five audited variants with their exact fields",
+		);
+	});
+
+	it("fails if GitDiffFileEntryWire's binary field is renamed", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) => source.replace("binary: bool,\n}", "is_binary: bool,\n}"),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitDiffFileEntryWire must expose only its exact audited fields",
+		);
+	});
+
+	it("fails if dto.rs is missing entirely", () => {
+		const missingDto = baselineGitRustSources.filter(
+			(entry) => entry.relativePath !== "src-tauri/src/git/dto.rs",
+		);
+		expect(validateGitRustBoundary(missingDto)).toContain(
+			"git boundary requires dto.rs",
+		);
+	});
+
+	it("fails if GIT_COMMIT_ARGS drops user.useConfigOnly=true", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/commit.rs",
+			(source) => source.replace('"user.useConfigOnly=true",', ""),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"commit.rs must define GIT_COMMIT_ARGS as exactly the audited commit argument list",
+		);
+	});
+
+	it("fails if GIT_DISCARD_ARGS drops -q", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/discard.rs",
+			(source) => source.replace('"checkout", "-q"', '"checkout"'),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"discard.rs must define GIT_DISCARD_ARGS as exactly the audited discard argument list",
+		);
+	});
+
+	it("fails if GitStagePathsRequest gains an extra field", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"pub struct GitStagePathsRequest {\n    paths: Vec<String>,\n}",
+					"pub struct GitStagePathsRequest {\n    paths: Vec<String>,\n    extra: bool,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitStagePathsRequest/GitUnstagePathsRequest/GitDiscardPathsRequest must expose only their exact audited paths field",
+		);
+	});
+
+	it("fails if GitStageBlobRequest's content field is renamed", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"pub struct GitStageBlobRequest {\n    path: String,\n    content: Vec<u8>,\n}",
+					"pub struct GitStageBlobRequest {\n    path: String,\n    bytes: Vec<u8>,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitStageBlobRequest must expose only its exact audited path/content fields",
+		);
+	});
+
+	it("fails if GitCommitRequest's amend field is renamed", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"pub struct GitCommitRequest {\n    message: String,\n    amend: bool,\n}",
+					"pub struct GitCommitRequest {\n    message: String,\n    is_amend: bool,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitCommitRequest must expose only its exact audited message/amend fields",
+		);
+	});
+
+	it("fails if commit.rs is missing entirely", () => {
+		const missingCommit = baselineGitRustSources.filter(
+			(entry) => entry.relativePath !== "src-tauri/src/git/commit.rs",
+		);
+		expect(validateGitRustBoundary(missingCommit)).toContain(
+			"git boundary requires commit.rs and discard.rs",
+		);
+	});
+
+	it("fails if GitNetworkPreviewRequest gains an extra field", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"pub struct GitNetworkPreviewRequest {\n    operation: GitNetworkOperationWire,\n}",
+					"pub struct GitNetworkPreviewRequest {\n    operation: GitNetworkOperationWire,\n    extra: bool,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitNetworkPreviewRequest must expose only its exact audited operation field",
+		);
+	});
+
+	it("fails if GitNetworkPreviewResult's behind field is renamed", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"pub struct GitNetworkPreviewResult {\n    upstream: Option<String>,\n    ahead: Option<u64>,\n    behind: Option<u64>,\n}",
+					"pub struct GitNetworkPreviewResult {\n    upstream: Option<String>,\n    ahead: Option<u64>,\n    remaining: Option<u64>,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitNetworkPreviewResult must expose only its exact audited upstream/ahead/behind fields",
+		);
+	});
+
+	it("fails if GitNetworkOperationWire loses the Push variant", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"pub enum GitNetworkOperationWire {\n    Fetch,\n    Pull,\n    Push,\n}",
+					"pub enum GitNetworkOperationWire {\n    Fetch,\n    Pull,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitNetworkOperationWire must expose exactly its three audited Fetch/Pull/Push variants",
+		);
+	});
+
+	it("fails if GitFetchRequest gains a field", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"pub struct GitFetchRequest {}",
+					"pub struct GitFetchRequest {\n    remote: String,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitFetchRequest/GitPullRequest must remain empty structs",
+		);
+	});
+
+	it("fails if GitPushRequest's force field is renamed", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"pub struct GitPushRequest {\n    force: bool,\n}",
+					"pub struct GitPushRequest {\n    isForce: bool,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitPushRequest must expose only its exact audited force field",
+		);
+	});
+
+	it("fails if GitNetworkCancelRequest gains a field", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"pub struct GitNetworkCancelRequest {}",
+					"pub struct GitNetworkCancelRequest {\n    force: bool,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitNetworkCancelRequest must remain an empty struct",
+		);
+	});
+
+	it("fails if GIT_FETCH_ARGS drops --quiet", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/network.rs",
+			(source) =>
+				source.replace(
+					'pub(crate) const GIT_FETCH_ARGS: &[&str] = &["fetch", "--quiet"];',
+					'pub(crate) const GIT_FETCH_ARGS: &[&str] = &["fetch"];',
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"network.rs must define GIT_FETCH_ARGS as exactly the audited fetch argument list",
+		);
+	});
+
+	it("fails if GIT_PULL_ARGS gains an unaudited reconcile-strategy flag", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/network.rs",
+			(source) =>
+				source.replace(
+					'pub(crate) const GIT_PULL_ARGS: &[&str] = &["pull", "--quiet"];',
+					'pub(crate) const GIT_PULL_ARGS: &[&str] = &["pull", "--quiet", "--no-rebase"];',
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"network.rs must define GIT_PULL_ARGS as exactly the audited pull argument list",
+		);
+	});
+
+	it("fails if GIT_PUSH_ARGS gains an unaudited flag", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/network.rs",
+			(source) =>
+				source.replace(
+					'pub(crate) const GIT_PUSH_ARGS: &[&str] = &["push", "--quiet"];',
+					'pub(crate) const GIT_PUSH_ARGS: &[&str] = &["push", "--quiet", "--force"];',
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"network.rs must define GIT_PUSH_ARGS as exactly the audited push argument list",
+		);
+	});
+
+	it("fails if GIT_PUSH_FORCE_ARGS uses bare --force instead of --force-with-lease", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/network.rs",
+			(source) => source.replace('"--force-with-lease"', '"--force"'),
+		);
+		const failures = validateGitRustBoundary(mutated);
+		expect(failures).toContain(
+			"network.rs must define GIT_PUSH_FORCE_ARGS as exactly the audited force-with-lease argument list (never bare --force)",
+		);
+		expect(failures).toContain(
+			"src-tauri/src/git/network.rs must never pass a bare --force argument to git push — only --force-with-lease",
+		);
+	});
+
+	it("fails if a second, bare --force literal is smuggled in anywhere in network.rs", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/network.rs",
+			(source) =>
+				`${source}\npub(crate) const GIT_HOSTILE_FORCE_ARGS: &[&str] = &["push", "--force"];\n`,
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"src-tauri/src/git/network.rs must never pass a bare --force argument to git push — only --force-with-lease",
+		);
+	});
+
+	// Post-review fix: the bare-`--force` scan was previously scoped only to
+	// `network.rs`'s own source (`executableNetwork`), not the whole git
+	// Rust domain, despite the evidence text this Harness backs originally
+	// claiming domain-wide coverage. Broadened to scan every git-domain
+	// source file (confirmed empirically zero false positives: no other
+	// file under `src-tauri/src/git/` contains the literal quoted string
+	// `"--force"` at all) — this test proves a bare `--force` literal
+	// smuggled into a *different* git-domain file (not `network.rs`) is now
+	// also caught, which the pre-fix, network.rs-only scan could not do.
+	it("fails if a bare --force literal is smuggled into a different git-domain file entirely", () => {
+		const mutated = [
+			...baselineGitRustSources,
+			{
+				relativePath: "src-tauri/src/git/stage.rs",
+				source:
+					'pub(crate) const GIT_HOSTILE_FORCE_ARGS: &[&str] = &["push", "--force"];',
+			},
+		];
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"src-tauri/src/git/stage.rs must never pass a bare --force argument to git push — only --force-with-lease",
+		);
+	});
+
+	it("fails if GIT_NETWORK_ENV_PASSTHROUGH_NAMES gains an unaudited variable", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/exec.rs",
+			(source) =>
+				source.replace(
+					'pub(crate) const GIT_NETWORK_ENV_PASSTHROUGH_NAMES: &[&str] = &["PATH", "HOME", "SSH_AUTH_SOCK"];',
+					'pub(crate) const GIT_NETWORK_ENV_PASSTHROUGH_NAMES: &[&str] = &["PATH", "HOME", "SSH_AUTH_SOCK", "SSH_AGENT_PID"];',
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"exec.rs must define GIT_NETWORK_ENV_PASSTHROUGH_NAMES as exactly PATH/HOME/SSH_AUTH_SOCK",
+		);
+	});
+
+	it("fails if network.rs or exec.rs is missing entirely", () => {
+		const missingNetwork = baselineGitRustSources.filter(
+			(entry) =>
+				entry.relativePath !== "src-tauri/src/git/network.rs" &&
+				entry.relativePath !== "src-tauri/src/git/exec.rs",
+		);
+		expect(validateGitRustBoundary(missingNetwork)).toContain(
+			"git boundary requires network.rs and exec.rs",
+		);
+	});
+
+	// Post-review fix: GIT_LITERAL_PATHSPECS=1 must live exactly once,
+	// unconditionally, inside apply_universal_hardening — never removed,
+	// duplicated, or narrowed into a single GitExecMode's own harden_*
+	// function. Each mutation below targets a different way that guarantee
+	// could silently erode.
+	describe("GIT_LITERAL_PATHSPECS universal-hardening lock", () => {
+		it("fails if GIT_LITERAL_PATHSPECS is removed entirely", () => {
+			const mutated = withMutatedGitRustSource(
+				"src-tauri/src/git/exec.rs",
+				(source) =>
+					source.replace(
+						'    command.env("GIT_LITERAL_PATHSPECS", "1");\n',
+						"",
+					),
+			);
+			expect(validateGitRustBoundary(mutated)).toContain(
+				"exec.rs must set GIT_LITERAL_PATHSPECS=1 exactly once, unconditionally, inside " +
+					"apply_universal_hardening, and build_git_command must call it before " +
+					"dispatching on GitExecMode — never duplicated or narrowed into a single " +
+					"GitExecMode's own harden_* function",
+			);
+		});
+
+		it("fails if GIT_LITERAL_PATHSPECS is narrowed into only harden_write, removed from apply_universal_hardening", () => {
+			const mutated = withMutatedGitRustSource(
+				"src-tauri/src/git/exec.rs",
+				(source) =>
+					source
+						.replace(
+							'fn apply_universal_hardening(command: &mut Command) {\n    command.env("GIT_LITERAL_PATHSPECS", "1");\n}',
+							"fn apply_universal_hardening(command: &mut Command) {}",
+						)
+						.replace(
+							"fn harden_write(command: &mut Command) {",
+							'fn harden_write(command: &mut Command) {\n    command.env("GIT_LITERAL_PATHSPECS", "1");',
+						),
+			);
+			expect(validateGitRustBoundary(mutated)).toContain(
+				"exec.rs must set GIT_LITERAL_PATHSPECS=1 exactly once, unconditionally, inside " +
+					"apply_universal_hardening, and build_git_command must call it before " +
+					"dispatching on GitExecMode — never duplicated or narrowed into a single " +
+					"GitExecMode's own harden_* function",
+			);
+		});
+
+		it("fails if GIT_LITERAL_PATHSPECS is duplicated into harden_write alongside apply_universal_hardening", () => {
+			const mutated = withMutatedGitRustSource(
+				"src-tauri/src/git/exec.rs",
+				(source) =>
+					source.replace(
+						"fn harden_write(command: &mut Command) {",
+						'fn harden_write(command: &mut Command) {\n    command.env("GIT_LITERAL_PATHSPECS", "1");',
+					),
+			);
+			expect(validateGitRustBoundary(mutated)).toContain(
+				"exec.rs must set GIT_LITERAL_PATHSPECS=1 exactly once, unconditionally, inside " +
+					"apply_universal_hardening, and build_git_command must call it before " +
+					"dispatching on GitExecMode — never duplicated or narrowed into a single " +
+					"GitExecMode's own harden_* function",
+			);
+		});
+
+		it("fails if build_git_command's call to apply_universal_hardening is removed", () => {
+			const mutated = withMutatedGitRustSource(
+				"src-tauri/src/git/exec.rs",
+				(source) =>
+					source.replace(
+						"    apply_universal_hardening(&mut command);\n\n    match mode {",
+						"    match mode {",
+					),
+			);
+			expect(validateGitRustBoundary(mutated)).toContain(
+				"exec.rs must set GIT_LITERAL_PATHSPECS=1 exactly once, unconditionally, inside " +
+					"apply_universal_hardening, and build_git_command must call it before " +
+					"dispatching on GitExecMode — never duplicated or narrowed into a single " +
+					"GitExecMode's own harden_* function",
+			);
+		});
+
+		it("fails if build_git_command calls apply_universal_hardening only after the match dispatch", () => {
+			const mutated = withMutatedGitRustSource(
+				"src-tauri/src/git/exec.rs",
+				(source) =>
+					source
+						.replace(
+							"    apply_universal_hardening(&mut command);\n\n    match mode {",
+							"    match mode {",
+						)
+						.replace(
+							"    command.args(args);\n    Ok(command)\n}",
+							"    apply_universal_hardening(&mut command);\n    command.args(args);\n    Ok(command)\n}",
+						),
+			);
+			expect(validateGitRustBoundary(mutated)).toContain(
+				"exec.rs must set GIT_LITERAL_PATHSPECS=1 exactly once, unconditionally, inside " +
+					"apply_universal_hardening, and build_git_command must call it before " +
+					"dispatching on GitExecMode — never duplicated or narrowed into a single " +
+					"GitExecMode's own harden_* function",
+			);
+		});
+	});
+
+	// --- F090 S3: graph (`git::log::log_graph`) + refs (`git::refs`) DTOs ---
+
+	it("fails if GitLogGraphRequest gains an extra field", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"pub struct GitLogGraphRequest {\n    max_count: u32,\n}",
+					"pub struct GitLogGraphRequest {\n    max_count: u32,\n    extra_flag: bool,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitLogGraphRequest/GitGraphNodeWire/GitLogGraphResultWire must expose only their exact audited fields",
+		);
+	});
+
+	it("fails if GitGraphNodeWire loses its parents field", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"    sha: String,\n    parents: Vec<String>,\n    subject: String,\n}",
+					"    sha: String,\n    subject: String,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitLogGraphRequest/GitGraphNodeWire/GitLogGraphResultWire must expose only their exact audited fields",
+		);
+	});
+
+	it("fails if GitRefsListRequest gains a field, no longer remaining an empty struct", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"pub struct GitRefsListRequest {}",
+					"pub struct GitRefsListRequest {\n    max_count: u32,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitRefsListRequest must remain an empty struct",
+		);
+	});
+
+	it("fails if GitRefKindWire loses the RemoteBranch variant", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) => source.replace("    RemoteBranch,\n", ""),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitRefKindWire must expose exactly its three audited Branch/RemoteBranch/Tag variants",
+		);
+	});
+
+	it("fails if GitRefEntryWire's upstream field is renamed", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"    upstream: Option<String>,\n    is_head: bool,\n}",
+					"    tracking_ref: Option<String>,\n    is_head: bool,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"GitRefEntryWire/GitRefsListResultWire must expose only their exact audited fields",
+		);
+	});
+});
+
+describe("Plain F090 S0 git blame hardening args Harness", () => {
+	const gitBlameSource = readFileSync(
+		new URL("../../src-tauri/src/git/blame.rs", import.meta.url),
+		"utf8",
+	);
+	const baselineGitBlameRustSources = Object.freeze([
+		{ relativePath: "src-tauri/src/git/blame.rs", source: gitBlameSource },
+	]);
+
+	function withMutatedGitBlameSource(mutate) {
+		return baselineGitBlameRustSources.map((entry) => ({
+			...entry,
+			source: mutate(entry.source),
+		}));
+	}
+
+	it("passes for the real, unmodified blame.rs file", () => {
+		expect(validateGitBlameHardeningArgs(baselineGitBlameRustSources)).toEqual(
+			[],
+		);
+	});
+
+	it("fails if blame.rs is missing entirely", () => {
+		expect(validateGitBlameHardeningArgs([])).toContain(
+			"git boundary requires blame.rs",
+		);
+	});
+
+	it("fails if -c core.quotePath=false is dropped from GIT_BLAME_BASE_ARGS", () => {
+		const mutated = withMutatedGitBlameSource((source) =>
+			source.replace(
+				'"-c",\n    "core.quotePath=false",\n    "blame",',
+				'"blame",',
+			),
+		);
+		expect(validateGitBlameHardeningArgs(mutated)).toContain(
+			"blame.rs must define GIT_BLAME_BASE_ARGS as exactly the audited blame argument list, " +
+				"with -c core.quotePath=false positioned as a global option before the blame subcommand " +
+				"token (not after it, where -c means something else entirely to git blame)",
+		);
+	});
+
+	it("fails if -c core.quotePath=false is moved after the blame subcommand token (the exact regression this contract exists to catch)", () => {
+		const mutated = withMutatedGitBlameSource((source) =>
+			source.replace(
+				'"-c",\n    "core.quotePath=false",\n    "blame",\n    "--line-porcelain",\n    "--root",',
+				'"blame",\n    "--line-porcelain",\n    "--root",\n    "-c",\n    "core.quotePath=false",',
+			),
+		);
+		expect(validateGitBlameHardeningArgs(mutated)).toContain(
+			"blame.rs must define GIT_BLAME_BASE_ARGS as exactly the audited blame argument list, " +
+				"with -c core.quotePath=false positioned as a global option before the blame subcommand " +
+				"token (not after it, where -c means something else entirely to git blame)",
+		);
+	});
+
+	it("fails if --root is dropped from GIT_BLAME_BASE_ARGS", () => {
+		const mutated = withMutatedGitBlameSource((source) =>
+			source.replace('"--root",\n', ""),
+		);
+		expect(validateGitBlameHardeningArgs(mutated)).toContain(
+			"blame.rs must define GIT_BLAME_BASE_ARGS as exactly the audited blame argument list, " +
+				"with -c core.quotePath=false positioned as a global option before the blame subcommand " +
+				"token (not after it, where -c means something else entirely to git blame)",
+		);
+	});
+
+	it("fails if --line-porcelain is weakened to --porcelain", () => {
+		const mutated = withMutatedGitBlameSource((source) =>
+			source.replace(
+				'"blame",\n    "--line-porcelain",\n    "--root",',
+				'"blame",\n    "--porcelain",\n    "--root",',
+			),
+		);
+		expect(validateGitBlameHardeningArgs(mutated)).toContain(
+			"blame.rs must define GIT_BLAME_BASE_ARGS as exactly the audited blame argument list, " +
+				"with -c core.quotePath=false positioned as a global option before the blame subcommand " +
+				"token (not after it, where -c means something else entirely to git blame)",
+		);
+	});
+
+	it("fails if GIT_BLAME_BASE_ARGS is renamed away entirely", () => {
+		const mutated = withMutatedGitBlameSource((source) =>
+			source.replace(/GIT_BLAME_BASE_ARGS/g, "GIT_BLAME_RENAMED_ARGS"),
+		);
+		expect(validateGitBlameHardeningArgs(mutated)).toContain(
+			"blame.rs must define GIT_BLAME_BASE_ARGS as exactly the audited blame argument list, " +
+				"with -c core.quotePath=false positioned as a global option before the blame subcommand " +
+				"token (not after it, where -c means something else entirely to git blame)",
+		);
+	});
+});
+
+describe("Plain F090 S2 git show-commit first-parent boundary Harness", () => {
+	const gitShowCommitSource = readFileSync(
+		new URL("../../src-tauri/src/git/show_commit.rs", import.meta.url),
+		"utf8",
+	);
+	const baselineGitShowCommitRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/git/show_commit.rs",
+			source: gitShowCommitSource,
+		},
+	]);
+
+	function withMutatedGitShowCommitSource(mutate) {
+		return baselineGitShowCommitRustSources.map((entry) => ({
+			...entry,
+			source: mutate(entry.source),
+		}));
+	}
+
+	it("passes for the real, unmodified show_commit.rs file", () => {
+		expect(
+			validateGitShowCommitFirstParentBoundary(
+				baselineGitShowCommitRustSources,
+			),
+		).toEqual([]);
+	});
+
+	it("fails if show_commit.rs is missing entirely", () => {
+		expect(validateGitShowCommitFirstParentBoundary([])).toContain(
+			"git boundary requires show_commit.rs",
+		);
+	});
+
+	it('fails if a literal "show" subcommand string is smuggled in anywhere in the file', () => {
+		const mutated = withMutatedGitShowCommitSource(
+			(source) => `${source}\nconst UNUSED_SHOW_MARKER: &str = "show";\n`,
+		);
+		expect(validateGitShowCommitFirstParentBoundary(mutated)).toContain(
+			'show_commit.rs must never spawn `git show` (the literal string "show" must not ' +
+				"appear anywhere in its executable source) — see this file's own module doc " +
+				"comment for why a plain two-explicit-revision `git diff` replaces it entirely",
+		);
+	});
+
+	it("fails if verify_commit_exists is called after resolve_first_parent instead of before (the exact regression this contract exists to catch)", () => {
+		const mutated = withMutatedGitShowCommitSource((source) =>
+			source.replace(
+				"    verify_commit_exists(&repo_dir, sha).await?;\n    let parent_sha = resolve_first_parent(&repo_dir, sha).await?;\n",
+				"    let parent_sha = resolve_first_parent(&repo_dir, sha).await?;\n    verify_commit_exists(&repo_dir, sha).await?;\n",
+			),
+		);
+		expect(validateGitShowCommitFirstParentBoundary(mutated)).toContain(
+			"show_commit's own function body must call verify_commit_exists strictly before " +
+				"resolve_first_parent — neither %P nor --parents output alone can distinguish a " +
+				"non-existent/non-commit object from a genuine root commit",
+		);
+	});
+
+	it("fails if verify_commit_exists is removed from show_commit entirely", () => {
+		const mutated = withMutatedGitShowCommitSource((source) =>
+			source.replace("    verify_commit_exists(&repo_dir, sha).await?;\n", ""),
+		);
+		expect(validateGitShowCommitFirstParentBoundary(mutated)).toContain(
+			"show_commit's own function body must call verify_commit_exists strictly before " +
+				"resolve_first_parent — neither %P nor --parents output alone can distinguish a " +
+				"non-existent/non-commit object from a genuine root commit",
+		);
+	});
+
+	it("fails if base_revision is built from a bare sha instead of parent_sha.as_deref().unwrap_or(EMPTY_TREE_SHA)", () => {
+		const mutated = withMutatedGitShowCommitSource((source) =>
+			source.replace(
+				"let base_revision: &str = parent_sha.as_deref().unwrap_or(EMPTY_TREE_SHA);",
+				"let base_revision: &str = sha;",
+			),
+		);
+		expect(validateGitShowCommitFirstParentBoundary(mutated)).toContain(
+			"show_commit's own base_revision must be built from parent_sha.as_deref().unwrap_or(EMPTY_TREE_SHA) " +
+				"— never a bare sha positional or a sha^-style revspec suffix",
+		);
+	});
+
+	it("fails if show_commit is renamed away, losing the function this contract inspects", () => {
+		const mutated = withMutatedGitShowCommitSource((source) =>
+			source.replace(
+				"pub(crate) async fn show_commit(",
+				"pub(crate) async fn show_commit_renamed(",
+			),
+		);
+		expect(validateGitShowCommitFirstParentBoundary(mutated)).toContain(
+			"show_commit.rs must define a show_commit function",
+		);
+	});
+});
+
+describe("Plain F090 S3 git log-graph format-string boundary Harness", () => {
+	const gitLogSourceForGraphBoundary = readFileSync(
+		new URL("../../src-tauri/src/git/log.rs", import.meta.url),
+		"utf8",
+	);
+	const baselineGitLogGraphRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/git/log.rs",
+			source: gitLogSourceForGraphBoundary,
+		},
+	]);
+
+	function withMutatedGitLogGraphSource(mutate) {
+		return baselineGitLogGraphRustSources.map((entry) => ({
+			...entry,
+			source: mutate(entry.source),
+		}));
+	}
+
+	it("passes for the real, unmodified log.rs file", () => {
+		expect(
+			validateGitLogGraphFormatStringBoundary(baselineGitLogGraphRustSources),
+		).toEqual([]);
+	});
+
+	it("fails if log.rs is missing entirely", () => {
+		expect(validateGitLogGraphFormatStringBoundary([])).toContain(
+			"git boundary requires log.rs",
+		);
+	});
+
+	it("fails if GIT_LOG_GRAPH_ARGS drops --topo-order", () => {
+		const mutated = withMutatedGitLogGraphSource((source) =>
+			source.replace('"--topo-order",\n    "--branches"', '"--branches"'),
+		);
+		expect(validateGitLogGraphFormatStringBoundary(mutated)).toContain(
+			"log.rs must define GIT_LOG_GRAPH_ARGS as exactly the audited graph format string — " +
+				"%s (the one attacker-controlled free-text field) must be positioned strictly last, " +
+				"after the two fixed-shape, git-computed %H/%P fields, and the ref-namespace scope " +
+				"must remain --branches --tags --remotes (never --all, which also walks refs/stash)",
+		);
+	});
+
+	it("fails if GIT_LOG_GRAPH_ARGS's format string moves %s before %P (the exact field-shift regression this contract exists to catch)", () => {
+		const mutated = withMutatedGitLogGraphSource((source) =>
+			source.replace('"--format=%H%x1f%P%x1f%s"', '"--format=%H%x1f%s%x1f%P"'),
+		);
+		expect(validateGitLogGraphFormatStringBoundary(mutated)).toContain(
+			"log.rs must define GIT_LOG_GRAPH_ARGS as exactly the audited graph format string — " +
+				"%s (the one attacker-controlled free-text field) must be positioned strictly last, " +
+				"after the two fixed-shape, git-computed %H/%P fields, and the ref-namespace scope " +
+				"must remain --branches --tags --remotes (never --all, which also walks refs/stash)",
+		);
+	});
+
+	it("fails if GIT_LOG_GRAPH_ARGS switches from --branches --tags --remotes to --all", () => {
+		const mutated = withMutatedGitLogGraphSource((source) =>
+			source.replace(
+				'"--branches",\n    "--tags",\n    "--remotes",',
+				'"--all",',
+			),
+		);
+		expect(validateGitLogGraphFormatStringBoundary(mutated)).toContain(
+			"log.rs must define GIT_LOG_GRAPH_ARGS as exactly the audited graph format string — " +
+				"%s (the one attacker-controlled free-text field) must be positioned strictly last, " +
+				"after the two fixed-shape, git-computed %H/%P fields, and the ref-namespace scope " +
+				"must remain --branches --tags --remotes (never --all, which also walks refs/stash)",
+		);
+	});
+
+	it("fails if parse_graph_entries's bounded splitn(3, ...) is widened to an unbounded split (the exact regression this contract exists to catch)", () => {
+		const mutated = withMutatedGitLogGraphSource((source) =>
+			source.replace(
+				"let mut parts = record.splitn(3, |&byte| byte == 0x1f);",
+				"let mut parts = record.split(|&byte| byte == 0x1f);",
+			),
+		);
+		expect(validateGitLogGraphFormatStringBoundary(mutated)).toContain(
+			"parse_graph_entries must split each record with a bounded splitn(3, ...) — leaving " +
+				"the subject field's own further bytes (including an attacker-embedded 0x1f) " +
+				"untouched — never an unbounded split",
+		);
+		// Control: this same mutated source now also trips the *second* guard
+		// (the exact naive-full-split shape this contract independently bans),
+		// proving both checks are real and not merely mutually redundant phrasing.
+		expect(validateGitLogGraphFormatStringBoundary(mutated)).toContain(
+			"parse_graph_entries must never fall back to an unbounded split on 0x1f anywhere in " +
+				"its own body — this is exactly the field-shift vulnerability this command's format " +
+				"string is designed to avoid",
+		);
+	});
+
+	it("fails if parse_graph_entries is renamed away, losing the function this contract inspects", () => {
+		const mutated = withMutatedGitLogGraphSource((source) =>
+			source.replace(
+				"fn parse_graph_entries(",
+				"fn parse_graph_entries_renamed(",
+			),
+		);
+		expect(validateGitLogGraphFormatStringBoundary(mutated)).toContain(
+			"log.rs must define a parse_graph_entries function",
+		);
+	});
+});
+
+describe("Plain F090 S3 git refs field-safety boundary Harness", () => {
+	const gitRefsSourceForFieldSafetyBoundary = readFileSync(
+		new URL("../../src-tauri/src/git/refs.rs", import.meta.url),
+		"utf8",
+	);
+	const baselineGitRefsRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/git/refs.rs",
+			source: gitRefsSourceForFieldSafetyBoundary,
+		},
+	]);
+
+	function withMutatedGitRefsSource(mutate) {
+		return baselineGitRefsRustSources.map((entry) => ({
+			...entry,
+			source: mutate(entry.source),
+		}));
+	}
+
+	it("passes for the real, unmodified refs.rs file", () => {
+		expect(
+			validateGitRefsFieldSafetyBoundary(baselineGitRefsRustSources),
+		).toEqual([]);
+	});
+
+	it("fails if refs.rs is missing entirely", () => {
+		expect(validateGitRefsFieldSafetyBoundary([])).toContain(
+			"git boundary requires refs.rs",
+		);
+	});
+
+	it("fails if GIT_FOR_EACH_REF_ARGS drops refs/remotes from its scope", () => {
+		const mutated = withMutatedGitRefsSource((source) =>
+			source.replace('\n    "refs/remotes",', ""),
+		);
+		expect(validateGitRefsFieldSafetyBoundary(mutated)).toContain(
+			"refs.rs must define GIT_FOR_EACH_REF_ARGS as exactly the audited six-field " +
+				"for-each-ref format string, scoped to refs/heads, refs/tags and refs/remotes only " +
+				"(never --all, which also walks refs/stash)",
+		);
+	});
+
+	it("fails if parse_refs's plain NUL split is narrowed to a bounded splitn (the exact regression this contract exists to catch, mirror image of the log_graph one)", () => {
+		const mutated = withMutatedGitRefsSource((source) =>
+			source.replace(
+				"let fields: Vec<&[u8]> = line.split(|&byte| byte == 0u8).collect();",
+				"let fields: Vec<&[u8]> = line.splitn(6, |&byte| byte == 0u8).collect();",
+			),
+		);
+		expect(validateGitRefsFieldSafetyBoundary(mutated)).toContain(
+			"parse_refs must never use a bounded splitn anywhere in its own body — doing so would " +
+				"misleadingly suggest this command's fields carry the same attacker-controlled-" +
+				"content risk log/blame's own format strings do, which this module's own doc " +
+				"comment establishes they structurally do not",
+		);
+	});
+
+	it("fails if parse_refs stops splitting on a plain NUL byte entirely", () => {
+		const mutated = withMutatedGitRefsSource((source) =>
+			source.replace(
+				"let fields: Vec<&[u8]> = line.split(|&byte| byte == 0u8).collect();",
+				"let fields: Vec<&[u8]> = line.split(|&byte| byte == b' ').collect();",
+			),
+		);
+		expect(validateGitRefsFieldSafetyBoundary(mutated)).toContain(
+			"parse_refs must split each record's fields on a plain, unbounded NUL split — every " +
+				"field here is structurally NUL-free by git's own ref-name grammar (see refs.rs's " +
+				"own module doc comment), so no single-absorbing-field workaround is needed",
+		);
+	});
+
+	it("fails if parse_refs is renamed away, losing the function this contract inspects", () => {
+		const mutated = withMutatedGitRefsSource((source) =>
+			source.replace("fn parse_refs(", "fn parse_refs_renamed("),
+		);
+		expect(validateGitRefsFieldSafetyBoundary(mutated)).toContain(
+			"refs.rs must define a parse_refs function",
+		);
+	});
+});
+
+describe("Plain F080 S1 git IPC bridge Harness", () => {
+	const gitCommandsSourceForBridge = readFileSync(
+		new URL("../../src-tauri/src/git/commands.rs", import.meta.url),
+		"utf8",
+	);
+	const gitDtoSourceForBridge = readFileSync(
+		new URL("../../src-tauri/src/git/dto.rs", import.meta.url),
+		"utf8",
+	);
+	const contractsSourceForGit = readFileSync(
+		new URL("../../app/platform/tauri/contracts.ts", import.meta.url),
+		"utf8",
+	);
+	const gitCodecSource = readFileSync(
+		new URL("../../app/platform/tauri/git-codec.ts", import.meta.url),
+		"utf8",
+	);
+	const nativeSourceForGit = readFileSync(
+		new URL("../../app/platform/tauri/native.ts", import.meta.url),
+		"utf8",
+	);
+
+	const baselineGitBridgeRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/git/commands.rs",
+			source: gitCommandsSourceForBridge,
+		},
+		{ relativePath: "src-tauri/src/git/dto.rs", source: gitDtoSourceForBridge },
+	]);
+	const baselineGitBridgeAppSources = Object.freeze([
+		{
+			relativePath: "app/platform/tauri/contracts.ts",
+			source: contractsSourceForGit,
+		},
+		{ relativePath: "app/platform/tauri/git-codec.ts", source: gitCodecSource },
+		{
+			relativePath: "app/platform/tauri/native.ts",
+			source: nativeSourceForGit,
+		},
+	]);
+
+	function withMutatedGitApp(relativePath, mutate) {
+		return baselineGitBridgeAppSources.map((entry) =>
+			entry.relativePath === relativePath
+				? { ...entry, source: mutate(entry.source) }
+				: entry,
+		);
+	}
+
+	it("passes for the real, unmodified git bridge files", () => {
+		expect(
+			validateGitIpcBridgeBoundary(
+				baselineGitBridgeRustSources,
+				baselineGitBridgeAppSources,
+			),
+		).toEqual([]);
+	});
+
+	it("fails if PlainBridge loses gitShowBlob", () => {
+		const widened = withMutatedGitApp(
+			"app/platform/tauri/contracts.ts",
+			(source) =>
+				source.replace(
+					/\tgitShowBlob\(rev: GitBlobRev, path: string\): Promise<GitShowBlobResult>;\n/,
+					"",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
+		).toContain(
+			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
+		);
+	});
+
+	it("fails if git-codec.ts's decodeGitStatusResult stops rejecting Proxy wrapping", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/git-codec.ts",
+			(source) =>
+				source.replace(
+					/export function decodeGitStatusResult\(value: unknown\): GitStatusResult \{\n\treturn sanitizedDecode\(\(\) => \{[\s\S]*?\n\t\}\);\n\}/,
+					"export function decodeGitStatusResult(value) { return value; }",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"git-codec.ts's decodeGitStatusResult must validate exact own-data keys, reject Proxy wrapping, and freeze its result",
+		);
+	});
+
+	it("fails if native.ts stops decoding git_diff_files through the audited decoder", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					"decodeGitDiffFilesResult(",
+					"JSON.parse(JSON.stringify(",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"native.ts must invoke git_status/git_diff_files/git_show_blob exactly once each, decoded through the audited decoders",
+		);
+	});
+
+	it("fails if native.ts invokes git_status a second time", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					'await invoke<unknown>("git_status", { request: {} })',
+					'await invoke<unknown>("git_status", { request: {} }); await invoke<unknown>("git_status", { request: {} })',
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"native.ts must invoke git_status/git_diff_files/git_show_blob exactly once each, decoded through the audited decoders",
+		);
+	});
+
+	it("fails if PlainBridge loses gitCommit", () => {
+		const widened = withMutatedGitApp(
+			"app/platform/tauri/contracts.ts",
+			(source) =>
+				source.replace(
+					"\tgitCommit(message: string, amend: boolean): Promise<void>;\n",
+					"",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
+		).toContain(
+			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
+		);
+	});
+
+	it("fails if native.ts invokes git_discard_paths a second time", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					'decodeGitVoid(await invoke<unknown>("git_discard_paths", { request }));',
+					'decodeGitVoid(await invoke<unknown>("git_discard_paths", { request })); decodeGitVoid(await invoke<unknown>("git_discard_paths", { request }));',
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"native.ts must invoke git_discard_paths exactly once, routed through frozenGitDiscardPathsRequest",
+		);
+	});
+
+	it("fails if native.ts stops routing git_stage_blob through frozenGitStageBlobRequest", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					"const request = frozenGitStageBlobRequest(path, content);",
+					"const request = { path, content: Array.from(content) };",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"native.ts must invoke git_stage_blob exactly once, routed through frozenGitStageBlobRequest",
+		);
+	});
+
+	it("fails if native.ts stops decoding a git write command's response through decodeGitVoid", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replaceAll("decodeGitVoid(", "JSON.parse(JSON.stringify("),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"native.ts must decode every F080 S3/S4 git void-returning command's response through decodeGitVoid",
+		);
+	});
+
+	it("fails if PlainBridge loses gitNetworkPreview", () => {
+		const widened = withMutatedGitApp(
+			"app/platform/tauri/contracts.ts",
+			(source) =>
+				source.replace(
+					/\tgitNetworkPreview\(\n\t\toperation: GitNetworkOperation,\n\t\): Promise<GitNetworkPreviewResult>;\n/,
+					"",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
+		).toContain(
+			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
+		);
+	});
+
+	it("fails if PlainBridge loses gitPush", () => {
+		const widened = withMutatedGitApp(
+			"app/platform/tauri/contracts.ts",
+			(source) =>
+				source.replace("\tgitPush(force: boolean): Promise<void>;\n", ""),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
+		).toContain(
+			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
+		);
+	});
+
+	it("fails if git-codec.ts's decodeGitNetworkPreviewResult stops freezing its result", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/git-codec.ts",
+			(source) =>
+				source.replace(
+					/export function decodeGitNetworkPreviewResult\(\n\tvalue: unknown,\n\): GitNetworkPreviewResult \{\n\treturn sanitizedDecode\(\(\) => \{[\s\S]*?\n\t\}\);\n\}/,
+					"export function decodeGitNetworkPreviewResult(value) { return value; }",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"git-codec.ts's decodeGitNetworkPreviewResult must validate exact own-data keys, reject Proxy wrapping, and freeze its result",
+		);
+	});
+
+	it("fails if native.ts stops routing git_network_preview through its audited builder/decoder", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					"const request = frozenGitNetworkPreviewRequest(operation);",
+					"const request = { operation };",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"native.ts must invoke git_network_preview exactly once, routed through frozenGitNetworkPreviewRequest and decoded through decodeGitNetworkPreviewResult",
+		);
+	});
+
+	it("fails if native.ts invokes git_fetch a second time", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					'decodeGitVoid(await invoke<unknown>("git_fetch", { request: {} }));',
+					'decodeGitVoid(await invoke<unknown>("git_fetch", { request: {} })); decodeGitVoid(await invoke<unknown>("git_fetch", { request: {} }));',
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain("native.ts must invoke git_fetch exactly once");
+	});
+
+	it("fails if native.ts stops routing git_push through frozenGitPushRequest", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					"const request = frozenGitPushRequest(force);",
+					"const request = { force };",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"native.ts must invoke git_push exactly once, routed through frozenGitPushRequest",
+		);
+	});
+
+	it("fails if PlainBridge loses gitLogGraph", () => {
+		const widened = withMutatedGitApp(
+			"app/platform/tauri/contracts.ts",
+			(source) =>
+				source.replace(
+					"\tgitLogGraph(maxCount: number): Promise<GitLogGraphResult>;\n",
+					"",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
+		).toContain(
+			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
+		);
+	});
+
+	it("fails if PlainBridge loses gitRefsList", () => {
+		const widened = withMutatedGitApp(
+			"app/platform/tauri/contracts.ts",
+			(source) =>
+				source.replace("\tgitRefsList(): Promise<GitRefsListResult>;\n", ""),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
+		).toContain(
+			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
+		);
+	});
+
+	it("fails if native.ts stops routing git_log_graph through its audited builder/decoder", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					"const request = frozenGitLogGraphRequest(maxCount);",
+					"const request = { maxCount };",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"native.ts must invoke git_log_graph exactly once, routed through frozenGitLogGraphRequest and decoded through decodeGitLogGraphResult",
+		);
+	});
+
+	it("fails if native.ts invokes git_refs_list a second time", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					'await invoke<unknown>("git_refs_list", { request: {} })',
+					'await invoke<unknown>("git_refs_list", { request: {} }); await invoke<unknown>("git_refs_list", { request: {} })',
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"native.ts must invoke git_refs_list exactly once, decoded through decodeGitRefsListResult",
+		);
+	});
+
+	it("fails if git-codec.ts's decodeGitRefsListResult stops rejecting Proxy wrapping", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/git-codec.ts",
+			(source) =>
+				source.replace(
+					/export function decodeGitRefsListResult\(value: unknown\): GitRefsListResult \{\n\treturn sanitizedDecode\(\(\) => \{[\s\S]*?\n\t\}\);\n\}/,
+					"export function decodeGitRefsListResult(value) { return value; }",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"git-codec.ts's decodeGitRefsListResult must validate exact own-data keys, reject Proxy wrapping, and freeze its result",
+		);
+	});
+});
+
+const gitDiscardAppPaths = [
+	"app/platform/tauri/contracts.ts",
+	"app/platform/tauri/native.ts",
+	"app/platform/tauri/browser-mock.ts",
+	"app/features/scm/plain-scm-view.ts",
+	"app/features/scm/plain-scm-discard.ts",
+];
+const gitDiscardAppSources = gitDiscardAppPaths.map((relativePath) => ({
+	relativePath,
+	source: readFileSync(
+		new URL(`../../${relativePath}`, import.meta.url),
+		"utf8",
+	),
+}));
+
+function replaceGitDiscardAppSource(relativePath, from, to) {
+	return mutateWorkspaceSource(gitDiscardAppSources, relativePath, (source) => {
+		if (!source.includes(from)) {
+			throw new Error(
+				`${relativePath} git discard mutation fixture no longer matches production`,
+			);
+		}
+		return source.replace(from, to);
+	});
+}
+
+describe("Plain F080 S3 git discard confirmation boundary Harness", () => {
+	it("accepts the production single confirmed discardResources route", () => {
+		expect(
+			validateGitDiscardConfirmationBoundary(gitDiscardAppSources),
+		).toEqual([]);
+	});
+
+	it("requires every audited file to be present", () => {
+		expect(validateGitDiscardConfirmationBoundary([])).toContain(
+			"git discard confirmation boundary requires app/features/scm/plain-scm-view.ts",
+		);
+	});
+
+	it("rejects a second gitDiscardPaths call site anywhere else in app/", () => {
+		const relativePath = "app/features/scm/plain-scm-discard-bypass.ts";
+		const hostile = [
+			...gitDiscardAppSources,
+			{
+				relativePath,
+				source: `import type { PlainBridge } from "../../platform/tauri/contracts";
+export async function bypassDiscard(bridge: PlainBridge): Promise<void> {
+	await bridge.gitDiscardPaths(["README.md"]);
+}`,
+			},
+		];
+		expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
+			`${relativePath} must not consume gitDiscardPaths outside PlainScmView.discardResources's single audited call site`,
+		);
+	});
+
+	it("rejects a second call site inside plain-scm-view.ts outside discardResources", () => {
+		const hostile = replaceGitDiscardAppSource(
+			"app/features/scm/plain-scm-view.ts",
+			"private async discardAllWorkingTree(): Promise<void> {\n\t\tawait this.discardResources(this.#discardableWorkingTreePaths(false));\n\t}",
+			`private async discardAllWorkingTree(): Promise<void> {
+		await this.discardResources(this.#discardableWorkingTreePaths(false));
+	}
+
+	private async bypassDiscard(bridge: PlainBridge, relativePaths: readonly string[]): Promise<void> {
+		await bridge.gitDiscardPaths(relativePaths);
+	}`,
+		);
+		expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
+			"app/features/scm/plain-scm-view.ts must not consume gitDiscardPaths outside PlainScmView.discardResources's single audited call site",
+		);
+	});
+
+	it("rejects a duplicated gitDiscardPaths call inside discardResources itself", () => {
+		const hostile = replaceGitDiscardAppSource(
+			"app/features/scm/plain-scm-view.ts",
+			`await this.runGitMutation((bridge) =>
+			bridge.gitDiscardPaths(relativePaths),
+		);`,
+			`await this.runGitMutation((bridge) =>
+			bridge.gitDiscardPaths(relativePaths),
+		);
+		await this.runGitMutation((bridge) =>
+			bridge.gitDiscardPaths(relativePaths),
+		);`,
+		);
+		expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
+			"gitDiscardPaths must have exactly one production call site, inside PlainScmView.discardResources",
+		);
+	});
+
+	it("rejects computed/bracket access to gitDiscardPaths", () => {
+		const hostile = replaceGitDiscardAppSource(
+			"app/features/scm/plain-scm-view.ts",
+			"bridge.gitDiscardPaths(relativePaths)",
+			'bridge["gitDiscardPaths"](relativePaths)',
+		);
+		expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
+			"app/features/scm/plain-scm-view.ts must not consume gitDiscardPaths outside PlainScmView.discardResources's single audited call site",
+		);
+	});
+
+	it("rejects a missing or renamed gitDiscardPaths bridge declaration", () => {
+		const hostile = replaceGitDiscardAppSource(
+			"app/platform/tauri/native.ts",
+			"gitDiscardPaths: async (paths) => {",
+			"gitDiscardPathsRenamed: async (paths) => {",
+		);
+		expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
+			"app/platform/tauri/native.ts must declare gitDiscardPaths exactly once in its audited bridge surface",
+		);
+	});
+
+	it("rejects a duplicated gitDiscardPaths bridge declaration", () => {
+		const hostile = mutateWorkspaceSource(
+			gitDiscardAppSources,
+			"app/platform/tauri/browser-mock.ts",
+			(source) =>
+				`${source}\nconst duplicateGitDiscardMock = { async gitDiscardPaths(paths) { return; } };`,
+		);
+		expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
+			"app/platform/tauri/browser-mock.ts must declare gitDiscardPaths exactly once in its audited bridge surface",
+		);
+	});
+
+	it("rejects any shape of discardResources that does not await, check, then call in that exact order", () => {
+		const cases = [
+			[
+				'if (decision.kind !== "confirmed") {',
+				'if (decision.kind === "confirmed") {',
+			],
+			[
+				`const decision = await resolveDiscardConfirmation(
+			this.dialogService,
+			relativePaths,
+		);
+		if (decision.kind !== "confirmed") {
+			return;
+		}
+		await this.runGitMutation((bridge) =>
+			bridge.gitDiscardPaths(relativePaths),
+		);`,
+				`await this.runGitMutation((bridge) =>
+			bridge.gitDiscardPaths(relativePaths),
+		);
+		const decision = await resolveDiscardConfirmation(
+			this.dialogService,
+			relativePaths,
+		);
+		if (decision.kind !== "confirmed") {
+			return;
+		}`,
+			],
+		];
+		const failure =
+			'PlainScmView.discardResources must await resolveDiscardConfirmation, return unless its result is exactly "confirmed", and only then call bridge.gitDiscardPaths — no other shape may reach the discard bridge call';
+		for (const [from, to] of cases) {
+			const hostile = replaceGitDiscardAppSource(
+				"app/features/scm/plain-scm-view.ts",
+				from,
+				to,
+			);
+			expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
+				failure,
+			);
+		}
+	});
+
+	it("rejects plain-scm-discard.ts importing anything at all", () => {
+		const hostile = mutateWorkspaceSource(
+			gitDiscardAppSources,
+			"app/features/scm/plain-scm-discard.ts",
+			(source) => `import { invoke } from "@tauri-apps/api/core";\n${source}`,
+		);
+		expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
+			"plain-scm-discard.ts must not import anything — it only ever decides whether the caller may discard, and an import is the only way it could ever reach a bridge or service to perform the discard itself",
+		);
+	});
+
+	it("rejects a new top-level declaration added to plain-scm-discard.ts", () => {
+		const hostile = mutateWorkspaceSource(
+			gitDiscardAppSources,
+			"app/features/scm/plain-scm-discard.ts",
+			(source) => `${source}\nexport function leakedHelper(): void {}`,
+		);
+		expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
+			"plain-scm-discard.ts must retain its exact audited top-level surface — no new declaration can quietly add a way for this decide-only module to reach a bridge",
+		);
+	});
+
+	it("rejects resolveDiscardConfirmation skipping the dialog for a non-empty path list", () => {
+		const hostile = replaceGitDiscardAppSource(
+			"app/features/scm/plain-scm-discard.ts",
+			"if (relativePaths.length === 0) {",
+			"if (relativePaths.length === 0 || relativePaths.length < 5) {",
+		);
+		expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
+			"resolveDiscardConfirmation must, for a non-empty path list, unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited no-op/confirm/decline shape",
+		);
+	});
+
+	it("rejects resolveDiscardConfirmation calling a bridge method itself", () => {
+		const hostile = replaceGitDiscardAppSource(
+			"app/features/scm/plain-scm-discard.ts",
+			`export async function resolveDiscardConfirmation(
+	dialogService: DiscardConfirmDialogService,
+	relativePaths: readonly string[],
+): Promise<DiscardDecision> {
+	if (relativePaths.length === 0) {`,
+			`export async function resolveDiscardConfirmation(
+	dialogService: DiscardConfirmDialogService,
+	relativePaths: readonly string[],
+	bridge: { gitDiscardPaths(paths: readonly string[]): Promise<void> },
+): Promise<DiscardDecision> {
+	await bridge.gitDiscardPaths(relativePaths);
+	if (relativePaths.length === 0) {`,
+		);
+		expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
+			"resolveDiscardConfirmation must, for a non-empty path list, unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited no-op/confirm/decline shape",
+		);
+	});
+});
+
+const gitNetworkAppPaths = [
+	"app/platform/tauri/contracts.ts",
+	"app/platform/tauri/native.ts",
+	"app/platform/tauri/browser-mock.ts",
+	"app/features/scm/plain-scm-view.ts",
+	"app/features/scm/plain-scm-network.ts",
+];
+const gitNetworkAppSources = gitNetworkAppPaths.map((relativePath) => ({
+	relativePath,
+	source: readFileSync(
+		new URL(`../../${relativePath}`, import.meta.url),
+		"utf8",
+	),
+}));
+
+function replaceGitNetworkAppSource(relativePath, from, to) {
+	return mutateWorkspaceSource(gitNetworkAppSources, relativePath, (source) => {
+		if (!source.includes(from)) {
+			throw new Error(
+				`${relativePath} git network mutation fixture no longer matches production`,
+			);
+		}
+		return source.replace(from, to);
+	});
+}
+
+describe("Plain F080 S4 git network confirmation boundary Harness", () => {
+	it("accepts the production single confirmed fetch/pull/push routes", () => {
+		expect(
+			validateGitNetworkConfirmationBoundary(gitNetworkAppSources),
+		).toEqual([]);
+	});
+
+	it("requires every audited file to be present", () => {
+		expect(validateGitNetworkConfirmationBoundary([])).toContain(
+			"git network confirmation boundary requires app/features/scm/plain-scm-network.ts",
+		);
+	});
+
+	it("rejects a second gitFetch call site anywhere else in app/", () => {
+		const relativePath = "app/features/scm/plain-scm-network-bypass.ts";
+		const hostile = [
+			...gitNetworkAppSources,
+			{
+				relativePath,
+				source: `import type { PlainBridge } from "../../platform/tauri/contracts";
+export async function bypassFetch(bridge: PlainBridge): Promise<void> {
+	await bridge.gitFetch();
+}`,
+			},
+		];
+		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
+			`${relativePath} must not consume gitFetch outside PlainScmView.fetchFromRemote's single audited call site`,
+		);
+	});
+
+	it("rejects a second gitPush call site inside plain-scm-view.ts outside pushToRemote", () => {
+		const hostile = replaceGitNetworkAppSource(
+			"app/features/scm/plain-scm-view.ts",
+			"private async commitChanges(): Promise<void> {",
+			`private async bypassPush(bridge: PlainBridge): Promise<void> {
+		await bridge.gitPush(false);
+	}
+
+	private async commitChanges(): Promise<void> {`,
+		);
+		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
+			"app/features/scm/plain-scm-view.ts must not consume gitPush outside PlainScmView.pushToRemote's single audited call site",
+		);
+	});
+
+	it("rejects a duplicated gitPull call inside pullFromRemote itself", () => {
+		const hostile = replaceGitNetworkAppSource(
+			"app/features/scm/plain-scm-view.ts",
+			"await this.runNetworkMutation((bridge) => bridge.gitPull());",
+			`await this.runNetworkMutation((bridge) => bridge.gitPull());
+		await this.runNetworkMutation((bridge) => bridge.gitPull());`,
+		);
+		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
+			"gitPull must have exactly one production call site, inside PlainScmView.pullFromRemote",
+		);
+	});
+
+	it("rejects computed/bracket access to gitFetch", () => {
+		const hostile = replaceGitNetworkAppSource(
+			"app/features/scm/plain-scm-view.ts",
+			"bridge.gitFetch()",
+			'bridge["gitFetch"]()',
+		);
+		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
+			"app/features/scm/plain-scm-view.ts must not consume gitFetch outside PlainScmView.fetchFromRemote's single audited call site",
+		);
+	});
+
+	it("rejects a missing or renamed gitPush bridge declaration", () => {
+		const hostile = replaceGitNetworkAppSource(
+			"app/platform/tauri/native.ts",
+			"gitPush: async (force) => {",
+			"gitPushRenamed: async (force) => {",
+		);
+		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
+			"app/platform/tauri/native.ts must declare gitPush exactly once in its audited bridge surface",
+		);
+	});
+
+	it("rejects a duplicated gitFetch bridge declaration", () => {
+		const hostile = mutateWorkspaceSource(
+			gitNetworkAppSources,
+			"app/platform/tauri/browser-mock.ts",
+			(source) =>
+				`${source}\nconst duplicateGitFetchMock = { async gitFetch() { return; } };`,
+		);
+		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
+			"app/platform/tauri/browser-mock.ts must declare gitFetch exactly once in its audited bridge surface",
+		);
+	});
+
+	it("rejects any shape of fetchFromRemote that does not preview, check, confirm, check, then call in that exact order", () => {
+		const hostile = replaceGitNetworkAppSource(
+			"app/features/scm/plain-scm-view.ts",
+			'if (decision.kind !== "confirmed") {\n\t\t\treturn;\n\t\t}\n\t\tawait this.runNetworkMutation((bridge) => bridge.gitFetch());',
+			'if (decision.kind === "confirmed") {\n\t\t\treturn;\n\t\t}\n\t\tawait this.runNetworkMutation((bridge) => bridge.gitFetch());',
+		);
+		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
+			"PlainScmView.fetchFromRemote must match its exact audited preview-then-confirm-then-call shape — no other shape may reach the network bridge call",
+		);
+	});
+
+	it("rejects pushToRemote skipping the force-checkbox read", () => {
+		const hostile = replaceGitNetworkAppSource(
+			"app/features/scm/plain-scm-view.ts",
+			"const force = this.#forcePushCheckbox?.checked ?? false;",
+			"const force = false;",
+		);
+		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
+			"PlainScmView.pushToRemote must match its exact audited preview-then-confirm-then-call shape — no other shape may reach the network bridge call",
+		);
+	});
+
+	it("rejects plain-scm-network.ts importing anything at all", () => {
+		const hostile = mutateWorkspaceSource(
+			gitNetworkAppSources,
+			"app/features/scm/plain-scm-network.ts",
+			(source) => `import { invoke } from "@tauri-apps/api/core";\n${source}`,
+		);
+		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
+			"plain-scm-network.ts must not import anything — it only ever decides whether the caller may fetch/pull/push, and an import is the only way it could ever reach a bridge or service to perform the network write itself",
+		);
+	});
+
+	it("rejects a new top-level declaration added to plain-scm-network.ts", () => {
+		const hostile = mutateWorkspaceSource(
+			gitNetworkAppSources,
+			"app/features/scm/plain-scm-network.ts",
+			(source) => `${source}\nexport function leakedHelper(): void {}`,
+		);
+		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
+			"plain-scm-network.ts must retain its exact audited top-level surface — no new declaration can quietly add a way for this decide-only module to reach a bridge",
+		);
+	});
+
+	it("rejects resolveNetworkConfirmation calling a bridge method itself", () => {
+		const hostile = replaceGitNetworkAppSource(
+			"app/features/scm/plain-scm-network.ts",
+			`export async function resolveNetworkConfirmation(
+	dialogService: NetworkConfirmDialogService,
+	request: NetworkConfirmationRequest,
+): Promise<NetworkConfirmDecision> {
+	const confirmation = await dialogService.confirm({`,
+			`export async function resolveNetworkConfirmation(
+	dialogService: NetworkConfirmDialogService,
+	request: NetworkConfirmationRequest,
+	bridge: { gitFetch(): Promise<void> },
+): Promise<NetworkConfirmDecision> {
+	await bridge.gitFetch();
+	const confirmation = await dialogService.confirm({`,
+		);
+		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
+			"resolveNetworkConfirmation must unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited shape",
+		);
+	});
+});
+
+describe("Plain F090 S4 git stash message field-safety boundary Harness", () => {
+	const gitStashSourceForFieldSafety = readFileSync(
+		new URL("../../src-tauri/src/git/stash.rs", import.meta.url),
+		"utf8",
+	);
+	const baselineGitStashFieldSafetyRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/git/stash.rs",
+			source: gitStashSourceForFieldSafety,
+		},
+	]);
+
+	function withMutatedGitStashSource(mutate) {
+		return baselineGitStashFieldSafetyRustSources.map((entry) => ({
+			...entry,
+			source: mutate(entry.source),
+		}));
+	}
+
+	it("passes for the real, unmodified stash.rs file", () => {
+		expect(
+			validateGitStashMessageFieldSafetyBoundary(
+				baselineGitStashFieldSafetyRustSources,
+			),
+		).toEqual([]);
+	});
+
+	it("fails if stash.rs is missing entirely", () => {
+		expect(validateGitStashMessageFieldSafetyBoundary([])).toContain(
+			"git boundary requires stash.rs",
+		);
+	});
+
+	it("fails if GIT_STASH_LIST_ARGS drops -z", () => {
+		const mutated = withMutatedGitStashSource((source) =>
+			source.replace(
+				'&["stash", "list", "-z", "--format=%gd%x1f%H%x1f%ct%x1f%B"]',
+				'&["stash", "list", "--format=%gd%x1f%H%x1f%ct%x1f%B"]',
+			),
+		);
+		expect(validateGitStashMessageFieldSafetyBoundary(mutated)).toContain(
+			"stash.rs must define GIT_STASH_LIST_ARGS as exactly the audited format string — " +
+				"%B (the one attacker-controlled free-text field) must be positioned strictly last, " +
+				"after the three fixed-shape, git-computed %gd/%H/%ct fields",
+		);
+	});
+
+	it("fails if GIT_STASH_LIST_ARGS's format string moves %B before %ct (the exact field-shift regression this contract exists to catch)", () => {
+		const mutated = withMutatedGitStashSource((source) =>
+			source.replace(
+				'"--format=%gd%x1f%H%x1f%ct%x1f%B"',
+				'"--format=%gd%x1f%H%x1f%B%x1f%ct"',
+			),
+		);
+		expect(validateGitStashMessageFieldSafetyBoundary(mutated)).toContain(
+			"stash.rs must define GIT_STASH_LIST_ARGS as exactly the audited format string — " +
+				"%B (the one attacker-controlled free-text field) must be positioned strictly last, " +
+				"after the three fixed-shape, git-computed %gd/%H/%ct fields",
+		);
+	});
+
+	it("fails if parse_stash_list's bounded splitn(4, ...) is widened to an unbounded split (the exact regression this contract exists to catch)", () => {
+		const mutated = withMutatedGitStashSource((source) =>
+			source.replace(
+				"let mut parts = record.splitn(4, |&byte| byte == 0x1f);",
+				"let mut parts = record.split(|&byte| byte == 0x1f);",
+			),
+		);
+		expect(validateGitStashMessageFieldSafetyBoundary(mutated)).toContain(
+			"parse_stash_list must split each record with a bounded splitn(4, ...) — leaving " +
+				"the message field's own further bytes (including an attacker-embedded 0x1f) " +
+				"untouched — never an unbounded split",
+		);
+		// Control: this same mutated source now also trips the *second* guard
+		// (the exact naive-full-split shape this contract independently bans),
+		// proving both checks are real and not merely mutually redundant phrasing.
+		expect(validateGitStashMessageFieldSafetyBoundary(mutated)).toContain(
+			"parse_stash_list must never fall back to an unbounded split on 0x1f anywhere in " +
+				"its own body — this is exactly the field-shift vulnerability this command's format " +
+				"string is designed to avoid",
+		);
+	});
+
+	it("fails if parse_stash_list is renamed away, losing the function this contract inspects", () => {
+		const mutated = withMutatedGitStashSource((source) =>
+			source.replace("fn parse_stash_list(", "fn parse_stash_list_renamed("),
+		);
+		expect(validateGitStashMessageFieldSafetyBoundary(mutated)).toContain(
+			"stash.rs must define a parse_stash_list function",
+		);
+	});
+});
+
+const gitStashAppPaths = [
+	"app/platform/tauri/contracts.ts",
+	"app/platform/tauri/native.ts",
+	"app/platform/tauri/browser-mock.ts",
+	"app/features/scm/plain-git-stash-view.ts",
+	"app/features/scm/plain-scm-stash.ts",
+];
+const gitStashAppSources = gitStashAppPaths.map((relativePath) => ({
+	relativePath,
+	source: readFileSync(
+		new URL(`../../${relativePath}`, import.meta.url),
+		"utf8",
+	),
+}));
+
+function replaceGitStashAppSource(relativePath, from, to) {
+	return mutateWorkspaceSource(gitStashAppSources, relativePath, (source) => {
+		if (!source.includes(from)) {
+			throw new Error(
+				`${relativePath} git stash mutation fixture no longer matches production`,
+			);
+		}
+		return source.replace(from, to);
+	});
+}
+
+describe("Plain F090 S4 git stash confirmation boundary Harness", () => {
+	it("accepts the production single confirmed pop/drop routes", () => {
+		expect(validateGitStashConfirmationBoundary(gitStashAppSources)).toEqual(
+			[],
+		);
+	});
+
+	it("requires every audited file to be present", () => {
+		expect(validateGitStashConfirmationBoundary([])).toContain(
+			"git stash confirmation boundary requires app/features/scm/plain-scm-stash.ts",
+		);
+	});
+
+	it("rejects a second gitStashPop call site anywhere else in app/", () => {
+		const relativePath = "app/features/scm/plain-git-stash-bypass.ts";
+		const hostile = [
+			...gitStashAppSources,
+			{
+				relativePath,
+				source: `import type { PlainBridge } from "../../platform/tauri/contracts";
+export async function bypassPop(bridge: PlainBridge): Promise<void> {
+	await bridge.gitStashPop("a".repeat(40), false);
+}`,
+			},
+		];
+		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
+			`${relativePath} must not consume gitStashPop outside PlainGitStashView.popEntry's single audited call site`,
+		);
+	});
+
+	it("rejects a second gitStashDrop call site inside plain-git-stash-view.ts outside dropEntry", () => {
+		const hostile = replaceGitStashAppSource(
+			"app/features/scm/plain-git-stash-view.ts",
+			"private async showEntry(entry: GitStashEntry): Promise<void> {",
+			`private async bypassDrop(bridge: PlainBridge): Promise<void> {
+		await bridge.gitStashDrop("a".repeat(40));
+	}
+
+	private async showEntry(entry: GitStashEntry): Promise<void> {`,
+		);
+		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
+			"app/features/scm/plain-git-stash-view.ts must not consume gitStashDrop outside PlainGitStashView.dropEntry's single audited call site",
+		);
+	});
+
+	it("rejects a duplicated gitStashPop call inside popEntry itself", () => {
+		const hostile = replaceGitStashAppSource(
+			"app/features/scm/plain-git-stash-view.ts",
+			`const outcome = await this.#runStashMutation((bridge) =>
+			bridge.gitStashPop(entry.sha, false),
+		);`,
+			`const outcome = await this.#runStashMutation((bridge) =>
+			bridge.gitStashPop(entry.sha, false),
+		);
+		await this.#runStashMutation((bridge) => bridge.gitStashPop(entry.sha, false));`,
+		);
+		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
+			"gitStashPop must have exactly one production call site, inside PlainGitStashView.popEntry",
+		);
+	});
+
+	it("rejects computed/bracket access to gitStashDrop", () => {
+		const hostile = replaceGitStashAppSource(
+			"app/features/scm/plain-git-stash-view.ts",
+			"await this.#runStashMutation((bridge) => bridge.gitStashDrop(entry.sha));",
+			'await this.#runStashMutation((bridge) => bridge["gitStashDrop"](entry.sha));',
+		);
+		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
+			"app/features/scm/plain-git-stash-view.ts must not consume gitStashDrop outside PlainGitStashView.dropEntry's single audited call site",
+		);
+	});
+
+	it("rejects a missing or renamed gitStashPop bridge declaration", () => {
+		const hostile = replaceGitStashAppSource(
+			"app/platform/tauri/native.ts",
+			"gitStashPop: async (sha, useIndex) => {",
+			"gitStashPopRenamed: async (sha, useIndex) => {",
+		);
+		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
+			"app/platform/tauri/native.ts must declare gitStashPop exactly once in its audited bridge surface",
+		);
+	});
+
+	it("rejects a duplicated gitStashDrop bridge declaration", () => {
+		const hostile = mutateWorkspaceSource(
+			gitStashAppSources,
+			"app/platform/tauri/browser-mock.ts",
+			(source) =>
+				`${source}\nconst duplicateGitStashDropMock = { async gitStashDrop() { return; } };`,
+		);
+		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
+			"app/platform/tauri/browser-mock.ts must declare gitStashDrop exactly once in its audited bridge surface",
+		);
+	});
+
+	it("rejects popEntry skipping the confirmation gate", () => {
+		const hostile = replaceGitStashAppSource(
+			"app/features/scm/plain-git-stash-view.ts",
+			'if (decision.kind !== "confirmed") {\n\t\t\treturn;\n\t\t}\n\t\tconst outcome = await this.#runStashMutation((bridge) =>\n\t\t\tbridge.gitStashPop(entry.sha, false),\n\t\t);',
+			'if (decision.kind === "confirmed") {\n\t\t\treturn;\n\t\t}\n\t\tconst outcome = await this.#runStashMutation((bridge) =>\n\t\t\tbridge.gitStashPop(entry.sha, false),\n\t\t);',
+		);
+		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
+			"PlainGitStashView.popEntry must match its exact audited confirm-then-call shape — no other shape may reach the stash bridge call",
+		);
+	});
+
+	it("rejects dropEntry skipping the confirmation gate", () => {
+		const hostile = replaceGitStashAppSource(
+			"app/features/scm/plain-git-stash-view.ts",
+			'if (decision.kind !== "confirmed") {\n\t\t\treturn;\n\t\t}\n\t\tawait this.#runStashMutation((bridge) => bridge.gitStashDrop(entry.sha));',
+			'if (decision.kind === "confirmed") {\n\t\t\treturn;\n\t\t}\n\t\tawait this.#runStashMutation((bridge) => bridge.gitStashDrop(entry.sha));',
+		);
+		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
+			"PlainGitStashView.dropEntry must match its exact audited confirm-then-call shape — no other shape may reach the stash bridge call",
+		);
+	});
+
+	it("rejects plain-scm-stash.ts importing anything at all", () => {
+		const hostile = mutateWorkspaceSource(
+			gitStashAppSources,
+			"app/features/scm/plain-scm-stash.ts",
+			(source) => `import { invoke } from "@tauri-apps/api/core";\n${source}`,
+		);
+		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
+			"plain-scm-stash.ts must not import anything — it only ever decides whether the caller may pop/drop a stash entry, and an import is the only way it could ever reach a bridge or service to perform the write itself",
+		);
+	});
+
+	it("rejects a new top-level declaration added to plain-scm-stash.ts", () => {
+		const hostile = mutateWorkspaceSource(
+			gitStashAppSources,
+			"app/features/scm/plain-scm-stash.ts",
+			(source) => `${source}\nexport function leakedHelper(): void {}`,
+		);
+		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
+			"plain-scm-stash.ts must retain its exact audited top-level surface — no new declaration can quietly add a way for this decide-only module to reach a bridge",
+		);
+	});
+
+	it("rejects resolveStashConfirmation calling a bridge method itself", () => {
+		const hostile = replaceGitStashAppSource(
+			"app/features/scm/plain-scm-stash.ts",
+			`export async function resolveStashConfirmation(
+	dialogService: StashConfirmDialogService,
+	request: StashConfirmationRequest,
+): Promise<StashConfirmDecision> {
+	const confirmation = await dialogService.confirm({`,
+			`export async function resolveStashConfirmation(
+	dialogService: StashConfirmDialogService,
+	request: StashConfirmationRequest,
+	bridge: { gitStashDrop(sha: string): Promise<void> },
+): Promise<StashConfirmDecision> {
+	await bridge.gitStashDrop("a".repeat(40));
+	const confirmation = await dialogService.confirm({`,
+		);
+		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
+			"resolveStashConfirmation must unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited shape",
+		);
+	});
+});
+
+const gitWorktreeAppPaths = [
+	"app/platform/tauri/contracts.ts",
+	"app/platform/tauri/native.ts",
+	"app/platform/tauri/browser-mock.ts",
+	"app/features/scm/plain-git-worktree-view.ts",
+	"app/features/scm/plain-scm-worktree.ts",
+];
+const gitWorktreeAppSources = gitWorktreeAppPaths.map((relativePath) => ({
+	relativePath,
+	source: readFileSync(
+		new URL(`../../${relativePath}`, import.meta.url),
+		"utf8",
+	),
+}));
+
+function replaceGitWorktreeAppSource(relativePath, from, to) {
+	return mutateWorkspaceSource(
+		gitWorktreeAppSources,
+		relativePath,
+		(source) => {
+			if (!source.includes(from)) {
+				throw new Error(
+					`${relativePath} git worktree mutation fixture no longer matches production`,
+				);
+			}
+			return source.replace(from, to);
+		},
+	);
+}
+
+describe("Plain F090 S5 git worktree confirmation boundary Harness", () => {
+	it("accepts the production two-call removeEntry route", () => {
+		expect(
+			validateGitWorktreeConfirmationBoundary(gitWorktreeAppSources),
+		).toEqual([]);
+	});
+
+	it("requires every audited file to be present", () => {
+		expect(validateGitWorktreeConfirmationBoundary([])).toContain(
+			"git worktree confirmation boundary requires app/features/scm/plain-scm-worktree.ts",
+		);
+	});
+
+	it("rejects a second gitWorktreeRemove call site anywhere else in app/", () => {
+		const relativePath = "app/features/scm/plain-git-worktree-bypass.ts";
+		const hostile = [
+			...gitWorktreeAppSources,
+			{
+				relativePath,
+				source: `import type { PlainBridge } from "../../platform/tauri/contracts";
+export async function bypassRemove(bridge: PlainBridge): Promise<void> {
+	await bridge.gitWorktreeRemove("/some/path", true);
+}`,
+			},
+		];
+		expect(validateGitWorktreeConfirmationBoundary(hostile)).toContain(
+			`${relativePath} must not consume gitWorktreeRemove outside PlainGitWorktreeView.removeEntry's two audited call sites`,
+		);
+	});
+
+	it("rejects a third gitWorktreeRemove call inside removeEntry itself", () => {
+		const hostile = replaceGitWorktreeAppSource(
+			"app/features/scm/plain-git-worktree-view.ts",
+			`await this.#runWorktreeMutation((bridge) =>
+			bridge.gitWorktreeRemove(entry.path, true),
+		);
+	}`,
+			`await this.#runWorktreeMutation((bridge) =>
+			bridge.gitWorktreeRemove(entry.path, true),
+		);
+		await this.#runWorktreeMutation((bridge) => bridge.gitWorktreeRemove(entry.path, true));
+	}`,
+		);
+		expect(validateGitWorktreeConfirmationBoundary(hostile)).toContain(
+			"gitWorktreeRemove must have exactly two production call sites, both inside PlainGitWorktreeView.removeEntry (the unforced probe and the confirmed forced retry)",
+		);
+	});
+
+	it("rejects computed/bracket access to gitWorktreeRemove", () => {
+		const hostile = replaceGitWorktreeAppSource(
+			"app/features/scm/plain-git-worktree-view.ts",
+			"bridge.gitWorktreeRemove(entry.path, true),",
+			'bridge["gitWorktreeRemove"](entry.path, true),',
+		);
+		expect(validateGitWorktreeConfirmationBoundary(hostile)).toContain(
+			"gitWorktreeRemove must have exactly two production call sites, both inside PlainGitWorktreeView.removeEntry (the unforced probe and the confirmed forced retry)",
+		);
+	});
+
+	it("rejects a missing or renamed gitWorktreeRemove bridge declaration", () => {
+		const hostile = replaceGitWorktreeAppSource(
+			"app/platform/tauri/native.ts",
+			"gitWorktreeRemove: async (path, force) => {",
+			"gitWorktreeRemoveRenamed: async (path, force) => {",
+		);
+		expect(validateGitWorktreeConfirmationBoundary(hostile)).toContain(
+			"app/platform/tauri/native.ts must declare gitWorktreeRemove exactly once in its audited bridge surface",
+		);
+	});
+
+	it("rejects a duplicated gitWorktreeRemove bridge declaration", () => {
+		const hostile = mutateWorkspaceSource(
+			gitWorktreeAppSources,
+			"app/platform/tauri/browser-mock.ts",
+			(source) =>
+				`${source}\nconst duplicateGitWorktreeRemoveMock = { async gitWorktreeRemove() { return "removed"; } };`,
+		);
+		expect(validateGitWorktreeConfirmationBoundary(hostile)).toContain(
+			"app/platform/tauri/browser-mock.ts must declare gitWorktreeRemove exactly once in its audited bridge surface",
+		);
+	});
+
+	it("rejects removeEntry skipping the confirmation gate", () => {
+		const hostile = replaceGitWorktreeAppSource(
+			"app/features/scm/plain-git-worktree-view.ts",
+			'if (decision.kind !== "confirmed") {\n\t\t\treturn;\n\t\t}\n\t\tawait this.#runWorktreeMutation((bridge) =>\n\t\t\tbridge.gitWorktreeRemove(entry.path, true),\n\t\t);',
+			'if (decision.kind === "confirmed") {\n\t\t\treturn;\n\t\t}\n\t\tawait this.#runWorktreeMutation((bridge) =>\n\t\t\tbridge.gitWorktreeRemove(entry.path, true),\n\t\t);',
+		);
+		expect(validateGitWorktreeConfirmationBoundary(hostile)).toContain(
+			"PlainGitWorktreeView.removeEntry must match its exact audited unforced-probe-then-confirm-then-forced-retry shape — no other shape may reach the gitWorktreeRemove bridge call",
+		);
+	});
+
+	it("rejects removeEntry skipping the needsForce check", () => {
+		const hostile = replaceGitWorktreeAppSource(
+			"app/features/scm/plain-git-worktree-view.ts",
+			'if (outcome !== "needsForce") {\n\t\t\treturn;\n\t\t}',
+			'if (outcome === "needsForce") {\n\t\t\treturn;\n\t\t}',
+		);
+		expect(validateGitWorktreeConfirmationBoundary(hostile)).toContain(
+			"PlainGitWorktreeView.removeEntry must match its exact audited unforced-probe-then-confirm-then-forced-retry shape — no other shape may reach the gitWorktreeRemove bridge call",
+		);
+	});
+
+	it("rejects plain-scm-worktree.ts importing anything at all", () => {
+		const hostile = mutateWorkspaceSource(
+			gitWorktreeAppSources,
+			"app/features/scm/plain-scm-worktree.ts",
+			(source) => `import { invoke } from "@tauri-apps/api/core";\n${source}`,
+		);
+		expect(validateGitWorktreeConfirmationBoundary(hostile)).toContain(
+			"plain-scm-worktree.ts must not import anything — it only ever decides whether the caller may retry a forced worktree removal, and an import is the only way it could ever reach a bridge or service to perform the write itself",
+		);
+	});
+
+	it("rejects a new top-level declaration added to plain-scm-worktree.ts", () => {
+		const hostile = mutateWorkspaceSource(
+			gitWorktreeAppSources,
+			"app/features/scm/plain-scm-worktree.ts",
+			(source) => `${source}\nexport function leakedHelper(): void {}`,
+		);
+		expect(validateGitWorktreeConfirmationBoundary(hostile)).toContain(
+			"plain-scm-worktree.ts must retain its exact audited top-level surface — no new declaration can quietly add a way for this decide-only module to reach a bridge",
+		);
+	});
+
+	it("rejects resolveWorktreeConfirmation calling a bridge method itself", () => {
+		const hostile = replaceGitWorktreeAppSource(
+			"app/features/scm/plain-scm-worktree.ts",
+			`export async function resolveWorktreeConfirmation(
+	dialogService: WorktreeConfirmDialogService,
+	request: WorktreeConfirmationRequest,
+): Promise<WorktreeConfirmDecision> {
+	const confirmation = await dialogService.confirm({`,
+			`export async function resolveWorktreeConfirmation(
+	dialogService: WorktreeConfirmDialogService,
+	request: WorktreeConfirmationRequest,
+	bridge: { gitWorktreeRemove(path: string, force: boolean): Promise<string> },
+): Promise<WorktreeConfirmDecision> {
+	await bridge.gitWorktreeRemove("/some/path", true);
+	const confirmation = await dialogService.confirm({`,
+		);
+		expect(validateGitWorktreeConfirmationBoundary(hostile)).toContain(
+			"resolveWorktreeConfirmation must unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited shape",
+		);
+	});
+});
+
+const viewPaneAppPaths = [
+	"app/features/scm/plain-scm-view.ts",
+	"app/features/search/plain-search-view.ts",
+	"app/features/scm/plain-git-graph-view.ts",
+	"app/features/scm/plain-git-stash-view.ts",
+	"app/features/scm/plain-git-worktree-view.ts",
+	"app/features/scm/plain-git-history-view.ts",
+	"app/features/terminal/plain-terminal-view.ts",
+];
+const viewPaneAppSources = viewPaneAppPaths.map((relativePath) => ({
+	relativePath,
+	source: readFileSync(
+		new URL(`../../${relativePath}`, import.meta.url),
+		"utf8",
+	),
+}));
+
+function replaceViewPaneAppSource(relativePath, from, to) {
+	return mutateWorkspaceSource(viewPaneAppSources, relativePath, (source) => {
+		if (!source.includes(from)) {
+			throw new Error(
+				`${relativePath} ViewPane decorator mutation fixture no longer matches production`,
+			);
+		}
+		return source.replace(from, to);
+	});
+}
+
+describe("Plain ViewPane DI decorator boundary Harness", () => {
+	it("accepts every real app/ ViewPane subclass exactly as it stands today", () => {
+		expect(
+			validateViewPaneDependencyDecoratorBoundary(viewPaneAppSources),
+		).toEqual([]);
+	});
+
+	it("rejects a subclass declaring zero of its own decorators once it adds services beyond the base nine (reproduces F090 S6's plain-git-history-view.ts, which never declared any decorator since F090 S1)", () => {
+		const hostile = replaceViewPaneAppSource(
+			"app/features/scm/plain-git-history-view.ts",
+			`IKeybindingService(PlainGitHistoryView, undefined, 1);
+IContextMenuService(PlainGitHistoryView, undefined, 2);
+IConfigurationService(PlainGitHistoryView, undefined, 3);
+IContextKeyService(PlainGitHistoryView, undefined, 4);
+IViewDescriptorService(PlainGitHistoryView, undefined, 5);
+IInstantiationService(PlainGitHistoryView, undefined, 6);
+IOpenerService(PlainGitHistoryView, undefined, 7);
+IThemeService(PlainGitHistoryView, undefined, 8);
+IHoverService(PlainGitHistoryView, undefined, 9);
+IWorkspaceContextService(PlainGitHistoryView, undefined, 10);
+IEditorService(PlainGitHistoryView, undefined, 11);`,
+			"",
+		);
+		const failures = validateViewPaneDependencyDecoratorBoundary(hostile);
+		expect(
+			failures.some(
+				(failure) =>
+					failure.includes("PlainGitHistoryView") &&
+					failure.includes("declares 0 of its own DI decorator(s)") &&
+					failure.includes("12 parameter(s)") &&
+					failure.includes("F090 S6's PlainGitHistoryView"),
+			),
+		).toBe(true);
+	});
+
+	it("rejects a subclass declaring only the services it adds beyond the base nine, leaving indices 1-9 undeclared (reproduces F090 S4's plain-git-stash-view.ts, which broke every sibling view in the same container)", () => {
+		const hostile = replaceViewPaneAppSource(
+			"app/features/scm/plain-git-stash-view.ts",
+			`IKeybindingService(PlainGitStashView, undefined, 1);
+IContextMenuService(PlainGitStashView, undefined, 2);
+IConfigurationService(PlainGitStashView, undefined, 3);
+IContextKeyService(PlainGitStashView, undefined, 4);
+IViewDescriptorService(PlainGitStashView, undefined, 5);
+IInstantiationService(PlainGitStashView, undefined, 6);
+IOpenerService(PlainGitStashView, undefined, 7);
+IThemeService(PlainGitStashView, undefined, 8);
+IHoverService(PlainGitStashView, undefined, 9);
+IDialogService(PlainGitStashView, undefined, 10);
+INotificationService(PlainGitStashView, undefined, 11);`,
+			`IDialogService(PlainGitStashView, undefined, 10);
+INotificationService(PlainGitStashView, undefined, 11);`,
+		);
+		const failures = validateViewPaneDependencyDecoratorBoundary(hostile);
+		expect(
+			failures.some(
+				(failure) =>
+					failure.includes("PlainGitStashView") &&
+					failure.includes("declares 2 of its own DI decorator(s)") &&
+					failure.includes("12 parameter(s)") &&
+					failure.includes("F090 S4's PlainGitStashView"),
+			),
+		).toBe(true);
+	});
+
+	it("rejects a subclass declaring more decorators than its constructor has parameters", () => {
+		const hostile = replaceViewPaneAppSource(
+			"app/features/scm/plain-git-worktree-view.ts",
+			"INotificationService(PlainGitWorktreeView, undefined, 11);",
+			`INotificationService(PlainGitWorktreeView, undefined, 11);
+IDialogService(PlainGitWorktreeView, undefined, 12);`,
+		);
+		const failures = validateViewPaneDependencyDecoratorBoundary(hostile);
+		expect(
+			failures.some(
+				(failure) =>
+					failure.includes("PlainGitWorktreeView") &&
+					failure.includes("declares 12 of its own DI decorator(s)") &&
+					failure.includes("12 parameter(s)"),
+			),
+		).toBe(true);
+	});
+
+	it("rejects a subclass that redeclares an existing index instead of the missing one (same-looking 11 call sites, but index 10 is never declared and index 9 is declared twice)", () => {
+		const hostile = replaceViewPaneAppSource(
+			"app/features/scm/plain-git-worktree-view.ts",
+			"IDialogService(PlainGitWorktreeView, undefined, 10);\nINotificationService(PlainGitWorktreeView, undefined, 11);",
+			"IDialogService(PlainGitWorktreeView, undefined, 9);\nINotificationService(PlainGitWorktreeView, undefined, 11);",
+		);
+		const failures = validateViewPaneDependencyDecoratorBoundary(hostile);
+		expect(
+			failures.some(
+				(failure) =>
+					failure.includes("PlainGitWorktreeView") &&
+					// The distinct declared indices collapse to {1..9, 11} — ten
+					// unique values, not eleven — because index 9 is declared twice
+					// (deduplicated by the underlying Set) and index 10 is never
+					// declared at all. A raw call-count check alone would have missed
+					// this; checking the exact declared index *set* catches it.
+					failure.includes("declares 10 of its own DI decorator(s)"),
+			),
+		).toBe(true);
+	});
+
+	it("accepts a subclass that adds nothing beyond ViewPane's own base signature and declares zero decorators of its own (PlainGitGraphView's real, currently-safe shape)", () => {
+		const failures = validateViewPaneDependencyDecoratorBoundary(
+			viewPaneAppSources.filter(
+				({ relativePath }) =>
+					relativePath === "app/features/scm/plain-git-graph-view.ts",
+			),
+		);
+		expect(
+			failures.some((failure) => failure.includes("PlainGitGraphView")),
+		).toBe(false);
+	});
+
+	it("rejects that same zero-decorator class the moment it adds one more parameter without declaring anything (the S6 defect, reproduced in a class that currently relies on inheritance)", () => {
+		const hostile = replaceViewPaneAppSource(
+			"app/features/scm/plain-git-graph-view.ts",
+			`		themeService: IThemeService,
+		hoverService: IHoverService,
+	) {
+		super(
+			options,
+			keybindingService,
+			contextMenuService,
+			configurationService,
+			contextKeyService,
+			viewDescriptorService,
+			instantiationService,
+			openerService,
+			themeService,
+			hoverService,
+		);
+	}`,
+			`		themeService: IThemeService,
+		hoverService: IHoverService,
+		private readonly dialogService: IDialogService,
+	) {
+		super(
+			options,
+			keybindingService,
+			contextMenuService,
+			configurationService,
+			contextKeyService,
+			viewDescriptorService,
+			instantiationService,
+			openerService,
+			themeService,
+			hoverService,
+		);
+	}`,
+		);
+		const failures = validateViewPaneDependencyDecoratorBoundary(hostile);
+		expect(
+			failures.some(
+				(failure) =>
+					failure.includes("PlainGitGraphView") &&
+					failure.includes("declares 0 of its own DI decorator(s)") &&
+					failure.includes("11 parameter(s)"),
+			),
+		).toBe(true);
+	});
+});
+
+describe("Plain F100 S0/S1/S5 debug adapter spawn/connect/framing boundary Harness", () => {
+	const debugExecSource = readFileSync(
+		new URL("../../src-tauri/src/debug/exec.rs", import.meta.url),
+		"utf8",
+	);
+	const debugFramingSource = readFileSync(
+		new URL("../../src-tauri/src/debug/framing.rs", import.meta.url),
+		"utf8",
+	);
+	const debugTcpSource = readFileSync(
+		new URL("../../src-tauri/src/debug/tcp.rs", import.meta.url),
+		"utf8",
+	);
+
+	const baselineDebugRustSources = Object.freeze([
+		{ relativePath: "src-tauri/src/debug/exec.rs", source: debugExecSource },
+		{
+			relativePath: "src-tauri/src/debug/framing.rs",
+			source: debugFramingSource,
+		},
+		{ relativePath: "src-tauri/src/debug/tcp.rs", source: debugTcpSource },
+	]);
+
+	function withMutatedDebugSource(relativePath, mutate) {
+		return baselineDebugRustSources.map((entry) =>
+			entry.relativePath === relativePath
+				? { ...entry, source: mutate(entry.source) }
+				: entry,
+		);
+	}
+
+	const trustCheckAnchor =
+		"    trust.require_trusted(workspace, window_label).await?;\n" +
+		"    let subject = descriptor.confirmation_subject(AdapterTransportKind::Stdio);\n" +
+		"    confirmation\n" +
+		"        .require_confirmed(workspace, window_label, &subject)\n" +
+		"        .await?;\n" +
+		"    let descriptor = descriptor.clone();";
+	const constructionAnchor =
+		"    let mut command = Command::new(&descriptor.command);\n    command.args(&descriptor.args);";
+	const connectTrustCheckAnchor =
+		"    trust.require_trusted(workspace, window_label).await?;\n" +
+		"    let subject = descriptor.confirmation_subject(AdapterTransportKind::Tcp);\n" +
+		"    confirmation\n" +
+		"        .require_confirmed(workspace, window_label, &subject)\n" +
+		"        .await?;\n" +
+		"    let tcp = tcp.clone();";
+
+	describe("validateDebugAdapterSpawnBoundary", () => {
+		it("passes for the real, unmodified debug/exec.rs", () => {
+			expect(
+				validateDebugAdapterSpawnBoundary(baselineDebugRustSources),
+			).toEqual([]);
+		});
+
+		it("requires debug/exec.rs to be present", () => {
+			expect(validateDebugAdapterSpawnBoundary([])).toEqual([
+				"debug adapter spawn boundary requires debug/exec.rs",
+			]);
+		});
+
+		it("requires a spawn_adapter function to exist", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) =>
+					source.replace(
+						"pub(crate) async fn spawn_adapter(",
+						"pub(crate) async fn spawn_adapter_renamed(",
+					),
+			);
+			expect(validateDebugAdapterSpawnBoundary(mutated)).toEqual([
+				"debug/exec.rs must define spawn_adapter",
+			]);
+		});
+
+		it("rejects a spawn_adapter body that spawns before checking trust", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(trustCheckAnchor)).toBe(true);
+					return source.replace(
+						trustCheckAnchor,
+						"    let descriptor = descriptor.clone();\n    trust.require_trusted(workspace, window_label).await?;",
+					);
+				},
+			);
+			const failures = validateDebugAdapterSpawnBoundary(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"spawn_adapter must call trust.require_trusted(workspace, window_label).await? as its literal first statement",
+					),
+				),
+			).toBe(true);
+		});
+
+		it("rejects spawn_adapter when the trust check is missing entirely", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(trustCheckAnchor)).toBe(true);
+					return source.replace(
+						trustCheckAnchor,
+						"    let descriptor = descriptor.clone();",
+					);
+				},
+			);
+			const failures = validateDebugAdapterSpawnBoundary(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"spawn_adapter must call trust.require_trusted(workspace, window_label).await? as its literal first statement",
+					),
+				),
+			).toBe(true);
+		});
+
+		it("rejects spawn_adapter when the confirmation check is missing entirely (trust alone is not enough)", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(trustCheckAnchor)).toBe(true);
+					return source.replace(
+						trustCheckAnchor,
+						"    trust.require_trusted(workspace, window_label).await?;\n    let descriptor = descriptor.clone();",
+					);
+				},
+			);
+			const failures = validateDebugAdapterSpawnBoundary(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"must call confirmation.require_confirmed(workspace, window_label, &subject).await? (subject built via descriptor.confirmation_subject(AdapterTransportKind::Stdio)) as its literal second statement",
+					),
+				),
+			).toBe(true);
+		});
+
+		it("rejects spawn_adapter when the confirmation check runs before the trust check", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(trustCheckAnchor)).toBe(true);
+					return source.replace(
+						trustCheckAnchor,
+						"    let subject = descriptor.confirmation_subject(AdapterTransportKind::Stdio);\n" +
+							"    confirmation\n" +
+							"        .require_confirmed(workspace, window_label, &subject)\n" +
+							"        .await?;\n" +
+							"    trust.require_trusted(workspace, window_label).await?;\n" +
+							"    let descriptor = descriptor.clone();",
+					);
+				},
+			);
+			const failures = validateDebugAdapterSpawnBoundary(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"spawn_adapter must call trust.require_trusted(workspace, window_label).await? as its literal first statement",
+					),
+				),
+			).toBe(true);
+		});
+	});
+
+	describe("validateDebugAdapterConnectBoundary", () => {
+		it("passes for the real, unmodified debug/tcp.rs", () => {
+			expect(
+				validateDebugAdapterConnectBoundary(baselineDebugRustSources),
+			).toEqual([]);
+		});
+
+		it("requires debug/tcp.rs to be present", () => {
+			expect(validateDebugAdapterConnectBoundary([])).toEqual([
+				"debug adapter connect boundary requires debug/tcp.rs",
+			]);
+		});
+
+		it("requires a connect_adapter function to exist", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/tcp.rs",
+				(source) =>
+					source.replace(
+						"pub(crate) async fn connect_adapter(",
+						"pub(crate) async fn connect_adapter_renamed(",
+					),
+			);
+			expect(validateDebugAdapterConnectBoundary(mutated)).toEqual([
+				"debug/tcp.rs must define connect_adapter",
+			]);
+		});
+
+		it("rejects connect_adapter when the trust check is missing entirely", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/tcp.rs",
+				(source) => {
+					expect(source.includes(connectTrustCheckAnchor)).toBe(true);
+					return source.replace(
+						connectTrustCheckAnchor,
+						"    let tcp = tcp.clone();",
+					);
+				},
+			);
+			const failures = validateDebugAdapterConnectBoundary(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"connect_adapter must call trust.require_trusted(workspace, window_label).await? as its literal first statement",
+					),
+				),
+			).toBe(true);
+		});
+
+		it("rejects connect_adapter when the confirmation check is missing entirely (trust alone is not enough)", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/tcp.rs",
+				(source) => {
+					expect(source.includes(connectTrustCheckAnchor)).toBe(true);
+					return source.replace(
+						connectTrustCheckAnchor,
+						"    trust.require_trusted(workspace, window_label).await?;\n    let tcp = tcp.clone();",
+					);
+				},
+			);
+			const failures = validateDebugAdapterConnectBoundary(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"must call confirmation.require_confirmed(workspace, window_label, &subject).await? (subject built via descriptor.confirmation_subject(AdapterTransportKind::Tcp)) as its literal second statement",
+					),
+				),
+			).toBe(true);
+		});
+	});
+
+	describe("validateDebugTcpCompanionSpawnBoundary", () => {
+		const companionTrustCheckAnchor =
+			"    trust.require_trusted(workspace, window_label).await?;\n" +
+			"    let subject = descriptor.confirmation_subject(AdapterTransportKind::Tcp);\n" +
+			"    confirmation\n" +
+			"        .require_confirmed(workspace, window_label, &subject)\n" +
+			"        .await?;\n" +
+			"    let descriptor = descriptor.clone();";
+
+		it("passes for the real, unmodified debug/exec.rs", () => {
+			expect(
+				validateDebugTcpCompanionSpawnBoundary(baselineDebugRustSources),
+			).toEqual([]);
+		});
+
+		it("requires debug/exec.rs to be present", () => {
+			expect(validateDebugTcpCompanionSpawnBoundary([])).toEqual([
+				"debug tcp companion spawn boundary requires debug/exec.rs",
+			]);
+		});
+
+		it("requires a spawn_adapter_as_tcp_companion function to exist", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) =>
+					source.replace(
+						"pub(crate) async fn spawn_adapter_as_tcp_companion(",
+						"pub(crate) async fn spawn_adapter_as_tcp_companion_renamed(",
+					),
+			);
+			expect(validateDebugTcpCompanionSpawnBoundary(mutated)).toEqual([
+				"debug/exec.rs must define spawn_adapter_as_tcp_companion",
+			]);
+		});
+
+		it("rejects a spawn_adapter_as_tcp_companion body that spawns before checking trust", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(companionTrustCheckAnchor)).toBe(true);
+					return source.replace(
+						companionTrustCheckAnchor,
+						"    let descriptor = descriptor.clone();\n    trust.require_trusted(workspace, window_label).await?;",
+					);
+				},
+			);
+			const failures = validateDebugTcpCompanionSpawnBoundary(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"spawn_adapter_as_tcp_companion must call trust.require_trusted(workspace, window_label).await? as its literal first statement",
+					),
+				),
+			).toBe(true);
+		});
+
+		it("rejects spawn_adapter_as_tcp_companion when the confirmation check is missing entirely (trust alone is not enough)", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(companionTrustCheckAnchor)).toBe(true);
+					return source.replace(
+						companionTrustCheckAnchor,
+						"    trust.require_trusted(workspace, window_label).await?;\n    let descriptor = descriptor.clone();",
+					);
+				},
+			);
+			const failures = validateDebugTcpCompanionSpawnBoundary(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"must call confirmation.require_confirmed(workspace, window_label, &subject).await? (subject built via descriptor.confirmation_subject(AdapterTransportKind::Tcp)) as its literal second statement",
+					),
+				),
+			).toBe(true);
+		});
+
+		it("rejects spawn_adapter_as_tcp_companion when it is confirmed via the Stdio variant instead of Tcp (the exact confusion this primitive exists to prevent)", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(companionTrustCheckAnchor)).toBe(true);
+					return source.replace(
+						companionTrustCheckAnchor,
+						companionTrustCheckAnchor.replace(
+							"AdapterTransportKind::Tcp",
+							"AdapterTransportKind::Stdio",
+						),
+					);
+				},
+			);
+			const failures = validateDebugTcpCompanionSpawnBoundary(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"must call confirmation.require_confirmed(workspace, window_label, &subject).await? (subject built via descriptor.confirmation_subject(AdapterTransportKind::Tcp)) as its literal second statement",
+					),
+				),
+			).toBe(true);
+		});
+	});
+
+	describe("validateDebugSpawnConstructionShape", () => {
+		it("passes for the real, unmodified debug/exec.rs", () => {
+			expect(
+				validateDebugSpawnConstructionShape(baselineDebugRustSources),
+			).toEqual([]);
+		});
+
+		it("requires debug/exec.rs to be present", () => {
+			expect(validateDebugSpawnConstructionShape([])).toEqual([
+				"debug spawn construction boundary requires debug/exec.rs",
+			]);
+		});
+
+		it("requires a spawn_adapter_sync function to exist", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) =>
+					source.replace(
+						"fn spawn_adapter_sync(",
+						"fn spawn_adapter_sync_renamed(",
+					),
+			);
+			expect(validateDebugSpawnConstructionShape(mutated)).toEqual([
+				"debug/exec.rs must define spawn_adapter_sync",
+			]);
+		});
+
+		it("rejects a shell interpreter passed to Command::new", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(constructionAnchor)).toBe(true);
+					return source.replace(
+						constructionAnchor,
+						`${constructionAnchor}\n    let _sh = Command::new("sh");`,
+					);
+				},
+			);
+			const failures = validateDebugSpawnConstructionShape(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes("must not spawn a shell interpreter"),
+				),
+			).toBe(true);
+		});
+
+		it("rejects format! feeding into the spawned command", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(constructionAnchor)).toBe(true);
+					return source.replace(
+						constructionAnchor,
+						`${constructionAnchor}\n    let _joined = format!("{} extra", descriptor.command);`,
+					);
+				},
+			);
+			const failures = validateDebugSpawnConstructionShape(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"must not build the spawned program or its arguments via format!",
+					),
+				),
+			).toBe(true);
+		});
+
+		it('rejects a shell "-c" literal argument', () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(constructionAnchor)).toBe(true);
+					return source.replace(
+						constructionAnchor,
+						`${constructionAnchor}\n    command.arg("-c");`,
+					);
+				},
+			);
+			const failures = validateDebugSpawnConstructionShape(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes('must not pass a shell "-c" argument'),
+				),
+			).toBe(true);
+		});
+
+		it("rejects a program name that is not Command::new(&descriptor.command)", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(constructionAnchor)).toBe(true);
+					return source.replace(
+						constructionAnchor,
+						'    let mut command = Command::new("hardcoded-adapter");\n    command.args(&descriptor.args);',
+					);
+				},
+			);
+			const failures = validateDebugSpawnConstructionShape(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"must construct the child process via Command::new(&descriptor.command)",
+					),
+				),
+			).toBe(true);
+		});
+
+		it("rejects an argv source that is not .args(&descriptor.args)", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => {
+					expect(source.includes(constructionAnchor)).toBe(true);
+					return source.replace(
+						constructionAnchor,
+						'    let mut command = Command::new(&descriptor.command);\n    command.args(["--flag"]);',
+					);
+				},
+			);
+			const failures = validateDebugSpawnConstructionShape(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes("must pass argv via .args(&descriptor.args)"),
+				),
+			).toBe(true);
+		});
+	});
+
+	describe("validateDebugFramingBounds", () => {
+		it("passes for the real, unmodified debug/framing.rs", () => {
+			expect(validateDebugFramingBounds(baselineDebugRustSources)).toEqual([]);
+		});
+
+		it("requires debug/framing.rs to be present", () => {
+			expect(validateDebugFramingBounds([])).toEqual([
+				"debug framing boundary requires debug/framing.rs",
+			]);
+		});
+
+		it("rejects a widened MAX_DAP_MESSAGE_BYTES", () => {
+			const anchor =
+				"pub(crate) const MAX_DAP_MESSAGE_BYTES: usize = 67_108_864; // 64 MiB";
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/framing.rs",
+				(source) => {
+					expect(source.includes(anchor)).toBe(true);
+					return source.replace(
+						anchor,
+						"pub(crate) const MAX_DAP_MESSAGE_BYTES: usize = 134_217_728; // 128 MiB",
+					);
+				},
+			);
+			expect(validateDebugFramingBounds(mutated)).toContain(
+				"debug/framing.rs must define exactly one MAX_DAP_MESSAGE_BYTES: usize = 67108864",
+			);
+		});
+
+		it("rejects a narrowed MAX_DAP_HEADER_BYTES", () => {
+			const anchor =
+				"pub(crate) const MAX_DAP_HEADER_BYTES: usize = 8_192; // 8 KiB";
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/framing.rs",
+				(source) => {
+					expect(source.includes(anchor)).toBe(true);
+					return source.replace(
+						anchor,
+						"pub(crate) const MAX_DAP_HEADER_BYTES: usize = 4_096; // 4 KiB",
+					);
+				},
+			);
+			expect(validateDebugFramingBounds(mutated)).toContain(
+				"debug/framing.rs must define exactly one MAX_DAP_HEADER_BYTES: usize = 8192",
+			);
+		});
+
+		it("rejects MAX_DAP_MESSAGE_BYTES being declared but never referenced by the decoder", () => {
+			const anchor = "if content_length > MAX_DAP_MESSAGE_BYTES {";
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/framing.rs",
+				(source) => {
+					expect(source.includes(anchor)).toBe(true);
+					return source.replace(anchor, "if content_length > 67_108_864 {");
+				},
+			);
+			const failures = validateDebugFramingBounds(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"must reference MAX_DAP_MESSAGE_BYTES in its decoder logic, not just declare it",
+					),
+				),
+			).toBe(true);
+		});
+
+		it("rejects MAX_DAP_HEADER_BYTES being declared but never referenced by the decoder", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/framing.rs",
+				(source) => {
+					const withoutFirstUse = source.replace(
+						"if self.buffer.len() > MAX_DAP_HEADER_BYTES {",
+						"if self.buffer.len() > 8_192 {",
+					);
+					expect(withoutFirstUse).not.toEqual(source);
+					const withoutSecondUse = withoutFirstUse.replace(
+						"if header_block_len > MAX_DAP_HEADER_BYTES {",
+						"if header_block_len > 8_192 {",
+					);
+					expect(withoutSecondUse).not.toEqual(withoutFirstUse);
+					return withoutSecondUse;
+				},
+			);
+			const failures = validateDebugFramingBounds(mutated);
+			expect(
+				failures.some((failure) =>
+					failure.includes(
+						"must reference MAX_DAP_HEADER_BYTES in its decoder logic, not just declare it",
+					),
+				),
+			).toBe(true);
+		});
+	});
+});
+
+describe("Plain F100 S1 debug adapter confirmation command registration Harness", () => {
+	const debugCommandsSource = readFileSync(
+		new URL("../../src-tauri/src/debug/commands.rs", import.meta.url),
+		"utf8",
+	);
+	const libSource = readFileSync(
+		new URL("../../src-tauri/src/lib.rs", import.meta.url),
+		"utf8",
+	);
+
+	const baselineCommandRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/debug/commands.rs",
+			source: debugCommandsSource,
+		},
+		{ relativePath: "src-tauri/src/lib.rs", source: libSource },
+	]);
+
+	it("passes for the real, unmodified debug command files", () => {
+		expect(
+			validateDebugCommandRegistration(baselineCommandRustSources),
+		).toEqual([]);
+	});
+
+	it("requires debug/commands.rs to be present", () => {
+		const missingFile = baselineCommandRustSources.filter(
+			(entry) => entry.relativePath !== "src-tauri/src/debug/commands.rs",
+		);
+		expect(validateDebugCommandRegistration(missingFile)).toContain(
+			"command registration boundary requires src-tauri/src/debug/commands.rs",
+		);
+	});
+
+	it("fails if debug_adapter_confirmation_state's body is rewired to a different service call", () => {
+		const rewired = baselineCommandRustSources.map((entry) =>
+			entry.relativePath === "src-tauri/src/debug/commands.rs"
+				? {
+						...entry,
+						source: entry.source.replace(
+							".is_confirmed(workspace.inner(), window.label(), &request)",
+							'.is_confirmed(workspace.inner(), "main", &request)',
+						),
+					}
+				: entry,
+		);
+		expect(validateDebugCommandRegistration(rewired)).toContain(
+			"debug_adapter_confirmation_state must contain only its audited confirmation-service route",
+		);
+	});
+
+	it("fails if a debug command is missing from lib.rs's generate_handler", () => {
+		const missingRegistration = baselineCommandRustSources.map((entry) =>
+			entry.relativePath === "src-tauri/src/lib.rs"
+				? {
+						...entry,
+						source: entry.source.replace(
+							"            debug::commands::debug_adapter_confirmation_revoke,\n",
+							"",
+						),
+					}
+				: entry,
+		);
+		expect(validateDebugCommandRegistration(missingRegistration)).toContain(
+			"src-tauri/src/lib.rs must register debug::commands::debug_adapter_confirmation_revoke exactly once in generate_handler",
+		);
+	});
+
+	it("fails if a debug command is registered a second time (duplicate registration)", () => {
+		const duplicated = baselineCommandRustSources.map((entry) =>
+			entry.relativePath === "src-tauri/src/lib.rs"
+				? {
+						...entry,
+						source: entry.source.replace(
+							"            debug::commands::debug_adapter_confirmation_revoke,\n",
+							"            debug::commands::debug_adapter_confirmation_revoke,\n            debug::commands::debug_adapter_confirmation_revoke,\n",
+						),
+					}
+				: entry,
+		);
+		expect(validateDebugCommandRegistration(duplicated)).toContain(
+			"src-tauri/src/lib.rs must register debug::commands::debug_adapter_confirmation_revoke exactly once in generate_handler",
+		);
+	});
+});
+
+describe("Plain F100 S4 runInTerminal boundary Harness", () => {
+	const debugCommandsSource = readFileSync(
+		new URL("../../src-tauri/src/debug/commands.rs", import.meta.url),
+		"utf8",
+	);
+	const debugCommandsSourceOnly = Object.freeze([
+		{
+			relativePath: "src-tauri/src/debug/commands.rs",
+			source: debugCommandsSource,
+		},
+	]);
+
+	it("passes for the real, unmodified debug/commands.rs", () => {
+		expect(validateDebugRunInTerminalBoundary(debugCommandsSourceOnly)).toEqual(
+			[],
+		);
+	});
+
+	it("requires debug/commands.rs to be present", () => {
+		expect(validateDebugRunInTerminalBoundary([])).toEqual([
+			"debug runInTerminal boundary requires debug/commands.rs",
+		]);
+	});
+
+	it("requires handle_run_in_terminal_reverse_request to be defined", () => {
+		const mutated = [
+			{
+				relativePath: "src-tauri/src/debug/commands.rs",
+				source: debugCommandsSource.replace(
+					"pub(crate) fn handle_run_in_terminal_reverse_request(",
+					"pub(crate) fn renamed_handler(",
+				),
+			},
+		];
+		const failures = validateDebugRunInTerminalBoundary(mutated);
+		expect(failures).toContain(
+			"debug/commands.rs must define handle_run_in_terminal_reverse_request",
+		);
+		// Renaming only the function's own signature line leaves its body
+		// (and the `terminal.start_program(...)` call inside it) completely
+		// intact, so the crate-wide call-site count is unaffected by this
+		// particular mutation — this is a deliberately narrow test of the
+		// "is it defined at all" check in isolation, not a combined scenario.
+		expect(failures).toHaveLength(1);
+	});
+
+	it("fails if the handler stops calling terminal.start_program", () => {
+		const mutated = [
+			{
+				relativePath: "src-tauri/src/debug/commands.rs",
+				source: debugCommandsSource.replace(
+					"tauri::async_runtime::block_on(terminal.start_program(",
+					"tauri::async_runtime::block_on(terminal.start_something_else(",
+				),
+			},
+		];
+		expect(validateDebugRunInTerminalBoundary(mutated)).toContain(
+			"handle_run_in_terminal_reverse_request must call terminal.start_program(...) — the only sanctioned way to spawn a runInTerminal-launched process",
+		);
+	});
+
+	it("does not flag an unrelated Command::new elsewhere in the file as a runInTerminal bypass", () => {
+		const mutated = [
+			{
+				relativePath: "src-tauri/src/debug/commands.rs",
+				source: debugCommandsSource.replace(
+					"pub(crate) fn handle_run_in_terminal_reverse_request(",
+					'pub(crate) fn handle_run_in_terminal_reverse_request_marker() { let _ = std::process::Command::new("sh"); }\npub(crate) fn handle_run_in_terminal_reverse_request(',
+				),
+			},
+		];
+		// The injected marker function is a distinct, separate function (not
+		// inside the real handler's own body), so this proves the "no direct
+		// Command::new" check only inspects the handler's own isolated body
+		// (via `rustFunctionBody`), not the whole file — an unrelated
+		// `Command::new` elsewhere must not be mistaken for a runInTerminal
+		// bypass by this contract.
+		expect(validateDebugRunInTerminalBoundary(mutated)).toEqual([]);
+	});
+
+	it("fails if the handler's own body is rewritten to spawn a Command directly", () => {
+		const mutated = [
+			{
+				relativePath: "src-tauri/src/debug/commands.rs",
+				source: debugCommandsSource.replace(
+					"let result = tauri::async_runtime::block_on(terminal.start_program(",
+					'let _bypass = std::process::Command::new("sh");\n    let result = tauri::async_runtime::block_on(terminal.start_program(',
+				),
+			},
+		];
+		expect(validateDebugRunInTerminalBoundary(mutated)).toContain(
+			"handle_run_in_terminal_reverse_request must not construct a subprocess directly — it must delegate to TerminalService::start_program",
+		);
+	});
+
+	it("requires exactly one non-test start_program call site across the crate", () => {
+		const duplicated = [
+			...debugCommandsSourceOnly,
+			{
+				relativePath: "src-tauri/src/debug/duplicate.rs",
+				source: "fn other() { let _ = terminal.start_program(1); }",
+			},
+		];
+		const failures = validateDebugRunInTerminalBoundary(duplicated);
+		expect(
+			failures.some((failure) =>
+				failure.includes(
+					"TerminalService::start_program must have exactly one non-test production call site in src-tauri/src (found 2)",
+				),
+			),
+		).toBe(true);
+	});
+
+	it("excludes call sites inside *tests.rs files from the crate-wide count", () => {
+		const withTestCallSite = [
+			...debugCommandsSourceOnly,
+			{
+				relativePath: "src-tauri/src/debug/service/tests.rs",
+				source: "fn other() { let _ = terminal.start_program(1); }",
+			},
+		];
+		expect(validateDebugRunInTerminalBoundary(withTestCallSite)).toEqual([]);
+	});
+});
+
+describe("Plain F100 S1 debug adapter confirmation TypeScript boundary Harness", () => {
+	const requiredPaths = Object.freeze([
+		"app/platform/tauri/contracts.ts",
+		"app/platform/tauri/native.ts",
+		"app/platform/tauri/browser-mock.ts",
+		"app/features/debug/plain-debug-adapter-confirmation.ts",
+		"app/features/debug/plain-debug-adapter-launch.ts",
+	]);
+	const baselineAppSources = Object.freeze(
+		requiredPaths.map((relativePath) => ({
+			relativePath,
+			source: readFileSync(
+				new URL(`../../${relativePath}`, import.meta.url),
+				"utf8",
+			),
+		})),
+	);
+
+	function withMutatedSource(relativePath, mutate) {
+		return baselineAppSources.map((entry) =>
+			entry.relativePath === relativePath
+				? { ...entry, source: mutate(entry.source) }
+				: entry,
+		);
+	}
+
+	it("passes for the real, unmodified files", () => {
+		expect(
+			validateDebugAdapterConfirmationBoundary(baselineAppSources),
+		).toEqual([]);
+	});
+
+	it("requires every audited file to be present", () => {
+		for (const relativePath of requiredPaths) {
+			const missing = baselineAppSources.filter(
+				(entry) => entry.relativePath !== relativePath,
+			);
+			expect(validateDebugAdapterConfirmationBoundary(missing)).toContain(
+				`debug adapter confirmation boundary requires ${relativePath}`,
+			);
+		}
+	});
+
+	it("rejects a second call site for debugAdapterConfirmationState outside resolveDebugAdapterConfirmation", () => {
+		const mutated = withMutatedSource(
+			"app/features/debug/plain-debug-adapter-launch.ts",
+			(source) =>
+				source.replace(
+					"export async function prepareDebugAdapterLaunch(",
+					"function sneakyBridgeCall(bridge) { void bridge.debugAdapterConfirmationState({ command: '', args: [], transport: 'stdio' }); }\nexport async function prepareDebugAdapterLaunch(",
+				),
+		);
+		const failures = validateDebugAdapterConfirmationBoundary(mutated);
+		expect(
+			failures.some((failure) =>
+				failure.includes(
+					"must not consume debugAdapterConfirmationState outside resolveDebugAdapterConfirmation's single audited call site",
+				),
+			),
+		).toBe(true);
+	});
+
+	it("rejects a second call site for resolveDebugAdapterConfirmation outside prepareDebugAdapterLaunch", () => {
+		const mutated = withMutatedSource(
+			"app/features/debug/plain-debug-adapter-launch.ts",
+			(source) =>
+				`${source}\nasync function anotherCaller(bridge, dialogService) {\n\tawait resolveDebugAdapterConfirmation(bridge, dialogService, { subject: { command: "", args: [], transport: "stdio" }, configSource: "" });\n}\n`,
+		);
+		const failures = validateDebugAdapterConfirmationBoundary(mutated);
+		expect(
+			failures.some((failure) =>
+				failure.includes(
+					"must not call resolveDebugAdapterConfirmation outside plain-debug-adapter-launch.ts's prepareDebugAdapterLaunch",
+				),
+			),
+		).toBe(true);
+	});
+
+	it("rejects plain-debug-adapter-confirmation.ts gaining an import", () => {
+		const mutated = withMutatedSource(
+			"app/features/debug/plain-debug-adapter-confirmation.ts",
+			(source) => `import { readFileSync } from "node:fs";\n${source}`,
+		);
+		const failures = validateDebugAdapterConfirmationBoundary(mutated);
+		expect(
+			failures.some((failure) => failure.includes("must not import anything")),
+		).toBe(true);
+	});
+
+	it("rejects resolveDebugAdapterConfirmation skipping the dialog for an unconfirmed subject", () => {
+		const mutated = withMutatedSource(
+			"app/features/debug/plain-debug-adapter-confirmation.ts",
+			(source) =>
+				source.replace(
+					'if (state.confirmed) {\n\t\treturn Object.freeze({ kind: "already-confirmed" });\n\t}',
+					'if (state.confirmed || true) {\n\t\treturn Object.freeze({ kind: "already-confirmed" });\n\t}',
+				),
+		);
+		const failures = validateDebugAdapterConfirmationBoundary(mutated);
+		expect(
+			failures.some((failure) =>
+				failure.includes(
+					"must query the persisted decision first, always show the dialog for an unconfirmed subject",
+				),
+			),
+		).toBe(true);
+	});
+
+	it("rejects a declaration count other than exactly one per platform file", () => {
+		const mutated = withMutatedSource(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					"debugAdapterConfirmationState: async (descriptor) => {",
+					"debugAdapterConfirmationStateUnused: async (descriptor) => {",
+				),
+		);
+		const failures = validateDebugAdapterConfirmationBoundary(mutated);
+		expect(
+			failures.some((failure) =>
+				failure.includes(
+					"app/platform/tauri/native.ts must declare debugAdapterConfirmationState exactly once in its audited bridge surface",
+				),
+			),
+		).toBe(true);
 	});
 });

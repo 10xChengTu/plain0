@@ -34,7 +34,7 @@ async function baseline() {
 }
 
 describe("exact Workbench patch contracts", () => {
-	it("accepts only the checked-in nine-package patch and lock graph", async () => {
+	it("accepts only the checked-in ten-package patch and lock graph", async () => {
 		expect(validateWorkbenchPatchSet(await baseline())).toEqual([]);
 	});
 
@@ -116,6 +116,62 @@ describe("exact Workbench patch contracts", () => {
 			{
 				from: 'resource.fragment === ""',
 				to: "true",
+			},
+		];
+
+		for (const mutation of mutations) {
+			const input = await baseline();
+			const source = input.patchSources.get(patchPath);
+			expect(source).toContain(mutation.from);
+			input.patchSources.set(
+				patchPath,
+				source.replace(mutation.from, mutation.to),
+			);
+			expect(validateWorkbenchPatchSet(input)).toContain(
+				`${patchPath} differs from its exact audited SHA-256`,
+			);
+		}
+	});
+
+	it("rejects titlebarPart dead-account-branch resurrection and the Manage-gear reroute downgrade", async () => {
+		const patchPath =
+			"patches/@codingame__monaco-vscode-view-title-bar-service-override@35.0.1.patch";
+		const baselineInput = await baseline();
+		const baselineSource = baselineInput.patchSources.get(patchPath);
+		expect(baselineSource).toContain(
+			"+import { PlainSimpleGlobalActivityActionViewItem } from '../../../../../../../../../../../../../app/features/workbench/plain-global-composite-bar.ts';",
+		);
+		expect(baselineSource).toContain(
+			'+                    "workbench.activity.showAccounts",',
+		);
+		// `SimpleAccountActivityActionViewItem`/`isAccountsActionVisible`/
+		// `AccountsActivityActionViewItem` only appear on removed (`-`-prefixed)
+		// diff lines — never on an added (`+`-prefixed) line — proving the
+		// patched, post-apply file has zero remaining references to any of them.
+		for (const removedToken of [
+			"SimpleAccountActivityActionViewItem",
+			"isAccountsActionVisible",
+			"AccountsActivityActionViewItem",
+		]) {
+			for (const line of baselineSource.split(/\r?\n/u)) {
+				if (line.includes(removedToken)) {
+					expect(line.startsWith("-")).toBe(true);
+				}
+			}
+		}
+
+		const mutations = [
+			{
+				from: "+                return this.instantiationService.createInstance(PlainSimpleGlobalActivityActionViewItem, {",
+				to: "+                return this.instantiationService.createInstance(SimpleGlobalActivityActionViewItem, {",
+			},
+			{
+				from: '+                    "workbench.activity.showAccounts",',
+				to: "+                    AccountsActivityActionViewItem.ACCOUNTS_VISIBILITY_PREFERENCE_KEY,",
+			},
+			{
+				from: "             if (this.activityActionsEnabled) {\n-                if (isAccountsActionVisible(this.storageService)) {\n-                    actions.primary.push(ACCOUNTS_ACTIVITY_TILE_ACTION);\n-                }\n                 actions.primary.push(GLOBAL_ACTIVITY_TITLE_ACTION);",
+				to: "             if (this.activityActionsEnabled) {\n                 actions.primary.push(GLOBAL_ACTIVITY_TITLE_ACTION);",
 			},
 		];
 
@@ -391,7 +447,7 @@ describe("exact Workbench patch contracts", () => {
 			"patchedDependencies:\n  '@example/extra@1.0.0': patches/extra.patch\n",
 		);
 		expect(validateWorkbenchPatchSet(manifestExtra)).toContain(
-			"pnpm-workspace.yaml top-level patchedDependencies must be the exact audited nine-entry closed set",
+			"pnpm-workspace.yaml top-level patchedDependencies must be the exact audited ten-entry closed set",
 		);
 
 		const lockExtra = await baseline();
@@ -400,7 +456,7 @@ describe("exact Workbench patch contracts", () => {
 			`patchedDependencies:\n  '@example/extra@1.0.0': ${"f".repeat(64)}\n`,
 		);
 		expect(validateWorkbenchPatchSet(lockExtra)).toContain(
-			"pnpm-lock.yaml top-level patchedDependencies must be the exact audited nine-entry closed set",
+			"pnpm-lock.yaml top-level patchedDependencies must be the exact audited ten-entry closed set",
 		);
 	});
 
@@ -420,7 +476,7 @@ describe("exact Workbench patch contracts", () => {
 
 	it("rejects bare importer and snapshot edges even when comments repeat the hash", async () => {
 		const apiHash =
-			"184ceed92b82bccb869ca91bc322e6c01740d8eb85cd9ddde47484e8959858f6";
+			"9b22d0ee29e3f8c8dadf821345699e11459b4cf0b272c48d98d95d8fc057bd76";
 		const importerBare = await baseline();
 		importerBare.lockfile = `${importerBare.lockfile.replace(
 			`        version: 35.0.1(patch_hash=${apiHash})`,

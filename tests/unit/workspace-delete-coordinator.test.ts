@@ -135,6 +135,246 @@ function testBridge(
 		async workspaceWriteFile() {
 			throw new Error("unused");
 		},
+		async workspaceSearchFiles() {
+			throw new Error("unused");
+		},
+		async workspaceSearchTextStart() {
+			throw new Error("unused");
+		},
+		async workspaceSearchTextPoll() {
+			throw new Error("unused");
+		},
+		async workspaceSearchTextCancel() {
+			throw new Error("unused");
+		},
+		workspaceSearchTextWatch() {
+			return () => {};
+		},
+		async backupWrite() {
+			throw new Error("unused");
+		},
+		async backupReadAll() {
+			throw new Error("unused");
+		},
+		async backupDiscard() {
+			throw new Error("unused");
+		},
+		async backupDiscardAll() {
+			throw new Error("unused");
+		},
+		async themeImportVsix() {
+			throw new Error("unused");
+		},
+		async themeImportDirectory() {
+			throw new Error("unused");
+		},
+		async themeList() {
+			throw new Error("unused");
+		},
+		async themeReadResource() {
+			throw new Error("unused");
+		},
+		async themeRemove() {
+			throw new Error("unused");
+		},
+		async themeGetSelection() {
+			throw new Error("unused");
+		},
+		async themeSetSelection() {
+			throw new Error("unused");
+		},
+		async themeSetFileIconThemeSelection() {
+			throw new Error("unused");
+		},
+		async themeSetProductIconThemeSelection() {
+			throw new Error("unused");
+		},
+		async terminalStart() {
+			throw new Error("unused");
+		},
+		async terminalInputText() {
+			throw new Error("unused");
+		},
+		async terminalInputKey() {
+			throw new Error("unused");
+		},
+		async terminalFocus() {
+			throw new Error("unused");
+		},
+		async terminalResize() {
+			throw new Error("unused");
+		},
+		async terminalAck() {
+			throw new Error("unused");
+		},
+		async terminalScrollback() {
+			throw new Error("unused");
+		},
+		async terminalKill() {
+			throw new Error("unused");
+		},
+		terminalWatchData() {
+			throw new Error("unused");
+		},
+		terminalWatchExit() {
+			throw new Error("unused");
+		},
+		async workspaceTrustState() {
+			throw new Error("unused");
+		},
+		async workspaceTrustGrant() {
+			throw new Error("unused");
+		},
+		async workspaceTrustRevoke() {
+			throw new Error("unused");
+		},
+		async gitStatus() {
+			throw new Error("unused");
+		},
+		async gitDiffFiles() {
+			throw new Error("unused");
+		},
+		async gitShowBlob() {
+			throw new Error("unused");
+		},
+		async gitStagePaths() {
+			throw new Error("unused");
+		},
+		async gitUnstagePaths() {
+			throw new Error("unused");
+		},
+		async gitStageBlob() {
+			throw new Error("unused");
+		},
+		async gitCommit() {
+			throw new Error("unused");
+		},
+		async gitDiscardPaths() {
+			throw new Error("unused");
+		},
+		async gitNetworkPreview() {
+			throw new Error("unused");
+		},
+		async gitFetch() {
+			throw new Error("unused");
+		},
+		async gitPull() {
+			throw new Error("unused");
+		},
+		async gitPush() {
+			throw new Error("unused");
+		},
+		async gitNetworkCancel() {
+			throw new Error("unused");
+		},
+		async gitBlameFile() {
+			throw new Error("unused");
+		},
+		async gitBlameCommitMessages() {
+			throw new Error("unused");
+		},
+		async gitFileHistory() {
+			throw new Error("unused");
+		},
+		async gitLineHistoryList() {
+			throw new Error("unused");
+		},
+		async gitLineHistoryDetail() {
+			throw new Error("unused");
+		},
+		async gitShowCommit() {
+			throw new Error("unused");
+		},
+		async gitShowCommitBlob() {
+			throw new Error("unused");
+		},
+		async gitLogGraph() {
+			throw new Error("unused");
+		},
+		async gitRefsList() {
+			throw new Error("unused");
+		},
+		async gitStashList() {
+			throw new Error("unused");
+		},
+		async gitStashShow() {
+			throw new Error("unused");
+		},
+		async gitStashPush() {
+			throw new Error("unused");
+		},
+		async gitStashApply() {
+			throw new Error("unused");
+		},
+		async gitStashPop() {
+			throw new Error("unused");
+		},
+		async gitStashDrop() {
+			throw new Error("unused");
+		},
+		async gitWorktreeList() {
+			throw new Error("unused");
+		},
+		async gitWorktreeAdd() {
+			throw new Error("unused");
+		},
+		async gitWorktreeRemove() {
+			throw new Error("unused");
+		},
+		async debugAdapterConfirmationState() {
+			throw new Error("unused");
+		},
+		async debugAdapterConfirmationGrant() {
+			throw new Error("unused");
+		},
+		async debugAdapterConfirmationRevoke() {
+			throw new Error("unused");
+		},
+		async debugLaunch() {
+			throw new Error("unused");
+		},
+		async debugAttach() {
+			throw new Error("unused");
+		},
+		async debugDisconnect() {
+			throw new Error("unused");
+		},
+		async debugSetBreakpoints() {
+			throw new Error("unused");
+		},
+		async debugStackTrace() {
+			throw new Error("unused");
+		},
+		async debugScopes() {
+			throw new Error("unused");
+		},
+		async debugVariables() {
+			throw new Error("unused");
+		},
+		async debugEvaluate() {
+			throw new Error("unused");
+		},
+		async debugContinue() {
+			throw new Error("unused");
+		},
+		async debugNext() {
+			throw new Error("unused");
+		},
+		async debugStepIn() {
+			throw new Error("unused");
+		},
+		async debugStepOut() {
+			throw new Error("unused");
+		},
+		async debugPause() {
+			throw new Error("unused");
+		},
+		async debugOutputAck() {
+			throw new Error("unused");
+		},
+		debugWatchEvent() {
+			throw new Error("unused");
+		},
 		...overrides,
 	};
 }

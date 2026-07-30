@@ -60,6 +60,158 @@ const EXPECTED_TAURI_CONFIG_FILES = Object.freeze([
 const TAURI_CONFIG_FILE_PATTERN =
 	/^(?:tauri(?:\.[^.]+)*\.conf\.(?:json|json5)|Tauri(?:\.[^.]+)?\.toml)$/;
 
+// `F120` S0 (`docs/research/2026-07-29-branding-packaging.md`, "5.1 品牌统一"):
+// the closed set of `IProductConfiguration` fields `app/main.ts` overrides via
+// `initialize(...)`'s `productConfiguration` option, and the exact literal
+// value audited for each. Two of these — `dataFolderName`/`urlProtocol` — are
+// security-relevant, not cosmetic: leaving them at their upstream Code OSS
+// defaults (`.vscode-oss`/`code-oss`) would make Plain read/write the same
+// user-data directory and register the same custom URL scheme as a real,
+// separately-installed VS Code on the same machine. The remaining fields
+// close off the vendor `product.json.js` blob's Code OSS-branded strings
+// (`applicationName`/`sharedDataFolderName`/`reportIssueUrl`/`licenseUrl`/
+// `serverApplicationName`) that `mixin()`'s shallow merge would otherwise
+// leave live on the real, currently-bundled `IProductService` singleton (see
+// the research document's "结论 2.1" for the real `document.title === "Plain"`
+// evidence that this override path is live, and its enumeration of exactly
+// which fields were previously left uncovered). `win32*`/`darwinBundleIdentifier`/
+// `defaultChatAgent`/`onboardingThemes`/`onboardingKeymaps` are deliberately
+// excluded — the research document confirmed each has zero real reference
+// anywhere in the installed `vs/` source tree (Electron-only fields, or a
+// dead GitHub Copilot onboarding blob), so covering them here would just be
+// unreachable dead configuration, not a real fix.
+//
+// `reportIssueUrl`/`licenseUrl` point at this repository's own real remote
+// (`git remote -v` → `https://github.com/10xChengTu/plain0`) rather than a
+// placeholder domain — the research document found no currently-reachable UI
+// consumer of either field (no "Report Issue"/About action registered in the
+// real bundle), but covers them defensively in case a future vendor upgrade
+// makes either reachable, per the plan's own "5.1" guidance.
+const EXPECTED_PRODUCT_CONFIGURATION = Object.freeze({
+	nameShort: "Plain",
+	nameLong: "Plain",
+	applicationName: "plain",
+	dataFolderName: ".plain",
+	sharedDataFolderName: ".plain-shared",
+	urlProtocol: "plain",
+	reportIssueUrl: "https://github.com/10xChengTu/plain0/issues/new",
+	licenseUrl: "https://github.com/10xChengTu/plain0/blob/main/LICENSE.txt",
+	serverApplicationName: "plain-server",
+});
+
+// `F120` S7 (`docs/research/2026-07-29-branding-packaging.md` "结论 6", "需要
+// 新增的 AST 契约" item 2): `validateTauriConfiguration` below used to check
+// nothing about `config.identifier` or `config.bundle` at all -- the research
+// document's own real reading of this function (as it stood before this
+// slice) confirmed the `bundle` segment was a complete blind spot: an
+// `identifier` reverted to a Code OSS-style value, a deleted `icon` array, a
+// missing `copyright`, or a changed `macOS.minimumSystemVersion` would all
+// pass `pnpm check` silently. `EXPECTED_BUNDLE_IDENTIFIER`/`EXPECTED_BUNDLE`
+// close that gap by locking the exact, currently-shipping shape byte for
+// byte (mirroring the same `sameObject`/`sameArray` exact-match style already
+// used for `EXPECTED_PRODUCTION_CSP` above, not a looser subset check).
+//
+// `bundle.macOS.entitlements` is included here (F120 S5, same research
+// document "结论 4.3"/"5.3"): it must always point at the audited
+// `Entitlements.plist` this same slice added, never silently drop out or
+// point somewhere else -- `validateEntitlementsBoundary` below is the
+// separate contract that locks that file's own contents.
+const EXPECTED_BUNDLE_IDENTIFIER = "com.plain.editor";
+const EXPECTED_BUNDLE = Object.freeze({
+	active: true,
+	targets: ["app", "dmg"],
+	category: "DeveloperTool",
+	copyright: "Copyright (c) 2026 Plain Contributors",
+	icon: [
+		"icons/32x32.png",
+		"icons/128x128.png",
+		"icons/128x128@2x.png",
+		"icons/icon.icns",
+		"icons/icon.ico",
+	],
+	macOS: {
+		minimumSystemVersion: "10.15",
+		entitlements: "Entitlements.plist",
+	},
+});
+
+// `F120` S5 (`docs/research/2026-07-29-branding-packaging.md` "结论 4.3",
+// "5.3", main-session ruling point 6): the closed, audited set of
+// hardened-runtime entitlements `src-tauri/Entitlements.plist` may declare.
+//
+// This explanation lives here rather than as a comment inside the plist
+// file itself for a real, empirically-discovered reason: a real
+// `codesign`-driven build of this exact file, with an explanatory XML
+// comment inside it, failed with `Failed to parse entitlements:
+// AMFIUnserializeXML: syntax error near line 13` -- Apple's own
+// entitlements parser (AMFI) is a stricter, separate path from the general
+// CoreFoundation plist parser `plutil -lint` uses, and rejects the literal
+// `--` sequence inside an XML comment (a real, long-standing XML-spec rule
+// -- "the string `--` MUST NOT occur within comments" -- that most
+// general-purpose XML tooling tolerates but AMFI does not). This project's
+// own prose style uses `--` as an em dash throughout, so any comment of
+// meaningful length was essentially guaranteed to trip this. The fix was
+// to keep `Entitlements.plist` itself comment-free (matching how
+// real-world entitlements files are conventionally authored anyway) and
+// move the rationale here instead.
+//
+// `com.apple.security.cs.allow-jit` is the one entry this file starts
+// with, because Tauri's own published guidance is unambiguous that it is
+// not optional once hardened runtime is enabled: WKWebView needs
+// JIT-compiled memory pages to run JavaScript at a usable speed, hardened
+// runtime blocks MAP_JIT allocation by default, and an app that omits this
+// entitlement after being notarized does not merely run slower, it can
+// crash on launch. Tauri's own `bundle.macOS.hardenedRuntime` config
+// defaults to `true` (confirmed by reading `@tauri-apps/cli`'s
+// `config.schema.json` locally), so this is a real, load-bearing
+// prerequisite the moment a real signing identity is configured, not a
+// speculative addition.
+//
+// `com.apple.security.cs.debugger` is deliberately NOT included. The
+// research document's "结论 4.4" raises a real technical correction to
+// F100's own recorded assumption: `task_for_pid` permission is evaluated
+// against the *calling* process (the DAP adapter binary Plain spawns, e.g.
+// `lldb-dap`), not against whichever process spawned that caller -- if
+// that holds, Plain.app itself never needs this entitlement at all, since
+// Plain only spawns an adapter and talks DAP over stdio/TCP, never calling
+// `task_for_pid` itself.
+//
+// This slice ran a real, bounded, reproducible experiment (not just cited
+// documentation) to test this in the only environment available here (an
+// automated, headless Bash sandbox, not a real interactive Mac session): a
+// small ad-hoc-signed C harness spawns a child and calls `task_for_pid` on
+// it. Without any entitlement, the call fails fast and cleanly
+// (`KERN_FAILURE`, no hang). Re-signed with only
+// `com.apple.security.cs.debugger` added, the identical call reliably
+// blocks and has to be force-killed -- reproduced twice. Real Apple `lldb`
+// itself (already signed by Apple with whatever entitlements it needs)
+// hangs identically at `process launch` in this same sandbox, and
+// `DevToolsSecurity -status` reports Developer Mode disabled here with no
+// passwordless path to enable it (enabling it would itself be a system
+// security setting change, out of bounds for an automated agent
+// regardless). Together this confirms the entitlement measurably changes
+// kernel-level behavior for the immediate caller regardless of what
+// spawned it (consistent with the research document's caller-based
+// correction), but also that this specific execution environment cannot
+// complete real native process debugging at all, for reasons independent
+// of any entitlement Plain.app itself carries. Neither finding proves the
+// adapter (not Plain.app) is the correct entitlement holder in a real,
+// unsandboxed, Developer-Mode-enabled session -- that still needs the
+// real-Mac verification the research document's "结论 4.4" and
+// `docs/e2e-handover.md`'s E2E-010 step 3 already call for. Adding
+// `com.apple.security.cs.debugger` now, before that verification, would be
+// exactly the "expand the attack surface on a guess" move the
+// main-session ruling's point 6 explicitly forbids. If real-Mac testing
+// later proves Plain.app itself needs it, add it then, with its own
+// threat-model note.
+//
+// Any future entitlement addition must extend this set deliberately (with
+// its own threat-model note, per `AGENTS.md`'s "new permissions need a
+// threat note and a test" rule), not slip in silently.
+const EXPECTED_ENTITLEMENTS = Object.freeze({
+	"com.apple.security.cs.allow-jit": true,
+});
+
 function isRecord(value) {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -121,6 +273,58 @@ const EXPECTED_SERVICE_OVERRIDE_CALLS = Object.freeze([
 	"getExplorerServiceOverride",
 	"getThemeServiceOverride",
 	"getTextmateServiceOverride",
+	// `F090` S2: the multi-diff-editor override's own zero-argument factory
+	// — see `validateMultiDiffEditorOverrideImportBoundary`'s own doc
+	// comment for the chat/AI-cleanliness audit that justifies calling it
+	// directly here, exactly like every sibling override above.
+	"getMultiDiffEditorServiceOverride",
+]);
+// Working-copy-service-override's default export unconditionally imports
+// browser/workingCopyBackupService.js and common/workingCopyHistoryService.js,
+// which register BrowserWorkingCopyBackupTracker and WorkingCopyHistoryTracker
+// as real Workbench contributions purely as an import-time side effect (the
+// history tracker calls IFileService.cloneFile() on every save, which Plain's
+// files-service patch always rejects for plain-workspace resources). Plain
+// therefore never calls that package's factory; it imports WorkingCopyService
+// and WorkingCopyEditorService directly from their exact class submodules,
+// the same pattern already used for DialogService below.
+const WORKING_COPY_OVERRIDE_ROOT_MODULE =
+	"@codingame/monaco-vscode-working-copy-service-override";
+const WORKING_COPY_SERVICE_IMPLEMENTATION_MODULE = `${WORKING_COPY_OVERRIDE_ROOT_MODULE}/vscode/vs/workbench/services/workingCopy/common/workingCopyService`;
+const WORKING_COPY_EDITOR_SERVICE_IMPLEMENTATION_MODULE = `${WORKING_COPY_OVERRIDE_ROOT_MODULE}/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService`;
+// app/services/plain-workspace-backup-tracker.ts extends the package's
+// exact, side-effect-free common/workingCopyBackupTracker submodule (see
+// that file's own doc comment for the side-effect audit); it is the only
+// other file permitted to reference the working-copy override.
+const ALLOWED_WORKING_COPY_OVERRIDE_IMPORT_PATHS = new Set([
+	"app/services.ts",
+	"app/services/plain-workspace-backup-tracker.ts",
+]);
+// search-service-override's default export (CustomSearchService) unconditionally
+// does `isHTMLFileSystemProvider(fileService.getProvider(Schemas.file))`, which
+// throws a TypeError once Plain's FileService (registering no `file:` provider)
+// returns undefined for that lookup; both of that factory's fallbacks are also
+// front-end file searchers hard-coded to the `file:` scheme. Plain therefore
+// never calls that package's factory; app/features/search/plain-search-service.ts
+// extends the exact, unpatched SearchService submodule instead. That same file's
+// own doc comment records the audit of searchService.js's own import graph
+// (no top-level registrations beyond defining the class).
+const SEARCH_OVERRIDE_ROOT_MODULE =
+	"@codingame/monaco-vscode-search-service-override";
+const SEARCH_SERVICE_IMPLEMENTATION_MODULE = `${SEARCH_OVERRIDE_ROOT_MODULE}/vscode/vs/workbench/services/search/common/searchService`;
+// app/features/search/search-contribution.ts imports exactly one other
+// submodule of this package for its side effects
+// (.../browser/searchQuickAccess.contribution, which registers only the
+// Cmd+P AnythingQuickAccessProvider, the `#` SymbolsQuickAccessProvider, and
+// the workbench.action.showAllSymbols command). It deliberately does not
+// import the package's own search.contribution.js: that file unconditionally
+// imports searchChatContext.js and registers SearchChatContextContribution as
+// a real WorkbenchPhase.AfterRestored contribution wiring Search results into
+// IChatContextPickService, a Chat/AI context-attachment surface forbidden by
+// AGENTS.md — see search-contribution.ts's own doc comment for the full audit.
+const ALLOWED_SEARCH_OVERRIDE_IMPORT_PATHS = new Set([
+	"app/features/search/plain-search-service.ts",
+	"app/features/search/search-contribution.ts",
 ]);
 
 function staticStringValue(node) {
@@ -213,6 +417,264 @@ export function validateNotificationOverrideImportBoundary(
 	return referencesNotificationsOverride && normalizedPath !== "app/services.ts"
 		? [
 				`${normalizedPath} imports the notifications override outside app/services.ts`,
+			]
+		: [];
+}
+
+const SEARCH_CONTRIBUTION_MODULE = `${SEARCH_OVERRIDE_ROOT_MODULE}/vscode/vs/workbench/contrib/search/browser/search.contribution`;
+const SEARCH_EDITOR_CONTRIBUTION_MODULE = `${SEARCH_OVERRIDE_ROOT_MODULE}/vscode/vs/workbench/contrib/searchEditor/browser/searchEditor.contribution`;
+
+function isSearchOverrideModule(moduleName) {
+	return (
+		moduleName === SEARCH_OVERRIDE_ROOT_MODULE ||
+		moduleName.startsWith(`${SEARCH_OVERRIDE_ROOT_MODULE}/`)
+	);
+}
+
+export function validateSearchOverrideImportBoundary(source, relativePath) {
+	const sourceFile = ts.createSourceFile(
+		relativePath,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	let referencesSearchOverride = false;
+	let referencesAggregatingEntryPoint = false;
+	let referencesSearchContributionModule = false;
+	function record(moduleName) {
+		if (!isSearchOverrideModule(moduleName)) {
+			return;
+		}
+		referencesSearchOverride = true;
+		if (moduleName === SEARCH_OVERRIDE_ROOT_MODULE) {
+			referencesAggregatingEntryPoint = true;
+		}
+		if (
+			moduleName === SEARCH_CONTRIBUTION_MODULE ||
+			moduleName === SEARCH_EDITOR_CONTRIBUTION_MODULE
+		) {
+			referencesSearchContributionModule = true;
+		}
+	}
+	function visit(node) {
+		if (ts.isStringLiteralLike(node)) {
+			record(node.text);
+		}
+		if (
+			ts.isCallExpression(node) &&
+			node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+			node.arguments.length > 0
+		) {
+			record(staticStringValue(node.arguments[0]) ?? "");
+		}
+		ts.forEachChild(node, visit);
+	}
+	visit(sourceFile);
+	const normalizedPath = relativePath.replaceAll("\\", "/");
+	const failures = [];
+	if (
+		referencesSearchOverride &&
+		!ALLOWED_SEARCH_OVERRIDE_IMPORT_PATHS.has(normalizedPath)
+	) {
+		failures.push(
+			`${normalizedPath} imports the search override outside its audited files`,
+		);
+	}
+	if (referencesAggregatingEntryPoint) {
+		failures.push(
+			`${normalizedPath} must not import the search-service-override aggregating entry point`,
+		);
+	}
+	if (referencesSearchContributionModule) {
+		// search.contribution.js (and searchEditor.contribution.js, which it
+		// also imports) unconditionally registers SearchChatContextContribution
+		// as a real WorkbenchPhase.AfterRestored contribution wiring Search
+		// results/files/symbols into IChatContextPickService — a Chat/AI
+		// context-attachment surface. AGENTS.md forbids adding AI/Chat/Agent/MCP
+		// surfaces, and the runtime excluded-surface guard cannot catch this
+		// because it only audits commandIds/viewContainerIds/viewIds, not
+		// registerWorkbenchContribution2 ids. Only the narrower
+		// searchQuickAccess.contribution submodule (imported by
+		// app/features/search/search-contribution.ts) and Plain's own
+		// hand-reproduced view-container/view registration are permitted.
+		failures.push(
+			`${normalizedPath} must not import the search.contribution/searchEditor.contribution modules`,
+		);
+	}
+	if (normalizedPath === "app/features/search/plain-search-service.ts") {
+		const searchServiceImports = sourceFile.statements.filter(
+			(statement) =>
+				ts.isImportDeclaration(statement) &&
+				ts.isStringLiteral(statement.moduleSpecifier) &&
+				statement.moduleSpecifier.text === SEARCH_SERVICE_IMPLEMENTATION_MODULE,
+		);
+		const isExactSearchServiceImport =
+			searchServiceImports.length === 1 &&
+			searchServiceImports[0].importClause?.isTypeOnly !== true &&
+			searchServiceImports[0].importClause?.name === undefined &&
+			ts.isNamedImports(searchServiceImports[0].importClause?.namedBindings) &&
+			searchServiceImports[0].importClause.namedBindings.elements.length ===
+				1 &&
+			!searchServiceImports[0].importClause.namedBindings.elements[0]
+				.isTypeOnly &&
+			(searchServiceImports[0].importClause.namedBindings.elements[0]
+				.propertyName?.text ??
+				searchServiceImports[0].importClause.namedBindings.elements[0].name
+					.text) === "SearchService" &&
+			searchServiceImports[0].importClause.namedBindings.elements[0].name
+				.text === "SearchService";
+		if (!isExactSearchServiceImport) {
+			failures.push(
+				`${normalizedPath} must import only the exact SearchService class subpath`,
+			);
+		}
+	}
+	return failures;
+}
+
+function isWorkingCopyOverrideModule(moduleName) {
+	return (
+		moduleName === WORKING_COPY_OVERRIDE_ROOT_MODULE ||
+		moduleName.startsWith(`${WORKING_COPY_OVERRIDE_ROOT_MODULE}/`)
+	);
+}
+
+export function validateWorkingCopyOverrideImportBoundary(
+	source,
+	relativePath,
+) {
+	const sourceFile = ts.createSourceFile(
+		relativePath,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	let referencesWorkingCopyOverride = false;
+	let referencesAggregatingEntryPoint = false;
+	function visit(node) {
+		if (
+			ts.isStringLiteralLike(node) &&
+			isWorkingCopyOverrideModule(node.text)
+		) {
+			referencesWorkingCopyOverride = true;
+			if (node.text === WORKING_COPY_OVERRIDE_ROOT_MODULE) {
+				referencesAggregatingEntryPoint = true;
+			}
+		}
+		if (
+			ts.isCallExpression(node) &&
+			node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+			node.arguments.length > 0
+		) {
+			const moduleName = staticStringValue(node.arguments[0]) ?? "";
+			if (isWorkingCopyOverrideModule(moduleName)) {
+				referencesWorkingCopyOverride = true;
+				if (moduleName === WORKING_COPY_OVERRIDE_ROOT_MODULE) {
+					referencesAggregatingEntryPoint = true;
+				}
+			}
+		}
+		ts.forEachChild(node, visit);
+	}
+	visit(sourceFile);
+	const normalizedPath = relativePath.replaceAll("\\", "/");
+	const failures = [];
+	if (
+		referencesWorkingCopyOverride &&
+		!ALLOWED_WORKING_COPY_OVERRIDE_IMPORT_PATHS.has(normalizedPath)
+	) {
+		failures.push(
+			`${normalizedPath} imports the working-copy override outside its audited files`,
+		);
+	}
+	if (referencesAggregatingEntryPoint) {
+		// The package's default export unconditionally imports
+		// browser/workingCopyBackupService.js and
+		// common/workingCopyHistoryService.js, which register
+		// BrowserWorkingCopyBackupTracker and WorkingCopyHistoryTracker as real
+		// Workbench contributions as an import-time side effect: the history
+		// tracker calls IFileService.cloneFile() on every save, which Plain's
+		// files-service patch always rejects for plain-workspace resources.
+		failures.push(
+			`${normalizedPath} must not import the working-copy-service-override aggregating entry point`,
+		);
+	}
+	return failures;
+}
+
+/**
+ * `F090` S2 installs `@codingame/monaco-vscode-multi-diff-editor-service-
+ * override@35.0.1` — the first new vendor override this feature adds (see
+ * `docs/research/2026-07-26-git-history.md`'s own chat/AI-coupling audit).
+ * Confirmed clean by reading the real, installed tarball (not merely the
+ * research doc's own summary): its only file (`index.js`) does
+ * `getServiceOverride() { return { [IMultiDiffSourceResolverService...]:
+ * new SyncDescriptor(MultiDiffSourceResolverService, [], true) }; }` and a
+ * side-effect import of `multiDiffEditor.contribution.js` (which itself only
+ * registers the multi-diff editor pane, its actions, and the base package's
+ * own `ScmMultiDiffSourceResolverContribution`/`OpenScmGroupAction` — audited
+ * zero chat/copilot references, only `ISCMService`/`IEditorService`/
+ * `IActivityService` dependencies) — this override package is therefore
+ * called directly, exactly like every sibling override in
+ * `app/services.ts`'s `createServiceOverrides` (never an aggregating-entry-
+ * point exception the way `working-copy-service-override`'s own factory
+ * needs). Plain's own resolver (`plain-git-commit-detail.ts`) and view code
+ * never import this override package at all — they only import
+ * `IMultiDiffSourceResolverService`/`IMultiDiffSourceResolver`/
+ * `MultiDiffEditorItem` from the *base* `@codingame/monaco-vscode-api`
+ * package (already unrestricted by this boundary; those types live there,
+ * not in the override package itself) — so `app/services.ts` is this
+ * package's *only* legitimate reference anywhere in `app/`.
+ */
+const MULTI_DIFF_EDITOR_OVERRIDE_ROOT_MODULE =
+	"@codingame/monaco-vscode-multi-diff-editor-service-override";
+
+function isMultiDiffEditorOverrideModule(moduleName) {
+	return (
+		moduleName === MULTI_DIFF_EDITOR_OVERRIDE_ROOT_MODULE ||
+		moduleName.startsWith(`${MULTI_DIFF_EDITOR_OVERRIDE_ROOT_MODULE}/`)
+	);
+}
+
+export function validateMultiDiffEditorOverrideImportBoundary(
+	source,
+	relativePath,
+) {
+	const sourceFile = ts.createSourceFile(
+		relativePath,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	let referencesMultiDiffEditorOverride = false;
+	function visit(node) {
+		if (
+			ts.isStringLiteralLike(node) &&
+			isMultiDiffEditorOverrideModule(node.text)
+		) {
+			referencesMultiDiffEditorOverride = true;
+		}
+		if (
+			ts.isCallExpression(node) &&
+			node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+			node.arguments.length > 0 &&
+			isMultiDiffEditorOverrideModule(
+				staticStringValue(node.arguments[0]) ?? "",
+			)
+		) {
+			referencesMultiDiffEditorOverride = true;
+		}
+		ts.forEachChild(node, visit);
+	}
+	visit(sourceFile);
+	const normalizedPath = relativePath.replaceAll("\\", "/");
+	return referencesMultiDiffEditorOverride &&
+		normalizedPath !== "app/services.ts"
+		? [
+				`${normalizedPath} imports the multi-diff-editor override outside app/services.ts`,
 			]
 		: [];
 }
@@ -409,6 +871,88 @@ export function validateDialogServiceOverride(source) {
 		);
 	}
 
+	const workingCopyModuleReferences = [];
+	let hasDynamicWorkingCopyImport = false;
+	function collectWorkingCopyModuleReferences(node) {
+		if (
+			ts.isStringLiteralLike(node) &&
+			isWorkingCopyOverrideModule(node.text)
+		) {
+			workingCopyModuleReferences.push(node.text);
+		}
+		if (
+			ts.isCallExpression(node) &&
+			node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+			node.arguments.length > 0 &&
+			isWorkingCopyOverrideModule(staticStringValue(node.arguments[0]) ?? "")
+		) {
+			hasDynamicWorkingCopyImport = true;
+		}
+		ts.forEachChild(node, collectWorkingCopyModuleReferences);
+	}
+	collectWorkingCopyModuleReferences(sourceFile);
+	const workingCopyImports = sourceFile.statements.filter(
+		(statement) =>
+			ts.isImportDeclaration(statement) &&
+			ts.isStringLiteral(statement.moduleSpecifier) &&
+			isWorkingCopyOverrideModule(statement.moduleSpecifier.text),
+	);
+	function isExactWorkingCopyClassImport(
+		statement,
+		expectedModule,
+		expectedName,
+	) {
+		return (
+			statement !== undefined &&
+			statement.moduleSpecifier.text === expectedModule &&
+			statement.importClause?.isTypeOnly !== true &&
+			statement.importClause?.name === undefined &&
+			ts.isNamedImports(statement.importClause?.namedBindings) &&
+			statement.importClause.namedBindings.elements.length === 1 &&
+			!statement.importClause.namedBindings.elements[0].isTypeOnly &&
+			(statement.importClause.namedBindings.elements[0].propertyName?.text ??
+				statement.importClause.namedBindings.elements[0].name.text) ===
+				expectedName &&
+			statement.importClause.namedBindings.elements[0].name.text ===
+				expectedName
+		);
+	}
+	const workingCopyServiceImport = workingCopyImports.find(
+		(statement) =>
+			statement.moduleSpecifier.text ===
+			WORKING_COPY_SERVICE_IMPLEMENTATION_MODULE,
+	);
+	const workingCopyEditorServiceImport = workingCopyImports.find(
+		(statement) =>
+			statement.moduleSpecifier.text ===
+			WORKING_COPY_EDITOR_SERVICE_IMPLEMENTATION_MODULE,
+	);
+	// Isolated fixtures exercising unrelated Dialog/Notification checks may
+	// omit working-copy wiring entirely (mirrors how IWorkspaceEditingService/
+	// IWorkspacesService are optional here too); but once any working-copy
+	// override reference appears, it must be exactly this closed shape.
+	if (workingCopyModuleReferences.length > 0 || hasDynamicWorkingCopyImport) {
+		if (
+			workingCopyModuleReferences.length !== 2 ||
+			hasDynamicWorkingCopyImport ||
+			workingCopyImports.length !== 2 ||
+			!isExactWorkingCopyClassImport(
+				workingCopyServiceImport,
+				WORKING_COPY_SERVICE_IMPLEMENTATION_MODULE,
+				"WorkingCopyService",
+			) ||
+			!isExactWorkingCopyClassImport(
+				workingCopyEditorServiceImport,
+				WORKING_COPY_EDITOR_SERVICE_IMPLEMENTATION_MODULE,
+				"WorkingCopyEditorService",
+			)
+		) {
+			failures.push(
+				"app/services.ts must import only the exact WorkingCopyService and WorkingCopyEditorService class subpaths",
+			);
+		}
+	}
+
 	const factories = sourceFile.statements.filter(
 		(statement) =>
 			ts.isFunctionDeclaration(statement) &&
@@ -464,6 +1008,99 @@ export function validateDialogServiceOverride(source) {
 	const nonSpreadProperties = overrideObject.properties.filter(
 		(property) => !ts.isSpreadAssignment(property),
 	);
+	// Between the zero-argument override spreads and the trailing audited
+	// IDialogService/ILanguageStatusService pair, only this exact closed set
+	// of hand-selected SyncDescriptor bindings is permitted, in this order.
+	const MIDDLE_SERVICE_DESCRIPTORS = Object.freeze([
+		{
+			tokenName: "IWorkspaceEditingService",
+			className: "PlainWorkspaceEditingService",
+			thirdArgIsTrue: true,
+		},
+		{
+			tokenName: "IWorkspacesService",
+			className: "PlainWorkspacesService",
+			thirdArgIsTrue: true,
+		},
+		{
+			tokenName: "IWorkingCopyService",
+			className: "WorkingCopyService",
+			thirdArgIsTrue: false,
+		},
+		{
+			tokenName: "IWorkingCopyEditorService",
+			className: "WorkingCopyEditorService",
+			thirdArgIsTrue: false,
+		},
+		{
+			tokenName: "IWorkingCopyBackupService",
+			className: "PlainWorkingCopyBackupService",
+			thirdArgIsTrue: false,
+		},
+		{
+			tokenName: "ISearchService",
+			className: "PlainSearchService",
+			thirdArgIsTrue: true,
+		},
+		{
+			tokenName: "IExtensionResourceLoaderService",
+			className: "PlainExtensionResourceLoaderService",
+			thirdArgIsTrue: false,
+		},
+		{
+			tokenName: "ISCMService",
+			className: "SCMService",
+			thirdArgIsTrue: true,
+		},
+		{
+			tokenName: "IExtensionService",
+			className: "PlainNullExtensionService",
+			thirdArgIsTrue: true,
+		},
+	]);
+	function matchesMiddleServiceDescriptor(property, spec) {
+		if (
+			!ts.isPropertyAssignment(property) ||
+			!ts.isComputedPropertyName(property.name) ||
+			!ts.isCallExpression(property.name.expression) ||
+			!ts.isPropertyAccessExpression(property.name.expression.expression) ||
+			!ts.isIdentifier(property.name.expression.expression.expression) ||
+			property.name.expression.expression.expression.text !== spec.tokenName ||
+			property.name.expression.expression.name.text !== "toString" ||
+			property.name.expression.arguments.length !== 0
+		) {
+			return false;
+		}
+		const initializer = property.initializer;
+		return (
+			ts.isNewExpression(initializer) &&
+			ts.isIdentifier(initializer.expression) &&
+			initializer.expression.text === "SyncDescriptor" &&
+			initializer.arguments?.length === 3 &&
+			ts.isIdentifier(initializer.arguments[0]) &&
+			initializer.arguments[0].text === spec.className &&
+			ts.isArrayLiteralExpression(initializer.arguments[1]) &&
+			initializer.arguments[1].elements.length === 0 &&
+			initializer.arguments[2].kind ===
+				(spec.thirdArgIsTrue
+					? ts.SyntaxKind.TrueKeyword
+					: ts.SyntaxKind.FalseKeyword)
+		);
+	}
+	const middleProperties = nonSpreadProperties.slice(0, -2);
+	const hasMiddleServiceDescriptors =
+		middleProperties.length === MIDDLE_SERVICE_DESCRIPTORS.length &&
+		middleProperties.every((property, index) =>
+			matchesMiddleServiceDescriptor(
+				property,
+				MIDDLE_SERVICE_DESCRIPTORS[index],
+			),
+		);
+	if (middleProperties.length !== 0 && !hasMiddleServiceDescriptors) {
+		failures.push(
+			"createServiceOverrides must keep the exact hand-selected working-copy and workspace service descriptors",
+		);
+	}
 	function isDialogServiceKeyCall(expression) {
 		return (
 			ts.isCallExpression(expression) &&
@@ -474,7 +1111,6 @@ export function validateDialogServiceOverride(source) {
 			expression.arguments.length === 0
 		);
 	}
-	const hasPlainWorkspaceServiceOverrides = nonSpreadProperties.length === 4;
 	const dialogService = nonSpreadProperties.at(-2);
 	const dialogServiceName =
 		dialogService !== undefined &&
@@ -524,7 +1160,9 @@ export function validateDialogServiceOverride(source) {
 		descriptor.arguments[1].elements.length === 0 &&
 		descriptor.arguments[2].kind === ts.SyntaxKind.TrueKeyword;
 	if (
-		![2, 4].includes(nonSpreadProperties.length) ||
+		![2, 2 + MIDDLE_SERVICE_DESCRIPTORS.length].includes(
+			nonSpreadProperties.length,
+		) ||
 		overrideObject.properties.length !==
 			EXPECTED_SERVICE_OVERRIDE_CALLS.length + nonSpreadProperties.length ||
 		!dialogServiceName ||
@@ -570,8 +1208,8 @@ export function validateDialogServiceOverride(source) {
 	if (
 		!sameArray(propertyOrder, [
 			...EXPECTED_SERVICE_OVERRIDE_CALLS,
-			...(hasPlainWorkspaceServiceOverrides
-				? ["IWorkspaceEditingService", "IWorkspacesService"]
+			...(hasMiddleServiceDescriptors
+				? MIDDLE_SERVICE_DESCRIPTORS.map((spec) => spec.tokenName)
 				: []),
 			"IDialogService",
 			"ILanguageStatusService",
@@ -587,6 +1225,10 @@ export function validateDialogServiceOverride(source) {
 	let notificationOverrideBindingReferences = 0;
 	let fileDialogServiceReference = false;
 	let globalConfirmReference = false;
+	let workingCopyServiceBindingReferences = 0;
+	let workingCopyEditorServiceBindingReferences = 0;
+	let workingCopyServiceTokenReferences = 0;
+	let workingCopyEditorServiceTokenReferences = 0;
 	function visit(node) {
 		if (ts.isIdentifier(node)) {
 			if (node.text === "DialogService") {
@@ -600,6 +1242,18 @@ export function validateDialogServiceOverride(source) {
 			}
 			if (node.text === "IFileDialogService") {
 				fileDialogServiceReference = true;
+			}
+			if (node.text === "WorkingCopyService") {
+				workingCopyServiceBindingReferences += 1;
+			}
+			if (node.text === "WorkingCopyEditorService") {
+				workingCopyEditorServiceBindingReferences += 1;
+			}
+			if (node.text === "IWorkingCopyService") {
+				workingCopyServiceTokenReferences += 1;
+			}
+			if (node.text === "IWorkingCopyEditorService") {
+				workingCopyEditorServiceTokenReferences += 1;
 			}
 		}
 		if (
@@ -626,6 +1280,20 @@ export function validateDialogServiceOverride(source) {
 	if (notificationOverrideBindingReferences !== 2) {
 		failures.push(
 			"getNotificationServiceOverride may appear only in its exact import and audited service spread",
+		);
+	}
+	const workingCopyReferenceCounts = [
+		workingCopyServiceBindingReferences,
+		workingCopyEditorServiceBindingReferences,
+		workingCopyServiceTokenReferences,
+		workingCopyEditorServiceTokenReferences,
+	];
+	if (
+		workingCopyReferenceCounts.some((count) => count !== 0) &&
+		workingCopyReferenceCounts.some((count) => count !== 2)
+	) {
+		failures.push(
+			"WorkingCopyService and WorkingCopyEditorService may appear only in their exact imports and audited descriptors",
 		);
 	}
 	if (fileDialogServiceReference || globalConfirmReference) {
@@ -688,6 +1356,11 @@ export function validateWorkspaceProviderBootstrap(source) {
 			"registerWorkspaceDeleteCoordinator",
 		],
 		["./platform/tauri", "createBridge"],
+		[
+			"./services/plain-workspace-backup-service",
+			"configurePlainWorkingCopyBackupBridge",
+		],
+		["./features/search/plain-search-service", "configurePlainSearchBridge"],
 	]) {
 		if (countExactNamedImport(moduleName, importedName) !== 1) {
 			failures.push(
@@ -713,6 +1386,8 @@ export function validateWorkspaceProviderBootstrap(source) {
 		"registerCustomProvider",
 		"initialize",
 		"PLAIN_WORKSPACE_SCHEME",
+		"configurePlainWorkingCopyBackupBridge",
+		"configurePlainSearchBridge",
 	]);
 	let hasCriticalBootstrapShadow = false;
 	function bindingContainsCriticalName(name) {
@@ -950,7 +1625,29 @@ export function validateWorkspaceProviderBootstrap(source) {
 			ts.isIdentifier(parent.expression) &&
 			(parent.expression.text === "createPlainWorkspaceFileSystemProvider" ||
 				parent.expression.text === "registerWorkspaceDeleteCoordinator" ||
-				parent.expression.text === "registerWorkspaceCommands")
+				parent.expression.text === "registerWorkspaceCommands" ||
+				parent.expression.text === "configurePlainWorkingCopyBackupBridge" ||
+				parent.expression.text === "configurePlainSearchBridge" ||
+				parent.expression.text === "configurePlainTerminalBridge" ||
+				parent.expression.text === "configurePlainScmBridge" ||
+				parent.expression.text === "configurePlainGitHistoryBridge" ||
+				parent.expression.text === "configurePlainGitGraphBridge" ||
+				parent.expression.text === "configurePlainGitStashBridge" ||
+				parent.expression.text === "configurePlainGitWorktreeBridge" ||
+				parent.expression.text === "createPlainGitTextModelContentProvider" ||
+				parent.expression.text === "createPlainGitBlameContribution" ||
+				parent.expression.text === "createPlainGitCommitBlobContentProvider" ||
+				parent.expression.text ===
+					"createPlainGitCommitMultiDiffSourceResolver" ||
+				parent.expression.text === "consumeImportedThemePackages" ||
+				parent.expression.text === "registerPlainThemeCommands" ||
+				parent.expression.text === "registerPlainThemePicker" ||
+				parent.expression.text === "registerPlainFileIconThemePicker" ||
+				parent.expression.text === "registerPlainProductIconThemePicker" ||
+				parent.expression.text === "applyPersistedThemeSelection" ||
+				parent.expression.text === "applyPersistedFileIconThemeSelection" ||
+				parent.expression.text === "applyPersistedProductIconThemeSelection" ||
+				parent.expression.text === "createAndConfigurePlainDebugRuntime")
 		);
 	}
 	function isAllowedWorkspaceProviderIdentifier(node) {
@@ -1252,6 +1949,114 @@ export function validateWorkspaceProviderBootstrap(source) {
 	return failures;
 }
 
+// `F120` S0: locks the closed set of brand fields `app/main.ts` overrides via
+// `initialize(...)`'s `productConfiguration` option against
+// `EXPECTED_PRODUCT_CONFIGURATION` above — every audited field must be
+// present with its exact literal value, and no unaudited field may be added.
+// This is deliberately a *separate* export from `validateWorkspaceProviderBootstrap`
+// (which asserts the bootstrap call *sequence*, not what's inside the
+// configuration object literal it passes) so a future refactor of one cannot
+// silently widen or narrow the other's blast radius. Reverse tests
+// (`tests/unit/boundary-contracts.test.mjs`) construct both a missing-field
+// and a reverted-to-Code-OSS-value mutation of each field and assert this
+// function reports the specific, actionable failure — not just "something is
+// wrong".
+export function validateProductConfigurationBoundary(source) {
+	const failures = [];
+	const sourceFile = ts.createSourceFile(
+		"main.ts",
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	const initializeCalls = [];
+	function visit(node) {
+		if (
+			ts.isCallExpression(node) &&
+			ts.isIdentifier(node.expression) &&
+			node.expression.text === "initialize" &&
+			node.arguments.length === 3
+		) {
+			initializeCalls.push(node);
+		}
+		ts.forEachChild(node, visit);
+	}
+	visit(sourceFile);
+	if (initializeCalls.length !== 1) {
+		return [
+			"app/main.ts must call the audited three-argument initialize(...) exactly once to configure productConfiguration",
+		];
+	}
+	const [initializeCall] = initializeCalls;
+	const configurationArgument = initializeCall.arguments[2];
+	if (!ts.isObjectLiteralExpression(configurationArgument)) {
+		return [
+			"app/main.ts's initialize(...) third argument must be a plain object literal",
+		];
+	}
+	const productConfigurationAssignments =
+		configurationArgument.properties.filter(
+			(property) =>
+				ts.isPropertyAssignment(property) &&
+				typeScriptStaticName(property.name) === "productConfiguration",
+		);
+	if (productConfigurationAssignments.length !== 1) {
+		return [
+			"app/main.ts's initialize(...) configuration must set productConfiguration exactly once",
+		];
+	}
+	const productConfiguration = productConfigurationAssignments[0].initializer;
+	if (!ts.isObjectLiteralExpression(productConfiguration)) {
+		return [
+			"app/main.ts's productConfiguration must be a plain object literal",
+		];
+	}
+	const seenKeys = new Set();
+	for (const property of productConfiguration.properties) {
+		if (!ts.isPropertyAssignment(property)) {
+			failures.push(
+				"app/main.ts's productConfiguration may only contain plain key: value assignments",
+			);
+			continue;
+		}
+		const key = typeScriptStaticName(property.name);
+		if (
+			key === undefined ||
+			!Object.hasOwn(EXPECTED_PRODUCT_CONFIGURATION, key)
+		) {
+			failures.push(
+				`app/main.ts's productConfiguration must not set an unaudited field${key !== undefined ? ` (${key})` : ""} -- F120 S0 fixed the closed brand-field set`,
+			);
+			continue;
+		}
+		if (seenKeys.has(key)) {
+			failures.push(
+				`app/main.ts's productConfiguration must not set ${key} more than once`,
+			);
+			continue;
+		}
+		seenKeys.add(key);
+		const expectedValue = EXPECTED_PRODUCT_CONFIGURATION[key];
+		if (
+			!ts.isStringLiteral(property.initializer) ||
+			property.initializer.text !== expectedValue
+		) {
+			failures.push(
+				`app/main.ts's productConfiguration.${key} must be the exact audited literal ${JSON.stringify(expectedValue)}`,
+			);
+		}
+	}
+	for (const key of Object.keys(EXPECTED_PRODUCT_CONFIGURATION)) {
+		if (!seenKeys.has(key)) {
+			failures.push(
+				`app/main.ts's productConfiguration is missing the required brand field ${key}`,
+			);
+		}
+	}
+	return failures;
+}
+
 export function validateTauriConfiguration(config) {
 	const failures = [];
 	const app = config?.app;
@@ -1315,6 +2120,69 @@ export function validateTauriConfiguration(config) {
 		}
 	}
 
+	if (config?.identifier !== EXPECTED_BUNDLE_IDENTIFIER) {
+		failures.push(
+			`Tauri bundle identifier must remain ${JSON.stringify(EXPECTED_BUNDLE_IDENTIFIER)}`,
+		);
+	}
+	if (!sameObject(config?.bundle, EXPECTED_BUNDLE)) {
+		failures.push(
+			"Tauri bundle configuration differs from the audited branding/packaging contract",
+		);
+	}
+
+	return failures;
+}
+
+// `F120` S5 (`docs/research/2026-07-29-branding-packaging.md` "结论 4.3",
+// "需要新增的 AST 契约" item 3): parses `src-tauri/Entitlements.plist` well
+// enough to lock its closed, audited key set -- this is a small, hand-rolled
+// parser scoped to exactly this project's own hand-authored file (a flat
+// `<dict>` of boolean-valued `<key>`/`<true/>`|`<false/>` pairs), not a
+// general XML/plist parser, since no `plist` parsing dependency exists in
+// this project and pulling one in for a five-line file would be a poor
+// trade. It intentionally does not validate the surrounding
+// `<?xml?>`/`<!DOCTYPE>`/`<plist>` wrapper -- `plutil -lint` (run by hand
+// during this slice) already proves the real file is well-formed XML, and
+// this contract's job is the *content*, not the container.
+export function validateEntitlementsBoundary(source) {
+	const failures = [];
+	const keyValuePattern = /<key>([^<]+)<\/key>\s*<(true|false)\s*\/>/g;
+	const seen = new Map();
+	for (const match of source.matchAll(keyValuePattern)) {
+		const [, key, boolText] = match;
+		if (seen.has(key)) {
+			failures.push(
+				`Entitlements.plist must not declare ${key} more than once`,
+			);
+			continue;
+		}
+		seen.set(key, boolText === "true");
+	}
+	if (seen.size === 0) {
+		failures.push(
+			"Entitlements.plist could not be parsed as a boolean-keyed plist dict -- it must declare at least the audited required entitlement set",
+		);
+		return failures;
+	}
+	for (const [key, expectedValue] of Object.entries(EXPECTED_ENTITLEMENTS)) {
+		if (!seen.has(key)) {
+			failures.push(
+				`Entitlements.plist is missing the required entitlement ${key}`,
+			);
+			continue;
+		}
+		if (seen.get(key) !== expectedValue) {
+			failures.push(`Entitlements.plist's ${key} must be ${expectedValue}`);
+		}
+	}
+	for (const key of seen.keys()) {
+		if (!Object.hasOwn(EXPECTED_ENTITLEMENTS, key)) {
+			failures.push(
+				`Entitlements.plist declares an unaudited entitlement ${key} -- new entitlements need a threat justification and test before being added (AGENTS.md), not a silent addition`,
+			);
+		}
+	}
 	return failures;
 }
 
@@ -1448,15 +2316,22 @@ export function validateMainCapability(capability) {
 }
 
 const WORKSPACE_RUST_SOURCE_PATTERN =
-	/^src-tauri\/src\/(?:path_policy\.rs|workspace\/.*\.rs)$/;
+	/^src-tauri\/src\/(?:path_policy\.rs|workspace\/.*\.rs|search\/.*\.rs)$/;
 const RUST_PRODUCTION_SOURCE_PATTERN = /^src-tauri\/src\/.*\.rs$/;
 const WORKSPACE_TEST_SOURCE_PATTERN = /(?:^|\/)tests\.rs$/;
 const WORKSPACE_VERSIONED_WRITER_PATH =
 	"src-tauri/src/workspace/versioned_writer.rs";
+const BACKUP_STORE_PATH = "src-tauri/src/backup/store.rs";
 const RUSTIX_TARGET = 'cfg(any(target_os = "linux", target_os = "macos"))';
 const SHA2_VERSION = "0.10.9";
 const SHA2_REQUIREMENT = `=${SHA2_VERSION}`;
 const SHA2_RESOLVED_FEATURES = Object.freeze(["default", "std"]);
+const ZIP_VERSION = "8.6.0";
+const ZIP_REQUIREMENT = `=${ZIP_VERSION}`;
+const ZIP_FEATURES = Object.freeze(["deflate-flate2-zlib-rs"]);
+const JSONC_PARSER_VERSION = "0.33.0";
+const JSONC_PARSER_REQUIREMENT = `=${JSONC_PARSER_VERSION}`;
+const JSONC_PARSER_FEATURES = Object.freeze([]);
 const FOLLOW_SYMLINKS_YES_PATTERN =
 	/\bFollowSymlinks\s*::\s*(?:Yes\b|\{[^}]*\bYes\b)/;
 const FORBIDDEN_DIRECTORY_DEPENDENCIES = Object.freeze([
@@ -1492,6 +2367,10 @@ const WORKSPACE_DELETE_LIMITS = Object.freeze([
 	["MAX_DELETE_TREE_NAME_BYTES", 2 * 1_024 * 1_024, "usize"],
 	["MAX_DELETE_SYMLINK_BYTES", 4 * 1_024, "usize"],
 	["MAX_DELETE_TREE_SYMLINK_BYTES", 2 * 1_024 * 1_024, "usize"],
+]);
+const SEARCH_FILE_LIMITS = Object.freeze([
+	["MAX_SEARCH_TREE_ENTRIES", 50_000, "usize"],
+	["MAX_SEARCH_TREE_DEPTH", 256, "usize"],
 ]);
 
 function escapeRegularExpression(value) {
@@ -2294,6 +3173,102 @@ export function validateWorkspaceRustBoundary(
 			"resolved sha2@0.10.9 features must remain exactly default and std",
 		);
 	}
+	const zipDeclarations = [
+		...cargoSource.matchAll(
+			/^zip = \{ version = "=8\.6\.0", default-features = false, features = \["deflate-flate2-zlib-rs"\] \}$/gm,
+		),
+	];
+	if (zipDeclarations.length !== 1) {
+		failures.push(
+			'Cargo.toml must declare exactly one zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] } dependency',
+		);
+	}
+	const zipDependencies = cargoDependencies.filter(
+		({ name }) => name === "zip",
+	);
+	if (zipDependencies.length !== 1) {
+		failures.push(
+			"Cargo metadata must contain exactly one direct zip dependency",
+		);
+	} else {
+		const [zipDependency] = zipDependencies;
+		if (zipDependency.req !== ZIP_REQUIREMENT) {
+			failures.push("the direct zip dependency must require exactly =8.6.0");
+		}
+		if (zipDependency.rename !== null) {
+			failures.push("the direct zip dependency must remain unrenamed");
+		}
+		if (zipDependency.kind !== null) {
+			failures.push("the direct zip dependency must be a normal runtime edge");
+		}
+		if (zipDependency.target !== null) {
+			failures.push("the direct zip dependency must not be target-specific");
+		}
+		if (zipDependency.optional !== false) {
+			failures.push("the direct zip dependency must not be optional");
+		}
+		if (zipDependency.uses_default_features !== false) {
+			failures.push("the direct zip dependency must disable default features");
+		}
+		if (!sameArray(zipDependency.features, ZIP_FEATURES)) {
+			failures.push(
+				"the direct zip dependency must enable exactly the deflate-flate2-zlib-rs feature",
+			);
+		}
+	}
+
+	const jsoncParserDeclarations = [
+		...cargoSource.matchAll(
+			/^jsonc-parser = \{ version = "=0\.33\.0", default-features = false, features = \[\] \}$/gm,
+		),
+	];
+	if (jsoncParserDeclarations.length !== 1) {
+		failures.push(
+			'Cargo.toml must declare exactly one jsonc-parser = { version = "=0.33.0", default-features = false, features = [] } dependency',
+		);
+	}
+	const jsoncParserDependencies = cargoDependencies.filter(
+		({ name }) => name === "jsonc-parser",
+	);
+	if (jsoncParserDependencies.length !== 1) {
+		failures.push(
+			"Cargo metadata must contain exactly one direct jsonc-parser dependency",
+		);
+	} else {
+		const [jsoncParserDependency] = jsoncParserDependencies;
+		if (jsoncParserDependency.req !== JSONC_PARSER_REQUIREMENT) {
+			failures.push(
+				"the direct jsonc-parser dependency must require exactly =0.33.0",
+			);
+		}
+		if (jsoncParserDependency.rename !== null) {
+			failures.push("the direct jsonc-parser dependency must remain unrenamed");
+		}
+		if (jsoncParserDependency.kind !== null) {
+			failures.push(
+				"the direct jsonc-parser dependency must be a normal runtime edge",
+			);
+		}
+		if (jsoncParserDependency.target !== null) {
+			failures.push(
+				"the direct jsonc-parser dependency must not be target-specific",
+			);
+		}
+		if (jsoncParserDependency.optional !== false) {
+			failures.push("the direct jsonc-parser dependency must not be optional");
+		}
+		if (jsoncParserDependency.uses_default_features !== false) {
+			failures.push(
+				"the direct jsonc-parser dependency must disable default features",
+			);
+		}
+		if (!sameArray(jsoncParserDependency.features, JSONC_PARSER_FEATURES)) {
+			failures.push(
+				"the direct jsonc-parser dependency must enable no explicit features",
+			);
+		}
+	}
+
 	const notifyDeclarations = [...cargoSource.matchAll(/^notify\s*=/gm)];
 	const notifyDependencies = cargoDependencies.filter(
 		({ name }) => name === "notify",
@@ -2319,6 +3294,34 @@ export function validateWorkspaceRustBoundary(
 		failures.push(
 			"Cargo.toml must not grant broad Tauri filesystem or shell authority",
 		);
+	}
+	for (const [dependency, requirement] of [
+		["globset", "=0.4.19"],
+		["ignore", "=0.4.31"],
+		["grep-matcher", "=0.1.9"],
+		["grep-regex", "=0.1.14"],
+		["grep-searcher", "=0.1.17"],
+	]) {
+		if (
+			!cargoDependencyDeclaration(dependency, requirement).test(cargoSource)
+		) {
+			failures.push(`Cargo.toml must pin ${dependency} to ${requirement}`);
+		}
+		const dependencies = cargoDependencies.filter(
+			({ name }) => name === dependency,
+		);
+		const hasExactDependency = dependencies.some(
+			(candidate) =>
+				candidate.req === requirement &&
+				candidate.kind === null &&
+				candidate.rename === null &&
+				candidate.optional === false,
+		);
+		if (!hasExactDependency) {
+			failures.push(
+				`Cargo metadata must contain exactly one unrenamed runtime ${dependency} ${requirement} dependency`,
+			);
+		}
 	}
 
 	const usesCapFsExt = rustSources.some(({ relativePath, source }) => {
@@ -4585,6 +5588,4758 @@ export function validateWorkspaceDeleteCommandRegistration(rustSources) {
 	return failures;
 }
 
+/**
+ * Mirrors the workspace copy/move/delete command-registration validators for
+ * the search domain's single command: `search/commands.rs` must define
+ * exactly one audited `workspace_search_files` Tauri command whose body does
+ * nothing but decode its request and route once through
+ * `WorkspaceService::search_files`, and `lib.rs` must register it exactly
+ * once. There is no closed-set-of-many check here because this slice
+ * registers exactly one search command.
+ */
+export function validateSearchCommandRegistration(rustSources) {
+	const failures = [];
+	const commandsSource = findRustSource(
+		rustSources,
+		"src-tauri/src/search/commands.rs",
+	);
+	const libSource = findRustSource(rustSources, "src-tauri/src/lib.rs");
+
+	if (commandsSource === undefined) {
+		return ["search command boundary requires search/commands.rs"];
+	}
+	const executableCommands = stripRustCommentsAndLiterals(commandsSource);
+	const commands = extractAuditedTauriCommands(
+		executableCommands,
+		"workspace_search_files",
+	);
+	if (commands.length !== 1) {
+		failures.push(
+			"search/commands.rs must define exactly one audited workspace_search_files Tauri command",
+		);
+	} else {
+		const [command] = commands;
+		const normalizedParameters = command.parameters
+			.replaceAll(/\s+/g, "")
+			.replace(/,$/, "");
+		const expectedParameters =
+			"window:WebviewWindow,service:State<'_,WorkspaceService>,request:WorkspaceSearchFilesRequest";
+		const expectedReturn = "->Result<WorkspaceSearchFilesResult,CommandError>";
+		if (
+			normalizedParameters !== expectedParameters ||
+			command.returnType.replaceAll(/\s+/g, "") !== expectedReturn
+		) {
+			failures.push(
+				"workspace_search_files must accept request: WorkspaceSearchFilesRequest and return Result<WorkspaceSearchFilesResult, CommandError>",
+			);
+		}
+		const normalizedBody = command.body
+			.replaceAll(/\s+/g, "")
+			.replace(/;$/, "");
+		if (
+			normalizedBody !==
+			"letquery=request.into_parts()?;WorkspaceService::search_files(service.inner(),window.label(),query).await"
+		) {
+			failures.push(
+				"workspace_search_files must contain only its DTO decode and a single WorkspaceService::search_files route",
+			);
+		}
+	}
+
+	if (libSource === undefined) {
+		failures.push("search command boundary requires src-tauri/src/lib.rs");
+		return failures;
+	}
+	const executableLib = stripRustCommentsAndLiterals(libSource);
+	const handlerBodies = [
+		...executableLib.matchAll(
+			/\.invoke_handler\s*\(\s*tauri\s*::\s*generate_handler\s*!\s*\[([\s\S]*?)\]\s*\)/g,
+		),
+	];
+	const commandPath =
+		/\bsearch\s*::\s*commands\s*::\s*workspace_search_files\b/g;
+	const registrations = [...executableLib.matchAll(commandPath)];
+	const registeredInHandler =
+		handlerBodies.length === 1 &&
+		/\bsearch\s*::\s*commands\s*::\s*workspace_search_files\b/.test(
+			handlerBodies[0][1],
+		);
+	if (registrations.length !== 1 || !registeredInHandler) {
+		failures.push(
+			"src-tauri/src/lib.rs must register search::commands::workspace_search_files exactly once in generate_handler",
+		);
+	}
+
+	return failures;
+}
+
+/**
+ * Locks the three F040 S3 streaming text search commands
+ * (`workspace_search_text_start/poll/cancel`) to their audited exact
+ * signatures, bodies and single `generate_handler!` registration — the same
+ * exact-body-pinning technique `validateSearchCommandRegistration` already
+ * uses for `workspace_search_files`, so a silent edit that bypasses the DTO
+ * decode or routes to something other than the one audited
+ * `WorkspaceService` method fails this check rather than only being caught
+ * by chance in review.
+ */
+export function validateSearchTextCommandRegistration(rustSources) {
+	const failures = [];
+	const commandsSource = findRustSource(
+		rustSources,
+		"src-tauri/src/search/commands.rs",
+	);
+	const libSource = findRustSource(rustSources, "src-tauri/src/lib.rs");
+
+	if (commandsSource === undefined) {
+		return ["search text command boundary requires search/commands.rs"];
+	}
+	const executableCommands = stripRustCommentsAndLiterals(commandsSource);
+
+	const expected = [
+		{
+			name: "workspace_search_text_start",
+			parameters:
+				"window:WebviewWindow,service:State<'_,WorkspaceService>,request:WorkspaceSearchTextStartRequest",
+			returnType: "->Result<WorkspaceSearchTextStartResult,CommandError>",
+			body: "letquery=request.into_parts()?;letapp=window.app_handle().clone();letwindow_label=window.label().to_owned();letwake_sink:Arc<dynFn(SearchId)+Send+Sync>=Arc::new(move|search_id:SearchId|{let_=app.emit_to(EventTarget::webview_window(window_label.clone()),WORKSPACE_SEARCH_TEXT_WAKE_EVENT,WorkspaceSearchTextWakeEvent::new(search_id),);});service.inner().search_text_start(window.label(),query,wake_sink)",
+		},
+		{
+			name: "workspace_search_text_poll",
+			parameters:
+				"window:WebviewWindow,service:State<'_,WorkspaceService>,request:WorkspaceSearchTextPollRequest",
+			returnType: "->Result<WorkspaceSearchTextPollResult,CommandError>",
+			body: "let(search_id,cursor)=request.into_parts()?;service.inner().search_text_poll(window.label(),search_id,cursor)",
+		},
+		{
+			name: "workspace_search_text_cancel",
+			parameters:
+				"window:WebviewWindow,service:State<'_,WorkspaceService>,request:WorkspaceSearchTextCancelRequest",
+			returnType: "->Result<(),CommandError>",
+			body: "service.inner().search_text_cancel(window.label(),request.search_id())",
+		},
+	];
+
+	for (const { name, parameters, returnType, body } of expected) {
+		const commands = extractAuditedTauriCommands(executableCommands, name);
+		if (commands.length !== 1) {
+			failures.push(
+				`search/commands.rs must define exactly one audited ${name} Tauri command`,
+			);
+			continue;
+		}
+		const [command] = commands;
+		const normalizedParameters = command.parameters
+			.replaceAll(/\s+/g, "")
+			.replace(/,$/, "");
+		if (
+			normalizedParameters !== parameters ||
+			command.returnType.replaceAll(/\s+/g, "") !== returnType
+		) {
+			failures.push(
+				`${name} must accept request: its own DTO and return the audited Result type`,
+			);
+		}
+		const normalizedBody = command.body
+			.replaceAll(/\s+/g, "")
+			.replace(/;$/, "");
+		if (normalizedBody !== body) {
+			failures.push(
+				`${name} must contain only its audited DTO decode and single WorkspaceService route`,
+			);
+		}
+	}
+
+	if (libSource === undefined) {
+		failures.push("search text command boundary requires src-tauri/src/lib.rs");
+		return failures;
+	}
+	const executableLib = stripRustCommentsAndLiterals(libSource);
+	const handlerBodies = [
+		...executableLib.matchAll(
+			/\.invoke_handler\s*\(\s*tauri\s*::\s*generate_handler\s*!\s*\[([\s\S]*?)\]\s*\)/g,
+		),
+	];
+	for (const { name } of expected) {
+		const commandPath = new RegExp(
+			`\\bsearch\\s*::\\s*commands\\s*::\\s*${name}\\b`,
+			"g",
+		);
+		const registrations = [...executableLib.matchAll(commandPath)];
+		const registeredInHandler =
+			handlerBodies.length === 1 &&
+			new RegExp(`\\bsearch\\s*::\\s*commands\\s*::\\s*${name}\\b`).test(
+				handlerBodies[0][1],
+			);
+		if (registrations.length !== 1 || !registeredInHandler) {
+			failures.push(
+				`src-tauri/src/lib.rs must register search::commands::${name} exactly once in generate_handler`,
+			);
+		}
+	}
+
+	return failures;
+}
+
+/**
+ * Locks `search/file_search.rs`'s traversal budget constants to their
+ * audited exact values, mirroring `WORKSPACE_COPY_LIMITS`/
+ * `WORKSPACE_DELETE_LIMITS`: a silent widening of either constant must fail
+ * this check rather than quietly changing the search domain's resource
+ * ceiling.
+ */
+export function validateSearchFileBudgetConstants(rustSources) {
+	const fileSearchSource = findRustSource(
+		rustSources,
+		"src-tauri/src/search/file_search.rs",
+	);
+	if (fileSearchSource === undefined) {
+		return ["search budget boundary requires search/file_search.rs"];
+	}
+	const executableSource = stripRustCommentsAndLiterals(fileSearchSource);
+	const failures = [];
+	for (const [name, value, integerType] of SEARCH_FILE_LIMITS) {
+		const declarations = findWorkspaceCopyLimitDeclarations(
+			executableSource,
+			name,
+			integerType,
+		);
+		if (
+			declarations.length !== 1 ||
+			evaluateSmallRustIntegerExpression(declarations[0]) !== value
+		) {
+			failures.push(
+				`search/file_search.rs must define exactly one ${name}: ${integerType} = ${value}`,
+			);
+		}
+	}
+	return failures;
+}
+
+const SEARCH_TEXT_LIMITS = Object.freeze([
+	[
+		"SEARCH_BATCH_QUEUE_CAPACITY",
+		512,
+		"usize",
+		"src-tauri/src/search/text_search.rs",
+	],
+	[
+		"MAX_TEXT_SEARCH_RESULTS_HARD_CAP",
+		20_000,
+		"u32",
+		"src-tauri/src/search/dto.rs",
+	],
+]);
+
+/**
+ * Locks the F040 S3 streaming text search budget constants (the batch
+ * backpressure queue capacity and the results hard cap) to their audited
+ * exact values, plus the window-scoped idle-search TTL in
+ * `workspace/service.rs` — mirroring `validateSearchFileBudgetConstants`'s
+ * rationale but also covering `SEARCH_TASK_IDLE_TTL`, which is a
+ * `Duration::from_secs(...)` call rather than a plain integer literal and so
+ * cannot go through `evaluateSmallRustIntegerExpression`.
+ */
+export function validateSearchTextBudgetConstants(rustSources) {
+	const failures = [];
+	for (const [name, value, integerType, path] of SEARCH_TEXT_LIMITS) {
+		const fileSource = findRustSource(rustSources, path);
+		if (fileSource === undefined) {
+			failures.push(`search text budget boundary requires ${path}`);
+			continue;
+		}
+		const executableSource = stripRustCommentsAndLiterals(fileSource);
+		const declarations = findWorkspaceCopyLimitDeclarations(
+			executableSource,
+			name,
+			integerType,
+		);
+		if (
+			declarations.length !== 1 ||
+			evaluateSmallRustIntegerExpression(declarations[0]) !== value
+		) {
+			failures.push(
+				`${path} must define exactly one ${name}: ${integerType} = ${value}`,
+			);
+		}
+	}
+
+	const serviceSource = findRustSource(
+		rustSources,
+		"src-tauri/src/workspace/service.rs",
+	);
+	if (serviceSource === undefined) {
+		failures.push("search text budget boundary requires workspace/service.rs");
+		return failures;
+	}
+	const executableService = stripRustCommentsAndLiterals(serviceSource);
+	const ttlPattern =
+		/^const\s+SEARCH_TASK_IDLE_TTL\s*:\s*Duration\s*=\s*Duration::from_secs\(\s*120\s*\)\s*;/m;
+	if (!ttlPattern.test(executableService)) {
+		failures.push(
+			"workspace/service.rs must define exactly one SEARCH_TASK_IDLE_TTL: Duration = Duration::from_secs(120)",
+		);
+	}
+
+	return failures;
+}
+
+const FORBIDDEN_SPAWN_BYPASS_DEPENDENCIES = Object.freeze([
+	"async-process",
+	"duct",
+	"execute",
+	"run_script",
+	"shell-words",
+	"subprocess",
+	"xshell",
+]);
+
+/**
+ * ADR `docs/decisions/0003-native-git-and-generic-dap.md`'s "系统 Git CLI
+ * 为唯一写操作权威" / "不混用 git2/gix" decision, upgraded from a doc-only
+ * convention to a machine guard (`F080` S0): none of these libgit2/gix
+ * bindings may appear as a Cargo dependency, under any rename, full stop —
+ * not even as a read-only cache, which the ADR explicitly gates behind a
+ * future benchmark-proven need, never an ambient dependency.
+ */
+const FORBIDDEN_GIT_LIBRARY_DEPENDENCIES = Object.freeze([
+	"git2",
+	"gix",
+	"libgit2-sys",
+]);
+
+/**
+ * The Git domain's sole audited `std::process::Command` wrapper (`F080` S0
+ * of `docs/research/2026-07-25-core-git.md`) — every other file under
+ * `src-tauri/src/git/` remains mechanically forbidden from naming
+ * `std::process::Command` at all, exactly like every file under
+ * `src-tauri/src/terminal/` always has been. Chosen as a single fixed path
+ * (rather than e.g. any file matching `exec*.rs`) so the allowlist is one
+ * unambiguous, greppable line, not a pattern someone could widen by
+ * dropping in a second file that happens to match.
+ */
+const GIT_EXEC_WRAPPER_PATH = "src-tauri/src/git/exec.rs";
+
+/**
+ * The `debug` domain's own sole audited `std::process::Command` wrapper
+ * (`F100` S0 of `docs/research/2026-07-28-generic-dap.md`) — the second (and,
+ * as of this slice, only other) legitimate process-spawning file in this
+ * codebase besides [`GIT_EXEC_WRAPPER_PATH`]. Separately and more precisely
+ * locked down by [`validateDebugAdapterSpawnBoundary`] (trust gate first) and
+ * [`validateDebugSpawnConstructionShape`] (fixed `Command::new(&descriptor.command)
+ * .args(&descriptor.args)` shape, no shell interpreter, no `format!`) —
+ * this constant only feeds the broad cross-domain "no capability-based
+ * deletion bypass via a raw process/shell spawn" sweep inside
+ * `validateWorkspaceMoveBoundary`, exactly like `GIT_EXEC_WRAPPER_PATH`
+ * already does for the git domain.
+ */
+const DEBUG_EXEC_WRAPPER_PATH = "src-tauri/src/debug/exec.rs";
+
+/**
+ * `F100` S1's own staged-atomic-write persistence file for the first-run
+ * confirmation gate (`src-tauri/src/debug/confirm_store.rs`) — added to
+ * [`stageCleanupCallsAreExact`]'s per-file allowlist alongside
+ * `backup/store.rs`/`trust/store.rs`, whose identical `Stage`-drop-cleanup
+ * shape this file deliberately mirrors (see that file's own module doc for
+ * why the duplication is intentional, not an oversight).
+ */
+const DEBUG_CONFIRM_STORE_PATH = "src-tauri/src/debug/confirm_store.rs";
+
+const GIT_DOMAIN_SOURCE_PATTERN = /^src-tauri\/src\/git\/.*\.rs$/;
+
+/**
+ * Program names [`GIT_EXEC_WRAPPER_PATH`] must never pass to
+ * `Command::new`, even though it is otherwise exempt from the
+ * `std::process::Command` ban below: the one-file allowlist only closes
+ * half the bypass a hostile edit could exploit — nothing else would stop
+ * that same file from quietly becoming `Command::new("sh").arg("-c", ...)`
+ * instead. Deliberately a small, explicit denylist of common shell
+ * interpreters (not a "must equal exactly `git`" allowlist coupled to a
+ * single literal-match regex) because the wrapper legitimately needs
+ * `-c key=value` git-config-override arguments — a shell "-c" would be the
+ * actual bypass to catch, not the token "-c" itself.
+ */
+const GIT_EXEC_SHELL_INTERPRETER_PATTERN =
+	/Command::new\s*\(\s*"(?:sh|bash|zsh|dash|ksh|csh|tcsh|cmd|cmd\.exe|powershell|powershell\.exe|pwsh)"\s*\)/;
+
+const TERMINAL_BUDGET_LIMITS = Object.freeze([
+	[
+		"MAX_TERMINAL_SESSIONS_PER_WINDOW",
+		16,
+		"usize",
+		"src-tauri/src/terminal/mod.rs",
+	],
+	[
+		"TERMINAL_FLOW_HIGH_WATER_MARK",
+		100_000,
+		"usize",
+		"src-tauri/src/terminal/flow.rs",
+	],
+	[
+		"TERMINAL_FLOW_LOW_WATER_MARK",
+		5_000,
+		"usize",
+		"src-tauri/src/terminal/flow.rs",
+	],
+	[
+		"TERMINAL_READ_BUFFER_BYTES",
+		8192,
+		"usize",
+		"src-tauri/src/terminal/service.rs",
+	],
+	[
+		"TERMINAL_VT_MAX_SCROLLBACK_LINES",
+		10_000,
+		"usize",
+		"src-tauri/src/terminal/vt.rs",
+	],
+]);
+
+const TERMINAL_ENV_PASSTHROUGH_NAMES_LOCK = Object.freeze([
+	"PATH",
+	"HOME",
+	"USER",
+	"LOGNAME",
+	"SHELL",
+	"LANG",
+	"TMPDIR",
+]);
+
+const SPAWN_GUARDED_DOMAIN_PATTERN =
+	/^src-tauri\/src\/(?:terminal|git)\/.*\.rs$/;
+
+/**
+ * Comments-only variant of `stripRustCommentsAndLiterals`: masks `//`/`/* *​/`
+ * comments but leaves string/char literal *contents* intact. Used only by
+ * the spawn-guard's `.arg("-c")` detection below, which — unlike every other
+ * check in this file that calls `stripRustCommentsAndLiterals` — genuinely
+ * needs to see the literal text inside a string, not just avoid false
+ * positives from an identifier that happens to appear inside a comment or
+ * doc string. Reusing the full comment-and-literal stripper here would
+ * blank out the very `"-c"` text this check exists to find.
+ */
+function stripRustCommentsOnly(source) {
+	const output = source.split("");
+	const mask = (start, end) => {
+		for (let index = start; index < end; index += 1) {
+			if (output[index] !== "\n" && output[index] !== "\r") {
+				output[index] = " ";
+			}
+		}
+	};
+	let index = 0;
+	while (index < source.length) {
+		if (source.startsWith("//", index)) {
+			const end = source.indexOf("\n", index + 2);
+			const boundary = end < 0 ? source.length : end;
+			mask(index, boundary);
+			index = boundary;
+			continue;
+		}
+		if (source.startsWith("/*", index)) {
+			let depth = 1;
+			let cursor = index + 2;
+			while (cursor < source.length && depth > 0) {
+				if (source.startsWith("/*", cursor)) {
+					depth += 1;
+					cursor += 2;
+				} else if (source.startsWith("*/", cursor)) {
+					depth -= 1;
+					cursor += 2;
+				} else {
+					cursor += 1;
+				}
+			}
+			mask(index, cursor);
+			index = cursor;
+			continue;
+		}
+		index += 1;
+	}
+	return output.join("");
+}
+
+/**
+ * Locks the terminal *and* `git::` domains' subprocess-spawning contracts —
+ * `docs/research/2026-07-24-pty-terminal.md` for the former,
+ * `docs/research/2026-07-25-core-git.md`/ADR 0003 for the latter. Kept as
+ * one function (not split into a `validateGitRustBoundary` sibling) because
+ * the two domains share the exact same `SPAWN_GUARDED_DOMAIN_PATTERN`
+ * sweep and the same two mechanical red flags below; splitting it would
+ * duplicate that sweep for a cosmetic naming win. `portable-pty` is pinned
+ * to an exact version for the terminal domain; every non-test source file
+ * under both guarded domains is forbidden from using `std::process::Command`
+ * directly — except [`GIT_EXEC_WRAPPER_PATH`], the git domain's own single
+ * audited wrapper (see that constant's doc) — or invoking a shell with a
+ * `-c`/string-interpreter argument, the same two mechanical red flags the
+ * delete domain's own `FORBIDDEN_DELETE_BYPASS_DEPENDENCIES` precedent
+ * guards against for a different bypass shape. Also locks
+ * [`FORBIDDEN_GIT_LIBRARY_DEPENDENCIES`] (git2/gix/libgit2-sys) and the
+ * terminal domain's flow-control/session-limit/env-allowlist constants
+ * exactly, mirroring `validateSearchTextBudgetConstants`'s own precedent
+ * for a different domain's streaming protocol.
+ */
+export function validateTerminalRustBoundary(
+	rustSources,
+	cargoSource,
+	cargoDependencies = [],
+) {
+	const failures = [];
+
+	if (!cargoDependencyDeclaration("portable-pty", "=0.9.0").test(cargoSource)) {
+		failures.push("Cargo.toml must pin portable-pty to =0.9.0");
+	}
+	const portablePtyDependencies = cargoDependencies.filter(
+		({ name }) => name === "portable-pty",
+	);
+	const hasExactPortablePty = portablePtyDependencies.some(
+		(candidate) =>
+			candidate.req === "=0.9.0" &&
+			candidate.kind === null &&
+			candidate.rename === null &&
+			candidate.target === null &&
+			candidate.optional === false,
+	);
+	if (!hasExactPortablePty) {
+		failures.push(
+			"Cargo metadata must contain exactly one unrenamed runtime portable-pty =0.9.0 dependency",
+		);
+	}
+
+	// F070 "VT 集成" slice (docs/research/2026-07-24-libghostty-terminal.md):
+	// `libghostty-vt` is a pre-1.0 FFI crate pinned to an exact version for
+	// the same reason `portable-pty` is above — an unpinned range could pull
+	// in a breaking API change (or a different pinned Ghostty commit inside
+	// `libghostty-vt-sys`'s build.rs) silently.
+	if (
+		!cargoDependencyDeclaration("libghostty-vt", "=0.2.1").test(cargoSource)
+	) {
+		failures.push("Cargo.toml must pin libghostty-vt to =0.2.1");
+	}
+	const libghosttyVtDependencies = cargoDependencies.filter(
+		({ name }) => name === "libghostty-vt",
+	);
+	const hasExactLibghosttyVt = libghosttyVtDependencies.some(
+		(candidate) =>
+			candidate.req === "=0.2.1" &&
+			candidate.kind === null &&
+			candidate.rename === null &&
+			candidate.target === null &&
+			candidate.optional === false,
+	);
+	if (!hasExactLibghosttyVt) {
+		failures.push(
+			"Cargo metadata must contain exactly one unrenamed runtime libghostty-vt =0.2.1 dependency",
+		);
+	}
+	for (const dependency of FORBIDDEN_SPAWN_BYPASS_DEPENDENCIES) {
+		if (cargoDependencies.some(({ name }) => name === dependency)) {
+			failures.push(
+				`Cargo metadata must not contain direct spawn-bypass dependency ${dependency}, including renamed dependencies`,
+			);
+		}
+	}
+	for (const dependency of FORBIDDEN_GIT_LIBRARY_DEPENDENCIES) {
+		if (cargoDependencies.some(({ name }) => name === dependency)) {
+			failures.push(
+				`Cargo metadata must not contain forbidden git library dependency ${dependency}, including renamed dependencies (ADR 0003: the system Git CLI is the sole write authority, never git2/gix)`,
+			);
+		}
+	}
+
+	for (const { relativePath, source } of rustSources) {
+		const normalizedPath = relativePath.replaceAll("\\", "/");
+		if (
+			!SPAWN_GUARDED_DOMAIN_PATTERN.test(normalizedPath) ||
+			WORKSPACE_TEST_SOURCE_PATTERN.test(normalizedPath)
+		) {
+			continue;
+		}
+		const isGitDomain = GIT_DOMAIN_SOURCE_PATTERN.test(normalizedPath);
+		const isAuditedGitExecWrapper = normalizedPath === GIT_EXEC_WRAPPER_PATH;
+		const executableSource = stripRustCommentsAndLiterals(source);
+		if (
+			!isAuditedGitExecWrapper &&
+			/\bprocess\s*::\s*Command\b/.test(executableSource)
+		) {
+			const guidance = isGitDomain
+				? `use the sole audited ${GIT_EXEC_WRAPPER_PATH} wrapper`
+				: "use portable_pty::CommandBuilder";
+			failures.push(
+				`${normalizedPath} must not spawn subprocesses via std::process::Command; ${guidance}`,
+			);
+		}
+		// Comments-only (not `stripRustCommentsAndLiterals`) from here on:
+		// both the `Command::new("git")` and shell-interpreter checks below,
+		// like the pre-existing "-c" check, need to see actual string
+		// literal *contents* — `stripRustCommentsAndLiterals` blanks those
+		// out too (it only leaves code structure intact), which would make
+		// `"git"`/`"sh"` invisible to a naive check against its output.
+		const commentsOnlySource = stripRustCommentsOnly(source);
+		if (isAuditedGitExecWrapper) {
+			if (GIT_EXEC_SHELL_INTERPRETER_PATTERN.test(commentsOnlySource)) {
+				failures.push(
+					`${GIT_EXEC_WRAPPER_PATH} must not spawn a shell interpreter — it may only invoke the git binary directly`,
+				);
+			}
+			if (!/Command::new\s*\(\s*"git"\s*\)/.test(commentsOnlySource)) {
+				failures.push(
+					`${GIT_EXEC_WRAPPER_PATH} must invoke Command::new("git") literally`,
+				);
+			}
+		}
+		if (/\.args?\s*\(\s*\[?\s*"-c"/.test(commentsOnlySource)) {
+			failures.push(`${normalizedPath} must not pass a shell "-c" argument`);
+		}
+	}
+
+	for (const [name, value, integerType, path] of TERMINAL_BUDGET_LIMITS) {
+		const fileSource = findRustSource(rustSources, path);
+		if (fileSource === undefined) {
+			failures.push(`terminal budget boundary requires ${path}`);
+			continue;
+		}
+		const executableSource = stripRustCommentsAndLiterals(fileSource);
+		const declarations = findWorkspaceCopyLimitDeclarations(
+			executableSource,
+			name,
+			integerType,
+		);
+		if (
+			declarations.length !== 1 ||
+			evaluateSmallRustIntegerExpression(declarations[0]) !== value
+		) {
+			failures.push(
+				`${path} must define exactly one ${name}: ${integerType} = ${value}`,
+			);
+		}
+	}
+
+	const shellSource = findRustSource(
+		rustSources,
+		"src-tauri/src/terminal/shell.rs",
+	);
+	if (shellSource === undefined) {
+		failures.push("terminal env allowlist boundary requires terminal/shell.rs");
+		return failures;
+	}
+	const namesMatch =
+		/pub\(crate\)\s+const\s+TERMINAL_ENV_PASSTHROUGH_NAMES\s*:\s*&\[&str\]\s*=\s*&\[([^\]]*)\]\s*;/.exec(
+			shellSource,
+		);
+	const names = namesMatch?.[1]
+		.split(",")
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0)
+		.map((entry) => entry.replace(/^"|"$/g, ""));
+	if (
+		namesMatch === null ||
+		!sameArray(names, TERMINAL_ENV_PASSTHROUGH_NAMES_LOCK)
+	) {
+		failures.push(
+			"terminal/shell.rs must define TERMINAL_ENV_PASSTHROUGH_NAMES as exactly the audited name list",
+		);
+	}
+	if (
+		!/pub\(crate\)\s+const\s+TERMINAL_ENV_LC_PREFIX\s*:\s*&str\s*=\s*"LC_"\s*;/.test(
+			shellSource,
+		)
+	) {
+		failures.push(
+			'terminal/shell.rs must define TERMINAL_ENV_LC_PREFIX: &str = "LC_"',
+		);
+	}
+	if (
+		!/pub\(crate\)\s+const\s+TERMINAL_ENV_TERM\s*:\s*\(&str,\s*&str\)\s*=\s*\(\s*"TERM"\s*,\s*"xterm-256color"\s*\)\s*;/.test(
+			shellSource,
+		)
+	) {
+		failures.push(
+			'terminal/shell.rs must define TERMINAL_ENV_TERM: (&str, &str) = ("TERM", "xterm-256color")',
+		);
+	}
+	if (
+		!/pub\(crate\)\s+const\s+TERMINAL_ENV_COLORTERM\s*:\s*\(&str,\s*&str\)\s*=\s*\(\s*"COLORTERM"\s*,\s*"truecolor"\s*\)\s*;/.test(
+			shellSource,
+		)
+	) {
+		failures.push(
+			'terminal/shell.rs must define TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor")',
+		);
+	}
+
+	return failures;
+}
+
+const TRUST_COMMAND_CONTRACTS = Object.freeze([
+	{
+		file: "src-tauri/src/trust/commands.rs",
+		name: "workspace_trust_state",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:WorkspaceTrustStateRequest",
+		returnType: "->Result<WorkspaceTrustState,CommandError>",
+		body: "request.validate();lettrusted=trust.inner().is_trusted(workspace.inner(),window.label()).await?;Ok(WorkspaceTrustState::new(trusted))",
+	},
+	{
+		file: "src-tauri/src/trust/commands.rs",
+		name: "workspace_trust_grant",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:WorkspaceTrustGrantRequest",
+		returnType: "->Result<WorkspaceTrustState,CommandError>",
+		body: "request.validate();trust.inner().grant(workspace.inner(),window.label()).await?;Ok(WorkspaceTrustState::new(true))",
+	},
+	{
+		file: "src-tauri/src/trust/commands.rs",
+		name: "workspace_trust_revoke",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:WorkspaceTrustRevokeRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "request.validate();trust.inner().revoke(workspace.inner(),window.label()).await",
+	},
+]);
+
+const TERMINAL_COMMAND_CONTRACTS = Object.freeze([
+	{
+		file: "src-tauri/src/terminal/commands.rs",
+		name: "terminal_start",
+		parameters:
+			"window:WebviewWindow,terminal:State<'_,TerminalService>,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:TerminalStartRequest",
+		returnType: "->Result<TerminalStartResult,CommandError>",
+		body: "letquery=request.into_parts()?;letsink:Arc<dynTerminalOutputSink>=Arc::new(WindowEmitSink{app:window.app_handle().clone(),window_label:window.label().to_owned(),});letsession_id=terminal.inner().start(trust.inner(),workspace.inner(),window.label(),query.cwd,query.cols,query.rows,sink,).await?;Ok(TerminalStartResult::new(session_id))",
+	},
+	{
+		file: "src-tauri/src/terminal/commands.rs",
+		name: "terminal_input_text",
+		parameters:
+			"window:WebviewWindow,terminal:State<'_,TerminalService>,request:TerminalInputTextRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(session_id,text)=request.into_parts()?;terminal.inner().input_text(window.label(),session_id,text).await",
+	},
+	{
+		file: "src-tauri/src/terminal/commands.rs",
+		name: "terminal_input_key",
+		parameters:
+			"window:WebviewWindow,terminal:State<'_,TerminalService>,request:TerminalInputKeyRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(session_id,input)=request.into_parts()?;terminal.inner().input_key(window.label(),session_id,input).await",
+	},
+	{
+		file: "src-tauri/src/terminal/commands.rs",
+		name: "terminal_focus",
+		parameters:
+			"window:WebviewWindow,terminal:State<'_,TerminalService>,request:TerminalFocusRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(session_id,focused)=request.into_parts();terminal.inner().focus(window.label(),session_id,focused).await",
+	},
+	{
+		file: "src-tauri/src/terminal/commands.rs",
+		name: "terminal_resize",
+		parameters:
+			"window:WebviewWindow,terminal:State<'_,TerminalService>,request:TerminalResizeRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(session_id,cols,rows)=request.into_parts()?;terminal.inner().resize(window.label(),session_id,cols,rows).await",
+	},
+	{
+		file: "src-tauri/src/terminal/commands.rs",
+		name: "terminal_ack",
+		parameters:
+			"window:WebviewWindow,terminal:State<'_,TerminalService>,request:TerminalAckRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(session_id,sequence)=request.into_parts();terminal.inner().ack(window.label(),session_id,sequence)",
+	},
+	{
+		file: "src-tauri/src/terminal/commands.rs",
+		name: "terminal_scrollback",
+		parameters:
+			"window:WebviewWindow,terminal:State<'_,TerminalService>,request:TerminalScrollbackRequest",
+		returnType: "->Result<TerminalScrollbackResult,CommandError>",
+		body: "let(session_id,start,count)=request.into_parts()?;letrows=terminal.inner().scrollback(window.label(),session_id,start,count).await?;Ok(TerminalScrollbackResult::new(rows))",
+	},
+	{
+		file: "src-tauri/src/terminal/commands.rs",
+		name: "terminal_kill",
+		parameters:
+			"window:WebviewWindow,terminal:State<'_,TerminalService>,request:TerminalKillRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(session_id,immediate)=request.into_parts();terminal.inner().kill(window.label(),session_id,immediate).await",
+	},
+]);
+
+/**
+ * Locks the trust (3) and terminal (6, since F070's "IPC 改造" slice split
+ * `terminal_input` into `terminal_input_text`/`terminal_input_key` and added
+ * `terminal_focus`/`terminal_scrollback`) commands to their audited exact
+ * signatures, bodies and single `generate_handler!` registration —
+ * the same exact-body-pinning technique `validateSearchCommandRegistration`/
+ * `validateSearchTextCommandRegistration` already use, extended to a closed
+ * set spanning two command files at once so a command silently added,
+ * removed, duplicated or rewired to a different service method fails this
+ * check rather than only being caught by chance in review.
+ */
+export function validateTrustTerminalCommandRegistration(rustSources) {
+	const failures = [];
+	const libSource = findRustSource(rustSources, "src-tauri/src/lib.rs");
+	const contracts = [...TRUST_COMMAND_CONTRACTS, ...TERMINAL_COMMAND_CONTRACTS];
+	const sourceCache = new Map();
+
+	for (const contract of contracts) {
+		if (!sourceCache.has(contract.file)) {
+			sourceCache.set(
+				contract.file,
+				findRustSource(rustSources, contract.file),
+			);
+		}
+		const fileSource = sourceCache.get(contract.file);
+		if (fileSource === undefined) {
+			failures.push(`command registration boundary requires ${contract.file}`);
+			continue;
+		}
+		const executableSource = stripRustCommentsAndLiterals(fileSource);
+		const commands = extractAuditedTauriCommands(
+			executableSource,
+			contract.name,
+		);
+		if (commands.length !== 1) {
+			failures.push(
+				`${contract.file} must define exactly one audited ${contract.name} Tauri command`,
+			);
+			continue;
+		}
+		const [command] = commands;
+		const normalizedParameters = command.parameters
+			.replaceAll(/\s+/g, "")
+			.replace(/,$/, "");
+		if (
+			normalizedParameters !== contract.parameters ||
+			command.returnType.replaceAll(/\s+/g, "") !== contract.returnType
+		) {
+			failures.push(
+				`${contract.name} must accept its audited parameters and return the audited Result type`,
+			);
+		}
+		const normalizedBody = command.body
+			.replaceAll(/\s+/g, "")
+			.replace(/;$/, "");
+		if (normalizedBody !== contract.body) {
+			failures.push(
+				`${contract.name} must contain only its audited DTO decode and single service route`,
+			);
+		}
+	}
+
+	if (libSource === undefined) {
+		failures.push(
+			"command registration boundary requires src-tauri/src/lib.rs",
+		);
+		return failures;
+	}
+	const executableLib = stripRustCommentsAndLiterals(libSource);
+	const handlerBodies = [
+		...executableLib.matchAll(
+			/\.invoke_handler\s*\(\s*tauri\s*::\s*generate_handler\s*!\s*\[([\s\S]*?)\]\s*\)/g,
+		),
+	];
+	for (const contract of contracts) {
+		const modulePrefix = contract.file.includes("/trust/")
+			? "trust"
+			: "terminal";
+		const commandPath = new RegExp(
+			`\\b${modulePrefix}\\s*::\\s*commands\\s*::\\s*${contract.name}\\b`,
+			"g",
+		);
+		const registrations = [...executableLib.matchAll(commandPath)];
+		const registeredInHandler =
+			handlerBodies.length === 1 &&
+			new RegExp(
+				`\\b${modulePrefix}\\s*::\\s*commands\\s*::\\s*${contract.name}\\b`,
+			).test(handlerBodies[0][1]);
+		if (registrations.length !== 1 || !registeredInHandler) {
+			failures.push(
+				`src-tauri/src/lib.rs must register ${modulePrefix}::commands::${contract.name} exactly once in generate_handler`,
+			);
+		}
+	}
+
+	return failures;
+}
+
+/**
+ * Locks the terminal IPC bridge (F070's "IPC 改造" slice, superseding S2's
+ * raw-byte shapes): the `TerminalDataEvent`/`TerminalExitEvent` Rust struct
+ * bodies and the two `plain://terminal-*` event name consts (mirroring
+ * `WorkspaceWatchWakeEvent`'s own `structBody(...)`/wake-event-const
+ * precedent in `validateWorkspaceWatcherBoundary`), `WindowEmitSink`'s two
+ * methods each emitting exactly once through the audited event/constructor,
+ * the frozen `PlainBridge` terminal/trust method surface (a fixed 13-method
+ * count so a silently added/removed/renamed bridge method fails this
+ * check), and the TypeScript event/result decoders' own-data/Proxy-
+ * rejection/freeze shape plus native's exactly-once `listen` wiring for
+ * each event.
+ */
+export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
+	const failures = [];
+	const dto = findRustSource(rustSources, "src-tauri/src/terminal/dto.rs");
+	const commands = findRustSource(
+		rustSources,
+		"src-tauri/src/terminal/commands.rs",
+	);
+	const appSource = (expectedPath) =>
+		appSources.find(
+			({ relativePath }) => relativePath.replaceAll("\\", "/") === expectedPath,
+		)?.source;
+	const compact = (value) => value?.replaceAll(/\s+/g, "") ?? "";
+
+	const executableDto =
+		dto === undefined ? undefined : stripRustCommentsAndLiterals(dto);
+	const structBody = (name) => {
+		if (executableDto === undefined) {
+			return undefined;
+		}
+		const bodies = watcherRustStructBodies(executableDto, name);
+		return bodies.length === 1 ? compact(bodies[0].body) : undefined;
+	};
+	if (
+		structBody("TerminalDataEvent") !==
+			"session_id:TerminalSessionId,sequence:u64,frame:TerminalFrame," ||
+		structBody("TerminalExitEvent") !==
+			"session_id:TerminalSessionId,exit_code:u32,"
+	) {
+		failures.push(
+			"TerminalDataEvent/TerminalExitEvent must expose only their exact audited fields",
+		);
+	}
+
+	if (
+		commands === undefined ||
+		!/\bpub\s*\(\s*crate\s*\)\s+const\s+TERMINAL_DATA_EVENT\s*:\s*&str\s*=\s*"plain:\/\/terminal-data"\s*;/.test(
+			commands,
+		) ||
+		!/\bpub\s*\(\s*crate\s*\)\s+const\s+TERMINAL_EXIT_EVENT\s*:\s*&str\s*=\s*"plain:\/\/terminal-exit"\s*;/.test(
+			commands,
+		)
+	) {
+		failures.push(
+			'terminal/commands.rs must define TERMINAL_DATA_EVENT = "plain://terminal-data" and TERMINAL_EXIT_EVENT = "plain://terminal-exit"',
+		);
+	}
+
+	const executableCommands =
+		commands === undefined ? undefined : stripRustCommentsAndLiterals(commands);
+
+	const emitFrame =
+		executableCommands === undefined
+			? undefined
+			: extractRustFunctions(executableCommands, "emit_frame")[0];
+	const emitExit =
+		executableCommands === undefined
+			? undefined
+			: extractRustFunctions(executableCommands, "emit_exit")[0];
+	const emitFrameBody = compact(emitFrame?.body);
+	const emitExitBody = compact(emitExit?.body);
+	if (
+		emitFrame === undefined ||
+		[...emitFrameBody.matchAll(/\.emit_to\(/g)].length !== 1 ||
+		!emitFrameBody.includes(
+			"EventTarget::webview_window(self.window_label.clone())",
+		) ||
+		!emitFrameBody.includes("TERMINAL_DATA_EVENT") ||
+		!emitFrameBody.includes(
+			"TerminalDataEvent::new(session_id,sequence,frame)",
+		) ||
+		/[^_]\.emit\(/.test(emitFrameBody)
+	) {
+		failures.push(
+			"WindowEmitSink::emit_frame must emit_to exactly one window-targeted TerminalDataEvent built from the frame it was given",
+		);
+	}
+	if (
+		emitExit === undefined ||
+		[...emitExitBody.matchAll(/\.emit_to\(/g)].length !== 1 ||
+		!emitExitBody.includes(
+			"EventTarget::webview_window(self.window_label.clone())",
+		) ||
+		!emitExitBody.includes("TERMINAL_EXIT_EVENT") ||
+		!emitExitBody.includes(
+			"TerminalExitEvent::new(session_id,status.exit_code)",
+		) ||
+		/[^_]\.emit\(/.test(emitExitBody)
+	) {
+		failures.push(
+			"WindowEmitSink::emit_exit must emit_to exactly one window-targeted TerminalExitEvent built from the status it was given",
+		);
+	}
+
+	const contracts = appSource("app/platform/tauri/contracts.ts");
+	const contractsFile =
+		contracts === undefined
+			? undefined
+			: ts.createSourceFile(
+					"contracts.ts",
+					contracts,
+					ts.ScriptTarget.Latest,
+					true,
+					ts.ScriptKind.TS,
+				);
+	if (
+		contracts === undefined ||
+		!/export\s+const\s+TERMINAL_DATA_EVENT\s*=\s*"plain:\/\/terminal-data"\s+as\s+const\s*;/.test(
+			contracts,
+		) ||
+		!/export\s+const\s+TERMINAL_EXIT_EVENT\s*=\s*"plain:\/\/terminal-exit"\s+as\s+const\s*;/.test(
+			contracts,
+		)
+	) {
+		failures.push(
+			"contracts.ts must declare the exact TERMINAL_DATA_EVENT/TERMINAL_EXIT_EVENT wire strings",
+		);
+	}
+	const plainBridgeInterfaces =
+		contractsFile?.statements.filter(
+			(statement) =>
+				ts.isInterfaceDeclaration(statement) &&
+				statement.name.text === "PlainBridge",
+		) ?? [];
+	const TERMINAL_BRIDGE_METHOD_NAMES = [
+		"terminalStart",
+		"terminalInputText",
+		"terminalInputKey",
+		"terminalFocus",
+		"terminalResize",
+		"terminalAck",
+		"terminalScrollback",
+		"terminalKill",
+		"terminalWatchData",
+		"terminalWatchExit",
+		"workspaceTrustState",
+		"workspaceTrustGrant",
+		"workspaceTrustRevoke",
+	];
+	const bridgeMembers =
+		plainBridgeInterfaces[0]?.members.filter((member) =>
+			TERMINAL_BRIDGE_METHOD_NAMES.includes(typeScriptStaticName(member.name)),
+		) ?? [];
+	const bridgeMemberNames = bridgeMembers
+		.map((member) => typeScriptStaticName(member.name))
+		.sort();
+	if (
+		plainBridgeInterfaces.length !== 1 ||
+		bridgeMembers.length !== TERMINAL_BRIDGE_METHOD_NAMES.length ||
+		!bridgeMembers.every((member) => ts.isMethodSignature(member)) ||
+		JSON.stringify(bridgeMemberNames) !==
+			JSON.stringify([...TERMINAL_BRIDGE_METHOD_NAMES].sort())
+	) {
+		failures.push(
+			"PlainBridge must expose exactly the thirteen audited terminal/trust methods, no more and no fewer",
+		);
+	}
+
+	const terminalCodec = appSource("app/platform/tauri/terminal-codec.ts");
+	const decoderBody = (name) => {
+		if (terminalCodec === undefined) {
+			return undefined;
+		}
+		const functions = extractRustLikeTypeScriptFunctionBodies(
+			terminalCodec,
+			name,
+		);
+		return functions.length === 1 ? functions[0] : undefined;
+	};
+	for (const name of [
+		"decodeTerminalDataEvent",
+		"decodeTerminalExitEvent",
+		"decodeTerminalScrollbackResult",
+		"decodeWorkspaceTrustState",
+	]) {
+		const body = decoderBody(name);
+		if (
+			body === undefined ||
+			!body.includes("hasExactKeys(") ||
+			!body.includes("rejectProxyObject(") ||
+			!body.includes("Object.freeze(")
+		) {
+			failures.push(
+				`terminal-codec.ts's ${name} must validate exact own-data keys, reject Proxy wrapping, and freeze its result`,
+			);
+		}
+	}
+
+	const native = appSource("app/platform/tauri/native.ts");
+	if (
+		native === undefined ||
+		[...native.matchAll(/\blisten<unknown>\(\s*TERMINAL_DATA_EVENT\b/g)]
+			.length !== 1 ||
+		[...native.matchAll(/\blisten<unknown>\(\s*TERMINAL_EXIT_EVENT\b/g)]
+			.length !== 1 ||
+		!native.includes("decodeTerminalDataEvent(event.payload)") ||
+		!native.includes("decodeTerminalExitEvent(event.payload)")
+	) {
+		failures.push(
+			"native.ts must listen for TERMINAL_DATA_EVENT/TERMINAL_EXIT_EVENT exactly once each, decoded through the audited decoders",
+		);
+	}
+
+	return failures;
+}
+
+/**
+ * `F080` S1's three git IPC commands (`docs/research/2026-07-25-core-git.md`)
+ * — same exact-body-pinning technique as [`TRUST_COMMAND_CONTRACTS`]/
+ * [`TERMINAL_COMMAND_CONTRACTS`], kept as its own const/function pair (not
+ * folded into [`validateTrustTerminalCommandRegistration`]) because this
+ * domain's commands live in a third file (`src-tauri/src/git/commands.rs`)
+ * and register through a still-open `generate_handler!` call already
+ * validated once per contract set below.
+ */
+const GIT_COMMAND_CONTRACTS = Object.freeze([
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_status",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitStatusRequest",
+		returnType: "->Result<GitStatusResult,CommandError>",
+		body: "request.validate();letresult=status::git_status(trust.inner(),workspace.inner(),window.label()).await?;Ok(GitStatusResult::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_diff_files",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitDiffFilesRequest",
+		returnType: "->Result<GitDiffFilesResult,CommandError>",
+		body: "letcached=request.into_parts();letentries=diff::diff_files(trust.inner(),workspace.inner(),window.label(),cached).await?;Ok(GitDiffFilesResult::new(entries))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_show_blob",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitShowBlobRequest",
+		returnType: "->Result<GitShowBlobResult,CommandError>",
+		body: "let(rev,path)=request.into_parts()?;letcontent=diff::show_blob(trust.inner(),workspace.inner(),window.label(),rev,&path).await?;Ok(GitShowBlobResult::new(content))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_stage_paths",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitStagePathsRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "letpaths=request.into_parts()?;stage::stage_paths(trust.inner(),workspace.inner(),window.label(),&paths).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_unstage_paths",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitUnstagePathsRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "letpaths=request.into_parts()?;stage::unstage_paths(trust.inner(),workspace.inner(),window.label(),&paths).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_stage_blob",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitStageBlobRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(path,content)=request.into_parts()?;stage::stage_blob(trust.inner(),workspace.inner(),window.label(),&path,content,).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_commit",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitCommitRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(message,amend)=request.into_parts()?;commit::commit(trust.inner(),workspace.inner(),window.label(),&message,amend,).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_discard_paths",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitDiscardPathsRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "letpaths=request.into_parts()?;discard::discard_paths(trust.inner(),workspace.inner(),window.label(),&paths).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_network_preview",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitNetworkPreviewRequest",
+		returnType: "->Result<GitNetworkPreviewResult,CommandError>",
+		body: "letoperation=request.into_parts();letresult=network::preview(trust.inner(),workspace.inner(),window.label(),operation).await?;Ok(GitNetworkPreviewResult::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_fetch",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,network_service:State<'_,GitNetworkService>,request:GitFetchRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "request.validate();network::fetch(trust.inner(),workspace.inner(),network_service.inner(),window.label(),).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_pull",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,network_service:State<'_,GitNetworkService>,request:GitPullRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "request.validate();network::pull(trust.inner(),workspace.inner(),network_service.inner(),window.label(),).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_push",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,network_service:State<'_,GitNetworkService>,request:GitPushRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "letforce=request.into_parts();network::push(trust.inner(),workspace.inner(),network_service.inner(),window.label(),force,).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_network_cancel",
+		parameters:
+			"window:WebviewWindow,network_service:State<'_,GitNetworkService>,request:GitNetworkCancelRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "request.validate();network_service.inner().request_cancel(window.label());Ok(())",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_blame_file",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitBlameFileRequest",
+		returnType: "->Result<GitBlameFileResult,CommandError>",
+		body: "let(path,range)=request.into_parts()?;letresult=blame::blame_file(trust.inner(),workspace.inner(),window.label(),&path,range,).await?;Ok(GitBlameFileResult::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_blame_commit_messages",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitBlameCommitMessagesRequest",
+		returnType: "->Result<GitBlameCommitMessagesResult,CommandError>",
+		body: "letshas=request.into_parts()?;letmessages=blame::blame_commit_messages(trust.inner(),workspace.inner(),window.label(),&shas).await?;Ok(GitBlameCommitMessagesResult::new(messages))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_file_history",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitFileHistoryRequest",
+		returnType: "->Result<GitHistoryListResultWire,CommandError>",
+		body: "letpath=request.into_parts()?;letresult=log::file_history(trust.inner(),workspace.inner(),window.label(),&path).await?;Ok(GitHistoryListResultWire::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_line_history_list",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitLineHistoryListRequest",
+		returnType: "->Result<GitHistoryListResultWire,CommandError>",
+		body: "let(path,range)=request.into_parts()?;letresult=log::line_history_list(trust.inner(),workspace.inner(),window.label(),&path,range,).await?;Ok(GitHistoryListResultWire::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_line_history_detail",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitLineHistoryDetailRequest",
+		returnType: "->Result<GitLineHistoryDetailResultWire,CommandError>",
+		body: "let(path,range,skip,expected_sha)=request.into_parts()?;letresult=log::line_history_detail(trust.inner(),workspace.inner(),window.label(),&path,range,skip,&expected_sha,).await?;Ok(GitLineHistoryDetailResultWire::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_show_commit",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitShowCommitRequest",
+		returnType: "->Result<GitShowCommitResult,CommandError>",
+		body: "letsha=request.into_parts()?;letresult=show_commit::show_commit(trust.inner(),workspace.inner(),window.label(),&sha).await?;Ok(GitShowCommitResult::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_show_commit_blob",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitShowCommitBlobRequest",
+		returnType: "->Result<GitShowBlobResult,CommandError>",
+		body: "let(sha,path)=request.into_parts()?;letcontent=show_commit::show_commit_blob(trust.inner(),workspace.inner(),window.label(),&sha,&path,).await?;Ok(GitShowBlobResult::new(content))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_log_graph",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitLogGraphRequest",
+		returnType: "->Result<GitLogGraphResultWire,CommandError>",
+		body: "letmax_count=request.into_parts()?;letresult=log::log_graph(trust.inner(),workspace.inner(),window.label(),max_count).await?;Ok(GitLogGraphResultWire::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_refs_list",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitRefsListRequest",
+		returnType: "->Result<GitRefsListResultWire,CommandError>",
+		body: "request.validate();letresult=refs::list_refs(trust.inner(),workspace.inner(),window.label()).await?;Ok(GitRefsListResultWire::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_stash_list",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitStashListRequest",
+		returnType: "->Result<GitStashListResultWire,CommandError>",
+		body: "request.validate();letresult=stash::list_stashes(trust.inner(),workspace.inner(),window.label()).await?;Ok(GitStashListResultWire::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_stash_show",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitStashShowRequest",
+		returnType: "->Result<GitStashShowResultWire,CommandError>",
+		body: "letsha=request.into_parts()?;letresult=stash::show_stash(trust.inner(),workspace.inner(),window.label(),&sha).await?;Ok(GitStashShowResultWire::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_stash_push",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitStashPushRequest",
+		returnType: "->Result<GitStashPushOutcomeWire,CommandError>",
+		body: "let(message,include_untracked)=request.into_parts()?;letoutcome=stash::push_stash(trust.inner(),workspace.inner(),window.label(),&message,include_untracked,).await?;Ok(GitStashPushOutcomeWire::from(outcome))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_stash_apply",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitStashApplyRequest",
+		returnType: "->Result<GitStashApplyOutcomeWire,CommandError>",
+		body: "let(sha,use_index)=request.into_parts()?;letoutcome=stash::apply_stash(trust.inner(),workspace.inner(),window.label(),&sha,use_index,).await?;Ok(GitStashApplyOutcomeWire::from(outcome))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_stash_pop",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitStashPopRequest",
+		returnType: "->Result<GitStashApplyOutcomeWire,CommandError>",
+		body: "let(expected_sha,use_index)=request.into_parts()?;letoutcome=stash::pop_stash(trust.inner(),workspace.inner(),window.label(),&expected_sha,use_index,).await?;Ok(GitStashApplyOutcomeWire::from(outcome))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_stash_drop",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitStashDropRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "letexpected_sha=request.into_parts()?;stash::drop_stash(trust.inner(),workspace.inner(),window.label(),&expected_sha,).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_worktree_list",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitWorktreeListRequest",
+		returnType: "->Result<GitWorktreeListResultWire,CommandError>",
+		body: "request.validate();letresult=worktree::list_worktrees(trust.inner(),workspace.inner(),window.label()).await?;Ok(GitWorktreeListResultWire::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_worktree_add",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitWorktreeAddRequest",
+		returnType: "->Result<GitWorktreeAddOutcomeWire,CommandError>",
+		body: "let(child_segment,detach,commit_ish)=request.into_parts()?;letpicker=TauriDirectoryPicker::new(window.clone());letoutcome=worktree::add_worktree(trust.inner(),workspace.inner(),window.label(),&picker,&child_segment,detach,commit_ish.as_deref(),).await?;Ok(GitWorktreeAddOutcomeWire::from(outcome))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_worktree_remove",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitWorktreeRemoveRequest",
+		returnType: "->Result<GitWorktreeRemoveOutcomeWire,CommandError>",
+		body: "let(path,force)=request.into_parts()?;letoutcome=worktree::remove_worktree(trust.inner(),workspace.inner(),window.label(),&path,force,).await?;Ok(GitWorktreeRemoveOutcomeWire::from(outcome))",
+	},
+]);
+
+/**
+ * Locks all thirty-one git commands (`F080` S1's three reads, S3's five
+ * writes, S4's five network commands, `F090` S0's two read-only blame
+ * commands — `git_blame_file`/`git_blame_commit_messages` —, `F090` S1's
+ * three read-only file/line-history commands —
+ * `git_file_history`/`git_line_history_list`/`git_line_history_detail` —,
+ * `F090` S2's two read-only commit-detail commands —
+ * `git_show_commit`/`git_show_commit_blob` —, `F090` S3's two read-only
+ * graph/refs commands — `git_log_graph`/`git_refs_list` —, `F090` S4's six
+ * stash commands (two read-only — `git_stash_list`/`git_stash_show` — and
+ * four writes — `git_stash_push`/`git_stash_apply`/`git_stash_pop`/
+ * `git_stash_drop`) — and `F090` S5's three worktree commands (one read-only
+ * — `git_worktree_list` — and two writes — `git_worktree_add`/
+ * `git_worktree_remove`), added to this same closed array rather than a
+ * parallel `GIT_HISTORY_COMMAND_CONTRACTS`, per the existing "`PlainBridge`'s
+ * git surface is one audited whole, not
+ * several independently-sized ones" rationale documented below at
+ * `GIT_BRIDGE_METHOD_NAMES`) to their audited exact signatures, bodies and
+ * single `generate_handler!` registration — mirrors
+ * `validateTrustTerminalCommandRegistration`'s exact technique.
+ */
+export function validateGitCommandRegistration(rustSources) {
+	const failures = [];
+	const libSource = findRustSource(rustSources, "src-tauri/src/lib.rs");
+
+	for (const contract of GIT_COMMAND_CONTRACTS) {
+		const fileSource = findRustSource(rustSources, contract.file);
+		if (fileSource === undefined) {
+			failures.push(`command registration boundary requires ${contract.file}`);
+			continue;
+		}
+		const executableSource = stripRustCommentsAndLiterals(fileSource);
+		const commands = extractAuditedTauriCommands(
+			executableSource,
+			contract.name,
+		);
+		if (commands.length !== 1) {
+			failures.push(
+				`${contract.file} must define exactly one audited ${contract.name} Tauri command`,
+			);
+			continue;
+		}
+		const [command] = commands;
+		const normalizedParameters = command.parameters
+			.replaceAll(/\s+/g, "")
+			.replace(/,$/, "");
+		if (
+			normalizedParameters !== contract.parameters ||
+			command.returnType.replaceAll(/\s+/g, "") !== contract.returnType
+		) {
+			failures.push(
+				`${contract.name} must accept its audited parameters and return the audited Result type`,
+			);
+		}
+		const normalizedBody = command.body
+			.replaceAll(/\s+/g, "")
+			.replace(/;$/, "");
+		if (normalizedBody !== contract.body) {
+			failures.push(
+				`${contract.name} must contain only its audited DTO decode and single service route`,
+			);
+		}
+	}
+
+	if (libSource === undefined) {
+		failures.push(
+			"command registration boundary requires src-tauri/src/lib.rs",
+		);
+		return failures;
+	}
+	const executableLib = stripRustCommentsAndLiterals(libSource);
+	const handlerBodies = [
+		...executableLib.matchAll(
+			/\.invoke_handler\s*\(\s*tauri\s*::\s*generate_handler\s*!\s*\[([\s\S]*?)\]\s*\)/g,
+		),
+	];
+	if (handlerBodies.length !== 1) {
+		failures.push(
+			"lib.rs must register commands through exactly one generate_handler! call",
+		);
+		return failures;
+	}
+	const [handlerBody] = handlerBodies;
+	for (const contract of GIT_COMMAND_CONTRACTS) {
+		const commandPath = new RegExp(
+			`\\bgit\\s*::\\s*commands\\s*::\\s*${escapeRegularExpression(contract.name)}\\b`,
+		);
+		if (!commandPath.test(handlerBody[1])) {
+			failures.push(
+				`generate_handler! must register git::commands::${contract.name} exactly once`,
+			);
+		}
+	}
+	return failures;
+}
+
+/**
+ * Comments-only variant of [`watcherRustStructBodies`] for a Rust `enum`
+ * declaration's whole variant-list text (between its outermost `{`/`}`) —
+ * used to lock [`GitStatusEntryWire`]'s five-variant discriminated union
+ * exactly, the same "brace-match then compare whitespace-stripped text"
+ * technique `watcherRustStructBodies` already establishes for a struct.
+ */
+function watcherRustEnumBodies(source, name) {
+	if (source === undefined) {
+		return [];
+	}
+	const bodies = [];
+	const pattern = new RegExp(
+		`\\b(?:pub(?:\\s*\\([^)]*\\))?\\s+)?enum\\s+${escapeRegularExpression(name)}\\b`,
+		"g",
+	);
+	for (const match of source.matchAll(pattern)) {
+		const bodyOpen = source.indexOf("{", match.index + match[0].length);
+		if (bodyOpen < 0) {
+			continue;
+		}
+		const bodyClose = findMatchingDelimiter(source, bodyOpen, "{", "}");
+		if (bodyClose !== undefined) {
+			bodies.push({
+				start: match.index,
+				body: source.slice(bodyOpen + 1, bodyClose),
+			});
+		}
+	}
+	return bodies;
+}
+
+/**
+ * Extracts a Rust `fn NAME(...) { ... }` function's body text (comments-only
+ * stripped source expected as input, so string-literal content stays visible
+ * exactly like [`watcherRustEnumBodies`] needs) by locating the parameter
+ * list via [`findMatchingDelimiter`] first (so a return-type arrow or nested
+ * generic in the signature can't confuse the search for the body's opening
+ * `{`), then matching that opening brace to its close the same way. Returns
+ * `undefined` if `name` is not found or the file's braces do not balance —
+ * callers should already have a "the whole file exists" failure path for
+ * that.
+ */
+function rustFunctionBody(source, name) {
+	const pattern = new RegExp(
+		`\\bfn\\s+${escapeRegularExpression(name)}\\s*\\(`,
+	);
+	const match = pattern.exec(source);
+	if (match === null) {
+		return undefined;
+	}
+	const parameterOpen = match.index + match[0].length - 1;
+	const parameterClose = findMatchingDelimiter(source, parameterOpen, "(", ")");
+	if (parameterClose === undefined) {
+		return undefined;
+	}
+	const bodyOpen = source.indexOf("{", parameterClose + 1);
+	if (bodyOpen < 0) {
+		return undefined;
+	}
+	const bodyClose = findMatchingDelimiter(source, bodyOpen, "{", "}");
+	if (bodyClose === undefined) {
+		return undefined;
+	}
+	return {
+		start: bodyOpen,
+		end: bodyClose,
+		body: source.slice(bodyOpen, bodyClose + 1),
+	};
+}
+
+/**
+ * Locks `F080` S1's git domain: the three hardened, audited argument-list
+ * constants (`status.rs`'s `GIT_STATUS_ARGS`, `diff.rs`'s
+ * `GIT_DIFF_BASE_ARGS`/`GIT_SHOW_BASE_ARGS`) and the wire DTO struct/enum
+ * shapes (`dto.rs`'s `GitBranchWire`/`GitSubmoduleStateWire`/
+ * `GitStatusEntryWire`/`GitDiffFileEntryWire`/`GitShowBlobResult`) exactly —
+ * a command silently gaining/losing a hardening flag, or a DTO silently
+ * gaining/losing/renaming a field, fails this check rather than only being
+ * caught by chance in review.
+ */
+export function validateGitRustBoundary(rustSources) {
+	const failures = [];
+	const statusSource = findRustSource(
+		rustSources,
+		"src-tauri/src/git/status.rs",
+	);
+	const diffSource = findRustSource(rustSources, "src-tauri/src/git/diff.rs");
+	const dtoSource = findRustSource(rustSources, "src-tauri/src/git/dto.rs");
+
+	if (statusSource === undefined || diffSource === undefined) {
+		failures.push("git boundary requires status.rs and diff.rs");
+		return failures;
+	}
+	// Comments-only (not `stripRustCommentsAndLiterals`, which blanks string
+	// literal *contents* too — see that function's own doc comment): this
+	// check must see the actual `"status"`/`"--porcelain=v2"`/etc. argument
+	// text, exactly like the pre-existing spawn-guard's `"-c"` check in
+	// `validateTerminalRustBoundary` needs `stripRustCommentsOnly` for the
+	// same reason.
+	const executableStatus = stripRustCommentsOnly(statusSource);
+	const executableDiff = stripRustCommentsOnly(diffSource);
+
+	const argsConstant = (source, name) => {
+		const constantPattern = new RegExp(
+			`pub\\s*\\(\\s*crate\\s*\\)\\s+const\\s+${escapeRegularExpression(name)}\\s*:\\s*&\\[&str\\]\\s*=\\s*&\\[([^\\]]*)\\]\\s*;`,
+		);
+		const match = constantPattern.exec(source);
+		if (match === null) {
+			return undefined;
+		}
+		return match[1]
+			.split(",")
+			.map((entry) => entry.trim())
+			.filter((entry) => entry.length > 0)
+			.map((entry) => entry.replace(/^"|"$/g, ""));
+	};
+
+	const statusArgs = argsConstant(executableStatus, "GIT_STATUS_ARGS");
+	if (
+		!sameArray(statusArgs, [
+			"status",
+			"--porcelain=v2",
+			"-z",
+			"--branch",
+			"--ignored",
+		])
+	) {
+		failures.push(
+			"status.rs must define GIT_STATUS_ARGS as exactly the audited status argument list",
+		);
+	}
+	const diffBaseArgs = argsConstant(executableDiff, "GIT_DIFF_BASE_ARGS");
+	if (
+		!sameArray(diffBaseArgs, [
+			"diff",
+			"--no-color",
+			"-z",
+			"-M",
+			"--no-textconv",
+			"--no-ext-diff",
+		])
+	) {
+		failures.push(
+			"diff.rs must define GIT_DIFF_BASE_ARGS as exactly the audited diff argument list",
+		);
+	}
+	const showBaseArgs = argsConstant(executableDiff, "GIT_SHOW_BASE_ARGS");
+	if (
+		!sameArray(showBaseArgs, [
+			"show",
+			"--no-color",
+			"--no-textconv",
+			"--no-ext-diff",
+		])
+	) {
+		failures.push(
+			"diff.rs must define GIT_SHOW_BASE_ARGS as exactly the audited show argument list",
+		);
+	}
+
+	if (dtoSource === undefined) {
+		failures.push("git boundary requires dto.rs");
+		return failures;
+	}
+	const executableDto = stripRustCommentsAndLiterals(dtoSource);
+	const compact = (value) => value?.replaceAll(/\s+/g, "") ?? "";
+	const structBody = (name) => {
+		const bodies = watcherRustStructBodies(executableDto, name);
+		return bodies.length === 1 ? compact(bodies[0].body) : undefined;
+	};
+	const enumBody = (name) => {
+		const bodies = watcherRustEnumBodies(executableDto, name);
+		return bodies.length === 1 ? compact(bodies[0].body) : undefined;
+	};
+
+	if (
+		structBody("GitSubmoduleStateWire") !==
+		"is_submodule:bool,commit_changed:bool,tracked_changed:bool,untracked_changed:bool,"
+	) {
+		failures.push(
+			"GitSubmoduleStateWire must expose only its exact audited four boolean fields",
+		);
+	}
+	if (
+		structBody("GitBranchWire") !==
+		"oid:String,head:String,upstream:Option<GitBranchUpstreamWire>,"
+	) {
+		failures.push("GitBranchWire must expose only its exact audited fields");
+	}
+	if (
+		structBody("GitDiffFileEntryWire") !==
+		"kind:GitDiffStatusKindWire,similarity:Option<u16>,path:String,orig_path:Option<String>,added:Option<u64>,deleted:Option<u64>,binary:bool,"
+	) {
+		failures.push(
+			"GitDiffFileEntryWire must expose only its exact audited fields",
+		);
+	}
+	if (structBody("GitShowBlobResult") !== "content:Option<Vec<u8>>,") {
+		failures.push(
+			"GitShowBlobResult must expose only its exact audited content field",
+		);
+	}
+	const expectedStatusEntryWire =
+		"Ordinary{index_status:char,worktree_status:char,submodule:GitSubmoduleStateWire,mode_head:String,mode_index:String,mode_worktree:String,hash_head:String,hash_index:String,path:String,},RenameOrCopy{index_status:char,worktree_status:char,submodule:GitSubmoduleStateWire,mode_head:String,mode_index:String,mode_worktree:String,hash_head:String,hash_index:String,rename_or_copy_kind:GitRenameOrCopyKindWire,similarity:u16,path:String,orig_path:String,},Unmerged{index_status:char,worktree_status:char,submodule:GitSubmoduleStateWire,mode_stage1:String,mode_stage2:String,mode_stage3:String,mode_worktree:String,hash_stage1:String,hash_stage2:String,hash_stage3:String,path:String,},Untracked{path:String,},Ignored{path:String,},";
+	if (enumBody("GitStatusEntryWire") !== expectedStatusEntryWire) {
+		failures.push(
+			"GitStatusEntryWire must expose exactly its five audited variants with their exact fields",
+		);
+	}
+
+	// --- F080 S3 write commands --------------------------------------------
+	if (
+		structBody("GitStagePathsRequest") !== "paths:Vec<String>," ||
+		structBody("GitUnstagePathsRequest") !== "paths:Vec<String>," ||
+		structBody("GitDiscardPathsRequest") !== "paths:Vec<String>,"
+	) {
+		failures.push(
+			"GitStagePathsRequest/GitUnstagePathsRequest/GitDiscardPathsRequest must expose only their exact audited paths field",
+		);
+	}
+	if (structBody("GitStageBlobRequest") !== "path:String,content:Vec<u8>,") {
+		failures.push(
+			"GitStageBlobRequest must expose only its exact audited path/content fields",
+		);
+	}
+	if (structBody("GitCommitRequest") !== "message:String,amend:bool,") {
+		failures.push(
+			"GitCommitRequest must expose only its exact audited message/amend fields",
+		);
+	}
+
+	const commitSource = findRustSource(
+		rustSources,
+		"src-tauri/src/git/commit.rs",
+	);
+	const discardSource = findRustSource(
+		rustSources,
+		"src-tauri/src/git/discard.rs",
+	);
+	if (commitSource === undefined || discardSource === undefined) {
+		failures.push("git boundary requires commit.rs and discard.rs");
+		return failures;
+	}
+	const executableCommit = stripRustCommentsOnly(commitSource);
+	const executableDiscard = stripRustCommentsOnly(discardSource);
+	const commitArgs = argsConstant(executableCommit, "GIT_COMMIT_ARGS");
+	if (
+		!sameArray(commitArgs, [
+			"-c",
+			"user.useConfigOnly=true",
+			"commit",
+			"--quiet",
+			"--file",
+			"-",
+		])
+	) {
+		failures.push(
+			"commit.rs must define GIT_COMMIT_ARGS as exactly the audited commit argument list",
+		);
+	}
+	const discardArgs = argsConstant(executableDiscard, "GIT_DISCARD_ARGS");
+	if (!sameArray(discardArgs, ["checkout", "-q"])) {
+		failures.push(
+			"discard.rs must define GIT_DISCARD_ARGS as exactly the audited discard argument list",
+		);
+	}
+
+	// --- F080 S4 network commands -------------------------------------------
+	if (
+		structBody("GitNetworkPreviewRequest") !==
+		"operation:GitNetworkOperationWire,"
+	) {
+		failures.push(
+			"GitNetworkPreviewRequest must expose only its exact audited operation field",
+		);
+	}
+	if (
+		structBody("GitNetworkPreviewResult") !==
+		"upstream:Option<String>,ahead:Option<u64>,behind:Option<u64>,"
+	) {
+		failures.push(
+			"GitNetworkPreviewResult must expose only its exact audited upstream/ahead/behind fields",
+		);
+	}
+	const networkOperationWireBody = enumBody("GitNetworkOperationWire");
+	if (
+		networkOperationWireBody !== "Fetch,Pull,Push," &&
+		networkOperationWireBody !== "Fetch,Pull,Push"
+	) {
+		failures.push(
+			"GitNetworkOperationWire must expose exactly its three audited Fetch/Pull/Push variants",
+		);
+	}
+	if (
+		structBody("GitFetchRequest") !== "" ||
+		structBody("GitPullRequest") !== ""
+	) {
+		failures.push("GitFetchRequest/GitPullRequest must remain empty structs");
+	}
+	if (structBody("GitPushRequest") !== "force:bool,") {
+		failures.push(
+			"GitPushRequest must expose only its exact audited force field",
+		);
+	}
+	if (structBody("GitNetworkCancelRequest") !== "") {
+		failures.push("GitNetworkCancelRequest must remain an empty struct");
+	}
+
+	const networkSource = findRustSource(
+		rustSources,
+		"src-tauri/src/git/network.rs",
+	);
+	const execSourceForNetwork = findRustSource(
+		rustSources,
+		"src-tauri/src/git/exec.rs",
+	);
+	if (networkSource === undefined || execSourceForNetwork === undefined) {
+		failures.push("git boundary requires network.rs and exec.rs");
+		return failures;
+	}
+	const executableNetwork = stripRustCommentsOnly(networkSource);
+	const fetchArgs = argsConstant(executableNetwork, "GIT_FETCH_ARGS");
+	if (!sameArray(fetchArgs, ["fetch", "--quiet"])) {
+		failures.push(
+			"network.rs must define GIT_FETCH_ARGS as exactly the audited fetch argument list",
+		);
+	}
+	const pullArgs = argsConstant(executableNetwork, "GIT_PULL_ARGS");
+	if (!sameArray(pullArgs, ["pull", "--quiet"])) {
+		failures.push(
+			"network.rs must define GIT_PULL_ARGS as exactly the audited pull argument list",
+		);
+	}
+	const pushArgs = argsConstant(executableNetwork, "GIT_PUSH_ARGS");
+	if (!sameArray(pushArgs, ["push", "--quiet"])) {
+		failures.push(
+			"network.rs must define GIT_PUSH_ARGS as exactly the audited push argument list",
+		);
+	}
+	const pushForceArgs = argsConstant(executableNetwork, "GIT_PUSH_FORCE_ARGS");
+	if (!sameArray(pushForceArgs, ["push", "--quiet", "--force-with-lease"])) {
+		failures.push(
+			"network.rs must define GIT_PUSH_FORCE_ARGS as exactly the audited force-with-lease argument list (never bare --force)",
+		);
+	}
+	// Belt-and-suspenders textual scan: the two `argsConstant` locks above
+	// already fully pin every element of both push-argument constants, so
+	// this only catches a *third*, differently-named constant (or an inline
+	// `.args([...])` literal) smuggling in a bare `--force` token anywhere in
+	// the git Rust domain — not just `network.rs` (broadened post-review;
+	// confirmed empirically zero false positives at the time: no other file
+	// under `src-tauri/src/git/` contained the literal quoted string
+	// `"--force"` at all, so widening this scan cost nothing). `--force-with-
+	// lease` itself contains the substring `--force`, so the negative
+	// lookahead is required to avoid a false positive against the audited
+	// constant's own literal.
+	//
+	// `F090` S5 found the one genuine exception this scan's own "zero false
+	// positives" premise did not anticipate: `worktree.rs`'s `remove_worktree`
+	// legitimately passes a bare `--force` to `git worktree remove` — a
+	// completely different subcommand from `push`, with no `--force-with-
+	// lease`-style safer equivalent at all (confirmed empirically,
+	// `worktree.rs`'s own module doc comment: a locked worktree requires it
+	// *twice*, a merely-dirty one once; `worktree remove` has no remote/lease
+	// concept for this flag to protect against in the first place — unlike
+	// `push`, which can silently clobber someone else's remote history, a
+	// local worktree removal's own two-phase probe-then-confirm flow is this
+	// feature's own, differently-shaped safeguard, see `plain-scm-worktree.ts`).
+	// `worktree.rs` is therefore excluded from this specific scan by name —
+	// not a weakening of the underlying push-only invariant this scan exists
+	// to protect (still enforced for every other file in the domain), and not
+	// a license for any *other* file to follow suit without the same
+	// disclosure and review.
+	const gitDomainSourcesForForceScan = rustSources.filter(
+		(entry) =>
+			GIT_DOMAIN_SOURCE_PATTERN.test(
+				entry.relativePath.replaceAll("\\", "/"),
+			) &&
+			!entry.relativePath.replaceAll("\\", "/").endsWith("/git/worktree.rs"),
+	);
+	const bareForceLiteralFoundIn = gitDomainSourcesForForceScan.find((entry) =>
+		/"--force"(?!-with-lease)/.test(stripRustCommentsOnly(entry.source)),
+	);
+	if (bareForceLiteralFoundIn !== undefined) {
+		failures.push(
+			`${bareForceLiteralFoundIn.relativePath} must never pass a bare --force argument to git push — only --force-with-lease`,
+		);
+	}
+
+	// Raw source (not `stripRustCommentsAndLiterals`, which blanks string
+	// literal *contents* too) — mirrors `validateTerminalRustBoundary`'s own
+	// `TERMINAL_ENV_PASSTHROUGH_NAMES_LOCK` check against `shell.rs`, which
+	// needs to see the actual `"PATH"`/`"HOME"`/etc. literal text.
+	const networkEnvNamesMatch =
+		/pub\(crate\)\s+const\s+GIT_NETWORK_ENV_PASSTHROUGH_NAMES\s*:\s*&\[&str\]\s*=\s*&\[([^\]]*)\]\s*;/.exec(
+			execSourceForNetwork,
+		);
+	const networkEnvNames = networkEnvNamesMatch?.[1]
+		.split(",")
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0)
+		.map((entry) => entry.replace(/^"|"$/g, ""));
+	if (
+		networkEnvNamesMatch === null ||
+		!sameArray(networkEnvNames, ["PATH", "HOME", "SSH_AUTH_SOCK"])
+	) {
+		failures.push(
+			"exec.rs must define GIT_NETWORK_ENV_PASSTHROUGH_NAMES as exactly PATH/HOME/SSH_AUTH_SOCK",
+		);
+	}
+
+	// Post-review fix: `GIT_LITERAL_PATHSPECS=1` (defeats the pathspec-glob-
+	// expansion data-loss defect a `--` separator alone does not stop) must
+	// be set exactly once, unconditionally, in the one shared pre-dispatch
+	// function (`apply_universal_hardening`) — never duplicated into, or
+	// narrowed to live only inside, one of `harden_background_read`/
+	// `harden_write`/`harden_network`. Comments-only (not
+	// `stripRustCommentsAndLiterals`) because this needs to see the actual
+	// `"GIT_LITERAL_PATHSPECS"`/`"1"` string-literal text, exactly like the
+	// `GIT_NETWORK_ENV_PASSTHROUGH_NAMES` check just above.
+	const execCommentsOnlyForPathspecs =
+		stripRustCommentsOnly(execSourceForNetwork);
+	const literalPathspecsOccurrences = (
+		execCommentsOnlyForPathspecs.match(/GIT_LITERAL_PATHSPECS/g) ?? []
+	).length;
+	const universalHardeningBody = rustFunctionBody(
+		execCommentsOnlyForPathspecs,
+		"apply_universal_hardening",
+	);
+	const universalHardeningSetsLiteralPathspecs =
+		universalHardeningBody !== undefined &&
+		/\.env\s*\(\s*"GIT_LITERAL_PATHSPECS"\s*,\s*"1"\s*\)/.test(
+			universalHardeningBody.body,
+		);
+	const literalPathspecsLeaksIntoAModeHardener = [
+		"harden_background_read",
+		"harden_write",
+		"harden_network",
+	].some((name) => {
+		const body = rustFunctionBody(execCommentsOnlyForPathspecs, name);
+		return body !== undefined && body.body.includes("GIT_LITERAL_PATHSPECS");
+	});
+	// `apply_universal_hardening` defining the env var correctly is not
+	// enough on its own — `build_git_command` must actually call it, and
+	// before the `match mode { ... }` dispatch (so it truly applies to
+	// every `GitExecMode`, not just whichever arm happens to run after it).
+	const buildGitCommandBody = rustFunctionBody(
+		execCommentsOnlyForPathspecs,
+		"build_git_command",
+	);
+	const buildGitCommandCallsUniversalHardeningBeforeDispatch = (() => {
+		if (buildGitCommandBody === undefined) {
+			return false;
+		}
+		const callIndex = buildGitCommandBody.body.indexOf(
+			"apply_universal_hardening(",
+		);
+		const matchIndex = buildGitCommandBody.body.indexOf("match mode");
+		return callIndex >= 0 && matchIndex >= 0 && callIndex < matchIndex;
+	})();
+	if (
+		literalPathspecsOccurrences !== 1 ||
+		!universalHardeningSetsLiteralPathspecs ||
+		literalPathspecsLeaksIntoAModeHardener ||
+		!buildGitCommandCallsUniversalHardeningBeforeDispatch
+	) {
+		failures.push(
+			"exec.rs must set GIT_LITERAL_PATHSPECS=1 exactly once, unconditionally, inside " +
+				"apply_universal_hardening, and build_git_command must call it before dispatching " +
+				"on GitExecMode — never duplicated or narrowed into a single GitExecMode's own " +
+				"harden_* function",
+		);
+	}
+
+	// --- F090 S1: file/line history (`git::log`) ---------------------------
+	const logSource = findRustSource(rustSources, "src-tauri/src/git/log.rs");
+	if (logSource === undefined) {
+		failures.push("git boundary requires log.rs");
+		return failures;
+	}
+	const executableLog = stripRustCommentsOnly(logSource);
+	const logCommitMetaArgs = argsConstant(
+		executableLog,
+		"GIT_LOG_COMMIT_META_ARGS",
+	);
+	if (
+		!sameArray(logCommitMetaArgs, [
+			"log",
+			"-z",
+			"--format=%H%x1f%B",
+			"--no-patch",
+		])
+	) {
+		failures.push(
+			"log.rs must define GIT_LOG_COMMIT_META_ARGS as exactly the audited " +
+				"sha+full-message-body format — a second free-text field (e.g. author " +
+				"name) positioned before the body would reintroduce the exact field-shift " +
+				"vulnerability F090 S0 found and fixed for blame's own hover-metadata fetch",
+		);
+	}
+
+	if (
+		structBody("GitFileHistoryRequest") !== "path:String," ||
+		structBody("GitLogLineRangeWire") !== "start:u32,end:u32," ||
+		structBody("GitLineHistoryListRequest") !==
+			"path:String,range:GitLogLineRangeWire," ||
+		structBody("GitLineHistoryDetailRequest") !==
+			"path:String,range:GitLogLineRangeWire,skip:u32,expected_sha:String," ||
+		structBody("GitHistoryEntryWire") !== "sha:String,message:String," ||
+		structBody("GitHistoryListResultWire") !==
+			"entries:Vec<GitHistoryEntryWire>,truncated:bool," ||
+		structBody("GitLineHistoryDetailResultWire") !==
+			"sha:String,diff_text:String,"
+	) {
+		failures.push(
+			"GitFileHistoryRequest/GitLogLineRangeWire/GitLineHistoryListRequest/" +
+				"GitLineHistoryDetailRequest/GitHistoryEntryWire/GitHistoryListResultWire/" +
+				"GitLineHistoryDetailResultWire must expose only their exact audited fields",
+		);
+	}
+
+	// --- F090 S2: commit-detail file list (`git::show_commit`) -------------
+	const showCommitSource = findRustSource(
+		rustSources,
+		"src-tauri/src/git/show_commit.rs",
+	);
+	if (showCommitSource === undefined) {
+		failures.push("git boundary requires show_commit.rs");
+		return failures;
+	}
+	const executableShowCommit = stripRustCommentsOnly(showCommitSource);
+	const showCommitDiffBaseArgs = argsConstant(
+		executableShowCommit,
+		"GIT_SHOW_COMMIT_DIFF_BASE_ARGS",
+	);
+	if (
+		!sameArray(showCommitDiffBaseArgs, [
+			"diff",
+			"--no-color",
+			"-z",
+			"-M",
+			"-C",
+			"--find-copies-harder",
+			"--no-textconv",
+			"--no-ext-diff",
+		])
+	) {
+		failures.push(
+			"show_commit.rs must define GIT_SHOW_COMMIT_DIFF_BASE_ARGS as exactly the audited " +
+				"two-explicit-revision git diff argument list — never the literal show " +
+				"subcommand (see validateGitShowCommitFirstParentBoundary for the dedicated, " +
+				"stronger lock on that specific invariant)",
+		);
+	}
+	const emptyTreeShaMatch =
+		/pub\s*\(\s*crate\s*\)\s+const\s+EMPTY_TREE_SHA\s*:\s*&\s*str\s*=\s*"([^"]*)"\s*;/.exec(
+			executableShowCommit,
+		);
+	if (
+		emptyTreeShaMatch === null ||
+		emptyTreeShaMatch[1] !== "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+	) {
+		failures.push(
+			"show_commit.rs must define EMPTY_TREE_SHA as exactly git's own well-known empty-tree object id",
+		);
+	}
+
+	if (
+		structBody("GitShowCommitRequest") !== "sha:String," ||
+		structBody("GitShowCommitResult") !==
+			"sha:String,parent_sha:Option<String>,files:Vec<GitDiffFileEntryWire>," ||
+		structBody("GitShowCommitBlobRequest") !== "sha:String,path:String,"
+	) {
+		failures.push(
+			"GitShowCommitRequest/GitShowCommitResult/GitShowCommitBlobRequest must expose only their exact audited fields",
+		);
+	}
+
+	// --- F090 S3: graph (`git::log::log_graph`) + refs (`git::refs`) -------
+	//
+	// `GIT_LOG_GRAPH_ARGS`/`GIT_FOR_EACH_REF_ARGS` themselves get their own
+	// *dedicated* lock (`validateGitLogGraphFormatStringBoundary`/
+	// `validateGitRefsFieldSafetyBoundary` below) — the same "exported on its
+	// own, not folded in here" treatment `validateGitBlameHardeningArgs`/
+	// `validateGitShowCommitFirstParentBoundary` already get, because each
+	// has its own easy-to-miss field-safety footgun beyond plain array
+	// equality. This section only locks the wire DTO shapes.
+	if (
+		structBody("GitLogGraphRequest") !== "max_count:u32," ||
+		structBody("GitGraphNodeWire") !==
+			"sha:String,parents:Vec<String>,subject:String," ||
+		structBody("GitLogGraphResultWire") !==
+			"nodes:Vec<GitGraphNodeWire>,truncated:bool,"
+	) {
+		failures.push(
+			"GitLogGraphRequest/GitGraphNodeWire/GitLogGraphResultWire must expose only their exact audited fields",
+		);
+	}
+	if (structBody("GitRefsListRequest") !== "") {
+		failures.push("GitRefsListRequest must remain an empty struct");
+	}
+	const refKindWireBody = enumBody("GitRefKindWire");
+	if (
+		refKindWireBody !== "Branch,RemoteBranch,Tag," &&
+		refKindWireBody !== "Branch,RemoteBranch,Tag"
+	) {
+		failures.push(
+			"GitRefKindWire must expose exactly its three audited Branch/RemoteBranch/Tag variants",
+		);
+	}
+	if (
+		structBody("GitRefEntryWire") !==
+			"kind:GitRefKindWire,full_name:String,short_name:String,target_sha:String," +
+				"is_annotated_tag:bool,peeled_sha:Option<String>,upstream:Option<String>,is_head:bool," ||
+		structBody("GitRefsListResultWire") !==
+			"entries:Vec<GitRefEntryWire>,truncated:bool,"
+	) {
+		failures.push(
+			"GitRefEntryWire/GitRefsListResultWire must expose only their exact audited fields",
+		);
+	}
+
+	// --- F090 S4: stash (`git::stash`) --------------------------------------
+	//
+	// `GIT_STASH_LIST_ARGS` itself gets its own *dedicated* lock
+	// (`validateGitStashMessageFieldSafetyBoundary` below) — the same
+	// "exported on its own, not folded in here" treatment
+	// `validateGitBlameHardeningArgs`/`validateGitLogGraphFormatStringBoundary`
+	// already get, because it has its own easy-to-miss field-safety footgun
+	// (a stash message is entirely user-supplied, unlike `refs`' grammar-
+	// constrained fields) beyond plain array equality. This section locks
+	// every other `GIT_STASH_*_ARGS` constant (plain array equality is
+	// sufficient for each: none of them has a free-text field to absorb) and
+	// the wire DTO shapes.
+	const stashSource = findRustSource(rustSources, "src-tauri/src/git/stash.rs");
+	if (stashSource === undefined) {
+		failures.push("git boundary requires stash.rs");
+		return failures;
+	}
+	const executableStash = stripRustCommentsOnly(stashSource);
+	const stashArgsChecks = [
+		[
+			"GIT_STASH_SHOW_NAME_STATUS_ARGS",
+			[
+				"stash",
+				"show",
+				"--no-color",
+				"-z",
+				"-u",
+				"-M",
+				"-C",
+				"--find-copies-harder",
+				"--no-textconv",
+				"--no-ext-diff",
+				"--name-status",
+			],
+		],
+		[
+			"GIT_STASH_SHOW_NUMSTAT_ARGS",
+			[
+				"stash",
+				"show",
+				"--no-color",
+				"-z",
+				"-u",
+				"-M",
+				"-C",
+				"--find-copies-harder",
+				"--no-textconv",
+				"--no-ext-diff",
+				"--numstat",
+			],
+		],
+		["GIT_STASH_PUSH_ARGS", ["stash", "push"]],
+		[
+			"GIT_STASH_PUSH_INCLUDE_UNTRACKED_ARGS",
+			["stash", "push", "--include-untracked"],
+		],
+		["GIT_STASH_APPLY_ARGS", ["stash", "apply"]],
+		["GIT_STASH_APPLY_INDEX_ARGS", ["stash", "apply", "--index"]],
+		["GIT_STASH_POP_ARGS", ["stash", "pop"]],
+		["GIT_STASH_POP_INDEX_ARGS", ["stash", "pop", "--index"]],
+		["GIT_STASH_DROP_ARGS", ["stash", "drop"]],
+	];
+	for (const [constantName, expected] of stashArgsChecks) {
+		if (!sameArray(argsConstant(executableStash, constantName), expected)) {
+			failures.push(
+				`stash.rs must define ${constantName} as exactly the audited argument list`,
+			);
+		}
+	}
+
+	if (
+		structBody("GitStashListRequest") !== "" ||
+		structBody("GitStashEntryWire") !==
+			"index:u32,sha:String,committer_time:i64,message:String," ||
+		structBody("GitStashListResultWire") !==
+			"entries:Vec<GitStashEntryWire>,truncated:bool,"
+	) {
+		failures.push(
+			"GitStashListRequest/GitStashEntryWire/GitStashListResultWire must expose only their exact audited fields",
+		);
+	}
+	if (
+		structBody("GitStashShowRequest") !== "sha:String," ||
+		structBody("GitStashShowResultWire") !==
+			"sha:String,parent_sha:Option<String>,files:Vec<GitDiffFileEntryWire>,"
+	) {
+		failures.push(
+			"GitStashShowRequest/GitStashShowResultWire must expose only their exact audited fields",
+		);
+	}
+	if (
+		structBody("GitStashPushRequest") !==
+		"message:String,include_untracked:bool,"
+	) {
+		failures.push(
+			"GitStashPushRequest must expose only its exact audited fields",
+		);
+	}
+	const stashPushOutcomeBody = enumBody("GitStashPushOutcomeWire");
+	if (
+		stashPushOutcomeBody !== "Created,NoLocalChanges," &&
+		stashPushOutcomeBody !== "Created,NoLocalChanges"
+	) {
+		failures.push(
+			"GitStashPushOutcomeWire must expose exactly its two audited Created/NoLocalChanges variants",
+		);
+	}
+	if (
+		structBody("GitStashApplyRequest") !== "sha:String,use_index:bool," ||
+		structBody("GitStashPopRequest") !==
+			"expected_sha:String,use_index:bool," ||
+		structBody("GitStashDropRequest") !== "expected_sha:String,"
+	) {
+		failures.push(
+			"GitStashApplyRequest/GitStashPopRequest/GitStashDropRequest must expose only their exact audited fields",
+		);
+	}
+	const stashApplyOutcomeBody = enumBody("GitStashApplyOutcomeWire");
+	if (
+		stashApplyOutcomeBody !==
+			"Applied,Conflict{conflicted_paths:Vec<String>}," &&
+		stashApplyOutcomeBody !== "Applied,Conflict{conflicted_paths:Vec<String>}"
+	) {
+		failures.push(
+			"GitStashApplyOutcomeWire must expose exactly its two audited Applied/Conflict variants",
+		);
+	}
+
+	// --- F090 S5: worktree (`git::worktree`) --------------------------------
+	//
+	// None of `worktree.rs`'s three argument constants has a free-text field
+	// to absorb (`worktree list`'s porcelain format has no user-supplied
+	// content at all; `worktree add`/`worktree remove`'s own literal `--`
+	// separator is enforced by `GIT_WORKTREE_ADD_BASE_ARGS`'s own fixed shape,
+	// not a format string), so plain array equality is sufficient for all
+	// three — no dedicated field-safety function is needed here, unlike
+	// `validateGitBlameHardeningArgs`/`validateGitLogGraphFormatStringBoundary`/
+	// `validateGitStashMessageFieldSafetyBoundary`.
+	const worktreeSource = findRustSource(
+		rustSources,
+		"src-tauri/src/git/worktree.rs",
+	);
+	if (worktreeSource === undefined) {
+		failures.push("git boundary requires worktree.rs");
+		return failures;
+	}
+	const executableWorktree = stripRustCommentsOnly(worktreeSource);
+	const worktreeArgsChecks = [
+		["GIT_WORKTREE_LIST_ARGS", ["worktree", "list", "--porcelain", "-z"]],
+		["GIT_WORKTREE_ADD_BASE_ARGS", ["worktree", "add"]],
+		["GIT_WORKTREE_REMOVE_ARGS", ["worktree", "remove"]],
+	];
+	for (const [constantName, expected] of worktreeArgsChecks) {
+		if (!sameArray(argsConstant(executableWorktree, constantName), expected)) {
+			failures.push(
+				`worktree.rs must define ${constantName} as exactly the audited argument list`,
+			);
+		}
+	}
+
+	if (
+		structBody("GitWorktreeListRequest") !== "" ||
+		enumBody("GitWorktreeHeadStateWire") !==
+			"Branch{ref_name:String},Detached,Bare," ||
+		structBody("GitWorktreeEntryWire") !==
+			"path:String,head_sha:Option<String>,head_state:GitWorktreeHeadStateWire,lock_reason:Option<String>,prunable_reason:Option<String>,is_main:bool," ||
+		structBody("GitWorktreeListResultWire") !==
+			"entries:Vec<GitWorktreeEntryWire>,truncated:bool,"
+	) {
+		failures.push(
+			"GitWorktreeListRequest/GitWorktreeHeadStateWire/GitWorktreeEntryWire/GitWorktreeListResultWire must expose only their exact audited fields",
+		);
+	}
+	if (
+		structBody("GitWorktreeAddRequest") !==
+		"child_segment:String,detach:bool,commit_ish:Option<String>,"
+	) {
+		failures.push(
+			"GitWorktreeAddRequest must expose only its exact audited fields",
+		);
+	}
+	const worktreeAddOutcomeBody = enumBody("GitWorktreeAddOutcomeWire");
+	if (
+		worktreeAddOutcomeBody !== "Added{path:String},PickerCancelled," &&
+		worktreeAddOutcomeBody !== "Added{path:String},PickerCancelled"
+	) {
+		failures.push(
+			"GitWorktreeAddOutcomeWire must expose exactly its two audited Added/PickerCancelled variants",
+		);
+	}
+	if (structBody("GitWorktreeRemoveRequest") !== "path:String,force:bool,") {
+		failures.push(
+			"GitWorktreeRemoveRequest must expose only its exact audited fields",
+		);
+	}
+	const worktreeRemoveOutcomeBody = enumBody("GitWorktreeRemoveOutcomeWire");
+	if (
+		worktreeRemoveOutcomeBody !== "Removed,NeedsForce," &&
+		worktreeRemoveOutcomeBody !== "Removed,NeedsForce"
+	) {
+		failures.push(
+			"GitWorktreeRemoveOutcomeWire must expose exactly its two audited Removed/NeedsForce variants",
+		);
+	}
+
+	return failures;
+}
+
+/**
+ * `F090` S0's dedicated hardening lock for `git blame` — kept as its own
+ * exported function (not folded into `validateGitRustBoundary`'s generic
+ * `argsConstant` checks) precisely because the research doc's own warning
+ * is that this is easy to conflate with an already-covered case: `status`/
+ * `diff` get their NUL-safe, unquoted path output from `-z` alone, so it
+ * would be a natural (but wrong) assumption that blame's own `-z` does the
+ * same. It does not — verified empirically (`blame.rs`'s own module doc
+ * comment, `blame/tests.rs`'s `blame_hardened_call_recovers_the_real_filename_
+ * while_an_unhardened_control_is_octal_escaped` control-group test): git
+ * blame's `filename`/`previous` path fields are only unescaped when `-c
+ * core.quotePath=false` is explicitly set, and that override must be a
+ * *global* option positioned before the `blame` subcommand token (`-c`
+ * placed after `blame` is a *different*, blame-specific flag — annotate-
+ * compatibility mode — not the config-override flag; confirmed empirically
+ * against real git 2.50.1, which is why `GIT_BLAME_BASE_ARGS` itself is
+ * ordered `-c`, `core.quotePath=false` *first*, `blame` second, unlike the
+ * research doc's original un-verified sketch).
+ */
+export function validateGitBlameHardeningArgs(rustSources) {
+	const failures = [];
+	const blameSource = findRustSource(rustSources, "src-tauri/src/git/blame.rs");
+	if (blameSource === undefined) {
+		failures.push("git boundary requires blame.rs");
+		return failures;
+	}
+	const executableBlame = stripRustCommentsOnly(blameSource);
+	const constantPattern =
+		/pub\s*\(\s*crate\s*\)\s+const\s+GIT_BLAME_BASE_ARGS\s*:\s*&\[&str\]\s*=\s*&\[([^\]]*)\]\s*;/;
+	const match = constantPattern.exec(executableBlame);
+	const args = match?.[1]
+		?.split(",")
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0)
+		.map((entry) => entry.replace(/^"|"$/g, ""));
+	if (
+		match === null ||
+		!sameArray(args, [
+			"-c",
+			"core.quotePath=false",
+			"blame",
+			"--line-porcelain",
+			"--root",
+		])
+	) {
+		failures.push(
+			"blame.rs must define GIT_BLAME_BASE_ARGS as exactly the audited blame argument list, " +
+				"with -c core.quotePath=false positioned as a global option before the blame subcommand " +
+				"token (not after it, where -c means something else entirely to git blame)",
+		);
+	}
+	return failures;
+}
+
+/**
+ * `F090` S2's dedicated lock for `show_commit.rs`'s own empirically-
+ * discovered deviation from the frozen plan — kept as its own exported
+ * function (not folded into `validateGitRustBoundary`'s generic
+ * `argsConstant`/`structBody` checks) for exactly the same reason
+ * `validateGitBlameHardeningArgs` is: the frozen plan's own sketch
+ * (`git show <sha> --first-parent --name-status`) is the *natural*,
+ * easy-to-reach-for shape, and nothing about `GIT_SHOW_COMMIT_DIFF_BASE_ARGS`
+ * containing `"diff"` instead of `"show"` alone proves a future edit could
+ * not add a second, parallel invocation elsewhere in the same file that goes
+ * back to spawning `git show`. This function re-scans the *entire* file for
+ * the literal subcommand token `"show"` (comments-only stripped, so an actual
+ * quoted string literal — not prose in a doc comment — would be required to
+ * trip it; confirmed zero legitimate occurrences in the audited file, every
+ * real use of the word "show" in `show_commit.rs` today lives in a doc
+ * comment or an identifier like `GIT_SHOW_COMMIT_INVALID_SHA`, neither of
+ * which this pattern can match) and additionally locks the call-order
+ * invariant that makes the two-explicit-revision `git diff` approach actually
+ * correct: `show_commit` must call `verify_commit_exists` before
+ * `resolve_first_parent` (see `show_commit.rs`'s own module doc comment for
+ * why neither `%P` nor `--parents` output alone can tell a non-existent/
+ * non-commit object apart from a genuine root commit), and the diff
+ * invocations' own base revision must be built from `parent_sha`/
+ * `EMPTY_TREE_SHA` — never a bare `sha` positional or a `sha^`-style revspec
+ * suffix (the frozen plan's original, empirically-falsified drill-down
+ * shape for a *different* command, `log::line_history_detail`, which this
+ * lock also guards `show_commit.rs` against silently reintroducing here).
+ */
+export function validateGitShowCommitFirstParentBoundary(rustSources) {
+	const failures = [];
+	const showCommitSource = findRustSource(
+		rustSources,
+		"src-tauri/src/git/show_commit.rs",
+	);
+	if (showCommitSource === undefined) {
+		failures.push("git boundary requires show_commit.rs");
+		return failures;
+	}
+	const executableShowCommit = stripRustCommentsOnly(showCommitSource);
+	if (/"show"/.test(executableShowCommit)) {
+		failures.push(
+			'show_commit.rs must never spawn `git show` (the literal string "show" must not ' +
+				"appear anywhere in its executable source) — see this file's own module doc " +
+				"comment for why a plain two-explicit-revision `git diff` replaces it entirely",
+		);
+	}
+
+	const showCommitBody = rustFunctionBody(executableShowCommit, "show_commit");
+	if (showCommitBody === undefined) {
+		failures.push("show_commit.rs must define a show_commit function");
+		return failures;
+	}
+	const verifyCallIndex = showCommitBody.body.indexOf("verify_commit_exists(");
+	const resolveParentCallIndex = showCommitBody.body.indexOf(
+		"resolve_first_parent(",
+	);
+	if (
+		verifyCallIndex < 0 ||
+		resolveParentCallIndex < 0 ||
+		verifyCallIndex >= resolveParentCallIndex
+	) {
+		failures.push(
+			"show_commit's own function body must call verify_commit_exists strictly before " +
+				"resolve_first_parent — neither %P nor --parents output alone can distinguish a " +
+				"non-existent/non-commit object from a genuine root commit",
+		);
+	}
+	const baseRevisionMatch =
+		/base_revision\s*:\s*&\s*str\s*=\s*parent_sha\s*\.\s*as_deref\s*\(\s*\)\s*\.\s*unwrap_or\s*\(\s*EMPTY_TREE_SHA\s*\)\s*;/.exec(
+			showCommitBody.body,
+		);
+	if (baseRevisionMatch === null) {
+		failures.push(
+			"show_commit's own base_revision must be built from parent_sha.as_deref().unwrap_or(EMPTY_TREE_SHA) " +
+				"— never a bare sha positional or a sha^-style revspec suffix",
+		);
+	}
+
+	return failures;
+}
+
+/**
+ * `F090` S3's dedicated lock for `log.rs`'s graph command — kept as its own
+ * exported function (not folded into `validateGitRustBoundary`'s generic
+ * `argsConstant` checks) for the same reason `validateGitBlameHardeningArgs`
+ * is: `GIT_LOG_GRAPH_ARGS`'s own format string
+ * (`%H%x1f%P%x1f%s`) has an easy-to-miss footgun a plain array-equality
+ * check does not fully guard — a future edit could insert a second
+ * free-text field (e.g. `%an`) *before* `%s`, which would still leave the
+ * array "looking similar" in a diff but reintroduce exactly the
+ * delimiter-shift vulnerability `GIT_LOG_COMMIT_META_ARGS` itself was
+ * fixed to avoid (see `log.rs`'s own module doc comment, "F090 S3: the
+ * graph command's own format-string safety design"). This function
+ * therefore locks two things together: the exact argument list itself, and
+ * that `parse_graph_entries` actually parses it the safe way — a bounded
+ * `splitn(3, ...)` (so the one attacker-controlled field, `%s`, safely
+ * absorbs everything after the second delimiter, embedded `0x1f` bytes
+ * included) rather than an unbounded split that would misparse a hostile
+ * subject line into extra fields (proven reachable via entirely normal git
+ * usage by `tests.rs`'s own
+ * `log_graph_is_immune_to_a_hostile_subject_line_containing_a_unit_separator_byte`
+ * fixture and its pure-function naive-split control group).
+ */
+export function validateGitLogGraphFormatStringBoundary(rustSources) {
+	const failures = [];
+	const logSource = findRustSource(rustSources, "src-tauri/src/git/log.rs");
+	if (logSource === undefined) {
+		failures.push("git boundary requires log.rs");
+		return failures;
+	}
+	const executableLog = stripRustCommentsOnly(logSource);
+	const constantPattern =
+		/pub\s*\(\s*crate\s*\)\s+const\s+GIT_LOG_GRAPH_ARGS\s*:\s*&\[&str\]\s*=\s*&\[([^\]]*)\]\s*;/;
+	const match = constantPattern.exec(executableLog);
+	const args = match?.[1]
+		?.split(",")
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0)
+		.map((entry) => entry.replace(/^"|"$/g, ""));
+	if (
+		match === null ||
+		!sameArray(args, [
+			"log",
+			"-z",
+			"--format=%H%x1f%P%x1f%s",
+			"--no-patch",
+			"--topo-order",
+			"--branches",
+			"--tags",
+			"--remotes",
+		])
+	) {
+		failures.push(
+			"log.rs must define GIT_LOG_GRAPH_ARGS as exactly the audited graph format string — " +
+				"%s (the one attacker-controlled free-text field) must be positioned strictly last, " +
+				"after the two fixed-shape, git-computed %H/%P fields, and the ref-namespace scope " +
+				"must remain --branches --tags --remotes (never --all, which also walks refs/stash)",
+		);
+	}
+
+	const parseGraphEntriesBody = rustFunctionBody(
+		executableLog,
+		"parse_graph_entries",
+	);
+	if (parseGraphEntriesBody === undefined) {
+		failures.push("log.rs must define a parse_graph_entries function");
+		return failures;
+	}
+	if (!parseGraphEntriesBody.body.includes("splitn(3")) {
+		failures.push(
+			"parse_graph_entries must split each record with a bounded splitn(3, ...) — leaving " +
+				"the subject field's own further bytes (including an attacker-embedded 0x1f) " +
+				"untouched — never an unbounded split",
+		);
+	}
+	if (parseGraphEntriesBody.body.includes(".split(|&byte| byte == 0x1f)")) {
+		failures.push(
+			"parse_graph_entries must never fall back to an unbounded split on 0x1f anywhere in " +
+				"its own body — this is exactly the field-shift vulnerability this command's format " +
+				"string is designed to avoid",
+		);
+	}
+
+	return failures;
+}
+
+/**
+ * `F090` S3's dedicated lock for `refs.rs` — kept as its own exported
+ * function for the mirror-image reason `validateGitLogGraphFormatStringBoundary`
+ * is: where `log`/`blame`'s own format strings need a single absorbing
+ * free-text field because their content is genuinely attacker-controlled,
+ * `for-each-ref`'s six fields are (per `refs.rs`'s own module doc comment)
+ * structurally NUL-free *by git's own ref-name grammar* — no field ever
+ * needs (or should) absorb an embedded separator. This function locks the
+ * exact `GIT_FOR_EACH_REF_ARGS` format string/scope, and that `parse_refs`
+ * actually takes advantage of that structural guarantee (a plain,
+ * unbounded NUL split) rather than defensively (and misleadingly) using a
+ * bounded `splitn` as if this command's fields carried the same risk
+ * `log`/`blame`'s do.
+ */
+export function validateGitRefsFieldSafetyBoundary(rustSources) {
+	const failures = [];
+	const refsSource = findRustSource(rustSources, "src-tauri/src/git/refs.rs");
+	if (refsSource === undefined) {
+		failures.push("git boundary requires refs.rs");
+		return failures;
+	}
+	const executableRefs = stripRustCommentsOnly(refsSource);
+	const constantPattern =
+		/pub\s*\(\s*crate\s*\)\s+const\s+GIT_FOR_EACH_REF_ARGS\s*:\s*&\[&str\]\s*=\s*&\[([^\]]*)\]\s*;/;
+	const match = constantPattern.exec(executableRefs);
+	const args = match?.[1]
+		?.split(",")
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0)
+		.map((entry) => entry.replace(/^"|"$/g, ""));
+	if (
+		match === null ||
+		!sameArray(args, [
+			"for-each-ref",
+			"--format=%(refname)%00%(objecttype)%00%(objectname)%00%(*objectname)%00%(upstream)%00%(HEAD)",
+			"refs/heads",
+			"refs/tags",
+			"refs/remotes",
+		])
+	) {
+		failures.push(
+			"refs.rs must define GIT_FOR_EACH_REF_ARGS as exactly the audited six-field " +
+				"for-each-ref format string, scoped to refs/heads, refs/tags and refs/remotes only " +
+				"(never --all, which also walks refs/stash)",
+		);
+	}
+
+	const parseRefsBody = rustFunctionBody(executableRefs, "parse_refs");
+	if (parseRefsBody === undefined) {
+		failures.push("refs.rs must define a parse_refs function");
+		return failures;
+	}
+	if (!parseRefsBody.body.includes(".split(|&byte| byte == 0u8)")) {
+		failures.push(
+			"parse_refs must split each record's fields on a plain, unbounded NUL split — every " +
+				"field here is structurally NUL-free by git's own ref-name grammar (see refs.rs's " +
+				"own module doc comment), so no single-absorbing-field workaround is needed",
+		);
+	}
+	if (parseRefsBody.body.includes("splitn(")) {
+		failures.push(
+			"parse_refs must never use a bounded splitn anywhere in its own body — doing so would " +
+				"misleadingly suggest this command's fields carry the same attacker-controlled-" +
+				"content risk log/blame's own format strings do, which this module's own doc " +
+				"comment establishes they structurally do not",
+		);
+	}
+
+	return failures;
+}
+
+/**
+ * `F090` S4's dedicated lock for `stash.rs`'s own list command — kept as its
+ * own exported function (not folded into `validateGitRustBoundary`'s generic
+ * `argsConstant` checks) for the same reason
+ * `validateGitLogGraphFormatStringBoundary` is: a stash entry's own message
+ * is entirely user-supplied (`git stash push -m <message>` accepts arbitrary
+ * bytes, including this format string's own `0x1f` separator — confirmed
+ * empirically, this slice's own report), so `GIT_STASH_LIST_ARGS` needs the
+ * same "one absorbing free-text field, positioned last" discipline
+ * `GIT_LOG_COMMIT_META_ARGS`/`GIT_LOG_GRAPH_ARGS` already established for
+ * this domain, and a plain array-equality check alone would not catch a
+ * future edit that silently reordered the fields or added a second free-text
+ * one before `%B`. This function locks two things together: the exact
+ * argument list itself, and that `parse_stash_list` actually parses it the
+ * safe way — a bounded `splitn(4, ...)` (so the one attacker-controlled
+ * field, `%B`, safely absorbs everything after the third delimiter, embedded
+ * `0x1f` bytes included) rather than an unbounded split that would misparse
+ * a hostile message into extra fields (proven reachable via entirely normal
+ * git usage by `tests.rs`'s own
+ * `list_stashes_is_immune_to_a_hostile_message_containing_a_unit_separator_byte`
+ * fixture and its pure-function naive-split control group,
+ * `parse_stash_list_splitn_is_not_confused_by_a_message_containing_an_embedded_separator_byte`).
+ */
+export function validateGitStashMessageFieldSafetyBoundary(rustSources) {
+	const failures = [];
+	const stashSource = findRustSource(rustSources, "src-tauri/src/git/stash.rs");
+	if (stashSource === undefined) {
+		failures.push("git boundary requires stash.rs");
+		return failures;
+	}
+	const executableStash = stripRustCommentsOnly(stashSource);
+	const constantPattern =
+		/pub\s*\(\s*crate\s*\)\s+const\s+GIT_STASH_LIST_ARGS\s*:\s*&\[&str\]\s*=\s*&\[([^\]]*)\]\s*;/;
+	const match = constantPattern.exec(executableStash);
+	const args = match?.[1]
+		?.split(",")
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0)
+		.map((entry) => entry.replace(/^"|"$/g, ""));
+	if (
+		match === null ||
+		!sameArray(args, ["stash", "list", "-z", "--format=%gd%x1f%H%x1f%ct%x1f%B"])
+	) {
+		failures.push(
+			"stash.rs must define GIT_STASH_LIST_ARGS as exactly the audited format string — " +
+				"%B (the one attacker-controlled free-text field) must be positioned strictly last, " +
+				"after the three fixed-shape, git-computed %gd/%H/%ct fields",
+		);
+	}
+
+	const parseStashListBody = rustFunctionBody(
+		executableStash,
+		"parse_stash_list",
+	);
+	if (parseStashListBody === undefined) {
+		failures.push("stash.rs must define a parse_stash_list function");
+		return failures;
+	}
+	if (!parseStashListBody.body.includes("splitn(4")) {
+		failures.push(
+			"parse_stash_list must split each record with a bounded splitn(4, ...) — leaving " +
+				"the message field's own further bytes (including an attacker-embedded 0x1f) " +
+				"untouched — never an unbounded split",
+		);
+	}
+	if (parseStashListBody.body.includes(".split(|&byte| byte == 0x1f)")) {
+		failures.push(
+			"parse_stash_list must never fall back to an unbounded split on 0x1f anywhere in " +
+				"its own body — this is exactly the field-shift vulnerability this command's format " +
+				"string is designed to avoid",
+		);
+	}
+
+	return failures;
+}
+
+/**
+ * `F080` S1's three read methods, `F080` S3's five write methods
+ * (`git_stage_paths`/`git_unstage_paths`/`git_stage_blob`/`git_commit`/
+ * `git_discard_paths`), `F080` S4's five network methods
+ * (`git_network_preview`/`git_fetch`/`git_pull`/`git_push`/
+ * `git_network_cancel`), `F090` S0's two read-only blame methods
+ * (`gitBlameFile`/`gitBlameCommitMessages`), `F090` S1's three
+ * read-only file/line-history methods (`gitFileHistory`/
+ * `gitLineHistoryList`/`gitLineHistoryDetail`), `F090` S2's two
+ * read-only commit-detail methods (`gitShowCommit`/`gitShowCommitBlob`),
+ * `F090` S3's two read-only graph/refs methods (`gitLogGraph`/
+ * `gitRefsList`), `F090` S4's six stash methods (`gitStashList`/
+ * `gitStashShow`/`gitStashPush`/`gitStashApply`/`gitStashPop`/
+ * `gitStashDrop`), and `F090` S5's three worktree methods (`gitWorktreeList`/
+ * `gitWorktreeAdd`/`gitWorktreeRemove`) — every slice deliberately shares
+ * this same closed-list lock rather than getting its own parallel
+ * "S_ bridge methods" const, for the same reason `GIT_COMMAND_CONTRACTS`
+ * above holds all thirty-one Rust commands in one array: `PlainBridge`'s git
+ * surface is one audited whole, not several independently-sized ones.
+ */
+const GIT_BRIDGE_METHOD_NAMES = [
+	"gitStatus",
+	"gitDiffFiles",
+	"gitShowBlob",
+	"gitStagePaths",
+	"gitUnstagePaths",
+	"gitStageBlob",
+	"gitCommit",
+	"gitDiscardPaths",
+	"gitNetworkPreview",
+	"gitFetch",
+	"gitPull",
+	"gitPush",
+	"gitNetworkCancel",
+	"gitBlameFile",
+	"gitBlameCommitMessages",
+	"gitFileHistory",
+	"gitLineHistoryList",
+	"gitLineHistoryDetail",
+	"gitShowCommit",
+	"gitShowCommitBlob",
+	"gitLogGraph",
+	"gitRefsList",
+	"gitStashList",
+	"gitStashShow",
+	"gitStashPush",
+	"gitStashApply",
+	"gitStashPop",
+	"gitStashDrop",
+	"gitWorktreeList",
+	"gitWorktreeAdd",
+	"gitWorktreeRemove",
+];
+
+/**
+ * The five `F080` S3 write commands, plus `F080` S4's `git_push` (the one
+ * S4 command that carries a payload — `force`), mapped to their exact
+ * command-name string and the audited frontend `frozen*Request` builder
+ * `native.ts` must route the call's arguments through before invoking —
+ * mirrors `frozenGitDiffFilesRequest`/`frozenGitShowBlobRequest`'s existing
+ * S1 precedent for validating a request's shape at the TypeScript boundary
+ * before it ever reaches `invoke`. `git_fetch`/`git_pull`/
+ * `git_network_cancel` take no payload at all (an empty `{}` request, same
+ * shape as `git_status`) and so have no builder to route through — see
+ * [`GIT_NO_ARG_COMMAND_CONTRACTS`] for those three instead.
+ */
+const GIT_WRITE_COMMAND_CONTRACTS = Object.freeze([
+	Object.freeze({
+		command: "git_stage_paths",
+		requestBuilder: "frozenGitStagePathsRequest",
+	}),
+	Object.freeze({
+		command: "git_unstage_paths",
+		requestBuilder: "frozenGitUnstagePathsRequest",
+	}),
+	Object.freeze({
+		command: "git_stage_blob",
+		requestBuilder: "frozenGitStageBlobRequest",
+	}),
+	Object.freeze({
+		command: "git_commit",
+		requestBuilder: "frozenGitCommitRequest",
+	}),
+	Object.freeze({
+		command: "git_discard_paths",
+		requestBuilder: "frozenGitDiscardPathsRequest",
+	}),
+	Object.freeze({
+		command: "git_push",
+		requestBuilder: "frozenGitPushRequest",
+	}),
+	Object.freeze({
+		command: "git_stash_drop",
+		requestBuilder: "frozenGitStashDropRequest",
+	}),
+]);
+
+/**
+ * `F080` S4's three no-payload network commands (`git_fetch`/`git_pull`/
+ * `git_network_cancel`) — same "invoked exactly once" rigor
+ * [`GIT_WRITE_COMMAND_CONTRACTS`] applies, but with no request builder to
+ * check (mirrors how `git_status` itself, S1's own no-payload read, is
+ * checked below: invocation count only).
+ */
+const GIT_NO_ARG_COMMAND_CONTRACTS = Object.freeze([
+	"git_fetch",
+	"git_pull",
+	"git_network_cancel",
+]);
+
+/**
+ * Locks `F080` S1+S3+S4 and `F090` S0+S1+S2+S3+S4+S5's TypeScript surface:
+ * `PlainBridge` exposes exactly the thirty-one audited git methods,
+ * `git-codec.ts`'s read-result decoders validate exact own-data keys/reject
+ * Proxy wrapping/freeze their result (same rigor
+ * `validateTerminalIpcBridgeBoundary` already locks for the terminal
+ * domain), and `native.ts` routes each read/write through `invoke` with its
+ * audited command name — the reads through their audited decoders, the
+ * seven mutating writes (`GIT_WRITE_COMMAND_CONTRACTS`, including `F090`
+ * S4's own void-returning `git_stash_drop`) through their audited
+ * `frozen*Request` builders and `decodeGitVoid`, and the three no-payload
+ * network commands (`GIT_NO_ARG_COMMAND_CONTRACTS`) invoked exactly once
+ * each. `git_refs_list` (`F090` S3) is a fourth no-payload read, but unlike
+ * those three it returns a real decoded result rather than void, so it gets
+ * its own dedicated check just below rather than joining
+ * `GIT_NO_ARG_COMMAND_CONTRACTS`.
+ */
+export function validateGitIpcBridgeBoundary(rustSources, appSources) {
+	const failures = [];
+	const appSource = (expectedPath) =>
+		appSources.find(
+			({ relativePath }) => relativePath.replaceAll("\\", "/") === expectedPath,
+		)?.source;
+
+	const contracts = appSource("app/platform/tauri/contracts.ts");
+	const contractsFile =
+		contracts === undefined
+			? undefined
+			: ts.createSourceFile(
+					"contracts.ts",
+					contracts,
+					ts.ScriptTarget.Latest,
+					true,
+					ts.ScriptKind.TS,
+				);
+	const plainBridgeInterfaces =
+		contractsFile?.statements.filter(
+			(statement) =>
+				ts.isInterfaceDeclaration(statement) &&
+				statement.name.text === "PlainBridge",
+		) ?? [];
+	const bridgeMembers =
+		plainBridgeInterfaces[0]?.members.filter((member) =>
+			GIT_BRIDGE_METHOD_NAMES.includes(typeScriptStaticName(member.name)),
+		) ?? [];
+	const bridgeMemberNames = bridgeMembers
+		.map((member) => typeScriptStaticName(member.name))
+		.sort();
+	if (
+		plainBridgeInterfaces.length !== 1 ||
+		bridgeMembers.length !== GIT_BRIDGE_METHOD_NAMES.length ||
+		!bridgeMembers.every((member) => ts.isMethodSignature(member)) ||
+		JSON.stringify(bridgeMemberNames) !==
+			JSON.stringify([...GIT_BRIDGE_METHOD_NAMES].sort())
+	) {
+		failures.push(
+			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
+		);
+	}
+
+	const gitCodec = appSource("app/platform/tauri/git-codec.ts");
+	const decoderBody = (name) => {
+		if (gitCodec === undefined) {
+			return undefined;
+		}
+		const functions = extractRustLikeTypeScriptFunctionBodies(gitCodec, name);
+		return functions.length === 1 ? functions[0] : undefined;
+	};
+	for (const name of [
+		"decodeGitStatusResult",
+		"decodeGitDiffFilesResult",
+		"decodeGitShowBlobResult",
+		"decodeGitNetworkPreviewResult",
+		"decodeGitBlameFileResult",
+		"decodeGitBlameCommitMessagesResult",
+		"decodeGitHistoryListResult",
+		"decodeGitLineHistoryDetailResult",
+		"decodeGitShowCommitResult",
+		"decodeGitLogGraphResult",
+		"decodeGitRefsListResult",
+		"decodeGitStashListResult",
+		"decodeGitStashShowResult",
+		"decodeGitStashApplyOutcome",
+		"decodeGitWorktreeListResult",
+		"decodeGitWorktreeAddOutcome",
+	]) {
+		const body = decoderBody(name);
+		if (
+			body === undefined ||
+			!body.includes("hasExactKeys(") ||
+			!body.includes("rejectProxyObject(") ||
+			!body.includes("Object.freeze(")
+		) {
+			failures.push(
+				`git-codec.ts's ${name} must validate exact own-data keys, reject Proxy wrapping, and freeze its result`,
+			);
+		}
+	}
+	// `decodeGitStashPushOutcome` decodes a bare own-data string (one of the
+	// two audited outcomes), not a `{ ... }` object — `hasExactKeys`/
+	// `rejectProxyObject`/`Object.freeze` do not apply to it, so it gets its
+	// own, differently-shaped check rather than joining the loop above.
+	{
+		const body = decoderBody("decodeGitStashPushOutcome");
+		if (
+			body === undefined ||
+			!body.includes('typeof value !== "string"') ||
+			!body.includes("GIT_STASH_PUSH_OUTCOMES.has(")
+		) {
+			failures.push(
+				"git-codec.ts's decodeGitStashPushOutcome must validate value is one of the exact two audited outcome strings",
+			);
+		}
+	}
+	// `decodeGitWorktreeRemoveOutcome` decodes a bare own-data string (one of
+	// the two audited outcomes) — same differently-shaped check as
+	// `decodeGitStashPushOutcome` above, for the same reason.
+	{
+		const body = decoderBody("decodeGitWorktreeRemoveOutcome");
+		if (
+			body === undefined ||
+			!body.includes('typeof value !== "string"') ||
+			!body.includes("GIT_WORKTREE_REMOVE_OUTCOMES.has(")
+		) {
+			failures.push(
+				"git-codec.ts's decodeGitWorktreeRemoveOutcome must validate value is one of the exact two audited outcome strings",
+			);
+		}
+	}
+
+	const native = appSource("app/platform/tauri/native.ts");
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_status"/g)].length !== 1 ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_diff_files"/g)].length !==
+			1 ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_show_blob"/g)].length !==
+			1 ||
+		!native.includes("decodeGitStatusResult(") ||
+		!native.includes("decodeGitDiffFilesResult(") ||
+		!native.includes("decodeGitShowBlobResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_status/git_diff_files/git_show_blob exactly once each, decoded through the audited decoders",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_network_preview"/g)]
+			.length !== 1 ||
+		!native.includes("frozenGitNetworkPreviewRequest(") ||
+		!native.includes("decodeGitNetworkPreviewResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_network_preview exactly once, routed through frozenGitNetworkPreviewRequest and decoded through decodeGitNetworkPreviewResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_blame_file"/g)].length !==
+			1 ||
+		!native.includes("frozenGitBlameFileRequest(") ||
+		!native.includes("decodeGitBlameFileResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_blame_file exactly once, routed through frozenGitBlameFileRequest and decoded through decodeGitBlameFileResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_blame_commit_messages"/g)]
+			.length !== 1 ||
+		!native.includes("frozenGitBlameCommitMessagesRequest(") ||
+		!native.includes("decodeGitBlameCommitMessagesResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_blame_commit_messages exactly once, routed through frozenGitBlameCommitMessagesRequest and decoded through decodeGitBlameCommitMessagesResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_file_history"/g)].length !==
+			1 ||
+		!native.includes("frozenGitFileHistoryRequest(") ||
+		!native.includes("decodeGitHistoryListResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_file_history exactly once, routed through frozenGitFileHistoryRequest and decoded through decodeGitHistoryListResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_line_history_list"/g)]
+			.length !== 1 ||
+		!native.includes("frozenGitLineHistoryListRequest(") ||
+		!native.includes("decodeGitHistoryListResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_line_history_list exactly once, routed through frozenGitLineHistoryListRequest and decoded through decodeGitHistoryListResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_line_history_detail"/g)]
+			.length !== 1 ||
+		!native.includes("frozenGitLineHistoryDetailRequest(") ||
+		!native.includes("decodeGitLineHistoryDetailResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_line_history_detail exactly once, routed through frozenGitLineHistoryDetailRequest and decoded through decodeGitLineHistoryDetailResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_show_commit"/g)].length !==
+			1 ||
+		!native.includes("frozenGitShowCommitRequest(") ||
+		!native.includes("decodeGitShowCommitResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_show_commit exactly once, routed through frozenGitShowCommitRequest and decoded through decodeGitShowCommitResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_show_commit_blob"/g)]
+			.length !== 1 ||
+		!native.includes("frozenGitShowCommitBlobRequest(") ||
+		// Reuses `decodeGitShowBlobResult` verbatim — `git_show_commit_blob`
+		// returns the exact same `{ content }` wire shape `git_show_blob`
+		// does (see `dto.rs`'s `GitShowCommitBlobRequest`'s own module
+		// comment), so this is deliberately not a third, near-duplicate
+		// decoder.
+		!native.includes("decodeGitShowBlobResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_show_commit_blob exactly once, routed through frozenGitShowCommitBlobRequest and decoded through decodeGitShowBlobResult",
+		);
+	}
+
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_log_graph"/g)].length !==
+			1 ||
+		!native.includes("frozenGitLogGraphRequest(") ||
+		!native.includes("decodeGitLogGraphResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_log_graph exactly once, routed through frozenGitLogGraphRequest and decoded through decodeGitLogGraphResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_refs_list"/g)].length !==
+			1 ||
+		// `git_refs_list` takes no payload at all (the same `{ request: {} }`
+		// shape `git_fetch`/`git_pull`/`git_network_cancel` use) — there is no
+		// `frozenGitRefsListRequest` builder to route through, only its result
+		// decoder.
+		!native.includes("decodeGitRefsListResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_refs_list exactly once, decoded through decodeGitRefsListResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_stash_list"/g)].length !==
+			1 ||
+		// `git_stash_list` takes no payload at all — same shape as
+		// `git_refs_list` above, no `frozenGitStashListRequest` builder exists.
+		!native.includes("decodeGitStashListResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_stash_list exactly once, decoded through decodeGitStashListResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_stash_show"/g)].length !==
+			1 ||
+		!native.includes("frozenGitStashShowRequest(") ||
+		!native.includes("decodeGitStashShowResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_stash_show exactly once, routed through frozenGitStashShowRequest and decoded through decodeGitStashShowResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_stash_push"/g)].length !==
+			1 ||
+		!native.includes("frozenGitStashPushRequest(") ||
+		!native.includes("decodeGitStashPushOutcome(")
+	) {
+		failures.push(
+			"native.ts must invoke git_stash_push exactly once, routed through frozenGitStashPushRequest and decoded through decodeGitStashPushOutcome",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_stash_apply"/g)].length !==
+			1 ||
+		!native.includes("frozenGitStashApplyRequest(") ||
+		// `decodeGitStashApplyOutcome` is shared verbatim with `git_stash_pop`
+		// below — see `GitStashApplyOutcome`'s own doc comment for why the two
+		// bridge methods' response shape is identical.
+		!native.includes("decodeGitStashApplyOutcome(")
+	) {
+		failures.push(
+			"native.ts must invoke git_stash_apply exactly once, routed through frozenGitStashApplyRequest and decoded through decodeGitStashApplyOutcome",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_stash_pop"/g)].length !==
+			1 ||
+		!native.includes("frozenGitStashPopRequest(") ||
+		!native.includes("decodeGitStashApplyOutcome(")
+	) {
+		failures.push(
+			"native.ts must invoke git_stash_pop exactly once, routed through frozenGitStashPopRequest and decoded through decodeGitStashApplyOutcome",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_worktree_list"/g)]
+			.length !== 1 ||
+		// `git_worktree_list` takes no payload at all — same shape as
+		// `git_refs_list`/`git_stash_list` above, no
+		// `frozenGitWorktreeListRequest` builder exists.
+		!native.includes("decodeGitWorktreeListResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_worktree_list exactly once, decoded through decodeGitWorktreeListResult",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_worktree_add"/g)].length !==
+			1 ||
+		!native.includes("frozenGitWorktreeAddRequest(") ||
+		!native.includes("decodeGitWorktreeAddOutcome(")
+	) {
+		failures.push(
+			"native.ts must invoke git_worktree_add exactly once, routed through frozenGitWorktreeAddRequest and decoded through decodeGitWorktreeAddOutcome",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_worktree_remove"/g)]
+			.length !== 1 ||
+		!native.includes("frozenGitWorktreeRemoveRequest(") ||
+		!native.includes("decodeGitWorktreeRemoveOutcome(")
+	) {
+		failures.push(
+			"native.ts must invoke git_worktree_remove exactly once, routed through frozenGitWorktreeRemoveRequest and decoded through decodeGitWorktreeRemoveOutcome",
+		);
+	}
+
+	for (const { command, requestBuilder } of GIT_WRITE_COMMAND_CONTRACTS) {
+		const invokePattern = new RegExp(
+			`\\binvoke<unknown>\\(\\s*"${command}"`,
+			"g",
+		);
+		if (
+			native === undefined ||
+			[...native.matchAll(invokePattern)].length !== 1 ||
+			!native.includes(`${requestBuilder}(`)
+		) {
+			failures.push(
+				`native.ts must invoke ${command} exactly once, routed through ${requestBuilder}`,
+			);
+		}
+	}
+	for (const command of GIT_NO_ARG_COMMAND_CONTRACTS) {
+		const invokePattern = new RegExp(
+			`\\binvoke<unknown>\\(\\s*"${command}"`,
+			"g",
+		);
+		if (
+			native === undefined ||
+			[...native.matchAll(invokePattern)].length !== 1
+		) {
+			failures.push(`native.ts must invoke ${command} exactly once`);
+		}
+	}
+	if (native === undefined || !native.includes("decodeGitVoid(")) {
+		failures.push(
+			"native.ts must decode every F080 S3/S4 git void-returning command's response through decodeGitVoid",
+		);
+	}
+
+	return failures;
+}
+
+const GIT_DISCARD_VIEW_PATH = "app/features/scm/plain-scm-view.ts";
+const GIT_DISCARD_MODULE_PATH = "app/features/scm/plain-scm-discard.ts";
+
+/**
+ * The three files that may reference the `gitDiscardPaths` identifier at all
+ * without it being a business call: `contracts.ts` declares the `PlainBridge`
+ * method signature, `native.ts` defines the real bridge's forwarding
+ * implementation (routing to the `git_discard_paths` Tauri command), and
+ * `browser-mock.ts` defines the in-browser mock's implementation. None of
+ * these three is a *call* to `gitDiscardPaths` — mirrors how
+ * `validateWorkspaceDeleteTypeScriptBoundary`'s `declarationPaths` separates
+ * "defines/forwards" from "invokes" for the confirmed-delete bridge methods.
+ */
+const GIT_DISCARD_DECLARATION_PATHS = Object.freeze([
+	"app/platform/tauri/contracts.ts",
+	"app/platform/tauri/native.ts",
+	"app/platform/tauri/browser-mock.ts",
+]);
+
+/**
+ * `F080` S3's `gitDiscardPaths` is an irreversible working-tree write (see
+ * `PlainBridge.gitDiscardPaths`'s own doc comment: "This call performs the
+ * discard unconditionally; the caller must have already confirmed with the
+ * user"). Nothing at the Rust command or bridge-interface layer enforces
+ * that — today it holds only because `PlainScmView.discardResources` is the
+ * sole caller and it always awaits `resolveDiscardConfirmation` first. A
+ * later slice (F090's planned blame/history/graph SCM views) could easily
+ * grow a second call site that skips the gate, and `pnpm check` would stay
+ * green. This mirrors `validateWorkspaceDeleteTypeScriptBoundary`'s
+ * confirmed-delete precedent for this codebase's *other* irreversible write,
+ * at the same rigor: lock the bridge method to its one production call site
+ * (`PlainScmView.discardResources`), lock that call site's exact
+ * confirm-then-call body shape, and lock `plain-scm-discard.ts`'s own
+ * audited module face so it can never grow a bridge call or a
+ * dialog-skipping branch of its own.
+ */
+export function validateGitDiscardConfirmationBoundary(appSources) {
+	const failures = [];
+	const normalizedSources = new Map(
+		appSources.map(({ relativePath, source }) => [
+			relativePath.replaceAll("\\", "/"),
+			source,
+		]),
+	);
+	const requiredPaths = Object.freeze([
+		...GIT_DISCARD_DECLARATION_PATHS,
+		GIT_DISCARD_VIEW_PATH,
+		GIT_DISCARD_MODULE_PATH,
+	]);
+	for (const relativePath of requiredPaths) {
+		if (!normalizedSources.has(relativePath)) {
+			failures.push(
+				`git discard confirmation boundary requires ${relativePath}`,
+			);
+		}
+	}
+
+	function containingMethodName(node) {
+		let current = node.parent;
+		while (current !== undefined) {
+			if (
+				ts.isMethodDeclaration(current) ||
+				ts.isFunctionDeclaration(current)
+			) {
+				return typeScriptStaticName(current.name);
+			}
+			current = current.parent;
+		}
+		return undefined;
+	}
+
+	const declarationCounts = new Map(
+		GIT_DISCARD_DECLARATION_PATHS.map((relativePath) => [relativePath, 0]),
+	);
+	let auditedCallCount = 0;
+
+	for (const [normalizedPath, source] of normalizedSources) {
+		if (!normalizedPath.endsWith(".ts") && !normalizedPath.endsWith(".tsx")) {
+			continue;
+		}
+		const sourceFile = ts.createSourceFile(
+			normalizedPath,
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			normalizedPath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+		);
+		const isKnownBridge = collectTypeScriptBridgeAliases(sourceFile);
+
+		function visit(node) {
+			const referencesMethod =
+				(ts.isIdentifier(node) && node.text === "gitDiscardPaths") ||
+				((ts.isStringLiteral(node) ||
+					ts.isNoSubstitutionTemplateLiteral(node)) &&
+					node.text === "gitDiscardPaths");
+			if (referencesMethod) {
+				const parent = node.parent;
+				const isAllowedDeclaration =
+					(normalizedPath === "app/platform/tauri/contracts.ts" &&
+						ts.isMethodSignature(parent) &&
+						parent.name === node) ||
+					(normalizedPath === "app/platform/tauri/native.ts" &&
+						ts.isPropertyAssignment(parent) &&
+						parent.name === node) ||
+					(normalizedPath === "app/platform/tauri/browser-mock.ts" &&
+						(ts.isMethodDeclaration(parent) ||
+							ts.isPropertyAssignment(parent)) &&
+						parent.name === node);
+				if (isAllowedDeclaration) {
+					declarationCounts.set(
+						normalizedPath,
+						declarationCounts.get(normalizedPath) + 1,
+					);
+				} else {
+					const propertyAccess = ts.isIdentifier(node) ? parent : undefined;
+					const directCall =
+						propertyAccess !== undefined &&
+						ts.isPropertyAccessExpression(propertyAccess) &&
+						propertyAccess.name === node &&
+						ts.isCallExpression(propertyAccess.parent) &&
+						propertyAccess.parent.expression === propertyAccess &&
+						isKnownBridge(propertyAccess.expression)
+							? propertyAccess.parent
+							: undefined;
+					const isAuditedCall =
+						directCall !== undefined &&
+						normalizedPath === GIT_DISCARD_VIEW_PATH &&
+						containingMethodName(node) === "discardResources" &&
+						directCall.arguments.length === 1 &&
+						directCall.arguments[0]
+							.getText(sourceFile)
+							.replaceAll(/\s+/g, "") === "relativePaths";
+					if (isAuditedCall) {
+						auditedCallCount += 1;
+					} else {
+						failures.push(
+							`${normalizedPath} must not consume gitDiscardPaths outside PlainScmView.discardResources's single audited call site`,
+						);
+					}
+				}
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(sourceFile);
+	}
+
+	for (const [relativePath, count] of declarationCounts) {
+		if (count !== 1) {
+			failures.push(
+				`${relativePath} must declare gitDiscardPaths exactly once in its audited bridge surface`,
+			);
+		}
+	}
+	if (auditedCallCount !== 1) {
+		failures.push(
+			"gitDiscardPaths must have exactly one production call site, inside PlainScmView.discardResources",
+		);
+	}
+
+	const viewSource = normalizedSources.get(GIT_DISCARD_VIEW_PATH);
+	if (viewSource !== undefined) {
+		failures.push(...validateDiscardResourcesGuardedCall(viewSource));
+	}
+	const discardModuleSource = normalizedSources.get(GIT_DISCARD_MODULE_PATH);
+	if (discardModuleSource !== undefined) {
+		failures.push(
+			...validateDiscardConfirmationModuleFace(discardModuleSource),
+		);
+	}
+
+	return [...new Set(failures)];
+}
+
+/**
+ * Locks `PlainScmView.discardResources` to the exact "await the
+ * confirmation, return unless it is exactly `\"confirmed\"`, only then call
+ * the discard bridge" shape — mirrors
+ * `workspaceDeleteCommandBodyIsExact`/`exactFunctionBody`'s own "precise
+ * method body" technique for this codebase's other irreversible write.
+ * There is deliberately no looser structural check (e.g. "confirm is called
+ * somewhere before the discard call"): a fixed body is the only way to rule
+ * out a second, differently-shaped bridge call slipping in unnoticed.
+ */
+function validateDiscardResourcesGuardedCall(source) {
+	const sourceFile = ts.createSourceFile(
+		GIT_DISCARD_VIEW_PATH,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["plain-scm-view.ts must remain valid TypeScript"];
+	}
+	const methods = [];
+	function visit(node) {
+		if (
+			ts.isMethodDeclaration(node) &&
+			typeScriptStaticName(node.name) === "discardResources"
+		) {
+			methods.push(node);
+		}
+		ts.forEachChild(node, visit);
+	}
+	visit(sourceFile);
+	const expectedBody = `{
+		const decision = await resolveDiscardConfirmation(
+			this.dialogService,
+			relativePaths,
+		);
+		if (decision.kind !== "confirmed") {
+			return;
+		}
+		await this.runGitMutation((bridge) =>
+			bridge.gitDiscardPaths(relativePaths),
+		);
+	}`.replaceAll(/\s+/g, "");
+	if (
+		methods.length !== 1 ||
+		methods[0].body === undefined ||
+		methods[0].body.getText(sourceFile).replaceAll(/\s+/g, "") !== expectedBody
+	) {
+		return [
+			'PlainScmView.discardResources must await resolveDiscardConfirmation, return unless its result is exactly "confirmed", and only then call bridge.gitDiscardPaths — no other shape may reach the discard bridge call',
+		];
+	}
+	return [];
+}
+
+/**
+ * Locks `plain-scm-discard.ts`'s own audited module face: it must import
+ * nothing at all (the module doc comment's "DOM/service-free" claim,
+ * enforced structurally — an import is the only way this module could ever
+ * reach a bridge, `invoke`, or a real Workbench service to perform the
+ * discard itself rather than merely deciding whether the caller may), its
+ * top-level declarations must match the exact audited set (so a future edit
+ * cannot quietly add a helper that reaches a bridge), and
+ * `resolveDiscardConfirmation` itself must match the exact audited
+ * no-op/confirm/decline body — which simultaneously proves it never calls a
+ * bridge method and never has a branch that skips the dialog for a
+ * non-empty path list. Mirrors
+ * `validateWorkspaceDeleteCoordinatorRoute`'s own import/top-level/exact-body
+ * locks for `delete-coordinator.ts`.
+ */
+function validateDiscardConfirmationModuleFace(source) {
+	const failures = [];
+	const sourceFile = ts.createSourceFile(
+		GIT_DISCARD_MODULE_PATH,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["plain-scm-discard.ts must remain valid TypeScript"];
+	}
+
+	if (
+		sourceFile.statements.some((statement) => ts.isImportDeclaration(statement))
+	) {
+		failures.push(
+			"plain-scm-discard.ts must not import anything — it only ever decides whether the caller may discard, and an import is the only way it could ever reach a bridge or service to perform the discard itself",
+		);
+	}
+
+	const expectedTopLevel = new Map([
+		["DiscardConfirmDialogService", { kind: "interface", exported: true }],
+		["MAX_NAMED_PATHS_IN_DETAIL", { kind: "variable", exported: false }],
+		["discardConfirmationMessage", { kind: "function", exported: true }],
+		["discardConfirmationDetail", { kind: "function", exported: true }],
+		["DISCARD_CONFIRM_PRIMARY_BUTTON", { kind: "variable", exported: true }],
+		["DiscardDecision", { kind: "type", exported: true }],
+		[
+			"resolveDiscardConfirmation",
+			{ kind: "function", exported: true, async: true },
+		],
+	]);
+	const topLevelCounts = new Map(
+		[...expectedTopLevel].map(([name]) => [name, 0]),
+	);
+	let topLevelIsExact = true;
+	for (const statement of sourceFile.statements) {
+		if (ts.isImportDeclaration(statement)) {
+			continue;
+		}
+		let name;
+		let kind;
+		if (ts.isVariableStatement(statement)) {
+			if (statement.declarationList.declarations.length !== 1) {
+				topLevelIsExact = false;
+				continue;
+			}
+			name = statement.declarationList.declarations[0].name;
+			kind = "variable";
+		} else if (ts.isFunctionDeclaration(statement)) {
+			name = statement.name;
+			kind = "function";
+		} else if (ts.isInterfaceDeclaration(statement)) {
+			name = statement.name;
+			kind = "interface";
+		} else if (ts.isTypeAliasDeclaration(statement)) {
+			name = statement.name;
+			kind = "type";
+		} else {
+			topLevelIsExact = false;
+			continue;
+		}
+		const expected = ts.isIdentifier(name)
+			? expectedTopLevel.get(name.text)
+			: undefined;
+		const modifierKinds = (statement.modifiers ?? []).map(
+			(modifier) => modifier.kind,
+		);
+		const expectedModifiers = [
+			...(expected?.exported ? [ts.SyntaxKind.ExportKeyword] : []),
+			...(expected?.async ? [ts.SyntaxKind.AsyncKeyword] : []),
+		];
+		if (
+			expected === undefined ||
+			expected.kind !== kind ||
+			!sameArray(modifierKinds, expectedModifiers)
+		) {
+			topLevelIsExact = false;
+		} else {
+			topLevelCounts.set(name.text, topLevelCounts.get(name.text) + 1);
+		}
+	}
+	if (
+		!topLevelIsExact ||
+		[...topLevelCounts.values()].some((count) => count !== 1)
+	) {
+		failures.push(
+			"plain-scm-discard.ts must retain its exact audited top-level surface — no new declaration can quietly add a way for this decide-only module to reach a bridge",
+		);
+	}
+
+	const resolveFunctions = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "resolveDiscardConfirmation",
+	);
+	const expectedResolveBody = `{
+		if (relativePaths.length === 0) {
+			return Object.freeze({ kind: "no-op" });
+		}
+		const confirmation = await dialogService.confirm({
+			message: discardConfirmationMessage(relativePaths),
+			detail: discardConfirmationDetail(relativePaths),
+			primaryButton: DISCARD_CONFIRM_PRIMARY_BUTTON,
+		});
+		return Object.freeze({
+			kind: confirmation.confirmed ? "confirmed" : "declined",
+		});
+	}`.replaceAll(/\s+/g, "");
+	if (
+		resolveFunctions.length !== 1 ||
+		resolveFunctions[0].body === undefined ||
+		resolveFunctions[0].body.getText(sourceFile).replaceAll(/\s+/g, "") !==
+			expectedResolveBody
+	) {
+		failures.push(
+			"resolveDiscardConfirmation must, for a non-empty path list, unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited no-op/confirm/decline shape",
+		);
+	}
+	return failures;
+}
+
+const GIT_NETWORK_MODULE_PATH = "app/features/scm/plain-scm-network.ts";
+
+/**
+ * `F080` S4's three confirm-gated network bridge methods, each mapped to the
+ * one `PlainScmView` method allowed to call it and the exact argument list
+ * that call must pass — mirrors `GIT_DISCARD_DECLARATION_PATHS`'s "declares
+ * vs. calls" split, generalized from discard's single bridge method to
+ * three (`gitFetch`/`gitPull`/`gitPush`), one audit entry each.
+ */
+const GIT_NETWORK_BRIDGE_METHOD_AUDITS = Object.freeze([
+	Object.freeze({
+		bridgeMethod: "gitFetch",
+		containingMethod: "fetchFromRemote",
+		argumentTexts: Object.freeze([]),
+	}),
+	Object.freeze({
+		bridgeMethod: "gitPull",
+		containingMethod: "pullFromRemote",
+		argumentTexts: Object.freeze([]),
+	}),
+	Object.freeze({
+		bridgeMethod: "gitPush",
+		containingMethod: "pushToRemote",
+		argumentTexts: Object.freeze(["force"]),
+	}),
+]);
+
+/**
+ * `F080` S4's `gitFetch`/`gitPull`/`gitPush` are each a network write ADR
+ * 0003 requires a preview + confirmation for before ever running (acceptance
+ * criterion 5) — the same "nothing at the Rust/bridge-interface layer
+ * enforces this, only one audited call site per method does" situation
+ * `validateGitDiscardConfirmationBoundary` already locks for `F080` S3's
+ * `gitDiscardPaths`, generalized here from one bridge method to three. Locks:
+ * each method's bridge declaration to its audited three files
+ * (`GIT_DISCARD_DECLARATION_PATHS`, reused — same contracts.ts/native.ts/
+ * browser-mock.ts split as discard), each method's single production call
+ * site to its own audited `PlainScmView` method with the exact argument list
+ * `GIT_NETWORK_BRIDGE_METHOD_AUDITS` names, that call site's exact
+ * preview-then-confirm-then-call body shape, and `plain-scm-network.ts`'s
+ * own audited module face (mirrors `validateDiscardConfirmationModuleFace`).
+ */
+export function validateGitNetworkConfirmationBoundary(appSources) {
+	const failures = [];
+	const normalizedSources = new Map(
+		appSources.map(({ relativePath, source }) => [
+			relativePath.replaceAll("\\", "/"),
+			source,
+		]),
+	);
+	const requiredPaths = Object.freeze([
+		...GIT_DISCARD_DECLARATION_PATHS,
+		GIT_DISCARD_VIEW_PATH,
+		GIT_NETWORK_MODULE_PATH,
+	]);
+	for (const relativePath of requiredPaths) {
+		if (!normalizedSources.has(relativePath)) {
+			failures.push(
+				`git network confirmation boundary requires ${relativePath}`,
+			);
+		}
+	}
+
+	function containingMethodName(node) {
+		let current = node.parent;
+		while (current !== undefined) {
+			if (
+				ts.isMethodDeclaration(current) ||
+				ts.isFunctionDeclaration(current)
+			) {
+				return typeScriptStaticName(current.name);
+			}
+			current = current.parent;
+		}
+		return undefined;
+	}
+
+	const bridgeMethodNames = GIT_NETWORK_BRIDGE_METHOD_AUDITS.map(
+		(audit) => audit.bridgeMethod,
+	);
+	const declarationCounts = new Map(
+		GIT_DISCARD_DECLARATION_PATHS.flatMap((relativePath) =>
+			bridgeMethodNames.map((bridgeMethod) => [
+				`${relativePath}:${bridgeMethod}`,
+				0,
+			]),
+		),
+	);
+	const auditedCallCounts = new Map(
+		bridgeMethodNames.map((bridgeMethod) => [bridgeMethod, 0]),
+	);
+
+	for (const [normalizedPath, source] of normalizedSources) {
+		if (!normalizedPath.endsWith(".ts") && !normalizedPath.endsWith(".tsx")) {
+			continue;
+		}
+		const sourceFile = ts.createSourceFile(
+			normalizedPath,
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			normalizedPath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+		);
+		const isKnownBridge = collectTypeScriptBridgeAliases(sourceFile);
+
+		function visit(node) {
+			const isNameLike =
+				ts.isIdentifier(node) ||
+				ts.isStringLiteral(node) ||
+				ts.isNoSubstitutionTemplateLiteral(node);
+			const audit = isNameLike
+				? GIT_NETWORK_BRIDGE_METHOD_AUDITS.find(
+						(candidate) => candidate.bridgeMethod === node.text,
+					)
+				: undefined;
+			if (audit !== undefined) {
+				const bridgeMethod = audit.bridgeMethod;
+				const parent = node.parent;
+				const isAllowedDeclaration =
+					(normalizedPath === "app/platform/tauri/contracts.ts" &&
+						ts.isMethodSignature(parent) &&
+						parent.name === node) ||
+					(normalizedPath === "app/platform/tauri/native.ts" &&
+						ts.isPropertyAssignment(parent) &&
+						parent.name === node) ||
+					(normalizedPath === "app/platform/tauri/browser-mock.ts" &&
+						(ts.isMethodDeclaration(parent) ||
+							ts.isPropertyAssignment(parent)) &&
+						parent.name === node);
+				if (isAllowedDeclaration) {
+					const key = `${normalizedPath}:${bridgeMethod}`;
+					declarationCounts.set(key, declarationCounts.get(key) + 1);
+				} else {
+					const propertyAccess = ts.isIdentifier(node) ? parent : undefined;
+					const directCall =
+						propertyAccess !== undefined &&
+						ts.isPropertyAccessExpression(propertyAccess) &&
+						propertyAccess.name === node &&
+						ts.isCallExpression(propertyAccess.parent) &&
+						propertyAccess.parent.expression === propertyAccess &&
+						isKnownBridge(propertyAccess.expression)
+							? propertyAccess.parent
+							: undefined;
+					const argumentTexts =
+						directCall?.arguments.map((argument) =>
+							argument.getText(sourceFile).replaceAll(/\s+/g, ""),
+						) ?? [];
+					const isAuditedCall =
+						directCall !== undefined &&
+						normalizedPath === GIT_DISCARD_VIEW_PATH &&
+						containingMethodName(node) === audit.containingMethod &&
+						sameArray(argumentTexts, audit.argumentTexts);
+					if (isAuditedCall) {
+						auditedCallCounts.set(
+							bridgeMethod,
+							auditedCallCounts.get(bridgeMethod) + 1,
+						);
+					} else {
+						failures.push(
+							`${normalizedPath} must not consume ${bridgeMethod} outside PlainScmView.${audit.containingMethod}'s single audited call site`,
+						);
+					}
+				}
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(sourceFile);
+	}
+
+	for (const [key, count] of declarationCounts) {
+		if (count !== 1) {
+			const [relativePath, bridgeMethod] = key.split(":");
+			failures.push(
+				`${relativePath} must declare ${bridgeMethod} exactly once in its audited bridge surface`,
+			);
+		}
+	}
+	for (const audit of GIT_NETWORK_BRIDGE_METHOD_AUDITS) {
+		if (auditedCallCounts.get(audit.bridgeMethod) !== 1) {
+			failures.push(
+				`${audit.bridgeMethod} must have exactly one production call site, inside PlainScmView.${audit.containingMethod}`,
+			);
+		}
+	}
+
+	const viewSource = normalizedSources.get(GIT_DISCARD_VIEW_PATH);
+	if (viewSource !== undefined) {
+		failures.push(...validateNetworkMutationGuardedCalls(viewSource));
+	}
+	const networkModuleSource = normalizedSources.get(GIT_NETWORK_MODULE_PATH);
+	if (networkModuleSource !== undefined) {
+		failures.push(
+			...validateNetworkConfirmationModuleFace(networkModuleSource),
+		);
+	}
+
+	return [...new Set(failures)];
+}
+
+/**
+ * Locks `PlainScmView.fetchFromRemote`/`pullFromRemote`/`pushToRemote` to
+ * their exact "compute the preview, bail if unavailable, await the
+ * confirmation, bail unless exactly `\"confirmed\"`, only then call the
+ * network bridge" shapes — the `F080` S4 analogue of
+ * `validateDiscardResourcesGuardedCall`, one audited body per method instead
+ * of one overall (`pushToRemote`'s differs by reading the force checkbox and
+ * passing `force` through both the preview kind and the bridge call).
+ */
+function validateNetworkMutationGuardedCalls(source) {
+	const sourceFile = ts.createSourceFile(
+		GIT_DISCARD_VIEW_PATH,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["plain-scm-view.ts must remain valid TypeScript"];
+	}
+
+	function methodBody(name) {
+		const methods = [];
+		function visit(node) {
+			if (
+				ts.isMethodDeclaration(node) &&
+				typeScriptStaticName(node.name) === name
+			) {
+				methods.push(node);
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(sourceFile);
+		return methods.length === 1 ? methods[0].body : undefined;
+	}
+
+	const expectedBodies = {
+		fetchFromRemote: `{
+			const preview = await this.previewNetworkOperation("fetch");
+			if (preview === undefined) {
+				return;
+			}
+			const decision = await resolveNetworkConfirmation(this.dialogService, {
+				kind: "fetch",
+				preview,
+			});
+			if (decision.kind !== "confirmed") {
+				return;
+			}
+			await this.runNetworkMutation((bridge) => bridge.gitFetch());
+		}`,
+		pullFromRemote: `{
+			const preview = await this.previewNetworkOperation("pull");
+			if (preview === undefined) {
+				return;
+			}
+			const decision = await resolveNetworkConfirmation(this.dialogService, {
+				kind: "pull",
+				preview,
+			});
+			if (decision.kind !== "confirmed") {
+				return;
+			}
+			await this.runNetworkMutation((bridge) => bridge.gitPull());
+		}`,
+		pushToRemote: `{
+			const force = this.#forcePushCheckbox?.checked ?? false;
+			const kind = force ? "forcePush" : "push";
+			const preview = await this.previewNetworkOperation(kind);
+			if (preview === undefined) {
+				return;
+			}
+			const decision = await resolveNetworkConfirmation(this.dialogService, {
+				kind,
+				preview,
+			});
+			if (decision.kind !== "confirmed") {
+				return;
+			}
+			await this.runNetworkMutation((bridge) => bridge.gitPush(force));
+		}`,
+	};
+
+	const failures = [];
+	for (const [name, expectedBody] of Object.entries(expectedBodies)) {
+		const body = methodBody(name);
+		const normalizedExpected = expectedBody.replaceAll(/\s+/g, "");
+		if (
+			body === undefined ||
+			body.getText(sourceFile).replaceAll(/\s+/g, "") !== normalizedExpected
+		) {
+			failures.push(
+				`PlainScmView.${name} must match its exact audited preview-then-confirm-then-call shape — no other shape may reach the network bridge call`,
+			);
+		}
+	}
+	return failures;
+}
+
+/**
+ * Locks `plain-scm-network.ts`'s own audited module face: it must import
+ * nothing at all (an import is the only way this module could ever reach a
+ * bridge or a real Workbench service to perform a network write itself), its
+ * top-level declarations must match the exact audited set, and
+ * `resolveNetworkConfirmation` itself must match the exact audited body —
+ * which simultaneously proves it never calls a bridge method and never has a
+ * branch that skips the dialog. Mirrors
+ * `validateDiscardConfirmationModuleFace`'s exact technique.
+ */
+function validateNetworkConfirmationModuleFace(source) {
+	const failures = [];
+	const sourceFile = ts.createSourceFile(
+		GIT_NETWORK_MODULE_PATH,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["plain-scm-network.ts must remain valid TypeScript"];
+	}
+
+	if (
+		sourceFile.statements.some((statement) => ts.isImportDeclaration(statement))
+	) {
+		failures.push(
+			"plain-scm-network.ts must not import anything — it only ever decides whether the caller may fetch/pull/push, and an import is the only way it could ever reach a bridge or service to perform the network write itself",
+		);
+	}
+
+	const expectedTopLevel = new Map([
+		["NetworkConfirmDialogService", { kind: "interface", exported: true }],
+		["NetworkConfirmationKind", { kind: "type", exported: true }],
+		["NetworkConfirmationPreview", { kind: "interface", exported: true }],
+		["NetworkConfirmationRequest", { kind: "interface", exported: true }],
+		["describeUpstream", { kind: "function", exported: false }],
+		["networkConfirmationMessage", { kind: "function", exported: true }],
+		["networkConfirmationDetail", { kind: "function", exported: true }],
+		["NETWORK_CONFIRM_PRIMARY_BUTTON", { kind: "variable", exported: true }],
+		["NetworkConfirmDecision", { kind: "type", exported: true }],
+		[
+			"resolveNetworkConfirmation",
+			{ kind: "function", exported: true, async: true },
+		],
+	]);
+	const topLevelCounts = new Map(
+		[...expectedTopLevel].map(([name]) => [name, 0]),
+	);
+	let topLevelIsExact = true;
+	for (const statement of sourceFile.statements) {
+		if (ts.isImportDeclaration(statement)) {
+			continue;
+		}
+		let name;
+		let kind;
+		if (ts.isVariableStatement(statement)) {
+			if (statement.declarationList.declarations.length !== 1) {
+				topLevelIsExact = false;
+				continue;
+			}
+			name = statement.declarationList.declarations[0].name;
+			kind = "variable";
+		} else if (ts.isFunctionDeclaration(statement)) {
+			name = statement.name;
+			kind = "function";
+		} else if (ts.isInterfaceDeclaration(statement)) {
+			name = statement.name;
+			kind = "interface";
+		} else if (ts.isTypeAliasDeclaration(statement)) {
+			name = statement.name;
+			kind = "type";
+		} else {
+			topLevelIsExact = false;
+			continue;
+		}
+		const expected = ts.isIdentifier(name)
+			? expectedTopLevel.get(name.text)
+			: undefined;
+		const modifierKinds = (statement.modifiers ?? []).map(
+			(modifier) => modifier.kind,
+		);
+		const expectedModifiers = [
+			...(expected?.exported ? [ts.SyntaxKind.ExportKeyword] : []),
+			...(expected?.async ? [ts.SyntaxKind.AsyncKeyword] : []),
+		];
+		if (
+			expected === undefined ||
+			expected.kind !== kind ||
+			!sameArray(modifierKinds, expectedModifiers)
+		) {
+			topLevelIsExact = false;
+		} else {
+			topLevelCounts.set(name.text, topLevelCounts.get(name.text) + 1);
+		}
+	}
+	if (
+		!topLevelIsExact ||
+		[...topLevelCounts.values()].some((count) => count !== 1)
+	) {
+		failures.push(
+			"plain-scm-network.ts must retain its exact audited top-level surface — no new declaration can quietly add a way for this decide-only module to reach a bridge",
+		);
+	}
+
+	const resolveFunctions = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "resolveNetworkConfirmation",
+	);
+	const expectedResolveBody = `{
+		const confirmation = await dialogService.confirm({
+			message: networkConfirmationMessage(request),
+			detail: networkConfirmationDetail(request),
+			primaryButton: NETWORK_CONFIRM_PRIMARY_BUTTON[request.kind],
+		});
+		return Object.freeze({
+			kind: confirmation.confirmed ? "confirmed" : "declined",
+		});
+	}`.replaceAll(/\s+/g, "");
+	if (
+		resolveFunctions.length !== 1 ||
+		resolveFunctions[0].body === undefined ||
+		resolveFunctions[0].body.getText(sourceFile).replaceAll(/\s+/g, "") !==
+			expectedResolveBody
+	) {
+		failures.push(
+			"resolveNetworkConfirmation must unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited shape",
+		);
+	}
+	return failures;
+}
+
+const GIT_STASH_VIEW_PATH = "app/features/scm/plain-git-stash-view.ts";
+const GIT_STASH_MODULE_PATH = "app/features/scm/plain-scm-stash.ts";
+
+/**
+ * `F090` S4's two confirm-gated stash bridge methods, each mapped to the one
+ * `PlainGitStashView` method allowed to call it and the exact argument list
+ * that call must pass — mirrors `GIT_NETWORK_BRIDGE_METHOD_AUDITS`'s exact
+ * shape, generalized from `PlainScmView`'s three network methods to
+ * `PlainGitStashView`'s two stash ones. Only `gitStashPop`/`gitStashDrop` are
+ * here — `gitStashPush`/`gitStashApply` are this feature's own "提示,不强确认"
+ * half (see `plain-scm-stash.ts`'s own module doc comment) and so have no
+ * confirmation gate to lock.
+ */
+const GIT_STASH_BRIDGE_METHOD_AUDITS = Object.freeze([
+	Object.freeze({
+		bridgeMethod: "gitStashPop",
+		containingMethod: "popEntry",
+		argumentTexts: Object.freeze(["entry.sha", "false"]),
+	}),
+	Object.freeze({
+		bridgeMethod: "gitStashDrop",
+		containingMethod: "dropEntry",
+		argumentTexts: Object.freeze(["entry.sha"]),
+	}),
+]);
+
+/**
+ * `F090` S4's `gitStashPop`/`gitStashDrop` are each an irreversible-or-
+ * effectively-irreversible write this feature's own frozen plan requires a
+ * confirmation dialog before ever running — the same "nothing at the Rust/
+ * bridge-interface layer enforces this, only one audited call site per
+ * method does" situation `validateGitDiscardConfirmationBoundary`/
+ * `validateGitNetworkConfirmationBoundary` already lock for this codebase's
+ * other two irreversible writes, generalized here to a *third* view file
+ * (`PlainGitStashView`, not `PlainScmView`) and confirmation module
+ * (`plain-scm-stash.ts`, not `plain-scm-discard.ts`/`plain-scm-network.ts`).
+ * Locks: each method's bridge declaration to its audited three files
+ * (`GIT_DISCARD_DECLARATION_PATHS`, reused — same contracts.ts/native.ts/
+ * browser-mock.ts split as discard/network), each method's single
+ * production call site to its own audited `PlainGitStashView` method with
+ * the exact argument list `GIT_STASH_BRIDGE_METHOD_AUDITS` names, that call
+ * site's exact confirm-then-call body shape, and `plain-scm-stash.ts`'s own
+ * audited module face (mirrors `validateNetworkConfirmationModuleFace`).
+ */
+export function validateGitStashConfirmationBoundary(appSources) {
+	const failures = [];
+	const normalizedSources = new Map(
+		appSources.map(({ relativePath, source }) => [
+			relativePath.replaceAll("\\", "/"),
+			source,
+		]),
+	);
+	const requiredPaths = Object.freeze([
+		...GIT_DISCARD_DECLARATION_PATHS,
+		GIT_STASH_VIEW_PATH,
+		GIT_STASH_MODULE_PATH,
+	]);
+	for (const relativePath of requiredPaths) {
+		if (!normalizedSources.has(relativePath)) {
+			failures.push(`git stash confirmation boundary requires ${relativePath}`);
+		}
+	}
+
+	function containingMethodName(node) {
+		let current = node.parent;
+		while (current !== undefined) {
+			if (
+				ts.isMethodDeclaration(current) ||
+				ts.isFunctionDeclaration(current)
+			) {
+				return typeScriptStaticName(current.name);
+			}
+			current = current.parent;
+		}
+		return undefined;
+	}
+
+	const bridgeMethodNames = GIT_STASH_BRIDGE_METHOD_AUDITS.map(
+		(audit) => audit.bridgeMethod,
+	);
+	const declarationCounts = new Map(
+		GIT_DISCARD_DECLARATION_PATHS.flatMap((relativePath) =>
+			bridgeMethodNames.map((bridgeMethod) => [
+				`${relativePath}:${bridgeMethod}`,
+				0,
+			]),
+		),
+	);
+	const auditedCallCounts = new Map(
+		bridgeMethodNames.map((bridgeMethod) => [bridgeMethod, 0]),
+	);
+
+	for (const [normalizedPath, source] of normalizedSources) {
+		if (!normalizedPath.endsWith(".ts") && !normalizedPath.endsWith(".tsx")) {
+			continue;
+		}
+		const sourceFile = ts.createSourceFile(
+			normalizedPath,
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			normalizedPath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+		);
+		const isKnownBridge = collectTypeScriptBridgeAliases(sourceFile);
+
+		function visit(node) {
+			const isNameLike =
+				ts.isIdentifier(node) ||
+				ts.isStringLiteral(node) ||
+				ts.isNoSubstitutionTemplateLiteral(node);
+			const audit = isNameLike
+				? GIT_STASH_BRIDGE_METHOD_AUDITS.find(
+						(candidate) => candidate.bridgeMethod === node.text,
+					)
+				: undefined;
+			if (audit !== undefined) {
+				const bridgeMethod = audit.bridgeMethod;
+				const parent = node.parent;
+				const isAllowedDeclaration =
+					(normalizedPath === "app/platform/tauri/contracts.ts" &&
+						ts.isMethodSignature(parent) &&
+						parent.name === node) ||
+					(normalizedPath === "app/platform/tauri/native.ts" &&
+						ts.isPropertyAssignment(parent) &&
+						parent.name === node) ||
+					(normalizedPath === "app/platform/tauri/browser-mock.ts" &&
+						(ts.isMethodDeclaration(parent) ||
+							ts.isPropertyAssignment(parent)) &&
+						parent.name === node);
+				if (isAllowedDeclaration) {
+					const key = `${normalizedPath}:${bridgeMethod}`;
+					declarationCounts.set(key, declarationCounts.get(key) + 1);
+				} else {
+					const propertyAccess = ts.isIdentifier(node) ? parent : undefined;
+					const directCall =
+						propertyAccess !== undefined &&
+						ts.isPropertyAccessExpression(propertyAccess) &&
+						propertyAccess.name === node &&
+						ts.isCallExpression(propertyAccess.parent) &&
+						propertyAccess.parent.expression === propertyAccess &&
+						isKnownBridge(propertyAccess.expression)
+							? propertyAccess.parent
+							: undefined;
+					const argumentTexts =
+						directCall?.arguments.map((argument) =>
+							argument.getText(sourceFile).replaceAll(/\s+/g, ""),
+						) ?? [];
+					const isAuditedCall =
+						directCall !== undefined &&
+						normalizedPath === GIT_STASH_VIEW_PATH &&
+						containingMethodName(node) === audit.containingMethod &&
+						sameArray(argumentTexts, audit.argumentTexts);
+					if (isAuditedCall) {
+						auditedCallCounts.set(
+							bridgeMethod,
+							auditedCallCounts.get(bridgeMethod) + 1,
+						);
+					} else {
+						failures.push(
+							`${normalizedPath} must not consume ${bridgeMethod} outside PlainGitStashView.${audit.containingMethod}'s single audited call site`,
+						);
+					}
+				}
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(sourceFile);
+	}
+
+	for (const [key, count] of declarationCounts) {
+		if (count !== 1) {
+			const [relativePath, bridgeMethod] = key.split(":");
+			failures.push(
+				`${relativePath} must declare ${bridgeMethod} exactly once in its audited bridge surface`,
+			);
+		}
+	}
+	for (const audit of GIT_STASH_BRIDGE_METHOD_AUDITS) {
+		if (auditedCallCounts.get(audit.bridgeMethod) !== 1) {
+			failures.push(
+				`${audit.bridgeMethod} must have exactly one production call site, inside PlainGitStashView.${audit.containingMethod}`,
+			);
+		}
+	}
+
+	const viewSource = normalizedSources.get(GIT_STASH_VIEW_PATH);
+	if (viewSource !== undefined) {
+		failures.push(...validateStashMutationGuardedCalls(viewSource));
+	}
+	const stashModuleSource = normalizedSources.get(GIT_STASH_MODULE_PATH);
+	if (stashModuleSource !== undefined) {
+		failures.push(...validateStashConfirmationModuleFace(stashModuleSource));
+	}
+
+	return [...new Set(failures)];
+}
+
+/**
+ * Locks `PlainGitStashView.popEntry`/`dropEntry` to their exact "await the
+ * confirmation, return unless it is exactly `\"confirmed\"`, only then call
+ * the stash bridge (and, for `popEntry`, render a conflict outcome
+ * afterward)" shapes — mirrors `validateNetworkMutationGuardedCalls`'s own
+ * "one audited body per method" technique.
+ */
+function validateStashMutationGuardedCalls(source) {
+	const sourceFile = ts.createSourceFile(
+		GIT_STASH_VIEW_PATH,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["plain-git-stash-view.ts must remain valid TypeScript"];
+	}
+
+	function methodBody(name) {
+		const methods = [];
+		function visit(node) {
+			if (
+				ts.isMethodDeclaration(node) &&
+				typeScriptStaticName(node.name) === name
+			) {
+				methods.push(node);
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(sourceFile);
+		return methods.length === 1 ? methods[0].body : undefined;
+	}
+
+	const expectedBodies = {
+		popEntry: `{
+			const decision = await resolveStashConfirmation(this.dialogService, {
+				kind: "pop",
+				entryLabel: stashEntryLabel(entry),
+			});
+			if (decision.kind !== "confirmed") {
+				return;
+			}
+			const outcome = await this.#runStashMutation((bridge) =>
+				bridge.gitStashPop(entry.sha, false),
+			);
+			if (outcome?.kind === "conflict") {
+				this.#setDetail(
+					\`Conflict popping \${stashEntryLabel(entry)} (kept in the stash list):\\n\${outcome.conflictedPaths.join("\\n")}\`,
+				);
+			}
+		}`,
+		dropEntry: `{
+			const decision = await resolveStashConfirmation(this.dialogService, {
+				kind: "drop",
+				entryLabel: stashEntryLabel(entry),
+			});
+			if (decision.kind !== "confirmed") {
+				return;
+			}
+			await this.#runStashMutation((bridge) => bridge.gitStashDrop(entry.sha));
+		}`,
+	};
+
+	const failures = [];
+	for (const [name, expectedBody] of Object.entries(expectedBodies)) {
+		const body = methodBody(name);
+		const normalizedExpected = expectedBody.replaceAll(/\s+/g, "");
+		if (
+			body === undefined ||
+			body.getText(sourceFile).replaceAll(/\s+/g, "") !== normalizedExpected
+		) {
+			failures.push(
+				`PlainGitStashView.${name} must match its exact audited confirm-then-call shape — no other shape may reach the stash bridge call`,
+			);
+		}
+	}
+	return failures;
+}
+
+/**
+ * Locks `plain-scm-stash.ts`'s own audited module face: it must import
+ * nothing at all (an import is the only way this module could ever reach a
+ * bridge or a real Workbench service to perform the stash write itself), its
+ * top-level declarations must match the exact audited set, and
+ * `resolveStashConfirmation` itself must match the exact audited body —
+ * which simultaneously proves it never calls a bridge method and never has a
+ * branch that skips the dialog for either `kind`. Mirrors
+ * `validateNetworkConfirmationModuleFace`'s exact technique.
+ */
+function validateStashConfirmationModuleFace(source) {
+	const failures = [];
+	const sourceFile = ts.createSourceFile(
+		GIT_STASH_MODULE_PATH,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["plain-scm-stash.ts must remain valid TypeScript"];
+	}
+
+	if (
+		sourceFile.statements.some((statement) => ts.isImportDeclaration(statement))
+	) {
+		failures.push(
+			"plain-scm-stash.ts must not import anything — it only ever decides whether the caller may pop/drop a stash entry, and an import is the only way it could ever reach a bridge or service to perform the write itself",
+		);
+	}
+
+	const expectedTopLevel = new Map([
+		["StashConfirmDialogService", { kind: "interface", exported: true }],
+		["StashConfirmationKind", { kind: "type", exported: true }],
+		["StashConfirmationRequest", { kind: "interface", exported: true }],
+		["stashConfirmationMessage", { kind: "function", exported: true }],
+		["stashConfirmationDetail", { kind: "function", exported: true }],
+		["STASH_CONFIRM_PRIMARY_BUTTON", { kind: "variable", exported: true }],
+		["StashConfirmDecision", { kind: "type", exported: true }],
+		[
+			"resolveStashConfirmation",
+			{ kind: "function", exported: true, async: true },
+		],
+	]);
+	const topLevelCounts = new Map(
+		[...expectedTopLevel].map(([name]) => [name, 0]),
+	);
+	let topLevelIsExact = true;
+	for (const statement of sourceFile.statements) {
+		if (ts.isImportDeclaration(statement)) {
+			continue;
+		}
+		let name;
+		let kind;
+		if (ts.isVariableStatement(statement)) {
+			if (statement.declarationList.declarations.length !== 1) {
+				topLevelIsExact = false;
+				continue;
+			}
+			name = statement.declarationList.declarations[0].name;
+			kind = "variable";
+		} else if (ts.isFunctionDeclaration(statement)) {
+			name = statement.name;
+			kind = "function";
+		} else if (ts.isInterfaceDeclaration(statement)) {
+			name = statement.name;
+			kind = "interface";
+		} else if (ts.isTypeAliasDeclaration(statement)) {
+			name = statement.name;
+			kind = "type";
+		} else {
+			topLevelIsExact = false;
+			continue;
+		}
+		const expected = ts.isIdentifier(name)
+			? expectedTopLevel.get(name.text)
+			: undefined;
+		const modifierKinds = (statement.modifiers ?? []).map(
+			(modifier) => modifier.kind,
+		);
+		const expectedModifiers = [
+			...(expected?.exported ? [ts.SyntaxKind.ExportKeyword] : []),
+			...(expected?.async ? [ts.SyntaxKind.AsyncKeyword] : []),
+		];
+		if (
+			expected === undefined ||
+			expected.kind !== kind ||
+			!sameArray(modifierKinds, expectedModifiers)
+		) {
+			topLevelIsExact = false;
+		} else {
+			topLevelCounts.set(name.text, topLevelCounts.get(name.text) + 1);
+		}
+	}
+	if (
+		!topLevelIsExact ||
+		[...topLevelCounts.values()].some((count) => count !== 1)
+	) {
+		failures.push(
+			"plain-scm-stash.ts must retain its exact audited top-level surface — no new declaration can quietly add a way for this decide-only module to reach a bridge",
+		);
+	}
+
+	const resolveFunctions = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "resolveStashConfirmation",
+	);
+	const expectedResolveBody = `{
+		const confirmation = await dialogService.confirm({
+			message: stashConfirmationMessage(request),
+			detail: stashConfirmationDetail(request),
+			primaryButton: STASH_CONFIRM_PRIMARY_BUTTON[request.kind],
+		});
+		return Object.freeze({
+			kind: confirmation.confirmed ? "confirmed" : "declined",
+		});
+	}`.replaceAll(/\s+/g, "");
+	if (
+		resolveFunctions.length !== 1 ||
+		resolveFunctions[0].body === undefined ||
+		resolveFunctions[0].body.getText(sourceFile).replaceAll(/\s+/g, "") !==
+			expectedResolveBody
+	) {
+		failures.push(
+			"resolveStashConfirmation must unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited shape",
+		);
+	}
+	return failures;
+}
+
+const GIT_WORKTREE_VIEW_PATH = "app/features/scm/plain-git-worktree-view.ts";
+const GIT_WORKTREE_MODULE_PATH = "app/features/scm/plain-scm-worktree.ts";
+
+/**
+ * `F090` S5's `gitWorktreeRemove` is an irreversible write (when its second,
+ * forced call actually discards uncommitted content) this feature's own
+ * frozen plan requires a confirmation dialog before ever running with
+ * `force: true` — the same "nothing at the Rust/bridge-interface layer
+ * enforces this, only the audited call site does" situation
+ * `validateGitStashConfirmationBoundary` already locks, generalized here to a
+ * *fourth* view file (`PlainGitWorktreeView`) and confirmation module
+ * (`plain-scm-worktree.ts`). Unlike `validateGitStashConfirmationBoundary`'s
+ * `GIT_STASH_BRIDGE_METHOD_AUDITS` (one call site per audited bridge
+ * method), `gitWorktreeRemove` itself is called **twice** inside the same
+ * audited method (`PlainGitWorktreeView.removeEntry`'s own unforced probe,
+ * then its confirmed forced retry — see that method's own doc comment), so
+ * this contract counts exactly two valid occurrences there rather than one,
+ * and additionally pins `removeEntry`'s own exact body text (via
+ * [`validateWorktreeRemoveEntryGuardedCall`]) to prove the confirm-then-retry
+ * control flow is real, not merely "two calls somewhere in the method".
+ * Locks: `gitWorktreeRemove`'s bridge declaration to its audited three files
+ * (`GIT_DISCARD_DECLARATION_PATHS`, reused — same contracts.ts/native.ts/
+ * browser-mock.ts split as discard/network/stash), its two production call
+ * sites to `PlainGitWorktreeView.removeEntry` and nowhere else, that
+ * method's exact body shape, and `plain-scm-worktree.ts`'s own audited
+ * module face (mirrors `validateStashConfirmationModuleFace`).
+ */
+export function validateGitWorktreeConfirmationBoundary(appSources) {
+	const failures = [];
+	const normalizedSources = new Map(
+		appSources.map(({ relativePath, source }) => [
+			relativePath.replaceAll("\\", "/"),
+			source,
+		]),
+	);
+	const requiredPaths = Object.freeze([
+		...GIT_DISCARD_DECLARATION_PATHS,
+		GIT_WORKTREE_VIEW_PATH,
+		GIT_WORKTREE_MODULE_PATH,
+	]);
+	for (const relativePath of requiredPaths) {
+		if (!normalizedSources.has(relativePath)) {
+			failures.push(
+				`git worktree confirmation boundary requires ${relativePath}`,
+			);
+		}
+	}
+
+	function containingMethodName(node) {
+		let current = node.parent;
+		while (current !== undefined) {
+			if (
+				ts.isMethodDeclaration(current) ||
+				ts.isFunctionDeclaration(current)
+			) {
+				return typeScriptStaticName(current.name);
+			}
+			current = current.parent;
+		}
+		return undefined;
+	}
+
+	const declarationCounts = new Map(
+		GIT_DISCARD_DECLARATION_PATHS.map((relativePath) => [relativePath, 0]),
+	);
+	// `gitWorktreeRemove` is legitimately called twice inside the same
+	// audited method (see this function's own doc comment) — unlike every
+	// other confirm-gated bridge method this codebase locks, which expects
+	// exactly one production call site.
+	let auditedCallCount = 0;
+
+	for (const [normalizedPath, source] of normalizedSources) {
+		if (!normalizedPath.endsWith(".ts") && !normalizedPath.endsWith(".tsx")) {
+			continue;
+		}
+		const sourceFile = ts.createSourceFile(
+			normalizedPath,
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			normalizedPath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+		);
+		const isKnownBridge = collectTypeScriptBridgeAliases(sourceFile);
+
+		function visit(node) {
+			const referencesMethod =
+				(ts.isIdentifier(node) && node.text === "gitWorktreeRemove") ||
+				((ts.isStringLiteral(node) ||
+					ts.isNoSubstitutionTemplateLiteral(node)) &&
+					node.text === "gitWorktreeRemove");
+			if (referencesMethod) {
+				const parent = node.parent;
+				const isAllowedDeclaration =
+					(normalizedPath === "app/platform/tauri/contracts.ts" &&
+						ts.isMethodSignature(parent) &&
+						parent.name === node) ||
+					(normalizedPath === "app/platform/tauri/native.ts" &&
+						ts.isPropertyAssignment(parent) &&
+						parent.name === node) ||
+					(normalizedPath === "app/platform/tauri/browser-mock.ts" &&
+						(ts.isMethodDeclaration(parent) ||
+							ts.isPropertyAssignment(parent)) &&
+						parent.name === node);
+				if (isAllowedDeclaration) {
+					declarationCounts.set(
+						normalizedPath,
+						declarationCounts.get(normalizedPath) + 1,
+					);
+				} else {
+					const propertyAccess = ts.isIdentifier(node) ? parent : undefined;
+					const directCall =
+						propertyAccess !== undefined &&
+						ts.isPropertyAccessExpression(propertyAccess) &&
+						propertyAccess.name === node &&
+						ts.isCallExpression(propertyAccess.parent) &&
+						propertyAccess.parent.expression === propertyAccess &&
+						isKnownBridge(propertyAccess.expression)
+							? propertyAccess.parent
+							: undefined;
+					const isAuditedCall =
+						directCall !== undefined &&
+						normalizedPath === GIT_WORKTREE_VIEW_PATH &&
+						containingMethodName(node) === "removeEntry";
+					if (isAuditedCall) {
+						auditedCallCount += 1;
+					} else {
+						failures.push(
+							`${normalizedPath} must not consume gitWorktreeRemove outside PlainGitWorktreeView.removeEntry's two audited call sites`,
+						);
+					}
+				}
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(sourceFile);
+	}
+
+	for (const [relativePath, count] of declarationCounts) {
+		if (count !== 1) {
+			failures.push(
+				`${relativePath} must declare gitWorktreeRemove exactly once in its audited bridge surface`,
+			);
+		}
+	}
+	if (auditedCallCount !== 2) {
+		failures.push(
+			"gitWorktreeRemove must have exactly two production call sites, both inside PlainGitWorktreeView.removeEntry (the unforced probe and the confirmed forced retry)",
+		);
+	}
+
+	const viewSource = normalizedSources.get(GIT_WORKTREE_VIEW_PATH);
+	if (viewSource !== undefined) {
+		failures.push(...validateWorktreeRemoveEntryGuardedCall(viewSource));
+	}
+	const worktreeModuleSource = normalizedSources.get(GIT_WORKTREE_MODULE_PATH);
+	if (worktreeModuleSource !== undefined) {
+		failures.push(
+			...validateWorktreeConfirmationModuleFace(worktreeModuleSource),
+		);
+	}
+
+	return [...new Set(failures)];
+}
+
+/**
+ * Locks `PlainGitWorktreeView.removeEntry` to its exact "try unforced, return
+ * unless the outcome is exactly `\"needsForce\"`, await the confirmation,
+ * return unless it is exactly `\"confirmed\"`, only then retry forced" shape
+ * — mirrors `validateStashMutationGuardedCalls`'s own "one audited body per
+ * method" technique, applied here to a single method containing two calls to
+ * the same bridge method rather than one call each across two methods.
+ */
+function validateWorktreeRemoveEntryGuardedCall(source) {
+	const sourceFile = ts.createSourceFile(
+		GIT_WORKTREE_VIEW_PATH,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["plain-git-worktree-view.ts must remain valid TypeScript"];
+	}
+
+	const methods = [];
+	function visit(node) {
+		if (
+			ts.isMethodDeclaration(node) &&
+			typeScriptStaticName(node.name) === "removeEntry"
+		) {
+			methods.push(node);
+		}
+		ts.forEachChild(node, visit);
+	}
+	visit(sourceFile);
+
+	const expectedBody = `{
+		const outcome = await this.#runWorktreeMutation((bridge) =>
+			bridge.gitWorktreeRemove(entry.path, false),
+		);
+		if (outcome !== "needsForce") {
+			return;
+		}
+		const decision = await resolveWorktreeConfirmation(this.dialogService, {
+			kind: "removeDirty",
+			worktreeLabel: worktreeEntryLabel(entry),
+		});
+		if (decision.kind !== "confirmed") {
+			return;
+		}
+		await this.#runWorktreeMutation((bridge) =>
+			bridge.gitWorktreeRemove(entry.path, true),
+		);
+	}`.replaceAll(/\s+/g, "");
+	if (
+		methods.length !== 1 ||
+		methods[0].body === undefined ||
+		methods[0].body.getText(sourceFile).replaceAll(/\s+/g, "") !== expectedBody
+	) {
+		return [
+			"PlainGitWorktreeView.removeEntry must match its exact audited unforced-probe-then-confirm-then-forced-retry shape — no other shape may reach the gitWorktreeRemove bridge call",
+		];
+	}
+	return [];
+}
+
+/**
+ * Locks `plain-scm-worktree.ts`'s own audited module face: it must import
+ * nothing at all (an import is the only way this module could ever reach a
+ * bridge or a real Workbench service to perform the worktree removal
+ * itself), its top-level declarations must match the exact audited set, and
+ * `resolveWorktreeConfirmation` itself must match the exact audited body —
+ * which simultaneously proves it never calls a bridge method and never has a
+ * branch that skips the dialog. Mirrors
+ * `validateStashConfirmationModuleFace`'s exact technique.
+ */
+function validateWorktreeConfirmationModuleFace(source) {
+	const failures = [];
+	const sourceFile = ts.createSourceFile(
+		GIT_WORKTREE_MODULE_PATH,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["plain-scm-worktree.ts must remain valid TypeScript"];
+	}
+
+	if (
+		sourceFile.statements.some((statement) => ts.isImportDeclaration(statement))
+	) {
+		failures.push(
+			"plain-scm-worktree.ts must not import anything — it only ever decides whether the caller may retry a forced worktree removal, and an import is the only way it could ever reach a bridge or service to perform the write itself",
+		);
+	}
+
+	const expectedTopLevel = new Map([
+		["WorktreeConfirmDialogService", { kind: "interface", exported: true }],
+		["WorktreeConfirmationKind", { kind: "type", exported: true }],
+		["WorktreeConfirmationRequest", { kind: "interface", exported: true }],
+		["worktreeConfirmationMessage", { kind: "function", exported: true }],
+		["worktreeConfirmationDetail", { kind: "function", exported: true }],
+		["WORKTREE_CONFIRM_PRIMARY_BUTTON", { kind: "variable", exported: true }],
+		["WorktreeConfirmDecision", { kind: "type", exported: true }],
+		[
+			"resolveWorktreeConfirmation",
+			{ kind: "function", exported: true, async: true },
+		],
+	]);
+	const topLevelCounts = new Map(
+		[...expectedTopLevel].map(([name]) => [name, 0]),
+	);
+	let topLevelIsExact = true;
+	for (const statement of sourceFile.statements) {
+		if (ts.isImportDeclaration(statement)) {
+			continue;
+		}
+		let name;
+		let kind;
+		if (ts.isVariableStatement(statement)) {
+			if (statement.declarationList.declarations.length !== 1) {
+				topLevelIsExact = false;
+				continue;
+			}
+			name = statement.declarationList.declarations[0].name;
+			kind = "variable";
+		} else if (ts.isFunctionDeclaration(statement)) {
+			name = statement.name;
+			kind = "function";
+		} else if (ts.isInterfaceDeclaration(statement)) {
+			name = statement.name;
+			kind = "interface";
+		} else if (ts.isTypeAliasDeclaration(statement)) {
+			name = statement.name;
+			kind = "type";
+		} else {
+			topLevelIsExact = false;
+			continue;
+		}
+		const expected = ts.isIdentifier(name)
+			? expectedTopLevel.get(name.text)
+			: undefined;
+		const modifierKinds = (statement.modifiers ?? []).map(
+			(modifier) => modifier.kind,
+		);
+		const expectedModifiers = [
+			...(expected?.exported ? [ts.SyntaxKind.ExportKeyword] : []),
+			...(expected?.async ? [ts.SyntaxKind.AsyncKeyword] : []),
+		];
+		if (
+			expected === undefined ||
+			expected.kind !== kind ||
+			!sameArray(modifierKinds, expectedModifiers)
+		) {
+			topLevelIsExact = false;
+		} else {
+			topLevelCounts.set(name.text, topLevelCounts.get(name.text) + 1);
+		}
+	}
+	if (
+		!topLevelIsExact ||
+		[...topLevelCounts.values()].some((count) => count !== 1)
+	) {
+		failures.push(
+			"plain-scm-worktree.ts must retain its exact audited top-level surface — no new declaration can quietly add a way for this decide-only module to reach a bridge",
+		);
+	}
+
+	const resolveFunctions = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "resolveWorktreeConfirmation",
+	);
+	const expectedResolveBody = `{
+		const confirmation = await dialogService.confirm({
+			message: worktreeConfirmationMessage(request),
+			detail: worktreeConfirmationDetail(request),
+			primaryButton: WORKTREE_CONFIRM_PRIMARY_BUTTON[request.kind],
+		});
+		return Object.freeze({
+			kind: confirmation.confirmed ? "confirmed" : "declined",
+		});
+	}`.replaceAll(/\s+/g, "");
+	if (
+		resolveFunctions.length !== 1 ||
+		resolveFunctions[0].body === undefined ||
+		resolveFunctions[0].body.getText(sourceFile).replaceAll(/\s+/g, "") !==
+			expectedResolveBody
+	) {
+		failures.push(
+			"resolveWorktreeConfirmation must unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited shape",
+		);
+	}
+	return failures;
+}
+
+/**
+ * Finds every top-level `function <name>(...) { ... }` declaration's body
+ * text in a TypeScript source string — a lightweight, brace-matching
+ * sibling of [`extractRustFunctions`] for this file's occasional
+ * string-level (rather than full AST) TypeScript checks.
+ */
+function extractRustLikeTypeScriptFunctionBodies(source, functionName) {
+	const bodies = [];
+	const pattern = new RegExp(
+		`\\bfunction\\s+${escapeRegularExpression(functionName)}\\s*\\(`,
+		"g",
+	);
+	for (const match of source.matchAll(pattern)) {
+		const parameterOpen = match.index + match[0].length - 1;
+		const parameterClose = findMatchingDelimiter(
+			source,
+			parameterOpen,
+			"(",
+			")",
+		);
+		if (parameterClose === undefined) {
+			continue;
+		}
+		const bodyOpen = source.indexOf("{", parameterClose + 1);
+		if (bodyOpen < 0) {
+			continue;
+		}
+		const bodyClose = findMatchingDelimiter(source, bodyOpen, "{", "}");
+		if (bodyClose === undefined) {
+			continue;
+		}
+		bodies.push(source.slice(bodyOpen + 1, bodyClose));
+	}
+	return bodies;
+}
+
 function extractNamedImplBodies(source, typeName) {
 	const bodies = [];
 	const pattern = new RegExp(
@@ -4693,6 +10448,113 @@ function stageCleanupCallsAreExact(relativePath, source) {
 				removeFileCalls[0],
 				/\bparent\s*\.\s*$/,
 				"stage",
+			) &&
+			removeDirectoryCalls.length === 0
+		);
+	}
+	if (relativePath === "src-tauri/src/theme/unpack.rs") {
+		return (
+			removeFileCalls.length === 1 &&
+			exactMethodCall(
+				source,
+				removeFileCalls[0],
+				/\bparent\s*\.\s*$/,
+				"&entry.name",
+			) &&
+			removeDirectoryCalls.length === 2 &&
+			removeDirectoryCalls.some((call) =>
+				exactMethodCall(source, call, /\bparent\s*\.\s*$/, "&entry.name"),
+			) &&
+			removeDirectoryCalls.some((call) =>
+				exactMethodCall(
+					source,
+					call,
+					/\bself\s*\.\s*root\s*\.\s*$/,
+					"&self.stage_name",
+				),
+			)
+		);
+	}
+	if (relativePath === "src-tauri/src/theme/library.rs") {
+		return (
+			removeFileCalls.length === 1 &&
+			exactMethodCall(
+				source,
+				removeFileCalls[0],
+				/\bdir\s*\.\s*$/,
+				"child_path",
+			) &&
+			removeDirectoryCalls.length === 2 &&
+			removeDirectoryCalls.some((call) =>
+				exactMethodCall(source, call, /\bdir\s*\.\s*$/, "child_path"),
+			) &&
+			removeDirectoryCalls.some((call) =>
+				exactMethodCall(source, call, /\broot\s*\.\s*$/, "&name"),
+			)
+		);
+	}
+	if (relativePath === "src-tauri/src/theme/selection.rs") {
+		return (
+			removeFileCalls.length === 2 &&
+			removeFileCalls.some((call) =>
+				exactMethodCall(
+					source,
+					call,
+					/\bself\s*\.\s*dir\s*\.\s*$/,
+					"&self.name",
+				),
+			) &&
+			removeFileCalls.some((call) =>
+				exactMethodCall(source, call, /\broot\s*\.\s*$/, "SELECTION_FILE_NAME"),
+			) &&
+			removeDirectoryCalls.length === 0
+		);
+	}
+	if (relativePath === "src-tauri/src/trust/store.rs") {
+		return (
+			removeFileCalls.length === 1 &&
+			exactMethodCall(
+				source,
+				removeFileCalls[0],
+				/\bself\s*\.\s*dir\s*\.\s*$/,
+				"&self.name",
+			) &&
+			removeDirectoryCalls.length === 0
+		);
+	}
+	if (relativePath === DEBUG_CONFIRM_STORE_PATH) {
+		return (
+			removeFileCalls.length === 2 &&
+			removeFileCalls.some((call) =>
+				exactMethodCall(
+					source,
+					call,
+					/\bself\s*\.\s*dir\s*\.\s*$/,
+					"&self.name",
+				),
+			) &&
+			removeFileCalls.some((call) =>
+				exactMethodCall(source, call, /\bdir\s*\.\s*$/, "&key"),
+			) &&
+			removeDirectoryCalls.length === 0
+		);
+	}
+	if (relativePath === BACKUP_STORE_PATH) {
+		return (
+			removeFileCalls.length === 3 &&
+			removeFileCalls.some((call) =>
+				exactMethodCall(
+					source,
+					call,
+					/\bself\s*\.\s*dir\s*\.\s*$/,
+					"&self.name",
+				),
+			) &&
+			removeFileCalls.some((call) =>
+				exactMethodCall(source, call, /\bdir\s*\.\s*$/, "key.as_str()"),
+			) &&
+			removeFileCalls.some((call) =>
+				exactMethodCall(source, call, /\bdir\s*\.\s*$/, "name"),
 			) &&
 			removeDirectoryCalls.length === 0
 		);
@@ -5405,18 +11267,37 @@ export function validateWorkspaceMoveBoundary(rustSources) {
 				`${normalizedPath} must not use broad, open-directory or direct unlink deletion`,
 			);
 		}
+		// `src-tauri/src/git/exec.rs` and `src-tauri/src/debug/exec.rs` are
+		// exempt from this specific check only: they are the git and `debug`
+		// domains' own sole audited `std::process::Command` wrappers
+		// (`F080` S0 / `F100` S0 respectively), separately and more precisely
+		// locked down by `validateTerminalRustBoundary` (git: literal
+		// `Command::new("git")` only, no other program, no shell interpreter
+		// — see `GIT_EXEC_WRAPPER_PATH`'s doc) and
+		// `validateDebugAdapterSpawnBoundary`/`validateDebugSpawnConstructionShape`
+		// (debug: trust gate first, fixed `Command::new(&descriptor.command)
+		// .args(&descriptor.args)` shape — see `DEBUG_EXEC_WRAPPER_PATH`'s
+		// doc). This check's actual purpose — preventing the
+		// *workspace/theme/backup* domains' capability-based deletion from
+		// being bypassed via a raw process/shell spawn — does not apply to
+		// either file: neither spawns anything but its own domain's audited
+		// program, and neither calls `remove_file`/`remove_dir` at all
+		// (confirmed immediately below by this same loop's UFCS/broad-
+		// deletion checks, which still run for both unexempted).
 		if (
-			/\b(?:std|tokio|async_process)\s*::\s*(?:\{[^;}]*\bprocess\b|process\b)|\btauri_plugin_shell\b|\b(?:Command|Shell)\s*::\s*new\s*\(/s.test(
+			normalizedPath !== GIT_EXEC_WRAPPER_PATH &&
+			normalizedPath !== DEBUG_EXEC_WRAPPER_PATH &&
+			(/\b(?:std|tokio|async_process)\s*::\s*(?:\{[^;}]*\bprocess\b|process\b)|\btauri_plugin_shell\b|\b(?:Command|Shell)\s*::\s*new\s*\(/s.test(
 				executableSource,
 			) ||
-			/\b(?:async_process|duct|subprocess|xshell)\b/.test(executableSource) ||
-			/\b(?:libc|nix)\s*::(?:\s*[A-Za-z_]\w*\s*::)*\s*(?:remove|rmdir|system|posix_spawn|execv|execve|fork)\b/.test(
-				executableSource,
-			) ||
-			/\bextern\s+"C"\s*\{[^}]*\bfn\s+(?:remove|rmdir|system|posix_spawn|execv|execve|fork)\b/s.test(
-				executableSource,
-			) ||
-			/\b(?:use\s+std\s+as\b|extern\s+crate\s+std\b)/.test(executableSource)
+				/\b(?:async_process|duct|subprocess|xshell)\b/.test(executableSource) ||
+				/\b(?:libc|nix)\s*::(?:\s*[A-Za-z_]\w*\s*::)*\s*(?:remove|rmdir|system|posix_spawn|execv|execve|fork)\b/.test(
+					executableSource,
+				) ||
+				/\bextern\s+"C"\s*\{[^}]*\bfn\s+(?:remove|rmdir|system|posix_spawn|execv|execve|fork)\b/s.test(
+					executableSource,
+				) ||
+				/\b(?:use\s+std\s+as\b|extern\s+crate\s+std\b)/.test(executableSource))
 		) {
 			failures.push(
 				`${normalizedPath} must not use process or shell deletion bypasses`,
@@ -6366,6 +12247,48 @@ function collectTypeScriptBridgeAliases(sourceFile) {
  * token. The last condition deliberately permits unrelated catalog APIs that
  * happen to use the same method name.
  */
+// app/features/search/plain-search-service.ts extends the unpatched
+// SearchService base class from @codingame/monaco-vscode-search-service-override
+// (see that file's own doc comment). That base class's own constructor takes
+// IFileService as its 6th parameter and stores it as `this.fileService`,
+// purely to call `this.fileService.exists(folder)` when pre-filtering folder
+// queries (verified: searchService.js contains zero `getProvider` calls of
+// any kind — grep confirms it). Extending that base class, and wiring it
+// through Plain's own DI SyncDescriptor, is therefore structurally
+// impossible without some app file importing the literal `IFileService`
+// value (both for the constructor parameter type and for the manual
+// ServiceIdentifier-decorator call each DI-constructed class must redeclare
+// for its own exact constructor — see that file's doc comment on why
+// PlainSearchService cannot inherit SearchService's dependency list).
+// app/features/themes/plain-theme-registry.ts and app/main.ts are the second
+// audited exemption. Built-in (and, in a later slice, imported) color theme
+// resources live in the read-only, static `extension-file:` virtual tree
+// (registered by `registerFileUrl`/`registerExtensionFile`, a scheme wholly
+// distinct from `file:` or `plain-workspace:` — see the module doc comment
+// on PlainExtensionResourceLoaderService in plain-theme-registry.ts). Both
+// upstream's own `ColorThemeData#ensureLoaded`/`_loadColorTheme` (via
+// `IExtensionResourceLoaderService.readExtensionResource`) and Plain's own
+// NLS-bundle read (`readNlsBundle`, resolving `%placeholder%` labels) need a
+// real IFileService to read those already-registered bytes; no override
+// package provides one (see plain-theme-registry.ts's own doc comment), so
+// Plain's PlainExtensionResourceLoaderService wraps IFileService directly,
+// and app/main.ts resolves it once via `getService(IFileService)` to hand to
+// `createPlainThemeRegistry`. Neither file ever calls `.getProvider(...)` on
+// an IFileService-derived expression — the getProvider-derivation check
+// below is NOT exempted anywhere, including in these two files.
+//
+// This is the narrow, audited exemption set from the blanket "no app file
+// may reference IFileService" rule below; the getProvider-derivation check
+// three lines down is NOT exempted anywhere, including in these files — if
+// any exempted file (or anything it delegates to) ever called
+// `.getProvider(...)` on a fileService-derived expression, this function
+// would still fail it.
+const IFILE_SERVICE_TOKEN_EXEMPT_PATHS = new Set([
+	"app/features/search/plain-search-service.ts",
+	"app/features/themes/plain-theme-registry.ts",
+	"app/main.ts",
+]);
+
 export function validateWorkspaceProviderRetrievalBoundary(appSources) {
 	const failures = [];
 	const factoryContracts = new Map([
@@ -6786,7 +12709,10 @@ export function validateWorkspaceProviderRetrievalBoundary(appSources) {
 			ts.forEachChild(node, visit);
 		}
 		visit(sourceFile);
-		if (referencesFileServiceToken) {
+		if (
+			referencesFileServiceToken &&
+			!IFILE_SERVICE_TOKEN_EXEMPT_PATHS.has(normalizedPath)
+		) {
 			failures.push(
 				`${normalizedPath} must not import or reference IFileService in the Plain application`,
 			);
@@ -8193,6 +14119,10 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	}
 	const allowedTopLevelDeclarations = new Map([
 		["PLAIN_WORKSPACE_SCHEME", { kind: "variable", exported: true }],
+		[
+			"MAX_TRACKED_OPEN_RESOURCES_PER_ROOT",
+			{ kind: "variable", exported: false },
+		],
 		["ResolvedResource", { kind: "interface", exported: false }],
 		["ResolvedMutationResource", { kind: "interface", exported: false }],
 		["PlainWorkspaceDeleteResource", { kind: "interface", exported: true }],
@@ -9117,6 +15047,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	const expectedProviderMembers = new Set([
 		"#bridge",
 		"#allowsMutationDispatch",
+		"#watchState",
 		"capabilities",
 		"onDidChangeCapabilities",
 		"changeEmitter",
@@ -9142,6 +15073,8 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		"fireMoved",
 		"fireRootUpdated",
 		"fireRootsUpdated",
+		"reconcileWatchedPaths",
+		"trackOpenResource",
 		"resolveMutationResource",
 		"resolveResource",
 	]);
@@ -10214,7 +16147,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	]);
 	const expectedBridgeMethods = new Map([
 		["workspaceWatch", 1],
-		["workspaceStat", 1],
+		["workspaceStat", 2],
 		["workspaceReadDirectory", 1],
 		["workspaceReadFile", 1],
 		["workspaceWriteFile", 1],
@@ -10342,6 +16275,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	let moveOutcomeUnknownConstructionCount = 0;
 	let privateBridgeReferences = 0;
 	let privatePolicyReferences = 0;
+	let privateWatchStateReferences = 0;
 	function isThisBridge(node) {
 		return (
 			ts.isPropertyAccessExpression(node) &&
@@ -10447,6 +16381,8 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 				privateBridgeReferences += 1;
 			} else if (node.text === "#allowsMutationDispatch") {
 				privatePolicyReferences += 1;
+			} else if (node.text === "#watchState") {
+				privateWatchStateReferences += 1;
 			} else {
 				hasUnexpectedPrivateIdentifier = true;
 			}
@@ -10935,9 +16871,13 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			"Plain workspace mutation boolean parameter may appear only in its declaration, private-field assignment and capability condition",
 		);
 	}
-	if (privateBridgeReferences !== 13 || privatePolicyReferences !== 3) {
+	if (
+		privateBridgeReferences !== 14 ||
+		privatePolicyReferences !== 3 ||
+		privateWatchStateReferences !== 7
+	) {
 		failures.push(
-			"Plain workspace native authority must remain sealed in the exact #bridge and #allowsMutationDispatch private-field consumers",
+			"Plain workspace native authority must remain sealed in the exact #bridge, #allowsMutationDispatch and #watchState private-field consumers",
 		);
 	}
 	if (
@@ -10955,7 +16895,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	for (const [methodName, expectedCount] of expectedBridgeMethods) {
 		if (bridgeMethodCounts.get(methodName) !== expectedCount) {
 			failures.push(
-				`${methodName} must have exactly one fixed direct this.#bridge call site`,
+				`${methodName} must have exactly ${expectedCount} fixed direct this.#bridge call site(s)`,
 			);
 		}
 	}
@@ -10977,8 +16917,8 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		);
 	}
 	if (
-		fireCreatedCallCount !== 3 ||
-		fireDeletedCallCount !== 1 ||
+		fireCreatedCallCount !== 4 ||
+		fireDeletedCallCount !== 2 ||
 		fireMovedCallCount !== 2 ||
 		fireRootUpdatedCallCount !== 8 ||
 		fireRootsUpdatedCallCount !== 2 ||
@@ -11065,33 +17005,6 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 		);
 	}
 
-	const deleteScenarioAliases = sourceFile.statements.filter(
-		(statement) =>
-			ts.isTypeAliasDeclaration(statement) &&
-			statement.name.text === "TestMultiRootDeleteIncompleteScenario",
-	);
-	let deleteScenarioAliasIsClosed = false;
-	if (deleteScenarioAliases.length === 1) {
-		const [deleteAlias] = deleteScenarioAliases;
-		const deleteMembers = ts.isUnionTypeNode(deleteAlias.type)
-			? deleteAlias.type.types
-			: [];
-		const deleteValues = deleteMembers.map((member) =>
-			ts.isLiteralTypeNode(member) && ts.isStringLiteral(member.literal)
-				? member.literal.text
-				: undefined,
-		);
-		deleteScenarioAliasIsClosed =
-			(deleteAlias.modifiers?.length ?? 0) === 0 &&
-			deleteMembers.length === 2 &&
-			sameArray([...deleteValues].sort(), ["deletePartial", "deleteRetained"]);
-	}
-	if (!deleteScenarioAliasIsClosed) {
-		failures.push(
-			"browser delete-failure fixture fourth argument must remain the closed deleteRetained/deletePartial scenario set",
-		);
-	}
-
 	const installers = sourceFile.statements.filter(
 		(statement) =>
 			ts.isFunctionDeclaration(statement) &&
@@ -11153,18 +17066,6 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 		scenarioParameter.initializer !== undefined &&
 		ts.isArrayLiteralExpression(scenarioParameter.initializer) &&
 		scenarioParameter.initializer.elements.length === 0 &&
-		returnType !== undefined &&
-		ts.isTypeReferenceNode(returnType) &&
-		ts.isIdentifier(returnType.typeName) &&
-		returnType.typeName.text === "Promise" &&
-		returnType.typeArguments?.length === 1 &&
-		returnType.typeArguments[0].kind === ts.SyntaxKind.VoidKeyword;
-	if (!signatureIsExact) {
-		failures.push(
-			"browser move-failure fixture third argument must remain the closed moveRetained/movePartial scenario set",
-		);
-	}
-	const deleteSignatureIsExact =
 		deleteScenarioParameter !== undefined &&
 		ts.isIdentifier(deleteScenarioParameter.name) &&
 		deleteScenarioParameter.name.text === "deleteIncompleteScenarios" &&
@@ -11176,10 +17077,16 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 		deleteScenarioElementType.typeArguments === undefined &&
 		deleteScenarioParameter.initializer !== undefined &&
 		ts.isArrayLiteralExpression(deleteScenarioParameter.initializer) &&
-		deleteScenarioParameter.initializer.elements.length === 0;
-	if (!deleteSignatureIsExact) {
+		deleteScenarioParameter.initializer.elements.length === 0 &&
+		returnType !== undefined &&
+		ts.isTypeReferenceNode(returnType) &&
+		ts.isIdentifier(returnType.typeName) &&
+		returnType.typeName.text === "Promise" &&
+		returnType.typeArguments?.length === 1 &&
+		returnType.typeArguments[0].kind === ts.SyntaxKind.VoidKeyword;
+	if (!signatureIsExact) {
 		failures.push(
-			"browser delete-failure fixture fourth argument must remain the closed deleteRetained/deletePartial scenario set",
+			"browser move-failure fixture third argument must remain the closed moveRetained/movePartial scenario set",
 		);
 	}
 
@@ -11240,20 +17147,15 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 		installer,
 		"moveIncompleteScenarios",
 	);
-	const deleteScenarioReferenceCount = countIdentifier(
-		installer,
-		"deleteIncompleteScenarios",
-	);
 	if (
 		callback === undefined ||
 		!ts.isBlock(callback.body) ||
 		!callbackBindingsAreExact ||
 		!initDataIsExact ||
-		scenarioReferenceCount !== 5 ||
-		deleteScenarioReferenceCount !== 6
+		scenarioReferenceCount !== 5
 	) {
 		failures.push(
-			"browser move/delete-failure scenarios must remain local to one audited multi-root addInitScript fixture",
+			"browser move-failure scenarios must remain local to one audited multi-root addInitScript fixture",
 		);
 	}
 	if (callback === undefined || !ts.isBlock(callback.body)) {
@@ -11281,40 +17183,7 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 		partialTreeInitializers.length !== 1
 	) {
 		failures.push(
-			"browser move/delete-failure scenarios must remain local to one audited multi-root addInitScript fixture",
-		);
-	}
-
-	const deletePlanDeclarations = collect(
-		callback.body,
-		(node) =>
-			ts.isVariableDeclaration(node) &&
-			ts.isIdentifier(node.name) &&
-			node.name.text === "deleteIncompletePlan",
-	);
-	const deleteRetainedTreeInitializers = collect(
-		callback.body,
-		(node) =>
-			ts.isIfStatement(node) &&
-			normalizedText(node) ===
-				'if(deleteIncompleteScenarios.includes("deleteRetained")){primaryEntries.push(["delete-retained.txt",file("Keep this retained delete target.\\n"),]);}',
-	);
-	const deletePartialTreeInitializers = collect(
-		callback.body,
-		(node) =>
-			ts.isIfStatement(node) &&
-			normalizedText(node) ===
-				'if(deleteIncompleteScenarios.includes("deletePartial")){secondaryEntries.push(["delete-partial",directory([["removed.txt",file("Remove this delete child.\\n")],["kept.txt",file("Keep this delete child.\\n")],]),]);}',
-	);
-	if (
-		deletePlanDeclarations.length !== 1 ||
-		normalizedText(deletePlanDeclarations[0]) !==
-			"deleteIncompletePlan=[...deleteIncompleteScenarios]" ||
-		deleteRetainedTreeInitializers.length !== 1 ||
-		deletePartialTreeInitializers.length !== 1
-	) {
-		failures.push(
-			"browser move/delete-failure scenarios must remain local to one audited multi-root addInitScript fixture",
+			"browser move-failure scenarios must remain local to one audited multi-root addInitScript fixture",
 		);
 	}
 
@@ -11392,65 +17261,6 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 		);
 	}
 
-	const deleteCommitCases = collect(
-		callback.body,
-		(node) =>
-			ts.isCaseClause(node) &&
-			ts.isStringLiteral(node.expression) &&
-			node.expression.text === "workspace_commit_delete_entry",
-	);
-	if (deleteCommitCases.length !== 1) {
-		return [
-			...new Set([
-				...failures,
-				"browser delete-failure fixture must retain exact commit-entry request validation",
-			]),
-		];
-	}
-	const [deleteCommitCase] = deleteCommitCases;
-	const deleteIfStatements = collect(deleteCommitCase, (node) =>
-		ts.isIfStatement(node),
-	);
-	const deleteRetainedRequestGuards = deleteIfStatements.filter(
-		(node) =>
-			normalizedText(node) ===
-			'if(plannedIncomplete==="deleteRetained"&&(request.rootId!==primaryRootId||request.relativePath!=="delete-retained.txt"||request.recursive!==true)){thrownewError("Unexpected retained delete browser test request.",);}',
-	);
-	const deletePartialRequestGuards = deleteIfStatements.filter(
-		(node) =>
-			normalizedText(node) ===
-			'if(plannedIncomplete==="deletePartial"&&(request.rootId!==secondaryRootId||request.relativePath!=="delete-partial"||request.recursive!==true)){thrownewError("Unexpected partial delete browser test request.",);}',
-	);
-	if (
-		deleteRetainedRequestGuards.length !== 1 ||
-		deletePartialRequestGuards.length !== 1
-	) {
-		failures.push(
-			"browser delete-failure fixture must retain exact commit-entry request validation",
-		);
-	}
-
-	const deleteRetainedBranches = deleteIfStatements.filter(
-		(node) =>
-			normalizedText(node) ===
-			'if(plannedIncomplete==="deleteRetained"){deleteIncompletePlan.shift();activeDelete=undefined;return{status:"entryRetained",reason:"deleteFailed"};}',
-	);
-	const deletePartialBranches = deleteIfStatements.filter(
-		(node) =>
-			normalizedText(node) ===
-			'if(plannedIncomplete==="deletePartial"){constnode=resolveNode(activeDelete.rootId,activeDelete.relativePath,);if(node.kind!=="directory"){throwentryTypeMismatch();}constremovedEntries=node.entries.delete("removed.txt")?1:0;if(removedEntries!==1||!node.entries.has("kept.txt")){thrownewError("Invalid partial delete browser test target tree.",);}deleteIncompletePlan.shift();activeDelete=undefined;return{status:"entryPartiallyDeleted",reason:"deleteFailed",removedEntries,};}',
-	);
-	if (deleteRetainedBranches.length !== 1) {
-		failures.push(
-			"browser retained-delete fixture must leave the tree untouched and invalidate the active batch",
-		);
-	}
-	if (deletePartialBranches.length !== 1) {
-		failures.push(
-			"browser partial-delete fixture must delete removed.txt and derive removedEntries from that boolean result",
-		);
-	}
-
 	const movePlanReferences = countIdentifier(
 		callback.body,
 		"moveIncompletePlan",
@@ -11459,14 +17269,12 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 		callback.body,
 		"moveIncompleteScenarios",
 	);
-	const deletePlanReferences = countIdentifier(
-		callback.body,
-		"deleteIncompletePlan",
-	);
-	const deleteCallbackScenarioReferences = countIdentifier(
-		callback.body,
-		"deleteIncompleteScenarios",
-	);
+	// `forbiddenWindowControls` only catches receivers that are literally
+	// `window`/`testWindow` after unwrapping property chains; it is kept as
+	// defense in depth, but `validateWorkspaceBrowserFixtureWindowAuthority`
+	// is what actually closes the window-alias gap (see that function's
+	// JSDoc) by locking down every way the callback can reach the page
+	// window at all.
 	const forbiddenWindowControls = collect(callback.body, (node) => {
 		if (
 			!ts.isPropertyAccessExpression(node) &&
@@ -11479,7 +17287,7 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 			: typeScriptStaticName(node.argumentExpression);
 		if (
 			name === undefined ||
-			!/(?:(?:move|delete).*(?:failure|incomplete|scenario|status|reason|count)|(?:failure|incomplete|scenario).*(?:move|delete))/iu.test(
+			!/(?:move.*(?:failure|incomplete|scenario|status|reason|count)|(?:failure|incomplete|scenario).*move)/iu.test(
 				name,
 			)
 		) {
@@ -11500,13 +17308,832 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 	if (
 		movePlanReferences !== 4 ||
 		callbackScenarioReferences !== 2 ||
-		deletePlanReferences !== 4 ||
-		deleteCallbackScenarioReferences !== 3 ||
 		forbiddenWindowControls.length !== 0
 	) {
 		failures.push(
-			"browser move/delete-failure fixture must not accept raw receipt fields or expose a window mutation control",
+			"browser move-failure fixture must not accept raw receipt fields or expose a window mutation control",
 		);
+	}
+
+	const peekDeclarations = collect(
+		callback.body,
+		(node) =>
+			ts.isVariableDeclaration(node) &&
+			ts.isIdentifier(node.name) &&
+			node.name.text === "plannedIncomplete",
+	);
+	const peekStatementIsExact =
+		peekDeclarations.length === 1 &&
+		normalizedText(peekDeclarations[0].parent.parent) ===
+			"constplannedIncomplete=moveIncompletePlan[0];";
+	if (!peekStatementIsExact) {
+		failures.push(
+			"browser move-failure fixture must peek moveIncompletePlan[0] through one audited statement",
+		);
+	}
+
+	const movePlanAuditedRanges = [
+		planDeclarations[0]?.parent?.parent,
+		peekDeclarations[0]?.parent?.parent,
+		retainedBranches[0],
+		partialBranches[0],
+	]
+		.filter((node) => node !== undefined)
+		.map((node) => [node.getStart(sourceFile), node.getEnd()]);
+	const movePlanReferenceNodes = collect(
+		callback.body,
+		(node) => ts.isIdentifier(node) && node.text === "moveIncompletePlan",
+	);
+	const movePlanReferencesOutOfRange = movePlanReferenceNodes.some(
+		(node) =>
+			!movePlanAuditedRanges.some(
+				([start, end]) =>
+					node.getStart(sourceFile) >= start && node.getEnd() <= end,
+			),
+	);
+	if (movePlanAuditedRanges.length !== 4 || movePlanReferencesOutOfRange) {
+		failures.push(
+			"browser move-failure fixture must keep moveIncompletePlan references inside its audited plan, peek and terminal branch statements",
+		);
+	}
+
+	return [...new Set(failures)];
+}
+
+/**
+ * Locks the browser-only retained/partial permanent delete fixture to two
+ * local scenarios. The fixture may shape only the addInitScript closure that
+ * `validateWorkspaceMoveFailureBrowserFixture` also audits; production code
+ * and the page window never receive a mutable failure-plan control surface.
+ */
+export function validateWorkspaceDeleteFailureBrowserFixture(source) {
+	const failures = [];
+	const sourceFile = ts.createSourceFile(
+		"tests/browser/workspace.spec.ts",
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	const normalizedText = (node) => {
+		if (node === undefined) {
+			return undefined;
+		}
+		const scanner = ts.createScanner(
+			ts.ScriptTarget.Latest,
+			true,
+			ts.LanguageVariant.Standard,
+			node.getText(sourceFile),
+		);
+		let compact = "";
+		for (
+			let token = scanner.scan();
+			token !== ts.SyntaxKind.EndOfFileToken;
+			token = scanner.scan()
+		) {
+			compact += scanner.getTokenText();
+		}
+		return compact;
+	};
+	const collect = (root, predicate) => {
+		const matches = [];
+		function visit(node) {
+			if (predicate(node)) {
+				matches.push(node);
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(root);
+		return matches;
+	};
+	const countIdentifier = (root, name) =>
+		collect(root, (node) => ts.isIdentifier(node) && node.text === name).length;
+
+	const scenarioAliases = sourceFile.statements.filter(
+		(statement) =>
+			ts.isTypeAliasDeclaration(statement) &&
+			statement.name.text === "TestMultiRootDeleteIncompleteScenario",
+	);
+	let scenarioAliasIsClosed = false;
+	if (scenarioAliases.length === 1) {
+		const [alias] = scenarioAliases;
+		const members = ts.isUnionTypeNode(alias.type) ? alias.type.types : [];
+		const values = members.map((member) =>
+			ts.isLiteralTypeNode(member) && ts.isStringLiteral(member.literal)
+				? member.literal.text
+				: undefined,
+		);
+		scenarioAliasIsClosed =
+			(alias.modifiers?.length ?? 0) === 0 &&
+			members.length === 2 &&
+			sameArray([...values].sort(), ["deletePartial", "deleteRetained"]);
+	}
+	if (!scenarioAliasIsClosed) {
+		failures.push(
+			"browser delete-failure fixture fourth argument must remain the closed deleteRetained/deletePartial scenario set",
+		);
+	}
+
+	const installers = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "installMultiRootNativeIpcMock",
+	);
+	if (installers.length !== 1) {
+		return [
+			...failures,
+			"browser delete-failure scenarios must remain local to one audited multi-root addInitScript fixture",
+		];
+	}
+	const [installer] = installers;
+	const [, , , deleteScenarioParameter] = installer.parameters;
+	const deleteScenarioArrayType =
+		deleteScenarioParameter?.type !== undefined &&
+		ts.isTypeOperatorNode(deleteScenarioParameter.type) &&
+		deleteScenarioParameter.type.operator === ts.SyntaxKind.ReadonlyKeyword &&
+		ts.isArrayTypeNode(deleteScenarioParameter.type.type)
+			? deleteScenarioParameter.type.type
+			: undefined;
+	const deleteScenarioElementType = deleteScenarioArrayType?.elementType;
+	const signatureIsExact =
+		installer.parameters.length === 4 &&
+		deleteScenarioParameter !== undefined &&
+		ts.isIdentifier(deleteScenarioParameter.name) &&
+		deleteScenarioParameter.name.text === "deleteIncompleteScenarios" &&
+		deleteScenarioElementType !== undefined &&
+		ts.isTypeReferenceNode(deleteScenarioElementType) &&
+		ts.isIdentifier(deleteScenarioElementType.typeName) &&
+		deleteScenarioElementType.typeName.text ===
+			"TestMultiRootDeleteIncompleteScenario" &&
+		deleteScenarioElementType.typeArguments === undefined &&
+		deleteScenarioParameter.initializer !== undefined &&
+		ts.isArrayLiteralExpression(deleteScenarioParameter.initializer) &&
+		deleteScenarioParameter.initializer.elements.length === 0;
+	if (!signatureIsExact) {
+		failures.push(
+			"browser delete-failure fixture fourth argument must remain the closed deleteRetained/deletePartial scenario set",
+		);
+	}
+
+	const [onlyStatement] = installer.body?.statements ?? [];
+	const awaited =
+		installer.body?.statements.length === 1 &&
+		onlyStatement !== undefined &&
+		ts.isExpressionStatement(onlyStatement) &&
+		ts.isAwaitExpression(onlyStatement.expression)
+			? onlyStatement.expression.expression
+			: undefined;
+	const addInitScriptCall =
+		awaited !== undefined &&
+		ts.isCallExpression(awaited) &&
+		ts.isPropertyAccessExpression(awaited.expression) &&
+		ts.isIdentifier(awaited.expression.expression) &&
+		awaited.expression.expression.text === "page" &&
+		awaited.expression.name.text === "addInitScript" &&
+		awaited.arguments.length === 2
+			? awaited
+			: undefined;
+	const callback =
+		addInitScriptCall !== undefined &&
+		ts.isArrowFunction(addInitScriptCall.arguments[0])
+			? addInitScriptCall.arguments[0]
+			: undefined;
+	const callbackParameter = callback?.parameters[0];
+	const callbackBindings =
+		callback?.parameters.length === 1 &&
+		callbackParameter !== undefined &&
+		ts.isObjectBindingPattern(callbackParameter.name)
+			? callbackParameter.name.elements.map((element) => ({
+					name: typeScriptStaticName(element.name),
+					property: typeScriptStaticName(element.propertyName ?? element.name),
+				}))
+			: [];
+	const callbackBindingsAreExact = sameArray(callbackBindings, [
+		{ name: "mode", property: "mode" },
+		{
+			name: "moveIncompleteScenarios",
+			property: "moveIncompleteScenarios",
+		},
+		{
+			name: "deleteIncompleteScenarios",
+			property: "deleteIncompleteScenarios",
+		},
+		{ name: "workspaceId", property: "workspaceId" },
+		{ name: "primaryRootId", property: "primaryRootId" },
+		{ name: "secondaryRootId", property: "secondaryRootId" },
+	]);
+	const initData = addInitScriptCall?.arguments[1];
+	const initDataIsExact =
+		initData !== undefined &&
+		ts.isObjectLiteralExpression(initData) &&
+		normalizedText(initData) ===
+			"{mode,moveIncompleteScenarios,deleteIncompleteScenarios,workspaceId:nativeWorkspaceId,primaryRootId:nativeRootId,secondaryRootId:nativeSecondaryRootId,}";
+	const scenarioReferenceCount = countIdentifier(
+		installer,
+		"deleteIncompleteScenarios",
+	);
+	if (
+		callback === undefined ||
+		!ts.isBlock(callback.body) ||
+		!callbackBindingsAreExact ||
+		!initDataIsExact ||
+		scenarioReferenceCount !== 6
+	) {
+		failures.push(
+			"browser delete-failure scenarios must remain local to one audited multi-root addInitScript fixture",
+		);
+	}
+	if (callback === undefined || !ts.isBlock(callback.body)) {
+		return [...new Set(failures)];
+	}
+
+	const planDeclarations = collect(
+		callback.body,
+		(node) =>
+			ts.isVariableDeclaration(node) &&
+			ts.isIdentifier(node.name) &&
+			node.name.text === "deleteIncompletePlan",
+	);
+	const retainedTreeInitializers = collect(
+		callback.body,
+		(node) =>
+			ts.isIfStatement(node) &&
+			normalizedText(node) ===
+				'if(deleteIncompleteScenarios.includes("deleteRetained")){primaryEntries.push(["delete-retained.txt",file("Retain this delete target.\\n"),]);}',
+	);
+	const partialTreeInitializers = collect(
+		callback.body,
+		(node) =>
+			ts.isIfStatement(node) &&
+			normalizedText(node) ===
+				'if(deleteIncompleteScenarios.includes("deletePartial")){secondaryEntries.push(["delete-partial",directory([["removed.txt",file("Remove this delete child.\\n")],["kept.txt",file("Keep this delete child.\\n")],]),]);}',
+	);
+	// The shared fixture also seeds a movePartial secondaryEntries branch for
+	// validateWorkspaceMoveFailureBrowserFixture; this validator locks it too
+	// because the tree-seed reference range lock below audits every
+	// primaryEntries/secondaryEntries reference in the whole shared callback,
+	// not only the delete-related ones.
+	const movePartialTreeInitializers = collect(
+		callback.body,
+		(node) =>
+			ts.isIfStatement(node) &&
+			normalizedText(node) ===
+				'if(moveIncompleteScenarios.includes("movePartial")){secondaryEntries.push(["move-partial",directory([["removed.txt",file("Remove this source child.\\n")],["kept.txt",file("Keep this source child.\\n")],]),]);}',
+	);
+	const primaryEntriesDeclarations = collect(
+		callback.body,
+		(node) =>
+			ts.isVariableDeclaration(node) &&
+			ts.isIdentifier(node.name) &&
+			node.name.text === "primaryEntries",
+	);
+	const secondaryEntriesDeclarations = collect(
+		callback.body,
+		(node) =>
+			ts.isVariableDeclaration(node) &&
+			ts.isIdentifier(node.name) &&
+			node.name.text === "secondaryEntries",
+	);
+	const treesDeclarations = collect(
+		callback.body,
+		(node) =>
+			ts.isVariableDeclaration(node) &&
+			ts.isIdentifier(node.name) &&
+			node.name.text === "trees",
+	);
+	if (
+		planDeclarations.length !== 1 ||
+		normalizedText(planDeclarations[0]) !==
+			"deleteIncompletePlan=[...deleteIncompleteScenarios]" ||
+		retainedTreeInitializers.length !== 1 ||
+		partialTreeInitializers.length !== 1 ||
+		movePartialTreeInitializers.length !== 1 ||
+		primaryEntriesDeclarations.length !== 1 ||
+		secondaryEntriesDeclarations.length !== 1 ||
+		treesDeclarations.length !== 1 ||
+		normalizedText(primaryEntriesDeclarations[0].parent.parent) !==
+			'constprimaryEntries:Array<readonly[string,MockNode]>=[["README.md",file("# Primary workspace\\n")],["copy-source.txt",file("Copy across roots.\\n")],["src",directory([])],];' ||
+		normalizedText(secondaryEntriesDeclarations[0].parent.parent) !==
+			'constsecondaryEntries:Array<readonly[string,MockNode]>=[["move-source.txt",file("Move across roots.\\n")],["notes.txt",file("Secondary workspace\\n")],["packages",directory([])],];' ||
+		normalizedText(treesDeclarations[0].parent.parent) !==
+			"consttrees=newMap<string,MockDirectory>([[primaryRootId,directory(primaryEntries)],[secondaryRootId,directory(secondaryEntries)],]);"
+	) {
+		failures.push(
+			"browser delete-failure scenarios must remain local to one audited multi-root addInitScript fixture",
+		);
+	}
+
+	const treeSeedAuditedRanges = [
+		primaryEntriesDeclarations[0]?.parent?.parent,
+		secondaryEntriesDeclarations[0]?.parent?.parent,
+		movePartialTreeInitializers[0],
+		retainedTreeInitializers[0],
+		partialTreeInitializers[0],
+		treesDeclarations[0]?.parent?.parent,
+	]
+		.filter((node) => node !== undefined)
+		.map((node) => [node.getStart(sourceFile), node.getEnd()]);
+	const treeSeedReferenceNodes = collect(
+		callback.body,
+		(node) =>
+			ts.isIdentifier(node) &&
+			(node.text === "primaryEntries" || node.text === "secondaryEntries"),
+	);
+	const treeSeedReferencesOutOfRange = treeSeedReferenceNodes.some(
+		(node) =>
+			!treeSeedAuditedRanges.some(
+				([start, end]) =>
+					node.getStart(sourceFile) >= start && node.getEnd() <= end,
+			),
+	);
+	if (treeSeedAuditedRanges.length !== 6 || treeSeedReferencesOutOfRange) {
+		failures.push(
+			"browser delete-failure fixture must keep primaryEntries and secondaryEntries references inside their audited seed and tree-construction statements",
+		);
+	}
+
+	const commitCases = collect(
+		callback.body,
+		(node) =>
+			ts.isCaseClause(node) &&
+			ts.isStringLiteral(node.expression) &&
+			node.expression.text === "workspace_commit_delete_entry",
+	);
+	if (commitCases.length !== 1) {
+		return [
+			...new Set([
+				...failures,
+				"browser delete-failure fixture must retain exact per-entry request validation",
+			]),
+		];
+	}
+	const [commitCase] = commitCases;
+	const targetDeclarations = collect(
+		commitCase,
+		(node) =>
+			ts.isVariableDeclaration(node) &&
+			ts.isIdentifier(node.name) &&
+			node.name.text === "target",
+	);
+	const ifStatements = collect(commitCase, (node) => ts.isIfStatement(node));
+	const retainedRequest = ifStatements.filter(
+		(node) =>
+			normalizedText(node) ===
+			'if(plannedDeleteIncomplete==="deleteRetained"&&(activeDelete.rootId!==primaryRootId||activeDelete.relativePath!=="delete-retained.txt")){thrownewError("Unexpected retained delete browser test request.",);}',
+	);
+	const partialRequest = ifStatements.filter(
+		(node) =>
+			normalizedText(node) ===
+			'if(plannedDeleteIncomplete==="deletePartial"&&(activeDelete.rootId!==secondaryRootId||activeDelete.relativePath!=="delete-partial")){thrownewError("Unexpected partial delete browser test request.",);}',
+	);
+	if (retainedRequest.length !== 1 || partialRequest.length !== 1) {
+		failures.push(
+			"browser delete-failure fixture must retain exact per-entry request validation",
+		);
+	}
+
+	const retainedBranches = ifStatements.filter(
+		(node) =>
+			normalizedText(node) ===
+			'if(plannedDeleteIncomplete==="deleteRetained"){deleteIncompletePlan.shift();activeDelete=undefined;return{status:"entryRetained",reason:"deleteFailed"};}',
+	);
+	const partialBranches = ifStatements.filter(
+		(node) =>
+			normalizedText(node) ===
+			'if(plannedDeleteIncomplete==="deletePartial"){constnode=target.parent.entries.get(target.name);if(node?.kind!=="directory"){throwentryTypeMismatch();}constremovedEntries=node.entries.delete("removed.txt")?1:0;if(removedEntries!==1||!node.entries.has("kept.txt")){thrownewError("Invalid partial delete browser test target tree.",);}deleteIncompletePlan.shift();activeDelete=undefined;return{status:"entryPartiallyDeleted",reason:"deleteFailed",removedEntries,};}',
+	);
+	const normalDeleteStatements = ifStatements.filter(
+		(node) =>
+			normalizedText(node) ===
+			"if(!target.parent.entries.delete(target.name)){throwentryNotFound();}",
+	);
+	if (retainedBranches.length !== 1) {
+		failures.push(
+			"browser retained-delete fixture must leave the tree untouched and return only its fixed receipt",
+		);
+	}
+	if (partialBranches.length !== 1) {
+		failures.push(
+			"browser partial-delete fixture must delete removed.txt and derive removedEntries from that boolean result",
+		);
+	}
+	if (
+		retainedRequest.length !== 1 ||
+		partialRequest.length !== 1 ||
+		retainedBranches.length !== 1 ||
+		partialBranches.length !== 1 ||
+		normalDeleteStatements.length !== 1 ||
+		retainedRequest[0].getStart(sourceFile) >=
+			partialRequest[0].getStart(sourceFile) ||
+		partialRequest[0].getStart(sourceFile) >=
+			retainedBranches[0].getStart(sourceFile) ||
+		retainedBranches[0].getStart(sourceFile) >=
+			partialBranches[0].getStart(sourceFile) ||
+		partialBranches[0].getStart(sourceFile) >=
+			normalDeleteStatements[0].getStart(sourceFile)
+	) {
+		failures.push(
+			"browser delete-failure fixture must invalidate the active batch before its ordered terminal scenario branches",
+		);
+	}
+
+	const targetAuditedRanges = [
+		targetDeclarations[0]?.parent?.parent,
+		partialBranches[0],
+		normalDeleteStatements[0],
+	]
+		.filter((node) => node !== undefined)
+		.map((node) => [node.getStart(sourceFile), node.getEnd()]);
+	const targetReferenceNodes = collect(
+		commitCase,
+		(node) => ts.isIdentifier(node) && node.text === "target",
+	);
+	const targetReferencesOutOfRange = targetReferenceNodes.some(
+		(node) =>
+			!targetAuditedRanges.some(
+				([start, end]) =>
+					node.getStart(sourceFile) >= start && node.getEnd() <= end,
+			),
+	);
+	if (
+		targetDeclarations.length !== 1 ||
+		normalizedText(targetDeclarations[0].parent.parent) !==
+			"consttarget=resolveParent(activeDelete.rootId,activeDelete.relativePath,);" ||
+		targetAuditedRanges.length !== 3 ||
+		targetReferencesOutOfRange
+	) {
+		failures.push(
+			"browser delete-failure fixture must keep commit-case target references inside its audited declaration and terminal branch statements",
+		);
+	}
+
+	const peekDeclarations = collect(
+		callback.body,
+		(node) =>
+			ts.isVariableDeclaration(node) &&
+			ts.isIdentifier(node.name) &&
+			node.name.text === "plannedDeleteIncomplete",
+	);
+	const peekStatementIsExact =
+		peekDeclarations.length === 1 &&
+		normalizedText(peekDeclarations[0].parent.parent) ===
+			"constplannedDeleteIncomplete=deleteIncompletePlan[0];";
+	if (!peekStatementIsExact) {
+		failures.push(
+			"browser delete-failure fixture must peek deleteIncompletePlan[0] through one audited statement",
+		);
+	}
+
+	const deletePlanAuditedRanges = [
+		planDeclarations[0]?.parent?.parent,
+		peekDeclarations[0]?.parent?.parent,
+		retainedBranches[0],
+		partialBranches[0],
+	]
+		.filter((node) => node !== undefined)
+		.map((node) => [node.getStart(sourceFile), node.getEnd()]);
+	const deletePlanReferenceNodes = collect(
+		callback.body,
+		(node) => ts.isIdentifier(node) && node.text === "deleteIncompletePlan",
+	);
+	const deletePlanReferencesOutOfRange = deletePlanReferenceNodes.some(
+		(node) =>
+			!deletePlanAuditedRanges.some(
+				([start, end]) =>
+					node.getStart(sourceFile) >= start && node.getEnd() <= end,
+			),
+	);
+	if (deletePlanAuditedRanges.length !== 4 || deletePlanReferencesOutOfRange) {
+		failures.push(
+			"browser delete-failure fixture must keep deleteIncompletePlan references inside its audited plan, peek and terminal branch statements",
+		);
+	}
+
+	const deletePlanReferences = countIdentifier(
+		callback.body,
+		"deleteIncompletePlan",
+	);
+	const callbackScenarioReferences = countIdentifier(
+		callback.body,
+		"deleteIncompleteScenarios",
+	);
+	// Kept as defense in depth; see the matching comment in
+	// validateWorkspaceMoveFailureBrowserFixture and the JSDoc on
+	// validateWorkspaceBrowserFixtureWindowAuthority, which is what actually
+	// closes the window-alias gap this check alone cannot catch.
+	const forbiddenWindowControls = collect(callback.body, (node) => {
+		if (
+			!ts.isPropertyAccessExpression(node) &&
+			!ts.isElementAccessExpression(node)
+		) {
+			return false;
+		}
+		const name = ts.isPropertyAccessExpression(node)
+			? node.name.text
+			: typeScriptStaticName(node.argumentExpression);
+		if (
+			name === undefined ||
+			!/(?:delete.*(?:failure|incomplete|scenario|status|reason|count)|(?:failure|incomplete|scenario).*delete)/iu.test(
+				name,
+			)
+		) {
+			return false;
+		}
+		let receiver = node.expression;
+		while (
+			ts.isPropertyAccessExpression(receiver) ||
+			ts.isElementAccessExpression(receiver)
+		) {
+			receiver = receiver.expression;
+		}
+		return (
+			ts.isIdentifier(receiver) &&
+			(receiver.text === "window" || receiver.text === "testWindow")
+		);
+	});
+	if (
+		deletePlanReferences !== 4 ||
+		callbackScenarioReferences !== 3 ||
+		forbiddenWindowControls.length !== 0
+	) {
+		failures.push(
+			"browser delete-failure fixture must not accept raw receipt fields or expose a window mutation control",
+		);
+	}
+
+	return [...new Set(failures)];
+}
+
+/**
+ * Locks the browser-only retained/partial move/delete fixture so the page
+ * window can only be reached through the single audited `testWindow`
+ * declaration inside `installMultiRootNativeIpcMock`'s addInitScript
+ * callback.
+ *
+ * `validateWorkspaceMoveFailureBrowserFixture` and
+ * `validateWorkspaceDeleteFailureBrowserFixture` already lock the
+ * failure-plan shapes inside that same callback, but their
+ * `forbiddenWindowControls` check only rejects property accesses whose
+ * receiver is literally `window` or `testWindow` after unwrapping property
+ * chains. An alias such as `const winAlias = window as unknown as
+ * Record<string, unknown>;` followed by
+ * `winAlias.__PLAIN_TEST_DELETE_FAILURE__ = (next) => { ... };` never
+ * mentions `window`/`testWindow` as a receiver, so it slips through
+ * untouched. This validator closes that gap directly: every value-position
+ * reference to a well-known way of reaching the global object (`window`,
+ * `globalThis`, `self`, `top`, `frames`, `document`, `eval`, `Function`)
+ * must be the single audited `const testWindow = window as unknown as
+ * Window & {...};` declaration, and every subsequent `testWindow` reference
+ * must live in one of the fixed statements that install its exposed test
+ * surface (no new alias, no new property).
+ *
+ * `parent` is deliberately left out of the forbidden-name set: the fixture
+ * legitimately shadows it with `const parent = resolveNode(...)` inside the
+ * local `resolveParent` helper, and every other occurrence of `parent` in
+ * the callback is the `.parent` property name (a non-value position this
+ * validator already ignores). This validator does no scope analysis, so a
+ * name with a legitimate local shadow cannot be added to a closed-world
+ * list without false positives; `window.parent`/`self.parent`-style access
+ * is still caught because `window` (and every other listed name) may only
+ * appear once, in the audited declaration.
+ *
+ * The `testWindow.__TAURI_INTERNALS__ = {...}` statement is recognised
+ * structurally (assignment target only) rather than by exact source text:
+ * its right-hand object literal is the entire IPC command switch, which
+ * contains a template literal with a `${command}` substitution, and the
+ * plain `ts.createScanner` token loop used for `normalizedText` elsewhere in
+ * this file does not call `reScanTemplateToken`, so it mis-tokenizes
+ * anything after that substitution as one runaway token. Pinning that
+ * mis-tokenized text would lock in a scanner artifact instead of the actual
+ * source, and would break on any unrelated reformatting inside the switch.
+ * The switch's own contents (case shapes, ordering, terminal branches) are
+ * independently locked by `validateWorkspaceMoveFailureBrowserFixture` and
+ * `validateWorkspaceDeleteFailureBrowserFixture`, so recognising this one
+ * statement by its assignment shape does not weaken coverage of this
+ * validator's actual concern: window/testWindow reachability.
+ */
+export function validateWorkspaceBrowserFixtureWindowAuthority(source) {
+	const FAILURE_MESSAGE =
+		"browser workspace fixture must reach the page window only through the audited testWindow surface";
+	const sourceFile = ts.createSourceFile(
+		"tests/browser/workspace.spec.ts",
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	const normalizedText = (node) => {
+		if (node === undefined) {
+			return undefined;
+		}
+		const scanner = ts.createScanner(
+			ts.ScriptTarget.Latest,
+			true,
+			ts.LanguageVariant.Standard,
+			node.getText(sourceFile),
+		);
+		let compact = "";
+		for (
+			let token = scanner.scan();
+			token !== ts.SyntaxKind.EndOfFileToken;
+			token = scanner.scan()
+		) {
+			compact += scanner.getTokenText();
+		}
+		return compact;
+	};
+	const collect = (root, predicate) => {
+		const matches = [];
+		function visit(node) {
+			if (predicate(node)) {
+				matches.push(node);
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(root);
+		return matches;
+	};
+
+	const installers = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "installMultiRootNativeIpcMock",
+	);
+	if (installers.length !== 1) {
+		return [FAILURE_MESSAGE];
+	}
+	const [installer] = installers;
+	const [onlyStatement] = installer.body?.statements ?? [];
+	const awaited =
+		installer.body?.statements.length === 1 &&
+		onlyStatement !== undefined &&
+		ts.isExpressionStatement(onlyStatement) &&
+		ts.isAwaitExpression(onlyStatement.expression)
+			? onlyStatement.expression.expression
+			: undefined;
+	const addInitScriptCall =
+		awaited !== undefined &&
+		ts.isCallExpression(awaited) &&
+		ts.isPropertyAccessExpression(awaited.expression) &&
+		ts.isIdentifier(awaited.expression.expression) &&
+		awaited.expression.expression.text === "page" &&
+		awaited.expression.name.text === "addInitScript" &&
+		awaited.arguments.length === 2
+			? awaited
+			: undefined;
+	const callback =
+		addInitScriptCall !== undefined &&
+		ts.isArrowFunction(addInitScriptCall.arguments[0])
+			? addInitScriptCall.arguments[0]
+			: undefined;
+	if (callback === undefined || !ts.isBlock(callback.body)) {
+		return [FAILURE_MESSAGE];
+	}
+	const body = callback.body;
+	const failures = [];
+
+	const isValuePositionIdentifier = (node) => {
+		const parent = node.parent;
+		if (parent === undefined) {
+			return true;
+		}
+		if (ts.isPropertyAccessExpression(parent) && parent.name === node) {
+			return false;
+		}
+		if (
+			(ts.isPropertySignature(parent) ||
+				ts.isPropertyAssignment(parent) ||
+				ts.isMethodSignature(parent) ||
+				ts.isMethodDeclaration(parent) ||
+				ts.isPropertyDeclaration(parent)) &&
+			parent.name === node
+		) {
+			return false;
+		}
+		if (
+			(ts.isBindingElement(parent) ||
+				ts.isParameter(parent) ||
+				ts.isVariableDeclaration(parent)) &&
+			parent.name === node
+		) {
+			return false;
+		}
+		if (ts.isBindingElement(parent) && parent.propertyName === node) {
+			return false;
+		}
+		if (ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent)) {
+			return false;
+		}
+		if (ts.isQualifiedName(parent) && parent.right === node) {
+			return false;
+		}
+		if (ts.isTypeReferenceNode(parent) || ts.isTypeQueryNode(parent)) {
+			return false;
+		}
+		if (
+			ts.isLabeledStatement(parent) ||
+			ts.isBreakOrContinueStatement(parent)
+		) {
+			return false;
+		}
+		return true;
+	};
+
+	const FORBIDDEN_GLOBAL_NAMES = new Set([
+		"window",
+		"globalThis",
+		"self",
+		"top",
+		"frames",
+		"document",
+		"eval",
+		"Function",
+	]);
+	const globalReferences = collect(
+		body,
+		(node) =>
+			ts.isIdentifier(node) &&
+			FORBIDDEN_GLOBAL_NAMES.has(node.text) &&
+			isValuePositionIdentifier(node),
+	);
+	const windowReferences = globalReferences.filter(
+		(node) => node.text === "window",
+	);
+	const otherGlobalReferences = globalReferences.filter(
+		(node) => node.text !== "window",
+	);
+	if (otherGlobalReferences.length !== 0) {
+		failures.push(FAILURE_MESSAGE);
+	}
+
+	const unwrapAsExpressions = (node) => {
+		let current = node;
+		while (
+			ts.isAsExpression(current.parent) &&
+			current.parent.expression === current
+		) {
+			current = current.parent;
+		}
+		return current;
+	};
+	let windowDeclarationIsAudited = false;
+	if (windowReferences.length === 1) {
+		const [windowReference] = windowReferences;
+		const outer = unwrapAsExpressions(windowReference);
+		windowDeclarationIsAudited =
+			outer !== windowReference &&
+			ts.isVariableDeclaration(outer.parent) &&
+			outer.parent.initializer === outer &&
+			ts.isIdentifier(outer.parent.name) &&
+			outer.parent.name.text === "testWindow";
+	}
+	if (windowReferences.length !== 1 || !windowDeclarationIsAudited) {
+		failures.push(FAILURE_MESSAGE);
+	}
+
+	const ALLOWED_TEST_WINDOW_STATEMENTS = new Set([
+		"consttestWindow=windowasunknownasWindow&{__PLAIN_TEST_TAURI_CALLS__:typeofcalls;__PLAIN_TEST_MULTI_ROOT_VERSION_TRANSITIONS__:typeofversionTransitions;__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__:typeofwatchExchanges;__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGE_TIMINGS__:typeofwatchExchangeTimings;__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_TIMINGS__:typeofexternalCreateTimings;__PLAIN_TEST_MULTI_ROOT_EMIT_WAKE__():number;__PLAIN_TEST_MULTI_ROOT_WATCH_LISTENER_COUNT__():number;__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__(rootId:string,name:string,emitWake:boolean,):number;__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_AFTER_NEXT_SYNC__(rootId:string,name:string,emitWake:boolean,):Promise<number>;__TAURI_EVENT_PLUGIN_INTERNALS__:{unregisterListener():void;};__TAURI_INTERNALS__:{invoke(command:string,args?:Record<string,unknown>|Uint8Array,):Promise<unknown>;transformCallback(callback?:(payload:unknown)=>void,once?:boolean,):number;unregisterCallback(callbackId:number):void;};};",
+		"testWindow.__PLAIN_TEST_TAURI_CALLS__=calls;",
+		"testWindow.__PLAIN_TEST_MULTI_ROOT_VERSION_TRANSITIONS__=versionTransitions;",
+		"testWindow.__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__=watchExchanges;",
+		"testWindow.__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGE_TIMINGS__=watchExchangeTimings;",
+		"testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_TIMINGS__=externalCreateTimings;",
+		"testWindow.__PLAIN_TEST_MULTI_ROOT_EMIT_WAKE__=emitWorkspaceWatchWake;",
+		'testWindow.__PLAIN_TEST_MULTI_ROOT_WATCH_LISTENER_COUNT__=()=>[...eventHandlers.values()].filter(({event})=>event==="plain://workspace-watch-wake",).length;',
+		"testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__=externalCreate;",
+		'testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_AFTER_NEXT_SYNC__=(rootId,name,emitWake,)=>{if(deferredExternalCreate!==undefined){thrownewError("A multi-root browser test change is already queued.",);}if(!/^[A-Za-z0-9._-]+$/u.test(name)){thrownewTypeError("Invalid multi-root browser test entry.");}if(typeofemitWake!=="boolean"){thrownewTypeError("Invalid multi-root browser test wake mode.");}returnnewPromise<number>((resolve,reject)=>{deferredExternalCreate=Object.freeze({rootId,name,emitWake,resolve,reject,});});};',
+		"testWindow.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener(){},};",
+	]);
+	const isTauriInternalsAssignmentStatement = (statement) =>
+		ts.isExpressionStatement(statement) &&
+		ts.isBinaryExpression(statement.expression) &&
+		statement.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+		ts.isPropertyAccessExpression(statement.expression.left) &&
+		ts.isIdentifier(statement.expression.left.expression) &&
+		statement.expression.left.expression.text === "testWindow" &&
+		statement.expression.left.name.text === "__TAURI_INTERNALS__" &&
+		ts.isObjectLiteralExpression(statement.expression.right);
+
+	const testWindowReferences = collect(
+		body,
+		(node) => ts.isIdentifier(node) && node.text === "testWindow",
+	);
+	let tauriInternalsAssignmentReferences = 0;
+	for (const reference of testWindowReferences) {
+		let statement = reference;
+		while (statement.parent !== body) {
+			statement = statement.parent;
+		}
+		if (isTauriInternalsAssignmentStatement(statement)) {
+			tauriInternalsAssignmentReferences += 1;
+			continue;
+		}
+		if (!ALLOWED_TEST_WINDOW_STATEMENTS.has(normalizedText(statement))) {
+			failures.push(FAILURE_MESSAGE);
+		}
+	}
+	if (tauriInternalsAssignmentReferences !== 1) {
+		failures.push(FAILURE_MESSAGE);
 	}
 
 	return [...new Set(failures)];
@@ -12484,4 +19111,1356 @@ export function validateWorkspaceVersionedWriteBoundary(
 		...validateVersionedWriteRustBoundary(rustSources),
 		...validateVersionedWriteTypeScriptBoundary(appSources),
 	];
+}
+
+/**
+ * `ViewPane`'s own base constructor signature (`options: IViewPaneOptions`
+ * followed by these nine injected services, in this exact order), as it
+ * appears — byte-for-byte identical — at the head of every hand-written
+ * `app/` subclass audited for this contract
+ * (`plain-scm-view.ts`/`plain-search-view.ts`/`plain-git-graph-view.ts`/
+ * `plain-git-stash-view.ts`/`plain-git-worktree-view.ts`/
+ * `plain-git-history-view.ts`/`plain-terminal-view.ts`). It is hardcoded
+ * here, rather than parsed out of `@codingame/monaco-vscode-api` itself,
+ * because that package is vendor code outside this repo's own `app/`
+ * source set — the same reason every other args/DTO-shape contract in this
+ * file freezes an exact expected constant instead of deriving it from a
+ * dependency. If a future upgrade of the package ever changes `ViewPane`'s
+ * own constructor, every subclass's `super(...)` call already fails to
+ * compile before this contract would ever need to notice.
+ */
+const VIEW_PANE_BASE_INJECTED_SERVICE_TYPES = Object.freeze([
+	"IKeybindingService",
+	"IContextMenuService",
+	"IConfigurationService",
+	"IContextKeyService",
+	"IViewDescriptorService",
+	"IInstantiationService",
+	"IOpenerService",
+	"IThemeService",
+	"IHoverService",
+]);
+
+/**
+ * Locks the invariant that `F090` S4 and S6 each independently paid for in
+ * real, hard-to-diagnose production failures: every `app/` class that
+ * extends `ViewPane` must, in its own file, redeclare a DI decorator for
+ * *every* one of its own constructor parameters beyond the leading
+ * `options: IViewPaneOptions` — not only the parameters it adds beyond
+ * `ViewPane`'s own base nine.
+ *
+ * The reason a *partial* declaration is exactly as dangerous as *no*
+ * declaration at all: `@codingame/monaco-vscode-api`'s decorator storage
+ * (`instantiation.js`) creates a **fresh** `$di$dependencies` array the
+ * first time any decorator is ever called on a given class, rather than
+ * appending to whatever array `ViewPane`'s own prototype chain would
+ * otherwise make reachable. So the instant a subclass calls a decorator on
+ * itself even once, every one of its *other* injected parameters that
+ * weren't also redeclared silently reverts to `undefined` at real
+ * construction time — no compile error, no thrown exception at
+ * registration time, nothing a Rust fixture or a DOM-free unit test could
+ * ever observe.
+ *
+ * Two real incidents, both discovered only once a first real Playwright
+ * click finally exercised the broken view (`F090` S6's own retrospective):
+ *
+ * - **`F090` S4** — `PlainGitStashView` declared decorators only for the
+ *   two services it adds beyond the base nine (indices 10/11), leaving
+ *   indices 1-9 completely undeclared for this class. Because the base
+ *   nine were then missing, `IInstantiationService.createInstance` failed
+ *   to construct not just this view but *every sibling pane in the same
+ *   Source Control view container* — a single Playwright run fanned out
+ *   into 16 failing cases with none of their failure messages mentioning
+ *   stash at all, making the true root cause nearly unreadable from the
+ *   symptoms alone.
+ * - **`F090` S6** — `plain-git-history-view.ts` had never declared *any*
+ *   decorator at all since the view was first written in `F090` S1. This
+ *   one happened not to break sibling views (an entirely undeclared
+ *   subclass still inherits `ViewPane`'s own correct nine-entry array
+ *   unmodified), but this class's own two extra parameters
+ *   (`workspaceContextService`/`editorService`) were `undefined` on every
+ *   real construction from day one — and the "Show File History" /
+ *   "Show Line History" buttons this view exposes are also the *only*
+ *   entry point into `F090` S2's commit-detail multi-diff feature, which
+ *   therefore had never been reachable in a real Workbench either, for an
+ *   entire feature slice, until this defect was finally found.
+ *
+ * Both failures were invisible to every gate that ran at the time (Rust
+ * command fixtures, DOM-free frontend unit tests) because both only
+ * exercise pure logic, never a real `IInstantiationService.createInstance`
+ * call through a real Workbench. `F100` is about to add four or more new
+ * `ViewPane` subclasses (call stack/variables/watch/REPL); this contract
+ * exists so each of those starts out structurally incapable of repeating
+ * either failure mode, from the very first line, rather than depending on
+ * someone remembering to write a Playwright click for it eventually.
+ *
+ * Detection, per subclass:
+ *
+ * 1. Identify "extends `ViewPane`" by resolving, per file, the *local*
+ *    name the vendor `ViewPane` export is imported under (handles a
+ *    renaming import alias, `import { ViewPane as VP } from ...` — no
+ *    file in this repo currently renames it, but nothing here assumes
+ *    otherwise) from the same `.../views/viewPane` module every real
+ *    subclass imports it from, then matching class heritage clauses
+ *    against that local name.
+ * 2. A subclass with no constructor of its own adds no parameters and
+ *    therefore has nothing that could be under-declared; it is skipped.
+ * 3. Otherwise, walk the same source file (decorator declarations always
+ *    live in the same file as the class, immediately after
+ *    `Object.freeze(ClassName.prototype)` in every audited view) for
+ *    expressions of the shape `SomeService(ClassName, undefined, N)` —
+ *    this repo's actual, real declaration syntax (a plain function call
+ *    using the legacy parameter-decorator signature, *not* `@SomeService`
+ *    applied to a constructor parameter — confirmed by reading every
+ *    `extends ViewPane` file in `app/features/` before writing this
+ *    contract).  The count of such calls naming this class, and the set
+ *    of indices they declare, must be exactly `{1, 2, ..., N}` where `N`
+ *    is the constructor's own parameter count minus one (`options` itself
+ *    is never decorated in any audited file — it is supplied positionally
+ *    by the instantiation caller, not resolved by DI).
+ * 4. The sole exception: a subclass with **zero** of its own declarations
+ *    is still accepted, but *only* if its own injected parameter list
+ *    (everything after `options`) is structurally identical, name for
+ *    name, in order, to `VIEW_PANE_BASE_INJECTED_SERVICE_TYPES` — i.e. it
+ *    adds nothing beyond `ViewPane`'s own base signature, so the array it
+ *    silently inherits is already exactly correct for its own needs. This
+ *    is `PlainGitGraphView`'s real, currently-passing shape today: it is
+ *    the one audited view that adds no services beyond the base nine, and
+ *    is therefore the one place in this codebase where relying on
+ *    inheritance is actually sound rather than a repeat of the S6 defect.
+ *    The moment such a class ever adds even one more parameter without
+ *    also fully redeclaring, this exception stops applying and the
+ *    contract fails it — exactly the transition that silently broke
+ *    `plain-git-history-view.ts` in `F090` S1.
+ *
+ * Known scope limit: this only follows a heritage clause naming `ViewPane`
+ * directly. If a future change introduces an intermediate hand-written
+ * base class between `ViewPane` and a leaf view (e.g. a shared
+ * `PlainDebugViewBase`), this contract will not automatically walk that
+ * indirection to classify the leaf as a `ViewPane` descendant — no file in
+ * this repo does this today, so it is not a gap in current coverage, but
+ * it is one to close if `F100` (or later work) ever introduces such a
+ * base class.
+ */
+export function validateViewPaneDependencyDecoratorBoundary(appSources) {
+	const failures = [];
+	for (const { relativePath, source } of appSources) {
+		const normalizedPath = relativePath.replaceAll("\\", "/");
+		if (!normalizedPath.endsWith(".ts") && !normalizedPath.endsWith(".tsx")) {
+			continue;
+		}
+		const sourceFile = ts.createSourceFile(
+			normalizedPath,
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			normalizedPath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+		);
+
+		let viewPaneLocalName;
+		for (const statement of sourceFile.statements) {
+			if (
+				ts.isImportDeclaration(statement) &&
+				ts.isStringLiteral(statement.moduleSpecifier) &&
+				statement.moduleSpecifier.text.endsWith("/viewPane") &&
+				statement.importClause?.namedBindings !== undefined &&
+				ts.isNamedImports(statement.importClause.namedBindings)
+			) {
+				for (const element of statement.importClause.namedBindings.elements) {
+					if ((element.propertyName ?? element.name).text === "ViewPane") {
+						viewPaneLocalName = element.name.text;
+					}
+				}
+			}
+		}
+		if (viewPaneLocalName === undefined) {
+			continue;
+		}
+
+		function visit(node) {
+			if (
+				ts.isClassDeclaration(node) &&
+				node.name !== undefined &&
+				node.heritageClauses?.some(
+					(clause) =>
+						clause.token === ts.SyntaxKind.ExtendsKeyword &&
+						clause.types.some(
+							(type) =>
+								ts.isIdentifier(type.expression) &&
+								type.expression.text === viewPaneLocalName,
+						),
+				)
+			) {
+				failures.push(
+					...viewPaneSubclassDecoratorFailures(
+						node,
+						sourceFile,
+						normalizedPath,
+					),
+				);
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(sourceFile);
+	}
+	return [...new Set(failures)];
+}
+
+function viewPaneSubclassDecoratorFailures(
+	classNode,
+	sourceFile,
+	normalizedPath,
+) {
+	const className = classNode.name.text;
+	const constructor = classNode.members.find(
+		(member) =>
+			ts.isConstructorDeclaration(member) && member.body !== undefined,
+	);
+	if (constructor === undefined) {
+		return [];
+	}
+	const ctorParamCount = constructor.parameters.length;
+	if (ctorParamCount === 0) {
+		return [
+			`${className} (${normalizedPath}) extends ViewPane but declares a constructor with no parameters — it must still accept ViewPane's own options/base-service parameters`,
+		];
+	}
+	const requiredDecoratorCount = ctorParamCount - 1;
+
+	const declaredIndexes = new Set();
+	function visitForDecorators(node) {
+		if (
+			ts.isCallExpression(node) &&
+			ts.isIdentifier(node.expression) &&
+			node.arguments.length === 3 &&
+			ts.isIdentifier(node.arguments[0]) &&
+			node.arguments[0].text === className &&
+			ts.isIdentifier(node.arguments[1]) &&
+			node.arguments[1].text === "undefined" &&
+			ts.isNumericLiteral(node.arguments[2])
+		) {
+			declaredIndexes.add(node.arguments[2].text);
+		}
+		ts.forEachChild(node, visitForDecorators);
+	}
+	visitForDecorators(sourceFile);
+
+	const expectedIndexes = Array.from(
+		{ length: requiredDecoratorCount },
+		(_, index) => String(index + 1),
+	);
+	const declaredIndexesMatchExactly =
+		declaredIndexes.size === expectedIndexes.length &&
+		expectedIndexes.every((index) => declaredIndexes.has(index));
+
+	if (declaredIndexesMatchExactly) {
+		return [];
+	}
+
+	if (declaredIndexes.size === 0) {
+		const injectedParamTypeNames = constructor.parameters
+			.slice(1)
+			.map((param) =>
+				param.type !== undefined &&
+				ts.isTypeReferenceNode(param.type) &&
+				ts.isIdentifier(param.type.typeName)
+					? param.type.typeName.text
+					: undefined,
+			);
+		const matchesViewPaneBaseExactly =
+			injectedParamTypeNames.length ===
+				VIEW_PANE_BASE_INJECTED_SERVICE_TYPES.length &&
+			injectedParamTypeNames.every(
+				(typeName, index) =>
+					typeName === VIEW_PANE_BASE_INJECTED_SERVICE_TYPES[index],
+			);
+		if (matchesViewPaneBaseExactly) {
+			return [];
+		}
+	}
+
+	return [
+		`${className} (${normalizedPath}) declares ${declaredIndexes.size} of its own DI decorator(s) but its constructor has ${ctorParamCount} parameter(s) (${requiredDecoratorCount} injectable beyond the leading options argument) — every parameter this class's own constructor accepts beyond \`options\` must be redeclared as this class's own decorator (\`SomeService(${className}, undefined, <index>)\`, indices 1 through ${requiredDecoratorCount}), because \`@codingame/monaco-vscode-api\`'s decorator storage replaces — rather than appends to — the inherited dependency array the first time any decorator is ever called on a class. A partial or missing declaration silently leaves the undeclared parameters \`undefined\` at real construction time: this is exactly how F090 S4's PlainGitStashView (declared only its own two new services, wiping the nine base ViewPane parameters and breaking every sibling view in the same Source Control container) and F090 S6's PlainGitHistoryView (declared none at all, silently leaving its own two extra parameters undefined and disabling the commit-detail multi-diff feature since its introduction) both went undetected until a real end-to-end click finally exercised the broken view.`,
+	];
+}
+
+// ---------------------------------------------------------------------
+// F100 S0 (docs/research/2026-07-28-generic-dap.md): the `debug` domain's
+// framing state machine + hardened adapter-spawn primitive. Three new AST
+// contracts, per that document's "需要新增的 AST 契约清单" items 2/3/5 (items
+// 1/4/6 are later-slice work — S1's confirmation gate and command registry,
+// and the separately-landed harness-wide ViewPane decorator contract above).
+// ---------------------------------------------------------------------
+
+/**
+ * Shared prefix check for `F100` S1's trust-*then*-confirmation double gate:
+ * builds a whitespace-insensitive regex matching the exact three-statement
+ * prefix `trust.require_trusted(workspace, window_label).await?;` → `let
+ * subject = descriptor.confirmation_subject(AdapterTransportKind::<variant>);`
+ * → `confirmation.require_confirmed(workspace, window_label,
+ * &subject).await?;`, and reports which of the two gates (or their ordering)
+ * is missing. Shared by [`validateDebugAdapterSpawnBoundary`] (`exec.rs`'s
+ * `spawn_adapter`, `variant: "Stdio"`) and
+ * [`validateDebugAdapterConnectBoundary`] (`tcp.rs`'s `connect_adapter`,
+ * `variant: "Tcp"`) rather than duplicated, since both functions share this
+ * exact shape by design (see either module's own doc comment for why
+ * connecting out is gated identically to spawning).
+ */
+function validateTrustThenConfirmationGatePrefix(body, transportVariant) {
+	const trustCheckFirst =
+		/^trust\s*\.\s*require_trusted\s*\(\s*workspace\s*,\s*window_label\s*\)\s*\.\s*await\s*\?\s*;/.test(
+			body,
+		);
+	if (!trustCheckFirst) {
+		return "must call trust.require_trusted(workspace, window_label).await? as its literal first statement, before any spawn/connect-related identifier appears in the function body";
+	}
+	const confirmationCheckSecond = new RegExp(
+		`^trust\\s*\\.\\s*require_trusted\\s*\\(\\s*workspace\\s*,\\s*window_label\\s*\\)\\s*\\.\\s*await\\s*\\?\\s*;` +
+			`\\s*let\\s+subject\\s*=\\s*descriptor\\s*\\.\\s*confirmation_subject\\s*\\(\\s*AdapterTransportKind\\s*::\\s*${transportVariant}\\s*\\)\\s*;` +
+			`\\s*confirmation\\s*\\.\\s*require_confirmed\\s*\\(\\s*workspace\\s*,\\s*window_label\\s*,\\s*&subject\\s*\\)\\s*\\.\\s*await\\s*\\?\\s*;`,
+	).test(body);
+	if (!confirmationCheckSecond) {
+		return `must call confirmation.require_confirmed(workspace, window_label, &subject).await? (subject built via descriptor.confirmation_subject(AdapterTransportKind::${transportVariant})) as its literal second statement, immediately after the trust check`;
+	}
+	return undefined;
+}
+
+/**
+ * Locks `debug/exec.rs`'s `spawn_adapter` function body's first two
+ * statements (after argument binding) to be, in order,
+ * `trust.require_trusted(workspace, window_label).await?;` then
+ * `confirmation.require_confirmed(...)` — the `F100` S1 trust-then-
+ * confirmation double gate ADR 0003 requires (workspace trust alone is not
+ * enough; a trusted workspace still requires first-run confirmation of the
+ * exact `(command, args, transport)` triple before this function may touch
+ * `Command`). `F100` S0 originally locked only the trust check; this is the
+ * S1 extension, generalized via [`validateTrustThenConfirmationGatePrefix`]
+ * so [`validateDebugAdapterConnectBoundary`] can lock the identical shape for
+ * `tcp.rs`'s `connect_adapter`. Isolates the function body first via
+ * `rustFunctionBody` (comments-only source, so string literal content —
+ * irrelevant here — stays visible, matching this helper's existing contract)
+ * rather than regexing the whole file, so either check appearing anywhere
+ * else (e.g. a doc comment, or a different function) can never produce a
+ * false pass.
+ */
+export function validateDebugAdapterSpawnBoundary(rustSources) {
+	const execSource = findRustSource(rustSources, "src-tauri/src/debug/exec.rs");
+	if (execSource === undefined) {
+		return ["debug adapter spawn boundary requires debug/exec.rs"];
+	}
+	const commentsOnly = stripRustCommentsOnly(execSource);
+	const spawnAdapter = rustFunctionBody(commentsOnly, "spawn_adapter");
+	if (spawnAdapter === undefined) {
+		return ["debug/exec.rs must define spawn_adapter"];
+	}
+	const body = spawnAdapter.body
+		.replace(/^\{/, "")
+		.replace(/\}$/, "")
+		.trimStart();
+	const failure = validateTrustThenConfirmationGatePrefix(body, "Stdio");
+	if (failure !== undefined) {
+		return [`debug/exec.rs spawn_adapter ${failure}`];
+	}
+	return [];
+}
+
+/**
+ * The connect-side sibling of [`validateDebugAdapterSpawnBoundary`]: locks
+ * `debug/tcp.rs`'s `connect_adapter` function body to the identical
+ * trust-then-confirmation double-gate prefix (`AdapterTransportKind::Tcp`
+ * rather than `::Stdio`) — "对任意 host:port 说 DAP" 和 "spawn 任意程序" 是同
+ * 等级的信任委托 (`docs/research/2026-07-28-generic-dap.md`'s "主导会话裁定"
+ * item 3), so this function must be gated exactly as strictly as
+ * `spawn_adapter`, not merely by trust alone.
+ */
+export function validateDebugAdapterConnectBoundary(rustSources) {
+	const tcpSource = findRustSource(rustSources, "src-tauri/src/debug/tcp.rs");
+	if (tcpSource === undefined) {
+		return ["debug adapter connect boundary requires debug/tcp.rs"];
+	}
+	const commentsOnly = stripRustCommentsOnly(tcpSource);
+	const connectAdapter = rustFunctionBody(commentsOnly, "connect_adapter");
+	if (connectAdapter === undefined) {
+		return ["debug/tcp.rs must define connect_adapter"];
+	}
+	const body = connectAdapter.body
+		.replace(/^\{/, "")
+		.replace(/\}$/, "")
+		.trimStart();
+	const failure = validateTrustThenConfirmationGatePrefix(body, "Tcp");
+	if (failure !== undefined) {
+		return [`debug/tcp.rs connect_adapter ${failure}`];
+	}
+	return [];
+}
+
+/**
+ * `F100` S5 — the third sibling of [`validateDebugAdapterSpawnBoundary`]/
+ * [`validateDebugAdapterConnectBoundary`]: locks `debug/exec.rs`'s
+ * `spawn_adapter_as_tcp_companion` (the `Tcp`-confirmed companion-spawn
+ * primitive `debug::mod`'s own module doc names as S2's open recommendation,
+ * now built) to the identical trust-then-confirmation double-gate prefix —
+ * except keyed on `AdapterTransportKind::Tcp`, never `::Stdio`. This is the
+ * mechanical lock proving the one line that actually matters (which
+ * transport variant the confirmation subject is built with) can never
+ * silently regress back to `Stdio` — which would reintroduce exactly the
+ * confirmation-identity-confusion trap this whole primitive exists to avoid.
+ */
+export function validateDebugTcpCompanionSpawnBoundary(rustSources) {
+	const execSource = findRustSource(rustSources, "src-tauri/src/debug/exec.rs");
+	if (execSource === undefined) {
+		return ["debug tcp companion spawn boundary requires debug/exec.rs"];
+	}
+	const commentsOnly = stripRustCommentsOnly(execSource);
+	const spawnCompanion = rustFunctionBody(
+		commentsOnly,
+		"spawn_adapter_as_tcp_companion",
+	);
+	if (spawnCompanion === undefined) {
+		return ["debug/exec.rs must define spawn_adapter_as_tcp_companion"];
+	}
+	const body = spawnCompanion.body
+		.replace(/^\{/, "")
+		.replace(/\}$/, "")
+		.trimStart();
+	const failure = validateTrustThenConfirmationGatePrefix(body, "Tcp");
+	if (failure !== undefined) {
+		return [`debug/exec.rs spawn_adapter_as_tcp_companion ${failure}`];
+	}
+	return [];
+}
+
+/**
+ * Locks `debug/exec.rs`'s `spawn_adapter_sync` function body — the function
+ * that actually builds and spawns the child process — to the fixed
+ * `Command::new(&descriptor.command)` / `.args(&descriptor.args)`
+ * construction shape (both the program and the args must come from field
+ * access, never a literal or a formatted string), and forbids the same two
+ * mechanical red flags `validateTerminalRustBoundary` already polices for
+ * `git`/`terminal` (a shell-interpreter `Command::new` literal, an
+ * `.arg("-c")`/`.args([...,"-c",...])` literal), plus a `debug`-domain-
+ * specific one: no `format!`/string-concatenation may feed into the spawned
+ * command at all, even though (unlike every `GIT_*_ARGS` constant) the
+ * *content* of `descriptor.command`/`descriptor.args` here comes from
+ * caller-supplied configuration, not a fixed list this codebase writes —
+ * only the *construction mechanism* is fixed and audited here, matching
+ * `docs/research/2026-07-28-generic-dap.md`'s own "决策 1" reasoning for why
+ * that distinction is intentional, not a gap.
+ */
+export function validateDebugSpawnConstructionShape(rustSources) {
+	const failures = [];
+	const execSource = findRustSource(rustSources, "src-tauri/src/debug/exec.rs");
+	if (execSource === undefined) {
+		return ["debug spawn construction boundary requires debug/exec.rs"];
+	}
+	const commentsOnly = stripRustCommentsOnly(execSource);
+	const spawnAdapterSync = rustFunctionBody(commentsOnly, "spawn_adapter_sync");
+	if (spawnAdapterSync === undefined) {
+		return ["debug/exec.rs must define spawn_adapter_sync"];
+	}
+	const body = spawnAdapterSync.body;
+	if (GIT_EXEC_SHELL_INTERPRETER_PATTERN.test(body)) {
+		failures.push(
+			"debug/exec.rs spawn_adapter_sync must not spawn a shell interpreter — it may only invoke the caller-configured adapter executable directly",
+		);
+	}
+	if (/\bformat!\s*\(/.test(body)) {
+		failures.push(
+			"debug/exec.rs spawn_adapter_sync must not build the spawned program or its arguments via format!/string concatenation",
+		);
+	}
+	if (/\.args?\s*\(\s*\[?\s*"-c"/.test(body)) {
+		failures.push(
+			'debug/exec.rs spawn_adapter_sync must not pass a shell "-c" argument',
+		);
+	}
+	if (!/Command::new\s*\(\s*&descriptor\.command\s*\)/.test(body)) {
+		failures.push(
+			"debug/exec.rs spawn_adapter_sync must construct the child process via Command::new(&descriptor.command), never a literal or formatted program name",
+		);
+	}
+	if (!/\.args\s*\(\s*&descriptor\.args\s*\)/.test(body)) {
+		failures.push(
+			"debug/exec.rs spawn_adapter_sync must pass argv via .args(&descriptor.args), never a literal or formatted argument list",
+		);
+	}
+	return failures;
+}
+
+const DEBUG_FRAMING_BOUNDS_LIMITS = Object.freeze([
+	["MAX_DAP_MESSAGE_BYTES", 67_108_864, "usize"],
+	["MAX_DAP_HEADER_BYTES", 8_192, "usize"],
+]);
+
+/**
+ * Locks `debug/framing.rs`'s two message/header size ceilings to their
+ * audited exact values — mirroring `validateSearchFileBudgetConstants`'s
+ * `findWorkspaceCopyLimitDeclarations`/`evaluateSmallRustIntegerExpression`
+ * pattern exactly — and additionally cross-checks that each constant is
+ * actually *referenced* somewhere in the file beyond its own declaration
+ * line (a plain occurrence count greater than one), matching this file's
+ * existing lightweight-but-real style for "the constant is actually wired
+ * up, not merely declared and forgotten" (the same spirit as
+ * `validateTerminalRustBoundary`'s `TERMINAL_ENV_PASSTHROUGH_NAMES` lock,
+ * which likewise fails the whole file rather than just checking the
+ * constant exists in isolation).
+ */
+export function validateDebugFramingBounds(rustSources) {
+	const failures = [];
+	const framingSource = findRustSource(
+		rustSources,
+		"src-tauri/src/debug/framing.rs",
+	);
+	if (framingSource === undefined) {
+		return ["debug framing boundary requires debug/framing.rs"];
+	}
+	const executableSource = stripRustCommentsAndLiterals(framingSource);
+	for (const [name, value, integerType] of DEBUG_FRAMING_BOUNDS_LIMITS) {
+		const declarations = findWorkspaceCopyLimitDeclarations(
+			executableSource,
+			name,
+			integerType,
+		);
+		if (
+			declarations.length !== 1 ||
+			evaluateSmallRustIntegerExpression(declarations[0]) !== value
+		) {
+			failures.push(
+				`debug/framing.rs must define exactly one ${name}: ${integerType} = ${value}`,
+			);
+			continue;
+		}
+		const occurrences = executableSource.split(name).length - 1;
+		if (occurrences < 2) {
+			failures.push(
+				`debug/framing.rs must reference ${name} in its decoder logic, not just declare it`,
+			);
+		}
+	}
+	return failures;
+}
+
+// ---------------------------------------------------------------------
+// F100 S1 — first-run confirmation gate's Tauri command surface, mirroring
+// TRUST_COMMAND_CONTRACTS/TERMINAL_COMMAND_CONTRACTS's exact-signature-and-
+// body pinning technique.
+// ---------------------------------------------------------------------
+
+const DEBUG_COMMAND_CONTRACTS = Object.freeze([
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_adapter_confirmation_state",
+		parameters:
+			"window:WebviewWindow,confirmation:State<'_,ConfirmationService>,workspace:State<'_,WorkspaceService>,request:AdapterConfirmationSubject",
+		returnType: "->Result<DebugAdapterConfirmationState,CommandError>",
+		body: "letconfirmed=confirmation.inner().is_confirmed(workspace.inner(),window.label(),&request).await?;Ok(DebugAdapterConfirmationState::new(confirmed))",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_adapter_confirmation_grant",
+		parameters:
+			"window:WebviewWindow,confirmation:State<'_,ConfirmationService>,workspace:State<'_,WorkspaceService>,request:AdapterConfirmationSubject",
+		returnType: "->Result<(),CommandError>",
+		body: "confirmation.inner().grant(workspace.inner(),window.label(),&request).await",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_adapter_confirmation_revoke",
+		parameters:
+			"window:WebviewWindow,confirmation:State<'_,ConfirmationService>,workspace:State<'_,WorkspaceService>,request:AdapterConfirmationSubject",
+		returnType: "->Result<(),CommandError>",
+		body: "confirmation.inner().revoke(workspace.inner(),window.label(),&request).await",
+	},
+	// `F100` S2 — the real session-lifecycle surface (`debug/mod.rs`'s own
+	// module doc), completing the command set S1's `commands.rs` module doc
+	// already named as what S2 would add.
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_launch",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,confirmation:State<'_,ConfirmationService>,request:DebugSessionStartRequest",
+		returnType: "->Result<DebugSessionStartResult,CommandError>",
+		body: "start_debug_session(window,debug_sessions,trust,workspace,confirmation,request,LaunchRequestKind::Launch,).await",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_attach",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,confirmation:State<'_,ConfirmationService>,request:DebugSessionStartRequest",
+		returnType: "->Result<DebugSessionStartResult,CommandError>",
+		body: "start_debug_session(window,debug_sessions,trust,workspace,confirmation,request,LaunchRequestKind::Attach,).await",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_disconnect",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugSessionIdRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "debug_sessions.inner().disconnect(window.label(),request.into_parts()).await",
+	},
+	// `F100` S3 — the interactive debugging surface (`debug/mod.rs`'s own
+	// module doc). These five were registered in `generate_handler!` and
+	// shipped as part of S3's own delivery, but were never actually added to
+	// this contract array at the time — a real gap this slice (`F100` S4)
+	// discovered while extending this same array for its own five new
+	// commands, and backfills here rather than leaving it open, per this
+	// project's "如实核实,不能只凭自述结论" discipline.
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_set_breakpoints",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugSetBreakpointsRequest",
+		returnType: "->Result<DebugSetBreakpointsResult,CommandError>",
+		body: "letquery=request.into_parts()?;letbody=debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments,).await?;dto::parse_set_breakpoints_response(&body)",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_stack_trace",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugStackTraceRequest",
+		returnType: "->Result<DebugStackTraceResult,CommandError>",
+		body: "letquery=request.into_parts();letbody=debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments,).await?;dto::parse_stack_trace_response(&body)",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_scopes",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugScopesRequest",
+		returnType: "->Result<DebugScopesResult,CommandError>",
+		body: "letquery=request.into_parts();letbody=debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments).await?;dto::parse_scopes_response(&body)",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_variables",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugVariablesRequest",
+		returnType: "->Result<DebugVariablesResult,CommandError>",
+		body: "letquery=request.into_parts();letbody=debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments,).await?;dto::parse_variables_response(&body)",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_evaluate",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugEvaluateRequest",
+		returnType: "->Result<DebugEvaluateResult,CommandError>",
+		body: "letquery=request.into_parts()?;letbody=debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments,).await?;dto::parse_evaluate_response(&body)",
+	},
+	// `F100` S4 — execution/step control (`debug/commands.rs`'s own module
+	// doc, "`F100` S4's five step-control commands" section).
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_continue",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugThreadRequest",
+		returnType: "->Result<DebugContinueResult,CommandError>",
+		body: "letquery=request.into_parts();letbody=debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments,).await?;dto::parse_continue_response(&body)",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_next",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugThreadRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "letquery=request.into_parts();debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments).await?;Ok(())",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_step_in",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugThreadRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "letquery=request.into_parts();debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments).await?;Ok(())",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_step_out",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugThreadRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "letquery=request.into_parts();debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments).await?;Ok(())",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_pause",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugThreadRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "letquery=request.into_parts();debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments).await?;Ok(())",
+	},
+	// `F100` S5 — the `output`-event backpressure ack (`debug/commands.rs`'s
+	// own module doc, "`F100` S5" section).
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_output_ack",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugOutputAckRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(session_id,sequence)=request.into_parts();debug_sessions.inner().ack_output(window.label(),session_id,sequence).await;Ok(())",
+	},
+]);
+
+/**
+ * `F100` S1's `DEBUG_COMMAND_CONTRACTS` registration lock — structurally
+ * identical to `validateTrustTerminalCommandRegistration` (exact
+ * parameters/returnType/body pinning per command, plus a single audited
+ * `generate_handler!` registration each), scoped to the three
+ * `debug_adapter_confirmation_*` commands this slice adds. A fourth
+ * `debug_*` command (`debug_launch`, etc.) silently added, removed, renamed
+ * or rewired to a different service method fails this check the moment it is
+ * added to `DEBUG_COMMAND_CONTRACTS` without a matching, audited definition —
+ * mirroring the exact discipline `commands.rs`'s own module doc requires
+ * ("read this comment before adding a fourth").
+ */
+export function validateDebugCommandRegistration(rustSources) {
+	const failures = [];
+	const libSource = findRustSource(rustSources, "src-tauri/src/lib.rs");
+	const sourceCache = new Map();
+
+	for (const contract of DEBUG_COMMAND_CONTRACTS) {
+		if (!sourceCache.has(contract.file)) {
+			sourceCache.set(
+				contract.file,
+				findRustSource(rustSources, contract.file),
+			);
+		}
+		const fileSource = sourceCache.get(contract.file);
+		if (fileSource === undefined) {
+			failures.push(`command registration boundary requires ${contract.file}`);
+			continue;
+		}
+		const executableSource = stripRustCommentsAndLiterals(fileSource);
+		const commands = extractAuditedTauriCommands(
+			executableSource,
+			contract.name,
+		);
+		if (commands.length !== 1) {
+			failures.push(
+				`${contract.file} must define exactly one audited ${contract.name} Tauri command`,
+			);
+			continue;
+		}
+		const [command] = commands;
+		const normalizedParameters = command.parameters
+			.replaceAll(/\s+/g, "")
+			.replace(/,$/, "");
+		if (
+			normalizedParameters !== contract.parameters ||
+			command.returnType.replaceAll(/\s+/g, "") !== contract.returnType
+		) {
+			failures.push(
+				`${contract.name} must accept its audited parameters and return the audited Result type`,
+			);
+		}
+		const normalizedBody = command.body
+			.replaceAll(/\s+/g, "")
+			.replace(/;$/, "");
+		if (normalizedBody !== contract.body) {
+			failures.push(
+				`${contract.name} must contain only its audited confirmation-service route`,
+			);
+		}
+	}
+
+	if (libSource === undefined) {
+		failures.push(
+			"command registration boundary requires src-tauri/src/lib.rs",
+		);
+		return failures;
+	}
+	const executableLib = stripRustCommentsAndLiterals(libSource);
+	const handlerBodies = [
+		...executableLib.matchAll(
+			/\.invoke_handler\s*\(\s*tauri\s*::\s*generate_handler\s*!\s*\[([\s\S]*?)\]\s*\)/g,
+		),
+	];
+	for (const contract of DEBUG_COMMAND_CONTRACTS) {
+		const commandPath = new RegExp(
+			`\\bdebug\\s*::\\s*commands\\s*::\\s*${contract.name}\\b`,
+			"g",
+		);
+		const registrations = [...executableLib.matchAll(commandPath)];
+		const registeredInHandler =
+			handlerBodies.length === 1 &&
+			new RegExp(
+				`\\bdebug\\s*::\\s*commands\\s*::\\s*${contract.name}\\b`,
+			).test(handlerBodies[0][1]);
+		if (registrations.length !== 1 || !registeredInHandler) {
+			failures.push(
+				`src-tauri/src/lib.rs must register debug::commands::${contract.name} exactly once in generate_handler`,
+			);
+		}
+	}
+
+	return failures;
+}
+
+/**
+ * `F100` S4's real `runInTerminal` reverse-request handling boundary: locks
+ * `debug/commands.rs`'s `handle_run_in_terminal_reverse_request` to actually
+ * delegate to `TerminalService::start_program` (rather than constructing a
+ * subprocess itself — the "no hidden second spawn path" requirement the
+ * frozen research doc's "主导会话裁定" item 4 calls for), and cross-checks
+ * that `TerminalService::start_program` has *exactly one* non-test
+ * production call site anywhere in the crate — a second call site appearing
+ * anywhere (an accidental duplicate, or a genuinely new bypass) fails this
+ * immediately, the same "count the real call sites, don't just trust one
+ * audited-looking one" discipline `validateDebugCommandRegistration`'s own
+ * `generate_handler!` cross-check already applies.
+ */
+export function validateDebugRunInTerminalBoundary(rustSources) {
+	const failures = [];
+	const commandsSource = findRustSource(
+		rustSources,
+		"src-tauri/src/debug/commands.rs",
+	);
+	if (commandsSource === undefined) {
+		return ["debug runInTerminal boundary requires debug/commands.rs"];
+	}
+	const commentsOnly = stripRustCommentsOnly(commandsSource);
+	const handler = rustFunctionBody(
+		commentsOnly,
+		"handle_run_in_terminal_reverse_request",
+	);
+	if (handler === undefined) {
+		failures.push(
+			"debug/commands.rs must define handle_run_in_terminal_reverse_request",
+		);
+	} else {
+		const body = handler.body;
+		if (!/\bterminal\s*\.\s*start_program\s*\(/.test(body)) {
+			failures.push(
+				"handle_run_in_terminal_reverse_request must call terminal.start_program(...) — the only sanctioned way to spawn a runInTerminal-launched process",
+			);
+		}
+		if (
+			/\bCommand(Builder)?\s*::\s*new\s*\(/.test(body) ||
+			/std\s*::\s*process\s*::\s*Command/.test(body)
+		) {
+			failures.push(
+				"handle_run_in_terminal_reverse_request must not construct a subprocess directly — it must delegate to TerminalService::start_program",
+			);
+		}
+	}
+
+	let productionCallSites = 0;
+	for (const { relativePath, source } of rustSources) {
+		const normalizedPath = relativePath.replaceAll("\\", "/");
+		if (
+			!normalizedPath.startsWith("src-tauri/src/") ||
+			WORKSPACE_TEST_SOURCE_PATTERN.test(normalizedPath)
+		) {
+			continue;
+		}
+		const executableSource = stripRustCommentsAndLiterals(source);
+		const matches = executableSource.match(/\.start_program\s*\(/g);
+		if (matches !== null) {
+			productionCallSites += matches.length;
+		}
+	}
+	if (productionCallSites !== 1) {
+		failures.push(
+			`TerminalService::start_program must have exactly one non-test production call site in src-tauri/src (found ${productionCallSites})`,
+		);
+	}
+
+	return failures;
+}
+
+// ---------------------------------------------------------------------
+// F100 S1 — first-run confirmation gate's TypeScript boundary, mirroring
+// validateGitDiscardConfirmationBoundary/validateGitNetworkConfirmationBoundary's
+// exact rigor for this codebase's newest confirm-before-native-execution flow.
+// ---------------------------------------------------------------------
+
+const DEBUG_ADAPTER_CONFIRMATION_MODULE_PATH =
+	"app/features/debug/plain-debug-adapter-confirmation.ts";
+const DEBUG_ADAPTER_LAUNCH_MODULE_PATH =
+	"app/features/debug/plain-debug-adapter-launch.ts";
+
+/**
+ * `F100` S1's two confirm-gated bridge methods, both audited to the *same*
+ * single containing function (`resolveDebugAdapterConfirmation`) — unlike
+ * `GIT_NETWORK_BRIDGE_METHOD_AUDITS`'s one-method-per-view-method shape, both
+ * calls here belong to the same state-machine step (query the persisted
+ * decision, then — only on the unconfirmed path, only after a real user
+ * answer — grant).
+ */
+const DEBUG_ADAPTER_CONFIRMATION_BRIDGE_METHOD_AUDITS = Object.freeze([
+	Object.freeze({
+		bridgeMethod: "debugAdapterConfirmationState",
+		containingMethod: "resolveDebugAdapterConfirmation",
+		argumentTexts: Object.freeze(["request.subject"]),
+	}),
+	Object.freeze({
+		bridgeMethod: "debugAdapterConfirmationGrant",
+		containingMethod: "resolveDebugAdapterConfirmation",
+		argumentTexts: Object.freeze(["request.subject"]),
+	}),
+]);
+
+/**
+ * Locks three independent facts, any one of whose violation would let an
+ * unconfirmed `(command, args, transport)` triple slip through silently:
+ *
+ * 1. `debugAdapterConfirmationState`/`debugAdapterConfirmationGrant` each
+ *    have exactly one production call site, both inside
+ *    `resolveDebugAdapterConfirmation`'s own body — never called directly
+ *    from `plain-debug-adapter-launch.ts` or anywhere else (the same
+ *    `declarationCounts`/`auditedCallCounts` technique
+ *    `validateGitNetworkConfirmationBoundary` uses, generalized to a single
+ *    shared containing function for both methods).
+ * 2. `plain-debug-adapter-confirmation.ts`'s own audited module face: no
+ *    imports at all (mirrors `validateNetworkConfirmationModuleFace` — an
+ *    import is the only way this decide-only module could ever reach a
+ *    bridge/dialog service itself), an exact top-level declaration set, and
+ *    `resolveDebugAdapterConfirmation`'s own body matching the exact audited
+ *    shape (query state; return early *without* showing the dialog only when
+ *    already confirmed; otherwise *always* show it; grant only after a real
+ *    `confirmed: true` answer).
+ * 3. `resolveDebugAdapterConfirmation` itself has exactly one production call
+ *    site — `plain-debug-adapter-launch.ts`'s `prepareDebugAdapterLaunch` —
+ *    and that function's own body matches its exact audited
+ *    resolve-then-gate shape (the "唯一生产调用点 + 调用点的精确方法体" the
+ *    frozen research doc's AST contract item 4 calls for).
+ */
+export function validateDebugAdapterConfirmationBoundary(appSources) {
+	const failures = [];
+	const normalizedSources = new Map(
+		appSources.map(({ relativePath, source }) => [
+			relativePath.replaceAll("\\", "/"),
+			source,
+		]),
+	);
+	const requiredPaths = Object.freeze([
+		...GIT_DISCARD_DECLARATION_PATHS,
+		DEBUG_ADAPTER_CONFIRMATION_MODULE_PATH,
+		DEBUG_ADAPTER_LAUNCH_MODULE_PATH,
+	]);
+	for (const relativePath of requiredPaths) {
+		if (!normalizedSources.has(relativePath)) {
+			failures.push(
+				`debug adapter confirmation boundary requires ${relativePath}`,
+			);
+		}
+	}
+
+	function containingFunctionName(node) {
+		let current = node.parent;
+		while (current !== undefined) {
+			if (
+				ts.isMethodDeclaration(current) ||
+				ts.isFunctionDeclaration(current)
+			) {
+				return typeScriptStaticName(current.name);
+			}
+			current = current.parent;
+		}
+		return undefined;
+	}
+
+	const bridgeMethodNames = DEBUG_ADAPTER_CONFIRMATION_BRIDGE_METHOD_AUDITS.map(
+		(audit) => audit.bridgeMethod,
+	);
+	const declarationCounts = new Map(
+		GIT_DISCARD_DECLARATION_PATHS.flatMap((relativePath) =>
+			bridgeMethodNames.map((bridgeMethod) => [
+				`${relativePath}:${bridgeMethod}`,
+				0,
+			]),
+		),
+	);
+	const auditedCallCounts = new Map(
+		bridgeMethodNames.map((bridgeMethod) => [bridgeMethod, 0]),
+	);
+	let resolveConfirmationCallCount = 0;
+
+	for (const [normalizedPath, source] of normalizedSources) {
+		if (!normalizedPath.endsWith(".ts") && !normalizedPath.endsWith(".tsx")) {
+			continue;
+		}
+		const sourceFile = ts.createSourceFile(
+			normalizedPath,
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			normalizedPath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+		);
+		const isKnownBridge = collectTypeScriptBridgeAliases(sourceFile);
+
+		function visit(node) {
+			const isNameLike =
+				ts.isIdentifier(node) ||
+				ts.isStringLiteral(node) ||
+				ts.isNoSubstitutionTemplateLiteral(node);
+			const audit = isNameLike
+				? DEBUG_ADAPTER_CONFIRMATION_BRIDGE_METHOD_AUDITS.find(
+						(candidate) => candidate.bridgeMethod === node.text,
+					)
+				: undefined;
+			if (audit !== undefined) {
+				const bridgeMethod = audit.bridgeMethod;
+				const parent = node.parent;
+				const isPlatformBridgeDeclaration =
+					(normalizedPath === "app/platform/tauri/contracts.ts" &&
+						ts.isMethodSignature(parent) &&
+						parent.name === node) ||
+					(normalizedPath === "app/platform/tauri/native.ts" &&
+						ts.isPropertyAssignment(parent) &&
+						parent.name === node) ||
+					(normalizedPath === "app/platform/tauri/browser-mock.ts" &&
+						(ts.isMethodDeclaration(parent) ||
+							ts.isPropertyAssignment(parent)) &&
+						parent.name === node);
+				// `plain-debug-adapter-confirmation.ts`'s own
+				// `DebugAdapterConfirmBridge` structural interface re-declares these
+				// two method names as method signatures (the narrow bridge shape
+				// this module needs) — a fourth, in-file declaration site
+				// `validateGitNetworkConfirmationBoundary`'s own
+				// `NetworkConfirmDialogService` sibling never needed (that
+				// interface only ever declares `confirm`, never the audited bridge
+				// method names themselves, because git's confirmation module never
+				// calls a bridge method at all — this one does, by design, so it
+				// must declare the shape it calls). Deliberately not counted in
+				// `declarationCounts` (that map only tracks the three platform
+				// files' exactly-once-each requirement) — this is a fourth,
+				// separately-legitimate reference that needs only to be excluded
+				// from the "must be an audited call" branch below, not counted
+				// anywhere.
+				const isOwnInterfaceDeclaration =
+					normalizedPath === DEBUG_ADAPTER_CONFIRMATION_MODULE_PATH &&
+					ts.isMethodSignature(parent) &&
+					parent.name === node;
+				if (isPlatformBridgeDeclaration) {
+					const key = `${normalizedPath}:${bridgeMethod}`;
+					declarationCounts.set(key, declarationCounts.get(key) + 1);
+				} else if (isOwnInterfaceDeclaration) {
+					// No-op: a legitimate structural-interface declaration, not a call.
+				} else {
+					const propertyAccess = ts.isIdentifier(node) ? parent : undefined;
+					const directCall =
+						propertyAccess !== undefined &&
+						ts.isPropertyAccessExpression(propertyAccess) &&
+						propertyAccess.name === node &&
+						ts.isCallExpression(propertyAccess.parent) &&
+						propertyAccess.parent.expression === propertyAccess &&
+						isKnownBridge(propertyAccess.expression)
+							? propertyAccess.parent
+							: undefined;
+					const argumentTexts =
+						directCall?.arguments.map((argument) =>
+							argument.getText(sourceFile).replaceAll(/\s+/g, ""),
+						) ?? [];
+					const isAuditedCall =
+						directCall !== undefined &&
+						normalizedPath === DEBUG_ADAPTER_CONFIRMATION_MODULE_PATH &&
+						containingFunctionName(node) === audit.containingMethod &&
+						sameArray(argumentTexts, audit.argumentTexts);
+					if (isAuditedCall) {
+						auditedCallCounts.set(
+							bridgeMethod,
+							auditedCallCounts.get(bridgeMethod) + 1,
+						);
+					} else {
+						failures.push(
+							`${normalizedPath} must not consume ${bridgeMethod} outside resolveDebugAdapterConfirmation's single audited call site`,
+						);
+					}
+				}
+			}
+			if (
+				ts.isIdentifier(node) &&
+				node.text === "resolveDebugAdapterConfirmation" &&
+				ts.isCallExpression(node.parent) &&
+				node.parent.expression === node
+			) {
+				if (
+					normalizedPath === DEBUG_ADAPTER_LAUNCH_MODULE_PATH &&
+					containingFunctionName(node) === "prepareDebugAdapterLaunch"
+				) {
+					resolveConfirmationCallCount += 1;
+				} else if (normalizedPath !== DEBUG_ADAPTER_CONFIRMATION_MODULE_PATH) {
+					failures.push(
+						`${normalizedPath} must not call resolveDebugAdapterConfirmation outside plain-debug-adapter-launch.ts's prepareDebugAdapterLaunch`,
+					);
+				}
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(sourceFile);
+	}
+
+	for (const [key, count] of declarationCounts) {
+		if (count !== 1) {
+			const [relativePath, bridgeMethod] = key.split(":");
+			failures.push(
+				`${relativePath} must declare ${bridgeMethod} exactly once in its audited bridge surface`,
+			);
+		}
+	}
+	for (const audit of DEBUG_ADAPTER_CONFIRMATION_BRIDGE_METHOD_AUDITS) {
+		if (auditedCallCounts.get(audit.bridgeMethod) !== 1) {
+			failures.push(
+				`${audit.bridgeMethod} must have exactly one production call site, inside resolveDebugAdapterConfirmation`,
+			);
+		}
+	}
+	if (resolveConfirmationCallCount !== 1) {
+		failures.push(
+			"resolveDebugAdapterConfirmation must have exactly one production call site, inside plain-debug-adapter-launch.ts's prepareDebugAdapterLaunch",
+		);
+	}
+
+	const confirmationModuleSource = normalizedSources.get(
+		DEBUG_ADAPTER_CONFIRMATION_MODULE_PATH,
+	);
+	if (confirmationModuleSource !== undefined) {
+		failures.push(
+			...validateDebugAdapterConfirmationModuleFace(confirmationModuleSource),
+		);
+	}
+	const launchModuleSource = normalizedSources.get(
+		DEBUG_ADAPTER_LAUNCH_MODULE_PATH,
+	);
+	if (launchModuleSource !== undefined) {
+		failures.push(...validateDebugAdapterLaunchGuardedCall(launchModuleSource));
+	}
+
+	return [...new Set(failures)];
+}
+
+/**
+ * Locks `plain-debug-adapter-confirmation.ts`'s own audited module face —
+ * mirrors `validateNetworkConfirmationModuleFace`'s exact technique: it must
+ * import nothing at all, its top-level declarations must match the exact
+ * audited set, and `resolveDebugAdapterConfirmation` itself must match the
+ * exact audited body — which simultaneously proves it never calls a bridge
+ * method itself outside the audited pattern and never has a branch that
+ * skips the dialog for an unconfirmed subject.
+ */
+function validateDebugAdapterConfirmationModuleFace(source) {
+	const failures = [];
+	const sourceFile = ts.createSourceFile(
+		DEBUG_ADAPTER_CONFIRMATION_MODULE_PATH,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["plain-debug-adapter-confirmation.ts must remain valid TypeScript"];
+	}
+
+	if (
+		sourceFile.statements.some((statement) => ts.isImportDeclaration(statement))
+	) {
+		failures.push(
+			"plain-debug-adapter-confirmation.ts must not import anything — it only ever decides whether the caller may proceed, and an import is the only way it could ever reach a bridge/dialog service itself",
+		);
+	}
+
+	const expectedTopLevel = new Map([
+		["DebugAdapterConfirmBridge", { kind: "interface", exported: true }],
+		["DebugAdapterConfirmDialogService", { kind: "interface", exported: true }],
+		["DebugAdapterConfirmationSubject", { kind: "interface", exported: true }],
+		["DebugAdapterConfirmationRequest", { kind: "interface", exported: true }],
+		["quoteArgIfNeeded", { kind: "function", exported: false }],
+		["debugAdapterCommandLine", { kind: "function", exported: true }],
+		["debugAdapterConfirmationMessage", { kind: "function", exported: true }],
+		["debugAdapterConfirmationDetail", { kind: "function", exported: true }],
+		[
+			"DEBUG_ADAPTER_CONFIRM_PRIMARY_BUTTON",
+			{ kind: "variable", exported: true },
+		],
+		["DebugAdapterConfirmDecision", { kind: "type", exported: true }],
+		[
+			"resolveDebugAdapterConfirmation",
+			{ kind: "function", exported: true, async: true },
+		],
+	]);
+	const topLevelCounts = new Map(
+		[...expectedTopLevel].map(([name]) => [name, 0]),
+	);
+	let topLevelIsExact = true;
+	for (const statement of sourceFile.statements) {
+		if (ts.isImportDeclaration(statement)) {
+			continue;
+		}
+		let name;
+		let kind;
+		if (ts.isVariableStatement(statement)) {
+			if (statement.declarationList.declarations.length !== 1) {
+				topLevelIsExact = false;
+				continue;
+			}
+			name = statement.declarationList.declarations[0].name;
+			kind = "variable";
+		} else if (ts.isFunctionDeclaration(statement)) {
+			name = statement.name;
+			kind = "function";
+		} else if (ts.isInterfaceDeclaration(statement)) {
+			name = statement.name;
+			kind = "interface";
+		} else if (ts.isTypeAliasDeclaration(statement)) {
+			name = statement.name;
+			kind = "type";
+		} else {
+			topLevelIsExact = false;
+			continue;
+		}
+		const expected = ts.isIdentifier(name)
+			? expectedTopLevel.get(name.text)
+			: undefined;
+		const modifierKinds = (statement.modifiers ?? []).map(
+			(modifier) => modifier.kind,
+		);
+		const expectedModifiers = [
+			...(expected?.exported ? [ts.SyntaxKind.ExportKeyword] : []),
+			...(expected?.async ? [ts.SyntaxKind.AsyncKeyword] : []),
+		];
+		if (
+			expected === undefined ||
+			expected.kind !== kind ||
+			!sameArray(modifierKinds, expectedModifiers)
+		) {
+			topLevelIsExact = false;
+		} else {
+			topLevelCounts.set(name.text, topLevelCounts.get(name.text) + 1);
+		}
+	}
+	if (
+		!topLevelIsExact ||
+		[...topLevelCounts.values()].some((count) => count !== 1)
+	) {
+		failures.push(
+			"plain-debug-adapter-confirmation.ts must retain its exact audited top-level surface — no new declaration can quietly add a way for this decide-only module to reach a bridge",
+		);
+	}
+
+	const resolveFunctions = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "resolveDebugAdapterConfirmation",
+	);
+	const expectedResolveBody = `{
+		const state = await bridge.debugAdapterConfirmationState(request.subject);
+		if (state.confirmed) {
+			return Object.freeze({ kind: "already-confirmed" });
+		}
+		const confirmation = await dialogService.confirm({
+			message: debugAdapterConfirmationMessage(request),
+			detail: debugAdapterConfirmationDetail(request),
+			primaryButton: DEBUG_ADAPTER_CONFIRM_PRIMARY_BUTTON,
+		});
+		if (!confirmation.confirmed) {
+			return Object.freeze({ kind: "declined" });
+		}
+		await bridge.debugAdapterConfirmationGrant(request.subject);
+		return Object.freeze({ kind: "confirmed" });
+	}`.replaceAll(/\s+/g, "");
+	if (
+		resolveFunctions.length !== 1 ||
+		resolveFunctions[0].body === undefined ||
+		resolveFunctions[0].body.getText(sourceFile).replaceAll(/\s+/g, "") !==
+			expectedResolveBody
+	) {
+		failures.push(
+			"resolveDebugAdapterConfirmation must query the persisted decision first, always show the dialog for an unconfirmed subject, and never call a bridge method itself outside the exact audited shape",
+		);
+	}
+	return failures;
+}
+
+/**
+ * Locks `plain-debug-adapter-launch.ts`'s `prepareDebugAdapterLaunch` to its
+ * exact "parse, resolve, gate-then-return" body shape — the "调用点的精确方法
+ * 体" half of the frozen research doc's AST contract item 4, mirroring
+ * `validateNetworkMutationGuardedCalls`'s per-function exact-body technique
+ * (applied here to a standalone exported function rather than a class
+ * method, since there is no `PlainDebugView` class yet in this slice).
+ */
+function validateDebugAdapterLaunchGuardedCall(source) {
+	const sourceFile = ts.createSourceFile(
+		DEBUG_ADAPTER_LAUNCH_MODULE_PATH,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["plain-debug-adapter-launch.ts must remain valid TypeScript"];
+	}
+
+	const functions = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "prepareDebugAdapterLaunch",
+	);
+	const expectedBody = `{
+		const registryResult =
+			registryBytes === null
+				? Object.freeze({ kind: "ok" as const, value: Object.freeze([]) })
+				: parseDebugAdapterRegistry(registryBytes);
+		if (registryResult.kind === "error") {
+			return Object.freeze({
+				kind: "invalid-registry",
+				reason: registryResult.reason,
+			});
+		}
+		const launchResult = parseLaunchConfigurations(launchConfigurationBytes);
+		if (launchResult.kind === "error") {
+			return Object.freeze({
+				kind: "invalid-launch-configuration",
+				reason: launchResult.reason,
+			});
+		}
+		const configuration = launchResult.value.find(
+			(candidate) => candidate.name === configurationName,
+		);
+		if (configuration === undefined) {
+			return Object.freeze({
+				kind: "configuration-not-found",
+				name: configurationName,
+			});
+		}
+		const resolved = resolveAdapterDescriptor(
+			configuration,
+			registryResult.value,
+		);
+		if (resolved.kind === "adapter-not-found") {
+			return Object.freeze({ kind: "adapter-not-found", type: resolved.type });
+		}
+		const decision = await resolveDebugAdapterConfirmation(
+			bridge,
+			dialogService,
+			{
+				subject: {
+					command: resolved.descriptor.command,
+					args: resolved.descriptor.args,
+					transport: resolved.descriptor.transport,
+				},
+				configSource: resolved.configSource,
+			},
+		);
+		if (decision.kind === "declined") {
+			return Object.freeze({ kind: "declined" });
+		}
+		return Object.freeze({
+			kind: "ready",
+			descriptor: resolved.descriptor,
+			configSource: resolved.configSource,
+			warnings: resolved.warnings,
+			launchArguments: configuration.launchArguments,
+		});
+	}`.replaceAll(/\s+/g, "");
+	if (
+		functions.length !== 1 ||
+		functions[0].body === undefined ||
+		functions[0].body.getText(sourceFile).replaceAll(/\s+/g, "") !==
+			expectedBody
+	) {
+		return [
+			"prepareDebugAdapterLaunch must match its exact audited parse-resolve-then-gate shape — no other shape may reach resolveDebugAdapterConfirmation",
+		];
+	}
+	return [];
 }

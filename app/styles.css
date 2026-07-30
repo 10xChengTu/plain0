@@ -37,3 +37,344 @@ body[data-plain-ready="error"] #plain-bootstrap-status {
 	border-color: #f14c4c;
 	color: #f8d7da;
 }
+
+/* F070 "WebView DOM 渲染 + trust UX" — functional-only styling (grid
+ * alignment, cursor positioning and the hidden input surface are load
+ * bearing; nothing here is decorative polish), mirroring PlainSearchView's
+ * own precedent of leaving visual chrome for a later slice. */
+.plain-terminal-view-body {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	position: relative;
+}
+
+/* F070 "多 tab/split/scrollback" — tab strip + split pane layout. Functional
+ * styling only, same precedent as the rest of this domain's CSS. */
+.plain-terminal-tabstrip {
+	display: flex;
+	flex: 0 0 auto;
+	align-items: center;
+	gap: 2px;
+	padding: 2px 4px;
+	border-bottom: 1px solid #3c3c3c;
+	background: #1f1f1f;
+}
+
+.plain-terminal-tablist {
+	display: flex;
+	flex: 1 1 auto;
+	overflow-x: auto;
+	gap: 2px;
+}
+
+.plain-terminal-tab {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 3px 6px;
+	border-radius: 3px;
+	white-space: nowrap;
+	cursor: pointer;
+	color: #cccccc;
+}
+
+.plain-terminal-tab[data-active="true"] {
+	background: #37373d;
+}
+
+.plain-terminal-tab-label {
+	font-size: 0.8rem;
+}
+
+.plain-terminal-tab-close,
+.plain-terminal-tab-new,
+.plain-terminal-split-button {
+	flex: 0 0 auto;
+	border: 0;
+	background: transparent;
+	color: #cccccc;
+	cursor: pointer;
+	line-height: 1;
+	padding: 2px 6px;
+	border-radius: 3px;
+}
+
+.plain-terminal-tab-close:hover,
+.plain-terminal-tab-new:hover,
+.plain-terminal-split-button:hover {
+	background: #37373d;
+}
+
+.plain-terminal-panearea {
+	position: relative;
+	flex: 1 1 auto;
+	overflow: hidden;
+}
+
+.plain-terminal-panecontainer {
+	position: absolute;
+	inset: 0;
+	display: flex;
+}
+
+.plain-terminal-panecontainer[data-active="false"] {
+	display: none;
+}
+
+.plain-terminal-panecontainer[data-split="column"] {
+	flex-direction: column;
+}
+
+.plain-terminal-panecontainer[data-split="row"]
+	> .plain-terminal-pane
+	+ .plain-terminal-pane {
+	border-left: 1px solid #3c3c3c;
+}
+
+.plain-terminal-panecontainer[data-split="column"]
+	> .plain-terminal-pane
+	+ .plain-terminal-pane {
+	border-top: 1px solid #3c3c3c;
+}
+
+.plain-terminal-empty-state {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	height: 100%;
+	color: #808080;
+	font-size: 0.85rem;
+}
+
+.plain-terminal-pane {
+	position: relative;
+	flex: 1 1 0;
+	min-width: 0;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+}
+
+.plain-terminal-status {
+	padding: 0.25rem 0.75rem;
+	font-size: 0.85rem;
+	color: #cccccc;
+}
+
+.plain-terminal-status:empty {
+	display: none;
+}
+
+.plain-terminal-surface-wrapper {
+	position: relative;
+	flex: 1 1 auto;
+	overflow: auto;
+}
+
+.plain-terminal-surface {
+	position: relative;
+	font-family:
+		ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+	font-size: 13px;
+	line-height: 18px;
+	color: var(--plain-terminal-fg, #cccccc);
+	background: var(--plain-terminal-bg, #000000);
+}
+
+.plain-terminal-grid {
+	position: relative;
+}
+
+.plain-terminal-row {
+	white-space: pre;
+	height: 18px;
+}
+
+.plain-terminal-cell {
+	color: var(--plain-terminal-cell-fg, var(--plain-terminal-fg, inherit));
+	background-color: var(--plain-terminal-cell-bg, transparent);
+}
+
+.plain-terminal-cell--bold {
+	font-weight: bold;
+}
+
+.plain-terminal-cell--italic {
+	font-style: italic;
+}
+
+.plain-terminal-cell--faint {
+	opacity: 0.6;
+}
+
+.plain-terminal-cell--invisible {
+	opacity: 0;
+}
+
+.plain-terminal-cell--blink {
+	animation: plain-terminal-blink 1s steps(1) infinite;
+}
+
+.plain-terminal-cursor {
+	position: absolute;
+	top: 0;
+	left: 0;
+	display: none;
+	pointer-events: none;
+	box-sizing: border-box;
+}
+
+.plain-terminal-cursor--block {
+	background: rgba(204, 204, 204, 0.6);
+}
+
+.plain-terminal-cursor--block-hollow {
+	border: 1px solid rgba(204, 204, 204, 0.8);
+}
+
+.plain-terminal-cursor--bar {
+	border-left: 2px solid rgba(204, 204, 204, 0.9);
+}
+
+.plain-terminal-cursor--underline {
+	border-bottom: 2px solid rgba(204, 204, 204, 0.9);
+	background: transparent;
+}
+
+.plain-terminal-cursor--blinking {
+	animation: plain-terminal-cursor-blink 1s steps(1) infinite;
+}
+
+.plain-terminal-measure-probe {
+	position: absolute;
+	top: -9999px;
+	left: -9999px;
+	visibility: hidden;
+	white-space: pre;
+}
+
+.plain-terminal-input {
+	position: absolute;
+	top: 0;
+	left: 0;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	border: 0;
+	opacity: 0;
+	overflow: hidden;
+	resize: none;
+}
+
+@keyframes plain-terminal-blink {
+	50% {
+		opacity: 0;
+	}
+}
+
+@keyframes plain-terminal-cursor-blink {
+	50% {
+		opacity: 0;
+	}
+}
+
+/* `F090` S0 inline git blame decoration — age heatmap colors, own palette
+ * (not GitLens's — see `docs/research/2026-07-26-git-history.md`'s own
+ * "调色板颜色本身应走 Plain 自己的主题色系统...但仍需自行设计" note). Six
+ * fixed buckets from `--plain-git-blame-age-0` (the file's most recently
+ * touched lines) through `--plain-git-blame-age-5` (its oldest), warm→cool,
+ * computed by `blameAgeBucketIndex` in `app/features/scm/plain-git-blame.ts`.
+ * A CSS custom property per bucket (rather than one interpolated inline
+ * style per decoration) keeps this a fixed, auditable palette instead of an
+ * unbounded set of dynamically generated colors, and leaves room for a
+ * future theme-token integration to override these six variables without
+ * touching the decoration-building code at all. */
+:root {
+	--plain-git-blame-age-0: #d98a3d;
+	--plain-git-blame-age-1: #c98a52;
+	--plain-git-blame-age-2: #b48a6b;
+	--plain-git-blame-age-3: #8a8a94;
+	--plain-git-blame-age-4: #6a86a8;
+	--plain-git-blame-age-5: #4d79b3;
+}
+
+.plain-git-blame-inline {
+	opacity: 0.7;
+	font-style: italic;
+	margin-left: 1rem;
+	pointer-events: none;
+	white-space: pre;
+}
+
+.plain-git-blame-age-0 {
+	color: var(--plain-git-blame-age-0);
+}
+
+.plain-git-blame-age-1 {
+	color: var(--plain-git-blame-age-1);
+}
+
+.plain-git-blame-age-2 {
+	color: var(--plain-git-blame-age-2);
+}
+
+.plain-git-blame-age-3 {
+	color: var(--plain-git-blame-age-3);
+}
+
+.plain-git-blame-age-4 {
+	color: var(--plain-git-blame-age-4);
+}
+
+.plain-git-blame-age-5 {
+	color: var(--plain-git-blame-age-5);
+}
+
+/* `F100` S3: breakpoint glyph margin — see
+   `plain-debug-breakpoints-contribution.ts`'s module doc comment. */
+.plain-debug-breakpoint-glyph {
+	width: 0.7rem !important;
+	height: 0.7rem !important;
+	margin-left: 0.35rem;
+	border-radius: 50%;
+}
+
+.plain-debug-breakpoint-glyph-verified {
+	background-color: #e51400;
+}
+
+.plain-debug-breakpoint-glyph-unverified {
+	background-color: #a9a9a9;
+}
+
+.plain-debug-breakpoint-glyph-rejected {
+	background-color: #a9a9a9;
+	border: 1px solid #e51400;
+}
+
+.plain-debug-breakpoint-popup {
+	position: absolute;
+	z-index: 50;
+	top: 2rem;
+	left: 3rem;
+	display: flex;
+	flex-direction: column;
+	gap: 0.35rem;
+	padding: 0.5rem;
+	background: var(--vscode-editorWidget-background, #252526);
+	color: var(--vscode-editorWidget-foreground, #cccccc);
+	border: 1px solid var(--vscode-editorWidget-border, #454545);
+	border-radius: 0.25rem;
+	font-size: 0.85rem;
+}
+
+.plain-debug-breakpoint-popup label {
+	display: flex;
+	flex-direction: column;
+	gap: 0.15rem;
+}
+
+.plain-debug-breakpoint-popup input {
+	min-width: 14rem;
+}

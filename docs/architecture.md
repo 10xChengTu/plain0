@@ -22,7 +22,7 @@ SideX 证明 VS Code Workbench 可以运行在 Tauri WebView 中，但其来源�
 │ Rust main process                                           │
 │ ├─ window/menu/lifecycle                                    │
 │ ├─ workspace + fs + watcher                                 │
-│ ├─ search workers / ripgrep sidecar                         │
+│ ├─ in-process search (grep-searcher, bounded DFS)           │
 │ ├─ PTY sessions                                             │
 │ ├─ Git command service                                      │
 │ ├─ DAP adapter processes / TCP sessions                     │
@@ -37,8 +37,9 @@ SideX 证明 VS Code Workbench 可以运行在 Tauri WebView 中，但其来源�
 │ └─ xterm.js                                                 │
 └─────────────────────────────────────────────────────────────┘
 
-External local processes: system git, user-configured DAP adapter,
-shells, and a fixed-version ripgrep sidecar.
+External local processes: system git, user-configured DAP adapter, and
+shells. Search runs in-process (no ripgrep sidecar or other external
+search process — see section 6).
 ```
 
 不会存在 Electron、Node runtime、共享进程、local/worker/WASM/sidecar Extension Host、AI service 或账号 service。
@@ -150,8 +151,9 @@ Workbench model ← Plain feature service ← typed bridge/events
 
 ### 搜索
 
-- 第一阶段使用固定版本 ripgrep sidecar 并解析 `rg --json`；Quick Open 使用 `ignore` 遍历。
-- Rust 负责 ignore、上限、取消和批次；前端负责分组、预览和替换确认。
+- 搜索完全在 Rust 进程内实现，没有外部 rg/ripgrep 子进程：外部 rg 会自行按路径 ambient 遍历文件系统，无法纳入 capability root handle 权威（原先冻结的 sidecar 路线已废弃，修正见 `docs/research/2026-07-23-search-quickopen.md` 决策 2 的完整排除理由）。文件遍历是手写有界 DFS（复用 directory copy/delete 的 cap_std 帧栈范式与条目数/深度预算惯例），不使用 `ignore::WalkBuilder`（构造即要求 ambient 路径并自做 `std::fs` 遍历，同样违反 capability 纪律）；只局部复用 `ignore::gitignore::GitignoreBuilder` 做纯字符串 `.gitignore` 语义匹配（字节由既有 capability reader 读出后按行喂入，不做 I/O）。
+- 文本匹配使用进程内 `grep-searcher`/`grep-regex`（对已授权打开的文件 handle 搜索，显式 `BinaryDetection::quit(0x00)` 对齐 rg 的二进制探测语义）；正则只用线性时间 `regex` crate，不支持 `usePCRE2`/lookaround/backreference，语义比上游窄且如实标注，不伪装支持。文件名 include/exclude glob 用 `globset`。
+- Quick Open 文件搜索是单次请求-响应；文本搜索是显式的「wake 信号 + 前端 pull」流式协议（`searchId`/`cursor`/按 id 取消、有界队列背压），复用仓库既有事件流先例。Rust 负责 ignore、上限、取消和批次；前端负责分组、预览和替换确认。
 - 批量替换先生成 edit plan，再校验文件版本并执行，失败精确报告到单文件。
 
 ### 终端

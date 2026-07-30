@@ -1,10 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::time::{Duration, Instant};
 
 use crate::error::CommandError;
 use crate::path_policy::RelativePath;
+use crate::search::dto::{
+    search_not_found, SearchId, WorkspaceSearchFilesQuery, WorkspaceSearchFilesResult,
+    WorkspaceSearchTextPollResult, WorkspaceSearchTextQuery, WorkspaceSearchTextStartResult,
+};
+use crate::search::file_search;
+use crate::search::text_search::{self, TextSearchHandle};
 
 use super::dto::{
     DeleteConfirmationId, DeleteEntryId, WorkspaceDeleteBatchPlan, WorkspaceDeleteResult,
@@ -19,7 +24,7 @@ use super::watcher::{
     WindowWatcher,
 };
 use super::writer;
-use super::{RootId, WorkspaceId, WorkspaceRootLease, WorkspaceScope};
+use super::{RootId, WorkspaceId, WorkspaceRootLease, WorkspaceRootsIdentity, WorkspaceScope};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::delete::{DeleteBatchReceipt, DeleteSelection};
@@ -27,12 +32,31 @@ use super::delete::{DeleteBatchReceipt, DeleteSelection};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const DELETE_BATCH_IDLE_TTL: Duration = Duration::from_secs(120);
 
+/// How long a naturally-completed (or vacuously-done) text search lingers in
+/// its window's single active-search slot after its last poll, so a final
+/// `done: true` poll can still observe it. Chosen to match
+/// [`DELETE_BATCH_IDLE_TTL`]'s existing precedent and rationale (a generous
+/// idle bound with no user-visible countdown, reclaimed lazily on the next
+/// search-related call for that window, exactly like
+/// `discard_expired_delete_batch`) rather than inventing a second unrelated
+/// constant; a *forced* termination (cancel, a new `start` superseding this
+/// one, window close, or root revocation) purges the slot immediately
+/// instead of waiting out this TTL — see `WindowWorkspace::start_text_search`
+/// and `WindowWorkspace::close`.
+const SEARCH_TASK_IDLE_TTL: Duration = Duration::from_secs(120);
+
 type WorkspaceWatchWakeSink = Arc<dyn Fn(WorkspaceId) + Send + Sync>;
+/// Called with the identity of the search a wake hint belongs to — mirrors
+/// [`WorkspaceWatchWakeSink`]'s own shape (a wake sink parameterized over the
+/// entity it wakes, not a bare `Fn()`), so a stale wake for a search a window
+/// has already superseded stays identifiable by the frontend.
+type TextSearchWakeSink = Arc<dyn Fn(SearchId) + Send + Sync>;
 
 pub struct WorkspaceService {
     windows: Mutex<HashMap<String, Arc<WindowWorkspace>>>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     delete_clock: Arc<dyn Fn() -> Instant + Send + Sync>,
+    search_clock: Arc<dyn Fn() -> Instant + Send + Sync>,
 }
 
 impl Default for WorkspaceService {
@@ -41,6 +65,7 @@ impl Default for WorkspaceService {
             windows: Mutex::new(HashMap::new()),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             delete_clock: Arc::new(Instant::now),
+            search_clock: Arc::new(Instant::now),
         }
     }
 }
@@ -55,11 +80,45 @@ impl WorkspaceService {
         Self {
             windows: Mutex::new(HashMap::new()),
             delete_clock: clock,
+            search_clock: Arc::new(Instant::now),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_search_clock(clock: Arc<dyn Fn() -> Instant + Send + Sync>) -> Self {
+        Self {
+            windows: Mutex::new(HashMap::new()),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            delete_clock: Arc::new(Instant::now),
+            search_clock: clock,
         }
     }
 
     pub fn snapshot(&self, window_label: &str) -> Result<WorkspaceSnapshot, CommandError> {
         self.scope_for_window(window_label)?.snapshot()
+    }
+
+    /// The stable identity of `window_label`'s currently authorized root set
+    /// (see [`WorkspaceRootsIdentity`]); `None` when zero roots are
+    /// authorized. Used only by the backup domain to key its per-root-set
+    /// storage directory; never exposed over IPC.
+    pub(crate) fn stable_identity(
+        &self,
+        window_label: &str,
+    ) -> Result<Option<WorkspaceRootsIdentity>, CommandError> {
+        self.scope_for_window(window_label)?.stable_identity()
+    }
+
+    /// The canonical filesystem path backing each of `window_label`'s
+    /// currently authorized roots, in authorization order; see
+    /// [`super::WorkspaceScope::root_canonical_paths`] for the exact
+    /// contract and why this exists (currently: the terminal domain's `cwd`
+    /// validation). Never exposed over IPC.
+    pub(crate) fn root_canonical_paths(
+        &self,
+        window_label: &str,
+    ) -> Result<Vec<(RootId, std::path::PathBuf)>, CommandError> {
+        self.scope_for_window(window_label)?.root_canonical_paths()
     }
 
     pub async fn pick_roots<P: DirectoryPicker>(
@@ -138,6 +197,87 @@ impl WorkspaceService {
             reader::read_file(&lease, &relative_path)?.into_plr1_frame()
         })
         .await
+    }
+
+    /// Read-only, multi-root file search. Does not take the mutation gate
+    /// (search never writes anything): every named root is leased once up
+    /// front, the bounded traversal runs on a blocking thread, and every
+    /// leased root is revalidated afterward exactly like [`Self::run_reader`]
+    /// does for a single root. If any root was revoked while the traversal
+    /// was in flight, the revoked-root error wins over a successful result.
+    pub async fn search_files(
+        &self,
+        window_label: &str,
+        query: WorkspaceSearchFilesQuery,
+    ) -> Result<WorkspaceSearchFilesResult, CommandError> {
+        let workspace = self.scope_for_window(window_label)?;
+        let mut leases = Vec::with_capacity(query.roots.len());
+        for root_id in &query.roots {
+            leases.push(workspace.lease(*root_id)?);
+        }
+        let leased_root_ids: Vec<RootId> = leases.iter().map(WorkspaceRootLease::root_id).collect();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            file_search::search_roots(&leases, &query)
+        })
+        .await
+        .map_err(|_| workspace_read_failed());
+        workspace.validate_leases(&leased_root_ids)?;
+        result?
+    }
+
+    /// Starts one streaming text search for `window_label`, superseding
+    /// whatever search (active or lingering-done) that window already had.
+    /// Leasing every named root happens synchronously up front (fail closed
+    /// if any root is not authorized, exactly like [`Self::search_files`]);
+    /// the bounded traversal and grep then run on a dedicated background
+    /// thread started by [`text_search::start`], so this method itself never
+    /// blocks on disk I/O and does not need `spawn_blocking`.
+    pub fn search_text_start(
+        &self,
+        window_label: &str,
+        query: WorkspaceSearchTextQuery,
+        wake_sink: TextSearchWakeSink,
+    ) -> Result<WorkspaceSearchTextStartResult, CommandError> {
+        let workspace = self.scope_for_window(window_label)?;
+        let mut leases = Vec::with_capacity(query.roots.len());
+        for root_id in &query.roots {
+            leases.push(workspace.lease(*root_id)?);
+        }
+        let compiled = text_search::compile_query(&query)?;
+        workspace.start_text_search(leases, compiled, wake_sink, (self.search_clock)())
+    }
+
+    /// Drains whatever batches `search_id`'s task has produced since
+    /// `cursor`. Never blocks (the channel drain is non-blocking); returns
+    /// [`crate::search::dto::search_not_found`] if `search_id` does not match
+    /// this window's active or lingering search (including one already
+    /// reclaimed by its TTL).
+    pub fn search_text_poll(
+        &self,
+        window_label: &str,
+        search_id: SearchId,
+        cursor: u64,
+    ) -> Result<WorkspaceSearchTextPollResult, CommandError> {
+        self.scope_for_window(window_label)?.poll_text_search(
+            search_id,
+            cursor,
+            (self.search_clock)(),
+        )
+    }
+
+    /// Cancels `search_id`, mirroring `workspace_cancel_delete`'s exact
+    /// contract: a request naming a search that is not this window's current
+    /// active-or-lingering one (wrong id, already cancelled, already TTL-
+    /// reclaimed) reports [`crate::search::dto::search_not_found`] rather
+    /// than a silent no-op success — safe to call defensively (it never
+    /// panics or corrupts state either way), but not a bare fire-and-forget.
+    pub fn search_text_cancel(
+        &self,
+        window_label: &str,
+        search_id: SearchId,
+    ) -> Result<(), CommandError> {
+        self.scope_for_window(window_label)?
+            .cancel_text_search(search_id, (self.search_clock)())
     }
 
     pub async fn write_file(
@@ -590,6 +730,14 @@ struct WindowWorkspace {
     delete_clock: Arc<dyn Fn() -> Instant + Send + Sync>,
 }
 
+/// The one active-or-lingering text search a window may have; see
+/// [`SEARCH_TASK_IDLE_TTL`]'s doc comment for the lingering/purge contract.
+struct ActiveTextSearch {
+    search_id: SearchId,
+    handle: TextSearchHandle,
+    idle_deadline: Instant,
+}
+
 impl WindowWorkspace {
     fn new(
         #[cfg(any(target_os = "linux", target_os = "macos"))] delete_clock: Arc<
@@ -606,6 +754,7 @@ impl WindowWorkspace {
                 watch_registrations: BTreeMap::new(),
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 active_delete_batch: None,
+                active_text_search: None,
                 closed: false,
             }),
             watcher: Mutex::new(None),
@@ -614,10 +763,81 @@ impl WindowWorkspace {
         }
     }
 
+    /// Starts a text search, immediately dropping (cancelling) whatever
+    /// active-or-lingering search this window already had — the frozen
+    /// "a new start always supersedes the old one" contract.
+    fn start_text_search(
+        &self,
+        leases: Vec<WorkspaceRootLease>,
+        compiled: text_search::CompiledTextQuery,
+        wake_sink: TextSearchWakeSink,
+        now: Instant,
+    ) -> Result<WorkspaceSearchTextStartResult, CommandError> {
+        let mut state = lock(&self.state)?;
+        ensure_open(&state)?;
+        let search_id = SearchId::new();
+        let sink = Arc::clone(&wake_sink);
+        let handle = text_search::start(leases, compiled, Arc::new(move || sink(search_id)));
+        state.active_text_search = Some(ActiveTextSearch {
+            search_id,
+            handle,
+            idle_deadline: search_text_deadline(now)?,
+        });
+        Ok(WorkspaceSearchTextStartResult::new(search_id))
+    }
+
+    fn poll_text_search(
+        &self,
+        search_id: SearchId,
+        cursor: u64,
+        now: Instant,
+    ) -> Result<WorkspaceSearchTextPollResult, CommandError> {
+        let mut state = lock(&self.state)?;
+        ensure_open(&state)?;
+        discard_expired_text_search(&mut state, now);
+        let Some(active) = state.active_text_search.as_mut() else {
+            return Err(search_not_found());
+        };
+        if active.search_id != search_id {
+            return Err(search_not_found());
+        }
+        let result = active.handle.poll(cursor)?;
+        active.idle_deadline = search_text_deadline(now)?;
+        Ok(result)
+    }
+
+    fn cancel_text_search(&self, search_id: SearchId, now: Instant) -> Result<(), CommandError> {
+        let mut state = lock(&self.state)?;
+        ensure_open(&state)?;
+        discard_expired_text_search(&mut state, now);
+        let matches = state
+            .active_text_search
+            .as_ref()
+            .is_some_and(|active| active.search_id == search_id);
+        if matches {
+            state.active_text_search = None;
+            Ok(())
+        } else {
+            Err(search_not_found())
+        }
+    }
+
     fn snapshot(&self) -> Result<WorkspaceSnapshot, CommandError> {
         let state = lock(&self.state)?;
         ensure_open(&state)?;
         Ok(state.scope.snapshot())
+    }
+
+    fn stable_identity(&self) -> Result<Option<WorkspaceRootsIdentity>, CommandError> {
+        let state = lock(&self.state)?;
+        ensure_open(&state)?;
+        Ok(state.scope.stable_identity())
+    }
+
+    fn root_canonical_paths(&self) -> Result<Vec<(RootId, std::path::PathBuf)>, CommandError> {
+        let state = lock(&self.state)?;
+        ensure_open(&state)?;
+        Ok(state.scope.root_canonical_paths())
     }
 
     fn begin_picker(&self) -> Result<u64, CommandError> {
@@ -720,6 +940,7 @@ impl WindowWorkspace {
                     retained
                 });
                 invalidate_delete_batch(&mut state);
+                invalidate_text_search(&mut state);
                 (
                     WorkspacePickRootsResult::new(
                         WorkspacePickRootsStatus::Selected,
@@ -915,6 +1136,7 @@ impl WindowWorkspace {
         state.scope.remove(root_id)?;
         let removed_registration = state.watch_registrations.remove(&root_id);
         invalidate_delete_batch(&mut state);
+        invalidate_text_search(&mut state);
         let snapshot = state.scope.snapshot();
         let watcher = lock(&self.watcher)?.clone();
         drop(state);
@@ -1124,6 +1346,11 @@ impl WindowWorkspace {
         state.active_picker = None;
         state.watch_registrations.clear();
         invalidate_delete_batch(&mut state);
+        // Taken (not just cleared) so the search task's thread-join — bounded
+        // and fast, but still a blocking operation — happens after the state
+        // and mutation locks are released below, the same way `watcher.close()`
+        // is deferred past `drop(state)`/`drop(mutation)` a few lines down.
+        let active_text_search = state.active_text_search.take();
         let watcher = self
             .watcher
             .lock()
@@ -1131,6 +1358,7 @@ impl WindowWorkspace {
             .take();
         drop(state);
         drop(mutation);
+        drop(active_text_search);
         if let Some(watcher) = watcher {
             watcher.close();
         }
@@ -1145,6 +1373,7 @@ struct WindowWorkspaceState {
     watch_registrations: BTreeMap<RootId, WatchRegistration>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     active_delete_batch: Option<DeleteBatchReceipt>,
+    active_text_search: Option<ActiveTextSearch>,
     closed: bool,
 }
 
@@ -1192,6 +1421,32 @@ fn discard_expired_delete_batch(state: &mut WindowWorkspaceState, now: Instant) 
 fn delete_deadline(now: Instant) -> Result<Instant, CommandError> {
     now.checked_add(DELETE_BATCH_IDLE_TTL)
         .ok_or_else(workspace_delete_failed)
+}
+
+/// Unconditionally drops (cancelling/reclaiming) a window's active-or-
+/// lingering text search: called at every site that already invalidates the
+/// delete batch (root add/replace/remove, window close) because a text
+/// search's leases were taken from the root set at the moment it started,
+/// and any change to that set — even one unrelated to the specific roots the
+/// search named — must not leave a task running against authorization that
+/// may no longer hold.
+fn invalidate_text_search(state: &mut WindowWorkspaceState) {
+    state.active_text_search = None;
+}
+
+fn discard_expired_text_search(state: &mut WindowWorkspaceState, now: Instant) {
+    if state
+        .active_text_search
+        .as_ref()
+        .is_some_and(|active| now >= active.idle_deadline)
+    {
+        state.active_text_search = None;
+    }
+}
+
+fn search_text_deadline(now: Instant) -> Result<Instant, CommandError> {
+    now.checked_add(SEARCH_TASK_IDLE_TTL)
+        .ok_or_else(workspace_operation_failed)
 }
 
 fn picker_already_active() -> CommandError {

@@ -4,14 +4,167 @@ const PATCH_CONTRACTS = Object.freeze([
 	Object.freeze({
 		packageName: "@codingame/monaco-vscode-api@35.0.1",
 		patchPath: "patches/@codingame__monaco-vscode-api@35.0.1.patch",
-		sha256: "184ceed92b82bccb869ca91bc322e6c01740d8eb85cd9ddde47484e8959858f6",
+		// `F110` S2 (`docs/research/2026-07-28-legacy-retirement.md`, decision 1):
+		// added two new hunks on top of the pre-existing diff — a brand-new
+		// `missing-services.js` block (this file was never patched before) and
+		// an addition to the already-patched `services.js` block. Both remove
+		// the `import`/`class`/`registerSingleton` (or, for `services.js`,
+		// `export { X } from 'Y'` re-export) three-part registration for the
+		// `mcp` (16), `syncEditSessions` (8) and 9-of-10 non-`globalCompositeBar`
+		// `authAccount` debt-source tokens — see
+		// `scripts/plain/missing-services-patch-contract.mjs` for the paired
+		// shape assertion this sha/hunk lock does not by itself provide
+		// (detecting a *semantically* drifted but still-diff-shaped upstream
+		// file). `IAuthenticationService`'s own import/class/registerSingleton
+		// triple in `missing-services.js` was deliberately *not* removed by S2:
+		// `globalCompositeBar.js` (kept then, real Activity Bar code) injected
+		// it as a non-optional constructor dependency
+		// (`AccountsActivityActionViewItem`/`SimpleAccountActivityActionViewItem`),
+		// so leaving it unbound would have thrown at Activity Bar construction
+		// time — this was the one token S2's dependency sweep found with a
+		// real, currently-bundled required consumer outside
+		// `missing-services.js`.
+		//
+		// `F110` S4 (same research document, "主导会话裁定" point 2) adds a third
+		// hunk to the `missing-services.js` block (removing the
+		// `IAuthenticationService` import/class/registerSingleton triple S2 had
+		// to keep) plus a brand-new `activitybarPart.js` hunk (two-line change:
+		// the `GlobalCompositeBar` import and its sole
+		// `instantiationService.createInstance(...)` call site are repointed at
+		// `PlainGlobalCompositeBar`, this repo's own
+		// `app/features/workbench/plain-global-composite-bar.ts` migration of
+		// the "Manage" gear — see that file's own doc comment). The
+		// already-patched `globalCompositeBar.js` hunks are untouched: the file
+		// itself simply becomes unreachable now that `activitybarPart.js` no
+		// longer imports it, which is why `IAuthenticationService`'s
+		// registration is finally provably dead. See
+		// `scripts/plain/missing-services-patch-contract.mjs`'s own S4
+		// paragraph for the full token-count accounting.
+		//
+		// `F110` S6 (same research document, "主导会话裁定" point 4 — the six
+		// categories `check-bundle.mjs` had never covered before `F110` S0
+		// added them) extends the same two-file surgery to 32 more tokens
+		// spanning `notebook`/`tasks`/`testing`/`remote`/`languagePacks`
+		// (`languageDetection`/`treeSitter` were deliberately left untouched —
+		// see below). Unlike every earlier slice, three tokens this slice's
+		// dependency-graph audit found are real, non-optional, always-reached
+		// consumers were deliberately *kept* registered despite being in one of
+		// this slice's five target categories — the same "share a real
+		// consumer, don't remove for zero benefit" judgment S2/S3/S5 already
+		// established for `IAuthenticationService`/the seven chat tokens/the
+		// nine `extensionRuntime` tokens: `IRemoteAgentService` (`remote`) is a
+		// non-optional constructor `__param` of `@codingame/monaco-vscode-base-service-override`'s
+		// `BrowserPathServiceOverride`/`LabelService` — both spread
+		// unconditionally into `services.js`'s own `initialize()` via that
+		// package's `getServiceOverride()` default export, so every real
+		// Workbench boot needs `IPathService`/`ILabelService`, which need this;
+		// `INotebookDocumentService` (`notebook`) is a non-optional `__param`
+		// of `workbench/browser/labels.js`'s `ResourceLabelWidget`, constructed
+		// by the universally-used `ResourceLabels`/`ResourceLabel` utility every
+		// file tab and Explorer row renders through; `ILanguageDetectionService`
+		// (`languageDetection`) is resolved unconditionally at the top of
+		// `editorStatus.js`'s real "Change Language Mode" command
+		// (`ChangeLanguageModeAction.run()`, `Ctrl+K Ctrl+M`, `f1: true`,
+		// already the same file/pattern `extensionRuntime`'s
+		// `IExtensionGalleryService` keep-reason cites). Removing any of these
+		// three would have reproduced this project's own `F110` S5 "hoverService
+		// depends on extensionService which is NOT registered" bootstrap-death
+		// class of failure. `languageDetection`'s 2 debt files and
+		// `treeSitter`'s 8 debt files are therefore both left at their `F110`
+		// S0 starting count — not because a token removal was attempted and
+		// reverted, but because this slice's dependency sweep found the
+		// registration removal would have zero debt-count benefit either way
+		// (both categories' vendor files are already unconditionally reachable
+		// through a path that has nothing to do with `missing-services.js` —
+		// `tokenizationTextModelPart.js`, part of every real `TextModel`, for
+		// `treeSitter`; `driver.js`'s `localizedStrings` default-import, for the
+		// one `languagePacks` file that remains). See
+		// `scripts/plain/missing-services-patch-contract.mjs`'s own S6
+		// paragraph and `docs/bundle-baseline.json`'s per-category
+		// `categoryNotes` for the full per-file accounting.
+		sha256: "9b22d0ee29e3f8c8dadf821345699e11459b4cf0b272c48d98d95d8fc057bd76",
 		integrity:
 			"sha512-pJMSRMI0m5Mvx54u6iBGh+iad9KqfICnwAcjswNJOO7Xt1OXm5xILcM32VkMe4UX0YmrGAvYc0WVKWL8I9O4ng==",
 		directImporter: true,
-		snapshotEdgeCount: 23,
+		// 27, not 26: `F080` S2 installs
+		// `@codingame/monaco-vscode-scm-service-override@35.0.1`, whose own
+		// pnpm-lock.yaml snapshot block depends on this exact patched
+		// `@codingame/monaco-vscode-api` — one more edge, same audited patch
+		// hash as every other edge below. `F090` S2 installs
+		// `@codingame/monaco-vscode-multi-diff-editor-service-override@35.0.1`,
+		// whose own snapshot block depends on this exact same patched
+		// `@codingame/monaco-vscode-api` too — one more edge again (confirmed
+		// against the real pnpm-lock.yaml: its snapshot entry declares exactly
+		// one dependency, `'@codingame/monaco-vscode-api':
+		// 35.0.1(patch_hash=184ceed9...)`, the identical audited hash every
+		// other edge here already shares — not a second, divergent patch
+		// variant).
+		snapshotEdgeCount: 27,
 		shape: Object.freeze([
+			"diff --git a/missing-services.js b/missing-services.js",
+			"@@ -3,7 +3,6 @@ import { __decorate, __param } from './external/tslib/tslib.es6.js';",
+			"@@ -47,37 +46,26 @@ import { ActionWidgetService } from './vscode/src/vs/platform/actionWidget/brows",
+			"@@ -96,11 +84,6 @@ import { IURLService } from './vscode/src/vs/platform/url/common/url.service.js'",
+			"@@ -112,89 +95,40 @@ import { StatusBarUpdateKind, IExtensionStatusBarItemService } from './vscode/sr",
+			"@@ -206,17 +140,8 @@ import { IActivityService } from './vscode/src/vs/workbench/services/activity/co",
+			"@@ -227,16 +152,10 @@ import { IEditorGroupsService } from './vscode/src/vs/workbench/services/editor/",
+			"@@ -250,7 +169,6 @@ import { ILifecycleService } from './vscode/src/vs/workbench/services/lifecycle/",
+			"@@ -258,8 +176,6 @@ import { IPaneCompositePartService } from './vscode/src/vs/workbench/services/pa",
+			"@@ -272,11 +188,8 @@ import { ITitleService } from './vscode/src/vs/workbench/services/title/browser/",
+			"@@ -294,101 +207,31 @@ import { IDataChannelService } from './vscode/src/vs/platform/dataChannel/common",
+			"@@ -1338,7 +1181,6 @@ class LanguageDetectionService {",
+			"@@ -1886,39 +1728,6 @@ __decorate([",
+			"@@ -2053,95 +1862,6 @@ __decorate([",
+			"@@ -2186,6 +1906,44 @@ __decorate([",
+			"@@ -2455,40 +2213,6 @@ class ExtensionRecommendationsService {",
+			"@@ -2528,80 +2252,6 @@ __decorate([",
+			"@@ -3026,14 +2676,6 @@ __decorate([",
+			"@@ -3100,28 +2742,6 @@ __decorate([",
+			"@@ -3137,21 +2757,6 @@ class GlobalExtensionEnablementService {",
+			"@@ -3831,81 +3436,6 @@ class TerminalQuickFixService {",
+			"@@ -3944,76 +3474,6 @@ __decorate([",
+			"@@ -4049,34 +3509,6 @@ __decorate([",
+			"@@ -4086,26 +3518,6 @@ __decorate([",
+			"@@ -4153,156 +3565,7 @@ class WorkbenchAssignmentService {",
+			"@@ -4483,44 +3746,6 @@ __decorate([",
+			"@@ -4716,55 +3941,6 @@ __decorate([",
+			"@@ -4773,18 +3949,6 @@ class WorkspaceTrustEnablementService {",
+			"@@ -4796,16 +3960,6 @@ __decorate([",
+			"@@ -4852,13 +4006,6 @@ __decorate([",
+			"@@ -4962,100 +4109,6 @@ __decorate([",
+			"@@ -5109,47 +4162,6 @@ class ActiveLanguagePackService {",
+			"@@ -5180,277 +4192,37 @@ __decorate([",
+			"@@ -5542,80 +4314,6 @@ __decorate([",
+			"@@ -5641,63 +4339,6 @@ __decorate([",
+			"@@ -5709,139 +4350,6 @@ class UserDataInitializationService {",
+			"@@ -5901,201 +4409,52 @@ class SignService {",
+			"@@ -6111,22 +4470,6 @@ __decorate([",
+			"@@ -6134,89 +4477,6 @@ class ChatCodeBlockContextProviderService {",
+			"@@ -6229,1536 +4489,366 @@ class WalkthroughsService {",
+			"@@ -7769,73 +4859,6 @@ __decorate([",
+			"@@ -7847,14 +4870,6 @@ __decorate([",
+			"@@ -7867,28 +4882,6 @@ __decorate([",
+			"@@ -7902,45 +4895,6 @@ __decorate([",
+			"@@ -7954,228 +4908,16 @@ __decorate([",
+			"@@ -8225,241 +4967,6 @@ class MeteredConnectionService {",
+			"@@ -8468,24 +4975,6 @@ class GitService {",
+			"@@ -8506,39 +4995,6 @@ class PowerService {",
+			"@@ -8551,54 +5007,6 @@ class WebBrowserViewCDPService {",
+			"@@ -8678,139 +5086,6 @@ __decorate([",
+			"@@ -8871,29 +5146,6 @@ __decorate([",
+			"@@ -8950,178 +5202,3 @@ __decorate([",
 			"diff --git a/services.js b/services.js",
 			"@@ -24,7 +24,6 @@ import './vscode/src/vs/workbench/contrib/inlayHints/browser/inlayHintsAccessibi",
+			"@@ -106,7 +105,6 @@ import { initialize as initialize$1 } from './workbench.js';",
+			"@@ -175,11 +173,9 @@ export { IHistoryService } from './vscode/src/vs/workbench/services/history/comm",
+			"@@ -192,29 +188,22 @@ export { IWorkspaceTrustEnablementService, IWorkspaceTrustManagementService, IWo",
+			"@@ -227,10 +216,6 @@ export { IURLService } from './vscode/src/vs/platform/url/common/url.service.js'",
+			"@@ -239,54 +224,27 @@ export { IExtensionStatusBarItemService, StatusBarUpdateKind } from './vscode/sr",
+			"@@ -294,15 +252,6 @@ export { ITerminalContributionService } from './vscode/src/vs/workbench/contrib/",
+			"@@ -313,24 +262,15 @@ export { IAccessibleViewInformationService } from './vscode/src/vs/workbench/ser",
+			"@@ -346,22 +286,16 @@ export { ITimerService } from './vscode/src/vs/workbench/services/timer/browser/",
+			"@@ -376,87 +310,30 @@ export { IEditorCancellationTokens } from './vscode/src/vs/editor/contrib/editor",
+			"@@ -496,7 +373,6 @@ async function initialize(overrides, container = document.body, configuration =",
 			"diff --git a/vscode/src/vs/platform/files/common/files.d.ts b/vscode/src/vs/platform/files/common/files.d.ts",
 			"@@ -775,6 +775,40 @@ export declare class FileOperationError extends Error {",
 			"diff --git a/vscode/src/vs/platform/files/common/files.js b/vscode/src/vs/platform/files/common/files.js",
@@ -32,11 +185,17 @@ const PATCH_CONTRACTS = Object.freeze([
 			"diff --git a/vscode/src/vs/workbench/browser/actions/workspaceCommands.js b/vscode/src/vs/workbench/browser/actions/workspaceCommands.js",
 			"@@ -1,97 +1,22 @@",
 			"@@ -131,76 +56,6 @@ CommandsRegistry.registerCommand(PICK_WORKSPACE_FOLDER_COMMAND_ID, async functio",
+			"diff --git a/vscode/src/vs/workbench/browser/parts/activitybar/activitybarPart.js b/vscode/src/vs/workbench/browser/parts/activitybar/activitybarPart.js",
+			"@@ -35,7 +35,7 @@ import { StandardKeyboardEvent } from '../../../../base/browser/keyboardEvent.js",
+			"@@ -294,7 +294,7 @@ let ActivityBarCompositeBar = class ActivityBarCompositeBar extends PaneComposit",
 			"diff --git a/vscode/src/vs/workbench/browser/parts/globalCompositeBar.js b/vscode/src/vs/workbench/browser/parts/globalCompositeBar.js",
 			"@@ -117,15 +117,7 @@ let GlobalCompositeBar = class GlobalCompositeBar extends Disposable {",
 			"@@ -137,30 +129,16 @@ let GlobalCompositeBar = class GlobalCompositeBar extends Disposable {",
 			"@@ -732,20 +710,7 @@ let SimpleGlobalActivityActionViewItem = class SimpleGlobalActivityActionViewIte",
 			"@@ -756,19 +721,10 @@ function simpleActivityContextMenuActions(storageService, isAccount) {",
+			"diff --git a/vscode/src/vs/workbench/contrib/accessibility/browser/editorAccessibilityHelp.js b/vscode/src/vs/workbench/contrib/accessibility/browser/editorAccessibilityHelp.js",
+			"@@ -9,14 +9,12 @@ import { IContextKeyService } from '../../../../platform/contextkey/common/conte",
+			"@@ -140,19 +138,17 @@ function getCommentCommandInfo(keybindingService, contextKeyService, editor) {",
 			"diff --git a/vscode/src/vs/workbench/contrib/files/browser/editors/textFileSaveErrorHandler.js b/vscode/src/vs/workbench/contrib/files/browser/editors/textFileSaveErrorHandler.js",
 			"@@ -5,7 +5,7 @@ import { toErrorMessage } from '../../../../../base/common/errorMessage.js';",
 			"@@ -35,10 +35,55 @@ import Severity$1 from '../../../../../base/common/severity.js';",
@@ -56,6 +215,9 @@ const PATCH_CONTRACTS = Object.freeze([
 			"@@ -541,9 +542,10 @@ let ExplorerView = class ExplorerView extends ViewPane {",
 			"diff --git a/vscode/src/vs/workbench/contrib/files/common/explorerModel.js b/vscode/src/vs/workbench/contrib/files/common/explorerModel.js",
 			"@@ -139,6 +139,17 @@ class ExplorerItem {",
+			"diff --git a/vscode/src/vs/workbench/contrib/inlineCompletions/browser/inlineCompletionLanguageStatusBarContribution.js b/vscode/src/vs/workbench/contrib/inlineCompletions/browser/inlineCompletionLanguageStatusBarContribution.js",
+			"@@ -1,20 +1,21 @@",
+			"@@ -22,87 +23,9 @@ let InlineCompletionLanguageStatusBarContribution = class InlineCompletionLangua",
 			"diff --git a/vscode/src/vs/workbench/services/textfile/common/textFileEditorModel.js b/vscode/src/vs/workbench/services/textfile/common/textFileEditorModel.js",
 			"@@ -34,6 +34,57 @@ import { IProgressService } from '../../../../platform/progress/common/progress.",
 			"@@ -112,6 +163,7 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel",
@@ -183,7 +345,7 @@ const PATCH_CONTRACTS = Object.freeze([
 		integrity:
 			"sha512-tuyXQG4xajLk3uHpYRF0KCO1DV1L3U6tf+COPumRgDmJUINNOPBWpJ43uAdDnE2MNJL9eY5E4LlIxeHSZChaZw==",
 		directImporter: true,
-		snapshotEdgeCount: 6,
+		snapshotEdgeCount: 7,
 		shape: Object.freeze([
 			"diff --git a/vscode/src/vs/platform/files/common/fileService.js b/vscode/src/vs/platform/files/common/fileService.js",
 			"@@ -9,15 +9,17 @@ import { hash } from '@codingame/monaco-vscode-api/vscode/vs/base/common/hash';",
@@ -241,6 +403,55 @@ const PATCH_CONTRACTS = Object.freeze([
 			"@@ -228,7 +240,7 @@ let ProgressService = class ProgressService extends Disposable {",
 			"@@ -380,19 +392,13 @@ let ProgressService = class ProgressService extends Disposable {",
 			"@@ -437,7 +443,7 @@ let ProgressService = class ProgressService extends Disposable {",
+		]),
+	}),
+	Object.freeze({
+		packageName:
+			"@codingame/monaco-vscode-view-title-bar-service-override@35.0.1",
+		patchPath:
+			"patches/@codingame__monaco-vscode-view-title-bar-service-override@35.0.1.patch",
+		// `F110` S4 (`docs/research/2026-07-28-legacy-retirement.md`, "主导会话裁定"
+		// point 2): the first-ever patch of this package, a transitive-only
+		// dependency (pulled in by `@codingame/monaco-vscode-workbench-service-override`,
+		// which Plain does depend on directly — this package itself never
+		// appears in `package.json`, see `directImporter: false` below). Its
+		// `titlebarPart.js` turned out to be the real, previously-undiscovered
+		// second consumer of vendor `globalCompositeBar.js` that kept
+		// `authAccount` stuck at 5 after S4's `activitybarPart.js` repoint alone
+		// (see `docs/bundle-baseline.json`'s `categoryNotes.authAccount` for the
+		// full discovery story). This patch repoints `titlebarPart.js`'s single
+		// import line from vendor `SimpleGlobalActivityActionViewItem` to this
+		// repo's own `PlainSimpleGlobalActivityActionViewItem` in
+		// `app/features/workbench/plain-global-composite-bar.ts`, deletes the two
+		// branches that only ever served the already-dead account UI
+		// (`SimpleAccountActivityActionViewItem`'s `ACCOUNTS_ACTIVITY_ID`
+		// construction branch, and the `isAccountsActionVisible(...)` guard — that
+		// helper is vendor code already neutered to always `return false;` by the
+		// untouched `globalCompositeBar.js` hunk in
+		// `patches/@codingame__monaco-vscode-api@35.0.1.patch`, so the guarded
+		// `actions.primary.push(ACCOUNTS_ACTIVITY_TILE_ACTION)` call never fired
+		// regardless), and inlines
+		// `AccountsActivityActionViewItem.ACCOUNTS_VISIBILITY_PREFERENCE_KEY`'s
+		// literal string value (`"workbench.activity.showAccounts"`) so the last
+		// remaining reference to that class's own import can drop too. With zero
+		// references left anywhere to
+		// `SimpleGlobalActivityActionViewItem`/`SimpleAccountActivityActionViewItem`/
+		// `isAccountsActionVisible`/`AccountsActivityActionViewItem`,
+		// `titlebarPart.js` no longer imports vendor `globalCompositeBar.js` at
+		// all — and neither does anything else, so that file (plus the four other
+		// authAccount debt sources it alone kept reachable) finally drops out of
+		// the real bundle.
+		sha256: "16c58f3d95604ca298b63405701bfbab9b285d7a7098a32cafc85594ead0c74d",
+		integrity:
+			"sha512-sS8hLpTaXFwIKSaJZXjb/tLi0CfRCbFDF+Yj1dhXqqSGyRma7FCqYaoTzt+rcrd9BKJVxyy8MPhAqEn48lHpSQ==",
+		directImporter: false,
+		snapshotEdgeCount: 1,
+		shape: Object.freeze([
+			"diff --git a/vscode/src/vs/workbench/browser/parts/titlebar/titlebarPart.js b/vscode/src/vs/workbench/browser/parts/titlebar/titlebarPart.js",
+			"@@ -34,7 +34,7 @@ import { Categories } from '@codingame/monaco-vscode-api/vscode/vs/platform/acti",
+			"@@ -476,12 +476,7 @@ let BrowserTitlebarPart = class BrowserTitlebarPart extends Part {",
+			"@@ -586,9 +581,6 @@ let BrowserTitlebarPart = class BrowserTitlebarPart extends Part {",
+			"@@ -631,7 +623,7 @@ let BrowserTitlebarPart = class BrowserTitlebarPart extends Part {",
 		]),
 	}),
 ]);
@@ -428,7 +639,7 @@ function exactMappingLines(source, expected, label, failures) {
 	).filter((line) => line.trim().length > 0);
 	if (JSON.stringify(actual) !== JSON.stringify(expected)) {
 		failures.push(
-			`${label} top-level patchedDependencies must be the exact audited nine-entry closed set`,
+			`${label} top-level patchedDependencies must be the exact audited ten-entry closed set`,
 		);
 	}
 	return actual;

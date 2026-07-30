@@ -218,6 +218,26 @@ const DIRECT_COMMAND_REGISTRATION_MANIFEST = Object.freeze([
 		relativePath: "app/features/workspace/commands.ts",
 		count: productContracts.length + 1,
 	}),
+	Object.freeze({
+		relativePath: "app/features/themes/plain-theme-picker.ts",
+		count: 3,
+	}),
+	Object.freeze({
+		relativePath: "app/features/themes/plain-theme-commands.ts",
+		count: 3,
+	}),
+	Object.freeze({
+		relativePath: "app/features/terminal/plain-terminal-commands.ts",
+		count: 4,
+	}),
+	Object.freeze({
+		relativePath: "app/features/scm/plain-scm-commands.ts",
+		count: 2,
+	}),
+	Object.freeze({
+		relativePath: "app/features/debug/plain-debug-commands.ts",
+		count: 3,
+	}),
 ]);
 
 // The pinned 35.0.1 packages expose deep wildcard modules, including modules
@@ -225,7 +245,211 @@ const DIRECT_COMMAND_REGISTRATION_MANIFEST = Object.freeze([
 // allowlist key: another app module cannot reuse an otherwise approved import.
 const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/excluded-surfaces.ts:@codingame/monaco-vscode-api/monaco",
+	"app/excluded-surfaces.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/contributions",
 	"app/excluded-surfaces.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/views",
+	"app/features/scm/git-uri.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
+	"app/features/scm/hunk-stage.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/diff/linesDiffComputers",
+	"app/features/scm/plain-git-blame-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
+	"app/features/scm/plain-git-blame-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/editor/browser/services/codeEditorService.service",
+	"app/features/scm/plain-git-blame-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/model",
+	"app/features/scm/plain-git-blame-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/services/languageFeatures.service",
+	"app/features/scm/plain-git-blame-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace.service",
+	"app/features/scm/plain-git-blame.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/cancellation",
+	"app/features/scm/plain-git-blame.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/htmlContent",
+	"app/features/scm/plain-git-blame.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
+	"app/features/scm/plain-git-blame.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/core/position",
+	"app/features/scm/plain-git-blame.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/languages",
+	"app/features/scm/plain-git-blame.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/model",
+	"app/features/scm/plain-git-commit-detail.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/event",
+	"app/features/scm/plain-git-commit-detail.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
+	"app/features/scm/plain-git-commit-detail.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/model",
+	"app/features/scm/plain-git-commit-detail.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/multiDiffEditor/browser/multiDiffSourceResolverService",
+	"app/features/scm/plain-git-commit-detail.ts:@codingame/monaco-vscode-model-service-override/vscode/vs/editor/common/services/resolverService",
+	"app/features/scm/plain-git-content-provider.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
+	"app/features/scm/plain-git-content-provider.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/model",
+	"app/features/scm/plain-git-content-provider.ts:@codingame/monaco-vscode-model-service-override/vscode/vs/editor/common/services/resolverService",
+	"app/features/scm/plain-git-history-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/dom",
+	"app/features/scm/plain-git-history-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration.service",
+	"app/features/scm/plain-git-history-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextkey/common/contextkey.service",
+	"app/features/scm/plain-git-history-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextview/browser/contextView.service",
+	"app/features/scm/plain-git-history-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/hover/browser/hover.service",
+	"app/features/scm/plain-git-history-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/instantiation",
+	"app/features/scm/plain-git-history-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/keybinding/common/keybinding.service",
+	"app/features/scm/plain-git-history-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/opener/common/opener.service",
+	"app/features/scm/plain-git-history-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/themeService.service",
+	"app/features/scm/plain-git-history-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace.service",
+	"app/features/scm/plain-git-history-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/views/viewPane",
+	"app/features/scm/plain-git-history-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/views.service",
+	"app/features/scm/plain-git-history-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service",
+	"app/features/scm/plain-git-graph-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/dom",
+	"app/features/scm/plain-git-graph-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration.service",
+	"app/features/scm/plain-git-graph-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextkey/common/contextkey.service",
+	"app/features/scm/plain-git-graph-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextview/browser/contextView.service",
+	"app/features/scm/plain-git-graph-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/hover/browser/hover.service",
+	"app/features/scm/plain-git-graph-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/instantiation",
+	"app/features/scm/plain-git-graph-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/keybinding/common/keybinding.service",
+	"app/features/scm/plain-git-graph-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/opener/common/opener.service",
+	"app/features/scm/plain-git-graph-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/themeService.service",
+	"app/features/scm/plain-git-graph-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/views/viewPane",
+	"app/features/scm/plain-git-graph-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/views.service",
+	"app/features/scm/plain-git-stash-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/dom",
+	"app/features/scm/plain-git-stash-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration.service",
+	"app/features/scm/plain-git-stash-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextkey/common/contextkey.service",
+	"app/features/scm/plain-git-stash-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextview/browser/contextView.service",
+	"app/features/scm/plain-git-stash-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service",
+	"app/features/scm/plain-git-stash-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/hover/browser/hover.service",
+	"app/features/scm/plain-git-stash-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/instantiation",
+	"app/features/scm/plain-git-stash-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/keybinding/common/keybinding.service",
+	"app/features/scm/plain-git-stash-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service",
+	"app/features/scm/plain-git-stash-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/opener/common/opener.service",
+	"app/features/scm/plain-git-stash-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/themeService.service",
+	"app/features/scm/plain-git-stash-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/views/viewPane",
+	"app/features/scm/plain-git-stash-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/views.service",
+	"app/features/scm/plain-git-worktree-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/dom",
+	"app/features/scm/plain-git-worktree-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration.service",
+	"app/features/scm/plain-git-worktree-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextkey/common/contextkey.service",
+	"app/features/scm/plain-git-worktree-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextview/browser/contextView.service",
+	"app/features/scm/plain-git-worktree-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service",
+	"app/features/scm/plain-git-worktree-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/hover/browser/hover.service",
+	"app/features/scm/plain-git-worktree-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/instantiation",
+	"app/features/scm/plain-git-worktree-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/keybinding/common/keybinding.service",
+	"app/features/scm/plain-git-worktree-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service",
+	"app/features/scm/plain-git-worktree-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/opener/common/opener.service",
+	"app/features/scm/plain-git-worktree-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/themeService.service",
+	"app/features/scm/plain-git-worktree-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/views/viewPane",
+	"app/features/scm/plain-git-worktree-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/views.service",
+	"app/features/scm/plain-scm-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions",
+	"app/features/scm/plain-scm-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands",
+	"app/features/scm/plain-scm-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service",
+	"app/features/scm/plain-scm-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace.service",
+	"app/features/scm/plain-scm-commands.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service",
+	"app/features/scm/plain-scm-commands.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/views/common/viewsService.service",
+	"app/features/scm/plain-scm-provider.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/event",
+	"app/features/scm/plain-scm-provider.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/observableInternal/base",
+	"app/features/scm/plain-scm-provider.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/observableInternal/observables/constObservable",
+	"app/features/scm/plain-scm-provider.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/resourceTree",
+	"app/features/scm/plain-scm-provider.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
+	"app/features/scm/plain-scm-provider.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/languages",
+	"app/features/scm/plain-scm-provider.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/model",
+	"app/features/scm/plain-scm-provider.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/scm/common/artifact",
+	"app/features/scm/plain-scm-provider.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/scm/common/history",
+	"app/features/scm/plain-scm-provider.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/scm/common/scm",
+	"app/features/scm/plain-scm-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/dom",
+	"app/features/scm/plain-scm-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle",
+	"app/features/scm/plain-scm-view.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/services/model.service",
+	"app/features/scm/plain-scm-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration.service",
+	"app/features/scm/plain-scm-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextkey/common/contextkey.service",
+	"app/features/scm/plain-scm-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextview/browser/contextView.service",
+	"app/features/scm/plain-scm-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service",
+	"app/features/scm/plain-scm-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/hover/browser/hover.service",
+	"app/features/scm/plain-scm-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/instantiation",
+	"app/features/scm/plain-scm-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/keybinding/common/keybinding.service",
+	"app/features/scm/plain-scm-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service",
+	"app/features/scm/plain-scm-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/opener/common/opener.service",
+	"app/features/scm/plain-scm-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/themeService.service",
+	"app/features/scm/plain-scm-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace.service",
+	"app/features/scm/plain-scm-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/views/viewPane",
+	"app/features/scm/plain-scm-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/views.service",
+	"app/features/scm/plain-scm-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/scm/common/scm",
+	"app/features/scm/plain-scm-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/scm/common/scm.service",
+	"app/features/scm/plain-scm-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service",
+	"app/features/scm/scm-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/codicons",
+	"app/features/scm/scm-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors",
+	"app/features/scm/scm-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/platform/registry/common/platform",
+	"app/features/scm/scm-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/views/viewPaneContainer",
+	"app/features/scm/scm-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/views",
+	"app/features/search/plain-replace-coordinator.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
+	"app/features/search/plain-replace-coordinator.ts:@codingame/monaco-vscode-api/vscode/vs/editor/browser/services/bulkEditService",
+	"app/features/search/plain-search-service.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/cancellation",
+	"app/features/search/plain-search-service.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/glob",
+	"app/features/search/plain-search-service.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
+	"app/features/search/plain-search-service.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/services/model.service",
+	"app/features/search/plain-search-service.ts:@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files.service",
+	"app/features/search/plain-search-service.ts:@codingame/monaco-vscode-api/vscode/vs/platform/log/common/log.service",
+	"app/features/search/plain-search-service.ts:@codingame/monaco-vscode-api/vscode/vs/platform/telemetry/common/telemetry.service",
+	"app/features/search/plain-search-service.ts:@codingame/monaco-vscode-api/vscode/vs/platform/uriIdentity/common/uriIdentity.service",
+	"app/features/search/plain-search-service.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service",
+	"app/features/search/plain-search-service.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions.service",
+	"app/features/search/plain-search-service.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search",
+	"app/features/search/plain-search-service.ts:@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/services/search/common/searchService",
+	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/dom",
+	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/cancellation",
+	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/glob",
+	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle",
+	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/editor/browser/services/bulkEditService.service",
+	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration.service",
+	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextkey/common/contextkey.service",
+	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextview/browser/contextView.service",
+	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/hover/browser/hover.service",
+	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/instantiation",
+	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/keybinding/common/keybinding.service",
+	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/opener/common/opener.service",
+	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/themeService.service",
+	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace.service",
+	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/views/viewPane",
+	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/views.service",
+	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service",
+	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search",
+	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search.service",
+	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/textfile/common/textfiles.service",
+	"app/features/search/search-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configurationRegistry",
+	"app/features/search/search-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors",
+	"app/features/search/search-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/platform/registry/common/platform",
+	"app/features/search/search-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/views/viewPaneContainer",
+	"app/features/search/search-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/views",
+	"app/features/search/search-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/search/browser/searchIcons",
+	"app/features/search/search-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search",
+	"app/features/search/search-contribution.ts:@codingame/monaco-vscode-search-service-override/vscode/vs/workbench/contrib/search/browser/searchQuickAccess.contribution",
+	"app/features/terminal/plain-terminal-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions",
+	"app/features/terminal/plain-terminal-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands",
+	"app/features/terminal/plain-terminal-commands.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/views/common/viewsService.service",
+	"app/features/terminal/plain-terminal-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/dom",
+	"app/features/terminal/plain-terminal-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle",
+	"app/features/terminal/plain-terminal-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration.service",
+	"app/features/terminal/plain-terminal-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextkey/common/contextkey.service",
+	"app/features/terminal/plain-terminal-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextview/browser/contextView.service",
+	"app/features/terminal/plain-terminal-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service",
+	"app/features/terminal/plain-terminal-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/hover/browser/hover.service",
+	"app/features/terminal/plain-terminal-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/instantiation",
+	"app/features/terminal/plain-terminal-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/keybinding/common/keybinding.service",
+	"app/features/terminal/plain-terminal-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/opener/common/opener.service",
+	"app/features/terminal/plain-terminal-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/themeService.service",
+	"app/features/terminal/plain-terminal-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace.service",
+	"app/features/terminal/plain-terminal-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/views/viewPane",
+	"app/features/terminal/plain-terminal-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/views.service",
+	"app/features/terminal/terminal-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/codicons",
+	"app/features/terminal/terminal-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors",
+	"app/features/terminal/terminal-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/platform/registry/common/platform",
+	"app/features/terminal/terminal-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/views/viewPaneContainer",
+	"app/features/terminal/terminal-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/views",
+	"app/features/themes/plain-theme-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions",
+	"app/features/themes/plain-theme-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands",
+	"app/features/themes/plain-theme-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service",
+	"app/features/themes/plain-theme-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service",
+	"app/features/themes/plain-theme-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput",
+	"app/features/themes/plain-theme-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service",
+	"app/features/themes/plain-theme-commands.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service",
+	"app/features/themes/plain-theme-import-coordinator.ts:@codingame/monaco-vscode-api/extensions",
+	"app/features/themes/plain-theme-import-coordinator.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
+	"app/features/themes/plain-theme-import-coordinator.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService",
+	"app/features/themes/plain-theme-import-coordinator.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service",
+	"app/features/themes/plain-theme-picker.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands",
+	"app/features/themes/plain-theme-picker.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput",
+	"app/features/themes/plain-theme-picker.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service",
+	"app/features/themes/plain-theme-picker.ts:@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/theme",
+	"app/features/themes/plain-theme-picker.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service",
+	"app/features/themes/plain-theme-picker.ts:@codingame/monaco-vscode-theme-service-override/vscode/vs/workbench/services/themes/browser/fileIconThemeData",
+	"app/features/themes/plain-theme-picker.ts:@codingame/monaco-vscode-theme-service-override/vscode/vs/workbench/services/themes/browser/productIconThemeData",
+	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-api/extensions",
+	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
+	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-api/vscode/vs/platform/extensionResourceLoader/common/extensionResourceLoader.service",
+	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-api/vscode/vs/platform/extensions/common/extensions",
+	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files.service",
+	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/theme",
+	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/colorThemeData",
+	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService",
+	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-theme-service-override/vscode/vs/workbench/services/themes/browser/fileIconThemeData",
+	"app/features/themes/plain-theme-registry.ts:@codingame/monaco-vscode-theme-service-override/vscode/vs/workbench/services/themes/browser/productIconThemeData",
 	"app/features/workspace/commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands",
 	"app/features/workspace/commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands.service",
 	"app/features/workspace/commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextkey/common/contextkey.service",
@@ -247,13 +471,38 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/features/workspace/workspace-projection.ts:@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace",
 	"app/features/workspace/workspace-projection.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/browser/web.api",
 	"app/main.ts:@codingame/monaco-vscode-api",
+	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/editor/browser/services/codeEditorService.service",
+	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/services/languageFeatures.service",
+	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/services/model.service",
+	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/services/resolverService.service",
+	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files.service",
+	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/multiDiffEditor/browser/multiDiffSourceResolverService.service",
+	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service",
 	"app/main.ts:@codingame/monaco-vscode-configuration-service-override",
 	"app/main.ts:@codingame/monaco-vscode-files-service-override",
 	"app/main.ts:@codingame/monaco-vscode-theme-defaults-default-extension",
 	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service",
+	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/platform/extensionResourceLoader/common/extensionResourceLoader.service",
 	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors",
+	// `F110` S5: `registerSingleton`/`InstantiationType`. The patched
+	// `missing-services.js` no longer eagerly registers `IExtensionService`,
+	// and `initialize()`'s own services map is NOT an equivalent substitute —
+	// consumers resolved through the global singleton registry (`hoverService`
+	// among them) are constructed before that map applies, so binding only
+	// there left bootstrap dying with "hoverService depends on extensionService
+	// which is NOT registered" and 97 of 98 browser scenarios red while
+	// `pnpm check` stayed green. `app/services.ts` therefore performs the
+	// global registration itself, pointing at Plain's own
+	// `PlainNullExtensionService`.
+	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/extensions",
 	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/platform/workspaces/common/workspaces.service",
+	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/scm/common/scm.service",
+	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions.service",
 	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/languageStatus/common/languageStatusService.service",
+	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search.service",
+	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyBackup.service",
+	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService.service",
+	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyService.service",
 	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/workspaces/common/workspaceEditing.service",
 	"app/services.ts:@codingame/monaco-vscode-configuration-service-override",
 	"app/services.ts:@codingame/monaco-vscode-dialogs-service-override/vscode/vs/workbench/browser/parts/dialogs/dialog.web.contribution",
@@ -261,12 +510,42 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/services.ts:@codingame/monaco-vscode-explorer-service-override",
 	"app/services.ts:@codingame/monaco-vscode-files-service-override",
 	"app/services.ts:@codingame/monaco-vscode-model-service-override",
+	"app/services.ts:@codingame/monaco-vscode-multi-diff-editor-service-override",
 	"app/services.ts:@codingame/monaco-vscode-notifications-service-override",
+	"app/services.ts:@codingame/monaco-vscode-scm-service-override/vscode/vs/workbench/contrib/scm/common/scmService",
 	"app/services.ts:@codingame/monaco-vscode-textmate-service-override",
 	"app/services.ts:@codingame/monaco-vscode-theme-service-override",
 	"app/services.ts:@codingame/monaco-vscode-workbench-service-override",
+	"app/services.ts:@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService",
+	"app/services.ts:@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyService",
 	"app/services/empty-language-status.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/event",
 	"app/services/empty-language-status.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle",
+	"app/services/plain-null-extension-service.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/event",
+	"app/services/plain-null-extension-service.ts:@codingame/monaco-vscode-api/vscode/vs/platform/extensions/common/extensions",
+	"app/services/plain-null-extension-service.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensionHostKind",
+	"app/services/plain-null-extension-service.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions",
+	"app/services/plain-null-extension-service.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions.service",
+	"app/services/plain-null-extension-service.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensionsRegistry",
+	"app/services/plain-workspace-backup-service.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/buffer",
+	"app/services/plain-workspace-backup-service.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/cancellation",
+	"app/services/plain-workspace-backup-service.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/stream",
+	"app/services/plain-workspace-backup-service.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
+	"app/services/plain-workspace-backup-service.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopy",
+	"app/services/plain-workspace-backup-service.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyBackup",
+	"app/services/plain-workspace-backup-service.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyBackup.service",
+	"app/services/plain-workspace-backup-tracker.ts:@codingame/monaco-vscode-api/vscode/vs/platform/log/common/log.service",
+	"app/services/plain-workspace-backup-tracker.ts:@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace.service",
+	"app/services/plain-workspace-backup-tracker.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/contributions",
+	"app/services/plain-workspace-backup-tracker.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service",
+	"app/services/plain-workspace-backup-tracker.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/filesConfiguration/common/filesConfigurationService.service",
+	"app/services/plain-workspace-backup-tracker.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/lifecycle/common/lifecycle",
+	"app/services/plain-workspace-backup-tracker.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/lifecycle/common/lifecycle.service",
+	"app/services/plain-workspace-backup-tracker.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopy",
+	"app/services/plain-workspace-backup-tracker.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyBackup.service",
+	"app/services/plain-workspace-backup-tracker.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService.service",
+	"app/services/plain-workspace-backup-tracker.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyService.service",
+	"app/services/plain-workspace-backup-tracker.ts:@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyBackupTracker",
+	"app/services/plain-workspace-backup-tracker.ts:@codingame/monaco-vscode-working-copy-service-override/vscode/vs/workbench/services/workingCopy/common/workingCopyEditorService",
 	"app/services/plain-workspace-services.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/event",
 	"app/services/plain-workspace-services.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
 	"app/services/plain-workspace-services.ts:@codingame/monaco-vscode-api/vscode/vs/platform/backup/common/backup",
@@ -274,6 +553,104 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/services/plain-workspace-services.ts:@codingame/monaco-vscode-api/vscode/vs/platform/workspaces/common/workspaces",
 	"app/services/plain-workspace-services.ts:@codingame/monaco-vscode-api/vscode/vs/platform/workspaces/common/workspaces.service",
 	"app/services/plain-workspace-services.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/workspaces/common/workspaceEditing.service",
+	// `F100` S3 — the debug domain's own `ViewPane`s, glyph-margin
+	// contribution, view-container registration and commands.
+	"app/features/debug/debug-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/codicons",
+	"app/features/debug/debug-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors",
+	"app/features/debug/debug-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/platform/registry/common/platform",
+	"app/features/debug/debug-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/views/viewPaneContainer",
+	"app/features/debug/debug-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/views",
+	"app/features/debug/plain-debug-breakpoints-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/dom",
+	"app/features/debug/plain-debug-breakpoints-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
+	"app/features/debug/plain-debug-breakpoints-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/editor/browser/services/codeEditorService.service",
+	"app/features/debug/plain-debug-breakpoints-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/model",
+	"app/features/debug/plain-debug-breakpoints-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/standalone/standaloneEnums",
+	"app/features/debug/plain-debug-breakpoints-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace.service",
+	"app/features/debug/plain-debug-call-stack-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/dom",
+	"app/features/debug/plain-debug-call-stack-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration.service",
+	"app/features/debug/plain-debug-call-stack-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextkey/common/contextkey.service",
+	"app/features/debug/plain-debug-call-stack-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextview/browser/contextView.service",
+	"app/features/debug/plain-debug-call-stack-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/hover/browser/hover.service",
+	"app/features/debug/plain-debug-call-stack-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/instantiation",
+	"app/features/debug/plain-debug-call-stack-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/keybinding/common/keybinding.service",
+	"app/features/debug/plain-debug-call-stack-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/opener/common/opener.service",
+	"app/features/debug/plain-debug-call-stack-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/themeService.service",
+	"app/features/debug/plain-debug-call-stack-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/views/viewPane",
+	"app/features/debug/plain-debug-call-stack-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/views.service",
+	"app/features/debug/plain-debug-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions",
+	"app/features/debug/plain-debug-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands",
+	"app/features/debug/plain-debug-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service",
+	"app/features/debug/plain-debug-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service",
+	"app/features/debug/plain-debug-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace.service",
+	"app/features/debug/plain-debug-commands.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/views/common/viewsService.service",
+	"app/features/debug/plain-debug-console-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/dom",
+	"app/features/debug/plain-debug-console-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration.service",
+	"app/features/debug/plain-debug-console-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextkey/common/contextkey.service",
+	"app/features/debug/plain-debug-console-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextview/browser/contextView.service",
+	"app/features/debug/plain-debug-console-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/hover/browser/hover.service",
+	"app/features/debug/plain-debug-console-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/instantiation",
+	"app/features/debug/plain-debug-console-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/keybinding/common/keybinding.service",
+	"app/features/debug/plain-debug-console-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/opener/common/opener.service",
+	"app/features/debug/plain-debug-console-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/themeService.service",
+	"app/features/debug/plain-debug-console-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/views/viewPane",
+	"app/features/debug/plain-debug-console-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/views.service",
+	"app/features/debug/plain-debug-session-alerts.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/contributions",
+	"app/features/debug/plain-debug-session-alerts.ts:@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service",
+	"app/features/debug/plain-debug-terminal-integration.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/contributions",
+	"app/features/debug/plain-debug-terminal-integration.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/views/common/viewsService.service",
+	"app/features/debug/plain-debug-variables-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/dom",
+	"app/features/debug/plain-debug-variables-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration.service",
+	"app/features/debug/plain-debug-variables-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextkey/common/contextkey.service",
+	"app/features/debug/plain-debug-variables-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextview/browser/contextView.service",
+	"app/features/debug/plain-debug-variables-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/hover/browser/hover.service",
+	"app/features/debug/plain-debug-variables-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/instantiation",
+	"app/features/debug/plain-debug-variables-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/keybinding/common/keybinding.service",
+	"app/features/debug/plain-debug-variables-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/opener/common/opener.service",
+	"app/features/debug/plain-debug-variables-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/themeService.service",
+	"app/features/debug/plain-debug-variables-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/views/viewPane",
+	"app/features/debug/plain-debug-variables-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/views.service",
+	"app/features/debug/plain-debug-watch-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/dom",
+	"app/features/debug/plain-debug-watch-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration.service",
+	"app/features/debug/plain-debug-watch-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextkey/common/contextkey.service",
+	"app/features/debug/plain-debug-watch-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextview/browser/contextView.service",
+	"app/features/debug/plain-debug-watch-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/hover/browser/hover.service",
+	"app/features/debug/plain-debug-watch-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/instantiation",
+	"app/features/debug/plain-debug-watch-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/keybinding/common/keybinding.service",
+	"app/features/debug/plain-debug-watch-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/opener/common/opener.service",
+	"app/features/debug/plain-debug-watch-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/themeService.service",
+	"app/features/debug/plain-debug-watch-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/views/viewPane",
+	"app/features/debug/plain-debug-watch-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/views.service",
+	// `F110` S4 (`app/features/workbench/plain-global-composite-bar.ts`, the
+	// Activity Bar's migrated "Manage" gear — see that file's own doc comment).
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/dom",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/keyboardEvent",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/mouseEvent",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/touch",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/ui/actionbar/actionbar",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/ui/contextview/contextview",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/actions",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/keyCodes",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/layout",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/themables",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/types",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/platform/actions/browser/menuEntryActionViewItem",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions.service",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration.service",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextkey/common/contextkey.service",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextview/browser/contextView.service",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/platform/hover/browser/hover.service",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/instantiation",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/platform/keybinding/common/keybinding.service",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/themeService",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/themeService.service",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/compositeBarActions",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/activity",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/theme",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/activity/common/activity.service",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/userDataProfile/common/userDataProfile.service",
+	"app/features/workbench/plain-global-composite-bar.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/userDataProfile/common/userDataProfileIcons",
 ]);
 const ALLOWED_OTHER_BARE_APP_IMPORTS = Object.freeze([
 	"app/platform/tauri/native.ts:@tauri-apps/api/core",
@@ -1545,12 +1922,50 @@ function validateBootstrap(sourceFile) {
 	const hasExactInitializeConfiguration =
 		initialWorkspaceName !== undefined &&
 		hasExactObjectShape(initializeConfiguration, [
+			// `F120` S0 (`docs/research/2026-07-29-branding-packaging.md`, "5.1
+			// 品牌统一"): expanded from the original two-field
+			// `{nameShort, nameLong}` shape to the full closed brand-field set.
+			// These nine literal values must stay byte-identical to
+			// `scripts/plain/boundary-contracts.mjs`'s own
+			// `EXPECTED_PRODUCT_CONFIGURATION` (that module's
+			// `validateProductConfigurationBoundary` is the primary,
+			// field-by-field contract with the full rationale for each value;
+			// this one only needs the closed shape to keep validating the
+			// surrounding bootstrap statement order/sequencing it was already
+			// responsible for).
 			[
 				"productConfiguration",
 				(value) =>
 					hasExactObjectShape(value, [
 						["nameShort", (name) => isExactStringLiteral(name, "Plain")],
 						["nameLong", (name) => isExactStringLiteral(name, "Plain")],
+						["applicationName", (name) => isExactStringLiteral(name, "plain")],
+						["dataFolderName", (name) => isExactStringLiteral(name, ".plain")],
+						[
+							"sharedDataFolderName",
+							(name) => isExactStringLiteral(name, ".plain-shared"),
+						],
+						["urlProtocol", (name) => isExactStringLiteral(name, "plain")],
+						[
+							"reportIssueUrl",
+							(name) =>
+								isExactStringLiteral(
+									name,
+									"https://github.com/10xChengTu/plain0/issues/new",
+								),
+						],
+						[
+							"licenseUrl",
+							(name) =>
+								isExactStringLiteral(
+									name,
+									"https://github.com/10xChengTu/plain0/blob/main/LICENSE.txt",
+								),
+						],
+						[
+							"serverApplicationName",
+							(name) => isExactStringLiteral(name, "plain-server"),
+						],
 					]),
 			],
 			[
@@ -1564,6 +1979,15 @@ function validateBootstrap(sourceFile) {
 						[
 							"workbench.startupEditor",
 							(editor) => isExactStringLiteral(editor, "none"),
+						],
+						[
+							"files.autoSave",
+							(autoSave) => isExactStringLiteral(autoSave, "off"),
+						],
+						[
+							"search.followSymlinks",
+							(followSymlinks) =>
+								followSymlinks.kind === ts.SyntaxKind.FalseKeyword,
 						],
 					]),
 			],
@@ -3481,6 +3905,17 @@ function validateGuardedCommands(sourceFile) {
 	);
 }
 
+// `F080` S0's excluded-surface depth hardening
+// (`docs/research/2026-07-25-core-git.md` decision 2) adds a *third*
+// `Registry.as(...)` read to `app/excluded-surfaces.ts` — the
+// `WorkbenchContributionsRegistry` singleton, keyed by a second
+// "Extensions" namespace import (aliased `WorkbenchContributionExtensions`,
+// mirroring the existing `ViewExtensions` alias for the view-registry
+// pair) so its own `Extensions.Workbench` property never collides with
+// `ViewExtensions`'s. This function's closed-shape check is extended
+// alongside it: exactly three `Registry.as(...)` reads total, and every
+// "Registry"/"ViewExtensions"/"WorkbenchContributionExtensions" identifier
+// reference accounted for.
 function validateCommandRegistryReader(sourceFile) {
 	const commandRegistryImport = namedImportLocalIdentifier(
 		sourceFile,
@@ -3497,6 +3932,12 @@ function validateCommandRegistryReader(sourceFile) {
 		"@codingame/monaco-vscode-api/vscode/vs/workbench/common/views",
 		"Extensions",
 		"ViewExtensions",
+	);
+	const workbenchContributionExtensionsImport = namedImportLocalIdentifier(
+		sourceFile,
+		"@codingame/monaco-vscode-api/vscode/vs/workbench/common/contributions",
+		"Extensions",
+		"WorkbenchContributionExtensions",
 	);
 	const reads = callWithChain(sourceFile, ["CommandsRegistry", "getCommands"]);
 	const read = reads.length === 1 ? reads[0] : undefined;
@@ -3525,13 +3966,41 @@ function validateCommandRegistryReader(sourceFile) {
 			return { receiver, viewExtensionsReceiver };
 		},
 	);
+	const contributionRegistryMatches = registryReads.filter(
+		(call) =>
+			call.arguments.length === 1 &&
+			sameChain(call.arguments[0], [
+				"WorkbenchContributionExtensions",
+				"Workbench",
+			]),
+	);
+	const contributionRegistryCall =
+		contributionRegistryMatches.length === 1
+			? contributionRegistryMatches[0]
+			: undefined;
+	const contributionRegistryReceiver = directMethodReceiver(
+		contributionRegistryCall,
+		"Registry",
+		"as",
+	);
+	const contributionRegistryArgument = ts.isCallExpression(
+		contributionRegistryCall,
+	)
+		? unwrapExpression(contributionRegistryCall.arguments[0])
+		: undefined;
+	const workbenchContributionExtensionsReceiver =
+		contributionRegistryArgument !== undefined &&
+		ts.isPropertyAccessExpression(contributionRegistryArgument)
+			? unwrapExpression(contributionRegistryArgument.expression)
+			: undefined;
 	return (
 		commandRegistryImport !== undefined &&
 		registryImport !== undefined &&
 		viewExtensionsImport !== undefined &&
+		workbenchContributionExtensionsImport !== undefined &&
 		readReceiver !== undefined &&
 		read.arguments.length === 0 &&
-		registryReads.length === registryReadContracts.length &&
+		registryReads.length === registryReadContracts.length + 1 &&
 		registryReadContracts.every(
 			({ receiver, viewExtensionsReceiver }) =>
 				receiver !== undefined &&
@@ -3539,6 +4008,11 @@ function validateCommandRegistryReader(sourceFile) {
 				ts.isIdentifier(viewExtensionsReceiver) &&
 				viewExtensionsReceiver.text === "ViewExtensions",
 		) &&
+		contributionRegistryReceiver !== undefined &&
+		workbenchContributionExtensionsReceiver !== undefined &&
+		ts.isIdentifier(workbenchContributionExtensionsReceiver) &&
+		workbenchContributionExtensionsReceiver.text ===
+			"WorkbenchContributionExtensions" &&
 		hasExactIdentifierReferences(sourceFile, "CommandsRegistry", [
 			commandRegistryImport,
 			readReceiver,
@@ -3546,13 +4020,22 @@ function validateCommandRegistryReader(sourceFile) {
 		hasExactIdentifierReferences(sourceFile, "Registry", [
 			registryImport,
 			...registryReadContracts.map(({ receiver }) => receiver),
+			contributionRegistryReceiver,
 		]) &&
 		hasExactIdentifierReferences(sourceFile, "ViewExtensions", [
 			viewExtensionsImport,
 			...registryReadContracts.map(
 				({ viewExtensionsReceiver }) => viewExtensionsReceiver,
 			),
-		])
+		]) &&
+		hasExactIdentifierReferences(
+			sourceFile,
+			"WorkbenchContributionExtensions",
+			[
+				workbenchContributionExtensionsImport,
+				workbenchContributionExtensionsReceiver,
+			],
+		)
 	);
 }
 
@@ -4917,18 +5400,33 @@ function validateProviderBindingAuthority(authority, moduleImports) {
 	);
 }
 
+// `DIRECT_COMMAND_REGISTRATION_MANIFEST` entries are only mandatory when
+// either the caller supplied the complete app authority (`appSources`,
+// `authority.completeAppAuthority === true`) or the manifest's own file
+// happens to be part of whatever narrower fixed-file set the caller did
+// supply (some callers — e.g. the workspace-topology-only test fixtures —
+// intentionally pass just the small, fixed workspace-topology entrypoint
+// set, never app/features/themes/plain-theme-picker.ts). A manifest entry
+// for a file that is simply absent from a narrower, non-complete authority
+// is vacuously satisfied rather than failed; one that IS present is still
+// held to its exact registration count and shape, in either mode.
 function validateDirectCommandRegistrationManifest(authority, registrations) {
 	const manifestPaths = DIRECT_COMMAND_REGISTRATION_MANIFEST.map(
 		({ relativePath }) => relativePath,
 	);
-	const expectedCount = DIRECT_COMMAND_REGISTRATION_MANIFEST.reduce(
+	const relevantManifestEntries = DIRECT_COMMAND_REGISTRATION_MANIFEST.filter(
+		({ relativePath }) =>
+			authority.completeAppAuthority === true ||
+			authority.filesByPath[relativePath] !== undefined,
+	);
+	const expectedCount = relevantManifestEntries.reduce(
 		(total, { count }) => total + count,
 		0,
 	);
 	return (
 		new Set(manifestPaths).size === manifestPaths.length &&
 		registrations.length === expectedCount &&
-		DIRECT_COMMAND_REGISTRATION_MANIFEST.every(({ relativePath, count }) => {
+		relevantManifestEntries.every(({ relativePath, count }) => {
 			const sourceFile = authority.filesByPath[relativePath]?.sourceFile;
 			const sourceRegistrations = registrations.filter(
 				({ sourceFile }) => sourceFile.fileName === relativePath,
@@ -5190,11 +5688,16 @@ function validateTopologyAuthority(authority) {
 			);
 		},
 	);
+	// See validateDirectCommandRegistrationManifest's own doc comment: a
+	// manifest entry only contributes an expected CommandsRegistry import when
+	// its file is actually part of the authority being validated.
 	const expectedCommandAuthorityImportKeys = [
 		`app/excluded-surfaces.ts:${MONACO_API_MODULE}`,
-		...DIRECT_COMMAND_REGISTRATION_MANIFEST.map(
-			({ relativePath }) => `${relativePath}:${COMMAND_REGISTRY_MODULE}`,
-		),
+		...DIRECT_COMMAND_REGISTRATION_MANIFEST.filter(
+			({ relativePath }) =>
+				authority.completeAppAuthority === true ||
+				authority.filesByPath[relativePath] !== undefined,
+		).map(({ relativePath }) => `${relativePath}:${COMMAND_REGISTRY_MODULE}`),
 	].sort();
 	const hasClosedProviderBindings = validateProviderBindingAuthority(
 		authority,

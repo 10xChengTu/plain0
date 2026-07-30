@@ -451,6 +451,51 @@ createPlainWorkspaceFileSystemProvider();`,
 		).toEqual([]);
 	});
 
+	it("rejects an unauthorized monaco-vscode-api import from either theme file", () => {
+		for (const relativePath of [
+			"app/features/themes/plain-theme-registry.ts",
+			"app/features/themes/plain-theme-picker.ts",
+		]) {
+			expectFailure(
+				mutatedProductionAppSource(
+					relativePath,
+					(source) =>
+						`import { Registry } from "@codingame/monaco-vscode-api/vscode/vs/platform/registry/common/platform";\n${source}`,
+				),
+				WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+			);
+		}
+	});
+
+	it("rejects a second registerCommand call added to the theme picker file", () => {
+		expectFailure(
+			mutatedProductionAppSource(
+				"app/features/themes/plain-theme-picker.ts",
+				(source) =>
+					`${source}\nCommandsRegistry.registerCommand("plain.rogueThemeCommand", () => undefined);\n`,
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+	});
+
+	it("rejects a third, unaudited file registering commands directly", () => {
+		expectFailure(
+			{
+				...withAppSources(currentSources()),
+				appSources: [
+					...withAppSources(currentSources()).appSources,
+					{
+						relativePath: "app/features/themes/rogue-command.ts",
+						source: `import { CommandsRegistry } from "@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands";
+CommandsRegistry.registerCommand("plain.rogueThemeCommand", () => undefined);
+`,
+					},
+				],
+			},
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+	});
+
 	it("rejects duplicate providers and reversed fixed-scheme registration", () => {
 		const duplicateConfigurationFactory = mutated("main", (source) =>
 			replaceOnce(
@@ -1011,9 +1056,8 @@ Reflect.set(FileSystemProviderCapabilities, "FileReadWrite", 0);
 			mutated("main", (source) =>
 				replaceOnce(
 					source,
-					"await initialize(createServiceOverrides(), container, {\n\t\tproductConfiguration:",
-					`await initialize(createServiceOverrides(), container, {
-		commands: [{ id: "plain.extra", handler: () => undefined }],
+					"\n\t\tproductConfiguration:",
+					`\n\t\tcommands: [{ id: "plain.extra", handler: () => undefined }],
 		productConfiguration:`,
 				),
 			),
@@ -1446,6 +1490,42 @@ export function captureWorkbenchSurfaces`,
 		);
 		expectFailure(
 			withAppSources(indirectSources),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+	});
+
+	// `F080` S0's excluded-surface depth hardening added a third
+	// `Registry.as(...)` read (the `WorkbenchContributionsRegistry`
+	// singleton) to `app/excluded-surfaces.ts` — locking both directions of
+	// that change: exactly three reads (not a fourth, unaccounted one) and
+	// that read must specifically target `WorkbenchContributionExtensions.Workbench`.
+	it("rejects an extra unaccounted Registry.as read added to the excluded-surface command reader", () => {
+		const sources = mutated("excludedSurfaces", (source) =>
+			replaceOnce(
+				source,
+				"export function captureWorkbenchSurfaces",
+				`const extraRegistryRead = Registry.as<any>("platform.someOtherRegistry");
+void extraRegistryRead;
+
+export function captureWorkbenchSurfaces`,
+			),
+		);
+		expectFailure(
+			withAppSources(sources),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
+	});
+
+	it("rejects the contribution registry read if it targets a different property than Workbench", () => {
+		const sources = mutated("excludedSurfaces", (source) =>
+			replaceOnce(
+				source,
+				"WorkbenchContributionExtensions.Workbench,",
+				"WorkbenchContributionExtensions.NotWorkbench,",
+			),
+		);
+		expectFailure(
+			withAppSources(sources),
 			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
 		);
 	});

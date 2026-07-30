@@ -3,31 +3,68 @@ import { lstat, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { validateMacOSPackagingWorkflow } from "./ci-packaging-contract.mjs";
 import {
 	validateCapabilityFiles,
+	validateDebugAdapterConfirmationBoundary,
+	validateDebugAdapterConnectBoundary,
+	validateDebugAdapterSpawnBoundary,
+	validateDebugCommandRegistration,
+	validateDebugFramingBounds,
+	validateDebugRunInTerminalBoundary,
+	validateDebugSpawnConstructionShape,
+	validateDebugTcpCompanionSpawnBoundary,
 	validateDialogOverrideImportBoundary,
 	validateDialogServiceOverride,
 	validateDialogSurfaceBoundary,
+	validateEntitlementsBoundary,
 	validateNotificationOverrideImportBoundary,
 	validateFrontendEntrypointScripts,
+	validateGitBlameHardeningArgs,
+	validateGitCommandRegistration,
+	validateGitDiscardConfirmationBoundary,
+	validateGitIpcBridgeBoundary,
+	validateGitLogGraphFormatStringBoundary,
+	validateGitNetworkConfirmationBoundary,
+	validateGitRefsFieldSafetyBoundary,
+	validateGitRustBoundary,
+	validateGitShowCommitFirstParentBoundary,
+	validateGitStashConfirmationBoundary,
+	validateGitStashMessageFieldSafetyBoundary,
+	validateGitWorktreeConfirmationBoundary,
 	validateMainCapability,
+	validateMultiDiffEditorOverrideImportBoundary,
+	validateProductConfigurationBoundary,
+	validateSearchCommandRegistration,
+	validateSearchFileBudgetConstants,
+	validateSearchOverrideImportBoundary,
+	validateSearchTextBudgetConstants,
+	validateSearchTextCommandRegistration,
 	validateTauriApiBoundary,
 	validateTauriConfiguration,
 	validateTauriConfigurationFiles,
 	validateTauriE2EConfiguration,
+	validateTerminalIpcBridgeBoundary,
+	validateTerminalRustBoundary,
+	validateTrustTerminalCommandRegistration,
+	validateWorkspaceBrowserFixtureWindowAuthority,
 	validateWorkspaceCapabilitiesBoundary,
 	validateWorkspaceCopyCommandRegistration,
 	validateWorkspaceDeleteBoundary,
 	validateWorkspaceDeleteCommandRegistration,
+	validateWorkspaceDeleteFailureBrowserFixture,
 	validateWorkspaceDeleteTypeScriptBoundary,
 	validateWorkspaceMoveBoundary,
 	validateWorkspaceMoveCommandRegistration,
 	validateWorkspaceMoveFailureBrowserFixture,
 	validateWorkspaceProviderBootstrap,
 	validateWorkspaceProviderCopyBoundary,
+	validateViewPaneDependencyDecoratorBoundary,
 	validateWorkspaceRustBoundary,
 	validateWorkspaceVersionedWriteBoundary,
+	validateWorkingCopyOverrideImportBoundary,
 } from "./boundary-contracts.mjs";
+import { validateMissingServicesPatchShape } from "./missing-services-patch-contract.mjs";
 import {
 	auditedWorkbenchPatchPaths,
 	validateWorkbenchPatchSet,
@@ -52,11 +89,15 @@ const allowedDependencies = new Map([
 	["@codingame/monaco-vscode-explorer-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-files-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-model-service-override", "35.0.1"],
+	["@codingame/monaco-vscode-multi-diff-editor-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-notifications-service-override", "35.0.1"],
+	["@codingame/monaco-vscode-scm-service-override", "35.0.1"],
+	["@codingame/monaco-vscode-search-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-textmate-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-theme-defaults-default-extension", "35.0.1"],
 	["@codingame/monaco-vscode-theme-service-override", "35.0.1"],
 	["@codingame/monaco-vscode-workbench-service-override", "35.0.1"],
+	["@codingame/monaco-vscode-working-copy-service-override", "35.0.1"],
 	["@tauri-apps/api", "2.11.1"],
 	["monaco-editor", "npm:@codingame/monaco-vscode-editor-api@35.0.1"],
 ]);
@@ -176,6 +217,13 @@ const requiredPatches = new Map([
 			marker: "Plain keeps the contribution schema constant",
 		},
 	],
+	[
+		"@codingame/monaco-vscode-view-title-bar-service-override@35.0.1",
+		{
+			file: "patches/@codingame__monaco-vscode-view-title-bar-service-override@35.0.1.patch",
+			marker: "PlainSimpleGlobalActivityActionViewItem",
+		},
+	],
 ]);
 
 const workspaceManifest = await readFile(
@@ -250,6 +298,51 @@ if (
 		workspaceManifest,
 		lockfile: lock,
 		patchSources,
+	})) {
+		fail(failure);
+	}
+}
+
+// `F110` S2 (`docs/research/2026-07-28-legacy-retirement.md`, "主导会话裁定"
+// point 1): the sha256/hunk-shape lock above proves the *patch file's own
+// bytes* haven't drifted; it does not prove the *currently-installed,
+// patch-applied* vendor files still have the shape this slice's
+// `mcp`/`syncEditSessions`/`authAccount` token removal assumed — a future
+// `@codingame/monaco-vscode-api` version bump could leave the patch applying
+// "successfully" (by diff-context coincidence) while the resulting file no
+// longer matches what was audited. Reading the real, installed (post-patch)
+// `missing-services.js`/`services.js` here and asserting their content
+// directly is the faster, more directly diagnostic first line of defense
+// `scripts/plain/missing-services-patch-contract.mjs`'s own module doc
+// comment describes — `check:bundle`'s per-category ratchet ceilings remain
+// the second, full-bundle-level line behind it.
+const vendorApiRoot = path.join(
+	root,
+	"node_modules/@codingame/monaco-vscode-api",
+);
+let vendorMissingServicesSource;
+let vendorServicesFacadeSource;
+try {
+	vendorMissingServicesSource = await readFile(
+		path.join(vendorApiRoot, "missing-services.js"),
+		"utf8",
+	);
+	vendorServicesFacadeSource = await readFile(
+		path.join(vendorApiRoot, "services.js"),
+		"utf8",
+	);
+} catch {
+	fail(
+		"node_modules/@codingame/monaco-vscode-api/missing-services.js or services.js is missing; run pnpm install first",
+	);
+}
+if (
+	vendorMissingServicesSource !== undefined &&
+	vendorServicesFacadeSource !== undefined
+) {
+	for (const failure of validateMissingServicesPatchShape({
+		missingServicesSource: vendorMissingServicesSource,
+		servicesSource: vendorServicesFacadeSource,
 	})) {
 		fail(failure);
 	}
@@ -347,6 +440,10 @@ const forbiddenSourcePatterns = [
 		/monaco-vscode-languages?-service-override[^'"]*/,
 		"language service override",
 	],
+	[
+		/monaco-vscode-extensions-service-override[^'"]*/,
+		"extensions service override (real Extension Host)",
+	],
 ];
 
 for (const file of appFiles) {
@@ -370,6 +467,24 @@ for (const file of appFiles) {
 		fail(failure);
 	}
 	for (const failure of validateNotificationOverrideImportBoundary(
+		source,
+		relative,
+	)) {
+		fail(failure);
+	}
+	for (const failure of validateWorkingCopyOverrideImportBoundary(
+		source,
+		relative,
+	)) {
+		fail(failure);
+	}
+	for (const failure of validateSearchOverrideImportBoundary(
+		source,
+		relative,
+	)) {
+		fail(failure);
+	}
+	for (const failure of validateMultiDiffEditorOverrideImportBoundary(
 		source,
 		relative,
 	)) {
@@ -400,9 +515,15 @@ const appSources = await Promise.all(
 for (const failure of validateWorkspaceDeleteTypeScriptBoundary(appSources)) {
 	fail(failure);
 }
+for (const failure of validateViewPaneDependencyDecoratorBoundary(appSources)) {
+	fail(failure);
+}
 
 const mainSource = await readFile(path.join(appRoot, "main.ts"), "utf8");
 for (const failure of validateWorkspaceProviderBootstrap(mainSource)) {
+	fail(failure);
+}
+for (const failure of validateProductConfigurationBoundary(mainSource)) {
 	fail(failure);
 }
 const servicesSource = await readFile(
@@ -462,6 +583,16 @@ for (const failure of validateWorkspaceMoveFailureBrowserFixture(
 )) {
 	fail(failure);
 }
+for (const failure of validateWorkspaceDeleteFailureBrowserFixture(
+	workspaceBrowserFixtureSource,
+)) {
+	fail(failure);
+}
+for (const failure of validateWorkspaceBrowserFixtureWindowAuthority(
+	workspaceBrowserFixtureSource,
+)) {
+	fail(failure);
+}
 
 const tauriRoot = path.join(root, "src-tauri");
 const tauriRootEntries = await readdir(tauriRoot, { withFileTypes: true });
@@ -506,6 +637,39 @@ if (!hasRealTauriConfigurationFiles) {
 	)) {
 		fail(failure);
 	}
+}
+
+// `F120` S5 (`docs/research/2026-07-29-branding-packaging.md` "结论 4.3",
+// "需要新增的 AST 契约" item 3): `src-tauri/Entitlements.plist` must exist and
+// declare exactly the audited entitlement set -- see
+// `validateEntitlementsBoundary`'s own doc comment for why this is a
+// hand-rolled, narrowly-scoped parser rather than a general plist library.
+const entitlementsPath = path.join(tauriRoot, "Entitlements.plist");
+try {
+	const entitlementsSource = await readFile(entitlementsPath, "utf8");
+	for (const failure of validateEntitlementsBoundary(entitlementsSource)) {
+		fail(failure);
+	}
+} catch {
+	fail(
+		"src-tauri/Entitlements.plist must exist and declare the audited hardened-runtime entitlement set",
+	);
+}
+
+// `F120` S6 (`docs/research/2026-07-29-branding-packaging.md` "结论 5",
+// "需要新增的 AST 契约" item 5): assert CI actually packages the app, not
+// just checks/tests it -- see `validateMacOSPackagingWorkflow`'s own doc
+// comment for why this is deliberately scoped to macOS only for now.
+const ciWorkflowPath = path.join(root, ".github/workflows/plain-ci.yml");
+try {
+	const ciWorkflowSource = await readFile(ciWorkflowPath, "utf8");
+	for (const failure of validateMacOSPackagingWorkflow(ciWorkflowSource)) {
+		fail(failure);
+	}
+} catch {
+	fail(
+		".github/workflows/plain-ci.yml must exist and run a real macOS tauri build",
+	);
 }
 
 const capabilitiesRoot = path.join(root, "src-tauri/capabilities");
@@ -664,6 +828,94 @@ for (const failure of validateWorkspaceDeleteCommandRegistration(rustSources)) {
 	fail(failure);
 }
 for (const failure of validateWorkspaceDeleteBoundary(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateSearchCommandRegistration(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateSearchFileBudgetConstants(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateSearchTextCommandRegistration(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateSearchTextBudgetConstants(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateTerminalRustBoundary(
+	rustSources,
+	cargo,
+	cargoDependencies,
+)) {
+	fail(failure);
+}
+for (const failure of validateTrustTerminalCommandRegistration(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateTerminalIpcBridgeBoundary(
+	rustSources,
+	appSources,
+)) {
+	fail(failure);
+}
+for (const failure of validateGitCommandRegistration(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateGitRustBoundary(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateGitBlameHardeningArgs(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateGitShowCommitFirstParentBoundary(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateGitLogGraphFormatStringBoundary(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateGitRefsFieldSafetyBoundary(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateGitIpcBridgeBoundary(rustSources, appSources)) {
+	fail(failure);
+}
+for (const failure of validateGitDiscardConfirmationBoundary(appSources)) {
+	fail(failure);
+}
+for (const failure of validateGitNetworkConfirmationBoundary(appSources)) {
+	fail(failure);
+}
+for (const failure of validateGitStashMessageFieldSafetyBoundary(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateGitStashConfirmationBoundary(appSources)) {
+	fail(failure);
+}
+for (const failure of validateGitWorktreeConfirmationBoundary(appSources)) {
+	fail(failure);
+}
+for (const failure of validateDebugAdapterSpawnBoundary(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateDebugAdapterConnectBoundary(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateDebugTcpCompanionSpawnBoundary(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateDebugSpawnConstructionShape(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateDebugFramingBounds(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateDebugCommandRegistration(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateDebugRunInTerminalBoundary(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateDebugAdapterConfirmationBoundary(appSources)) {
 	fail(failure);
 }
 

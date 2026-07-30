@@ -35,3 +35,66 @@ jobs:
       - run: pnpm check
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:e2e:browser
+
+  # F120 S6 (docs/research/2026-07-29-branding-packaging.md "结论 5", main
+  # session ruling point 7): the first real `tauri build` this CI has ever
+  # run, on any platform. Deliberately macOS-only for now -- Windows/Linux
+  # packaging is a separate, future slice, not stacked into this same
+  # first run. No Apple Developer Program signing identity is configured
+  # (APPLE_SIGNING_IDENTITY/APPLE_CERTIFICATE* secrets are unset), so this
+  # produces the same local ad-hoc-signed, unnotarized build already
+  # verified by hand during this feature; it proves the packaging pipeline
+  # itself works in CI, not that a signed/notarized artifact is producable
+  # yet (that remains gated on a product-owner decision to invest in a paid
+  # Apple account, per this feature's own evidence).
+  build-macos:
+    needs: check
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      # libghostty-vt-sys's build.rs shells out to a real `zig build`
+      # (docs/research/2026-07-24-libghostty-terminal.md); this repo's own
+      # local development environment pins Zig 0.15.x, so CI must install
+      # the same major/minor line rather than relying on whatever (if
+      # anything) macos-latest ships by default.
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.15.2
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm ghostty:vendor:setup
+      # `--bundles app` only, deliberately, for now: a real local build of
+      # tauri.conf.json's full `bundle.targets` (`app` and `dmg`) was
+      # attempted during this slice, and the `dmg` step hung indefinitely
+      # -- confirmed via direct process inspection, not just a timeout --
+      # inside `bundle_dmg.sh`'s AppleScript/Finder automation call
+      # (`osascript ... createdmg.tmp...`), most likely because this
+      # verification environment lacks whatever interactive
+      # Automation/Apple-Events session a real desktop normally has. This
+      # is very likely specific to that sandboxed verification environment
+      # rather than a real GitHub Actions macos-latest problem (DMG
+      # bundling via this same mechanism is a well-established pattern for
+      # real Tauri projects on GitHub Actions), but it was not possible to
+      # confirm that from here. Scoping this first real CI packaging job to
+      # `app` only -- the target this slice *did* verify end to end,
+      # repeatedly -- avoids risking a genuine hang eating this job's whole
+      # timeout budget on its first real run. Re-adding `dmg` is a
+      # follow-up once either this is confirmed sandbox-specific after a
+      # real CI run, or a working fix is found.
+      - run: pnpm exec tauri build --bundles app
+      - name: Verify the produced bundle is a real macOS .app
+        run: |
+          APP="src-tauri/target/release/bundle/macos/Plain.app"
+          test -d "$APP"
+          codesign -dv "$APP"

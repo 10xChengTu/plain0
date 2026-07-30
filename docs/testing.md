@@ -19,7 +19,7 @@
 
 - path canonicalization、symlink escape、workspace scope。
 - VSIX zip-slip、zip bomb 上限、JSONC/include cycle、资源越界。
-- `rg --json`、Git porcelain v2/NUL、diff/log/blame parser。
+- 搜索域的有界遍历预算、分层 gitignore/glob 语义、流式分批/背压/取消（进程内 `grep-searcher`，rg sidecar 已废弃，见 docs/architecture.md 第 6 节）、Git porcelain v2/NUL、diff/log/blame parser。
 - Git workspace trust gate 和 hardened background mode；恶意 helper/hook fixture 不得产生 marker。
 - PTY session 生命周期、resize/kill/exit 和事件序号。
 - DAP header/body fragmentation、多个 frame、错误长度、timeout/cancel。
@@ -66,9 +66,13 @@
 
 ### 真实 Tauri E2E
 
+分工（2026-07-22 起，用户指示）：实现方（Claude）负责单元、Rust、Browser mock E2E 与架构/bundle guard；本节的真实桌面（电脑控制）验收不再由实现方执行，所有待执行场景持续登记在 `docs/e2e-handover.md`，由用户交接给 Codex 统一执行并回写 evidence。以下纪律对执行方仍然全部有效。
+
 电脑控制验收统一先运行 `pnpm tauri:build:e2e`，再把 `src-tauri/target/debug/bundle/macos/Plain.app` 解析为当前仓库绝对路径交给 Computer Use；不得只按 `com.plain.editor` 绑定，因为同 bundle id 的旧 `.app` 会形成假阳性/假阴性。构建和启动前应关闭既有 Plain 实例，首个取样必须轮询至 Activity Bar 出现 `Explorer` 或 `#plain-bootstrap-status` 给出明确错误，不能把 Workbench contribution 尚未稳定时的瞬时空 tab group 记为失败。需要交互式开发时可用 `pnpm tauri:dev:e2e`，但最终证据仍来自刚构建的 `.app`。
 
 两个 E2E 命令都通过 Tauri 官方 `--config` flavor 合并 `src-tauri/tauri.e2e.conf.json`，只把完整主窗口替换为 `incognito: true` 版本；WKWebView 因而使用进程级非持久 data store，不读取或污染用户的生产 Workbench 布局、Local Storage、IndexedDB、cookie 与 cache。生产 `pnpm tauri:dev`/`pnpm tauri:build` 必须继续使用持久 data store；Harness 同时锁定两条 E2E 命令、overlay 闭集及两份窗口配置除 `incognito` 外完全一致。
+
+`tauri:dev:e2e` 不能作为电脑控制验收的取样对象，这是 2026-07-22 实测确认的结构性限制而非流程偏好：`tauri dev` 的窗口进程是 `cargo run` 直接执行的裸 Mach-O（无 `Info.plist`/`CFBundleIdentifier`，`lsappinfo` 显示 `bundleID=[ NULL ]`，不经 `open`/LaunchServices 注册），而桌面自动化的应用授权层依赖 LaunchServices/Spotlight 应用索引，因此无论以何种名称请求都无法识别或授权该窗口，与用户是否批准无关。debug `.app` bundle（`CFBundleIdentifier=com.plain.editor`）可被正常注册并弹出授权对话框。据此：电脑控制验收必须使用 debug `.app`；若磁盘上已有与当前 HEAD 完全对应的构建产物，应直接复用而不重复执行 `tauri:build:e2e`；验收全部通过后清理 `src-tauri/target` 等大体积构建产物。
 
 使用电脑控制操作实际应用，至少覆盖：
 

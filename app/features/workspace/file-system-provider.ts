@@ -83,6 +83,8 @@ export type PlainWorkspaceWriteFileResult =
 	  }>
 	| Exclude<WorkspaceWriteResult, Readonly<{ status: "written" }>>;
 
+const MAX_TRACKED_OPEN_RESOURCES_PER_ROOT = 256;
+
 const SANITIZED_MESSAGES = Object.freeze({
 	entryNotFound: "The workspace entry does not exist.",
 	moveIncomplete:
@@ -528,6 +530,15 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 	private readonly changeEmitter = new Emitter<readonly IFileChange[]>();
 	readonly onDidChangeFile: Event<readonly IFileChange[]> =
 		this.changeEmitter.event;
+	readonly #watchState = new Map<
+		string,
+		{
+			paths: Map<string, URI>;
+			missing: Set<string>;
+			reconciling: boolean;
+			dirty: boolean;
+		}
+	>();
 
 	constructor(bridge: PlainBridge, allowsMutationDispatch: boolean) {
 		this.#bridge = bridge;
@@ -545,6 +556,7 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 		const resolved = this.resolveResource(resource);
 		const unlisten = this.#bridge.workspaceWatch(resolved.rootId, () => {
 			this.fireRootUpdated(resource);
+			void this.reconcileWatchedPaths(resolved.rootId);
 		});
 		let disposed = false;
 		return {
@@ -602,6 +614,13 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 				resolved.rootId,
 				resolved.relativePath,
 			);
+			if (resolved.relativePath !== "") {
+				this.trackOpenResource(
+					resolved.rootId,
+					resolved.relativePath,
+					resource,
+				);
+			}
 			return Object.freeze({
 				stat: providerStat(receipt.stat),
 				value: receipt.value.copy(),
@@ -983,6 +1002,87 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 				}),
 			]),
 		);
+	}
+
+	private async reconcileWatchedPaths(rootId: string): Promise<void> {
+		const state = this.#watchState.get(rootId);
+		if (state === undefined) {
+			return;
+		}
+		if (state.reconciling) {
+			state.dirty = true;
+			return;
+		}
+		state.reconciling = true;
+		state.dirty = false;
+		try {
+			for (const relativePath of state.paths.keys()) {
+				if (this.#watchState.get(rootId) !== state) {
+					return;
+				}
+				let missing: boolean;
+				try {
+					await this.#bridge.workspaceStat(rootId, relativePath);
+					missing = false;
+				} catch (error) {
+					const code = commandErrorCode(error);
+					if (code !== "ENTRY_NOT_FOUND" && code !== "ENTRY_TYPE_MISMATCH") {
+						continue;
+					}
+					missing = true;
+				}
+				if (this.#watchState.get(rootId) !== state) {
+					return;
+				}
+				const current = state.paths.get(relativePath);
+				if (current === undefined) {
+					continue;
+				}
+				if (missing && !state.missing.has(relativePath)) {
+					state.missing.add(relativePath);
+					this.fireDeleted(current);
+				} else if (!missing && state.missing.has(relativePath)) {
+					state.missing.delete(relativePath);
+					this.fireCreated(current);
+				}
+			}
+		} finally {
+			state.reconciling = false;
+			if (state.dirty && this.#watchState.get(rootId) === state) {
+				state.dirty = false;
+				void this.reconcileWatchedPaths(rootId);
+			}
+		}
+	}
+
+	private trackOpenResource(
+		rootId: string,
+		relativePath: string,
+		resource: URI,
+	): void {
+		let state = this.#watchState.get(rootId);
+		if (state === undefined) {
+			state = {
+				paths: new Map<string, URI>(),
+				missing: new Set<string>(),
+				reconciling: false,
+				dirty: false,
+			};
+			this.#watchState.set(rootId, state);
+		}
+		state.paths.delete(relativePath);
+		resource.toString();
+		void resource.fsPath;
+		Object.freeze(resource);
+		state.paths.set(relativePath, resource);
+		while (state.paths.size > MAX_TRACKED_OPEN_RESOURCES_PER_ROOT) {
+			const oldest = state.paths.keys().next().value;
+			if (oldest === undefined) {
+				break;
+			}
+			state.paths.delete(oldest);
+			state.missing.delete(oldest);
+		}
 	}
 
 	private resolveMutationResource(resource: URI): ResolvedMutationResource {

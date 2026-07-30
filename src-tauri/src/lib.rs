@@ -1,10 +1,24 @@
 use tauri::{Emitter, Manager};
 
+pub mod backup;
+pub mod debug;
 pub mod error;
+pub mod git;
 pub mod path_policy;
+pub mod search;
+pub mod terminal;
+pub mod theme;
+pub mod trust;
 pub mod workspace;
 
+use backup::service::BackupService;
+use debug::confirm::ConfirmationService;
+use debug::service::DebugSessionService;
 use error::CommandError;
+use git::network::GitNetworkService;
+use terminal::service::TerminalService;
+use theme::service::ThemeService;
+use trust::service::TrustService;
 use workspace::service::WorkspaceService;
 
 const RUNTIME_READY_EVENT: &str = "plain://runtime-ready";
@@ -37,11 +51,32 @@ fn runtime_info(app: tauri::AppHandle) -> Result<RuntimeInfo, CommandError> {
 pub fn run() {
     tauri::Builder::default()
         .manage(WorkspaceService::new())
+        .manage(TerminalService::new())
+        .manage(GitNetworkService::new())
+        .manage(DebugSessionService::new())
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let base_path = app.path().app_local_data_dir()?;
+            app.manage(BackupService::new(base_path.clone()));
+            app.manage(ThemeService::new(base_path.clone()));
+            app.manage(TrustService::new(base_path.clone()));
+            app.manage(ConfirmationService::new(base_path));
+            Ok(())
+        })
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 window
                     .state::<WorkspaceService>()
+                    .close_window(window.label());
+                window.state::<BackupService>().close_window(window.label());
+                window
+                    .state::<TerminalService>()
+                    .close_window(window.label());
+                window
+                    .state::<ConfirmationService>()
+                    .close_window(window.label());
+                window
+                    .state::<DebugSessionService>()
                     .close_window(window.label());
             }
         })
@@ -65,6 +100,80 @@ pub fn run() {
             workspace::commands::workspace_cancel_delete,
             workspace::commands::workspace_begin_delete,
             workspace::commands::workspace_commit_delete_entry,
+            git::commands::git_status,
+            git::commands::git_diff_files,
+            git::commands::git_show_blob,
+            git::commands::git_stage_paths,
+            git::commands::git_unstage_paths,
+            git::commands::git_stage_blob,
+            git::commands::git_commit,
+            git::commands::git_discard_paths,
+            git::commands::git_network_preview,
+            git::commands::git_fetch,
+            git::commands::git_pull,
+            git::commands::git_push,
+            git::commands::git_network_cancel,
+            git::commands::git_blame_file,
+            git::commands::git_blame_commit_messages,
+            git::commands::git_file_history,
+            git::commands::git_line_history_list,
+            git::commands::git_line_history_detail,
+            git::commands::git_show_commit,
+            git::commands::git_show_commit_blob,
+            git::commands::git_log_graph,
+            git::commands::git_refs_list,
+            git::commands::git_stash_list,
+            git::commands::git_stash_show,
+            git::commands::git_stash_push,
+            git::commands::git_stash_apply,
+            git::commands::git_stash_pop,
+            git::commands::git_stash_drop,
+            git::commands::git_worktree_list,
+            git::commands::git_worktree_add,
+            git::commands::git_worktree_remove,
+            search::commands::workspace_search_files,
+            search::commands::workspace_search_text_start,
+            search::commands::workspace_search_text_poll,
+            search::commands::workspace_search_text_cancel,
+            backup::commands::backup_write,
+            backup::commands::backup_read_all,
+            backup::commands::backup_discard,
+            backup::commands::backup_discard_all,
+            trust::commands::workspace_trust_state,
+            trust::commands::workspace_trust_grant,
+            trust::commands::workspace_trust_revoke,
+            terminal::commands::terminal_start,
+            terminal::commands::terminal_input_text,
+            terminal::commands::terminal_input_key,
+            terminal::commands::terminal_focus,
+            terminal::commands::terminal_resize,
+            terminal::commands::terminal_ack,
+            terminal::commands::terminal_scrollback,
+            terminal::commands::terminal_kill,
+            theme::commands::theme_import_vsix,
+            theme::commands::theme_import_directory,
+            theme::commands::theme_list,
+            theme::commands::theme_read_resource,
+            theme::commands::theme_remove,
+            theme::commands::theme_get_selection,
+            theme::commands::theme_set_selection,
+            debug::commands::debug_adapter_confirmation_state,
+            debug::commands::debug_adapter_confirmation_grant,
+            debug::commands::debug_adapter_confirmation_revoke,
+            debug::commands::debug_launch,
+            debug::commands::debug_attach,
+            debug::commands::debug_disconnect,
+            debug::commands::debug_set_breakpoints,
+            debug::commands::debug_stack_trace,
+            debug::commands::debug_scopes,
+            debug::commands::debug_variables,
+            debug::commands::debug_evaluate,
+            debug::commands::debug_continue,
+            debug::commands::debug_next,
+            debug::commands::debug_step_in,
+            debug::commands::debug_step_out,
+            debug::commands::debug_pause,
+            debug::commands::debug_output_ack,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Plain")

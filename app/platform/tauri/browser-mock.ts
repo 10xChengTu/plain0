@@ -1,7 +1,42 @@
 import type {
+	BackupEntry,
 	CommandError,
+	DebugAdapterConfirmationSubject,
+	DebugAdapterTarget,
+	DebugEvaluateResult,
+	DebugEventPayload,
+	DebugScope,
+	DebugSessionStartResult,
+	DebugStackFrame,
+	DebugVariable,
+	GitBlameCommitHeader,
+	GitBlameFileResult,
+	GitBlameLineEntry,
+	GitBlobRev,
+	GitBranch,
+	GitDiffFilesResult,
+	GitHistoryEntry,
+	GitHistoryListResult,
+	GitLineHistoryDetail,
+	GitLogGraphResult,
+	GitNetworkPreviewResult,
+	GitRefsListResult,
+	GitShowCommitResult,
+	GitStashEntry,
+	GitStashListResult,
+	GitStashShowResult,
+	GitStatusEntry,
+	GitStatusResult,
+	GitWorktreeEntry,
+	GitWorktreeListResult,
 	PlainBridge,
 	RuntimeInfo,
+	TerminalDataEvent,
+	TerminalExitEvent,
+	TerminalRgb,
+	TerminalStyle,
+	ThemeImportResult,
+	ThemePackageSummary,
 	WorkspaceCapabilities,
 	WorkspaceCommitDeleteEntryRequest,
 	WorkspaceDeleteBatchPlan,
@@ -14,11 +49,51 @@ import type {
 	WorkspaceMoveIncompleteReason,
 	WorkspaceMoveResult,
 	WorkspaceRoot,
+	WorkspaceSearchFilesResult,
 	WorkspaceWatchPendingRoot,
 	WorkspaceWatchSyncRequest,
 	WorkspaceWatchWakeEvent,
 	WorkspaceWriteResult,
 } from "./contracts";
+import {
+	frozenGitBlameCommitMessagesRequest,
+	frozenGitBlameFileRequest,
+	frozenGitCommitRequest,
+	frozenGitDiffFilesRequest,
+	frozenGitDiscardPathsRequest,
+	frozenGitFileHistoryRequest,
+	frozenGitLineHistoryDetailRequest,
+	frozenGitLineHistoryListRequest,
+	frozenGitLogGraphRequest,
+	frozenGitNetworkPreviewRequest,
+	frozenGitPushRequest,
+	frozenGitShowBlobRequest,
+	frozenGitShowBlobResult,
+	frozenGitShowCommitBlobRequest,
+	frozenGitShowCommitRequest,
+	frozenGitStageBlobRequest,
+	frozenGitStagePathsRequest,
+	frozenGitStashApplyRequest,
+	frozenGitStashDropRequest,
+	frozenGitStashPopRequest,
+	frozenGitStashPushRequest,
+	frozenGitStashShowRequest,
+	frozenGitUnstagePathsRequest,
+	frozenGitWorktreeAddRequest,
+	frozenGitWorktreeRemoveRequest,
+} from "./git-codec";
+import {
+	backupUnavailable,
+	frozenBackupDiscardRequest,
+	frozenBackupWriteInputs,
+} from "./backup-codec";
+import {
+	decodeWorkspaceSearchTextStartResult,
+	frozenWorkspaceSearchFilesRequest,
+	frozenWorkspaceSearchFilesResult,
+	frozenWorkspaceSearchTextPollResult,
+	frozenWorkspaceSearchTextStartRequest,
+} from "./search-codec";
 import {
 	compareWorkspaceEntryNames,
 	encodeWorkspaceWriteFileRequest,
@@ -50,6 +125,35 @@ import {
 	createWorkspaceWatcherManager,
 	type WorkspaceWatcherTransport,
 } from "./workspace-watcher";
+import {
+	decodeDebugAdapterConfirmationState,
+	decodeDebugAdapterConfirmationVoid,
+	frozenDebugAdapterConfirmationRequest,
+	frozenDebugEvaluateRequest,
+	frozenDebugOutputAckRequest,
+	frozenDebugScopesRequest,
+	frozenDebugSessionIdRequest,
+	frozenDebugSessionStartRequest,
+	frozenDebugSetBreakpointsRequest,
+	frozenDebugStackTraceRequest,
+	frozenDebugThreadRequest,
+	frozenDebugVariablesRequest,
+} from "./debug-codec";
+import {
+	decodeTerminalScrollbackResult,
+	decodeTerminalStartResult,
+	decodeWorkspaceTrustState,
+	frozenTerminalAckRequest,
+	frozenTerminalDataEvent,
+	frozenTerminalExitEvent,
+	frozenTerminalFocusRequest,
+	frozenTerminalInputKeyRequest,
+	frozenTerminalInputTextRequest,
+	frozenTerminalKillRequest,
+	frozenTerminalResizeRequest,
+	frozenTerminalScrollbackRequest,
+	frozenTerminalStartRequest,
+} from "./terminal-codec";
 
 const runtimeInfo: RuntimeInfo = Object.freeze({
 	application: "Plain",
@@ -84,6 +188,8 @@ const MAX_DELETE_NAME_PAYLOAD_BYTES = 2 * 1_024 * 1_024;
 const MAX_DELETE_SYMLINK_PAYLOAD_BYTES = 4 * 1_024;
 const MAX_DELETE_SYMLINK_TOTAL_BYTES = 2 * 1_024 * 1_024;
 const WORKSPACE_DELETE_IDLE_TTL_MS = 120_000;
+const MAX_MOCK_SEARCH_TREE_ENTRIES = 50_000;
+const MAX_MOCK_SEARCH_TREE_DEPTH = 256;
 const MOCK_MTIME = 1_700_000_000_000;
 const MOCK_CTIME = 1_699_999_000_000;
 const textEncoder = new TextEncoder();
@@ -447,6 +553,153 @@ function cloneMockTrees(): Map<string, MockDirectoryNode> {
 	);
 }
 
+/**
+ * A deliberately simplified `.gitignore` line: this mock exists so Browser
+ * E2E fixtures can drop a `.gitignore` file into the tree and see file
+ * search honor it, not to re-implement gitignore's full glob grammar. Rust
+ * (`src-tauri/src/search/file_search.rs`) is the sole semantic authority;
+ * this only supports what the fixtures actually need: exact names,
+ * `*.ext` suffix globs, one literal path segment, negation (`!`), and a
+ * trailing `/` for directory-only rules.
+ */
+interface MockGitignoreRule {
+	readonly negate: boolean;
+	readonly dirOnly: boolean;
+	readonly pattern: string;
+}
+
+interface MockGitignoreLayer {
+	readonly wire: string;
+	readonly rules: readonly MockGitignoreRule[];
+}
+
+function parseMockGitignoreRules(
+	content: string,
+): readonly MockGitignoreRule[] {
+	return content
+		.split("\n")
+		.map((line) => line.replace(/\r$/, "").trim())
+		.filter((line) => line.length > 0 && !line.startsWith("#"))
+		.map((line): MockGitignoreRule => {
+			const negate = line.startsWith("!");
+			const withoutBang = negate ? line.slice(1) : line;
+			const dirOnly = withoutBang.endsWith("/");
+			const pattern = dirOnly ? withoutBang.slice(0, -1) : withoutBang;
+			return Object.freeze({ negate, dirOnly, pattern });
+		});
+}
+
+function mockGitignoreRuleMatches(
+	rule: MockGitignoreRule,
+	relativeToLayer: string,
+	isDir: boolean,
+): boolean {
+	if (rule.dirOnly && !isDir) {
+		return false;
+	}
+	if (rule.pattern.includes("/")) {
+		return (
+			relativeToLayer === rule.pattern ||
+			relativeToLayer.startsWith(`${rule.pattern}/`)
+		);
+	}
+	const segments = relativeToLayer.split("/");
+	const basename = segments.at(-1) ?? relativeToLayer;
+	if (rule.pattern.startsWith("*.")) {
+		return basename.endsWith(rule.pattern.slice(1));
+	}
+	return basename === rule.pattern || segments.includes(rule.pattern);
+}
+
+function mockGitignoreLayerFor(
+	directory: MockDirectoryNode,
+	wire: string,
+): MockGitignoreLayer {
+	const gitignoreNode = directory.entries.get(".gitignore");
+	let rules: readonly MockGitignoreRule[] = [];
+	if (gitignoreNode !== undefined && gitignoreNode.kind === "file") {
+		try {
+			rules = parseMockGitignoreRules(textDecoder.decode(gitignoreNode.bytes));
+		} catch {
+			rules = [];
+		}
+	}
+	return Object.freeze({ wire, rules });
+}
+
+/**
+ * Walks the `.gitignore` chain from most specific (deepest directory) to
+ * least specific (the search root), mirroring
+ * `search::file_search::matched_gitignore`'s precedence: the first layer
+ * with an opinion (ignore or negated re-include) wins.
+ */
+function mockPathIsGitignored(
+	chain: readonly MockGitignoreLayer[],
+	wire: string,
+	isDir: boolean,
+): boolean {
+	for (let index = chain.length - 1; index >= 0; index -= 1) {
+		const layer = chain[index]!;
+		const relative =
+			layer.wire.length === 0 ? wire : wire.slice(layer.wire.length + 1);
+		let matched: boolean | undefined;
+		for (const rule of layer.rules) {
+			if (mockGitignoreRuleMatches(rule, relative, isDir)) {
+				matched = !rule.negate;
+			}
+		}
+		if (matched !== undefined) {
+			return matched;
+		}
+	}
+	return false;
+}
+
+/**
+ * A deliberately small glob subset for mock `excludeGlobs`: `**\/name` (any
+ * depth), `**\/name/**` (anywhere under a directory named `name`), or a
+ * literal full-path match. Sufficient for E2E fixtures; Rust's `globset`
+ * matcher is the real implementation.
+ */
+function compileMockExcludeGlob(pattern: string): (wire: string) => boolean {
+	if (pattern.startsWith("**/") && pattern.endsWith("/**")) {
+		const middle = pattern.slice(3, -3);
+		return (wire) =>
+			wire === middle ||
+			wire.startsWith(`${middle}/`) ||
+			wire.split("/").includes(middle);
+	}
+	if (pattern.startsWith("**/")) {
+		const rest = pattern.slice(3);
+		return (wire) =>
+			wire === rest ||
+			wire.endsWith(`/${rest}`) ||
+			wire.split("/").includes(rest);
+	}
+	return (wire) => wire === pattern;
+}
+
+/** Cheap, non-scoring case-insensitive subsequence test; mirrors Rust's
+ * `is_subsequence` prefilter (both callers already lowercase their inputs). */
+function isMockSubsequence(pattern: string, haystack: string): boolean {
+	let haystackIndex = 0;
+	for (const patternChar of pattern) {
+		let found = false;
+		while (haystackIndex < haystack.length) {
+			const haystackChar = haystack[haystackIndex]!;
+			haystackIndex += 1;
+			if (haystackChar === patternChar) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			return false;
+		}
+	}
+	return true;
+}
+
 export type BrowserMockWorkspacePick = "selected" | "cancelled";
 
 export interface BrowserMockDirectoryCopyLimitsForTest {
@@ -638,8 +891,61 @@ export interface BrowserMockWorkspaceWatchControllerForTest {
 	): void;
 }
 
+/**
+ * Deterministic seed for the browser-mock backup store, injected before any
+ * interaction. Simulates content a previous session left on disk (the
+ * production Rust store's actual restart-persistence is out of scope for a
+ * browser-only mock).
+ */
+export interface BrowserMockBackupSeedEntryForTest {
+	readonly key: string;
+	readonly bytes: readonly number[];
+}
+
+/**
+ * A pre-validated theme package the browser mock exposes as if it had
+ * already gone through the real Rust unpack/validate/import pipeline — the
+ * mock never re-implements zip/JSONC/include-chain parsing (109 real Rust
+ * tests already cover that), it only exercises the frontend's own
+ * consumption (registerExtension/registerFileUrl wiring, registry/picker
+ * updates, toast feedback). `resourceContents` must have exactly one entry
+ * per `summary.resources` path (UTF-8 text, matching every resource this
+ * slice ever whitelists: theme JSON and `.tmTheme` documents).
+ */
+export interface BrowserMockThemePackageFixture {
+	readonly summary: ThemePackageSummary;
+	readonly resourceContents: Readonly<Record<string, string>>;
+}
+
+/** One scripted `theme_import_vsix`/`theme_import_directory` outcome,
+ * consumed in order (like `workspacePicks`) — the mock file/folder picker
+ * itself is never simulated byte-for-byte, only its end result. */
+export type BrowserMockThemeImportOutcome =
+	| Readonly<{ status: "cancelled" }>
+	| Readonly<{ status: "imported"; fixture: BrowserMockThemePackageFixture }>;
+
 export interface BrowserMockBridgeOptions {
 	readonly workspacePicks?: readonly BrowserMockWorkspacePick[];
+	/** Seeds the isolated in-memory backup store before first use. */
+	readonly backupFixtureForTest?: readonly BrowserMockBackupSeedEntryForTest[];
+	/** Seeds the isolated in-memory theme library before first use — as if
+	 * these packages had already been imported in a previous session. */
+	readonly themeLibraryFixtureForTest?: readonly BrowserMockThemePackageFixture[];
+	/** Consumed in order by `themeImportVsix`/`themeImportDirectory`; an
+	 * empty queue falls back to `{ status: "cancelled" }`. */
+	readonly themeImportOutcomesForTest?: readonly BrowserMockThemeImportOutcome[];
+	/** Seeds the isolated in-memory theme selection before first use — as if
+	 * `theme_set_selection` had already persisted this value (or `null`/
+	 * omitted for "nothing persisted yet") in a previous session. Consumed by
+	 * `themeGetSelection`; every later `themeSetSelection` call replaces it,
+	 * matching the real Rust store's own overwrite/clear semantics. */
+	readonly themeSelectionForTest?: string | null;
+	/** `F060` S3: the file icon theme axis analogue of
+	 * `themeSelectionForTest` — seeds the in-memory `fileIconThemeId`
+	 * returned by `themeGetSelection`, independent of the color axis. */
+	readonly fileIconThemeSelectionForTest?: string | null;
+	/** `F060` S3: the product icon theme axis analogue. */
+	readonly productIconThemeSelectionForTest?: string | null;
 	/** Browser-mock only bounded tree injected below the first mock root. */
 	readonly directoryCopyFixtureForTest?: BrowserMockDirectoryFixtureForTest;
 	/** May only lower production directory-copy budgets. */
@@ -727,6 +1033,402 @@ export interface BrowserMockBridgeOptions {
 	readonly onWorkspaceWatchControllerForTest?: (
 		controller: BrowserMockWorkspaceWatchControllerForTest,
 	) => void;
+	/** Lowers the streaming text search match budget so `limitHit` is
+	 * reachable with a small fixture instead of 20,000 real matches. */
+	readonly textSearchMaxMatchesForTest?: number;
+	/** How many batches `workspaceSearchTextPoll` delivers per call; defaults
+	 * to 1 so tests can observe genuine multi-poll streaming instead of
+	 * everything arriving in a single response. */
+	readonly textSearchBatchesPerPollForTest?: number;
+	/** Initial execution-trust state for the current (non-empty) workspace;
+	 * defaults to `false`, matching the real `TrustService`'s own "granted
+	 * trust does not carry over automatically" semantics. Always reported
+	 * `false` regardless of this value whenever there is no open root —
+	 * mirrors `TrustService::is_trusted`'s `EMPTY`-workspace short-circuit. */
+	readonly terminalTrustedForTest?: boolean;
+	/** Runs once per `terminalStart` call, handing the caller a controller
+	 * scoped to *that* session so tests/E2E can inject extra output, force a
+	 * resize, simulate exit, and inspect the frame emission credit gate —
+	 * see `BrowserMockTerminalSessionController`. */
+	readonly onTerminalSessionForTest?: (
+		controller: BrowserMockTerminalSessionController,
+	) => void;
+	/** `F080` S1: seeds the deterministic `gitStatus`/`gitDiffFiles`/
+	 * `gitShowBlob` responses — see `BrowserMockGitFixtureForTest`. */
+	readonly gitFixtureForTest?: BrowserMockGitFixtureForTest;
+	/** `F100` S3: seeds the deterministic `debug_launch`/`debug_attach`/
+	 * `debug_set_breakpoints`/`debug_stack_trace`/`debug_scopes`/
+	 * `debug_variables`/`debug_evaluate` responses — see
+	 * `BrowserMockDebugFixtureForTest`. */
+	readonly debugFixtureForTest?: BrowserMockDebugFixtureForTest;
+	/** Runs once per `debugLaunch`/`debugAttach` call, handing the caller a
+	 * controller scoped to *that* session so tests/E2E can push synthetic DAP
+	 * events (`stopped`, `continued`, `output`, …) and simulate the transport
+	 * closing — see `BrowserMockDebugSessionController`. */
+	readonly onDebugSessionForTest?: (
+		controller: BrowserMockDebugSessionController,
+	) => void;
+}
+
+/**
+ * Deterministic, injectable `git_status`/`git_diff_files`/`git_show_blob`
+ * responses for the browser mock (`F080` S1) — this mock never re-implements
+ * porcelain-v2/numstat parsing (the real Rust parsers already have thorough
+ * fixture coverage in `src-tauri/src/git/status/tests.rs`/
+ * `src-tauri/src/git/diff/tests.rs`); it only exists so a consuming frontend
+ * (`PlainScmProvider`, `F080` S2) has structurally correct, scriptable
+ * responses to develop and test against, gated by the same shared
+ * workspace-trust flag `terminalTrustedForTest` already models (git and
+ * terminal share one `TrustService` in the real Rust implementation, so the
+ * mock does not model a second, independent trust flag).
+ */
+export interface BrowserMockGitFixtureForTest {
+	/** Defaults to a clean repository on branch `"main"` with no upstream and
+	 * no entries. */
+	readonly status?: GitStatusResult;
+	/** Defaults to `{ entries: [] }` for whichever of `cached`/`worktree` is
+	 * omitted. */
+	readonly diffFiles?: Readonly<{
+		readonly cached?: GitDiffFilesResult;
+		readonly worktree?: GitDiffFilesResult;
+	}>;
+	/** Keyed by repository-toplevel-relative path, then by `GitBlobRev`; a
+	 * missing rev for an otherwise-present path key (or a missing path key
+	 * entirely) means "no such version" (`{ content: null }`), matching the
+	 * real `git_show_blob` not-found outcome — never a rejection. Values are
+	 * UTF-8 text, encoded to bytes by the mock. */
+	readonly blobs?: Readonly<
+		Record<string, Partial<Record<GitBlobRev, string>>>
+	>;
+	/** `F090` S0: seeds the deterministic `gitBlameFile` response, keyed by
+	 * repository-toplevel-relative path — a missing path key defaults to
+	 * `{ entries: [], commits: {} }` (an empty, harmless default, mirroring
+	 * `diffFiles`'s own `defaultGitDiffFiles`). Unlike the real Rust parser,
+	 * this mock never re-implements `--line-porcelain` parsing (the real
+	 * parser's fixture coverage lives in
+	 * `src-tauri/src/git/blame/tests.rs`); it only exists so a consuming
+	 * frontend has structurally correct, scriptable responses to develop and
+	 * test the inline-blame/hover/age-heatmap UI against. A `gitBlameFile`
+	 * call with a non-null `range` filters the seeded fixture's own entries
+	 * down to `finalLine` within `[start, end]` — real range-scoped `-L`
+	 * blame is otherwise unmodeled. */
+	readonly blame?: Readonly<Record<string, GitBlameFileResult>>;
+	/** `F090` S0: seeds the deterministic `gitBlameCommitMessages` response,
+	 * keyed by commit sha -> full message body. A sha with no fixture entry
+	 * is simply absent from the response's `messages` map (this mock has no
+	 * real commit history to validate a sha against, unlike the real
+	 * `git log` call, which would reject an unknown sha outright — see
+	 * `src-tauri/src/git/blame.rs`'s `blame_commit_messages` doc comment). */
+	readonly blameCommitMessages?: Readonly<Record<string, string>>;
+	/** `F090` S1: seeds the deterministic `gitFileHistory` response, keyed by
+	 * repository-toplevel-relative path — a missing path key defaults to
+	 * `{ entries: [], truncated: false }`. Like `blame` above, this mock never
+	 * re-implements `git log --follow`'s own rename-heuristic traversal (the
+	 * real parser's thorough fixture coverage, including its rename fixture,
+	 * lives in `src-tauri/src/git/log/tests.rs`); it only exists so a
+	 * consuming frontend has structurally correct, scriptable responses to
+	 * develop and test the history sidebar against. */
+	readonly fileHistory?: Readonly<Record<string, GitHistoryListResult>>;
+	/** `F090` S1: seeds the deterministic `gitLineHistoryList` response, keyed
+	 * by path only (a missing path key defaults to `{ entries: [], truncated:
+	 * false }`) — unlike the real `-L<range>` command, this mock has no real
+	 * per-line git history to slice, so the same fixture is returned
+	 * regardless of the requested range. */
+	readonly lineHistoryList?: Readonly<Record<string, GitHistoryListResult>>;
+	/** `F090` S1: seeds the deterministic `gitLineHistoryDetail` response,
+	 * keyed by commit sha (the sha a `lineHistoryList` entry reports) — a sha
+	 * with no fixture entry falls back to a synthesized minimal `diffText`
+	 * (`commit <sha>\n\n    <message>\n`) built from that same
+	 * `lineHistoryList` entry, so a caller does not need to seed both maps
+	 * just to exercise the click-through flow. `gitLineHistoryDetail` still
+	 * enforces the real `skip`/`expectedSha` contract against whatever
+	 * `lineHistoryList` fixture is seeded (`GIT_LINE_HISTORY_DETAIL_NOT_FOUND`/
+	 * `GIT_LINE_HISTORY_DETAIL_STALE_INDEX`), exactly like the real Rust
+	 * implementation. */
+	readonly lineHistoryDetail?: Readonly<Record<string, GitLineHistoryDetail>>;
+	/** `F090` S2: seeds the deterministic `gitShowCommit` response, keyed by
+	 * commit sha — a missing sha key defaults to `{ sha: <requested>,
+	 * parentSha: null, files: [] }` (an empty, harmless default, mirroring
+	 * `blame`'s own `defaultGitBlameFile` precedent). This mock never
+	 * re-implements the real two-explicit-revision `git diff`/empty-tree
+	 * resolution (the real Rust parser's thorough fixture coverage, including
+	 * its clean-merge control groups, lives in
+	 * `src-tauri/src/git/show_commit/tests.rs`); it only exists so a
+	 * consuming frontend (the multi-diff commit-detail resolver) has
+	 * structurally correct, scriptable responses to develop and test
+	 * against. */
+	readonly showCommit?: Readonly<Record<string, GitShowCommitResult>>;
+	/** `F090` S2: seeds the deterministic `gitShowCommitBlob` response, keyed
+	 * by commit sha and then by repository-toplevel-relative path — a missing
+	 * sha or path key means "no such version" (`{ content: null }`), matching
+	 * `gitShowCommitBlob`'s real not-found outcome (never a rejection),
+	 * mirroring `blobs`'s own convention for `gitShowBlob`. Values are UTF-8
+	 * text, encoded to bytes by the mock. */
+	readonly commitBlobs?: Readonly<
+		Record<string, Readonly<Record<string, string>>>
+	>;
+	/** `F090` S3: seeds the deterministic `gitLogGraph` response, returned
+	 * regardless of the requested `maxCount` (defaults to `{ nodes: [],
+	 * truncated: false }`) — like `blame`/`fileHistory` above, this mock never
+	 * re-implements the real `--topo-order` DAG walk or swimlane assignment
+	 * (the real Rust parser's thorough fixture coverage, including its
+	 * octopus-merge fixture, lives in `src-tauri/src/git/log/tests.rs`; the
+	 * frontend swimlane layout algorithm's own coverage lives in
+	 * `plain-git-graph-layout.test.ts`); it only exists so a consuming
+	 * frontend has structurally correct, scriptable responses to develop and
+	 * test the graph view against. */
+	readonly graphForTest?: GitLogGraphResult;
+	/** `F090` S3: seeds the deterministic `gitRefsList` response (defaults to
+	 * `{ entries: [], truncated: false }`) — same "structurally correct
+	 * fixture, not a re-implementation" scope as `graphForTest` above (the
+	 * real Rust parser's thorough fixture coverage lives in
+	 * `src-tauri/src/git/refs/tests.rs`). */
+	readonly refsForTest?: GitRefsListResult;
+	/** `F090` S4: seeds the initial, mutable `gitStashList` state (defaults to
+	 * `[]`) — `gitStashPush`/`gitStashApply`/`gitStashPop`/`gitStashDrop` all
+	 * mutate this in place (unshift on push, splice on a successful pop/drop),
+	 * mirroring `gitEntries`'s own "mutable simulation, not a re-implementation
+	 * of real git plumbing" scope for `F080` S3's stage/commit/discard mock —
+	 * the real Rust parser's thorough fixture coverage (including the
+	 * index-shift race and the hostile-message field-safety proof) lives in
+	 * `src-tauri/src/git/stash/tests.rs`; this mock only exists so a consuming
+	 * frontend has structurally correct, scriptable responses to develop and
+	 * test the stash panel against. `index` on each seeded entry is ignored
+	 * (recomputed from array position on every `gitStashList` call, exactly
+	 * like the real Rust `%gd` invariant). */
+	readonly stashForTest?: readonly GitStashEntry[];
+	/** `F090` S4: seeds the deterministic `gitStashShow` response, keyed by
+	 * stash sha — a sha present in `stashForTest` but missing here defaults to
+	 * `{ sha, parentSha: null, files: [] }` (an empty, harmless default,
+	 * mirroring `showCommit`'s own default). A sha absent from `stashForTest`
+	 * entirely rejects with `GIT_STASH_NOT_FOUND`, matching the real
+	 * not-a-stash-like-commit rejection. */
+	readonly stashShowForTest?: Readonly<Record<string, GitStashShowResult>>;
+	/** `F090` S4: seeds a forced `{ kind: "conflict", conflictedPaths }`
+	 * outcome for `gitStashApply`/`gitStashPop`, keyed by stash sha — a sha
+	 * with no entry here always applies/pops cleanly. A conflicting *pop*
+	 * correctly leaves the entry in `stashForTest`'s own mutable list
+	 * untouched (mirrors the real `git stash pop`'s "kept on conflict"
+	 * semantics this feature's own acceptance criteria require). */
+	readonly stashConflictForTest?: Readonly<Record<string, readonly string[]>>;
+	/** `F090` S5: seeds the initial, mutable `gitWorktreeList` state (defaults
+	 * to a single synthetic main-worktree entry, since a real repository
+	 * always has at least one) — `gitWorktreeAdd`/`gitWorktreeRemove` mutate
+	 * this in place, mirroring `stashForTest`'s own "mutable simulation, not a
+	 * re-implementation of real git plumbing" scope; the real Rust parser's
+	 * thorough fixture coverage (main/linked/detached/locked/prunable/
+	 * non-ASCII entries) lives in `src-tauri/src/git/worktree/tests.rs`. A
+	 * seeded entry's own `lockReason`/`isMain` are consulted by the mock
+	 * `gitWorktreeRemove` below (see that fixture's own doc comment) rather
+	 * than duplicating them into a second, parallel fixture shape. */
+	readonly worktreesForTest?: readonly GitWorktreeEntry[];
+	/** `F090` S5: when `true`, every `gitWorktreeAdd` call returns
+	 * `{ kind: "pickerCancelled" }` without mutating `worktreesForTest`'s own
+	 * list — simulates the native folder-picker dialog being dismissed
+	 * without a selection. A disclosed simplification (not a one-shot queue
+	 * like `BrowserMockWorkspacePick`'s own scripted outcomes): a consuming
+	 * test that needs "cancelled once, then succeeds" configures two separate
+	 * mock instances instead. */
+	readonly worktreeAddCancelledForTest?: boolean;
+	/** `F090` S5: the set of worktree paths (matched against
+	 * `worktreesForTest`'s own `path` field) `gitWorktreeRemove` reports
+	 * `"needsForce"` for when called with `force: false` — mirrors
+	 * `stashConflictForTest`'s own "seed a specific, scriptable non-default
+	 * outcome by identity" shape. Calling again with `force: true` for the
+	 * same path always succeeds and removes the entry (a locked or main
+	 * entry rejects regardless — see the mock `gitWorktreeRemove`'s own doc
+	 * comment). */
+	readonly worktreeDirtyForTest?: readonly string[];
+	/** When `true`, every git method rejects with `GIT_NO_REPOSITORY` instead
+	 * of returning fixture data — simulates a trusted workspace root that is
+	 * not (or no longer) a Git working tree. */
+	readonly noRepositoryForTest?: boolean;
+	/** `F080` S4: seeds the deterministic `gitNetworkPreview`/`gitFetch`/
+	 * `gitPull`/`gitPush` simulation — see
+	 * `BrowserMockGitNetworkFixtureForTest`. */
+	readonly networkForTest?: BrowserMockGitNetworkFixtureForTest;
+}
+
+/**
+ * Deterministic, injectable `git_network_preview`/`git_fetch`/`git_pull`/
+ * `git_push` simulation (`F080` S4) — like `BrowserMockGitFixtureForTest`'s
+ * own doc comment says of the S1/S3 git fixtures, this mock never
+ * re-implements real ahead/behind or non-fast-forward semantics (the real
+ * Rust parsers/porcelain behavior already have thorough fixture coverage in
+ * `src-tauri/src/git/network/tests.rs`); it only exists so a consuming
+ * frontend (`PlainScmView`) has structurally correct, scriptable responses to
+ * develop and test the confirm-then-call UI flow against.
+ */
+export interface BrowserMockGitNetworkFixtureForTest {
+	/** Defaults to `"origin/main"`. `null` simulates no upstream configured —
+	 * matches the real `GIT_NETWORK_NO_UPSTREAM` preview rejection for
+	 * `"pull"`/`"push"`, and the real `{ upstream: null, ahead: null, behind:
+	 * null }` outcome for `"fetch"`. */
+	readonly upstream?: string | null;
+	/** Defaults to `0`. Mutated in place: a mock `gitPush` resets this to `0`
+	 * on success, mirroring `ahead` clearing once local commits are actually
+	 * uploaded. */
+	readonly ahead?: number;
+	/** Defaults to `0`. Mutated in place: a mock `gitPull` resets this to `0`
+	 * on success (simulating the remote's commits being merged in); a mock
+	 * `gitPush` rejects with `GIT_PUSH_REJECTED` while this is still nonzero
+	 * and `force` is `false` — the same non-fast-forward shape a real stale
+	 * remote-tracking ref produces. */
+	readonly behind?: number;
+	/** When `true`, a mock `gitPush(true)` (force) rejects with
+	 * `GIT_PUSH_REJECTED` regardless of `behind` — simulates a stale
+	 * `--force-with-lease` lease, letting Browser E2E exercise the
+	 * force-push-rejected path without modeling a real divergent remote. */
+	readonly forcePushRejectedForTest?: boolean;
+}
+
+/**
+ * Deterministic, injectable `debug_stack_trace`/`debug_scopes`/
+ * `debug_variables`/`debug_evaluate`/`debug_set_breakpoints` responses
+ * (`F100` S3) — like `BrowserMockGitFixtureForTest`'s own doc comment says of
+ * the git fixtures, this mock never re-implements a real DAP adapter (the
+ * real protocol-level behavior — handshake ordering, `request_seq`
+ * correlation, capability negotiation — has thorough fixture coverage in
+ * `src-tauri/src/debug/{session,service}/tests.rs`, including a real spawned
+ * Python mock adapter); it only exists so a consuming frontend (the call
+ * stack/variables/watch views) has structurally correct, scriptable
+ * responses to develop and test against. Every one of the by-id/by-reference
+ * maps below mirrors this mock's other fixtures' own "a missing key defaults
+ * to an empty, harmless result" convention rather than rejecting.
+ */
+export interface BrowserMockDebugFixtureForTest {
+	/** The negotiated `Capabilities` every mock `debugLaunch`/`debugAttach`
+	 * call returns — defaults to `{}` (every `supportsXxx` query answers
+	 * `false`), letting a test exercise the capability-gated
+	 * conditional-breakpoint/log-point UI's disabled path without seeding
+	 * anything, and its enabled path by setting e.g.
+	 * `{ supportsConditionalBreakpoints: true }`. */
+	readonly capabilities?: Readonly<Record<string, unknown>>;
+	/** Keyed by `threadId` — the full (unpaged) synthetic call stack
+	 * `debugStackTrace` slices by `startFrame`/`levels` exactly like a real
+	 * adapter would (this mock does implement real slicing, not a canned
+	 * per-call response, so a test can genuinely exercise pagination). A
+	 * missing `threadId` key defaults to an empty stack. */
+	readonly stackFramesByThread?: Readonly<
+		Record<number, readonly DebugStackFrame[]>
+	>;
+	/** Keyed by `frameId` — a missing key defaults to an empty `scopes` array
+	 * (the "genuinely empty scopes" scenario this feature's own acceptance
+	 * criteria call out), not an error. */
+	readonly scopesByFrame?: Readonly<Record<number, readonly DebugScope[]>>;
+	/** Keyed by `variablesReference` — the full (unpaged) synthetic children
+	 * list `debugVariables` slices by `start`/`count` exactly like a real
+	 * adapter would, letting a test seed a large synthetic collection (e.g.
+	 * a 5,000-element array) and exercise real pagination rather than a
+	 * canned per-call response. A missing reference defaults to an empty
+	 * list. */
+	readonly variablesByReference?: Readonly<
+		Record<number, readonly DebugVariable[]>
+	>;
+	/** Keyed by the literal `expression` string — a missing key falls back to
+	 * a harmless synthetic result (`{ result: expression, ... }`) rather than
+	 * rejecting, so a test only needs to seed the expressions it actually
+	 * cares about asserting on. */
+	readonly evaluateByExpression?: Readonly<Record<string, DebugEvaluateResult>>;
+	/** Keyed by `path`, then by the *requested* line number — lets a test
+	 * script the two adversarial `setBreakpoints` outcomes this feature's own
+	 * acceptance criteria name explicitly: an adapter moving a breakpoint to
+	 * a different line (`{ line: <different number> }`) and an adapter
+	 * rejecting one outright (`{ verified: false, message: "…" }`). A
+	 * requested line with no scripted outcome verifies as-is, at the
+	 * requested line. */
+	readonly breakpointOutcomes?: Readonly<
+		Record<
+			string,
+			Readonly<
+				Record<
+					number,
+					Readonly<{
+						readonly verified?: boolean;
+						readonly line?: number;
+						readonly message?: string;
+					}>
+				>
+			>
+		>
+	>;
+}
+
+/**
+ * Per-session control surface for the mock debug session `debugLaunch`/
+ * `debugAttach` creates — handed to `onDebugSessionForTest` the instant a
+ * session starts, mirroring `BrowserMockTerminalSessionController`'s own
+ * "per-session push surface" shape. It only pushes whatever DAP event a test
+ * scripts, exactly as a real adapter would over `plain://debug-event`, which
+ * is precisely what the call-stack view's own "`stopped` drives a refresh"
+ * wiring needs to exercise. `F100` S4's own `debugContinue`/`debugNext`/
+ * `debugStepIn`/`debugStepOut`/`debugPause` command surface is implemented
+ * elsewhere in this mock (always succeeding for any live session) — see
+ * those methods' own doc comment for why this mock does not additionally
+ * simulate the adversarial "not stopped" adapter rejection real Rust
+ * integration tests already cover.
+ */
+export interface BrowserMockDebugSessionController {
+	readonly sessionId: string;
+	/** Pushes one DAP event (or one of Plain's own `plain/`-prefixed synthetic
+	 * notifications) to every current `debugWatchEvent` listener, exactly as
+	 * `src-tauri/src/debug/session.rs`'s `DebugEventSink::emit_event` would. */
+	emitEvent(event: string, body: unknown): void;
+	/** Simulates the transport closing: removes the session from this mock's
+	 * live-session table (so a further call against `sessionId` now rejects
+	 * with `DEBUG_SESSION_NOT_FOUND`, exactly like the real backend after
+	 * `close_window`/a crashed adapter) and pushes the reserved
+	 * `"plain/sessionEnded"` event, mirroring
+	 * `DebugEventSink::emit_session_ended`. Idempotent after the first call. */
+	finish(): void;
+}
+
+/**
+ * Per-session control surface for the deterministic fake PTY `terminalStart`
+ * creates in the browser mock — handed to `onTerminalSessionForTest` the
+ * instant a session starts. Each session (indeed each bridge instance) has
+ * fully independent state; nothing here is shared across sessions or across
+ * separate `createBrowserMockBridge` calls.
+ *
+ * This mock's fake PTY is deliberately minimal — a single-row "echo" grid,
+ * not a real VT emulator (no newline/scrollback/cursor-movement handling) —
+ * per F070's "IPC 改造" slice's own scope: it exists to give a real
+ * consuming renderer (a later slice) structurally correct `TerminalFrame`s
+ * to develop and test against, not to reproduce `libghostty-vt`'s actual
+ * terminal semantics. It does, however, faithfully mirror the *protocol*:
+ * the same single-frame-in-flight emission credit gate real sessions use
+ * (see `src-tauri/src/terminal/service.rs`'s module doc) governs when a
+ * pushed/echoed change actually gets delivered to `terminalWatchData`
+ * listeners.
+ */
+export interface BrowserMockTerminalSessionController {
+	readonly sessionId: string;
+	/**
+	 * Appends `text` to the session's single echo row and attempts an
+	 * emission, subject to the same single-frame-in-flight credit gate a
+	 * real session's vt thread enforces: if a previously emitted frame is
+	 * still unacknowledged, this queues the change (coalesced into
+	 * whatever the *next* eligible frame reports) rather than emitting
+	 * immediately — this is how a caller drives (and observes) real
+	 * frame-delivery backpressure deterministically.
+	 */
+	pushOutput(text: string): void;
+	/**
+	 * Reports the session as exited with `exitCode` (idempotent after the
+	 * first call — later calls are ignored). Does not force-flush any
+	 * not-yet-emitted (credit-gated) pending content: this mirrors the real
+	 * exit-vs-last-frame race `src-tauri/src/terminal/service.rs`'s module
+	 * doc documents rather than "fixing" it away, so this mock stays a
+	 * faithful stand-in for that behavior in E2E tests.
+	 */
+	finish(exitCode: number): void;
+	/** Whether a previously emitted frame is currently unacknowledged (the
+	 * mock analogue of the real single-frame-in-flight emission credit
+	 * gate being exhausted). */
+	isAwaitingAckForTest(): boolean;
+	/** The sequence number of the most recently emitted frame, or `null` if
+	 * none has been emitted yet. */
+	lastEmittedSequenceForTest(): number | null;
 }
 
 interface CapturedBrowserMockWorkspaceMoveSeams {
@@ -900,6 +1602,34 @@ function fileTooLarge(): CommandError {
 	return commandError(
 		"FILE_TOO_LARGE",
 		"The workspace file exceeds the supported read limit.",
+	);
+}
+
+function invalidSearchRegex(): CommandError {
+	return commandError(
+		"INVALID_SEARCH_REGEX",
+		"The workspace text search pattern is not a valid regular expression.",
+	);
+}
+
+function searchNotFound(): CommandError {
+	return commandError(
+		"WORKSPACE_SEARCH_NOT_FOUND",
+		"The workspace text search is no longer available.",
+	);
+}
+
+function themeResourceNotFound(): CommandError {
+	return commandError(
+		"THEME_RESOURCE_NOT_FOUND",
+		"The requested theme package resource is not available.",
+	);
+}
+
+function invalidSearchRequest(): CommandError {
+	return commandError(
+		"INVALID_SEARCH_REQUEST",
+		"The workspace text search request is invalid.",
 	);
 }
 
@@ -1711,6 +2441,43 @@ export function createBrowserMockBridge(
 	const listeners = new Set<(payload: RuntimeInfo) => void>();
 	const scriptedPicks = [...(options.workspacePicks ?? [])];
 	const roots = new Map<string, WorkspaceRoot>();
+	const backupEntries = new Map<string, Uint8Array>();
+	for (const seed of options.backupFixtureForTest ?? []) {
+		const { key, content } = frozenBackupWriteInputs(
+			seed.key,
+			Uint8Array.from(seed.bytes),
+		);
+		backupEntries.set(key, content);
+	}
+	const themePackages = new Map<string, ThemePackageSummary>();
+	const themeResourceContents = new Map<string, ReadonlyMap<string, string>>();
+	function seedThemePackage(fixture: BrowserMockThemePackageFixture): void {
+		themePackages.set(fixture.summary.id, fixture.summary);
+		themeResourceContents.set(
+			fixture.summary.id,
+			new Map(Object.entries(fixture.resourceContents)),
+		);
+	}
+	for (const fixture of options.themeLibraryFixtureForTest ?? []) {
+		seedThemePackage(fixture);
+	}
+	let themeSelection: string | null = options.themeSelectionForTest ?? null;
+	let fileIconThemeSelection: string | null =
+		options.fileIconThemeSelectionForTest ?? null;
+	let productIconThemeSelection: string | null =
+		options.productIconThemeSelectionForTest ?? null;
+	const scriptedThemeImports = [...(options.themeImportOutcomesForTest ?? [])];
+	function themeImportFromScript(): ThemeImportResult {
+		const outcome = scriptedThemeImports.shift();
+		if (outcome === undefined || outcome.status === "cancelled") {
+			return Object.freeze({ status: "cancelled" });
+		}
+		seedThemePackage(outcome.fixture);
+		return Object.freeze({
+			status: "imported",
+			package: outcome.fixture.summary,
+		});
+	}
 	const trees = cloneMockTrees();
 	const directoryCopyLimits = resolveDirectoryCopyLimits(
 		options.directoryCopyLimitsForTest,
@@ -4403,6 +5170,1353 @@ export function createBrowserMockBridge(
 		return result;
 	};
 
+	const searchWorkspaceFiles = (
+		request: Readonly<{
+			roots: readonly string[];
+			filePattern: string;
+			excludeGlobs: readonly string[];
+			maxResults: number;
+		}>,
+	): WorkspaceSearchFilesResult => {
+		const excludeMatchers = request.excludeGlobs.map(compileMockExcludeGlob);
+		const patternLower = request.filePattern.toLowerCase();
+		const entries: string[] = [];
+		let limitHit = false;
+		let visited = 0;
+
+		interface SearchFrame {
+			readonly directory: MockDirectoryNode;
+			readonly wire: string;
+			readonly depth: number;
+			readonly gitignoreChain: readonly MockGitignoreLayer[];
+			readonly names: readonly string[];
+			nextIndex: number;
+		}
+
+		// Mirrors WorkspaceService::search_files: every named root is leased
+		// (authorization-checked) up front, so an unauthorized root fails the
+		// whole request closed rather than being silently skipped.
+		for (const rootId of request.roots) {
+			if (!roots.has(rootId)) {
+				throw rootNotAuthorized();
+			}
+		}
+
+		rootsLoop: for (const rootId of request.roots) {
+			const root = trees.get(rootId);
+			if (root === undefined || root.kind !== "directory") {
+				continue;
+			}
+			const frames: SearchFrame[] = [
+				{
+					directory: root,
+					wire: "",
+					depth: 0,
+					gitignoreChain: [mockGitignoreLayerFor(root, "")],
+					names: [...root.entries.keys()].sort(compareWorkspaceEntryNames),
+					nextIndex: 0,
+				},
+			];
+
+			while (frames.length > 0) {
+				const frame = frames[frames.length - 1]!;
+				if (frame.nextIndex >= frame.names.length) {
+					frames.pop();
+					continue;
+				}
+				const name = frame.names[frame.nextIndex]!;
+				frame.nextIndex += 1;
+				visited += 1;
+				if (visited > MAX_MOCK_SEARCH_TREE_ENTRIES) {
+					limitHit = true;
+					break rootsLoop;
+				}
+				const child = frame.directory.entries.get(name);
+				if (child === undefined) {
+					continue;
+				}
+				const wire = frame.wire.length === 0 ? name : `${frame.wire}/${name}`;
+				const isDir = child.kind === "directory";
+				const excluded =
+					excludeMatchers.some((matches) => matches(wire)) ||
+					mockPathIsGitignored(frame.gitignoreChain, wire, isDir);
+
+				if (child.kind === "directory") {
+					if (excluded) {
+						continue;
+					}
+					const depth = frame.depth + 1;
+					if (depth > MAX_MOCK_SEARCH_TREE_DEPTH) {
+						limitHit = true;
+						continue;
+					}
+					frames.push({
+						directory: child,
+						wire,
+						depth,
+						gitignoreChain: [
+							...frame.gitignoreChain,
+							mockGitignoreLayerFor(child, wire),
+						],
+						names: [...child.entries.keys()].sort(compareWorkspaceEntryNames),
+						nextIndex: 0,
+					});
+				} else if (child.kind === "file") {
+					if (excluded) {
+						continue;
+					}
+					if (
+						patternLower.length > 0 &&
+						!isMockSubsequence(patternLower, wire.toLowerCase())
+					) {
+						continue;
+					}
+					entries.push(wire);
+					if (entries.length >= request.maxResults) {
+						limitHit = true;
+						break rootsLoop;
+					}
+				}
+				// Symlinks and other node kinds are never followed or
+				// reported, matching Rust's traversal policy.
+			}
+		}
+
+		return frozenWorkspaceSearchFilesResult(entries, limitHit);
+	};
+
+	// --- Streaming text search (F040 S3) ------------------------------------
+
+	const MAX_MOCK_TEXT_SEARCH_MATCHES =
+		options.textSearchMaxMatchesForTest ?? 20_000;
+	const MOCK_TEXT_SEARCH_BATCHES_PER_POLL =
+		options.textSearchBatchesPerPollForTest ?? 1;
+	const lenientTextDecoder = new TextDecoder("utf-8", { fatal: false });
+	const issuedTextSearchIds = new Set<string>();
+	const nextTextSearchId = (): string => {
+		for (let attempt = 0; attempt < 16; attempt += 1) {
+			const bytes = new Uint8Array(16);
+			globalThis.crypto.getRandomValues(bytes);
+			bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+			bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+			const hex = [...bytes]
+				.map((value) => value.toString(16).padStart(2, "0"))
+				.join("");
+			const id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(
+				12,
+				16,
+			)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+			if (!issuedTextSearchIds.has(id)) {
+				issuedTextSearchIds.add(id);
+				return id;
+			}
+		}
+		throw new Error("Browser mock text-search id generation failed.");
+	};
+
+	interface MockTextSearchBatch {
+		readonly path: string;
+		readonly matches: readonly {
+			readonly line: number;
+			readonly column: number;
+			readonly length: number;
+			readonly previewText: string;
+			readonly absoluteColumn: number;
+		}[];
+	}
+
+	interface MockTextSearch {
+		readonly searchId: string;
+		pending: MockTextSearchBatch[];
+		deliveredCursor: number;
+		readonly limitHit: boolean;
+		readonly skippedBinary: number;
+		readonly skippedOversize: number;
+	}
+
+	// --- Terminal + execution trust (F070 "IPC 改造": render-state frames) ---
+
+	/** Approximates the conventional Unix "128 + signal" shell reporting for
+	 * a killed process (SIGKILL = 9) — an approximation for mock purposes
+	 * only, not a guarantee of byte-for-byte parity with `portable_pty`'s
+	 * real exit-code encoding for a killed child. */
+	const MOCK_TERMINAL_KILLED_EXIT_CODE = 137;
+	/** Fixed neutral color scheme every mock frame reports — this mock does
+	 * not model SGR styling at all (see
+	 * `BrowserMockTerminalSessionController`'s doc comment), so every cell
+	 * is unstyled and every frame's `colors` are these same two constants. */
+	const MOCK_TERMINAL_BACKGROUND: TerminalRgb = Object.freeze({
+		r: 0,
+		g: 0,
+		b: 0,
+	});
+	const MOCK_TERMINAL_FOREGROUND: TerminalRgb = Object.freeze({
+		r: 229,
+		g: 229,
+		b: 229,
+	});
+	const MOCK_TERMINAL_DEFAULT_STYLE: TerminalStyle = Object.freeze({
+		bold: false,
+		italic: false,
+		faint: false,
+		blink: false,
+		inverse: false,
+		invisible: false,
+		strikethrough: false,
+		overline: false,
+		underline: "none",
+	});
+
+	let terminalTrusted = options.terminalTrustedForTest ?? false;
+	const terminalDataListeners = new Set<(event: TerminalDataEvent) => void>();
+	const terminalExitListeners = new Set<(event: TerminalExitEvent) => void>();
+
+	/** `F100` S1 mock confirmation state — a workspace-independent set of
+	 * confirmed `(command, args, transport)` keys, mirroring `terminalTrusted`'s
+	 * own "gated on `roots.size === 0`, otherwise a plain in-memory flag" shape
+	 * (this mock, unlike real Rust, has no per-workspace-identity scoping —
+	 * every mocked window shares one fixture-global fake workspace already,
+	 * matching `terminalTrusted`'s identical simplification). */
+	const debugAdapterConfirmations = new Set<string>();
+	function debugAdapterConfirmationKey(
+		descriptor: DebugAdapterConfirmationSubject,
+	): string {
+		return JSON.stringify([
+			descriptor.command,
+			descriptor.args,
+			descriptor.transport,
+		]);
+	}
+	function debugAdapterConfirmationUnavailable(): CommandError {
+		return commandError(
+			"DEBUG_ADAPTER_CONFIRMATION_UNAVAILABLE",
+			"The debug adapter confirmation store is not available for this window.",
+		);
+	}
+
+	// --- `F100` S3: real session-lifecycle + interactive debugging mock. ---
+
+	function debugAdapterNotConfirmed(): CommandError {
+		return commandError(
+			"DEBUG_ADAPTER_NOT_CONFIRMED",
+			"This exact adapter command has not been confirmed for this workspace yet.",
+		);
+	}
+
+	function debugSessionNotFound(): CommandError {
+		return commandError(
+			"DEBUG_SESSION_NOT_FOUND",
+			"The requested debug session does not exist for this window.",
+		);
+	}
+
+	const liveDebugSessions = new Set<string>();
+	const issuedDebugSessionIds = new Set<string>();
+	const debugEventListeners = new Set<(event: DebugEventPayload) => void>();
+
+	// `F100` S5 — a deliberately small-scale mirror of
+	// `src-tauri/src/debug/output_gate.rs`'s real backpressure gate, for the
+	// same reason `MockTerminalSession`'s own single-frame-in-flight credit
+	// gate mirrors `terminal::service`'s real one: this mock never
+	// re-implements a real DAP adapter, but a consuming frontend (the Debug
+	// Console view) needs to be able to genuinely drive and observe real
+	// gate/ack behavior in a Browser test, not just receive a canned,
+	// already-flushed fixture. Deliberately much smaller watermarks/caps than
+	// the real Rust constants (`DEBUG_OUTPUT_MOCK_HIGH_WATER_EVENTS`/
+	// `DEBUG_OUTPUT_MOCK_MERGE_CAP_BYTES`) so a Browser test can trigger real
+	// backpressure with a handful of events rather than needing to actually
+	// send tens of thousands.
+	const DEBUG_OUTPUT_MOCK_HIGH_WATER_EVENTS = 4;
+	const DEBUG_OUTPUT_MOCK_MERGE_CAP_BYTES = 256;
+	interface MockDebugOutputMergedCategory {
+		text: string;
+		elidedBytes: number;
+		elidedLines: number;
+	}
+	interface MockDebugOutputGate {
+		nextSequence: number;
+		highestEmitted: number;
+		highestAcked: number;
+		merged: Map<string, MockDebugOutputMergedCategory>;
+	}
+	const debugOutputGates = new Map<string, MockDebugOutputGate>();
+
+	function mockDebugOutputGate(sessionId: string): MockDebugOutputGate {
+		let gate = debugOutputGates.get(sessionId);
+		if (gate === undefined) {
+			gate = {
+				nextSequence: 1,
+				highestEmitted: 0,
+				highestAcked: 0,
+				merged: new Map(),
+			};
+			debugOutputGates.set(sessionId, gate);
+		}
+		return gate;
+	}
+
+	function mockDebugOutputUnacked(gate: MockDebugOutputGate): number {
+		return gate.highestEmitted - gate.highestAcked;
+	}
+
+	function mockDebugOutputCategory(body: unknown): string {
+		if (typeof body !== "object" || body === null || Array.isArray(body)) {
+			return "console";
+		}
+		const category = (body as Record<string, unknown>).category;
+		return typeof category === "string" ? category : "console";
+	}
+
+	function mockDebugOutputText(body: unknown): string | undefined {
+		if (typeof body !== "object" || body === null || Array.isArray(body)) {
+			return undefined;
+		}
+		const output = (body as Record<string, unknown>).output;
+		return typeof output === "string" ? output : undefined;
+	}
+
+	function mergeMockDebugOutput(
+		gate: MockDebugOutputGate,
+		category: string,
+		text: string,
+	): void {
+		const entry = gate.merged.get(category) ?? {
+			text: "",
+			elidedBytes: 0,
+			elidedLines: 0,
+		};
+		entry.text += text;
+		if (entry.text.length > DEBUG_OUTPUT_MOCK_MERGE_CAP_BYTES) {
+			const overflow = entry.text.length - DEBUG_OUTPUT_MOCK_MERGE_CAP_BYTES;
+			const dropped = entry.text.slice(0, overflow);
+			entry.text = entry.text.slice(overflow);
+			entry.elidedBytes += dropped.length;
+			entry.elidedLines += (dropped.match(/\n/gu) ?? []).length;
+		}
+		gate.merged.set(category, entry);
+	}
+
+	/** Emits every merged category this mock's own credit currently allows —
+	 * mirrors `OutputGate::ack`'s "drain as many as credit permits" contract. */
+	function flushMockDebugOutput(
+		sessionId: string,
+		gate: MockDebugOutputGate,
+	): void {
+		while (
+			gate.merged.size > 0 &&
+			mockDebugOutputUnacked(gate) < DEBUG_OUTPUT_MOCK_HIGH_WATER_EVENTS
+		) {
+			const nextCategory = gate.merged.keys().next().value;
+			if (nextCategory === undefined) {
+				break;
+			}
+			const entry = gate.merged.get(nextCategory);
+			gate.merged.delete(nextCategory);
+			if (entry === undefined) {
+				break;
+			}
+			if (entry.elidedBytes > 0) {
+				emitMockDebugEvent(sessionId, "plain/outputElided", {
+					category: nextCategory,
+					elidedBytes: entry.elidedBytes,
+					elidedLines: entry.elidedLines,
+				});
+			}
+			const sequence = gate.nextSequence;
+			gate.nextSequence += 1;
+			gate.highestEmitted = sequence;
+			emitMockDebugEvent(sessionId, "output", {
+				category: nextCategory,
+				output: entry.text,
+				sequence,
+			});
+		}
+	}
+
+	/** The mock counterpart of `DebugSession::handle_output_event` — routes a
+	 * real `output` event through the gate instead of forwarding it straight
+	 * through, so a Browser test can genuinely drive backpressure by pushing
+	 * more than `DEBUG_OUTPUT_MOCK_HIGH_WATER_EVENTS` events via
+	 * `BrowserMockDebugSessionController.emitEvent("output", …)`. */
+	function handleMockDebugOutputEvent(sessionId: string, body: unknown): void {
+		const text = mockDebugOutputText(body);
+		if (text === undefined) {
+			emitMockDebugEvent(sessionId, "output", body);
+			return;
+		}
+		const category = mockDebugOutputCategory(body);
+		const gate = mockDebugOutputGate(sessionId);
+		if (
+			gate.merged.size === 0 &&
+			mockDebugOutputUnacked(gate) < DEBUG_OUTPUT_MOCK_HIGH_WATER_EVENTS
+		) {
+			const sequence = gate.nextSequence;
+			gate.nextSequence += 1;
+			gate.highestEmitted = sequence;
+			emitMockDebugEvent(sessionId, "output", {
+				category,
+				output: text,
+				sequence,
+			});
+			return;
+		}
+		mergeMockDebugOutput(gate, category, text);
+	}
+
+	const nextDebugSessionId = (): string => {
+		for (let attempt = 0; attempt < 16; attempt += 1) {
+			const bytes = new Uint8Array(16);
+			globalThis.crypto.getRandomValues(bytes);
+			bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+			bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+			const hex = [...bytes]
+				.map((value) => value.toString(16).padStart(2, "0"))
+				.join("");
+			const id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(
+				12,
+				16,
+			)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+			if (!issuedDebugSessionIds.has(id)) {
+				issuedDebugSessionIds.add(id);
+				return id;
+			}
+		}
+		throw new Error("Browser mock debug session id generation failed.");
+	};
+
+	function requireLiveMockDebugSession(sessionId: string): void {
+		if (!liveDebugSessions.has(sessionId)) {
+			throw debugSessionNotFound();
+		}
+	}
+
+	function emitMockDebugEvent(
+		sessionId: string,
+		event: string,
+		body: unknown,
+	): void {
+		const payload: DebugEventPayload = Object.freeze({
+			sessionId,
+			event,
+			body,
+		});
+		for (const listener of debugEventListeners) {
+			listener(payload);
+		}
+	}
+
+	/** Shared by mock `debugLaunch`/`debugAttach` — see
+	 * `PlainBridge.debugLaunch`'s own doc comment for why neither ever sends
+	 * an initial breakpoint (this mock therefore never models
+	 * `initialBreakpoints` either). Enforces the exact same two gates the
+	 * real Rust `start_session` does, in the same order: workspace trust
+	 * first, then the exact `(command, args, transport)` confirmation —
+	 * never spawns/connects (there is nothing to spawn/connect in a browser
+	 * mock) until both pass. */
+	function startMockDebugSession(
+		target: DebugAdapterTarget,
+		adapterId: string,
+		launchArguments: Readonly<Record<string, unknown>>,
+	): DebugSessionStartResult {
+		const request = frozenDebugSessionStartRequest(
+			target,
+			adapterId,
+			launchArguments,
+		);
+		if (roots.size === 0 || !terminalTrusted) {
+			throw terminalNotTrusted();
+		}
+		const subject: DebugAdapterConfirmationSubject = Object.freeze({
+			command: request.command as string,
+			args: request.args as readonly string[],
+			transport: request.transport as "stdio" | "tcp",
+		});
+		if (!debugAdapterConfirmations.has(debugAdapterConfirmationKey(subject))) {
+			throw debugAdapterNotConfirmed();
+		}
+		const sessionId = nextDebugSessionId();
+		liveDebugSessions.add(sessionId);
+		const capabilities = { ...options.debugFixtureForTest?.capabilities };
+		const controller: BrowserMockDebugSessionController = Object.freeze({
+			sessionId,
+			emitEvent(event: string, body: unknown): void {
+				if (!liveDebugSessions.has(sessionId)) {
+					return;
+				}
+				if (event === "output") {
+					// `F100` S5 — routed through the mock's own backpressure
+					// gate instead of forwarded straight through, so a
+					// Browser test can genuinely drive/observe real gate/ack
+					// behavior — see `handleMockDebugOutputEvent`'s own doc
+					// comment.
+					handleMockDebugOutputEvent(sessionId, body);
+					return;
+				}
+				emitMockDebugEvent(sessionId, event, body);
+			},
+			finish(): void {
+				debugOutputGates.delete(sessionId);
+				if (!liveDebugSessions.delete(sessionId)) {
+					return;
+				}
+				emitMockDebugEvent(sessionId, "plain/sessionEnded", {
+					reason: "transportClosed",
+				});
+			},
+		});
+		options.onDebugSessionForTest?.(controller);
+		return Object.freeze({
+			sessionId,
+			capabilities: Object.freeze(capabilities),
+		});
+	}
+
+	interface MockTerminalSession {
+		readonly sessionId: string;
+		cols: number;
+		rows: number;
+		/** The mock's entire fake PTY state: one echo row's text — see
+		 * `BrowserMockTerminalSessionController`'s doc comment for why this
+		 * is deliberately not a real VT grid. */
+		line: string;
+		exited: boolean;
+		nextSequence: number;
+		lastEmittedSequence: number | null;
+		/** Mirrors the real vt thread's single-frame-in-flight emission
+		 * credit gate (`FrameEmitGate` in `src-tauri/src/terminal/service.rs`). */
+		awaitingAck: boolean;
+		/** Set on construction and after every resize; forces the next
+		 * eligible frame to report `dirty: "full"` — mirrors
+		 * `vt::VtSession::resize`'s guarantee (and matches the real crate's
+		 * own construction-time behavior: its very first frame is always a
+		 * full redraw). */
+		forceFull: boolean;
+		/** Whether `line` has changed since the last frame this session
+		 * emitted. */
+		dirty: boolean;
+	}
+
+	const terminalSessions = new Map<string, MockTerminalSession>();
+	const issuedTerminalSessionIds = new Set<string>();
+	const nextTerminalSessionId = (): string => {
+		for (let attempt = 0; attempt < 16; attempt += 1) {
+			const bytes = new Uint8Array(16);
+			globalThis.crypto.getRandomValues(bytes);
+			bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+			bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+			const hex = [...bytes]
+				.map((value) => value.toString(16).padStart(2, "0"))
+				.join("");
+			const id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(
+				12,
+				16,
+			)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+			if (!issuedTerminalSessionIds.has(id)) {
+				issuedTerminalSessionIds.add(id);
+				return id;
+			}
+		}
+		throw new Error("Browser mock terminal session id generation failed.");
+	};
+
+	function terminalNotTrusted(): CommandError {
+		return commandError(
+			"WORKSPACE_NOT_TRUSTED",
+			"This workspace has not been granted execution trust.",
+		);
+	}
+
+	function trustUnavailable(): CommandError {
+		return commandError(
+			"TRUST_UNAVAILABLE",
+			"The workspace trust store is not available for this window.",
+		);
+	}
+
+	function gitNoRepository(): CommandError {
+		return commandError(
+			"GIT_NO_REPOSITORY",
+			"The current workspace root is not a Git repository.",
+		);
+	}
+
+	const gitFixture = options.gitFixtureForTest ?? {};
+	const defaultGitStatus: GitStatusResult = Object.freeze({
+		branch: Object.freeze({
+			oid: "0".repeat(40),
+			head: "main",
+			upstream: null,
+		}),
+		entries: Object.freeze([]),
+	});
+	const defaultGitDiffFiles: GitDiffFilesResult = Object.freeze({
+		entries: [],
+	});
+	const gitBlobs = new Map<string, Partial<Record<GitBlobRev, string>>>(
+		Object.entries(gitFixture.blobs ?? {}),
+	);
+	const defaultGitBlameFile: GitBlameFileResult = Object.freeze({
+		entries: Object.freeze([]),
+		commits: Object.freeze({}),
+	});
+	const gitBlameFixtures = new Map<string, GitBlameFileResult>(
+		Object.entries(gitFixture.blame ?? {}),
+	);
+	const gitBlameCommitMessages = new Map<string, string>(
+		Object.entries(gitFixture.blameCommitMessages ?? {}),
+	);
+	const defaultGitHistoryList: GitHistoryListResult = Object.freeze({
+		entries: Object.freeze([]),
+		truncated: false,
+	});
+	const gitFileHistoryFixtures = new Map<string, GitHistoryListResult>(
+		Object.entries(gitFixture.fileHistory ?? {}),
+	);
+	const gitLineHistoryListFixtures = new Map<string, GitHistoryListResult>(
+		Object.entries(gitFixture.lineHistoryList ?? {}),
+	);
+	const gitLineHistoryDetailFixtures = new Map<string, GitLineHistoryDetail>(
+		Object.entries(gitFixture.lineHistoryDetail ?? {}),
+	);
+	const gitShowCommitFixtures = new Map<string, GitShowCommitResult>(
+		Object.entries(gitFixture.showCommit ?? {}),
+	);
+	const gitCommitBlobs = new Map<string, Readonly<Record<string, string>>>(
+		Object.entries(gitFixture.commitBlobs ?? {}),
+	);
+	const defaultGitLogGraphResult: GitLogGraphResult = Object.freeze({
+		nodes: Object.freeze([]),
+		truncated: false,
+	});
+	const gitGraphResult = gitFixture.graphForTest ?? defaultGitLogGraphResult;
+	const defaultGitRefsListResult: GitRefsListResult = Object.freeze({
+		entries: Object.freeze([]),
+		truncated: false,
+	});
+	const gitRefsListResult = gitFixture.refsForTest ?? defaultGitRefsListResult;
+
+	// --- F090 S4: mutable stash list simulation ----------------------------
+	//
+	// See `BrowserMockGitFixtureForTest.stashForTest`'s own doc comment for
+	// why this never re-implements real stash-commit plumbing (no parent
+	// resolution, no reflog) — `src-tauri/src/git/stash/tests.rs` is this
+	// slice's authoritative correctness evidence; this array only needs to be
+	// self-consistent enough for a consuming frontend to develop and test the
+	// full push/apply/pop/drop click-through flow against.
+	let gitStashEntries: GitStashEntry[] = (gitFixture.stashForTest ?? []).map(
+		(entry) => ({ ...entry }),
+	);
+	const gitStashShowFixtures = new Map<string, GitStashShowResult>(
+		Object.entries(gitFixture.stashShowForTest ?? {}),
+	);
+	const gitStashConflictFixtures = new Map<string, readonly string[]>(
+		Object.entries(gitFixture.stashConflictForTest ?? {}),
+	);
+	let gitStashCounter = 0;
+
+	function gitStashNotFound(): CommandError {
+		return commandError(
+			"GIT_STASH_NOT_FOUND",
+			"No stash entry with the requested identity exists.",
+		);
+	}
+
+	function gitStashListSnapshot(): GitStashListResult {
+		return Object.freeze({
+			entries: Object.freeze(
+				gitStashEntries.map((entry, index) => ({ ...entry, index })),
+			),
+			truncated: false,
+		});
+	}
+
+	// --- F090 S5: mutable worktree list simulation --------------------------
+	//
+	// See `BrowserMockGitFixtureForTest.worktreesForTest`'s own doc comment for
+	// why this never re-implements real `git worktree` plumbing (no reflog, no
+	// actual filesystem directories) — `src-tauri/src/git/worktree/tests.rs`
+	// is this slice's authoritative correctness evidence; this array only
+	// needs to be self-consistent enough for a consuming frontend to develop
+	// and test the full add/remove click-through flow against.
+	const defaultWorktreeEntry: GitWorktreeEntry = Object.freeze({
+		path: "/workspace",
+		headSha: "f0".padEnd(40, "0"),
+		headState: Object.freeze({
+			kind: "branch" as const,
+			refName: "refs/heads/main",
+		}),
+		lockReason: null,
+		prunableReason: null,
+		isMain: true,
+	});
+	let gitWorktreeEntries: GitWorktreeEntry[] = (
+		gitFixture.worktreesForTest ?? [defaultWorktreeEntry]
+	).map((entry) => ({ ...entry }));
+	const gitWorktreeDirtyPaths = new Set<string>(
+		gitFixture.worktreeDirtyForTest ?? [],
+	);
+	let gitWorktreeCounter = 0;
+
+	function gitWorktreeListSnapshot(): GitWorktreeListResult {
+		return Object.freeze({
+			entries: Object.freeze(gitWorktreeEntries.map((entry) => ({ ...entry }))),
+			truncated: false,
+		});
+	}
+
+	function gitWorktreeRemoveIsMainWorktree(): CommandError {
+		return commandError(
+			"GIT_WORKTREE_REMOVE_IS_MAIN_WORKTREE",
+			"The main worktree cannot be removed.",
+		);
+	}
+
+	function gitWorktreeRemoveLocked(): CommandError {
+		return commandError(
+			"GIT_WORKTREE_REMOVE_LOCKED",
+			"This worktree is locked and must be unlocked before it can be removed.",
+		);
+	}
+
+	function gitWorktreeRemoveNotFound(): CommandError {
+		return commandError(
+			"GIT_WORKTREE_REMOVE_NOT_FOUND",
+			"That path is not a registered worktree of this repository.",
+		);
+	}
+
+	// --- F080 S3: mutable stage/unstage/commit/discard simulation ---------
+	//
+	// `gitBranch`/`gitEntries` start from the injected fixture (or the clean
+	// default) and are mutated in place by `gitStagePaths`/`gitUnstagePaths`/
+	// `gitStageBlob`/`gitCommit`/`gitDiscardPaths` below — this mock never
+	// re-implements real git plumbing (no hashing, no index file), only
+	// enough of porcelain-v2's index/worktree status-character semantics to
+	// let a consuming frontend (`PlainScmProvider`) observe a believable
+	// state transition after each write call. The Rust-side fixtures in
+	// `src-tauri/src/git/stage/tests.rs`/`commit/tests.rs`/`discard/tests.rs`
+	// are this slice's authoritative correctness evidence; this simulation
+	// only needs to be self-consistent enough for frontend development and
+	// Browser E2E to exercise the full click-through flow.
+	let gitBranch: GitBranch = (gitFixture.status ?? defaultGitStatus).branch;
+	let gitEntries: GitStatusEntry[] = (
+		gitFixture.status ?? defaultGitStatus
+	).entries.map((entry) => ({ ...entry }));
+	let gitCommitCounter = 0;
+
+	const ZERO_GIT_HASH = "0".repeat(40);
+	const ZERO_GIT_SUBMODULE = Object.freeze({
+		isSubmodule: false,
+		commitChanged: false,
+		trackedChanged: false,
+		untrackedChanged: false,
+	});
+
+	// --- F080 S4: mutable fetch/pull/push simulation -----------------------
+	//
+	// See `BrowserMockGitNetworkFixtureForTest`'s own doc comment for why this
+	// never re-implements real ahead/behind or non-fast-forward semantics —
+	// `src-tauri/src/git/network/tests.rs` is this slice's authoritative
+	// correctness evidence.
+	const gitNetworkFixture = gitFixture.networkForTest ?? {};
+	let gitNetworkUpstream: string | null =
+		gitNetworkFixture.upstream === undefined
+			? "origin/main"
+			: gitNetworkFixture.upstream;
+	let gitNetworkAhead = gitNetworkFixture.ahead ?? 0;
+	let gitNetworkBehind = gitNetworkFixture.behind ?? 0;
+
+	function gitMutateUnavailable(): CommandError | undefined {
+		if (roots.size === 0 || !terminalTrusted) {
+			return terminalNotTrusted();
+		}
+		if (gitFixture.noRepositoryForTest === true) {
+			return gitNoRepository();
+		}
+		return undefined;
+	}
+
+	function gitNetworkNoUpstream(): CommandError {
+		return commandError(
+			"GIT_NETWORK_NO_UPSTREAM",
+			"The current branch has no upstream configured.",
+		);
+	}
+
+	function gitPushRejected(): CommandError {
+		return commandError(
+			"GIT_PUSH_REJECTED",
+			"The remote rejected the push (it has commits this branch does not).",
+		);
+	}
+
+	function gitDiscardFailed(): CommandError {
+		return commandError(
+			"GIT_DISCARD_FAILED",
+			"git checkout did not complete successfully.",
+		);
+	}
+
+	function gitCommitNothingToCommit(): CommandError {
+		return commandError(
+			"GIT_COMMIT_NOTHING_TO_COMMIT",
+			"There are no staged changes to commit.",
+		);
+	}
+
+	function findGitEntryIndex(path: string): number {
+		return gitEntries.findIndex(
+			(entry) =>
+				(entry.type === "ordinary" ||
+					entry.type === "renameOrCopy" ||
+					entry.type === "untracked") &&
+				entry.path === path,
+		);
+	}
+
+	function newOrdinaryGitEntry(
+		indexStatus: string,
+		worktreeStatus: string,
+		path: string,
+	): GitStatusEntry {
+		return {
+			type: "ordinary",
+			indexStatus,
+			worktreeStatus,
+			submodule: ZERO_GIT_SUBMODULE,
+			modeHead: "100644",
+			modeIndex: "100644",
+			modeWorktree: "100644",
+			hashHead: ZERO_GIT_HASH,
+			hashIndex: ZERO_GIT_HASH,
+			path,
+		};
+	}
+
+	/** Moves the worktree-side change at `path` (partly, when `wholeFile` is
+	 * `false`) onto the index side — `gitStagePaths` (`git add -A`) always
+	 * passes `wholeFile: true` (worktree status clears to `.`); `gitStageBlob`
+	 * (hunk-level) passes `false`, deliberately leaving the worktree status
+	 * exactly as it was, simulating the real `MM`-shaped partial stage
+	 * `src-tauri/src/git/stage/tests.rs`'s
+	 * `stage_blob_partially_stages_a_file_and_status_reports_mm` proves
+	 * server-side. */
+	function gitStageOnePath(path: string, wholeFile: boolean): void {
+		const index = findGitEntryIndex(path);
+		if (index === -1) {
+			return;
+		}
+		const entry = gitEntries[index]!;
+		if (entry.type === "untracked") {
+			gitEntries[index] = newOrdinaryGitEntry("A", wholeFile ? "." : "M", path);
+			return;
+		}
+		if (entry.type !== "ordinary" && entry.type !== "renameOrCopy") {
+			return;
+		}
+		if (entry.worktreeStatus === ".") {
+			return;
+		}
+		gitEntries[index] = {
+			...entry,
+			indexStatus: entry.worktreeStatus,
+			worktreeStatus: wholeFile ? "." : entry.worktreeStatus,
+		};
+	}
+
+	function gitUnstageOnePath(path: string): void {
+		const index = findGitEntryIndex(path);
+		if (index === -1) {
+			return;
+		}
+		const entry = gitEntries[index]!;
+		if (entry.type !== "ordinary" && entry.type !== "renameOrCopy") {
+			return;
+		}
+		if (entry.indexStatus === ".") {
+			return;
+		}
+		if (entry.indexStatus === "A" && entry.worktreeStatus === ".") {
+			gitEntries[index] = { type: "untracked", path };
+			return;
+		}
+		gitEntries[index] = {
+			...entry,
+			worktreeStatus: entry.indexStatus,
+			indexStatus: ".",
+		};
+	}
+
+	/** `true` only when `path` currently has a worktree-side change a discard
+	 * could meaningfully restore — mirrors real `git checkout -q --`'s
+	 * pathspec-resolution-before-touching-anything semantics
+	 * (`src-tauri/src/git/discard/tests.rs`'s
+	 * `discard_paths_is_all_or_nothing_when_one_path_is_untracked`): an
+	 * untracked path (or a path with no worktree change at all) cannot be
+	 * discarded, and `gitDiscardPaths` below checks every path with this
+	 * function *before* mutating any of them. */
+	function gitPathIsDiscardable(path: string): boolean {
+		const index = findGitEntryIndex(path);
+		if (index === -1) {
+			return false;
+		}
+		const entry = gitEntries[index]!;
+		return (
+			(entry.type === "ordinary" || entry.type === "renameOrCopy") &&
+			entry.worktreeStatus !== "."
+		);
+	}
+
+	function gitDiscardOnePath(path: string): void {
+		const index = findGitEntryIndex(path);
+		if (index === -1) {
+			return;
+		}
+		const entry = gitEntries[index]!;
+		if (entry.type !== "ordinary" && entry.type !== "renameOrCopy") {
+			return;
+		}
+		if (entry.indexStatus === ".") {
+			gitEntries.splice(index, 1);
+		} else {
+			gitEntries[index] = { ...entry, worktreeStatus: "." };
+		}
+	}
+
+	function gitHasStagedChanges(): boolean {
+		return gitEntries.some(
+			(entry) =>
+				(entry.type === "ordinary" || entry.type === "renameOrCopy") &&
+				entry.indexStatus !== ".",
+		);
+	}
+
+	/** Drops every fully-committed entry (both axes now `.`) and clears the
+	 * index axis of every remaining one — the same "commit only touches the
+	 * staged half" semantics `git commit` has in reality. Also advances a
+	 * fake, deterministic commit oid so `gitStatus().branch.oid` visibly
+	 * changes after a commit, matching real `git commit` always producing a
+	 * new oid (including `--amend`, which still replaces the oid even though
+	 * the tree may be identical). */
+	function gitCommitStagedEntries(): void {
+		const nextEntries: GitStatusEntry[] = [];
+		for (const entry of gitEntries) {
+			if (entry.type === "ordinary" || entry.type === "renameOrCopy") {
+				if (entry.indexStatus === ".") {
+					nextEntries.push(entry);
+					continue;
+				}
+				if (entry.worktreeStatus === ".") {
+					continue;
+				}
+				nextEntries.push({ ...entry, indexStatus: "." });
+				continue;
+			}
+			nextEntries.push(entry);
+		}
+		gitEntries = nextEntries;
+		gitCommitCounter += 1;
+		gitBranch = {
+			...gitBranch,
+			oid: gitCommitCounter.toString(16).padStart(40, "0"),
+		};
+	}
+
+	function terminalSessionNotFound(): CommandError {
+		return commandError(
+			"TERMINAL_SESSION_NOT_FOUND",
+			"The requested terminal session does not exist for this window.",
+		);
+	}
+
+	function terminalIoFailed(): CommandError {
+		return commandError("IO_FAILED", "The terminal session could not be used.");
+	}
+
+	function getMockTerminalSession(sessionId: string): MockTerminalSession {
+		const session = terminalSessions.get(sessionId);
+		if (session === undefined) {
+			throw terminalSessionNotFound();
+		}
+		return session;
+	}
+
+	/** Builds this session's single-row frame value at its current state —
+	 * an own-data plain object handed to `frozenTerminalDataEvent`, which
+	 * re-validates and freezes it through the same decoder a real wire
+	 * payload goes through. */
+	function buildMockTerminalFrameValue(
+		session: MockTerminalSession,
+		dirty: "full" | "partial",
+	): unknown {
+		const cells = [...session.line].map((character) => ({
+			graphemes: character,
+			fg: null,
+			bg: null,
+			style: MOCK_TERMINAL_DEFAULT_STYLE,
+		}));
+		return {
+			dirty,
+			cols: session.cols,
+			rows: session.rows,
+			cursor: {
+				visible: true,
+				blinking: false,
+				viewport: { x: cells.length, y: 0, atWideTail: false },
+				style: "block",
+			},
+			colors: {
+				background: MOCK_TERMINAL_BACKGROUND,
+				foreground: MOCK_TERMINAL_FOREGROUND,
+				cursor: null,
+			},
+			rowsData: [{ rowIndex: 0, cells }],
+		};
+	}
+
+	/** Attempts to snapshot and emit a frame right now — the mock analogue
+	 * of `FrameEmitGate::try_take_frame` + `attempt_emit`
+	 * (`src-tauri/src/terminal/service.rs`): a no-op whenever a previously
+	 * emitted frame is still unacknowledged, or nothing has actually
+	 * changed since the last one (and this is not a forced full redraw). */
+	function attemptEmitMockTerminalFrame(session: MockTerminalSession): void {
+		if (session.awaitingAck || (!session.dirty && !session.forceFull)) {
+			return;
+		}
+		const dirty: "full" | "partial" = session.forceFull ? "full" : "partial";
+		const sequence = session.nextSequence;
+		session.nextSequence += 1;
+		session.lastEmittedSequence = sequence;
+		session.awaitingAck = true;
+		session.forceFull = false;
+		session.dirty = false;
+		const event = frozenTerminalDataEvent(
+			session.sessionId,
+			sequence,
+			buildMockTerminalFrameValue(session, dirty),
+		);
+		queueMicrotask(() => {
+			for (const listener of terminalDataListeners) {
+				listener(event);
+			}
+		});
+	}
+
+	/** Frees the emission credit once the frontend has acked up through
+	 * `sequence` — mirrors `FrameEmitGate::ack`'s tolerant contract (a stale
+	 * or duplicate ack below the last emitted sequence is simply ignored). */
+	function ackMockTerminalSession(
+		session: MockTerminalSession,
+		sequence: number,
+	): void {
+		if (
+			session.lastEmittedSequence !== null &&
+			sequence >= session.lastEmittedSequence
+		) {
+			session.awaitingAck = false;
+			attemptEmitMockTerminalFrame(session);
+		}
+	}
+
+	/** Appends `text` to the session's echo row and attempts an emission —
+	 * shared by `terminalInputText`'s own echo, `terminalInputKey`'s
+	 * `utf8`-only echo, and `pushOutput`'s test-only injection. */
+	function pushMockTerminalOutput(
+		session: MockTerminalSession,
+		text: string,
+	): void {
+		if (session.exited || text.length === 0) {
+			return;
+		}
+		session.line += text;
+		session.dirty = true;
+		attemptEmitMockTerminalFrame(session);
+	}
+
+	function resizeMockTerminalSession(
+		session: MockTerminalSession,
+		cols: number,
+		rows: number,
+	): void {
+		session.cols = cols;
+		session.rows = rows;
+		session.forceFull = true;
+		attemptEmitMockTerminalFrame(session);
+	}
+
+	/** Reports `session` as exited exactly once — shared by the test
+	 * controller's `finish` and `terminalKill`'s own exit notification, so a
+	 * natural `finish()` that raced ahead of a `terminalKill` call is never
+	 * overwritten or double-reported (mirrors the real one-shot exit-event
+	 * contract). Deliberately does not force-flush any not-yet-emitted
+	 * (credit-gated) pending content: this mirrors the real exit-vs-last-
+	 * frame race `terminal::service`'s module doc documents rather than
+	 * "fixing" it away. */
+	function finishMockTerminalSession(
+		session: MockTerminalSession,
+		exitCode: number,
+	): void {
+		if (session.exited) {
+			return;
+		}
+		session.exited = true;
+		const event = frozenTerminalExitEvent(session.sessionId, exitCode);
+		queueMicrotask(() => {
+			for (const listener of terminalExitListeners) {
+				listener(event);
+			}
+		});
+	}
+
+	function startMockTerminalSession(
+		cols: number,
+		rows: number,
+	): MockTerminalSession {
+		const sessionId = nextTerminalSessionId();
+		const session: MockTerminalSession = {
+			sessionId,
+			cols,
+			rows,
+			line: "",
+			exited: false,
+			nextSequence: 0,
+			lastEmittedSequence: null,
+			awaitingAck: false,
+			forceFull: true,
+			dirty: false,
+		};
+		terminalSessions.set(sessionId, session);
+		const controller: BrowserMockTerminalSessionController = Object.freeze({
+			sessionId,
+			pushOutput(text: string): void {
+				pushMockTerminalOutput(session, text);
+			},
+			finish(exitCode: number): void {
+				finishMockTerminalSession(session, exitCode);
+			},
+			isAwaitingAckForTest: (): boolean => session.awaitingAck,
+			lastEmittedSequenceForTest: (): number | null =>
+				session.lastEmittedSequence,
+		});
+		options.onTerminalSessionForTest?.(controller);
+		return session;
+	}
+
+	let activeTextSearch: MockTextSearch | undefined;
+	const textSearchWakeListeners = new Set<(searchId: string) => void>();
+	const emitTextSearchWake = (searchId: string): void => {
+		queueMicrotask(() => {
+			for (const listener of textSearchWakeListeners) {
+				listener(searchId);
+			}
+		});
+	};
+
+	const TEXT_SEARCH_PREVIEW_MAX_UTF16_UNITS = 256;
+
+	const buildMockPreview = (
+		line: string,
+		matchStart: number,
+		matchLength: number,
+	): { previewText: string; column: number } => {
+		const matchEnd = matchStart + matchLength;
+		const windowStart =
+			matchEnd <= TEXT_SEARCH_PREVIEW_MAX_UTF16_UNITS ? 0 : matchStart;
+		const windowEnd = Math.min(
+			windowStart + TEXT_SEARCH_PREVIEW_MAX_UTF16_UNITS,
+			line.length,
+		);
+		return {
+			previewText: line.slice(windowStart, windowEnd),
+			column: matchStart - windowStart,
+		};
+	};
+
+	const escapeMockRegExp = (value: string): string =>
+		value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+	const compileMockTextMatcher = (
+		pattern: string,
+		isRegExp: boolean,
+		isCaseSensitive: boolean,
+		isWordMatch: boolean,
+	): RegExp => {
+		const source = isRegExp ? pattern : escapeMockRegExp(pattern);
+		const wrapped = isWordMatch ? `\\b(?:${source})\\b` : source;
+		try {
+			return new RegExp(wrapped, isCaseSensitive ? "gu" : "giu");
+		} catch {
+			throw invalidSearchRegex();
+		}
+	};
+
+	const searchWorkspaceTextMatches = (
+		request: Readonly<{
+			roots: readonly string[];
+			pattern: string;
+			isRegExp: boolean;
+			isCaseSensitive: boolean;
+			isWordMatch: boolean;
+			excludeGlobs: readonly string[];
+			maxResults: number;
+			maxFileSize: number | null;
+		}>,
+	): Omit<MockTextSearch, "searchId" | "deliveredCursor"> => {
+		for (const rootId of request.roots) {
+			if (!roots.has(rootId)) {
+				throw rootNotAuthorized();
+			}
+		}
+		const matcher = compileMockTextMatcher(
+			request.pattern,
+			request.isRegExp,
+			request.isCaseSensitive,
+			request.isWordMatch,
+		);
+		const excludeMatchers = request.excludeGlobs.map(compileMockExcludeGlob);
+		const maxFileSize = request.maxFileSize ?? 8 * 1_024 * 1_024;
+		const maxResults = Math.min(
+			request.maxResults,
+			MAX_MOCK_TEXT_SEARCH_MATCHES,
+		);
+
+		const pending: MockTextSearchBatch[] = [];
+		let limitHit = false;
+		let skippedBinary = 0;
+		let skippedOversize = 0;
+		let remainingBudget = maxResults;
+		let visited = 0;
+
+		interface SearchFrame {
+			readonly directory: MockDirectoryNode;
+			readonly wire: string;
+			readonly depth: number;
+			readonly gitignoreChain: readonly MockGitignoreLayer[];
+			readonly names: readonly string[];
+			nextIndex: number;
+		}
+
+		rootsLoop: for (const rootId of request.roots) {
+			const root = trees.get(rootId);
+			if (root === undefined || root.kind !== "directory") {
+				continue;
+			}
+			const frames: SearchFrame[] = [
+				{
+					directory: root,
+					wire: "",
+					depth: 0,
+					gitignoreChain: [mockGitignoreLayerFor(root, "")],
+					names: [...root.entries.keys()].sort(compareWorkspaceEntryNames),
+					nextIndex: 0,
+				},
+			];
+
+			while (frames.length > 0) {
+				const frame = frames[frames.length - 1]!;
+				if (frame.nextIndex >= frame.names.length) {
+					frames.pop();
+					continue;
+				}
+				const name = frame.names[frame.nextIndex]!;
+				frame.nextIndex += 1;
+				visited += 1;
+				if (visited > MAX_MOCK_SEARCH_TREE_ENTRIES) {
+					limitHit = true;
+					break rootsLoop;
+				}
+				const child = frame.directory.entries.get(name);
+				if (child === undefined) {
+					continue;
+				}
+				const wire = frame.wire.length === 0 ? name : `${frame.wire}/${name}`;
+				const isDir = child.kind === "directory";
+				const excluded =
+					excludeMatchers.some((matches) => matches(wire)) ||
+					mockPathIsGitignored(frame.gitignoreChain, wire, isDir);
+
+				if (child.kind === "directory") {
+					if (excluded) {
+						continue;
+					}
+					const depth = frame.depth + 1;
+					if (depth > MAX_MOCK_SEARCH_TREE_DEPTH) {
+						limitHit = true;
+						continue;
+					}
+					frames.push({
+						directory: child,
+						wire,
+						depth,
+						gitignoreChain: [
+							...frame.gitignoreChain,
+							mockGitignoreLayerFor(child, wire),
+						],
+						names: [...child.entries.keys()].sort(compareWorkspaceEntryNames),
+						nextIndex: 0,
+					});
+					continue;
+				}
+				if (child.kind !== "file" || excluded) {
+					continue;
+				}
+				if (remainingBudget <= 0) {
+					limitHit = true;
+					break rootsLoop;
+				}
+				if (child.bytes.byteLength > maxFileSize) {
+					skippedOversize += 1;
+					continue;
+				}
+				if (child.bytes.includes(0)) {
+					skippedBinary += 1;
+					continue;
+				}
+				const text = lenientTextDecoder.decode(child.bytes);
+				const lines = text.split("\n");
+				const matches: {
+					line: number;
+					column: number;
+					length: number;
+					previewText: string;
+					absoluteColumn: number;
+				}[] = [];
+				lineLoop: for (const [lineIndex, rawLine] of lines.entries()) {
+					const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+					for (const found of line.matchAll(matcher)) {
+						if (remainingBudget <= 0) {
+							break lineLoop;
+						}
+						const { previewText, column } = buildMockPreview(
+							line,
+							found.index,
+							found[0].length,
+						);
+						matches.push({
+							line: lineIndex + 1,
+							column: column + 1,
+							length: found[0].length,
+							previewText,
+							absoluteColumn: found.index + 1,
+						});
+						remainingBudget -= 1;
+					}
+				}
+				if (matches.length > 0) {
+					pending.push(
+						Object.freeze({ path: wire, matches: Object.freeze(matches) }),
+					);
+				}
+				if (remainingBudget <= 0) {
+					limitHit = true;
+					break rootsLoop;
+				}
+			}
+		}
+
+		return { pending, limitHit, skippedBinary, skippedOversize };
+	};
+
 	return {
 		async runtimeInfo() {
 			queueMicrotask(() => {
@@ -4563,6 +6677,925 @@ export function createBrowserMockBridge(
 		},
 		async workspaceWriteFile(rootId, relativePath, expectedVersion, content) {
 			return writeWorkspaceFile(rootId, relativePath, expectedVersion, content);
+		},
+		async workspaceSearchFiles(roots_, filePattern, excludeGlobs, maxResults) {
+			const request = frozenWorkspaceSearchFilesRequest(
+				roots_,
+				filePattern,
+				excludeGlobs,
+				maxResults,
+			);
+			return searchWorkspaceFiles(request);
+		},
+		async workspaceSearchTextStart(candidate) {
+			const request = frozenWorkspaceSearchTextStartRequest(
+				candidate.roots,
+				candidate.pattern,
+				candidate.isRegExp,
+				candidate.isCaseSensitive,
+				candidate.isWordMatch,
+				candidate.excludeGlobs,
+				candidate.maxResults,
+				candidate.maxFileSize,
+			);
+			// A new start always supersedes whatever this window already had,
+			// active or lingering-done — mirrors the Rust service's contract.
+			const { pending, limitHit, skippedBinary, skippedOversize } =
+				searchWorkspaceTextMatches(request);
+			const searchId = nextTextSearchId();
+			activeTextSearch = {
+				searchId,
+				pending,
+				deliveredCursor: 0,
+				limitHit,
+				skippedBinary,
+				skippedOversize,
+			};
+			if (pending.length > 0) {
+				emitTextSearchWake(searchId);
+			}
+			return decodeWorkspaceSearchTextStartResult({ searchId });
+		},
+		async workspaceSearchTextPoll(searchId, cursor) {
+			if (
+				activeTextSearch === undefined ||
+				activeTextSearch.searchId !== searchId
+			) {
+				throw searchNotFound();
+			}
+			const search = activeTextSearch;
+			if (cursor !== search.deliveredCursor) {
+				throw invalidSearchRequest();
+			}
+			const delivered = search.pending.splice(
+				0,
+				MOCK_TEXT_SEARCH_BATCHES_PER_POLL,
+			);
+			search.deliveredCursor += delivered.length;
+			const done = search.pending.length === 0;
+			if (!done) {
+				emitTextSearchWake(searchId);
+			}
+			return frozenWorkspaceSearchTextPollResult(
+				delivered,
+				search.deliveredCursor,
+				done,
+				search.limitHit,
+				{ binary: search.skippedBinary, oversize: search.skippedOversize },
+			);
+		},
+		async workspaceSearchTextCancel(searchId) {
+			if (
+				activeTextSearch === undefined ||
+				activeTextSearch.searchId !== searchId
+			) {
+				throw searchNotFound();
+			}
+			activeTextSearch = undefined;
+		},
+		workspaceSearchTextWatch(listener) {
+			textSearchWakeListeners.add(listener);
+			return () => {
+				textSearchWakeListeners.delete(listener);
+			};
+		},
+		async backupWrite(key, bytes) {
+			if (roots.size === 0) {
+				throw backupUnavailable();
+			}
+			const validated = frozenBackupWriteInputs(key, bytes);
+			backupEntries.set(validated.key, validated.content);
+		},
+		async backupReadAll(): Promise<readonly BackupEntry[]> {
+			if (roots.size === 0) {
+				throw backupUnavailable();
+			}
+			const entries = [...backupEntries.entries()]
+				.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+				.map(([key, bytes]): BackupEntry =>
+					Object.freeze({ key, bytes: bytes.slice() }),
+				);
+			return Object.freeze(entries);
+		},
+		async backupDiscard(key) {
+			if (roots.size === 0) {
+				throw backupUnavailable();
+			}
+			const request = frozenBackupDiscardRequest(key);
+			backupEntries.delete(request.key);
+		},
+		async backupDiscardAll() {
+			if (roots.size === 0) {
+				throw backupUnavailable();
+			}
+			backupEntries.clear();
+		},
+		async themeImportVsix() {
+			return themeImportFromScript();
+		},
+		async themeImportDirectory() {
+			return themeImportFromScript();
+		},
+		async themeList() {
+			const packages = [...themePackages.values()].sort((left, right) =>
+				left.id < right.id ? -1 : left.id > right.id ? 1 : 0,
+			);
+			return Object.freeze({ packages: Object.freeze(packages), skipped: 0 });
+		},
+		async themeReadResource(packageId, relativePath) {
+			const summary = themePackages.get(packageId);
+			const resources = themeResourceContents.get(packageId);
+			if (
+				summary === undefined ||
+				resources === undefined ||
+				!summary.resources.includes(relativePath)
+			) {
+				throw themeResourceNotFound();
+			}
+			const content = resources.get(relativePath);
+			if (content === undefined) {
+				throw themeResourceNotFound();
+			}
+			return new TextEncoder().encode(content);
+		},
+		async themeRemove(packageId) {
+			// Idempotent, matching the Rust service: removing an unknown or
+			// already-removed id is a plain success.
+			themePackages.delete(packageId);
+			themeResourceContents.delete(packageId);
+		},
+		async themeGetSelection() {
+			return Object.freeze({
+				themeId: themeSelection,
+				fileIconThemeId: fileIconThemeSelection,
+				productIconThemeId: productIconThemeSelection,
+			});
+		},
+		async themeSetSelection(themeId) {
+			themeSelection = themeId;
+		},
+		async themeSetFileIconThemeSelection(fileIconThemeId) {
+			fileIconThemeSelection = fileIconThemeId;
+		},
+		async themeSetProductIconThemeSelection(productIconThemeId) {
+			productIconThemeSelection = productIconThemeId;
+		},
+		async terminalStart(cwd, cols, rows) {
+			const request = frozenTerminalStartRequest(cwd, cols, rows);
+			if (roots.size === 0 || !terminalTrusted) {
+				throw terminalNotTrusted();
+			}
+			const session = startMockTerminalSession(request.cols, request.rows);
+			return decodeTerminalStartResult({ sessionId: session.sessionId });
+		},
+		async terminalInputText(sessionId, text) {
+			const request = frozenTerminalInputTextRequest(sessionId, text);
+			const session = getMockTerminalSession(request.sessionId);
+			if (session.exited) {
+				throw terminalIoFailed();
+			}
+			// This minimal echo mock reflects written text straight back as
+			// output — see `BrowserMockTerminalSessionController`'s doc
+			// comment for why this is not a real shell's own echo decision.
+			pushMockTerminalOutput(session, request.text);
+		},
+		async terminalInputKey(sessionId, action, key, mods, utf8) {
+			const request = frozenTerminalInputKeyRequest(
+				sessionId,
+				action,
+				key,
+				mods,
+				utf8,
+			);
+			const session = getMockTerminalSession(request.sessionId);
+			if (session.exited) {
+				throw terminalIoFailed();
+			}
+			// This mock does not replicate `libghostty-vt`'s key encoding
+			// matrix (see `BrowserMockTerminalSessionController`'s doc
+			// comment) — it only echoes the key event's own `utf8` text, if
+			// any, approximating how a printable character key would look
+			// once round-tripped through a real shell.
+			if (request.utf8 !== null) {
+				pushMockTerminalOutput(session, request.utf8);
+			}
+		},
+		async terminalFocus(sessionId, focused) {
+			const request = frozenTerminalFocusRequest(sessionId, focused);
+			getMockTerminalSession(request.sessionId);
+			// Always a silent no-op: this mock never enables DEC 1004,
+			// matching a real terminal's default —see
+			// `TerminalModesSnapshot::focus_reporting_enabled`'s doc.
+		},
+		async terminalResize(sessionId, cols, rows) {
+			const request = frozenTerminalResizeRequest(sessionId, cols, rows);
+			const session = getMockTerminalSession(request.sessionId);
+			resizeMockTerminalSession(session, request.cols, request.rows);
+		},
+		async terminalAck(sessionId, sequence) {
+			const request = frozenTerminalAckRequest(sessionId, sequence);
+			const session = getMockTerminalSession(request.sessionId);
+			ackMockTerminalSession(session, request.sequence);
+		},
+		async terminalScrollback(sessionId, start, count) {
+			const request = frozenTerminalScrollbackRequest(sessionId, start, count);
+			getMockTerminalSession(request.sessionId);
+			// This mock keeps no scrollback history — a single echo row only
+			// (see `BrowserMockTerminalSessionController`'s doc comment).
+			return decodeTerminalScrollbackResult({ rows: [] });
+		},
+		async terminalKill(sessionId, immediate) {
+			const request = frozenTerminalKillRequest(sessionId, immediate);
+			const session = getMockTerminalSession(request.sessionId);
+			finishMockTerminalSession(session, MOCK_TERMINAL_KILLED_EXIT_CODE);
+			terminalSessions.delete(request.sessionId);
+		},
+		terminalWatchData(listener) {
+			terminalDataListeners.add(listener);
+			return () => {
+				terminalDataListeners.delete(listener);
+			};
+		},
+		terminalWatchExit(listener) {
+			terminalExitListeners.add(listener);
+			return () => {
+				terminalExitListeners.delete(listener);
+			};
+		},
+		async workspaceTrustState() {
+			return decodeWorkspaceTrustState({
+				trusted: roots.size === 0 ? false : terminalTrusted,
+			});
+		},
+		async workspaceTrustGrant() {
+			if (roots.size === 0) {
+				throw trustUnavailable();
+			}
+			terminalTrusted = true;
+			return decodeWorkspaceTrustState({ trusted: true });
+		},
+		async workspaceTrustRevoke() {
+			if (roots.size === 0) {
+				throw trustUnavailable();
+			}
+			terminalTrusted = false;
+		},
+		async gitStatus() {
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return Object.freeze({
+				branch: gitBranch,
+				entries: Object.freeze(gitEntries.map((entry) => ({ ...entry }))),
+			});
+		},
+		async gitDiffFiles(cached_) {
+			const request = frozenGitDiffFilesRequest(cached_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return request.cached
+				? (gitFixture.diffFiles?.cached ?? defaultGitDiffFiles)
+				: (gitFixture.diffFiles?.worktree ?? defaultGitDiffFiles);
+		},
+		async gitShowBlob(rev_, path_) {
+			const request = frozenGitShowBlobRequest(rev_, path_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const content = gitBlobs.get(request.path)?.[request.rev];
+			return frozenGitShowBlobResult(
+				content === undefined ? null : new TextEncoder().encode(content),
+			);
+		},
+		async gitStagePaths(paths_) {
+			const request = frozenGitStagePathsRequest(paths_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			for (const path of request.paths) {
+				gitStageOnePath(path, true);
+			}
+		},
+		async gitUnstagePaths(paths_) {
+			const request = frozenGitUnstagePathsRequest(paths_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			for (const path of request.paths) {
+				gitUnstageOnePath(path);
+			}
+		},
+		async gitStageBlob(path_, content_) {
+			const request = frozenGitStageBlobRequest(path_, content_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			gitStageOnePath(request.path, false);
+		},
+		async gitCommit(message_, amend_) {
+			const request = frozenGitCommitRequest(message_, amend_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			if (!request.amend && !gitHasStagedChanges()) {
+				throw gitCommitNothingToCommit();
+			}
+			gitCommitStagedEntries();
+		},
+		async gitDiscardPaths(paths_) {
+			const request = frozenGitDiscardPathsRequest(paths_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			// All-or-nothing, mirroring real `git checkout -q --`: every path
+			// must resolve before any of them are touched.
+			if (!request.paths.every((path) => gitPathIsDiscardable(path))) {
+				throw gitDiscardFailed();
+			}
+			for (const path of request.paths) {
+				gitDiscardOnePath(path);
+			}
+		},
+		async gitNetworkPreview(operation_): Promise<GitNetworkPreviewResult> {
+			const request = frozenGitNetworkPreviewRequest(operation_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			if (gitNetworkUpstream === null) {
+				if (request.operation === "fetch") {
+					return Object.freeze({
+						upstream: null,
+						ahead: null,
+						behind: null,
+					});
+				}
+				throw gitNetworkNoUpstream();
+			}
+			return Object.freeze({
+				upstream: gitNetworkUpstream,
+				ahead: gitNetworkAhead,
+				behind: gitNetworkBehind,
+			});
+		},
+		async gitFetch() {
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			// A real fetch only updates the remote-tracking ref, never the
+			// local branch/ahead-behind-vs-HEAD numbers this simulation
+			// tracks — see `BrowserMockGitNetworkFixtureForTest`'s own doc
+			// comment for why this mock does not model a separate remote
+			// state to fetch new data from.
+		},
+		async gitPull() {
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			if (gitNetworkUpstream === null) {
+				throw gitNetworkNoUpstream();
+			}
+			gitNetworkBehind = 0;
+		},
+		async gitPush(force_) {
+			const request = frozenGitPushRequest(force_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			if (gitNetworkUpstream === null) {
+				throw gitNetworkNoUpstream();
+			}
+			if (request.force) {
+				if (gitNetworkFixture.forcePushRejectedForTest === true) {
+					throw gitPushRejected();
+				}
+			} else if (gitNetworkBehind > 0) {
+				throw gitPushRejected();
+			}
+			gitNetworkAhead = 0;
+		},
+		async gitNetworkCancel() {
+			// This mock resolves every network call synchronously-ish (no real
+			// long-running subprocess to interrupt), so there is never
+			// anything in flight to actually cancel — a harmless no-op,
+			// matching the real bridge method's own idempotent contract.
+		},
+		async gitBlameFile(path_, range_) {
+			const request = frozenGitBlameFileRequest(path_, range_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const fixture = gitBlameFixtures.get(request.path) ?? defaultGitBlameFile;
+			if (request.range === null) {
+				return fixture;
+			}
+			const { start, end } = request.range;
+			const entries: GitBlameLineEntry[] = fixture.entries.filter(
+				(entry) => entry.finalLine >= start && entry.finalLine <= end,
+			);
+			const commitShas = new Set(entries.map((entry) => entry.commitSha));
+			const commits: Record<string, GitBlameCommitHeader> = {};
+			for (const [sha, header] of Object.entries(fixture.commits)) {
+				if (commitShas.has(sha)) {
+					commits[sha] = header;
+				}
+			}
+			return Object.freeze({ entries: Object.freeze(entries), commits });
+		},
+		async gitBlameCommitMessages(shas_) {
+			const request = frozenGitBlameCommitMessagesRequest(shas_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const messages: Record<string, string> = {};
+			for (const sha of request.shas) {
+				const message = gitBlameCommitMessages.get(sha);
+				if (message !== undefined) {
+					messages[sha] = message;
+				}
+			}
+			return Object.freeze({ messages });
+		},
+		async gitFileHistory(path_) {
+			const request = frozenGitFileHistoryRequest(path_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return gitFileHistoryFixtures.get(request.path) ?? defaultGitHistoryList;
+		},
+		async gitLineHistoryList(path_, range_) {
+			const request = frozenGitLineHistoryListRequest(path_, range_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			// This mock has no real per-line git history to slice by range — the
+			// seeded fixture (keyed by path only) is returned regardless of the
+			// requested range, exactly like `gitFileHistory`'s own "one fixture
+			// per path" simplicity — see `BrowserMockGitFixtureForTest.
+			// lineHistoryList`'s own doc comment.
+			return (
+				gitLineHistoryListFixtures.get(request.path) ?? defaultGitHistoryList
+			);
+		},
+		async gitLineHistoryDetail(path_, range_, skip_, expectedSha_) {
+			const request = frozenGitLineHistoryDetailRequest(
+				path_,
+				range_,
+				skip_,
+				expectedSha_,
+			);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const list =
+				gitLineHistoryListFixtures.get(request.path) ?? defaultGitHistoryList;
+			const entry: GitHistoryEntry | undefined = list.entries[request.skip];
+			if (entry === undefined) {
+				throw commandError(
+					"GIT_LINE_HISTORY_DETAIL_NOT_FOUND",
+					"No commit exists at the requested position in this line's history.",
+				);
+			}
+			if (entry.sha !== request.expectedSha) {
+				throw commandError(
+					"GIT_LINE_HISTORY_DETAIL_STALE_INDEX",
+					"The line's history has changed since it was listed; refresh and try again.",
+				);
+			}
+			const seeded = gitLineHistoryDetailFixtures.get(entry.sha);
+			if (seeded !== undefined) {
+				return seeded;
+			}
+			return Object.freeze({
+				sha: entry.sha,
+				diffText: `commit ${entry.sha}\n\n    ${entry.message}\n`,
+			});
+		},
+		async gitShowCommit(sha_) {
+			const request = frozenGitShowCommitRequest(sha_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return (
+				gitShowCommitFixtures.get(request.sha) ??
+				Object.freeze({
+					sha: request.sha,
+					parentSha: null,
+					files: Object.freeze([]),
+				})
+			);
+		},
+		async gitShowCommitBlob(sha_, path_) {
+			const request = frozenGitShowCommitBlobRequest(sha_, path_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const content = gitCommitBlobs.get(request.sha)?.[request.path];
+			return frozenGitShowBlobResult(
+				content === undefined ? null : new TextEncoder().encode(content),
+			);
+		},
+		async gitLogGraph(maxCount_) {
+			// This mock has no real commit history to walk/cap by `maxCount` —
+			// the seeded fixture (or the empty default) is returned as-is,
+			// exactly like `gitFileHistory`'s own "one fixture regardless of
+			// the requested range" simplicity — see `BrowserMockGitFixtureForTest.
+			// graphForTest`'s own doc comment.
+			frozenGitLogGraphRequest(maxCount_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return gitGraphResult;
+		},
+		async gitRefsList() {
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return gitRefsListResult;
+		},
+		async gitStashList() {
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return gitStashListSnapshot();
+		},
+		async gitStashShow(sha_) {
+			const request = frozenGitStashShowRequest(sha_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			if (!gitStashEntries.some((entry) => entry.sha === request.sha)) {
+				throw gitStashNotFound();
+			}
+			return (
+				gitStashShowFixtures.get(request.sha) ??
+				Object.freeze({
+					sha: request.sha,
+					parentSha: null,
+					files: Object.freeze([]),
+				})
+			);
+		},
+		async gitStashPush(message_, includeUntracked_) {
+			const request = frozenGitStashPushRequest(message_, includeUntracked_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			gitStashCounter += 1;
+			const sha = `f0${gitStashCounter.toString(16).padStart(38, "0")}`;
+			gitStashEntries.unshift({
+				index: 0,
+				sha,
+				committerTime: Math.floor(Date.now() / 1000),
+				message: request.message,
+			});
+			return "created";
+		},
+		async gitStashApply(sha_, useIndex_) {
+			const request = frozenGitStashApplyRequest(sha_, useIndex_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			if (!gitStashEntries.some((entry) => entry.sha === request.sha)) {
+				throw gitStashNotFound();
+			}
+			const conflictedPaths = gitStashConflictFixtures.get(request.sha);
+			if (conflictedPaths !== undefined) {
+				return Object.freeze({
+					kind: "conflict" as const,
+					conflictedPaths,
+				});
+			}
+			return Object.freeze({ kind: "applied" as const });
+		},
+		async gitStashPop(sha_, useIndex_) {
+			const request = frozenGitStashPopRequest(sha_, useIndex_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const index = gitStashEntries.findIndex(
+				(entry) => entry.sha === request.expectedSha,
+			);
+			if (index === -1) {
+				throw gitStashNotFound();
+			}
+			const conflictedPaths = gitStashConflictFixtures.get(request.expectedSha);
+			if (conflictedPaths !== undefined) {
+				return Object.freeze({
+					kind: "conflict" as const,
+					conflictedPaths,
+				});
+			}
+			gitStashEntries.splice(index, 1);
+			return Object.freeze({ kind: "applied" as const });
+		},
+		async gitStashDrop(sha_) {
+			const request = frozenGitStashDropRequest(sha_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const index = gitStashEntries.findIndex(
+				(entry) => entry.sha === request.expectedSha,
+			);
+			if (index === -1) {
+				throw gitStashNotFound();
+			}
+			gitStashEntries.splice(index, 1);
+		},
+		async gitWorktreeList() {
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return gitWorktreeListSnapshot();
+		},
+		async gitWorktreeAdd(childSegment_, detach_, commitIsh_) {
+			const request = frozenGitWorktreeAddRequest(
+				childSegment_,
+				detach_,
+				commitIsh_,
+			);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			if (gitFixture.worktreeAddCancelledForTest === true) {
+				return Object.freeze({ kind: "pickerCancelled" as const });
+			}
+			gitWorktreeCounter += 1;
+			const sha = `a0${gitWorktreeCounter.toString(16).padStart(38, "0")}`;
+			const path = `/workspace-worktrees/${request.childSegment}`;
+			gitWorktreeEntries.push({
+				path,
+				headSha: sha,
+				headState: request.detach
+					? { kind: "detached" as const }
+					: {
+							kind: "branch" as const,
+							refName: `refs/heads/${request.commitIsh ?? request.childSegment}`,
+						},
+				lockReason: null,
+				prunableReason: null,
+				isMain: false,
+			});
+			return Object.freeze({ kind: "added" as const, path });
+		},
+		async gitWorktreeRemove(path_, force_) {
+			const request = frozenGitWorktreeRemoveRequest(path_, force_);
+			const unavailable = gitMutateUnavailable();
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const entry = gitWorktreeEntries.find(
+				(candidate) => candidate.path === request.path,
+			);
+			if (entry === undefined) {
+				throw gitWorktreeRemoveNotFound();
+			}
+			if (entry.isMain) {
+				throw gitWorktreeRemoveIsMainWorktree();
+			}
+			if (entry.lockReason !== null) {
+				throw gitWorktreeRemoveLocked();
+			}
+			if (!request.force && gitWorktreeDirtyPaths.has(request.path)) {
+				return "needsForce";
+			}
+			gitWorktreeEntries = gitWorktreeEntries.filter(
+				(candidate) => candidate.path !== request.path,
+			);
+			gitWorktreeDirtyPaths.delete(request.path);
+			return "removed";
+		},
+		async debugAdapterConfirmationState(descriptor) {
+			const request = frozenDebugAdapterConfirmationRequest(descriptor);
+			return decodeDebugAdapterConfirmationState({
+				confirmed:
+					roots.size === 0
+						? false
+						: debugAdapterConfirmations.has(
+								debugAdapterConfirmationKey(request),
+							),
+			});
+		},
+		async debugAdapterConfirmationGrant(descriptor) {
+			if (roots.size === 0) {
+				throw debugAdapterConfirmationUnavailable();
+			}
+			const request = frozenDebugAdapterConfirmationRequest(descriptor);
+			debugAdapterConfirmations.add(debugAdapterConfirmationKey(request));
+			decodeDebugAdapterConfirmationVoid(null);
+		},
+		async debugAdapterConfirmationRevoke(descriptor) {
+			if (roots.size === 0) {
+				throw debugAdapterConfirmationUnavailable();
+			}
+			const request = frozenDebugAdapterConfirmationRequest(descriptor);
+			debugAdapterConfirmations.delete(debugAdapterConfirmationKey(request));
+			decodeDebugAdapterConfirmationVoid(null);
+		},
+		async debugLaunch(target, adapterId, launchArguments) {
+			return startMockDebugSession(target, adapterId, launchArguments);
+		},
+		async debugAttach(target, adapterId, launchArguments) {
+			return startMockDebugSession(target, adapterId, launchArguments);
+		},
+		async debugDisconnect(sessionId) {
+			const request = frozenDebugSessionIdRequest(sessionId);
+			requireLiveMockDebugSession(request.sessionId as string);
+			liveDebugSessions.delete(request.sessionId as string);
+		},
+		async debugSetBreakpoints(sessionId, path, breakpoints) {
+			const request = frozenDebugSetBreakpointsRequest(
+				sessionId,
+				path,
+				breakpoints,
+			);
+			requireLiveMockDebugSession(request.sessionId as string);
+			const outcomesForPath =
+				options.debugFixtureForTest?.breakpointOutcomes?.[
+					request.path as string
+				];
+			const requested = request.breakpoints as readonly { line: number }[];
+			const reported = requested.map((entry) => {
+				const outcome = outcomesForPath?.[entry.line];
+				if (outcome?.verified === false) {
+					return Object.freeze({
+						verified: false,
+						line: null,
+						id: null,
+						message: outcome.message ?? "Breakpoint could not be set.",
+					});
+				}
+				return Object.freeze({
+					verified: true,
+					line: outcome?.line ?? entry.line,
+					id: null,
+					message: null,
+				});
+			});
+			return Object.freeze({ breakpoints: Object.freeze(reported) });
+		},
+		async debugStackTrace(sessionId, threadId, startFrame, levels) {
+			const request = frozenDebugStackTraceRequest(
+				sessionId,
+				threadId,
+				startFrame,
+				levels,
+			);
+			requireLiveMockDebugSession(request.sessionId as string);
+			const all =
+				options.debugFixtureForTest?.stackFramesByThread?.[
+					request.threadId as number
+				] ?? [];
+			const start = (request.startFrame as number | null) ?? 0;
+			const levelsValue = request.levels as number | null;
+			const sliced =
+				levelsValue === null
+					? all.slice(start)
+					: all.slice(start, start + levelsValue);
+			return Object.freeze({
+				stackFrames: Object.freeze(sliced.map((frame) => ({ ...frame }))),
+				totalFrames: all.length,
+			});
+		},
+		async debugScopes(sessionId, frameId) {
+			const request = frozenDebugScopesRequest(sessionId, frameId);
+			requireLiveMockDebugSession(request.sessionId as string);
+			const scopes =
+				options.debugFixtureForTest?.scopesByFrame?.[
+					request.frameId as number
+				] ?? [];
+			return Object.freeze({
+				scopes: Object.freeze(scopes.map((scope) => ({ ...scope }))),
+			});
+		},
+		async debugVariables(sessionId, variablesReference, start, count, filter) {
+			const request = frozenDebugVariablesRequest(
+				sessionId,
+				variablesReference,
+				start,
+				count,
+				filter,
+			);
+			requireLiveMockDebugSession(request.sessionId as string);
+			const all =
+				options.debugFixtureForTest?.variablesByReference?.[
+					request.variablesReference as number
+				] ?? [];
+			const startIndex = (request.start as number | null) ?? 0;
+			const countValue = request.count as number | null;
+			const sliced =
+				countValue === null
+					? all.slice(startIndex)
+					: all.slice(startIndex, startIndex + countValue);
+			return Object.freeze({
+				variables: Object.freeze(sliced.map((variable) => ({ ...variable }))),
+			});
+		},
+		async debugEvaluate(sessionId, expression, frameId, context) {
+			const request = frozenDebugEvaluateRequest(
+				sessionId,
+				expression,
+				frameId,
+				context,
+			);
+			requireLiveMockDebugSession(request.sessionId as string);
+			const fixture =
+				options.debugFixtureForTest?.evaluateByExpression?.[
+					request.expression as string
+				];
+			if (fixture === undefined) {
+				return Object.freeze({
+					result: request.expression as string,
+					type: null,
+					variablesReference: 0,
+					namedVariables: null,
+					indexedVariables: null,
+				});
+			}
+			return Object.freeze({ ...fixture });
+		},
+		// `F100` S4 — execution/step control. Unlike the terminal mock's fake
+		// PTY, this mock does not simulate the adversarial "adapter rejects a
+		// step request because the debuggee is not actually stopped" case at
+		// all (that real, considered behavior is covered end to end against a
+		// real spawned mock adapter in
+		// `src-tauri/src/debug/service/tests.rs`'s
+		// `step_control_commands_send_their_own_distinct_dap_command_and_surface_a_not_stopped_rejection`)
+		// — every one of these five always succeeds for any live mock
+		// session, matching this mock's own stated scope (structurally
+		// correct, scriptable responses for local dev/manual exploration, not
+		// a faithful re-simulation of every real adapter behavior).
+		async debugContinue(sessionId, threadId) {
+			const request = frozenDebugThreadRequest(sessionId, threadId);
+			requireLiveMockDebugSession(request.sessionId as string);
+			return Object.freeze({ allThreadsContinued: true });
+		},
+		async debugNext(sessionId, threadId) {
+			const request = frozenDebugThreadRequest(sessionId, threadId);
+			requireLiveMockDebugSession(request.sessionId as string);
+		},
+		async debugStepIn(sessionId, threadId) {
+			const request = frozenDebugThreadRequest(sessionId, threadId);
+			requireLiveMockDebugSession(request.sessionId as string);
+		},
+		async debugStepOut(sessionId, threadId) {
+			const request = frozenDebugThreadRequest(sessionId, threadId);
+			requireLiveMockDebugSession(request.sessionId as string);
+		},
+		async debugPause(sessionId, threadId) {
+			const request = frozenDebugThreadRequest(sessionId, threadId);
+			requireLiveMockDebugSession(request.sessionId as string);
+		},
+		async debugOutputAck(sessionId, sequence) {
+			const request = frozenDebugOutputAckRequest(sessionId, sequence);
+			const id = request.sessionId as string;
+			if (!liveDebugSessions.has(id)) {
+				// Mirrors the real service's own tolerant race: acking a
+				// session that already ended is a harmless no-op, not an
+				// error.
+				return;
+			}
+			const gate = mockDebugOutputGate(id);
+			gate.highestAcked = Math.max(
+				gate.highestAcked,
+				Math.min(request.sequence as number, gate.highestEmitted),
+			);
+			flushMockDebugOutput(id, gate);
+		},
+		debugWatchEvent(listener) {
+			debugEventListeners.add(listener);
+			return () => {
+				debugEventListeners.delete(listener);
+			};
 		},
 	};
 }

@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::PathBuf;
 
 use tempfile::TempDir;
 
@@ -274,6 +275,122 @@ fn distinguishes_os_permission_errors_from_capability_escape_errors() {
         "capability escape",
     ));
     assert_eq!(capability_denied.code(), "PATH_OUTSIDE_ROOT");
+}
+
+#[test]
+fn stable_identity_is_none_for_the_empty_scope_and_independent_of_authorization_order() {
+    let temp = TempDir::new().unwrap();
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    fs::create_dir(&first).unwrap();
+    fs::create_dir(&second).unwrap();
+
+    let empty = WorkspaceScope::new();
+    assert!(empty.stable_identity().is_none());
+
+    let mut in_order = WorkspaceScope::new();
+    in_order.authorize_root(&first).unwrap();
+    in_order.authorize_root(&second).unwrap();
+
+    let mut reverse_order = WorkspaceScope::new();
+    reverse_order.authorize_root(&second).unwrap();
+    reverse_order.authorize_root(&first).unwrap();
+
+    let in_order_identity = in_order.stable_identity().expect("non-empty scope");
+    let reverse_order_identity = reverse_order.stable_identity().expect("non-empty scope");
+    assert_eq!(
+        in_order_identity.as_dir_name(),
+        reverse_order_identity.as_dir_name(),
+        "identity must not depend on the order roots were authorized in"
+    );
+    assert_eq!(in_order_identity.as_dir_name().len(), 64);
+    assert!(in_order_identity
+        .as_dir_name()
+        .bytes()
+        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')));
+}
+
+#[test]
+fn stable_identity_changes_with_add_remove_and_replace_and_is_reproducible_on_reauthorization() {
+    let temp = TempDir::new().unwrap();
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    fs::create_dir(&first).unwrap();
+    fs::create_dir(&second).unwrap();
+
+    let mut scope = WorkspaceScope::new();
+    let first_id = scope.authorize_root(&first).unwrap();
+    let identity_with_first_only = scope.stable_identity().unwrap();
+
+    scope.authorize_root(&second).unwrap();
+    let identity_with_both = scope.stable_identity().unwrap();
+    assert_ne!(
+        identity_with_first_only.as_dir_name(),
+        identity_with_both.as_dir_name()
+    );
+
+    scope.remove(first_id).unwrap();
+    let identity_with_second_only = scope.stable_identity().unwrap();
+    assert_ne!(
+        identity_with_second_only.as_dir_name(),
+        identity_with_first_only.as_dir_name()
+    );
+    assert_ne!(
+        identity_with_second_only.as_dir_name(),
+        identity_with_both.as_dir_name()
+    );
+
+    // Replacing the sole root back to `first` reproduces the exact same
+    // identity the scope had when `first` was previously its only root.
+    scope.replace_root_atomically(&first).unwrap();
+    assert_eq!(
+        scope.stable_identity().unwrap().as_dir_name(),
+        identity_with_first_only.as_dir_name()
+    );
+
+    // A brand-new scope that reauthorizes exactly `first` again (simulating
+    // reopening the same folder in a fresh session/window/process)
+    // reproduces the identical identity string, byte for byte.
+    let mut reopened = WorkspaceScope::new();
+    reopened.authorize_root(&first).unwrap();
+    assert_eq!(
+        reopened.stable_identity().unwrap().as_dir_name(),
+        identity_with_first_only.as_dir_name()
+    );
+
+    assert!(scope.remove(scope.root_ids()[0]).is_ok());
+    assert!(scope.stable_identity().is_none());
+}
+
+/// Adversarial concatenation-ambiguity matrix for the pure hashing function:
+/// distinct path sets that would collide under naive separator-free
+/// concatenation must still hash to distinct identities.
+#[test]
+fn stable_roots_identity_never_collides_across_naive_concatenation_ambiguity() {
+    let matrix: [(&[&str], &[&str]); 3] = [
+        (&["/a/b", "/c"], &["/a", "/b/c"]),
+        (&["/ab", "/c"], &["/a", "/bc"]),
+        (&["/a", "/b", "/c"], &["/a", "/bc"]),
+    ];
+    for (left, right) in matrix {
+        let left_paths: Vec<PathBuf> = left.iter().map(PathBuf::from).collect();
+        let right_paths: Vec<PathBuf> = right.iter().map(PathBuf::from).collect();
+        let left_identity =
+            super::stable_roots_identity(&left_paths).expect("non-empty set has an identity");
+        let right_identity =
+            super::stable_roots_identity(&right_paths).expect("non-empty set has an identity");
+        assert_ne!(
+            left_identity, right_identity,
+            "{left:?} and {right:?} must not collide"
+        );
+    }
+
+    assert!(super::stable_roots_identity(&[]).is_none());
+    assert_eq!(
+        super::stable_roots_identity(&[PathBuf::from("/a")]),
+        super::stable_roots_identity(&[PathBuf::from("/a")]),
+        "identical single-root input is reproducible"
+    );
 }
 
 fn read_resolved(scope: &WorkspaceScope, root_id: RootId, path: &RelativePath) -> Vec<u8> {
