@@ -17,6 +17,7 @@ import {
 	getWorkspaceDeleteIncompleteDetails,
 	registerWorkspaceDeleteCoordinator,
 	WorkspaceDeleteIncompleteError,
+	type PlainDeleteErrorNotificationService,
 } from "../../app/features/workspace/delete-coordinator";
 import type { PlainWorkspaceDeleteProvider } from "../../app/features/workspace/file-system-provider";
 import type {
@@ -136,6 +137,16 @@ function testBridge(
 		},
 		...overrides,
 	};
+}
+
+function testNotifier(): PlainDeleteErrorNotificationService & {
+	readonly error: ReturnType<typeof vi.fn<(message: string) => unknown>>;
+} {
+	return { error: vi.fn<(message: string) => unknown>() };
+}
+
+async function getTestNotificationService(): Promise<PlainDeleteErrorNotificationService> {
+	return testNotifier();
 }
 
 function testProvider(): PlainWorkspaceDeleteProvider & {
@@ -280,7 +291,13 @@ describe("Plain confirmed-delete coordinator", () => {
 			workspaceCancelDelete: cancel,
 		});
 		const provider = testProvider();
-		disposables.push(registerWorkspaceDeleteCoordinator(bridge, provider));
+		disposables.push(
+			registerWorkspaceDeleteCoordinator(
+				bridge,
+				provider,
+				getTestNotificationService,
+			),
+		);
 		const dirty = Object.freeze({ id: "dirty" });
 		const confirm = vi.fn(async (options) => {
 			order.push("confirm");
@@ -357,7 +374,11 @@ describe("Plain confirmed-delete coordinator", () => {
 			workspaceBeginDelete: begin,
 		});
 		disposables.push(
-			registerWorkspaceDeleteCoordinator(bridge, testProvider()),
+			registerWorkspaceDeleteCoordinator(
+				bridge,
+				testProvider(),
+				getTestNotificationService,
+			),
 		);
 
 		await expect(
@@ -379,19 +400,29 @@ describe("Plain confirmed-delete coordinator", () => {
 		expect(applyBulkEdit).not.toHaveBeenCalled();
 	});
 
-	it("brands retained and response-unknown terminals, refreshes every selected root, and never retries", async () => {
+	it("brands retained and response-unknown terminals, notifies once with the exact branded message, refreshes every selected root, and never retries", async () => {
+		const expectedMessage = Object.freeze({
+			entryRetained:
+				"The permanent delete batch stopped after a native delete became incomplete.",
+			outcomeUnknown: "The permanent delete batch did not complete.",
+		});
 		for (const terminal of ["entryRetained", "outcomeUnknown"] as const) {
 			const cancel = vi.fn();
 			const provider = testProvider();
 			const bridge = testBridge(plan([{ kind: "file" }]), {
 				workspaceCancelDelete: cancel,
 			});
-			const registration = registerWorkspaceDeleteCoordinator(bridge, provider);
+			const notifier = testNotifier();
+			const registration = registerWorkspaceDeleteCoordinator(
+				bridge,
+				provider,
+				async () => notifier,
+			);
 			disposables.push(registration);
 			const original = new Error("provider unavailable");
-			let caught: unknown;
-			try {
-				await runPlainWorkspaceDeleteCoordinator(
+
+			await expect(
+				runPlainWorkspaceDeleteCoordinator(
 					context([element("unknown.txt")], {
 						explorerService: {
 							async applyBulkEdit(edits) {
@@ -400,21 +431,11 @@ describe("Plain confirmed-delete coordinator", () => {
 							},
 						},
 					}),
-				);
-			} catch (error) {
-				caught = error;
-			}
-			expect(caught).toBeInstanceOf(WorkspaceDeleteIncompleteError);
-			const details = getWorkspaceDeleteIncompleteDetails(caught);
-			expect(details?.deletedEntries).toBe(0);
-			if (terminal === "entryRetained") {
-				expect(details?.incompleteResult).toEqual({
-					status: "entryRetained",
-					reason: "entryChanged",
-				});
-			} else {
-				expect(details?.incompleteResult).toBeUndefined();
-			}
+				),
+			).resolves.toBeUndefined();
+
+			expect(notifier.error).toHaveBeenCalledTimes(1);
+			expect(notifier.error).toHaveBeenCalledWith(expectedMessage[terminal]);
 			expect(provider.refresh).toHaveBeenCalledTimes(1);
 			expect(cancel).toHaveBeenCalledTimes(1);
 			registration.dispose();
@@ -422,13 +443,83 @@ describe("Plain confirmed-delete coordinator", () => {
 		}
 	});
 
-	it("preserves a zero-side-effect ordinary provider failure while cancelling and refreshing", async () => {
+	it("rethrows the original branded error when the notification service getter or error() itself fails", async () => {
+		for (const terminal of ["entryRetained", "outcomeUnknown"] as const) {
+			for (const failingNotificationService of [
+				async () => {
+					throw new Error("notification service unavailable");
+				},
+				async () => ({
+					error: vi.fn(() => {
+						throw new Error("notification rendering failed");
+					}),
+				}),
+			]) {
+				const cancel = vi.fn();
+				const provider = testProvider();
+				const bridge = testBridge(plan([{ kind: "file" }]), {
+					workspaceCancelDelete: cancel,
+				});
+				const registration = registerWorkspaceDeleteCoordinator(
+					bridge,
+					provider,
+					failingNotificationService,
+				);
+				disposables.push(registration);
+				const original = new Error("provider unavailable");
+				let caught: unknown;
+				try {
+					await runPlainWorkspaceDeleteCoordinator(
+						context([element("unknown.txt")], {
+							explorerService: {
+								async applyBulkEdit(edits) {
+									terminalizeAuthorizedEdit(edits[0]!, terminal);
+									throw original;
+								},
+							},
+						}),
+					);
+				} catch (error) {
+					caught = error;
+				}
+				expect(caught).toBeInstanceOf(WorkspaceDeleteIncompleteError);
+				expect((caught as WorkspaceDeleteIncompleteError).message).toBe(
+					terminal === "entryRetained"
+						? "The permanent delete batch stopped after a native delete became incomplete."
+						: "The permanent delete batch did not complete.",
+				);
+				const details = getWorkspaceDeleteIncompleteDetails(caught);
+				expect(details?.deletedEntries).toBe(0);
+				if (terminal === "entryRetained") {
+					expect(details?.incompleteResult).toEqual({
+						status: "entryRetained",
+						reason: "entryChanged",
+					});
+				} else {
+					expect(details?.incompleteResult).toBeUndefined();
+				}
+				expect(provider.refresh).toHaveBeenCalledTimes(1);
+				expect(cancel).toHaveBeenCalledTimes(1);
+				registration.dispose();
+				disposables.pop();
+			}
+		}
+	});
+
+	it("preserves a zero-side-effect ordinary provider failure while cancelling and refreshing, without notifying", async () => {
 		const provider = testProvider();
 		const cancel = vi.fn();
 		const bridge = testBridge(plan([{ kind: "file" }]), {
 			workspaceCancelDelete: cancel,
 		});
-		disposables.push(registerWorkspaceDeleteCoordinator(bridge, provider));
+		const notifier = testNotifier();
+		disposables.push(
+			registerWorkspaceDeleteCoordinator(
+				bridge,
+				provider,
+				async () => notifier,
+			),
+		);
 		const ordinary = new Error("ordinary failure");
 
 		await expect(
@@ -445,6 +536,7 @@ describe("Plain confirmed-delete coordinator", () => {
 		).rejects.toBe(ordinary);
 		expect(provider.refresh).toHaveBeenCalledTimes(1);
 		expect(cancel).toHaveBeenCalledTimes(1);
+		expect(notifier.error).not.toHaveBeenCalled();
 	});
 
 	it("accepts an exact 64-entry selection and cancels it without creating edits", async () => {
@@ -460,7 +552,11 @@ describe("Plain confirmed-delete coordinator", () => {
 			workspaceCancelDelete: cancel,
 		});
 		disposables.push(
-			registerWorkspaceDeleteCoordinator(bridge, testProvider()),
+			registerWorkspaceDeleteCoordinator(
+				bridge,
+				testProvider(),
+				getTestNotificationService,
+			),
 		);
 
 		await runPlainWorkspaceDeleteCoordinator(

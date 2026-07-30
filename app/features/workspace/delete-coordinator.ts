@@ -60,6 +60,10 @@ export function getWorkspaceDeleteIncompleteDetails(error: unknown):
 		: undefined;
 }
 
+export type PlainDeleteErrorNotificationService = Readonly<{
+	error(message: string): unknown;
+}>;
+
 interface DeleteSelectionEntry {
 	readonly resource: PlainWorkspaceDeleteResource;
 	readonly name: string;
@@ -205,6 +209,7 @@ function classifyAuthorizationResults(
 async function runDelete(
 	bridge: PlainBridge,
 	provider: PlainWorkspaceDeleteProvider,
+	getNotificationService: () => Promise<PlainDeleteErrorNotificationService>,
 	context: PlainWorkspaceDeleteCoordinatorContext,
 ): Promise<void> {
 	const selection = snapshotSelection(context, provider);
@@ -295,16 +300,27 @@ async function runDelete(
 			);
 		}
 		const results = classifyAuthorizationResults(authorizations);
-		if (
-			!(error instanceof WorkspaceDeleteIncompleteError) &&
-			(results.incompleteResult !== undefined ||
-				results.outcomeUnknown ||
-				results.deletedEntries > 0)
+		let brandedError: WorkspaceDeleteIncompleteError | undefined;
+		if (error instanceof WorkspaceDeleteIncompleteError) {
+			brandedError = error;
+		} else if (
+			results.incompleteResult !== undefined ||
+			results.outcomeUnknown ||
+			results.deletedEntries > 0
 		) {
-			throw new WorkspaceDeleteIncompleteError(
+			brandedError = new WorkspaceDeleteIncompleteError(
 				results.deletedEntries,
 				results.incompleteResult,
 			);
+		}
+		if (brandedError !== undefined) {
+			try {
+				const notificationService = await getNotificationService();
+				notificationService.error(brandedError.message);
+				return;
+			} catch {
+				throw brandedError;
+			}
 		}
 		throw error;
 	} finally {
@@ -319,8 +335,9 @@ async function runDelete(
 export function registerWorkspaceDeleteCoordinator(
 	bridge: PlainBridge,
 	provider: PlainWorkspaceDeleteProvider,
+	getNotificationService: () => Promise<PlainDeleteErrorNotificationService>,
 ): IDisposable {
 	return registerPlainWorkspaceDeleteCoordinator((context) =>
-		runDelete(bridge, provider, context),
+		runDelete(bridge, provider, getNotificationService, context),
 	);
 }

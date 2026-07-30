@@ -4864,7 +4864,7 @@ function validateProviderBindingAuthority(authority, moduleImports) {
 		!sameChain(rootFactoryCalls[0].arguments[0], ["bridge"]) ||
 		!sameChain(rootFactoryCalls[0].arguments[1], ["workspaceCapabilities"]) ||
 		configurationFactoryCalls[0].arguments.length !== 0 ||
-		deleteCoordinatorCall?.arguments.length !== 2 ||
+		deleteCoordinatorCall?.arguments.length !== 3 ||
 		!sameChain(deleteCoordinatorCall.arguments[0], ["bridge"]) ||
 		topologyCoordinatorCall?.arguments.length === 0 ||
 		!sameChain(deleteCoordinatorCall.arguments[1], [rootName]) ||
@@ -5254,6 +5254,7 @@ function validateTopologyAuthority(authority) {
 		hasExactNamedImport(mainSource, "@codingame/monaco-vscode-api", [
 			"getService",
 			"IContextKeyService",
+			"INotificationService",
 			"IWorkspaceContextService",
 			"initialize",
 		]) &&

@@ -3,6 +3,7 @@ import "@codingame/monaco-vscode-theme-defaults-default-extension";
 import {
 	getService,
 	IContextKeyService,
+	INotificationService,
 	IWorkspaceContextService,
 	initialize,
 } from "@codingame/monaco-vscode-api";
@@ -44,6 +45,7 @@ async function bootstrap(): Promise<void> {
 	const workspaceDeleteCoordinator = registerWorkspaceDeleteCoordinator(
 		bridge,
 		workspaceFileSystemProvider,
+		() => getService(INotificationService),
 	);
 	const workspaceConfigurationProvider =
 		createPlainWorkspaceConfigurationProvider();

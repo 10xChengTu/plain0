@@ -673,6 +673,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 	}
 	for (const [moduleName, importedName] of [
 		["@codingame/monaco-vscode-api", "initialize"],
+		["@codingame/monaco-vscode-api", "INotificationService"],
 		[
 			"@codingame/monaco-vscode-files-service-override",
 			"registerCustomProvider",
@@ -837,13 +838,20 @@ export function validateWorkspaceProviderBootstrap(source) {
 			"workspaceDeleteCoordinator",
 		);
 		const initializer = declaration?.initializer;
+		const notificationGetter = initializer?.arguments?.[2];
 		return (
 			initializer !== undefined &&
-			identifierCall(initializer, "registerWorkspaceDeleteCoordinator", 2) &&
+			identifierCall(initializer, "registerWorkspaceDeleteCoordinator", 3) &&
 			ts.isIdentifier(initializer.arguments[0]) &&
 			initializer.arguments[0].text === "bridge" &&
 			ts.isIdentifier(initializer.arguments[1]) &&
-			initializer.arguments[1].text === "workspaceFileSystemProvider"
+			initializer.arguments[1].text === "workspaceFileSystemProvider" &&
+			notificationGetter !== undefined &&
+			ts.isArrowFunction(notificationGetter) &&
+			notificationGetter.parameters.length === 0 &&
+			identifierCall(notificationGetter.body, "getService", 1) &&
+			ts.isIdentifier(notificationGetter.body.arguments[0]) &&
+			notificationGetter.body.arguments[0].text === "INotificationService"
 		);
 	});
 	const registrationIndexes = matchingStatementIndexes((statement) => {
@@ -7418,6 +7426,10 @@ function validateWorkspaceDeleteCoordinatorRoute(source) {
 			"getWorkspaceDeleteIncompleteDetails",
 			{ kind: "function", exported: true },
 		],
+		[
+			"PlainDeleteErrorNotificationService",
+			{ kind: "typeAlias", exported: true },
+		],
 		["DeleteSelectionEntry", { kind: "interface", exported: false }],
 		["snapshotSelection", { kind: "function", exported: false }],
 		["confirmationDetail", { kind: "function", exported: false }],
@@ -7455,6 +7467,9 @@ function validateWorkspaceDeleteCoordinatorRoute(source) {
 		} else if (ts.isClassDeclaration(statement)) {
 			name = statement.name;
 			kind = "class";
+		} else if (ts.isTypeAliasDeclaration(statement)) {
+			name = statement.name;
+			kind = "typeAlias";
 		} else {
 			topLevelIsExact = false;
 			continue;
@@ -7485,6 +7500,21 @@ function validateWorkspaceDeleteCoordinatorRoute(source) {
 	) {
 		failures.push(
 			"delete-coordinator.ts must retain its exact module-private coordinator surface",
+		);
+	}
+
+	const notificationServiceTypeAlias = sourceFile.statements.find(
+		(statement) =>
+			ts.isTypeAliasDeclaration(statement) &&
+			statement.name.text === "PlainDeleteErrorNotificationService",
+	);
+	if (
+		notificationServiceTypeAlias === undefined ||
+		normalized(notificationServiceTypeAlias.type) !==
+			"Readonly<{error(message:string):unknown;}>"
+	) {
+		failures.push(
+			"delete coordinator notification seam type must remain the exact minimal error(message) surface",
 		);
 	}
 
@@ -7608,10 +7638,10 @@ function validateWorkspaceDeleteCoordinatorRoute(source) {
 		"registerWorkspaceDeleteCoordinator",
 		`{
 			return registerPlainWorkspaceDeleteCoordinator((context) =>
-				runDelete(bridge, provider, context),
+				runDelete(bridge, provider, getNotificationService, context),
 			);
 		}`,
-		"delete coordinator registration must directly close over one bridge and provider",
+		"delete coordinator registration must directly close over one bridge, provider and notification getter",
 	);
 
 	const runFunctions = sourceFile.statements.filter(
@@ -7705,16 +7735,27 @@ function validateWorkspaceDeleteCoordinatorRoute(source) {
 			);
 		}
 		const results = classifyAuthorizationResults(authorizations);
-		if (
-			!(error instanceof WorkspaceDeleteIncompleteError) &&
-			(results.incompleteResult !== undefined ||
-				results.outcomeUnknown ||
-				results.deletedEntries > 0)
+		let brandedError: WorkspaceDeleteIncompleteError | undefined;
+		if (error instanceof WorkspaceDeleteIncompleteError) {
+			brandedError = error;
+		} else if (
+			results.incompleteResult !== undefined ||
+			results.outcomeUnknown ||
+			results.deletedEntries > 0
 		) {
-			throw new WorkspaceDeleteIncompleteError(
+			brandedError = new WorkspaceDeleteIncompleteError(
 				results.deletedEntries,
 				results.incompleteResult,
 			);
+		}
+		if (brandedError !== undefined) {
+			try {
+				const notificationService = await getNotificationService();
+				notificationService.error(brandedError.message);
+				return;
+			} catch {
+				throw brandedError;
+			}
 		}
 		throw error;
 	}`.replaceAll(/\s+/g, "");
@@ -7757,12 +7798,12 @@ function validateWorkspaceDeleteCoordinatorRoute(source) {
 	if (
 		runDelete.modifiers?.length !== 1 ||
 		runDelete.modifiers[0].kind !== ts.SyntaxKind.AsyncKeyword ||
-		runDelete.parameters.length !== 3 ||
+		runDelete.parameters.length !== 4 ||
 		!sameArray(
 			runDelete.parameters.map((parameter) =>
 				ts.isIdentifier(parameter.name) ? parameter.name.text : undefined,
 			),
-			["bridge", "provider", "context"],
+			["bridge", "provider", "getNotificationService", "context"],
 		) ||
 		runDelete.type === undefined ||
 		!ts.isTypeReferenceNode(runDelete.type) ||
@@ -11024,6 +11065,33 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 		);
 	}
 
+	const deleteScenarioAliases = sourceFile.statements.filter(
+		(statement) =>
+			ts.isTypeAliasDeclaration(statement) &&
+			statement.name.text === "TestMultiRootDeleteIncompleteScenario",
+	);
+	let deleteScenarioAliasIsClosed = false;
+	if (deleteScenarioAliases.length === 1) {
+		const [deleteAlias] = deleteScenarioAliases;
+		const deleteMembers = ts.isUnionTypeNode(deleteAlias.type)
+			? deleteAlias.type.types
+			: [];
+		const deleteValues = deleteMembers.map((member) =>
+			ts.isLiteralTypeNode(member) && ts.isStringLiteral(member.literal)
+				? member.literal.text
+				: undefined,
+		);
+		deleteScenarioAliasIsClosed =
+			(deleteAlias.modifiers?.length ?? 0) === 0 &&
+			deleteMembers.length === 2 &&
+			sameArray([...deleteValues].sort(), ["deletePartial", "deleteRetained"]);
+	}
+	if (!deleteScenarioAliasIsClosed) {
+		failures.push(
+			"browser delete-failure fixture fourth argument must remain the closed deleteRetained/deletePartial scenario set",
+		);
+	}
+
 	const installers = sourceFile.statements.filter(
 		(statement) =>
 			ts.isFunctionDeclaration(statement) &&
@@ -11036,8 +11104,12 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 		];
 	}
 	const [installer] = installers;
-	const [pageParameter, modeParameter, scenarioParameter] =
-		installer.parameters;
+	const [
+		pageParameter,
+		modeParameter,
+		scenarioParameter,
+		deleteScenarioParameter,
+	] = installer.parameters;
 	const scenarioArrayType =
 		scenarioParameter?.type !== undefined &&
 		ts.isTypeOperatorNode(scenarioParameter.type) &&
@@ -11046,11 +11118,19 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 			? scenarioParameter.type.type
 			: undefined;
 	const scenarioElementType = scenarioArrayType?.elementType;
+	const deleteScenarioArrayType =
+		deleteScenarioParameter?.type !== undefined &&
+		ts.isTypeOperatorNode(deleteScenarioParameter.type) &&
+		deleteScenarioParameter.type.operator === ts.SyntaxKind.ReadonlyKeyword &&
+		ts.isArrayTypeNode(deleteScenarioParameter.type.type)
+			? deleteScenarioParameter.type.type
+			: undefined;
+	const deleteScenarioElementType = deleteScenarioArrayType?.elementType;
 	const returnType = installer.type;
 	const signatureIsExact =
 		installer.modifiers?.length === 1 &&
 		installer.modifiers[0].kind === ts.SyntaxKind.AsyncKeyword &&
-		installer.parameters.length === 3 &&
+		installer.parameters.length === 4 &&
 		pageParameter !== undefined &&
 		ts.isIdentifier(pageParameter.name) &&
 		pageParameter.name.text === "page" &&
@@ -11082,6 +11162,24 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 	if (!signatureIsExact) {
 		failures.push(
 			"browser move-failure fixture third argument must remain the closed moveRetained/movePartial scenario set",
+		);
+	}
+	const deleteSignatureIsExact =
+		deleteScenarioParameter !== undefined &&
+		ts.isIdentifier(deleteScenarioParameter.name) &&
+		deleteScenarioParameter.name.text === "deleteIncompleteScenarios" &&
+		deleteScenarioElementType !== undefined &&
+		ts.isTypeReferenceNode(deleteScenarioElementType) &&
+		ts.isIdentifier(deleteScenarioElementType.typeName) &&
+		deleteScenarioElementType.typeName.text ===
+			"TestMultiRootDeleteIncompleteScenario" &&
+		deleteScenarioElementType.typeArguments === undefined &&
+		deleteScenarioParameter.initializer !== undefined &&
+		ts.isArrayLiteralExpression(deleteScenarioParameter.initializer) &&
+		deleteScenarioParameter.initializer.elements.length === 0;
+	if (!deleteSignatureIsExact) {
+		failures.push(
+			"browser delete-failure fixture fourth argument must remain the closed deleteRetained/deletePartial scenario set",
 		);
 	}
 
@@ -11124,6 +11222,10 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 			name: "moveIncompleteScenarios",
 			property: "moveIncompleteScenarios",
 		},
+		{
+			name: "deleteIncompleteScenarios",
+			property: "deleteIncompleteScenarios",
+		},
 		{ name: "workspaceId", property: "workspaceId" },
 		{ name: "primaryRootId", property: "primaryRootId" },
 		{ name: "secondaryRootId", property: "secondaryRootId" },
@@ -11133,20 +11235,25 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 		initData !== undefined &&
 		ts.isObjectLiteralExpression(initData) &&
 		normalizedText(initData) ===
-			"{mode,moveIncompleteScenarios,workspaceId:nativeWorkspaceId,primaryRootId:nativeRootId,secondaryRootId:nativeSecondaryRootId,}";
+			"{mode,moveIncompleteScenarios,deleteIncompleteScenarios,workspaceId:nativeWorkspaceId,primaryRootId:nativeRootId,secondaryRootId:nativeSecondaryRootId,}";
 	const scenarioReferenceCount = countIdentifier(
 		installer,
 		"moveIncompleteScenarios",
+	);
+	const deleteScenarioReferenceCount = countIdentifier(
+		installer,
+		"deleteIncompleteScenarios",
 	);
 	if (
 		callback === undefined ||
 		!ts.isBlock(callback.body) ||
 		!callbackBindingsAreExact ||
 		!initDataIsExact ||
-		scenarioReferenceCount !== 5
+		scenarioReferenceCount !== 5 ||
+		deleteScenarioReferenceCount !== 6
 	) {
 		failures.push(
-			"browser move-failure scenarios must remain local to one audited multi-root addInitScript fixture",
+			"browser move/delete-failure scenarios must remain local to one audited multi-root addInitScript fixture",
 		);
 	}
 	if (callback === undefined || !ts.isBlock(callback.body)) {
@@ -11174,7 +11281,40 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 		partialTreeInitializers.length !== 1
 	) {
 		failures.push(
-			"browser move-failure scenarios must remain local to one audited multi-root addInitScript fixture",
+			"browser move/delete-failure scenarios must remain local to one audited multi-root addInitScript fixture",
+		);
+	}
+
+	const deletePlanDeclarations = collect(
+		callback.body,
+		(node) =>
+			ts.isVariableDeclaration(node) &&
+			ts.isIdentifier(node.name) &&
+			node.name.text === "deleteIncompletePlan",
+	);
+	const deleteRetainedTreeInitializers = collect(
+		callback.body,
+		(node) =>
+			ts.isIfStatement(node) &&
+			normalizedText(node) ===
+				'if(deleteIncompleteScenarios.includes("deleteRetained")){primaryEntries.push(["delete-retained.txt",file("Keep this retained delete target.\\n"),]);}',
+	);
+	const deletePartialTreeInitializers = collect(
+		callback.body,
+		(node) =>
+			ts.isIfStatement(node) &&
+			normalizedText(node) ===
+				'if(deleteIncompleteScenarios.includes("deletePartial")){secondaryEntries.push(["delete-partial",directory([["removed.txt",file("Remove this delete child.\\n")],["kept.txt",file("Keep this delete child.\\n")],]),]);}',
+	);
+	if (
+		deletePlanDeclarations.length !== 1 ||
+		normalizedText(deletePlanDeclarations[0]) !==
+			"deleteIncompletePlan=[...deleteIncompleteScenarios]" ||
+		deleteRetainedTreeInitializers.length !== 1 ||
+		deletePartialTreeInitializers.length !== 1
+	) {
+		failures.push(
+			"browser move/delete-failure scenarios must remain local to one audited multi-root addInitScript fixture",
 		);
 	}
 
@@ -11252,6 +11392,65 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 		);
 	}
 
+	const deleteCommitCases = collect(
+		callback.body,
+		(node) =>
+			ts.isCaseClause(node) &&
+			ts.isStringLiteral(node.expression) &&
+			node.expression.text === "workspace_commit_delete_entry",
+	);
+	if (deleteCommitCases.length !== 1) {
+		return [
+			...new Set([
+				...failures,
+				"browser delete-failure fixture must retain exact commit-entry request validation",
+			]),
+		];
+	}
+	const [deleteCommitCase] = deleteCommitCases;
+	const deleteIfStatements = collect(deleteCommitCase, (node) =>
+		ts.isIfStatement(node),
+	);
+	const deleteRetainedRequestGuards = deleteIfStatements.filter(
+		(node) =>
+			normalizedText(node) ===
+			'if(plannedIncomplete==="deleteRetained"&&(request.rootId!==primaryRootId||request.relativePath!=="delete-retained.txt"||request.recursive!==true)){thrownewError("Unexpected retained delete browser test request.",);}',
+	);
+	const deletePartialRequestGuards = deleteIfStatements.filter(
+		(node) =>
+			normalizedText(node) ===
+			'if(plannedIncomplete==="deletePartial"&&(request.rootId!==secondaryRootId||request.relativePath!=="delete-partial"||request.recursive!==true)){thrownewError("Unexpected partial delete browser test request.",);}',
+	);
+	if (
+		deleteRetainedRequestGuards.length !== 1 ||
+		deletePartialRequestGuards.length !== 1
+	) {
+		failures.push(
+			"browser delete-failure fixture must retain exact commit-entry request validation",
+		);
+	}
+
+	const deleteRetainedBranches = deleteIfStatements.filter(
+		(node) =>
+			normalizedText(node) ===
+			'if(plannedIncomplete==="deleteRetained"){deleteIncompletePlan.shift();activeDelete=undefined;return{status:"entryRetained",reason:"deleteFailed"};}',
+	);
+	const deletePartialBranches = deleteIfStatements.filter(
+		(node) =>
+			normalizedText(node) ===
+			'if(plannedIncomplete==="deletePartial"){constnode=resolveNode(activeDelete.rootId,activeDelete.relativePath,);if(node.kind!=="directory"){throwentryTypeMismatch();}constremovedEntries=node.entries.delete("removed.txt")?1:0;if(removedEntries!==1||!node.entries.has("kept.txt")){thrownewError("Invalid partial delete browser test target tree.",);}deleteIncompletePlan.shift();activeDelete=undefined;return{status:"entryPartiallyDeleted",reason:"deleteFailed",removedEntries,};}',
+	);
+	if (deleteRetainedBranches.length !== 1) {
+		failures.push(
+			"browser retained-delete fixture must leave the tree untouched and invalidate the active batch",
+		);
+	}
+	if (deletePartialBranches.length !== 1) {
+		failures.push(
+			"browser partial-delete fixture must delete removed.txt and derive removedEntries from that boolean result",
+		);
+	}
+
 	const movePlanReferences = countIdentifier(
 		callback.body,
 		"moveIncompletePlan",
@@ -11259,6 +11458,14 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 	const callbackScenarioReferences = countIdentifier(
 		callback.body,
 		"moveIncompleteScenarios",
+	);
+	const deletePlanReferences = countIdentifier(
+		callback.body,
+		"deleteIncompletePlan",
+	);
+	const deleteCallbackScenarioReferences = countIdentifier(
+		callback.body,
+		"deleteIncompleteScenarios",
 	);
 	const forbiddenWindowControls = collect(callback.body, (node) => {
 		if (
@@ -11272,7 +11479,7 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 			: typeScriptStaticName(node.argumentExpression);
 		if (
 			name === undefined ||
-			!/(?:move.*(?:failure|incomplete|scenario|status|reason|count)|(?:failure|incomplete|scenario).*move)/iu.test(
+			!/(?:(?:move|delete).*(?:failure|incomplete|scenario|status|reason|count)|(?:failure|incomplete|scenario).*(?:move|delete))/iu.test(
 				name,
 			)
 		) {
@@ -11293,10 +11500,12 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 	if (
 		movePlanReferences !== 4 ||
 		callbackScenarioReferences !== 2 ||
+		deletePlanReferences !== 4 ||
+		deleteCallbackScenarioReferences !== 3 ||
 		forbiddenWindowControls.length !== 0
 	) {
 		failures.push(
-			"browser move-failure fixture must not accept raw receipt fields or expose a window mutation control",
+			"browser move/delete-failure fixture must not accept raw receipt fields or expose a window mutation control",
 		);
 	}
 

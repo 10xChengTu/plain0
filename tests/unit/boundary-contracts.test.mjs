@@ -5180,6 +5180,109 @@ void tauri["create" + "BrowserMockBridge"]();`,
 			"confirmed delete requires the final all-five writable-or-readonly provider capability contract",
 		);
 	});
+
+	it("swallows a branded incomplete error into exactly one notifier call and rethrows only on notifier failure", () => {
+		for (const hostile of [
+			replaceWorkspaceDeleteAppSource(
+				"app/features/workspace/delete-coordinator.ts",
+				"notificationService.error(brandedError.message);\n\t\t\t\treturn;",
+				"notificationService.error(brandedError.message);\n\t\t\t\tthrow brandedError;",
+			),
+			replaceWorkspaceDeleteAppSource(
+				"app/features/workspace/delete-coordinator.ts",
+				`		if (brandedError !== undefined) {
+			try {
+				const notificationService = await getNotificationService();
+				notificationService.error(brandedError.message);
+				return;
+			} catch {
+				throw brandedError;
+			}
+		}
+		throw error;`,
+				`		const notificationService = await getNotificationService();
+		if (brandedError !== undefined) {
+			try {
+				notificationService.error(brandedError.message);
+				return;
+			} catch {
+				throw brandedError;
+			}
+		}
+		notificationService.error(String(error));
+		throw error;`,
+			),
+			replaceWorkspaceDeleteAppSource(
+				"app/features/workspace/delete-coordinator.ts",
+				"notificationService.error(brandedError.message);",
+				'notificationService.error("The permanent delete batch stopped after a native delete became incomplete.");',
+			),
+			replaceWorkspaceDeleteAppSource(
+				"app/features/workspace/delete-coordinator.ts",
+				"notificationService.error(brandedError.message);\n\t\t\t\treturn;",
+				"notificationService.error(brandedError.message);\n\t\t\t\tnotificationService.error(brandedError.message);\n\t\t\t\treturn;",
+			),
+			replaceWorkspaceDeleteAppSource(
+				"app/features/workspace/delete-coordinator.ts",
+				"} catch {\n\t\t\t\tthrow brandedError;\n\t\t\t}",
+				"} catch {}",
+			),
+		]) {
+			expect(validateWorkspaceDeleteTypeScriptBoundary(hostile)).toContain(
+				"runDelete must rescan after begun failures and cancel every uncompleted confirmation in finally",
+			);
+		}
+	});
+
+	it("locks the minimal notification seam type, the four-parameter runDelete route and its registration forwarding", () => {
+		expect(
+			validateWorkspaceDeleteTypeScriptBoundary(
+				replaceWorkspaceDeleteAppSource(
+					"app/features/workspace/delete-coordinator.ts",
+					"export type PlainDeleteErrorNotificationService = Readonly<{\n\terror(message: string): unknown;\n}>;",
+					"export type PlainDeleteErrorNotificationService = Readonly<{\n\terror(message: string): unknown;\n\twarn(message: string): unknown;\n}>;",
+				),
+			),
+		).toContain(
+			"delete coordinator notification seam type must remain the exact minimal error(message) surface",
+		);
+
+		expect(
+			validateWorkspaceDeleteTypeScriptBoundary(
+				replaceWorkspaceDeleteAppSource(
+					"app/features/workspace/delete-coordinator.ts",
+					"export type PlainDeleteErrorNotificationService",
+					"type PlainDeleteErrorNotificationService",
+				),
+			),
+		).toContain(
+			"delete-coordinator.ts must retain its exact module-private coordinator surface",
+		);
+
+		expect(
+			validateWorkspaceDeleteTypeScriptBoundary(
+				replaceWorkspaceDeleteAppSource(
+					"app/features/workspace/delete-coordinator.ts",
+					"\tgetNotificationService: () => Promise<PlainDeleteErrorNotificationService>,\n\tcontext: PlainWorkspaceDeleteCoordinatorContext,\n): Promise<void> {",
+					"\tnotifierGetter: () => Promise<PlainDeleteErrorNotificationService>,\n\tcontext: PlainWorkspaceDeleteCoordinatorContext,\n): Promise<void> {",
+				),
+			),
+		).toContain(
+			"delete coordinator must define exactly one audited async runDelete route",
+		);
+
+		expect(
+			validateWorkspaceDeleteTypeScriptBoundary(
+				replaceWorkspaceDeleteAppSource(
+					"app/features/workspace/delete-coordinator.ts",
+					"runDelete(bridge, provider, getNotificationService, context)",
+					"runDelete(bridge, provider, context)",
+				),
+			),
+		).toContain(
+			"delete coordinator registration must directly close over one bridge, provider and notification getter",
+		);
+	});
 });
 
 const readonlyWorkspaceProvider = readFileSync(
@@ -5963,8 +6066,8 @@ describe("Plain browser move-failure fixture boundary", () => {
 				'type TestMultiRootMoveIncompleteScenario = "moveRetained" | "movePartial" | "moveUnknown";',
 			),
 			mutateBrowserFixture(
-				"moveIncompleteScenarios: readonly TestMultiRootMoveIncompleteScenario[] = [],\n): Promise<void>",
-				'moveIncompleteScenarios: readonly TestMultiRootMoveIncompleteScenario[] = [],\n\tstatus: string = "targetPublishedSourceRetained",\n): Promise<void>',
+				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n): Promise<void>",
+				'deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n\tstatus: string = "targetPublishedSourceRetained",\n): Promise<void>',
 			),
 			mutateBrowserFixture(
 				"moveIncompleteScenarios: readonly TestMultiRootMoveIncompleteScenario[] = []",
@@ -5980,12 +6083,12 @@ describe("Plain browser move-failure fixture boundary", () => {
 	it("keeps scenario state inside the one local addInitScript closure", () => {
 		for (const hostile of [
 			mutateBrowserFixture(
-				"moveIncompleteScenarios: readonly TestMultiRootMoveIncompleteScenario[] = [],\n): Promise<void> {\n\tawait page.addInitScript(",
-				"moveIncompleteScenarios: readonly TestMultiRootMoveIncompleteScenario[] = [],\n): Promise<void> {\n\tvoid moveIncompleteScenarios;\n\tawait page.addInitScript(",
+				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n): Promise<void> {\n\tawait page.addInitScript(",
+				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n): Promise<void> {\n\tvoid moveIncompleteScenarios;\n\tawait page.addInitScript(",
 			),
 			mutateBrowserFixture(
-				"\t\t\tmoveIncompleteScenarios,\n\t\t\tworkspaceId: nativeWorkspaceId,",
-				"\t\t\tworkspaceId: nativeWorkspaceId,",
+				"\t\t\tmoveIncompleteScenarios,\n\t\t\tdeleteIncompleteScenarios,\n\t\t\tworkspaceId: nativeWorkspaceId,",
+				"\t\t\tdeleteIncompleteScenarios,\n\t\t\tworkspaceId: nativeWorkspaceId,",
 			),
 			mutateBrowserFixture(
 				"const moveIncompletePlan = [...moveIncompleteScenarios];",
@@ -6052,9 +6155,153 @@ describe("Plain browser move-failure fixture boundary", () => {
 	});
 });
 
+describe("Plain browser delete-failure fixture boundary", () => {
+	function mutateBrowserFixture(from, to) {
+		if (!workspaceBrowserFixture.includes(from)) {
+			throw new Error(
+				"browser delete-failure fixture no longer matches production",
+			);
+		}
+		return workspaceBrowserFixture.replace(from, to);
+	}
+
+	it("accepts the local retained/partial multi-root delete fixture", () => {
+		expect(
+			validateWorkspaceMoveFailureBrowserFixture(workspaceBrowserFixture),
+		).toEqual([]);
+	});
+
+	it("rejects an expanded delete scenario set and a malformed fourth argument", () => {
+		for (const hostile of [
+			mutateBrowserFixture(
+				'type TestMultiRootDeleteIncompleteScenario = "deleteRetained" | "deletePartial";',
+				'type TestMultiRootDeleteIncompleteScenario = "deleteRetained" | "deletePartial" | "deleteUnknown";',
+			),
+			mutateBrowserFixture(
+				"\tdeleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n): Promise<void> {",
+				"\tdeleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n): Promise<void> {",
+			),
+			mutateBrowserFixture(
+				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],",
+				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[],",
+			),
+			mutateBrowserFixture(
+				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = []",
+				"deleteIncompleteScenarios: readonly string[] = []",
+			),
+		]) {
+			expect(validateWorkspaceMoveFailureBrowserFixture(hostile)).toContain(
+				"browser delete-failure fixture fourth argument must remain the closed deleteRetained/deletePartial scenario set",
+			);
+		}
+	});
+
+	it("keeps delete scenario state inside the one local addInitScript closure", () => {
+		for (const hostile of [
+			mutateBrowserFixture(
+				"\t\t\tconst deleteIncompletePlan = [...deleteIncompleteScenarios];",
+				"",
+			),
+			mutateBrowserFixture(
+				'if (deleteIncompleteScenarios.includes("deleteRetained")) {\n\t\t\t\tprimaryEntries.push([\n\t\t\t\t\t"delete-retained.txt",\n\t\t\t\t\tfile("Keep this retained delete target.\\n"),\n\t\t\t\t]);\n\t\t\t}',
+				'if (deleteIncompleteScenarios.includes("deleteRetained")) {\n\t\t\t\tprimaryEntries.push([\n\t\t\t\t\t"delete-retained-renamed.txt",\n\t\t\t\t\tfile("Keep this retained delete target.\\n"),\n\t\t\t\t]);\n\t\t\t}',
+			),
+			mutateBrowserFixture(
+				'if (deleteIncompleteScenarios.includes("deletePartial")) {\n\t\t\t\tsecondaryEntries.push([\n\t\t\t\t\t"delete-partial",\n\t\t\t\t\tdirectory([\n\t\t\t\t\t\t["removed.txt", file("Remove this delete child.\\n")],\n\t\t\t\t\t\t["kept.txt", file("Keep this delete child.\\n")],\n\t\t\t\t\t]),\n\t\t\t\t]);',
+				'if (deleteIncompleteScenarios.includes("deletePartial")) {\n\t\t\t\tsecondaryEntries.push([\n\t\t\t\t\t"delete-partial-renamed",\n\t\t\t\t\tdirectory([\n\t\t\t\t\t\t["removed.txt", file("Remove this delete child.\\n")],\n\t\t\t\t\t\t["kept.txt", file("Keep this delete child.\\n")],\n\t\t\t\t\t]),\n\t\t\t\t]);',
+			),
+			mutateBrowserFixture(
+				"const deleteIncompletePlan = [...deleteIncompleteScenarios];",
+				`const deleteIncompletePlan = [...deleteIncompleteScenarios];
+			const testDeleteWindow = window as unknown as Record<string, unknown>;
+			testDeleteWindow.__PLAIN_TEST_DELETE_FAILURE__ = () =>
+				deleteIncompletePlan.shift();`,
+			),
+		]) {
+			const failures = validateWorkspaceMoveFailureBrowserFixture(hostile);
+			expect(
+				failures.some((failure) =>
+					/local to one audited multi-root addInitScript fixture|must not accept raw receipt fields or expose a window mutation control/.test(
+						failure,
+					),
+				),
+			).toBe(true);
+		}
+	});
+
+	it("locks fixed commit-entry requests for both delete phases", () => {
+		const wrongRetainedPath = mutateBrowserFixture(
+			'request.relativePath !== "delete-retained.txt"',
+			'request.relativePath !== "delete-retained-2.txt"',
+		);
+		expect(
+			validateWorkspaceMoveFailureBrowserFixture(wrongRetainedPath),
+		).toContain(
+			"browser delete-failure fixture must retain exact commit-entry request validation",
+		);
+
+		const wrongPartialRoot = mutateBrowserFixture(
+			'plannedIncomplete === "deletePartial" &&\n\t\t\t\t\t\t\t\t(request.rootId !== secondaryRootId ||',
+			'plannedIncomplete === "deletePartial" &&\n\t\t\t\t\t\t\t\t(request.rootId !== primaryRootId ||',
+		);
+		expect(
+			validateWorkspaceMoveFailureBrowserFixture(wrongPartialRoot),
+		).toContain(
+			"browser delete-failure fixture must retain exact commit-entry request validation",
+		);
+	});
+
+	it("locks retained tree preservation, batch invalidation and boolean-derived partial deletion count", () => {
+		const retainedBranch =
+			'if (plannedIncomplete === "deleteRetained") {\n\t\t\t\t\t\t\t\tdeleteIncompletePlan.shift();\n\t\t\t\t\t\t\t\tactiveDelete = undefined;\n\t\t\t\t\t\t\t\treturn { status: "entryRetained", reason: "deleteFailed" };\n\t\t\t\t\t\t\t}';
+
+		const retainedMutation = mutateBrowserFixture(
+			retainedBranch,
+			'if (plannedIncomplete === "deleteRetained") {\n\t\t\t\t\t\t\t\ttarget.parent.entries.delete(target.name);\n\t\t\t\t\t\t\t\tdeleteIncompletePlan.shift();\n\t\t\t\t\t\t\t\tactiveDelete = undefined;\n\t\t\t\t\t\t\t\treturn { status: "entryRetained", reason: "deleteFailed" };\n\t\t\t\t\t\t\t}',
+		);
+		expect(
+			validateWorkspaceMoveFailureBrowserFixture(retainedMutation),
+		).toContain(
+			"browser retained-delete fixture must leave the tree untouched and invalidate the active batch",
+		);
+
+		const retainedNoInvalidate = mutateBrowserFixture(
+			retainedBranch,
+			'if (plannedIncomplete === "deleteRetained") {\n\t\t\t\t\t\t\t\tdeleteIncompletePlan.shift();\n\t\t\t\t\t\t\t\treturn { status: "entryRetained", reason: "deleteFailed" };\n\t\t\t\t\t\t\t}',
+		);
+		expect(
+			validateWorkspaceMoveFailureBrowserFixture(retainedNoInvalidate),
+		).toContain(
+			"browser retained-delete fixture must leave the tree untouched and invalidate the active batch",
+		);
+
+		const forgedCountAnchor =
+			'const node = resolveNode(\n\t\t\t\t\t\t\t\t\tactiveDelete.rootId,\n\t\t\t\t\t\t\t\t\tactiveDelete.relativePath,\n\t\t\t\t\t\t\t\t);\n\t\t\t\t\t\t\t\tif (node.kind !== "directory") {\n\t\t\t\t\t\t\t\t\tthrow entryTypeMismatch();\n\t\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\t\tconst removedEntries = node.entries.delete("removed.txt")\n\t\t\t\t\t\t\t\t\t? 1\n\t\t\t\t\t\t\t\t\t: 0;';
+		const forgedCount = mutateBrowserFixture(
+			forgedCountAnchor,
+			'const node = resolveNode(\n\t\t\t\t\t\t\t\t\tactiveDelete.rootId,\n\t\t\t\t\t\t\t\t\tactiveDelete.relativePath,\n\t\t\t\t\t\t\t\t);\n\t\t\t\t\t\t\t\tif (node.kind !== "directory") {\n\t\t\t\t\t\t\t\t\tthrow entryTypeMismatch();\n\t\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\t\tconst removedEntries = 1;',
+		);
+		expect(validateWorkspaceMoveFailureBrowserFixture(forgedCount)).toContain(
+			"browser partial-delete fixture must delete removed.txt and derive removedEntries from that boolean result",
+		);
+
+		const partialBranch =
+			'if (plannedIncomplete === "deletePartial") {\n\t\t\t\t\t\t\t\tconst node = resolveNode(\n\t\t\t\t\t\t\t\t\tactiveDelete.rootId,\n\t\t\t\t\t\t\t\t\tactiveDelete.relativePath,\n\t\t\t\t\t\t\t\t);\n\t\t\t\t\t\t\t\tif (node.kind !== "directory") {\n\t\t\t\t\t\t\t\t\tthrow entryTypeMismatch();\n\t\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\t\tconst removedEntries = node.entries.delete("removed.txt")\n\t\t\t\t\t\t\t\t\t? 1\n\t\t\t\t\t\t\t\t\t: 0;\n\t\t\t\t\t\t\t\tif (removedEntries !== 1 || !node.entries.has("kept.txt")) {\n\t\t\t\t\t\t\t\t\tthrow new Error(\n\t\t\t\t\t\t\t\t\t\t"Invalid partial delete browser test target tree.",\n\t\t\t\t\t\t\t\t\t);\n\t\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\t\tdeleteIncompletePlan.shift();\n\t\t\t\t\t\t\t\tactiveDelete = undefined;\n\t\t\t\t\t\t\t\treturn {\n\t\t\t\t\t\t\t\t\tstatus: "entryPartiallyDeleted",\n\t\t\t\t\t\t\t\t\treason: "deleteFailed",\n\t\t\t\t\t\t\t\t\tremovedEntries,\n\t\t\t\t\t\t\t\t};\n\t\t\t\t\t\t\t}';
+		const partialNoInvalidate = mutateBrowserFixture(
+			partialBranch,
+			partialBranch.replace("\t\t\t\t\t\t\t\tactiveDelete = undefined;\n", ""),
+		);
+		expect(
+			validateWorkspaceMoveFailureBrowserFixture(partialNoInvalidate),
+		).toContain(
+			"browser partial-delete fixture must delete removed.txt and derive removedEntries from that boolean result",
+		);
+	});
+});
+
 describe("Plain workspace provider bootstrap contract", () => {
 	const bootstrap = `
-import { initialize } from "@codingame/monaco-vscode-api";
+import { getService, initialize, INotificationService } from "@codingame/monaco-vscode-api";
 import { registerCustomProvider } from "@codingame/monaco-vscode-files-service-override";
 import { createPlainWorkspaceFileSystemProvider, PLAIN_WORKSPACE_SCHEME } from "./features/workspace/file-system-provider";
 import { registerWorkspaceDeleteCoordinator } from "./features/workspace/delete-coordinator";
@@ -6070,6 +6317,7 @@ const workspaceFileSystemProvider = createPlainWorkspaceFileSystemProvider(
 const workspaceDeleteCoordinator = registerWorkspaceDeleteCoordinator(
   bridge,
   workspaceFileSystemProvider,
+  () => getService(INotificationService),
 );
 registerCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);
 const initialWorkspaceSnapshot = await bridge.workspaceSnapshot();
@@ -6275,6 +6523,7 @@ await initialize(createServiceOverrides(), container, { enableWorkspaceTrust: fa
 			`const workspaceDeleteCoordinator = registerWorkspaceDeleteCoordinator(
   bridge,
   workspaceFileSystemProvider,
+  () => getService(INotificationService),
 );
 `,
 			"",
@@ -6309,6 +6558,7 @@ await initialize(createServiceOverrides(), container, { enableWorkspaceTrust: fa
 				`const workspaceDeleteCoordinator = registerWorkspaceDeleteCoordinator(
   bridge,
   workspaceFileSystemProvider,
+  () => getService(INotificationService),
 );
 `,
 				"",
@@ -6319,11 +6569,46 @@ await initialize(createServiceOverrides(), container, { enableWorkspaceTrust: fa
 const workspaceDeleteCoordinator = registerWorkspaceDeleteCoordinator(
   bridge,
   workspaceFileSystemProvider,
+  () => getService(INotificationService),
 );`,
 			);
 		expect(validateWorkspaceProviderBootstrap(lateCoordinator)).toContain(
 			"bootstrap order must remain createBridge -> capabilities -> provider -> delete coordinator -> register -> snapshot -> initialize",
 		);
+	});
+
+	it("requires the exact deferred notification-service getter as the coordinator's third argument", () => {
+		for (const hostile of [
+			bootstrap.replace(
+				"() => getService(INotificationService)",
+				"() => getService(IWorkspaceContextService)",
+			),
+			bootstrap.replace(
+				"() => getService(INotificationService)",
+				"await getService(INotificationService)",
+			),
+			bootstrap.replace(
+				"() => getService(INotificationService)",
+				"() => Promise.resolve(getService(INotificationService))",
+			),
+			bootstrap.replace(
+				`const workspaceDeleteCoordinator = registerWorkspaceDeleteCoordinator(
+  bridge,
+  workspaceFileSystemProvider,
+  () => getService(INotificationService),
+);`,
+				`const notificationServiceGetter = () => getService(INotificationService);
+const workspaceDeleteCoordinator = registerWorkspaceDeleteCoordinator(
+  bridge,
+  workspaceFileSystemProvider,
+  notificationServiceGetter,
+);`,
+			),
+		]) {
+			expect(validateWorkspaceProviderBootstrap(hostile)).toContain(
+				"app/main.ts must register exactly one audited workspace delete coordinator",
+			);
+		}
 	});
 
 	it("rejects explicit early termination after bridge creation", () => {

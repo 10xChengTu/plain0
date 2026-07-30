@@ -6,7 +6,7 @@
 
 - 阶段：2 — 编辑主链。
 - WIP：`F020` Workspace path policy and file tree。
-- 当前最小工作项：实现并验收 Browser delete retained/partial 可见失败矩阵。
+- 当前最小工作项：完成真实 multi-root Tauri 验收。
 - 当前旧源码迁移 oracle：Code OSS 1.130.0，Electron 42.6.0，约 16,555 个跟踪文件；它不是 Plain 的产品运行时。
 - 当前产品 Workbench 运行时基线：`monaco-vscode-api@35.0.1`，对应 Code OSS 1.128.1 commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`。
 - `monaco-vscode-api` 35.0.1 的 203 个排除域 source-map 文件仍作为已记录的迁移债务存在，但当前没有可达的排除命令、视图或 Extension Host。
@@ -112,12 +112,13 @@
 - [x] 完成 Browser move/delete incomplete 的固定 GitHub 调研与技术方案：固定 Code OSS `5264f` 的 Cut/Paste 单 Error toast、无 Retry、失败清 Cut、成功后才建 Undo，以及 permanent delete 的危险 Retry fallback；Plain fixed delete patch 继续在上游 try/catch 前提前分流，retained/partial 由右键 ActionRunner 显示单 Error toast，不恢复 Retry。方案只在测试本地 multi-root IPC mock 增加不可伪造 DTO 的 FIFO 场景闭集，以真实 target publication/源子项删除生成 move retained/partial，以真实 batch/tree 变化生成 delete retained/partial；各自锁定 root refresh、树终态、exact IPC、零重放、去敏诊断和无 `pageerror`。同时识别 move transport/DTO unknown 没有 target publication 证据，实施前必须从 `WORKSPACE_MOVE_INCOMPLETE` 拆成独立安全错误，不能混入 retained/partial Browser 终态。
 - [x] 完成 Browser move retained/partial 可见失败矩阵：已认证的 `targetPublishedSourceRetained/PartiallyDeleted` 继续抛冻结的 `WORKSPACE_MOVE_INCOMPLETE`，transport reject、畸形 DTO 与未认证 rescan failure 则改为不声称发布事实的冻结 `WORKSPACE_MOVE_OUTCOME_UNKNOWN`；固定 Workbench Paste patch 只对这两个精确 name/message 且冻结的 Plain 错误显示直接安全文案，其他错误仍走上游 stale-source fallback，失败始终清空 Cut 且不增加 Retry。Browser-only 双根 fixture 先真实发布 target，再分别保留完整 source 或只删除 source `removed.txt`，以树差异和实际 boolean delete 生成 retained/partial 回执；AST Harness 锁定场景闭集、请求、target-first、source 终态、错误分流及禁止页面可写控制面。API patch SHA-256 更新为 `184ceed92b82bccb869ca91bc322e6c01740d8eb85cd9ddde47484e8959858f6`。
 - [x] Move 可见失败切片通过完整验收：定向 provider/patch/Harness 为 178/178，聚焦 Chromium 单次与重复 5/5 均通过；完整 `pnpm check` 通过 30 个前端测试文件、595 个用例、2277 个模块、2112 个 bundle source、203 项既有迁移债务与 Rust 255/255，全部 Browser E2E 13/13 通过。两阶段各只有一次 `workspace_move`、一个无 Retry Error toast 和两条有序诊断，Cut 均清空、双根均刷新，retained 的 source/target 均存在，partial 的完整 target 与仅剩 `kept.txt` 的 source 同时可见，且无 native dialog、`pageerror`、自动重放或伪成功事件。
+- [x] 完成 Browser delete retained/partial 可见失败矩阵与右键永久删除静默失败修复：探针证伪了「确认后 rejection 由菜单 ActionRunner 显示 Error toast」的冻结假设——固定 ContextMenuHandler 每次渲染新建 ActionRunner，ContextView.hide() 在动作触发后立即 dispose 其 onDidRun 订阅，而 Plain 永久删除需先经交互式 DOM 确认，rejection 到达时订阅已亡，右键触发的失败此前完全静默。修复以 main.ts 延迟 getter 注入 INotificationService，coordinator 把两处 branded 抛出点收敛为单一 notify-or-rethrow 出口：branded incomplete/unknown 显示单个去敏 Error toast 后吞掉，notifier 失败退化为原样上抛；普通错误与 finally best-effort cancel 语义逐字节不变，菜单与键盘两条触发路径对 branded 统一为单 Error toast，patches 未改动。Browser fixture 以独立 deleteRetained/deletePartial 闭集扩展同一 multi-root mock：retained 零树变更，partial 以真实 Map delete 布尔生成 removedEntries=1，incomplete 后 batch 立即失效使 best-effort cancel 命中 `WORKSPACE_DELETE_PLAN_INVALID` 并被静默吞掉。
+- [x] delete 矩阵切片通过完整验收：两 phase 均恰为 prepare→begin→commit→cancel 四命令，UUID v4 confirmationId/entryId 闭合且两 phase 互异，单 Error toast 无 Retry/无第二确认框，retained 树完整保留，partial 仅 `removed.txt` 消失且 `kept.txt` 保留，受影响 root 至少一次 read_dir 收敛；每 phase 恰 2 条有序 console error（BulkEdit 结构化日志含 "The workspace is unavailable."，NotificationsAlerts 恰为 coordinator 安全文案），`pageerror` 与 native dialog 为零。聚焦重复 10/10（move+delete 各 ×5）、全量 Browser E2E 14/14、前端 604/604、Rust 255/255、bundle 2112 source/203 debt、完整 `pnpm check` 全绿；Harness 新增 delete 场景闭集/FIFO/请求匹配/app 泄漏禁令与 notify-once/退化 rethrow 敌意变异，workspace-topology-contracts 同步锁定 main.ts 三参数接线。
 
 ## 下一步
 
-1. 实现并验收 Browser delete retained/partial 可见失败矩阵。
-2. 完成真实 multi-root Tauri 验收。
-3. 全部通过后写入 `features.json` evidence/status，完成 `F020` 并切换到下一个垂直切片。
+1. 完成真实 multi-root Tauri 验收。
+2. 全部通过后写入 `features.json` evidence/status，完成 `F020` 并切换到下一个垂直切片。
 
 ## 当前验收命令
 
