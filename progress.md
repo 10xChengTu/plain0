@@ -1,6 +1,6 @@
 # Plain 重写进度
 
-更新时间：2026-07-20
+更新时间：2026-07-30
 
 ## 当前状态
 
@@ -141,6 +141,7 @@ pnpm test:e2e:browser -- workspace.spec.ts
 - Browser 与真实 WKWebView 均已证明当前 `IDialogService` 使用 Workbench DOM handler，且根 factory/Web 文件对话框未进入最终 bundle；菜单/快捷键取消与用户即时确认后的正向永久删除均已通过。
 - 若 native `prepare-delete` 已登记批次但 IPC 响应在前端收到 confirmation id 前丢失，前端无法主动 cancel；批次仍不可 begin/commit，由 Rust 的 120 秒单调 idle TTL、root/window 生命周期清理兜底。
 - watcher wake event 只是可丢失提示，权威状态在 Rust sticky generation；Browser mock 已覆盖定时拉取收敛，真实 macOS FSEvents/WKWebView 链也已覆盖外部新增与删除后的即时收敛，但 lost-wake 定时拉取仍只由可控 Browser mock 确定性验证。
+- 2026-07-30 的真实 multi-root Tauri 验收在权限环节中止：`tauri:build:e2e` 构建与绝对路径启动均成功，但该会话的 Computer Use `request_access` 对 Plain 与访达都被即时 `user_denied`（会话级自动拒绝，无弹窗；Accessibility 通道同样被拒），用户随后要求跳过本轮验收。下次验收前必须先确认 Claude 桌面应用已放行 Computer Use（并注意并行会话占用），且 `src-tauri/target` 已按惯例清理，需要重新执行 `pnpm tauri:build:e2e`。
 
 ## 阻塞项
 
