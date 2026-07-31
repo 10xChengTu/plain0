@@ -384,10 +384,10 @@ fixture（临时目录中构造，不提交仓库；可直接复用 E2E-005 已�
 
 ### E2E-012 · F120 品牌/打包/发布检查收口后仍需真实桌面与真实 CI 才能确认的维度
 
-状态：**部分完成（2026-07-31）**。项 1 的 ad-hoc hardened-runtime + JIT 真实 GUI 已完成；项 2 的第七次真实 Actions run `30647183986` attempt 2 已让 Ubuntu `pnpm check` 与 Browser E2E 99/99 全绿，并首次启动 macOS job。该 job 的 `macos-latest` 当日解析为 `macos-26-arm64`（macOS 26.5.2 / Xcode 26），固定 Zig 0.15.2 在 Ghostty prewarm 的 build runner 链接阶段无法解析 Darwin 系统符号；现将首个打包门固定到 `macos-15` 并用契约拒绝重新使用漂移标签，待第八次 run 验证真实 `Plain.app`。项 3 仍为可选；项 4 继续受 Apple Developer Program 决策阻塞。`F120` S0–S7 已全部完成并转 `complete`（`features.json`），机器化契约（品牌覆盖面、bundle 段契约、entitlements 内容契约、品牌字符串扫描、声明新鲜度检查、CI 打包存在性检查）已全部落地并配真实反向测试。但按本项目一贯纪律（"机器化契约通过不等于实机验证通过"），其余维度仍按下列边界登记：
+状态：**全部可执行项已完成（2026-07-31）**。项 1 的 ad-hoc hardened-runtime + JIT 真实 GUI 已完成；项 2 由第八次真实 Actions run `30649792999`（`main@954fc718`）关闭：Ubuntu `pnpm check` 与 Browser E2E 99/99 全绿，固定 `macos-15` 的 job 成功完成 Zig/Ghostty、Tauri release、真实 `Plain.app` 与 `codesign -dv` 检查。项 3 明确为可选；项 4 继续受 Apple Developer Program 决策阻塞，二者都不是尚可执行但未完成的验收。`F120` S0–S7 已全部完成并转 `complete`（`features.json`），机器化契约（品牌覆盖面、bundle 段契约、entitlements 内容契约、品牌字符串扫描、声明新鲜度检查、CI 打包存在性检查）已全部落地并配真实反向测试。其余边界如下：
 
-1. **ad-hoc 签名 + hardened runtime + JIT entitlement 构建的真实 GUI 验证**：本次收口只做到了——用 `APPLE_SIGNING_IDENTITY=-` 强制真实 ad-hoc 签名，`codesign -dv`/`codesign -d --entitlements -` 确认 `flags=0x10002(adhoc,runtime)` 与 `com.apple.security.cs.allow-jit=true` 真实生效，并把签名后的原始二进制（绕开 Finder/LaunchServices）直接启动，确认进程存活 4 秒无崩溃、无报错。这**不是**真实 GUI 验证——本条目需要真实通过 Finder/`open` 双击启动该构建，确认窗口真实出现、Workbench 正常渲染、编辑器可以真实输入文本（真实验证 JIT 在 hardened runtime 下确实让 WKWebView 的 JS 执行保持正常速度且不崩溃，而不只是"进程活着"这一较弱证据）。
-2. **CI `build-macos` job 的真实首跑**：第七次 run 已首次进入 macOS job，但浮动的 `macos-latest` 解析到 macOS 26/Xcode 26 后与 Zig 0.15.2 不兼容，尚未进入真实 Tauri build。现已固定 `macos-15`；下一次 run 必须确认 `pnpm ghostty:vendor:setup`、`tauri build --bundles app` 与最终 `codesign -dv Plain.app` 全部成功，方可完成本项。
+1. **ad-hoc 签名 + hardened runtime + JIT entitlement 构建的真实 GUI 验证（已完成）**：`APPLE_SIGNING_IDENTITY=- pnpm tauri:build:e2e` 产物确认 `flags=0x10002(adhoc,runtime)` 且只含 `com.apple.security.cs.allow-jit=true`。真实 GUI 中 Workbench 正常渲染，编辑、保存和磁盘精确回读均成功；执行中发现的残余 `Cmd+N` Untitled 入口也已修复并在重建应用中复验。
+2. **CI `build-macos` job 的真实首跑（已完成）**：run `30649792999` 整体成功。Ubuntu `check` 15m10s，完整 `pnpm check` 3m58s，Browser E2E 99/99 9m48s；`macos-15` 的 `build-macos` 9m44s，Ghostty vendor 1m25s，Tauri release 6m47s（Cargo 自报 6m28s）。预期路径存在真实 `Plain.app`，`codesign -dv` 显示 `flags=0x20002(adhoc,linker-signed)`、`Signature=adhoc`、`TeamIdentifier=not set`、`Sealed Resources=none`，符合当前未配置发布签名身份的既定边界。
 3. **DMG 打包目标的真实 CI 行为（可选，非阻塞）**：本机真实测试发现 `pnpm tauri:build`（含 `dmg` target）会在 `bundle_dmg.sh` 的 Finder/AppleScript 自动化步骤上真实挂起（`ps` 核实进程卡死），`build-macos` job 因此故意只跑 `--bundles app`。判断这很可能是本次验证环境本身缺少交互式 Automation 会话所致，而非真实 GitHub Actions 环境的缺陷，但未经真实 CI 确证。若执行方希望恢复 `dmg` 打包，可在真实 CI 环境里先单独试跑 `tauri build --bundles dmg`，确认是否同样挂起；若不挂起，可以放心把 `build-macos` 步骤改回默认的 `pnpm tauri:build`（两个 target 都打）。
 4. **签名/公证挂起对验收范围的直接影响，供执行方规划 F130 时参考**：产品所有者已明确暂不投入 Apple Developer Program 账号，`F120` 只完成本地 ad-hoc 签名验证。这意味着任何"在另一台机器上安装运行"类验收（例如把构建产物发给另一个人在他们自己的 Mac 上首次打开）**做不到**——`spctl -a -vv` 在当前状态下会真实报 `rejected`（本次已验证，这是预期结果而非回归），真实公证后的 Gatekeeper 首次打开确认对话框流程完全无法验证。
 
@@ -402,7 +402,7 @@ fixture（临时目录中构造，不提交仓库；可直接复用 E2E-005 已�
 
 ### E2E-013 · F130 十二条待执行条目总览、十条产品需求交叉索引与建议执行顺序
 
-状态：总览条目，本身不新增测试步骤。`F130` 收口时 12 条均待执行；截至 2026-07-31，Codex 已完成 `E2E-001` 至 `E2E-009`、`E2E-010` 的全部可执行场景、`E2E-011` 与 `E2E-012` 项 1，当前只剩 `E2E-012` 项 2 的修复后真实 CI 运行、可选项 3，以及受 Apple Developer Program 决策阻塞的项 4。完成项均已把真实结果/缺陷修复回写到对应 feature evidence；本条目的十条需求交叉索引和签名阻塞分类继续有效。
+状态：总览条目，本身不新增测试步骤。`F130` 收口时 12 条均待执行；截至 2026-07-31，Codex 已完成 `E2E-001` 至 `E2E-009`、`E2E-010` 的全部可执行场景、`E2E-011` 与 `E2E-012` 项 1/2。当前没有尚可执行但未完成的验收：`E2E-012` 项 3 为可选，项 4 受 Apple Developer Program 决策阻塞。完成项均已把真实结果/缺陷修复回写到对应 feature evidence；本条目的十条需求交叉索引和签名阻塞分类继续有效。
 
 **十条产品需求 × 对应真实桌面验收条目**（完整对照见 `progress.md` 本次 `F130` 完成条目下的总表，逐条附证据引用；这里只列条目编号，避免重复）：
 
