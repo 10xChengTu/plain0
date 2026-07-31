@@ -1,6 +1,6 @@
 # 端到端桌面验收交接清单（Codex 执行）
 
-更新时间：2026-07-31（Codex 已完成 E2E-001、E2E-003、E2E-004、E2E-005 与 E2E-011；其余条目继续按 E2E-013 顺序执行）
+更新时间：2026-07-31（Codex 已完成 E2E-001、E2E-003、E2E-004、E2E-005、E2E-006 与 E2E-011；其余条目继续按 E2E-013 顺序执行）
 
 ## 分工模式
 
@@ -143,7 +143,9 @@ fixture（临时目录中构造，不提交仓库）：
 
 ### E2E-006 · F060 文件与产品图标主题的真实桌面矩阵
 
-状态：待执行。Browser mock 层已全部闭合（S1 Rust 校验管线含 SVG 净化/字体 magic bytes/恶意 fixture 矩阵；S2 内置 `vs-minimal` 真实 DOM 渲染与两个 Quick Pick 激活；S3 导入包 `iconThemes`/`productIconThemes` 的 DTO 投影、双 icon selection 跨会话持久化、启动应用、None/Default 保留 sentinel、失效回退，见 progress.md 与 `tests/browser/workspace.spec.ts`）；本条目补真实系统文件选择器、真实 SVG/字体文件在真实 WKWebView 中的渲染，以及真实进程重启持久化——这些是 Rust 单元测试与 Browser mock 都无法替代的维度。复用 E2E-005 已验证过的 VSIX 构造与系统选择器路径，不重复该矩阵。
+状态：**已完成（2026-07-31）**。合法三轴 VSIX 经真实系统文件选择器导入，成功 toast 为 `plain-e2e.icon-theme-demo@1.0.0`；文件图标主题的红色三角文件、蓝色圆形目录/根目录在 Explorer 真实渲染，产品图标主题把 Explorer Activity Bar 图标从内置 files 字形切换为包内真实 TTF 的自定义字形，颜色主题把编辑器背景切换为 `#0a0a0a`。`selection.plain.json` 同时精确持久化 `E2E Icon Demo Dark`、`e2e-demo-icons`、`e2e-demo-picons`；完整 Cmd+Q 退出并确认旧 PID 消失后冷启动，三个轴均无需重新选择即恢复，重开 workspace 后红色三角/蓝色圆形仍在。包内 SVG、TTF、颜色 JSON 与 fixture SHA-256 分别一致（文件 SVG `fcd2ad7b…`、TTF `cc2472e2…`、颜色 JSON `ada51b56…`）。恶意 SVG 包显示去敏错误 `Plain: one of the theme package's SVG resources was rejected as unsafe.`，不含 `THEME_SVG_UNSAFE` 或本机路径，主题库无失败目录或 `.plain-theme-*.tmp` 残留。最后通过产品内移除命令清理测试包，三轴立即回退且主题库为空。
+
+执行中发现并修复一处真实打包 WKWebView 才暴露的缺陷：选择 `e2e-demo-icons` 已写入磁盘，但 Explorer 仍渲染内置白色轮廓图标。导入包把所有资源都注册成 blob-backed `RegisteredUriFile`；真实 WKWebView 能把 blob 用作 SVG/字体 CSS URL，却不能可靠地经该路径读取 JSON/TMTheme 文档，Browser mock 的原断言又只检查 `background-image != none`，会把仍在显示的内置图标误判为成功。现将 JSON/TMTheme 注册为 `RegisteredReadOnlyFile` 内存资源，仅 SVG/字体保留 blob URL，并显式保存/释放每个资源注册；Browser 回归进一步 fetch 计算后的 icon URL 并逐字节断言就是导入包 SVG。验证：聚焦 coordinator/topology 单测 95/95、真实图标 Browser 1/1、最终全量 `pnpm check` 通过（前端 81 文件/1695 用例、Rust 1178/1178、architecture 89 app/145 Rust/17 pinned、bundle 1985/53）；提交 `19c04fb8`、`561d3656`。应用、fixture、测试包、截图、`dist` 与 `test-results` 已清理。
 
 fixture（临时目录中构造，不提交仓库）：
 
@@ -392,7 +394,7 @@ fixture（临时目录中构造，不提交仓库；可直接复用 E2E-005 已�
 
 ### E2E-013 · F130 十二条待执行条目总览、十条产品需求交叉索引与建议执行顺序
 
-状态：总览条目，本身不新增测试步骤。`F130` 收口时 12 条均待执行；截至 2026-07-31，Codex 已完成 `E2E-001`、`E2E-003`、`E2E-004`、`E2E-005` 与 `E2E-011`，余下 7 条继续按本总览执行。完成项均已把真实结果/缺陷修复回写到对应 feature evidence；本条目的十条需求交叉索引和签名阻塞分类继续有效。
+状态：总览条目，本身不新增测试步骤。`F130` 收口时 12 条均待执行；截至 2026-07-31，Codex 已完成 `E2E-001`、`E2E-003`、`E2E-004`、`E2E-005`、`E2E-006` 与 `E2E-011`，余下 6 条继续按本总览执行。完成项均已把真实结果/缺陷修复回写到对应 feature evidence；本条目的十条需求交叉索引和签名阻塞分类继续有效。
 
 **十条产品需求 × 对应真实桌面验收条目**（完整对照见 `progress.md` 本次 `F130` 完成条目下的总表，逐条附证据引用；这里只列条目编号，避免重复）：
 
@@ -414,13 +416,13 @@ fixture（临时目录中构造，不提交仓库；可直接复用 E2E-005 已�
 - `E2E-010` 步骤 3（真实 `lldb-dap` 原生调试）：`F120` S5 已实测确认，本沙箱下缺少 `com.apple.security.cs.debugger` entitlement 时 `task_for_pid`/真实 `lldb` 均会挂起；该 entitlement 因「无真机验证支撑、不应凭疑心扩大攻击面」被主导会话裁定不加。即便执行方拥有真实 Mac，只要这条 entitlement 决定不重新评估，本步骤依然无法完整验证，只能如实记录"阻塞于签名前提"。
 - `E2E-012` 项 1（ad-hoc hardened runtime + JIT entitlement 构建的真实 GUI 验证）与项 4（跨机器安装运行/真实公证后 Gatekeeper 行为）：项 4 严格阻塞于产品所有者已拍板的"暂不投入 Apple Developer Program"决定；项 1 本身**不需要**公证（本机 `open` 真实启动即可验证，`F130` 已用非 GUI 方式确认能启动，缺的只是真实 GUI 会话下的视觉/交互确认），但仍登记于此以保持与 `E2E-012` 原条目一致，执行时不应与项 4 混为一谈。
 
-**其余未完成条目均不需要签名公证到位，只是尚未按既定分工执行**：`E2E-002`、`E2E-006`、`E2E-007`、`E2E-008`、`E2E-009`、`E2E-010`（除步骤 3 外）、`E2E-012` 项 2/3。`E2E-001`、`E2E-003`、`E2E-004`、`E2E-005` 与 `E2E-011` 已完成，不再列入待执行集合。
+**其余未完成条目均不需要签名公证到位，只是尚未按既定分工执行**：`E2E-002`、`E2E-007`、`E2E-008`、`E2E-009`、`E2E-010`（除步骤 3 外）、`E2E-012` 项 2/3。`E2E-001`、`E2E-003`、`E2E-004`、`E2E-005`、`E2E-006` 与 `E2E-011` 已完成，不再列入待执行集合。
 
 **建议执行顺序**（供人工/Codex 参考，非强制）：
 
 1. `E2E-011`（**已完成**：去 AI/账号/sync 桌面巡检 + `extensionRuntime` 手术后回归）——结果已回写 F110 evidence。
 2. `E2E-001`（**已完成**）/`E2E-002`/`E2E-003`（**已完成**）/`E2E-004`（**已完成**）——多根文件树、热退出和搜索结果已分别回写 F020/F030/F040 evidence；仅永久删除补强继续执行。
-3. `E2E-005`（**已完成**）/`E2E-006`——颜色主题结果已回写 F050 evidence；文件/产品图标主题继续复用同一套 VSIX fixture 构造手法。
+3. `E2E-005`（**已完成**）/`E2E-006`（**已完成**）——颜色、文件图标、产品图标三轴的真实导入/渲染/持久化/恶意包拒绝结果已分别回写 F050/F060 evidence。
 4. `E2E-007`——终端（需求 7）。
 5. `E2E-008`/`E2E-009`——Git 与 Git 历史增强（需求 8），`E2E-008` 需要执行人自备真实远端凭据，建议提前准备。
 6. `E2E-010`——调试（需求 4），步骤 1/2/4/5/6/7 可执行；步骤 3 按上文如实标注"阻塞于签名前提"即可，不必等待。
