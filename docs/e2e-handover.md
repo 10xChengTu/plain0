@@ -311,7 +311,9 @@ fixture（临时目录中创建，不提交仓库）：
 
 ### E2E-010 · F100 真实原生调试器与真实桌面 DAP 全链路矩阵
 
-状态：**执行中（2026-07-31）**。trust Cancel/Trust & Continue、精确 adapter 命令/transport/source 首次确认、跨冷启动持久化与真实 debugpy stdout 已完成。首次 Python 3.12/debugpy 1.8.21 会话暴露标准 `terminated` 后 UI 永久停在 `Running…` 且 adapter 驻留的缺陷；修复后同一真实会话输出 `sum=7`、自动回到 `Not debugging.` 且 adapter/debuggee PID 全消失，聚焦单测 18/18 与 app 重建通过。其余步骤继续执行；`lldb-dap` 仍按本条已知签名前提如实阻塞。
+状态：**已完成（2026-07-31；步骤 3 按既定签名前提如实阻塞）**。真实 Python 3.12/debugpy 1.8.21 桌面链路已覆盖 trust Cancel/Trust & Continue、精确 adapter 命令/transport/source 首次确认与冷启动持久化、真实断点命中、Step Over/Into/Out、5 帧常规调用栈、locals、Watch `7`、Debug Console 求值 `12`、stdout `sum=7` 与自然退出。真实 `console: "integratedTerminal"` 会话自动拉出 `Debug: Python Debug Console`，精确显示 `RUN_IN_TERMINAL_STDOUT`，关闭标签后回到 `No terminals open.`。深数据 fixture 显示 1204 帧调用栈，5 万元素列表能按 debugpy 的 100 项与后续区间节点分页直至末项 `49999`；约 2 MiB/10,000 行输出洪泛期间 Debug Console 仍可求值 `1 + 1 = 2`、滚动且无假死，本次前端持续跟上，未触发可选的 `plain/outputElided`。显式 Stop Debugging 与运行中 Cmd+Q 后，shell 均确认 Plain、adapter、launcher、debuggee 与集成终端子进程无残留。
+
+本条真实验收发现并修复三处只在真实 adapter/时序下暴露的缺陷：①标准 `terminated` 事件后 UI 与 adapter 不收口，现复用既有 disconnect 路径；②debugpy 在 `debugLaunch()` 返回前发出的 `plain/runInTerminal` 被丢弃，现以 256 条硬上限暂存启动窗口事件并只重放匹配 session；③终端在前端附着前产生的首帧卡在 awaiting-ack，现先安装监听器、退役不可见旧帧，再由 resize 触发完整当前状态重绘。步骤 3 使用 `xcrun --find lldb-dap` 确认真适配器存在，但当前 app 签名无 `com.apple.security.cs.debugger`，且 `DevToolsSecurity -status` 无法取得 `system.privilege.taskport.debug` 授权；按本条明示规则未绕过系统安全边界，记录为 F120/Developer Mode 签名前提阻塞，不算 F100 回归。
 
 fixture（临时目录中创建，不提交仓库；具体路径由执行人自备）：
 
@@ -418,7 +420,7 @@ fixture（临时目录中构造，不提交仓库；可直接复用 E2E-005 已�
 - `E2E-010` 步骤 3（真实 `lldb-dap` 原生调试）：`F120` S5 已实测确认，本沙箱下缺少 `com.apple.security.cs.debugger` entitlement 时 `task_for_pid`/真实 `lldb` 均会挂起；该 entitlement 因「无真机验证支撑、不应凭疑心扩大攻击面」被主导会话裁定不加。即便执行方拥有真实 Mac，只要这条 entitlement 决定不重新评估，本步骤依然无法完整验证，只能如实记录"阻塞于签名前提"。
 - `E2E-012` 项 1（ad-hoc hardened runtime + JIT entitlement 构建的真实 GUI 验证）与项 4（跨机器安装运行/真实公证后 Gatekeeper 行为）：项 4 严格阻塞于产品所有者已拍板的"暂不投入 Apple Developer Program"决定；项 1 本身**不需要**公证（本机 `open` 真实启动即可验证，`F130` 已用非 GUI 方式确认能启动，缺的只是真实 GUI 会话下的视觉/交互确认），但仍登记于此以保持与 `E2E-012` 原条目一致，执行时不应与项 4 混为一谈。
 
-**其余未完成条目均不需要签名公证到位，只是尚未按既定分工执行**：`E2E-002`、`E2E-008`、`E2E-010`（除步骤 3 外）、`E2E-012` 项 2/3。`E2E-001`、`E2E-003`、`E2E-004`、`E2E-005`、`E2E-006`、`E2E-007`、`E2E-009` 与 `E2E-011` 已完成，不再列入待执行集合。
+**其余未完成条目均不需要签名公证到位，只是尚未按既定分工执行或受用户凭据/即时确认约束**：`E2E-002`、`E2E-008`、`E2E-012` 项 2/3。`E2E-001`、`E2E-003`、`E2E-004`、`E2E-005`、`E2E-006`、`E2E-007`、`E2E-009`、`E2E-010`（步骤 3 按既定规则记为结构性阻塞）与 `E2E-011` 已完成，不再列入待执行集合。
 
 **建议执行顺序**（供人工/Codex 参考，非强制）：
 
@@ -427,8 +429,8 @@ fixture（临时目录中构造，不提交仓库；可直接复用 E2E-005 已�
 3. `E2E-005`（**已完成**）/`E2E-006`（**已完成**）——颜色、文件图标、产品图标三轴的真实导入/渲染/持久化/恶意包拒绝结果已分别回写 F050/F060 evidence。
 4. `E2E-007`（**已完成**）——真实 shell、resize、trust、多 tab/split、高吞吐与退出清理均已回写 F070 evidence。
 5. `E2E-008`（**阻塞于用户凭据**）/`E2E-009`（**已完成**）——本地 Git 历史、multi-diff、worktree 与 stash 冲突已闭合；真实远端矩阵等待恢复 GitHub 登录并加载 SSH identity。
-6. `E2E-010`——调试（需求 4），步骤 1/2/4/5/6/7 可执行；步骤 3 按上文如实标注"阻塞于签名前提"即可，不必等待。
-7. `E2E-012` 项 1——品牌打包 GUI 确认，与具体产品需求无直接关联，可放在最后；项 2/3（CI 首跑）可在任意时间点通过真实 PR 单独触发，不占用桌面验收时间。
+6. `E2E-010`（**已完成**）——步骤 1/2/4/5/6/7 已以真实 debugpy/桌面/shell 交叉验证；步骤 3 已按上文如实标注"阻塞于签名前提"，未绕过系统安全边界。
+7. `E2E-012` 项 1（**已完成**）——ad-hoc hardened-runtime + JIT 构建已完成真实 GUI 输入/保存/冷启动确认；项 2 等待修复后的真实 CI 首跑，项 3 可选，项 4 继续受 Apple Developer Program 决策阻塞。
 
 已知边界（执行方须知）：
 
