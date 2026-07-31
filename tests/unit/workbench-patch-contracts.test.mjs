@@ -62,6 +62,8 @@ describe("exact Workbench patch contracts", () => {
 			'-    id: "workbench.action.files.openFileInNewWindow",',
 			'-    id: "workbench.action.files.openFolderInNewWindow",',
 			'-    id: "workbench.action.openWorkspaceInNewWindow",',
+			"-    id: NEW_UNTITLED_FILE_COMMAND_ID,",
+			"-import { isWindows, isWeb } from '../../../../base/common/platform.js';",
 			'-            id: "workbench.action.newWindow",',
 			"-registerAction2(NewWindowAction);",
 			"-    id: ADD_ROOT_FOLDER_COMMAND_ID,",
@@ -476,7 +478,7 @@ describe("exact Workbench patch contracts", () => {
 
 	it("rejects bare importer and snapshot edges even when comments repeat the hash", async () => {
 		const apiHash =
-			"9b22d0ee29e3f8c8dadf821345699e11459b4cf0b272c48d98d95d8fc057bd76";
+			"0d79e32416d5fa128e80082ea765cfabb3df7e601a916f43fe5caef05532fedb";
 		const importerBare = await baseline();
 		importerBare.lockfile = `${importerBare.lockfile.replace(
 			`        version: 35.0.1(patch_hash=${apiHash})`,

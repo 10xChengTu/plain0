@@ -6832,6 +6832,72 @@ index f4f533eb6e2e9cbcd50b4d4a4d90167b513462b3..1d650fa546ddd228ba6630deed088e88
      } finally {
          if (pasteShouldMove) {
              await explorerService.setToCopy([], false);
+diff --git a/vscode/src/vs/workbench/contrib/files/browser/fileCommands.js b/vscode/src/vs/workbench/contrib/files/browser/fileCommands.js
+index 5fc7a0c806a7f3ab36ce38d206204ed424f33e1a..b99693917753dc1588f9036b0fcce1afa3f78754 100644
+--- a/vscode/src/vs/workbench/contrib/files/browser/fileCommands.js
++++ b/vscode/src/vs/workbench/contrib/files/browser/fileCommands.js
+@@ -15,7 +15,7 @@ import { IContextKeyService } from '../../../../platform/contextkey/common/conte
+ import { IFileService } from '../../../../platform/files/common/files.service.js';
+ import { KeybindingsRegistry, KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
+ import { KeyMod as KeyMod$1, KeyCode, KeyChord } from '../../../../base/common/keyCodes.js';
+-import { isWindows, isWeb } from '../../../../base/common/platform.js';
++import { isWindows } from '../../../../base/common/platform.js';
+ import { ITextModelService } from '../../../../editor/common/services/resolverService.service.js';
+ import { getMultiSelectedResources, getResourceForCommand } from './files.js';
+ import { IExplorerService } from './files.service.js';
+@@ -35,7 +35,7 @@ import { IConfigurationService } from '../../../../platform/configuration/common
+ import { IPaneCompositePartService } from '../../../services/panecomposite/browser/panecomposite.service.js';
+ import { ViewContainerLocation } from '../../../common/views.js';
+ import { IViewsService } from '../../../services/views/common/viewsService.service.js';
+-import { OPEN_TO_SIDE_COMMAND_ID, COMPARE_WITH_SAVED_COMMAND_ID, ResourceSelectedForCompareContext, SELECT_FOR_COMPARE_COMMAND_ID, COMPARE_SELECTED_COMMAND_ID, COMPARE_RESOURCE_COMMAND_ID, COPY_PATH_COMMAND_ID, COPY_RELATIVE_PATH_COMMAND_ID, REVEAL_IN_EXPLORER_COMMAND_ID, OPEN_WITH_EXPLORER_COMMAND_ID, REMOVE_ROOT_FOLDER_COMMAND_ID, PREVIOUS_COMPRESSED_FOLDER, NEXT_COMPRESSED_FOLDER, FIRST_COMPRESSED_FOLDER, LAST_COMPRESSED_FOLDER, NEW_UNTITLED_FILE_LABEL, NEW_UNTITLED_FILE_COMMAND_ID, NEW_FILE_COMMAND_ID } from './fileConstants.js';
++import { OPEN_TO_SIDE_COMMAND_ID, COMPARE_WITH_SAVED_COMMAND_ID, ResourceSelectedForCompareContext, SELECT_FOR_COMPARE_COMMAND_ID, COMPARE_SELECTED_COMMAND_ID, COMPARE_RESOURCE_COMMAND_ID, COPY_PATH_COMMAND_ID, COPY_RELATIVE_PATH_COMMAND_ID, REVEAL_IN_EXPLORER_COMMAND_ID, OPEN_WITH_EXPLORER_COMMAND_ID, REMOVE_ROOT_FOLDER_COMMAND_ID, PREVIOUS_COMPRESSED_FOLDER, NEXT_COMPRESSED_FOLDER, FIRST_COMPRESSED_FOLDER, LAST_COMPRESSED_FOLDER, NEW_FILE_COMMAND_ID } from './fileConstants.js';
+ import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.service.js';
+ import { RemoveRootFolderAction } from '../../../browser/actions/workspaceActions.js';
+ import { OpenEditorsView } from './views/openEditorsView.js';
+@@ -506,43 +506,6 @@ KeybindingsRegistry.registerCommandAndKeybindingRule({
+         view.lastCompressedStat();
+     }
+ });
+-KeybindingsRegistry.registerCommandAndKeybindingRule({
+-    weight: KeybindingWeight.WorkbenchContrib,
+-    when: null,
+-    primary: isWeb ? (isWindows ? KeyChord(KeyMod$1.CtrlCmd | KeyCode.KeyK, KeyCode.KeyN) : KeyMod$1.CtrlCmd | KeyMod$1.Alt | KeyCode.KeyN) : KeyMod$1.CtrlCmd | KeyCode.KeyN,
+-    secondary: isWeb ? [KeyMod$1.CtrlCmd | KeyCode.KeyN] : undefined,
+-    id: NEW_UNTITLED_FILE_COMMAND_ID,
+-    metadata: {
+-        description: NEW_UNTITLED_FILE_LABEL,
+-        args: [{
+-            isOptional: true,
+-            name: "New Untitled Text File arguments",
+-            description: "The editor view type or language ID if known",
+-            schema: {
+-                "type": "object",
+-                "properties": {
+-                    "viewType": {
+-                        "type": "string"
+-                    },
+-                    "languageId": {
+-                        "type": "string"
+-                    }
+-                }
+-            }
+-        }]
+-    },
+-    handler: async (accessor, args) => {
+-        const editorService = accessor.get(IEditorService);
+-        await editorService.openEditor({
+-            resource: undefined,
+-            options: {
+-                override: args?.viewType,
+-                pinned: true
+-            },
+-            languageId: args?.languageId
+-        });
+-    }
+-});
+ CommandsRegistry.registerCommand({
+     id: NEW_FILE_COMMAND_ID,
+     handler: async (accessor, args) => {
 diff --git a/vscode/src/vs/workbench/contrib/files/browser/views/explorerView.js b/vscode/src/vs/workbench/contrib/files/browser/views/explorerView.js
 index a55c3b2a0ec15783e04295b9fd723bf00169ccba..5252f86572a6d5da9185aba8e394768ab4ad3413 100644
 --- a/vscode/src/vs/workbench/contrib/files/browser/views/explorerView.js

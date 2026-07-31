@@ -30,6 +30,7 @@ export const GUARDED_WORKSPACE_COMMAND_IDS = Object.freeze([
 	"workbench.action.files.openFile",
 	"workbench.action.files.openFileFolder",
 	"workbench.action.files.openFileInNewWindow",
+	"workbench.action.files.newUntitledFile",
 	"workbench.action.newWindow",
 	"vscode.openFolder",
 	"vscode.newWindow",

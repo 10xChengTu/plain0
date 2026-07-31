@@ -82,7 +82,7 @@ const PATCH_CONTRACTS = Object.freeze([
 		// `scripts/plain/missing-services-patch-contract.mjs`'s own S6
 		// paragraph and `docs/bundle-baseline.json`'s per-category
 		// `categoryNotes` for the full per-file accounting.
-		sha256: "9b22d0ee29e3f8c8dadf821345699e11459b4cf0b272c48d98d95d8fc057bd76",
+		sha256: "0d79e32416d5fa128e80082ea765cfabb3df7e601a916f43fe5caef05532fedb",
 		integrity:
 			"sha512-pJMSRMI0m5Mvx54u6iBGh+iad9KqfICnwAcjswNJOO7Xt1OXm5xILcM32VkMe4UX0YmrGAvYc0WVKWL8I9O4ng==",
 		directImporter: true,
@@ -210,6 +210,10 @@ const PATCH_CONTRACTS = Object.freeze([
 			"@@ -99,6 +100,42 @@ async function deleteFiles(",
 			"@@ -1120,6 +1157,18 @@ CommandsRegistry.registerCommand({",
 			"@@ -1263,11 +1312,17 @@ const pasteFileHandler = async (accessor, fileList) => {",
+			"diff --git a/vscode/src/vs/workbench/contrib/files/browser/fileCommands.js b/vscode/src/vs/workbench/contrib/files/browser/fileCommands.js",
+			"@@ -15,7 +15,7 @@ import { IContextKeyService } from '../../../../platform/contextkey/common/conte",
+			"@@ -35,7 +35,7 @@ import { IConfigurationService } from '../../../../platform/configuration/common",
+			"@@ -506,43 +506,6 @@ KeybindingsRegistry.registerCommandAndKeybindingRule({",
 			"diff --git a/vscode/src/vs/workbench/contrib/files/browser/views/explorerView.js b/vscode/src/vs/workbench/contrib/files/browser/views/explorerView.js",
 			"@@ -37,6 +37,7 @@ import { StorageScope, StorageTarget } from '../../../../../platform/storage/com",
 			"@@ -541,9 +542,10 @@ let ExplorerView = class ExplorerView extends ViewPane {",
