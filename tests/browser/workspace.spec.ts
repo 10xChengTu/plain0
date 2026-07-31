@@ -5271,6 +5271,20 @@ async function finishExplorerNameInput(
 	await input.press("Enter");
 }
 
+async function browserRunsOnMacOS(page: Page): Promise<boolean> {
+	return page.evaluate(() => navigator.platform.startsWith("Mac"));
+}
+
+async function pressExplorerRenameKey(page: Page): Promise<void> {
+	await page.keyboard.press((await browserRunsOnMacOS(page)) ? "Enter" : "F2");
+}
+
+async function pressExplorerPermanentDeleteKey(page: Page): Promise<void> {
+	await page.keyboard.press(
+		(await browserRunsOnMacOS(page)) ? "Meta+Backspace" : "Delete",
+	);
+}
+
 const nativeMutationCommands = [
 	"workspace_create_file",
 	"workspace_create_directory",
@@ -7536,7 +7550,7 @@ test("routes all-five workspace CRUD, save, rename and permanent delete through 
 	).toHaveCount(1);
 
 	await scratch.click();
-	await page.keyboard.press("Enter");
+	await pressExplorerRenameKey(page);
 	await finishExplorerNameInput(page, "renamed");
 	await expect(scratch).toHaveCount(0);
 	const renamed = explorer.getByRole("treeitem", {
@@ -7546,7 +7560,7 @@ test("routes all-five workspace CRUD, save, rename and permanent delete through 
 	await expect(renamed).toBeVisible();
 
 	await renamed.click();
-	const cancelDeleteKey = page.keyboard.press("ControlOrMeta+Backspace");
+	const cancelDeleteKey = pressExplorerPermanentDeleteKey(page);
 	const permanentDeleteDialog = page.getByRole("dialog");
 	await expect(permanentDeleteDialog).toBeVisible();
 	await expect(permanentDeleteDialog).toContainText("永久删除“renamed”？");
@@ -7581,7 +7595,7 @@ test("routes all-five workspace CRUD, save, rename and permanent delete through 
 		.toEqual(["workspace_prepare_delete", "workspace_cancel_delete"]);
 
 	await renamed.click();
-	const confirmDeleteKey = page.keyboard.press("ControlOrMeta+Backspace");
+	const confirmDeleteKey = pressExplorerPermanentDeleteKey(page);
 	await expect(permanentDeleteDialog).toBeVisible();
 	await permanentDeleteDialog
 		.getByRole("button", { name: "永久删除", exact: true })
@@ -7760,7 +7774,7 @@ test("keeps the entire provider readonly when one platform capability is false",
 	page.on("console", onConsole);
 	try {
 		await src.click();
-		await page.keyboard.press("ControlOrMeta+Backspace");
+		await pressExplorerPermanentDeleteKey(page);
 		const warningToast = page
 			.locator(".notifications-toasts .notification-toast")
 			.filter({ hasText: "The permanent delete selection is invalid." });
