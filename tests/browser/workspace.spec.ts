@@ -501,6 +501,7 @@ async function installNativeIpcMock(
 					},
 				],
 			};
+			let currentSnapshot = emptySnapshot;
 			type MockFile = {
 				kind: "file";
 				bytes: Uint8Array;
@@ -2257,8 +2258,9 @@ async function installNativeIpcMock(
 								versionedWrite: true,
 							};
 						case "workspace_snapshot":
-							return emptySnapshot;
+							return currentSnapshot;
 						case "workspace_pick_roots":
+							currentSnapshot = selectedSnapshot;
 							return { status: "selected", snapshot: selectedSnapshot };
 						case "workspace_watch_sync": {
 							const watchRequest = args.request as

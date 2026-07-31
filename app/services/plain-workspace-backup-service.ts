@@ -16,7 +16,11 @@ import type {
 import type { IResolvedWorkingCopyBackup } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyBackup";
 import type { IWorkingCopyBackupService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyBackup.service";
 
-import type { BackupEntry, PlainBridge } from "../platform/tauri/contracts";
+import type {
+	BackupEntry,
+	PlainBridge,
+	WorkspaceSnapshot,
+} from "../platform/tauri/contracts";
 
 /** Mirrors the Rust `MAX_BACKUP_ENTRY_BYTES` ceiling: the *whole* stored
  * payload (this service's own JSON preamble plus the raw content) must fit,
@@ -75,6 +79,32 @@ async function backupKeyForResource(resource: URI): Promise<string> {
 	return hexFromBytes(new Uint8Array(digest));
 }
 
+async function sha256(bytes: Uint8Array): Promise<string> {
+	const owned = Uint8Array.from(bytes);
+	return hexFromBytes(
+		new Uint8Array(await crypto.subtle.digest("SHA-256", owned.buffer)),
+	);
+}
+
+function workspaceResourceParts(
+	resource: URI,
+): Readonly<{ rootId: string; relativePath: string }> | undefined {
+	if (
+		resource.scheme !== "plain-workspace" ||
+		resource.authority.length === 0 ||
+		resource.query !== "" ||
+		resource.fragment !== "" ||
+		!resource.path.startsWith("/") ||
+		resource.path.length < 2
+	) {
+		return undefined;
+	}
+	return Object.freeze({
+		rootId: resource.authority,
+		relativePath: resource.path.slice(1),
+	});
+}
+
 // A plain function call, rather than repeated inline `token?.isCancellationRequested`
 // property narrowing, so TypeScript does not (incorrectly) assume the token's
 // cancellation state cannot change between two checks that straddle an `await`.
@@ -112,9 +142,13 @@ function encodeBackupPayload(
 	identifier: IWorkingCopyIdentifier,
 	meta: IWorkingCopyBackupMeta | undefined,
 	content: Uint8Array,
+	baselineSha256: string | undefined,
 ): Uint8Array {
 	const preamble = {
 		...meta,
+		...(baselineSha256 === undefined
+			? {}
+			: { plainBaselineSha256: baselineSha256 }),
 		resource: identifier.resource.toString(),
 		typeId: identifier.typeId,
 	};
@@ -135,6 +169,7 @@ interface DecodedBackupPayload {
 	readonly identifier: IWorkingCopyIdentifier;
 	readonly meta: IWorkingCopyBackupMeta | undefined;
 	readonly content: Uint8Array;
+	readonly baselineSha256: string | undefined;
 }
 
 /**
@@ -171,10 +206,12 @@ function decodeBackupPayload(
 	const {
 		resource: resourceText,
 		typeId,
+		plainBaselineSha256,
 		...meta
 	} = preamble as {
 		resource: string;
 		typeId?: unknown;
+		plainBaselineSha256?: unknown;
 	} & Record<string, unknown>;
 	let resource: URI;
 	try {
@@ -188,12 +225,21 @@ function decodeBackupPayload(
 		identifier: Object.freeze({ resource, typeId: resolvedTypeId }),
 		meta: metaKeys.length > 0 ? (meta as IWorkingCopyBackupMeta) : undefined,
 		content: bytes.slice(newlineIndex + 1),
+		baselineSha256:
+			typeof plainBaselineSha256 === "string" &&
+			/^[0-9a-f]{64}$/u.test(plainBaselineSha256)
+				? plainBaselineSha256
+				: undefined,
 	});
 }
 
 interface SyncIndexEntry {
 	readonly identifier: IWorkingCopyIdentifier;
 	readonly versionId: number | undefined;
+}
+
+function remapResourceAuthority(resource: URI, authority: string): URI {
+	return resource.with({ authority });
 }
 
 /**
@@ -216,6 +262,7 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 	readonly _serviceBrand = undefined;
 
 	private readonly index = new Map<string, SyncIndexEntry>();
+	private readonly storageKeys = new Map<string, string>();
 
 	hasBackupSync(
 		identifier: IWorkingCopyIdentifier,
@@ -247,11 +294,16 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 			if (parsed === undefined) {
 				continue;
 			}
-			const resourceKey = parsed.identifier.resource.toString();
+			const identifier = await this.currentIdentifier(parsed.identifier);
+			if (identifier === undefined) {
+				continue;
+			}
+			const resourceKey = identifier.resource.toString();
 			this.index.set(resourceKey, {
-				identifier: parsed.identifier,
+				identifier,
 				versionId: this.index.get(resourceKey)?.versionId,
 			});
+			this.storageKeys.set(resourceKey, entry.key);
 		}
 		return Object.freeze(
 			[...this.index.values()].map((entry) => entry.identifier),
@@ -262,7 +314,10 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 		identifier: IWorkingCopyIdentifier,
 	): Promise<IResolvedWorkingCopyBackup<T> | undefined> {
 		const bridge = requireBridge();
-		const key = await backupKeyForResource(identifier.resource);
+		const resourceKey = identifier.resource.toString();
+		const key =
+			this.storageKeys.get(resourceKey) ??
+			(await backupKeyForResource(identifier.resource));
 		let entries: readonly BackupEntry[];
 		try {
 			entries = await bridge.backupReadAll();
@@ -277,9 +332,10 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 		if (parsed === undefined) {
 			return undefined;
 		}
+		const meta = await this.currentMeta(identifier, parsed);
 		return Object.freeze({
 			value: bufferToStream(VSBuffer.wrap(parsed.content)),
-			meta: parsed.meta as T | undefined,
+			meta: meta as T | undefined,
 		});
 	}
 
@@ -293,6 +349,7 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 		const bridge = requireBridge();
 		const resourceKey = identifier.resource.toString();
 		const previous = this.index.get(resourceKey);
+		const previousStorageKey = this.storageKeys.get(resourceKey);
 		this.index.set(resourceKey, { identifier, versionId });
 		try {
 			if (isCancelled(token)) {
@@ -304,11 +361,32 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 				this.rollbackIndex(resourceKey, previous);
 				return;
 			}
-			const payload = encodeBackupPayload(identifier, meta, bytes);
+			const baselineSha256 = await this.baselineSha256(identifier, meta);
+			const payload = encodeBackupPayload(
+				identifier,
+				meta,
+				bytes,
+				baselineSha256,
+			);
 			const wireKey = await backupKeyForResource(identifier.resource);
 			await bridge.backupWrite(wireKey, payload);
+			if (previousStorageKey !== undefined && previousStorageKey !== wireKey) {
+				try {
+					await bridge.backupDiscard(previousStorageKey);
+				} catch (error) {
+					try {
+						await bridge.backupDiscard(wireKey);
+					} catch {
+						// Preserve the original migration failure. A later read still
+						// prefers the old, already-indexed entry for this process.
+					}
+					throw error;
+				}
+			}
+			this.storageKeys.set(resourceKey, wireKey);
 		} catch (error) {
 			this.rollbackIndex(resourceKey, previous);
+			this.rollbackStorageKey(resourceKey, previousStorageKey);
 			throw error;
 		}
 	}
@@ -320,12 +398,16 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 		const bridge = requireBridge();
 		const resourceKey = identifier.resource.toString();
 		const previous = this.index.get(resourceKey);
+		const previousStorageKey = this.storageKeys.get(resourceKey);
 		this.index.delete(resourceKey);
+		this.storageKeys.delete(resourceKey);
 		try {
-			const wireKey = await backupKeyForResource(identifier.resource);
+			const wireKey =
+				previousStorageKey ?? (await backupKeyForResource(identifier.resource));
 			await bridge.backupDiscard(wireKey);
 		} catch (error) {
 			this.rollbackIndex(resourceKey, previous);
+			this.rollbackStorageKey(resourceKey, previousStorageKey);
 			throw error;
 		}
 	}
@@ -337,13 +419,19 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 		const except = filter?.except;
 		if (except === undefined || except.length === 0) {
 			const previousEntries = new Map(this.index);
+			const previousStorageKeys = new Map(this.storageKeys);
 			this.index.clear();
+			this.storageKeys.clear();
 			try {
 				await bridge.backupDiscardAll();
 			} catch (error) {
 				this.index.clear();
+				this.storageKeys.clear();
 				for (const [resourceKey, entry] of previousEntries) {
 					this.index.set(resourceKey, entry);
+				}
+				for (const [resourceKey, key] of previousStorageKeys) {
+					this.storageKeys.set(resourceKey, key);
 				}
 				throw error;
 			}
@@ -368,6 +456,119 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 			this.index.delete(resourceKey);
 		} else {
 			this.index.set(resourceKey, previous);
+		}
+	}
+
+	/**
+	 * Rust deliberately issues a fresh, unguessable root capability UUID each
+	 * time a folder is authorized. A persisted backup therefore cannot reuse
+	 * its old `plain-workspace://<root-id>/...` authority after a real process
+	 * restart. In a single-root workspace the replacement is unambiguous: keep
+	 * the relative path and bind it to the sole currently authorized root. For
+	 * multi-root workspaces an old authority is skipped rather than guessed;
+	 * restoring it against the wrong root would be worse than failing closed.
+	 */
+	private async currentIdentifier(
+		stored: IWorkingCopyIdentifier,
+	): Promise<IWorkingCopyIdentifier | undefined> {
+		const bridge = requireBridge();
+		let snapshot: WorkspaceSnapshot;
+		try {
+			snapshot = await bridge.workspaceSnapshot();
+		} catch {
+			// Unit/browser fakes predating native capability rotation can still
+			// use their original identifier unchanged.
+			return stored;
+		}
+		if (stored.resource.scheme !== "plain-workspace") {
+			return stored;
+		}
+		if (
+			snapshot.roots.some((root) => root.rootId === stored.resource.authority)
+		) {
+			return stored;
+		}
+		if (snapshot.roots.length !== 1) {
+			return undefined;
+		}
+		return Object.freeze({
+			resource: remapResourceAuthority(
+				stored.resource,
+				snapshot.roots[0]!.rootId,
+			),
+			typeId: stored.typeId,
+		});
+	}
+
+	private async baselineSha256(
+		identifier: IWorkingCopyIdentifier,
+		meta: IWorkingCopyBackupMeta | undefined,
+	): Promise<string | undefined> {
+		const etag = (meta as { etag?: unknown } | undefined)?.etag;
+		const parts = workspaceResourceParts(identifier.resource);
+		if (typeof etag !== "string" || parts === undefined) {
+			return undefined;
+		}
+		try {
+			const current = await requireBridge().workspaceReadFile(
+				parts.rootId,
+				parts.relativePath,
+			);
+			if (current.stat.version !== etag) {
+				return undefined;
+			}
+			return sha256(current.value.copy());
+		} catch {
+			return undefined;
+		}
+	}
+
+	private async currentMeta(
+		identifier: IWorkingCopyIdentifier,
+		parsed: DecodedBackupPayload,
+	): Promise<IWorkingCopyBackupMeta | undefined> {
+		if (
+			parsed.identifier.resource.toString() ===
+				identifier.resource.toString() ||
+			parsed.baselineSha256 === undefined
+		) {
+			return parsed.meta;
+		}
+		const parts = workspaceResourceParts(identifier.resource);
+		if (parts === undefined) {
+			return parsed.meta;
+		}
+		try {
+			const current = await requireBridge().workspaceReadFile(
+				parts.rootId,
+				parts.relativePath,
+			);
+			if (
+				current.stat.version === null ||
+				(await sha256(current.value.copy())) !== parsed.baselineSha256
+			) {
+				return parsed.meta;
+			}
+			return Object.freeze({
+				...parsed.meta,
+				size: current.stat.size,
+				mtime: current.stat.mtime,
+				ctime: current.stat.ctime,
+				etag: current.stat.version,
+			});
+		} catch {
+			return parsed.meta;
+		}
+	}
+
+	private rollbackStorageKey(
+		resourceKey: string,
+		previous: string | undefined,
+	): void {
+		if (previous === undefined) {
+			this.storageKeys.delete(resourceKey);
+		} else {
+			this.storageKeys.set(resourceKey, previous);
 		}
 	}
 }

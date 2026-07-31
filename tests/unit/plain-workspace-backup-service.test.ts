@@ -310,6 +310,90 @@ describe("PlainWorkingCopyBackupService", () => {
 		);
 	});
 
+	it("remaps a persisted single-root backup from its expired capability UUID and discards the original storage key after recovery", async () => {
+		const oldRootId = "00000000-0000-4000-8000-000000000101";
+		const newRootId = "00000000-0000-4000-8000-000000000201";
+		const oldVersion = `wv1:${"a".repeat(64)}`;
+		const newVersion = `wv1:${"b".repeat(64)}`;
+		const baselineBytes = new TextEncoder().encode("disk base\n");
+		let currentDiskBytes = baselineBytes;
+		const readReceipt = (version: string, bytes = baselineBytes) =>
+			Object.freeze({
+				stat: Object.freeze({
+					kind: "file" as const,
+					size: bytes.byteLength,
+					mtime: 123,
+					ctime: 456,
+					version,
+				}),
+				value: Object.freeze({
+					byteLength: bytes.byteLength,
+					copy: () => bytes.slice(),
+				}),
+			});
+		const storedIdentifier = identifierFor(
+			`plain-workspace://${oldRootId}/hot.txt`,
+		);
+		const { bridge: writerBridge, state: writerState } = createFakeBridge({
+			workspaceReadFile: async () => readReceipt(oldVersion),
+		});
+		configurePlainWorkingCopyBackupBridge(writerBridge);
+		const writer = new PlainWorkingCopyBackupService();
+		await writer.backup(
+			storedIdentifier,
+			readableFromString("unsaved recovery"),
+			1,
+			{ etag: oldVersion, orphaned: false },
+		);
+		const storedKey = [...writerState.entries.keys()][0]!;
+
+		const { bridge: readerBridge } = createFakeBridge({
+			workspaceSnapshot: async () =>
+				Object.freeze({
+					workspaceId: "00000000-0000-4000-8000-000000000301",
+					revision: 1,
+					roots: Object.freeze([
+						Object.freeze({
+							rootId: newRootId,
+							displayName: "fixture",
+							uri: `plain-workspace://${newRootId}/`,
+						}),
+					]),
+				}),
+			backupReadAll: async () =>
+				[...writerState.entries.entries()].map(([key, bytes]) =>
+					Object.freeze({ key, bytes }),
+				),
+			backupDiscard: async (key) => {
+				writerState.discards.push(key);
+				writerState.entries.delete(key);
+			},
+			workspaceReadFile: async () => readReceipt(newVersion, currentDiskBytes),
+		});
+		configurePlainWorkingCopyBackupBridge(readerBridge);
+		const reader = new PlainWorkingCopyBackupService();
+
+		const [currentIdentifier] = await reader.getBackups();
+		expect(currentIdentifier?.resource.toString()).toBe(
+			`plain-workspace://${newRootId}/hot.txt`,
+		);
+		const resolved = await reader.resolve(currentIdentifier!);
+		expect(await readValueToString(resolved)).toBe("unsaved recovery");
+		expect(resolved?.meta).toMatchObject({
+			etag: newVersion,
+			size: baselineBytes.byteLength,
+			mtime: 123,
+			ctime: 456,
+		});
+		currentDiskBytes = new TextEncoder().encode("external change\n");
+		const conflicted = await reader.resolve(currentIdentifier!);
+		expect(conflicted?.meta).toMatchObject({ etag: oldVersion });
+
+		await reader.discardBackup(currentIdentifier!);
+		expect(writerState.discards).toEqual([storedKey]);
+		expect(writerState.entries.size).toBe(0);
+	});
+
 	it("resolve() returns undefined for a resource with no backup", async () => {
 		const { bridge } = createFakeBridge();
 		configurePlainWorkingCopyBackupBridge(bridge);
