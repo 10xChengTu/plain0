@@ -28,10 +28,12 @@
 //!    the other (both take `&mut self`), so a `ChildKiller` obtained via
 //!    `Child::clone_killer` *before* handing `Child` to this thread is what
 //!    lets [`TerminalService::kill`] terminate the process concurrently.
-//!    Once `wait()` returns, this thread also calls
-//!    [`flow::FlowControl::cancel`] as a belt-and-suspenders wake for the
-//!    reader (normally redundant with the EOF it will already see) and
-//!    reports the exit status via [`TerminalOutputSink::emit_exit`].
+//!    Once `wait()` returns, this thread reports the exit status via
+//!    [`TerminalOutputSink::emit_exit`]. It deliberately does **not** cancel
+//!    the reader's flow gate: the exited child may still have unread bytes
+//!    buffered in the pty, and the reader must drain those bytes through the
+//!    VT thread before it observes the real EOF. Explicit kill/teardown uses
+//!    [`terminate_session`], which still cancels the gate before joining.
 //!
 //!    **Known ordering caveat** (documented, not fixed): this thread's
 //!    `emit_exit` call is *not* synchronized with the vt thread having
@@ -569,18 +571,10 @@ impl TerminalService {
                 .spawn(move || run_reader(reader, &reader_flow, &reader_vt_sender))
                 .ok();
 
-            let waiter_flow = Arc::clone(&flow);
             let waiter_sink = Arc::clone(&sink);
             let waiter_thread = std::thread::Builder::new()
                 .name(format!("plain-terminal-wait-{}", session_id.as_wire()))
-                .spawn(move || {
-                    run_waiter(
-                        session_id,
-                        child.as_mut(),
-                        &waiter_flow,
-                        waiter_sink.as_ref(),
-                    )
-                })
+                .spawn(move || run_waiter(session_id, child.as_mut(), waiter_sink.as_ref()))
                 .ok();
 
             let vt_flow = Arc::clone(&flow);
@@ -1057,19 +1051,8 @@ fn attempt_emit(
     }
 }
 
-fn run_waiter(
-    session_id: TerminalSessionId,
-    child: &mut dyn Child,
-    flow: &FlowControl,
-    sink: &dyn TerminalOutputSink,
-) {
+fn run_waiter(session_id: TerminalSessionId, child: &mut dyn Child, sink: &dyn TerminalOutputSink) {
     let status = child.wait();
-    // Belt-and-suspenders wake for the reader — normally redundant with the
-    // EOF it will already observe once the child (the only other holder of
-    // the pty slave) has exited, but this closes the hypothetical gap where
-    // it somehow does not, rather than leaving a paused reader parked
-    // forever.
-    flow.cancel();
     let exit_status = match status {
         Ok(status) => TerminalExitStatus::from(status),
         Err(_) => TerminalExitStatus {
