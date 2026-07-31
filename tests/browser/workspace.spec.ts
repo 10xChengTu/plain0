@@ -10327,6 +10327,32 @@ async function explorerRowIconBackgroundImage(
 	}, rowName);
 }
 
+async function explorerRowIconResourceText(
+	page: Page,
+	rowName: string,
+): Promise<string> {
+	return page.evaluate(async (name) => {
+		const rows = [...document.querySelectorAll(".monaco-list-row")];
+		const row = rows.find(
+			(candidate) =>
+				candidate.querySelector(".label-name")?.textContent === name,
+		);
+		if (row === undefined) {
+			throw new Error(`Explorer row not found: ${name}`);
+		}
+		const label = row.querySelector(".monaco-icon-label");
+		if (label === null) {
+			throw new Error(`icon label not found for Explorer row: ${name}`);
+		}
+		const backgroundImage = getComputedStyle(label, "::before").backgroundImage;
+		const match = /^url\(["']?(.*?)["']?\)$/.exec(backgroundImage);
+		if (match?.[1] === undefined) {
+			throw new Error(`Explorer icon is not a URL: ${backgroundImage}`);
+		}
+		return await (await fetch(match[1])).text();
+	}, rowName);
+}
+
 test("renders the vs-minimal file icon theme on real Explorer file and folder icons", async ({
 	page,
 }) => {
@@ -10558,6 +10584,9 @@ test("discovers an imported package's file icon theme and product icon theme in 
 	await expect
 		.poll(() => explorerRowIconBackgroundImage(page, "README.md"))
 		.not.toBe("none");
+	expect(await explorerRowIconResourceText(page, "README.md")).toBe(
+		IMPORTED_FANCY_ICONS_FIXTURE.resourceContents["fileicons/fancy-file.svg"],
+	);
 
 	// Reopening the picker and finding "Fancy File Icons" pre-selected
 	// proves `getFileIconTheme()` now really returns this entry, not merely

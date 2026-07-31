@@ -3,7 +3,12 @@ import {
 	type IExtensionManifest,
 	type RegisterLocalExtensionResult,
 } from "@codingame/monaco-vscode-api/extensions";
+import type { IDisposable } from "@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle";
 import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
+import {
+	RegisteredReadOnlyFile,
+	registerExtensionFile,
+} from "@codingame/monaco-vscode-files-service-override";
 import type { IWorkbenchThemeService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service";
 import { ExtensionData } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService";
 
@@ -180,6 +185,7 @@ function buildImportedManifest(pkg: ThemePackageSummary): IExtensionManifest {
 interface ImportedPackageHandle {
 	readonly registered: RegisterLocalExtensionResult;
 	readonly blobUrls: readonly string[];
+	readonly resourceRegistrations: readonly IDisposable[];
 }
 
 /**
@@ -347,21 +353,49 @@ async function registerImportedPackage(
 	) as unknown as RegisterLocalExtensionResult;
 	const location = extensionLocationFor(pkg);
 	const blobUrls: string[] = [];
+	const resourceRegistrations: IDisposable[] = [];
 	try {
 		for (const resourcePath of pkg.resources) {
-			const bytes = await bridge.themeReadResource(pkg.id, resourcePath);
+			const bytes = new Uint8Array(
+				await bridge.themeReadResource(pkg.id, resourcePath),
+			);
+			const mimeType = mimeTypeForResource(resourcePath);
+			// WKWebView can display blob-backed SVG/font assets, but reading a
+			// blob-backed JSON theme document through the extension-file provider
+			// is not reliable in the packaged app: the selection persists while
+			// the loader silently leaves the previous theme rendered. Register
+			// textual documents as in-memory extension files, matching the proven
+			// built-in-theme path; keep blobs only where generated CSS needs an
+			// actual browser URL. Retain every registration for package removal.
+			if (mimeType === "application/json" || mimeType === "application/xml") {
+				resourceRegistrations.push(
+					registerExtensionFile(
+						new RegisteredReadOnlyFile(
+							URI.joinPath(location, resourcePath),
+							async () => bytes,
+							bytes.byteLength,
+						),
+					),
+				);
+				continue;
+			}
 			// `Blob`'s DOM typings require an `ArrayBufferView<ArrayBuffer>`
 			// (never the wider `ArrayBufferLike`/`SharedArrayBuffer`-compatible
 			// shape a bridge-returned `Uint8Array` is typed as); copying into a
 			// fresh `Uint8Array` guarantees a plain `ArrayBuffer` backing.
-			const blob = new Blob([new Uint8Array(bytes)], {
-				type: mimeTypeForResource(resourcePath),
+			const blob = new Blob([bytes], {
+				type: mimeType,
 			});
 			const url = URL.createObjectURL(blob);
 			blobUrls.push(url);
-			registered.registerFileUrl(resourcePath, url);
+			resourceRegistrations.push(
+				registered.registerFileUrl(resourcePath, url, mimeType),
+			);
 		}
 	} catch (error) {
+		for (const registration of resourceRegistrations) {
+			registration.dispose();
+		}
 		for (const url of blobUrls) {
 			URL.revokeObjectURL(url);
 		}
@@ -403,6 +437,9 @@ async function registerImportedPackage(
 	// first rather than leaking it.
 	const previous = handlesByPackage.get(pkg.id);
 	if (previous !== undefined) {
+		for (const registration of previous.resourceRegistrations) {
+			registration.dispose();
+		}
 		for (const url of previous.blobUrls) {
 			URL.revokeObjectURL(url);
 		}
@@ -411,6 +448,7 @@ async function registerImportedPackage(
 	handlesByPackage.set(pkg.id, {
 		registered,
 		blobUrls: Object.freeze(blobUrls),
+		resourceRegistrations: Object.freeze(resourceRegistrations),
 	});
 	store.setImported(pkg.id, Object.freeze(entries));
 	store.setImportedFileIcon(pkg.id, Object.freeze(fileIconEntries));
@@ -538,6 +576,9 @@ export async function removeImportedThemePackage(
 	const handle = handlesByPackage.get(packageId);
 	handlesByPackage.delete(packageId);
 	if (handle !== undefined) {
+		for (const registration of handle.resourceRegistrations) {
+			registration.dispose();
+		}
 		for (const url of handle.blobUrls) {
 			URL.revokeObjectURL(url);
 		}
