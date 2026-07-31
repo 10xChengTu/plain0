@@ -501,7 +501,8 @@ async function installNativeIpcMock(
 					},
 				],
 			};
-			let currentSnapshot = emptySnapshot;
+			let currentSnapshot: typeof emptySnapshot | typeof selectedSnapshot =
+				emptySnapshot;
 			type MockFile = {
 				kind: "file";
 				bytes: Uint8Array;
