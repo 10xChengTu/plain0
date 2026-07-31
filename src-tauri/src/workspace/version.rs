@@ -14,6 +14,12 @@ const VERSION_DOMAIN: &[u8] = b"plain.workspace.file-version.v1\0";
 const SPECIAL_MODE_BITS: u32 = 0o7000;
 pub(crate) const VERSION_TOKEN_BYTES: usize = 68;
 
+#[cfg(unix)]
+#[inline]
+pub(crate) fn mode_bits(value: impl Into<u32>) -> u32 {
+    value.into()
+}
+
 pub(crate) fn is_version_token(value: &str) -> bool {
     value.len() == VERSION_TOKEN_BYTES
         && value.strip_prefix("wv1:").is_some_and(|digest| {
@@ -164,12 +170,12 @@ pub(crate) fn writer_eligibility(
     let effective_gid = unsafe { libc::getegid() };
     target.length <= MAX_VERSIONED_FILE_BYTES
         && target.link_count == 1
-        && target.mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFREG)
+        && target.mode & mode_bits(libc::S_IFMT) == mode_bits(libc::S_IFREG)
         && target.mode & SPECIAL_MODE_BITS == 0
         && target.uid == effective_uid
         && target.gid == effective_gid
         && target.mode & 0o200 != 0
-        && parent.mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFDIR)
+        && parent.mode & mode_bits(libc::S_IFMT) == mode_bits(libc::S_IFDIR)
         && parent.mode & SPECIAL_MODE_BITS == 0
         && parent.uid == effective_uid
         && parent.gid == effective_gid
@@ -414,7 +420,7 @@ mod tests {
             device: 1,
             inode: 2,
             length: 4,
-            mode: u32::from(libc::S_IFREG) | 0o600,
+            mode: super::mode_bits(libc::S_IFREG) | 0o600,
             uid,
             gid,
             rdev: 0,
@@ -428,7 +434,7 @@ mod tests {
             device: 1,
             inode: 1,
             length: 0,
-            mode: u32::from(libc::S_IFDIR) | 0o700,
+            mode: super::mode_bits(libc::S_IFDIR) | 0o700,
             uid,
             gid,
             rdev: 0,
@@ -493,14 +499,14 @@ mod tests {
             (
                 target,
                 UnixMetadataSnapshot {
-                    mode: u32::from(libc::S_IFDIR) | 0o770,
+                    mode: super::mode_bits(libc::S_IFDIR) | 0o770,
                     ..parent
                 },
             ),
             (
                 target,
                 UnixMetadataSnapshot {
-                    mode: u32::from(libc::S_IFDIR) | 0o777,
+                    mode: super::mode_bits(libc::S_IFDIR) | 0o777,
                     ..parent
                 },
             ),

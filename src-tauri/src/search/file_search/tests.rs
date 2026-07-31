@@ -174,7 +174,7 @@ fn non_utf8_file_names_are_skipped_not_fatal() {
 
     let temp = TempDir::new().unwrap();
     fs::write(temp.path().join("valid.txt"), b"ok").unwrap();
-    let invalid_name = OsString::from_vec(vec![0xff, 0xfe, 0x00 + b'x']);
+    let invalid_name = OsString::from_vec(vec![0xff, 0xfe, b'x']);
     fs::write(temp.path().join(&invalid_name), b"bad").unwrap();
     let lease = authorized_lease(temp.path());
 

@@ -14,7 +14,7 @@ use super::dto::{
     WorkspaceWriteTargetObservation,
 };
 use super::version::{
-    version_token, writable_filesystem_kind, writer_eligibility, FileSystemKind,
+    mode_bits, version_token, writable_filesystem_kind, writer_eligibility, FileSystemKind,
     UnixMetadataSnapshot, MAX_VERSIONED_FILE_BYTES,
 };
 use super::WorkspaceRootLease;
@@ -465,7 +465,7 @@ fn valid_stage_metadata(
     expected_length: usize,
     expected_mode: u32,
 ) -> bool {
-    snapshot.mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFREG)
+    snapshot.mode & mode_bits(libc::S_IFMT) == mode_bits(libc::S_IFREG)
         && snapshot.mode & 0o7000 == 0
         && snapshot.mode & 0o777 == expected_mode
         && snapshot.link_count == 1
