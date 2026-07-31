@@ -495,25 +495,43 @@ export async function removeImportedThemePackage(
 	themeService: IWorkbenchThemeService,
 	packageId: string,
 ): Promise<void> {
+	let persistedSelection:
+		Awaited<ReturnType<PlainBridge["themeGetSelection"]>> | undefined;
+	try {
+		persistedSelection = await bridge.themeGetSelection();
+	} catch (error) {
+		console.warn(
+			"Plain: failed to read persisted theme selection before package removal",
+			error,
+		);
+	}
 	await bridge.themeRemove(packageId);
 
 	const removedColorEntries = store.importedEntries(packageId) ?? [];
 	const removedFileIconEntries = store.importedFileIconEntries(packageId) ?? [];
 	const removedProductIconEntries =
 		store.importedProductIconEntries(packageId) ?? [];
-	const currentThemeId = themeService.getColorTheme().id;
-	const currentFileIconThemeId = themeService.getFileIconTheme().id;
-	const currentProductIconThemeId = themeService.getProductIconTheme().id;
+	const currentThemeSettingsId = themeService.getColorTheme().settingsId;
+	const currentFileIconThemeSettingsId =
+		themeService.getFileIconTheme().settingsId;
+	const currentProductIconThemeSettingsId =
+		themeService.getProductIconTheme().settingsId;
 	const currentThemeBelongsToRemovedPackage = removedColorEntries.some(
-		(entry) => entry.data.id === currentThemeId,
+		(entry) =>
+			entry.settingsId === currentThemeSettingsId ||
+			entry.settingsId === persistedSelection?.themeId,
 	);
 	const currentFileIconThemeBelongsToRemovedPackage =
 		removedFileIconEntries.some(
-			(entry) => entry.data.id === currentFileIconThemeId,
+			(entry) =>
+				entry.settingsId === currentFileIconThemeSettingsId ||
+				entry.settingsId === persistedSelection?.fileIconThemeId,
 		);
 	const currentProductIconThemeBelongsToRemovedPackage =
 		removedProductIconEntries.some(
-			(entry) => entry.data.id === currentProductIconThemeId,
+			(entry) =>
+				entry.settingsId === currentProductIconThemeSettingsId ||
+				entry.settingsId === persistedSelection?.productIconThemeId,
 		);
 
 	store.removeImported(packageId);

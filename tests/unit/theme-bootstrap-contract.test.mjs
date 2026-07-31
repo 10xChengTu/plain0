@@ -34,5 +34,20 @@ describe("real-renderer theme bootstrap contract", () => {
 				`${call} must run after LifecyclePhase.Restored`,
 			).toBeGreaterThan(restoredWaitIndex);
 		}
+
+		const importedConsumptionIndex = MAIN_SOURCE.indexOf(
+			"await consumeImportedThemePackages(",
+		);
+		expect(importedConsumptionIndex).toBeGreaterThan(restoredWaitIndex);
+		for (const call of [
+			"await applyDefaultColorTheme(",
+			"await applyDefaultFileIconTheme(",
+			"await applyDefaultProductIconTheme(",
+		]) {
+			expect(
+				MAIN_SOURCE.indexOf(call),
+				`${call} must run after imported theme packages are consumed`,
+			).toBeGreaterThan(importedConsumptionIndex);
+		}
 	});
 });

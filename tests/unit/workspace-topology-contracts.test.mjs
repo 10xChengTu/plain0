@@ -1182,8 +1182,8 @@ void provider;`,
 		const reachableRogue = mutated("main", (source) =>
 			replaceOnce(
 				source,
-				'import "@codingame/monaco-vscode-theme-defaults-default-extension";',
-				'import "./rogue-relative-provider";\nimport "@codingame/monaco-vscode-theme-defaults-default-extension";',
+				'import { registerPlainBuiltinThemeResources } from "./features/themes/plain-builtin-theme-extension";',
+				'import "./rogue-relative-provider";\nimport { registerPlainBuiltinThemeResources } from "./features/themes/plain-builtin-theme-extension";',
 			),
 		);
 		expectFailure(

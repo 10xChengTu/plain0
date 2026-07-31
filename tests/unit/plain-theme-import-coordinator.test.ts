@@ -175,6 +175,11 @@ function bridgeWithResourceBytes(
 ): PlainBridge {
 	return fakeBridge({
 		themeReadResource: async () => new TextEncoder().encode(DEMO_THEME_JSON),
+		themeGetSelection: async () => ({
+			themeId: null,
+			fileIconThemeId: null,
+			productIconThemeId: null,
+		}),
 		...overrides,
 	});
 }
@@ -505,13 +510,25 @@ describe("removeImportedThemePackage", () => {
 		currentThemeId: string,
 		currentFileIconThemeId = "unrelated-file-icon-theme-id",
 		currentProductIconThemeId = "unrelated-product-icon-theme-id",
+		currentThemeSettingsId = currentThemeId,
+		currentFileIconThemeSettingsId = currentFileIconThemeId,
+		currentProductIconThemeSettingsId = currentProductIconThemeId,
 	) {
 		return {
-			getColorTheme: vi.fn(() => ({ id: currentThemeId })),
+			getColorTheme: vi.fn(() => ({
+				id: currentThemeId,
+				settingsId: currentThemeSettingsId,
+			})),
 			setColorTheme: vi.fn(async () => null),
-			getFileIconTheme: vi.fn(() => ({ id: currentFileIconThemeId })),
+			getFileIconTheme: vi.fn(() => ({
+				id: currentFileIconThemeId,
+				settingsId: currentFileIconThemeSettingsId,
+			})),
 			setFileIconTheme: vi.fn(async () => undefined),
-			getProductIconTheme: vi.fn(() => ({ id: currentProductIconThemeId })),
+			getProductIconTheme: vi.fn(() => ({
+				id: currentProductIconThemeId,
+				settingsId: currentProductIconThemeSettingsId,
+			})),
 			setProductIconTheme: vi.fn(async () => undefined),
 		};
 	}
@@ -567,16 +584,29 @@ describe("removeImportedThemePackage", () => {
 			name: "fallback-test",
 		});
 		const themeRemove = vi.fn(async () => undefined);
+		const themeSetSelection = vi.fn(async () => undefined);
 		const bridge = bridgeWithResourceBytes({
 			themeImportVsix: async () =>
 				({ status: "imported", package: pkg }) satisfies ThemeImportResult,
 			themeRemove,
+			themeSetSelection,
+			themeGetSelection: async () => ({
+				themeId: "Demo Dark",
+				fileIconThemeId: null,
+				productIconThemeId: null,
+			}),
 		});
 		await importThemePackageViaVsix(bridge, store);
 		const importedEntries = store.importedEntries(pkg.id);
-		const activeThemeId = importedEntries?.[0]?.data.id as string;
+		const activeThemeSettingsId = importedEntries?.[0]?.settingsId as string;
 
-		const themeService = fakeThemeService(activeThemeId);
+		const themeService = fakeThemeService(
+			"runtime-generated-color-theme-id",
+			undefined,
+			undefined,
+			"runtime-active-settings-id",
+		);
+		expect(activeThemeSettingsId).toBe("Demo Dark");
 		await removeImportedThemePackage(
 			bridge,
 			store,
@@ -588,6 +618,7 @@ describe("removeImportedThemePackage", () => {
 			expect.objectContaining({ id: "dark-modern-id" }),
 			undefined,
 		);
+		expect(themeSetSelection).toHaveBeenCalledWith(null);
 		// A package that only contributes a color theme must not disturb either
 		// icon axis.
 		expect(themeService.setFileIconTheme).not.toHaveBeenCalled();
@@ -622,12 +653,15 @@ describe("removeImportedThemePackage", () => {
 		});
 		await importThemePackageViaVsix(bridge, store);
 		const importedFileIconEntries = store.importedFileIconEntries(pkg.id);
-		const activeFileIconThemeId = importedFileIconEntries?.[0]?.data
-			.id as string;
+		const activeFileIconThemeSettingsId = importedFileIconEntries?.[0]
+			?.settingsId as string;
 
 		const themeService = fakeThemeService(
 			"unrelated-color-theme-id",
-			activeFileIconThemeId,
+			"runtime-generated-file-icon-theme-id",
+			undefined,
+			undefined,
+			activeFileIconThemeSettingsId,
 		);
 		await removeImportedThemePackage(
 			bridge,
@@ -667,13 +701,16 @@ describe("removeImportedThemePackage", () => {
 		});
 		await importThemePackageViaVsix(bridge, store);
 		const importedProductIconEntries = store.importedProductIconEntries(pkg.id);
-		const activeProductIconThemeId = importedProductIconEntries?.[0]?.data
-			.id as string;
+		const activeProductIconThemeSettingsId = importedProductIconEntries?.[0]
+			?.settingsId as string;
 
 		const themeService = fakeThemeService(
 			"unrelated-color-theme-id",
 			"unrelated-file-icon-theme-id",
-			activeProductIconThemeId,
+			"runtime-generated-product-icon-theme-id",
+			undefined,
+			undefined,
+			activeProductIconThemeSettingsId,
 		);
 		await removeImportedThemePackage(
 			bridge,

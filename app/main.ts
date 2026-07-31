@@ -1,4 +1,4 @@
-import "@codingame/monaco-vscode-theme-defaults-default-extension";
+import { registerPlainBuiltinThemeResources } from "./features/themes/plain-builtin-theme-extension";
 
 import {
 	getService,
@@ -241,6 +241,7 @@ async function bootstrap(): Promise<void> {
 		enableWorkspaceTrust: false,
 		workspaceProvider: initialWorkspace.provider,
 	});
+	registerPlainBuiltinThemeResources();
 	await workspaceTopologyCoordinator.completeInitial();
 	workspaceCommands = registerWorkspaceCommands(
 		bridge,
@@ -351,12 +352,10 @@ async function bootstrap(): Promise<void> {
 	// its own stored/unloaded theme before LifecyclePhase.Restored. Chromium's
 	// Browser E2E happened to settle in the opposite order, but a real WKWebView
 	// reproducibly overwrote both Plain's default and a persisted imported theme
-	// after these calls returned. Apply all three axes only after restoration so
-	// this block is the final startup theme authority on every renderer.
+	// after these calls returned. Do not apply a theme axis before restoration;
+	// the actual default/persisted apply block also stays after imported-package
+	// consumption below so no asynchronous registration work can supersede it.
 	await (await getService(ILifecycleService)).when(LifecyclePhase.Restored);
-	await applyDefaultColorTheme(themeService, themeRegistry);
-	await applyDefaultFileIconTheme(themeService, fileIconThemeRegistry);
-	await applyDefaultProductIconTheme(themeService);
 	const themeRegistryStore = new PlainThemeRegistryStore(
 		themeRegistry,
 		fileIconThemeRegistry,
@@ -410,6 +409,14 @@ async function bootstrap(): Promise<void> {
 	// consumption scope, extended by `F060` S3 to the two icon axes.
 	await consumeImportedThemePackages(bridge, themeRegistryStore);
 	reRegisterAllThemePickers();
+	// This is the final startup theme authority: establish each default only
+	// after the full imported registry exists, then replace it with a valid
+	// persisted choice where one exists. Keeping these six calls adjacent also
+	// makes a missing/stale selection reliably leave Dark Modern/vs-minimal/
+	// Default active in a real WKWebView.
+	await applyDefaultColorTheme(themeService, themeRegistry);
+	await applyDefaultFileIconTheme(themeService, fileIconThemeRegistry);
+	await applyDefaultProductIconTheme(themeService);
 	// `F050` S4/`F060` S3: only once each registry reflects every built-in
 	// *and* already-imported entry can a persisted selection resolve against
 	// the full set it was originally chosen from — see
