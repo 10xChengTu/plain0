@@ -356,6 +356,43 @@ fn cancelling_an_in_progress_search_stops_the_worker_and_frees_the_receiver() {
 }
 
 #[test]
+fn cancelling_while_the_bounded_queue_is_full_disconnects_before_joining() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("a.txt"), "needle\n").unwrap();
+    fs::write(temp.path().join("b.txt"), "needle\n").unwrap();
+    let lease = authorized_lease(temp.path());
+    let compiled = compile_query(&query(vec![lease.root_id()], "needle")).unwrap();
+    let (attempt_tx, attempt_rx) = std::sync::mpsc::channel::<()>();
+    let handle = start_with_capacity_and_before_send_hook_for_test(
+        vec![lease],
+        compiled,
+        noop_wake(),
+        1,
+        Arc::new(move || {
+            let _ = attempt_tx.send(());
+        }),
+    );
+
+    let long_timeout = Duration::from_secs(5);
+    attempt_rx
+        .recv_timeout(long_timeout)
+        .expect("producer should fill the queue with batch a");
+    attempt_rx
+        .recv_timeout(long_timeout)
+        .expect("producer should attempt batch b and block on the full queue");
+
+    let (closed_tx, closed_rx) = std::sync::mpsc::channel::<()>();
+    let closer = std::thread::spawn(move || {
+        drop(handle);
+        closed_tx.send(()).unwrap();
+    });
+    closed_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("dropping a full-queue search must disconnect send before joining");
+    closer.join().unwrap();
+}
+
+#[test]
 fn cancelling_an_already_completed_search_is_a_harmless_no_op() {
     let temp = TempDir::new().unwrap();
     fs::write(temp.path().join("a.txt"), "needle\n").unwrap();

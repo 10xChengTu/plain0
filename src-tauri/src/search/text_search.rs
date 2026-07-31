@@ -175,7 +175,7 @@ struct TextSearchOutcomeCounters {
 /// TTL after natural completion).
 pub(crate) struct TextSearchHandle {
     cancelled: Arc<AtomicBool>,
-    receiver: Receiver<WorkspaceSearchTextBatch>,
+    receiver: Option<Receiver<WorkspaceSearchTextBatch>>,
     counters: Arc<TextSearchOutcomeCounters>,
     worker: Option<JoinHandle<()>>,
     delivered: u64,
@@ -196,7 +196,11 @@ impl TextSearchHandle {
             return Err(super::dto::invalid_search_text_request());
         }
         let mut batches = Vec::new();
-        while let Ok(batch) = self.receiver.try_recv() {
+        let receiver = self
+            .receiver
+            .as_ref()
+            .ok_or_else(super::dto::invalid_search_text_request)?;
+        while let Ok(batch) = receiver.try_recv() {
             batches.push(batch);
         }
         self.delivered = self
@@ -223,6 +227,11 @@ impl TextSearchHandle {
     /// worker is already joined and taken).
     pub(crate) fn close(&mut self) {
         self.cancelled.store(true, Ordering::Release);
+        // Disconnect the bounded channel before joining. A producer can be
+        // parked inside `SyncSender::send` when the queue is full; the atomic
+        // flag cannot wake that blocking call, but dropping the receiver does
+        // so immediately with `SendError`.
+        drop(self.receiver.take());
         if let Some(worker) = self.worker.take() {
             if worker.thread().id() == std::thread::current().id() {
                 drop(worker);
@@ -325,7 +334,7 @@ fn start_with_seams(
     }
     TextSearchHandle {
         cancelled,
-        receiver,
+        receiver: Some(receiver),
         counters,
         worker,
         delivered: 0,
