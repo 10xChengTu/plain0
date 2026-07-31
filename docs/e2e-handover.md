@@ -1,6 +1,6 @@
 # 端到端桌面验收交接清单（Codex 执行）
 
-更新时间：2026-07-31（Codex 已完成 E2E-001、E2E-003、E2E-004、E2E-005、E2E-006 与 E2E-011；其余条目继续按 E2E-013 顺序执行）
+更新时间：2026-07-31（Codex 已完成 E2E-001、E2E-003、E2E-004、E2E-005、E2E-006、E2E-007 与 E2E-011；其余条目继续按 E2E-013 顺序执行）
 
 ## 分工模式
 
@@ -208,7 +208,7 @@ fixture（临时目录中构造，不提交仓库）：
 
 ### E2E-007 · F070 真实桌面终端矩阵（真实 shell、resize、多 tab/split、trust、高吞吐）
 
-状态：待执行。Browser mock 层已全部闭合（S1 trust/PTY 域 Rust 测试：`stable_roots_identity` 持久化 grant/revoke/is_trusted、`FlowControl` 高低水位 hysteresis 单元测试与真实子进程吞吐测试 `output_well_beyond_the_high_water_mark_still_arrives_completely_and_in_order`——2,200 行/约 112 KiB、远超 100,000 字节高水位，验证真实暂停/恢复、字节不丢、序列号严格连续；VT 集成 `vt.rs` 分片测试——一个 SGR 转义序列在两次 `feed()` 调用间的全部 17 个可能切分点、以及逐字节切分，均与整段一次喂入结果逐位相同，另加一个跨两次 `feed()` 拆分的多字节 UTF-8 字符正确解码；IPC 改造的帧级单帧信用背压 `frame_emission_is_gated_until_the_previous_frame_is_acked`；WebView DOM 渲染 + trust UX 与多 tab/split/scrollback 的全部 Browser E2E；本切片新增的高吞吐 mock Browser E2E——500 行无让出的突发写入被单帧信用门合并为个位数 `terminal_ack` 往返、内容不丢、页面在突发后仍立即响应键盘输入，见 `tests/browser/workspace.spec.ts` 与 `src-tauri/src/terminal/{flow.rs,vt/tests.rs,service/tests.rs}`）；本条目补真实 shell 进程、真实 WKWebView 渲染管线、真实操作系统调度下的高吞吐与多进程生命周期这几个 mock/单元测试无法替代的维度。
+状态：**已完成（2026-07-31）**。全新临时 workspace 首次创建终端显示精确的 trust 对话框；Cancel 后显示 `Terminal is disabled until you trust this workspace.`，第二次选择 Trust & Continue 后真实 spawn `/bin/zsh`。`pwd` 回显 canonical 路径 `/private/tmp/plain0-e2e-terminal-20260731`，probe 输出正确；最大化 Panel 前后 `stty size` 从 `10 153` 变为 `36 153`。两个 tab 与一个 split 分别输出独立 marker，Plain PID 下真实存在 3 个 `/bin/zsh` 子进程；关闭第三个 tab 后立即只余 2 个，另外两 pane 继续存活。运行 `yes plain-e2e-throughput` 时仍能立即打开 Explorer，Plain RSS 实测约 97 MB；`Ctrl+C` 后提示符恢复且 `echo AFTER_FLOOD` 正常输出。Cmd+Q 前两个 shell 均存活，退出后 Plain 及两个 shell PID 全部消失（`ps` exit 1），无孤儿或 zombie。本条未发现需修复的产品缺陷。
 
 fixture（临时目录中创建，不提交仓库）：
 
@@ -394,7 +394,7 @@ fixture（临时目录中构造，不提交仓库；可直接复用 E2E-005 已�
 
 ### E2E-013 · F130 十二条待执行条目总览、十条产品需求交叉索引与建议执行顺序
 
-状态：总览条目，本身不新增测试步骤。`F130` 收口时 12 条均待执行；截至 2026-07-31，Codex 已完成 `E2E-001`、`E2E-003`、`E2E-004`、`E2E-005`、`E2E-006` 与 `E2E-011`，余下 6 条继续按本总览执行。完成项均已把真实结果/缺陷修复回写到对应 feature evidence；本条目的十条需求交叉索引和签名阻塞分类继续有效。
+状态：总览条目，本身不新增测试步骤。`F130` 收口时 12 条均待执行；截至 2026-07-31，Codex 已完成 `E2E-001`、`E2E-003`、`E2E-004`、`E2E-005`、`E2E-006`、`E2E-007` 与 `E2E-011`，余下 5 条继续按本总览执行。完成项均已把真实结果/缺陷修复回写到对应 feature evidence；本条目的十条需求交叉索引和签名阻塞分类继续有效。
 
 **十条产品需求 × 对应真实桌面验收条目**（完整对照见 `progress.md` 本次 `F130` 完成条目下的总表，逐条附证据引用；这里只列条目编号，避免重复）：
 
@@ -416,14 +416,14 @@ fixture（临时目录中构造，不提交仓库；可直接复用 E2E-005 已�
 - `E2E-010` 步骤 3（真实 `lldb-dap` 原生调试）：`F120` S5 已实测确认，本沙箱下缺少 `com.apple.security.cs.debugger` entitlement 时 `task_for_pid`/真实 `lldb` 均会挂起；该 entitlement 因「无真机验证支撑、不应凭疑心扩大攻击面」被主导会话裁定不加。即便执行方拥有真实 Mac，只要这条 entitlement 决定不重新评估，本步骤依然无法完整验证，只能如实记录"阻塞于签名前提"。
 - `E2E-012` 项 1（ad-hoc hardened runtime + JIT entitlement 构建的真实 GUI 验证）与项 4（跨机器安装运行/真实公证后 Gatekeeper 行为）：项 4 严格阻塞于产品所有者已拍板的"暂不投入 Apple Developer Program"决定；项 1 本身**不需要**公证（本机 `open` 真实启动即可验证，`F130` 已用非 GUI 方式确认能启动，缺的只是真实 GUI 会话下的视觉/交互确认），但仍登记于此以保持与 `E2E-012` 原条目一致，执行时不应与项 4 混为一谈。
 
-**其余未完成条目均不需要签名公证到位，只是尚未按既定分工执行**：`E2E-002`、`E2E-007`、`E2E-008`、`E2E-009`、`E2E-010`（除步骤 3 外）、`E2E-012` 项 2/3。`E2E-001`、`E2E-003`、`E2E-004`、`E2E-005`、`E2E-006` 与 `E2E-011` 已完成，不再列入待执行集合。
+**其余未完成条目均不需要签名公证到位，只是尚未按既定分工执行**：`E2E-002`、`E2E-008`、`E2E-009`、`E2E-010`（除步骤 3 外）、`E2E-012` 项 2/3。`E2E-001`、`E2E-003`、`E2E-004`、`E2E-005`、`E2E-006`、`E2E-007` 与 `E2E-011` 已完成，不再列入待执行集合。
 
 **建议执行顺序**（供人工/Codex 参考，非强制）：
 
 1. `E2E-011`（**已完成**：去 AI/账号/sync 桌面巡检 + `extensionRuntime` 手术后回归）——结果已回写 F110 evidence。
 2. `E2E-001`（**已完成**）/`E2E-002`/`E2E-003`（**已完成**）/`E2E-004`（**已完成**）——多根文件树、热退出和搜索结果已分别回写 F020/F030/F040 evidence；仅永久删除补强继续执行。
 3. `E2E-005`（**已完成**）/`E2E-006`（**已完成**）——颜色、文件图标、产品图标三轴的真实导入/渲染/持久化/恶意包拒绝结果已分别回写 F050/F060 evidence。
-4. `E2E-007`——终端（需求 7）。
+4. `E2E-007`（**已完成**）——真实 shell、resize、trust、多 tab/split、高吞吐与退出清理均已回写 F070 evidence。
 5. `E2E-008`/`E2E-009`——Git 与 Git 历史增强（需求 8），`E2E-008` 需要执行人自备真实远端凭据，建议提前准备。
 6. `E2E-010`——调试（需求 4），步骤 1/2/4/5/6/7 可执行；步骤 3 按上文如实标注"阻塞于签名前提"即可，不必等待。
 7. `E2E-012` 项 1——品牌打包 GUI 确认，与具体产品需求无直接关联，可放在最后；项 2/3（CI 首跑）可在任意时间点通过真实 PR 单独触发，不占用桌面验收时间。
