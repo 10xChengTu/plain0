@@ -23,7 +23,7 @@ jobs:
 
   build-macos:
     needs: check
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
@@ -66,7 +66,7 @@ describe("validateMacOSPackagingWorkflow", () => {
       - run: pnpm check
 
   build-macos:
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - run: pnpm check
 `;
@@ -78,7 +78,7 @@ describe("validateMacOSPackagingWorkflow", () => {
 	it("does not credit a real build step that only appears in an unrelated, non-macOS job", () => {
 		const buildInWrongJob = `jobs:
   build-macos:
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - run: pnpm check
 
@@ -95,7 +95,7 @@ describe("validateMacOSPackagingWorkflow", () => {
 	it("accepts either the pnpm script or a direct tauri build invocation", () => {
 		const directTauriBuild = `jobs:
   build-macos:
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - uses: mlugg/setup-zig@v2
         with:
@@ -103,6 +103,13 @@ describe("validateMacOSPackagingWorkflow", () => {
       - run: pnpm exec tauri build
 `;
 		expect(validateMacOSPackagingWorkflow(directTauriBuild)).toEqual([]);
+	});
+
+	it("rejects the floating macos-latest label that moved beyond pinned Zig support", () => {
+		const floatingRunner = cleanWorkflow.replace("macos-15", "macos-latest");
+		expect(validateMacOSPackagingWorkflow(floatingRunner)).toEqual([
+			"the macOS packaging job must pin macos-15 -- macos-latest moved to macos-26-arm64/Xcode 26 and cannot build with the repository's pinned Zig 0.15.2",
+		]);
 	});
 
 	it("rejects a pnpm check job that never installs Zig", () => {

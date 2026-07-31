@@ -54,7 +54,10 @@ jobs:
   # Apple account, per this feature's own evidence).
   build-macos:
     needs: check
-    runs-on: macos-latest
+    # Keep this paired with the repository's pinned Zig 0.15.2 toolchain.
+    # On 2026-07-31 `macos-latest` migrated to macos-26-arm64/Xcode 26,
+    # where Zig 0.15.2 could not link even its own build runner.
+    runs-on: macos-15
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4

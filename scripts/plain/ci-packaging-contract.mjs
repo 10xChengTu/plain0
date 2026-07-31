@@ -56,6 +56,7 @@ function splitIntoJobBlocks(yamlText) {
 }
 
 const MACOS_RUNNER_PATTERN = /runs-on:\s*macos-[\w.-]+/;
+const PINNED_MACOS_RUNNER_PATTERN = /runs-on:\s*macos-15\b/;
 const REAL_TAURI_BUILD_STEP_PATTERN =
 	/\bpnpm (?:run )?tauri:build\b|\btauri build\b/;
 const ZIG_CONSUMER_PATTERN =
@@ -102,6 +103,11 @@ export function validateMacOSPackagingWorkflow(yamlText) {
 	if (macJobs.length === 0) {
 		return [
 			"no job in .github/workflows/plain-ci.yml runs on a macos-* runner -- F120 S6 requires at least one real macOS packaging job",
+		];
+	}
+	if (!macJobs.some((job) => PINNED_MACOS_RUNNER_PATTERN.test(job.text))) {
+		return [
+			"the macOS packaging job must pin macos-15 -- macos-latest moved to macos-26-arm64/Xcode 26 and cannot build with the repository's pinned Zig 0.15.2",
 		];
 	}
 	const hasRealBuildStep = macJobs.some((job) =>

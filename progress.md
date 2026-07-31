@@ -542,7 +542,7 @@
 
 ## 下一步
 
-1. 本项目原定的最后一个 feature（`F130`）已完成，没有下一个已规划的实现工作项。真实外部环境验收登记在 `docs/e2e-handover.md`（`E2E-001` 至 `E2E-013`）；Codex 已完成 `E2E-001` 至 `E2E-009`、`E2E-010` 的全部可执行场景、`E2E-011` 与 `E2E-012` 项 1。第六次 run `30645081027` 已让 Ubuntu 完整 `pnpm check` 通过，Browser E2E **97/99**；两条失败来自测试硬编码 macOS Explorer 快捷键。E2E 现按浏览器平台选择 macOS Enter/Meta+Backspace 或 Linux/Windows F2/Delete，聚焦 2/2 与本机全量 **99/99（3.3m）** 通过；下一步提交、推送第七次 run，直到 Ubuntu `check` 与 macOS `build-macos` 都通过。项 3 为可选冷/热缓存对照，项 4 的跨机器公证仍受 Apple Developer Program 决策阻塞。`jschardet` LGPL-2.1+ 动态链接豁免适用性、`vscode-codicons` 精确 commit/version 比对、Ghostty vendor 二进制级 Nerd Fonts 链接确认三项仍标注为需人工确认，见「已知风险」。
+1. 本项目原定的最后一个 feature（`F130`）已完成，没有下一个已规划的实现工作项。真实外部环境验收登记在 `docs/e2e-handover.md`（`E2E-001` 至 `E2E-013`）；Codex 已完成 `E2E-001` 至 `E2E-009`、`E2E-010` 的全部可执行场景、`E2E-011` 与 `E2E-012` 项 1。第七次 run `30647183986` attempt 2 已让 Ubuntu 完整 `pnpm check` 与 Browser E2E **99/99** 全绿，并首次启动 macOS job；真实 runner 漂移到 `macos-26-arm64`（macOS 26.5.2 / Xcode 26），项目固定的 Zig 0.15.2 在该 SDK 上连 build runner 都无法链接系统符号。下一步将首个打包门固定到受支持的 `macos-15` 并以第八次真实 run 验证，直到 `build-macos` 产出并检查真实 `Plain.app`。项 3 为可选冷/热缓存对照，项 4 的跨机器公证仍受 Apple Developer Program 决策阻塞。`jschardet` LGPL-2.1+ 动态链接豁免适用性、`vscode-codicons` 精确 commit/version 比对、Ghostty vendor 二进制级 Nerd Fonts 链接确认三项仍标注为需人工确认，见「已知风险」。
 
 ## 当前验收命令
 
@@ -554,6 +554,7 @@ pnpm test:e2e:browser
 
 ## 已知风险
 
+- 2026-07-31 `E2E-012` 第七次真实 Actions run `30647183986` attempt 2（`main@de84a032`）证明 Ubuntu `pnpm check` 与 Browser E2E **99/99** 全绿，跨平台 Explorer 键位修复生效；随后首次真实 `build-macos` 落到当日正在迁移的 `macos-26-arm64`（macOS 26.5.2 / Xcode 26），固定的 Zig 0.15.2 在 Ghostty prewarm 的 build runner 链接阶段连续 5 次报告 `__availability_version_check`、`_abort`、`_dispatch_*` 等系统符号未定义。该失败发生在 Ghostty 源码编译和联网解析之前，是 `-latest` runner/SDK 漂移与旧 Zig 工具链不兼容；当前首个 macOS 打包门改为显式 `macos-15`，并新增契约拒绝重新漂移到 `macos-latest`，待第八次真实 run 验证。
 - 2026-07-31 `E2E-012` 第六次真实 Actions run `30645081027`（`main@e755f159`）证明 Ubuntu `pnpm check` 全绿（含 1699 前端用例、clippy 与 1180 Rust 用例），Browser E2E 为 **97/99**。两条失败均在 Linux 上 3 次稳定复现：Explorer 的 macOS `Enter` 重命名未出现输入框；readonly 删除的 macOS `Cmd+Backspace` 未触发提示。上游真实键位是 macOS Enter/Cmd+Backspace、Linux/Windows F2/Delete；Playwright 现按浏览器平台选择对应真实键位，不改变产品代码，聚焦 2/2 与本机全量 **99/99（3.3m）** 通过。
 - 2026-07-31 `E2E-012` 第五次真实 Actions run `30643472864`（`main@66cc0962`）越过 Linux clippy，证明跨平台 mode 修复生效；Rust 全量测试 **1171/1180** 通过。9 个失败分为三项：7 个 versioned-write 用例已由 capability-relative 重开 `.` FD 修复（13/13 + clippy）；Git submodule clone 已固定 repo-local 测试身份（禁用 global config 时 1/1）；终端尾帧不是单纯测试等待不足，而是 waiter 在自然退出时 `flow.cancel()` 会让高水位 reader 在排空 PTY 内核缓冲前返回。waiter 现不再 cancel，显式 kill/teardown 仍保留 cancel；真实 112 KiB PTY 压力测试连续 2/2 与 all-target clippy 通过。
 - 2026-07-31 `E2E-012` 第四次真实 Actions run `30642444026`（`main@cbc3d98a`）证明 `mlugg/setup-zig@v2` 在 Ubuntu 成功安装精确 Zig 0.15.2，前端 **81 文件 / 1699 用例**及此前门禁继续通过。新的最深层失败是 Rust 1.97/Linux clippy：Linux 上 `libc::S_IF*` 已是 `u32`，10 处为兼容 macOS 写下的 `u32::from(...)` 被判 `useless_conversion`；另有一条 Linux-only 测试把 `0x00 + b'x'` 判为 `identity_op`。现以 generic mode helper 隔离平台 ABI 类型差异并删去无语义加法；本机 all-target clippy 与直接 eligibility 测试通过，待第五次真实 run。
