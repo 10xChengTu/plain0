@@ -9257,6 +9257,80 @@ test("keeps a version-conflicted file's replace visibly failed while a sibling f
 	);
 });
 
+test("rejects stale search coordinates for an unopened externally rewritten file before any edit or write", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported", {
+		"stale-unopened.txt": "replace needle stable\n",
+	});
+	await openNativeWorkspaceExplorer(page);
+
+	await page.getByRole("tab", { name: /^Search/ }).click();
+	const searchInput = page.locator(".plain-search-view-input");
+	const replaceInput = page.locator(".plain-search-view-replace-input");
+	const status = page.locator(".plain-search-view-status");
+	await searchInput.pressSequentially("needle");
+	await expect(status).toHaveText("1 result in 1 file", { timeout: 5_000 });
+	await replaceInput.fill("cactus");
+
+	// Keep the old result visible while changing the authoritative file. This
+	// is the real desktop failure E2E-004 exposed: resolving an unopened model
+	// only after this rewrite used to apply the stale column to fresh content
+	// and then save successfully because that fresh model also held the fresh
+	// wv1 token.
+	await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_EXTERNAL_WRITE__(
+				name: string,
+				content: string,
+				emitWake: boolean,
+			): void;
+		};
+		testWindow.__PLAIN_TEST_EXTERNAL_WRITE__(
+			"stale-unopened.txt",
+			"external changed stable\n",
+			false,
+		);
+	});
+	await page.locator(".plain-search-view-replace-match").click();
+
+	await expect(page.locator(".plain-search-view-file-error")).toContainText(
+		"failed to save",
+	);
+	await expect(page.locator(".plain-search-view-messages")).toHaveText(
+		"1 replacement failed to save.",
+	);
+	const toast = page.locator(".notifications-toasts .notification-toast");
+	await expect(toast).toHaveCount(1);
+	await expect(toast).toContainText(
+		"The file changed on disk after these search results were produced.",
+	);
+	for (const action of ["Reload", "Save As...", "Details"]) {
+		await expect(
+			toast.getByRole("button", { name: action, exact: true }),
+		).toHaveCount(1);
+	}
+	await expect(
+		toast.getByRole("button", { name: "Retry", exact: true }),
+	).toHaveCount(0);
+	await expect(toast.getByRole("button", { name: /Overwrite/ })).toHaveCount(0);
+
+	// Preflight conflict means no in-memory edit and no native write at all.
+	expect(await nativeWriteFileCalls(page)).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([
+		"Failed to replace 'stale-unopened.txt'. The file changed on disk after these search results were produced.",
+	]);
+});
+
 test("replaces a match correctly using its absolute column even when the line is far longer than the 256-unit preview window", async ({
 	page,
 }) => {

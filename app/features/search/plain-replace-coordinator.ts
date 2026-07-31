@@ -61,6 +61,14 @@ import type { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri
  * on. So this coordinator never sets that flag, and determines success from
  * `save()`'s own boolean return value (`true` only once the model's state is
  * genuinely `SAVED`) rather than from a thrown error.
+ *
+ * Before applying edits, each target model is resolved and the text still at
+ * every recorded range must equal the exact match text captured by the
+ * search result. This closes the unopened-file race where resolving only
+ * inside `apply()` could load already-rewritten disk content, apply stale
+ * coordinates to it, and then save successfully with that fresh file's own
+ * fresh version token. Once resolved, the model pins the normal wv1 baseline;
+ * any later external write is still rejected by the existing save path.
  */
 
 export interface ReplaceRange {
@@ -73,6 +81,7 @@ export interface ReplaceRange {
 export interface ReplaceTarget {
 	readonly resource: URI;
 	readonly range: ReplaceRange;
+	readonly expectedText: string;
 }
 
 /** The narrow slice of `IBulkEditService` this coordinator calls — lets
@@ -86,20 +95,26 @@ export interface ReplaceBulkEditService {
 	apply(edits: ResourceTextEdit[]): Promise<unknown>;
 }
 
-/** The narrow slice of one resolved `ITextFileEditorModel` this coordinator
- * needs: `save()`'s own boolean return value is the sole success signal
- * (see this module's own doc comment for why a thrown error is not). */
+/** The narrow slice of `ITextFileEditorModel` this coordinator needs for the
+ * pre-edit stale-range check and final save. */
 export interface ReplaceModelHandle {
+	readonly textEditorModel: {
+		getValueInRange(range: ReplaceRange): string;
+	} | null;
+	isResolved(): boolean;
 	save(options: { readonly source: string }): Promise<boolean>;
 }
 
 /** The narrow slice of `ITextFileService.files` this coordinator calls. */
 export interface ReplaceFileModels {
 	get(resource: URI): ReplaceModelHandle | undefined;
+	resolve(resource: URI): Promise<ReplaceModelHandle>;
 }
 
 export type ReplaceResourceOutcome =
-	{ readonly status: "replaced" } | { readonly status: "failed" };
+	| { readonly status: "replaced" }
+	| { readonly status: "conflict" }
+	| { readonly status: "failed" };
 
 export interface ReplaceOutcome {
 	/** Keyed by `resource.toString()`, one entry per distinct resource named
@@ -112,6 +127,7 @@ const REPLACE_SAVE_SOURCE = "plainSearch.replace";
 interface ResourceGroup {
 	readonly resource: URI;
 	readonly edits: ResourceTextEdit[];
+	readonly targets: ReplaceTarget[];
 }
 
 /**
@@ -133,9 +149,10 @@ export async function replaceSearchMatches(
 		const key = target.resource.toString();
 		let group = groups.get(key);
 		if (group === undefined) {
-			group = { resource: target.resource, edits: [] };
+			group = { resource: target.resource, edits: [], targets: [] };
 			groups.set(key, group);
 		}
+		group.targets.push(target);
 		group.edits.push(
 			new ResourceTextEdit(target.resource, {
 				range: target.range,
@@ -161,15 +178,35 @@ async function replaceOneResource(
 	fileModels: ReplaceFileModels,
 	group: ResourceGroup,
 ): Promise<ReplaceResourceOutcome> {
+	let model: ReplaceModelHandle;
+	try {
+		model = await fileModels.resolve(group.resource);
+	} catch {
+		return { status: "failed" };
+	}
+	if (!model.isResolved() || model.textEditorModel === null) {
+		return { status: "failed" };
+	}
+	const textModel = model.textEditorModel;
+	if (
+		group.targets.some(
+			(target) =>
+				textModel.getValueInRange(target.range) !== target.expectedText,
+		)
+	) {
+		// The file changed before a model (and therefore a wv1 baseline) was
+		// resolved. Do not apply stale search coordinates to fresh content.
+		return { status: "conflict" };
+	}
 	try {
 		await bulkEditService.apply(group.edits);
 	} catch {
 		return { status: "failed" };
 	}
-	const model = fileModels.get(group.resource);
-	if (model === undefined) {
+	const savedModel = fileModels.get(group.resource);
+	if (savedModel === undefined) {
 		return { status: "failed" };
 	}
-	const saved = await model.save({ source: REPLACE_SAVE_SOURCE });
+	const saved = await savedModel.save({ source: REPLACE_SAVE_SOURCE });
 	return saved ? { status: "replaced" } : { status: "failed" };
 }

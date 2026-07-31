@@ -158,6 +158,7 @@ function searchResultResource(rootId: string, relativePath: string): URI {
  */
 export interface ReplaceMatchLocation {
 	readonly resource: URI;
+	readonly expectedText: string;
 	readonly range: {
 		readonly startLineNumber: number;
 		readonly startColumn: number;
@@ -202,6 +203,10 @@ function textSearchFileMatch(
 		);
 		matchLocations.set(textSearchMatch, {
 			resource,
+			expectedText: match.previewText.slice(
+				match.column - 1,
+				match.column - 1 + match.length,
+			),
 			range: {
 				startLineNumber: match.line,
 				startColumn: match.absoluteColumn,

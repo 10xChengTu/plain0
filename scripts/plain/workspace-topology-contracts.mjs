@@ -384,6 +384,7 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/instantiation",
 	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/keybinding/common/keybinding.service",
 	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/opener/common/opener.service",
+	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service",
 	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/themeService.service",
 	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace.service",
 	"app/features/search/plain-search-view.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/views/viewPane",

@@ -22,6 +22,7 @@ function target(path: string, startColumn = 1, endColumn = 7): ReplaceTarget {
 			endLineNumber: 1,
 			endColumn,
 		},
+		expectedText: "needle",
 	};
 }
 
@@ -30,19 +31,25 @@ interface FakeEnvironment {
 	readonly fileModels: ReplaceFileModels;
 	readonly applyCalls: unknown[][];
 	readonly saveCalls: Array<{ resourceKey: string; source: string }>;
-	/** Resources present in the fake model manager after `apply()` "resolved"
-	 * them — mirrors `ITextFileService.files` only containing a model once
-	 * `IBulkEditService.apply()` has resolved it via `createModelReference`. */
+	/** Resources the fake manager can resolve before `apply()`, matching the
+	 * coordinator's stale-range preflight. */
 	registerModel(
 		path: string,
-		options?: { readonly save?: boolean; readonly applyThrows?: boolean },
+		options?: {
+			readonly save?: boolean;
+			readonly applyThrows?: boolean;
+			readonly currentText?: string;
+		},
 	): void;
 }
 
 function createFakeEnvironment(): FakeEnvironment {
 	const applyCalls: unknown[][] = [];
 	const saveCalls: Array<{ resourceKey: string; source: string }> = [];
-	const models = new Map<string, { save: boolean; applyThrows: boolean }>();
+	const models = new Map<
+		string,
+		{ save: boolean; applyThrows: boolean; currentText: string }
+	>();
 	const modelHandles = new Map<string, ReplaceModelHandle>();
 
 	const bulkEditService: ReplaceBulkEditService = {
@@ -54,14 +61,6 @@ function createFakeEnvironment(): FakeEnvironment {
 				if (model?.applyThrows === true) {
 					throw new Error(`apply failed for ${key}`);
 				}
-				if (model !== undefined && !modelHandles.has(key)) {
-					modelHandles.set(key, {
-						async save(options) {
-							saveCalls.push({ resourceKey: key, source: options.source });
-							return model.save;
-						},
-					});
-				}
 			}
 			return {};
 		},
@@ -70,6 +69,32 @@ function createFakeEnvironment(): FakeEnvironment {
 	const fileModels: ReplaceFileModels = {
 		get(candidate) {
 			return modelHandles.get(candidate.toString());
+		},
+		async resolve(candidate) {
+			const key = candidate.toString();
+			const model = models.get(key);
+			if (model === undefined) {
+				throw new Error(`missing model for ${key}`);
+			}
+			let handle = modelHandles.get(key);
+			if (handle === undefined) {
+				handle = {
+					textEditorModel: {
+						getValueInRange() {
+							return model.currentText;
+						},
+					},
+					isResolved() {
+						return true;
+					},
+					async save(options) {
+						saveCalls.push({ resourceKey: key, source: options.source });
+						return model.save;
+					},
+				};
+				modelHandles.set(key, handle);
+			}
+			return handle;
 		},
 	};
 
@@ -82,6 +107,7 @@ function createFakeEnvironment(): FakeEnvironment {
 			models.set(resource(path).toString(), {
 				save: options.save ?? true,
 				applyThrows: options.applyThrows ?? false,
+				currentText: options.currentText ?? "needle",
 			});
 		},
 	};
@@ -210,6 +236,24 @@ describe("replaceSearchMatches", () => {
 		expect(
 			outcome.perResource.get(resource("/never-registered.ts").toString()),
 		).toEqual({ status: "failed" });
+	});
+
+	it("rejects stale match coordinates before applying or saving", async () => {
+		const env = createFakeEnvironment();
+		env.registerModel("/changed.ts", { currentText: "changed" });
+
+		const outcome = await replaceSearchMatches(
+			env.bulkEditService,
+			env.fileModels,
+			[target("/changed.ts")],
+			"replacement",
+		);
+
+		expect(outcome.perResource.get(resource("/changed.ts").toString())).toEqual(
+			{ status: "conflict" },
+		);
+		expect(env.applyCalls).toHaveLength(0);
+		expect(env.saveCalls).toHaveLength(0);
 	});
 
 	it("isolates one resource's failure from a sibling resource's success in the same call (F040 S4 partial success)", async () => {

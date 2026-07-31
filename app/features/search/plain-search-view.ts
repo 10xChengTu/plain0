@@ -10,6 +10,7 @@ import { IHoverService } from "@codingame/monaco-vscode-api/vscode/vs/platform/h
 import { IInstantiationService } from "@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/instantiation";
 import { IKeybindingService } from "@codingame/monaco-vscode-api/vscode/vs/platform/keybinding/common/keybinding.service";
 import { IOpenerService } from "@codingame/monaco-vscode-api/vscode/vs/platform/opener/common/opener.service";
+import { INotificationService } from "@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service";
 import { IThemeService } from "@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/themeService.service";
 import { IWorkspaceContextService } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace.service";
 import {
@@ -34,6 +35,12 @@ import {
 	replaceSearchMatches,
 	type ReplaceTarget,
 } from "./plain-replace-coordinator";
+
+// `INotificationService.prompt`'s enum is a default export, while Plain's
+// closed import authority intentionally forbids default imports from the
+// Monaco API package. Numeric enum member 3 is the stable `Severity.Error`
+// wire/runtime value in this pinned Code OSS surface.
+const ERROR_NOTIFICATION_SEVERITY = 3 as const;
 
 /**
  * Plain's own, hand-written Search view pane — deliberately NOT the vendor
@@ -123,6 +130,7 @@ import {
  */
 interface ResolvedMatchLocation {
 	readonly element: HTMLLIElement;
+	readonly expectedText: string;
 	readonly range: {
 		readonly startLineNumber: number;
 		readonly startColumn: number;
@@ -176,6 +184,7 @@ export class PlainSearchView extends ViewPane {
 	 * which are separate methods from `renderBody` and so cannot simply
 	 * close over its local variables the way `runSearch`'s own callers do. */
 	#replaceInput: HTMLInputElement | undefined;
+	#searchInput: HTMLInputElement | undefined;
 	#statusElement: HTMLElement | undefined;
 	#messagesElement: HTMLElement | undefined;
 
@@ -195,6 +204,7 @@ export class PlainSearchView extends ViewPane {
 		private readonly editorService: IEditorService,
 		private readonly bulkEditService: IBulkEditService,
 		private readonly textFileService: ITextFileService,
+		private readonly notificationService: INotificationService,
 	) {
 		super(
 			options,
@@ -219,6 +229,7 @@ export class PlainSearchView extends ViewPane {
 		input.className = "plain-search-view-input";
 		input.placeholder = "Search";
 		input.setAttribute("aria-label", "Search");
+		this.#searchInput = input;
 
 		const regexLabel = document.createElement("label");
 		regexLabel.className = "plain-search-view-regex-label";
@@ -482,12 +493,19 @@ export class PlainSearchView extends ViewPane {
 				// this `+ 1` correction was added — so it is corrected back to
 				// Monaco's normal 1-indexed convention here, once, at the single
 				// point this range is resolved.
-				const range = getReplaceMatchLocation(result)?.range ?? {
+				const providerLocation = getReplaceMatchLocation(result);
+				const range = providerLocation?.range ?? {
 					startLineNumber: rangeLocation.source.startLineNumber + 1,
 					startColumn: rangeLocation.source.startColumn + 1,
 					endLineNumber: rangeLocation.source.endLineNumber + 1,
 					endColumn: rangeLocation.source.endColumn + 1,
 				};
+				const expectedText =
+					providerLocation?.expectedText ??
+					result.previewText.slice(
+						rangeLocation.preview.startColumn,
+						rangeLocation.preview.endColumn,
+					);
 
 				const item = document.createElement("li");
 				item.className = "plain-search-view-match-row";
@@ -510,14 +528,14 @@ export class PlainSearchView extends ViewPane {
 							resourceKey,
 							resource: fileMatch.resource,
 							match: result,
-							location: { element: item, range },
+							location: { element: item, range, expectedText },
 						},
 					]);
 				});
 
 				item.append(jumpButton, replaceButton);
 				list.append(item);
-				state.matches.set(result, { element: item, range });
+				state.matches.set(result, { element: item, range, expectedText });
 			}
 		}
 		group.append(header, errorElement, list);
@@ -596,6 +614,7 @@ export class PlainSearchView extends ViewPane {
 		const targets: ReplaceTarget[] = candidates.map((candidate) => ({
 			resource: candidate.resource,
 			range: candidate.location.range,
+			expectedText: candidate.location.expectedText,
 		}));
 
 		const outcome = await replaceSearchMatches(
@@ -617,6 +636,7 @@ export class PlainSearchView extends ViewPane {
 		let replacedCount = 0;
 		let failedCount = 0;
 		const failedResourceKeys = new Set<string>();
+		const conflictedResources = new Map<string, IFileMatch["resource"]>();
 
 		for (const candidate of candidates) {
 			const { resourceKey, match } = candidate;
@@ -633,7 +653,14 @@ export class PlainSearchView extends ViewPane {
 			} else {
 				failedCount += 1;
 				failedResourceKeys.add(resourceKey);
+				if (status?.status === "conflict") {
+					conflictedResources.set(resourceKey, candidate.resource);
+				}
 			}
+		}
+
+		for (const resource of conflictedResources.values()) {
+			this.showReplaceConflict(resource);
 		}
 
 		for (const resourceKey of failedResourceKeys) {
@@ -688,6 +715,38 @@ export class PlainSearchView extends ViewPane {
 			this.#messagesElement.textContent = parts.join(" ");
 		}
 	}
+
+	private showReplaceConflict(resource: IFileMatch["resource"]): void {
+		const fileName = resource.path.split("/").at(-1) ?? resource.path;
+		this.notificationService.prompt(
+			ERROR_NOTIFICATION_SEVERITY,
+			`Failed to replace '${fileName}'. The file changed on disk after these search results were produced.`,
+			[
+				{
+					label: "Reload",
+					run: async () => {
+						await this.textFileService.revert(resource, { force: true });
+						this.#searchInput?.dispatchEvent(new globalThis.Event("input"));
+					},
+				},
+				{
+					label: "Save As...",
+					run: async () => {
+						await this.textFileService.saveAs(resource);
+					},
+				},
+				{
+					label: "Details",
+					run: () => {
+						this.notificationService.error(
+							"Search replacement was cancelled because the current file no longer contains the matched text at the recorded location.",
+						);
+					},
+				},
+			],
+			{ sticky: true },
+		);
+	}
 }
 
 function formatSearchStatus(
@@ -719,3 +778,4 @@ IWorkspaceContextService(PlainSearchView, undefined, 11);
 IEditorService(PlainSearchView, undefined, 12);
 IBulkEditService(PlainSearchView, undefined, 13);
 ITextFileService(PlainSearchView, undefined, 14);
+INotificationService(PlainSearchView, undefined, 15);
