@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use cap_std::fs::{Dir, File, OpenOptions};
 use tempfile::TempDir;
 
-use super::{write_file_with_hooks, WriteHooks, MAX_STAGING_ATTEMPTS, STAGING_PREFIX};
+use super::{
+    sync_directory_handle, write_file_with_hooks, WriteHooks, MAX_STAGING_ATTEMPTS, STAGING_PREFIX,
+};
 use crate::path_policy::RelativePath;
 use crate::workspace::dto::{
     WorkspaceWriteDirectorySyncObservation, WorkspaceWriteResult, WorkspaceWriteTargetObservation,
@@ -890,7 +892,7 @@ impl WriteHooks for TestHooks {
         if self.fail_directory_sync {
             Err(rustix::io::Errno::IO)
         } else {
-            rustix::fs::fsync(parent)
+            sync_directory_handle(parent)
         }
     }
 

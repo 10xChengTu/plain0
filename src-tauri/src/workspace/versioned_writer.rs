@@ -457,6 +457,18 @@ fn is_single_normal_name(name: &Path) -> bool {
     matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
 }
 
+fn sync_directory_handle(parent: &Dir) -> rustix::io::Result<()> {
+    use rustix::fs::{Mode, OFlags};
+
+    let syncable = rustix::fs::openat(
+        parent,
+        ".",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )?;
+    rustix::fs::fsync(&syncable)
+}
+
 fn valid_stage_metadata(
     snapshot: UnixMetadataSnapshot,
     filesystem: FileSystemKind,
@@ -1014,7 +1026,7 @@ trait WriteHooks {
     }
     fn after_rename(&mut self, _reported_success: bool) {}
     fn sync_directory(&mut self, parent: &Dir) -> rustix::io::Result<()> {
-        rustix::fs::fsync(parent)
+        sync_directory_handle(parent)
     }
     fn before_postcheck(&mut self) {}
     fn after_not_published_proof(&mut self, _parent: &Dir, _stage: &Path, _target: &Path) {}
