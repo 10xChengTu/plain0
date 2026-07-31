@@ -1,6 +1,6 @@
 # 端到端桌面验收交接清单（Codex 执行）
 
-更新时间：2026-07-30（新增 E2E-013：`F130` 最终验收收口后，对 E2E-001 至 E2E-012 共 12 条待执行条目的总览、十条产品需求交叉索引与建议执行顺序）
+更新时间：2026-07-31（Codex 已完成 E2E-005 与 E2E-011；其余条目继续按 E2E-013 顺序执行）
 
 ## 分工模式
 
@@ -91,7 +91,7 @@ fixture（临时目录中创建）：
 
 ### E2E-005 · F050 VS Code 主题兼容的真实桌面矩阵
 
-状态：执行中（2026-07-31 已完成步骤 1-2）。真实系统文件选择器导入合法 VSIX 成功，toast 与 `<app_local_data_dir>/themes/` 磁盘内容均核对通过；首次真实完全退出/重启暴露出 Workbench 布局恢复晚于 Plain 主题 apply 的 WKWebView 启动竞态，已改为等待 `LifecyclePhase.Restored` 后再应用三轴默认/持久化主题，并以重新构建的当前绝对路径 debug `.app` 复核 `E2E Demo Dark` 启动即恢复。步骤 3-4（恶意包拒绝、删除回退及再次重启）仍待执行。Browser mock 层原有证据已全部闭合（S0-S4：内置主题激活与选择器、Rust VSIX/目录安全解包、manifest/主题校验与恶意 fixture 矩阵、导入 UX 与注册消费、selection 跨会话持久化与失效 id 回退，见 progress.md 与 `tests/browser/workspace.spec.ts`）。
+状态：**已完成（2026-07-31）**。合法 VSIX 经真实系统文件选择器导入，`E2E Demo Dark` 应用与 `selection.plain.json`/包资源落盘、完整退出后的冷启动恢复均通过；Zip Slip 与无主题声明两个恶意 VSIX 分别显示去敏错误，未泄漏内部错误码/本机路径，磁盘无 staging/越界文件残留；移除活动主题后立即回退 Dark Modern，包目录与 selection 同时清除，再次完整退出/重启仍为 Dark Modern。执行中发现并修复三处只有真实 WKWebView 暴露的问题：启动主题应用时序、打包后内置主题资源经 `tauri://` fetch 失败（改为声明式只读内存资源，SVG 保留 blob URL）、移除主题只做视觉回退却未按 Rust 持久化 selection 判断并清理。最终回归：主题相关 Browser E2E 3/3、前端单测 81 文件/1692 用例、Rust 1177/1177、架构与 bundle 门全部通过。
 
 fixture（临时目录中构造，不提交仓库）：
 
@@ -339,14 +339,14 @@ fixture（临时目录中创建，不提交仓库；具体路径由执行人自�
 
 ### E2E-011 · F110 真实桌面排除面巡检与 extensionRuntime 手术后回归
 
-状态：待执行。F110 全部七个实现切片（S0-S6）已把追踪债务从（补记的诚实基线）260 个 bundle source 降到 53 个，`mcp`/`syncEditSessions`/`tasks`/`testing` 四类真降到 0，`authAccount`（1）/`chatAgent`（9）/`extensionRuntime`（19）/`notebook`（9）/`remote`（4）/`languagePacks`（1）降到逐文件有据的诚实地板值，`languageDetection`（2）/`treeSitter`（8）经依赖图审计后有意保持零改动（删除对应注册要么命中真实硬依赖、要么零收益）——全部证据见 `docs/bundle-baseline.json` 的 `categoryNotes`。运行时排除面 guard（`app/excluded-surface-policy.ts`/`excluded-surfaces.ts`）在全部 98 个 Browser E2E 场景下从未触发过。**但这两层证据都不是真实桌面证据**：Browser mock 用的是确定性 Tauri IPC mock，不是真实 WKWebView 里的真实命令面板/菜单/设置渲染；`check:bundle` 证明的是"源文件是否进入产物"，不是"真实点开命令面板搜索一个词，会不会出现一条本不该存在的结果"。本条目补这最后一环——一次穷尽式的真实桌面人工巡检，加上 `extensionRuntime` 深度手术（F110 S5）后主题导入/替换/删除这条真实调用链的回归确认。
+状态：**已完成（2026-07-31）**。当前绝对路径 debug `Plain.app` 在真实 WKWebView 启动正常，Activity Bar/Explorer 就绪且未出现排除面 guard 错误；命令面板逐项搜索 `chat`、`copilot`、`agent`、`mcp`、`language model`、登录/账号/sync/edit session/extension/gallery/marketplace/remote/tunnel/notebook/task/test explorer，未发现任何被排除产品入口，少量结果均为人工核实后的语义无关命令（如 Change Language Mode、Reset Active Editor Read-only in Session）；真实 macOS 菜单与 Manage 左/右键菜单均无账号/AI/sync，Activity Bar 只有 Manage、无 Accounts，标题栏紧凑 Manage 未出现。Settings UI/`Preferences: Open Settings` 在当前产品命令面板中不可达，按真实状态记录为无可巡检表面。主题真实回归复用 E2E-005：导入、应用、重复同 package/version 被 Rust 按既定合同拒绝、删除均无 `deltaExtensions`/`IExtensionService` 异常；删除成功并回退默认。原文所谓“替换已导入包”不是可达产品路径（Rust 有意拒绝重复 package id），已在下方步骤 7 修正文档合同。
 
-**S5 发现的真实回归类别，执行方必须重点复核在真实桌面上是否同样成立**（已在 Browser mock 层修复并验证，但同一类"运行时才炸、`pnpm check` 全绿也测不出来"的缺陷这个 feature 本身就出现过四次，真实 WKWebView 与 Chromium 的模块加载/DI 时序可能有细节差异，不能想当然认为一致）：`app/services/plain-null-extension-service.ts` 的 `PlainNullExtensionService` 必须提供一个 `deltaExtensions` no-op（不属于 `IExtensionService` 正式接口，是 vendor 包顶层 `registerExtension()` 返回句柄的 `dispose()` 无条件调用的方法）——`app/features/themes/plain-theme-import-coordinator.ts` 在导入失败清理、替换已导入包、删除已导入包这三条真实路径都会调用该 `dispose()`；如果这个方法缺失或行为不对，真实表现是用户点击"删除已导入主题"时抛出 `extensionService.deltaExtensions is not a function`，而不是任何编译期或类型层面的提示。
+**S5 发现的真实回归类别，执行方必须重点复核在真实桌面上是否同样成立**（已在 Browser mock 层修复并验证，但同一类"运行时才炸、`pnpm check` 全绿也测不出来"的缺陷这个 feature 本身就出现过四次，真实 WKWebView 与 Chromium 的模块加载/DI 时序可能有细节差异，不能想当然认为一致）：`app/services/plain-null-extension-service.ts` 的 `PlainNullExtensionService` 必须提供一个 `deltaExtensions` no-op（不属于 `IExtensionService` 正式接口，是 vendor 包顶层 `registerExtension()` 返回句柄的 `dispose()` 无条件调用的方法）——`app/features/themes/plain-theme-import-coordinator.ts` 在导入资源读取失败清理、防御性的同 id 重注册、删除已导入包这三条代码路径都会调用该 `dispose()`；其中生产 UI 可达的是删除路径，重复导入在 Rust 层先被拒绝。如果这个方法缺失或行为不对，真实表现是用户点击"删除已导入主题"时抛出 `extensionService.deltaExtensions is not a function`，而不是任何编译期或类型层面的提示。
 
 fixture（临时目录中构造，不提交仓库；可直接复用 E2E-005 已验证过的合法 VSIX 构造步骤）：
 
 - 一个真实、最小的合法主题包 VSIX `demo-theme-a.vsix`（复用 E2E-005 fixture 一节的 `package.json`/`themes/demo-dark.json`/`zip -r` 步骤，`publisher: "plain-e2e"`、`name: "demo-theme-a"`，背景色 `#0a0a0a`）。
-- 第二个真实、最小的合法主题包 VSIX `demo-theme-b.vsix`（同样构造，`name: "demo-theme-b"`，背景色改用一个不同、有辨识度的颜色，例如 `#141414`，用于下方"替换已导入包"步骤）。
+- 第二个 VSIX `demo-theme-b.vsix`：与 A 使用相同 `publisher`/`name`/`version`，但主题标签/背景色改为 `#141414`，用于验证重复 package id 按 Rust 合同被明确拒绝且不会替换已发布包。
 
 步骤与断言：
 
@@ -356,7 +356,7 @@ fixture（临时目录中构造，不提交仓库；可直接复用 E2E-005 已�
 4. **设置（Settings UI 若可达）/命令面板 `Preferences: Open Settings` 关键词巡检**：搜索 `chat`、`copilot`、`sync`、`account`、`telemetry`，断言零命中或命中内容与这些功能面语义无关。
 5. **Activity Bar 巡检与 `Manage` 齿轮真实交互**（对应 F110 S4 迁移进 `app/` 的 `PlainGlobalCompositeBar`/`PlainGlobalActivityActionViewItem`）：确认 Activity Bar 底部只有一个 `aria-label="Manage"` 的复合按钮，**没有**独立的 Accounts 图标；左键点击，断言主菜单真实打开且至少含 "Command Palette..." 与 "Themes" 子菜单（这是 F110 S4 在 Browser E2E 中发现的真实菜单内容，本步骤是它在真实桌面渲染管线下的复核，而不是重新假设一个空菜单）；右键点击，断言上下文菜单含 "Activity Bar Position" 子菜单（`activitybarPart.js` 自身未被本 feature 改动的真实逻辑，证明 `PlainGlobalCompositeBar` 的回调确实原样转发，而不只是外观正确）。
 6. **标题栏紧凑变体的真实可达性核实**（F110 S4 在 Browser dev server 里确认当前产品配置下标题栏不渲染 `PlainSimpleGlobalActivityActionViewItem` 这一紧凑变体，但这个结论来自网页版 dev server，真实 macOS `Plain.app` 的原生标题栏/自定义标题栏配置是否相同**从未在真实桌面上确认过**）：观察真实应用窗口标题栏区域，如实记录是否出现紧凑版 Manage 齿轮；若出现，断言其左键点击的主菜单/右键上下文菜单内容与步骤 5 的 Activity Bar 变体等价（两者共享同一套 `PlainGlobalActivityActionViewItem`/`PlainSimpleGlobalActivityActionViewItem` 回调）；若不出现，与 F110 S4 的既有结论一致，记录为确认而非新发现。
-7. **`extensionRuntime` 深度手术后的主题导入/替换/删除真实回归**：命令面板 `Plain: Import Color Theme (VSIX)...` 导入 `demo-theme-a.vsix`（真实系统文件选择器），断言成功 toast、Color Theme Quick Pick 出现 "E2E Demo Dark" 且应用后 `--vscode-editor-background` 变为 `#0a0a0a`；再次执行导入命令选择 `demo-theme-b.vsix`（同一 `publisher`/包名前缀不同版本或替换流程，视实际 UI 呈现按"替换已导入包"这条真实路径操作），断言替换成功、旧包的 `dispose()` 真实执行且**没有**任何 `deltaExtensions is not a function` 或其他 JS 异常（开发者工具 console 应无红色错误）；命令面板 `Plain: Remove Imported Color Theme...` 删除 `demo-theme-b`，同样断言删除成功、无异常、主题回退为内置默认。三步操作全程留意开发者工具 console，一旦出现任何提及 `deltaExtensions`/`IExtensionService`/`extensionService` 的报错，必须作为阻塞发现单独报告，不得归入本条目的常规完成流程。
+7. **`extensionRuntime` 深度手术后的主题导入/重复拒绝/删除真实回归**：命令面板 `Plain: Import Color Theme (VSIX)...` 导入 `demo-theme-a.vsix`（真实系统文件选择器），断言成功 toast、Color Theme Quick Pick 出现 "E2E Demo Dark" 且应用后 `--vscode-editor-background` 变为 `#0a0a0a`；再次选择同 package id/version 的 `demo-theme-b.vsix`，断言明确显示“already imported”去敏错误，旧包仍完整可用且磁盘不变——Rust 的 `THEME_PACKAGE_ALREADY_IMPORTED` 合同决定生产路径不存在“原地替换”，前端 re-registration dispose 只是一条防御分支；最后通过 `Plain: Remove Imported Color Theme...` 删除 A，实际执行 `registered.dispose()`，断言成功、无 `deltaExtensions`/`IExtensionService` 异常、主题回退内置默认且 selection 清除。
 8. 每步 UI 断言后尽量用一个平行的开发者工具 console 核对没有未预期的红色错误，而不仅凭 UI 呈现下结论。
 9. 清理：退出应用；删除 fixture VSIX、本次测试新建的主题库内容、截图与 `src-tauri/target`。
 
@@ -388,35 +388,35 @@ fixture（临时目录中构造，不提交仓库；可直接复用 E2E-005 已�
 
 ### E2E-013 · F130 十二条待执行条目总览、十条产品需求交叉索引与建议执行顺序
 
-状态：总览条目，本身不新增测试步骤。`F130`（浏览器与原生端到端验收，本项目最后一个 feature）完成最终验收收口时，`E2E-001` 至 `E2E-012` 共 12 条真实桌面验收条目仍**全部待执行**——`F130` 本身没有执行其中任何一条（详见 `features.json` F130 evidence 的 `nativeScenarios`：本次只做了 `pnpm tauri:build:e2e`/`pnpm exec tauri build --bundles app` 产出的 `.app` 静态检查与两次非 GUI 的进程级探测，未启动任何 Computer Use 交互式桌面会话），维持自 2026-07-22 起「Claude 负责可自动化验证、真实桌面验收交接人工/Codex」的既定分工。本条目的作用是把这 12 条待执行条目，按项目最初十条产品需求重新交叉索引，并区分「严格阻塞于签名/公证」与「无需签名、只是尚未执行」两类，给出一份可直接使用的执行顺序建议——而不是假设 12 条可以按登记顺序无差别逐条执行。
+状态：总览条目，本身不新增测试步骤。`F130` 收口时 12 条均待执行；截至 2026-07-31，Codex 已完成 `E2E-005` 与 `E2E-011`，余下 10 条继续按本总览执行。两条完成项均已把真实结果/缺陷修复回写到对应 feature evidence；本条目的十条需求交叉索引和签名阻塞分类继续有效。
 
 **十条产品需求 × 对应真实桌面验收条目**（完整对照见 `progress.md` 本次 `F130` 完成条目下的总表，逐条附证据引用；这里只列条目编号，避免重复）：
 
-| # | 需求 | 对应条目 |
-|---|------|----------|
-| 1 | VS Code 颜色主题扩展迁移 | `E2E-005`、`E2E-006` |
-| 2 | 不支持其他扩展 | `E2E-011` |
-| 3 | 移除 AI 相关功能 | `E2E-011` |
-| 4 | 保留调试功能 | `E2E-010`（步骤 3 例外，见下） |
-| 5 | 移除登录注册 | `E2E-011` |
-| 6 | 移除 settings-sync | `E2E-011` |
-| 7 | 保留终端 | `E2E-007` |
-| 8 | 保留 Git 并扩展为 GitLens 式增强 | `E2E-008`、`E2E-009` |
-| 9 | 保留文件树/预览/编辑 | `E2E-001`、`E2E-002`、`E2E-003` |
-| 10 | 保留搜索 | `E2E-004` |
+| #   | 需求                             | 对应条目                        |
+| --- | -------------------------------- | ------------------------------- |
+| 1   | VS Code 颜色主题扩展迁移         | `E2E-005`、`E2E-006`            |
+| 2   | 不支持其他扩展                   | `E2E-011`                       |
+| 3   | 移除 AI 相关功能                 | `E2E-011`                       |
+| 4   | 保留调试功能                     | `E2E-010`（步骤 3 例外，见下）  |
+| 5   | 移除登录注册                     | `E2E-011`                       |
+| 6   | 移除 settings-sync               | `E2E-011`                       |
+| 7   | 保留终端                         | `E2E-007`                       |
+| 8   | 保留 Git 并扩展为 GitLens 式增强 | `E2E-008`、`E2E-009`            |
+| 9   | 保留文件树/预览/编辑             | `E2E-001`、`E2E-002`、`E2E-003` |
+| 10  | 保留搜索                         | `E2E-004`                       |
 
 **严格阻塞于「签名公证到位」的条目（无法绕过，只能等产品所有者重新拍板）**：
 
 - `E2E-010` 步骤 3（真实 `lldb-dap` 原生调试）：`F120` S5 已实测确认，本沙箱下缺少 `com.apple.security.cs.debugger` entitlement 时 `task_for_pid`/真实 `lldb` 均会挂起；该 entitlement 因「无真机验证支撑、不应凭疑心扩大攻击面」被主导会话裁定不加。即便执行方拥有真实 Mac，只要这条 entitlement 决定不重新评估，本步骤依然无法完整验证，只能如实记录"阻塞于签名前提"。
 - `E2E-012` 项 1（ad-hoc hardened runtime + JIT entitlement 构建的真实 GUI 验证）与项 4（跨机器安装运行/真实公证后 Gatekeeper 行为）：项 4 严格阻塞于产品所有者已拍板的"暂不投入 Apple Developer Program"决定；项 1 本身**不需要**公证（本机 `open` 真实启动即可验证，`F130` 已用非 GUI 方式确认能启动，缺的只是真实 GUI 会话下的视觉/交互确认），但仍登记于此以保持与 `E2E-012` 原条目一致，执行时不应与项 4 混为一谈。
 
-**其余条目均不需要签名公证到位，只是尚未按既定分工执行**：`E2E-001`、`E2E-002`、`E2E-003`、`E2E-004`、`E2E-005`、`E2E-006`、`E2E-007`、`E2E-008`、`E2E-009`、`E2E-010`（除步骤 3 外）、`E2E-011`、`E2E-012` 项 2/3（CI 首跑，甚至不需要本机桌面，只需要一次真实 PR 触发 CI）。这些条目本机可用当前已构建或随时可重建的 `.app` 直接执行，不受签名状态影响。
+**其余未完成条目均不需要签名公证到位，只是尚未按既定分工执行**：`E2E-001`、`E2E-002`、`E2E-003`、`E2E-004`、`E2E-006`、`E2E-007`、`E2E-008`、`E2E-009`、`E2E-010`（除步骤 3 外）、`E2E-012` 项 2/3。`E2E-005` 与 `E2E-011` 已完成，不再列入待执行集合。
 
 **建议执行顺序**（供人工/Codex 参考，非强制）：
 
-1. `E2E-011`（去 AI/账号/sync 桌面巡检 + `extensionRuntime` 手术后回归）——覆盖需求 2/3/5/6 共四条产品硬边界，且 `F110` S5 已在 mock 层发现过真实回归（`deltaExtensions` 缺失），优先级最高。
+1. `E2E-011`（**已完成**：去 AI/账号/sync 桌面巡检 + `extensionRuntime` 手术后回归）——结果已回写 F110 evidence。
 2. `E2E-001`/`E2E-002`/`E2E-003`/`E2E-004`——文件树、编辑、热退出、搜索，覆盖需求 9/10 的基础打底能力，风险面广但相互独立，可并行安排。
-3. `E2E-005`/`E2E-006`——主题（需求 1），复用同一套 VSIX fixture 构造手法，建议连续执行。
+3. `E2E-005`（**已完成**）/`E2E-006`——颜色主题结果已回写 F050 evidence；文件/产品图标主题继续复用同一套 VSIX fixture 构造手法。
 4. `E2E-007`——终端（需求 7）。
 5. `E2E-008`/`E2E-009`——Git 与 Git 历史增强（需求 8），`E2E-008` 需要执行人自备真实远端凭据，建议提前准备。
 6. `E2E-010`——调试（需求 4），步骤 1/2/4/5/6/7 可执行；步骤 3 按上文如实标注"阻塞于签名前提"即可，不必等待。
