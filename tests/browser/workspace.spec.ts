@@ -9515,7 +9515,7 @@ const BUILT_IN_THEMES = Object.freeze([
 		className: "vscode-theme-defaults-themes-dark_modern-json",
 	},
 	{
-		label: "Dark (Visual Studio)",
+		label: "Dark",
 		className: "vscode-theme-defaults-themes-dark_vs-json",
 	},
 	{
@@ -9531,7 +9531,7 @@ const BUILT_IN_THEMES = Object.freeze([
 		className: "vscode-theme-defaults-themes-light_modern-json",
 	},
 	{
-		label: "Light (Visual Studio)",
+		label: "Light",
 		className: "vscode-theme-defaults-themes-light_vs-json",
 	},
 	{
@@ -9612,7 +9612,7 @@ test("lists all 10 built-in themes in their exact grouped order in the Color The
 	const pickerRows = picker.locator(".quick-input-list .monaco-list-row");
 	await expect(pickerRows).toHaveCount(BUILT_IN_THEMES.length);
 	for (const { label } of BUILT_IN_THEMES) {
-		await expect(pickerRows.filter({ hasText: label })).toHaveCount(1);
+		await expect(pickerRows.getByText(label, { exact: true })).toHaveCount(1);
 	}
 
 	// The currently active theme (Dark Modern, the bootstrap default) is
@@ -9636,7 +9636,7 @@ test("lists all 10 built-in themes in their exact grouped order in the Color The
 		await page.keyboard.press("ArrowUp");
 	}
 	for (const [index, { label }] of BUILT_IN_THEMES.entries()) {
-		await expect(focusedRow).toContainText(label);
+		await expect(focusedRow.locator(".label-name")).toHaveText(label);
 		if (index < BUILT_IN_THEMES.length - 1) {
 			await page.keyboard.press("ArrowDown");
 		}
@@ -10429,9 +10429,7 @@ test("lists vs-minimal and None in the File Icon Theme quick pick; None disables
 	const pickerRows = picker.locator(".quick-input-list .monaco-list-row");
 	await expect(pickerRows).toHaveCount(2);
 	await expect(pickerRows.filter({ hasText: "None" })).toHaveCount(1);
-	await expect(
-		pickerRows.filter({ hasText: "Minimal (Visual Studio Code)" }),
-	).toHaveCount(1);
+	await expect(pickerRows.getByText("Minimal", { exact: true })).toHaveCount(1);
 
 	// `vs-minimal` (Plain's own bootstrap default — see
 	// `VS_MINIMAL_FILE_ICON_THEME_SETTINGS_ID`) is pre-selected as the
@@ -10440,7 +10438,7 @@ test("lists vs-minimal and None in the File Icon Theme quick pick; None disables
 	const focusedRow = picker.locator(
 		".quick-input-list .monaco-list-row.focused",
 	);
-	await expect(focusedRow).toContainText("Minimal (Visual Studio Code)");
+	await expect(focusedRow.locator(".label-name")).toHaveText("Minimal");
 
 	// "None" is always the first row (see `noFileIconThemeItem`'s own doc
 	// comment) — one ArrowUp from the pre-selected Minimal entry reaches it.
@@ -10463,7 +10461,7 @@ test("lists vs-minimal and None in the File Icon Theme quick pick; None disables
 	);
 	await expect(secondFocusedRow).toContainText("None");
 	await page.keyboard.press("ArrowDown");
-	await expect(secondFocusedRow).toContainText("Minimal (Visual Studio Code)");
+	await expect(secondFocusedRow.locator(".label-name")).toHaveText("Minimal");
 	await page.keyboard.press("Enter");
 	await expect(secondPicker).toBeHidden();
 	await expect
