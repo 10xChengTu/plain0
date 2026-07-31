@@ -542,7 +542,7 @@
 
 ## 下一步
 
-1. 本项目原定的最后一个 feature（`F130`）已完成，没有下一个已规划的实现工作项。真实外部环境验收登记在 `docs/e2e-handover.md`（`E2E-001` 至 `E2E-013`）；Codex 已完成 `E2E-001` 至 `E2E-009`、`E2E-010` 的全部可执行场景、`E2E-011` 与 `E2E-012` 项 1。下一项是获得用户对当前本地提交推送到 GitHub 的明确授权后，触发并观察 `E2E-012` 项 2 的修复后真实 Actions run；项 3 为可选冷/热缓存对照，项 4 的跨机器公证仍受 Apple Developer Program 决策阻塞。`jschardet` LGPL-2.1+ 动态链接豁免适用性、`vscode-codicons` 精确 commit/version 比对、Ghostty vendor 二进制级 Nerd Fonts 链接确认三项仍标注为需人工确认，见「已知风险」。
+1. 本项目原定的最后一个 feature（`F130`）已完成，没有下一个已规划的实现工作项。真实外部环境验收登记在 `docs/e2e-handover.md`（`E2E-001` 至 `E2E-013`）；Codex 已完成 `E2E-001` 至 `E2E-009`、`E2E-010` 的全部可执行场景、`E2E-011` 与 `E2E-012` 项 1。`E2E-012` 项 2 的第二次真实 run 已证明 Vitest timeout 修复并暴露 Ubuntu `check` 缺 Zig；Zig 0.15.2 前置及其反向契约现已本地修复，下一步是提交、推送并观察第三次 Actions run，直到 `check` 与 `build-macos` 都获得真实结果。项 3 为可选冷/热缓存对照，项 4 的跨机器公证仍受 Apple Developer Program 决策阻塞。`jschardet` LGPL-2.1+ 动态链接豁免适用性、`vscode-codicons` 精确 commit/version 比对、Ghostty vendor 二进制级 Nerd Fonts 链接确认三项仍标注为需人工确认，见「已知风险」。
 
 ## 当前验收命令
 
@@ -554,6 +554,7 @@ pnpm test:e2e:browser
 
 ## 已知风险
 
+- 2026-07-31 `E2E-012` 第二次真实 Actions run `30640499415`（`main@3943767c`）证明上一轮 Vitest timeout 修复生效：Ubuntu `check` 中 **81 文件 / 1698 用例**在 65.56 秒内全部通过，随后 frontend build、architecture（89 app / 145 Rust / 17 pinned）、bundle（1985 sources / 53 debt）与 cargo fmt 均通过。新的真实失败出现在 `rust:clippy`：`pnpm check` 会调用 `ghostty:vendor:setup`，但 Ubuntu job 未像 `build-macos` 一样安装 Zig；脚本成功 clone pinned Ghostty 后连续 5 次 `spawnSync zig ENOENT`，导致 `check` 失败、`build-macos` 再次 skipped。workflow 现为 Ubuntu `check` 补入 `mlugg/setup-zig@v1`/0.15.2；CI 契约改为逐 job 扫描真实 `run:` step（忽略注释），要求 Zig action 出现在第一个 Rust/Ghostty consumer 之前并在自身 step 锁定 0.15.2，missing/late/version-drift 三类反向测试与真实 workflow 共 **9/9** 通过，完整 architecture check 通过。下一步推送第三次 run。
 - 2026-07-31 Codex 完成 `E2E-002` 双根永久删除补强：两个经真实 macOS 目录选择器独立授权的临时根分别显示 `delete-me.txt` 与 `keep-me.txt`；⌘Backspace 后 DOM 明示永久且不可撤销，取得用户即时确认后点击「永久删除」。目标文件从 Explorer 与磁盘同步消失，第二根文件仍可见且磁盘精确为 31 字节，未发现跨根误删或其他产品缺陷。
 - 2026-07-31 本轮 E2E 收口后的最终机器化回归：`pnpm check` 的格式、TypeScript、oxlint、feature、前端单测 **81 文件/1698 用例**、frontend build、architecture（89 app/145 Rust/17 pinned dependencies）、bundle（1985 sources/53 debt）、Rust fmt/clippy 均通过；受限命令沙箱中的 Rust 回环端口/特殊文件用例按预期以 `EPERM` 失败，随后在获准的非沙箱环境原命令全量复跑 **1178/1178** 通过。清理 Vite 缓存后完整 Browser E2E **99/99** 通过。首次 Browser 全量运行发现两条主题选择器用例仍断言上游旧品牌标签 `Dark (Visual Studio)`/`Light (Visual Studio)`/`Minimal (Visual Studio Code)`，而产品代码与反向契约已明确将真实 UI 去品牌为 `Dark`/`Light`/`Minimal`；测试现断言真实标签并使用 `.label-name`/精确文本避免 `Dark` 与 `Dark+` 子串误命中，聚焦 2/2 与随后全量 99/99 均通过（提交 `a70a3185`）。
 - 2026-07-31 `E2E-012` ad-hoc hardened-runtime + JIT GUI 验收中发现并修复一个与签名无关的残余上游入口：旧版 `Cmd+N` 仍可执行 `workbench.action.files.newUntitledFile`，编辑后关闭会调用被 Plain 明确排除的宽泛 `IFileDialogService.showSaveConfirm`，最终只显示 `Unsupported` 通知且无法关闭。`docs/architecture.md` 已声明 untitled/new-window/open-file 通用命令注册应由固定 vendor patch 移除，因此修复更新固定 `@codingame/monaco-vscode-api` patch，物理删除 `fileCommands.js` 的 keybinding+handler，并把该 command id 加入 Plain 的稳定拒绝闭集；未重新引入 `IFileDialogService`。patch/workspace-topology 聚焦契约 83/83 通过。重新构建的真实 `APPLE_SIGNING_IDENTITY=-` 应用由 `codesign` 确认 `flags=0x10002(adhoc,runtime)` 且只有 `com.apple.security.cs.allow-jit=true`；Workbench 正常渲染，在仓库内可写 APFS fixture 中真实输入 `HARDENED_RUNTIME_JIT_OK`、Cmd+S 后磁盘精确出现，再恢复并保存为原始 20 字节，修复版 `Cmd+N` 不再产生新 tab/Untitled。`E2E-012` 项 1 完成。

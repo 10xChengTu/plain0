@@ -21,7 +21,10 @@
 // scoped to *the same job* that declares the macOS runner, not merely
 // "somewhere in the file" -- a job that only runs `pnpm check` on macOS
 // while an unrelated job elsewhere mentions `tauri build` in a comment
-// would not satisfy this.
+// would not satisfy this. The same job blocks also lock the real prerequisite
+// discovered by E2E-012 run 30640499415: every job that reaches Rust through
+// `pnpm check`, `ghostty:vendor:setup`, or `tauri build` must install the
+// repository's pinned Zig 0.15.2 before the first such consumer.
 function splitIntoJobBlocks(yamlText) {
 	const lines = yamlText.split("\n");
 	const jobsIndex = lines.findIndex((line) => /^jobs:\s*$/.test(line));
@@ -55,6 +58,43 @@ function splitIntoJobBlocks(yamlText) {
 const MACOS_RUNNER_PATTERN = /runs-on:\s*macos-[\w.-]+/;
 const REAL_TAURI_BUILD_STEP_PATTERN =
 	/\bpnpm (?:run )?tauri:build\b|\btauri build\b/;
+const ZIG_CONSUMER_PATTERN =
+	/^\s+-\s+run:\s+.*(?:\bpnpm (?:run )?check\b|\bpnpm (?:run )?ghostty:vendor:setup\b|\btauri build\b)/m;
+const ZIG_SETUP_ACTION_PATTERN = /uses:\s*mlugg\/setup-zig@v1\b/;
+const PINNED_ZIG_VERSION_PATTERN = /^\s+version:\s*["']?0\.15\.2["']?\s*$/m;
+
+function validatePinnedZigBeforeConsumers(jobs) {
+	const failures = [];
+	for (const job of jobs) {
+		const consumerIndex = job.text.search(ZIG_CONSUMER_PATTERN);
+		if (consumerIndex === -1) {
+			continue;
+		}
+
+		const setupIndex = job.text.search(ZIG_SETUP_ACTION_PATTERN);
+		if (setupIndex === -1 || setupIndex > consumerIndex) {
+			failures.push(
+				`CI job "${job.name}" reaches Rust/Ghostty before installing Zig with mlugg/setup-zig@v1`,
+			);
+			continue;
+		}
+
+		const setupTail = job.text.slice(setupIndex);
+		const nextStepOffset = setupTail
+			.slice(1)
+			.search(/^\s+-\s+(?:uses|run|name):/m);
+		const setupBlock =
+			nextStepOffset === -1
+				? setupTail
+				: setupTail.slice(0, nextStepOffset + 1);
+		if (!PINNED_ZIG_VERSION_PATTERN.test(setupBlock)) {
+			failures.push(
+				`CI job "${job.name}" must pin mlugg/setup-zig@v1 to Zig 0.15.2 before Rust/Ghostty commands`,
+			);
+		}
+	}
+	return failures;
+}
 
 export function validateMacOSPackagingWorkflow(yamlText) {
 	const jobs = splitIntoJobBlocks(yamlText);
@@ -72,5 +112,5 @@ export function validateMacOSPackagingWorkflow(yamlText) {
 			'the macOS CI job does not run a real `tauri build` -- a macos-* runner alone (e.g. one that only runs `pnpm check`) does not satisfy "macOS packages build in CI"',
 		];
 	}
-	return [];
+	return validatePinnedZigBeforeConsumers(jobs);
 }
