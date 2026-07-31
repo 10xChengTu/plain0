@@ -126,6 +126,7 @@ export class DebugSessionController {
 	readonly #stateListeners = new Set<DebugSessionChangeListener>();
 	readonly #eventListeners = new Set<DebugSessionEventListener>();
 	#state: DebugSessionState | null = null;
+	#pendingStartEvents: DebugEventPayload[] | undefined;
 	#unwatch: Unlisten | undefined;
 	#unwatchBreakpoints: { dispose(): void } | undefined;
 
@@ -167,7 +168,20 @@ export class DebugSessionController {
 	}
 
 	#handleEvent(event: DebugEventPayload): void {
-		if (this.#state === null || event.sessionId !== this.#state.sessionId) {
+		if (this.#state === null) {
+			// A real adapter may emit events before the launch/attach request has
+			// returned its session id. debugpy's runInTerminal reverse request does
+			// exactly that during launch configuration. Keep this bounded startup
+			// window and replay only the events matching the returned session below.
+			if (this.#pendingStartEvents !== undefined) {
+				if (this.#pendingStartEvents.length === 256) {
+					this.#pendingStartEvents.shift();
+				}
+				this.#pendingStartEvents.push(event);
+			}
+			return;
+		}
+		if (event.sessionId !== this.#state.sessionId) {
 			return;
 		}
 		for (const listener of this.#eventListeners) {
@@ -293,10 +307,19 @@ export class DebugSessionController {
 		launchArguments: Readonly<Record<string, unknown>>,
 	): Promise<DebugSessionState> {
 		this.#ensureWatching();
-		const result =
-			kind === "launch"
-				? await this.#bridge.debugLaunch(target, adapterId, launchArguments)
-				: await this.#bridge.debugAttach(target, adapterId, launchArguments);
+		this.#pendingStartEvents = [];
+		let result: Awaited<ReturnType<DebugSessionBridge["debugLaunch"]>>;
+		try {
+			result =
+				kind === "launch"
+					? await this.#bridge.debugLaunch(target, adapterId, launchArguments)
+					: await this.#bridge.debugAttach(target, adapterId, launchArguments);
+		} catch (error) {
+			this.#pendingStartEvents = undefined;
+			throw error;
+		}
+		const pendingStartEvents = this.#pendingStartEvents;
+		this.#pendingStartEvents = undefined;
 		const started: DebugSessionState = {
 			sessionId: result.sessionId,
 			capabilities: result.capabilities,
@@ -304,6 +327,9 @@ export class DebugSessionController {
 			lastKnownThreadId: null,
 		};
 		this.#setState(started);
+		for (const event of pendingStartEvents) {
+			this.#handleEvent(event);
+		}
 		await this.#pushEveryPath();
 		return started;
 	}
@@ -424,6 +450,7 @@ export class DebugSessionController {
 	}
 
 	dispose(): void {
+		this.#pendingStartEvents = undefined;
 		this.#stateListeners.clear();
 		this.#eventListeners.clear();
 		this.#unwatchBreakpoints?.dispose();

@@ -135,6 +135,42 @@ describe("DebugSessionController", () => {
 		expect(bridge.debugLaunch).not.toHaveBeenCalled();
 	});
 
+	it("replays matching events that arrive before launch returns its session id", async () => {
+		let emitDuringLaunch: (event: DebugEventPayload) => void = () => {};
+		const handle = fakeBridge({
+			debugLaunch: vi.fn(async () => {
+				emitDuringLaunch({
+					sessionId: "stale-session",
+					event: "plain/runInTerminal",
+					body: { terminalSessionId: "stale-terminal", title: "stale" },
+				});
+				emitDuringLaunch({
+					sessionId: "session-during-launch",
+					event: "plain/runInTerminal",
+					body: { terminalSessionId: "terminal-1", title: "main.py" },
+				});
+				return { sessionId: "session-during-launch", capabilities: {} };
+			}),
+		});
+		emitDuringLaunch = handle.emit;
+		const controller = new DebugSessionController(
+			handle.bridge,
+			new DebugBreakpointStore(),
+		);
+		const events: DebugEventPayload[] = [];
+		controller.onEvent((event) => events.push(event));
+
+		await controller.start("launch", STDIO_TARGET, "debugpy", {});
+
+		expect(events).toEqual([
+			{
+				sessionId: "session-during-launch",
+				event: "plain/runInTerminal",
+				body: { terminalSessionId: "terminal-1", title: "main.py" },
+			},
+		]);
+	});
+
 	it("a stopped event for the current session updates stoppedThreadId and notifies listeners", async () => {
 		const { bridge, emit } = fakeBridge();
 		const controller = new DebugSessionController(
