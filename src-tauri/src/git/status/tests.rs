@@ -502,6 +502,11 @@ fn submodule_states_cover_all_four_flag_combinations() {
 
     // Commit changed inside the submodule.
     let sub_dir = outer.path().join("sub");
+    raw_git_ok(
+        &sub_dir,
+        &["config", "user.email", "plain-test@example.invalid"],
+    );
+    raw_git_ok(&sub_dir, &["config", "user.name", "Plain Test"]);
     std::fs::write(sub_dir.join("f.txt"), "hi\nmore\n").unwrap();
     raw_git_ok(&sub_dir, &["commit", "--quiet", "-am", "more"]);
     let commit_changed = parse_porcelain_v2(&raw_status_bytes(outer.path())).expect("parses");
