@@ -237,7 +237,7 @@ fixture（临时目录中创建，不提交仓库）：
 
 ### E2E-008 · F080 S4 真实凭证/SSH agent/远端网络矩阵（fetch/pull/push）
 
-状态：待执行。本切片（S4）的机制层证据已全部闭合，且刻意选择了**完全不触网**的证明手法：`src-tauri/src/git/exec/tests.rs`（`network_mode_fixtures` 模块）用真实 `git` 二进制 + 真实本机 `ssh-agent`（`ssh-add -l` 在 `SSH_AUTH_SOCK` 存在/缺失两种状态下的真实差异）+ `core.sshCommand` 替身脚本证明 `SSH_AUTH_SOCK` 确实透传到子进程环境；用真实 `git credential fill`（无网络的本地凭据子系统调用）证明 `GIT_ASKPASS` 拒绝程序确实优先于仓库自身 `core.askPass` 配置生效、且一个完整满足的 `credential.helper` 响应能让 askpass 全程不被咨询；用真实 `pre-push` hook + 本地 `git init --bare` 充当"远端"证明网络模式放行仓库自身 hooks。`src-tauri/src/git/network/tests.rs` 用同样的本地 bare 仓库手法覆盖 fetch/pull/push 的 porcelain 正确性（ahead/behind 预览、fast-forward、divergence 拒绝、`--force-with-lease` 的合法/过期两种结果）与 `GitNetworkService::request_cancel` 的取消标志本身。Browser E2E 覆盖了预览+确认 UI 全链路（fetch/pull/push 三种确认文案、force push 的独立措辞与按钮、无 upstream 时 pull/push 预览 fail-closed、从不弹窗也从不调用桥接方法、Cancel 按钮在真实进行中的调用期间可点击并触发 `gitNetworkCancel`）。本条目补的是这些机制层证据无法触达的维度：**真实凭据存储**（macOS Keychain/`git-credential-osxkeychain`）、**真实 ssh-agent 对真实远端的完整握手**、**真实网络远端**上的 fetch/pull/push、以及认证失败/凭据缺失时的真实用户可见文案——这些都需要真实桌面 + 真实（或至少真实协议层的）远端，Rust 单元测试和 Browser mock 都无法替代。
+状态：**阻塞于用户凭据（2026-07-31 实时核对）**。`gh auth status` 显示本机已登记的两套 GitHub CLI 账号令牌均失效，`ssh-add -l` 在真实宿主进程环境中返回 `The agent has no identities.`；当前既无可用 HTTPS 登录，也无已加载、对测试仓库有推送权限的 SSH identity，因此无法安全创建本条要求的双协议真实远端 fixture。未尝试读取、重置或替用户创建任何凭据，也未把本地 bare 仓库冒充为本条的真实网络证据。待用户重新登录一个可创建临时仓库的 GitHub 账号并向 ssh-agent 加载对应密钥后，从步骤 1 继续。
 
 fixture（临时目录/临时远端中创建，不提交仓库；具体凭据由执行人自备，不得写入仓库或本清单）：
 
