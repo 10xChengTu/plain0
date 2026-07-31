@@ -1,6 +1,6 @@
 # Plain 重写进度
 
-更新时间：2026-07-30（`F130` 最终端到端验收收口：十条原始产品需求逐条对照 `F001`-`F120` 已闭环 evidence 复核完毕——八条达成、两条（去 AI、去登录）是精确的部分完成而非全部移除；`pnpm check`/`pnpm test:e2e:browser`/`pnpm tauri:build:e2e`/`pnpm exec tauri build --bundles app` 全部真实复跑且零漂移；`.app` 静态检查发现一个此前未披露的细节——默认（无签名身份）构建的 `codesign --verify`/`spctl -a -vv` 报 "code has no resources but signature indicates they must be present" 而非 `F120` 记录的单纯 `rejected`，已交叉核实对本地无 quarantine 属性的开发/E2E 闭环零影响；`docs/e2e-handover.md` 新增 `E2E-013` 汇总并重新排定 `E2E-001`-`E2E-012` 共 12 条待执行桌面验收的优先级。`F130` 转 `complete`，14 个 feature 全部完成，WIP 回落为无。详见「已完成」与「已知风险」新增条目）
+更新时间：2026-07-31（Codex 正在执行真实桌面验收；已完成 `E2E-001`、`E2E-005` 与 `E2E-011`，其余条目继续按 `docs/e2e-handover.md` 执行）
 
 ## 当前状态
 
@@ -542,7 +542,7 @@
 
 ## 下一步
 
-1. 本项目原定的最后一个 feature（`F130`）已完成，没有下一个已规划的实现工作项。剩余工作全部是真实桌面（Computer Use/人工）验收，登记在 `docs/e2e-handover.md`（`E2E-001` 至 `E2E-013`），由用户视需要交接人工或 Codex 执行；`E2E-013` 给出了跨 12 条条目的优先级建议与「哪些严格阻塞于签名公证」的划分。`jschardet` LGPL-2.1+ 动态链接豁免适用性、`vscode-codicons` 精确 commit/version 比对、Ghostty vendor 二进制级 Nerd Fonts 链接确认三项仍标注为需人工确认，见「已知风险」。
+1. 本项目原定的最后一个 feature（`F130`）已完成，没有下一个已规划的实现工作项。剩余工作全部是真实桌面（Computer Use/人工）验收，登记在 `docs/e2e-handover.md`（`E2E-001` 至 `E2E-013`）；Codex 已完成 `E2E-001`、`E2E-005` 与 `E2E-011`，继续执行其余条目。`E2E-013` 给出了跨 12 条条目的优先级建议与「哪些严格阻塞于签名公证」的划分。`jschardet` LGPL-2.1+ 动态链接豁免适用性、`vscode-codicons` 精确 commit/version 比对、Ghostty vendor 二进制级 Nerd Fonts 链接确认三项仍标注为需人工确认，见「已知风险」。
 
 ## 当前验收命令
 
@@ -554,6 +554,7 @@ pnpm test:e2e:browser
 
 ## 已知风险
 
+- 2026-07-31 Codex 完成 `E2E-001` 真实 multi-root 桌面验收：原生选择器双根投影、两根分别编辑保存、跨根 Copy/Paste 与 Cut/Paste 的逐字节磁盘核对、两根独立 FSEvents 新增/删除收敛、依次移除到空工作区并按绝对路径重开均通过；全程未点 Explorer Refresh，fixture 已清理，本条未发现产品缺陷。
 - 2026-07-31 Codex 完成 `E2E-005` 与 `E2E-011` 真实桌面验收。`E2E-005` 在当前绝对路径 debug `Plain.app` 上闭合合法 VSIX 原生选择器导入、`#0a0a0a` 主题/磁盘 selection 冷启动保持、Zip Slip 与无主题包去敏拒绝且零残留、移除活动包后立即回退 Dark Modern/删除包与 selection/再次冷启动保持。真实 WKWebView 共暴露并修复三处 Browser mock 未发现的缺陷：①等待 `LifecyclePhase.Restored` 且把默认/持久化三轴 apply 放到导入包消费之后；②打包后 `extension-file` 读取 `tauri://` 主题资产会 `Load failed`，改由 `plain-builtin-theme-extension.ts` 把锁定上游 JSON/NLS 注册为只读内存文件、SVG 保留进程期 blob URL，同时把上游文件图标品牌标签收窄为 `Minimal` 通过 bundle 品牌门；③移除包时运行时主题 id/settingsId 不足以保证 Rust selection 清理，现同时读取持久化三轴 selection 决定回退与清除。`E2E-011` 完成命令面板 20+ 关键词、真实菜单、Activity Bar/Manage 左右键、标题栏紧凑变体巡检，未发现 Chat/Copilot/Agent/MCP/账号/登录/sync/扩展宿主/Marketplace/remote/notebook/task/testing 可达入口；Settings UI 当前不可达；主题导入/重复拒绝/删除无 `deltaExtensions` 异常，并修正文档中不可达的“原地替换”假设。验证：前端 81 文件/1692 用例、主题 Browser E2E 3/3、架构/bundle 门、clippy、Rust 1177/1177；提交 `0aa7ab14`、`e7c74a59`。
 - 旧源码迁移 oracle Code OSS 1.130、产品运行时 `monaco-vscode-api@35.0.1` 对应的 Code OSS 1.128.1（upstream commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`）和 SideX 约 1.96/1.110 的接口存在漂移；Rust/TS 实现都不能直接套用任一旧结构。
 - SideX 源码审计发现路径逃逸、宽泛 Git 执行、DAP Unicode framing、watcher 无界队列、主题格式和 CSP/capability 问题；只保留失败模式和纯逻辑参考。

@@ -140,10 +140,13 @@
 					"The native Explorer created an empty file, saved an exact 31-byte edit, created a nested directory, renamed within the same root and copied a file, with every result verified on disk.",
 					"External file additions and deletions converged in the Explorer on the first FSEvents poll with no manual Refresh click.",
 					"The Workbench DOM confirmation dialog was cancelled via both the Cancel button and Escape, leaving the target file and its disk bytes and SHA-256 unchanged.",
-					"After explicit user confirmation, clicking the irreversible permanent-delete action removed the target from the Explorer, the preview editor and disk, leaving the workspace directory empty."
+					"After explicit user confirmation, clicking the irreversible permanent-delete action removed the target from the Explorer, the preview editor and disk, leaving the workspace directory empty.",
+					"The 2026-07-31 real multi-root desktop session opened and added two independently authorized roots through native macOS pickers, then rendered both roots and their files in the Explorer.",
+					"Native create/save plus cross-root copy and move were verified byte-for-byte on disk: copy retained the source, move removed the source, and every target held the exact expected bytes.",
+					"Independent external additions in both roots appeared on the first no-Refresh Computer Use sample, and an external deletion disappeared on the first sample 350 ms later.",
+					"Removing the secondary root left only the primary; removing the final root showed the no-folder Explorer with Open Folder, and reopening the primary by absolute native-picker path succeeded."
 				],
 				"platformGaps": [
-					"The real multi-root desktop matrix (dual-root projection, cross-root disk write chain, per-root FSEvents convergence and root add/remove lifecycle) is registered as E2E-001 in docs/e2e-handover.md and handed over to Codex for native execution.",
 					"The multi-root permanent-delete desktop variant is registered as E2E-002 in docs/e2e-handover.md as a lower-priority handover to Codex.",
 					"Windows and Linux native packaging remains F120.",
 					"Zeroing the monaco-vscode-api bundle migration debt remains F110."
@@ -155,7 +158,7 @@
 					},
 					{
 						"acceptance": "A workspace can hold multiple independently authorized canonical roots",
-						"result": "Rust capability/watcher tests plus Browser multi-root projection, cross-root write-chain, removal and incomplete-outcome fixtures passed; the real native multi-root desktop matrix is tracked as E2E-001 in docs/e2e-handover.md."
+						"result": "Rust capability/watcher tests and Browser fixtures passed; E2E-001 then verified real native two-root projection, byte-exact cross-root copy/move, independent FSEvents and the complete add/remove/reopen lifecycle."
 					},
 					{
 						"acceptance": "Symlink and traversal escapes are rejected",
@@ -163,7 +166,7 @@
 					},
 					{
 						"acceptance": "External changes update the tree with rescan fallback",
-						"result": "The real single-root desktop session converged instantly through FSEvents, and the Browser fixture verified lost-wake timer convergence and independent per-root convergence across two roots."
+						"result": "The real single-root and multi-root desktop sessions both converged through FSEvents without Refresh; the two-root run observed both external additions on its first post-command sample and a deletion on its first 350 ms sample."
 					}
 				]
 			}
