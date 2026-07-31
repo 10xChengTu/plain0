@@ -477,6 +477,7 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/services/resolverService.service",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files.service",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/multiDiffEditor/browser/multiDiffSourceResolverService.service",
+	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/lifecycle/common/lifecycle",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service",
 	"app/main.ts:@codingame/monaco-vscode-configuration-service-override",
 	"app/main.ts:@codingame/monaco-vscode-files-service-override",
@@ -5757,6 +5758,7 @@ function validateTopologyAuthority(authority) {
 		hasExactNamedImport(mainSource, "@codingame/monaco-vscode-api", [
 			"getService",
 			"IContextKeyService",
+			"ILifecycleService",
 			"INotificationService",
 			"IWorkspaceContextService",
 			"initialize",

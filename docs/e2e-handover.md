@@ -91,7 +91,7 @@ fixture（临时目录中创建）：
 
 ### E2E-005 · F050 VS Code 主题兼容的真实桌面矩阵
 
-状态：待执行。Browser mock 层已全部闭合（S0-S4：内置主题激活与选择器、Rust VSIX/目录安全解包、manifest/主题校验与恶意 fixture 矩阵、导入 UX 与注册消费、selection 跨会话持久化与失效 id 回退，见 progress.md 与 `tests/browser/workspace.spec.ts`）；本条目补真实系统文件选择器、真实 `<app_local_data_dir>` 磁盘持久化路径和真实进程重启这几个 mock 无法替代的维度。
+状态：执行中（2026-07-31 已完成步骤 1-2）。真实系统文件选择器导入合法 VSIX 成功，toast 与 `<app_local_data_dir>/themes/` 磁盘内容均核对通过；首次真实完全退出/重启暴露出 Workbench 布局恢复晚于 Plain 主题 apply 的 WKWebView 启动竞态，已改为等待 `LifecyclePhase.Restored` 后再应用三轴默认/持久化主题，并以重新构建的当前绝对路径 debug `.app` 复核 `E2E Demo Dark` 启动即恢复。步骤 3-4（恶意包拒绝、删除回退及再次重启）仍待执行。Browser mock 层原有证据已全部闭合（S0-S4：内置主题激活与选择器、Rust VSIX/目录安全解包、manifest/主题校验与恶意 fixture 矩阵、导入 UX 与注册消费、selection 跨会话持久化与失效 id 回退，见 progress.md 与 `tests/browser/workspace.spec.ts`）。
 
 fixture（临时目录中构造，不提交仓库）：
 

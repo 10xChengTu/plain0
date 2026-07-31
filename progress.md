@@ -554,6 +554,7 @@ pnpm test:e2e:browser
 
 ## 已知风险
 
+- 2026-07-31 执行 `E2E-005` 时发现并修复真实 WKWebView 启动竞态：合法 VSIX 导入、应用与 `selection.plain.json` 写入均成功，但完整退出再启动后，Workbench 的异步布局恢复会覆盖 Plain 在 `LifecyclePhase.Ready` 阶段应用的默认/持久化主题，界面回到浅色未主题化状态；`app/main.ts` 现等待 `LifecyclePhase.Restored` 后再应用默认与持久化的颜色/文件图标/产品图标三轴主题，新增源码合同锁定六个启动 apply 均位于该 barrier 之后。重新构建当前绝对路径下的 debug `.app` 后，真实完全退出/重启已复核 `E2E Demo Dark` 启动即恢复，磁盘 selection 与导入包资源保持一致。`E2E-005` 步骤 1-2 已通过，恶意包拒绝与删除回退步骤仍待后续执行。
 - 旧源码迁移 oracle Code OSS 1.130、产品运行时 `monaco-vscode-api@35.0.1` 对应的 Code OSS 1.128.1（upstream commit `5264f2156cbcd7aea5fd004d29eaa10209155d66`）和 SideX 约 1.96/1.110 的接口存在漂移；Rust/TS 实现都不能直接套用任一旧结构。
 - SideX 源码审计发现路径逃逸、宽泛 Git 执行、DAP Unicode framing、watcher 无界队列、主题格式和 CSP/capability 问题；只保留失败模式和纯逻辑参考。
 - `monaco-vscode-api` 的 `missing-services.js`（及其 `services.js` 门面自身独立的 re-export 路径，F110 S2 才发现的第二条可达路径）仍让 bundle source map 含 **53** 个 Auth/Chat-Agent/Extension-Runtime/Notebook/Remote/LanguagePacks/LanguageDetection/TreeSitter 债务源（`mcp`/`syncEditSessions`/`tasks`/`testing` 已清零，不再计入；F110 S0 冻结时为 260，S2 降到 231，S3 降到 117，S4 降到 113，S5 `extensionRuntime` 深度手术降到 84，S6 剩余 7 个 category 清零降到 53；`docs/bundle-baseline.json` 的 `categoryNotes` 逐类记录地板值与理由——`authAccount` 剩余 1 个文件被 `chatAgent` 自己的地板决策钉住，`extensionRuntime` 剩余 19 个文件逐一有真实非可选消费者，`notebook`/`remote`/`languagePacks` 剩余文件被本切片实测确认的真实、独立于 `missing-services.js` 的消费点钉住，`languageDetection`/`treeSitter` 是本切片有意零改动的两类，交叉引用见「当前状态」）；运行时 guard 保证当前不可达。`F110` S0–S6 均已完成，仅剩 S7 收口（跨切片 evidence 闭环、文档措辞修正、`features.json` 转 `complete`），不再需要继续物理清零任何 category。

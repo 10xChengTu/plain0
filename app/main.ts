@@ -3,6 +3,7 @@ import "@codingame/monaco-vscode-theme-defaults-default-extension";
 import {
 	getService,
 	IContextKeyService,
+	ILifecycleService,
 	INotificationService,
 	IWorkspaceContextService,
 	initialize,
@@ -15,6 +16,7 @@ import { ITextModelService } from "@codingame/monaco-vscode-api/vscode/vs/editor
 import { ILanguageFeaturesService } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/services/languageFeatures.service";
 import { IMultiDiffSourceResolverService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/multiDiffEditor/browser/multiDiffSourceResolverService.service";
 import { IFileService } from "@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files.service";
+import { LifecyclePhase } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/lifecycle/common/lifecycle";
 import { IWorkbenchThemeService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service";
 
 import { EXCLUDED_SURFACE_GUARD_MARKER } from "./excluded-surface-policy";
@@ -344,6 +346,14 @@ async function bootstrap(): Promise<void> {
 	const productIconThemeRegistry =
 		await createPlainProductIconThemeRegistry(themeFileService);
 	const themeService = await getService(IWorkbenchThemeService);
+	// `initialize()` resolves once services reach LifecyclePhase.Ready, while
+	// Workbench layout restoration continues asynchronously and can still apply
+	// its own stored/unloaded theme before LifecyclePhase.Restored. Chromium's
+	// Browser E2E happened to settle in the opposite order, but a real WKWebView
+	// reproducibly overwrote both Plain's default and a persisted imported theme
+	// after these calls returned. Apply all three axes only after restoration so
+	// this block is the final startup theme authority on every renderer.
+	await (await getService(ILifecycleService)).when(LifecyclePhase.Restored);
 	await applyDefaultColorTheme(themeService, themeRegistry);
 	await applyDefaultFileIconTheme(themeService, fileIconThemeRegistry);
 	await applyDefaultProductIconTheme(themeService);
