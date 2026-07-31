@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v1
+      - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
       - run: pnpm check
@@ -26,9 +26,10 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v1
+      - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
+      - run: pnpm ghostty:vendor:setup
       - run: pnpm tauri:build
 `;
 
@@ -96,7 +97,7 @@ describe("validateMacOSPackagingWorkflow", () => {
   build-macos:
     runs-on: macos-latest
     steps:
-      - uses: mlugg/setup-zig@v1
+      - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
       - run: pnpm exec tauri build
@@ -106,30 +107,41 @@ describe("validateMacOSPackagingWorkflow", () => {
 
 	it("rejects a pnpm check job that never installs Zig", () => {
 		const missingCheckZig = cleanWorkflow.replace(
-			`      - uses: mlugg/setup-zig@v1
+			`      - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
       - run: pnpm check`,
 			"      - run: pnpm check",
 		);
 		expect(validateMacOSPackagingWorkflow(missingCheckZig)).toEqual([
-			'CI job "check" reaches Rust/Ghostty before installing Zig with mlugg/setup-zig@v1',
+			'CI job "check" reaches Rust/Ghostty before installing Zig with mlugg/setup-zig@v2',
 		]);
 	});
 
 	it("rejects a Zig setup that runs after pnpm check", () => {
 		const lateCheckZig = cleanWorkflow.replace(
-			`      - uses: mlugg/setup-zig@v1
+			`      - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
       - run: pnpm check`,
 			`      - run: pnpm check
-      - uses: mlugg/setup-zig@v1
+      - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2`,
 		);
 		expect(validateMacOSPackagingWorkflow(lateCheckZig)).toEqual([
-			'CI job "check" reaches Rust/Ghostty before installing Zig with mlugg/setup-zig@v1',
+			'CI job "check" reaches Rust/Ghostty before installing Zig with mlugg/setup-zig@v2',
+		]);
+	});
+
+	it("rejects the stale v1 action major even with the pinned Zig version", () => {
+		const staleZigAction = cleanWorkflow.replaceAll(
+			"mlugg/setup-zig@v2",
+			"mlugg/setup-zig@v1",
+		);
+		expect(validateMacOSPackagingWorkflow(staleZigAction)).toEqual([
+			'CI job "check" reaches Rust/Ghostty before installing Zig with mlugg/setup-zig@v2',
+			'CI job "build-macos" reaches Rust/Ghostty before installing Zig with mlugg/setup-zig@v2',
 		]);
 	});
 
@@ -139,7 +151,7 @@ describe("validateMacOSPackagingWorkflow", () => {
 			"          version: 0.14.1",
 		);
 		expect(validateMacOSPackagingWorkflow(wrongZigVersion)).toEqual([
-			'CI job "check" must pin mlugg/setup-zig@v1 to Zig 0.15.2 before Rust/Ghostty commands',
+			'CI job "check" must pin mlugg/setup-zig@v2 to Zig 0.15.2 before Rust/Ghostty commands',
 		]);
 	});
 });

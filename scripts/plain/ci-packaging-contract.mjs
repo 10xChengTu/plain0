@@ -60,7 +60,7 @@ const REAL_TAURI_BUILD_STEP_PATTERN =
 	/\bpnpm (?:run )?tauri:build\b|\btauri build\b/;
 const ZIG_CONSUMER_PATTERN =
 	/^\s+-\s+run:\s+.*(?:\bpnpm (?:run )?check\b|\bpnpm (?:run )?ghostty:vendor:setup\b|\btauri build\b)/m;
-const ZIG_SETUP_ACTION_PATTERN = /uses:\s*mlugg\/setup-zig@v1\b/;
+const ZIG_SETUP_ACTION_PATTERN = /uses:\s*mlugg\/setup-zig@v2\b/;
 const PINNED_ZIG_VERSION_PATTERN = /^\s+version:\s*["']?0\.15\.2["']?\s*$/m;
 
 function validatePinnedZigBeforeConsumers(jobs) {
@@ -74,7 +74,7 @@ function validatePinnedZigBeforeConsumers(jobs) {
 		const setupIndex = job.text.search(ZIG_SETUP_ACTION_PATTERN);
 		if (setupIndex === -1 || setupIndex > consumerIndex) {
 			failures.push(
-				`CI job "${job.name}" reaches Rust/Ghostty before installing Zig with mlugg/setup-zig@v1`,
+				`CI job "${job.name}" reaches Rust/Ghostty before installing Zig with mlugg/setup-zig@v2`,
 			);
 			continue;
 		}
@@ -89,7 +89,7 @@ function validatePinnedZigBeforeConsumers(jobs) {
 				: setupTail.slice(0, nextStepOffset + 1);
 		if (!PINNED_ZIG_VERSION_PATTERN.test(setupBlock)) {
 			failures.push(
-				`CI job "${job.name}" must pin mlugg/setup-zig@v1 to Zig 0.15.2 before Rust/Ghostty commands`,
+				`CI job "${job.name}" must pin mlugg/setup-zig@v2 to Zig 0.15.2 before Rust/Ghostty commands`,
 			);
 		}
 	}

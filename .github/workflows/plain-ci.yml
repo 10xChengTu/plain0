@@ -26,7 +26,7 @@ jobs:
           components: clippy,rustfmt
       # pnpm check reaches libghostty-vt-sys through rust:clippy/rust:test,
       # so the Ubuntu gate needs the same pinned Zig toolchain as packaging.
-      - uses: mlugg/setup-zig@v1
+      - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
       - uses: Swatinem/rust-cache@v2
@@ -74,7 +74,7 @@ jobs:
       # local development environment pins Zig 0.15.x, so CI must install
       # the same major/minor line rather than relying on whatever (if
       # anything) macos-latest ships by default.
-      - uses: mlugg/setup-zig@v1
+      - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
       - run: pnpm install --frozen-lockfile
