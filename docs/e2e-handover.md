@@ -311,7 +311,7 @@ fixture（临时目录中创建，不提交仓库）：
 
 ### E2E-010 · F100 真实原生调试器与真实桌面 DAP 全链路矩阵
 
-状态：待执行。本条目补的是 F100 全部六个实现切片（S0-S5）里，Rust 单元测试、真实子进程集成测试与 Browser mock 都无法替代的几个维度。**如实声明本条目的起点**：F100 是本项目迄今唯一一个**完全没有任何真实桌面（Computer Use）验收证据**的已完成 feature——S0 调研阶段确实用一个手写零依赖 Python 分帧客户端跑通了真实 `lldb-dap`（`initialize`/Capabilities 握手成功，但真正启动被调试进程在该沙箱环境下完全挂起）与真实 `debugpy`（完整端到端会话，含真实断点命中）的协议层握手，S2-S5 的全部 Rust 集成测试也都针对真实 spawn 的 Python mock adapter 子进程与真实 TCP socket，但这些都不是"在一个真实运行的 Plain.app 桌面会话里"的证据；本条目要补的正是这最后一环。
+状态：**执行中（2026-07-31）**。trust Cancel/Trust & Continue、精确 adapter 命令/transport/source 首次确认、跨冷启动持久化与真实 debugpy stdout 已完成。首次 Python 3.12/debugpy 1.8.21 会话暴露标准 `terminated` 后 UI 永久停在 `Running…` 且 adapter 驻留的缺陷；修复后同一真实会话输出 `sum=7`、自动回到 `Not debugging.` 且 adapter/debuggee PID 全消失，聚焦单测 18/18 与 app 重建通过。其余步骤继续执行；`lldb-dap` 仍按本条已知签名前提如实阻塞。
 
 fixture（临时目录中创建，不提交仓库；具体路径由执行人自备）：
 

@@ -29,10 +29,14 @@
  * raw event stream itself. `plain/sessionEnded` (Plain's own synthetic
  * "transport died" signal — never a real DAP event name, see
  * `src-tauri/src/debug/session.rs`'s module doc) tears down `state` to
- * `null` outright; a real `terminated`/`exited` DAP event is forwarded to
- * listeners like any other but does *not* itself clear `state` (the adapter
- * may still reply to a `disconnect` afterward) — mirroring the Rust side's
- * own "two independent 'the session is over' signals" design.
+ * `null` outright. A real `terminated` DAP event is first forwarded to
+ * listeners, then completes the client half of the protocol by calling the
+ * same `disconnect()` path as the user-facing Stop command. This matters for
+ * adapters such as debugpy, which stay alive after the debuggee exits so they
+ * can still answer `disconnect`; waiting for transport EOF in that state
+ * would leave the UI saying "Running…" and the adapter process resident
+ * forever. `exited` remains informational because DAP adapters may send it
+ * before their final `terminated` event.
  */
 
 import type {
@@ -193,6 +197,15 @@ export class DebugSessionController {
 			if (threadId !== null) {
 				this.#setState({ ...this.#state, lastKnownThreadId: threadId });
 			}
+			return;
+		}
+		if (event.event === "terminated") {
+			// `disconnect()` clears state synchronously before awaiting the bridge,
+			// so duplicate/late events for this session are ignored immediately.
+			// The backend request itself is best-effort here: the debuggee has
+			// already terminated, and a transport race must not recreate an active
+			// UI state or surface an unhandled promise rejection.
+			void this.disconnect().catch(() => {});
 			return;
 		}
 		if (event.event === SESSION_ENDED_EVENT_NAME) {

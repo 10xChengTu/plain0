@@ -239,6 +239,25 @@ describe("DebugSessionController", () => {
 		expect(store.viewsForPath("a.py")[0]?.verification).toBeNull();
 	});
 
+	it("a terminated event disconnects the adapter and clears the completed session", async () => {
+		const { bridge, emit } = fakeBridge();
+		const store = new DebugBreakpointStore();
+		store.toggle("a.py", 5);
+		const controller = new DebugSessionController(bridge, store);
+		await controller.start("launch", STDIO_TARGET, "debugpy", {});
+		expect(store.viewsForPath("a.py")[0]?.verification).not.toBeNull();
+
+		emit({ sessionId: "session-1", event: "exited", body: { exitCode: 0 } });
+		expect(controller.state).not.toBeNull();
+		expect(bridge.debugDisconnect).not.toHaveBeenCalled();
+
+		emit({ sessionId: "session-1", event: "terminated", body: null });
+
+		expect(controller.state).toBeNull();
+		expect(store.viewsForPath("a.py")[0]?.verification).toBeNull();
+		expect(bridge.debugDisconnect).toHaveBeenCalledExactlyOnceWith("session-1");
+	});
+
 	it("start() pushes every path's currently-placed breakpoints and records verification", async () => {
 		const { bridge, setBreakpointsCalls } = fakeBridge();
 		const store = new DebugBreakpointStore();
