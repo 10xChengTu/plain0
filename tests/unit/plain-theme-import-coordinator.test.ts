@@ -9,6 +9,12 @@ interface FakeRegisteredExtension {
 }
 
 const registeredExtensions: FakeRegisteredExtension[] = [];
+const registeredReadOnlyFiles: Array<{
+	readonly resource: { toString(): string };
+	readonly read: () => Promise<Uint8Array>;
+	readonly size: number;
+}> = [];
+const resourceDisposals: Array<ReturnType<typeof vi.fn>> = [];
 
 vi.mock("@codingame/monaco-vscode-api/extensions", () => ({
 	registerExtension: vi.fn((manifest: { publisher: string; name: string }) => {
@@ -17,11 +23,37 @@ vi.mock("@codingame/monaco-vscode-api/extensions", () => ({
 			dispose: vi.fn(async () => undefined),
 			whenReady: vi.fn(async () => undefined),
 			isEnabled: vi.fn(async () => true),
-			registerFileUrl: vi.fn(() => ({ dispose: () => undefined })),
+			registerFileUrl: vi.fn(() => {
+				const dispose = vi.fn();
+				resourceDisposals.push(dispose);
+				return { dispose };
+			}),
 		};
 		registeredExtensions.push(extension);
 		return extension;
 	}),
+}));
+
+vi.mock("@codingame/monaco-vscode-files-service-override", () => ({
+	RegisteredReadOnlyFile: class {
+		constructor(
+			readonly resource: { toString(): string },
+			readonly read: () => Promise<Uint8Array>,
+			readonly size: number,
+		) {}
+	},
+	registerExtensionFile: vi.fn(
+		(file: {
+			readonly resource: { toString(): string };
+			readonly read: () => Promise<Uint8Array>;
+			readonly size: number;
+		}) => {
+			registeredReadOnlyFiles.push(file);
+			const dispose = vi.fn();
+			resourceDisposals.push(dispose);
+			return { dispose };
+		},
+	),
 }));
 
 import type {
@@ -203,6 +235,8 @@ function trackObjectUrls(): void {
 
 afterEach(() => {
 	registeredExtensions.length = 0;
+	registeredReadOnlyFiles.length = 0;
+	resourceDisposals.length = 0;
 	createdObjectUrls.length = 0;
 	revokedObjectUrls.length = 0;
 	URL.createObjectURL = originalCreateObjectURL;
@@ -333,7 +367,7 @@ describe("importThemePackageViaVsix / importThemePackageViaDirectory", () => {
 		expect(registeredExtensions).toHaveLength(0);
 	});
 
-	it("registers an imported package's resources as blob URLs and registry entries", async () => {
+	it("registers imported text resources as read-only extension files and registry entries", async () => {
 		trackObjectUrls();
 		const store = new PlainThemeRegistryStore([]);
 		const pkg = samplePackage({
@@ -348,17 +382,46 @@ describe("importThemePackageViaVsix / importThemePackageViaDirectory", () => {
 		const result = await importThemePackageViaVsix(bridge, store);
 		expect(result).toEqual({ status: "imported", package: pkg });
 		expect(registeredExtensions).toHaveLength(1);
-		expect(registeredExtensions[0]?.registerFileUrl).toHaveBeenCalledTimes(1);
-		expect(registeredExtensions[0]?.registerFileUrl).toHaveBeenCalledWith(
-			"themes/dark.json",
-			expect.stringMatching(/^blob:/),
+		expect(registeredExtensions[0]?.registerFileUrl).not.toHaveBeenCalled();
+		expect(registeredReadOnlyFiles).toHaveLength(1);
+		expect(registeredReadOnlyFiles[0]?.resource.toString()).toBe(
+			"extension-file://demo-publisher.register-test/extension/themes/dark.json",
 		);
-		expect(createdObjectUrls).toHaveLength(1);
+		expect(
+			new TextDecoder().decode(await registeredReadOnlyFiles[0]?.read()),
+		).toBe(DEMO_THEME_JSON);
+		expect(createdObjectUrls).toHaveLength(0);
 
 		const entries = store.importedEntries(pkg.id);
 		expect(entries).toHaveLength(1);
 		expect(entries?.[0]?.uiTheme).toBe("vs-dark");
 		expect(store.entries()).toHaveLength(1);
+	});
+
+	it("keeps SVG and font resources blob-backed for generated browser CSS", async () => {
+		trackObjectUrls();
+		const store = new PlainThemeRegistryStore([]);
+		const svg = '<svg xmlns="http://www.w3.org/2000/svg"/>';
+		const pkg = samplePackage({
+			id: "browser-resource.pkg@1.0.0",
+			name: "browser-resource",
+			themes: [],
+			resources: ["fileicons/icon.svg"],
+		});
+		const bridge = fakeBridge({
+			themeImportVsix: async () =>
+				({ status: "imported", package: pkg }) satisfies ThemeImportResult,
+			themeReadResource: async () => new TextEncoder().encode(svg),
+		});
+
+		await importThemePackageViaVsix(bridge, store);
+		expect(registeredReadOnlyFiles).toHaveLength(0);
+		expect(createdObjectUrls).toHaveLength(1);
+		expect(registeredExtensions[0]?.registerFileUrl).toHaveBeenCalledWith(
+			"fileicons/icon.svg",
+			expect.stringMatching(/^blob:/),
+			"image/svg+xml",
+		);
 	});
 
 	it("registers a package's iconThemes/productIconThemes into the store's own two axes (the `F060` S3 gap this closes)", async () => {
@@ -448,8 +511,9 @@ describe("importThemePackageViaVsix / importThemePackageViaDirectory", () => {
 		});
 
 		await expect(importThemePackageViaVsix(bridge, store)).rejects.toBeTruthy();
-		expect(createdObjectUrls).toHaveLength(1);
-		expect(revokedObjectUrls).toEqual(createdObjectUrls);
+		expect(createdObjectUrls).toHaveLength(0);
+		expect(registeredReadOnlyFiles).toHaveLength(1);
+		expect(resourceDisposals[0]).toHaveBeenCalledTimes(1);
 		expect(registeredExtensions[0]?.dispose).toHaveBeenCalledTimes(1);
 		expect(store.importedPackageIds()).toEqual([]);
 	});
@@ -562,6 +626,7 @@ describe("removeImportedThemePackage", () => {
 		expect(themeRemove).toHaveBeenCalledWith(pkg.id);
 		expect(store.importedPackageIds()).toEqual([]);
 		expect(registeredExtensions[0]?.dispose).toHaveBeenCalledTimes(1);
+		expect(resourceDisposals[0]).toHaveBeenCalledTimes(1);
 		expect(revokedObjectUrls).toEqual(blobUrlsBefore);
 		expect(themeService.setColorTheme).not.toHaveBeenCalled();
 		expect(themeService.setFileIconTheme).not.toHaveBeenCalled();
@@ -790,7 +855,7 @@ describe("themeCommandErrorMessage", () => {
 	});
 });
 
-describe("mimeTypeForResource (via registerImportedPackage's blob creation)", () => {
+describe("mimeTypeForResource (via registerImportedPackage resource routing)", () => {
 	function capturedBlobTypes(): {
 		types: string[];
 		restore: () => void;
@@ -837,7 +902,16 @@ describe("mimeTypeForResource (via registerImportedPackage's blob creation)", ()
 					({ status: "imported", package: pkg }) satisfies ThemeImportResult,
 			});
 			await importThemePackageViaVsix(bridge, store);
-			expect(types).toEqual([expectedMimeType]);
+			if (
+				expectedMimeType === "application/json" ||
+				expectedMimeType === "application/xml"
+			) {
+				expect(types).toEqual([]);
+				expect(registeredReadOnlyFiles).toHaveLength(1);
+			} else {
+				expect(types).toEqual([expectedMimeType]);
+				expect(registeredReadOnlyFiles).toHaveLength(0);
+			}
 		} finally {
 			restore();
 		}
