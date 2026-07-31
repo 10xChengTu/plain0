@@ -542,7 +542,7 @@
 
 ## 下一步
 
-1. 本项目原定的最后一个 feature（`F130`）已完成，没有下一个已规划的实现工作项。真实外部环境验收登记在 `docs/e2e-handover.md`（`E2E-001` 至 `E2E-013`）；Codex 已完成 `E2E-001` 至 `E2E-009`、`E2E-010` 的全部可执行场景、`E2E-011` 与 `E2E-012` 项 1。`E2E-012` 项 2 的第五次 run 已通过 Linux clippy，Rust 全量测试为 1171/1180，剩余 9 个失败分成目录同步、Git fixture 身份与终端尾帧三项。目录同步与 Git fixture 已分别由 `5dff75a3`、`24cd3a78` 修复；终端根因也已确认并修复为产品级自然退出竞态：waiter 不再取消仍需排空 PTY 缓冲的 reader，显式 kill 仍由 teardown 取消。真实高水位压力测试连续 2/2 与 all-target clippy 通过；提交后执行全量 Rust 回归并推送下一次真实 CI。项 3 为可选冷/热缓存对照，项 4 的跨机器公证仍受 Apple Developer Program 决策阻塞。`jschardet` LGPL-2.1+ 动态链接豁免适用性、`vscode-codicons` 精确 commit/version 比对、Ghostty vendor 二进制级 Nerd Fonts 链接确认三项仍标注为需人工确认，见「已知风险」。
+1. 本项目原定的最后一个 feature（`F130`）已完成，没有下一个已规划的实现工作项。真实外部环境验收登记在 `docs/e2e-handover.md`（`E2E-001` 至 `E2E-013`）；Codex 已完成 `E2E-001` 至 `E2E-009`、`E2E-010` 的全部可执行场景、`E2E-011` 与 `E2E-012` 项 1。`E2E-012` 项 2 的第五次 run 已通过 Linux clippy，Rust 全量测试为 1171/1180，剩余 9 个失败分成目录同步、Git fixture 身份与终端尾帧三项。目录同步与 Git fixture 已分别由 `5dff75a3`、`24cd3a78` 修复；终端自然退出竞态也已修复，真实高水位压力测试连续 2/2 与 all-target clippy 通过。三项组合后的本机 Rust 全量回归 **1178/1178** 通过，下一步推送第六次真实 CI，直到 Ubuntu `check` 与 macOS `build-macos` 都通过。项 3 为可选冷/热缓存对照，项 4 的跨机器公证仍受 Apple Developer Program 决策阻塞。`jschardet` LGPL-2.1+ 动态链接豁免适用性、`vscode-codicons` 精确 commit/version 比对、Ghostty vendor 二进制级 Nerd Fonts 链接确认三项仍标注为需人工确认，见「已知风险」。
 
 ## 当前验收命令
 
