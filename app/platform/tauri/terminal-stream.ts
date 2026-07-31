@@ -274,22 +274,26 @@ export async function openTerminalStream(
  * `TerminalService::start_program`), which has already emitted a
  * `"plain/runInTerminal"` notification (see
  * `plain-debug-terminal-integration.ts`) carrying the real `sessionId` this
- * function is handed. Because the session already exists, there is no
- * "buffer events until the id is known" race to handle (unlike
- * `openTerminalStream`, whose own id only becomes known after `terminalStart`
- * resolves) — this function's own `terminalWatchData`/`terminalWatchExit`
- * listeners can filter on `sessionId` from the very first event. Never calls
+ * function is handed. The listeners can therefore filter on `sessionId` from
+ * the instant this function begins. There is still one earlier-frame race:
+ * the process may have emitted a frame before the frontend learned the id,
+ * leaving Rust's one-frame gate waiting for an ack no future listener can
+ * produce. After installing both listeners, this function deliberately acks
+ * through `Number.MAX_SAFE_INTEGER`; the pane immediately resizes after this
+ * await, and resize forces a full redraw of the current VT state. If a frame
+ * arrived after listener installation, the high-water ack merely duplicates
+ * the renderer's ordinary ack and remains harmless. Never calls
  * `terminalStart`: `transport` intentionally excludes it (the type omits that
  * one method) so a caller cannot accidentally spawn a *second*, unrelated
  * session while believing it is attaching to the first — the whole point of
  * "复用既有 TerminalService" is exactly one spawn, ever, per `runInTerminal`
  * reverse request.
  */
-export function attachTerminalStream(
+export async function attachTerminalStream(
 	transport: Omit<TerminalStreamTransport, "terminalStart">,
 	sessionId: string,
 	handlers: TerminalStreamHandlers,
-): TerminalStream {
+): Promise<TerminalStream> {
 	let nextExpectedSequence = 0;
 	const disposedRef = { value: false };
 
@@ -312,11 +316,18 @@ export function attachTerminalStream(
 		}
 	});
 
-	return buildStreamHandle(
+	const stream = buildStreamHandle(
 		transport,
 		sessionId,
 		unlistenData,
 		unlistenExit,
 		disposedRef,
 	);
+	try {
+		await stream.ack(Number.MAX_SAFE_INTEGER);
+	} catch (error) {
+		stream.dispose();
+		throw error;
+	}
+	return stream;
 }

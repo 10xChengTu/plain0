@@ -297,7 +297,7 @@ export class TerminalPaneController {
 		try {
 			stream =
 				this.#existingSessionId !== undefined
-					? attachTerminalStream(
+					? await attachTerminalStream(
 							this.#bridge,
 							this.#existingSessionId,
 							handlers,

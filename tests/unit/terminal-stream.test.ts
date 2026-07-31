@@ -7,6 +7,7 @@ import type {
 	TerminalScrollbackResult,
 } from "../../app/platform/tauri/contracts";
 import {
+	attachTerminalStream,
 	openTerminalStream,
 	type TerminalStreamTransport,
 } from "../../app/platform/tauri/terminal-stream";
@@ -414,5 +415,31 @@ describe("openTerminalStream", () => {
 		expect(fake.scrollbackCalls).toEqual([
 			{ sessionId: SESSION_ID, start: 0, count: 10 },
 		]);
+	});
+});
+
+describe("attachTerminalStream", () => {
+	it("installs listeners before acknowledging any frame emitted before attachment", async () => {
+		const fake = createFakeTransport();
+		const delivered: TerminalFrame[] = [];
+
+		const stream = await attachTerminalStream(fake.transport, SESSION_ID, {
+			onFrame: (received) => delivered.push(received),
+			onExit: () => {},
+		});
+
+		expect(fake.dataListenerCount()).toBe(1);
+		expect(fake.exitListenerCount()).toBe(1);
+		expect(fake.ackCalls).toEqual([
+			{ sessionId: SESSION_ID, sequence: Number.MAX_SAFE_INTEGER },
+		]);
+
+		fake.emitData({
+			sessionId: SESSION_ID,
+			sequence: 1,
+			frame: frame("redraw"),
+		});
+		expect(delivered).toEqual([frame("redraw")]);
+		stream.dispose();
 	});
 });
