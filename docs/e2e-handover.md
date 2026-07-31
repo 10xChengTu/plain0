@@ -237,7 +237,11 @@ fixture（临时目录中创建，不提交仓库）：
 
 ### E2E-008 · F080 S4 真实凭证/SSH agent/远端网络矩阵（fetch/pull/push）
 
-状态：**阻塞于用户凭据（2026-07-31 实时核对）**。`gh auth status` 显示本机已登记的两套 GitHub CLI 账号令牌均失效，`ssh-add -l` 在真实宿主进程环境中返回 `The agent has no identities.`；当前既无可用 HTTPS 登录，也无已加载、对测试仓库有推送权限的 SSH identity，因此无法安全创建本条要求的双协议真实远端 fixture。未尝试读取、重置或替用户创建任何凭据，也未把本地 bare 仓库冒充为本条的真实网络证据。待用户重新登录一个可创建临时仓库的 GitHub 账号并向 ssh-agent 加载对应密钥后，从步骤 1 继续。
+状态：**已完成（2026-07-31）**。用户恢复 GitHub 凭据后，Codex 用专门创建的私有临时仓库 `10xChengTu/plain0-e2e-network-20260731` 和两个本地 clone 完成 HTTPS/macOS Keychain、SSH agent、无权限失败、真实 divergence/`--force-with-lease` 以及慢速 Fetch 取消矩阵。HTTPS 凭据由 `git-credential-osxkeychain` 静默提供，首次及后续操作均未出现 Keychain 授权对话框，也没有 Plain 自建密码 UI；Fetch 前 UI/终端均为 `0 ahead, 0 behind`，远端推进后 Fetch 得到 `main ↓1`，Pull 预览精确为 `0 ahead, 1 behind`，确认后本地与 `origin/main` 均快进到 `fa29481`。SSH remote 经真实 ssh-agent 推送提交 `d96cfe4`，`git ls-remote` 与 UI 一致，全程无 passphrase/TTY 挂起。
+
+无权限路径把 push URL 指向执行账号无写权限的 `octocat/Hello-World`：Plain 在 5.761 秒内显示 `Error: git push did not complete successfully.` 并恢复交互。真实竞争场景中，平行 clone 先推 `83c6b80`，本地仍持有过期的 `origin/main=d96cfe4`；普通 Push 和未 Fetch 的 Force Push 均被拒绝，UI 明示 `The remote rejected the push (it has commits this branch does not).`。Fetch 后 UI 与 shell 都变为 `1 ahead, 1 behind`，Force 对话框明确显示 `--force-with-lease`、不可撤销风险和独立的 `Force Push` 按钮；确认后远端被安全改写为本地 `d1954ca`，`HEAD`、`origin/main`、真实 `git ls-remote` 三者完全一致。
+
+取消场景使用仓库内临时 `core.sshCommand` 包装器在真实 SSH 前等待 30 秒，受控制造仍在运行的网络操作；`ps` 实测同一进程组中存在 `/Applications/Xcode.app/.../git fetch --quiet` → `tmp-slow-ssh.sh` → `/bin/sleep 30`。点击 Cancel 后 UI 明示 `The git subprocess was cancelled and was terminated.`，复查进程列表仅剩查询命令自身，随后移除包装配置并再次 Fetch 成功，证明底层进程终止且界面可立即复用。最终退出 Plain，永久删除临时 GitHub 仓库并以登录态 404 复核，删除两个 clone、`dist`、`src-tauri/target`，并从 ssh-agent 卸载本次临时加入的 identity（复查为 `The agent has no identities.`）；未留下远端历史、凭据、fixture 或构建产物。本条未发现需要修复的产品缺陷。
 
 fixture（临时目录/临时远端中创建，不提交仓库；具体凭据由执行人自备，不得写入仓库或本清单）：
 
@@ -398,7 +402,7 @@ fixture（临时目录中构造，不提交仓库；可直接复用 E2E-005 已�
 
 ### E2E-013 · F130 十二条待执行条目总览、十条产品需求交叉索引与建议执行顺序
 
-状态：总览条目，本身不新增测试步骤。`F130` 收口时 12 条均待执行；截至 2026-07-31，Codex 已完成 `E2E-001`、`E2E-003`、`E2E-004`、`E2E-005`、`E2E-006`、`E2E-007`、`E2E-009` 与 `E2E-011`，余下 4 条继续按本总览执行。完成项均已把真实结果/缺陷修复回写到对应 feature evidence；本条目的十条需求交叉索引和签名阻塞分类继续有效。
+状态：总览条目，本身不新增测试步骤。`F130` 收口时 12 条均待执行；截至 2026-07-31，Codex 已完成 `E2E-001` 至 `E2E-009`、`E2E-010` 的全部可执行场景、`E2E-011` 与 `E2E-012` 项 1，当前只剩 `E2E-012` 项 2 的修复后真实 CI 运行、可选项 3，以及受 Apple Developer Program 决策阻塞的项 4。完成项均已把真实结果/缺陷修复回写到对应 feature evidence；本条目的十条需求交叉索引和签名阻塞分类继续有效。
 
 **十条产品需求 × 对应真实桌面验收条目**（完整对照见 `progress.md` 本次 `F130` 完成条目下的总表，逐条附证据引用；这里只列条目编号，避免重复）：
 
@@ -420,7 +424,7 @@ fixture（临时目录中构造，不提交仓库；可直接复用 E2E-005 已�
 - `E2E-010` 步骤 3（真实 `lldb-dap` 原生调试）：`F120` S5 已实测确认，本沙箱下缺少 `com.apple.security.cs.debugger` entitlement 时 `task_for_pid`/真实 `lldb` 均会挂起；该 entitlement 因「无真机验证支撑、不应凭疑心扩大攻击面」被主导会话裁定不加。即便执行方拥有真实 Mac，只要这条 entitlement 决定不重新评估，本步骤依然无法完整验证，只能如实记录"阻塞于签名前提"。
 - `E2E-012` 项 1（ad-hoc hardened runtime + JIT entitlement 构建的真实 GUI 验证）与项 4（跨机器安装运行/真实公证后 Gatekeeper 行为）：项 4 严格阻塞于产品所有者已拍板的"暂不投入 Apple Developer Program"决定；项 1 本身**不需要**公证（本机 `open` 真实启动即可验证，`F130` 已用非 GUI 方式确认能启动，缺的只是真实 GUI 会话下的视觉/交互确认），但仍登记于此以保持与 `E2E-012` 原条目一致，执行时不应与项 4 混为一谈。
 
-**其余未完成条目均不需要签名公证到位，只是尚未按既定分工执行或受用户凭据约束**：`E2E-008`、`E2E-012` 项 2/3。`E2E-001`、`E2E-002`、`E2E-003`、`E2E-004`、`E2E-005`、`E2E-006`、`E2E-007`、`E2E-009`、`E2E-010`（步骤 3 按既定规则记为结构性阻塞）与 `E2E-011` 已完成，不再列入待执行集合。
+**其余未完成内容均不需要签名公证到位**：仅 `E2E-012` 项 2/3；其中项 2 需要把当前本地提交推送到 GitHub 后观察修复后的真实 Actions run，项 3 是可选的冷/热缓存对照。`E2E-001` 至 `E2E-009`、`E2E-010`（步骤 3 按既定规则记为结构性阻塞）、`E2E-011` 与 `E2E-012` 项 1 已完成，不再列入待执行集合。
 
 **建议执行顺序**（供人工/Codex 参考，非强制）：
 
@@ -428,7 +432,7 @@ fixture（临时目录中构造，不提交仓库；可直接复用 E2E-005 已�
 2. `E2E-001`/`E2E-002`/`E2E-003`/`E2E-004`（**均已完成**）——多根文件树、双根永久删除、热退出和搜索结果已分别回写 F020/F030/F040 evidence。
 3. `E2E-005`（**已完成**）/`E2E-006`（**已完成**）——颜色、文件图标、产品图标三轴的真实导入/渲染/持久化/恶意包拒绝结果已分别回写 F050/F060 evidence。
 4. `E2E-007`（**已完成**）——真实 shell、resize、trust、多 tab/split、高吞吐与退出清理均已回写 F070 evidence。
-5. `E2E-008`（**阻塞于用户凭据**）/`E2E-009`（**已完成**）——本地 Git 历史、multi-diff、worktree 与 stash 冲突已闭合；真实远端矩阵等待恢复 GitHub 登录并加载 SSH identity。
+5. `E2E-008`/`E2E-009`（**均已完成**）——HTTPS Keychain、SSH agent、无权限快速失败、真实 `--force-with-lease` 竞争、慢速 Fetch 取消，以及本地 Git 历史、multi-diff、worktree 与 stash 冲突均已闭合；临时远端、clone 和 SSH identity 已清理。
 6. `E2E-010`（**已完成**）——步骤 1/2/4/5/6/7 已以真实 debugpy/桌面/shell 交叉验证；步骤 3 已按上文如实标注"阻塞于签名前提"，未绕过系统安全边界。
 7. `E2E-012` 项 1（**已完成**）——ad-hoc hardened-runtime + JIT 构建已完成真实 GUI 输入/保存/冷启动确认；项 2 等待修复后的真实 CI 首跑，项 3 可选，项 4 继续受 Apple Developer Program 决策阻塞。
 
