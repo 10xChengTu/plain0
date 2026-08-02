@@ -375,6 +375,7 @@ fn run_search(
         if cancelled.load(Ordering::Acquire) {
             break;
         }
+        let root_id = lease.root_id();
         let Ok(root) = lease.directory().try_clone() else {
             continue;
         };
@@ -455,6 +456,7 @@ fn run_search(
                         continue;
                     }
                     let outcome = search_one_file(
+                        root_id,
                         &frame.directory,
                         &name,
                         &child_wire,
@@ -507,6 +509,7 @@ enum FileOutcome {
 
 #[allow(clippy::too_many_arguments)]
 fn search_one_file(
+    root_id: crate::workspace::RootId,
     parent: &Dir,
     name: &str,
     wire: &str,
@@ -561,6 +564,7 @@ fn search_one_file(
         FileOutcome::Continue
     } else {
         FileOutcome::Batch(WorkspaceSearchTextBatch::new(
+            root_id,
             wire.to_owned(),
             collector.matches,
         ))

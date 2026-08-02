@@ -19,7 +19,10 @@ describe("native workspace search bridge", () => {
 
 	it("invokes workspace_search_files with the exact frozen request and decodes the response", async () => {
 		tauri.invoke.mockResolvedValueOnce({
-			entries: ["src/main.ts", "README.md"],
+			entries: [
+				{ rootId, path: "src/main.ts" },
+				{ rootId, path: "README.md" },
+			],
 			limitHit: true,
 		});
 		const bridge = createNativeBridge();
@@ -45,7 +48,10 @@ describe("native workspace search bridge", () => {
 			],
 		]);
 		expect(result).toEqual({
-			entries: ["src/main.ts", "README.md"],
+			entries: [
+				{ rootId, path: "src/main.ts" },
+				{ rootId, path: "README.md" },
+			],
 			limitHit: true,
 		});
 		expect(Object.isFrozen(result)).toBe(true);
@@ -106,6 +112,7 @@ describe("native streaming text search bridge (F040 S3)", () => {
 		tauri.invoke.mockResolvedValueOnce({
 			batches: [
 				{
+					rootId,
 					path: "a.ts",
 					matches: [
 						{
@@ -198,9 +205,18 @@ describe("browser mock workspace search bridge", () => {
 			512,
 		);
 
-		expect(result.entries).toContain("fixture/visible.txt");
-		expect(result.entries).not.toContain("fixture/secret.txt");
-		expect(result.entries).not.toContain("fixture/node_modules/pkg.js");
+		expect(result.entries).toContainEqual({
+			rootId,
+			path: "fixture/visible.txt",
+		});
+		expect(result.entries).not.toContainEqual({
+			rootId,
+			path: "fixture/secret.txt",
+		});
+		expect(result.entries).not.toContainEqual({
+			rootId,
+			path: "fixture/node_modules/pkg.js",
+		});
 		expect(result.limitHit).toBe(false);
 	});
 
@@ -209,7 +225,7 @@ describe("browser mock workspace search bridge", () => {
 		await bridge.workspacePickRoots("replace");
 
 		const all = await bridge.workspaceSearchFiles([rootId], "", [], 512);
-		expect(all.entries).toContain("README.md");
+		expect(all.entries).toContainEqual({ rootId, path: "README.md" });
 
 		const matched = await bridge.workspaceSearchFiles(
 			[rootId],
@@ -217,7 +233,7 @@ describe("browser mock workspace search bridge", () => {
 			[],
 			512,
 		);
-		expect(matched.entries).toEqual(["README.md"]);
+		expect(matched.entries).toEqual([{ rootId, path: "README.md" }]);
 
 		const unmatched = await bridge.workspaceSearchFiles(
 			[rootId],
@@ -253,8 +269,14 @@ describe("browser mock workspace search bridge", () => {
 		await bridge.workspacePickRoots("replace");
 
 		const result = await bridge.workspaceSearchFiles([rootId], "", [], 512);
-		expect(result.entries).not.toContain("fixtures/file-link");
-		expect(result.entries).not.toContain("fixtures/directory-link/main.ts");
+		expect(result.entries).not.toContainEqual({
+			rootId,
+			path: "fixtures/file-link",
+		});
+		expect(result.entries).not.toContainEqual({
+			rootId,
+			path: "fixtures/directory-link/main.ts",
+		});
 	});
 });
 

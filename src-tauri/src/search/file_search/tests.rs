@@ -70,6 +70,32 @@ fn max_results_truncates_and_reports_limit_hit() {
 }
 
 #[test]
+fn multi_root_duplicate_paths_keep_their_producing_root_ids() {
+    let temp_a = TempDir::new().unwrap();
+    let temp_b = TempDir::new().unwrap();
+    fs::write(temp_a.path().join("shared.txt"), b"first").unwrap();
+    fs::write(temp_b.path().join("shared.txt"), b"second").unwrap();
+    let lease_a = authorized_lease(temp_a.path());
+    let lease_b = authorized_lease(temp_b.path());
+    let root_a = lease_a.root_id();
+    let root_b = lease_b.root_id();
+    let query = WorkspaceSearchFilesQuery {
+        roots: vec![root_a, root_b],
+        file_pattern: "shared".to_owned(),
+        exclude_globs: Vec::new(),
+        max_results: 512,
+    };
+
+    let result = search_roots(&[lease_a, lease_b], &query).unwrap();
+
+    assert_eq!(result.entry_records().len(), 2);
+    assert_eq!(result.entry_records()[0].root_id(), root_a);
+    assert_eq!(result.entry_records()[0].path(), "shared.txt");
+    assert_eq!(result.entry_records()[1].root_id(), root_b);
+    assert_eq!(result.entry_records()[1].path(), "shared.txt");
+}
+
+#[test]
 fn gitignore_ignores_matching_files_and_respects_negation() {
     let temp = TempDir::new().unwrap();
     fs::write(temp.path().join(".gitignore"), "*.log\n!keep.log\n").unwrap();
@@ -198,11 +224,11 @@ fn depth_budget_stops_the_search_and_reports_limit_hit() {
     assert!(result.limit_hit());
     assert!(result
         .entries()
-        .iter()
+        .into_iter()
         .any(|entry| entry == "a/shallow.txt"));
     assert!(!result
         .entries()
-        .iter()
+        .into_iter()
         .any(|entry| entry.ends_with("marker.txt")));
 }
 

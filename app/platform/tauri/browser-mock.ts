@@ -5180,7 +5180,7 @@ export function createBrowserMockBridge(
 	): WorkspaceSearchFilesResult => {
 		const excludeMatchers = request.excludeGlobs.map(compileMockExcludeGlob);
 		const patternLower = request.filePattern.toLowerCase();
-		const entries: string[] = [];
+		const entries: { rootId: string; path: string }[] = [];
 		let limitHit = false;
 		let visited = 0;
 
@@ -5271,7 +5271,7 @@ export function createBrowserMockBridge(
 					) {
 						continue;
 					}
-					entries.push(wire);
+					entries.push(Object.freeze({ rootId, path: wire }));
 					if (entries.length >= request.maxResults) {
 						limitHit = true;
 						break rootsLoop;
@@ -5315,6 +5315,7 @@ export function createBrowserMockBridge(
 	};
 
 	interface MockTextSearchBatch {
+		readonly rootId: string;
 		readonly path: string;
 		readonly matches: readonly {
 			readonly line: number;
@@ -6504,7 +6505,11 @@ export function createBrowserMockBridge(
 				}
 				if (matches.length > 0) {
 					pending.push(
-						Object.freeze({ path: wire, matches: Object.freeze(matches) }),
+						Object.freeze({
+							rootId,
+							path: wire,
+							matches: Object.freeze(matches),
+						}),
 					);
 				}
 				if (remainingBudget <= 0) {

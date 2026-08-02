@@ -1,13 +1,18 @@
 use super::{
-    SearchId, WorkspaceSearchFilesRequest, WorkspaceSearchFilesResult, WorkspaceSearchTextBatch,
-    WorkspaceSearchTextCancelRequest, WorkspaceSearchTextMatch, WorkspaceSearchTextPollRequest,
-    WorkspaceSearchTextPollResult, WorkspaceSearchTextSkipped, WorkspaceSearchTextStartRequest,
-    WorkspaceSearchTextStartResult, WorkspaceSearchTextWakeEvent, MAX_SEARCH_RESULTS_HARD_CAP,
-    MAX_TEXT_SEARCH_RESULTS_HARD_CAP,
+    SearchId, WorkspaceSearchFileEntry, WorkspaceSearchFilesRequest, WorkspaceSearchFilesResult,
+    WorkspaceSearchTextBatch, WorkspaceSearchTextCancelRequest, WorkspaceSearchTextMatch,
+    WorkspaceSearchTextPollRequest, WorkspaceSearchTextPollResult, WorkspaceSearchTextSkipped,
+    WorkspaceSearchTextStartRequest, WorkspaceSearchTextStartResult, WorkspaceSearchTextWakeEvent,
+    MAX_SEARCH_RESULTS_HARD_CAP, MAX_TEXT_SEARCH_RESULTS_HARD_CAP,
 };
+use crate::workspace::RootId;
 
 const ROOT_A: &str = "00000000-0000-4000-8000-000000000001";
 const ROOT_B: &str = "00000000-0000-4000-8000-000000000002";
+
+fn root_id(value: &str) -> RootId {
+    serde_json::from_value(serde_json::json!(value)).unwrap()
+}
 
 fn request(value: serde_json::Value) -> Result<WorkspaceSearchFilesRequest, ()> {
     serde_json::from_value(value).map_err(|_| ())
@@ -171,13 +176,22 @@ fn request_is_a_closed_set_of_exactly_four_camel_case_fields() {
 
 #[test]
 fn result_serializes_as_the_exact_frozen_camel_case_contract() {
-    let result = WorkspaceSearchFilesResult::new(vec!["src/main.rs".to_owned()], true);
+    let result = WorkspaceSearchFilesResult::new(
+        vec![WorkspaceSearchFileEntry::new(
+            root_id(ROOT_B),
+            "src/main.rs".to_owned(),
+        )],
+        true,
+    );
     let value = serde_json::to_value(&result).unwrap();
     let object = value.as_object().unwrap();
     let mut keys = object.keys().map(String::as_str).collect::<Vec<_>>();
     keys.sort_unstable();
     assert_eq!(keys, ["entries", "limitHit"]);
-    assert_eq!(value["entries"], serde_json::json!(["src/main.rs"]));
+    assert_eq!(
+        value["entries"],
+        serde_json::json!([{ "rootId": ROOT_B, "path": "src/main.rs" }])
+    );
     assert_eq!(value["limitHit"], true);
     assert_eq!(result.entries(), ["src/main.rs"]);
     assert!(result.limit_hit());
@@ -360,6 +374,7 @@ fn text_poll_request_round_trips_and_rejects_extra_fields() {
 #[test]
 fn text_poll_result_serializes_the_exact_frozen_camel_case_contract() {
     let batch = WorkspaceSearchTextBatch::new(
+        root_id(ROOT_B),
         "src/main.rs".to_owned(),
         vec![WorkspaceSearchTextMatch::new(
             1,
@@ -390,6 +405,7 @@ fn text_poll_result_serializes_the_exact_frozen_camel_case_contract() {
     assert_eq!(value["skipped"]["binary"], 1);
     assert_eq!(value["skipped"]["oversize"], 2);
     let batch_value = &value["batches"][0];
+    assert_eq!(batch_value["rootId"], ROOT_B);
     assert_eq!(batch_value["path"], "src/main.rs");
     let match_value = &batch_value["matches"][0];
     assert_eq!(match_value["line"], 1);
@@ -404,6 +420,7 @@ fn text_poll_result_serializes_the_exact_frozen_camel_case_contract() {
     assert_eq!(result.skipped().binary(), 1);
     assert_eq!(result.skipped().oversize(), 2);
     assert_eq!(result.batches()[0].path(), "src/main.rs");
+    assert_eq!(result.batches()[0].root_id(), root_id(ROOT_B));
     assert_eq!(
         result.batches()[0].matches()[0].preview_text(),
         "needle here"

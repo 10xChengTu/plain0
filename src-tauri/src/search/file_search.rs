@@ -20,7 +20,7 @@ use ignore::Match;
 use crate::error::CommandError;
 use crate::workspace::WorkspaceRootLease;
 
-use super::dto::{WorkspaceSearchFilesQuery, WorkspaceSearchFilesResult};
+use super::dto::{WorkspaceSearchFileEntry, WorkspaceSearchFilesQuery, WorkspaceSearchFilesResult};
 
 /// Total directory entries (files, directories, symlinks and other node
 /// types combined) a single search request may visit across every requested
@@ -72,11 +72,12 @@ pub(crate) fn search_roots(
 ) -> Result<WorkspaceSearchFilesResult, CommandError> {
     let exclude_set = compile_exclude_globs(&query.exclude_globs)?;
     let pattern_lower = query.file_pattern.to_lowercase();
-    let mut entries: Vec<String> = Vec::new();
+    let mut entries: Vec<WorkspaceSearchFileEntry> = Vec::new();
     let mut limit_hit = false;
     let mut visited = 0_usize;
 
     for lease in leases {
+        let root_id = lease.root_id();
         let Ok(root) = lease.directory().try_clone() else {
             continue;
         };
@@ -165,7 +166,7 @@ pub(crate) fn search_roots(
                     {
                         continue;
                     }
-                    entries.push(child_wire);
+                    entries.push(WorkspaceSearchFileEntry::new(root_id, child_wire));
                     if entries.len() >= query.max_results {
                         limit_hit = true;
                         break 'frames;

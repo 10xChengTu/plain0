@@ -17612,9 +17612,9 @@ export function validateWorkspaceDeleteFailureBrowserFixture(source) {
 		secondaryEntriesDeclarations.length !== 1 ||
 		treesDeclarations.length !== 1 ||
 		normalizedText(primaryEntriesDeclarations[0].parent.parent) !==
-			'constprimaryEntries:Array<readonly[string,MockNode]>=[["README.md",file("# Primary workspace\\n")],["copy-source.txt",file("Copy across roots.\\n")],["src",directory([])],];' ||
+			'constprimaryEntries:Array<readonly[string,MockNode]>=[["README.md",file("# Primary workspace\\n")],["copy-source.txt",file("Copy across roots.\\n")],["shared.txt",file("F140 shared primary\\n")],["src",directory([])],];' ||
 		normalizedText(secondaryEntriesDeclarations[0].parent.parent) !==
-			'constsecondaryEntries:Array<readonly[string,MockNode]>=[["move-source.txt",file("Move across roots.\\n")],["notes.txt",file("Secondary workspace\\n")],["packages",directory([])],];' ||
+			'constsecondaryEntries:Array<readonly[string,MockNode]>=[["move-source.txt",file("Move across roots.\\n")],["notes.txt",file("Secondary workspace\\n")],["shared.txt",file("F140 shared secondary\\n")],["packages",directory([])],];' ||
 		normalizedText(treesDeclarations[0].parent.parent) !==
 			"consttrees=newMap<string,MockDirectory>([[primaryRootId,directory(primaryEntries)],[secondaryRootId,directory(secondaryEntries)],]);"
 	) {

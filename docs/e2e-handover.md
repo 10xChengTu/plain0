@@ -444,6 +444,26 @@ fixture（临时目录中构造，不提交仓库；可直接复用 E2E-005 已�
 
 完成后：不需要向 `features.json` 写回本条目自身的结果（本条目不是一次可执行验收，没有独立的通过/失败结果）；每条底层 `E2E-00X` 条目完成后，仍按其自身小节末尾"完成后"的指示，把结果写入对应 feature 的 evidence。
 
+### E2E-014 · F140 多根同名搜索结果、打开与安全替换真实桌面矩阵
+
+状态：**待执行**。Browser E2E 已证明两个 root 下同名 `shared.txt` 会形成两个不同 authority 的 Quick Open 结果，并且 Search Replace 只向实际命中的 secondary root 发出 versioned write；本条补真实 Rust capability、真实磁盘与 WKWebView 证据。
+
+fixture（仓库内 `tmp-` 前缀临时目录中创建，测试后删除）：
+
+- `tmp-f140-primary/shared.txt`：精确内容 `F140 shared primary\n`。
+- `tmp-f140-secondary/shared.txt`：精确内容 `F140 shared secondary\n`。
+
+步骤与断言：
+
+1. 用当前提交执行 `pnpm tauri:build:e2e`，只从构建日志解析出的绝对路径启动新产出的 debug `Plain.app`；通过真实 macOS 目录选择器 Open Folder 授权 primary，再执行 `Workspaces: Add Folder to Workspace...` 授权 secondary，Explorer 必须同时显示两根。
+2. `Cmd+P` 输入 `shared.txt`，必须出现两条结果并以 workspace root 标签区分；选择 secondary 条目后，活动 editor URI/面包屑必须属于 secondary，内容必须逐字与 secondary 磁盘文件一致。
+3. Search 输入 `F140 shared secondary`，必须只显示一个文件/一个匹配；Replace All 改为 `F140 replaced secondary`。等待保存完成后用 shell 核对 secondary 字节精确为 `F140 replaced secondary\n`，primary 仍精确为 `F140 shared primary\n`，并记录两者 SHA-256。不得只凭 UI 文案判断写入根。
+4. Search 改为 `F140 shared primary`，必须仍命中一个结果；点击后编辑器显示 primary 原内容。再次 `Cmd+P shared.txt`，两条同名结果仍存在，已替换的 secondary 与未改的 primary 仍可分别打开。
+5. 全程记录未出现 page error、未处理 rejection、native dialog 异常或 `ROOT_NOT_AUTHORIZED`；退出应用后核对无残留 Plain 进程。
+6. 清理两个 `tmp-f140-*` fixture、截图、`test-results`、`dist` 与 `src-tauri/target`；确认 `git status --short` 只含预期跟踪修改。
+
+完成后：把本条状态、真实磁盘哈希和任何缺陷/修复写回本节；在 `features.json` 为 F140 增加 evidence 并转 `complete`，`progress.md` 将 WIP 移到 F150。若真实桌面暴露串根或错误写入，F140 保持 `in_progress`，先修复并追加独立提交后重跑本条。
+
 ## 后续条目（随切片追加）
 
 - F030 遗留：真实 `CloseRequested` 关窗握手协议实现后，补「正常关窗 → 重开恢复」的桌面验收变体。
@@ -452,3 +472,4 @@ fixture（临时目录中构造，不提交仓库；可直接复用 E2E-005 已�
 - F110 遗留子系统退役的真实桌面排除面巡检与 extensionRuntime 手术后回归已登记为 E2E-011。
 - F120 品牌/打包/发布检查收口后仍需真实桌面与真实 CI 才能确认的维度已登记为 E2E-012。
 - F130 浏览器与原生端到端验收（本项目最后一个 feature，已完成并转 complete）：已清点 E2E-001 至 E2E-012 共 12 条待执行条目、按十条产品需求交叉索引并给出建议执行顺序，登记为 E2E-013；F130 自身未执行这 12 条中的任何一条，全部维持「待执行」状态，交由用户后续按需交接人工或 Codex。
+- F140 多根同名搜索结果、打开与安全替换真实桌面矩阵已登记为 E2E-014。

@@ -244,16 +244,19 @@ export type WorkspaceWriteResult =
 			target: "ambiguous";
 	  }>;
 
+/** One file-search result, bound to the exact authorized root that produced it. */
+export interface WorkspaceSearchFileEntry {
+	readonly rootId: string;
+	readonly path: string;
+}
+
 /**
  * Result of a bounded, `.gitignore`-respecting file-name search rooted at
- * one or more workspace roots. `entries` are root-relative wire paths (see
- * `frozenWorkspaceEntryRequest`'s `relativePath` convention) — this slice
- * does not pair each entry with its root id because Plain currently
- * authorizes exactly one workspace root at a time (see
- * `WorkspaceSearchFilesRequest`'s own doc comment).
+ * one or more workspace roots. Duplicate relative paths remain distinct
+ * because every entry carries its producing root identity.
  */
 export interface WorkspaceSearchFilesResult {
-	readonly entries: readonly string[];
+	readonly entries: readonly WorkspaceSearchFileEntry[];
 	readonly limitHit: boolean;
 }
 
@@ -295,6 +298,7 @@ export interface WorkspaceSearchTextMatch {
 }
 
 export interface WorkspaceSearchTextBatch {
+	readonly rootId: string;
 	readonly path: string;
 	readonly matches: readonly WorkspaceSearchTextMatch[];
 }

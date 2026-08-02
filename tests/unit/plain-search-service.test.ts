@@ -444,7 +444,10 @@ describe("PlainSearchService", () => {
 			fakeBridge(async (roots, filePattern, excludeGlobs, maxResults) => {
 				requests.push({ roots, filePattern, excludeGlobs, maxResults });
 				return {
-					entries: ["src/main.ts", "README.md"],
+					entries: [
+						{ rootId: ROOT_A, path: "src/main.ts" },
+						{ rootId: ROOT_A, path: "README.md" },
+					],
 					limitHit: true,
 				};
 			}),
@@ -550,7 +553,10 @@ describe("PlainSearchService", () => {
 						resolveFirst = resolve;
 					});
 				}
-				return { entries: ["second.txt"], limitHit: false };
+				return {
+					entries: [{ rootId: ROOT_A, path: "second.txt" }],
+					limitHit: false,
+				};
 			}),
 		);
 		const provider = providerFor(createService());
@@ -575,13 +581,19 @@ describe("PlainSearchService", () => {
 			messages: [],
 		});
 
-		resolveFirst?.({ entries: ["first.txt"], limitHit: false });
+		resolveFirst?.({
+			entries: [{ rootId: ROOT_A, path: "first.txt" }],
+			limitHit: false,
+		});
 		await expect(first).resolves.toEqual({ results: [], messages: [] });
 	});
 
 	it("fileSearch drops a response once the caller's token is already cancelled", async () => {
 		configurePlainSearchBridge(
-			fakeBridge(async () => ({ entries: ["late.txt"], limitHit: false })),
+			fakeBridge(async () => ({
+				entries: [{ rootId: ROOT_A, path: "late.txt" }],
+				limitHit: false,
+			})),
 		);
 		const provider = providerFor(createService());
 
@@ -595,11 +607,17 @@ describe("PlainSearchService", () => {
 		expect(complete).toEqual({ results: [], messages: [] });
 	});
 
-	it("fileSearch resolves a two-root query and reuses roots[0] as every result's authority", async () => {
+	it("fileSearch keeps duplicate paths distinct by their producing root", async () => {
 		configurePlainSearchBridge(
 			fakeBridge(async (roots) => {
 				expect(roots).toEqual([ROOT_A, ROOT_B]);
-				return { entries: ["shared.txt"], limitHit: false };
+				return {
+					entries: [
+						{ rootId: ROOT_A, path: "shared.txt" },
+						{ rootId: ROOT_B, path: "shared.txt" },
+					],
+					limitHit: false,
+				};
 			}),
 		);
 		const provider = providerFor(createService());
@@ -617,10 +635,34 @@ describe("PlainSearchService", () => {
 						path: "/shared.txt",
 					}),
 				},
+				{
+					resource: URI.from({
+						scheme: "plain-workspace",
+						authority: ROOT_B,
+						path: "/shared.txt",
+					}),
+				},
 			],
 			limitHit: false,
 			messages: [],
 		});
+	});
+
+	it("fileSearch rejects a result whose root is outside the query", async () => {
+		configurePlainSearchBridge(
+			fakeBridge(async () => ({
+				entries: [{ rootId: ROOT_B, path: "outside.txt" }],
+				limitHit: false,
+			})),
+		);
+		const provider = providerFor(createService());
+
+		await expect(
+			provider.fileSearch({
+				type: 1,
+				folderQueries: [{ folder: rootUri(ROOT_A) }],
+			} as never),
+		).rejects.toMatchObject({ code: "ROOT_NOT_AUTHORIZED" });
 	});
 });
 
@@ -633,13 +675,14 @@ describe("PlainSearchService textSearch (F040 S3 streaming)", () => {
 		};
 	}
 
-	it("streams every batch to onProgress as it arrives and returns the final limitHit/messages", async () => {
+	it("streams duplicate paths under their producing roots and returns the final limitHit/messages", async () => {
 		const fake = fakeTextSearchBridge();
 		configurePlainSearchBridge(fake.bridge);
 		fake.enqueuePoll({
 			batches: [
 				{
-					path: "a.ts",
+					rootId: ROOT_A,
+					path: "shared.ts",
 					matches: [
 						{
 							line: 1,
@@ -659,7 +702,8 @@ describe("PlainSearchService textSearch (F040 S3 streaming)", () => {
 		fake.enqueuePoll({
 			batches: [
 				{
-					path: "b.ts",
+					rootId: ROOT_B,
+					path: "shared.ts",
 					matches: [
 						{
 							line: 2,
@@ -677,33 +721,43 @@ describe("PlainSearchService textSearch (F040 S3 streaming)", () => {
 			skipped: { binary: 1, oversize: 2 },
 		});
 		const provider = providerFor(createService());
-		const progressResources: string[] = [];
+		const progressResources: Array<{ authority: string; path: string }> = [];
 
 		const complete = (await provider.textSearch(
-			textQuery("needle"),
+			textQuery("needle", [ROOT_A, ROOT_B]),
 			(progress: unknown) => {
-				const resource = (progress as { resource?: { path: string } }).resource;
+				const resource = (
+					progress as { resource?: { authority: string; path: string } }
+				).resource;
 				if (resource !== undefined) {
-					progressResources.push(resource.path);
+					progressResources.push({
+						authority: resource.authority,
+						path: resource.path,
+					});
 				}
 			},
 		)) as {
-			results: Array<{ resource: { path: string } }>;
+			results: Array<{ resource: { authority: string; path: string } }>;
 			limitHit: boolean;
 			messages: Array<{ text: string }>;
 		};
 
-		expect(progressResources).toEqual(["/a.ts", "/b.ts"]);
-		expect(complete.results.map((result) => result.resource.path)).toEqual([
-			"/a.ts",
-			"/b.ts",
+		expect(progressResources).toEqual([
+			{ authority: ROOT_A, path: "/shared.ts" },
+			{ authority: ROOT_B, path: "/shared.ts" },
 		]);
+		expect(
+			complete.results.map((result) => ({
+				authority: result.resource.authority,
+				path: result.resource.path,
+			})),
+		).toEqual(progressResources);
 		expect(complete.limitHit).toBe(true);
 		expect(complete.messages).toHaveLength(1);
 		expect(complete.messages[0]?.text).toContain("1 binary");
 		expect(complete.messages[0]?.text).toContain("2 oversized");
 		expect(fake.startCalls[0]).toEqual({
-			roots: [ROOT_A],
+			roots: [ROOT_A, ROOT_B],
 			pattern: "needle",
 			isRegExp: false,
 			isCaseSensitive: false,
@@ -727,6 +781,7 @@ describe("PlainSearchService textSearch (F040 S3 streaming)", () => {
 		fake.enqueuePoll({
 			batches: [
 				{
+					rootId: ROOT_A,
 					path: "long.ts",
 					matches: [
 						{
@@ -851,14 +906,14 @@ describe("PlainSearchService textSearch (F040 S3 streaming)", () => {
 		// first, for whichever call proceeds without waiting, and
 		// "stale.ts" second, for the one released afterwards.
 		fake.enqueuePoll({
-			batches: [{ path: "fresh.ts", matches: [] }],
+			batches: [{ rootId: ROOT_A, path: "fresh.ts", matches: [] }],
 			nextCursor: 1,
 			done: true,
 			limitHit: false,
 			skipped: { binary: 0, oversize: 0 },
 		});
 		fake.enqueuePoll({
-			batches: [{ path: "stale.ts", matches: [] }],
+			batches: [{ rootId: ROOT_A, path: "stale.ts", matches: [] }],
 			nextCursor: 1,
 			done: true,
 			limitHit: false,
@@ -886,7 +941,7 @@ describe("PlainSearchService textSearch (F040 S3 streaming)", () => {
 		const fake = fakeTextSearchBridge();
 		configurePlainSearchBridge(fake.bridge);
 		fake.enqueuePoll({
-			batches: [{ path: "late.ts", matches: [] }],
+			batches: [{ rootId: ROOT_A, path: "late.ts", matches: [] }],
 			nextCursor: 1,
 			done: true,
 			limitHit: false,

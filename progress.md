@@ -1,8 +1,16 @@
 # Plain 重写进度
 
-更新时间：2026-07-31（Codex 已完成 `E2E-001` 至 `E2E-009`、`E2E-010` 全部可执行场景、`E2E-011` 与 `E2E-012` 项 1；仅余远端 CI、可选缓存对照及签名/公证阻塞项）
+更新时间：2026-08-02（进入非发布遗留功能补全阶段；发布签名、公证、DMG、Windows/Linux 打包、应用图标与法务确认不在本轮目标内）
 
 ## 当前状态
+
+- 阶段：6 — 非发布遗留功能补全。
+- WIP：`F140` Multi-root search identity and safe replace。
+- 当前最小工作项：让文件搜索与全文搜索的每个结果携带产生它的 `rootId`，确保 Quick Open、Search 结果打开和 Replace 始终落到真实命中的 workspace root；补齐严格 Rust/TypeScript codec、Browser E2E，并登记/执行真实 Tauri 多根验收。
+- 后续已规划：多根 Git/终端/调试根路由，原生关窗与多根热退出恢复，本地 Open/Recent/Settings/Trash 工作流，Git/终端/搜索/调试完整度，独立 Rust SSH 远程工作区，以及最终非发布全量 E2E 审计。WIP 上限仍为 1，逐项验证并提交。
+- [x] `F140` S0 实现与 Browser 证据：Rust 文件搜索 entry/文本搜索 batch 均新增产生结果的 `rootId`；TypeScript 严格 codec 拒绝畸形 UUID、缺失/额外字段、accessor/Proxy，`PlainSearchService` 还以 query roots 集合二次 fail closed；Quick Open 与 Search 对两个 root 下同名 `shared.txt` 保留不同 authority，Replace Browser E2E 实际只向 secondary root 发出 versioned write，primary 内容保持不变。定向 Rust search 47/47、前端搜索单元 66/66、类型检查、lint、features/architecture guard 与聚焦 Chromium E2E 均通过。真实 Tauri 矩阵已登记为 `E2E-014`，完成后再关闭 `F140`。
+
+## 2026-07-31 收口状态
 
 - 阶段：5 — 旧体系退役与发布验收。`F130`（浏览器与原生端到端验收）已完成并转 `complete`，是本次重写的最后一个 feature；**14 个 feature 全部 `complete`，重写工作本身收口**。
 - WIP：无。

@@ -213,22 +213,21 @@ fn oversized_and_binary_files_are_skipped_and_counted_not_reported() {
 fn multi_root_search_reports_matches_from_every_root() {
     let temp_a = TempDir::new().unwrap();
     let temp_b = TempDir::new().unwrap();
-    fs::write(temp_a.path().join("a.txt"), "needle\n").unwrap();
-    fs::write(temp_b.path().join("b.txt"), "needle\n").unwrap();
+    fs::write(temp_a.path().join("shared.txt"), "needle first\n").unwrap();
+    fs::write(temp_b.path().join("shared.txt"), "needle second\n").unwrap();
     let lease_a = authorized_lease(temp_a.path());
     let lease_b = authorized_lease(temp_b.path());
-    let compiled =
-        compile_query(&query(vec![lease_a.root_id(), lease_b.root_id()], "needle")).unwrap();
+    let root_a = lease_a.root_id();
+    let root_b = lease_b.root_id();
+    let compiled = compile_query(&query(vec![root_a, root_b], "needle")).unwrap();
 
     let mut handle = start(vec![lease_a, lease_b], compiled, noop_wake());
     let result = poll_until_done(&mut handle);
-    let mut paths = result
-        .batches()
-        .iter()
-        .map(|batch| batch.path().to_owned())
-        .collect::<Vec<_>>();
-    paths.sort();
-    assert_eq!(paths, ["a.txt", "b.txt"]);
+    assert_eq!(result.batches().len(), 2);
+    assert_eq!(result.batches()[0].root_id(), root_a);
+    assert_eq!(result.batches()[0].path(), "shared.txt");
+    assert_eq!(result.batches()[1].root_id(), root_b);
+    assert_eq!(result.batches()[1].path(), "shared.txt");
 }
 
 #[test]

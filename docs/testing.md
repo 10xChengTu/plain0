@@ -31,7 +31,7 @@
 - Tauri bridge 请求/错误映射。
 - provider bootstrap 必须证明能力 DTO 在注册前恰好读取一次、窗口生命周期不可升级；五项全真与任一 false 分别产生唯一 writable/readonly capability 集合，畸形或读取失败不能回退为可写。
 - 编辑器模型和脏状态/恢复状态机。
-- 搜索结果批次、取消、替换 plan。
+- 搜索结果批次、取消、替换 plan；文件 entry 与文本 batch 必须逐条保留产生它的 rootId，重复相对路径不得合并或回退到首根，query 外 root 必须 fail closed。
 - theme color/token/icon 映射。
 - Git/DAP view model 在乱序或缺失事件下的行为。
 - 固定 FileService patch 对 Plain copy/move/clone 的 provider-lookup 前拒绝、native-only 合法路径和零副作用失败矩阵；非 Plain 控制组必须保持 upstream 行为。
@@ -57,7 +57,7 @@
 - 打开 fixture、文件树 CRUD、标签/预览/拆分、编辑保存和冲突提示。
 - 文件树 CRUD 必须分别在 all-true 能力下真实调用 mock native，在任一 false 时保持整 provider 只读且 native mutation 调用数为零；create 缺失父目录、move partial 和 delete retained/partial 必须显示失败且不产生成功事件。
 - 永久删除必须观察 Workbench DOM `role="dialog"`，先取消并证明只有 prepare/cancel、目标仍在，再确认并证明 prepare/begin/commit 与目标消失；Playwright 原生 `dialog` 事件必须保持为空，防止同步 `window.confirm` 路径假通过。
-- Quick Open、全文搜索、替换、取消。
+- Quick Open、全文搜索、替换、取消；多根场景必须用两个同名相对路径验证结果可区分、打开命中根且替换只写命中根。
 - 颜色/文件图标主题导入和切换。
 - 终端/Git/DAP 使用录制事件测试 UI 状态机。
 - 未信任 workspace 的终端、Git、DAP 操作保持禁用并显示准确风险说明。

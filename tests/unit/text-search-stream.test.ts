@@ -12,9 +12,11 @@ import {
 } from "../../app/platform/tauri/text-search-stream";
 
 const NO_SKIPPED = Object.freeze({ binary: 0, oversize: 0 });
+const ROOT_ID = "00000000-0000-4000-8000-000000000101";
 
 function batch(path: string): WorkspaceSearchTextBatch {
 	return Object.freeze({
+		rootId: ROOT_ID,
 		path,
 		matches: [
 			Object.freeze({

@@ -106,15 +106,22 @@ describe("search codec", () => {
 
 	it("decodes a well-formed result and freezes it", () => {
 		const result = decodeWorkspaceSearchFilesResult({
-			entries: ["src/main.ts", "README.md"],
+			entries: [
+				{ rootId, path: "src/main.ts" },
+				{ rootId: secondRootId, path: "README.md" },
+			],
 			limitHit: true,
 		});
 		expect(result).toEqual({
-			entries: ["src/main.ts", "README.md"],
+			entries: [
+				{ rootId, path: "src/main.ts" },
+				{ rootId: secondRootId, path: "README.md" },
+			],
 			limitHit: true,
 		});
 		expect(Object.isFrozen(result)).toBe(true);
 		expect(Object.isFrozen(result.entries)).toBe(true);
+		expect(Object.isFrozen(result.entries[0])).toBe(true);
 	});
 
 	it("rejects a response with extra, missing, or mistyped fields", () => {
@@ -124,7 +131,10 @@ describe("search codec", () => {
 			{ limitHit: false },
 			{ entries: "not-an-array", limitHit: false },
 			{ entries: [123], limitHit: false },
-			{ entries: [""], limitHit: false },
+			{ entries: [{ rootId, path: "" }], limitHit: false },
+			{ entries: [{ rootId: "bad", path: "a.txt" }], limitHit: false },
+			{ entries: [{ rootId }], limitHit: false },
+			{ entries: [{ rootId, path: "a.txt", extra: true }], limitHit: false },
 			{ entries: [], limitHit: "false" },
 			null,
 			[],
@@ -151,12 +161,21 @@ describe("search codec", () => {
 	});
 
 	it("frozenWorkspaceSearchFilesResult round-trips a plain owned array through the same decoder", () => {
-		const source = ["a.txt", "b.txt"];
+		const source = [
+			{ rootId, path: "a.txt" },
+			{ rootId: secondRootId, path: "b.txt" },
+		];
 		const result = frozenWorkspaceSearchFilesResult(source, false);
-		expect(result).toEqual({ entries: ["a.txt", "b.txt"], limitHit: false });
+		expect(result).toEqual({
+			entries: [
+				{ rootId, path: "a.txt" },
+				{ rootId: secondRootId, path: "b.txt" },
+			],
+			limitHit: false,
+		});
 		expect(result.entries).not.toBe(source);
-		source[0] = "changed";
-		expect(result.entries[0]).toBe("a.txt");
+		source[0]!.path = "changed";
+		expect(result.entries[0]).toEqual({ rootId, path: "a.txt" });
 	});
 });
 
@@ -310,6 +329,7 @@ describe("streaming text search codec (F040 S3)", () => {
 		const decoded = decodeWorkspaceSearchTextPollResult({
 			batches: [
 				{
+					rootId,
 					path: "src/main.ts",
 					matches: [
 						{
@@ -355,12 +375,17 @@ describe("streaming text search codec (F040 S3)", () => {
 			{ ...base(), done: "false" },
 			{
 				...base(),
-				batches: [{ path: "", matches: [] }],
+				batches: [{ rootId, path: "", matches: [] }],
+			},
+			{
+				...base(),
+				batches: [{ rootId: "bad", path: "a.ts", matches: [] }],
 			},
 			{
 				...base(),
 				batches: [
 					{
+						rootId,
 						path: "a.ts",
 						matches: [
 							{
@@ -378,6 +403,7 @@ describe("streaming text search codec (F040 S3)", () => {
 				...base(),
 				batches: [
 					{
+						rootId,
 						path: "a.ts",
 						matches: [{ line: 1, column: 1, length: 1, previewText: "a" }],
 					},
@@ -387,6 +413,7 @@ describe("streaming text search codec (F040 S3)", () => {
 				...base(),
 				batches: [
 					{
+						rootId,
 						path: "a.ts",
 						matches: [
 							{
@@ -413,6 +440,7 @@ describe("streaming text search codec (F040 S3)", () => {
 		const result = frozenWorkspaceSearchTextPollResult(
 			[
 				{
+					rootId,
 					path: "a.ts",
 					matches: [
 						{

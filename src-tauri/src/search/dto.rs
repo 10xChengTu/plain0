@@ -8,8 +8,7 @@ use crate::error::CommandError;
 use crate::workspace::RootId;
 
 /// Defensive upper bound on how many roots a single search request may name.
-/// Plain currently authorizes a single workspace root, so this is a
-/// hostile-input ceiling, not an expected value.
+/// Matches the workspace topology contract's 256-root ceiling.
 const MAX_SEARCH_ROOTS: usize = 256;
 const MAX_SEARCH_PATTERN_BYTES: usize = 4_096;
 const MAX_SEARCH_EXCLUDE_GLOBS: usize = 64;
@@ -68,27 +67,57 @@ impl WorkspaceSearchFilesRequest {
     }
 }
 
-/// Response for `workspace_search_files`. `entries` are root-relative wire
-/// paths (see [`crate::path_policy::RelativePath`]); this slice returns bare
-/// paths rather than `{ rootId, path }` pairs because Plain currently
-/// authorizes exactly one workspace root at a time (add-root/replace stay
-/// disabled per `progress.md`'s single-directory stage), so a request naming
-/// more than one root is defensively accepted but not expected, and a
-/// hypothetical future multi-root caller would need this contract revisited.
+/// One file-search hit. `path` is relative to the exact authorized `root_id`
+/// that produced it; the pair is indivisible so duplicate relative paths in
+/// different workspace roots never collapse onto the first root.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSearchFileEntry {
+    root_id: RootId,
+    path: String,
+}
+
+impl WorkspaceSearchFileEntry {
+    pub(crate) const fn new(root_id: RootId, path: String) -> Self {
+        Self { root_id, path }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn root_id(&self) -> RootId {
+        self.root_id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
+}
+
+/// Response for `workspace_search_files`. Every entry retains the root
+/// identity leased before traversal; no consumer has to infer it from request
+/// order.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSearchFilesResult {
-    entries: Vec<String>,
+    entries: Vec<WorkspaceSearchFileEntry>,
     limit_hit: bool,
 }
 
 impl WorkspaceSearchFilesResult {
-    pub(crate) fn new(entries: Vec<String>, limit_hit: bool) -> Self {
+    pub(crate) fn new(entries: Vec<WorkspaceSearchFileEntry>, limit_hit: bool) -> Self {
         Self { entries, limit_hit }
     }
 
     #[cfg(test)]
-    pub(crate) fn entries(&self) -> &[String] {
+    pub(crate) fn entries(&self) -> Vec<&str> {
+        self.entries
+            .iter()
+            .map(WorkspaceSearchFileEntry::path)
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn entry_records(&self) -> &[WorkspaceSearchFileEntry] {
         &self.entries
     }
 
@@ -108,9 +137,7 @@ fn invalid_search_request() -> CommandError {
 // --- Streaming text search (F040 S3) ---------------------------------------
 
 /// Defensive upper bound on how many roots a single text search request may
-/// name. Same rationale as [`MAX_SEARCH_ROOTS`]: Plain currently authorizes a
-/// single workspace root, so this is a hostile-input ceiling, not an expected
-/// value.
+/// name. Same rationale as [`MAX_SEARCH_ROOTS`].
 const MAX_TEXT_SEARCH_ROOTS: usize = 256;
 const MAX_TEXT_SEARCH_PATTERN_BYTES: usize = 4_096;
 const MAX_TEXT_SEARCH_EXCLUDE_GLOBS: usize = 64;
@@ -368,13 +395,27 @@ impl WorkspaceSearchTextMatch {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSearchTextBatch {
+    root_id: RootId,
     path: String,
     matches: Vec<WorkspaceSearchTextMatch>,
 }
 
 impl WorkspaceSearchTextBatch {
-    pub(crate) const fn new(path: String, matches: Vec<WorkspaceSearchTextMatch>) -> Self {
-        Self { path, matches }
+    pub(crate) const fn new(
+        root_id: RootId,
+        path: String,
+        matches: Vec<WorkspaceSearchTextMatch>,
+    ) -> Self {
+        Self {
+            root_id,
+            path,
+            matches,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn root_id(&self) -> RootId {
+        self.root_id
     }
 
     #[cfg(test)]

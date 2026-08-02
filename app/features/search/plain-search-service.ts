@@ -127,13 +127,22 @@ function plainWorkspaceRoots(
 }
 
 /**
- * Rebuilds the `plain-workspace:` resource URI for one root-relative search
- * result. This slice's response does not pair each entry with a root id
- * (see `WorkspaceSearchFilesResult`'s own doc comment): Plain currently
- * authorizes exactly one workspace root, so every entry is resolved against
- * `roots[0]`.
+ * Rebuilds the `plain-workspace:` resource URI for one root-bound search
+ * result. A result naming a root outside the originating query fails closed
+ * even if a custom bridge bypassed the native codec.
  */
-function searchResultResource(rootId: string, relativePath: string): URI {
+function searchResultResource(
+	authorizedRoots: ReadonlySet<string>,
+	rootId: string,
+	relativePath: string,
+): URI {
+	if (!authorizedRoots.has(rootId)) {
+		throw Object.freeze({
+			code: "ROOT_NOT_AUTHORIZED",
+			message:
+				"Plain search returned a result for a root outside the current query.",
+		});
+	}
 	return URI.from({
 		scheme: PLAIN_WORKSPACE_SCHEME,
 		authority: rootId,
@@ -192,10 +201,14 @@ export function getReplaceMatchLocation(
  * `matchLocations` using `absoluteColumn`, for replace (F040 S4) to consume.
  */
 function textSearchFileMatch(
-	rootId: string,
+	authorizedRoots: ReadonlySet<string>,
 	batch: WorkspaceSearchTextBatch,
 ): IFileMatch {
-	const resource = searchResultResource(rootId, batch.path);
+	const resource = searchResultResource(
+		authorizedRoots,
+		batch.rootId,
+		batch.path,
+	);
 	const results = batch.matches.map((match) => {
 		const textSearchMatch = new TextSearchMatch(
 			match.previewText,
@@ -266,6 +279,7 @@ class PlainSearchResultProvider implements ISearchResultProvider {
 			return { results: [], messages: [] };
 		}
 		const excludeGlobs = collectExcludeGlobs(query);
+		const authorizedRoots = new Set(roots);
 		const requestedMaxResults = query.maxResults;
 		const maxResults =
 			requestedMaxResults === undefined
@@ -287,10 +301,13 @@ class PlainSearchResultProvider implements ISearchResultProvider {
 			return { results: [], messages: [] };
 		}
 
-		const primaryRoot = roots[0]!;
 		return {
-			results: result.entries.map((relativePath) => ({
-				resource: searchResultResource(primaryRoot, relativePath),
+			results: result.entries.map((entry) => ({
+				resource: searchResultResource(
+					authorizedRoots,
+					entry.rootId,
+					entry.path,
+				),
 			})),
 			limitHit: result.limitHit,
 			messages: [],
@@ -308,6 +325,7 @@ class PlainSearchResultProvider implements ISearchResultProvider {
 			return { results: [], messages: [] };
 		}
 		const excludeGlobs = collectExcludeGlobs(query);
+		const authorizedRoots = new Set(roots);
 		const requestedMaxResults = query.maxResults;
 		const maxResults =
 			requestedMaxResults === undefined
@@ -316,7 +334,6 @@ class PlainSearchResultProvider implements ISearchResultProvider {
 
 		this.#textSearchSequence += 1;
 		const sequence = this.#textSearchSequence;
-		const primaryRoot = roots[0]!;
 		const isStale = (): boolean =>
 			sequence !== this.#textSearchSequence ||
 			token?.isCancellationRequested === true;
@@ -339,7 +356,7 @@ class PlainSearchResultProvider implements ISearchResultProvider {
 					if (isStale()) {
 						return;
 					}
-					const fileMatch = textSearchFileMatch(primaryRoot, batch);
+					const fileMatch = textSearchFileMatch(authorizedRoots, batch);
 					results.push(fileMatch);
 					onProgress?.(fileMatch);
 				},

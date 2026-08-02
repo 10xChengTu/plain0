@@ -1,5 +1,6 @@
 import type {
 	WorkspaceSearchFilesResult,
+	WorkspaceSearchFileEntry,
 	WorkspaceSearchTextBatch,
 	WorkspaceSearchTextMatch,
 	WorkspaceSearchTextPollResult,
@@ -220,27 +221,42 @@ export function frozenWorkspaceSearchFilesRequest(
 }
 
 /**
- * Decodes a `workspace_search_files` response: an own-data, exactly
- * `{ entries, limitHit }` object. `entries` are root-relative wire paths —
- * validated for shape/length here, not full `RelativePath` grammar (Rust is
- * the sole authority on well-formed relative paths; this decoder only
- * refuses to accept something structurally impossible, such as a non-string
- * element, a Proxy-wrapped array, or a huge oversized listing).
+ * Decodes one root-bound file-search entry. Full `RelativePath` grammar stays
+ * Rust-authoritative; this boundary rejects malformed ids, empty/oversized
+ * paths, accessors, proxies and extra keys.
  */
+function decodeFileSearchEntry(value: unknown): WorkspaceSearchFileEntry {
+	if (!isPlainObject(value) || !hasExactKeys(value, ["rootId", "path"])) {
+		return violation();
+	}
+	if (
+		!isUuidV4(value.rootId) ||
+		typeof value.path !== "string" ||
+		value.path.length === 0 ||
+		value.path.length > MAX_SEARCH_PATTERN_BYTES
+	) {
+		return violation();
+	}
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze({ rootId: value.rootId, path: value.path });
+}
+
+/** Decodes an exact `{ entries, limitHit }` file-search response. */
 export function decodeWorkspaceSearchFilesResult(
 	value: unknown,
 ): WorkspaceSearchFilesResult {
 	if (!isPlainObject(value) || !hasExactKeys(value, ["entries", "limitHit"])) {
 		return violation();
 	}
-	const entries = ownStringArraySnapshot(
+	const entries = ownObjectArraySnapshot(
 		value.entries,
 		MAX_SEARCH_RESULTS_HARD_CAP,
-		MAX_SEARCH_PATTERN_BYTES,
+		decodeFileSearchEntry,
 	);
-	if (entries.some((entry) => entry.length === 0)) {
-		return violation();
-	}
 	if (typeof value.limitHit !== "boolean") {
 		return violation();
 	}
@@ -257,11 +273,14 @@ export function decodeWorkspaceSearchFilesResult(
  * browser mock (which has no wire boundary to round-trip through).
  */
 export function frozenWorkspaceSearchFilesResult(
-	entries: readonly string[],
+	entries: readonly WorkspaceSearchFileEntry[],
 	limitHit: boolean,
 ): WorkspaceSearchFilesResult {
 	return decodeWorkspaceSearchFilesResult({
-		entries: [...entries],
+		entries: entries.map((entry) => ({
+			rootId: entry.rootId,
+			path: entry.path,
+		})),
 		limitHit,
 	});
 }
@@ -516,10 +535,14 @@ function decodeTextSearchMatch(value: unknown): WorkspaceSearchTextMatch {
 }
 
 function decodeTextSearchBatch(value: unknown): WorkspaceSearchTextBatch {
-	if (!isPlainObject(value) || !hasExactKeys(value, ["path", "matches"])) {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, ["rootId", "path", "matches"])
+	) {
 		return violation();
 	}
 	if (
+		!isUuidV4(value.rootId) ||
 		typeof value.path !== "string" ||
 		value.path.length === 0 ||
 		value.path.length > MAX_SEARCH_PATTERN_BYTES
@@ -536,7 +559,7 @@ function decodeTextSearchBatch(value: unknown): WorkspaceSearchTextBatch {
 	} catch {
 		return violation();
 	}
-	return Object.freeze({ path: value.path, matches });
+	return Object.freeze({ rootId: value.rootId, path: value.path, matches });
 }
 
 function decodeTextSearchSkipped(value: unknown): WorkspaceSearchTextSkipped {
@@ -629,6 +652,7 @@ export function decodeWorkspaceSearchTextWakeEvent(
  */
 export function frozenWorkspaceSearchTextPollResult(
 	batches: readonly {
+		readonly rootId: string;
 		readonly path: string;
 		readonly matches: readonly WorkspaceSearchTextMatch[];
 	}[],
@@ -639,6 +663,7 @@ export function frozenWorkspaceSearchTextPollResult(
 ): WorkspaceSearchTextPollResult {
 	return decodeWorkspaceSearchTextPollResult({
 		batches: batches.map((batch) => ({
+			rootId: batch.rootId,
 			path: batch.path,
 			matches: batch.matches.map((match) => ({ ...match })),
 		})),

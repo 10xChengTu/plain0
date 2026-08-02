@@ -1,7 +1,7 @@
 {
 	"schemaVersion": 3,
-	"updatedAt": "2026-07-31",
-	"currentPhase": 5,
+	"updatedAt": "2026-08-02",
+	"currentPhase": 6,
 	"wipLimit": 1,
 	"features": [
 		{
@@ -252,7 +252,6 @@
 					"Symlink exclusion from search results is proven by 3 Rust unit tests (F040 S2) and one browser-mock-level unit test (tests/unit/workspace-search-bridge.test.ts, \"never reports a symlink as a match and never traverses through one\"), not by a live Browser/Playwright scenario -- the shared installNativeIpcMock fixture helper used by every Browser E2E test does not expose symlink-node injection through its extraFiles parameter, and adding that plumbing was judged to risk the ~30 other scenarios sharing it for marginal signal beyond the existing unit-level proof against the identical mock code.",
 					"\"Replace All in File\" (per-file granularity) shares its code path with \"Replace\" and \"Replace All\", both of which have dedicated Browser E2E coverage, but it has no dedicated Browser E2E scenario of its own (F040 S4 decision; unit tests and code review cover its shared logic).",
 					"An over-8-MiB unopened file's replace failure has no dedicated Browser E2E of its own; the underlying 8 MiB read limit itself is already covered by earlier workspace read slices (F020).",
-					"Root-relative search results are not paired with a rootId in the wire response (F040 S2 documented assumption): Plain currently only ever authorizes a single workspace root, so this has not caused an observable issue, but a future multi-root search would need this addressed first.",
 					"Windows and Linux native packaging remains F120.",
 					"Zeroing the monaco-vscode-api bundle migration debt remains F110."
 				],
@@ -780,6 +779,126 @@
 					}
 				]
 			}
+		},
+		{
+			"id": "F140",
+			"name": "Multi-root search identity and safe replace",
+			"phase": 6,
+			"status": "in_progress",
+			"acceptance": [
+				"Every file-search and text-search result carries the authorized root that produced it",
+				"Quick Open and Search preserve duplicate relative paths across roots and open the matching resource",
+				"Replace actions mutate only the root that produced each match",
+				"Strict codec, Rust, Browser and real Tauri multi-root tests pass"
+			]
+		},
+		{
+			"id": "F150",
+			"name": "Multi-root Git terminal and debug routing",
+			"phase": 6,
+			"status": "planned",
+			"acceptance": [
+				"Git and SCM select an explicit authorized root and never report or mutate paths outside it",
+				"Terminal creation selects an authorized root or cwd instead of silently using the first root",
+				"Debug launch configurations and breakpoints are routed by their owning workspace root",
+				"Multi-root Browser and real Tauri workflows pass for all three domains"
+			]
+		},
+		{
+			"id": "F160",
+			"name": "Native close and multi-root hot-exit recovery",
+			"phase": 6,
+			"status": "planned",
+			"acceptance": [
+				"Native CloseRequested waits for the final bounded backup flush before allowing shutdown",
+				"Dirty working copies recover across restart in single-root and multi-root workspaces without root guessing",
+				"Normal close crash and root-topology changes cannot silently lose or misattach dirty content",
+				"Browser process-boundary and real Tauri shutdown recovery tests pass"
+			]
+		},
+		{
+			"id": "F170",
+			"name": "Local open recent settings and trash workflows",
+			"phase": 6,
+			"status": "planned",
+			"acceptance": [
+				"Open File Open Recent and last-workspace restore work through Rust-owned capabilities",
+				"Untitled files local settings auto save and user keybindings have durable product-owned workflows",
+				"New-window and workspace lifecycle actions preserve capability isolation and dirty-content protection",
+				"System Trash has an explicit platform contract and never falls back silently to permanent deletion"
+			]
+		},
+		{
+			"id": "F180",
+			"name": "Complete local Git workflows",
+			"phase": 6,
+			"status": "planned",
+			"acceptance": [
+				"Branch tag remote and upstream management are available without a general-purpose git runner",
+				"Cherry-pick revert merge rebase reset reflog and contributor workflows have bounded previews and confirmations",
+				"Hunk staging supports explicit selected hunks and SCM refreshes from authoritative repository changes",
+				"Trust credentials conflicts cancellation and destructive outcomes pass real Git E2E"
+			]
+		},
+		{
+			"id": "F190",
+			"name": "Complete terminal workflows",
+			"phase": 6,
+			"status": "planned",
+			"acceptance": [
+				"Terminal find profile shell and cwd selection are fully interactive and persisted",
+				"Shell integration links recursive splits and live scrollback preserve bounded terminal semantics",
+				"Session restore or explicit non-restorable outcomes are handled without orphan processes",
+				"SSH agent inheritance and real shell terminal E2E pass under the audited environment policy"
+			]
+		},
+		{
+			"id": "F200",
+			"name": "Complete search workflows",
+			"phase": 6,
+			"status": "planned",
+			"acceptance": [
+				"Search UI actions menus keybindings and quick-access entry points cover the promised local workflow",
+				"Replacement supports capture groups with version-safe multi-file coordination and undo semantics",
+				"Regex capability and unsupported constructs are explicit and test-backed",
+				"Large ignored binary oversized cancellation and conflict scenarios pass Browser and real Tauri E2E"
+			]
+		},
+		{
+			"id": "F210",
+			"name": "Complete generic debug workflows",
+			"phase": 6,
+			"status": "planned",
+			"acceptance": [
+				"Users can choose among launch configurations and route them to the correct root",
+				"Nested Watch hit-count breakpoints disassembly and supported step-in targets are implemented",
+				"Spawn-then-connect TCP adapters have bounded readiness and lifecycle handling",
+				"Real debugpy and runnable native-adapter desktop matrices pass without process leaks"
+			]
+		},
+		{
+			"id": "F220",
+			"name": "Rust SSH remote workspace",
+			"phase": 6,
+			"status": "planned",
+			"acceptance": [
+				"Product scope architecture and ADRs explicitly define the Remote SSH trust and threat model",
+				"Rust owns SSH authentication host-key verification remote filesystem PTY Git and DAP transports",
+				"The WebView receives only opaque remote workspace capabilities and no general shell filesystem or extension-host access",
+				"Connection loss reconnect cancellation cleanup and real remote-host E2E pass"
+			]
+		},
+		{
+			"id": "F230",
+			"name": "Non-release end-to-end completion audit",
+			"phase": 6,
+			"status": "planned",
+			"acceptance": [
+				"Every non-release requirement is mapped to current executable evidence",
+				"Unit integration Browser and real Tauri evidence tiers are reported separately",
+				"No excluded AI account sync general extension host or language-runtime surface is reachable",
+				"The repository is clean and every completed work item is independently committed"
+			]
 		}
 	]
 }

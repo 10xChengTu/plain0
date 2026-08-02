@@ -870,10 +870,13 @@ async function installNativeIpcMock(
 				filePattern: string,
 				excludeGlobs: readonly string[],
 				maxResults: number,
-			): { entries: string[]; limitHit: boolean } => {
+			): {
+				entries: Array<{ rootId: string; path: string }>;
+				limitHit: boolean;
+			} => {
 				const excludeMatchers = excludeGlobs.map(compileExcludeGlob);
 				const patternLower = filePattern.toLowerCase();
-				const entries: string[] = [];
+				const entries: Array<{ rootId: string; path: string }> = [];
 				let limitHit = false;
 				let visited = 0;
 				interface SearchFrame {
@@ -951,7 +954,7 @@ async function installNativeIpcMock(
 							) {
 								continue;
 							}
-							entries.push(wire);
+							entries.push({ rootId: requestedRootId, path: wire });
 							if (entries.length >= maxResults) {
 								limitHit = true;
 								break rootsLoop;
@@ -996,6 +999,7 @@ async function installNativeIpcMock(
 				}
 			};
 			interface TextSearchBatch {
+				rootId: string;
 				path: string;
 				matches: Array<{
 					line: number;
@@ -1152,7 +1156,11 @@ async function installNativeIpcMock(
 							}
 						}
 						if (matches.length > 0) {
-							pending.push({ path: wire, matches });
+							pending.push({
+								rootId: requestedRootId,
+								path: wire,
+								matches,
+							});
 						}
 						if (remainingBudget <= 0) {
 							limitHit = true;
@@ -3912,6 +3920,7 @@ async function installMultiRootNativeIpcMock(
 			const primaryEntries: Array<readonly [string, MockNode]> = [
 				["README.md", file("# Primary workspace\n")],
 				["copy-source.txt", file("Copy across roots.\n")],
+				["shared.txt", file("F140 shared primary\n")],
 				["src", directory([])],
 			];
 			if (deleteIncompleteScenarios.includes("deleteRetained")) {
@@ -3923,6 +3932,7 @@ async function installMultiRootNativeIpcMock(
 			const secondaryEntries: Array<readonly [string, MockNode]> = [
 				["move-source.txt", file("Move across roots.\n")],
 				["notes.txt", file("Secondary workspace\n")],
+				["shared.txt", file("F140 shared secondary\n")],
 				["packages", directory([])],
 			];
 			if (moveIncompleteScenarios.includes("movePartial")) {
@@ -4026,6 +4036,191 @@ async function installMultiRootNativeIpcMock(
 					descendants += descendantEntries(child);
 				}
 				return descendants;
+			};
+			const isSearchSubsequence = (
+				pattern: string,
+				candidate: string,
+			): boolean => {
+				let candidateIndex = 0;
+				for (const patternCharacter of pattern) {
+					let found = false;
+					while (candidateIndex < candidate.length) {
+						const candidateCharacter = candidate[candidateIndex]!;
+						candidateIndex += 1;
+						if (candidateCharacter === patternCharacter) {
+							found = true;
+							break;
+						}
+					}
+					if (!found) {
+						return false;
+					}
+				}
+				return true;
+			};
+			const searchExcluded = (
+				relativePath: string,
+				excludeGlobs: readonly string[],
+			): boolean =>
+				excludeGlobs.some((glob) => {
+					const token = glob.replace(/^\*\*\//u, "").replace(/\/\*\*$/u, "");
+					return (
+						token.length > 0 &&
+						(relativePath === token ||
+							relativePath.startsWith(`${token}/`) ||
+							relativePath.split("/").includes(token))
+					);
+				});
+			const searchFiles = (request: {
+				roots: readonly string[];
+				filePattern: string;
+				excludeGlobs: readonly string[];
+				maxResults: number;
+			}): {
+				entries: Array<{ rootId: string; path: string }>;
+				limitHit: boolean;
+			} => {
+				const entries: Array<{ rootId: string; path: string }> = [];
+				const pattern = request.filePattern.toLowerCase();
+				for (const requestedRootId of request.roots) {
+					if (!activeRoots.has(requestedRootId)) {
+						throw rootNotAuthorized();
+					}
+					const tree = trees.get(requestedRootId);
+					if (tree === undefined) {
+						throw rootNotAuthorized();
+					}
+					const pending: Array<{ directory: MockDirectory; prefix: string }> = [
+						{ directory: tree, prefix: "" },
+					];
+					while (pending.length > 0) {
+						const frame = pending.pop()!;
+						const children = [...frame.directory.entries].sort(
+							([left], [right]) => left.localeCompare(right),
+						);
+						for (let index = children.length - 1; index >= 0; index -= 1) {
+							const [name, child] = children[index]!;
+							const path =
+								frame.prefix === "" ? name : `${frame.prefix}/${name}`;
+							if (searchExcluded(path, request.excludeGlobs)) {
+								continue;
+							}
+							if (child.kind === "directory") {
+								pending.push({ directory: child, prefix: path });
+								continue;
+							}
+							if (
+								pattern.length > 0 &&
+								!isSearchSubsequence(pattern, path.toLowerCase())
+							) {
+								continue;
+							}
+							entries.push({ rootId: requestedRootId, path });
+							if (entries.length >= request.maxResults) {
+								return { entries, limitHit: true };
+							}
+						}
+					}
+				}
+				return { entries, limitHit: false };
+			};
+			interface MultiRootTextSearchBatch {
+				rootId: string;
+				path: string;
+				matches: Array<{
+					line: number;
+					column: number;
+					length: number;
+					previewText: string;
+					absoluteColumn: number;
+				}>;
+			}
+			let textSearchSerial = 301;
+			let activeTextSearch:
+				| {
+						searchId: string;
+						batches: MultiRootTextSearchBatch[];
+						cursor: number;
+						limitHit: boolean;
+				  }
+				| undefined;
+			const nextTextSearchId = (): string =>
+				`00000000-0000-4000-8000-${(textSearchSerial++)
+					.toString()
+					.padStart(12, "0")}`;
+			const searchText = (request: {
+				roots: readonly string[];
+				pattern: string;
+				isRegExp: boolean;
+				isCaseSensitive: boolean;
+				isWordMatch: boolean;
+				excludeGlobs: readonly string[];
+				maxResults: number;
+				maxFileSize: number | null;
+			}): { batches: MultiRootTextSearchBatch[]; limitHit: boolean } => {
+				const source = request.isRegExp
+					? request.pattern
+					: request.pattern.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+				const matcher = new RegExp(
+					request.isWordMatch ? `\\b(?:${source})\\b` : source,
+					request.isCaseSensitive ? "gu" : "giu",
+				);
+				const batches: MultiRootTextSearchBatch[] = [];
+				let remaining = request.maxResults;
+				for (const requestedRootId of request.roots) {
+					if (!activeRoots.has(requestedRootId)) {
+						throw rootNotAuthorized();
+					}
+					const tree = trees.get(requestedRootId);
+					if (tree === undefined) {
+						throw rootNotAuthorized();
+					}
+					const pending: Array<{ directory: MockDirectory; prefix: string }> = [
+						{ directory: tree, prefix: "" },
+					];
+					while (pending.length > 0) {
+						const frame = pending.pop()!;
+						for (const [name, child] of frame.directory.entries) {
+							const path =
+								frame.prefix === "" ? name : `${frame.prefix}/${name}`;
+							if (searchExcluded(path, request.excludeGlobs)) {
+								continue;
+							}
+							if (child.kind === "directory") {
+								pending.push({ directory: child, prefix: path });
+								continue;
+							}
+							if (
+								request.maxFileSize !== null &&
+								child.bytes.byteLength > request.maxFileSize
+							) {
+								continue;
+							}
+							const matches: MultiRootTextSearchBatch["matches"] = [];
+							const lines = decoder.decode(child.bytes).split("\n");
+							for (const [lineIndex, line] of lines.entries()) {
+								matcher.lastIndex = 0;
+								for (const match of line.matchAll(matcher)) {
+									if (remaining <= 0) {
+										return { batches, limitHit: true };
+									}
+									matches.push({
+										line: lineIndex + 1,
+										column: match.index + 1,
+										length: match[0].length,
+										previewText: line,
+										absoluteColumn: match.index + 1,
+									});
+									remaining -= 1;
+								}
+							}
+							if (matches.length > 0) {
+								batches.push({ rootId: requestedRootId, path, matches });
+							}
+						}
+					}
+				}
+				return { batches, limitHit: false };
 			};
 			const hexFromBytes = (bytes: Uint8Array): string =>
 				[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -4889,6 +5084,114 @@ async function installMultiRootNativeIpcMock(
 							}
 							activeDelete = undefined;
 							return { status: "deleted" };
+						}
+						case "workspace_search_files": {
+							const request = args.request as
+								| {
+										roots?: unknown;
+										filePattern?: unknown;
+										excludeGlobs?: unknown;
+										maxResults?: unknown;
+								  }
+								| undefined;
+							if (
+								request === undefined ||
+								!Array.isArray(request.roots) ||
+								!request.roots.every((root) => typeof root === "string") ||
+								typeof request.filePattern !== "string" ||
+								!Array.isArray(request.excludeGlobs) ||
+								!request.excludeGlobs.every(
+									(glob) => typeof glob === "string",
+								) ||
+								typeof request.maxResults !== "number"
+							) {
+								throw new TypeError("Invalid multi-root file search request.");
+							}
+							return searchFiles({
+								roots: request.roots as string[],
+								filePattern: request.filePattern,
+								excludeGlobs: request.excludeGlobs as string[],
+								maxResults: request.maxResults,
+							});
+						}
+						case "workspace_search_text_start": {
+							const request = args.request as
+								| {
+										roots?: unknown;
+										pattern?: unknown;
+										isRegExp?: unknown;
+										isCaseSensitive?: unknown;
+										isWordMatch?: unknown;
+										excludeGlobs?: unknown;
+										maxResults?: unknown;
+										maxFileSize?: unknown;
+								  }
+								| undefined;
+							if (
+								request === undefined ||
+								!Array.isArray(request.roots) ||
+								!request.roots.every((root) => typeof root === "string") ||
+								typeof request.pattern !== "string" ||
+								typeof request.isRegExp !== "boolean" ||
+								typeof request.isCaseSensitive !== "boolean" ||
+								typeof request.isWordMatch !== "boolean" ||
+								!Array.isArray(request.excludeGlobs) ||
+								!request.excludeGlobs.every(
+									(glob) => typeof glob === "string",
+								) ||
+								typeof request.maxResults !== "number" ||
+								(request.maxFileSize !== null &&
+									typeof request.maxFileSize !== "number")
+							) {
+								throw new TypeError("Invalid multi-root text search request.");
+							}
+							const result = searchText({
+								roots: request.roots as string[],
+								pattern: request.pattern,
+								isRegExp: request.isRegExp,
+								isCaseSensitive: request.isCaseSensitive,
+								isWordMatch: request.isWordMatch,
+								excludeGlobs: request.excludeGlobs as string[],
+								maxResults: request.maxResults,
+								maxFileSize: request.maxFileSize,
+							});
+							const searchId = nextTextSearchId();
+							activeTextSearch = {
+								searchId,
+								batches: result.batches,
+								cursor: 0,
+								limitHit: result.limitHit,
+							};
+							return { searchId };
+						}
+						case "workspace_search_text_poll": {
+							const request = args.request as
+								{ searchId?: unknown; cursor?: unknown } | undefined;
+							if (
+								activeTextSearch === undefined ||
+								request?.searchId !== activeTextSearch.searchId ||
+								request.cursor !== activeTextSearch.cursor
+							) {
+								throw new TypeError("Invalid multi-root text search poll.");
+							}
+							const batches = activeTextSearch.batches.splice(0);
+							activeTextSearch.cursor += batches.length;
+							return {
+								batches,
+								nextCursor: activeTextSearch.cursor,
+								done: true,
+								limitHit: activeTextSearch.limitHit,
+								skipped: { binary: 0, oversize: 0 },
+							};
+						}
+						case "workspace_search_text_cancel": {
+							const request = args.request as
+								{ searchId?: unknown } | undefined;
+							if (request?.searchId !== activeTextSearch?.searchId) {
+								throw new TypeError("Invalid multi-root text search cancel.");
+							}
+							activeTextSearch = undefined;
+							return null;
 						}
 						case "workspace_stat":
 						case "workspace_read_dir":
@@ -8754,6 +9057,121 @@ test("opens Quick Open with Cmd+P and stays stable while typing, including on an
 	await page.keyboard.press("Escape");
 	await expect(quickOpen).toBeHidden();
 
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("keeps duplicate Quick Open and text-search paths bound to their producing workspace root", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	await installMultiRootNativeIpcMock(page, "supported");
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	await executePaletteCommand(page, "Open Folder", "File: Open Folder...");
+	await executePaletteCommand(
+		page,
+		"Add Folder to Workspace",
+		"Workspaces: Add Folder to Workspace...",
+	);
+
+	const quickOpen = page.locator(".quick-input-widget");
+	await page.keyboard.press("ControlOrMeta+P");
+	await expect(quickOpen).toBeVisible();
+	await quickOpen.locator("input").pressSequentially("shared.txt");
+	const duplicateRows = quickOpen
+		.locator(".quick-input-list .monaco-list-row")
+		.filter({ hasText: "shared.txt" });
+	await expect(duplicateRows).toHaveCount(2);
+	const secondaryRow = quickOpen.locator(
+		'.quick-input-list .monaco-list-row[aria-label*="plain-library"]',
+	);
+	await expect(secondaryRow).toHaveCount(1);
+	await secondaryRow.click();
+	await expect(quickOpen).toBeHidden();
+	await expect(
+		page.getByRole("code").filter({ hasText: "F140 shared secondary" }),
+	).toBeVisible();
+
+	await page.getByRole("tab", { name: /^Search/ }).click();
+	const searchInput = page.locator(".plain-search-view-input");
+	const replaceInput = page.locator(".plain-search-view-replace-input");
+	const status = page.locator(".plain-search-view-status");
+	const messages = page.locator(".plain-search-view-messages");
+	await searchInput.pressSequentially("F140 shared secondary");
+	await expect(status).toHaveText("1 result in 1 file", { timeout: 5_000 });
+	await replaceInput.fill("F140 replaced secondary");
+	await page.locator(".plain-search-view-replace-all").click();
+	await expect(messages).toHaveText("Replaced 1 match.");
+	await expect(
+		page.getByRole("code").filter({ hasText: "F140 replaced secondary" }),
+	).toBeVisible();
+
+	// The write must target the secondary root despite the duplicate relative
+	// path. The primary copy remains searchable and opens with its original
+	// content, proving replace did not merely select the first workspace root.
+	const writes = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+		};
+		return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+			({ command }) => command === "workspace_write_file",
+		);
+	});
+	expect(writes).toHaveLength(1);
+	expect(writes[0]!.args.request).toEqual({
+		rootId: nativeSecondaryRootId,
+		relativePath: "shared.txt",
+		expectedVersion: expect.stringMatching(/^wv1:[0-9a-f]{64}$/u),
+	});
+	expect(writes[0]!.args.contentHex).toBe(
+		hexOfText("F140 replaced secondary\n"),
+	);
+
+	await searchInput.fill("F140 shared primary");
+	await expect(status).toHaveText("1 result in 1 file", { timeout: 5_000 });
+	await page.locator(".plain-search-view-match").click();
+	await expect(
+		page.getByRole("code").filter({ hasText: "F140 shared primary" }),
+	).toBeVisible();
+
+	const searchCalls = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+		};
+		return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+			({ command }) =>
+				command === "workspace_search_files" ||
+				command === "workspace_search_text_start",
+		);
+	});
+	expect(
+		searchCalls.some(
+			(call) =>
+				JSON.stringify(
+					(call.args.request as { roots?: readonly string[] } | undefined)
+						?.roots,
+				) === JSON.stringify([nativeRootId, nativeSecondaryRootId]),
+		),
+	).toBe(true);
 	expect(nativeDialogs).toEqual([]);
 	expect(pageErrors).toEqual([]);
 	expect(consoleErrors).toEqual([]);
