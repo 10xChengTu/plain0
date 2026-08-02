@@ -21,6 +21,7 @@ import type {
 
 const BEFORE_AND_STORAGE_BUDGET_MS = 4_000;
 const WILL_SHUTDOWN_BUDGET_MS = 500;
+const RENDERER_INPUT_SETTLE_MS = 100;
 
 let configuredBridge: PlainBridge | undefined;
 
@@ -85,7 +86,7 @@ export class PlainLifecycleService extends AbstractLifecycleService {
 		this.shutdownReason = reason;
 		try {
 			const veto = await deadline(
-				this.handleBeforeShutdown(reason).then(async (beforeVeto) => {
+				this.prepareForShutdown(reason).then(async (beforeVeto) => {
 					if (beforeVeto) return true;
 					await this.storageService.flush(WillSaveStateReason.SHUTDOWN);
 					return false;
@@ -114,6 +115,19 @@ export class PlainLifecycleService extends AbstractLifecycleService {
 		} finally {
 			this.activeRequestId = undefined;
 		}
+	}
+
+	private async prepareForShutdown(reason: ShutdownReason): Promise<boolean> {
+		// A native Cmd+Q/close request can reach Tauri while Monaco is still
+		// processing the final text-input task that preceded the shortcut. Give
+		// that already-queued renderer work one small, bounded grace window before
+		// the final-veto listeners snapshot modified working copies. Without this
+		// turn, a just-edited buffer can be absent from `modifiedWorkingCopies`
+		// even though the keystroke becomes visible immediately afterwards.
+		await new Promise<void>((resolve) => {
+			setTimeout(resolve, RENDERER_INPUT_SETTLE_MS);
+		});
+		return this.handleBeforeShutdown(reason);
 	}
 
 	private async handleBeforeShutdown(reason: ShutdownReason): Promise<boolean> {

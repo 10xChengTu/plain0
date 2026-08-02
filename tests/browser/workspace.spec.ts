@@ -9261,14 +9261,20 @@ test("flushes the newest dirty bytes before both native close and application qu
 	const emitAndAssert = async (
 		reason: "close" | "quit",
 		tail: string,
+		deferTailUntilAfterNativeEvent = false,
 	): Promise<void> => {
-		await page.keyboard.insertText(tail);
+		if (!deferTailUntilAfterNativeEvent) {
+			await page.keyboard.insertText(tail);
+		}
 		const requestId = await page.evaluate((nativeReason) => {
 			const testWindow = window as unknown as Window & {
 				__PLAIN_TEST_EMIT_NATIVE_CLOSE__(reason: "close" | "quit"): string;
 			};
 			return testWindow.__PLAIN_TEST_EMIT_NATIVE_CLOSE__(nativeReason);
 		}, reason);
+		if (deferTailUntilAfterNativeEvent) {
+			await page.keyboard.insertText(tail);
+		}
 		await expect
 			.poll(async () =>
 				page.evaluate((id) => {
@@ -9338,7 +9344,10 @@ test("flushes the newest dirty bytes before both native close and application qu
 		.filter({ hasText: "CLOSE-LATEST" })
 		.click();
 	await page.keyboard.press("End");
-	await emitAndAssert("quit", " QUIT-LATEST");
+	// Native Cmd+Q can overtake Monaco's final queued input task. Model that
+	// ordering explicitly: the close request is delivered now, while the last
+	// editor mutation becomes observable on the next renderer turn.
+	await emitAndAssert("quit", " QUIT-LATEST", true);
 
 	expect(pageErrors).toEqual([]);
 });
