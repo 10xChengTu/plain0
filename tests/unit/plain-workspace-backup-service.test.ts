@@ -50,6 +50,9 @@ function createFakeBridge(overrides: Partial<PlainBridge> = {}): {
 	const bridge: PlainBridge = {
 		runtimeInfo: notImplemented,
 		onRuntimeReady: notImplemented,
+		onNativeCloseRequested: notImplemented,
+		lifecycleCompleteClose: notImplemented,
+		lifecycleRequestClose: notImplemented,
 		workspaceCapabilities: notImplemented,
 		workspaceSnapshot: notImplemented,
 		workspaceReconcileWatchRoots: notImplemented,

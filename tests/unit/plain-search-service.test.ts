@@ -50,6 +50,9 @@ function fakeBridge(
 	return {
 		runtimeInfo: notImplemented,
 		onRuntimeReady: notImplemented,
+		onNativeCloseRequested: notImplemented,
+		lifecycleCompleteClose: notImplemented,
+		lifecycleRequestClose: notImplemented,
 		workspaceCapabilities: notImplemented,
 		workspaceSnapshot: notImplemented,
 		workspaceReconcileWatchRoots: notImplemented,
@@ -189,6 +192,9 @@ function fakeTextSearchBridge(
 	const bridge: PlainBridge = {
 		runtimeInfo: notImplemented,
 		onRuntimeReady: notImplemented,
+		onNativeCloseRequested: notImplemented,
+		lifecycleCompleteClose: notImplemented,
+		lifecycleRequestClose: notImplemented,
 		workspaceCapabilities: notImplemented,
 		workspaceSnapshot: notImplemented,
 		workspaceReconcileWatchRoots: notImplemented,

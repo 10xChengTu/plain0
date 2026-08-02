@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import {
 	DEBUG_EVENT,
+	NATIVE_CLOSE_REQUEST_EVENT,
 	RUNTIME_READY_EVENT,
 	TERMINAL_DATA_EVENT,
 	TERMINAL_EXIT_EVENT,
@@ -10,6 +11,11 @@ import {
 	WORKSPACE_WATCH_WAKE_EVENT,
 	type PlainBridge,
 } from "./contracts";
+import {
+	decodeLifecycleVoid,
+	decodeNativeCloseRequest,
+	frozenCompleteCloseRequest,
+} from "./lifecycle-codec";
 import {
 	decodeBackupReadAllResult,
 	decodeBackupVoid,
@@ -194,6 +200,22 @@ export function createNativeBridge(): PlainBridge {
 		onRuntimeReady: async (listener) => {
 			return listen<unknown>(RUNTIME_READY_EVENT, (event) =>
 				listener(decodeRuntimeInfo(event.payload)),
+			);
+		},
+		onNativeCloseRequested: async (listener) => {
+			return listen<unknown>(NATIVE_CLOSE_REQUEST_EVENT, (event) =>
+				listener(decodeNativeCloseRequest(event.payload)),
+			);
+		},
+		lifecycleCompleteClose: async (requestId, outcome) => {
+			const request = frozenCompleteCloseRequest(requestId, outcome);
+			decodeLifecycleVoid(
+				await invoke<unknown>("lifecycle_complete_close", { request }),
+			);
+		},
+		lifecycleRequestClose: async () => {
+			decodeLifecycleVoid(
+				await invoke<unknown>("lifecycle_request_close", { request: {} }),
 			);
 		},
 		workspaceCapabilities: async () =>

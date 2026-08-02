@@ -4,6 +4,7 @@ pub mod backup;
 pub mod debug;
 pub mod error;
 pub mod git;
+pub mod lifecycle;
 pub mod path_policy;
 pub mod search;
 pub mod terminal;
@@ -16,6 +17,7 @@ use debug::confirm::ConfirmationService;
 use debug::service::DebugSessionService;
 use error::CommandError;
 use git::network::GitNetworkService;
+use lifecycle::service::{CloseCoordinator, ExitDecision, WindowCloseDecision};
 use terminal::service::TerminalService;
 use theme::service::ThemeService;
 use trust::service::TrustService;
@@ -54,6 +56,7 @@ pub fn run() {
         .manage(TerminalService::new())
         .manage(GitNetworkService::new())
         .manage(DebugSessionService::new())
+        .manage(CloseCoordinator::new())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let base_path = app.path().app_local_data_dir()?;
@@ -64,7 +67,27 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let lifecycle = window.state::<CloseCoordinator>();
+                match lifecycle.begin_window_close(window.label(), std::time::Instant::now()) {
+                    Ok(WindowCloseDecision::Allow) => {}
+                    Ok(WindowCloseDecision::Prevent) => api.prevent_close(),
+                    Ok(WindowCloseDecision::Emit(payload)) => {
+                        api.prevent_close();
+                        if window
+                            .emit(lifecycle::CLOSE_REQUEST_EVENT, payload.clone())
+                            .is_err()
+                        {
+                            lifecycle.cancel_request(payload.request_id);
+                        }
+                    }
+                    Err(_) => api.prevent_close(),
+                }
+            }
             if matches!(event, tauri::WindowEvent::Destroyed) {
+                window
+                    .state::<CloseCoordinator>()
+                    .close_window(window.label());
                 window
                     .state::<WorkspaceService>()
                     .close_window(window.label());
@@ -139,6 +162,8 @@ pub fn run() {
             backup::commands::backup_read_all,
             backup::commands::backup_discard,
             backup::commands::backup_discard_all,
+            lifecycle::commands::lifecycle_complete_close,
+            lifecycle::commands::lifecycle_request_close,
             trust::commands::workspace_trust_state,
             trust::commands::workspace_trust_grant,
             trust::commands::workspace_trust_revoke,
@@ -178,8 +203,31 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("failed to build Plain")
         .run(|app, event| {
-            if matches!(event, tauri::RunEvent::Resumed) {
+            if matches!(&event, tauri::RunEvent::Resumed) {
                 app.state::<WorkspaceService>().mark_all_watchers_rescan();
+            }
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                let lifecycle = app.state::<CloseCoordinator>();
+                let windows = app.webview_windows();
+                let labels = windows.keys().cloned().collect::<Vec<_>>();
+                match lifecycle.begin_exit(labels, code.unwrap_or(0), std::time::Instant::now()) {
+                    Ok(ExitDecision::Allow) => {}
+                    Ok(ExitDecision::Prevent) => api.prevent_exit(),
+                    Ok(ExitDecision::Emit(events)) => {
+                        api.prevent_exit();
+                        for (label, payload) in events {
+                            let emitted = windows.get(&label).is_some_and(|window| {
+                                window
+                                    .emit(lifecycle::CLOSE_REQUEST_EVENT, payload.clone())
+                                    .is_ok()
+                            });
+                            if !emitted {
+                                lifecycle.cancel_request(payload.request_id);
+                            }
+                        }
+                    }
+                    Err(_) => api.prevent_exit(),
+                }
             }
         });
 }

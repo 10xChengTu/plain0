@@ -1350,8 +1350,33 @@ async function installNativeIpcMock(
 					}
 				}
 			};
+			let nativeCloseRequestSerial = 701;
+			const emitNativeCloseRequest = (reason: "close" | "quit"): string => {
+				const requestId = `00000000-0000-4000-8000-${(nativeCloseRequestSerial++)
+					.toString()
+					.padStart(12, "0")}`;
+				const payload = { requestId, reason, timeoutMs: 5_000 };
+				calls.push({
+					command: "__test_emit_native_close__",
+					args: { requestId, reason },
+				});
+				for (const [eventId, registration] of eventHandlers) {
+					if (registration.event !== "plain://close-requested") continue;
+					const transformed = callbacks.get(registration.handlerId);
+					transformed?.callback({
+						event: registration.event,
+						id: eventId,
+						payload,
+					});
+					if (transformed?.once === true) {
+						callbacks.delete(registration.handlerId);
+					}
+				}
+				return requestId;
+			};
 			const testWindow = window as unknown as Window & {
 				__PLAIN_TEST_TAURI_CALLS__: typeof calls;
+				__PLAIN_TEST_EMIT_NATIVE_CLOSE__(reason: "close" | "quit"): string;
 				__PLAIN_TEST_EXTERNAL_CREATE__(name: string, emitWake: boolean): void;
 				__PLAIN_TEST_EXTERNAL_DELETE__(name: string, emitWake: boolean): void;
 				__PLAIN_TEST_EXTERNAL_WRITE__(
@@ -1381,6 +1406,7 @@ async function installNativeIpcMock(
 				};
 			};
 			testWindow.__PLAIN_TEST_TAURI_CALLS__ = calls;
+			testWindow.__PLAIN_TEST_EMIT_NATIVE_CLOSE__ = emitNativeCloseRequest;
 			testWindow.__PLAIN_TEST_EXTERNAL_CREATE__ = (name, shouldEmitWake) => {
 				if (
 					!/^[A-Za-z0-9._-]+$/u.test(name) ||
@@ -2276,6 +2302,11 @@ async function installNativeIpcMock(
 								ipcVersion: 1,
 								runtime: "tauri",
 							};
+						case "lifecycle_complete_close":
+							return null;
+						case "lifecycle_request_close":
+							emitNativeCloseRequest("close");
+							return null;
 						case "workspace_capabilities":
 							return {
 								create: true,
@@ -9193,6 +9224,279 @@ test("restores an unsaved edit as a dirty editor after a simulated hot-exit relo
 	expect(nativeDialogs).toEqual([]);
 	expect(pageErrors).toEqual([]);
 	expect(consoleErrors).toEqual([]);
+});
+
+test("flushes the newest dirty bytes before both native close and application quit are allowed", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	await installNativeIpcMock(page, "arrayBuffer", "supported");
+
+	const explorer = await openNativeWorkspaceExplorer(page);
+	await explorer
+		.getByRole("treeitem", { name: "README.md", exact: true })
+		.dblclick();
+	const editorLine = page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "Read-only Explorer fixture." });
+	await editorLine.click();
+	await page.keyboard.press("End");
+	await page.keyboard.insertText(" native-close-baseline");
+	await expect
+		.poll(
+			async () =>
+				page.evaluate(() => {
+					const testWindow = window as unknown as Window & {
+						__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+					};
+					return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+						({ command }) => command === "backup_write",
+					).length;
+				}),
+			{ timeout: 5_000 },
+		)
+		.toBe(1);
+
+	const emitAndAssert = async (
+		reason: "close" | "quit",
+		tail: string,
+	): Promise<void> => {
+		await page.keyboard.insertText(tail);
+		const requestId = await page.evaluate((nativeReason) => {
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_EMIT_NATIVE_CLOSE__(reason: "close" | "quit"): string;
+			};
+			return testWindow.__PLAIN_TEST_EMIT_NATIVE_CLOSE__(nativeReason);
+		}, reason);
+		await expect
+			.poll(async () =>
+				page.evaluate((id) => {
+					const testWindow = window as unknown as Window & {
+						__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+					};
+					return testWindow.__PLAIN_TEST_TAURI_CALLS__.find(
+						({ command, args }) =>
+							command === "lifecycle_complete_close" &&
+							(
+								args.request as
+									{ requestId?: string; outcome?: string } | undefined
+							)?.requestId === id,
+					)?.args;
+				}, requestId),
+			)
+			.toEqual({ request: { requestId, outcome: "allow" } });
+
+		const calls = await page.evaluate(() => {
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+			};
+			return testWindow.__PLAIN_TEST_TAURI_CALLS__;
+		});
+		const markerIndex = calls.findIndex(
+			({ command, args }) =>
+				command === "__test_emit_native_close__" &&
+				args.requestId === requestId,
+		);
+		const backupIndex = calls.findIndex(
+			({ command }, index) => index > markerIndex && command === "backup_write",
+		);
+		const completionIndex = calls.findIndex(
+			({ command, args }, index) =>
+				index > backupIndex &&
+				command === "lifecycle_complete_close" &&
+				(args.request as { requestId?: string } | undefined)?.requestId ===
+					requestId,
+		);
+		expect(markerIndex).toBeGreaterThanOrEqual(0);
+		expect(backupIndex).toBeGreaterThan(markerIndex);
+		expect(completionIndex).toBeGreaterThan(backupIndex);
+		const contentHex = calls[backupIndex]?.args.contentHex;
+		expect(typeof contentHex).toBe("string");
+		expect(Buffer.from(contentHex as string, "hex").toString("utf8")).toContain(
+			tail,
+		);
+	};
+
+	await emitAndAssert("close", " CLOSE-LATEST");
+
+	// The native test fixture records allow instead of destroying Chromium.
+	// Reload models the process boundary and proves that the just-flushed
+	// close bytes, rather than the prior one-second backup, are authoritative.
+	await page.reload();
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	await executePaletteCommand(page, "Open Folder", "File: Open Folder...");
+	await expect(
+		page.getByRole("code").filter({ hasText: "CLOSE-LATEST" }),
+	).toBeVisible();
+	await page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "CLOSE-LATEST" })
+		.click();
+	await page.keyboard.press("End");
+	await emitAndAssert("quit", " QUIT-LATEST");
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("vetoes a native close when the final backup write fails and allows a later retry with the newest bytes", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	await installNativeIpcMock(page, "arrayBuffer", "supported");
+
+	const explorer = await openNativeWorkspaceExplorer(page);
+	await explorer
+		.getByRole("treeitem", { name: "README.md", exact: true })
+		.dblclick();
+	await page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "Read-only Explorer fixture." })
+		.click();
+	await page.keyboard.press("End");
+	await page.keyboard.insertText(" veto-baseline");
+	await expect
+		.poll(
+			async () =>
+				page.evaluate(() => {
+					const testWindow = window as unknown as Window & {
+						__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+					};
+					return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+						({ command }) => command === "backup_write",
+					).length;
+				}),
+			{ timeout: 5_000 },
+		)
+		.toBe(1);
+
+	await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_FAILED_BACKUP_WRITES__: number;
+			__PLAIN_TEST_RESTORE_INVOKE__(): void;
+			__TAURI_INTERNALS__: {
+				invoke(
+					command: string,
+					args?: Record<string, unknown> | Uint8Array,
+				): Promise<unknown>;
+			};
+		};
+		const originalInvoke = testWindow.__TAURI_INTERNALS__.invoke.bind(
+			testWindow.__TAURI_INTERNALS__,
+		);
+		testWindow.__PLAIN_TEST_FAILED_BACKUP_WRITES__ = 0;
+		testWindow.__TAURI_INTERNALS__.invoke = async (command, args = {}) => {
+			if (command === "backup_write") {
+				testWindow.__PLAIN_TEST_FAILED_BACKUP_WRITES__ += 1;
+				throw { code: "BACKUP_WRITE_FAILED", message: "Injected failure." };
+			}
+			return originalInvoke(command, args);
+		};
+		testWindow.__PLAIN_TEST_RESTORE_INVOKE__ = () => {
+			testWindow.__TAURI_INTERNALS__.invoke = originalInvoke;
+		};
+	});
+	await page.keyboard.insertText(" FAILED-CLOSE-LATEST");
+	const failedRequestId = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_EMIT_NATIVE_CLOSE__(reason: "close"): string;
+		};
+		return testWindow.__PLAIN_TEST_EMIT_NATIVE_CLOSE__("close");
+	});
+	await expect
+		.poll(async () =>
+			page.evaluate((requestId) => {
+				const testWindow = window as unknown as Window & {
+					__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+					__PLAIN_TEST_FAILED_BACKUP_WRITES__: number;
+				};
+				const completion = testWindow.__PLAIN_TEST_TAURI_CALLS__.find(
+					({ command, args }) =>
+						command === "lifecycle_complete_close" &&
+						(args.request as { requestId?: string } | undefined)?.requestId ===
+							requestId,
+				);
+				return {
+					failedWrites: testWindow.__PLAIN_TEST_FAILED_BACKUP_WRITES__,
+					outcome: (
+						completion?.args.request as { outcome?: string } | undefined
+					)?.outcome,
+				};
+			}, failedRequestId),
+		)
+		.toEqual({ failedWrites: 1, outcome: "veto" });
+
+	// A veto must leave the Workbench alive and unsuspended. Restore the
+	// transport, make another edit, and prove a fresh request can flush and
+	// close instead of being poisoned by the failed attempt.
+	await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_RESTORE_INVOKE__(): void;
+		};
+		testWindow.__PLAIN_TEST_RESTORE_INVOKE__();
+	});
+	await page.keyboard.insertText(" RETRY-LATEST");
+	const retryRequestId = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_EMIT_NATIVE_CLOSE__(reason: "close"): string;
+		};
+		return testWindow.__PLAIN_TEST_EMIT_NATIVE_CLOSE__("close");
+	});
+	await expect
+		.poll(async () =>
+			page.evaluate((requestId) => {
+				const testWindow = window as unknown as Window & {
+					__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+				};
+				return testWindow.__PLAIN_TEST_TAURI_CALLS__.find(
+					({ command, args }) =>
+						command === "lifecycle_complete_close" &&
+						(args.request as { requestId?: string } | undefined)?.requestId ===
+							requestId,
+				)?.args;
+			}, retryRequestId),
+		)
+		.toEqual({ request: { requestId: retryRequestId, outcome: "allow" } });
+
+	const retryEvidence = await page.evaluate((requestId) => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+		};
+		const calls = testWindow.__PLAIN_TEST_TAURI_CALLS__;
+		const marker = calls.findIndex(
+			({ command, args }) =>
+				command === "__test_emit_native_close__" &&
+				args.requestId === requestId,
+		);
+		const backup = calls.findIndex(
+			({ command }, index) => index > marker && command === "backup_write",
+		);
+		const completion = calls.findIndex(
+			({ command, args }, index) =>
+				index > backup &&
+				command === "lifecycle_complete_close" &&
+				(args.request as { requestId?: string } | undefined)?.requestId ===
+					requestId,
+		);
+		return {
+			marker,
+			backup,
+			completion,
+			contentHex: calls[backup]?.args.contentHex,
+		};
+	}, retryRequestId);
+	expect(retryEvidence.backup).toBeGreaterThan(retryEvidence.marker);
+	expect(retryEvidence.completion).toBeGreaterThan(retryEvidence.backup);
+	expect(
+		Buffer.from(String(retryEvidence.contentHex), "hex").toString("utf8"),
+	).toContain("RETRY-LATEST");
+	expect(failedRequestId).not.toBe(retryRequestId);
+	expect(pageErrors).toEqual([]);
 });
 
 test("restores duplicate-path dirty editors only when each owning root is adopted across a multi-root hot-exit reload", async ({

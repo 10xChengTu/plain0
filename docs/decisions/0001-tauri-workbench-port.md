@@ -23,6 +23,7 @@
 - WebView 通过显式 allowlist 组合 Workbench、Views、Editor、Theme/TextMate、Files、Search、Terminal、SCM 和 Debug service overrides。
 - Plain 自己拥有 TypeScript feature composition、IPC DTO 和 Rust service contract。
 - Tauri 替换 Electron lifecycle/window/menu/IPC/build。
+- 原生窗口关闭和应用退出由 Rust 一次性请求状态机控制：先 prevent，等待 WebView Workbench lifecycle 完成最终 backup/storage 刷新并显式 allow，再执行真正 close/exit；不把系统 WebView 的 `beforeunload` 当作数据安全边界。
 - Rust 替换 Node/Electron 的 fs/search/PTY/Git/DAP/theme/storage。
 - 不导入 AI、Chat、Auth、Sync、Gallery、Remote、Task、Testing 或 Notebook packages。API 包传递带入的 extensions service 只作惰性静态 registry，不直接导入或启用任何 Extension Host。
 - 当前 Code OSS 源码只在迁移期作为行为、静态资源和测试基线，最终删除。

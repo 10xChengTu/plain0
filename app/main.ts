@@ -82,6 +82,7 @@ import { configureMonacoEnvironment } from "./monaco-environment";
 import { createBridge, normalizeCommandError } from "./platform/tauri";
 import { configurePlainSearchBridge } from "./features/search/plain-search-service";
 import { createServiceOverrides } from "./services";
+import { configurePlainLifecycleBridge } from "./services/plain-lifecycle-service";
 import { configurePlainWorkingCopyBackupBridge } from "./services/plain-workspace-backup-service";
 import "./styles.css";
 
@@ -187,6 +188,7 @@ async function bootstrap(): Promise<void> {
 	document.body.dataset.plainIpcVersion = String(runtime.ipcVersion);
 
 	configurePlainWorkingCopyBackupBridge(bridge);
+	configurePlainLifecycleBridge(bridge);
 	configurePlainSearchBridge(bridge);
 	configurePlainTerminalBridge(bridge);
 	configurePlainScmBridge(bridge);

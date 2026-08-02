@@ -1,6 +1,6 @@
 # 端到端桌面验收交接清单（Codex 执行）
 
-更新时间：2026-08-02（新增并完成 E2E-015；既有条目的完成或阻塞状态以各自小节为准）
+更新时间：2026-08-02（新增 E2E-018；既有条目的完成或阻塞状态以各自小节为准）
 
 ## 分工模式
 
@@ -61,7 +61,7 @@ fixture：临时 workspace（含一个文本文件）。
 5. 保存冲突真实路径：外部改写文件后在 app 内 `Cmd+S` → 冲突通知（动作恰为 Reload/Save As.../Details，无 Retry/Overwrite）→ Reload 后内容为外部版本。
 6. 清理：退出、删除 fixture 与 backup 目录、删除 `src-tauri/target`。
 
-已知边界（执行方须知）：真实 `WindowEvent::CloseRequested` 关窗握手（关窗前保证 backup 落盘的 veto/等待协议）**尚未实现**——Plain tracker 的 `onFinalBeforeShutdown` 恒不 veto，正常关窗时最后一次节流备份可能未落盘；崩溃路径（kill -9）依赖此前已完成的节流备份。该协议属后续工作项，本条目按现状验收即可，发现关窗竞态属预期，不算回归。
+历史边界更新：本条执行时真实 `WindowEvent::CloseRequested` 关窗握手尚未实现，因此只验收了等待节流备份后的 kill-9 路径。该缺口已在 2026-08-02 的 F160 S1 实现，不再是当前产品边界；普通关窗、Cmd+Q、最终刷新与双根恢复由 E2E-018 重新验收。
 
 ### E2E-004 · F040 Quick Open、搜索与替换的真实桌面矩阵
 
@@ -500,6 +500,28 @@ fixture 与清理：`/private/tmp/plain-f150-terminal-e2e-primary` 与 `/private
 
 fixture 与清理：两个 fixture 各含同名 `main.py`、独立 `.vscode/launch.json` 与确定性 Python DAP adapter；测试不访问网络、凭证或用户文件。临时 debugpy 日志、探针、marker、fixture、`dist`、`test-results` 与 `src-tauri/target` 在提交前全部删除。
 
+### E2E-018 · F160 原生关窗与双根 hot-exit 恢复真实桌面矩阵
+
+状态：**待执行（2026-08-02 登记）**。Browser 已确定性覆盖 close/quit 的「事件 → 最新 backup_write → allow」、backup 写失败 veto 与同一页面重试；本条补真实 Rust `WindowEvent`/`RunEvent`、真实 WKWebView、真实应用数据目录和真实进程边界。
+
+fixture（只创建本条专用临时目录，不使用真实开发仓库）：
+
+- `plain-f160-close-primary/` 与 `plain-f160-close-secondary/`，两根都包含同名 `shared.txt`，初始内容分别带唯一 `PRIMARY_DISK`/`SECONDARY_DISK` 标记。
+- 两根各再放一个不同名文件，便于 Explorer 与恢复 tab 核对 root 标签；测试脏内容使用互不相同且包含场景名的完整行。
+
+步骤与断言：
+
+1. 以当前工作树执行 `env PATH=<系统工具优先 PATH> APPLE_SIGNING_IDENTITY=- pnpm tauri:build:e2e`，只从当前仓库绝对路径启动新生成的 debug `Plain.app`；确认旧 PID 已消失并等到 Explorer ready。
+2. 用系统目录选择器授权 primary，再 Add Folder 授权 secondary；分别打开两个 `shared.txt`，在 1 秒默认节流窗口内立即写入 `PRIMARY_CLOSE_LATEST`/`SECONDARY_CLOSE_LATEST`，不要等待定时 backup。点击真实 macOS 红色关闭按钮（或等价的 `Cmd+W` 关闭最后窗口），确认应用正常退出而非停留 5/8 秒超时；shell 确认 Plain PID 消失。
+3. 检查 `<app_local_data_dir>/backups/roots/`：两个不同稳定 root identity 分区均有条目，不应出现按授权顺序、显示名或当前随机 UUID 合并的单目录；记录条目尺寸/mtime，不把原生绝对根路径泄漏到 WebView 证据。
+4. 冷启动同一 bundle，先授权 secondary、再加入 primary（刻意反转顺序）。两个同名 tab 都必须恢复为 dirty，内容分别精确包含本根的 CLOSE marker，绝不能交换；逐个保存后 shell 核对两根磁盘字节，并确认对应 backup 条目消失。
+5. 在两根 `shared.txt` 再分别输入唯一 `PRIMARY_QUIT_LATEST`/`SECONDARY_QUIT_LATEST`，同样在节流窗口内立即按 `Cmd+Q`。确认应用退出、无残留 PID；冷启动并以另一授权顺序重开后，两个最新 QUIT marker 分别恢复到正确 root。保存并核对磁盘/backup 清理。
+6. crash 对照：再次制造两根不同 dirty marker，这次等待定时 backup 真实落盘，然后 `kill -9`；冷启动、反序授权两根，确认两者仍按各自 root 恢复。该步骤证明新的单-root 分区没有破坏 E2E-003 的崩溃路径，而不是用 crash 代替步骤 2/5 的正常生命周期验证。
+7. topology 对照：只移除其中一根并确认另一根的 dirty/backup 仍可见；重新加入被移除根后其自身内容恢复，未变化根不被重新挂载或覆盖。
+8. 清理：把所有恢复内容保存或显式 revert，使本条创建的 backup 精确清空；退出应用，删除两个 fixture、截图、`dist`、`test-results` 与 `src-tauri/target`。不得删除整个用户 application-data 目录，只能清理由本条 fixture 精确产生且已核对身份的条目。
+
+完成后：把真实 normal-close、Cmd+Q、kill-9、反序双根恢复、磁盘分区与进程清理结果写入 F160 evidence，F160 转 `complete`；若任何一步失败，先修复并重新执行对应场景，不能以 Browser 证据替代。
+
 ## 后续条目（随切片追加）
 
 - F030 遗留：真实 `CloseRequested` 关窗握手协议实现后，补「正常关窗 → 重开恢复」的桌面验收变体。
@@ -512,3 +534,4 @@ fixture 与清理：两个 fixture 各含同名 `main.py`、独立 `.vscode/laun
 - F150 S1 多根 Git 显式选择、写入隔离、Graph/Worktree/History 路由真实桌面矩阵 E2E-015 已完成；F150 继续进入 Terminal 与 Debug routing，整个 feature 完成后再统一回写 `features.json` evidence。
 - F150 S2 多根终端显式选择、tab/split root 冻结与进程清理真实桌面矩阵 E2E-016 已完成；F150 下一步只进入 Debug routing，整个 feature 完成后再统一回写 `features.json` evidence。
 - F150 S3 多根调试显式选择、adapter cwd、调用栈、同路径断点身份与进程清理真实桌面矩阵 E2E-017 已完成；F150 已整体关闭，唯一 WIP 切到 F160。
+- F160 原生普通关窗/Cmd+Q/kill-9、最终 backup 刷新与双根反序恢复真实桌面矩阵已登记为 E2E-018，完成后关闭 F160。

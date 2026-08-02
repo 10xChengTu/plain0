@@ -1038,6 +1038,11 @@ export function validateDialogServiceOverride(source) {
 			thirdArgIsTrue: false,
 		},
 		{
+			tokenName: "ILifecycleService",
+			className: "PlainLifecycleService",
+			thirdArgIsTrue: true,
+		},
+		{
 			tokenName: "ISearchService",
 			className: "PlainSearchService",
 			thirdArgIsTrue: true,
@@ -1360,6 +1365,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 			"./services/plain-workspace-backup-service",
 			"configurePlainWorkingCopyBackupBridge",
 		],
+		["./services/plain-lifecycle-service", "configurePlainLifecycleBridge"],
 		["./features/search/plain-search-service", "configurePlainSearchBridge"],
 	]) {
 		if (countExactNamedImport(moduleName, importedName) !== 1) {
@@ -1387,6 +1393,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 		"initialize",
 		"PLAIN_WORKSPACE_SCHEME",
 		"configurePlainWorkingCopyBackupBridge",
+		"configurePlainLifecycleBridge",
 		"configurePlainSearchBridge",
 	]);
 	let hasCriticalBootstrapShadow = false;
@@ -1560,6 +1567,18 @@ export function validateWorkspaceProviderBootstrap(source) {
 			identifierCall(statement.expression.expression, "initialize", 3)
 		);
 	});
+	const lifecycleBridgeIndexes = matchingStatementIndexes((statement) => {
+		return (
+			ts.isExpressionStatement(statement) &&
+			identifierCall(
+				statement.expression,
+				"configurePlainLifecycleBridge",
+				1,
+			) &&
+			ts.isIdentifier(statement.expression.arguments[0]) &&
+			statement.expression.arguments[0].text === "bridge"
+		);
+	});
 
 	const calls = {
 		createBridge: 0,
@@ -1568,6 +1587,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 		deleteCoordinatorRegistration: 0,
 		registerCustomProvider: 0,
 		workspaceSnapshot: 0,
+		configureLifecycle: 0,
 		initialize: 0,
 	};
 	let capabilityMemberReferences = 0;
@@ -1627,6 +1647,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 				parent.expression.text === "registerWorkspaceDeleteCoordinator" ||
 				parent.expression.text === "registerWorkspaceCommands" ||
 				parent.expression.text === "configurePlainWorkingCopyBackupBridge" ||
+				parent.expression.text === "configurePlainLifecycleBridge" ||
 				parent.expression.text === "configurePlainSearchBridge" ||
 				parent.expression.text === "configurePlainTerminalBridge" ||
 				parent.expression.text === "configurePlainScmBridge" ||
@@ -1690,6 +1711,9 @@ export function validateWorkspaceProviderBootstrap(source) {
 						break;
 					case "initialize":
 						calls.initialize += 1;
+						break;
+					case "configurePlainLifecycleBridge":
+						calls.configureLifecycle += 1;
 						break;
 				}
 			}
@@ -1791,6 +1815,16 @@ export function validateWorkspaceProviderBootstrap(source) {
 			"app/main.ts must keep one direct workspace snapshot and initialize sequence",
 		);
 	}
+	if (
+		calls.configureLifecycle !== 1 ||
+		lifecycleBridgeIndexes.length !== 1 ||
+		initializeIndexes[0] === undefined ||
+		lifecycleBridgeIndexes[0] >= initializeIndexes[0]
+	) {
+		failures.push(
+			"app/main.ts must configure the native lifecycle bridge exactly once before initialize",
+		);
+	}
 	const orderedIndexes = [
 		bridgeIndexes[0],
 		capabilityIndexes[0],
@@ -1798,6 +1832,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 		coordinatorIndexes[0],
 		registrationIndexes[0],
 		snapshotIndexes[0],
+		lifecycleBridgeIndexes[0],
 		initializeIndexes[0],
 	];
 	if (
@@ -4783,7 +4818,7 @@ export function validateWorkspaceWatcherBoundary(rustSources, appSources) {
 		!runBody.includes(".build(tauri::generate_context!())") ||
 		!runBody.includes(".run(|app,event|") ||
 		!runBody.includes(
-			"ifmatches!(event,tauri::RunEvent::Resumed){app.state::<WorkspaceService>().mark_all_watchers_rescan();}",
+			"ifmatches!(&event,tauri::RunEvent::Resumed){app.state::<WorkspaceService>().mark_all_watchers_rescan();}",
 		)
 	) {
 		failures.push(
@@ -5441,6 +5476,47 @@ function extractAuditedTauriCommands(source, commandName) {
 	const commands = [];
 	const definitionPattern = new RegExp(
 		`#\\s*\\[\\s*tauri\\s*::\\s*command\\s*\\]\\s*pub\\s*\\(\\s*crate\\s*\\)\\s+async\\s+fn\\s+${escapeRegularExpression(commandName)}\\s*\\(`,
+		"g",
+	);
+	for (const match of source.matchAll(definitionPattern)) {
+		const parameterOpen = match.index + match[0].lastIndexOf("(");
+		const parameterClose = findMatchingDelimiter(
+			source,
+			parameterOpen,
+			"(",
+			")",
+		);
+		if (parameterClose === undefined) {
+			commands.push({ parameters: "", returnType: "", body: "" });
+			continue;
+		}
+		const bodyOpen = source.indexOf("{", parameterClose + 1);
+		const bodyClose =
+			bodyOpen < 0
+				? undefined
+				: findMatchingDelimiter(source, bodyOpen, "{", "}");
+		commands.push({
+			parameters: source.slice(parameterOpen + 1, parameterClose),
+			returnType:
+				bodyOpen < 0
+					? source.slice(parameterClose + 1)
+					: source.slice(parameterClose + 1, bodyOpen),
+			body:
+				bodyOpen < 0
+					? ""
+					: source.slice(
+							bodyOpen + 1,
+							bodyClose === undefined ? source.length : bodyClose,
+						),
+		});
+	}
+	return commands;
+}
+
+function extractAuditedSyncTauriCommands(source, commandName) {
+	const commands = [];
+	const definitionPattern = new RegExp(
+		`#\\s*\\[\\s*tauri\\s*::\\s*command\\s*\\]\\s*pub\\s*\\(\\s*crate\\s*\\)\\s+fn\\s+${escapeRegularExpression(commandName)}\\s*\\(`,
 		"g",
 	);
 	for (const match of source.matchAll(definitionPattern)) {
@@ -6387,6 +6463,126 @@ const TERMINAL_COMMAND_CONTRACTS = Object.freeze([
 		body: "let(session_id,immediate)=request.into_parts();terminal.inner().kill(window.label(),session_id,immediate).await",
 	},
 ]);
+
+const LIFECYCLE_COMMAND_CONTRACTS = Object.freeze([
+	{
+		name: "lifecycle_complete_close",
+		parameters:
+			"app:AppHandle,window:WebviewWindow,lifecycle:State<'_,CloseCoordinator>,request:CompleteCloseRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "matchlifecycle.complete(window.label(),request.request_id,request.outcome,Instant::now(),)?{CompletionAction::None=>Ok(()),CompletionAction::CloseWindow=>{ifapp.webview_windows().len()==1{lifecycle.allow_exit_after_last_window_close();}ifwindow.close().is_err(){lifecycle.rollback_failed_window_close(window.label());returnErr(close_failed());}Ok(())}CompletionAction::Exit(code)=>{app.exit(code);Ok(())}}",
+	},
+	{
+		name: "lifecycle_request_close",
+		parameters: "window:WebviewWindow,request:RequestCloseRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "request.validate();window.close().map_err(|_|close_failed())",
+	},
+]);
+
+/**
+ * Locks F160's two native lifecycle commands and both native event entry
+ * points. The pure coordinator has its own state-machine tests; this guard
+ * prevents a later refactor from leaving that tested coordinator orphaned
+ * from `CloseRequested`, application `ExitRequested`, or `generate_handler!`.
+ */
+export function validateLifecycleCommandRegistration(rustSources) {
+	const failures = [];
+	const commandsPath = "src-tauri/src/lifecycle/commands.rs";
+	const commandsSource = findRustSource(rustSources, commandsPath);
+	const libSource = findRustSource(rustSources, "src-tauri/src/lib.rs");
+	if (commandsSource === undefined) {
+		return [`command registration boundary requires ${commandsPath}`];
+	}
+	const executableCommands = stripRustCommentsAndLiterals(commandsSource);
+	for (const contract of LIFECYCLE_COMMAND_CONTRACTS) {
+		const commands = extractAuditedSyncTauriCommands(
+			executableCommands,
+			contract.name,
+		);
+		if (commands.length !== 1) {
+			failures.push(
+				`${commandsPath} must define exactly one audited ${contract.name} Tauri command`,
+			);
+			continue;
+		}
+		const [command] = commands;
+		const parameters = command.parameters
+			.replaceAll(/\s+/g, "")
+			.replace(/,$/, "");
+		const returnType = command.returnType.replaceAll(/\s+/g, "");
+		const body = command.body.replaceAll(/\s+/g, "").replace(/;$/, "");
+		if (
+			parameters !== contract.parameters ||
+			returnType !== contract.returnType
+		) {
+			failures.push(
+				`${contract.name} must accept its audited parameters and return Result<(), CommandError>`,
+			);
+		}
+		if (body !== contract.body) {
+			failures.push(
+				`${contract.name} must retain its audited one-shot close coordinator route`,
+			);
+		}
+	}
+
+	if (libSource === undefined) {
+		failures.push("lifecycle command boundary requires src-tauri/src/lib.rs");
+		return failures;
+	}
+	const executableLib = stripRustCommentsAndLiterals(libSource);
+	const normalizedLib = executableLib.replaceAll(/\s+/g, "");
+	const handlerBodies = [
+		...executableLib.matchAll(
+			/\.invoke_handler\s*\(\s*tauri\s*::\s*generate_handler\s*!\s*\[([\s\S]*?)\]\s*\)/g,
+		),
+	];
+	for (const contract of LIFECYCLE_COMMAND_CONTRACTS) {
+		const commandPath = new RegExp(
+			`\\blifecycle\\s*::\\s*commands\\s*::\\s*${contract.name}\\b`,
+			"g",
+		);
+		const registrations = [...executableLib.matchAll(commandPath)];
+		const registeredInHandler =
+			handlerBodies.length === 1 &&
+			new RegExp(
+				`\\blifecycle\\s*::\\s*commands\\s*::\\s*${contract.name}\\b`,
+			).test(handlerBodies[0][1]);
+		if (registrations.length !== 1 || !registeredInHandler) {
+			failures.push(
+				`src-tauri/src/lib.rs must register lifecycle::commands::${contract.name} exactly once in generate_handler`,
+			);
+		}
+	}
+	for (const [fragment, expectedCount, message] of [
+		[
+			".manage(CloseCoordinator::new())",
+			1,
+			"src-tauri/src/lib.rs must manage exactly one CloseCoordinator",
+		],
+		[
+			"lifecycle.begin_window_close(window.label(),std::time::Instant::now())",
+			1,
+			"WindowEvent::CloseRequested must route through CloseCoordinator::begin_window_close",
+		],
+		[
+			"lifecycle.begin_exit(labels,code.unwrap_or(0),std::time::Instant::now())",
+			1,
+			"RunEvent::ExitRequested must route through CloseCoordinator::begin_exit",
+		],
+		[
+			"window.emit(lifecycle::CLOSE_REQUEST_EVENT,payload.clone())",
+			2,
+			"native close and quit must each emit the audited lifecycle request event",
+		],
+	]) {
+		if (normalizedLib.split(fragment).length !== expectedCount + 1) {
+			failures.push(message);
+		}
+	}
+	return failures;
+}
 
 /**
  * Locks the trust (3) and terminal (6, since F070's "IPC 改造" slice split

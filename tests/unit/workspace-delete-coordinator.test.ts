@@ -78,6 +78,11 @@ function testBridge(
 		async onRuntimeReady() {
 			return () => {};
 		},
+		async onNativeCloseRequested() {
+			return () => {};
+		},
+		async lifecycleCompleteClose() {},
+		async lifecycleRequestClose() {},
 		async workspaceCapabilities() {
 			return {
 				create: true,

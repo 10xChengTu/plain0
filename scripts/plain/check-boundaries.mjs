@@ -33,6 +33,7 @@ import {
 	validateGitStashConfirmationBoundary,
 	validateGitStashMessageFieldSafetyBoundary,
 	validateGitWorktreeConfirmationBoundary,
+	validateLifecycleCommandRegistration,
 	validateMainCapability,
 	validateMultiDiffEditorOverrideImportBoundary,
 	validateProductConfigurationBoundary,
@@ -851,6 +852,9 @@ for (const failure of validateTerminalRustBoundary(
 	fail(failure);
 }
 for (const failure of validateTrustTerminalCommandRegistration(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateLifecycleCommandRegistration(rustSources)) {
 	fail(failure);
 }
 for (const failure of validateTerminalIpcBridgeBoundary(

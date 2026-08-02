@@ -49,6 +49,7 @@ import {
 	validateGitStashConfirmationBoundary,
 	validateGitStashMessageFieldSafetyBoundary,
 	validateGitWorktreeConfirmationBoundary,
+	validateLifecycleCommandRegistration,
 	validateMultiDiffEditorOverrideImportBoundary,
 	validateViewPaneDependencyDecoratorBoundary,
 	validateDebugAdapterConfirmationBoundary,
@@ -216,8 +217,9 @@ export function createServiceOverrides() {
 
 // Mirrors the real app/services.ts shape: the two Plain workspace
 // SyncDescriptors, the two hand-selected working-copy SyncDescriptors, the
-// Rust-backed backup SyncDescriptor, and the Plain search SyncDescriptor
-// must all be present together as the exact closed middle-descriptor set.
+// Rust-backed backup SyncDescriptor, native lifecycle SyncDescriptor, and
+// the Plain search SyncDescriptor must all be present together as the exact
+// closed middle-descriptor set.
 const workingCopyServiceOverridesFixture = `
 import getConfigurationServiceOverride from "@codingame/monaco-vscode-configuration-service-override";
 import "@codingame/monaco-vscode-dialogs-service-override/vscode/vs/workbench/browser/parts/dialogs/dialog.web.contribution";
@@ -239,6 +241,7 @@ import { SyncDescriptor } from "@codingame/monaco-vscode-api/vscode/vs/platform/
 import { IWorkspacesService } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspaces/common/workspaces.service";
 import { ISCMService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/scm/common/scm.service";
 import { IExtensionService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions.service";
+import { ILifecycleService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/lifecycle/common/lifecycle.service";
 import { ISearchService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search.service";
 import { ILanguageStatusService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/languageStatus/common/languageStatusService.service";
 import { IWorkingCopyBackupService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyBackup.service";
@@ -249,6 +252,7 @@ import { PlainSearchService } from "./features/search/plain-search-service";
 import { PlainExtensionResourceLoaderService } from "./features/themes/plain-theme-registry";
 import { EmptyLanguageStatusService } from "./services/empty-language-status";
 import { PlainNullExtensionService } from "./services/plain-null-extension-service";
+import { PlainLifecycleService } from "./services/plain-lifecycle-service";
 import { PlainWorkingCopyBackupService } from "./services/plain-workspace-backup-service";
 import { PlainWorkspaceEditingService, PlainWorkspacesService } from "./services/plain-workspace-services";
 
@@ -287,6 +291,11 @@ export function createServiceOverrides() {
       PlainWorkingCopyBackupService,
       [],
       false,
+    ),
+    [ILifecycleService.toString()]: new SyncDescriptor(
+      PlainLifecycleService,
+      [],
+      true,
     ),
     [ISearchService.toString()]: new SyncDescriptor(
       PlainSearchService,
@@ -7380,6 +7389,7 @@ import { createPlainWorkspaceFileSystemProvider, PLAIN_WORKSPACE_SCHEME } from "
 import { registerWorkspaceDeleteCoordinator } from "./features/workspace/delete-coordinator";
 import { createBridge } from "./platform/tauri";
 import { configurePlainSearchBridge } from "./features/search/plain-search-service";
+import { configurePlainLifecycleBridge } from "./services/plain-lifecycle-service";
 import { configurePlainWorkingCopyBackupBridge } from "./services/plain-workspace-backup-service";
 
 async function bootstrap() {
@@ -7400,6 +7410,7 @@ window.addEventListener("pagehide", () => {
   workspaceDeleteCoordinator.dispose();
 }, { once: true });
 configurePlainWorkingCopyBackupBridge(bridge);
+configurePlainLifecycleBridge(bridge);
 configurePlainSearchBridge(bridge);
 await initialize(createServiceOverrides(), container, { enableWorkspaceTrust: false });
 }
@@ -9212,6 +9223,68 @@ pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor
 		);
 		expect(validateTrustTerminalCommandRegistration(duplicated)).toContain(
 			"src-tauri/src/lib.rs must register terminal::commands::terminal_kill exactly once in generate_handler",
+		);
+	});
+});
+
+describe("Plain native lifecycle command Harness", () => {
+	const commands = readFileSync(
+		new URL("../../src-tauri/src/lifecycle/commands.rs", import.meta.url),
+		"utf8",
+	);
+	const lib = readFileSync(
+		new URL("../../src-tauri/src/lib.rs", import.meta.url),
+		"utf8",
+	);
+	const baseline = Object.freeze([
+		{ relativePath: "src-tauri/src/lifecycle/commands.rs", source: commands },
+		{ relativePath: "src-tauri/src/lib.rs", source: lib },
+	]);
+
+	it("accepts the real close/quit command and event wiring", () => {
+		expect(validateLifecycleCommandRegistration(baseline)).toEqual([]);
+	});
+
+	it("rejects a close command that bypasses the native window close", () => {
+		const bypassed = baseline.map((entry) =>
+			entry.relativePath === "src-tauri/src/lifecycle/commands.rs"
+				? {
+						...entry,
+						source: entry.source.replace(
+							"request.validate();\n    window.close().map_err(|_| close_failed())",
+							"request.validate();\n    Ok(())",
+						),
+					}
+				: entry,
+		);
+		expect(validateLifecycleCommandRegistration(bypassed)).toContain(
+			"lifecycle_request_close must retain its audited one-shot close coordinator route",
+		);
+	});
+
+	it("rejects missing command registration or an orphaned quit entry point", () => {
+		const missing = baseline.map((entry) =>
+			entry.relativePath === "src-tauri/src/lib.rs"
+				? {
+						...entry,
+						source: entry.source
+							.replace(
+								"            lifecycle::commands::lifecycle_request_close,\n",
+								"",
+							)
+							.replace(
+								"lifecycle.begin_exit(labels, code.unwrap_or(0), std::time::Instant::now())",
+								"ExitDecision::Allow",
+							),
+					}
+				: entry,
+		);
+		const failures = validateLifecycleCommandRegistration(missing);
+		expect(failures).toContain(
+			"src-tauri/src/lib.rs must register lifecycle::commands::lifecycle_request_close exactly once in generate_handler",
+		);
+		expect(failures).toContain(
+			"RunEvent::ExitRequested must route through CloseCoordinator::begin_exit",
 		);
 	});
 });

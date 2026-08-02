@@ -61,6 +61,9 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 	return {
 		runtimeInfo: vi.fn(),
 		onRuntimeReady: vi.fn(),
+		onNativeCloseRequested: vi.fn(),
+		lifecycleCompleteClose: vi.fn(),
+		lifecycleRequestClose: vi.fn(),
 		workspaceCapabilities: vi.fn(),
 		workspaceSnapshot: vi.fn(),
 		workspaceReconcileWatchRoots: vi.fn(),
@@ -191,6 +194,9 @@ describe("workspace Workbench command overrides", () => {
 		const bridge: PlainBridge = {
 			runtimeInfo: vi.fn(),
 			onRuntimeReady: vi.fn(),
+			onNativeCloseRequested: vi.fn(),
+			lifecycleCompleteClose: vi.fn(),
+			lifecycleRequestClose: vi.fn(),
 			workspaceCapabilities: vi.fn(),
 			workspaceSnapshot: vi.fn(),
 			workspaceReconcileWatchRoots: vi.fn(),

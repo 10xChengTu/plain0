@@ -13,6 +13,13 @@ export const TERMINAL_EXIT_EVENT = "plain://terminal-exit" as const;
  * `DebugEventPayload`'s own doc comment. Mirrors
  * `src-tauri/src/debug/commands.rs`'s `DEBUG_EVENT` constant. */
 export const DEBUG_EVENT = "plain://debug-event" as const;
+export const NATIVE_CLOSE_REQUEST_EVENT = "plain://close-requested" as const;
+
+export interface NativeCloseRequest {
+	readonly requestId: string;
+	readonly reason: "close" | "quit";
+	readonly timeoutMs: 5_000;
+}
 
 export interface RuntimeInfo {
 	application: "Plain";
@@ -1243,6 +1250,14 @@ export type Unlisten = () => void | Promise<void>;
 export interface PlainBridge {
 	runtimeInfo(): Promise<RuntimeInfo>;
 	onRuntimeReady(listener: (payload: RuntimeInfo) => void): Promise<Unlisten>;
+	onNativeCloseRequested(
+		listener: (request: NativeCloseRequest) => void,
+	): Promise<Unlisten>;
+	lifecycleCompleteClose(
+		requestId: string,
+		outcome: "allow" | "veto",
+	): Promise<void>;
+	lifecycleRequestClose(): Promise<void>;
 	workspaceCapabilities(): Promise<WorkspaceCapabilities>;
 	workspaceSnapshot(): Promise<WorkspaceSnapshot>;
 	workspaceReconcileWatchRoots(rootIds: readonly string[]): void;
