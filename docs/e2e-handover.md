@@ -488,6 +488,18 @@ fixture 与清理：在 `/private/tmp` 下创建两个一次性仓库，primary/
 
 fixture 与清理：`/private/tmp/plain-f150-terminal-e2e-primary` 与 `/private/tmp/plain-f150-terminal-e2e-secondary` 均为空目录；测试未访问网络、凭证或用户文件，提交前删除 fixture、`dist`、`test-results` 与 `src-tauri/target`。
 
+### E2E-017 · F150 S3 多根调试选择、会话/源码身份与进程清理真实桌面矩阵
+
+状态：**已完成（2026-08-03）**。从本次工作树以系统工具优先的 PATH 和本地 ad-hoc identity `-` 构建当前 debug `Plain.app`，构建、签名与真实 WKWebView 启动均成功。两个仓库内 `tmp-f150-debug-e2e-*` APFS fixture 经 macOS 系统目录选择器分别授权；执行 `Plain: Start Debugging` 后先出现 `Select a workspace folder to debug` 两根选择器，按 `Escape` 取消后 `ps` 确认没有适配器进程，证明取消发生在 config read/spawn 之前。
+
+真实 root 路由：选择 secondary 后，首次执行确认准确显示 `/opt/homebrew/anaconda3/bin/python3 adapter.py`；真实 stdio DAP 子进程在自身 cwd 写出 `SECONDARY_DEBUG_ROOT`，Run and Debug 的 Call Stack 显示 `SECONDARY_DEBUG_ROOT (main.py:1)`，Continue 后执行标记仍只落在 secondary。随后选择 primary，无需重复确认同一个精确 command/args/transport，Call Stack 改为 `PRIMARY_DEBUG_ROOT (main.py:1)`；最终两根的 adapter/execution 标记分别为 `PRIMARY_DEBUG_ROOT` 与 `SECONDARY_DEBUG_ROOT`，没有串根。两个 session 的 `terminated` 事件都让 UI 回到 `Not debugging.`，`ps` 不存在残留 `python3 adapter.py`；最终取消复验同样保持零进程。
+
+断点身份的 Browser 对照使用两个根各自的 `main.py` 和不同 `launch.json`：取消 root picker 后没有新增配置读取或 spawn；依次选择 secondary/primary 时，配置读取、launch 与 `setBreakpoints` 都携带对应 rootId，同一路径 `main.py` 的断点集合互不合并，活动 secondary session 期间编辑 primary 的断点也不会错误同步。聚焦 Chromium 调试回归 6/6 通过；严格 root/codec/session/breakpoint 单测和完整 Rust Debug 域 193/193 通过。最终统一 `pnpm check` 在允许回环端口/FIFO 的本机权限下完整通过：83 个前端测试文件/1749 个用例、生产构建、架构与 bundle guard、Rust fmt/clippy、1193/1193 个 Rust 测试全部绿色。
+
+首轮真实 `debugpy 1.6.7` 探针还暴露并修复了两个原有协议健壮性问题：适配器若在 `initialized` 前提前返回失败，Plain 现在立即报告该 `launch`/`attach` 消息，不再等 30 秒后误报 `initialized` 超时；debugpy 的 `runInTerminal` 在 launch 未指定 cwd 时会真实省略规范宣称必填的 `cwd`，Plain 现在把缺失/相对 cwd 解析到该 debug session 冻结的 selected root。新的真实 PTY Rust 集成测试用两根 workspace、选择第二根并省略 cwd，确认 marker 只写入第二根；绝对 cwd 仍保持既有受信任适配器语义。
+
+fixture 与清理：两个 fixture 各含同名 `main.py`、独立 `.vscode/launch.json` 与确定性 Python DAP adapter；测试不访问网络、凭证或用户文件。临时 debugpy 日志、探针、marker、fixture、`dist`、`test-results` 与 `src-tauri/target` 在提交前全部删除。
+
 ## 后续条目（随切片追加）
 
 - F030 遗留：真实 `CloseRequested` 关窗握手协议实现后，补「正常关窗 → 重开恢复」的桌面验收变体。
@@ -499,3 +511,4 @@ fixture 与清理：`/private/tmp/plain-f150-terminal-e2e-primary` 与 `/private
 - F140 多根同名搜索结果、打开与安全替换真实桌面矩阵 E2E-014 已完成并回写 F140 evidence。
 - F150 S1 多根 Git 显式选择、写入隔离、Graph/Worktree/History 路由真实桌面矩阵 E2E-015 已完成；F150 继续进入 Terminal 与 Debug routing，整个 feature 完成后再统一回写 `features.json` evidence。
 - F150 S2 多根终端显式选择、tab/split root 冻结与进程清理真实桌面矩阵 E2E-016 已完成；F150 下一步只进入 Debug routing，整个 feature 完成后再统一回写 `features.json` evidence。
+- F150 S3 多根调试显式选择、adapter cwd、调用栈、同路径断点身份与进程清理真实桌面矩阵 E2E-017 已完成；F150 已整体关闭，唯一 WIP 切到 F160。

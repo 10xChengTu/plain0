@@ -6,6 +6,8 @@ import {
 	decodeDebugContinueResult,
 	decodeDebugStepVoid,
 	frozenDebugAdapterConfirmationRequest,
+	frozenDebugSessionStartRequest,
+	frozenDebugSetBreakpointsRequest,
 	frozenDebugThreadRequest,
 } from "../../app/platform/tauri/debug-codec";
 
@@ -124,6 +126,83 @@ describe("decodeDebugAdapterConfirmationVoid", () => {
 // ---------------------------------------------------------------------
 
 const VALID_SESSION_ID = "0d3f4b0e-6f1a-4c9d-9c3a-1a2b3c4d5e6f";
+const VALID_ROOT_ID = "11111111-1111-4111-8111-111111111111";
+
+describe("root-scoped debug request encoders", () => {
+	it("includes the exact rootId in stdio and tcp session starts", () => {
+		expect(
+			frozenDebugSessionStartRequest(
+				VALID_ROOT_ID,
+				{
+					transport: "stdio",
+					command: "/usr/bin/python3",
+					args: ["-m", "debugpy.adapter"],
+				},
+				"debugpy",
+				{ program: "main.py" },
+			),
+		).toEqual({
+			rootId: VALID_ROOT_ID,
+			transport: "stdio",
+			command: "/usr/bin/python3",
+			args: ["-m", "debugpy.adapter"],
+			adapterId: "debugpy",
+			arguments: { program: "main.py" },
+			initialBreakpoints: [],
+		});
+		expect(
+			frozenDebugSessionStartRequest(
+				VALID_ROOT_ID,
+				{
+					transport: "tcp",
+					command: "/usr/bin/lldb-dap",
+					args: [],
+					host: "127.0.0.1",
+					port: 4711,
+				},
+				"lldb",
+				{},
+			),
+		).toMatchObject({
+			rootId: VALID_ROOT_ID,
+			transport: "tcp",
+			host: "127.0.0.1",
+			port: 4711,
+		});
+	});
+
+	it("includes rootId in setBreakpoints and rejects missing or malformed roots", () => {
+		expect(
+			frozenDebugSetBreakpointsRequest(
+				VALID_SESSION_ID,
+				VALID_ROOT_ID,
+				"src/main.py",
+				[{ line: 7, condition: null, logMessage: null }],
+			),
+		).toEqual({
+			sessionId: VALID_SESSION_ID,
+			rootId: VALID_ROOT_ID,
+			path: "src/main.py",
+			breakpoints: [{ line: 7, condition: null, logMessage: null }],
+		});
+		expect(() =>
+			frozenDebugSessionStartRequest(
+				undefined,
+				{ transport: "stdio", command: "/bin/true", args: [] },
+				"mock",
+				{},
+			),
+		).toThrow();
+		expect(() =>
+			frozenDebugSetBreakpointsRequest(
+				VALID_SESSION_ID,
+				"not-a-root-id",
+				"main.py",
+				[],
+			),
+		).toThrow();
+	});
+});
 
 describe("frozenDebugThreadRequest", () => {
 	it("encodes a well-formed sessionId/threadId pair", () => {

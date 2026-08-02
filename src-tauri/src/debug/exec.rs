@@ -103,6 +103,7 @@
 //! primitive.
 
 use std::io::Read;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -111,6 +112,7 @@ use std::time::{Duration, Instant};
 use crate::error::CommandError;
 use crate::trust::service::TrustService;
 use crate::workspace::service::WorkspaceService;
+use crate::workspace::RootId;
 
 use super::confirm::ConfirmationService;
 use super::dto::{self, AdapterTransportKind};
@@ -267,12 +269,13 @@ impl AdapterHandle {
     }
 }
 
-/// Trust-*then*-confirmation-gated entry point — see the module doc's "Why a
-/// long-lived model" section for the overall shape this returns. Calls
-/// [`TrustService::require_trusted`] as its literal first statement, then
-/// [`ConfirmationService::require_confirmed`] as its literal second, both
-/// before any `Command`/spawn-related identifier appears anywhere in this
-/// function's body — `scripts/plain/boundary-contracts.mjs`'s
+/// Trust → selected-root → confirmation-gated entry point — see the module
+/// doc's "Why a long-lived model" section for the overall shape this returns.
+/// Calls [`TrustService::require_trusted`] first, resolves `root_id` through
+/// the authorized workspace next, then calls
+/// [`ConfirmationService::require_confirmed`], all before any
+/// `Command`/spawn-related identifier appears anywhere in this function's
+/// body — `scripts/plain/boundary-contracts.mjs`'s
 /// `validateDebugAdapterSpawnBoundary` mechanically locks exactly this
 /// ordering. Propagates `require_trusted`'s own `WORKSPACE_NOT_TRUSTED` error
 /// verbatim rather than wrapping it in a debug-domain-specific code — this
@@ -295,28 +298,32 @@ pub(crate) async fn spawn_adapter(
     trust: &TrustService,
     workspace: &WorkspaceService,
     window_label: &str,
+    root_id: RootId,
     confirmation: &ConfirmationService,
     descriptor: &dto::AdapterSpawnDescriptor,
     cancel: Arc<AtomicBool>,
 ) -> Result<AdapterHandle, CommandError> {
     trust.require_trusted(workspace, window_label).await?;
+    let selected_root = workspace.root_canonical_path(window_label, root_id)?;
     let subject = descriptor.confirmation_subject(AdapterTransportKind::Stdio);
     confirmation
         .require_confirmed(workspace, window_label, &subject)
         .await?;
     let descriptor = descriptor.clone();
-    tauri::async_runtime::spawn_blocking(move || spawn_adapter_sync(&descriptor, &cancel))
-        .await
-        .map_err(|_| debug_adapter_spawn_unavailable())?
+    tauri::async_runtime::spawn_blocking(move || {
+        spawn_adapter_sync(&descriptor, &selected_root, &cancel)
+    })
+    .await
+    .map_err(|_| debug_adapter_spawn_unavailable())?
 }
 
 /// `F100` S5 — the `Tcp`-confirmed companion-spawn primitive `debug::mod`'s
 /// own module doc named as S2's open recommendation, now built: identical to
-/// [`spawn_adapter`] in every respect (same trust-then-confirmation ordering,
+/// [`spawn_adapter`] in every respect (same trust/root/confirmation ordering,
 /// same [`spawn_adapter_sync`] hardened construction, same
 /// `validateDebugSpawnConstructionShape`/`validateDebugAdapterSpawnBoundary`
-/// mechanical locks — both functions share the exact literal two-statement
-/// gate prefix those contracts already require of any `debug::exec` spawn
+/// mechanical locks — both functions share the exact four-statement gate
+/// prefix those contracts require of any `debug::exec` spawn
 /// entry point) **except the one line that matters**: the confirmation
 /// subject this checks is built with [`AdapterTransportKind::Tcp`], never
 /// [`AdapterTransportKind::Stdio`]. This is the whole fix for the
@@ -343,19 +350,23 @@ pub(crate) async fn spawn_adapter_as_tcp_companion(
     trust: &TrustService,
     workspace: &WorkspaceService,
     window_label: &str,
+    root_id: RootId,
     confirmation: &ConfirmationService,
     descriptor: &dto::AdapterSpawnDescriptor,
     cancel: Arc<AtomicBool>,
 ) -> Result<AdapterHandle, CommandError> {
     trust.require_trusted(workspace, window_label).await?;
+    let selected_root = workspace.root_canonical_path(window_label, root_id)?;
     let subject = descriptor.confirmation_subject(AdapterTransportKind::Tcp);
     confirmation
         .require_confirmed(workspace, window_label, &subject)
         .await?;
     let descriptor = descriptor.clone();
-    tauri::async_runtime::spawn_blocking(move || spawn_adapter_sync(&descriptor, &cancel))
-        .await
-        .map_err(|_| debug_adapter_spawn_unavailable())?
+    tauri::async_runtime::spawn_blocking(move || {
+        spawn_adapter_sync(&descriptor, &selected_root, &cancel)
+    })
+    .await
+    .map_err(|_| debug_adapter_spawn_unavailable())?
 }
 
 /// The actual hardened build-and-spawn step — see the module doc for the
@@ -399,10 +410,12 @@ fn apply_env_passthrough(
 /// Real production caller: [`spawn_adapter`].
 fn spawn_adapter_sync(
     descriptor: &dto::AdapterSpawnDescriptor,
+    cwd: &Path,
     cancel: &AtomicBool,
 ) -> Result<AdapterHandle, CommandError> {
     let mut command = Command::new(&descriptor.command);
     command.args(&descriptor.args);
+    command.current_dir(cwd);
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());

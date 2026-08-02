@@ -34,11 +34,14 @@ import { MouseTargetType } from "@codingame/monaco-vscode-api/vscode/vs/editor/c
 import type { IModelDeltaDecoration } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/model";
 import { IWorkspaceContextService } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace.service";
 
-import { relativePathUnder } from "../scm/plain-scm-provider";
 import type {
 	DebugBreakpointStore,
 	DebugBreakpointView,
 } from "./plain-debug-breakpoints";
+import {
+	plainDebugSourceForResource,
+	type PlainDebugSource,
+} from "./plain-debug-root";
 import type { DebugSessionController } from "./plain-debug-session";
 
 const BREAKPOINT_DECORATION_DESCRIPTION = "plain-debug-breakpoint";
@@ -254,23 +257,25 @@ export function createPlainDebugBreakpointsContribution(
 	const editorDisposables = new WeakMap<object, { dispose(): void }[]>();
 	const activePopups = new WeakMap<object, BreakpointPopupHandle>();
 
-	function relativePathForEditor(
+	function sourceForEditor(
 		editor: PlainDebugBreakpointAttachableEditor,
-	): string | undefined {
+	): PlainDebugSource | undefined {
 		const model = editor.getModel();
 		if (model === null) {
 			return undefined;
 		}
-		const rootUri = workspaceContextService.getWorkspace().folders[0]?.uri;
-		if (rootUri === undefined) {
-			return undefined;
-		}
-		return relativePathUnder(rootUri, model.uri);
+		return plainDebugSourceForResource(
+			workspaceContextService.getWorkspace().folders,
+			model.uri,
+		);
 	}
 
 	function redraw(editor: PlainDebugBreakpointAttachableEditor): void {
-		const path = relativePathForEditor(editor);
-		const views = path === undefined ? [] : breakpoints.viewsForPath(path);
+		const source = sourceForEditor(editor);
+		const views =
+			source === undefined
+				? []
+				: breakpoints.viewsForPath(source.rootId, source.path);
 		const previous = decorationIds.get(editor) ?? [];
 		const next = editor.deltaDecorations(previous, buildDecorations(views));
 		decorationIds.set(editor, next);
@@ -285,12 +290,12 @@ export function createPlainDebugBreakpointsContribution(
 
 	function openPopup(
 		editor: PlainDebugBreakpointAttachableEditor,
-		path: string,
+		source: PlainDebugSource,
 		line: number,
 	): void {
 		closePopup(editor);
 		const view = breakpoints
-			.viewsForPath(path)
+			.viewsForPath(source.rootId, source.path)
 			.find((candidate) => candidate.line === line);
 		if (view === undefined) {
 			return;
@@ -321,7 +326,8 @@ export function createPlainDebugBreakpointsContribution(
 				// keeps its existing value rather than being overwritten with
 				// whatever the (disabled, unusable) input happened to hold.
 				breakpoints.setDetails(
-					path,
+					source.rootId,
+					source.path,
 					line,
 					conditionSupported ? condition : view.condition,
 					logPointSupported ? logMessage : view.logMessage,
@@ -329,7 +335,7 @@ export function createPlainDebugBreakpointsContribution(
 				closePopup(editor);
 			},
 			() => {
-				breakpoints.remove(path, line);
+				breakpoints.remove(source.rootId, source.path, line);
 				closePopup(editor);
 			},
 		);
@@ -339,8 +345,9 @@ export function createPlainDebugBreakpointsContribution(
 	function attach(editor: PlainDebugBreakpointAttachableEditor): void {
 		const disposables = [
 			editor.onDidChangeModel(() => redraw(editor)),
-			breakpoints.onDidChange((path) => {
-				if (path === relativePathForEditor(editor)) {
+			breakpoints.onDidChange((rootId, path) => {
+				const source = sourceForEditor(editor);
+				if (source?.rootId === rootId && source.path === path) {
 					redraw(editor);
 				}
 			}),
@@ -352,12 +359,16 @@ export function createPlainDebugBreakpointsContribution(
 				) {
 					return;
 				}
-				const path = relativePathForEditor(editor);
-				if (path === undefined) {
+				const source = sourceForEditor(editor);
+				if (source === undefined) {
 					return;
 				}
 				closePopup(editor);
-				breakpoints.toggle(path, event.target.position.lineNumber);
+				breakpoints.toggle(
+					source.rootId,
+					source.path,
+					event.target.position.lineNumber,
+				);
 			}),
 			editor.onContextMenu((event) => {
 				if (
@@ -366,12 +377,12 @@ export function createPlainDebugBreakpointsContribution(
 				) {
 					return;
 				}
-				const path = relativePathForEditor(editor);
-				if (path === undefined) {
+				const source = sourceForEditor(editor);
+				if (source === undefined) {
 					return;
 				}
 				event.event.preventDefault();
-				openPopup(editor, path, event.target.position.lineNumber);
+				openPopup(editor, source, event.target.position.lineNumber);
 			}),
 		];
 		editorDisposables.set(editor, disposables);

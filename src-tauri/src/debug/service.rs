@@ -33,6 +33,7 @@ use serde_json::Value;
 use crate::error::CommandError;
 use crate::trust::service::TrustService;
 use crate::workspace::service::WorkspaceService;
+use crate::workspace::RootId;
 
 use super::confirm::ConfirmationService;
 use super::dto::{self, DebugSessionId, SessionTransportRequest};
@@ -48,7 +49,12 @@ pub struct DebugSessionService {
 }
 
 struct DebugSessionState {
-    windows: Mutex<HashMap<String, HashMap<DebugSessionId, Arc<DebugSession>>>>,
+    windows: Mutex<HashMap<String, HashMap<DebugSessionId, DebugSessionRecord>>>,
+}
+
+struct DebugSessionRecord {
+    root_id: RootId,
+    session: Arc<DebugSession>,
 }
 
 impl Default for DebugSessionService {
@@ -84,6 +90,7 @@ impl DebugSessionService {
         trust: &TrustService,
         workspace: &WorkspaceService,
         window_label: &str,
+        root_id: RootId,
         confirmation: &ConfirmationService,
         request: LaunchRequestKind,
         transport: SessionTransportRequest,
@@ -102,6 +109,7 @@ impl DebugSessionService {
                         trust,
                         workspace,
                         window_label,
+                        root_id,
                         confirmation,
                         &descriptor,
                         Arc::clone(&cancel),
@@ -128,6 +136,7 @@ impl DebugSessionService {
                     trust,
                     workspace,
                     window_label,
+                    root_id,
                     confirmation,
                     &descriptor,
                     &tcp_descriptor,
@@ -185,10 +194,13 @@ impl DebugSessionService {
 
         {
             let mut windows = lock(&self.state.windows);
-            windows
-                .entry(window_label.to_owned())
-                .or_default()
-                .insert(session_id, debug_session);
+            windows.entry(window_label.to_owned()).or_default().insert(
+                session_id,
+                DebugSessionRecord {
+                    root_id,
+                    session: debug_session,
+                },
+            );
         }
 
         Ok((session_id, capabilities.as_value()))
@@ -207,7 +219,22 @@ impl DebugSessionService {
     ) -> Result<Arc<DebugSession>, CommandError> {
         lock(&self.state.windows)
             .get(window_label)
-            .and_then(|sessions| sessions.get(&session_id).cloned())
+            .and_then(|sessions| sessions.get(&session_id))
+            .map(|record| Arc::clone(&record.session))
+            .ok_or_else(debug_session_not_found)
+    }
+
+    fn session_for_root(
+        &self,
+        window_label: &str,
+        session_id: DebugSessionId,
+        root_id: RootId,
+    ) -> Result<Arc<DebugSession>, CommandError> {
+        lock(&self.state.windows)
+            .get(window_label)
+            .and_then(|sessions| sessions.get(&session_id))
+            .filter(|record| record.root_id == root_id)
+            .map(|record| Arc::clone(&record.session))
             .ok_or_else(debug_session_not_found)
     }
 
@@ -244,6 +271,19 @@ impl DebugSessionService {
         .await
     }
 
+    pub async fn send_request_for_root(
+        &self,
+        window_label: &str,
+        session_id: DebugSessionId,
+        root_id: RootId,
+        command: &'static str,
+        arguments: Value,
+    ) -> Result<Value, CommandError> {
+        let session = self.session_for_root(window_label, session_id, root_id)?;
+        Self::send_request_on_session(session, command, arguments, session::DEBUG_REQUEST_TIMEOUT)
+            .await
+    }
+
     /// The shared implementation behind [`Self::send_request`] — factored out
     /// purely so `service::tests` can exercise the exact same production
     /// request/timeout/response-mapping logic with a small, injected timeout
@@ -262,6 +302,15 @@ impl DebugSessionService {
         timeout: std::time::Duration,
     ) -> Result<Value, CommandError> {
         let session = self.session_for(window_label, session_id)?;
+        Self::send_request_on_session(session, command, arguments, timeout).await
+    }
+
+    async fn send_request_on_session(
+        session: Arc<DebugSession>,
+        command: &'static str,
+        arguments: Value,
+        timeout: std::time::Duration,
+    ) -> Result<Value, CommandError> {
         let response = tauri::async_runtime::spawn_blocking(move || {
             let pending = session.send_request(command, Some(arguments))?;
             session.wait_for_response_with_timeout(pending, timeout, command)
@@ -315,6 +364,7 @@ impl DebugSessionService {
             windows
                 .get_mut(window_label)
                 .and_then(|sessions| sessions.remove(&session_id))
+                .map(|record| record.session)
         }
         .ok_or_else(debug_session_not_found)?;
         tauri::async_runtime::spawn_blocking(move || {
@@ -338,7 +388,7 @@ impl DebugSessionService {
             let mut windows = lock(&self.state.windows);
             windows
                 .remove(window_label)
-                .map(|table| table.into_values().collect())
+                .map(|table| table.into_values().map(|record| record.session).collect())
                 .unwrap_or_default()
         };
         let joiners: Vec<JoinHandle<()>> = sessions

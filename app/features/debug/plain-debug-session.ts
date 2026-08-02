@@ -89,6 +89,7 @@ export const SESSION_ENDED_EVENT_NAME = "plain/sessionEnded";
 
 export interface DebugSessionState {
 	readonly sessionId: string;
+	readonly rootId: string;
 	readonly capabilities: Readonly<Record<string, unknown>>;
 	/** The thread a real `stopped` event most recently named, or `null` if
 	 * the debuggee is currently running (or has not stopped yet). */
@@ -232,12 +233,12 @@ export class DebugSessionController {
 	 * session and records whatever the adapter reports — the single path
 	 * both {@link start} (every path, once) and the live breakpoint-change
 	 * subscription (one path at a time, as the user edits) funnel through. */
-	async #pushBreakpointsForPath(path: string): Promise<void> {
-		if (this.#state === null) {
+	async #pushBreakpointsForPath(rootId: string, path: string): Promise<void> {
+		if (this.#state === null || this.#state.rootId !== rootId) {
 			return;
 		}
 		const sessionId = this.#state.sessionId;
-		const descriptors = this.#breakpoints.descriptorsForPath(path);
+		const descriptors = this.#breakpoints.descriptorsForPath(rootId, path);
 		const requestEntries: DebugBreakpointRequest[] = descriptors.map(
 			(descriptor) => ({
 				line: descriptor.line,
@@ -249,6 +250,7 @@ export class DebugSessionController {
 		try {
 			result = await this.#bridge.debugSetBreakpoints(
 				sessionId,
+				rootId,
 				path,
 				requestEntries,
 			);
@@ -258,7 +260,11 @@ export class DebugSessionController {
 			// than guessing at a new one.
 			return;
 		}
-		if (this.#state === null || this.#state.sessionId !== sessionId) {
+		if (
+			this.#state === null ||
+			this.#state.sessionId !== sessionId ||
+			this.#state.rootId !== rootId
+		) {
 			// The session moved on while the request was in flight.
 			return;
 		}
@@ -269,14 +275,14 @@ export class DebugSessionController {
 				message: entry.message,
 			}),
 		);
-		this.#breakpoints.setVerification(path, verifications);
+		this.#breakpoints.setVerification(rootId, path, verifications);
 	}
 
-	async #pushEveryPath(): Promise<void> {
+	async #pushEveryPath(rootId: string): Promise<void> {
 		await Promise.all(
 			this.#breakpoints
-				.pathsWithBreakpoints()
-				.map((path) => this.#pushBreakpointsForPath(path)),
+				.pathsWithBreakpoints(rootId)
+				.map((path) => this.#pushBreakpointsForPath(rootId, path)),
 		);
 	}
 
@@ -293,14 +299,21 @@ export class DebugSessionController {
 		// `"verification"` too would recurse forever (this controller's own
 		// `setVerification` call, made *because* it just synced, would
 		// otherwise be mistaken for a fresh reason to sync again).
-		this.#unwatchBreakpoints ??= this.#breakpoints.onDidChange((path, kind) => {
-			if (kind === "breakpoints" && this.#state !== null) {
-				void this.#pushBreakpointsForPath(path);
-			}
-		});
+		this.#unwatchBreakpoints ??= this.#breakpoints.onDidChange(
+			(rootId, path, kind) => {
+				if (
+					kind === "breakpoints" &&
+					this.#state !== null &&
+					this.#state.rootId === rootId
+				) {
+					void this.#pushBreakpointsForPath(rootId, path);
+				}
+			},
+		);
 	}
 
 	async start(
+		rootId: string,
 		kind: "launch" | "attach",
 		target: DebugAdapterTarget,
 		adapterId: string,
@@ -312,8 +325,18 @@ export class DebugSessionController {
 		try {
 			result =
 				kind === "launch"
-					? await this.#bridge.debugLaunch(target, adapterId, launchArguments)
-					: await this.#bridge.debugAttach(target, adapterId, launchArguments);
+					? await this.#bridge.debugLaunch(
+							rootId,
+							target,
+							adapterId,
+							launchArguments,
+						)
+					: await this.#bridge.debugAttach(
+							rootId,
+							target,
+							adapterId,
+							launchArguments,
+						);
 		} catch (error) {
 			this.#pendingStartEvents = undefined;
 			throw error;
@@ -322,6 +345,7 @@ export class DebugSessionController {
 		this.#pendingStartEvents = undefined;
 		const started: DebugSessionState = {
 			sessionId: result.sessionId,
+			rootId,
 			capabilities: result.capabilities,
 			stoppedThreadId: null,
 			lastKnownThreadId: null,
@@ -330,7 +354,7 @@ export class DebugSessionController {
 		for (const event of pendingStartEvents) {
 			this.#handleEvent(event);
 		}
-		await this.#pushEveryPath();
+		await this.#pushEveryPath(rootId);
 		return started;
 	}
 

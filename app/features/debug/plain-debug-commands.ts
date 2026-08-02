@@ -5,11 +5,13 @@ import {
 import { CommandsRegistry } from "@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands";
 import { IDialogService } from "@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service";
 import { INotificationService } from "@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service";
+import { IQuickInputService } from "@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service";
 import { IWorkspaceContextService } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace.service";
 import { IViewsService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/views/common/viewsService.service";
 
 import type { DebugAdapterTarget } from "../../platform/tauri/contracts";
 import { normalizeCommandError } from "../../platform/tauri/errors";
+import { plainWorkspaceRootsFromFolders } from "../workspace/plain-workspace-roots";
 import {
 	parseLaunchConfigurations,
 	type AdapterDescriptor,
@@ -17,6 +19,7 @@ import {
 import { prepareDebugAdapterLaunch } from "./plain-debug-adapter-launch";
 import { DEBUG_CONSOLE_VIEW_ID } from "./debug-contribution";
 import { getPlainDebugRuntime } from "./plain-debug-runtime";
+import { selectPlainDebugRoot } from "./plain-debug-root";
 import { resolveDebugTrust } from "./plain-debug-trust";
 
 /** Plain's own commands — never a vendor `workbench.action.debug.*` id
@@ -96,6 +99,7 @@ function toDebugAdapterTarget(
 async function runStartDebugging(
 	dialogService: IDialogService,
 	notificationService: INotificationService,
+	quickInputService: IQuickInputService,
 	workspaceContextService: IWorkspaceContextService,
 ): Promise<void> {
 	const runtime = getPlainDebugRuntime();
@@ -103,20 +107,30 @@ async function runStartDebugging(
 		return;
 	}
 	const bridge = runtime.bridge;
-	const rootUri = workspaceContextService.getWorkspace().folders[0]?.uri;
-	const trustDecision = await resolveDebugTrust(
-		bridge,
-		dialogService,
-		rootUri === undefined,
+	const roots = plainWorkspaceRootsFromFolders(
+		workspaceContextService.getWorkspace().folders,
 	);
+	if (roots.length === 0) {
+		await resolveDebugTrust(bridge, dialogService, true);
+		return;
+	}
+	const root = await selectPlainDebugRoot(roots, (items) =>
+		quickInputService.pick([...items], {
+			placeHolder: "Select a workspace folder to debug",
+			canPickMany: false,
+		}),
+	);
+	if (root === undefined) {
+		return;
+	}
+	const trustDecision = await resolveDebugTrust(bridge, dialogService, false);
 	if (
 		trustDecision.kind === "empty-workspace" ||
-		trustDecision.kind === "declined" ||
-		rootUri === undefined
+		trustDecision.kind === "declined"
 	) {
 		return;
 	}
-	const rootId = rootUri.authority;
+	const rootId = root.rootId;
 
 	let launchBytes: Uint8Array;
 	try {
@@ -203,6 +217,7 @@ async function runStartDebugging(
 		configuration.request === "attach" ? "attach" : "launch";
 	try {
 		await runtime.session.start(
+			rootId,
 			kind,
 			target,
 			configuration.type,
@@ -233,6 +248,7 @@ export function registerPlainDebugCommands(): { dispose(): void } {
 			void runStartDebugging(
 				accessor.get(IDialogService),
 				accessor.get(INotificationService),
+				accessor.get(IQuickInputService),
 				accessor.get(IWorkspaceContextService),
 			);
 		}),

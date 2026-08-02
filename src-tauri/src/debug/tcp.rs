@@ -2,7 +2,7 @@
 //! (`docs/research/2026-07-28-generic-dap.md`'s "主导会话裁定" item 3):
 //! [`connect_adapter`]/[`connect_adapter_sync`] are the TCP-transport
 //! counterpart of [`super::exec`]'s `spawn_adapter`/`spawn_adapter_sync`,
-//! sharing the identical trust-then-confirmation double gate but performing a
+//! sharing the identical trust/root/confirmation gate but performing a
 //! `TcpStream::connect` instead of a `Command::spawn`.
 //!
 //! # Why "connect out" only, never "listen and accept"
@@ -21,14 +21,14 @@
 //! same "we picked this target, not an anonymous caller" property spawning a
 //! named executable already has.
 //!
-//! # Same double gate as `spawn_adapter`, for the same reason
+//! # Same trust/root/confirmation gate as `spawn_adapter`
 //!
 //! "对任意 host:port 说 DAP" 和 "spawn 任意程序" 是同等级的信任委托 — connecting
 //! out is not a lesser privilege than spawning just because it skips
 //! `Command::new`. [`connect_adapter`] therefore calls
-//! `TrustService::require_trusted` first, then
-//! `ConfirmationService::require_confirmed` second, exactly mirroring
-//! [`super::exec::spawn_adapter`]'s literal two-statement prefix —
+//! `TrustService::require_trusted` first, validates the selected `root_id`
+//! second, then calls `ConfirmationService::require_confirmed`, exactly
+//! mirroring [`super::exec::spawn_adapter`]'s four-statement prefix —
 //! `scripts/plain/boundary-contracts.mjs`'s `validateDebugAdapterConnectBoundary`
 //! mechanically locks this ordering, the connect-side sibling of
 //! `validateDebugAdapterSpawnBoundary`.
@@ -80,6 +80,7 @@ use std::time::{Duration, Instant};
 use crate::error::CommandError;
 use crate::trust::service::TrustService;
 use crate::workspace::service::WorkspaceService;
+use crate::workspace::RootId;
 
 use super::confirm::ConfirmationService;
 use super::dto::{self, AdapterTransportKind};
@@ -94,26 +95,30 @@ use super::{debug_adapter_cancelled, debug_adapter_connect_failed};
 /// "did the process survive" observation window.
 const DEBUG_ADAPTER_TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Trust-*then*-confirmation-gated entry point — see the module doc for the
-/// full rationale. Calls [`TrustService::require_trusted`] as its literal
-/// first statement, then [`ConfirmationService::require_confirmed`] as its
-/// literal second, both before any `TcpStream`/connect-related identifier
-/// appears anywhere in this function's body —
+/// Trust → selected-root → confirmation-gated entry point — see the module
+/// doc for the full rationale. Calls [`TrustService::require_trusted`] first,
+/// resolves the selected authorized root second, then calls
+/// [`ConfirmationService::require_confirmed`], all before any
+/// `TcpStream`/connect-related identifier appears anywhere in this function's
+/// body —
 /// `scripts/plain/boundary-contracts.mjs`'s `validateDebugAdapterConnectBoundary`
 /// mechanically locks exactly this ordering.
 ///
 /// Real production caller: `super::service::DebugSessionService::start_session`'s
 /// TCP-transport branch (`F100` S2).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn connect_adapter(
     trust: &TrustService,
     workspace: &WorkspaceService,
     window_label: &str,
+    root_id: RootId,
     confirmation: &ConfirmationService,
     descriptor: &dto::AdapterSpawnDescriptor,
     tcp: &dto::TcpConnectDescriptor,
     cancel: Arc<AtomicBool>,
 ) -> Result<TcpStream, CommandError> {
     trust.require_trusted(workspace, window_label).await?;
+    let _selected_root = workspace.root_canonical_path(window_label, root_id)?;
     let subject = descriptor.confirmation_subject(AdapterTransportKind::Tcp);
     confirmation
         .require_confirmed(workspace, window_label, &subject)

@@ -29,6 +29,7 @@ Tauri `plugin-fs` 的 scope 适合限制通用前端文件 API，但其核心仍
 - 非 UTF-8 名称不做 lossy conversion。首版返回 `PATH_ENCODING_UNSUPPORTED`，以后可增加无损 opaque entry handle。
 - 不安装或授权 Tauri 通用 fs/shell scope。目录选择只授予文件访问，与 Git、PTY、DAP 的 workspace trust 分离。
 - WebView 发起普通 PTY 时必须提交一个当前窗口仍获授权的 opaque `rootId`；`cwd` 省略时精确使用该 root，提供时也必须 canonicalize 到同一 root 内。多根不得取授权顺序首项或靠一个属于另一根的 cwd 间接改写选择；前端在恰好单根时可自动选择，多根必须明确选择，并把 root 身份冻结到新 tab/split。DAP adapter 已经通过独立确认后从 Rust 内部发起的 `runInTerminal` 不经 WebView command，保留 ADR 0003 的独立委托边界。
+- WebView 发起 Debug launch/attach 时也必须提交一个当前窗口仍授权的 opaque `rootId`。单根自动选择，多根由用户 Quick Pick；所选根决定 `.vscode/launch.json`/`.plain/debug-adapters.json` 的读取 authority、stdio adapter 的 native cwd、session 的不可变 root 和唯一可同步的断点集合。断点身份必须包含 rootId，运行期请求的 rootId 既要仍获授权，也要与 session root 相等；同相对路径在不同根是两个断点源。首次 adapter 确认继续绑定完整 roots identity 与精确 `(command,args,transport)`，不额外按 root 拆分；launch configuration 多选仍归后续完整 Debug workflow，不借本决策扩大范围。
 
 ## Watcher 决策
 

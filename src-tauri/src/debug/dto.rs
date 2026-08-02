@@ -42,6 +42,7 @@ use serde_json::Value;
 use uuid::{Uuid, Variant};
 
 use crate::error::CommandError;
+use crate::workspace::RootId;
 
 use super::session::{LaunchRequestKind, SourceBreakpoints};
 use super::{debug_adapter_response_malformed, debug_session_request_invalid};
@@ -302,6 +303,7 @@ pub(crate) enum SessionTransportRequest {
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
 pub struct DebugSessionStartRequest {
+    pub root_id: RootId,
     pub transport: AdapterTransportKind,
     pub command: String,
     #[serde(default)]
@@ -325,6 +327,7 @@ fn empty_json_object() -> Value {
 }
 
 pub(crate) struct DebugSessionStartQuery {
+    pub(crate) root_id: RootId,
     pub(crate) transport: SessionTransportRequest,
     pub(crate) request: LaunchRequestKind,
     pub(crate) adapter_id: String,
@@ -388,6 +391,7 @@ impl DebugSessionStartRequest {
             .map(SourceBreakpointsRequest::to_source_breakpoints)
             .collect();
         Ok(DebugSessionStartQuery {
+            root_id: self.root_id,
             transport,
             request,
             adapter_id: self.adapter_id,
@@ -479,6 +483,7 @@ const MAX_DEBUG_EVALUATE_EXPRESSION_BYTES: usize = 8_192;
 #[serde(deny_unknown_fields)]
 pub struct DebugSetBreakpointsRequest {
     pub session_id: DebugSessionId,
+    pub root_id: RootId,
     pub path: String,
     #[serde(default)]
     pub breakpoints: Vec<LineBreakpointRequest>,
@@ -486,6 +491,7 @@ pub struct DebugSetBreakpointsRequest {
 
 pub(crate) struct DebugSetBreakpointsQuery {
     pub(crate) session_id: DebugSessionId,
+    pub(crate) root_id: RootId,
     pub(crate) arguments: Value,
 }
 
@@ -500,6 +506,7 @@ impl DebugSetBreakpointsRequest {
         let arguments = set_breakpoints_arguments(&self.path, &self.breakpoints);
         Ok(DebugSetBreakpointsQuery {
             session_id: self.session_id,
+            root_id: self.root_id,
             arguments,
         })
     }
@@ -1118,7 +1125,7 @@ const MAX_RUN_IN_TERMINAL_ENV_ENTRIES: usize = 256;
 /// asks a shell to interpret anything, regardless of what an adapter's
 /// `argsCanBeInterpretedByShell` hint claims.
 pub(crate) struct RunInTerminalArguments {
-    pub(crate) cwd: String,
+    pub(crate) cwd: Option<String>,
     pub(crate) program: String,
     pub(crate) args: Vec<String>,
     pub(crate) env: Vec<(String, Option<String>)>,
@@ -1126,8 +1133,11 @@ pub(crate) struct RunInTerminalArguments {
 }
 
 /// Parses one `runInTerminal` reverse request's raw `arguments` value.
-/// `None` for anything structurally invalid (missing `cwd`/`args`, a non-
-/// string `cwd`, an empty or oversized `args` array, a non-string `args`
+/// Although DAP declares `cwd` required, debugpy 1.6.7 omits it when the
+/// launch configuration itself omits `cwd`; that real adapter shape is
+/// accepted here and resolved against the selected debug root by the caller.
+/// `None` for anything structurally invalid (missing `args`, a present but
+/// non-string `cwd`, an empty or oversized `args` array, a non-string `args`
 /// entry, an oversized `env` map, or an `env` entry whose value is neither a
 /// string nor `null`) — the caller (`handle_run_in_terminal_reverse_request`)
 /// turns a `None` into a real, structured `success: false` reply to the
@@ -1136,7 +1146,11 @@ pub(crate) fn parse_run_in_terminal_arguments(
     arguments: Option<&Value>,
 ) -> Option<RunInTerminalArguments> {
     let arguments = arguments?;
-    let cwd = arguments.get("cwd").and_then(Value::as_str)?.to_owned();
+    let cwd = match arguments.get("cwd") {
+        None => None,
+        Some(Value::String(cwd)) => Some(cwd.clone()),
+        Some(_) => return None,
+    };
     let args_value = arguments.get("args").and_then(Value::as_array)?;
     if args_value.is_empty() || args_value.len() > MAX_RUN_IN_TERMINAL_ARGS {
         return None;
@@ -1219,10 +1233,15 @@ mod tests {
         SessionTransportRequest, SourceBreakpointsRequest, MAX_RUN_IN_TERMINAL_ARGS,
     };
     use crate::debug::session::LaunchRequestKind;
+    use crate::workspace::RootId;
     use serde_json::Value;
 
     fn session_id() -> DebugSessionId {
         serde_json::from_value(serde_json::Value::String(VALID_ID.to_owned())).unwrap()
+    }
+
+    fn root_id() -> RootId {
+        RootId::parse_v4_wire(VALID_ID).unwrap()
     }
 
     const VALID_ID: &str = "0d3f4b0e-6f1a-4c9d-9c3a-1a2b3c4d5e6f";
@@ -1249,6 +1268,7 @@ mod tests {
 
     fn stdio_request(command: &str) -> DebugSessionStartRequest {
         DebugSessionStartRequest {
+            root_id: root_id(),
             transport: AdapterTransportKind::Stdio,
             command: command.to_owned(),
             args: Vec::new(),
@@ -1262,6 +1282,7 @@ mod tests {
 
     fn tcp_request(host: Option<&str>, port: Option<u16>) -> DebugSessionStartRequest {
         DebugSessionStartRequest {
+            root_id: root_id(),
             transport: AdapterTransportKind::Tcp,
             command: "/usr/bin/true".to_owned(),
             args: Vec::new(),
@@ -1415,6 +1436,7 @@ mod tests {
     #[test]
     fn debug_session_start_request_deserializes_camel_case_and_rejects_unknown_fields() {
         let value = json!({
+            "rootId": VALID_ID,
             "transport": "stdio",
             "command": "/usr/bin/python3",
             "args": ["-m", "debugpy.adapter"],
@@ -1426,12 +1448,49 @@ mod tests {
         assert!(request.initial_breakpoints.is_empty());
 
         let with_unknown_field = json!({
+            "rootId": VALID_ID,
             "transport": "stdio",
             "command": "/usr/bin/python3",
             "adapterId": "mock",
             "unexpected": true,
         });
         assert!(serde_json::from_value::<DebugSessionStartRequest>(with_unknown_field).is_err());
+    }
+
+    #[test]
+    fn debug_root_ids_are_required_and_reject_malformed_wire_values() {
+        let missing_start_root = json!({
+            "transport": "stdio",
+            "command": "/usr/bin/python3",
+            "adapterId": "mock",
+        });
+        assert!(serde_json::from_value::<DebugSessionStartRequest>(missing_start_root).is_err());
+        let malformed_start_root = json!({
+            "rootId": "not-a-root-id",
+            "transport": "stdio",
+            "command": "/usr/bin/python3",
+            "adapterId": "mock",
+        });
+        assert!(serde_json::from_value::<DebugSessionStartRequest>(malformed_start_root).is_err());
+
+        let missing_breakpoint_root = json!({
+            "sessionId": VALID_ID,
+            "path": "main.py",
+            "breakpoints": [],
+        });
+        assert!(
+            serde_json::from_value::<DebugSetBreakpointsRequest>(missing_breakpoint_root).is_err()
+        );
+        let malformed_breakpoint_root = json!({
+            "sessionId": VALID_ID,
+            "rootId": "not-a-root-id",
+            "path": "main.py",
+            "breakpoints": [],
+        });
+        assert!(
+            serde_json::from_value::<DebugSetBreakpointsRequest>(malformed_breakpoint_root)
+                .is_err()
+        );
     }
 
     // -------------------------------------------------------------
@@ -1442,6 +1501,7 @@ mod tests {
     fn debug_set_breakpoints_request_builds_the_exact_set_breakpoints_arguments_shape() {
         let request = DebugSetBreakpointsRequest {
             session_id: session_id(),
+            root_id: root_id(),
             path: "/tmp/a.py".to_owned(),
             breakpoints: vec![
                 LineBreakpointRequest {
@@ -1473,6 +1533,7 @@ mod tests {
     fn debug_set_breakpoints_request_rejects_a_blank_path() {
         let request = DebugSetBreakpointsRequest {
             session_id: session_id(),
+            root_id: root_id(),
             path: "   ".to_owned(),
             breakpoints: Vec::new(),
         };
@@ -1483,6 +1544,7 @@ mod tests {
     fn debug_set_breakpoints_request_rejects_more_breakpoints_than_the_defensive_ceiling() {
         let request = DebugSetBreakpointsRequest {
             session_id: session_id(),
+            root_id: root_id(),
             path: "/tmp/a.py".to_owned(),
             breakpoints: (0..=super::MAX_DEBUG_SET_BREAKPOINTS_ENTRIES)
                 .map(|line| LineBreakpointRequest {
@@ -1836,7 +1898,7 @@ mod tests {
         });
         let parsed =
             parse_run_in_terminal_arguments(Some(&arguments)).expect("well-formed request parses");
-        assert_eq!(parsed.cwd, "/tmp");
+        assert_eq!(parsed.cwd.as_deref(), Some("/tmp"));
         assert_eq!(parsed.program, "python3");
         assert_eq!(parsed.args, vec!["-c".to_owned(), "print(1)".to_owned()]);
         assert_eq!(
@@ -1862,6 +1924,17 @@ mod tests {
                 .expect("well-formed request parses regardless of kind");
             assert_eq!(parsed.program, "true");
         }
+    }
+
+    #[test]
+    fn parse_run_in_terminal_arguments_accepts_debugpy_missing_cwd_shape() {
+        let parsed = parse_run_in_terminal_arguments(Some(&json!({
+            "kind": "integrated",
+            "args": ["python3", "launcher.py"],
+        })))
+        .expect("debugpy's omitted cwd shape is resolved by the root-bound handler");
+        assert_eq!(parsed.cwd, None);
+        assert_eq!(parsed.program, "python3");
     }
 
     #[test]

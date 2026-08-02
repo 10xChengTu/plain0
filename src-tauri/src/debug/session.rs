@@ -129,7 +129,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -161,6 +161,13 @@ pub(crate) const DEBUG_LAUNCH_TIMEOUT: Duration = Duration::from_secs(300);
 /// per-message size ceiling lives in [`super::framing::MAX_DAP_MESSAGE_BYTES`],
 /// not here).
 const DEBUG_SESSION_READ_BUFFER_BYTES: usize = 8192;
+
+/// Maximum latency before the handshake notices that `initialized` fired
+/// while it is also watching for an early `launch`/`attach` response. The
+/// standard library has no select primitive spanning a condvar and an mpsc
+/// receiver, so the short bounded receive below is the smallest portable
+/// way to observe both without ever blocking on the start response first.
+const DEBUG_HANDSHAKE_START_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Reserved event name [`DebugEventSink::emit_session_ended`] is delivered
 /// under when surfaced to the frontend — see the module doc's "two
@@ -380,6 +387,10 @@ impl SessionSignal {
         let mut state = lock(&self.state);
         state.initialized = true;
         self.condvar.notify_all();
+    }
+
+    fn is_initialized(&self) -> bool {
+        lock(&self.state).initialized
     }
 
     fn mark_ended(&self, reason: SessionEndReason) {
@@ -937,8 +948,12 @@ pub(crate) fn run_handshake(
     // Sent, deliberately not awaited yet — see the module doc.
     let launch_command = config.request.as_command();
     let launch_pending = session.send_request(launch_command, Some(config.arguments))?;
-
-    session.wait_for_initialized(config.request_timeout)?;
+    let early_launch_response = wait_for_initialized_or_early_start_response(
+        session,
+        &launch_pending,
+        config.request_timeout,
+        launch_command,
+    )?;
 
     for breakpoints in config.breakpoints {
         let pending = session.send_request("setBreakpoints", Some(breakpoints.arguments))?;
@@ -974,11 +989,14 @@ pub(crate) fn run_handshake(
     // blocking; either way this is the exact same blocking receive, just
     // with the deliberately generous `launch_timeout` budget rather than
     // `request_timeout` — see the module doc's "`F100` S5" section.
-    let launch_response = session.wait_for_response_with_timeout(
-        launch_pending,
-        config.launch_timeout,
-        launch_command,
-    )?;
+    let launch_response = match early_launch_response {
+        Some(response) => response,
+        None => session.wait_for_response_with_timeout(
+            launch_pending,
+            config.launch_timeout,
+            launch_command,
+        )?,
+    };
     if !launch_response.success {
         return Err(debug_handshake_failed(
             launch_command,
@@ -987,6 +1005,55 @@ pub(crate) fn run_handshake(
     }
 
     Ok(capabilities)
+}
+
+/// Waits for the adapter's `initialized` event while also observing an
+/// adapter that answers `launch`/`attach` *early*. A conforming adapter may
+/// withhold that response until after `configurationDone`, so this must not
+/// linearly await it. But a real adapter can reject startup before emitting
+/// `initialized`; ignoring that response would mask its actionable error
+/// behind a later, misleading "initialized timed out" message.
+///
+/// `Some(response)` means the adapter replied successfully before
+/// `initialized`; the caller retains it for the final start-response step.
+/// A failed early response is reported immediately. `None` is the ordinary
+/// DAP ordering where `initialized` won the race and the response remains in
+/// `launch_pending` for the caller to await after configuration.
+fn wait_for_initialized_or_early_start_response(
+    session: &DebugSession,
+    launch_pending: &PendingResponse,
+    timeout: Duration,
+    launch_command: &str,
+) -> Result<Option<ResponseEnvelope>, CommandError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if session.signal.is_initialized() {
+            return Ok(None);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(debug_request_timed_out("initialized"));
+        }
+        let poll = remaining.min(DEBUG_HANDSHAKE_START_POLL_INTERVAL);
+        match launch_pending.receiver.recv_timeout(poll) {
+            Ok(response) => {
+                if !response.success {
+                    return Err(debug_handshake_failed(
+                        launch_command,
+                        response.message.as_deref(),
+                    ));
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(debug_request_timed_out("initialized"));
+                }
+                session.wait_for_initialized(remaining)?;
+                return Ok(Some(response));
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return Err(debug_session_ended()),
+        }
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

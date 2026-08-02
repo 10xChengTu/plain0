@@ -1866,6 +1866,7 @@ export interface PlainBridge {
 	 * `DEBUG_HANDSHAKE_FAILED` if the adapter itself rejects any handshake
 	 * step. */
 	debugLaunch(
+		rootId: string,
 		target: DebugAdapterTarget,
 		adapterId: string,
 		launchArguments: Readonly<Record<string, unknown>>,
@@ -1873,6 +1874,7 @@ export interface PlainBridge {
 	/** Identical contract to `debugLaunch`, sending DAP's `attach` request
 	 * instead of `launch`. */
 	debugAttach(
+		rootId: string,
 		target: DebugAdapterTarget,
 		adapterId: string,
 		launchArguments: Readonly<Record<string, unknown>>,
@@ -1890,6 +1892,7 @@ export interface PlainBridge {
 	 * requested. */
 	debugSetBreakpoints(
 		sessionId: string,
+		rootId: string,
 		path: string,
 		breakpoints: readonly DebugBreakpointRequest[],
 	): Promise<DebugSetBreakpointsResult>;

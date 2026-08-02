@@ -56,6 +56,7 @@ export interface DebugBreakpointVerification {
 export type DebugBreakpointChangeKind = "breakpoints" | "verification";
 
 export type DebugBreakpointChangeListener = (
+	rootId: string,
 	path: string,
 	kind: DebugBreakpointChangeKind,
 ) => void;
@@ -86,11 +87,11 @@ export interface DebugBreakpointView {
 export class DebugBreakpointStore {
 	readonly #descriptors = new Map<
 		string,
-		Map<number, DebugBreakpointDescriptor>
+		Map<string, Map<number, DebugBreakpointDescriptor>>
 	>();
 	readonly #verification = new Map<
 		string,
-		Map<number, DebugBreakpointVerification>
+		Map<string, Map<number, DebugBreakpointVerification>>
 	>();
 	readonly #listeners = new Set<DebugBreakpointChangeListener>();
 
@@ -103,10 +104,32 @@ export class DebugBreakpointStore {
 		};
 	}
 
-	#notify(path: string, kind: DebugBreakpointChangeKind): void {
+	#notify(rootId: string, path: string, kind: DebugBreakpointChangeKind): void {
 		for (const listener of this.#listeners) {
-			listener(path, kind);
+			listener(rootId, path, kind);
 		}
+	}
+
+	#descriptorsForRoot(
+		rootId: string,
+	): Map<string, Map<number, DebugBreakpointDescriptor>> {
+		let root = this.#descriptors.get(rootId);
+		if (root === undefined) {
+			root = new Map();
+			this.#descriptors.set(rootId, root);
+		}
+		return root;
+	}
+
+	#verificationForRoot(
+		rootId: string,
+	): Map<string, Map<number, DebugBreakpointVerification>> {
+		let root = this.#verification.get(rootId);
+		if (root === undefined) {
+			root = new Map();
+			this.#verification.set(rootId, root);
+		}
+		return root;
 	}
 
 	/** Adds a plain breakpoint at `line` if none exists there yet, otherwise
@@ -114,28 +137,29 @@ export class DebugBreakpointStore {
 	 * behavior. Clears any prior verification for that line either way (a
 	 * removed breakpoint has no verification; a newly added one has none
 	 * yet). */
-	toggle(path: string, line: number): void {
-		const forPath = this.#descriptors.get(path);
+	toggle(rootId: string, path: string, line: number): void {
+		const root = this.#descriptorsForRoot(rootId);
+		const forPath = root.get(path);
 		if (forPath?.has(line) === true) {
 			forPath.delete(line);
-			this.#verification.get(path)?.delete(line);
-			this.#notify(path, "breakpoints");
+			this.#verification.get(rootId)?.get(path)?.delete(line);
+			this.#notify(rootId, path, "breakpoints");
 			return;
 		}
 		const map = forPath ?? new Map<number, DebugBreakpointDescriptor>();
 		map.set(line, { line, condition: null, logMessage: null });
-		this.#descriptors.set(path, map);
-		this.#verification.get(path)?.delete(line);
-		this.#notify(path, "breakpoints");
+		root.set(path, map);
+		this.#verification.get(rootId)?.get(path)?.delete(line);
+		this.#notify(rootId, path, "breakpoints");
 	}
 
-	remove(path: string, line: number): void {
-		const forPath = this.#descriptors.get(path);
+	remove(rootId: string, path: string, line: number): void {
+		const forPath = this.#descriptors.get(rootId)?.get(path);
 		if (forPath?.delete(line) !== true) {
 			return;
 		}
-		this.#verification.get(path)?.delete(line);
-		this.#notify(path, "breakpoints");
+		this.#verification.get(rootId)?.get(path)?.delete(line);
+		this.#notify(rootId, path, "breakpoints");
 	}
 
 	/** Sets (or clears, with `null`) `line`'s condition expression — always
@@ -144,25 +168,35 @@ export class DebugBreakpointStore {
 	 * responsible for not offering this input at all when unsupported (see
 	 * `plain-debug-breakpoints-contribution.ts`'s own capability-gating
 	 * doc comment). A line with no existing breakpoint is a no-op. */
-	setCondition(path: string, line: number, condition: string | null): void {
-		const forPath = this.#descriptors.get(path);
+	setCondition(
+		rootId: string,
+		path: string,
+		line: number,
+		condition: string | null,
+	): void {
+		const forPath = this.#descriptors.get(rootId)?.get(path);
 		const existing = forPath?.get(line);
 		if (forPath === undefined || existing === undefined) {
 			return;
 		}
 		forPath.set(line, { ...existing, condition });
-		this.#notify(path, "breakpoints");
+		this.#notify(rootId, path, "breakpoints");
 	}
 
 	/** Same contract as {@link setCondition}, for the log-point message. */
-	setLogMessage(path: string, line: number, logMessage: string | null): void {
-		const forPath = this.#descriptors.get(path);
+	setLogMessage(
+		rootId: string,
+		path: string,
+		line: number,
+		logMessage: string | null,
+	): void {
+		const forPath = this.#descriptors.get(rootId)?.get(path);
 		const existing = forPath?.get(line);
 		if (forPath === undefined || existing === undefined) {
 			return;
 		}
 		forPath.set(line, { ...existing, logMessage });
-		this.#notify(path, "breakpoints");
+		this.#notify(rootId, path, "breakpoints");
 	}
 
 	/** Sets both `condition` and `logMessage` in one atomic update — a single
@@ -175,32 +209,38 @@ export class DebugBreakpointStore {
 	 * harmless (DAP's own `setBreakpoints` replaces the whole set each time,
 	 * so it is not *incorrect*, just redundant chatter this method avoids). */
 	setDetails(
+		rootId: string,
 		path: string,
 		line: number,
 		condition: string | null,
 		logMessage: string | null,
 	): void {
-		const forPath = this.#descriptors.get(path);
+		const forPath = this.#descriptors.get(rootId)?.get(path);
 		const existing = forPath?.get(line);
 		if (forPath === undefined || existing === undefined) {
 			return;
 		}
 		forPath.set(line, { ...existing, condition, logMessage });
-		this.#notify(path, "breakpoints");
+		this.#notify(rootId, path, "breakpoints");
 	}
 
-	descriptorsForPath(path: string): readonly DebugBreakpointDescriptor[] {
-		const forPath = this.#descriptors.get(path);
+	descriptorsForPath(
+		rootId: string,
+		path: string,
+	): readonly DebugBreakpointDescriptor[] {
+		const forPath = this.#descriptors.get(rootId)?.get(path);
 		if (forPath === undefined) {
 			return [];
 		}
 		return [...forPath.values()].sort((a, b) => a.line - b.line);
 	}
 
-	pathsWithBreakpoints(): readonly string[] {
-		return [...this.#descriptors.keys()].filter(
-			(path) => (this.#descriptors.get(path)?.size ?? 0) > 0,
-		);
+	pathsWithBreakpoints(rootId: string): readonly string[] {
+		const root = this.#descriptors.get(rootId);
+		if (root === undefined) {
+			return [];
+		}
+		return [...root.keys()].filter((path) => (root.get(path)?.size ?? 0) > 0);
 	}
 
 	/** Records the live session's `debugSetBreakpoints` response for `path` —
@@ -213,42 +253,46 @@ export class DebugBreakpointStore {
 	 * (defensive: better to show stale verification than misattribute one
 	 * breakpoint's real verdict to a different line). */
 	setVerification(
+		rootId: string,
 		path: string,
 		results: readonly DebugBreakpointVerification[],
 	): void {
-		const descriptors = this.descriptorsForPath(path);
+		const descriptors = this.descriptorsForPath(rootId, path);
 		if (results.length !== descriptors.length) {
 			return;
 		}
-		const map = this.#verification.get(path) ?? new Map();
+		const root = this.#verificationForRoot(rootId);
+		const map = root.get(path) ?? new Map();
 		descriptors.forEach((descriptor, index) => {
 			map.set(descriptor.line, results[index]!);
 		});
-		this.#verification.set(path, map);
-		this.#notify(path, "verification");
+		root.set(path, map);
+		this.#notify(rootId, path, "verification");
 	}
 
 	/** Clears every recorded verification for `path` (but not the
 	 * breakpoints themselves) — called when a session ends, since a
 	 * verification report is only meaningful for the session that produced
 	 * it. */
-	clearVerification(path: string): void {
-		if (this.#verification.delete(path)) {
-			this.#notify(path, "verification");
+	clearVerification(rootId: string, path: string): void {
+		if (this.#verification.get(rootId)?.delete(path) === true) {
+			this.#notify(rootId, path, "verification");
 		}
 	}
 
 	clearAllVerification(): void {
-		const paths = [...this.#verification.keys()];
+		const sources = [...this.#verification].flatMap(([rootId, paths]) =>
+			[...paths.keys()].map((path) => ({ rootId, path })),
+		);
 		this.#verification.clear();
-		for (const path of paths) {
-			this.#notify(path, "verification");
+		for (const { rootId, path } of sources) {
+			this.#notify(rootId, path, "verification");
 		}
 	}
 
-	viewsForPath(path: string): readonly DebugBreakpointView[] {
-		const verification = this.#verification.get(path);
-		return this.descriptorsForPath(path).map((descriptor) => ({
+	viewsForPath(rootId: string, path: string): readonly DebugBreakpointView[] {
+		const verification = this.#verification.get(rootId)?.get(path);
+		return this.descriptorsForPath(rootId, path).map((descriptor) => ({
 			...descriptor,
 			verification: verification?.get(descriptor.line) ?? null,
 		}));

@@ -5413,6 +5413,7 @@ export function createBrowserMockBridge(
 	}
 
 	const liveDebugSessions = new Set<string>();
+	const debugSessionRoots = new Map<string, string>();
 	const issuedDebugSessionIds = new Set<string>();
 	const debugEventListeners = new Set<(event: DebugEventPayload) => void>();
 
@@ -5586,8 +5587,17 @@ export function createBrowserMockBridge(
 		throw new Error("Browser mock debug session id generation failed.");
 	};
 
-	function requireLiveMockDebugSession(sessionId: string): void {
+	function requireLiveMockDebugSession(
+		sessionId: string,
+		rootId?: string,
+	): void {
 		if (!liveDebugSessions.has(sessionId)) {
+			throw debugSessionNotFound();
+		}
+		if (
+			rootId !== undefined &&
+			(debugSessionRoots.get(sessionId) !== rootId || !roots.has(rootId))
+		) {
 			throw debugSessionNotFound();
 		}
 	}
@@ -5616,17 +5626,22 @@ export function createBrowserMockBridge(
 	 * never spawns/connects (there is nothing to spawn/connect in a browser
 	 * mock) until both pass. */
 	function startMockDebugSession(
+		rootId: string,
 		target: DebugAdapterTarget,
 		adapterId: string,
 		launchArguments: Readonly<Record<string, unknown>>,
 	): DebugSessionStartResult {
 		const request = frozenDebugSessionStartRequest(
+			rootId,
 			target,
 			adapterId,
 			launchArguments,
 		);
 		if (roots.size === 0 || !terminalTrusted) {
 			throw terminalNotTrusted();
+		}
+		if (!roots.has(request.rootId as string)) {
+			throw rootNotAuthorized();
 		}
 		const subject: DebugAdapterConfirmationSubject = Object.freeze({
 			command: request.command as string,
@@ -5638,6 +5653,7 @@ export function createBrowserMockBridge(
 		}
 		const sessionId = nextDebugSessionId();
 		liveDebugSessions.add(sessionId);
+		debugSessionRoots.set(sessionId, request.rootId as string);
 		const capabilities = { ...options.debugFixtureForTest?.capabilities };
 		const controller: BrowserMockDebugSessionController = Object.freeze({
 			sessionId,
@@ -5658,6 +5674,7 @@ export function createBrowserMockBridge(
 			},
 			finish(): void {
 				debugOutputGates.delete(sessionId);
+				debugSessionRoots.delete(sessionId);
 				if (!liveDebugSessions.delete(sessionId)) {
 					return;
 				}
@@ -7456,24 +7473,29 @@ export function createBrowserMockBridge(
 			debugAdapterConfirmations.delete(debugAdapterConfirmationKey(request));
 			decodeDebugAdapterConfirmationVoid(null);
 		},
-		async debugLaunch(target, adapterId, launchArguments) {
-			return startMockDebugSession(target, adapterId, launchArguments);
+		async debugLaunch(rootId, target, adapterId, launchArguments) {
+			return startMockDebugSession(rootId, target, adapterId, launchArguments);
 		},
-		async debugAttach(target, adapterId, launchArguments) {
-			return startMockDebugSession(target, adapterId, launchArguments);
+		async debugAttach(rootId, target, adapterId, launchArguments) {
+			return startMockDebugSession(rootId, target, adapterId, launchArguments);
 		},
 		async debugDisconnect(sessionId) {
 			const request = frozenDebugSessionIdRequest(sessionId);
 			requireLiveMockDebugSession(request.sessionId as string);
 			liveDebugSessions.delete(request.sessionId as string);
+			debugSessionRoots.delete(request.sessionId as string);
 		},
-		async debugSetBreakpoints(sessionId, path, breakpoints) {
+		async debugSetBreakpoints(sessionId, rootId, path, breakpoints) {
 			const request = frozenDebugSetBreakpointsRequest(
 				sessionId,
+				rootId,
 				path,
 				breakpoints,
 			);
-			requireLiveMockDebugSession(request.sessionId as string);
+			requireLiveMockDebugSession(
+				request.sessionId as string,
+				request.rootId as string,
+			);
 			const outcomesForPath =
 				options.debugFixtureForTest?.breakpointOutcomes?.[
 					request.path as string

@@ -837,19 +837,59 @@
 			"id": "F150",
 			"name": "Multi-root Git terminal and debug routing",
 			"phase": 6,
-			"status": "in_progress",
+			"status": "complete",
 			"acceptance": [
 				"Git and SCM select an explicit authorized root and never report or mutate paths outside it",
 				"Terminal creation selects an authorized root or cwd instead of silently using the first root",
 				"Debug launch configurations and breakpoints are routed by their owning workspace root",
 				"Multi-root Browser and real Tauri workflows pass for all three domains"
-			]
+			],
+			"evidence": {
+				"commands": [
+					"pnpm check",
+					"cargo test --manifest-path src-tauri/Cargo.toml debug::",
+					"pnpm exec vitest run tests/unit/boundary-contracts.test.mjs",
+					"pnpm exec playwright test tests/browser/workspace.spec.ts --grep Debug|debug",
+					"env PATH=/usr/bin:/bin:/usr/sbin:/sbin:/Users/zhenghui/.cargo/bin:/Users/zhenghui/.nvm/versions/node/v22.22.1/bin:/opt/homebrew/bin:/opt/homebrew/anaconda3/bin APPLE_SIGNING_IDENTITY=- pnpm tauri:build:e2e"
+				],
+				"results": [
+					"Every one of the 31 Git IPC routes carries an explicit rootId; SCM, Graph, Stash and Worktrees share one explicit repository selection while file/line history and blame derive the root from the active resource. Git S1's full frontend run passed 1729 tests and its focused Browser matrix passed 24/24.",
+					"Terminal start carries {rootId,cwd,cols,rows}; multi-root creation requires a choice, tabs freeze that root and splits inherit it. Terminal S2's focused frontend tests passed 77/77, Rust passed 75/75 and its Browser matrix passed 17/17.",
+					"Debug start, transport authorization, live session records and setBreakpoints now carry one immutable rootId. Breakpoint identity is (rootId, relativePath, line); strict root/codec/session/breakpoint tests pass, boundary contracts pass 433/433, the complete Rust Debug domain passes 193/193 outside the socket-restricted sandbox, and focused Chromium Debug regression passes 6/6.",
+					"E2E-015, E2E-016 and E2E-017 all passed in freshly built real Plain.app bundles. The final Debug run used the locally ad-hoc-signed hardened-runtime bundle and left no Plain, shell, adapter or debuggee process behind. The final unified pnpm check passed 83 frontend files / 1749 tests, production build, architecture and bundle guards, Rust fmt/clippy, and 1193/1193 Rust tests."
+				],
+				"nativeScenarios": [
+					"E2E-015 authorized two independent real Git repositories, proved Source Control performed no reads before explicit selection, staged only secondary-only.txt, left primary's index empty, and routed File History to each active file's own repository.",
+					"E2E-016 authorized two real directories and used actual PTY pwd output to prove a secondary tab, its split after the future-root selector changed, and a later primary tab each retained the correct cwd; killing tabs and Cmd+Q cleaned every shell.",
+					"E2E-017 authorized two real APFS fixtures. Cancelling the root picker spawned nothing. Secondary and primary launches showed SECONDARY_DEBUG_ROOT and PRIMARY_DEBUG_ROOT call-stack frames respectively; adapter and execution marker files existed only in their owning roots, Continue returned to Not debugging, and no adapter process remained.",
+					"A real debugpy 1.6.7 probe exposed an early launch-failure masking bug and its omitted-cwd runInTerminal shape. Plain now reports an early failed launch/attach response immediately, and a real two-root TerminalService integration resolves missing/relative cwd against the selected second debug root."
+				],
+				"platformGaps": [],
+				"acceptanceResults": [
+					{
+						"acceptance": "Git and SCM select an explicit authorized root and never report or mutate paths outside it",
+						"result": "Achieved. Rust rejects stale/foreign roots and repositories outside the selected capability; all Git reads, writes, network cancellation, URI-backed models, history and blame preserve root identity. Browser and E2E-015 proved explicit selection and secondary-only mutation with primary unchanged."
+					},
+					{
+						"acceptance": "Terminal creation selects an authorized root or cwd instead of silently using the first root",
+						"result": "Achieved. A multi-root terminal cannot spawn until the user selects a root; each tab freezes it and a split inherits it. Browser tests and E2E-016 verified labels, real pwd output, future selector changes and complete process cleanup."
+					},
+					{
+						"acceptance": "Debug launch configurations and breakpoints are routed by their owning workspace root",
+						"result": "Achieved. Launch/attach, stdio cwd, TCP authorization, session records, setBreakpoints and runInTerminal fallback all bind to one selected root. Same-path breakpoints are root-scoped in Browser tests; E2E-017 verified each real adapter cwd and call stack independently."
+					},
+					{
+						"acceptance": "Multi-root Browser and real Tauri workflows pass for all three domains",
+						"result": "Achieved through the focused Git, Terminal and Debug Browser matrices plus E2E-015, E2E-016 and E2E-017 against real built desktop bundles, with disk/index/cwd/call-stack/process cross-checks rather than UI assertions alone."
+					}
+				]
+			}
 		},
 		{
 			"id": "F160",
 			"name": "Native close and multi-root hot-exit recovery",
 			"phase": 6,
-			"status": "planned",
+			"status": "in_progress",
 			"acceptance": [
 				"Native CloseRequested waits for the final bounded backup flush before allowing shutdown",
 				"Dirty working copies recover across restart in single-root and multi-root workspaces without root guessing",

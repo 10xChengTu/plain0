@@ -6736,6 +6736,129 @@ export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 }
 
 /**
+ * F150 Debug multi-root IPC lock. The selected root is process authority,
+ * not presentation metadata: both session-start DTOs and runtime breakpoint
+ * requests must require it; the frozen TypeScript encoders must validate it;
+ * and native.ts must forward the same explicit value to the matching Tauri
+ * command. This complements the exact Rust command-body contracts below and
+ * the trust/root/confirmation spawn/connect prefix checks above.
+ */
+export function validateDebugRootIpcBoundary(rustSources, appSources) {
+	const failures = [];
+	const dto = findRustSource(rustSources, "src-tauri/src/debug/dto.rs");
+	const appSource = (expectedPath) =>
+		appSources.find(
+			({ relativePath }) => relativePath.replaceAll("\\", "/") === expectedPath,
+		)?.source;
+	const compact = (value) => value?.replaceAll(/\s+/g, "") ?? "";
+	const executableDto =
+		dto === undefined
+			? undefined
+			: stripRustCommentsAndLiterals(dto).replaceAll(/#\s*\[[^\]]*\]\s*/g, "");
+	if (
+		executableDto === undefined ||
+		!rustStructFieldsAreExact(executableDto, "DebugSessionStartRequest", [
+			"pubroot_id:RootId",
+			"pubtransport:AdapterTransportKind",
+			"pubcommand:String",
+			"pubargs:Vec<String>",
+			"pubhost:Option<String>",
+			"pubport:Option<u16>",
+			"pubadapter_id:String",
+			"pubarguments:Value",
+			"pubinitial_breakpoints:Vec<SourceBreakpointsRequest>",
+		]) ||
+		!rustStructFieldsAreExact(executableDto, "DebugSessionStartQuery", [
+			"pub(crate)root_id:RootId",
+			"pub(crate)transport:SessionTransportRequest",
+			"pub(crate)request:LaunchRequestKind",
+			"pub(crate)adapter_id:String",
+			"pub(crate)arguments:Value",
+			"pub(crate)breakpoints:Vec<SourceBreakpoints>",
+		]) ||
+		!rustStructFieldsAreExact(executableDto, "DebugSetBreakpointsRequest", [
+			"pubsession_id:DebugSessionId",
+			"pubroot_id:RootId",
+			"pubpath:String",
+			"pubbreakpoints:Vec<LineBreakpointRequest>",
+		]) ||
+		!rustStructFieldsAreExact(executableDto, "DebugSetBreakpointsQuery", [
+			"pub(crate)session_id:DebugSessionId",
+			"pub(crate)root_id:RootId",
+			"pub(crate)arguments:Value",
+		])
+	) {
+		failures.push(
+			"Debug session-start and set-breakpoints DTOs must retain their exact audited rootId-bearing fields",
+		);
+	}
+
+	const codec = appSource("app/platform/tauri/debug-codec.ts");
+	const codecFunctionBody = (name) => {
+		if (codec === undefined) {
+			return undefined;
+		}
+		const bodies = extractRustLikeTypeScriptFunctionBodies(codec, name);
+		return bodies.length === 1 ? compact(bodies[0]) : undefined;
+	};
+	if (
+		codec === undefined ||
+		!codec.includes(
+			"export function frozenDebugSessionStartRequest(\n\trootId: unknown,",
+		) ||
+		!codecFunctionBody("frozenDebugSessionStartRequest")?.includes(
+			"constbase={rootId:frozenRootId(rootId),transport:target.transport,command:target.command,args:Object.freeze(frozenArgs),adapterId,arguments:{...launchArguments},initialBreakpoints:Object.freeze([]),};",
+		) ||
+		!codec.includes(
+			"export function frozenDebugSetBreakpointsRequest(\n\tsessionId: unknown,\n\trootId: unknown,",
+		) ||
+		!codecFunctionBody("frozenDebugSetBreakpointsRequest")?.includes(
+			"returnObject.freeze({sessionId:frozenSessionId(sessionId),rootId:frozenRootId(rootId),path,breakpoints:Object.freeze(",
+		)
+	) {
+		failures.push(
+			"debug-codec.ts must validate and serialize rootId for session-start and set-breakpoints requests",
+		);
+	}
+
+	const native = compact(appSource("app/platform/tauri/native.ts"));
+	if (
+		!native.includes(
+			"debugLaunch:async(rootId,target,adapterId,launchArguments)=>{constrequest=frozenDebugSessionStartRequest(rootId,target,adapterId,launchArguments,);",
+		) ||
+		!native.includes(
+			"debugAttach:async(rootId,target,adapterId,launchArguments)=>{constrequest=frozenDebugSessionStartRequest(rootId,target,adapterId,launchArguments,);",
+		) ||
+		!native.includes(
+			"debugSetBreakpoints:async(sessionId,rootId,path,breakpoints)=>{constrequest=frozenDebugSetBreakpointsRequest(sessionId,rootId,path,breakpoints,);",
+		)
+	) {
+		failures.push(
+			"native.ts must forward the explicit debug rootId through launch, attach, and setBreakpoints",
+		);
+	}
+
+	const contracts = compact(appSource("app/platform/tauri/contracts.ts"));
+	if (
+		!contracts.includes(
+			"debugLaunch(rootId:string,target:DebugAdapterTarget,adapterId:string,launchArguments:Readonly<Record<string,unknown>>,):Promise<DebugSessionStartResult>;",
+		) ||
+		!contracts.includes(
+			"debugAttach(rootId:string,target:DebugAdapterTarget,adapterId:string,launchArguments:Readonly<Record<string,unknown>>,):Promise<DebugSessionStartResult>;",
+		) ||
+		!contracts.includes(
+			"debugSetBreakpoints(sessionId:string,rootId:string,path:string,breakpoints:readonlyDebugBreakpointRequest[],):Promise<DebugSetBreakpointsResult>;",
+		)
+	) {
+		failures.push(
+			"PlainBridge debug launch, attach, and setBreakpoints signatures must require rootId",
+		);
+	}
+
+	return failures;
+}
+
+/**
  * `F080` S1's three git IPC commands (`docs/research/2026-07-25-core-git.md`)
  * — same exact-body-pinning technique as [`TRUST_COMMAND_CONTRACTS`]/
  * [`TERMINAL_COMMAND_CONTRACTS`], kept as its own const/function pair (not
@@ -17991,9 +18114,9 @@ export function validateWorkspaceDeleteFailureBrowserFixture(source) {
 		secondaryEntriesDeclarations.length !== 1 ||
 		treesDeclarations.length !== 1 ||
 		normalizedText(primaryEntriesDeclarations[0].parent.parent) !==
-			'constprimaryEntries:Array<readonly[string,MockNode]>=[["README.md",file("# Primary workspace\\n")],["copy-source.txt",file("Copy across roots.\\n")],["shared.txt",file("F140 shared primary\\n")],["src",directory([])],];' ||
+			'constprimaryEntries:Array<readonly[string,MockNode]>=[["README.md",file("# Primary workspace\\n")],["main.py",file("def primary():\\n    marker = \'primary-debug\'\\n    print(marker)\\n\\nprimary()\\n",),],[".vscode",directory([["launch.json",file(JSON.stringify({version:"0.2.0",configurations:[{type:"primary-python",request:"launch",name:"Debug primary main.py",plainAdapter:{transport:"stdio",command:"/primary-debug-adapter",args:["--root","primary"],},program:"main.py",},],}),),],]),],["copy-source.txt",file("Copy across roots.\\n")],["shared.txt",file("F140 shared primary\\n")],["src",directory([])],];' ||
 		normalizedText(secondaryEntriesDeclarations[0].parent.parent) !==
-			'constsecondaryEntries:Array<readonly[string,MockNode]>=[["move-source.txt",file("Move across roots.\\n")],["notes.txt",file("Secondary workspace\\n")],["shared.txt",file("F140 shared secondary\\n")],["packages",directory([])],];' ||
+			'constsecondaryEntries:Array<readonly[string,MockNode]>=[["main.py",file("def secondary():\\n    marker = \'secondary-debug\'\\n    print(marker)\\n\\nsecondary()\\n",),],[".vscode",directory([["launch.json",file(JSON.stringify({version:"0.2.0",configurations:[{type:"secondary-python",request:"launch",name:"Debug secondary main.py",plainAdapter:{transport:"stdio",command:"/secondary-debug-adapter",args:["--root","secondary"],},program:"main.py",},],}),),],]),],["move-source.txt",file("Move across roots.\\n")],["notes.txt",file("Secondary workspace\\n")],["shared.txt",file("F140 shared secondary\\n")],["packages",directory([])],];' ||
 		normalizedText(treesDeclarations[0].parent.parent) !==
 			"consttrees=newMap<string,MockDirectory>([[primaryRootId,directory(primaryEntries)],[secondaryRootId,directory(secondaryEntries)],]);"
 	) {
@@ -18471,7 +18594,7 @@ export function validateWorkspaceBrowserFixtureWindowAuthority(source) {
 	}
 
 	const ALLOWED_TEST_WINDOW_STATEMENTS = new Set([
-		"consttestWindow=windowasunknownasWindow&{__PLAIN_TEST_TAURI_CALLS__:typeofcalls;__PLAIN_TEST_MULTI_ROOT_VERSION_TRANSITIONS__:typeofversionTransitions;__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__:typeofwatchExchanges;__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGE_TIMINGS__:typeofwatchExchangeTimings;__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_TIMINGS__:typeofexternalCreateTimings;__PLAIN_TEST_MULTI_ROOT_EMIT_WAKE__():number;__PLAIN_TEST_MULTI_ROOT_WATCH_LISTENER_COUNT__():number;__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__(rootId:string,name:string,emitWake:boolean,):number;__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_AFTER_NEXT_SYNC__(rootId:string,name:string,emitWake:boolean,):Promise<number>;__TAURI_EVENT_PLUGIN_INTERNALS__:{unregisterListener():void;};__TAURI_INTERNALS__:{invoke(command:string,args?:Record<string,unknown>|Uint8Array,):Promise<unknown>;transformCallback(callback?:(payload:unknown)=>void,once?:boolean,):number;unregisterCallback(callbackId:number):void;};};",
+		"consttestWindow=windowasunknownasWindow&{__PLAIN_TEST_TAURI_CALLS__:typeofcalls;__PLAIN_TEST_MULTI_ROOT_VERSION_TRANSITIONS__:typeofversionTransitions;__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__:typeofwatchExchanges;__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGE_TIMINGS__:typeofwatchExchangeTimings;__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_TIMINGS__:typeofexternalCreateTimings;__PLAIN_TEST_MULTI_ROOT_EMIT_WAKE__():number;__PLAIN_TEST_MULTI_ROOT_WATCH_LISTENER_COUNT__():number;__PLAIN_TEST_DEBUG_SESSION_IDS__():readonlystring[];__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__(rootId:string,name:string,emitWake:boolean,):number;__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_AFTER_NEXT_SYNC__(rootId:string,name:string,emitWake:boolean,):Promise<number>;__TAURI_EVENT_PLUGIN_INTERNALS__:{unregisterListener():void;};__TAURI_INTERNALS__:{invoke(command:string,args?:Record<string,unknown>|Uint8Array,):Promise<unknown>;transformCallback(callback?:(payload:unknown)=>void,once?:boolean,):number;unregisterCallback(callbackId:number):void;};};",
 		"testWindow.__PLAIN_TEST_TAURI_CALLS__=calls;",
 		"testWindow.__PLAIN_TEST_MULTI_ROOT_VERSION_TRANSITIONS__=versionTransitions;",
 		"testWindow.__PLAIN_TEST_WORKSPACE_WATCH_EXCHANGES__=watchExchanges;",
@@ -18479,6 +18602,7 @@ export function validateWorkspaceBrowserFixtureWindowAuthority(source) {
 		"testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_TIMINGS__=externalCreateTimings;",
 		"testWindow.__PLAIN_TEST_MULTI_ROOT_EMIT_WAKE__=emitWorkspaceWatchWake;",
 		'testWindow.__PLAIN_TEST_MULTI_ROOT_WATCH_LISTENER_COUNT__=()=>[...eventHandlers.values()].filter(({event})=>event==="plain://workspace-watch-wake",).length;',
+		"testWindow.__PLAIN_TEST_DEBUG_SESSION_IDS__=()=>[...debugSessionRoots.keys(),];",
 		"testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__=externalCreate;",
 		'testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_AFTER_NEXT_SYNC__=(rootId,name,emitWake,)=>{if(deferredExternalCreate!==undefined){thrownewError("A multi-root browser test change is already queued.",);}if(!/^[A-Za-z0-9._-]+$/u.test(name)){thrownewTypeError("Invalid multi-root browser test entry.");}if(typeofemitWake!=="boolean"){thrownewTypeError("Invalid multi-root browser test wake mode.");}returnnewPromise<number>((resolve,reject)=>{deferredExternalCreate=Object.freeze({rootId,name,emitWake,resolve,reject,});});};',
 		"testWindow.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener(){},};",
@@ -19772,13 +19896,14 @@ function viewPaneSubclassDecoratorFailures(
 // ---------------------------------------------------------------------
 
 /**
- * Shared prefix check for `F100` S1's trust-*then*-confirmation double gate:
- * builds a whitespace-insensitive regex matching the exact three-statement
- * prefix `trust.require_trusted(workspace, window_label).await?;` → `let
- * subject = descriptor.confirmation_subject(AdapterTransportKind::<variant>);`
- * → `confirmation.require_confirmed(workspace, window_label,
- * &subject).await?;`, and reports which of the two gates (or their ordering)
- * is missing. Shared by [`validateDebugAdapterSpawnBoundary`] (`exec.rs`'s
+ * Shared prefix check for Debug's trust → selected-root → confirmation
+ * sequence: builds a whitespace-insensitive regex matching the exact
+ * four-statement prefix `trust.require_trusted(...)` →
+ * `workspace.root_canonical_path(window_label, root_id)?` → `let subject =
+ * descriptor.confirmation_subject(...)` →
+ * `confirmation.require_confirmed(...)`. The selected-root gate was added by
+ * F150 so a stale/foreign root fails before any spawn or connect. Shared by
+ * [`validateDebugAdapterSpawnBoundary`] (`exec.rs`'s
  * `spawn_adapter`, `variant: "Stdio"`) and
  * [`validateDebugAdapterConnectBoundary`] (`tcp.rs`'s `connect_adapter`,
  * `variant: "Tcp"`) rather than duplicated, since both functions share this
@@ -19793,27 +19918,26 @@ function validateTrustThenConfirmationGatePrefix(body, transportVariant) {
 	if (!trustCheckFirst) {
 		return "must call trust.require_trusted(workspace, window_label).await? as its literal first statement, before any spawn/connect-related identifier appears in the function body";
 	}
-	const confirmationCheckSecond = new RegExp(
+	const rootAndConfirmationChecks = new RegExp(
 		`^trust\\s*\\.\\s*require_trusted\\s*\\(\\s*workspace\\s*,\\s*window_label\\s*\\)\\s*\\.\\s*await\\s*\\?\\s*;` +
+			`\\s*let\\s+_?selected_root\\s*=\\s*workspace\\s*\\.\\s*root_canonical_path\\s*\\(\\s*window_label\\s*,\\s*root_id\\s*\\)\\s*\\?\\s*;` +
 			`\\s*let\\s+subject\\s*=\\s*descriptor\\s*\\.\\s*confirmation_subject\\s*\\(\\s*AdapterTransportKind\\s*::\\s*${transportVariant}\\s*\\)\\s*;` +
 			`\\s*confirmation\\s*\\.\\s*require_confirmed\\s*\\(\\s*workspace\\s*,\\s*window_label\\s*,\\s*&subject\\s*\\)\\s*\\.\\s*await\\s*\\?\\s*;`,
 	).test(body);
-	if (!confirmationCheckSecond) {
-		return `must call confirmation.require_confirmed(workspace, window_label, &subject).await? (subject built via descriptor.confirmation_subject(AdapterTransportKind::${transportVariant})) as its literal second statement, immediately after the trust check`;
+	if (!rootAndConfirmationChecks) {
+		return `must validate root_id with workspace.root_canonical_path immediately after trust, then call confirmation.require_confirmed for AdapterTransportKind::${transportVariant}, before spawning or connecting`;
 	}
 	return undefined;
 }
 
 /**
- * Locks `debug/exec.rs`'s `spawn_adapter` function body's first two
- * statements (after argument binding) to be, in order,
- * `trust.require_trusted(workspace, window_label).await?;` then
- * `confirmation.require_confirmed(...)` — the `F100` S1 trust-then-
- * confirmation double gate ADR 0003 requires (workspace trust alone is not
- * enough; a trusted workspace still requires first-run confirmation of the
- * exact `(command, args, transport)` triple before this function may touch
- * `Command`). `F100` S0 originally locked only the trust check; this is the
- * S1 extension, generalized via [`validateTrustThenConfirmationGatePrefix`]
+ * Locks `debug/exec.rs`'s `spawn_adapter` prefix to trust first,
+ * selected-root validation second, and exact adapter confirmation third —
+ * F150's extension of ADR 0003's original double gate. Workspace trust alone
+ * is not enough; neither is a valid root without first-run confirmation of
+ * the exact `(command, args, transport)` triple before this function may
+ * touch `Command`. Generalized via
+ * [`validateTrustThenConfirmationGatePrefix`]
  * so [`validateDebugAdapterConnectBoundary`] can lock the identical shape for
  * `tcp.rs`'s `connect_adapter`. Isolates the function body first via
  * `rustFunctionBody` (comments-only source, so string literal content —
@@ -19846,7 +19970,7 @@ export function validateDebugAdapterSpawnBoundary(rustSources) {
 /**
  * The connect-side sibling of [`validateDebugAdapterSpawnBoundary`]: locks
  * `debug/tcp.rs`'s `connect_adapter` function body to the identical
- * trust-then-confirmation double-gate prefix (`AdapterTransportKind::Tcp`
+ * trust/root/confirmation prefix (`AdapterTransportKind::Tcp`
  * rather than `::Stdio`) — "对任意 host:port 说 DAP" 和 "spawn 任意程序" 是同
  * 等级的信任委托 (`docs/research/2026-07-28-generic-dap.md`'s "主导会话裁定"
  * item 3), so this function must be gated exactly as strictly as
@@ -19878,7 +20002,7 @@ export function validateDebugAdapterConnectBoundary(rustSources) {
  * [`validateDebugAdapterConnectBoundary`]: locks `debug/exec.rs`'s
  * `spawn_adapter_as_tcp_companion` (the `Tcp`-confirmed companion-spawn
  * primitive `debug::mod`'s own module doc names as S2's open recommendation,
- * now built) to the identical trust-then-confirmation double-gate prefix —
+ * now built) to the identical trust/root/confirmation prefix —
  * except keyed on `AdapterTransportKind::Tcp`, never `::Stdio`. This is the
  * mechanical lock proving the one line that actually matters (which
  * transport variant the confirmation subject is built with) can never
@@ -19961,6 +20085,11 @@ export function validateDebugSpawnConstructionShape(rustSources) {
 	if (!/\.args\s*\(\s*&descriptor\.args\s*\)/.test(body)) {
 		failures.push(
 			"debug/exec.rs spawn_adapter_sync must pass argv via .args(&descriptor.args), never a literal or formatted argument list",
+		);
+	}
+	if (!/\.current_dir\s*\(\s*cwd\s*\)/.test(body)) {
+		failures.push(
+			"debug/exec.rs spawn_adapter_sync must set current_dir(cwd) to the selected authorized root",
 		);
 	}
 	return failures;
@@ -20088,9 +20217,9 @@ const DEBUG_COMMAND_CONTRACTS = Object.freeze([
 		file: "src-tauri/src/debug/commands.rs",
 		name: "debug_set_breakpoints",
 		parameters:
-			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugSetBreakpointsRequest",
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,workspace:State<'_,WorkspaceService>,request:DebugSetBreakpointsRequest",
 		returnType: "->Result<DebugSetBreakpointsResult,CommandError>",
-		body: "letquery=request.into_parts()?;letbody=debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments,).await?;dto::parse_set_breakpoints_response(&body)",
+		body: "letquery=request.into_parts()?;workspace.inner().root_canonical_path(window.label(),query.root_id)?;letbody=debug_sessions.inner().send_request_for_root(window.label(),query.session_id,query.root_id,,query.arguments,).await?;dto::parse_set_breakpoints_response(&body)",
 	},
 	{
 		file: "src-tauri/src/debug/commands.rs",

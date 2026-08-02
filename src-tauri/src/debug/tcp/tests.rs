@@ -33,6 +33,7 @@ use crate::trust::service::TrustService;
 use crate::workspace::dto::WorkspacePickRootsMode;
 use crate::workspace::picker::{DirectoryPicker, DirectoryPickerFuture, DirectoryPickerResult};
 use crate::workspace::service::WorkspaceService;
+use crate::workspace::RootId;
 
 use super::{connect_adapter, connect_adapter_sync};
 
@@ -58,11 +59,26 @@ impl DirectoryPicker for FakePicker {
 }
 
 fn workspace_with_root(window_label: &str, root_path: &std::path::Path) -> WorkspaceService {
+    workspace_with_roots(window_label, vec![root_path.to_path_buf()])
+}
+
+fn workspace_with_roots(
+    window_label: &str,
+    root_paths: Vec<std::path::PathBuf>,
+) -> WorkspaceService {
     let workspace = WorkspaceService::new();
-    let picker = FakePicker::selected(vec![root_path.to_path_buf()]);
+    let picker = FakePicker::selected(root_paths);
     block_on(workspace.pick_roots(window_label, picker, WorkspacePickRootsMode::Add))
         .expect("root authorizes");
     workspace
+}
+
+fn root_id_at(workspace: &WorkspaceService, window_label: &str, index: usize) -> RootId {
+    workspace.snapshot(window_label).unwrap().roots()[index].root_id()
+}
+
+fn arbitrary_root_id() -> RootId {
+    RootId::parse_v4_wire("0d3f4b0e-6f1a-4c9d-9c3a-1a2b3c4d5e6f").unwrap()
 }
 
 fn unconfirmed_confirmation_service() -> (TempDir, ConfirmationService) {
@@ -129,6 +145,7 @@ fn connect_adapter_never_connects_when_the_workspace_is_untrusted() {
         &trust,
         &workspace,
         "main",
+        root_id_at(&workspace, "main", 0),
         &confirmation,
         &command_descriptor(),
         &tcp_descriptor(&listener),
@@ -154,12 +171,59 @@ fn connect_adapter_rejects_the_empty_workspace_without_connecting() {
         &trust,
         &workspace,
         "main",
+        arbitrary_root_id(),
         &confirmation,
         &command_descriptor(),
         &tcp_descriptor(&listener),
         cancel,
     ));
     assert_eq!(result.unwrap_err().code(), "WORKSPACE_NOT_TRUSTED");
+    assert!(!observed_a_connection_within(
+        &listener,
+        NEVER_CONNECTS_POLL_WINDOW
+    ));
+}
+
+#[test]
+fn connect_adapter_rejects_a_removed_root_before_opening_a_socket() {
+    let retained_root = TempDir::new().unwrap();
+    let removed_root = TempDir::new().unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let workspace = workspace_with_roots(
+        "main",
+        vec![
+            retained_root.path().to_path_buf(),
+            removed_root.path().to_path_buf(),
+        ],
+    );
+    let removed_root_id = root_id_at(&workspace, "main", 1);
+    let trust = TrustService::new(trust_base.path().to_path_buf());
+    block_on(trust.grant(&workspace, "main")).expect("grant succeeds");
+    let (_confirm_base, confirmation) = unconfirmed_confirmation_service();
+    let descriptor = command_descriptor();
+    block_on(confirmation.grant(
+        &workspace,
+        "main",
+        &descriptor.confirmation_subject(AdapterTransportKind::Tcp),
+    ))
+    .expect("confirmation grant succeeds");
+    workspace
+        .remove_root("main", removed_root_id)
+        .expect("root removal succeeds");
+    block_on(trust.grant(&workspace, "main")).expect("remaining topology trust succeeds");
+    let listener = bind_loopback_listener();
+
+    let result = block_on(connect_adapter(
+        &trust,
+        &workspace,
+        "main",
+        removed_root_id,
+        &confirmation,
+        &descriptor,
+        &tcp_descriptor(&listener),
+        Arc::new(AtomicBool::new(false)),
+    ));
+    assert_eq!(result.unwrap_err().code(), "ROOT_NOT_AUTHORIZED");
     assert!(!observed_a_connection_within(
         &listener,
         NEVER_CONNECTS_POLL_WINDOW
@@ -186,6 +250,7 @@ fn connect_adapter_never_connects_when_trusted_but_not_confirmed() {
         &trust,
         &workspace,
         "main",
+        root_id_at(&workspace, "main", 0),
         &confirmation,
         &command_descriptor(),
         &tcp_descriptor(&listener),
@@ -225,6 +290,7 @@ fn connect_adapter_positive_control_connects_once_trusted_and_confirmed() {
         &trust,
         &workspace,
         "main",
+        root_id_at(&workspace, "main", 0),
         &confirmation,
         &descriptor,
         &tcp_descriptor(&listener),
@@ -269,6 +335,7 @@ fn connect_adapter_rejects_a_subject_confirmed_only_for_stdio_transport() {
         &trust,
         &workspace,
         "main",
+        root_id_at(&workspace, "main", 0),
         &confirmation,
         &descriptor,
         &tcp_descriptor(&listener),

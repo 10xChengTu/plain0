@@ -78,6 +78,7 @@
 //! block happens in `app/features/debug/plain-debug-adapter-config.ts`, not
 //! here — this file has no config-reading surface at all.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -87,6 +88,7 @@ use crate::error::CommandError;
 use crate::terminal::service::{TerminalOutputSink, TerminalService};
 use crate::trust::service::TrustService;
 use crate::workspace::service::WorkspaceService;
+use crate::workspace::RootId;
 
 use super::confirm::ConfirmationService;
 use super::debug_run_in_terminal_arguments_invalid;
@@ -282,6 +284,7 @@ async fn start_debug_session(
         Arc::new(RunInTerminalReverseRequestHandler {
             app: window.app_handle().clone(),
             window_label: window.label().to_owned(),
+            root_id: query.root_id,
         });
     let (session_id, capabilities) = debug_sessions
         .inner()
@@ -289,6 +292,7 @@ async fn start_debug_session(
             trust.inner(),
             workspace.inner(),
             window.label(),
+            query.root_id,
             confirmation.inner(),
             query.request,
             query.transport,
@@ -322,14 +326,19 @@ pub(crate) async fn debug_disconnect(
 pub(crate) async fn debug_set_breakpoints(
     window: WebviewWindow,
     debug_sessions: State<'_, DebugSessionService>,
+    workspace: State<'_, WorkspaceService>,
     request: DebugSetBreakpointsRequest,
 ) -> Result<DebugSetBreakpointsResult, CommandError> {
     let query = request.into_parts()?;
+    workspace
+        .inner()
+        .root_canonical_path(window.label(), query.root_id)?;
     let body = debug_sessions
         .inner()
-        .send_request(
+        .send_request_for_root(
             window.label(),
             query.session_id,
+            query.root_id,
             "setBreakpoints",
             query.arguments,
         )
@@ -572,6 +581,7 @@ pub(crate) fn handle_run_in_terminal_reverse_request(
     trust: &TrustService,
     workspace: &WorkspaceService,
     window_label: &str,
+    root_id: RootId,
     arguments: Option<&Value>,
     sink: Arc<dyn TerminalOutputSink>,
 ) -> ReverseRequestOutcome {
@@ -591,11 +601,35 @@ pub(crate) fn handle_run_in_terminal_reverse_request(
         }
         command_line
     });
+    let selected_root = match workspace.root_canonical_path(window_label, root_id) {
+        Ok(root) => root,
+        Err(error) => {
+            return ReverseRequestOutcome {
+                success: false,
+                body: None,
+                message: Some(error.message().to_owned()),
+                notify: None,
+            };
+        }
+    };
+    let resolved_cwd = match parsed.cwd.as_deref() {
+        None | Some("") => selected_root,
+        Some(cwd) if Path::new(cwd).is_absolute() => Path::new(cwd).to_path_buf(),
+        Some(cwd) => selected_root.join(cwd),
+    };
+    let Ok(resolved_cwd) = resolved_cwd.into_os_string().into_string() else {
+        return ReverseRequestOutcome {
+            success: false,
+            body: None,
+            message: Some(debug_run_in_terminal_arguments_invalid().to_owned()),
+            notify: None,
+        };
+    };
     let result = tauri::async_runtime::block_on(terminal.start_program(
         trust,
         workspace,
         window_label,
-        parsed.cwd,
+        resolved_cwd,
         parsed.program,
         parsed.args,
         parsed.env,
@@ -646,6 +680,7 @@ pub(crate) fn handle_run_in_terminal_reverse_request(
 struct RunInTerminalReverseRequestHandler {
     app: AppHandle,
     window_label: String,
+    root_id: RootId,
 }
 
 impl ReverseRequestHandler for RunInTerminalReverseRequestHandler {
@@ -671,6 +706,7 @@ impl ReverseRequestHandler for RunInTerminalReverseRequestHandler {
             trust.inner(),
             workspace.inner(),
             &self.window_label,
+            self.root_id,
             arguments,
             sink,
         ))

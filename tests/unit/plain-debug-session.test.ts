@@ -17,12 +17,15 @@ const STDIO_TARGET = Object.freeze({
 	command: "/usr/bin/python3",
 	args: Object.freeze(["-m", "debugpy.adapter"]),
 });
+const ROOT_ID = "11111111-1111-4111-8111-111111111111";
+const OTHER_ROOT_ID = "22222222-2222-4222-8222-222222222222";
 
 interface FakeBridgeHandle {
 	readonly bridge: DebugSessionBridge;
 	emit(event: DebugEventPayload): void;
 	readonly setBreakpointsCalls: Array<{
 		sessionId: string;
+		rootId: string;
 		path: string;
 		breakpoints: readonly { line: number }[];
 	}>;
@@ -50,10 +53,11 @@ function fakeBridge(
 		debugSetBreakpoints: vi.fn(
 			async (
 				sessionId: string,
+				rootId: string,
 				path: string,
 				breakpoints: readonly { line: number }[],
 			) => {
-				setBreakpointsCalls.push({ sessionId, path, breakpoints });
+				setBreakpointsCalls.push({ sessionId, rootId, path, breakpoints });
 				const result: DebugSetBreakpointsResult = {
 					breakpoints: breakpoints.map((entry) => ({
 						verified: true,
@@ -108,19 +112,29 @@ describe("DebugSessionController", () => {
 		const store = new DebugBreakpointStore();
 		const controller = new DebugSessionController(bridge, store);
 
-		const state = await controller.start("launch", STDIO_TARGET, "debugpy", {
-			program: "main.py",
-		});
+		const state = await controller.start(
+			ROOT_ID,
+			"launch",
+			STDIO_TARGET,
+			"debugpy",
+			{
+				program: "main.py",
+			},
+		);
 
 		expect(state.sessionId).toBe("session-1");
+		expect(state.rootId).toBe(ROOT_ID);
 		expect(state.stoppedThreadId).toBeNull();
 		expect(controller.state).toEqual(state);
-		expect(bridge.debugLaunch).toHaveBeenCalledWith(STDIO_TARGET, "debugpy", {
-			program: "main.py",
-		});
+		expect(bridge.debugLaunch).toHaveBeenCalledWith(
+			ROOT_ID,
+			STDIO_TARGET,
+			"debugpy",
+			{ program: "main.py" },
+		);
 		expect(bridge.debugWatchEvent).toHaveBeenCalledTimes(1);
 
-		await controller.start("launch", STDIO_TARGET, "debugpy", {});
+		await controller.start(ROOT_ID, "launch", STDIO_TARGET, "debugpy", {});
 		expect(bridge.debugWatchEvent).toHaveBeenCalledTimes(1);
 	});
 
@@ -130,7 +144,7 @@ describe("DebugSessionController", () => {
 			bridge,
 			new DebugBreakpointStore(),
 		);
-		await controller.start("attach", STDIO_TARGET, "debugpy", {});
+		await controller.start(ROOT_ID, "attach", STDIO_TARGET, "debugpy", {});
 		expect(bridge.debugAttach).toHaveBeenCalledTimes(1);
 		expect(bridge.debugLaunch).not.toHaveBeenCalled();
 	});
@@ -160,7 +174,7 @@ describe("DebugSessionController", () => {
 		const events: DebugEventPayload[] = [];
 		controller.onEvent((event) => events.push(event));
 
-		await controller.start("launch", STDIO_TARGET, "debugpy", {});
+		await controller.start(ROOT_ID, "launch", STDIO_TARGET, "debugpy", {});
 
 		expect(events).toEqual([
 			{
@@ -177,7 +191,7 @@ describe("DebugSessionController", () => {
 			bridge,
 			new DebugBreakpointStore(),
 		);
-		await controller.start("launch", STDIO_TARGET, "debugpy", {});
+		await controller.start(ROOT_ID, "launch", STDIO_TARGET, "debugpy", {});
 		const states: (DebugSessionState | null)[] = [];
 		controller.onDidChangeState((state) => {
 			states.push(state);
@@ -199,7 +213,7 @@ describe("DebugSessionController", () => {
 			bridge,
 			new DebugBreakpointStore(),
 		);
-		await controller.start("launch", STDIO_TARGET, "debugpy", {});
+		await controller.start(ROOT_ID, "launch", STDIO_TARGET, "debugpy", {});
 		emit({ sessionId: "session-1", event: "stopped", body: { threadId: 1 } });
 		expect(controller.state?.stoppedThreadId).toBe(1);
 
@@ -213,7 +227,7 @@ describe("DebugSessionController", () => {
 			bridge,
 			new DebugBreakpointStore(),
 		);
-		await controller.start("launch", STDIO_TARGET, "debugpy", {});
+		await controller.start(ROOT_ID, "launch", STDIO_TARGET, "debugpy", {});
 		emit({ sessionId: "session-1", event: "stopped", body: { threadId: 7 } });
 		expect(controller.state?.lastKnownThreadId).toBe(7);
 
@@ -228,7 +242,7 @@ describe("DebugSessionController", () => {
 			bridge,
 			new DebugBreakpointStore(),
 		);
-		await controller.start("launch", STDIO_TARGET, "debugpy", {});
+		await controller.start(ROOT_ID, "launch", STDIO_TARGET, "debugpy", {});
 		expect(controller.state?.lastKnownThreadId).toBeNull();
 
 		emit({
@@ -246,7 +260,7 @@ describe("DebugSessionController", () => {
 			bridge,
 			new DebugBreakpointStore(),
 		);
-		await controller.start("launch", STDIO_TARGET, "debugpy", {});
+		await controller.start(ROOT_ID, "launch", STDIO_TARGET, "debugpy", {});
 
 		emit({
 			sessionId: "some-other-session",
@@ -260,10 +274,10 @@ describe("DebugSessionController", () => {
 	it("plain/sessionEnded clears state and clears every path's recorded verification", async () => {
 		const { bridge, emit } = fakeBridge();
 		const store = new DebugBreakpointStore();
-		store.toggle("a.py", 5);
+		store.toggle(ROOT_ID, "a.py", 5);
 		const controller = new DebugSessionController(bridge, store);
-		await controller.start("launch", STDIO_TARGET, "debugpy", {});
-		expect(store.viewsForPath("a.py")[0]?.verification).not.toBeNull();
+		await controller.start(ROOT_ID, "launch", STDIO_TARGET, "debugpy", {});
+		expect(store.viewsForPath(ROOT_ID, "a.py")[0]?.verification).not.toBeNull();
 
 		emit({
 			sessionId: "session-1",
@@ -272,16 +286,16 @@ describe("DebugSessionController", () => {
 		});
 
 		expect(controller.state).toBeNull();
-		expect(store.viewsForPath("a.py")[0]?.verification).toBeNull();
+		expect(store.viewsForPath(ROOT_ID, "a.py")[0]?.verification).toBeNull();
 	});
 
 	it("a terminated event disconnects the adapter and clears the completed session", async () => {
 		const { bridge, emit } = fakeBridge();
 		const store = new DebugBreakpointStore();
-		store.toggle("a.py", 5);
+		store.toggle(ROOT_ID, "a.py", 5);
 		const controller = new DebugSessionController(bridge, store);
-		await controller.start("launch", STDIO_TARGET, "debugpy", {});
-		expect(store.viewsForPath("a.py")[0]?.verification).not.toBeNull();
+		await controller.start(ROOT_ID, "launch", STDIO_TARGET, "debugpy", {});
+		expect(store.viewsForPath(ROOT_ID, "a.py")[0]?.verification).not.toBeNull();
 
 		emit({ sessionId: "session-1", event: "exited", body: { exitCode: 0 } });
 		expect(controller.state).not.toBeNull();
@@ -290,47 +304,60 @@ describe("DebugSessionController", () => {
 		emit({ sessionId: "session-1", event: "terminated", body: null });
 
 		expect(controller.state).toBeNull();
-		expect(store.viewsForPath("a.py")[0]?.verification).toBeNull();
+		expect(store.viewsForPath(ROOT_ID, "a.py")[0]?.verification).toBeNull();
 		expect(bridge.debugDisconnect).toHaveBeenCalledExactlyOnceWith("session-1");
 	});
 
 	it("start() pushes every path's currently-placed breakpoints and records verification", async () => {
 		const { bridge, setBreakpointsCalls } = fakeBridge();
 		const store = new DebugBreakpointStore();
-		store.toggle("a.py", 5);
-		store.toggle("a.py", 10);
-		store.toggle("b.py", 1);
+		store.toggle(ROOT_ID, "a.py", 5);
+		store.toggle(ROOT_ID, "a.py", 10);
+		store.toggle(ROOT_ID, "b.py", 1);
+		store.toggle(OTHER_ROOT_ID, "a.py", 99);
 		const controller = new DebugSessionController(bridge, store);
 
-		await controller.start("launch", STDIO_TARGET, "debugpy", {});
+		await controller.start(ROOT_ID, "launch", STDIO_TARGET, "debugpy", {});
 
 		expect(setBreakpointsCalls).toHaveLength(2);
+		expect(setBreakpointsCalls.every((call) => call.rootId === ROOT_ID)).toBe(
+			true,
+		);
 		const byPath = new Map(
 			setBreakpointsCalls.map((call) => [call.path, call.breakpoints]),
 		);
 		expect(byPath.get("a.py")?.map((entry) => entry.line)).toEqual([5, 10]);
 		expect(byPath.get("b.py")?.map((entry) => entry.line)).toEqual([1]);
-		expect(store.viewsForPath("a.py")[0]?.verification).toEqual({
+		expect(store.viewsForPath(ROOT_ID, "a.py")[0]?.verification).toEqual({
 			verified: true,
 			actualLine: 5,
 			message: null,
 		});
+		expect(
+			store.viewsForPath(OTHER_ROOT_ID, "a.py")[0]?.verification,
+		).toBeNull();
 	});
 
 	it("editing the breakpoint store while a session is live re-syncs only the changed path", async () => {
 		const { bridge, setBreakpointsCalls } = fakeBridge();
 		const store = new DebugBreakpointStore();
-		store.toggle("a.py", 5);
+		store.toggle(ROOT_ID, "a.py", 5);
 		const controller = new DebugSessionController(bridge, store);
-		await controller.start("launch", STDIO_TARGET, "debugpy", {});
+		await controller.start(ROOT_ID, "launch", STDIO_TARGET, "debugpy", {});
 		expect(setBreakpointsCalls).toHaveLength(1);
 
-		store.toggle("a.py", 8);
+		store.toggle(OTHER_ROOT_ID, "a.py", 99);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(setBreakpointsCalls).toHaveLength(1);
+
+		store.toggle(ROOT_ID, "a.py", 8);
 		await Promise.resolve();
 		await Promise.resolve();
 
 		expect(setBreakpointsCalls).toHaveLength(2);
 		expect(setBreakpointsCalls[1]?.path).toBe("a.py");
+		expect(setBreakpointsCalls[1]?.rootId).toBe(ROOT_ID);
 		expect(
 			setBreakpointsCalls[1]?.breakpoints.map((entry) => entry.line),
 		).toEqual([5, 8]);
@@ -342,7 +369,7 @@ describe("DebugSessionController", () => {
 		const controller = new DebugSessionController(bridge, store);
 		void controller;
 
-		store.toggle("a.py", 5);
+		store.toggle(ROOT_ID, "a.py", 5);
 
 		expect(setBreakpointsCalls).toHaveLength(0);
 	});
@@ -374,7 +401,7 @@ describe("DebugSessionController", () => {
 			bridge,
 			new DebugBreakpointStore(),
 		);
-		await controller.start("launch", STDIO_TARGET, "debugpy", {});
+		await controller.start(ROOT_ID, "launch", STDIO_TARGET, "debugpy", {});
 
 		await controller.stackTrace(2, 0, 20);
 		expect(bridge.debugStackTrace).toHaveBeenCalledWith("session-1", 2, 0, 20);
@@ -425,7 +452,7 @@ describe("DebugSessionController", () => {
 			bridge,
 			new DebugBreakpointStore(),
 		);
-		await controller.start("launch", STDIO_TARGET, "debugpy", {});
+		await controller.start(ROOT_ID, "launch", STDIO_TARGET, "debugpy", {});
 
 		const continueResult = await controller.continue_(1);
 		expect(bridge.debugContinue).toHaveBeenCalledWith("session-1", 1);
@@ -453,7 +480,7 @@ describe("DebugSessionController", () => {
 		await controller.disconnect();
 		expect(bridge.debugDisconnect).not.toHaveBeenCalled();
 
-		await controller.start("launch", STDIO_TARGET, "debugpy", {});
+		await controller.start(ROOT_ID, "launch", STDIO_TARGET, "debugpy", {});
 		await controller.disconnect();
 		expect(controller.state).toBeNull();
 		expect(bridge.debugDisconnect).toHaveBeenCalledWith("session-1");
@@ -465,7 +492,7 @@ describe("DebugSessionController", () => {
 			bridge,
 			new DebugBreakpointStore(),
 		);
-		await controller.start("launch", STDIO_TARGET, "debugpy", {});
+		await controller.start(ROOT_ID, "launch", STDIO_TARGET, "debugpy", {});
 		const stateChanges: unknown[] = [];
 		controller.onDidChangeState((state) => stateChanges.push(state));
 

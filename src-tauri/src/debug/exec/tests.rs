@@ -40,6 +40,7 @@ use crate::trust::service::TrustService;
 use crate::workspace::dto::WorkspacePickRootsMode;
 use crate::workspace::picker::{DirectoryPicker, DirectoryPickerFuture, DirectoryPickerResult};
 use crate::workspace::service::WorkspaceService;
+use crate::workspace::RootId;
 
 use super::{
     apply_env_passthrough, spawn_adapter, spawn_adapter_as_tcp_companion, spawn_adapter_sync,
@@ -68,11 +69,23 @@ impl DirectoryPicker for FakePicker {
 }
 
 fn workspace_with_root(window_label: &str, root_path: &Path) -> WorkspaceService {
+    workspace_with_roots(window_label, vec![root_path.to_path_buf()])
+}
+
+fn workspace_with_roots(window_label: &str, root_paths: Vec<PathBuf>) -> WorkspaceService {
     let workspace = WorkspaceService::new();
-    let picker = FakePicker::selected(vec![root_path.to_path_buf()]);
+    let picker = FakePicker::selected(root_paths);
     block_on(workspace.pick_roots(window_label, picker, WorkspacePickRootsMode::Add))
         .expect("root authorizes");
     workspace
+}
+
+fn root_id_at(workspace: &WorkspaceService, window_label: &str, index: usize) -> RootId {
+    workspace.snapshot(window_label).unwrap().roots()[index].root_id()
+}
+
+fn arbitrary_root_id() -> RootId {
+    RootId::parse_v4_wire("0d3f4b0e-6f1a-4c9d-9c3a-1a2b3c4d5e6f").unwrap()
 }
 
 /// Guards every test below that mutates process-wide environment variables —
@@ -223,7 +236,7 @@ fn the_real_spawned_childs_environment_matches_the_allowlist_empirically() {
                 ],
             };
             let cancel = AtomicBool::new(false);
-            let error = spawn_adapter_sync(&descriptor, &cancel)
+            let error = spawn_adapter_sync(&descriptor, Path::new("/"), &cancel)
                 .expect_err("a trivial printf-then-exit script is reported as a startup crash");
             assert_eq!(error.code(), "DEBUG_ADAPTER_STARTUP_CRASHED");
             let message = error.message();
@@ -262,7 +275,7 @@ fn a_healthy_process_survives_the_startup_grace_window_and_can_be_killed() {
         args: vec!["2".to_owned()],
     };
     let cancel = AtomicBool::new(false);
-    let handle = spawn_adapter_sync(&descriptor, &cancel).expect(
+    let handle = spawn_adapter_sync(&descriptor, Path::new("/"), &cancel).expect(
         "a process that outlives the grace window must be handed back, not reported as crashed",
     );
     handle.kill();
@@ -278,7 +291,7 @@ fn a_process_that_exits_immediately_is_reported_as_a_startup_crash_with_captured
         ],
     };
     let cancel = AtomicBool::new(false);
-    let error = spawn_adapter_sync(&descriptor, &cancel)
+    let error = spawn_adapter_sync(&descriptor, Path::new("/"), &cancel)
         .expect_err("an immediately-exiting process must be reported as a startup crash");
     assert_eq!(error.code(), "DEBUG_ADAPTER_STARTUP_CRASHED");
     assert!(error.message().contains("boom-from-adapter"));
@@ -295,7 +308,7 @@ fn cancelling_during_the_grace_window_kills_the_child_and_returns_cancelled() {
     // must already observe it, aborting well before the 5-second sleep could
     // ever finish on its own.
     let cancel = AtomicBool::new(true);
-    let error = spawn_adapter_sync(&descriptor, &cancel)
+    let error = spawn_adapter_sync(&descriptor, Path::new("/"), &cancel)
         .expect_err("a pre-set cancel flag must abort the grace-window wait");
     assert_eq!(error.code(), "DEBUG_ADAPTER_CANCELLED");
 }
@@ -307,8 +320,8 @@ fn a_nonexistent_command_path_fails_with_spawn_unavailable() {
         args: Vec::new(),
     };
     let cancel = AtomicBool::new(false);
-    let error =
-        spawn_adapter_sync(&descriptor, &cancel).expect_err("a missing executable cannot spawn");
+    let error = spawn_adapter_sync(&descriptor, Path::new("/"), &cancel)
+        .expect_err("a missing executable cannot spawn");
     assert_eq!(error.code(), "DEBUG_ADAPTER_SPAWN_UNAVAILABLE");
 }
 
@@ -345,7 +358,7 @@ fn argv_elements_containing_shell_metacharacters_are_never_shell_interpreted() {
         ],
     };
     let cancel = AtomicBool::new(false);
-    let error = spawn_adapter_sync(&descriptor, &cancel)
+    let error = spawn_adapter_sync(&descriptor, Path::new("/"), &cancel)
         .expect_err("a trivial for-loop-then-exit script is reported as a startup crash");
     assert_eq!(error.code(), "DEBUG_ADAPTER_STARTUP_CRASHED");
     assert!(
@@ -393,6 +406,7 @@ fn spawn_adapter_never_spawns_a_child_process_when_the_workspace_is_untrusted() 
         &trust,
         &workspace,
         "main",
+        root_id_at(&workspace, "main", 0),
         &confirmation,
         &descriptor,
         cancel,
@@ -421,6 +435,7 @@ fn spawn_adapter_rejects_the_empty_workspace_without_spawning() {
         &trust,
         &workspace,
         "main",
+        arbitrary_root_id(),
         &confirmation,
         &descriptor,
         cancel,
@@ -457,6 +472,7 @@ fn spawn_adapter_never_spawns_when_trusted_but_not_confirmed() {
         &trust,
         &workspace,
         "main",
+        root_id_at(&workspace, "main", 0),
         &confirmation,
         &descriptor,
         cancel,
@@ -500,6 +516,7 @@ fn spawn_adapter_positive_control_the_same_descriptor_does_spawn_once_trusted_an
         &trust,
         &workspace,
         "main",
+        root_id_at(&workspace, "main", 0),
         &confirmation,
         &descriptor,
         cancel,
@@ -511,6 +528,109 @@ fn spawn_adapter_positive_control_the_same_descriptor_does_spawn_once_trusted_an
     assert!(
         canary.exists(),
         "with real trust granted and the matching subject confirmed, the identical descriptor's fixture command must actually run"
+    );
+}
+
+#[test]
+fn spawn_adapter_runs_with_the_selected_second_root_as_its_real_cwd() {
+    let first_root = TempDir::new().unwrap();
+    let second_root = TempDir::new().unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let canary_dir = TempDir::new().unwrap();
+    let canary = canary_dir.path().join("observed-cwd");
+
+    let workspace = workspace_with_roots(
+        "main",
+        vec![
+            first_root.path().to_path_buf(),
+            second_root.path().to_path_buf(),
+        ],
+    );
+    let second_root_id = root_id_at(&workspace, "main", 1);
+    let trust = TrustService::new(trust_base.path().to_path_buf());
+    block_on(trust.grant(&workspace, "main")).expect("grant succeeds");
+    let (_confirm_base, confirmation) = unconfirmed_confirmation_service();
+    let descriptor = AdapterSpawnDescriptor {
+        command: "/bin/sh".to_owned(),
+        args: vec![
+            "-c".to_owned(),
+            format!("pwd > '{}'; sleep 2", canary.display()),
+        ],
+    };
+    block_on(confirmation.grant(
+        &workspace,
+        "main",
+        &descriptor.confirmation_subject(AdapterTransportKind::Stdio),
+    ))
+    .expect("confirmation grant succeeds");
+
+    let handle = block_on(spawn_adapter(
+        &trust,
+        &workspace,
+        "main",
+        second_root_id,
+        &confirmation,
+        &descriptor,
+        Arc::new(AtomicBool::new(false)),
+    ))
+    .expect("a long-lived adapter starts");
+    handle.kill();
+
+    let observed = std::fs::read_to_string(&canary).expect("adapter records its cwd");
+    assert_eq!(
+        observed.trim(),
+        second_root.path().canonicalize().unwrap().to_string_lossy()
+    );
+}
+
+#[test]
+fn spawn_adapter_rejects_a_removed_root_before_spawning_the_child() {
+    let retained_root = TempDir::new().unwrap();
+    let removed_root = TempDir::new().unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let canary_dir = TempDir::new().unwrap();
+    let canary = canary_dir.path().join("should-not-exist");
+
+    let workspace = workspace_with_roots(
+        "main",
+        vec![
+            retained_root.path().to_path_buf(),
+            removed_root.path().to_path_buf(),
+        ],
+    );
+    let root_id = root_id_at(&workspace, "main", 1);
+    let trust = TrustService::new(trust_base.path().to_path_buf());
+    block_on(trust.grant(&workspace, "main")).expect("grant succeeds");
+    let (_confirm_base, confirmation) = unconfirmed_confirmation_service();
+    let descriptor = AdapterSpawnDescriptor {
+        command: "/bin/sh".to_owned(),
+        args: vec!["-c".to_owned(), format!(": > '{}'", canary.display())],
+    };
+    block_on(confirmation.grant(
+        &workspace,
+        "main",
+        &descriptor.confirmation_subject(AdapterTransportKind::Stdio),
+    ))
+    .expect("confirmation grant succeeds");
+    workspace
+        .remove_root("main", root_id)
+        .expect("root removal succeeds");
+    block_on(trust.grant(&workspace, "main")).expect("remaining topology trust succeeds");
+
+    let error = block_on(spawn_adapter(
+        &trust,
+        &workspace,
+        "main",
+        root_id,
+        &confirmation,
+        &descriptor,
+        Arc::new(AtomicBool::new(false)),
+    ))
+    .expect_err("a removed root must fail closed");
+    assert_eq!(error.code(), "ROOT_NOT_AUTHORIZED");
+    assert!(
+        !canary.exists(),
+        "a stale root must fail before process spawn"
     );
 }
 
@@ -550,6 +670,7 @@ fn spawn_adapter_rejects_a_descriptor_whose_args_differ_from_what_was_confirmed(
         &trust,
         &workspace,
         "main",
+        root_id_at(&workspace, "main", 0),
         &confirmation,
         &edited_descriptor,
         cancel,
@@ -599,6 +720,7 @@ fn spawn_adapter_as_tcp_companion_rejects_a_subject_confirmed_only_for_stdio_tra
         &trust,
         &workspace,
         "main",
+        root_id_at(&workspace, "main", 0),
         &confirmation,
         &descriptor,
         cancel,
@@ -645,6 +767,7 @@ fn spawn_adapter_rejects_a_subject_confirmed_only_for_tcp_transport() {
         &trust,
         &workspace,
         "main",
+        root_id_at(&workspace, "main", 0),
         &confirmation,
         &descriptor,
         cancel,
@@ -690,6 +813,7 @@ fn spawn_adapter_as_tcp_companion_positive_control_spawns_once_trusted_and_tcp_c
         &trust,
         &workspace,
         "main",
+        root_id_at(&workspace, "main", 0),
         &confirmation,
         &descriptor,
         cancel,

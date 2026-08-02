@@ -270,6 +270,13 @@ function frozenSessionId(value: unknown): string {
 	return value;
 }
 
+function frozenRootId(value: unknown): string {
+	if (!isUuidV4(value)) {
+		return debugSessionRequestInvalid();
+	}
+	return value;
+}
+
 /**
  * Encodes `debug_launch`/`debug_attach`'s shared request shape from a
  * type-safe `DebugAdapterTarget` — see that type's own doc comment for why an
@@ -281,6 +288,7 @@ function frozenSessionId(value: unknown): string {
  * starts, so this encoder never needs to duplicate that serialization here.
  */
 export function frozenDebugSessionStartRequest(
+	rootId: unknown,
 	target: DebugAdapterTarget,
 	adapterId: string,
 	launchArguments: Readonly<Record<string, unknown>>,
@@ -324,6 +332,7 @@ export function frozenDebugSessionStartRequest(
 		return debugSessionRequestInvalid();
 	}
 	const base = {
+		rootId: frozenRootId(rootId),
 		transport: target.transport,
 		command: target.command,
 		args: Object.freeze(frozenArgs),
@@ -429,6 +438,7 @@ function frozenDebugBreakpointRequest(
  * own doc comment). */
 export function frozenDebugSetBreakpointsRequest(
 	sessionId: unknown,
+	rootId: unknown,
 	path: string,
 	breakpoints: readonly DebugBreakpointRequest[],
 ): Readonly<Record<string, unknown>> {
@@ -443,6 +453,7 @@ export function frozenDebugSetBreakpointsRequest(
 	}
 	return Object.freeze({
 		sessionId: frozenSessionId(sessionId),
+		rootId: frozenRootId(rootId),
 		path,
 		breakpoints: Object.freeze(
 			breakpoints.map((entry) => frozenDebugBreakpointRequest(entry)),

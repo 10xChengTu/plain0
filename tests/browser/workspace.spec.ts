@@ -1682,6 +1682,13 @@ async function installNativeIpcMock(
 						"The requested debug session does not exist for this window.",
 				};
 			}
+			function debugRootNotAuthorized() {
+				return {
+					code: "ROOT_NOT_AUTHORIZED",
+					message:
+						"The requested workspace root is not authorized for this window.",
+				};
+			}
 			// `F100` S4: the adversarial "step request issued while the session
 			// is not stopped" scenario — mirrors the real, spec-grounded
 			// rejection `src-tauri/src/debug/service/tests.rs`'s own
@@ -1694,6 +1701,7 @@ async function installNativeIpcMock(
 				};
 			}
 			const liveDebugSessions = new Set<string>();
+			const debugSessionRoots = new Map<string, string>();
 			let debugSessionSerial = 601;
 			const nextDebugSessionId = (): string =>
 				`00000000-0000-4000-8000-${(debugSessionSerial++)
@@ -2801,11 +2809,15 @@ async function installNativeIpcMock(
 							}
 							const startRequest = args.request as
 								| {
+										rootId?: string;
 										command?: string;
 										args?: readonly string[];
 										transport?: string;
 								  }
 								| undefined;
+							if (startRequest?.rootId !== rootId) {
+								throw debugRootNotAuthorized();
+							}
 							if (
 								!debugAdapterConfirmations.has(
 									debugAdapterConfirmationKey(startRequest ?? {}),
@@ -2815,6 +2827,7 @@ async function installNativeIpcMock(
 							}
 							const sessionId = nextDebugSessionId();
 							liveDebugSessions.add(sessionId);
+							debugSessionRoots.set(sessionId, rootId);
 							return {
 								sessionId,
 								capabilities: debugFixtureForTest.capabilities ?? {},
@@ -2823,23 +2836,29 @@ async function installNativeIpcMock(
 						case "debug_disconnect": {
 							const disconnectRequest = args.request as
 								{ sessionId?: string } | undefined;
-							if (
-								!liveDebugSessions.delete(disconnectRequest?.sessionId ?? "")
-							) {
+							const disconnectSessionId = disconnectRequest?.sessionId ?? "";
+							if (!liveDebugSessions.delete(disconnectSessionId)) {
 								throw debugSessionNotFound();
 							}
+							debugSessionRoots.delete(disconnectSessionId);
 							return null;
 						}
 						case "debug_set_breakpoints": {
 							const setBreakpointsRequest = args.request as
 								| {
 										sessionId?: string;
+										rootId?: string;
 										path?: string;
 										breakpoints?: readonly { line: number }[];
 								  }
 								| undefined;
+							const breakpointSessionId =
+								setBreakpointsRequest?.sessionId ?? "";
 							if (
-								!liveDebugSessions.has(setBreakpointsRequest?.sessionId ?? "")
+								!liveDebugSessions.has(breakpointSessionId) ||
+								setBreakpointsRequest?.rootId !==
+									debugSessionRoots.get(breakpointSessionId) ||
+								setBreakpointsRequest?.rootId !== rootId
 							) {
 								throw debugSessionNotFound();
 							}
@@ -3989,6 +4008,38 @@ async function installMultiRootNativeIpcMock(
 						);
 			const primaryEntries: Array<readonly [string, MockNode]> = [
 				["README.md", file("# Primary workspace\n")],
+				[
+					"main.py",
+					file(
+						"def primary():\n    marker = 'primary-debug'\n    print(marker)\n\nprimary()\n",
+					),
+				],
+				[
+					".vscode",
+					directory([
+						[
+							"launch.json",
+							file(
+								JSON.stringify({
+									version: "0.2.0",
+									configurations: [
+										{
+											type: "primary-python",
+											request: "launch",
+											name: "Debug primary main.py",
+											plainAdapter: {
+												transport: "stdio",
+												command: "/primary-debug-adapter",
+												args: ["--root", "primary"],
+											},
+											program: "main.py",
+										},
+									],
+								}),
+							),
+						],
+					]),
+				],
 				["copy-source.txt", file("Copy across roots.\n")],
 				["shared.txt", file("F140 shared primary\n")],
 				["src", directory([])],
@@ -4000,6 +4051,38 @@ async function installMultiRootNativeIpcMock(
 				]);
 			}
 			const secondaryEntries: Array<readonly [string, MockNode]> = [
+				[
+					"main.py",
+					file(
+						"def secondary():\n    marker = 'secondary-debug'\n    print(marker)\n\nsecondary()\n",
+					),
+				],
+				[
+					".vscode",
+					directory([
+						[
+							"launch.json",
+							file(
+								JSON.stringify({
+									version: "0.2.0",
+									configurations: [
+										{
+											type: "secondary-python",
+											request: "launch",
+											name: "Debug secondary main.py",
+											plainAdapter: {
+												transport: "stdio",
+												command: "/secondary-debug-adapter",
+												args: ["--root", "secondary"],
+											},
+											program: "main.py",
+										},
+									],
+								}),
+							),
+						],
+					]),
+				],
 				["move-source.txt", file("Move across roots.\n")],
 				["notes.txt", file("Secondary workspace\n")],
 				["shared.txt", file("F140 shared secondary\n")],
@@ -4031,12 +4114,26 @@ async function installMultiRootNativeIpcMock(
 			const watchStates = new Map<string, WatchState>();
 			const terminalSessions = new Set<string>();
 			let terminalSessionSerial = 1;
+			const debugAdapterConfirmations = new Set<string>();
+			const debugSessionRoots = new Map<string, string>();
+			let debugSessionSerial = 801;
 			let revision = 0;
 			const nextTerminalSessionId = (): string => {
 				const suffix = terminalSessionSerial.toString(16).padStart(12, "0");
 				terminalSessionSerial += 1;
 				return `00000000-0000-4000-8000-${suffix}`;
 			};
+			const nextDebugSessionId = (): string => {
+				const suffix = debugSessionSerial.toString(16).padStart(12, "0");
+				debugSessionSerial += 1;
+				return `00000000-0000-4000-8000-${suffix}`;
+			};
+			const debugAdapterConfirmationKey = (request: {
+				command?: unknown;
+				args?: unknown;
+				transport?: unknown;
+			}): string =>
+				JSON.stringify([request.command, request.args, request.transport]);
 			const terminalSessionFrom = (args: Record<string, unknown>): string => {
 				const request = args.request as { sessionId?: unknown } | undefined;
 				if (
@@ -4054,6 +4151,15 @@ async function installMultiRootNativeIpcMock(
 			const rootNotAuthorized = () => ({
 				code: "ROOT_NOT_AUTHORIZED",
 				message: "The workspace root is not authorized.",
+			});
+			const debugAdapterNotConfirmed = () => ({
+				code: "DEBUG_ADAPTER_NOT_CONFIRMED",
+				message:
+					"This exact adapter command has not been confirmed for this workspace yet.",
+			});
+			const debugSessionNotFound = () => ({
+				code: "DEBUG_SESSION_NOT_FOUND",
+				message: "The debug session does not exist for this window and root.",
 			});
 			const entryNotFound = () => ({
 				code: "ENTRY_NOT_FOUND",
@@ -4494,6 +4600,7 @@ async function installMultiRootNativeIpcMock(
 				__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_TIMINGS__: typeof externalCreateTimings;
 				__PLAIN_TEST_MULTI_ROOT_EMIT_WAKE__(): number;
 				__PLAIN_TEST_MULTI_ROOT_WATCH_LISTENER_COUNT__(): number;
+				__PLAIN_TEST_DEBUG_SESSION_IDS__(): readonly string[];
 				__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__(
 					rootId: string,
 					name: string,
@@ -4532,6 +4639,9 @@ async function installMultiRootNativeIpcMock(
 				[...eventHandlers.values()].filter(
 					({ event }) => event === "plain://workspace-watch-wake",
 				).length;
+			testWindow.__PLAIN_TEST_DEBUG_SESSION_IDS__ = () => [
+				...debugSessionRoots.keys(),
+			];
 			testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE__ = externalCreate;
 			testWindow.__PLAIN_TEST_MULTI_ROOT_EXTERNAL_CREATE_AFTER_NEXT_SYNC__ = (
 				rootId,
@@ -4661,6 +4771,103 @@ async function installMultiRootNativeIpcMock(
 							};
 						case "workspace_trust_state":
 							return { trusted: true };
+						case "debug_adapter_confirmation_state": {
+							const request = (args.request ?? {}) as {
+								command?: unknown;
+								args?: unknown;
+								transport?: unknown;
+							};
+							return {
+								confirmed: debugAdapterConfirmations.has(
+									debugAdapterConfirmationKey(request),
+								),
+							};
+						}
+						case "debug_adapter_confirmation_grant": {
+							const request = (args.request ?? {}) as {
+								command?: unknown;
+								args?: unknown;
+								transport?: unknown;
+							};
+							debugAdapterConfirmations.add(
+								debugAdapterConfirmationKey(request),
+							);
+							return null;
+						}
+						case "debug_adapter_confirmation_revoke": {
+							const request = (args.request ?? {}) as {
+								command?: unknown;
+								args?: unknown;
+								transport?: unknown;
+							};
+							debugAdapterConfirmations.delete(
+								debugAdapterConfirmationKey(request),
+							);
+							return null;
+						}
+						case "debug_launch":
+						case "debug_attach": {
+							const request = (args.request ?? {}) as {
+								rootId?: unknown;
+								command?: unknown;
+								args?: unknown;
+								transport?: unknown;
+							};
+							if (
+								typeof request.rootId !== "string" ||
+								!activeRoots.has(request.rootId)
+							) {
+								throw rootNotAuthorized();
+							}
+							if (
+								!debugAdapterConfirmations.has(
+									debugAdapterConfirmationKey(request),
+								)
+							) {
+								throw debugAdapterNotConfirmed();
+							}
+							const sessionId = nextDebugSessionId();
+							debugSessionRoots.set(sessionId, request.rootId);
+							return { sessionId, capabilities: {} };
+						}
+						case "debug_set_breakpoints": {
+							const request = (args.request ?? {}) as {
+								sessionId?: unknown;
+								rootId?: unknown;
+								path?: unknown;
+								breakpoints?: readonly {
+									line: number;
+								}[];
+							};
+							if (
+								typeof request.sessionId !== "string" ||
+								typeof request.rootId !== "string" ||
+								!activeRoots.has(request.rootId) ||
+								debugSessionRoots.get(request.sessionId) !== request.rootId
+							) {
+								throw debugSessionNotFound();
+							}
+							return {
+								breakpoints: (request.breakpoints ?? []).map((entry) => ({
+									verified: true,
+									line: entry.line,
+									id: null,
+									message: null,
+								})),
+							};
+						}
+						case "debug_disconnect": {
+							const request = (args.request ?? {}) as {
+								sessionId?: unknown;
+							};
+							if (
+								typeof request.sessionId !== "string" ||
+								!debugSessionRoots.delete(request.sessionId)
+							) {
+								throw debugSessionNotFound();
+							}
+							return null;
+						}
 						case "terminal_start": {
 							const request = args.request as
 								| {
@@ -14268,6 +14475,178 @@ async function clickGlyphMargin(
 	});
 }
 
+test("Debug requires an explicit multi-root choice and keeps launch plus same-path breakpoints bound to that root", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			errors.push(message.text());
+		}
+	});
+	await installMultiRootNativeIpcMock(page, "supported");
+	await openNativeWorkspaceExplorer(page);
+	await executePaletteCommand(
+		page,
+		"Add Folder to Workspace",
+		"Workspaces: Add Folder to Workspace...",
+	);
+
+	const openRootMain = async (
+		rootLabel: "plain-workspace" | "plain-library",
+		marker: "primary-debug" | "secondary-debug",
+	): Promise<void> => {
+		await page.keyboard.press("ControlOrMeta+P");
+		const quickOpen = page.locator(".quick-input-widget");
+		await expect(quickOpen).toBeVisible();
+		await quickOpen.locator("input").pressSequentially("main.py");
+		const row = quickOpen.locator(
+			`.quick-input-list .monaco-list-row[aria-label*="${rootLabel}"]`,
+		);
+		await expect(row).toHaveCount(1);
+		await row.click();
+		await expect(quickOpen).toBeHidden();
+		await expect(
+			page.getByRole("code").filter({ hasText: marker }),
+		).toBeVisible();
+	};
+	const startForRoot = async (
+		rootLabel: "plain-workspace" | "plain-library",
+		adapterCommand: string,
+	): Promise<void> => {
+		await page.keyboard.press("ControlOrMeta+Shift+P");
+		const palette = page.locator(".quick-input-widget");
+		await expect(palette).toBeVisible();
+		await palette.locator("input").pressSequentially("Start Debugging");
+		await palette.getByText("Plain: Start Debugging", { exact: true }).click();
+		await expect(palette.locator("input")).toHaveAttribute(
+			"placeholder",
+			"Select a workspace folder to debug",
+		);
+		const rootRow = palette
+			.locator(".quick-input-list .monaco-list-row")
+			.filter({ hasText: rootLabel });
+		await expect(rootRow).toHaveCount(1);
+		await rootRow.click();
+		await expect(palette).toBeHidden();
+
+		const dialog = page.getByRole("dialog");
+		await expect(dialog).toContainText(`Run "${adapterCommand}"?`);
+		await dialog
+			.getByRole("button", { name: "Run Adapter", exact: true })
+			.click();
+		await expect(dialog).toHaveCount(0);
+	};
+
+	await openRootMain("plain-workspace", "primary-debug");
+	await clickGlyphMargin(page, "marker = 'primary-debug'");
+	await openRootMain("plain-library", "secondary-debug");
+	await clickGlyphMargin(page, "print(marker)");
+	await openRunAndDebugView(page);
+	const launchConfigReads = async (): Promise<TestTauriInvocation[]> =>
+		(await terminalCallsFor(page, "workspace_read_file")).filter(
+			(call) =>
+				(call.args.request as { relativePath?: string }).relativePath ===
+				".vscode/launch.json",
+		);
+	const launchReadsBeforeCancelledStart = (await launchConfigReads()).length;
+
+	// Cancelling the required root picker performs no config read and creates
+	// no session; multi-root must never fall back to folders[0].
+	await page.keyboard.press("ControlOrMeta+Shift+P");
+	const cancelledPicker = page.locator(".quick-input-widget");
+	await cancelledPicker.locator("input").pressSequentially("Start Debugging");
+	await cancelledPicker
+		.getByText("Plain: Start Debugging", { exact: true })
+		.click();
+	await expect(cancelledPicker.locator("input")).toHaveAttribute(
+		"placeholder",
+		"Select a workspace folder to debug",
+	);
+	await page.keyboard.press("Escape");
+	await expect(cancelledPicker).toBeHidden();
+	expect(await terminalCallsFor(page, "debug_launch")).toEqual([]);
+	expect(await launchConfigReads()).toHaveLength(
+		launchReadsBeforeCancelledStart,
+	);
+
+	await startForRoot("plain-library", "/secondary-debug-adapter");
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "debug_launch")).length)
+		.toBe(1);
+	await expect
+		.poll(
+			async () =>
+				(await terminalCallsFor(page, "debug_set_breakpoints")).length,
+		)
+		.toBe(1);
+	const firstSessionId = await currentDebugSessionId(page);
+	const launches = await terminalCallsFor(page, "debug_launch");
+	expect(launches[0]?.args.request).toMatchObject({
+		rootId: nativeSecondaryRootId,
+		command: "/secondary-debug-adapter",
+		args: ["--root", "secondary"],
+		adapterId: "secondary-python",
+		arguments: { program: "main.py" },
+	});
+	let breakpointCalls = await terminalCallsFor(page, "debug_set_breakpoints");
+	expect(breakpointCalls[0]?.args.request).toEqual({
+		sessionId: firstSessionId,
+		rootId: nativeSecondaryRootId,
+		path: "main.py",
+		breakpoints: [{ line: 3, condition: null, logMessage: null }],
+	});
+	let launchReads = (await launchConfigReads()).slice(
+		launchReadsBeforeCancelledStart,
+	);
+	expect(
+		launchReads.map(
+			(call) => (call.args.request as { rootId?: string }).rootId,
+		),
+	).toEqual([nativeSecondaryRootId]);
+
+	// Editing the same relative path in the other root while the secondary
+	// session is live must remain local and must not generate another DAP sync.
+	await openRootMain("plain-workspace", "primary-debug");
+	await clickGlyphMargin(page, "print(marker)");
+	await Promise.resolve();
+	await Promise.resolve();
+	expect(await terminalCallsFor(page, "debug_set_breakpoints")).toHaveLength(1);
+
+	await executePaletteCommand(page, "Stop Debugging", "Plain: Stop Debugging");
+	await startForRoot("plain-workspace", "/primary-debug-adapter");
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "debug_launch")).length)
+		.toBe(2);
+	await expect
+		.poll(
+			async () =>
+				(await terminalCallsFor(page, "debug_set_breakpoints")).length,
+		)
+		.toBe(2);
+	const secondSessionId = await currentDebugSessionId(page);
+	breakpointCalls = await terminalCallsFor(page, "debug_set_breakpoints");
+	expect(breakpointCalls[1]?.args.request).toEqual({
+		sessionId: secondSessionId,
+		rootId: nativeRootId,
+		path: "main.py",
+		breakpoints: [
+			{ line: 2, condition: null, logMessage: null },
+			{ line: 3, condition: null, logMessage: null },
+		],
+	});
+	launchReads = (await launchConfigReads()).slice(
+		launchReadsBeforeCancelledStart,
+	);
+	expect(
+		launchReads.map(
+			(call) => (call.args.request as { rootId?: string }).rootId,
+		),
+	).toEqual([nativeSecondaryRootId, nativeRootId]);
+	expect(errors).toEqual([]);
+});
+
 async function emitDebugTestEvent(
 	page: Page,
 	sessionId: string,
@@ -14479,6 +14858,9 @@ test("places a breakpoint the adapter moves to another line, starts a session th
 	await expect
 		.poll(async () => (await terminalCallsFor(page, "debug_launch")).length)
 		.toBe(1);
+	expect(
+		(await terminalCallsFor(page, "debug_launch"))[0]?.args.request,
+	).toMatchObject({ rootId: nativeRootId });
 	const sessionId = await currentDebugSessionId(page);
 
 	// The freshly-placed breakpoint is synced immediately once the session
@@ -14496,6 +14878,7 @@ test("places a breakpoint the adapter moves to another line, starts a session th
 	)[0]!;
 	expect(setBreakpointsCall.args.request).toEqual({
 		sessionId,
+		rootId: nativeRootId,
 		path: "main.py",
 		breakpoints: [{ line: 6, condition: null, logMessage: null }],
 	});
@@ -14865,6 +15248,7 @@ test("breakpoint popup enables condition/log-point inputs when the adapter adver
 	const calls = await terminalCallsFor(page, "debug_set_breakpoints");
 	expect(calls[1]!.args.request).toEqual({
 		sessionId,
+		rootId: nativeRootId,
 		path: "main.py",
 		breakpoints: [{ line: 6, condition: "total > 5", logMessage: null }],
 	});

@@ -47,6 +47,7 @@ use crate::trust::service::TrustService;
 use crate::workspace::dto::WorkspacePickRootsMode;
 use crate::workspace::picker::{DirectoryPicker, DirectoryPickerFuture, DirectoryPickerResult};
 use crate::workspace::service::WorkspaceService;
+use crate::workspace::RootId;
 
 use super::DebugSessionService;
 
@@ -84,6 +85,7 @@ struct TestRunInTerminalHandler {
     trust: std::sync::Arc<TrustService>,
     workspace: std::sync::Arc<WorkspaceService>,
     window_label: String,
+    root_id: RootId,
     sink: std::sync::Arc<dyn TerminalOutputSink>,
 }
 
@@ -102,6 +104,7 @@ impl ReverseRequestHandler for TestRunInTerminalHandler {
             &self.trust,
             &self.workspace,
             &self.window_label,
+            self.root_id,
             arguments,
             std::sync::Arc::clone(&self.sink),
         ))
@@ -159,12 +162,20 @@ impl DirectoryPicker for FakePicker {
     }
 }
 
-fn workspace_with_root(window_label: &str, root_path: &Path) -> WorkspaceService {
+fn workspace_with_roots(window_label: &str, root_paths: Vec<PathBuf>) -> WorkspaceService {
     let workspace = WorkspaceService::new();
-    let picker = FakePicker::selected(vec![root_path.to_path_buf()]);
+    let picker = FakePicker::selected(root_paths);
     block_on(workspace.pick_roots(window_label, picker, WorkspacePickRootsMode::Add))
-        .expect("root authorizes");
+        .expect("roots authorize");
     workspace
+}
+
+fn workspace_with_root(window_label: &str, root_path: &Path) -> WorkspaceService {
+    workspace_with_roots(window_label, vec![root_path.to_path_buf()])
+}
+
+fn root_id_at(workspace: &WorkspaceService, window_label: &str, index: usize) -> RootId {
+    workspace.snapshot(window_label).unwrap().roots()[index].root_id()
 }
 
 /// Holds every temp resource + service handle a trusted-and-confirmed test
@@ -176,6 +187,7 @@ struct TrustedConfirmedFixture {
     workspace: WorkspaceService,
     trust: TrustService,
     confirmation: ConfirmationService,
+    root_id: RootId,
 }
 
 fn trusted_and_confirmed(
@@ -196,6 +208,7 @@ fn trusted_and_confirmed(
         &descriptor.confirmation_subject(transport),
     ))
     .expect("confirmation grant succeeds");
+    let root_id = root_id_at(&workspace, window_label, 0);
     TrustedConfirmedFixture {
         _root: root,
         _trust_base: trust_base,
@@ -203,6 +216,7 @@ fn trusted_and_confirmed(
         workspace,
         trust,
         confirmation,
+        root_id,
     }
 }
 
@@ -585,6 +599,7 @@ fn debug_launch_over_a_real_spawned_stdio_process_drives_the_full_handshake_end_
         &fixture.trust,
         &fixture.workspace,
         window_label,
+        fixture.root_id,
         &fixture.confirmation,
         LaunchRequestKind::Launch,
         SessionTransportRequest::Stdio {
@@ -660,6 +675,7 @@ fn interactive_debugging_commands_work_end_to_end_over_a_real_spawned_stdio_proc
         &fixture.trust,
         &fixture.workspace,
         window_label,
+        fixture.root_id,
         &fixture.confirmation,
         LaunchRequestKind::Launch,
         SessionTransportRequest::Stdio {
@@ -674,10 +690,25 @@ fn interactive_debugging_commands_work_end_to_end_over_a_real_spawned_stdio_proc
     ))
     .expect("handshake succeeds");
 
-    // --- setBreakpoints: a moved line and a rejected one, in one request. ---
-    let set_breakpoints_body = block_on(service.send_request(
+    // A session is immutably bound to the root that started it: presenting
+    // the same live session id with a different root must fail before any DAP
+    // request reaches the adapter.
+    let foreign_root_id = RootId::parse_v4_wire("22222222-2222-4222-8222-222222222222").unwrap();
+    let mismatch = block_on(service.send_request_for_root(
         window_label,
         session_id,
+        foreign_root_id,
+        "setBreakpoints",
+        json!({"source": {"path": "foreign.py"}, "breakpoints": []}),
+    ))
+    .expect_err("a foreign root must not address the live session");
+    assert_eq!(mismatch.code(), "DEBUG_SESSION_NOT_FOUND");
+
+    // --- setBreakpoints: a moved line and a rejected one, in one request. ---
+    let set_breakpoints_body = block_on(service.send_request_for_root(
+        window_label,
+        session_id,
+        fixture.root_id,
         "setBreakpoints",
         json!({
             "source": {"path": "/tmp/prog.py"},
@@ -851,6 +882,7 @@ fn step_control_commands_send_their_own_distinct_dap_command_and_surface_a_not_s
         &fixture.trust,
         &fixture.workspace,
         window_label,
+        fixture.root_id,
         &fixture.confirmation,
         LaunchRequestKind::Launch,
         SessionTransportRequest::Stdio {
@@ -1038,8 +1070,7 @@ while True:
             "arguments": {
                 "kind": "integrated",
                 "title": "Run Program",
-                "cwd": "/tmp",
-                "args": ["/bin/sh", "-c", "echo hello-from-run-in-terminal"],
+                "args": ["/bin/sh", "-c", "pwd > run-in-terminal-cwd.txt; echo hello-from-run-in-terminal"],
                 "env": {"MOCK_RUN_IN_TERMINAL": "1"},
             },
         })
@@ -1093,7 +1124,8 @@ fn run_in_terminal_reverse_request_spawns_a_real_terminal_service_session_with_n
     };
     let window_label = "main";
 
-    let root = TempDir::new().unwrap();
+    let primary_root = TempDir::new().unwrap();
+    let selected_root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let confirm_base = TempDir::new().unwrap();
     // `Arc`-wrapped (unlike `trusted_and_confirmed`'s own owned fields) —
@@ -1106,7 +1138,13 @@ fn run_in_terminal_reverse_request_spawns_a_real_terminal_service_session_with_n
     // is purely in-memory, never persisted) not merely a fresh instance that
     // happens to exist, which would report zero authorized roots for this
     // window and fail `TerminalService::start_program`'s own trust check.
-    let workspace = std::sync::Arc::new(workspace_with_root(window_label, root.path()));
+    let workspace = std::sync::Arc::new(workspace_with_roots(
+        window_label,
+        vec![
+            primary_root.path().to_path_buf(),
+            selected_root.path().to_path_buf(),
+        ],
+    ));
     let trust = std::sync::Arc::new(TrustService::new(trust_base.path().to_path_buf()));
     block_on(trust.grant(&workspace, window_label)).expect("grant succeeds");
     let confirmation = ConfirmationService::new(confirm_base.path().to_path_buf());
@@ -1123,12 +1161,14 @@ fn run_in_terminal_reverse_request_spawns_a_real_terminal_service_session_with_n
     let terminal = std::sync::Arc::new(TerminalService::new());
     let terminal_sink = std::sync::Arc::new(RecordingTerminalSink::default());
     let terminal_sink_for_handler: std::sync::Arc<dyn TerminalOutputSink> = terminal_sink.clone();
+    let selected_root_id = root_id_at(&workspace, window_label, 1);
     let reverse_requests: std::sync::Arc<dyn ReverseRequestHandler> =
         std::sync::Arc::new(TestRunInTerminalHandler {
             terminal: std::sync::Arc::clone(&terminal),
             trust: std::sync::Arc::clone(&trust),
             workspace: std::sync::Arc::clone(&workspace),
             window_label: window_label.to_owned(),
+            root_id: selected_root_id,
             sink: terminal_sink_for_handler,
         });
 
@@ -1136,6 +1176,7 @@ fn run_in_terminal_reverse_request_spawns_a_real_terminal_service_session_with_n
         &trust,
         &workspace,
         window_label,
+        selected_root_id,
         &confirmation,
         LaunchRequestKind::Launch,
         SessionTransportRequest::Stdio {
@@ -1197,6 +1238,20 @@ fn run_in_terminal_reverse_request_spawns_a_real_terminal_service_session_with_n
 
     // --- (2) a real, running `TerminalService` session was created. ---
     assert_eq!(terminal.session_count_for_test(window_label), 1);
+    assert!(
+        wait_until(
+            || selected_root
+                .path()
+                .join("run-in-terminal-cwd.txt")
+                .is_file(),
+            Duration::from_secs(5),
+        ),
+        "a missing cwd from the real debugpy-shaped request must resolve to the selected second root"
+    );
+    assert!(
+        !primary_root.path().join("run-in-terminal-cwd.txt").exists(),
+        "the first root must remain untouched"
+    );
     assert!(
         wait_until(
             || !terminal_sink
@@ -1331,6 +1386,7 @@ fn debug_launch_over_a_real_tcp_socket_drives_the_full_handshake_end_to_end() {
         &fixture.trust,
         &fixture.workspace,
         window_label,
+        fixture.root_id,
         &fixture.confirmation,
         LaunchRequestKind::Launch,
         SessionTransportRequest::Tcp {
@@ -1402,6 +1458,7 @@ fn close_window_tears_down_every_live_session_and_the_peer_observes_the_connecti
         &fixture.trust,
         &fixture.workspace,
         window_label,
+        fixture.root_id,
         &fixture.confirmation,
         LaunchRequestKind::Launch,
         SessionTransportRequest::Tcp {
@@ -1445,6 +1502,7 @@ fn start_session_still_requires_confirmation_before_ever_attempting_to_connect()
         &trust,
         &workspace,
         window_label,
+        root_id_at(&workspace, window_label, 0),
         &confirmation,
         LaunchRequestKind::Launch,
         SessionTransportRequest::Tcp {
@@ -1500,6 +1558,7 @@ fn start_real_python_session(
         &fixture.trust,
         &fixture.workspace,
         window_label,
+        fixture.root_id,
         &fixture.confirmation,
         LaunchRequestKind::Launch,
         SessionTransportRequest::Stdio {

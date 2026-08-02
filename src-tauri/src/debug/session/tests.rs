@@ -450,6 +450,84 @@ fn initialized_event_arriving_before_the_initialize_response_does_not_break_the_
 }
 
 #[test]
+fn an_early_failed_launch_response_is_reported_before_initialized_can_time_out() {
+    let ((client_reader, client_writer), mut adapter) = duplex_pair();
+    let session_id = DebugSessionId::new();
+    let (_sink, sink) = sink_pair();
+    let session = DebugSession::start(
+        session_id,
+        client_reader,
+        client_writer,
+        sink,
+        Box::new(|| {}),
+    );
+
+    let adapter_thread = std::thread::spawn(move || {
+        let (init_seq, _) = adapter.expect_request("initialize");
+        adapter.send_response(1, init_seq, "initialize", true, None, Some(json!({})));
+        let (launch_seq, _) = adapter.expect_request("launch");
+        adapter.send_response(
+            2,
+            launch_seq,
+            "launch",
+            false,
+            Some("launcher could not connect"),
+            None,
+        );
+        // Deliberately never sends `initialized`: the failed start response
+        // is already the authoritative and more actionable outcome.
+    });
+
+    let config = HandshakeConfig {
+        adapter_id: "mock".to_owned(),
+        request: LaunchRequestKind::Launch,
+        arguments: json!({}),
+        breakpoints: Vec::new(),
+        request_timeout: Duration::from_secs(2),
+        launch_timeout: Duration::from_secs(5),
+    };
+    let started = Instant::now();
+    let error = run_handshake_within(session, config, Duration::from_secs(1))
+        .expect("the early failure must not wait for the initialized timeout")
+        .expect_err("the adapter rejected launch");
+    assert_eq!(error.code(), "DEBUG_HANDSHAKE_FAILED");
+    assert!(error.message().contains("launcher could not connect"));
+    assert!(started.elapsed() < Duration::from_secs(1));
+    adapter_thread.join().unwrap();
+}
+
+#[test]
+fn an_early_successful_launch_response_is_retained_until_initialized_and_configuration_done() {
+    let ((client_reader, client_writer), mut adapter) = duplex_pair();
+    let session_id = DebugSessionId::new();
+    let (_sink, sink) = sink_pair();
+    let session = DebugSession::start(
+        session_id,
+        client_reader,
+        client_writer,
+        sink,
+        Box::new(|| {}),
+    );
+
+    let adapter_thread = std::thread::spawn(move || {
+        let (init_seq, _) = adapter.expect_request("initialize");
+        adapter.send_response(1, init_seq, "initialize", true, None, Some(json!({})));
+        let (launch_seq, _) = adapter.expect_request("launch");
+        adapter.send_response(2, launch_seq, "launch", true, None, None);
+        std::thread::sleep(Duration::from_millis(25));
+        adapter.send_event(3, "initialized", None);
+        let (config_done_seq, _) = adapter.expect_request("configurationDone");
+        adapter.send_response(4, config_done_seq, "configurationDone", true, None, None);
+    });
+
+    let config = basic_handshake_config(json!({}));
+    run_handshake_within(session, config, Duration::from_secs(1))
+        .expect("the handshake must not hang")
+        .expect("an early successful launch response remains valid");
+    adapter_thread.join().unwrap();
+}
+
+#[test]
 fn attach_requests_send_the_literal_attach_command_not_launch() {
     let ((client_reader, client_writer), mut adapter) = duplex_pair();
     let session_id = DebugSessionId::new();

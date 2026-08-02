@@ -878,8 +878,9 @@ export function createNativeBridge(): PlainBridge {
 				await invoke<unknown>("debug_adapter_confirmation_revoke", { request }),
 			);
 		},
-		debugLaunch: async (target, adapterId, launchArguments) => {
+		debugLaunch: async (rootId, target, adapterId, launchArguments) => {
 			const request = frozenDebugSessionStartRequest(
+				rootId,
 				target,
 				adapterId,
 				launchArguments,
@@ -888,8 +889,9 @@ export function createNativeBridge(): PlainBridge {
 				await invoke<unknown>("debug_launch", { request }),
 			);
 		},
-		debugAttach: async (target, adapterId, launchArguments) => {
+		debugAttach: async (rootId, target, adapterId, launchArguments) => {
 			const request = frozenDebugSessionStartRequest(
+				rootId,
 				target,
 				adapterId,
 				launchArguments,
@@ -902,9 +904,10 @@ export function createNativeBridge(): PlainBridge {
 			const request = frozenDebugSessionIdRequest(sessionId);
 			decodeDebugVoid(await invoke<unknown>("debug_disconnect", { request }));
 		},
-		debugSetBreakpoints: async (sessionId, path, breakpoints) => {
+		debugSetBreakpoints: async (sessionId, rootId, path, breakpoints) => {
 			const request = frozenDebugSetBreakpointsRequest(
 				sessionId,
+				rootId,
 				path,
 				breakpoints,
 			);

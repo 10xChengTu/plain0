@@ -57,6 +57,7 @@ import {
 	validateDebugTcpCompanionSpawnBoundary,
 	validateDebugCommandRegistration,
 	validateDebugRunInTerminalBoundary,
+	validateDebugRootIpcBoundary,
 	validateDebugSpawnConstructionShape,
 	validateDebugFramingBounds,
 } from "../../scripts/plain/boundary-contracts.mjs";
@@ -12494,6 +12495,7 @@ describe("Plain F100 S0/S1/S5 debug adapter spawn/connect/framing boundary Harne
 
 	const trustCheckAnchor =
 		"    trust.require_trusted(workspace, window_label).await?;\n" +
+		"    let selected_root = workspace.root_canonical_path(window_label, root_id)?;\n" +
 		"    let subject = descriptor.confirmation_subject(AdapterTransportKind::Stdio);\n" +
 		"    confirmation\n" +
 		"        .require_confirmed(workspace, window_label, &subject)\n" +
@@ -12503,6 +12505,7 @@ describe("Plain F100 S0/S1/S5 debug adapter spawn/connect/framing boundary Harne
 		"    let mut command = Command::new(&descriptor.command);\n    command.args(&descriptor.args);";
 	const connectTrustCheckAnchor =
 		"    trust.require_trusted(workspace, window_label).await?;\n" +
+		"    let _selected_root = workspace.root_canonical_path(window_label, root_id)?;\n" +
 		"    let subject = descriptor.confirmation_subject(AdapterTransportKind::Tcp);\n" +
 		"    confirmation\n" +
 		"        .require_confirmed(workspace, window_label, &subject)\n" +
@@ -12593,10 +12596,24 @@ describe("Plain F100 S0/S1/S5 debug adapter spawn/connect/framing boundary Harne
 			expect(
 				failures.some((failure) =>
 					failure.includes(
-						"must call confirmation.require_confirmed(workspace, window_label, &subject).await? (subject built via descriptor.confirmation_subject(AdapterTransportKind::Stdio)) as its literal second statement",
+						"must validate root_id with workspace.root_canonical_path",
 					),
 				),
 			).toBe(true);
+		});
+
+		it("rejects spawn_adapter when selected-root validation is removed", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) =>
+					source.replace(
+						"    let selected_root = workspace.root_canonical_path(window_label, root_id)?;\n",
+						"",
+					),
+			);
+			expect(validateDebugAdapterSpawnBoundary(mutated)).toContain(
+				"debug/exec.rs spawn_adapter must validate root_id with workspace.root_canonical_path immediately after trust, then call confirmation.require_confirmed for AdapterTransportKind::Stdio, before spawning or connecting",
+			);
 		});
 
 		it("rejects spawn_adapter when the confirmation check runs before the trust check", () => {
@@ -12689,7 +12706,7 @@ describe("Plain F100 S0/S1/S5 debug adapter spawn/connect/framing boundary Harne
 			expect(
 				failures.some((failure) =>
 					failure.includes(
-						"must call confirmation.require_confirmed(workspace, window_label, &subject).await? (subject built via descriptor.confirmation_subject(AdapterTransportKind::Tcp)) as its literal second statement",
+						"must validate root_id with workspace.root_canonical_path",
 					),
 				),
 			).toBe(true);
@@ -12699,6 +12716,7 @@ describe("Plain F100 S0/S1/S5 debug adapter spawn/connect/framing boundary Harne
 	describe("validateDebugTcpCompanionSpawnBoundary", () => {
 		const companionTrustCheckAnchor =
 			"    trust.require_trusted(workspace, window_label).await?;\n" +
+			"    let selected_root = workspace.root_canonical_path(window_label, root_id)?;\n" +
 			"    let subject = descriptor.confirmation_subject(AdapterTransportKind::Tcp);\n" +
 			"    confirmation\n" +
 			"        .require_confirmed(workspace, window_label, &subject)\n" +
@@ -12767,7 +12785,7 @@ describe("Plain F100 S0/S1/S5 debug adapter spawn/connect/framing boundary Harne
 			expect(
 				failures.some((failure) =>
 					failure.includes(
-						"must call confirmation.require_confirmed(workspace, window_label, &subject).await? (subject built via descriptor.confirmation_subject(AdapterTransportKind::Tcp)) as its literal second statement",
+						"must validate root_id with workspace.root_canonical_path",
 					),
 				),
 			).toBe(true);
@@ -12791,7 +12809,7 @@ describe("Plain F100 S0/S1/S5 debug adapter spawn/connect/framing boundary Harne
 			expect(
 				failures.some((failure) =>
 					failure.includes(
-						"must call confirmation.require_confirmed(workspace, window_label, &subject).await? (subject built via descriptor.confirmation_subject(AdapterTransportKind::Tcp)) as its literal second statement",
+						"must validate root_id with workspace.root_canonical_path",
 					),
 				),
 			).toBe(true);
@@ -12923,6 +12941,16 @@ describe("Plain F100 S0/S1/S5 debug adapter spawn/connect/framing boundary Harne
 				),
 			).toBe(true);
 		});
+
+		it("rejects removing the selected-root cwd from the spawned adapter", () => {
+			const mutated = withMutatedDebugSource(
+				"src-tauri/src/debug/exec.rs",
+				(source) => source.replace("    command.current_dir(cwd);\n", ""),
+			);
+			expect(validateDebugSpawnConstructionShape(mutated)).toContain(
+				"debug/exec.rs spawn_adapter_sync must set current_dir(cwd) to the selected authorized root",
+			);
+		});
 	});
 
 	describe("validateDebugFramingBounds", () => {
@@ -13017,6 +13045,76 @@ describe("Plain F100 S0/S1/S5 debug adapter spawn/connect/framing boundary Harne
 				),
 			).toBe(true);
 		});
+	});
+});
+
+describe("Plain F150 Debug rootId IPC boundary Harness", () => {
+	const baselineRust = Object.freeze([
+		{
+			relativePath: "src-tauri/src/debug/dto.rs",
+			source: readFileSync(
+				new URL("../../src-tauri/src/debug/dto.rs", import.meta.url),
+				"utf8",
+			),
+		},
+	]);
+	const baselineApp = Object.freeze(
+		[
+			"app/platform/tauri/contracts.ts",
+			"app/platform/tauri/debug-codec.ts",
+			"app/platform/tauri/native.ts",
+		].map((relativePath) => ({
+			relativePath,
+			source: readFileSync(
+				new URL(`../../${relativePath}`, import.meta.url),
+				"utf8",
+			),
+		})),
+	);
+	const mutateRust = (mutate) =>
+		baselineRust.map((entry) => ({ ...entry, source: mutate(entry.source) }));
+	const mutateApp = (relativePath, mutate) =>
+		baselineApp.map((entry) =>
+			entry.relativePath === relativePath
+				? { ...entry, source: mutate(entry.source) }
+				: entry,
+		);
+
+	it("passes for the real root-scoped Debug DTO, codec, bridge, and native route", () => {
+		expect(validateDebugRootIpcBoundary(baselineRust, baselineApp)).toEqual([]);
+	});
+
+	it("rejects removing root_id from either Rust request surface", () => {
+		const widened = mutateRust((source) =>
+			source.replace("    pub root_id: RootId,\n", ""),
+		);
+		expect(validateDebugRootIpcBoundary(widened, baselineApp)).toContain(
+			"Debug session-start and set-breakpoints DTOs must retain their exact audited rootId-bearing fields",
+		);
+	});
+
+	it("rejects bypassing frozen rootId validation in the TypeScript codec", () => {
+		const widened = mutateApp("app/platform/tauri/debug-codec.ts", (source) =>
+			source.replace(
+				"rootId: frozenRootId(rootId),",
+				"rootId: rootId as string,",
+			),
+		);
+		expect(validateDebugRootIpcBoundary(baselineRust, widened)).toContain(
+			"debug-codec.ts must validate and serialize rootId for session-start and set-breakpoints requests",
+		);
+	});
+
+	it("rejects dropping rootId from native launch forwarding", () => {
+		const widened = mutateApp("app/platform/tauri/native.ts", (source) =>
+			source.replace(
+				"frozenDebugSessionStartRequest(\n\t\t\t\trootId,",
+				"frozenDebugSessionStartRequest(",
+			),
+		);
+		expect(validateDebugRootIpcBoundary(baselineRust, widened)).toContain(
+			"native.ts must forward the explicit debug rootId through launch, attach, and setBreakpoints",
+		);
 	});
 });
 
