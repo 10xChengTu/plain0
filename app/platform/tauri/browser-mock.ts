@@ -899,6 +899,7 @@ export interface BrowserMockWorkspaceWatchControllerForTest {
  * browser-only mock).
  */
 export interface BrowserMockBackupSeedEntryForTest {
+	readonly rootId: string;
 	readonly key: string;
 	readonly bytes: readonly number[];
 }
@@ -2442,13 +2443,22 @@ export function createBrowserMockBridge(
 	const listeners = new Set<(payload: RuntimeInfo) => void>();
 	const scriptedPicks = [...(options.workspacePicks ?? [])];
 	const roots = new Map<string, WorkspaceRoot>();
-	const backupEntries = new Map<string, Uint8Array>();
+	const backupEntries = new Map<
+		string,
+		Readonly<{ rootId: string; key: string; bytes: Uint8Array }>
+	>();
+	const backupMapKey = (rootId: string, key: string): string =>
+		`${rootId}\0${key}`;
 	for (const seed of options.backupFixtureForTest ?? []) {
-		const { key, content } = frozenBackupWriteInputs(
+		const { rootId, key, content } = frozenBackupWriteInputs(
+			seed.rootId,
 			seed.key,
 			Uint8Array.from(seed.bytes),
 		);
-		backupEntries.set(key, content);
+		backupEntries.set(
+			backupMapKey(rootId, key),
+			Object.freeze({ rootId, key, bytes: content }),
+		);
 	}
 	const themePackages = new Map<string, ThemePackageSummary>();
 	const themeResourceContents = new Map<string, ReadonlyMap<string, string>>();
@@ -6795,36 +6805,58 @@ export function createBrowserMockBridge(
 				textSearchWakeListeners.delete(listener);
 			};
 		},
-		async backupWrite(key, bytes) {
-			if (roots.size === 0) {
+		async backupWrite(rootId, key, bytes) {
+			if (!roots.has(rootId)) {
 				throw backupUnavailable();
 			}
-			const validated = frozenBackupWriteInputs(key, bytes);
-			backupEntries.set(validated.key, validated.content);
+			const validated = frozenBackupWriteInputs(rootId, key, bytes);
+			backupEntries.set(
+				backupMapKey(validated.rootId, validated.key),
+				Object.freeze({
+					rootId: validated.rootId,
+					key: validated.key,
+					bytes: validated.content,
+				}),
+			);
 		},
 		async backupReadAll(): Promise<readonly BackupEntry[]> {
 			if (roots.size === 0) {
 				throw backupUnavailable();
 			}
-			const entries = [...backupEntries.entries()]
-				.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-				.map(([key, bytes]): BackupEntry =>
-					Object.freeze({ key, bytes: bytes.slice() }),
+			const entries = [...backupEntries.values()]
+				.filter(({ rootId }) => roots.has(rootId))
+				.sort((left, right) =>
+					left.rootId < right.rootId
+						? -1
+						: left.rootId > right.rootId
+							? 1
+							: left.key < right.key
+								? -1
+								: left.key > right.key
+									? 1
+									: 0,
+				)
+				.map(({ rootId, key, bytes }): BackupEntry =>
+					Object.freeze({ rootId, key, bytes: bytes.slice() }),
 				);
 			return Object.freeze(entries);
 		},
-		async backupDiscard(key) {
-			if (roots.size === 0) {
+		async backupDiscard(rootId, key) {
+			if (!roots.has(rootId)) {
 				throw backupUnavailable();
 			}
-			const request = frozenBackupDiscardRequest(key);
-			backupEntries.delete(request.key);
+			const request = frozenBackupDiscardRequest(rootId, key);
+			backupEntries.delete(backupMapKey(request.rootId, request.key));
 		},
 		async backupDiscardAll() {
 			if (roots.size === 0) {
 				throw backupUnavailable();
 			}
-			backupEntries.clear();
+			for (const [mapKey, entry] of backupEntries) {
+				if (roots.has(entry.rootId)) {
+					backupEntries.delete(mapKey);
+				}
+			}
 		},
 		async themeImportVsix() {
 			return themeImportFromScript();

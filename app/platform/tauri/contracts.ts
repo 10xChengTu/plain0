@@ -681,6 +681,8 @@ export interface DebugEventPayload {
  * mutate it.
  */
 export interface BackupEntry {
+	/** Current-session id of the exact authorized root that owns this entry. */
+	readonly rootId: string;
 	readonly key: string;
 	readonly bytes: Uint8Array;
 }
@@ -1347,9 +1349,9 @@ export interface PlainBridge {
 		expectedVersion: string,
 		content: Uint8Array,
 	): Promise<WorkspaceWriteResult>;
-	backupWrite(key: string, bytes: Uint8Array): Promise<void>;
+	backupWrite(rootId: string, key: string, bytes: Uint8Array): Promise<void>;
 	backupReadAll(): Promise<readonly BackupEntry[]>;
-	backupDiscard(key: string): Promise<void>;
+	backupDiscard(rootId: string, key: string): Promise<void>;
 	backupDiscardAll(): Promise<void>;
 	/** Prompts for a `.vsix` file via a native dialog and imports it. The
 	 * file dialog only ever opens from this explicit, user-triggered call —

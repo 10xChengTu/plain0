@@ -121,6 +121,18 @@ impl WorkspaceService {
         self.scope_for_window(window_label)?.root_canonical_paths()
     }
 
+    /// Returns the current random root ids paired with stable Rust-only
+    /// per-root storage identities. The backup domain uses this mapping to
+    /// keep persisted working-copy content attached to its exact directory
+    /// across process restarts and workspace-topology changes.
+    pub(crate) fn root_storage_identities(
+        &self,
+        window_label: &str,
+    ) -> Result<Vec<(RootId, WorkspaceRootsIdentity)>, CommandError> {
+        self.scope_for_window(window_label)?
+            .root_storage_identities()
+    }
+
     /// Resolves one exact authorized root identity to its canonical backing
     /// path. Unlike callers taking `root_canonical_paths().first()`, this is
     /// fail-closed for a stale, foreign-window, or otherwise unauthorized
@@ -855,6 +867,14 @@ impl WindowWorkspace {
         let state = lock(&self.state)?;
         ensure_open(&state)?;
         Ok(state.scope.root_canonical_paths())
+    }
+
+    fn root_storage_identities(
+        &self,
+    ) -> Result<Vec<(RootId, WorkspaceRootsIdentity)>, CommandError> {
+        let state = lock(&self.state)?;
+        ensure_open(&state)?;
+        Ok(state.scope.root_storage_identities())
     }
 
     fn begin_picker(&self) -> Result<u64, CommandError> {

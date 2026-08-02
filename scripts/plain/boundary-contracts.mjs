@@ -17524,6 +17524,7 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 		modeParameter,
 		scenarioParameter,
 		deleteScenarioParameter,
+		persistBackupsParameter,
 	] = installer.parameters;
 	const scenarioArrayType =
 		scenarioParameter?.type !== undefined &&
@@ -17545,7 +17546,7 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 	const signatureIsExact =
 		installer.modifiers?.length === 1 &&
 		installer.modifiers[0].kind === ts.SyntaxKind.AsyncKeyword &&
-		installer.parameters.length === 4 &&
+		installer.parameters.length === 5 &&
 		pageParameter !== undefined &&
 		ts.isIdentifier(pageParameter.name) &&
 		pageParameter.name.text === "page" &&
@@ -17580,6 +17581,11 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 		deleteScenarioParameter.initializer !== undefined &&
 		ts.isArrayLiteralExpression(deleteScenarioParameter.initializer) &&
 		deleteScenarioParameter.initializer.elements.length === 0 &&
+		persistBackupsParameter !== undefined &&
+		ts.isIdentifier(persistBackupsParameter.name) &&
+		persistBackupsParameter.name.text === "persistBackupsForTest" &&
+		normalizedText(persistBackupsParameter.type) === "boolean" &&
+		persistBackupsParameter.initializer?.kind === ts.SyntaxKind.FalseKeyword &&
 		returnType !== undefined &&
 		ts.isTypeReferenceNode(returnType) &&
 		ts.isIdentifier(returnType.typeName) &&
@@ -17638,13 +17644,17 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 		{ name: "workspaceId", property: "workspaceId" },
 		{ name: "primaryRootId", property: "primaryRootId" },
 		{ name: "secondaryRootId", property: "secondaryRootId" },
+		{
+			name: "persistBackupsForTest",
+			property: "persistBackupsForTest",
+		},
 	]);
 	const initData = addInitScriptCall?.arguments[1];
 	const initDataIsExact =
 		initData !== undefined &&
 		ts.isObjectLiteralExpression(initData) &&
 		normalizedText(initData) ===
-			"{mode,moveIncompleteScenarios,deleteIncompleteScenarios,workspaceId:nativeWorkspaceId,primaryRootId:nativeRootId,secondaryRootId:nativeSecondaryRootId,}";
+			"{mode,moveIncompleteScenarios,deleteIncompleteScenarios,workspaceId:nativeWorkspaceId,primaryRootId:nativeRootId,secondaryRootId:nativeSecondaryRootId,persistBackupsForTest,}";
 	const scenarioReferenceCount = countIdentifier(
 		installer,
 		"moveIncompleteScenarios",
@@ -17948,7 +17958,8 @@ export function validateWorkspaceDeleteFailureBrowserFixture(source) {
 		];
 	}
 	const [installer] = installers;
-	const [, , , deleteScenarioParameter] = installer.parameters;
+	const [, , , deleteScenarioParameter, persistBackupsParameter] =
+		installer.parameters;
 	const deleteScenarioArrayType =
 		deleteScenarioParameter?.type !== undefined &&
 		ts.isTypeOperatorNode(deleteScenarioParameter.type) &&
@@ -17958,7 +17969,7 @@ export function validateWorkspaceDeleteFailureBrowserFixture(source) {
 			: undefined;
 	const deleteScenarioElementType = deleteScenarioArrayType?.elementType;
 	const signatureIsExact =
-		installer.parameters.length === 4 &&
+		installer.parameters.length === 5 &&
 		deleteScenarioParameter !== undefined &&
 		ts.isIdentifier(deleteScenarioParameter.name) &&
 		deleteScenarioParameter.name.text === "deleteIncompleteScenarios" &&
@@ -17970,7 +17981,12 @@ export function validateWorkspaceDeleteFailureBrowserFixture(source) {
 		deleteScenarioElementType.typeArguments === undefined &&
 		deleteScenarioParameter.initializer !== undefined &&
 		ts.isArrayLiteralExpression(deleteScenarioParameter.initializer) &&
-		deleteScenarioParameter.initializer.elements.length === 0;
+		deleteScenarioParameter.initializer.elements.length === 0 &&
+		persistBackupsParameter !== undefined &&
+		ts.isIdentifier(persistBackupsParameter.name) &&
+		persistBackupsParameter.name.text === "persistBackupsForTest" &&
+		normalizedText(persistBackupsParameter.type) === "boolean" &&
+		persistBackupsParameter.initializer?.kind === ts.SyntaxKind.FalseKeyword;
 	if (!signatureIsExact) {
 		failures.push(
 			"browser delete-failure fixture fourth argument must remain the closed deleteRetained/deletePartial scenario set",
@@ -18023,13 +18039,17 @@ export function validateWorkspaceDeleteFailureBrowserFixture(source) {
 		{ name: "workspaceId", property: "workspaceId" },
 		{ name: "primaryRootId", property: "primaryRootId" },
 		{ name: "secondaryRootId", property: "secondaryRootId" },
+		{
+			name: "persistBackupsForTest",
+			property: "persistBackupsForTest",
+		},
 	]);
 	const initData = addInitScriptCall?.arguments[1];
 	const initDataIsExact =
 		initData !== undefined &&
 		ts.isObjectLiteralExpression(initData) &&
 		normalizedText(initData) ===
-			"{mode,moveIncompleteScenarios,deleteIncompleteScenarios,workspaceId:nativeWorkspaceId,primaryRootId:nativeRootId,secondaryRootId:nativeSecondaryRootId,}";
+			"{mode,moveIncompleteScenarios,deleteIncompleteScenarios,workspaceId:nativeWorkspaceId,primaryRootId:nativeRootId,secondaryRootId:nativeSecondaryRootId,persistBackupsForTest,}";
 	const scenarioReferenceCount = countIdentifier(
 		installer,
 		"deleteIncompleteScenarios",

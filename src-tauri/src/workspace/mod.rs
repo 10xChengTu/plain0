@@ -47,7 +47,6 @@ impl RootId {
         self.0.hyphenated().to_string()
     }
 
-    #[cfg(unix)]
     pub(crate) const fn as_bytes(&self) -> &[u8; 16] {
         self.0.as_bytes()
     }
@@ -104,8 +103,9 @@ impl Serialize for WorkspaceId {
 /// window, in any process, after a restart — always reproduces the same
 /// value, and changing the root set (add/remove/replace) always changes it.
 /// It carries no `Serialize` implementation and is never sent to the
-/// WebView; it exists purely to key Rust-internal, root-set-scoped storage
-/// (currently: the hot-exit backup directory).
+/// WebView; it keys Rust-internal root-set-scoped state such as workspace
+/// trust and debug confirmation. Hot-exit now reuses this hash construction
+/// in singleton form for an independently stable identity per root.
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct WorkspaceRootsIdentity(String);
 
@@ -518,6 +518,26 @@ impl WorkspaceScope {
                 self.roots
                     .get(root_id)
                     .map(|root| (*root_id, root.canonical_path.clone()))
+            })
+            .collect()
+    }
+
+    /// Stable Rust-only identity for each independently authorized root.
+    ///
+    /// This deliberately reuses the ambiguity-free singleton form of
+    /// [`stable_roots_identity`]: no canonical path or digest crosses IPC,
+    /// while reopening the same directory with a fresh random [`RootId`]
+    /// still reaches the same product-owned storage partition. Keeping the
+    /// identity per root (rather than per current root set) is what lets
+    /// hot-exit content survive add/remove/reorder topology changes without
+    /// ever guessing which current root owns a backup.
+    pub(crate) fn root_storage_identities(&self) -> Vec<(RootId, WorkspaceRootsIdentity)> {
+        self.order
+            .iter()
+            .filter_map(|root_id| {
+                let root = self.roots.get(root_id)?;
+                let identity = stable_roots_identity(std::slice::from_ref(&root.canonical_path))?;
+                Some((*root_id, WorkspaceRootsIdentity(identity)))
             })
             .collect()
     }

@@ -263,6 +263,7 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 
 	private readonly index = new Map<string, SyncIndexEntry>();
 	private readonly storageKeys = new Map<string, string>();
+	private readonly storageRootIds = new Map<string, string>();
 
 	hasBackupSync(
 		identifier: IWorkingCopyIdentifier,
@@ -289,22 +290,37 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 				[...this.index.values()].map((entry) => entry.identifier),
 			);
 		}
+		const nextIndex = new Map<string, SyncIndexEntry>();
+		const nextStorageKeys = new Map<string, string>();
+		const nextStorageRootIds = new Map<string, string>();
 		for (const entry of entries) {
 			const parsed = decodeBackupPayload(entry.bytes);
 			if (parsed === undefined) {
 				continue;
 			}
-			const identifier = await this.currentIdentifier(parsed.identifier);
+			const identifier = await this.currentIdentifier(
+				parsed.identifier,
+				entry.rootId,
+			);
 			if (identifier === undefined) {
 				continue;
 			}
 			const resourceKey = identifier.resource.toString();
-			this.index.set(resourceKey, {
+			nextIndex.set(resourceKey, {
 				identifier,
 				versionId: this.index.get(resourceKey)?.versionId,
 			});
-			this.storageKeys.set(resourceKey, entry.key);
+			nextStorageKeys.set(resourceKey, entry.key);
+			nextStorageRootIds.set(resourceKey, entry.rootId);
 		}
+		this.index.clear();
+		this.storageKeys.clear();
+		this.storageRootIds.clear();
+		for (const [key, value] of nextIndex) this.index.set(key, value);
+		for (const [key, value] of nextStorageKeys)
+			this.storageKeys.set(key, value);
+		for (const [key, value] of nextStorageRootIds)
+			this.storageRootIds.set(key, value);
 		return Object.freeze(
 			[...this.index.values()].map((entry) => entry.identifier),
 		);
@@ -315,6 +331,10 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 	): Promise<IResolvedWorkingCopyBackup<T> | undefined> {
 		const bridge = requireBridge();
 		const resourceKey = identifier.resource.toString();
+		const resourceParts = workspaceResourceParts(identifier.resource);
+		if (resourceParts === undefined) {
+			return undefined;
+		}
 		const key =
 			this.storageKeys.get(resourceKey) ??
 			(await backupKeyForResource(identifier.resource));
@@ -324,7 +344,10 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 		} catch {
 			return undefined;
 		}
-		const entry = entries.find((candidate) => candidate.key === key);
+		const entry = entries.find(
+			(candidate) =>
+				candidate.rootId === resourceParts.rootId && candidate.key === key,
+		);
 		if (entry === undefined) {
 			return undefined;
 		}
@@ -348,8 +371,16 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 	): Promise<void> {
 		const bridge = requireBridge();
 		const resourceKey = identifier.resource.toString();
+		const resourceParts = workspaceResourceParts(identifier.resource);
+		if (resourceParts === undefined) {
+			throw Object.freeze({
+				code: "BACKUP_UNAVAILABLE",
+				message: "The backup store is not available for this working copy.",
+			});
+		}
 		const previous = this.index.get(resourceKey);
 		const previousStorageKey = this.storageKeys.get(resourceKey);
+		const previousStorageRootId = this.storageRootIds.get(resourceKey);
 		this.index.set(resourceKey, { identifier, versionId });
 		try {
 			if (isCancelled(token)) {
@@ -369,13 +400,16 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 				baselineSha256,
 			);
 			const wireKey = await backupKeyForResource(identifier.resource);
-			await bridge.backupWrite(wireKey, payload);
+			await bridge.backupWrite(resourceParts.rootId, wireKey, payload);
 			if (previousStorageKey !== undefined && previousStorageKey !== wireKey) {
 				try {
-					await bridge.backupDiscard(previousStorageKey);
+					await bridge.backupDiscard(
+						previousStorageRootId ?? resourceParts.rootId,
+						previousStorageKey,
+					);
 				} catch (error) {
 					try {
-						await bridge.backupDiscard(wireKey);
+						await bridge.backupDiscard(resourceParts.rootId, wireKey);
 					} catch {
 						// Preserve the original migration failure. A later read still
 						// prefers the old, already-indexed entry for this process.
@@ -384,9 +418,11 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 				}
 			}
 			this.storageKeys.set(resourceKey, wireKey);
+			this.storageRootIds.set(resourceKey, resourceParts.rootId);
 		} catch (error) {
 			this.rollbackIndex(resourceKey, previous);
 			this.rollbackStorageKey(resourceKey, previousStorageKey);
+			this.rollbackStorageRootId(resourceKey, previousStorageRootId);
 			throw error;
 		}
 	}
@@ -399,15 +435,23 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 		const resourceKey = identifier.resource.toString();
 		const previous = this.index.get(resourceKey);
 		const previousStorageKey = this.storageKeys.get(resourceKey);
+		const previousStorageRootId = this.storageRootIds.get(resourceKey);
+		const resourceParts = workspaceResourceParts(identifier.resource);
 		this.index.delete(resourceKey);
 		this.storageKeys.delete(resourceKey);
+		this.storageRootIds.delete(resourceKey);
 		try {
 			const wireKey =
 				previousStorageKey ?? (await backupKeyForResource(identifier.resource));
-			await bridge.backupDiscard(wireKey);
+			const rootId = previousStorageRootId ?? resourceParts?.rootId;
+			if (rootId === undefined) {
+				return;
+			}
+			await bridge.backupDiscard(rootId, wireKey);
 		} catch (error) {
 			this.rollbackIndex(resourceKey, previous);
 			this.rollbackStorageKey(resourceKey, previousStorageKey);
+			this.rollbackStorageRootId(resourceKey, previousStorageRootId);
 			throw error;
 		}
 	}
@@ -420,18 +464,24 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 		if (except === undefined || except.length === 0) {
 			const previousEntries = new Map(this.index);
 			const previousStorageKeys = new Map(this.storageKeys);
+			const previousStorageRootIds = new Map(this.storageRootIds);
 			this.index.clear();
 			this.storageKeys.clear();
+			this.storageRootIds.clear();
 			try {
 				await bridge.backupDiscardAll();
 			} catch (error) {
 				this.index.clear();
 				this.storageKeys.clear();
+				this.storageRootIds.clear();
 				for (const [resourceKey, entry] of previousEntries) {
 					this.index.set(resourceKey, entry);
 				}
 				for (const [resourceKey, key] of previousStorageKeys) {
 					this.storageKeys.set(resourceKey, key);
+				}
+				for (const [resourceKey, rootId] of previousStorageRootIds) {
+					this.storageRootIds.set(resourceKey, rootId);
 				}
 				throw error;
 			}
@@ -460,16 +510,13 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 	}
 
 	/**
-	 * Rust deliberately issues a fresh, unguessable root capability UUID each
-	 * time a folder is authorized. A persisted backup therefore cannot reuse
-	 * its old `plain-workspace://<root-id>/...` authority after a real process
-	 * restart. In a single-root workspace the replacement is unambiguous: keep
-	 * the relative path and bind it to the sole currently authorized root. For
-	 * multi-root workspaces an old authority is skipped rather than guessed;
-	 * restoring it against the wrong root would be worse than failing closed.
+	 * Rust returns the current authorized root id that owns each persisted
+	 * entry. The payload's old URI authority is therefore replaced only by
+	 * that exact native mapping; root order and root count never participate.
 	 */
 	private async currentIdentifier(
 		stored: IWorkingCopyIdentifier,
+		storageRootId: string,
 	): Promise<IWorkingCopyIdentifier | undefined> {
 		const bridge = requireBridge();
 		let snapshot: WorkspaceSnapshot;
@@ -483,19 +530,11 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 		if (stored.resource.scheme !== "plain-workspace") {
 			return stored;
 		}
-		if (
-			snapshot.roots.some((root) => root.rootId === stored.resource.authority)
-		) {
-			return stored;
-		}
-		if (snapshot.roots.length !== 1) {
+		if (!snapshot.roots.some((root) => root.rootId === storageRootId)) {
 			return undefined;
 		}
 		return Object.freeze({
-			resource: remapResourceAuthority(
-				stored.resource,
-				snapshot.roots[0]!.rootId,
-			),
+			resource: remapResourceAuthority(stored.resource, storageRootId),
 			typeId: stored.typeId,
 		});
 	}
@@ -569,6 +608,17 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 			this.storageKeys.delete(resourceKey);
 		} else {
 			this.storageKeys.set(resourceKey, previous);
+		}
+	}
+
+	private rollbackStorageRootId(
+		resourceKey: string,
+		previous: string | undefined,
+	): void {
+		if (previous === undefined) {
+			this.storageRootIds.delete(resourceKey);
+		} else {
+			this.storageRootIds.set(resourceKey, previous);
 		}
 	}
 }

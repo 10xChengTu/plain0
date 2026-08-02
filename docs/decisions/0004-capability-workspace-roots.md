@@ -13,6 +13,7 @@ Tauri `plugin-fs` 的 scope 适合限制通用前端文件 API，但其核心仍
 
 - 每个 Tauri 窗口持有独立 `WorkspaceScope`；root 只能由 Rust 原生目录选择器授权，WebView 不得传入任意绝对路径创建授权。
 - 每个授权 root 打开并持有独立 `cap_std::fs::Dir`，以随机 opaque `rootId` 暴露给前端。相同目录身份的重复授权复用 id；重叠 root 可以独立存在。
+- working-copy backup 的持久化身份与随机 `rootId` 分离：Rust 对每个已授权 root 的 canonical path 计算域隔离、长度前缀的稳定单 root digest，并只在应用数据目录内部用作分区名。backup IPC 必须携带当前 rootId；Rust 校验授权后写入该 root 分区，枚举时把分区精确映射回当前 rootId。禁止用 roots 数量、授权顺序、显示名或 `roots[0]` 重挂内容；root topology 变化只改变当前可见分区集合，不迁移或错挂其他 root 的脏内容。
 - IPC 文件路径固定为 `(rootId, relativePath)`。`relativePath` 使用 `/` wire format；解析器拒绝 absolute/prefix、`.`、`..`、空组件、NUL、反斜杠及 Windows drive/UNC/device/ADS 歧义，并设置长度与段数上限。
 - 所有 stat、read、create、rename、copy、move 和 delete 都通过 root `Dir` 或从它打开的子目录 handle 执行。canonical path 只作为 Rust 私有的显示、文件身份去重和 watcher 元数据。
 - 普通 rename 只允许同 root 且默认 no-clobber；跨 root move 只接受两个不同且明确授权的 rootId，并在同一次 mutation gate 内执行 copy + published receipt 验收 + verified delete。同 root 永远走原子 rename，不能退化为 copy/delete。

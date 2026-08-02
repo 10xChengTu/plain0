@@ -17,12 +17,20 @@ import {
 } from "../../app/services/plain-workspace-backup-service";
 
 interface FakeBridgeState {
-	readonly writes: Array<{ key: string; bytes: Uint8Array }>;
-	readonly discards: string[];
+	readonly writes: Array<{ rootId: string; key: string; bytes: Uint8Array }>;
+	readonly discards: Array<{ rootId: string; key: string }>;
 	discardAllCalls: number;
 	readAllCalls: number;
-	readonly entries: Map<string, Uint8Array>;
+	readonly entries: Map<
+		string,
+		{ rootId: string; key: string; bytes: Uint8Array }
+	>;
 }
+
+const ROOT_ID = "00000000-0000-4000-8000-000000000101";
+const SECOND_ROOT_ID = "00000000-0000-4000-8000-000000000102";
+const backupMapKey = (rootId: string, key: string): string =>
+	`${rootId}\0${key}`;
 
 function notImplemented(): never {
 	throw new Error("not implemented in fake bridge for this test");
@@ -66,19 +74,19 @@ function createFakeBridge(overrides: Partial<PlainBridge> = {}): {
 		workspaceSearchTextPoll: notImplemented,
 		workspaceSearchTextCancel: notImplemented,
 		workspaceSearchTextWatch: notImplemented,
-		async backupWrite(key, bytes) {
-			state.writes.push({ key, bytes });
-			state.entries.set(key, bytes);
+		async backupWrite(rootId, key, bytes) {
+			state.writes.push({ rootId, key, bytes });
+			state.entries.set(backupMapKey(rootId, key), { rootId, key, bytes });
 		},
 		async backupReadAll(): Promise<readonly BackupEntry[]> {
 			state.readAllCalls += 1;
-			return [...state.entries.entries()].map(([key, bytes]) =>
-				Object.freeze({ key, bytes }),
+			return [...state.entries.values()].map(({ rootId, key, bytes }) =>
+				Object.freeze({ rootId, key, bytes }),
 			);
 		},
-		async backupDiscard(key) {
-			state.discards.push(key);
-			state.entries.delete(key);
+		async backupDiscard(rootId, key) {
+			state.discards.push({ rootId, key });
+			state.entries.delete(backupMapKey(rootId, key));
 		},
 		async backupDiscardAll() {
 			state.discardAllCalls += 1;
@@ -190,7 +198,7 @@ describe("PlainWorkingCopyBackupService", () => {
 		const { bridge } = createFakeBridge();
 		configurePlainWorkingCopyBackupBridge(bridge);
 		const service = new PlainWorkingCopyBackupService();
-		const identifier = identifierFor("plain-workspace://root/a.txt");
+		const identifier = identifierFor(`plain-workspace://${ROOT_ID}/a.txt`);
 
 		expect(service.hasBackupSync(identifier)).toBe(false);
 		await service.backup(identifier, readableFromString("hello"), 1);
@@ -206,7 +214,7 @@ describe("PlainWorkingCopyBackupService", () => {
 		const { bridge, state } = createFakeBridge();
 		configurePlainWorkingCopyBackupBridge(bridge);
 		const service = new PlainWorkingCopyBackupService();
-		const identifier = identifierFor("plain-workspace://root/a.txt");
+		const identifier = identifierFor(`plain-workspace://${ROOT_ID}/a.txt`);
 
 		// First: a successful backup establishes a known-good baseline entry.
 		await service.backup(identifier, readableFromString("first"), 1);
@@ -217,12 +225,12 @@ describe("PlainWorkingCopyBackupService", () => {
 		// version, nor lose the fact that a backup still exists at all.
 		let shouldFail = true;
 		const failingBridge = createFakeBridge({
-			backupWrite: async (key, bytes) => {
+			backupWrite: async (rootId, key, bytes) => {
 				if (shouldFail) {
 					throw new Error("disk full");
 				}
-				state.writes.push({ key, bytes });
-				state.entries.set(key, bytes);
+				state.writes.push({ rootId, key, bytes });
+				state.entries.set(backupMapKey(rootId, key), { rootId, key, bytes });
 			},
 		});
 		configurePlainWorkingCopyBackupBridge(failingBridge.bridge);
@@ -234,7 +242,7 @@ describe("PlainWorkingCopyBackupService", () => {
 
 		// A backup for a resource with *no* prior entry that then fails must
 		// roll all the way back to "no entry", not a stale ghost entry.
-		const neverBackedUp = identifierFor("plain-workspace://root/b.txt");
+		const neverBackedUp = identifierFor(`plain-workspace://${ROOT_ID}/b.txt`);
 		await expect(
 			service.backup(neverBackedUp, readableFromString("x"), 1),
 		).rejects.toThrow("disk full");
@@ -247,7 +255,7 @@ describe("PlainWorkingCopyBackupService", () => {
 		const { bridge } = createFakeBridge();
 		configurePlainWorkingCopyBackupBridge(bridge);
 		const service = new PlainWorkingCopyBackupService();
-		const identifier = identifierFor("plain-workspace://root/a.txt");
+		const identifier = identifierFor(`plain-workspace://${ROOT_ID}/a.txt`);
 		await service.backup(identifier, readableFromString("hello"), 1);
 
 		const { bridge: failingDiscardBridge } = createFakeBridge({
@@ -266,8 +274,8 @@ describe("PlainWorkingCopyBackupService", () => {
 		const { bridge, state } = createFakeBridge();
 		configurePlainWorkingCopyBackupBridge(bridge);
 		const service = new PlainWorkingCopyBackupService();
-		const first = identifierFor("plain-workspace://root/a.txt");
-		const second = identifierFor("plain-workspace://root/b.txt");
+		const first = identifierFor(`plain-workspace://${ROOT_ID}/a.txt`);
+		const second = identifierFor(`plain-workspace://${ROOT_ID}/b.txt`);
 
 		await service.backup(first, readableFromString("one"));
 		await service.backup(first, readableFromString("one-again"));
@@ -287,7 +295,10 @@ describe("PlainWorkingCopyBackupService", () => {
 		const { bridge } = createFakeBridge();
 		configurePlainWorkingCopyBackupBridge(bridge);
 		const service = new PlainWorkingCopyBackupService();
-		const identifier = identifierFor("plain-workspace://root/notes.txt", "");
+		const identifier = identifierFor(
+			`plain-workspace://${ROOT_ID}/notes.txt`,
+			"",
+		);
 		const meta = { mtime: 12_345, orphaned: false };
 
 		await service.backup(
@@ -310,7 +321,7 @@ describe("PlainWorkingCopyBackupService", () => {
 		);
 	});
 
-	it("remaps a persisted single-root backup from its expired capability UUID and discards the original storage key after recovery", async () => {
+	it("remaps a persisted backup only to the exact current root returned by native storage", async () => {
 		const oldRootId = "00000000-0000-4000-8000-000000000101";
 		const newRootId = "00000000-0000-4000-8000-000000000201";
 		const oldVersion = `wv1:${"a".repeat(64)}`;
@@ -345,7 +356,7 @@ describe("PlainWorkingCopyBackupService", () => {
 			1,
 			{ etag: oldVersion, orphaned: false },
 		);
-		const storedKey = [...writerState.entries.keys()][0]!;
+		const storedKey = [...writerState.entries.values()][0]!.key;
 
 		const { bridge: readerBridge } = createFakeBridge({
 			workspaceSnapshot: async () =>
@@ -361,12 +372,12 @@ describe("PlainWorkingCopyBackupService", () => {
 					]),
 				}),
 			backupReadAll: async () =>
-				[...writerState.entries.entries()].map(([key, bytes]) =>
-					Object.freeze({ key, bytes }),
+				[...writerState.entries.values()].map(({ key, bytes }) =>
+					Object.freeze({ rootId: newRootId, key, bytes }),
 				),
-			backupDiscard: async (key) => {
-				writerState.discards.push(key);
-				writerState.entries.delete(key);
+			backupDiscard: async (rootId, key) => {
+				writerState.discards.push({ rootId, key });
+				writerState.entries.delete(backupMapKey(oldRootId, key));
 			},
 			workspaceReadFile: async () => readReceipt(newVersion, currentDiskBytes),
 		});
@@ -390,15 +401,77 @@ describe("PlainWorkingCopyBackupService", () => {
 		expect(conflicted?.meta).toMatchObject({ etag: oldVersion });
 
 		await reader.discardBackup(currentIdentifier!);
-		expect(writerState.discards).toEqual([storedKey]);
+		expect(writerState.discards).toEqual([
+			{ rootId: newRootId, key: storedKey },
+		]);
 		expect(writerState.entries.size).toBe(0);
+	});
+
+	it("keeps same-path multi-root backups distinct when both capability ids rotate", async () => {
+		const { bridge: writerBridge, state } = createFakeBridge();
+		configurePlainWorkingCopyBackupBridge(writerBridge);
+		const writer = new PlainWorkingCopyBackupService();
+		await writer.backup(
+			identifierFor(`plain-workspace://${ROOT_ID}/shared.txt`),
+			readableFromString("PRIMARY UNSAVED"),
+		);
+		await writer.backup(
+			identifierFor(`plain-workspace://${SECOND_ROOT_ID}/shared.txt`),
+			readableFromString("SECONDARY UNSAVED"),
+		);
+
+		const currentPrimary = "00000000-0000-4000-8000-000000000201";
+		const currentSecondary = "00000000-0000-4000-8000-000000000202";
+		const currentRootFor = (oldRootId: string): string =>
+			oldRootId === ROOT_ID ? currentPrimary : currentSecondary;
+		const persistedEntries = (): readonly BackupEntry[] =>
+			[...state.entries.values()].map(({ rootId, key, bytes }) =>
+				Object.freeze({ rootId: currentRootFor(rootId), key, bytes }),
+			);
+		const { bridge: readerBridge } = createFakeBridge({
+			workspaceSnapshot: async () =>
+				Object.freeze({
+					workspaceId: "00000000-0000-4000-8000-000000000301",
+					revision: 2,
+					roots: Object.freeze([
+						Object.freeze({
+							rootId: currentPrimary,
+							displayName: "primary",
+							uri: `plain-workspace://${currentPrimary}/`,
+						}),
+						Object.freeze({
+							rootId: currentSecondary,
+							displayName: "secondary",
+							uri: `plain-workspace://${currentSecondary}/`,
+						}),
+					]),
+				}),
+			backupReadAll: async () => persistedEntries(),
+		});
+		configurePlainWorkingCopyBackupBridge(readerBridge);
+		const reader = new PlainWorkingCopyBackupService();
+		const backups = [...(await reader.getBackups())].sort((left, right) =>
+			left.resource.authority.localeCompare(right.resource.authority),
+		);
+		expect(backups.map(({ resource }) => resource.toString())).toEqual([
+			`plain-workspace://${currentPrimary}/shared.txt`,
+			`plain-workspace://${currentSecondary}/shared.txt`,
+		]);
+		expect(await readValueToString(await reader.resolve(backups[0]!))).toBe(
+			"PRIMARY UNSAVED",
+		);
+		expect(await readValueToString(await reader.resolve(backups[1]!))).toBe(
+			"SECONDARY UNSAVED",
+		);
 	});
 
 	it("resolve() returns undefined for a resource with no backup", async () => {
 		const { bridge } = createFakeBridge();
 		configurePlainWorkingCopyBackupBridge(bridge);
 		const service = new PlainWorkingCopyBackupService();
-		const identifier = identifierFor("plain-workspace://root/missing.txt");
+		const identifier = identifierFor(
+			`plain-workspace://${ROOT_ID}/missing.txt`,
+		);
 		expect(await service.resolve(identifier)).toBeUndefined();
 	});
 
@@ -420,7 +493,7 @@ describe("PlainWorkingCopyBackupService", () => {
 		const { bridge, state } = createFakeBridge();
 		configurePlainWorkingCopyBackupBridge(bridge);
 		const service = new PlainWorkingCopyBackupService();
-		const identifier = identifierFor("plain-workspace://root/big.txt");
+		const identifier = identifierFor(`plain-workspace://${ROOT_ID}/big.txt`);
 		const preambleBytes = new TextEncoder().encode(
 			`${JSON.stringify({
 				resource: identifier.resource.toString(),
@@ -448,8 +521,8 @@ describe("PlainWorkingCopyBackupService", () => {
 		const { bridge, state } = createFakeBridge();
 		configurePlainWorkingCopyBackupBridge(bridge);
 		const service = new PlainWorkingCopyBackupService();
-		const first = identifierFor("plain-workspace://root/a.txt");
-		const second = identifierFor("plain-workspace://root/b.txt");
+		const first = identifierFor(`plain-workspace://${ROOT_ID}/a.txt`);
+		const second = identifierFor(`plain-workspace://${ROOT_ID}/b.txt`);
 		await service.backup(first, readableFromString("1"));
 		await service.backup(second, readableFromString("2"));
 
@@ -477,8 +550,8 @@ describe("PlainWorkingCopyBackupService", () => {
 		const { bridge, state } = createFakeBridge();
 		configurePlainWorkingCopyBackupBridge(bridge);
 		const service = new PlainWorkingCopyBackupService();
-		const kept = identifierFor("plain-workspace://root/keep.txt");
-		const dropped = identifierFor("plain-workspace://root/drop.txt");
+		const kept = identifierFor(`plain-workspace://${ROOT_ID}/keep.txt`);
+		const dropped = identifierFor(`plain-workspace://${ROOT_ID}/drop.txt`);
 		await service.backup(kept, readableFromString("keep"));
 		await service.backup(dropped, readableFromString("drop"));
 

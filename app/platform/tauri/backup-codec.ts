@@ -3,11 +3,14 @@ import type { BackupEntry } from "./contracts";
 const MAX_BACKUP_KEY_BYTES = 128;
 const MAX_BACKUP_ENTRY_BYTES = 8 * 1_024 * 1_024;
 const MAX_BACKUP_ENTRIES = 4_096;
-const PLBK_HEADER_BYTES = 9;
-const PLBA_HEADER_BYTES = 8;
+const ROOT_ID_BYTES = 36;
+const PLB2_HEADER_BYTES = 4 + ROOT_ID_BYTES + 1 + 4;
+const PLA2_HEADER_BYTES = 8;
 /** The wire frame is capped at 8 MiB including its header and key bytes. */
 const MAX_BACKUP_FRAME_BYTES = 8 * 1_024 * 1_024;
 const BACKUP_KEY_PATTERN = /^[a-z0-9-]{1,128}$/;
+const ROOT_ID_PATTERN =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const CONTRACT_ERROR_MESSAGE =
 	"Native IPC returned a payload that violates the Plain backup contract.";
 
@@ -66,10 +69,24 @@ function frozenBackupKeyOrViolation(key: unknown): string {
 	return key;
 }
 
+function frozenRootIdOrViolation(rootId: unknown): string {
+	if (typeof rootId !== "string" || !ROOT_ID_PATTERN.test(rootId)) {
+		return requestViolation(
+			"INVALID_BACKUP_REQUEST",
+			"The backup request is invalid.",
+		);
+	}
+	return rootId;
+}
+
 export function frozenBackupDiscardRequest(
+	rootId: unknown,
 	key: unknown,
-): Readonly<{ key: string }> {
-	return Object.freeze({ key: frozenBackupKeyOrViolation(key) });
+): Readonly<{ rootId: string; key: string }> {
+	return Object.freeze({
+		rootId: frozenRootIdOrViolation(rootId),
+		key: frozenBackupKeyOrViolation(key),
+	});
 }
 
 /**
@@ -155,9 +172,11 @@ function backupContentSnapshot(value: unknown): Uint8Array {
  * so both transports reject the same hostile inputs identically.
  */
 export function frozenBackupWriteInputs(
+	rootId: unknown,
 	key: unknown,
 	bytes: unknown,
-): Readonly<{ key: string; content: Uint8Array }> {
+): Readonly<{ rootId: string; key: string; content: Uint8Array }> {
+	const validRootId = frozenRootIdOrViolation(rootId);
 	const validKey = frozenBackupKeyOrViolation(key);
 	const content = backupContentSnapshot(bytes);
 	if (content.byteLength > MAX_BACKUP_ENTRY_BYTES) {
@@ -166,27 +185,36 @@ export function frozenBackupWriteInputs(
 			"The backup payload exceeds the supported size limit.",
 		);
 	}
-	return Object.freeze({ key: validKey, content });
+	return Object.freeze({ rootId: validRootId, key: validKey, content });
 }
 
 /**
- * Encodes a `backup_write` request as a `PLBK` frame: magic (4 bytes) + key
- * length (1 byte) + content length (4 bytes, big-endian) + key bytes +
- * content bytes. There is no version token: a backup write always publishes
- * over whatever previously existed for the same key.
+ * Encodes a `backup_write` request as a `PLB2` frame: magic (4 bytes) +
+ * canonical UUID-v4 root id (36 ASCII bytes) + key length (1 byte) + content
+ * length (4 bytes, big-endian) + key bytes + content bytes.
  */
 export function encodeBackupWriteRequest(
+	rootId: unknown,
 	key: unknown,
 	bytes: unknown,
 ): Uint8Array {
-	const { key: validKey, content } = frozenBackupWriteInputs(key, bytes);
+	const {
+		rootId: validRootId,
+		key: validKey,
+		content,
+	} = frozenBackupWriteInputs(rootId, key, bytes);
+	const rootBytes = new TextEncoder().encode(validRootId);
 	const keyBytes = new TextEncoder().encode(validKey);
-	if (keyBytes.byteLength < 1 || keyBytes.byteLength > MAX_BACKUP_KEY_BYTES) {
+	if (
+		rootBytes.byteLength !== ROOT_ID_BYTES ||
+		keyBytes.byteLength < 1 ||
+		keyBytes.byteLength > MAX_BACKUP_KEY_BYTES
+	) {
 		return violation();
 	}
 
 	const frameLength =
-		PLBK_HEADER_BYTES + keyBytes.byteLength + content.byteLength;
+		PLB2_HEADER_BYTES + keyBytes.byteLength + content.byteLength;
 	if (frameLength > MAX_BACKUP_FRAME_BYTES) {
 		return requestViolation(
 			"BACKUP_TOO_LARGE",
@@ -196,11 +224,12 @@ export function encodeBackupWriteRequest(
 
 	const frame = new Uint8Array(frameLength);
 	const view = new DataView(frame.buffer);
-	frame.set([0x50, 0x4c, 0x42, 0x4b], 0); // "PLBK"
-	view.setUint8(4, keyBytes.byteLength);
-	view.setUint32(5, content.byteLength, false);
-	frame.set(keyBytes, PLBK_HEADER_BYTES);
-	frame.set(content, PLBK_HEADER_BYTES + keyBytes.byteLength);
+	frame.set([0x50, 0x4c, 0x42, 0x32], 0); // "PLB2"
+	frame.set(rootBytes, 4);
+	view.setUint8(4 + ROOT_ID_BYTES, keyBytes.byteLength);
+	view.setUint32(5 + ROOT_ID_BYTES, content.byteLength, false);
+	frame.set(keyBytes, PLB2_HEADER_BYTES);
+	frame.set(content, PLB2_HEADER_BYTES + keyBytes.byteLength);
 	return frame;
 }
 
@@ -220,7 +249,7 @@ function exactBackupFrameBytes(value: unknown): Uint8Array {
 			lengthDescriptor === undefined ||
 			!("value" in lengthDescriptor) ||
 			!Number.isSafeInteger(lengthDescriptor.value) ||
-			lengthDescriptor.value < PLBA_HEADER_BYTES ||
+			lengthDescriptor.value < PLA2_HEADER_BYTES ||
 			lengthDescriptor.value > MAX_BACKUP_FRAME_BYTES * MAX_BACKUP_ENTRIES
 		) {
 			return violation();
@@ -266,7 +295,7 @@ function exactBackupFrameBytes(value: unknown): Uint8Array {
 	if (
 		typeof byteLength !== "number" ||
 		!Number.isSafeInteger(byteLength) ||
-		byteLength < PLBA_HEADER_BYTES
+		byteLength < PLA2_HEADER_BYTES
 	) {
 		return violation();
 	}
@@ -276,20 +305,20 @@ function exactBackupFrameBytes(value: unknown): Uint8Array {
 }
 
 /**
- * Decodes a `backup_read_all` response frame: `PLBA` magic (4 bytes) + entry
- * count (4 bytes, big-endian), then for each entry: key length (1 byte) +
- * content length (4 bytes, big-endian) + key bytes + content bytes.
+ * Decodes a `backup_read_all` response frame: `PLA2` magic (4 bytes) + entry
+ * count (4 bytes, big-endian), then for each entry: root id (36 ASCII bytes)
+ * + key length (1 byte) + content length (4 bytes, big-endian) + bytes.
  */
 export function decodeBackupReadAllResult(
 	value: unknown,
 ): readonly BackupEntry[] {
 	const frame = exactBackupFrameBytes(value);
 	if (
-		frame.byteLength < PLBA_HEADER_BYTES ||
+		frame.byteLength < PLA2_HEADER_BYTES ||
 		frame[0] !== 0x50 ||
 		frame[1] !== 0x4c ||
-		frame[2] !== 0x42 ||
-		frame[3] !== 0x41
+		frame[2] !== 0x41 ||
+		frame[3] !== 0x32
 	) {
 		return violation();
 	}
@@ -301,11 +330,20 @@ export function decodeBackupReadAllResult(
 
 	const entries: BackupEntry[] = [];
 	const seenKeys = new Set<string>();
-	let offset = PLBA_HEADER_BYTES;
+	let offset = PLA2_HEADER_BYTES;
 	for (let index = 0; index < entryCount; index += 1) {
-		if (offset + 5 > frame.byteLength) {
+		if (offset + ROOT_ID_BYTES + 5 > frame.byteLength) {
 			return violation();
 		}
+		let rootId: string;
+		try {
+			rootId = new TextDecoder("utf-8", { fatal: true }).decode(
+				frame.slice(offset, offset + ROOT_ID_BYTES),
+			);
+		} catch {
+			return violation();
+		}
+		offset += ROOT_ID_BYTES;
 		const keyLength = frame[offset]!;
 		const contentLength = view.getUint32(offset + 1, false);
 		offset += 5;
@@ -322,12 +360,22 @@ export function decodeBackupReadAllResult(
 		const content = frame.slice(offset, offset + contentLength);
 		offset += contentLength;
 
-		const key = new TextDecoder("utf-8", { fatal: true }).decode(keyBytes);
-		if (!isBackupKey(key) || seenKeys.has(key)) {
+		let key: string;
+		try {
+			key = new TextDecoder("utf-8", { fatal: true }).decode(keyBytes);
+		} catch {
 			return violation();
 		}
-		seenKeys.add(key);
-		entries.push(Object.freeze({ key, bytes: content }));
+		const compositeKey = `${rootId}\0${key}`;
+		if (
+			!ROOT_ID_PATTERN.test(rootId) ||
+			!isBackupKey(key) ||
+			seenKeys.has(compositeKey)
+		) {
+			return violation();
+		}
+		seenKeys.add(compositeKey);
+		entries.push(Object.freeze({ rootId, key, bytes: content }));
 	}
 	if (offset !== frame.byteLength) {
 		return violation();

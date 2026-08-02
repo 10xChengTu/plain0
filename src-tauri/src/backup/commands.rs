@@ -15,9 +15,9 @@ pub(crate) async fn backup_write(
     request: tauri::ipc::Request<'_>,
 ) -> Result<(), CommandError> {
     let frame = BackupWriteFrame::parse_invoke_body(request.body())?;
-    let (key, content) = frame.into_parts();
+    let (root_id, key, content) = frame.into_parts();
     backup
-        .write(workspace.inner(), window.label(), key, content)
+        .write(workspace.inner(), window.label(), root_id, key, content)
         .await
 }
 
@@ -41,8 +41,9 @@ pub(crate) async fn backup_discard(
     workspace: State<'_, WorkspaceService>,
     request: BackupDiscardRequest,
 ) -> Result<(), CommandError> {
+    let (root_id, key) = request.into_parts();
     backup
-        .discard(workspace.inner(), window.label(), request.into_key())
+        .discard(workspace.inner(), window.label(), root_id, key)
         .await
 }
 
@@ -81,7 +82,10 @@ mod tests {
 
     #[test]
     fn read_all_response_uses_raw_ipc_bytes_instead_of_json() {
-        let frame = encode_read_all_frame(&[("k".to_owned(), vec![1, 2, 3])]).unwrap();
+        let root_id =
+            crate::workspace::RootId::parse_v4_wire("00000000-0000-4000-8000-000000000001")
+                .unwrap();
+        let frame = encode_read_all_frame(&[(root_id, "k".to_owned(), vec![1, 2, 3])]).unwrap();
         match tauri::ipc::Response::new(frame.clone()).body().unwrap() {
             InvokeResponseBody::Raw(body) => assert_eq!(body, frame),
             InvokeResponseBody::Json(_) => panic!("backup entries must not be JSON serialized"),

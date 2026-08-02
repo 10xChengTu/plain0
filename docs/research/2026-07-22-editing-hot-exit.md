@@ -57,6 +57,8 @@
 
 ### 决策 3：Plain backup 域（Rust 权威）
 
+> 2026-08-03 F160 修订：下述 S4/S5 的“整组 roots 稳定身份目录”只描述 F030 当时实现，现已由 `docs/architecture.md` 与 ADR 0004 的稳定单 root 分区合同取代。原因是整组目录在多根下既无法把旧随机 authority 精确映射到成员 root，也会在增删 root 后让未变化 root 的脏内容暂时不可达；F160 的新协议让每条 entry 携带当前 rootId，由 Rust 内部稳定单 root identity 决定存储与重映射，绝不再做单根猜测。
+
 - 新建 `src-tauri/src/backup/`：窗口绑定的 backup store，落在 Tauri `app_local_data_dir()/backups/<identity>/` 下，目录经 `Dir::open_ambient_dir` 打开为 capability 后全部 handle-relative 操作；写入复用 staged 原子写范式；批量枚举/读取/丢弃各配严格 DTO；窗口销毁清理挂起句柄（内容保留，供重启恢复）。
 - **目录身份（S4 实施后修正）**：S4 首版以会话内随机 `workspaceId` 作目录键，但该 id 不跨应用重启，无法支撑「重启后恢复」这一 F030 acceptance。S5 修正为 Rust 内部派生的**稳定 workspace 身份**：对已授权 roots 的 canonical 路径集合排序后做 SHA-256（十六进制小写作目录名）。canonical 路径与哈希只在 Rust 内部使用、不进 WebView；同一组 roots 重开得到同一身份，topology 变化（增删根）产生新身份、旧身份下的 backup 自然不可达（与上游 workspace identity 变更语义一致）；EMPTY workspace 无身份，backup 命令维持 `BACKUP_UNAVAILABLE`。
 - 命令闭集（预计）：`backup_write`、`backup_read_all`（启动一次性枚举+读取）、`backup_discard`、`backup_discard_all`；大小上限沿用 8 MiB/条，超限拒绝并可见失败。

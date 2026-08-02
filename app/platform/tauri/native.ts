@@ -419,8 +419,8 @@ export function createNativeBridge(): PlainBridge {
 				unlisten?.();
 			};
 		},
-		backupWrite: async (key, bytes) => {
-			const frame = encodeBackupWriteRequest(key, bytes);
+		backupWrite: async (rootId, key, bytes) => {
+			const frame = encodeBackupWriteRequest(rootId, key, bytes);
 			decodeBackupVoid(await invoke<unknown>("backup_write", frame));
 		},
 		backupReadAll: async () => {
@@ -430,8 +430,8 @@ export function createNativeBridge(): PlainBridge {
 				}),
 			);
 		},
-		backupDiscard: async (key) => {
-			const request = frozenBackupDiscardRequest(key);
+		backupDiscard: async (rootId, key) => {
+			const request = frozenBackupDiscardRequest(rootId, key);
 			decodeBackupVoid(await invoke<unknown>("backup_discard", { request }));
 		},
 		backupDiscardAll: async () => {

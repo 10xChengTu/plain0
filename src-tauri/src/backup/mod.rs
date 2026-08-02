@@ -75,6 +75,10 @@ pub(crate) fn invalid_backup_key() -> CommandError {
     CommandError::new("INVALID_BACKUP_KEY", "The backup key is invalid.")
 }
 
+pub(crate) fn invalid_backup_request() -> CommandError {
+    CommandError::new("INVALID_BACKUP_REQUEST", "The backup request is invalid.")
+}
+
 pub(crate) fn backup_too_large() -> CommandError {
     CommandError::new(
         "BACKUP_TOO_LARGE",

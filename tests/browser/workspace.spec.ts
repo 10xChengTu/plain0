@@ -551,46 +551,49 @@ async function installNativeIpcMock(
 					),
 				);
 			};
-			const plbkFrame = (
+			const plb2Frame = (
 				value: Uint8Array,
-			): { key: string; content: Uint8Array } => {
+			): { rootId: string; key: string; content: Uint8Array } => {
 				if (
-					value.byteLength < 9 ||
+					value.byteLength < 45 ||
 					value[0] !== 0x50 ||
 					value[1] !== 0x4c ||
 					value[2] !== 0x42 ||
-					value[3] !== 0x4b
+					value[3] !== 0x32
 				) {
-					throw new Error("Malformed PLBK browser test frame.");
+					throw new Error("Malformed PLB2 browser test frame.");
 				}
 				const view = new DataView(
 					value.buffer,
 					value.byteOffset,
 					value.byteLength,
 				);
-				const keyLength = value[4]!;
-				const contentLength = view.getUint32(5, false);
-				if (9 + keyLength + contentLength !== value.byteLength) {
-					throw new Error("Malformed PLBK browser test frame length.");
+				const frameRootId = decoder.decode(value.slice(4, 40));
+				const keyLength = value[40]!;
+				const contentLength = view.getUint32(41, false);
+				if (45 + keyLength + contentLength !== value.byteLength) {
+					throw new Error("Malformed PLB2 browser test frame length.");
 				}
-				const key = decoder.decode(value.slice(9, 9 + keyLength));
-				const content = value.slice(9 + keyLength);
-				return { key, content };
+				const key = decoder.decode(value.slice(45, 45 + keyLength));
+				const content = value.slice(45 + keyLength);
+				return { rootId: frameRootId, key, content };
 			};
 			const encodeBackupReadAllFrame = (): Uint8Array => {
 				const entries = [...backupEntries.entries()];
 				let total = 8;
 				const encoded = entries.map(([key, bytes]) => {
 					const keyBytes = encoder.encode(key);
-					total += 5 + keyBytes.byteLength + bytes.byteLength;
+					total += 36 + 5 + keyBytes.byteLength + bytes.byteLength;
 					return { keyBytes, bytes };
 				});
 				const frame = new Uint8Array(total);
 				const view = new DataView(frame.buffer);
-				frame.set([0x50, 0x4c, 0x42, 0x41], 0); // "PLBA"
+				frame.set([0x50, 0x4c, 0x41, 0x32], 0); // "PLA2"
 				view.setUint32(4, entries.length, false);
 				let offset = 8;
 				for (const { keyBytes, bytes } of encoded) {
+					frame.set(encoder.encode(rootId), offset);
+					offset += 36;
 					frame[offset] = keyBytes.byteLength;
 					offset += 1;
 					view.setUint32(offset, bytes.byteLength, false);
@@ -2225,12 +2228,19 @@ async function installNativeIpcMock(
 					}
 					if (command === "backup_write") {
 						if (!(args instanceof Uint8Array)) {
-							throw new Error("Expected one raw PLBK browser test frame.");
+							throw new Error("Expected one raw PLB2 browser test frame.");
 						}
-						const frame = plbkFrame(args);
+						const frame = plb2Frame(args);
+						if (frame.rootId !== rootId) {
+							throw new Error("Backup targeted a foreign browser-test root.");
+						}
 						calls.push({
 							command,
-							args: { key: frame.key, contentHex: hexFromBytes(frame.content) },
+							args: {
+								rootId: frame.rootId,
+								key: frame.key,
+								contentHex: hexFromBytes(frame.content),
+							},
 						});
 						backupEntries.set(frame.key, frame.content.slice());
 						persistBackupEntries();
@@ -2665,8 +2675,10 @@ async function installNativeIpcMock(
 								: [...frame];
 						}
 						case "backup_discard": {
-							const key = (args.request as { key?: string } | undefined)?.key;
-							if (typeof key !== "string") {
+							const discard = args.request as
+								{ rootId?: string; key?: string } | undefined;
+							const key = discard?.key;
+							if (discard?.rootId !== rootId || typeof key !== "string") {
 								throw new Error("Malformed backup_discard test request.");
 							}
 							backupEntries.delete(key);
@@ -3793,6 +3805,7 @@ async function installMultiRootNativeIpcMock(
 	mode: NativeIpcMockMode = "readonly",
 	moveIncompleteScenarios: readonly TestMultiRootMoveIncompleteScenario[] = [],
 	deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],
+	persistBackupsForTest: boolean = false,
 ): Promise<void> {
 	await page.addInitScript(
 		({
@@ -3802,6 +3815,7 @@ async function installMultiRootNativeIpcMock(
 			workspaceId,
 			primaryRootId,
 			secondaryRootId,
+			persistBackupsForTest,
 		}) => {
 			type MockFile = {
 				kind: "file";
@@ -3920,53 +3934,91 @@ async function installMultiRootNativeIpcMock(
 			}
 			const encoder = new TextEncoder();
 			const decoder = new TextDecoder();
-			// This fixture never exercises a reload, so (unlike
-			// installNativeIpcMock's own hot-exit backup store) this one is
-			// purely in-memory: its only job is to let the real backup
-			// tracker's schedule/discard lifecycle, now active across every
-			// fixture, complete without hitting the closed `default:` case
-			// below whenever a multi-root test edits or saves a file.
-			const backupEntries = new Map<string, Uint8Array>();
-			const plbkFrame = (
+			// Most callers keep this purely in-memory. F160's process-boundary
+			// scenario opts into sessionStorage so a page reload can stand in for
+			// a fresh WebView while preserving the native store's root-bound data.
+			const BACKUP_STORAGE_KEY = "__plain_test_multi_root_backup_store__";
+			const loadBackupEntries = (): Map<
+				string,
+				{ rootId: string; key: string; bytes: Uint8Array }
+			> => {
+				if (!persistBackupsForTest) return new Map();
+				const raw = sessionStorage.getItem(BACKUP_STORAGE_KEY);
+				if (raw === null) return new Map();
+				try {
+					const parsed = JSON.parse(raw) as Array<
+						[string, { rootId: string; key: string; bytes: number[] }]
+					>;
+					return new Map(
+						parsed.map(([mapKey, entry]) => [
+							mapKey,
+							{ ...entry, bytes: Uint8Array.from(entry.bytes) },
+						]),
+					);
+				} catch {
+					return new Map();
+				}
+			};
+			const backupEntries = loadBackupEntries();
+			const persistBackupEntries = (): void => {
+				if (!persistBackupsForTest) return;
+				sessionStorage.setItem(
+					BACKUP_STORAGE_KEY,
+					JSON.stringify(
+						[...backupEntries.entries()].map(([mapKey, entry]) => [
+							mapKey,
+							{ ...entry, bytes: [...entry.bytes] },
+						]),
+					),
+				);
+			};
+			const backupMapKey = (entryRootId: string, key: string): string =>
+				`${entryRootId}\0${key}`;
+			const plb2Frame = (
 				value: Uint8Array,
-			): { key: string; content: Uint8Array } => {
+			): { rootId: string; key: string; content: Uint8Array } => {
 				if (
-					value.byteLength < 9 ||
+					value.byteLength < 45 ||
 					value[0] !== 0x50 ||
 					value[1] !== 0x4c ||
 					value[2] !== 0x42 ||
-					value[3] !== 0x4b
+					value[3] !== 0x32
 				) {
-					throw new Error("Malformed PLBK multi-root test frame.");
+					throw new Error("Malformed PLB2 multi-root test frame.");
 				}
 				const view = new DataView(
 					value.buffer,
 					value.byteOffset,
 					value.byteLength,
 				);
-				const keyLength = value[4]!;
-				const contentLength = view.getUint32(5, false);
-				if (9 + keyLength + contentLength !== value.byteLength) {
-					throw new Error("Malformed PLBK multi-root test frame length.");
+				const frameRootId = decoder.decode(value.slice(4, 40));
+				const keyLength = value[40]!;
+				const contentLength = view.getUint32(41, false);
+				if (45 + keyLength + contentLength !== value.byteLength) {
+					throw new Error("Malformed PLB2 multi-root test frame length.");
 				}
-				const key = decoder.decode(value.slice(9, 9 + keyLength));
-				const content = value.slice(9 + keyLength);
-				return { key, content };
+				const key = decoder.decode(value.slice(45, 45 + keyLength));
+				const content = value.slice(45 + keyLength);
+				return { rootId: frameRootId, key, content };
 			};
 			const encodeBackupReadAllFrame = (): Uint8Array => {
-				const entries = [...backupEntries.entries()];
+				const entries = [...backupEntries.values()].filter(({ rootId }) =>
+					activeRoots.has(rootId),
+				);
 				let total = 8;
-				const encoded = entries.map(([key, bytes]) => {
+				const encoded = entries.map(({ rootId, key, bytes }) => {
 					const keyBytes = encoder.encode(key);
-					total += 5 + keyBytes.byteLength + bytes.byteLength;
-					return { keyBytes, bytes };
+					total += 36 + 5 + keyBytes.byteLength + bytes.byteLength;
+					return { rootId, keyBytes, bytes };
 				});
 				const frame = new Uint8Array(total);
 				const view = new DataView(frame.buffer);
-				frame.set([0x50, 0x4c, 0x42, 0x41], 0); // "PLBA"
+				frame.set([0x50, 0x4c, 0x41, 0x32], 0); // "PLA2"
 				view.setUint32(4, entries.length, false);
 				let offset = 8;
-				for (const { keyBytes, bytes } of encoded) {
+				for (const { rootId, keyBytes, bytes } of encoded) {
+					frame.set(encoder.encode(rootId), offset);
+					offset += 36;
 					frame[offset] = keyBytes.byteLength;
 					offset += 1;
 					view.setUint32(offset, bytes.byteLength, false);
@@ -4727,10 +4779,26 @@ async function installMultiRootNativeIpcMock(
 					}
 					if (command === "backup_write") {
 						if (!(args instanceof Uint8Array)) {
-							throw new Error("Expected one raw PLBK multi-root test frame.");
+							throw new Error("Expected one raw PLB2 multi-root test frame.");
 						}
-						const frame = plbkFrame(args);
-						backupEntries.set(frame.key, frame.content.slice());
+						const frame = plb2Frame(args);
+						if (!activeRoots.has(frame.rootId)) {
+							throw rootNotAuthorized();
+						}
+						calls.push({
+							command,
+							args: {
+								rootId: frame.rootId,
+								key: frame.key,
+								contentHex: hexFromBytes(frame.content),
+							},
+						});
+						backupEntries.set(backupMapKey(frame.rootId, frame.key), {
+							rootId: frame.rootId,
+							key: frame.key,
+							bytes: frame.content.slice(),
+						});
+						persistBackupEntries();
 						return null;
 					}
 					if (args instanceof Uint8Array) {
@@ -5651,15 +5719,27 @@ async function installMultiRootNativeIpcMock(
 						case "backup_read_all":
 							return encodeBackupReadAllFrame().buffer;
 						case "backup_discard": {
-							const key = (args.request as { key?: string } | undefined)?.key;
-							if (typeof key !== "string") {
+							const discard = args.request as
+								{ rootId?: string; key?: string } | undefined;
+							const key = discard?.key;
+							if (
+								typeof discard?.rootId !== "string" ||
+								!activeRoots.has(discard.rootId) ||
+								typeof key !== "string"
+							) {
 								throw new Error("Malformed backup_discard test request.");
 							}
-							backupEntries.delete(key);
+							backupEntries.delete(backupMapKey(discard.rootId, key));
+							persistBackupEntries();
 							return null;
 						}
 						case "backup_discard_all":
-							backupEntries.clear();
+							for (const [mapKey, entry] of backupEntries) {
+								if (activeRoots.has(entry.rootId)) {
+									backupEntries.delete(mapKey);
+								}
+							}
+							persistBackupEntries();
 							return null;
 						default:
 							throw new Error(
@@ -5676,6 +5756,7 @@ async function installMultiRootNativeIpcMock(
 			workspaceId: nativeWorkspaceId,
 			primaryRootId: nativeRootId,
 			secondaryRootId: nativeSecondaryRootId,
+			persistBackupsForTest,
 		},
 	);
 }
@@ -9110,6 +9191,120 @@ test("restores an unsaved edit as a dirty editor after a simulated hot-exit relo
 	await expect(page.locator(".tabs-container .tab")).toHaveCount(0);
 
 	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("restores duplicate-path dirty editors only when each owning root is adopted across a multi-root hot-exit reload", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	await installMultiRootNativeIpcMock(page, "supported", [], [], true);
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") consoleErrors.push(message.text());
+	});
+
+	const openDuplicate = async (rootLabel: string): Promise<void> => {
+		await page.keyboard.press("ControlOrMeta+P");
+		const quickOpen = page.locator(".quick-input-widget");
+		await expect(quickOpen).toBeVisible();
+		await quickOpen.locator("input").pressSequentially("shared.txt");
+		const row = quickOpen.locator(
+			`.quick-input-list .monaco-list-row[aria-label*="${rootLabel}"]`,
+		);
+		await expect(row).toHaveCount(1);
+		await row.click();
+		await expect(quickOpen).toBeHidden();
+	};
+
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	await executePaletteCommand(page, "Open Folder", "File: Open Folder...");
+	await executePaletteCommand(
+		page,
+		"Add Folder to Workspace",
+		"Workspaces: Add Folder to Workspace...",
+	);
+
+	await openDuplicate("plain-library");
+	await page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "F140 shared secondary" })
+		.click();
+	await page.keyboard.press("End");
+	await page.keyboard.type(" · SECONDARY DIRTY");
+
+	await openDuplicate("plain-workspace");
+	await page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "F140 shared primary" })
+		.click();
+	await page.keyboard.press("End");
+	await page.keyboard.type(" · PRIMARY DIRTY");
+
+	await expect
+		.poll(
+			async () =>
+				page.evaluate(() => {
+					const testWindow = window as unknown as Window & {
+						__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+					};
+					return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+						({ command }) => command === "backup_write",
+					);
+				}),
+			{ timeout: 5_000 },
+		)
+		.toHaveLength(2);
+	const backupRoots = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+		};
+		return testWindow.__PLAIN_TEST_TAURI_CALLS__
+			.filter(({ command }) => command === "backup_write")
+			.map(({ args }) => args.rootId)
+			.sort();
+	});
+	expect(backupRoots).toEqual([nativeRootId, nativeSecondaryRootId].sort());
+
+	await page.reload();
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	// Adopting only primary must restore only primary; the secondary backup
+	// remains native-owned but invisible until its exact root is authorized.
+	await executePaletteCommand(page, "Open Folder", "File: Open Folder...");
+	await expect(page.locator(".tabs-container .tab.dirty")).toHaveCount(1);
+	await expect(
+		page.getByRole("code").filter({ hasText: "PRIMARY DIRTY" }),
+	).toBeVisible();
+	await expect(
+		page.getByRole("code").filter({ hasText: "SECONDARY DIRTY" }),
+	).toHaveCount(0);
+
+	await executePaletteCommand(
+		page,
+		"Add Folder to Workspace",
+		"Workspaces: Add Folder to Workspace...",
+	);
+	await expect(page.locator(".tabs-container .tab.dirty")).toHaveCount(2);
+	await openDuplicate("plain-library");
+	await expect(
+		page.getByRole("code").filter({ hasText: "SECONDARY DIRTY" }),
+	).toBeVisible();
+	await openDuplicate("plain-workspace");
+	await expect(
+		page.getByRole("code").filter({ hasText: "PRIMARY DIRTY" }),
+	).toBeVisible();
+
 	expect(pageErrors).toEqual([]);
 	expect(consoleErrors).toEqual([]);
 });

@@ -34,6 +34,11 @@ fn key(wire: &str) -> BackupKey {
     BackupKey::parse(wire).expect("valid key")
 }
 
+fn test_root_id() -> crate::workspace::RootId {
+    crate::workspace::RootId::parse_v4_wire("00000000-0000-4000-8000-000000000001")
+        .expect("valid test root id")
+}
+
 /// Independently reproduces the stable roots identity backup uses as its
 /// on-disk subdirectory name, from the same ambient paths a test authorized.
 /// Canonicalizes each path itself (mirroring what root authorization does
@@ -57,6 +62,14 @@ fn workspace_with_root(window_label: &str, root_path: &std::path::Path) -> Works
     workspace
 }
 
+fn only_root_id(workspace: &WorkspaceService, window_label: &str) -> crate::workspace::RootId {
+    let snapshot = workspace
+        .snapshot(window_label)
+        .expect("workspace snapshot");
+    assert_eq!(snapshot.roots().len(), 1, "test helper requires one root");
+    snapshot.roots()[0].root_id()
+}
+
 #[test]
 fn write_then_read_all_round_trips_through_the_service() {
     let base = TempDir::new().unwrap();
@@ -64,16 +77,17 @@ fn write_then_read_all_round_trips_through_the_service() {
     let workspace = workspace_with_root("main", root.path());
     let backup = BackupService::new(base.path().to_path_buf());
 
-    block_on(backup.write(&workspace, "main", key("alpha"), b"one".to_vec())).unwrap();
-    block_on(backup.write(&workspace, "main", key("beta"), b"two".to_vec())).unwrap();
+    let root_id = only_root_id(&workspace, "main");
+    block_on(backup.write(&workspace, "main", root_id, key("alpha"), b"one".to_vec())).unwrap();
+    block_on(backup.write(&workspace, "main", root_id, key("beta"), b"two".to_vec())).unwrap();
 
     let mut entries = block_on(backup.read_all(&workspace, "main")).unwrap();
-    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries.sort_by(|left, right| left.1.cmp(&right.1));
     assert_eq!(
         entries,
         vec![
-            ("alpha".to_owned(), b"one".to_vec()),
-            ("beta".to_owned(), b"two".to_vec()),
+            (root_id, "alpha".to_owned(), b"one".to_vec()),
+            (root_id, "beta".to_owned(), b"two".to_vec()),
         ]
     );
 }
@@ -97,14 +111,15 @@ fn discard_is_idempotent_and_discard_all_clears_every_entry() {
     let workspace = workspace_with_root("main", root.path());
     let backup = BackupService::new(base.path().to_path_buf());
 
-    block_on(backup.write(&workspace, "main", key("one"), b"1".to_vec())).unwrap();
-    block_on(backup.write(&workspace, "main", key("two"), b"2".to_vec())).unwrap();
+    let root_id = only_root_id(&workspace, "main");
+    block_on(backup.write(&workspace, "main", root_id, key("one"), b"1".to_vec())).unwrap();
+    block_on(backup.write(&workspace, "main", root_id, key("two"), b"2".to_vec())).unwrap();
 
-    block_on(backup.discard(&workspace, "main", key("one"))).unwrap();
-    block_on(backup.discard(&workspace, "main", key("one"))).unwrap();
+    block_on(backup.discard(&workspace, "main", root_id, key("one"))).unwrap();
+    block_on(backup.discard(&workspace, "main", root_id, key("one"))).unwrap();
     assert_eq!(
         block_on(backup.read_all(&workspace, "main")).unwrap(),
-        vec![("two".to_owned(), b"2".to_vec())]
+        vec![(root_id, "two".to_owned(), b"2".to_vec())]
     );
 
     block_on(backup.discard_all(&workspace, "main")).unwrap();
@@ -121,7 +136,8 @@ fn discard_on_a_workspace_with_no_backup_directory_yet_is_a_no_op() {
     let workspace = workspace_with_root("main", root.path());
     let backup = BackupService::new(base.path().to_path_buf());
 
-    block_on(backup.discard(&workspace, "main", key("never-written"))).unwrap();
+    let root_id = only_root_id(&workspace, "main");
+    block_on(backup.discard(&workspace, "main", root_id, key("never-written"))).unwrap();
     block_on(backup.discard_all(&workspace, "main")).unwrap();
 }
 
@@ -132,7 +148,7 @@ fn every_operation_reports_backup_unavailable_before_any_workspace_root_is_open(
     let backup = BackupService::new(base.path().to_path_buf());
 
     assert_eq!(
-        block_on(backup.write(&workspace, "main", key("k"), b"v".to_vec()))
+        block_on(backup.write(&workspace, "main", test_root_id(), key("k"), b"v".to_vec(),))
             .unwrap_err()
             .code(),
         "BACKUP_UNAVAILABLE"
@@ -144,7 +160,7 @@ fn every_operation_reports_backup_unavailable_before_any_workspace_root_is_open(
         "BACKUP_UNAVAILABLE"
     );
     assert_eq!(
-        block_on(backup.discard(&workspace, "main", key("k")))
+        block_on(backup.discard(&workspace, "main", test_root_id(), key("k")))
             .unwrap_err()
             .code(),
         "BACKUP_UNAVAILABLE"
@@ -164,7 +180,8 @@ fn backup_content_survives_on_disk_after_the_window_is_closed() {
     let workspace = workspace_with_root("main", root.path());
     let backup = BackupService::new(base.path().to_path_buf());
 
-    block_on(backup.write(&workspace, "main", key("alpha"), b"kept".to_vec())).unwrap();
+    let root_id = only_root_id(&workspace, "main");
+    block_on(backup.write(&workspace, "main", root_id, key("alpha"), b"kept".to_vec())).unwrap();
 
     // Simulate `WindowEvent::Destroyed`: only the backup domain's own
     // pending handle is dropped, the workspace itself is untouched.
@@ -174,7 +191,7 @@ fn backup_content_survives_on_disk_after_the_window_is_closed() {
     // capability from disk and observe the exact same content.
     assert_eq!(
         block_on(backup.read_all(&workspace, "main")).unwrap(),
-        vec![("alpha".to_owned(), b"kept".to_vec())]
+        vec![(root_id, "alpha".to_owned(), b"kept".to_vec())]
     );
 }
 
@@ -186,13 +203,15 @@ fn backup_content_survives_on_disk_even_after_the_workspace_window_itself_is_clo
     let backup = BackupService::new(base.path().to_path_buf());
     let identity_dir_name = expected_identity_dir_name(&[root.path()]);
 
-    block_on(backup.write(&workspace, "main", key("alpha"), b"kept".to_vec())).unwrap();
+    let root_id = only_root_id(&workspace, "main");
+    block_on(backup.write(&workspace, "main", root_id, key("alpha"), b"kept".to_vec())).unwrap();
     backup.close_window("main");
     workspace.close_window("main");
 
     let on_disk = base
         .path()
         .join("backups")
+        .join("roots")
         .join(&identity_dir_name)
         .join("alpha");
     assert_eq!(std::fs::read(on_disk).unwrap(), b"kept");
@@ -203,15 +222,16 @@ fn backup_content_survives_on_disk_even_after_the_workspace_window_itself_is_clo
 /// the sorted canonical root paths — never the window's per-session random
 /// `WorkspaceId`.
 #[test]
-fn the_backup_subdirectory_is_named_after_the_stable_roots_identity_not_the_session_workspace_id() {
+fn the_backup_subdirectory_is_named_after_the_stable_root_identity_not_the_session_ids() {
     let base = TempDir::new().unwrap();
     let root = TempDir::new().unwrap();
     let workspace = workspace_with_root("main", root.path());
     let backup = BackupService::new(base.path().to_path_buf());
     let identity_dir_name = expected_identity_dir_name(&[root.path()]);
     let session_workspace_id = workspace.snapshot("main").unwrap().workspace_id().as_wire();
+    let root_id = only_root_id(&workspace, "main");
 
-    block_on(backup.write(&workspace, "main", key("alpha"), b"kept".to_vec())).unwrap();
+    block_on(backup.write(&workspace, "main", root_id, key("alpha"), b"kept".to_vec())).unwrap();
 
     assert_eq!(identity_dir_name.len(), 64);
     assert!(identity_dir_name
@@ -221,13 +241,21 @@ fn the_backup_subdirectory_is_named_after_the_stable_roots_identity_not_the_sess
     assert!(base
         .path()
         .join("backups")
+        .join("roots")
         .join(&identity_dir_name)
         .join("alpha")
         .is_file());
     assert!(!base
         .path()
         .join("backups")
+        .join("roots")
         .join(&session_workspace_id)
+        .exists());
+    assert!(!base
+        .path()
+        .join("backups")
+        .join("roots")
+        .join(root_id.as_wire())
         .exists());
 }
 
@@ -243,7 +271,15 @@ fn reopening_the_same_root_in_a_fresh_service_reproduces_the_same_identity_and_b
     let first_session = workspace_with_root("main", root.path());
     let first_session_snapshot = first_session.snapshot("main").unwrap();
     let backup = BackupService::new(base.path().to_path_buf());
-    block_on(backup.write(&first_session, "main", key("alpha"), b"kept".to_vec())).unwrap();
+    let first_root_id = only_root_id(&first_session, "main");
+    block_on(backup.write(
+        &first_session,
+        "main",
+        first_root_id,
+        key("alpha"),
+        b"kept".to_vec(),
+    ))
+    .unwrap();
     backup.close_window("main");
     first_session.close_window("main");
 
@@ -259,56 +295,106 @@ fn reopening_the_same_root_in_a_fresh_service_reproduces_the_same_identity_and_b
 
     assert_eq!(
         block_on(backup.read_all(&second_session, "main")).unwrap(),
-        vec![("alpha".to_owned(), b"kept".to_vec())],
+        vec![(
+            only_root_id(&second_session, "main"),
+            "alpha".to_owned(),
+            b"kept".to_vec()
+        )],
     );
 }
 
-/// Identity changes whenever the authorized root set changes (add, remove,
-/// replace), and a backup written under a superseded identity becomes
-/// unreachable through the new one — mirroring upstream's "workspace
-/// identity changed" semantics for hot-exit backups.
 #[test]
-fn the_stable_identity_changes_whenever_the_authorized_root_set_changes() {
+fn legacy_single_root_entries_are_mapped_exactly_and_removed_by_root_bound_discard() {
+    let base = TempDir::new().unwrap();
+    let root = TempDir::new().unwrap();
+    let workspace = workspace_with_root("main", root.path());
+    let root_id = only_root_id(&workspace, "main");
+    let identity = expected_identity_dir_name(&[root.path()]);
+    let legacy_dir = base.path().join("backups").join(identity);
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    std::fs::write(legacy_dir.join("legacy-key"), b"legacy-content").unwrap();
+
+    let backup = BackupService::new(base.path().to_path_buf());
+    assert_eq!(
+        block_on(backup.read_all(&workspace, "main")).unwrap(),
+        vec![(root_id, "legacy-key".to_owned(), b"legacy-content".to_vec())]
+    );
+
+    block_on(backup.discard(&workspace, "main", root_id, key("legacy-key"))).unwrap();
+    assert!(!legacy_dir.join("legacy-key").exists());
+}
+
+/// Backup ownership follows each stable root independently: adding another
+/// root keeps the first root's entry visible, replacing the topology with
+/// only the second root exposes only its entry, and re-adding the first root
+/// restores both without relying on authorization order or old random ids.
+#[test]
+fn root_bound_backups_survive_topology_changes_without_cross_attachment() {
     let base = TempDir::new().unwrap();
     let root_a = TempDir::new().unwrap();
     let root_b = TempDir::new().unwrap();
     let backup = BackupService::new(base.path().to_path_buf());
 
     let workspace = workspace_with_root("main", root_a.path());
-    block_on(backup.write(&workspace, "main", key("alpha"), b"under-a".to_vec())).unwrap();
-    let identity_with_a_only = expected_identity_dir_name(&[root_a.path()]);
+    let root_a_id = only_root_id(&workspace, "main");
+    block_on(backup.write(
+        &workspace,
+        "main",
+        root_a_id,
+        key("same-key"),
+        b"under-a".to_vec(),
+    ))
+    .unwrap();
+    let identity_a = expected_identity_dir_name(&[root_a.path()]);
 
-    // Add a second root: the identity must change, and the previously
-    // written entry must not be visible through the new identity.
     let picker = FakePicker::selected(vec![root_b.path().to_path_buf()]);
     block_on(workspace.pick_roots("main", picker, WorkspacePickRootsMode::Add)).unwrap();
-    let identity_with_a_and_b = expected_identity_dir_name(&[root_a.path(), root_b.path()]);
-    assert_ne!(identity_with_a_only, identity_with_a_and_b);
-    assert!(block_on(backup.read_all(&workspace, "main"))
-        .unwrap()
-        .is_empty());
+    let roots = workspace.snapshot("main").unwrap();
+    let root_b_id = roots.roots()[1].root_id();
+    assert_eq!(
+        block_on(backup.read_all(&workspace, "main")).unwrap(),
+        vec![(root_a_id, "same-key".to_owned(), b"under-a".to_vec())]
+    );
 
-    block_on(backup.write(&workspace, "main", key("beta"), b"under-a-and-b".to_vec())).unwrap();
+    block_on(backup.write(
+        &workspace,
+        "main",
+        root_b_id,
+        key("same-key"),
+        b"under-b".to_vec(),
+    ))
+    .unwrap();
+    let identity_b = expected_identity_dir_name(&[root_b.path()]);
 
-    // Replace back down to just `root_b`: the identity must change again,
-    // distinct from both prior identities.
     let picker = FakePicker::selected(vec![root_b.path().to_path_buf()]);
     block_on(workspace.pick_roots("main", picker, WorkspacePickRootsMode::Replace)).unwrap();
-    let identity_with_b_only = expected_identity_dir_name(&[root_b.path()]);
-    assert_ne!(identity_with_b_only, identity_with_a_only);
-    assert_ne!(identity_with_b_only, identity_with_a_and_b);
-    assert!(block_on(backup.read_all(&workspace, "main"))
-        .unwrap()
-        .is_empty());
+    let reopened_b_id = only_root_id(&workspace, "main");
+    assert_eq!(
+        block_on(backup.read_all(&workspace, "main")).unwrap(),
+        vec![(reopened_b_id, "same-key".to_owned(), b"under-b".to_vec())]
+    );
 
-    // Every identity's own on-disk content is untouched and independently
-    // reachable by reauthorizing its exact root set.
+    let picker = FakePicker::selected(vec![root_a.path().to_path_buf()]);
+    block_on(workspace.pick_roots("main", picker, WorkspacePickRootsMode::Add)).unwrap();
+    let current = workspace.snapshot("main").unwrap();
+    let reopened_a_id = current.roots()[1].root_id();
+    let mut entries = block_on(backup.read_all(&workspace, "main")).unwrap();
+    entries.sort_by(|left, right| left.2.cmp(&right.2));
+    assert_eq!(
+        entries,
+        vec![
+            (reopened_a_id, "same-key".to_owned(), b"under-a".to_vec()),
+            (reopened_b_id, "same-key".to_owned(), b"under-b".to_vec()),
+        ]
+    );
+
     assert_eq!(
         std::fs::read(
             base.path()
                 .join("backups")
-                .join(&identity_with_a_only)
-                .join("alpha")
+                .join("roots")
+                .join(&identity_a)
+                .join("same-key")
         )
         .unwrap(),
         b"under-a"
@@ -317,11 +403,12 @@ fn the_stable_identity_changes_whenever_the_authorized_root_set_changes() {
         std::fs::read(
             base.path()
                 .join("backups")
-                .join(&identity_with_a_and_b)
-                .join("beta")
+                .join("roots")
+                .join(&identity_b)
+                .join("same-key")
         )
         .unwrap(),
-        b"under-a-and-b"
+        b"under-b"
     );
 }
 
@@ -361,7 +448,7 @@ fn a_window_with_zero_authorized_roots_after_removal_reports_backup_unavailable(
     let snapshot = workspace.snapshot("main").unwrap();
     let root_id = snapshot.roots()[0].root_id();
 
-    block_on(backup.write(&workspace, "main", key("alpha"), b"kept".to_vec())).unwrap();
+    block_on(backup.write(&workspace, "main", root_id, key("alpha"), b"kept".to_vec())).unwrap();
     workspace.remove_root("main", root_id).unwrap();
 
     assert_eq!(
@@ -378,6 +465,7 @@ fn concurrent_writes_to_distinct_keys_are_all_observable_afterward() {
     let root = TempDir::new().unwrap();
     let workspace = std::sync::Arc::new(workspace_with_root("main", root.path()));
     let backup = std::sync::Arc::new(BackupService::new(base.path().to_path_buf()));
+    let root_id = only_root_id(&workspace, "main");
 
     block_on(async {
         let mut handles = Vec::new();
@@ -389,6 +477,7 @@ fn concurrent_writes_to_distinct_keys_are_all_observable_afterward() {
                     .write(
                         &workspace,
                         "main",
+                        root_id,
                         key(&format!("k{index}")),
                         format!("v{index}").into_bytes(),
                     )
@@ -402,7 +491,13 @@ fn concurrent_writes_to_distinct_keys_are_all_observable_afterward() {
     });
 
     let entries = block_on(backup.read_all(&workspace, "main")).unwrap();
-    let mut observed: std::collections::BTreeMap<String, Vec<u8>> = entries.into_iter().collect();
+    let mut observed: std::collections::BTreeMap<String, Vec<u8>> = entries
+        .into_iter()
+        .map(|(entry_root_id, key, content)| {
+            assert_eq!(entry_root_id, root_id);
+            (key, content)
+        })
+        .collect();
     assert_eq!(observed.len(), 16);
     for index in 0..16 {
         assert_eq!(
@@ -418,6 +513,7 @@ fn racing_writes_to_the_same_key_are_serialized_into_exactly_one_clean_winner() 
     let root = TempDir::new().unwrap();
     let workspace = std::sync::Arc::new(workspace_with_root("main", root.path()));
     let backup = std::sync::Arc::new(BackupService::new(base.path().to_path_buf()));
+    let root_id = only_root_id(&workspace, "main");
 
     let candidates: Vec<Vec<u8>> = (0..12)
         .map(|index| format!("candidate-{index}").into_bytes())
@@ -430,7 +526,7 @@ fn racing_writes_to_the_same_key_are_serialized_into_exactly_one_clean_winner() 
             let backup = std::sync::Arc::clone(&backup);
             handles.push(tauri::async_runtime::spawn(async move {
                 backup
-                    .write(&workspace, "main", key("shared"), candidate)
+                    .write(&workspace, "main", root_id, key("shared"), candidate)
                     .await
                     .unwrap();
             }));
@@ -442,7 +538,8 @@ fn racing_writes_to_the_same_key_are_serialized_into_exactly_one_clean_winner() 
 
     let entries = block_on(backup.read_all(&workspace, "main")).unwrap();
     assert_eq!(entries.len(), 1);
-    let (name, bytes) = &entries[0];
+    let (entry_root_id, name, bytes) = &entries[0];
+    assert_eq!(*entry_root_id, root_id);
     assert_eq!(name, "shared");
     assert!(
         candidates.contains(bytes),
