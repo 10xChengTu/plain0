@@ -121,6 +121,23 @@ impl WorkspaceService {
         self.scope_for_window(window_label)?.root_canonical_paths()
     }
 
+    /// Resolves one exact authorized root identity to its canonical backing
+    /// path. Unlike callers taking `root_canonical_paths().first()`, this is
+    /// fail-closed for a stale, foreign-window, or otherwise unauthorized
+    /// identity and therefore preserves the root identity chosen by the
+    /// WebView across native domain boundaries.
+    pub(crate) fn root_canonical_path(
+        &self,
+        window_label: &str,
+        root_id: RootId,
+    ) -> Result<std::path::PathBuf, CommandError> {
+        self.scope_for_window(window_label)?
+            .root_canonical_paths()?
+            .into_iter()
+            .find_map(|(candidate_id, path)| (candidate_id == root_id).then_some(path))
+            .ok_or_else(root_not_authorized)
+    }
+
     pub async fn pick_roots<P: DirectoryPicker>(
         &self,
         window_label: &str,

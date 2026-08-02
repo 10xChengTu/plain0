@@ -169,12 +169,11 @@ use std::sync::atomic::AtomicBool;
 
 use crate::error::CommandError;
 use crate::trust::service::TrustService;
-use crate::workspace::service::WorkspaceService;
 
 use super::dto::is_valid_mutate_path;
 use super::exec::{run_git, GitExecMode};
 use super::git_exec_unavailable;
-use super::repo::resolve_repo_toplevel;
+use super::repo::{resolve_repo_toplevel, GitRepositoryScope};
 use super::wire::split_nul_records;
 
 /// The shared, audited "sha + full message body" metadata format both
@@ -374,7 +373,7 @@ fn parse_history_entries(output: &[u8]) -> Result<HistoryList, CommandError> {
 /// it can never falsely match [`file_history`]'s own stderr).
 async fn run_history_list(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     suffix_args: Vec<String>,
     on_other_failure: fn() -> CommandError,
@@ -419,7 +418,7 @@ async fn run_history_list(
 /// so this returns an empty, non-truncated [`HistoryList`].
 pub(crate) async fn file_history(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     path: &str,
 ) -> Result<HistoryList, CommandError> {
@@ -448,7 +447,7 @@ pub(crate) async fn file_history(
 /// `line_history_list_crosses_a_rename_by_default_without_needing_follow`).
 pub(crate) async fn line_history_list(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     path: &str,
     range: LineRange,
@@ -508,7 +507,7 @@ fn verify_leading_commit_line(stdout: &[u8], expected_sha: &str) -> Option<Strin
 /// showing the wrong commit.
 pub(crate) async fn line_history_detail(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     path: &str,
     range: LineRange,
@@ -692,7 +691,7 @@ fn parse_graph_entries(output: &[u8], max_nodes: usize) -> Result<GraphList, Com
 /// ordering and ref-namespace-scope rationale.
 pub(crate) async fn log_graph(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     max_count: u32,
 ) -> Result<GraphList, CommandError> {

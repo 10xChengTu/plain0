@@ -53,12 +53,11 @@ use std::sync::atomic::AtomicBool;
 
 use crate::error::CommandError;
 use crate::trust::service::TrustService;
-use crate::workspace::service::WorkspaceService;
 
 use super::dto::is_valid_mutate_path;
 use super::exec::{run_git, GitExecMode};
 use super::git_exec_unavailable;
-use super::repo::resolve_repo_toplevel;
+use super::repo::{resolve_repo_toplevel, GitRepositoryScope};
 use super::wire::{split_nul_records, GitPathBuf};
 
 /// The exact, audited base `git blame` argument list — locked by
@@ -274,7 +273,7 @@ pub(crate) struct BlameResult {
 /// deserves the same defensive floor before it becomes a spawn argument.
 pub(crate) async fn blame_file(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     path: &str,
     range: Option<BlameLineRange>,
@@ -334,7 +333,7 @@ pub(crate) async fn blame_file(
 /// remains to look up.
 pub(crate) async fn blame_commit_messages(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     shas: &[String],
 ) -> Result<HashMap<String, String>, CommandError> {

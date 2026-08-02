@@ -133,14 +133,13 @@ use std::sync::atomic::AtomicBool;
 
 use crate::error::CommandError;
 use crate::trust::service::TrustService;
-use crate::workspace::service::WorkspaceService;
 
 use super::diff::{
     merge_diff_files, parse_name_status, parse_numstat, show_blob, DiffFileEntry, GitBlobRev,
 };
 use super::exec::{run_git, GitExecMode};
 use super::git_exec_unavailable;
-use super::repo::resolve_repo_toplevel;
+use super::repo::{resolve_repo_toplevel, GitRepositoryScope};
 use super::wire::split_nul_records;
 
 /// Git's fixed, well-known empty-tree object id (SHA-1) — every git
@@ -331,7 +330,7 @@ pub(crate) struct ShowCommitResult {
 /// other read in this domain — no new exec path.
 pub(crate) async fn show_commit(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     sha: &str,
 ) -> Result<ShowCommitResult, CommandError> {
@@ -366,7 +365,7 @@ pub(crate) async fn show_commit(
 /// function rather than a parallel implementation).
 pub(crate) async fn show_commit_blob(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     sha: &str,
     path: &str,

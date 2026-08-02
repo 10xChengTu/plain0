@@ -38,12 +38,11 @@ use std::sync::atomic::AtomicBool;
 
 use crate::error::CommandError;
 use crate::trust::service::TrustService;
-use crate::workspace::service::WorkspaceService;
 
 use super::exec::{run_git, GitExecMode};
 use super::git_exec_output_limit_exceeded;
 use super::git_exec_unavailable;
-use super::repo::resolve_repo_toplevel;
+use super::repo::{resolve_repo_toplevel, GitRepositoryScope};
 use super::wire::{split_nul_records, GitPathBuf};
 
 /// 8 MiB — the same ceiling `workspace::commands::workspace_read_file` and
@@ -331,7 +330,7 @@ async fn run_diff(
 
 pub(crate) async fn diff_files(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     cached: bool,
 ) -> Result<Vec<DiffFileEntry>, CommandError> {
@@ -391,7 +390,7 @@ pub(crate) const GIT_SHOW_BASE_ARGS: &[&str] =
 
 pub(crate) async fn show_blob(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     rev: GitBlobRev,
     path: &str,

@@ -19,11 +19,10 @@ use std::sync::atomic::AtomicBool;
 
 use crate::error::CommandError;
 use crate::trust::service::TrustService;
-use crate::workspace::service::WorkspaceService;
 
 use super::exec::{run_git_with_stdin, GitExecMode};
 use super::git_exec_unavailable;
-use super::repo::resolve_repo_toplevel;
+use super::repo::{resolve_repo_toplevel, GitRepositoryScope};
 
 /// Mirrors `dto::MAX_GIT_COMMIT_MESSAGE_BYTES` — see `git::stage`'s module
 /// doc comment for why domain functions re-validate what the DTO layer
@@ -78,7 +77,7 @@ pub(crate) const GIT_COMMIT_ARGS: &[&str] = &[
 
 pub(crate) async fn commit(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     message: &str,
     amend: bool,

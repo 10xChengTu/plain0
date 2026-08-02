@@ -23,6 +23,7 @@ use crate::error::CommandError;
 use crate::trust::service::TrustService;
 use crate::workspace::picker::TauriDirectoryPicker;
 use crate::workspace::service::WorkspaceService;
+use crate::workspace::RootId;
 
 use super::blame;
 use super::commit;
@@ -47,6 +48,7 @@ use super::dto::{
 use super::log;
 use super::network::{self, GitNetworkService};
 use super::refs;
+use super::repo::SelectedGitRoot;
 use super::show_commit;
 use super::stage;
 use super::stash;
@@ -58,10 +60,12 @@ pub(crate) async fn git_status(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitStatusRequest,
 ) -> Result<GitStatusResult, CommandError> {
     request.validate();
-    let result = status::git_status(trust.inner(), workspace.inner(), window.label()).await?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let result = status::git_status(trust.inner(), &scope, window.label()).await?;
     Ok(GitStatusResult::from(result))
 }
 
@@ -70,11 +74,12 @@ pub(crate) async fn git_diff_files(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitDiffFilesRequest,
 ) -> Result<GitDiffFilesResult, CommandError> {
     let cached = request.into_parts();
-    let entries =
-        diff::diff_files(trust.inner(), workspace.inner(), window.label(), cached).await?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let entries = diff::diff_files(trust.inner(), &scope, window.label(), cached).await?;
     Ok(GitDiffFilesResult::new(entries))
 }
 
@@ -83,11 +88,12 @@ pub(crate) async fn git_show_blob(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitShowBlobRequest,
 ) -> Result<GitShowBlobResult, CommandError> {
     let (rev, path) = request.into_parts()?;
-    let content =
-        diff::show_blob(trust.inner(), workspace.inner(), window.label(), rev, &path).await?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let content = diff::show_blob(trust.inner(), &scope, window.label(), rev, &path).await?;
     Ok(GitShowBlobResult::new(content))
 }
 
@@ -96,10 +102,12 @@ pub(crate) async fn git_stage_paths(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitStagePathsRequest,
 ) -> Result<(), CommandError> {
     let paths = request.into_parts()?;
-    stage::stage_paths(trust.inner(), workspace.inner(), window.label(), &paths).await
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    stage::stage_paths(trust.inner(), &scope, window.label(), &paths).await
 }
 
 #[tauri::command]
@@ -107,10 +115,12 @@ pub(crate) async fn git_unstage_paths(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitUnstagePathsRequest,
 ) -> Result<(), CommandError> {
     let paths = request.into_parts()?;
-    stage::unstage_paths(trust.inner(), workspace.inner(), window.label(), &paths).await
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    stage::unstage_paths(trust.inner(), &scope, window.label(), &paths).await
 }
 
 #[tauri::command]
@@ -118,17 +128,12 @@ pub(crate) async fn git_stage_blob(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitStageBlobRequest,
 ) -> Result<(), CommandError> {
     let (path, content) = request.into_parts()?;
-    stage::stage_blob(
-        trust.inner(),
-        workspace.inner(),
-        window.label(),
-        &path,
-        content,
-    )
-    .await
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    stage::stage_blob(trust.inner(), &scope, window.label(), &path, content).await
 }
 
 #[tauri::command]
@@ -136,17 +141,12 @@ pub(crate) async fn git_commit(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitCommitRequest,
 ) -> Result<(), CommandError> {
     let (message, amend) = request.into_parts()?;
-    commit::commit(
-        trust.inner(),
-        workspace.inner(),
-        window.label(),
-        &message,
-        amend,
-    )
-    .await
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    commit::commit(trust.inner(), &scope, window.label(), &message, amend).await
 }
 
 #[tauri::command]
@@ -154,10 +154,12 @@ pub(crate) async fn git_discard_paths(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitDiscardPathsRequest,
 ) -> Result<(), CommandError> {
     let paths = request.into_parts()?;
-    discard::discard_paths(trust.inner(), workspace.inner(), window.label(), &paths).await
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    discard::discard_paths(trust.inner(), &scope, window.label(), &paths).await
 }
 
 #[tauri::command]
@@ -165,11 +167,12 @@ pub(crate) async fn git_network_preview(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitNetworkPreviewRequest,
 ) -> Result<GitNetworkPreviewResult, CommandError> {
     let operation = request.into_parts();
-    let result =
-        network::preview(trust.inner(), workspace.inner(), window.label(), operation).await?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let result = network::preview(trust.inner(), &scope, window.label(), operation).await?;
     Ok(GitNetworkPreviewResult::from(result))
 }
 
@@ -179,12 +182,14 @@ pub(crate) async fn git_fetch(
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
     network_service: State<'_, GitNetworkService>,
+    root_id: RootId,
     request: GitFetchRequest,
 ) -> Result<(), CommandError> {
     request.validate();
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
     network::fetch(
         trust.inner(),
-        workspace.inner(),
+        &scope,
         network_service.inner(),
         window.label(),
     )
@@ -197,12 +202,14 @@ pub(crate) async fn git_pull(
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
     network_service: State<'_, GitNetworkService>,
+    root_id: RootId,
     request: GitPullRequest,
 ) -> Result<(), CommandError> {
     request.validate();
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
     network::pull(
         trust.inner(),
-        workspace.inner(),
+        &scope,
         network_service.inner(),
         window.label(),
     )
@@ -215,12 +222,14 @@ pub(crate) async fn git_push(
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
     network_service: State<'_, GitNetworkService>,
+    root_id: RootId,
     request: GitPushRequest,
 ) -> Result<(), CommandError> {
     let force = request.into_parts();
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
     network::push(
         trust.inner(),
-        workspace.inner(),
+        &scope,
         network_service.inner(),
         window.label(),
         force,
@@ -233,17 +242,12 @@ pub(crate) async fn git_blame_file(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitBlameFileRequest,
 ) -> Result<GitBlameFileResult, CommandError> {
     let (path, range) = request.into_parts()?;
-    let result = blame::blame_file(
-        trust.inner(),
-        workspace.inner(),
-        window.label(),
-        &path,
-        range,
-    )
-    .await?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let result = blame::blame_file(trust.inner(), &scope, window.label(), &path, range).await?;
     Ok(GitBlameFileResult::from(result))
 }
 
@@ -252,12 +256,13 @@ pub(crate) async fn git_blame_commit_messages(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitBlameCommitMessagesRequest,
 ) -> Result<GitBlameCommitMessagesResult, CommandError> {
     let shas = request.into_parts()?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
     let messages =
-        blame::blame_commit_messages(trust.inner(), workspace.inner(), window.label(), &shas)
-            .await?;
+        blame::blame_commit_messages(trust.inner(), &scope, window.label(), &shas).await?;
     Ok(GitBlameCommitMessagesResult::new(messages))
 }
 
@@ -266,10 +271,12 @@ pub(crate) async fn git_file_history(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitFileHistoryRequest,
 ) -> Result<GitHistoryListResultWire, CommandError> {
     let path = request.into_parts()?;
-    let result = log::file_history(trust.inner(), workspace.inner(), window.label(), &path).await?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let result = log::file_history(trust.inner(), &scope, window.label(), &path).await?;
     Ok(GitHistoryListResultWire::from(result))
 }
 
@@ -278,17 +285,13 @@ pub(crate) async fn git_line_history_list(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitLineHistoryListRequest,
 ) -> Result<GitHistoryListResultWire, CommandError> {
     let (path, range) = request.into_parts()?;
-    let result = log::line_history_list(
-        trust.inner(),
-        workspace.inner(),
-        window.label(),
-        &path,
-        range,
-    )
-    .await?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let result =
+        log::line_history_list(trust.inner(), &scope, window.label(), &path, range).await?;
     Ok(GitHistoryListResultWire::from(result))
 }
 
@@ -297,12 +300,14 @@ pub(crate) async fn git_line_history_detail(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitLineHistoryDetailRequest,
 ) -> Result<GitLineHistoryDetailResultWire, CommandError> {
     let (path, range, skip, expected_sha) = request.into_parts()?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
     let result = log::line_history_detail(
         trust.inner(),
-        workspace.inner(),
+        &scope,
         window.label(),
         &path,
         range,
@@ -318,11 +323,12 @@ pub(crate) async fn git_show_commit(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitShowCommitRequest,
 ) -> Result<GitShowCommitResult, CommandError> {
     let sha = request.into_parts()?;
-    let result =
-        show_commit::show_commit(trust.inner(), workspace.inner(), window.label(), &sha).await?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let result = show_commit::show_commit(trust.inner(), &scope, window.label(), &sha).await?;
     Ok(GitShowCommitResult::from(result))
 }
 
@@ -331,17 +337,13 @@ pub(crate) async fn git_show_commit_blob(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitShowCommitBlobRequest,
 ) -> Result<GitShowBlobResult, CommandError> {
     let (sha, path) = request.into_parts()?;
-    let content = show_commit::show_commit_blob(
-        trust.inner(),
-        workspace.inner(),
-        window.label(),
-        &sha,
-        &path,
-    )
-    .await?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let content =
+        show_commit::show_commit_blob(trust.inner(), &scope, window.label(), &sha, &path).await?;
     Ok(GitShowBlobResult::new(content))
 }
 
@@ -349,10 +351,13 @@ pub(crate) async fn git_show_commit_blob(
 pub(crate) async fn git_network_cancel(
     window: WebviewWindow,
     network_service: State<'_, GitNetworkService>,
+    root_id: RootId,
     request: GitNetworkCancelRequest,
 ) -> Result<(), CommandError> {
     request.validate();
-    network_service.inner().request_cancel(window.label());
+    network_service
+        .inner()
+        .request_cancel_for_root(window.label(), root_id);
     Ok(())
 }
 
@@ -361,11 +366,12 @@ pub(crate) async fn git_log_graph(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitLogGraphRequest,
 ) -> Result<GitLogGraphResultWire, CommandError> {
     let max_count = request.into_parts()?;
-    let result =
-        log::log_graph(trust.inner(), workspace.inner(), window.label(), max_count).await?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let result = log::log_graph(trust.inner(), &scope, window.label(), max_count).await?;
     Ok(GitLogGraphResultWire::from(result))
 }
 
@@ -374,10 +380,12 @@ pub(crate) async fn git_refs_list(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitRefsListRequest,
 ) -> Result<GitRefsListResultWire, CommandError> {
     request.validate();
-    let result = refs::list_refs(trust.inner(), workspace.inner(), window.label()).await?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let result = refs::list_refs(trust.inner(), &scope, window.label()).await?;
     Ok(GitRefsListResultWire::from(result))
 }
 
@@ -386,10 +394,12 @@ pub(crate) async fn git_stash_list(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitStashListRequest,
 ) -> Result<GitStashListResultWire, CommandError> {
     request.validate();
-    let result = stash::list_stashes(trust.inner(), workspace.inner(), window.label()).await?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let result = stash::list_stashes(trust.inner(), &scope, window.label()).await?;
     Ok(GitStashListResultWire::from(result))
 }
 
@@ -398,10 +408,12 @@ pub(crate) async fn git_stash_show(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitStashShowRequest,
 ) -> Result<GitStashShowResultWire, CommandError> {
     let sha = request.into_parts()?;
-    let result = stash::show_stash(trust.inner(), workspace.inner(), window.label(), &sha).await?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let result = stash::show_stash(trust.inner(), &scope, window.label(), &sha).await?;
     Ok(GitStashShowResultWire::from(result))
 }
 
@@ -410,12 +422,14 @@ pub(crate) async fn git_stash_push(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitStashPushRequest,
 ) -> Result<GitStashPushOutcomeWire, CommandError> {
     let (message, include_untracked) = request.into_parts()?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
     let outcome = stash::push_stash(
         trust.inner(),
-        workspace.inner(),
+        &scope,
         window.label(),
         &message,
         include_untracked,
@@ -429,17 +443,13 @@ pub(crate) async fn git_stash_apply(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitStashApplyRequest,
 ) -> Result<GitStashApplyOutcomeWire, CommandError> {
     let (sha, use_index) = request.into_parts()?;
-    let outcome = stash::apply_stash(
-        trust.inner(),
-        workspace.inner(),
-        window.label(),
-        &sha,
-        use_index,
-    )
-    .await?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let outcome =
+        stash::apply_stash(trust.inner(), &scope, window.label(), &sha, use_index).await?;
     Ok(GitStashApplyOutcomeWire::from(outcome))
 }
 
@@ -448,12 +458,14 @@ pub(crate) async fn git_stash_pop(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitStashPopRequest,
 ) -> Result<GitStashApplyOutcomeWire, CommandError> {
     let (expected_sha, use_index) = request.into_parts()?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
     let outcome = stash::pop_stash(
         trust.inner(),
-        workspace.inner(),
+        &scope,
         window.label(),
         &expected_sha,
         use_index,
@@ -467,16 +479,12 @@ pub(crate) async fn git_stash_drop(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitStashDropRequest,
 ) -> Result<(), CommandError> {
     let expected_sha = request.into_parts()?;
-    stash::drop_stash(
-        trust.inner(),
-        workspace.inner(),
-        window.label(),
-        &expected_sha,
-    )
-    .await
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    stash::drop_stash(trust.inner(), &scope, window.label(), &expected_sha).await
 }
 
 #[tauri::command]
@@ -484,10 +492,12 @@ pub(crate) async fn git_worktree_list(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitWorktreeListRequest,
 ) -> Result<GitWorktreeListResultWire, CommandError> {
     request.validate();
-    let result = worktree::list_worktrees(trust.inner(), workspace.inner(), window.label()).await?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let result = worktree::list_worktrees(trust.inner(), &scope, window.label()).await?;
     Ok(GitWorktreeListResultWire::from(result))
 }
 
@@ -496,13 +506,15 @@ pub(crate) async fn git_worktree_add(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitWorktreeAddRequest,
 ) -> Result<GitWorktreeAddOutcomeWire, CommandError> {
     let (child_segment, detach, commit_ish) = request.into_parts()?;
     let picker = TauriDirectoryPicker::new(window.clone());
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
     let outcome = worktree::add_worktree(
         trust.inner(),
-        workspace.inner(),
+        &scope,
         window.label(),
         &picker,
         &child_segment,
@@ -518,16 +530,12 @@ pub(crate) async fn git_worktree_remove(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
     request: GitWorktreeRemoveRequest,
 ) -> Result<GitWorktreeRemoveOutcomeWire, CommandError> {
     let (path, force) = request.into_parts()?;
-    let outcome = worktree::remove_worktree(
-        trust.inner(),
-        workspace.inner(),
-        window.label(),
-        &path,
-        force,
-    )
-    .await?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let outcome =
+        worktree::remove_worktree(trust.inner(), &scope, window.label(), &path, force).await?;
     Ok(GitWorktreeRemoveOutcomeWire::from(outcome))
 }

@@ -24,12 +24,11 @@ use std::sync::atomic::AtomicBool;
 
 use crate::error::CommandError;
 use crate::trust::service::TrustService;
-use crate::workspace::service::WorkspaceService;
 
 use super::dto::is_valid_mutate_path;
 use super::exec::{run_git, run_git_with_stdin, GitExecMode};
 use super::git_exec_unavailable;
-use super::repo::resolve_repo_toplevel;
+use super::repo::{resolve_repo_toplevel, GitRepositoryScope};
 
 /// Mirrors `dto::MAX_GIT_STAGE_BLOB_BYTES` — see this module's own doc
 /// comment on why domain functions re-validate what the DTO layer already
@@ -95,7 +94,7 @@ fn validate_paths(paths: &[String]) -> Result<(), CommandError> {
 /// `-`-prefixed path from being misread as a git option.
 pub(crate) async fn stage_paths(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     paths: &[String],
 ) -> Result<(), CommandError> {
@@ -115,7 +114,7 @@ pub(crate) async fn stage_paths(
 /// untouched).
 pub(crate) async fn unstage_paths(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     paths: &[String],
 ) -> Result<(), CommandError> {
@@ -149,7 +148,7 @@ pub(crate) async fn unstage_paths(
 ///    already has one — see that function's own doc comment.
 pub(crate) async fn stage_blob(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     path: &str,
     content: Vec<u8>,

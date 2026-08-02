@@ -166,6 +166,8 @@ Workbench model ← Plain feature service ← typed bridge/events
 ### Git
 
 - 系统 Git CLI 是唯一写操作权威，调用使用参数数组和机器格式：porcelain v2/NUL/JSON-safe DTO。
+- 每个 Git IPC 调用必须携带当前窗口中一个显式、仍获授权的 opaque root id；Rust 在启动 Git 前重新把该 id 解析为 canonical root。单根兼容入口可以自动选取唯一 root，多根时必须要求用户选择，绝不把 `roots[0]` 当成隐式仓库。
+- Git 报告的 repository top level 必须与所选 canonical root 完全相等。若用户只打开了更大仓库的子目录，仓库级 status/refs/stash/写操作会因可能越过 capability 边界而拒绝；不得以 ambient 父仓库 I/O 或未审计的全仓库 pathspec 回退绕过。
 - Rust service 把 status、diff、log、blame、refs 和动作转换为稳定 DTO；前端不解析人类文本。
 - 初期不混用 `git2`/`gix`。只有性能数据证明需要时，才用 `gix` 做只读缓存，并以 Git CLI 差分测试约束语义。
 - 不提供任意 `git_run` 或任意 config 写入；hooks、credential helper、ssh command 等高风险配置不通过 UI 修改。

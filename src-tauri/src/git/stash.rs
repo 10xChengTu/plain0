@@ -262,12 +262,11 @@ use std::sync::atomic::AtomicBool;
 
 use crate::error::CommandError;
 use crate::trust::service::TrustService;
-use crate::workspace::service::WorkspaceService;
 
 use super::diff::{merge_diff_files, parse_name_status, parse_numstat, DiffFileEntry};
 use super::exec::{run_git, GitExecMode, GitExecOutput};
 use super::git_exec_unavailable;
-use super::repo::resolve_repo_toplevel;
+use super::repo::{resolve_repo_toplevel, GitRepositoryScope};
 use super::status::{git_status, StatusEntry};
 use super::wire::{split_nul_records, GitPathBuf};
 
@@ -605,7 +604,7 @@ async fn run_stash_list(repo_dir: &Path) -> Result<StashList, CommandError> {
 
 pub(crate) async fn list_stashes(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
 ) -> Result<StashList, CommandError> {
     let repo_dir = resolve_repo_toplevel(trust, workspace, window_label).await?;
@@ -709,7 +708,7 @@ async fn run_stash_show_variant(
 
 pub(crate) async fn show_stash(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     sha: &str,
 ) -> Result<StashShowResult, CommandError> {
@@ -745,7 +744,7 @@ fn combined_output_text(output: &GitExecOutput) -> String {
 
 pub(crate) async fn push_stash(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     message: &str,
     include_untracked: bool,
@@ -803,7 +802,7 @@ pub(crate) async fn push_stash(
 /// output.
 async fn conflicted_paths_from_status(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
 ) -> Result<Vec<GitPathBuf>, CommandError> {
     let status = git_status(trust, workspace, window_label).await?;
@@ -828,7 +827,7 @@ async fn conflicted_paths_from_status(
 /// per-caller error identity" shape).
 async fn stash_apply_outcome_from_exec(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     output: GitExecOutput,
     check_not_found: bool,
@@ -859,7 +858,7 @@ async fn stash_apply_outcome_from_exec(
 
 pub(crate) async fn apply_stash(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     sha: &str,
     use_index: bool,
@@ -899,7 +898,7 @@ pub(crate) async fn apply_stash(
 
 pub(crate) async fn pop_stash(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     expected_sha: &str,
     use_index: bool,
@@ -940,7 +939,7 @@ pub(crate) async fn pop_stash(
 
 pub(crate) async fn drop_stash(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     expected_sha: &str,
 ) -> Result<(), CommandError> {

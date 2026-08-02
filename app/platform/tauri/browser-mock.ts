@@ -67,6 +67,7 @@ import {
 	frozenGitLogGraphRequest,
 	frozenGitNetworkPreviewRequest,
 	frozenGitPushRequest,
+	frozenGitRootId,
 	frozenGitShowBlobRequest,
 	frozenGitShowBlobResult,
 	frozenGitShowCommitBlobRequest,
@@ -5927,9 +5928,22 @@ export function createBrowserMockBridge(
 	let gitNetworkAhead = gitNetworkFixture.ahead ?? 0;
 	let gitNetworkBehind = gitNetworkFixture.behind ?? 0;
 
-	function gitMutateUnavailable(): CommandError | undefined {
+	function gitMutateUnavailable(rootId?: string): CommandError | undefined {
 		if (roots.size === 0 || !terminalTrusted) {
 			return terminalNotTrusted();
+		}
+		if (rootId === undefined) {
+			if (roots.size !== 1) {
+				return commandError(
+					"GIT_ROOT_REQUIRED",
+					"Select a workspace root before running a Git operation.",
+				);
+			}
+		} else if (!roots.has(frozenGitRootId(rootId))) {
+			return commandError(
+				"ROOT_NOT_AUTHORIZED",
+				"The requested workspace root is not authorized for this window.",
+			);
 		}
 		if (gitFixture.noRepositoryForTest === true) {
 			return gitNoRepository();
@@ -6945,8 +6959,8 @@ export function createBrowserMockBridge(
 			}
 			terminalTrusted = false;
 		},
-		async gitStatus() {
-			const unavailable = gitMutateUnavailable();
+		async gitStatus(rootId_) {
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
@@ -6955,9 +6969,9 @@ export function createBrowserMockBridge(
 				entries: Object.freeze(gitEntries.map((entry) => ({ ...entry }))),
 			});
 		},
-		async gitDiffFiles(cached_) {
+		async gitDiffFiles(cached_, rootId_) {
 			const request = frozenGitDiffFilesRequest(cached_);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
@@ -6965,9 +6979,9 @@ export function createBrowserMockBridge(
 				? (gitFixture.diffFiles?.cached ?? defaultGitDiffFiles)
 				: (gitFixture.diffFiles?.worktree ?? defaultGitDiffFiles);
 		},
-		async gitShowBlob(rev_, path_) {
+		async gitShowBlob(rev_, path_, rootId_) {
 			const request = frozenGitShowBlobRequest(rev_, path_);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
@@ -6976,9 +6990,9 @@ export function createBrowserMockBridge(
 				content === undefined ? null : new TextEncoder().encode(content),
 			);
 		},
-		async gitStagePaths(paths_) {
+		async gitStagePaths(paths_, rootId_) {
 			const request = frozenGitStagePathsRequest(paths_);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
@@ -6986,9 +7000,9 @@ export function createBrowserMockBridge(
 				gitStageOnePath(path, true);
 			}
 		},
-		async gitUnstagePaths(paths_) {
+		async gitUnstagePaths(paths_, rootId_) {
 			const request = frozenGitUnstagePathsRequest(paths_);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
@@ -6996,17 +7010,17 @@ export function createBrowserMockBridge(
 				gitUnstageOnePath(path);
 			}
 		},
-		async gitStageBlob(path_, content_) {
+		async gitStageBlob(path_, content_, rootId_) {
 			const request = frozenGitStageBlobRequest(path_, content_);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
 			gitStageOnePath(request.path, false);
 		},
-		async gitCommit(message_, amend_) {
+		async gitCommit(message_, amend_, rootId_) {
 			const request = frozenGitCommitRequest(message_, amend_);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
@@ -7015,9 +7029,9 @@ export function createBrowserMockBridge(
 			}
 			gitCommitStagedEntries();
 		},
-		async gitDiscardPaths(paths_) {
+		async gitDiscardPaths(paths_, rootId_) {
 			const request = frozenGitDiscardPathsRequest(paths_);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
@@ -7030,9 +7044,12 @@ export function createBrowserMockBridge(
 				gitDiscardOnePath(path);
 			}
 		},
-		async gitNetworkPreview(operation_): Promise<GitNetworkPreviewResult> {
+		async gitNetworkPreview(
+			operation_,
+			rootId_,
+		): Promise<GitNetworkPreviewResult> {
 			const request = frozenGitNetworkPreviewRequest(operation_);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
@@ -7052,8 +7069,8 @@ export function createBrowserMockBridge(
 				behind: gitNetworkBehind,
 			});
 		},
-		async gitFetch() {
-			const unavailable = gitMutateUnavailable();
+		async gitFetch(rootId_) {
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
@@ -7063,8 +7080,8 @@ export function createBrowserMockBridge(
 			// comment for why this mock does not model a separate remote
 			// state to fetch new data from.
 		},
-		async gitPull() {
-			const unavailable = gitMutateUnavailable();
+		async gitPull(rootId_) {
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
@@ -7073,9 +7090,9 @@ export function createBrowserMockBridge(
 			}
 			gitNetworkBehind = 0;
 		},
-		async gitPush(force_) {
+		async gitPush(force_, rootId_) {
 			const request = frozenGitPushRequest(force_);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
@@ -7091,15 +7108,25 @@ export function createBrowserMockBridge(
 			}
 			gitNetworkAhead = 0;
 		},
-		async gitNetworkCancel() {
+		async gitNetworkCancel(rootId_) {
+			if (rootId_ === undefined) {
+				if (roots.size !== 1) {
+					throw commandError(
+						"GIT_ROOT_REQUIRED",
+						"Select a workspace root before running a Git operation.",
+					);
+				}
+			} else {
+				frozenGitRootId(rootId_);
+			}
 			// This mock resolves every network call synchronously-ish (no real
 			// long-running subprocess to interrupt), so there is never
 			// anything in flight to actually cancel — a harmless no-op,
 			// matching the real bridge method's own idempotent contract.
 		},
-		async gitBlameFile(path_, range_) {
+		async gitBlameFile(path_, range_, rootId_) {
 			const request = frozenGitBlameFileRequest(path_, range_);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
@@ -7120,9 +7147,9 @@ export function createBrowserMockBridge(
 			}
 			return Object.freeze({ entries: Object.freeze(entries), commits });
 		},
-		async gitBlameCommitMessages(shas_) {
+		async gitBlameCommitMessages(shas_, rootId_) {
 			const request = frozenGitBlameCommitMessagesRequest(shas_);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
@@ -7135,17 +7162,17 @@ export function createBrowserMockBridge(
 			}
 			return Object.freeze({ messages });
 		},
-		async gitFileHistory(path_) {
+		async gitFileHistory(path_, rootId_) {
 			const request = frozenGitFileHistoryRequest(path_);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
 			return gitFileHistoryFixtures.get(request.path) ?? defaultGitHistoryList;
 		},
-		async gitLineHistoryList(path_, range_) {
+		async gitLineHistoryList(path_, range_, rootId_) {
 			const request = frozenGitLineHistoryListRequest(path_, range_);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
@@ -7158,14 +7185,14 @@ export function createBrowserMockBridge(
 				gitLineHistoryListFixtures.get(request.path) ?? defaultGitHistoryList
 			);
 		},
-		async gitLineHistoryDetail(path_, range_, skip_, expectedSha_) {
+		async gitLineHistoryDetail(path_, range_, skip_, expectedSha_, rootId_) {
 			const request = frozenGitLineHistoryDetailRequest(
 				path_,
 				range_,
 				skip_,
 				expectedSha_,
 			);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
@@ -7193,9 +7220,9 @@ export function createBrowserMockBridge(
 				diffText: `commit ${entry.sha}\n\n    ${entry.message}\n`,
 			});
 		},
-		async gitShowCommit(sha_) {
+		async gitShowCommit(sha_, rootId_) {
 			const request = frozenGitShowCommitRequest(sha_);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
@@ -7208,9 +7235,9 @@ export function createBrowserMockBridge(
 				})
 			);
 		},
-		async gitShowCommitBlob(sha_, path_) {
+		async gitShowCommitBlob(sha_, path_, rootId_) {
 			const request = frozenGitShowCommitBlobRequest(sha_, path_);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
@@ -7219,36 +7246,36 @@ export function createBrowserMockBridge(
 				content === undefined ? null : new TextEncoder().encode(content),
 			);
 		},
-		async gitLogGraph(maxCount_) {
+		async gitLogGraph(maxCount_, rootId_) {
 			// This mock has no real commit history to walk/cap by `maxCount` —
 			// the seeded fixture (or the empty default) is returned as-is,
 			// exactly like `gitFileHistory`'s own "one fixture regardless of
 			// the requested range" simplicity — see `BrowserMockGitFixtureForTest.
 			// graphForTest`'s own doc comment.
 			frozenGitLogGraphRequest(maxCount_);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
 			return gitGraphResult;
 		},
-		async gitRefsList() {
-			const unavailable = gitMutateUnavailable();
+		async gitRefsList(rootId_) {
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
 			return gitRefsListResult;
 		},
-		async gitStashList() {
-			const unavailable = gitMutateUnavailable();
+		async gitStashList(rootId_) {
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
 			return gitStashListSnapshot();
 		},
-		async gitStashShow(sha_) {
+		async gitStashShow(sha_, rootId_) {
 			const request = frozenGitStashShowRequest(sha_);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
@@ -7264,9 +7291,9 @@ export function createBrowserMockBridge(
 				})
 			);
 		},
-		async gitStashPush(message_, includeUntracked_) {
+		async gitStashPush(message_, includeUntracked_, rootId_) {
 			const request = frozenGitStashPushRequest(message_, includeUntracked_);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
@@ -7280,9 +7307,9 @@ export function createBrowserMockBridge(
 			});
 			return "created";
 		},
-		async gitStashApply(sha_, useIndex_) {
+		async gitStashApply(sha_, useIndex_, rootId_) {
 			const request = frozenGitStashApplyRequest(sha_, useIndex_);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
@@ -7298,9 +7325,9 @@ export function createBrowserMockBridge(
 			}
 			return Object.freeze({ kind: "applied" as const });
 		},
-		async gitStashPop(sha_, useIndex_) {
+		async gitStashPop(sha_, useIndex_, rootId_) {
 			const request = frozenGitStashPopRequest(sha_, useIndex_);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
@@ -7320,9 +7347,9 @@ export function createBrowserMockBridge(
 			gitStashEntries.splice(index, 1);
 			return Object.freeze({ kind: "applied" as const });
 		},
-		async gitStashDrop(sha_) {
+		async gitStashDrop(sha_, rootId_) {
 			const request = frozenGitStashDropRequest(sha_);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
@@ -7334,20 +7361,20 @@ export function createBrowserMockBridge(
 			}
 			gitStashEntries.splice(index, 1);
 		},
-		async gitWorktreeList() {
-			const unavailable = gitMutateUnavailable();
+		async gitWorktreeList(rootId_) {
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
 			return gitWorktreeListSnapshot();
 		},
-		async gitWorktreeAdd(childSegment_, detach_, commitIsh_) {
+		async gitWorktreeAdd(childSegment_, detach_, commitIsh_, rootId_) {
 			const request = frozenGitWorktreeAddRequest(
 				childSegment_,
 				detach_,
 				commitIsh_,
 			);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
@@ -7372,9 +7399,9 @@ export function createBrowserMockBridge(
 			});
 			return Object.freeze({ kind: "added" as const, path });
 		},
-		async gitWorktreeRemove(path_, force_) {
+		async gitWorktreeRemove(path_, force_, rootId_) {
 			const request = frozenGitWorktreeRemoveRequest(path_, force_);
-			const unavailable = gitMutateUnavailable();
+			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}

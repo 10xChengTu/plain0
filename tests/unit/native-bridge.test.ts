@@ -1070,4 +1070,62 @@ describe("native Plain bridge", () => {
 			createNativeBridge().workspaceSnapshot(),
 		).rejects.toMatchObject({ code: "IPC_CONTRACT_VIOLATION" });
 	});
+
+	it("attaches an explicitly selected root identity to a Git IPC call", async () => {
+		tauri.invoke.mockResolvedValueOnce({
+			branch: { oid: "(initial)", head: "(detached)", upstream: null },
+			entries: [],
+		});
+
+		await createNativeBridge().gitStatus(rootId);
+
+		expect(tauri.invoke).toHaveBeenCalledOnce();
+		expect(tauri.invoke).toHaveBeenCalledWith("git_status", {
+			rootId,
+			request: {},
+		});
+	});
+
+	it("resolves the sole workspace root for a legacy single-root Git caller", async () => {
+		tauri.invoke.mockResolvedValueOnce(validSnapshot()).mockResolvedValueOnce({
+			branch: { oid: "(initial)", head: "(detached)", upstream: null },
+			entries: [],
+		});
+
+		await createNativeBridge().gitStatus();
+
+		expect(tauri.invoke.mock.calls).toEqual([
+			["workspace_snapshot", { request: {} }],
+			["git_status", { rootId, request: {} }],
+		]);
+	});
+
+	it("rejects an implicit multi-root Git caller before invoking Git", async () => {
+		tauri.invoke.mockResolvedValueOnce({
+			...validSnapshot(),
+			roots: [
+				validRoot(),
+				{
+					rootId: targetRootId,
+					displayName: "second",
+					uri: `plain-workspace://${targetRootId}/`,
+				},
+			],
+		});
+
+		await expect(createNativeBridge().gitStatus()).rejects.toMatchObject({
+			code: "GIT_ROOT_REQUIRED",
+		});
+		expect(tauri.invoke).toHaveBeenCalledOnce();
+		expect(tauri.invoke).toHaveBeenCalledWith("workspace_snapshot", {
+			request: {},
+		});
+	});
+
+	it("rejects a malformed explicit Git root identity before IPC", async () => {
+		await expect(
+			createNativeBridge().gitStatus("not-a-root-id"),
+		).rejects.toMatchObject({ code: "INVALID_ROOT_ID" });
+		expect(tauri.invoke).not.toHaveBeenCalled();
+	});
 });

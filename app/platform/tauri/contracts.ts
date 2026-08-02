@@ -1479,28 +1479,32 @@ export interface PlainBridge {
 	 * `WORKSPACE_NOT_TRUSTED` if the workspace has not been granted execution
 	 * trust, or `GIT_NO_REPOSITORY` if the trusted root is not a Git working
 	 * tree. */
-	gitStatus(): Promise<GitStatusResult>;
+	gitStatus(rootId?: string): Promise<GitStatusResult>;
 	/** Lists file-level diff entries (`cached: true` for the index-vs-HEAD
 	 * diff, `false` for the worktree-vs-index diff) — see
 	 * `src-tauri/src/git/diff.rs`'s `diff_files` doc comment for the
 	 * two-invocation-join caveat. Same trust/repository rejections as
 	 * `gitStatus`. */
-	gitDiffFiles(cached: boolean): Promise<GitDiffFilesResult>;
+	gitDiffFiles(cached: boolean, rootId?: string): Promise<GitDiffFilesResult>;
 	/** Reads one version of `path` (repository-toplevel-relative). Same
 	 * trust/repository rejections as `gitStatus`; a missing version of an
 	 * otherwise-valid path is `{ content: null }`, not a rejection. */
-	gitShowBlob(rev: GitBlobRev, path: string): Promise<GitShowBlobResult>;
+	gitShowBlob(
+		rev: GitBlobRev,
+		path: string,
+		rootId?: string,
+	): Promise<GitShowBlobResult>;
 	/** `F080` S3: `git add -A -- <paths...>` — stages every kind of
 	 * working-tree change (modified/added/deleted) for exactly the given
 	 * repository-toplevel-relative paths. Same trust/repository rejections as
 	 * `gitStatus`; rejects with `GIT_MUTATE_PATHS_INVALID_REQUEST` for an
 	 * empty list or an invalid (absolute, `..`-traversing, or oversized)
 	 * path. */
-	gitStagePaths(paths: readonly string[]): Promise<void>;
+	gitStagePaths(paths: readonly string[], rootId?: string): Promise<void>;
 	/** `F080` S3: `git reset -q -- <paths...>` — unstages exactly the given
 	 * paths, leaving working-tree content untouched. Same
 	 * rejections as `gitStagePaths`. */
-	gitUnstagePaths(paths: readonly string[]): Promise<void>;
+	gitUnstagePaths(paths: readonly string[], rootId?: string): Promise<void>;
 	/** `F080` S3 hunk-level stage: hashes `content` (the file's complete new
 	 * content after applying one or more selected hunks — computed by the
 	 * frontend's Monaco diff engine, never a unified-diff patch) into the
@@ -1510,7 +1514,11 @@ export interface PlainBridge {
 	 * mechanics and mode-resolution rule. Rejects with
 	 * `GIT_STAGE_BLOB_CONTENT_TOO_LARGE` above 8 MiB, or
 	 * `GIT_STAGE_BLOB_INVALID_PATH` for an invalid path. */
-	gitStageBlob(path: string, content: Uint8Array): Promise<void>;
+	gitStageBlob(
+		path: string,
+		content: Uint8Array,
+		rootId?: string,
+	): Promise<void>;
 	/** `F080` S3: `git -c user.useConfigOnly=true commit --quiet --file -
 	 * [--amend]` — `message` travels over stdin, never a command-line
 	 * argument. Rejects with `GIT_COMMIT_EMPTY_MESSAGE` for an empty/
@@ -1519,7 +1527,7 @@ export interface PlainBridge {
 	 * blocking `pre-commit`/`commit-msg` hook — hooks are *not* suppressed
 	 * for this user-initiated write, unlike `gitStatus`'s background read).
 	 */
-	gitCommit(message: string, amend: boolean): Promise<void>;
+	gitCommit(message: string, amend: boolean, rootId?: string): Promise<void>;
 	/** `F080` S3, **destructive**: `git checkout -q -- <paths...>` — restores
 	 * exactly the given paths' working-tree content to the index's version,
 	 * discarding unstaged edits. This call performs the discard
@@ -1529,7 +1537,7 @@ export interface PlainBridge {
 	 * batch cannot be resolved (e.g. an untracked path), the whole call
 	 * rejects with `GIT_DISCARD_FAILED` and none of the paths are touched.
 	 * Same path-list validation rejections as `gitStagePaths`. */
-	gitDiscardPaths(paths: readonly string[]): Promise<void>;
+	gitDiscardPaths(paths: readonly string[], rootId?: string): Promise<void>;
 	/** `F080` S4: computes the ahead/behind preview for `operation` — never
 	 * spawns a network subprocess itself (both underlying git invocations are
 	 * pure local-ref/local-object-database reads). Same trust/repository
@@ -1542,13 +1550,14 @@ export interface PlainBridge {
 	 * `gitPush` — see `app/features/scm/plain-scm-network.ts`. */
 	gitNetworkPreview(
 		operation: GitNetworkOperation,
+		rootId?: string,
 	): Promise<GitNetworkPreviewResult>;
 	/** `F080` S4: `git fetch --quiet` (no explicit remote — resolves to the
 	 * current branch's configured remote, or `origin`, exactly like a bare
 	 * `git fetch` typed at a real terminal). Rejects with `GIT_FETCH_FAILED`
 	 * on any other failure. Never called without a preceding, user-confirmed
 	 * `gitNetworkPreview("fetch")` call. */
-	gitFetch(): Promise<void>;
+	gitFetch(rootId?: string): Promise<void>;
 	/** `F080` S4: `git pull --quiet` against the current branch's configured
 	 * upstream. Rejects with `GIT_NETWORK_NO_UPSTREAM` if none is configured,
 	 * `GIT_PULL_NEEDS_STRATEGY` if the branches have diverged and no
@@ -1556,7 +1565,7 @@ export interface PlainBridge {
 	 * domain never auto-configures one on the caller's behalf — ADR 0003), or
 	 * `GIT_PULL_FAILED` for any other failure. Never called without a
 	 * preceding, user-confirmed `gitNetworkPreview("pull")` call. */
-	gitPull(): Promise<void>;
+	gitPull(rootId?: string): Promise<void>;
 	/** `F080` S4, **network-destructive when `force` is true**: `git push
 	 * --quiet` (or, with `force: true`, `git push --quiet --force-with-lease`
 	 * — never bare `--force`, see `src-tauri/src/git/network.rs`'s own module
@@ -1568,14 +1577,14 @@ export interface PlainBridge {
 	 * `gitNetworkPreview("push")` call — `force: true` requires its own,
 	 * separately-worded confirmation (see
 	 * `app/features/scm/plain-scm-network.ts`'s `"forcePush"` kind). */
-	gitPush(force: boolean): Promise<void>;
+	gitPush(force: boolean, rootId?: string): Promise<void>;
 	/** `F080` S4: best-effort, idempotent request to cancel whatever
 	 * `gitFetch`/`gitPull`/`gitPush` call is currently in flight for this
-	 * window (a no-op if none is) — the user-reachable half of this domain's
+	 * window and selected root (a no-op if none is) — the user-reachable half of this domain's
 	 * cooperative network-exec cancellation (`GitExecMode::Network`'s longer
 	 * timeout means a stuck fetch/pull/push needs a real way to abort early).
 	 * Never rejects. */
-	gitNetworkCancel(): Promise<void>;
+	gitNetworkCancel(rootId?: string): Promise<void>;
 	/** `F090` S0: `git blame --line-porcelain --root -c core.quotePath=false
 	 * [-L<range>] -- <path>` — `path` is repository-toplevel-relative, `range`
 	 * omitted means whole-file blame. Same trust/repository rejections as
@@ -1587,6 +1596,7 @@ export interface PlainBridge {
 	gitBlameFile(
 		path: string,
 		range: GitBlameLineRange | null,
+		rootId?: string,
 	): Promise<GitBlameFileResult>;
 	/** `F090` S0: batch `git log --no-walk` fetch of each requested commit's
 	 * full message body (blame's own `summary` is only the first line) — for
@@ -1599,6 +1609,7 @@ export interface PlainBridge {
 	 * array itself is valid and simply resolves to `{ messages: {} }`. */
 	gitBlameCommitMessages(
 		shas: readonly string[],
+		rootId?: string,
 	): Promise<GitBlameCommitMessagesResult>;
 	/** `F090` S1: `git log -z --format=%H%x1f%B --no-patch --follow -- <path>`
 	 * — the whole-file commit list, newest first. `--follow` is git's own
@@ -1607,7 +1618,7 @@ export interface PlainBridge {
 	 * history at all (never committed, or never existed) is **not** a
 	 * rejection — it resolves to `{ entries: [], truncated: false }`. Same
 	 * trust/repository rejections as `gitStatus`. */
-	gitFileHistory(path: string): Promise<GitHistoryListResult>;
+	gitFileHistory(path: string, rootId?: string): Promise<GitHistoryListResult>;
 	/** `F090` S1: `git log -z --format=%H%x1f%B --no-patch -L<range>:<path>` —
 	 * the commit list touching one specific line range, newest first (this
 	 * already crosses a rename on its own, by default, for the tracked line —
@@ -1620,6 +1631,7 @@ export interface PlainBridge {
 	gitLineHistoryList(
 		path: string,
 		range: GitLogLineRange,
+		rootId?: string,
 	): Promise<GitHistoryListResult>;
 	/** `F090` S1: drills into one `gitLineHistoryList(path, range)` entry's
 	 * actual diff hunk. `skip` is the zero-based position of the desired entry
@@ -1640,6 +1652,7 @@ export interface PlainBridge {
 		range: GitLogLineRange,
 		skip: number,
 		expectedSha: string,
+		rootId?: string,
 	): Promise<GitLineHistoryDetail>;
 	/** `F090` S2: resolves `sha`'s file-level change list against its first
 	 * parent (or git's own well-known empty-tree object for a root commit) —
@@ -1651,7 +1664,7 @@ export interface PlainBridge {
 	 * sha, or `GIT_SHOW_COMMIT_NOT_FOUND` for a sha that does not resolve to a
 	 * real commit object (including a syntactically valid sha naming a real
 	 * blob/tree instead). */
-	gitShowCommit(sha: string): Promise<GitShowCommitResult>;
+	gitShowCommit(sha: string, rootId?: string): Promise<GitShowCommitResult>;
 	/** `F090` S2: reads one version of `path` at an arbitrary, already-
 	 * validated commit `sha` — the multi-diff resolver's own content-fetch
 	 * primitive for each changed file's original/modified side (the commit
@@ -1660,24 +1673,28 @@ export interface PlainBridge {
 	 * `gitShowBlob` (`{ content: null }`, not a rejection, when the path does
 	 * not exist at that revision) — reuses that exact result type rather than
 	 * a near-duplicate one. */
-	gitShowCommitBlob(sha: string, path: string): Promise<GitShowBlobResult>;
+	gitShowCommitBlob(
+		sha: string,
+		path: string,
+		rootId?: string,
+	): Promise<GitShowBlobResult>;
 	/** `F090` S3: `git log -z --format=%H%x1f%P%x1f%s --no-patch --topo-order
 	 * --branches --tags --remotes --max-count=<maxCount+1>` — the graph
 	 * view's own DAG source. `maxCount` must be a positive integer (the
 	 * caller's own display window); rejects with
 	 * `GIT_LOG_GRAPH_INVALID_REQUEST` for zero or an excessive value. Same
 	 * trust/repository rejections as `gitStatus`. */
-	gitLogGraph(maxCount: number): Promise<GitLogGraphResult>;
+	gitLogGraph(maxCount: number, rootId?: string): Promise<GitLogGraphResult>;
 	/** `F090` S3: `git for-each-ref --format=... refs/heads refs/tags
 	 * refs/remotes` — the refs sidebar's own data source, and the graph
 	 * view's own ref-badge join source (see `GitGraphNode`'s own doc
 	 * comment). Takes no parameters. Same trust/repository rejections as
 	 * `gitStatus`. */
-	gitRefsList(): Promise<GitRefsListResult>;
+	gitRefsList(rootId?: string): Promise<GitRefsListResult>;
 	/** `F090` S4: `git stash list -z --format=%gd%x1f%H%x1f%ct%x1f%B` — the
 	 * stash panel's own data source, newest first. Takes no parameters. Same
 	 * trust/repository rejections as `gitStatus`. */
-	gitStashList(): Promise<GitStashListResult>;
+	gitStashList(rootId?: string): Promise<GitStashListResult>;
 	/** `F090` S4: `git stash show --name-status/--numstat -z -u -M -C
 	 * --find-copies-harder <sha>` — one stash entry's own file-level change
 	 * list. `sha` must be a real, exactly 40-lowercase-hex commit id
@@ -1685,7 +1702,7 @@ export interface PlainBridge {
 	 * as `gitStatus`; rejects with `GIT_STASH_NOT_FOUND` for a malformed or
 	 * nonexistent sha (including a syntactically valid sha naming a real
 	 * commit that is not itself a stash entry). */
-	gitStashShow(sha: string): Promise<GitStashShowResult>;
+	gitStashShow(sha: string, rootId?: string): Promise<GitStashShowResult>;
 	/** `F090` S4: `git stash push -m <message> [--include-untracked] -- .` —
 	 * moves the current working tree's uncommitted changes into a new stash
 	 * entry. This is a low-severity write per this feature's own frozen plan
@@ -1701,6 +1718,7 @@ export interface PlainBridge {
 	gitStashPush(
 		message: string,
 		includeUntracked: boolean,
+		rootId?: string,
 	): Promise<GitStashPushOutcome>;
 	/** `F090` S4: `git stash apply [--index] <sha>` — applies a stash entry's
 	 * changes without removing it from the list. Unlike `gitStashPop`, `sha`
@@ -1717,7 +1735,11 @@ export interface PlainBridge {
 	 * clobbered (a different, preemptive failure mode from a true content
 	 * conflict — git detects this before ever attempting a merge). Same
 	 * trust/repository rejections as `gitStatus`. */
-	gitStashApply(sha: string, useIndex: boolean): Promise<GitStashApplyOutcome>;
+	gitStashApply(
+		sha: string,
+		useIndex: boolean,
+		rootId?: string,
+	): Promise<GitStashApplyOutcome>;
 	/** `F090` S4: `git stash pop [--index] stash@{N}` — applies a stash
 	 * entry's changes and, only on success, removes it from the list. `sha`
 	 * is re-resolved to a fresh `stash@{N}` server-side immediately before
@@ -1738,7 +1760,11 @@ export interface PlainBridge {
 	 * `GIT_STASH_POP_WOULD_OVERWRITE` for the same preemptive-failure case
 	 * `gitStashApply` documents. Same trust/repository rejections as
 	 * `gitStatus`. */
-	gitStashPop(sha: string, useIndex: boolean): Promise<GitStashApplyOutcome>;
+	gitStashPop(
+		sha: string,
+		useIndex: boolean,
+		rootId?: string,
+	): Promise<GitStashApplyOutcome>;
 	/** `F090` S4: `git stash drop stash@{N}` — permanently, irreversibly
 	 * discards a stash entry (unlike `gitStashPop`, there is no successful
 	 * "applied" outcome at all: this call either drops the entry or rejects).
@@ -1750,11 +1776,11 @@ export interface PlainBridge {
 	 * re-confirms" contract `gitStashPop`/`gitDiscardPaths` already establish.
 	 * Rejects with `GIT_STASH_NOT_FOUND` when no entry with this sha
 	 * currently exists. Same trust/repository rejections as `gitStatus`. */
-	gitStashDrop(sha: string): Promise<void>;
+	gitStashDrop(sha: string, rootId?: string): Promise<void>;
 	/** `F090` S5: `git worktree list --porcelain -z` — the worktree panel's own
 	 * data source; the main worktree is always `entries[0]`. Takes no
 	 * parameters. Same trust/repository rejections as `gitStatus`. */
-	gitWorktreeList(): Promise<GitWorktreeListResult>;
+	gitWorktreeList(rootId?: string): Promise<GitWorktreeListResult>;
 	/** `F090` S5: `git worktree add [--detach] -- <path> [<commitIsh>]` —
 	 * creates a new linked worktree. `childSegment` must be a single,
 	 * non-empty path segment (no `/`) naming the new worktree's own leaf
@@ -1780,6 +1806,7 @@ export interface PlainBridge {
 		childSegment: string,
 		detach: boolean,
 		commitIsh: string | null,
+		rootId?: string,
 	): Promise<GitWorktreeAddOutcome>;
 	/** `F090` S5: `git worktree remove [--force] -- <path>` — removes a linked
 	 * worktree. This call performs the removal unconditionally for whatever
@@ -1800,6 +1827,7 @@ export interface PlainBridge {
 	gitWorktreeRemove(
 		path: string,
 		force: boolean,
+		rootId?: string,
 	): Promise<GitWorktreeRemoveOutcome>;
 	/** `F100` S1: reads whether the exact `(command, args, transport)` triple
 	 * has already been confirmed for the current workspace — see

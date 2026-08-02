@@ -1,12 +1,8 @@
-//! Resolves "the repository" a git IPC command should act on for the
-//! current window: `F080` currently authorizes exactly one workspace root
-//! at a time (the same single-root assumption `search::dto`'s own doc
-//! comments already document for this codebase), so [`resolve_repo_toplevel`]
-//! takes that root as the sole candidate directory and confirms it is a Git
-//! working tree exactly the way [`super::discovery::discover_repository`]
-//! already does — this function is the wiring `discover_repository`'s own
-//! doc comment predicted ("exercised by tests only until F080 S1 wires a
-//! command onto this").
+//! Resolves the exact repository a Git operation should act on. Production
+//! IPC creates a [`SelectedGitRoot`] from the caller's explicit `rootId`;
+//! direct single-root helpers can continue passing [`WorkspaceService`]
+//! itself, but that compatibility path refuses a multi-root workspace rather
+//! than silently selecting its first root.
 //!
 //! Trust is checked *before* even looking at the workspace's roots, and as a
 //! hard failure (`WORKSPACE_NOT_TRUSTED`) rather than
@@ -16,37 +12,94 @@
 //! from "no repository here" (nothing to show), not have both collapse into
 //! the same "no repository" outcome.
 //!
-//! # Known scope limit (not solved in this slice)
-//!
-//! This function trusts *git's own* reported toplevel, which may sit at or
-//! above the authorized workspace root (e.g. the user opened a subdirectory
-//! of a larger repository). Running status/diff from that toplevel would
-//! then report entries outside the workspace's own authorized root —
-//! `F080` S1 does not add a pathspec/authorized-subtree filter for that
-//! case; it is accepted as a known gap for a follow-up slice, not silently
-//! papered over.
+//! Git's reported top level must canonicalize to exactly the selected root.
+//! A workspace opened at a subdirectory of a larger repository is rejected:
+//! running repository-wide status, stash, refs, or mutations from the parent
+//! top level would otherwise escape the authorized root.
 
 use std::path::PathBuf;
 
 use crate::error::CommandError;
 use crate::trust::service::TrustService;
 use crate::workspace::service::WorkspaceService;
+use crate::workspace::RootId;
 
 use super::discovery::{discover_repository, RepositoryDiscovery};
-use super::git_no_repository;
+use super::{git_no_repository, git_repository_outside_root, git_root_required};
+
+/// The minimum workspace capability every Git operation needs. Keeping this
+/// as a small trait lets the existing direct single-root unit tests pass a
+/// `WorkspaceService`, while IPC passes a root-bound scope through the same
+/// operation chain without ambient mutable selection state.
+pub(crate) trait GitRepositoryScope {
+    fn workspace(&self) -> &WorkspaceService;
+    fn selected_root_id(&self) -> Option<RootId>;
+}
+
+impl GitRepositoryScope for WorkspaceService {
+    fn workspace(&self) -> &WorkspaceService {
+        self
+    }
+
+    fn selected_root_id(&self) -> Option<RootId> {
+        None
+    }
+}
+
+/// Immutable root-bound view over a window's workspace service. It carries
+/// no filesystem authority of its own; every resolution revalidates the
+/// identity against the current window state, so removing/replacing a root
+/// invalidates subsequent Git calls immediately.
+pub(crate) struct SelectedGitRoot<'workspace> {
+    workspace: &'workspace WorkspaceService,
+    root_id: RootId,
+}
+
+impl<'workspace> SelectedGitRoot<'workspace> {
+    pub(crate) const fn new(workspace: &'workspace WorkspaceService, root_id: RootId) -> Self {
+        Self { workspace, root_id }
+    }
+}
+
+impl GitRepositoryScope for SelectedGitRoot<'_> {
+    fn workspace(&self) -> &WorkspaceService {
+        self.workspace
+    }
+
+    fn selected_root_id(&self) -> Option<RootId> {
+        Some(self.root_id)
+    }
+}
 
 pub(crate) async fn resolve_repo_toplevel(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    scope: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
 ) -> Result<PathBuf, CommandError> {
+    let workspace = scope.workspace();
     trust.require_trusted(workspace, window_label).await?;
-    let roots = workspace.root_canonical_paths(window_label)?;
-    let (_, candidate_dir) = roots.first().ok_or_else(git_no_repository)?;
-    match discover_repository(trust, workspace, window_label, candidate_dir).await? {
+    let candidate_dir = match scope.selected_root_id() {
+        Some(root_id) => workspace.root_canonical_path(window_label, root_id)?,
+        None => {
+            let roots = workspace.root_canonical_paths(window_label)?;
+            match roots.as_slice() {
+                [] => return Err(git_no_repository()),
+                [(_, path)] => path.clone(),
+                _ => return Err(git_root_required()),
+            }
+        }
+    };
+    match discover_repository(trust, workspace, window_label, &candidate_dir).await? {
         RepositoryDiscovery::Confirmed {
             toplevel: Some(toplevel),
-        } => Ok(toplevel),
+        } => {
+            let canonical_toplevel =
+                std::fs::canonicalize(toplevel).map_err(|_| git_no_repository())?;
+            if canonical_toplevel != candidate_dir {
+                return Err(git_repository_outside_root());
+            }
+            Ok(canonical_toplevel)
+        }
         _ => Err(git_no_repository()),
     }
 }

@@ -169,11 +169,33 @@ pub(crate) fn git_no_repository() -> CommandError {
     )
 }
 
+/// A legacy/internal caller did not identify which repository a Git
+/// operation should use while more than one workspace root is authorized.
+/// Tauri IPC commands always carry a `rootId`; this error keeps direct
+/// single-root helpers fail-closed instead of silently choosing root zero.
+pub(crate) fn git_root_required() -> CommandError {
+    CommandError::new(
+        "GIT_ROOT_REQUIRED",
+        "Select a workspace root before running a Git operation.",
+    )
+}
+
+/// Git reported a repository top level above (or otherwise different from)
+/// the exact authorized workspace root selected by the caller. Running from
+/// that top level would expose or mutate paths outside the authorized root.
+pub(crate) fn git_repository_outside_root() -> CommandError {
+    CommandError::new(
+        "GIT_REPOSITORY_OUTSIDE_ROOT",
+        "The Git repository extends outside the selected workspace root.",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         git_cwd_invalid, git_exec_cancelled, git_exec_filter_discovery_failed,
         git_exec_output_limit_exceeded, git_exec_timeout, git_exec_unavailable, git_no_repository,
+        git_repository_outside_root, git_root_required,
     };
 
     #[test]
@@ -187,6 +209,11 @@ mod tests {
             "GIT_EXEC_OUTPUT_LIMIT_EXCEEDED"
         );
         assert_eq!(git_no_repository().code(), "GIT_NO_REPOSITORY");
+        assert_eq!(git_root_required().code(), "GIT_ROOT_REQUIRED");
+        assert_eq!(
+            git_repository_outside_root().code(),
+            "GIT_REPOSITORY_OUTSIDE_ROOT"
+        );
         assert_eq!(
             git_exec_filter_discovery_failed().code(),
             "GIT_EXEC_FILTER_DISCOVERY_FAILED"

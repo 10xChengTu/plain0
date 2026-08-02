@@ -9793,12 +9793,36 @@ describe("Plain F080 S1 git command registration Harness", () => {
 			"src-tauri/src/git/commands.rs",
 			(source) =>
 				source.replace(
-					"status::git_status(trust.inner(), workspace.inner(), window.label())",
-					'status::git_status(trust.inner(), workspace.inner(), "main")',
+					"status::git_status(trust.inner(), &scope, window.label())",
+					'status::git_status(trust.inner(), &scope, "main")',
 				),
 		);
 		expect(validateGitCommandRegistration(rewired)).toContain(
 			"git_status must contain only its audited DTO decode and single service route",
+		);
+	});
+
+	it("fails if a Git command drops its explicit root identity", () => {
+		const rewired = withMutatedGitCommandSource(
+			"src-tauri/src/git/commands.rs",
+			(source) => source.replace("    root_id: RootId,\n", ""),
+		);
+		expect(validateGitCommandRegistration(rewired)).toContain(
+			"git_status must accept its audited parameters and return the audited Result type",
+		);
+	});
+
+	it("fails if a Git command bypasses SelectedGitRoot", () => {
+		const rewired = withMutatedGitCommandSource(
+			"src-tauri/src/git/commands.rs",
+			(source) =>
+				source.replace(
+					"    let scope = SelectedGitRoot::new(workspace.inner(), root_id);\n    let result = status::git_status(trust.inner(), &scope, window.label()).await?;",
+					"    let result = status::git_status(trust.inner(), workspace.inner(), window.label()).await?;",
+				),
+		);
+		expect(validateGitCommandRegistration(rewired)).toContain(
+			"git_status must construct exactly one immutable SelectedGitRoot from its audited workspace/root_id pair",
 		);
 	});
 
@@ -10936,7 +10960,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 			"app/platform/tauri/contracts.ts",
 			(source) =>
 				source.replace(
-					/\tgitShowBlob\(rev: GitBlobRev, path: string\): Promise<GitShowBlobResult>;\n/,
+					/\tgitShowBlob\(\n\t\trev: GitBlobRev,\n\t\tpath: string,\n\t\trootId\?: string,\n\t\): Promise<GitShowBlobResult>;\n/,
 					"",
 				),
 		);
@@ -10944,6 +10968,54 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
 			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
+		);
+	});
+
+	it("fails if a PlainBridge Git method stops accepting the selected root identity", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/contracts.ts",
+			(source) =>
+				source.replace(
+					"\tgitStatus(rootId?: string): Promise<GitStatusResult>;",
+					"\tgitStatus(): Promise<GitStatusResult>;",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
+		);
+	});
+
+	it("fails if a native Git invoke drops the validated root identity", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					"\t\t\t\t\trootId: await resolveNativeGitRootId(rootId),\n\t\t\t\t\trequest: {},",
+					"\t\t\t\t\trequest: {},",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"native.ts must attach one validated explicit rootId to every audited Git invoke",
+		);
+	});
+
+	it("fails if the Git root identity codec stops validating UUID-v4", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/git-codec.ts",
+			(source) =>
+				source.replace(
+					'typeof rootId !== "string" || !UUID_V4_PATTERN.test(rootId)',
+					'typeof rootId !== "string"',
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"git-codec.ts's frozenGitRootId must reject every non-canonical UUID-v4 root identity before IPC",
 		);
 	});
 
@@ -10982,11 +11054,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 	it("fails if native.ts invokes git_status a second time", () => {
 		const mutated = withMutatedGitApp(
 			"app/platform/tauri/native.ts",
-			(source) =>
-				source.replace(
-					'await invoke<unknown>("git_status", { request: {} })',
-					'await invoke<unknown>("git_status", { request: {} }); await invoke<unknown>("git_status", { request: {} })',
-				),
+			(source) => `${source}\ninvoke<unknown>("git_status");`,
 		);
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
@@ -11000,7 +11068,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 			"app/platform/tauri/contracts.ts",
 			(source) =>
 				source.replace(
-					"\tgitCommit(message: string, amend: boolean): Promise<void>;\n",
+					"\tgitCommit(message: string, amend: boolean, rootId?: string): Promise<void>;\n",
 					"",
 				),
 		);
@@ -11014,11 +11082,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 	it("fails if native.ts invokes git_discard_paths a second time", () => {
 		const mutated = withMutatedGitApp(
 			"app/platform/tauri/native.ts",
-			(source) =>
-				source.replace(
-					'decodeGitVoid(await invoke<unknown>("git_discard_paths", { request }));',
-					'decodeGitVoid(await invoke<unknown>("git_discard_paths", { request })); decodeGitVoid(await invoke<unknown>("git_discard_paths", { request }));',
-				),
+			(source) => `${source}\ninvoke<unknown>("git_discard_paths");`,
 		);
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
@@ -11061,7 +11125,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 			"app/platform/tauri/contracts.ts",
 			(source) =>
 				source.replace(
-					/\tgitNetworkPreview\(\n\t\toperation: GitNetworkOperation,\n\t\): Promise<GitNetworkPreviewResult>;\n/,
+					/\tgitNetworkPreview\(\n\t\toperation: GitNetworkOperation,\n\t\trootId\?: string,\n\t\): Promise<GitNetworkPreviewResult>;\n/,
 					"",
 				),
 		);
@@ -11076,7 +11140,10 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		const widened = withMutatedGitApp(
 			"app/platform/tauri/contracts.ts",
 			(source) =>
-				source.replace("\tgitPush(force: boolean): Promise<void>;\n", ""),
+				source.replace(
+					"\tgitPush(force: boolean, rootId?: string): Promise<void>;\n",
+					"",
+				),
 		);
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
@@ -11120,11 +11187,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 	it("fails if native.ts invokes git_fetch a second time", () => {
 		const mutated = withMutatedGitApp(
 			"app/platform/tauri/native.ts",
-			(source) =>
-				source.replace(
-					'decodeGitVoid(await invoke<unknown>("git_fetch", { request: {} }));',
-					'decodeGitVoid(await invoke<unknown>("git_fetch", { request: {} })); decodeGitVoid(await invoke<unknown>("git_fetch", { request: {} }));',
-				),
+			(source) => `${source}\ninvoke<unknown>("git_fetch");`,
 		);
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
@@ -11152,7 +11215,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 			"app/platform/tauri/contracts.ts",
 			(source) =>
 				source.replace(
-					"\tgitLogGraph(maxCount: number): Promise<GitLogGraphResult>;\n",
+					"\tgitLogGraph(maxCount: number, rootId?: string): Promise<GitLogGraphResult>;\n",
 					"",
 				),
 		);
@@ -11167,7 +11230,10 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		const widened = withMutatedGitApp(
 			"app/platform/tauri/contracts.ts",
 			(source) =>
-				source.replace("\tgitRefsList(): Promise<GitRefsListResult>;\n", ""),
+				source.replace(
+					"\tgitRefsList(rootId?: string): Promise<GitRefsListResult>;\n",
+					"",
+				),
 		);
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
@@ -11195,11 +11261,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 	it("fails if native.ts invokes git_refs_list a second time", () => {
 		const mutated = withMutatedGitApp(
 			"app/platform/tauri/native.ts",
-			(source) =>
-				source.replace(
-					'await invoke<unknown>("git_refs_list", { request: {} })',
-					'await invoke<unknown>("git_refs_list", { request: {} }); await invoke<unknown>("git_refs_list", { request: {} })',
-				),
+			(source) => `${source}\ninvoke<unknown>("git_refs_list");`,
 		);
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
@@ -11330,8 +11392,8 @@ export async function bypassDiscard(bridge: PlainBridge): Promise<void> {
 	it("rejects a missing or renamed gitDiscardPaths bridge declaration", () => {
 		const hostile = replaceGitDiscardAppSource(
 			"app/platform/tauri/native.ts",
-			"gitDiscardPaths: async (paths) => {",
-			"gitDiscardPathsRenamed: async (paths) => {",
+			"gitDiscardPaths: async (paths, rootId) => {",
+			"gitDiscardPathsRenamed: async (paths, rootId) => {",
 		);
 		expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
 			"app/platform/tauri/native.ts must declare gitDiscardPaths exactly once in its audited bridge surface",
@@ -11545,8 +11607,8 @@ export async function bypassFetch(bridge: PlainBridge): Promise<void> {
 	it("rejects a missing or renamed gitPush bridge declaration", () => {
 		const hostile = replaceGitNetworkAppSource(
 			"app/platform/tauri/native.ts",
-			"gitPush: async (force) => {",
-			"gitPushRenamed: async (force) => {",
+			"gitPush: async (force, rootId) => {",
+			"gitPushRenamed: async (force, rootId) => {",
 		);
 		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
 			"app/platform/tauri/native.ts must declare gitPush exactly once in its audited bridge surface",
@@ -11825,8 +11887,8 @@ export async function bypassPop(bridge: PlainBridge): Promise<void> {
 	it("rejects a missing or renamed gitStashPop bridge declaration", () => {
 		const hostile = replaceGitStashAppSource(
 			"app/platform/tauri/native.ts",
-			"gitStashPop: async (sha, useIndex) => {",
-			"gitStashPopRenamed: async (sha, useIndex) => {",
+			"gitStashPop: async (sha, useIndex, rootId) => {",
+			"gitStashPopRenamed: async (sha, useIndex, rootId) => {",
 		);
 		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
 			"app/platform/tauri/native.ts must declare gitStashPop exactly once in its audited bridge surface",
@@ -12003,8 +12065,8 @@ export async function bypassRemove(bridge: PlainBridge): Promise<void> {
 	it("rejects a missing or renamed gitWorktreeRemove bridge declaration", () => {
 		const hostile = replaceGitWorktreeAppSource(
 			"app/platform/tauri/native.ts",
-			"gitWorktreeRemove: async (path, force) => {",
-			"gitWorktreeRemoveRenamed: async (path, force) => {",
+			"gitWorktreeRemove: async (path, force, rootId) => {",
+			"gitWorktreeRemoveRenamed: async (path, force, rootId) => {",
 		);
 		expect(validateGitWorktreeConfirmationBoundary(hostile)).toContain(
 			"app/platform/tauri/native.ts must declare gitWorktreeRemove exactly once in its audited bridge surface",

@@ -20,6 +20,8 @@
 ### Workspace trust 与外部执行
 
 - 未信任 workspace 不启动 Git 子进程，只通过文件系统识别仓库标记。
+- 多根 workspace 的每个 Git 命令都携带显式 root id，并在当前窗口授权集合中重新验证；没有选择时只允许“恰好一个 root”的兼容路径，多根绝不按授权顺序猜测。
+- `git rev-parse --show-toplevel` 的结果必须 canonicalize 后与所选 root 完全相等。所选 root 是父仓库子目录时拒绝仓库级 Git，而不是让 status、history、stash、refs 或写操作越过已授权 root。
 - 首次信任明确告知：仓库或用户 Git 配置可能触发 hooks、fsmonitor、filters/textconv、credential helper、SSH/GPG 等外部程序；授权按 workspace 保存并可撤销。
 - 自动后台读取使用 hardened mode，固定子命令并禁用 hooks、fsmonitor、external diff/textconv 和 credential prompt；设置超时、输出上限和取消。
 - 用户发起的 commit 等本地写操作可使用相应 hooks/filters；fetch/pull/push 和所有破坏性动作在显示目标/影响后确认。不得提供通用命令或 fail-open 回退。

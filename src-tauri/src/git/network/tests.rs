@@ -18,6 +18,7 @@ use crate::trust::service::TrustService;
 use crate::workspace::dto::WorkspacePickRootsMode;
 use crate::workspace::picker::{DirectoryPicker, DirectoryPickerFuture, DirectoryPickerResult};
 use crate::workspace::service::WorkspaceService;
+use crate::workspace::RootId;
 
 fn block_on<F: std::future::Future>(future: F) -> F::Output {
     tauri::async_runtime::block_on(future)
@@ -588,15 +589,31 @@ fn stale_force_push_is_still_rejected_by_force_with_lease() {
 fn request_cancel_sets_the_flag_for_an_in_flight_window_and_is_a_no_op_otherwise() {
     let service = GitNetworkService::new();
     // No operation ever began for "main" — must not panic, must do nothing.
-    service.request_cancel("main");
+    service.request_cancel_for_root_id("main", None);
 
-    let flag = service.begin("main");
+    let flag = service.begin_for_root("main", None);
     assert!(!flag.load(std::sync::atomic::Ordering::SeqCst));
-    service.request_cancel("main");
+    service.request_cancel_for_root_id("main", None);
     assert!(flag.load(std::sync::atomic::Ordering::SeqCst));
 
-    service.end("main");
+    service.end_for_root("main", None);
     // Cancelling again after `end` must not resurrect or panic — there is
     // simply nothing left to cancel.
-    service.request_cancel("main");
+    service.request_cancel_for_root_id("main", None);
+}
+
+#[test]
+fn rooted_network_cancellation_never_crosses_to_another_repository() {
+    let service = GitNetworkService::new();
+    let first = RootId::parse_v4_wire("00000000-0000-4000-8000-000000000101").unwrap();
+    let second = RootId::parse_v4_wire("00000000-0000-4000-8000-000000000102").unwrap();
+    let first_flag = service.begin_for_root("main", Some(first));
+    let second_flag = service.begin_for_root("main", Some(second));
+
+    service.request_cancel_for_root("main", first);
+
+    assert!(first_flag.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!second_flag.load(std::sync::atomic::Ordering::SeqCst));
+    service.end_for_root("main", Some(first));
+    service.end_for_root("main", Some(second));
 }

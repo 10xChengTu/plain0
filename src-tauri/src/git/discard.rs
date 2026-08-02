@@ -22,12 +22,11 @@ use std::sync::atomic::AtomicBool;
 
 use crate::error::CommandError;
 use crate::trust::service::TrustService;
-use crate::workspace::service::WorkspaceService;
 
 use super::dto::is_valid_mutate_path;
 use super::exec::{run_git, GitExecMode};
 use super::git_exec_unavailable;
-use super::repo::resolve_repo_toplevel;
+use super::repo::{resolve_repo_toplevel, GitRepositoryScope};
 
 fn git_mutate_invalid_paths() -> CommandError {
     CommandError::new(
@@ -49,7 +48,7 @@ pub(crate) const GIT_DISCARD_ARGS: &[&str] = &["checkout", "-q"];
 
 pub(crate) async fn discard_paths(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     paths: &[String],
 ) -> Result<(), CommandError> {

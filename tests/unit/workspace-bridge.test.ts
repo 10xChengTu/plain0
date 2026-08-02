@@ -20,6 +20,22 @@ function bytesFromHex(value: string): Uint8Array {
 }
 
 describe("browser mock workspace bridge", () => {
+	it("requires an explicit authorized root for Git in a multi-root workspace", async () => {
+		const bridge = createBrowserMockBridge();
+		const selected = await bridge.workspacePickRoots("add");
+		await bridge.workspaceTrustGrant();
+
+		await expect(bridge.gitStatus()).rejects.toMatchObject({
+			code: "GIT_ROOT_REQUIRED",
+		});
+		await expect(
+			bridge.gitStatus(selected.snapshot.roots[1]!.rootId),
+		).resolves.toMatchObject({ entries: [] });
+		await expect(
+			bridge.gitStatus("00000000-0000-4000-8000-000000000199"),
+		).rejects.toMatchObject({ code: "ROOT_NOT_AUTHORIZED" });
+	});
+
 	it("isolates each instance and preserves revisions for cancellation and duplicates", async () => {
 		const bridge = createBrowserMockBridge({
 			workspacePicks: ["selected", "cancelled", "selected"],

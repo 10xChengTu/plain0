@@ -50,6 +50,8 @@ const MAX_GIT_SHOW_BLOB_PATH_CHARS = 4_096;
 /** Mirrors `git::diff::MAX_GIT_SHOW_BLOB_BYTES` — see
  * `src-tauri/src/git/diff.rs`. */
 const MAX_GIT_SHOW_BLOB_BYTES = 8 * 1_024 * 1_024;
+const UUID_V4_PATTERN =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 const CONTRACT_ERROR_MESSAGE =
 	"Native IPC returned a payload that violates the Plain git contract.";
@@ -69,6 +71,20 @@ function violation(): never {
 
 function requestViolation(code: string, message: string): never {
 	throw Object.freeze({ code, message });
+}
+
+/** Validates the explicit workspace-root identity carried beside every Git
+ * request. The Rust `RootId` decoder and workspace authorization perform the
+ * same checks again; this frontend guard prevents malformed identities from
+ * crossing IPC at all. */
+export function frozenGitRootId(rootId: unknown): string {
+	if (typeof rootId !== "string" || !UUID_V4_PATTERN.test(rootId)) {
+		return requestViolation(
+			"INVALID_ROOT_ID",
+			"The Git workspace root identifier is invalid.",
+		);
+	}
+	return rootId;
 }
 
 function sanitizedDecode<T>(decoder: () => T): T {

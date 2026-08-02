@@ -221,11 +221,10 @@ use crate::error::CommandError;
 use crate::path_policy::RelativePath;
 use crate::trust::service::TrustService;
 use crate::workspace::picker::{DirectoryPicker, DirectoryPickerResult};
-use crate::workspace::service::WorkspaceService;
 
 use super::exec::{run_git, GitExecMode};
 use super::git_exec_unavailable;
-use super::repo::resolve_repo_toplevel;
+use super::repo::{resolve_repo_toplevel, GitRepositoryScope};
 use super::wire::{split_nul_records, GitPathBuf};
 
 /// Mirrors `log::is_lowercase_hex40`/`refs::is_lowercase_hex40`/
@@ -562,7 +561,7 @@ pub(crate) fn parse_worktree_list(
 
 pub(crate) async fn list_worktrees(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
 ) -> Result<WorktreeList, CommandError> {
     let repo_dir = resolve_repo_toplevel(trust, workspace, window_label).await?;
@@ -629,7 +628,7 @@ fn combined_output_text(stdout: &[u8], stderr: &[u8]) -> String {
 /// test supplies a fake.
 pub(crate) async fn add_worktree<P: DirectoryPicker>(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     picker: &P,
     child_segment: &str,
@@ -707,7 +706,7 @@ pub(crate) async fn add_worktree<P: DirectoryPicker>(
 /// to escalate.
 pub(crate) async fn remove_worktree(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     path: &str,
     force: bool,

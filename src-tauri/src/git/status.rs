@@ -26,11 +26,10 @@ use std::sync::atomic::AtomicBool;
 
 use crate::error::CommandError;
 use crate::trust::service::TrustService;
-use crate::workspace::service::WorkspaceService;
 
 use super::exec::{run_git, GitExecMode};
 use super::git_exec_unavailable;
-use super::repo::resolve_repo_toplevel;
+use super::repo::{resolve_repo_toplevel, GitRepositoryScope};
 use super::wire::{split_n_fields, split_nul_records, GitPathBuf};
 
 /// `# branch.oid` — no commits yet is the literal token `(initial)`, modeled
@@ -172,7 +171,7 @@ pub(crate) const GIT_STATUS_ARGS: &[&str] =
 /// through the hardened background-read exec path, then parses the result.
 pub(crate) async fn git_status(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
 ) -> Result<GitStatus, CommandError> {
     let repo_dir = resolve_repo_toplevel(trust, workspace, window_label).await?;

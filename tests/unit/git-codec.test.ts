@@ -15,6 +15,7 @@ import {
 	frozenGitDiscardPathsRequest,
 	frozenGitNetworkPreviewRequest,
 	frozenGitPushRequest,
+	frozenGitRootId,
 	frozenGitShowBlobRequest,
 	frozenGitShowBlobResult,
 	frozenGitStageBlobRequest,
@@ -23,6 +24,25 @@ import {
 } from "../../app/platform/tauri/git-codec";
 
 const contractError = { code: "IPC_CONTRACT_VIOLATION" };
+const rootId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+describe("Git root identity codec", () => {
+	it("accepts only a canonical lowercase RFC4122 UUID-v4 identity", () => {
+		expect(frozenGitRootId(rootId)).toBe(rootId);
+		for (const value of [
+			undefined,
+			null,
+			42,
+			"not-a-uuid",
+			rootId.toUpperCase(),
+			"00000000-0000-1000-8000-000000000101",
+		]) {
+			expect(() => frozenGitRootId(value)).toThrowError(
+				expect.objectContaining({ code: "INVALID_ROOT_ID" }),
+			);
+		}
+	});
+});
 
 function sampleOrdinary() {
 	return {

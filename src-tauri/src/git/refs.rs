@@ -102,11 +102,10 @@ use std::sync::atomic::AtomicBool;
 
 use crate::error::CommandError;
 use crate::trust::service::TrustService;
-use crate::workspace::service::WorkspaceService;
 
 use super::exec::{run_git, GitExecMode};
 use super::git_exec_unavailable;
-use super::repo::resolve_repo_toplevel;
+use super::repo::{resolve_repo_toplevel, GitRepositoryScope};
 use super::wire::GitPathBuf;
 
 /// The exact, audited `for-each-ref` argument list — locked by
@@ -308,7 +307,7 @@ fn parse_refs(output: &[u8], max_entries: usize) -> Result<RefList, CommandError
 /// resolving to an empty, non-truncated [`RefList`] rather than an error.
 pub(crate) async fn list_refs(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
 ) -> Result<RefList, CommandError> {
     let repo_dir = resolve_repo_toplevel(trust, workspace, window_label).await?;

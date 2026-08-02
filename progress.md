@@ -6,10 +6,11 @@
 
 - 阶段：6 — 非发布遗留功能补全。
 - WIP：`F150` Multi-root Git terminal and debug routing。
-- 当前最小工作项：先核对 Git/SCM 当前 root 授权与 repo 发现边界，改为显式选择已授权 root，补多根状态/写操作 Browser 与真实 Git E2E；完成并提交后再进入同 feature 的终端和调试 root routing，仍保持一次只做一个可验证切片。
+- 当前最小工作项：`F150` Git S0 已完成，下一项是 S1：实现 Source Control 显式根选择器、所有 Git 视图/资源 URI 的 root binding，并用两个真实独立仓库完成 Browser 与 Tauri 状态/写操作验收；该项独立提交后才进入同 feature 的终端与调试 routing。
 - 后续已规划：原生关窗与多根热退出恢复，本地 Open/Recent/Settings/Trash 工作流，Git/终端/搜索/调试完整度，独立 Rust SSH 远程工作区，以及最终非发布全量 E2E 审计。WIP 上限仍为 1，逐项验证并提交。
 - [x] `F140` S0 实现与 Browser 证据：Rust 文件搜索 entry/文本搜索 batch 均新增产生结果的 `rootId`；TypeScript 严格 codec 拒绝畸形 UUID、缺失/额外字段、accessor/Proxy，`PlainSearchService` 还以 query roots 集合二次 fail closed；Quick Open 与 Search 对两个 root 下同名 `shared.txt` 保留不同 authority，Replace Browser E2E 实际只向 secondary root 发出 versioned write，primary 内容保持不变。定向 Rust search 47/47、前端搜索单元 66/66、类型检查、lint、features/architecture guard 与聚焦 Chromium E2E 均通过。真实 Tauri 矩阵已登记为 `E2E-014`，完成后再关闭 `F140`。
 - [x] `F140` S1 真实 Tauri 收口：`E2E-014` 用 macOS 系统目录选择器分别授权两个仓库内 APFS fixture root，Explorer 双根正确；Cmd+P 同名 `shared.txt` 返回两条带 root label 的结果，secondary 打开内容/面包屑正确；真实 Search 为 secondary 返回 `1 result in 1 file`，Replace All 后磁盘仅 secondary 从 22 字节输入变为精确 24 字节 `F140 replaced secondary\n`（SHA-256 `2d0dfffb5e40b815be15cef2011cbc82e303e33b7efd429863502d3a860ab775`），primary 保持精确 20 字节 `F140 shared primary\n`（SHA-256 `2fd92e8289c8d2d3f15245d0afda61983970fcd1c16c3f24263cebc69eddb8d8`）；反向 Search/打开 primary 与再次 Cmd+P 双结果/重开 secondary 均通过，Cmd+Q 后无 Plain 残留进程。默认 linker-signed debug bundle 的白 WebView 属既有 F120 签名/资源封装边界，本条改用仓库已验证的本地 ad-hoc 完整签名（`flags=0x10002(adhoc,runtime)`、唯一 `allow-jit` entitlement）完成真实 WKWebView 验收，不把发布签名混入 F140。F140 已转 `complete`，唯一 WIP 切到 F150。
+- [x] `F150` Git S0 显式 root 与授权边界：全部 31 个 Git IPC 现在都携带严格 UUID-v4 `rootId`，Rust 用不可变 `SelectedGitRoot` 贯穿 status/diff/stage/commit/network/blame/history/refs/stash/worktree 调用链；stale/foreign root 返回 `ROOT_NOT_AUTHORIZED`，直接 helper 在多根下返回 `GIT_ROOT_REQUIRED`，`rev-parse --show-toplevel` 越过所选 root 时返回 `GIT_REPOSITORY_OUTSIDE_ROOT`，不再读取或写入父仓库。网络取消按 `(window, root)` 隔离，并在 root 已移除后仍能命中原 in-flight flag。严格 codec、native bridge、Browser mock 与 architecture hostile mutations 已覆盖漏传/畸形 root 和跨根取消；前端聚焦 600/600、全量 81 文件/1715 用例、Git Rust 356/356 及 clippy 均通过。
 
 ## 2026-07-31 收口状态
 

@@ -140,6 +140,7 @@ import {
 	frozenGitLogGraphRequest,
 	frozenGitNetworkPreviewRequest,
 	frozenGitPushRequest,
+	frozenGitRootId,
 	frozenGitShowBlobRequest,
 	frozenGitShowCommitBlobRequest,
 	frozenGitShowCommitRequest,
@@ -154,6 +155,24 @@ import {
 	frozenGitWorktreeAddRequest,
 	frozenGitWorktreeRemoveRequest,
 } from "./git-codec";
+
+async function resolveNativeGitRootId(
+	rootId: string | undefined,
+): Promise<string> {
+	if (rootId !== undefined) {
+		return frozenGitRootId(rootId);
+	}
+	const snapshot = decodeWorkspaceSnapshot(
+		await invoke<unknown>("workspace_snapshot", { request: {} }),
+	);
+	if (snapshot.roots.length !== 1) {
+		throw Object.freeze({
+			code: "GIT_ROOT_REQUIRED",
+			message: "Select a workspace root before running a Git operation.",
+		});
+	}
+	return frozenGitRootId(snapshot.roots[0]!.rootId);
+}
 
 export function createNativeBridge(): PlainBridge {
 	const workspaceWatcher = createWorkspaceWatcherManager({
@@ -561,88 +580,155 @@ export function createNativeBridge(): PlainBridge {
 				await invoke<unknown>("workspace_trust_revoke", { request: {} }),
 			);
 		},
-		gitStatus: async () =>
+		gitStatus: async (rootId) =>
 			decodeGitStatusResult(
-				await invoke<unknown>("git_status", { request: {} }),
+				await invoke<unknown>("git_status", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request: {},
+				}),
 			),
-		gitDiffFiles: async (cached) => {
+		gitDiffFiles: async (cached, rootId) => {
 			const request = frozenGitDiffFilesRequest(cached);
 			return decodeGitDiffFilesResult(
-				await invoke<unknown>("git_diff_files", { request }),
+				await invoke<unknown>("git_diff_files", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
 			);
 		},
-		gitShowBlob: async (rev, path) => {
+		gitShowBlob: async (rev, path, rootId) => {
 			const request = frozenGitShowBlobRequest(rev, path);
 			return decodeGitShowBlobResult(
-				await invoke<unknown>("git_show_blob", { request }),
+				await invoke<unknown>("git_show_blob", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
 			);
 		},
-		gitStagePaths: async (paths) => {
+		gitStagePaths: async (paths, rootId) => {
 			const request = frozenGitStagePathsRequest(paths);
-			decodeGitVoid(await invoke<unknown>("git_stage_paths", { request }));
+			decodeGitVoid(
+				await invoke<unknown>("git_stage_paths", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
 		},
-		gitUnstagePaths: async (paths) => {
+		gitUnstagePaths: async (paths, rootId) => {
 			const request = frozenGitUnstagePathsRequest(paths);
-			decodeGitVoid(await invoke<unknown>("git_unstage_paths", { request }));
+			decodeGitVoid(
+				await invoke<unknown>("git_unstage_paths", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
 		},
-		gitStageBlob: async (path, content) => {
+		gitStageBlob: async (path, content, rootId) => {
 			const request = frozenGitStageBlobRequest(path, content);
-			decodeGitVoid(await invoke<unknown>("git_stage_blob", { request }));
+			decodeGitVoid(
+				await invoke<unknown>("git_stage_blob", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
 		},
-		gitCommit: async (message, amend) => {
+		gitCommit: async (message, amend, rootId) => {
 			const request = frozenGitCommitRequest(message, amend);
-			decodeGitVoid(await invoke<unknown>("git_commit", { request }));
+			decodeGitVoid(
+				await invoke<unknown>("git_commit", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
 		},
-		gitDiscardPaths: async (paths) => {
+		gitDiscardPaths: async (paths, rootId) => {
 			const request = frozenGitDiscardPathsRequest(paths);
-			decodeGitVoid(await invoke<unknown>("git_discard_paths", { request }));
+			decodeGitVoid(
+				await invoke<unknown>("git_discard_paths", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
 		},
-		gitNetworkPreview: async (operation) => {
+		gitNetworkPreview: async (operation, rootId) => {
 			const request = frozenGitNetworkPreviewRequest(operation);
 			return decodeGitNetworkPreviewResult(
-				await invoke<unknown>("git_network_preview", { request }),
+				await invoke<unknown>("git_network_preview", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
 			);
 		},
-		gitFetch: async () => {
-			decodeGitVoid(await invoke<unknown>("git_fetch", { request: {} }));
-		},
-		gitPull: async () => {
-			decodeGitVoid(await invoke<unknown>("git_pull", { request: {} }));
-		},
-		gitPush: async (force) => {
-			const request = frozenGitPushRequest(force);
-			decodeGitVoid(await invoke<unknown>("git_push", { request }));
-		},
-		gitNetworkCancel: async () => {
+		gitFetch: async (rootId) => {
 			decodeGitVoid(
-				await invoke<unknown>("git_network_cancel", { request: {} }),
+				await invoke<unknown>("git_fetch", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request: {},
+				}),
 			);
 		},
-		gitBlameFile: async (path, range) => {
+		gitPull: async (rootId) => {
+			decodeGitVoid(
+				await invoke<unknown>("git_pull", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request: {},
+				}),
+			);
+		},
+		gitPush: async (force, rootId) => {
+			const request = frozenGitPushRequest(force);
+			decodeGitVoid(
+				await invoke<unknown>("git_push", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
+		},
+		gitNetworkCancel: async (rootId) => {
+			decodeGitVoid(
+				await invoke<unknown>("git_network_cancel", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request: {},
+				}),
+			);
+		},
+		gitBlameFile: async (path, range, rootId) => {
 			const request = frozenGitBlameFileRequest(path, range);
 			return decodeGitBlameFileResult(
-				await invoke<unknown>("git_blame_file", { request }),
+				await invoke<unknown>("git_blame_file", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
 			);
 		},
-		gitBlameCommitMessages: async (shas) => {
+		gitBlameCommitMessages: async (shas, rootId) => {
 			const request = frozenGitBlameCommitMessagesRequest(shas);
 			return decodeGitBlameCommitMessagesResult(
-				await invoke<unknown>("git_blame_commit_messages", { request }),
+				await invoke<unknown>("git_blame_commit_messages", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
 			);
 		},
-		gitFileHistory: async (path) => {
+		gitFileHistory: async (path, rootId) => {
 			const request = frozenGitFileHistoryRequest(path);
 			return decodeGitHistoryListResult(
-				await invoke<unknown>("git_file_history", { request }),
+				await invoke<unknown>("git_file_history", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
 			);
 		},
-		gitLineHistoryList: async (path, range) => {
+		gitLineHistoryList: async (path, range, rootId) => {
 			const request = frozenGitLineHistoryListRequest(path, range);
 			return decodeGitHistoryListResult(
-				await invoke<unknown>("git_line_history_list", { request }),
+				await invoke<unknown>("git_line_history_list", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
 			);
 		},
-		gitLineHistoryDetail: async (path, range, skip, expectedSha) => {
+		gitLineHistoryDetail: async (path, range, skip, expectedSha, rootId) => {
 			const request = frozenGitLineHistoryDetailRequest(
 				path,
 				range,
@@ -650,86 +736,128 @@ export function createNativeBridge(): PlainBridge {
 				expectedSha,
 			);
 			return decodeGitLineHistoryDetailResult(
-				await invoke<unknown>("git_line_history_detail", { request }),
+				await invoke<unknown>("git_line_history_detail", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
 			);
 		},
-		gitShowCommit: async (sha) => {
+		gitShowCommit: async (sha, rootId) => {
 			const request = frozenGitShowCommitRequest(sha);
 			return decodeGitShowCommitResult(
-				await invoke<unknown>("git_show_commit", { request }),
+				await invoke<unknown>("git_show_commit", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
 			);
 		},
-		gitShowCommitBlob: async (sha, path) => {
+		gitShowCommitBlob: async (sha, path, rootId) => {
 			const request = frozenGitShowCommitBlobRequest(sha, path);
 			return decodeGitShowBlobResult(
-				await invoke<unknown>("git_show_commit_blob", { request }),
+				await invoke<unknown>("git_show_commit_blob", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
 			);
 		},
-		gitLogGraph: async (maxCount) => {
+		gitLogGraph: async (maxCount, rootId) => {
 			const request = frozenGitLogGraphRequest(maxCount);
 			return decodeGitLogGraphResult(
-				await invoke<unknown>("git_log_graph", { request }),
+				await invoke<unknown>("git_log_graph", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
 			);
 		},
-		gitRefsList: async () => {
+		gitRefsList: async (rootId) => {
 			return decodeGitRefsListResult(
-				await invoke<unknown>("git_refs_list", { request: {} }),
+				await invoke<unknown>("git_refs_list", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request: {},
+				}),
 			);
 		},
-		gitStashList: async () => {
+		gitStashList: async (rootId) => {
 			return decodeGitStashListResult(
-				await invoke<unknown>("git_stash_list", { request: {} }),
+				await invoke<unknown>("git_stash_list", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request: {},
+				}),
 			);
 		},
-		gitStashShow: async (sha) => {
+		gitStashShow: async (sha, rootId) => {
 			const request = frozenGitStashShowRequest(sha);
 			return decodeGitStashShowResult(
-				await invoke<unknown>("git_stash_show", { request }),
+				await invoke<unknown>("git_stash_show", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
 			);
 		},
-		gitStashPush: async (message, includeUntracked) => {
+		gitStashPush: async (message, includeUntracked, rootId) => {
 			const request = frozenGitStashPushRequest(message, includeUntracked);
 			return decodeGitStashPushOutcome(
-				await invoke<unknown>("git_stash_push", { request }),
+				await invoke<unknown>("git_stash_push", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
 			);
 		},
-		gitStashApply: async (sha, useIndex) => {
+		gitStashApply: async (sha, useIndex, rootId) => {
 			const request = frozenGitStashApplyRequest(sha, useIndex);
 			return decodeGitStashApplyOutcome(
-				await invoke<unknown>("git_stash_apply", { request }),
+				await invoke<unknown>("git_stash_apply", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
 			);
 		},
-		gitStashPop: async (sha, useIndex) => {
+		gitStashPop: async (sha, useIndex, rootId) => {
 			const request = frozenGitStashPopRequest(sha, useIndex);
 			return decodeGitStashApplyOutcome(
-				await invoke<unknown>("git_stash_pop", { request }),
+				await invoke<unknown>("git_stash_pop", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
 			);
 		},
-		gitStashDrop: async (sha) => {
+		gitStashDrop: async (sha, rootId) => {
 			const request = frozenGitStashDropRequest(sha);
 			return decodeGitVoid(
-				await invoke<unknown>("git_stash_drop", { request }),
+				await invoke<unknown>("git_stash_drop", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
 			);
 		},
-		gitWorktreeList: async () => {
+		gitWorktreeList: async (rootId) => {
 			return decodeGitWorktreeListResult(
-				await invoke<unknown>("git_worktree_list", { request: {} }),
+				await invoke<unknown>("git_worktree_list", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request: {},
+				}),
 			);
 		},
-		gitWorktreeAdd: async (childSegment, detach, commitIsh) => {
+		gitWorktreeAdd: async (childSegment, detach, commitIsh, rootId) => {
 			const request = frozenGitWorktreeAddRequest(
 				childSegment,
 				detach,
 				commitIsh,
 			);
 			return decodeGitWorktreeAddOutcome(
-				await invoke<unknown>("git_worktree_add", { request }),
+				await invoke<unknown>("git_worktree_add", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
 			);
 		},
-		gitWorktreeRemove: async (path, force) => {
+		gitWorktreeRemove: async (path, force, rootId) => {
 			const request = frozenGitWorktreeRemoveRequest(path, force);
 			return decodeGitWorktreeRemoveOutcome(
-				await invoke<unknown>("git_worktree_remove", { request }),
+				await invoke<unknown>("git_worktree_remove", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
 			);
 		},
 		debugAdapterConfirmationState: async (descriptor) => {

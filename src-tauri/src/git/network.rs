@@ -85,11 +85,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::error::CommandError;
 use crate::trust::service::TrustService;
-use crate::workspace::service::WorkspaceService;
+use crate::workspace::RootId;
 
 use super::exec::{run_git, run_git_network, GitExecMode, GitExecOutput};
 use super::git_exec_unavailable;
-use super::repo::resolve_repo_toplevel;
+use super::repo::{resolve_repo_toplevel, GitRepositoryScope};
 
 /// The git revision expression for "the current branch's configured
 /// upstream" — resolved via `git rev-parse --abbrev-ref --symbolic-full-name`
@@ -206,17 +206,34 @@ pub(crate) struct NetworkPreview {
 }
 
 /// Tracks at most one in-flight `F080` S4 network operation (fetch/pull/
-/// push) per window, so [`GitNetworkService::request_cancel`] can reach the
+/// push) per `(window, selected root)`, so
+/// [`GitNetworkService::request_cancel_for_root`] can reach the
 /// real cooperative-cancellation flag `run_git_network`'s `wait_with_limits`
 /// poll loop already checks (`F080` S0's mechanism — this service is simply
 /// the first thing in this domain that actually *exposes* it to a caller,
 /// because no write command before this slice was slow enough to need a
-/// user-reachable cancel path). A single flag per window — not a registry
-/// keyed by an operation id — is enough: the frontend already enforces "at
-/// most one mutation in flight" (`PlainScmView`'s `#mutationInFlight`).
+/// user-reachable cancel path). The root identity remains part of the key so
+/// changing SCM selection can never cancel another repository's operation;
+/// no operation id is needed because the frontend still enforces at most one
+/// mutation per selected repository.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct NetworkOperationKey {
+    window_label: String,
+    root_id: Option<RootId>,
+}
+
+impl NetworkOperationKey {
+    fn new(window_label: &str, root_id: Option<RootId>) -> Self {
+        Self {
+            window_label: window_label.to_owned(),
+            root_id,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct GitNetworkService {
-    inflight: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    inflight: Mutex<HashMap<NetworkOperationKey, Arc<AtomicBool>>>,
 }
 
 impl GitNetworkService {
@@ -224,35 +241,39 @@ impl GitNetworkService {
         Self::default()
     }
 
-    fn begin(&self, window_label: &str) -> Arc<AtomicBool> {
+    fn begin_for_root(&self, window_label: &str, root_id: Option<RootId>) -> Arc<AtomicBool> {
         let flag = Arc::new(AtomicBool::new(false));
         self.inflight
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(window_label.to_owned(), Arc::clone(&flag));
+            .insert(
+                NetworkOperationKey::new(window_label, root_id),
+                Arc::clone(&flag),
+            );
         flag
     }
 
-    fn end(&self, window_label: &str) {
+    fn end_for_root(&self, window_label: &str, root_id: Option<RootId>) {
         self.inflight
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .remove(window_label);
+            .remove(&NetworkOperationKey::new(window_label, root_id));
     }
 
-    /// Best-effort and idempotent: requests cancellation of whatever network
-    /// operation is currently in flight for `window_label`, or does nothing
-    /// at all if none is (already finished, or never started). Mirrors
-    /// `TrustService::revoke`'s "idempotent, cannot itself fail" shape —
-    /// unlike `search::service`'s `search_text_cancel`, there is no id a
-    /// caller could get wrong, only "is one running right now for this
-    /// window".
-    pub(crate) fn request_cancel(&self, window_label: &str) {
+    /// Root-bound production variant. It deliberately does not re-read the
+    /// current workspace authorization set: cancellation must remain able to
+    /// stop a process even if the root was removed while that process was in
+    /// flight, while the key still prevents cross-root cancellation.
+    pub(crate) fn request_cancel_for_root(&self, window_label: &str, root_id: RootId) {
+        self.request_cancel_for_root_id(window_label, Some(root_id));
+    }
+
+    fn request_cancel_for_root_id(&self, window_label: &str, root_id: Option<RootId>) {
         if let Some(flag) = self
             .inflight
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(window_label)
+            .get(&NetworkOperationKey::new(window_label, root_id))
         {
             flag.store(true, Ordering::SeqCst);
         }
@@ -297,7 +318,7 @@ async fn run_background_read(
 /// `diff`.
 pub(crate) async fn preview(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
     operation: NetworkOperation,
 ) -> Result<NetworkPreview, CommandError> {
@@ -356,29 +377,37 @@ pub(crate) async fn preview(
 async fn run_network(
     network: &GitNetworkService,
     window_label: &str,
+    root_id: Option<RootId>,
     repo_dir: &Path,
     args: Vec<String>,
 ) -> Result<GitExecOutput, CommandError> {
-    let flag = network.begin(window_label);
+    let flag = network.begin_for_root(window_label, root_id);
     let repo_dir = repo_dir.to_path_buf();
     let flag_for_spawn = Arc::clone(&flag);
     let joined = tauri::async_runtime::spawn_blocking(move || {
         run_git_network(&repo_dir, &args, &flag_for_spawn)
     })
     .await;
-    network.end(window_label);
+    network.end_for_root(window_label, root_id);
     joined.map_err(|_| git_exec_unavailable())?
 }
 
 pub(crate) async fn fetch(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     network: &GitNetworkService,
     window_label: &str,
 ) -> Result<(), CommandError> {
     let repo_dir = resolve_repo_toplevel(trust, workspace, window_label).await?;
     let args: Vec<String> = GIT_FETCH_ARGS.iter().map(|arg| (*arg).to_owned()).collect();
-    let output = run_network(network, window_label, &repo_dir, args).await?;
+    let output = run_network(
+        network,
+        window_label,
+        workspace.selected_root_id(),
+        &repo_dir,
+        args,
+    )
+    .await?;
     if output.exit_code != 0 {
         return Err(git_fetch_failed());
     }
@@ -387,13 +416,20 @@ pub(crate) async fn fetch(
 
 pub(crate) async fn pull(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     network: &GitNetworkService,
     window_label: &str,
 ) -> Result<(), CommandError> {
     let repo_dir = resolve_repo_toplevel(trust, workspace, window_label).await?;
     let args: Vec<String> = GIT_PULL_ARGS.iter().map(|arg| (*arg).to_owned()).collect();
-    let output = run_network(network, window_label, &repo_dir, args).await?;
+    let output = run_network(
+        network,
+        window_label,
+        workspace.selected_root_id(),
+        &repo_dir,
+        args,
+    )
+    .await?;
     if output.exit_code != 0 {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("Need to specify how to reconcile divergent branches") {
@@ -406,7 +442,7 @@ pub(crate) async fn pull(
 
 pub(crate) async fn push(
     trust: &TrustService,
-    workspace: &WorkspaceService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
     network: &GitNetworkService,
     window_label: &str,
     force: bool,
@@ -418,7 +454,14 @@ pub(crate) async fn push(
         GIT_PUSH_ARGS
     };
     let args: Vec<String> = args_const.iter().map(|arg| (*arg).to_owned()).collect();
-    let output = run_network(network, window_label, &repo_dir, args).await?;
+    let output = run_network(
+        network,
+        window_label,
+        workspace.selected_root_id(),
+        &repo_dir,
+        args,
+    )
+    .await?;
     if output.exit_code != 0 {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("has no upstream branch")

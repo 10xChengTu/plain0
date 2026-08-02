@@ -6791,9 +6791,9 @@ const GIT_COMMAND_CONTRACTS = Object.freeze([
 		file: "src-tauri/src/git/commands.rs",
 		name: "git_network_cancel",
 		parameters:
-			"window:WebviewWindow,network_service:State<'_,GitNetworkService>,request:GitNetworkCancelRequest",
+			"window:WebviewWindow,network_service:State<'_,GitNetworkService>,root_id:RootId,request:GitNetworkCancelRequest",
 		returnType: "->Result<(),CommandError>",
-		body: "request.validate();network_service.inner().request_cancel(window.label());Ok(())",
+		body: "request.validate();network_service.inner().request_cancel_for_root(window.label(),root_id);Ok(())",
 	},
 	{
 		file: "src-tauri/src/git/commands.rs",
@@ -6987,18 +6987,37 @@ export function validateGitCommandRegistration(rustSources) {
 		const normalizedParameters = command.parameters
 			.replaceAll(/\s+/g, "")
 			.replace(/,$/, "");
+		const expectedParameters =
+			contract.name === "git_network_cancel"
+				? contract.parameters
+				: contract.parameters.replace(",request:", ",root_id:RootId,request:");
 		if (
-			normalizedParameters !== contract.parameters ||
+			normalizedParameters !== expectedParameters ||
 			command.returnType.replaceAll(/\s+/g, "") !== contract.returnType
 		) {
 			failures.push(
 				`${contract.name} must accept its audited parameters and return the audited Result type`,
 			);
 		}
-		const normalizedBody = command.body
-			.replaceAll(/\s+/g, "")
-			.replace(/;$/, "");
-		if (normalizedBody !== contract.body) {
+		let normalizedBody = command.body.replaceAll(/\s+/g, "").replace(/;$/, "");
+		if (contract.name !== "git_network_cancel") {
+			const scopeStatement =
+				"letscope=SelectedGitRoot::new(workspace.inner(),root_id);";
+			if (normalizedBody.split(scopeStatement).length !== 2) {
+				failures.push(
+					`${contract.name} must construct exactly one immutable SelectedGitRoot from its audited workspace/root_id pair`,
+				);
+			}
+			normalizedBody = normalizedBody
+				.replace(scopeStatement, "")
+				.replaceAll("&scope", "workspace.inner()");
+		}
+		// rustfmt freely adds/removes a trailing comma when a call crosses its
+		// line-width threshold; that token has no semantic effect and must not
+		// make the exact route contract depend on formatting alone.
+		normalizedBody = normalizedBody.replaceAll(",)", ")");
+		const expectedBody = contract.body.replaceAll(",)", ")");
+		if (normalizedBody !== expectedBody) {
 			failures.push(
 				`${contract.name} must contain only its audited DTO decode and single service route`,
 			);
@@ -8397,6 +8416,15 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 		plainBridgeInterfaces.length !== 1 ||
 		bridgeMembers.length !== GIT_BRIDGE_METHOD_NAMES.length ||
 		!bridgeMembers.every((member) => ts.isMethodSignature(member)) ||
+		!bridgeMembers.every((member) => {
+			const rootParameter = member.parameters.at(-1);
+			return (
+				rootParameter !== undefined &&
+				ts.isIdentifier(rootParameter.name) &&
+				rootParameter.name.text === "rootId" &&
+				rootParameter.questionToken !== undefined
+			);
+		}) ||
 		JSON.stringify(bridgeMemberNames) !==
 			JSON.stringify([...GIT_BRIDGE_METHOD_NAMES].sort())
 	) {
@@ -8443,6 +8471,19 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 			);
 		}
 	}
+	{
+		const body = decoderBody("frozenGitRootId");
+		if (
+			body === undefined ||
+			!body.includes('typeof rootId !== "string"') ||
+			!body.includes("UUID_V4_PATTERN.test(rootId)") ||
+			!body.includes('"INVALID_ROOT_ID"')
+		) {
+			failures.push(
+				"git-codec.ts's frozenGitRootId must reject every non-canonical UUID-v4 root identity before IPC",
+			);
+		}
+	}
 	// `decodeGitStashPushOutcome` decodes a bare own-data string (one of the
 	// two audited outcomes), not a `{ ... }` object — `hasExactKeys`/
 	// `rejectProxyObject`/`Object.freeze` do not apply to it, so it gets its
@@ -8476,6 +8517,18 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 	}
 
 	const native = appSource("app/platform/tauri/native.ts");
+	if (
+		native === undefined ||
+		[
+			...native.matchAll(
+				/\binvoke<unknown>\(\s*"git_[a-z_]+"\s*,\s*\{\s*rootId:\s*await\s+resolveNativeGitRootId\(rootId\)/g,
+			),
+		].length !== GIT_BRIDGE_METHOD_NAMES.length
+	) {
+		failures.push(
+			"native.ts must attach one validated explicit rootId to every audited Git invoke",
+		);
+	}
 	if (
 		native === undefined ||
 		[...native.matchAll(/\binvoke<unknown>\(\s*"git_status"/g)].length !== 1 ||
