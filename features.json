@@ -784,19 +784,60 @@
 			"id": "F140",
 			"name": "Multi-root search identity and safe replace",
 			"phase": 6,
-			"status": "in_progress",
+			"status": "complete",
 			"acceptance": [
 				"Every file-search and text-search result carries the authorized root that produced it",
 				"Quick Open and Search preserve duplicate relative paths across roots and open the matching resource",
 				"Replace actions mutate only the root that produced each match",
 				"Strict codec, Rust, Browser and real Tauri multi-root tests pass"
-			]
+			],
+			"evidence": {
+				"commands": [
+					"cargo test --manifest-path src-tauri/Cargo.toml search::",
+					"pnpm exec vitest run tests/unit/search-codec.test.ts tests/unit/plain-search-service.test.ts tests/unit/text-search-stream.test.ts tests/unit/workspace-search-bridge.test.ts",
+					"pnpm typecheck && pnpm lint && node scripts/plain/check-features.mjs && node scripts/plain/check-boundaries.mjs && pnpm exec vitest run",
+					"pnpm exec playwright test tests/browser/workspace.spec.ts --grep <F140 and carried search/replace matrix>",
+					"env PATH=/usr/bin:/bin:/usr/sbin:/sbin:/Users/zhenghui/.nvm/versions/node/v22.22.1/bin:/opt/homebrew/bin:/Users/zhenghui/.cargo/bin APPLE_SIGNING_IDENTITY=- pnpm tauri:build:e2e"
+				],
+				"results": [
+					"Rust search tests passed 47/47; cargo fmt --check and cargo clippy --all-targets -D warnings passed.",
+					"Focused TypeScript search tests passed 66/66; the full frontend suite passed 81 files and 1704 tests with typecheck, lint, feature-WIP and architecture boundaries green.",
+					"The focused Chromium search/replace regression passed 11/11, including the new two-root duplicate-path case: Quick Open retained both shared.txt resources, Search opened the secondary authority, Replace issued one versioned write to that root, and the primary content remained unchanged.",
+					"E2E-014 passed on 2026-08-03 in a freshly built, locally ad-hoc-signed real Plain.app. codesign verified Identifier=com.plain.editor, flags=0x10002(adhoc,runtime), and the sole com.apple.security.cs.allow-jit entitlement."
+				],
+				"nativeScenarios": [
+					"Two real APFS directories were authorized independently through the macOS folder picker. Explorer displayed both roots and both same-named shared.txt files. Cmd+P returned two rows labelled tmp-f140-primary and tmp-f140-secondary; selecting the secondary row opened its exact F140 shared secondary content and breadcrumb.",
+					"Real Rust text search for F140 shared secondary returned exactly 1 result in 1 file. Replace All changed it to F140 replaced secondary and saved through the real PLR1/PLW1 versioned-write chain. Shell verification found primary unchanged at 20 bytes with SHA-256 2fd92e8289c8d2d3f15245d0afda61983970fcd1c16c3f24263cebc69eddb8d8 and secondary changed to 24 bytes with SHA-256 2d0dfffb5e40b815be15cef2011cbc82e303e33b7efd429863502d3a860ab775.",
+					"A second real search for F140 shared primary still returned exactly 1 result in 1 file and opened the primary breadcrumb/content. Cmd+P continued to show both labelled duplicate paths, reopening secondary showed the replaced bytes, and Cmd+Q left no Plain process. No ROOT_NOT_AUTHORIZED, IPC contract, panic, unhandled-rejection or JavaScript-exception marker appeared in the filtered native log."
+				],
+				"platformGaps": [
+					"The current host's default linker-signed debug bundle compiled but rendered a blank WebView and failed codesign resource verification, matching the already documented F120 packaging/signing boundary. E2E-014 therefore used the repository's previously validated one-off local ad-hoc signing path with system /usr/bin/xattr. Release signing, notarization and packaging remain explicitly outside this completion goal and do not alter the verified Rust/Tauri search behavior."
+				],
+				"acceptanceResults": [
+					{
+						"acceptance": "Every file-search and text-search result carries the authorized root that produced it",
+						"result": "Rust now serializes rootId on every WorkspaceSearchFileEntry and WorkspaceSearchTextBatch. Both strict TypeScript decoders require an exact UUID-bearing object, and PlainSearchService additionally rejects any result whose root is outside the originating query. Rust and codec/service tests cover two roots, duplicate paths and injected unauthorized roots."
+					},
+					{
+						"acceptance": "Quick Open and Search preserve duplicate relative paths across roots and open the matching resource",
+						"result": "Chromium and real WKWebView both displayed two distinct shared.txt results labelled by their workspace roots. Selecting each result produced the matching plain-workspace authority, breadcrumb and exact source content rather than collapsing onto roots[0]."
+					},
+					{
+						"acceptance": "Replace actions mutate only the root that produced each match",
+						"result": "Browser evidence captured one write whose request rootId was the secondary root. E2E-014 then proved the same behavior against real disks: only secondary changed to the replacement SHA-256 while primary retained its original bytes and remained independently searchable/openable."
+					},
+					{
+						"acceptance": "Strict codec, Rust, Browser and real Tauri multi-root tests pass",
+						"result": "Strict codec/service tests passed 66/66, Rust search 47/47, full frontend 1704/1704, focused Chromium 11/11, clippy and architecture guards passed, and E2E-014 completed in a freshly built real ad-hoc-signed Plain.app with disk and process cross-checks."
+					}
+				]
+			}
 		},
 		{
 			"id": "F150",
 			"name": "Multi-root Git terminal and debug routing",
 			"phase": 6,
-			"status": "planned",
+			"status": "in_progress",
 			"acceptance": [
 				"Git and SCM select an explicit authorized root and never report or mutate paths outside it",
 				"Terminal creation selects an authorized root or cwd instead of silently using the first root",

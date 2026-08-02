@@ -446,7 +446,9 @@ fixture（临时目录中构造，不提交仓库；可直接复用 E2E-005 已�
 
 ### E2E-014 · F140 多根同名搜索结果、打开与安全替换真实桌面矩阵
 
-状态：**待执行**。Browser E2E 已证明两个 root 下同名 `shared.txt` 会形成两个不同 authority 的 Quick Open 结果，并且 Search Replace 只向实际命中的 secondary root 发出 versioned write；本条补真实 Rust capability、真实磁盘与 WKWebView 证据。
+状态：**已完成（2026-08-03）**。两个真实 APFS 目录经 macOS 系统选择器独立授权；Explorer 同时显示双根和两个同名 `shared.txt`。Cmd+P 显示两条分别标注 `tmp-f140-primary`/`tmp-f140-secondary` 的结果，选择 secondary 后面包屑与内容精确对应 secondary。真实 Search 查询 `F140 shared secondary` 返回 `1 result in 1 file`，Replace All 后 secondary 磁盘精确为 `F140 replaced secondary\n`（24 字节，SHA-256 `2d0dfffb5e40b815be15cef2011cbc82e303e33b7efd429863502d3a860ab775`），primary 仍精确为 `F140 shared primary\n`（20 字节，SHA-256 `2fd92e8289c8d2d3f15245d0afda61983970fcd1c16c3f24263cebc69eddb8d8`）。反向搜索/打开 primary、再次 Cmd+P 双结果、重开已替换 secondary 均通过；Cmd+Q 后无 Plain 残留进程，筛查无 `ROOT_NOT_AUTHORIZED`/IPC contract/panic/unhandled rejection/JavaScript exception。
+
+构建事实：默认 linker-signed `pnpm tauri:build:e2e` 成功产物在当前主机出现空白 WebView，且 `codesign --verify` 报既有的 resources 未封装问题；这与 F120/F130 已记录的发布签名边界同类。本条没有把它误归为搜索回归，也没有伪装默认产物通过，而是按仓库既有验证路径以系统 `/usr/bin/xattr` 优先的 PATH 执行一次性 `APPLE_SIGNING_IDENTITY=-` 本地 ad-hoc 构建。最终 app 经 `codesign --verify --deep --strict` 通过，`Identifier=com.plain.editor`、`flags=0x10002(adhoc,runtime)`，entitlements 只有 `com.apple.security.cs.allow-jit=true`，真实 WKWebView 正常完成上述矩阵。发布签名/公证仍不在本轮目标内。
 
 fixture（仓库内 `tmp-` 前缀临时目录中创建，测试后删除）：
 
@@ -472,4 +474,4 @@ fixture（仓库内 `tmp-` 前缀临时目录中创建，测试后删除）：
 - F110 遗留子系统退役的真实桌面排除面巡检与 extensionRuntime 手术后回归已登记为 E2E-011。
 - F120 品牌/打包/发布检查收口后仍需真实桌面与真实 CI 才能确认的维度已登记为 E2E-012。
 - F130 浏览器与原生端到端验收（本项目最后一个 feature，已完成并转 complete）：已清点 E2E-001 至 E2E-012 共 12 条待执行条目、按十条产品需求交叉索引并给出建议执行顺序，登记为 E2E-013；F130 自身未执行这 12 条中的任何一条，全部维持「待执行」状态，交由用户后续按需交接人工或 Codex。
-- F140 多根同名搜索结果、打开与安全替换真实桌面矩阵已登记为 E2E-014。
+- F140 多根同名搜索结果、打开与安全替换真实桌面矩阵 E2E-014 已完成并回写 F140 evidence。
