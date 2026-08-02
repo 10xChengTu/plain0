@@ -1,6 +1,6 @@
 # 端到端桌面验收交接清单（Codex 执行）
 
-更新时间：2026-08-02（新增 E2E-018；既有条目的完成或阻塞状态以各自小节为准）
+更新时间：2026-08-02（新增 E2E-019；既有条目的完成或阻塞状态以各自小节为准）
 
 ## 分工模式
 
@@ -529,6 +529,20 @@ fixture（只创建本条专用临时目录，不使用真实开发仓库）：
 
 结论：E2E-018 全部通过，F160 已转 `complete`。正常关窗、真实退出、崩溃恢复、反序双根授权、root topology 变化、backup 分区和进程清理均有真实桌面与磁盘证据，未以 Browser mock 替代。
 
+### E2E-019 · F170 S1 本地 settings/keybindings 与 Auto Save 冷启动矩阵
+
+状态：**已完成（2026-08-02）**。从当前工作树以系统工具优先 PATH 和本地 ad-hoc identity `-` 构建 debug `Plain.app`，复制为唯一绝对路径后通过 Finder/Computer Use 启动真实 WKWebView。命令面板分别打开 `Plain: Open Local Keyboard Shortcuts (JSON)` 与 `Plain: Open Local Settings (JSON)`；User 目录枚举只有 `keybindings.json`/`settings.json`，面包屑保持 `vscode-userdata:` 的 `User` 虚拟目录，没有原生应用数据路径。
+
+持久化与即时重载：保存精确 keybinding `[{"key":"cmd+alt+u","command":"plain.preferences.openLocalSettings"}]` 后，同一进程立即用 `Cmd+Alt+U` 打开 settings；保存精确 setting `{"files.autoSave":"afterDelay","files.autoSaveDelay":750}` 后，两份 Rust versioned envelope 均为 revision 2，文件 SHA-256 分别为 keybindings `19f881ec5eba555be1c57abbe01bc57493f1207acd3d89ae182a28a34959cf4f`、settings `4f76de190d6c2687d07312c1089483037a6ceed3d0419c00d51a3659020011ad`。完全 Cmd+Q、确认进程退出并冷启动后，在未打开命令面板的前提下再次按 `Cmd+Alt+U`，settings 立即打开且内容逐字一致，证明快捷键和设置都从真实本地文件恢复，而非沿用页面内存。
+
+Auto Save 真实磁盘链路：首次授权仓库内专用 workspace，打开 README 后在文件首部输入 `AUTO_SAVE_REAL_1`，全程不按 Cmd+S；等待 750ms 窗口后 editor 无 dirty 标记，磁盘文件 SHA-256 为 `91e685aa79efada20d26fb76f53ccbf02badfaac890cb676f2488b0f44a53797`。冷启动并确认 settings/keybinding 恢复后，重新通过 macOS 系统选择器授权同一 workspace，在相同文件首部输入 `AUTO_SAVE_REAL_2`，仍不按 Cmd+S；等待后磁盘精确以 `AUTO_SAVE_REAL_2AUTO_SAVE_REAL_1` 开头，SHA-256 为 `e766ea6fe40d435ea430f7a1a216fb48a68c0b439bd3de0a1c603ebf55b3f08a`。这证明 cold-start setting 真正驱动了 Workbench Auto Save 和 Rust `PLW1` versioned write，而不只是设置文件自身持久化。
+
+负向路径由同一提交的 Rust/Browser 自动化锁定：仅对象/数组 JSONC 形状、size ceiling、revision conflict、symlink fail closed、损坏常规文件 quarantine、第三个 provider 唯一 bridge-bound 工厂，以及其他顶层 user-data 读探测 FileNotFound/全部写操作拒绝。完整 `pnpm check` 为 87 个前端文件/1772 个用例、生产构建、97 app/154 Rust source 架构门、bundle guard、Rust fmt/clippy 与 1207/1207 测试；聚焦 Browser E2E 另通过真实 Workbench 即时快捷键重载与精确 `workspace_write_file` 断言。
+
+fixture 与清理：仓库内 `tmp-f170-s1-e2e/` 只含复制的测试 app、配置和单文件 workspace；`dist`、`test-results`、`src-tauri/target` 与该 fixture 均已删除。真实 app-data 下本轮创建的两份精确 `*.plain.json` 因安全清理器拒绝递归删除主应用目录而保留，未触碰同目录外既有 trust/theme/backup/debug-confirmation 数据；后续真实 F170 场景必须把这两份已知内容视为基线或在得到明确授权后只删除精确文件。最终 Cmd+Q 后 Computer Use 显示两个同 bundle-id 的测试/正常 Plain 均 `isRunning:false`。
+
+结论：F170 S1 的本地设置、快捷键即时与冷启动重载、Auto Save 跨进程真实落盘、资源闭集和路径不暴露均通过。F170 继续保持 `in_progress`，唯一 WIP 转入 S2 Open/Recent。
+
 ## 后续条目（随切片追加）
 
 - F030 遗留：真实 `CloseRequested` 关窗握手协议实现后，补「正常关窗 → 重开恢复」的桌面验收变体。
@@ -542,3 +556,4 @@ fixture（只创建本条专用临时目录，不使用真实开发仓库）：
 - F150 S2 多根终端显式选择、tab/split root 冻结与进程清理真实桌面矩阵 E2E-016 已完成；F150 下一步只进入 Debug routing，整个 feature 完成后再统一回写 `features.json` evidence。
 - F150 S3 多根调试显式选择、adapter cwd、调用栈、同路径断点身份与进程清理真实桌面矩阵 E2E-017 已完成；F150 已整体关闭，唯一 WIP 切到 F160。
 - F160 原生普通关窗/Cmd+Q/kill-9、最终 backup 刷新、双根反序恢复与 topology 变化真实桌面矩阵 E2E-018 已完成；F160 已关闭，唯一 WIP 切到 F170。
+- F170 S1 本地 settings/keybindings 即时与冷启动重载、Auto Save 真实磁盘写入和 user-data 资源闭集矩阵 E2E-019 已完成；F170 继续进入 Open/Recent。
