@@ -312,8 +312,19 @@ describe("PlainGitBlameEditorController", () => {
 			Date.now(),
 		);
 		const editor = fakeEditor("file:///a.txt", 3);
-		await controller.refresh(editor, "a.txt");
-		expect(bridge.gitBlameFile).toHaveBeenCalledWith("a.txt", null);
+		await controller.refresh(
+			editor,
+			"a.txt",
+			"11111111-1111-4111-8111-111111111111",
+		);
+		expect(bridge.gitBlameFile).toHaveBeenCalledWith(
+			"a.txt",
+			null,
+			"11111111-1111-4111-8111-111111111111",
+		);
+		expect(controller.index.rootId).toBe(
+			"11111111-1111-4111-8111-111111111111",
+		);
 		expect(controller.index.lineLookup(1)?.entry.commitSha).toBe(SHA_A);
 	});
 
@@ -342,8 +353,8 @@ describe("PlainGitBlameEditorController", () => {
 			commits: { [SHA_A]: commitHeader() },
 		});
 		await refreshPromise;
-		// The index was still populated (harmless), but no decorations were
-		// applied to the now-current (different) model.
+		// Neither the index nor decorations may receive the stale file's result.
+		expect(controller.index.lineLookup(1)).toBeUndefined();
 		expect(editor.appliedDecorations).toEqual([]);
 	});
 
@@ -413,10 +424,13 @@ describe("PlainGitBlameHoverProvider", () => {
 
 	it("returns a hover with the fetched full body for a tracked, committed line", async () => {
 		const index = new PlainGitBlameFileIndex();
-		index.setResult({
-			entries: [lineEntry({ commitSha: SHA_A, finalLine: 1 })],
-			commits: { [SHA_A]: commitHeader({ summary: "fix bug" }) },
-		});
+		index.setResult(
+			{
+				entries: [lineEntry({ commitSha: SHA_A, finalLine: 1 })],
+				commits: { [SHA_A]: commitHeader({ summary: "fix bug" }) },
+			},
+			"11111111-1111-4111-8111-111111111111",
+		);
 		const bridge: PlainGitBlameBridge = {
 			gitBlameFile: vi.fn(),
 			gitBlameCommitMessages: vi.fn(async () => ({
@@ -435,7 +449,10 @@ describe("PlainGitBlameHoverProvider", () => {
 			cancellationToken,
 		);
 		expect(hover?.contents[0]?.value).toContain("long body");
-		expect(bridge.gitBlameCommitMessages).toHaveBeenCalledWith([SHA_A]);
+		expect(bridge.gitBlameCommitMessages).toHaveBeenCalledWith(
+			[SHA_A],
+			"11111111-1111-4111-8111-111111111111",
+		);
 	});
 
 	it("falls back to the summary when the commit-messages fetch rejects", async () => {

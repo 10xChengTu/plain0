@@ -38,6 +38,12 @@ import {
 	type NetworkConfirmationKind,
 } from "./plain-scm-network";
 import { PlainScmProvider, PlainScmResource } from "./plain-scm-provider";
+import {
+	bindPlainGitBridge,
+	plainGitRootSelection,
+	plainGitRootsFromWorkspaceFolders,
+	type PlainRootedGitBridge,
+} from "./plain-git-root";
 
 const PLAIN_GIT_PROVIDER_ID = "plain-git";
 
@@ -52,13 +58,21 @@ const PLAIN_GIT_PROVIDER_ID = "plain-git";
  * trusted non-repository root needs nothing from the user at all.
  */
 type PlainScmDisabledReason =
-	"empty-workspace" | "not-trusted" | "not-a-repository" | "error";
+	| "empty-workspace"
+	| "root-required"
+	| "not-trusted"
+	| "not-a-repository"
+	| "repository-outside-root"
+	| "error";
 
 const DISABLED_MESSAGES: Readonly<Record<PlainScmDisabledReason, string>> = {
 	"empty-workspace": "Open a folder to use Source Control.",
+	"root-required": "Select a repository to use Source Control.",
 	"not-trusted":
 		"This workspace has not been granted execution trust. Grant trust (for example by starting a terminal) to use Source Control.",
 	"not-a-repository": "The open folder is not a Git repository.",
+	"repository-outside-root":
+		"The Git repository extends outside the selected workspace root. Open the repository root to use Source Control.",
 	error: "Source Control is unavailable right now.",
 };
 
@@ -141,7 +155,9 @@ export class PlainScmView extends ViewPane {
 	#disabledReason: PlainScmDisabledReason | undefined = "empty-workspace";
 	#generation = 0;
 	#lastBranch: GitStatusResult["branch"] | undefined;
+	#rootedBridge: PlainRootedGitBridge | undefined;
 
+	#rootSelectorElement: HTMLSelectElement | undefined;
 	#messageElement: HTMLElement | undefined;
 	#branchElement: HTMLElement | undefined;
 	#inputElement: HTMLTextAreaElement | undefined;
@@ -169,6 +185,7 @@ export class PlainScmView extends ViewPane {
 	 * push needs a real way to abort early (see
 	 * `PlainBridge.gitNetworkCancel`'s own doc comment). */
 	#networkMutationInFlight = false;
+	#rootRefreshQueued = false;
 
 	constructor(
 		options: IViewPaneOptions,
@@ -205,6 +222,40 @@ export class PlainScmView extends ViewPane {
 	protected override renderBody(container: HTMLElement): void {
 		super.renderBody(container);
 		container.classList.add("plain-scm-view-body");
+
+		const rootRow = document.createElement("label");
+		rootRow.className = "plain-scm-view-root-row";
+		rootRow.append(document.createTextNode("Repository"));
+		const rootSelector = document.createElement("select");
+		rootSelector.className = "plain-scm-view-root-select";
+		rootSelector.setAttribute("aria-label", "Source Control Repository");
+		this.#rootSelectorElement = rootSelector;
+		rootRow.append(rootSelector);
+		this._register(
+			addDisposableListener(rootSelector, "change", () => {
+				const roots = plainGitRootsFromWorkspaceFolders(
+					this.workspaceContextService.getWorkspace().folders,
+				);
+				const rootId = rootSelector.value || undefined;
+				if (!plainGitRootSelection.select(rootId, roots)) {
+					return;
+				}
+			}),
+		);
+		this._register(
+			plainGitRootSelection.onDidChange(() => {
+				if (this.#rootRefreshQueued) {
+					return;
+				}
+				this.#rootRefreshQueued = true;
+				queueMicrotask(() => {
+					this.#rootRefreshQueued = false;
+					this.#generation += 1;
+					this.teardownRepository();
+					void this.refresh();
+				});
+			}),
+		);
 
 		const branch = document.createElement("div");
 		branch.className = "plain-scm-view-branch";
@@ -368,6 +419,7 @@ export class PlainScmView extends ViewPane {
 		this.#stagedList = stagedList;
 
 		container.append(
+			rootRow,
 			branch,
 			networkRow,
 			message,
@@ -403,11 +455,27 @@ export class PlainScmView extends ViewPane {
 
 		const folders = this.workspaceContextService.getWorkspace().folders;
 		if (folders.length === 0) {
+			plainGitRootSelection.synchronize([]);
 			this.teardownRepository();
 			this.#disabledReason = "empty-workspace";
 			this.renderState();
 			return;
 		}
+		const roots = plainGitRootsFromWorkspaceFolders(folders);
+		if (roots.length !== folders.length) {
+			this.teardownRepository();
+			this.#disabledReason = "error";
+			this.renderState();
+			return;
+		}
+		const selectedRoot = plainGitRootSelection.resolve(roots);
+		if (selectedRoot === undefined) {
+			this.teardownRepository();
+			this.#disabledReason = "root-required";
+			this.renderState();
+			return;
+		}
+		const rootedBridge = bindPlainGitBridge(bridge, selectedRoot.rootId);
 
 		let trusted: boolean;
 		try {
@@ -432,21 +500,26 @@ export class PlainScmView extends ViewPane {
 		}
 
 		try {
-			const status = await bridge.gitStatus();
+			const status = await rootedBridge.gitStatus();
 			if (generation !== this.#generation) {
 				return;
 			}
-			if (this.#provider === undefined) {
+			if (
+				this.#provider === undefined ||
+				this.#provider.rootUri.authority !== selectedRoot.rootId
+			) {
+				this.teardownRepository();
 				const provider = new PlainScmProvider(
 					PLAIN_GIT_PROVIDER_ID,
-					folders[0]!.uri,
-					bridge,
+					selectedRoot.uri,
+					rootedBridge,
 					this.editorService,
 					this.modelService,
 				);
 				this.#provider = provider;
 				this.#repository = this.scmService.registerSCMProvider(provider);
 			}
+			this.#rootedBridge = rootedBridge;
 			this.#provider.applyStatus(status);
 			this.#lastBranch = status.branch;
 			this.#disabledReason = undefined;
@@ -458,7 +531,11 @@ export class PlainScmView extends ViewPane {
 			this.teardownRepository();
 			const normalized = normalizeCommandError(error);
 			this.#disabledReason =
-				normalized.code === "GIT_NO_REPOSITORY" ? "not-a-repository" : "error";
+				normalized.code === "GIT_NO_REPOSITORY"
+					? "not-a-repository"
+					: normalized.code === "GIT_REPOSITORY_OUTSIDE_ROOT"
+						? "repository-outside-root"
+						: "error";
 			this.renderState();
 		}
 	}
@@ -468,10 +545,40 @@ export class PlainScmView extends ViewPane {
 		this.#repository = undefined;
 		this.#provider = undefined;
 		this.#lastBranch = undefined;
+		this.#rootedBridge = undefined;
+	}
+
+	private renderRootSelector(): void {
+		const selector = this.#rootSelectorElement;
+		if (selector === undefined) {
+			return;
+		}
+		const roots = plainGitRootsFromWorkspaceFolders(
+			this.workspaceContextService.getWorkspace().folders,
+		);
+		const selected = plainGitRootSelection.resolve(roots);
+		const options: HTMLOptionElement[] = [];
+		if (roots.length !== 1) {
+			const placeholder = document.createElement("option");
+			placeholder.value = "";
+			placeholder.textContent = "Select a repository…";
+			options.push(placeholder);
+		}
+		for (const root of roots) {
+			const option = document.createElement("option");
+			option.value = root.rootId;
+			option.textContent = root.label;
+			options.push(option);
+		}
+		selector.replaceChildren(...options);
+		selector.value = selected?.rootId ?? "";
+		selector.disabled = roots.length < 2 || this.#mutationInFlight;
 	}
 
 	private renderState(): void {
+		this.renderRootSelector();
 		if (
+			this.#rootSelectorElement === undefined ||
 			this.#messageElement === undefined ||
 			this.#branchElement === undefined ||
 			this.#inputElement === undefined ||
@@ -565,15 +672,16 @@ export class PlainScmView extends ViewPane {
 	 * are reported via `INotificationService`, never left as an unhandled
 	 * rejection or a silently stale UI. */
 	private async runGitMutation(
-		mutation: (bridge: PlainBridge) => Promise<void>,
+		mutation: (bridge: PlainRootedGitBridge) => Promise<void>,
 	): Promise<void> {
-		if (configuredBridge === undefined || this.#mutationInFlight) {
+		const bridge = this.#rootedBridge;
+		if (bridge === undefined || this.#mutationInFlight) {
 			return;
 		}
 		this.#mutationInFlight = true;
 		this.renderState();
 		try {
-			await mutation(configuredBridge);
+			await mutation(bridge);
 		} catch (error) {
 			this.notificationService.error(normalizeCommandError(error).message);
 		} finally {
@@ -662,16 +770,17 @@ export class PlainScmView extends ViewPane {
 	 * `#networkMutationInFlight` (so `#cancelNetworkButton` becomes enabled)
 	 * in addition to everything `runGitMutation` already does. */
 	private async runNetworkMutation(
-		mutation: (bridge: PlainBridge) => Promise<void>,
+		mutation: (bridge: PlainRootedGitBridge) => Promise<void>,
 	): Promise<void> {
-		if (configuredBridge === undefined || this.#mutationInFlight) {
+		const bridge = this.#rootedBridge;
+		if (bridge === undefined || this.#mutationInFlight) {
 			return;
 		}
 		this.#mutationInFlight = true;
 		this.#networkMutationInFlight = true;
 		this.renderState();
 		try {
-			await mutation(configuredBridge);
+			await mutation(bridge);
 		} catch (error) {
 			this.notificationService.error(normalizeCommandError(error).message);
 		} finally {
@@ -689,12 +798,13 @@ export class PlainScmView extends ViewPane {
 	private async previewNetworkOperation(
 		kind: NetworkConfirmationKind,
 	): Promise<GitNetworkPreviewResult | undefined> {
-		if (configuredBridge === undefined) {
+		const bridge = this.#rootedBridge;
+		if (bridge === undefined) {
 			return undefined;
 		}
 		const operation: GitNetworkOperation = kind === "forcePush" ? "push" : kind;
 		try {
-			return await configuredBridge.gitNetworkPreview(operation);
+			return await bridge.gitNetworkPreview(operation);
 		} catch (error) {
 			this.notificationService.error(normalizeCommandError(error).message);
 			return undefined;
@@ -707,7 +817,7 @@ export class PlainScmView extends ViewPane {
 	 * `runNetworkMutation`) settles on its own once the cancelled subprocess
 	 * actually exits. */
 	private cancelNetworkOperation(): void {
-		void configuredBridge?.gitNetworkCancel();
+		void this.#rootedBridge?.gitNetworkCancel();
 	}
 
 	private async fetchFromRemote(): Promise<void> {

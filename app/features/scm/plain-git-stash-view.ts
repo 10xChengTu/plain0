@@ -9,6 +9,7 @@ import { IKeybindingService } from "@codingame/monaco-vscode-api/vscode/vs/platf
 import { INotificationService } from "@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service";
 import { IOpenerService } from "@codingame/monaco-vscode-api/vscode/vs/platform/opener/common/opener.service";
 import { IThemeService } from "@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/themeService.service";
+import { IWorkspaceContextService } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace.service";
 import {
 	ViewPane,
 	type IViewPaneOptions,
@@ -21,6 +22,12 @@ import type {
 } from "../../platform/tauri/contracts";
 import { normalizeCommandError } from "../../platform/tauri/errors";
 import { PlainGitStashController, stashEntryLabel } from "./plain-git-stash";
+import {
+	bindPlainGitBridge,
+	plainGitRootSelection,
+	plainGitRootsFromWorkspaceFolders,
+	type PlainRootedGitBridge,
+} from "./plain-git-root";
 import { resolveStashConfirmation } from "./plain-scm-stash";
 
 let configuredBridge: PlainBridge | undefined;
@@ -69,6 +76,9 @@ export class PlainGitStashView extends ViewPane {
 	static readonly ID = "plain.workbench.view.gitStash";
 
 	#controller: PlainGitStashController | undefined;
+	#controllerRootId: string | undefined;
+	#rootedBridge: PlainRootedGitBridge | undefined;
+	#rootRefreshQueued = false;
 	#messageElement: HTMLElement | undefined;
 	#pushMessageInput: HTMLTextAreaElement | undefined;
 	#includeUntrackedCheckbox: HTMLInputElement | undefined;
@@ -89,6 +99,7 @@ export class PlainGitStashView extends ViewPane {
 		hoverService: IHoverService,
 		private readonly dialogService: IDialogService,
 		private readonly notificationService: INotificationService,
+		private readonly workspaceContextService: IWorkspaceContextService,
 	) {
 		super(
 			options,
@@ -187,6 +198,21 @@ export class PlainGitStashView extends ViewPane {
 			entryList,
 			detail,
 		);
+		this._register(
+			plainGitRootSelection.onDidChange(() => {
+				if (this.#rootRefreshQueued) {
+					return;
+				}
+				this.#rootRefreshQueued = true;
+				queueMicrotask(() => {
+					this.#rootRefreshQueued = false;
+					this.#controller = undefined;
+					this.#controllerRootId = undefined;
+					this.#rootedBridge = undefined;
+					void this.refresh();
+				});
+			}),
+		);
 
 		void this.refresh();
 	}
@@ -195,7 +221,24 @@ export class PlainGitStashView extends ViewPane {
 		if (configuredBridge === undefined) {
 			return undefined;
 		}
-		this.#controller ??= new PlainGitStashController(configuredBridge);
+		const roots = plainGitRootsFromWorkspaceFolders(
+			this.workspaceContextService.getWorkspace().folders,
+		);
+		const root = plainGitRootSelection.resolve(roots);
+		if (root === undefined) {
+			this.#controller = undefined;
+			this.#controllerRootId = undefined;
+			this.#rootedBridge = undefined;
+			return undefined;
+		}
+		if (
+			this.#controller === undefined ||
+			this.#controllerRootId !== root.rootId
+		) {
+			this.#rootedBridge = bindPlainGitBridge(configuredBridge, root.rootId);
+			this.#controller = new PlainGitStashController(this.#rootedBridge);
+			this.#controllerRootId = root.rootId;
+		}
 		return this.#controller;
 	}
 
@@ -214,6 +257,9 @@ export class PlainGitStashView extends ViewPane {
 	async refresh(): Promise<void> {
 		const controller = this.#getController();
 		if (controller === undefined) {
+			this.#setMessage("Select a repository to view its stashes.");
+			this.#entryList?.replaceChildren();
+			this.#setDetail("");
 			return;
 		}
 		try {
@@ -305,15 +351,17 @@ export class PlainGitStashView extends ViewPane {
 	 * already in flight, or `mutation` itself rejects — the rejection is
 	 * reported via `INotificationService` instead. */
 	async #runStashMutation<T>(
-		mutation: (bridge: PlainBridge) => Promise<T>,
+		mutation: (bridge: PlainRootedGitBridge) => Promise<T>,
 	): Promise<T | undefined> {
-		if (configuredBridge === undefined || this.#mutationInFlight) {
+		this.#getController();
+		const bridge = this.#rootedBridge;
+		if (bridge === undefined || this.#mutationInFlight) {
 			return undefined;
 		}
 		this.#mutationInFlight = true;
 		this.#renderEntries();
 		try {
-			return await mutation(configuredBridge);
+			return await mutation(bridge);
 		} catch (error) {
 			this.notificationService.error(normalizeCommandError(error).message);
 			return undefined;
@@ -394,11 +442,13 @@ export class PlainGitStashView extends ViewPane {
 	}
 
 	private async showEntry(entry: GitStashEntry): Promise<void> {
-		if (configuredBridge === undefined) {
+		this.#getController();
+		const bridge = this.#rootedBridge;
+		if (bridge === undefined) {
 			return;
 		}
 		try {
-			const result = await configuredBridge.gitStashShow(entry.sha);
+			const result = await bridge.gitStashShow(entry.sha);
 			const lines = result.files.map((file) => {
 				const counts =
 					file.binary || file.added === null || file.deleted === null
@@ -446,3 +496,4 @@ IThemeService(PlainGitStashView, undefined, 8);
 IHoverService(PlainGitStashView, undefined, 9);
 IDialogService(PlainGitStashView, undefined, 10);
 INotificationService(PlainGitStashView, undefined, 11);
+IWorkspaceContextService(PlainGitStashView, undefined, 12);

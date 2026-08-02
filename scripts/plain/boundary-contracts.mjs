@@ -8796,6 +8796,126 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 
 const GIT_DISCARD_VIEW_PATH = "app/features/scm/plain-scm-view.ts";
 const GIT_DISCARD_MODULE_PATH = "app/features/scm/plain-scm-discard.ts";
+const GIT_ROOT_BINDER_PATH = "app/features/scm/plain-git-root.ts";
+const GIT_ROOT_BINDER_FUNCTION = "bindPlainGitBridge";
+
+function containingTypeScriptCallableName(node) {
+	let current = node.parent;
+	while (current !== undefined) {
+		if (ts.isMethodDeclaration(current) || ts.isFunctionDeclaration(current)) {
+			return typeScriptStaticName(current.name);
+		}
+		current = current.parent;
+	}
+	return undefined;
+}
+
+function gitRootBinderPropertyAssignment(node, relativePath, bridgeMethod) {
+	if (
+		relativePath !== GIT_ROOT_BINDER_PATH ||
+		!ts.isIdentifier(node) ||
+		node.text !== bridgeMethod ||
+		!ts.isPropertyAssignment(node.parent) ||
+		node.parent.name !== node ||
+		containingTypeScriptCallableName(node) !== GIT_ROOT_BINDER_FUNCTION
+	) {
+		return undefined;
+	}
+	return node.parent;
+}
+
+/**
+ * The root binder is a transport adapter, not a second business-level Git
+ * write caller. Keep that exception narrower than the confirmation gates:
+ * one identifier-named object property inside `bindPlainGitBridge`, one
+ * expression-bodied arrow with the audited facade parameters, and one direct
+ * `bridge.<method>(..., rootId)` call with the exact appended authority.
+ */
+function gitRootBinderPropertyIsExact(
+	node,
+	relativePath,
+	sourceFile,
+	bridgeMethod,
+	facadeParameterTexts,
+	rootedArgumentTexts,
+) {
+	const assignment = gitRootBinderPropertyAssignment(
+		node,
+		relativePath,
+		bridgeMethod,
+	);
+	if (assignment === undefined) {
+		return false;
+	}
+	const arrow = unwrapTypeScriptExpression(assignment.initializer);
+	if (
+		!ts.isArrowFunction(arrow) ||
+		!sameArray(
+			arrow.parameters.map((parameter) =>
+				parameter.name.getText(sourceFile).replaceAll(/\s+/g, ""),
+			),
+			facadeParameterTexts,
+		)
+	) {
+		return false;
+	}
+	const body = unwrapTypeScriptExpression(arrow.body);
+	if (!ts.isCallExpression(body)) {
+		return false;
+	}
+	const access = unwrapTypeScriptExpression(body.expression);
+	return (
+		ts.isPropertyAccessExpression(access) &&
+		ts.isIdentifier(access.expression) &&
+		access.expression.text === "bridge" &&
+		access.name.text === bridgeMethod &&
+		sameArray(
+			body.arguments.map((argument) =>
+				argument.getText(sourceFile).replaceAll(/\s+/g, ""),
+			),
+			rootedArgumentTexts,
+		)
+	);
+}
+
+function gitRootBinderForwardCallIsExact(
+	directCall,
+	node,
+	relativePath,
+	sourceFile,
+	bridgeMethod,
+	facadeParameterTexts,
+	rootedArgumentTexts,
+) {
+	if (directCall === undefined) {
+		return false;
+	}
+	let current = directCall.parent;
+	while (
+		current !== undefined &&
+		!ts.isPropertyAssignment(current) &&
+		!ts.isFunctionDeclaration(current)
+	) {
+		current = current.parent;
+	}
+	return (
+		current !== undefined &&
+		ts.isPropertyAssignment(current) &&
+		gitRootBinderPropertyIsExact(
+			current.name,
+			relativePath,
+			sourceFile,
+			bridgeMethod,
+			facadeParameterTexts,
+			rootedArgumentTexts,
+		) &&
+		unwrapTypeScriptExpression(
+			unwrapTypeScriptExpression(current.initializer).body,
+		) === directCall &&
+		ts.isIdentifier(node) &&
+		node.text === bridgeMethod
+	);
+}
 
 /**
  * The three files that may reference the `gitDiscardPaths` identifier at all
@@ -8842,6 +8962,7 @@ export function validateGitDiscardConfirmationBoundary(appSources) {
 		...GIT_DISCARD_DECLARATION_PATHS,
 		GIT_DISCARD_VIEW_PATH,
 		GIT_DISCARD_MODULE_PATH,
+		GIT_ROOT_BINDER_PATH,
 	]);
 	for (const relativePath of requiredPaths) {
 		if (!normalizedSources.has(relativePath)) {
@@ -8869,6 +8990,8 @@ export function validateGitDiscardConfirmationBoundary(appSources) {
 		GIT_DISCARD_DECLARATION_PATHS.map((relativePath) => [relativePath, 0]),
 	);
 	let auditedCallCount = 0;
+	let rootBinderPropertyCount = 0;
+	let rootBinderForwardCallCount = 0;
 
 	for (const [normalizedPath, source] of normalizedSources) {
 		if (!normalizedPath.endsWith(".ts") && !normalizedPath.endsWith(".tsx")) {
@@ -8891,6 +9014,14 @@ export function validateGitDiscardConfirmationBoundary(appSources) {
 					node.text === "gitDiscardPaths");
 			if (referencesMethod) {
 				const parent = node.parent;
+				const isExactRootBinderProperty = gitRootBinderPropertyIsExact(
+					node,
+					normalizedPath,
+					sourceFile,
+					"gitDiscardPaths",
+					["paths"],
+					["paths", "rootId"],
+				);
 				const isAllowedDeclaration =
 					(normalizedPath === "app/platform/tauri/contracts.ts" &&
 						ts.isMethodSignature(parent) &&
@@ -8902,7 +9033,9 @@ export function validateGitDiscardConfirmationBoundary(appSources) {
 						(ts.isMethodDeclaration(parent) ||
 							ts.isPropertyAssignment(parent)) &&
 						parent.name === node);
-				if (isAllowedDeclaration) {
+				if (isExactRootBinderProperty) {
+					rootBinderPropertyCount += 1;
+				} else if (isAllowedDeclaration) {
 					declarationCounts.set(
 						normalizedPath,
 						declarationCounts.get(normalizedPath) + 1,
@@ -8926,7 +9059,18 @@ export function validateGitDiscardConfirmationBoundary(appSources) {
 						directCall.arguments[0]
 							.getText(sourceFile)
 							.replaceAll(/\s+/g, "") === "relativePaths";
-					if (isAuditedCall) {
+					const isExactRootBinderForwardCall = gitRootBinderForwardCallIsExact(
+						directCall,
+						node,
+						normalizedPath,
+						sourceFile,
+						"gitDiscardPaths",
+						["paths"],
+						["paths", "rootId"],
+					);
+					if (isExactRootBinderForwardCall) {
+						rootBinderForwardCallCount += 1;
+					} else if (isAuditedCall) {
 						auditedCallCount += 1;
 					} else {
 						failures.push(
@@ -8950,6 +9094,11 @@ export function validateGitDiscardConfirmationBoundary(appSources) {
 	if (auditedCallCount !== 1) {
 		failures.push(
 			"gitDiscardPaths must have exactly one production call site, inside PlainScmView.discardResources",
+		);
+	}
+	if (rootBinderPropertyCount !== 1 || rootBinderForwardCallCount !== 1) {
+		failures.push(
+			"plain-git-root.ts must expose exactly one gitDiscardPaths facade property that only forwards paths plus its immutable rootId",
 		);
 	}
 
@@ -9175,16 +9324,22 @@ const GIT_NETWORK_BRIDGE_METHOD_AUDITS = Object.freeze([
 		bridgeMethod: "gitFetch",
 		containingMethod: "fetchFromRemote",
 		argumentTexts: Object.freeze([]),
+		facadeParameterTexts: Object.freeze([]),
+		rootedArgumentTexts: Object.freeze(["rootId"]),
 	}),
 	Object.freeze({
 		bridgeMethod: "gitPull",
 		containingMethod: "pullFromRemote",
 		argumentTexts: Object.freeze([]),
+		facadeParameterTexts: Object.freeze([]),
+		rootedArgumentTexts: Object.freeze(["rootId"]),
 	}),
 	Object.freeze({
 		bridgeMethod: "gitPush",
 		containingMethod: "pushToRemote",
 		argumentTexts: Object.freeze(["force"]),
+		facadeParameterTexts: Object.freeze(["force"]),
+		rootedArgumentTexts: Object.freeze(["force", "rootId"]),
 	}),
 ]);
 
@@ -9215,6 +9370,7 @@ export function validateGitNetworkConfirmationBoundary(appSources) {
 		...GIT_DISCARD_DECLARATION_PATHS,
 		GIT_DISCARD_VIEW_PATH,
 		GIT_NETWORK_MODULE_PATH,
+		GIT_ROOT_BINDER_PATH,
 	]);
 	for (const relativePath of requiredPaths) {
 		if (!normalizedSources.has(relativePath)) {
@@ -9252,6 +9408,12 @@ export function validateGitNetworkConfirmationBoundary(appSources) {
 	const auditedCallCounts = new Map(
 		bridgeMethodNames.map((bridgeMethod) => [bridgeMethod, 0]),
 	);
+	const rootBinderPropertyCounts = new Map(
+		bridgeMethodNames.map((bridgeMethod) => [bridgeMethod, 0]),
+	);
+	const rootBinderForwardCallCounts = new Map(
+		bridgeMethodNames.map((bridgeMethod) => [bridgeMethod, 0]),
+	);
 
 	for (const [normalizedPath, source] of normalizedSources) {
 		if (!normalizedPath.endsWith(".ts") && !normalizedPath.endsWith(".tsx")) {
@@ -9279,6 +9441,14 @@ export function validateGitNetworkConfirmationBoundary(appSources) {
 			if (audit !== undefined) {
 				const bridgeMethod = audit.bridgeMethod;
 				const parent = node.parent;
+				const isExactRootBinderProperty = gitRootBinderPropertyIsExact(
+					node,
+					normalizedPath,
+					sourceFile,
+					bridgeMethod,
+					audit.facadeParameterTexts,
+					audit.rootedArgumentTexts,
+				);
 				const isAllowedDeclaration =
 					(normalizedPath === "app/platform/tauri/contracts.ts" &&
 						ts.isMethodSignature(parent) &&
@@ -9290,7 +9460,12 @@ export function validateGitNetworkConfirmationBoundary(appSources) {
 						(ts.isMethodDeclaration(parent) ||
 							ts.isPropertyAssignment(parent)) &&
 						parent.name === node);
-				if (isAllowedDeclaration) {
+				if (isExactRootBinderProperty) {
+					rootBinderPropertyCounts.set(
+						bridgeMethod,
+						rootBinderPropertyCounts.get(bridgeMethod) + 1,
+					);
+				} else if (isAllowedDeclaration) {
 					const key = `${normalizedPath}:${bridgeMethod}`;
 					declarationCounts.set(key, declarationCounts.get(key) + 1);
 				} else {
@@ -9313,7 +9488,21 @@ export function validateGitNetworkConfirmationBoundary(appSources) {
 						normalizedPath === GIT_DISCARD_VIEW_PATH &&
 						containingMethodName(node) === audit.containingMethod &&
 						sameArray(argumentTexts, audit.argumentTexts);
-					if (isAuditedCall) {
+					const isExactRootBinderForwardCall = gitRootBinderForwardCallIsExact(
+						directCall,
+						node,
+						normalizedPath,
+						sourceFile,
+						bridgeMethod,
+						audit.facadeParameterTexts,
+						audit.rootedArgumentTexts,
+					);
+					if (isExactRootBinderForwardCall) {
+						rootBinderForwardCallCounts.set(
+							bridgeMethod,
+							rootBinderForwardCallCounts.get(bridgeMethod) + 1,
+						);
+					} else if (isAuditedCall) {
 						auditedCallCounts.set(
 							bridgeMethod,
 							auditedCallCounts.get(bridgeMethod) + 1,
@@ -9342,6 +9531,14 @@ export function validateGitNetworkConfirmationBoundary(appSources) {
 		if (auditedCallCounts.get(audit.bridgeMethod) !== 1) {
 			failures.push(
 				`${audit.bridgeMethod} must have exactly one production call site, inside PlainScmView.${audit.containingMethod}`,
+			);
+		}
+		if (
+			rootBinderPropertyCounts.get(audit.bridgeMethod) !== 1 ||
+			rootBinderForwardCallCounts.get(audit.bridgeMethod) !== 1
+		) {
+			failures.push(
+				`plain-git-root.ts must expose exactly one ${audit.bridgeMethod} facade property that only appends its immutable rootId`,
 			);
 		}
 	}
@@ -9610,11 +9807,15 @@ const GIT_STASH_BRIDGE_METHOD_AUDITS = Object.freeze([
 		bridgeMethod: "gitStashPop",
 		containingMethod: "popEntry",
 		argumentTexts: Object.freeze(["entry.sha", "false"]),
+		facadeParameterTexts: Object.freeze(["sha", "useIndex"]),
+		rootedArgumentTexts: Object.freeze(["sha", "useIndex", "rootId"]),
 	}),
 	Object.freeze({
 		bridgeMethod: "gitStashDrop",
 		containingMethod: "dropEntry",
 		argumentTexts: Object.freeze(["entry.sha"]),
+		facadeParameterTexts: Object.freeze(["sha"]),
+		rootedArgumentTexts: Object.freeze(["sha", "rootId"]),
 	}),
 ]);
 
@@ -9648,6 +9849,7 @@ export function validateGitStashConfirmationBoundary(appSources) {
 		...GIT_DISCARD_DECLARATION_PATHS,
 		GIT_STASH_VIEW_PATH,
 		GIT_STASH_MODULE_PATH,
+		GIT_ROOT_BINDER_PATH,
 	]);
 	for (const relativePath of requiredPaths) {
 		if (!normalizedSources.has(relativePath)) {
@@ -9683,6 +9885,12 @@ export function validateGitStashConfirmationBoundary(appSources) {
 	const auditedCallCounts = new Map(
 		bridgeMethodNames.map((bridgeMethod) => [bridgeMethod, 0]),
 	);
+	const rootBinderPropertyCounts = new Map(
+		bridgeMethodNames.map((bridgeMethod) => [bridgeMethod, 0]),
+	);
+	const rootBinderForwardCallCounts = new Map(
+		bridgeMethodNames.map((bridgeMethod) => [bridgeMethod, 0]),
+	);
 
 	for (const [normalizedPath, source] of normalizedSources) {
 		if (!normalizedPath.endsWith(".ts") && !normalizedPath.endsWith(".tsx")) {
@@ -9710,6 +9918,14 @@ export function validateGitStashConfirmationBoundary(appSources) {
 			if (audit !== undefined) {
 				const bridgeMethod = audit.bridgeMethod;
 				const parent = node.parent;
+				const isExactRootBinderProperty = gitRootBinderPropertyIsExact(
+					node,
+					normalizedPath,
+					sourceFile,
+					bridgeMethod,
+					audit.facadeParameterTexts,
+					audit.rootedArgumentTexts,
+				);
 				const isAllowedDeclaration =
 					(normalizedPath === "app/platform/tauri/contracts.ts" &&
 						ts.isMethodSignature(parent) &&
@@ -9721,7 +9937,12 @@ export function validateGitStashConfirmationBoundary(appSources) {
 						(ts.isMethodDeclaration(parent) ||
 							ts.isPropertyAssignment(parent)) &&
 						parent.name === node);
-				if (isAllowedDeclaration) {
+				if (isExactRootBinderProperty) {
+					rootBinderPropertyCounts.set(
+						bridgeMethod,
+						rootBinderPropertyCounts.get(bridgeMethod) + 1,
+					);
+				} else if (isAllowedDeclaration) {
 					const key = `${normalizedPath}:${bridgeMethod}`;
 					declarationCounts.set(key, declarationCounts.get(key) + 1);
 				} else {
@@ -9744,7 +9965,21 @@ export function validateGitStashConfirmationBoundary(appSources) {
 						normalizedPath === GIT_STASH_VIEW_PATH &&
 						containingMethodName(node) === audit.containingMethod &&
 						sameArray(argumentTexts, audit.argumentTexts);
-					if (isAuditedCall) {
+					const isExactRootBinderForwardCall = gitRootBinderForwardCallIsExact(
+						directCall,
+						node,
+						normalizedPath,
+						sourceFile,
+						bridgeMethod,
+						audit.facadeParameterTexts,
+						audit.rootedArgumentTexts,
+					);
+					if (isExactRootBinderForwardCall) {
+						rootBinderForwardCallCounts.set(
+							bridgeMethod,
+							rootBinderForwardCallCounts.get(bridgeMethod) + 1,
+						);
+					} else if (isAuditedCall) {
 						auditedCallCounts.set(
 							bridgeMethod,
 							auditedCallCounts.get(bridgeMethod) + 1,
@@ -9773,6 +10008,14 @@ export function validateGitStashConfirmationBoundary(appSources) {
 		if (auditedCallCounts.get(audit.bridgeMethod) !== 1) {
 			failures.push(
 				`${audit.bridgeMethod} must have exactly one production call site, inside PlainGitStashView.${audit.containingMethod}`,
+			);
+		}
+		if (
+			rootBinderPropertyCounts.get(audit.bridgeMethod) !== 1 ||
+			rootBinderForwardCallCounts.get(audit.bridgeMethod) !== 1
+		) {
+			failures.push(
+				`plain-git-root.ts must expose exactly one ${audit.bridgeMethod} facade property that only appends its immutable rootId`,
 			);
 		}
 	}
@@ -10039,6 +10282,7 @@ export function validateGitWorktreeConfirmationBoundary(appSources) {
 		...GIT_DISCARD_DECLARATION_PATHS,
 		GIT_WORKTREE_VIEW_PATH,
 		GIT_WORKTREE_MODULE_PATH,
+		GIT_ROOT_BINDER_PATH,
 	]);
 	for (const relativePath of requiredPaths) {
 		if (!normalizedSources.has(relativePath)) {
@@ -10070,6 +10314,8 @@ export function validateGitWorktreeConfirmationBoundary(appSources) {
 	// other confirm-gated bridge method this codebase locks, which expects
 	// exactly one production call site.
 	let auditedCallCount = 0;
+	let rootBinderPropertyCount = 0;
+	let rootBinderForwardCallCount = 0;
 
 	for (const [normalizedPath, source] of normalizedSources) {
 		if (!normalizedPath.endsWith(".ts") && !normalizedPath.endsWith(".tsx")) {
@@ -10092,6 +10338,14 @@ export function validateGitWorktreeConfirmationBoundary(appSources) {
 					node.text === "gitWorktreeRemove");
 			if (referencesMethod) {
 				const parent = node.parent;
+				const isExactRootBinderProperty = gitRootBinderPropertyIsExact(
+					node,
+					normalizedPath,
+					sourceFile,
+					"gitWorktreeRemove",
+					["path", "force"],
+					["path", "force", "rootId"],
+				);
 				const isAllowedDeclaration =
 					(normalizedPath === "app/platform/tauri/contracts.ts" &&
 						ts.isMethodSignature(parent) &&
@@ -10103,7 +10357,9 @@ export function validateGitWorktreeConfirmationBoundary(appSources) {
 						(ts.isMethodDeclaration(parent) ||
 							ts.isPropertyAssignment(parent)) &&
 						parent.name === node);
-				if (isAllowedDeclaration) {
+				if (isExactRootBinderProperty) {
+					rootBinderPropertyCount += 1;
+				} else if (isAllowedDeclaration) {
 					declarationCounts.set(
 						normalizedPath,
 						declarationCounts.get(normalizedPath) + 1,
@@ -10123,7 +10379,18 @@ export function validateGitWorktreeConfirmationBoundary(appSources) {
 						directCall !== undefined &&
 						normalizedPath === GIT_WORKTREE_VIEW_PATH &&
 						containingMethodName(node) === "removeEntry";
-					if (isAuditedCall) {
+					const isExactRootBinderForwardCall = gitRootBinderForwardCallIsExact(
+						directCall,
+						node,
+						normalizedPath,
+						sourceFile,
+						"gitWorktreeRemove",
+						["path", "force"],
+						["path", "force", "rootId"],
+					);
+					if (isExactRootBinderForwardCall) {
+						rootBinderForwardCallCount += 1;
+					} else if (isAuditedCall) {
 						auditedCallCount += 1;
 					} else {
 						failures.push(
@@ -10147,6 +10414,11 @@ export function validateGitWorktreeConfirmationBoundary(appSources) {
 	if (auditedCallCount !== 2) {
 		failures.push(
 			"gitWorktreeRemove must have exactly two production call sites, both inside PlainGitWorktreeView.removeEntry (the unforced probe and the confirmed forced retry)",
+		);
+	}
+	if (rootBinderPropertyCount !== 1 || rootBinderForwardCallCount !== 1) {
+		failures.push(
+			"plain-git-root.ts must expose exactly one gitWorktreeRemove facade property that only forwards path and force plus its immutable rootId",
 		);
 	}
 
@@ -19277,11 +19549,11 @@ const VIEW_PANE_BASE_INJECTED_SERVICE_TYPES = Object.freeze([
  *    name, in order, to `VIEW_PANE_BASE_INJECTED_SERVICE_TYPES` — i.e. it
  *    adds nothing beyond `ViewPane`'s own base signature, so the array it
  *    silently inherits is already exactly correct for its own needs. This
- *    is `PlainGitGraphView`'s real, currently-passing shape today: it is
- *    the one audited view that adds no services beyond the base nine, and
- *    is therefore the one place in this codebase where relying on
- *    inheritance is actually sound rather than a repeat of the S6 defect.
- *    The moment such a class ever adds even one more parameter without
+ *    is retained as a generic safe shape for any future subclass that adds
+ *    no services beyond the base nine. `PlainGitGraphView` historically
+ *    exercised this exception, but F150 S1 added workspace-root routing and
+ *    therefore correctly moved it onto a complete explicit decorator set.
+ *    The moment any zero-decorator class adds even one more parameter without
  *    also fully redeclaring, this exception stops applying and the
  *    contract fails it — exactly the transition that silently broke
  *    `plain-git-history-view.ts` in `F090` S1.

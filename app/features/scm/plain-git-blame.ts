@@ -46,9 +46,11 @@ export interface PlainGitBlameBridge {
 	gitBlameFile(
 		path: string,
 		range: GitBlameLineRange | null,
+		rootId?: string,
 	): Promise<GitBlameFileResult>;
 	gitBlameCommitMessages(
 		shas: readonly string[],
+		rootId?: string,
 	): Promise<GitBlameCommitMessagesResult>;
 }
 
@@ -191,12 +193,14 @@ interface PlainGitBlameLineLookup {
  * without any Monaco object in play. */
 export class PlainGitBlameFileIndex {
 	#result: GitBlameFileResult = Object.freeze({ entries: [], commits: {} });
+	#rootId: string | undefined;
 	#byFinalLine = new Map<number, GitBlameLineEntry>();
 	#oldestAuthorTime = 0;
 	#newestAuthorTime = 0;
 
-	setResult(result: GitBlameFileResult): void {
+	setResult(result: GitBlameFileResult, rootId?: string): void {
 		this.#result = result;
+		this.#rootId = rootId;
 		this.#byFinalLine = new Map(
 			result.entries.map((entry) => [entry.finalLine, entry]),
 		);
@@ -212,6 +216,10 @@ export class PlainGitBlameFileIndex {
 
 	get result(): GitBlameFileResult {
 		return this.#result;
+	}
+
+	get rootId(): string | undefined {
+		return this.#rootId;
 	}
 
 	lineLookup(lineNumber: number): PlainGitBlameLineLookup | undefined {
@@ -354,6 +362,8 @@ export interface PlainGitBlameEditorLike {
 export class PlainGitBlameEditorController {
 	#decorationIds: readonly string[] = [];
 	readonly #index = new PlainGitBlameFileIndex();
+	#modelKey: string | undefined;
+	#refreshGeneration = 0;
 
 	constructor(
 		private readonly bridge: PlainGitBlameBridge,
@@ -367,14 +377,30 @@ export class PlainGitBlameEditorController {
 	async refresh(
 		editor: PlainGitBlameEditorLike,
 		relativePath: string,
+		rootId?: string,
 	): Promise<void> {
 		const model = editor.getModel();
 		if (model === null) {
 			return;
 		}
+		const modelKey = model.uri.toString();
+		const generation = ++this.#refreshGeneration;
+		if (this.#modelKey !== modelKey || this.#index.rootId !== rootId) {
+			if (this.#decorationIds.length > 0) {
+				this.#decorationIds = editor.deltaDecorations(this.#decorationIds, []);
+			}
+			this.#index.setResult(
+				Object.freeze({ entries: [], commits: {} }),
+				rootId,
+			);
+			this.#modelKey = modelKey;
+		}
 		let result: GitBlameFileResult;
 		try {
-			result = await this.bridge.gitBlameFile(relativePath, null);
+			result =
+				rootId === undefined
+					? await this.bridge.gitBlameFile(relativePath, null)
+					: await this.bridge.gitBlameFile(relativePath, null, rootId);
 		} catch {
 			// Best-effort, exactly like `PlainScmResource.open`'s identical
 			// rationale: an untrusted workspace, a path outside any repository,
@@ -388,11 +414,11 @@ export class PlainGitBlameEditorController {
 			// annotations".
 			return;
 		}
-		this.#index.setResult(result);
 		const currentModel = editor.getModel();
 		if (
+			generation !== this.#refreshGeneration ||
 			currentModel === null ||
-			currentModel.uri.toString() !== model.uri.toString()
+			currentModel.uri.toString() !== modelKey
 		) {
 			// The editor's model changed while the fetch above was in flight
 			// (e.g. the user switched files) — applying a now-stale file's
@@ -400,6 +426,7 @@ export class PlainGitBlameEditorController {
 			// wrong, not just outdated, so this refresh is simply abandoned.
 			return;
 		}
+		this.#index.setResult(result, rootId);
 		const decorations = buildBlameDecorations(
 			this.#index,
 			currentModel.getLineCount(),
@@ -412,6 +439,9 @@ export class PlainGitBlameEditorController {
 	}
 
 	clear(editor: PlainGitBlameEditorLike): void {
+		this.#refreshGeneration += 1;
+		this.#modelKey = undefined;
+		this.#index.setResult(Object.freeze({ entries: [], commits: {} }));
 		this.#decorationIds = editor.deltaDecorations(this.#decorationIds, []);
 	}
 }
@@ -452,9 +482,11 @@ export class PlainGitBlameHoverProvider implements HoverProvider {
 		let fullBody: string | undefined;
 		if (!entry.isUncommitted) {
 			try {
-				const messages = await this.bridge.gitBlameCommitMessages([
-					entry.commitSha,
-				]);
+				const shas = [entry.commitSha];
+				const messages =
+					index.rootId === undefined
+						? await this.bridge.gitBlameCommitMessages(shas)
+						: await this.bridge.gitBlameCommitMessages(shas, index.rootId);
 				fullBody = messages.messages[entry.commitSha];
 			} catch {
 				// A failed batch fetch (e.g. the workspace lost trust between

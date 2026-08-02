@@ -8,6 +8,9 @@ import {
 } from "../../app/features/scm/plain-git-content-provider";
 import type { PlainScmModelFactory } from "../../app/features/scm/plain-scm-provider";
 
+const ROOT_A = "11111111-1111-4111-8111-111111111111";
+const ROOT_B = "22222222-2222-4222-8222-222222222222";
+
 function fakeModelFactory(): PlainScmModelFactory & {
 	readonly created: Array<{ value: string; resource: URI }>;
 } {
@@ -31,14 +34,19 @@ function fakeModelFactory(): PlainScmModelFactory & {
 
 function fakeBridge(
 	blobs: Record<string, string | undefined>,
-): PlainGitContentBridge & { calls: number } {
+): PlainGitContentBridge & { calls: number; rootIds: string[] } {
 	let calls = 0;
+	const rootIds: string[] = [];
 	return {
 		get calls() {
 			return calls;
 		},
-		async gitShowBlob(rev, path) {
+		rootIds,
+		async gitShowBlob(rev, path, rootId) {
 			calls += 1;
+			if (rootId !== undefined) {
+				rootIds.push(rootId);
+			}
 			const key = `${rev}:${path}`;
 			const text = blobs[key];
 			return {
@@ -66,10 +74,11 @@ describe("PlainGitTextModelContentProvider", () => {
 		const modelFactory = fakeModelFactory();
 		const provider = new PlainGitTextModelContentProvider(bridge, modelFactory);
 
-		const uri = encodeGitResourceUri("head", "src/a.ts");
+		const uri = encodeGitResourceUri(ROOT_A, "head", "src/a.ts");
 		const model = await provider.provideTextContent(uri);
 
 		expect(bridge.calls).toBe(1);
+		expect(bridge.rootIds).toEqual([ROOT_A]);
 		expect(modelFactory.created).toHaveLength(1);
 		expect(modelFactory.created[0]!.value).toBe("console.log('hi');\n");
 		expect(modelFactory.created[0]!.resource.toString()).toBe(uri.toString());
@@ -82,7 +91,7 @@ describe("PlainGitTextModelContentProvider", () => {
 		const provider = new PlainGitTextModelContentProvider(bridge, modelFactory);
 
 		const result = await provider.provideTextContent(
-			encodeGitResourceUri("index", "does-not-exist.txt"),
+			encodeGitResourceUri(ROOT_A, "index", "does-not-exist.txt"),
 		);
 
 		expect(result).toBeNull();
@@ -93,7 +102,7 @@ describe("PlainGitTextModelContentProvider", () => {
 		const bridge = fakeBridge({ "head:a.txt": "one" });
 		const modelFactory = fakeModelFactory();
 		const provider = new PlainGitTextModelContentProvider(bridge, modelFactory);
-		const uri = encodeGitResourceUri("head", "a.txt");
+		const uri = encodeGitResourceUri(ROOT_A, "head", "a.txt");
 
 		const first = await provider.provideTextContent(uri);
 		const second = await provider.provideTextContent(uri);
@@ -107,15 +116,38 @@ describe("PlainGitTextModelContentProvider", () => {
 		const bridge = fakeBridge({ "head:a.txt": "one", "index:b.txt": "two" });
 		const modelFactory = fakeModelFactory();
 		const provider = new PlainGitTextModelContentProvider(bridge, modelFactory);
-		await provider.provideTextContent(encodeGitResourceUri("head", "a.txt"));
-		await provider.provideTextContent(encodeGitResourceUri("index", "b.txt"));
+		await provider.provideTextContent(
+			encodeGitResourceUri(ROOT_A, "head", "a.txt"),
+		);
+		await provider.provideTextContent(
+			encodeGitResourceUri(ROOT_A, "index", "b.txt"),
+		);
 		expect(bridge.calls).toBe(2);
 
 		provider.dispose();
 
 		// Re-request after dispose must re-fetch from the bridge rather than
 		// reuse a (now-disposed, since dispose() also clears the cache) model.
-		await provider.provideTextContent(encodeGitResourceUri("head", "a.txt"));
+		await provider.provideTextContent(
+			encodeGitResourceUri(ROOT_A, "head", "a.txt"),
+		);
 		expect(bridge.calls).toBe(3);
+	});
+
+	it("does not share a cached model between two roots with the same revision and path", async () => {
+		const bridge = fakeBridge({ "head:same.txt": "same" });
+		const modelFactory = fakeModelFactory();
+		const provider = new PlainGitTextModelContentProvider(bridge, modelFactory);
+
+		await provider.provideTextContent(
+			encodeGitResourceUri(ROOT_A, "head", "same.txt"),
+		);
+		await provider.provideTextContent(
+			encodeGitResourceUri(ROOT_B, "head", "same.txt"),
+		);
+
+		expect(bridge.calls).toBe(2);
+		expect(bridge.rootIds).toEqual([ROOT_A, ROOT_B]);
+		expect(modelFactory.created).toHaveLength(2);
 	});
 });

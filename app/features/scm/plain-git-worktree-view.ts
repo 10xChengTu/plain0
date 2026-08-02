@@ -9,6 +9,7 @@ import { IKeybindingService } from "@codingame/monaco-vscode-api/vscode/vs/platf
 import { INotificationService } from "@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service";
 import { IOpenerService } from "@codingame/monaco-vscode-api/vscode/vs/platform/opener/common/opener.service";
 import { IThemeService } from "@codingame/monaco-vscode-api/vscode/vs/platform/theme/common/themeService.service";
+import { IWorkspaceContextService } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace.service";
 import {
 	ViewPane,
 	type IViewPaneOptions,
@@ -24,6 +25,12 @@ import {
 	PlainGitWorktreeController,
 	worktreeEntryLabel,
 } from "./plain-git-worktree";
+import {
+	bindPlainGitBridge,
+	plainGitRootSelection,
+	plainGitRootsFromWorkspaceFolders,
+	type PlainRootedGitBridge,
+} from "./plain-git-root";
 import { resolveWorktreeConfirmation } from "./plain-scm-worktree";
 
 let configuredBridge: PlainBridge | undefined;
@@ -64,6 +71,9 @@ export class PlainGitWorktreeView extends ViewPane {
 	static readonly ID = "plain.workbench.view.gitWorktree";
 
 	#controller: PlainGitWorktreeController | undefined;
+	#controllerRootId: string | undefined;
+	#rootedBridge: PlainRootedGitBridge | undefined;
+	#rootRefreshQueued = false;
 	#messageElement: HTMLElement | undefined;
 	#childSegmentInput: HTMLInputElement | undefined;
 	#commitIshInput: HTMLInputElement | undefined;
@@ -85,6 +95,7 @@ export class PlainGitWorktreeView extends ViewPane {
 		hoverService: IHoverService,
 		private readonly dialogService: IDialogService,
 		private readonly notificationService: INotificationService,
+		private readonly workspaceContextService: IWorkspaceContextService,
 	) {
 		super(
 			options,
@@ -185,6 +196,21 @@ export class PlainGitWorktreeView extends ViewPane {
 			entryList,
 			detail,
 		);
+		this._register(
+			plainGitRootSelection.onDidChange(() => {
+				if (this.#rootRefreshQueued) {
+					return;
+				}
+				this.#rootRefreshQueued = true;
+				queueMicrotask(() => {
+					this.#rootRefreshQueued = false;
+					this.#controller = undefined;
+					this.#controllerRootId = undefined;
+					this.#rootedBridge = undefined;
+					void this.refresh();
+				});
+			}),
+		);
 
 		void this.refresh();
 	}
@@ -193,7 +219,24 @@ export class PlainGitWorktreeView extends ViewPane {
 		if (configuredBridge === undefined) {
 			return undefined;
 		}
-		this.#controller ??= new PlainGitWorktreeController(configuredBridge);
+		const roots = plainGitRootsFromWorkspaceFolders(
+			this.workspaceContextService.getWorkspace().folders,
+		);
+		const root = plainGitRootSelection.resolve(roots);
+		if (root === undefined) {
+			this.#controller = undefined;
+			this.#controllerRootId = undefined;
+			this.#rootedBridge = undefined;
+			return undefined;
+		}
+		if (
+			this.#controller === undefined ||
+			this.#controllerRootId !== root.rootId
+		) {
+			this.#rootedBridge = bindPlainGitBridge(configuredBridge, root.rootId);
+			this.#controller = new PlainGitWorktreeController(this.#rootedBridge);
+			this.#controllerRootId = root.rootId;
+		}
 		return this.#controller;
 	}
 
@@ -212,6 +255,9 @@ export class PlainGitWorktreeView extends ViewPane {
 	async refresh(): Promise<void> {
 		const controller = this.#getController();
 		if (controller === undefined) {
+			this.#setMessage("Select a repository to view its worktrees.");
+			this.#entryList?.replaceChildren();
+			this.#setDetail("");
 			return;
 		}
 		try {
@@ -272,15 +318,17 @@ export class PlainGitWorktreeView extends ViewPane {
 	 * rejects — the rejection is reported via `INotificationService` instead.
 	 */
 	async #runWorktreeMutation<T>(
-		mutation: (bridge: PlainBridge) => Promise<T>,
+		mutation: (bridge: PlainRootedGitBridge) => Promise<T>,
 	): Promise<T | undefined> {
-		if (configuredBridge === undefined || this.#mutationInFlight) {
+		this.#getController();
+		const bridge = this.#rootedBridge;
+		if (bridge === undefined || this.#mutationInFlight) {
 			return undefined;
 		}
 		this.#mutationInFlight = true;
 		this.#renderEntries();
 		try {
-			return await mutation(configuredBridge);
+			return await mutation(bridge);
 		} catch (error) {
 			this.notificationService.error(normalizeCommandError(error).message);
 			return undefined;
@@ -369,3 +417,4 @@ IThemeService(PlainGitWorktreeView, undefined, 8);
 IHoverService(PlainGitWorktreeView, undefined, 9);
 IDialogService(PlainGitWorktreeView, undefined, 10);
 INotificationService(PlainGitWorktreeView, undefined, 11);
+IWorkspaceContextService(PlainGitWorktreeView, undefined, 12);

@@ -14,6 +14,11 @@ import {
 	decodeLosslessUtf8,
 } from "./hunk-stage";
 import { relativePathUnder } from "./plain-scm-provider";
+import {
+	bindPlainGitBridge,
+	plainGitRootSelection,
+	plainGitRootsFromWorkspaceFolders,
+} from "./plain-git-root";
 import { getConfiguredPlainScmBridge, PlainScmView } from "./plain-scm-view";
 import { SCM_VIEW_ID } from "./scm-contribution";
 
@@ -64,12 +69,25 @@ async function runStageActiveFileFirstHunk(
 		notificationService.info("Plain: open a file to stage a change.");
 		return;
 	}
-	const rootUri = workspaceContextService.getWorkspace().folders[0]?.uri;
-	if (rootUri === undefined) {
+	const roots = plainGitRootsFromWorkspaceFolders(
+		workspaceContextService.getWorkspace().folders,
+	);
+	if (roots.length === 0) {
 		notificationService.info("Plain: open a folder to use Source Control.");
 		return;
 	}
-	const relativePath = relativePathUnder(rootUri, resource);
+	const root = roots.find(
+		(candidate) =>
+			candidate.uri.scheme === resource.scheme &&
+			candidate.uri.authority === resource.authority,
+	);
+	if (root === undefined) {
+		notificationService.info(
+			"Plain: the active file is outside the open workspace.",
+		);
+		return;
+	}
+	const relativePath = relativePathUnder(root.uri, resource);
 	if (relativePath === undefined) {
 		notificationService.info(
 			"Plain: the active file is outside the open workspace.",
@@ -83,11 +101,13 @@ async function runStageActiveFileFirstHunk(
 	// `relativePathUnder` above) to share `rootUri`'s scheme and authority,
 	// reading it directly here avoids a second `workspaceSnapshot()` round
 	// trip just to look the same id back up.
-	const rootId = resource.authority;
+	const rootId = root.rootId;
+	plainGitRootSelection.select(rootId, roots);
+	const git = bindPlainGitBridge(bridge, rootId);
 
 	try {
 		const [originalResult, modifiedFile] = await Promise.all([
-			bridge.gitShowBlob("index", relativePath),
+			git.gitShowBlob("index", relativePath),
 			bridge.workspaceReadFile(rootId, relativePath),
 		]);
 		const originalText =
@@ -112,10 +132,7 @@ async function runStageActiveFileFirstHunk(
 			);
 			return;
 		}
-		await bridge.gitStageBlob(
-			relativePath,
-			new TextEncoder().encode(hunkContent),
-		);
+		await git.gitStageBlob(relativePath, new TextEncoder().encode(hunkContent));
 		notificationService.info(
 			`Plain: staged the first change in "${relativePath}".`,
 		);

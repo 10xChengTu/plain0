@@ -41,22 +41,27 @@ export const PLAIN_GIT_COMMIT_BLOB_SCHEME = "plain-git-commit-blob";
 export const PLAIN_GIT_COMMIT_SOURCE_SCHEME = "plain-git-commit";
 
 const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
+const ROOT_ID_PATTERN =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function isCommitSha(value: string): boolean {
 	return COMMIT_SHA_PATTERN.test(value);
 }
 
 export interface GitCommitBlobResourceQuery {
+	readonly rootId: string;
 	readonly sha: string;
 	readonly path: string;
 }
 
 export function encodeGitCommitBlobResourceUri(
+	rootId: string,
 	sha: string,
 	relativePath: string,
 ): URI {
 	return URI.from({
 		scheme: PLAIN_GIT_COMMIT_BLOB_SCHEME,
+		authority: rootId,
 		path: relativePath.startsWith("/") ? relativePath : `/${relativePath}`,
 		query: JSON.stringify({ sha, path: relativePath }),
 	});
@@ -70,7 +75,10 @@ export function encodeGitCommitBlobResourceUri(
 export function decodeGitCommitBlobResourceUri(
 	uri: URI,
 ): GitCommitBlobResourceQuery | undefined {
-	if (uri.scheme !== PLAIN_GIT_COMMIT_BLOB_SCHEME) {
+	if (
+		uri.scheme !== PLAIN_GIT_COMMIT_BLOB_SCHEME ||
+		!ROOT_ID_PATTERN.test(uri.authority)
+	) {
 		return undefined;
 	}
 	let parsed: unknown;
@@ -83,6 +91,8 @@ export function decodeGitCommitBlobResourceUri(
 		typeof parsed !== "object" ||
 		parsed === null ||
 		Array.isArray(parsed) ||
+		Object.getPrototypeOf(parsed) !== Object.prototype ||
+		Reflect.ownKeys(parsed).length !== 2 ||
 		!("sha" in parsed) ||
 		!("path" in parsed)
 	) {
@@ -97,30 +107,45 @@ export function decodeGitCommitBlobResourceUri(
 	) {
 		return undefined;
 	}
-	return Object.freeze({ sha, path });
+	return Object.freeze({ rootId: uri.authority, sha, path });
 }
 
 /** Encodes the `multiDiffSource` URI [`PlainGitHistoryView`] hands to
  * `IEditorService.openEditor({ multiDiffSource, ... })` to open a commit's
  * changed-file list as a multi-diff editor. */
-export function encodeGitCommitSourceUri(sha: string): URI {
-	return URI.from({ scheme: PLAIN_GIT_COMMIT_SOURCE_SCHEME, path: `/${sha}` });
+export function encodeGitCommitSourceUri(rootId: string, sha: string): URI {
+	return URI.from({
+		scheme: PLAIN_GIT_COMMIT_SOURCE_SCHEME,
+		authority: rootId,
+		path: `/${sha}`,
+	});
 }
 
 /** Returns `undefined` for any URI that is not one of ours, mirroring
  * [`decodeGitCommitBlobResourceUri`]'s own contract. */
-export function decodeGitCommitSourceUri(uri: URI): string | undefined {
-	if (uri.scheme !== PLAIN_GIT_COMMIT_SOURCE_SCHEME) {
+export function decodeGitCommitSourceUri(
+	uri: URI,
+): Readonly<{ rootId: string; sha: string }> | undefined {
+	if (
+		uri.scheme !== PLAIN_GIT_COMMIT_SOURCE_SCHEME ||
+		!ROOT_ID_PATTERN.test(uri.authority)
+	) {
 		return undefined;
 	}
 	const sha = uri.path.startsWith("/") ? uri.path.slice(1) : uri.path;
-	return isCommitSha(sha) ? sha : undefined;
+	return isCommitSha(sha)
+		? Object.freeze({ rootId: uri.authority, sha })
+		: undefined;
 }
 
 /** Structural subset of `PlainBridge` [`PlainGitCommitBlobContentProvider`]
  * needs. */
 export interface PlainGitCommitBlobBridge {
-	gitShowCommitBlob(sha: string, path: string): Promise<GitShowBlobResult>;
+	gitShowCommitBlob(
+		sha: string,
+		path: string,
+		rootId?: string,
+	): Promise<GitShowBlobResult>;
 }
 
 /**
@@ -129,7 +154,7 @@ export interface PlainGitCommitBlobBridge {
  * `IFileSystemProvider`" shape `PlainGitTextModelContentProvider`
  * (`plain-git-content-provider.ts`) already establishes for the `git:`
  * scheme, just backed by `gitShowCommitBlob` instead of `gitShowBlob`. One
- * model per distinct `(sha, path)` pair is cached for the lifetime of this
+ * model per distinct `(rootId, sha, path)` tuple is cached for the lifetime of this
  * provider, for the identical reason that file's own doc comment gives: a
  * historical commit's blob is immutable the moment it is read, so there is
  * nothing to invalidate short of the model's own normal disposal.
@@ -152,7 +177,11 @@ export class PlainGitCommitBlobContentProvider implements ITextModelContentProvi
 		if (cached !== null && cached !== undefined && !cached.isDisposed()) {
 			return cached;
 		}
-		const result = await this.bridge.gitShowCommitBlob(query.sha, query.path);
+		const result = await this.bridge.gitShowCommitBlob(
+			query.sha,
+			query.path,
+			query.rootId,
+		);
 		if (result.content === null) {
 			return null;
 		}
@@ -175,7 +204,7 @@ export class PlainGitCommitBlobContentProvider implements ITextModelContentProvi
 /** Structural subset of `PlainBridge`
  * [`PlainGitCommitMultiDiffSourceResolver`] needs. */
 export interface PlainGitCommitResolverBridge {
-	gitShowCommit(sha: string): Promise<GitShowCommitResult>;
+	gitShowCommit(sha: string, rootId?: string): Promise<GitShowCommitResult>;
 }
 
 /**
@@ -189,6 +218,7 @@ export interface PlainGitCommitResolverBridge {
  * needed here.
  */
 function commitDiffUris(
+	rootId: string,
 	sha: string,
 	parentSha: string | null,
 	file: GitShowCommitResult["files"][number],
@@ -198,10 +228,14 @@ function commitDiffUris(
 	const hasModified = file.kind !== "deleted";
 	return {
 		originalUri: hasOriginal
-			? encodeGitCommitBlobResourceUri(parentSha as string, originalPath)
+			? encodeGitCommitBlobResourceUri(
+					rootId,
+					parentSha as string,
+					originalPath,
+				)
 			: undefined,
 		modifiedUri: hasModified
-			? encodeGitCommitBlobResourceUri(sha, file.path)
+			? encodeGitCommitBlobResourceUri(rootId, sha, file.path)
 			: undefined,
 	};
 }
@@ -232,15 +266,16 @@ export class PlainGitCommitMultiDiffSourceResolver implements IMultiDiffSourceRe
 	}
 
 	async resolveDiffSource(uri: URI): Promise<IResolvedMultiDiffSource> {
-		const sha = decodeGitCommitSourceUri(uri);
-		if (sha === undefined) {
+		const query = decodeGitCommitSourceUri(uri);
+		if (query === undefined) {
 			throw new Error(
 				"plain-git-commit: URI does not carry a valid commit sha",
 			);
 		}
-		const result = await this.bridge.gitShowCommit(sha);
+		const result = await this.bridge.gitShowCommit(query.sha, query.rootId);
 		const items = result.files.map((file) => {
 			const { originalUri, modifiedUri } = commitDiffUris(
+				query.rootId,
 				result.sha,
 				result.parentSha,
 				file,

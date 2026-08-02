@@ -299,11 +299,12 @@ async function bootstrap(): Promise<void> {
 		(
 			window as unknown as Record<string, unknown>
 		).__PLAIN_TEST_RESOLVE_GIT_TEXT__ = async (
+			rootId: string,
 			rev: "head" | "index",
 			relativePath: string,
 		): Promise<string | null> => {
 			const reference = await textModelService.createModelReference(
-				encodeGitResourceUri(rev, relativePath),
+				encodeGitResourceUri(rootId, rev, relativePath),
 			);
 			try {
 				return reference.object.textEditorModel.getValue();

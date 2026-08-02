@@ -1,6 +1,6 @@
 # 端到端桌面验收交接清单（Codex 执行）
 
-更新时间：2026-07-31（Codex 已完成 E2E-001、E2E-003、E2E-004、E2E-005、E2E-006、E2E-007 与 E2E-011；其余条目继续按 E2E-013 顺序执行）
+更新时间：2026-08-02（新增并完成 E2E-015；既有条目的完成或阻塞状态以各自小节为准）
 
 ## 分工模式
 
@@ -466,6 +466,16 @@ fixture（仓库内 `tmp-` 前缀临时目录中创建，测试后删除）：
 
 完成后：把本条状态、真实磁盘哈希和任何缺陷/修复写回本节；在 `features.json` 为 F140 增加 evidence 并转 `complete`，`progress.md` 将 WIP 移到 F150。若真实桌面暴露串根或错误写入，F140 保持 `in_progress`，先修复并追加独立提交后重跑本条。
 
+### E2E-015 · F150 S1 多根 Git 选择、写入与历史路由真实桌面矩阵
+
+状态：**已完成（2026-08-02）**。从本次工作树执行 `pnpm tauri:build:e2e`，并只按构建日志给出的绝对路径启动 `src-tauri/target/debug/bundle/macos/Plain.app`；真实 WKWebView 正常进入 Workbench。两个独立临时 Git 仓库经 macOS 系统目录选择器分别授权后，Source Control 首屏保持禁用并显示 `Select a repository to use Source Control.`，仓库选择器值为 `Select a repository…`，没有默认猜测第一根。选择 primary/secondary 后分别只显示 `primary-only.txt`/`secondary-only.txt`，Graph 与 Worktrees 同步切换到所选仓库。
+
+写入隔离：UI 只对 secondary 的 `secondary-only.txt` 执行 Stage，页面由 Changes 切为 Staged Changes；随后 shell 交叉核对 primary 仍为 ` M primary-only.txt` 且 `git diff --cached --name-only` 为空，secondary 为 `M  secondary-only.txt` 且暂存区精确只含 `secondary-only.txt`。切回 primary 后 UI 收敛为 primary 的未暂存文件，Staged Changes 为空，Worktrees 路径也回到 primary。历史隔离：依次从 Explorer 打开两根文件并点击 `Show File History`，分别得到 `4dc1d00 initial primary` 与 `23baacf initial secondary`；第二次操作同时把共享仓库选择同步到 secondary，证明 History 按活动文件 authority 路由而非沿用旧选择或首根。
+
+自动化对照：新增 Browser E2E `Source Control requires an explicit repository in a multi-root workspace and keeps reads, writes, and historical models root-bound`，用两个根的独立状态机验证显式选择、secondary-only stage、切回 primary 不受影响，以及同一 `(rev, path)` 的历史模型跨根不共用缓存；相关 Source Control/History/Graph/Stash/Worktree 浏览器矩阵 24 项全部通过。根选择状态机、所有 31 个 Git bridge 方法、普通/commit URI 与 Blame 根传播另有单元合同覆盖。
+
+fixture 与清理：在 `/private/tmp` 下创建两个一次性仓库，primary/secondary 各一条基线提交后分别修改一个文件；测试未创建远端、凭证或网络连接。Plain 经 `Cmd+Q` 正常退出且 Computer Use 确认 `isRunning: false`；fixture、`dist`、`test-results` 与 `src-tauri/target` 在提交前全部删除。
+
 ## 后续条目（随切片追加）
 
 - F030 遗留：真实 `CloseRequested` 关窗握手协议实现后，补「正常关窗 → 重开恢复」的桌面验收变体。
@@ -475,3 +485,4 @@ fixture（仓库内 `tmp-` 前缀临时目录中创建，测试后删除）：
 - F120 品牌/打包/发布检查收口后仍需真实桌面与真实 CI 才能确认的维度已登记为 E2E-012。
 - F130 浏览器与原生端到端验收（本项目最后一个 feature，已完成并转 complete）：已清点 E2E-001 至 E2E-012 共 12 条待执行条目、按十条产品需求交叉索引并给出建议执行顺序，登记为 E2E-013；F130 自身未执行这 12 条中的任何一条，全部维持「待执行」状态，交由用户后续按需交接人工或 Codex。
 - F140 多根同名搜索结果、打开与安全替换真实桌面矩阵 E2E-014 已完成并回写 F140 evidence。
+- F150 S1 多根 Git 显式选择、写入隔离、Graph/Worktree/History 路由真实桌面矩阵 E2E-015 已完成；F150 继续进入 Terminal 与 Debug routing，整个 feature 完成后再统一回写 `features.json` evidence。

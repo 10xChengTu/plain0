@@ -11291,6 +11291,7 @@ const gitDiscardAppPaths = [
 	"app/platform/tauri/contracts.ts",
 	"app/platform/tauri/native.ts",
 	"app/platform/tauri/browser-mock.ts",
+	"app/features/scm/plain-git-root.ts",
 	"app/features/scm/plain-scm-view.ts",
 	"app/features/scm/plain-scm-discard.ts",
 ];
@@ -11318,6 +11319,17 @@ describe("Plain F080 S3 git discard confirmation boundary Harness", () => {
 		expect(
 			validateGitDiscardConfirmationBoundary(gitDiscardAppSources),
 		).toEqual([]);
+	});
+
+	it("rejects a discard facade that drops its immutable repository authority", () => {
+		const hostile = replaceGitDiscardAppSource(
+			"app/features/scm/plain-git-root.ts",
+			"bridge.gitDiscardPaths(paths, rootId)",
+			"bridge.gitDiscardPaths(paths)",
+		);
+		expect(validateGitDiscardConfirmationBoundary(hostile)).toContain(
+			"plain-git-root.ts must expose exactly one gitDiscardPaths facade property that only forwards paths plus its immutable rootId",
+		);
 	});
 
 	it("requires every audited file to be present", () => {
@@ -11514,6 +11526,7 @@ const gitNetworkAppPaths = [
 	"app/platform/tauri/contracts.ts",
 	"app/platform/tauri/native.ts",
 	"app/platform/tauri/browser-mock.ts",
+	"app/features/scm/plain-git-root.ts",
 	"app/features/scm/plain-scm-view.ts",
 	"app/features/scm/plain-scm-network.ts",
 ];
@@ -11541,6 +11554,17 @@ describe("Plain F080 S4 git network confirmation boundary Harness", () => {
 		expect(
 			validateGitNetworkConfirmationBoundary(gitNetworkAppSources),
 		).toEqual([]);
+	});
+
+	it("rejects a network facade that drops its immutable repository authority", () => {
+		const hostile = replaceGitNetworkAppSource(
+			"app/features/scm/plain-git-root.ts",
+			"bridge.gitPush(force, rootId)",
+			"bridge.gitPush(force)",
+		);
+		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
+			"plain-git-root.ts must expose exactly one gitPush facade property that only appends its immutable rootId",
+		);
 	});
 
 	it("requires every audited file to be present", () => {
@@ -11790,6 +11814,7 @@ const gitStashAppPaths = [
 	"app/platform/tauri/contracts.ts",
 	"app/platform/tauri/native.ts",
 	"app/platform/tauri/browser-mock.ts",
+	"app/features/scm/plain-git-root.ts",
 	"app/features/scm/plain-git-stash-view.ts",
 	"app/features/scm/plain-scm-stash.ts",
 ];
@@ -11816,6 +11841,17 @@ describe("Plain F090 S4 git stash confirmation boundary Harness", () => {
 	it("accepts the production single confirmed pop/drop routes", () => {
 		expect(validateGitStashConfirmationBoundary(gitStashAppSources)).toEqual(
 			[],
+		);
+	});
+
+	it("rejects a stash facade that drops its immutable repository authority", () => {
+		const hostile = replaceGitStashAppSource(
+			"app/features/scm/plain-git-root.ts",
+			"bridge.gitStashDrop(sha, rootId)",
+			"bridge.gitStashDrop(sha)",
+		);
+		expect(validateGitStashConfirmationBoundary(hostile)).toContain(
+			"plain-git-root.ts must expose exactly one gitStashDrop facade property that only appends its immutable rootId",
 		);
 	});
 
@@ -11977,6 +12013,7 @@ const gitWorktreeAppPaths = [
 	"app/platform/tauri/contracts.ts",
 	"app/platform/tauri/native.ts",
 	"app/platform/tauri/browser-mock.ts",
+	"app/features/scm/plain-git-root.ts",
 	"app/features/scm/plain-git-worktree-view.ts",
 	"app/features/scm/plain-scm-worktree.ts",
 ];
@@ -12008,6 +12045,17 @@ describe("Plain F090 S5 git worktree confirmation boundary Harness", () => {
 		expect(
 			validateGitWorktreeConfirmationBoundary(gitWorktreeAppSources),
 		).toEqual([]);
+	});
+
+	it("rejects a worktree facade that drops its immutable repository authority", () => {
+		const hostile = replaceGitWorktreeAppSource(
+			"app/features/scm/plain-git-root.ts",
+			"bridge.gitWorktreeRemove(path, force, rootId)",
+			"bridge.gitWorktreeRemove(path, force)",
+		);
+		expect(validateGitWorktreeConfirmationBoundary(hostile)).toContain(
+			"plain-git-root.ts must expose exactly one gitWorktreeRemove facade property that only forwards path and force plus its immutable rootId",
+		);
 	});
 
 	it("requires every audited file to be present", () => {
@@ -12227,17 +12275,19 @@ IOpenerService(PlainGitStashView, undefined, 7);
 IThemeService(PlainGitStashView, undefined, 8);
 IHoverService(PlainGitStashView, undefined, 9);
 IDialogService(PlainGitStashView, undefined, 10);
-INotificationService(PlainGitStashView, undefined, 11);`,
+INotificationService(PlainGitStashView, undefined, 11);
+IWorkspaceContextService(PlainGitStashView, undefined, 12);`,
 			`IDialogService(PlainGitStashView, undefined, 10);
-INotificationService(PlainGitStashView, undefined, 11);`,
+INotificationService(PlainGitStashView, undefined, 11);
+IWorkspaceContextService(PlainGitStashView, undefined, 12);`,
 		);
 		const failures = validateViewPaneDependencyDecoratorBoundary(hostile);
 		expect(
 			failures.some(
 				(failure) =>
 					failure.includes("PlainGitStashView") &&
-					failure.includes("declares 2 of its own DI decorator(s)") &&
-					failure.includes("12 parameter(s)") &&
+					failure.includes("declares 3 of its own DI decorator(s)") &&
+					failure.includes("13 parameter(s)") &&
 					failure.includes("F090 S4's PlainGitStashView"),
 			),
 		).toBe(true);
@@ -12246,22 +12296,22 @@ INotificationService(PlainGitStashView, undefined, 11);`,
 	it("rejects a subclass declaring more decorators than its constructor has parameters", () => {
 		const hostile = replaceViewPaneAppSource(
 			"app/features/scm/plain-git-worktree-view.ts",
-			"INotificationService(PlainGitWorktreeView, undefined, 11);",
-			`INotificationService(PlainGitWorktreeView, undefined, 11);
-IDialogService(PlainGitWorktreeView, undefined, 12);`,
+			"IWorkspaceContextService(PlainGitWorktreeView, undefined, 12);",
+			`IWorkspaceContextService(PlainGitWorktreeView, undefined, 12);
+IDialogService(PlainGitWorktreeView, undefined, 13);`,
 		);
 		const failures = validateViewPaneDependencyDecoratorBoundary(hostile);
 		expect(
 			failures.some(
 				(failure) =>
 					failure.includes("PlainGitWorktreeView") &&
-					failure.includes("declares 12 of its own DI decorator(s)") &&
-					failure.includes("12 parameter(s)"),
+					failure.includes("declares 13 of its own DI decorator(s)") &&
+					failure.includes("13 parameter(s)"),
 			),
 		).toBe(true);
 	});
 
-	it("rejects a subclass that redeclares an existing index instead of the missing one (same-looking 11 call sites, but index 10 is never declared and index 9 is declared twice)", () => {
+	it("rejects a subclass that redeclares an existing index instead of the missing one (same-looking 12 call sites, but index 10 is never declared and index 9 is declared twice)", () => {
 		const hostile = replaceViewPaneAppSource(
 			"app/features/scm/plain-git-worktree-view.ts",
 			"IDialogService(PlainGitWorktreeView, undefined, 10);\nINotificationService(PlainGitWorktreeView, undefined, 11);",
@@ -12272,64 +12322,54 @@ IDialogService(PlainGitWorktreeView, undefined, 12);`,
 			failures.some(
 				(failure) =>
 					failure.includes("PlainGitWorktreeView") &&
-					// The distinct declared indices collapse to {1..9, 11} — ten
-					// unique values, not eleven — because index 9 is declared twice
+					// The distinct declared indices collapse to {1..9, 11, 12} —
+					// eleven unique values, not twelve — because index 9 is declared twice
 					// (deduplicated by the underlying Set) and index 10 is never
 					// declared at all. A raw call-count check alone would have missed
 					// this; checking the exact declared index *set* catches it.
-					failure.includes("declares 10 of its own DI decorator(s)"),
+					failure.includes("declares 11 of its own DI decorator(s)"),
 			),
 		).toBe(true);
 	});
 
-	it("accepts a subclass that adds nothing beyond ViewPane's own base signature and declares zero decorators of its own (PlainGitGraphView's real, currently-safe shape)", () => {
-		const failures = validateViewPaneDependencyDecoratorBoundary(
-			viewPaneAppSources.filter(
-				({ relativePath }) =>
-					relativePath === "app/features/scm/plain-git-graph-view.ts",
-			),
+	const graphDecoratorBlock = `IKeybindingService(PlainGitGraphView, undefined, 1);
+IContextMenuService(PlainGitGraphView, undefined, 2);
+IConfigurationService(PlainGitGraphView, undefined, 3);
+IContextKeyService(PlainGitGraphView, undefined, 4);
+IViewDescriptorService(PlainGitGraphView, undefined, 5);
+IInstantiationService(PlainGitGraphView, undefined, 6);
+IOpenerService(PlainGitGraphView, undefined, 7);
+IThemeService(PlainGitGraphView, undefined, 8);
+IHoverService(PlainGitGraphView, undefined, 9);
+IWorkspaceContextService(PlainGitGraphView, undefined, 10);`;
+
+	it("accepts a subclass that adds nothing beyond ViewPane's own base signature and declares zero decorators of its own", () => {
+		const baseSignatureOnly = mutateWorkspaceSource(
+			viewPaneAppSources,
+			"app/features/scm/plain-git-graph-view.ts",
+			(source) =>
+				source
+					.replace(
+						"\t\tprivate readonly workspaceContextService: IWorkspaceContextService,\n",
+						"",
+					)
+					.replace(graphDecoratorBlock, ""),
+		).filter(
+			({ relativePath }) =>
+				relativePath === "app/features/scm/plain-git-graph-view.ts",
 		);
+		const failures =
+			validateViewPaneDependencyDecoratorBoundary(baseSignatureOnly);
 		expect(
 			failures.some((failure) => failure.includes("PlainGitGraphView")),
 		).toBe(false);
 	});
 
-	it("rejects that same zero-decorator class the moment it adds one more parameter without declaring anything (the S6 defect, reproduced in a class that currently relies on inheritance)", () => {
+	it("rejects a zero-decorator class the moment it adds one more parameter without declaring anything", () => {
 		const hostile = replaceViewPaneAppSource(
 			"app/features/scm/plain-git-graph-view.ts",
-			`		themeService: IThemeService,
-		hoverService: IHoverService,
-	) {
-		super(
-			options,
-			keybindingService,
-			contextMenuService,
-			configurationService,
-			contextKeyService,
-			viewDescriptorService,
-			instantiationService,
-			openerService,
-			themeService,
-			hoverService,
-		);
-	}`,
-			`		themeService: IThemeService,
-		hoverService: IHoverService,
-		private readonly dialogService: IDialogService,
-	) {
-		super(
-			options,
-			keybindingService,
-			contextMenuService,
-			configurationService,
-			contextKeyService,
-			viewDescriptorService,
-			instantiationService,
-			openerService,
-			themeService,
-			hoverService,
-		);
-	}`,
+			graphDecoratorBlock,
+			"",
 		);
 		const failures = validateViewPaneDependencyDecoratorBoundary(hostile);
 		expect(

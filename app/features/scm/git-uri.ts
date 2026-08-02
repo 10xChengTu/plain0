@@ -18,20 +18,26 @@ import type { GitBlobRev } from "../../platform/tauri/contracts";
 export const GIT_URI_SCHEME = "git" as const;
 
 export interface GitResourceQuery {
+	readonly rootId: string;
 	readonly rev: GitBlobRev;
 	readonly path: string;
 }
+
+const ROOT_ID_PATTERN =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function isGitBlobRev(value: unknown): value is GitBlobRev {
 	return value === "head" || value === "index";
 }
 
 export function encodeGitResourceUri(
+	rootId: string,
 	rev: GitBlobRev,
 	relativePath: string,
 ): URI {
 	return URI.from({
 		scheme: GIT_URI_SCHEME,
+		authority: rootId,
 		path: relativePath.startsWith("/") ? relativePath : `/${relativePath}`,
 		query: JSON.stringify({ rev, path: relativePath }),
 	});
@@ -42,7 +48,7 @@ export function encodeGitResourceUri(
  * `PlainGitTextModelContentProvider.provideTextContent` treats that as "not
  * mine to resolve" (returns `null`), never a thrown error. */
 export function decodeGitResourceUri(uri: URI): GitResourceQuery | undefined {
-	if (uri.scheme !== GIT_URI_SCHEME) {
+	if (uri.scheme !== GIT_URI_SCHEME || !ROOT_ID_PATTERN.test(uri.authority)) {
 		return undefined;
 	}
 	let parsed: unknown;
@@ -55,6 +61,8 @@ export function decodeGitResourceUri(uri: URI): GitResourceQuery | undefined {
 		typeof parsed !== "object" ||
 		parsed === null ||
 		Array.isArray(parsed) ||
+		Object.getPrototypeOf(parsed) !== Object.prototype ||
+		Reflect.ownKeys(parsed).length !== 2 ||
 		!("rev" in parsed) ||
 		!("path" in parsed)
 	) {
@@ -64,5 +72,5 @@ export function decodeGitResourceUri(uri: URI): GitResourceQuery | undefined {
 	if (!isGitBlobRev(rev) || typeof path !== "string" || path.length === 0) {
 		return undefined;
 	}
-	return Object.freeze({ rev, path });
+	return Object.freeze({ rootId: uri.authority, rev, path });
 }

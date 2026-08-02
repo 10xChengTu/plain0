@@ -10,6 +10,7 @@ import {
 	PlainGitBlameHoverProvider,
 	type PlainGitBlameBridge,
 } from "./plain-git-blame";
+import { plainGitRootsFromWorkspaceFolders } from "./plain-git-root";
 import { relativePathUnder } from "./plain-scm-provider";
 
 /** The real `ICodeEditor` (`@codingame/monaco-vscode-api`'s own type alias
@@ -43,9 +44,11 @@ interface PlainGitBlameAttachableEditor {
  * `scm-contribution.ts`'s own "registration glue, not logic" shape.
  *
  * Only ever attaches to a model whose `uri` resolves (via
- * `relativePathUnder`) to a path inside the current single workspace root —
- * exactly the same root `PlainScmProvider` itself is scoped to. A file
- * outside the workspace (or no workspace open at all) is left undecorated.
+ * `relativePathUnder`) to a path inside one exact authorized workspace root.
+ * The root id is carried through both the blame fetch and later hover-message
+ * fetch, so identically named files in two open repositories cannot share Git
+ * state. A file outside the workspace (or no workspace open at all) is left
+ * undecorated.
  */
 export function createPlainGitBlameContribution(
 	bridge: PlainGitBlameBridge,
@@ -64,21 +67,32 @@ export function createPlainGitBlameContribution(
 	const debounceTimers = new WeakMap<object, ReturnType<typeof setTimeout>>();
 	const controllers = new WeakMap<object, PlainGitBlameEditorController>();
 	const editorDisposables = new WeakMap<object, { dispose(): void }[]>();
+	const indexedModelKeys = new WeakMap<object, string>();
 
 	const BLAME_REFRESH_DEBOUNCE_MS = 300;
 
 	function relativePathForEditor(
 		editor: PlainGitBlameAttachableEditor,
-	): string | undefined {
+	): { readonly rootId: string; readonly relativePath: string } | undefined {
 		const model = editor.getModel();
 		if (model === null) {
 			return undefined;
 		}
-		const rootUri = workspaceContextService.getWorkspace().folders[0]?.uri;
-		if (rootUri === undefined) {
+		const roots = plainGitRootsFromWorkspaceFolders(
+			workspaceContextService.getWorkspace().folders,
+		);
+		const root = roots.find(
+			({ rootId }) =>
+				model.uri.scheme === "plain-workspace" &&
+				model.uri.authority === rootId,
+		);
+		if (root === undefined) {
 			return undefined;
 		}
-		return relativePathUnder(rootUri, model.uri);
+		const relativePath = relativePathUnder(root.uri, model.uri);
+		return relativePath === undefined
+			? undefined
+			: { rootId: root.rootId, relativePath };
 	}
 
 	function scheduleRefresh(editor: PlainGitBlameAttachableEditor): void {
@@ -86,8 +100,17 @@ export function createPlainGitBlameContribution(
 		if (existing !== undefined) {
 			clearTimeout(existing);
 		}
-		const relativePath = relativePathForEditor(editor);
-		if (relativePath === undefined) {
+		const target = relativePathForEditor(editor);
+		const modelKey = editor.getModel()?.uri.toString();
+		const previousModelKey = indexedModelKeys.get(editor);
+		if (previousModelKey !== undefined && previousModelKey !== modelKey) {
+			indexes.delete(previousModelKey);
+			indexedModelKeys.delete(editor);
+		}
+		if (target === undefined) {
+			if (modelKey !== undefined) {
+				indexes.delete(modelKey);
+			}
 			controllers.get(editor)?.clear(editor);
 			return;
 		}
@@ -102,9 +125,11 @@ export function createPlainGitBlameContribution(
 				}
 				const model = editor.getModel();
 				if (model !== null) {
-					indexes.set(model.uri.toString(), controller.index);
+					const key = model.uri.toString();
+					indexes.set(key, controller.index);
+					indexedModelKeys.set(editor, key);
 				}
-				void controller.refresh(editor, relativePath);
+				void controller.refresh(editor, target.relativePath, target.rootId);
 			}, BLAME_REFRESH_DEBOUNCE_MS),
 		);
 	}
@@ -128,6 +153,11 @@ export function createPlainGitBlameContribution(
 			disposable.dispose();
 		}
 		editorDisposables.delete(editor);
+		const modelKey = indexedModelKeys.get(editor);
+		if (modelKey !== undefined) {
+			indexes.delete(modelKey);
+			indexedModelKeys.delete(editor);
+		}
 		controllers.delete(editor);
 	}
 

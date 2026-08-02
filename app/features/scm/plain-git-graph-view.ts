@@ -3,6 +3,7 @@ import { IConfigurationService } from "@codingame/monaco-vscode-api/vscode/vs/pl
 import { IContextKeyService } from "@codingame/monaco-vscode-api/vscode/vs/platform/contextkey/common/contextkey.service";
 import { IContextMenuService } from "@codingame/monaco-vscode-api/vscode/vs/platform/contextview/browser/contextView.service";
 import { IHoverService } from "@codingame/monaco-vscode-api/vscode/vs/platform/hover/browser/hover.service";
+import { IWorkspaceContextService } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace.service";
 import { IInstantiationService } from "@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/instantiation";
 import { IKeybindingService } from "@codingame/monaco-vscode-api/vscode/vs/platform/keybinding/common/keybinding.service";
 import { IOpenerService } from "@codingame/monaco-vscode-api/vscode/vs/platform/opener/common/opener.service";
@@ -16,6 +17,11 @@ import { IViewDescriptorService } from "@codingame/monaco-vscode-api/vscode/vs/w
 import type { GitRefEntry, PlainBridge } from "../../platform/tauri/contracts";
 import { normalizeCommandError } from "../../platform/tauri/errors";
 import { PlainGitGraphController } from "./plain-git-graph";
+import {
+	bindPlainGitBridge,
+	plainGitRootSelection,
+	plainGitRootsFromWorkspaceFolders,
+} from "./plain-git-root";
 import { graphLaneColor } from "./plain-git-graph-layout";
 import { refBadgeText } from "./plain-git-refs";
 
@@ -74,6 +80,8 @@ export class PlainGitGraphView extends ViewPane {
 	static readonly ID = "plain.workbench.view.gitGraph";
 
 	#controller: PlainGitGraphController | undefined;
+	#controllerRootId: string | undefined;
+	#rootRefreshQueued = false;
 	#messageElement: HTMLElement | undefined;
 	#branchesList: HTMLElement | undefined;
 	#remoteBranchesList: HTMLElement | undefined;
@@ -91,6 +99,7 @@ export class PlainGitGraphView extends ViewPane {
 		openerService: IOpenerService,
 		themeService: IThemeService,
 		hoverService: IHoverService,
+		private readonly workspaceContextService: IWorkspaceContextService,
 	) {
 		super(
 			options,
@@ -169,13 +178,42 @@ export class PlainGitGraphView extends ViewPane {
 			graphHeading,
 			graphScroll,
 		);
+		this._register(
+			plainGitRootSelection.onDidChange(() => {
+				if (this.#rootRefreshQueued) {
+					return;
+				}
+				this.#rootRefreshQueued = true;
+				queueMicrotask(() => {
+					this.#rootRefreshQueued = false;
+					this.#controller = undefined;
+					this.#controllerRootId = undefined;
+					void this.refresh();
+				});
+			}),
+		);
 	}
 
 	#getController(): PlainGitGraphController | undefined {
 		if (configuredBridge === undefined) {
 			return undefined;
 		}
-		this.#controller ??= new PlainGitGraphController(configuredBridge);
+		const roots = plainGitRootsFromWorkspaceFolders(
+			this.workspaceContextService.getWorkspace().folders,
+		);
+		const root = plainGitRootSelection.resolve(roots);
+		if (root === undefined) {
+			return undefined;
+		}
+		if (
+			this.#controller === undefined ||
+			this.#controllerRootId !== root.rootId
+		) {
+			this.#controller = new PlainGitGraphController(
+				bindPlainGitBridge(configuredBridge, root.rootId),
+			);
+			this.#controllerRootId = root.rootId;
+		}
 		return this.#controller;
 	}
 
@@ -188,6 +226,11 @@ export class PlainGitGraphView extends ViewPane {
 	async refresh(): Promise<void> {
 		const controller = this.#getController();
 		if (controller === undefined) {
+			this.#setMessage("Select a repository to view its graph.");
+			this.#branchesList?.replaceChildren();
+			this.#remoteBranchesList?.replaceChildren();
+			this.#tagsList?.replaceChildren();
+			this.#svg?.replaceChildren();
 			return;
 		}
 		// This slice's own real benchmark (see this feature's report) found
@@ -318,3 +361,16 @@ export class PlainGitGraphView extends ViewPane {
 		});
 	}
 }
+
+Object.freeze(PlainGitGraphView.prototype);
+
+IKeybindingService(PlainGitGraphView, undefined, 1);
+IContextMenuService(PlainGitGraphView, undefined, 2);
+IConfigurationService(PlainGitGraphView, undefined, 3);
+IContextKeyService(PlainGitGraphView, undefined, 4);
+IViewDescriptorService(PlainGitGraphView, undefined, 5);
+IInstantiationService(PlainGitGraphView, undefined, 6);
+IOpenerService(PlainGitGraphView, undefined, 7);
+IThemeService(PlainGitGraphView, undefined, 8);
+IHoverService(PlainGitGraphView, undefined, 9);
+IWorkspaceContextService(PlainGitGraphView, undefined, 10);

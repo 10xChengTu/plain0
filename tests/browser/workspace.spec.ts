@@ -3829,6 +3829,61 @@ async function installMultiRootNativeIpcMock(
 				displayName: "plain-library",
 				uri: `plain-workspace://${secondaryRootId}/`,
 			});
+			const gitSubmodule = Object.freeze({
+				isSubmodule: false,
+				commitChanged: false,
+				trackedChanged: false,
+				untrackedChanged: false,
+			});
+			const gitOrdinaryEntry = (
+				path: string,
+				indexStatus: string,
+				worktreeStatus: string,
+			) => ({
+				type: "ordinary" as const,
+				indexStatus,
+				worktreeStatus,
+				submodule: gitSubmodule,
+				modeHead: "100644",
+				modeIndex: "100644",
+				modeWorktree: "100644",
+				hashHead: "a".repeat(40),
+				hashIndex: "b".repeat(40),
+				path,
+			});
+			const gitBranchesByRoot = new Map([
+				[
+					primaryRootId,
+					{
+						oid: "1".repeat(40),
+						head: "primary-main",
+						upstream: null,
+					},
+				],
+				[
+					secondaryRootId,
+					{
+						oid: "2".repeat(40),
+						head: "secondary-main",
+						upstream: null,
+					},
+				],
+			] as const);
+			const gitEntriesByRoot = new Map<string, Array<Record<string, unknown>>>([
+				[primaryRootId, [gitOrdinaryEntry("primary-only.txt", ".", "M")]],
+				[secondaryRootId, [{ type: "untracked", path: "secondary-only.txt" }]],
+			]);
+			function selectedGitRootId(args: Record<string, unknown>): string {
+				const selectedRootId = args.rootId;
+				if (
+					typeof selectedRootId !== "string" ||
+					!activeRoots.has(selectedRootId) ||
+					!gitBranchesByRoot.has(selectedRootId)
+				) {
+					throw rootNotAuthorized();
+				}
+				return selectedRootId;
+			}
 			const encoder = new TextEncoder();
 			const decoder = new TextDecoder();
 			// This fixture never exercises a reload, so (unlike
@@ -4569,6 +4624,87 @@ async function installMultiRootNativeIpcMock(
 								delete: mode === "supported",
 								versionedWrite: mode === "supported",
 							};
+						case "workspace_trust_state":
+							return { trusted: true };
+						case "git_status": {
+							const selectedRootId = selectedGitRootId(args);
+							return structuredClone({
+								branch: gitBranchesByRoot.get(selectedRootId),
+								entries: gitEntriesByRoot.get(selectedRootId) ?? [],
+							});
+						}
+						case "git_diff_files":
+							selectedGitRootId(args);
+							return { entries: [] };
+						case "git_show_blob": {
+							const selectedRootId = selectedGitRootId(args);
+							const request = args.request as
+								{ rev?: string; path?: string } | undefined;
+							const label =
+								selectedRootId === primaryRootId ? "primary" : "secondary";
+							const text = `${label}:${request?.rev ?? "unknown"}:${request?.path ?? "unknown"}\n`;
+							return { content: Array.from(encoder.encode(text)) };
+						}
+						case "git_stage_paths": {
+							const selectedRootId = selectedGitRootId(args);
+							const request = args.request as { paths?: string[] } | undefined;
+							const entries = gitEntriesByRoot.get(selectedRootId) ?? [];
+							for (const path of request?.paths ?? []) {
+								const index = entries.findIndex((entry) => entry.path === path);
+								if (index < 0) {
+									continue;
+								}
+								const entry = entries[index]!;
+								if (entry.type === "untracked") {
+									entries[index] = gitOrdinaryEntry(path, "A", ".");
+									continue;
+								}
+								const worktreeStatus =
+									typeof entry.worktreeStatus === "string"
+										? entry.worktreeStatus
+										: ".";
+								entries[index] = gitOrdinaryEntry(
+									path,
+									worktreeStatus === "." ? "M" : worktreeStatus,
+									".",
+								);
+							}
+							return null;
+						}
+						case "git_unstage_paths": {
+							const selectedRootId = selectedGitRootId(args);
+							const request = args.request as { paths?: string[] } | undefined;
+							const entries = gitEntriesByRoot.get(selectedRootId) ?? [];
+							for (const path of request?.paths ?? []) {
+								const index = entries.findIndex((entry) => entry.path === path);
+								if (index >= 0) {
+									entries[index] = gitOrdinaryEntry(path, ".", "M");
+								}
+							}
+							return null;
+						}
+						case "git_blame_file":
+							selectedGitRootId(args);
+							return { entries: [], commits: {} };
+						case "git_blame_commit_messages":
+							selectedGitRootId(args);
+							return { messages: {} };
+						case "git_file_history":
+						case "git_line_history_list":
+							selectedGitRootId(args);
+							return { entries: [], truncated: false };
+						case "git_log_graph":
+							selectedGitRootId(args);
+							return { nodes: [], truncated: false };
+						case "git_refs_list":
+							selectedGitRootId(args);
+							return { entries: [], truncated: false };
+						case "git_stash_list":
+							selectedGitRootId(args);
+							return { entries: [], truncated: false };
+						case "git_worktree_list":
+							selectedGitRootId(args);
+							return { entries: [], truncated: false };
 						case "workspace_snapshot":
 							return snapshot();
 						case "workspace_pick_roots": {
@@ -12143,6 +12279,115 @@ test("Source Control is reachable from the Activity Bar and shows a clear disabl
 	expect(pageErrors).toEqual([]);
 });
 
+test("Source Control requires an explicit repository in a multi-root workspace and keeps reads, writes, and historical models root-bound", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			errors.push(message.text());
+		}
+	});
+
+	await installMultiRootNativeIpcMock(page);
+	const explorer = await openNativeWorkspaceExplorer(page);
+	await executePaletteCommand(
+		page,
+		"Add Folder to Workspace",
+		"Workspaces: Add Folder to Workspace...",
+	);
+	await expect(
+		explorer.getByRole("treeitem", { name: "plain-library", exact: true }),
+	).toHaveCount(1);
+
+	const body = await openScmView(page);
+	const selector = body.getByRole("combobox", {
+		name: "Source Control Repository",
+	});
+	await expect(selector).toBeEnabled();
+	await expect(selector).toHaveValue("");
+	await expect(page.locator(".plain-scm-view-message")).toHaveText(
+		"Select a repository to use Source Control.",
+	);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_status")).length)
+		.toBe(0);
+
+	await selector.selectOption(nativeRootId);
+	await expect(page.locator(".plain-scm-view-branch")).toHaveText(
+		"primary-main",
+	);
+	await expect(
+		body.locator(".plain-scm-view-changes .plain-scm-view-resource"),
+	).toContainText("primary-only.txt");
+	let statusCalls = await terminalCallsFor(page, "git_status");
+	expect(statusCalls.at(-1)?.args.rootId).toBe(nativeRootId);
+
+	await selector.selectOption(nativeSecondaryRootId);
+	await expect(page.locator(".plain-scm-view-branch")).toHaveText(
+		"secondary-main",
+	);
+	const secondaryChanges = body.locator(
+		".plain-scm-view-changes .plain-scm-view-resource",
+	);
+	await expect(secondaryChanges).toHaveCount(1);
+	await expect(secondaryChanges).toContainText("secondary-only.txt");
+	statusCalls = await terminalCallsFor(page, "git_status");
+	expect(statusCalls.at(-1)?.args.rootId).toBe(nativeSecondaryRootId);
+
+	await secondaryChanges
+		.getByRole("button", { name: "Stage", exact: true })
+		.click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_stage_paths")).length)
+		.toBe(1);
+	const [stageCall] = await terminalCallsFor(page, "git_stage_paths");
+	expect(stageCall?.args.rootId).toBe(nativeSecondaryRootId);
+	expect(stageCall?.args.request).toEqual({ paths: ["secondary-only.txt"] });
+	await expect(secondaryChanges).toHaveCount(0);
+	await expect(
+		body.locator(".plain-scm-view-staged .plain-scm-view-resource"),
+	).toContainText("secondary-only.txt");
+
+	const [primaryText, secondaryText] = await page.evaluate(
+		async ({ primaryRootId, secondaryRootId }) => {
+			const resolve = (
+				window as unknown as {
+					__PLAIN_TEST_RESOLVE_GIT_TEXT__(
+						rootId: string,
+						rev: "head" | "index",
+						path: string,
+					): Promise<string | null>;
+				}
+			).__PLAIN_TEST_RESOLVE_GIT_TEXT__;
+			return Promise.all([
+				resolve(primaryRootId, "head", "same.txt"),
+				resolve(secondaryRootId, "head", "same.txt"),
+			]);
+		},
+		{
+			primaryRootId: nativeRootId,
+			secondaryRootId: nativeSecondaryRootId,
+		},
+	);
+	expect(primaryText).toBe("primary:head:same.txt\n");
+	expect(secondaryText).toBe("secondary:head:same.txt\n");
+
+	await selector.selectOption(nativeRootId);
+	await expect(page.locator(".plain-scm-view-branch")).toHaveText(
+		"primary-main",
+	);
+	await expect(
+		body.locator(".plain-scm-view-changes .plain-scm-view-resource"),
+	).toContainText("primary-only.txt");
+	await expect(
+		body.locator(".plain-scm-view-staged .plain-scm-view-resource"),
+	).toHaveCount(0);
+
+	expect(errors).toEqual([]);
+});
+
 test("Source Control shows a clear disabled message for a trusted workspace that is not a Git repository", async ({
 	page,
 }) => {
@@ -12339,27 +12584,33 @@ test("git: read-only content is resolvable through the registered ITextModelCont
 	);
 	await openNativeWorkspaceExplorer(page);
 
-	const headText = await page.evaluate(() =>
-		(
-			window as unknown as {
-				__PLAIN_TEST_RESOLVE_GIT_TEXT__(
-					rev: "head" | "index",
-					path: string,
-				): Promise<string | null>;
-			}
-		).__PLAIN_TEST_RESOLVE_GIT_TEXT__("head", "src/a.ts"),
+	const headText = await page.evaluate(
+		(rootId) =>
+			(
+				window as unknown as {
+					__PLAIN_TEST_RESOLVE_GIT_TEXT__(
+						rootId: string,
+						rev: "head" | "index",
+						path: string,
+					): Promise<string | null>;
+				}
+			).__PLAIN_TEST_RESOLVE_GIT_TEXT__(rootId, "head", "src/a.ts"),
+		nativeRootId,
 	);
 	expect(headText).toBe("export const a = 1;\n");
 
-	const indexText = await page.evaluate(() =>
-		(
-			window as unknown as {
-				__PLAIN_TEST_RESOLVE_GIT_TEXT__(
-					rev: "head" | "index",
-					path: string,
-				): Promise<string | null>;
-			}
-		).__PLAIN_TEST_RESOLVE_GIT_TEXT__("index", "src/a.ts"),
+	const indexText = await page.evaluate(
+		(rootId) =>
+			(
+				window as unknown as {
+					__PLAIN_TEST_RESOLVE_GIT_TEXT__(
+						rootId: string,
+						rev: "head" | "index",
+						path: string,
+					): Promise<string | null>;
+				}
+			).__PLAIN_TEST_RESOLVE_GIT_TEXT__(rootId, "index", "src/a.ts"),
+		nativeRootId,
 	);
 	expect(indexText).toBe("export const a = 2;\n");
 

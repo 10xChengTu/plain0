@@ -279,6 +279,21 @@ body[data-plain-ready="error"] #plain-bootstrap-status {
 	}
 }
 
+/* F150 S1 repository identity control. The row must stay usable in a narrow
+ * Source Control pane: the label remains legible while the select absorbs the
+ * remaining width and truncates long workspace-folder names. */
+.plain-scm-view-root-row {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	padding: 0.25rem 0;
+}
+
+.plain-scm-view-root-select {
+	min-width: 0;
+	flex: 1 1 auto;
+}
+
 /* `F090` S0 inline git blame decoration — age heatmap colors, own palette
  * (not GitLens's — see `docs/research/2026-07-26-git-history.md`'s own
  * "调色板颜色本身应走 Plain 自己的主题色系统...但仍需自行设计" note). Six

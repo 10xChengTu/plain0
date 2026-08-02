@@ -19,6 +19,11 @@ import type { PlainBridge } from "../../platform/tauri/contracts";
 import { normalizeCommandError } from "../../platform/tauri/errors";
 import { encodeGitCommitSourceUri } from "./plain-git-commit-detail";
 import {
+	bindPlainGitBridge,
+	plainGitRootSelection,
+	plainGitRootsFromWorkspaceFolders,
+} from "./plain-git-root";
+import {
 	historyEntrySummary,
 	PlainGitHistoryController,
 	shortCommitSha,
@@ -68,6 +73,7 @@ export class PlainGitHistoryView extends ViewPane {
 	static readonly ID = "plain.workbench.view.gitHistory";
 
 	#controller: PlainGitHistoryController | undefined;
+	#controllerRootId: string | undefined;
 	#messageElement: HTMLElement | undefined;
 	#fileHistoryList: HTMLElement | undefined;
 	#lineHistoryList: HTMLElement | undefined;
@@ -186,23 +192,44 @@ export class PlainGitHistoryView extends ViewPane {
 	}
 
 	#getController(): PlainGitHistoryController | undefined {
-		if (configuredBridge === undefined) {
-			return undefined;
-		}
-		this.#controller ??= new PlainGitHistoryController(configuredBridge);
 		return this.#controller;
 	}
 
-	#activeRelativePath(): string | undefined {
+	#getControllerForRoot(rootId: string): PlainGitHistoryController | undefined {
+		if (configuredBridge === undefined) {
+			return undefined;
+		}
+		if (this.#controller === undefined || this.#controllerRootId !== rootId) {
+			this.#controller = new PlainGitHistoryController(
+				bindPlainGitBridge(configuredBridge, rootId),
+			);
+			this.#controllerRootId = rootId;
+			this.#expandedFileHistoryIndex = undefined;
+		}
+		return this.#controller;
+	}
+
+	#activeResourceTarget():
+		Readonly<{ rootId: string; path: string }> | undefined {
 		const resource = this.editorService.activeEditor?.resource;
 		if (resource === undefined) {
 			return undefined;
 		}
-		const rootUri = this.workspaceContextService.getWorkspace().folders[0]?.uri;
-		if (rootUri === undefined) {
+		const roots = plainGitRootsFromWorkspaceFolders(
+			this.workspaceContextService.getWorkspace().folders,
+		);
+		const root = roots.find(
+			(candidate) =>
+				candidate.uri.scheme === resource.scheme &&
+				candidate.uri.authority === resource.authority,
+		);
+		if (root === undefined) {
 			return undefined;
 		}
-		return relativePathUnder(rootUri, resource);
+		const path = relativePathUnder(root.uri, resource);
+		return path === undefined
+			? undefined
+			: Object.freeze({ rootId: root.rootId, path });
 	}
 
 	#setMessage(text: string | undefined): void {
@@ -212,17 +239,21 @@ export class PlainGitHistoryView extends ViewPane {
 	}
 
 	async showFileHistory(): Promise<void> {
-		const controller = this.#getController();
-		if (controller === undefined) {
-			return;
-		}
-		const path = this.#activeRelativePath();
-		if (path === undefined) {
+		const target = this.#activeResourceTarget();
+		if (target === undefined) {
 			this.#setMessage("Open a file inside the workspace to see its history.");
 			return;
 		}
+		const roots = plainGitRootsFromWorkspaceFolders(
+			this.workspaceContextService.getWorkspace().folders,
+		);
+		plainGitRootSelection.select(target.rootId, roots);
+		const controller = this.#getControllerForRoot(target.rootId);
+		if (controller === undefined) {
+			return;
+		}
 		try {
-			await controller.loadFileHistory(path);
+			await controller.loadFileHistory(target.path);
 			this.#setMessage(undefined);
 		} catch (error) {
 			this.#setMessage(normalizeCommandError(error).message);
@@ -232,13 +263,17 @@ export class PlainGitHistoryView extends ViewPane {
 	}
 
 	async showLineHistory(): Promise<void> {
-		const controller = this.#getController();
-		if (controller === undefined) {
+		const target = this.#activeResourceTarget();
+		if (target === undefined) {
+			this.#setMessage("Open a file inside the workspace to see its history.");
 			return;
 		}
-		const path = this.#activeRelativePath();
-		if (path === undefined) {
-			this.#setMessage("Open a file inside the workspace to see its history.");
+		const roots = plainGitRootsFromWorkspaceFolders(
+			this.workspaceContextService.getWorkspace().folders,
+		);
+		plainGitRootSelection.select(target.rootId, roots);
+		const controller = this.#getControllerForRoot(target.rootId);
+		if (controller === undefined) {
 			return;
 		}
 		const start = Number(this.#startInput?.value ?? "");
@@ -258,7 +293,7 @@ export class PlainGitHistoryView extends ViewPane {
 			this.#detailElement.textContent = "";
 		}
 		try {
-			await controller.loadLineHistory(path, { start, end });
+			await controller.loadLineHistory(target.path, { start, end });
 			this.#setMessage(undefined);
 		} catch (error) {
 			controller.clearLineHistory();
@@ -270,7 +305,12 @@ export class PlainGitHistoryView extends ViewPane {
 	#renderFileHistory(): void {
 		const controller = this.#getController();
 		const list = this.#fileHistoryList;
-		if (controller === undefined || list === undefined) {
+		const rootId = this.#controllerRootId;
+		if (
+			controller === undefined ||
+			list === undefined ||
+			rootId === undefined
+		) {
 			return;
 		}
 		list.textContent = "";
@@ -308,7 +348,7 @@ export class PlainGitHistoryView extends ViewPane {
 				this._register(
 					addDisposableListener(viewFilesButton, "click", () => {
 						void this.editorService.openEditor({
-							multiDiffSource: encodeGitCommitSourceUri(entry.sha),
+							multiDiffSource: encodeGitCommitSourceUri(rootId, entry.sha),
 							label: `Commit ${shortCommitSha(entry.sha)}`,
 						});
 					}),

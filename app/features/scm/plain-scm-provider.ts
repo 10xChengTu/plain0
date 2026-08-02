@@ -384,7 +384,7 @@ export class PlainScmProvider implements ISCMProvider {
 		if (relativePath === undefined) {
 			return null;
 		}
-		return encodeGitResourceUri("head", relativePath);
+		return encodeGitResourceUri(this.rootUri.authority, "head", relativePath);
 	}
 
 	dispose(): void {

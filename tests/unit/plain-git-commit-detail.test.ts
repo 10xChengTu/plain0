@@ -21,6 +21,8 @@ import type { PlainScmModelFactory } from "../../app/features/scm/plain-scm-prov
 
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
+const ROOT_A = "11111111-1111-4111-8111-111111111111";
+const ROOT_B = "22222222-2222-4222-8222-222222222222";
 
 function fakeModelFactory(): PlainScmModelFactory & {
 	readonly created: Array<{ value: string; resource: URI }>;
@@ -45,14 +47,19 @@ function fakeModelFactory(): PlainScmModelFactory & {
 
 function fakeBlobBridge(
 	blobs: Record<string, string | undefined>,
-): PlainGitCommitBlobBridge & { calls: number } {
+): PlainGitCommitBlobBridge & { calls: number; rootIds: string[] } {
 	let calls = 0;
+	const rootIds: string[] = [];
 	return {
 		get calls() {
 			return calls;
 		},
-		async gitShowCommitBlob(sha, path) {
+		rootIds,
+		async gitShowCommitBlob(sha, path, rootId) {
 			calls += 1;
+			if (rootId !== undefined) {
+				rootIds.push(rootId);
+			}
 			const text = blobs[`${sha}:${path}`];
 			return {
 				content: text === undefined ? null : new TextEncoder().encode(text),
@@ -76,12 +83,14 @@ function fileEntry(overrides: Partial<GitDiffFileEntry>): GitDiffFileEntry {
 
 function fakeResolverBridge(
 	results: Record<string, GitShowCommitResult>,
-): PlainGitCommitResolverBridge & { calls: string[] } {
-	const calls: string[] = [];
+): PlainGitCommitResolverBridge & {
+	calls: Array<{ sha: string; rootId: string | undefined }>;
+} {
+	const calls: Array<{ sha: string; rootId: string | undefined }> = [];
 	return {
 		calls,
-		async gitShowCommit(sha) {
-			calls.push(sha);
+		async gitShowCommit(sha, rootId) {
+			calls.push({ sha, rootId });
 			const result = results[sha];
 			if (result === undefined) {
 				throw new Error(`no fixture for ${sha}`);
@@ -93,9 +102,11 @@ function fakeResolverBridge(
 
 describe("plain-git-commit-detail URI encode/decode", () => {
 	it("round-trips a blob resource URI and rejects a foreign scheme/query", () => {
-		const uri = encodeGitCommitBlobResourceUri(SHA_A, "src/a.ts");
+		const uri = encodeGitCommitBlobResourceUri(ROOT_A, SHA_A, "src/a.ts");
 		expect(uri.scheme).toBe(PLAIN_GIT_COMMIT_BLOB_SCHEME);
+		expect(uri.authority).toBe(ROOT_A);
 		expect(decodeGitCommitBlobResourceUri(uri)).toEqual({
+			rootId: ROOT_A,
 			sha: SHA_A,
 			path: "src/a.ts",
 		});
@@ -106,6 +117,7 @@ describe("plain-git-commit-detail URI encode/decode", () => {
 			decodeGitCommitBlobResourceUri(
 				URI.from({
 					scheme: PLAIN_GIT_COMMIT_BLOB_SCHEME,
+					authority: ROOT_A,
 					path: "/a",
 					query: "not json",
 				}),
@@ -115,6 +127,7 @@ describe("plain-git-commit-detail URI encode/decode", () => {
 			decodeGitCommitBlobResourceUri(
 				URI.from({
 					scheme: PLAIN_GIT_COMMIT_BLOB_SCHEME,
+					authority: ROOT_A,
 					path: "/a",
 					query: JSON.stringify({ sha: "not-a-sha", path: "a" }),
 				}),
@@ -123,25 +136,45 @@ describe("plain-git-commit-detail URI encode/decode", () => {
 	});
 
 	it("round-trips a commit source URI and rejects a foreign scheme/malformed sha", () => {
-		const uri = encodeGitCommitSourceUri(SHA_A);
+		const uri = encodeGitCommitSourceUri(ROOT_A, SHA_A);
 		expect(uri.scheme).toBe(PLAIN_GIT_COMMIT_SOURCE_SCHEME);
-		expect(decodeGitCommitSourceUri(uri)).toBe(SHA_A);
+		expect(uri.authority).toBe(ROOT_A);
+		expect(decodeGitCommitSourceUri(uri)).toEqual({
+			rootId: ROOT_A,
+			sha: SHA_A,
+		});
 		expect(
 			decodeGitCommitSourceUri(URI.from({ scheme: "file", path: `/${SHA_A}` })),
 		).toBeUndefined();
 		expect(
 			decodeGitCommitSourceUri(
-				URI.from({ scheme: PLAIN_GIT_COMMIT_SOURCE_SCHEME, path: "/short" }),
+				URI.from({
+					scheme: PLAIN_GIT_COMMIT_SOURCE_SCHEME,
+					authority: ROOT_A,
+					path: "/short",
+				}),
 			),
 		).toBeUndefined();
 		expect(
 			decodeGitCommitSourceUri(
 				URI.from({
 					scheme: PLAIN_GIT_COMMIT_SOURCE_SCHEME,
+					authority: ROOT_A,
 					path: `/${SHA_A.toUpperCase()}`,
 				}),
 			),
 		).toBeUndefined();
+	});
+
+	it("keeps identical commits and paths distinct across repository roots", () => {
+		expect(
+			encodeGitCommitBlobResourceUri(ROOT_A, SHA_A, "same.txt").toString(),
+		).not.toBe(
+			encodeGitCommitBlobResourceUri(ROOT_B, SHA_A, "same.txt").toString(),
+		);
+		expect(encodeGitCommitSourceUri(ROOT_A, SHA_A).toString()).not.toBe(
+			encodeGitCommitSourceUri(ROOT_B, SHA_A).toString(),
+		);
 	});
 });
 
@@ -165,11 +198,12 @@ describe("PlainGitCommitBlobContentProvider", () => {
 			bridge,
 			modelFactory,
 		);
-		const uri = encodeGitCommitBlobResourceUri(SHA_A, "src/a.ts");
+		const uri = encodeGitCommitBlobResourceUri(ROOT_A, SHA_A, "src/a.ts");
 
 		const model = await provider.provideTextContent(uri);
 
 		expect(bridge.calls).toBe(1);
+		expect(bridge.rootIds).toEqual([ROOT_A]);
 		expect(modelFactory.created).toHaveLength(1);
 		expect(modelFactory.created[0]!.value).toBe("content\n");
 		expect(model).not.toBeNull();
@@ -184,7 +218,7 @@ describe("PlainGitCommitBlobContentProvider", () => {
 		);
 
 		const result = await provider.provideTextContent(
-			encodeGitCommitBlobResourceUri(SHA_A, "missing.txt"),
+			encodeGitCommitBlobResourceUri(ROOT_A, SHA_A, "missing.txt"),
 		);
 
 		expect(result).toBeNull();
@@ -198,7 +232,7 @@ describe("PlainGitCommitBlobContentProvider", () => {
 			bridge,
 			modelFactory,
 		);
-		const uri = encodeGitCommitBlobResourceUri(SHA_A, "a.txt");
+		const uri = encodeGitCommitBlobResourceUri(ROOT_A, SHA_A, "a.txt");
 
 		const first = await provider.provideTextContent(uri);
 		const second = await provider.provideTextContent(uri);
@@ -214,7 +248,7 @@ describe("PlainGitCommitBlobContentProvider", () => {
 			bridge,
 			modelFactory,
 		);
-		const uri = encodeGitCommitBlobResourceUri(SHA_A, "a.txt");
+		const uri = encodeGitCommitBlobResourceUri(ROOT_A, SHA_A, "a.txt");
 		await provider.provideTextContent(uri);
 		expect(bridge.calls).toBe(1);
 
@@ -223,6 +257,26 @@ describe("PlainGitCommitBlobContentProvider", () => {
 		await provider.provideTextContent(uri);
 		expect(bridge.calls).toBe(2);
 	});
+
+	it("does not share a cached historical model between repository roots", async () => {
+		const bridge = fakeBlobBridge({ [`${SHA_A}:same.txt`]: "same" });
+		const modelFactory = fakeModelFactory();
+		const provider = new PlainGitCommitBlobContentProvider(
+			bridge,
+			modelFactory,
+		);
+
+		await provider.provideTextContent(
+			encodeGitCommitBlobResourceUri(ROOT_A, SHA_A, "same.txt"),
+		);
+		await provider.provideTextContent(
+			encodeGitCommitBlobResourceUri(ROOT_B, SHA_A, "same.txt"),
+		);
+
+		expect(bridge.calls).toBe(2);
+		expect(bridge.rootIds).toEqual([ROOT_A, ROOT_B]);
+		expect(modelFactory.created).toHaveLength(2);
+	});
 });
 
 describe("PlainGitCommitMultiDiffSourceResolver", () => {
@@ -230,7 +284,9 @@ describe("PlainGitCommitMultiDiffSourceResolver", () => {
 		const resolver = new PlainGitCommitMultiDiffSourceResolver(
 			fakeResolverBridge({}),
 		);
-		expect(resolver.canHandleUri(encodeGitCommitSourceUri(SHA_A))).toBe(true);
+		expect(resolver.canHandleUri(encodeGitCommitSourceUri(ROOT_A, SHA_A))).toBe(
+			true,
+		);
 		expect(
 			resolver.canHandleUri(URI.from({ scheme: "file", path: "/a" })),
 		).toBe(false);
@@ -258,46 +314,46 @@ describe("PlainGitCommitMultiDiffSourceResolver", () => {
 				}),
 			],
 		};
-		const resolver = new PlainGitCommitMultiDiffSourceResolver(
-			fakeResolverBridge({ [SHA_B]: result }),
-		);
+		const bridge = fakeResolverBridge({ [SHA_B]: result });
+		const resolver = new PlainGitCommitMultiDiffSourceResolver(bridge);
 
 		const resolved = await resolver.resolveDiffSource(
-			encodeGitCommitSourceUri(SHA_B),
+			encodeGitCommitSourceUri(ROOT_A, SHA_B),
 		);
 		const items = resolved.resources.value;
+		expect(bridge.calls).toEqual([{ sha: SHA_B, rootId: ROOT_A }]);
 		expect(items).toHaveLength(5);
 
 		const [added, deleted, modified, renamed, copied] = items;
 		expect(added!.originalUri).toBeUndefined();
 		expect(added!.modifiedUri?.toString()).toBe(
-			encodeGitCommitBlobResourceUri(SHA_B, "new.txt").toString(),
+			encodeGitCommitBlobResourceUri(ROOT_A, SHA_B, "new.txt").toString(),
 		);
 
 		expect(deleted!.modifiedUri).toBeUndefined();
 		expect(deleted!.originalUri?.toString()).toBe(
-			encodeGitCommitBlobResourceUri(SHA_A, "gone.txt").toString(),
+			encodeGitCommitBlobResourceUri(ROOT_A, SHA_A, "gone.txt").toString(),
 		);
 
 		expect(modified!.originalUri?.toString()).toBe(
-			encodeGitCommitBlobResourceUri(SHA_A, "changed.txt").toString(),
+			encodeGitCommitBlobResourceUri(ROOT_A, SHA_A, "changed.txt").toString(),
 		);
 		expect(modified!.modifiedUri?.toString()).toBe(
-			encodeGitCommitBlobResourceUri(SHA_B, "changed.txt").toString(),
+			encodeGitCommitBlobResourceUri(ROOT_A, SHA_B, "changed.txt").toString(),
 		);
 
 		expect(renamed!.originalUri?.toString()).toBe(
-			encodeGitCommitBlobResourceUri(SHA_A, "old-name.txt").toString(),
+			encodeGitCommitBlobResourceUri(ROOT_A, SHA_A, "old-name.txt").toString(),
 		);
 		expect(renamed!.modifiedUri?.toString()).toBe(
-			encodeGitCommitBlobResourceUri(SHA_B, "new-name.txt").toString(),
+			encodeGitCommitBlobResourceUri(ROOT_A, SHA_B, "new-name.txt").toString(),
 		);
 
 		expect(copied!.originalUri?.toString()).toBe(
-			encodeGitCommitBlobResourceUri(SHA_A, "source.txt").toString(),
+			encodeGitCommitBlobResourceUri(ROOT_A, SHA_A, "source.txt").toString(),
 		);
 		expect(copied!.modifiedUri?.toString()).toBe(
-			encodeGitCommitBlobResourceUri(SHA_B, "copy.txt").toString(),
+			encodeGitCommitBlobResourceUri(ROOT_A, SHA_B, "copy.txt").toString(),
 		);
 	});
 
@@ -316,12 +372,12 @@ describe("PlainGitCommitMultiDiffSourceResolver", () => {
 		);
 
 		const resolved = await resolver.resolveDiffSource(
-			encodeGitCommitSourceUri(SHA_A),
+			encodeGitCommitSourceUri(ROOT_A, SHA_A),
 		);
 		const [entry] = resolved.resources.value;
 		expect(entry!.originalUri).toBeUndefined();
 		expect(entry!.modifiedUri?.toString()).toBe(
-			encodeGitCommitBlobResourceUri(SHA_A, "root.txt").toString(),
+			encodeGitCommitBlobResourceUri(ROOT_A, SHA_A, "root.txt").toString(),
 		);
 	});
 

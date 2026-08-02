@@ -10,7 +10,11 @@ const utf8Decoder = new TextDecoder();
 
 /** Structural subset of `PlainBridge` this provider needs. */
 export interface PlainGitContentBridge {
-	gitShowBlob(rev: "head" | "index", path: string): Promise<GitShowBlobResult>;
+	gitShowBlob(
+		rev: "head" | "index",
+		path: string,
+		rootId?: string,
+	): Promise<GitShowBlobResult>;
 }
 
 /**
@@ -23,7 +27,7 @@ export interface PlainGitContentBridge {
  * its own read-only `IFileSystemProvider` for a *different* scheme in
  * `app/features/workspace/workspace-configuration-provider.ts`.
  *
- * One model per distinct `(rev, path)` pair is cached for the lifetime of
+ * One model per distinct `(rootId, rev, path)` tuple is cached for the lifetime of
  * this provider (never invalidated mid-session) — matching upstream
  * `vscode.git`'s own quick-diff model caching: a `HEAD`/index blob is
  * immutable at the moment it's read (the whole point of asking for a
@@ -50,7 +54,11 @@ export class PlainGitTextModelContentProvider implements ITextModelContentProvid
 		if (cached !== null && cached !== undefined && !cached.isDisposed()) {
 			return cached;
 		}
-		const result = await this.bridge.gitShowBlob(query.rev, query.path);
+		const result = await this.bridge.gitShowBlob(
+			query.rev,
+			query.path,
+			query.rootId,
+		);
 		if (result.content === null) {
 			return null;
 		}
