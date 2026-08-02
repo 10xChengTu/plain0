@@ -889,19 +889,58 @@
 			"id": "F160",
 			"name": "Native close and multi-root hot-exit recovery",
 			"phase": 6,
-			"status": "in_progress",
+			"status": "complete",
 			"acceptance": [
 				"Native CloseRequested waits for the final bounded backup flush before allowing shutdown",
 				"Dirty working copies recover across restart in single-root and multi-root workspaces without root guessing",
 				"Normal close crash and root-topology changes cannot silently lose or misattach dirty content",
 				"Browser process-boundary and real Tauri shutdown recovery tests pass"
-			]
+			],
+			"evidence": {
+				"commands": [
+					"pnpm exec playwright test tests/browser/workspace.spec.ts --grep <native close and application quit recovery matrix>",
+					"pnpm prettier --check app/services/plain-lifecycle-service.ts tests/browser/workspace.spec.ts",
+					"pnpm typecheck && pnpm lint",
+					"env PATH=/usr/bin:/bin:/usr/sbin:/sbin:/Users/zhenghui/.nvm/versions/node/v22.22.1/bin:/opt/homebrew/bin:/Users/zhenghui/.cargo/bin APPLE_SIGNING_IDENTITY=- pnpm tauri:build:e2e"
+				],
+				"results": [
+					"The focused Chromium lifecycle regression passed, including an ordering test that emits native quit before the renderer's final editor-input task. A bounded 100 ms renderer settle lets that task become observable before the final veto flush; the backup contains the newest bytes before allow is sent.",
+					"Lifecycle formatting, typecheck and lint passed. The prior F160 S1 full check passed 85 frontend files and 1761 tests, 1201 Rust tests, fmt, clippy, production build, architecture and bundle guards.",
+					"E2E-018 passed on 2026-08-02 in a freshly built, locally ad-hoc-signed real Plain.app. Normal window close, true Cmd+Q exit, kill-9 recovery and root-topology removal/re-addition all preserved root ownership and exact dirty bytes."
+				],
+				"nativeScenarios": [
+					"Two real APFS fixture roots containing same-named shared.txt files were authorized through the macOS folder picker. Red-window close flushed PRIMARY_CLOSE_FIXED and SECONDARY_CLOSE_FIXED into two different stable root-identity directories before destroying the window. macOS intentionally kept the no-window application process alive; reopening that same process restored both dirty buffers without swapping roots.",
+					"After clearing the first backups, both editors visibly contained PRIMARY_QUIT_VISIBLE and SECONDARY_QUIT_VISIBLE before Cmd+Q. The real application process exited, both exact markers existed in separate backup partitions, and a cold launch with reversed root authorization restored both dirty tabs to their own breadcrumb/root. Saving both cleared their backup entries.",
+					"After waiting for scheduled backup of PRIMARY_CRASH_RECOVERY and SECONDARY_CRASH_RECOVERY, kill -9 terminated the exact Plain process. A cold launch with the opposite root order restored both exact dirty buffers. Removing the secondary root retained its backup; re-adding it to the remaining primary workspace restored both roots independently. Final saves produced those exact disk bytes and left backups/roots with no test files, and the final Cmd+Q left no Plain process."
+				],
+				"platformGaps": [
+					"On macOS, closing the last window is not application termination: the real red-window path destroys the window after the bounded handshake but leaves Plain running without windows. Cmd+Q is the separately verified process-exit path. This is recorded platform behavior, not a missing backup or shutdown handshake. Release signing, notarization and packaging remain outside the current goal."
+				],
+				"acceptanceResults": [
+					{
+						"acceptance": "Native CloseRequested waits for the final bounded backup flush before allowing shutdown",
+						"result": "Achieved. Rust close/exit requests are one-shot, bounded and fail closed; the Workbench awaits final backup and storage flushes before allow. Chromium proves call ordering and failure veto/retry, including final renderer input delivered after the native event, while E2E-018 proves the real red-window and Cmd+Q paths."
+					},
+					{
+						"acceptance": "Dirty working copies recover across restart in single-root and multi-root workspaces without root guessing",
+						"result": "Achieved. PLB2/PLA2 storage partitions entries by stable single-root identity and remaps only after current authorization. Browser process-boundary tests and E2E-018 restored two same-path dirty files correctly after reversed authorization order."
+					},
+					{
+						"acceptance": "Normal close crash and root-topology changes cannot silently lose or misattach dirty content",
+						"result": "Achieved. Real normal close, Cmd+Q, kill-9, root removal and root re-addition preserved three distinct marker pairs in their owning roots. Removed-root backup remained isolated until that root was reauthorized, and final saves cleared only the corresponding entries."
+					},
+					{
+						"acceptance": "Browser process-boundary and real Tauri shutdown recovery tests pass",
+						"result": "Achieved through the focused Chromium close/quit/failure matrix and E2E-018 in a freshly built real Plain.app, with application-data backup contents, exact disk bytes, root breadcrumbs and process exit checked independently of the UI."
+					}
+				]
+			}
 		},
 		{
 			"id": "F170",
 			"name": "Local open recent settings and trash workflows",
 			"phase": 6,
-			"status": "planned",
+			"status": "in_progress",
 			"acceptance": [
 				"Open File Open Recent and last-workspace restore work through Rust-owned capabilities",
 				"Untitled files local settings auto save and user keybindings have durable product-owned workflows",

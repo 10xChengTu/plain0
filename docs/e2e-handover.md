@@ -502,7 +502,7 @@ fixture 与清理：两个 fixture 各含同名 `main.py`、独立 `.vscode/laun
 
 ### E2E-018 · F160 原生关窗与双根 hot-exit 恢复真实桌面矩阵
 
-状态：**待执行（2026-08-02 登记）**。Browser 已确定性覆盖 close/quit 的「事件 → 最新 backup_write → allow」、backup 写失败 veto 与同一页面重试；本条补真实 Rust `WindowEvent`/`RunEvent`、真实 WKWebView、真实应用数据目录和真实进程边界。
+状态：**已完成（2026-08-02）**。Browser 已确定性覆盖 close/quit 的「事件 → 最新 backup_write → allow」、backup 写失败 veto 与同一页面重试；真实 Rust `WindowEvent`/`RunEvent`、真实 WKWebView、真实应用数据目录和真实进程边界也已完成。首轮真实 Cmd+Q 时序探针促成一处修复：原生退出事件可能先于 Monaco 的最后一个 renderer input task，生命周期服务现先等待 100ms 有界 renderer settle 再执行 final veto；聚焦 Browser 用例明确先发 native quit、下一 renderer turn 才输入尾字节，证明最终 backup 包含该尾字节后才 allow。
 
 fixture（只创建本条专用临时目录，不使用真实开发仓库）：
 
@@ -520,7 +520,14 @@ fixture（只创建本条专用临时目录，不使用真实开发仓库）：
 7. topology 对照：只移除其中一根并确认另一根的 dirty/backup 仍可见；重新加入被移除根后其自身内容恢复，未变化根不被重新挂载或覆盖。
 8. 清理：把所有恢复内容保存或显式 revert，使本条创建的 backup 精确清空；退出应用，删除两个 fixture、截图、`dist`、`test-results` 与 `src-tauri/target`。不得删除整个用户 application-data 目录，只能清理由本条 fixture 精确产生且已核对身份的条目。
 
-完成后：把真实 normal-close、Cmd+Q、kill-9、反序双根恢复、磁盘分区与进程清理结果写入 F160 evidence，F160 转 `complete`；若任何一步失败，先修复并重新执行对应场景，不能以 Browser 证据替代。
+真实结果：
+
+- 两个仓库内 APFS fixture root 均通过系统目录选择器授权，并各自打开同名 `shared.txt`。普通 macOS 红色关窗完成最终 flush 后销毁了窗口；macOS 按平台惯例保留无窗口应用进程，因此本路径验收的是窗口关闭握手而非虚构的进程退出。重新打开同一进程后，两个 dirty buffer 分别精确恢复 `PRIMARY_CLOSE_FIXED` 与 `SECONDARY_CLOSE_FIXED`，root 面包屑未交换。
+- 显式确认两个编辑器已经显示 `PRIMARY_QUIT_VISIBLE` 与 `SECONDARY_QUIT_VISIBLE` 后执行 Cmd+Q，真实 Plain PID 消失；`backups/roots/` 下两个不同稳定 root identity 分区分别含有对应精确 marker。冷启动并反转授权顺序后，两份 dirty 内容仍恢复到各自 root；保存后对应 backup 条目消失。
+- 等待定时 backup 真实落盘后以 `kill -9` 强杀，随后冷启动并再次反转根顺序，`PRIMARY_CRASH_RECOVERY` 与 `SECONDARY_CRASH_RECOVERY` 均精确恢复。移除 secondary root 时其 backup 文件仍保留；重新加入 secondary 后两根 dirty tab 同时出现且未互相覆盖。
+- 最终分别保存两个恢复编辑器，磁盘内容精确为各自的 CRASH marker，`backups/roots/` 不再包含本测试产生的文件；最终 Cmd+Q 后进程列表没有该 bundle 的 Plain 进程。fixture、`dist`、`test-results` 与 `src-tauri/target` 在提交前清理。
+
+结论：E2E-018 全部通过，F160 已转 `complete`。正常关窗、真实退出、崩溃恢复、反序双根授权、root topology 变化、backup 分区和进程清理均有真实桌面与磁盘证据，未以 Browser mock 替代。
 
 ## 后续条目（随切片追加）
 
@@ -534,4 +541,4 @@ fixture（只创建本条专用临时目录，不使用真实开发仓库）：
 - F150 S1 多根 Git 显式选择、写入隔离、Graph/Worktree/History 路由真实桌面矩阵 E2E-015 已完成；F150 继续进入 Terminal 与 Debug routing，整个 feature 完成后再统一回写 `features.json` evidence。
 - F150 S2 多根终端显式选择、tab/split root 冻结与进程清理真实桌面矩阵 E2E-016 已完成；F150 下一步只进入 Debug routing，整个 feature 完成后再统一回写 `features.json` evidence。
 - F150 S3 多根调试显式选择、adapter cwd、调用栈、同路径断点身份与进程清理真实桌面矩阵 E2E-017 已完成；F150 已整体关闭，唯一 WIP 切到 F160。
-- F160 原生普通关窗/Cmd+Q/kill-9、最终 backup 刷新与双根反序恢复真实桌面矩阵已登记为 E2E-018，完成后关闭 F160。
+- F160 原生普通关窗/Cmd+Q/kill-9、最终 backup 刷新、双根反序恢复与 topology 变化真实桌面矩阵 E2E-018 已完成；F160 已关闭，唯一 WIP 切到 F170。
