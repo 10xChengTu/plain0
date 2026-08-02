@@ -20,6 +20,7 @@ use libghostty_vt::render::{Colors, CursorViewport, CursorVisualStyle, Dirty};
 use libghostty_vt::style::{RgbColor, Style, Underline};
 
 use crate::error::CommandError;
+use crate::workspace::RootId;
 
 use super::vt;
 
@@ -100,6 +101,7 @@ impl<'de> Deserialize<'de> for TerminalSessionId {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TerminalStartRequest {
+    root_id: RootId,
     cwd: Option<String>,
     cols: u16,
     rows: u16,
@@ -107,6 +109,7 @@ pub struct TerminalStartRequest {
 
 #[derive(Debug)]
 pub(crate) struct TerminalStartQuery {
+    pub(crate) root_id: RootId,
     pub(crate) cwd: Option<String>,
     pub(crate) cols: u16,
     pub(crate) rows: u16,
@@ -116,6 +119,7 @@ impl TerminalStartRequest {
     pub(crate) fn into_parts(self) -> Result<TerminalStartQuery, CommandError> {
         validate_dimensions(self.cols, self.rows)?;
         Ok(TerminalStartQuery {
+            root_id: self.root_id,
             cwd: self.cwd,
             cols: self.cols,
             rows: self.rows,
@@ -700,7 +704,7 @@ mod tests {
     fn every_terminal_request_rejects_extra_fields() {
         assert!(
             serde_json::from_value::<TerminalStartRequest>(serde_json::json!({
-                "cols": 80, "rows": 24, "extra": true
+                "rootId": VALID_ID, "cols": 80, "rows": 24, "extra": true
             }))
             .is_err()
         );
@@ -749,19 +753,33 @@ mod tests {
     }
 
     #[test]
-    fn start_request_accepts_missing_cwd_and_rejects_zero_or_oversized_dimensions() {
+    fn start_request_requires_a_root_accepts_missing_cwd_and_rejects_invalid_dimensions() {
         let request: TerminalStartRequest = serde_json::from_value(serde_json::json!({
-            "cols": 80, "rows": 24
+            "rootId": VALID_ID, "cols": 80, "rows": 24
         }))
         .unwrap();
         let query = request.into_parts().unwrap();
+        assert_eq!(query.root_id.as_wire(), VALID_ID);
         assert_eq!(query.cwd, None);
         assert_eq!(query.cols, 80);
         assert_eq!(query.rows, 24);
 
+        assert!(
+            serde_json::from_value::<TerminalStartRequest>(serde_json::json!({
+                "cols": 80, "rows": 24
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TerminalStartRequest>(serde_json::json!({
+                "rootId": "not-a-root", "cols": 80, "rows": 24
+            }))
+            .is_err()
+        );
+
         for (cols, rows) in [(0, 24), (80, 0), (3_000, 24), (80, 3_000)] {
             let request: TerminalStartRequest = serde_json::from_value(serde_json::json!({
-                "cols": cols, "rows": rows
+                "rootId": VALID_ID, "cols": cols, "rows": rows
             }))
             .unwrap();
             assert_eq!(

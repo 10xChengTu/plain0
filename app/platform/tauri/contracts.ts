@@ -1393,12 +1393,14 @@ export interface PlainBridge {
 	themeSetProductIconThemeSelection(
 		productIconThemeId: string | null,
 	): Promise<void>;
-	/** Starts a new interactive terminal session. `cwd: null` uses the
-	 * current workspace's first authorized root — see
-	 * `src-tauri/src/terminal/service.rs`'s `resolve_cwd`. Rejects with
+	/** Starts a new interactive terminal session bound to one exact authorized
+	 * root. `cwd: null` uses that root itself; a non-null cwd must resolve
+	 * inside the same root — see `src-tauri/src/terminal/service.rs`'s
+	 * `resolve_cwd`. Rejects with
 	 * `WORKSPACE_NOT_TRUSTED` if the current workspace has not been granted
 	 * execution trust (see `workspaceTrustGrant`). */
 	terminalStart(
+		rootId: string,
 		cwd: string | null,
 		cols: number,
 		rows: number,

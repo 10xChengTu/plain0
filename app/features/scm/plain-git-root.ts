@@ -1,119 +1,18 @@
-import type { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
-
 import type { PlainBridge } from "../../platform/tauri/contracts";
+import {
+	PlainWorkspaceRootSelection,
+	plainWorkspaceRootsFromFolders,
+	type PlainWorkspaceRoot,
+} from "../workspace/plain-workspace-roots";
 
-const ROOT_ID_PATTERN =
-	/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-
-export interface PlainGitWorkspaceRoot {
-	readonly rootId: string;
-	readonly label: string;
-	readonly uri: URI;
-}
-
-interface WorkspaceFolderLike {
-	readonly name: string;
-	readonly uri: URI;
-}
-
-/** Projects the Workbench folder list back into Plain's opaque native root
- * identities. Invalid or duplicate authorities fail closed as an empty
- * result: workspace topology already enforces this shape, but Git must not
- * turn a corrupted projection into a best-effort repository guess. */
-export function plainGitRootsFromWorkspaceFolders(
-	folders: readonly WorkspaceFolderLike[],
-): readonly PlainGitWorkspaceRoot[] {
-	const seen = new Set<string>();
-	const roots: PlainGitWorkspaceRoot[] = [];
-	for (const folder of folders) {
-		const rootId = folder.uri.authority;
-		if (
-			folder.uri.scheme !== "plain-workspace" ||
-			folder.uri.path !== "/" ||
-			!ROOT_ID_PATTERN.test(rootId) ||
-			seen.has(rootId)
-		) {
-			return Object.freeze([]);
-		}
-		seen.add(rootId);
-		roots.push(Object.freeze({ rootId, label: folder.name, uri: folder.uri }));
-	}
-	return Object.freeze(roots);
-}
-
-type RootSelectionListener = () => void;
+export type PlainGitWorkspaceRoot = PlainWorkspaceRoot;
+export const plainGitRootsFromWorkspaceFolders = plainWorkspaceRootsFromFolders;
 
 /** Shared Source Control repository selection. A sole root is safe to select
  * automatically; the moment a second root appears, an automatic selection is
  * cleared and the user must make an explicit choice. Explicit choices survive
  * unrelated topology changes only while that exact root remains authorized. */
-export class PlainGitRootSelection {
-	#rootId: string | undefined;
-	#explicit = false;
-	readonly #listeners = new Set<RootSelectionListener>();
-
-	onDidChange(listener: RootSelectionListener): { dispose(): void } {
-		this.#listeners.add(listener);
-		return {
-			dispose: () => {
-				this.#listeners.delete(listener);
-			},
-		};
-	}
-
-	#update(rootId: string | undefined, explicit: boolean): void {
-		if (this.#rootId === rootId && this.#explicit === explicit) {
-			return;
-		}
-		this.#rootId = rootId;
-		this.#explicit = explicit;
-		for (const listener of Array.from(this.#listeners)) {
-			listener();
-		}
-	}
-
-	synchronize(roots: readonly PlainGitWorkspaceRoot[]): string | undefined {
-		if (roots.length === 0) {
-			this.#update(undefined, false);
-			return undefined;
-		}
-		if (roots.length === 1) {
-			this.#update(roots[0]!.rootId, false);
-			return roots[0]!.rootId;
-		}
-		if (
-			this.#explicit &&
-			this.#rootId !== undefined &&
-			roots.some(({ rootId }) => rootId === this.#rootId)
-		) {
-			return this.#rootId;
-		}
-		this.#update(undefined, false);
-		return undefined;
-	}
-
-	select(
-		rootId: string | undefined,
-		roots: readonly PlainGitWorkspaceRoot[],
-	): boolean {
-		if (rootId === undefined) {
-			this.#update(undefined, false);
-			return true;
-		}
-		if (!roots.some((root) => root.rootId === rootId)) {
-			return false;
-		}
-		this.#update(rootId, true);
-		return true;
-	}
-
-	resolve(
-		roots: readonly PlainGitWorkspaceRoot[],
-	): PlainGitWorkspaceRoot | undefined {
-		const rootId = this.synchronize(roots);
-		return roots.find((root) => root.rootId === rootId);
-	}
-}
+export class PlainGitRootSelection extends PlainWorkspaceRootSelection {}
 
 export const plainGitRootSelection = new PlainGitRootSelection();
 

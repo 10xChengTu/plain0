@@ -169,6 +169,7 @@ Workbench model ← Plain feature service ← typed bridge/events
 - 每个 Git IPC 调用必须携带当前窗口中一个显式、仍获授权的 opaque root id；Rust 在启动 Git 前重新把该 id 解析为 canonical root。单根兼容入口可以自动选取唯一 root，多根时必须要求用户选择，绝不把 `roots[0]` 当成隐式仓库。
 - 前端用一个共享 Source Control root selection 驱动 SCM、Graph、Stash 与 Worktrees；自动选择只允许发生在恰好一个 root 时，进入多根后必须等待用户明确选择。History、blame 与 hunk stage 从活动 `plain-workspace://<rootId>/...` resource 推导所属根，不沿用首根或猜测相对路径。
 - `git:`、`plain-git-commit-blob:` 与 `plain-git-commit:` 资源 URI 的 authority 是 root id，cache key 因而至少包含 `(rootId, rev/sha, path)`；content provider/resolver 解码后仍把该 root 原样传给 native bridge，禁止跨仓库复用历史模型。
+- WebView 可达的 `terminal_start` 必须携带一个显式、仍获授权的 root id；`cwd:null` 只表示该根本身，非空 cwd canonicalize 后也必须仍落在同一根内，绝不遍历全部 roots 接受另一个根或回退到授权顺序第一项。前端只在单根时自动选择；多根必须先由用户明确选择，且每个 tab/split 在创建时冻结自己的 root，后续 selector 变化只影响未来会话。Rust 内部由已确认 DAP adapter 发起的 `runInTerminal` 不经过此 WebView IPC，继续遵循其独立的 adapter 信任与 cwd 合同。
 - Git 报告的 repository top level 必须与所选 canonical root 完全相等。若用户只打开了更大仓库的子目录，仓库级 status/refs/stash/写操作会因可能越过 capability 边界而拒绝；不得以 ambient 父仓库 I/O 或未审计的全仓库 pathspec 回退绕过。
 - Rust service 把 status、diff、log、blame、refs 和动作转换为稳定 DTO；前端不解析人类文本。
 - 初期不混用 `git2`/`gix`。只有性能数据证明需要时，才用 `gix` 做只读缓存，并以 Git CLI 差分测试约束语义。

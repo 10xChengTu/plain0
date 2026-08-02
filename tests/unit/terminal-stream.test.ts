@@ -14,6 +14,7 @@ import {
 
 const SESSION_ID = "0d3f4b0e-6f1a-4c9d-9c3a-1a2b3c4d5e6f";
 const OTHER_SESSION_ID = "1d3f4b0e-6f1a-4c9d-9c3a-1a2b3c4d5e6f";
+const ROOT_ID = "11111111-1111-4111-8111-111111111111";
 
 const DEFAULT_STYLE = Object.freeze({
 	bold: false,
@@ -59,6 +60,12 @@ function frame(text: string): TerminalFrame {
 
 interface FakeTransportHandle {
 	readonly transport: TerminalStreamTransport;
+	readonly startCalls: Array<{
+		rootId: string;
+		cwd: string | null;
+		cols: number;
+		rows: number;
+	}>;
 	readonly inputTextCalls: Array<{ sessionId: string; text: string }>;
 	readonly inputKeyCalls: Array<{
 		sessionId: string;
@@ -91,6 +98,7 @@ interface FakeTransportHandle {
 }
 
 function createFakeTransport(sessionId = SESSION_ID): FakeTransportHandle {
+	const startCalls: FakeTransportHandle["startCalls"] = [];
 	const inputTextCalls: FakeTransportHandle["inputTextCalls"] = [];
 	const inputKeyCalls: FakeTransportHandle["inputKeyCalls"] = [];
 	const focusCalls: FakeTransportHandle["focusCalls"] = [];
@@ -105,6 +113,7 @@ function createFakeTransport(sessionId = SESSION_ID): FakeTransportHandle {
 	let releaseStartGate: (() => void) | undefined;
 
 	return {
+		startCalls,
 		inputTextCalls,
 		inputKeyCalls,
 		focusCalls,
@@ -134,7 +143,8 @@ function createFakeTransport(sessionId = SESSION_ID): FakeTransportHandle {
 			return () => releaseStartGate?.();
 		},
 		transport: {
-			async terminalStart() {
+			async terminalStart(rootId, cwd, cols, rows) {
+				startCalls.push({ rootId, cwd, cols, rows });
 				if (startGate !== undefined) {
 					await startGate;
 					startGate = undefined;
@@ -184,7 +194,12 @@ function createFakeTransport(sessionId = SESSION_ID): FakeTransportHandle {
 	};
 }
 
-const startRequest = Object.freeze({ cwd: null, cols: 80, rows: 24 });
+const startRequest = Object.freeze({
+	rootId: ROOT_ID,
+	cwd: null,
+	cols: 80,
+	rows: 24,
+});
 
 describe("openTerminalStream", () => {
 	it("resolves with the started sessionId and exposes writeText/writeKey/focus/resize/ack/scrollback/kill", async () => {
@@ -194,6 +209,9 @@ describe("openTerminalStream", () => {
 			onExit: () => {},
 		});
 		expect(stream.sessionId).toBe(SESSION_ID);
+		expect(fake.startCalls).toEqual([
+			{ rootId: ROOT_ID, cwd: null, cols: 80, rows: 24 },
+		]);
 
 		await stream.writeText("hi");
 		expect(fake.inputTextCalls).toEqual([

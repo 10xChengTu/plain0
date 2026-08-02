@@ -137,6 +137,7 @@ use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, Master
 use crate::error::CommandError;
 use crate::trust::service::TrustService;
 use crate::workspace::service::WorkspaceService;
+use crate::workspace::RootId;
 
 use super::dto::TerminalSessionId;
 use super::flow::FlowControl;
@@ -337,13 +338,14 @@ impl TerminalService {
         trust: &TrustService,
         workspace: &WorkspaceService,
         window_label: &str,
+        root_id: RootId,
         cwd: Option<String>,
         cols: u16,
         rows: u16,
         sink: Arc<dyn TerminalOutputSink>,
     ) -> Result<TerminalSessionId, CommandError> {
         trust.require_trusted(workspace, window_label).await?;
-        let resolved_cwd = resolve_cwd(workspace, window_label, cwd)?;
+        let resolved_cwd = resolve_cwd(workspace, window_label, root_id, cwd)?;
         let shell_path = shell::detect_shell(std::env::var("SHELL").ok().as_deref());
         let command = CommandBuilder::new(&shell_path);
         let (session_id, _pid) = self
@@ -368,6 +370,7 @@ impl TerminalService {
         trust: &TrustService,
         workspace: &WorkspaceService,
         window_label: &str,
+        root_id: RootId,
         cwd: Option<String>,
         cols: u16,
         rows: u16,
@@ -375,7 +378,7 @@ impl TerminalService {
         sink: Arc<dyn TerminalOutputSink>,
     ) -> Result<TerminalSessionId, CommandError> {
         trust.require_trusted(workspace, window_label).await?;
-        let resolved_cwd = resolve_cwd(workspace, window_label, cwd)?;
+        let resolved_cwd = resolve_cwd(workspace, window_label, root_id, cwd)?;
         let (session_id, _pid) = self
             .spawn_session(window_label, resolved_cwd, command, &[], cols, rows, sink)
             .await?;
@@ -879,34 +882,25 @@ impl TerminalService {
     }
 }
 
-/// Resolves and validates `cwd`: if provided, it must canonicalize to a path
-/// inside (or exactly equal to) one of `window_label`'s currently authorized
-/// workspace roots; if omitted, the first authorized root is used. See
-/// `workspace::WorkspaceScope::root_canonical_paths`'s doc comment for why
-/// this specific `canonicalize` + `starts_with` check is the sanctioned
-/// boundary here (a spawn parameter, not capability-relative file I/O).
+/// Resolves and validates `cwd` against one exact, caller-selected workspace
+/// root. If omitted, that root itself is used. If provided, it must
+/// canonicalize inside (or exactly equal to) the same root — never merely
+/// some other authorized root. See [`WorkspaceService::root_canonical_path`]
+/// for the stale/foreign authority check and why this specific
+/// `canonicalize` + `starts_with` check is sanctioned here (a spawn
+/// parameter, not capability-relative file I/O).
 fn resolve_cwd(
     workspace: &WorkspaceService,
     window_label: &str,
+    root_id: RootId,
     cwd: Option<String>,
 ) -> Result<PathBuf, CommandError> {
-    let roots = workspace.root_canonical_paths(window_label)?;
-    let Some((_, first_root)) = roots.first() else {
-        // `require_trusted` already rejects the `EMPTY` workspace before
-        // this is ever reached; an empty root list here would only mean
-        // every root was revoked in the narrow window between that check
-        // and this call. Fail closed the same way rather than assume it
-        // cannot happen.
-        return Err(terminal_cwd_invalid());
-    };
+    let selected_root = workspace.root_canonical_path(window_label, root_id)?;
     match cwd {
-        None => Ok(first_root.clone()),
+        None => Ok(selected_root),
         Some(candidate) => {
             let canonical = std::fs::canonicalize(candidate).map_err(|_| terminal_cwd_invalid())?;
-            let authorized = roots
-                .iter()
-                .any(|(_, root)| canonical == *root || canonical.starts_with(root));
-            if authorized {
+            if canonical == selected_root || canonical.starts_with(&selected_root) {
                 Ok(canonical)
             } else {
                 Err(terminal_cwd_invalid())

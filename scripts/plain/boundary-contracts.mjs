@@ -6215,6 +6215,29 @@ export function validateTerminalRustBoundary(
 		}
 	}
 
+	const terminalServiceSource = findRustSource(
+		rustSources,
+		"src-tauri/src/terminal/service.rs",
+	);
+	const executableTerminalService =
+		terminalServiceSource === undefined
+			? undefined
+			: stripRustCommentsAndLiterals(terminalServiceSource);
+	const resolveCwd =
+		executableTerminalService === undefined
+			? undefined
+			: extractRustFunctions(executableTerminalService, "resolve_cwd")[0];
+	const expectedResolveCwdBody =
+		"letselected_root=workspace.root_canonical_path(window_label,root_id)?;matchcwd{None=>Ok(selected_root),Some(candidate)=>{letcanonical=std::fs::canonicalize(candidate).map_err(|_|terminal_cwd_invalid())?;ifcanonical==selected_root||canonical.starts_with(&selected_root){Ok(canonical)}else{Err(terminal_cwd_invalid())}}}";
+	if (
+		resolveCwd === undefined ||
+		resolveCwd.body.replaceAll(/\s+/g, "") !== expectedResolveCwdBody
+	) {
+		failures.push(
+			"terminal/service.rs resolve_cwd must resolve one explicit rootId, default to that root, and reject a cwd outside that same root without roots[0] fallback",
+		);
+	}
+
 	const shellSource = findRustSource(
 		rustSources,
 		"src-tauri/src/terminal/shell.rs",
@@ -6305,7 +6328,7 @@ const TERMINAL_COMMAND_CONTRACTS = Object.freeze([
 		parameters:
 			"window:WebviewWindow,terminal:State<'_,TerminalService>,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:TerminalStartRequest",
 		returnType: "->Result<TerminalStartResult,CommandError>",
-		body: "letquery=request.into_parts()?;letsink:Arc<dynTerminalOutputSink>=Arc::new(WindowEmitSink{app:window.app_handle().clone(),window_label:window.label().to_owned(),});letsession_id=terminal.inner().start(trust.inner(),workspace.inner(),window.label(),query.cwd,query.cols,query.rows,sink,).await?;Ok(TerminalStartResult::new(session_id))",
+		body: "letquery=request.into_parts()?;letsink:Arc<dynTerminalOutputSink>=Arc::new(WindowEmitSink{app:window.app_handle().clone(),window_label:window.label().to_owned(),});letsession_id=terminal.inner().start(trust.inner(),workspace.inner(),window.label(),query.root_id,query.cwd,query.cols,query.rows,sink,).await?;Ok(TerminalStartResult::new(session_id))",
 	},
 	{
 		file: "src-tauri/src/terminal/commands.rs",
@@ -6499,6 +6522,16 @@ export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 		return bodies.length === 1 ? compact(bodies[0].body) : undefined;
 	};
 	if (
+		structBody("TerminalStartRequest") !==
+			"root_id:RootId,cwd:Option<String>,cols:u16,rows:u16," ||
+		structBody("TerminalStartQuery") !==
+			"pub(crate)root_id:RootId,pub(crate)cwd:Option<String>,pub(crate)cols:u16,pub(crate)rows:u16,"
+	) {
+		failures.push(
+			"TerminalStartRequest/TerminalStartQuery must require the exact audited rootId/cwd/geometry fields",
+		);
+	}
+	if (
 		structBody("TerminalDataEvent") !==
 			"session_id:TerminalSessionId,sequence:u64,frame:TerminalFrame," ||
 		structBody("TerminalExitEvent") !==
@@ -6662,8 +6695,29 @@ export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 			);
 		}
 	}
+	if (
+		compact(decoderBody("frozenTerminalStartRequest")) !==
+		"returnObject.freeze({rootId:frozenRootId(rootId),cwd:frozenCwd(cwd),cols:frozenDimension(cols),rows:frozenDimension(rows),});"
+	) {
+		failures.push(
+			"terminal-codec.ts frozenTerminalStartRequest must preserve the exact rootId/cwd/geometry request shape",
+		);
+	}
 
 	const native = appSource("app/platform/tauri/native.ts");
+	if (
+		native === undefined ||
+		!compact(native).includes(
+			"terminalStart:async(rootId,cwd,cols,rows)=>{constrequest=frozenTerminalStartRequest(rootId,cwd,cols,rows);return decodeTerminalStartResult(".replaceAll(
+				" ",
+				"",
+			),
+		)
+	) {
+		failures.push(
+			"native.ts terminalStart must forward the explicit rootId through frozenTerminalStartRequest",
+		);
+	}
 	if (
 		native === undefined ||
 		[...native.matchAll(/\blisten<unknown>\(\s*TERMINAL_DATA_EVENT\b/g)]

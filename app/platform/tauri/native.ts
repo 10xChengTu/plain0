@@ -487,8 +487,8 @@ export function createNativeBridge(): PlainBridge {
 				await invoke<unknown>("theme_set_selection", { request }),
 			);
 		},
-		terminalStart: async (cwd, cols, rows) => {
-			const request = frozenTerminalStartRequest(cwd, cols, rows);
+		terminalStart: async (rootId, cwd, cols, rows) => {
+			const request = frozenTerminalStartRequest(rootId, cwd, cols, rows);
 			return decodeTerminalStartResult(
 				await invoke<unknown>("terminal_start", { request }),
 			);

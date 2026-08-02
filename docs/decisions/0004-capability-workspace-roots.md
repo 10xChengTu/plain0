@@ -28,6 +28,7 @@ Tauri `plugin-fs` 的 scope 适合限制通用前端文件 API，但其核心仍
 - symlink 可列出；只有能力解析确认仍在当前 root 内的相对链接可跟随。删除 symlink 删除链接自身，递归扫描/删除不跟随最终链接。
 - 非 UTF-8 名称不做 lossy conversion。首版返回 `PATH_ENCODING_UNSUPPORTED`，以后可增加无损 opaque entry handle。
 - 不安装或授权 Tauri 通用 fs/shell scope。目录选择只授予文件访问，与 Git、PTY、DAP 的 workspace trust 分离。
+- WebView 发起普通 PTY 时必须提交一个当前窗口仍获授权的 opaque `rootId`；`cwd` 省略时精确使用该 root，提供时也必须 canonicalize 到同一 root 内。多根不得取授权顺序首项或靠一个属于另一根的 cwd 间接改写选择；前端在恰好单根时可自动选择，多根必须明确选择，并把 root 身份冻结到新 tab/split。DAP adapter 已经通过独立确认后从 Rust 内部发起的 `runInTerminal` 不经 WebView command，保留 ADR 0003 的独立委托边界。
 
 ## Watcher 决策
 

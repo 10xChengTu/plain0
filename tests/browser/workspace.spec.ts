@@ -3007,7 +3007,22 @@ async function installNativeIpcMock(
 								throw terminalNotTrusted();
 							}
 							const startRequest = args.request as
-								{ cols?: number; rows?: number } | undefined;
+								| {
+										rootId?: string;
+										cwd?: string | null;
+										cols?: number;
+										rows?: number;
+								  }
+								| undefined;
+							if (
+								currentSnapshot.roots.length !== 1 ||
+								startRequest?.rootId !== rootId ||
+								startRequest.cwd !== null
+							) {
+								throw new Error(
+									"terminal_start must target the one authorized test root",
+								);
+							}
 							const sessionId = nextTerminalSessionId();
 							const session: FakeTerminalSession = {
 								sessionId,
@@ -4014,7 +4029,27 @@ async function installMultiRootNativeIpcMock(
 			]);
 			const activeRoots = new Map<string, MockWorkspaceRoot>();
 			const watchStates = new Map<string, WatchState>();
+			const terminalSessions = new Set<string>();
+			let terminalSessionSerial = 1;
 			let revision = 0;
+			const nextTerminalSessionId = (): string => {
+				const suffix = terminalSessionSerial.toString(16).padStart(12, "0");
+				terminalSessionSerial += 1;
+				return `00000000-0000-4000-8000-${suffix}`;
+			};
+			const terminalSessionFrom = (args: Record<string, unknown>): string => {
+				const request = args.request as { sessionId?: unknown } | undefined;
+				if (
+					typeof request?.sessionId !== "string" ||
+					!terminalSessions.has(request.sessionId)
+				) {
+					throw {
+						code: "TERMINAL_SESSION_NOT_FOUND",
+						message: "The terminal session does not exist.",
+					};
+				}
+				return request.sessionId;
+			};
 
 			const rootNotAuthorized = () => ({
 				code: "ROOT_NOT_AUTHORIZED",
@@ -4626,6 +4661,41 @@ async function installMultiRootNativeIpcMock(
 							};
 						case "workspace_trust_state":
 							return { trusted: true };
+						case "terminal_start": {
+							const request = args.request as
+								| {
+										rootId?: unknown;
+										cwd?: unknown;
+										cols?: unknown;
+										rows?: unknown;
+								  }
+								| undefined;
+							if (
+								typeof request?.rootId !== "string" ||
+								!activeRoots.has(request.rootId) ||
+								request.cwd !== null ||
+								typeof request.cols !== "number" ||
+								typeof request.rows !== "number"
+							) {
+								throw rootNotAuthorized();
+							}
+							const sessionId = nextTerminalSessionId();
+							terminalSessions.add(sessionId);
+							return { sessionId };
+						}
+						case "terminal_input_text":
+						case "terminal_input_key":
+						case "terminal_focus":
+						case "terminal_resize":
+						case "terminal_ack":
+						case "terminal_scrollback": {
+							terminalSessionFrom(args);
+							return command === "terminal_scrollback" ? { rows: [] } : null;
+						}
+						case "terminal_kill": {
+							terminalSessions.delete(terminalSessionFrom(args));
+							return null;
+						}
 						case "git_status": {
 							const selectedRootId = selectedGitRootId(args);
 							return structuredClone({
@@ -11498,6 +11568,11 @@ test("opens a trusted terminal, renders a pushed frame, and echoes typed input",
 	await expect
 		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
 		.toBe(1);
+	const [startCall] = await terminalCallsFor(page, "terminal_start");
+	expect(startCall?.args.request).toMatchObject({
+		rootId: nativeRootId,
+		cwd: null,
+	});
 
 	await pushTerminalOutput(page, "hello");
 	await expect(page.locator(".plain-terminal-grid")).toContainText("hello");
@@ -11665,7 +11740,7 @@ test("explains that a folder must be open first, for an empty workspace, and nev
 	await infoDialog.getByRole("button", { name: "OK", exact: true }).click();
 	await expect(infoDialog).toHaveCount(0);
 
-	await expect(page.locator(".plain-terminal-status")).toHaveText(
+	await expect(page.locator(".plain-terminal-empty-state")).toHaveText(
 		"Open a folder to use the terminal.",
 	);
 	expect(await terminalCallsFor(page, "workspace_trust_state")).toEqual([]);
@@ -12242,6 +12317,82 @@ test("reloading the page while multiple terminal tabs (including a split) are op
 	);
 
 	expect(pageErrors).toEqual([]);
+});
+
+test("Terminal requires an explicit root in a multi-root workspace and freezes it per tab and split", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			errors.push(message.text());
+		}
+	});
+
+	await installMultiRootNativeIpcMock(page);
+	await openNativeWorkspaceExplorer(page);
+	await executePaletteCommand(
+		page,
+		"Add Folder to Workspace",
+		"Workspaces: Add Folder to Workspace...",
+	);
+
+	await createTerminal(page);
+	const selector = page.getByRole("combobox", {
+		name: "New Terminal Working Folder",
+	});
+	await expect(selector).toBeEnabled();
+	await expect(selector).toHaveValue("");
+	await expect(page.locator(".plain-terminal-empty-state")).toHaveText(
+		"Select a working folder to create a terminal.",
+	);
+	expect(await terminalCallsFor(page, "terminal_start")).toEqual([]);
+
+	await selector.selectOption(nativeSecondaryRootId);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+	await expect(
+		page.locator(".plain-terminal-tab", {
+			hasText: "Terminal 1 · plain-library",
+		}),
+	).toHaveCount(1);
+	let starts = await terminalCallsFor(page, "terminal_start");
+	expect(starts[0]?.args.request).toMatchObject({
+		rootId: nativeSecondaryRootId,
+		cwd: null,
+	});
+
+	// Changing the selector only chooses the root for future tabs. A split
+	// remains bound to the active tab's immutable secondary-root identity.
+	await selector.selectOption(nativeRootId);
+	await page.getByRole("button", { name: "Split Terminal Right" }).click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(2);
+	starts = await terminalCallsFor(page, "terminal_start");
+	expect(starts[1]?.args.request).toMatchObject({
+		rootId: nativeSecondaryRootId,
+		cwd: null,
+	});
+
+	await page.getByRole("button", { name: "New Terminal" }).click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(3);
+	starts = await terminalCallsFor(page, "terminal_start");
+	expect(starts[2]?.args.request).toMatchObject({
+		rootId: nativeRootId,
+		cwd: null,
+	});
+	await expect(
+		page.locator(".plain-terminal-tab", {
+			hasText: "Terminal 2 · plain-workspace",
+		}),
+	).toHaveCount(1);
+
+	expect(errors).toEqual([]);
 });
 
 // --- F080 S2: SCM override introduction + PlainScmProvider ---------------

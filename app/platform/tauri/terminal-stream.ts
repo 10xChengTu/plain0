@@ -26,6 +26,7 @@ export type TerminalStreamTransport = Pick<
 >;
 
 export interface TerminalStreamStartRequest {
+	readonly rootId: string;
 	readonly cwd: string | null;
 	readonly cols: number;
 	readonly rows: number;
@@ -233,6 +234,7 @@ export async function openTerminalStream(
 
 	try {
 		const result = await transport.terminalStart(
+			request.rootId,
 			request.cwd,
 			request.cols,
 			request.rows,

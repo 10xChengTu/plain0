@@ -6859,10 +6859,13 @@ export function createBrowserMockBridge(
 		async themeSetProductIconThemeSelection(productIconThemeId) {
 			productIconThemeSelection = productIconThemeId;
 		},
-		async terminalStart(cwd, cols, rows) {
-			const request = frozenTerminalStartRequest(cwd, cols, rows);
+		async terminalStart(rootId, cwd, cols, rows) {
+			const request = frozenTerminalStartRequest(rootId, cwd, cols, rows);
 			if (roots.size === 0 || !terminalTrusted) {
 				throw terminalNotTrusted();
+			}
+			if (!roots.has(request.rootId)) {
+				throw rootNotAuthorized();
 			}
 			const session = startMockTerminalSession(request.cols, request.rows);
 			return decodeTerminalStartResult({ sessionId: session.sessionId });

@@ -172,6 +172,13 @@ function frozenSessionId(value: unknown): string {
 	return value;
 }
 
+function frozenRootId(value: unknown): string {
+	if (!isUuidV4(value)) {
+		return invalidTerminalRequest();
+	}
+	return value;
+}
+
 function frozenCwd(value: unknown): string | null {
 	if (value === null || value === undefined) {
 		return null;
@@ -228,12 +235,21 @@ function frozenImmediate(value: unknown): boolean {
  * the frozen object as-is to `invoke`) and the browser mock, so both
  * transports reject the same hostile inputs identically.
  */
+interface FrozenTerminalStartRequest {
+	readonly rootId: string;
+	readonly cwd: string | null;
+	readonly cols: number;
+	readonly rows: number;
+}
+
 export function frozenTerminalStartRequest(
+	rootId: unknown,
 	cwd: unknown,
 	cols: unknown,
 	rows: unknown,
-): Readonly<{ cwd: string | null; cols: number; rows: number }> {
+): FrozenTerminalStartRequest {
 	return Object.freeze({
+		rootId: frozenRootId(rootId),
 		cwd: frozenCwd(cwd),
 		cols: frozenDimension(cols),
 		rows: frozenDimension(rows),

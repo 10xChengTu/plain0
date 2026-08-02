@@ -68,24 +68,39 @@ function sampleFrame(): unknown {
 
 describe("terminal_start request/result codec", () => {
 	it("builds a frozen own-data request from valid inputs, defaulting a missing cwd to null", () => {
-		expect(frozenTerminalStartRequest(null, 80, 24)).toEqual({
+		expect(frozenTerminalStartRequest(VALID_ID, null, 80, 24)).toEqual({
+			rootId: VALID_ID,
 			cwd: null,
 			cols: 80,
 			rows: 24,
 		});
-		expect(frozenTerminalStartRequest(undefined, 80, 24)).toEqual({
+		expect(frozenTerminalStartRequest(VALID_ID, undefined, 80, 24)).toEqual({
+			rootId: VALID_ID,
 			cwd: null,
 			cols: 80,
 			rows: 24,
 		});
-		expect(frozenTerminalStartRequest("/tmp/project", 80, 24)).toEqual({
+		expect(
+			frozenTerminalStartRequest(VALID_ID, "/tmp/project", 80, 24),
+		).toEqual({
+			rootId: VALID_ID,
 			cwd: "/tmp/project",
 			cols: 80,
 			rows: 24,
 		});
-		expect(Object.isFrozen(frozenTerminalStartRequest(null, 80, 24))).toBe(
-			true,
-		);
+		expect(
+			Object.isFrozen(frozenTerminalStartRequest(VALID_ID, null, 80, 24)),
+		).toBe(true);
+	});
+
+	it("rejects a missing, malformed, or non-v4 root id", () => {
+		for (const rootId of [
+			undefined,
+			"not-a-root",
+			"0d3f4b0e-6f1a-3c9d-9c3a-1a2b3c4d5e6f",
+		]) {
+			expect(() => frozenTerminalStartRequest(rootId, null, 80, 24)).toThrow();
+		}
 	});
 
 	it("rejects zero, negative, non-integer, or oversized dimensions", () => {
@@ -97,13 +112,15 @@ describe("terminal_start request/result codec", () => {
 			[2_001, 24],
 			[80, 2_001],
 		] as const) {
-			expect(() => frozenTerminalStartRequest(null, cols, rows)).toThrow();
+			expect(() =>
+				frozenTerminalStartRequest(VALID_ID, null, cols, rows),
+			).toThrow();
 		}
 	});
 
 	it("rejects a non-string, empty-string cwd", () => {
-		expect(() => frozenTerminalStartRequest(123, 80, 24)).toThrow();
-		expect(() => frozenTerminalStartRequest("", 80, 24)).toThrow();
+		expect(() => frozenTerminalStartRequest(VALID_ID, 123, 80, 24)).toThrow();
+		expect(() => frozenTerminalStartRequest(VALID_ID, "", 80, 24)).toThrow();
 	});
 
 	it("decodes a well-formed start result and rejects a non-UUID or extra field", () => {

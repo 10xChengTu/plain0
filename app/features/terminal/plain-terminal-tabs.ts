@@ -44,9 +44,16 @@ export const MAX_PANES_PER_TAB = 2;
 
 export type TerminalSplitOrientation = "row" | "column";
 
+export interface TerminalRootTarget {
+	readonly rootId: string;
+	readonly label: string;
+}
+
 export interface TerminalTabSnapshot {
 	readonly id: string;
 	readonly title: string;
+	readonly rootId: string | undefined;
+	readonly rootLabel: string | undefined;
 	readonly paneIds: readonly string[];
 	readonly splitOrientation: TerminalSplitOrientation;
 }
@@ -54,6 +61,8 @@ export interface TerminalTabSnapshot {
 interface MutableTab {
 	readonly id: string;
 	readonly title: string;
+	readonly rootId: string | undefined;
+	readonly rootLabel: string | undefined;
 	paneIds: string[];
 	splitOrientation: TerminalSplitOrientation;
 }
@@ -107,8 +116,11 @@ export class TerminalTabsModel {
 	 * tab/pane ids. Tab numbering (`"Terminal N"`) is a monotonic counter,
 	 * never reused after a close — two tabs never show the same title within
 	 * one view's lifetime, even after earlier ones were closed. */
-	createTab(): TerminalTabCreated {
-		return this.#createTabWithTitle(`Terminal ${this.#nextTabNumber}`);
+	createTab(root: TerminalRootTarget): TerminalTabCreated {
+		return this.#createTabWithTitle(
+			`Terminal ${this.#nextTabNumber} · ${root.label}`,
+			root,
+		);
 	}
 
 	/**
@@ -123,16 +135,21 @@ export class TerminalTabsModel {
 	 * so a later ordinary tab can never collide with this one's id.
 	 */
 	createExternalTab(title: string): TerminalTabCreated {
-		return this.#createTabWithTitle(title);
+		return this.#createTabWithTitle(title, undefined);
 	}
 
-	#createTabWithTitle(title: string): TerminalTabCreated {
+	#createTabWithTitle(
+		title: string,
+		root: TerminalRootTarget | undefined,
+	): TerminalTabCreated {
 		const tabId = `plain-terminal-tab-${this.#nextTabNumber}`;
 		const paneId = this.#nextPaneId();
 		this.#nextTabNumber += 1;
 		this.#tabs.push({
 			id: tabId,
 			title,
+			rootId: root?.rootId,
+			rootLabel: root?.label,
 			paneIds: [paneId],
 			splitOrientation: "row",
 		});
@@ -211,6 +228,8 @@ export class TerminalTabsModel {
 		return Object.freeze({
 			id: tab.id,
 			title: tab.title,
+			rootId: tab.rootId,
+			rootLabel: tab.rootLabel,
 			paneIds: Object.freeze([...tab.paneIds]),
 			splitOrientation: tab.splitOrientation,
 		});

@@ -87,6 +87,12 @@ body[data-plain-ready="error"] #plain-bootstrap-status {
 	font-size: 0.8rem;
 }
 
+.plain-terminal-root-select {
+	flex: 0 1 11rem;
+	min-width: 6rem;
+	max-width: 11rem;
+}
+
 .plain-terminal-tab-close,
 .plain-terminal-tab-new,
 .plain-terminal-split-button {

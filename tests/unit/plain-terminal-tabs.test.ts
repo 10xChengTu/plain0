@@ -5,6 +5,11 @@ import {
 	TerminalTabsModel,
 } from "../../app/features/terminal/plain-terminal-tabs";
 
+const ROOT = Object.freeze({
+	rootId: "11111111-1111-4111-8111-111111111111",
+	label: "alpha",
+});
+
 describe("TerminalTabsModel", () => {
 	it("starts with no tabs and no active tab", () => {
 		const model = new TerminalTabsModel();
@@ -16,11 +21,13 @@ describe("TerminalTabsModel", () => {
 	it("creates a single-pane tab, numbered from 1, and makes it active", () => {
 		const model = new TerminalTabsModel();
 
-		const created = model.createTab();
+		const created = model.createTab(ROOT);
 
 		expect(model.activeTabId).toBe(created.tabId);
 		const tab = model.getTab(created.tabId);
-		expect(tab?.title).toBe("Terminal 1");
+		expect(tab?.title).toBe("Terminal 1 · alpha");
+		expect(tab?.rootId).toBe(ROOT.rootId);
+		expect(tab?.rootLabel).toBe(ROOT.label);
 		expect(tab?.paneIds).toEqual([created.paneId]);
 		expect(tab?.splitOrientation).toBe("row");
 	});
@@ -28,28 +35,38 @@ describe("TerminalTabsModel", () => {
 	it("gives every new tab a distinct, monotonically numbered title", () => {
 		const model = new TerminalTabsModel();
 
-		const first = model.createTab();
-		const second = model.createTab();
+		const first = model.createTab(ROOT);
+		const second = model.createTab(ROOT);
 
-		expect(model.getTab(first.tabId)?.title).toBe("Terminal 1");
-		expect(model.getTab(second.tabId)?.title).toBe("Terminal 2");
+		expect(model.getTab(first.tabId)?.title).toBe("Terminal 1 · alpha");
+		expect(model.getTab(second.tabId)?.title).toBe("Terminal 2 · alpha");
+	});
+
+	it("keeps an adopted external session rootless instead of inventing a workspace owner", () => {
+		const model = new TerminalTabsModel();
+		const created = model.createExternalTab("Debuggee");
+		const tab = model.getTab(created.tabId);
+
+		expect(tab?.title).toBe("Debuggee");
+		expect(tab?.rootId).toBeUndefined();
+		expect(tab?.rootLabel).toBeUndefined();
 	});
 
 	it("never reuses a tab number after it is closed", () => {
 		const model = new TerminalTabsModel();
-		const first = model.createTab();
+		const first = model.createTab(ROOT);
 		model.closeTab(first.tabId);
 
-		const third = model.createTab();
+		const third = model.createTab(ROOT);
 
-		expect(model.getTab(third.tabId)?.title).toBe("Terminal 2");
+		expect(model.getTab(third.tabId)?.title).toBe("Terminal 2 · alpha");
 	});
 
 	it("creating a new tab makes it active, leaving the previous tab intact", () => {
 		const model = new TerminalTabsModel();
-		const first = model.createTab();
+		const first = model.createTab(ROOT);
 
-		const second = model.createTab();
+		const second = model.createTab(ROOT);
 
 		expect(model.activeTabId).toBe(second.tabId);
 		expect(model.getTab(first.tabId)).not.toBeUndefined();
@@ -57,8 +74,8 @@ describe("TerminalTabsModel", () => {
 
 	it("switchTab activates an existing tab and returns true", () => {
 		const model = new TerminalTabsModel();
-		const first = model.createTab();
-		model.createTab();
+		const first = model.createTab(ROOT);
+		model.createTab(ROOT);
 
 		const switched = model.switchTab(first.tabId);
 
@@ -68,7 +85,7 @@ describe("TerminalTabsModel", () => {
 
 	it("switchTab is a no-op returning false for an unknown tab id", () => {
 		const model = new TerminalTabsModel();
-		const first = model.createTab();
+		const first = model.createTab(ROOT);
 
 		const switched = model.switchTab("does-not-exist");
 
@@ -78,7 +95,7 @@ describe("TerminalTabsModel", () => {
 
 	it("closeTab returns every pane id the closed tab held, and the tab list no longer contains it", () => {
 		const model = new TerminalTabsModel();
-		const tab = model.createTab();
+		const tab = model.createTab(ROOT);
 		const paneId = model.splitTab(tab.tabId, "row");
 
 		const closed = model.closeTab(tab.tabId);
@@ -89,15 +106,15 @@ describe("TerminalTabsModel", () => {
 
 	it("closeTab is a no-op returning undefined for an unknown tab id", () => {
 		const model = new TerminalTabsModel();
-		model.createTab();
+		model.createTab(ROOT);
 
 		expect(model.closeTab("does-not-exist")).toBeUndefined();
 	});
 
 	it("closing the active tab activates its now-previous neighbor", () => {
 		const model = new TerminalTabsModel();
-		const first = model.createTab();
-		const second = model.createTab();
+		const first = model.createTab(ROOT);
+		const second = model.createTab(ROOT);
 		expect(model.activeTabId).toBe(second.tabId);
 
 		const closed = model.closeTab(second.tabId);
@@ -108,8 +125,8 @@ describe("TerminalTabsModel", () => {
 
 	it("closing a non-active tab leaves the active tab unchanged", () => {
 		const model = new TerminalTabsModel();
-		const first = model.createTab();
-		const second = model.createTab();
+		const first = model.createTab(ROOT);
+		const second = model.createTab(ROOT);
 		expect(model.activeTabId).toBe(second.tabId);
 
 		const closed = model.closeTab(first.tabId);
@@ -120,7 +137,7 @@ describe("TerminalTabsModel", () => {
 
 	it("closing the last remaining tab leaves no active tab", () => {
 		const model = new TerminalTabsModel();
-		const only = model.createTab();
+		const only = model.createTab(ROOT);
 
 		const closed = model.closeTab(only.tabId);
 
@@ -131,9 +148,9 @@ describe("TerminalTabsModel", () => {
 
 	it("closing the active middle tab activates the tab that slides into its place (the next one)", () => {
 		const model = new TerminalTabsModel();
-		model.createTab();
-		const second = model.createTab();
-		const third = model.createTab();
+		model.createTab(ROOT);
+		const second = model.createTab(ROOT);
+		const third = model.createTab(ROOT);
 		model.switchTab(second.tabId);
 
 		const closed = model.closeTab(second.tabId);
@@ -147,7 +164,7 @@ describe("TerminalTabsModel", () => {
 
 	it("splitTab adds a second pane along the given orientation and returns its id", () => {
 		const model = new TerminalTabsModel();
-		const tab = model.createTab();
+		const tab = model.createTab(ROOT);
 
 		const paneId = model.splitTab(tab.tabId, "column");
 
@@ -159,7 +176,7 @@ describe("TerminalTabsModel", () => {
 
 	it(`splitTab refuses a third pane once a tab already has ${MAX_PANES_PER_TAB}`, () => {
 		const model = new TerminalTabsModel();
-		const tab = model.createTab();
+		const tab = model.createTab(ROOT);
 		model.splitTab(tab.tabId, "row");
 
 		const third = model.splitTab(tab.tabId, "row");
@@ -176,7 +193,7 @@ describe("TerminalTabsModel", () => {
 
 	it("tabIdForPane finds the owning tab for any of its panes", () => {
 		const model = new TerminalTabsModel();
-		const tab = model.createTab();
+		const tab = model.createTab(ROOT);
 		const secondPaneId = model.splitTab(tab.tabId, "row");
 
 		expect(model.tabIdForPane(tab.paneId)).toBe(tab.tabId);
@@ -186,8 +203,8 @@ describe("TerminalTabsModel", () => {
 
 	it("every pane id, across every tab, is unique", () => {
 		const model = new TerminalTabsModel();
-		const first = model.createTab();
-		const second = model.createTab();
+		const first = model.createTab(ROOT);
+		const second = model.createTab(ROOT);
 		const splitPaneId = model.splitTab(first.tabId, "row");
 
 		const allPaneIds = [first.paneId, second.paneId, splitPaneId];
@@ -196,7 +213,7 @@ describe("TerminalTabsModel", () => {
 
 	it("tabs snapshots are independent from later mutation (no shared mutable arrays leak out)", () => {
 		const model = new TerminalTabsModel();
-		const tab = model.createTab();
+		const tab = model.createTab(ROOT);
 		const snapshotBeforeSplit = model.getTab(tab.tabId);
 
 		model.splitTab(tab.tabId, "row");

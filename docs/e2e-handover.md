@@ -476,6 +476,18 @@ fixture（仓库内 `tmp-` 前缀临时目录中创建，测试后删除）：
 
 fixture 与清理：在 `/private/tmp` 下创建两个一次性仓库，primary/secondary 各一条基线提交后分别修改一个文件；测试未创建远端、凭证或网络连接。Plain 经 `Cmd+Q` 正常退出且 Computer Use 确认 `isRunning: false`；fixture、`dist`、`test-results` 与 `src-tauri/target` 在提交前全部删除。
 
+### E2E-016 · F150 S2 多根终端选择、标签与分屏 root 冻结真实桌面矩阵
+
+状态：**已完成（2026-08-02）**。从本次工作树构建当前 debug `Plain.app`；首次构建的 Rust/前端编译成功，但本机 Anaconda `xattr` 抢占系统工具导致 bundle 步骤失败，随后严格按 `docs/testing.md` 让 `/usr/bin/xattr` 优先并使用本地 ad-hoc identity `-` 重跑，成功产出并只按绝对路径启动 `src-tauri/target/debug/bundle/macos/Plain.app`。两个空的真实 APFS 临时目录经 macOS 系统选择器分别授权，Explorer 同时显示 `plain-f150-terminal-e2e-primary` 与 `plain-f150-terminal-e2e-secondary`。
+
+多根显式选择：第一次执行 `Plain: Create Terminal` 后，Terminal 面板只显示 `Select a working folder to create a terminal.`，根选择器保持 `New terminal in…`，没有 tab、trust 对话框或 shell spawn。选择 secondary 后才出现 trust 对话框；在这两个本轮自建空目录上执行 `Trust & Continue` 后，tab 标题为 `Terminal 1 · plain-f150-terminal-e2e-secondary`，真实 shell 的 `pwd` 输出精确为 `/private/tmp/plain-f150-terminal-e2e-secondary`，并输出 `SECONDARY_ROOT_OK`。
+
+会话 root 冻结：把“未来新终端”的选择器切到 primary 后，对活动 secondary tab 执行 `Split Terminal Right`；新 split 的初始提示和随后独立执行的 `pwd` 仍都精确位于 secondary，证明 split 继承 tab 创建时 root，没有被当前 selector 重定向。随后点击 `New Terminal`，新 tab 标题为 `Terminal 2 · plain-f150-terminal-e2e-primary`，其真实 `pwd` 输出精确为 `/private/tmp/plain-f150-terminal-e2e-primary`，并输出 `PRIMARY_ROOT_OK`。切回第一个 tab 后，两块 secondary pane 的既有输出仍各自保留，tab 与 pane 状态没有串到 primary。
+
+生命周期交叉核对：在活动 secondary 双分屏 tab 上执行 `Plain: Kill Terminal` 后，UI 只保留 primary tab 及其输出；`ps` 的真实进程树只剩 Plain PID `6203` 与一个子 `/bin/zsh` PID `8345`。随后 `Cmd+Q`，再次 `ps` 对应用路径及这两个 PID 均返回 `NO_MATCHES`，没有遗留 shell。Browser 对照矩阵覆盖空工作区说明、trust、输入/IME、resize、高吞吐、tab/split/scrollback/reload、DAP `runInTerminal` 与新增多根 root 冻结场景，最终 17/17 通过；完整自动化计数见 `progress.md`。
+
+fixture 与清理：`/private/tmp/plain-f150-terminal-e2e-primary` 与 `/private/tmp/plain-f150-terminal-e2e-secondary` 均为空目录；测试未访问网络、凭证或用户文件，提交前删除 fixture、`dist`、`test-results` 与 `src-tauri/target`。
+
 ## 后续条目（随切片追加）
 
 - F030 遗留：真实 `CloseRequested` 关窗握手协议实现后，补「正常关窗 → 重开恢复」的桌面验收变体。
@@ -486,3 +498,4 @@ fixture 与清理：在 `/private/tmp` 下创建两个一次性仓库，primary/
 - F130 浏览器与原生端到端验收（本项目最后一个 feature，已完成并转 complete）：已清点 E2E-001 至 E2E-012 共 12 条待执行条目、按十条产品需求交叉索引并给出建议执行顺序，登记为 E2E-013；F130 自身未执行这 12 条中的任何一条，全部维持「待执行」状态，交由用户后续按需交接人工或 Codex。
 - F140 多根同名搜索结果、打开与安全替换真实桌面矩阵 E2E-014 已完成并回写 F140 evidence。
 - F150 S1 多根 Git 显式选择、写入隔离、Graph/Worktree/History 路由真实桌面矩阵 E2E-015 已完成；F150 继续进入 Terminal 与 Debug routing，整个 feature 完成后再统一回写 `features.json` evidence。
+- F150 S2 多根终端显式选择、tab/split root 冻结与进程清理真实桌面矩阵 E2E-016 已完成；F150 下一步只进入 Debug routing，整个 feature 完成后再统一回写 `features.json` evidence。

@@ -17,11 +17,21 @@ import {
 import { IViewDescriptorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/common/views.service";
 
 import type { PlainBridge } from "../../platform/tauri/contracts";
+import {
+	PlainWorkspaceRootSelection,
+	plainWorkspaceRootsFromFolders,
+	type PlainWorkspaceRoot,
+} from "../workspace/plain-workspace-roots";
 import { TerminalPaneController } from "./plain-terminal-pane";
 import {
 	type TerminalSplitOrientation,
 	TerminalTabsModel,
 } from "./plain-terminal-tabs";
+import {
+	TERMINAL_TRUST_EMPTY_WORKSPACE_DETAIL,
+	TERMINAL_TRUST_EMPTY_WORKSPACE_MESSAGE,
+	TERMINAL_TRUST_EMPTY_WORKSPACE_STATUS_MESSAGE,
+} from "./plain-terminal-trust";
 
 /**
  * Plain's own, hand-written terminal view pane. Originally (F070 "WebView
@@ -83,6 +93,7 @@ export class PlainTerminalView extends ViewPane {
 	static readonly ID = "plain.workbench.view.terminal";
 
 	readonly #tabsModel = new TerminalTabsModel();
+	readonly #rootSelection = new PlainWorkspaceRootSelection();
 	readonly #panes = new Map<string, TerminalPaneController>();
 	readonly #paneElements = new Map<string, HTMLElement>();
 	readonly #tabRecords = new Map<
@@ -91,8 +102,10 @@ export class PlainTerminalView extends ViewPane {
 	>();
 
 	#tabListElement: HTMLElement | undefined;
+	#rootSelectorElement: HTMLSelectElement | undefined;
 	#paneAreaElement: HTMLElement | undefined;
 	#emptyStateElement: HTMLElement | undefined;
+	#pendingNewTab = false;
 
 	constructor(
 		options: IViewPaneOptions,
@@ -133,6 +146,26 @@ export class PlainTerminalView extends ViewPane {
 		const tabList = document.createElement("div");
 		tabList.className = "plain-terminal-tablist";
 		tabStrip.append(tabList);
+
+		const rootSelector = document.createElement("select");
+		rootSelector.className = "plain-terminal-root-select";
+		rootSelector.setAttribute("aria-label", "New Terminal Working Folder");
+		this.#rootSelectorElement = rootSelector;
+		this._register(
+			addDisposableListener(rootSelector, "change", () => {
+				const roots = this.#workspaceRoots();
+				if (
+					!this.#rootSelection.select(rootSelector.value || undefined, roots)
+				) {
+					return;
+				}
+				this.#renderRootSelector();
+				if (this.#pendingNewTab) {
+					this.openNewTab();
+				}
+			}),
+		);
+		tabStrip.append(rootSelector);
 
 		const newTabButton = document.createElement("button");
 		newTabButton.type = "button";
@@ -194,6 +227,7 @@ export class PlainTerminalView extends ViewPane {
 			}),
 		);
 
+		this.#renderRootSelector();
 		this.#syncTabVisibility();
 	}
 
@@ -225,9 +259,31 @@ export class PlainTerminalView extends ViewPane {
 	 * Terminal` calls this every time it runs (after revealing/opening this
 	 * view) — see `plain-terminal-commands.ts`. */
 	openNewTab(): void {
-		const { tabId, paneId } = this.#tabsModel.createTab();
+		const roots = this.#workspaceRoots();
+		const root = this.#rootSelection.resolve(roots);
+		this.#renderRootSelector();
+		if (root === undefined) {
+			this.#pendingNewTab = roots.length > 1;
+			if (this.#emptyStateElement !== undefined) {
+				this.#emptyStateElement.textContent =
+					roots.length === 0
+						? TERMINAL_TRUST_EMPTY_WORKSPACE_STATUS_MESSAGE
+						: "Select a working folder to create a terminal.";
+			}
+			if (roots.length === 0) {
+				void this.dialogService.info(
+					TERMINAL_TRUST_EMPTY_WORKSPACE_MESSAGE,
+					TERMINAL_TRUST_EMPTY_WORKSPACE_DETAIL,
+				);
+				return;
+			}
+			this.#rootSelectorElement?.focus();
+			return;
+		}
+		this.#pendingNewTab = false;
+		const { tabId, paneId } = this.#tabsModel.createTab(root);
 		this.#createTabRecord(tabId);
-		this.#createPane(paneId, tabId);
+		this.#createPane(paneId, tabId, undefined, root.rootId);
 		this.#activateTab(tabId);
 	}
 
@@ -270,11 +326,19 @@ export class PlainTerminalView extends ViewPane {
 		if (activeTabId === undefined) {
 			return;
 		}
+		const tab = this.#tabsModel.getTab(activeTabId);
+		const rootId =
+			tab?.rootId ??
+			this.#rootSelection.resolve(this.#workspaceRoots())?.rootId;
+		if (rootId === undefined) {
+			this.#rootSelectorElement?.focus();
+			return;
+		}
 		const paneId = this.#tabsModel.splitTab(activeTabId, orientation);
 		if (paneId === undefined) {
 			return;
 		}
-		this.#createPane(paneId, activeTabId);
+		this.#createPane(paneId, activeTabId, undefined, rootId);
 		const record = this.#tabRecords.get(activeTabId);
 		if (record !== undefined) {
 			record.paneContainer.dataset.split = orientation;
@@ -329,7 +393,12 @@ export class PlainTerminalView extends ViewPane {
 		this.#tabRecords.set(tabId, { tabButton, paneContainer });
 	}
 
-	#createPane(paneId: string, tabId: string, existingSessionId?: string): void {
+	#createPane(
+		paneId: string,
+		tabId: string,
+		existingSessionId?: string,
+		rootId?: string,
+	): void {
 		const record = this.#tabRecords.get(tabId);
 		if (record === undefined) {
 			return;
@@ -340,15 +409,57 @@ export class PlainTerminalView extends ViewPane {
 		this.#paneElements.set(paneId, paneElement);
 
 		const bridge = requireTerminalBridge();
-		const controller = new TerminalPaneController({
+		const options = {
 			container: paneElement,
 			bridge,
 			dialogService: this.dialogService,
 			isEmptyWorkspace: () =>
 				this.workspaceContextService.getWorkspace().folders.length === 0,
-			existingSessionId,
-		});
+		};
+		let controller: TerminalPaneController;
+		if (existingSessionId === undefined) {
+			if (rootId === undefined) {
+				throw new Error("A new terminal pane requires an authorized root.");
+			}
+			controller = new TerminalPaneController({ ...options, rootId });
+		} else {
+			controller = new TerminalPaneController({
+				...options,
+				existingSessionId,
+			});
+		}
 		this.#panes.set(paneId, controller);
+	}
+
+	#workspaceRoots(): readonly PlainWorkspaceRoot[] {
+		return plainWorkspaceRootsFromFolders(
+			this.workspaceContextService.getWorkspace().folders,
+		);
+	}
+
+	#renderRootSelector(): void {
+		const selector = this.#rootSelectorElement;
+		if (selector === undefined) {
+			return;
+		}
+		const roots = this.#workspaceRoots();
+		const selected = this.#rootSelection.resolve(roots);
+		const options: HTMLOptionElement[] = [];
+		if (roots.length !== 1) {
+			const placeholder = document.createElement("option");
+			placeholder.value = "";
+			placeholder.textContent = "New terminal in…";
+			options.push(placeholder);
+		}
+		for (const root of roots) {
+			const option = document.createElement("option");
+			option.value = root.rootId;
+			option.textContent = root.label;
+			options.push(option);
+		}
+		selector.replaceChildren(...options);
+		selector.value = selected?.rootId ?? "";
+		selector.disabled = roots.length < 2;
 	}
 
 	#activateTab(tabId: string): void {

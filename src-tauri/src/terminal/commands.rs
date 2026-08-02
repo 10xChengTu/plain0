@@ -92,6 +92,7 @@ pub(crate) async fn terminal_start(
             trust.inner(),
             workspace.inner(),
             window.label(),
+            query.root_id,
             query.cwd,
             query.cols,
             query.rows,

@@ -22,6 +22,9 @@ use crate::trust::service::TrustService;
 use crate::workspace::dto::WorkspacePickRootsMode;
 use crate::workspace::picker::{DirectoryPicker, DirectoryPickerFuture, DirectoryPickerResult};
 use crate::workspace::service::WorkspaceService;
+use crate::workspace::RootId;
+
+const VALID_ROOT_ID: &str = "0d3f4b0e-6f1a-4c9d-9c3a-1a2b3c4d5e6f";
 
 fn block_on<F: Future>(future: F) -> F::Output {
     tauri::async_runtime::block_on(future)
@@ -64,6 +67,14 @@ fn trusted_workspace(
     let trust = TrustService::new(trust_base.to_path_buf());
     block_on(trust.grant(&workspace, window_label)).expect("grant succeeds");
     (workspace, trust)
+}
+
+fn root_id_at(workspace: &WorkspaceService, window_label: &str, index: usize) -> RootId {
+    workspace.snapshot(window_label).unwrap().roots()[index].root_id()
+}
+
+fn arbitrary_root_id() -> RootId {
+    RootId::parse_v4_wire(VALID_ROOT_ID).unwrap()
 }
 
 /// Records every `(sequence, frame)` this session's vt thread emitted, plus
@@ -217,6 +228,7 @@ fn start_test_session(
         trust,
         workspace,
         window_label,
+        root_id_at(workspace, window_label, 0),
         None,
         80,
         24,
@@ -736,6 +748,7 @@ fn session_limit_is_enforced_and_independent_per_window() {
         &trust,
         &workspace,
         "main",
+        root_id_at(&workspace, "main", 0),
         None,
         80,
         24,
@@ -799,6 +812,7 @@ fn an_untrusted_workspace_rejects_start() {
         &trust,
         &workspace,
         "main",
+        root_id_at(&workspace, "main", 0),
         None,
         80,
         24,
@@ -819,6 +833,7 @@ fn the_empty_workspace_rejects_start() {
         &trust,
         &workspace,
         "main",
+        arbitrary_root_id(),
         None,
         80,
         24,
@@ -829,24 +844,39 @@ fn the_empty_workspace_rejects_start() {
 }
 
 #[test]
-fn cwd_defaults_to_the_first_authorized_root() {
-    let root = TempDir::new().unwrap();
+fn cwd_defaults_to_the_explicitly_selected_authorized_root() {
+    let first_root = TempDir::new().unwrap();
+    let selected_root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
-    let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
+    let workspace = WorkspaceService::new();
+    block_on(workspace.pick_roots(
+        "main",
+        FakePicker::selected(vec![
+            first_root.path().to_path_buf(),
+            selected_root.path().to_path_buf(),
+        ]),
+        WorkspacePickRootsMode::Add,
+    ))
+    .unwrap();
+    let trust = TrustService::new(trust_base.path().to_path_buf());
+    block_on(trust.grant(&workspace, "main")).unwrap();
     let terminal = TerminalService::new();
     let sink = RecordingSink::new();
 
-    let session_id = start_test_session(
-        &terminal,
+    let session_id = block_on(terminal.start_with_command_for_test(
         &trust,
         &workspace,
         "main",
+        root_id_at(&workspace, "main", 1),
+        None,
+        80,
+        24,
         sh_c("pwd"),
-        Arc::clone(&sink),
-    );
-    let _ = session_id;
+        sink.clone(),
+    ))
+    .unwrap();
 
-    let expected = std::fs::canonicalize(root.path()).unwrap();
+    let expected = std::fs::canonicalize(selected_root.path()).unwrap();
     assert!(
         wait_for_rendered_text(
             &terminal,
@@ -859,6 +889,70 @@ fn cwd_defaults_to_the_first_authorized_root() {
         "got {:?}",
         sink.rendered_screen_text()
     );
+    block_on(terminal.kill("main", session_id, true)).unwrap();
+}
+
+#[test]
+fn cwd_in_another_authorized_root_is_rejected_for_the_selected_root() {
+    let selected_root = TempDir::new().unwrap();
+    let other_root = TempDir::new().unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let workspace = WorkspaceService::new();
+    block_on(workspace.pick_roots(
+        "main",
+        FakePicker::selected(vec![
+            selected_root.path().to_path_buf(),
+            other_root.path().to_path_buf(),
+        ]),
+        WorkspacePickRootsMode::Add,
+    ))
+    .unwrap();
+    let trust = TrustService::new(trust_base.path().to_path_buf());
+    block_on(trust.grant(&workspace, "main")).unwrap();
+    let terminal = TerminalService::new();
+
+    let result = block_on(terminal.start_with_command_for_test(
+        &trust,
+        &workspace,
+        "main",
+        root_id_at(&workspace, "main", 0),
+        Some(other_root.path().to_string_lossy().into_owned()),
+        80,
+        24,
+        CommandBuilder::new("cat"),
+        RecordingSink::new(),
+    ));
+    assert_eq!(result.unwrap_err().code(), "TERMINAL_CWD_INVALID");
+}
+
+#[test]
+fn a_foreign_window_root_id_is_rejected_before_spawn() {
+    let root = TempDir::new().unwrap();
+    let foreign_root = TempDir::new().unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let workspace = workspace_with_root("main", root.path());
+    block_on(workspace.pick_roots(
+        "other",
+        FakePicker::selected(vec![foreign_root.path().to_path_buf()]),
+        WorkspacePickRootsMode::Add,
+    ))
+    .unwrap();
+    let trust = TrustService::new(trust_base.path().to_path_buf());
+    block_on(trust.grant(&workspace, "main")).unwrap();
+    let terminal = TerminalService::new();
+
+    let result = block_on(terminal.start_with_command_for_test(
+        &trust,
+        &workspace,
+        "main",
+        root_id_at(&workspace, "other", 0),
+        None,
+        80,
+        24,
+        CommandBuilder::new("cat"),
+        RecordingSink::new(),
+    ));
+    assert_eq!(result.unwrap_err().code(), "ROOT_NOT_AUTHORIZED");
 }
 
 #[test]
@@ -873,6 +967,7 @@ fn a_cwd_outside_every_authorized_root_is_rejected() {
         &trust,
         &workspace,
         "main",
+        root_id_at(&workspace, "main", 0),
         Some(outside.path().to_string_lossy().into_owned()),
         80,
         24,

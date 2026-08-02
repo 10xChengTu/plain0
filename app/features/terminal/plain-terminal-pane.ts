@@ -103,7 +103,7 @@ const TERMINAL_SCROLLBACK_DISCOVERY_LIMIT = 10_000;
  * section for why this is a fixed step rather than `deltaY`-proportional. */
 const TERMINAL_SCROLL_WHEEL_LINES = 3;
 
-export interface TerminalPaneOptions {
+interface TerminalPaneBaseOptions {
 	/** The `.plain-terminal-pane` wrapper this controller mounts its status/
 	 * surface/input elements into — owned and sized by `PlainTerminalView`,
 	 * never created by this class itself. */
@@ -113,26 +113,43 @@ export interface TerminalPaneOptions {
 	/** Read fresh at session-start time (not cached at construction) — the
 	 * same timing the prior single-session `PlainTerminalView` used. */
 	readonly isEmptyWorkspace: () => boolean;
-	/** `F100` S4: when set, this pane **attaches** to an already-existing
-	 * `TerminalService` session (created by Rust's own `runInTerminal`
-	 * reverse-request handling,
-	 * `debug::commands::handle_run_in_terminal_reverse_request`) via
-	 * `attachTerminalStream` instead of starting a brand new one via
-	 * `openTerminalStream`/`terminalStart` — see
-	 * `plain-debug-terminal-integration.ts`'s own doc comment for the full
-	 * flow from DAP reverse request to this option being set. Trust is still
-	 * resolved first, exactly like an ordinary pane (an already-live session
-	 * implies the workspace already passed a stricter debug-adapter trust
-	 * gate, but this pane's own empty-workspace/declined status text is
-	 * reused unconditionally for UI consistency across every pane kind). */
-	readonly existingSessionId?: string;
 }
+
+/** An ordinary pane owns one immutable workspace root; an externally
+ * created DAP `runInTerminal` session already owns its native cwd and only
+ * supplies the existing session id. Keeping the two shapes disjoint makes it
+ * impossible for a later selector change to retarget an already-created
+ * shell. */
+export type TerminalPaneOptions = TerminalPaneBaseOptions &
+	(
+		| {
+				readonly rootId: string;
+				readonly existingSessionId?: undefined;
+		  }
+		| {
+				readonly rootId?: undefined;
+				/** `F100` S4: when set, this pane **attaches** to an already-existing
+				 * `TerminalService` session (created by Rust's own `runInTerminal`
+				 * reverse-request handling,
+				 * `debug::commands::handle_run_in_terminal_reverse_request`) via
+				 * `attachTerminalStream` instead of starting a brand new one via
+				 * `openTerminalStream`/`terminalStart` — see
+				 * `plain-debug-terminal-integration.ts`'s own doc comment for the full
+				 * flow from DAP reverse request to this option being set. Trust is still
+				 * resolved first, exactly like an ordinary pane (an already-live session
+				 * implies the workspace already passed a stricter debug-adapter trust
+				 * gate, but this pane's own empty-workspace/declined status text is
+				 * reused unconditionally for UI consistency across every pane kind). */
+				readonly existingSessionId: string;
+		  }
+	);
 
 export class TerminalPaneController {
 	readonly #container: HTMLElement;
 	readonly #bridge: PlainBridge;
 	readonly #dialogService: TerminalTrustDialogService;
 	readonly #isEmptyWorkspace: () => boolean;
+	readonly #rootId: string | undefined;
 	readonly #existingSessionId: string | undefined;
 	readonly #abort = new AbortController();
 	readonly #ime = new TerminalImeController();
@@ -164,6 +181,7 @@ export class TerminalPaneController {
 		this.#bridge = options.bridge;
 		this.#dialogService = options.dialogService;
 		this.#isEmptyWorkspace = options.isEmptyWorkspace;
+		this.#rootId = options.rootId;
 		this.#existingSessionId = options.existingSessionId;
 		this.#container.classList.add("plain-terminal-pane");
 
@@ -295,18 +313,23 @@ export class TerminalPaneController {
 
 		let stream: TerminalStream;
 		try {
-			stream =
-				this.#existingSessionId !== undefined
-					? await attachTerminalStream(
-							this.#bridge,
-							this.#existingSessionId,
-							handlers,
-						)
-					: await openTerminalStream(
-							this.#bridge,
-							{ cwd: null, cols, rows },
-							handlers,
-						);
+			const rootId = this.#rootId;
+			if (this.#existingSessionId !== undefined) {
+				stream = await attachTerminalStream(
+					this.#bridge,
+					this.#existingSessionId,
+					handlers,
+				);
+			} else {
+				if (rootId === undefined) {
+					throw new Error("Select a workspace folder for this terminal.");
+				}
+				stream = await openTerminalStream(
+					this.#bridge,
+					{ rootId, cwd: null, cols, rows },
+					handlers,
+				);
+			}
 		} catch (error) {
 			if (generation !== this.#generation) {
 				return;

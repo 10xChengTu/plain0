@@ -249,7 +249,7 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/excluded-surfaces.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/contributions",
 	"app/excluded-surfaces.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/views",
 	"app/features/scm/git-uri.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
-	"app/features/scm/plain-git-root.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
+	"app/features/workspace/plain-workspace-roots.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
 	"app/features/scm/hunk-stage.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/diff/linesDiffComputers",
 	"app/features/scm/plain-git-blame-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
 	"app/features/scm/plain-git-blame-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/editor/browser/services/codeEditorService.service",

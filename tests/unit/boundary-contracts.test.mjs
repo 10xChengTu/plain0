@@ -8822,6 +8822,21 @@ fn spawn_via_command_builder() {
     let mut command = portable_pty::CommandBuilder::new("test-fixture-program");
     command.args(["--flag", "value"]);
 }
+
+fn resolve_cwd(workspace: &WorkspaceService, window_label: &str, root_id: RootId, cwd: Option<String>) -> Result<PathBuf, CommandError> {
+    let selected_root = workspace.root_canonical_path(window_label, root_id)?;
+    match cwd {
+        None => Ok(selected_root),
+        Some(candidate) => {
+            let canonical = std::fs::canonicalize(candidate).map_err(|_| terminal_cwd_invalid())?;
+            if canonical == selected_root || canonical.starts_with(&selected_root) {
+                Ok(canonical)
+            } else {
+                Err(terminal_cwd_invalid())
+            }
+        }
+    }
+}
 `;
 	const terminalShellSource = `
 pub(crate) const TERMINAL_ENV_PASSTHROUGH_NAMES: &[&str] =
@@ -8868,6 +8883,28 @@ pub(crate) const TERMINAL_VT_MAX_SCROLLBACK_LINES: usize = 10_000;
 				exactLibghosttyVtDependency,
 			]),
 		).toEqual([]);
+	});
+
+	it("rejects restoring the implicit first-root terminal cwd fallback", () => {
+		const hostile = baselineTerminalRustSources.map((entry) =>
+			entry.relativePath === "src-tauri/src/terminal/service.rs"
+				? {
+						...entry,
+						source: entry.source.replace(
+							"None => Ok(selected_root)",
+							"None => Ok(workspace.root_canonical_paths(window_label)?.first().unwrap().1.clone())",
+						),
+					}
+				: entry,
+		);
+		expect(
+			validateTerminalRustBoundary(hostile, terminalCargo, [
+				exactPortablePtyDependency,
+				exactLibghosttyVtDependency,
+			]),
+		).toContain(
+			"terminal/service.rs resolve_cwd must resolve one explicit rootId, default to that root, and reject a cwd outside that same root without roots[0] fallback",
+		);
 	});
 
 	it("requires the exact portable-pty =0.9.0 pin in Cargo.toml and metadata", () => {
@@ -9230,7 +9267,7 @@ libghostty-vt = "=0.2.1"
 		{
 			relativePath: "src-tauri/src/terminal/service.rs",
 			source:
-				'const TERMINAL_CHUNK_QUEUE_CAPACITY: usize = 256;\nconst TERMINAL_READ_BUFFER_BYTES: usize = 8192;\n\nfn spawn_via_command_builder() {\n    let mut command = portable_pty::CommandBuilder::new("test-fixture-program");\n    command.args(["--flag", "value"]);\n}\n',
+				'const TERMINAL_CHUNK_QUEUE_CAPACITY: usize = 256;\nconst TERMINAL_READ_BUFFER_BYTES: usize = 8192;\n\nfn spawn_via_command_builder() {\n    let mut command = portable_pty::CommandBuilder::new("test-fixture-program");\n    command.args(["--flag", "value"]);\n}\n\nfn resolve_cwd(workspace: &WorkspaceService, window_label: &str, root_id: RootId, cwd: Option<String>) -> Result<PathBuf, CommandError> {\n    let selected_root = workspace.root_canonical_path(window_label, root_id)?;\n    match cwd {\n        None => Ok(selected_root),\n        Some(candidate) => {\n            let canonical = std::fs::canonicalize(candidate).map_err(|_| terminal_cwd_invalid())?;\n            if canonical == selected_root || canonical.starts_with(&selected_root) {\n                Ok(canonical)\n            } else {\n                Err(terminal_cwd_invalid())\n            }\n        }\n    }\n}\n',
 		},
 		{
 			relativePath: "src-tauri/src/terminal/shell.rs",
@@ -9561,6 +9598,47 @@ describe("Plain F070 S2 terminal IPC bridge Harness", () => {
 				baselineBridgeAppSources,
 			),
 		).toEqual([]);
+	});
+
+	it("fails if terminal_start no longer requires an explicit root identity", () => {
+		const widened = withMutatedRust("src-tauri/src/terminal/dto.rs", (source) =>
+			source.replace("    root_id: RootId,\n", ""),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(widened, baselineBridgeAppSources),
+		).toContain(
+			"TerminalStartRequest/TerminalStartQuery must require the exact audited rootId/cwd/geometry fields",
+		);
+	});
+
+	it("fails if the TypeScript start request stops validating rootId", () => {
+		const widened = withMutatedApp(
+			"app/platform/tauri/terminal-codec.ts",
+			(source) =>
+				source.replace(
+					"rootId: frozenRootId(rootId),",
+					"rootId: rootId as string,",
+				),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(baselineBridgeRustSources, widened),
+		).toContain(
+			"terminal-codec.ts frozenTerminalStartRequest must preserve the exact rootId/cwd/geometry request shape",
+		);
+	});
+
+	it("fails if native terminalStart omits rootId from the frozen request", () => {
+		const widened = withMutatedApp("app/platform/tauri/native.ts", (source) =>
+			source.replace(
+				"frozenTerminalStartRequest(rootId, cwd, cols, rows)",
+				"frozenTerminalStartRequest(cwd, cols, rows)",
+			),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(baselineBridgeRustSources, widened),
+		).toContain(
+			"native.ts terminalStart must forward the explicit rootId through frozenTerminalStartRequest",
+		);
 	});
 
 	it("fails if TerminalDataEvent gains an extra field", () => {
