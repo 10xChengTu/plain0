@@ -181,6 +181,72 @@ describe("native Plain bridge", () => {
 		expect(Object.isFrozen(capabilities)).toBe(true);
 	});
 
+	it("routes local user data through exact DTOs and strictly decodes sibling-window invalidations", async () => {
+		let changedHandler:
+			((event: { readonly payload: unknown }) => void) | undefined;
+		const unlisten = vi.fn();
+		tauri.listen.mockImplementation(
+			async (
+				eventName: string,
+				handler: (event: { readonly payload: unknown }) => void,
+			) => {
+				expect(eventName).toBe("plain://user-data-changed");
+				changedHandler = handler;
+				return unlisten;
+			},
+		);
+		tauri.invoke
+			.mockResolvedValueOnce({
+				resource: "settings",
+				revision: 2,
+				content: "{}\n",
+			})
+			.mockResolvedValueOnce({
+				resource: "settings",
+				revision: 3,
+				content: '{ "files.autoSave": "afterDelay" }\n',
+			});
+		const bridge = createNativeBridge();
+
+		const read = await bridge.userDataRead("settings");
+		const written = await bridge.userDataWrite(
+			"settings",
+			2,
+			'{ "files.autoSave": "afterDelay" }\n',
+		);
+		const listener = vi.fn();
+		const stop = await bridge.onUserDataChanged(listener);
+
+		expect(tauri.invoke.mock.calls).toEqual([
+			["user_data_read", { request: { resource: "settings" } }],
+			[
+				"user_data_write",
+				{
+					request: {
+						resource: "settings",
+						expectedRevision: 2,
+						content: '{ "files.autoSave": "afterDelay" }\n',
+					},
+				},
+			],
+		]);
+		expect(Object.isFrozen(read)).toBe(true);
+		expect(Object.isFrozen(written)).toBe(true);
+
+		changedHandler?.({ payload: { resource: "settings", revision: 3 } });
+		expect(listener).toHaveBeenCalledOnce();
+		const [event] = listener.mock.calls[0] as [unknown];
+		expect(event).toEqual({ resource: "settings", revision: 3 });
+		expect(Object.isFrozen(event)).toBe(true);
+		expect(() =>
+			changedHandler?.({
+				payload: { resource: "settings", revision: 4, nativePath: "/tmp" },
+			}),
+		).toThrowError(expect.objectContaining({ code: "IPC_CONTRACT_VIOLATION" }));
+		await stop();
+		expect(unlisten).toHaveBeenCalledOnce();
+	});
+
 	it("uses owned request DTOs and decodes immutable workspace results", async () => {
 		tauri.invoke
 			.mockResolvedValueOnce(validSnapshot())

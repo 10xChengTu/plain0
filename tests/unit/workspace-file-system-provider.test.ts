@@ -186,6 +186,15 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		},
 		async lifecycleCompleteClose() {},
 		async lifecycleRequestClose() {},
+		async userDataRead() {
+			throw new Error("not implemented in fake bridge for this test");
+		},
+		async userDataWrite() {
+			throw new Error("not implemented in fake bridge for this test");
+		},
+		async onUserDataChanged() {
+			return () => {};
+		},
 		async workspaceCapabilities() {
 			return {
 				create: true,

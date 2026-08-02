@@ -10,6 +10,7 @@ pub mod search;
 pub mod terminal;
 pub mod theme;
 pub mod trust;
+pub mod user_data;
 pub mod workspace;
 
 use backup::service::BackupService;
@@ -21,6 +22,7 @@ use lifecycle::service::{CloseCoordinator, ExitDecision, WindowCloseDecision};
 use terminal::service::TerminalService;
 use theme::service::ThemeService;
 use trust::service::TrustService;
+use user_data::service::UserDataService;
 use workspace::service::WorkspaceService;
 
 const RUNTIME_READY_EVENT: &str = "plain://runtime-ready";
@@ -63,7 +65,8 @@ pub fn run() {
             app.manage(BackupService::new(base_path.clone()));
             app.manage(ThemeService::new(base_path.clone()));
             app.manage(TrustService::new(base_path.clone()));
-            app.manage(ConfirmationService::new(base_path));
+            app.manage(ConfirmationService::new(base_path.clone()));
+            app.manage(UserDataService::new(base_path));
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -164,6 +167,8 @@ pub fn run() {
             backup::commands::backup_discard_all,
             lifecycle::commands::lifecycle_complete_close,
             lifecycle::commands::lifecycle_request_close,
+            user_data::commands::user_data_read,
+            user_data::commands::user_data_write,
             trust::commands::workspace_trust_state,
             trust::commands::workspace_trust_grant,
             trust::commands::workspace_trust_revoke,

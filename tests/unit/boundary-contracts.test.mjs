@@ -7385,7 +7385,9 @@ describe("Plain workspace provider bootstrap contract", () => {
 	const bootstrap = `
 import { getService, initialize, INotificationService } from "@codingame/monaco-vscode-api";
 import { registerCustomProvider } from "@codingame/monaco-vscode-files-service-override";
+import { createPlainUserDataFileSystemProvider, PLAIN_USER_DATA_SCHEME } from "./features/preferences/user-data-file-system-provider";
 import { createPlainWorkspaceFileSystemProvider, PLAIN_WORKSPACE_SCHEME } from "./features/workspace/file-system-provider";
+import { createPlainWorkspaceConfigurationProvider, PLAIN_WORKSPACE_CONFIGURATION_SCHEME } from "./features/workspace/workspace-configuration-provider";
 import { registerWorkspaceDeleteCoordinator } from "./features/workspace/delete-coordinator";
 import { createBridge } from "./platform/tauri";
 import { configurePlainSearchBridge } from "./features/search/plain-search-service";
@@ -7394,6 +7396,8 @@ import { configurePlainWorkingCopyBackupBridge } from "./services/plain-workspac
 
 async function bootstrap() {
 const bridge = createBridge();
+const userDataFileSystemProvider = createPlainUserDataFileSystemProvider(bridge);
+registerCustomProvider(PLAIN_USER_DATA_SCHEME, userDataFileSystemProvider);
 const workspaceCapabilities = await bridge.workspaceCapabilities();
 const workspaceFileSystemProvider = createPlainWorkspaceFileSystemProvider(
   bridge,
@@ -7404,7 +7408,9 @@ const workspaceDeleteCoordinator = registerWorkspaceDeleteCoordinator(
   workspaceFileSystemProvider,
   () => getService(INotificationService),
 );
+const workspaceConfigurationProvider = createPlainWorkspaceConfigurationProvider();
 registerCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);
+registerCustomProvider(PLAIN_WORKSPACE_CONFIGURATION_SCHEME, workspaceConfigurationProvider);
 const initialWorkspaceSnapshot = await bridge.workspaceSnapshot();
 window.addEventListener("pagehide", () => {
   workspaceDeleteCoordinator.dispose();
@@ -7427,11 +7433,46 @@ await initialize(createServiceOverrides(), container, { enableWorkspaceTrust: fa
 			),
 		).toEqual(
 			expect.arrayContaining([
-				"app/main.ts must register one legacy or two audited custom workspace providers",
+				"app/main.ts must register exactly three audited custom providers",
 				"app/main.ts must unconditionally register only the audited plain-workspace provider",
-				"bootstrap order must remain createBridge -> capabilities -> provider -> delete coordinator -> register -> snapshot -> initialize",
+				"bootstrap order must remain createBridge -> user data -> capabilities -> provider -> delete coordinator -> register -> snapshot -> initialize",
 			]),
 		);
+	});
+
+	it("locks the local user-data provider to one direct bridge-bound registration", () => {
+		for (const [hostile, expected] of [
+			[
+				bootstrap.replace(
+					"createPlainUserDataFileSystemProvider(bridge)",
+					"createPlainUserDataFileSystemProvider(otherBridge)",
+				),
+				"app/main.ts must construct exactly one bridge-bound local user-data provider",
+			],
+			[
+				bootstrap.replace(
+					"registerCustomProvider(PLAIN_USER_DATA_SCHEME, userDataFileSystemProvider);",
+					'registerCustomProvider("file", userDataFileSystemProvider);',
+				),
+				"app/main.ts must unconditionally register only the audited vscode-userdata provider",
+			],
+			[
+				bootstrap.replace(
+					"registerCustomProvider(PLAIN_USER_DATA_SCHEME, userDataFileSystemProvider);",
+					"registerCustomProvider(PLAIN_USER_DATA_SCHEME, userDataFileSystemProvider);\nvoid userDataFileSystemProvider;",
+				),
+				"app/main.ts may use the audited user-data provider only for its declaration and custom-provider registration",
+			],
+			[
+				bootstrap.replace(
+					"registerCustomProvider(PLAIN_USER_DATA_SCHEME, userDataFileSystemProvider);",
+					"registerCustomProvider(PLAIN_USER_DATA_SCHEME, userDataFileSystemProvider);\nregisterCustomProvider(PLAIN_USER_DATA_SCHEME, userDataFileSystemProvider);",
+				),
+				"app/main.ts must register exactly three audited custom providers",
+			],
+		]) {
+			expect(validateWorkspaceProviderBootstrap(hostile)).toContain(expected);
+		}
 	});
 
 	it("forbids inspecting, mutating, aliasing or forwarding the registered workspace provider", () => {
@@ -7521,7 +7562,7 @@ await initialize(createServiceOverrides(), container, { enableWorkspaceTrust: fa
 				"const workspaceCapabilities = await bridge.workspaceCapabilities();\nregisterCustomProvider(PLAIN_WORKSPACE_SCHEME, workspaceFileSystemProvider);",
 			);
 		expect(validateWorkspaceProviderBootstrap(late)).toContain(
-			"bootstrap order must remain createBridge -> capabilities -> provider -> delete coordinator -> register -> snapshot -> initialize",
+			"bootstrap order must remain createBridge -> user data -> capabilities -> provider -> delete coordinator -> register -> snapshot -> initialize",
 		);
 
 		const aliased = bootstrap.replace(
@@ -7619,7 +7660,7 @@ await initialize(createServiceOverrides(), container, { enableWorkspaceTrust: fa
 		expect(validateWorkspaceProviderBootstrap(missingRegistration)).toEqual(
 			expect.arrayContaining([
 				"app/main.ts must register exactly one audited workspace delete coordinator",
-				"bootstrap order must remain createBridge -> capabilities -> provider -> delete coordinator -> register -> snapshot -> initialize",
+				"bootstrap order must remain createBridge -> user data -> capabilities -> provider -> delete coordinator -> register -> snapshot -> initialize",
 				"app/main.ts must dispose the sole workspace delete coordinator exactly once on pagehide",
 			]),
 		);
@@ -7661,7 +7702,7 @@ const workspaceDeleteCoordinator = registerWorkspaceDeleteCoordinator(
 );`,
 			);
 		expect(validateWorkspaceProviderBootstrap(lateCoordinator)).toContain(
-			"bootstrap order must remain createBridge -> capabilities -> provider -> delete coordinator -> register -> snapshot -> initialize",
+			"bootstrap order must remain createBridge -> user data -> capabilities -> provider -> delete coordinator -> register -> snapshot -> initialize",
 		);
 	});
 
@@ -7721,7 +7762,7 @@ const workspaceDeleteCoordinator = registerWorkspaceDeleteCoordinator(
 			"await bridge.runtimeInfo();\nconst workspaceCapabilities = await bridge.workspaceCapabilities();",
 		);
 		expect(validateWorkspaceProviderBootstrap(interrupted)).toContain(
-			"bootstrap order must remain createBridge -> capabilities -> provider -> delete coordinator -> register -> snapshot -> initialize",
+			"bootstrap order must remain createBridge -> user data -> capabilities -> provider -> delete coordinator -> register -> snapshot -> initialize",
 		);
 	});
 

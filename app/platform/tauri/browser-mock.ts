@@ -38,6 +38,9 @@ import type {
 	TerminalStyle,
 	ThemeImportResult,
 	ThemePackageSummary,
+	UserDataChangedEvent,
+	UserDataResource,
+	UserDataResult,
 	WorkspaceCapabilities,
 	WorkspaceCommitDeleteEntryRequest,
 	WorkspaceDeleteBatchPlan,
@@ -2443,6 +2446,16 @@ export function createBrowserMockBridge(
 		captureBrowserMockWorkspaceWatchController(options);
 	const listeners = new Set<(payload: RuntimeInfo) => void>();
 	const nativeCloseListeners = new Set<(payload: NativeCloseRequest) => void>();
+	const userDataChangedListeners = new Set<
+		(payload: UserDataChangedEvent) => void
+	>();
+	const userDataEntries = new Map<
+		UserDataResource,
+		{ revision: number; content: string }
+	>([
+		["settings", { revision: 1, content: "{}\n" }],
+		["keybindings", { revision: 1, content: "[]\n" }],
+	]);
 	const scriptedPicks = [...(options.workspacePicks ?? [])];
 	const roots = new Map<string, WorkspaceRoot>();
 	const backupEntries = new Map<
@@ -6604,6 +6617,52 @@ export function createBrowserMockBridge(
 				timeoutMs: 5_000 as const,
 			});
 			for (const listener of nativeCloseListeners) listener(request);
+		},
+		async userDataRead(resource) {
+			const entry = userDataEntries.get(resource);
+			if (entry === undefined) {
+				throw Object.freeze({
+					code: "USER_DATA_INVALID",
+					message: "The local user-data resource is not supported.",
+				});
+			}
+			return Object.freeze({
+				resource,
+				revision: entry.revision,
+				content: entry.content,
+			}) satisfies UserDataResult;
+		},
+		async userDataWrite(resource, expectedRevision, content) {
+			const entry = userDataEntries.get(resource);
+			if (entry === undefined || !Number.isSafeInteger(expectedRevision)) {
+				throw Object.freeze({
+					code: "USER_DATA_INVALID",
+					message: "The local user-data write request is invalid.",
+				});
+			}
+			if (entry.revision !== expectedRevision) {
+				throw Object.freeze({
+					code: "USER_DATA_CONFLICT",
+					message:
+						"The local user-data resource changed before it could be written.",
+				});
+			}
+			const next = { revision: entry.revision + 1, content };
+			userDataEntries.set(resource, next);
+			const event = Object.freeze({
+				resource,
+				revision: next.revision,
+			}) satisfies UserDataChangedEvent;
+			queueMicrotask(() => {
+				for (const listener of userDataChangedListeners) listener(event);
+			});
+			return Object.freeze({ ...event, content }) satisfies UserDataResult;
+		},
+		async onUserDataChanged(listener) {
+			userDataChangedListeners.add(listener);
+			return () => {
+				userDataChangedListeners.delete(listener);
+			};
 		},
 		async workspaceCapabilities() {
 			return workspaceCapabilities;

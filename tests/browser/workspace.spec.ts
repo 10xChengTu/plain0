@@ -515,6 +515,13 @@ async function installNativeIpcMock(
 			type MockNode = MockDirectory | MockFile;
 			const encoder = new TextEncoder();
 			const decoder = new TextDecoder();
+			const userDataEntries = new Map<
+				"settings" | "keybindings",
+				{ revision: number; content: string }
+			>([
+				["settings", { revision: 1, content: "{}\n" }],
+				["keybindings", { revision: 1, content: "[]\n" }],
+			]);
 			let versionSerial = 1;
 			const nextVersion = (): string =>
 				`wv1:${(versionSerial++).toString(16).padStart(64, "0")}`;
@@ -1344,6 +1351,23 @@ async function installNativeIpcMock(
 						event: registration.event,
 						id: eventId,
 						payload: { searchId },
+					});
+					if (transformed?.once === true) {
+						callbacks.delete(registration.handlerId);
+					}
+				}
+			};
+			const emitUserDataChanged = (
+				resource: "settings" | "keybindings",
+				revision: number,
+			): void => {
+				for (const [eventId, registration] of eventHandlers) {
+					if (registration.event !== "plain://user-data-changed") continue;
+					const transformed = callbacks.get(registration.handlerId);
+					transformed?.callback({
+						event: registration.event,
+						id: eventId,
+						payload: { resource, revision },
 					});
 					if (transformed?.once === true) {
 						callbacks.delete(registration.handlerId);
@@ -2307,6 +2331,43 @@ async function installNativeIpcMock(
 						case "lifecycle_request_close":
 							emitNativeCloseRequest("close");
 							return null;
+						case "user_data_read": {
+							const resource = (args.request as { resource?: unknown })
+								?.resource;
+							const entry =
+								resource === "settings" || resource === "keybindings"
+									? userDataEntries.get(resource)
+									: undefined;
+							if (entry === undefined)
+								throw new Error("Invalid user-data read.");
+							return { resource, ...entry };
+						}
+						case "user_data_write": {
+							const userRequest = args.request as {
+								resource?: unknown;
+								expectedRevision?: unknown;
+								content?: unknown;
+							};
+							const resource = userRequest.resource;
+							if (resource !== "settings" && resource !== "keybindings") {
+								throw new Error("Invalid user-data write.");
+							}
+							const entry = userDataEntries.get(resource);
+							if (
+								entry === undefined ||
+								entry.revision !== userRequest.expectedRevision ||
+								typeof userRequest.content !== "string"
+							) {
+								throw new Error("Invalid user-data write.");
+							}
+							const next = {
+								revision: entry.revision + 1,
+								content: userRequest.content,
+							};
+							userDataEntries.set(resource, next);
+							emitUserDataChanged(resource, next.revision);
+							return { resource, ...next };
+						}
 						case "workspace_capabilities":
 							return {
 								create: true,
@@ -3890,6 +3951,13 @@ async function installMultiRootNativeIpcMock(
 				command: string;
 				args: Record<string, unknown>;
 			}> = [];
+			const userDataEntries = new Map<
+				"settings" | "keybindings",
+				{ revision: number; content: string }
+			>([
+				["settings", { revision: 1, content: "{}\n" }],
+				["keybindings", { revision: 1, content: "[]\n" }],
+			]);
 			const watchExchanges: Array<{
 				callIndex: number;
 				request: { roots: WatchRootRequest[] };
@@ -4592,6 +4660,23 @@ async function installMultiRootNativeIpcMock(
 			>();
 			let nextCallbackId = 0;
 			let nextEventId = 0;
+			const emitUserDataChanged = (
+				resource: "settings" | "keybindings",
+				revision: number,
+			): void => {
+				for (const [eventId, registration] of eventHandlers) {
+					if (registration.event !== "plain://user-data-changed") continue;
+					const transformed = callbacks.get(registration.handlerId);
+					transformed?.callback({
+						event: registration.event,
+						id: eventId,
+						payload: { resource, revision },
+					});
+					if (transformed?.once === true) {
+						callbacks.delete(registration.handlerId);
+					}
+				}
+			};
 			const emitWorkspaceWatchWake = (): number => {
 				let delivered = 0;
 				for (const [eventId, registration] of eventHandlers) {
@@ -4860,6 +4945,43 @@ async function installMultiRootNativeIpcMock(
 								ipcVersion: 1,
 								runtime: "tauri",
 							};
+						case "user_data_read": {
+							const resource = (args.request as { resource?: unknown })
+								?.resource;
+							const entry =
+								resource === "settings" || resource === "keybindings"
+									? userDataEntries.get(resource)
+									: undefined;
+							if (entry === undefined)
+								throw new Error("Invalid user-data read.");
+							return { resource, ...entry };
+						}
+						case "user_data_write": {
+							const userRequest = args.request as {
+								resource?: unknown;
+								expectedRevision?: unknown;
+								content?: unknown;
+							};
+							const resource = userRequest.resource;
+							if (resource !== "settings" && resource !== "keybindings") {
+								throw new Error("Invalid user-data write.");
+							}
+							const entry = userDataEntries.get(resource);
+							if (
+								entry === undefined ||
+								entry.revision !== userRequest.expectedRevision ||
+								typeof userRequest.content !== "string"
+							) {
+								throw new Error("Invalid user-data write.");
+							}
+							const next = {
+								revision: entry.revision + 1,
+								content: userRequest.content,
+							};
+							userDataEntries.set(resource, next);
+							emitUserDataChanged(resource, next.revision);
+							return { resource, ...next };
+						}
 						case "workspace_capabilities":
 							return {
 								create: mode === "supported",
@@ -16286,6 +16408,167 @@ test("the Manage gear renders in the Activity Bar, its context menu carries real
 	await expect(page.getByRole("menuitem", { name: "Themes" })).toBeVisible();
 	await page.keyboard.press("Escape");
 	await expect(page.locator(".context-view")).toBeHidden();
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+// --- `F170` S1 local settings / keybindings / Auto Save --------------------
+
+test("persists local keybindings and settings through Rust-shaped IPC, reloads the shortcut, and Auto Saves an edited workspace file", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") consoleErrors.push(message.text());
+	});
+
+	await installNativeIpcMock(page, "arrayBuffer", "supported");
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	await executePaletteCommand(
+		page,
+		"Open Local Keyboard Shortcuts",
+		"Plain: Open Local Keyboard Shortcuts (JSON)",
+	);
+	const keybindingsTab = page.locator(".tabs-container .tab.active");
+	await expect(keybindingsTab).toContainText("keybindings.json");
+	await page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "[]" })
+		.click();
+	const keybindings =
+		'[{"key":"ctrl+alt+u","command":"plain.preferences.openLocalSettings"}]';
+	await page.keyboard.press("ControlOrMeta+A");
+	await page.keyboard.type(keybindings);
+	// Monaco keeps the quote/object/array auto-closers it created for the
+	// opening characters when Playwright enters the full JSON quickly. Remove
+	// those three synthetic suffix characters just as a user typing or pasting
+	// over this tiny default file would.
+	await page.keyboard.press("End");
+	await page.keyboard.press("Backspace");
+	await page.keyboard.press("Backspace");
+	await page.keyboard.press("Backspace");
+	await expect(keybindingsTab).toHaveClass(/dirty/);
+	await page.keyboard.press("ControlOrMeta+S");
+	await expect
+		.poll(async () =>
+			page.evaluate(() => {
+				const testWindow = window as unknown as Window & {
+					__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+				};
+				return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+					({ command, args }) =>
+						command === "user_data_write" &&
+						(args.request as { resource?: unknown } | undefined)?.resource ===
+							"keybindings",
+				).length;
+			}),
+		)
+		.toBe(1);
+	await expect(keybindingsTab).not.toHaveClass(/dirty/);
+	await page.keyboard.press("ControlOrMeta+W");
+	await expect(
+		page.getByRole("tab", { name: /keybindings\.json/i }),
+	).toHaveCount(0);
+
+	await expect
+		.poll(
+			async () => {
+				await page.keyboard.press("Control+Alt+U");
+				return page.getByRole("tab", { name: /settings\.json/i }).count();
+			},
+			{ timeout: 5_000 },
+		)
+		.toBe(1);
+	const settingsTab = page.locator(".tabs-container .tab.active");
+	await expect(settingsTab).toContainText("settings.json");
+	await page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "{}" })
+		.click();
+	const settings = '{"files.autoSave":"afterDelay","files.autoSaveDelay":750}';
+	await page.keyboard.press("ControlOrMeta+A");
+	await page.keyboard.type(settings);
+	await page.keyboard.press("End");
+	await page.keyboard.press("Backspace");
+	await page.keyboard.press("Backspace");
+	await page.keyboard.press("ControlOrMeta+S");
+	await expect
+		.poll(async () =>
+			page.evaluate(() => {
+				const testWindow = window as unknown as Window & {
+					__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+				};
+				return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+					({ command, args }) =>
+						command === "user_data_write" &&
+						(args.request as { resource?: unknown } | undefined)?.resource ===
+							"settings",
+				).length;
+			}),
+		)
+		.toBe(1);
+	const userDataWrites = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+		};
+		return testWindow.__PLAIN_TEST_TAURI_CALLS__
+			.filter(({ command }) => command === "user_data_write")
+			.map(({ args }) => args.request);
+	});
+	expect(userDataWrites).toEqual([
+		{ resource: "keybindings", expectedRevision: 1, content: keybindings },
+		{ resource: "settings", expectedRevision: 1, content: settings },
+	]);
+
+	await executePaletteCommand(page, "Open Folder", "File: Open Folder...");
+	await page.getByRole("tab", { name: /^Explorer / }).click();
+	const explorer = page.getByRole("tree", { name: "Files Explorer" });
+	await expect(explorer).toBeVisible();
+	const readme = explorer.getByRole("treeitem", {
+		name: "README.md",
+		exact: true,
+	});
+	await readme.dblclick();
+	const editor = page
+		.getByRole("code")
+		.filter({ hasText: "Read-only Explorer fixture." });
+	await expect(editor).toBeVisible();
+	await page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "Read-only Explorer fixture." })
+		.click();
+	expect(await nativeWriteFileCalls(page)).toEqual([]);
+	await page.keyboard.press("End");
+	const autoSaveMarker = " Auto-saved by local settings.";
+	await page.keyboard.insertText(autoSaveMarker);
+	const workspaceTab = page.locator(".tabs-container .tab.active");
+	await expect
+		.poll(async () => {
+			const writes = await nativeWriteFileCalls(page);
+			const latest = writes.at(-1);
+			return latest === undefined
+				? undefined
+				: {
+						relativePath: latest.request.relativePath,
+						contentHex: latest.contentHex,
+					};
+		})
+		.toEqual({
+			relativePath: "README.md",
+			contentHex: hexOfText(
+				`# Native workspace\n\nRead-only Explorer fixture.${autoSaveMarker}\n`,
+			),
+		});
+	await expect(workspaceTab).not.toHaveClass(/dirty/);
 
 	expect(pageErrors).toEqual([]);
 	expect(consoleErrors).toEqual([]);

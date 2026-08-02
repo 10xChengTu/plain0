@@ -1352,6 +1352,14 @@ export function validateWorkspaceProviderBootstrap(source) {
 			"registerCustomProvider",
 		],
 		[
+			"./features/preferences/user-data-file-system-provider",
+			"createPlainUserDataFileSystemProvider",
+		],
+		[
+			"./features/preferences/user-data-file-system-provider",
+			"PLAIN_USER_DATA_SCHEME",
+		],
+		[
 			"./features/workspace/file-system-provider",
 			"createPlainWorkspaceFileSystemProvider",
 		],
@@ -1387,10 +1395,12 @@ export function validateWorkspaceProviderBootstrap(source) {
 	const statements = bootstrap.body.statements;
 	const criticalBootstrapBindings = new Set([
 		"createBridge",
+		"createPlainUserDataFileSystemProvider",
 		"createPlainWorkspaceFileSystemProvider",
 		"registerWorkspaceDeleteCoordinator",
 		"registerCustomProvider",
 		"initialize",
+		"PLAIN_USER_DATA_SCHEME",
 		"PLAIN_WORKSPACE_SCHEME",
 		"configurePlainWorkingCopyBackupBridge",
 		"configurePlainLifecycleBridge",
@@ -1479,6 +1489,32 @@ export function validateWorkspaceProviderBootstrap(source) {
 		return (
 			declaration?.initializer !== undefined &&
 			identifierCall(declaration.initializer, "createBridge", 0)
+		);
+	});
+	const userDataProviderIndexes = matchingStatementIndexes((statement) => {
+		const declaration = exactConstDeclaration(
+			statement,
+			"userDataFileSystemProvider",
+		);
+		const initializer = declaration?.initializer;
+		return (
+			initializer !== undefined &&
+			identifierCall(initializer, "createPlainUserDataFileSystemProvider", 1) &&
+			ts.isIdentifier(initializer.arguments[0]) &&
+			initializer.arguments[0].text === "bridge"
+		);
+	});
+	const userDataRegistrationIndexes = matchingStatementIndexes((statement) => {
+		if (!ts.isExpressionStatement(statement)) {
+			return false;
+		}
+		const expression = statement.expression;
+		return (
+			identifierCall(expression, "registerCustomProvider", 2) &&
+			ts.isIdentifier(expression.arguments[0]) &&
+			expression.arguments[0].text === "PLAIN_USER_DATA_SCHEME" &&
+			ts.isIdentifier(expression.arguments[1]) &&
+			expression.arguments[1].text === "userDataFileSystemProvider"
 		);
 	});
 	const capabilityIndexes = matchingStatementIndexes((statement) => {
@@ -1582,6 +1618,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 
 	const calls = {
 		createBridge: 0,
+		userDataProviderFactory: 0,
 		workspaceCapabilities: 0,
 		providerFactory: 0,
 		deleteCoordinatorRegistration: 0,
@@ -1592,6 +1629,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 	};
 	let capabilityMemberReferences = 0;
 	let hasUnexpectedBridgeReference = false;
+	let hasUnexpectedUserDataProviderReference = false;
 	let hasUnexpectedWorkspaceProviderReference = false;
 	function isAllowedBridgeIdentifier(node) {
 		const parent = node.parent;
@@ -1643,7 +1681,8 @@ export function validateWorkspaceProviderBootstrap(source) {
 			ts.isCallExpression(parent) &&
 			parent.arguments[0] === node &&
 			ts.isIdentifier(parent.expression) &&
-			(parent.expression.text === "createPlainWorkspaceFileSystemProvider" ||
+			(parent.expression.text === "createPlainUserDataFileSystemProvider" ||
+				parent.expression.text === "createPlainWorkspaceFileSystemProvider" ||
 				parent.expression.text === "registerWorkspaceDeleteCoordinator" ||
 				parent.expression.text === "registerWorkspaceCommands" ||
 				parent.expression.text === "configurePlainWorkingCopyBackupBridge" ||
@@ -1669,6 +1708,27 @@ export function validateWorkspaceProviderBootstrap(source) {
 				parent.expression.text === "applyPersistedFileIconThemeSelection" ||
 				parent.expression.text === "applyPersistedProductIconThemeSelection" ||
 				parent.expression.text === "createAndConfigurePlainDebugRuntime")
+		);
+	}
+	function isAllowedUserDataProviderIdentifier(node) {
+		const parent = node.parent;
+		if (
+			ts.isVariableDeclaration(parent) &&
+			parent.name === node &&
+			parent.initializer !== undefined &&
+			identifierCall(
+				parent.initializer,
+				"createPlainUserDataFileSystemProvider",
+				1,
+			)
+		) {
+			return true;
+		}
+		return (
+			ts.isCallExpression(parent) &&
+			parent.arguments[1] === node &&
+			ts.isIdentifier(parent.expression) &&
+			parent.expression.text === "registerCustomProvider"
 		);
 	}
 	function isAllowedWorkspaceProviderIdentifier(node) {
@@ -1699,6 +1759,9 @@ export function validateWorkspaceProviderBootstrap(source) {
 				switch (node.expression.text) {
 					case "createBridge":
 						calls.createBridge += 1;
+						break;
+					case "createPlainUserDataFileSystemProvider":
+						calls.userDataProviderFactory += 1;
 						break;
 					case "createPlainWorkspaceFileSystemProvider":
 						calls.providerFactory += 1;
@@ -1751,6 +1814,13 @@ export function validateWorkspaceProviderBootstrap(source) {
 		}
 		if (
 			ts.isIdentifier(node) &&
+			node.text === "userDataFileSystemProvider" &&
+			!isAllowedUserDataProviderIdentifier(node)
+		) {
+			hasUnexpectedUserDataProviderReference = true;
+		}
+		if (
+			ts.isIdentifier(node) &&
 			node.text === "workspaceFileSystemProvider" &&
 			!isAllowedWorkspaceProviderIdentifier(node)
 		) {
@@ -1777,6 +1847,11 @@ export function validateWorkspaceProviderBootstrap(source) {
 			"app/main.ts must not alias or dynamically access the audited bootstrap bridge",
 		);
 	}
+	if (hasUnexpectedUserDataProviderReference) {
+		failures.push(
+			"app/main.ts may use the audited user-data provider only for its declaration and custom-provider registration",
+		);
+	}
 	if (hasUnexpectedWorkspaceProviderReference) {
 		failures.push(
 			"app/main.ts may use the audited workspace provider only for its declaration, delete coordinator and custom-provider registration",
@@ -1788,6 +1863,14 @@ export function validateWorkspaceProviderBootstrap(source) {
 		);
 	}
 	if (
+		calls.userDataProviderFactory !== 1 ||
+		userDataProviderIndexes.length !== 1
+	) {
+		failures.push(
+			"app/main.ts must construct exactly one bridge-bound local user-data provider",
+		);
+	}
+	if (
 		calls.deleteCoordinatorRegistration !== 1 ||
 		coordinatorIndexes.length !== 1
 	) {
@@ -1795,9 +1878,14 @@ export function validateWorkspaceProviderBootstrap(source) {
 			"app/main.ts must register exactly one audited workspace delete coordinator",
 		);
 	}
-	if (calls.registerCustomProvider < 1 || calls.registerCustomProvider > 2) {
+	if (calls.registerCustomProvider !== 3) {
 		failures.push(
-			"app/main.ts must register one legacy or two audited custom workspace providers",
+			"app/main.ts must register exactly three audited custom providers",
+		);
+	}
+	if (userDataRegistrationIndexes.length !== 1) {
+		failures.push(
+			"app/main.ts must unconditionally register only the audited vscode-userdata provider",
 		);
 	}
 	if (registrationIndexes.length !== 1) {
@@ -1827,6 +1915,8 @@ export function validateWorkspaceProviderBootstrap(source) {
 	}
 	const orderedIndexes = [
 		bridgeIndexes[0],
+		userDataProviderIndexes[0],
+		userDataRegistrationIndexes[0],
 		capabilityIndexes[0],
 		providerIndexes[0],
 		coordinatorIndexes[0],
@@ -1842,14 +1932,18 @@ export function validateWorkspaceProviderBootstrap(source) {
 				position > 0 && index <= orderedIndexes[position - 1],
 		) ||
 		(bridgeIndexes[0] !== undefined &&
-			capabilityIndexes[0] !== bridgeIndexes[0] + 1) ||
+			userDataProviderIndexes[0] !== bridgeIndexes[0] + 1) ||
+		(userDataProviderIndexes[0] !== undefined &&
+			userDataRegistrationIndexes[0] !== userDataProviderIndexes[0] + 1) ||
+		(userDataRegistrationIndexes[0] !== undefined &&
+			capabilityIndexes[0] !== userDataRegistrationIndexes[0] + 1) ||
 		(capabilityIndexes[0] !== undefined &&
 			providerIndexes[0] !== capabilityIndexes[0] + 1) ||
 		(providerIndexes[0] !== undefined &&
 			coordinatorIndexes[0] !== providerIndexes[0] + 1)
 	) {
 		failures.push(
-			"bootstrap order must remain createBridge -> capabilities -> provider -> delete coordinator -> register -> snapshot -> initialize",
+			"bootstrap order must remain createBridge -> user data -> capabilities -> provider -> delete coordinator -> register -> snapshot -> initialize",
 		);
 	}
 
@@ -11253,6 +11347,18 @@ function stageCleanupCallsAreExact(relativePath, source) {
 			) &&
 			removeFileCalls.some((call) =>
 				exactMethodCall(source, call, /\bdir\s*\.\s*$/, "name"),
+			) &&
+			removeDirectoryCalls.length === 0
+		);
+	}
+	if (relativePath === "src-tauri/src/user_data/service.rs") {
+		return (
+			removeFileCalls.length === 1 &&
+			exactMethodCall(
+				source,
+				removeFileCalls[0],
+				/\bself\s*\.\s*root\s*\.\s*$/,
+				"&self.name",
 			) &&
 			removeDirectoryCalls.length === 0
 		);

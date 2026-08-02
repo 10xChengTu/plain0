@@ -14,6 +14,7 @@ export const TERMINAL_EXIT_EVENT = "plain://terminal-exit" as const;
  * `src-tauri/src/debug/commands.rs`'s `DEBUG_EVENT` constant. */
 export const DEBUG_EVENT = "plain://debug-event" as const;
 export const NATIVE_CLOSE_REQUEST_EVENT = "plain://close-requested" as const;
+export const USER_DATA_CHANGED_EVENT = "plain://user-data-changed" as const;
 
 export interface NativeCloseRequest {
 	readonly requestId: string;
@@ -25,6 +26,19 @@ export interface RuntimeInfo {
 	application: "Plain";
 	ipcVersion: 1;
 	runtime: "tauri" | "browser-mock";
+}
+
+export type UserDataResource = "settings" | "keybindings";
+
+export interface UserDataResult {
+	readonly resource: UserDataResource;
+	readonly revision: number;
+	readonly content: string;
+}
+
+export interface UserDataChangedEvent {
+	readonly resource: UserDataResource;
+	readonly revision: number;
 }
 
 export interface CommandError {
@@ -1258,6 +1272,15 @@ export interface PlainBridge {
 		outcome: "allow" | "veto",
 	): Promise<void>;
 	lifecycleRequestClose(): Promise<void>;
+	userDataRead(resource: UserDataResource): Promise<UserDataResult>;
+	userDataWrite(
+		resource: UserDataResource,
+		expectedRevision: number,
+		content: string,
+	): Promise<UserDataResult>;
+	onUserDataChanged(
+		listener: (event: UserDataChangedEvent) => void,
+	): Promise<Unlisten>;
 	workspaceCapabilities(): Promise<WorkspaceCapabilities>;
 	workspaceSnapshot(): Promise<WorkspaceSnapshot>;
 	workspaceReconcileWatchRoots(rootIds: readonly string[]): void;

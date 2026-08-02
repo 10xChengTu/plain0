@@ -27,6 +27,11 @@ import { registerPlainDebugCommands } from "./features/debug/plain-debug-command
 import { createAndConfigurePlainDebugRuntime } from "./features/debug/plain-debug-runtime";
 import "./features/debug/plain-debug-session-alerts";
 import "./features/debug/plain-debug-terminal-integration";
+import { registerPlainPreferenceCommands } from "./features/preferences/plain-preference-commands";
+import {
+	createPlainUserDataFileSystemProvider,
+	PLAIN_USER_DATA_SCHEME,
+} from "./features/preferences/user-data-file-system-provider";
 import "./features/search/search-contribution";
 import "./features/terminal/terminal-contribution";
 import { registerPlainTerminalCommands } from "./features/terminal/plain-terminal-commands";
@@ -95,6 +100,9 @@ async function bootstrap(): Promise<void> {
 	}
 
 	const bridge = createBridge();
+	const userDataFileSystemProvider =
+		createPlainUserDataFileSystemProvider(bridge);
+	registerCustomProvider(PLAIN_USER_DATA_SCHEME, userDataFileSystemProvider);
 	const workspaceCapabilities = await bridge.workspaceCapabilities();
 	const workspaceFileSystemProvider = createPlainWorkspaceFileSystemProvider(
 		bridge,
@@ -142,6 +150,8 @@ async function bootstrap(): Promise<void> {
 	});
 	let workspaceCommands:
 		ReturnType<typeof registerWorkspaceCommands> | undefined;
+	let preferenceCommandsRegistration:
+		ReturnType<typeof registerPlainPreferenceCommands> | undefined;
 	let themeCommandsRegistration:
 		ReturnType<typeof registerPlainThemeCommands> | undefined;
 	let fileIconThemePickerRegistration:
@@ -170,6 +180,7 @@ async function bootstrap(): Promise<void> {
 		() => {
 			void stopListening();
 			workspaceCommands?.dispose();
+			preferenceCommandsRegistration?.dispose();
 			workspaceDeleteCoordinator.dispose();
 			themeCommandsRegistration?.dispose();
 			fileIconThemePickerRegistration?.dispose();
@@ -250,6 +261,7 @@ async function bootstrap(): Promise<void> {
 		await getService(IContextKeyService),
 		workspaceTopologyCoordinator,
 	);
+	preferenceCommandsRegistration = registerPlainPreferenceCommands();
 	terminalCommandsRegistration = registerPlainTerminalCommands();
 	scmCommandsRegistration = registerPlainScmCommands();
 	// `F090` S0: inline blame decoration + hover + age heatmap — see

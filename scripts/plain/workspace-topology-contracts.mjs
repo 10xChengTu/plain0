@@ -211,10 +211,16 @@ const URI_MODULE = "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
 const MONACO_API_MODULE = "@codingame/monaco-vscode-api/monaco";
 const FILES_PROVIDER_OVERRIDE_MODULE =
 	"@codingame/monaco-vscode-files-service-override";
+const USER_DATA_PROVIDER_MODULE =
+	"features/preferences/user-data-file-system-provider";
 const ROOT_PROVIDER_MODULE = "features/workspace/file-system-provider";
 const CONFIGURATION_PROVIDER_MODULE =
 	"features/workspace/workspace-configuration-provider";
 const DIRECT_COMMAND_REGISTRATION_MANIFEST = Object.freeze([
+	Object.freeze({
+		relativePath: "app/features/preferences/plain-preference-commands.ts",
+		count: 2,
+	}),
 	Object.freeze({
 		relativePath: "app/features/workspace/commands.ts",
 		count: productContracts.length + 1,
@@ -248,6 +254,13 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/excluded-surfaces.ts:@codingame/monaco-vscode-api/monaco",
 	"app/excluded-surfaces.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/contributions",
 	"app/excluded-surfaces.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/views",
+	"app/features/preferences/plain-preference-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions",
+	"app/features/preferences/plain-preference-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands",
+	"app/features/preferences/plain-preference-commands.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service",
+	"app/features/preferences/user-data-file-system-provider.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/event",
+	"app/features/preferences/user-data-file-system-provider.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle",
+	"app/features/preferences/user-data-file-system-provider.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
+	"app/features/preferences/user-data-file-system-provider.ts:@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files",
 	"app/features/scm/git-uri.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
 	"app/features/workspace/plain-workspace-roots.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
 	"app/features/scm/hunk-stage.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/diff/linesDiffComputers",
@@ -1676,6 +1689,16 @@ function validateBootstrap(sourceFile) {
 		) ||
 		!importsNamedValue(
 			sourceFile,
+			"./features/preferences/user-data-file-system-provider",
+			"createPlainUserDataFileSystemProvider",
+		) ||
+		!importsNamedValue(
+			sourceFile,
+			"./features/preferences/user-data-file-system-provider",
+			"PLAIN_USER_DATA_SCHEME",
+		) ||
+		!importsNamedValue(
+			sourceFile,
 			"./features/workspace/file-system-provider",
 			"createPlainWorkspaceFileSystemProvider",
 		) ||
@@ -1741,6 +1764,11 @@ function validateBootstrap(sourceFile) {
 	) {
 		return false;
 	}
+	const userDataFactoryCalls = directCallsNamed(
+		bootstrap,
+		"createPlainUserDataFileSystemProvider",
+		bootstrapOwner,
+	);
 	const rootFactoryCalls = directCallsNamed(
 		bootstrap,
 		"createPlainWorkspaceFileSystemProvider",
@@ -1751,6 +1779,13 @@ function validateBootstrap(sourceFile) {
 		"createPlainWorkspaceConfigurationProvider",
 		bootstrapOwner,
 	);
+	const userDataDeclaration =
+		userDataFactoryCalls.length === 1
+			? declarationInitializedByExactCall(
+					sourceAnalysis,
+					userDataFactoryCalls[0],
+				)
+			: undefined;
 	const rootDeclaration =
 		rootFactoryCalls.length === 1
 			? declarationInitializedByExactCall(sourceAnalysis, rootFactoryCalls[0])
@@ -1763,25 +1798,40 @@ function validateBootstrap(sourceFile) {
 				)
 			: undefined;
 	if (
+		userDataDeclaration === undefined ||
 		rootDeclaration === undefined ||
 		configurationDeclaration === undefined ||
+		!isDirectVariableDeclaration(bootstrapOwner, userDataDeclaration) ||
 		!isDirectVariableDeclaration(bootstrapOwner, rootDeclaration) ||
 		!isDirectVariableDeclaration(bootstrapOwner, configurationDeclaration) ||
+		!isOwnedByFunction(userDataDeclaration, bootstrapOwner) ||
 		!isOwnedByFunction(rootDeclaration, bootstrapOwner) ||
 		!isOwnedByFunction(configurationDeclaration, bootstrapOwner) ||
+		!ts.isIdentifier(userDataDeclaration.name) ||
 		!ts.isIdentifier(rootDeclaration.name) ||
 		!ts.isIdentifier(configurationDeclaration.name)
 	) {
 		return false;
 	}
+	const userDataName = userDataDeclaration.name.text;
 	const rootName = rootDeclaration.name.text;
 	const configurationName = configurationDeclaration.name.text;
+	const userDataReferences = bindingReferences(
+		bootstrap,
+		sourceAnalysis,
+		userDataName,
+	).filter((reference) => isOwnedByFunction(reference, bootstrapOwner));
 	const configurationReferences = bindingReferences(
 		bootstrap,
 		sourceAnalysis,
 		configurationName,
 	).filter((reference) => isOwnedByFunction(reference, bootstrapOwner));
-	if (configurationReferences.length !== 3) {
+	if (
+		userDataReferences.length !== 2 ||
+		configurationReferences.length !== 3 ||
+		userDataFactoryCalls[0].arguments.length !== 1 ||
+		!sameChain(userDataFactoryCalls[0].arguments[0], ["bridge"])
+	) {
 		return false;
 	}
 	const registrations = directCallsNamed(
@@ -1789,9 +1839,15 @@ function validateBootstrap(sourceFile) {
 		"registerCustomProvider",
 		bootstrapOwner,
 	);
-	if (registrations.length !== 2) {
+	if (registrations.length !== 3) {
 		return false;
 	}
+	const userDataRegistration = registrations.find(
+		(call) =>
+			call.arguments.length === 2 &&
+			sameChain(call.arguments[0], ["PLAIN_USER_DATA_SCHEME"]) &&
+			sameChain(call.arguments[1], [userDataName]),
+	);
 	const rootRegistration = registrations.find(
 		(call) =>
 			call.arguments.length === 2 &&
@@ -1805,10 +1861,14 @@ function validateBootstrap(sourceFile) {
 			sameChain(call.arguments[1], [configurationName]),
 	);
 	if (
+		userDataRegistration === undefined ||
 		rootRegistration === undefined ||
 		configurationRegistration === undefined ||
+		!isDirectExpressionCall(bootstrapOwner, userDataRegistration) ||
 		!isDirectExpressionCall(bootstrapOwner, rootRegistration) ||
 		!isDirectExpressionCall(bootstrapOwner, configurationRegistration) ||
+		userDataFactoryCalls[0].pos >= userDataRegistration.pos ||
+		userDataRegistration.pos >= rootFactoryCalls[0].pos ||
 		rootRegistration.pos >= configurationRegistration.pos
 	) {
 		return false;
@@ -5256,22 +5316,41 @@ function validateProviderBindingAuthority(authority, moduleImports) {
 		return false;
 	}
 	const registrarName = "registerCustomProvider";
+	const userDataFactoryName = "createPlainUserDataFileSystemProvider";
 	const rootFactoryName = "createPlainWorkspaceFileSystemProvider";
 	const configurationFactoryName = "createPlainWorkspaceConfigurationProvider";
+	const userDataSchemeName = "PLAIN_USER_DATA_SCHEME";
 	const rootSchemeName = "PLAIN_WORKSPACE_SCHEME";
 	const configurationSchemeName = "PLAIN_WORKSPACE_CONFIGURATION_SCHEME";
 	const deleteCoordinatorName = "registerWorkspaceDeleteCoordinator";
 	const topologyCoordinatorName = "createWorkspaceTopologyCoordinator";
+	const userDataModule = `./${USER_DATA_PROVIDER_MODULE}`;
 	const rootModule = `./${ROOT_PROVIDER_MODULE}`;
 	const configurationModule = `./${CONFIGURATION_PROVIDER_MODULE}`;
 	const importContracts = [
 		[FILES_PROVIDER_OVERRIDE_MODULE, [registrarName]],
+		[userDataModule, [userDataFactoryName, userDataSchemeName]],
 		[rootModule, [rootFactoryName, rootSchemeName]],
 		[configurationModule, [configurationFactoryName, configurationSchemeName]],
 		["./features/workspace/delete-coordinator", [deleteCoordinatorName]],
 		["./features/workspace/workspace-projection", [topologyCoordinatorName]],
 	];
 	const acquisitionContracts = [
+		providerBindingAcquisitions(
+			moduleImports,
+			(moduleName, sourceFile) =>
+				resolvesAppModule(
+					sourceFile,
+					moduleName,
+					`app/${USER_DATA_PROVIDER_MODULE}`,
+				),
+			[
+				userDataFactoryName,
+				userDataSchemeName,
+				"PlainUserDataFileSystemProvider",
+			],
+			{ defaultAcquires: true },
+		),
 		providerBindingAcquisitions(
 			moduleImports,
 			(moduleName) => moduleName.startsWith(FILES_PROVIDER_OVERRIDE_MODULE),
@@ -5318,7 +5397,8 @@ function validateProviderBindingAuthority(authority, moduleImports) {
 	}
 
 	const directBindingContracts = [
-		[registrarName, FILES_PROVIDER_OVERRIDE_MODULE, 2],
+		[registrarName, FILES_PROVIDER_OVERRIDE_MODULE, 3],
+		[userDataFactoryName, userDataModule, 1],
 		[rootFactoryName, rootModule, 1],
 		[configurationFactoryName, configurationModule, 1],
 		[deleteCoordinatorName, "./features/workspace/delete-coordinator", 1],
@@ -5345,11 +5425,16 @@ function validateProviderBindingAuthority(authority, moduleImports) {
 		return false;
 	}
 	const registrarCalls = callsByName[registrarName];
+	const userDataFactoryCalls = callsByName[userDataFactoryName];
 	const rootFactoryCalls = callsByName[rootFactoryName];
 	const configurationFactoryCalls = callsByName[configurationFactoryName];
 	const deleteCoordinatorCalls = callsByName[deleteCoordinatorName];
 	const topologyCoordinatorCalls = callsByName[topologyCoordinatorName];
 
+	const userDataDeclaration = declarationInitializedByExactCall(
+		mainAnalysis,
+		userDataFactoryCalls[0],
+	);
 	const rootDeclaration = declarationInitializedByExactCall(
 		mainAnalysis,
 		rootFactoryCalls[0],
@@ -5359,17 +5444,27 @@ function validateProviderBindingAuthority(authority, moduleImports) {
 		configurationFactoryCalls[0],
 	);
 	if (
+		userDataDeclaration === undefined ||
 		rootDeclaration === undefined ||
 		configurationDeclaration === undefined ||
+		!isConstVariableDeclaration(userDataDeclaration) ||
 		!isConstVariableDeclaration(rootDeclaration) ||
 		!isConstVariableDeclaration(configurationDeclaration) ||
+		!ts.isIdentifier(userDataDeclaration.name) ||
 		!ts.isIdentifier(rootDeclaration.name) ||
 		!ts.isIdentifier(configurationDeclaration.name)
 	) {
 		return false;
 	}
+	const userDataName = userDataDeclaration.name.text;
 	const rootName = rootDeclaration.name.text;
 	const configurationName = configurationDeclaration.name.text;
+	const userDataRegistration = registrarCalls.find(
+		(call) =>
+			call.arguments.length === 2 &&
+			sameChain(call.arguments[0], [userDataSchemeName]) &&
+			sameChain(call.arguments[1], [userDataName]),
+	);
 	const rootRegistration = registrarCalls.find(
 		(call) =>
 			call.arguments.length === 2 &&
@@ -5385,8 +5480,11 @@ function validateProviderBindingAuthority(authority, moduleImports) {
 	const deleteCoordinatorCall = deleteCoordinatorCalls[0];
 	const topologyCoordinatorCall = topologyCoordinatorCalls[0];
 	if (
+		userDataRegistration === undefined ||
 		rootRegistration === undefined ||
 		configurationRegistration === undefined ||
+		userDataFactoryCalls[0].arguments.length !== 1 ||
+		!sameChain(userDataFactoryCalls[0].arguments[0], ["bridge"]) ||
 		rootFactoryCalls[0].arguments.length !== 2 ||
 		!sameChain(rootFactoryCalls[0].arguments[0], ["bridge"]) ||
 		!sameChain(rootFactoryCalls[0].arguments[1], ["workspaceCapabilities"]) ||
@@ -5396,15 +5494,23 @@ function validateProviderBindingAuthority(authority, moduleImports) {
 		topologyCoordinatorCall?.arguments.length === 0 ||
 		!sameChain(deleteCoordinatorCall.arguments[1], [rootName]) ||
 		!sameChain(topologyCoordinatorCall.arguments[0], [configurationName]) ||
+		userDataFactoryCalls[0].pos >= userDataRegistration.pos ||
+		userDataRegistration.pos >= rootFactoryCalls[0].pos ||
 		rootFactoryCalls[0].pos >= deleteCoordinatorCall.pos ||
 		deleteCoordinatorCall.pos >= configurationFactoryCalls[0].pos ||
 		configurationFactoryCalls[0].pos >= rootRegistration.pos
 	) {
 		return false;
 	}
+	const userDataSchemeArgument = unwrapExpression(
+		userDataRegistration.arguments[0],
+	);
 	const rootSchemeArgument = unwrapExpression(rootRegistration.arguments[0]);
 	const configurationSchemeArgument = unwrapExpression(
 		configurationRegistration.arguments[0],
+	);
+	const userDataRegistrationArgument = unwrapExpression(
+		userDataRegistration.arguments[1],
 	);
 	const rootRegistrationArgument = unwrapExpression(
 		rootRegistration.arguments[1],
@@ -5419,6 +5525,14 @@ function validateProviderBindingAuthority(authority, moduleImports) {
 		topologyCoordinatorCall.arguments[0],
 	);
 	return (
+		exactBindingReferences(mainSource, mainAnalysis, userDataSchemeName, [
+			namedImportLocalIdentifier(
+				mainSource,
+				userDataModule,
+				userDataSchemeName,
+			),
+			userDataSchemeArgument,
+		]) &&
 		exactBindingReferences(mainSource, mainAnalysis, rootSchemeName, [
 			namedImportLocalIdentifier(mainSource, rootModule, rootSchemeName),
 			rootSchemeArgument,
@@ -5430,6 +5544,10 @@ function validateProviderBindingAuthority(authority, moduleImports) {
 				configurationSchemeName,
 			),
 			configurationSchemeArgument,
+		]) &&
+		exactBindingReferences(mainSource, mainAnalysis, userDataName, [
+			userDataDeclaration.name,
+			userDataRegistrationArgument,
 		]) &&
 		exactBindingReferences(mainSource, mainAnalysis, rootName, [
 			rootDeclaration.name,

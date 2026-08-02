@@ -497,6 +497,21 @@ CommandsRegistry.registerCommand("plain.rogueThemeCommand", () => undefined);
 	});
 
 	it("rejects duplicate providers and reversed fixed-scheme registration", () => {
+		const missingUserDataRegistration = mutated("main", (source) =>
+			replaceOnce(
+				source,
+				"registerCustomProvider(PLAIN_USER_DATA_SCHEME, userDataFileSystemProvider);",
+				"",
+			),
+		);
+		expectFailure(
+			missingUserDataRegistration,
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.bootstrap,
+		);
+		expectFailure(
+			withAppSources(missingUserDataRegistration),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
+		);
 		const duplicateConfigurationFactory = mutated("main", (source) =>
 			replaceOnce(
 				source,

@@ -9,6 +9,7 @@ import {
 	TERMINAL_EXIT_EVENT,
 	WORKSPACE_SEARCH_TEXT_WAKE_EVENT,
 	WORKSPACE_WATCH_WAKE_EVENT,
+	USER_DATA_CHANGED_EVENT,
 	type PlainBridge,
 } from "./contracts";
 import {
@@ -16,6 +17,12 @@ import {
 	decodeNativeCloseRequest,
 	frozenCompleteCloseRequest,
 } from "./lifecycle-codec";
+import {
+	decodeUserDataChangedEvent,
+	decodeUserDataResult,
+	frozenUserDataReadRequest,
+	frozenUserDataWriteRequest,
+} from "./user-data-codec";
 import {
 	decodeBackupReadAllResult,
 	decodeBackupVoid,
@@ -216,6 +223,27 @@ export function createNativeBridge(): PlainBridge {
 		lifecycleRequestClose: async () => {
 			decodeLifecycleVoid(
 				await invoke<unknown>("lifecycle_request_close", { request: {} }),
+			);
+		},
+		userDataRead: async (resource) => {
+			const request = frozenUserDataReadRequest(resource);
+			return decodeUserDataResult(
+				await invoke<unknown>("user_data_read", { request }),
+			);
+		},
+		userDataWrite: async (resource, expectedRevision, content) => {
+			const request = frozenUserDataWriteRequest(
+				resource,
+				expectedRevision,
+				content,
+			);
+			return decodeUserDataResult(
+				await invoke<unknown>("user_data_write", { request }),
+			);
+		},
+		onUserDataChanged: async (listener) => {
+			return listen<unknown>(USER_DATA_CHANGED_EVENT, (event) =>
+				listener(decodeUserDataChangedEvent(event.payload)),
 			);
 		},
 		workspaceCapabilities: async () =>
