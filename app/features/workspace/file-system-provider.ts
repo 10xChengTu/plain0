@@ -668,6 +668,39 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 		}
 	}
 
+	async plainPublishFile(
+		resource: URI,
+		content: Uint8Array,
+	): Promise<PlainWorkspaceWriteFileResult> {
+		this.requireMutationDispatchAllowed();
+		const resolved = this.resolveMutationResource(resource);
+		try {
+			const result = await this.#bridge.workspacePublishFile(
+				resolved.rootId,
+				resolved.relativePath,
+				content,
+			);
+			if (result.status === "written") {
+				this.trackOpenResource(
+					resolved.rootId,
+					resolved.relativePath,
+					resolved.resource,
+				);
+				this.fireCreated(resolved.resource);
+				return Object.freeze({
+					status: result.status,
+					stat: providerStat(result.stat),
+				});
+			}
+			this.fireRootUpdated(resolved.resource);
+			return result;
+		} catch (error) {
+			const failure = mapCreateError(error);
+			if (failure.rescan) this.fireRootUpdated(resolved.resource);
+			throw failure.error;
+		}
+	}
+
 	async plainCreateFile(resource: URI): Promise<PlainWorkspaceProviderStat> {
 		this.requireMutationDispatchAllowed();
 		const resolved = this.resolveMutationResource(resource);

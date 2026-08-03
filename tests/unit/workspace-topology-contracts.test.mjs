@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
 	validateAppHtmlAuthority,
 	validateLocalWorkspaceWorkflowCommands,
+	validatePlainUntitledWorkflow,
 	validateViteResolverAuthority,
 	validateWorkspaceTopologyContracts,
 	WORKSPACE_TOPOLOGY_CONTRACT_FAILURES,
@@ -313,6 +314,67 @@ describe("workspace topology source contracts", () => {
 					mutatedProductionAppSource(relativePath, () => mutatedSource),
 				),
 			).toContain(WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.localWorkflow);
+		}
+	});
+
+	it("locks Untitled creation, verified publication, and recovery cleanup ordering", () => {
+		const relativePath = "app/features/workspace/untitled-workflow.ts";
+		const production = productionAppSourceByPath.get(relativePath);
+		expect(production).toBeTypeOf("string");
+		expect(validatePlainUntitledWorkflow(production)).toBe(true);
+
+		for (const mutate of [
+			(source) =>
+				replaceOnce(
+					source,
+					"this.bridge.scratchCreate()",
+					"Promise.resolve({ scratchId: crypto.randomUUID() })",
+				),
+			(source) =>
+				replaceOnce(
+					source,
+					"this.topologyCoordinator.runMutation(async () =>",
+					"(async () =>",
+				),
+			(source) =>
+				replaceOnce(
+					source,
+					"this.workspaceProvider.plainReadFile(target)",
+					"this.bridge.workspaceReadFile(target)",
+				),
+			(source) =>
+				replaceOnce(
+					source,
+					"forceReplaceDirty: true",
+					"forceReplaceDirty: false",
+				),
+			(source) => `type IFileDialogService = unknown;\n${source}`,
+			(source) =>
+				replaceOnce(
+					source,
+					`await model.revert();
+			try {
+				await this.services.workingCopyBackupService.discardBackup(model);`,
+					`try {
+				await this.services.workingCopyBackupService.discardBackup(model);
+				await model.revert();`,
+				),
+			(source) =>
+				replaceOnce(
+					source,
+					`const previousSave = CommandsRegistry.getCommand(
+		PLAIN_UNTITLED_COMMAND_IDS.save,
+	);`,
+					"const previousSave = CommandsRegistry.getCommands().get(PLAIN_UNTITLED_COMMAND_IDS.save);",
+				),
+		]) {
+			const mutatedSource = mutate(production);
+			expect(validatePlainUntitledWorkflow(mutatedSource)).toBe(false);
+			expect(
+				validateWorkspaceTopologyContracts(
+					mutatedProductionAppSource(relativePath, () => mutatedSource),
+				),
+			).toContain(WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.untitledWorkflow);
 		}
 	});
 

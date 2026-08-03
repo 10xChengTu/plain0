@@ -6806,7 +6806,7 @@ function workspaceMoveOutcomeUnknown(): WorkspaceMoveOutcomeUnknownError {
 			"\tasync stat(resource: URI): Promise<PlainWorkspaceProviderStat> {\n\t\tthis.changeEmitter.fire(Object.freeze([]));",
 		);
 		expect(validateWorkspaceProviderCopyBoundary(readEvent)).toContain(
-			"provider change events must remain confined to the audited create, copy, rename, move and rescan closure",
+			"provider change events must remain confined to the audited create, publish, copy, rename, move and rescan closure",
 		);
 
 		const bridgeAlias = mutateProvider(
@@ -6845,7 +6845,7 @@ function workspaceMoveOutcomeUnknown(): WorkspaceMoveOutcomeUnknownError {
 			"\tasync readdir(resource: URI): Promise<[string, FileType][]> {\n\t\tthis.fireDeleted(resource);",
 		);
 		expect(validateWorkspaceProviderCopyBoundary(extraFireDeleted)).toContain(
-			"provider change events must remain confined to the audited create, copy, rename, move and rescan closure",
+			"provider change events must remain confined to the audited create, publish, copy, rename, move and rescan closure",
 		);
 
 		const extraFireCreated = mutateProvider(
@@ -6853,7 +6853,7 @@ function workspaceMoveOutcomeUnknown(): WorkspaceMoveOutcomeUnknownError {
 			"\tasync readdir(resource: URI): Promise<[string, FileType][]> {\n\t\tthis.fireCreated(resource);",
 		);
 		expect(validateWorkspaceProviderCopyBoundary(extraFireCreated)).toContain(
-			"provider change events must remain confined to the audited create, copy, rename, move and rescan closure",
+			"provider change events must remain confined to the audited create, publish, copy, rename, move and rescan closure",
 		);
 
 		const extraWatchStateReference = mutateProvider(
@@ -6893,8 +6893,12 @@ function workspaceMoveOutcomeUnknown(): WorkspaceMoveOutcomeUnknownError {
 			],
 			[
 				mutateProvider(
-					"this.fireCreated(resolved.resource);",
-					"this.fireCreated(resource);",
+					`"file",
+			);
+			this.fireCreated(resolved.resource);`,
+					`"file",
+			);
+			this.fireCreated(resource);`,
 				),
 				"plainCreateFile must gate first, snapshot once, validate one native receipt and emit one target addition",
 			],
@@ -6958,6 +6962,11 @@ function workspaceMoveOutcomeUnknown(): WorkspaceMoveOutcomeUnknownError {
 
 	it("requires every advertised mutation consumer to retain the all-five gate as its first statement", () => {
 		for (const [methodName, validator, expectedFailure] of [
+			[
+				"plainPublishFile",
+				"provider",
+				"plainPublishFile must gate first, publish once, validate metadata and emit only audited target events",
+			],
 			[
 				"plainWriteFile",
 				"provider",

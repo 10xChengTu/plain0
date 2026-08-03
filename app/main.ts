@@ -16,8 +16,13 @@ import { ITextModelService } from "@codingame/monaco-vscode-api/vscode/vs/editor
 import { ILanguageFeaturesService } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/services/languageFeatures.service";
 import { IMultiDiffSourceResolverService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/multiDiffEditor/browser/multiDiffSourceResolverService.service";
 import { IFileService } from "@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files.service";
+import { IDialogService } from "@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service";
 import { LifecyclePhase } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/lifecycle/common/lifecycle";
 import { IWorkbenchThemeService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service";
+import { IEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service";
+import { ITextEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/textfile/common/textEditorService.service";
+import { IUntitledTextEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/untitled/common/untitledTextEditorService.service";
+import { IWorkingCopyBackupService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyBackup.service";
 
 import { EXCLUDED_SURFACE_GUARD_MARKER } from "./excluded-surface-policy";
 import { enforceExcludedWorkbenchSurfaces } from "./excluded-surfaces";
@@ -57,6 +62,7 @@ import {
 	registerLocalWorkspaceCommands,
 	reportInitialWorkspaceRestoreStatus,
 } from "./features/workspace/local-workflow-commands";
+import { registerPlainUntitledWorkflow } from "./features/workspace/untitled-workflow";
 import {
 	createPlainWorkspaceConfigurationProvider,
 	PLAIN_WORKSPACE_CONFIGURATION_SCHEME,
@@ -156,6 +162,8 @@ async function bootstrap(): Promise<void> {
 		ReturnType<typeof registerWorkspaceCommands> | undefined;
 	let localWorkspaceCommands:
 		ReturnType<typeof registerLocalWorkspaceCommands> | undefined;
+	let untitledWorkflowRegistration:
+		ReturnType<typeof registerPlainUntitledWorkflow> | undefined;
 	let preferenceCommandsRegistration:
 		ReturnType<typeof registerPlainPreferenceCommands> | undefined;
 	let themeCommandsRegistration:
@@ -187,6 +195,7 @@ async function bootstrap(): Promise<void> {
 			void stopListening();
 			workspaceCommands?.dispose();
 			localWorkspaceCommands?.dispose();
+			untitledWorkflowRegistration?.dispose();
 			preferenceCommandsRegistration?.dispose();
 			workspaceDeleteCoordinator.dispose();
 			themeCommandsRegistration?.dispose();
@@ -271,6 +280,19 @@ async function bootstrap(): Promise<void> {
 	localWorkspaceCommands = registerLocalWorkspaceCommands(
 		bridge,
 		workspaceTopologyCoordinator,
+	);
+	untitledWorkflowRegistration = registerPlainUntitledWorkflow(
+		bridge,
+		workspaceTopologyCoordinator,
+		workspaceFileSystemProvider,
+		{
+			editorService: await getService(IEditorService),
+			textEditorService: await getService(ITextEditorService),
+			untitledTextEditorService: await getService(IUntitledTextEditorService),
+			workingCopyBackupService: await getService(IWorkingCopyBackupService),
+			dialogService: await getService(IDialogService),
+			notificationService: await getService(INotificationService),
+		},
 	);
 	await reportInitialWorkspaceRestoreStatus(
 		bridge,

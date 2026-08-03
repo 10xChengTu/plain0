@@ -4,7 +4,7 @@ import {
 	streamToBuffer,
 } from "@codingame/monaco-vscode-api/vscode/vs/base/common/buffer";
 import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
 	BackupEntry,
@@ -392,6 +392,52 @@ describe("PlainWorkingCopyBackupService", () => {
 		await service.discardBackup(identifier);
 		expect(state.scratchDiscards).toEqual([scratchId]);
 		expect(state.discards).toEqual([]);
+		expect(service.hasBackupSync(identifier)).toBe(false);
+	});
+
+	it("coalesces concurrent scratch discards so tracker cleanup remains idempotent", async () => {
+		let release!: () => void;
+		const pending = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const scratchDiscard = vi.fn(async () => pending);
+		const { bridge } = createFakeBridge({ scratchDiscard });
+		configurePlainWorkingCopyBackupBridge(bridge);
+		const service = new PlainWorkingCopyBackupService();
+		const identifier = identifierFor(
+			plainUntitledResourceForScratchId(
+				"00000000-0000-4000-8000-000000000113",
+			).toString(),
+		);
+		await service.backup(identifier, readableFromString("dirty"));
+
+		const first = service.discardBackup(identifier);
+		const second = service.discardBackup(identifier);
+		expect(scratchDiscard).toHaveBeenCalledTimes(1);
+		release();
+		await Promise.all([first, second]);
+		await service.discardBackup(identifier);
+		expect(scratchDiscard).toHaveBeenCalledTimes(1);
+		expect(service.hasBackupSync(identifier)).toBe(false);
+	});
+
+	it("re-enables native scratch cleanup after a discarded working copy is backed up again", async () => {
+		const scratchDiscard = vi.fn(async () => undefined);
+		const { bridge } = createFakeBridge({ scratchDiscard });
+		configurePlainWorkingCopyBackupBridge(bridge);
+		const service = new PlainWorkingCopyBackupService();
+		const identifier = identifierFor(
+			plainUntitledResourceForScratchId(
+				"00000000-0000-4000-8000-000000000114",
+			).toString(),
+		);
+
+		await service.backup(identifier, readableFromString("first"));
+		await service.discardBackup(identifier);
+		await service.backup(identifier, readableFromString("second"));
+		await service.discardBackup(identifier);
+
+		expect(scratchDiscard).toHaveBeenCalledTimes(2);
 		expect(service.hasBackupSync(identifier)).toBe(false);
 	});
 

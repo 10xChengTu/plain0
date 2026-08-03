@@ -1686,6 +1686,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 				parent.expression.text === "registerWorkspaceDeleteCoordinator" ||
 				parent.expression.text === "registerWorkspaceCommands" ||
 				parent.expression.text === "registerLocalWorkspaceCommands" ||
+				parent.expression.text === "registerPlainUntitledWorkflow" ||
 				parent.expression.text === "reportInitialWorkspaceRestoreStatus" ||
 				parent.expression.text === "configurePlainWorkingCopyBackupBridge" ||
 				parent.expression.text === "configurePlainLifecycleBridge" ||
@@ -1747,13 +1748,18 @@ export function validateWorkspaceProviderBootstrap(source) {
 		) {
 			return true;
 		}
-		return (
+		const isExistingConsumer =
 			ts.isCallExpression(parent) &&
 			parent.arguments[1] === node &&
 			ts.isIdentifier(parent.expression) &&
 			(parent.expression.text === "registerWorkspaceDeleteCoordinator" ||
-				parent.expression.text === "registerCustomProvider")
-		);
+				parent.expression.text === "registerCustomProvider");
+		const isUntitledConsumer =
+			ts.isCallExpression(parent) &&
+			parent.arguments[2] === node &&
+			ts.isIdentifier(parent.expression) &&
+			parent.expression.text === "registerPlainUntitledWorkflow";
+		return isExistingConsumer || isUntitledConsumer;
 	}
 	function visit(node) {
 		if (ts.isCallExpression(node)) {
@@ -15977,6 +15983,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		"readFile",
 		"plainReadFile",
 		"plainWriteFile",
+		"plainPublishFile",
 		"plainCreateFile",
 		"plainCreateDirectory",
 		"writeFile",
@@ -16223,6 +16230,11 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		(member) =>
 			ts.isMethodDeclaration(member) &&
 			typeScriptMemberName(member) === "plainWriteFile",
+	);
+	const plainPublishMethods = provider.members.filter(
+		(member) =>
+			ts.isMethodDeclaration(member) &&
+			typeScriptMemberName(member) === "plainPublishFile",
 	);
 	const plainCreateFileMethods = provider.members.filter(
 		(member) =>
@@ -16658,6 +16670,69 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			);
 		}
 	}
+	if (plainPublishMethods.length !== 1) {
+		failures.push(
+			"Plain workspace provider must expose exactly one audited private plainPublishFile seam",
+		);
+	} else {
+		const [plainPublish] = plainPublishMethods;
+		const parameterNames = plainPublish.parameters.map((parameter) =>
+			ts.isIdentifier(parameter.name) ? parameter.name.text : undefined,
+		);
+		const normalizedBody = plainPublish.body
+			?.getText(sourceFile)
+			.replaceAll(/\s+/g, "");
+		const expectedBody = `{
+			this.requireMutationDispatchAllowed();
+			const resolved = this.resolveMutationResource(resource);
+			try {
+				const result = await this.#bridge.workspacePublishFile(
+					resolved.rootId,
+					resolved.relativePath,
+					content,
+				);
+				if (result.status === "written") {
+					this.trackOpenResource(
+						resolved.rootId,
+						resolved.relativePath,
+						resolved.resource,
+					);
+					this.fireCreated(resolved.resource);
+					return Object.freeze({
+						status: result.status,
+						stat: providerStat(result.stat),
+					});
+				}
+				this.fireRootUpdated(resolved.resource);
+				return result;
+			} catch (error) {
+				const failure = mapCreateError(error);
+				if (failure.rescan) this.fireRootUpdated(resolved.resource);
+				throw failure.error;
+			}
+		}`.replaceAll(/\s+/g, "");
+		if (
+			!sameArray(parameterNames, ["resource", "content"]) ||
+			!startsWithMutationGate(plainPublish) ||
+			providerMethodCallCount(
+				plainPublish,
+				"bridge",
+				"workspacePublishFile",
+			) !== 1 ||
+			directThisMethodCallCount(plainPublish, "resolveMutationResource") !==
+				1 ||
+			directThisMethodCallCount(plainPublish, "trackOpenResource") !== 1 ||
+			directThisMethodCallCount(plainPublish, "fireCreated") !== 1 ||
+			directThisMethodCallCount(plainPublish, "fireRootUpdated") !== 2 ||
+			identifierCallCount(plainPublish, "providerStat") !== 1 ||
+			identifierCallCount(plainPublish, "mapCreateError") !== 1 ||
+			normalizedBody !== expectedBody
+		) {
+			failures.push(
+				"plainPublishFile must gate first, publish once, validate metadata and emit only audited target events",
+			);
+		}
+	}
 	function validatePlainCreateMethod(
 		methods,
 		methodName,
@@ -17056,6 +17131,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	let renameBridgeReferences = 0;
 	let moveBridgeReferences = 0;
 	let deleteBridgeReferences = 0;
+	let publishFileBridgeReferences = 0;
 	const auditedMutationBridgeNames = new Set([
 		"workspaceCreateFile",
 		"workspaceCreateDirectory",
@@ -17063,6 +17139,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		"workspaceRename",
 		"workspaceMove",
 		"workspaceCommitDeleteEntry",
+		"workspacePublishFile",
 	]);
 	const expectedBridgeMethods = new Map([
 		["workspaceWatch", 1],
@@ -17070,6 +17147,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		["workspaceReadDirectory", 1],
 		["workspaceReadFile", 1],
 		["workspaceWriteFile", 1],
+		["workspacePublishFile", 1],
 		["workspaceCreateFile", 1],
 		["workspaceCreateDirectory", 1],
 		["workspaceCopy", 1],
@@ -17142,7 +17220,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	]);
 	const protectedFunctionReferences = new Map([
 		["createdProviderStat", 2],
-		["mapCreateError", 2],
+		["mapCreateError", 3],
 		["requireNoOverwriteOptions", 2],
 		["copyMoveCommandErrorCode", 2],
 		["mapCopyMoveError", 3],
@@ -17180,6 +17258,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		"plainCreateFile",
 		"plainCreateDirectory",
 		"plainWriteFile",
+		"plainPublishFile",
 		"delete",
 		"copy",
 		"rename",
@@ -17706,6 +17785,9 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 				case "workspaceCommitDeleteEntry":
 					deleteBridgeReferences += 1;
 					break;
+				case "workspacePublishFile":
+					publishFileBridgeReferences += 1;
+					break;
 			}
 		}
 		if (
@@ -17791,7 +17873,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		);
 	}
 	if (
-		privateBridgeReferences !== 14 ||
+		privateBridgeReferences !== 15 ||
 		privatePolicyReferences !== 3 ||
 		privateWatchStateReferences !== 7
 	) {
@@ -17805,7 +17887,8 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		copyBridgeReferences !== 1 ||
 		renameBridgeReferences !== 1 ||
 		moveBridgeReferences !== 1 ||
-		deleteBridgeReferences !== 1
+		deleteBridgeReferences !== 1 ||
+		publishFileBridgeReferences !== 1
 	) {
 		failures.push(
 			"Plain workspace mutation bridges must each have exactly one direct provider call site",
@@ -17836,15 +17919,15 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		);
 	}
 	if (
-		fireCreatedCallCount !== 4 ||
+		fireCreatedCallCount !== 5 ||
 		fireDeletedCallCount !== 2 ||
 		fireMovedCallCount !== 2 ||
-		fireRootUpdatedCallCount !== 8 ||
+		fireRootUpdatedCallCount !== 10 ||
 		fireRootsUpdatedCallCount !== 2 ||
 		changeEmitterFireCallCount !== 7
 	) {
 		failures.push(
-			"provider change events must remain confined to the audited create, copy, rename, move and rescan closure",
+			"provider change events must remain confined to the audited create, publish, copy, rename, move and rescan closure",
 		);
 	}
 

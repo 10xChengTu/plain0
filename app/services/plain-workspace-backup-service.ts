@@ -271,6 +271,8 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 	private readonly index = new Map<string, SyncIndexEntry>();
 	private readonly storageKeys = new Map<string, string>();
 	private readonly storageRootIds = new Map<string, string>();
+	private readonly discardedScratchIds = new Set<string>();
+	private readonly scratchDiscardOperations = new Map<string, Promise<void>>();
 
 	hasBackupSync(
 		identifier: IWorkingCopyIdentifier,
@@ -312,6 +314,7 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 		if (scratchResult.status === "fulfilled") {
 			this.removeIndexedDomain("scratch");
 			for (const entry of scratchResult.value) {
+				this.discardedScratchIds.delete(entry.scratchId);
 				const identifier = Object.freeze({
 					resource: plainUntitledResourceForScratchId(entry.scratchId),
 					typeId: "",
@@ -415,6 +418,7 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 			if (scratchId !== undefined) {
 				if (bytes.byteLength > MAX_BACKUP_PAYLOAD_BYTES) backupTooLarge();
 				await bridge.scratchWrite(scratchId, bytes);
+				this.discardedScratchIds.delete(scratchId);
 				return;
 			}
 			const baselineSha256 = await this.baselineSha256(identifier, meta);
@@ -462,15 +466,34 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 		const previousStorageKey = this.storageKeys.get(resourceKey);
 		const previousStorageRootId = this.storageRootIds.get(resourceKey);
 		const scratchId = scratchIdFromPlainUntitledResource(identifier.resource);
+		if (scratchId !== undefined) {
+			if (this.discardedScratchIds.has(scratchId)) {
+				this.index.delete(resourceKey);
+				return;
+			}
+			let operation = this.scratchDiscardOperations.get(scratchId);
+			if (operation === undefined) {
+				operation = bridge
+					.scratchDiscard(scratchId)
+					.then(() => {
+						this.discardedScratchIds.add(scratchId);
+					})
+					.finally(() => {
+						this.scratchDiscardOperations.delete(scratchId);
+					});
+				this.scratchDiscardOperations.set(scratchId, operation);
+			}
+			await operation;
+			this.index.delete(resourceKey);
+			this.storageKeys.delete(resourceKey);
+			this.storageRootIds.delete(resourceKey);
+			return;
+		}
 		const resourceParts = workspaceResourceParts(identifier.resource);
 		this.index.delete(resourceKey);
 		this.storageKeys.delete(resourceKey);
 		this.storageRootIds.delete(resourceKey);
 		try {
-			if (scratchId !== undefined) {
-				await bridge.scratchDiscard(scratchId);
-				return;
-			}
 			const wireKey =
 				previousStorageKey ?? (await backupKeyForResource(identifier.resource));
 			const rootId = previousStorageRootId ?? resourceParts?.rootId;
@@ -492,6 +515,12 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 		const bridge = requireBridge();
 		const except = filter?.except;
 		if (except === undefined || except.length === 0) {
+			const indexedScratchIds = [...this.index.values()].flatMap((entry) => {
+				const scratchId = scratchIdFromPlainUntitledResource(
+					entry.identifier.resource,
+				);
+				return scratchId === undefined ? [] : [scratchId];
+			});
 			const [workspaceResult, scratchResult] = await Promise.allSettled([
 				bridge.backupDiscardAll(),
 				bridge.scratchDiscardAll(),
@@ -500,6 +529,9 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 				this.removeIndexedDomain("workspace");
 			}
 			if (scratchResult.status === "fulfilled") {
+				for (const scratchId of indexedScratchIds) {
+					this.discardedScratchIds.add(scratchId);
+				}
 				this.removeIndexedDomain("scratch");
 			}
 			if (workspaceResult.status === "rejected") {

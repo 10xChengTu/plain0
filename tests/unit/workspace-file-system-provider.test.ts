@@ -679,6 +679,7 @@ describe("Plain workspace file system provider", () => {
 			supportedCapabilities,
 		) as (keyof WorkspaceCapabilities)[]) {
 			const write = vi.fn();
+			const publish = vi.fn();
 			const createFile = vi.fn();
 			const createDirectory = vi.fn();
 			const copy = vi.fn();
@@ -692,6 +693,7 @@ describe("Plain workspace file system provider", () => {
 			const provider = createPlainWorkspaceFileSystemProvider(
 				testBridge({
 					workspaceWriteFile: write,
+					workspacePublishFile: publish,
 					workspaceCreateFile: createFile,
 					workspaceCreateDirectory: createDirectory,
 					workspaceCopy: copy,
@@ -714,6 +716,14 @@ describe("Plain workspace file system provider", () => {
 			);
 			expect(error.code).toBe(FileSystemProviderErrorCode.NoPermissions);
 			expect(write).not.toHaveBeenCalled();
+			const publishError = await rejected(
+				provider.plainPublishFile(
+					workspaceUri("readonly-new.txt"),
+					new Uint8Array([1]),
+				),
+			);
+			expect(publishError.code).toBe(FileSystemProviderErrorCode.NoPermissions);
+			expect(publish).not.toHaveBeenCalled();
 			let uriReads = 0;
 			let optionReads = 0;
 			const unreadableResource = Object.create(null) as URI;
@@ -2216,6 +2226,48 @@ describe("Plain workspace file system provider", () => {
 			"src/main.ts",
 			versionA,
 			content,
+		);
+	});
+
+	it("publishes a new file through the private provider seam and emits one created event", async () => {
+		const publish = vi.fn(async () =>
+			Object.freeze({
+				status: "written" as const,
+				stat: Object.freeze({
+					kind: "file" as const,
+					size: 3,
+					mtime: 30,
+					ctime: 20,
+					version: versionB,
+				}),
+			}),
+		);
+		const provider = createPlainWorkspaceFileSystemProvider(
+			testBridge({ workspacePublishFile: publish }),
+		);
+		const events: Array<readonly { type: FileChangeType; resource: URI }[]> =
+			[];
+		const listener = provider.onDidChangeFile((event) => events.push(event));
+		const content = Uint8Array.from([4, 5, 6]);
+
+		await expect(
+			provider.plainPublishFile(workspaceUri("src/new.ts"), content),
+		).resolves.toEqual({
+			status: "written",
+			stat: {
+				type: FileType.File,
+				size: 3,
+				mtime: 30,
+				ctime: 20,
+				plainVersion: versionB,
+			},
+		});
+		listener.dispose();
+		expect(publish).toHaveBeenCalledWith(rootId, "src/new.ts", content);
+		expect(events).toHaveLength(1);
+		expect(events[0]?.[0]?.type).toBe(FileChangeType.ADDED);
+		expect(events[0]?.[0]?.resource.toString()).toBe(
+			workspaceUri("src/new.ts").toString(),
 		);
 	});
 

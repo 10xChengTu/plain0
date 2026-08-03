@@ -19,6 +19,8 @@ export const WORKSPACE_TOPOLOGY_CONTRACT_FAILURES = Object.freeze({
 		"GUARDED_WORKSPACE_COMMAND_IDS must remain the exact closed set registered as stable rejections",
 	localWorkflow:
 		"local Open File and Recent commands must preserve opaque ids, serialized topology projection, DOM confirmation, and path-free UI",
+	untitledWorkflow:
+		"Plain Untitled must keep Rust scratch ownership, provider-verified Save As, dirty preservation, and DOM close confirmation",
 });
 
 export const EXPECTED_GUARDED_WORKSPACE_COMMAND_IDS = Object.freeze([
@@ -30,7 +32,6 @@ export const EXPECTED_GUARDED_WORKSPACE_COMMAND_IDS = Object.freeze([
 	"workbench.action.duplicateWorkspaceInNewWindow",
 	"workbench.action.files.openFileFolder",
 	"workbench.action.files.openFileInNewWindow",
-	"workbench.action.files.newUntitledFile",
 	"workbench.action.newWindow",
 	"vscode.openFolder",
 	"vscode.newWindow",
@@ -229,6 +230,11 @@ const DIRECT_COMMAND_REGISTRATION_MANIFEST = Object.freeze([
 	Object.freeze({
 		relativePath: "app/features/workspace/local-workflow-commands.ts",
 		count: 4,
+	}),
+	Object.freeze({
+		relativePath: "app/features/workspace/untitled-workflow.ts",
+		count: 3,
+		readCount: 2,
 	}),
 	Object.freeze({
 		relativePath: "app/features/themes/plain-theme-picker.ts",
@@ -524,6 +530,18 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput",
 	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service",
 	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service",
+	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
+	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands",
+	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs",
+	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service",
+	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service",
+	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/editor",
+	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/editor/editorInput",
+	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service",
+	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/textfile/common/textEditorService.service",
+	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/untitled/common/untitledTextEditorModel",
+	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/untitled/common/untitledTextEditorService.service",
+	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyBackup.service",
 	"app/features/workspace/workspace-configuration-provider.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/event",
 	"app/features/workspace/workspace-configuration-provider.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle",
 	"app/features/workspace/workspace-configuration-provider.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
@@ -536,10 +554,15 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/services/languageFeatures.service",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/services/model.service",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/services/resolverService.service",
+	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files.service",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/multiDiffEditor/browser/multiDiffSourceResolverService.service",
+	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/lifecycle/common/lifecycle",
+	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/textfile/common/textEditorService.service",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service",
+	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/untitled/common/untitledTextEditorService.service",
+	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyBackup.service",
 	"app/main.ts:@codingame/monaco-vscode-configuration-service-override",
 	"app/main.ts:@codingame/monaco-vscode-files-service-override",
 	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service",
@@ -5446,6 +5469,11 @@ function validateProviderBindingAuthority(authority, moduleImports) {
 	const configurationFactoryCalls = callsByName[configurationFactoryName];
 	const deleteCoordinatorCalls = callsByName[deleteCoordinatorName];
 	const topologyCoordinatorCalls = callsByName[topologyCoordinatorName];
+	const untitledWorkflowCalls = directCallsNamed(
+		mainSource,
+		"registerPlainUntitledWorkflow",
+		bootstrapOwner,
+	);
 
 	const userDataDeclaration = declarationInitializedByExactCall(
 		mainAnalysis,
@@ -5505,10 +5533,13 @@ function validateProviderBindingAuthority(authority, moduleImports) {
 		!sameChain(rootFactoryCalls[0].arguments[0], ["bridge"]) ||
 		!sameChain(rootFactoryCalls[0].arguments[1], ["workspaceCapabilities"]) ||
 		configurationFactoryCalls[0].arguments.length !== 0 ||
+		untitledWorkflowCalls.length !== 1 ||
+		untitledWorkflowCalls[0].arguments.length !== 4 ||
 		deleteCoordinatorCall?.arguments.length !== 3 ||
 		!sameChain(deleteCoordinatorCall.arguments[0], ["bridge"]) ||
 		topologyCoordinatorCall?.arguments.length === 0 ||
 		!sameChain(deleteCoordinatorCall.arguments[1], [rootName]) ||
+		!sameChain(untitledWorkflowCalls[0].arguments[2], [rootName]) ||
 		!sameChain(topologyCoordinatorCall.arguments[0], [configurationName]) ||
 		userDataFactoryCalls[0].pos >= userDataRegistration.pos ||
 		userDataRegistration.pos >= rootFactoryCalls[0].pos ||
@@ -5540,6 +5571,9 @@ function validateProviderBindingAuthority(authority, moduleImports) {
 	const topologyCoordinatorProviderArgument = unwrapExpression(
 		topologyCoordinatorCall.arguments[0],
 	);
+	const untitledWorkflowProviderArgument = unwrapExpression(
+		untitledWorkflowCalls[0].arguments[2],
+	);
 	return (
 		exactBindingReferences(mainSource, mainAnalysis, userDataSchemeName, [
 			namedImportLocalIdentifier(
@@ -5569,6 +5603,7 @@ function validateProviderBindingAuthority(authority, moduleImports) {
 			rootDeclaration.name,
 			deleteCoordinatorProviderArgument,
 			rootRegistrationArgument,
+			untitledWorkflowProviderArgument,
 		]) &&
 		exactBindingReferences(mainSource, mainAnalysis, configurationName, [
 			configurationDeclaration.name,
@@ -5604,10 +5639,14 @@ function validateDirectCommandRegistrationManifest(authority, registrations) {
 	return (
 		new Set(manifestPaths).size === manifestPaths.length &&
 		registrations.length === expectedCount &&
-		relevantManifestEntries.every(({ relativePath, count }) => {
+		relevantManifestEntries.every(({ relativePath, count, readCount = 0 }) => {
 			const sourceFile = authority.filesByPath[relativePath]?.sourceFile;
 			const sourceRegistrations = registrations.filter(
 				({ sourceFile }) => sourceFile.fileName === relativePath,
+			);
+			const sourceReads = authority.callFacts.filter(
+				({ sourceFile, staticName }) =>
+					sourceFile.fileName === relativePath && staticName === "getCommand",
 			);
 			if (sourceFile === undefined || sourceRegistrations.length !== count) {
 				return false;
@@ -5620,12 +5659,18 @@ function validateDirectCommandRegistrationManifest(authority, registrations) {
 			const receivers = sourceRegistrations.map(({ call }) =>
 				directMethodReceiver(call, "CommandsRegistry", "registerCommand"),
 			);
+			const readReceivers = sourceReads.map(({ call }) =>
+				directMethodReceiver(call, "CommandsRegistry", "getCommand"),
+			);
 			return (
 				commandRegistryImport !== undefined &&
 				receivers.every((receiver) => receiver !== undefined) &&
+				sourceReads.length === readCount &&
+				readReceivers.every((receiver) => receiver !== undefined) &&
 				hasExactIdentifierReferences(sourceFile, "CommandsRegistry", [
 					commandRegistryImport,
 					...receivers,
+					...readReceivers,
 				])
 			);
 		})
@@ -5873,6 +5918,70 @@ export function validateLocalWorkspaceWorkflowCommands(source) {
 	);
 }
 
+export function validatePlainUntitledWorkflow(source) {
+	if (typeof source !== "string") return false;
+	const sourceFile = parse(
+		"app/features/workspace/untitled-workflow.ts",
+		source,
+	);
+	if (sourceFile.parseDiagnostics.length !== 0) return false;
+	const compact = source.replace(/\s+/gu, "");
+	const includesTokens = (expected) =>
+		compact.includes(expected.replace(/\s+/gu, ""));
+	const forbidden =
+		/\bIFileDialogService\b|\blocalStorage\b|\bsessionStorage\b|\bindexedDB\b|(?:window|globalThis)\s*\.\s*confirm\b|scheme\s*:\s*["']file["']/u;
+	const saveStart = source.indexOf("private async doSaveInput(");
+	const saveEnd = source.indexOf("private attachInput(", saveStart + 1);
+	if (saveStart < 0 || saveEnd <= saveStart) return false;
+	const saveBody = source.slice(saveStart, saveEnd);
+	const readIndex = saveBody.indexOf("plainReadFile(");
+	const replaceIndex = saveBody.indexOf("replaceEditors(");
+	const revertIndex = saveBody.indexOf("await model.revert();");
+	const discardIndex = saveBody.indexOf(
+		"await this.services.workingCopyBackupService.discardBackup(model);",
+	);
+	const orderedAcceptance =
+		readIndex >= 0 &&
+		replaceIndex > readIndex &&
+		revertIndex > replaceIndex &&
+		discardIndex > revertIndex;
+	const commandRegistrationCount =
+		compact.split("CommandsRegistry.registerCommand(").length - 1;
+	const commandReadCount =
+		compact.split("CommandsRegistry.getCommand(").length - 1;
+	const required = [
+		'newTextFile: "workbench.action.files.newUntitledFile"',
+		'save: "workbench.action.files.save"',
+		'saveAs: "workbench.action.files.saveAs"',
+		"this.bridge.scratchCreate()",
+		"this.topologyCoordinator.runMutation(async () =>",
+		"this.bridge.workspacePickSaveTarget(",
+		"this.workspaceProvider.plainPublishFile(target, content)",
+		"this.workspaceProvider.plainWriteFile(",
+		"this.workspaceProvider.plainReadFile(target)",
+		'result.status === "written"',
+		"accepted.stat.plainVersion !== writtenStat.plainVersion",
+		"!bytesEqual(accepted.value, content)",
+		"model.textEditorModel.getAlternativeVersionId() !== contentVersion",
+		"forceReplaceDirty: true",
+		'Object.defineProperty(input, "closeHandler"',
+		"this.services.dialogService.confirm({",
+		"this.services.dialogService.prompt<",
+		"return ConfirmResult.CANCEL",
+		"scratchIdFromPlainUntitledResource(resource)",
+		"this.services.workingCopyBackupService.discardBackup(model)",
+		"const previousSave = CommandsRegistry.getCommand(PLAIN_UNTITLED_COMMAND_IDS.save,)",
+		"const previousSaveAs = CommandsRegistry.getCommand(PLAIN_UNTITLED_COMMAND_IDS.saveAs,)",
+	];
+	return (
+		!forbidden.test(source) &&
+		orderedAcceptance &&
+		commandRegistrationCount === 3 &&
+		commandReadCount === 2 &&
+		required.every(includesTokens)
+	);
+}
+
 function validateLocalWorkspaceWorkflowBootstrap(sourceFile) {
 	if (sourceFile?.parseDiagnostics.length !== 0) {
 		return false;
@@ -5901,6 +6010,37 @@ function validateLocalWorkspaceWorkflowBootstrap(sourceFile) {
 		),
 	];
 	return checks.every(Boolean);
+}
+
+function validatePlainUntitledWorkflowBootstrap(sourceFile) {
+	if (sourceFile?.parseDiagnostics.length !== 0) return false;
+	const compact = sourceFile.getFullText().replace(/\s+/gu, "");
+	const includesTokens = (expected) =>
+		compact.includes(expected.replace(/\s+/gu, ""));
+	return [
+		hasExactNamedImport(sourceFile, "./features/workspace/untitled-workflow", [
+			"registerPlainUntitledWorkflow",
+		]),
+		includesTokens(
+			"let untitledWorkflowRegistration: ReturnType<typeof registerPlainUntitledWorkflow> | undefined;",
+		),
+		includesTokens("untitledWorkflowRegistration?.dispose();"),
+		includesTokens(
+			"untitledWorkflowRegistration = registerPlainUntitledWorkflow(bridge, workspaceTopologyCoordinator, workspaceFileSystemProvider",
+		),
+		includesTokens("editorService: await getService(IEditorService)"),
+		includesTokens("textEditorService: await getService(ITextEditorService)"),
+		includesTokens(
+			"untitledTextEditorService: await getService(IUntitledTextEditorService)",
+		),
+		includesTokens(
+			"workingCopyBackupService: await getService(IWorkingCopyBackupService)",
+		),
+		includesTokens("dialogService: await getService(IDialogService)"),
+		includesTokens(
+			"notificationService: await getService(INotificationService)",
+		),
+	].every(Boolean);
 }
 
 function validateTopologyAuthority(authority) {
@@ -6391,6 +6531,9 @@ export function validateWorkspaceTopologyContracts(sources) {
 	const localWorkflowCommands = sourceFile(
 		"app/features/workspace/local-workflow-commands.ts",
 	);
+	const untitledWorkflow = sourceFile(
+		"app/features/workspace/untitled-workflow.ts",
+	);
 	const projection = sourceFile(
 		"app/features/workspace/workspace-projection.ts",
 	);
@@ -6447,6 +6590,16 @@ export function validateWorkspaceTopologyContracts(sources) {
 			!safelyValidate(validateLocalWorkspaceWorkflowBootstrap, main))
 	) {
 		failures.push(WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.localWorkflow);
+	}
+	if (
+		hasAppSources &&
+		(!safelyValidate(
+			validatePlainUntitledWorkflow,
+			untitledWorkflow?.getFullText(),
+		) ||
+			!safelyValidate(validatePlainUntitledWorkflowBootstrap, main))
+	) {
+		failures.push(WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.untitledWorkflow);
 	}
 	return failures;
 }
