@@ -3,11 +3,13 @@ import type {
 	TerminalFrame,
 	TerminalScrollbackRow,
 } from "../../platform/tauri/contracts";
+import { normalizeCommandError } from "../../platform/tauri/errors";
 import {
 	attachTerminalStream,
 	openTerminalStream,
 	type TerminalStream,
 } from "../../platform/tauri/terminal-stream";
+import type { TerminalFutureTabDefaults } from "./plain-terminal-defaults";
 import {
 	encodeTerminalKeyEvent,
 	TerminalImeController,
@@ -115,19 +117,26 @@ interface TerminalPaneBaseOptions {
 	readonly isEmptyWorkspace: () => boolean;
 }
 
-/** An ordinary pane owns one immutable workspace root; an externally
- * created DAP `runInTerminal` session already owns its native cwd and only
- * supplies the existing session id. Keeping the two shapes disjoint makes it
- * impossible for a later selector change to retarget an already-created
- * shell. */
+/** An ordinary pane owns one immutable workspace root (plus, `F190` S2, one
+ * immutable {@link TerminalFutureTabDefaults} profile/cwd identity); an
+ * externally created DAP `runInTerminal` session already owns its native
+ * cwd/shell and only supplies the existing session id. Keeping the two
+ * shapes disjoint makes it impossible for a later selector change to
+ * retarget an already-created shell. */
 export type TerminalPaneOptions = TerminalPaneBaseOptions &
 	(
 		| {
 				readonly rootId: string;
+				/** `F190` S2: this pane's frozen profile/cwd identity, computed once
+				 * by `PlainTerminalView` at tab-creation (or split) time from its
+				 * two future-tab-default controls and never re-read afterward — see
+				 * `plain-terminal-defaults.ts`'s own doc comment. */
+				readonly defaults: TerminalFutureTabDefaults;
 				readonly existingSessionId?: undefined;
 		  }
 		| {
 				readonly rootId?: undefined;
+				readonly defaults?: undefined;
 				/** `F100` S4: when set, this pane **attaches** to an already-existing
 				 * `TerminalService` session (created by Rust's own `runInTerminal`
 				 * reverse-request handling,
@@ -150,6 +159,7 @@ export class TerminalPaneController {
 	readonly #dialogService: TerminalTrustDialogService;
 	readonly #isEmptyWorkspace: () => boolean;
 	readonly #rootId: string | undefined;
+	readonly #defaults: TerminalFutureTabDefaults | undefined;
 	readonly #existingSessionId: string | undefined;
 	readonly #abort = new AbortController();
 	readonly #ime = new TerminalImeController();
@@ -182,6 +192,7 @@ export class TerminalPaneController {
 		this.#dialogService = options.dialogService;
 		this.#isEmptyWorkspace = options.isEmptyWorkspace;
 		this.#rootId = options.rootId;
+		this.#defaults = options.defaults;
 		this.#existingSessionId = options.existingSessionId;
 		this.#container.classList.add("plain-terminal-pane");
 
@@ -324,12 +335,24 @@ export class TerminalPaneController {
 				if (rootId === undefined) {
 					throw new Error("Select a workspace folder for this terminal.");
 				}
+				const defaults = this.#defaults;
+				// `F190` S2: a defaults value frozen as `invalidCwd` (only reachable
+				// via a hand-edited `settings.json` — the settings UI itself never
+				// persists an invalid cwd, see `plain-terminal-view.ts`) must never
+				// reach `terminal_start` at all: showing `reason` here and returning
+				// is this pane's entire response, exactly zero spawn attempts, per
+				// "不得静默回退装作成功" (`docs/research/2026-08-03-complete-terminal.md`).
+				if (defaults === undefined || defaults.kind === "invalidCwd") {
+					throw new Error(
+						defaults?.reason ?? "The terminal session could not be started.",
+					);
+				}
 				stream = await openTerminalStream(
 					this.#bridge,
 					{
 						rootId,
-						profileId: "systemDefault",
-						cwd: null,
+						profileId: defaults.profileId,
+						cwd: defaults.cwd,
 						cols,
 						rows,
 					},
@@ -340,11 +363,17 @@ export class TerminalPaneController {
 			if (generation !== this.#generation) {
 				return;
 			}
-			this.#showStatus(
-				error instanceof Error
-					? error.message
-					: "The terminal session could not be started.",
-			);
+			// `normalizeCommandError` (not a bare `instanceof Error` check) so a
+			// real Rust `CommandError` — e.g. `TERMINAL_PROFILE_INVALID` or
+			// `TERMINAL_CWD_INVALID` if a hand-edited default slips past this
+			// pane's own defaults check, or `WORKSPACE_NOT_TRUSTED`/root-not-
+			// authorized — surfaces its own accurate, absolute-path-free message
+			// instead of a generic fallback; every one of those fixed Rust/local
+			// messages is written to never interpolate a raw path (see
+			// `src-tauri/src/terminal/mod.rs`'s error constructors and
+			// `plain-terminal-defaults.ts`'s validator), so this can never leak
+			// one either.
+			this.#showStatus(normalizeCommandError(error).message);
 			return;
 		}
 		if (generation !== this.#generation) {

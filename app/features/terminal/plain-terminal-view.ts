@@ -1,5 +1,6 @@
 import { addDisposableListener } from "@codingame/monaco-vscode-api/vscode/vs/base/browser/dom";
 import { toDisposable } from "@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle";
+import { ConfigurationTarget } from "@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration";
 import { IConfigurationService } from "@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration.service";
 import { IContextKeyService } from "@codingame/monaco-vscode-api/vscode/vs/platform/contextkey/common/contextkey.service";
 import { IContextMenuService } from "@codingame/monaco-vscode-api/vscode/vs/platform/contextview/browser/contextView.service";
@@ -16,12 +17,23 @@ import {
 } from "@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/views/viewPane";
 import { IViewDescriptorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/common/views.service";
 
-import type { PlainBridge } from "../../platform/tauri/contracts";
+import type {
+	PlainBridge,
+	TerminalProfile,
+} from "../../platform/tauri/contracts";
 import {
 	PlainWorkspaceRootSelection,
 	plainWorkspaceRootsFromFolders,
 	type PlainWorkspaceRoot,
 } from "../workspace/plain-workspace-roots";
+import {
+	TERMINAL_DEFAULT_CWD_CONFIG_KEY,
+	TERMINAL_DEFAULT_PROFILE_CONFIG_KEY,
+	TERMINAL_DEFAULT_PROFILE_FALLBACK_ID,
+	type TerminalCwdInputState,
+	type TerminalFutureTabDefaults,
+	validateFutureTabCwdInput,
+} from "./plain-terminal-defaults";
 import { TerminalPaneController } from "./plain-terminal-pane";
 import {
 	type TerminalSplitOrientation,
@@ -107,6 +119,14 @@ export class PlainTerminalView extends ViewPane {
 	#emptyStateElement: HTMLElement | undefined;
 	#pendingNewTab = false;
 
+	/** `F190` S2: the two future-tab-default controls plus the bounded
+	 * profile snapshot they draw their options from — see this class's own
+	 * `#resolveFutureTabDefaults`/`#renderProfileSelector` doc comments. */
+	#profileSelectElement: HTMLSelectElement | undefined;
+	#cwdInputElement: HTMLInputElement | undefined;
+	#cwdHintElement: HTMLElement | undefined;
+	#availableProfiles: readonly TerminalProfile[] = [];
+
 	constructor(
 		options: IViewPaneOptions,
 		keybindingService: IKeybindingService,
@@ -166,6 +186,60 @@ export class PlainTerminalView extends ViewPane {
 			}),
 		);
 		tabStrip.append(rootSelector);
+
+		// `F190` S2: the two future-tab-default controls — see
+		// `#resolveFutureTabDefaults`'s doc comment for what they mean and
+		// `plain-terminal-defaults.ts`'s module doc for why cwd validation here
+		// is feedback only, never authority.
+		const profileSelect = document.createElement("select");
+		profileSelect.className = "plain-terminal-profile-select";
+		profileSelect.setAttribute("aria-label", "Default Terminal Profile");
+		this.#profileSelectElement = profileSelect;
+		this._register(
+			addDisposableListener(profileSelect, "change", () => {
+				if (profileSelect.value.length === 0) {
+					return;
+				}
+				void this.configurationService.updateValue(
+					TERMINAL_DEFAULT_PROFILE_CONFIG_KEY,
+					profileSelect.value,
+					ConfigurationTarget.USER,
+				);
+			}),
+		);
+		tabStrip.append(profileSelect);
+
+		const cwdInput = document.createElement("input");
+		cwdInput.type = "text";
+		cwdInput.className = "plain-terminal-cwd-input";
+		cwdInput.setAttribute("aria-label", "Default Terminal Working Directory");
+		cwdInput.placeholder = "cwd (optional)";
+		this.#cwdInputElement = cwdInput;
+		this._register(
+			addDisposableListener(cwdInput, "input", () => {
+				this.#renderCwdValidation(validateFutureTabCwdInput(cwdInput.value));
+			}),
+		);
+		this._register(
+			addDisposableListener(cwdInput, "change", () => {
+				const validation = validateFutureTabCwdInput(cwdInput.value);
+				this.#renderCwdValidation(validation);
+				if (validation.kind === "valid") {
+					void this.configurationService.updateValue(
+						TERMINAL_DEFAULT_CWD_CONFIG_KEY,
+						validation.cwd ?? "",
+						ConfigurationTarget.USER,
+					);
+				}
+			}),
+		);
+		tabStrip.append(cwdInput);
+
+		const cwdHint = document.createElement("span");
+		cwdHint.className = "plain-terminal-cwd-hint";
+		cwdHint.setAttribute("aria-live", "polite");
+		this.#cwdHintElement = cwdHint;
+		tabStrip.append(cwdHint);
 
 		const newTabButton = document.createElement("button");
 		newTabButton.type = "button";
@@ -229,6 +303,7 @@ export class PlainTerminalView extends ViewPane {
 
 		this.#renderRootSelector();
 		this.#syncTabVisibility();
+		this.#initFutureTabDefaultsControls();
 	}
 
 	protected override layoutBody(height: number, width: number): void {
@@ -281,9 +356,14 @@ export class PlainTerminalView extends ViewPane {
 			return;
 		}
 		this.#pendingNewTab = false;
-		const { tabId, paneId } = this.#tabsModel.createTab(root);
+		// `F190` S2: computed exactly once, here, and frozen onto the new
+		// tab/pane — a later change to the profile/cwd controls must never
+		// redirect this tab (see `#resolveFutureTabDefaults`'s own doc
+		// comment).
+		const defaults = this.#resolveFutureTabDefaults();
+		const { tabId, paneId } = this.#tabsModel.createTab(root, defaults);
 		this.#createTabRecord(tabId);
-		this.#createPane(paneId, tabId, undefined, root.rootId);
+		this.#createPane(paneId, tabId, undefined, root.rootId, defaults);
 		this.#activateTab(tabId);
 	}
 
@@ -338,7 +418,15 @@ export class PlainTerminalView extends ViewPane {
 		if (paneId === undefined) {
 			return;
 		}
-		this.#createPane(paneId, activeTabId, undefined, rootId);
+		// `F190` S2: a split inherits the *active tab's own frozen* defaults
+		// (never a fresh read of the current selector state) — the same
+		// "inherit, don't redirect" rule `rootId` above already followed
+		// since `F150`. `tab?.defaults` is only ever `undefined` for an
+		// externally-adopted (`F100` S4) tab, which owns no defaults of its
+		// own to inherit; falling back to a fresh resolve there mirrors what
+		// this method already did for `rootId` in that same edge case.
+		const defaults = tab?.defaults ?? this.#resolveFutureTabDefaults();
+		this.#createPane(paneId, activeTabId, undefined, rootId, defaults);
 		const record = this.#tabRecords.get(activeTabId);
 		if (record !== undefined) {
 			record.paneContainer.dataset.split = orientation;
@@ -398,6 +486,7 @@ export class PlainTerminalView extends ViewPane {
 		tabId: string,
 		existingSessionId?: string,
 		rootId?: string,
+		defaults?: TerminalFutureTabDefaults,
 	): void {
 		const record = this.#tabRecords.get(tabId);
 		if (record === undefined) {
@@ -418,10 +507,10 @@ export class PlainTerminalView extends ViewPane {
 		};
 		let controller: TerminalPaneController;
 		if (existingSessionId === undefined) {
-			if (rootId === undefined) {
+			if (rootId === undefined || defaults === undefined) {
 				throw new Error("A new terminal pane requires an authorized root.");
 			}
-			controller = new TerminalPaneController({ ...options, rootId });
+			controller = new TerminalPaneController({ ...options, rootId, defaults });
 		} else {
 			controller = new TerminalPaneController({
 				...options,
@@ -460,6 +549,138 @@ export class PlainTerminalView extends ViewPane {
 		selector.replaceChildren(...options);
 		selector.value = selected?.rootId ?? "";
 		selector.disabled = roots.length < 2;
+	}
+
+	/** Populates the two future-tab-default controls' initial values from
+	 * configuration and kicks off the (async, best-effort) profile snapshot
+	 * fetch. Called exactly once, from `renderBody` — never re-run on a
+	 * later configuration change (see `plain-terminal-defaults.ts`'s module
+	 * doc for why this slice deliberately does not subscribe to
+	 * `onDidChangeConfiguration`: a live-refresh listener risks fighting the
+	 * user's own in-progress edit, and is out of this minimal slice's
+	 * scope). */
+	#initFutureTabDefaultsControls(): void {
+		const cwdInput = this.#cwdInputElement;
+		if (cwdInput !== undefined) {
+			const configuredCwd = this.configurationService.getValue<string>(
+				TERMINAL_DEFAULT_CWD_CONFIG_KEY,
+			);
+			cwdInput.value = typeof configuredCwd === "string" ? configuredCwd : "";
+			this.#renderCwdValidation(validateFutureTabCwdInput(cwdInput.value));
+		}
+		this.#renderProfileSelector();
+		requireTerminalBridge()
+			.terminalProfiles()
+			.then((result) => {
+				this.#availableProfiles = result.profiles;
+				this.#renderProfileSelector();
+			})
+			.catch(() => {
+				// The profile dropdown's own System-Default-only fallback (see
+				// `#renderProfileSelector`) stays in place — this fetch is a
+				// best-effort UI convenience, never an authority a new tab's
+				// startup depends on (`#resolveFutureTabDefaults` always falls
+				// back to `TERMINAL_DEFAULT_PROFILE_FALLBACK_ID` regardless of
+				// whether this snapshot ever arrives).
+			});
+	}
+
+	/** Rebuilds the profile `<select>`'s options from whatever bounded,
+	 * native-issued snapshot {@link TerminalProfile} list this view has so
+	 * far (empty until `terminalProfiles` first resolves, in which case a
+	 * single `TERMINAL_DEFAULT_PROFILE_FALLBACK_ID` placeholder option is
+	 * shown instead — the WebView never invents a profile id of its own),
+	 * then selects whichever option matches the currently configured
+	 * default (falling back to the fallback id if the configured value does
+	 * not match any known profile — e.g. a profile no longer installed). */
+	#renderProfileSelector(): void {
+		const select = this.#profileSelectElement;
+		if (select === undefined) {
+			return;
+		}
+		const profiles: readonly TerminalProfile[] =
+			this.#availableProfiles.length > 0
+				? this.#availableProfiles
+				: [
+						Object.freeze({
+							id: TERMINAL_DEFAULT_PROFILE_FALLBACK_ID,
+							label: "System Default",
+						}),
+					];
+		const options = profiles.map((profile) => {
+			const option = document.createElement("option");
+			option.value = profile.id;
+			option.textContent = profile.label;
+			return option;
+		});
+		select.replaceChildren(...options);
+		const configuredProfileId = this.configurationService.getValue<string>(
+			TERMINAL_DEFAULT_PROFILE_CONFIG_KEY,
+		);
+		const knownIds = new Set(profiles.map((profile) => profile.id));
+		select.value =
+			typeof configuredProfileId === "string" &&
+			knownIds.has(configuredProfileId)
+				? configuredProfileId
+				: TERMINAL_DEFAULT_PROFILE_FALLBACK_ID;
+	}
+
+	/** Updates the cwd input's `data-invalid`/`aria-invalid` styling hook and
+	 * its sibling hint text to match `validation` — pure DOM feedback, called
+	 * on every keystroke (`input`) and again on commit (`change`); never
+	 * itself decides whether to persist anything (see the `change` listener
+	 * in `renderBody`, the only caller that also writes to configuration). */
+	#renderCwdValidation(validation: TerminalCwdInputState): void {
+		const input = this.#cwdInputElement;
+		const hint = this.#cwdHintElement;
+		if (input === undefined || hint === undefined) {
+			return;
+		}
+		if (validation.kind === "invalid") {
+			input.dataset.invalid = "true";
+			input.setAttribute("aria-invalid", "true");
+			hint.textContent = validation.reason;
+		} else {
+			input.dataset.invalid = "false";
+			input.removeAttribute("aria-invalid");
+			hint.textContent = "";
+		}
+	}
+
+	/**
+	 * Computes one frozen {@link TerminalFutureTabDefaults} snapshot from
+	 * whatever `plain.terminal.defaultProfile`/`plain.terminal.cwd` currently
+	 * hold in configuration — called exactly once per new tab or split (by
+	 * `openNewTab`/`splitActiveTab`), never re-read afterward by the
+	 * resulting tab/pane, which is what keeps an already-running tab frozen
+	 * against a later selector change (see `plain-terminal-defaults.ts`'s
+	 * module doc). Re-validates the persisted cwd string (not just trusts
+	 * it) because the settings UI is not the only way `settings.json` can
+	 * change — a hand-edited file can hold an absolute path the settings UI
+	 * itself would never have written; see `TerminalFutureTabDefaults`'s own
+	 * `invalidCwd` doc comment for what happens then. */
+	#resolveFutureTabDefaults(): TerminalFutureTabDefaults {
+		const configuredProfileId = this.configurationService.getValue<string>(
+			TERMINAL_DEFAULT_PROFILE_CONFIG_KEY,
+		);
+		const profileId =
+			typeof configuredProfileId === "string" && configuredProfileId.length > 0
+				? configuredProfileId
+				: TERMINAL_DEFAULT_PROFILE_FALLBACK_ID;
+		const configuredCwd = this.configurationService.getValue<string>(
+			TERMINAL_DEFAULT_CWD_CONFIG_KEY,
+		);
+		const validation = validateFutureTabCwdInput(
+			typeof configuredCwd === "string" ? configuredCwd : "",
+		);
+		if (validation.kind === "invalid") {
+			return Object.freeze({
+				kind: "invalidCwd",
+				profileId,
+				reason: validation.reason,
+			});
+		}
+		return Object.freeze({ kind: "ok", profileId, cwd: validation.cwd });
 	}
 
 	#activateTab(tabId: string): void {

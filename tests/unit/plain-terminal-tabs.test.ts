@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+	DEFAULT_TERMINAL_FUTURE_TAB_DEFAULTS,
+	type TerminalFutureTabDefaults,
+} from "../../app/features/terminal/plain-terminal-defaults";
+import {
 	MAX_PANES_PER_TAB,
 	TerminalTabsModel,
 } from "../../app/features/terminal/plain-terminal-tabs";
@@ -8,6 +12,12 @@ import {
 const ROOT = Object.freeze({
 	rootId: "11111111-1111-4111-8111-111111111111",
 	label: "alpha",
+});
+
+const CUSTOM_DEFAULTS: TerminalFutureTabDefaults = Object.freeze({
+	kind: "ok",
+	profileId: "zsh",
+	cwd: "nested/project",
 });
 
 describe("TerminalTabsModel", () => {
@@ -32,6 +42,39 @@ describe("TerminalTabsModel", () => {
 		expect(tab?.splitOrientation).toBe("row");
 	});
 
+	// `F190` S2 "future-tab defaults UI": every tab freezes the
+	// profile/cwd defaults it was created with — see
+	// `plain-terminal-defaults.ts`'s own doc comment.
+	it("defaults to systemDefault/root-itself when a caller passes no explicit defaults", () => {
+		const model = new TerminalTabsModel();
+
+		const created = model.createTab(ROOT);
+
+		expect(model.getTab(created.tabId)?.defaults).toEqual(
+			DEFAULT_TERMINAL_FUTURE_TAB_DEFAULTS,
+		);
+	});
+
+	it("freezes whatever explicit defaults a caller passes onto the new tab", () => {
+		const model = new TerminalTabsModel();
+
+		const created = model.createTab(ROOT, CUSTOM_DEFAULTS);
+
+		expect(model.getTab(created.tabId)?.defaults).toEqual(CUSTOM_DEFAULTS);
+	});
+
+	it("keeps two tabs' defaults independent — changing one does not affect the other", () => {
+		const model = new TerminalTabsModel();
+
+		const first = model.createTab(ROOT, CUSTOM_DEFAULTS);
+		const second = model.createTab(ROOT);
+
+		expect(model.getTab(first.tabId)?.defaults).toEqual(CUSTOM_DEFAULTS);
+		expect(model.getTab(second.tabId)?.defaults).toEqual(
+			DEFAULT_TERMINAL_FUTURE_TAB_DEFAULTS,
+		);
+	});
+
 	it("gives every new tab a distinct, monotonically numbered title", () => {
 		const model = new TerminalTabsModel();
 
@@ -50,6 +93,13 @@ describe("TerminalTabsModel", () => {
 		expect(tab?.title).toBe("Debuggee");
 		expect(tab?.rootId).toBeUndefined();
 		expect(tab?.rootLabel).toBeUndefined();
+	});
+
+	it("gives an adopted external session no future-tab defaults of its own", () => {
+		const model = new TerminalTabsModel();
+		const created = model.createExternalTab("Debuggee");
+
+		expect(model.getTab(created.tabId)?.defaults).toBeUndefined();
 	});
 
 	it("never reuses a tab number after it is closed", () => {
@@ -172,6 +222,15 @@ describe("TerminalTabsModel", () => {
 		const updated = model.getTab(tab.tabId);
 		expect(updated?.paneIds).toEqual([tab.paneId, paneId]);
 		expect(updated?.splitOrientation).toBe("column");
+	});
+
+	it("splitTab never changes the tab's own frozen defaults — a split reads them back unchanged, it does not recompute them", () => {
+		const model = new TerminalTabsModel();
+		const tab = model.createTab(ROOT, CUSTOM_DEFAULTS);
+
+		model.splitTab(tab.tabId, "row");
+
+		expect(model.getTab(tab.tabId)?.defaults).toEqual(CUSTOM_DEFAULTS);
 	});
 
 	it(`splitTab refuses a third pane once a tab already has ${MAX_PANES_PER_TAB}`, () => {

@@ -93,6 +93,41 @@ body[data-plain-ready="error"] #plain-bootstrap-status {
 	max-width: 11rem;
 }
 
+/* F190 S2 "future-tab defaults UI" — profile/cwd controls. Functional
+ * styling only, same precedent as the rest of this domain's CSS. */
+.plain-terminal-profile-select {
+	flex: 0 1 9rem;
+	min-width: 5rem;
+	max-width: 9rem;
+}
+
+.plain-terminal-cwd-input {
+	flex: 0 1 9rem;
+	min-width: 5rem;
+	max-width: 9rem;
+	background: #3c3c3c;
+	color: #cccccc;
+	border: 1px solid transparent;
+	border-radius: 3px;
+	padding: 2px 6px;
+	font-size: 0.8rem;
+}
+
+.plain-terminal-cwd-input[data-invalid="true"] {
+	border-color: #f14c4c;
+}
+
+.plain-terminal-cwd-hint {
+	flex: 0 0 auto;
+	font-size: 0.75rem;
+	color: #f14c4c;
+	align-self: center;
+	max-width: 14rem;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
 .plain-terminal-tab-close,
 .plain-terminal-tab-new,
 .plain-terminal-split-button {

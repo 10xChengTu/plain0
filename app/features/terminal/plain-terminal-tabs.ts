@@ -36,11 +36,28 @@
  * tab already has two. Recursive/nested splitting is out of scope for this
  * slice; extending the cap later is a self-contained change confined to
  * this file's `MAX_PANES_PER_TAB` constant and `splitTab`'s own check.
+ *
+ * # `F190` S2: frozen per-tab profile/cwd defaults
+ *
+ * Every tab also stores the `TerminalFutureTabDefaults` it was created with
+ * — computed once by `PlainTerminalView` from its two future-tab-default
+ * controls and never re-read afterward, so a later change to those
+ * controls cannot redirect an already-running tab/pane. `splitTab`
+ * intentionally does not take a defaults parameter: a split adds a pane to
+ * an *existing* tab, and `PlainTerminalView` reads that tab's own
+ * already-frozen `defaults` back out via `getTab` to construct the new
+ * pane — the same "inherit the active tab's frozen identity" rule this
+ * slice extends from root freezing (`F150`) to profile/cwd.
  */
 
 /** Maximum panes one tab may hold at once — see the module doc's "Split
  * cap" section. */
 export const MAX_PANES_PER_TAB = 2;
+
+import {
+	DEFAULT_TERMINAL_FUTURE_TAB_DEFAULTS,
+	type TerminalFutureTabDefaults,
+} from "./plain-terminal-defaults";
 
 export type TerminalSplitOrientation = "row" | "column";
 
@@ -54,6 +71,11 @@ export interface TerminalTabSnapshot {
 	readonly title: string;
 	readonly rootId: string | undefined;
 	readonly rootLabel: string | undefined;
+	/** This tab's frozen profile/cwd identity — `undefined` only for an
+	 * externally-adopted (`F100` S4 `runInTerminal`) tab, which owns no such
+	 * concept of its own. See the module doc's "frozen per-tab profile/cwd
+	 * defaults" section. */
+	readonly defaults: TerminalFutureTabDefaults | undefined;
 	readonly paneIds: readonly string[];
 	readonly splitOrientation: TerminalSplitOrientation;
 }
@@ -63,6 +85,7 @@ interface MutableTab {
 	readonly title: string;
 	readonly rootId: string | undefined;
 	readonly rootLabel: string | undefined;
+	readonly defaults: TerminalFutureTabDefaults | undefined;
 	paneIds: string[];
 	splitOrientation: TerminalSplitOrientation;
 }
@@ -115,11 +138,22 @@ export class TerminalTabsModel {
 	/** Creates a new single-pane tab, makes it active, and returns its new
 	 * tab/pane ids. Tab numbering (`"Terminal N"`) is a monotonic counter,
 	 * never reused after a close — two tabs never show the same title within
-	 * one view's lifetime, even after earlier ones were closed. */
-	createTab(root: TerminalRootTarget): TerminalTabCreated {
+	 * one view's lifetime, even after earlier ones were closed.
+	 *
+	 * `defaults` is this tab's frozen `F190` S2 profile/cwd identity —
+	 * defaulted to `DEFAULT_TERMINAL_FUTURE_TAB_DEFAULTS`
+	 * (`systemDefault`/root itself) purely so every pre-`F190`-S2 caller of
+	 * this method (every existing test in `plain-terminal-tabs.test.ts`)
+	 * keeps compiling unchanged; `PlainTerminalView` — the only production
+	 * caller — always passes an explicit, freshly-resolved value. */
+	createTab(
+		root: TerminalRootTarget,
+		defaults: TerminalFutureTabDefaults = DEFAULT_TERMINAL_FUTURE_TAB_DEFAULTS,
+	): TerminalTabCreated {
 		return this.#createTabWithTitle(
 			`Terminal ${this.#nextTabNumber} · ${root.label}`,
 			root,
+			defaults,
 		);
 	}
 
@@ -132,15 +166,19 @@ export class TerminalTabsModel {
 	 * debug-launched rather than looking like an ordinary manually-created
 	 * terminal. Still consumes the same monotonic tab-number counter as
 	 * {@link createTab} (for a unique internal `tabId`, never for display),
-	 * so a later ordinary tab can never collide with this one's id.
+	 * so a later ordinary tab can never collide with this one's id. Has no
+	 * frozen `defaults` of its own — an externally-adopted session already
+	 * owns its native cwd/profile, so there is nothing for this tab to
+	 * freeze (see `TerminalTabSnapshot.defaults`'s own doc comment).
 	 */
 	createExternalTab(title: string): TerminalTabCreated {
-		return this.#createTabWithTitle(title, undefined);
+		return this.#createTabWithTitle(title, undefined, undefined);
 	}
 
 	#createTabWithTitle(
 		title: string,
 		root: TerminalRootTarget | undefined,
+		defaults: TerminalFutureTabDefaults | undefined,
 	): TerminalTabCreated {
 		const tabId = `plain-terminal-tab-${this.#nextTabNumber}`;
 		const paneId = this.#nextPaneId();
@@ -150,6 +188,7 @@ export class TerminalTabsModel {
 			title,
 			rootId: root?.rootId,
 			rootLabel: root?.label,
+			defaults,
 			paneIds: [paneId],
 			splitOrientation: "row",
 		});
@@ -230,6 +269,7 @@ export class TerminalTabsModel {
 			title: tab.title,
 			rootId: tab.rootId,
 			rootLabel: tab.rootLabel,
+			defaults: tab.defaults,
 			paneIds: Object.freeze([...tab.paneIds]),
 			splitOrientation: tab.splitOrientation,
 		});

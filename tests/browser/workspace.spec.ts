@@ -1925,6 +1925,25 @@ async function installNativeIpcMock(
 					message: "This workspace has not been granted execution trust.",
 				};
 			}
+			// `F190` S2 "future-tab defaults UI": mirrors
+			// `src-tauri/src/terminal/mod.rs`'s own `terminal_profile_invalid`/
+			// `terminal_cwd_invalid` — same code/message — so a Browser test can
+			// exercise the exact accurate, absolute-path-free status text
+			// `TerminalPaneController` shows via `normalizeCommandError`.
+			function terminalProfileInvalid() {
+				return {
+					code: "TERMINAL_PROFILE_INVALID",
+					message:
+						"The requested terminal profile is not available on this computer.",
+				};
+			}
+			function terminalCwdInvalid() {
+				return {
+					code: "TERMINAL_CWD_INVALID",
+					message:
+						"The requested working directory is not inside an authorized workspace root.",
+				};
+			}
 			function gitNoRepository() {
 				return {
 					code: "GIT_NO_REPOSITORY",
@@ -3853,13 +3872,29 @@ async function installNativeIpcMock(
 								| undefined;
 							if (
 								currentSnapshot.roots.length !== 1 ||
-								startRequest?.rootId !== rootId ||
-								startRequest.profileId !== "systemDefault" ||
-								startRequest.cwd !== null
+								startRequest?.rootId !== rootId
 							) {
 								throw new Error(
 									"terminal_start must target the one authorized test root",
 								);
+							}
+							// `F190` S2: this fixture's `terminal_profiles` snapshot (see
+							// that case below) only ever issues `systemDefault`/`zsh` — the
+							// same bounded set a real `terminal_start` would accept.
+							// `cwd` mirrors Rust's own `resolve_cwd`: `null`, or a relative
+							// path that does not try to leave the root.
+							if (
+								startRequest.profileId !== "systemDefault" &&
+								startRequest.profileId !== "zsh"
+							) {
+								throw terminalProfileInvalid();
+							}
+							if (
+								typeof startRequest.cwd === "string" &&
+								(startRequest.cwd.startsWith("/") ||
+									startRequest.cwd.split("/").includes(".."))
+							) {
+								throw terminalCwdInvalid();
 							}
 							const sessionId = nextTerminalSessionId();
 							const session: FakeTerminalSession = {
@@ -15545,6 +15580,314 @@ test("Terminal requires an explicit root in a multi-root workspace and freezes i
 	).toHaveCount(1);
 
 	expect(errors).toEqual([]);
+});
+
+// --- F190 S2: "future-tab defaults UI" (profile/cwd controls) -----------
+
+test("setting default profile/cwd controls persists through settings.json and a new tab starts with them", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+	const [firstStart] = await terminalCallsFor(page, "terminal_start");
+	expect(firstStart?.args.request).toMatchObject({
+		rootId: nativeRootId,
+		profileId: "systemDefault",
+		cwd: null,
+	});
+
+	const settingsWriteCount = async (): Promise<number> =>
+		(await terminalCallsFor(page, "user_data_write")).filter(
+			({ args }) =>
+				(args.request as { resource?: unknown } | undefined)?.resource ===
+				"settings",
+		).length;
+
+	const profileSelect = page.getByRole("combobox", {
+		name: "Default Terminal Profile",
+	});
+	await expect(profileSelect).toBeVisible();
+	await profileSelect.selectOption("zsh");
+	await expect.poll(settingsWriteCount).toBe(1);
+
+	const cwdInput = page.getByRole("textbox", {
+		name: "Default Terminal Working Directory",
+	});
+	await cwdInput.fill("nested/project");
+	await cwdInput.blur();
+	await expect.poll(settingsWriteCount).toBe(2);
+
+	const settingsWrites = (await terminalCallsFor(page, "user_data_write")).map(
+		({ args }) => args.request as { content?: unknown },
+	);
+	expect(JSON.parse(String(settingsWrites[0]?.content))).toEqual({
+		"plain.terminal.defaultProfile": "zsh",
+	});
+	expect(JSON.parse(String(settingsWrites[1]?.content))).toEqual({
+		"plain.terminal.defaultProfile": "zsh",
+		"plain.terminal.cwd": "nested/project",
+	});
+
+	await page.getByRole("button", { name: "New Terminal" }).click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(2);
+	const starts = await terminalCallsFor(page, "terminal_start");
+	expect(starts[1]?.args.request).toMatchObject({
+		rootId: nativeRootId,
+		profileId: "zsh",
+		cwd: "nested/project",
+	});
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("changing the profile/cwd defaults after a tab is already running never redirects that tab", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+	const [firstSessionId] = await terminalSessionIds(page);
+
+	const profileSelect = page.getByRole("combobox", {
+		name: "Default Terminal Profile",
+	});
+	await profileSelect.selectOption("zsh");
+	const cwdInput = page.getByRole("textbox", {
+		name: "Default Terminal Working Directory",
+	});
+	await cwdInput.fill("nested/project");
+	await cwdInput.blur();
+	await expect
+		.poll(
+			async () =>
+				(await terminalCallsFor(page, "user_data_write")).filter(
+					({ args }) =>
+						(args.request as { resource?: unknown } | undefined)?.resource ===
+						"settings",
+				).length,
+		)
+		.toBe(2);
+
+	// The already-running tab must not restart, resize, or be killed just
+	// because the *future*-tab defaults changed underneath it.
+	expect(await terminalCallsFor(page, "terminal_start")).toHaveLength(1);
+	expect(await terminalCallsFor(page, "terminal_kill")).toEqual([]);
+	await pushTerminalOutput(page, "still-alive", firstSessionId);
+	await expect(page.locator(".plain-terminal-grid")).toContainText(
+		"still-alive",
+	);
+
+	// A brand-new tab, though, does pick up the new future-tab defaults.
+	await page.getByRole("button", { name: "New Terminal" }).click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(2);
+	const starts = await terminalCallsFor(page, "terminal_start");
+	expect(starts[1]?.args.request).toMatchObject({
+		profileId: "zsh",
+		cwd: "nested/project",
+	});
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("typing an illegal default cwd shows immediate feedback and never spawns a terminal or persists", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+
+	const cwdInput = page.getByRole("textbox", {
+		name: "Default Terminal Working Directory",
+	});
+	await cwdInput.fill("../escape");
+
+	await expect(cwdInput).toHaveAttribute("data-invalid", "true");
+	await expect(page.locator(".plain-terminal-cwd-hint")).toHaveText(
+		'Cannot use ".." to leave the workspace root.',
+	);
+
+	// Typing alone never spawns a second terminal, and an illegal value is
+	// never persisted — the one already-open tab's own start call stays the
+	// only one, forever.
+	expect(await terminalCallsFor(page, "terminal_start")).toHaveLength(1);
+	expect(
+		(await terminalCallsFor(page, "user_data_write")).filter(
+			({ args }) =>
+				(args.request as { resource?: unknown } | undefined)?.resource ===
+				"settings",
+		),
+	).toEqual([]);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("a hand-edited invalid persisted cwd default is rejected with an accurate, path-free status and zero spawn", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+
+	// `settings.json` is only ever reachable through the settings UI's own
+	// `validateFutureTabCwdInput` gate (see `plain-terminal-view.ts`), which
+	// never persists an illegal value. A hand-edited file is the *only* way
+	// an illegal default can ever land in configuration — simulated here by
+	// editing `settings.json` directly through Plain's own raw-JSON settings
+	// editor (the same real `user_data_write` persistence chain the settings
+	// UI itself writes through), never through the profile/cwd controls.
+	await executePaletteCommand(
+		page,
+		"Open Local Settings",
+		"Plain: Open Local Settings (JSON)",
+	);
+	const settingsTab = page.locator(".tabs-container .tab.active");
+	await expect(settingsTab).toContainText("settings.json");
+	const secretPath = "/Users/someone/very-secret-directory";
+	const settings = `{"plain.terminal.cwd":"${secretPath}"}`;
+	await page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "{}" })
+		.click();
+	await page.keyboard.press("ControlOrMeta+A");
+	await page.keyboard.type(settings);
+	// Monaco keeps the quote/object auto-closers it created for the opening
+	// characters when Playwright enters the full JSON quickly — the same
+	// two stray trailing characters the "settings/keybindings survive save"
+	// scenario elsewhere in this file already documents and strips the same
+	// way.
+	await page.keyboard.press("End");
+	await page.keyboard.press("Backspace");
+	await page.keyboard.press("Backspace");
+	await page.keyboard.press("ControlOrMeta+S");
+	await expect
+		.poll(
+			async () =>
+				(await terminalCallsFor(page, "user_data_write")).filter(
+					({ args }) =>
+						(args.request as { resource?: unknown } | undefined)?.resource ===
+						"settings",
+				).length,
+		)
+		.toBe(1);
+	await page.keyboard.press("ControlOrMeta+W");
+
+	// This save (unlike an in-app `updateValue` call — see the two tests
+	// above, which never need this) round-trips through the real, un-mocked
+	// `WorkspaceService`'s own external-change reload machinery: the write
+	// fires a file-change event that asynchronously reparses the file into
+	// the live configuration model, with no test-observable completion
+	// signal short of the effect this test is itself trying to observe. A
+	// bounded wait is therefore the only available choice here — this is
+	// eventual consistency of the pre-existing `F170` S1 persistence chain,
+	// not a property `F190` S2 controls. The already-open first tab above
+	// stays completely unaffected by this wait (its own session was already
+	// frozen before this edit even started), so this delay cannot mask a
+	// real regression in this slice's own "zero spawn" guarantee for the
+	// *second* tab created below.
+	await page.waitForTimeout(1_000);
+
+	await page.getByRole("button", { name: "New Terminal" }).click();
+	const secondTab = page.locator(".plain-terminal-tab", {
+		hasText: "Terminal 2",
+	});
+	await expect(secondTab).toHaveCount(1);
+	const activePaneStatus = page.locator(
+		'.plain-terminal-panecontainer[data-active="true"] .plain-terminal-status',
+	);
+	await expect(activePaneStatus).toHaveText(
+		"Must be relative to the workspace root, not an absolute path.",
+	);
+	// Only the first (baseline) tab ever spawned — the second tab, built
+	// from the hand-edited invalid default, never called `terminal_start`.
+	expect(await terminalCallsFor(page, "terminal_start")).toHaveLength(1);
+
+	const bodyText = await page.locator(".plain-terminal-view-body").innerText();
+	expect(bodyText).not.toContain(secretPath);
+	expect(bodyText).not.toContain("/Users/someone");
+
+	expect(pageErrors).toEqual([]);
 });
 
 // --- F080 S2: SCM override introduction + PlainScmProvider ---------------
