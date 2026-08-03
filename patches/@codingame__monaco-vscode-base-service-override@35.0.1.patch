@@ -1,5 +1,5 @@
 diff --git a/vscode/src/vs/workbench/services/workingCopy/common/workingCopyFileService.js b/vscode/src/vs/workbench/services/workingCopy/common/workingCopyFileService.js
-index cbbe36c9c1d85e6d25a1ccd5aafcc668d439f5c0..3069ca516c4ecf9f398d2d93bf89e761bbeb6f42 100644
+index cbbe36c9c1d85e6d25a1ccd5aafcc668d439f5c0..fa42918dbf04465e54bb4b05db53d235a050a0de 100644
 --- a/vscode/src/vs/workbench/services/workingCopy/common/workingCopyFileService.js
 +++ b/vscode/src/vs/workbench/services/workingCopy/common/workingCopyFileService.js
 @@ -13,6 +13,20 @@ import { IWorkingCopyService } from '@codingame/monaco-vscode-api/vscode/vs/work
@@ -12,7 +12,7 @@ index cbbe36c9c1d85e6d25a1ccd5aafcc668d439f5c0..3069ca516c4ecf9f398d2d93bf89e761
 +function plainDeleteFileServiceOptions(operation) {
 +    const options = {
 +        recursive: true,
-+        useTrash: false,
++        useTrash: operation.useTrash,
 +        atomic: false
 +    };
 +    return {

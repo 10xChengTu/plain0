@@ -501,6 +501,7 @@ function context(
 	overrides: Partial<PlainWorkspaceDeleteCoordinatorContext> = {},
 ): PlainWorkspaceDeleteCoordinatorContext {
 	return {
+		useTrash: false,
 		elements,
 		explorerService: {
 			async applyBulkEdit() {},

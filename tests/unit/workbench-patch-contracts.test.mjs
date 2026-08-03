@@ -423,7 +423,7 @@ describe("exact Workbench patch contracts", () => {
 
 		const stale = await baseline();
 		stale.lockfile = stale.lockfile.replace(
-			"4639136edb34a2de20a9f24c8d7bfc892c7080e444c997a8290772ce37ac0159",
+			"90558e0cc2df2cf979d361b1f1fa535a17460c6f2b333832e4e972f4798a96da",
 			"0".repeat(64),
 		);
 		expect(validateWorkbenchPatchSet(stale)).toContain(
@@ -478,7 +478,7 @@ describe("exact Workbench patch contracts", () => {
 
 	it("rejects bare importer and snapshot edges even when comments repeat the hash", async () => {
 		const apiHash =
-			"0d79e32416d5fa128e80082ea765cfabb3df7e601a916f43fe5caef05532fedb";
+			"bae37ebab7aa701f8c832e9d68b03a654fe9aa61a508e52c9f0824655a76b2fc";
 		const importerBare = await baseline();
 		importerBare.lockfile = `${importerBare.lockfile.replace(
 			`        version: 35.0.1(patch_hash=${apiHash})`,

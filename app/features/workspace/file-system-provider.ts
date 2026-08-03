@@ -35,6 +35,7 @@ import type {
 	WorkspaceDeleteResult,
 	WorkspaceEntryKind,
 	WorkspaceEntryStat,
+	WorkspaceTrashResult,
 	WorkspaceWriteResult,
 } from "../../platform/tauri";
 import {
@@ -42,6 +43,7 @@ import {
 	decodeWorkspaceCapabilities,
 	decodeWorkspaceDeleteResult,
 	decodeWorkspaceMoveResult,
+	decodeWorkspaceTrashResult,
 	frozenWorkspaceEntryRequest,
 } from "../../platform/tauri/workspace-codec";
 
@@ -399,6 +401,8 @@ function mapDeleteError(error: unknown): Readonly<{
 				outcome: "ordinaryFailure",
 			});
 		case "WORKSPACE_DELETE_PLAN_INVALID":
+		case "WORKSPACE_TRASH_PLAN_INVALID":
+		case "WORKSPACE_TRASH_UNAVAILABLE":
 		case "ROOT_UNAVAILABLE":
 		case "WORKSPACE_WINDOW_CLOSED":
 		case "ENTRY_TYPE_MISMATCH":
@@ -780,23 +784,32 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 			authorizationSnapshot.rootId !== resolved.rootId ||
 			authorizationSnapshot.relativePath !== resolved.relativePath ||
 			authorizationSnapshot.recursive !== true ||
-			authorizationSnapshot.permanent !== true
+			typeof authorizationSnapshot.permanent !== "boolean"
 		) {
 			throw noPermissions();
 		}
 		beginPlainWorkspaceDeleteProviderDispatch(authorization);
 
-		let result: WorkspaceDeleteResult;
+		let result: WorkspaceDeleteResult | WorkspaceTrashResult;
 		try {
-			result = decodeWorkspaceDeleteResult(
-				await this.#bridge.workspaceCommitDeleteEntry(
-					authorizationSnapshot.confirmationId,
-					authorizationSnapshot.entryId,
-					authorizationSnapshot.rootId,
-					authorizationSnapshot.relativePath,
-					authorizationSnapshot.recursive,
-				),
-			);
+			result = authorizationSnapshot.permanent
+				? decodeWorkspaceDeleteResult(
+						await this.#bridge.workspaceCommitDeleteEntry(
+							authorizationSnapshot.confirmationId,
+							authorizationSnapshot.entryId,
+							authorizationSnapshot.rootId,
+							authorizationSnapshot.relativePath,
+							authorizationSnapshot.recursive,
+						),
+					)
+				: decodeWorkspaceTrashResult(
+						await this.#bridge.workspaceCommitTrashEntry(
+							authorizationSnapshot.confirmationId,
+							authorizationSnapshot.entryId,
+							authorizationSnapshot.rootId,
+							authorizationSnapshot.relativePath,
+						),
+					);
 		} catch (error) {
 			const failure = mapDeleteError(error);
 			completePlainWorkspaceDeleteProviderFailure(
@@ -818,7 +831,10 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 			this.fireRootUpdated(resolved.resource);
 			throw unavailable();
 		}
-		if (result.status !== "deleted") {
+		const succeeded = authorizationSnapshot.permanent
+			? result.status === "deleted"
+			: result.status === "trashed";
+		if (!succeeded) {
 			this.fireRootUpdated(resolved.resource);
 			throw unavailable();
 		}

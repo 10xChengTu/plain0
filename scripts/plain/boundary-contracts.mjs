@@ -15358,6 +15358,17 @@ function validateWorkspaceDeleteCoordinatorRoute(source) {
 					ordinaryFailures += 1;
 				} else if (result.status === "outcomeUnknown") {
 					outcomeUnknown = true;
+				} else if (result.status === "trashed") {
+					outcomeUnknown = true;
+				} else if (result.status === "entryRetained") {
+					if (result.reason === "trashFailed") {
+						outcomeUnknown = true;
+					} else if (incompleteResult === undefined) {
+						incompleteResult = Object.freeze({
+							status: result.status,
+							reason: result.reason,
+						});
+					}
 				} else if (incompleteResult === undefined) {
 					incompleteResult = result;
 				}
@@ -15613,23 +15624,32 @@ function validateWorkspaceDeleteProviderRoute(source) {
 			authorizationSnapshot.rootId !== resolved.rootId ||
 			authorizationSnapshot.relativePath !== resolved.relativePath ||
 			authorizationSnapshot.recursive !== true ||
-			authorizationSnapshot.permanent !== true
+			typeof authorizationSnapshot.permanent !== "boolean"
 		) {
 			throw noPermissions();
 		}
 		beginPlainWorkspaceDeleteProviderDispatch(authorization);
 
-		let result: WorkspaceDeleteResult;
+		let result: WorkspaceDeleteResult | WorkspaceTrashResult;
 		try {
-			result = decodeWorkspaceDeleteResult(
-				await this.#bridge.workspaceCommitDeleteEntry(
-					authorizationSnapshot.confirmationId,
-					authorizationSnapshot.entryId,
-					authorizationSnapshot.rootId,
-					authorizationSnapshot.relativePath,
-					authorizationSnapshot.recursive,
-				),
-			);
+			result = authorizationSnapshot.permanent
+				? decodeWorkspaceDeleteResult(
+						await this.#bridge.workspaceCommitDeleteEntry(
+							authorizationSnapshot.confirmationId,
+							authorizationSnapshot.entryId,
+							authorizationSnapshot.rootId,
+							authorizationSnapshot.relativePath,
+							authorizationSnapshot.recursive,
+						),
+					)
+				: decodeWorkspaceTrashResult(
+						await this.#bridge.workspaceCommitTrashEntry(
+							authorizationSnapshot.confirmationId,
+							authorizationSnapshot.entryId,
+							authorizationSnapshot.rootId,
+							authorizationSnapshot.relativePath,
+						),
+					);
 		} catch (error) {
 			const failure = mapDeleteError(error);
 			completePlainWorkspaceDeleteProviderFailure(
@@ -15651,7 +15671,10 @@ function validateWorkspaceDeleteProviderRoute(source) {
 			this.fireRootUpdated(resolved.resource);
 			throw unavailable();
 		}
-		if (result.status !== "deleted") {
+		const succeeded = authorizationSnapshot.permanent
+			? result.status === "deleted"
+			: result.status === "trashed";
+		if (!succeeded) {
 			this.fireRootUpdated(resolved.resource);
 			throw unavailable();
 		}
@@ -15687,7 +15710,7 @@ function validateWorkspaceDeleteProviderRoute(source) {
 			normalized(method.body) !== expectedDeleteBody
 		) {
 			failures.push(
-				"provider delete must consume one authorization through prepared/inFlight/terminal typestate and dispatch exactly one permanent commit",
+				"provider delete must consume one authorization through prepared/inFlight/terminal typestate and dispatch exactly one mode-matched commit",
 			);
 		}
 	}
@@ -15707,6 +15730,8 @@ function validateWorkspaceDeleteProviderRoute(source) {
 					outcome: "ordinaryFailure",
 				});
 			case "WORKSPACE_DELETE_PLAN_INVALID":
+			case "WORKSPACE_TRASH_PLAN_INVALID":
+			case "WORKSPACE_TRASH_UNAVAILABLE":
 			case "ROOT_UNAVAILABLE":
 			case "WORKSPACE_WINDOW_CLOSED":
 			case "ENTRY_TYPE_MISMATCH":
@@ -15859,6 +15884,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 				"type:WorkspaceDeleteResult",
 				"type:WorkspaceEntryKind",
 				"type:WorkspaceEntryStat",
+				"type:WorkspaceTrashResult",
 				"type:WorkspaceWriteResult",
 			]),
 		],
@@ -15869,6 +15895,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 				"value:decodeWorkspaceDeleteResult",
 				"value:decodeWorkspaceEntryStat",
 				"value:decodeWorkspaceMoveResult",
+				"value:decodeWorkspaceTrashResult",
 				"value:frozenWorkspaceEntryRequest",
 			]),
 		],
@@ -16749,6 +16776,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		["../../platform/tauri/workspace-codec", "decodeWorkspaceDeleteResult"],
 		["../../platform/tauri/workspace-codec", "decodeWorkspaceEntryStat"],
 		["../../platform/tauri/workspace-codec", "decodeWorkspaceMoveResult"],
+		["../../platform/tauri/workspace-codec", "decodeWorkspaceTrashResult"],
 		["../../platform/tauri/workspace-codec", "frozenWorkspaceEntryRequest"],
 	];
 	for (const [moduleName, importedName] of criticalProviderImports) {
@@ -18018,6 +18046,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	let renameBridgeReferences = 0;
 	let moveBridgeReferences = 0;
 	let deleteBridgeReferences = 0;
+	let trashBridgeReferences = 0;
 	let publishFileBridgeReferences = 0;
 	const auditedMutationBridgeNames = new Set([
 		"workspaceCreateFile",
@@ -18026,6 +18055,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		"workspaceRename",
 		"workspaceMove",
 		"workspaceCommitDeleteEntry",
+		"workspaceCommitTrashEntry",
 		"workspacePublishFile",
 	]);
 	const expectedBridgeMethods = new Map([
@@ -18041,6 +18071,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		["workspaceRename", 1],
 		["workspaceMove", 1],
 		["workspaceCommitDeleteEntry", 1],
+		["workspaceCommitTrashEntry", 1],
 	]);
 	const bridgeMethodCounts = new Map(
 		[...expectedBridgeMethods].map(([name]) => [name, 0]),
@@ -18068,6 +18099,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		"decodeWorkspaceDeleteResult",
 		"decodeWorkspaceEntryStat",
 		"decodeWorkspaceMoveResult",
+		"decodeWorkspaceTrashResult",
 		"frozenWorkspaceEntryRequest",
 	]);
 	const criticalNewBindings = new Set([
@@ -18117,6 +18149,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		["workspaceMoveOutcomeUnknown", 1],
 		["decodeWorkspaceMoveResult", 1],
 		["decodeWorkspaceDeleteResult", 1],
+		["decodeWorkspaceTrashResult", 1],
 		["beginPlainWorkspaceDeleteProviderDispatch", 1],
 		["completePlainWorkspaceDeleteProviderFailure", 2],
 		["completePlainWorkspaceDeleteProviderResult", 1],
@@ -18672,6 +18705,9 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 				case "workspaceCommitDeleteEntry":
 					deleteBridgeReferences += 1;
 					break;
+				case "workspaceCommitTrashEntry":
+					trashBridgeReferences += 1;
+					break;
 				case "workspacePublishFile":
 					publishFileBridgeReferences += 1;
 					break;
@@ -18760,7 +18796,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		);
 	}
 	if (
-		privateBridgeReferences !== 15 ||
+		privateBridgeReferences !== 16 ||
 		privatePolicyReferences !== 3 ||
 		privateWatchStateReferences !== 7
 	) {
@@ -18775,6 +18811,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		renameBridgeReferences !== 1 ||
 		moveBridgeReferences !== 1 ||
 		deleteBridgeReferences !== 1 ||
+		trashBridgeReferences !== 1 ||
 		publishFileBridgeReferences !== 1
 	) {
 		failures.push(

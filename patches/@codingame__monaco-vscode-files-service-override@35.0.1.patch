@@ -1,5 +1,5 @@
 diff --git a/vscode/src/vs/platform/files/common/fileService.js b/vscode/src/vs/platform/files/common/fileService.js
-index 107a37ee3b1999392b35fa5545382acc7238a3c1..ebe36148b077802ffb0ee969e3c0354aa39b3ee3 100644
+index 107a37ee3b1999392b35fa5545382acc7238a3c1..8aec90be3973fc48333a5bc3de1d1ac26f004067 100644
 --- a/vscode/src/vs/platform/files/common/fileService.js
 +++ b/vscode/src/vs/platform/files/common/fileService.js
 @@ -9,15 +9,17 @@ import { hash } from '@codingame/monaco-vscode-api/vscode/vs/base/common/hash';
@@ -1235,7 +1235,7 @@ index 107a37ee3b1999392b35fa5545382acc7238a3c1..ebe36148b077802ffb0ee969e3c0354a
      async del(resource, options) {
 +        const plainProviderOptions = {
 +            recursive: true,
-+            useTrash: false,
++            useTrash: options.useTrash === true,
 +            atomic: false
 +        };
 +        const isAuthorizedPlainDelete = movePlainWorkspaceDeleteFileServiceAuthorization(options, resource, plainProviderOptions);

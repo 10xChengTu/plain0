@@ -82,7 +82,7 @@ const PATCH_CONTRACTS = Object.freeze([
 		// `scripts/plain/missing-services-patch-contract.mjs`'s own S6
 		// paragraph and `docs/bundle-baseline.json`'s per-category
 		// `categoryNotes` for the full per-file accounting.
-		sha256: "0d79e32416d5fa128e80082ea765cfabb3df7e601a916f43fe5caef05532fedb",
+		sha256: "bae37ebab7aa701f8c832e9d68b03a654fe9aa61a508e52c9f0824655a76b2fc",
 		integrity:
 			"sha512-pJMSRMI0m5Mvx54u6iBGh+iad9KqfICnwAcjswNJOO7Xt1OXm5xILcM32VkMe4UX0YmrGAvYc0WVKWL8I9O4ng==",
 		directImporter: true,
@@ -171,9 +171,9 @@ const PATCH_CONTRACTS = Object.freeze([
 			"@@ -346,6 +346,95 @@ var FileOperationResult;",
 			"@@ -437,4 +526,4 @@ function getLargeFileConfirmationLimit(arg) {",
 			"diff --git a/vscode/src/vs/platform/files/common/plainWorkspaceDelete.d.ts b/vscode/src/vs/platform/files/common/plainWorkspaceDelete.d.ts",
-			"@@ -0,0 +1,71 @@",
+			"@@ -0,0 +1,74 @@",
 			"diff --git a/vscode/src/vs/platform/files/common/plainWorkspaceDelete.js b/vscode/src/vs/platform/files/common/plainWorkspaceDelete.js",
-			"@@ -0,0 +1,417 @@",
+			"@@ -0,0 +1,427 @@",
 			"diff --git a/vscode/src/vs/workbench/browser/actions/windowActions.js b/vscode/src/vs/workbench/browser/actions/windowActions.js",
 			"@@ -407,36 +407,6 @@ class ShowAboutDialogAction extends Action2 {",
 			"@@ -451,7 +421,6 @@ class BlurAction extends Action2 {",
@@ -207,9 +207,9 @@ const PATCH_CONTRACTS = Object.freeze([
 			"@@ -32,8 +31,6 @@ registerAction2(SetActiveEditorReadonlyInSession);",
 			"diff --git a/vscode/src/vs/workbench/contrib/files/browser/fileActions.js b/vscode/src/vs/workbench/contrib/files/browser/fileActions.js",
 			"@@ -10,6 +10,7 @@ import { Action } from '../../../../base/common/actions.js';",
-			"@@ -99,6 +100,42 @@ async function deleteFiles(",
-			"@@ -1120,6 +1157,18 @@ CommandsRegistry.registerCommand({",
-			"@@ -1263,11 +1312,17 @@ const pasteFileHandler = async (accessor, fileList) => {",
+			"@@ -99,6 +100,43 @@ async function deleteFiles(",
+			"@@ -1120,6 +1158,18 @@ CommandsRegistry.registerCommand({",
+			"@@ -1263,11 +1313,17 @@ const pasteFileHandler = async (accessor, fileList) => {",
 			"diff --git a/vscode/src/vs/workbench/contrib/files/browser/fileCommands.js b/vscode/src/vs/workbench/contrib/files/browser/fileCommands.js",
 			"@@ -15,7 +15,7 @@ import { IContextKeyService } from '../../../../platform/contextkey/common/conte",
 			"@@ -35,7 +35,7 @@ import { IConfigurationService } from '../../../../platform/configuration/common",
@@ -256,7 +256,7 @@ const PATCH_CONTRACTS = Object.freeze([
 		packageName: "@codingame/monaco-vscode-base-service-override@35.0.1",
 		patchPath:
 			"patches/@codingame__monaco-vscode-base-service-override@35.0.1.patch",
-		sha256: "db541d394346ba2985b5550e2f0faf665a056ac701df25119354bd0b1e3baf4e",
+		sha256: "98a7cd1eb7e87702fa76447fcf0ce3ba9ac56758ad33b3c641e5f82eec256b7c",
 		integrity:
 			"sha512-t1jG2GWrJcNJBzvSSC7H174C/7VmPDFR3FT89cmmYu1XjSs9XUDYgjLAzaQrf+KP6zlWv+uE3HvLBo0OESQ4MQ==",
 		directImporter: false,
@@ -271,7 +271,7 @@ const PATCH_CONTRACTS = Object.freeze([
 		packageName: "@codingame/monaco-vscode-bulk-edit-service-override@35.0.1",
 		patchPath:
 			"patches/@codingame__monaco-vscode-bulk-edit-service-override@35.0.1.patch",
-		sha256: "4437c5e441146d5d2f2262cbe8748932a1353ebf48424356fa648d33abf44245",
+		sha256: "43ee12f4707635cc9568b214d729e0836de9192c13e5cb752c4e8c5293adab81",
 		integrity:
 			"sha512-4pLqH3KRUU0IevwRFBUPvHkiP9+wkWHIsPNXq/BVwulvEAgR69bjmpXkRHXXGOUilYdq1LCoICFGIyAtmyrTdg==",
 		directImporter: false,
@@ -345,7 +345,7 @@ const PATCH_CONTRACTS = Object.freeze([
 		packageName: "@codingame/monaco-vscode-files-service-override@35.0.1",
 		patchPath:
 			"patches/@codingame__monaco-vscode-files-service-override@35.0.1.patch",
-		sha256: "4639136edb34a2de20a9f24c8d7bfc892c7080e444c997a8290772ce37ac0159",
+		sha256: "90558e0cc2df2cf979d361b1f1fa535a17460c6f2b333832e4e972f4798a96da",
 		integrity:
 			"sha512-tuyXQG4xajLk3uHpYRF0KCO1DV1L3U6tf+COPumRgDmJUINNOPBWpJ43uAdDnE2MNJL9eY5E4LlIxeHSZChaZw==",
 		directImporter: true,

@@ -71,6 +71,7 @@ function rootedWorkspaceUri(workspaceRootId: string, relativePath = ""): URI {
 function authorizedProviderDelete(
 	resource: URI,
 	kind: "file" | "directory" | "symlink" = "file",
+	permanent = true,
 ): Readonly<{
 	options: IFileDeleteOptions;
 	authorization: PlainWorkspaceDeleteAuthorization;
@@ -79,7 +80,7 @@ function authorizedProviderDelete(
 		recursive: true,
 		folder: kind === "directory",
 		ignoreIfNotExists: false,
-		skipTrashBin: true,
+		skipTrashBin: permanent,
 	};
 	const authorization = authorizePlainWorkspaceDeleteResourceEdit(
 		resourceEditOptions,
@@ -91,10 +92,10 @@ function authorizedProviderDelete(
 			relativePath: resource.path.slice(1),
 			recursive: true,
 			kind,
-			permanent: true,
+			permanent,
 		},
 	);
-	const operation = { resource, recursive: true, useTrash: false };
+	const operation = { resource, recursive: true, useTrash: !permanent };
 	expect(
 		movePlainWorkspaceDeleteResourceEditAuthorization(
 			resourceEditOptions,
@@ -102,7 +103,7 @@ function authorizedProviderDelete(
 			operation,
 		),
 	).toBe(true);
-	const fileOptions = { recursive: true, useTrash: false, atomic: false };
+	const fileOptions = { recursive: true, useTrash: !permanent, atomic: false };
 	expect(
 		movePlainWorkspaceDeleteWorkingCopyAuthorization(
 			operation,
@@ -112,7 +113,7 @@ function authorizedProviderDelete(
 	).toBe(true);
 	const providerOptions = {
 		recursive: true,
-		useTrash: false,
+		useTrash: !permanent,
 		atomic: false,
 	} as const;
 	expect(
@@ -2446,6 +2447,88 @@ describe("Plain workspace file system provider", () => {
 		);
 		expect(replay.code).toBe(FileSystemProviderErrorCode.NoPermissions);
 		expect(commit).toHaveBeenCalledOnce();
+	});
+
+	it("routes an exact Trash authorization only to the system-Trash bridge and emits the trashed entry", async () => {
+		const commitTrash = vi.fn(async () =>
+			Object.freeze({ status: "trashed" as const }),
+		);
+		const commitDelete = vi.fn();
+		const provider = createPlainWorkspaceFileSystemProvider(
+			testBridge({
+				workspaceCommitTrashEntry: commitTrash,
+				workspaceCommitDeleteEntry: commitDelete,
+			}),
+		);
+		const resource = workspaceUri("trash-me.txt");
+		const authorized = authorizedProviderDelete(resource, "file", false);
+		const changes: ProviderChanges[] = [];
+		const subscription = provider.onDidChangeFile((event: ProviderChanges) =>
+			changes.push(event),
+		);
+
+		await expect(
+			provider.delete(resource, authorized.options),
+		).resolves.toBeUndefined();
+		subscription.dispose();
+
+		expect(commitTrash).toHaveBeenCalledOnce();
+		expect(commitTrash).toHaveBeenCalledWith(
+			"00000000-0000-4000-8000-000000000303",
+			"00000000-0000-4000-8000-000000000404",
+			rootId,
+			"trash-me.txt",
+		);
+		expect(commitDelete).not.toHaveBeenCalled();
+		expect(getPlainWorkspaceDeleteState(authorized.authorization)).toEqual({
+			status: "trashed",
+		});
+		expect(changes).toHaveLength(1);
+		expect(changes[0]).toHaveLength(1);
+		expect(changes[0]![0]!.type).toBe(FileChangeType.DELETED);
+		expect(changes[0]![0]!.resource.toString()).toBe(resource.toString());
+	});
+
+	it("rescans and rejects retained or unknown Trash outcomes without permanent fallback", async () => {
+		for (const result of [
+			Object.freeze({
+				status: "entryRetained" as const,
+				reason: "trashFailed" as const,
+			}),
+			Object.freeze({ status: "outcomeUnknown" as const }),
+		]) {
+			const commitTrash = vi.fn(async () => result);
+			const commitDelete = vi.fn();
+			const provider = createPlainWorkspaceFileSystemProvider(
+				testBridge({
+					workspaceCommitTrashEntry: commitTrash,
+					workspaceCommitDeleteEntry: commitDelete,
+				}),
+			);
+			const resource = workspaceUri(`trash-${result.status}`);
+			const authorized = authorizedProviderDelete(resource, "file", false);
+			const changes: ProviderChanges[] = [];
+			const subscription = provider.onDidChangeFile((event: ProviderChanges) =>
+				changes.push(event),
+			);
+
+			await expect(
+				provider.delete(resource, authorized.options),
+			).rejects.toMatchObject({
+				code: FileSystemProviderErrorCode.Unavailable,
+			});
+			subscription.dispose();
+
+			expect(commitTrash).toHaveBeenCalledOnce();
+			expect(commitDelete).not.toHaveBeenCalled();
+			expect(getPlainWorkspaceDeleteState(authorized.authorization)).toEqual(
+				result,
+			);
+			expect(changes).toHaveLength(1);
+			expect(changes[0]![0]).toMatchObject({
+				type: FileChangeType.UPDATED,
+			});
+		}
 	});
 
 	it("publishes a root rescan before mapping every retained or partial terminal to unavailable", async () => {

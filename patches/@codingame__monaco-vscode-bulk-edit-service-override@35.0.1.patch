@@ -1,5 +1,5 @@
 diff --git a/vscode/src/vs/workbench/contrib/bulkEdit/browser/bulkFileEdits.js b/vscode/src/vs/workbench/contrib/bulkEdit/browser/bulkFileEdits.js
-index d1b90d1205ec913adce9b2cc8c0f428e60d411af..68aadad763cebae1e0edacf0b7955b062d797135 100644
+index d1b90d1205ec913adce9b2cc8c0f428e60d411af..652629521e41f0c764548ee3edfb32ec0e41764c 100644
 --- a/vscode/src/vs/workbench/contrib/bulkEdit/browser/bulkFileEdits.js
 +++ b/vscode/src/vs/workbench/contrib/bulkEdit/browser/bulkFileEdits.js
 @@ -11,11 +11,13 @@ import { ILogService } from '@codingame/monaco-vscode-api/vscode/vs/platform/log
@@ -25,7 +25,7 @@ index d1b90d1205ec913adce9b2cc8c0f428e60d411af..68aadad763cebae1e0edacf0b7955b06
 +    const operation = {
 +        resource: edit.oldUri,
 +        recursive: true,
-+        useTrash: false
++        useTrash: edit.options.skipTrashBin === false
 +    };
 +    return {
 +        operation,

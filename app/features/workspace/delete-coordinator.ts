@@ -193,6 +193,17 @@ function classifyAuthorizationResults(
 			ordinaryFailures += 1;
 		} else if (result.status === "outcomeUnknown") {
 			outcomeUnknown = true;
+		} else if (result.status === "trashed") {
+			outcomeUnknown = true;
+		} else if (result.status === "entryRetained") {
+			if (result.reason === "trashFailed") {
+				outcomeUnknown = true;
+			} else if (incompleteResult === undefined) {
+				incompleteResult = Object.freeze({
+					status: result.status,
+					reason: result.reason,
+				});
+			}
 		} else if (incompleteResult === undefined) {
 			incompleteResult = result;
 		}
@@ -212,6 +223,9 @@ async function runDelete(
 	getNotificationService: () => Promise<PlainDeleteErrorNotificationService>,
 	context: PlainWorkspaceDeleteCoordinatorContext,
 ): Promise<void> {
+	if (context.useTrash !== false) {
+		throw new Error("System Trash is not connected to the coordinator yet.");
+	}
 	const selection = snapshotSelection(context, provider);
 	const requests = Object.freeze(
 		selection.map(({ resource }) =>

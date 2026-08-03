@@ -55,12 +55,16 @@ function resource(relativePath = "delete.txt") {
 	return URI.parse(`plain-workspace://${rootId}/${relativePath}`);
 }
 
-function authorizedResourceEdit(target = resource(), entrySuffix = 404) {
+function authorizedResourceEdit(
+	target = resource(),
+	entrySuffix = 404,
+	permanent = true,
+) {
 	const options = {
 		recursive: true,
 		folder: false,
 		ignoreIfNotExists: false,
-		skipTrashBin: true,
+		skipTrashBin: permanent,
 	};
 	const authorization = authorizePlainWorkspaceDeleteResourceEdit(
 		options,
@@ -74,7 +78,7 @@ function authorizedResourceEdit(target = resource(), entrySuffix = 404) {
 			relativePath: target.path.slice(1),
 			recursive: true,
 			kind: "file",
-			permanent: true,
+			permanent,
 		},
 	);
 	return {
@@ -87,7 +91,7 @@ function moveToWorkingCopy(edit) {
 	const operation = {
 		resource: edit.oldResource,
 		recursive: true,
-		useTrash: false,
+		useTrash: edit.options.skipTrashBin === false,
 	};
 	expect(
 		movePlainWorkspaceDeleteResourceEditAuthorization(
@@ -100,7 +104,11 @@ function moveToWorkingCopy(edit) {
 }
 
 function moveToFileService(operation) {
-	const options = { recursive: true, useTrash: false, atomic: false };
+	const options = {
+		recursive: true,
+		useTrash: operation.useTrash,
+		atomic: false,
+	};
 	expect(
 		movePlainWorkspaceDeleteWorkingCopyAuthorization(
 			operation,
@@ -112,7 +120,11 @@ function moveToFileService(operation) {
 }
 
 function terminalizeAtProvider(fileOptions, target) {
-	const providerOptions = { recursive: true, useTrash: false, atomic: false };
+	const providerOptions = {
+		recursive: true,
+		useTrash: fileOptions.useTrash,
+		atomic: false,
+	};
 	expect(
 		movePlainWorkspaceDeleteFileServiceAuthorization(
 			fileOptions,
@@ -127,7 +139,7 @@ function terminalizeAtProvider(fileOptions, target) {
 	expect(authorization).toBeDefined();
 	beginPlainWorkspaceDeleteProviderDispatch(authorization);
 	completePlainWorkspaceDeleteProviderResult(authorization, {
-		status: "deleted",
+		status: fileOptions.useTrash ? "trashed" : "deleted",
 	});
 	return providerOptions;
 }
@@ -165,9 +177,12 @@ describe("confirmed-delete Workbench patch", () => {
 		expect(source.slice(invalidGuard, genericDeleteBoundary)).toContain(
 			"PLAIN_WORKSPACE_DELETE_CONTRACT: invalid deletion resource rejected",
 		);
+		expect(source.slice(invalidGuard, genericDeleteBoundary)).toContain(
+			"useTrash,",
+		);
 	});
 
-	it("keeps every carrier exact and one-shot, including permanent mode and unknown terminals", () => {
+	it("keeps every carrier exact, mode-preserving, and one-shot, including unknown terminals", () => {
 		const target = resource("strict.txt");
 		const options = {
 			recursive: true,
@@ -187,9 +202,15 @@ describe("confirmed-delete Workbench patch", () => {
 		expect(() =>
 			authorizePlainWorkspaceDeleteResourceEdit(options, target, {
 				...input,
-				permanent: false,
+				permanent: "yes",
 			}),
 		).toThrow(/invalid authorization/u);
+		expect(() =>
+			authorizePlainWorkspaceDeleteResourceEdit(options, target, {
+				...input,
+				permanent: false,
+			}),
+		).toThrow(/invalid ResourceFileEdit options/u);
 
 		let getterReads = 0;
 		const accessorOptions = {
@@ -250,6 +271,43 @@ describe("confirmed-delete Workbench patch", () => {
 		expect(() =>
 			beginPlainWorkspaceDeleteProviderDispatch(providerAuthorization),
 		).toThrow(/dispatch rejected/u);
+
+		const trash = authorizedResourceEdit(
+			resource("trash-strict.txt"),
+			405,
+			false,
+		);
+		const trashOperation = moveToWorkingCopy(trash.edit);
+		expect(trashOperation.useTrash).toBe(true);
+		const trashFileOptions = moveToFileService(trashOperation);
+		const trashProviderOptions = {
+			recursive: true,
+			useTrash: true,
+			atomic: false,
+		};
+		expect(
+			movePlainWorkspaceDeleteFileServiceAuthorization(
+				trashFileOptions,
+				trashOperation.resource,
+				trashProviderOptions,
+			),
+		).toBe(true);
+		const trashAuthorization = takePlainWorkspaceDeleteProviderAuthorization(
+			trashProviderOptions,
+			trashOperation.resource,
+		);
+		beginPlainWorkspaceDeleteProviderDispatch(trashAuthorization);
+		expect(() =>
+			completePlainWorkspaceDeleteProviderResult(trashAuthorization, {
+				status: "deleted",
+			}),
+		).toThrow(/invalid delete result/u);
+		completePlainWorkspaceDeleteProviderResult(trashAuthorization, {
+			status: "trashed",
+		});
+		expect(getPlainWorkspaceDeleteState(trash.authorization)).toEqual({
+			status: "trashed",
+		});
 	});
 
 	it("BulkFileEdits transfers a pure authorized delete without resolve, read, Trash, or Undo", async () => {
@@ -305,6 +363,60 @@ describe("confirmed-delete Workbench patch", () => {
 		expect(progress.report).toHaveBeenCalledOnce();
 		expect(getPlainWorkspaceDeleteState(authorization)).toEqual({
 			status: "deleted",
+		});
+	});
+
+	it("BulkFileEdits preserves Trash intent without capability or configuration reinterpretation", async () => {
+		const { authorization, edit } = authorizedResourceEdit(
+			resource("trash.txt"),
+			406,
+			false,
+		);
+		const workingCopyDelete = vi.fn(async (operations) => {
+			expect(operations).toHaveLength(1);
+			expect(operations[0].useTrash).toBe(true);
+			const fileOptions = moveToFileService(operations[0]);
+			terminalizeAtProvider(fileOptions, operations[0].resource);
+		});
+		const fileService = {
+			resolve: vi.fn(),
+			readFile: vi.fn(),
+			hasCapability: vi.fn(),
+		};
+		const configurationService = { getValue: vi.fn() };
+		const instantiationService = {
+			createInstance(ctor, ...args) {
+				return new ctor(
+					...args,
+					{ delete: workingCopyDelete },
+					fileService,
+					configurationService,
+					instantiationService,
+					{ error: vi.fn() },
+				);
+			},
+		};
+		const bulk = new BulkFileEdits(
+			"trash",
+			"plain.trash",
+			{ id: 3 },
+			undefined,
+			false,
+			{ report: vi.fn() },
+			CancellationToken.None,
+			[edit],
+			instantiationService,
+			{ pushElement: vi.fn() },
+		);
+
+		await expect(bulk.apply()).resolves.toEqual([]);
+		expect(workingCopyDelete).toHaveBeenCalledOnce();
+		expect(fileService.resolve).not.toHaveBeenCalled();
+		expect(fileService.readFile).not.toHaveBeenCalled();
+		expect(fileService.hasCapability).not.toHaveBeenCalled();
+		expect(configurationService.getValue).not.toHaveBeenCalled();
+		expect(getPlainWorkspaceDeleteState(authorization)).toEqual({
+			status: "trashed",
 		});
 	});
 

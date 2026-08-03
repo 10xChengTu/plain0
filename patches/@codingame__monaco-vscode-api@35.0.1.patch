@@ -5601,10 +5601,10 @@ index 0ec5225b326fbfa5c0225f4d96fffc251ea6a301..053504dc5cd4b8fcb0c5717e0c74ab1b
 +export { AutoSaveConfiguration, ByteSize, ETAG_DISABLED, FILES_ASSOCIATIONS_CONFIG, FILES_EXCLUDE_CONFIG, FILES_READONLY_EXCLUDE_CONFIG, FILES_READONLY_FROM_PERMISSIONS_CONFIG, FILES_READONLY_INCLUDE_CONFIG, FileChangeFilter, FileChangeType, FileChangesEvent, FileKind, FileOperation, FileOperationError, FileOperationEvent, FileOperationResult, FilePermission, FileSystemProviderCapabilities, FileSystemProviderError, FileSystemProviderErrorCode, FileType, HotExitConfiguration, NotModifiedSinceFileOperationError, TooLargeFileOperationError, createFileSystemProviderError, createPlainWorkspaceWriteOutcomeError, ensureFileSystemProviderError, etag, getLargeFileConfirmationLimit, getPlainWorkspaceWriteOutcome, hasFileAppendCapability, hasFileAtomicDeleteCapability, hasFileAtomicReadCapability, hasFileAtomicWriteCapability, hasFileCloneCapability, hasFileFolderCopyCapability, hasFileReadStreamCapability, hasFileRealpathCapability, hasOpenReadWriteCloseCapability, hasReadWriteCapability, hasReadonlyCapability, isFileOpenForWriteOptions, isPlainWorkspaceWriteOutcomeError, markAsFileSystemProviderError, toFileOperationResult, toFileSystemProviderErrorCode, whenProviderRegistered };
 diff --git a/vscode/src/vs/platform/files/common/plainWorkspaceDelete.d.ts b/vscode/src/vs/platform/files/common/plainWorkspaceDelete.d.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..fc455e29fe6ad3220fe783c0ece8c2824938e09d
+index 0000000000000000000000000000000000000000..8136e862b4e2c37d6de920a92ac6f419ee59a7f2
 --- /dev/null
 +++ b/vscode/src/vs/platform/files/common/plainWorkspaceDelete.d.ts
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,74 @@
 +import type { IDisposable } from "../../../base/common/lifecycle";
 +import type { URI } from "../../../base/common/uri";
 +import type { ResourceFileEdit } from "../../../editor/browser/services/bulkEditService";
@@ -5616,9 +5616,11 @@ index 0000000000000000000000000000000000000000..fc455e29fe6ad3220fe783c0ece8c282
 +    readonly [plainWorkspaceDeleteAuthorizationBrand]: true;
 +}
 +export type PlainWorkspaceDeleteKind = "file" | "directory" | "symlink";
-+export type PlainWorkspaceDeleteReason = "entryChanged" | "entryUnverifiable" | "deleteFailed";
-+export type PlainWorkspaceDeleteResult = Readonly<{ status: "deleted" }> | Readonly<{ status: "entryRetained"; reason: PlainWorkspaceDeleteReason }> | Readonly<{ status: "entryPartiallyDeleted"; reason: PlainWorkspaceDeleteReason; removedEntries: number }>;
-+export type PlainWorkspaceDeleteState = Readonly<{ status: "pending" }> | Readonly<{ status: "inFlight" }> | Readonly<{ status: "ordinaryFailure" }> | Readonly<{ status: "outcomeUnknown" }> | PlainWorkspaceDeleteResult;
++export type PlainWorkspacePermanentDeleteReason = "entryChanged" | "entryUnverifiable" | "deleteFailed";
++export type PlainWorkspaceTrashReason = "entryChanged" | "entryUnverifiable" | "trashFailed";
++export type PlainWorkspaceDeleteReason = PlainWorkspacePermanentDeleteReason | PlainWorkspaceTrashReason;
++export type PlainWorkspaceDeleteResult = Readonly<{ status: "deleted" }> | Readonly<{ status: "trashed" }> | Readonly<{ status: "entryRetained"; reason: PlainWorkspaceDeleteReason }> | Readonly<{ status: "entryPartiallyDeleted"; reason: PlainWorkspacePermanentDeleteReason; removedEntries: number }> | Readonly<{ status: "outcomeUnknown" }>;
++export type PlainWorkspaceDeleteState = Readonly<{ status: "pending" }> | Readonly<{ status: "inFlight" }> | Readonly<{ status: "ordinaryFailure" }> | PlainWorkspaceDeleteResult;
 +export interface PlainWorkspaceDeleteAuthorizationSnapshot {
 +    readonly confirmationId: string;
 +    readonly entryId: string;
@@ -5626,7 +5628,7 @@ index 0000000000000000000000000000000000000000..fc455e29fe6ad3220fe783c0ece8c282
 +    readonly relativePath: string;
 +    readonly recursive: true;
 +    readonly kind: PlainWorkspaceDeleteKind;
-+    readonly permanent: true;
++    readonly permanent: boolean;
 +}
 +export interface PlainWorkspaceDeleteResourceSnapshot {
 +    readonly scheme: typeof PLAIN_WORKSPACE_SCHEME;
@@ -5653,6 +5655,7 @@ index 0000000000000000000000000000000000000000..fc455e29fe6ad3220fe783c0ece8c282
 +    isReadonly(resource: URI): unknown;
 +}
 +export interface PlainWorkspaceDeleteCoordinatorContext {
++    readonly useTrash: boolean;
 +    readonly elements: readonly PlainWorkspaceDeleteElement[];
 +    readonly explorerService: PlainWorkspaceDeleteExplorerService;
 +    readonly dialogService: PlainWorkspaceDeleteDialogService;
@@ -5678,14 +5681,15 @@ index 0000000000000000000000000000000000000000..fc455e29fe6ad3220fe783c0ece8c282
 +export declare function runPlainWorkspaceDeleteCoordinator(context: PlainWorkspaceDeleteCoordinatorContext): Promise<void>;
 diff --git a/vscode/src/vs/platform/files/common/plainWorkspaceDelete.js b/vscode/src/vs/platform/files/common/plainWorkspaceDelete.js
 new file mode 100644
-index 0000000000000000000000000000000000000000..cb1ac39d496be53077432617485abf5ee4dba6b9
+index 0000000000000000000000000000000000000000..cae3338cdbed5a8f6cc4791ee65a324fdc811c38
 --- /dev/null
 +++ b/vscode/src/vs/platform/files/common/plainWorkspaceDelete.js
-@@ -0,0 +1,417 @@
+@@ -0,0 +1,427 @@
 +const PLAIN_WORKSPACE_SCHEME = "plain-workspace";
 +const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 +const DELETE_KINDS = ( new Set(["file", "directory", "symlink"]));
-+const DELETE_REASONS = ( new Set(["entryChanged", "entryUnverifiable", "deleteFailed"]));
++const PERMANENT_DELETE_REASONS = ( new Set(["entryChanged", "entryUnverifiable", "deleteFailed"]));
++const TRASH_REASONS = ( new Set(["entryChanged", "entryUnverifiable", "trashFailed"]));
 +const MAX_RELATIVE_PATH_BYTES = 4096;
 +const MAX_RELATIVE_PATH_SEGMENTS = 256;
 +const utf8Encoder = ( new TextEncoder());
@@ -5791,7 +5795,7 @@ index 0000000000000000000000000000000000000000..cb1ac39d496be53077432617485abf5e
 +        "kind",
 +        "permanent"
 +    ], true);
-+    if (!UUID_V4_PATTERN.test(snapshot.confirmationId) || !UUID_V4_PATTERN.test(snapshot.entryId) || snapshot.confirmationId === snapshot.entryId || !UUID_V4_PATTERN.test(snapshot.rootId) || !isValidRelativePath(snapshot.relativePath) || snapshot.recursive !== true || !DELETE_KINDS.has(snapshot.kind) || snapshot.permanent !== true) {
++    if (!UUID_V4_PATTERN.test(snapshot.confirmationId) || !UUID_V4_PATTERN.test(snapshot.entryId) || snapshot.confirmationId === snapshot.entryId || !UUID_V4_PATTERN.test(snapshot.rootId) || !isValidRelativePath(snapshot.relativePath) || snapshot.recursive !== true || !DELETE_KINDS.has(snapshot.kind) || typeof snapshot.permanent !== "boolean") {
 +        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: invalid authorization"));
 +    }
 +    return Object.freeze({
@@ -5805,26 +5809,33 @@ index 0000000000000000000000000000000000000000..cb1ac39d496be53077432617485abf5e
 +    });
 +}
 +
-+function deleteResultSnapshot(value) {
++function deleteResultSnapshot(value, permanent) {
 +    const result = ownDataSnapshot(value);
 +    const status = result.snapshot.status;
-+    if (status === "deleted") {
++    if (status === (permanent ? "deleted" : "trashed")) {
 +        if (result.keys.length !== 1 || result.keys[0] !== "status") {
-+            throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: invalid deleted result"));
++            throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: invalid successful result"));
 +        }
 +        return Object.freeze({ status });
 +    }
 +    if (status === "entryRetained") {
-+        if (result.keys.length !== 2 || !result.keys.includes("status") || !result.keys.includes("reason") || !DELETE_REASONS.has(result.snapshot.reason)) {
++        const reasons = permanent ? PERMANENT_DELETE_REASONS : TRASH_REASONS;
++        if (result.keys.length !== 2 || !result.keys.includes("status") || !result.keys.includes("reason") || !reasons.has(result.snapshot.reason)) {
 +            throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: invalid retained result"));
 +        }
 +        return Object.freeze({ status, reason: result.snapshot.reason });
 +    }
-+    if (status === "entryPartiallyDeleted") {
-+        if (result.keys.length !== 3 || !result.keys.includes("status") || !result.keys.includes("reason") || !result.keys.includes("removedEntries") || !DELETE_REASONS.has(result.snapshot.reason) || !Number.isSafeInteger(result.snapshot.removedEntries) || result.snapshot.removedEntries < 1 || result.snapshot.removedEntries > 10000) {
++    if (permanent && status === "entryPartiallyDeleted") {
++        if (result.keys.length !== 3 || !result.keys.includes("status") || !result.keys.includes("reason") || !result.keys.includes("removedEntries") || !PERMANENT_DELETE_REASONS.has(result.snapshot.reason) || !Number.isSafeInteger(result.snapshot.removedEntries) || result.snapshot.removedEntries < 1 || result.snapshot.removedEntries > 10000) {
 +            throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: invalid partial result"));
 +        }
 +        return Object.freeze({ status, reason: result.snapshot.reason, removedEntries: result.snapshot.removedEntries });
++    }
++    if (!permanent && status === "outcomeUnknown") {
++        if (result.keys.length !== 1 || result.keys[0] !== "status") {
++            throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: invalid unknown result"));
++        }
++        return Object.freeze({ status });
 +    }
 +    throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: invalid delete result"));
 +}
@@ -5883,22 +5894,22 @@ index 0000000000000000000000000000000000000000..cb1ac39d496be53077432617485abf5e
 +
 +function assertResourceEditOptions(record, options) {
 +    const snapshot = exactOwnDataSnapshot(options, ["recursive", "folder", "ignoreIfNotExists", "skipTrashBin"], true);
-+    if (snapshot.recursive !== true || snapshot.folder !== (record.snapshot.kind === "directory") || snapshot.ignoreIfNotExists !== false || snapshot.skipTrashBin !== true) {
++    if (snapshot.recursive !== true || snapshot.folder !== (record.snapshot.kind === "directory") || snapshot.ignoreIfNotExists !== false || snapshot.skipTrashBin !== record.snapshot.permanent) {
 +        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: invalid ResourceFileEdit options"));
 +    }
 +}
 +
 +function assertWorkingCopyOperation(record, operation, resource) {
 +    const snapshot = exactOwnDataSnapshot(operation, ["resource", "recursive", "useTrash"], true);
-+    if (snapshot.resource !== resource || snapshot.recursive !== true || snapshot.useTrash !== false) {
++    if (snapshot.resource !== resource || snapshot.recursive !== true || snapshot.useTrash !== !record.snapshot.permanent) {
 +        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: invalid working-copy delete operation"));
 +    }
 +}
 +
-+function assertFileDeleteOptions(options) {
++function assertFileDeleteOptions(record, options) {
 +    const snapshot = exactOwnDataSnapshot(options, ["recursive", "useTrash", "atomic"], true);
-+    if (snapshot.recursive !== true || snapshot.useTrash !== false || snapshot.atomic !== false) {
-+        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: delete must be recursive, permanent and non-atomic"));
++    if (snapshot.recursive !== true || snapshot.useTrash !== !record.snapshot.permanent || snapshot.atomic !== false) {
++        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: delete mode changed in transit"));
 +    }
 +}
 +
@@ -5937,6 +5948,7 @@ index 0000000000000000000000000000000000000000..cb1ac39d496be53077432617485abf5e
 +        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: authorized delete batch must contain only authorized edits"));
 +    }
 +    let confirmationId;
++    let permanent;
 +    const entryIds = ( new Set());
 +    for (let index = 0; index < edits.length; index++) {
 +        const edit = edits[index];
@@ -5949,8 +5961,9 @@ index 0000000000000000000000000000000000000000..cb1ac39d496be53077432617485abf5e
 +        assertResourceEditOptions(record, edit.options);
 +        if (confirmationId === undefined) {
 +            confirmationId = record.snapshot.confirmationId;
++            permanent = record.snapshot.permanent;
 +        }
-+        if (record.snapshot.confirmationId !== confirmationId || entryIds.has(record.snapshot.entryId)) {
++        if (record.snapshot.confirmationId !== confirmationId || record.snapshot.permanent !== permanent || entryIds.has(record.snapshot.entryId)) {
 +            throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: authorized batch identity mismatch"));
 +        }
 +        entryIds.add(record.snapshot.entryId);
@@ -5984,7 +5997,7 @@ index 0000000000000000000000000000000000000000..cb1ac39d496be53077432617485abf5e
 +    assertPrepared(record);
 +    assertResource(record, resource);
 +    assertWorkingCopyOperation(record, operation, resource);
-+    assertFileDeleteOptions(fileOptions);
++    assertFileDeleteOptions(record, fileOptions);
 +    if (fileServiceAuthorizations.has(fileOptions)) {
 +        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: FileService options already authorized"));
 +    }
@@ -6000,8 +6013,8 @@ index 0000000000000000000000000000000000000000..cb1ac39d496be53077432617485abf5e
 +    fileServiceAuthorizations.delete(fileOptions);
 +    assertPrepared(record);
 +    assertResource(record, resource);
-+    assertFileDeleteOptions(fileOptions);
-+    assertFileDeleteOptions(providerOptions);
++    assertFileDeleteOptions(record, fileOptions);
++    assertFileDeleteOptions(record, providerOptions);
 +    if (providerAuthorizations.has(providerOptions)) {
 +        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: provider options already authorized"));
 +    }
@@ -6017,7 +6030,7 @@ index 0000000000000000000000000000000000000000..cb1ac39d496be53077432617485abf5e
 +    providerAuthorizations.delete(providerOptions);
 +    assertPrepared(record);
 +    assertResource(record, resource);
-+    assertFileDeleteOptions(providerOptions);
++    assertFileDeleteOptions(record, providerOptions);
 +    const handle = Object.freeze(Object.create(null));
 +    authorizationHandles.set(handle, record);
 +    return handle;
@@ -6044,7 +6057,7 @@ index 0000000000000000000000000000000000000000..cb1ac39d496be53077432617485abf5e
 +    if (!record || record.phase !== "inFlight") {
 +        throw ( new Error("PLAIN_WORKSPACE_DELETE_CONTRACT: provider result rejected"));
 +    }
-+    const result = deleteResultSnapshot(value);
++    const result = deleteResultSnapshot(value, record.snapshot.permanent);
 +    record.terminal = result;
 +    record.phase = "terminal";
 +    return result;
@@ -6736,7 +6749,7 @@ index 8d123c3d769b98698d473420ba78b6d0af1eb5cb..21f3621e7b0b264abb4c661d4c969d29
  const RENAME_ID = "renameFile";
  KeybindingsRegistry.registerCommandAndKeybindingRule({
 diff --git a/vscode/src/vs/workbench/contrib/files/browser/fileActions.js b/vscode/src/vs/workbench/contrib/files/browser/fileActions.js
-index f4f533eb6e2e9cbcd50b4d4a4d90167b513462b3..1d650fa546ddd228ba6630deed088e888d1b93e6 100644
+index f4f533eb6e2e9cbcd50b4d4a4d90167b513462b3..03874ef4890659e05612b615438037604ddaa013 100644
 --- a/vscode/src/vs/workbench/contrib/files/browser/fileActions.js
 +++ b/vscode/src/vs/workbench/contrib/files/browser/fileActions.js
 @@ -10,6 +10,7 @@ import { Action } from '../../../../base/common/actions.js';
@@ -6747,7 +6760,7 @@ index f4f533eb6e2e9cbcd50b4d4a4d90167b513462b3..1d650fa546ddd228ba6630deed088e88
  import { EditorResourceAccessor, SideBySideEditor } from '../../../common/editor.js';
  import { ItemActivation } from '../../../../platform/quickinput/common/quickInput.js';
  import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.service.js';
-@@ -99,6 +100,42 @@ async function deleteFiles(
+@@ -99,6 +100,43 @@ async function deleteFiles(
          primaryButton = ( localize(10966, "&&Delete"));
      }
      const distinctElements = distinctParents(elements, e => e.resource);
@@ -6780,6 +6793,7 @@ index f4f533eb6e2e9cbcd50b4d4a4d90167b513462b3..1d650fa546ddd228ba6630deed088e88
 +            });
 +        });
 +        return runPlainWorkspaceDeleteCoordinator(Object.freeze({
++            useTrash,
 +            elements: Object.freeze(plainElements),
 +            explorerService,
 +            dialogService,
@@ -6790,7 +6804,7 @@ index f4f533eb6e2e9cbcd50b4d4a4d90167b513462b3..1d650fa546ddd228ba6630deed088e88
      const dirtyWorkingCopies = ( new Set());
      for (const distinctElement of distinctElements) {
          for (const dirtyWorkingCopy of workingCopyFileService.getDirty(distinctElement.resource)) {
-@@ -1120,6 +1157,18 @@ CommandsRegistry.registerCommand({
+@@ -1120,6 +1158,18 @@ CommandsRegistry.registerCommand({
      id: UPLOAD_COMMAND_ID,
      handler: uploadFileHandler
  });
@@ -6809,7 +6823,7 @@ index f4f533eb6e2e9cbcd50b4d4a4d90167b513462b3..1d650fa546ddd228ba6630deed088e88
  const pasteFileHandler = async (accessor, fileList) => {
      const clipboardService = accessor.get(IClipboardService);
      const explorerService = accessor.get(IExplorerService);
-@@ -1263,11 +1312,17 @@ const pasteFileHandler = async (accessor, fileList) => {
+@@ -1263,11 +1313,17 @@ const pasteFileHandler = async (accessor, fileList) => {
              }
          }
      } catch (e) {

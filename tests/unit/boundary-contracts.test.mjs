@@ -6564,26 +6564,23 @@ void tauri["create" + "BrowserMockBridge"]();`,
 		);
 	});
 
-	it("locks provider authorization typestate, permanent commit and closed event outcomes", () => {
+	it("locks provider authorization typestate, mode-matched commit and closed event outcomes", () => {
 		const provider = "app/features/workspace/file-system-provider.ts";
 		const cases = [
 			[
+				'typeof authorizationSnapshot.permanent !== "boolean"',
 				"authorizationSnapshot.permanent !== true",
-				"authorizationSnapshot.permanent !== false",
 			],
 			[
 				"beginPlainWorkspaceDeleteProviderDispatch(authorization);",
 				"void authorization;",
 			],
-			[
-				"result = decodeWorkspaceDeleteResult(",
-				"result = await Promise.resolve(",
-			],
+			["decodeWorkspaceDeleteResult(", "await Promise.resolve("],
 			[
 				"completePlainWorkspaceDeleteProviderResult(authorization, result);",
 				"void result;",
 			],
-			['if (result.status !== "deleted")', 'if (result.status === "deleted")'],
+			[': result.status === "trashed";', ': result.status === "deleted";'],
 			[
 				"this.fireDeleted(resolved.resource);",
 				"this.fireRootUpdated(resolved.resource);",
@@ -7462,7 +7459,7 @@ function workspaceMoveOutcomeUnknown(): WorkspaceMoveOutcomeUnknownError {
 			[
 				"delete",
 				"delete",
-				"provider delete must consume one authorization through prepared/inFlight/terminal typestate and dispatch exactly one permanent commit",
+				"provider delete must consume one authorization through prepared/inFlight/terminal typestate and dispatch exactly one mode-matched commit",
 			],
 			[
 				"plainSnapshotDeleteResource",
