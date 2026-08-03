@@ -181,6 +181,33 @@ describe("native Plain bridge", () => {
 		expect(Object.isFrozen(capabilities)).toBe(true);
 	});
 
+	it("creates only a fixed native window and closes the current folder through empty DTOs", async () => {
+		tauri.invoke
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce({ ...validSnapshot(), revision: 2, roots: [] });
+		const bridge = createNativeBridge();
+
+		await bridge.windowCreate();
+		const closed = await bridge.workspaceCloseFolder();
+
+		expect(tauri.invoke.mock.calls).toEqual([
+			["window_create", { request: {} }],
+			["workspace_close_folder", { request: {} }],
+		]);
+		for (const [, arguments_] of tauri.invoke.mock.calls) {
+			expect(Object.isFrozen(arguments_?.request)).toBe(true);
+		}
+		expect(closed.roots).toEqual([]);
+		expect(Object.isFrozen(closed)).toBe(true);
+	});
+
+	it("rejects a malformed native new-window unit response", async () => {
+		tauri.invoke.mockResolvedValueOnce({ label: "plain-window-injected" });
+		await expect(createNativeBridge().windowCreate()).rejects.toMatchObject({
+			code: "IPC_CONTRACT_VIOLATION",
+		});
+	});
+
 	it("routes local user data through exact DTOs and strictly decodes sibling-window invalidations", async () => {
 		let changedHandler:
 			((event: { readonly payload: unknown }) => void) | undefined;

@@ -183,6 +183,7 @@ import {
 	frozenGitWorktreeAddRequest,
 	frozenGitWorktreeRemoveRequest,
 } from "./git-codec";
+import { decodeWindowVoid } from "./window-codec";
 
 async function resolveNativeGitRootId(
 	rootId: string | undefined,
@@ -219,6 +220,13 @@ export function createNativeBridge(): PlainBridge {
 	return {
 		runtimeInfo: async () =>
 			decodeRuntimeInfo(await invoke<unknown>("runtime_info")),
+		windowCreate: async () => {
+			decodeWindowVoid(
+				await invoke<unknown>("window_create", {
+					request: Object.freeze({}),
+				}),
+			);
+		},
 		onRuntimeReady: async (listener) => {
 			return listen<unknown>(RUNTIME_READY_EVENT, (event) =>
 				listener(decodeRuntimeInfo(event.payload)),
@@ -318,6 +326,12 @@ export function createNativeBridge(): PlainBridge {
 			decodeWorkspaceSnapshot(
 				await invoke<unknown>("workspace_remove_root", {
 					request: { rootId },
+				}),
+			),
+		workspaceCloseFolder: async () =>
+			decodeWorkspaceSnapshot(
+				await invoke<unknown>("workspace_close_folder", {
+					request: Object.freeze({}),
 				}),
 			),
 		workspaceCreateFile: async (rootId, relativePath) => {

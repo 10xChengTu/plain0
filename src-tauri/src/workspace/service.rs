@@ -284,6 +284,13 @@ impl WorkspaceService {
         self.scope_for_window(window_label)?.remove_root(root_id)
     }
 
+    pub(crate) fn close_folder(
+        &self,
+        window_label: &str,
+    ) -> Result<(WorkspaceSnapshot, bool), CommandError> {
+        self.scope_for_window(window_label)?.close_folder()
+    }
+
     pub async fn stat(
         &self,
         window_label: &str,
@@ -1638,6 +1645,34 @@ impl WindowWorkspace {
             watcher.revoke(registration);
         }
         Ok(snapshot)
+    }
+
+    fn close_folder(&self) -> Result<(WorkspaceSnapshot, bool), CommandError> {
+        let mutation = lock(&self.mutation_gate)?;
+        let mut state = lock(&self.state)?;
+        ensure_open(&state)?;
+        if state.active_picker.is_some() {
+            return Err(picker_already_active());
+        }
+        if state.initial_restore_status == WorkspaceRestoreStatus::Pending {
+            state.initial_restore_status = WorkspaceRestoreStatus::None;
+        }
+        if !state.scope.clear_roots()? {
+            return Ok((state.scope.snapshot(), false));
+        }
+        let revoked = std::mem::take(&mut state.watch_registrations);
+        invalidate_delete_batch(&mut state);
+        invalidate_text_search(&mut state);
+        let snapshot = state.scope.snapshot();
+        let watcher = lock(&self.watcher)?.clone();
+        drop(state);
+        drop(mutation);
+        if let Some(watcher) = watcher {
+            for registration in revoked.into_values() {
+                watcher.revoke(registration);
+            }
+        }
+        Ok((snapshot, true))
     }
 
     fn lease(&self, root_id: RootId) -> Result<WorkspaceRootLease, CommandError> {

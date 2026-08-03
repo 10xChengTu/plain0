@@ -73,6 +73,7 @@ function testContextKeyService(): IContextKeyService {
 function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 	return {
 		runtimeInfo: vi.fn(),
+		windowCreate: vi.fn(),
 		onRuntimeReady: vi.fn(),
 		onNativeCloseRequested: vi.fn(),
 		lifecycleCompleteClose: vi.fn(),
@@ -92,6 +93,7 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		workspaceRemoveRecent: vi.fn(),
 		workspaceClearRecent: vi.fn(),
 		workspaceRemoveRoot: vi.fn(),
+		workspaceCloseFolder: vi.fn(),
 		workspaceCreateFile: vi.fn(),
 		workspaceCreateDirectory: vi.fn(),
 		workspaceRename: vi.fn(),
@@ -236,6 +238,7 @@ describe("workspace Workbench command overrides", () => {
 		}));
 		const bridge: PlainBridge = {
 			runtimeInfo: vi.fn(),
+			windowCreate: vi.fn(),
 			onRuntimeReady: vi.fn(),
 			onNativeCloseRequested: vi.fn(),
 			lifecycleCompleteClose: vi.fn(),
@@ -255,6 +258,7 @@ describe("workspace Workbench command overrides", () => {
 			workspaceRemoveRecent: vi.fn(),
 			workspaceClearRecent: vi.fn(),
 			workspaceRemoveRoot: vi.fn(),
+			workspaceCloseFolder: vi.fn(),
 			workspaceCreateFile: vi.fn(),
 			workspaceCreateDirectory: vi.fn(),
 			workspaceRename: vi.fn(),

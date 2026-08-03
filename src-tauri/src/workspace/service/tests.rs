@@ -200,6 +200,83 @@ fn initial_snapshot_restores_the_complete_ordered_root_set_once() {
 }
 
 #[test]
+fn close_folder_revokes_all_roots_once_and_keeps_other_windows_isolated() {
+    let temp = TempDir::new().unwrap();
+    let first = create_directory(&temp, "first");
+    let second = create_directory(&temp, "second");
+    let other = create_directory(&temp, "other");
+    let service = WorkspaceService::new();
+    let main = block_on(service.replace_roots_with_watch_sink(
+        "main",
+        vec![first, second],
+        Arc::new(|_| {}),
+    ))
+    .unwrap();
+    let other_window = block_on(service.pick_roots(
+        "plain-window-test",
+        FakePicker::selected(vec![other]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let before_revision = main.revision();
+    let revoked_ids = main
+        .roots()
+        .iter()
+        .map(|root| root.root_id())
+        .collect::<Vec<_>>();
+
+    let (cleared, changed) = service.close_folder("main").unwrap();
+    assert!(changed);
+    assert_eq!(cleared.revision(), before_revision + 1);
+    assert!(cleared.roots().is_empty());
+    for root_id in revoked_ids {
+        assert_eq!(
+            service
+                .root_canonical_path("main", root_id)
+                .unwrap_err()
+                .code(),
+            "ROOT_NOT_AUTHORIZED"
+        );
+    }
+    assert_eq!(
+        service.snapshot("plain-window-test").unwrap(),
+        *other_window.snapshot()
+    );
+
+    let (unchanged, changed_again) = service.close_folder("main").unwrap();
+    assert!(!changed_again);
+    assert_eq!(unchanged, cleared);
+}
+
+#[test]
+fn close_folder_cancels_the_active_text_search() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::write(root.join("a.txt"), b"needle").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let start = service
+        .search_text_start("main", text_query(root_id, "needle"), noop_search_wake())
+        .unwrap();
+    let search_id = extract_search_id(&start);
+
+    assert!(service.close_folder("main").unwrap().1);
+    assert_eq!(
+        service
+            .search_text_poll("main", search_id, 0)
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_SEARCH_NOT_FOUND"
+    );
+}
+
+#[test]
 fn failed_initial_restore_is_path_free_empty_and_does_not_guess_another_root() {
     let temp = TempDir::new().unwrap();
     let valid = create_directory(&temp, "valid-but-not-last");

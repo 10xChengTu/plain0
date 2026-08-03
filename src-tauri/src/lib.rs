@@ -13,6 +13,7 @@ pub mod terminal;
 pub mod theme;
 pub mod trust;
 pub mod user_data;
+pub mod window;
 pub mod workspace;
 
 use backup::service::BackupService;
@@ -117,6 +118,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             runtime_info,
+            window::commands::window_create,
             workspace::commands::workspace_capabilities,
             workspace::commands::workspace_snapshot,
             workspace::commands::workspace_pick_roots,
@@ -128,6 +130,7 @@ pub fn run() {
             workspace::commands::workspace_clear_recent,
             workspace::commands::workspace_watch_sync,
             workspace::commands::workspace_remove_root,
+            workspace::commands::workspace_close_folder,
             workspace::commands::workspace_stat,
             workspace::commands::workspace_read_dir,
             workspace::commands::workspace_read_file,

@@ -617,6 +617,16 @@ impl WorkspaceScope {
         Ok(())
     }
 
+    pub(crate) fn clear_roots(&mut self) -> Result<bool, CommandError> {
+        if self.roots.is_empty() {
+            return Ok(false);
+        }
+        self.revision = next_revision(self.revision)?;
+        self.roots.clear();
+        self.order.clear();
+        Ok(true)
+    }
+
     pub(crate) fn lease(&self, root_id: RootId) -> Result<WorkspaceRootLease, CommandError> {
         let root = self.roots.get(&root_id).ok_or_else(root_not_authorized)?;
         let directory = root

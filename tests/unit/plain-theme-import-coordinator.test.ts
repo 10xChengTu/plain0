@@ -77,6 +77,7 @@ function notImplemented(): never {
 function fakeBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 	return {
 		runtimeInfo: notImplemented,
+		windowCreate: notImplemented,
 		onRuntimeReady: notImplemented,
 		onNativeCloseRequested: notImplemented,
 		lifecycleCompleteClose: notImplemented,
@@ -96,6 +97,7 @@ function fakeBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		workspaceRemoveRecent: notImplemented,
 		workspaceClearRecent: notImplemented,
 		workspaceRemoveRoot: notImplemented,
+		workspaceCloseFolder: notImplemented,
 		workspaceCreateFile: notImplemented,
 		workspaceCreateDirectory: notImplemented,
 		workspaceRename: notImplemented,

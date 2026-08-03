@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 
+use super::dto::WorkspaceCloseFolderRequest;
 use super::{RootId, WorkspaceScope};
 use crate::error::CommandError;
 use crate::path_policy::RelativePath;
@@ -60,6 +61,46 @@ fn rejects_unknown_and_revoked_roots() {
     assert_eq!(
         scope.remove(authorized).unwrap_err().code(),
         "ROOT_NOT_AUTHORIZED"
+    );
+}
+
+#[test]
+fn clear_roots_is_atomic_revisioned_and_idempotent() {
+    let temp = TempDir::new().unwrap();
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    fs::create_dir(&first).unwrap();
+    fs::create_dir(&second).unwrap();
+    let mut scope = WorkspaceScope::new();
+    let root_ids = scope.authorize_roots_atomically(&[first, second]).unwrap();
+    let before_revision = scope.snapshot().revision();
+
+    assert!(scope.clear_roots().unwrap());
+    let cleared = scope.snapshot();
+    assert_eq!(cleared.revision(), before_revision + 1);
+    assert!(cleared.roots().is_empty());
+    for root_id in root_ids {
+        assert_eq!(
+            scope
+                .resolve(root_id, &RelativePath::parse_wire("").unwrap())
+                .unwrap_err()
+                .code(),
+            "ROOT_NOT_AUTHORIZED"
+        );
+    }
+
+    assert!(!scope.clear_roots().unwrap());
+    assert_eq!(scope.snapshot(), cleared);
+}
+
+#[test]
+fn close_folder_request_is_closed_and_empty() {
+    assert!(serde_json::from_value::<WorkspaceCloseFolderRequest>(serde_json::json!({})).is_ok());
+    assert!(
+        serde_json::from_value::<WorkspaceCloseFolderRequest>(serde_json::json!({
+            "rootId": "00000000-0000-4000-8000-000000000000",
+        }))
+        .is_err()
     );
 }
 

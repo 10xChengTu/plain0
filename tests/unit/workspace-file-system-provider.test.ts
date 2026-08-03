@@ -178,6 +178,9 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async runtimeInfo() {
 			return runtimeInfo;
 		},
+		async windowCreate() {
+			throw new Error("unused");
+		},
 		async onRuntimeReady() {
 			return () => {};
 		},
@@ -233,6 +236,9 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 			throw new Error("unused");
 		},
 		async workspaceRemoveRoot() {
+			throw new Error("unused");
+		},
+		async workspaceCloseFolder() {
 			throw new Error("unused");
 		},
 		async workspaceCreateFile() {

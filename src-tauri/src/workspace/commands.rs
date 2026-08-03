@@ -6,14 +6,15 @@ use crate::error::CommandError;
 
 use super::dto::{
     WorkspaceCapabilities, WorkspaceCapabilitiesRequest, WorkspaceClearRecentRequest,
-    WorkspaceCommitDeleteEntryRequest, WorkspaceCopyRequest, WorkspaceDeleteBatchPlan,
-    WorkspaceDeleteBatchRequest, WorkspaceDeleteResult, WorkspaceEntryRequest, WorkspaceEntryStat,
-    WorkspaceMoveRequest, WorkspaceMoveResult, WorkspaceOpenFilesRequest, WorkspaceOpenFilesResult,
-    WorkspaceOpenRecentRequest, WorkspacePickRootsRequest, WorkspacePickRootsResult,
-    WorkspacePickRootsStatus, WorkspacePickSaveTargetRequest, WorkspacePickSaveTargetResult,
-    WorkspacePrepareDeleteRequest, WorkspaceReadDirectoryResult, WorkspaceRecentListRequest,
-    WorkspaceRecentListResult, WorkspaceRemoveRecentRequest, WorkspaceRemoveRootRequest,
-    WorkspaceRenameRequest, WorkspaceSnapshot, WorkspaceSnapshotRequest, WorkspaceWatchSyncRequest,
+    WorkspaceCloseFolderRequest, WorkspaceCommitDeleteEntryRequest, WorkspaceCopyRequest,
+    WorkspaceDeleteBatchPlan, WorkspaceDeleteBatchRequest, WorkspaceDeleteResult,
+    WorkspaceEntryRequest, WorkspaceEntryStat, WorkspaceMoveRequest, WorkspaceMoveResult,
+    WorkspaceOpenFilesRequest, WorkspaceOpenFilesResult, WorkspaceOpenRecentRequest,
+    WorkspacePickRootsRequest, WorkspacePickRootsResult, WorkspacePickRootsStatus,
+    WorkspacePickSaveTargetRequest, WorkspacePickSaveTargetResult, WorkspacePrepareDeleteRequest,
+    WorkspaceReadDirectoryResult, WorkspaceRecentListRequest, WorkspaceRecentListResult,
+    WorkspaceRemoveRecentRequest, WorkspaceRemoveRootRequest, WorkspaceRenameRequest,
+    WorkspaceSnapshot, WorkspaceSnapshotRequest, WorkspaceWatchSyncRequest,
     WorkspaceWatchSyncResult, WorkspaceWatchWakeEvent, WorkspaceWriteResult,
 };
 use super::picker::{TauriDirectoryPicker, TauriFilePicker};
@@ -79,10 +80,14 @@ pub(crate) async fn workspace_snapshot(
     request: WorkspaceSnapshotRequest,
 ) -> Result<WorkspaceSnapshot, CommandError> {
     request.validate();
-    let history = history.inner().clone();
-    let last_roots = tauri::async_runtime::spawn_blocking(move || history.last_roots())
-        .await
-        .map_err(|_| workspace_history_unavailable())?;
+    let last_roots = if crate::window::should_restore_last_workspace(window.label()) {
+        let history = history.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || history.last_roots())
+            .await
+            .map_err(|_| workspace_history_unavailable())?
+    } else {
+        Ok(None)
+    };
     service
         .initial_snapshot_with_restore(
             window.label(),
@@ -237,6 +242,21 @@ pub(crate) async fn workspace_remove_root(
 ) -> Result<WorkspaceSnapshot, CommandError> {
     let snapshot = service.remove_root(window.label(), request.root_id())?;
     record_current_workspace(window.label(), service.inner(), history.inner()).await?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub(crate) async fn workspace_close_folder(
+    window: WebviewWindow,
+    service: State<'_, WorkspaceService>,
+    history: State<'_, WorkspaceHistoryService>,
+    request: WorkspaceCloseFolderRequest,
+) -> Result<WorkspaceSnapshot, CommandError> {
+    request.validate();
+    let (snapshot, changed) = service.close_folder(window.label())?;
+    if changed {
+        record_current_workspace(window.label(), service.inner(), history.inner()).await?;
+    }
     Ok(snapshot)
 }
 

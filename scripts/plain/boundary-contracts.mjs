@@ -2435,8 +2435,10 @@ export function validateMainCapability(capability) {
 	if (capability.identifier !== "main-capability") {
 		failures.push("main capability identifier must remain main-capability");
 	}
-	if (!sameArray(capability.windows, ["main"])) {
-		failures.push("main capability must target only the main window");
+	if (!sameArray(capability.windows, ["main", "plain-window-*"])) {
+		failures.push(
+			"main capability must target only main and Plain-generated windows",
+		);
 	}
 	if (
 		!sameArray(capability.permissions, [
@@ -2446,6 +2448,205 @@ export function validateMainCapability(capability) {
 	) {
 		failures.push(
 			"main capability permissions differ from the minimum contract",
+		);
+	}
+
+	return failures;
+}
+
+/**
+ * F170 S4: lock the two newly-enabled window workflows to their deliberately
+ * narrow authority path. New Window may only clone the merged static `main`
+ * configuration and replace its Rust-generated label; Close Folder must clear
+ * one window's whole root set under the existing mutation gate. The WebView
+ * never supplies a URL, label, filesystem path, capability pattern, or window
+ * options to either command.
+ */
+export function validateWindowWorkflowBoundary(rustSources, appSources) {
+	const failures = [];
+	const rust = new Map(
+		rustSources.map(({ relativePath, source }) => [relativePath, source]),
+	);
+	const app = new Map(
+		appSources.map(({ relativePath, source }) => [relativePath, source]),
+	);
+	const required = (sources, relativePath) => {
+		const source = sources.get(relativePath);
+		if (typeof source !== "string") {
+			failures.push(`${relativePath} is required by the window workflow`);
+			return "";
+		}
+		return source;
+	};
+	const compact = (source) => source.replaceAll(/\s+/g, "");
+	const occurrences = (source, literal) => source.split(literal).length - 1;
+
+	const windowModule = required(rust, "src-tauri/src/window/mod.rs");
+	const windowDto = required(rust, "src-tauri/src/window/dto.rs");
+	const windowCommands = required(rust, "src-tauri/src/window/commands.rs");
+	const workspaceDto = required(rust, "src-tauri/src/workspace/dto.rs");
+	const workspaceCommands = required(
+		rust,
+		"src-tauri/src/workspace/commands.rs",
+	);
+	const workspaceService = required(rust, "src-tauri/src/workspace/service.rs");
+	const workspaceScope = required(rust, "src-tauri/src/workspace/mod.rs");
+	const lib = required(rust, "src-tauri/src/lib.rs");
+	const contracts = required(app, "app/platform/tauri/contracts.ts");
+	const native = required(app, "app/platform/tauri/native.ts");
+	const browserMock = required(app, "app/platform/tauri/browser-mock.ts");
+
+	const compactWindowModule = compact(windowModule);
+	if (
+		!compactWindowModule.includes('constMAIN_WINDOW_LABEL:&str="main";') ||
+		!compactWindowModule.includes(
+			'constSECONDARY_WINDOW_LABEL_PREFIX:&str="plain-window-";',
+		) ||
+		!compactWindowModule.includes(
+			"pub(crate)fnshould_restore_last_workspace(window_label:&str)->bool{window_label==MAIN_WINDOW_LABEL}",
+		)
+	) {
+		failures.push("only the static main window may restore recent roots");
+	}
+
+	for (const [source, typeName] of [
+		[windowDto, "WindowCreateRequest"],
+		[workspaceDto, "WorkspaceCloseFolderRequest"],
+	]) {
+		if (
+			!source.includes("#[serde(deny_unknown_fields)]") ||
+			!new RegExp(`struct\\s+${typeName}\\s*\\{\\s*\\}`).test(source)
+		) {
+			failures.push(`${typeName} must remain an empty deny-unknown-fields DTO`);
+		}
+	}
+
+	const compactWindowCommands = compact(windowCommands);
+	if (
+		occurrences(windowCommands, "WebviewWindowBuilder::from_config") !== 1 ||
+		windowCommands.includes("WebviewWindowBuilder::new") ||
+		!compactWindowCommands.includes(
+			"constMAX_WINDOW_LABEL_ATTEMPTS:usize=16;",
+		) ||
+		!compactWindowCommands.includes(
+			".find(|config|config.label==MAIN_WINDOW_LABEL)",
+		) ||
+		!compactWindowCommands.includes("letmutconfig=template.clone();") ||
+		!compactWindowCommands.includes("config.label=label;") ||
+		!compactWindowCommands.includes("Uuid::new_v4().simple()") ||
+		!compactWindowCommands.includes("request.validate();create_window(&app)")
+	) {
+		failures.push(
+			"window_create must clone the merged main template with one Rust-generated label",
+		);
+	}
+	if (/WebviewUrl|https?:\/\/|\burl\b/i.test(windowCommands)) {
+		failures.push("window_create must not accept or construct another URL");
+	}
+
+	if (
+		occurrences(lib, "window::commands::window_create") !== 1 ||
+		occurrences(lib, "workspace::commands::workspace_close_folder") !== 1
+	) {
+		failures.push(
+			"both window workflow commands must be registered exactly once",
+		);
+	}
+
+	const compactWorkspaceCommands = compact(workspaceCommands);
+	if (
+		!compactWorkspaceCommands.includes(
+			"ifcrate::window::should_restore_last_workspace(window.label())",
+		) ||
+		!compactWorkspaceCommands.includes(
+			"let(snapshot,changed)=service.close_folder(window.label())?;ifchanged{record_current_workspace(window.label(),service.inner(),history.inner()).await?;}Ok(snapshot)",
+		)
+	) {
+		failures.push(
+			"workspace commands must isolate secondary restore and record only real folder closes",
+		);
+	}
+
+	const compactWorkspaceService = compact(workspaceService);
+	const closeStart = compactWorkspaceService.indexOf(
+		"fnclose_folder(&self)->Result<(WorkspaceSnapshot,bool),CommandError>{",
+	);
+	const closeEnd = compactWorkspaceService.indexOf(
+		"fnlease(&self,root_id:RootId)",
+		closeStart,
+	);
+	const closeBody =
+		closeStart >= 0 && closeEnd > closeStart
+			? compactWorkspaceService.slice(closeStart, closeEnd)
+			: "";
+	const orderedCloseTokens = [
+		"lock(&self.mutation_gate)?",
+		"lock(&self.state)?",
+		"state.scope.clear_roots()?",
+		"std::mem::take(&mutstate.watch_registrations)",
+		"invalidate_delete_batch(&mutstate)",
+		"invalidate_text_search(&mutstate)",
+	];
+	let previous = -1;
+	for (const token of orderedCloseTokens) {
+		const index = closeBody.indexOf(token);
+		if (index <= previous) {
+			failures.push(
+				"Close Folder must atomically revoke roots, watchers, deletes, and searches",
+			);
+			break;
+		}
+		previous = index;
+	}
+	const compactWorkspaceScope = compact(workspaceScope);
+	if (
+		!compactWorkspaceScope.includes(
+			"pub(crate)fnclear_roots(&mutself)->Result<bool,CommandError>{ifself.roots.is_empty(){returnOk(false);}self.revision=next_revision(self.revision)?;self.roots.clear();self.order.clear();Ok(true)}",
+		)
+	) {
+		failures.push(
+			"WorkspaceScope must clear all roots once and no-op when empty",
+		);
+	}
+
+	if (
+		occurrences(contracts, "windowCreate(): Promise<void>") !== 1 ||
+		occurrences(
+			contracts,
+			"workspaceCloseFolder(): Promise<WorkspaceSnapshot>",
+		) !== 1
+	) {
+		failures.push(
+			"PlainBridge must expose the two exact window workflow methods",
+		);
+	}
+	if (
+		occurrences(native, 'invoke<unknown>("window_create"') !== 1 ||
+		occurrences(native, 'invoke<unknown>("workspace_close_folder"') !== 1 ||
+		!native.includes("decodeWindowVoid(") ||
+		!new RegExp(
+			'windowCreate:\\s*async\\s*\\(\\)\\s*=>[\\s\\S]*?"window_create"\\s*,\\s*\\{\\s*request:\\s*Object\\.freeze\\(\\{\\}\\)',
+		).test(native) ||
+		!new RegExp(
+			'workspaceCloseFolder:\\s*async\\s*\\(\\)\\s*=>[\\s\\S]*?"workspace_close_folder"\\s*,\\s*\\{\\s*request:\\s*Object\\.freeze\\(\\{\\}\\)',
+		).test(native)
+	) {
+		failures.push("native bridge must dispatch only the two empty window DTOs");
+	}
+
+	const compactBrowserMock = compact(browserMock);
+	if (
+		!compactBrowserMock.includes("readonlyonWindowCreateForTest?:()=>void;") ||
+		!compactBrowserMock.includes("asyncwindowCreate(){") ||
+		!compactBrowserMock.includes(
+			'window.open(window.location.href,"_blank","noopener,noreferrer");',
+		) ||
+		!compactBrowserMock.includes(
+			"asyncworkspaceCloseFolder(){if(roots.size===0){returnsnapshot();}roots.clear();workspaceWatchStates.clear();invalidateDeleteBatch();revision+=1;recordRecent();returnsnapshot();}",
+		)
+	) {
+		failures.push(
+			"browser mock must preserve the fixed new/close window semantics",
 		);
 	}
 

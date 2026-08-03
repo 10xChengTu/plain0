@@ -956,6 +956,9 @@ export type BrowserMockThemeImportOutcome =
 	| Readonly<{ status: "imported"; fixture: BrowserMockThemePackageFixture }>;
 
 export interface BrowserMockBridgeOptions {
+	/** Captures a fixed same-application new-window request without letting
+	 * tests inject a URL, label, capability scope, or browser feature string. */
+	readonly onWindowCreateForTest?: () => void;
 	readonly workspacePicks?: readonly BrowserMockWorkspacePick[];
 	readonly workspaceFilePicks?: readonly BrowserMockWorkspaceFilePick[];
 	readonly workspaceSavePicks?: readonly BrowserMockWorkspaceSavePick[];
@@ -6658,6 +6661,13 @@ export function createBrowserMockBridge(
 			});
 			return runtimeInfo;
 		},
+		async windowCreate() {
+			if (options.onWindowCreateForTest !== undefined) {
+				options.onWindowCreateForTest();
+				return;
+			}
+			window.open(window.location.href, "_blank", "noopener,noreferrer");
+		},
 		async onRuntimeReady(listener) {
 			listeners.add(listener);
 			return () => {
@@ -6904,6 +6914,17 @@ export function createBrowserMockBridge(
 				throw rootNotAuthorized();
 			}
 			workspaceWatchStates.delete(rootId);
+			invalidateDeleteBatch();
+			revision += 1;
+			recordRecent();
+			return snapshot();
+		},
+		async workspaceCloseFolder() {
+			if (roots.size === 0) {
+				return snapshot();
+			}
+			roots.clear();
+			workspaceWatchStates.clear();
 			invalidateDeleteBatch();
 			revision += 1;
 			recordRecent();

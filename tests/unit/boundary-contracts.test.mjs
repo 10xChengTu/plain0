@@ -53,6 +53,7 @@ import {
 	validateLifecycleCommandRegistration,
 	validateMultiDiffEditorOverrideImportBoundary,
 	validateViewPaneDependencyDecoratorBoundary,
+	validateWindowWorkflowBoundary,
 	validateDebugAdapterConfirmationBoundary,
 	validateDebugAdapterConnectBoundary,
 	validateDebugAdapterSpawnBoundary,
@@ -169,8 +170,8 @@ const baselineTauriE2EBuildScript =
 const baselineCapability = {
 	$schema: "../gen/schemas/desktop-schema.json",
 	identifier: "main-capability",
-	description: "Minimum capability for the Plain main window",
-	windows: ["main"],
+	description: "Minimum capability for Plain-owned windows",
+	windows: ["main", "plain-window-*"],
 	permissions: ["core:event:allow-listen", "core:event:allow-unlisten"],
 };
 
@@ -790,6 +791,18 @@ describe("Plain Tauri boundary contracts", () => {
 		).not.toEqual([]);
 		expect(validateMainCapability(baselineCapability)).toEqual([]);
 
+		for (const windows of [
+			["main"],
+			["main", "*"],
+			["main", "plain-window-*", "foreign-*"],
+		]) {
+			const changedTargets = structuredClone(baselineCapability);
+			changedTargets.windows = windows;
+			expect(validateMainCapability(changedTargets)).toContain(
+				"main capability must target only main and Plain-generated windows",
+			);
+		}
+
 		const broad = structuredClone(baselineCapability);
 		broad.webviews = ["*"];
 		broad.permissions.push(
@@ -818,6 +831,142 @@ describe("Plain Tauri boundary contracts", () => {
 				"main capability permissions differ from the minimum contract",
 			);
 		}
+	});
+});
+
+describe("Plain F170 window workflow boundary", () => {
+	const rustPaths = [
+		"src-tauri/src/window/mod.rs",
+		"src-tauri/src/window/dto.rs",
+		"src-tauri/src/window/commands.rs",
+		"src-tauri/src/workspace/dto.rs",
+		"src-tauri/src/workspace/commands.rs",
+		"src-tauri/src/workspace/service.rs",
+		"src-tauri/src/workspace/mod.rs",
+		"src-tauri/src/lib.rs",
+	];
+	const appPaths = [
+		"app/platform/tauri/contracts.ts",
+		"app/platform/tauri/native.ts",
+		"app/platform/tauri/browser-mock.ts",
+	];
+	const loadSources = (paths) =>
+		paths.map((relativePath) => ({
+			relativePath,
+			source: readFileSync(
+				new URL(`../../${relativePath}`, import.meta.url),
+				"utf8",
+			),
+		}));
+	const productionRust = loadSources(rustPaths);
+	const productionApp = loadSources(appPaths);
+	const mutate = (sources, relativePath, transform) =>
+		sources.map((entry) =>
+			entry.relativePath === relativePath
+				? { ...entry, source: transform(entry.source) }
+				: entry,
+		);
+
+	it("accepts the fixed Rust-owned new-window and atomic close-folder routes", () => {
+		expect(
+			validateWindowWorkflowBoundary(productionRust, productionApp),
+		).toEqual([]);
+	});
+
+	it("rejects caller-selected window construction, secondary restore, and incomplete root revocation", () => {
+		const callerWindow = mutate(
+			productionRust,
+			"src-tauri/src/window/commands.rs",
+			(source) =>
+				source.replace(
+					"WebviewWindowBuilder::from_config(app, &config)",
+					'WebviewWindowBuilder::new(app, "caller", tauri::WebviewUrl::External("https://example.com".parse().unwrap()))',
+				),
+		);
+		expect(validateWindowWorkflowBoundary(callerWindow, productionApp)).toEqual(
+			expect.arrayContaining([
+				"window_create must clone the merged main template with one Rust-generated label",
+				"window_create must not accept or construct another URL",
+			]),
+		);
+
+		const allWindowsRestore = mutate(
+			productionRust,
+			"src-tauri/src/window/mod.rs",
+			(source) => source.replace("window_label == MAIN_WINDOW_LABEL", "true"),
+		);
+		expect(
+			validateWindowWorkflowBoundary(allWindowsRestore, productionApp),
+		).toContain("only the static main window may restore recent roots");
+
+		const retainedWatchers = mutate(
+			productionRust,
+			"src-tauri/src/workspace/service.rs",
+			(source) =>
+				source.replace(
+					"let revoked = std::mem::take(&mut state.watch_registrations);",
+					"let revoked = std::collections::BTreeMap::new();",
+				),
+		);
+		expect(
+			validateWindowWorkflowBoundary(retainedWatchers, productionApp),
+		).toContain(
+			"Close Folder must atomically revoke roots, watchers, deletes, and searches",
+		);
+	});
+
+	it("rejects widened DTOs, missing registrations, and injected bridge options", () => {
+		const widenedDto = mutate(
+			productionRust,
+			"src-tauri/src/window/dto.rs",
+			(source) =>
+				source.replace(
+					"pub(crate) struct WindowCreateRequest {}",
+					"pub(crate) struct WindowCreateRequest { url: String }",
+				),
+		);
+		expect(validateWindowWorkflowBoundary(widenedDto, productionApp)).toContain(
+			"WindowCreateRequest must remain an empty deny-unknown-fields DTO",
+		);
+
+		const missingRegistration = mutate(
+			productionRust,
+			"src-tauri/src/lib.rs",
+			(source) => source.replace("window::commands::window_create,", ""),
+		);
+		expect(
+			validateWindowWorkflowBoundary(missingRegistration, productionApp),
+		).toContain(
+			"both window workflow commands must be registered exactly once",
+		);
+
+		const injectedRequest = mutate(
+			productionApp,
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					'await invoke<unknown>("window_create", {\n\t\t\t\t\trequest: Object.freeze({}),',
+					'await invoke<unknown>("window_create", {\n\t\t\t\t\trequest: Object.freeze({ url: "https://example.com" }),',
+				),
+		);
+		expect(
+			validateWindowWorkflowBoundary(productionRust, injectedRequest),
+		).toContain("native bridge must dispatch only the two empty window DTOs");
+
+		const browserExternal = mutate(
+			productionApp,
+			"app/platform/tauri/browser-mock.ts",
+			(source) =>
+				source.replace(
+					'window.open(window.location.href, "_blank", "noopener,noreferrer");',
+					'window.open("https://example.com", "_blank", "noopener,noreferrer");',
+				),
+		);
+		expect(
+			validateWindowWorkflowBoundary(productionRust, browserExternal),
+		).toContain(
+			"browser mock must preserve the fixed new/close window semantics",
+		);
 	});
 });
 

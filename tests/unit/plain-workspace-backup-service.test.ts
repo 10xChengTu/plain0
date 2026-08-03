@@ -60,6 +60,7 @@ function createFakeBridge(overrides: Partial<PlainBridge> = {}): {
 	};
 	const bridge: PlainBridge = {
 		runtimeInfo: notImplemented,
+		windowCreate: notImplemented,
 		onRuntimeReady: notImplemented,
 		onNativeCloseRequested: notImplemented,
 		lifecycleCompleteClose: notImplemented,
@@ -79,6 +80,7 @@ function createFakeBridge(overrides: Partial<PlainBridge> = {}): {
 		workspaceRemoveRecent: notImplemented,
 		workspaceClearRecent: notImplemented,
 		workspaceRemoveRoot: notImplemented,
+		workspaceCloseFolder: notImplemented,
 		workspaceCreateFile: notImplemented,
 		workspaceCreateDirectory: notImplemented,
 		workspaceRename: notImplemented,

@@ -1315,6 +1315,7 @@ export type Unlisten = () => void | Promise<void>;
 
 export interface PlainBridge {
 	runtimeInfo(): Promise<RuntimeInfo>;
+	windowCreate(): Promise<void>;
 	onRuntimeReady(listener: (payload: RuntimeInfo) => void): Promise<Unlisten>;
 	onNativeCloseRequested(
 		listener: (request: NativeCloseRequest) => void,
@@ -1347,6 +1348,7 @@ export interface PlainBridge {
 	workspaceRemoveRecent(recentId: string): Promise<void>;
 	workspaceClearRecent(): Promise<void>;
 	workspaceRemoveRoot(rootId: string): Promise<WorkspaceSnapshot>;
+	workspaceCloseFolder(): Promise<WorkspaceSnapshot>;
 	workspaceCreateFile(
 		rootId: string,
 		relativePath: string,

@@ -1,7 +1,7 @@
 {
-  "$schema": "../gen/schemas/desktop-schema.json",
-  "identifier": "main-capability",
-  "description": "Minimum capability for the Plain main window",
-  "windows": ["main"],
-  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+	"$schema": "../gen/schemas/desktop-schema.json",
+	"identifier": "main-capability",
+	"description": "Minimum capability for Plain-owned windows",
+	"windows": ["main", "plain-window-*"],
+	"permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
 }

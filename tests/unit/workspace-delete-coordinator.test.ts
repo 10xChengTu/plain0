@@ -75,6 +75,9 @@ function testBridge(
 		async runtimeInfo() {
 			return runtimeInfo;
 		},
+		async windowCreate() {
+			throw new Error("unused");
+		},
 		async onRuntimeReady() {
 			return () => {};
 		},
@@ -130,6 +133,9 @@ function testBridge(
 			throw new Error("unused");
 		},
 		async workspaceRemoveRoot() {
+			throw new Error("unused");
+		},
+		async workspaceCloseFolder() {
 			throw new Error("unused");
 		},
 		async workspaceCreateFile() {

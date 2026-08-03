@@ -17,6 +17,14 @@ impl WorkspaceCapabilitiesRequest {
     pub const fn validate(self) {}
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceCloseFolderRequest {}
+
+impl WorkspaceCloseFolderRequest {
+    pub const fn validate(self) {}
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceCapabilities {

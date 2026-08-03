@@ -20,6 +20,45 @@ function bytesFromHex(value: string): Uint8Array {
 }
 
 describe("browser mock workspace bridge", () => {
+	it("creates a fixed same-app window without mutating the current workspace", async () => {
+		const calls: unknown[][] = [];
+		const bridge = createBrowserMockBridge({
+			onWindowCreateForTest: (...args: unknown[]) => calls.push(args),
+		});
+		const selected = await bridge.workspacePickRoots("replace");
+
+		await bridge.windowCreate();
+
+		expect(calls).toEqual([[]]);
+		expect(await bridge.workspaceSnapshot()).toEqual(selected.snapshot);
+	});
+
+	it("closes every root once, preserves recent entries, and revokes old identities", async () => {
+		const bridge = createBrowserMockBridge();
+		const selected = await bridge.workspacePickRoots("add");
+		const recentBefore = await bridge.workspaceRecentList();
+
+		const closed = await bridge.workspaceCloseFolder();
+		expect(closed.revision).toBe(selected.snapshot.revision + 1);
+		expect(closed.roots).toEqual([]);
+		const recentAfter = await bridge.workspaceRecentList();
+		expect(recentAfter.revision).toBe(recentBefore.revision + 1);
+		expect(recentAfter.entries).toEqual(recentBefore.entries);
+		for (const root of selected.snapshot.roots) {
+			await expect(bridge.workspaceStat(root.rootId, "")).rejects.toMatchObject(
+				{
+					code: "ROOT_NOT_AUTHORIZED",
+				},
+			);
+		}
+
+		const closedAgain = await bridge.workspaceCloseFolder();
+		expect(closedAgain).toEqual(closed);
+		expect((await bridge.workspaceRecentList()).revision).toBe(
+			recentAfter.revision,
+		);
+	});
+
 	it("requires an explicit authorized root for Git in a multi-root workspace", async () => {
 		const bridge = createBrowserMockBridge();
 		const selected = await bridge.workspacePickRoots("add");

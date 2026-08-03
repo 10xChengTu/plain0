@@ -62,6 +62,7 @@ import {
 	validateWorkspaceProviderBootstrap,
 	validateWorkspaceProviderCopyBoundary,
 	validateViewPaneDependencyDecoratorBoundary,
+	validateWindowWorkflowBoundary,
 	validateWorkspaceRustBoundary,
 	validateWorkspaceSavePickerAuthority,
 	validateWorkspaceVersionedWriteBoundary,
@@ -819,6 +820,9 @@ for (const failure of validateWorkspaceCapabilitiesBoundary(
 	rustSources,
 	appSources,
 )) {
+	fail(failure);
+}
+for (const failure of validateWindowWorkflowBoundary(rustSources, appSources)) {
 	fail(failure);
 }
 for (const failure of validateWorkspaceCopyCommandRegistration(rustSources)) {

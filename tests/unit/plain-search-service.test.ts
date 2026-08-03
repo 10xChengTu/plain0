@@ -49,6 +49,7 @@ function fakeBridge(
 	};
 	return {
 		runtimeInfo: notImplemented,
+		windowCreate: notImplemented,
 		onRuntimeReady: notImplemented,
 		onNativeCloseRequested: notImplemented,
 		lifecycleCompleteClose: notImplemented,
@@ -68,6 +69,7 @@ function fakeBridge(
 		workspaceRemoveRecent: notImplemented,
 		workspaceClearRecent: notImplemented,
 		workspaceRemoveRoot: notImplemented,
+		workspaceCloseFolder: notImplemented,
 		workspaceCreateFile: notImplemented,
 		workspaceCreateDirectory: notImplemented,
 		workspaceRename: notImplemented,
@@ -206,6 +208,7 @@ function fakeTextSearchBridge(
 
 	const bridge: PlainBridge = {
 		runtimeInfo: notImplemented,
+		windowCreate: notImplemented,
 		onRuntimeReady: notImplemented,
 		onNativeCloseRequested: notImplemented,
 		lifecycleCompleteClose: notImplemented,
@@ -225,6 +228,7 @@ function fakeTextSearchBridge(
 		workspaceRemoveRecent: notImplemented,
 		workspaceClearRecent: notImplemented,
 		workspaceRemoveRoot: notImplemented,
+		workspaceCloseFolder: notImplemented,
 		workspaceCreateFile: notImplemented,
 		workspaceCreateDirectory: notImplemented,
 		workspaceRename: notImplemented,
