@@ -543,6 +543,22 @@ fixture 与清理：仓库内 `tmp-f170-s1-e2e/` 只含复制的测试 app、配
 
 结论：F170 S1 的本地设置、快捷键即时与冷启动重载、Auto Save 跨进程真实落盘、资源闭集和路径不暴露均通过。F170 继续保持 `in_progress`，唯一 WIP 转入 S2 Open/Recent。
 
+### E2E-020 · F170 S2 Open File、Recent 与冷启动全根恢复矩阵
+
+状态：**已完成（2026-08-02）**。从提交 `b9f748af` 对应的当前工作树，以系统工具优先 PATH 和本地 ad-hoc identity `-` 构建 debug `Plain.app`；`codesign --verify --deep --strict` 通过，bundle identifier 为 `com.plain.editor`，CodeDirectory 为 `flags=0x10002(adhoc,runtime)`。Computer Use 只按仓库绝对 bundle 路径启动，`ps` 交叉核对真实进程同样来自该绝对路径。执行前主应用数据目录没有 `workspace-state/`，仅保留 E2E-019 已记录的 settings/keybindings 与既有 trust/debug confirmation，因而本条从空 Recent 基线开始。
+
+Open File 原生链路：首次执行 `File: Open File...` 后在 macOS 系统文件选择器点击 Cancel，Workbench 仍是空 editor/空 workspace，磁盘仍没有 `workspace-state` 文件。第二次从同一系统选择器选中仓库内 fixture 的 `primary/README.md`，Plain 自动把该文件的显式父目录授权为唯一 `primary` root，Explorer 显示 `primary/README.md`，editor 精确显示 `F170_PRIMARY_OPEN_FILE`；未先执行 Open Folder，也没有把原生绝对路径传入 Workbench resource。此时 `workspaces.plain.json` 首次出现，为 schema 1/revision 2/一条单根记录。随后用系统目录选择器 Add Folder 选中 `secondary`，Explorer 同时显示 `primary/README.md` 与 `secondary/SECONDARY.txt`；磁盘变为 revision 3、两条记录，分别是单根 `primary` 与双根 `primary + 1 folders`，每条 `recentId` 都是 opaque UUID。
+
+冷启动与失败重试：Cmd+Q 后 Computer Use 与 `ps` 均确认旧 PID 消失；再次从同一绝对 bundle 冷启动时，没有出现任何选择器，Explorer 立即恢复 ordered `primary`/`secondary` 双根。真实 Open Recent Quick Pick 显示 `2 Results`，可见文本只有 `primary + 1 folders, primary · secondary` 与 `primary`，AX tree 和截图均没有 `/Users/`、`file:` 或 `plain-workspace://`。随后完整退出，把 fixture 的 `secondary` 临时改名使 last workspace 缺一根，再冷启动：Plain 保持完整空 workspace，没有部分挂载仍存在的 `primary`，并显示 `Plain could not restore the last workspace. Use Open Recent to retry.`；该提示不含路径。磁盘 recent 文件仍是 revision 3、两条记录、SHA-256 `a6e29a731e8663d7a2228840d6e47b082676d99b8ffde8ee6c7729ef7fdbc4cd`，证明失败没有删改历史。把目录恢复原名后，从 Open Recent 选择双根条目即可重新挂载两根。
+
+历史维护：在真实 Quick Pick 的 `Remove from Recently Opened` 条目按钮删除双根记录后，列表原地从 2 条降为 1 条，活动 Explorer 双根完全不受影响；磁盘变为 revision 5、只余单根记录，`lastRecentId:null`。执行 `File: Clear Recently Opened...` 时，Workbench DOM 对话框明确写明 `This only clears Plain's local history. It does not delete any files or folders.`；首次点击 Cancel 后 revision 仍为 5、记录仍为 1。再次确认 Clear 后出现成功通知，磁盘为 revision 6、0 条记录、`lastRecentId:null`，但 Explorer 两根与两个 fixture 文件仍存在。此时 Open Recent 只提示 `there are no recent workspaces`；再次 Cmd+Q/冷启动为干净空 workspace、无 restore warning，证明清空只影响本地历史和未来启动恢复。
+
+文件与进程交叉核对：整个验收没有编辑或保存 fixture；最终 SHA-256 为 primary `73f7e28108d56eb59a402448c0547d837ef2b2312612a7a80ae631ac70339d4b`、secondary `5511e956b711ec7ee1db6b8bb822b8112cc5857b6296086b75984d30b06d046e`，与初始字节一致。最终 Cmd+Q 后 Computer Use 显示本次 Plain 与 E2E-019 旧副本均 `isRunning:false`，`ps` 对当前 bundle 路径零匹配。Browser 对照已另行覆盖取消/选择、topology 投影顺序、Quick Pick 删除失败与清空分支；本条证据来自真实 Rust、WKWebView、系统文件/目录选择器、应用数据文件和真实进程边界，没有用 Browser mock 代替。
+
+fixture 与清理：仓库内 `tmp-f170-s2-e2e/` 只含上述两个小文本文件；`dist`、`test-results`、`src-tauri/target` 与 fixture 在证据提交前删除。真实 app-data 下本条首次创建的精确 `workspace-state/workspaces.plain.json` 最终仅保存 schema 1/revision 6 的空历史；为遵守不递归删除主应用目录与不触碰同目录既有数据的安全边界，本次保留该空状态文件并如实记录，未删除 E2E-019 的两份 user-data 文件。
+
+结论：E2E-020 全部通过，Open File 显式 parent-root adoption、取消零副作用、opaque/path-free Recent、双根冷启动原子恢复、缺失根 fail-closed、成功重试、单条删除与清空历史均有真实桌面/磁盘/进程证据。F170 继续保持 `in_progress`，唯一 WIP 转入 S3 Untitled/Save As。
+
 ## 后续条目（随切片追加）
 
 - F030 遗留：真实 `CloseRequested` 关窗握手协议实现后，补「正常关窗 → 重开恢复」的桌面验收变体。
@@ -557,3 +573,4 @@ fixture 与清理：仓库内 `tmp-f170-s1-e2e/` 只含复制的测试 app、配
 - F150 S3 多根调试显式选择、adapter cwd、调用栈、同路径断点身份与进程清理真实桌面矩阵 E2E-017 已完成；F150 已整体关闭，唯一 WIP 切到 F160。
 - F160 原生普通关窗/Cmd+Q/kill-9、最终 backup 刷新、双根反序恢复与 topology 变化真实桌面矩阵 E2E-018 已完成；F160 已关闭，唯一 WIP 切到 F170。
 - F170 S1 本地 settings/keybindings 即时与冷启动重载、Auto Save 真实磁盘写入和 user-data 资源闭集矩阵 E2E-019 已完成；F170 继续进入 Open/Recent。
+- F170 S2 Open File parent-root adoption、opaque Recent、双根冷启动恢复、缺失根 fail-closed 与历史清理矩阵 E2E-020 已完成；F170 继续进入 Untitled/Save As。
