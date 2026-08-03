@@ -994,19 +994,62 @@
 			"id": "F180",
 			"name": "Complete local Git workflows",
 			"phase": 6,
-			"status": "in_progress",
+			"status": "complete",
 			"acceptance": [
 				"Branch tag remote and upstream management are available without a general-purpose git runner",
 				"Cherry-pick revert merge rebase reset reflog and contributor workflows have bounded previews and confirmations",
 				"Hunk staging supports explicit selected hunks and SCM refreshes from authoritative repository changes",
 				"Trust credentials conflicts cancellation and destructive outcomes pass real Git E2E"
-			]
+			],
+			"evidence": {
+				"commands": [
+					"pnpm check",
+					"pnpm test:e2e:browser",
+					"cargo test --manifest-path src-tauri/Cargo.toml git::exec::tests::hostile_fixtures::cancellation_terminates_a_running_process_and_reports_cancelled -- --exact --nocapture",
+					"env PATH=/Users/zhenghui/.nvm/versions/node/v22.22.1/bin:/Users/zhenghui/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin APPLE_SIGNING_IDENTITY=- pnpm tauri:build:e2e"
+				],
+				"results": [
+					"S0 through S5 froze the missing workflow inventory, added bounded read models, dedicated ref/config mutations, management UI, history-operation authority and UI, and explicit selected-hunk staging. Every slice passed its focused Rust, TypeScript, architecture and Chromium gates before exposure.",
+					"The final automated baseline passed 101 frontend test files and 1960 tests, a 2186-module production build, architecture over 105 app and 182 Rust sources with 17 pinned runtime dependencies, the 2001-source bundle audit with 53 tracked transitional sources, all-target Clippy and 1298/1298 Rust tests. The immediately preceding full Browser matrix passed 118/118.",
+					"E2E-024 passed in a freshly built real Plain.app against a repo-local working repository and bare remote. It covered trust gating, remote creation and fetch, upstream binding, branch and tag lifecycle, merge conflict and abort, true in-flight cancellation, hard reset, cherry-pick, reflog, contributors, explicit selected-hunk staging, authoritative SCM invalidation, Recent cleanup and zero residual processes.",
+					"Real E2E found and fixed one native-only cancellation defect: killing only the direct Git child orphaned a running pre-merge hook and sleep process. Every Unix Git invocation now owns a process group and cancellation, timeout or output-cap termination kills and reaps that group; the regression records both descendant PIDs and the real desktop rerun found no hook, sleep or Git process after cancellation."
+				],
+				"nativeScenarios": [
+					"E2E-024 opened an initially untrusted workspace, observed Git fail closed, explicitly trusted the repo-local fixture, added origin with a local bare URL, fetched origin/main, origin/topic and origin/conflict-feature, and bound main to origin/main. Branch and lightweight-tag create/delete were each verified in the UI and with exact refs on disk.",
+					"A real merge into origin/conflict-feature displayed the bounded preview, stopped with conflict.txt, exposed the real conflicted index and markers, and Abort restored the exact pre-merge HEAD, index and working tree. A separate 60-second pre-merge hook made merge genuinely in flight; Cancel reported that it did not imply rollback, left the actual staged topic.txt visible, and after the process-group fix left no Git, hook or sleep process.",
+					"Hard Reset used its distinct destructive button, named the tracked path being discarded and preserved a purpose-built untracked file. Cherry-pick created a new exact commit from origin/topic; a second Hard Reset returned to origin/main while retaining the untracked file and upstream. Reflog and Contributors displayed the resulting real history and identity.",
+					"The active hunk.txt contained two zero-context changes. Selecting only Change 2 produced index bytes exactly one, two, THREE while the working tree remained ONE, two, THREE; git status reported MM and the Source Control view simultaneously showed the staged and unstaged halves. The run removed only its own Recent entry, restoring the pre-existing count from four to three, then exited Plain and deleted all fixtures and generated artifacts."
+				],
+				"platformGaps": [
+					"E2E-008 remains the source of truth for real HTTPS Keychain credentials, SSH-agent push, permission failure, divergence and force-with-lease. E2E-024 intentionally reused that completed evidence instead of creating another external repository or claiming those network credential scenarios were rerun.",
+					"Whole-process-tree cancellation is implemented and verified on Unix with a dedicated process group. The non-Unix fallback still kills only the direct child; Windows process-tree semantics and Windows/Linux packaging are outside this macOS non-release completion goal.",
+					"Release signing, notarization, DMG, Windows or Linux packaging, application icons and legal confirmation are explicitly outside this non-release feature-completion phase. E2E-024 used only a local ad-hoc hardened-runtime signature with allow-jit to make the real WKWebView testable."
+				],
+				"acceptanceResults": [
+					{
+						"acceptance": "Branch tag remote and upstream management are available without a general-purpose git runner",
+						"result": "Achieved. Rust exposes only dedicated bounded commands with strict DTOs and ref/URL validation. Chromium covers the complete management controller matrix, while E2E-024 proves real remote fetch, upstream configuration and branch/tag create/delete against actual refs and config."
+					},
+					{
+						"acceptance": "Cherry-pick revert merge rebase reset reflog and contributor workflows have bounded previews and confirmations",
+						"result": "Achieved. Real Git authority tests cover all five mutation families, sequencer continue/abort and reset modes; Chromium covers every UI workflow and confirmation. E2E-024 independently proves real merge conflict/abort, cherry-pick, hard reset, reflog and contributors in WKWebView without claiming desktop reruns for the already-covered revert/rebase branches."
+					},
+					{
+						"acceptance": "Hunk staging supports explicit selected hunks and SCM refreshes from authoritative repository changes",
+						"result": "Achieved. The only product command requires explicit multi-selection from a bounded Monaco diff, revalidates index and worktree bytes before writing and calls the dedicated Rust blob-stage authority. Chromium and E2E-024 both prove selecting only the second hunk yields the exact split index/worktree state and root-scoped SCM refresh."
+					},
+					{
+						"acceptance": "Trust credentials conflicts cancellation and destructive outcomes pass real Git E2E",
+						"result": "Achieved on the supported macOS/Unix product target. E2E-008 supplies real HTTPS/SSH/force-with-lease credential evidence; E2E-024 supplies fresh trust, conflict, abort, true in-flight cancel, process cleanup and hard-reset preservation evidence. The cancellation defect found by that run is fixed and guarded by descendant-PID regression coverage."
+					}
+				]
+			}
 		},
 		{
 			"id": "F190",
 			"name": "Complete terminal workflows",
 			"phase": 6,
-			"status": "planned",
+			"status": "in_progress",
 			"acceptance": [
 				"Terminal find profile shell and cwd selection are fully interactive and persisted",
 				"Shell integration links recursive splits and live scrollback preserve bounded terminal semantics",

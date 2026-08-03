@@ -1,6 +1,6 @@
 # 端到端桌面验收交接清单（Codex 执行）
 
-更新时间：2026-08-03（E2E-023 已完成；既有条目的完成或阻塞状态以各自小节为准）
+更新时间：2026-08-03（E2E-024 已完成；既有条目的完成或阻塞状态以各自小节为准）
 
 ## 分工模式
 
@@ -607,6 +607,22 @@ Close Folder 时序：主窗口在执行 `Cmd+K F` 前把 primary 最后一个 r
 
 结论：E2E-023 全部通过；F170 的 Open/Recent/Settings/Trash、Untitled/Save As、New Window/Close Folder 与真实恢复路径均已由 Browser 和真实桌面双层闭合，F170 转 `complete`，唯一 WIP 切到 F180 本地 Git 完整工作流。
 
+### E2E-024 · F180 完整本地 Git 工作流与进程组取消矩阵
+
+状态：**已完成（2026-08-03）**。以随后提交为 `e862eaaa` 的当前源码、系统工具优先 PATH 与 `APPLE_SIGNING_IDENTITY=-` 构建仓库绝对路径 `src-tauri/target/debug/bundle/macos/Plain.app`；`codesign --verify --deep --strict` 通过，bundle identifier 为 `com.plain.editor`，CodeDirectory 为 `flags=0x10002(adhoc,runtime)`，唯一应用 entitlement 为 `com.apple.security.cs.allow-jit=true`。Computer Use 始终绑定该绝对 bundle 路径。本条未执行发布签名、公证或分发工作。
+
+真实 fixture 为仓库内一次性 `tmp-f180-e2e-*`：seed 的 base 为 `454c813`，main conflict side 为 `f7faef9`，conflict-feature 为 `54210c9`，topic 为 `c1eb2c5`；bare remote 同时持有 main/conflict-feature/topic。首次打开 local clone 时 Source Control 明确报告 workspace 未信任；只有显式 `Trust & Continue` 后才允许真实 shell 与 Git。`Plain: Manage Remotes` 添加本地 bare URL，Fetch 后 shell 精确确认三个 `origin/*` tracking refs；`Plain: Manage Upstream` 把 main 绑定到 origin/main，配置为 `branch.main.remote=origin`/`branch.main.merge=refs/heads/main`。Manage Branches 创建并删除 `e2e-ui-branch`，Manage Tags 创建并删除指向 `f7faef9` 的 `e2e-ui-tag`；每一步均以 UI 通知、`show-ref`/`rev-parse` 和磁盘 config 交叉核对。
+
+冲突与恢复：Merge 到 `origin/conflict-feature` 的 DOM 预览准确列出 target/current HEAD、ahead/behind 与本地路径状态；确认后真实 index 为 `conflict.txt` 的 UU 加 `feature-only.txt` staged，工作树含标准 conflict markers，UI 明确提示 `Resolve: conflict.txt`。`Plain: Abort Git Operation` 的 DOM 对话框绑定当前 merge、HEAD 与一个冲突路径；确认后 HEAD 仍为 `f7faef9`，MERGE_HEAD/feature-only 消失，`conflict.txt` 精确恢复 `main side\n`，index/worktree 清洁且 upstream 不变。
+
+运行中取消首次真实探针使用可执行 `pre-merge-commit` 的 60 秒 sleep，使 Merge 到 `origin/topic` 在 index 已加入 `topic.txt` 时保持 in flight。Cancel 正确显示两条语义：已请求终止、以及取消完成后从真实 Git 状态刷新且**不代表回滚**；UI 如实显示 staged `topic.txt`。但系统进程列表首次仍看到 reparented hook shell 与 `sleep 60`，证明旧实现只杀 direct Git child。修复后所有 Unix Git 调用各自建立 process group，cancel/timeout/output-cap 统一向负 PGID 发 SIGKILL 并 reap direct child；自动回归会先记录 external-diff shell 与 sleep 两个 PID，再要求两者均不存在。重建后的完全相同步骤在约一秒内返回相同不回滚提示，`ps` 只剩 Plain 本体，Git/hook/sleep 均零残留。该真实缺陷与修复提交为 `e862eaaa`。
+
+历史与只选 hunk：先用 Hard Reset 的独立 `Hard Reset and Discard Tracked Changes` 按钮清除取消留下的 staged topic，DOM 精确命名待丢弃 tracked path；随后 Cherry-Pick `origin/topic` 生成新提交 `3a7bc0c`，再创建 purpose-built untracked 文件并 Hard Reset 回 `origin/main`。结果 HEAD 回到 `f7faef9`、topic.txt 消失、untracked 文件逐字节保留、upstream 仍为 origin/main。Show Reflog 显示真实 reset/cherry-pick 历史，Show Contributors 显示 `Plain E2E <plain-e2e@example.invalid>` 的真实聚合。最后把 hunk.txt 从 `one/two/three` 改成 `ONE/two/THREE`，`Plain: Stage Selected Changes in Active File (Hunks)` 显示两个未选 checkbox；只勾 Change 2 后，index blob 精确为 `one\ntwo\nTHREE\n`，工作树精确为 `ONE\ntwo\nTHREE\n`，cached diff 只有 line 3，worktree diff 只有 line 1，状态为 `MM hunk.txt`，Source Control 同时显示 staged 与 unstaged 两半。
+
+自动化与既有证据边界：最终 `pnpm check` 通过 101 个前端测试文件/1960 项、2186-module production build、architecture 105 app/182 Rust/17 pinned、bundle 2001 sources/53 tracked debt、all-target Clippy 与 Rust 1298/1298；S5 同一源码线的完整 Chromium 为 118/118。HTTPS Keychain、真实 SSH-agent push、无权限失败、divergence 与 force-with-lease 已由 E2E-008 完成，本条明确复用而没有创建外部仓库或冒充重跑。Rebase/Revert 的真实 Git authority 与完整 Chromium 工作流继续由自动化覆盖，本条桌面只重测 merge/cherry-pick/reset 代表路径。
+
+清理：Open Recent 在本轮记录存在时显示 4 Results，点击该行唯一删除按钮后原地恢复为既有 3 Results，没有清空或改写其余历史。Cmd+Q 后 Computer Use 与精确 `ps` 均确认 Plain、Git、hook、sleep 零进程；三个 fixture、`src-tauri/target`、`dist`、`.vite` 与 `test-results` 全部删除。F180 四项 acceptance 已由专用 Rust/TypeScript authority、完整 Browser 与 E2E-008/E2E-024 真实桌面证据共同闭合。
+
 ## 后续条目（随切片追加）
 
 - F030 遗留：真实 `CloseRequested` 关窗握手协议实现后，补「正常关窗 → 重开恢复」的桌面验收变体。
@@ -625,3 +641,4 @@ Close Folder 时序：主窗口在执行 `Cmd+K F` 前把 primary 最后一个 r
 - F170 S3 Untitled/Save As、两阶段 macOS 父目录授权、覆盖取消/竞态/成功、关闭三分支与 kill-9 恢复矩阵 E2E-021 已完成；F170 继续进入 New Window/Close Folder。
 - F170 S4 New Window/Close Folder、双窗口 capability/dirty 隔离、稳定 backup 先于撤权、跨进程逐根恢复矩阵 E2E-022 已完成；F170 继续进入系统 Trash。
 - F170 S5 系统 Trash DOM 确认/取消、确认期间 identity 竞态、真实 Finder 废纸篓与“放回原处”恢复矩阵 E2E-023 已完成；F170 已整体关闭，唯一 WIP 切到 F180。
+- F180 remote/upstream、branch/tag、冲突/abort、真实 in-flight cancel、history rewrite、reflog/contributors、selected hunk 与进程/Recent 清理矩阵 E2E-024 已完成；F180 已整体关闭，唯一 WIP 切到 F190。
