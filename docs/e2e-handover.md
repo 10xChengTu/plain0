@@ -1,6 +1,6 @@
 # 端到端桌面验收交接清单（Codex 执行）
 
-更新时间：2026-08-02（新增 E2E-019；既有条目的完成或阻塞状态以各自小节为准）
+更新时间：2026-08-03（E2E-021 已完成；既有条目的完成或阻塞状态以各自小节为准）
 
 ## 分工模式
 
@@ -559,6 +559,22 @@ fixture 与清理：仓库内 `tmp-f170-s2-e2e/` 只含上述两个小文本文�
 
 结论：E2E-020 全部通过，Open File 显式 parent-root adoption、取消零副作用、opaque/path-free Recent、双根冷启动原子恢复、缺失根 fail-closed、成功重试、单条删除与清空历史均有真实桌面/磁盘/进程证据。F170 继续保持 `in_progress`，唯一 WIP 转入 S3 Untitled/Save As。
 
+### E2E-021 · F170 S3 Untitled、Save As、覆盖冲突与崩溃恢复矩阵
+
+状态：**已完成（2026-08-03）**。以提交 `028383e6` 对应源码、系统工具优先 PATH 和本地 ad-hoc identity `-` 构建 debug `Plain.app`，Computer Use 只绑定仓库内绝对 bundle 路径；结果来自真实 WKWebView、macOS Save/Open panel、Rust scratch、APFS 文件和进程边界，不以 Browser mock 替代。
+
+真实验收首先暴露并修复 macOS Save As 的平台权限缺口：旧实现把 `NSSavePanel` 选择的文件 URL 直接交给 workspace parent 授权，在 Documents 目录稳定阻塞于 `prepare_save_file_selection → prepare_workspace_root → open(2)`。修复后 Save panel 只确定文件名与候选位置，随后显示标题固定为 `Authorize Plain to Save in This Folder` 的原生目录选择器；第二次选择才是最终 parent capability。最终源码重建后，成功路径发布精确 24 字节 `F170_FINAL_BUILD_SAVE_OK`（SHA-256 `45b505a74ca992a4aa3a1dc5e65b4ad3e3e37cb6e4216f1e8c675d5f0400fccb`）并清空 scratch；第二阶段 Cancel 时目标不存在、editor 仍 dirty，scratch 精确保留 `F170_FINAL_BUILD_FOLDER_CANCEL`。架构 guard 同时禁止 picker 中用 ambient open/canonicalize 把文件选择隐式升级为父目录权限。
+
+既有目标三分支：`existing.txt` 初始为 23 字节 `F170_EXISTING_ORIGINAL\n`（SHA-256 `5b87ec46538a1ebc11ccf24e1f63439f306194d0298a08dda3319ec97a76a9e2`）。macOS 自带同名文件警告只确认选择目标，不写字节；通过第二阶段目录授权后，Plain 自有 DOM `Replace` 对话框 Cancel 保持原文件、dirty editor 与 scratch。第二次取得 version receipt 后，外部把文件改为 26 字节 `F170_EXTERNAL_VERSION_WON\n`（SHA-256 `11e3b2f6d54b94e00253531111cd6c98e52b739212e595e4ade97414877de821`），再确认 Replace 得到 `The workspace file changed before it could be written.`，磁盘外部版本未被覆盖且 scratch 保留。第三次重新取 fresh receipt 并确认后成功发布精确 19 字节 `F170_REAL_OVERWRITE`（SHA-256 `d3779d902abc40319fb8e3d19fa6ae68c5e59f16e6dce871d9e3da736cfbd51a`），editor 转为 clean `existing.txt`，scratch 清空。
+
+关闭三分支：对 dirty `F170_CLOSE_BRANCH` 按 Cmd+W，Cancel 保持 editor/dirty/scratch；再次 Cmd+W 选择 Don't Save 后 Untitled 消失且 scratch 清空。新的 `F170_CLOSE_SAVE` 在 Close 对话框选择 Save 后仍走两阶段原生选择，成功把原 Untitled editor 原位替换为 clean `close-save.txt`，磁盘为精确 15 字节、SHA-256 `960f108589e759b6979495c1a6c2f1e37b8135c20bd112a480a680c698bbda70`，scratch 为空；该“保存后保留已命名 editor”行为与 Browser 合同一致。
+
+崩溃恢复：dirty `F170_CRASH_RECOVERY` 先在 app-local scratch 中逐字可见，再对唯一测试 PID 执行 `kill -9`；冷启动自动恢复同一个 dirty Untitled 与精确内容。两阶段 Save As 后 `crash-recovered.txt` 为精确 19 字节、SHA-256 `6b7e41d24d0fcd792471df6f905d4fedca999ce759f95f43a619503cc8407827`，scratch 清空。随后 Cmd+Q、确认零 PID并再次冷启动，editor group 为空，没有任何 Untitled 复活。最后通过产品命令确认 `Clear Recently Opened...`，状态文件为 `schemaVersion:1`、revision 17、`lastRecentId:null`、空 entries；最终 scratch 为空、Plain 零进程。
+
+自动化对照：S3C3 的四个 Browser 场景无 retry 连续 3 轮 12/12，完整 Browser 112/112；S3C4A 修复后的完整门禁为 91 个前端文件/1816 项、生产构建 2182 modules、architecture（101 app/165 Rust/17 pinned）、bundle（1997 sources/53 既有债务）、Rust fmt/clippy 与沙箱外 Rust 1244/1244。fixture、`dist`、`test-results`、`src-tauri/target` 与诊断 sample 均在证据提交前清理。
+
+结论：E2E-021 全部通过，F170 S3 Untitled/Save As 已由 Browser 与真实桌面双层收口；F170 保持 `in_progress`，唯一 WIP 转入 S4 New Window/Close Folder。
+
 ## 后续条目（随切片追加）
 
 - F030 遗留：真实 `CloseRequested` 关窗握手协议实现后，补「正常关窗 → 重开恢复」的桌面验收变体。
@@ -574,3 +590,4 @@ fixture 与清理：仓库内 `tmp-f170-s2-e2e/` 只含上述两个小文本文�
 - F160 原生普通关窗/Cmd+Q/kill-9、最终 backup 刷新、双根反序恢复与 topology 变化真实桌面矩阵 E2E-018 已完成；F160 已关闭，唯一 WIP 切到 F170。
 - F170 S1 本地 settings/keybindings 即时与冷启动重载、Auto Save 真实磁盘写入和 user-data 资源闭集矩阵 E2E-019 已完成；F170 继续进入 Open/Recent。
 - F170 S2 Open File parent-root adoption、opaque Recent、双根冷启动恢复、缺失根 fail-closed 与历史清理矩阵 E2E-020 已完成；F170 继续进入 Untitled/Save As。
+- F170 S3 Untitled/Save As、两阶段 macOS 父目录授权、覆盖取消/竞态/成功、关闭三分支与 kill-9 恢复矩阵 E2E-021 已完成；F170 继续进入 New Window/Close Folder。
