@@ -575,6 +575,24 @@ fixture 与清理：仓库内 `tmp-f170-s2-e2e/` 只含上述两个小文本文�
 
 结论：E2E-021 全部通过，F170 S3 Untitled/Save As 已由 Browser 与真实桌面双层收口；F170 保持 `in_progress`，唯一 WIP 转入 S4 New Window/Close Folder。
 
+### E2E-022 · F170 S4 New Window、Close Folder 与跨进程 root 恢复矩阵
+
+状态：**已完成（2026-08-03）**。以提交 `e17249ab` 对应源码、系统工具优先 PATH 与本地 ad-hoc identity `-` 构建仓库内绝对路径 `src-tauri/target/debug/bundle/macos/Plain.app`；`codesign --verify --deep --strict` 通过，bundle identifier 为 `com.plain.editor`，CodeDirectory 为 `flags=0x10002(adhoc,runtime)`，唯一应用 entitlement 为 `com.apple.security.cs.allow-jit=true`。该签名只为真实 E2E 启动 WKWebView，不属于发布签名、公证或分发工作。
+
+双窗口隔离：主窗口通过系统选择器授权 `primary`，再加入 `secondary`，分别把两个磁盘文件改为互不相同的 dirty marker，并新建含 `F170_S4_UNTITLED_STAYS` 的 Untitled；fixture 自身的 workspace setting 把 Auto Save 设为 off，因此没有改动生产 user setting。此时用 Command Palette/`Cmd+Shift+N` 创建的动态窗口，在全局 Recent 已记录主窗口双根的情况下仍从 empty snapshot 启动；动态窗口只显式授权 `isolated`，其 root、dirty editor 和稳定 backup 与主窗口三个 working copy 完全分离。
+
+Close Folder 时序：主窗口在执行 `Cmd+K F` 前把 primary 最后一个 renderer 内容改为 `F170_S4_PRIMARY_DISK PRIMARY_CLOSE_FINAL`。稳定 root backup 的 mtime 与内容均先更新，随后主窗口 topology 才变为空；README、SECONDARY 和 Untitled 三个 editor 仍留在原窗口且保持 dirty，isolated 窗口的 root/editor/backup 不变。磁盘三个原文件仍保持初始 SHA-256，证明 Close Folder 没有把 dirty buffer 当成保存，也没有跨窗口撤权。`workspaces.plain.json` 的 `lastRecentId` 同步清为 null，但既有 history entries 没有被删除。
+
+真实进程边界：从 isolated 窗口执行 Cmd+Q 后，精确进程过滤确认当前 bundle 零 PID。冷启动静态主窗口时先只恢复独立 scratch 的 Untitled，没有自行恢复任何 workspace root 或文件 tab；只授权 primary 后恢复精确 `PRIMARY_CLOSE_FINAL`，再加入 secondary 后才恢复精确 `SECONDARY_DIRTY_LATEST`。再次创建动态窗口仍先 empty，只授权 isolated 后才恢复精确 `ISOLATED_DIRTY_LATEST`。这证明 Close Folder 清除 last restore、动态窗口不消费全局 last roots，而且稳定 root backup 必须重新取得对应 capability 后才可见。
+
+保存与清理：真实 Cmd+S 后，primary 为精确 `F170_S4_PRIMARY_DISK PRIMARY_CLOSE_FINAL`（SHA-256 `3b39d1fab4067658f205a86180b9a36d10f0bf09e9cb74267eba8dce83339382`），secondary 为精确 `F170_S4_SECONDARY_DISK SECONDARY_DIRTY_LATEST`（SHA-256 `b60ab8b99715891393444c5c8c20d18997cb4ebcf5bc90be54e21cdb5a3bca2a`），isolated 为精确 `F170_S4_ISOLATED_DISK ISOLATED_DIRTY_LATEST`（SHA-256 `3e63ffbf1be8cdd1fbfbc402a90961e49f79a2702e43b4814245927dcbefd5ce`）；恢复的 Untitled 经两阶段 macOS Save As 保存为 22 字节 `F170_S4_UNTITLED_STAYS`（SHA-256 `df1b733ec51080dd2aa0e27b5b7531a120de774edd8ce47cc809bf177f660e29`）。四个 editor 均转 clean，三个 root backup 与 scratch 中不再存在本测试 marker。两个窗口分别 Close Folder 后 Cmd+Q，`ps` 精确匹配为零。
+
+自动化对照：同一源码的 Chromium 两场景 2/2 通过，覆盖动态窗口 empty/源窗口不变，以及最新 backup 严格先于 `workspace_close_folder`、Untitled 留存和重新授权后恢复；完整 `pnpm check` 通过 93 个前端测试文件/1831 项、2183-module 生产构建、102 app/169 Rust source architecture、1998-source bundle/53 项既有债务，以及 Rust fmt/clippy/1252 项测试。
+
+外部状态边界：本条开始前 Recent 为 revision 17/零 entries；验收结束后为 revision 27/三条仅由本 fixture 创建的 `primary`、`primary + secondary`、`isolated` 记录，`lastRecentId:null`。Plain 的 DOM 清理对话框已经打开并在最终 `Clear` 按钮前停下；因这会永久删除产品内本地历史且尚未取得明确确认，已点击 Cancel 而非清除。没有覆盖 settings、keybindings 或其他既有 application-data；仓库内 fixture、`dist`、`test-results` 与 `src-tauri/target` 在本证据提交前清理。
+
+结论：E2E-022 全部通过，F170 S4 的固定新窗口、动态窗口 empty 启动、窗口 capability/dirty 隔离、Close Folder 最终 backup 时序、Untitled 独立性、跨进程逐根恢复、真实保存和进程退出均由 Browser 与真实桌面双层收口。F170 继续保持 `in_progress`，唯一 WIP 转入 S5 系统 Trash。
+
 ## 后续条目（随切片追加）
 
 - F030 遗留：真实 `CloseRequested` 关窗握手协议实现后，补「正常关窗 → 重开恢复」的桌面验收变体。
@@ -591,3 +609,4 @@ fixture 与清理：仓库内 `tmp-f170-s2-e2e/` 只含上述两个小文本文�
 - F170 S1 本地 settings/keybindings 即时与冷启动重载、Auto Save 真实磁盘写入和 user-data 资源闭集矩阵 E2E-019 已完成；F170 继续进入 Open/Recent。
 - F170 S2 Open File parent-root adoption、opaque Recent、双根冷启动恢复、缺失根 fail-closed 与历史清理矩阵 E2E-020 已完成；F170 继续进入 Untitled/Save As。
 - F170 S3 Untitled/Save As、两阶段 macOS 父目录授权、覆盖取消/竞态/成功、关闭三分支与 kill-9 恢复矩阵 E2E-021 已完成；F170 继续进入 New Window/Close Folder。
+- F170 S4 New Window/Close Folder、双窗口 capability/dirty 隔离、稳定 backup 先于撤权、跨进程逐根恢复矩阵 E2E-022 已完成；F170 继续进入系统 Trash。
