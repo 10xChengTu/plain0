@@ -39,7 +39,8 @@ describe("TerminalTabsModel", () => {
 		expect(tab?.rootId).toBe(ROOT.rootId);
 		expect(tab?.rootLabel).toBe(ROOT.label);
 		expect(tab?.paneIds).toEqual([created.paneId]);
-		expect(tab?.splitOrientation).toBe("row");
+		expect(tab?.activePaneId).toBe(created.paneId);
+		expect(tab?.tree).toEqual({ kind: "leaf", paneId: created.paneId });
 	});
 
 	// `F190` S2 "future-tab defaults UI": every tab freezes the
@@ -146,7 +147,8 @@ describe("TerminalTabsModel", () => {
 	it("closeTab returns every pane id the closed tab held, and the tab list no longer contains it", () => {
 		const model = new TerminalTabsModel();
 		const tab = model.createTab(ROOT);
-		const paneId = model.splitTab(tab.tabId, "row");
+		const split = model.splitActivePane(tab.tabId, "row");
+		const paneId = split?.kind === "created" ? split.paneId : undefined;
 
 		const closed = model.closeTab(tab.tabId);
 
@@ -212,51 +214,226 @@ describe("TerminalTabsModel", () => {
 		]);
 	});
 
-	it("splitTab adds a second pane along the given orientation and returns its id", () => {
+	// --- `F190` S3: recursive split tree / active pane -----------------------
+
+	it("splitActivePane adds a second pane along the given orientation, makes it active, and returns its id", () => {
 		const model = new TerminalTabsModel();
 		const tab = model.createTab(ROOT);
 
-		const paneId = model.splitTab(tab.tabId, "column");
+		const result = model.splitActivePane(tab.tabId, "column");
 
+		expect(result?.kind).toBe("created");
+		const paneId = result?.kind === "created" ? result.paneId : undefined;
 		expect(paneId).not.toBeUndefined();
 		const updated = model.getTab(tab.tabId);
 		expect(updated?.paneIds).toEqual([tab.paneId, paneId]);
-		expect(updated?.splitOrientation).toBe("column");
+		expect(updated?.activePaneId).toBe(paneId);
+		expect(updated?.tree).toEqual({
+			kind: "split",
+			orientation: "column",
+			first: { kind: "leaf", paneId: tab.paneId },
+			second: { kind: "leaf", paneId },
+		});
 	});
 
-	it("splitTab never changes the tab's own frozen defaults — a split reads them back unchanged, it does not recompute them", () => {
+	it("splitActivePane always splits whichever pane is currently active, not always the tab's original pane", () => {
+		const model = new TerminalTabsModel();
+		const tab = model.createTab(ROOT);
+		const firstSplit = model.splitActivePane(tab.tabId, "row");
+		const secondPaneId =
+			firstSplit?.kind === "created" ? firstSplit.paneId : undefined;
+		expect(secondPaneId).not.toBeUndefined();
+		// The just-created pane is now active — splitting again must target it,
+		// not the tab's original pane.
+		expect(model.getTab(tab.tabId)?.activePaneId).toBe(secondPaneId);
+
+		const secondSplit = model.splitActivePane(tab.tabId, "column");
+		const thirdPaneId =
+			secondSplit?.kind === "created" ? secondSplit.paneId : undefined;
+
+		expect(model.getTab(tab.tabId)?.tree).toEqual({
+			kind: "split",
+			orientation: "row",
+			first: { kind: "leaf", paneId: tab.paneId },
+			second: {
+				kind: "split",
+				orientation: "column",
+				first: { kind: "leaf", paneId: secondPaneId },
+				second: { kind: "leaf", paneId: thirdPaneId },
+			},
+		});
+	});
+
+	it("switching the active pane redirects a later split to that pane", () => {
+		const model = new TerminalTabsModel();
+		const tab = model.createTab(ROOT);
+		const firstSplit = model.splitActivePane(tab.tabId, "row");
+		const secondPaneId =
+			firstSplit?.kind === "created" ? firstSplit.paneId : undefined;
+		expect(secondPaneId).not.toBeUndefined();
+
+		// Reactivate the tab's original pane before splitting again.
+		expect(model.activatePane(tab.paneId)).toBe(true);
+		expect(model.getTab(tab.tabId)?.activePaneId).toBe(tab.paneId);
+
+		const secondSplit = model.splitActivePane(tab.tabId, "column");
+		const thirdPaneId =
+			secondSplit?.kind === "created" ? secondSplit.paneId : undefined;
+
+		// pane-1's own subtree gained the new sibling; pane-2 (the other
+		// branch of the original row split) is completely untouched.
+		expect(model.getTab(tab.tabId)?.tree).toEqual({
+			kind: "split",
+			orientation: "row",
+			first: {
+				kind: "split",
+				orientation: "column",
+				first: { kind: "leaf", paneId: tab.paneId },
+				second: { kind: "leaf", paneId: thirdPaneId },
+			},
+			second: { kind: "leaf", paneId: secondPaneId },
+		});
+	});
+
+	it("splitActivePane never changes the tab's own frozen defaults — a split reads them back unchanged, it does not recompute them", () => {
 		const model = new TerminalTabsModel();
 		const tab = model.createTab(ROOT, CUSTOM_DEFAULTS);
 
-		model.splitTab(tab.tabId, "row");
+		model.splitActivePane(tab.tabId, "row");
 
 		expect(model.getTab(tab.tabId)?.defaults).toEqual(CUSTOM_DEFAULTS);
 	});
 
-	it(`splitTab refuses a third pane once a tab already has ${MAX_PANES_PER_TAB}`, () => {
+	it(`splitActivePane refuses a pane beyond ${MAX_PANES_PER_TAB} and reports the limit instead of a silent no-op`, () => {
 		const model = new TerminalTabsModel();
 		const tab = model.createTab(ROOT);
-		model.splitTab(tab.tabId, "row");
+		for (let i = 1; i < MAX_PANES_PER_TAB; i += 1) {
+			const result = model.splitActivePane(tab.tabId, "row");
+			expect(result?.kind).toBe("created");
+		}
+		expect(model.getTab(tab.tabId)?.paneIds).toHaveLength(MAX_PANES_PER_TAB);
 
-		const third = model.splitTab(tab.tabId, "row");
+		const overLimit = model.splitActivePane(tab.tabId, "row");
 
-		expect(third).toBeUndefined();
+		expect(overLimit).toEqual({ kind: "limit" });
 		expect(model.getTab(tab.tabId)?.paneIds).toHaveLength(MAX_PANES_PER_TAB);
 	});
 
-	it("splitTab is a no-op returning undefined for an unknown tab id", () => {
+	it("splitActivePane is a no-op returning undefined for an unknown tab id", () => {
 		const model = new TerminalTabsModel();
 
-		expect(model.splitTab("does-not-exist", "row")).toBeUndefined();
+		expect(model.splitActivePane("does-not-exist", "row")).toBeUndefined();
 	});
 
-	it("tabIdForPane finds the owning tab for any of its panes", () => {
+	it("activatePane makes an existing pane active and returns true", () => {
 		const model = new TerminalTabsModel();
 		const tab = model.createTab(ROOT);
-		const secondPaneId = model.splitTab(tab.tabId, "row");
+		const split = model.splitActivePane(tab.tabId, "row");
+		const secondPaneId = split?.kind === "created" ? split.paneId : undefined;
+		expect(secondPaneId).not.toBeUndefined();
+
+		expect(model.activatePane(tab.paneId)).toBe(true);
+		expect(model.getTab(tab.tabId)?.activePaneId).toBe(tab.paneId);
+
+		expect(model.activatePane(secondPaneId ?? "")).toBe(true);
+		expect(model.getTab(tab.tabId)?.activePaneId).toBe(secondPaneId);
+	});
+
+	it("activatePane is a no-op returning false for an unknown pane id", () => {
+		const model = new TerminalTabsModel();
+		const tab = model.createTab(ROOT);
+
+		expect(model.activatePane("does-not-exist")).toBe(false);
+		expect(model.getTab(tab.tabId)?.activePaneId).toBe(tab.paneId);
+	});
+
+	it("closePane on a middle pane promotes its sibling and keeps the rest of the tree/active pane untouched", () => {
+		const model = new TerminalTabsModel();
+		const tab = model.createTab(ROOT);
+		// Build: split(row){ pane-1, split(column){ pane-2, pane-3 } }
+		const firstSplit = model.splitActivePane(tab.tabId, "row");
+		const secondPaneId =
+			firstSplit?.kind === "created" ? firstSplit.paneId : undefined;
+		const secondSplit = model.splitActivePane(tab.tabId, "column");
+		const thirdPaneId =
+			secondSplit?.kind === "created" ? secondSplit.paneId : undefined;
+		expect(model.getTab(tab.tabId)?.activePaneId).toBe(thirdPaneId);
+
+		// Reactivate pane-3 explicitly to make the close target unambiguous,
+		// then close pane-2 (the middle pane) instead of the active one.
+		const result = model.closePane(tab.tabId, secondPaneId ?? "");
+
+		expect(result?.tabClosed).toBe(false);
+		expect(result?.closedPaneId).toBe(secondPaneId);
+		const updated = model.getTab(tab.tabId);
+		expect(updated?.tree).toEqual({
+			kind: "split",
+			orientation: "row",
+			first: { kind: "leaf", paneId: tab.paneId },
+			second: { kind: "leaf", paneId: thirdPaneId },
+		});
+		// pane-3 was active and was not the one closed — it stays active.
+		expect(updated?.activePaneId).toBe(thirdPaneId);
+	});
+
+	it("closePane on the currently active pane falls back to the tree's leftmost remaining pane", () => {
+		const model = new TerminalTabsModel();
+		const tab = model.createTab(ROOT);
+		const split = model.splitActivePane(tab.tabId, "row");
+		const secondPaneId = split?.kind === "created" ? split.paneId : undefined;
+		expect(model.getTab(tab.tabId)?.activePaneId).toBe(secondPaneId);
+
+		const result = model.closePane(tab.tabId, secondPaneId ?? "");
+
+		expect(result?.tabClosed).toBe(false);
+		expect(result?.nextActivePaneId).toBe(tab.paneId);
+		expect(model.getTab(tab.tabId)?.activePaneId).toBe(tab.paneId);
+	});
+
+	it("closePane on a tab's only pane closes the whole tab instead, matching closeTab", () => {
+		const model = new TerminalTabsModel();
+		const first = model.createTab(ROOT);
+		const second = model.createTab(ROOT);
+		model.switchTab(first.tabId);
+
+		const result = model.closePane(first.tabId, first.paneId);
+
+		expect(result).toEqual({
+			closedPaneId: first.paneId,
+			tabClosed: true,
+			nextActiveTabId: second.tabId,
+			nextActivePaneId: undefined,
+		});
+		expect(model.getTab(first.tabId)).toBeUndefined();
+		expect(model.activeTabId).toBe(second.tabId);
+	});
+
+	it("closePane is a no-op returning undefined for an unknown tab id", () => {
+		const model = new TerminalTabsModel();
+
+		expect(model.closePane("does-not-exist", "some-pane")).toBeUndefined();
+	});
+
+	it("closePane is a no-op returning undefined for a pane id not in the given tab", () => {
+		const model = new TerminalTabsModel();
+		const tab = model.createTab(ROOT);
+
+		expect(model.closePane(tab.tabId, "not-a-real-pane")).toBeUndefined();
+	});
+
+	it("tabIdForPane finds the owning tab for any of its panes, at any depth", () => {
+		const model = new TerminalTabsModel();
+		const tab = model.createTab(ROOT);
+		const firstSplit = model.splitActivePane(tab.tabId, "row");
+		const secondPaneId =
+			firstSplit?.kind === "created" ? firstSplit.paneId : undefined;
+		const secondSplit = model.splitActivePane(tab.tabId, "column");
+		const thirdPaneId =
+			secondSplit?.kind === "created" ? secondSplit.paneId : undefined;
 
 		expect(model.tabIdForPane(tab.paneId)).toBe(tab.tabId);
 		expect(model.tabIdForPane(secondPaneId ?? "")).toBe(tab.tabId);
+		expect(model.tabIdForPane(thirdPaneId ?? "")).toBe(tab.tabId);
 		expect(model.tabIdForPane("unknown-pane")).toBeUndefined();
 	});
 
@@ -264,19 +441,24 @@ describe("TerminalTabsModel", () => {
 		const model = new TerminalTabsModel();
 		const first = model.createTab(ROOT);
 		const second = model.createTab(ROOT);
-		const splitPaneId = model.splitTab(first.tabId, "row");
+		const split = model.splitActivePane(first.tabId, "row");
+		const splitPaneId = split?.kind === "created" ? split.paneId : undefined;
 
 		const allPaneIds = [first.paneId, second.paneId, splitPaneId];
 		expect(new Set(allPaneIds).size).toBe(allPaneIds.length);
 	});
 
-	it("tabs snapshots are independent from later mutation (no shared mutable arrays leak out)", () => {
+	it("tabs snapshots are independent from later mutation (no shared mutable state leaks out)", () => {
 		const model = new TerminalTabsModel();
 		const tab = model.createTab(ROOT);
 		const snapshotBeforeSplit = model.getTab(tab.tabId);
 
-		model.splitTab(tab.tabId, "row");
+		model.splitActivePane(tab.tabId, "row");
 
 		expect(snapshotBeforeSplit?.paneIds).toEqual([tab.paneId]);
+		expect(snapshotBeforeSplit?.tree).toEqual({
+			kind: "leaf",
+			paneId: tab.paneId,
+		});
 	});
 });

@@ -128,6 +128,25 @@ body[data-plain-ready="error"] #plain-bootstrap-status {
 	white-space: nowrap;
 }
 
+/* `F190` S3 "recursive split tree" — accurate, visible 8-pane-limit feedback
+ * (see `PlainTerminalView#syncSplitControls`'s own doc comment). Functional
+ * styling only, same precedent as the rest of this domain's CSS. */
+.plain-terminal-split-hint {
+	flex: 0 0 auto;
+	font-size: 0.75rem;
+	color: #f14c4c;
+	align-self: center;
+	max-width: 16rem;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.plain-terminal-split-button:disabled {
+	opacity: 0.4;
+	cursor: default;
+}
+
 .plain-terminal-tab-close,
 .plain-terminal-tab-new,
 .plain-terminal-split-button {
@@ -163,19 +182,29 @@ body[data-plain-ready="error"] #plain-bootstrap-status {
 	display: none;
 }
 
-.plain-terminal-panecontainer[data-split="column"] {
+/* `F190` S3 "recursive split tree" — one `.plain-terminal-split` per internal
+ * split-tree node (see `PlainTerminalView#buildSplitDom`), nested arbitrarily
+ * deep; each independently carries its own `data-split` orientation, unlike
+ * the prior single tab-level `flex-direction`. `flex: 1 1 0` matches
+ * `.plain-terminal-pane`'s own sizing below so a split wrapper fills exactly
+ * the region its own parent (the panecontainer, or an ancestor split) gives
+ * it, whether that parent's child is a lone pane or another nested split. */
+.plain-terminal-split {
+	display: flex;
+	flex: 1 1 0;
+	min-width: 0;
+	min-height: 0;
+}
+
+.plain-terminal-split[data-split="column"] {
 	flex-direction: column;
 }
 
-.plain-terminal-panecontainer[data-split="row"]
-	> .plain-terminal-pane
-	+ .plain-terminal-pane {
+.plain-terminal-split[data-split="row"] > * + * {
 	border-left: 1px solid #3c3c3c;
 }
 
-.plain-terminal-panecontainer[data-split="column"]
-	> .plain-terminal-pane
-	+ .plain-terminal-pane {
+.plain-terminal-split[data-split="column"] > * + * {
 	border-top: 1px solid #3c3c3c;
 }
 
@@ -195,6 +224,31 @@ body[data-plain-ready="error"] #plain-bootstrap-status {
 	min-height: 0;
 	display: flex;
 	flex-direction: column;
+}
+
+/* `F190` S3 "recursive split tree" — visible active-pane indicator (see
+ * `PlainTerminalView#buildSplitDom`'s `data-active` assignment). Functional
+ * only: an inset outline that never shifts layout. */
+.plain-terminal-pane[data-active="true"] {
+	box-shadow: inset 0 0 0 1px #007acc;
+}
+
+.plain-terminal-pane-close {
+	position: absolute;
+	top: 2px;
+	right: 2px;
+	z-index: 1;
+	border: 0;
+	background: transparent;
+	color: #cccccc;
+	cursor: pointer;
+	line-height: 1;
+	padding: 2px 6px;
+	border-radius: 3px;
+}
+
+.plain-terminal-pane-close:hover {
+	background: #37373d;
 }
 
 .plain-terminal-status {

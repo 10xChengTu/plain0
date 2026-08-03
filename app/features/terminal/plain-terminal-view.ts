@@ -35,7 +35,9 @@ import {
 	validateFutureTabCwdInput,
 } from "./plain-terminal-defaults";
 import { TerminalPaneController } from "./plain-terminal-pane";
+import type { TerminalSplitNode } from "./plain-terminal-split-tree";
 import {
+	MAX_PANES_PER_TAB,
 	type TerminalSplitOrientation,
 	TerminalTabsModel,
 } from "./plain-terminal-tabs";
@@ -50,7 +52,8 @@ import {
  * DOM 渲染 + trust UX") this managed exactly one PTY session inline; this
  * slice (F070 "多 tab/split/scrollback + 生命周期") turns it into a small
  * tab strip self-managed by [`TerminalTabsModel`], each tab holding one or
- * two [`TerminalPaneController`]s (a split) — see that model's own module
+ * more (up to `MAX_PANES_PER_TAB`, arranged in a recursive split tree —
+ * `F190` S3) [`TerminalPaneController`]s — see that model's own module
  * doc for why this is one self-managing view rather than N registered
  * `IViewsRegistry` views. Built from scratch on the bare `ViewPane` base
  * class, the same precedent `PlainSearchView` established: Plain never
@@ -71,9 +74,9 @@ import {
  * still the top-level resize signal this view acts on — unchanged reasoning
  * from the prior slice (`ViewPane`/`Pane` already receives a
  * `layoutBody(height, width)` call from the Workbench's own layout
- * pipeline). Below that top level, though, a split tab's two panes are laid
- * out purely by CSS flexbox (`.plain-terminal-panecontainer`'s
- * `flex-direction`, each `.plain-terminal-pane`'s `flex: 1 1 0`) — there is
+ * pipeline). Below that top level, though, a split tab's panes are laid out
+ * purely by CSS flexbox (each `.plain-terminal-split`'s own `data-split`
+ * orientation, each `.plain-terminal-pane`'s `flex: 1 1 0`) — there is
  * no Workbench-provided layout signal at that finer, self-managed
  * granularity for this view to reuse. Rather than reimplementing that
  * arithmetic (and risking it drifting from whatever the CSS actually
@@ -100,6 +103,24 @@ import {
  * `display: none`), for the same reason a real browser tab or VS Code's own
  * terminal tabs do not kill a shell just because it is not the foreground
  * one right now.
+ *
+ * # `F190` S3: recursive split DOM from a tree snapshot
+ *
+ * Each tab's `TerminalTabsModel.getTab(id).tree` (see that module's own doc)
+ * is the sole source of truth for layout; this view never keeps its own
+ * parallel notion of "how many panes" or "which orientation". Every time a
+ * tab's tree changes (a split, or a pane close that is not the whole tab),
+ * [`#rebuildPaneLayout`] rebuilds that tab's nested `.plain-terminal-split`
+ * wrapper `<div>`s from scratch via [`#buildSplitDom`] and swaps them in with
+ * one `replaceChildren` call — but it always **reuses** each leaf's existing
+ * pane `<div>` (looked up from `#paneElements`) rather than recreating it, so
+ * a `TerminalPaneController` untouched by the mutation (any pane other than
+ * the one just split or closed) simply gets moved to a new parent, with its
+ * session, listeners and rendered scrollback completely undisturbed — a DOM
+ * reparent, not a teardown/recreate. Only the pane(s) this view explicitly
+ * disposes (in [`#closePane`]/[`#closeTab`]) ever have their controller torn
+ * down; every other visible pane survives an arbitrarily deep tree rebuild
+ * unchanged.
  */
 export class PlainTerminalView extends ViewPane {
 	static readonly ID = "plain.workbench.view.terminal";
@@ -108,6 +129,15 @@ export class PlainTerminalView extends ViewPane {
 	readonly #rootSelection = new PlainWorkspaceRootSelection();
 	readonly #panes = new Map<string, TerminalPaneController>();
 	readonly #paneElements = new Map<string, HTMLElement>();
+	/** `F190` S3: each pane's own view-level listeners (activate-on-focus,
+	 * its close button) live on a private `AbortController` keyed by pane id
+	 * rather than `this._register` — panes can be created/closed far more
+	 * often over one view's lifetime than tabs, so tying their disposal to
+	 * this pane's own teardown (see `#closePane`/`#closeTab`) avoids growing
+	 * the view's own disposables list without bound across a long session of
+	 * repeated splitting/closing. Mirrors `TerminalPaneController`'s own
+	 * `#abort` precedent (see that class's module doc). */
+	readonly #paneListenerAborts = new Map<string, AbortController>();
 	readonly #tabRecords = new Map<
 		string,
 		{ readonly tabButton: HTMLElement; readonly paneContainer: HTMLElement }
@@ -118,6 +148,12 @@ export class PlainTerminalView extends ViewPane {
 	#paneAreaElement: HTMLElement | undefined;
 	#emptyStateElement: HTMLElement | undefined;
 	#pendingNewTab = false;
+
+	/** `F190` S3: the two split buttons plus the hint text next to them — see
+	 * `#syncSplitControls`'s own doc comment. */
+	#splitRightButton: HTMLButtonElement | undefined;
+	#splitDownButton: HTMLButtonElement | undefined;
+	#splitHintElement: HTMLElement | undefined;
 
 	/** `F190` S2: the two future-tab-default controls plus the bounded
 	 * profile snapshot they draw their options from — see this class's own
@@ -264,6 +300,7 @@ export class PlainTerminalView extends ViewPane {
 			}),
 		);
 		tabStrip.append(splitRightButton);
+		this.#splitRightButton = splitRightButton;
 
 		const splitDownButton = document.createElement("button");
 		splitDownButton.type = "button";
@@ -276,6 +313,18 @@ export class PlainTerminalView extends ViewPane {
 			}),
 		);
 		tabStrip.append(splitDownButton);
+		this.#splitDownButton = splitDownButton;
+
+		// `F190` S3: accurate, visible feedback once the active tab reaches
+		// `MAX_PANES_PER_TAB` — see `#syncSplitControls`'s own doc comment.
+		// Never the *only* signal (the two buttons above are also disabled at
+		// the cap): a command-palette-invoked split bypasses `disabled`
+		// entirely, so this text is what makes that path visible too.
+		const splitHint = document.createElement("span");
+		splitHint.className = "plain-terminal-split-hint";
+		splitHint.setAttribute("aria-live", "polite");
+		this.#splitHintElement = splitHint;
+		tabStrip.append(splitHint);
 
 		const paneArea = document.createElement("div");
 		paneArea.className = "plain-terminal-panearea";
@@ -298,11 +347,16 @@ export class PlainTerminalView extends ViewPane {
 				this.#panes.clear();
 				this.#paneElements.clear();
 				this.#tabRecords.clear();
+				for (const abort of this.#paneListenerAborts.values()) {
+					abort.abort();
+				}
+				this.#paneListenerAborts.clear();
 			}),
 		);
 
 		this.#renderRootSelector();
 		this.#syncTabVisibility();
+		this.#syncSplitControls();
 		this.#initFutureTabDefaultsControls();
 	}
 
@@ -323,10 +377,7 @@ export class PlainTerminalView extends ViewPane {
 		if (activeTabId === undefined) {
 			return;
 		}
-		const paneId = this.#tabsModel.getTab(activeTabId)?.paneIds[0];
-		if (paneId !== undefined) {
-			this.#panes.get(paneId)?.focus();
-		}
+		this.#focusActivePane(activeTabId);
 	}
 
 	/** Creates a new tab (one pane), makes it active, and lays it out
@@ -364,6 +415,7 @@ export class PlainTerminalView extends ViewPane {
 		const { tabId, paneId } = this.#tabsModel.createTab(root, defaults);
 		this.#createTabRecord(tabId);
 		this.#createPane(paneId, tabId, undefined, root.rootId, defaults);
+		this.#rebuildPaneLayout(tabId);
 		this.#activateTab(tabId);
 	}
 
@@ -384,23 +436,38 @@ export class PlainTerminalView extends ViewPane {
 		const { tabId, paneId } = this.#tabsModel.createExternalTab(title);
 		this.#createTabRecord(tabId);
 		this.#createPane(paneId, tabId, sessionId);
+		this.#rebuildPaneLayout(tabId);
 		this.#activateTab(tabId);
 	}
 
-	/** Closes the currently active tab (killing every one of its panes'
-	 * sessions) and activates whatever tab the model says is next, or shows
-	 * the empty state if none remain. A no-op if there is no active tab. */
-	closeActiveTab(): void {
+	/** `F190` S3: closes the active tab's active **pane** (killing that
+	 * pane's session) — its sibling subtree is promoted into its place. If
+	 * it was the tab's only pane, the whole tab is removed instead (identical
+	 * to the prior, tab-only granularity this replaces — see
+	 * `TerminalTabsModel.closePane`'s own doc comment) and whatever tab the
+	 * model says is next becomes active, or the empty state shows if none
+	 * remain. A no-op if there is no active tab. Bound to `Plain: Kill
+	 * Terminal` — see `plain-terminal-commands.ts`. */
+	closeActivePane(): void {
 		const activeTabId = this.#tabsModel.activeTabId;
 		if (activeTabId === undefined) {
 			return;
 		}
-		this.#closeTab(activeTabId);
+		const activePaneId = this.#tabsModel.getTab(activeTabId)?.activePaneId;
+		if (activePaneId === undefined) {
+			return;
+		}
+		this.#closePane(activeTabId, activePaneId);
 	}
 
-	/** Splits the active tab along `orientation`, adding one more pane (this
-	 * slice caps a tab at two panes — see `TerminalTabsModel`'s own doc). A
-	 * no-op if there is no active tab, or it is already split. */
+	/** `F190` S3: splits the active tab's **active pane** along `orientation`
+	 * — never an arbitrary one (see `TerminalTabsModel.splitActivePane`'s own
+	 * doc comment) — up to `MAX_PANES_PER_TAB` panes per tab. A no-op if
+	 * there is no active tab. Once the active tab is already at the cap, this
+	 * spawns nothing and instead makes sure the accurate, visible "at limit"
+	 * feedback (`#syncSplitControls`) is showing — the whole point of
+	 * `TerminalPaneSplitResult`'s `"limit"` case is that this path must never
+	 * look identical to an ordinary no-op. */
 	splitActiveTab(orientation: TerminalSplitOrientation): void {
 		const activeTabId = this.#tabsModel.activeTabId;
 		if (activeTabId === undefined) {
@@ -414,11 +481,15 @@ export class PlainTerminalView extends ViewPane {
 			this.#rootSelectorElement?.focus();
 			return;
 		}
-		const paneId = this.#tabsModel.splitTab(activeTabId, orientation);
-		if (paneId === undefined) {
+		const result = this.#tabsModel.splitActivePane(activeTabId, orientation);
+		if (result === undefined) {
 			return;
 		}
-		// `F190` S2: a split inherits the *active tab's own frozen* defaults
+		if (result.kind === "limit") {
+			this.#syncSplitControls();
+			return;
+		}
+		// `F190` S2: a split inherits the *active pane's own frozen* defaults
 		// (never a fresh read of the current selector state) — the same
 		// "inherit, don't redirect" rule `rootId` above already followed
 		// since `F150`. `tab?.defaults` is only ever `undefined` for an
@@ -426,12 +497,11 @@ export class PlainTerminalView extends ViewPane {
 		// own to inherit; falling back to a fresh resolve there mirrors what
 		// this method already did for `rootId` in that same edge case.
 		const defaults = tab?.defaults ?? this.#resolveFutureTabDefaults();
-		this.#createPane(paneId, activeTabId, undefined, rootId, defaults);
-		const record = this.#tabRecords.get(activeTabId);
-		if (record !== undefined) {
-			record.paneContainer.dataset.split = orientation;
-		}
+		this.#createPane(result.paneId, activeTabId, undefined, rootId, defaults);
+		this.#rebuildPaneLayout(activeTabId);
 		this.#layoutActivePanes();
+		this.#syncSplitControls();
+		this.#focusActivePane(activeTabId);
 	}
 
 	#createTabRecord(tabId: string): void {
@@ -475,12 +545,22 @@ export class PlainTerminalView extends ViewPane {
 		paneContainer.className = "plain-terminal-panecontainer";
 		paneContainer.dataset.terminalTabId = tabId;
 		paneContainer.dataset.active = "false";
-		paneContainer.dataset.split = "single";
 		paneArea.append(paneContainer);
 
 		this.#tabRecords.set(tabId, { tabButton, paneContainer });
 	}
 
+	/**
+	 * Builds the backing `TerminalPaneController` (and its DOM leaf) for one
+	 * new pane, but does **not** attach that leaf into the live DOM tree
+	 * itself — every caller must follow up with `#rebuildPaneLayout(tabId)`,
+	 * which is what actually mounts (or remounts) this pane's element at the
+	 * right position in `tabId`'s recursive split tree. Splitting "create the
+	 * pane" from "place it in the layout" is what lets `#rebuildPaneLayout`
+	 * treat every existing pane uniformly (always a reused `#paneElements`
+	 * lookup), whether it was just created or has survived any number of
+	 * earlier splits/closes elsewhere in the same tab.
+	 */
 	#createPane(
 		paneId: string,
 		tabId: string,
@@ -488,13 +568,8 @@ export class PlainTerminalView extends ViewPane {
 		rootId?: string,
 		defaults?: TerminalFutureTabDefaults,
 	): void {
-		const record = this.#tabRecords.get(tabId);
-		if (record === undefined) {
-			return;
-		}
 		const paneElement = document.createElement("div");
 		paneElement.dataset.terminalPaneId = paneId;
-		record.paneContainer.append(paneElement);
 		this.#paneElements.set(paneId, paneElement);
 
 		const bridge = requireTerminalBridge();
@@ -518,6 +593,38 @@ export class PlainTerminalView extends ViewPane {
 			});
 		}
 		this.#panes.set(paneId, controller);
+
+		// `F190` S3: clicking/focusing anywhere in this pane makes it the
+		// active one (see `TerminalTabsModel.activatePane`'s own doc comment)
+		// — `focusin` bubbles, and `TerminalPaneController`'s own `mousedown`
+		// listener already forces its hidden input to focus on *any* click
+		// inside the pane (including on this pane's own status text, which is
+		// not itself focusable), so this single listener also covers "click
+		// anywhere in the pane", not only genuine keyboard focus changes.
+		const abort = new AbortController();
+		this.#paneListenerAborts.set(paneId, abort);
+		paneElement.addEventListener(
+			"focusin",
+			() => {
+				this.#activatePane(tabId, paneId);
+			},
+			{ signal: abort.signal },
+		);
+
+		const closeButton = document.createElement("button");
+		closeButton.type = "button";
+		closeButton.className = "plain-terminal-pane-close";
+		closeButton.setAttribute("aria-label", "Close Pane");
+		closeButton.textContent = "×";
+		closeButton.addEventListener(
+			"click",
+			(event) => {
+				event.stopPropagation();
+				this.#closePane(tabId, paneId);
+			},
+			{ signal: abort.signal },
+		);
+		paneElement.append(closeButton);
 	}
 
 	#workspaceRoots(): readonly PlainWorkspaceRoot[] {
@@ -689,10 +796,76 @@ export class PlainTerminalView extends ViewPane {
 		}
 		this.#syncTabVisibility();
 		this.#layoutActivePanes();
-		const paneId = this.#tabsModel.getTab(tabId)?.paneIds[0];
-		if (paneId !== undefined) {
-			this.#panes.get(paneId)?.focus();
+		this.#syncSplitControls();
+		this.#focusActivePane(tabId);
+	}
+
+	/** `F190` S3: makes `paneId` the active pane of `tabId` and refreshes that
+	 * tab's `data-active` attributes to match — see
+	 * `TerminalTabsModel.activatePane`'s own doc comment for when this fires
+	 * (any click/focus inside a pane, via the `focusin` listener
+	 * `#createPane` registers). Deliberately calls
+	 * `#refreshActivePaneAttributes` — never `#rebuildPaneLayout` — because
+	 * this never changes the tree's *shape*, only which existing leaf is
+	 * flagged active: `#rebuildPaneLayout`'s `replaceChildren` detaches and
+	 * reattaches every pane element it touches (even when reusing the same
+	 * node), and a detached-then-reattached element loses DOM focus. Since
+	 * this method fires *from* a `focusin` event — including the very first
+	 * focus a brand new pane receives right after creation — reaching for a
+	 * full rebuild here would immediately undo the focus that just triggered
+	 * it, breaking ordinary typing. */
+	#activatePane(tabId: string, paneId: string): void {
+		if (!this.#tabsModel.activatePane(paneId)) {
+			return;
 		}
+		this.#refreshActivePaneAttributes(tabId);
+	}
+
+	/** Sets every one of `tabId`'s existing pane elements' `data-active`
+	 * attribute to match the model's current `activePaneId`, without
+	 * otherwise touching the DOM tree — see `#activatePane`'s own doc
+	 * comment for why this must never reparent an already-mounted pane
+	 * element. */
+	#refreshActivePaneAttributes(tabId: string): void {
+		const tab = this.#tabsModel.getTab(tabId);
+		if (tab === undefined) {
+			return;
+		}
+		for (const paneId of tab.paneIds) {
+			const paneElement = this.#paneElements.get(paneId);
+			if (paneElement === undefined) {
+				continue;
+			}
+			paneElement.dataset.active =
+				paneId === tab.activePaneId ? "true" : "false";
+		}
+	}
+
+	/** `F190` S3: disposes exactly `paneId`'s session/controller and either
+	 * rebuilds `tabId`'s (now smaller) tree, or — if that was the tab's last
+	 * pane — tears the whole tab down exactly like `#closeTab` already does.
+	 * Shared by `closeActivePane` (`Plain: Kill Terminal`) and each pane's own
+	 * close button (see `#createPane`). */
+	#closePane(tabId: string, paneId: string): void {
+		const result = this.#tabsModel.closePane(tabId, paneId);
+		if (result === undefined) {
+			return;
+		}
+		this.#disposePane(paneId);
+		if (result.tabClosed) {
+			this.#removeTabRecord(tabId);
+			this.#syncTabVisibility();
+			this.#syncSplitControls();
+			if (result.nextActiveTabId !== undefined) {
+				this.#layoutActivePanes();
+				this.#focusActivePane(result.nextActiveTabId);
+			}
+			return;
+		}
+		this.#rebuildPaneLayout(tabId);
+		this.#layoutActivePanes();
+		this.#syncSplitControls();
+		this.#focusActivePane(tabId);
 	}
 
 	#closeTab(tabId: string): void {
@@ -701,23 +874,130 @@ export class PlainTerminalView extends ViewPane {
 			return;
 		}
 		for (const paneId of closed.closedPaneIds) {
-			this.#panes.get(paneId)?.dispose();
-			this.#panes.delete(paneId);
-			this.#paneElements.delete(paneId);
+			this.#disposePane(paneId);
 		}
+		this.#removeTabRecord(tabId);
+
+		this.#syncTabVisibility();
+		this.#syncSplitControls();
+		if (closed.nextActiveTabId !== undefined) {
+			this.#layoutActivePanes();
+			this.#focusActivePane(closed.nextActiveTabId);
+		}
+	}
+
+	/** Disposes `paneId`'s `TerminalPaneController` (kills its session) and
+	 * every view-level bookkeeping entry for it — shared by `#closePane`
+	 * (one pane) and `#closeTab` (every pane a closed tab held). Never itself
+	 * touches the model or the DOM tree; callers own that. */
+	#disposePane(paneId: string): void {
+		this.#panes.get(paneId)?.dispose();
+		this.#panes.delete(paneId);
+		this.#paneElements.delete(paneId);
+		this.#paneListenerAborts.get(paneId)?.abort();
+		this.#paneListenerAborts.delete(paneId);
+	}
+
+	#removeTabRecord(tabId: string): void {
 		const record = this.#tabRecords.get(tabId);
 		record?.tabButton.remove();
 		record?.paneContainer.remove();
 		this.#tabRecords.delete(tabId);
+	}
 
-		this.#syncTabVisibility();
-		if (closed.nextActiveTabId !== undefined) {
-			this.#layoutActivePanes();
-			const nextPaneId = this.#tabsModel.getTab(closed.nextActiveTabId)
-				?.paneIds[0];
-			if (nextPaneId !== undefined) {
-				this.#panes.get(nextPaneId)?.focus();
+	/** `F190` S3: rebuilds `tabId`'s nested `.plain-terminal-split` DOM from
+	 * its current `tree` snapshot — see this class's own module doc,
+	 * "recursive split DOM from a tree snapshot" section, for why this always
+	 * reuses (never recreates) each leaf's pane element. Called after every
+	 * mutation of that tab's tree (a pane created, split, activated or
+	 * closed) — cheap even called eagerly, since a tab holds at most
+	 * `MAX_PANES_PER_TAB` panes and therefore at most `MAX_PANES_PER_TAB - 1`
+	 * split wrapper `<div>`s to (re)create. */
+	#rebuildPaneLayout(tabId: string): void {
+		const record = this.#tabRecords.get(tabId);
+		const tab = this.#tabsModel.getTab(tabId);
+		if (record === undefined || tab === undefined) {
+			return;
+		}
+		const root = this.#buildSplitDom(tab.tree, tab.activePaneId);
+		if (root === undefined) {
+			return;
+		}
+		record.paneContainer.replaceChildren(root);
+	}
+
+	/** Recursively turns one `TerminalSplitNode` into the matching DOM: a
+	 * leaf resolves to its existing, reused pane element (its `data-active`
+	 * attribute refreshed to match `activePaneId`); a split resolves to a
+	 * fresh `.plain-terminal-split` wrapper holding its two children's own
+	 * recursively-built DOM. Returns `undefined` (never a partially-built
+	 * tree) if a leaf's pane element cannot be found — defensive; every real
+	 * leaf in a snapshot's `tree` has a corresponding `#paneElements` entry
+	 * created by `#createPane` before this is ever called. */
+	#buildSplitDom(
+		node: TerminalSplitNode,
+		activePaneId: string,
+	): HTMLElement | undefined {
+		if (node.kind === "leaf") {
+			const paneElement = this.#paneElements.get(node.paneId);
+			if (paneElement === undefined) {
+				return undefined;
 			}
+			paneElement.dataset.active =
+				node.paneId === activePaneId ? "true" : "false";
+			return paneElement;
+		}
+		const first = this.#buildSplitDom(node.first, activePaneId);
+		const second = this.#buildSplitDom(node.second, activePaneId);
+		if (first === undefined || second === undefined) {
+			return undefined;
+		}
+		const wrapper = document.createElement("div");
+		wrapper.className = "plain-terminal-split";
+		wrapper.dataset.split = node.orientation;
+		wrapper.append(first, second);
+		return wrapper;
+	}
+
+	/** Enables/disables the two split buttons and shows/clears the
+	 * accompanying hint text to match whether the *active* tab currently
+	 * holds `MAX_PANES_PER_TAB` panes — see this class's own module doc,
+	 * "recursive split DOM" section, and `TerminalTabsModel.splitActivePane`'s
+	 * doc comment for why both a disabled control (the ordinary mouse path)
+	 * and a persistent, `aria-live` status text (the command-palette path,
+	 * which never consults `disabled`) are kept in sync together rather than
+	 * only reacting after a failed split attempt — proactively accurate is
+	 * what makes this "绝不静默失败" even for a path this view cannot
+	 * intercept via `disabled`. Called after every tab switch and every pane
+	 * create/split/close. */
+	#syncSplitControls(): void {
+		const activeTabId = this.#tabsModel.activeTabId;
+		const tab =
+			activeTabId === undefined
+				? undefined
+				: this.#tabsModel.getTab(activeTabId);
+		const atLimit = (tab?.paneIds.length ?? 0) >= MAX_PANES_PER_TAB;
+		if (this.#splitRightButton !== undefined) {
+			this.#splitRightButton.disabled = atLimit;
+		}
+		if (this.#splitDownButton !== undefined) {
+			this.#splitDownButton.disabled = atLimit;
+		}
+		if (this.#splitHintElement !== undefined) {
+			this.#splitHintElement.textContent = atLimit
+				? `This tab has reached its ${MAX_PANES_PER_TAB}-pane split limit.`
+				: "";
+		}
+	}
+
+	/** Focuses `tabId`'s current active pane's input, if both the tab and a
+	 * live controller for that pane still exist. Shared by every place that
+	 * used to reach for `paneIds[0]` before this slice introduced a real
+	 * per-tab active-pane identity. */
+	#focusActivePane(tabId: string): void {
+		const paneId = this.#tabsModel.getTab(tabId)?.activePaneId;
+		if (paneId !== undefined) {
+			this.#panes.get(paneId)?.focus();
 		}
 	}
 

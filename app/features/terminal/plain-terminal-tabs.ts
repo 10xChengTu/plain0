@@ -1,13 +1,14 @@
 /**
  * Pure tab/split bookkeeping for `PlainTerminalView` (F070 "多 tab/split +
- * 生命周期 + scrollback" slice). Deliberately DOM/IPC-free at the type level,
- * like `plain-terminal-scroll.ts` — this class only tracks *which* tabs and
- * panes currently exist, their order and which one is active; it never
- * touches a session, a stream or the DOM itself. `PlainTerminalView` is the
- * only real caller: it reacts to this model's return values (which pane ids
- * were just created, which must be torn down, which tab is now active) by
- * creating/disposing the matching `TerminalPaneController`s and DOM
- * elements.
+ * 生命周期 + scrollback" slice, extended by `F190` S3 "recursive split tree").
+ * Deliberately DOM/IPC-free at the type level, like `plain-terminal-scroll.ts`
+ * — this class only tracks *which* tabs and panes currently exist, how they
+ * are arranged (`plain-terminal-split-tree.ts`'s binary tree) and which one
+ * is active; it never touches a session, a stream or the DOM itself.
+ * `PlainTerminalView` is the only real caller: it reacts to this model's
+ * return values (which pane ids were just created, which must be torn down,
+ * which tab/pane is now active) by creating/disposing the matching
+ * `TerminalPaneController`s and DOM elements.
  *
  * # Why one view self-manages tabs instead of registering N view panes
  *
@@ -28,38 +29,60 @@
  * the one that keeps `terminal-contribution.ts`'s view/view-container
  * registration exactly as small as it already is.
  *
- * # Split cap
+ * # `F190` S3: recursive split tree, active pane, 8-pane cap
  *
- * This slice caps each tab at exactly two panes (matching the research
- * doc's own scrollback/split test wording, "split 一个终端 → 两 pane"):
- * [`splitTab`] returns `undefined` (a deliberate no-op, not an error) once a
- * tab already has two. Recursive/nested splitting is out of scope for this
- * slice; extending the cap later is a self-contained change confined to
- * this file's `MAX_PANES_PER_TAB` constant and `splitTab`'s own check.
+ * Every tab's layout is now a `TerminalSplitNode` binary tree (see
+ * `plain-terminal-split-tree.ts`'s own module doc) instead of the prior flat
+ * two-pane cap with one tab-level orientation. Every tab also remembers
+ * exactly one `activePaneId` — the leaf that clicking/focusing a pane last
+ * made current — and [`splitActivePane`] always splits *that* leaf, never an
+ * arbitrary one: "split 操作替换当前活动叶子" from the architecture doc.
+ * [`splitActivePane`] returns a discriminated result (`"limit"` vs. an
+ * actual new pane id) rather than `undefined`, specifically so
+ * `PlainTerminalView` can tell "this tab is already at the
+ * [`MAX_PANES_PER_TAB`] cap" apart from any other no-op and show accurate,
+ * visible feedback instead of failing silently.
  *
  * # `F190` S2: frozen per-tab profile/cwd defaults
  *
  * Every tab also stores the `TerminalFutureTabDefaults` it was created with
  * — computed once by `PlainTerminalView` from its two future-tab-default
  * controls and never re-read afterward, so a later change to those
- * controls cannot redirect an already-running tab/pane. `splitTab`
- * intentionally does not take a defaults parameter: a split adds a pane to
- * an *existing* tab, and `PlainTerminalView` reads that tab's own
+ * controls cannot redirect an already-running tab/pane. `splitActivePane`
+ * intentionally does not take a defaults parameter: a split adds a pane
+ * alongside an *existing* one, and `PlainTerminalView` reads that tab's own
  * already-frozen `defaults` back out via `getTab` to construct the new
- * pane — the same "inherit the active tab's frozen identity" rule this
- * slice extends from root freezing (`F150`) to profile/cwd.
+ * pane — the same "inherit the active pane's frozen identity" rule this
+ * slice sharpens from tab-level (`F150`/`F190` S2) to pane-level: every pane
+ * in a tab is reachable, transitively, only by splitting some ancestor pane
+ * that itself already carried this exact frozen value, so pane-level and
+ * tab-level inheritance coincide for every pane this slice can create (a
+ * later slice's shell-integration cwd candidate — see
+ * `docs/research/2026-08-03-complete-terminal.md`'s "架构裁定 §3" — is what
+ * would first let one pane's own effective cwd diverge from its ancestor's).
  */
 
-/** Maximum panes one tab may hold at once — see the module doc's "Split
- * cap" section. */
-export const MAX_PANES_PER_TAB = 2;
+import {
+	countSplitPanes,
+	createSplitLeaf,
+	firstSplitPaneId,
+	removeTreeLeaf,
+	splitPaneIdsInOrder,
+	splitTreeLeaf,
+	type TerminalSplitNode,
+	type TerminalSplitOrientation,
+} from "./plain-terminal-split-tree";
+export type { TerminalSplitOrientation } from "./plain-terminal-split-tree";
 
 import {
 	DEFAULT_TERMINAL_FUTURE_TAB_DEFAULTS,
 	type TerminalFutureTabDefaults,
 } from "./plain-terminal-defaults";
 
-export type TerminalSplitOrientation = "row" | "column";
+/** Maximum panes one tab may hold at once — see the module doc's "recursive
+ * split tree" section. Reaching this cap never fails silently: see
+ * [`splitActivePane`]'s `"limit"` result. */
+export const MAX_PANES_PER_TAB = 8;
 
 export interface TerminalRootTarget {
 	readonly rootId: string;
@@ -76,8 +99,17 @@ export interface TerminalTabSnapshot {
 	 * concept of its own. See the module doc's "frozen per-tab profile/cwd
 	 * defaults" section. */
 	readonly defaults: TerminalFutureTabDefaults | undefined;
+	/** Every pane id in this tab's tree, in document order — see
+	 * `splitPaneIdsInOrder`'s own doc comment. */
 	readonly paneIds: readonly string[];
-	readonly splitOrientation: TerminalSplitOrientation;
+	/** The pane a click/focus most recently made current. `splitActivePane`
+	 * and pane-scoped commands (`Plain: Kill Terminal`) always act on this
+	 * one. Always one of `paneIds` — a tab is never left with no active
+	 * pane while it still holds at least one. */
+	readonly activePaneId: string;
+	/** This tab's full split layout — `PlainTerminalView` walks this
+	 * recursively to (re)build the matching nested DOM. */
+	readonly tree: TerminalSplitNode;
 }
 
 interface MutableTab {
@@ -86,8 +118,8 @@ interface MutableTab {
 	readonly rootId: string | undefined;
 	readonly rootLabel: string | undefined;
 	readonly defaults: TerminalFutureTabDefaults | undefined;
-	paneIds: string[];
-	splitOrientation: TerminalSplitOrientation;
+	tree: TerminalSplitNode;
+	activePaneId: string;
 }
 
 export interface TerminalTabCreated {
@@ -98,11 +130,33 @@ export interface TerminalTabCreated {
 export interface TerminalTabClosed {
 	/** Every pane id that belonged to the closed tab — the caller must
 	 * dispose all of them (kill the session, tear down the renderer/stream),
-	 * not just the one that happened to be active. */
+	 * not just the active one. */
 	readonly closedPaneIds: readonly string[];
 	/** The tab that is active after this close, or `undefined` if no tabs
 	 * remain. */
 	readonly nextActiveTabId: string | undefined;
+}
+
+/** Result of {@link TerminalTabsModel.splitActivePane} — see that method's
+ * own doc comment for why this is a discriminated result rather than a bare
+ * `undefined` no-op. */
+export type TerminalPaneSplitResult =
+	| { readonly kind: "created"; readonly paneId: string }
+	| { readonly kind: "limit" };
+
+/** Result of {@link TerminalTabsModel.closePane}. */
+export interface TerminalPaneClosed {
+	readonly closedPaneId: string;
+	/** `true` when the closed pane was the tab's only remaining pane, so the
+	 * whole tab was removed too — identical bookkeeping to
+	 * {@link TerminalTabsModel.closeTab}. */
+	readonly tabClosed: boolean;
+	/** Only meaningful when `tabClosed` is `true` — same meaning as
+	 * {@link TerminalTabClosed.nextActiveTabId}. */
+	readonly nextActiveTabId: string | undefined;
+	/** The tab's new active pane after this close. `undefined` only when
+	 * `tabClosed` is `true` (nothing left in that tab to activate). */
+	readonly nextActivePaneId: string | undefined;
 }
 
 /**
@@ -132,7 +186,9 @@ export class TerminalTabsModel {
 
 	/** Which tab (if any) currently holds `paneId`. */
 	tabIdForPane(paneId: string): string | undefined {
-		return this.#tabs.find((tab) => tab.paneIds.includes(paneId))?.id;
+		return this.#tabs.find((tab) =>
+			splitPaneIdsInOrder(tab.tree).includes(paneId),
+		)?.id;
 	}
 
 	/** Creates a new single-pane tab, makes it active, and returns its new
@@ -189,8 +245,8 @@ export class TerminalTabsModel {
 			rootId: root?.rootId,
 			rootLabel: root?.label,
 			defaults,
-			paneIds: [paneId],
-			splitOrientation: "row",
+			tree: createSplitLeaf(paneId),
+			activePaneId: paneId,
 		});
 		this.#activeTabId = tabId;
 		return Object.freeze({ tabId, paneId });
@@ -218,7 +274,7 @@ export class TerminalTabsModel {
 			this.#activeTabId = this.#tabs[fallbackIndex]?.id;
 		}
 		return Object.freeze({
-			closedPaneIds: Object.freeze([...closed.paneIds]),
+			closedPaneIds: Object.freeze(splitPaneIdsInOrder(closed.tree)),
 			nextActiveTabId: this.#activeTabId,
 		});
 	}
@@ -233,24 +289,98 @@ export class TerminalTabsModel {
 		return true;
 	}
 
+	/** Makes `paneId` the active pane of whichever tab currently holds it.
+	 * Returns `false` (a no-op) if no tab holds `paneId`. Called whenever the
+	 * user clicks/focuses a pane — see the module doc's "active pane"
+	 * section. */
+	activatePane(paneId: string): boolean {
+		const tab = this.#tabs.find((candidate) =>
+			splitPaneIdsInOrder(candidate.tree).includes(paneId),
+		);
+		if (tab === undefined) {
+			return false;
+		}
+		tab.activePaneId = paneId;
+		return true;
+	}
+
 	/**
-	 * Adds a second pane to `tabId`, arranged along `orientation`. Returns
-	 * the new pane id, or `undefined` (a deliberate no-op — see the module
-	 * doc's "Split cap" section) when `tabId` does not exist or already has
-	 * `MAX_PANES_PER_TAB` panes.
+	 * Splits `tabId`'s currently **active** pane along `orientation`,
+	 * arranging the existing pane and a brand new one — see the module doc's
+	 * "recursive split tree" section. Returns `{kind: "limit"}` (never a bare
+	 * no-op) once the tab already holds [`MAX_PANES_PER_TAB`] panes, so the
+	 * caller can show accurate, visible feedback instead of failing
+	 * silently. Returns `undefined` only if `tabId` does not exist.
 	 */
-	splitTab(
+	splitActivePane(
 		tabId: string,
 		orientation: TerminalSplitOrientation,
-	): string | undefined {
+	): TerminalPaneSplitResult | undefined {
 		const tab = this.#find(tabId);
-		if (tab === undefined || tab.paneIds.length >= MAX_PANES_PER_TAB) {
+		if (tab === undefined) {
 			return undefined;
 		}
+		if (countSplitPanes(tab.tree) >= MAX_PANES_PER_TAB) {
+			return Object.freeze({ kind: "limit" });
+		}
 		const paneId = this.#nextPaneId();
-		tab.paneIds = [...tab.paneIds, paneId];
-		tab.splitOrientation = orientation;
-		return paneId;
+		const nextTree = splitTreeLeaf(
+			tab.tree,
+			tab.activePaneId,
+			orientation,
+			paneId,
+		);
+		if (nextTree === undefined) {
+			// Defensive: `activePaneId` is always a real leaf of `tab.tree` by
+			// construction (every mutator that changes either keeps this
+			// invariant), so this should be unreachable.
+			return undefined;
+		}
+		tab.tree = nextTree;
+		// A split's new pane becomes the active one — the same "creating
+		// something new makes it current" rule `createTab` already applies to
+		// a brand new tab, now extended to a brand new pane within one.
+		tab.activePaneId = paneId;
+		return Object.freeze({ kind: "created", paneId });
+	}
+
+	/**
+	 * Closes exactly `paneId` within `tabId` — the sibling subtree it split
+	 * off from is promoted into its place (see
+	 * `plain-terminal-split-tree.ts`'s `removeTreeLeaf`). If `paneId` was the
+	 * tab's only remaining pane, the whole tab is removed instead (identical
+	 * bookkeeping to {@link closeTab}) — a tab can never be left with zero
+	 * panes. Returns `undefined` if `tabId` does not exist or does not hold
+	 * `paneId`.
+	 */
+	closePane(tabId: string, paneId: string): TerminalPaneClosed | undefined {
+		const tab = this.#find(tabId);
+		if (tab === undefined) {
+			return undefined;
+		}
+		const removal = removeTreeLeaf(tab.tree, paneId);
+		if (removal === undefined) {
+			return undefined;
+		}
+		if (removal.kind === "empty") {
+			const closed = this.closeTab(tabId);
+			return Object.freeze({
+				closedPaneId: paneId,
+				tabClosed: true,
+				nextActiveTabId: closed?.nextActiveTabId,
+				nextActivePaneId: undefined,
+			});
+		}
+		tab.tree = removal.tree;
+		if (tab.activePaneId === paneId) {
+			tab.activePaneId = firstSplitPaneId(tab.tree);
+		}
+		return Object.freeze({
+			closedPaneId: paneId,
+			tabClosed: false,
+			nextActiveTabId: undefined,
+			nextActivePaneId: tab.activePaneId,
+		});
 	}
 
 	#nextPaneId(): string {
@@ -270,8 +400,9 @@ export class TerminalTabsModel {
 			rootId: tab.rootId,
 			rootLabel: tab.rootLabel,
 			defaults: tab.defaults,
-			paneIds: Object.freeze([...tab.paneIds]),
-			splitOrientation: tab.splitOrientation,
+			paneIds: Object.freeze(splitPaneIdsInOrder(tab.tree)),
+			activePaneId: tab.activePaneId,
+			tree: tab.tree,
 		});
 	}
 }

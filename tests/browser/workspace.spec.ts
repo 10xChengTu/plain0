@@ -15582,6 +15582,439 @@ test("Terminal requires an explicit root in a multi-root workspace and freezes i
 	expect(errors).toEqual([]);
 });
 
+// --- F190 S3: "recursive split tree" (active pane, 8-pane cap) ----------
+
+test("recursively splits a tab to 3 panes, building a two-level split tree with correct row/column directions", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+
+	await page.getByRole("button", { name: "Split Terminal Right" }).click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(2);
+	// The just-created second pane is now active — splitting again must
+	// target it (a second, nested level), not the tab's original pane.
+	await page.getByRole("button", { name: "Split Terminal Down" }).click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(3);
+
+	const activePane = page.locator(
+		'.plain-terminal-panecontainer[data-active="true"]',
+	);
+	const panes = activePane.locator(".plain-terminal-pane");
+	await expect(panes).toHaveCount(3);
+	const splits = activePane.locator(".plain-terminal-split");
+	await expect(splits).toHaveCount(2);
+	// Document order is pre-order — the outer split precedes the nested one.
+	await expect(splits.nth(0)).toHaveAttribute("data-split", "row");
+	await expect(splits.nth(1)).toHaveAttribute("data-split", "column");
+
+	const [firstSessionId, secondSessionId, thirdSessionId] =
+		await terminalSessionIds(page);
+	await pushTerminalOutput(page, "left-pane-text", firstSessionId);
+	await pushTerminalOutput(page, "top-right-pane-text", secondSessionId);
+	await pushTerminalOutput(page, "bottom-right-pane-text", thirdSessionId);
+
+	const leftPane = panes.filter({ hasText: "left-pane-text" });
+	const topRightPane = panes.filter({ hasText: "top-right-pane-text" });
+	const bottomRightPane = panes.filter({ hasText: "bottom-right-pane-text" });
+	await expect(leftPane).toHaveCount(1);
+	await expect(topRightPane).toHaveCount(1);
+	await expect(bottomRightPane).toHaveCount(1);
+	await expect(leftPane).not.toContainText("top-right-pane-text");
+	await expect(leftPane).not.toContainText("bottom-right-pane-text");
+
+	// Genuinely laid out row-then-column: the left pane is roughly half
+	// width, and the top-right/bottom-right panes stack vertically within
+	// that same half.
+	const containerBox = await activePane.boundingBox();
+	const leftBox = await leftPane.boundingBox();
+	const topRightBox = await topRightPane.boundingBox();
+	const bottomRightBox = await bottomRightPane.boundingBox();
+	expect(containerBox).not.toBeNull();
+	expect(leftBox).not.toBeNull();
+	expect(topRightBox).not.toBeNull();
+	expect(bottomRightBox).not.toBeNull();
+	if (
+		containerBox !== null &&
+		leftBox !== null &&
+		topRightBox !== null &&
+		bottomRightBox !== null
+	) {
+		expect(leftBox.width).toBeLessThan(containerBox.width * 0.7);
+		expect(topRightBox.width).toBeLessThan(containerBox.width * 0.7);
+		expect(topRightBox.y).toBeLessThan(bottomRightBox.y);
+	}
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("a nested split inherits the frozen root/profile/cwd of the pane it was split from, even after the future-tab defaults change again", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	// The profile/cwd controls are part of the terminal view's own tab
+	// strip — they do not exist in the DOM until the view has actually been
+	// rendered at least once (see the established F190 S2 tests above,
+	// which all `createTerminal` first for the same reason).
+	await createTerminal(page);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+
+	const profileSelect = page.getByRole("combobox", {
+		name: "Default Terminal Profile",
+	});
+	await profileSelect.selectOption("zsh");
+	const cwdInput = page.getByRole("textbox", {
+		name: "Default Terminal Working Directory",
+	});
+	await cwdInput.fill("nested/project");
+	await cwdInput.blur();
+
+	// A brand new tab freezes zsh/nested-project.
+	await page.getByRole("button", { name: "New Terminal" }).click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(2);
+	const startsAfterCreate = await terminalCallsFor(page, "terminal_start");
+	expect(startsAfterCreate[1]?.args.request).toMatchObject({
+		rootId: nativeRootId,
+		profileId: "zsh",
+		cwd: "nested/project",
+	});
+
+	// Change the future-tab defaults again *after* that tab is already
+	// running — neither split below may ever pick these up. (This fixture's
+	// `terminal_profiles` snapshot only ever issues `systemDefault`/`zsh` —
+	// see that mock case's own comment — so `systemDefault` is the only
+	// other value available to switch to.)
+	await profileSelect.selectOption("systemDefault");
+	await cwdInput.fill("somewhere/else");
+	await cwdInput.blur();
+
+	await page.getByRole("button", { name: "Split Terminal Right" }).click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(3);
+	let starts = await terminalCallsFor(page, "terminal_start");
+	expect(starts[2]?.args.request).toMatchObject({
+		rootId: nativeRootId,
+		profileId: "zsh",
+		cwd: "nested/project",
+	});
+
+	// A second-level split — of the *new* pane the first split just
+	// created, not the tab's original pane — must still inherit the same
+	// originally-frozen values (pane-level, not merely tab-level,
+	// inheritance).
+	await page.getByRole("button", { name: "Split Terminal Down" }).click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(4);
+	starts = await terminalCallsFor(page, "terminal_start");
+	expect(starts[3]?.args.request).toMatchObject({
+		rootId: nativeRootId,
+		profileId: "zsh",
+		cwd: "nested/project",
+	});
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("reaching the 8-pane split limit disables the split controls and shows accurate feedback, with zero additional spawn on a further attempt", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+
+	const splitRightButton = page.getByRole("button", {
+		name: "Split Terminal Right",
+	});
+	// 7 splits: 1 pane -> 8 panes (this slice's cap).
+	for (let i = 0; i < 7; i += 1) {
+		await splitRightButton.click();
+		await expect
+			.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+			.toBe(i + 2);
+	}
+
+	const activePane = page.locator(
+		'.plain-terminal-panecontainer[data-active="true"]',
+	);
+	await expect(activePane.locator(".plain-terminal-pane")).toHaveCount(8);
+
+	// Accurate, visible, proactive feedback — never merely a silent no-op.
+	await expect(splitRightButton).toBeDisabled();
+	await expect(
+		page.getByRole("button", { name: "Split Terminal Down" }),
+	).toBeDisabled();
+	await expect(page.locator(".plain-terminal-split-hint")).toHaveText(
+		"This tab has reached its 8-pane split limit.",
+	);
+
+	// A command-palette-invoked split bypasses the disabled button entirely —
+	// it must still spawn nothing and keep the same accurate feedback
+	// visible, never fail silently.
+	await executePaletteCommand(
+		page,
+		"Split Terminal Right",
+		"Plain: Split Terminal Right",
+	);
+	expect(await terminalCallsFor(page, "terminal_start")).toHaveLength(8);
+	await expect(activePane.locator(".plain-terminal-pane")).toHaveCount(8);
+	await expect(page.locator(".plain-terminal-split-hint")).toHaveText(
+		"This tab has reached its 8-pane split limit.",
+	);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("closing a middle pane promotes its sibling and leaves the other panes' sessions untouched", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+
+	// Build: split(row){ pane-left, split(column){ pane-top-right, pane-bottom-right } }
+	await page.getByRole("button", { name: "Split Terminal Right" }).click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(2);
+	await page.getByRole("button", { name: "Split Terminal Down" }).click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(3);
+
+	const [leftSessionId, topRightSessionId, bottomRightSessionId] =
+		await terminalSessionIds(page);
+	await pushTerminalOutput(page, "left-marker", leftSessionId);
+	await pushTerminalOutput(page, "top-right-marker", topRightSessionId);
+	await pushTerminalOutput(page, "bottom-right-marker", bottomRightSessionId);
+
+	const activePane = page.locator(
+		'.plain-terminal-panecontainer[data-active="true"]',
+	);
+	await expect(activePane.locator(".plain-terminal-split")).toHaveCount(2);
+
+	// Close the *middle* pane (top-right) — deliberately not the currently
+	// active one (bottom-right, the most recently split-off pane), via that
+	// specific pane's own close button.
+	const topRightPane = activePane
+		.locator(".plain-terminal-pane")
+		.filter({ hasText: "top-right-marker" });
+	await topRightPane.getByRole("button", { name: "Close Pane" }).click();
+
+	await expect(activePane.locator(".plain-terminal-pane")).toHaveCount(2);
+	// The tree collapsed — the nested column split is gone, only the outer
+	// split remains.
+	await expect(activePane.locator(".plain-terminal-split")).toHaveCount(1);
+
+	// Exactly the closed pane's session was killed.
+	await expect
+		.poll(async () =>
+			terminalKillSessionIds(await terminalCallsFor(page, "terminal_kill")),
+		)
+		.toEqual([topRightSessionId]);
+	// No new terminal_start calls happened because of this close.
+	expect(await terminalCallsFor(page, "terminal_start")).toHaveLength(3);
+
+	// The two survivors are still alive and independently addressable.
+	await expect(
+		activePane
+			.locator(".plain-terminal-pane")
+			.filter({ hasText: "left-marker" }),
+	).toHaveCount(1);
+	await expect(
+		activePane
+			.locator(".plain-terminal-pane")
+			.filter({ hasText: "bottom-right-marker" }),
+	).toHaveCount(1);
+	await pushTerminalOutput(page, "-still-alive", leftSessionId);
+	await pushTerminalOutput(page, "-still-alive", bottomRightSessionId);
+	await expect(
+		activePane
+			.locator(".plain-terminal-pane")
+			.filter({ hasText: "left-marker-still-alive" }),
+	).toHaveCount(1);
+	await expect(
+		activePane
+			.locator(".plain-terminal-pane")
+			.filter({ hasText: "bottom-right-marker-still-alive" }),
+	).toHaveCount(1);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("splitting after switching the active pane targets the newly active pane, not the one that was active before", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+
+	await page.getByRole("button", { name: "Split Terminal Right" }).click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(2);
+
+	const [firstSessionId, secondSessionId] = await terminalSessionIds(page);
+	await pushTerminalOutput(page, "left-marker", firstSessionId);
+	await pushTerminalOutput(page, "right-marker", secondSessionId);
+
+	const activePane = page.locator(
+		'.plain-terminal-panecontainer[data-active="true"]',
+	);
+	const leftPane = activePane
+		.locator(".plain-terminal-pane")
+		.filter({ hasText: "left-marker" });
+	const rightPane = activePane
+		.locator(".plain-terminal-pane")
+		.filter({ hasText: "right-marker" });
+
+	// The just-created right pane is active right now.
+	await expect(rightPane).toHaveAttribute("data-active", "true");
+	await expect(leftPane).toHaveAttribute("data-active", "false");
+
+	// Click into the left pane — a visible active-pane indicator (not just
+	// internal bookkeeping) now moves to it.
+	await leftPane.locator(".plain-terminal-surface-wrapper").click();
+	await expect(leftPane).toHaveAttribute("data-active", "true");
+	await expect(rightPane).toHaveAttribute("data-active", "false");
+
+	// Splitting now must nest a new pane alongside the *left* pane — the
+	// right pane is completely untouched.
+	await page.getByRole("button", { name: "Split Terminal Down" }).click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(3);
+
+	await expect(activePane.locator(".plain-terminal-pane")).toHaveCount(3);
+	expect(await terminalCallsFor(page, "terminal_kill")).toEqual([]);
+	await expect(rightPane).toContainText("right-marker");
+
+	// The new pane is a sibling of the left pane specifically: both now live
+	// under the same nested `.plain-terminal-split`, distinct from the
+	// top-level split that still separates them from the right pane.
+	const splits = activePane.locator(".plain-terminal-split");
+	await expect(splits).toHaveCount(2);
+	await expect(splits.nth(0)).toHaveAttribute("data-split", "row");
+	await expect(splits.nth(1)).toHaveAttribute("data-split", "column");
+	await expect(
+		splits
+			.nth(1)
+			.locator(".plain-terminal-pane")
+			.filter({ hasText: "right-marker" }),
+	).toHaveCount(0);
+	await expect(
+		splits
+			.nth(1)
+			.locator(".plain-terminal-pane")
+			.filter({ hasText: "left-marker" }),
+	).toHaveCount(1);
+
+	expect(pageErrors).toEqual([]);
+});
+
 // --- F190 S2: "future-tab defaults UI" (profile/cwd controls) -----------
 
 test("setting default profile/cwd controls persists through settings.json and a new tab starts with them", async ({

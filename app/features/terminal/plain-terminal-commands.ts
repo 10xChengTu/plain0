@@ -34,14 +34,18 @@ export interface PlainTerminalCommandsRegistration {
  *   makes running this command twice produce two tabs rather than one
  *   (compare the prior slice, where "create" and "reveal" were the same
  *   single-tab action).
- * - `Plain: Kill Terminal` closes the *active* tab of the terminal view, if
- *   it is currently open — this uses `IViewsService.getViewWithId` (a
- *   synchronous lookup, unlike `openView`) rather than opening/creating the
- *   view: killing a terminal that is not even open has nothing to do.
+ * - `Plain: Kill Terminal` closes the active tab's active **pane** (`F190`
+ *   S3 sharpened this from whole-tab to pane granularity — see
+ *   `PlainTerminalView.closeActivePane`'s own doc comment; closing a tab's
+ *   only pane still closes the whole tab, so this is unchanged for any tab
+ *   that was never split), if the view is currently open — this uses
+ *   `IViewsService.getViewWithId` (a synchronous lookup, unlike `openView`)
+ *   rather than opening/creating the view: killing a terminal that is not
+ *   even open has nothing to do.
  * - `Plain: Split Terminal Right`/`Plain: Split Terminal Down` split the
- *   active tab (same `getViewWithId` lookup — see `TerminalTabsModel`'s own
- *   doc for the two-panes-per-tab cap and the row/column orientation
- *   meaning).
+ *   active tab's active pane (same `getViewWithId` lookup — see
+ *   `TerminalTabsModel`'s own doc for the recursive-split-tree/8-pane cap and
+ *   the row/column orientation meaning).
  *
  * None of these four commands have any IPC side effect of their own — the
  * actual trust check / session start (or kill) happens inside the view/pane
@@ -65,7 +69,7 @@ export function registerPlainTerminalCommands(): PlainTerminalCommandsRegistrati
 			const viewsService = accessor.get(IViewsService);
 			const view =
 				viewsService.getViewWithId<PlainTerminalView>(TERMINAL_VIEW_ID);
-			view?.closeActiveTab();
+			view?.closeActivePane();
 		}),
 		CommandsRegistry.registerCommand(
 			SPLIT_TERMINAL_RIGHT_COMMAND_ID,
