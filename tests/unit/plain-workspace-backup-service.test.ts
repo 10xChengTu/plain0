@@ -15,12 +15,18 @@ import {
 	MAX_BACKUP_PAYLOAD_BYTES,
 	PlainWorkingCopyBackupService,
 } from "../../app/services/plain-workspace-backup-service";
+import { plainUntitledResourceForScratchId } from "../../app/services/plain-untitled-resource";
 
 interface FakeBridgeState {
 	readonly writes: Array<{ rootId: string; key: string; bytes: Uint8Array }>;
 	readonly discards: Array<{ rootId: string; key: string }>;
 	discardAllCalls: number;
+	scratchDiscardAllCalls: number;
 	readAllCalls: number;
+	scratchReadAllCalls: number;
+	readonly scratchWrites: Array<{ scratchId: string; bytes: Uint8Array }>;
+	readonly scratchDiscards: string[];
+	readonly scratchEntries: Map<string, Uint8Array>;
 	readonly entries: Map<
 		string,
 		{ rootId: string; key: string; bytes: Uint8Array }
@@ -44,7 +50,12 @@ function createFakeBridge(overrides: Partial<PlainBridge> = {}): {
 		writes: [],
 		discards: [],
 		discardAllCalls: 0,
+		scratchDiscardAllCalls: 0,
 		readAllCalls: 0,
+		scratchReadAllCalls: 0,
+		scratchWrites: [],
+		scratchDiscards: [],
+		scratchEntries: new Map(),
 		entries: new Map(),
 	};
 	const bridge: PlainBridge = {
@@ -106,10 +117,25 @@ function createFakeBridge(overrides: Partial<PlainBridge> = {}): {
 			state.entries.clear();
 		},
 		scratchCreate: notImplemented,
-		scratchWrite: notImplemented,
-		scratchReadAll: notImplemented,
-		scratchDiscard: notImplemented,
-		scratchDiscardAll: notImplemented,
+		async scratchWrite(scratchId, bytes) {
+			const snapshot = bytes.slice();
+			state.scratchWrites.push({ scratchId, bytes: snapshot });
+			state.scratchEntries.set(scratchId, snapshot);
+		},
+		async scratchReadAll() {
+			state.scratchReadAllCalls += 1;
+			return [...state.scratchEntries].map(([scratchId, bytes]) =>
+				Object.freeze({ scratchId, bytes: bytes.slice() }),
+			);
+		},
+		async scratchDiscard(scratchId) {
+			state.scratchDiscards.push(scratchId);
+			state.scratchEntries.delete(scratchId);
+		},
+		async scratchDiscardAll() {
+			state.scratchDiscardAllCalls += 1;
+			state.scratchEntries.clear();
+		},
 		themeImportVsix: notImplemented,
 		themeImportDirectory: notImplemented,
 		themeList: notImplemented,
@@ -339,6 +365,72 @@ describe("PlainWorkingCopyBackupService", () => {
 		);
 	});
 
+	it("routes Plain Untitled backups through the independent Rust scratch partition", async () => {
+		const { bridge, state } = createFakeBridge({
+			backupReadAll: async () => {
+				throw Object.freeze({ code: "BACKUP_UNAVAILABLE" });
+			},
+		});
+		configurePlainWorkingCopyBackupBridge(bridge);
+		const service = new PlainWorkingCopyBackupService();
+		const scratchId = "00000000-0000-4000-8000-000000000111";
+		const identifier = {
+			resource: plainUntitledResourceForScratchId(scratchId),
+			typeId: "",
+		};
+
+		await service.backup(identifier, readableFromString("unsaved scratch"), 7);
+		expect(state.writes).toEqual([]);
+		expect(state.scratchWrites).toHaveLength(1);
+		expect(service.hasBackupSync(identifier, 7)).toBe(true);
+		expect(await readValueToString(await service.resolve(identifier))).toBe(
+			"unsaved scratch",
+		);
+		expect(await service.getBackups()).toEqual([identifier]);
+		expect(service.hasBackupSync(identifier, 7)).toBe(true);
+
+		await service.discardBackup(identifier);
+		expect(state.scratchDiscards).toEqual([scratchId]);
+		expect(state.discards).toEqual([]);
+		expect(service.hasBackupSync(identifier)).toBe(false);
+	});
+
+	it("restores orphan scratch even when no workspace backup store is available", async () => {
+		const scratchId = "00000000-0000-4000-8000-000000000112";
+		const { bridge, state } = createFakeBridge({
+			backupReadAll: async () => {
+				throw Object.freeze({ code: "BACKUP_UNAVAILABLE" });
+			},
+		});
+		state.scratchEntries.set(
+			scratchId,
+			new TextEncoder().encode("crash recovery"),
+		);
+		configurePlainWorkingCopyBackupBridge(bridge);
+		const service = new PlainWorkingCopyBackupService();
+
+		const backups = await service.getBackups();
+		expect(backups).toHaveLength(1);
+		expect(backups[0]?.resource.toString()).toBe(
+			plainUntitledResourceForScratchId(scratchId).toString(),
+		);
+		expect(await readValueToString(await service.resolve(backups[0]!))).toBe(
+			"crash recovery",
+		);
+	});
+
+	it("rejects ordinary untitled URIs that do not carry a Rust scratch id", async () => {
+		const { bridge } = createFakeBridge();
+		configurePlainWorkingCopyBackupBridge(bridge);
+		const service = new PlainWorkingCopyBackupService();
+		await expect(
+			service.backup(
+				identifierFor("untitled:/Untitled-1"),
+				readableFromString("not owned"),
+			),
+		).rejects.toMatchObject({ code: "BACKUP_UNAVAILABLE" });
+	});
+
 	it("remaps a persisted backup only to the exact current root returned by native storage", async () => {
 		const oldRootId = "00000000-0000-4000-8000-000000000101";
 		const newRootId = "00000000-0000-4000-8000-000000000201";
@@ -546,6 +638,7 @@ describe("PlainWorkingCopyBackupService", () => {
 
 		await service.discardBackups();
 		expect(state.discardAllCalls).toBe(1);
+		expect(state.scratchDiscardAllCalls).toBe(1);
 		expect(service.hasBackupSync(first)).toBe(false);
 		expect(service.hasBackupSync(second)).toBe(false);
 

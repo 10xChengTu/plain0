@@ -21,6 +21,10 @@ import type {
 	PlainBridge,
 	WorkspaceSnapshot,
 } from "../platform/tauri/contracts";
+import {
+	plainUntitledResourceForScratchId,
+	scratchIdFromPlainUntitledResource,
+} from "./plain-untitled-resource";
 
 /** Mirrors the Rust `MAX_BACKUP_ENTRY_BYTES` ceiling: the *whole* stored
  * payload (this service's own JSON preamble plus the raw content) must fit,
@@ -243,8 +247,11 @@ function remapResourceAuthority(resource: URI, authority: string): URI {
 }
 
 /**
- * Plain's `IWorkingCopyBackupService`, backed by the Rust backup domain (see
- * `src-tauri/src/backup/`) through the four `backup_*` bridge commands.
+ * Plain's `IWorkingCopyBackupService`, backed by two disjoint Rust domains:
+ * workspace files use `src-tauri/src/backup/`, while `untitled:` working
+ * copies carrying a Rust scratch id use `src-tauri/src/scratch/`. A scratch
+ * resource never acquires a workspace root or enters the workspace backup
+ * envelope/key space.
  *
  * Synchronous index design: `hasBackupSync` cannot perform IPC, so this
  * service keeps an in-memory `Map<resource URI text, SyncIndexEntry>` that
@@ -278,49 +285,44 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 
 	async getBackups(): Promise<readonly IWorkingCopyIdentifier[]> {
 		const bridge = requireBridge();
-		let entries: readonly BackupEntry[];
-		try {
-			entries = await bridge.backupReadAll();
-		} catch {
-			// No workspace open yet (Rust reports `BACKUP_UNAVAILABLE` for the
-			// EMPTY workspace) or any other transport failure: report zero
-			// backups rather than rejecting. The tracker's restoration pass
-			// must never see this promise reject.
-			return Object.freeze(
-				[...this.index.values()].map((entry) => entry.identifier),
-			);
-		}
-		const nextIndex = new Map<string, SyncIndexEntry>();
-		const nextStorageKeys = new Map<string, string>();
-		const nextStorageRootIds = new Map<string, string>();
-		for (const entry of entries) {
-			const parsed = decodeBackupPayload(entry.bytes);
-			if (parsed === undefined) {
-				continue;
+		const previousIndex = new Map(this.index);
+		const [workspaceResult, scratchResult] = await Promise.allSettled([
+			bridge.backupReadAll(),
+			bridge.scratchReadAll(),
+		]);
+		if (workspaceResult.status === "fulfilled") {
+			this.removeIndexedDomain("workspace");
+			for (const entry of workspaceResult.value) {
+				const parsed = decodeBackupPayload(entry.bytes);
+				if (parsed === undefined) continue;
+				const identifier = await this.currentIdentifier(
+					parsed.identifier,
+					entry.rootId,
+				);
+				if (identifier === undefined) continue;
+				const resourceKey = identifier.resource.toString();
+				this.index.set(resourceKey, {
+					identifier,
+					versionId: previousIndex.get(resourceKey)?.versionId,
+				});
+				this.storageKeys.set(resourceKey, entry.key);
+				this.storageRootIds.set(resourceKey, entry.rootId);
 			}
-			const identifier = await this.currentIdentifier(
-				parsed.identifier,
-				entry.rootId,
-			);
-			if (identifier === undefined) {
-				continue;
-			}
-			const resourceKey = identifier.resource.toString();
-			nextIndex.set(resourceKey, {
-				identifier,
-				versionId: this.index.get(resourceKey)?.versionId,
-			});
-			nextStorageKeys.set(resourceKey, entry.key);
-			nextStorageRootIds.set(resourceKey, entry.rootId);
 		}
-		this.index.clear();
-		this.storageKeys.clear();
-		this.storageRootIds.clear();
-		for (const [key, value] of nextIndex) this.index.set(key, value);
-		for (const [key, value] of nextStorageKeys)
-			this.storageKeys.set(key, value);
-		for (const [key, value] of nextStorageRootIds)
-			this.storageRootIds.set(key, value);
+		if (scratchResult.status === "fulfilled") {
+			this.removeIndexedDomain("scratch");
+			for (const entry of scratchResult.value) {
+				const identifier = Object.freeze({
+					resource: plainUntitledResourceForScratchId(entry.scratchId),
+					typeId: "",
+				});
+				const resourceKey = identifier.resource.toString();
+				this.index.set(resourceKey, {
+					identifier,
+					versionId: previousIndex.get(resourceKey)?.versionId,
+				});
+			}
+		}
 		return Object.freeze(
 			[...this.index.values()].map((entry) => entry.identifier),
 		);
@@ -331,6 +333,23 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 	): Promise<IResolvedWorkingCopyBackup<T> | undefined> {
 		const bridge = requireBridge();
 		const resourceKey = identifier.resource.toString();
+		const scratchId = scratchIdFromPlainUntitledResource(identifier.resource);
+		if (scratchId !== undefined) {
+			let entries;
+			try {
+				entries = await bridge.scratchReadAll();
+			} catch {
+				return undefined;
+			}
+			const entry = entries.find(
+				(candidate) => candidate.scratchId === scratchId,
+			);
+			if (entry === undefined) return undefined;
+			return Object.freeze({
+				value: bufferToStream(VSBuffer.wrap(entry.bytes)),
+				meta: undefined,
+			}) as IResolvedWorkingCopyBackup<T>;
+		}
 		const resourceParts = workspaceResourceParts(identifier.resource);
 		if (resourceParts === undefined) {
 			return undefined;
@@ -371,8 +390,9 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 	): Promise<void> {
 		const bridge = requireBridge();
 		const resourceKey = identifier.resource.toString();
+		const scratchId = scratchIdFromPlainUntitledResource(identifier.resource);
 		const resourceParts = workspaceResourceParts(identifier.resource);
-		if (resourceParts === undefined) {
+		if (scratchId === undefined && resourceParts === undefined) {
 			throw Object.freeze({
 				code: "BACKUP_UNAVAILABLE",
 				message: "The backup store is not available for this working copy.",
@@ -392,6 +412,11 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 				this.rollbackIndex(resourceKey, previous);
 				return;
 			}
+			if (scratchId !== undefined) {
+				if (bytes.byteLength > MAX_BACKUP_PAYLOAD_BYTES) backupTooLarge();
+				await bridge.scratchWrite(scratchId, bytes);
+				return;
+			}
 			const baselineSha256 = await this.baselineSha256(identifier, meta);
 			const payload = encodeBackupPayload(
 				identifier,
@@ -400,16 +425,16 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 				baselineSha256,
 			);
 			const wireKey = await backupKeyForResource(identifier.resource);
-			await bridge.backupWrite(resourceParts.rootId, wireKey, payload);
+			await bridge.backupWrite(resourceParts!.rootId, wireKey, payload);
 			if (previousStorageKey !== undefined && previousStorageKey !== wireKey) {
 				try {
 					await bridge.backupDiscard(
-						previousStorageRootId ?? resourceParts.rootId,
+						previousStorageRootId ?? resourceParts!.rootId,
 						previousStorageKey,
 					);
 				} catch (error) {
 					try {
-						await bridge.backupDiscard(resourceParts.rootId, wireKey);
+						await bridge.backupDiscard(resourceParts!.rootId, wireKey);
 					} catch {
 						// Preserve the original migration failure. A later read still
 						// prefers the old, already-indexed entry for this process.
@@ -418,7 +443,7 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 				}
 			}
 			this.storageKeys.set(resourceKey, wireKey);
-			this.storageRootIds.set(resourceKey, resourceParts.rootId);
+			this.storageRootIds.set(resourceKey, resourceParts!.rootId);
 		} catch (error) {
 			this.rollbackIndex(resourceKey, previous);
 			this.rollbackStorageKey(resourceKey, previousStorageKey);
@@ -436,11 +461,16 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 		const previous = this.index.get(resourceKey);
 		const previousStorageKey = this.storageKeys.get(resourceKey);
 		const previousStorageRootId = this.storageRootIds.get(resourceKey);
+		const scratchId = scratchIdFromPlainUntitledResource(identifier.resource);
 		const resourceParts = workspaceResourceParts(identifier.resource);
 		this.index.delete(resourceKey);
 		this.storageKeys.delete(resourceKey);
 		this.storageRootIds.delete(resourceKey);
 		try {
+			if (scratchId !== undefined) {
+				await bridge.scratchDiscard(scratchId);
+				return;
+			}
 			const wireKey =
 				previousStorageKey ?? (await backupKeyForResource(identifier.resource));
 			const rootId = previousStorageRootId ?? resourceParts?.rootId;
@@ -462,28 +492,21 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 		const bridge = requireBridge();
 		const except = filter?.except;
 		if (except === undefined || except.length === 0) {
-			const previousEntries = new Map(this.index);
-			const previousStorageKeys = new Map(this.storageKeys);
-			const previousStorageRootIds = new Map(this.storageRootIds);
-			this.index.clear();
-			this.storageKeys.clear();
-			this.storageRootIds.clear();
-			try {
-				await bridge.backupDiscardAll();
-			} catch (error) {
-				this.index.clear();
-				this.storageKeys.clear();
-				this.storageRootIds.clear();
-				for (const [resourceKey, entry] of previousEntries) {
-					this.index.set(resourceKey, entry);
-				}
-				for (const [resourceKey, key] of previousStorageKeys) {
-					this.storageKeys.set(resourceKey, key);
-				}
-				for (const [resourceKey, rootId] of previousStorageRootIds) {
-					this.storageRootIds.set(resourceKey, rootId);
-				}
-				throw error;
+			const [workspaceResult, scratchResult] = await Promise.allSettled([
+				bridge.backupDiscardAll(),
+				bridge.scratchDiscardAll(),
+			]);
+			if (workspaceResult.status === "fulfilled") {
+				this.removeIndexedDomain("workspace");
+			}
+			if (scratchResult.status === "fulfilled") {
+				this.removeIndexedDomain("scratch");
+			}
+			if (workspaceResult.status === "rejected") {
+				throw workspaceResult.reason;
+			}
+			if (scratchResult.status === "rejected") {
+				throw scratchResult.reason;
 			}
 			return;
 		}
@@ -509,6 +532,20 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 		}
 	}
 
+	private removeIndexedDomain(domain: "workspace" | "scratch"): void {
+		for (const [resourceKey, entry] of this.index) {
+			const matches =
+				domain === "workspace"
+					? workspaceResourceParts(entry.identifier.resource) !== undefined
+					: scratchIdFromPlainUntitledResource(entry.identifier.resource) !==
+						undefined;
+			if (!matches) continue;
+			this.index.delete(resourceKey);
+			this.storageKeys.delete(resourceKey);
+			this.storageRootIds.delete(resourceKey);
+		}
+	}
+
 	/**
 	 * Rust returns the current authorized root id that owns each persisted
 	 * entry. The payload's old URI authority is therefore replaced only by
@@ -519,15 +556,15 @@ export class PlainWorkingCopyBackupService implements IWorkingCopyBackupService 
 		storageRootId: string,
 	): Promise<IWorkingCopyIdentifier | undefined> {
 		const bridge = requireBridge();
+		if (stored.resource.scheme !== "plain-workspace") {
+			return undefined;
+		}
 		let snapshot: WorkspaceSnapshot;
 		try {
 			snapshot = await bridge.workspaceSnapshot();
 		} catch {
 			// Unit/browser fakes predating native capability rotation can still
 			// use their original identifier unchanged.
-			return stored;
-		}
-		if (stored.resource.scheme !== "plain-workspace") {
 			return stored;
 		}
 		if (!snapshot.roots.some((root) => root.rootId === storageRootId)) {

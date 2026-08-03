@@ -595,6 +595,7 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/services/plain-lifecycle-service.ts:@codingame/monaco-vscode-api/vscode/vs/platform/storage/common/storage.service",
 	"app/services/plain-lifecycle-service.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/lifecycle/common/lifecycle",
 	"app/services/plain-lifecycle-service.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/lifecycle/common/lifecycleService",
+	"app/services/plain-untitled-resource.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
 	"app/services/plain-workspace-backup-service.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/buffer",
 	"app/services/plain-workspace-backup-service.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/cancellation",
 	"app/services/plain-workspace-backup-service.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/stream",
