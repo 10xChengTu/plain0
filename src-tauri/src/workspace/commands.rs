@@ -537,6 +537,7 @@ mod tests {
                 "create",
                 "delete",
                 "renameNoReplace",
+                "trash",
                 "versionedWrite",
             ]
         );
@@ -545,6 +546,7 @@ mod tests {
         for key in ["renameNoReplace", "copyMove", "delete", "versionedWrite"] {
             assert_eq!(value[key], namespace_mutations, "unexpected {key} value");
         }
+        assert_eq!(value["trash"], cfg!(target_os = "macos"));
     }
 
     #[test]

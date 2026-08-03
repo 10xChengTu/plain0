@@ -24,6 +24,7 @@ import {
 	validateWorkspaceDeleteCommandRegistration,
 	validateWorkspaceTrashBoundary,
 	validateWorkspaceTrashCommandRegistration,
+	validateWorkspaceTrashTypeScriptBoundary,
 	validateWorkspaceDeleteFailureBrowserFixture,
 	validateWorkspaceDeleteTypeScriptBoundary,
 	validateWorkspaceMoveBoundary,
@@ -347,6 +348,7 @@ pub struct WorkspaceCapabilities {
   rename_no_replace: bool,
   copy_move: bool,
   delete: bool,
+  trash: bool,
   versioned_write: bool,
 }
 
@@ -359,6 +361,7 @@ impl WorkspaceCapabilities {
       rename_no_replace: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
       copy_move: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
       delete: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
+      trash: ::core::cfg!(target_os = "macos"),
       versioned_write: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
     }
   }
@@ -393,6 +396,7 @@ export interface WorkspaceCapabilities {
   readonly renameNoReplace: boolean;
   readonly copyMove: boolean;
   readonly delete: boolean;
+  readonly trash: boolean;
   readonly versionedWrite: boolean;
 }
 export interface PlainBridge {
@@ -406,11 +410,12 @@ export interface PlainBridge {
 export function decodeWorkspaceCapabilities(value: unknown): WorkspaceCapabilities {
   return sanitizedDecode(() => {
     const snapshot = ownPlainDataSnapshot(value);
-    if (!hasExactKeys(snapshot, ["create", "renameNoReplace", "copyMove", "delete", "versionedWrite",]) ||
+    if (!hasExactKeys(snapshot, ["create", "renameNoReplace", "copyMove", "delete", "trash", "versionedWrite",]) ||
       typeof snapshot.create !== "boolean" ||
       typeof snapshot.renameNoReplace !== "boolean" ||
       typeof snapshot.copyMove !== "boolean" ||
       typeof snapshot.delete !== "boolean" ||
+      typeof snapshot.trash !== "boolean" ||
       typeof snapshot.versionedWrite !== "boolean") {
       return violation();
     }
@@ -420,6 +425,7 @@ export function decodeWorkspaceCapabilities(value: unknown): WorkspaceCapabiliti
       renameNoReplace: snapshot.renameNoReplace,
       copyMove: snapshot.copyMove,
       delete: snapshot.delete,
+      trash: snapshot.trash,
       versionedWrite: snapshot.versionedWrite,
     });
   });
@@ -450,6 +456,7 @@ const workspaceCapabilities: WorkspaceCapabilities = Object.freeze({
   renameNoReplace: true,
   copyMove: true,
   delete: true,
+  trash: true,
   versionedWrite: true,
 });
 const bridge = {
@@ -1540,7 +1547,7 @@ describe("workspace capability Harness", () => {
 		expect(
 			validateWorkspaceCapabilitiesBoundary(extraRustField, baseline.app),
 		).toContain(
-			"workspace capability Rust DTO must be an empty deny-unknown request and the exact five-boolean response",
+			"workspace capability Rust DTO must be an empty deny-unknown request and the exact six-boolean response",
 		);
 
 		const splitPlatformGate = mutate(
@@ -1555,7 +1562,7 @@ describe("workspace capability Harness", () => {
 		expect(
 			validateWorkspaceCapabilitiesBoundary(splitPlatformGate, baseline.app),
 		).toContain(
-			"workspace capabilities must keep create cross-platform and derive every unsafe mutation from the one Linux/macOS build gate",
+			"workspace capabilities must keep create cross-platform, derive handle-relative mutations from the Linux/macOS gate, and expose system Trash only on macOS",
 		);
 
 		const missingRegistration = mutate(
@@ -1598,6 +1605,7 @@ describe("workspace capability Harness", () => {
         rename_no_replace: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
         copy_move: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
         delete: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
+        trash: ::core::cfg!(target_os = "macos"),
         versioned_write: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
       };
     }
@@ -1610,7 +1618,7 @@ describe("workspace capability Harness", () => {
 				baseline.app,
 			),
 		).toContain(
-			"workspace capabilities must keep create cross-platform and derive every unsafe mutation from the one Linux/macOS build gate",
+			"workspace capabilities must keep create cross-platform, derive handle-relative mutations from the Linux/macOS gate, and expose system Trash only on macOS",
 		);
 
 		const shadowedPlatformMacro = mutate(
@@ -1625,7 +1633,7 @@ describe("workspace capability Harness", () => {
 				baseline.app,
 			),
 		).toContain(
-			"workspace capabilities must keep create cross-platform and derive every unsafe mutation from the one Linux/macOS build gate",
+			"workspace capabilities must keep create cross-platform, derive handle-relative mutations from the Linux/macOS gate, and expose system Trash only on macOS",
 		);
 
 		for (const hostileCodec of [
@@ -5892,6 +5900,95 @@ describe("Plain F170 Rust-owned system Trash boundary", () => {
 		);
 		expect(validateWorkspaceDeleteBoundary(hostile)).toContain(
 			"permanent delete commit must remain isolated from every system Trash adapter and result",
+		);
+	});
+});
+
+const workspaceTrashAppPaths = [
+	"app/platform/tauri/contracts.ts",
+	"app/platform/tauri/workspace-codec.ts",
+	"app/platform/tauri/native.ts",
+	"app/platform/tauri/browser-mock.ts",
+];
+const workspaceTrashAppSources = workspaceTrashAppPaths.map((relativePath) => ({
+	relativePath,
+	source: readFileSync(
+		new URL(`../../${relativePath}`, import.meta.url),
+		"utf8",
+	),
+}));
+
+function replaceWorkspaceTrashAppSource(relativePath, from, to) {
+	return mutateWorkspaceSource(
+		workspaceTrashAppSources,
+		relativePath,
+		(source) => {
+			if (!source.includes(from)) {
+				throw new Error(
+					`${relativePath} TypeScript Trash mutation fixture no longer matches production`,
+				);
+			}
+			return source.replace(from, to);
+		},
+	);
+}
+
+describe("Plain F170 TypeScript system Trash boundary", () => {
+	it("accepts the strict bridge, native route and independent browser receipt", () => {
+		expect(
+			validateWorkspaceTrashTypeScriptBoundary(workspaceTrashAppSources),
+		).toEqual([]);
+	});
+
+	it("rejects a recursive or native-path field in the wire contract", () => {
+		for (const insertion of [
+			"\treadonly recursive: boolean;\n",
+			"\treadonly nativePath: string;\n",
+		]) {
+			const hostile = replaceWorkspaceTrashAppSource(
+				"app/platform/tauri/contracts.ts",
+				"export interface WorkspaceTrashEntryRequest {\n",
+				`export interface WorkspaceTrashEntryRequest {\n${insertion}`,
+			);
+			expect(validateWorkspaceTrashTypeScriptBoundary(hostile)).toContain(
+				"PlainBridge system Trash contract must keep its exact path-free request, plan and three-state result types",
+			);
+		}
+	});
+
+	it("rejects collapsing outcomeUnknown into retained", () => {
+		const hostile = replaceWorkspaceTrashAppSource(
+			"app/platform/tauri/workspace-codec.ts",
+			'if (snapshot.status === "outcomeUnknown") {',
+			'if (snapshot.status === "entryRetained") {',
+		);
+		expect(validateWorkspaceTrashTypeScriptBoundary(hostile)).toContain(
+			"workspace Trash codec must keep a strict 1..64 path-free protocol with unique ids and only trashed, retained or unknown results",
+		);
+	});
+
+	it("rejects routing a Trash commit through permanent delete", () => {
+		const hostile = replaceWorkspaceTrashAppSource(
+			"app/platform/tauri/native.ts",
+			'await invoke<unknown>("workspace_commit_trash_entry", { request })',
+			'await invoke<unknown>("workspace_commit_delete_entry", { request })',
+		);
+		expect(validateWorkspaceTrashTypeScriptBoundary(hostile)).toContain(
+			"native bridge must route each system Trash phase once through its dedicated strict codec and command",
+		);
+		expect(validateWorkspaceTrashTypeScriptBoundary(hostile)).toContain(
+			"workspace_commit_trash_entry must have exactly one production TypeScript invoke route",
+		);
+	});
+
+	it("rejects aliasing the browser Trash receipt to permanent delete state", () => {
+		const hostile = replaceWorkspaceTrashAppSource(
+			"app/platform/tauri/browser-mock.ts",
+			"let activeTrashBatch: MockTrashBatch | undefined;",
+			"let activeTrashBatch = activeDeleteBatch;",
+		);
+		expect(validateWorkspaceTrashTypeScriptBoundary(hostile)).toContain(
+			"browser mock must model a distinct mutually-exclusive Trash receipt with begin revalidation and ordered terminal results",
 		);
 	});
 });

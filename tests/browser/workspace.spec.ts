@@ -2577,6 +2577,7 @@ async function installNativeIpcMock(
 								renameNoReplace: true,
 								copyMove: true,
 								delete: mode === "supported",
+								trash: mode === "supported",
 								versionedWrite: true,
 							};
 						case "workspace_snapshot":
@@ -5319,6 +5320,7 @@ async function installMultiRootNativeIpcMock(
 								renameNoReplace: mode === "supported",
 								copyMove: mode === "supported",
 								delete: mode === "supported",
+								trash: mode === "supported",
 								versionedWrite: mode === "supported",
 							};
 						case "workspace_trust_state":

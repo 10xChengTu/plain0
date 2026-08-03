@@ -52,6 +52,7 @@ export interface WorkspaceCapabilities {
 	readonly renameNoReplace: boolean;
 	readonly copyMove: boolean;
 	readonly delete: boolean;
+	readonly trash: boolean;
 	readonly versionedWrite: boolean;
 }
 
@@ -244,6 +245,47 @@ export type WorkspaceDeleteResult =
 			reason: WorkspaceDeleteIncompleteReason;
 			removedEntries: number;
 	  }>;
+
+export interface WorkspaceTrashEntryRequest {
+	readonly rootId: string;
+	readonly relativePath: string;
+}
+
+export interface WorkspacePrepareTrashRequest {
+	readonly entries: readonly WorkspaceTrashEntryRequest[];
+}
+
+export type WorkspaceTrashEntryKind = "file" | "directory" | "symlink";
+
+export interface WorkspaceTrashBatchPlanEntry {
+	readonly entryId: string;
+	readonly kind: WorkspaceTrashEntryKind;
+}
+
+export interface WorkspaceTrashBatchPlan {
+	readonly confirmationId: string;
+	readonly entries: readonly WorkspaceTrashBatchPlanEntry[];
+}
+
+export interface WorkspaceTrashBatchRequest {
+	readonly confirmationId: string;
+}
+
+export interface WorkspaceCommitTrashEntryRequest extends WorkspaceTrashEntryRequest {
+	readonly confirmationId: string;
+	readonly entryId: string;
+}
+
+export type WorkspaceTrashIncompleteReason =
+	"entryChanged" | "entryUnverifiable" | "trashFailed";
+
+export type WorkspaceTrashResult =
+	| Readonly<{ status: "trashed" }>
+	| Readonly<{
+			status: "entryRetained";
+			reason: WorkspaceTrashIncompleteReason;
+	  }>
+	| Readonly<{ status: "outcomeUnknown" }>;
 
 /**
  * Immutable file payload. The backing bytes are closure-private; each call to
@@ -1386,6 +1428,17 @@ export interface PlainBridge {
 		relativePath: string,
 		recursive: boolean,
 	): Promise<WorkspaceDeleteResult>;
+	workspacePrepareTrash(
+		entries: readonly WorkspaceTrashEntryRequest[],
+	): Promise<WorkspaceTrashBatchPlan>;
+	workspaceCancelTrash(confirmationId: string): Promise<void>;
+	workspaceBeginTrash(confirmationId: string): Promise<void>;
+	workspaceCommitTrashEntry(
+		confirmationId: string,
+		entryId: string,
+		rootId: string,
+		relativePath: string,
+	): Promise<WorkspaceTrashResult>;
 	workspaceStat(
 		rootId: string,
 		relativePath: string,

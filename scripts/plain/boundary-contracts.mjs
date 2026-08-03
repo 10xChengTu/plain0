@@ -4234,10 +4234,10 @@ export function validateWorkspaceCapabilitiesBoundary(rustSources, appSources) {
 		!requestHasDenyUnknown ||
 		capabilityStructs.length !== 1 ||
 		normalized(capabilityStructs[0]?.body ?? "") !==
-			"create:bool,rename_no_replace:bool,copy_move:bool,delete:bool,versioned_write:bool,"
+			"create:bool,rename_no_replace:bool,copy_move:bool,delete:bool,trash:bool,versioned_write:bool,"
 	) {
 		failures.push(
-			"workspace capability Rust DTO must be an empty deny-unknown request and the exact five-boolean response",
+			"workspace capability Rust DTO must be an empty deny-unknown request and the exact six-boolean response",
 		);
 	}
 	const currentPlatformFunctions = executableDto
@@ -4248,6 +4248,7 @@ export function validateWorkspaceCapabilitiesBoundary(rustSources, appSources) {
 		"constHAS_EXCLUSIVE_NAMESPACE_MUTATIONS:bool=::core::cfg!(any(target_os=,target_os=));" +
 		"Self{create:true,rename_no_replace:HAS_EXCLUSIVE_NAMESPACE_MUTATIONS," +
 		"copy_move:HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,delete:HAS_EXCLUSIVE_NAMESPACE_MUTATIONS," +
+		"trash:::core::cfg!(target_os=)," +
 		"versioned_write:HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,}";
 	const originalCurrentPlatformBody =
 		dto !== undefined && currentPlatform !== undefined
@@ -4259,10 +4260,13 @@ export function validateWorkspaceCapabilitiesBoundary(rustSources, appSources) {
 		normalized(currentPlatform?.body ?? "") !== expectedCurrentPlatformBody ||
 		!/^\s*const\s+HAS_EXCLUSIVE_NAMESPACE_MUTATIONS\s*:\s*bool\s*=\s*::\s*core\s*::\s*cfg!\(\s*any\(\s*target_os\s*=\s*"linux"\s*,\s*target_os\s*=\s*"macos"\s*\)\s*\)\s*;/u.test(
 			originalCurrentPlatformBody,
+		) ||
+		!/^\s*trash\s*:\s*::\s*core\s*::\s*cfg!\(\s*target_os\s*=\s*"macos"\s*\)\s*,\s*$/mu.test(
+			originalCurrentPlatformBody,
 		)
 	) {
 		failures.push(
-			"workspace capabilities must keep create cross-platform and derive every unsafe mutation from the one Linux/macOS build gate",
+			"workspace capabilities must keep create cross-platform, derive handle-relative mutations from the Linux/macOS gate, and expose system Trash only on macOS",
 		);
 	}
 	const executableCommands = commands && stripRustCommentsAndLiterals(commands);
@@ -4368,6 +4372,7 @@ export function validateWorkspaceCapabilitiesBoundary(rustSources, appSources) {
 					"renameNoReplace",
 					"copyMove",
 					"delete",
+					"trash",
 					"versionedWrite",
 				].map((name) => ({
 					name,
@@ -4384,7 +4389,7 @@ export function validateWorkspaceCapabilitiesBoundary(rustSources, appSources) {
 		) !== "Promise<WorkspaceCapabilities>"
 	) {
 		failures.push(
-			"PlainBridge must own the exact five-boolean workspace capability contract",
+			"PlainBridge must own the exact six-boolean workspace capability contract",
 		);
 	}
 	const codecFile =
@@ -4406,13 +4411,14 @@ export function validateWorkspaceCapabilitiesBoundary(rustSources, appSources) {
 	const capabilityDecoder = capabilityDecoders[0];
 	const expectedDecoderBody =
 		"{returnsanitizedDecode(()=>{constsnapshot=ownPlainDataSnapshot(value);" +
-		'if(!hasExactKeys(snapshot,["create","renameNoReplace","copyMove","delete","versionedWrite",])||' +
+		'if(!hasExactKeys(snapshot,["create","renameNoReplace","copyMove","delete","trash","versionedWrite",])||' +
 		'typeofsnapshot.create!=="boolean"||typeofsnapshot.renameNoReplace!=="boolean"||' +
 		'typeofsnapshot.copyMove!=="boolean"||typeofsnapshot.delete!=="boolean"||' +
+		'typeofsnapshot.trash!=="boolean"||' +
 		'typeofsnapshot.versionedWrite!=="boolean"){returnviolation();}' +
 		"rejectProxyObject(valueasobject);returnObject.freeze({create:snapshot.create," +
 		"renameNoReplace:snapshot.renameNoReplace,copyMove:snapshot.copyMove," +
-		"delete:snapshot.delete,versionedWrite:snapshot.versionedWrite,});});}";
+		"delete:snapshot.delete,trash:snapshot.trash,versionedWrite:snapshot.versionedWrite,});});}";
 	if (
 		capabilityDecoders.length !== 1 ||
 		capabilityDecoder.parameters.length !== 1 ||
@@ -4588,7 +4594,7 @@ export function validateWorkspaceCapabilitiesBoundary(rustSources, appSources) {
 			"{returnworkspaceCapabilities;}" ||
 		browserCapabilitySnapshots.length !== 1 ||
 		normalized(browserCapabilitySnapshots[0]?.getText(browserFile) ?? "") !==
-			"Object.freeze({create:true,renameNoReplace:true,copyMove:true,delete:true,versionedWrite:true,})"
+			"Object.freeze({create:true,renameNoReplace:true,copyMove:true,delete:true,trash:true,versionedWrite:true,})"
 	) {
 		failures.push(
 			"browser mock must expose one immutable workspace capability snapshot",
@@ -13736,6 +13742,25 @@ const WORKSPACE_DELETE_TS_COMMANDS = Object.freeze([
 	}),
 ]);
 
+const WORKSPACE_TRASH_TS_COMMANDS = Object.freeze([
+	Object.freeze({
+		command: "workspace_prepare_trash",
+		bridgeMethod: "workspacePrepareTrash",
+	}),
+	Object.freeze({
+		command: "workspace_cancel_trash",
+		bridgeMethod: "workspaceCancelTrash",
+	}),
+	Object.freeze({
+		command: "workspace_begin_trash",
+		bridgeMethod: "workspaceBeginTrash",
+	}),
+	Object.freeze({
+		command: "workspace_commit_trash_entry",
+		bridgeMethod: "workspaceCommitTrashEntry",
+	}),
+]);
+
 function typeScriptStaticName(node) {
 	if (node === undefined) {
 		return undefined;
@@ -14883,6 +14908,153 @@ export function validateWorkspaceDeleteTypeScriptBoundary(appSources) {
 	const providerSource = normalizedSources.get(providerPath);
 	if (providerSource !== undefined) {
 		failures.push(...validateWorkspaceDeleteProviderRoute(providerSource));
+	}
+	return [...new Set(failures)];
+}
+
+/**
+ * Locks the path-free TypeScript half of the independent system-Trash
+ * protocol. Permanent delete and Trash may share the Workbench transport in a
+ * later layer, but their bridge DTOs, native commands and browser receipts
+ * must remain distinct here.
+ */
+export function validateWorkspaceTrashTypeScriptBoundary(appSources) {
+	const failures = [];
+	const sources = new Map(
+		appSources.map(({ relativePath, source }) => [
+			relativePath.replaceAll("\\", "/"),
+			source,
+		]),
+	);
+	const contractsPath = "app/platform/tauri/contracts.ts";
+	const codecPath = "app/platform/tauri/workspace-codec.ts";
+	const nativePath = "app/platform/tauri/native.ts";
+	const browserPath = "app/platform/tauri/browser-mock.ts";
+	for (const path of [contractsPath, codecPath, nativePath, browserPath]) {
+		if (!sources.has(path)) {
+			failures.push(`system Trash TypeScript boundary requires ${path}`);
+		}
+	}
+	if (failures.length > 0) {
+		return failures;
+	}
+	const compact = (value) => value.replaceAll(/\s+/g, "");
+	const contracts = compact(sources.get(contractsPath));
+	const codec = compact(sources.get(codecPath));
+	const native = compact(sources.get(nativePath));
+	const browser = compact(sources.get(browserPath));
+
+	const contractTokens = [
+		"exportinterfaceWorkspaceTrashEntryRequest{readonlyrootId:string;readonlyrelativePath:string;}",
+		"exportinterfaceWorkspacePrepareTrashRequest{readonlyentries:readonlyWorkspaceTrashEntryRequest[];}",
+		'exporttypeWorkspaceTrashEntryKind="file"|"directory"|"symlink";',
+		"exportinterfaceWorkspaceTrashBatchPlanEntry{readonlyentryId:string;readonlykind:WorkspaceTrashEntryKind;}",
+		"exportinterfaceWorkspaceTrashBatchPlan{readonlyconfirmationId:string;readonlyentries:readonlyWorkspaceTrashBatchPlanEntry[];}",
+		"exportinterfaceWorkspaceTrashBatchRequest{readonlyconfirmationId:string;}",
+		"exportinterfaceWorkspaceCommitTrashEntryRequestextendsWorkspaceTrashEntryRequest{readonlyconfirmationId:string;readonlyentryId:string;}",
+		'exporttypeWorkspaceTrashIncompleteReason="entryChanged"|"entryUnverifiable"|"trashFailed";',
+		'exporttypeWorkspaceTrashResult=|Readonly<{status:"trashed"}>|Readonly<{status:"entryRetained";reason:WorkspaceTrashIncompleteReason;}>|Readonly<{status:"outcomeUnknown"}>;',
+		"workspacePrepareTrash(entries:readonlyWorkspaceTrashEntryRequest[],):Promise<WorkspaceTrashBatchPlan>;",
+		"workspaceCancelTrash(confirmationId:string):Promise<void>;",
+		"workspaceBeginTrash(confirmationId:string):Promise<void>;",
+		"workspaceCommitTrashEntry(confirmationId:string,entryId:string,rootId:string,relativePath:string,):Promise<WorkspaceTrashResult>;",
+	];
+	if (contractTokens.some((token) => !contracts.includes(token))) {
+		failures.push(
+			"PlainBridge system Trash contract must keep its exact path-free request, plan and three-state result types",
+		);
+	}
+
+	const codecTokens = [
+		"constMAX_TRASH_BATCH_ENTRIES=64;",
+		"exportfunctionfrozenWorkspacePrepareTrashRequest(entries:unknown,):Readonly<WorkspacePrepareTrashRequest>",
+		"exportfunctionfrozenWorkspaceTrashBatchRequest(confirmationId:unknown,):Readonly<WorkspaceTrashBatchRequest>",
+		"exportfunctionfrozenWorkspaceCommitTrashEntryRequest(confirmationId:unknown,entryId:unknown,rootId:unknown,relativePath:unknown,):Readonly<WorkspaceCommitTrashEntryRequest>",
+		"exportfunctiondecodeWorkspaceTrashBatchPlan(value:unknown,request:WorkspacePrepareTrashRequest,):WorkspaceTrashBatchPlan",
+		"exportfunctiondecodeWorkspaceTrashResult(value:unknown,):WorkspaceTrashResult",
+		'if(snapshot.status==="trashed")',
+		'if(snapshot.status==="outcomeUnknown")',
+		'snapshot.status!=="entryRetained"',
+		"WORKSPACE_TRASH_INCOMPLETE_REASONS.has",
+	];
+	if (
+		codecTokens.some((token) => !codec.includes(token)) ||
+		codec.includes("WorkspacePrepareTrashRequest{readonlyrecursive")
+	) {
+		failures.push(
+			"workspace Trash codec must keep a strict 1..64 path-free protocol with unique ids and only trashed, retained or unknown results",
+		);
+	}
+
+	const nativeRoutes = [
+		'workspacePrepareTrash:async(entries)=>{constrequest=frozenWorkspacePrepareTrashRequest(entries);returndecodeWorkspaceTrashBatchPlan(awaitinvoke<unknown>("workspace_prepare_trash",{request}),request,);}',
+		'workspaceCancelTrash:async(confirmationId)=>{constrequest=frozenWorkspaceTrashBatchRequest(confirmationId);decodeWorkspaceVoid(awaitinvoke<unknown>("workspace_cancel_trash",{request}),);}',
+		'workspaceBeginTrash:async(confirmationId)=>{constrequest=frozenWorkspaceTrashBatchRequest(confirmationId);decodeWorkspaceVoid(awaitinvoke<unknown>("workspace_begin_trash",{request}),);}',
+		'workspaceCommitTrashEntry:async(confirmationId,entryId,rootId,relativePath,)=>{constrequest=frozenWorkspaceCommitTrashEntryRequest(confirmationId,entryId,rootId,relativePath,);returndecodeWorkspaceTrashResult(awaitinvoke<unknown>("workspace_commit_trash_entry",{request}),);}',
+	];
+	if (nativeRoutes.some((route) => !native.includes(route))) {
+		failures.push(
+			"native bridge must route each system Trash phase once through its dedicated strict codec and command",
+		);
+	}
+
+	for (const { command, bridgeMethod } of WORKSPACE_TRASH_TS_COMMANDS) {
+		let count = 0;
+		for (const [path, source] of sources) {
+			const sourceFile = ts.createSourceFile(
+				path,
+				source,
+				ts.ScriptTarget.Latest,
+				true,
+				path.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+			);
+			function visit(node) {
+				if (ts.isStringLiteral(node) && node.text === command) {
+					count += 1;
+					const call = node.parent;
+					if (
+						path !== nativePath ||
+						!ts.isCallExpression(call) ||
+						call.arguments[0] !== node ||
+						!ts.isIdentifier(call.expression) ||
+						call.expression.text !== "invoke" ||
+						containingPropertyName(node) !== bridgeMethod
+					) {
+						failures.push(
+							`${command} must appear only as the direct native ${bridgeMethod} invoke route`,
+						);
+					}
+				}
+				ts.forEachChild(node, visit);
+			}
+			visit(sourceFile);
+		}
+		if (count !== 1) {
+			failures.push(
+				`${command} must have exactly one production TypeScript invoke route`,
+			);
+		}
+	}
+
+	const browserTokens = [
+		"letactiveDeleteBatch:MockDeleteBatch|undefined;letactiveTrashBatch:MockTrashBatch|undefined;",
+		"if(activeDeleteBatch!==undefined||activeTrashBatch!==undefined){throwworkspaceTrashConflict();}",
+		"constprepareTrashBatch=",
+		"constbeginTrashBatch=",
+		"constcommitTrashEntry=",
+		"if(batch.entries.some(({top})=>!matchesTrashTop(top))){activeTrashBatch=undefined;throwworkspaceTrashBatchChanged();}",
+		"workspacePrepareTrash(entries){returnprepareTrashBatch(entries);}",
+		"workspaceCancelTrash(confirmationId){cancelTrashBatch(confirmationId);}",
+		"workspaceBeginTrash(confirmationId){beginTrashBatch(confirmationId);}",
+		"workspaceCommitTrashEntry(confirmationId,entryId,rootId,relativePath,){returncommitTrashEntry(confirmationId,entryId,rootId,relativePath);}",
+	];
+	if (
+		browserTokens.some((token) => !browser.includes(token)) ||
+		browser.includes("constcommitTrashEntry=commitDeleteEntry")
+	) {
+		failures.push(
+			"browser mock must model a distinct mutually-exclusive Trash receipt with begin revalidation and ordered terminal results",
+		);
 	}
 	return [...new Set(failures)];
 }

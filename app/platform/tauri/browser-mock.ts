@@ -43,6 +43,7 @@ import type {
 	UserDataResult,
 	WorkspaceCapabilities,
 	WorkspaceCommitDeleteEntryRequest,
+	WorkspaceCommitTrashEntryRequest,
 	WorkspaceDeleteBatchPlan,
 	WorkspaceDeleteEntryKind,
 	WorkspaceDeleteEntryRequest,
@@ -56,6 +57,9 @@ import type {
 	WorkspaceRecentEntry,
 	WorkspaceRoot,
 	WorkspaceSearchFilesResult,
+	WorkspaceTrashBatchPlan,
+	WorkspaceTrashEntryRequest,
+	WorkspaceTrashResult,
 	WorkspaceWatchPendingRoot,
 	WorkspaceWatchSyncRequest,
 	WorkspaceWatchWakeEvent,
@@ -110,6 +114,7 @@ import {
 	encodeWorkspacePublishFileRequest,
 	encodeWorkspaceWriteFileRequest,
 	frozenWorkspaceCommitDeleteEntryRequest,
+	frozenWorkspaceCommitTrashEntryRequest,
 	frozenWorkspaceCopyRequest,
 	frozenWorkspaceDeleteBatchPlan,
 	frozenWorkspaceDeleteBatchRequest,
@@ -121,6 +126,10 @@ import {
 	frozenWorkspaceMoveRequest,
 	frozenWorkspaceMoveResult,
 	frozenWorkspacePrepareDeleteRequest,
+	frozenWorkspacePrepareTrashRequest,
+	frozenWorkspaceTrashBatchPlan,
+	frozenWorkspaceTrashBatchRequest,
+	frozenWorkspaceTrashResult,
 	frozenWorkspacePickResult,
 	frozenWorkspacePickSaveTargetRequest,
 	frozenWorkspacePickSaveTargetResult,
@@ -184,6 +193,7 @@ const workspaceCapabilities: WorkspaceCapabilities = Object.freeze({
 	renameNoReplace: true,
 	copyMove: true,
 	delete: true,
+	trash: true,
 	versionedWrite: true,
 });
 
@@ -200,6 +210,7 @@ const MAX_DIRECTORY_COPY_PATH_BYTES = 4 * 1_024;
 const MAX_DIRECTORY_COPY_PATH_SEGMENTS = 256;
 const MAX_MOCK_SYMLINK_DEPTH = 256;
 const MAX_DELETE_BATCH_ENTRIES = 64;
+const MAX_TRASH_BATCH_ENTRIES = 64;
 const MAX_DELETE_DESCENDANTS = 10_000;
 const MAX_DELETE_DEPTH = 256;
 const MAX_DELETE_NAME_PAYLOAD_BYTES = 2 * 1_024 * 1_024;
@@ -1019,6 +1030,8 @@ export interface BrowserMockBridgeOptions {
 	readonly workspaceDeleteLimitsForTest?: BrowserMockWorkspaceDeleteLimitsForTest;
 	/** Injectable monotonic millisecond clock for delete batch expiry tests. */
 	readonly workspaceDeleteClockForTest?: () => number;
+	/** Scripted system-Trash terminal results; default commits are `trashed`. */
+	readonly workspaceTrashResultsForTest?: readonly WorkspaceTrashResult[];
 	/** Runs after a private receipt exists and before prepare's second pass. */
 	readonly onWorkspaceDeletePreparedForTest?: (
 		observation: BrowserMockWorkspaceDeleteObservation,
@@ -1757,6 +1770,27 @@ function workspaceDeleteBatchUnverifiable(): CommandError {
 	);
 }
 
+function workspaceTrashPlanInvalid(): CommandError {
+	return commandError(
+		"WORKSPACE_TRASH_PLAN_INVALID",
+		"The workspace Trash plan is invalid.",
+	);
+}
+
+function workspaceTrashConflict(): CommandError {
+	return commandError(
+		"WORKSPACE_CONFLICT",
+		"The workspace Trash selection conflicts with another entry.",
+	);
+}
+
+function workspaceTrashBatchChanged(): CommandError {
+	return commandError(
+		"WORKSPACE_TRASH_BATCH_CHANGED",
+		"The workspace Trash selection changed before the operation began.",
+	);
+}
+
 function directoryNotEmpty(): CommandError {
 	return commandError(
 		"DIRECTORY_NOT_EMPTY",
@@ -2460,6 +2494,47 @@ interface MockDeleteBatch {
 	inFlight: boolean;
 }
 
+type MockTrashReceipt =
+	| Readonly<{
+			kind: "file";
+			identity: MockFileNode;
+			metadata: MockDeleteMetadataSnapshot;
+			size: number;
+	  }>
+	| Readonly<{
+			kind: "directory";
+			identity: MockDirectoryNode;
+			metadata: MockDeleteMetadataSnapshot;
+	  }>
+	| Readonly<{
+			kind: "symlink";
+			identity: MockSymlinkNode;
+			metadata: MockDeleteMetadataSnapshot;
+			payload: MockImmutableBytes;
+	  }>;
+
+interface MockTrashTopReceipt {
+	readonly request: WorkspaceTrashEntryRequest;
+	readonly parentIdentity: MockDirectoryNode;
+	readonly name: string;
+	readonly receipt: MockTrashReceipt;
+}
+
+interface MockTrashBatchEntry {
+	readonly entryId: string;
+	readonly top: MockTrashTopReceipt;
+}
+
+interface MockTrashBatch {
+	readonly confirmationId: string;
+	readonly revision: number;
+	readonly entries: readonly MockTrashBatchEntry[];
+	phase: "prepared" | "executing";
+	nextIndex: number;
+	deadline: number;
+	inFlight: boolean;
+}
+
 interface MockDeleteJournal {
 	readonly removedPaths: Set<string>;
 	readonly expectedMetadata: Map<MockNode, MockDeleteMetadataSnapshot>;
@@ -2549,6 +2624,9 @@ export function createBrowserMockBridge(
 	const workspaceDeleteLimits = resolveWorkspaceDeleteLimits(
 		options.workspaceDeleteLimitsForTest,
 	);
+	const scriptedWorkspaceTrashResults = [
+		...(options.workspaceTrashResultsForTest ?? []),
+	].map(frozenWorkspaceTrashResult);
 	const deleteMetadata = new WeakMap<MockNode, MockDeleteMetadata>();
 	const workspaceWriteIdentities = new WeakMap<MockNode, number>();
 	let nextWorkspaceWriteIdentity = 1;
@@ -2600,6 +2678,7 @@ export function createBrowserMockBridge(
 	> = [];
 	const issuedDeleteIds = new Set<string>();
 	let activeDeleteBatch: MockDeleteBatch | undefined;
+	let activeTrashBatch: MockTrashBatch | undefined;
 	let workspaceWriteInFlight = false;
 	let workspaceWriteWindowIsClosed = false;
 	let workspaceWriteAncestorGeneration = 0;
@@ -2837,13 +2916,24 @@ export function createBrowserMockBridge(
 		}
 		return value;
 	};
+	const trashNow = (): number => {
+		const value = workspaceDeleteSeams.clock();
+		if (!Number.isSafeInteger(value) || value < 0) {
+			throw workspaceTrashPlanInvalid();
+		}
+		return value;
+	};
 	const expireDeleteBatch = (now: number): void => {
 		if (activeDeleteBatch !== undefined && now >= activeDeleteBatch.deadline) {
 			activeDeleteBatch = undefined;
 		}
+		if (activeTrashBatch !== undefined && now >= activeTrashBatch.deadline) {
+			activeTrashBatch = undefined;
+		}
 	};
 	const invalidateDeleteBatch = (): void => {
 		activeDeleteBatch = undefined;
+		activeTrashBatch = undefined;
 	};
 
 	const snapshot = () =>
@@ -3829,6 +3919,74 @@ export function createBrowserMockBridge(
 				target.name === top.name &&
 				node !== undefined &&
 				matchesDeleteReceipt(node, top.receipt, journal)
+			);
+		} catch {
+			return false;
+		}
+	};
+	const captureTrashReceipt = (node: MockNode): MockTrashReceipt => {
+		if (node.kind === "file") {
+			return Object.freeze({
+				kind: node.kind,
+				identity: node,
+				metadata: metadataSnapshot(node),
+				size: node.size,
+			});
+		}
+		if (isMockSymlinkNode(node)) {
+			if (node.payload.byteLength > 4 * 1_024) {
+				throw symlinkTooLarge();
+			}
+			return Object.freeze({
+				kind: node.kind,
+				identity: node,
+				metadata: metadataSnapshot(node),
+				payload: immutableMockBytes(node.payload.copy()),
+			});
+		}
+		if (node.kind !== "directory") {
+			throw entryTypeMismatch();
+		}
+		return Object.freeze({
+			kind: node.kind,
+			identity: node,
+			metadata: metadataSnapshot(node),
+		});
+	};
+	const matchesTrashReceipt = (
+		node: MockNode,
+		receipt: MockTrashReceipt,
+	): boolean => {
+		if (
+			node !== receipt.identity ||
+			node.kind !== receipt.kind ||
+			!metadataEqual(metadataFor(node), receipt.metadata)
+		) {
+			return false;
+		}
+		if (receipt.kind === "file") {
+			return node.kind === "file" && node.size === receipt.size;
+		}
+		if (receipt.kind === "symlink") {
+			return (
+				isMockSymlinkNode(node) &&
+				mockBytesEqual(node.payload.copy(), receipt.payload.copy())
+			);
+		}
+		return node.kind === "directory";
+	};
+	const matchesTrashTop = (top: MockTrashTopReceipt): boolean => {
+		try {
+			const target = resolveCreateTarget(
+				top.request.rootId,
+				top.request.relativePath,
+			);
+			const node = target.parent.entries.get(target.name);
+			return (
+				target.parent === top.parentIdentity &&
+				target.name === top.name &&
+				node !== undefined &&
+				matchesTrashReceipt(node, top.receipt)
 			);
 		} catch {
 			return false;
@@ -4820,6 +4978,13 @@ export function createBrowserMockBridge(
 		}
 		return deadline;
 	};
+	const trashDeadline = (now: number): number => {
+		const deadline = now + WORKSPACE_DELETE_IDLE_TTL_MS;
+		if (!Number.isSafeInteger(deadline)) {
+			throw workspaceTrashPlanInvalid();
+		}
+		return deadline;
+	};
 	const deleteObservation = (
 		confirmationId: string,
 		phase: BrowserMockWorkspaceDeleteObservation["phase"],
@@ -4885,7 +5050,7 @@ export function createBrowserMockBridge(
 		}
 		const now = deleteNow();
 		expireDeleteBatch(now);
-		if (activeDeleteBatch !== undefined) {
+		if (activeDeleteBatch !== undefined || activeTrashBatch !== undefined) {
 			throw workspaceDeleteConflict();
 		}
 
@@ -5268,6 +5433,179 @@ export function createBrowserMockBridge(
 			activeDeleteBatch = undefined;
 		}
 		return result;
+	};
+	const prepareTrashBatch = (
+		entriesInput: readonly WorkspaceTrashEntryRequest[],
+	): WorkspaceTrashBatchPlan => {
+		const request = frozenWorkspacePrepareTrashRequest(entriesInput);
+		if (
+			request.entries.length < 1 ||
+			request.entries.length > MAX_TRASH_BATCH_ENTRIES
+		) {
+			throw workspaceTrashPlanInvalid();
+		}
+		const now = trashNow();
+		expireDeleteBatch(now);
+		if (activeDeleteBatch !== undefined || activeTrashBatch !== undefined) {
+			throw workspaceTrashConflict();
+		}
+
+		const seenTopIdentities = new Set<MockNode>();
+		const tops = request.entries.map((entry): MockTrashTopReceipt => {
+			const target = resolveCreateTarget(entry.rootId, entry.relativePath);
+			const node = target.parent.entries.get(target.name);
+			if (node === undefined) {
+				throw entryNotFound();
+			}
+			if (seenTopIdentities.has(node)) {
+				throw workspaceTrashConflict();
+			}
+			seenTopIdentities.add(node);
+			return Object.freeze({
+				request: entry,
+				parentIdentity: target.parent,
+				name: target.name,
+				receipt: captureTrashReceipt(node),
+			});
+		});
+		if (tops.some((top) => !matchesTrashTop(top))) {
+			throw workspaceTrashBatchChanged();
+		}
+		const confirmationId = nextDeleteId();
+		const entries = tops.map((top) =>
+			Object.freeze({ entryId: nextDeleteId(), top }),
+		);
+		const plan = frozenWorkspaceTrashBatchPlan(
+			{
+				confirmationId,
+				entries: entries.map(({ entryId, top }) => ({
+					entryId,
+					kind: top.receipt.kind,
+				})),
+			},
+			request,
+		);
+		const completedNow = trashNow();
+		if (completedNow < now) {
+			throw workspaceTrashPlanInvalid();
+		}
+		activeTrashBatch = {
+			confirmationId,
+			revision,
+			entries: Object.freeze(entries),
+			phase: "prepared",
+			nextIndex: 0,
+			deadline: trashDeadline(completedNow),
+			inFlight: false,
+		};
+		return plan;
+	};
+	const matchingTrashBatch = (
+		confirmationId: string,
+		phase?: MockTrashBatch["phase"],
+	): MockTrashBatch => {
+		const now = trashNow();
+		expireDeleteBatch(now);
+		const batch = activeTrashBatch;
+		if (
+			batch === undefined ||
+			batch.confirmationId !== confirmationId ||
+			(phase !== undefined && batch.phase !== phase) ||
+			batch.revision !== revision ||
+			batch.inFlight
+		) {
+			throw workspaceTrashPlanInvalid();
+		}
+		return batch;
+	};
+	const cancelTrashBatch = (confirmationIdInput: string): void => {
+		const { confirmationId } =
+			frozenWorkspaceTrashBatchRequest(confirmationIdInput);
+		matchingTrashBatch(confirmationId);
+		activeTrashBatch = undefined;
+	};
+	const beginTrashBatch = (confirmationIdInput: string): void => {
+		const { confirmationId } =
+			frozenWorkspaceTrashBatchRequest(confirmationIdInput);
+		const batch = matchingTrashBatch(confirmationId, "prepared");
+		if (batch.entries.some(({ top }) => !matchesTrashTop(top))) {
+			activeTrashBatch = undefined;
+			throw workspaceTrashBatchChanged();
+		}
+		batch.phase = "executing";
+		batch.deadline = trashDeadline(trashNow());
+	};
+	const retainedTrashResult = (
+		reason: "entryChanged" | "entryUnverifiable" | "trashFailed",
+	): WorkspaceTrashResult =>
+		frozenWorkspaceTrashResult({ status: "entryRetained", reason });
+	const commitTrashEntry = (
+		confirmationIdInput: string,
+		entryIdInput: string,
+		rootIdInput: string,
+		relativePathInput: string,
+	): WorkspaceTrashResult => {
+		const request: WorkspaceCommitTrashEntryRequest =
+			frozenWorkspaceCommitTrashEntryRequest(
+				confirmationIdInput,
+				entryIdInput,
+				rootIdInput,
+				relativePathInput,
+			);
+		const batch = matchingTrashBatch(request.confirmationId, "executing");
+		const entry = batch.entries[batch.nextIndex];
+		if (
+			entry === undefined ||
+			entry.entryId !== request.entryId ||
+			entry.top.request.rootId !== request.rootId ||
+			entry.top.request.relativePath !== request.relativePath
+		) {
+			activeTrashBatch = undefined;
+			throw workspaceTrashPlanInvalid();
+		}
+		batch.inFlight = true;
+		if (!matchesTrashTop(entry.top)) {
+			batch.inFlight = false;
+			activeTrashBatch = undefined;
+			return retainedTrashResult("entryChanged");
+		}
+		const scripted =
+			scriptedWorkspaceTrashResults.shift() ??
+			frozenWorkspaceTrashResult({ status: "trashed" });
+		if (scripted.status !== "trashed") {
+			batch.inFlight = false;
+			activeTrashBatch = undefined;
+			return scripted;
+		}
+		const target = resolveCreateTarget(
+			entry.top.request.rootId,
+			entry.top.request.relativePath,
+		);
+		const node = target.parent.entries.get(target.name);
+		if (
+			target.parent !== entry.top.parentIdentity ||
+			target.name !== entry.top.name ||
+			node === undefined ||
+			!matchesTrashReceipt(node, entry.top.receipt) ||
+			!target.parent.entries.delete(target.name)
+		) {
+			batch.inFlight = false;
+			activeTrashBatch = undefined;
+			return retainedTrashResult("trashFailed");
+		}
+		touchDeleteNode(target.parent);
+		batch.inFlight = false;
+		batch.nextIndex += 1;
+		if (batch.nextIndex >= batch.entries.length) {
+			activeTrashBatch = undefined;
+			return scripted;
+		}
+		try {
+			batch.deadline = trashDeadline(trashNow());
+		} catch {
+			activeTrashBatch = undefined;
+		}
+		return scripted;
 	};
 
 	const searchWorkspaceFiles = (
@@ -6970,6 +7308,23 @@ export function createBrowserMockBridge(
 				relativePath,
 				recursive,
 			);
+		},
+		async workspacePrepareTrash(entries) {
+			return prepareTrashBatch(entries);
+		},
+		async workspaceCancelTrash(confirmationId) {
+			cancelTrashBatch(confirmationId);
+		},
+		async workspaceBeginTrash(confirmationId) {
+			beginTrashBatch(confirmationId);
+		},
+		async workspaceCommitTrashEntry(
+			confirmationId,
+			entryId,
+			rootId,
+			relativePath,
+		) {
+			return commitTrashEntry(confirmationId, entryId, rootId, relativePath);
 		},
 		async workspaceStat(rootId, relativePath) {
 			const entry = resolveEntryForRead(rootId, relativePath);

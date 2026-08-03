@@ -56,6 +56,7 @@ import {
 	validateWorkspaceDeleteCommandRegistration,
 	validateWorkspaceTrashBoundary,
 	validateWorkspaceTrashCommandRegistration,
+	validateWorkspaceTrashTypeScriptBoundary,
 	validateWorkspaceDeleteFailureBrowserFixture,
 	validateWorkspaceDeleteTypeScriptBoundary,
 	validateWorkspaceMoveBoundary,
@@ -846,6 +847,9 @@ for (const failure of validateWorkspaceTrashCommandRegistration(rustSources)) {
 	fail(failure);
 }
 for (const failure of validateWorkspaceTrashBoundary(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateWorkspaceTrashTypeScriptBoundary(appSources)) {
 	fail(failure);
 }
 for (const failure of validateSearchCommandRegistration(rustSources)) {

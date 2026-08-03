@@ -101,6 +101,7 @@ function testBridge(
 				renameNoReplace: true,
 				copyMove: true,
 				delete: true,
+				trash: true,
 				versionedWrite: true,
 			};
 		},
@@ -159,6 +160,14 @@ function testBridge(
 		async workspaceCancelDelete() {},
 		async workspaceBeginDelete() {},
 		async workspaceCommitDeleteEntry() {
+			throw new Error("unused");
+		},
+		async workspacePrepareTrash() {
+			throw new Error("unused");
+		},
+		async workspaceCancelTrash() {},
+		async workspaceBeginTrash() {},
+		async workspaceCommitTrashEntry() {
 			throw new Error("unused");
 		},
 		async workspaceStat() {

@@ -161,6 +161,7 @@ describe("native Plain bridge", () => {
 			renameNoReplace: true,
 			copyMove: true,
 			delete: true,
+			trash: true,
 			versionedWrite: true,
 		});
 		const bridge = createNativeBridge();
@@ -176,6 +177,7 @@ describe("native Plain bridge", () => {
 			renameNoReplace: true,
 			copyMove: true,
 			delete: true,
+			trash: true,
 			versionedWrite: true,
 		});
 		expect(Object.isFrozen(capabilities)).toBe(true);

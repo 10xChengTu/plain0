@@ -3,6 +3,7 @@ import type {
 	RuntimeInfo,
 	WorkspaceCapabilities,
 	WorkspaceCommitDeleteEntryRequest,
+	WorkspaceCommitTrashEntryRequest,
 	WorkspaceDeleteBatchPlan,
 	WorkspaceDeleteBatchPlanEntry,
 	WorkspaceDeleteBatchRequest,
@@ -21,12 +22,20 @@ import type {
 	WorkspaceOpenFilesResult,
 	WorkspacePickSaveTargetResult,
 	WorkspacePrepareDeleteRequest,
+	WorkspacePrepareTrashRequest,
 	WorkspacePickResult,
 	WorkspaceRecentListResult,
 	WorkspaceReadDirectoryResult,
 	WorkspaceReadFileResult,
 	WorkspaceRoot,
 	WorkspaceSnapshot,
+	WorkspaceTrashBatchPlan,
+	WorkspaceTrashBatchPlanEntry,
+	WorkspaceTrashBatchRequest,
+	WorkspaceTrashEntryKind,
+	WorkspaceTrashEntryRequest,
+	WorkspaceTrashIncompleteReason,
+	WorkspaceTrashResult,
 	WorkspaceWatchPendingRoot,
 	WorkspaceWatchSyncRequest,
 	WorkspaceWatchSyncResult,
@@ -49,6 +58,7 @@ const MAX_FILE_BYTES = 8 * 1_024 * 1_024;
 const MAX_MOVE_REMOVED_ENTRIES = 10_000;
 const MAX_DELETE_BATCH_ENTRIES = 64;
 const MAX_DELETE_DESCENDANT_ENTRIES = 10_000;
+const MAX_TRASH_BATCH_ENTRIES = 64;
 const MAX_RELATIVE_PATH_BYTES = 4_096;
 const MAX_RELATIVE_PATH_SEGMENTS = 256;
 const PLR1_HEADER_BYTES = 36;
@@ -119,6 +129,17 @@ const WORKSPACE_DELETE_INCOMPLETE_REASONS =
 		"entryChanged",
 		"entryUnverifiable",
 		"deleteFailed",
+	]);
+const WORKSPACE_TRASH_ENTRY_KINDS = new Set<WorkspaceTrashEntryKind>([
+	"file",
+	"directory",
+	"symlink",
+]);
+const WORKSPACE_TRASH_INCOMPLETE_REASONS =
+	new Set<WorkspaceTrashIncompleteReason>([
+		"entryChanged",
+		"entryUnverifiable",
+		"trashFailed",
 	]);
 const utf8Encoder = new TextEncoder();
 const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
@@ -921,6 +942,152 @@ export function frozenWorkspaceCommitDeleteEntryRequest(
 	});
 }
 
+function workspaceTrashPlanInvalid(): never {
+	return requestViolation(
+		"WORKSPACE_TRASH_PLAN_INVALID",
+		"The workspace Trash plan is invalid.",
+	);
+}
+
+function workspaceTrashConflict(): never {
+	return requestViolation(
+		"WORKSPACE_CONFLICT",
+		"The workspace Trash selection conflicts with another entry.",
+	);
+}
+
+function trashEntryRequestFromSnapshot(
+	value: unknown,
+): WorkspaceTrashEntryRequest {
+	let snapshot: Readonly<Record<string, unknown>>;
+	try {
+		snapshot = ownPlainDataSnapshot(value);
+		if (!hasExactKeys(snapshot, ["rootId", "relativePath"])) {
+			return workspaceTrashPlanInvalid();
+		}
+		rejectProxyObject(value as object);
+	} catch {
+		return workspaceTrashPlanInvalid();
+	}
+	const entry = frozenWorkspaceCreateEntryRequest(
+		snapshot.rootId,
+		snapshot.relativePath,
+	);
+	return Object.freeze({
+		rootId: entry.rootId,
+		relativePath: entry.relativePath,
+	});
+}
+
+export function frozenWorkspacePrepareTrashRequest(
+	entries: unknown,
+): Readonly<WorkspacePrepareTrashRequest> {
+	let declaredLength: number;
+	try {
+		if (
+			typeof entries !== "object" ||
+			entries === null ||
+			!Array.isArray(entries) ||
+			Object.getPrototypeOf(entries) !== Array.prototype
+		) {
+			return workspaceTrashPlanInvalid();
+		}
+		const descriptor = Object.getOwnPropertyDescriptor(entries, "length");
+		if (
+			descriptor === undefined ||
+			!("value" in descriptor) ||
+			!Number.isSafeInteger(descriptor.value) ||
+			descriptor.value < 0
+		) {
+			return workspaceTrashPlanInvalid();
+		}
+		declaredLength = descriptor.value as number;
+	} catch {
+		return workspaceTrashPlanInvalid();
+	}
+	if (declaredLength < 1 || declaredLength > MAX_TRASH_BATCH_ENTRIES) {
+		return workspaceTrashConflict();
+	}
+	let arraySnapshot: ReturnType<typeof ownArrayDataSnapshot>;
+	try {
+		arraySnapshot = ownArrayDataSnapshot(
+			entries,
+			declaredLength,
+			declaredLength,
+		);
+	} catch {
+		return workspaceTrashPlanInvalid();
+	}
+	const frozenEntries = arraySnapshot.entries.map(
+		trashEntryRequestFromSnapshot,
+	);
+	try {
+		rejectProxyObject(arraySnapshot.value);
+	} catch {
+		return workspaceTrashPlanInvalid();
+	}
+
+	for (let leftIndex = 0; leftIndex < frozenEntries.length; leftIndex += 1) {
+		const left = frozenEntries[leftIndex]!;
+		const leftSegments = workspaceRelativePathSegments(left.relativePath);
+		if (leftSegments === undefined || leftSegments.length === 0) {
+			return workspaceTrashPlanInvalid();
+		}
+		for (
+			let rightIndex = leftIndex + 1;
+			rightIndex < frozenEntries.length;
+			rightIndex += 1
+		) {
+			const right = frozenEntries[rightIndex]!;
+			if (left.rootId !== right.rootId) {
+				continue;
+			}
+			const rightSegments = workspaceRelativePathSegments(right.relativePath);
+			if (rightSegments === undefined || rightSegments.length === 0) {
+				return workspaceTrashPlanInvalid();
+			}
+			const commonLength = Math.min(leftSegments.length, rightSegments.length);
+			if (
+				leftSegments
+					.slice(0, commonLength)
+					.every((segment, index) => rightSegments[index] === segment)
+			) {
+				return workspaceTrashConflict();
+			}
+		}
+	}
+
+	return Object.freeze({ entries: Object.freeze(frozenEntries) });
+}
+
+export function frozenWorkspaceTrashBatchRequest(
+	confirmationId: unknown,
+): Readonly<WorkspaceTrashBatchRequest> {
+	if (!isUuidV4(confirmationId)) {
+		return workspaceTrashPlanInvalid();
+	}
+	return Object.freeze({ confirmationId });
+}
+
+export function frozenWorkspaceCommitTrashEntryRequest(
+	confirmationId: unknown,
+	entryId: unknown,
+	rootId: unknown,
+	relativePath: unknown,
+): Readonly<WorkspaceCommitTrashEntryRequest> {
+	const batch = frozenWorkspaceTrashBatchRequest(confirmationId);
+	if (!isUuidV4(entryId) || entryId === batch.confirmationId) {
+		return workspaceTrashPlanInvalid();
+	}
+	const entry = frozenWorkspaceCreateEntryRequest(rootId, relativePath);
+	return Object.freeze({
+		confirmationId: batch.confirmationId,
+		entryId,
+		rootId: entry.rootId,
+		relativePath: entry.relativePath,
+	});
+}
+
 function compareUtf8(left: Uint8Array, right: Uint8Array): number {
 	const length = Math.min(left.byteLength, right.byteLength);
 	for (let index = 0; index < length; index += 1) {
@@ -1306,12 +1473,14 @@ export function decodeWorkspaceCapabilities(
 				"renameNoReplace",
 				"copyMove",
 				"delete",
+				"trash",
 				"versionedWrite",
 			]) ||
 			typeof snapshot.create !== "boolean" ||
 			typeof snapshot.renameNoReplace !== "boolean" ||
 			typeof snapshot.copyMove !== "boolean" ||
 			typeof snapshot.delete !== "boolean" ||
+			typeof snapshot.trash !== "boolean" ||
 			typeof snapshot.versionedWrite !== "boolean"
 		) {
 			return violation();
@@ -1323,6 +1492,7 @@ export function decodeWorkspaceCapabilities(
 			renameNoReplace: snapshot.renameNoReplace,
 			copyMove: snapshot.copyMove,
 			delete: snapshot.delete,
+			trash: snapshot.trash,
 			versionedWrite: snapshot.versionedWrite,
 		});
 	});
@@ -2161,6 +2331,115 @@ export function decodeWorkspaceDeleteResult(
 	});
 }
 
+function isWorkspaceTrashEntryKind(
+	value: unknown,
+): value is WorkspaceTrashEntryKind {
+	return (
+		typeof value === "string" &&
+		WORKSPACE_TRASH_ENTRY_KINDS.has(value as WorkspaceTrashEntryKind)
+	);
+}
+
+function isWorkspaceTrashIncompleteReason(
+	value: unknown,
+): value is WorkspaceTrashIncompleteReason {
+	return (
+		typeof value === "string" &&
+		WORKSPACE_TRASH_INCOMPLETE_REASONS.has(
+			value as WorkspaceTrashIncompleteReason,
+		)
+	);
+}
+
+export function decodeWorkspaceTrashBatchPlan(
+	value: unknown,
+	request: WorkspacePrepareTrashRequest,
+): WorkspaceTrashBatchPlan {
+	return sanitizedDecode(() => {
+		const requestSnapshot = ownPlainDataSnapshot(request);
+		if (!hasExactKeys(requestSnapshot, ["entries"])) {
+			return violation();
+		}
+		const frozenRequest = frozenWorkspacePrepareTrashRequest(
+			requestSnapshot.entries,
+		);
+		rejectProxyObject(request as object);
+
+		const snapshot = ownPlainDataSnapshot(value);
+		if (
+			!hasExactKeys(snapshot, ["confirmationId", "entries"]) ||
+			!isUuidV4(snapshot.confirmationId)
+		) {
+			return violation();
+		}
+		const entriesSnapshot = ownArrayDataSnapshot(
+			snapshot.entries,
+			frozenRequest.entries.length,
+			frozenRequest.entries.length,
+		);
+		const seenIds = new Set<string>([snapshot.confirmationId]);
+		const entries = entriesSnapshot.entries.map(
+			(candidate): WorkspaceTrashBatchPlanEntry => {
+				const entry = ownPlainDataSnapshot(candidate);
+				if (
+					!hasExactKeys(entry, ["entryId", "kind"]) ||
+					!isUuidV4(entry.entryId) ||
+					seenIds.has(entry.entryId) ||
+					!isWorkspaceTrashEntryKind(entry.kind)
+				) {
+					return violation();
+				}
+				seenIds.add(entry.entryId);
+				rejectProxyObject(candidate as object);
+				return Object.freeze({
+					entryId: entry.entryId,
+					kind: entry.kind,
+				});
+			},
+		);
+		rejectProxyObject(entriesSnapshot.value);
+		rejectProxyObject(value as object);
+		return Object.freeze({
+			confirmationId: snapshot.confirmationId,
+			entries: Object.freeze(entries),
+		});
+	});
+}
+
+export function decodeWorkspaceTrashResult(
+	value: unknown,
+): WorkspaceTrashResult {
+	return sanitizedDecode(() => {
+		const snapshot = ownPlainDataSnapshot(value);
+		if (snapshot.status === "trashed") {
+			if (!hasExactKeys(snapshot, ["status"])) {
+				return violation();
+			}
+			rejectProxyObject(value as object);
+			return Object.freeze({ status: snapshot.status });
+		}
+		if (snapshot.status === "outcomeUnknown") {
+			if (!hasExactKeys(snapshot, ["status"])) {
+				return violation();
+			}
+			rejectProxyObject(value as object);
+			return Object.freeze({ status: snapshot.status });
+		}
+		if (
+			snapshot.status !== "entryRetained" ||
+			!hasExactKeys(snapshot, ["status", "reason"]) ||
+			!isWorkspaceTrashIncompleteReason(snapshot.reason)
+		) {
+			return violation();
+		}
+		rejectProxyObject(value as object);
+		return Object.freeze({
+			status: snapshot.status,
+			reason: snapshot.reason,
+		});
+	});
+}
+
 export function frozenWorkspaceSnapshot(
 	workspaceId: string,
 	revision: number,
@@ -2272,4 +2551,17 @@ export function frozenWorkspaceDeleteResult(
 	result: WorkspaceDeleteResult,
 ): WorkspaceDeleteResult {
 	return decodeWorkspaceDeleteResult(result);
+}
+
+export function frozenWorkspaceTrashBatchPlan(
+	plan: WorkspaceTrashBatchPlan,
+	request: WorkspacePrepareTrashRequest,
+): WorkspaceTrashBatchPlan {
+	return decodeWorkspaceTrashBatchPlan(plan, request);
+}
+
+export function frozenWorkspaceTrashResult(
+	result: WorkspaceTrashResult,
+): WorkspaceTrashResult {
+	return decodeWorkspaceTrashResult(result);
 }

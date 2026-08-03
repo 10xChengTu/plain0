@@ -32,6 +32,7 @@ pub struct WorkspaceCapabilities {
     rename_no_replace: bool,
     copy_move: bool,
     delete: bool,
+    trash: bool,
     versioned_write: bool,
 }
 
@@ -45,6 +46,7 @@ impl WorkspaceCapabilities {
             rename_no_replace: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
             copy_move: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
             delete: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
+            trash: ::core::cfg!(target_os = "macos"),
             versioned_write: HAS_EXCLUSIVE_NAMESPACE_MUTATIONS,
         }
     }

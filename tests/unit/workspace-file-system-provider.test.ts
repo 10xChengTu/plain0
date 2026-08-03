@@ -49,6 +49,7 @@ const supportedCapabilities: WorkspaceCapabilities = Object.freeze({
 	renameNoReplace: true,
 	copyMove: true,
 	delete: true,
+	trash: true,
 	versionedWrite: true,
 });
 
@@ -204,6 +205,7 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 				renameNoReplace: true,
 				copyMove: true,
 				delete: true,
+				trash: true,
 				versionedWrite: true,
 			};
 		},
@@ -266,6 +268,14 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 			throw new Error("unused");
 		},
 		async workspaceCommitDeleteEntry() {
+			throw new Error("unused");
+		},
+		async workspacePrepareTrash() {
+			throw new Error("unused");
+		},
+		async workspaceCancelTrash() {},
+		async workspaceBeginTrash() {},
+		async workspaceCommitTrashEntry() {
 			throw new Error("unused");
 		},
 		async workspaceStat() {
@@ -584,6 +594,7 @@ describe("Plain workspace file system provider", () => {
 				renameNoReplace: (mask & 2) !== 0,
 				copyMove: (mask & 4) !== 0,
 				delete: (mask & 8) !== 0,
+				trash: true,
 				versionedWrite: (mask & 16) !== 0,
 			});
 			const provider = createPlainWorkspaceFileSystemProvider(
@@ -681,9 +692,13 @@ describe("Plain workspace file system provider", () => {
 	});
 
 	it("keeps the private mutation seam disabled when any platform capability is false", async () => {
-		for (const capability of Object.keys(
-			supportedCapabilities,
-		) as (keyof WorkspaceCapabilities)[]) {
+		for (const capability of [
+			"create",
+			"renameNoReplace",
+			"copyMove",
+			"delete",
+			"versionedWrite",
+		] as const) {
 			const write = vi.fn();
 			const publish = vi.fn();
 			const createFile = vi.fn();
@@ -2594,6 +2609,7 @@ describe("Plain workspace file system provider", () => {
 			renameNoReplace: false,
 			copyMove: false,
 			delete: false,
+			trash: false,
 			versionedWrite: false,
 		});
 

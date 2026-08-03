@@ -42,6 +42,8 @@ import {
 	decodeWorkspaceEntryStat,
 	decodeWorkspaceDeleteBatchPlan,
 	decodeWorkspaceDeleteResult,
+	decodeWorkspaceTrashBatchPlan,
+	decodeWorkspaceTrashResult,
 	decodeWorkspaceReadFile,
 	decodeWorkspaceWritePrepublicationError,
 	decodeWorkspaceWriteResult,
@@ -61,12 +63,15 @@ import {
 	encodeWorkspacePublishFileRequest,
 	frozenWorkspaceCopyRequest,
 	frozenWorkspaceCommitDeleteEntryRequest,
+	frozenWorkspaceCommitTrashEntryRequest,
 	frozenWorkspaceCreateEntryRequest,
 	frozenWorkspaceDeleteBatchRequest,
+	frozenWorkspaceTrashBatchRequest,
 	frozenWorkspaceEntryRequest,
 	frozenWorkspaceMoveRequest,
 	frozenWorkspacePickSaveTargetRequest,
 	frozenWorkspacePrepareDeleteRequest,
+	frozenWorkspacePrepareTrashRequest,
 	frozenWorkspaceRenameRequest,
 	frozenWorkspaceRecentRequest,
 	frozenWorkspaceWatchSyncRequest,
@@ -421,6 +426,41 @@ export function createNativeBridge(): PlainBridge {
 			);
 			return decodeWorkspaceDeleteResult(
 				await invoke<unknown>("workspace_commit_delete_entry", { request }),
+			);
+		},
+		workspacePrepareTrash: async (entries) => {
+			const request = frozenWorkspacePrepareTrashRequest(entries);
+			return decodeWorkspaceTrashBatchPlan(
+				await invoke<unknown>("workspace_prepare_trash", { request }),
+				request,
+			);
+		},
+		workspaceCancelTrash: async (confirmationId) => {
+			const request = frozenWorkspaceTrashBatchRequest(confirmationId);
+			decodeWorkspaceVoid(
+				await invoke<unknown>("workspace_cancel_trash", { request }),
+			);
+		},
+		workspaceBeginTrash: async (confirmationId) => {
+			const request = frozenWorkspaceTrashBatchRequest(confirmationId);
+			decodeWorkspaceVoid(
+				await invoke<unknown>("workspace_begin_trash", { request }),
+			);
+		},
+		workspaceCommitTrashEntry: async (
+			confirmationId,
+			entryId,
+			rootId,
+			relativePath,
+		) => {
+			const request = frozenWorkspaceCommitTrashEntryRequest(
+				confirmationId,
+				entryId,
+				rootId,
+				relativePath,
+			);
+			return decodeWorkspaceTrashResult(
+				await invoke<unknown>("workspace_commit_trash_entry", { request }),
 			);
 		},
 		workspaceStat: async (rootId, relativePath) => {

@@ -8,6 +8,7 @@ const supportedCapabilities = Object.freeze({
 	renameNoReplace: true,
 	copyMove: true,
 	delete: true,
+	trash: true,
 	versionedWrite: true,
 });
 
@@ -20,6 +21,7 @@ describe("workspace capability contract", () => {
 				renameNoReplace: false,
 				copyMove: false,
 				delete: false,
+				trash: false,
 				versionedWrite: false,
 			},
 		]) {
