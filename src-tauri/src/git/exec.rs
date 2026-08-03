@@ -35,6 +35,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt as _;
+
 use crate::error::CommandError;
 
 use super::{
@@ -390,6 +393,7 @@ fn build_git_command(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
     command.env_clear();
+    isolate_process_group(&mut command);
 
     apply_universal_hardening(&mut command);
 
@@ -691,6 +695,7 @@ fn run_config_list_bootstrap(repo_dir: &Path) -> Result<Vec<u8>, CommandError> {
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
     command.env_clear();
+    isolate_process_group(&mut command);
 
     apply_universal_hardening(&mut command);
     for name in ["PATH", "HOME"] {
@@ -977,8 +982,51 @@ fn wait_with_limits(
 }
 
 fn kill_and_reap(child: &mut Child) {
-    let _ = child.kill();
+    kill_process_tree(child);
     let _ = child.wait();
+}
+
+/// Places every spawned Git invocation in its own process group on Unix so
+/// timeout/cancellation/output-cap enforcement can terminate Git together
+/// with hooks, filters, SSH helpers and other descendants it has started.
+/// Killing only [`Child`] itself is insufficient: a running hook is then
+/// reparented and keeps executing after Plain has already reported the Git
+/// operation cancelled.
+#[cfg(unix)]
+fn isolate_process_group(command: &mut Command) {
+    command.process_group(0);
+}
+
+/// Windows does not expose Unix process groups through `std::process`.
+/// Plain's Windows packaging/E2E is not yet in scope, so the existing
+/// direct-child fallback remains explicit rather than pretending it has
+/// equivalent tree-kill semantics.
+#[cfg(not(unix))]
+fn isolate_process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn kill_process_tree(child: &mut Child) {
+    let Ok(process_group_id) = libc::pid_t::try_from(child.id()) else {
+        let _ = child.kill();
+        return;
+    };
+    if process_group_id <= 0 {
+        let _ = child.kill();
+        return;
+    }
+
+    // `isolate_process_group` makes the child's PID its PGID. A negative
+    // `kill(2)` target addresses every process still in that group. Fall
+    // back to the direct child if the group disappeared in the small race
+    // between `try_wait` and this call.
+    if unsafe { libc::kill(-process_group_id, libc::SIGKILL) } != 0 {
+        let _ = child.kill();
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_tree(child: &mut Child) {
+    let _ = child.kill();
 }
 
 /// Reads `source` to completion on a dedicated thread, collecting up to

@@ -605,6 +605,13 @@ mod hostile_fixtures {
         std::fs::set_permissions(path, perms).expect("chmod script executable");
     }
 
+    fn unix_process_exists(pid: libc::pid_t) -> bool {
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+
     /// A marker script that exits non-zero: fine for hooks git treats as
     /// best-effort (fsmonitor, `post-index-change`) — git proceeds normally
     /// either way — but *not* suitable as `diff.external`/textconv, where a
@@ -1376,7 +1383,15 @@ mod hostile_fixtures {
         let repo = init_repo();
         let scripts = TempDir::new().expect("tempdir");
         let script_path = scripts.path().join("slow-diff-external.sh");
-        write_executable_script(&script_path, "sleep 5\necho slow-diff-output");
+        let process_ids_path = scripts.path().join("slow-diff-process-ids");
+        write_executable_script(
+            &script_path,
+            &format!(
+                "sleep 5 &\nsleep_pid=$!\nprintf '%s %s\\n' \"$$\" \"$sleep_pid\" > '{}'\n\
+                 wait \"$sleep_pid\"\necho slow-diff-output",
+                process_ids_path.display()
+            ),
+        );
 
         std::fs::write(repo.path().join("a.txt"), "one\n").unwrap();
         raw_git_ok(repo.path(), &["add", "a.txt"]);
@@ -1389,8 +1404,7 @@ mod hostile_fixtures {
 
         let repo_path = repo.path().to_path_buf();
         let cancel = AtomicBool::new(false);
-        let start = std::time::Instant::now();
-        std::thread::scope(|scope| {
+        let (descendant_process_ids, cancellation_elapsed) = std::thread::scope(|scope| {
             let handle = scope.spawn(|| {
                 run_git_with_limits_for_test(
                     &repo_path,
@@ -1401,36 +1415,53 @@ mod hostile_fixtures {
                     10_000_000,
                 )
             });
-            std::thread::sleep(Duration::from_millis(200));
+            let marker_wait_start = std::time::Instant::now();
+            while !process_ids_path.exists()
+                && marker_wait_start.elapsed() < Duration::from_secs(15)
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let descendant_process_ids: Vec<libc::pid_t> =
+                std::fs::read_to_string(&process_ids_path)
+                    .expect("the hostile external diff and its sleep child both started")
+                    .split_whitespace()
+                    .map(|value| value.parse().expect("fixture records numeric process IDs"))
+                    .collect();
+            assert_eq!(
+                descendant_process_ids.len(),
+                2,
+                "fixture records the external-diff shell and its sleep child"
+            );
+            let cancellation_start = std::time::Instant::now();
             cancel.store(true, Ordering::SeqCst);
             let result = handle.join().expect("worker thread does not panic");
+            let cancellation_elapsed = cancellation_start.elapsed();
             let error = result.expect_err("a cancelled invocation must be an error");
             assert_eq!(error.code(), "GIT_EXEC_CANCELLED");
+            (descendant_process_ids, cancellation_elapsed)
         });
-        // The load-bearing regression assertion for the `wait_with_limits`
-        // reader-join fix (see that function's own doc comment): the
-        // `diff.external` script here is a *grandchild* of the killed `git`
-        // process (git execs it directly, its stdout wired straight to the
-        // same piped fd our reader thread reads) and keeps sleeping for
-        // ~4.8s more of its own `sleep 5` after `git` itself is killed and
-        // reaped on cancellation ~200ms in. Before this fix, `wait_with_limits`'s
-        // final `stdout_handle.join()`/`stderr_handle.join()` blocked on that
-        // orphaned grandchild's own pipe close, and this exact test measured
-        // ~5.56s real wall-clock (via `cargo test ... -- --nocapture`) despite
-        // "cancelling" almost instantly. 4 seconds is a generous margin over
-        // the ~200ms cancel delay plus [`super::GIT_EXEC_READER_DRAIN_GRACE`]
-        // (500ms) plus scheduling slack observed under the full parallel
-        // test suite (785+ tests forking subprocesses concurrently pushes
-        // this measurably higher than an isolated single-test run) —
-        // comfortably under the child's remaining ~4.8s sleep, so this
-        // assertion only passes when the reader join is genuinely bounded,
-        // not merely "eventually returns".
-        let elapsed = start.elapsed();
+        // Cancellation must kill Git's whole process group, not only Git's
+        // direct process. Before the process-group fix, both recorded PIDs
+        // survived as reparented processes until `sleep 5` completed — the
+        // exact leak reproduced by the real Tauri pre-merge hook scenario.
+        for pid in descendant_process_ids {
+            let process_wait_start = std::time::Instant::now();
+            while unix_process_exists(pid) && process_wait_start.elapsed() < Duration::from_secs(2)
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                !unix_process_exists(pid),
+                "cancel must terminate descendant process {pid}, not orphan it"
+            );
+        }
+
+        // The result must also return promptly instead of waiting for the
+        // external helper's original five-second sleep duration.
         assert!(
-            elapsed < Duration::from_secs(4),
-            "cancellation must return within a small bounded window even though the orphaned \
-             diff.external grandchild keeps the output pipe open for its own remaining ~4.8s \
-             sleep — took {elapsed:?}"
+            cancellation_elapsed < Duration::from_secs(10),
+            "cancellation must terminate and reap the process group within a small bounded \
+             window after the request is issued — took {cancellation_elapsed:?}"
         );
     }
 
