@@ -22,6 +22,8 @@ import {
 	validateWorkspaceCopyCommandRegistration,
 	validateWorkspaceDeleteBoundary,
 	validateWorkspaceDeleteCommandRegistration,
+	validateWorkspaceTrashBoundary,
+	validateWorkspaceTrashCommandRegistration,
 	validateWorkspaceDeleteFailureBrowserFixture,
 	validateWorkspaceDeleteTypeScriptBoundary,
 	validateWorkspaceMoveBoundary,
@@ -5703,6 +5705,194 @@ describe("Plain confirmed-delete Harness contracts", () => {
 			);
 			expect(validateWorkspaceDeleteBoundary(hostile)).toContain(failure);
 		}
+	});
+});
+
+const workspaceTrashRustPaths = [
+	"src-tauri/src/workspace/trash/mod.rs",
+	"src-tauri/src/workspace/trash/macos.rs",
+	"src-tauri/src/workspace/delete.rs",
+	"src-tauri/src/workspace/service.rs",
+	"src-tauri/src/workspace/dto.rs",
+	"src-tauri/src/workspace/mod.rs",
+	"src-tauri/src/workspace/commands.rs",
+	"src-tauri/src/lib.rs",
+];
+const workspaceTrashRustSources = workspaceTrashRustPaths.map(
+	(relativePath) => ({
+		relativePath,
+		source: readFileSync(
+			new URL(`../../${relativePath}`, import.meta.url),
+			"utf8",
+		),
+	}),
+);
+
+function replaceWorkspaceTrashRustSource(relativePath, from, to) {
+	return mutateWorkspaceSource(
+		workspaceTrashRustSources,
+		relativePath,
+		(source) => {
+			if (!source.includes(from)) {
+				throw new Error(
+					`${relativePath} Trash mutation fixture no longer matches production`,
+				);
+			}
+			return source.replace(from, to);
+		},
+	);
+}
+
+describe("Plain F170 Rust-owned system Trash boundary", () => {
+	it("accepts the independent four-command receipt and macOS Foundation route", () => {
+		expect(
+			validateWorkspaceTrashCommandRegistration(workspaceTrashRustSources),
+		).toEqual([]);
+		expect(validateWorkspaceTrashBoundary(workspaceTrashRustSources)).toEqual(
+			[],
+		);
+	});
+
+	it("rejects missing command attributes and permanent-delete DTO substitution", () => {
+		for (const command of [
+			"workspace_prepare_trash",
+			"workspace_cancel_trash",
+			"workspace_begin_trash",
+			"workspace_commit_trash_entry",
+		]) {
+			const hostile = replaceWorkspaceTrashRustSource(
+				"src-tauri/src/workspace/commands.rs",
+				`#[tauri::command]\npub(crate) async fn ${command}`,
+				`pub(crate) async fn ${command}`,
+			);
+			expect(validateWorkspaceTrashCommandRegistration(hostile)).toContain(
+				`workspace/commands.rs must define exactly one audited ${command} Tauri command`,
+			);
+		}
+		const mixed = replaceWorkspaceTrashRustSource(
+			"src-tauri/src/workspace/commands.rs",
+			"request: WorkspacePrepareTrashRequest",
+			"request: WorkspacePrepareDeleteRequest",
+		);
+		expect(validateWorkspaceTrashCommandRegistration(mixed)).toContain(
+			"workspace_prepare_trash must accept request: WorkspacePrepareTrashRequest and return Result<WorkspaceTrashBatchPlan, CommandError>",
+		);
+	});
+
+	it("rejects serializable receipts, permanent removal, shell fallback and extra Foundation calls", () => {
+		const serializable = replaceWorkspaceTrashRustSource(
+			"src-tauri/src/workspace/trash/mod.rs",
+			"pub(super) struct TrashBatchReceipt {",
+			"#[derive(Clone, Serialize)]\npub(super) struct TrashBatchReceipt {",
+		);
+		expect(validateWorkspaceTrashBoundary(serializable)).toContain(
+			"TrashBatchReceipt must have one non-Serde non-Clone Rust-only definition in workspace/trash/mod.rs",
+		);
+
+		for (const injection of [
+			'fn fallback() { std::fs::remove_file("entry"); }',
+			'fn fallback(parent: &Dir) { parent.remove_dir("entry"); }',
+		]) {
+			const hostile = replaceWorkspaceTrashRustSource(
+				"src-tauri/src/workspace/trash/mod.rs",
+				"#[cfg(test)]\nmod tests;",
+				`${injection}\n#[cfg(test)]\nmod tests;`,
+			);
+			expect(validateWorkspaceTrashBoundary(hostile)).toContain(
+				"system Trash receipt and adapter must not call or embed any permanent-delete surface",
+			);
+		}
+
+		const shell = replaceWorkspaceTrashRustSource(
+			"src-tauri/src/workspace/trash/macos.rs",
+			"pub(in crate::workspace) struct MacOsSystemTrash;",
+			"use std::process::Command;\npub(in crate::workspace) struct MacOsSystemTrash;",
+		);
+		expect(validateWorkspaceTrashBoundary(shell)).toContain(
+			"macOS Trash adapter must use one direct Foundation trashItemAtURL call and no shell or delete fallback",
+		);
+
+		const duplicateFoundation = replaceWorkspaceTrashRustSource(
+			"src-tauri/src/workspace/trash/macos.rs",
+			"let manager = NSFileManager::defaultManager();",
+			"let manager = NSFileManager::defaultManager();\nlet _second = NSFileManager::defaultManager();",
+		);
+		expect(validateWorkspaceTrashBoundary(duplicateFoundation)).toContain(
+			"macOS Trash adapter must use one direct Foundation trashItemAtURL call and no shell or delete fallback",
+		);
+	});
+
+	it("rejects missing ambient identity preflight and collapsed uncertain outcomes", () => {
+		const missingTargetIdentity = replaceWorkspaceTrashRustSource(
+			"src-tauri/src/workspace/trash/macos.rs",
+			"std::fs::symlink_metadata(&request.target_path)",
+			"std::fs::metadata(&request.target_path)",
+		);
+		expect(validateWorkspaceTrashBoundary(missingTargetIdentity)).toContain(
+			"macOS Trash must recheck private canonical root and final pathname identities immediately before Foundation",
+		);
+
+		const collapsedUnknown = replaceWorkspaceTrashRustSource(
+			"src-tauri/src/workspace/trash/mod.rs",
+			"Ok(_) | Err(_) => WorkspaceTrashResult::OutcomeUnknown",
+			"Ok(_) | Err(_) => retained(TrashFailure::TrashFailed)",
+		);
+		expect(validateWorkspaceTrashBoundary(collapsedUnknown)).toContain(
+			"Trash commit must distinguish pre-attempt retention from post-attempt retained or outcomeUnknown",
+		);
+	});
+
+	it("rejects skipped begin revalidation, permanent fallback and native paths in wire DTOs", () => {
+		const noRevalidation = mutateWorkspaceSource(
+			workspaceTrashRustSources,
+			"src-tauri/src/workspace/service.rs",
+			(source) => {
+				const marker = "receipt.revalidate_all(&leases)?;";
+				const index = source.lastIndexOf(marker);
+				if (index < 0) {
+					throw new Error(
+						"Trash revalidation mutation no longer matches production",
+					);
+				}
+				return source.slice(0, index) + source.slice(index + marker.length);
+			},
+		);
+		expect(validateWorkspaceTrashBoundary(noRevalidation)).toContain(
+			"WorkspaceService Trash phases must share the mutation gate, revalidate before begin, advance only trashed entries, rescan, and never fall back",
+		);
+
+		const fallback = replaceWorkspaceTrashRustSource(
+			"src-tauri/src/workspace/service.rs",
+			"let result = receipt.commit_next_with_platform(&lease, platform);",
+			"let result = receipt.commit_next_with_platform(&lease, platform);\nlet _ = self.commit_delete_entry;",
+		);
+		expect(validateWorkspaceTrashBoundary(fallback)).toContain(
+			"WorkspaceService Trash phases must share the mutation gate, revalidate before begin, advance only trashed entries, rescan, and never fall back",
+		);
+
+		const nativePath = replaceWorkspaceTrashRustSource(
+			"src-tauri/src/workspace/dto.rs",
+			"pub struct WorkspacePrepareTrashEntryRequest {\n    root_id: RootId,",
+			"pub struct WorkspacePrepareTrashEntryRequest {\n    native_path: PathBuf,\n    root_id: RootId,",
+		);
+		expect(validateWorkspaceTrashBoundary(nativePath)).toContain(
+			"Trash DTOs must be a strict path-free protocol distinct from permanent delete",
+		);
+	});
+
+	it("keeps permanent delete commit isolated from the system Trash result", () => {
+		const hostile = mutateWorkspaceSource(
+			workspaceTrashRustSources,
+			"src-tauri/src/workspace/service.rs",
+			(source) =>
+				source.replace(
+					"let result = receipt.commit_next(&lease);",
+					"let result = receipt.commit_next(&lease);\nlet _fallback: WorkspaceTrashResult = WorkspaceTrashResult::OutcomeUnknown;",
+				),
+		);
+		expect(validateWorkspaceDeleteBoundary(hostile)).toContain(
+			"permanent delete commit must remain isolated from every system Trash adapter and result",
+		);
 	});
 });
 

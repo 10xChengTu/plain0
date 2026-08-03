@@ -54,6 +54,8 @@ import {
 	validateWorkspaceCopyCommandRegistration,
 	validateWorkspaceDeleteBoundary,
 	validateWorkspaceDeleteCommandRegistration,
+	validateWorkspaceTrashBoundary,
+	validateWorkspaceTrashCommandRegistration,
 	validateWorkspaceDeleteFailureBrowserFixture,
 	validateWorkspaceDeleteTypeScriptBoundary,
 	validateWorkspaceMoveBoundary,
@@ -840,6 +842,12 @@ for (const failure of validateWorkspaceDeleteCommandRegistration(rustSources)) {
 for (const failure of validateWorkspaceDeleteBoundary(rustSources)) {
 	fail(failure);
 }
+for (const failure of validateWorkspaceTrashCommandRegistration(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateWorkspaceTrashBoundary(rustSources)) {
+	fail(failure);
+}
 for (const failure of validateSearchCommandRegistration(rustSources)) {
 	fail(failure);
 }
@@ -955,6 +963,6 @@ if (failures.length > 0) {
 	process.exitCode = 1;
 } else {
 	console.log(
-		`architecture: ${appFiles.length} app sources, ${rustSources.length} Rust sources, ${allowedDependencies.size} pinned runtime dependencies, audited DOM dialogs, bounded directory/file/symlink copy, cross-root move, confirmed-delete, PLW1 versioned-write and workspace-capability boundaries, minimum Tauri capability`,
+		`architecture: ${appFiles.length} app sources, ${rustSources.length} Rust sources, ${allowedDependencies.size} pinned runtime dependencies, audited DOM dialogs, bounded directory/file/symlink copy, cross-root move, confirmed-delete, system-Trash, PLW1 versioned-write and workspace-capability boundaries, minimum Tauri capability`,
 	);
 }

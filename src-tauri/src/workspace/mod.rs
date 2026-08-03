@@ -28,6 +28,8 @@ pub mod picker;
 pub(crate) mod publish_frame;
 pub(crate) mod reader;
 pub mod service;
+#[cfg(target_os = "macos")]
+pub(crate) mod trash;
 pub(crate) mod version;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod versioned_writer;
@@ -240,6 +242,11 @@ pub struct ResolvedWorkspacePath<'scope> {
 pub(crate) struct WorkspaceRootLease {
     root_id: RootId,
     directory: Dir,
+    /// Canonical ambient pathname retained strictly for platform APIs that
+    /// cannot operate on directory handles (currently macOS system Trash).
+    /// It never crosses IPC and ordinary workspace I/O must keep using
+    /// `directory` capability-relative operations.
+    canonical_path: PathBuf,
 }
 
 impl fmt::Debug for WorkspaceRootLease {
@@ -258,6 +265,11 @@ impl WorkspaceRootLease {
 
     pub fn directory(&self) -> &Dir {
         &self.directory
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn platform_root_path(&self) -> &Path {
+        &self.canonical_path
     }
 }
 
@@ -633,7 +645,11 @@ impl WorkspaceScope {
             .directory
             .try_clone()
             .map_err(|_| root_capability_clone_failed())?;
-        Ok(WorkspaceRootLease { root_id, directory })
+        Ok(WorkspaceRootLease {
+            root_id,
+            directory,
+            canonical_path: root.canonical_path.clone(),
+        })
     }
 
     pub(crate) fn contains_root(&self, root_id: RootId) -> bool {
@@ -699,7 +715,11 @@ impl PreparedWorkspaceRoot {
             .directory
             .try_clone()
             .map_err(|_| root_capability_clone_failed())?;
-        Ok(WorkspaceRootLease { root_id, directory })
+        Ok(WorkspaceRootLease {
+            root_id,
+            directory,
+            canonical_path: self.watch_path.clone(),
+        })
     }
 }
 

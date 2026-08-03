@@ -13,10 +13,14 @@ use crate::workspace::dto::{
     WorkspaceDeleteIncompleteReason, WorkspaceDeleteResult, WorkspaceEntryKind,
     WorkspacePickRootsMode, WorkspacePickRootsStatus, WorkspaceRestoreStatus,
 };
+#[cfg(target_os = "macos")]
+use crate::workspace::dto::{WorkspaceTrashIncompleteReason, WorkspaceTrashResult};
 use crate::workspace::picker::{
     DirectoryPicker, DirectoryPickerFuture, DirectoryPickerResult, FilePicker, FilePickerFuture,
     FilePickerResult, SaveFilePicker, SaveFilePickerFuture, SaveFilePickerResult,
 };
+#[cfg(target_os = "macos")]
+use crate::workspace::trash::{PlatformTrash, PlatformTrashOutcome, PlatformTrashRequest};
 use crate::workspace::{RootId, MAX_WORKSPACE_ROOTS};
 
 enum FakeOutcome {
@@ -2344,6 +2348,217 @@ fn blocking_reader_discards_a_result_after_its_window_closes() {
         pending_result.unwrap_err().code(),
         "WORKSPACE_WINDOW_CLOSED"
     );
+}
+
+#[cfg(target_os = "macos")]
+struct FakeSystemTrash {
+    outcomes: VecDeque<PlatformTrashOutcome>,
+    calls: usize,
+}
+
+#[cfg(target_os = "macos")]
+impl FakeSystemTrash {
+    fn new(outcomes: impl IntoIterator<Item = PlatformTrashOutcome>) -> Self {
+        Self {
+            outcomes: outcomes.into_iter().collect(),
+            calls: 0,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl PlatformTrash for FakeSystemTrash {
+    fn move_to_trash(&mut self, _request: &PlatformTrashRequest) -> PlatformTrashOutcome {
+        self.calls += 1;
+        self.outcomes.pop_front().expect("fake Trash outcome")
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn trash_and_permanent_delete_receipts_are_distinct_and_mutually_exclusive_per_window() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::write(root.join("entry"), b"plain").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+
+    let trash =
+        block_on(service.prepare_trash("main", vec![(root_id, relative("entry"))])).unwrap();
+    assert_eq!(
+        block_on(service.prepare_delete("main", vec![(root_id, relative("entry"), false)],))
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_CONFLICT"
+    );
+    block_on(service.cancel_trash("main", trash.confirmation_id())).unwrap();
+
+    let permanent =
+        block_on(service.prepare_delete("main", vec![(root_id, relative("entry"), false)]))
+            .unwrap();
+    assert_eq!(
+        block_on(service.prepare_trash("main", vec![(root_id, relative("entry"))]))
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_CONFLICT"
+    );
+    block_on(service.cancel_delete("main", permanent.confirmation_id())).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn trash_begin_revalidates_every_entry_before_any_platform_attempt() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::write(root.join("first"), b"first").unwrap();
+    std::fs::write(root.join("second"), b"second").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let plan = block_on(service.prepare_trash(
+        "main",
+        vec![(root_id, relative("first")), (root_id, relative("second"))],
+    ))
+    .unwrap();
+    std::fs::write(root.join("second"), b"changed after prepare").unwrap();
+
+    assert_eq!(
+        block_on(service.begin_trash("main", plan.confirmation_id()))
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_TRASH_BATCH_CHANGED"
+    );
+    assert_eq!(std::fs::read(root.join("first")).unwrap(), b"first");
+    assert_eq!(
+        block_on(service.begin_trash("main", plan.confirmation_id()))
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_TRASH_PLAN_INVALID"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn trash_commit_is_ordered_one_shot_and_stops_after_first_non_success() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::write(root.join("first"), b"first").unwrap();
+    std::fs::write(root.join("second"), b"second").unwrap();
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let plan = block_on(service.prepare_trash(
+        "main",
+        vec![(root_id, relative("first")), (root_id, relative("second"))],
+    ))
+    .unwrap();
+    block_on(service.begin_trash("main", plan.confirmation_id())).unwrap();
+    let workspace = service.scope_for_window("main").unwrap();
+    let mut platform = FakeSystemTrash::new([
+        PlatformTrashOutcome::Trashed,
+        PlatformTrashOutcome::FailedBeforeAttempt,
+    ]);
+
+    assert_eq!(
+        workspace
+            .commit_trash_entry_with_platform(
+                plan.confirmation_id(),
+                plan.entries()[0].entry_id(),
+                root_id,
+                relative("first"),
+                &mut platform,
+            )
+            .unwrap(),
+        WorkspaceTrashResult::Trashed
+    );
+    assert_eq!(
+        workspace
+            .commit_trash_entry_with_platform(
+                plan.confirmation_id(),
+                plan.entries()[1].entry_id(),
+                root_id,
+                relative("second"),
+                &mut platform,
+            )
+            .unwrap(),
+        WorkspaceTrashResult::EntryRetained {
+            reason: WorkspaceTrashIncompleteReason::TrashFailed,
+        }
+    );
+    assert_eq!(platform.calls, 2);
+    assert_eq!(
+        workspace
+            .commit_trash_entry_with_platform(
+                plan.confirmation_id(),
+                plan.entries()[1].entry_id(),
+                root_id,
+                relative("second"),
+                &mut platform,
+            )
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_TRASH_PLAN_INVALID"
+    );
+    assert_eq!(std::fs::read(root.join("first")).unwrap(), b"first");
+    assert_eq!(std::fs::read(root.join("second")).unwrap(), b"second");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn root_lifecycle_and_exact_deadline_invalidate_trash_without_touching_files() {
+    let temp = TempDir::new().unwrap();
+    let root = create_directory(&temp, "root");
+    std::fs::write(root.join("entry"), b"plain").unwrap();
+    let now = Arc::new(Mutex::new(Instant::now()));
+    let clock_now = Arc::clone(&now);
+    let service = WorkspaceService::with_delete_clock(Arc::new(move || {
+        *clock_now.lock().expect("test clock")
+    }));
+    let selected = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![root.clone()]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+    let root_id = selected.snapshot().roots()[0].root_id();
+    let expired =
+        block_on(service.prepare_trash("main", vec![(root_id, relative("entry"))])).unwrap();
+    let base = *now.lock().unwrap();
+    *now.lock().unwrap() = base + Duration::from_secs(120);
+    assert_eq!(
+        block_on(service.begin_trash("main", expired.confirmation_id()))
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_TRASH_PLAN_INVALID"
+    );
+
+    *now.lock().unwrap() = base;
+    let revoked =
+        block_on(service.prepare_trash("main", vec![(root_id, relative("entry"))])).unwrap();
+    service.remove_root("main", root_id).unwrap();
+    assert_eq!(
+        block_on(service.begin_trash("main", revoked.confirmation_id()))
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_TRASH_PLAN_INVALID"
+    );
+    assert_eq!(std::fs::read(root.join("entry")).unwrap(), b"plain");
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

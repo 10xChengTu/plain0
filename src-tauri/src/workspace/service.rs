@@ -12,12 +12,13 @@ use crate::search::file_search;
 use crate::search::text_search::{self, TextSearchHandle};
 
 use super::dto::{
-    DeleteConfirmationId, DeleteEntryId, WorkspaceDeleteBatchPlan, WorkspaceDeleteResult,
-    WorkspaceEntryStat, WorkspaceMoveResult, WorkspaceOpenFileTarget, WorkspaceOpenFilesResult,
-    WorkspacePickRootsMode, WorkspacePickRootsResult, WorkspacePickRootsStatus,
-    WorkspacePickSaveTargetResult, WorkspaceReadDirectoryResult, WorkspaceRestoreStatus,
-    WorkspaceSaveTarget, WorkspaceSnapshot, WorkspaceWatchPendingRoot, WorkspaceWatchSyncResult,
-    WorkspaceWriteResult,
+    DeleteConfirmationId, DeleteEntryId, TrashConfirmationId, TrashEntryId,
+    WorkspaceDeleteBatchPlan, WorkspaceDeleteResult, WorkspaceEntryStat, WorkspaceMoveResult,
+    WorkspaceOpenFileTarget, WorkspaceOpenFilesResult, WorkspacePickRootsMode,
+    WorkspacePickRootsResult, WorkspacePickRootsStatus, WorkspacePickSaveTargetResult,
+    WorkspaceReadDirectoryResult, WorkspaceRestoreStatus, WorkspaceSaveTarget, WorkspaceSnapshot,
+    WorkspaceTrashBatchPlan, WorkspaceTrashResult, WorkspaceWatchPendingRoot,
+    WorkspaceWatchSyncResult, WorkspaceWriteResult,
 };
 use super::picker::{
     DirectoryPicker, DirectoryPickerResult, FilePicker, FilePickerResult, SaveFilePicker,
@@ -33,6 +34,8 @@ use super::{RootId, WorkspaceId, WorkspaceRootLease, WorkspaceRootsIdentity, Wor
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::delete::{DeleteBatchReceipt, DeleteSelection};
+#[cfg(target_os = "macos")]
+use super::trash::{TrashBatchReceipt, TrashSelection};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const DELETE_BATCH_IDLE_TTL: Duration = Duration::from_secs(120);
@@ -655,6 +658,93 @@ impl WorkspaceService {
         }
     }
 
+    pub async fn prepare_trash(
+        &self,
+        window_label: &str,
+        entries: Vec<(RootId, RelativePath)>,
+    ) -> Result<WorkspaceTrashBatchPlan, CommandError> {
+        #[cfg(target_os = "macos")]
+        {
+            let workspace = self.scope_for_window(window_label)?;
+            tauri::async_runtime::spawn_blocking(move || workspace.prepare_trash(entries))
+                .await
+                .map_err(|_| workspace_trash_failed())?
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (window_label, entries);
+            Err(workspace_trash_unsupported())
+        }
+    }
+
+    pub async fn cancel_trash(
+        &self,
+        window_label: &str,
+        confirmation_id: TrashConfirmationId,
+    ) -> Result<(), CommandError> {
+        #[cfg(target_os = "macos")]
+        {
+            let workspace = self.scope_for_window(window_label)?;
+            tauri::async_runtime::spawn_blocking(move || workspace.cancel_trash(confirmation_id))
+                .await
+                .map_err(|_| workspace_trash_failed())?
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (window_label, confirmation_id);
+            Err(workspace_trash_unsupported())
+        }
+    }
+
+    pub async fn begin_trash(
+        &self,
+        window_label: &str,
+        confirmation_id: TrashConfirmationId,
+    ) -> Result<(), CommandError> {
+        #[cfg(target_os = "macos")]
+        {
+            let workspace = self.scope_for_window(window_label)?;
+            tauri::async_runtime::spawn_blocking(move || workspace.begin_trash(confirmation_id))
+                .await
+                .map_err(|_| workspace_trash_failed())?
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (window_label, confirmation_id);
+            Err(workspace_trash_unsupported())
+        }
+    }
+
+    pub async fn commit_trash_entry(
+        &self,
+        window_label: &str,
+        confirmation_id: TrashConfirmationId,
+        entry_id: TrashEntryId,
+        root_id: RootId,
+        relative_path: RelativePath,
+    ) -> Result<WorkspaceTrashResult, CommandError> {
+        #[cfg(target_os = "macos")]
+        {
+            let workspace = self.scope_for_window(window_label)?;
+            tauri::async_runtime::spawn_blocking(move || {
+                workspace.commit_trash_entry(confirmation_id, entry_id, root_id, relative_path)
+            })
+            .await
+            .map_err(|_| workspace_trash_failed())?
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (
+                window_label,
+                confirmation_id,
+                entry_id,
+                root_id,
+                relative_path,
+            );
+            Err(workspace_trash_unsupported())
+        }
+    }
+
     pub async fn watch_sync(
         &self,
         window_label: &str,
@@ -906,6 +996,8 @@ impl WindowWorkspace {
                 watch_registrations: BTreeMap::new(),
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 active_delete_batch: None,
+                #[cfg(target_os = "macos")]
+                active_trash_batch: None,
                 active_text_search: None,
                 initial_restore_status: WorkspaceRestoreStatus::Pending,
                 closed: false,
@@ -1093,6 +1185,7 @@ impl WindowWorkspace {
             retained
         });
         invalidate_delete_batch(state);
+        invalidate_trash_batch(state);
         invalidate_text_search(state);
         Ok((watcher, revoked))
     }
@@ -1217,6 +1310,7 @@ impl WindowWorkspace {
                     retained
                 });
                 invalidate_delete_batch(&mut state);
+                invalidate_trash_batch(&mut state);
                 invalidate_text_search(&mut state);
                 (
                     WorkspacePickRootsResult::new(
@@ -1346,6 +1440,7 @@ impl WindowWorkspace {
                     })
                     .collect::<Result<Vec<_>, CommandError>>()?;
                 invalidate_delete_batch(&mut state);
+                invalidate_trash_batch(&mut state);
                 invalidate_text_search(&mut state);
                 if state.initial_restore_status == WorkspaceRestoreStatus::Pending {
                     state.initial_restore_status = WorkspaceRestoreStatus::None;
@@ -1448,6 +1543,7 @@ impl WindowWorkspace {
                         .insert(registration.root_id(), registration);
                 }
                 invalidate_delete_batch(&mut state);
+                invalidate_trash_batch(&mut state);
                 invalidate_text_search(&mut state);
                 if state.initial_restore_status == WorkspaceRestoreStatus::Pending {
                     state.initial_restore_status = WorkspaceRestoreStatus::None;
@@ -1636,6 +1732,7 @@ impl WindowWorkspace {
         state.scope.remove(root_id)?;
         let removed_registration = state.watch_registrations.remove(&root_id);
         invalidate_delete_batch(&mut state);
+        invalidate_trash_batch(&mut state);
         invalidate_text_search(&mut state);
         let snapshot = state.scope.snapshot();
         let watcher = lock(&self.watcher)?.clone();
@@ -1662,6 +1759,7 @@ impl WindowWorkspace {
         }
         let revoked = std::mem::take(&mut state.watch_registrations);
         invalidate_delete_batch(&mut state);
+        invalidate_trash_batch(&mut state);
         invalidate_text_search(&mut state);
         let snapshot = state.scope.snapshot();
         let watcher = lock(&self.watcher)?.clone();
@@ -1708,7 +1806,8 @@ impl WindowWorkspace {
             let mut state = lock(&self.state)?;
             ensure_open(&state)?;
             discard_expired_delete_batch(&mut state, (self.delete_clock)());
-            if state.active_delete_batch.is_some() {
+            discard_expired_trash_batch(&mut state, (self.delete_clock)());
+            if mutation_receipt_active(&state) {
                 return Err(workspace_delete_conflict());
             }
             let selected = entries
@@ -1729,7 +1828,7 @@ impl WindowWorkspace {
         receipt.refresh_deadline(delete_deadline((self.delete_clock)())?);
         let mut state = lock(&self.state)?;
         ensure_open(&state)?;
-        if state.scope.revision() != workspace_revision || state.active_delete_batch.is_some() {
+        if state.scope.revision() != workspace_revision || mutation_receipt_active(&state) {
             return Err(workspace_delete_conflict());
         }
         state.active_delete_batch = Some(receipt);
@@ -1861,6 +1960,190 @@ impl WindowWorkspace {
         Ok(result)
     }
 
+    #[cfg(target_os = "macos")]
+    fn prepare_trash(
+        &self,
+        entries: Vec<(RootId, RelativePath)>,
+    ) -> Result<WorkspaceTrashBatchPlan, CommandError> {
+        let _mutation = lock(&self.mutation_gate)?;
+        let (workspace_revision, selected) = {
+            let mut state = lock(&self.state)?;
+            ensure_open(&state)?;
+            discard_expired_delete_batch(&mut state, (self.delete_clock)());
+            discard_expired_trash_batch(&mut state, (self.delete_clock)());
+            if mutation_receipt_active(&state) {
+                return Err(workspace_trash_conflict());
+            }
+            let selected = entries
+                .into_iter()
+                .map(|(root_id, relative_path)| {
+                    let lease = state.scope.lease(root_id)?;
+                    Ok((TrashSelection::new(root_id, relative_path), lease))
+                })
+                .collect::<Result<Vec<_>, CommandError>>()?;
+            (state.scope.revision(), selected)
+        };
+        let deadline = trash_deadline((self.delete_clock)())?;
+        let mut receipt = super::trash::prepare_batch(workspace_revision, deadline, selected)?;
+        let plan = receipt.plan();
+        receipt.refresh_deadline(trash_deadline((self.delete_clock)())?);
+        let mut state = lock(&self.state)?;
+        ensure_open(&state)?;
+        if state.scope.revision() != workspace_revision || mutation_receipt_active(&state) {
+            return Err(workspace_trash_conflict());
+        }
+        state.active_trash_batch = Some(receipt);
+        Ok(plan)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn cancel_trash(&self, confirmation_id: TrashConfirmationId) -> Result<(), CommandError> {
+        let _mutation = lock(&self.mutation_gate)?;
+        let mut state = lock(&self.state)?;
+        ensure_open(&state)?;
+        discard_expired_trash_batch(&mut state, (self.delete_clock)());
+        if state
+            .active_trash_batch
+            .as_ref()
+            .is_some_and(|batch| batch.confirmation_id() == confirmation_id)
+        {
+            state.active_trash_batch = None;
+            Ok(())
+        } else {
+            Err(workspace_trash_plan_invalid())
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn begin_trash(&self, confirmation_id: TrashConfirmationId) -> Result<(), CommandError> {
+        let _mutation = lock(&self.mutation_gate)?;
+        let (mut receipt, leases) = {
+            let mut state = lock(&self.state)?;
+            ensure_open(&state)?;
+            discard_expired_trash_batch(&mut state, (self.delete_clock)());
+            let matches = state.active_trash_batch.as_ref().is_some_and(|batch| {
+                batch.confirmation_id() == confirmation_id
+                    && batch.is_prepared()
+                    && batch.workspace_revision() == state.scope.revision()
+            });
+            if !matches {
+                return Err(workspace_trash_plan_invalid());
+            }
+            let receipt = state
+                .active_trash_batch
+                .take()
+                .ok_or_else(workspace_trash_plan_invalid)?;
+            let mut leases = BTreeMap::new();
+            for selection in receipt.selections() {
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    leases.entry(selection.root_id())
+                {
+                    entry.insert(state.scope.lease(selection.root_id())?);
+                }
+            }
+            (receipt, leases)
+        };
+        // No platform pathname API is entered until the complete selection
+        // has survived this second capability-relative verification.
+        receipt.revalidate_all(&leases)?;
+        receipt.begin();
+        receipt.refresh_deadline(trash_deadline((self.delete_clock)())?);
+        let mut state = lock(&self.state)?;
+        ensure_open(&state)?;
+        if state.scope.revision() != receipt.workspace_revision()
+            || state.active_trash_batch.is_some()
+            || state.active_delete_batch.is_some()
+        {
+            return Err(workspace_trash_plan_invalid());
+        }
+        state.active_trash_batch = Some(receipt);
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn commit_trash_entry(
+        &self,
+        confirmation_id: TrashConfirmationId,
+        entry_id: TrashEntryId,
+        root_id: RootId,
+        relative_path: RelativePath,
+    ) -> Result<WorkspaceTrashResult, CommandError> {
+        let mut platform = super::trash::macos::MacOsSystemTrash;
+        self.commit_trash_entry_with_platform(
+            confirmation_id,
+            entry_id,
+            root_id,
+            relative_path,
+            &mut platform,
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn commit_trash_entry_with_platform(
+        &self,
+        confirmation_id: TrashConfirmationId,
+        entry_id: TrashEntryId,
+        root_id: RootId,
+        relative_path: RelativePath,
+        platform: &mut impl super::trash::PlatformTrash,
+    ) -> Result<WorkspaceTrashResult, CommandError> {
+        let _mutation = lock(&self.mutation_gate)?;
+        let (mut receipt, lease, registration) = {
+            let mut state = lock(&self.state)?;
+            ensure_open(&state)?;
+            discard_expired_trash_batch(&mut state, (self.delete_clock)());
+            let Some(batch) = state.active_trash_batch.as_ref() else {
+                return Err(workspace_trash_plan_invalid());
+            };
+            if batch.confirmation_id() != confirmation_id {
+                return Err(workspace_trash_plan_invalid());
+            }
+            if !batch.is_executing()
+                || batch.workspace_revision() != state.scope.revision()
+                || !batch.matches_next(entry_id, root_id, &relative_path)
+                || batch.next_root_id() != Some(root_id)
+            {
+                state.active_trash_batch = None;
+                return Err(workspace_trash_plan_invalid());
+            }
+            let lease = match state.scope.lease(root_id) {
+                Ok(lease) => lease,
+                Err(error) => {
+                    state.active_trash_batch = None;
+                    return Err(error);
+                }
+            };
+            let registration = state.watch_registrations.get(&root_id).copied();
+            let receipt = state
+                .active_trash_batch
+                .take()
+                .ok_or_else(workspace_trash_plan_invalid)?;
+            (receipt, lease, registration)
+        };
+
+        let result = receipt.commit_next_with_platform(&lease, platform);
+        let mut state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if result.is_trashed() && !receipt.is_complete() && !state.closed {
+            if let Ok(deadline) = trash_deadline((self.delete_clock)()) {
+                receipt.refresh_deadline(deadline);
+                state.active_trash_batch = Some(receipt);
+            }
+        }
+        let watcher = self
+            .watcher
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        drop(state);
+        if let (Some(watcher), Some(registration)) = (watcher, registration) {
+            watcher.mark_root_rescan(registration);
+        }
+        Ok(result)
+    }
+
     fn close(&self) {
         let mutation = match self.mutation_gate.lock() {
             Ok(guard) => guard,
@@ -1874,6 +2157,7 @@ impl WindowWorkspace {
         state.active_picker = None;
         state.watch_registrations.clear();
         invalidate_delete_batch(&mut state);
+        invalidate_trash_batch(&mut state);
         // Taken (not just cleared) so the search task's thread-join — bounded
         // and fast, but still a blocking operation — happens after the state
         // and mutation locks are released below, the same way `watcher.close()`
@@ -1901,6 +2185,8 @@ struct WindowWorkspaceState {
     watch_registrations: BTreeMap<RootId, WatchRegistration>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     active_delete_batch: Option<DeleteBatchReceipt>,
+    #[cfg(target_os = "macos")]
+    active_trash_batch: Option<TrashBatchReceipt>,
     active_text_search: Option<ActiveTextSearch>,
     initial_restore_status: WorkspaceRestoreStatus,
     closed: bool,
@@ -1935,6 +2221,22 @@ fn invalidate_delete_batch(state: &mut WindowWorkspaceState) {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn invalidate_delete_batch(_state: &mut WindowWorkspaceState) {}
 
+#[cfg(target_os = "macos")]
+fn invalidate_trash_batch(state: &mut WindowWorkspaceState) {
+    state.active_trash_batch = None;
+}
+
+#[cfg(not(target_os = "macos"))]
+fn invalidate_trash_batch(_state: &mut WindowWorkspaceState) {}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn mutation_receipt_active(state: &WindowWorkspaceState) -> bool {
+    let active = state.active_delete_batch.is_some();
+    #[cfg(target_os = "macos")]
+    let active = active || state.active_trash_batch.is_some();
+    active
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn discard_expired_delete_batch(state: &mut WindowWorkspaceState, now: Instant) {
     if state
@@ -1946,10 +2248,30 @@ fn discard_expired_delete_batch(state: &mut WindowWorkspaceState, now: Instant) 
     }
 }
 
+#[cfg(target_os = "macos")]
+fn discard_expired_trash_batch(state: &mut WindowWorkspaceState, now: Instant) {
+    if state
+        .active_trash_batch
+        .as_ref()
+        .is_some_and(|batch| batch.is_expired(now))
+    {
+        state.active_trash_batch = None;
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn discard_expired_trash_batch(_state: &mut WindowWorkspaceState, _now: Instant) {}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn delete_deadline(now: Instant) -> Result<Instant, CommandError> {
     now.checked_add(DELETE_BATCH_IDLE_TTL)
         .ok_or_else(workspace_delete_failed)
+}
+
+#[cfg(target_os = "macos")]
+fn trash_deadline(now: Instant) -> Result<Instant, CommandError> {
+    now.checked_add(DELETE_BATCH_IDLE_TTL)
+        .ok_or_else(workspace_trash_failed)
 }
 
 /// Unconditionally drops (cancelling/reclaiming) a window's active-or-
@@ -2055,6 +2377,38 @@ fn workspace_delete_unsupported() -> CommandError {
     CommandError::new(
         "IO_FAILED",
         "Permanent workspace delete is not supported on this platform.",
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn workspace_trash_failed() -> CommandError {
+    CommandError::new(
+        "IO_FAILED",
+        "The workspace entry could not be moved to Trash.",
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn workspace_trash_conflict() -> CommandError {
+    CommandError::new(
+        "WORKSPACE_CONFLICT",
+        "A delete or Trash confirmation is already active for this window.",
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn workspace_trash_plan_invalid() -> CommandError {
+    CommandError::new(
+        "WORKSPACE_TRASH_PLAN_INVALID",
+        "The Trash confirmation is no longer valid.",
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn workspace_trash_unsupported() -> CommandError {
+    CommandError::new(
+        "WORKSPACE_TRASH_UNAVAILABLE",
+        "System Trash is not available on this platform.",
     )
 }
 

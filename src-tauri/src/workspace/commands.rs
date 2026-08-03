@@ -6,16 +6,18 @@ use crate::error::CommandError;
 
 use super::dto::{
     WorkspaceCapabilities, WorkspaceCapabilitiesRequest, WorkspaceClearRecentRequest,
-    WorkspaceCloseFolderRequest, WorkspaceCommitDeleteEntryRequest, WorkspaceCopyRequest,
-    WorkspaceDeleteBatchPlan, WorkspaceDeleteBatchRequest, WorkspaceDeleteResult,
-    WorkspaceEntryRequest, WorkspaceEntryStat, WorkspaceMoveRequest, WorkspaceMoveResult,
-    WorkspaceOpenFilesRequest, WorkspaceOpenFilesResult, WorkspaceOpenRecentRequest,
-    WorkspacePickRootsRequest, WorkspacePickRootsResult, WorkspacePickRootsStatus,
-    WorkspacePickSaveTargetRequest, WorkspacePickSaveTargetResult, WorkspacePrepareDeleteRequest,
-    WorkspaceReadDirectoryResult, WorkspaceRecentListRequest, WorkspaceRecentListResult,
-    WorkspaceRemoveRecentRequest, WorkspaceRemoveRootRequest, WorkspaceRenameRequest,
-    WorkspaceSnapshot, WorkspaceSnapshotRequest, WorkspaceWatchSyncRequest,
-    WorkspaceWatchSyncResult, WorkspaceWatchWakeEvent, WorkspaceWriteResult,
+    WorkspaceCloseFolderRequest, WorkspaceCommitDeleteEntryRequest,
+    WorkspaceCommitTrashEntryRequest, WorkspaceCopyRequest, WorkspaceDeleteBatchPlan,
+    WorkspaceDeleteBatchRequest, WorkspaceDeleteResult, WorkspaceEntryRequest, WorkspaceEntryStat,
+    WorkspaceMoveRequest, WorkspaceMoveResult, WorkspaceOpenFilesRequest, WorkspaceOpenFilesResult,
+    WorkspaceOpenRecentRequest, WorkspacePickRootsRequest, WorkspacePickRootsResult,
+    WorkspacePickRootsStatus, WorkspacePickSaveTargetRequest, WorkspacePickSaveTargetResult,
+    WorkspacePrepareDeleteRequest, WorkspacePrepareTrashRequest, WorkspaceReadDirectoryResult,
+    WorkspaceRecentListRequest, WorkspaceRecentListResult, WorkspaceRemoveRecentRequest,
+    WorkspaceRemoveRootRequest, WorkspaceRenameRequest, WorkspaceSnapshot,
+    WorkspaceSnapshotRequest, WorkspaceTrashBatchPlan, WorkspaceTrashBatchRequest,
+    WorkspaceTrashResult, WorkspaceWatchSyncRequest, WorkspaceWatchSyncResult,
+    WorkspaceWatchWakeEvent, WorkspaceWriteResult,
 };
 use super::picker::{TauriDirectoryPicker, TauriFilePicker};
 use super::service::WorkspaceService;
@@ -452,6 +454,57 @@ pub(crate) async fn workspace_commit_delete_entry(
             root_id,
             relative_path,
             recursive,
+        )
+        .await
+}
+
+#[tauri::command]
+pub(crate) async fn workspace_prepare_trash(
+    window: WebviewWindow,
+    service: State<'_, WorkspaceService>,
+    request: WorkspacePrepareTrashRequest,
+) -> Result<WorkspaceTrashBatchPlan, CommandError> {
+    service
+        .prepare_trash(window.label(), request.into_parts()?)
+        .await
+}
+
+#[tauri::command]
+pub(crate) async fn workspace_cancel_trash(
+    window: WebviewWindow,
+    service: State<'_, WorkspaceService>,
+    request: WorkspaceTrashBatchRequest,
+) -> Result<(), CommandError> {
+    service
+        .cancel_trash(window.label(), request.confirmation_id())
+        .await
+}
+
+#[tauri::command]
+pub(crate) async fn workspace_begin_trash(
+    window: WebviewWindow,
+    service: State<'_, WorkspaceService>,
+    request: WorkspaceTrashBatchRequest,
+) -> Result<(), CommandError> {
+    service
+        .begin_trash(window.label(), request.confirmation_id())
+        .await
+}
+
+#[tauri::command]
+pub(crate) async fn workspace_commit_trash_entry(
+    window: WebviewWindow,
+    service: State<'_, WorkspaceService>,
+    request: WorkspaceCommitTrashEntryRequest,
+) -> Result<WorkspaceTrashResult, CommandError> {
+    let (confirmation_id, entry_id, root_id, relative_path) = request.into_parts()?;
+    service
+        .commit_trash_entry(
+            window.label(),
+            confirmation_id,
+            entry_id,
+            root_id,
+            relative_path,
         )
         .await
 }
