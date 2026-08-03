@@ -9,9 +9,10 @@ use crate::workspace::service::WorkspaceService;
 use super::dto::{
     TerminalAckRequest, TerminalDataEvent, TerminalExitEvent, TerminalFocusRequest,
     TerminalInputKeyRequest, TerminalInputTextRequest, TerminalKillRequest,
-    TerminalOpenExternalLinkRequest, TerminalProfilesRequest, TerminalProfilesResult,
-    TerminalResizeRequest, TerminalScrollbackRequest, TerminalScrollbackResult, TerminalSessionId,
-    TerminalStartRequest, TerminalStartResult,
+    TerminalLifecycleMarkerRequest, TerminalLifecycleMarkerResult, TerminalOpenExternalLinkRequest,
+    TerminalProfilesRequest, TerminalProfilesResult, TerminalResizeRequest,
+    TerminalScrollbackRequest, TerminalScrollbackResult, TerminalSessionId, TerminalStartRequest,
+    TerminalStartResult,
 };
 use super::opener;
 use super::service::{TerminalExitStatus, TerminalOutputSink, TerminalService};
@@ -79,7 +80,7 @@ impl TerminalOutputSink for WindowEmitSink {
         let _ = self.app.emit_to(
             EventTarget::webview_window(self.window_label.clone()),
             TERMINAL_EXIT_EVENT,
-            TerminalExitEvent::new(session_id, status.exit_code),
+            TerminalExitEvent::new(session_id, status),
         );
     }
 }
@@ -219,4 +220,26 @@ pub(crate) async fn terminal_kill(
         .inner()
         .kill(window.label(), session_id, immediate)
         .await
+}
+
+/// `F190` S6 "跨进程不伪造 session restore": called once by a freshly
+/// mounted terminal view, before it starts any session of its own — see
+/// `TerminalService::claim_lifecycle_marker`'s doc comment for the full
+/// read-then-clear contract (and why this never also kills whatever
+/// `TerminalState.windows` still holds for this window). Deliberately
+/// infallible (no trust gate, no filesystem/process capability of its own —
+/// purely per-window administrative housekeeping over state this domain
+/// already owns), so the frontend never has to special-case a failure here
+/// differently from "no unreachable sessions to report".
+#[tauri::command]
+pub(crate) async fn terminal_lifecycle_marker(
+    window: WebviewWindow,
+    terminal: State<'_, TerminalService>,
+    _request: TerminalLifecycleMarkerRequest,
+) -> Result<TerminalLifecycleMarkerResult, CommandError> {
+    let count = terminal
+        .inner()
+        .claim_lifecycle_marker(window.label())
+        .await;
+    Ok(TerminalLifecycleMarkerResult::new(count))
 }

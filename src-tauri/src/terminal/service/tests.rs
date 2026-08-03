@@ -339,7 +339,8 @@ fn echo_round_trip_through_cat() {
     let root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
     let sink = RecordingSink::new();
 
     let session_id = start_test_session(
@@ -381,7 +382,8 @@ fn vt_dirty_frame_reflects_real_session_output_and_is_gone_after_kill() {
     let root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
     let sink = RecordingSink::new();
 
     let session_id = start_test_session(
@@ -436,7 +438,8 @@ fn frame_emission_is_gated_until_the_previous_frame_is_acked() {
     let root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
     let sink = RecordingSink::new();
 
     let session_id = start_test_session(
@@ -544,7 +547,8 @@ fn output_well_beyond_the_high_water_mark_still_arrives_completely_and_in_order(
     let root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
     let sink = RecordingSink::new();
 
     // 2,200 ~51-byte lines (~112 KiB total): comfortably larger than the
@@ -639,7 +643,8 @@ fn resize_takes_effect_and_is_observed_by_stty_size() {
     let root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
     let sink = RecordingSink::new();
 
     // An interactive `sh` reads commands from its stdin (the pty) rather
@@ -678,7 +683,8 @@ fn kill_immediate_tears_down_synchronously_and_captures_a_signal_exit() {
     let root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
     let sink = RecordingSink::new();
 
     let session_id = start_test_session(
@@ -694,7 +700,16 @@ fn kill_immediate_tears_down_synchronously_and_captures_a_signal_exit() {
 
     // `immediate: true` joins every session thread before returning, so the
     // exit must already be recorded — no polling needed.
-    assert!(sink.exit_status().is_some());
+    let status = sink.exit_status().expect("kill's own wait() reports exit");
+    // `F190` S6 "真实 exit banner": a real signal-terminated process must
+    // report a real `signal`, not just *some* `TerminalExitStatus` — see
+    // `TerminalExitEvent`'s own doc comment for why `exit_code` alone
+    // (`portable_pty::ExitStatus`'s hardcoded placeholder `1` whenever a
+    // signal is set) would otherwise be misleading here.
+    assert!(
+        status.signal.is_some(),
+        "a killed process's real wait() status must carry a signal, not a bare exit code: {status:?}"
+    );
     assert_eq!(
         terminal.ack("main", session_id, 0).unwrap_err().code(),
         "TERMINAL_SESSION_NOT_FOUND"
@@ -706,7 +721,8 @@ fn a_normal_exit_code_is_captured() {
     let root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
     let sink = RecordingSink::new();
 
     let session_id = start_test_session(
@@ -730,7 +746,8 @@ fn session_limit_is_enforced_and_independent_per_window() {
     let root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
 
     let mut sessions = Vec::new();
     for _ in 0..MAX_TERMINAL_SESSIONS_PER_WINDOW {
@@ -767,7 +784,8 @@ fn close_window_kills_and_removes_every_session_for_that_window() {
     let root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
     let sinks: Vec<Arc<RecordingSink>> = (0..3).map(|_| RecordingSink::new()).collect();
     let session_ids: Vec<TerminalSessionId> = sinks
         .iter()
@@ -800,13 +818,198 @@ fn close_window_kills_and_removes_every_session_for_that_window() {
     }
 }
 
+// -----------------------------------------------------------------------
+// `F190` S6 "跨进程不伪造 session restore": the lifecycle marker
+// -----------------------------------------------------------------------
+
+/// Pure, no-subprocess unit tests directly against
+/// [`super::TerminalLifecycleMarkerStore`] — `service::tests` is a child
+/// module of `service` itself, so it can name this private type directly,
+/// the same way it already reaches into `FrameEmitGate`.
+mod lifecycle_marker_store {
+    use tempfile::TempDir;
+
+    use super::super::TerminalLifecycleMarkerStore;
+
+    #[test]
+    fn claim_reports_the_net_of_starts_and_ends_then_resets_to_zero() {
+        let base = TempDir::new().unwrap();
+        let store = TerminalLifecycleMarkerStore::new(base.path().to_path_buf());
+        assert_eq!(store.claim("main"), 0, "nothing recorded yet");
+
+        store.record_started("main");
+        store.record_started("main");
+        store.record_started("main");
+        store.record_ended("main", 1);
+        assert_eq!(
+            store.claim("main"),
+            2,
+            "2 sessions were never explicitly closed"
+        );
+        assert_eq!(store.claim("main"), 0, "claiming clears the marker");
+    }
+
+    #[test]
+    fn clear_zeroes_the_marker_regardless_of_how_many_sessions_were_recorded() {
+        let base = TempDir::new().unwrap();
+        let store = TerminalLifecycleMarkerStore::new(base.path().to_path_buf());
+        store.record_started("main");
+        store.record_started("main");
+        store.clear("main");
+        assert_eq!(store.claim("main"), 0);
+    }
+
+    #[test]
+    fn a_marker_never_explicitly_ended_or_cleared_survives_a_fresh_store_instance() {
+        let base = TempDir::new().unwrap();
+        {
+            let store = TerminalLifecycleMarkerStore::new(base.path().to_path_buf());
+            store.record_started("main");
+            store.record_started("main");
+            // No `record_ended`/`clear` — mirrors a real crash: nothing ever
+            // ran the "normal explicit close" path before this store (and
+            // the process holding it) went away.
+        }
+        let restarted = TerminalLifecycleMarkerStore::new(base.path().to_path_buf());
+        assert_eq!(restarted.claim("main"), 2);
+        assert_eq!(restarted.claim("main"), 0, "claim consumes the marker");
+    }
+
+    #[test]
+    fn markers_are_kept_independent_per_window_label() {
+        let base = TempDir::new().unwrap();
+        let store = TerminalLifecycleMarkerStore::new(base.path().to_path_buf());
+        let second_window = "plain-window-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        store.record_started("main");
+        store.record_started(second_window);
+        store.record_started(second_window);
+        assert_eq!(store.claim("main"), 1);
+        assert_eq!(store.claim(second_window), 2);
+    }
+}
+
+/// Full-stack integration: a real spawned subprocess and
+/// `claim_lifecycle_marker` itself (not the store directly) — proves it
+/// reports the real un-closed count and unconditionally clears it, exactly
+/// like the pure store-level tests above already prove for `claim` in
+/// isolation, but through the real async command path.
+#[test]
+fn claim_lifecycle_marker_reports_unclosed_sessions_and_clears_the_marker_exactly_once() {
+    let root = TempDir::new().unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
+
+    let first = start_test_session(
+        &terminal,
+        &trust,
+        &workspace,
+        "main",
+        sh_c("sleep 30"),
+        RecordingSink::new(),
+    );
+    let second = start_test_session(
+        &terminal,
+        &trust,
+        &workspace,
+        "main",
+        sh_c("sleep 30"),
+        RecordingSink::new(),
+    );
+    assert_eq!(terminal.session_count_for_test("main"), 2);
+
+    // `claim_lifecycle_marker` — never `kill` — is what a freshly (re)loaded
+    // frontend calls: neither session above was ever explicitly closed,
+    // exactly the "WebView reload while the window/process stays alive"
+    // scenario this exists for (see this method's own doc comment).
+    let claimed = block_on(terminal.claim_lifecycle_marker("main"));
+    assert_eq!(claimed, 2, "both un-closed sessions are reported once");
+    assert_eq!(
+        terminal.session_count_for_test("main"),
+        2,
+        "claiming reports the marker but never kills a session on its own \
+         — see this method's own doc comment for why (the runInTerminal \
+         concurrent-spawn race)"
+    );
+
+    // A second call for the same window — e.g. the Terminal panel closed and
+    // reopened later in the same run, with no further reload/crash in
+    // between — must report `0`: the marker was already claimed.
+    assert_eq!(block_on(terminal.claim_lifecycle_marker("main")), 0);
+
+    // Clean up the two still-live sessions this test itself left running.
+    block_on(terminal.kill("main", first, true)).unwrap();
+    block_on(terminal.kill("main", second, true)).unwrap();
+}
+
+/// `F190` S6: the exact race `claim_lifecycle_marker`'s own doc comment
+/// documents — a session inserted into this window's table *after* `claim`
+/// has already run (mirroring `runInTerminal`'s own "spawn, then notify the
+/// frontend" ordering, which can be what causes a fresh view — and this
+/// call — to happen at all) must never be touched by it.
+#[test]
+fn claim_lifecycle_marker_never_touches_a_session_started_after_it_ran() {
+    let root = TempDir::new().unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
+
+    assert_eq!(block_on(terminal.claim_lifecycle_marker("main")), 0);
+
+    let session_id = start_test_session(
+        &terminal,
+        &trust,
+        &workspace,
+        "main",
+        sh_c("sleep 30"),
+        RecordingSink::new(),
+    );
+    assert_eq!(
+        terminal.session_count_for_test("main"),
+        1,
+        "a session started after claim_lifecycle_marker ran must survive it"
+    );
+
+    block_on(terminal.kill("main", session_id, true)).unwrap();
+}
+
+#[test]
+fn claim_lifecycle_marker_never_reports_another_windows_sessions() {
+    let root = TempDir::new().unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
+
+    let session_id = start_test_session(
+        &terminal,
+        &trust,
+        &workspace,
+        "main",
+        sh_c("sleep 30"),
+        RecordingSink::new(),
+    );
+
+    // A second window's own fresh mount must not see "main"'s own
+    // still-legitimate, still-running session — multiple windows are
+    // independent, not a shared pool a stray reload could cross-contaminate.
+    assert_eq!(block_on(terminal.claim_lifecycle_marker("second")), 0);
+    assert_eq!(terminal.session_count_for_test("main"), 1);
+
+    block_on(terminal.kill("main", session_id, true)).unwrap();
+    assert_eq!(block_on(terminal.claim_lifecycle_marker("main")), 0);
+}
+
 #[test]
 fn an_untrusted_workspace_rejects_start() {
     let root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let workspace = workspace_with_root("main", root.path());
     let trust = TrustService::new(trust_base.path().to_path_buf());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
 
     let result = block_on(terminal.start_with_command_for_test(
         &trust,
@@ -827,7 +1030,8 @@ fn the_empty_workspace_rejects_start() {
     let trust_base = TempDir::new().unwrap();
     let workspace = WorkspaceService::new();
     let trust = TrustService::new(trust_base.path().to_path_buf());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
 
     let result = block_on(terminal.start_with_command_for_test(
         &trust,
@@ -860,7 +1064,8 @@ fn cwd_defaults_to_the_explicitly_selected_authorized_root() {
     .unwrap();
     let trust = TrustService::new(trust_base.path().to_path_buf());
     block_on(trust.grant(&workspace, "main")).unwrap();
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
     let sink = RecordingSink::new();
 
     let session_id = block_on(terminal.start_with_command_for_test(
@@ -902,7 +1107,8 @@ fn a_relative_cwd_is_resolved_inside_the_explicitly_selected_root() {
     std::fs::create_dir_all(&nested).unwrap();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
     let sink = RecordingSink::new();
 
     let session_id = block_on(terminal.start_with_command_for_test(
@@ -955,7 +1161,8 @@ fn cwd_in_another_authorized_root_is_rejected_for_the_selected_root() {
     .unwrap();
     let trust = TrustService::new(trust_base.path().to_path_buf());
     block_on(trust.grant(&workspace, "main")).unwrap();
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
 
     let result = block_on(terminal.start_with_command_for_test(
         &trust,
@@ -988,7 +1195,8 @@ fn a_foreign_window_root_id_is_rejected_before_spawn() {
     .unwrap();
     let trust = TrustService::new(trust_base.path().to_path_buf());
     block_on(trust.grant(&workspace, "main")).unwrap();
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
 
     let result = block_on(terminal.start_with_command_for_test(
         &trust,
@@ -1010,7 +1218,8 @@ fn a_cwd_outside_every_authorized_root_is_rejected() {
     let outside = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
 
     let result = block_on(terminal.start_with_command_for_test(
         &trust,
@@ -1039,7 +1248,8 @@ fn a_relative_cwd_symlink_that_resolves_outside_the_selected_root_is_rejected() 
     symlink(outside.path(), root.path().join("outside-link")).unwrap();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
 
     let result = block_on(terminal.start_with_command_for_test(
         &trust,
@@ -1072,7 +1282,8 @@ fn an_osc7_pwd_inside_the_selected_root_is_relativized_and_reaches_the_live_fram
     std::fs::create_dir_all(&nested).unwrap();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
     let sink = RecordingSink::new();
 
     let session_id = block_on(terminal.start_with_command_for_test(
@@ -1108,7 +1319,8 @@ fn an_osc7_pwd_at_exactly_the_selected_root_relativizes_to_an_empty_string() {
     let root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
     let sink = RecordingSink::new();
 
     let session_id = block_on(terminal.start_with_command_for_test(
@@ -1143,7 +1355,8 @@ fn an_osc7_pwd_outside_the_selected_root_never_reaches_the_frame_as_an_absolute_
     let outside_canonical = std::fs::canonicalize(outside.path()).unwrap();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
     let sink = RecordingSink::new();
 
     let session_id = block_on(terminal.start_with_command_for_test(
@@ -1202,7 +1415,8 @@ fn an_unknown_profile_id_is_rejected_before_spawn() {
     let root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
 
     let result = block_on(terminal.start(
         &trust,
@@ -1239,7 +1453,8 @@ fn start_program_runs_the_named_program_directly_and_reports_a_real_pid() {
     let root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
     let sink = RecordingSink::new();
 
     let (session_id, pid) = block_on(terminal.start_program(
@@ -1290,7 +1505,8 @@ fn start_program_accepts_a_cwd_outside_every_workspace_root_unlike_the_ordinary_
     let outside = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
     let sink = RecordingSink::new();
 
     let (session_id, _pid) = block_on(terminal.start_program(
@@ -1333,7 +1549,8 @@ fn start_program_env_overrides_apply_on_top_of_the_fixed_allowlist() {
     let root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
     let sink = RecordingSink::new();
 
     let (session_id, _pid) = block_on(terminal.start_program(
@@ -1384,7 +1601,8 @@ fn input_key_writes_the_libghostty_encoded_bytes_to_the_pty() {
     let root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
     let sink = RecordingSink::new();
 
     let session_id = start_test_session(
@@ -1428,7 +1646,8 @@ fn focus_writes_the_encoded_sequence_only_when_the_live_terminal_enabled_dec_100
     let root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
     let sink = RecordingSink::new();
 
     // Enables focus-reporting mode (DEC 1004) first, then behaves as a
@@ -1476,7 +1695,8 @@ fn focus_is_a_silent_no_op_when_the_live_terminal_has_not_enabled_dec_1004() {
     let root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
     let sink = RecordingSink::new();
 
     let session_id = start_test_session(
@@ -1504,7 +1724,8 @@ fn scrollback_reads_history_rows_scrolled_off_the_viewport() {
     let root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
     let sink = RecordingSink::new();
 
     // 30 lines through the fixed 80x24 viewport `start_test_session` uses:
@@ -1547,7 +1768,8 @@ fn scrollback_for_an_unknown_session_reports_not_found() {
     let root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let (_workspace, _trust) = trusted_workspace("main", root.path(), trust_base.path());
-    let terminal = TerminalService::new();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
 
     let unknown = TerminalSessionId::new();
     let result = block_on(terminal.scrollback("main", unknown, 0, 10));

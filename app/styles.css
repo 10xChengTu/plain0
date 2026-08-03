@@ -49,6 +49,47 @@ body[data-plain-ready="error"] #plain-bootstrap-status {
 	position: relative;
 }
 
+/* `F190` S6 "跨进程不伪造 session restore" — the one-time non-restorable
+ * notice banner (see `PlainTerminalView#checkLifecycleMarker`'s own doc
+ * comment). `hidden` by default; shown by removing that attribute, never by
+ * a class toggle, so the `[hidden]`-vs-class-selector specificity tie this
+ * file's own `.plain-terminal-find[hidden]` override already documents
+ * applies here too. */
+.plain-terminal-non-restorable-notice {
+	display: flex;
+	flex: 0 0 auto;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 10px;
+	background: #5a3d00;
+	color: #ffcc80;
+	font-size: 0.85rem;
+	border-bottom: 1px solid #3c3c3c;
+}
+
+.plain-terminal-non-restorable-notice[hidden] {
+	display: none;
+}
+
+.plain-terminal-non-restorable-notice > span {
+	flex: 1 1 auto;
+}
+
+.plain-terminal-non-restorable-notice-close {
+	flex: 0 0 auto;
+	border: 0;
+	background: transparent;
+	color: inherit;
+	cursor: pointer;
+	line-height: 1;
+	padding: 2px 6px;
+	border-radius: 3px;
+}
+
+.plain-terminal-non-restorable-notice-close:hover {
+	background: rgba(255, 255, 255, 0.15);
+}
+
 /* F070 "多 tab/split/scrollback" — tab strip + split pane layout. Functional
  * styling only, same precedent as the rest of this domain's CSS. */
 .plain-terminal-tabstrip {
@@ -344,6 +385,15 @@ body[data-plain-ready="error"] #plain-bootstrap-status {
 
 .plain-terminal-status:empty {
 	display: none;
+}
+
+/* `F190` S6 "真实 exit banner" — visibly distinguishes a real process-exit
+ * status line from the ordinary pre-start status text
+ * (`.plain-terminal-status`'s default styling above) it otherwise shares an
+ * element with. */
+.plain-terminal-pane[data-terminal-exited="true"] .plain-terminal-status {
+	background: #5a1d1d;
+	color: #f48771;
 }
 
 .plain-terminal-surface-wrapper {

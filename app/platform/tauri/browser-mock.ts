@@ -198,6 +198,7 @@ import {
 	frozenDebugVariablesRequest,
 } from "./debug-codec";
 import {
+	decodeTerminalLifecycleMarkerResult,
 	decodeTerminalScrollbackResult,
 	decodeTerminalStartResult,
 	decodeTerminalProfilesResult,
@@ -209,6 +210,7 @@ import {
 	frozenTerminalInputKeyRequest,
 	frozenTerminalInputTextRequest,
 	frozenTerminalKillRequest,
+	frozenTerminalLifecycleMarkerRequest,
 	frozenTerminalOpenExternalLinkRequest,
 	frozenTerminalProfilesRequest,
 	frozenTerminalResizeRequest,
@@ -1523,9 +1525,13 @@ export interface BrowserMockTerminalSessionController {
 	 * not-yet-emitted (credit-gated) pending content: this mirrors the real
 	 * exit-vs-last-frame race `src-tauri/src/terminal/service.rs`'s module
 	 * doc documents rather than "fixing" it away, so this mock stays a
-	 * faithful stand-in for that behavior in E2E tests.
+	 * faithful stand-in for that behavior in E2E tests. `F190` S6: `signal`
+	 * (default `null`, a normal exit) mirrors `TerminalExitEvent.signal` —
+	 * pass a non-`null` value to simulate a signal-terminated process, in
+	 * which case `exitCode` alone is not meaningful (see that field's own
+	 * doc comment).
 	 */
-	finish(exitCode: number): void;
+	finish(exitCode: number, signal?: string | null): void;
 	/** Whether a previously emitted frame is currently unacknowledged (the
 	 * mock analogue of the real single-frame-in-flight emission credit
 	 * gate being exhausted). */
@@ -7055,12 +7061,13 @@ export function createBrowserMockBridge(
 	function finishMockTerminalSession(
 		session: MockTerminalSession,
 		exitCode: number,
+		signal: string | null = null,
 	): void {
 		if (session.exited) {
 			return;
 		}
 		session.exited = true;
-		const event = frozenTerminalExitEvent(session.sessionId, exitCode);
+		const event = frozenTerminalExitEvent(session.sessionId, exitCode, signal);
 		queueMicrotask(() => {
 			for (const listener of terminalExitListeners) {
 				listener(event);
@@ -7091,8 +7098,8 @@ export function createBrowserMockBridge(
 			pushOutput(text: string): void {
 				pushMockTerminalOutput(session, text);
 			},
-			finish(exitCode: number): void {
-				finishMockTerminalSession(session, exitCode);
+			finish(exitCode: number, signal: string | null = null): void {
+				finishMockTerminalSession(session, exitCode, signal);
 			},
 			isAwaitingAckForTest: (): boolean => session.awaitingAck,
 			lastEmittedSequenceForTest: (): number | null =>
@@ -8102,6 +8109,20 @@ export function createBrowserMockBridge(
 		async terminalOpenExternalLink(url) {
 			const request = frozenTerminalOpenExternalLinkRequest(url);
 			options.onTerminalOpenExternalLinkForTest?.(request.url);
+		},
+		async terminalLifecycleMarker() {
+			// `F190` S6: this whole mock bridge is a fresh, purely in-memory
+			// object recreated by every `createBrowserMockBridge` call (see
+			// this file's own module doc) — there is no real "previous run"
+			// for it to have survived a reload or crash *from*, unlike the
+			// real Rust-persisted marker (`terminal::service::
+			// TerminalLifecycleMarkerStore`) or the dedicated
+			// `sessionStorage`-backed fake transport
+			// `tests/browser/workspace.spec.ts`'s own `installNativeIpcMock`
+			// uses to exercise that real behavior. `0` (no notice) is
+			// therefore always the honest answer here.
+			frozenTerminalLifecycleMarkerRequest();
+			return decodeTerminalLifecycleMarkerResult({ nonRestorableCount: 0 });
 		},
 		terminalWatchData(listener) {
 			terminalDataListeners.add(listener);

@@ -1,6 +1,6 @@
 # 端到端桌面验收交接清单（Codex 执行）
 
-更新时间：2026-08-03（E2E-024 已完成；既有条目的完成或阻塞状态以各自小节为准）
+更新时间：2026-08-04（E2E-025 已登记待执行；既有条目的完成或阻塞状态以各自小节为准）
 
 ## 分工模式
 
@@ -623,6 +623,42 @@ Close Folder 时序：主窗口在执行 `Cmd+K F` 前把 primary 最后一个 r
 
 清理：Open Recent 在本轮记录存在时显示 4 Results，点击该行唯一删除按钮后原地恢复为既有 3 Results，没有清空或改写其余历史。Cmd+Q 后 Computer Use 与精确 `ps` 均确认 Plain、Git、hook、sleep 零进程；三个 fixture、`src-tauri/target`、`dist`、`.vite` 与 `test-results` 全部删除。F180 四项 acceptance 已由专用 Rust/TypeScript authority、完整 Browser 与 E2E-008/E2E-024 真实桌面证据共同闭合。
 
+### E2E-025 · F190 完整终端工作流真实桌面矩阵（profile/cwd 持久化、OSC 注入、split、查找、live scrollback、退出/不可恢复、SSH agent、进程清理）
+
+状态：**待执行**。本条覆盖 `F190` S1–S6 全部六个切片累计的真实桌面面——Browser mock 已逐切片验证协议/状态机正确性，但 zsh/bash/fish 启动注入、真实链接 opener、`SSH_AUTH_SOCK` 继承与真实进程退出/信号只能在真实 shell 子进程上验证。F190 在本条通过前保持 `in_progress`；本条通过后再回写 `features.json` evidence 并关闭 F190，转入 F200。
+
+前置条件：
+
+- 以系统工具优先 PATH 与 `APPLE_SIGNING_IDENTITY=-` 从当前工作树执行 `pnpm tauri:build:e2e`，只按仓库绝对路径启动新生成的 `src-tauri/target/debug/bundle/macos/Plain.app`；`codesign --verify --deep --strict` 通过后再取样。
+- 执行前确认真实空闲窗口（合成键盘遇真人键鼠活动即让位中止）。
+- 执行环境需要一个真实运行的 SSH agent（`ssh-agent` 或系统 Keychain agent）且 `SSH_AUTH_SOCK` 已在启动 `Plain.app` 的同一登录会话中导出；若本机没有可用 agent，改用 `ssh-agent` 临时起一个并 `ssh-add` 一把仅用于本条 fixture 的一次性生成密钥，测试结束后 `ssh-agent -k` 关闭。
+
+fixture（本条专用临时目录，不使用真实开发仓库或用户密钥）：
+
+- `tmp-f190-e2e/` 内一个空 workspace 根（`.git` 非必需，本条不测试 Git）。
+- 一次性生成的 SSH 密钥对（仅用于确认 `ssh-add -l` 可见性，不连接任何真实远程主机）。
+
+步骤与断言：
+
+1. **profile/cwd 默认值冷启动持久化**：在终端栏把 Default Terminal Profile 切到非 `systemDefault` 的真实候选（如 `zsh`）、cwd 填一个 workspace 相对子目录并保存；`Cmd+Q` 完全退出、重新以同一绝对路径启动并重新授权同一 workspace 后，新建终端应无需重新选择即命中同一 profile/cwd（真实 `pwd` 输出核对，而非仅 UI 回显）。
+2. **OSC 7/8/133 真实注入**：新建一个 profile 为 `zsh`（audited family）的终端，真实执行 `cd`/`pwd` 观察 pane 的 `data-terminal-pwd` 随真实目录变化；执行一条真实产生 OSC 8 超链接的命令（或 `printf` 手工发出 OSC 8 序列）并确认可点击链接文案出现；核对 shell 集成状态为 `injected`。另建一个非 audited profile（若平台候选中存在，或用 `sh` 直接验证 systemDefault 之外的降级候选）终端，确认状态准确降级为 `unsupportedShell` 且未静默假装已注入。
+3. **降级路径**：临时改写/移除该用户账户下 zsh 的 `ZDOTDIR` 注入前置条件（或用一个刻意破坏注入文件写入权限的场景），确认 Plain 不篡改用户真实启动文件、状态准确报告降级，且真实 shell 仍可正常使用。
+4. **链接 Cmd+Click 经受控 opener**：对一个真实 `http(s)://` 链接执行 Cmd+Click，确认系统默认浏览器/程序真实打开该 URL（且仅此一次，不重复打开）；对非 `http(s)` scheme 的文本确认普通点击不触发任何 opener。
+5. **递归 split 到 3 个以上 pane 与上限反馈**：从一个 tab 连续 split 到 8 个 pane（多层嵌套方向都验证一次），确认布局与真实每个 pane 各自独立 shell 的 `pwd`/环境隔离；继续尝试第 9 次 split，确认按钮禁用、`aria-live` 提示可见，且命令面板路径同样不产生新 spawn（`ps` 核对进程数不变）。
+6. **终端查找**：在一个 pane 内产生超过一屏的真实输出（如 `seq`/`ls -la` 大目录），Cmd+F 打开查找，验证大小写切换、上一项/下一项导航、环绕，以及查询超长/匹配超上限时的准确「已达上限」文案。
+7. **live scrollback 合并刷新**：停留在 history 视图时用真实命令持续产生新输出，确认视图停留在同一相对 offset（不强制跳底）且后续滚动/查找能看到新到达内容；直接向真实终端键入内容后应自动回到 live 并收起查找。
+8. **真实 shell 退出 banner**：在一个 pane 中执行 `exit`（或 `kill -TERM $$`）使 shell 自然退出，确认 pane 显示准确 exit code（或信号名称）banner、pane 不自动关闭、绝不含任何绝对路径；用户手动点击关闭按钮后 pane 才消失。另用 `kill -9 <shell pid>` 从 pane 外部信号杀死同一 shell 的真实进程，确认 banner 显示的是真实信号名而非误导性占位 exit code。
+9. **异常 kill 后重启的不可恢复说明**：正常新建 2-3 个终端后，不做任何显式关闭，直接 `kill -9` 真实 Plain 进程（模拟崩溃）；重新以同一绝对路径启动并重新授权同一 workspace，确认新终端 view 首次可见时显示一次准确、不含路径的「上次终端已结束，不能恢复」说明，且该说明只出现一次（关闭后新建/关闭终端、或再次重启不应再出现，除非再次异常终止）。核对崩溃前的 shell 子进程已不再运行（pty 主端关闭后收到 SIGHUP 或已成孤儿——记录实际观察，不构造虚假的"已重连"）。
+10. **正常显式关闭对照**：新建终端后用 pane/tab 关闭按钮显式关闭（不使用 Cmd+Q），确认无 banner；随后正常 `Cmd+Q` 退出、重新启动并重新授权同一 workspace 后新终端 view 不显示不可恢复说明（marker 已被正常关闭归零，不应残留）。
+11. **`SSH_AUTH_SOCK` 继承**：新建终端后执行真实 `ssh-add -l`（或 `test -S "$SSH_AUTH_SOCK" && echo SOCKET_VISIBLE`），确认能看到与启动 Plain 的登录会话中一致的 agent 身份列表（或至少确认 socket 可见/可连接），证明继承的是父进程既有 agent 而非 Plain 自行寻找/启动/保存了任何 agent 或凭据。
+12. **退出后零残留进程**：完成以上全部步骤后 `Cmd+Q`，用 `ps`/`pgrep` 精确核对没有残留的 Plain 进程、shell 子进程（含步骤 8/9 中已"退出"但如果实现有误可能仍在等待的进程）或本条产生的任何后台进程。
+
+证据要求：每一步除 UI 观察外，需要至少一项 shell 层可核验证据（真实 `pwd`/`ps`/`ssh-add -l`/退出码等），不得仅凭 UI 文案判定通过；发现的任何真实缺陷需按既有条目先修复代码、补自动化回归，再重跑受影响步骤，不得带着已知缺陷标记通过。
+
+清理：删除 `tmp-f190-e2e/` fixture、一次性 SSH 密钥对（若新生成）、临时 `ssh-agent`（若新起）、`dist`、`test-results` 与 `src-tauri/target`；`git status --short` 确认工作树干净。
+
+完成后：将真实结果写入 `features.json` F190 的 `evidence`（`nativeScenarios`/`platformGaps`），并把 F190 状态改为 `complete`；随后 `progress.md`「当前最小工作项」切到 F200。
+
 ## 后续条目（随切片追加）
 
 - F030 遗留：真实 `CloseRequested` 关窗握手协议实现后，补「正常关窗 → 重开恢复」的桌面验收变体。
@@ -642,3 +678,4 @@ Close Folder 时序：主窗口在执行 `Cmd+K F` 前把 primary 最后一个 r
 - F170 S4 New Window/Close Folder、双窗口 capability/dirty 隔离、稳定 backup 先于撤权、跨进程逐根恢复矩阵 E2E-022 已完成；F170 继续进入系统 Trash。
 - F170 S5 系统 Trash DOM 确认/取消、确认期间 identity 竞态、真实 Finder 废纸篓与“放回原处”恢复矩阵 E2E-023 已完成；F170 已整体关闭，唯一 WIP 切到 F180。
 - F180 remote/upstream、branch/tag、冲突/abort、真实 in-flight cancel、history rewrite、reflog/contributors、selected hunk 与进程/Recent 清理矩阵 E2E-024 已完成；F180 已整体关闭，唯一 WIP 切到 F190。
+- F190 S1–S6（profile/cwd、future-tab defaults、递归 split、OSC 7/8/133 与链接、终端查找、live scrollback、真实 exit banner 与不可恢复 marker）自动化两层已闭合；真实桌面 profile/cwd 冷启动持久化、OSC 真实注入与降级、链接 opener、split 上限、查找、live scrollback、真实 shell 退出/信号 banner、异常 kill 重启不可恢复说明、`SSH_AUTH_SOCK` 继承与零残留进程矩阵已登记为 E2E-025（**待执行**）；F190 保持 `in_progress`，唯一 WIP 待 E2E-025 通过后关闭并转入 F200。

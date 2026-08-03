@@ -60,7 +60,6 @@ fn runtime_info(app: tauri::AppHandle) -> Result<RuntimeInfo, CommandError> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .manage(TerminalService::new())
         .manage(GitNetworkService::new())
         .manage(GitHistoryOperationService::new())
         .manage(DebugSessionService::new())
@@ -75,6 +74,12 @@ pub fn run() {
             app.manage(ThemeService::new(base_path.clone()));
             app.manage(TrustService::new(base_path.clone()));
             app.manage(ConfirmationService::new(base_path.clone()));
+            // `F190` S6: the lifecycle marker is this service's only
+            // persisted state (see `TerminalLifecycleMarkerStore`'s own doc
+            // comment) — `TerminalService::new` therefore joins the other
+            // `base_path`-scoped domains here instead of being pre-`.setup()`
+            // `.manage()`d like the ones above, which never needed it.
+            app.manage(TerminalService::new(base_path.clone()));
             app.manage(UserDataService::new(base_path));
             Ok(())
         })
@@ -237,6 +242,7 @@ pub fn run() {
             terminal::commands::terminal_scrollback,
             terminal::commands::terminal_kill,
             terminal::commands::terminal_open_external_link,
+            terminal::commands::terminal_lifecycle_marker,
             theme::commands::theme_import_vsix,
             theme::commands::theme_import_directory,
             theme::commands::theme_list,

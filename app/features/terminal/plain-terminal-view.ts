@@ -34,6 +34,7 @@ import {
 	type TerminalFutureTabDefaults,
 	validateFutureTabCwdInput,
 } from "./plain-terminal-defaults";
+import { formatTerminalNonRestorableNotice } from "./plain-terminal-lifecycle";
 import { TerminalPaneController } from "./plain-terminal-pane";
 import type { TerminalSplitNode } from "./plain-terminal-split-tree";
 import {
@@ -121,6 +122,31 @@ import {
  * disposes (in [`#closePane`]/[`#closeTab`]) ever have their controller torn
  * down; every other visible pane survives an arbitrarily deep tree rebuild
  * unchanged.
+ *
+ * # `F190` S6 "跨进程不伪造 session restore": the one-time non-restorable
+ * notice
+ *
+ * `renderBody` fires exactly one `PlainBridge.terminalLifecycleMarker()` call
+ * (see [`#checkLifecycleMarker`]) — this is a per-*view* concept, unlike
+ * [`TerminalPaneController`]'s own per-pane real exit banner (see that
+ * class's own "真实 exit banner" doc section), since it must be visible even
+ * before any pane in this view has been created at all. A nonzero result
+ * means the previous frontend generation left that many sessions
+ * un-explicitly-closed (an abnormal `WebView` reload or a full crash — see
+ * `TerminalService::claim_lifecycle_marker`'s own doc comment); this view
+ * then un-hides `#nonRestorableNoticeElement` — a standalone banner built
+ * once in `renderBody`, sitting above the tab strip — showing
+ * [`formatTerminalNonRestorableNotice`]'s text. A banner, not text folded
+ * into the empty-state placeholder: `Plain: Create Terminal` (the only path
+ * that ever constructs this view at all) unconditionally goes on to call
+ * [`openNewTab`] right after, which itself either creates a tab (hiding the
+ * empty state within the same tick) or overwrites that same element's own
+ * text with its own "select/open a folder" messaging — either way, text
+ * placed there could never reliably stay visible long enough for a user to
+ * actually read it. The banner is not tied to tab count or root selection at
+ * all, so it stays visible — until the user dismisses it with its own close
+ * button — regardless of what else this view's first `Create Terminal`
+ * invocation does.
  */
 export class PlainTerminalView extends ViewPane {
 	static readonly ID = "plain.workbench.view.terminal";
@@ -148,6 +174,18 @@ export class PlainTerminalView extends ViewPane {
 	#paneAreaElement: HTMLElement | undefined;
 	#emptyStateElement: HTMLElement | undefined;
 	#pendingNewTab = false;
+
+	/** `F190` S6: the one-time non-restorable notice banner and its text
+	 * span — see the class doc's own "one-time non-restorable notice"
+	 * section. Deliberately a standalone banner, not text folded into
+	 * `#emptyStateElement`: the empty state is hidden the instant any tab
+	 * exists (and `openNewTab`'s own root-resolution messaging already
+	 * overwrites that same element's text in the no-root case), neither of
+	 * which this notice should be at the mercy of — it must stay visible
+	 * (until the user dismisses it) regardless of whatever else this view's
+	 * own first `Plain: Create Terminal` invocation goes on to do. */
+	#nonRestorableNoticeElement: HTMLElement | undefined;
+	#nonRestorableNoticeTextElement: HTMLElement | undefined;
 
 	/** `F190` S3: the two split buttons plus the hint text next to them — see
 	 * `#syncSplitControls`'s own doc comment. */
@@ -194,6 +232,32 @@ export class PlainTerminalView extends ViewPane {
 	protected override renderBody(container: HTMLElement): void {
 		super.renderBody(container);
 		container.classList.add("plain-terminal-view-body");
+
+		// `F190` S6 "跨进程不伪造 session restore": built once, here, always
+		// mounted (`hidden` by default) — see the class doc's own "one-time
+		// non-restorable notice" section for why this is a standalone banner
+		// rather than text folded into the empty-state placeholder below.
+		const nonRestorableNotice = document.createElement("div");
+		nonRestorableNotice.className = "plain-terminal-non-restorable-notice";
+		nonRestorableNotice.setAttribute("role", "status");
+		nonRestorableNotice.hidden = true;
+		const nonRestorableNoticeText = document.createElement("span");
+		nonRestorableNotice.append(nonRestorableNoticeText);
+		const nonRestorableNoticeClose = document.createElement("button");
+		nonRestorableNoticeClose.type = "button";
+		nonRestorableNoticeClose.className =
+			"plain-terminal-non-restorable-notice-close";
+		nonRestorableNoticeClose.setAttribute("aria-label", "Dismiss");
+		nonRestorableNoticeClose.textContent = "×";
+		this._register(
+			addDisposableListener(nonRestorableNoticeClose, "click", () => {
+				nonRestorableNotice.hidden = true;
+			}),
+		);
+		nonRestorableNotice.append(nonRestorableNoticeClose);
+		container.append(nonRestorableNotice);
+		this.#nonRestorableNoticeElement = nonRestorableNotice;
+		this.#nonRestorableNoticeTextElement = nonRestorableNoticeText;
 
 		const tabStrip = document.createElement("div");
 		tabStrip.className = "plain-terminal-tabstrip";
@@ -358,6 +422,11 @@ export class PlainTerminalView extends ViewPane {
 		this.#syncTabVisibility();
 		this.#syncSplitControls();
 		this.#initFutureTabDefaultsControls();
+		// `F190` S6: fire-and-forget — see `#checkLifecycleMarker`'s own doc
+		// comment and the class doc's "one-time non-restorable notice"
+		// section. Exactly one call per view instance: `renderBody` itself
+		// only ever runs once, at construction.
+		void this.#checkLifecycleMarker();
 	}
 
 	protected override layoutBody(height: number, width: number): void {
@@ -663,6 +732,34 @@ export class PlainTerminalView extends ViewPane {
 			{ signal: abort.signal },
 		);
 		paneElement.append(closeButton);
+	}
+
+	/**
+	 * `F190` S6 "跨进程不伪造 session restore": called exactly once, from
+	 * `renderBody` — see the class doc's own "one-time non-restorable
+	 * notice" section for the full contract this implements. A failed bridge
+	 * call (best-effort; this is a UX nicety, never something a real session
+	 * should ever be blocked on) simply shows no notice, matching a `0`
+	 * result — this view has no other user-facing surface to report an IPC
+	 * failure through at this point (no session, no root, nothing else has
+	 * happened yet), and staying silent is preferable to a confusing error
+	 * before the user has done anything at all.
+	 */
+	async #checkLifecycleMarker(): Promise<void> {
+		let result;
+		try {
+			result = await requireTerminalBridge().terminalLifecycleMarker();
+		} catch {
+			return;
+		}
+		if (result.nonRestorableCount <= 0) {
+			return;
+		}
+		if (this.#nonRestorableNoticeTextElement !== undefined) {
+			this.#nonRestorableNoticeTextElement.textContent =
+				formatTerminalNonRestorableNotice(result.nonRestorableCount);
+		}
+		this.#nonRestorableNoticeElement?.removeAttribute("hidden");
 	}
 
 	#workspaceRoots(): readonly PlainWorkspaceRoot[] {

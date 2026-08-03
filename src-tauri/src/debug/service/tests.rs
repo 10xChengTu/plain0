@@ -1158,7 +1158,8 @@ fn run_in_terminal_reverse_request_spawns_a_real_terminal_service_session_with_n
     let service = DebugSessionService::new();
     let (sink, sink_for_session) = recording_sink();
 
-    let terminal = std::sync::Arc::new(TerminalService::new());
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = std::sync::Arc::new(TerminalService::new(terminal_base.path().to_path_buf()));
     let terminal_sink = std::sync::Arc::new(RecordingTerminalSink::default());
     let terminal_sink_for_handler: std::sync::Arc<dyn TerminalOutputSink> = terminal_sink.clone();
     let selected_root_id = root_id_at(&workspace, window_label, 1);

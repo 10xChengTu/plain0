@@ -8,6 +8,7 @@ import type {
 	TerminalDirty,
 	TerminalExitEvent,
 	TerminalFrame,
+	TerminalLifecycleMarkerResult,
 	TerminalProfile,
 	TerminalProfilesResult,
 	TerminalRgb,
@@ -39,6 +40,19 @@ const MAX_TERMINAL_PROFILE_ID_BYTES = 64;
 const MAX_TERMINAL_PROFILE_LABEL_BYTES = 256;
 const MAX_TERMINAL_PROFILES = 32;
 const MAX_TERMINAL_CWD_BYTES = 4_096;
+/** `F190` S6 "真实 exit banner": generous ceiling on a real signal name's
+ * UTF-8 byte length (portable_pty's own `strsignal`-derived strings — e.g.
+ * `"Killed: 9"` — are a handful of bytes; a hostile-input backstop, not an
+ * expected value) — mirrors `terminal::dto`'s own defensive-ceiling
+ * precedent for every other native-issued string this codec decodes. */
+const MAX_TERMINAL_EXIT_SIGNAL_BYTES = 256;
+/** Defensive ceiling on `terminal_lifecycle_marker`'s `nonRestorableCount` —
+ * matches `MAX_TERMINAL_SESSIONS_PER_WINDOW` in spirit (this count can never
+ * exceed however many sessions a single window could ever have accumulated
+ * without an explicit close), generous enough it never needs to track that
+ * constant exactly.
+ */
+const MAX_TERMINAL_NON_RESTORABLE_COUNT = 4_096;
 /** A frame can never report more rows than `MAX_TERMINAL_DIMENSION`, nor a
  * row more cells than that same bound (it doubles as the max column count
  * `terminal_start`/`terminal_resize` accept). */
@@ -287,6 +301,15 @@ export function frozenTerminalStartRequest(
 }
 
 export function frozenTerminalProfilesRequest(): Readonly<
+	Record<never, never>
+> {
+	return Object.freeze({});
+}
+
+/** `F190` S6: `terminal_lifecycle_marker`'s request is empty — the window
+ * itself is this call's whole subject, supplied natively by Tauri's own
+ * `WebviewWindow` extractor, never by this request body. */
+export function frozenTerminalLifecycleMarkerRequest(): Readonly<
 	Record<never, never>
 > {
 	return Object.freeze({});
@@ -554,6 +577,32 @@ export function decodeTerminalVoid(value: unknown): void {
 	if (value !== null) {
 		violation();
 	}
+}
+
+/** Decodes a `terminal_lifecycle_marker` response: an own-data, exactly
+ * `{ nonRestorableCount }` object whose value is a bounded non-negative
+ * integer. */
+export function decodeTerminalLifecycleMarkerResult(
+	value: unknown,
+): TerminalLifecycleMarkerResult {
+	if (!isPlainObject(value) || !hasExactKeys(value, ["nonRestorableCount"])) {
+		return violation();
+	}
+	const { nonRestorableCount } = value;
+	if (
+		typeof nonRestorableCount !== "number" ||
+		!Number.isSafeInteger(nonRestorableCount) ||
+		nonRestorableCount < 0 ||
+		nonRestorableCount > MAX_TERMINAL_NON_RESTORABLE_COUNT
+	) {
+		return violation();
+	}
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze({ nonRestorableCount });
 }
 
 const UNDERLINE_VALUES: readonly TerminalUnderline[] = Object.freeze([
@@ -956,9 +1005,23 @@ export function frozenTerminalDataEvent(
  * "no wire boundary to round-trip through" rationale as
  * [`frozenTerminalDataEvent`].
  */
+/** Shared by [`frozenTerminalExitEvent`]/[`decodeTerminalExitEvent`]: `null`
+ * (a normal exit) or a non-empty, byte-bounded signal name. */
+function isValidExitSignal(value: unknown): value is string | null {
+	if (value === null) {
+		return true;
+	}
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		utf8ByteLength(value) <= MAX_TERMINAL_EXIT_SIGNAL_BYTES
+	);
+}
+
 export function frozenTerminalExitEvent(
 	sessionId: unknown,
 	exitCode: unknown,
+	signal: unknown,
 ): TerminalExitEvent {
 	if (!isUuidV4(sessionId)) {
 		return violation();
@@ -971,17 +1034,23 @@ export function frozenTerminalExitEvent(
 	) {
 		return violation();
 	}
-	return Object.freeze({ sessionId, exitCode });
+	if (!isValidExitSignal(signal)) {
+		return violation();
+	}
+	return Object.freeze({ sessionId, exitCode, signal });
 }
 
 /**
  * Decodes a `plain://terminal-exit` event payload: an own-data, exactly
- * `{ sessionId, exitCode }` object.
+ * `{ sessionId, exitCode, signal }` object. `F190` S6: `signal` is `null`
+ * for a normal exit (`exitCode` alone is then the real exit status) or a
+ * real signal name, in which case `exitCode` is not meaningful on its own
+ * — see `TerminalExitEvent`'s own doc comment.
  */
 export function decodeTerminalExitEvent(value: unknown): TerminalExitEvent {
 	if (
 		!isPlainObject(value) ||
-		!hasExactKeys(value, ["sessionId", "exitCode"])
+		!hasExactKeys(value, ["sessionId", "exitCode", "signal"])
 	) {
 		return violation();
 	}
@@ -996,6 +1065,9 @@ export function decodeTerminalExitEvent(value: unknown): TerminalExitEvent {
 	) {
 		return violation();
 	}
+	if (!isValidExitSignal(value.signal)) {
+		return violation();
+	}
 	try {
 		rejectProxyObject(value);
 	} catch {
@@ -1004,6 +1076,7 @@ export function decodeTerminalExitEvent(value: unknown): TerminalExitEvent {
 	return Object.freeze({
 		sessionId: value.sessionId,
 		exitCode: value.exitCode,
+		signal: value.signal,
 	});
 }
 

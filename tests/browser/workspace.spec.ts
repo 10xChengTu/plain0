@@ -530,6 +530,13 @@ async function installNativeIpcMock(
 	// `F170` S5C: simulates begin-time identity revalidation rejecting a
 	// changed entry before any platform Trash attempt.
 	trashBeginFailuresForTest = 0,
+	// `F190` S6: pre-seeds this window's persisted "N terminal sessions left
+	// un-explicitly-closed by the previous run" marker, simulating a real
+	// abnormal reload/crash — a fresh `terminal_lifecycle_marker` call
+	// reports (and clears) exactly this value. `0` (the default) matches
+	// every other existing scenario's own "ordinary mount, nothing to
+	// report" expectation.
+	terminalLifecycleMarkerForTest = 0,
 ): Promise<void> {
 	await page.addInitScript(
 		({
@@ -552,6 +559,7 @@ async function installNativeIpcMock(
 			untitledFixtureForTest,
 			trashOutcomesForTest,
 			trashBeginFailuresForTest,
+			terminalLifecycleMarkerForTest,
 		}) => {
 			const calls: Array<{
 				command: string;
@@ -636,6 +644,39 @@ async function installNativeIpcMock(
 							Array.from(bytes),
 						]),
 					),
+				);
+			};
+			// `F190` S6 "跨进程不伪造 session restore": this window's persisted
+			// "N terminal sessions left un-explicitly-closed by the previous
+			// run" marker — same `sessionStorage` round-trip as the backup store
+			// above and for the same reason (must survive `page.reload()`,
+			// unlike this closure's own in-memory state). Seeded from
+			// `terminalLifecycleMarkerForTest` only when nothing is stored yet
+			// (a real fresh test run) — a `page.reload()` within the same test
+			// must see whatever value real `terminal_start`/`terminal_kill`
+			// activity (or an already-claimed marker) actually left behind, not
+			// silently reset back to the constructor argument every time.
+			const TERMINAL_LIFECYCLE_MARKER_STORAGE_KEY =
+				"__plain_test_terminal_lifecycle_marker__";
+			if (
+				sessionStorage.getItem(TERMINAL_LIFECYCLE_MARKER_STORAGE_KEY) === null
+			) {
+				sessionStorage.setItem(
+					TERMINAL_LIFECYCLE_MARKER_STORAGE_KEY,
+					String(Math.max(0, terminalLifecycleMarkerForTest)),
+				);
+			}
+			const loadTerminalLifecycleMarker = (): number => {
+				const raw = sessionStorage.getItem(
+					TERMINAL_LIFECYCLE_MARKER_STORAGE_KEY,
+				);
+				const parsed = raw === null ? 0 : Number.parseInt(raw, 10);
+				return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
+			};
+			const storeTerminalLifecycleMarker = (value: number): void => {
+				sessionStorage.setItem(
+					TERMINAL_LIFECYCLE_MARKER_STORAGE_KEY,
+					String(Math.max(0, value)),
 				);
 			};
 			const scriptedSavePicks = [...(untitledFixtureForTest.savePicks ?? [])];
@@ -1780,6 +1821,12 @@ async function installNativeIpcMock(
 				hyperlinks: Map<string, string>;
 				semantics: Map<string, "output" | "input" | "prompt">;
 				rowSemanticPrompts: Map<number, "none" | "prompt" | "continuation">;
+				// `F190` S6 "真实 exit banner": guards `emitTerminalExit` so it
+				// only ever fires once per session, mirroring the real one-shot
+				// `plain://terminal-exit` contract (and
+				// `BrowserMockTerminalSessionController.finish`'s own identical
+				// guard in `app/platform/tauri/browser-mock.ts`).
+				exited: boolean;
 			}
 			const terminalSessions = new Map<string, FakeTerminalSession>();
 			let terminalSessionSerial = 401;
@@ -1860,8 +1907,13 @@ async function installNativeIpcMock(
 			function emitTerminalExit(
 				session: FakeTerminalSession,
 				exitCode: number,
+				signal: string | null = null,
 			): void {
-				const payload = { sessionId: session.sessionId, exitCode };
+				if (session.exited) {
+					return;
+				}
+				session.exited = true;
+				const payload = { sessionId: session.sessionId, exitCode, signal };
 				for (const [eventId, registration] of eventHandlers) {
 					if (registration.event !== "plain://terminal-exit") {
 						continue;
@@ -2674,6 +2726,34 @@ async function installNativeIpcMock(
 				terminalAppendText(session, text);
 				requestTerminalEmit(session);
 			};
+			// `F190` S6 "真实 exit banner": simulates the shell process exiting
+			// **on its own** (never via `terminal_kill`, which already emits its
+			// own fixed exit event above and removes the session from this
+			// fixture's table) — the session stays in `terminalSessions`
+			// afterward, mirroring the real `TerminalService`'s own "an exited
+			// session still occupies a slot until explicitly killed" contract
+			// (`terminal::service`'s module doc), so a subsequent
+			// `terminal_scrollback`/`terminal_kill` against the same id still
+			// resolves normally.
+			(
+				window as unknown as Window & {
+					__PLAIN_TEST_TERMINAL_EXIT__(
+						exitCode: number,
+						signal?: string | null,
+						sessionId?: string,
+					): void;
+				}
+			).__PLAIN_TEST_TERMINAL_EXIT__ = (exitCode, signal, sessionId) => {
+				const targetId = sessionId ?? lastStartedTerminalSessionId;
+				if (targetId === undefined) {
+					throw new Error("No terminal session has been started yet.");
+				}
+				const session = terminalSessions.get(targetId);
+				if (session === undefined) {
+					throw new Error(`Terminal session ${targetId} no longer exists.`);
+				}
+				emitTerminalExit(session, exitCode, signal ?? null);
+			};
 			(
 				window as unknown as Window & {
 					__PLAIN_TEST_TERMINAL_LAST_SESSION_ID__(): string | undefined;
@@ -2791,7 +2871,15 @@ async function installNativeIpcMock(
 					hyperlinks: new Map(),
 					semantics: new Map(),
 					rowSemanticPrompts: new Map(),
+					exited: false,
 				});
+				// `F190` S6: mirrors real `TerminalService::start_program`, which
+				// (like every other session-creation path) funnels through the
+				// same shared `spawn_session` this domain's own
+				// `record_started` call lives in — a `runInTerminal`-adopted
+				// session counts toward this window's marker exactly like an
+				// ordinary `terminal_start` one does.
+				storeTerminalLifecycleMarker(loadTerminalLifecycleMarker() + 1);
 			};
 
 			testWindow.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
@@ -4003,9 +4091,18 @@ async function installNativeIpcMock(
 								hyperlinks: new Map(),
 								semantics: new Map(),
 								rowSemanticPrompts: new Map(),
+								exited: false,
 							};
 							terminalSessions.set(sessionId, session);
 							lastStartedTerminalSessionId = sessionId;
+							// `F190` S6 "跨进程不伪造 session restore": mirrors
+							// `TerminalService::spawn_session`'s own
+							// `TerminalLifecycleMarkerStore::record_started` call — every
+							// successful session start increments this window's marker,
+							// regardless of whether it is later explicitly closed
+							// (`terminal_kill`, below) or left un-closed for a later
+							// `terminal_lifecycle_marker` call to report.
+							storeTerminalLifecycleMarker(loadTerminalLifecycleMarker() + 1);
 							// `F190` S4: mirrors `terminal::shell_integration::plan_for_shell`'s
 							// own family split — `systemDefault`/`zsh` are audited families
 							// (`injected`); `sh` is deliberately not, exactly like the real
@@ -4131,6 +4228,13 @@ async function installNativeIpcMock(
 								{ sessionId?: string } | undefined;
 							const session = getFakeTerminalSession(killRequest?.sessionId);
 							terminalSessions.delete(session.sessionId);
+							// `F190` S6: mirrors `TerminalService::kill`'s own
+							// `TerminalLifecycleMarkerStore::record_ended(window_label, 1)`
+							// call — an explicit `terminal_kill` is, by construction,
+							// always a "正常显式关闭" the marker must not keep counting.
+							storeTerminalLifecycleMarker(
+								Math.max(0, loadTerminalLifecycleMarker() - 1),
+							);
 							emitTerminalExit(session, 137);
 							return null;
 						}
@@ -4154,6 +4258,17 @@ async function installNativeIpcMock(
 								});
 							}
 							return null;
+						}
+						// `F190` S6 "跨进程不伪造 session restore": mirrors
+						// `TerminalService::claim_lifecycle_marker` — reads and
+						// unconditionally clears this window's marker, reporting
+						// whatever it held. Never touches `terminalSessions` (the real
+						// command never kills a session on its own either — see that
+						// method's own doc comment for why).
+						case "terminal_lifecycle_marker": {
+							const nonRestorableCount = loadTerminalLifecycleMarker();
+							storeTerminalLifecycleMarker(0);
+							return { nonRestorableCount };
 						}
 						case "git_status": {
 							if (!terminalTrusted) {
@@ -5245,6 +5360,7 @@ async function installNativeIpcMock(
 			untitledFixtureForTest,
 			trashOutcomesForTest,
 			trashBeginFailuresForTest,
+			terminalLifecycleMarkerForTest,
 		},
 	);
 }
@@ -6567,6 +6683,15 @@ async function installMultiRootNativeIpcMock(
 								});
 							}
 							return null;
+						}
+						// `F190` S6: this fixture has no reason to model reload/crash
+						// marker persistence of its own — every scenario using it
+						// predates `F190` S6 and expects an ordinary, notice-free
+						// mount; `0` is that answer. The dedicated single-root
+						// `installNativeIpcMock` fixture is what this slice's own
+						// non-restorable-lifecycle scenarios use instead.
+						case "terminal_lifecycle_marker": {
+							return { nonRestorableCount: 0 };
 						}
 						case "git_status": {
 							const selectedRootId = selectedGitRootId(args);
@@ -14813,6 +14938,32 @@ async function pushTerminalOutput(
 	);
 }
 
+/** `F190` S6 "真实 exit banner": simulates the given session's shell process
+ * exiting **on its own** (never an explicit `terminal_kill`) via
+ * `__PLAIN_TEST_TERMINAL_EXIT__` — see that hook's own doc comment for why
+ * the fake session is deliberately left in the mock's live table afterward,
+ * mirroring the real `TerminalService`. */
+async function emitTerminalProcessExit(
+	page: Page,
+	exitCode: number,
+	signal: string | null = null,
+	sessionId?: string,
+): Promise<void> {
+	await page.evaluate(
+		({ exitCode, signal, sessionId }) => {
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_TERMINAL_EXIT__(
+					exitCode: number,
+					signal?: string | null,
+					sessionId?: string,
+				): void;
+			};
+			testWindow.__PLAIN_TEST_TERMINAL_EXIT__(exitCode, signal, sessionId);
+		},
+		{ exitCode, signal, sessionId },
+	);
+}
+
 /** Pushes every one of `lines` (each newline-terminated) via its own
  * `__PLAIN_TEST_TERMINAL_PUSH__` call, all within a single synchronous
  * `page.evaluate` turn -- the same "many writes with no yield in between"
@@ -17196,6 +17347,243 @@ test("shell-integration injection status is accurately observable: injected for 
 		"data-terminal-shell-integration",
 		"unsupportedShell",
 	);
+
+	expect(pageErrors).toEqual([]);
+});
+
+// --- `F190` S6 "explicit non-restorable lifecycle": real exit banner and
+// the one-time non-restorable notice ---------------------------------------
+
+test("a real (non-killed) shell exit shows an accurate, path-free banner without closing the pane, further input is inert, and an explicit close afterward still works", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+
+	// A normal exit: `exitCode` alone is the real, meaningful outcome.
+	const pane = page.locator(".plain-terminal-pane");
+	await emitTerminalProcessExit(page, 130);
+	await expect(pane).toHaveAttribute("data-terminal-exited", "true");
+	await expect(pane).toHaveAttribute("data-terminal-exit-code", "130");
+	await expect(pane).not.toHaveAttribute("data-terminal-exit-signal");
+	const status = page.locator(".plain-terminal-status");
+	await expect(status).toHaveText(
+		"The shell process exited with code 130. This session has ended and cannot be resumed — close this pane when you are done with it.",
+	);
+	expect(await status.innerText()).not.toMatch(/[/\\]/);
+	// A real exit never auto-closes anything — the tab/pane stay exactly as
+	// they were, still fully visible.
+	await expect(page.locator(".plain-terminal-tab")).toHaveCount(1);
+	await expect(pane).toBeVisible();
+
+	// Typing into the now-dead session is a harmless no-op: no further
+	// `terminal_input_key` call, and — the real point of this assertion —
+	// no unhandled-rejection `pageerror` from a write against a session the
+	// mock (mirroring real Rust) still remembers but nothing reads from
+	// anymore.
+	const inputKeyCallsBeforeTyping = (
+		await terminalCallsFor(page, "terminal_input_key")
+	).length;
+	await page.locator(".plain-terminal-input").focus();
+	await page.keyboard.type("still typing after exit");
+	expect((await terminalCallsFor(page, "terminal_input_key")).length).toBe(
+		inputKeyCallsBeforeTyping,
+	);
+
+	// Split, creating a second pane whose own session then exits by signal
+	// — `exitCode` alone (`1`, `portable_pty`'s own meaningless placeholder
+	// — see `TerminalExitEvent.signal`'s doc comment) must not be what the
+	// banner leads with.
+	await page.getByRole("button", { name: "Split Terminal Right" }).click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(2);
+	const activePane = page.locator('.plain-terminal-pane[data-active="true"]');
+	await emitTerminalProcessExit(page, 1, "Killed: 9");
+	await expect(activePane).toHaveAttribute(
+		"data-terminal-exit-signal",
+		"Killed: 9",
+	);
+	const activeStatus = activePane.locator(".plain-terminal-status");
+	await expect(activeStatus).toHaveText(
+		"The shell process was terminated (Killed: 9). This session has ended and cannot be resumed — close this pane when you are done with it.",
+	);
+	expect(await activeStatus.innerText()).not.toContain("exited with code");
+
+	// The user can still close an exited pane manually — the ordinary
+	// explicit `terminal_kill` path is unaffected by an already-observed
+	// exit.
+	await activePane.locator(".plain-terminal-pane-close").click();
+	await expect(page.locator(".plain-terminal-pane")).toHaveCount(1);
+	expect(
+		terminalKillSessionIds(await terminalCallsFor(page, "terminal_kill")),
+	).toHaveLength(1);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("an explicit pane close never shows a banner and decrements the lifecycle marker, so a later reload shows no non-restorable notice", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+	await expect(
+		page.locator(".plain-terminal-non-restorable-notice"),
+	).toBeHidden();
+	await expect(page.locator(".plain-terminal-status")).toHaveText("");
+
+	// Explicit close — the ordinary kill+join path, unchanged semantics: no
+	// exit banner (contrast the dedicated real-exit test above), and the
+	// marker this close decrements must never resurface as a notice later.
+	await page.locator(".plain-terminal-tab-close").click();
+	await expect(page.locator(".plain-terminal-tab")).toHaveCount(0);
+	expect(
+		terminalKillSessionIds(await terminalCallsFor(page, "terminal_kill")),
+	).toHaveLength(1);
+
+	// Simulate the next cold start: reload re-runs this fixture's
+	// `addInitScript` from scratch, but the lifecycle marker round-trips
+	// through `sessionStorage`, which the reload itself preserves — see
+	// `installNativeIpcMock`'s own `terminalLifecycleMarkerForTest` doc
+	// comment.
+	await page.reload();
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	await executePaletteCommand(page, "Open Folder", "File: Open Folder...");
+	await createTerminal(page);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+	await expect(
+		page.locator(".plain-terminal-non-restorable-notice"),
+	).toBeHidden();
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("an abnormal reload's leftover sessions show a one-time, path-free non-restorable notice that a second reload never repeats", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{},
+		{},
+		{},
+		{},
+		[],
+		0,
+		// `F190` S6: simulates 2 sessions the previous run left
+		// un-explicitly-closed — a real abnormal `WebView` reload or crash.
+		2,
+	);
+	await openNativeWorkspaceExplorer(page);
+
+	// The notice must be visible the moment the terminal view first mounts
+	// — `Plain: Create Terminal` also creates a real tab here (a workspace
+	// root is already open), but the notice is not tied to that at all.
+	await createTerminal(page);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+	await expect(
+		await terminalCallsFor(page, "terminal_lifecycle_marker"),
+	).toHaveLength(1);
+
+	const notice = page.locator(".plain-terminal-non-restorable-notice");
+	await expect(notice).toBeVisible();
+	await expect(notice).toContainText(
+		"2 previous terminal sessions ended without being explicitly closed and could not be restored.",
+	);
+	expect(await notice.innerText()).not.toMatch(/[/\\]/);
+
+	// User-dismissible.
+	await notice.getByRole("button", { name: "Dismiss" }).click();
+	await expect(notice).toBeHidden();
+
+	// `createTerminal` above also created one real tab (a root was already
+	// open) — its own session is itself now "open and un-explicitly-closed"
+	// exactly like any other, so it must be closed explicitly before the
+	// next reload, or *it* would correctly (not spuriously) reappear as a
+	// fresh notice — that is a different, already-covered behavior (see
+	// the dedicated explicit-close test above), not what this test itself
+	// is about.
+	await page.locator(".plain-terminal-tab-close").click();
+	await expect(page.locator(".plain-terminal-tab")).toHaveCount(0);
+
+	// The marker was already claimed by that first mount, and the one real
+	// session it opened was just explicitly closed — a second, unrelated
+	// reload must not show the notice again.
+	await page.reload();
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	await executePaletteCommand(page, "Open Folder", "File: Open Folder...");
+	await createTerminal(page);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+	await expect(
+		page.locator(".plain-terminal-non-restorable-notice"),
+	).toBeHidden();
 
 	expect(pageErrors).toEqual([]);
 });

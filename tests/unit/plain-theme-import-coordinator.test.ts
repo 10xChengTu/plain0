@@ -149,6 +149,7 @@ function fakeBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		terminalScrollback: notImplemented,
 		terminalKill: notImplemented,
 		terminalOpenExternalLink: notImplemented,
+		terminalLifecycleMarker: notImplemented,
 		terminalWatchData: notImplemented,
 		terminalWatchExit: notImplemented,
 		workspaceTrustState: notImplemented,

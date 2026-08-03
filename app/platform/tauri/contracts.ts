@@ -605,10 +605,28 @@ export interface TerminalDataEvent {
  * ignore the event, not treat it as a contract violation. See
  * `terminal-stream.ts`'s doc comment for why this event is *not* proof that
  * no further `TerminalDataEvent` for the same session will arrive.
+ *
+ * `F190` S6 "真实 exit banner": `signal` is `null` for a normal exit (in
+ * which case `exitCode` is the process's own real exit status) or the real
+ * signal name for a signal-terminated process, in which case `exitCode`
+ * alone is **not** meaningful — see `src-tauri/src/terminal/dto.rs`'s
+ * `TerminalExitEvent` doc comment for why (Rust's own `portable_pty`
+ * dependency hardcodes `exitCode` to `1` whenever a signal terminated the
+ * process, which is not itself a real exit status).
  */
 export interface TerminalExitEvent {
 	readonly sessionId: string;
 	readonly exitCode: number;
+	readonly signal: string | null;
+}
+
+/**
+ * `terminal_lifecycle_marker` response — see `PlainBridge.
+ * terminalLifecycleMarker`'s own doc comment for the full "read once, then
+ * it is claimed" contract this reports.
+ */
+export interface TerminalLifecycleMarkerResult {
+	readonly nonRestorableCount: number;
 }
 
 /** Wire projection of one `terminal::vt::ScrollbackCell` — lighter than
@@ -1781,6 +1799,17 @@ export interface PlainBridge {
 	 * already restricted to that same scheme — never automatically from
 	 * terminal output alone. */
 	terminalOpenExternalLink(url: string): Promise<void>;
+	/** `F190` S6 "跨进程不伪造 session restore": called once by a freshly
+	 * mounted terminal view, before it starts any session of its own — reads
+	 * and unconditionally clears this window's durable "sessions left
+	 * un-explicitly-closed by the previous frontend generation" marker,
+	 * returning whatever value it held. A nonzero value means an abnormal
+	 * reload or a crash happened; a second call for the same window with no
+	 * intervening reload/crash reports `0`. See `TerminalService::
+	 * claim_lifecycle_marker`'s own doc comment for the full contract
+	 * (including why this deliberately never kills any session on its own —
+	 * PTY sessions are never reconnected across this call, only reported). */
+	terminalLifecycleMarker(): Promise<TerminalLifecycleMarkerResult>;
 	/** Registers a listener for every terminal session's streamed
 	 * render-state frames in this window. The listener receives the full
 	 * decoded event (including `sessionId`) and must filter for the

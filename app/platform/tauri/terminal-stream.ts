@@ -48,8 +48,11 @@ export interface TerminalStreamHandlers {
 	readonly onFrame: (frame: TerminalFrame, sequence: number) => void;
 	/** Called once, the first time this session's exit is observed. Does
 	 * *not* imply `onFrame` will never fire again for this session — see
-	 * the module doc. */
-	readonly onExit: (exitCode: number) => void;
+	 * the module doc. `F190` S6: `signal` is `null` for a normal exit
+	 * (`exitCode` is then the real exit status) or the real signal name for
+	 * a signal-terminated process, in which case `exitCode` alone is not
+	 * meaningful — see `TerminalExitEvent.signal`'s own doc comment. */
+	readonly onExit: (exitCode: number, signal: string | null) => void;
 }
 
 export interface TerminalStream {
@@ -241,7 +244,7 @@ export async function openTerminalStream(
 			return;
 		}
 		if (event.sessionId === sessionId) {
-			handlers.onExit(event.exitCode);
+			handlers.onExit(event.exitCode, event.signal);
 		}
 	});
 
@@ -269,7 +272,7 @@ export async function openTerminalStream(
 	pendingData.length = 0;
 	for (const event of pendingExit) {
 		if (event.sessionId === sessionId) {
-			handlers.onExit(event.exitCode);
+			handlers.onExit(event.exitCode, event.signal);
 		}
 	}
 	pendingExit.length = 0;
@@ -330,7 +333,7 @@ export async function attachTerminalStream(
 	});
 	const unlistenExit = transport.terminalWatchExit((event) => {
 		if (event.sessionId === sessionId) {
-			handlers.onExit(event.exitCode);
+			handlers.onExit(event.exitCode, event.signal);
 		}
 	});
 

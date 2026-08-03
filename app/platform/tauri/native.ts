@@ -128,6 +128,7 @@ import {
 import {
 	decodeTerminalDataEvent,
 	decodeTerminalExitEvent,
+	decodeTerminalLifecycleMarkerResult,
 	decodeTerminalProfilesResult,
 	decodeTerminalScrollbackResult,
 	decodeTerminalStartResult,
@@ -139,6 +140,7 @@ import {
 	frozenTerminalInputKeyRequest,
 	frozenTerminalInputTextRequest,
 	frozenTerminalKillRequest,
+	frozenTerminalLifecycleMarkerRequest,
 	frozenTerminalOpenExternalLinkRequest,
 	frozenTerminalProfilesRequest,
 	frozenTerminalResizeRequest,
@@ -784,6 +786,12 @@ export function createNativeBridge(): PlainBridge {
 			const request = frozenTerminalOpenExternalLinkRequest(url);
 			decodeTerminalVoid(
 				await invoke<unknown>("terminal_open_external_link", { request }),
+			);
+		},
+		terminalLifecycleMarker: async () => {
+			const request = frozenTerminalLifecycleMarkerRequest();
+			return decodeTerminalLifecycleMarkerResult(
+				await invoke<unknown>("terminal_lifecycle_marker", { request }),
 			);
 		},
 		terminalWatchData: (listener) => {

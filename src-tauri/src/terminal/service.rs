@@ -130,10 +130,13 @@ use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 
+use cap_std::ambient_authority;
+use cap_std::fs::Dir;
 use libghostty_vt::focus;
 use libghostty_vt::render::Dirty;
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 
+use crate::backup::{store as backup_store, BackupKey};
 use crate::error::CommandError;
 use crate::trust::service::TrustService;
 use crate::workspace::service::WorkspaceService;
@@ -319,21 +322,26 @@ pub struct TerminalService {
 
 struct TerminalState {
     windows: Mutex<HashMap<String, HashMap<TerminalSessionId, Arc<TerminalSession>>>>,
-}
-
-impl Default for TerminalService {
-    fn default() -> Self {
-        Self {
-            state: Arc::new(TerminalState {
-                windows: Mutex::new(HashMap::new()),
-            }),
-        }
-    }
+    /// `F190` S6 "跨进程不伪造 session restore" — see
+    /// [`TerminalLifecycleMarkerStore`]'s own doc comment.
+    lifecycle: TerminalLifecycleMarkerStore,
 }
 
 impl TerminalService {
-    pub fn new() -> Self {
-        Self::default()
+    /// `base_path` is the same app-local state directory every other
+    /// persisted domain (`backup`, `scratch`, `recent`, `user_data`, …)
+    /// receives from `lib.rs`'s `.setup()` — used only for this service's
+    /// own `F190` S6 lifecycle marker (see [`TerminalLifecycleMarkerStore`]);
+    /// every other part of this domain remains purely in-memory, matching
+    /// its pre-`F190`-S6 shape (`不伪造 session restore` — a session's own
+    /// PTY/threads are never themselves persisted or reconnected).
+    pub fn new(base_path: PathBuf) -> Self {
+        Self {
+            state: Arc::new(TerminalState {
+                windows: Mutex::new(HashMap::new()),
+                lifecycle: TerminalLifecycleMarkerStore::new(base_path),
+            }),
+        }
     }
 
     /// Starts a new session running the detected default shell (see
@@ -578,7 +586,7 @@ impl TerminalService {
             // each other too. Acceptable: starting a terminal is a rare,
             // human-triggered action and `openpty`+spawn is fast.
             let mut windows = lock(&state.windows);
-            let sessions = windows.entry(window_label).or_default();
+            let sessions = windows.entry(window_label.clone()).or_default();
             if sessions.len() >= MAX_TERMINAL_SESSIONS_PER_WINDOW {
                 return Err(terminal_session_limit_exceeded());
             }
@@ -686,6 +694,14 @@ impl TerminalService {
             }
 
             sessions.insert(session_id, session);
+            // `F190` S6: dropped explicitly (rather than just letting the
+            // closure end) so the marker's own best-effort file I/O below
+            // never runs while `state.windows` is still locked — it does not
+            // need that lock at all (it has its own, independent one), and
+            // there is no reason to hold every other window's `start`/`kill`
+            // calls behind it for the duration of an unrelated write.
+            drop(windows);
+            state.lifecycle.record_started(&window_label);
             Ok((session_id, child_pid))
         })
         .await
@@ -872,6 +888,15 @@ impl TerminalService {
                     .remove(&session_id)
                     .ok_or_else(terminal_session_not_found)?
             };
+            // `F190` S6: this call is, by construction, always an *explicit*
+            // close — the frontend never calls `terminal_kill` on its own
+            // initiative for a session it did not itself decide to tear
+            // down (a pane/tab close button, `Plain: Kill Terminal`, or a
+            // window's own `close_window` sweep below) — so this is exactly
+            // the "正常显式关闭...应把 marker 归零或相应递减" half of the
+            // marker's contract; see `TerminalLifecycleMarkerStore`'s own
+            // doc comment.
+            state.lifecycle.record_ended(&window_label, 1);
             terminate_session(&session, immediate);
             Ok(())
         })
@@ -884,22 +909,58 @@ impl TerminalService {
     /// cleanup call `lib.rs` wires alongside `WorkspaceService::close_window`
     /// and `BackupService::close_window`. Every session's kill+join runs on
     /// its own thread so this call's own wall-clock cost is bounded by the
-    /// single slowest session's teardown rather than their sum.
+    /// single slowest session's teardown rather than their sum. `F190` S6:
+    /// also clears this window's own lifecycle marker entirely — a real
+    /// window close is the other "正常显式关闭" case the marker's contract
+    /// covers (see [`TerminalLifecycleMarkerStore`]'s own doc comment); every
+    /// session this call reaps is, by definition, one this call itself is
+    /// about to kill+join, so there is nothing left for a later view to
+    /// report as unreachable.
     pub fn close_window(&self, window_label: &str) {
-        let sessions: Vec<Arc<TerminalSession>> = {
-            let mut windows = lock(&self.state.windows);
-            windows
-                .remove(window_label)
-                .map(|table| table.into_values().collect())
-                .unwrap_or_default()
-        };
-        let joiners: Vec<JoinHandle<()>> = sessions
-            .into_iter()
-            .map(|session| std::thread::spawn(move || terminate_session(&session, true)))
-            .collect();
-        for joiner in joiners {
-            let _ = joiner.join();
-        }
+        reap_window_sessions(&self.state, window_label);
+        self.state.lifecycle.clear(window_label);
+    }
+
+    /// `F190` S6 "跨进程不伪造 session restore": called once by a freshly
+    /// mounted terminal view, before it starts any session of its own — see
+    /// `docs/research/2026-08-03-complete-terminal.md`'s "架构裁定 §6".
+    /// Reads and unconditionally clears `window_label`'s durable marker,
+    /// returning whatever value it held: a value surviving from before this
+    /// call means the previous frontend generation left that many sessions
+    /// un-explicitly-closed, whether because this whole process crashed (a
+    /// fresh process's `TerminalState.windows` starts empty regardless, but
+    /// the marker's last successful disk write survives it) or because a
+    /// `WebView` reload discarded the frontend's own memory of them while
+    /// this window (and this table) stayed alive. A second call for the same
+    /// window within the same process run (e.g. the Terminal panel closed
+    /// and reopened later, with no further reload/crash in between) reports
+    /// `0` — this call *claims* whatever it reports, exactly once.
+    ///
+    /// Deliberately does **not** also reap (kill) whatever
+    /// `TerminalState.windows` still holds for `window_label`: unlike the
+    /// window-destruction case `close_window` handles (where every
+    /// remaining session is unambiguously abandoned), a session can
+    /// legitimately be inserted into this exact table *concurrently* with
+    /// this call — `debug::commands::handle_run_in_terminal_reverse_request`
+    /// spawns a `runInTerminal` session and only *afterward* notifies the
+    /// frontend, which may itself be what causes this view to be constructed
+    /// (and this method to run) for the very first time (see
+    /// `PlainDebugTerminalIntegration`'s own doc comment for that
+    /// "可见性兜底" flow) — reaping indiscriminately here could kill that
+    /// brand new, fully legitimate session before the frontend ever gets to
+    /// attach to it. A session left behind by a genuine stale reload
+    /// therefore simply stays alive (exactly as it always has, pre-`F190`
+    /// S6) until this window's own eventual `close_window` reaps it — this
+    /// is a deliberate, documented scope boundary, not an oversight: it
+    /// trades away *immediate* reclamation of a reload-orphaned session's
+    /// thread/fd resources in exchange for never risking a live, wanted
+    /// session.
+    pub async fn claim_lifecycle_marker(&self, window_label: &str) -> u32 {
+        let window_label = window_label.to_owned();
+        let state = Arc::clone(&self.state);
+        tauri::async_runtime::spawn_blocking(move || state.lifecycle.claim(&window_label))
+            .await
+            .unwrap_or(0)
     }
 
     fn get_session(
@@ -1270,6 +1331,208 @@ fn terminate_session(session: &TerminalSession, join: bool) {
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Removes every session `window_label` currently holds and kills+joins each
+/// of them in parallel, exactly like [`TerminalService::close_window`]
+/// always has — shared by that method and `F190` S6's
+/// [`TerminalService::claim_lifecycle_marker`], the latter of which needs
+/// the identical "reap everything this window's table still holds" step for
+/// an unreachable-orphan sweep rather than a real window close. A no-op
+/// (zero threads spawned) when `window_label` has no table at all.
+fn reap_window_sessions(state: &TerminalState, window_label: &str) {
+    let sessions: Vec<Arc<TerminalSession>> = {
+        let mut windows = lock(&state.windows);
+        windows
+            .remove(window_label)
+            .map(|table| table.into_values().collect())
+            .unwrap_or_default()
+    };
+    let joiners: Vec<JoinHandle<()>> = sessions
+        .into_iter()
+        .map(|session| std::thread::spawn(move || terminate_session(&session, true)))
+        .collect();
+    for joiner in joiners {
+        let _ = joiner.join();
+    }
+}
+
+/// `F190` S6 "跨进程不伪造 session restore": a durable,
+/// `window_label`-keyed count of however many terminal sessions
+/// `TerminalState.windows` currently holds for that window — whether or not
+/// each one's underlying process has already exited (a pane showing a real
+/// exit banner is still "open" from the user's perspective until they
+/// explicitly close it; see `docs/research/2026-08-03-complete-terminal.md`'s
+/// "架构裁定 §6"). Kept in exact sync with that live count at every mutation
+/// (`record_started` right after an insert, `record_ended`/`clear` right
+/// before/after a removal), so — regardless of *why* a later read observes a
+/// stale, nonzero value (this process's own window table still holding
+/// sessions a reloaded frontend has no memory of, or a full process crash
+/// that lost the in-memory table entirely but not this store's last
+/// successful disk write) — that value always means the same thing: "this
+/// many sessions were open the moment nothing more explicit happened to
+/// them".
+///
+/// Reads/writes here are **best-effort**: any I/O failure (a missing
+/// directory, a permissions error, …) is silently treated as "0"/a no-op —
+/// this store exists purely to drive a one-time UX notice, never to gate
+/// whether a real session can start, resize, or be killed. Backed by
+/// `crate::backup::store`'s own audited stage-verify-rename primitives
+/// (the same atomic-write machinery `scratch`/`backup` already build on),
+/// storing one small entry per window label (`main`, `plain-window-<uuid>`,
+/// …) under this service's own `terminal-lifecycle/` subdirectory of the
+/// shared app-local state root — a fresh subdirectory, not
+/// `backup`'s/`scratch`'s own, since a window label means something
+/// entirely different from either of those domains' own key spaces.
+struct TerminalLifecycleMarkerStore {
+    base_path: PathBuf,
+    gate: Mutex<()>,
+    root: Mutex<Option<Dir>>,
+}
+
+impl TerminalLifecycleMarkerStore {
+    fn new(base_path: PathBuf) -> Self {
+        Self {
+            base_path,
+            gate: Mutex::new(()),
+            root: Mutex::new(None),
+        }
+    }
+
+    /// Records that one more session started in `window_label` (the count
+    /// stored on disk was already in sync with the live table *before* this
+    /// insert, so "+1" is always correct regardless of how many other
+    /// windows exist).
+    fn record_started(&self, window_label: &str) {
+        let _gate = lock(&self.gate);
+        let Some(key) = lifecycle_key(window_label) else {
+            return;
+        };
+        let Some(root) = self.ensure_root(true) else {
+            return;
+        };
+        let current = read_marker(&root, &key).unwrap_or(0);
+        let _ = write_marker(&root, &key, current.saturating_add(1));
+    }
+
+    /// Records that `count` sessions ended (an explicit `terminal_kill`
+    /// always passes `1`) in `window_label` — floors at zero and discards
+    /// the entry entirely once it reaches zero (an absent entry and a
+    /// stored `0` mean the same thing to [`Self::claim`], but not writing a
+    /// `0` avoids this directory accumulating one file per window label for
+    /// the lifetime of a long-running app that opens and closes many
+    /// windows).
+    fn record_ended(&self, window_label: &str, count: u32) {
+        let _gate = lock(&self.gate);
+        let Some(key) = lifecycle_key(window_label) else {
+            return;
+        };
+        let Some(root) = self.ensure_root(false) else {
+            return;
+        };
+        let current = read_marker(&root, &key).unwrap_or(0);
+        let next = current.saturating_sub(count);
+        if next == 0 {
+            let _ = backup_store::discard_entry(&root, &key);
+        } else {
+            let _ = write_marker(&root, &key, next);
+        }
+    }
+
+    /// Discards `window_label`'s entry outright — used by
+    /// [`TerminalService::close_window`], which is about to kill+join every
+    /// session that entry could possibly still be counting, so there is
+    /// nothing left to decrement one at a time.
+    fn clear(&self, window_label: &str) {
+        let _gate = lock(&self.gate);
+        let Some(key) = lifecycle_key(window_label) else {
+            return;
+        };
+        let Some(root) = self.ensure_root(false) else {
+            return;
+        };
+        let _ = backup_store::discard_entry(&root, &key);
+    }
+
+    /// Reads and clears `window_label`'s current value in one step — see
+    /// [`TerminalService::claim_lifecycle_marker`]'s own doc comment for the
+    /// full "read-once, then it is claimed" contract this backs.
+    fn claim(&self, window_label: &str) -> u32 {
+        let _gate = lock(&self.gate);
+        let Some(key) = lifecycle_key(window_label) else {
+            return 0;
+        };
+        let Some(root) = self.ensure_root(false) else {
+            return 0;
+        };
+        let value = read_marker(&root, &key).unwrap_or(0);
+        if value != 0 {
+            let _ = backup_store::discard_entry(&root, &key);
+        }
+        value
+    }
+
+    /// Lazily opens (and caches) this store's own `terminal-lifecycle/`
+    /// directory — `create: false` never creates it (a fresh install with no
+    /// terminal ever started yet has nothing to open, and every read path
+    /// above already treats "directory absent" as "0"), mirroring
+    /// `scratch::service::ScratchState::ensure_root`'s identical precedent.
+    fn ensure_root(&self, create: bool) -> Option<Dir> {
+        let mut slot = lock(&self.root);
+        if let Some(root) = slot.as_ref() {
+            return root.try_clone().ok();
+        }
+        let path = self.base_path.join("terminal-lifecycle");
+        if create {
+            ensure_directory_ambiently(&path).ok()?;
+        } else if !path.exists() {
+            return None;
+        }
+        let root = Dir::open_ambient_dir(&path, ambient_authority()).ok()?;
+        let clone = root.try_clone().ok()?;
+        *slot = Some(root);
+        Some(clone)
+    }
+}
+
+fn lifecycle_key(window_label: &str) -> Option<BackupKey> {
+    BackupKey::parse(window_label).ok()
+}
+
+/// This store's entries hold nothing but a plain ASCII decimal count —
+/// simpler than a JSON envelope for a single `u32`, and just as easy to
+/// audit by hand on disk.
+fn read_marker(root: &Dir, key: &BackupKey) -> Option<u32> {
+    let bytes = backup_store::read_entry(root, key).ok().flatten()?;
+    std::str::from_utf8(&bytes).ok()?.trim().parse::<u32>().ok()
+}
+
+fn write_marker(root: &Dir, key: &BackupKey, value: u32) -> Result<(), CommandError> {
+    backup_store::write_entry(root, key, value.to_string().as_bytes())
+}
+
+/// Mirrors `scratch::service`'s own identically-named, identically-shaped
+/// helper (recursively creates every missing path component, tolerating
+/// "already exists" at any level) — duplicated here rather than shared,
+/// since each of this crate's app-local-state domains already independently
+/// owns this same handful of lines rather than depending on one another.
+fn ensure_directory_ambiently(path: &Path) -> std::io::Result<()> {
+    match std::fs::create_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path
+                .parent()
+                .ok_or_else(|| std::io::Error::from(error.kind()))?;
+            ensure_directory_ambiently(parent)?;
+            match std::fs::create_dir(path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+                Err(error) => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]

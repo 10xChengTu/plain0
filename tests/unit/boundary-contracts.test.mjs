@@ -10409,15 +10409,41 @@ describe("Plain F070 S2 terminal IPC bridge Harness", () => {
 		);
 	});
 
-	it("fails if TerminalExitEvent's signal is (re-)added to the wire payload", () => {
-		const widened = withMutatedRust("src-tauri/src/terminal/dto.rs", (source) =>
-			source.replace(
-				"pub struct TerminalExitEvent {\n    session_id: TerminalSessionId,\n    exit_code: u32,\n}",
-				"pub struct TerminalExitEvent {\n    session_id: TerminalSessionId,\n    exit_code: u32,\n    signal: Option<String>,\n}",
-			),
+	/** `F190` S6: `signal` became an audited, *required* field (real
+	 * `portable_pty` signal-termination outcomes are not observable through
+	 * `exitCode` alone — see `TerminalExitEvent`'s own doc comment), so the
+	 * hostile direction flips relative to the pre-`F190`-S6 shape: this now
+	 * proves the check still catches the field being *dropped* (silently
+	 * regressing back to the old, signal-blind payload) as well as an
+	 * unaudited *extra* field being added. */
+	it("fails if TerminalExitEvent's signal field is dropped or an unaudited extra field is added", () => {
+		const droppedSignal = withMutatedRust(
+			"src-tauri/src/terminal/dto.rs",
+			(source) =>
+				source.replace(
+					"pub struct TerminalExitEvent {\n    session_id: TerminalSessionId,\n    exit_code: u32,\n    signal: Option<String>,\n}",
+					"pub struct TerminalExitEvent {\n    session_id: TerminalSessionId,\n    exit_code: u32,\n}",
+				),
 		);
 		expect(
-			validateTerminalIpcBridgeBoundary(widened, baselineBridgeAppSources),
+			validateTerminalIpcBridgeBoundary(
+				droppedSignal,
+				baselineBridgeAppSources,
+			),
+		).toContain(
+			"TerminalDataEvent/TerminalExitEvent must expose only their exact audited fields",
+		);
+
+		const extraField = withMutatedRust(
+			"src-tauri/src/terminal/dto.rs",
+			(source) =>
+				source.replace(
+					"pub struct TerminalExitEvent {\n    session_id: TerminalSessionId,\n    exit_code: u32,\n    signal: Option<String>,\n}",
+					"pub struct TerminalExitEvent {\n    session_id: TerminalSessionId,\n    exit_code: u32,\n    signal: Option<String>,\n    core_dumped: bool,\n}",
+				),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(extraField, baselineBridgeAppSources),
 		).toContain(
 			"TerminalDataEvent/TerminalExitEvent must expose only their exact audited fields",
 		);
@@ -10469,17 +10495,34 @@ describe("Plain F070 S2 terminal IPC bridge Harness", () => {
 		);
 	});
 
-	it("fails if WindowEmitSink::emit_exit is rewired to a bare .emit() or the wrong exit code", () => {
+	it("fails if WindowEmitSink::emit_exit is rewired to a bare .emit() or drops the status it was given", () => {
 		const bareEmit = withMutatedRust(
 			"src-tauri/src/terminal/commands.rs",
 			(source) =>
 				source.replace(
-					"let _ = self.app.emit_to(\n            EventTarget::webview_window(self.window_label.clone()),\n            TERMINAL_EXIT_EVENT,\n            TerminalExitEvent::new(session_id, status.exit_code),\n        );",
-					'let _ = self.app.emit("terminal-exit-fallback", ());\n        let _ = self.app.emit_to(\n            EventTarget::webview_window(self.window_label.clone()),\n            TERMINAL_EXIT_EVENT,\n            TerminalExitEvent::new(session_id, status.exit_code),\n        );',
+					"let _ = self.app.emit_to(\n            EventTarget::webview_window(self.window_label.clone()),\n            TERMINAL_EXIT_EVENT,\n            TerminalExitEvent::new(session_id, status),\n        );",
+					'let _ = self.app.emit("terminal-exit-fallback", ());\n        let _ = self.app.emit_to(\n            EventTarget::webview_window(self.window_label.clone()),\n            TERMINAL_EXIT_EVENT,\n            TerminalExitEvent::new(session_id, status),\n        );',
 				),
 		);
 		expect(
 			validateTerminalIpcBridgeBoundary(bareEmit, baselineBridgeAppSources),
+		).toContain(
+			"WindowEmitSink::emit_exit must emit_to exactly one window-targeted TerminalExitEvent built from the status it was given",
+		);
+
+		const droppedStatus = withMutatedRust(
+			"src-tauri/src/terminal/commands.rs",
+			(source) =>
+				source.replace(
+					"TerminalExitEvent::new(session_id, status),",
+					"TerminalExitEvent::new(session_id, TerminalExitStatus { exit_code: 0, signal: None }),",
+				),
+		);
+		expect(
+			validateTerminalIpcBridgeBoundary(
+				droppedStatus,
+				baselineBridgeAppSources,
+			),
 		).toContain(
 			"WindowEmitSink::emit_exit must emit_to exactly one window-targeted TerminalExitEvent built from the status it was given",
 		);
@@ -10513,11 +10556,11 @@ describe("Plain F070 S2 terminal IPC bridge Harness", () => {
 		expect(
 			validateTerminalIpcBridgeBoundary(baselineBridgeRustSources, mutated),
 		).toContain(
-			"PlainBridge must expose exactly the fifteen audited terminal/trust methods, no more and no fewer",
+			"PlainBridge must expose exactly the sixteen audited terminal/trust methods, no more and no fewer",
 		);
 	});
 
-	it("fails if PlainBridge gains an extra terminal-shaped method beyond the audited fifteen", () => {
+	it("fails if PlainBridge gains an extra terminal-shaped method beyond the audited sixteen", () => {
 		const mutated = withMutatedApp(
 			"app/platform/tauri/contracts.ts",
 			(source) =>
@@ -10527,7 +10570,7 @@ describe("Plain F070 S2 terminal IPC bridge Harness", () => {
 				),
 		);
 		// `terminalDestroy` is outside the audited name list, so the filtered
-		// member count still equals fifteen — this mutation is only observable
+		// member count still equals sixteen — this mutation is only observable
 		// because it does not change any *audited* name's presence, proving
 		// the check keys on the fixed name list rather than merely counting
 		// terminal-prefixed members. Assert the passing baseline is
@@ -10548,7 +10591,7 @@ describe("Plain F070 S2 terminal IPC bridge Harness", () => {
 		expect(
 			validateTerminalIpcBridgeBoundary(baselineBridgeRustSources, renamed),
 		).toContain(
-			"PlainBridge must expose exactly the fifteen audited terminal/trust methods, no more and no fewer",
+			"PlainBridge must expose exactly the sixteen audited terminal/trust methods, no more and no fewer",
 		);
 	});
 

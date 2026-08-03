@@ -20,6 +20,7 @@ import {
 	encodeTerminalKeyEvent,
 	TerminalImeController,
 } from "./plain-terminal-input";
+import { formatTerminalExitStatus } from "./plain-terminal-lifecycle";
 import { TerminalLiveScrollbackRefreshController } from "./plain-terminal-live-refresh";
 import {
 	PlainTerminalRenderer,
@@ -165,6 +166,39 @@ import {
  * comment for exactly which key paths trigger this and why a bare modifier
  * press must not.
  *
+ * # `F190` S6 "真实 exit banner"
+ *
+ * A shell process that exits **on its own** (the user never asked this pane
+ * to close) is not a reason to tear anything down: [`#handleExit`] shows a
+ * real, accurate status line (see `plain-terminal-lifecycle.ts`'s
+ * `formatTerminalExitStatus`) reporting the process's actual `exitCode`, or
+ * the real signal name if it was signal-terminated (`exitCode` alone is not
+ * meaningful then — see `TerminalExitEvent.signal`'s own doc comment), while
+ * leaving the last painted frame exactly as it was. The pane stays fully
+ * present — its close button (owned by `PlainTerminalView`) is what the user
+ * clicks when actually done with it, at which point the ordinary explicit-
+ * close path (`dispose()` → `stream.kill`) runs exactly as it always has.
+ * `#exited` additionally guards every remaining path that would otherwise
+ * write to the now-dead pty (a forwarded keystroke, an IME commit, a paste)
+ * against issuing a doomed-to-fail IPC call once the process is confirmed
+ * gone.
+ *
+ * This is a genuinely different case from an **explicit** user close (the
+ * pane/tab close button, `Plain: Kill Terminal`): [`dispose`] calls
+ * `stream.dispose()` — which synchronously unlistens this pane's own
+ * `plain://terminal-exit` subscription — *before* it ever calls
+ * `stream.kill`, so even though Rust's own waiter thread still reports a
+ * real exit status for a killed session exactly like it does for a natural
+ * one (see `terminal::service`'s module doc), this pane's own `onExit`
+ * handler is already detached by the time that event could arrive and
+ * simply never fires for that path. No extra bookkeeping is needed to tell
+ * the two apart — only a natural exit can ever reach [`#handleExit`] at all.
+ *
+ * The complementary "last run's terminals could not be restored" one-time
+ * notice is *not* this class's concern — that is a per-*view* (not
+ * per-pane) concept `PlainTerminalView` owns, shown before any pane like
+ * this one has even been created; see that class's own doc comment.
+ *
  * # Not done in this slice
  *
  * - No per-cell scrollback color fidelity (see
@@ -295,6 +329,10 @@ export class TerminalPaneController {
 	#stream: TerminalStream | undefined;
 	#lastRequestedCols = 0;
 	#lastRequestedRows = 0;
+	/** `F190` S6 "真实 exit banner": `true` once this pane's own shell process
+	 * has been observed to exit on its own — see the class doc's own section
+	 * for why an explicit user close can never reach [`#handleExit`] at all. */
+	#exited = false;
 	/** Set by the first `scrollUp` of a scroll session; cleared whenever this
 	 * pane returns to live — see the class doc's scrollback caching section. */
 	#scrollbackCache: readonly TerminalScrollbackRow[] | undefined;
@@ -681,10 +719,11 @@ export class TerminalPaneController {
 				// doc comment.
 				this.#noteFrameForScrollbackRefresh();
 			},
-			onExit: () => {
-				// This slice renders no explicit "process exited" banner yet
-				// (mirrors the prior single-session view) — the last painted
-				// frame simply stays on screen.
+			onExit: (exitCode: number, signal: string | null) => {
+				if (generation !== this.#generation) {
+					return;
+				}
+				this.#handleExit(exitCode, signal);
 			},
 		};
 
@@ -773,6 +812,34 @@ export class TerminalPaneController {
 		this.#statusElement.textContent = message ?? "";
 	}
 
+	/**
+	 * `F190` S6 "真实 exit banner": handles this pane's shell process having
+	 * exited **on its own** — see the class doc's own section for why an
+	 * explicit user close (the pane/tab close button, `Plain: Kill Terminal`)
+	 * can never reach this method at all. Idempotent (`#exited` guards a
+	 * second call — `TerminalStreamHandlers.onExit`'s own doc comment already
+	 * promises exactly one call per session, but this stays defensive rather
+	 * than trusting that from a second layer down). Never disposes this pane
+	 * or its stream — the last painted frame and every existing control
+	 * (scroll, find, the close button) stay exactly as usable as before;
+	 * only the accurate status line and the `#exited` write-guard below are
+	 * new.
+	 */
+	#handleExit(exitCode: number, signal: string | null): void {
+		if (this.#exited) {
+			return;
+		}
+		this.#exited = true;
+		this.#container.dataset.terminalExited = "true";
+		this.#container.dataset.terminalExitCode = String(exitCode);
+		if (signal === null) {
+			delete this.#container.dataset.terminalExitSignal;
+		} else {
+			this.#container.dataset.terminalExitSignal = signal;
+		}
+		this.#showStatus(formatTerminalExitStatus(exitCode, signal));
+	}
+
 	#registerListeners(surface: HTMLElement, input: HTMLTextAreaElement): void {
 		const { signal } = this.#abort;
 
@@ -805,6 +872,14 @@ export class TerminalPaneController {
 			direction: "down" | "up",
 		): void => {
 			if (this.#ime.active) {
+				return;
+			}
+			// `F190` S6: once this pane's own process has exited, there is
+			// nothing left to write a keystroke to — see the class doc's "真实
+			// exit banner" section for why this can never be an explicit-close
+			// case instead (which tears the whole pane/stream down via
+			// `dispose()`, not this guard).
+			if (this.#exited) {
 				return;
 			}
 			const encoded = encodeTerminalKeyEvent(event, direction);
@@ -902,8 +977,7 @@ export class TerminalPaneController {
 				const text = this.#ime.end({ data: event.data ?? "" });
 				input.value = "";
 				if (text.length > 0) {
-					this.#handleLiveInput();
-					void this.#stream?.writeText(text);
+					this.#writeTextToPty(text);
 				}
 			},
 			{ signal },
@@ -914,8 +988,7 @@ export class TerminalPaneController {
 				event.preventDefault();
 				const text = event.clipboardData?.getData("text/plain") ?? "";
 				if (text.length > 0) {
-					this.#handleLiveInput();
-					void this.#stream?.writeText(text);
+					this.#writeTextToPty(text);
 				}
 			},
 			{ signal },
@@ -932,8 +1005,7 @@ export class TerminalPaneController {
 				const { value } = input;
 				if (value.length > 0) {
 					input.value = "";
-					this.#handleLiveInput();
-					void this.#stream?.writeText(value);
+					this.#writeTextToPty(value);
 				}
 			},
 			{ signal },
@@ -1174,6 +1246,24 @@ export class TerminalPaneController {
 			this.#closeFindWidget(false);
 		}
 		this.#syncScrollbackRetention();
+	}
+
+	/**
+	 * `F190` S6: shared by every IME-commit/paste/input-fallback path that
+	 * writes literal text to the pty (`forwardKey`'s own per-keystroke path
+	 * has its own identical `#exited` guard, since it does not funnel through
+	 * here) — no-ops once this pane's process has exited (see the class doc's
+	 * "真实 exit banner" section) instead of issuing a doomed-to-fail IPC call
+	 * against a session Rust still remembers but nothing is reading from
+	 * anymore. Still runs `#handleLiveInput()` first, matching every prior
+	 * call site's own "returns to live" behavior for genuine typed content.
+	 */
+	#writeTextToPty(text: string): void {
+		this.#handleLiveInput();
+		if (this.#exited) {
+			return;
+		}
+		void this.#stream?.writeText(text);
 	}
 
 	/**

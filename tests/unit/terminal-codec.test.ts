@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
 	decodeTerminalDataEvent,
 	decodeTerminalExitEvent,
+	decodeTerminalLifecycleMarkerResult,
 	decodeTerminalProfilesResult,
 	decodeTerminalScrollbackResult,
 	decodeTerminalStartResult,
@@ -15,6 +16,7 @@ import {
 	frozenTerminalInputKeyRequest,
 	frozenTerminalInputTextRequest,
 	frozenTerminalKillRequest,
+	frozenTerminalLifecycleMarkerRequest,
 	frozenTerminalOpenExternalLinkRequest,
 	frozenTerminalProfilesRequest,
 	frozenTerminalResizeRequest,
@@ -450,6 +452,42 @@ describe("terminal_input_text/input_key/focus/resize/ack/scrollback/kill void re
 	});
 });
 
+describe("terminal_lifecycle_marker request/result codec", () => {
+	it("builds a frozen empty own-data request", () => {
+		const request = frozenTerminalLifecycleMarkerRequest();
+		expect(request).toEqual({});
+		expect(Object.isFrozen(request)).toBe(true);
+	});
+
+	it("decodes a well-formed result", () => {
+		expect(
+			decodeTerminalLifecycleMarkerResult({ nonRestorableCount: 0 }),
+		).toEqual({ nonRestorableCount: 0 });
+		const result = decodeTerminalLifecycleMarkerResult({
+			nonRestorableCount: 3,
+		});
+		expect(result).toEqual({ nonRestorableCount: 3 });
+		expect(Object.isFrozen(result)).toBe(true);
+	});
+
+	it("rejects extra fields, a negative/non-integer/oversized count, and a Proxy-wrapped payload", () => {
+		for (const value of [
+			{ nonRestorableCount: 0, extra: true },
+			{ nonRestorableCount: -1 },
+			{ nonRestorableCount: 1.5 },
+			{ nonRestorableCount: "3" },
+			{ nonRestorableCount: 4_097 },
+			{},
+			new Proxy(
+				{ nonRestorableCount: 0 },
+				{ get: (target, key) => Reflect.get(target, key) },
+			),
+		]) {
+			expect(() => decodeTerminalLifecycleMarkerResult(value)).toThrow();
+		}
+	});
+});
+
 describe("plain://terminal-data event codec", () => {
 	it("decodes a well-formed render-state frame field by field", () => {
 		const event = decodeTerminalDataEvent({
@@ -848,24 +886,62 @@ describe("terminal_open_external_link request codec", () => {
 });
 
 describe("plain://terminal-exit event codec", () => {
-	it("decodes a well-formed payload and omits any signal field", () => {
+	it("decodes a well-formed normal-exit payload with a null signal", () => {
 		expect(
-			decodeTerminalExitEvent({ sessionId: VALID_ID, exitCode: 130 }),
-		).toEqual({ sessionId: VALID_ID, exitCode: 130 });
+			decodeTerminalExitEvent({
+				sessionId: VALID_ID,
+				exitCode: 130,
+				signal: null,
+			}),
+		).toEqual({ sessionId: VALID_ID, exitCode: 130, signal: null });
 	});
 
-	it("rejects extra/missing fields and an invalid exitCode", () => {
+	/** `F190` S6: `portable_pty::ExitStatus::exit_code()` is meaningless
+	 * (hardcoded to `1`) whenever a process was terminated by a signal — a
+	 * real signal-terminated exit must decode with its real signal name, not
+	 * be mistaken for "exit code 1". */
+	it("decodes a well-formed signal-terminated payload with its real signal name", () => {
+		expect(
+			decodeTerminalExitEvent({
+				sessionId: VALID_ID,
+				exitCode: 1,
+				signal: "Killed: 9",
+			}),
+		).toEqual({ sessionId: VALID_ID, exitCode: 1, signal: "Killed: 9" });
+	});
+
+	it("rejects a missing signal field — it is required, not optional", () => {
+		expect(() =>
+			decodeTerminalExitEvent({ sessionId: VALID_ID, exitCode: 130 }),
+		).toThrow();
+	});
+
+	it("rejects extra fields, an invalid exitCode, and a hostile signal value", () => {
 		expect(() =>
 			decodeTerminalExitEvent({
 				sessionId: VALID_ID,
 				exitCode: 0,
-				signal: "SIGKILL",
+				signal: null,
+				extra: true,
 			}),
 		).toThrow();
 		expect(() => decodeTerminalExitEvent({ sessionId: VALID_ID })).toThrow();
 		expect(() =>
-			decodeTerminalExitEvent({ sessionId: VALID_ID, exitCode: -1 }),
+			decodeTerminalExitEvent({
+				sessionId: VALID_ID,
+				exitCode: -1,
+				signal: null,
+			}),
 		).toThrow();
+		for (const signal of ["", 42, undefined, "a".repeat(257)]) {
+			expect(() =>
+				decodeTerminalExitEvent({
+					sessionId: VALID_ID,
+					exitCode: 1,
+					signal,
+				}),
+			).toThrow();
+		}
 	});
 });
 
@@ -885,11 +961,18 @@ describe("frozenTerminalDataEvent/frozenTerminalExitEvent (browser mock helpers)
 		expect(() => frozenTerminalDataEvent("bad", 0, sampleFrame())).toThrow();
 	});
 
-	it("builds a frozen exit event directly", () => {
-		expect(frozenTerminalExitEvent(VALID_ID, 0)).toEqual({
+	it("builds a frozen exit event directly, for both a normal and a signal-terminated outcome", () => {
+		expect(frozenTerminalExitEvent(VALID_ID, 0, null)).toEqual({
 			sessionId: VALID_ID,
 			exitCode: 0,
+			signal: null,
 		});
+		expect(frozenTerminalExitEvent(VALID_ID, 1, "Killed: 9")).toEqual({
+			sessionId: VALID_ID,
+			exitCode: 1,
+			signal: "Killed: 9",
+		});
+		expect(() => frozenTerminalExitEvent(VALID_ID, 0, "")).toThrow();
 	});
 });
 

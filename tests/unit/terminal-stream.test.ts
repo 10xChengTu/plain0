@@ -277,7 +277,7 @@ describe("openTerminalStream", () => {
 			frame: frame("not-mine"),
 		});
 		fake.emitData({ sessionId: SESSION_ID, sequence: 0, frame: frame("a") });
-		fake.emitExit({ sessionId: OTHER_SESSION_ID, exitCode: 9 });
+		fake.emitExit({ sessionId: OTHER_SESSION_ID, exitCode: 9, signal: null });
 
 		release();
 		const stream = await promise;
@@ -338,8 +338,8 @@ describe("openTerminalStream", () => {
 			onExit: (exitCode) => exits.push(exitCode),
 		});
 
-		fake.emitExit({ sessionId: OTHER_SESSION_ID, exitCode: 1 });
-		fake.emitExit({ sessionId: SESSION_ID, exitCode: 0 });
+		fake.emitExit({ sessionId: OTHER_SESSION_ID, exitCode: 1, signal: null });
+		fake.emitExit({ sessionId: SESSION_ID, exitCode: 0, signal: null });
 
 		expect(exits).toEqual([0]);
 		stream.dispose();
@@ -356,7 +356,7 @@ describe("openTerminalStream", () => {
 			},
 		});
 
-		fake.emitExit({ sessionId: SESSION_ID, exitCode: 0 });
+		fake.emitExit({ sessionId: SESSION_ID, exitCode: 0, signal: null });
 		expect(exited).toBe(true);
 		// A trailing frame that raced ahead of exit reporting (the documented
 		// exit/data ordering caveat) must still be delivered, not dropped.

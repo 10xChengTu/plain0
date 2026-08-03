@@ -7189,6 +7189,14 @@ const TERMINAL_COMMAND_CONTRACTS = Object.freeze([
 		returnType: "->Result<(),CommandError>",
 		body: "leturl=request.into_parts()?;tauri::async_runtime::spawn_blocking(move||opener::open_external_link(&url)).await.map_err(|_|super::terminal_unavailable())?",
 	},
+	{
+		file: "src-tauri/src/terminal/commands.rs",
+		name: "terminal_lifecycle_marker",
+		parameters:
+			"window:WebviewWindow,terminal:State<'_,TerminalService>,_request:TerminalLifecycleMarkerRequest",
+		returnType: "->Result<TerminalLifecycleMarkerResult,CommandError>",
+		body: "letcount=terminal.inner().claim_lifecycle_marker(window.label()).await;Ok(TerminalLifecycleMarkerResult::new(count))",
+	},
 ]);
 
 const LIFECYCLE_COMMAND_CONTRACTS = Object.freeze([
@@ -7312,10 +7320,11 @@ export function validateLifecycleCommandRegistration(rustSources) {
 }
 
 /**
- * Locks the trust (3) and terminal (10, since F070's "IPC 改造" slice split
+ * Locks the trust (3) and terminal (11, since F070's "IPC 改造" slice split
  * `terminal_input` into `terminal_input_text`/`terminal_input_key` and added
- * `terminal_focus`/`terminal_scrollback`, and F190 S4 added
- * `terminal_open_external_link`) commands to their audited exact
+ * `terminal_focus`/`terminal_scrollback`, F190 S4 added
+ * `terminal_open_external_link`, and F190 S6 added
+ * `terminal_lifecycle_marker`) commands to their audited exact
  * signatures, bodies and single `generate_handler!` registration —
  * the same exact-body-pinning technique `validateSearchCommandRegistration`/
  * `validateSearchTextCommandRegistration` already use, extended to a closed
@@ -7417,9 +7426,10 @@ export function validateTrustTerminalCommandRegistration(rustSources) {
  * `WorkspaceWatchWakeEvent`'s own `structBody(...)`/wake-event-const
  * precedent in `validateWorkspaceWatcherBoundary`), `WindowEmitSink`'s two
  * methods each emitting exactly once through the audited event/constructor,
- * the frozen `PlainBridge` terminal/trust method surface (a fixed 15-method
- * count so a silently added/removed/renamed bridge method fails this
- * check), and the TypeScript event/result decoders' own-data/Proxy-
+ * the frozen `PlainBridge` terminal/trust method surface (a fixed 16-method
+ * count — F190 S6 added `terminalLifecycleMarker` — so a silently
+ * added/removed/renamed bridge method fails this check), and the TypeScript
+ * event/result decoders' own-data/Proxy-
  * rejection/freeze shape plus native's exactly-once `listen` wiring for
  * each event.
  */
@@ -7459,7 +7469,7 @@ export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 		structBody("TerminalDataEvent") !==
 			"session_id:TerminalSessionId,sequence:u64,frame:TerminalFrame," ||
 		structBody("TerminalExitEvent") !==
-			"session_id:TerminalSessionId,exit_code:u32,"
+			"session_id:TerminalSessionId,exit_code:u32,signal:Option<String>,"
 	) {
 		failures.push(
 			"TerminalDataEvent/TerminalExitEvent must expose only their exact audited fields",
@@ -7516,9 +7526,7 @@ export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 			"EventTarget::webview_window(self.window_label.clone())",
 		) ||
 		!emitExitBody.includes("TERMINAL_EXIT_EVENT") ||
-		!emitExitBody.includes(
-			"TerminalExitEvent::new(session_id,status.exit_code)",
-		) ||
+		!emitExitBody.includes("TerminalExitEvent::new(session_id,status)") ||
 		/[^_]\.emit\(/.test(emitExitBody)
 	) {
 		failures.push(
@@ -7567,6 +7575,7 @@ export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 		"terminalScrollback",
 		"terminalKill",
 		"terminalOpenExternalLink",
+		"terminalLifecycleMarker",
 		"terminalWatchData",
 		"terminalWatchExit",
 		"workspaceTrustState",
@@ -7588,7 +7597,7 @@ export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 			JSON.stringify([...TERMINAL_BRIDGE_METHOD_NAMES].sort())
 	) {
 		failures.push(
-			"PlainBridge must expose exactly the fifteen audited terminal/trust methods, no more and no fewer",
+			"PlainBridge must expose exactly the sixteen audited terminal/trust methods, no more and no fewer",
 		);
 	}
 
@@ -7606,6 +7615,7 @@ export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 	for (const name of [
 		"decodeTerminalDataEvent",
 		"decodeTerminalExitEvent",
+		"decodeTerminalLifecycleMarkerResult",
 		"decodeTerminalProfilesResult",
 		"decodeTerminalScrollbackResult",
 		"decodeWorkspaceTrustState",
@@ -7666,6 +7676,16 @@ export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 	) {
 		failures.push(
 			"native.ts must listen for TERMINAL_DATA_EVENT/TERMINAL_EXIT_EVENT exactly once each, decoded through the audited decoders",
+		);
+	}
+	if (
+		native === undefined ||
+		!compact(native).includes(
+			'terminalLifecycleMarker:async()=>{constrequest=frozenTerminalLifecycleMarkerRequest();returndecodeTerminalLifecycleMarkerResult(awaitinvoke<unknown>("terminal_lifecycle_marker",{request}),);}',
+		)
+	) {
+		failures.push(
+			"native.ts terminalLifecycleMarker must route the empty frozen request through the strict lifecycle-marker decoder",
 		);
 	}
 

@@ -408,6 +408,9 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async terminalOpenExternalLink() {
 			throw new Error("unused");
 		},
+		async terminalLifecycleMarker() {
+			throw new Error("unused");
+		},
 		terminalWatchData() {
 			throw new Error("unused");
 		},

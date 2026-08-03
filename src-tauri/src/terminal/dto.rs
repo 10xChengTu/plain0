@@ -743,24 +743,36 @@ impl TerminalDataEvent {
     }
 }
 
-/// `plain://terminal-exit` event payload: exactly `{ sessionId, exitCode }`,
-/// deliberately omitting `TerminalExitStatus::signal` — the research doc's
-/// frozen decision only calls for these two fields, and a wider payload can
-/// always be added in a later slice without breaking this one (widening a
-/// `deny_unknown_fields`-free `Serialize`-only event payload is backward
-/// compatible for any decoder that itself only reads named keys).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+/// `plain://terminal-exit` event payload: `{ sessionId, exitCode, signal }`.
+/// `F190` S6 "真实 exit banner": `signal` was dropped entirely by the prior
+/// slice, but `portable_pty::ExitStatus::exit_code()` is **not** a reliable
+/// "real exit code" on its own — see that type's own `From<std::process::
+/// ExitStatus>` impl: when a process is terminated by a signal, `code` is
+/// hardcoded to `1` (a placeholder, not the process's actual exit status)
+/// and the *real* outcome is only ever carried by `signal`. A banner built
+/// from `exitCode` alone would therefore report an inaccurate "exit code 1"
+/// for e.g. `kill -9`, instead of the true "terminated by signal" outcome —
+/// this field is what fixes that. `null` means "exited normally" (whatever
+/// `exitCode` is, is the process's own real exit status); non-`null` means
+/// the process was terminated by a signal and `exitCode` is not meaningful
+/// on its own (see `TerminalExitStatus`'s own doc comment in `service.rs`).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalExitEvent {
     session_id: TerminalSessionId,
     exit_code: u32,
+    signal: Option<String>,
 }
 
 impl TerminalExitEvent {
-    pub(crate) const fn new(session_id: TerminalSessionId, exit_code: u32) -> Self {
+    pub(crate) fn new(
+        session_id: TerminalSessionId,
+        status: super::service::TerminalExitStatus,
+    ) -> Self {
         Self {
             session_id,
-            exit_code,
+            exit_code: status.exit_code,
+            signal: status.signal,
         }
     }
 }
@@ -847,6 +859,35 @@ impl TerminalOpenExternalLinkRequest {
     }
 }
 
+/// `terminal_lifecycle_marker` request: empty — the window comes from the
+/// Tauri `WebviewWindow` extractor, exactly like every other window-scoped
+/// terminal command.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalLifecycleMarkerRequest {}
+
+/// `terminal_lifecycle_marker` response: how many of this window's terminal
+/// sessions were left un-explicitly-closed by whatever ran immediately
+/// before this call (see `terminal::service::TerminalService::
+/// claim_lifecycle_marker`'s doc comment for the full "reload vs crash vs
+/// ordinary re-open" contract this reports). `0` for an ordinary first mount
+/// or a re-open after every prior session was explicitly closed — the
+/// overwhelmingly common case — in which case the frontend shows no notice
+/// at all.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalLifecycleMarkerResult {
+    non_restorable_count: u32,
+}
+
+impl TerminalLifecycleMarkerResult {
+    pub(crate) const fn new(non_restorable_count: u32) -> Self {
+        Self {
+            non_restorable_count,
+        }
+    }
+}
+
 fn validate_dimensions(cols: u16, rows: u16) -> Result<(), CommandError> {
     if cols == 0 || rows == 0 || cols > MAX_TERMINAL_DIMENSION || rows > MAX_TERMINAL_DIMENSION {
         return Err(invalid_terminal_request());
@@ -870,12 +911,13 @@ mod tests {
 
     use super::{
         TerminalAckRequest, TerminalFocusRequest, TerminalInputKeyRequest,
-        TerminalInputTextRequest, TerminalKillRequest, TerminalOpenExternalLinkRequest,
-        TerminalProfilesRequest, TerminalProfilesResult, TerminalResizeRequest,
-        TerminalScrollbackRequest, TerminalStartRequest, MAX_TERMINAL_EXTERNAL_LINK_BYTES,
-        MAX_TERMINAL_INPUT_BYTES, MAX_TERMINAL_KEY_UTF8_BYTES,
-        MAX_TERMINAL_SCROLLBACK_REQUEST_ROWS,
+        TerminalInputTextRequest, TerminalKillRequest, TerminalLifecycleMarkerRequest,
+        TerminalLifecycleMarkerResult, TerminalOpenExternalLinkRequest, TerminalProfilesRequest,
+        TerminalProfilesResult, TerminalResizeRequest, TerminalScrollbackRequest,
+        TerminalStartRequest, MAX_TERMINAL_EXTERNAL_LINK_BYTES, MAX_TERMINAL_INPUT_BYTES,
+        MAX_TERMINAL_KEY_UTF8_BYTES, MAX_TERMINAL_SCROLLBACK_REQUEST_ROWS,
     };
+    use crate::terminal::service::TerminalExitStatus;
     use crate::terminal::vt::{self, DirtyCell, DirtyFrame, DirtyRow};
 
     const VALID_ID: &str = "0d3f4b0e-6f1a-4c9d-9c3a-1a2b3c4d5e6f";
@@ -943,6 +985,12 @@ mod tests {
         assert!(
             serde_json::from_value::<TerminalOpenExternalLinkRequest>(serde_json::json!({
                 "url": "https://example.com", "extra": true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TerminalLifecycleMarkerRequest>(serde_json::json!({
+                "extra": true
             }))
             .is_err()
         );
@@ -1242,11 +1290,57 @@ mod tests {
     }
 
     #[test]
-    fn exit_event_is_exact_camel_case_and_omits_signal() {
-        let event = super::TerminalExitEvent::new(valid_session_id(), 130);
+    fn exit_event_projects_a_normal_exit_code_with_a_null_signal() {
+        let event = super::TerminalExitEvent::new(
+            valid_session_id(),
+            TerminalExitStatus {
+                exit_code: 130,
+                signal: None,
+            },
+        );
         assert_eq!(
             serde_json::to_value(event).unwrap(),
-            serde_json::json!({ "sessionId": VALID_ID, "exitCode": 130 })
+            serde_json::json!({ "sessionId": VALID_ID, "exitCode": 130, "signal": null })
+        );
+    }
+
+    /// `F190` S6: `portable_pty::ExitStatus::exit_code()` is a meaningless
+    /// placeholder (`1`) whenever `signal` is set — see
+    /// `TerminalExitEvent`'s own doc comment. This projection must carry the
+    /// real `signal` through untouched rather than let a caller be misled by
+    /// that placeholder `exitCode` into reporting "exit code 1".
+    #[test]
+    fn exit_event_projects_a_signal_terminated_exit_with_its_real_signal_name() {
+        let event = super::TerminalExitEvent::new(
+            valid_session_id(),
+            TerminalExitStatus {
+                exit_code: 1,
+                signal: Some("Killed: 9".to_owned()),
+            },
+        );
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["exitCode"], 1);
+        assert_eq!(value["signal"], "Killed: 9");
+        assert_eq!(
+            value
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["sessionId", "exitCode", "signal"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        );
+    }
+
+    #[test]
+    fn lifecycle_marker_result_projects_exactly() {
+        let result = TerminalLifecycleMarkerResult::new(3);
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            serde_json::json!({ "nonRestorableCount": 3 })
         );
     }
 

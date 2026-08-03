@@ -111,6 +111,30 @@ fn verify_stage(file: &mut File, expected: &[u8]) -> Result<(), CommandError> {
     }
 }
 
+/// Reads exactly one entry by its key, returning `Ok(None)` if it does not
+/// exist — the single-key counterpart to [`read_all_entries`]'s full
+/// enumeration, for a caller (e.g. `terminal::service`'s per-window
+/// lifecycle marker) that only ever wants one specific key and would
+/// otherwise pay to enumerate and filter every entry in the directory for
+/// no reason.
+pub(crate) fn read_entry(dir: &Dir, key: &BackupKey) -> Result<Option<Vec<u8>>, CommandError> {
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let mut file = match dir.open_with(key.as_str(), &options) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(backup_io_failed()),
+    };
+    let metadata = file.metadata().map_err(|_| backup_io_failed())?;
+    if !metadata.is_file() || metadata.len() > MAX_BACKUP_ENTRY_BYTES {
+        return Err(backup_io_failed());
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|_| backup_io_failed())?;
+    Ok(Some(bytes))
+}
+
 /// Enumerates every entry directly inside `dir` whose filename is a valid
 /// backup key, returned sorted by key. Anything else (the domain's own
 /// leftover `.plain-backup-*.tmp` stage files, unrelated foreign entries,
@@ -190,7 +214,7 @@ mod tests {
     use cap_std::fs::Dir;
     use tempfile::TempDir;
 
-    use super::{discard_all_entries, discard_entry, read_all_entries, write_entry};
+    use super::{discard_all_entries, discard_entry, read_all_entries, read_entry, write_entry};
     use crate::backup::BackupKey;
 
     fn open_temp_dir() -> (TempDir, Dir) {
@@ -278,6 +302,17 @@ mod tests {
 
         let entries = read_all_entries(&dir).unwrap();
         assert_eq!(entries, vec![("kept".to_owned(), b"payload".to_vec())]);
+    }
+
+    #[test]
+    fn read_entry_returns_none_for_a_missing_key_and_the_written_bytes_for_a_present_one() {
+        let (_temp, dir) = open_temp_dir();
+        assert_eq!(read_entry(&dir, &key("missing")).unwrap(), None);
+        write_entry(&dir, &key("present"), b"payload").unwrap();
+        assert_eq!(
+            read_entry(&dir, &key("present")).unwrap(),
+            Some(b"payload".to_vec())
+        );
     }
 
     #[test]
