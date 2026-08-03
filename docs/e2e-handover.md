@@ -1,6 +1,6 @@
 # 端到端桌面验收交接清单（Codex 执行）
 
-更新时间：2026-08-03（E2E-021 已完成；既有条目的完成或阻塞状态以各自小节为准）
+更新时间：2026-08-03（E2E-023 已完成；既有条目的完成或阻塞状态以各自小节为准）
 
 ## 分工模式
 
@@ -593,6 +593,20 @@ Close Folder 时序：主窗口在执行 `Cmd+K F` 前把 primary 最后一个 r
 
 结论：E2E-022 全部通过，F170 S4 的固定新窗口、动态窗口 empty 启动、窗口 capability/dirty 隔离、Close Folder 最终 backup 时序、Untitled 独立性、跨进程逐根恢复、真实保存和进程退出均由 Browser 与真实桌面双层收口。F170 继续保持 `in_progress`，唯一 WIP 转入 S5 系统 Trash。
 
+### E2E-023 · F170 S5 系统 Trash、确认竞态与 Finder 恢复矩阵
+
+状态：**已完成（2026-08-03）**。以提交 `410b12c2` 加验收中发现并提交于 `d99079ef` 的竞态提示修复对应源码，使用系统工具优先 PATH 与 `APPLE_SIGNING_IDENTITY=-` 构建仓库绝对路径 `src-tauri/target/debug/bundle/macos/Plain.app`。当前 bundle 以 `com.plain.editor`、`flags=0x10002(adhoc,runtime)` 和唯一 `com.apple.security.cs.allow-jit=true` entitlement 启动真实 WKWebView；该签名只服务本机 E2E，不属于发布签名、公证或分发工作。
+
+确认与取消：从系统目录选择器授权一次性 fixture 后，对 `trash-cancel-410b12c2.txt` 执行普通 Explorer Delete，Plain 自有 DOM 对话框明确询问是否移到系统废纸篓并说明可恢复。点击 Cancel 后 Explorer 与磁盘文件都保留，SHA-256 仍为 `11471cf6a585209d08b18e469ef69492889d89fe4950999214b2992360ea2b11`，系统废纸篓没有同名项；未触发永久删除协议。
+
+确认期间竞态与真实缺口修复：对 `trash-race-410b12c2.txt` 打开同一 DOM 对话框后、点击 Move 前从外部改写文件。首轮构建中 Rust 的 begin-time identity revalidation 正确保留文件且废纸篓无同名项，但 Workbench 没有显示任何通知；这是真实桌面验收发现的产品缺口。修复后只把精确原生错误码 `WORKSPACE_TRASH_BATCH_CHANGED` 映射成不含原生路径的 retained result；同一真实步骤重跑后 UI 显示 `A selected workspace entry changed before it could be moved to the system Trash.`，磁盘文件仍在且 SHA-256 为改写后的 `f547a2b91d808f24101da77ab085bbdc39ba55d8f705b51a0aa3729509272a6f`。单元测试、hostile architecture mutation 与 Chromium mock 同时覆盖 begin-time rejection、root refresh、receipt cancel、零 bulk edit 和零 permanent fallback。
+
+成功与恢复：确认移动 `trash-success-410b12c2.txt` 后，该项从 Plain Explorer 和 workspace 磁盘位置消失，macOS `~/.Trash` 出现同名 34 字节项。因终端读取废纸篓受系统隐私保护，恢复通过真实 Finder 完成：在废纸篓搜索该唯一项，右键执行“放回原处”；Finder 回到原 fixture 目录，shell 核对恢复文件 SHA-256 精确等于初始值 `3afe83ad1719141427e9896e98e5efcca749a5fb1e5670a6f6d56a1d86da5e33`，废纸篓同名项消失，Plain watcher 无需 Refresh 即重新显示文件。对照文件 `keep-410b12c2.txt` 保持 SHA-256 `c7610fa202c62122b6d652698fcfb801616cf7adecac4567b9044dda5007e712`。
+
+自动化对照与清理：修复后 format、双 TypeScript、lint、features、architecture、96 个前端测试文件/1872 项及聚焦 Trash Chromium 3/3 通过；本切片前一提交的完整基线为 Chromium 115/115、Rust 1264/1264、2183-module 生产构建与 1998-source bundle。真实验收后执行 Close Folder；Open Recent 中只移除本轮 fixture 产生的 `tmp-e2e-trash-s5c-410b12c2` 一条记录，结果从 4 条回到既有 3 条，没有清空或改写其余历史。四个 fixture 文件哈希核对后，fixture、`dist`、`test-results`、`src-tauri/target` 与 `.vite` 缓存全部清理；Cmd+Q 后精确进程匹配无当前 Plain PID。
+
+结论：E2E-023 全部通过；F170 的 Open/Recent/Settings/Trash、Untitled/Save As、New Window/Close Folder 与真实恢复路径均已由 Browser 和真实桌面双层闭合，F170 转 `complete`，唯一 WIP 切到 F180 本地 Git 完整工作流。
+
 ## 后续条目（随切片追加）
 
 - F030 遗留：真实 `CloseRequested` 关窗握手协议实现后，补「正常关窗 → 重开恢复」的桌面验收变体。
@@ -610,3 +624,4 @@ Close Folder 时序：主窗口在执行 `Cmd+K F` 前把 primary 最后一个 r
 - F170 S2 Open File parent-root adoption、opaque Recent、双根冷启动恢复、缺失根 fail-closed 与历史清理矩阵 E2E-020 已完成；F170 继续进入 Untitled/Save As。
 - F170 S3 Untitled/Save As、两阶段 macOS 父目录授权、覆盖取消/竞态/成功、关闭三分支与 kill-9 恢复矩阵 E2E-021 已完成；F170 继续进入 New Window/Close Folder。
 - F170 S4 New Window/Close Folder、双窗口 capability/dirty 隔离、稳定 backup 先于撤权、跨进程逐根恢复矩阵 E2E-022 已完成；F170 继续进入系统 Trash。
+- F170 S5 系统 Trash DOM 确认/取消、确认期间 identity 竞态、真实 Finder 废纸篓与“放回原处”恢复矩阵 E2E-023 已完成；F170 已整体关闭，唯一 WIP 切到 F180。

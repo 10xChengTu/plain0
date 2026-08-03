@@ -940,19 +940,61 @@
 			"id": "F170",
 			"name": "Local open recent settings and trash workflows",
 			"phase": 6,
-			"status": "in_progress",
+			"status": "complete",
 			"acceptance": [
 				"Open File Open Recent and last-workspace restore work through Rust-owned capabilities",
 				"Untitled files local settings auto save and user keybindings have durable product-owned workflows",
 				"New-window and workspace lifecycle actions preserve capability isolation and dirty-content protection",
 				"System Trash has an explicit platform contract and never falls back silently to permanent deletion"
-			]
+			],
+			"evidence": {
+				"commands": [
+					"pnpm check",
+					"pnpm exec playwright test tests/browser/workspace.spec.ts --grep <F170 local workflow matrices>",
+					"cargo test --manifest-path src-tauri/Cargo.toml",
+					"env PATH=/usr/bin:/bin:/usr/sbin:/sbin:/Users/zhenghui/.nvm/versions/node/v22.22.1/bin:/Users/zhenghui/.cargo/bin:/opt/homebrew/bin:/opt/homebrew/sbin APPLE_SIGNING_IDENTITY=- pnpm tauri:build:e2e"
+				],
+				"results": [
+					"S1 through S5 each passed strict DTO, codec, Rust authority, architecture hostile-mutation and focused Browser coverage before exposure. The final automated baseline passed 96 frontend files and 1872 tests after the real Trash race fix; the immediately preceding full slice baseline passed Chromium 115/115, Rust 1264/1264, a 2183-module production build and a 1998-source bundle audit.",
+					"E2E-019 through E2E-023 passed in freshly built real Plain.app bundles. These cover durable settings, keybindings and Auto Save; Open File, opaque Recent and last-workspace restore; Untitled, Save As and crash recovery; New Window and Close Folder isolation; and confirmed macOS system Trash with Finder Put Back recovery.",
+					"Real E2E found and fixed two platform-only gaps: NSSavePanel could not implicitly authorize its parent directory, and a Trash begin-time identity change was retained without a visible notification. Both fixes have deterministic automated regressions and path-free failure messages."
+				],
+				"nativeScenarios": [
+					"E2E-019 persisted settings and user keybindings across a cold start and proved files.autoSave writes exact bytes without Cmd+S in the real WKWebView.",
+					"E2E-020 exercised native Open File cancellation and parent-root adoption, opaque Recent selection, atomic multi-root restore, missing-root fail-closed behavior and single-entry or confirmed full-history removal without exposing native paths.",
+					"E2E-021 exercised Rust-owned Untitled scratch, two-stage macOS Save As authorization, new-file publication, existing-file cancel and version conflict, Close editor Save or Don't Save, kill-9 recovery and final scratch cleanup.",
+					"E2E-022 exercised two isolated native windows, empty startup for dynamic windows, final stable backup before Close Folder capability revocation, root-scoped recovery after a cold start and zero leaked processes.",
+					"E2E-023 exercised DOM Trash confirmation and cancellation, an external identity change while confirmation was open, a real Foundation move to macOS Trash, Finder Put Back with exact SHA-256 restoration, watcher convergence and zero permanent-delete fallback."
+				],
+				"platformGaps": [
+					"The real system-Trash adapter is implemented and exercised on macOS. Unsupported targets advertise trash:false and therefore fail closed instead of presenting or emulating a recoverable delete; Windows and Linux packaging or platform adapter work is outside the current goal.",
+					"Release signing, notarization, DMG, Windows or Linux packaging, application icons and legal confirmation are explicitly outside this non-release feature-completion phase."
+				],
+				"acceptanceResults": [
+					{
+						"acceptance": "Open File Open Recent and last-workspace restore work through Rust-owned capabilities",
+						"result": "Achieved. Rust owns native selection, canonical capability adoption and the bounded opaque Recent store. Browser tests and E2E-020 prove cancel has no topology side effect, multi-root restore is atomic and path-free, missing roots fail closed, and history mutation never deletes workspace files."
+					},
+					{
+						"acceptance": "Untitled files local settings auto save and user keybindings have durable product-owned workflows",
+						"result": "Achieved. Rust-owned user-data and scratch stores use bounded versioned or framed writes with atomic publication. E2E-019 and E2E-021 prove cold-start settings and keybindings, real Auto Save, Save As conflict protection, editor close choices and kill-9 Untitled recovery."
+					},
+					{
+						"acceptance": "New-window and workspace lifecycle actions preserve capability isolation and dirty-content protection",
+						"result": "Achieved. Dynamic windows start empty with independent Rust window labels and capabilities; Close Folder waits for a stable working-copy backup before revocation. Browser coverage and E2E-022 prove cross-window root, dirty buffer and recovery isolation."
+					},
+					{
+						"acceptance": "System Trash has an explicit platform contract and never falls back silently to permanent deletion",
+						"result": "Achieved on the supported macOS product target. The four-phase Rust receipt, Foundation adapter, strict Workbench authorization and DOM confirmation are separate from permanent delete. Browser tests and E2E-023 prove cancel, retained, identity-change and success outcomes, real Finder restoration and zero permanent-delete fallback; unsupported targets fail closed with trash:false."
+					}
+				]
+			}
 		},
 		{
 			"id": "F180",
 			"name": "Complete local Git workflows",
 			"phase": 6,
-			"status": "planned",
+			"status": "in_progress",
 			"acceptance": [
 				"Branch tag remote and upstream management are available without a general-purpose git runner",
 				"Cherry-pick revert merge rebase reset reflog and contributor workflows have bounded previews and confirmations",
