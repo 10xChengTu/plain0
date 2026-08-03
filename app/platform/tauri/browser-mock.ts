@@ -52,6 +52,7 @@ import type {
 	WorkspaceEntryKind,
 	WorkspaceMoveIncompleteReason,
 	WorkspaceMoveResult,
+	WorkspaceRecentEntry,
 	WorkspaceRoot,
 	WorkspaceSearchFilesResult,
 	WorkspaceWatchPendingRoot,
@@ -115,8 +116,11 @@ import {
 	frozenWorkspaceMoveResult,
 	frozenWorkspacePrepareDeleteRequest,
 	frozenWorkspacePickResult,
+	frozenWorkspaceOpenFilesResult,
+	frozenWorkspaceRecentListResult,
 	frozenWorkspaceReadDirectory,
 	frozenWorkspaceRenameRequest,
+	frozenWorkspaceRecentRequest,
 	frozenWorkspaceSnapshot,
 	frozenWorkspaceWatchSyncRequest,
 	frozenWorkspaceWriteResult,
@@ -706,6 +710,7 @@ function isMockSubsequence(pattern: string, haystack: string): boolean {
 }
 
 export type BrowserMockWorkspacePick = "selected" | "cancelled";
+export type BrowserMockWorkspaceFilePick = "selected" | "cancelled";
 
 export interface BrowserMockDirectoryCopyLimitsForTest {
 	readonly descendants?: number;
@@ -932,6 +937,7 @@ export type BrowserMockThemeImportOutcome =
 
 export interface BrowserMockBridgeOptions {
 	readonly workspacePicks?: readonly BrowserMockWorkspacePick[];
+	readonly workspaceFilePicks?: readonly BrowserMockWorkspaceFilePick[];
 	/** Seeds the isolated in-memory backup store before first use. */
 	readonly backupFixtureForTest?: readonly BrowserMockBackupSeedEntryForTest[];
 	/** Seeds the isolated in-memory theme library before first use — as if
@@ -2457,6 +2463,7 @@ export function createBrowserMockBridge(
 		["keybindings", { revision: 1, content: "[]\n" }],
 	]);
 	const scriptedPicks = [...(options.workspacePicks ?? [])];
+	const scriptedFilePicks = [...(options.workspaceFilePicks ?? [])];
 	const roots = new Map<string, WorkspaceRoot>();
 	const backupEntries = new Map<
 		string,
@@ -2556,6 +2563,14 @@ export function createBrowserMockBridge(
 		});
 	}
 	let revision = 0;
+	let recentRevision = 1;
+	let nextRecentId = 1;
+	let recentEntries: Array<
+		Readonly<{
+			entry: WorkspaceRecentEntry;
+			roots: readonly WorkspaceRoot[];
+		}>
+	> = [];
 	const issuedDeleteIds = new Set<string>();
 	let activeDeleteBatch: MockDeleteBatch | undefined;
 	let workspaceWriteInFlight = false;
@@ -2806,6 +2821,38 @@ export function createBrowserMockBridge(
 
 	const snapshot = () =>
 		frozenWorkspaceSnapshot(MOCK_WORKSPACE_ID, revision, [...roots.values()]);
+	const recordRecent = (): void => {
+		const currentRoots = [...roots.values()];
+		recentRevision += 1;
+		if (currentRoots.length === 0) return;
+		const existingIndex = recentEntries.findIndex(
+			(candidate) =>
+				candidate.roots.length === currentRoots.length &&
+				candidate.roots.every(
+					(root, index) => root.rootId === currentRoots[index]?.rootId,
+				),
+		);
+		const recentId =
+			existingIndex >= 0
+				? recentEntries.splice(existingIndex, 1)[0]!.entry.recentId
+				: `00000000-0000-4000-8000-${(nextRecentId++).toString(16).padStart(12, "0")}`;
+		const rootLabels = Object.freeze(
+			currentRoots.map(({ displayName }) => displayName),
+		);
+		const first = rootLabels[0]!;
+		const entry = Object.freeze({
+			recentId,
+			label:
+				rootLabels.length === 1
+					? first
+					: `${first} + ${rootLabels.length - 1} folders`,
+			rootLabels,
+		}) satisfies WorkspaceRecentEntry;
+		recentEntries.unshift(
+			Object.freeze({ entry, roots: Object.freeze([...currentRoots]) }),
+		);
+		recentEntries = recentEntries.slice(0, 20);
+	};
 	const resolveNode = (rootId: string, relativePath: string): MockNode => {
 		const request = frozenWorkspaceEntryRequest(rootId, relativePath);
 		if (!roots.has(request.rootId)) {
@@ -6692,6 +6739,7 @@ export function createBrowserMockBridge(
 					}
 					revision += 1;
 				}
+				recordRecent();
 				return frozenWorkspacePickResult(status, snapshot());
 			}
 
@@ -6702,8 +6750,76 @@ export function createBrowserMockBridge(
 			if (roots.size !== before) {
 				revision += 1;
 			}
+			recordRecent();
 
 			return frozenWorkspacePickResult(status, snapshot());
+		},
+		async workspaceOpenFiles() {
+			const status = scriptedFilePicks.shift() ?? "selected";
+			if (status === "cancelled") {
+				return frozenWorkspaceOpenFilesResult(status, snapshot(), []);
+			}
+			const root = mockRoots[0]!;
+			if (!roots.has(root.rootId)) {
+				roots.set(root.rootId, root);
+				revision += 1;
+			}
+			recordRecent();
+			return frozenWorkspaceOpenFilesResult(status, snapshot(), [
+				Object.freeze({ rootId: root.rootId, relativePath: "README.md" }),
+			]);
+		},
+		async workspaceRecentList() {
+			return frozenWorkspaceRecentListResult(
+				recentRevision,
+				"none",
+				recentEntries.map(({ entry }) => entry),
+			);
+		},
+		async workspaceOpenRecent(recentId) {
+			recentId = frozenWorkspaceRecentRequest(recentId).recentId;
+			const index = recentEntries.findIndex(
+				(candidate) => candidate.entry.recentId === recentId,
+			);
+			if (index < 0) {
+				throw Object.freeze({
+					code: "WORKSPACE_RECENT_NOT_FOUND",
+					message: "The selected recent workspace is no longer available.",
+				});
+			}
+			const selected = recentEntries[index]!;
+			const nextRootIds = selected.roots.map(({ rootId }) => rootId);
+			const currentRootIds = [...roots.keys()];
+			if (
+				currentRootIds.length !== nextRootIds.length ||
+				currentRootIds.some(
+					(rootId, rootIndex) => rootId !== nextRootIds[rootIndex],
+				)
+			) {
+				roots.clear();
+				for (const root of selected.roots) roots.set(root.rootId, root);
+				revision += 1;
+			}
+			recordRecent();
+			return snapshot();
+		},
+		async workspaceRemoveRecent(recentId) {
+			recentId = frozenWorkspaceRecentRequest(recentId).recentId;
+			const before = recentEntries.length;
+			recentEntries = recentEntries.filter(
+				(candidate) => candidate.entry.recentId !== recentId,
+			);
+			if (recentEntries.length === before) {
+				throw Object.freeze({
+					code: "WORKSPACE_RECENT_NOT_FOUND",
+					message: "The selected recent workspace is no longer available.",
+				});
+			}
+			recentRevision += 1;
+		},
+		async workspaceClearRecent() {
+			recentEntries = [];
+			recentRevision += 1;
 		},
 		async workspaceRemoveRoot(rootId) {
 			if (!roots.delete(rootId)) {
@@ -6712,6 +6828,7 @@ export function createBrowserMockBridge(
 			workspaceWatchStates.delete(rootId);
 			invalidateDeleteBatch();
 			revision += 1;
+			recordRecent();
 			return snapshot();
 		},
 		async workspaceCreateFile(rootId, relativePath) {

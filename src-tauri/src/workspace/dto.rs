@@ -120,6 +120,242 @@ pub struct WorkspacePickRootsResult {
     snapshot: WorkspaceSnapshot,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceOpenFilesRequest {}
+
+impl WorkspaceOpenFilesRequest {
+    pub const fn validate(self) {}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceOpenFileTarget {
+    root_id: RootId,
+    relative_path: RelativePath,
+}
+
+impl WorkspaceOpenFileTarget {
+    pub(crate) const fn new(root_id: RootId, relative_path: RelativePath) -> Self {
+        Self {
+            root_id,
+            relative_path,
+        }
+    }
+
+    pub const fn root_id(&self) -> RootId {
+        self.root_id
+    }
+
+    pub fn relative_path(&self) -> &RelativePath {
+        &self.relative_path
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceOpenFilesResult {
+    status: WorkspacePickRootsStatus,
+    snapshot: WorkspaceSnapshot,
+    files: Vec<WorkspaceOpenFileTarget>,
+}
+
+impl WorkspaceOpenFilesResult {
+    pub(crate) const fn new(
+        status: WorkspacePickRootsStatus,
+        snapshot: WorkspaceSnapshot,
+        files: Vec<WorkspaceOpenFileTarget>,
+    ) -> Self {
+        Self {
+            status,
+            snapshot,
+            files,
+        }
+    }
+
+    pub const fn status(&self) -> WorkspacePickRootsStatus {
+        self.status
+    }
+
+    pub const fn snapshot(&self) -> &WorkspaceSnapshot {
+        &self.snapshot
+    }
+
+    pub fn files(&self) -> &[WorkspaceOpenFileTarget] {
+        &self.files
+    }
+}
+
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct WorkspaceRecentId(Uuid);
+
+impl WorkspaceRecentId {
+    pub(crate) fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub fn as_wire(self) -> String {
+        self.0.hyphenated().to_string()
+    }
+
+    pub(crate) fn parse_v4_wire(wire: &str) -> Result<Self, CommandError> {
+        let value = Uuid::parse_str(wire).map_err(|_| workspace_recent_request_invalid())?;
+        if value.hyphenated().to_string() != wire
+            || value.get_version() != Some(uuid::Version::Random)
+            || value.get_variant() != uuid::Variant::RFC4122
+        {
+            return Err(workspace_recent_request_invalid());
+        }
+        Ok(Self(value))
+    }
+}
+
+impl fmt::Debug for WorkspaceRecentId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("WorkspaceRecentId")
+            .field(&self.as_wire())
+            .finish()
+    }
+}
+
+impl Serialize for WorkspaceRecentId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.as_wire())
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkspaceRecentId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = String::deserialize(deserializer)?;
+        Self::parse_v4_wire(&wire).map_err(|_| D::Error::custom("invalid recent id"))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkspaceRestoreStatus {
+    #[default]
+    Pending,
+    None,
+    Restored,
+    Failed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRecentEntry {
+    recent_id: WorkspaceRecentId,
+    label: String,
+    root_labels: Vec<String>,
+}
+
+impl WorkspaceRecentEntry {
+    pub(crate) fn new(
+        recent_id: WorkspaceRecentId,
+        label: String,
+        root_labels: Vec<String>,
+    ) -> Self {
+        Self {
+            recent_id,
+            label,
+            root_labels,
+        }
+    }
+
+    pub const fn recent_id(&self) -> WorkspaceRecentId {
+        self.recent_id
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn root_labels(&self) -> &[String] {
+        &self.root_labels
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRecentListResult {
+    revision: u64,
+    restore_status: WorkspaceRestoreStatus,
+    entries: Vec<WorkspaceRecentEntry>,
+}
+
+impl WorkspaceRecentListResult {
+    pub(crate) const fn new(
+        revision: u64,
+        restore_status: WorkspaceRestoreStatus,
+        entries: Vec<WorkspaceRecentEntry>,
+    ) -> Self {
+        Self {
+            revision,
+            restore_status,
+            entries,
+        }
+    }
+
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub const fn restore_status(&self) -> WorkspaceRestoreStatus {
+        self.restore_status
+    }
+
+    pub fn entries(&self) -> &[WorkspaceRecentEntry] {
+        &self.entries
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceRecentListRequest {}
+
+impl WorkspaceRecentListRequest {
+    pub const fn validate(self) {}
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceOpenRecentRequest {
+    recent_id: WorkspaceRecentId,
+}
+
+impl WorkspaceOpenRecentRequest {
+    pub const fn recent_id(self) -> WorkspaceRecentId {
+        self.recent_id
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceRemoveRecentRequest {
+    recent_id: WorkspaceRecentId,
+}
+
+impl WorkspaceRemoveRecentRequest {
+    pub const fn recent_id(self) -> WorkspaceRecentId {
+        self.recent_id
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceClearRecentRequest {}
+
+impl WorkspaceClearRecentRequest {
+    pub const fn validate(self) {}
+}
+
 impl WorkspacePickRootsResult {
     pub(crate) const fn new(status: WorkspacePickRootsStatus, snapshot: WorkspaceSnapshot) -> Self {
         Self { status, snapshot }
@@ -343,6 +579,13 @@ fn workspace_watch_request_invalid() -> CommandError {
     CommandError::new(
         "WORKSPACE_WATCH_REQUEST_INVALID",
         "The workspace watcher synchronization request is invalid.",
+    )
+}
+
+fn workspace_recent_request_invalid() -> CommandError {
+    CommandError::new(
+        "WORKSPACE_RECENT_REQUEST_INVALID",
+        "The recent workspace request is invalid.",
     )
 }
 
@@ -1020,10 +1263,11 @@ mod tests {
         WorkspaceCommitDeleteEntryRequest, WorkspaceCopyRequest, WorkspaceDeleteBatchRequest,
         WorkspaceDeleteIncompleteReason, WorkspaceDeleteResult, WorkspaceEntryKind,
         WorkspaceEntryRequest, WorkspaceMoveIncompleteReason, WorkspaceMoveRequest,
-        WorkspaceMoveResult, WorkspacePickRootsMode, WorkspacePickRootsRequest,
-        WorkspacePrepareDeleteRequest, WorkspaceRenameRequest, WorkspaceWatchPendingRoot,
-        WorkspaceWatchSyncRequest, WorkspaceWatchSyncResult, WorkspaceWatchWakeEvent,
-        WorkspaceWriteDirectorySyncObservation, WorkspaceWriteResult,
+        WorkspaceMoveResult, WorkspaceOpenFilesRequest, WorkspaceOpenRecentRequest,
+        WorkspacePickRootsMode, WorkspacePickRootsRequest, WorkspacePrepareDeleteRequest,
+        WorkspaceRecentListRequest, WorkspaceRemoveRecentRequest, WorkspaceRenameRequest,
+        WorkspaceWatchPendingRoot, WorkspaceWatchSyncRequest, WorkspaceWatchSyncResult,
+        WorkspaceWatchWakeEvent, WorkspaceWriteDirectorySyncObservation, WorkspaceWriteResult,
         WorkspaceWriteTargetObservation,
     };
     use crate::workspace::{RootId, WorkspaceId};
@@ -1050,6 +1294,28 @@ mod tests {
                 serde_json::from_str::<WorkspacePickRootsRequest>(invalid).is_err(),
                 "request must reject {invalid}"
             );
+        }
+    }
+
+    #[test]
+    fn open_file_and_recent_requests_are_closed_and_path_free() {
+        serde_json::from_str::<WorkspaceOpenFilesRequest>(r#"{}"#).unwrap();
+        serde_json::from_str::<WorkspaceRecentListRequest>(r#"{}"#).unwrap();
+        for invalid in [r#"{"path":"/tmp/private"}"#, r#"{"mode":"multiple"}"#] {
+            assert!(serde_json::from_str::<WorkspaceOpenFilesRequest>(invalid).is_err());
+            assert!(serde_json::from_str::<WorkspaceRecentListRequest>(invalid).is_err());
+        }
+
+        let wire = r#"{"recentId":"00000000-0000-4000-8000-000000000123"}"#;
+        serde_json::from_str::<WorkspaceOpenRecentRequest>(wire).unwrap();
+        serde_json::from_str::<WorkspaceRemoveRecentRequest>(wire).unwrap();
+        for invalid in [
+            r#"{"recentId":"00000000-0000-1000-8000-000000000123"}"#,
+            r#"{"recentId":"00000000-0000-4000-8000-000000000123","path":"/tmp/private"}"#,
+            r#"{"recentId":"00000000000040008000000000000123"}"#,
+        ] {
+            assert!(serde_json::from_str::<WorkspaceOpenRecentRequest>(invalid).is_err());
+            assert!(serde_json::from_str::<WorkspaceRemoveRecentRequest>(invalid).is_err());
         }
     }
 

@@ -111,6 +111,21 @@ function testBridge(
 		async workspacePickRoots() {
 			throw new Error("unused");
 		},
+		async workspaceOpenFiles() {
+			throw new Error("unused");
+		},
+		async workspaceRecentList() {
+			throw new Error("unused");
+		},
+		async workspaceOpenRecent() {
+			throw new Error("unused");
+		},
+		async workspaceRemoveRecent() {
+			throw new Error("unused");
+		},
+		async workspaceClearRecent() {
+			throw new Error("unused");
+		},
 		async workspaceRemoveRoot() {
 			throw new Error("unused");
 		},

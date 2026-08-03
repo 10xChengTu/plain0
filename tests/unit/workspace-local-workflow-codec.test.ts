@@ -1,0 +1,167 @@
+import { describe, expect, it } from "vitest";
+
+import {
+	decodeWorkspaceOpenFilesResult,
+	decodeWorkspaceRecentListResult,
+	frozenWorkspaceRecentRequest,
+} from "../../app/platform/tauri/workspace-codec";
+
+const workspaceId = "00000000-0000-4000-8000-000000000001";
+const rootId = "00000000-0000-4000-8000-000000000101";
+const recentId = "00000000-0000-4000-8000-000000000201";
+const snapshot = {
+	workspaceId,
+	revision: 1,
+	roots: [
+		{
+			rootId,
+			displayName: "workspace",
+			uri: `plain-workspace://${rootId}/`,
+		},
+	],
+};
+const contractError = {
+	code: "IPC_CONTRACT_VIOLATION",
+	message: "Native IPC returned a payload that violates the Plain contract.",
+};
+
+describe("workspace local workflow codec", () => {
+	it("decodes a selected Open File result into frozen path-free targets", () => {
+		const decoded = decodeWorkspaceOpenFilesResult({
+			status: "selected",
+			snapshot,
+			files: [{ rootId, relativePath: "src/编辑器.ts" }],
+		});
+		expect(decoded).toEqual({
+			status: "selected",
+			snapshot,
+			files: [{ rootId, relativePath: "src/编辑器.ts" }],
+		});
+		expect(Object.isFrozen(decoded)).toBe(true);
+		expect(Object.isFrozen(decoded.files)).toBe(true);
+		expect(Object.isFrozen(decoded.files[0])).toBe(true);
+	});
+
+	it("rejects malformed, ambient, duplicate, accessor and Proxy Open File payloads", () => {
+		const vectors: unknown[] = [
+			{ status: "selected", snapshot, files: [] },
+			{
+				status: "cancelled",
+				snapshot,
+				files: [{ rootId, relativePath: "README.md" }],
+			},
+			{
+				status: "selected",
+				snapshot,
+				files: [{ rootId, relativePath: "/tmp/private" }],
+			},
+			{
+				status: "selected",
+				snapshot,
+				files: [
+					{ rootId, relativePath: "README.md" },
+					{ rootId, relativePath: "README.md" },
+				],
+			},
+			{
+				status: "selected",
+				snapshot,
+				files: [
+					{
+						rootId: "00000000-0000-4000-8000-000000000999",
+						relativePath: "README.md",
+					},
+				],
+			},
+			{ status: "selected", snapshot, files: [], path: "/tmp/private" },
+		];
+		const accessor = { rootId, relativePath: "README.md" };
+		Object.defineProperty(accessor, "relativePath", { get: () => "README.md" });
+		vectors.push({ status: "selected", snapshot, files: [accessor] });
+		vectors.push(
+			new Proxy(
+				{
+					status: "selected",
+					snapshot,
+					files: [{ rootId, relativePath: "README.md" }],
+				},
+				{},
+			),
+		);
+
+		for (const vector of vectors) {
+			expect(() => decodeWorkspaceOpenFilesResult(vector)).toThrowError(
+				expect.objectContaining(contractError),
+			);
+		}
+	});
+
+	it("decodes only opaque Recent ids and display labels", () => {
+		const decoded = decodeWorkspaceRecentListResult({
+			revision: 2,
+			restoreStatus: "restored",
+			entries: [
+				{
+					recentId,
+					label: "workspace + 1 folders",
+					rootLabels: ["workspace", "library"],
+				},
+			],
+		});
+		expect(decoded.entries[0]).toEqual({
+			recentId,
+			label: "workspace + 1 folders",
+			rootLabels: ["workspace", "library"],
+		});
+		expect(JSON.stringify(decoded)).not.toContain("/Users/");
+		expect(Object.isFrozen(decoded.entries[0]?.rootLabels)).toBe(true);
+	});
+
+	it("rejects duplicate ids, empty roots, extra native paths and hostile arrays", () => {
+		const valid = {
+			recentId,
+			label: "workspace",
+			rootLabels: ["workspace"],
+		};
+		const sparse: unknown[] = [];
+		sparse.length = 1;
+		for (const vector of [
+			{ revision: 0, restoreStatus: "none", entries: [] },
+			{ revision: 1, restoreStatus: "unknown", entries: [] },
+			{
+				revision: 1,
+				restoreStatus: "none",
+				entries: [valid, { ...valid }],
+			},
+			{
+				revision: 1,
+				restoreStatus: "none",
+				entries: [{ ...valid, rootLabels: [] }],
+			},
+			{
+				revision: 1,
+				restoreStatus: "none",
+				entries: [{ ...valid, path: "/Users/private" }],
+			},
+			{ revision: 1, restoreStatus: "none", entries: sparse },
+		]) {
+			expect(() => decodeWorkspaceRecentListResult(vector)).toThrowError(
+				expect.objectContaining(contractError),
+			);
+		}
+	});
+
+	it("freezes exact recent-id requests and rejects any path-shaped input", () => {
+		expect(frozenWorkspaceRecentRequest(recentId)).toEqual({ recentId });
+		expect(Object.isFrozen(frozenWorkspaceRecentRequest(recentId))).toBe(true);
+		for (const value of [
+			"00000000-0000-1000-8000-000000000201",
+			"00000000000040008000000000000201",
+			"/Users/private",
+		]) {
+			expect(() => frozenWorkspaceRecentRequest(value)).toThrowError(
+				expect.objectContaining({ code: "WORKSPACE_RECENT_REQUEST_INVALID" }),
+			);
+		}
+	});
+});

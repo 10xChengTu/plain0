@@ -1801,6 +1801,10 @@ describe("workspace watcher Harness", () => {
 			"let watcher = lock(&self.watcher)?.clone();\n        drop(state);\n        drop(mutation);\n        if let (Some(watcher), Some(registration)) = (watcher, removed_registration) {\n            watcher.revoke(registration);\n        }\n        Ok(snapshot)";
 		const finishPickerTail =
 			"if let Some(watcher) = watcher {\n            for registration in revoked_registrations {\n                watcher.revoke(registration);\n            }\n        }\n        Ok(result)";
+		const replaceRootsTail =
+			"let snapshot = state.scope.snapshot();\n        drop(state);\n        drop(mutation);\n        for registration in revoked {\n            watcher.revoke(registration);\n        }\n        Ok(snapshot)";
+		const initialSnapshotTail =
+			"let snapshot = state.scope.snapshot();\n        drop(state);\n        drop(mutation);\n        if let Some((watcher, revoked)) = activated {\n            for registration in revoked {\n                watcher.revoke(registration);\n            }\n        }\n        Ok(snapshot)";
 		for (const [from, to] of [
 			[
 				removeRootTail,
@@ -1811,8 +1815,11 @@ describe("workspace watcher Harness", () => {
 			],
 			[removeRootTail, removeRootTail.replace("        drop(mutation);\n", "")],
 			[
-				"let snapshot = state.scope.snapshot();",
-				"let snapshot = state.scope.snapshot();\n        if snapshot.roots().is_empty() {\n            return Ok(snapshot);\n        }",
+				removeRootTail,
+				removeRootTail.replace(
+					"let watcher = lock(&self.watcher)?.clone();",
+					"if snapshot.roots().is_empty() { return Ok(snapshot); }\n        let watcher = lock(&self.watcher)?.clone();",
+				),
 			],
 			[
 				finishPickerTail,
@@ -1820,6 +1827,28 @@ describe("workspace watcher Harness", () => {
 					"watcher.revoke(registration);",
 					"let _ = registration;",
 				),
+			],
+			[
+				replaceRootsTail,
+				replaceRootsTail.replace(
+					"watcher.revoke(registration);",
+					"let _ = registration;",
+				),
+			],
+			[
+				replaceRootsTail,
+				replaceRootsTail.replace("        drop(mutation);\n", ""),
+			],
+			[
+				initialSnapshotTail,
+				initialSnapshotTail.replace(
+					"watcher.revoke(registration);",
+					"let _ = registration;",
+				),
+			],
+			[
+				initialSnapshotTail,
+				initialSnapshotTail.replace("        drop(mutation);\n", ""),
 			],
 		]) {
 			const hostile = replaceWatcherSource(

@@ -6,6 +6,7 @@ pub mod error;
 pub mod git;
 pub mod lifecycle;
 pub mod path_policy;
+pub mod recent;
 pub mod search;
 pub mod terminal;
 pub mod theme;
@@ -19,6 +20,7 @@ use debug::service::DebugSessionService;
 use error::CommandError;
 use git::network::GitNetworkService;
 use lifecycle::service::{CloseCoordinator, ExitDecision, WindowCloseDecision};
+use recent::service::WorkspaceHistoryService;
 use terminal::service::TerminalService;
 use theme::service::ThemeService;
 use trust::service::TrustService;
@@ -54,7 +56,6 @@ fn runtime_info(app: tauri::AppHandle) -> Result<RuntimeInfo, CommandError> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .manage(WorkspaceService::new())
         .manage(TerminalService::new())
         .manage(GitNetworkService::new())
         .manage(DebugSessionService::new())
@@ -62,6 +63,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let base_path = app.path().app_local_data_dir()?;
+            app.manage(WorkspaceService::new());
+            app.manage(WorkspaceHistoryService::new(base_path.clone()));
             app.manage(BackupService::new(base_path.clone()));
             app.manage(ThemeService::new(base_path.clone()));
             app.manage(TrustService::new(base_path.clone()));
@@ -111,6 +114,11 @@ pub fn run() {
             workspace::commands::workspace_capabilities,
             workspace::commands::workspace_snapshot,
             workspace::commands::workspace_pick_roots,
+            workspace::commands::workspace_open_files,
+            workspace::commands::workspace_recent_list,
+            workspace::commands::workspace_open_recent,
+            workspace::commands::workspace_remove_recent,
+            workspace::commands::workspace_clear_recent,
             workspace::commands::workspace_watch_sync,
             workspace::commands::workspace_remove_root,
             workspace::commands::workspace_stat,

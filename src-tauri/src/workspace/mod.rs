@@ -3,8 +3,9 @@ use std::fmt;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
-use cap_std::fs::Dir;
+use cap_std::fs::{Dir, OpenOptions};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
@@ -33,7 +34,8 @@ pub(crate) mod writer;
 
 use dto::{WorkspaceRootSnapshot, WorkspaceSnapshot};
 
-const MAX_WORKSPACE_ROOTS: usize = 256;
+pub(crate) const MAX_WORKSPACE_ROOTS: usize = 256;
+const MAX_OPEN_FILE_SELECTIONS: usize = 64;
 
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RootId(Uuid);
@@ -407,49 +409,97 @@ impl WorkspaceScope {
     pub(crate) fn replace_root_atomically_with<F>(
         &mut self,
         ambient_path: &Path,
-        mut prepare_watcher: F,
+        prepare_watcher: F,
     ) -> Result<RootId, CommandError>
     where
         F: FnMut(RootId, &Path, WorkspaceRootLease) -> Result<(), CommandError>,
     {
-        let candidate = prepare_workspace_root(ambient_path)?;
-        if let Some(root_id) = self
-            .roots
-            .iter()
-            .find(|(_, root)| root.identity == candidate.identity)
-            .map(|(root_id, _)| *root_id)
-        {
-            if self.roots.len() == 1 && self.order.as_slice() == [root_id] {
-                return Ok(root_id);
-            }
+        let paths = [ambient_path.to_path_buf()];
+        self.replace_roots_atomically_with(&paths, prepare_watcher)?
+            .into_iter()
+            .next()
+            .ok_or_else(workspace_conflict)
+    }
 
-            let next_revision = next_revision(self.revision)?;
-            self.roots
-                .retain(|candidate_id, _| *candidate_id == root_id);
-            self.order.clear();
-            self.order.push(root_id);
-            self.revision = next_revision;
-            return Ok(root_id);
+    /// Opens and validates the complete ordered root set before changing any
+    /// live capability. Duplicate directory identities collapse to their first
+    /// occurrence; roots already held by this scope retain their ids and
+    /// capabilities, while every omitted root is revoked in the same commit.
+    pub(crate) fn replace_roots_atomically_with<F>(
+        &mut self,
+        ambient_paths: &[PathBuf],
+        mut prepare_watcher: F,
+    ) -> Result<Vec<RootId>, CommandError>
+    where
+        F: FnMut(RootId, &Path, WorkspaceRootLease) -> Result<(), CommandError>,
+    {
+        if ambient_paths.is_empty() || ambient_paths.len() > MAX_WORKSPACE_ROOTS {
+            return Err(workspace_root_limit_exceeded());
+        }
+
+        let candidates = ambient_paths
+            .iter()
+            .map(|ambient_path| prepare_workspace_root(ambient_path))
+            .collect::<Result<Vec<_>, CommandError>>()?;
+        let mut unique_candidates: Vec<PreparedWorkspaceRoot> = Vec::new();
+        for candidate in candidates {
+            if unique_candidates
+                .iter()
+                .any(|existing| existing.identity == candidate.identity)
+            {
+                continue;
+            }
+            unique_candidates.push(candidate);
+        }
+
+        let mut selections = Vec::with_capacity(unique_candidates.len());
+        for candidate in unique_candidates {
+            let existing_id = self
+                .roots
+                .iter()
+                .find(|(_, root)| root.identity == candidate.identity)
+                .map(|(root_id, _)| *root_id);
+            match existing_id {
+                Some(root_id) => selections.push((root_id, None)),
+                None => selections.push((RootId::new(), Some(candidate))),
+            }
+        }
+        let selected_ids = selections
+            .iter()
+            .map(|(root_id, _)| *root_id)
+            .collect::<Vec<_>>();
+        if self.order == selected_ids && self.roots.len() == selected_ids.len() {
+            return Ok(selected_ids);
         }
 
         let next_revision = next_revision(self.revision)?;
-        let root_id = RootId::new();
-        let lease = candidate.lease(root_id)?;
-        prepare_watcher(root_id, &candidate.watch_path, lease)?;
-        self.roots.clear();
-        self.order.clear();
-        self.roots.insert(
-            root_id,
-            WorkspaceRoot {
-                directory: candidate.directory,
-                display_name: candidate.display_name,
-                identity: candidate.identity,
-                canonical_path: candidate.watch_path,
-            },
-        );
-        self.order.push(root_id);
+        for (root_id, candidate) in &selections {
+            if let Some(candidate) = candidate {
+                let lease = candidate.lease(*root_id)?;
+                prepare_watcher(*root_id, &candidate.watch_path, lease)?;
+            }
+        }
+
+        let mut previous_roots = std::mem::take(&mut self.roots);
+        let mut next_roots = HashMap::with_capacity(selections.len());
+        for (root_id, candidate) in selections {
+            let root = match candidate {
+                Some(candidate) => WorkspaceRoot {
+                    directory: candidate.directory,
+                    display_name: candidate.display_name,
+                    identity: candidate.identity,
+                    canonical_path: candidate.watch_path,
+                },
+                None => previous_roots
+                    .remove(&root_id)
+                    .ok_or_else(workspace_conflict)?,
+            };
+            next_roots.insert(root_id, root);
+        }
+        self.roots = next_roots;
+        self.order = selected_ids.clone();
         self.revision = next_revision;
-        Ok(root_id)
+        Ok(selected_ids)
     }
 
     #[cfg(test)]
@@ -518,6 +568,17 @@ impl WorkspaceScope {
                 self.roots
                     .get(root_id)
                     .map(|root| (*root_id, root.canonical_path.clone()))
+            })
+            .collect()
+    }
+
+    pub(crate) fn history_roots(&self) -> Vec<(PathBuf, String)> {
+        self.order
+            .iter()
+            .filter_map(|root_id| {
+                self.roots
+                    .get(root_id)
+                    .map(|root| (root.canonical_path.clone(), root.display_name.clone()))
             })
             .collect()
     }
@@ -609,6 +670,11 @@ struct PreparedWorkspaceRoot {
     watch_path: PathBuf,
 }
 
+pub(crate) struct PreparedOpenFileSelection {
+    pub(crate) parent: PathBuf,
+    pub(crate) relative_path: RelativePath,
+}
+
 impl PreparedWorkspaceRoot {
     fn lease(&self, root_id: RootId) -> Result<WorkspaceRootLease, CommandError> {
         let directory = self
@@ -694,6 +760,58 @@ fn prepare_workspace_root(ambient_path: &Path) -> Result<PreparedWorkspaceRoot, 
     })
 }
 
+pub(crate) fn prepare_open_file_selections(
+    paths: Vec<PathBuf>,
+) -> Result<Vec<PreparedOpenFileSelection>, CommandError> {
+    if paths.is_empty() || paths.len() > MAX_OPEN_FILE_SELECTIONS {
+        return Err(workspace_open_file_selection_invalid());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut prepared = Vec::with_capacity(paths.len());
+    for path in paths {
+        if !path.is_absolute() {
+            return Err(workspace_file_unavailable());
+        }
+        let canonical_file =
+            std::fs::canonicalize(&path).map_err(|_| workspace_file_unavailable())?;
+        if !seen.insert(canonical_file.clone()) {
+            continue;
+        }
+        let parent = canonical_file
+            .parent()
+            .filter(|parent| parent.is_absolute())
+            .ok_or_else(workspace_file_unavailable)?;
+        let file_name = canonical_file
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .ok_or_else(workspace_file_unavailable)?;
+        let relative_path =
+            RelativePath::parse_wire(file_name).map_err(|_| workspace_file_unavailable())?;
+        let candidate = prepare_workspace_root(parent)?;
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let file = candidate
+            .directory
+            .open_with(relative_path.as_path(), &options)
+            .map_err(|_| workspace_file_unavailable())?;
+        if !file
+            .metadata()
+            .map_err(|_| workspace_file_unavailable())?
+            .is_file()
+        {
+            return Err(workspace_file_unavailable());
+        }
+        prepared.push(PreparedOpenFileSelection {
+            parent: candidate.watch_path,
+            relative_path,
+        });
+    }
+    if prepared.is_empty() {
+        return Err(workspace_open_file_selection_invalid());
+    }
+    Ok(prepared)
+}
+
 fn next_revision(current: u64) -> Result<u64, CommandError> {
     current.checked_add(1).ok_or_else(workspace_conflict)
 }
@@ -776,6 +894,20 @@ fn workspace_root_limit_exceeded() -> CommandError {
     CommandError::new(
         "WORKSPACE_ROOT_LIMIT_EXCEEDED",
         "The workspace root limit has been exceeded.",
+    )
+}
+
+fn workspace_open_file_selection_invalid() -> CommandError {
+    CommandError::new(
+        "WORKSPACE_OPEN_FILE_SELECTION_INVALID",
+        "The selected file list is invalid.",
+    )
+}
+
+fn workspace_file_unavailable() -> CommandError {
+    CommandError::new(
+        "WORKSPACE_FILE_UNAVAILABLE",
+        "The selected file is unavailable.",
     )
 }
 

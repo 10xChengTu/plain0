@@ -18,8 +18,10 @@ import type {
 	WorkspaceMoveIncompleteReason,
 	WorkspaceMoveRequest,
 	WorkspaceMoveResult,
+	WorkspaceOpenFilesResult,
 	WorkspacePrepareDeleteRequest,
 	WorkspacePickResult,
+	WorkspaceRecentListResult,
 	WorkspaceReadDirectoryResult,
 	WorkspaceReadFileResult,
 	WorkspaceRoot,
@@ -34,6 +36,9 @@ import type {
 const UUID_V4_PATTERN =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_WORKSPACE_ROOTS = 256;
+const MAX_OPEN_FILE_SELECTIONS = 64;
+const MAX_RECENT_WORKSPACES = 20;
+const MAX_RECENT_LABEL_BYTES = 1_024;
 const MAX_WORKSPACE_WATCH_GENERATION = 0xffff_ffff;
 const MAX_DISPLAY_NAME_LENGTH = 255;
 const MAX_DIRECTORY_ENTRIES = 10_000;
@@ -319,6 +324,15 @@ function isWellFormedUtf16(value: string): boolean {
 	return true;
 }
 
+function validRecentLabel(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		isWellFormedUtf16(value) &&
+		utf8Encoder.encode(value).byteLength <= MAX_RECENT_LABEL_BYTES
+	);
+}
+
 function isWindowsReservedSegment(value: string): boolean {
 	const rawStem = value.split(".", 1)[0] ?? value;
 	const stem = rawStem.replace(/[a-z]/g, (character) =>
@@ -408,6 +422,18 @@ export function frozenWorkspaceEntryRequest(
 		);
 	}
 	return Object.freeze({ rootId, relativePath });
+}
+
+export function frozenWorkspaceRecentRequest(
+	recentId: unknown,
+): Readonly<{ recentId: string }> {
+	if (!isUuidV4(recentId)) {
+		return requestViolation(
+			"WORKSPACE_RECENT_REQUEST_INVALID",
+			"The recent workspace request is invalid.",
+		);
+	}
+	return Object.freeze({ recentId });
 }
 
 function workspaceWatchRequestInvalid(): never {
@@ -1332,6 +1358,118 @@ export function decodeWorkspacePickResult(value: unknown): WorkspacePickResult {
 	});
 }
 
+export function decodeWorkspaceOpenFilesResult(
+	value: unknown,
+): WorkspaceOpenFilesResult {
+	return sanitizedDecode(() => {
+		const result = ownPlainDataSnapshot(value);
+		if (
+			!hasExactKeys(result, ["status", "snapshot", "files"]) ||
+			(result.status !== "selected" && result.status !== "cancelled")
+		) {
+			return violation();
+		}
+		const snapshot = decodeWorkspaceSnapshotValue(result.snapshot);
+		const files = ownArrayDataSnapshot(
+			result.files,
+			result.status === "selected" ? 1 : 0,
+			result.status === "selected" ? MAX_OPEN_FILE_SELECTIONS : 0,
+		);
+		const authorizedRoots = new Set(snapshot.roots.map(({ rootId }) => rootId));
+		const unique = new Set<string>();
+		const targets = files.entries.map((entry) => {
+			const target = ownPlainDataSnapshot(entry);
+			if (
+				!hasExactKeys(target, ["rootId", "relativePath"]) ||
+				!isUuidV4(target.rootId) ||
+				!authorizedRoots.has(target.rootId) ||
+				typeof target.relativePath !== "string" ||
+				target.relativePath.length === 0 ||
+				workspaceRelativePathSegments(target.relativePath) === undefined
+			) {
+				return violation();
+			}
+			const identity = `${target.rootId}\0${target.relativePath}`;
+			if (unique.has(identity)) {
+				return violation();
+			}
+			unique.add(identity);
+			rejectProxyObject(entry as object);
+			return Object.freeze({
+				rootId: target.rootId,
+				relativePath: target.relativePath,
+			});
+		});
+		rejectProxyObject(files.value);
+		rejectProxyObject(value as object);
+		return Object.freeze({
+			status: result.status,
+			snapshot,
+			files: Object.freeze(targets),
+		});
+	});
+}
+
+export function decodeWorkspaceRecentListResult(
+	value: unknown,
+): WorkspaceRecentListResult {
+	return sanitizedDecode(() => {
+		const result = ownPlainDataSnapshot(value);
+		if (
+			!hasExactKeys(result, ["revision", "restoreStatus", "entries"]) ||
+			!isSafeNonnegativeInteger(result.revision) ||
+			result.revision < 1 ||
+			!["pending", "none", "restored", "failed"].includes(
+				result.restoreStatus as string,
+			)
+		) {
+			return violation();
+		}
+		const entries = ownArrayDataSnapshot(
+			result.entries,
+			0,
+			MAX_RECENT_WORKSPACES,
+		);
+		const unique = new Set<string>();
+		const decodedEntries = entries.entries.map((entry) => {
+			const recent = ownPlainDataSnapshot(entry);
+			if (
+				!hasExactKeys(recent, ["recentId", "label", "rootLabels"]) ||
+				!isUuidV4(recent.recentId) ||
+				unique.has(recent.recentId) ||
+				!validRecentLabel(recent.label)
+			) {
+				return violation();
+			}
+			const rootLabels = ownArrayDataSnapshot(
+				recent.rootLabels,
+				1,
+				MAX_WORKSPACE_ROOTS,
+			);
+			const labels = rootLabels.entries.map((label) => {
+				if (!validRecentLabel(label)) return violation();
+				return label;
+			});
+			unique.add(recent.recentId);
+			rejectProxyObject(rootLabels.value);
+			rejectProxyObject(entry as object);
+			return Object.freeze({
+				recentId: recent.recentId,
+				label: recent.label,
+				rootLabels: Object.freeze(labels),
+			});
+		});
+		rejectProxyObject(entries.value);
+		rejectProxyObject(value as object);
+		return Object.freeze({
+			revision: result.revision,
+			restoreStatus:
+				result.restoreStatus as WorkspaceRecentListResult["restoreStatus"],
+			entries: Object.freeze(decodedEntries),
+		});
+	});
+}
+
 export function decodeWorkspaceEntryStat(value: unknown): WorkspaceEntryStat {
 	return sanitizedDecode(() => decodeWorkspaceEntryStatValue(value));
 }
@@ -1803,6 +1941,26 @@ export function frozenWorkspacePickResult(
 	snapshot: WorkspaceSnapshot,
 ): WorkspacePickResult {
 	return decodeWorkspacePickResult({ status, snapshot });
+}
+
+export function frozenWorkspaceOpenFilesResult(
+	status: WorkspaceOpenFilesResult["status"],
+	snapshot: WorkspaceSnapshot,
+	files: WorkspaceOpenFilesResult["files"],
+): WorkspaceOpenFilesResult {
+	return decodeWorkspaceOpenFilesResult({ status, snapshot, files });
+}
+
+export function frozenWorkspaceRecentListResult(
+	revision: number,
+	restoreStatus: WorkspaceRecentListResult["restoreStatus"],
+	entries: WorkspaceRecentListResult["entries"],
+): WorkspaceRecentListResult {
+	return decodeWorkspaceRecentListResult({
+		revision,
+		restoreStatus,
+		entries,
+	});
 }
 
 export function frozenWorkspaceEntryStat(

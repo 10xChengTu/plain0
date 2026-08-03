@@ -11,9 +11,12 @@ use crate::error::CommandError;
 use crate::path_policy::RelativePath;
 use crate::workspace::dto::{
     WorkspaceDeleteIncompleteReason, WorkspaceDeleteResult, WorkspaceEntryKind,
-    WorkspacePickRootsMode, WorkspacePickRootsStatus,
+    WorkspacePickRootsMode, WorkspacePickRootsStatus, WorkspaceRestoreStatus,
 };
-use crate::workspace::picker::{DirectoryPicker, DirectoryPickerFuture, DirectoryPickerResult};
+use crate::workspace::picker::{
+    DirectoryPicker, DirectoryPickerFuture, DirectoryPickerResult, FilePicker, FilePickerFuture,
+    FilePickerResult,
+};
 use crate::workspace::{RootId, MAX_WORKSPACE_ROOTS};
 
 enum FakeOutcome {
@@ -78,6 +81,31 @@ impl DirectoryPicker for FakePicker {
     }
 }
 
+struct FakeFilePicker {
+    outcome: Mutex<Option<FilePickerResult>>,
+}
+
+impl FakeFilePicker {
+    fn selected(paths: Vec<PathBuf>) -> Self {
+        Self {
+            outcome: Mutex::new(Some(FilePickerResult::Selected(paths))),
+        }
+    }
+
+    fn cancelled() -> Self {
+        Self {
+            outcome: Mutex::new(Some(FilePickerResult::Cancelled)),
+        }
+    }
+}
+
+impl FilePicker for FakeFilePicker {
+    fn pick_files(&self) -> FilePickerFuture<'_> {
+        let outcome = self.outcome.lock().unwrap().take().unwrap();
+        Box::pin(async move { Ok(outcome) })
+    }
+}
+
 #[derive(Clone)]
 struct GatedPicker {
     entered: Arc<Barrier>,
@@ -113,6 +141,148 @@ fn cancellation_preserves_the_exact_snapshot() {
     assert_eq!(result.status(), WorkspacePickRootsStatus::Cancelled);
     assert_eq!(result.snapshot(), &before);
     assert_eq!(service.snapshot("main").unwrap(), before);
+}
+
+#[test]
+fn initial_snapshot_restores_the_complete_ordered_root_set_once() {
+    let temp = TempDir::new().unwrap();
+    let first = create_directory(&temp, "first");
+    let second = create_directory(&temp, "second");
+    let service = WorkspaceService::new();
+    let restored = block_on(service.initial_snapshot_with_restore(
+        "main",
+        Ok(Some(vec![first, second])),
+        Arc::new(|_| {}),
+    ))
+    .unwrap();
+    assert_eq!(restored.revision(), 1);
+    assert_eq!(restored.roots().len(), 2);
+    assert_eq!(restored.roots()[0].display_name(), "first");
+    assert_eq!(restored.roots()[1].display_name(), "second");
+    assert_eq!(
+        service.restore_status("main").unwrap(),
+        WorkspaceRestoreStatus::Restored
+    );
+
+    let ignored_second_attempt =
+        block_on(service.initial_snapshot_with_restore("main", Ok(None), Arc::new(|_| {})))
+            .unwrap();
+    assert_eq!(ignored_second_attempt, restored);
+}
+
+#[test]
+fn failed_initial_restore_is_path_free_empty_and_does_not_guess_another_root() {
+    let temp = TempDir::new().unwrap();
+    let valid = create_directory(&temp, "valid-but-not-last");
+    let missing = temp.path().join("missing-last");
+    let service = WorkspaceService::new();
+    let restored = block_on(service.initial_snapshot_with_restore(
+        "main",
+        Ok(Some(vec![missing])),
+        Arc::new(|_| {}),
+    ))
+    .unwrap();
+    assert!(restored.roots().is_empty());
+    assert_eq!(restored.revision(), 0);
+    assert_eq!(
+        service.restore_status("main").unwrap(),
+        WorkspaceRestoreStatus::Failed
+    );
+    assert!(valid.exists());
+}
+
+#[test]
+fn recent_replacement_is_all_or_nothing_and_preserves_order() {
+    let temp = TempDir::new().unwrap();
+    let current = create_directory(&temp, "current");
+    let first = create_directory(&temp, "first");
+    let second = create_directory(&temp, "second");
+    let missing = temp.path().join("missing");
+    let service = WorkspaceService::new();
+    let initial = block_on(service.pick_roots(
+        "main",
+        FakePicker::selected(vec![current]),
+        WorkspacePickRootsMode::Replace,
+    ))
+    .unwrap();
+
+    let replaced = block_on(service.replace_roots_with_watch_sink(
+        "main",
+        vec![second, first],
+        Arc::new(|_| {}),
+    ))
+    .unwrap();
+    assert_eq!(replaced.revision(), initial.snapshot().revision() + 1);
+    assert_eq!(replaced.roots()[0].display_name(), "second");
+    assert_eq!(replaced.roots()[1].display_name(), "first");
+
+    let before_failure = service.snapshot("main").unwrap();
+    let error = block_on(service.replace_roots_with_watch_sink(
+        "main",
+        vec![temp.path().join("first"), missing],
+        Arc::new(|_| {}),
+    ))
+    .unwrap_err();
+    assert_eq!(error.code(), "ROOT_UNAVAILABLE");
+    assert_eq!(service.snapshot("main").unwrap(), before_failure);
+}
+
+#[test]
+fn open_file_cancel_preserves_topology_and_selected_parents_are_explicit_roots() {
+    let temp = TempDir::new().unwrap();
+    let first_parent = create_directory(&temp, "first-parent");
+    let second_parent = create_directory(&temp, "second-parent");
+    let first = first_parent.join("first.txt");
+    let sibling = first_parent.join("sibling.txt");
+    let second = second_parent.join("second.txt");
+    std::fs::write(&first, b"first").unwrap();
+    std::fs::write(&sibling, b"sibling").unwrap();
+    std::fs::write(&second, b"second").unwrap();
+    let service = WorkspaceService::new();
+
+    let cancelled = block_on(service.pick_files_with_watch_sink(
+        "main",
+        FakeFilePicker::cancelled(),
+        Arc::new(|_| {}),
+    ))
+    .unwrap();
+    assert_eq!(cancelled.status(), WorkspacePickRootsStatus::Cancelled);
+    assert!(cancelled.snapshot().roots().is_empty());
+    assert!(cancelled.files().is_empty());
+
+    let opened = block_on(service.pick_files_with_watch_sink(
+        "main",
+        FakeFilePicker::selected(vec![first, sibling, second]),
+        Arc::new(|_| {}),
+    ))
+    .unwrap();
+    assert_eq!(opened.status(), WorkspacePickRootsStatus::Selected);
+    assert_eq!(opened.snapshot().roots().len(), 2);
+    assert_eq!(opened.files().len(), 3);
+    assert_eq!(opened.files()[0].relative_path().as_wire(), "first.txt");
+    assert_eq!(opened.files()[1].relative_path().as_wire(), "sibling.txt");
+    assert_eq!(opened.files()[2].relative_path().as_wire(), "second.txt");
+    assert_eq!(opened.files()[0].root_id(), opened.files()[1].root_id());
+    assert_ne!(opened.files()[0].root_id(), opened.files()[2].root_id());
+}
+
+#[test]
+fn one_invalid_open_file_rejects_the_complete_parent_adoption() {
+    let temp = TempDir::new().unwrap();
+    let parent = create_directory(&temp, "parent");
+    let valid = parent.join("valid.txt");
+    std::fs::write(&valid, b"valid").unwrap();
+    let missing = parent.join("missing.txt");
+    let service = WorkspaceService::new();
+
+    let error = block_on(service.pick_files_with_watch_sink(
+        "main",
+        FakeFilePicker::selected(vec![valid, missing]),
+        Arc::new(|_| {}),
+    ))
+    .unwrap_err();
+    assert_eq!(error.code(), "WORKSPACE_FILE_UNAVAILABLE");
+    assert!(service.snapshot("main").unwrap().roots().is_empty());
 }
 
 #[test]

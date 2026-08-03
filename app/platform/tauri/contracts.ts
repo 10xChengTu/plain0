@@ -96,6 +96,31 @@ export interface WorkspacePickResult {
 	readonly snapshot: WorkspaceSnapshot;
 }
 
+export interface WorkspaceOpenFileTarget {
+	readonly rootId: string;
+	readonly relativePath: string;
+}
+
+export interface WorkspaceOpenFilesResult {
+	readonly status: "selected" | "cancelled";
+	readonly snapshot: WorkspaceSnapshot;
+	readonly files: readonly WorkspaceOpenFileTarget[];
+}
+
+export type WorkspaceRestoreStatus = "pending" | "none" | "restored" | "failed";
+
+export interface WorkspaceRecentEntry {
+	readonly recentId: string;
+	readonly label: string;
+	readonly rootLabels: readonly string[];
+}
+
+export interface WorkspaceRecentListResult {
+	readonly revision: number;
+	readonly restoreStatus: WorkspaceRestoreStatus;
+	readonly entries: readonly WorkspaceRecentEntry[];
+}
+
 export type WorkspacePickMode = "replace" | "add";
 
 export type WorkspaceEntryKind =
@@ -1286,6 +1311,11 @@ export interface PlainBridge {
 	workspaceReconcileWatchRoots(rootIds: readonly string[]): void;
 	workspaceWatch(rootId: string, listener: () => void): Unlisten;
 	workspacePickRoots(mode: WorkspacePickMode): Promise<WorkspacePickResult>;
+	workspaceOpenFiles(): Promise<WorkspaceOpenFilesResult>;
+	workspaceRecentList(): Promise<WorkspaceRecentListResult>;
+	workspaceOpenRecent(recentId: string): Promise<WorkspaceSnapshot>;
+	workspaceRemoveRecent(recentId: string): Promise<void>;
+	workspaceClearRecent(): Promise<void>;
 	workspaceRemoveRoot(rootId: string): Promise<WorkspaceSnapshot>;
 	workspaceCreateFile(
 		rootId: string,

@@ -39,7 +39,9 @@ import {
 	decodeWorkspaceWritePrepublicationError,
 	decodeWorkspaceWriteResult,
 	decodeWorkspaceMoveResult,
+	decodeWorkspaceOpenFilesResult,
 	decodeWorkspacePickResult,
+	decodeWorkspaceRecentListResult,
 	decodeWorkspaceReadDirectory,
 	decodeWorkspaceSnapshot,
 	decodeWorkspaceVoid,
@@ -54,6 +56,7 @@ import {
 	frozenWorkspaceMoveRequest,
 	frozenWorkspacePrepareDeleteRequest,
 	frozenWorkspaceRenameRequest,
+	frozenWorkspaceRecentRequest,
 	frozenWorkspaceWatchSyncRequest,
 	workspaceWriteResponseUnavailable,
 } from "./workspace-codec";
@@ -262,6 +265,37 @@ export function createNativeBridge(): PlainBridge {
 					request: { mode },
 				}),
 			),
+		workspaceOpenFiles: async () =>
+			decodeWorkspaceOpenFilesResult(
+				await invoke<unknown>("workspace_open_files", {
+					request: Object.freeze({}),
+				}),
+			),
+		workspaceRecentList: async () =>
+			decodeWorkspaceRecentListResult(
+				await invoke<unknown>("workspace_recent_list", {
+					request: Object.freeze({}),
+				}),
+			),
+		workspaceOpenRecent: async (recentId) => {
+			const request = frozenWorkspaceRecentRequest(recentId);
+			return decodeWorkspaceSnapshot(
+				await invoke<unknown>("workspace_open_recent", { request }),
+			);
+		},
+		workspaceRemoveRecent: async (recentId) => {
+			const request = frozenWorkspaceRecentRequest(recentId);
+			decodeWorkspaceVoid(
+				await invoke<unknown>("workspace_remove_recent", { request }),
+			);
+		},
+		workspaceClearRecent: async () => {
+			decodeWorkspaceVoid(
+				await invoke<unknown>("workspace_clear_recent", {
+					request: Object.freeze({}),
+				}),
+			);
+		},
 		workspaceRemoveRoot: async (rootId) =>
 			decodeWorkspaceSnapshot(
 				await invoke<unknown>("workspace_remove_root", {

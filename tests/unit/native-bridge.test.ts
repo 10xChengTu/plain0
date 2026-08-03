@@ -278,6 +278,62 @@ describe("native Plain bridge", () => {
 		expect(Object.isFrozen(snapshot.roots[0])).toBe(true);
 	});
 
+	it("keeps Open File and Recent IPC path-free with frozen exact requests", async () => {
+		const recentId = "00000000-0000-4000-8000-000000000201";
+		tauri.invoke
+			.mockResolvedValueOnce({
+				status: "selected",
+				snapshot: validSnapshot(),
+				files: [{ rootId, relativePath: "README.md" }],
+			})
+			.mockResolvedValueOnce({
+				revision: 2,
+				restoreStatus: "restored",
+				entries: [{ recentId, label: "workspace", rootLabels: ["workspace"] }],
+			})
+			.mockResolvedValueOnce(validSnapshot())
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(null);
+		const bridge = createNativeBridge();
+
+		const opened = await bridge.workspaceOpenFiles();
+		const recent = await bridge.workspaceRecentList();
+		await bridge.workspaceOpenRecent(recentId);
+		await bridge.workspaceRemoveRecent(recentId);
+		await bridge.workspaceClearRecent();
+
+		expect(tauri.invoke.mock.calls).toEqual([
+			["workspace_open_files", { request: {} }],
+			["workspace_recent_list", { request: {} }],
+			["workspace_open_recent", { request: { recentId } }],
+			["workspace_remove_recent", { request: { recentId } }],
+			["workspace_clear_recent", { request: {} }],
+		]);
+		expect(opened.files).toEqual([{ rootId, relativePath: "README.md" }]);
+		expect(recent.entries[0]?.rootLabels).toEqual(["workspace"]);
+		expect(Object.isFrozen(opened.files)).toBe(true);
+		expect(Object.isFrozen(recent.entries)).toBe(true);
+		for (const [, arguments_] of tauri.invoke.mock.calls) {
+			expect(Object.isFrozen(arguments_?.request)).toBe(true);
+			expect(JSON.stringify(arguments_)).not.toContain("/Users/");
+		}
+	});
+
+	it("rejects invalid recent ids before native invocation", async () => {
+		const bridge = createNativeBridge();
+		for (const recentId of ["not-an-id", "/Users/private"]) {
+			await expect(bridge.workspaceOpenRecent(recentId)).rejects.toMatchObject({
+				code: "WORKSPACE_RECENT_REQUEST_INVALID",
+			});
+			await expect(
+				bridge.workspaceRemoveRecent(recentId),
+			).rejects.toMatchObject({
+				code: "WORKSPACE_RECENT_REQUEST_INVALID",
+			});
+		}
+		expect(tauri.invoke).not.toHaveBeenCalled();
+	});
+
 	it("keeps decoded topology responses side-effect free until accepted roots are reconciled", async () => {
 		vi.useFakeTimers();
 		try {

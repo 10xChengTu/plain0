@@ -5,18 +5,62 @@ use tauri::{Emitter, EventTarget, Manager, State, WebviewWindow};
 use crate::error::CommandError;
 
 use super::dto::{
-    WorkspaceCapabilities, WorkspaceCapabilitiesRequest, WorkspaceCommitDeleteEntryRequest,
-    WorkspaceCopyRequest, WorkspaceDeleteBatchPlan, WorkspaceDeleteBatchRequest,
-    WorkspaceDeleteResult, WorkspaceEntryRequest, WorkspaceEntryStat, WorkspaceMoveRequest,
-    WorkspaceMoveResult, WorkspacePickRootsRequest, WorkspacePickRootsResult,
-    WorkspacePrepareDeleteRequest, WorkspaceReadDirectoryResult, WorkspaceRemoveRootRequest,
-    WorkspaceRenameRequest, WorkspaceSnapshot, WorkspaceSnapshotRequest, WorkspaceWatchSyncRequest,
-    WorkspaceWatchSyncResult, WorkspaceWatchWakeEvent, WorkspaceWriteResult,
+    WorkspaceCapabilities, WorkspaceCapabilitiesRequest, WorkspaceClearRecentRequest,
+    WorkspaceCommitDeleteEntryRequest, WorkspaceCopyRequest, WorkspaceDeleteBatchPlan,
+    WorkspaceDeleteBatchRequest, WorkspaceDeleteResult, WorkspaceEntryRequest, WorkspaceEntryStat,
+    WorkspaceMoveRequest, WorkspaceMoveResult, WorkspaceOpenFilesRequest, WorkspaceOpenFilesResult,
+    WorkspaceOpenRecentRequest, WorkspacePickRootsRequest, WorkspacePickRootsResult,
+    WorkspacePickRootsStatus, WorkspacePrepareDeleteRequest, WorkspaceReadDirectoryResult,
+    WorkspaceRecentListRequest, WorkspaceRecentListResult, WorkspaceRemoveRecentRequest,
+    WorkspaceRemoveRootRequest, WorkspaceRenameRequest, WorkspaceSnapshot,
+    WorkspaceSnapshotRequest, WorkspaceWatchSyncRequest, WorkspaceWatchSyncResult,
+    WorkspaceWatchWakeEvent, WorkspaceWriteResult,
 };
-use super::picker::TauriDirectoryPicker;
+use super::picker::{TauriDirectoryPicker, TauriFilePicker};
 use super::service::WorkspaceService;
+use crate::recent::service::{WorkspaceHistoryRoot, WorkspaceHistoryService};
 
 pub(crate) const WORKSPACE_WATCH_WAKE_EVENT: &str = "plain://workspace-watch-wake";
+
+fn workspace_watch_wake_sink(
+    window: &WebviewWindow,
+) -> Arc<dyn Fn(super::WorkspaceId) + Send + Sync> {
+    let app = window.app_handle().clone();
+    let window_label = window.label().to_owned();
+    Arc::new(move |workspace_id| {
+        let _ = app.emit_to(
+            EventTarget::webview_window(window_label.clone()),
+            WORKSPACE_WATCH_WAKE_EVENT,
+            WorkspaceWatchWakeEvent::new(workspace_id),
+        );
+    })
+}
+
+async fn record_current_workspace(
+    window_label: &str,
+    service: &WorkspaceService,
+    history: &WorkspaceHistoryService,
+) -> Result<(), CommandError> {
+    let roots = service
+        .history_roots(window_label)?
+        .into_iter()
+        .map(|(canonical_path, display_name)| WorkspaceHistoryRoot {
+            canonical_path,
+            display_name,
+        })
+        .collect::<Vec<_>>();
+    let history = history.clone();
+    tauri::async_runtime::spawn_blocking(move || history.record(&roots))
+        .await
+        .map_err(|_| workspace_history_unavailable())?
+}
+
+fn workspace_history_unavailable() -> CommandError {
+    CommandError::new(
+        "WORKSPACE_HISTORY_UNAVAILABLE",
+        "Recent workspaces are unavailable.",
+    )
+}
 
 #[tauri::command]
 pub(crate) fn workspace_capabilities(
@@ -31,31 +75,125 @@ pub(crate) fn workspace_capabilities(
 pub(crate) async fn workspace_snapshot(
     window: WebviewWindow,
     service: State<'_, WorkspaceService>,
+    history: State<'_, WorkspaceHistoryService>,
     request: WorkspaceSnapshotRequest,
 ) -> Result<WorkspaceSnapshot, CommandError> {
     request.validate();
-    service.snapshot(window.label())
+    let history = history.inner().clone();
+    let last_roots = tauri::async_runtime::spawn_blocking(move || history.last_roots())
+        .await
+        .map_err(|_| workspace_history_unavailable())?;
+    service
+        .initial_snapshot_with_restore(
+            window.label(),
+            last_roots,
+            workspace_watch_wake_sink(&window),
+        )
+        .await
 }
 
 #[tauri::command]
 pub(crate) async fn workspace_pick_roots(
     window: WebviewWindow,
     service: State<'_, WorkspaceService>,
+    history: State<'_, WorkspaceHistoryService>,
     request: WorkspacePickRootsRequest,
 ) -> Result<WorkspacePickRootsResult, CommandError> {
     let picker = TauriDirectoryPicker::new(window.clone());
-    let app = window.app_handle().clone();
-    let window_label = window.label().to_owned();
-    let watch_wake_sink = Arc::new(move |workspace_id| {
-        let _ = app.emit_to(
-            EventTarget::webview_window(window_label.clone()),
-            WORKSPACE_WATCH_WAKE_EVENT,
-            WorkspaceWatchWakeEvent::new(workspace_id),
-        );
-    });
-    service
-        .pick_roots_with_watch_sink(window.label(), picker, request.mode(), watch_wake_sink)
+    let result = service
+        .pick_roots_with_watch_sink(
+            window.label(),
+            picker,
+            request.mode(),
+            workspace_watch_wake_sink(&window),
+        )
+        .await?;
+    if result.status() == WorkspacePickRootsStatus::Selected {
+        record_current_workspace(window.label(), service.inner(), history.inner()).await?;
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub(crate) async fn workspace_open_files(
+    window: WebviewWindow,
+    service: State<'_, WorkspaceService>,
+    history: State<'_, WorkspaceHistoryService>,
+    request: WorkspaceOpenFilesRequest,
+) -> Result<WorkspaceOpenFilesResult, CommandError> {
+    request.validate();
+    let result = service
+        .pick_files_with_watch_sink(
+            window.label(),
+            TauriFilePicker::new(window.clone()),
+            workspace_watch_wake_sink(&window),
+        )
+        .await?;
+    if result.status() == WorkspacePickRootsStatus::Selected {
+        record_current_workspace(window.label(), service.inner(), history.inner()).await?;
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub(crate) async fn workspace_recent_list(
+    window: WebviewWindow,
+    service: State<'_, WorkspaceService>,
+    history: State<'_, WorkspaceHistoryService>,
+    request: WorkspaceRecentListRequest,
+) -> Result<WorkspaceRecentListResult, CommandError> {
+    request.validate();
+    let history = history.inner().clone();
+    let snapshot = tauri::async_runtime::spawn_blocking(move || history.snapshot())
         .await
+        .map_err(|_| workspace_history_unavailable())??;
+    Ok(WorkspaceRecentListResult::new(
+        snapshot.revision,
+        service.restore_status(window.label())?,
+        snapshot.entries,
+    ))
+}
+
+#[tauri::command]
+pub(crate) async fn workspace_open_recent(
+    window: WebviewWindow,
+    service: State<'_, WorkspaceService>,
+    history: State<'_, WorkspaceHistoryService>,
+    request: WorkspaceOpenRecentRequest,
+) -> Result<WorkspaceSnapshot, CommandError> {
+    let recent_id = request.recent_id();
+    let history_clone = history.inner().clone();
+    let roots = tauri::async_runtime::spawn_blocking(move || history_clone.roots_for(recent_id))
+        .await
+        .map_err(|_| workspace_history_unavailable())??;
+    let snapshot = service
+        .replace_roots_with_watch_sink(window.label(), roots, workspace_watch_wake_sink(&window))
+        .await?;
+    record_current_workspace(window.label(), service.inner(), history.inner()).await?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub(crate) async fn workspace_remove_recent(
+    history: State<'_, WorkspaceHistoryService>,
+    request: WorkspaceRemoveRecentRequest,
+) -> Result<(), CommandError> {
+    let history = history.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || history.remove(request.recent_id()))
+        .await
+        .map_err(|_| workspace_history_unavailable())?
+}
+
+#[tauri::command]
+pub(crate) async fn workspace_clear_recent(
+    history: State<'_, WorkspaceHistoryService>,
+    request: WorkspaceClearRecentRequest,
+) -> Result<(), CommandError> {
+    request.validate();
+    let history = history.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || history.clear())
+        .await
+        .map_err(|_| workspace_history_unavailable())?
 }
 
 #[tauri::command]
@@ -73,9 +211,12 @@ pub(crate) async fn workspace_watch_sync(
 pub(crate) async fn workspace_remove_root(
     window: WebviewWindow,
     service: State<'_, WorkspaceService>,
+    history: State<'_, WorkspaceHistoryService>,
     request: WorkspaceRemoveRootRequest,
 ) -> Result<WorkspaceSnapshot, CommandError> {
-    service.remove_root(window.label(), request.root_id())
+    let snapshot = service.remove_root(window.label(), request.root_id())?;
+    record_current_workspace(window.label(), service.inner(), history.inner()).await?;
+    Ok(snapshot)
 }
 
 #[tauri::command]

@@ -13,11 +13,12 @@ use crate::search::text_search::{self, TextSearchHandle};
 
 use super::dto::{
     DeleteConfirmationId, DeleteEntryId, WorkspaceDeleteBatchPlan, WorkspaceDeleteResult,
-    WorkspaceEntryStat, WorkspaceMoveResult, WorkspacePickRootsMode, WorkspacePickRootsResult,
-    WorkspacePickRootsStatus, WorkspaceReadDirectoryResult, WorkspaceSnapshot,
+    WorkspaceEntryStat, WorkspaceMoveResult, WorkspaceOpenFileTarget, WorkspaceOpenFilesResult,
+    WorkspacePickRootsMode, WorkspacePickRootsResult, WorkspacePickRootsStatus,
+    WorkspaceReadDirectoryResult, WorkspaceRestoreStatus, WorkspaceSnapshot,
     WorkspaceWatchPendingRoot, WorkspaceWatchSyncResult, WorkspaceWriteResult,
 };
-use super::picker::{DirectoryPicker, DirectoryPickerResult};
+use super::picker::{DirectoryPicker, DirectoryPickerResult, FilePicker, FilePickerResult};
 use super::reader;
 use super::watcher::{
     WatchAcknowledgement, WatchRegistration, WatchRegistrationEpoch, WatchScanOutcome,
@@ -96,6 +97,34 @@ impl WorkspaceService {
 
     pub fn snapshot(&self, window_label: &str) -> Result<WorkspaceSnapshot, CommandError> {
         self.scope_for_window(window_label)?.snapshot()
+    }
+
+    pub(crate) async fn initial_snapshot_with_restore(
+        &self,
+        window_label: &str,
+        last_roots: Result<Option<Vec<std::path::PathBuf>>, CommandError>,
+        watch_wake_sink: WorkspaceWatchWakeSink,
+    ) -> Result<WorkspaceSnapshot, CommandError> {
+        let workspace = self.scope_for_window(window_label)?;
+        tauri::async_runtime::spawn_blocking(move || {
+            workspace.initial_snapshot(last_roots, watch_wake_sink)
+        })
+        .await
+        .map_err(|_| workspace_operation_failed())?
+    }
+
+    pub fn restore_status(
+        &self,
+        window_label: &str,
+    ) -> Result<WorkspaceRestoreStatus, CommandError> {
+        self.scope_for_window(window_label)?.restore_status()
+    }
+
+    pub(crate) fn history_roots(
+        &self,
+        window_label: &str,
+    ) -> Result<Vec<(std::path::PathBuf, String)>, CommandError> {
+        self.scope_for_window(window_label)?.history_roots()
     }
 
     /// The stable identity of `window_label`'s currently authorized root set
@@ -179,6 +208,42 @@ impl WorkspaceService {
 
         tauri::async_runtime::spawn_blocking(move || {
             workspace.finish_picker(picker_token, mode, selection, watch_wake_sink)
+        })
+        .await
+        .map_err(|_| workspace_operation_failed())?
+    }
+
+    pub(crate) async fn pick_files_with_watch_sink<P: FilePicker>(
+        &self,
+        window_label: &str,
+        picker: P,
+        watch_wake_sink: WorkspaceWatchWakeSink,
+    ) -> Result<WorkspaceOpenFilesResult, CommandError> {
+        let workspace = self.scope_for_window(window_label)?;
+        let picker_token = workspace.begin_picker()?;
+        let selection = match picker.pick_files().await {
+            Ok(selection) => selection,
+            Err(error) => {
+                workspace.abort_picker(picker_token)?;
+                return Err(error);
+            }
+        };
+        tauri::async_runtime::spawn_blocking(move || {
+            workspace.finish_file_picker(picker_token, selection, watch_wake_sink)
+        })
+        .await
+        .map_err(|_| workspace_operation_failed())?
+    }
+
+    pub(crate) async fn replace_roots_with_watch_sink(
+        &self,
+        window_label: &str,
+        paths: Vec<std::path::PathBuf>,
+        watch_wake_sink: WorkspaceWatchWakeSink,
+    ) -> Result<WorkspaceSnapshot, CommandError> {
+        let workspace = self.scope_for_window(window_label)?;
+        tauri::async_runtime::spawn_blocking(move || {
+            workspace.replace_roots(paths, watch_wake_sink)
         })
         .await
         .map_err(|_| workspace_operation_failed())?
@@ -784,6 +849,7 @@ impl WindowWorkspace {
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 active_delete_batch: None,
                 active_text_search: None,
+                initial_restore_status: WorkspaceRestoreStatus::Pending,
                 closed: false,
             }),
             watcher: Mutex::new(None),
@@ -855,6 +921,122 @@ impl WindowWorkspace {
         let state = lock(&self.state)?;
         ensure_open(&state)?;
         Ok(state.scope.snapshot())
+    }
+
+    fn initial_snapshot(
+        self: &Arc<Self>,
+        last_roots: Result<Option<Vec<std::path::PathBuf>>, CommandError>,
+        watch_wake_sink: WorkspaceWatchWakeSink,
+    ) -> Result<WorkspaceSnapshot, CommandError> {
+        let mutation = lock(&self.mutation_gate)?;
+        let mut state = lock(&self.state)?;
+        ensure_open(&state)?;
+        if state.initial_restore_status != WorkspaceRestoreStatus::Pending {
+            return Ok(state.scope.snapshot());
+        }
+        if !state.scope.root_ids().is_empty() {
+            state.initial_restore_status = WorkspaceRestoreStatus::None;
+            return Ok(state.scope.snapshot());
+        }
+
+        let mut activated = None;
+        match last_roots {
+            Ok(None) => state.initial_restore_status = WorkspaceRestoreStatus::None,
+            Err(_) => state.initial_restore_status = WorkspaceRestoreStatus::Failed,
+            Ok(Some(paths)) => match self.replace_scope_locked(&mut state, &paths, watch_wake_sink)
+            {
+                Ok(pair) => {
+                    state.initial_restore_status = WorkspaceRestoreStatus::Restored;
+                    activated = Some(pair);
+                }
+                Err(_) => state.initial_restore_status = WorkspaceRestoreStatus::Failed,
+            },
+        }
+        let snapshot = state.scope.snapshot();
+        drop(state);
+        drop(mutation);
+        if let Some((watcher, revoked)) = activated {
+            for registration in revoked {
+                watcher.revoke(registration);
+            }
+        }
+        Ok(snapshot)
+    }
+
+    fn restore_status(&self) -> Result<WorkspaceRestoreStatus, CommandError> {
+        let state = lock(&self.state)?;
+        ensure_open(&state)?;
+        Ok(state.initial_restore_status)
+    }
+
+    fn history_roots(&self) -> Result<Vec<(std::path::PathBuf, String)>, CommandError> {
+        let state = lock(&self.state)?;
+        ensure_open(&state)?;
+        Ok(state.scope.history_roots())
+    }
+
+    fn replace_roots(
+        self: &Arc<Self>,
+        paths: Vec<std::path::PathBuf>,
+        watch_wake_sink: WorkspaceWatchWakeSink,
+    ) -> Result<WorkspaceSnapshot, CommandError> {
+        let mutation = lock(&self.mutation_gate)?;
+        let mut state = lock(&self.state)?;
+        ensure_open(&state)?;
+        if state.active_picker.is_some() {
+            return Err(picker_already_active());
+        }
+        let (watcher, revoked) = self.replace_scope_locked(&mut state, &paths, watch_wake_sink)?;
+        let snapshot = state.scope.snapshot();
+        drop(state);
+        drop(mutation);
+        for registration in revoked {
+            watcher.revoke(registration);
+        }
+        Ok(snapshot)
+    }
+
+    fn replace_scope_locked(
+        self: &Arc<Self>,
+        state: &mut WindowWorkspaceState,
+        paths: &[std::path::PathBuf],
+        watch_wake_sink: WorkspaceWatchWakeSink,
+    ) -> Result<(Arc<WindowWatcher>, Vec<WatchRegistration>), CommandError> {
+        let watcher = self.watcher_for(state.scope.workspace_id(), Arc::clone(&watch_wake_sink))?;
+        let mut next_watch_epoch = state.next_watch_epoch;
+        let mut prepared = Vec::new();
+        let mut prepare = |root_id, watch_path: &std::path::Path, _lease| {
+            next_watch_epoch = next_watch_epoch
+                .checked_add(1)
+                .ok_or_else(workspace_conflict)?;
+            let epoch = WatchRegistrationEpoch::new(next_watch_epoch)?;
+            prepared
+                .push(watcher.prepare_root(WatchRegistration::new(root_id, epoch), watch_path)?);
+            Ok(())
+        };
+        let authorization = state
+            .scope
+            .replace_roots_atomically_with(paths, &mut prepare);
+        state.next_watch_epoch = next_watch_epoch;
+        authorization?;
+        for prepared_watcher in prepared {
+            let registration = watcher.activate(prepared_watcher);
+            state
+                .watch_registrations
+                .insert(registration.root_id(), registration);
+        }
+        let active_root_ids = state.scope.root_ids().into_iter().collect::<BTreeSet<_>>();
+        let mut revoked = Vec::new();
+        state.watch_registrations.retain(|root_id, registration| {
+            let retained = active_root_ids.contains(root_id);
+            if !retained {
+                revoked.push(*registration);
+            }
+            retained
+        });
+        invalidate_delete_batch(state);
+        invalidate_text_search(state);
+        Ok((watcher, revoked))
     }
 
     fn stable_identity(&self) -> Result<Option<WorkspaceRootsIdentity>, CommandError> {
@@ -995,6 +1177,128 @@ impl WindowWorkspace {
                         state.scope.snapshot(),
                     ),
                     None,
+                    Vec::new(),
+                )
+            }
+        };
+        drop(state);
+        drop(mutation);
+        if let Some(watcher) = watcher {
+            for registration in revoked_registrations {
+                watcher.revoke(registration);
+            }
+        }
+        Ok(result)
+    }
+
+    fn finish_file_picker(
+        self: &Arc<Self>,
+        token: u64,
+        selection: FilePickerResult,
+        watch_wake_sink: WorkspaceWatchWakeSink,
+    ) -> Result<WorkspaceOpenFilesResult, CommandError> {
+        let mutation = lock(&self.mutation_gate)?;
+        let mut state = lock(&self.state)?;
+        ensure_active_picker(&state, token)?;
+
+        let (result, watcher, revoked_registrations) = match selection {
+            FilePickerResult::Selected(paths) if paths.is_empty() => {
+                state.active_picker = None;
+                (
+                    WorkspaceOpenFilesResult::new(
+                        WorkspacePickRootsStatus::Cancelled,
+                        state.scope.snapshot(),
+                        Vec::new(),
+                    ),
+                    None,
+                    Vec::new(),
+                )
+            }
+            FilePickerResult::Cancelled => {
+                state.active_picker = None;
+                (
+                    WorkspaceOpenFilesResult::new(
+                        WorkspacePickRootsStatus::Cancelled,
+                        state.scope.snapshot(),
+                        Vec::new(),
+                    ),
+                    None,
+                    Vec::new(),
+                )
+            }
+            FilePickerResult::Selected(paths) => {
+                let files = match super::prepare_open_file_selections(paths) {
+                    Ok(files) => files,
+                    Err(error) => {
+                        state.active_picker = None;
+                        return Err(error);
+                    }
+                };
+                let mut parents = Vec::new();
+                for file in &files {
+                    if !parents.contains(&file.parent) {
+                        parents.push(file.parent.clone());
+                    }
+                }
+                let watcher = match self
+                    .watcher_for(state.scope.workspace_id(), Arc::clone(&watch_wake_sink))
+                {
+                    Ok(watcher) => watcher,
+                    Err(error) => {
+                        state.active_picker = None;
+                        return Err(error);
+                    }
+                };
+                let mut next_watch_epoch = state.next_watch_epoch;
+                let mut prepared_watchers = Vec::new();
+                let mut prepare = |root_id, watch_path: &std::path::Path, _lease| {
+                    next_watch_epoch = next_watch_epoch
+                        .checked_add(1)
+                        .ok_or_else(workspace_conflict)?;
+                    let epoch = WatchRegistrationEpoch::new(next_watch_epoch)?;
+                    prepared_watchers.push(
+                        watcher.prepare_root(WatchRegistration::new(root_id, epoch), watch_path)?,
+                    );
+                    Ok(())
+                };
+                let root_ids = state
+                    .scope
+                    .authorize_roots_atomically_with(&parents, &mut prepare);
+                state.next_watch_epoch = next_watch_epoch;
+                state.active_picker = None;
+                let root_ids = root_ids?;
+                for prepared_watcher in prepared_watchers {
+                    let registration = watcher.activate(prepared_watcher);
+                    state
+                        .watch_registrations
+                        .insert(registration.root_id(), registration);
+                }
+                let parent_roots = parents
+                    .into_iter()
+                    .zip(root_ids)
+                    .collect::<BTreeMap<_, _>>();
+                let targets = files
+                    .into_iter()
+                    .map(|file| {
+                        let root_id = parent_roots
+                            .get(&file.parent)
+                            .copied()
+                            .ok_or_else(workspace_conflict)?;
+                        Ok(WorkspaceOpenFileTarget::new(root_id, file.relative_path))
+                    })
+                    .collect::<Result<Vec<_>, CommandError>>()?;
+                invalidate_delete_batch(&mut state);
+                invalidate_text_search(&mut state);
+                if state.initial_restore_status == WorkspaceRestoreStatus::Pending {
+                    state.initial_restore_status = WorkspaceRestoreStatus::None;
+                }
+                (
+                    WorkspaceOpenFilesResult::new(
+                        WorkspacePickRootsStatus::Selected,
+                        state.scope.snapshot(),
+                        targets,
+                    ),
+                    Some(watcher),
                     Vec::new(),
                 )
             }
@@ -1411,6 +1715,7 @@ struct WindowWorkspaceState {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     active_delete_batch: Option<DeleteBatchReceipt>,
     active_text_search: Option<ActiveTextSearch>,
+    initial_restore_status: WorkspaceRestoreStatus,
     closed: bool,
 }
 

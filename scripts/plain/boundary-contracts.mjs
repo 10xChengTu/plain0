@@ -4732,16 +4732,29 @@ export function validateWorkspaceWatcherBoundary(rustSources, appSources) {
 			: extractRustFunctions(executableCommands, "workspace_watch_sync")[0];
 	const pickerBody = compact(picker?.body);
 	const watchSyncBody = compact(watchSync?.body);
+	const watchWakeSink =
+		executableCommands === undefined
+			? undefined
+			: extractRustFunctions(
+					executableCommands,
+					"workspace_watch_wake_sink",
+				)[0];
+	const watchWakeSinkBody = compact(watchWakeSink?.body);
 	if (
 		commands === undefined ||
 		!/\bWORKSPACE_WATCH_WAKE_EVENT\s*:\s*&str\s*=\s*"plain:\/\/workspace-watch-wake"\s*;/.test(
 			commands,
 		) ||
 		picker === undefined ||
-		[...pickerBody.matchAll(/\.emit_to\(/g)].length !== 1 ||
-		!pickerBody.includes("EventTarget::webview_window(window_label.clone())") ||
-		!pickerBody.includes("WorkspaceWatchWakeEvent::new(workspace_id)") ||
-		/\.emit\(/.test(pickerBody)
+		watchWakeSink === undefined ||
+		[...watchWakeSinkBody.matchAll(/\.emit_to\(/g)].length !== 1 ||
+		!watchWakeSinkBody.includes(
+			"EventTarget::webview_window(window_label.clone())",
+		) ||
+		!watchWakeSinkBody.includes("WorkspaceWatchWakeEvent::new(workspace_id)") ||
+		/\.emit\(/.test(watchWakeSinkBody) ||
+		!pickerBody.includes("workspace_watch_wake_sink(&window)") ||
+		/\.emit(?:_to)?\(/.test(pickerBody)
 	) {
 		failures.push(
 			"workspace watcher wake must be one window-targeted opaque workspaceId hint",
@@ -4839,6 +4852,45 @@ export function validateWorkspaceWatcherBoundary(rustSources, appSources) {
 			"drop(state);drop(mutation);ifletSome(watcher)=watcher{forregistrationinrevoked_registrations{watcher.revoke(registration);}}Ok(result)",
 		) &&
 		!finishPickerBody.includes("watcher.retain(&active_registrations)");
+	const replaceRoots =
+		executableService === undefined
+			? undefined
+			: extractRustFunctions(executableService, "replace_roots").find(
+					(candidate) =>
+						compact(candidate.parameters).startsWith(
+							"self:&Arc<Self>,paths:",
+						) &&
+						compact(candidate.returnType) ===
+							"->Result<WorkspaceSnapshot,CommandError>",
+				);
+	const replaceRootsBody = compact(replaceRoots?.body);
+	const replaceRootsRevokesDeltas =
+		replaceRoots !== undefined &&
+		replaceRootsBody.includes(
+			"let(watcher,revoked)=self.replace_scope_locked(&mutstate,&paths,watch_wake_sink)?",
+		) &&
+		replaceRootsBody.includes(
+			"letsnapshot=state.scope.snapshot();drop(state);drop(mutation);forregistrationinrevoked{watcher.revoke(registration);}Ok(snapshot)",
+		) &&
+		[...replaceRootsBody.matchAll(/watcher\.revoke\(/g)].length === 1;
+	const initialSnapshot =
+		executableService === undefined
+			? undefined
+			: extractRustFunctions(executableService, "initial_snapshot").find(
+					(candidate) =>
+						compact(candidate.parameters).startsWith(
+							"self:&Arc<Self>,last_roots:",
+						) &&
+						compact(candidate.returnType) ===
+							"->Result<WorkspaceSnapshot,CommandError>",
+				);
+	const initialSnapshotBody = compact(initialSnapshot?.body);
+	const initialSnapshotRevokesDeltas =
+		initialSnapshot !== undefined &&
+		initialSnapshotBody.includes(
+			"letsnapshot=state.scope.snapshot();drop(state);drop(mutation);ifletSome((watcher,revoked))=activated{forregistrationinrevoked{watcher.revoke(registration);}}Ok(snapshot)",
+		) &&
+		[...initialSnapshotBody.matchAll(/watcher\.revoke\(/g)].length === 1;
 	const watcherRevokeCandidates =
 		executableWatcher === undefined
 			? []
@@ -4882,6 +4934,8 @@ export function validateWorkspaceWatcherBoundary(rustSources, appSources) {
 		[...removeRootWithWatcherBody.matchAll(/watcher\.revoke\(/g)].length !==
 			1 ||
 		!finishPickerRevokesDeltas ||
+		!replaceRootsRevokesDeltas ||
+		!initialSnapshotRevokesDeltas ||
 		!watcherRevokeIsProduction ||
 		/watcher\.retain\s*\(\s*&active_registrations\s*\)/.test(executableService)
 	) {
@@ -11352,6 +11406,18 @@ function stageCleanupCallsAreExact(relativePath, source) {
 		);
 	}
 	if (relativePath === "src-tauri/src/user_data/service.rs") {
+		return (
+			removeFileCalls.length === 1 &&
+			exactMethodCall(
+				source,
+				removeFileCalls[0],
+				/\bself\s*\.\s*root\s*\.\s*$/,
+				"&self.name",
+			) &&
+			removeDirectoryCalls.length === 0
+		);
+	}
+	if (relativePath === "src-tauri/src/recent/service.rs") {
 		return (
 			removeFileCalls.length === 1 &&
 			exactMethodCall(
