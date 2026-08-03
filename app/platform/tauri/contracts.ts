@@ -431,6 +431,16 @@ export interface TerminalStartResult {
 	readonly sessionId: string;
 }
 
+export interface TerminalProfile {
+	readonly id: string;
+	readonly label: string;
+}
+
+export interface TerminalProfilesResult {
+	readonly profiles: readonly TerminalProfile[];
+	readonly defaultProfileId: string;
+}
+
 /** Wire projection of `libghostty_vt::style::RgbColor`. */
 export interface TerminalRgb {
 	readonly r: number;
@@ -1658,14 +1668,20 @@ export interface PlainBridge {
 	themeSetProductIconThemeSelection(
 		productIconThemeId: string | null,
 	): Promise<void>;
+	/** Returns the bounded native-issued terminal profile snapshot. The ids are
+	 * the only profile values `terminalStart` accepts; no executable path or
+	 * argument array crosses from the WebView. */
+	terminalProfiles(): Promise<TerminalProfilesResult>;
 	/** Starts a new interactive terminal session bound to one exact authorized
-	 * root. `cwd: null` uses that root itself; a non-null cwd must resolve
+	 * root and one native-issued `profileId`. `cwd: null` uses that root
+	 * itself; a non-null cwd is root-relative and must resolve
 	 * inside the same root — see `src-tauri/src/terminal/service.rs`'s
 	 * `resolve_cwd`. Rejects with
 	 * `WORKSPACE_NOT_TRUSTED` if the current workspace has not been granted
 	 * execution trust (see `workspaceTrustGrant`). */
 	terminalStart(
 		rootId: string,
+		profileId: string,
 		cwd: string | null,
 		cols: number,
 		rows: number,

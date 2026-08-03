@@ -3826,6 +3826,18 @@ async function installNativeIpcMock(
 							// mirroring `terminal_ack`'s own tolerant shape.
 							return null;
 						}
+						case "terminal_profiles": {
+							return {
+								profiles: [
+									{
+										id: "systemDefault",
+										label: "zsh (System Default)",
+									},
+									{ id: "zsh", label: "zsh" },
+								],
+								defaultProfileId: "systemDefault",
+							};
+						}
 						case "terminal_start": {
 							if (!terminalTrusted) {
 								throw terminalNotTrusted();
@@ -3833,6 +3845,7 @@ async function installNativeIpcMock(
 							const startRequest = args.request as
 								| {
 										rootId?: string;
+										profileId?: string;
 										cwd?: string | null;
 										cols?: number;
 										rows?: number;
@@ -3841,6 +3854,7 @@ async function installNativeIpcMock(
 							if (
 								currentSnapshot.roots.length !== 1 ||
 								startRequest?.rootId !== rootId ||
+								startRequest.profileId !== "systemDefault" ||
 								startRequest.cwd !== null
 							) {
 								throw new Error(
@@ -6329,10 +6343,23 @@ async function installMultiRootNativeIpcMock(
 							}
 							return null;
 						}
+						case "terminal_profiles": {
+							return {
+								profiles: [
+									{
+										id: "systemDefault",
+										label: "zsh (System Default)",
+									},
+									{ id: "zsh", label: "zsh" },
+								],
+								defaultProfileId: "systemDefault",
+							};
+						}
 						case "terminal_start": {
 							const request = args.request as
 								| {
 										rootId?: unknown;
+										profileId?: unknown;
 										cwd?: unknown;
 										cols?: unknown;
 										rows?: unknown;
@@ -6341,6 +6368,7 @@ async function installMultiRootNativeIpcMock(
 							if (
 								typeof request?.rootId !== "string" ||
 								!activeRoots.has(request.rootId) ||
+								request.profileId !== "systemDefault" ||
 								request.cwd !== null ||
 								typeof request.cols !== "number" ||
 								typeof request.rows !== "number"
@@ -14691,6 +14719,7 @@ test("opens a trusted terminal, renders a pushed frame, and echoes typed input",
 	const [startCall] = await terminalCallsFor(page, "terminal_start");
 	expect(startCall?.args.request).toMatchObject({
 		rootId: nativeRootId,
+		profileId: "systemDefault",
 		cwd: null,
 	});
 
@@ -15481,6 +15510,7 @@ test("Terminal requires an explicit root in a multi-root workspace and freezes i
 	let starts = await terminalCallsFor(page, "terminal_start");
 	expect(starts[0]?.args.request).toMatchObject({
 		rootId: nativeSecondaryRootId,
+		profileId: "systemDefault",
 		cwd: null,
 	});
 
@@ -15494,6 +15524,7 @@ test("Terminal requires an explicit root in a multi-root workspace and freezes i
 	starts = await terminalCallsFor(page, "terminal_start");
 	expect(starts[1]?.args.request).toMatchObject({
 		rootId: nativeSecondaryRootId,
+		profileId: "systemDefault",
 		cwd: null,
 	});
 
@@ -15504,6 +15535,7 @@ test("Terminal requires an explicit root in a multi-root workspace and freezes i
 	starts = await terminalCallsFor(page, "terminal_start");
 	expect(starts[2]?.args.request).toMatchObject({
 		rootId: nativeRootId,
+		profileId: "systemDefault",
 		cwd: null,
 	});
 	await expect(

@@ -339,6 +339,7 @@ impl TerminalService {
         workspace: &WorkspaceService,
         window_label: &str,
         root_id: RootId,
+        profile_id: String,
         cwd: Option<String>,
         cols: u16,
         rows: u16,
@@ -346,10 +347,23 @@ impl TerminalService {
     ) -> Result<TerminalSessionId, CommandError> {
         trust.require_trusted(workspace, window_label).await?;
         let resolved_cwd = resolve_cwd(workspace, window_label, root_id, cwd)?;
-        let shell_path = shell::detect_shell(std::env::var("SHELL").ok().as_deref());
+        let shell_path =
+            shell::resolve_profile(&profile_id, std::env::var("SHELL").ok().as_deref())?;
         let command = CommandBuilder::new(&shell_path);
+        let shell_env = [(
+            "SHELL".to_owned(),
+            Some(shell_path.to_string_lossy().into_owned()),
+        )];
         let (session_id, _pid) = self
-            .spawn_session(window_label, resolved_cwd, command, &[], cols, rows, sink)
+            .spawn_session(
+                window_label,
+                resolved_cwd,
+                command,
+                &shell_env,
+                cols,
+                rows,
+                sink,
+            )
             .await?;
         Ok(session_id)
     }
@@ -884,7 +898,7 @@ impl TerminalService {
 
 /// Resolves and validates `cwd` against one exact, caller-selected workspace
 /// root. If omitted, that root itself is used. If provided, it must
-/// canonicalize inside (or exactly equal to) the same root — never merely
+/// resolve relative to and canonicalize inside (or exactly equal to) the same root — never merely
 /// some other authorized root. See [`WorkspaceService::root_canonical_path`]
 /// for the stale/foreign authority check and why this specific
 /// `canonicalize` + `starts_with` check is sanctioned here (a spawn
@@ -899,7 +913,12 @@ fn resolve_cwd(
     match cwd {
         None => Ok(selected_root),
         Some(candidate) => {
-            let canonical = std::fs::canonicalize(candidate).map_err(|_| terminal_cwd_invalid())?;
+            let candidate = PathBuf::from(candidate);
+            if candidate.is_absolute() {
+                return Err(terminal_cwd_invalid());
+            }
+            let canonical = std::fs::canonicalize(selected_root.join(candidate))
+                .map_err(|_| terminal_cwd_invalid())?;
             if canonical == selected_root || canonical.starts_with(&selected_root) {
                 Ok(canonical)
             } else {

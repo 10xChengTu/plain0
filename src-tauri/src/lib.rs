@@ -227,6 +227,7 @@ pub fn run() {
             trust::commands::workspace_trust_state,
             trust::commands::workspace_trust_grant,
             trust::commands::workspace_trust_revoke,
+            terminal::commands::terminal_profiles,
             terminal::commands::terminal_start,
             terminal::commands::terminal_input_text,
             terminal::commands::terminal_input_key,

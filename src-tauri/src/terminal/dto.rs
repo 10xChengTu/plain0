@@ -10,6 +10,7 @@
 //! see this slice's final report for why.
 
 use std::fmt;
+use std::path::Path;
 
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -45,6 +46,8 @@ const MAX_TERMINAL_KEY_UTF8_BYTES: usize = 64;
 /// session ever retains more scrollback than that regardless of what is
 /// requested.
 const MAX_TERMINAL_SCROLLBACK_REQUEST_ROWS: u32 = 10_000;
+const MAX_TERMINAL_PROFILE_ID_BYTES: usize = 64;
+const MAX_TERMINAL_CWD_BYTES: usize = 4_096;
 
 /// An opaque, window-bound identity for one terminal session. Validated the
 /// same strict way `search::dto::SearchId` is (exact-length, version-4,
@@ -102,6 +105,7 @@ impl<'de> Deserialize<'de> for TerminalSessionId {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TerminalStartRequest {
     root_id: RootId,
+    profile_id: String,
     cwd: Option<String>,
     cols: u16,
     rows: u16,
@@ -110,6 +114,7 @@ pub struct TerminalStartRequest {
 #[derive(Debug)]
 pub(crate) struct TerminalStartQuery {
     pub(crate) root_id: RootId,
+    pub(crate) profile_id: String,
     pub(crate) cwd: Option<String>,
     pub(crate) cols: u16,
     pub(crate) rows: u16,
@@ -118,12 +123,65 @@ pub(crate) struct TerminalStartQuery {
 impl TerminalStartRequest {
     pub(crate) fn into_parts(self) -> Result<TerminalStartQuery, CommandError> {
         validate_dimensions(self.cols, self.rows)?;
+        if !is_valid_profile_id(&self.profile_id) {
+            return Err(invalid_terminal_request());
+        }
+        if self.cwd.as_ref().is_some_and(|cwd| {
+            cwd.is_empty()
+                || cwd.len() > MAX_TERMINAL_CWD_BYTES
+                || cwd.contains('\0')
+                || Path::new(cwd).is_absolute()
+        }) {
+            return Err(invalid_terminal_request());
+        }
         Ok(TerminalStartQuery {
             root_id: self.root_id,
+            profile_id: self.profile_id,
             cwd: self.cwd,
             cols: self.cols,
             rows: self.rows,
         })
+    }
+}
+
+fn is_valid_profile_id(profile_id: &str) -> bool {
+    !profile_id.is_empty()
+        && profile_id.len() <= MAX_TERMINAL_PROFILE_ID_BYTES
+        && profile_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalProfilesRequest {}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalProfile {
+    id: String,
+    label: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalProfilesResult {
+    profiles: Vec<TerminalProfile>,
+    default_profile_id: String,
+}
+
+impl TerminalProfilesResult {
+    pub(crate) fn from_shell_profiles(profiles: Vec<super::shell::ShellProfile>) -> Self {
+        Self {
+            profiles: profiles
+                .into_iter()
+                .map(|profile| TerminalProfile {
+                    id: profile.id.to_owned(),
+                    label: profile.label,
+                })
+                .collect(),
+            default_profile_id: super::shell::SYSTEM_DEFAULT_PROFILE_ID.to_owned(),
+        }
     }
 }
 
@@ -688,9 +746,10 @@ mod tests {
 
     use super::{
         TerminalAckRequest, TerminalFocusRequest, TerminalInputKeyRequest,
-        TerminalInputTextRequest, TerminalKillRequest, TerminalResizeRequest,
-        TerminalScrollbackRequest, TerminalStartRequest, MAX_TERMINAL_INPUT_BYTES,
-        MAX_TERMINAL_KEY_UTF8_BYTES, MAX_TERMINAL_SCROLLBACK_REQUEST_ROWS,
+        TerminalInputTextRequest, TerminalKillRequest, TerminalProfilesRequest,
+        TerminalProfilesResult, TerminalResizeRequest, TerminalScrollbackRequest,
+        TerminalStartRequest, MAX_TERMINAL_INPUT_BYTES, MAX_TERMINAL_KEY_UTF8_BYTES,
+        MAX_TERMINAL_SCROLLBACK_REQUEST_ROWS,
     };
     use crate::terminal::vt::{self, DirtyCell, DirtyFrame, DirtyRow};
 
@@ -704,7 +763,13 @@ mod tests {
     fn every_terminal_request_rejects_extra_fields() {
         assert!(
             serde_json::from_value::<TerminalStartRequest>(serde_json::json!({
-                "rootId": VALID_ID, "cols": 80, "rows": 24, "extra": true
+                "rootId": VALID_ID, "profileId": "systemDefault", "cols": 80, "rows": 24, "extra": true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TerminalProfilesRequest>(serde_json::json!({
+                "extra": true
             }))
             .is_err()
         );
@@ -753,33 +818,43 @@ mod tests {
     }
 
     #[test]
-    fn start_request_requires_a_root_accepts_missing_cwd_and_rejects_invalid_dimensions() {
+    fn start_request_requires_root_and_profile_accepts_relative_cwd_and_rejects_invalid_fields() {
         let request: TerminalStartRequest = serde_json::from_value(serde_json::json!({
-            "rootId": VALID_ID, "cols": 80, "rows": 24
+            "rootId": VALID_ID, "profileId": "systemDefault", "cols": 80, "rows": 24
         }))
         .unwrap();
         let query = request.into_parts().unwrap();
         assert_eq!(query.root_id.as_wire(), VALID_ID);
+        assert_eq!(query.profile_id, "systemDefault");
         assert_eq!(query.cwd, None);
         assert_eq!(query.cols, 80);
         assert_eq!(query.rows, 24);
 
         assert!(
             serde_json::from_value::<TerminalStartRequest>(serde_json::json!({
-                "cols": 80, "rows": 24
+                "profileId": "systemDefault", "cols": 80, "rows": 24
             }))
             .is_err()
         );
         assert!(
             serde_json::from_value::<TerminalStartRequest>(serde_json::json!({
-                "rootId": "not-a-root", "cols": 80, "rows": 24
+                "rootId": "not-a-root", "profileId": "systemDefault", "cols": 80, "rows": 24
             }))
             .is_err()
         );
 
-        for (cols, rows) in [(0, 24), (80, 0), (3_000, 24), (80, 3_000)] {
+        for (profile_id, cwd) in [
+            ("", None),
+            ("bad/profile", None),
+            ("systemDefault", Some("")),
+            ("systemDefault", Some("/absolute/path")),
+        ] {
             let request: TerminalStartRequest = serde_json::from_value(serde_json::json!({
-                "rootId": VALID_ID, "cols": cols, "rows": rows
+                "rootId": VALID_ID,
+                "profileId": profile_id,
+                "cwd": cwd,
+                "cols": 80,
+                "rows": 24
             }))
             .unwrap();
             assert_eq!(
@@ -787,6 +862,53 @@ mod tests {
                 "INVALID_TERMINAL_REQUEST"
             );
         }
+
+        let request: TerminalStartRequest = serde_json::from_value(serde_json::json!({
+            "rootId": VALID_ID,
+            "profileId": "zsh",
+            "cwd": "nested/project",
+            "cols": 80,
+            "rows": 24
+        }))
+        .unwrap();
+        let query = request.into_parts().unwrap();
+        assert_eq!(query.profile_id, "zsh");
+        assert_eq!(query.cwd.as_deref(), Some("nested/project"));
+
+        for (cols, rows) in [(0, 24), (80, 0), (3_000, 24), (80, 3_000)] {
+            let request: TerminalStartRequest = serde_json::from_value(serde_json::json!({
+                "rootId": VALID_ID, "profileId": "systemDefault", "cols": cols, "rows": rows
+            }))
+            .unwrap();
+            assert_eq!(
+                request.into_parts().unwrap_err().code(),
+                "INVALID_TERMINAL_REQUEST"
+            );
+        }
+    }
+
+    #[test]
+    fn profiles_result_exposes_only_native_issued_ids_labels_and_default() {
+        let result = TerminalProfilesResult::from_shell_profiles(vec![
+            crate::terminal::shell::ShellProfile {
+                id: crate::terminal::shell::SYSTEM_DEFAULT_PROFILE_ID,
+                label: "zsh (System Default)".to_owned(),
+            },
+            crate::terminal::shell::ShellProfile {
+                id: "bash",
+                label: "bash".to_owned(),
+            },
+        ]);
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            serde_json::json!({
+                "profiles": [
+                    {"id": "systemDefault", "label": "zsh (System Default)"},
+                    {"id": "bash", "label": "bash"}
+                ],
+                "defaultProfileId": "systemDefault"
+            })
+        );
     }
 
     #[test]

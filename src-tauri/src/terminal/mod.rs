@@ -64,6 +64,13 @@ pub(crate) fn terminal_cwd_invalid() -> CommandError {
     )
 }
 
+pub(crate) fn terminal_profile_invalid() -> CommandError {
+    CommandError::new(
+        "TERMINAL_PROFILE_INVALID",
+        "The requested terminal profile is not available on this computer.",
+    )
+}
+
 pub(crate) fn terminal_unavailable() -> CommandError {
     CommandError::new(
         "TERMINAL_UNAVAILABLE",
@@ -78,8 +85,9 @@ pub(crate) fn terminal_io_failed() -> CommandError {
 #[cfg(test)]
 mod tests {
     use super::{
-        terminal_cwd_invalid, terminal_io_failed, terminal_session_limit_exceeded,
-        terminal_session_not_found, terminal_unavailable, MAX_TERMINAL_SESSIONS_PER_WINDOW,
+        terminal_cwd_invalid, terminal_io_failed, terminal_profile_invalid,
+        terminal_session_limit_exceeded, terminal_session_not_found, terminal_unavailable,
+        MAX_TERMINAL_SESSIONS_PER_WINDOW,
     };
 
     #[test]
@@ -93,6 +101,10 @@ mod tests {
             "TERMINAL_SESSION_NOT_FOUND"
         );
         assert_eq!(terminal_cwd_invalid().code(), "TERMINAL_CWD_INVALID");
+        assert_eq!(
+            terminal_profile_invalid().code(),
+            "TERMINAL_PROFILE_INVALID"
+        );
         assert_eq!(terminal_unavailable().code(), "TERMINAL_UNAVAILABLE");
         assert_eq!(terminal_io_failed().code(), "IO_FAILED");
     }

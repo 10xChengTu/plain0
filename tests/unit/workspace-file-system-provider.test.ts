@@ -378,6 +378,9 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async themeSetProductIconThemeSelection() {
 			throw new Error("unused");
 		},
+		async terminalProfiles() {
+			throw new Error("unused");
+		},
 		async terminalStart() {
 			throw new Error("unused");
 		},

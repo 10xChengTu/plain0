@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
 	decodeTerminalDataEvent,
 	decodeTerminalExitEvent,
+	decodeTerminalProfilesResult,
 	decodeTerminalScrollbackResult,
 	decodeTerminalStartResult,
 	decodeTerminalVoid,
@@ -14,6 +15,7 @@ import {
 	frozenTerminalInputKeyRequest,
 	frozenTerminalInputTextRequest,
 	frozenTerminalKillRequest,
+	frozenTerminalProfilesRequest,
 	frozenTerminalResizeRequest,
 	frozenTerminalScrollbackRequest,
 	frozenTerminalStartRequest,
@@ -68,28 +70,37 @@ function sampleFrame(): unknown {
 
 describe("terminal_start request/result codec", () => {
 	it("builds a frozen own-data request from valid inputs, defaulting a missing cwd to null", () => {
-		expect(frozenTerminalStartRequest(VALID_ID, null, 80, 24)).toEqual({
-			rootId: VALID_ID,
-			cwd: null,
-			cols: 80,
-			rows: 24,
-		});
-		expect(frozenTerminalStartRequest(VALID_ID, undefined, 80, 24)).toEqual({
-			rootId: VALID_ID,
-			cwd: null,
-			cols: 80,
-			rows: 24,
-		});
 		expect(
-			frozenTerminalStartRequest(VALID_ID, "/tmp/project", 80, 24),
+			frozenTerminalStartRequest(VALID_ID, "systemDefault", null, 80, 24),
 		).toEqual({
 			rootId: VALID_ID,
-			cwd: "/tmp/project",
+			profileId: "systemDefault",
+			cwd: null,
 			cols: 80,
 			rows: 24,
 		});
 		expect(
-			Object.isFrozen(frozenTerminalStartRequest(VALID_ID, null, 80, 24)),
+			frozenTerminalStartRequest(VALID_ID, "systemDefault", undefined, 80, 24),
+		).toEqual({
+			rootId: VALID_ID,
+			profileId: "systemDefault",
+			cwd: null,
+			cols: 80,
+			rows: 24,
+		});
+		expect(
+			frozenTerminalStartRequest(VALID_ID, "zsh", "nested/project", 80, 24),
+		).toEqual({
+			rootId: VALID_ID,
+			profileId: "zsh",
+			cwd: "nested/project",
+			cols: 80,
+			rows: 24,
+		});
+		expect(
+			Object.isFrozen(
+				frozenTerminalStartRequest(VALID_ID, "systemDefault", null, 80, 24),
+			),
 		).toBe(true);
 	});
 
@@ -99,7 +110,22 @@ describe("terminal_start request/result codec", () => {
 			"not-a-root",
 			"0d3f4b0e-6f1a-3c9d-9c3a-1a2b3c4d5e6f",
 		]) {
-			expect(() => frozenTerminalStartRequest(rootId, null, 80, 24)).toThrow();
+			expect(() =>
+				frozenTerminalStartRequest(rootId, "systemDefault", null, 80, 24),
+			).toThrow();
+		}
+	});
+
+	it("rejects malformed profile ids and absolute or oversized cwd values", () => {
+		for (const profileId of [undefined, "", "bad/profile", "a".repeat(65)]) {
+			expect(() =>
+				frozenTerminalStartRequest(VALID_ID, profileId, null, 80, 24),
+			).toThrow();
+		}
+		for (const cwd of ["", "/tmp/project", "C:\\project", "a".repeat(4097)]) {
+			expect(() =>
+				frozenTerminalStartRequest(VALID_ID, "systemDefault", cwd, 80, 24),
+			).toThrow();
 		}
 	});
 
@@ -113,14 +139,15 @@ describe("terminal_start request/result codec", () => {
 			[80, 2_001],
 		] as const) {
 			expect(() =>
-				frozenTerminalStartRequest(VALID_ID, null, cols, rows),
+				frozenTerminalStartRequest(VALID_ID, "systemDefault", null, cols, rows),
 			).toThrow();
 		}
 	});
 
-	it("rejects a non-string, empty-string cwd", () => {
-		expect(() => frozenTerminalStartRequest(VALID_ID, 123, 80, 24)).toThrow();
-		expect(() => frozenTerminalStartRequest(VALID_ID, "", 80, 24)).toThrow();
+	it("rejects a non-string cwd", () => {
+		expect(() =>
+			frozenTerminalStartRequest(VALID_ID, "systemDefault", 123, 80, 24),
+		).toThrow();
 	});
 
 	it("decodes a well-formed start result and rejects a non-UUID or extra field", () => {
@@ -142,6 +169,55 @@ describe("terminal_start request/result codec", () => {
 			{ get: (target, key) => Reflect.get(target, key) },
 		);
 		expect(() => decodeTerminalStartResult(proxied)).toThrow();
+	});
+});
+
+describe("terminal_profiles codec", () => {
+	it("builds an empty frozen request and decodes a bounded unique snapshot", () => {
+		const request = frozenTerminalProfilesRequest();
+		expect(request).toEqual({});
+		expect(Object.isFrozen(request)).toBe(true);
+		const result = decodeTerminalProfilesResult({
+			profiles: [
+				{ id: "systemDefault", label: "zsh (System Default)" },
+				{ id: "bash", label: "bash" },
+			],
+			defaultProfileId: "systemDefault",
+		});
+		expect(result.defaultProfileId).toBe("systemDefault");
+		expect(result.profiles.map((profile) => profile.id)).toEqual([
+			"systemDefault",
+			"bash",
+		]);
+		expect(Object.isFrozen(result.profiles)).toBe(true);
+	});
+
+	it("rejects missing defaults, duplicate ids, invalid labels, and extra fields", () => {
+		for (const value of [
+			{ profiles: [], defaultProfileId: "systemDefault" },
+			{
+				profiles: [{ id: "bash", label: "bash" }],
+				defaultProfileId: "systemDefault",
+			},
+			{
+				profiles: [
+					{ id: "bash", label: "bash" },
+					{ id: "bash", label: "duplicate" },
+				],
+				defaultProfileId: "bash",
+			},
+			{
+				profiles: [{ id: "bash", label: "bad\nlabel" }],
+				defaultProfileId: "bash",
+			},
+			{
+				profiles: [{ id: "bash", label: "bash" }],
+				defaultProfileId: "bash",
+				extra: true,
+			},
+		]) {
+			expect(() => decodeTerminalProfilesResult(value)).toThrow();
+		}
 	});
 });
 

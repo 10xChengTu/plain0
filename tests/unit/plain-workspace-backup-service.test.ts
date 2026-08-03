@@ -151,6 +151,7 @@ function createFakeBridge(overrides: Partial<PlainBridge> = {}): {
 		themeSetSelection: notImplemented,
 		themeSetFileIconThemeSelection: notImplemented,
 		themeSetProductIconThemeSelection: notImplemented,
+		terminalProfiles: notImplemented,
 		terminalStart: notImplemented,
 		terminalInputText: notImplemented,
 		terminalInputKey: notImplemented,

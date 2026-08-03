@@ -8,7 +8,8 @@ use crate::workspace::service::WorkspaceService;
 
 use super::dto::{
     TerminalAckRequest, TerminalDataEvent, TerminalExitEvent, TerminalFocusRequest,
-    TerminalInputKeyRequest, TerminalInputTextRequest, TerminalKillRequest, TerminalResizeRequest,
+    TerminalInputKeyRequest, TerminalInputTextRequest, TerminalKillRequest,
+    TerminalProfilesRequest, TerminalProfilesResult, TerminalResizeRequest,
     TerminalScrollbackRequest, TerminalScrollbackResult, TerminalSessionId, TerminalStartRequest,
     TerminalStartResult,
 };
@@ -25,6 +26,15 @@ use super::vt;
 /// `plain://terminal-exit` is the session's one-shot terminal notification.
 pub(crate) const TERMINAL_DATA_EVENT: &str = "plain://terminal-data";
 pub(crate) const TERMINAL_EXIT_EVENT: &str = "plain://terminal-exit";
+
+#[tauri::command]
+pub(crate) async fn terminal_profiles(
+    _request: TerminalProfilesRequest,
+) -> Result<TerminalProfilesResult, CommandError> {
+    Ok(TerminalProfilesResult::from_shell_profiles(
+        super::shell::available_profiles(std::env::var("SHELL").ok().as_deref()),
+    ))
+}
 
 /// Real production [`TerminalOutputSink`]: emits every frame/exit straight
 /// to the session's own window. Built once per [`terminal_start`] call (the
@@ -93,6 +103,7 @@ pub(crate) async fn terminal_start(
             workspace.inner(),
             window.label(),
             query.root_id,
+            query.profile_id,
             query.cwd,
             query.cols,
             query.rows,

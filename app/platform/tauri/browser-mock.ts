@@ -200,6 +200,7 @@ import {
 import {
 	decodeTerminalScrollbackResult,
 	decodeTerminalStartResult,
+	decodeTerminalProfilesResult,
 	decodeWorkspaceTrustState,
 	frozenTerminalAckRequest,
 	frozenTerminalDataEvent,
@@ -208,6 +209,7 @@ import {
 	frozenTerminalInputKeyRequest,
 	frozenTerminalInputTextRequest,
 	frozenTerminalKillRequest,
+	frozenTerminalProfilesRequest,
 	frozenTerminalResizeRequest,
 	frozenTerminalScrollbackRequest,
 	frozenTerminalStartRequest,
@@ -7962,13 +7964,37 @@ export function createBrowserMockBridge(
 		async themeSetProductIconThemeSelection(productIconThemeId) {
 			productIconThemeSelection = productIconThemeId;
 		},
-		async terminalStart(rootId, cwd, cols, rows) {
-			const request = frozenTerminalStartRequest(rootId, cwd, cols, rows);
+		async terminalProfiles() {
+			frozenTerminalProfilesRequest();
+			return decodeTerminalProfilesResult({
+				profiles: [
+					{ id: "systemDefault", label: "zsh (System Default)" },
+					{ id: "zsh", label: "zsh" },
+					{ id: "bash", label: "bash" },
+				],
+				defaultProfileId: "systemDefault",
+			});
+		},
+		async terminalStart(rootId, profileId, cwd, cols, rows) {
+			const request = frozenTerminalStartRequest(
+				rootId,
+				profileId,
+				cwd,
+				cols,
+				rows,
+			);
 			if (roots.size === 0 || !terminalTrusted) {
 				throw terminalNotTrusted();
 			}
 			if (!roots.has(request.rootId)) {
 				throw rootNotAuthorized();
+			}
+			if (!new Set(["systemDefault", "zsh", "bash"]).has(request.profileId)) {
+				throw Object.freeze({
+					code: "TERMINAL_PROFILE_INVALID",
+					message:
+						"The requested terminal profile is not available on this computer.",
+				});
 			}
 			const session = startMockTerminalSession(request.cols, request.rows);
 			return decodeTerminalStartResult({ sessionId: session.sessionId });

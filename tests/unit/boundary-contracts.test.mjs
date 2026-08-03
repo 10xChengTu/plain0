@@ -9510,7 +9510,11 @@ fn resolve_cwd(workspace: &WorkspaceService, window_label: &str, root_id: RootId
     match cwd {
         None => Ok(selected_root),
         Some(candidate) => {
-            let canonical = std::fs::canonicalize(candidate).map_err(|_| terminal_cwd_invalid())?;
+            let candidate = PathBuf::from(candidate);
+            if candidate.is_absolute() {
+                return Err(terminal_cwd_invalid());
+            }
+            let canonical = std::fs::canonicalize(selected_root.join(candidate)).map_err(|_| terminal_cwd_invalid())?;
             if canonical == selected_root || canonical.starts_with(&selected_root) {
                 Ok(canonical)
             } else {
@@ -9522,10 +9526,12 @@ fn resolve_cwd(workspace: &WorkspaceService, window_label: &str, root_id: RootId
 `;
 	const terminalShellSource = `
 pub(crate) const TERMINAL_ENV_PASSTHROUGH_NAMES: &[&str] =
-    &["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR"];
+    &["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "SSH_AUTH_SOCK"];
 pub(crate) const TERMINAL_ENV_LC_PREFIX: &str = "LC_";
 pub(crate) const TERMINAL_ENV_TERM: (&str, &str) = ("TERM", "xterm-256color");
 pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor");
+pub(crate) const TERMINAL_ENV_TERM_PROGRAM: (&str, &str) = ("TERM_PROGRAM", "Plain");
+pub(crate) const TERMINAL_ENV_TERM_PROGRAM_VERSION: (&str, &str) = ("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
 `;
 	const terminalVtSource = `
 pub(crate) const TERMINAL_VT_MAX_SCROLLBACK_LINES: usize = 10_000;
@@ -9585,7 +9591,7 @@ pub(crate) const TERMINAL_VT_MAX_SCROLLBACK_LINES: usize = 10_000;
 				exactLibghosttyVtDependency,
 			]),
 		).toContain(
-			"terminal/service.rs resolve_cwd must resolve one explicit rootId, default to that root, and reject a cwd outside that same root without roots[0] fallback",
+			"terminal/service.rs resolve_cwd must resolve one explicit rootId, default to that root, and reject absolute or escaping cwd values without roots[0] fallback",
 		);
 	});
 
@@ -9764,7 +9770,7 @@ pub(crate) const TERMINAL_VT_MAX_SCROLLBACK_LINES: usize = 10_000;
 		);
 	});
 
-	it("locks the environment allowlist name list and the two fixed overrides exactly", () => {
+	it("locks the environment allowlist and fixed terminal identity overrides exactly", () => {
 		const widenedAllowlist = baselineTerminalRustSources
 			.filter(
 				(entry) => entry.relativePath !== "src-tauri/src/terminal/shell.rs",
@@ -9773,10 +9779,12 @@ pub(crate) const TERMINAL_VT_MAX_SCROLLBACK_LINES: usize = 10_000;
 				relativePath: "src-tauri/src/terminal/shell.rs",
 				source: `
 pub(crate) const TERMINAL_ENV_PASSTHROUGH_NAMES: &[&str] =
-    &["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "SECRET_TOKEN"];
+    &["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "SSH_AUTH_SOCK", "SECRET_TOKEN"];
 pub(crate) const TERMINAL_ENV_LC_PREFIX: &str = "LC_";
 pub(crate) const TERMINAL_ENV_TERM: (&str, &str) = ("TERM", "xterm-256color");
 pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor");
+pub(crate) const TERMINAL_ENV_TERM_PROGRAM: (&str, &str) = ("TERM_PROGRAM", "Plain");
+pub(crate) const TERMINAL_ENV_TERM_PROGRAM_VERSION: (&str, &str) = ("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
 `,
 			});
 		expect(
@@ -9796,10 +9804,12 @@ pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor
 				relativePath: "src-tauri/src/terminal/shell.rs",
 				source: `
 pub(crate) const TERMINAL_ENV_PASSTHROUGH_NAMES: &[&str] =
-    &["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR"];
+    &["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "SSH_AUTH_SOCK"];
 pub(crate) const TERMINAL_ENV_LC_PREFIX: &str = "LC_";
 pub(crate) const TERMINAL_ENV_TERM: (&str, &str) = ("TERM", "dumb");
 pub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor");
+pub(crate) const TERMINAL_ENV_TERM_PROGRAM: (&str, &str) = ("TERM_PROGRAM", "Plain");
+pub(crate) const TERMINAL_ENV_TERM_PROGRAM_VERSION: (&str, &str) = ("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
 `,
 			});
 		expect(
@@ -10011,12 +10021,12 @@ libghostty-vt = "=0.2.1"
 		{
 			relativePath: "src-tauri/src/terminal/service.rs",
 			source:
-				'const TERMINAL_CHUNK_QUEUE_CAPACITY: usize = 256;\nconst TERMINAL_READ_BUFFER_BYTES: usize = 8192;\n\nfn spawn_via_command_builder() {\n    let mut command = portable_pty::CommandBuilder::new("test-fixture-program");\n    command.args(["--flag", "value"]);\n}\n\nfn resolve_cwd(workspace: &WorkspaceService, window_label: &str, root_id: RootId, cwd: Option<String>) -> Result<PathBuf, CommandError> {\n    let selected_root = workspace.root_canonical_path(window_label, root_id)?;\n    match cwd {\n        None => Ok(selected_root),\n        Some(candidate) => {\n            let canonical = std::fs::canonicalize(candidate).map_err(|_| terminal_cwd_invalid())?;\n            if canonical == selected_root || canonical.starts_with(&selected_root) {\n                Ok(canonical)\n            } else {\n                Err(terminal_cwd_invalid())\n            }\n        }\n    }\n}\n',
+				'const TERMINAL_CHUNK_QUEUE_CAPACITY: usize = 256;\nconst TERMINAL_READ_BUFFER_BYTES: usize = 8192;\n\nfn spawn_via_command_builder() {\n    let mut command = portable_pty::CommandBuilder::new("test-fixture-program");\n    command.args(["--flag", "value"]);\n}\n\nfn resolve_cwd(workspace: &WorkspaceService, window_label: &str, root_id: RootId, cwd: Option<String>) -> Result<PathBuf, CommandError> {\n    let selected_root = workspace.root_canonical_path(window_label, root_id)?;\n    match cwd {\n        None => Ok(selected_root),\n        Some(candidate) => {\n            let candidate = PathBuf::from(candidate);\n            if candidate.is_absolute() {\n                return Err(terminal_cwd_invalid());\n            }\n            let canonical = std::fs::canonicalize(selected_root.join(candidate)).map_err(|_| terminal_cwd_invalid())?;\n            if canonical == selected_root || canonical.starts_with(&selected_root) {\n                Ok(canonical)\n            } else {\n                Err(terminal_cwd_invalid())\n            }\n        }\n    }\n}\n',
 		},
 		{
 			relativePath: "src-tauri/src/terminal/shell.rs",
 			source:
-				'pub(crate) const TERMINAL_ENV_PASSTHROUGH_NAMES: &[&str] =\n    &["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR"];\npub(crate) const TERMINAL_ENV_LC_PREFIX: &str = "LC_";\npub(crate) const TERMINAL_ENV_TERM: (&str, &str) = ("TERM", "xterm-256color");\npub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor");\n',
+				'pub(crate) const TERMINAL_ENV_PASSTHROUGH_NAMES: &[&str] =\n    &["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "SSH_AUTH_SOCK"];\npub(crate) const TERMINAL_ENV_LC_PREFIX: &str = "LC_";\npub(crate) const TERMINAL_ENV_TERM: (&str, &str) = ("TERM", "xterm-256color");\npub(crate) const TERMINAL_ENV_COLORTERM: (&str, &str) = ("COLORTERM", "truecolor");\npub(crate) const TERMINAL_ENV_TERM_PROGRAM: (&str, &str) = ("TERM_PROGRAM", "Plain");\npub(crate) const TERMINAL_ENV_TERM_PROGRAM_VERSION: (&str, &str) = ("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));\n',
 		},
 		{
 			relativePath: "src-tauri/src/terminal/vt.rs",
@@ -10351,7 +10361,7 @@ describe("Plain F070 S2 terminal IPC bridge Harness", () => {
 		expect(
 			validateTerminalIpcBridgeBoundary(widened, baselineBridgeAppSources),
 		).toContain(
-			"TerminalStartRequest/TerminalStartQuery must require the exact audited rootId/cwd/geometry fields",
+			"TerminalStartRequest/TerminalStartQuery must require the exact audited rootId/profileId/cwd/geometry fields",
 		);
 	});
 
@@ -10367,21 +10377,21 @@ describe("Plain F070 S2 terminal IPC bridge Harness", () => {
 		expect(
 			validateTerminalIpcBridgeBoundary(baselineBridgeRustSources, widened),
 		).toContain(
-			"terminal-codec.ts frozenTerminalStartRequest must preserve the exact rootId/cwd/geometry request shape",
+			"terminal-codec.ts frozenTerminalStartRequest must preserve the exact rootId/profileId/cwd/geometry request shape",
 		);
 	});
 
 	it("fails if native terminalStart omits rootId from the frozen request", () => {
 		const widened = withMutatedApp("app/platform/tauri/native.ts", (source) =>
 			source.replace(
-				"frozenTerminalStartRequest(rootId, cwd, cols, rows)",
-				"frozenTerminalStartRequest(cwd, cols, rows)",
+				"frozenTerminalStartRequest(\n\t\t\t\trootId,\n\t\t\t\tprofileId,",
+				"frozenTerminalStartRequest(\n\t\t\t\tprofileId,",
 			),
 		);
 		expect(
 			validateTerminalIpcBridgeBoundary(baselineBridgeRustSources, widened),
 		).toContain(
-			"native.ts terminalStart must forward the explicit rootId through frozenTerminalStartRequest",
+			"native.ts terminalStart must forward the explicit rootId and profileId through frozenTerminalStartRequest",
 		);
 	});
 
@@ -10503,7 +10513,7 @@ describe("Plain F070 S2 terminal IPC bridge Harness", () => {
 		expect(
 			validateTerminalIpcBridgeBoundary(baselineBridgeRustSources, mutated),
 		).toContain(
-			"PlainBridge must expose exactly the thirteen audited terminal/trust methods, no more and no fewer",
+			"PlainBridge must expose exactly the fourteen audited terminal/trust methods, no more and no fewer",
 		);
 	});
 
@@ -10538,7 +10548,7 @@ describe("Plain F070 S2 terminal IPC bridge Harness", () => {
 		expect(
 			validateTerminalIpcBridgeBoundary(baselineBridgeRustSources, renamed),
 		).toContain(
-			"PlainBridge must expose exactly the thirteen audited terminal/trust methods, no more and no fewer",
+			"PlainBridge must expose exactly the fourteen audited terminal/trust methods, no more and no fewer",
 		);
 	});
 

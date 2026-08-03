@@ -884,9 +884,55 @@ fn cwd_defaults_to_the_explicitly_selected_authorized_root() {
             session_id,
             &sink,
             Duration::from_secs(10),
-            |text| text.trim() == expected.to_string_lossy().as_ref(),
+            |text| {
+                text.lines().map(str::trim_end).collect::<String>()
+                    == expected.to_string_lossy().as_ref()
+            },
         ),
         "got {:?}",
+        sink.rendered_screen_text()
+    );
+    block_on(terminal.kill("main", session_id, true)).unwrap();
+}
+
+#[test]
+fn a_relative_cwd_is_resolved_inside_the_explicitly_selected_root() {
+    let root = TempDir::new().unwrap();
+    let nested = root.path().join("nested").join("project");
+    std::fs::create_dir_all(&nested).unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
+    let terminal = TerminalService::new();
+    let sink = RecordingSink::new();
+
+    let session_id = block_on(terminal.start_with_command_for_test(
+        &trust,
+        &workspace,
+        "main",
+        root_id_at(&workspace, "main", 0),
+        Some("nested/project".to_owned()),
+        80,
+        24,
+        sh_c("pwd"),
+        sink.clone(),
+    ))
+    .unwrap();
+
+    let expected = std::fs::canonicalize(nested).unwrap();
+    assert!(
+        wait_for_rendered_text(
+            &terminal,
+            "main",
+            session_id,
+            &sink,
+            Duration::from_secs(10),
+            |text| {
+                text.lines().map(str::trim_end).collect::<String>()
+                    == expected.to_string_lossy().as_ref()
+            },
+        ),
+        "expected {}, got {:?}",
+        expected.display(),
         sink.rendered_screen_text()
     );
     block_on(terminal.kill("main", session_id, true)).unwrap();
@@ -916,7 +962,10 @@ fn cwd_in_another_authorized_root_is_rejected_for_the_selected_root() {
         &workspace,
         "main",
         root_id_at(&workspace, "main", 0),
-        Some(other_root.path().to_string_lossy().into_owned()),
+        Some(format!(
+            "../{}",
+            other_root.path().file_name().unwrap().to_string_lossy()
+        )),
         80,
         24,
         CommandBuilder::new("cat"),
@@ -968,13 +1017,63 @@ fn a_cwd_outside_every_authorized_root_is_rejected() {
         &workspace,
         "main",
         root_id_at(&workspace, "main", 0),
-        Some(outside.path().to_string_lossy().into_owned()),
+        Some(format!(
+            "../{}",
+            outside.path().file_name().unwrap().to_string_lossy()
+        )),
         80,
         24,
         CommandBuilder::new("cat"),
         RecordingSink::new(),
     ));
     assert_eq!(result.unwrap_err().code(), "TERMINAL_CWD_INVALID");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_relative_cwd_symlink_that_resolves_outside_the_selected_root_is_rejected() {
+    use std::os::unix::fs::symlink;
+
+    let root = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    symlink(outside.path(), root.path().join("outside-link")).unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
+    let terminal = TerminalService::new();
+
+    let result = block_on(terminal.start_with_command_for_test(
+        &trust,
+        &workspace,
+        "main",
+        root_id_at(&workspace, "main", 0),
+        Some("outside-link".to_owned()),
+        80,
+        24,
+        CommandBuilder::new("cat"),
+        RecordingSink::new(),
+    ));
+    assert_eq!(result.unwrap_err().code(), "TERMINAL_CWD_INVALID");
+}
+
+#[test]
+fn an_unknown_profile_id_is_rejected_before_spawn() {
+    let root = TempDir::new().unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
+    let terminal = TerminalService::new();
+
+    let result = block_on(terminal.start(
+        &trust,
+        &workspace,
+        "main",
+        root_id_at(&workspace, "main", 0),
+        "attacker".to_owned(),
+        None,
+        80,
+        24,
+        RecordingSink::new(),
+    ));
+    assert_eq!(result.unwrap_err().code(), "TERMINAL_PROFILE_INVALID");
 }
 
 // -----------------------------------------------------------------------

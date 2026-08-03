@@ -8,6 +8,8 @@ import type {
 	TerminalDirty,
 	TerminalExitEvent,
 	TerminalFrame,
+	TerminalProfile,
+	TerminalProfilesResult,
 	TerminalRgb,
 	TerminalRow,
 	TerminalScrollbackCell,
@@ -30,6 +32,10 @@ const MAX_TERMINAL_INPUT_BYTES = 1_024 * 1_024;
 const MAX_TERMINAL_KEY_UTF8_BYTES = 64;
 /** Mirrors `terminal::dto::MAX_TERMINAL_SCROLLBACK_REQUEST_ROWS`. */
 const MAX_TERMINAL_SCROLLBACK_REQUEST_ROWS = 10_000;
+const MAX_TERMINAL_PROFILE_ID_BYTES = 64;
+const MAX_TERMINAL_PROFILE_LABEL_BYTES = 256;
+const MAX_TERMINAL_PROFILES = 32;
+const MAX_TERMINAL_CWD_BYTES = 4_096;
 /** A frame can never report more rows than `MAX_TERMINAL_DIMENSION`, nor a
  * row more cells than that same bound (it doubles as the max column count
  * `terminal_start`/`terminal_resize` accept). */
@@ -183,7 +189,25 @@ function frozenCwd(value: unknown): string | null {
 	if (value === null || value === undefined) {
 		return null;
 	}
-	if (typeof value !== "string" || value.length === 0) {
+	if (
+		typeof value !== "string" ||
+		value.length === 0 ||
+		utf8ByteLength(value) > MAX_TERMINAL_CWD_BYTES ||
+		value.includes("\0") ||
+		/^(?:[A-Za-z]:[\\/]|[\\/])/.test(value)
+	) {
+		return invalidTerminalRequest();
+	}
+	return value;
+}
+
+function frozenProfileId(value: unknown): string {
+	if (
+		typeof value !== "string" ||
+		value.length === 0 ||
+		utf8ByteLength(value) > MAX_TERMINAL_PROFILE_ID_BYTES ||
+		!/^[A-Za-z0-9.-]+$/.test(value)
+	) {
 		return invalidTerminalRequest();
 	}
 	return value;
@@ -237,6 +261,7 @@ function frozenImmediate(value: unknown): boolean {
  */
 interface FrozenTerminalStartRequest {
 	readonly rootId: string;
+	readonly profileId: string;
 	readonly cwd: string | null;
 	readonly cols: number;
 	readonly rows: number;
@@ -244,16 +269,24 @@ interface FrozenTerminalStartRequest {
 
 export function frozenTerminalStartRequest(
 	rootId: unknown,
+	profileId: unknown,
 	cwd: unknown,
 	cols: unknown,
 	rows: unknown,
 ): FrozenTerminalStartRequest {
 	return Object.freeze({
 		rootId: frozenRootId(rootId),
+		profileId: frozenProfileId(profileId),
 		cwd: frozenCwd(cwd),
 		cols: frozenDimension(cols),
 		rows: frozenDimension(rows),
 	});
+}
+
+export function frozenTerminalProfilesRequest(): Readonly<
+	Record<never, never>
+> {
+	return Object.freeze({});
 }
 
 /**
@@ -407,6 +440,70 @@ export function decodeTerminalStartResult(value: unknown): TerminalStartResult {
 		return violation();
 	}
 	return Object.freeze({ sessionId: value.sessionId });
+}
+
+function decodeTerminalProfile(value: unknown): TerminalProfile {
+	if (!isPlainObject(value) || !hasExactKeys(value, ["id", "label"])) {
+		return violation();
+	}
+	let id: string;
+	try {
+		id = frozenProfileId(value.id);
+	} catch {
+		return violation();
+	}
+	if (
+		typeof value.label !== "string" ||
+		value.label.length === 0 ||
+		utf8ByteLength(value.label) > MAX_TERMINAL_PROFILE_LABEL_BYTES ||
+		Array.from(value.label).some((character) => {
+			const codepoint = character.codePointAt(0)!;
+			return codepoint <= 0x1f || codepoint === 0x7f;
+		})
+	) {
+		return violation();
+	}
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze({ id, label: value.label });
+}
+
+export function decodeTerminalProfilesResult(
+	value: unknown,
+): TerminalProfilesResult {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, ["profiles", "defaultProfileId"])
+	) {
+		return violation();
+	}
+	const profiles = ownObjectArraySnapshot(
+		value.profiles,
+		MAX_TERMINAL_PROFILES,
+		decodeTerminalProfile,
+	);
+	if (profiles.length === 0) {
+		return violation();
+	}
+	let defaultProfileId: string;
+	try {
+		defaultProfileId = frozenProfileId(value.defaultProfileId);
+	} catch {
+		return violation();
+	}
+	const ids = new Set(profiles.map((profile) => profile.id));
+	if (ids.size !== profiles.length || !ids.has(defaultProfileId)) {
+		return violation();
+	}
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze({ profiles, defaultProfileId });
 }
 
 /** Decodes the `void` (JSON `null`) result of `terminal_input_text`/

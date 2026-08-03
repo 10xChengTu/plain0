@@ -62,6 +62,7 @@ interface FakeTransportHandle {
 	readonly transport: TerminalStreamTransport;
 	readonly startCalls: Array<{
 		rootId: string;
+		profileId: string;
 		cwd: string | null;
 		cols: number;
 		rows: number;
@@ -143,8 +144,8 @@ function createFakeTransport(sessionId = SESSION_ID): FakeTransportHandle {
 			return () => releaseStartGate?.();
 		},
 		transport: {
-			async terminalStart(rootId, cwd, cols, rows) {
-				startCalls.push({ rootId, cwd, cols, rows });
+			async terminalStart(rootId, profileId, cwd, cols, rows) {
+				startCalls.push({ rootId, profileId, cwd, cols, rows });
 				if (startGate !== undefined) {
 					await startGate;
 					startGate = undefined;
@@ -196,6 +197,7 @@ function createFakeTransport(sessionId = SESSION_ID): FakeTransportHandle {
 
 const startRequest = Object.freeze({
 	rootId: ROOT_ID,
+	profileId: "systemDefault",
 	cwd: null,
 	cols: 80,
 	rows: 24,
@@ -210,7 +212,13 @@ describe("openTerminalStream", () => {
 		});
 		expect(stream.sessionId).toBe(SESSION_ID);
 		expect(fake.startCalls).toEqual([
-			{ rootId: ROOT_ID, cwd: null, cols: 80, rows: 24 },
+			{
+				rootId: ROOT_ID,
+				profileId: "systemDefault",
+				cwd: null,
+				cols: 80,
+				rows: 24,
+			},
 		]);
 
 		await stream.writeText("hi");

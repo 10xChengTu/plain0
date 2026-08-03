@@ -326,7 +326,13 @@ export class TerminalPaneController {
 				}
 				stream = await openTerminalStream(
 					this.#bridge,
-					{ rootId, cwd: null, cols, rows },
+					{
+						rootId,
+						profileId: "systemDefault",
+						cwd: null,
+						cols,
+						rows,
+					},
 					handlers,
 				);
 			}

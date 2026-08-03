@@ -6729,6 +6729,7 @@ const TERMINAL_ENV_PASSTHROUGH_NAMES_LOCK = Object.freeze([
 	"SHELL",
 	"LANG",
 	"TMPDIR",
+	"SSH_AUTH_SOCK",
 ]);
 
 const SPAWN_GUARDED_DOMAIN_PATTERN =
@@ -6954,13 +6955,13 @@ export function validateTerminalRustBoundary(
 			? undefined
 			: extractRustFunctions(executableTerminalService, "resolve_cwd")[0];
 	const expectedResolveCwdBody =
-		"letselected_root=workspace.root_canonical_path(window_label,root_id)?;matchcwd{None=>Ok(selected_root),Some(candidate)=>{letcanonical=std::fs::canonicalize(candidate).map_err(|_|terminal_cwd_invalid())?;ifcanonical==selected_root||canonical.starts_with(&selected_root){Ok(canonical)}else{Err(terminal_cwd_invalid())}}}";
+		"letselected_root=workspace.root_canonical_path(window_label,root_id)?;matchcwd{None=>Ok(selected_root),Some(candidate)=>{letcandidate=PathBuf::from(candidate);ifcandidate.is_absolute(){returnErr(terminal_cwd_invalid());}letcanonical=std::fs::canonicalize(selected_root.join(candidate)).map_err(|_|terminal_cwd_invalid())?;ifcanonical==selected_root||canonical.starts_with(&selected_root){Ok(canonical)}else{Err(terminal_cwd_invalid())}}}";
 	if (
 		resolveCwd === undefined ||
 		resolveCwd.body.replaceAll(/\s+/g, "") !== expectedResolveCwdBody
 	) {
 		failures.push(
-			"terminal/service.rs resolve_cwd must resolve one explicit rootId, default to that root, and reject a cwd outside that same root without roots[0] fallback",
+			"terminal/service.rs resolve_cwd must resolve one explicit rootId, default to that root, and reject absolute or escaping cwd values without roots[0] fallback",
 		);
 	}
 
@@ -6987,6 +6988,18 @@ export function validateTerminalRustBoundary(
 	) {
 		failures.push(
 			"terminal/shell.rs must define TERMINAL_ENV_PASSTHROUGH_NAMES as exactly the audited name list",
+		);
+	}
+	if (
+		!/pub\(crate\)\s+const\s+TERMINAL_ENV_TERM_PROGRAM\s*:\s*\(&str,\s*&str\)\s*=\s*\(\s*"TERM_PROGRAM"\s*,\s*"Plain"\s*\)\s*;/.test(
+			shellSource,
+		) ||
+		!/pub\(crate\)\s+const\s+TERMINAL_ENV_TERM_PROGRAM_VERSION\s*:\s*\(&str,\s*&str\)\s*=\s*\(\s*"TERM_PROGRAM_VERSION"\s*,\s*env!\(\s*"CARGO_PKG_VERSION"\s*\)\s*\)\s*;/.test(
+			shellSource,
+		)
+	) {
+		failures.push(
+			"terminal/shell.rs must define the exact fixed TERM_PROGRAM and TERM_PROGRAM_VERSION overrides",
 		);
 	}
 	if (
@@ -7050,11 +7063,18 @@ const TRUST_COMMAND_CONTRACTS = Object.freeze([
 const TERMINAL_COMMAND_CONTRACTS = Object.freeze([
 	{
 		file: "src-tauri/src/terminal/commands.rs",
+		name: "terminal_profiles",
+		parameters: "_request:TerminalProfilesRequest",
+		returnType: "->Result<TerminalProfilesResult,CommandError>",
+		body: "Ok(TerminalProfilesResult::from_shell_profiles(super::shell::available_profiles(std::env::var().ok().as_deref()),))",
+	},
+	{
+		file: "src-tauri/src/terminal/commands.rs",
 		name: "terminal_start",
 		parameters:
 			"window:WebviewWindow,terminal:State<'_,TerminalService>,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:TerminalStartRequest",
 		returnType: "->Result<TerminalStartResult,CommandError>",
-		body: "letquery=request.into_parts()?;letsink:Arc<dynTerminalOutputSink>=Arc::new(WindowEmitSink{app:window.app_handle().clone(),window_label:window.label().to_owned(),});letsession_id=terminal.inner().start(trust.inner(),workspace.inner(),window.label(),query.root_id,query.cwd,query.cols,query.rows,sink,).await?;Ok(TerminalStartResult::new(session_id))",
+		body: "letquery=request.into_parts()?;letsink:Arc<dynTerminalOutputSink>=Arc::new(WindowEmitSink{app:window.app_handle().clone(),window_label:window.label().to_owned(),});letsession_id=terminal.inner().start(trust.inner(),workspace.inner(),window.label(),query.root_id,query.profile_id,query.cwd,query.cols,query.rows,sink,).await?;Ok(TerminalStartResult::new(session_id))",
 	},
 	{
 		file: "src-tauri/src/terminal/commands.rs",
@@ -7369,12 +7389,12 @@ export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 	};
 	if (
 		structBody("TerminalStartRequest") !==
-			"root_id:RootId,cwd:Option<String>,cols:u16,rows:u16," ||
+			"root_id:RootId,profile_id:String,cwd:Option<String>,cols:u16,rows:u16," ||
 		structBody("TerminalStartQuery") !==
-			"pub(crate)root_id:RootId,pub(crate)cwd:Option<String>,pub(crate)cols:u16,pub(crate)rows:u16,"
+			"pub(crate)root_id:RootId,pub(crate)profile_id:String,pub(crate)cwd:Option<String>,pub(crate)cols:u16,pub(crate)rows:u16,"
 	) {
 		failures.push(
-			"TerminalStartRequest/TerminalStartQuery must require the exact audited rootId/cwd/geometry fields",
+			"TerminalStartRequest/TerminalStartQuery must require the exact audited rootId/profileId/cwd/geometry fields",
 		);
 	}
 	if (
@@ -7479,6 +7499,7 @@ export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 				statement.name.text === "PlainBridge",
 		) ?? [];
 	const TERMINAL_BRIDGE_METHOD_NAMES = [
+		"terminalProfiles",
 		"terminalStart",
 		"terminalInputText",
 		"terminalInputKey",
@@ -7508,7 +7529,7 @@ export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 			JSON.stringify([...TERMINAL_BRIDGE_METHOD_NAMES].sort())
 	) {
 		failures.push(
-			"PlainBridge must expose exactly the thirteen audited terminal/trust methods, no more and no fewer",
+			"PlainBridge must expose exactly the fourteen audited terminal/trust methods, no more and no fewer",
 		);
 	}
 
@@ -7526,6 +7547,7 @@ export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 	for (const name of [
 		"decodeTerminalDataEvent",
 		"decodeTerminalExitEvent",
+		"decodeTerminalProfilesResult",
 		"decodeTerminalScrollbackResult",
 		"decodeWorkspaceTrustState",
 	]) {
@@ -7543,10 +7565,10 @@ export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 	}
 	if (
 		compact(decoderBody("frozenTerminalStartRequest")) !==
-		"returnObject.freeze({rootId:frozenRootId(rootId),cwd:frozenCwd(cwd),cols:frozenDimension(cols),rows:frozenDimension(rows),});"
+		"returnObject.freeze({rootId:frozenRootId(rootId),profileId:frozenProfileId(profileId),cwd:frozenCwd(cwd),cols:frozenDimension(cols),rows:frozenDimension(rows),});"
 	) {
 		failures.push(
-			"terminal-codec.ts frozenTerminalStartRequest must preserve the exact rootId/cwd/geometry request shape",
+			"terminal-codec.ts frozenTerminalStartRequest must preserve the exact rootId/profileId/cwd/geometry request shape",
 		);
 	}
 
@@ -7554,14 +7576,24 @@ export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 	if (
 		native === undefined ||
 		!compact(native).includes(
-			"terminalStart:async(rootId,cwd,cols,rows)=>{constrequest=frozenTerminalStartRequest(rootId,cwd,cols,rows);return decodeTerminalStartResult(".replaceAll(
+			"terminalStart:async(rootId,profileId,cwd,cols,rows)=>{constrequest=frozenTerminalStartRequest(rootId,profileId,cwd,cols,rows,);return decodeTerminalStartResult(".replaceAll(
 				" ",
 				"",
 			),
 		)
 	) {
 		failures.push(
-			"native.ts terminalStart must forward the explicit rootId through frozenTerminalStartRequest",
+			"native.ts terminalStart must forward the explicit rootId and profileId through frozenTerminalStartRequest",
+		);
+	}
+	if (
+		native === undefined ||
+		!compact(native).includes(
+			'terminalProfiles:async()=>{constrequest=frozenTerminalProfilesRequest();returndecodeTerminalProfilesResult(awaitinvoke<unknown>("terminal_profiles",{request}),);}',
+		)
+	) {
+		failures.push(
+			"native.ts terminalProfiles must route the empty frozen request through the strict profile decoder",
 		);
 	}
 	if (

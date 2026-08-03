@@ -128,6 +128,7 @@ import {
 import {
 	decodeTerminalDataEvent,
 	decodeTerminalExitEvent,
+	decodeTerminalProfilesResult,
 	decodeTerminalScrollbackResult,
 	decodeTerminalStartResult,
 	decodeTerminalVoid,
@@ -138,6 +139,7 @@ import {
 	frozenTerminalInputKeyRequest,
 	frozenTerminalInputTextRequest,
 	frozenTerminalKillRequest,
+	frozenTerminalProfilesRequest,
 	frozenTerminalResizeRequest,
 	frozenTerminalScrollbackRequest,
 	frozenTerminalStartRequest,
@@ -719,8 +721,20 @@ export function createNativeBridge(): PlainBridge {
 				await invoke<unknown>("theme_set_selection", { request }),
 			);
 		},
-		terminalStart: async (rootId, cwd, cols, rows) => {
-			const request = frozenTerminalStartRequest(rootId, cwd, cols, rows);
+		terminalProfiles: async () => {
+			const request = frozenTerminalProfilesRequest();
+			return decodeTerminalProfilesResult(
+				await invoke<unknown>("terminal_profiles", { request }),
+			);
+		},
+		terminalStart: async (rootId, profileId, cwd, cols, rows) => {
+			const request = frozenTerminalStartRequest(
+				rootId,
+				profileId,
+				cwd,
+				cols,
+				rows,
+			);
 			return decodeTerminalStartResult(
 				await invoke<unknown>("terminal_start", { request }),
 			);
