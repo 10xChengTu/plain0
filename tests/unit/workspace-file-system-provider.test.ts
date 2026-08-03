@@ -588,26 +588,29 @@ async function rejected(error: Promise<unknown>): Promise<{
 }
 
 describe("Plain workspace file system provider", () => {
-	it("advertises the writable set only for the sole all-true tuple across all 32 capability combinations", () => {
-		for (let mask = 0; mask < 32; mask += 1) {
+	it("advertises writable and Trash bits only for their exact tuples across all 64 capability combinations", () => {
+		for (let mask = 0; mask < 64; mask += 1) {
 			const platformCapabilities: WorkspaceCapabilities = Object.freeze({
 				create: (mask & 1) !== 0,
 				renameNoReplace: (mask & 2) !== 0,
 				copyMove: (mask & 4) !== 0,
 				delete: (mask & 8) !== 0,
-				trash: true,
+				trash: (mask & 32) !== 0,
 				versionedWrite: (mask & 16) !== 0,
 			});
 			const provider = createPlainWorkspaceFileSystemProvider(
 				testBridge(),
 				platformCapabilities,
 			);
+			const allowsMutation = (mask & 31) === 31;
 			const expected =
-				mask === 31
-					? FileSystemProviderCapabilities.FileReadWrite |
-						FileSystemProviderCapabilities.FileFolderCopy
-					: FileSystemProviderCapabilities.FileReadWrite |
-						FileSystemProviderCapabilities.Readonly;
+				FileSystemProviderCapabilities.FileReadWrite |
+				(allowsMutation
+					? FileSystemProviderCapabilities.FileFolderCopy |
+						((mask & 32) !== 0
+							? FileSystemProviderCapabilities.Trash
+							: FileSystemProviderCapabilities.None)
+					: FileSystemProviderCapabilities.Readonly);
 
 			expect(provider.capabilities, `capability mask ${mask}`).toBe(expected);
 			expect(provider.onDidChangeCapabilities).toBe(Event.None);
@@ -631,11 +634,13 @@ describe("Plain workspace file system provider", () => {
 			const ownKeys = Reflect.ownKeys(provider);
 			expect(ownKeys).not.toContain("bridge");
 			expect(ownKeys).not.toContain("allowsMutationDispatch");
+			expect(ownKeys).not.toContain("allowsTrashDispatch");
 			expect(Object.isFrozen(provider)).toBe(true);
 			expect(Object.isFrozen(Object.getPrototypeOf(provider))).toBe(true);
 			expect(Reflect.set(provider, "capabilities", 10)).toBe(false);
 			expect(Reflect.set(provider, "bridge", testBridge())).toBe(false);
 			expect(Reflect.set(provider, "allowsMutationDispatch", true)).toBe(false);
+			expect(Reflect.set(provider, "allowsTrashDispatch", true)).toBe(false);
 			expect(Reflect.set(provider, "injected", true)).toBe(false);
 			expect(Reflect.set(provider, "copy", async () => {})).toBe(false);
 			expect(
@@ -645,7 +650,8 @@ describe("Plain workspace file system provider", () => {
 
 		expect(writableProvider.capabilities).toBe(
 			FileSystemProviderCapabilities.FileReadWrite |
-				FileSystemProviderCapabilities.FileFolderCopy,
+				FileSystemProviderCapabilities.FileFolderCopy |
+				FileSystemProviderCapabilities.Trash,
 		);
 		expect(readonlyProvider.capabilities).toBe(
 			FileSystemProviderCapabilities.FileReadWrite |
@@ -677,10 +683,12 @@ describe("Plain workspace file system provider", () => {
 			mutableCapabilities,
 		);
 		mutableCapabilities.versionedWrite = false;
+		mutableCapabilities.trash = false;
 
 		expect(provider.capabilities).toBe(
 			FileSystemProviderCapabilities.FileReadWrite |
-				FileSystemProviderCapabilities.FileFolderCopy,
+				FileSystemProviderCapabilities.FileFolderCopy |
+				FileSystemProviderCapabilities.Trash,
 		);
 		await expect(
 			provider.plainWriteFile(
@@ -2439,7 +2447,8 @@ describe("Plain workspace file system provider", () => {
 		expect(changes[0]![0]!.resource.toString()).toBe(resource.toString());
 		expect(provider.capabilities).toBe(
 			FileSystemProviderCapabilities.FileReadWrite |
-				FileSystemProviderCapabilities.FileFolderCopy,
+				FileSystemProviderCapabilities.FileFolderCopy |
+				FileSystemProviderCapabilities.Trash,
 		);
 
 		const replay = await rejected(
@@ -2447,6 +2456,29 @@ describe("Plain workspace file system provider", () => {
 		);
 		expect(replay.code).toBe(FileSystemProviderErrorCode.NoPermissions);
 		expect(commit).toHaveBeenCalledOnce();
+	});
+
+	it("rejects a forged Trash authorization when the native capability snapshot disabled system Trash", async () => {
+		const commitTrash = vi.fn();
+		const provider = createPlainWorkspaceFileSystemProvider(
+			testBridge({ workspaceCommitTrashEntry: commitTrash }),
+			Object.freeze({ ...supportedCapabilities, trash: false }),
+		);
+		const resource = workspaceUri("no-trash.txt");
+		const authorized = authorizedProviderDelete(resource, "file", false);
+
+		await expect(
+			provider.delete(resource, authorized.options),
+		).rejects.toMatchObject({
+			code: FileSystemProviderErrorCode.NoPermissions,
+		});
+		expect(commitTrash).not.toHaveBeenCalled();
+		expect(getPlainWorkspaceDeleteState(authorized.authorization)).toEqual({
+			status: "pending",
+		});
+		expect(provider.capabilities & FileSystemProviderCapabilities.Trash).toBe(
+			0,
+		);
 	});
 
 	it("routes an exact Trash authorization only to the system-Trash bridge and emits the trashed entry", async () => {

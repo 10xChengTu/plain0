@@ -5909,6 +5909,8 @@ const workspaceTrashAppPaths = [
 	"app/platform/tauri/workspace-codec.ts",
 	"app/platform/tauri/native.ts",
 	"app/platform/tauri/browser-mock.ts",
+	"app/features/workspace/delete-coordinator.ts",
+	"app/features/workspace/file-system-provider.ts",
 ];
 const workspaceTrashAppSources = workspaceTrashAppPaths.map((relativePath) => ({
 	relativePath,
@@ -5990,6 +5992,71 @@ describe("Plain F170 TypeScript system Trash boundary", () => {
 		expect(validateWorkspaceTrashTypeScriptBoundary(hostile)).toContain(
 			"browser mock must model a distinct mutually-exclusive Trash receipt with begin revalidation and ordered terminal results",
 		);
+	});
+
+	it("locks non-permanent Trash authorization and strict coordinator ordering", () => {
+		const coordinator = "app/features/workspace/delete-coordinator.ts";
+		for (const [from, to, failure] of [
+			[
+				"skipTrashBin: false",
+				"skipTrashBin: true",
+				"Trash coordinator must bind one non-permanent recursive authorization to each ResourceFileEdit",
+			],
+			[
+				"permanent: false",
+				"permanent: true",
+				"Trash coordinator must bind one non-permanent recursive authorization to each ResourceFileEdit",
+			],
+			[
+				"beginAttempted = true;\n\t\tawait bridge.workspaceBeginTrash(plan.confirmationId);",
+				"await bridge.workspaceBeginTrash(plan.confirmationId);\n\t\tbeginAttempted = true;",
+				"runTrash must retain strict Trash intent, confirmation, begin and terminal-success sequencing",
+			],
+			[
+				"await bridge.workspaceCancelTrash(plan.confirmationId);",
+				"await bridge.workspaceCancelDelete(plan.confirmationId);",
+				"runTrash must rescan after begun failures and cancel every uncompleted Trash confirmation in finally",
+			],
+			[
+				'} else if (result.status === "trashed") {\n\t\t\ttrashedEntries += 1;',
+				'} else if (result.status === "deleted") {\n\t\t\ttrashedEntries += 1;',
+				"Trash coordinator must classify every authorization terminal typestate without guessing success",
+			],
+		]) {
+			const hostile = replaceWorkspaceTrashAppSource(coordinator, from, to);
+			expect(validateWorkspaceTrashTypeScriptBoundary(hostile)).toContain(
+				failure,
+			);
+		}
+	});
+
+	it("rejects Trash dispatch without the immutable capability gate or through permanent commit", () => {
+		const provider = "app/features/workspace/file-system-provider.ts";
+		for (const [from, to] of [
+			[
+				"this.requireTrashDispatchAllowed();",
+				"this.requireMutationDispatchAllowed();",
+			],
+			[
+				"this.#bridge.workspaceCommitTrashEntry(",
+				"this.#bridge.workspaceCommitDeleteEntry(",
+			],
+			[
+				"allowsTrashDispatch: allowsMutationDispatch && snapshot.trash",
+				"allowsTrashDispatch: allowsMutationDispatch",
+			],
+		]) {
+			const hostile = replaceWorkspaceTrashAppSource(provider, from, to);
+			const failures = validateWorkspaceTrashTypeScriptBoundary(hostile);
+			expect(
+				failures.some((message) =>
+					/provider delete|mode-matched commit|capability contract|mutation policy/.test(
+						message,
+					),
+				),
+				`Trash provider mutation was not rejected: ${from}`,
+			).toBe(true);
+		}
 	});
 });
 
@@ -6608,19 +6675,22 @@ void tauri["create" + "BrowserMockBridge"]();`,
 		}
 	});
 
-	it("keeps confirmed delete inside the final all-five capability contract with permanent non-Trash events", () => {
+	it("keeps confirmed delete inside the final all-five capability contract with mode-gated Trash and permanent events", () => {
 		const provider = "app/features/workspace/file-system-provider.ts";
 		for (const [from, to, expected] of [
 			[
-				`(allowsMutationDispatch
-				? FileSystemProviderCapabilities.FileFolderCopy
+				`(policy.allowsMutationDispatch
+				? FileSystemProviderCapabilities.FileFolderCopy |
+					(policy.allowsTrashDispatch
+						? FileSystemProviderCapabilities.Trash
+						: FileSystemProviderCapabilities.None)
 				: FileSystemProviderCapabilities.Readonly);`,
 				"FileSystemProviderCapabilities.FileFolderCopy;",
 				"confirmed delete requires the final all-five writable-or-readonly provider capability contract",
 			],
 			[
-				"? FileSystemProviderCapabilities.FileFolderCopy",
 				"? FileSystemProviderCapabilities.Trash",
+				"? FileSystemProviderCapabilities.Readonly",
 				"confirmed delete requires the final all-five writable-or-readonly provider capability contract",
 			],
 			[
@@ -6640,7 +6710,7 @@ void tauri["create" + "BrowserMockBridge"]();`,
 			provider,
 			(source) =>
 				`const allowsMutationDispatch = true;\n${source.replace(
-					"constructor(bridge: PlainBridge, allowsMutationDispatch: boolean)",
+					"constructor(bridge: PlainBridge, policy: PlainWorkspaceMutationPolicy)",
 					"constructor(bridge: PlainBridge)",
 				)}`,
 		);
@@ -6768,11 +6838,14 @@ const workspaceBrowserFixture = readFileSync(
 describe("Plain workspace provider copy boundary", () => {
 	const capabilityAssignment = `this.capabilities =
 			FileSystemProviderCapabilities.FileReadWrite |
-			(allowsMutationDispatch
-				? FileSystemProviderCapabilities.FileFolderCopy
+			(policy.allowsMutationDispatch
+				? FileSystemProviderCapabilities.FileFolderCopy |
+					(policy.allowsTrashDispatch
+						? FileSystemProviderCapabilities.Trash
+						: FileSystemProviderCapabilities.None)
 				: FileSystemProviderCapabilities.Readonly);`;
 	const capabilityContractFailure =
-		"Plain workspace provider capabilities must be constructed once as all-five FileReadWrite | FileFolderCopy or FileReadWrite | Readonly";
+		"Plain workspace provider capabilities must be constructed once from all-five mutation and explicit Trash policy bits";
 
 	function mutateProvider(from, to) {
 		if (!readonlyWorkspaceProvider.includes(from)) {
@@ -6830,7 +6903,7 @@ describe("Plain workspace provider copy boundary", () => {
 		);
 	}
 
-	it("accepts only the immutable all-five writable-or-readonly capability assignment", () => {
+	it("accepts only the immutable all-five writable, Trash and readonly capability assignment", () => {
 		expect(
 			validateWorkspaceProviderCopyBoundary(readonlyWorkspaceProvider),
 		).toEqual([]);
@@ -6845,17 +6918,24 @@ describe("Plain workspace provider copy boundary", () => {
 				"this.capabilities = FileSystemProviderCapabilities.FileReadWrite | FileSystemProviderCapabilities.Readonly;",
 			),
 			mutateProvider(
-				"(allowsMutationDispatch\n\t\t\t\t? FileSystemProviderCapabilities.FileFolderCopy\n\t\t\t\t: FileSystemProviderCapabilities.Readonly)",
-				"(allowsMutationDispatch\n\t\t\t\t? FileSystemProviderCapabilities.Readonly\n\t\t\t\t: FileSystemProviderCapabilities.FileFolderCopy)",
+				"(policy.allowsMutationDispatch\n\t\t\t\t? FileSystemProviderCapabilities.FileFolderCopy |",
+				"(policy.allowsMutationDispatch\n\t\t\t\t? FileSystemProviderCapabilities.Readonly |",
 			),
-			mutateProvider("(allowsMutationDispatch\n", "(!allowsMutationDispatch\n"),
 			mutateProvider(
-				"? FileSystemProviderCapabilities.FileFolderCopy",
-				"? FileSystemProviderCapabilities.FileFolderCopy | FileSystemProviderCapabilities.Readonly",
+				"(policy.allowsMutationDispatch\n",
+				"(!policy.allowsMutationDispatch\n",
+			),
+			mutateProvider(
+				"? FileSystemProviderCapabilities.Trash",
+				"? FileSystemProviderCapabilities.Readonly",
+			),
+			mutateProvider(
+				": FileSystemProviderCapabilities.None",
+				": FileSystemProviderCapabilities.Trash",
 			),
 			mutateProvider(
 				"readonly capabilities: FileSystemProviderCapabilities;",
-				"readonly capabilities = this.#allowsMutationDispatch ? FileSystemProviderCapabilities.FileFolderCopy : FileSystemProviderCapabilities.Readonly;",
+				"readonly capabilities = this.#allowsTrashDispatch ? FileSystemProviderCapabilities.Trash : FileSystemProviderCapabilities.Readonly;",
 			),
 			...["static readonly", "declare readonly", "public readonly"].map(
 				(modifiers) =>
@@ -6882,7 +6962,8 @@ describe("Plain workspace provider copy boundary", () => {
 
 	it("locks the exact ECMAScript-private authority fields and runtime freeze order", () => {
 		const privateAssignments = `this.#bridge = bridge;
-		this.#allowsMutationDispatch = allowsMutationDispatch;`;
+		this.#allowsMutationDispatch = policy.allowsMutationDispatch;
+		this.#allowsTrashDispatch = policy.allowsTrashDispatch;`;
 		const prototypeFreeze =
 			"Object.freeze(PlainWorkspaceFileSystemProvider.prototype);";
 		const earlyPrototypeFreeze = readonlyWorkspaceProvider
@@ -6901,8 +6982,13 @@ describe("Plain workspace provider copy boundary", () => {
 				"readonly allowsMutationDispatch: boolean;",
 			),
 			mutateProvider(
+				"readonly #allowsTrashDispatch: boolean;",
+				"readonly allowsTrashDispatch: boolean;",
+			),
+			mutateProvider(
 				privateAssignments,
-				`this.#allowsMutationDispatch = allowsMutationDispatch;
+				`this.#allowsTrashDispatch = policy.allowsTrashDispatch;
+		this.#allowsMutationDispatch = policy.allowsMutationDispatch;
 		this.#bridge = bridge;`,
 			),
 			mutateProvider(
@@ -6929,10 +7015,9 @@ describe("Plain workspace provider copy boundary", () => {
 		}
 	});
 
-	it("rejects every capability outside the final two sets plus computed, duplicate and inherited surfaces", () => {
+	it("rejects every capability outside the audited writable, Trash and readonly sets plus computed, duplicate and inherited surfaces", () => {
 		for (const flag of [
 			"PathCaseSensitive",
-			"Trash",
 			"FileAtomicRead",
 			"FileAtomicWrite",
 			"FileAtomicDelete",
@@ -6944,13 +7029,13 @@ describe("Plain workspace provider copy boundary", () => {
 			"FileWriteUnlock",
 		]) {
 			const hostile = mutateProvider(
-				"FileSystemProviderCapabilities.Readonly);",
-				"FileSystemProviderCapabilities.Readonly |\n\t\t\t\tFileSystemProviderCapabilities." +
+				"FileSystemProviderCapabilities.None)",
+				"FileSystemProviderCapabilities.None |\n\t\t\t\t\t\tFileSystemProviderCapabilities." +
 					flag +
-					");",
+					")",
 			);
 			expect(validateWorkspaceProviderCopyBoundary(hostile)).toContain(
-				`Plain workspace provider must not advertise ${flag} outside the final two capability sets`,
+				`Plain workspace provider must not advertise ${flag} outside the audited capability expression`,
 			);
 		}
 
@@ -7327,7 +7412,7 @@ function workspaceMoveOutcomeUnknown(): WorkspaceMoveOutcomeUnknownError {
 		expect(
 			validateWorkspaceProviderCopyBoundary(extraWatchStateReference),
 		).toContain(
-			"Plain workspace native authority must remain sealed in the exact #bridge, #allowsMutationDispatch and #watchState private-field consumers",
+			"Plain workspace native authority must remain sealed in the exact bridge, mutation, Trash and watch-state private-field consumers",
 		);
 	});
 
@@ -7404,7 +7489,7 @@ function workspaceMoveOutcomeUnknown(): WorkspaceMoveOutcomeUnknownError {
 			"snapshot.copyMove ||",
 		);
 		expect(validateWorkspaceProviderCopyBoundary(policy)).toContain(
-			"mutation policy must decode one own-data DTO into an immutable all-five boolean",
+			"mutation policy must decode one own-data DTO into immutable all-five and Trash booleans",
 		);
 
 		const factory = mutateProvider(
@@ -7526,7 +7611,7 @@ function workspaceMoveOutcomeUnknown(): WorkspaceMoveOutcomeUnknownError {
 		this.capabilities = FileSystemProviderCapabilities.FileReadWrite | FileSystemProviderCapabilities.FileFolderCopy;`,
 		);
 		expect(validateWorkspaceProviderCopyBoundary(constructorUpgrade)).toContain(
-			"Plain workspace provider constructor must retain only the bridge, immutable mutation boolean and exact capability assignment",
+			"Plain workspace provider constructor must retain only the bridge, immutable mutation and Trash booleans and exact capability assignment",
 		);
 
 		const liveAlias =

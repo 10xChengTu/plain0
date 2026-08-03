@@ -58,6 +58,11 @@ interface ResolvedMutationResource extends ResolvedResource {
 	readonly resource: URI;
 }
 
+interface PlainWorkspaceMutationPolicy {
+	readonly allowsMutationDispatch: boolean;
+	readonly allowsTrashDispatch: boolean;
+}
+
 export interface PlainWorkspaceDeleteResource {
 	readonly rootId: string;
 	readonly relativePath: string;
@@ -114,15 +119,18 @@ function noPermissions(): FileSystemProviderError {
 
 function createPlainWorkspaceMutationPolicy(
 	platformCapabilities: WorkspaceCapabilities,
-): boolean {
+): PlainWorkspaceMutationPolicy {
 	const snapshot = decodeWorkspaceCapabilities(platformCapabilities);
-	return (
+	const allowsMutationDispatch =
 		snapshot.create &&
 		snapshot.renameNoReplace &&
 		snapshot.copyMove &&
 		snapshot.delete &&
-		snapshot.versionedWrite
-	);
+		snapshot.versionedWrite;
+	return Object.freeze({
+		allowsMutationDispatch,
+		allowsTrashDispatch: allowsMutationDispatch && snapshot.trash,
+	});
 }
 
 function unavailable(): FileSystemProviderError {
@@ -529,6 +537,7 @@ function createdProviderStat(
 class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileReadWriteCapability {
 	readonly #bridge: PlainBridge;
 	readonly #allowsMutationDispatch: boolean;
+	readonly #allowsTrashDispatch: boolean;
 	readonly capabilities: FileSystemProviderCapabilities;
 	readonly onDidChangeCapabilities: Event<void> = Event.None;
 	private readonly changeEmitter = new Emitter<readonly IFileChange[]>();
@@ -544,13 +553,17 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 		}
 	>();
 
-	constructor(bridge: PlainBridge, allowsMutationDispatch: boolean) {
+	constructor(bridge: PlainBridge, policy: PlainWorkspaceMutationPolicy) {
 		this.#bridge = bridge;
-		this.#allowsMutationDispatch = allowsMutationDispatch;
+		this.#allowsMutationDispatch = policy.allowsMutationDispatch;
+		this.#allowsTrashDispatch = policy.allowsTrashDispatch;
 		this.capabilities =
 			FileSystemProviderCapabilities.FileReadWrite |
-			(allowsMutationDispatch
-				? FileSystemProviderCapabilities.FileFolderCopy
+			(policy.allowsMutationDispatch
+				? FileSystemProviderCapabilities.FileFolderCopy |
+					(policy.allowsTrashDispatch
+						? FileSystemProviderCapabilities.Trash
+						: FileSystemProviderCapabilities.None)
 				: FileSystemProviderCapabilities.Readonly);
 		Object.freeze(this);
 	}
@@ -788,6 +801,9 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 		) {
 			throw noPermissions();
 		}
+		if (!authorizationSnapshot.permanent) {
+			this.requireTrashDispatchAllowed();
+		}
 		beginPlainWorkspaceDeleteProviderDispatch(authorization);
 
 		let result: WorkspaceDeleteResult | WorkspaceTrashResult;
@@ -974,6 +990,12 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 
 	private requireMutationDispatchAllowed(): void {
 		if (!this.#allowsMutationDispatch) {
+			throw noPermissions();
+		}
+	}
+
+	private requireTrashDispatchAllowed(): void {
+		if (!this.#allowsTrashDispatch) {
 			throw noPermissions();
 		}
 	}

@@ -12,6 +12,8 @@ import type {
 	PlainBridge,
 	WorkspaceDeleteBatchPlan,
 	WorkspaceDeleteResult,
+	WorkspaceTrashBatchPlan,
+	WorkspaceTrashResult,
 } from "../../platform/tauri";
 import type {
 	PlainWorkspaceDeleteProvider,
@@ -23,6 +25,10 @@ const MAX_DELETE_ENTRIES = 64;
 const deleteFailureDetails = new WeakMap<
 	WorkspaceDeleteIncompleteError,
 	Readonly<{ deletedEntries: number; incompleteResult?: WorkspaceDeleteResult }>
+>();
+const trashFailureDetails = new WeakMap<
+	WorkspaceTrashIncompleteError,
+	Readonly<{ trashedEntries: number; incompleteResult?: WorkspaceTrashResult }>
 >();
 
 export class WorkspaceDeleteIncompleteError extends Error {
@@ -49,6 +55,27 @@ export class WorkspaceDeleteIncompleteError extends Error {
 	}
 }
 
+export class WorkspaceTrashIncompleteError extends Error {
+	readonly code = "WORKSPACE_TRASH_INCOMPLETE" as const;
+
+	constructor(trashedEntries: number, incompleteResult?: WorkspaceTrashResult) {
+		super(
+			incompleteResult?.status === "entryRetained"
+				? "The system Trash batch stopped before an entry could be moved."
+				: "The system Trash batch did not complete. Check the Trash before retrying.",
+		);
+		this.name = this.code;
+		trashFailureDetails.set(
+			this,
+			Object.freeze({
+				trashedEntries,
+				...(incompleteResult === undefined ? {} : { incompleteResult }),
+			}),
+		);
+		Object.freeze(this);
+	}
+}
+
 export function getWorkspaceDeleteIncompleteDetails(error: unknown):
 	| Readonly<{
 			deletedEntries: number;
@@ -57,6 +84,17 @@ export function getWorkspaceDeleteIncompleteDetails(error: unknown):
 	| undefined {
 	return error instanceof WorkspaceDeleteIncompleteError
 		? deleteFailureDetails.get(error)
+		: undefined;
+}
+
+export function getWorkspaceTrashIncompleteDetails(error: unknown):
+	| Readonly<{
+			trashedEntries: number;
+			incompleteResult?: WorkspaceTrashResult;
+	  }>
+	| undefined {
+	return error instanceof WorkspaceTrashIncompleteError
+		? trashFailureDetails.get(error)
 		: undefined;
 }
 
@@ -94,7 +132,7 @@ function snapshotSelection(
 		});
 		return Object.freeze(entries);
 	} catch {
-		throw new Error("The permanent delete selection is invalid.");
+		throw new Error("The workspace delete selection is invalid.");
 	}
 }
 
@@ -123,6 +161,28 @@ function confirmationDetail(
 			? `\n\n${readonlyEntries} 个所选条目被配置为只读。`
 			: "";
 	return `${names}${remaining}${descendants}${dirty}${readonly}\n\n此操作永久且不可撤销，不会移入废纸篓。`;
+}
+
+function trashConfirmationDetail(
+	entries: readonly DeleteSelectionEntry[],
+	dirtyWorkingCopies: number,
+	readonlyEntries: number,
+): string {
+	const names = entries
+		.slice(0, 10)
+		.map(({ name }) => `• ${name}`)
+		.join("\n");
+	const remaining =
+		entries.length > 10 ? `\n…以及另外 ${entries.length - 10} 项` : "";
+	const dirty =
+		dirtyWorkingCopies > 0
+			? `\n\n${dirtyWorkingCopies} 个未保存的工作副本会在对应条目成功移入废纸篓后丢失。`
+			: "";
+	const readonly =
+		readonlyEntries > 0
+			? `\n\n${readonlyEntries} 个所选条目被配置为只读。`
+			: "";
+	return `${names}${remaining}${dirty}${readonly}\n\n所选项目将移到系统废纸篓，可在废纸篓中恢复。`;
 }
 
 function createAuthorizedEdits(
@@ -158,6 +218,50 @@ function createAuthorizedEdits(
 				recursive: true,
 				kind: entry.kind,
 				permanent: true,
+			},
+		);
+		authorizations.push(authorization);
+		return new ResourceFileEdit(selected.resource.resource, undefined, options);
+	});
+	return Object.freeze({
+		edits: Object.freeze(edits),
+		authorizations: Object.freeze(authorizations),
+	});
+}
+
+function createAuthorizedTrashEdits(
+	selection: readonly DeleteSelectionEntry[],
+	plan: WorkspaceTrashBatchPlan,
+): Readonly<{
+	edits: readonly ResourceFileEdit[];
+	authorizations: readonly PlainWorkspaceDeleteAuthorization[];
+}> {
+	if (plan.entries.length !== selection.length) {
+		throw new Error("The system Trash plan is invalid.");
+	}
+	const authorizations: PlainWorkspaceDeleteAuthorization[] = [];
+	const edits = plan.entries.map((entry, index) => {
+		const selected = selection[index];
+		if (selected === undefined) {
+			throw new Error("The system Trash plan is invalid.");
+		}
+		const options = {
+			recursive: true,
+			folder: entry.kind === "directory",
+			ignoreIfNotExists: false,
+			skipTrashBin: false,
+		};
+		const authorization = authorizePlainWorkspaceDeleteResourceEdit(
+			options,
+			selected.resource.resource,
+			{
+				confirmationId: plan.confirmationId,
+				entryId: entry.entryId,
+				rootId: selected.resource.rootId,
+				relativePath: selected.resource.relativePath,
+				recursive: true,
+				kind: entry.kind,
+				permanent: false,
 			},
 		);
 		authorizations.push(authorization);
@@ -217,6 +321,55 @@ function classifyAuthorizationResults(
 	});
 }
 
+function classifyTrashAuthorizationResults(
+	authorizations: readonly PlainWorkspaceDeleteAuthorization[],
+): Readonly<{
+	trashedEntries: number;
+	pendingEntries: number;
+	ordinaryFailures: number;
+	outcomeUnknown: boolean;
+	incompleteResult?: WorkspaceTrashResult;
+}> {
+	let trashedEntries = 0;
+	let pendingEntries = 0;
+	let ordinaryFailures = 0;
+	let outcomeUnknown = false;
+	let incompleteResult: WorkspaceTrashResult | undefined;
+	for (const authorization of authorizations) {
+		const result = getPlainWorkspaceDeleteState(authorization);
+		if (result.status === "pending" || result.status === "inFlight") {
+			pendingEntries += 1;
+		} else if (result.status === "trashed") {
+			trashedEntries += 1;
+		} else if (result.status === "ordinaryFailure") {
+			ordinaryFailures += 1;
+		} else if (result.status === "outcomeUnknown") {
+			outcomeUnknown = true;
+			if (incompleteResult === undefined) {
+				incompleteResult = Object.freeze({ status: result.status });
+			}
+		} else if (result.status === "entryRetained") {
+			if (result.reason === "deleteFailed") {
+				outcomeUnknown = true;
+			} else if (incompleteResult === undefined) {
+				incompleteResult = Object.freeze({
+					status: result.status,
+					reason: result.reason,
+				});
+			}
+		} else {
+			outcomeUnknown = true;
+		}
+	}
+	return Object.freeze({
+		trashedEntries,
+		pendingEntries,
+		ordinaryFailures,
+		outcomeUnknown,
+		...(incompleteResult === undefined ? {} : { incompleteResult }),
+	});
+}
+
 async function runDelete(
 	bridge: PlainBridge,
 	provider: PlainWorkspaceDeleteProvider,
@@ -224,7 +377,9 @@ async function runDelete(
 	context: PlainWorkspaceDeleteCoordinatorContext,
 ): Promise<void> {
 	if (context.useTrash !== false) {
-		throw new Error("System Trash is not connected to the coordinator yet.");
+		throw new Error(
+			"The permanent delete coordinator requires permanent intent.",
+		);
 	}
 	const selection = snapshotSelection(context, provider);
 	const requests = Object.freeze(
@@ -346,12 +501,136 @@ async function runDelete(
 	}
 }
 
+async function runTrash(
+	bridge: PlainBridge,
+	provider: PlainWorkspaceDeleteProvider,
+	getNotificationService: () => Promise<PlainDeleteErrorNotificationService>,
+	context: PlainWorkspaceDeleteCoordinatorContext,
+): Promise<void> {
+	if (context.useTrash !== true) {
+		throw new Error("The system Trash coordinator requires Trash intent.");
+	}
+	const selection = snapshotSelection(context, provider);
+	const requests = Object.freeze(
+		selection.map(({ resource }) =>
+			Object.freeze({
+				rootId: resource.rootId,
+				relativePath: resource.relativePath,
+			}),
+		),
+	);
+	const plan = await bridge.workspacePrepareTrash(requests);
+	let beginAttempted = false;
+	let completed = false;
+	let authorizations: readonly PlainWorkspaceDeleteAuthorization[] = [];
+
+	try {
+		const dirtyWorkingCopies = new Set<unknown>();
+		let readonlyEntries = 0;
+		for (const { resource } of selection) {
+			for (const dirty of context.workingCopyFileService.getDirty(
+				resource.resource,
+			)) {
+				dirtyWorkingCopies.add(dirty);
+			}
+			if (context.filesConfigurationService.isReadonly(resource.resource)) {
+				readonlyEntries += 1;
+			}
+		}
+		const response = await context.dialogService.confirm(
+			Object.freeze({
+				type: "warning" as const,
+				message:
+					selection.length === 1
+						? `将“${selection[0]!.name}”移到废纸篓？`
+						: `将所选 ${selection.length} 项移到废纸篓？`,
+				detail: trashConfirmationDetail(
+					selection,
+					dirtyWorkingCopies.size,
+					readonlyEntries,
+				),
+				primaryButton: "移到废纸篓",
+			}),
+		);
+		if (response.confirmed !== true) {
+			return;
+		}
+
+		beginAttempted = true;
+		await bridge.workspaceBeginTrash(plan.confirmationId);
+		const authorized = createAuthorizedTrashEdits(selection, plan);
+		authorizations = authorized.authorizations;
+		await context.explorerService.applyBulkEdit(
+			authorized.edits,
+			Object.freeze({
+				undoLabel: "移到废纸篓",
+				progressLabel:
+					selection.length === 1
+						? "正在将 1 项移到废纸篓"
+						: `正在将 ${selection.length} 项移到废纸篓`,
+			}),
+		);
+		const results = classifyTrashAuthorizationResults(authorizations);
+		if (
+			results.incompleteResult !== undefined ||
+			results.outcomeUnknown ||
+			results.ordinaryFailures !== 0 ||
+			results.pendingEntries !== 0 ||
+			results.trashedEntries !== selection.length
+		) {
+			throw new WorkspaceTrashIncompleteError(
+				results.trashedEntries,
+				results.incompleteResult,
+			);
+		}
+		completed = true;
+	} catch (error) {
+		if (beginAttempted) {
+			provider.plainRefreshDeleteRoots(
+				selection.map(({ resource }) => resource.resource),
+			);
+		}
+		const results = classifyTrashAuthorizationResults(authorizations);
+		let brandedError: WorkspaceTrashIncompleteError | undefined;
+		if (error instanceof WorkspaceTrashIncompleteError) {
+			brandedError = error;
+		} else if (
+			results.incompleteResult !== undefined ||
+			results.outcomeUnknown ||
+			results.trashedEntries > 0
+		) {
+			brandedError = new WorkspaceTrashIncompleteError(
+				results.trashedEntries,
+				results.incompleteResult,
+			);
+		}
+		if (brandedError !== undefined) {
+			try {
+				const notificationService = await getNotificationService();
+				notificationService.error(brandedError.message);
+				return;
+			} catch {
+				throw brandedError;
+			}
+		}
+		throw error;
+	} finally {
+		if (!completed) {
+			try {
+				await bridge.workspaceCancelTrash(plan.confirmationId);
+			} catch {}
+		}
+	}
+}
+
 export function registerWorkspaceDeleteCoordinator(
 	bridge: PlainBridge,
 	provider: PlainWorkspaceDeleteProvider,
 	getNotificationService: () => Promise<PlainDeleteErrorNotificationService>,
 ): IDisposable {
 	return registerPlainWorkspaceDeleteCoordinator((context) =>
-		runDelete(bridge, provider, getNotificationService, context),
+		context.useTrash
+			? runTrash(bridge, provider, getNotificationService, context)
+			: runDelete(bridge, provider, getNotificationService, context),
 	);
 }

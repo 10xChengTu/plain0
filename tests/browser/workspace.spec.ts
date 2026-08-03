@@ -40,6 +40,13 @@ type RawReadTransport = "arrayBuffer" | "numberArray";
 type NativeIpcMockMode = "readonly" | "supported";
 type TestMultiRootMoveIncompleteScenario = "moveRetained" | "movePartial";
 type TestMultiRootDeleteIncompleteScenario = "deleteRetained" | "deletePartial";
+type TestWorkspaceTrashOutcome =
+	| Readonly<{ status: "trashed" }>
+	| Readonly<{
+			status: "entryRetained";
+			reason: "entryChanged" | "entryUnverifiable" | "trashFailed";
+	  }>
+	| Readonly<{ status: "outcomeUnknown" }>;
 
 interface TestWorkspaceWatchExchange {
 	readonly callIndex: number;
@@ -471,6 +478,9 @@ async function installNativeIpcMock(
 	// Rust-shaped scratch partition across a same-tab reload. Other scenarios
 	// retain an empty queue and process-local scratch state.
 	untitledFixtureForTest: TestUntitledFixture = {},
+	// `F170` S5: scripts system-Trash terminal results in commit order. An
+	// empty queue moves the selected entry to Trash successfully.
+	trashOutcomesForTest: readonly TestWorkspaceTrashOutcome[] = [],
 ): Promise<void> {
 	await page.addInitScript(
 		({
@@ -491,6 +501,7 @@ async function installNativeIpcMock(
 			gitNetworkFixtureForTest,
 			debugFixtureForTest,
 			untitledFixtureForTest,
+			trashOutcomesForTest,
 		}) => {
 			const calls: Array<{
 				command: string;
@@ -578,6 +589,7 @@ async function installNativeIpcMock(
 				);
 			};
 			const scriptedSavePicks = [...(untitledFixtureForTest.savePicks ?? [])];
+			const scriptedTrashOutcomes = [...trashOutcomesForTest];
 			const persistScratchForTest =
 				untitledFixtureForTest.persistScratchForTest === true;
 			const SCRATCH_STORAGE_KEY = "__plain_test_scratch_store__";
@@ -836,6 +848,10 @@ async function installNativeIpcMock(
 			const invalidDeletePlan = () => ({
 				code: "WORKSPACE_DELETE_PLAN_INVALID",
 				message: "The workspace delete plan is invalid.",
+			});
+			const invalidTrashPlan = () => ({
+				code: "WORKSPACE_TRASH_PLAN_INVALID",
+				message: "The workspace Trash plan is invalid.",
 			});
 			const searchNotFound = () => ({
 				code: "WORKSPACE_SEARCH_NOT_FOUND",
@@ -1432,6 +1448,14 @@ async function installNativeIpcMock(
 						entryId: string;
 						relativePath: string;
 						recursive: boolean;
+						phase: "prepared" | "executing";
+				  }
+				| undefined;
+			let activeTrash:
+				| {
+						confirmationId: string;
+						entryId: string;
+						relativePath: string;
 						phase: "prepared" | "executing";
 				  }
 				| undefined;
@@ -2790,6 +2814,8 @@ async function installNativeIpcMock(
 								| undefined;
 							const entry = prepare?.entries?.[0];
 							if (
+								activeDelete !== undefined ||
+								activeTrash !== undefined ||
 								prepare?.entries?.length !== 1 ||
 								entry?.rootId !== rootId ||
 								typeof entry.relativePath !== "string" ||
@@ -2863,6 +2889,89 @@ async function installNativeIpcMock(
 							deleteNode(activeDelete.relativePath);
 							activeDelete = undefined;
 							return { status: "deleted" };
+						}
+						case "workspace_prepare_trash": {
+							const prepare = args.request as
+								| {
+										entries?: readonly {
+											rootId?: string;
+											relativePath?: string;
+										}[];
+								  }
+								| undefined;
+							const entry = prepare?.entries?.[0];
+							if (
+								activeDelete !== undefined ||
+								activeTrash !== undefined ||
+								prepare?.entries?.length !== 1 ||
+								entry?.rootId !== rootId ||
+								typeof entry.relativePath !== "string"
+							) {
+								throw invalidTrashPlan();
+							}
+							const node = resolveNode(entry.relativePath);
+							const confirmationId = nextDeleteId();
+							const entryId = nextDeleteId();
+							activeTrash = {
+								confirmationId,
+								entryId,
+								relativePath: entry.relativePath,
+								phase: "prepared",
+							};
+							return {
+								confirmationId,
+								entries: [{ entryId, kind: node.kind }],
+							};
+						}
+						case "workspace_cancel_trash": {
+							const cancel = args.request as
+								{ confirmationId?: string } | undefined;
+							if (cancel?.confirmationId !== activeTrash?.confirmationId) {
+								throw invalidTrashPlan();
+							}
+							activeTrash = undefined;
+							return null;
+						}
+						case "workspace_begin_trash": {
+							const begin = args.request as
+								{ confirmationId?: string } | undefined;
+							if (
+								activeTrash === undefined ||
+								begin?.confirmationId !== activeTrash.confirmationId ||
+								activeTrash.phase !== "prepared"
+							) {
+								throw invalidTrashPlan();
+							}
+							activeTrash.phase = "executing";
+							return null;
+						}
+						case "workspace_commit_trash_entry": {
+							const commit = args.request as
+								| {
+										confirmationId?: string;
+										entryId?: string;
+										rootId?: string;
+										relativePath?: string;
+								  }
+								| undefined;
+							if (
+								activeTrash?.phase !== "executing" ||
+								commit?.confirmationId !== activeTrash.confirmationId ||
+								commit.entryId !== activeTrash.entryId ||
+								commit.rootId !== rootId ||
+								commit.relativePath !== activeTrash.relativePath
+							) {
+								throw invalidTrashPlan();
+							}
+							const relativePath = activeTrash.relativePath;
+							const outcome = scriptedTrashOutcomes.shift() ?? {
+								status: "trashed" as const,
+							};
+							activeTrash = undefined;
+							if (outcome.status === "trashed") {
+								deleteNode(relativePath);
+							}
+							return outcome;
 						}
 						case "workspace_stat": {
 							const relativePath = request?.relativePath ?? "";
@@ -4178,6 +4287,7 @@ async function installNativeIpcMock(
 			gitNetworkFixtureForTest,
 			debugFixtureForTest,
 			untitledFixtureForTest,
+			trashOutcomesForTest,
 		},
 	);
 }
@@ -6406,6 +6516,35 @@ async function installUntitledNativeIpcMock(
 	);
 }
 
+async function installTrashNativeIpcMock(
+	page: Page,
+	outcomes: readonly TestWorkspaceTrashOutcome[],
+): Promise<void> {
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"supported",
+		{
+			"trash-cancel.txt": "cancel stays in workspace\n",
+			"trash-retained.txt": "retained stays in workspace\n",
+			"trash-success.txt": "success moves to Trash\n",
+		},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{},
+		{},
+		outcomes,
+	);
+}
+
 async function nativeInvocations(
 	page: Page,
 	command: string,
@@ -6689,6 +6828,12 @@ async function pressExplorerRenameKey(page: Page): Promise<void> {
 
 async function pressExplorerPermanentDeleteKey(page: Page): Promise<void> {
 	await page.keyboard.press(
+		(await browserRunsOnMacOS(page)) ? "Meta+Alt+Backspace" : "Shift+Delete",
+	);
+}
+
+async function pressExplorerTrashKey(page: Page): Promise<void> {
+	await page.keyboard.press(
 		(await browserRunsOnMacOS(page)) ? "Meta+Backspace" : "Delete",
 	);
 }
@@ -6712,6 +6857,13 @@ const nativeDeleteCommands = [
 	"workspace_cancel_delete",
 	"workspace_begin_delete",
 	"workspace_commit_delete_entry",
+] as const;
+
+const nativeTrashCommands = [
+	"workspace_prepare_trash",
+	"workspace_cancel_trash",
+	"workspace_begin_trash",
+	"workspace_commit_trash_entry",
 ] as const;
 
 test("fails closed before workspace bootstrap when capabilities are unavailable", async ({
@@ -8845,21 +8997,22 @@ test("shows retained and partial permanent delete failures", async ({
 		await expect(toasts).toHaveCount(0);
 	};
 
-	// Exercise the route that originally failed silently: the context menu is
-	// disposed before the confirm-dialog-gated action settles, so the
-	// coordinator must publish the final Error notification itself.
+	// Use the dedicated permanent-delete keybinding now that the ordinary
+	// Explorer delete path advertises and uses system Trash.
 	const deletePermanently = async (
 		item: Locator,
 		name: string,
 	): Promise<number> => {
 		const phaseStart = await currentCallCount();
-		await activateExplorerContextAction(page, item, "Delete Permanently");
+		await item.click();
+		const key = pressExplorerPermanentDeleteKey(page);
 		const dialog = page.locator(".monaco-dialog-box");
 		await expect(dialog).toHaveCount(1);
 		await expect(dialog).toContainText(`永久删除“${name}”？`);
 		await expect(dialog).toContainText("此操作永久且不可撤销");
 		await expect(dialog).toContainText("不会移入废纸篓");
 		await dialog.getByRole("button", { name: "永久删除", exact: true }).click();
+		await key;
 		await expect(page.locator(".monaco-dialog-box")).toHaveCount(0);
 		await consumeDeleteFailureToast();
 		return phaseStart;
@@ -9849,6 +10002,109 @@ test("routes all-five workspace CRUD, save, rename and permanent delete through 
 	expect(errors).toEqual([]);
 });
 
+test("moves ordinary Explorer deletes through confirmed system Trash without permanent fallback", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	await installTrashNativeIpcMock(page, [
+		{ status: "entryRetained", reason: "trashFailed" },
+		{ status: "trashed" },
+	]);
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+
+	const explorer = await openNativeWorkspaceExplorer(page);
+	const item = (name: string): Locator =>
+		explorer.getByRole("treeitem", { name, exact: true });
+	const trashDialog = page.locator(".monaco-dialog-box");
+	const invokeTrash = async (name: string, confirm: boolean): Promise<void> => {
+		const target = item(name);
+		await expect(target).toHaveCount(1);
+		await target.click();
+		const key = pressExplorerTrashKey(page);
+		await expect(trashDialog).toBeVisible();
+		await expect(trashDialog).toContainText(`将“${name}”移到废纸篓？`);
+		await expect(trashDialog).toContainText("所选项目将移到系统废纸篓");
+		await expect(trashDialog).toContainText("可在废纸篓中恢复");
+		await expect(trashDialog).not.toContainText("永久且不可撤销");
+		if (confirm) {
+			await trashDialog
+				.getByRole("button", { name: "移到废纸篓", exact: true })
+				.click();
+		} else {
+			await trashDialog
+				.getByRole("button", { name: "Cancel", exact: true })
+				.click();
+		}
+		await key;
+		await expect(trashDialog).toHaveCount(0);
+	};
+
+	await invokeTrash("trash-cancel.txt", false);
+	await expect(item("trash-cancel.txt")).toHaveCount(1);
+
+	await invokeTrash("trash-retained.txt", true);
+	await expect(item("trash-retained.txt")).toHaveCount(1);
+	const toast = page.locator(".notifications-toasts .notification-toast");
+	await expect(toast).toHaveCount(1);
+	await expect(toast).toContainText(
+		"The system Trash batch stopped before an entry could be moved.",
+	);
+	const toastText = await toast.innerText();
+	expect(toastText).not.toContain("trashFailed");
+	expect(toastText).not.toContain(nativeRootId);
+	expect(toastText).not.toMatch(/(?:\/Users\/|[A-Za-z]:\\|\\\\)/u);
+	await toast.hover();
+	await toast
+		.getByRole("button", { name: /^Clear Notification(?: \(.+\))?$/u })
+		.click();
+	await expect(toast).toHaveCount(0);
+
+	await invokeTrash("trash-success.txt", true);
+	await expect(item("trash-success.txt")).toHaveCount(0);
+
+	const evidence = await page.evaluate(
+		({ trashCommands, deleteCommands }) => {
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+			};
+			return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(({ command }) =>
+				[...trashCommands, ...deleteCommands].includes(command),
+			);
+		},
+		{
+			trashCommands: nativeTrashCommands as readonly string[],
+			deleteCommands: nativeDeleteCommands as readonly string[],
+		},
+	);
+	expect(evidence.map(({ command }) => command)).toEqual([
+		"workspace_prepare_trash",
+		"workspace_cancel_trash",
+		"workspace_prepare_trash",
+		"workspace_begin_trash",
+		"workspace_commit_trash_entry",
+		"workspace_cancel_trash",
+		"workspace_prepare_trash",
+		"workspace_begin_trash",
+		"workspace_commit_trash_entry",
+	]);
+	expect(
+		evidence.some(({ command }) =>
+			(nativeDeleteCommands as readonly string[]).includes(command),
+		),
+	).toBe(false);
+	for (const invocation of evidence) {
+		const wire = JSON.stringify(invocation.args);
+		expect(wire).not.toMatch(/nativePath|useTrash|recursive/u);
+	}
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+});
+
 test("keeps the entire provider readonly when one platform capability is false", async ({
 	page,
 }) => {
@@ -9912,10 +10168,10 @@ test("keeps the entire provider readonly when one platform capability is false",
 		await pressExplorerPermanentDeleteKey(page);
 		const warningToast = page
 			.locator(".notifications-toasts .notification-toast")
-			.filter({ hasText: "The permanent delete selection is invalid." });
+			.filter({ hasText: "The workspace delete selection is invalid." });
 		await expect(warningToast).toHaveCount(1);
 		await expect(warningToast).toContainText(
-			"The permanent delete selection is invalid.",
+			"The workspace delete selection is invalid.",
 		);
 		await expect(page.getByRole("dialog")).toHaveCount(1);
 		await warningToast.hover();

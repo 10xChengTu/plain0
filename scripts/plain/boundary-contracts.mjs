@@ -13641,6 +13641,11 @@ function hasFinalWorkspaceProviderCapabilityContract(provider, sourceFile) {
 			ts.isPropertyDeclaration(member) &&
 			typeScriptMemberName(member) === "#allowsMutationDispatch",
 	);
+	const privateTrashPolicyMembers = provider.members.filter(
+		(member) =>
+			ts.isPropertyDeclaration(member) &&
+			typeScriptMemberName(member) === "#allowsTrashDispatch",
+	);
 	const [bridgeParameter, policyParameter] = constructor.parameters;
 	const constructorStatements = constructor.body?.statements ?? [];
 	function isExactPrivateField(member, name, typeName) {
@@ -13687,6 +13692,12 @@ function hasFinalWorkspaceProviderCapabilityContract(provider, sourceFile) {
 			"#allowsMutationDispatch",
 			"boolean",
 		) &&
+		privateTrashPolicyMembers.length === 1 &&
+		isExactPrivateField(
+			privateTrashPolicyMembers[0],
+			"#allowsTrashDispatch",
+			"boolean",
+		) &&
 		ts.isIdentifier(capabilityMember.name) &&
 		capabilityMember.name.text === "capabilities" &&
 		capabilityMember.initializer === undefined &&
@@ -13703,18 +13714,19 @@ function hasFinalWorkspaceProviderCapabilityContract(provider, sourceFile) {
 		isExactPlainParameter(bridgeParameter, "bridge", "PlainBridge") &&
 		isExactPlainParameter(
 			policyParameter,
-			"allowsMutationDispatch",
-			"boolean",
+			"policy",
+			"PlainWorkspaceMutationPolicy",
 		) &&
-		constructorStatements.length === 4 &&
+		constructorStatements.length === 5 &&
 		sameArray(
 			constructorStatements.map((statement) =>
 				statement.getText(sourceFile).replaceAll(/\s+/g, ""),
 			),
 			[
 				"this.#bridge=bridge;",
-				"this.#allowsMutationDispatch=allowsMutationDispatch;",
-				"this.capabilities=FileSystemProviderCapabilities.FileReadWrite|(allowsMutationDispatch?FileSystemProviderCapabilities.FileFolderCopy:FileSystemProviderCapabilities.Readonly);",
+				"this.#allowsMutationDispatch=policy.allowsMutationDispatch;",
+				"this.#allowsTrashDispatch=policy.allowsTrashDispatch;",
+				"this.capabilities=FileSystemProviderCapabilities.FileReadWrite|(policy.allowsMutationDispatch?FileSystemProviderCapabilities.FileFolderCopy|(policy.allowsTrashDispatch?FileSystemProviderCapabilities.Trash:FileSystemProviderCapabilities.None):FileSystemProviderCapabilities.Readonly);",
 				"Object.freeze(this);",
 			],
 		) &&
@@ -14521,45 +14533,51 @@ export function validateWorkspaceDeleteTypeScriptBoundary(appSources) {
 			"authorizePlainWorkspaceDeleteResourceEdit",
 			{
 				path: coordinatorPath,
-				functionName: "createAuthorizedEdits",
-				count: 1,
+				functionNames: new Set([
+					"createAuthorizedEdits",
+					"createAuthorizedTrashEdits",
+				]),
+				count: 2,
 			},
 		],
 		[
 			"getPlainWorkspaceDeleteState",
 			{
 				path: coordinatorPath,
-				functionName: "classifyAuthorizationResults",
-				count: 1,
+				functionNames: new Set([
+					"classifyAuthorizationResults",
+					"classifyTrashAuthorizationResults",
+				]),
+				count: 2,
 			},
 		],
 		[
 			"registerPlainWorkspaceDeleteCoordinator",
 			{
 				path: coordinatorPath,
-				functionName: "registerWorkspaceDeleteCoordinator",
+				functionNames: new Set(["registerWorkspaceDeleteCoordinator"]),
 				count: 1,
 			},
 		],
 		[
 			"beginPlainWorkspaceDeleteProviderDispatch",
-			{ path: providerPath, functionName: "delete", count: 1 },
+			{ path: providerPath, functionNames: new Set(["delete"]), count: 1 },
 		],
 		[
 			"completePlainWorkspaceDeleteProviderFailure",
-			{ path: providerPath, functionName: "delete", count: 2 },
+			{ path: providerPath, functionNames: new Set(["delete"]), count: 2 },
 		],
 		[
 			"completePlainWorkspaceDeleteProviderResult",
-			{ path: providerPath, functionName: "delete", count: 1 },
+			{ path: providerPath, functionNames: new Set(["delete"]), count: 1 },
 		],
 		[
 			"getPlainWorkspaceDeleteAuthorizationSnapshot",
-			{ path: providerPath, functionName: "delete", count: 1 },
+			{ path: providerPath, functionNames: new Set(["delete"]), count: 1 },
 		],
 		[
 			"takePlainWorkspaceDeleteProviderAuthorization",
-			{ path: providerPath, functionName: "delete", count: 1 },
+			{ path: providerPath, functionNames: new Set(["delete"]), count: 1 },
 		],
 	]);
 	const internalConsumerCounts = new Map(
@@ -14840,7 +14858,7 @@ export function validateWorkspaceDeleteTypeScriptBoundary(appSources) {
 					if (
 						!isDirectCall ||
 						normalizedPath !== consumer.path ||
-						containingFunctionName(node) !== consumer.functionName
+						!consumer.functionNames.has(containingFunctionName(node))
 					) {
 						failures.push(
 							`${node.text} must be consumed only by its fixed confirmed-delete function`,
@@ -14930,7 +14948,16 @@ export function validateWorkspaceTrashTypeScriptBoundary(appSources) {
 	const codecPath = "app/platform/tauri/workspace-codec.ts";
 	const nativePath = "app/platform/tauri/native.ts";
 	const browserPath = "app/platform/tauri/browser-mock.ts";
-	for (const path of [contractsPath, codecPath, nativePath, browserPath]) {
+	const coordinatorPath = "app/features/workspace/delete-coordinator.ts";
+	const providerPath = "app/features/workspace/file-system-provider.ts";
+	for (const path of [
+		contractsPath,
+		codecPath,
+		nativePath,
+		browserPath,
+		coordinatorPath,
+		providerPath,
+	]) {
 		if (!sources.has(path)) {
 			failures.push(`system Trash TypeScript boundary requires ${path}`);
 		}
@@ -15056,6 +15083,11 @@ export function validateWorkspaceTrashTypeScriptBoundary(appSources) {
 			"browser mock must model a distinct mutually-exclusive Trash receipt with begin revalidation and ordered terminal results",
 		);
 	}
+	failures.push(
+		...validateWorkspaceDeleteCoordinatorRoute(sources.get(coordinatorPath)),
+		...validateWorkspaceDeleteProviderRoute(sources.get(providerPath)),
+		...validateWorkspaceProviderCopyBoundary(sources.get(providerPath)),
+	);
 	return [...new Set(failures)];
 }
 
@@ -15097,6 +15129,8 @@ function validateWorkspaceDeleteCoordinatorRoute(source) {
 				"type:PlainBridge",
 				"type:WorkspaceDeleteBatchPlan",
 				"type:WorkspaceDeleteResult",
+				"type:WorkspaceTrashBatchPlan",
+				"type:WorkspaceTrashResult",
 			]),
 		],
 		[
@@ -15159,9 +15193,15 @@ function validateWorkspaceDeleteCoordinatorRoute(source) {
 	const expectedTopLevel = new Map([
 		["MAX_DELETE_ENTRIES", { kind: "variable", exported: false }],
 		["deleteFailureDetails", { kind: "variable", exported: false }],
+		["trashFailureDetails", { kind: "variable", exported: false }],
 		["WorkspaceDeleteIncompleteError", { kind: "class", exported: true }],
+		["WorkspaceTrashIncompleteError", { kind: "class", exported: true }],
 		[
 			"getWorkspaceDeleteIncompleteDetails",
+			{ kind: "function", exported: true },
+		],
+		[
+			"getWorkspaceTrashIncompleteDetails",
 			{ kind: "function", exported: true },
 		],
 		[
@@ -15171,9 +15211,16 @@ function validateWorkspaceDeleteCoordinatorRoute(source) {
 		["DeleteSelectionEntry", { kind: "interface", exported: false }],
 		["snapshotSelection", { kind: "function", exported: false }],
 		["confirmationDetail", { kind: "function", exported: false }],
+		["trashConfirmationDetail", { kind: "function", exported: false }],
 		["createAuthorizedEdits", { kind: "function", exported: false }],
+		["createAuthorizedTrashEdits", { kind: "function", exported: false }],
 		["classifyAuthorizationResults", { kind: "function", exported: false }],
+		[
+			"classifyTrashAuthorizationResults",
+			{ kind: "function", exported: false },
+		],
 		["runDelete", { kind: "function", exported: false, async: true }],
+		["runTrash", { kind: "function", exported: false, async: true }],
 		[
 			"registerWorkspaceDeleteCoordinator",
 			{ kind: "function", exported: true },
@@ -15294,7 +15341,7 @@ function validateWorkspaceDeleteCoordinatorRoute(source) {
 				});
 				return Object.freeze(entries);
 			} catch {
-				throw new Error("The permanent delete selection is invalid.");
+				throw new Error("The workspace delete selection is invalid.");
 			}
 		}`,
 		"delete coordinator must synchronously snapshot one bounded distinct selection",
@@ -15341,6 +15388,47 @@ function validateWorkspaceDeleteCoordinatorRoute(source) {
 		"delete coordinator must bind one permanent recursive authorization to each ResourceFileEdit",
 	);
 	exactFunctionBody(
+		"createAuthorizedTrashEdits",
+		`{
+			if (plan.entries.length !== selection.length) {
+				throw new Error("The system Trash plan is invalid.");
+			}
+			const authorizations: PlainWorkspaceDeleteAuthorization[] = [];
+			const edits = plan.entries.map((entry, index) => {
+				const selected = selection[index];
+				if (selected === undefined) {
+					throw new Error("The system Trash plan is invalid.");
+				}
+				const options = {
+					recursive: true,
+					folder: entry.kind === "directory",
+					ignoreIfNotExists: false,
+					skipTrashBin: false,
+				};
+				const authorization = authorizePlainWorkspaceDeleteResourceEdit(
+					options,
+					selected.resource.resource,
+					{
+						confirmationId: plan.confirmationId,
+						entryId: entry.entryId,
+						rootId: selected.resource.rootId,
+						relativePath: selected.resource.relativePath,
+						recursive: true,
+						kind: entry.kind,
+						permanent: false,
+					},
+				);
+				authorizations.push(authorization);
+				return new ResourceFileEdit(selected.resource.resource, undefined, options);
+			});
+			return Object.freeze({
+				edits: Object.freeze(edits),
+				authorizations: Object.freeze(authorizations),
+			});
+		}`,
+		"Trash coordinator must bind one non-permanent recursive authorization to each ResourceFileEdit",
+	);
+	exactFunctionBody(
 		"classifyAuthorizationResults",
 		`{
 			let deletedEntries = 0;
@@ -15384,10 +15472,56 @@ function validateWorkspaceDeleteCoordinatorRoute(source) {
 		"delete coordinator must classify every authorization terminal typestate without guessing success",
 	);
 	exactFunctionBody(
+		"classifyTrashAuthorizationResults",
+		`{
+			let trashedEntries = 0;
+			let pendingEntries = 0;
+			let ordinaryFailures = 0;
+			let outcomeUnknown = false;
+			let incompleteResult: WorkspaceTrashResult | undefined;
+			for (const authorization of authorizations) {
+				const result = getPlainWorkspaceDeleteState(authorization);
+				if (result.status === "pending" || result.status === "inFlight") {
+					pendingEntries += 1;
+				} else if (result.status === "trashed") {
+					trashedEntries += 1;
+				} else if (result.status === "ordinaryFailure") {
+					ordinaryFailures += 1;
+				} else if (result.status === "outcomeUnknown") {
+					outcomeUnknown = true;
+					if (incompleteResult === undefined) {
+						incompleteResult = Object.freeze({ status: result.status });
+					}
+				} else if (result.status === "entryRetained") {
+					if (result.reason === "deleteFailed") {
+						outcomeUnknown = true;
+					} else if (incompleteResult === undefined) {
+						incompleteResult = Object.freeze({
+							status: result.status,
+							reason: result.reason,
+						});
+					}
+				} else {
+					outcomeUnknown = true;
+				}
+			}
+			return Object.freeze({
+				trashedEntries,
+				pendingEntries,
+				ordinaryFailures,
+				outcomeUnknown,
+				...(incompleteResult === undefined ? {} : { incompleteResult }),
+			});
+		}`,
+		"Trash coordinator must classify every authorization terminal typestate without guessing success",
+	);
+	exactFunctionBody(
 		"registerWorkspaceDeleteCoordinator",
 		`{
 			return registerPlainWorkspaceDeleteCoordinator((context) =>
-				runDelete(bridge, provider, getNotificationService, context),
+				context.useTrash
+					? runTrash(bridge, provider, getNotificationService, context)
+					: runDelete(bridge, provider, getNotificationService, context),
 			);
 		}`,
 		"delete coordinator registration must directly close over one bridge, provider and notification getter",
@@ -15564,6 +15698,190 @@ function validateWorkspaceDeleteCoordinatorRoute(source) {
 			"delete coordinator must define exactly one audited async runDelete route",
 		);
 	}
+
+	const trashRunFunctions = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "runTrash",
+	);
+	if (
+		trashRunFunctions.length !== 1 ||
+		trashRunFunctions[0].body === undefined
+	) {
+		failures.push(
+			"Trash coordinator must define exactly one audited async runTrash route",
+		);
+		return [...new Set(failures)];
+	}
+	const runTrash = trashRunFunctions[0];
+	const runTrashBody = normalized(runTrash.body) ?? "";
+	const trashCallPositions = new Map();
+	function recordTrashCall(name, node) {
+		const positions = trashCallPositions.get(name) ?? [];
+		positions.push(node.getStart(sourceFile));
+		trashCallPositions.set(name, positions);
+	}
+	function visitRunTrash(node) {
+		if (ts.isCallExpression(node)) {
+			const callee = node.expression.getText(sourceFile).replaceAll(/\s+/g, "");
+			for (const name of [
+				"snapshotSelection",
+				"bridge.workspacePrepareTrash",
+				"context.dialogService.confirm",
+				"bridge.workspaceBeginTrash",
+				"createAuthorizedTrashEdits",
+				"context.explorerService.applyBulkEdit",
+				"classifyTrashAuthorizationResults",
+				"provider.plainRefreshDeleteRoots",
+				"bridge.workspaceCancelTrash",
+			]) {
+				if (callee === name) {
+					recordTrashCall(name, node);
+				}
+			}
+		}
+		ts.forEachChild(node, visitRunTrash);
+	}
+	visitRunTrash(runTrash.body);
+	const expectedTrashCallCounts = new Map([
+		["snapshotSelection", 1],
+		["bridge.workspacePrepareTrash", 1],
+		["context.dialogService.confirm", 1],
+		["bridge.workspaceBeginTrash", 1],
+		["createAuthorizedTrashEdits", 1],
+		["context.explorerService.applyBulkEdit", 1],
+		["classifyTrashAuthorizationResults", 2],
+		["provider.plainRefreshDeleteRoots", 1],
+		["bridge.workspaceCancelTrash", 1],
+	]);
+	for (const [name, count] of expectedTrashCallCounts) {
+		if ((trashCallPositions.get(name)?.length ?? 0) !== count) {
+			failures.push(
+				`runTrash must call ${name} exactly ${count} times in the audited route`,
+			);
+		}
+	}
+	const orderedTrashNames = [
+		"snapshotSelection",
+		"bridge.workspacePrepareTrash",
+		"context.dialogService.confirm",
+		"bridge.workspaceBeginTrash",
+		"createAuthorizedTrashEdits",
+		"context.explorerService.applyBulkEdit",
+	];
+	const orderedTrashPositions = orderedTrashNames.map(
+		(name) => trashCallPositions.get(name)?.[0],
+	);
+	if (
+		orderedTrashPositions.some((position) => position === undefined) ||
+		orderedTrashPositions.some(
+			(position, index) =>
+				index > 0 && position <= orderedTrashPositions[index - 1],
+		)
+	) {
+		failures.push(
+			"runTrash must prepare, confirm once, begin, authorize and apply in that strict order",
+		);
+	}
+	const trashTopLevelTry = runTrash.body.statements.filter((statement) =>
+		ts.isTryStatement(statement),
+	);
+	const trashTryStatement =
+		trashTopLevelTry.length === 1 ? trashTopLevelTry[0] : undefined;
+	const expectedTrashCatch = `{
+		if (beginAttempted) {
+			provider.plainRefreshDeleteRoots(
+				selection.map(({ resource }) => resource.resource),
+			);
+		}
+		const results = classifyTrashAuthorizationResults(authorizations);
+		let brandedError: WorkspaceTrashIncompleteError | undefined;
+		if (error instanceof WorkspaceTrashIncompleteError) {
+			brandedError = error;
+		} else if (
+			results.incompleteResult !== undefined ||
+			results.outcomeUnknown ||
+			results.trashedEntries > 0
+		) {
+			brandedError = new WorkspaceTrashIncompleteError(
+				results.trashedEntries,
+				results.incompleteResult,
+			);
+		}
+		if (brandedError !== undefined) {
+			try {
+				const notificationService = await getNotificationService();
+				notificationService.error(brandedError.message);
+				return;
+			} catch {
+				throw brandedError;
+			}
+		}
+		throw error;
+	}`.replaceAll(/\s+/g, "");
+	const expectedTrashFinally = `{
+		if (!completed) {
+			try {
+				await bridge.workspaceCancelTrash(plan.confirmationId);
+			} catch {}
+		}
+	}`.replaceAll(/\s+/g, "");
+	if (
+		trashTryStatement === undefined ||
+		trashTryStatement.catchClause?.variableDeclaration === undefined ||
+		!ts.isIdentifier(trashTryStatement.catchClause.variableDeclaration.name) ||
+		trashTryStatement.catchClause.variableDeclaration.name.text !== "error" ||
+		normalized(trashTryStatement.catchClause.block) !== expectedTrashCatch ||
+		normalized(trashTryStatement.finallyBlock) !== expectedTrashFinally
+	) {
+		failures.push(
+			"runTrash must rescan after begun failures and cancel every uncompleted Trash confirmation in finally",
+		);
+	}
+	for (const required of [
+		'if(context.useTrash!==true){thrownewError("ThesystemTrashcoordinatorrequiresTrashintent.");}',
+		"constplan=awaitbridge.workspacePrepareTrash(requests);letbeginAttempted=false;letcompleted=false;letauthorizations:readonlyPlainWorkspaceDeleteAuthorization[]=[];",
+		"if(response.confirmed!==true){return;}beginAttempted=true;awaitbridge.workspaceBeginTrash(plan.confirmationId);",
+		"constauthorized=createAuthorizedTrashEdits(selection,plan);authorizations=authorized.authorizations;awaitcontext.explorerService.applyBulkEdit(authorized.edits,",
+		"results.incompleteResult!==undefined||results.outcomeUnknown||results.ordinaryFailures!==0||results.pendingEntries!==0||results.trashedEntries!==selection.length",
+		"completed=true;",
+	]) {
+		if (!runTrashBody.includes(required)) {
+			failures.push(
+				"runTrash must retain strict Trash intent, confirmation, begin and terminal-success sequencing",
+			);
+			break;
+		}
+	}
+	if (
+		/(?:workspacePrepareDelete|workspaceBeginDelete|workspaceCancelDelete|workspaceCommitDeleteEntry|skipTrashBin:true|permanent:true)/.test(
+			runTrashBody,
+		)
+	) {
+		failures.push(
+			"runTrash must never route through permanent delete or upgrade its non-permanent authorization",
+		);
+	}
+	if (
+		runTrash.modifiers?.length !== 1 ||
+		runTrash.modifiers[0].kind !== ts.SyntaxKind.AsyncKeyword ||
+		runTrash.parameters.length !== 4 ||
+		!sameArray(
+			runTrash.parameters.map((parameter) =>
+				ts.isIdentifier(parameter.name) ? parameter.name.text : undefined,
+			),
+			["bridge", "provider", "getNotificationService", "context"],
+		) ||
+		runTrash.type === undefined ||
+		!ts.isTypeReferenceNode(runTrash.type) ||
+		!ts.isIdentifier(runTrash.type.typeName) ||
+		runTrash.type.typeName.text !== "Promise" ||
+		runTrash.type.typeArguments?.[0]?.kind !== ts.SyntaxKind.VoidKeyword
+	) {
+		failures.push(
+			"Trash coordinator must define exactly one audited async runTrash route",
+		);
+	}
 	return [...new Set(failures)];
 }
 
@@ -15627,6 +15945,9 @@ function validateWorkspaceDeleteProviderRoute(source) {
 			typeof authorizationSnapshot.permanent !== "boolean"
 		) {
 			throw noPermissions();
+		}
+		if (!authorizationSnapshot.permanent) {
+			this.requireTrashDispatchAllowed();
 		}
 		beginPlainWorkspaceDeleteProviderDispatch(authorization);
 
@@ -15964,6 +16285,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		],
 		["ResolvedResource", { kind: "interface", exported: false }],
 		["ResolvedMutationResource", { kind: "interface", exported: false }],
+		["PlainWorkspaceMutationPolicy", { kind: "interface", exported: false }],
 		["PlainWorkspaceDeleteResource", { kind: "interface", exported: true }],
 		["PlainWorkspaceDeleteProvider", { kind: "interface", exported: true }],
 		["PlainWorkspaceProviderStat", { kind: "interface", exported: true }],
@@ -16887,6 +17209,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	const expectedProviderMembers = new Set([
 		"#bridge",
 		"#allowsMutationDispatch",
+		"#allowsTrashDispatch",
 		"#watchState",
 		"capabilities",
 		"onDidChangeCapabilities",
@@ -16909,6 +17232,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		"copy",
 		"rename",
 		"requireMutationDispatchAllowed",
+		"requireTrashDispatchAllowed",
 		"fireCreated",
 		"fireDeleted",
 		"fireMoved",
@@ -16954,46 +17278,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	} else {
 		const [policyFunction] = policyFunctions;
 		const [parameter] = policyFunction.parameters;
-		const [snapshotStatement, returnStatement] =
-			policyFunction.body?.statements ?? [];
-		const snapshotDeclaration =
-			snapshotStatement !== undefined &&
-			ts.isVariableStatement(snapshotStatement) &&
-			(snapshotStatement.declarationList.flags & ts.NodeFlags.Const) !== 0 &&
-			snapshotStatement.declarationList.declarations.length === 1
-				? snapshotStatement.declarationList.declarations[0]
-				: undefined;
-		const snapshotInitializer = snapshotDeclaration?.initializer;
-		const returned =
-			returnStatement !== undefined && ts.isReturnStatement(returnStatement)
-				? returnStatement.expression
-				: undefined;
-		const capabilityFields = [];
-		function collectCapabilityFields(expression) {
-			if (ts.isParenthesizedExpression(expression)) {
-				return collectCapabilityFields(expression.expression);
-			}
-			if (
-				ts.isBinaryExpression(expression) &&
-				expression.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
-			) {
-				return (
-					collectCapabilityFields(expression.left) &&
-					collectCapabilityFields(expression.right)
-				);
-			}
-			if (
-				ts.isPropertyAccessExpression(expression) &&
-				ts.isIdentifier(expression.expression) &&
-				expression.expression.text === "snapshot"
-			) {
-				capabilityFields.push(expression.name.text);
-				return true;
-			}
-			return false;
-		}
 		const exactPolicyShape =
-			policyFunction.body?.statements.length === 2 &&
 			!policyFunction.modifiers?.some(
 				(modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
 			) &&
@@ -17005,29 +17290,27 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			ts.isTypeReferenceNode(parameter.type) &&
 			ts.isIdentifier(parameter.type.typeName) &&
 			parameter.type.typeName.text === "WorkspaceCapabilities" &&
-			policyFunction.type?.kind === ts.SyntaxKind.BooleanKeyword &&
-			snapshotDeclaration !== undefined &&
-			ts.isIdentifier(snapshotDeclaration.name) &&
-			snapshotDeclaration.name.text === "snapshot" &&
-			snapshotInitializer !== undefined &&
-			ts.isCallExpression(snapshotInitializer) &&
-			ts.isIdentifier(snapshotInitializer.expression) &&
-			snapshotInitializer.expression.text === "decodeWorkspaceCapabilities" &&
-			snapshotInitializer.arguments.length === 1 &&
-			ts.isIdentifier(snapshotInitializer.arguments[0]) &&
-			snapshotInitializer.arguments[0].text === "platformCapabilities" &&
-			returned !== undefined &&
-			collectCapabilityFields(returned) &&
-			sameArray(capabilityFields, [
-				"create",
-				"renameNoReplace",
-				"copyMove",
-				"delete",
-				"versionedWrite",
-			]);
+			policyFunction.type !== undefined &&
+			ts.isTypeReferenceNode(policyFunction.type) &&
+			ts.isIdentifier(policyFunction.type.typeName) &&
+			policyFunction.type.typeName.text === "PlainWorkspaceMutationPolicy" &&
+			policyFunction.body?.getText(sourceFile).replaceAll(/\s+/g, "") ===
+				`{
+					const snapshot = decodeWorkspaceCapabilities(platformCapabilities);
+					const allowsMutationDispatch =
+						snapshot.create &&
+						snapshot.renameNoReplace &&
+						snapshot.copyMove &&
+						snapshot.delete &&
+						snapshot.versionedWrite;
+					return Object.freeze({
+						allowsMutationDispatch,
+						allowsTrashDispatch: allowsMutationDispatch && snapshot.trash,
+					});
+				}`.replaceAll(/\s+/g, "");
 		if (!exactPolicyShape) {
 			failures.push(
-				"mutation policy must decode one own-data DTO into an immutable all-five boolean",
+				"mutation policy must decode one own-data DTO into immutable all-five and Trash booleans",
 			);
 		}
 	}
@@ -17042,7 +17325,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	} else {
 		if (!hasFinalWorkspaceProviderCapabilityContract(provider, sourceFile)) {
 			failures.push(
-				"Plain workspace provider constructor must retain only the bridge, immutable mutation boolean and exact capability assignment",
+				"Plain workspace provider constructor must retain only the bridge, immutable mutation and Trash booleans and exact capability assignment",
 			);
 		}
 	}
@@ -17185,6 +17468,11 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			ts.isMethodDeclaration(member) &&
 			typeScriptMemberName(member) === "requireMutationDispatchAllowed",
 	);
+	const trashGateMethods = provider.members.filter(
+		(member) =>
+			ts.isMethodDeclaration(member) &&
+			typeScriptMemberName(member) === "requireTrashDispatchAllowed",
+	);
 	const fireCreatedMethods = provider.members.filter(
 		(member) =>
 			ts.isMethodDeclaration(member) &&
@@ -17322,6 +17610,29 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		) {
 			failures.push(
 				"mutation dispatch gate must fail closed from the immutable primitive policy",
+			);
+		}
+	}
+	if (trashGateMethods.length !== 1) {
+		failures.push(
+			"Plain workspace provider must define one primitive Trash dispatch gate",
+		);
+	} else {
+		const [trashGate] = trashGateMethods;
+		const normalizedBody = trashGate.body
+			?.getText(sourceFile)
+			.replaceAll(/\s+/g, "");
+		if (
+			trashGate.parameters.length !== 0 ||
+			!trashGate.modifiers?.some(
+				(modifier) => modifier.kind === ts.SyntaxKind.PrivateKeyword,
+			) ||
+			trashGate.type?.kind !== ts.SyntaxKind.VoidKeyword ||
+			normalizedBody !==
+				"{if(!this.#allowsTrashDispatch){thrownoPermissions();}}"
+		) {
+			failures.push(
+				"Trash dispatch gate must fail closed from the immutable capability snapshot",
 			);
 		}
 	}
@@ -18018,7 +18329,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		!hasFinalWorkspaceProviderCapabilityContract(provider, sourceFile)
 	) {
 		failures.push(
-			"Plain workspace provider capabilities must be constructed once as all-five FileReadWrite | FileFolderCopy or FileReadWrite | Readonly",
+			"Plain workspace provider capabilities must be constructed once from all-five mutation and explicit Trash policy bits",
 		);
 	}
 
@@ -18038,6 +18349,8 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	const capabilityFlagReferences = new Map([
 		["FileReadWrite", 0],
 		["FileFolderCopy", 0],
+		["Trash", 0],
+		["None", 0],
 		["Readonly", 0],
 	]);
 	let createFileBridgeReferences = 0;
@@ -18193,6 +18506,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	let moveOutcomeUnknownConstructionCount = 0;
 	let privateBridgeReferences = 0;
 	let privatePolicyReferences = 0;
+	let privateTrashPolicyReferences = 0;
 	let privateWatchStateReferences = 0;
 	function isThisBridge(node) {
 		return (
@@ -18251,7 +18565,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			ts.isIdentifier(call.expression.expression) &&
 			call.expression.expression.text === "Object" &&
 			call.expression.name.text === "freeze" &&
-			call.parent === constructors[0]?.body?.statements[3]
+			call.parent === constructors[0]?.body?.statements[4]
 		);
 	}
 	function isAuditedProviderPrototypeNode(node) {
@@ -18299,6 +18613,8 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 				privateBridgeReferences += 1;
 			} else if (node.text === "#allowsMutationDispatch") {
 				privatePolicyReferences += 1;
+			} else if (node.text === "#allowsTrashDispatch") {
+				privateTrashPolicyReferences += 1;
 			} else if (node.text === "#watchState") {
 				privateWatchStateReferences += 1;
 			} else {
@@ -18339,7 +18655,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 			const flag = node.name.text;
 			if (!capabilityFlagReferences.has(flag)) {
 				failures.push(
-					`Plain workspace provider must not advertise ${flag} outside the final two capability sets`,
+					`Plain workspace provider must not advertise ${flag} outside the audited capability expression`,
 				);
 			} else {
 				capabilityFlagReferences.set(
@@ -18397,7 +18713,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 				ts.isBinaryExpression(assignment) &&
 				assignment.left === propertyAccess &&
 				assignment.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-				assignment.parent === constructors[0]?.body?.statements[2];
+				assignment.parent === constructors[0]?.body?.statements[3];
 			if (!isAuditedConstructorAssignment) {
 				hasCapabilitiesReference = true;
 			}
@@ -18757,7 +19073,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	}
 	if (hasUnexpectedPrivateIdentifier) {
 		failures.push(
-			"Plain workspace provider may declare and consume only its audited #bridge and #allowsMutationDispatch private fields",
+			"Plain workspace provider may declare and consume only its audited bridge, mutation, Trash and watch-state private fields",
 		);
 	}
 	if (hasPrototypeMutationSurface) {
@@ -18787,21 +19103,22 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 	}
 	if ([...capabilityFlagReferences.values()].some((count) => count !== 1)) {
 		failures.push(
-			"Plain workspace provider must reference FileReadWrite, FileFolderCopy and Readonly exactly once in the final capability assignment",
+			"Plain workspace provider must reference FileReadWrite, FileFolderCopy, Trash, None and Readonly exactly once in the final capability assignment",
 		);
 	}
-	if (mutationDispatchReferences !== 3) {
+	if (mutationDispatchReferences !== 6) {
 		failures.push(
-			"Plain workspace mutation boolean parameter may appear only in its declaration, private-field assignment and capability condition",
+			"Plain workspace mutation policy boolean must remain confined to its audited builder and constructor consumers",
 		);
 	}
 	if (
 		privateBridgeReferences !== 16 ||
 		privatePolicyReferences !== 3 ||
+		privateTrashPolicyReferences !== 3 ||
 		privateWatchStateReferences !== 7
 	) {
 		failures.push(
-			"Plain workspace native authority must remain sealed in the exact #bridge, #allowsMutationDispatch and #watchState private-field consumers",
+			"Plain workspace native authority must remain sealed in the exact bridge, mutation, Trash and watch-state private-field consumers",
 		);
 	}
 	if (

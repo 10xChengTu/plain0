@@ -15,8 +15,10 @@ import {
 
 import {
 	getWorkspaceDeleteIncompleteDetails,
+	getWorkspaceTrashIncompleteDetails,
 	registerWorkspaceDeleteCoordinator,
 	WorkspaceDeleteIncompleteError,
+	WorkspaceTrashIncompleteError,
 	type PlainDeleteErrorNotificationService,
 } from "../../app/features/workspace/delete-coordinator";
 import type { PlainWorkspaceDeleteProvider } from "../../app/features/workspace/file-system-provider";
@@ -24,6 +26,7 @@ import type {
 	PlainBridge,
 	RuntimeInfo,
 	WorkspaceDeleteBatchPlan,
+	WorkspaceTrashBatchPlan,
 } from "../../app/platform/tauri/contracts";
 
 const rootId = "00000000-0000-4000-8000-000000000101";
@@ -61,6 +64,24 @@ function plan(
 					entryId: uuid(400 + index),
 					kind: entry.kind,
 					descendantEntries: entry.descendantEntries ?? 0,
+				}),
+			),
+		),
+	});
+}
+
+function trashPlan(
+	entries: readonly Readonly<{
+		kind: "file" | "directory" | "symlink";
+	}>[],
+): WorkspaceTrashBatchPlan {
+	return Object.freeze({
+		confirmationId,
+		entries: Object.freeze(
+			entries.map((entry, index) =>
+				Object.freeze({
+					entryId: uuid(500 + index),
+					kind: entry.kind,
 				}),
 			),
 		),
@@ -530,10 +551,16 @@ function terminalizeAuthorizedEdit(
 		readonly oldResource?: URI;
 		readonly options: object;
 	},
-	terminal: "deleted" | "ordinaryFailure" | "outcomeUnknown" | "entryRetained",
+	terminal:
+		| "deleted"
+		| "trashed"
+		| "ordinaryFailure"
+		| "outcomeUnknown"
+		| "entryRetained",
+	useTrash = false,
 ): void {
 	const resource = edit.oldResource!;
-	const operation = { resource, recursive: true, useTrash: false };
+	const operation = { resource, recursive: true, useTrash };
 	expect(
 		movePlainWorkspaceDeleteResourceEditAuthorization(
 			edit.options,
@@ -541,7 +568,7 @@ function terminalizeAuthorizedEdit(
 			operation,
 		),
 	).toBe(true);
-	const fileOptions = { recursive: true, useTrash: false, atomic: false };
+	const fileOptions = { recursive: true, useTrash, atomic: false };
 	expect(
 		movePlainWorkspaceDeleteWorkingCopyAuthorization(
 			operation,
@@ -549,7 +576,7 @@ function terminalizeAuthorizedEdit(
 			fileOptions,
 		),
 	).toBe(true);
-	const providerOptions = { recursive: true, useTrash: false, atomic: false };
+	const providerOptions = { recursive: true, useTrash, atomic: false };
 	expect(
 		movePlainWorkspaceDeleteFileServiceAuthorization(
 			fileOptions,
@@ -563,14 +590,18 @@ function terminalizeAuthorizedEdit(
 	);
 	expect(authorization).toBeDefined();
 	beginPlainWorkspaceDeleteProviderDispatch(authorization!);
-	if (terminal === "deleted") {
+	if (terminal === "deleted" || terminal === "trashed") {
 		completePlainWorkspaceDeleteProviderResult(authorization!, {
-			status: "deleted",
+			status: terminal,
 		});
 	} else if (terminal === "entryRetained") {
 		completePlainWorkspaceDeleteProviderResult(authorization!, {
 			status: "entryRetained",
-			reason: "entryChanged",
+			reason: useTrash ? "trashFailed" : "entryChanged",
+		});
+	} else if (terminal === "outcomeUnknown" && useTrash) {
+		completePlainWorkspaceDeleteProviderResult(authorization!, {
+			status: "outcomeUnknown",
 		});
 	} else {
 		completePlainWorkspaceDeleteProviderFailure(authorization!, terminal);
@@ -843,6 +874,230 @@ describe("Plain confirmed-delete coordinator", () => {
 		expect(provider.refresh).toHaveBeenCalledTimes(1);
 		expect(cancel).toHaveBeenCalledTimes(1);
 		expect(notifier.error).not.toHaveBeenCalled();
+	});
+
+	it("prepares, confirms and begins system Trash before mode-matched edits consume entries in order", async () => {
+		const order: string[] = [];
+		const prepareTrash = vi.fn(async () => {
+			order.push("prepare-trash");
+			return trashPlan([{ kind: "directory" }, { kind: "symlink" }]);
+		});
+		const beginTrash = vi.fn(async () => {
+			order.push("begin-trash");
+		});
+		const cancelTrash = vi.fn();
+		const prepareDelete = vi.fn();
+		const bridge = testBridge(plan([]), {
+			workspacePrepareDelete: prepareDelete,
+			workspacePrepareTrash: prepareTrash,
+			workspaceBeginTrash: beginTrash,
+			workspaceCancelTrash: cancelTrash,
+		});
+		const provider = testProvider();
+		disposables.push(
+			registerWorkspaceDeleteCoordinator(
+				bridge,
+				provider,
+				getTestNotificationService,
+			),
+		);
+		const dirty = Object.freeze({ id: "trash-dirty" });
+		const confirm = vi.fn(async (options) => {
+			order.push("confirm-trash");
+			expect(options.message).toBe("将所选 2 项移到废纸篓？");
+			expect(options.detail).toContain("系统废纸篓");
+			expect(options.detail).toContain("可在废纸篓中恢复");
+			expect(options.detail).toContain("1 个未保存");
+			expect(options.detail).toContain("1 个所选条目被配置为只读");
+			expect(options.detail).not.toContain("永久且不可撤销");
+			expect(options.primaryButton).toBe("移到废纸篓");
+			return { confirmed: true };
+		});
+		const applyBulkEdit = vi.fn(async (edits, options) => {
+			order.push("apply-trash");
+			expect(options).toEqual({
+				undoLabel: "移到废纸篓",
+				progressLabel: "正在将 2 项移到废纸篓",
+			});
+			expect(edits).toHaveLength(2);
+			for (const edit of edits) {
+				expect(edit.options).toMatchObject({
+					recursive: true,
+					ignoreIfNotExists: false,
+					skipTrashBin: false,
+				});
+				expect(JSON.stringify(edit.options)).not.toContain(confirmationId);
+				terminalizeAuthorizedEdit(edit, "trashed", true);
+			}
+		});
+
+		await expect(
+			runPlainWorkspaceDeleteCoordinator(
+				context(
+					[
+						element("trash-dir", { isDirectory: true }),
+						element("trash-link", { workspaceRootId: secondRootId }),
+					],
+					{
+						useTrash: true,
+						dialogService: { confirm },
+						explorerService: { applyBulkEdit },
+						workingCopyFileService: {
+							getDirty(resource) {
+								return resource.path === "/trash-dir" ? [dirty] : [];
+							},
+						},
+						filesConfigurationService: {
+							isReadonly(resource) {
+								return resource.path === "/trash-link";
+							},
+						},
+					},
+				),
+			),
+		).resolves.toBeUndefined();
+
+		expect(order).toEqual([
+			"prepare-trash",
+			"confirm-trash",
+			"begin-trash",
+			"apply-trash",
+		]);
+		expect(prepareTrash).toHaveBeenCalledWith([
+			{ rootId, relativePath: "trash-dir" },
+			{ rootId: secondRootId, relativePath: "trash-link" },
+		]);
+		expect(beginTrash).toHaveBeenCalledWith(confirmationId);
+		expect(cancelTrash).not.toHaveBeenCalled();
+		expect(prepareDelete).not.toHaveBeenCalled();
+		expect(provider.refresh).not.toHaveBeenCalled();
+	});
+
+	it("cancels a prepared system Trash batch when its only DOM dialog is declined", async () => {
+		const cancelTrash = vi.fn();
+		const beginTrash = vi.fn();
+		const applyBulkEdit = vi.fn();
+		const bridge = testBridge(plan([]), {
+			workspacePrepareTrash: vi.fn(async () => trashPlan([{ kind: "file" }])),
+			workspaceCancelTrash: cancelTrash,
+			workspaceBeginTrash: beginTrash,
+		});
+		disposables.push(
+			registerWorkspaceDeleteCoordinator(
+				bridge,
+				testProvider(),
+				getTestNotificationService,
+			),
+		);
+
+		await expect(
+			runPlainWorkspaceDeleteCoordinator(
+				context([element("cancel-trash.txt")], {
+					useTrash: true,
+					dialogService: {
+						async confirm() {
+							return { confirmed: false };
+						},
+					},
+					explorerService: { applyBulkEdit },
+				}),
+			),
+		).resolves.toBeUndefined();
+
+		expect(cancelTrash).toHaveBeenCalledOnce();
+		expect(cancelTrash).toHaveBeenCalledWith(confirmationId);
+		expect(beginTrash).not.toHaveBeenCalled();
+		expect(applyBulkEdit).not.toHaveBeenCalled();
+	});
+
+	it("stops on retained or unknown Trash terminals, refreshes roots and never falls back to permanent delete", async () => {
+		const expectedMessages = Object.freeze({
+			entryRetained:
+				"The system Trash batch stopped before an entry could be moved.",
+			outcomeUnknown:
+				"The system Trash batch did not complete. Check the Trash before retrying.",
+		});
+		for (const terminal of ["entryRetained", "outcomeUnknown"] as const) {
+			const cancelTrash = vi.fn();
+			const commitDelete = vi.fn();
+			const provider = testProvider();
+			const notifier = testNotifier();
+			const bridge = testBridge(plan([]), {
+				workspacePrepareTrash: vi.fn(async () =>
+					trashPlan([{ kind: "file" }, { kind: "file" }]),
+				),
+				workspaceBeginTrash: vi.fn(),
+				workspaceCancelTrash: cancelTrash,
+				workspaceCommitDeleteEntry: commitDelete,
+			});
+			const registration = registerWorkspaceDeleteCoordinator(
+				bridge,
+				provider,
+				async () => notifier,
+			);
+			disposables.push(registration);
+
+			await expect(
+				runPlainWorkspaceDeleteCoordinator(
+					context([element("first-trash.txt"), element("second-trash.txt")], {
+						useTrash: true,
+						explorerService: {
+							async applyBulkEdit(edits) {
+								terminalizeAuthorizedEdit(edits[0]!, terminal, true);
+								throw new Error("provider stopped the batch");
+							},
+						},
+					}),
+				),
+			).resolves.toBeUndefined();
+
+			expect(notifier.error).toHaveBeenCalledWith(expectedMessages[terminal]);
+			expect(provider.refresh).toHaveBeenCalledOnce();
+			expect(cancelTrash).toHaveBeenCalledOnce();
+			expect(commitDelete).not.toHaveBeenCalled();
+			registration.dispose();
+			disposables.pop();
+		}
+	});
+
+	it("preserves branded Trash details if notification delivery fails", async () => {
+		const provider = testProvider();
+		const bridge = testBridge(plan([]), {
+			workspacePrepareTrash: vi.fn(async () => trashPlan([{ kind: "file" }])),
+			workspaceBeginTrash: vi.fn(),
+		});
+		disposables.push(
+			registerWorkspaceDeleteCoordinator(bridge, provider, async () => {
+				throw new Error("notification unavailable");
+			}),
+		);
+
+		let caught: unknown;
+		try {
+			await runPlainWorkspaceDeleteCoordinator(
+				context([element("retained-trash.txt")], {
+					useTrash: true,
+					explorerService: {
+						async applyBulkEdit(edits) {
+							terminalizeAuthorizedEdit(edits[0]!, "entryRetained", true);
+							throw new Error("provider retained entry");
+						},
+					},
+				}),
+			);
+		} catch (error) {
+			caught = error;
+		}
+
+		expect(caught).toBeInstanceOf(WorkspaceTrashIncompleteError);
+		expect(getWorkspaceTrashIncompleteDetails(caught)).toEqual({
+			trashedEntries: 0,
+			incompleteResult: {
+				status: "entryRetained",
+				reason: "trashFailed",
+			},
+		});
+		expect(provider.refresh).toHaveBeenCalledOnce();
 	});
 
 	it("accepts an exact 64-entry selection and cancels it without creating edits", async () => {

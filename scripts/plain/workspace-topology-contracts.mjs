@@ -5184,15 +5184,21 @@ function validateProviderProducerBindings(authority) {
 			optional: !authority.completeAppAuthority,
 			factory: "createPlainWorkspaceFileSystemProvider",
 			implementation: "PlainWorkspaceFileSystemProvider",
-			constructorParameters: ["bridge", "allowsMutationDispatch"],
-			constructorStatementCount: 4,
+			constructorParameters: ["bridge", "policy"],
+			constructorStatementCount: 5,
 			factoryReturnsImplementation: true,
 			valueMemberImports: [
 				{
 					moduleName:
 						"@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files",
 					name: "FileSystemProviderCapabilities",
-					members: ["FileFolderCopy", "FileReadWrite", "Readonly"],
+					members: [
+						"FileFolderCopy",
+						"FileReadWrite",
+						"None",
+						"Readonly",
+						"Trash",
+					],
 				},
 				{
 					moduleName:
