@@ -273,7 +273,7 @@ describe("workspace topology source contracts", () => {
 		).toEqual([]);
 	});
 
-	it("locks Open File and Recent to serialized capability-relative, path-free local workflows", () => {
+	it("locks Open/Recent/New Window/Close Folder to serialized, path-free local workflows", () => {
 		const relativePath = "app/features/workspace/local-workflow-commands.ts";
 		const production = productionAppSourceByPath.get(relativePath);
 		expect(production).toBeTypeOf("string");
@@ -299,6 +299,26 @@ describe("workspace topology source contracts", () => {
 					source,
 					"await bridge.workspaceRemoveRecent(context.item.recentId);",
 					"await bridge.workspaceRemoveRecent(context.item.label);",
+				),
+			(source) =>
+				replaceOnce(
+					source,
+					`await flushWorkingCopyBackups();
+				const snapshot = await bridge.workspaceCloseFolder();`,
+					`const snapshot = await bridge.workspaceCloseFolder();
+				await flushWorkingCopyBackups();`,
+				),
+			(source) =>
+				replaceOnce(
+					source,
+					"await bridge.windowCreate();",
+					'await bridge.windowCreate("https://example.com");',
+				),
+			(source) =>
+				replaceOnce(
+					source,
+					"primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyN,",
+					"primary: KeyMod.CtrlCmd | KeyCode.KeyN,",
 				),
 			(source) =>
 				replaceOnce(

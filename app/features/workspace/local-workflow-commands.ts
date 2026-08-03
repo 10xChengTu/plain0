@@ -1,4 +1,9 @@
 import { Codicon } from "@codingame/monaco-vscode-api/vscode/vs/base/common/codicons";
+import {
+	KeyChord,
+	KeyCode,
+	KeyMod,
+} from "@codingame/monaco-vscode-api/vscode/vs/base/common/keyCodes";
 import { ThemeIcon } from "@codingame/monaco-vscode-api/vscode/vs/base/common/themables";
 import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
 import {
@@ -8,9 +13,14 @@ import {
 import { CommandsRegistry } from "@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands";
 import { IDialogService } from "@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service";
 import { INotificationService } from "@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service";
+import {
+	KeybindingWeight,
+	KeybindingsRegistry,
+} from "@codingame/monaco-vscode-api/vscode/vs/platform/keybinding/common/keybindingsRegistry";
 import type { IQuickPickItem } from "@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput";
 import { IQuickInputService } from "@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service";
 import { IEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service";
+import { WorkbenchStateContext } from "@codingame/monaco-vscode-api/vscode/vs/workbench/common/contextkeys";
 
 import {
 	normalizeCommandError,
@@ -19,12 +29,15 @@ import {
 	type WorkspaceRecentEntry,
 } from "../../platform/tauri";
 import type { WorkspaceTopologyCoordinator } from "./workspace-projection";
+import { flushPlainWorkingCopyBackupsForTopologyChange } from "../../services/plain-workspace-backup-tracker";
 
 export const LOCAL_WORKSPACE_COMMAND_IDS = Object.freeze({
 	openFile: "workbench.action.files.openFile",
 	openRecent: "workbench.action.openRecent",
 	quickOpenRecent: "workbench.action.quickOpenRecent",
 	clearRecent: "workbench.action.clearRecentFiles",
+	newWindow: "workbench.action.newWindow",
+	closeFolder: "workbench.action.closeFolder",
 });
 
 const PLAIN_WORKSPACE_SCHEME = "plain-workspace";
@@ -103,7 +116,26 @@ function recentQuickPickItem(
 export function registerLocalWorkspaceCommands(
 	bridge: PlainBridge,
 	topologyCoordinator: WorkspaceTopologyCoordinator,
+	flushWorkingCopyBackups: () => Promise<void> = flushPlainWorkingCopyBackupsForTopologyChange,
 ): LocalWorkspaceCommandRegistration {
+	const newWindow = async (notificationService: INotificationService) => {
+		try {
+			await bridge.windowCreate();
+		} catch (error) {
+			reportWorkspaceWorkflowError(notificationService, error);
+		}
+	};
+	const closeFolder = async (notificationService: INotificationService) => {
+		try {
+			await topologyCoordinator.runMutation(async () => {
+				await flushWorkingCopyBackups();
+				const snapshot = await bridge.workspaceCloseFolder();
+				return Object.freeze({ result: undefined, snapshot });
+			});
+		} catch (error) {
+			reportWorkspaceWorkflowError(notificationService, error);
+		}
+	};
 	const openFiles = async (
 		editorService: IEditorService,
 		notificationService: INotificationService,
@@ -179,6 +211,24 @@ export function registerLocalWorkspaceCommands(
 		}
 	};
 	const registrations = [
+		MenuRegistry.appendMenuItem(MenuId.MenubarFileMenu, {
+			group: "1_new",
+			command: {
+				id: LOCAL_WORKSPACE_COMMAND_IDS.newWindow,
+				title: "New Window",
+			},
+			order: 2,
+		}),
+		MenuRegistry.appendMenuItem(MenuId.MenubarFileMenu, {
+			group: "3_workspace",
+			command: {
+				id: LOCAL_WORKSPACE_COMMAND_IDS.closeFolder,
+				title: "Close Folder",
+				precondition: WorkbenchStateContext.notEqualsTo("empty"),
+			},
+			order: 4,
+			when: WorkbenchStateContext.notEqualsTo("empty"),
+		}),
 		MenuRegistry.appendMenuItem(MenuId.CommandPalette, {
 			command: {
 				id: LOCAL_WORKSPACE_COMMAND_IDS.openFile,
@@ -186,6 +236,42 @@ export function registerLocalWorkspaceCommands(
 				category: "File",
 			},
 		}),
+		MenuRegistry.appendMenuItem(MenuId.CommandPalette, {
+			command: {
+				id: LOCAL_WORKSPACE_COMMAND_IDS.newWindow,
+				title: "New Window",
+				category: "File",
+			},
+		}),
+		MenuRegistry.appendMenuItem(MenuId.CommandPalette, {
+			command: {
+				id: LOCAL_WORKSPACE_COMMAND_IDS.closeFolder,
+				title: "Close Folder",
+				category: "File",
+				precondition: WorkbenchStateContext.notEqualsTo("empty"),
+			},
+			when: WorkbenchStateContext.notEqualsTo("empty"),
+		}),
+		KeybindingsRegistry.registerKeybindingRule({
+			id: LOCAL_WORKSPACE_COMMAND_IDS.newWindow,
+			weight: KeybindingWeight.WorkbenchContrib + 1,
+			when: undefined,
+			primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyN,
+		}),
+		KeybindingsRegistry.registerKeybindingRule({
+			id: LOCAL_WORKSPACE_COMMAND_IDS.closeFolder,
+			weight: KeybindingWeight.WorkbenchContrib + 1,
+			when: WorkbenchStateContext.notEqualsTo("empty"),
+			primary: KeyChord(KeyMod.CtrlCmd | KeyCode.KeyK, KeyCode.KeyF),
+		}),
+		CommandsRegistry.registerCommand(
+			LOCAL_WORKSPACE_COMMAND_IDS.newWindow,
+			(accessor) => newWindow(accessor.get(INotificationService)),
+		),
+		CommandsRegistry.registerCommand(
+			LOCAL_WORKSPACE_COMMAND_IDS.closeFolder,
+			(accessor) => closeFolder(accessor.get(INotificationService)),
+		),
 		CommandsRegistry.registerCommand(
 			LOCAL_WORKSPACE_COMMAND_IDS.openFile,
 			(accessor) =>

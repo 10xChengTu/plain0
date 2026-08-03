@@ -24,7 +24,6 @@ export const WORKSPACE_TOPOLOGY_CONTRACT_FAILURES = Object.freeze({
 });
 
 export const EXPECTED_GUARDED_WORKSPACE_COMMAND_IDS = Object.freeze([
-	"workbench.action.closeFolder",
 	"workbench.action.openWorkspace",
 	"workbench.action.openWorkspaceConfigFile",
 	"workbench.action.openWorkspaceInNewWindow",
@@ -32,7 +31,6 @@ export const EXPECTED_GUARDED_WORKSPACE_COMMAND_IDS = Object.freeze([
 	"workbench.action.duplicateWorkspaceInNewWindow",
 	"workbench.action.files.openFileFolder",
 	"workbench.action.files.openFileInNewWindow",
-	"workbench.action.newWindow",
 	"vscode.openFolder",
 	"vscode.newWindow",
 	"_files.pickFolderAndOpen",
@@ -229,7 +227,7 @@ const DIRECT_COMMAND_REGISTRATION_MANIFEST = Object.freeze([
 	}),
 	Object.freeze({
 		relativePath: "app/features/workspace/local-workflow-commands.ts",
-		count: 4,
+		count: 6,
 	}),
 	Object.freeze({
 		relativePath: "app/features/workspace/untitled-workflow.ts",
@@ -521,14 +519,17 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/features/workspace/file-system-provider.ts:@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files",
 	"app/features/workspace/file-system-provider.ts:@codingame/monaco-vscode-api/vscode/vs/platform/files/common/plainWorkspaceDelete",
 	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/codicons",
+	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/keyCodes",
 	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/themables",
 	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
 	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions",
 	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands",
 	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service",
+	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/keybinding/common/keybindingsRegistry",
 	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service",
 	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput",
 	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service",
+	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/contextkeys",
 	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service",
 	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/errors",
 	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/keyCodes",
@@ -5736,6 +5737,14 @@ export function validateLocalWorkspaceWorkflowCommands(source) {
 				(value) =>
 					isExactStringLiteral(value, "workbench.action.clearRecentFiles"),
 			],
+			[
+				"newWindow",
+				(value) => isExactStringLiteral(value, "workbench.action.newWindow"),
+			],
+			[
+				"closeFolder",
+				(value) => isExactStringLiteral(value, "workbench.action.closeFolder"),
+			],
 		]);
 
 	const registerDeclarations = sourceFile.statements.filter(
@@ -5748,14 +5757,24 @@ export function validateLocalWorkspaceWorkflowCommands(source) {
 	const registerParameters = registerDeclaration?.parameters ?? [];
 	const bridgeParameter = registerParameters[0];
 	const topologyParameter = registerParameters[1];
+	const flushParameter = registerParameters[2];
 	const registerShapeIsExact =
 		registerDeclarations.length === 1 &&
-		registerParameters.length === 2 &&
+		registerParameters.length === 3 &&
 		isExactTypedParameter(bridgeParameter, "bridge", "PlainBridge") &&
 		isExactTypedParameter(
 			topologyParameter,
 			"topologyCoordinator",
 			"WorkspaceTopologyCoordinator",
+		) &&
+		hasExactSyntaxTokens(
+			flushParameter,
+			"flushWorkingCopyBackups: () => Promise<void> = flushPlainWorkingCopyBackupsForTopologyChange",
+		) &&
+		importsNamedValue(
+			sourceFile,
+			"../../services/plain-workspace-backup-tracker",
+			"flushPlainWorkingCopyBackupsForTopologyChange",
 		);
 	const functionInitializer = (name) => {
 		const declarations = variableDeclarations(sourceFile, name);
@@ -5766,11 +5785,17 @@ export function validateLocalWorkspaceWorkflowCommands(source) {
 	const openFiles = functionInitializer("openFiles");
 	const openRecent = functionInitializer("openRecent");
 	const clearRecent = functionInitializer("clearRecent");
+	const newWindow = functionInitializer("newWindow");
+	const closeFolder = functionInitializer("closeFolder");
 	const openFileTopologyCalls = callWithChain(openFiles, [
 		"topologyCoordinator",
 		"runMutation",
 	]);
 	const openRecentTopologyCalls = callWithChain(openRecent, [
+		"topologyCoordinator",
+		"runMutation",
+	]);
+	const closeFolderTopologyCalls = callWithChain(closeFolder, [
 		"topologyCoordinator",
 		"runMutation",
 	]);
@@ -5786,6 +5811,18 @@ export function validateLocalWorkspaceWorkflowCommands(source) {
 		"bridge",
 		"workspaceOpenRecent",
 	]);
+	const newWindowNativeCalls = callWithChain(sourceFile, [
+		"bridge",
+		"windowCreate",
+	]);
+	const closeFolderNativeCalls = callWithChain(sourceFile, [
+		"bridge",
+		"workspaceCloseFolder",
+	]);
+	const stableFlushCalls = directCallsNamed(
+		sourceFile,
+		"flushWorkingCopyBackups",
+	);
 	const recentListCalls = callWithChain(sourceFile, [
 		"bridge",
 		"workspaceRecentList",
@@ -5799,13 +5836,21 @@ export function validateLocalWorkspaceWorkflowCommands(source) {
 		"workspaceClearRecent",
 	]);
 	const topologyIsSerialized =
-		allTopologyCalls.length === 2 &&
+		allTopologyCalls.length === 3 &&
 		openFileTopologyCalls.length === 1 &&
 		openRecentTopologyCalls.length === 1 &&
+		closeFolderTopologyCalls.length === 1 &&
 		openFileNativeCalls.length === 1 &&
 		openRecentNativeCalls.length === 1 &&
 		containsNode(openFileTopologyCalls[0], openFileNativeCalls[0]) &&
 		containsNode(openRecentTopologyCalls[0], openRecentNativeCalls[0]) &&
+		newWindowNativeCalls.length === 1 &&
+		containsNode(newWindow, newWindowNativeCalls[0]) &&
+		closeFolderNativeCalls.length === 1 &&
+		containsNode(closeFolderTopologyCalls[0], closeFolderNativeCalls[0]) &&
+		stableFlushCalls.length === 1 &&
+		containsNode(closeFolderTopologyCalls[0], stableFlushCalls[0]) &&
+		stableFlushCalls[0].getStart() < closeFolderNativeCalls[0].getStart() &&
 		recentListCalls.length === 2 &&
 		removeRecentCalls.length === 1 &&
 		clearRecentCalls.length === 1 &&
@@ -5849,13 +5894,21 @@ export function validateLocalWorkspaceWorkflowCommands(source) {
 			: undefined,
 	);
 	const registrationsAreExact =
-		commandRegistrations.length === 4 &&
-		["openFile", "openRecent", "quickOpenRecent", "clearRecent"].every(
-			(name, index) =>
-				sameChain(registeredIds[index], ["LOCAL_WORKSPACE_COMMAND_IDS", name]),
+		commandRegistrations.length === 6 &&
+		[
+			"newWindow",
+			"closeFolder",
+			"openFile",
+			"openRecent",
+			"quickOpenRecent",
+			"clearRecent",
+		].every((name, index) =>
+			sameChain(registeredIds[index], ["LOCAL_WORKSPACE_COMMAND_IDS", name]),
 		) &&
 		callWithChain(sourceFile, ["MenuRegistry", "appendMenuItem"]).length ===
-			1 &&
+			5 &&
+		callWithChain(sourceFile, ["KeybindingsRegistry", "registerKeybindingRule"])
+			.length === 2 &&
 		callWithChain(sourceFile, ["dialogService", "confirm"]).length === 1;
 
 	const forbiddenIdentifiers = new Set([
@@ -5903,6 +5956,15 @@ export function validateLocalWorkspaceWorkflowCommands(source) {
 		"entry.recentId",
 		'history.restoreStatus === "failed"',
 		'"This only clears Plain\'s local history. It does not delete any files or folders."',
+		"await bridge.windowCreate();",
+		"await flushWorkingCopyBackups(); const snapshot = await bridge.workspaceCloseFolder();",
+		'group: "1_new"',
+		'group: "3_workspace"',
+		'title: "New Window"',
+		'title: "Close Folder"',
+		"primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyN",
+		"primary: KeyChord(KeyMod.CtrlCmd | KeyCode.KeyK, KeyCode.KeyF)",
+		'WorkbenchStateContext.notEqualsTo("empty")',
 	];
 	const requiredSemantics = semanticFragments.every((fragment) =>
 		includesTokens(fragment),
@@ -6132,8 +6194,10 @@ function validateTopologyAuthority(authority) {
 					return (
 						FORBIDDEN_COMMAND_WRITER_IMPORTS.includes(name) &&
 						!(
-							sourceFile.fileName ===
-								"app/features/workspace/untitled-workflow.ts" &&
+							(sourceFile.fileName ===
+								"app/features/workspace/untitled-workflow.ts" ||
+								sourceFile.fileName ===
+									"app/features/workspace/local-workflow-commands.ts") &&
 							name === "KeybindingsRegistry"
 						)
 					);

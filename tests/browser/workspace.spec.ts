@@ -514,7 +514,13 @@ async function installNativeIpcMock(
 					},
 				],
 			};
-			let currentSnapshot: typeof emptySnapshot | typeof selectedSnapshot =
+			const closedSnapshot = {
+				workspaceId,
+				revision: 2,
+				roots: [],
+			};
+			let currentSnapshot:
+				typeof emptySnapshot | typeof selectedSnapshot | typeof closedSnapshot =
 				emptySnapshot;
 			type MockFile = {
 				kind: "file";
@@ -2624,6 +2630,18 @@ async function installNativeIpcMock(
 						case "workspace_pick_roots":
 							currentSnapshot = selectedSnapshot;
 							return { status: "selected", snapshot: selectedSnapshot };
+						case "workspace_close_folder":
+							if (
+								args.request === null ||
+								typeof args.request !== "object" ||
+								Object.keys(args.request).length !== 0
+							) {
+								throw new Error(
+									"Malformed workspace_close_folder test request.",
+								);
+							}
+							currentSnapshot = closedSnapshot;
+							return closedSnapshot;
 						case "workspace_watch_sync": {
 							const watchRequest = args.request as
 								| {
@@ -7273,6 +7291,223 @@ test("restores Rust scratch as one dirty Untitled across a simulated process rel
 	await expect(page.getByRole("code").filter({ hasText: marker })).toHaveCount(
 		0,
 	);
+	expect(errors).toEqual([]);
+});
+
+// --- `F170` S4 local window lifecycle ------------------------------------
+
+test("opens independent empty windows from the real palette and keybinding without disturbing the dirty source window", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	const watchPage = (candidate: Page): void => {
+		candidate.on("pageerror", (error) => errors.push(error.message));
+		candidate.on("console", (message) => {
+			if (message.type() === "error") errors.push(message.text());
+		});
+	};
+	watchPage(page);
+	page.context().on("page", watchPage);
+
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	await executePaletteCommand(page, "Open Folder", "File: Open Folder...");
+	await page.getByRole("tab", { name: /^Explorer / }).click();
+	const explorer = page.getByRole("tree", { name: "Files Explorer" });
+	const sourceRoot = explorer.getByRole("treeitem", {
+		name: "plain-workspace",
+		exact: true,
+	});
+	await expect(sourceRoot).toHaveCount(1);
+	await explorer
+		.getByRole("treeitem", { name: "README.md", exact: true })
+		.dblclick();
+	await page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "# Plain browser workspace" })
+		.click();
+	await page.keyboard.press("End");
+	await page.keyboard.insertText(" F170_SOURCE_WINDOW_DIRTY");
+	const sourceTab = page.locator(".tabs-container .tab.active");
+	await expect(sourceTab).toHaveClass(/dirty/);
+
+	const paletteWindowPromise = page.context().waitForEvent("page");
+	await executePaletteCommand(page, "New Window", "File: New Window");
+	const paletteWindow = await paletteWindowPromise;
+	await expect(paletteWindow.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	await paletteWindow.getByRole("tab", { name: /^Explorer / }).click();
+	await expect(
+		paletteWindow.getByRole("tree", { name: "Files Explorer" }),
+	).toHaveCount(0);
+	await expect(paletteWindow.locator(".tabs-container .tab")).toHaveCount(0);
+	await expectPaletteCommandHidden(
+		paletteWindow,
+		"Close Folder",
+		"File: Close Folder",
+	);
+	await paletteWindow.close();
+
+	const shortcutWindowPromise = page.context().waitForEvent("page");
+	await page.keyboard.press("ControlOrMeta+Shift+N");
+	const shortcutWindow = await shortcutWindowPromise;
+	await expect(shortcutWindow.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	await shortcutWindow.getByRole("tab", { name: /^Explorer / }).click();
+	await expect(
+		shortcutWindow.getByRole("tree", { name: "Files Explorer" }),
+	).toHaveCount(0);
+	await shortcutWindow.close();
+
+	await expect(sourceRoot).toHaveCount(1);
+	await expect(sourceTab).toHaveClass(/dirty/);
+	await expect(
+		page.getByRole("code").filter({ hasText: "F170_SOURCE_WINDOW_DIRTY" }),
+	).toBeVisible();
+	await expect(
+		page.locator(".notifications-toasts .notification-toast"),
+	).toHaveCount(0);
+	expect(errors).toEqual([]);
+});
+
+test("flushes the latest workspace bytes before Close Folder, keeps Untitled local, and restores the dirty file after reauthorization", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") errors.push(message.text());
+	});
+	await installUntitledNativeIpcMock(page, {}, { persistScratchForTest: true });
+
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	await expectPaletteCommandHidden(page, "Close Folder", "File: Close Folder");
+	await executePaletteCommand(page, "Open Folder", "File: Open Folder...");
+	await page.getByRole("tab", { name: /^Explorer / }).click();
+	let explorer = page.getByRole("tree", { name: "Files Explorer" });
+	const root = explorer.getByRole("treeitem", {
+		name: "native-workspace",
+		exact: true,
+	});
+	await explorer
+		.getByRole("treeitem", { name: "README.md", exact: true })
+		.dblclick();
+	const workspaceTab = page.locator(".tabs-container .tab", {
+		hasText: "README.md",
+	});
+	const editorLine = page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "Read-only Explorer fixture." });
+	await editorLine.click();
+	await page.keyboard.press("End");
+	await page.keyboard.insertText(" F170_CLOSE_BASELINE");
+	await expect(workspaceTab).toHaveClass(/dirty/);
+	// Wait for the ordinary delayed workspace backup to capture only the
+	// baseline, then prepare an independent Rust scratch before inserting the
+	// final workspace tail immediately ahead of the topology mutation.
+	await expect
+		.poll(async () => (await nativeInvocations(page, "backup_write")).length, {
+			timeout: 5_000,
+		})
+		.toBe(1);
+	await createDirtyUntitled(page, "F170_UNTITLED_STAYS");
+	const untitledTab = page.locator(".tabs-container .tab", {
+		hasText: "F170_UNTITLED_STAYS",
+	});
+	await workspaceTab.click();
+	await editorLine.click();
+	await page.keyboard.press("End");
+	await page.keyboard.insertText(" F170_CLOSE_LATEST");
+	await page.keyboard.press("ControlOrMeta+K");
+	await page.keyboard.press("F");
+
+	await expect(root).toHaveCount(0);
+	await expect(page.getByRole("tree", { name: "Files Explorer" })).toHaveCount(
+		0,
+	);
+	await expect(untitledTab).toBeVisible();
+	await expect(untitledTab).toHaveClass(/dirty/);
+	await untitledTab.click();
+	await expect(
+		page.getByRole("code").filter({ hasText: "F170_UNTITLED_STAYS" }),
+	).toBeVisible();
+	const topologyCalls = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+		};
+		return testWindow.__PLAIN_TEST_TAURI_CALLS__;
+	});
+	const latestBackupIndex = topologyCalls.findIndex(
+		({ command, args }) =>
+			command === "backup_write" &&
+			typeof args.contentHex === "string" &&
+			Buffer.from(args.contentHex, "hex")
+				.toString("utf8")
+				.includes("F170_CLOSE_LATEST"),
+	);
+	const closeFolderIndex = topologyCalls.findIndex(
+		({ command }) => command === "workspace_close_folder",
+	);
+	expect(latestBackupIndex).toBeGreaterThanOrEqual(0);
+	expect(closeFolderIndex).toBeGreaterThan(latestBackupIndex);
+	expect(topologyCalls[closeFolderIndex]?.args).toEqual({ request: {} });
+
+	// A reload removes the still-open editor from memory while retaining the
+	// Rust-shaped backup/scratch stores. The workspace copy must stay hidden
+	// until the same root is explicitly authorized again.
+	await page.reload();
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	await expect(
+		page.locator(".tabs-container .tab", { hasText: "README.md" }),
+	).toHaveCount(0);
+	await expect(
+		page.locator(".tabs-container .tab", { hasText: "F170_UNTITLED_STAYS" }),
+	).toHaveClass(/dirty/);
+	await executePaletteCommand(page, "Open Folder", "File: Open Folder...");
+	explorer = page.getByRole("tree", { name: "Files Explorer" });
+	if ((await explorer.count()) === 0) {
+		await page.getByRole("tab", { name: /^Explorer / }).click();
+	}
+	await expect(explorer).toBeVisible();
+	await expect(
+		explorer.getByRole("treeitem", {
+			name: "native-workspace",
+			exact: true,
+		}),
+	).toHaveCount(1);
+	const restoredWorkspaceTab = page.locator(".tabs-container .tab", {
+		hasText: "README.md",
+	});
+	await expect(restoredWorkspaceTab).toBeVisible();
+	await expect(restoredWorkspaceTab).toHaveClass(/dirty/);
+	await restoredWorkspaceTab.click();
+	await expect(
+		page.getByRole("code").filter({
+			hasText: "F170_CLOSE_BASELINE F170_CLOSE_LATEST",
+		}),
+	).toBeVisible();
+	await expect(
+		page.locator(".notifications-toasts .notification-toast"),
+	).toHaveCount(0);
 	expect(errors).toEqual([]);
 });
 

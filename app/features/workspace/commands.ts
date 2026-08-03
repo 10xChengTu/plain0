@@ -21,7 +21,6 @@ export const WORKSPACE_COMMAND_IDS = Object.freeze({
 });
 
 export const GUARDED_WORKSPACE_COMMAND_IDS = Object.freeze([
-	"workbench.action.closeFolder",
 	"workbench.action.openWorkspace",
 	"workbench.action.openWorkspaceConfigFile",
 	"workbench.action.openWorkspaceInNewWindow",
@@ -29,7 +28,6 @@ export const GUARDED_WORKSPACE_COMMAND_IDS = Object.freeze([
 	"workbench.action.duplicateWorkspaceInNewWindow",
 	"workbench.action.files.openFileFolder",
 	"workbench.action.files.openFileInNewWindow",
-	"workbench.action.newWindow",
 	"vscode.openFolder",
 	"vscode.newWindow",
 	"_files.pickFolderAndOpen",

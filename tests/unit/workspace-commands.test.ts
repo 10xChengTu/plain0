@@ -883,6 +883,165 @@ describe("workspace Workbench command overrides", () => {
 		}
 	});
 
+	it("creates an isolated window and flushes before atomically closing the current folder", async () => {
+		const calls: string[] = [];
+		const finalSnapshot = Object.freeze({
+			workspaceId: "00000000-0000-4000-8000-000000000010",
+			revision: 2,
+			roots: Object.freeze([]),
+		}) satisfies WorkspaceSnapshot;
+		const windowCreate = vi.fn(async () => {
+			calls.push("new-window");
+		});
+		const workspaceCloseFolder = vi.fn(async () => {
+			calls.push("native-close-folder");
+			return finalSnapshot;
+		});
+		const flushWorkingCopyBackups = vi.fn(async () => {
+			calls.push("stable-backup");
+		});
+		const topologyCoordinator = {
+			runMutation: vi.fn(async (mutation: TestTopologyMutation) => {
+				calls.push("queue");
+				const result = await mutation();
+				expect(result.snapshot).toBe(finalSnapshot);
+				calls.push("project");
+				return result.result;
+			}),
+		} as unknown as WorkspaceTopologyCoordinator;
+		const notificationService = testNotificationService();
+		const registration = registerLocalWorkspaceCommands(
+			testBridge({ windowCreate, workspaceCloseFolder }),
+			topologyCoordinator,
+			flushWorkingCopyBackups,
+		);
+		const accessor = testServiceAccessor(
+			new Map([[INotificationService, notificationService]]),
+		);
+
+		try {
+			expect(Object.values(LOCAL_WORKSPACE_COMMAND_IDS)).toEqual([
+				"workbench.action.files.openFile",
+				"workbench.action.openRecent",
+				"workbench.action.quickOpenRecent",
+				"workbench.action.clearRecentFiles",
+				"workbench.action.newWindow",
+				"workbench.action.closeFolder",
+			]);
+			expect(GUARDED_WORKSPACE_COMMAND_IDS).not.toContain(
+				LOCAL_WORKSPACE_COMMAND_IDS.newWindow,
+			);
+			expect(GUARDED_WORKSPACE_COMMAND_IDS).not.toContain(
+				LOCAL_WORKSPACE_COMMAND_IDS.closeFolder,
+			);
+
+			await CommandsRegistry.getCommand(
+				LOCAL_WORKSPACE_COMMAND_IDS.newWindow,
+			)?.handler(accessor as never);
+			expect(topologyCoordinator.runMutation).not.toHaveBeenCalled();
+			await CommandsRegistry.getCommand(
+				LOCAL_WORKSPACE_COMMAND_IDS.closeFolder,
+			)?.handler(accessor as never);
+
+			expect(calls).toEqual([
+				"new-window",
+				"queue",
+				"stable-backup",
+				"native-close-folder",
+				"project",
+			]);
+			expect(windowCreate).toHaveBeenCalledOnce();
+			expect(workspaceCloseFolder).toHaveBeenCalledOnce();
+			expect(notificationService.error).not.toHaveBeenCalled();
+
+			for (const menuId of [MenuId.CommandPalette, MenuId.MenubarFileMenu]) {
+				const commandIds = MenuRegistry.getMenuItems(menuId).flatMap((item) =>
+					"command" in item ? [item.command.id] : [],
+				);
+				expect(commandIds).toContain(LOCAL_WORKSPACE_COMMAND_IDS.newWindow);
+				expect(commandIds).toContain(LOCAL_WORKSPACE_COMMAND_IDS.closeFolder);
+			}
+		} finally {
+			registration.dispose();
+		}
+	});
+
+	it("keeps native topology untouched when the stable backup flush fails", async () => {
+		const flushFailure = Object.freeze({
+			code: "PLAIN_WORKING_COPY_BACKUP_FLUSH_FAILED",
+			message: "Plain could not preserve every modified file. Try again.",
+		});
+		const workspaceCloseFolder = vi.fn();
+		const topologyCoordinator = {
+			runMutation: vi.fn(async (mutation: TestTopologyMutation) => mutation()),
+		} as unknown as WorkspaceTopologyCoordinator;
+		const notificationService = testNotificationService();
+		const registration = registerLocalWorkspaceCommands(
+			testBridge({ workspaceCloseFolder }),
+			topologyCoordinator,
+			vi.fn(async () => Promise.reject(flushFailure)),
+		);
+		const accessor = testServiceAccessor(
+			new Map([[INotificationService, notificationService]]),
+		);
+
+		try {
+			await CommandsRegistry.getCommand(
+				LOCAL_WORKSPACE_COMMAND_IDS.closeFolder,
+			)?.handler(accessor as never);
+			expect(workspaceCloseFolder).not.toHaveBeenCalled();
+			expect(notificationService.error).toHaveBeenCalledExactlyOnceWith(
+				flushFailure.message,
+			);
+		} finally {
+			registration.dispose();
+		}
+	});
+
+	it("reports fixed new-window and native close failures without retrying", async () => {
+		const windowCreate = vi.fn(async () =>
+			Promise.reject({
+				code: "WINDOW_CREATE_FAILED",
+				message: "The Plain window could not be created.",
+			}),
+		);
+		const workspaceCloseFolder = vi.fn(async () =>
+			Promise.reject({
+				code: "WORKSPACE_CONFLICT",
+				message: "The workspace changed before it could be closed.",
+			}),
+		);
+		const topologyCoordinator = {
+			runMutation: vi.fn(async (mutation: TestTopologyMutation) => mutation()),
+		} as unknown as WorkspaceTopologyCoordinator;
+		const notificationService = testNotificationService();
+		const registration = registerLocalWorkspaceCommands(
+			testBridge({ windowCreate, workspaceCloseFolder }),
+			topologyCoordinator,
+			vi.fn(async () => undefined),
+		);
+		const accessor = testServiceAccessor(
+			new Map([[INotificationService, notificationService]]),
+		);
+
+		try {
+			await CommandsRegistry.getCommand(
+				LOCAL_WORKSPACE_COMMAND_IDS.newWindow,
+			)?.handler(accessor as never);
+			await CommandsRegistry.getCommand(
+				LOCAL_WORKSPACE_COMMAND_IDS.closeFolder,
+			)?.handler(accessor as never);
+			expect(windowCreate).toHaveBeenCalledOnce();
+			expect(workspaceCloseFolder).toHaveBeenCalledOnce();
+			expect(notificationService.error.mock.calls).toEqual([
+				["The Plain window could not be created."],
+				["The workspace changed before it could be closed."],
+			]);
+		} finally {
+			registration.dispose();
+		}
+	});
+
 	it("opens selected files only after their adopted workspace snapshot is projected and treats cancellation as a no-op", async () => {
 		const snapshot = Object.freeze({
 			workspaceId: "00000000-0000-4000-8000-000000000010",
