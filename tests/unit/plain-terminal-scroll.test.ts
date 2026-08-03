@@ -122,4 +122,31 @@ describe("TerminalScrollController", () => {
 
 		expect(controller.scrollUp(2)).toEqual({ kind: "history", offset: 12 });
 	});
+
+	it("jumpTo sets an absolute history offset regardless of the current position", () => {
+		const controller = new TerminalScrollController();
+
+		expect(controller.jumpTo(42)).toEqual({ kind: "history", offset: 42 });
+		expect(controller.position).toEqual({ kind: "history", offset: 42 });
+
+		// Overwrites an existing history offset, not accumulating with it.
+		expect(controller.jumpTo(7)).toEqual({ kind: "history", offset: 7 });
+	});
+
+	it("jumpTo with a non-positive offset goes to live", () => {
+		const controller = new TerminalScrollController();
+		controller.scrollUp(10);
+
+		expect(controller.jumpTo(0)).toEqual({ kind: "live" });
+
+		controller.scrollUp(10);
+		expect(controller.jumpTo(-5)).toEqual({ kind: "live" });
+	});
+
+	it("jumpTo from live enters history directly at the given offset", () => {
+		const controller = new TerminalScrollController();
+
+		expect(controller.jumpTo(15)).toEqual({ kind: "history", offset: 15 });
+		expect(controller.isFollowingLive).toBe(false);
+	});
 });

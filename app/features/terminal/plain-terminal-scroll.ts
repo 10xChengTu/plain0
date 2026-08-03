@@ -23,12 +23,16 @@
  * # Why new output never forces a jump back to live
  *
  * Per `docs/research/2026-07-24-libghostty-terminal.md`'s scrollback design
- * ("新输出到达时若在历史位置不强制跳底"): nothing in this class is driven by
+ * ("新输出到达时若在历史位置不强制跳底"), reaffirmed by `F190` S5's own "live
+ * scrollback 保持 anchor 并合并刷新": nothing in this class is driven by
  * incoming frames at all — the position only ever changes in response to an
- * explicit [`scrollUp`]/[`scrollDown`]/[`scrollToBottom`]/[`clampOffset`]
- * call, so a pane that keeps applying live frames to its retained grid model
- * while the user is parked at a history offset never has this state machine
- * silently reset out from under it.
+ * explicit [`scrollUp`]/[`scrollDown`]/[`scrollToBottom`]/[`clampOffset`]/
+ * [`jumpTo`] call, so a pane that keeps applying live frames to its retained
+ * grid model (and, per S5, keeps its scrollback *cache* fresh in the
+ * background) while the user is parked at a history offset never has this
+ * state machine silently reset out from under it — a background cache
+ * refresh repaints at the *same* offset this class already holds, which is
+ * exactly what "keeps anchor" means here.
  */
 
 /**
@@ -95,6 +99,24 @@ export class TerminalScrollController {
 	/** Jumps straight back to `"live"`, regardless of current offset. */
 	scrollToBottom(): void {
 		this.#position = LIVE_POSITION;
+	}
+
+	/**
+	 * Jumps directly to `offset` rows back from the live bottom, regardless
+	 * of the current position — unlike [`scrollUp`]/[`scrollDown`]'s
+	 * relative-only movement. `offset <= 0` goes straight to `"live"`. `F190`
+	 * S5 "find and live scrollback": `TerminalPaneController` uses this to
+	 * reveal a specific scrollback row a find match landed on, which (unlike
+	 * an ordinary wheel-driven scroll) is not naturally reachable as "so many
+	 * lines from wherever the view already was". The caller is still
+	 * expected to follow up with [`clampOffset`] once it knows the real
+	 * retained-history size, exactly like every other way this class enters
+	 * `"history"` — see the module doc's "division of responsibility"
+	 * section.
+	 */
+	jumpTo(offset: number): TerminalScrollPosition {
+		this.#position = offset <= 0 ? LIVE_POSITION : historyPosition(offset);
+		return this.#position;
 	}
 
 	/**

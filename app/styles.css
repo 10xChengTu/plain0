@@ -251,6 +251,91 @@ body[data-plain-ready="error"] #plain-bootstrap-status {
 	background: #37373d;
 }
 
+/* `F190` S5 "find and live scrollback" — the terminal-buffer find widget.
+ * A small floating panel overlaying the top-right of its own pane, shown/
+ * hidden via its `hidden` attribute (`TerminalPaneController#openFindWidget`/
+ * `#closeFindWidget`). Functional styling only, same precedent as the rest
+ * of this domain's CSS. */
+.plain-terminal-find {
+	position: absolute;
+	top: 4px;
+	right: 4px;
+	z-index: 2;
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 3px 4px;
+	border-radius: 4px;
+	background: #252526;
+	box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+	max-width: calc(100% - 8px);
+}
+
+/* The `[hidden]` attribute selector has the exact same specificity as the
+ * `.plain-terminal-find` class selector above, so without this explicit
+ * override the browser's built-in `[hidden] { display: none; }` UA rule
+ * would lose the cascade to this file's own later `display: flex` — leaving
+ * `#closeFindWidget`'s `setAttribute("hidden", "")` attribute-wise correct
+ * but visually inert. */
+.plain-terminal-find[hidden] {
+	display: none;
+}
+
+.plain-terminal-find-input {
+	flex: 0 1 12rem;
+	min-width: 4rem;
+	background: #3c3c3c;
+	color: #cccccc;
+	border: 1px solid transparent;
+	border-radius: 3px;
+	padding: 2px 6px;
+	font-size: 0.8rem;
+}
+
+.plain-terminal-find-count {
+	flex: 0 0 auto;
+	font-size: 0.75rem;
+	color: #cccccc;
+	white-space: nowrap;
+	min-width: 3.5rem;
+}
+
+.plain-terminal-find-hint {
+	flex: 0 0 auto;
+	font-size: 0.7rem;
+	color: #f14c4c;
+	white-space: nowrap;
+	max-width: 14rem;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.plain-terminal-find-case,
+.plain-terminal-find-prev,
+.plain-terminal-find-next,
+.plain-terminal-find-close {
+	flex: 0 0 auto;
+	border: 0;
+	background: transparent;
+	color: #cccccc;
+	cursor: pointer;
+	line-height: 1;
+	padding: 2px 6px;
+	border-radius: 3px;
+}
+
+.plain-terminal-find-case:hover,
+.plain-terminal-find-prev:hover,
+.plain-terminal-find-next:hover,
+.plain-terminal-find-close:hover {
+	background: #37373d;
+}
+
+.plain-terminal-find-case[aria-pressed="true"] {
+	background: #007acc;
+	color: #ffffff;
+}
+
 .plain-terminal-status {
 	padding: 0.25rem 0.75rem;
 	font-size: 0.85rem;
@@ -343,6 +428,31 @@ body[data-plain-ready="error"] #plain-bootstrap-status {
 	display: none;
 	pointer-events: none;
 	box-sizing: border-box;
+}
+
+/* `F190` S5 "find and live scrollback" — the find match highlight overlay.
+ * A sibling absolutely-positioned layer to `.plain-terminal-cursor` (see
+ * `PlainTerminalRenderer.setFindHighlights`'s own doc comment for why
+ * highlights are painted this way rather than as sub-cell run spans).
+ * Functional styling only, same precedent as the rest of this domain's
+ * CSS. */
+.plain-terminal-find-highlight-layer {
+	position: absolute;
+	top: 0;
+	left: 0;
+	pointer-events: none;
+}
+
+.plain-terminal-find-highlight {
+	position: absolute;
+	background: rgba(255, 204, 0, 0.35);
+	box-sizing: border-box;
+}
+
+.plain-terminal-find-highlight--active {
+	background: rgba(255, 149, 0, 0.75);
+	outline: 1px solid rgba(255, 149, 0, 0.9);
+	outline-offset: -1px;
 }
 
 .plain-terminal-cursor--block {

@@ -152,6 +152,26 @@ export interface TerminalGridApplyResult {
 	 * `rebuilt` to know which rows to repaint — only whether it may reuse
 	 * existing row elements or must recreate them. */
 	readonly rebuilt: boolean;
+	/** `true` only when `frame.cols`/`frame.rows` actually differ from what
+	 * this model previously held — a strict subset of `rebuilt` (which is
+	 * also `true` for an ordinary `dirty: "full"` redraw at *unchanged*
+	 * dimensions, e.g. a full-screen clear/repaint). Kept distinct from
+	 * `rebuilt` because `PlainTerminalRenderer`'s "a previously-painted
+	 * scrollback window's row/column shape no longer matches the live
+	 * grid" concern (see that class's own "Scrollback view mode" doc
+	 * section) is only ever true when the shape itself changed — an
+	 * ordinary full redraw at the same dimensions leaves an
+	 * already-painted history window perfectly valid. `F190` S5 "live
+	 * scrollback" is what makes this distinction load-bearing: it repaints
+	 * a history window repeatedly (not just once, frozen, like the prior
+	 * slice), so conflating "every row touched" with "shape changed" would
+	 * force an incorrect snap-back-to-live on the very next ordinary
+	 * `dirty: "full"` frame that happens to arrive while parked in
+	 * history — which real terminal output (a full-screen redraw with no
+	 * resize, e.g. `clear`, or this repo's own Browser E2E fixture, which
+	 * always marks every frame `"full"`) can produce with no dimension
+	 * change at all. */
+	readonly dimensionsChanged: boolean;
 	readonly changedRowIndices: readonly number[];
 }
 
@@ -249,6 +269,7 @@ export class TerminalGridModel {
 		if (rebuilt) {
 			return Object.freeze({
 				rebuilt: true,
+				dimensionsChanged,
 				changedRowIndices: Object.freeze(
 					Array.from({ length: this.#rows }, (_unused, index) => index),
 				),
@@ -256,6 +277,7 @@ export class TerminalGridModel {
 		}
 		return Object.freeze({
 			rebuilt: false,
+			dimensionsChanged: false,
 			changedRowIndices: Object.freeze([...changed].sort((a, b) => a - b)),
 		});
 	}
@@ -423,6 +445,20 @@ function cursorCssClassForStyle(style: TerminalCursorStyle): string {
 	}
 }
 
+/** `F190` S5 "find and live scrollback": one match highlight
+ * `PlainTerminalRenderer.setFindHighlights` should paint — see that
+ * method's own doc comment for the screen-row coordinate space `rowIndex`
+ * is already expected to be in. */
+export interface TerminalFindHighlightPaint {
+	readonly rowIndex: number;
+	readonly start: number;
+	readonly end: number;
+	/** Whether this is the find widget's currently-active (navigated-to)
+	 * match — painted with an extra CSS modifier class for visual emphasis
+	 * over any other, merely-present-on-screen match. */
+	readonly active: boolean;
+}
+
 export interface PlainTerminalRendererOptions {
 	readonly container: HTMLElement;
 	/** Invoked once per painted animation-frame batch, with the highest
@@ -463,12 +499,25 @@ export class PlainTerminalRenderer {
 	readonly #grid: HTMLElement;
 	readonly #cursorElement: HTMLElement;
 	readonly #measureProbe: HTMLElement;
+	/** `F190` S5 "find and live scrollback": absolutely-positioned overlay
+	 * holding this pane's current find-match highlight `<div>`s — see
+	 * [`setFindHighlights`]'s own doc comment. A sibling of `#cursorElement`,
+	 * positioned/sized the same way (cell-size math against whatever row is
+	 * *currently painted*, live or history — never against the retained
+	 * model's own row indices, which do not necessarily match what's on
+	 * screen while showing a scrollback window). */
+	readonly #findHighlightLayer: HTMLElement;
 	readonly #onFramePainted: (sequence: number) => void;
 	readonly #scheduleRepaint: (callback: () => void) => void;
 	readonly #model = new TerminalGridModel();
 	readonly #rowElements: HTMLElement[] = [];
 
 	#pendingRebuild = false;
+	/** `true` when *any* frame coalesced into the next paint pass reported
+	 * `TerminalGridApplyResult.dimensionsChanged` — see that field's own doc
+	 * comment for why this must stay a strict subset of `#pendingRebuild`,
+	 * not an alias for it. */
+	#pendingDimensionsChanged = false;
 	#pendingRows = new Set<number>();
 	#pendingSequence: number | undefined;
 	#paintScheduled = false;
@@ -501,12 +550,22 @@ export class PlainTerminalRenderer {
 		this.#cursorElement = this.#container.ownerDocument.createElement("div");
 		this.#cursorElement.className = "plain-terminal-cursor";
 
+		this.#findHighlightLayer =
+			this.#container.ownerDocument.createElement("div");
+		this.#findHighlightLayer.className = "plain-terminal-find-highlight-layer";
+		this.#findHighlightLayer.setAttribute("aria-hidden", "true");
+
 		this.#measureProbe = this.#container.ownerDocument.createElement("span");
 		this.#measureProbe.className = "plain-terminal-measure-probe";
 		this.#measureProbe.setAttribute("aria-hidden", "true");
 		this.#measureProbe.textContent = "X".repeat(50);
 
-		this.#container.append(this.#grid, this.#cursorElement, this.#measureProbe);
+		this.#container.append(
+			this.#grid,
+			this.#cursorElement,
+			this.#findHighlightLayer,
+			this.#measureProbe,
+		);
 
 		const onExternalLinkClick = options.onExternalLinkClick;
 		if (onExternalLinkClick !== undefined) {
@@ -558,6 +617,29 @@ export class PlainTerminalRenderer {
 	 * viewport — see the module doc's "Scrollback view mode" section. */
 	get isViewingHistory(): boolean {
 		return this.#viewMode === "history";
+	}
+
+	/** `F190` S5 "find and live scrollback": `rowIndex`'s current text in the
+	 * retained live model (trailing blank cells trimmed), used to build the
+	 * find widget's search corpus — see `TerminalPaneController`'s own doc
+	 * comment for the full "10,000 行 scrollback + 当前 viewport" assembly.
+	 * Deliberately reads `#model` (kept current by every `applyFrame` call
+	 * regardless of `#viewMode` — see the module doc's "Scrollback view
+	 * mode" section), never whatever is presently *painted* on screen, so
+	 * this always reflects the live viewport's real current content even
+	 * while a pane is showing a scrollback window. Returns `""` for a row
+	 * index outside the live grid's current bounds (e.g. before any frame
+	 * has ever painted). */
+	liveRowText(rowIndex: number): string {
+		const cells = this.#model.rowCells(rowIndex);
+		if (cells === undefined) {
+			return "";
+		}
+		let text = "";
+		for (const cell of cells) {
+			text += cell.graphemes === "" ? " " : cell.graphemes;
+		}
+		return text.trimEnd();
 	}
 
 	/**
@@ -683,6 +765,56 @@ export class PlainTerminalRenderer {
 		view.setTimeout(clear, 1_200);
 	}
 
+	/**
+	 * `F190` S5 "find and live scrollback": replaces this renderer's find
+	 * highlight overlay with one `<div>` per entry in `highlights` — always a
+	 * full clear-and-rebuild (never incrementally patched, unlike the row
+	 * grid itself), since `TerminalPaneController` only ever calls this on
+	 * a genuine navigation/state change (a find query edit, prev/next, or a
+	 * view/scroll change while find is open), not once per animation frame,
+	 * so there is no repaint-cost pressure to optimize here the way the main
+	 * grid's `#paintRow` needs to.
+	 *
+	 * `rowIndex` is a **screen row** — an index into whatever is *currently
+	 * painted* (`0..rows-1` of either the live viewport or a scrollback
+	 * window's padded slice), exactly the same coordinate space
+	 * `#rowElements` itself uses; it is the caller's job to have already
+	 * translated a find match's own `(scrollback index | live model row)`
+	 * origin into that space (or to have omitted it entirely, when that
+	 * origin is not part of what's currently on screen — e.g. a match deep
+	 * in scrollback while the pane is showing live). `start`/`end` are the
+	 * same half-open column range `TerminalFindMatch` carries.
+	 *
+	 * Enforces no cap of its own — `TerminalPaneController` is expected to
+	 * have already bounded `highlights.length` by
+	 * `TERMINAL_FIND_MAX_HIGHLIGHT_NODES` (`plain-terminal-find.ts`) before
+	 * calling this, since only that caller knows how many matches exist
+	 * beyond whatever it chose to pass here.
+	 */
+	setFindHighlights(highlights: readonly TerminalFindHighlightPaint[]): void {
+		this.#findHighlightLayer.replaceChildren();
+		const cellSize = this.measureCellSizePx();
+		if (
+			!Number.isFinite(cellSize.width) ||
+			!Number.isFinite(cellSize.height) ||
+			cellSize.width <= 0 ||
+			cellSize.height <= 0
+		) {
+			return;
+		}
+		for (const highlight of highlights) {
+			const span = this.#container.ownerDocument.createElement("div");
+			span.className = highlight.active
+				? "plain-terminal-find-highlight plain-terminal-find-highlight--active"
+				: "plain-terminal-find-highlight";
+			span.style.top = `${highlight.rowIndex * cellSize.height}px`;
+			span.style.left = `${highlight.start * cellSize.width}px`;
+			span.style.width = `${Math.max(0, highlight.end - highlight.start) * cellSize.width}px`;
+			span.style.height = `${cellSize.height}px`;
+			this.#findHighlightLayer.append(span);
+		}
+	}
+
 	/** Applies one frame onto the retained model, then schedules (but does
 	 * not immediately perform) a DOM paint — see the class doc comment for
 	 * why multiple calls within one animation frame coalesce into a single
@@ -696,6 +828,9 @@ export class PlainTerminalRenderer {
 			for (const rowIndex of result.changedRowIndices) {
 				this.#pendingRows.add(rowIndex);
 			}
+		}
+		if (result.dimensionsChanged) {
+			this.#pendingDimensionsChanged = true;
 		}
 		this.#pendingSequence =
 			this.#pendingSequence === undefined
@@ -711,19 +846,30 @@ export class PlainTerminalRenderer {
 	#paint(): void {
 		this.#paintScheduled = false;
 		const rebuild = this.#pendingRebuild;
+		const dimensionsChanged = this.#pendingDimensionsChanged;
 		const rows = this.#pendingRows;
 		const sequence = this.#pendingSequence;
 		this.#pendingRebuild = false;
+		this.#pendingDimensionsChanged = false;
 		this.#pendingRows = new Set();
 		this.#pendingSequence = undefined;
 
-		if (this.#viewMode === "history" && rebuild) {
-			// Dimensions changed (or a full redraw arrived) while a pane was
-			// showing history — the cached window's shape no longer matches
-			// the grid it was painted into. See the module doc's "Scrollback
-			// view mode" section for why falling back to live here (rather
-			// than trying to re-align a stale window) is this slice's chosen
-			// behavior.
+		if (this.#viewMode === "history" && dimensionsChanged) {
+			// A genuine resize arrived while a pane was showing history — the
+			// cached window's row/column shape no longer matches the grid it
+			// was painted into. See the module doc's "Scrollback view mode"
+			// section for why falling back to live here (rather than trying to
+			// re-align a stale window) is this slice's chosen behavior.
+			//
+			// Deliberately *not* triggered by `rebuild` alone (an ordinary
+			// `dirty: "full"` redraw at unchanged dimensions, e.g. a
+			// full-screen clear): `F190` S5 "live scrollback" repaints a
+			// history window repeatedly while parked in it (see
+			// `TerminalPaneController`'s own module doc), so treating every
+			// such redraw as shape-invalidating would force an incorrect
+			// snap back to live on the very next one that happens to arrive —
+			// see `TerminalGridApplyResult.dimensionsChanged`'s own doc
+			// comment.
 			this.#viewMode = "live";
 		} else if (this.#viewMode === "history") {
 			// Model already absorbed this frame above (via `applyFrame`); the
@@ -835,6 +981,7 @@ export class PlainTerminalRenderer {
 	dispose(): void {
 		this.#grid.remove();
 		this.#cursorElement.remove();
+		this.#findHighlightLayer.remove();
 		this.#measureProbe.remove();
 	}
 }

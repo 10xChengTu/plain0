@@ -15640,6 +15640,417 @@ test("renders fetched scrollback history when scrolling up, and resumes followin
 	expect(pageErrors).toEqual([]);
 });
 
+// `F190` S5 "find and live scrollback" — bounded terminal-buffer find widget
+// and live-updating (anchor-preserving) scrollback history. See
+// `docs/research/2026-08-03-complete-terminal.md`'s "架构裁定 §2/§5" and
+// `plain-terminal-find.ts`/`plain-terminal-live-refresh.ts`/
+// `plain-terminal-pane.ts`'s own module docs for the full design.
+
+test("Ctrl+F opens the find widget, searches across scrollback and the live viewport, and prev/next navigation (buttons and Enter/Shift+Enter) highlights and reveals the right match", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+	await expect(page.locator(".plain-terminal-surface")).toBeVisible();
+
+	// 80 short, uniquely-numbered lines — far more than any plausible
+	// viewport row count (see the scrollback test above's own precedent), so
+	// most of them scroll off into retained scrollback while the last few
+	// stay on the live viewport. Two of them additionally carry a second,
+	// rarer marker: one deep in scrollback, one still on the live viewport —
+	// exercising "查询集合 = 最多 10,000 行 retained scrollback + 当前
+	// viewport" in a single query.
+	const lineCount = 80;
+	const lines = Array.from({ length: lineCount }, (_unused, index) => {
+		if (index === 5) return "findmark-005 raremarker-a";
+		if (index === 75) return "findmark-075 raremarker-b";
+		return `findmark-${String(index).padStart(3, "0")}`;
+	});
+	await pushTerminalOutputBurst(page, lines);
+
+	const grid = page.locator(".plain-terminal-grid");
+	await expect(grid).toContainText("findmark-079");
+	await expect(grid).not.toContainText("findmark-005");
+
+	const input = page.locator(".plain-terminal-input").first();
+	await input.press("Control+f");
+
+	const findWidget = page.locator(".plain-terminal-find");
+	await expect(findWidget).toBeVisible();
+	const findInput = page.locator(".plain-terminal-find-input");
+	await expect(findInput).toBeFocused();
+	const count = page.locator(".plain-terminal-find-count");
+	const activeHighlight = page.locator(
+		".plain-terminal-find-highlight--active",
+	);
+
+	await findInput.fill("findmark");
+	await expect(count).toHaveText("1/80");
+	// The very first match ("findmark-005", deep in scrollback) must have
+	// scrolled the pane's view to actually reveal it, and be highlighted.
+	await expect(grid).toContainText("findmark-005");
+	await expect(activeHighlight).toHaveCount(1);
+
+	// Next via the button, then via Enter, then back via Shift+Enter.
+	await page.getByRole("button", { name: "Next Match" }).click();
+	await expect(count).toHaveText("2/80");
+	await findInput.press("Enter");
+	await expect(count).toHaveText("3/80");
+	await findInput.press("Shift+Enter");
+	await expect(count).toHaveText("2/80");
+
+	// Jumping straight to the very last match reveals the still-live tail.
+	await findInput.fill("findmark-079");
+	await expect(count).toHaveText("1/1");
+	await expect(grid).toContainText("findmark-079");
+	await expect(activeHighlight).toHaveCount(1);
+
+	// A two-match query spanning scrollback and the live viewport, including
+	// wraparound via the Next button.
+	await findInput.fill("raremarker");
+	await expect(count).toHaveText("1/2");
+	await expect(grid).toContainText("raremarker-a"); // deep scrollback match
+	await page.getByRole("button", { name: "Next Match" }).click();
+	await expect(count).toHaveText("2/2");
+	await expect(grid).toContainText("raremarker-b"); // still-live tail match
+	await page.getByRole("button", { name: "Next Match" }).click();
+	await expect(count).toHaveText("1/2"); // wraps back to the first match
+	await expect(grid).toContainText("raremarker-a");
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("case-sensitivity toggle changes the terminal find match set", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+	await expect(page.locator(".plain-terminal-surface")).toBeVisible();
+
+	await pushTerminalOutput(page, "Error error ERROR case-test\n");
+	const grid = page.locator(".plain-terminal-grid");
+	await expect(grid).toContainText("case-test");
+
+	const input = page.locator(".plain-terminal-input").first();
+	await input.press("Control+f");
+	const findInput = page.locator(".plain-terminal-find-input");
+	await expect(findInput).toBeFocused();
+	const count = page.locator(".plain-terminal-find-count");
+
+	// Case-insensitive by default: all three spellings match.
+	await findInput.fill("error");
+	await expect(count).toHaveText("1/3");
+
+	const caseButton = page.getByRole("button", { name: "Match Case" });
+	await expect(caseButton).toHaveAttribute("aria-pressed", "false");
+	await caseButton.click();
+	await expect(caseButton).toHaveAttribute("aria-pressed", "true");
+	// Case-sensitive: only the lowercase "error" matches.
+	await expect(count).toHaveText("1/1");
+
+	await caseButton.click();
+	await expect(caseButton).toHaveAttribute("aria-pressed", "false");
+	await expect(count).toHaveText("1/3");
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("live scrollback keeps refreshing and preserves its anchor while parked in history, without forcing a jump to live", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+	await expect(page.locator(".plain-terminal-surface")).toBeVisible();
+
+	const seedCount = 150;
+	const seedLines = Array.from(
+		{ length: seedCount },
+		(_unused, index) => `seed-${String(index).padStart(3, "0")}`,
+	);
+	await pushTerminalOutputBurst(page, seedLines);
+
+	const grid = page.locator(".plain-terminal-grid");
+	await expect(grid).toContainText(
+		`seed-${String(seedCount - 1).padStart(3, "0")}`,
+	);
+
+	// The real, measured viewport row count — pushing more new lines than
+	// this would start evicting the *newly*-pushed lines themselves (not
+	// just older `seed-*` ones) into scrollback once they no longer fit the
+	// live viewport either, which would break this test's exact-shift math
+	// below. Growing by at most half of it keeps every evicted row a
+	// `seed-*` one, regardless of how large or small the real panel is.
+	const rowCount = await page.locator(".plain-terminal-row").count();
+	expect(rowCount).toBeGreaterThan(0);
+	const growCount = Math.max(2, Math.floor(rowCount / 2));
+
+	// A small, deliberately-unclamped scroll-up (well short of the oldest
+	// retained row) — the discovery fetch below is this pane's first, and
+	// only, up-front `terminal_scrollback` call.
+	const surface = page.locator(".plain-terminal-surface-wrapper").first();
+	await surface.evaluate((element) => {
+		for (let tick = 0; tick < 5; tick += 1) {
+			element.dispatchEvent(
+				new WheelEvent("wheel", {
+					deltaY: -300,
+					bubbles: true,
+					cancelable: true,
+				}),
+			);
+		}
+	});
+	await expect
+		.poll(
+			async () => (await terminalCallsFor(page, "terminal_scrollback")).length,
+		)
+		.toBe(1);
+	// The call-count poll above only proves the IPC round trip happened, not
+	// that the resulting repaint has already landed in the DOM — wait for
+	// that too (the same synchronous paint that updates `topRow` below) so
+	// the one-shot `textContent()` read after it is not a race.
+	await expect(grid).not.toContainText(
+		`seed-${String(seedCount - 1).padStart(3, "0")}`,
+	);
+
+	const topRow = page.locator(".plain-terminal-row").first();
+	const beforeText = (await topRow.textContent()) ?? "";
+	const beforeMatch = /seed-(\d+)/.exec(beforeText);
+	expect(beforeMatch).not.toBeNull();
+	const beforeIndex = Number(beforeMatch![1]);
+
+	// New output arrives while still parked in history: this must not crash,
+	// must not silently do nothing (the pre-`F190`-S5 frozen-snapshot bug),
+	// and must not force a jump back to live.
+	const growLines = Array.from(
+		{ length: growCount },
+		(_unused, index) => `grown-${String(index).padStart(3, "0")}`,
+	);
+	await pushTerminalOutputBurst(page, growLines);
+
+	// Merge-refresh actually ran (more than the one up-front discovery
+	// fetch) — but bounded, never one fetch per pushed line (`growCount`
+	// pushes must not each produce their own scrollback call; "fetch 期间
+	// 到达的更多 frame 合并成一次后续 refresh").
+	await expect
+		.poll(
+			async () => (await terminalCallsFor(page, "terminal_scrollback")).length,
+			{ timeout: 10_000 },
+		)
+		.toBeGreaterThanOrEqual(2);
+	const finalScrollbackCalls = (
+		await terminalCallsFor(page, "terminal_scrollback")
+	).length;
+	expect(finalScrollbackCalls).toBeLessThanOrEqual(4);
+
+	// Anchor preserved: pinned the same number of rows back from the live
+	// tip, so as exactly `growCount` new rows joined the tip, the window's
+	// topmost row advances by exactly `growCount` — not staying frozen
+	// (the old bug) and not jumping to the new live tail either.
+	const expectedIndex = beforeIndex + growCount;
+	await expect(topRow).toContainText(
+		`seed-${String(expectedIndex).padStart(3, "0")}`,
+		{ timeout: 10_000 },
+	);
+	await expect(grid).not.toContainText(
+		`grown-${String(growCount - 1).padStart(3, "0")}`,
+	);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("typing into the terminal while parked in history or with find open returns to live and closes the find widget", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+	await expect(page.locator(".plain-terminal-surface")).toBeVisible();
+
+	const lineCount = 80;
+	const lines = Array.from(
+		{ length: lineCount },
+		(_unused, index) => `hist-${String(index).padStart(3, "0")}`,
+	);
+	await pushTerminalOutputBurst(page, lines);
+
+	const grid = page.locator(".plain-terminal-grid");
+	await expect(grid).toContainText(
+		`hist-${String(lineCount - 1).padStart(3, "0")}`,
+	);
+
+	// Scroll far away from live (well clear of the tail) and open find.
+	const surface = page.locator(".plain-terminal-surface-wrapper").first();
+	await surface.evaluate((element) => {
+		for (let tick = 0; tick < 80; tick += 1) {
+			element.dispatchEvent(
+				new WheelEvent("wheel", {
+					deltaY: -300,
+					bubbles: true,
+					cancelable: true,
+				}),
+			);
+		}
+	});
+	await expect(grid).toContainText("hist-000");
+	await expect(grid).not.toContainText(
+		`hist-${String(lineCount - 1).padStart(3, "0")}`,
+	);
+
+	const input = page.locator(".plain-terminal-input").first();
+	await input.press("Control+f");
+	const findWidget = page.locator(".plain-terminal-find");
+	await expect(findWidget).toBeVisible();
+	await page.locator(".plain-terminal-find-input").fill("hist");
+	await expect(page.locator(".plain-terminal-find-count")).toHaveText(
+		`1/${lineCount}`,
+	);
+
+	// Focus moves back onto the terminal's own input (not the find widget's
+	// query box) and a real character is typed — this is genuine terminal
+	// input, distinct from typing into the find query box (which would only
+	// edit the search query, never reach the pty). A direct `.focus()`
+	// (rather than a real trusted mouse click on the pane, which triggers
+	// the browser's own native "blur the previously-focused element on a
+	// non-focusable click target" default action *after* this class's own
+	// `mousedown` handler already ran, undoing it) isolates this test to the
+	// one behavior `F190` S5 actually changed — "typing returns to live and
+	// closes find" — from that separate, pre-existing, out-of-scope
+	// click-focus interaction.
+	await input.focus();
+	await input.press("x");
+
+	await expect(findWidget).toBeHidden();
+	// Returned to live: the tail content (invisible while parked in
+	// history above) is visible again.
+	await expect(grid).toContainText(
+		`hist-${String(lineCount - 1).padStart(3, "0")}`,
+	);
+	expect(
+		(await terminalCallsFor(page, "terminal_input_key")).length,
+	).toBeGreaterThan(0);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("find widget shows accurate status when the match count or query length hit their hard caps", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+	await expect(page.locator(".plain-terminal-surface")).toBeVisible();
+
+	// Well over `TERMINAL_FIND_MAX_MATCHES` (5,000) occurrences of a single
+	// character, regardless of the pane's real measured column count: 60
+	// pushed "lines" of 200 `q`s each line-wrap into however many physical
+	// rows the pane actually has, but always total 12,000 `q` characters.
+	const qLine = "q".repeat(200);
+	const lines = Array.from({ length: 60 }, () => qLine);
+	await pushTerminalOutputBurst(page, lines);
+
+	const input = page.locator(".plain-terminal-input").first();
+	await input.press("Control+f");
+	const findInput = page.locator(".plain-terminal-find-input");
+	await expect(findInput).toBeFocused();
+	const count = page.locator(".plain-terminal-find-count");
+
+	await findInput.fill("q");
+	await expect(count).toHaveText("1/5000+ (limit reached)");
+
+	// Independently, a query longer than the hard cap is truncated (not
+	// rejected outright) and reported via the hint text — never silently
+	// behaving as if the extra characters were simply never typed.
+	await findInput.fill("z".repeat(300));
+	await expect(page.locator(".plain-terminal-find-hint")).toHaveText(
+		"Query truncated to 256 characters (limit reached).",
+	);
+
+	expect(pageErrors).toEqual([]);
+});
+
 test("reloading the page while multiple terminal tabs (including a split) are open tears down cleanly with no pageerror", async ({
 	page,
 }) => {

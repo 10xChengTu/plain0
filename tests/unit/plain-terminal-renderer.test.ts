@@ -95,12 +95,67 @@ describe("TerminalGridModel", () => {
 		);
 
 		expect(result.rebuilt).toBe(true);
+		// The very first frame always changes dimensions (from the model's
+		// initial 0x0), so this one particular case is `true` — see the
+		// dedicated `dimensionsChanged` tests below for the distinction that
+		// actually matters (a *later* full-dirty frame at unchanged
+		// dimensions).
+		expect(result.dimensionsChanged).toBe(true);
 		expect(result.changedRowIndices).toEqual([0, 1]);
 		expect(model.cols).toBe(4);
 		expect(model.rows).toBe(2);
 		expect(model.cellAt(0, 0)?.graphemes).toBe("h");
 		expect(model.cellAt(0, 1)?.graphemes).toBe("i");
 		expect(model.cellAt(1, 0)?.graphemes).toBe("!");
+	});
+
+	it("`F190` S5: a later full-dirty frame at unchanged dimensions reports rebuilt but not dimensionsChanged", () => {
+		const model = new TerminalGridModel();
+		model.applyFrame(
+			frame({
+				dirty: "full",
+				rowsData: [row(0, [cell("a"), cell("b"), cell(""), cell("")])],
+			}),
+		);
+
+		// A second full redraw (e.g. a `clear` command) at the exact same
+		// cols/rows — `rebuilt` stays `true` (every row was repainted), but
+		// `dimensionsChanged` must be `false`: nothing about the grid's own
+		// shape actually changed, so a previously-painted scrollback window
+		// (see `PlainTerminalRenderer`'s own doc) remains shape-compatible.
+		const result = model.applyFrame(
+			frame({
+				dirty: "full",
+				rowsData: [row(0, [cell("z"), cell(""), cell(""), cell("")])],
+			}),
+		);
+
+		expect(result.rebuilt).toBe(true);
+		expect(result.dimensionsChanged).toBe(false);
+	});
+
+	it("`F190` S5: a frame with different cols/rows reports both rebuilt and dimensionsChanged", () => {
+		const model = new TerminalGridModel();
+		model.applyFrame(
+			frame({
+				dirty: "full",
+				cols: 4,
+				rows: 2,
+				rowsData: [row(0, [cell("a"), cell("b"), cell(""), cell("")])],
+			}),
+		);
+
+		const result = model.applyFrame(
+			frame({
+				dirty: "partial",
+				cols: 6,
+				rows: 3,
+				rowsData: [],
+			}),
+		);
+
+		expect(result.rebuilt).toBe(true);
+		expect(result.dimensionsChanged).toBe(true);
 	});
 
 	it("leaves rows untouched by a subsequent partial frame and only reports the changed ones", () => {
@@ -123,6 +178,7 @@ describe("TerminalGridModel", () => {
 		);
 
 		expect(result.rebuilt).toBe(false);
+		expect(result.dimensionsChanged).toBe(false);
 		expect(result.changedRowIndices).toEqual([1]);
 		// Row 0 is untouched by the partial frame.
 		expect(model.cellAt(0, 0)?.graphemes).toBe("a");
