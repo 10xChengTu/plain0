@@ -481,6 +481,9 @@ async function installNativeIpcMock(
 	// `F170` S5: scripts system-Trash terminal results in commit order. An
 	// empty queue moves the selected entry to Trash successfully.
 	trashOutcomesForTest: readonly TestWorkspaceTrashOutcome[] = [],
+	// `F170` S5C: simulates begin-time identity revalidation rejecting a
+	// changed entry before any platform Trash attempt.
+	trashBeginFailuresForTest = 0,
 ): Promise<void> {
 	await page.addInitScript(
 		({
@@ -502,6 +505,7 @@ async function installNativeIpcMock(
 			debugFixtureForTest,
 			untitledFixtureForTest,
 			trashOutcomesForTest,
+			trashBeginFailuresForTest,
 		}) => {
 			const calls: Array<{
 				command: string;
@@ -590,6 +594,7 @@ async function installNativeIpcMock(
 			};
 			const scriptedSavePicks = [...(untitledFixtureForTest.savePicks ?? [])];
 			const scriptedTrashOutcomes = [...trashOutcomesForTest];
+			let scriptedTrashBeginFailures = trashBeginFailuresForTest;
 			const persistScratchForTest =
 				untitledFixtureForTest.persistScratchForTest === true;
 			const SCRATCH_STORAGE_KEY = "__plain_test_scratch_store__";
@@ -2942,6 +2947,14 @@ async function installNativeIpcMock(
 							) {
 								throw invalidTrashPlan();
 							}
+							if (scriptedTrashBeginFailures > 0) {
+								scriptedTrashBeginFailures -= 1;
+								activeTrash = undefined;
+								throw {
+									code: "WORKSPACE_TRASH_BATCH_CHANGED",
+									message: "The workspace Trash batch changed.",
+								};
+							}
 							activeTrash.phase = "executing";
 							return null;
 						}
@@ -4288,6 +4301,7 @@ async function installNativeIpcMock(
 			debugFixtureForTest,
 			untitledFixtureForTest,
 			trashOutcomesForTest,
+			trashBeginFailuresForTest,
 		},
 	);
 }
@@ -6519,6 +6533,7 @@ async function installUntitledNativeIpcMock(
 async function installTrashNativeIpcMock(
 	page: Page,
 	outcomes: readonly TestWorkspaceTrashOutcome[],
+	beginFailures = 0,
 ): Promise<void> {
 	await installNativeIpcMock(
 		page,
@@ -6526,6 +6541,7 @@ async function installTrashNativeIpcMock(
 		"supported",
 		{
 			"trash-cancel.txt": "cancel stays in workspace\n",
+			"trash-changed.txt": "changed stays in workspace\n",
 			"trash-retained.txt": "retained stays in workspace\n",
 			"trash-success.txt": "success moves to Trash\n",
 		},
@@ -6542,6 +6558,7 @@ async function installTrashNativeIpcMock(
 		{},
 		{},
 		outcomes,
+		beginFailures,
 	);
 }
 
@@ -10007,10 +10024,11 @@ test("moves ordinary Explorer deletes through confirmed system Trash without per
 }) => {
 	const pageErrors: string[] = [];
 	const nativeDialogs: string[] = [];
-	await installTrashNativeIpcMock(page, [
-		{ status: "entryRetained", reason: "trashFailed" },
-		{ status: "trashed" },
-	]);
+	await installTrashNativeIpcMock(
+		page,
+		[{ status: "entryRetained", reason: "trashFailed" }, { status: "trashed" }],
+		1,
+	);
 	page.on("pageerror", (error) => pageErrors.push(error.message));
 	page.on("dialog", (dialog) => {
 		nativeDialogs.push(dialog.message());
@@ -10046,15 +10064,31 @@ test("moves ordinary Explorer deletes through confirmed system Trash without per
 
 	await invokeTrash("trash-cancel.txt", false);
 	await expect(item("trash-cancel.txt")).toHaveCount(1);
+	const toast = page.locator(".notifications-toasts .notification-toast");
+
+	await invokeTrash("trash-changed.txt", true);
+	await expect(item("trash-changed.txt")).toHaveCount(1);
+	await expect(toast).toHaveCount(1);
+	await expect(toast).toContainText(
+		"A selected workspace entry changed before it could be moved to the system Trash.",
+	);
+	let toastText = await toast.innerText();
+	expect(toastText).not.toContain("WORKSPACE_TRASH_BATCH_CHANGED");
+	expect(toastText).not.toContain(nativeRootId);
+	expect(toastText).not.toMatch(/(?:\/Users\/|[A-Za-z]:\\|\\\\)/u);
+	await toast.hover();
+	await toast
+		.getByRole("button", { name: /^Clear Notification(?: \(.+\))?$/u })
+		.click();
+	await expect(toast).toHaveCount(0);
 
 	await invokeTrash("trash-retained.txt", true);
 	await expect(item("trash-retained.txt")).toHaveCount(1);
-	const toast = page.locator(".notifications-toasts .notification-toast");
 	await expect(toast).toHaveCount(1);
 	await expect(toast).toContainText(
 		"The system Trash batch stopped before an entry could be moved.",
 	);
-	const toastText = await toast.innerText();
+	toastText = await toast.innerText();
 	expect(toastText).not.toContain("trashFailed");
 	expect(toastText).not.toContain(nativeRootId);
 	expect(toastText).not.toMatch(/(?:\/Users\/|[A-Za-z]:\\|\\\\)/u);
@@ -10083,6 +10117,9 @@ test("moves ordinary Explorer deletes through confirmed system Trash without per
 	);
 	expect(evidence.map(({ command }) => command)).toEqual([
 		"workspace_prepare_trash",
+		"workspace_cancel_trash",
+		"workspace_prepare_trash",
+		"workspace_begin_trash",
 		"workspace_cancel_trash",
 		"workspace_prepare_trash",
 		"workspace_begin_trash",

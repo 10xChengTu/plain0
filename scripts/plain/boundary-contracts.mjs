@@ -15208,6 +15208,7 @@ function validateWorkspaceDeleteCoordinatorRoute(source) {
 			"PlainDeleteErrorNotificationService",
 			{ kind: "typeAlias", exported: true },
 		],
+		["trashCoordinatorFailureResult", { kind: "function", exported: false }],
 		["DeleteSelectionEntry", { kind: "interface", exported: false }],
 		["snapshotSelection", { kind: "function", exported: false }],
 		["confirmationDetail", { kind: "function", exported: false }],
@@ -15316,6 +15317,26 @@ function validateWorkspaceDeleteCoordinatorRoute(source) {
 		}
 		return functions.length === 1 ? functions[0] : undefined;
 	}
+
+	exactFunctionBody(
+		"trashCoordinatorFailureResult",
+		`{
+			try {
+				if (typeof error !== "object" || error === null) {
+					return undefined;
+				}
+				return Reflect.get(error, "code") === "WORKSPACE_TRASH_BATCH_CHANGED"
+					? Object.freeze({
+							status: "entryRetained" as const,
+							reason: "entryChanged" as const,
+						})
+					: undefined;
+			} catch {
+				return undefined;
+			}
+		}`,
+		"Trash coordinator must map only the exact changed-batch code to one path-free retained result",
+	);
 
 	exactFunctionBody(
 		"snapshotSelection",
@@ -15732,6 +15753,7 @@ function validateWorkspaceDeleteCoordinatorRoute(source) {
 				"createAuthorizedTrashEdits",
 				"context.explorerService.applyBulkEdit",
 				"classifyTrashAuthorizationResults",
+				"trashCoordinatorFailureResult",
 				"provider.plainRefreshDeleteRoots",
 				"bridge.workspaceCancelTrash",
 			]) {
@@ -15751,6 +15773,7 @@ function validateWorkspaceDeleteCoordinatorRoute(source) {
 		["createAuthorizedTrashEdits", 1],
 		["context.explorerService.applyBulkEdit", 1],
 		["classifyTrashAuthorizationResults", 2],
+		["trashCoordinatorFailureResult", 1],
 		["provider.plainRefreshDeleteRoots", 1],
 		["bridge.workspaceCancelTrash", 1],
 	]);
@@ -15795,9 +15818,15 @@ function validateWorkspaceDeleteCoordinatorRoute(source) {
 			);
 		}
 		const results = classifyTrashAuthorizationResults(authorizations);
+		const coordinatorFailureResult = trashCoordinatorFailureResult(error);
 		let brandedError: WorkspaceTrashIncompleteError | undefined;
 		if (error instanceof WorkspaceTrashIncompleteError) {
 			brandedError = error;
+		} else if (coordinatorFailureResult !== undefined) {
+			brandedError = new WorkspaceTrashIncompleteError(
+				results.trashedEntries,
+				coordinatorFailureResult,
+			);
 		} else if (
 			results.incompleteResult !== undefined ||
 			results.outcomeUnknown ||

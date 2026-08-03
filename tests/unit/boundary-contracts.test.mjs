@@ -6022,6 +6022,11 @@ describe("Plain F170 TypeScript system Trash boundary", () => {
 				'} else if (result.status === "deleted") {\n\t\t\ttrashedEntries += 1;',
 				"Trash coordinator must classify every authorization terminal typestate without guessing success",
 			],
+			[
+				'Reflect.get(error, "code") === "WORKSPACE_TRASH_BATCH_CHANGED"',
+				'Reflect.get(error, "code") !== "WORKSPACE_TRASH_BATCH_CHANGED"',
+				"Trash coordinator must map only the exact changed-batch code to one path-free retained result",
+			],
 		]) {
 			const hostile = replaceWorkspaceTrashAppSource(coordinator, from, to);
 			expect(validateWorkspaceTrashTypeScriptBoundary(hostile)).toContain(

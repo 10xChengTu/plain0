@@ -61,7 +61,11 @@ export class WorkspaceTrashIncompleteError extends Error {
 	constructor(trashedEntries: number, incompleteResult?: WorkspaceTrashResult) {
 		super(
 			incompleteResult?.status === "entryRetained"
-				? "The system Trash batch stopped before an entry could be moved."
+				? incompleteResult.reason === "entryChanged"
+					? "A selected workspace entry changed before it could be moved to the system Trash."
+					: incompleteResult.reason === "entryUnverifiable"
+						? "A selected workspace entry could not be reverified before it could be moved to the system Trash."
+						: "The system Trash batch stopped before an entry could be moved."
 				: "The system Trash batch did not complete. Check the Trash before retrying.",
 		);
 		this.name = this.code;
@@ -101,6 +105,24 @@ export function getWorkspaceTrashIncompleteDetails(error: unknown):
 export type PlainDeleteErrorNotificationService = Readonly<{
 	error(message: string): unknown;
 }>;
+
+function trashCoordinatorFailureResult(
+	error: unknown,
+): WorkspaceTrashResult | undefined {
+	try {
+		if (typeof error !== "object" || error === null) {
+			return undefined;
+		}
+		return Reflect.get(error, "code") === "WORKSPACE_TRASH_BATCH_CHANGED"
+			? Object.freeze({
+					status: "entryRetained" as const,
+					reason: "entryChanged" as const,
+				})
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
 
 interface DeleteSelectionEntry {
 	readonly resource: PlainWorkspaceDeleteResource;
@@ -591,9 +613,15 @@ async function runTrash(
 			);
 		}
 		const results = classifyTrashAuthorizationResults(authorizations);
+		const coordinatorFailureResult = trashCoordinatorFailureResult(error);
 		let brandedError: WorkspaceTrashIncompleteError | undefined;
 		if (error instanceof WorkspaceTrashIncompleteError) {
 			brandedError = error;
+		} else if (coordinatorFailureResult !== undefined) {
+			brandedError = new WorkspaceTrashIncompleteError(
+				results.trashedEntries,
+				coordinatorFailureResult,
+			);
 		} else if (
 			results.incompleteResult !== undefined ||
 			results.outcomeUnknown ||

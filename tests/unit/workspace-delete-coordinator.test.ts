@@ -1010,6 +1010,50 @@ describe("Plain confirmed-delete coordinator", () => {
 		expect(applyBulkEdit).not.toHaveBeenCalled();
 	});
 
+	it("reports a path-free retained result when begin detects an entry changed during DOM confirmation", async () => {
+		const cancelTrash = vi.fn();
+		const applyBulkEdit = vi.fn();
+		const provider = testProvider();
+		const notifier = testNotifier();
+		const bridge = testBridge(plan([]), {
+			workspacePrepareTrash: vi.fn(async () => trashPlan([{ kind: "file" }])),
+			workspaceBeginTrash: vi.fn(async () => {
+				throw Object.freeze({
+					code: "WORKSPACE_TRASH_BATCH_CHANGED",
+					message: "private /Users/owner/workspace path",
+				});
+			}),
+			workspaceCancelTrash: cancelTrash,
+		});
+		disposables.push(
+			registerWorkspaceDeleteCoordinator(
+				bridge,
+				provider,
+				async () => notifier,
+			),
+		);
+
+		await expect(
+			runPlainWorkspaceDeleteCoordinator(
+				context([element("changed-during-confirm.txt")], {
+					useTrash: true,
+					explorerService: { applyBulkEdit },
+				}),
+			),
+		).resolves.toBeUndefined();
+
+		expect(notifier.error).toHaveBeenCalledOnce();
+		const [message] = vi.mocked(notifier.error).mock.calls[0]!;
+		expect(message).toBe(
+			"A selected workspace entry changed before it could be moved to the system Trash.",
+		);
+		expect(message).not.toContain("WORKSPACE_TRASH_BATCH_CHANGED");
+		expect(message).not.toContain("/Users/");
+		expect(provider.refresh).toHaveBeenCalledOnce();
+		expect(cancelTrash).toHaveBeenCalledOnce();
+		expect(applyBulkEdit).not.toHaveBeenCalled();
+	});
+
 	it("stops on retained or unknown Trash terminals, refreshes roots and never falls back to permanent delete", async () => {
 		const expectedMessages = Object.freeze({
 			entryRetained:
