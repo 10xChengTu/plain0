@@ -51,3 +51,13 @@
 ## 4. 工作项边界
 
 S0 只冻结事实、架构与验收，不写产品代码。后续严格按 ADR 0005 的 S1→S6 执行；若某一切片暴露新的架构歧义，先回写本文件/ADR 并提交，不并发推进下一域。
+
+## 5. S4 New Window/Close Folder 实施前复核（2026-08-03）
+
+- 上游 `workbench.action.newWindow`、`vscode.newWindow`、`_files.newWindow` 与 host navigation 已从真实 vendor 注册链移除或被 Plain guard 拒绝；不能恢复带 options/URL/reuseWindow 的别名。Plain 只接管面向用户的 `workbench.action.newWindow`，IPC 请求严格为空对象。
+- Tauri 运行时已经把 `tauri.conf.json` 与 `tauri.e2e.conf.json` 合并到 `app.config().app.windows`；`WebviewWindowBuilder::from_config` 是唯一能让动态窗口逐字段继承生产持久数据仓与 E2E `incognito:true` 的本地权威路径。Rust 只替换 label，label 固定为 `plain-window-` 加 canonical UUID-v4 simple hex；capability glob 只允许该前缀。
+- 每个 WebView 都会独立执行 `workspace_snapshot`。如果动态窗口也读取全局 `last_roots`，New Window 会暗中复制当前/上次 workspace；因此只有 label `main` 可执行 last restore，Rust 生成的动态窗口固定传 `Ok(None)` 并得到 empty scope。
+- 现有 `workspace_remove_root` 一次只撤销一个 root，不满足 Close Folder 的全根原子语义。S4 新增空请求 `workspace_close_folder`，在同一 window mutation gate 中一次把 scope 替换为空并撤销全部 watcher；已经 empty 时返回当前 snapshot 且不写 history，真实变更成功后才记录空 roots 以清除 `lastRecentId`。
+- F160 的 final shutdown backup 已能在最多四次尝试内证实 content version 稳定，但入口只挂在 native close/quit 上。Close Folder 保留窗口，不能伪触发 shutdown；S4 将同一个稳定 flush 提取为 tracker 的窗口内显式入口，先备份全部 modified working copies再撤权。任一失败都保持原 topology，成功后 Untitled scratch 留在原窗口，workspace backup 等重新授权同一稳定 root identity 时恢复。
+
+S4 切片固定为：S4A 本节事实/合同提交；S4B Rust fixed-window/atomic-close authority 与严格 bridge；S4C Workbench 命令、File 菜单/Command Palette/键盘表面和 Browser E2E；S4D 真实双窗口/dirty/Close Folder 恢复矩阵。

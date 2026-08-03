@@ -48,8 +48,10 @@ F170 开始前的真实产品状态与“打开文件、最近项目、本地设
 ### 5. New Window 是固定应用窗口，不是通用 host navigation
 
 - WebView 只能请求“创建一个 Plain 窗口”，不能提交 label、URL、脚本、原生路径或任意窗口配置。Rust 生成唯一 label，固定加载应用入口，并继承生产/E2E 窗口的安全属性。
-- 每个窗口继续拥有独立 workspace scope、watcher、terminal、debug、delete 和 close lifecycle。创建新窗口不得迁移或清空当前窗口的 dirty working copies。
-- Close Folder/empty workspace 走 topology coordinator 与原生 mutation gate；dirty 内容先经过 F160 lifecycle/backup 保护，不复活上游通用 workspace file 或 untitled-workspace API。
+- Rust 必须从 `app.config().app.windows` 克隆运行时已经合并完成的 `main` `WindowConfig`，只把 label 替换为 `plain-window-<Rust UUID>` 后交给 `WebviewWindowBuilder::from_config`；不得另写一份容易漂移的宽高、URL、incognito 或 WebView 安全配置。Tauri capability 只从精确 `main` 扩到精确前缀 `plain-window-*`，权限仍只有事件 listen/unlisten，不得用全窗口 `*` 或新增通用 core/plugin 权限。
+- 动态新窗口的首次 `workspace_snapshot` 固定从 empty scope 启动，不消费全局 last-workspace restore；只有静态 `main` 窗口可在进程冷启动时恢复 last workspace。创建新窗口不迁移、复制或清空当前窗口的 root、editor、dirty working copy、backup、scratch、PTY 或 DAP 状态。
+- 每个窗口继续拥有独立 workspace scope、watcher、terminal、debug、delete 和 close lifecycle。
+- Close Folder/empty workspace 走独立空请求 IPC、topology coordinator 与原生 mutation gate，一次原子替换为零 roots；已是 empty 时是零 history 写入的幂等 no-op。前端在调用 Rust 前必须复用 F160 hot-exit 的有界稳定快照算法，等待每个 modified working copy 的精确 backup 成功；hot exit 关闭、内容持续变化或任一 backup 失败时拒绝撤销 capability。成功清空后才把 recent 的 last id 置空，已有 history entries 不删除；不得触发窗口 shutdown 事件，也不得复活上游通用 workspace file 或 untitled-workspace API。Untitled scratch 与窗口无 root 的语义独立，Close Folder 后继续留在原窗口；workspace 文件 backup 保留其稳定 root identity，重新授权原 root 后按既有恢复链找回。
 
 ### 6. 系统 Trash 是独立平台操作，永不降级为永久删除
 
