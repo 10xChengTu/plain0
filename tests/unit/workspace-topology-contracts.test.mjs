@@ -367,6 +367,13 @@ describe("workspace topology source contracts", () => {
 	);`,
 					"const previousSave = CommandsRegistry.getCommands().get(PLAIN_UNTITLED_COMMAND_IDS.save);",
 				),
+			(source) =>
+				replaceOnce(
+					source,
+					"primary: KeyMod.CtrlCmd | KeyCode.KeyN,",
+					"primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyN,",
+				),
+			(source) => replaceOnce(source, ".catch(onUnexpectedError);", ".then();"),
 		]) {
 			const mutatedSource = mutate(production);
 			expect(validatePlainUntitledWorkflow(mutatedSource)).toBe(false);

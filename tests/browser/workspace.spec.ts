@@ -398,6 +398,14 @@ interface TestDebugFixture {
 	readonly stepRequestsRejectedForTest?: boolean;
 }
 
+interface TestUntitledFixture {
+	readonly savePicks?: readonly Readonly<{
+		status: "selected" | "cancelled";
+		name?: string;
+	}>[];
+	readonly persistScratchForTest?: boolean;
+}
+
 async function installNativeIpcMock(
 	page: Page,
 	rawReadTransport: RawReadTransport,
@@ -459,6 +467,10 @@ async function installNativeIpcMock(
 	// debug tests pass this; every other existing call site keeps the
 	// default (empty capabilities, no scripted frames/scopes/variables).
 	debugFixtureForTest: TestDebugFixture = {},
+	// `F170` S3: scripts native Save As picker results and optionally keeps the
+	// Rust-shaped scratch partition across a same-tab reload. Other scenarios
+	// retain an empty queue and process-local scratch state.
+	untitledFixtureForTest: TestUntitledFixture = {},
 ): Promise<void> {
 	await page.addInitScript(
 		({
@@ -478,6 +490,7 @@ async function installNativeIpcMock(
 			gitFixtureForTest,
 			gitNetworkFixtureForTest,
 			debugFixtureForTest,
+			untitledFixtureForTest,
 		}) => {
 			const calls: Array<{
 				command: string;
@@ -558,6 +571,46 @@ async function installNativeIpcMock(
 					),
 				);
 			};
+			const scriptedSavePicks = [...(untitledFixtureForTest.savePicks ?? [])];
+			const persistScratchForTest =
+				untitledFixtureForTest.persistScratchForTest === true;
+			const SCRATCH_STORAGE_KEY = "__plain_test_scratch_store__";
+			const loadScratchEntries = (): Map<string, Uint8Array> => {
+				if (!persistScratchForTest) return new Map();
+				const raw = sessionStorage.getItem(SCRATCH_STORAGE_KEY);
+				if (raw === null) return new Map();
+				try {
+					const parsed = JSON.parse(raw) as Array<[string, number[]]>;
+					return new Map(
+						parsed.map(([scratchId, bytes]) => [
+							scratchId,
+							Uint8Array.from(bytes),
+						]),
+					);
+				} catch {
+					return new Map();
+				}
+			};
+			const scratchEntries = loadScratchEntries();
+			const persistScratchEntries = (): void => {
+				if (!persistScratchForTest) return;
+				sessionStorage.setItem(
+					SCRATCH_STORAGE_KEY,
+					JSON.stringify(
+						[...scratchEntries.entries()].map(([scratchId, bytes]) => [
+							scratchId,
+							Array.from(bytes),
+						]),
+					),
+				);
+			};
+			let nextScratchOrdinal =
+				Math.max(
+					0,
+					...[...scratchEntries.keys()].map((scratchId) =>
+						Number.parseInt(scratchId.slice(-12), 16),
+					),
+				) + 1;
 			const plb2Frame = (
 				value: Uint8Array,
 			): { rootId: string; key: string; content: Uint8Array } => {
@@ -611,6 +664,96 @@ async function installNativeIpcMock(
 					offset += bytes.byteLength;
 				}
 				return frame;
+			};
+			const psw1Frame = (
+				value: Uint8Array,
+			): { scratchId: string; content: Uint8Array } => {
+				if (
+					value.byteLength < 44 ||
+					value[0] !== 0x50 ||
+					value[1] !== 0x53 ||
+					value[2] !== 0x57 ||
+					value[3] !== 0x31
+				) {
+					throw new Error("Malformed PSW1 browser test frame.");
+				}
+				const contentLength = new DataView(
+					value.buffer,
+					value.byteOffset,
+					value.byteLength,
+				).getUint32(40, false);
+				if (44 + contentLength !== value.byteLength) {
+					throw new Error("Malformed PSW1 browser test frame length.");
+				}
+				return {
+					scratchId: decoder.decode(value.slice(4, 40)),
+					content: value.slice(44),
+				};
+			};
+			const encodeScratchReadAllFrame = (): Uint8Array => {
+				const entries = [...scratchEntries.entries()].sort(([left], [right]) =>
+					left.localeCompare(right),
+				);
+				const total = entries.reduce(
+					(length, [, bytes]) => length + 40 + bytes.byteLength,
+					8,
+				);
+				const frame = new Uint8Array(total);
+				const view = new DataView(frame.buffer);
+				frame.set([0x50, 0x53, 0x4c, 0x31], 0); // "PSL1"
+				view.setUint32(4, entries.length, false);
+				let offset = 8;
+				for (const [scratchId, bytes] of entries) {
+					frame.set(encoder.encode(scratchId), offset);
+					offset += 36;
+					view.setUint32(offset, bytes.byteLength, false);
+					offset += 4;
+					frame.set(bytes, offset);
+					offset += bytes.byteLength;
+				}
+				return frame;
+			};
+			const pln1Frame = (
+				value: Uint8Array,
+			): { rootId: string; relativePath: string; content: Uint8Array } => {
+				if (
+					value.byteLength < 12 ||
+					value[0] !== 0x50 ||
+					value[1] !== 0x4c ||
+					value[2] !== 0x4e ||
+					value[3] !== 0x31
+				) {
+					throw new Error("Malformed PLN1 browser test frame.");
+				}
+				const view = new DataView(
+					value.buffer,
+					value.byteOffset,
+					value.byteLength,
+				);
+				const rootLength = view.getUint16(4, false);
+				const pathLength = view.getUint16(6, false);
+				const contentLength = view.getUint32(8, false);
+				if (
+					rootLength !== 36 ||
+					pathLength === 0 ||
+					12 + rootLength + pathLength + contentLength !== value.byteLength
+				) {
+					throw new Error("Malformed PLN1 browser test frame length.");
+				}
+				let offset = 12;
+				const frameRootId = decoder.decode(
+					value.slice(offset, offset + rootLength),
+				);
+				offset += rootLength;
+				const relativePath = decoder.decode(
+					value.slice(offset, offset + pathLength),
+				);
+				offset += pathLength;
+				return {
+					rootId: frameRootId,
+					relativePath,
+					content: value.slice(offset),
+				};
 			};
 			const file = (content: string): MockFile => ({
 				kind: "file",
@@ -2233,6 +2376,44 @@ async function installNativeIpcMock(
 					callbacks.delete(callbackId);
 				},
 				async invoke(command, args: Record<string, unknown> | Uint8Array = {}) {
+					if (command === "workspace_publish_file") {
+						if (!(args instanceof Uint8Array)) {
+							throw new Error("Expected one raw PLN1 browser test frame.");
+						}
+						const frame = pln1Frame(args);
+						calls.push({
+							command,
+							args: {
+								rawHex: hexFromBytes(args),
+								request: {
+									rootId: frame.rootId,
+									relativePath: frame.relativePath,
+								},
+								contentHex: hexFromBytes(frame.content),
+							},
+						});
+						if (frame.rootId !== rootId) throw entryNotFound();
+						const target = resolveParent(frame.relativePath);
+						if (target.parent.entries.has(target.name)) {
+							throw entryAlreadyExists();
+						}
+						const published = {
+							kind: "file" as const,
+							bytes: frame.content.slice(),
+							version: nextVersion(),
+						};
+						target.parent.entries.set(target.name, published);
+						return {
+							status: "written",
+							stat: {
+								kind: "file",
+								size: published.bytes.byteLength,
+								mtime: 1_700_000_000_001,
+								ctime: 1_699_999_000_000,
+								version: published.version,
+							},
+						};
+					}
 					if (command === "workspace_write_file") {
 						if (!(args instanceof Uint8Array)) {
 							throw new Error("Expected one raw PLW1 browser test frame.");
@@ -2294,6 +2475,22 @@ async function installNativeIpcMock(
 						});
 						backupEntries.set(frame.key, frame.content.slice());
 						persistBackupEntries();
+						return null;
+					}
+					if (command === "scratch_write") {
+						if (!(args instanceof Uint8Array)) {
+							throw new Error("Expected one raw PSW1 browser test frame.");
+						}
+						const frame = psw1Frame(args);
+						calls.push({
+							command,
+							args: {
+								scratchId: frame.scratchId,
+								contentHex: hexFromBytes(frame.content),
+							},
+						});
+						scratchEntries.set(frame.scratchId, frame.content.slice());
+						persistScratchEntries();
 						return null;
 					}
 					if (args instanceof Uint8Array) {
@@ -2378,6 +2575,50 @@ async function installNativeIpcMock(
 							};
 						case "workspace_snapshot":
 							return currentSnapshot;
+						case "workspace_pick_save_target": {
+							const saveRequest = args.request as
+								{ suggestedName?: unknown } | undefined;
+							if (typeof saveRequest?.suggestedName !== "string") {
+								throw new Error("Malformed Save As picker test request.");
+							}
+							const outcome = scriptedSavePicks.shift() ?? {
+								status: "selected" as const,
+							};
+							if (outcome.status === "cancelled") {
+								return {
+									status: "cancelled",
+									snapshot: currentSnapshot,
+									target: null,
+								};
+							}
+							const relativePath = outcome.name ?? saveRequest.suggestedName;
+							let existingStat: Record<string, unknown> | null = null;
+							try {
+								const existing = resolveNode(relativePath);
+								existingStat = {
+									kind: existing.kind,
+									size:
+										existing.kind === "file" ? existing.bytes.byteLength : 0,
+									mtime: 1_700_000_000_000,
+									ctime: 1_699_999_000_000,
+									version: existing.kind === "file" ? existing.version : null,
+								};
+							} catch (error) {
+								if ((error as { code?: unknown })?.code !== "ENTRY_NOT_FOUND") {
+									throw error;
+								}
+							}
+							currentSnapshot = selectedSnapshot;
+							return {
+								status: "selected",
+								snapshot: selectedSnapshot,
+								target: {
+									rootId,
+									relativePath,
+									existingStat,
+								},
+							};
+						}
 						case "workspace_recent_list":
 							return { revision: 1, restoreStatus: "none", entries: [] };
 						case "workspace_pick_roots":
@@ -2784,6 +3025,33 @@ async function installNativeIpcMock(
 							persistBackupEntries();
 							return null;
 						}
+						case "scratch_create": {
+							const scratchId = `00000000-0000-4000-8000-${(nextScratchOrdinal++)
+								.toString(16)
+								.padStart(12, "0")}`;
+							return { scratchId };
+						}
+						case "scratch_read_all": {
+							const frame = encodeScratchReadAllFrame();
+							return rawReadTransport === "arrayBuffer"
+								? frame.buffer
+								: [...frame];
+						}
+						case "scratch_discard": {
+							const scratchId = (
+								args.request as { scratchId?: unknown } | undefined
+							)?.scratchId;
+							if (typeof scratchId !== "string") {
+								throw new Error("Malformed scratch discard test request.");
+							}
+							scratchEntries.delete(scratchId);
+							persistScratchEntries();
+							return null;
+						}
+						case "scratch_discard_all":
+							scratchEntries.clear();
+							persistScratchEntries();
+							return null;
 						case "theme_import_vsix":
 						case "theme_import_directory":
 							return themeImportFromScript();
@@ -3890,6 +4158,7 @@ async function installNativeIpcMock(
 			gitFixtureForTest,
 			gitNetworkFixtureForTest,
 			debugFixtureForTest,
+			untitledFixtureForTest,
 		},
 	);
 }
@@ -6092,6 +6361,58 @@ async function executePaletteCommand(
 	await expect(palette).toBeHidden();
 }
 
+async function installUntitledNativeIpcMock(
+	page: Page,
+	extraFiles: Readonly<Record<string, string>>,
+	fixture: TestUntitledFixture,
+): Promise<void> {
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"supported",
+		extraFiles,
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{},
+		fixture,
+	);
+}
+
+async function nativeInvocations(
+	page: Page,
+	command: string,
+): Promise<TestTauriInvocation[]> {
+	return page.evaluate((expectedCommand) => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+		};
+		return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+			({ command }) => command === expectedCommand,
+		);
+	}, command);
+}
+
+async function createDirtyUntitled(
+	page: Page,
+	content: string,
+): Promise<Locator> {
+	await page.keyboard.press("ControlOrMeta+N");
+	const activeTab = page.locator(".tabs-container .tab.active");
+	await expect(activeTab).toContainText(/Untitled-[0-9]+/);
+	await page.locator(".monaco-editor .view-lines").last().click();
+	await page.keyboard.insertText(content);
+	await expect(activeTab).toHaveClass(/dirty/);
+	return activeTab;
+}
+
 async function expectPaletteCommandHidden(
 	page: Page,
 	query: string,
@@ -6650,6 +6971,308 @@ test("opens a file with parent-root adoption and manages path-free recent worksp
 		expect(JSON.stringify(call.args)).not.toContain("plain-workspace://");
 	}
 	expect(nativeDialogs).toEqual([]);
+	expect(errors).toEqual([]);
+});
+
+// --- `F170` S3 Rust-owned Untitled / Save As ------------------------------
+
+test("creates Plain Untitled from the real palette and keybinding, preserves a cancelled save, publishes verified bytes, and keeps ordinary Save working", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") errors.push(message.text());
+	});
+	await installUntitledNativeIpcMock(
+		page,
+		{},
+		{
+			savePicks: [
+				{ status: "cancelled" },
+				{ status: "selected", name: "saved-new.txt" },
+			],
+		},
+	);
+
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	await page.keyboard.press("ControlOrMeta+Shift+P");
+	const palette = page.locator(".quick-input-widget");
+	await palette.locator("input").pressSequentially("New Text File");
+	await expect(
+		palette.getByText("File: New Untitled Text File", { exact: true }),
+	).toHaveCount(1);
+	await page.keyboard.press("Escape");
+
+	await page.keyboard.press("ControlOrMeta+N");
+	const activeTab = page.locator(".tabs-container .tab.active");
+	await expect(activeTab).toContainText(/Untitled-[0-9]+/);
+	await page.locator(".monaco-editor .view-lines").last().click();
+	const marker = "F170_UNTITLED_CANCEL_THEN_SAVE";
+	await page.keyboard.insertText(marker);
+	await expect(activeTab).toHaveClass(/dirty/);
+
+	await page.keyboard.press("ControlOrMeta+S");
+	await expect(activeTab).toHaveClass(/dirty/);
+	expect(await nativeInvocations(page, "workspace_publish_file")).toEqual([]);
+	expect(await nativeInvocations(page, "scratch_discard")).toEqual([]);
+
+	await page.keyboard.press("ControlOrMeta+S");
+	await expect(activeTab).toContainText("saved-new.txt");
+	await expect(activeTab).not.toHaveClass(/dirty/);
+	await expect(
+		page.getByRole("code").filter({ hasText: marker }),
+	).toBeVisible();
+	const publications = await nativeInvocations(page, "workspace_publish_file");
+	expect(publications).toHaveLength(1);
+	expect(publications[0]?.args).toMatchObject({
+		request: {
+			rootId: nativeRootId,
+			relativePath: "saved-new.txt",
+		},
+		contentHex: hexOfText(marker),
+	});
+	await expect
+		.poll(async () => (await nativeInvocations(page, "scratch_discard")).length)
+		.toBe(1);
+
+	await page.locator(".monaco-editor .view-lines").last().click();
+	await page.keyboard.press("ControlOrMeta+End");
+	await page.keyboard.insertText("_ORDINARY_SAVE");
+	await expect(activeTab).toHaveClass(/dirty/);
+	await page.keyboard.press("ControlOrMeta+S");
+	await expect(activeTab).not.toHaveClass(/dirty/);
+	const ordinaryWrites = await nativeInvocations(page, "workspace_write_file");
+	expect(ordinaryWrites).toHaveLength(1);
+	expect(ordinaryWrites[0]?.args).toMatchObject({
+		request: { relativePath: "saved-new.txt" },
+		contentHex: hexOfText(`${marker}_ORDINARY_SAVE`),
+	});
+
+	expect(await nativeInvocations(page, "scratch_create")).toHaveLength(1);
+	expect(errors).toEqual([]);
+});
+
+test("requires DOM overwrite consent, rejects a stale picker version without closing Untitled, then succeeds from a fresh receipt", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
+		if (
+			message.type() === "error" &&
+			!message
+				.text()
+				.includes("The workspace file changed before it could be written.")
+		) {
+			errors.push(message.text());
+		}
+	});
+	await installUntitledNativeIpcMock(
+		page,
+		{ "existing.txt": "ORIGINAL_EXISTING\n" },
+		{
+			savePicks: [
+				{ status: "selected", name: "existing.txt" },
+				{ status: "selected", name: "existing.txt" },
+				{ status: "selected", name: "existing.txt" },
+			],
+		},
+	);
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	const marker = "F170_OVERWRITE_VERSIONED";
+	const activeTab = await createDirtyUntitled(page, marker);
+
+	await page.keyboard.press("ControlOrMeta+S");
+	let dialog = page.locator(".monaco-dialog-box");
+	await expect(dialog).toContainText("Replace 'existing.txt'?");
+	await expect(dialog).toContainText("existing file will be replaced");
+	await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+	await expect(dialog).toHaveCount(0);
+	await expect(activeTab).toHaveClass(/dirty/);
+	expect(await nativeInvocations(page, "workspace_write_file")).toEqual([]);
+
+	await page.keyboard.press("ControlOrMeta+S");
+	dialog = page.locator(".monaco-dialog-box");
+	await expect(dialog).toContainText("Replace 'existing.txt'?");
+	await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_EXTERNAL_WRITE__(
+				name: string,
+				content: string,
+				emitWake: boolean,
+			): void;
+		};
+		testWindow.__PLAIN_TEST_EXTERNAL_WRITE__(
+			"existing.txt",
+			"EXTERNAL_VERSION_WON\n",
+			false,
+		);
+	});
+	await dialog.getByRole("button", { name: "Replace", exact: true }).click();
+	await expect(dialog).toHaveCount(0);
+	await expect(activeTab).toHaveClass(/dirty/);
+	await expect(
+		page.locator(".notifications-toasts .notification-toast").filter({
+			hasText: "workspace file changed before it could be written",
+		}),
+	).toHaveCount(1);
+	expect(await nativeInvocations(page, "workspace_write_file")).toHaveLength(1);
+	expect(await nativeInvocations(page, "scratch_discard")).toEqual([]);
+
+	await page.keyboard.press("ControlOrMeta+S");
+	dialog = page.locator(".monaco-dialog-box");
+	await dialog.getByRole("button", { name: "Replace", exact: true }).click();
+	await expect(activeTab).toContainText("existing.txt");
+	await expect(activeTab).not.toHaveClass(/dirty/);
+	await expect(
+		page.getByRole("code").filter({ hasText: marker }),
+	).toBeVisible();
+	expect(await nativeInvocations(page, "workspace_write_file")).toHaveLength(2);
+	expect(await nativeInvocations(page, "workspace_publish_file")).toEqual([]);
+	await expect
+		.poll(async () => (await nativeInvocations(page, "scratch_discard")).length)
+		.toBe(1);
+	expect(errors).toEqual([]);
+});
+
+test("keeps close confirmation inside DOM and makes Cancel, Don't Save, and Save branches side-effect exact", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") errors.push(message.text());
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installUntitledNativeIpcMock(
+		page,
+		{},
+		{
+			savePicks: [{ status: "selected", name: "saved-on-close.txt" }],
+		},
+	);
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	let activeTab = await createDirtyUntitled(page, "F170_CLOSE_DISCARD");
+	await page.keyboard.press("ControlOrMeta+W");
+	let dialog = page.locator(".monaco-dialog-box");
+	await expect(dialog).toContainText("Do you want to save the changes");
+	await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+	await expect(activeTab).toBeVisible();
+	await expect(activeTab).toHaveClass(/dirty/);
+	expect(await nativeInvocations(page, "scratch_discard")).toEqual([]);
+
+	await page.keyboard.press("ControlOrMeta+W");
+	dialog = page.locator(".monaco-dialog-box");
+	await dialog.getByRole("button", { name: "Don't Save", exact: true }).click();
+	await expect(activeTab).toHaveCount(0);
+	await expect
+		.poll(async () => (await nativeInvocations(page, "scratch_discard")).length)
+		.toBe(1);
+	expect(await nativeInvocations(page, "workspace_publish_file")).toEqual([]);
+
+	activeTab = await createDirtyUntitled(page, "F170_CLOSE_SAVE");
+	await page.keyboard.press("ControlOrMeta+W");
+	dialog = page.locator(".monaco-dialog-box");
+	await dialog.getByRole("button", { name: "Save", exact: true }).click();
+	await expect(activeTab).toContainText("saved-on-close.txt");
+	await expect(activeTab).not.toHaveClass(/dirty/);
+	expect(await nativeInvocations(page, "workspace_publish_file")).toHaveLength(
+		1,
+	);
+	await expect
+		.poll(async () => (await nativeInvocations(page, "scratch_discard")).length)
+		.toBe(2);
+	expect(nativeDialogs).toEqual([]);
+	expect(errors).toEqual([]);
+});
+
+test("restores Rust scratch as one dirty Untitled across a simulated process reload and never resurrects it after verified Save As", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") errors.push(message.text());
+	});
+	await installUntitledNativeIpcMock(
+		page,
+		{},
+		{
+			persistScratchForTest: true,
+			savePicks: [{ status: "selected", name: "restored-save.txt" }],
+		},
+	);
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	const marker = "F170_SCRATCH_PROCESS_RECOVERY";
+	await createDirtyUntitled(page, marker);
+	await expect
+		.poll(async () => {
+			const writes = await nativeInvocations(page, "scratch_write");
+			return writes.at(-1)?.args.contentHex;
+		})
+		.toBe(hexOfText(marker));
+
+	await page.reload();
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	let activeTab = page.locator(".tabs-container .tab.active");
+	await expect(activeTab).toHaveClass(/dirty/);
+	await expect(
+		page.getByRole("code").filter({ hasText: marker }),
+	).toBeVisible();
+	expect(await nativeInvocations(page, "scratch_read_all")).toHaveLength(2);
+
+	await page.keyboard.press("ControlOrMeta+S");
+	await expect(activeTab).toContainText("restored-save.txt");
+	await expect(activeTab).not.toHaveClass(/dirty/);
+	await expect
+		.poll(async () => (await nativeInvocations(page, "scratch_discard")).length)
+		.toBe(1);
+	expect(await nativeInvocations(page, "workspace_publish_file")).toHaveLength(
+		1,
+	);
+
+	await page.reload();
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	activeTab = page.locator(".tabs-container .tab.active");
+	await expect(activeTab).toHaveCount(0);
+	await expect(page.getByRole("code").filter({ hasText: marker })).toHaveCount(
+		0,
+	);
 	expect(errors).toEqual([]);
 });
 

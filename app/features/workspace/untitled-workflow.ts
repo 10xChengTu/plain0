@@ -1,7 +1,16 @@
+import {
+	KeyCode,
+	KeyMod,
+} from "@codingame/monaco-vscode-api/vscode/vs/base/common/keyCodes";
+import { onUnexpectedError } from "@codingame/monaco-vscode-api/vscode/vs/base/common/errors";
 import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
 import { CommandsRegistry } from "@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands";
 import { ConfirmResult } from "@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs";
 import type { IDialogService } from "@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service";
+import {
+	KeybindingWeight,
+	KeybindingsRegistry,
+} from "@codingame/monaco-vscode-api/vscode/vs/platform/keybinding/common/keybindingsRegistry";
 import type { INotificationService } from "@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service";
 import {
 	EditorsOrder,
@@ -61,6 +70,10 @@ export interface PlainUntitledWorkflowServices {
 
 export interface PlainUntitledWorkflowRegistration {
 	dispose(): void;
+}
+
+interface PlainUntitledLanguageDetectionModel {
+	autoDetectLanguage(): Promise<void>;
 }
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
@@ -310,6 +323,15 @@ export class PlainUntitledWorkflow {
 		if (this.attachedInputs.has(input)) return true;
 		const model = this.modelForInput(input);
 		if (model === undefined) return false;
+		const languageDetectionModel =
+			model as unknown as PlainUntitledLanguageDetectionModel;
+		model.onDidChangeContent(() => {
+			// Upstream fires this public event immediately before it starts the same
+			// throttled detection. Joining the shared promise here gives its dispose-
+			// time CancellationError an owner when a fast Save As or close destroys
+			// the model inside the 600 ms throttle window.
+			void languageDetectionModel.autoDetectLanguage().catch(onUnexpectedError);
+		});
 		const closeHandler: IEditorCloseHandler = Object.freeze({
 			showConfirm: () => !input.isDisposed(),
 			confirm: async (editors: readonly IEditorIdentifier[]) => {
@@ -423,6 +445,12 @@ export function registerPlainUntitledWorkflow(
 			PLAIN_UNTITLED_COMMAND_IDS.newTextFile,
 			() => workflow.openNew(),
 		),
+		KeybindingsRegistry.registerKeybindingRule({
+			id: PLAIN_UNTITLED_COMMAND_IDS.newTextFile,
+			weight: KeybindingWeight.WorkbenchContrib + 1,
+			when: undefined,
+			primary: KeyMod.CtrlCmd | KeyCode.KeyN,
+		}),
 		CommandsRegistry.registerCommand(
 			PLAIN_UNTITLED_COMMAND_IDS.save,
 			(accessor, ...args) =>

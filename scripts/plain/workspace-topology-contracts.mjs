@@ -530,10 +530,13 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput",
 	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service",
 	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service",
+	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/errors",
+	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/keyCodes",
 	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
 	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands",
 	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs",
 	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service",
+	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/platform/keybinding/common/keybindingsRegistry",
 	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service",
 	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/editor",
 	"app/features/workspace/untitled-workflow.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/editor/editorInput",
@@ -5949,6 +5952,8 @@ export function validatePlainUntitledWorkflow(source) {
 		compact.split("CommandsRegistry.registerCommand(").length - 1;
 	const commandReadCount =
 		compact.split("CommandsRegistry.getCommand(").length - 1;
+	const keybindingRegistrationCount =
+		compact.split("KeybindingsRegistry.registerKeybindingRule(").length - 1;
 	const required = [
 		'newTextFile: "workbench.action.files.newUntitledFile"',
 		'save: "workbench.action.files.save"',
@@ -5972,12 +5977,16 @@ export function validatePlainUntitledWorkflow(source) {
 		"this.services.workingCopyBackupService.discardBackup(model)",
 		"const previousSave = CommandsRegistry.getCommand(PLAIN_UNTITLED_COMMAND_IDS.save,)",
 		"const previousSaveAs = CommandsRegistry.getCommand(PLAIN_UNTITLED_COMMAND_IDS.saveAs,)",
+		"KeybindingsRegistry.registerKeybindingRule({id: PLAIN_UNTITLED_COMMAND_IDS.newTextFile, weight: KeybindingWeight.WorkbenchContrib + 1, when: undefined, primary: KeyMod.CtrlCmd | KeyCode.KeyN,})",
+		"model.onDidChangeContent(() => {",
+		"languageDetectionModel.autoDetectLanguage().catch(onUnexpectedError)",
 	];
 	return (
 		!forbidden.test(source) &&
 		orderedAcceptance &&
 		commandRegistrationCount === 3 &&
 		commandReadCount === 2 &&
+		keybindingRegistrationCount === 1 &&
 		required.every(includesTokens)
 	);
 }
@@ -6116,11 +6125,17 @@ function validateTopologyAuthority(authority) {
 		},
 	);
 	const forbiddenWriterImports = constrainedPackageImports.filter(
-		({ statement }) =>
+		({ sourceFile, statement }) =>
 			descendants(statement, (node) => {
 				if (ts.isImportSpecifier(node) || ts.isExportSpecifier(node)) {
-					return FORBIDDEN_COMMAND_WRITER_IMPORTS.includes(
-						node.propertyName?.text ?? node.name.text,
+					const name = node.propertyName?.text ?? node.name.text;
+					return (
+						FORBIDDEN_COMMAND_WRITER_IMPORTS.includes(name) &&
+						!(
+							sourceFile.fileName ===
+								"app/features/workspace/untitled-workflow.ts" &&
+							name === "KeybindingsRegistry"
+						)
 					);
 				}
 				return (
