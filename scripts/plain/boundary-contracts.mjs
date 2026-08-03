@@ -3863,6 +3863,41 @@ function findRustSource(rustSources, expectedPath) {
 	)?.source;
 }
 
+export function validateWorkspaceSavePickerAuthority(rustSources) {
+	const failure =
+		"macOS Save As must keep file naming separate from an explicit parent-folder capability and never ambient-open the file-only selection";
+	const source = findRustSource(
+		rustSources,
+		"src-tauri/src/workspace/picker.rs",
+	);
+	if (typeof source !== "string") return [failure];
+	const compact = source.replaceAll(/\s+/g, " ");
+	const start = compact.indexOf(
+		'#[cfg(target_os = "macos")] fn authorize_macos_save_parent',
+	);
+	const end = compact.indexOf('#[cfg(any(target_os = "macos", test))]', start);
+	const macosAuthority =
+		start >= 0 && end > start ? compact.slice(start, end) : "";
+	const required = [
+		".blocking_save_file();",
+		"authorize_macos_save_parent(&window, path)",
+		'.set_title("Authorize Plain to Save in This Folder")',
+		".set_directory(parent)",
+		".blocking_pick_folder();",
+		"authorized_save_path(&path, selected_parent)",
+		"if !selected_parent.is_absolute()",
+		"Ok(selected_parent.join(file_name))",
+	];
+	return required.every((token) => compact.includes(token)) &&
+		macosAuthority.includes("SaveFilePickerResult::Cancelled") &&
+		macosAuthority.split(".blocking_pick_folder()").length - 1 === 1 &&
+		!/(?:Dir::open_ambient_dir|std::fs::canonicalize|\bcanonicalize\s*\()/u.test(
+			compact,
+		)
+		? []
+		: [failure];
+}
+
 export function validateWorkspaceCapabilitiesBoundary(rustSources, appSources) {
 	const failures = [];
 	const dto = findRustSource(rustSources, "src-tauri/src/workspace/dto.rs");

@@ -63,6 +63,7 @@ import {
 	validateWorkspaceProviderCopyBoundary,
 	validateViewPaneDependencyDecoratorBoundary,
 	validateWorkspaceRustBoundary,
+	validateWorkspaceSavePickerAuthority,
 	validateWorkspaceVersionedWriteBoundary,
 	validateWorkingCopyOverrideImportBoundary,
 } from "./boundary-contracts.mjs";
@@ -803,6 +804,9 @@ for (const failure of validateWorkspaceRustBoundary(
 	cargoDependencies,
 	resolvedSha2Features,
 )) {
+	fail(failure);
+}
+for (const failure of validateWorkspaceSavePickerAuthority(rustSources)) {
 	fail(failure);
 }
 for (const failure of validateWorkspaceVersionedWriteBoundary(

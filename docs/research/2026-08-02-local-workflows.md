@@ -27,6 +27,7 @@
 - 不启用 Tauri 通用 fs/shell capability，不把 `file:` URI 或 canonical path 发给 WebView。
 - 不用 localStorage/IndexedDB 冒充“Rust-owned persistence”；E2E 的 incognito WebView 会直接暴露这种伪持久化。
 - 不让 Open File 产生隐藏 ambient file handle；首版显式采用所选文件 parent 为 workspace root。
+- 不把 macOS `NSSavePanel` 返回的文件 URL 当作其父目录授权；Plain 的同目录 no-replace stage、目录 `fsync`、watcher 与后续编辑都需要目录 capability，因此文件名选择后必须再显示一次原生目录选择器，第二次结果才是最终 parent authority。
 - 不把 Trash 失败回退成 permanent delete，不复用 `confirmed:boolean`，不声称操作系统 pathname API 具有 handle-relative unlink 的同等竞态保证。
 - 不为了 Untitled 恢复上游通用 workspace/host lifecycle；只复用其文本模型语义。
 
@@ -43,7 +44,7 @@
 
 - 原生 Open File/Save picker 不泄漏绝对路径到 WebView；冷启动恢复 last workspace，Recent 反序选择正确。
 - settings/keybindings 在真实进程退出后仍生效；Auto Save 对真实 APFS 文件按配置延迟写入。
-- Untitled 经 Cmd+Q 与 kill-9 恢复，Save As 后 scratch 清空且目标字节精确。
+- Untitled 经 Cmd+Q 与 kill-9 恢复；macOS Save As 的文件名与父目录授权两步中任一步取消都保持 dirty/scratch 且零目标写入，显式目录授权后目标字节精确、scratch 清空。
 - 新窗口拥有独立 root/dirty buffer，关闭或退出不清理另一窗口状态。
 - Trash 先取消再确认：取消零磁盘副作用，确认后 Finder Trash 中可见且 workspace 原路径消失；注入/制造失败时原文件保留，永久删除 command 调用数为零。
 

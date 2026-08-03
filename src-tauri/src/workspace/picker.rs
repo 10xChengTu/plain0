@@ -160,11 +160,63 @@ fn pick_save_file_blocking(
         .set_title("Save Plain Untitled File")
         .set_file_name(suggested_name)
         .blocking_save_file();
-    selected.map_or(Ok(SaveFilePickerResult::Cancelled), |path| {
-        path.into_path()
-            .map(SaveFilePickerResult::Selected)
-            .map_err(|_| save_file_picker_path_unavailable())
-    })
+    let Some(path) = selected else {
+        return Ok(SaveFilePickerResult::Cancelled);
+    };
+    let path = path
+        .into_path()
+        .map_err(|_| save_file_picker_path_unavailable())?;
+    #[cfg(target_os = "macos")]
+    {
+        authorize_macos_save_parent(&window, path)
+    }
+    #[cfg(not(target_os = "macos"))]
+    Ok(SaveFilePickerResult::Selected(path))
+}
+
+#[cfg(target_os = "macos")]
+fn authorize_macos_save_parent(
+    window: &WebviewWindow,
+    path: PathBuf,
+) -> Result<SaveFilePickerResult, CommandError> {
+    let parent = path
+        .parent()
+        .filter(|parent| parent.is_absolute())
+        .ok_or_else(save_file_picker_path_unavailable)?;
+    // NSSavePanel extends macOS access only to the selected file URL. Plain's
+    // no-replace stage, directory fsync, watcher and future edits require a
+    // real parent-directory capability, so a separate folder selection is
+    // the authority. Its result also decides the final parent if the user
+    // deliberately changes folders here; cancellation never authorizes or
+    // writes anything.
+    let selected_parent = window
+        .dialog()
+        .file()
+        .set_parent(window)
+        .set_title("Authorize Plain to Save in This Folder")
+        .set_directory(parent)
+        .blocking_pick_folder();
+    let Some(selected_parent) = selected_parent else {
+        return Ok(SaveFilePickerResult::Cancelled);
+    };
+    let selected_parent = selected_parent
+        .into_path()
+        .map_err(|_| save_file_picker_path_unavailable())?;
+    authorized_save_path(&path, selected_parent)
+        .map(SaveFilePickerResult::Selected)
+        .map_err(|_| save_file_picker_path_unavailable())
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn authorized_save_path(
+    requested_path: &std::path::Path,
+    selected_parent: PathBuf,
+) -> Result<PathBuf, ()> {
+    let file_name = requested_path.file_name().ok_or(())?;
+    if !selected_parent.is_absolute() {
+        return Err(());
+    }
+    Ok(selected_parent.join(file_name))
 }
 
 #[cfg(mobile)]
@@ -228,4 +280,28 @@ fn save_file_picker_path_unavailable() -> CommandError {
         "WORKSPACE_SAVE_TARGET_UNAVAILABLE",
         "The selected save target is unavailable.",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::authorized_save_path;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn macos_save_authority_keeps_the_name_but_uses_the_explicit_folder() {
+        assert_eq!(
+            authorized_save_path(
+                Path::new("/untrusted/first-choice/note.txt"),
+                PathBuf::from("/authorized/final-choice"),
+            )
+            .unwrap(),
+            PathBuf::from("/authorized/final-choice/note.txt"),
+        );
+        assert!(authorized_save_path(
+            Path::new("/untrusted/first-choice/note.txt"),
+            PathBuf::from("relative-folder"),
+        )
+        .is_err());
+        assert!(authorized_save_path(Path::new("/"), PathBuf::from("/authorized")).is_err());
+    }
 }

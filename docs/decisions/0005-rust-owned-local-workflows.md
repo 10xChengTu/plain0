@@ -42,7 +42,7 @@ F170 开始前的真实产品状态与“打开文件、最近项目、本地设
 
 - 新建文本使用 Workbench 的 untitled working-copy/model 语义，不重新实现 Monaco 文本模型。
 - Untitled hot-exit 内容进入独立的 app-data scratch 分区，使用 Rust 生成的稳定 scratch id；它不伪造 workspace root，也不进入搜索、Git、PTY 或 DAP。
-- Save As 只能调用 Rust save picker。新目标以 capability-relative no-replace create 发布；已存在目标必须先取得当前 version receipt并显示显式覆盖确认，再走正常 versioned-write 合同。取消、拒绝或冲突时原 Untitled 保持 dirty。
+- Save As 只能调用 Rust save picker。macOS 的 `NSSavePanel` 文件选择只决定文件名与候选位置，不得把所选文件 URL 隐式升级为父目录 capability；文件名确定后必须再由原生目录选择器显式取得父目录授权，第二次选择的目录是最终 parent authority，任一步取消都不得改变 topology 或写入字节。新目标以 capability-relative no-replace create 发布；已存在目标必须先取得当前 version receipt并显示显式覆盖确认，再走正常 versioned-write 合同。取消、拒绝或冲突时原 Untitled 保持 dirty。
 - 只有目标字节成功发布并由 provider 接纳后才替换/关闭 Untitled editor；任何失败不得先 discard scratch backup。
 
 ### 5. New Window 是固定应用窗口，不是通用 host navigation
@@ -61,6 +61,8 @@ F170 开始前的真实产品状态与“打开文件、最近项目、本地设
 
 平台依据：
 
+- Apple App Sandbox 文件访问：<https://developer.apple.com/documentation/security/accessing-files-from-the-macos-app-sandbox>
+- Apple `NSSavePanel`：<https://developer.apple.com/documentation/appkit/nssavepanel>
 - Apple Foundation：<https://developer.apple.com/documentation/foundation/filemanager/trashitem%28at%3Aresultingitemurl%3A%29>
 - Windows Shell `IFileOperation`：<https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-ifileoperation-deleteitems>
 - freedesktop.org Trash 1.0：<https://specifications.freedesktop.org/trash/latest/>

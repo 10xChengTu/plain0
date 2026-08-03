@@ -31,6 +31,7 @@ import {
 	validateWorkspaceProviderBootstrap,
 	validateWorkspaceProviderCopyBoundary,
 	validateWorkspaceRustBoundary as validateWorkspaceRustBoundaryContract,
+	validateWorkspaceSavePickerAuthority,
 	validateWorkspaceVersionedWriteBoundary,
 	validateWorkspaceWatcherBoundary,
 	validateWorkingCopyOverrideImportBoundary,
@@ -1591,6 +1592,36 @@ const unused = {
 		).toContain(
 			"native bridge must invoke workspace_capabilities once with an empty request and strictly decode it",
 		);
+	});
+});
+
+describe("workspace Save As picker authority", () => {
+	const relativePath = "src-tauri/src/workspace/picker.rs";
+	const production = readFileSync(
+		new URL(`../../${relativePath}`, import.meta.url),
+		"utf8",
+	);
+	const validate = (source) =>
+		validateWorkspaceSavePickerAuthority([{ relativePath, source }]);
+
+	it("requires the macOS file-name picker to be followed by explicit folder authority", () => {
+		expect(validate(production)).toEqual([]);
+		for (const [from, to] of [
+			[
+				'"Authorize Plain to Save in This Folder"',
+				'"Save Plain Untitled File"',
+			],
+			[".blocking_pick_folder();", ".blocking_save_file();"],
+			["selected_parent.join(file_name)", "requested_path.to_path_buf()"],
+			[
+				"let parent = path",
+				"let _ambient = std::fs::canonicalize(&path);\n    let parent = path",
+			],
+		]) {
+			const mutated = production.replace(from, to);
+			expect(mutated).not.toBe(production);
+			expect(validate(mutated)).not.toEqual([]);
+		}
 	});
 });
 
