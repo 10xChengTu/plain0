@@ -114,6 +114,9 @@ function testBridge(
 		async workspaceOpenFiles() {
 			throw new Error("unused");
 		},
+		async workspacePickSaveTarget() {
+			throw new Error("unused");
+		},
 		async workspaceRecentList() {
 			throw new Error("unused");
 		},
@@ -162,6 +165,9 @@ function testBridge(
 			throw new Error("unused");
 		},
 		async workspaceWriteFile() {
+			throw new Error("unused");
+		},
+		async workspacePublishFile() {
 			throw new Error("unused");
 		},
 		async workspaceSearchFiles() {

@@ -217,6 +217,9 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async workspaceOpenFiles() {
 			throw new Error("unused");
 		},
+		async workspacePickSaveTarget() {
+			throw new Error("unused");
+		},
 		async workspaceRecentList() {
 			throw new Error("unused");
 		},
@@ -284,6 +287,9 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 			);
 		},
 		async workspaceWriteFile() {
+			throw new Error("unused");
+		},
+		async workspacePublishFile() {
 			throw new Error("unused");
 		},
 		async workspaceSearchFiles() {

@@ -33,6 +33,19 @@ pub trait FilePicker: Send + Sync {
     fn pick_files(&self) -> FilePickerFuture<'_>;
 }
 
+pub type SaveFilePickerFuture<'picker> =
+    Pin<Box<dyn Future<Output = Result<SaveFilePickerResult, CommandError>> + Send + 'picker>>;
+
+#[derive(Debug)]
+pub enum SaveFilePickerResult {
+    Selected(PathBuf),
+    Cancelled,
+}
+
+pub trait SaveFilePicker: Send + Sync {
+    fn pick_file(&self, suggested_name: &str) -> SaveFilePickerFuture<'_>;
+}
+
 #[derive(Clone)]
 pub struct TauriDirectoryPicker {
     window: WebviewWindow,
@@ -79,6 +92,20 @@ impl FilePicker for TauriFilePicker {
     }
 }
 
+impl SaveFilePicker for TauriFilePicker {
+    fn pick_file(&self, suggested_name: &str) -> SaveFilePickerFuture<'_> {
+        let window = self.window.clone();
+        let suggested_name = suggested_name.to_owned();
+        Box::pin(async move {
+            tauri::async_runtime::spawn_blocking(move || {
+                pick_save_file_blocking(window, &suggested_name)
+            })
+            .await
+            .map_err(|_| save_file_picker_failed())?
+        })
+    }
+}
+
 #[cfg(desktop)]
 fn pick_directories_blocking(
     window: WebviewWindow,
@@ -121,6 +148,25 @@ fn pick_files_blocking(window: WebviewWindow) -> Result<FilePickerResult, Comman
     })
 }
 
+#[cfg(desktop)]
+fn pick_save_file_blocking(
+    window: WebviewWindow,
+    suggested_name: &str,
+) -> Result<SaveFilePickerResult, CommandError> {
+    let selected = window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Save Plain Untitled File")
+        .set_file_name(suggested_name)
+        .blocking_save_file();
+    selected.map_or(Ok(SaveFilePickerResult::Cancelled), |path| {
+        path.into_path()
+            .map(SaveFilePickerResult::Selected)
+            .map_err(|_| save_file_picker_path_unavailable())
+    })
+}
+
 #[cfg(mobile)]
 fn pick_directories_blocking(
     _window: WebviewWindow,
@@ -132,6 +178,14 @@ fn pick_directories_blocking(
 #[cfg(mobile)]
 fn pick_files_blocking(_window: WebviewWindow) -> Result<FilePickerResult, CommandError> {
     Err(file_picker_failed())
+}
+
+#[cfg(mobile)]
+fn pick_save_file_blocking(
+    _window: WebviewWindow,
+    _suggested_name: &str,
+) -> Result<SaveFilePickerResult, CommandError> {
+    Err(save_file_picker_failed())
 }
 
 fn picker_failed() -> CommandError {
@@ -159,5 +213,19 @@ fn file_picker_path_unavailable() -> CommandError {
     CommandError::new(
         "WORKSPACE_FILE_UNAVAILABLE",
         "The selected file is unavailable.",
+    )
+}
+
+fn save_file_picker_failed() -> CommandError {
+    CommandError::new(
+        "WORKSPACE_SAVE_PICK_FAILED",
+        "The save file picker could not be completed.",
+    )
+}
+
+fn save_file_picker_path_unavailable() -> CommandError {
+    CommandError::new(
+        "WORKSPACE_SAVE_TARGET_UNAVAILABLE",
+        "The selected save target is unavailable.",
     )
 }

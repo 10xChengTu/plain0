@@ -15,7 +15,7 @@ use crate::workspace::dto::{
 };
 use crate::workspace::picker::{
     DirectoryPicker, DirectoryPickerFuture, DirectoryPickerResult, FilePicker, FilePickerFuture,
-    FilePickerResult,
+    FilePickerResult, SaveFilePicker, SaveFilePickerFuture, SaveFilePickerResult,
 };
 use crate::workspace::{RootId, MAX_WORKSPACE_ROOTS};
 
@@ -101,6 +101,35 @@ impl FakeFilePicker {
 
 impl FilePicker for FakeFilePicker {
     fn pick_files(&self) -> FilePickerFuture<'_> {
+        let outcome = self.outcome.lock().unwrap().take().unwrap();
+        Box::pin(async move { Ok(outcome) })
+    }
+}
+
+struct FakeSaveFilePicker {
+    expected_suggested_name: String,
+    outcome: Mutex<Option<SaveFilePickerResult>>,
+}
+
+impl FakeSaveFilePicker {
+    fn selected(expected_suggested_name: &str, path: PathBuf) -> Self {
+        Self {
+            expected_suggested_name: expected_suggested_name.to_owned(),
+            outcome: Mutex::new(Some(SaveFilePickerResult::Selected(path))),
+        }
+    }
+
+    fn cancelled(expected_suggested_name: &str) -> Self {
+        Self {
+            expected_suggested_name: expected_suggested_name.to_owned(),
+            outcome: Mutex::new(Some(SaveFilePickerResult::Cancelled)),
+        }
+    }
+}
+
+impl SaveFilePicker for FakeSaveFilePicker {
+    fn pick_file(&self, suggested_name: &str) -> SaveFilePickerFuture<'_> {
+        assert_eq!(suggested_name, self.expected_suggested_name);
         let outcome = self.outcome.lock().unwrap().take().unwrap();
         Box::pin(async move { Ok(outcome) })
     }
@@ -283,6 +312,100 @@ fn one_invalid_open_file_rejects_the_complete_parent_adoption() {
     .unwrap_err();
     assert_eq!(error.code(), "WORKSPACE_FILE_UNAVAILABLE");
     assert!(service.snapshot("main").unwrap().roots().is_empty());
+}
+
+#[test]
+fn save_target_cancel_preserves_topology_and_selection_adopts_only_the_parent() {
+    let temp = TempDir::new().unwrap();
+    let parent = create_directory(&temp, "save-parent");
+    let service = WorkspaceService::new();
+    let before = service.snapshot("main").unwrap();
+
+    let cancelled = block_on(service.pick_save_target_with_watch_sink(
+        "main",
+        FakeSaveFilePicker::cancelled("Untitled-1.txt"),
+        "Untitled-1.txt".to_owned(),
+        Arc::new(|_| {}),
+    ))
+    .unwrap();
+    assert_eq!(cancelled.status(), WorkspacePickRootsStatus::Cancelled);
+    assert_eq!(cancelled.snapshot(), &before);
+    assert!(cancelled.target().is_none());
+
+    let selected = block_on(service.pick_save_target_with_watch_sink(
+        "main",
+        FakeSaveFilePicker::selected("Untitled-1.txt", parent.join("draft.txt")),
+        "Untitled-1.txt".to_owned(),
+        Arc::new(|_| {}),
+    ))
+    .unwrap();
+    let target = selected.target().unwrap();
+    assert_eq!(selected.status(), WorkspacePickRootsStatus::Selected);
+    assert_eq!(selected.snapshot().roots().len(), 1);
+    assert_eq!(target.root_id(), selected.snapshot().roots()[0].root_id());
+    assert_eq!(target.relative_path().as_wire(), "draft.txt");
+    assert!(target.existing_stat().is_none());
+    assert!(!parent.join("draft.txt").exists());
+}
+
+#[test]
+fn save_target_returns_the_existing_version_receipt_without_writing() {
+    let temp = TempDir::new().unwrap();
+    let parent = create_directory(&temp, "save-parent");
+    let target_path = parent.join("existing.txt");
+    std::fs::write(&target_path, b"old bytes").unwrap();
+    let service = WorkspaceService::new();
+
+    let selected = block_on(service.pick_save_target_with_watch_sink(
+        "main",
+        FakeSaveFilePicker::selected("existing.txt", target_path.clone()),
+        "existing.txt".to_owned(),
+        Arc::new(|_| {}),
+    ))
+    .unwrap();
+    let target = selected.target().unwrap();
+    let stat = target.existing_stat().unwrap();
+    assert_eq!(stat.kind(), WorkspaceEntryKind::File);
+    assert!(stat.version().is_some());
+    assert_eq!(std::fs::read(target_path).unwrap(), b"old bytes");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn save_target_new_file_publication_is_exact_and_no_replace() {
+    let temp = TempDir::new().unwrap();
+    let parent = create_directory(&temp, "save-parent");
+    let target_path = parent.join("draft.bin");
+    let service = WorkspaceService::new();
+    let selected = block_on(service.pick_save_target_with_watch_sink(
+        "main",
+        FakeSaveFilePicker::selected("draft.bin", target_path.clone()),
+        "draft.bin".to_owned(),
+        Arc::new(|_| {}),
+    ))
+    .unwrap();
+    let target = selected.target().unwrap();
+    let content = vec![0, 0x41, 0xff, 0x0a];
+
+    let result = block_on(service.publish_file(
+        "main",
+        target.root_id(),
+        target.relative_path().clone(),
+        content.clone(),
+    ))
+    .unwrap();
+    assert_eq!(result.written_stat().unwrap().size(), content.len() as u64);
+    assert_eq!(std::fs::read(&target_path).unwrap(), content);
+
+    let error = block_on(service.publish_file(
+        "main",
+        target.root_id(),
+        target.relative_path().clone(),
+        b"replacement".to_vec(),
+    ))
+    .unwrap_err();
+    assert_eq!(error.code(), "ENTRY_ALREADY_EXISTS");
+    assert_eq!(std::fs::read(target_path).unwrap(), [0, 0x41, 0xff, 0x0a]);
 }
 
 #[test]

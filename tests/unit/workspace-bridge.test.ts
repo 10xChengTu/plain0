@@ -58,6 +58,38 @@ describe("browser mock workspace bridge", () => {
 		});
 	});
 
+	it("authorizes the selected Save As parent, preserves cancellation, and reports existing receipts", async () => {
+		const bridge = createBrowserMockBridge({
+			workspaceSavePicks: [
+				{ status: "cancelled" },
+				{ status: "selected", rootIndex: 1, name: "draft.txt" },
+				{ status: "selected", rootIndex: 0, name: "README.md" },
+			],
+		});
+		const before = await bridge.workspaceSnapshot();
+		const cancelled = await bridge.workspacePickSaveTarget("Untitled-1.txt");
+		expect(cancelled).toEqual({
+			status: "cancelled",
+			snapshot: before,
+			target: null,
+		});
+
+		const fresh = await bridge.workspacePickSaveTarget("Untitled-1.txt");
+		expect(fresh.snapshot.revision).toBe(1);
+		expect(fresh.snapshot.roots[0]?.displayName).toBe("plain-library");
+		expect(fresh.target).toMatchObject({
+			relativePath: "draft.txt",
+			existingStat: null,
+		});
+		const existing = await bridge.workspacePickSaveTarget("ignored.txt");
+		expect(existing.snapshot.revision).toBe(2);
+		expect(existing.target?.existingStat).toMatchObject({
+			kind: "file",
+			version: expect.stringMatching(workspaceVersionPattern),
+		});
+		expect(Object.isFrozen(existing.target?.existingStat)).toBe(true);
+	});
+
 	it("returns deeply frozen copies rather than mutable mock state", async () => {
 		const bridge = createBrowserMockBridge();
 		const first = await bridge.workspacePickRoots("add");
@@ -281,6 +313,51 @@ describe("browser mock workspace bridge", () => {
 			expect(second.stat.size).toBe(0);
 			expect(second.stat.version).not.toBe(first.stat.version);
 		}
+	});
+
+	it("publishes a new file atomically and never replaces an existing target", async () => {
+		const bridge = createBrowserMockBridge({
+			workspaceSavePicks: [
+				{ status: "selected", rootIndex: 1, name: "draft.bin" },
+			],
+		});
+		const picked = await bridge.workspacePickSaveTarget("Untitled-1.txt");
+		const target = picked.target!;
+		const backing = new Uint8Array([9, 0, 0x41, 0xff, 0x0a, 9]);
+		const content = backing.subarray(1, 5);
+		const published = await bridge.workspacePublishFile(
+			target.rootId,
+			target.relativePath,
+			content,
+		);
+		backing.fill(7);
+
+		expect(published.status).toBe("written");
+		if (published.status !== "written") {
+			throw new Error("Expected new-file publication to finish.");
+		}
+		expect(published.stat).toMatchObject({
+			kind: "file",
+			size: 4,
+			version: expect.stringMatching(workspaceVersionPattern),
+		});
+		expect(
+			(
+				await bridge.workspaceReadFile(target.rootId, target.relativePath)
+			).value.copy(),
+		).toEqual(Uint8Array.from([0, 0x41, 0xff, 0x0a]));
+		await expect(
+			bridge.workspacePublishFile(
+				target.rootId,
+				target.relativePath,
+				new Uint8Array([1]),
+			),
+		).rejects.toMatchObject({ code: "ENTRY_ALREADY_EXISTS" });
+		expect(
+			(
+				await bridge.workspaceReadFile(target.rootId, target.relativePath)
+			).value.copy(),
+		).toEqual(Uint8Array.from([0, 0x41, 0xff, 0x0a]));
 	});
 
 	it("treats deletion after a versioned read as modification, never create", async () => {

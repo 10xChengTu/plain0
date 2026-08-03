@@ -118,6 +118,10 @@ impl WorkspaceReadFileReceipt {
         }
         Ok(frame)
     }
+
+    pub(crate) fn into_parts(self) -> (WorkspaceEntryStat, Vec<u8>) {
+        (self.stat, self.content)
+    }
 }
 
 fn valid_receipt_version(kind: WorkspaceEntryKind, version: Option<&str>) -> bool {

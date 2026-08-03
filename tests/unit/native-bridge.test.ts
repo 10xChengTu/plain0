@@ -319,6 +319,114 @@ describe("native Plain bridge", () => {
 		}
 	});
 
+	it("binds Save As selection to an authorized target and dispatches one exact PLN1 frame", async () => {
+		const contentBacking = new Uint8Array([9, 0, 0x41, 0xff, 0x0a, 9]);
+		const content = contentBacking.subarray(1, 5);
+		let dispatchedFrame: Uint8Array | undefined;
+		tauri.invoke
+			.mockResolvedValueOnce({
+				status: "selected",
+				snapshot: validSnapshot(),
+				target: {
+					rootId,
+					relativePath: "draft.txt",
+					existingStat: null,
+				},
+			})
+			.mockImplementationOnce((command, raw) => {
+				expect(command).toBe("workspace_publish_file");
+				dispatchedFrame = raw as Uint8Array;
+				contentBacking.fill(7);
+				return Promise.resolve(validWrittenResult());
+			});
+		const bridge = createNativeBridge();
+
+		const picked = await bridge.workspacePickSaveTarget("draft.txt");
+		const published = await bridge.workspacePublishFile(
+			rootId,
+			"draft.txt",
+			content,
+		);
+
+		expect(tauri.invoke.mock.calls[0]).toEqual([
+			"workspace_pick_save_target",
+			{ request: { suggestedName: "draft.txt" } },
+		]);
+		expect(Object.isFrozen(tauri.invoke.mock.calls[0]?.[1]?.request)).toBe(
+			true,
+		);
+		expect(picked.target).toEqual({
+			rootId,
+			relativePath: "draft.txt",
+			existingStat: null,
+		});
+		expect(Object.isFrozen(picked.target)).toBe(true);
+		expect(dispatchedFrame?.slice(0, 4)).toEqual(
+			Uint8Array.from([0x50, 0x4c, 0x4e, 0x31]),
+		);
+		const frameView = new DataView(
+			dispatchedFrame!.buffer,
+			dispatchedFrame!.byteOffset,
+			dispatchedFrame!.byteLength,
+		);
+		expect(frameView.getUint16(4, false)).toBe(36);
+		expect(frameView.getUint16(6, false)).toBe(9);
+		expect(frameView.getUint32(8, false)).toBe(4);
+		expect(dispatchedFrame?.slice(-4)).toEqual(
+			Uint8Array.from([0, 0x41, 0xff, 0x0a]),
+		);
+		expect(dispatchedFrame?.byteOffset).toBe(0);
+		expect(published).toEqual(validWrittenResult());
+	});
+
+	it("rejects malformed Save As requests locally and preserves safe publication collisions", async () => {
+		const bridge = createNativeBridge();
+		for (const name of ["", "nested/file.txt", "..", "a".repeat(256)]) {
+			await expect(bridge.workspacePickSaveTarget(name)).rejects.toMatchObject({
+				code: "WORKSPACE_SAVE_TARGET_REQUEST_INVALID",
+			});
+		}
+		expect(tauri.invoke).not.toHaveBeenCalled();
+
+		const collision = {
+			code: "ENTRY_ALREADY_EXISTS",
+			message: "The workspace entry already exists.",
+		};
+		tauri.invoke.mockRejectedValueOnce(collision);
+		await expect(
+			bridge.workspacePublishFile(rootId, "draft.txt", new Uint8Array()),
+		).rejects.toEqual(collision);
+
+		const publishedButChanged = {
+			status: "targetPublished",
+			publicationEvidence: "renameReportedSuccess",
+			rename: "reportedSuccess",
+			directorySync: "synced",
+			target: "changed",
+		};
+		tauri.invoke.mockResolvedValueOnce(publishedButChanged);
+		await expect(
+			bridge.workspacePublishFile(rootId, "draft.txt", new Uint8Array()),
+		).resolves.toEqual(publishedButChanged);
+
+		tauri.invoke.mockResolvedValueOnce({
+			status: "targetPublished",
+			publicationEvidence: "targetObservedWritten",
+			rename: "reportedFailure",
+			directorySync: "failed",
+			target: "changed",
+		});
+		await expect(
+			bridge.workspacePublishFile(rootId, "draft.txt", new Uint8Array()),
+		).resolves.toEqual({
+			status: "outcomeUnknown",
+			observation: "responseUnavailable",
+			rename: "unobserved",
+			directorySync: "unobserved",
+			target: "ambiguous",
+		});
+	});
+
 	it("rejects invalid recent ids before native invocation", async () => {
 		const bridge = createNativeBridge();
 		for (const recentId of ["not-an-id", "/Users/private"]) {

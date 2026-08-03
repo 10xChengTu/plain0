@@ -10,11 +10,11 @@ use super::dto::{
     WorkspaceDeleteBatchRequest, WorkspaceDeleteResult, WorkspaceEntryRequest, WorkspaceEntryStat,
     WorkspaceMoveRequest, WorkspaceMoveResult, WorkspaceOpenFilesRequest, WorkspaceOpenFilesResult,
     WorkspaceOpenRecentRequest, WorkspacePickRootsRequest, WorkspacePickRootsResult,
-    WorkspacePickRootsStatus, WorkspacePrepareDeleteRequest, WorkspaceReadDirectoryResult,
-    WorkspaceRecentListRequest, WorkspaceRecentListResult, WorkspaceRemoveRecentRequest,
-    WorkspaceRemoveRootRequest, WorkspaceRenameRequest, WorkspaceSnapshot,
-    WorkspaceSnapshotRequest, WorkspaceWatchSyncRequest, WorkspaceWatchSyncResult,
-    WorkspaceWatchWakeEvent, WorkspaceWriteResult,
+    WorkspacePickRootsStatus, WorkspacePickSaveTargetRequest, WorkspacePickSaveTargetResult,
+    WorkspacePrepareDeleteRequest, WorkspaceReadDirectoryResult, WorkspaceRecentListRequest,
+    WorkspaceRecentListResult, WorkspaceRemoveRecentRequest, WorkspaceRemoveRootRequest,
+    WorkspaceRenameRequest, WorkspaceSnapshot, WorkspaceSnapshotRequest, WorkspaceWatchSyncRequest,
+    WorkspaceWatchSyncResult, WorkspaceWatchWakeEvent, WorkspaceWriteResult,
 };
 use super::picker::{TauriDirectoryPicker, TauriFilePicker};
 use super::service::WorkspaceService;
@@ -126,6 +126,27 @@ pub(crate) async fn workspace_open_files(
         .pick_files_with_watch_sink(
             window.label(),
             TauriFilePicker::new(window.clone()),
+            workspace_watch_wake_sink(&window),
+        )
+        .await?;
+    if result.status() == WorkspacePickRootsStatus::Selected {
+        record_current_workspace(window.label(), service.inner(), history.inner()).await?;
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub(crate) async fn workspace_pick_save_target(
+    window: WebviewWindow,
+    service: State<'_, WorkspaceService>,
+    history: State<'_, WorkspaceHistoryService>,
+    request: WorkspacePickSaveTargetRequest,
+) -> Result<WorkspacePickSaveTargetResult, CommandError> {
+    let result = service
+        .pick_save_target_with_watch_sink(
+            window.label(),
+            TauriFilePicker::new(window.clone()),
+            request.into_suggested_name()?,
             workspace_watch_wake_sink(&window),
         )
         .await?;
@@ -270,6 +291,19 @@ pub(crate) async fn workspace_write_file(
             expected_version,
             content,
         )
+        .await
+}
+
+#[tauri::command]
+pub(crate) async fn workspace_publish_file(
+    window: WebviewWindow,
+    service: State<'_, WorkspaceService>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<WorkspaceWriteResult, CommandError> {
+    let frame = super::publish_frame::WorkspacePublishFileFrame::parse_invoke_body(request.body())?;
+    let (root_id, relative_path, content) = frame.into_parts();
+    service
+        .publish_file(window.label(), root_id, relative_path, content)
         .await
 }
 

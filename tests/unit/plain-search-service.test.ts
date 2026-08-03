@@ -62,6 +62,7 @@ function fakeBridge(
 		workspaceWatch: notImplemented,
 		workspacePickRoots: notImplemented,
 		workspaceOpenFiles: notImplemented,
+		workspacePickSaveTarget: notImplemented,
 		workspaceRecentList: notImplemented,
 		workspaceOpenRecent: notImplemented,
 		workspaceRemoveRecent: notImplemented,
@@ -80,6 +81,7 @@ function fakeBridge(
 		workspaceReadDirectory: notImplemented,
 		workspaceReadFile: notImplemented,
 		workspaceWriteFile: notImplemented,
+		workspacePublishFile: notImplemented,
 		workspaceSearchFiles,
 		workspaceSearchTextStart: notImplemented,
 		workspaceSearchTextPoll: notImplemented,
@@ -217,6 +219,7 @@ function fakeTextSearchBridge(
 		workspaceWatch: notImplemented,
 		workspacePickRoots: notImplemented,
 		workspaceOpenFiles: notImplemented,
+		workspacePickSaveTarget: notImplemented,
 		workspaceRecentList: notImplemented,
 		workspaceOpenRecent: notImplemented,
 		workspaceRemoveRecent: notImplemented,
@@ -235,6 +238,7 @@ function fakeTextSearchBridge(
 		workspaceReadDirectory: notImplemented,
 		workspaceReadFile: notImplemented,
 		workspaceWriteFile: notImplemented,
+		workspacePublishFile: notImplemented,
 		workspaceSearchFiles: notImplemented,
 		async workspaceSearchTextStart(request) {
 			startCalls.push(request);

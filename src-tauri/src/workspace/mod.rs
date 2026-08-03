@@ -22,7 +22,10 @@ pub(crate) mod directory_copy;
 pub mod dto;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod move_entry;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod new_file_publisher;
 pub mod picker;
+pub(crate) mod publish_frame;
 pub(crate) mod reader;
 pub mod service;
 pub(crate) mod version;
@@ -675,6 +678,11 @@ pub(crate) struct PreparedOpenFileSelection {
     pub(crate) relative_path: RelativePath,
 }
 
+pub(crate) struct PreparedSaveFileSelection {
+    pub(crate) parent: PathBuf,
+    pub(crate) relative_path: RelativePath,
+}
+
 impl PreparedWorkspaceRoot {
     fn lease(&self, root_id: RootId) -> Result<WorkspaceRootLease, CommandError> {
         let directory = self
@@ -812,6 +820,33 @@ pub(crate) fn prepare_open_file_selections(
     Ok(prepared)
 }
 
+pub(crate) fn prepare_save_file_selection(
+    path: PathBuf,
+) -> Result<PreparedSaveFileSelection, CommandError> {
+    if !path.is_absolute() {
+        return Err(workspace_save_target_unavailable());
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| parent.is_absolute())
+        .ok_or_else(workspace_save_target_unavailable)?;
+    let file_name = path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or_else(workspace_save_target_unavailable)?;
+    let relative_path =
+        RelativePath::parse_wire(file_name).map_err(|_| workspace_save_target_unavailable())?;
+    if relative_path.is_root() || relative_path.as_wire().contains('/') {
+        return Err(workspace_save_target_unavailable());
+    }
+    let candidate =
+        prepare_workspace_root(parent).map_err(|_| workspace_save_target_unavailable())?;
+    Ok(PreparedSaveFileSelection {
+        parent: candidate.watch_path,
+        relative_path,
+    })
+}
+
 fn next_revision(current: u64) -> Result<u64, CommandError> {
     current.checked_add(1).ok_or_else(workspace_conflict)
 }
@@ -908,6 +943,13 @@ fn workspace_file_unavailable() -> CommandError {
     CommandError::new(
         "WORKSPACE_FILE_UNAVAILABLE",
         "The selected file is unavailable.",
+    )
+}
+
+fn workspace_save_target_unavailable() -> CommandError {
+    CommandError::new(
+        "WORKSPACE_SAVE_TARGET_UNAVAILABLE",
+        "The selected save target is unavailable.",
     )
 }
 

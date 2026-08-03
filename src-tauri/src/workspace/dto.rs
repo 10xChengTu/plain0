@@ -186,6 +186,91 @@ impl WorkspaceOpenFilesResult {
     }
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspacePickSaveTargetRequest {
+    suggested_name: String,
+}
+
+impl WorkspacePickSaveTargetRequest {
+    pub(crate) fn into_suggested_name(self) -> Result<String, CommandError> {
+        let path = RelativePath::parse_wire(&self.suggested_name)
+            .map_err(|_| workspace_save_target_request_invalid())?;
+        if path.is_root() || self.suggested_name.len() > 255 || self.suggested_name.contains('/') {
+            return Err(workspace_save_target_request_invalid());
+        }
+        Ok(self.suggested_name)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSaveTarget {
+    root_id: RootId,
+    relative_path: RelativePath,
+    existing_stat: Option<WorkspaceEntryStat>,
+}
+
+impl WorkspaceSaveTarget {
+    pub(crate) const fn new(
+        root_id: RootId,
+        relative_path: RelativePath,
+        existing_stat: Option<WorkspaceEntryStat>,
+    ) -> Self {
+        Self {
+            root_id,
+            relative_path,
+            existing_stat,
+        }
+    }
+
+    pub const fn root_id(&self) -> RootId {
+        self.root_id
+    }
+
+    pub fn relative_path(&self) -> &RelativePath {
+        &self.relative_path
+    }
+
+    pub const fn existing_stat(&self) -> Option<&WorkspaceEntryStat> {
+        self.existing_stat.as_ref()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspacePickSaveTargetResult {
+    status: WorkspacePickRootsStatus,
+    snapshot: WorkspaceSnapshot,
+    target: Option<WorkspaceSaveTarget>,
+}
+
+impl WorkspacePickSaveTargetResult {
+    pub(crate) const fn new(
+        status: WorkspacePickRootsStatus,
+        snapshot: WorkspaceSnapshot,
+        target: Option<WorkspaceSaveTarget>,
+    ) -> Self {
+        Self {
+            status,
+            snapshot,
+            target,
+        }
+    }
+
+    pub const fn status(&self) -> WorkspacePickRootsStatus {
+        self.status
+    }
+
+    pub const fn snapshot(&self) -> &WorkspaceSnapshot {
+        &self.snapshot
+    }
+
+    pub const fn target(&self) -> Option<&WorkspaceSaveTarget> {
+        self.target.as_ref()
+    }
+}
+
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct WorkspaceRecentId(Uuid);
 
@@ -586,6 +671,13 @@ fn workspace_recent_request_invalid() -> CommandError {
     CommandError::new(
         "WORKSPACE_RECENT_REQUEST_INVALID",
         "The recent workspace request is invalid.",
+    )
+}
+
+fn workspace_save_target_request_invalid() -> CommandError {
+    CommandError::new(
+        "WORKSPACE_SAVE_TARGET_REQUEST_INVALID",
+        "The save target request is invalid.",
     )
 }
 
@@ -1264,11 +1356,11 @@ mod tests {
         WorkspaceDeleteIncompleteReason, WorkspaceDeleteResult, WorkspaceEntryKind,
         WorkspaceEntryRequest, WorkspaceMoveIncompleteReason, WorkspaceMoveRequest,
         WorkspaceMoveResult, WorkspaceOpenFilesRequest, WorkspaceOpenRecentRequest,
-        WorkspacePickRootsMode, WorkspacePickRootsRequest, WorkspacePrepareDeleteRequest,
-        WorkspaceRecentListRequest, WorkspaceRemoveRecentRequest, WorkspaceRenameRequest,
-        WorkspaceWatchPendingRoot, WorkspaceWatchSyncRequest, WorkspaceWatchSyncResult,
-        WorkspaceWatchWakeEvent, WorkspaceWriteDirectorySyncObservation, WorkspaceWriteResult,
-        WorkspaceWriteTargetObservation,
+        WorkspacePickRootsMode, WorkspacePickRootsRequest, WorkspacePickSaveTargetRequest,
+        WorkspacePrepareDeleteRequest, WorkspaceRecentListRequest, WorkspaceRemoveRecentRequest,
+        WorkspaceRenameRequest, WorkspaceWatchPendingRoot, WorkspaceWatchSyncRequest,
+        WorkspaceWatchSyncResult, WorkspaceWatchWakeEvent, WorkspaceWriteDirectorySyncObservation,
+        WorkspaceWriteResult, WorkspaceWriteTargetObservation,
     };
     use crate::workspace::{RootId, WorkspaceId};
 
@@ -1316,6 +1408,25 @@ mod tests {
         ] {
             assert!(serde_json::from_str::<WorkspaceOpenRecentRequest>(invalid).is_err());
             assert!(serde_json::from_str::<WorkspaceRemoveRecentRequest>(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn save_target_request_is_one_closed_portable_file_name() {
+        let request: WorkspacePickSaveTargetRequest =
+            serde_json::from_str(r#"{"suggestedName":"Untitled-1.txt"}"#).unwrap();
+        assert_eq!(request.into_suggested_name().unwrap(), "Untitled-1.txt");
+
+        for invalid in [
+            r#"{}"#,
+            r#"{"suggestedName":""}"#,
+            r#"{"suggestedName":".."}"#,
+            r#"{"suggestedName":"nested/file.txt"}"#,
+            r#"{"suggestedName":"draft.txt","path":"/tmp/private"}"#,
+        ] {
+            let rejected = serde_json::from_str::<WorkspacePickSaveTargetRequest>(invalid)
+                .map_or(true, |request| request.into_suggested_name().is_err());
+            assert!(rejected, "request must reject {invalid}");
         }
     }
 

@@ -2452,6 +2452,8 @@ const RUST_PRODUCTION_SOURCE_PATTERN = /^src-tauri\/src\/.*\.rs$/;
 const WORKSPACE_TEST_SOURCE_PATTERN = /(?:^|\/)tests\.rs$/;
 const WORKSPACE_VERSIONED_WRITER_PATH =
 	"src-tauri/src/workspace/versioned_writer.rs";
+const WORKSPACE_NEW_FILE_PUBLISHER_PATH =
+	"src-tauri/src/workspace/new_file_publisher.rs";
 const BACKUP_STORE_PATH = "src-tauri/src/backup/store.rs";
 const RUSTIX_TARGET = 'cfg(any(target_os = "linux", target_os = "macos"))';
 const SHA2_VERSION = "0.10.9";
@@ -3517,6 +3519,9 @@ export function validateWorkspaceRustBoundary(
 	let ambientCanonicalizeCount = 0;
 	let exclusiveRenameCount = 0;
 	let invalidExclusiveRenameCount = 0;
+	let newFilePublishRenameCount = 0;
+	let invalidNewFilePublishRenameCount = 0;
+	let newFilePublisherPresent = false;
 	const symlinkSyscallCounts = new Map([
 		["readlinkat_raw", 0],
 		["symlinkat", 0],
@@ -3534,6 +3539,9 @@ export function validateWorkspaceRustBoundary(
 			continue;
 		}
 		const executableSource = stripRustCommentsAndLiterals(source);
+		if (normalizedPath === WORKSPACE_NEW_FILE_PUBLISHER_PATH) {
+			newFilePublisherPresent = true;
+		}
 		for (const dependency of forbiddenDirectoryCrates(executableSource)) {
 			failures.push(
 				`${normalizedPath} must not bind, alias or re-export recursive-directory crate ${dependency}`,
@@ -3579,13 +3587,30 @@ export function validateWorkspaceRustBoundary(
 			);
 		}
 		if (exclusiveRenameAudit.referenceCount > 0) {
-			if (normalizedPath !== "src-tauri/src/workspace/writer.rs") {
+			if (
+				normalizedPath !== "src-tauri/src/workspace/writer.rs" &&
+				normalizedPath !== WORKSPACE_NEW_FILE_PUBLISHER_PATH
+			) {
 				failures.push(
 					`${normalizedPath} must not use the exclusive rename syscall outside the workspace writer`,
 				);
-			} else {
+			} else if (normalizedPath === "src-tauri/src/workspace/writer.rs") {
 				exclusiveRenameCount += exclusiveRenameAudit.calls.length;
 				invalidExclusiveRenameCount += exclusiveRenameAudit.calls.filter(
+					(call) => {
+						const flagCount = [
+							...call.arguments.matchAll(/\bRenameFlags\s*::\s*NOREPLACE\b/g),
+						].length;
+						return (
+							!call.closed ||
+							flagCount !== 1 ||
+							!/,\s*RenameFlags\s*::\s*NOREPLACE\s*,?\s*$/.test(call.arguments)
+						);
+					},
+				).length;
+			} else {
+				newFilePublishRenameCount += exclusiveRenameAudit.calls.length;
+				invalidNewFilePublishRenameCount += exclusiveRenameAudit.calls.filter(
 					(call) => {
 						const flagCount = [
 							...call.arguments.matchAll(/\bRenameFlags\s*::\s*NOREPLACE\b/g),
@@ -3778,6 +3803,16 @@ export function validateWorkspaceRustBoundary(
 	if (invalidExclusiveRenameCount > 0) {
 		failures.push(
 			"every workspace writer renameat_with call must pass exactly one direct RenameFlags::NOREPLACE flag",
+		);
+	}
+	if (newFilePublisherPresent && newFilePublishRenameCount !== 1) {
+		failures.push(
+			"workspace new-file publisher must contain exactly one audited renameat_with call",
+		);
+	}
+	if (invalidNewFilePublishRenameCount > 0) {
+		failures.push(
+			"workspace new-file publisher renameat_with must pass exactly one direct RenameFlags::NOREPLACE flag",
 		);
 	}
 	for (const [functionName, count] of symlinkSyscallCounts) {
@@ -11296,6 +11331,18 @@ function stageCleanupCallsAreExact(relativePath, source) {
 				removeFileCalls[0],
 				/\bparent\s*\.\s*$/,
 				"stage",
+			) &&
+			removeDirectoryCalls.length === 0
+		);
+	}
+	if (relativePath === WORKSPACE_NEW_FILE_PUBLISHER_PATH) {
+		return (
+			removeFileCalls.length === 1 &&
+			exactMethodCall(
+				source,
+				removeFileCalls[0],
+				/\bself\s*\.\s*parent\s*\.\s*$/,
+				"&self.name",
 			) &&
 			removeDirectoryCalls.length === 0
 		);

@@ -47,7 +47,10 @@ import {
 	decodeWorkspaceWriteResult,
 	decodeWorkspaceMoveResult,
 	decodeWorkspaceOpenFilesResult,
+	decodeWorkspacePickSaveTargetResult,
 	decodeWorkspacePickResult,
+	decodeWorkspacePublishPrepublicationError,
+	decodeWorkspacePublishFileResult,
 	decodeWorkspaceRecentListResult,
 	decodeWorkspaceReadDirectory,
 	decodeWorkspaceSnapshot,
@@ -55,12 +58,14 @@ import {
 	decodeWorkspaceWatchSyncResult,
 	decodeWorkspaceWatchWakeEvent,
 	encodeWorkspaceWriteFileRequest,
+	encodeWorkspacePublishFileRequest,
 	frozenWorkspaceCopyRequest,
 	frozenWorkspaceCommitDeleteEntryRequest,
 	frozenWorkspaceCreateEntryRequest,
 	frozenWorkspaceDeleteBatchRequest,
 	frozenWorkspaceEntryRequest,
 	frozenWorkspaceMoveRequest,
+	frozenWorkspacePickSaveTargetRequest,
 	frozenWorkspacePrepareDeleteRequest,
 	frozenWorkspaceRenameRequest,
 	frozenWorkspaceRecentRequest,
@@ -278,6 +283,12 @@ export function createNativeBridge(): PlainBridge {
 					request: Object.freeze({}),
 				}),
 			),
+		workspacePickSaveTarget: async (suggestedName) => {
+			const request = frozenWorkspacePickSaveTargetRequest(suggestedName);
+			return decodeWorkspacePickSaveTargetResult(
+				await invoke<unknown>("workspace_pick_save_target", { request }),
+			);
+		},
 		workspaceRecentList: async () =>
 			decodeWorkspaceRecentListResult(
 				await invoke<unknown>("workspace_recent_list", {
@@ -444,6 +455,30 @@ export function createNativeBridge(): PlainBridge {
 				);
 			} catch (error) {
 				const commandError = decodeWorkspaceWritePrepublicationError(error);
+				if (commandError !== undefined) {
+					throw commandError;
+				}
+				return workspaceWriteResponseUnavailable();
+			}
+		},
+		workspacePublishFile: async (rootId, relativePath, content) => {
+			const frame = encodeWorkspacePublishFileRequest(
+				rootId,
+				relativePath,
+				content,
+			);
+			const expectedContentLength = new DataView(
+				frame.buffer,
+				frame.byteOffset,
+				frame.byteLength,
+			).getUint32(8, false);
+			try {
+				return decodeWorkspacePublishFileResult(
+					await invoke<unknown>("workspace_publish_file", frame),
+					expectedContentLength,
+				);
+			} catch (error) {
+				const commandError = decodeWorkspacePublishPrepublicationError(error);
 				if (commandError !== undefined) {
 					throw commandError;
 				}

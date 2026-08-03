@@ -52,6 +52,7 @@ import type {
 	WorkspaceEntryKind,
 	WorkspaceMoveIncompleteReason,
 	WorkspaceMoveResult,
+	WorkspacePickSaveTargetResult,
 	WorkspaceRecentEntry,
 	WorkspaceRoot,
 	WorkspaceSearchFilesResult,
@@ -106,6 +107,7 @@ import {
 } from "./search-codec";
 import {
 	compareWorkspaceEntryNames,
+	encodeWorkspacePublishFileRequest,
 	encodeWorkspaceWriteFileRequest,
 	frozenWorkspaceCommitDeleteEntryRequest,
 	frozenWorkspaceCopyRequest,
@@ -120,6 +122,9 @@ import {
 	frozenWorkspaceMoveResult,
 	frozenWorkspacePrepareDeleteRequest,
 	frozenWorkspacePickResult,
+	frozenWorkspacePickSaveTargetRequest,
+	frozenWorkspacePickSaveTargetResult,
+	frozenWorkspacePublishFileResult,
 	frozenWorkspaceOpenFilesResult,
 	frozenWorkspaceRecentListResult,
 	frozenWorkspaceReadDirectory,
@@ -293,7 +298,9 @@ const WORKSPACE_DELETE_LIMITS = Object.freeze({
 	totalSymlinkBytes: MAX_DELETE_SYMLINK_TOTAL_BYTES,
 } satisfies WorkspaceDeleteLimits);
 
-function mockFile(contents: string | readonly number[]): MockFileNode {
+function mockFile(
+	contents: string | readonly number[] | Uint8Array,
+): MockFileNode {
 	const bytes =
 		typeof contents === "string"
 			? textEncoder.encode(contents)
@@ -715,6 +722,15 @@ function isMockSubsequence(pattern: string, haystack: string): boolean {
 
 export type BrowserMockWorkspacePick = "selected" | "cancelled";
 export type BrowserMockWorkspaceFilePick = "selected" | "cancelled";
+export type BrowserMockWorkspaceSavePick =
+	| Readonly<{ status: "cancelled" }>
+	| Readonly<{
+			status: "selected";
+			/** Selects one of the two deterministic mock parent directories. */
+			rootIndex?: 0 | 1;
+			/** File name within that selected parent directory. */
+			name?: string;
+	  }>;
 
 export interface BrowserMockDirectoryCopyLimitsForTest {
 	readonly descendants?: number;
@@ -942,6 +958,7 @@ export type BrowserMockThemeImportOutcome =
 export interface BrowserMockBridgeOptions {
 	readonly workspacePicks?: readonly BrowserMockWorkspacePick[];
 	readonly workspaceFilePicks?: readonly BrowserMockWorkspaceFilePick[];
+	readonly workspaceSavePicks?: readonly BrowserMockWorkspaceSavePick[];
 	/** Seeds the isolated in-memory backup store before first use. */
 	readonly backupFixtureForTest?: readonly BrowserMockBackupSeedEntryForTest[];
 	/** Seeds the isolated in-memory theme library before first use — as if
@@ -2468,6 +2485,7 @@ export function createBrowserMockBridge(
 	]);
 	const scriptedPicks = [...(options.workspacePicks ?? [])];
 	const scriptedFilePicks = [...(options.workspaceFilePicks ?? [])];
+	const scriptedSavePicks = [...(options.workspaceSavePicks ?? [])];
 	const roots = new Map<string, WorkspaceRoot>();
 	const backupEntries = new Map<
 		string,
@@ -6775,6 +6793,60 @@ export function createBrowserMockBridge(
 				Object.freeze({ rootId: root.rootId, relativePath: "README.md" }),
 			]);
 		},
+		async workspacePickSaveTarget(suggestedName) {
+			const request = frozenWorkspacePickSaveTargetRequest(suggestedName);
+			const outcome: BrowserMockWorkspaceSavePick =
+				scriptedSavePicks.shift() ??
+				Object.freeze({ status: "selected" as const });
+			if (outcome.status === "cancelled") {
+				return frozenWorkspacePickSaveTargetResult(
+					Object.freeze({
+						status: outcome.status,
+						snapshot: snapshot(),
+						target: null,
+					}) satisfies WorkspacePickSaveTargetResult,
+				);
+			}
+
+			const name = frozenWorkspacePickSaveTargetRequest(
+				outcome.name ?? request.suggestedName,
+			).suggestedName;
+			const root = mockRoots[outcome.rootIndex ?? 0]!;
+			if (!roots.has(root.rootId)) {
+				roots.set(root.rootId, root);
+				revision += 1;
+			}
+			recordRecent();
+			let existingStat: ReturnType<typeof frozenWorkspaceEntryStat> | null =
+				null;
+			try {
+				const entry = resolveEntryForRead(root.rootId, name);
+				existingStat = frozenWorkspaceEntryStat(
+					entry.kind,
+					entry.size,
+					MOCK_MTIME,
+					MOCK_CTIME,
+					writableVersionForEntry(root.rootId, name, entry),
+				);
+			} catch (error) {
+				if (
+					(error as { readonly code?: unknown })?.code !== "ENTRY_NOT_FOUND"
+				) {
+					throw error;
+				}
+			}
+			return frozenWorkspacePickSaveTargetResult(
+				Object.freeze({
+					status: outcome.status,
+					snapshot: snapshot(),
+					target: Object.freeze({
+						rootId: root.rootId,
+						relativePath: name,
+						existingStat,
+					}),
+				}) satisfies WorkspacePickSaveTargetResult,
+			);
+		},
 		async workspaceRecentList() {
 			return frozenWorkspaceRecentListResult(
 				recentRevision,
@@ -6932,6 +7004,70 @@ export function createBrowserMockBridge(
 		},
 		async workspaceWriteFile(rootId, relativePath, expectedVersion, content) {
 			return writeWorkspaceFile(rootId, relativePath, expectedVersion, content);
+		},
+		async workspacePublishFile(rootId, relativePath, content) {
+			if (workspaceWriteWindowIsClosed) {
+				throw workspaceWindowClosed();
+			}
+			if (workspaceWriteInFlight) {
+				throw workspaceWriteConflict();
+			}
+			const request = frozenWorkspaceCreateEntryRequest(rootId, relativePath);
+			if (!roots.has(request.rootId)) {
+				throw rootNotAuthorized();
+			}
+			const frame = encodeWorkspacePublishFileRequest(
+				request.rootId,
+				request.relativePath,
+				content,
+			);
+			const view = new DataView(
+				frame.buffer,
+				frame.byteOffset,
+				frame.byteLength,
+			);
+			const contentLength = view.getUint32(8, false);
+			const contentSnapshot = frame.slice(frame.byteLength - contentLength);
+
+			workspaceWriteInFlight = true;
+			try {
+				const target = resolveCreateTarget(
+					request.rootId,
+					request.relativePath,
+				);
+				if (target.parent.entries.has(target.name)) {
+					throw entryAlreadyExists();
+				}
+				createEntry(
+					request.rootId,
+					request.relativePath,
+					mockFile(contentSnapshot),
+				);
+				const entry = resolveEntryForRead(request.rootId, request.relativePath);
+				const version = writableVersionForEntry(
+					request.rootId,
+					request.relativePath,
+					entry,
+				);
+				if (version === null) {
+					return workspaceWriteResponseUnavailable();
+				}
+				return frozenWorkspacePublishFileResult(
+					Object.freeze({
+						status: "written",
+						stat: frozenWorkspaceEntryStat(
+							"file",
+							contentLength,
+							MOCK_MTIME,
+							MOCK_CTIME,
+							version,
+						),
+					}),
+					contentLength,
+				);
+			} finally {
+				finishWorkspaceWriteGate();
+			}
 		},
 		async workspaceSearchFiles(roots_, filePattern, excludeGlobs, maxResults) {
 			const request = frozenWorkspaceSearchFilesRequest(

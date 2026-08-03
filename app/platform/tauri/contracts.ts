@@ -107,6 +107,23 @@ export interface WorkspaceOpenFilesResult {
 	readonly files: readonly WorkspaceOpenFileTarget[];
 }
 
+export interface WorkspaceSaveTarget {
+	readonly rootId: string;
+	readonly relativePath: string;
+	/**
+	 * A version-bearing receipt from the same native selection transaction when
+	 * the target already exists; `null` means the picker observed no target and
+	 * the caller may use the no-replace publication command.
+	 */
+	readonly existingStat: WorkspaceEntryStat | null;
+}
+
+export interface WorkspacePickSaveTargetResult {
+	readonly status: "selected" | "cancelled";
+	readonly snapshot: WorkspaceSnapshot;
+	readonly target: WorkspaceSaveTarget | null;
+}
+
 export type WorkspaceRestoreStatus = "pending" | "none" | "restored" | "failed";
 
 export interface WorkspaceRecentEntry {
@@ -1322,6 +1339,9 @@ export interface PlainBridge {
 	workspaceWatch(rootId: string, listener: () => void): Unlisten;
 	workspacePickRoots(mode: WorkspacePickMode): Promise<WorkspacePickResult>;
 	workspaceOpenFiles(): Promise<WorkspaceOpenFilesResult>;
+	workspacePickSaveTarget(
+		suggestedName: string,
+	): Promise<WorkspacePickSaveTargetResult>;
 	workspaceRecentList(): Promise<WorkspaceRecentListResult>;
 	workspaceOpenRecent(recentId: string): Promise<WorkspaceSnapshot>;
 	workspaceRemoveRecent(recentId: string): Promise<void>;
@@ -1425,6 +1445,11 @@ export interface PlainBridge {
 		rootId: string,
 		relativePath: string,
 		expectedVersion: string,
+		content: Uint8Array,
+	): Promise<WorkspaceWriteResult>;
+	workspacePublishFile(
+		rootId: string,
+		relativePath: string,
 		content: Uint8Array,
 	): Promise<WorkspaceWriteResult>;
 	backupWrite(rootId: string, key: string, bytes: Uint8Array): Promise<void>;

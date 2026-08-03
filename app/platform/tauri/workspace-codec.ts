@@ -19,6 +19,7 @@ import type {
 	WorkspaceMoveRequest,
 	WorkspaceMoveResult,
 	WorkspaceOpenFilesResult,
+	WorkspacePickSaveTargetResult,
 	WorkspacePrepareDeleteRequest,
 	WorkspacePickResult,
 	WorkspaceRecentListResult,
@@ -52,6 +53,7 @@ const MAX_RELATIVE_PATH_BYTES = 4_096;
 const MAX_RELATIVE_PATH_SEGMENTS = 256;
 const PLR1_HEADER_BYTES = 36;
 const PLW1_HEADER_BYTES = 14;
+const PLN1_HEADER_BYTES = 12;
 const WORKSPACE_VERSION_BYTES = 68;
 const MAX_PLR1_FRAME_BYTES =
 	PLR1_HEADER_BYTES + WORKSPACE_VERSION_BYTES + MAX_FILE_BYTES;
@@ -83,6 +85,22 @@ export const WORKSPACE_WRITE_PREPUBLICATION_ERROR_CODES = Object.freeze([
 const WORKSPACE_WRITE_PREPUBLICATION_ERROR_CODE_SET = new Set<string>(
 	WORKSPACE_WRITE_PREPUBLICATION_ERROR_CODES,
 );
+const WORKSPACE_PUBLISH_PREPUBLICATION_ERROR_CODE_SET = new Set<string>([
+	"ROOT_NOT_AUTHORIZED",
+	"ROOT_UNAVAILABLE",
+	"PERMISSION_DENIED",
+	"FILE_TOO_LARGE",
+	"INVALID_WORKSPACE_PUBLISH_REQUEST",
+	"ENTRY_NOT_FOUND",
+	"ENTRY_ALREADY_EXISTS",
+	"WORKSPACE_CONFLICT",
+	"WORKSPACE_WRITE_UNSUPPORTED",
+	"WORKSPACE_STAGE_CREATE_FAILED",
+	"WORKSPACE_STAGE_VERIFY_FAILED",
+	"WORKSPACE_STAGE_CLEANUP_FAILED",
+	"WORKSPACE_WRITE_FAILED",
+	"WORKSPACE_WINDOW_CLOSED",
+]);
 const WORKSPACE_MOVE_INCOMPLETE_REASONS =
 	new Set<WorkspaceMoveIncompleteReason>([
 		"sourceChanged",
@@ -436,6 +454,24 @@ export function frozenWorkspaceRecentRequest(
 	return Object.freeze({ recentId });
 }
 
+export function frozenWorkspacePickSaveTargetRequest(
+	suggestedName: unknown,
+): Readonly<{ suggestedName: string }> {
+	if (
+		typeof suggestedName !== "string" ||
+		suggestedName.length === 0 ||
+		utf8Encoder.encode(suggestedName).byteLength > 255 ||
+		suggestedName.includes("/") ||
+		workspaceRelativePathSegments(suggestedName)?.length !== 1
+	) {
+		return requestViolation(
+			"WORKSPACE_SAVE_TARGET_REQUEST_INVALID",
+			"The workspace save target request is invalid.",
+		);
+	}
+	return Object.freeze({ suggestedName });
+}
+
 function workspaceWatchRequestInvalid(): never {
 	return requestViolation(
 		"WORKSPACE_WATCH_REQUEST_INVALID",
@@ -618,6 +654,43 @@ export function encodeWorkspaceWriteFileRequest(
 	offset += pathBytes.byteLength;
 	frame.set(versionBytes, offset);
 	offset += versionBytes.byteLength;
+	frame.set(contentSnapshot, offset);
+	return frame;
+}
+
+export function encodeWorkspacePublishFileRequest(
+	rootId: unknown,
+	relativePath: unknown,
+	content: unknown,
+): Uint8Array {
+	const request = frozenWorkspaceCreateEntryRequest(rootId, relativePath);
+	const contentSnapshot = workspaceWriteContentSnapshot(content);
+	const rootBytes = utf8Encoder.encode(request.rootId);
+	const pathBytes = utf8Encoder.encode(request.relativePath);
+	if (
+		rootBytes.byteLength !== 36 ||
+		pathBytes.byteLength < 1 ||
+		pathBytes.byteLength > MAX_RELATIVE_PATH_BYTES
+	) {
+		return violation();
+	}
+
+	const frame = new Uint8Array(
+		PLN1_HEADER_BYTES +
+			rootBytes.byteLength +
+			pathBytes.byteLength +
+			contentSnapshot.byteLength,
+	);
+	const view = new DataView(frame.buffer);
+	frame.set([0x50, 0x4c, 0x4e, 0x31], 0);
+	view.setUint16(4, rootBytes.byteLength, false);
+	view.setUint16(6, pathBytes.byteLength, false);
+	view.setUint32(8, contentSnapshot.byteLength, false);
+	let offset = PLN1_HEADER_BYTES;
+	frame.set(rootBytes, offset);
+	offset += rootBytes.byteLength;
+	frame.set(pathBytes, offset);
+	offset += pathBytes.byteLength;
 	frame.set(contentSnapshot, offset);
 	return frame;
 }
@@ -1410,6 +1483,54 @@ export function decodeWorkspaceOpenFilesResult(
 	});
 }
 
+export function decodeWorkspacePickSaveTargetResult(
+	value: unknown,
+): WorkspacePickSaveTargetResult {
+	return sanitizedDecode(() => {
+		const result = ownPlainDataSnapshot(value);
+		if (
+			!hasExactKeys(result, ["status", "snapshot", "target"]) ||
+			(result.status !== "selected" && result.status !== "cancelled")
+		) {
+			return violation();
+		}
+		const snapshot = decodeWorkspaceSnapshotValue(result.snapshot);
+		if (result.status === "cancelled") {
+			if (result.target !== null) return violation();
+			rejectProxyObject(value as object);
+			return Object.freeze({ status: result.status, snapshot, target: null });
+		}
+
+		const target = ownPlainDataSnapshot(result.target);
+		const authorizedRoots = new Set(snapshot.roots.map(({ rootId }) => rootId));
+		if (
+			!hasExactKeys(target, ["rootId", "relativePath", "existingStat"]) ||
+			!isUuidV4(target.rootId) ||
+			!authorizedRoots.has(target.rootId) ||
+			typeof target.relativePath !== "string" ||
+			target.relativePath.length === 0 ||
+			workspaceRelativePathSegments(target.relativePath) === undefined
+		) {
+			return violation();
+		}
+		const existingStat =
+			target.existingStat === null
+				? null
+				: decodeWorkspaceEntryStatValue(target.existingStat);
+		rejectProxyObject(result.target as object);
+		rejectProxyObject(value as object);
+		return Object.freeze({
+			status: result.status,
+			snapshot,
+			target: Object.freeze({
+				rootId: target.rootId,
+				relativePath: target.relativePath,
+				existingStat,
+			}),
+		});
+	});
+}
+
 export function decodeWorkspaceRecentListResult(
 	value: unknown,
 ): WorkspaceRecentListResult {
@@ -1695,6 +1816,82 @@ export function decodeWorkspaceWriteResult(
 	});
 }
 
+export function decodeWorkspacePublishFileResult(
+	value: unknown,
+	expectedContentLength: number,
+): WorkspaceWriteResult {
+	return sanitizedDecode(() => {
+		if (
+			!Number.isSafeInteger(expectedContentLength) ||
+			expectedContentLength < 0 ||
+			expectedContentLength > MAX_FILE_BYTES
+		) {
+			return violation();
+		}
+		const snapshot = ownPlainDataSnapshot(value);
+		if (snapshot.status === "written") {
+			if (!hasExactKeys(snapshot, ["status", "stat"])) {
+				return violation();
+			}
+			const stat = decodeWorkspaceEntryStatValue(snapshot.stat);
+			if (
+				stat.kind !== "file" ||
+				typeof stat.version !== "string" ||
+				stat.size !== expectedContentLength
+			) {
+				return violation();
+			}
+			rejectProxyObject(value as object);
+			return Object.freeze({ status: snapshot.status, stat });
+		}
+
+		if (snapshot.status === "targetPublished") {
+			if (
+				!hasExactKeys(snapshot, [
+					"status",
+					"publicationEvidence",
+					"rename",
+					"directorySync",
+					"target",
+				]) ||
+				(snapshot.publicationEvidence !== "renameReportedSuccess" &&
+					snapshot.publicationEvidence !== "targetObservedWritten") ||
+				snapshot.rename !== "reportedSuccess" ||
+				(snapshot.directorySync !== "synced" &&
+					snapshot.directorySync !== "failed") ||
+				(snapshot.target !== "matchesWritten" &&
+					snapshot.target !== "changed" &&
+					snapshot.target !== "unverifiable") ||
+				(snapshot.publicationEvidence === "targetObservedWritten" &&
+					(snapshot.directorySync !== "failed" ||
+						snapshot.target !== "matchesWritten")) ||
+				(snapshot.publicationEvidence === "renameReportedSuccess" &&
+					snapshot.target === "matchesWritten")
+			) {
+				return violation();
+			}
+			rejectProxyObject(value as object);
+			if (snapshot.publicationEvidence === "targetObservedWritten") {
+				return Object.freeze({
+					status: snapshot.status,
+					publicationEvidence: snapshot.publicationEvidence,
+					rename: snapshot.rename,
+					directorySync: "failed",
+					target: "matchesWritten",
+				});
+			}
+			return Object.freeze({
+				status: snapshot.status,
+				publicationEvidence: "renameReportedSuccess",
+				rename: snapshot.rename,
+				directorySync: snapshot.directorySync,
+				target: snapshot.target as "changed" | "unverifiable",
+			});
+		}
+		return violation();
+	});
+}
+
 export function workspaceWriteResponseUnavailable(): WorkspaceWriteResult {
 	return Object.freeze({
 		status: "outcomeUnknown",
@@ -1714,6 +1911,42 @@ export function decodeWorkspaceWritePrepublicationError(
 			!hasExactKeys(snapshot, ["code", "message"]) ||
 			typeof snapshot.code !== "string" ||
 			!WORKSPACE_WRITE_PREPUBLICATION_ERROR_CODE_SET.has(snapshot.code) ||
+			typeof snapshot.message !== "string" ||
+			snapshot.message.length < 1 ||
+			snapshot.message.length > MAX_COMMAND_ERROR_MESSAGE_LENGTH ||
+			!isWellFormedUtf16(snapshot.message)
+		) {
+			return undefined;
+		}
+		rejectProxyObject(value as object);
+		return Object.freeze({
+			code: snapshot.code,
+			message: snapshot.message,
+		});
+	} catch {
+		return undefined;
+	}
+}
+
+export function decodeWorkspacePublishPrepublicationError(
+	value: unknown,
+): CommandError | undefined {
+	return decodeWorkspaceKnownCommandError(
+		value,
+		WORKSPACE_PUBLISH_PREPUBLICATION_ERROR_CODE_SET,
+	);
+}
+
+function decodeWorkspaceKnownCommandError(
+	value: unknown,
+	allowedCodes: ReadonlySet<string>,
+): CommandError | undefined {
+	try {
+		const snapshot = ownPlainDataSnapshot(value);
+		if (
+			!hasExactKeys(snapshot, ["code", "message"]) ||
+			typeof snapshot.code !== "string" ||
+			!allowedCodes.has(snapshot.code) ||
 			typeof snapshot.message !== "string" ||
 			snapshot.message.length < 1 ||
 			snapshot.message.length > MAX_COMMAND_ERROR_MESSAGE_LENGTH ||
@@ -1951,6 +2184,12 @@ export function frozenWorkspaceOpenFilesResult(
 	return decodeWorkspaceOpenFilesResult({ status, snapshot, files });
 }
 
+export function frozenWorkspacePickSaveTargetResult(
+	result: WorkspacePickSaveTargetResult,
+): WorkspacePickSaveTargetResult {
+	return decodeWorkspacePickSaveTargetResult(result);
+}
+
 export function frozenWorkspaceRecentListResult(
 	revision: number,
 	restoreStatus: WorkspaceRecentListResult["restoreStatus"],
@@ -2007,6 +2246,13 @@ export function frozenWorkspaceWriteResult(
 		expectedVersion,
 		expectedContentLength,
 	);
+}
+
+export function frozenWorkspacePublishFileResult(
+	result: WorkspaceWriteResult,
+	expectedContentLength: number,
+): WorkspaceWriteResult {
+	return decodeWorkspacePublishFileResult(result, expectedContentLength);
 }
 
 export function frozenWorkspaceMoveResult(

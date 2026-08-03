@@ -15,10 +15,14 @@ use super::dto::{
     DeleteConfirmationId, DeleteEntryId, WorkspaceDeleteBatchPlan, WorkspaceDeleteResult,
     WorkspaceEntryStat, WorkspaceMoveResult, WorkspaceOpenFileTarget, WorkspaceOpenFilesResult,
     WorkspacePickRootsMode, WorkspacePickRootsResult, WorkspacePickRootsStatus,
-    WorkspaceReadDirectoryResult, WorkspaceRestoreStatus, WorkspaceSnapshot,
-    WorkspaceWatchPendingRoot, WorkspaceWatchSyncResult, WorkspaceWriteResult,
+    WorkspacePickSaveTargetResult, WorkspaceReadDirectoryResult, WorkspaceRestoreStatus,
+    WorkspaceSaveTarget, WorkspaceSnapshot, WorkspaceWatchPendingRoot, WorkspaceWatchSyncResult,
+    WorkspaceWriteResult,
 };
-use super::picker::{DirectoryPicker, DirectoryPickerResult, FilePicker, FilePickerResult};
+use super::picker::{
+    DirectoryPicker, DirectoryPickerResult, FilePicker, FilePickerResult, SaveFilePicker,
+    SaveFilePickerResult,
+};
 use super::reader;
 use super::watcher::{
     WatchAcknowledgement, WatchRegistration, WatchRegistrationEpoch, WatchScanOutcome,
@@ -235,6 +239,29 @@ impl WorkspaceService {
         .map_err(|_| workspace_operation_failed())?
     }
 
+    pub(crate) async fn pick_save_target_with_watch_sink<P: SaveFilePicker>(
+        &self,
+        window_label: &str,
+        picker: P,
+        suggested_name: String,
+        watch_wake_sink: WorkspaceWatchWakeSink,
+    ) -> Result<WorkspacePickSaveTargetResult, CommandError> {
+        let workspace = self.scope_for_window(window_label)?;
+        let picker_token = workspace.begin_picker()?;
+        let selection = match picker.pick_file(&suggested_name).await {
+            Ok(selection) => selection,
+            Err(error) => {
+                workspace.abort_picker(picker_token)?;
+                return Err(error);
+            }
+        };
+        tauri::async_runtime::spawn_blocking(move || {
+            workspace.finish_save_file_picker(picker_token, selection, watch_wake_sink)
+        })
+        .await
+        .map_err(|_| workspace_operation_failed())?
+    }
+
     pub(crate) async fn replace_roots_with_watch_sink(
         &self,
         window_label: &str,
@@ -398,6 +425,30 @@ impl WorkspaceService {
                 Err(CommandError::new(
                     "WORKSPACE_WRITE_UNSUPPORTED",
                     "Versioned workspace writes are not supported on this platform.",
+                ))
+            }
+        })
+        .await
+    }
+
+    pub async fn publish_file(
+        &self,
+        window_label: &str,
+        root_id: RootId,
+        relative_path: RelativePath,
+        content: Vec<u8>,
+    ) -> Result<WorkspaceWriteResult, CommandError> {
+        self.run_versioned_write(window_label, root_id, move |lease| {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            {
+                super::new_file_publisher::publish_file(&lease, &relative_path, &content)
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            {
+                let _ = (lease, relative_path, content);
+                Err(CommandError::new(
+                    "WORKSPACE_WRITE_UNSUPPORTED",
+                    "Atomic workspace file publication is not supported on this platform.",
                 ))
             }
         })
@@ -1313,6 +1364,107 @@ impl WindowWorkspace {
         Ok(result)
     }
 
+    fn finish_save_file_picker(
+        self: &Arc<Self>,
+        token: u64,
+        selection: SaveFilePickerResult,
+        watch_wake_sink: WorkspaceWatchWakeSink,
+    ) -> Result<WorkspacePickSaveTargetResult, CommandError> {
+        let mutation = lock(&self.mutation_gate)?;
+        let mut state = lock(&self.state)?;
+        ensure_active_picker(&state, token)?;
+
+        let (result, watcher) = match selection {
+            SaveFilePickerResult::Cancelled => {
+                state.active_picker = None;
+                (
+                    WorkspacePickSaveTargetResult::new(
+                        WorkspacePickRootsStatus::Cancelled,
+                        state.scope.snapshot(),
+                        None,
+                    ),
+                    None,
+                )
+            }
+            SaveFilePickerResult::Selected(path) => {
+                let selected = match super::prepare_save_file_selection(path) {
+                    Ok(selected) => selected,
+                    Err(error) => {
+                        state.active_picker = None;
+                        return Err(error);
+                    }
+                };
+                let watcher = match self
+                    .watcher_for(state.scope.workspace_id(), Arc::clone(&watch_wake_sink))
+                {
+                    Ok(watcher) => watcher,
+                    Err(error) => {
+                        state.active_picker = None;
+                        return Err(error);
+                    }
+                };
+                let mut next_watch_epoch = state.next_watch_epoch;
+                let mut prepared_watchers = Vec::new();
+                let mut observed_stat: Option<Option<WorkspaceEntryStat>> = None;
+                let relative_path = selected.relative_path.clone();
+                let mut prepare = |root_id, watch_path: &std::path::Path, lease| {
+                    let stat = optional_target_stat(&lease, &relative_path)?;
+                    next_watch_epoch = next_watch_epoch
+                        .checked_add(1)
+                        .ok_or_else(workspace_conflict)?;
+                    let epoch = WatchRegistrationEpoch::new(next_watch_epoch)?;
+                    prepared_watchers.push(
+                        watcher.prepare_root(WatchRegistration::new(root_id, epoch), watch_path)?,
+                    );
+                    observed_stat = Some(stat);
+                    Ok(())
+                };
+                let authorization = state
+                    .scope
+                    .authorize_roots_atomically_with(&[selected.parent], &mut prepare);
+                state.next_watch_epoch = next_watch_epoch;
+                state.active_picker = None;
+                let root_id = authorization?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(workspace_conflict)?;
+                let existing_stat = match observed_stat {
+                    Some(stat) => stat,
+                    None => {
+                        optional_target_stat(&state.scope.lease(root_id)?, &selected.relative_path)?
+                    }
+                };
+                for prepared_watcher in prepared_watchers {
+                    let registration = watcher.activate(prepared_watcher);
+                    state
+                        .watch_registrations
+                        .insert(registration.root_id(), registration);
+                }
+                invalidate_delete_batch(&mut state);
+                invalidate_text_search(&mut state);
+                if state.initial_restore_status == WorkspaceRestoreStatus::Pending {
+                    state.initial_restore_status = WorkspaceRestoreStatus::None;
+                }
+                (
+                    WorkspacePickSaveTargetResult::new(
+                        WorkspacePickRootsStatus::Selected,
+                        state.scope.snapshot(),
+                        Some(WorkspaceSaveTarget::new(
+                            root_id,
+                            selected.relative_path,
+                            existing_stat,
+                        )),
+                    ),
+                    Some(watcher),
+                )
+            }
+        };
+        drop(state);
+        drop(mutation);
+        drop(watcher);
+        Ok(result)
+    }
+
     fn watcher_for(
         self: &Arc<Self>,
         workspace_id: WorkspaceId,
@@ -1789,6 +1941,17 @@ fn discard_expired_text_search(state: &mut WindowWorkspaceState, now: Instant) {
 fn search_text_deadline(now: Instant) -> Result<Instant, CommandError> {
     now.checked_add(SEARCH_TASK_IDLE_TTL)
         .ok_or_else(workspace_operation_failed)
+}
+
+fn optional_target_stat(
+    lease: &WorkspaceRootLease,
+    relative_path: &RelativePath,
+) -> Result<Option<WorkspaceEntryStat>, CommandError> {
+    match reader::stat(lease, relative_path) {
+        Ok(stat) => Ok(Some(stat)),
+        Err(error) if error.code() == "ENTRY_NOT_FOUND" => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn picker_already_active() -> CommandError {

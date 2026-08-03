@@ -4198,6 +4198,40 @@ fn publish_exclusive(parent: &cap_std::fs::Dir) {
 		);
 	});
 
+	it("allows one audited new-file publisher rename and rejects weakened flags", () => {
+		const publisher = {
+			relativePath: "src-tauri/src/workspace/new_file_publisher.rs",
+			source: `
+use rustix::fs::{renameat_with, RenameFlags};
+fn publish_no_replace(parent: &Dir, stage: &Path, target: &Path) {
+  let _ = renameat_with(parent, stage, parent, target, RenameFlags::NOREPLACE);
+}
+`,
+		};
+		expect(
+			validateWorkspaceRustBoundary(workspaceCargo, [
+				...workspaceSources,
+				publisher,
+			]),
+		).toEqual([]);
+
+		const weakened = {
+			...publisher,
+			source: publisher.source.replace(
+				"RenameFlags::NOREPLACE",
+				"RenameFlags::empty()",
+			),
+		};
+		expect(
+			validateWorkspaceRustBoundary(workspaceCargo, [
+				...workspaceSources,
+				weakened,
+			]),
+		).toContain(
+			"workspace new-file publisher renameat_with must pass exactly one direct RenameFlags::NOREPLACE flag",
+		);
+	});
+
 	it("binds publish_no_replace arguments and forbids every target pre-delete", () => {
 		const writerPath = "src-tauri/src/workspace/writer.rs";
 		const writer = workspaceSources.find(
@@ -7082,8 +7116,8 @@ describe("Plain browser move-failure fixture boundary", () => {
 				'type TestMultiRootMoveIncompleteScenario = "moveRetained" | "movePartial" | "moveUnknown";',
 			),
 			mutateBrowserFixture(
-				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n\tpersistBackupsForTest: boolean = false,\n): Promise<void>",
-				'deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n\tstatus: string = "targetPublishedSourceRetained",\n\tpersistBackupsForTest: boolean = false,\n): Promise<void>',
+				'deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n\tpersistBackupsForTest: boolean = false,\n\tworkspaceFilePicks: readonly ("selected" | "cancelled")[] = [],\n): Promise<void>',
+				'deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n\tstatus: string = "targetPublishedSourceRetained",\n\tpersistBackupsForTest: boolean = false,\n\tworkspaceFilePicks: readonly ("selected" | "cancelled")[] = [],\n): Promise<void>',
 			),
 			mutateBrowserFixture(
 				"moveIncompleteScenarios: readonly TestMultiRootMoveIncompleteScenario[] = []",
@@ -7099,8 +7133,8 @@ describe("Plain browser move-failure fixture boundary", () => {
 	it("keeps scenario state inside the one local addInitScript closure", () => {
 		for (const hostile of [
 			mutateBrowserFixture(
-				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n\tpersistBackupsForTest: boolean = false,\n): Promise<void> {\n\tawait page.addInitScript(",
-				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n\tpersistBackupsForTest: boolean = false,\n): Promise<void> {\n\tvoid moveIncompleteScenarios;\n\tawait page.addInitScript(",
+				'deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n\tpersistBackupsForTest: boolean = false,\n\tworkspaceFilePicks: readonly ("selected" | "cancelled")[] = [],\n): Promise<void> {\n\tawait page.addInitScript(',
+				'deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n\tpersistBackupsForTest: boolean = false,\n\tworkspaceFilePicks: readonly ("selected" | "cancelled")[] = [],\n): Promise<void> {\n\tvoid moveIncompleteScenarios;\n\tawait page.addInitScript(',
 			),
 			mutateBrowserFixture(
 				"\t\t\tmoveIncompleteScenarios,\n\t\t\tdeleteIncompleteScenarios,\n\t\t\tworkspaceId: nativeWorkspaceId,",
@@ -7194,8 +7228,8 @@ describe("Plain browser delete-failure fixture boundary", () => {
 				'type TestMultiRootDeleteIncompleteScenario = "deleteRetained" | "deletePartial" | "deleteUnknown";',
 			),
 			mutateBrowserFixture(
-				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n\tpersistBackupsForTest: boolean = false,\n): Promise<void>",
-				'deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n\tstatus: string = "entryRetained",\n\tpersistBackupsForTest: boolean = false,\n): Promise<void>',
+				'deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n\tpersistBackupsForTest: boolean = false,\n\tworkspaceFilePicks: readonly ("selected" | "cancelled")[] = [],\n): Promise<void>',
+				'deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n\tstatus: string = "entryRetained",\n\tpersistBackupsForTest: boolean = false,\n\tworkspaceFilePicks: readonly ("selected" | "cancelled")[] = [],\n): Promise<void>',
 			),
 			mutateBrowserFixture(
 				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = []",
@@ -7211,8 +7245,8 @@ describe("Plain browser delete-failure fixture boundary", () => {
 	it("keeps scenario state inside the one local addInitScript closure", () => {
 		for (const hostile of [
 			mutateBrowserFixture(
-				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n\tpersistBackupsForTest: boolean = false,\n): Promise<void> {\n\tawait page.addInitScript(",
-				"deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n\tpersistBackupsForTest: boolean = false,\n): Promise<void> {\n\tvoid deleteIncompleteScenarios;\n\tawait page.addInitScript(",
+				'deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n\tpersistBackupsForTest: boolean = false,\n\tworkspaceFilePicks: readonly ("selected" | "cancelled")[] = [],\n): Promise<void> {\n\tawait page.addInitScript(',
+				'deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],\n\tpersistBackupsForTest: boolean = false,\n\tworkspaceFilePicks: readonly ("selected" | "cancelled")[] = [],\n): Promise<void> {\n\tvoid deleteIncompleteScenarios;\n\tawait page.addInitScript(',
 			),
 			mutateBrowserFixture(
 				"\t\t\tdeleteIncompleteScenarios,\n\t\t\tworkspaceId: nativeWorkspaceId,",
