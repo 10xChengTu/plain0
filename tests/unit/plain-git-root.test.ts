@@ -150,6 +150,22 @@ describe("bindPlainGitBridge", () => {
 		await rooted.gitRemotesList();
 		await rooted.gitReflogList();
 		await rooted.gitContributorsList();
+		await rooted.gitBranchCreate("topic", "a".repeat(40));
+		await rooted.gitBranchSwitch("topic");
+		await rooted.gitBranchRename("topic", "renamed");
+		await rooted.gitBranchDelete("renamed", false);
+		await rooted.gitTagCreate("v1", "a".repeat(40), null);
+		await rooted.gitTagDelete("v1");
+		await rooted.gitRemoteAdd("origin", "https://example.invalid/repo.git");
+		await rooted.gitRemoteRename("origin", "upstream");
+		await rooted.gitRemoteSetUrl(
+			"upstream",
+			"push",
+			"ssh://example.invalid/repo.git",
+		);
+		await rooted.gitRemoteRemove("upstream");
+		await rooted.gitUpstreamSet("main", "origin/main");
+		await rooted.gitUpstreamUnset("main");
 		await rooted.gitStashList();
 		await rooted.gitStashShow("a".repeat(40));
 		await rooted.gitStashPush("message", true);
@@ -160,7 +176,7 @@ describe("bindPlainGitBridge", () => {
 		await rooted.gitWorktreeAdd("child", false, null);
 		await rooted.gitWorktreeRemove("/tmp/child", false);
 
-		expect(calls).toHaveLength(34);
+		expect(calls).toHaveLength(46);
 		for (const call of calls) {
 			expect(call.args.at(-1), call.method).toBe(ROOT_A);
 		}

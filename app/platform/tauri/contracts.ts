@@ -1274,6 +1274,16 @@ export interface GitContributorsListResult {
 	readonly truncated: boolean;
 }
 
+// --- F180 S1B branch/tag/remote/upstream mutation authority ---------------
+
+/** Selects which one of Git's fetch or explicit push URL slots is replaced. */
+export type GitRemoteUrlKind = "fetch" | "push";
+
+/** Safe branch deletion reports `needsForce` without deleting anything; a
+ * caller may retry with `force: true` only after its own destructive DOM
+ * confirmation. */
+export type GitBranchDeleteOutcome = "deleted" | "needsForce";
+
 // --- Git stash (F090 S4: `git::stash`) ---------------------------------------
 
 /**
@@ -1907,6 +1917,59 @@ export interface PlainBridge {
 	/** `F180` S1A: aggregates `%aN`/`%aE` across bounded `git log --all`
 	 * output, sorted by descending commit count. */
 	gitContributorsList(rootId?: string): Promise<GitContributorsListResult>;
+	/** Creates a local branch at one exact lowercase hex40 commit without
+	 * implicitly configuring tracking. */
+	gitBranchCreate(
+		name: string,
+		targetSha: string,
+		rootId?: string,
+	): Promise<void>;
+	gitBranchSwitch(name: string, rootId?: string): Promise<void>;
+	gitBranchRename(
+		oldName: string,
+		newName: string,
+		rootId?: string,
+	): Promise<void>;
+	/** `force: false` is the mandatory first probe. `force: true` performs
+	 * `git branch -D` and must only follow a `needsForce` outcome plus DOM
+	 * confirmation. The current branch is always rejected server-side. */
+	gitBranchDelete(
+		name: string,
+		force: boolean,
+		rootId?: string,
+	): Promise<GitBranchDeleteOutcome>;
+	/** `message: null` creates a lightweight tag; a non-null message creates
+	 * an annotated tag and travels over stdin, never argv. */
+	gitTagCreate(
+		name: string,
+		targetSha: string,
+		message: string | null,
+		rootId?: string,
+	): Promise<void>;
+	gitTagDelete(name: string, rootId?: string): Promise<void>;
+	/** URL values are one-shot mutation inputs. Reads only return Rust-redacted
+	 * display strings and never round-trip credentials or native paths. */
+	gitRemoteAdd(name: string, url: string, rootId?: string): Promise<void>;
+	gitRemoteRename(
+		oldName: string,
+		newName: string,
+		rootId?: string,
+	): Promise<void>;
+	gitRemoteSetUrl(
+		name: string,
+		kind: GitRemoteUrlKind,
+		url: string,
+		rootId?: string,
+	): Promise<void>;
+	gitRemoteRemove(name: string, rootId?: string): Promise<void>;
+	/** `upstream` must be the short name of a currently-existing
+	 * `refs/remotes/*` entry belonging to a configured remote. */
+	gitUpstreamSet(
+		branch: string,
+		upstream: string,
+		rootId?: string,
+	): Promise<void>;
+	gitUpstreamUnset(branch: string, rootId?: string): Promise<void>;
 	/** `F090` S4: `git stash list -z --format=%gd%x1f%H%x1f%ct%x1f%B` — the
 	 * stash panel's own data source, newest first. Takes no parameters. Same
 	 * trust/repository rejections as `gitStatus`. */

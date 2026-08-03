@@ -7915,6 +7915,102 @@ const GIT_COMMAND_CONTRACTS = Object.freeze([
 	},
 	{
 		file: "src-tauri/src/git/commands.rs",
+		name: "git_branch_create",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitBranchCreateRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(name,target_sha)=request.into_parts()?;management::create_branch(trust.inner(),workspace.inner(),window.label(),&name,&target_sha).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_branch_switch",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitBranchSwitchRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "letname=request.into_parts()?;management::switch_branch(trust.inner(),workspace.inner(),window.label(),&name).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_branch_rename",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitBranchRenameRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(old_name,new_name)=request.into_parts()?;management::rename_branch(trust.inner(),workspace.inner(),window.label(),&old_name,&new_name).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_branch_delete",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitBranchDeleteRequest",
+		returnType: "->Result<GitBranchDeleteOutcomeWire,CommandError>",
+		body: "let(name,force)=request.into_parts()?;letoutcome=management::delete_branch(trust.inner(),workspace.inner(),window.label(),&name,force).await?;Ok(GitBranchDeleteOutcomeWire::from(outcome))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_tag_create",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitTagCreateRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(name,target_sha,message)=request.into_parts()?;management::create_tag(trust.inner(),workspace.inner(),window.label(),&name,&target_sha,message.as_deref()).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_tag_delete",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitTagDeleteRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "letname=request.into_parts()?;management::delete_tag(trust.inner(),workspace.inner(),window.label(),&name).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_remote_add",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitRemoteAddRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(name,url)=request.into_parts()?;management::add_remote(trust.inner(),workspace.inner(),window.label(),&name,&url).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_remote_rename",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitRemoteRenameRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(old_name,new_name)=request.into_parts()?;management::rename_remote(trust.inner(),workspace.inner(),window.label(),&old_name,&new_name).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_remote_set_url",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitRemoteSetUrlRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(name,kind,url)=request.into_parts()?;management::set_remote_url(trust.inner(),workspace.inner(),window.label(),&name,kind,&url).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_remote_remove",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitRemoteRemoveRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "letname=request.into_parts()?;management::remove_remote(trust.inner(),workspace.inner(),window.label(),&name).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_upstream_set",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitUpstreamSetRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "let(branch,upstream)=request.into_parts()?;management::set_upstream(trust.inner(),workspace.inner(),window.label(),&branch,&upstream).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_upstream_unset",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitUpstreamUnsetRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "letbranch=request.into_parts()?;management::unset_upstream(trust.inner(),workspace.inner(),window.label(),&branch).await",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
 		name: "git_stash_list",
 		parameters:
 			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitStashListRequest",
@@ -7988,7 +8084,7 @@ const GIT_COMMAND_CONTRACTS = Object.freeze([
 ]);
 
 /**
- * Locks all thirty-four git commands (`F080` S1's three reads, S3's five
+ * Locks all forty-six git commands (`F080` S1's three reads, S3's five
  * writes, S4's five network commands, `F090` S0's two read-only blame
  * commands — `git_blame_file`/`git_blame_commit_messages` —, `F090` S1's
  * three read-only file/line-history commands —
@@ -7997,7 +8093,8 @@ const GIT_COMMAND_CONTRACTS = Object.freeze([
  * `git_show_commit`/`git_show_commit_blob` —, `F090` S3's two read-only
  * graph/refs commands — `git_log_graph`/`git_refs_list` —, `F180` S1A's
  * three read models — `git_remotes_list`/`git_reflog_list`/
- * `git_contributors_list` —, `F090` S4's six
+ * `git_contributors_list` —, S1B's twelve branch/tag/remote/upstream
+ * mutations, `F090` S4's six
  * stash commands (two read-only — `git_stash_list`/`git_stash_show` — and
  * four writes — `git_stash_push`/`git_stash_apply`/`git_stash_pop`/
  * `git_stash_drop`) — and `F090` S5's three worktree commands (one read-only
@@ -8830,6 +8927,93 @@ export function validateGitRustBoundary(rustSources) {
 		);
 	}
 
+	// --- F180 S1B: branch/tag/remote/upstream mutation authority -----------
+	const managementSource = findRustSource(
+		rustSources,
+		"src-tauri/src/git/management.rs",
+	);
+	if (managementSource === undefined) {
+		failures.push("git boundary requires management.rs");
+		return failures;
+	}
+	const executableManagement = stripRustCommentsOnly(managementSource);
+	const managementArgContracts = [
+		["GIT_BRANCH_CREATE_ARGS", ["branch", "--no-track", "--"]],
+		["GIT_BRANCH_SWITCH_ARGS", ["switch", "--"]],
+		["GIT_BRANCH_RENAME_ARGS", ["branch", "-m", "--"]],
+		["GIT_BRANCH_DELETE_ARGS", ["branch", "-d", "--"]],
+		["GIT_BRANCH_FORCE_DELETE_ARGS", ["branch", "-D", "--"]],
+		["GIT_TAG_CREATE_ARGS", ["tag", "--"]],
+		[
+			"GIT_TAG_CREATE_ANNOTATED_ARGS",
+			["tag", "-a", "--cleanup=verbatim", "-F", "-", "--"],
+		],
+		["GIT_TAG_DELETE_ARGS", ["tag", "-d", "--"]],
+		["GIT_REMOTE_ADD_ARGS", ["remote", "add", "--"]],
+		["GIT_REMOTE_RENAME_ARGS", ["remote", "rename", "--"]],
+		["GIT_REMOTE_SET_FETCH_URL_ARGS", ["remote", "set-url", "--"]],
+		["GIT_REMOTE_SET_PUSH_URL_ARGS", ["remote", "set-url", "--push", "--"]],
+		["GIT_REMOTE_REMOVE_ARGS", ["remote", "remove", "--"]],
+		["GIT_UPSTREAM_UNSET_ARGS", ["branch", "--unset-upstream", "--"]],
+	];
+	if (
+		managementArgContracts.some(
+			([name, expected]) =>
+				!sameArray(argsConstant(executableManagement, name), expected),
+		) ||
+		!executableManagement.includes(
+			'GIT_UPSTREAM_SET_OPTION_PREFIX: &str = "--set-upstream-to="',
+		)
+	) {
+		failures.push(
+			"management.rs must retain the audited option-terminated branch/tag/remote argv constants and inline upstream option",
+		);
+	}
+	if (
+		!executableManagement.includes('"check-ref-format".to_owned()') ||
+		!executableManagement.includes('"cat-file".to_owned()') ||
+		!executableManagement.includes('format!("{sha}^{{commit}}")') ||
+		!executableManagement.includes("run_git_with_stdin(") ||
+		[
+			...executableManagement.matchAll(
+				/value\.chars\(\)\.any\(char::is_control\)/g,
+			),
+		].length !== 2 ||
+		!executableManagement.includes("MAX_GIT_REMOTE_URL_BYTES")
+	) {
+		failures.push(
+			"management.rs must revalidate namespace refs/exact commits, send annotated messages over stdin, and bound control-free remote URLs",
+		);
+	}
+	const branchDeleteOutcomeBody = enumBody("GitBranchDeleteOutcomeWire");
+	const remoteUrlKindBody = enumBody("GitRemoteUrlKindRequest");
+	if (
+		structBody("GitBranchCreateRequest") !== "name:String,target_sha:String," ||
+		structBody("GitBranchSwitchRequest") !== "name:String," ||
+		structBody("GitBranchRenameRequest") !==
+			"old_name:String,new_name:String," ||
+		structBody("GitBranchDeleteRequest") !== "name:String,force:bool," ||
+		(branchDeleteOutcomeBody !== "Deleted,NeedsForce," &&
+			branchDeleteOutcomeBody !== "Deleted,NeedsForce") ||
+		structBody("GitTagCreateRequest") !==
+			"name:String,target_sha:String,message:Option<String>," ||
+		structBody("GitTagDeleteRequest") !== "name:String," ||
+		structBody("GitRemoteAddRequest") !== "name:String,url:String," ||
+		structBody("GitRemoteRenameRequest") !==
+			"old_name:String,new_name:String," ||
+		(remoteUrlKindBody !== "Fetch,Push," &&
+			remoteUrlKindBody !== "Fetch,Push") ||
+		structBody("GitRemoteSetUrlRequest") !==
+			"name:String,kind:GitRemoteUrlKindRequest,url:String," ||
+		structBody("GitRemoteRemoveRequest") !== "name:String," ||
+		structBody("GitUpstreamSetRequest") !== "branch:String,upstream:String," ||
+		structBody("GitUpstreamUnsetRequest") !== "branch:String,"
+	) {
+		failures.push(
+			"F180 management request/outcome DTOs must expose only their exact audited fields and variants",
+		);
+	}
+
 	// --- F090 S4: stash (`git::stash`) --------------------------------------
 	//
 	// `GIT_STASH_LIST_ARGS` itself gets its own *dedicated* lock
@@ -9423,7 +9607,7 @@ export function validateGitStashMessageFieldSafetyBoundary(rustSources) {
  * (`gitRemotesList`/`gitReflogList`/`gitContributorsList`) — every slice deliberately shares
  * this same closed-list lock rather than getting its own parallel
  * "S_ bridge methods" const, for the same reason `GIT_COMMAND_CONTRACTS`
- * above holds all thirty-four Rust commands in one array: `PlainBridge`'s git
+ * above holds all forty-six Rust commands in one array: `PlainBridge`'s git
  * surface is one audited whole, not several independently-sized ones.
  */
 const GIT_BRIDGE_METHOD_NAMES = [
@@ -9452,6 +9636,18 @@ const GIT_BRIDGE_METHOD_NAMES = [
 	"gitRemotesList",
 	"gitReflogList",
 	"gitContributorsList",
+	"gitBranchCreate",
+	"gitBranchSwitch",
+	"gitBranchRename",
+	"gitBranchDelete",
+	"gitTagCreate",
+	"gitTagDelete",
+	"gitRemoteAdd",
+	"gitRemoteRename",
+	"gitRemoteSetUrl",
+	"gitRemoteRemove",
+	"gitUpstreamSet",
+	"gitUpstreamUnset",
 	"gitStashList",
 	"gitStashShow",
 	"gitStashPush",
@@ -9501,6 +9697,54 @@ const GIT_WRITE_COMMAND_CONTRACTS = Object.freeze([
 		requestBuilder: "frozenGitPushRequest",
 	}),
 	Object.freeze({
+		command: "git_branch_create",
+		requestBuilder: "frozenGitBranchCreateRequest",
+	}),
+	Object.freeze({
+		command: "git_branch_switch",
+		requestBuilder: "frozenGitBranchSwitchRequest",
+	}),
+	Object.freeze({
+		command: "git_branch_rename",
+		requestBuilder: "frozenGitBranchRenameRequest",
+	}),
+	Object.freeze({
+		command: "git_branch_delete",
+		requestBuilder: "frozenGitBranchDeleteRequest",
+	}),
+	Object.freeze({
+		command: "git_tag_create",
+		requestBuilder: "frozenGitTagCreateRequest",
+	}),
+	Object.freeze({
+		command: "git_tag_delete",
+		requestBuilder: "frozenGitTagDeleteRequest",
+	}),
+	Object.freeze({
+		command: "git_remote_add",
+		requestBuilder: "frozenGitRemoteAddRequest",
+	}),
+	Object.freeze({
+		command: "git_remote_rename",
+		requestBuilder: "frozenGitRemoteRenameRequest",
+	}),
+	Object.freeze({
+		command: "git_remote_set_url",
+		requestBuilder: "frozenGitRemoteSetUrlRequest",
+	}),
+	Object.freeze({
+		command: "git_remote_remove",
+		requestBuilder: "frozenGitRemoteRemoveRequest",
+	}),
+	Object.freeze({
+		command: "git_upstream_set",
+		requestBuilder: "frozenGitUpstreamSetRequest",
+	}),
+	Object.freeze({
+		command: "git_upstream_unset",
+		requestBuilder: "frozenGitUpstreamUnsetRequest",
+	}),
+	Object.freeze({
 		command: "git_stash_drop",
 		requestBuilder: "frozenGitStashDropRequest",
 	}),
@@ -9521,15 +9765,16 @@ const GIT_NO_ARG_COMMAND_CONTRACTS = Object.freeze([
 
 /**
  * Locks `F080` S1+S3+S4 and `F090` S0+S1+S2+S3+S4+S5's TypeScript surface:
- * `PlainBridge` exposes exactly the thirty-four audited git methods,
+ * `PlainBridge` exposes exactly the forty-six audited git methods,
  * `git-codec.ts`'s read-result decoders validate exact own-data keys/reject
  * Proxy wrapping/freeze their result (same rigor
  * `validateTerminalIpcBridgeBoundary` already locks for the terminal
  * domain), and `native.ts` routes each read/write through `invoke` with its
  * audited command name — the reads through their audited decoders, the
- * seven mutating writes (`GIT_WRITE_COMMAND_CONTRACTS`, including `F090`
- * S4's own void-returning `git_stash_drop`) through their audited
- * `frozen*Request` builders and `decodeGitVoid`, and the three no-payload
+ * nineteen payload-carrying writes (`GIT_WRITE_COMMAND_CONTRACTS`, including
+ * F180 S1B's twelve management operations) through their audited
+ * `frozen*Request` builders; void results use `decodeGitVoid`, while branch
+ * deletion uses its exact two-value decoder. The three no-payload
  * network commands (`GIT_NO_ARG_COMMAND_CONTRACTS`) invoked exactly once
  * each. `git_refs_list` (`F090` S3) is a fourth no-payload read, but unlike
  * those three it returns a real decoded result rather than void, so it gets
@@ -9584,7 +9829,7 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 			JSON.stringify([...GIT_BRIDGE_METHOD_NAMES].sort())
 	) {
 		failures.push(
-			"PlainBridge must expose exactly the thirty-four audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the forty-six audited git methods, no more and no fewer",
 		);
 	}
 
@@ -9673,6 +9918,18 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 			);
 		}
 	}
+	{
+		const body = decoderBody("decodeGitBranchDeleteOutcome");
+		if (
+			body === undefined ||
+			!body.includes('typeof value !== "string"') ||
+			!body.includes("GIT_BRANCH_DELETE_OUTCOMES.has(")
+		) {
+			failures.push(
+				"git-codec.ts's decodeGitBranchDeleteOutcome must validate value is one of the exact two audited outcome strings",
+			);
+		}
+	}
 
 	const native = appSource("app/platform/tauri/native.ts");
 	if (
@@ -9685,6 +9942,17 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 	) {
 		failures.push(
 			"native.ts must attach one validated explicit rootId to every audited Git invoke",
+		);
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_branch_delete"/g)]
+			.length !== 1 ||
+		!native.includes("frozenGitBranchDeleteRequest(") ||
+		!native.includes("decodeGitBranchDeleteOutcome(")
+	) {
+		failures.push(
+			"native.ts must invoke git_branch_delete exactly once through its request builder and outcome decoder",
 		);
 	}
 	for (const [command, decoder] of [

@@ -389,6 +389,42 @@ function testBridge(
 		async gitContributorsList() {
 			throw new Error("unused");
 		},
+		async gitBranchCreate() {
+			throw new Error("unused");
+		},
+		async gitBranchSwitch() {
+			throw new Error("unused");
+		},
+		async gitBranchRename() {
+			throw new Error("unused");
+		},
+		async gitBranchDelete() {
+			throw new Error("unused");
+		},
+		async gitTagCreate() {
+			throw new Error("unused");
+		},
+		async gitTagDelete() {
+			throw new Error("unused");
+		},
+		async gitRemoteAdd() {
+			throw new Error("unused");
+		},
+		async gitRemoteRename() {
+			throw new Error("unused");
+		},
+		async gitRemoteSetUrl() {
+			throw new Error("unused");
+		},
+		async gitRemoteRemove() {
+			throw new Error("unused");
+		},
+		async gitUpstreamSet() {
+			throw new Error("unused");
+		},
+		async gitUpstreamUnset() {
+			throw new Error("unused");
+		},
 		async gitStashList() {
 			throw new Error("unused");
 		},

@@ -7,6 +7,7 @@ import type {
 	GitBlamePrevious,
 	GitBlobRev,
 	GitBranch,
+	GitBranchDeleteOutcome,
 	GitBranchUpstream,
 	GitContributorEntry,
 	GitContributorsListResult,
@@ -28,6 +29,7 @@ import type {
 	GitReflogListResult,
 	GitRemoteEntry,
 	GitRemotesListResult,
+	GitRemoteUrlKind,
 	GitRenameOrCopyKind,
 	GitShowBlobResult,
 	GitShowCommitResult,
@@ -1838,6 +1840,249 @@ export function decodeGitContributorsListResult(
 		rejectProxyObject(value);
 		return Object.freeze(result);
 	});
+}
+
+// --- F180 S1B: branch/tag/remote/upstream mutation requests ---------------
+
+const MAX_GIT_MANAGEMENT_REF_NAME_CHARS = 1_024;
+const MAX_GIT_MANAGEMENT_REMOTE_NAME_CHARS = 255;
+const MAX_GIT_MANAGEMENT_REMOTE_URL_CHARS = 4_096;
+const MAX_GIT_MANAGEMENT_TAG_MESSAGE_CHARS = 100_000;
+
+function hasControlCharacter(value: string): boolean {
+	for (const character of value) {
+		const codePoint = character.codePointAt(0)!;
+		if (codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+function validManagementName(
+	value: unknown,
+	maxChars: number,
+	allowSlash: boolean,
+): value is string {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		value.length <= maxChars &&
+		!value.startsWith("-") &&
+		!value.startsWith("refs/") &&
+		!hasControlCharacter(value) &&
+		(allowSlash || !value.includes("/"))
+	);
+}
+
+function gitBranchManagementRequestInvalid(): never {
+	return requestViolation(
+		"GIT_BRANCH_MANAGEMENT_INVALID_REQUEST",
+		"The Git branch management request is invalid.",
+	);
+}
+
+function gitTagManagementRequestInvalid(): never {
+	return requestViolation(
+		"GIT_TAG_MANAGEMENT_INVALID_REQUEST",
+		"The Git tag management request is invalid.",
+	);
+}
+
+function gitRemoteManagementRequestInvalid(): never {
+	return requestViolation(
+		"GIT_REMOTE_MANAGEMENT_INVALID_REQUEST",
+		"The Git remote management request is invalid.",
+	);
+}
+
+function gitUpstreamManagementRequestInvalid(): never {
+	return requestViolation(
+		"GIT_UPSTREAM_MANAGEMENT_INVALID_REQUEST",
+		"The Git upstream management request is invalid.",
+	);
+}
+
+export function frozenGitBranchCreateRequest(
+	name: unknown,
+	targetSha: unknown,
+): Readonly<{ name: string; targetSha: string }> {
+	if (
+		!validManagementName(name, MAX_GIT_MANAGEMENT_REF_NAME_CHARS, true) ||
+		!isGitBlameSha(targetSha)
+	) {
+		return gitBranchManagementRequestInvalid();
+	}
+	return Object.freeze({ name, targetSha });
+}
+
+export function frozenGitBranchSwitchRequest(
+	name: unknown,
+): Readonly<{ name: string }> {
+	if (!validManagementName(name, MAX_GIT_MANAGEMENT_REF_NAME_CHARS, true)) {
+		return gitBranchManagementRequestInvalid();
+	}
+	return Object.freeze({ name });
+}
+
+export function frozenGitBranchRenameRequest(
+	oldName: unknown,
+	newName: unknown,
+): Readonly<{ oldName: string; newName: string }> {
+	if (
+		!validManagementName(oldName, MAX_GIT_MANAGEMENT_REF_NAME_CHARS, true) ||
+		!validManagementName(newName, MAX_GIT_MANAGEMENT_REF_NAME_CHARS, true)
+	) {
+		return gitBranchManagementRequestInvalid();
+	}
+	return Object.freeze({ oldName, newName });
+}
+
+export function frozenGitBranchDeleteRequest(
+	name: unknown,
+	force: unknown,
+): Readonly<{ name: string; force: boolean }> {
+	if (
+		!validManagementName(name, MAX_GIT_MANAGEMENT_REF_NAME_CHARS, true) ||
+		typeof force !== "boolean"
+	) {
+		return gitBranchManagementRequestInvalid();
+	}
+	return Object.freeze({ name, force });
+}
+
+const GIT_BRANCH_DELETE_OUTCOMES = new Set<GitBranchDeleteOutcome>([
+	"deleted",
+	"needsForce",
+]);
+
+export function decodeGitBranchDeleteOutcome(
+	value: unknown,
+): GitBranchDeleteOutcome {
+	return sanitizedDecode(() => {
+		if (
+			typeof value !== "string" ||
+			!GIT_BRANCH_DELETE_OUTCOMES.has(value as GitBranchDeleteOutcome)
+		) {
+			return violation();
+		}
+		return value as GitBranchDeleteOutcome;
+	});
+}
+
+export function frozenGitTagCreateRequest(
+	name: unknown,
+	targetSha: unknown,
+	message: unknown,
+): Readonly<{ name: string; targetSha: string; message: string | null }> {
+	if (
+		!validManagementName(name, MAX_GIT_MANAGEMENT_REF_NAME_CHARS, true) ||
+		!isGitBlameSha(targetSha) ||
+		(message !== null &&
+			(typeof message !== "string" ||
+				message.trim().length === 0 ||
+				message.length > MAX_GIT_MANAGEMENT_TAG_MESSAGE_CHARS))
+	) {
+		return gitTagManagementRequestInvalid();
+	}
+	return Object.freeze({ name, targetSha, message });
+}
+
+export function frozenGitTagDeleteRequest(
+	name: unknown,
+): Readonly<{ name: string }> {
+	if (!validManagementName(name, MAX_GIT_MANAGEMENT_REF_NAME_CHARS, true)) {
+		return gitTagManagementRequestInvalid();
+	}
+	return Object.freeze({ name });
+}
+
+function validRemoteUrl(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		value.length <= MAX_GIT_MANAGEMENT_REMOTE_URL_CHARS &&
+		!hasControlCharacter(value)
+	);
+}
+
+export function frozenGitRemoteAddRequest(
+	name: unknown,
+	url: unknown,
+): Readonly<{ name: string; url: string }> {
+	if (
+		!validManagementName(name, MAX_GIT_MANAGEMENT_REMOTE_NAME_CHARS, false) ||
+		!validRemoteUrl(url)
+	) {
+		return gitRemoteManagementRequestInvalid();
+	}
+	return Object.freeze({ name, url });
+}
+
+export function frozenGitRemoteRenameRequest(
+	oldName: unknown,
+	newName: unknown,
+): Readonly<{ oldName: string; newName: string }> {
+	if (
+		!validManagementName(
+			oldName,
+			MAX_GIT_MANAGEMENT_REMOTE_NAME_CHARS,
+			false,
+		) ||
+		!validManagementName(newName, MAX_GIT_MANAGEMENT_REMOTE_NAME_CHARS, false)
+	) {
+		return gitRemoteManagementRequestInvalid();
+	}
+	return Object.freeze({ oldName, newName });
+}
+
+export function frozenGitRemoteSetUrlRequest(
+	name: unknown,
+	kind: unknown,
+	url: unknown,
+): Readonly<{ name: string; kind: GitRemoteUrlKind; url: string }> {
+	if (
+		!validManagementName(name, MAX_GIT_MANAGEMENT_REMOTE_NAME_CHARS, false) ||
+		(kind !== "fetch" && kind !== "push") ||
+		!validRemoteUrl(url)
+	) {
+		return gitRemoteManagementRequestInvalid();
+	}
+	return Object.freeze({ name, kind, url });
+}
+
+export function frozenGitRemoteRemoveRequest(
+	name: unknown,
+): Readonly<{ name: string }> {
+	if (!validManagementName(name, MAX_GIT_MANAGEMENT_REMOTE_NAME_CHARS, false)) {
+		return gitRemoteManagementRequestInvalid();
+	}
+	return Object.freeze({ name });
+}
+
+export function frozenGitUpstreamSetRequest(
+	branch: unknown,
+	upstream: unknown,
+): Readonly<{ branch: string; upstream: string }> {
+	if (
+		!validManagementName(branch, MAX_GIT_MANAGEMENT_REF_NAME_CHARS, true) ||
+		!validManagementName(upstream, MAX_GIT_MANAGEMENT_REF_NAME_CHARS, true) ||
+		!upstream.includes("/") ||
+		upstream.startsWith("/") ||
+		upstream.endsWith("/")
+	) {
+		return gitUpstreamManagementRequestInvalid();
+	}
+	return Object.freeze({ branch, upstream });
+}
+
+export function frozenGitUpstreamUnsetRequest(
+	branch: unknown,
+): Readonly<{ branch: string }> {
+	if (!validManagementName(branch, MAX_GIT_MANAGEMENT_REF_NAME_CHARS, true)) {
+		return gitUpstreamManagementRequestInvalid();
+	}
+	return Object.freeze({ branch });
 }
 
 // --- F090 S4: stash (`git::stash`) -------------------------------------------

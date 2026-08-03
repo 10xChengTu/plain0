@@ -130,6 +130,133 @@ describe("browser mock workspace bridge", () => {
 		).rejects.toMatchObject({ code: "ROOT_NOT_AUTHORIZED" });
 	});
 
+	it("simulates the root-bound F180 branch, tag, remote and upstream mutations", async () => {
+		const shaA = "a".repeat(40);
+		const shaB = "b".repeat(40);
+		const bridge = createBrowserMockBridge({
+			gitFixtureForTest: {
+				status: {
+					branch: { oid: shaA, head: "main", upstream: null },
+					entries: [],
+				},
+				refsForTest: {
+					entries: [
+						{
+							kind: "branch",
+							fullName: "refs/heads/main",
+							shortName: "main",
+							targetSha: shaA,
+							isAnnotatedTag: false,
+							peeledSha: null,
+							upstream: null,
+							isHead: true,
+						},
+						{
+							kind: "branch",
+							fullName: "refs/heads/topic",
+							shortName: "topic",
+							targetSha: shaB,
+							isAnnotatedTag: false,
+							peeledSha: null,
+							upstream: null,
+							isHead: false,
+						},
+						{
+							kind: "remoteBranch",
+							fullName: "refs/remotes/origin/main",
+							shortName: "origin/main",
+							targetSha: shaA,
+							isAnnotatedTag: false,
+							peeledSha: null,
+							upstream: null,
+							isHead: false,
+						},
+					],
+					truncated: false,
+				},
+				remotesForTest: {
+					entries: [
+						{
+							name: "origin",
+							fetchUrls: ["https://example.invalid/repo.git"],
+							pushUrls: [],
+						},
+					],
+					truncated: false,
+				},
+				branchUnmergedForTest: ["new-branch"],
+			},
+		});
+		const selected = await bridge.workspacePickRoots("add");
+		await bridge.workspaceTrustGrant();
+		const rootId = selected.snapshot.roots[0]!.rootId;
+
+		await bridge.gitBranchCreate("new-branch", shaA, rootId);
+		await bridge.gitBranchSwitch("new-branch", rootId);
+		expect((await bridge.gitStatus(rootId)).branch.head).toBe("new-branch");
+		await bridge.gitBranchRename("new-branch", "renamed", rootId);
+		await bridge.gitBranchSwitch("main", rootId);
+		expect(await bridge.gitBranchDelete("renamed", false, rootId)).toBe(
+			"needsForce",
+		);
+		expect(await bridge.gitBranchDelete("renamed", true, rootId)).toBe(
+			"deleted",
+		);
+
+		await bridge.gitTagCreate("v1", shaA, "release", rootId);
+		expect((await bridge.gitRefsList(rootId)).entries).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					shortName: "v1",
+					isAnnotatedTag: true,
+				}),
+			]),
+		);
+		await bridge.gitTagDelete("v1", rootId);
+
+		await bridge.gitRemoteAdd(
+			"backup",
+			"https://token@example.invalid/backup.git?secret=yes",
+			rootId,
+		);
+		await bridge.gitRemoteSetUrl(
+			"backup",
+			"push",
+			"ssh://user@example.invalid/backup.git",
+			rootId,
+		);
+		await bridge.gitRemoteRename("backup", "mirror", rootId);
+		expect(await bridge.gitRemotesList(rootId)).toMatchObject({
+			entries: expect.arrayContaining([
+				{
+					name: "mirror",
+					fetchUrls: [
+						"https://<redacted>@example.invalid/backup.git?<redacted>",
+					],
+					pushUrls: ["ssh://<redacted>@example.invalid/backup.git"],
+				},
+			]),
+		});
+
+		await bridge.gitUpstreamSet("topic", "origin/main", rootId);
+		expect(
+			(await bridge.gitRefsList(rootId)).entries.find(
+				(entry) => entry.shortName === "topic",
+			)?.upstream,
+		).toBe("refs/remotes/origin/main");
+		await bridge.gitUpstreamUnset("topic", rootId);
+		await bridge.gitRemoteRemove("origin", rootId);
+		expect(
+			(await bridge.gitRefsList(rootId)).entries.some(
+				(entry) => entry.shortName === "origin/main",
+			),
+		).toBe(false);
+
+		await expect(
+			bridge.gitRemoteAdd("bad/name", "https://example.invalid", rootId),
+		).rejects.toMatchObject({ code: "GIT_REMOTE_MANAGEMENT_INVALID_REQUEST" });
+	});
+
 	it("isolates each instance and preserves revisions for cancellation and duplicates", async () => {
 		const bridge = createBrowserMockBridge({
 			workspacePicks: ["selected", "cancelled", "selected"],

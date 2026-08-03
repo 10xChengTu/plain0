@@ -145,6 +145,7 @@ import {
 import {
 	decodeGitBlameCommitMessagesResult,
 	decodeGitBlameFileResult,
+	decodeGitBranchDeleteOutcome,
 	decodeGitContributorsListResult,
 	decodeGitDiffFilesResult,
 	decodeGitHistoryListResult,
@@ -167,6 +168,10 @@ import {
 	decodeGitWorktreeRemoveOutcome,
 	frozenGitBlameCommitMessagesRequest,
 	frozenGitBlameFileRequest,
+	frozenGitBranchCreateRequest,
+	frozenGitBranchDeleteRequest,
+	frozenGitBranchRenameRequest,
+	frozenGitBranchSwitchRequest,
 	frozenGitCommitRequest,
 	frozenGitDiffFilesRequest,
 	frozenGitDiscardPathsRequest,
@@ -176,6 +181,10 @@ import {
 	frozenGitLogGraphRequest,
 	frozenGitNetworkPreviewRequest,
 	frozenGitPushRequest,
+	frozenGitRemoteAddRequest,
+	frozenGitRemoteRemoveRequest,
+	frozenGitRemoteRenameRequest,
+	frozenGitRemoteSetUrlRequest,
 	frozenGitRootId,
 	frozenGitShowBlobRequest,
 	frozenGitShowCommitBlobRequest,
@@ -187,7 +196,11 @@ import {
 	frozenGitStashPopRequest,
 	frozenGitStashPushRequest,
 	frozenGitStashShowRequest,
+	frozenGitTagCreateRequest,
+	frozenGitTagDeleteRequest,
 	frozenGitUnstagePathsRequest,
+	frozenGitUpstreamSetRequest,
+	frozenGitUpstreamUnsetRequest,
 	frozenGitWorktreeAddRequest,
 	frozenGitWorktreeRemoveRequest,
 } from "./git-codec";
@@ -1006,6 +1019,114 @@ export function createNativeBridge(): PlainBridge {
 				await invoke<unknown>("git_contributors_list", {
 					rootId: await resolveNativeGitRootId(rootId),
 					request: {},
+				}),
+			);
+		},
+		gitBranchCreate: async (name, targetSha, rootId) => {
+			const request = frozenGitBranchCreateRequest(name, targetSha);
+			return decodeGitVoid(
+				await invoke<unknown>("git_branch_create", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
+		},
+		gitBranchSwitch: async (name, rootId) => {
+			const request = frozenGitBranchSwitchRequest(name);
+			return decodeGitVoid(
+				await invoke<unknown>("git_branch_switch", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
+		},
+		gitBranchRename: async (oldName, newName, rootId) => {
+			const request = frozenGitBranchRenameRequest(oldName, newName);
+			return decodeGitVoid(
+				await invoke<unknown>("git_branch_rename", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
+		},
+		gitBranchDelete: async (name, force, rootId) => {
+			const request = frozenGitBranchDeleteRequest(name, force);
+			return decodeGitBranchDeleteOutcome(
+				await invoke<unknown>("git_branch_delete", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
+		},
+		gitTagCreate: async (name, targetSha, message, rootId) => {
+			const request = frozenGitTagCreateRequest(name, targetSha, message);
+			return decodeGitVoid(
+				await invoke<unknown>("git_tag_create", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
+		},
+		gitTagDelete: async (name, rootId) => {
+			const request = frozenGitTagDeleteRequest(name);
+			return decodeGitVoid(
+				await invoke<unknown>("git_tag_delete", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
+		},
+		gitRemoteAdd: async (name, url, rootId) => {
+			const request = frozenGitRemoteAddRequest(name, url);
+			return decodeGitVoid(
+				await invoke<unknown>("git_remote_add", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
+		},
+		gitRemoteRename: async (oldName, newName, rootId) => {
+			const request = frozenGitRemoteRenameRequest(oldName, newName);
+			return decodeGitVoid(
+				await invoke<unknown>("git_remote_rename", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
+		},
+		gitRemoteSetUrl: async (name, kind, url, rootId) => {
+			const request = frozenGitRemoteSetUrlRequest(name, kind, url);
+			return decodeGitVoid(
+				await invoke<unknown>("git_remote_set_url", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
+		},
+		gitRemoteRemove: async (name, rootId) => {
+			const request = frozenGitRemoteRemoveRequest(name);
+			return decodeGitVoid(
+				await invoke<unknown>("git_remote_remove", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
+		},
+		gitUpstreamSet: async (branch, upstream, rootId) => {
+			const request = frozenGitUpstreamSetRequest(branch, upstream);
+			return decodeGitVoid(
+				await invoke<unknown>("git_upstream_set", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
+		},
+		gitUpstreamUnset: async (branch, rootId) => {
+			const request = frozenGitUpstreamUnsetRequest(branch);
+			return decodeGitVoid(
+				await invoke<unknown>("git_upstream_unset", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
 				}),
 			);
 		},

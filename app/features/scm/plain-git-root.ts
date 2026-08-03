@@ -67,6 +67,27 @@ export function bindPlainGitBridge(bridge: PlainBridge, rootId: string) {
 		gitRemotesList: () => bridge.gitRemotesList(rootId),
 		gitReflogList: () => bridge.gitReflogList(rootId),
 		gitContributorsList: () => bridge.gitContributorsList(rootId),
+		gitBranchCreate: (name: string, targetSha: string) =>
+			bridge.gitBranchCreate(name, targetSha, rootId),
+		gitBranchSwitch: (name: string) => bridge.gitBranchSwitch(name, rootId),
+		gitBranchRename: (oldName: string, newName: string) =>
+			bridge.gitBranchRename(oldName, newName, rootId),
+		gitBranchDelete: (name: string, force: boolean) =>
+			bridge.gitBranchDelete(name, force, rootId),
+		gitTagCreate: (name: string, targetSha: string, message: string | null) =>
+			bridge.gitTagCreate(name, targetSha, message, rootId),
+		gitTagDelete: (name: string) => bridge.gitTagDelete(name, rootId),
+		gitRemoteAdd: (name: string, url: string) =>
+			bridge.gitRemoteAdd(name, url, rootId),
+		gitRemoteRename: (oldName: string, newName: string) =>
+			bridge.gitRemoteRename(oldName, newName, rootId),
+		gitRemoteSetUrl: (name: string, kind: "fetch" | "push", url: string) =>
+			bridge.gitRemoteSetUrl(name, kind, url, rootId),
+		gitRemoteRemove: (name: string) => bridge.gitRemoteRemove(name, rootId),
+		gitUpstreamSet: (branch: string, upstream: string) =>
+			bridge.gitUpstreamSet(branch, upstream, rootId),
+		gitUpstreamUnset: (branch: string) =>
+			bridge.gitUpstreamUnset(branch, rootId),
 		gitStashList: () => bridge.gitStashList(rootId),
 		gitStashShow: (sha: string) => bridge.gitStashShow(sha, rootId),
 		gitStashPush: (message: string, includeUntracked: boolean) =>

@@ -14,6 +14,7 @@ import type {
 	GitBlameLineEntry,
 	GitBlobRev,
 	GitBranch,
+	GitBranchDeleteOutcome,
 	GitContributorsListResult,
 	GitDiffFilesResult,
 	GitHistoryEntry,
@@ -21,8 +22,10 @@ import type {
 	GitLineHistoryDetail,
 	GitLogGraphResult,
 	GitNetworkPreviewResult,
+	GitRefEntry,
 	GitRefsListResult,
 	GitReflogListResult,
+	GitRemoteEntry,
 	GitRemotesListResult,
 	GitShowCommitResult,
 	GitStashEntry,
@@ -71,6 +74,10 @@ import type {
 import {
 	frozenGitBlameCommitMessagesRequest,
 	frozenGitBlameFileRequest,
+	frozenGitBranchCreateRequest,
+	frozenGitBranchDeleteRequest,
+	frozenGitBranchRenameRequest,
+	frozenGitBranchSwitchRequest,
 	frozenGitCommitRequest,
 	frozenGitDiffFilesRequest,
 	frozenGitDiscardPathsRequest,
@@ -80,6 +87,10 @@ import {
 	frozenGitLogGraphRequest,
 	frozenGitNetworkPreviewRequest,
 	frozenGitPushRequest,
+	frozenGitRemoteAddRequest,
+	frozenGitRemoteRemoveRequest,
+	frozenGitRemoteRenameRequest,
+	frozenGitRemoteSetUrlRequest,
 	frozenGitRootId,
 	frozenGitShowBlobRequest,
 	frozenGitShowBlobResult,
@@ -92,7 +103,11 @@ import {
 	frozenGitStashPopRequest,
 	frozenGitStashPushRequest,
 	frozenGitStashShowRequest,
+	frozenGitTagCreateRequest,
+	frozenGitTagDeleteRequest,
 	frozenGitUnstagePathsRequest,
+	frozenGitUpstreamSetRequest,
+	frozenGitUpstreamUnsetRequest,
 	frozenGitWorktreeAddRequest,
 	frozenGitWorktreeRemoveRequest,
 } from "./git-codec";
@@ -1242,6 +1257,9 @@ export interface BrowserMockGitFixtureForTest {
 	readonly reflogForTest?: GitReflogListResult;
 	/** `F180` S1A: aggregated contributor fixture. */
 	readonly contributorsForTest?: GitContributorsListResult;
+	/** `F180` S1B: local branch short names whose first safe deletion probe
+	 * reports `needsForce`; a confirmed `force: true` retry removes them. */
+	readonly branchUnmergedForTest?: readonly string[];
 	/** `F090` S4: seeds the initial, mutable `gitStashList` state (defaults to
 	 * `[]`) — `gitStashPush`/`gitStashApply`/`gitStashPop`/`gitStashDrop` all
 	 * mutate this in place (unshift on push, splice on a successful pop/drop),
@@ -6258,16 +6276,88 @@ export function createBrowserMockBridge(
 		entries: Object.freeze([]),
 		truncated: false,
 	});
-	const gitRefsListResult = gitFixture.refsForTest ?? defaultGitRefsListResult;
-	const gitRemotesListResult: GitRemotesListResult =
+	const seededGitRefs = gitFixture.refsForTest ?? defaultGitRefsListResult;
+	let gitRefEntries: GitRefEntry[] = seededGitRefs.entries.map((entry) => ({
+		...entry,
+	}));
+	const gitRefsTruncated = seededGitRefs.truncated;
+	const seededGitRemotes: GitRemotesListResult =
 		gitFixture.remotesForTest ??
 		Object.freeze({ entries: Object.freeze([]), truncated: false });
+	let gitRemoteEntries: GitRemoteEntry[] = seededGitRemotes.entries.map(
+		(entry) => ({
+			...entry,
+			fetchUrls: [...entry.fetchUrls],
+			pushUrls: [...entry.pushUrls],
+		}),
+	);
+	const gitRemotesTruncated = seededGitRemotes.truncated;
 	const gitReflogListResult: GitReflogListResult =
 		gitFixture.reflogForTest ??
 		Object.freeze({ entries: Object.freeze([]), truncated: false });
 	const gitContributorsListResult: GitContributorsListResult =
 		gitFixture.contributorsForTest ??
 		Object.freeze({ entries: Object.freeze([]), truncated: false });
+	const gitUnmergedBranches = new Set(gitFixture.branchUnmergedForTest ?? []);
+
+	function gitRefsListSnapshot(): GitRefsListResult {
+		return Object.freeze({
+			entries: Object.freeze(
+				gitRefEntries.map((entry) => Object.freeze({ ...entry })),
+			),
+			truncated: gitRefsTruncated,
+		});
+	}
+
+	function gitRemotesListSnapshot(): GitRemotesListResult {
+		return Object.freeze({
+			entries: Object.freeze(
+				gitRemoteEntries.map((entry) =>
+					Object.freeze({
+						...entry,
+						fetchUrls: Object.freeze([...entry.fetchUrls]),
+						pushUrls: Object.freeze([...entry.pushUrls]),
+					}),
+				),
+			),
+			truncated: gitRemotesTruncated,
+		});
+	}
+
+	function redactGitRemoteUrlForMock(raw: string): string {
+		if (
+			raw.startsWith("/") ||
+			raw.startsWith("./") ||
+			raw.startsWith("../") ||
+			raw.startsWith("\\\\") ||
+			/^[A-Za-z]:[\\/]/.test(raw)
+		) {
+			return "<local-path>";
+		}
+		if (raw.startsWith("file://")) {
+			return "file://<local-path>";
+		}
+		const suffix = raw.search(/[?#]/);
+		const base = suffix < 0 ? raw : raw.slice(0, suffix);
+		let display = base;
+		const scheme = base.indexOf("://");
+		if (scheme >= 0) {
+			const authorityStart = scheme + 3;
+			const slash = base.indexOf("/", authorityStart);
+			const authorityEnd = slash < 0 ? base.length : slash;
+			const authority = base.slice(authorityStart, authorityEnd);
+			const at = authority.lastIndexOf("@");
+			if (at >= 0) {
+				display = `${base.slice(0, authorityStart)}<redacted>@${authority.slice(at + 1)}${base.slice(authorityEnd)}`;
+			}
+		} else {
+			const at = base.indexOf("@");
+			if (at >= 0 && base.slice(at + 1).includes(":")) {
+				display = `<redacted>@${base.slice(at + 1)}`;
+			}
+		}
+		return suffix < 0 ? display : `${display}?<redacted>`;
+	}
 
 	// --- F090 S4: mutable stash list simulation ----------------------------
 	//
@@ -6421,6 +6511,32 @@ export function createBrowserMockBridge(
 			return gitNoRepository();
 		}
 		return undefined;
+	}
+
+	function gitManagementError(code: string, message: string): CommandError {
+		return commandError(code, message);
+	}
+
+	function gitLocalBranch(name: string): GitRefEntry | undefined {
+		return gitRefEntries.find(
+			(entry) => entry.kind === "branch" && entry.shortName === name,
+		);
+	}
+
+	function gitTag(name: string): GitRefEntry | undefined {
+		return gitRefEntries.find(
+			(entry) => entry.kind === "tag" && entry.shortName === name,
+		);
+	}
+
+	function gitRemote(name: string): GitRemoteEntry | undefined {
+		return gitRemoteEntries.find((entry) => entry.name === name);
+	}
+
+	function shortUpstream(fullName: string | null): string | null {
+		return fullName?.startsWith("refs/remotes/") === true
+			? fullName.slice("refs/remotes/".length)
+			: null;
 	}
 
 	function gitNetworkNoUpstream(): CommandError {
@@ -8081,14 +8197,14 @@ export function createBrowserMockBridge(
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
-			return gitRefsListResult;
+			return gitRefsListSnapshot();
 		},
 		async gitRemotesList(rootId_) {
 			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
-			return gitRemotesListResult;
+			return gitRemotesListSnapshot();
 		},
 		async gitReflogList(rootId_) {
 			const unavailable = gitMutateUnavailable(rootId_);
@@ -8103,6 +8219,356 @@ export function createBrowserMockBridge(
 				throw unavailable;
 			}
 			return gitContributorsListResult;
+		},
+		async gitBranchCreate(name_, targetSha_, rootId_) {
+			const request = frozenGitBranchCreateRequest(name_, targetSha_);
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			if (gitLocalBranch(request.name) !== undefined) {
+				throw gitManagementError(
+					"GIT_BRANCH_ALREADY_EXISTS",
+					"A Git branch with that name already exists.",
+				);
+			}
+			gitRefEntries.push({
+				kind: "branch",
+				fullName: `refs/heads/${request.name}`,
+				shortName: request.name,
+				targetSha: request.targetSha,
+				isAnnotatedTag: false,
+				peeledSha: null,
+				upstream: null,
+				isHead: false,
+			});
+		},
+		async gitBranchSwitch(name_, rootId_) {
+			const request = frozenGitBranchSwitchRequest(name_);
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const branch = gitLocalBranch(request.name);
+			if (branch === undefined) {
+				throw gitManagementError(
+					"GIT_BRANCH_NOT_FOUND",
+					"The requested Git branch does not exist.",
+				);
+			}
+			gitRefEntries = gitRefEntries.map((entry) =>
+				entry.kind === "branch"
+					? { ...entry, isHead: entry.shortName === request.name }
+					: entry,
+			);
+			const upstream = shortUpstream(branch.upstream);
+			gitBranch = {
+				oid: branch.targetSha,
+				head: request.name,
+				upstream:
+					upstream === null ? null : { name: upstream, ahead: 0, behind: 0 },
+			};
+			gitNetworkUpstream = upstream;
+		},
+		async gitBranchRename(oldName_, newName_, rootId_) {
+			const request = frozenGitBranchRenameRequest(oldName_, newName_);
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const branch = gitLocalBranch(request.oldName);
+			if (branch === undefined) {
+				throw gitManagementError(
+					"GIT_BRANCH_NOT_FOUND",
+					"The requested Git branch does not exist.",
+				);
+			}
+			if (gitLocalBranch(request.newName) !== undefined) {
+				throw gitManagementError(
+					"GIT_BRANCH_ALREADY_EXISTS",
+					"A Git branch with that name already exists.",
+				);
+			}
+			gitRefEntries = gitRefEntries.map((entry) =>
+				entry === branch
+					? {
+							...entry,
+							fullName: `refs/heads/${request.newName}`,
+							shortName: request.newName,
+						}
+					: entry,
+			);
+			if (gitBranch.head === request.oldName) {
+				gitBranch = { ...gitBranch, head: request.newName };
+			}
+			if (gitUnmergedBranches.delete(request.oldName)) {
+				gitUnmergedBranches.add(request.newName);
+			}
+		},
+		async gitBranchDelete(name_, force_, rootId_) {
+			const request = frozenGitBranchDeleteRequest(name_, force_);
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const branch = gitLocalBranch(request.name);
+			if (branch === undefined) {
+				throw gitManagementError(
+					"GIT_BRANCH_NOT_FOUND",
+					"The requested Git branch does not exist.",
+				);
+			}
+			if (branch.isHead || gitBranch.head === request.name) {
+				throw gitManagementError(
+					"GIT_BRANCH_IS_CURRENT",
+					"The currently checked-out Git branch cannot be deleted.",
+				);
+			}
+			if (!request.force && gitUnmergedBranches.has(request.name)) {
+				return "needsForce" satisfies GitBranchDeleteOutcome;
+			}
+			gitRefEntries = gitRefEntries.filter((entry) => entry !== branch);
+			gitUnmergedBranches.delete(request.name);
+			return "deleted" satisfies GitBranchDeleteOutcome;
+		},
+		async gitTagCreate(name_, targetSha_, message_, rootId_) {
+			const request = frozenGitTagCreateRequest(name_, targetSha_, message_);
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			if (gitTag(request.name) !== undefined) {
+				throw gitManagementError(
+					"GIT_TAG_ALREADY_EXISTS",
+					"A Git tag with that name already exists.",
+				);
+			}
+			gitRefEntries.push({
+				kind: "tag",
+				fullName: `refs/tags/${request.name}`,
+				shortName: request.name,
+				targetSha: request.targetSha,
+				isAnnotatedTag: request.message !== null,
+				peeledSha: request.message === null ? null : request.targetSha,
+				upstream: null,
+				isHead: false,
+			});
+		},
+		async gitTagDelete(name_, rootId_) {
+			const request = frozenGitTagDeleteRequest(name_);
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const tag = gitTag(request.name);
+			if (tag === undefined) {
+				throw gitManagementError(
+					"GIT_TAG_NOT_FOUND",
+					"The requested Git tag does not exist.",
+				);
+			}
+			gitRefEntries = gitRefEntries.filter((entry) => entry !== tag);
+		},
+		async gitRemoteAdd(name_, url_, rootId_) {
+			const request = frozenGitRemoteAddRequest(name_, url_);
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			if (gitRemote(request.name) !== undefined) {
+				throw gitManagementError(
+					"GIT_REMOTE_ALREADY_EXISTS",
+					"A Git remote with that name already exists.",
+				);
+			}
+			gitRemoteEntries.push({
+				name: request.name,
+				fetchUrls: [redactGitRemoteUrlForMock(request.url)],
+				pushUrls: [],
+			});
+		},
+		async gitRemoteRename(oldName_, newName_, rootId_) {
+			const request = frozenGitRemoteRenameRequest(oldName_, newName_);
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const remote = gitRemote(request.oldName);
+			if (remote === undefined) {
+				throw gitManagementError(
+					"GIT_REMOTE_NOT_FOUND",
+					"The requested Git remote does not exist.",
+				);
+			}
+			if (gitRemote(request.newName) !== undefined) {
+				throw gitManagementError(
+					"GIT_REMOTE_ALREADY_EXISTS",
+					"A Git remote with that name already exists.",
+				);
+			}
+			gitRemoteEntries = gitRemoteEntries.map((entry) =>
+				entry === remote ? { ...entry, name: request.newName } : entry,
+			);
+			const oldShortPrefix = `${request.oldName}/`;
+			const oldFullPrefix = `refs/remotes/${request.oldName}/`;
+			gitRefEntries = gitRefEntries.map((entry) => {
+				if (
+					entry.kind === "remoteBranch" &&
+					entry.shortName.startsWith(oldShortPrefix)
+				) {
+					const suffix = entry.shortName.slice(oldShortPrefix.length);
+					return {
+						...entry,
+						shortName: `${request.newName}/${suffix}`,
+						fullName: `refs/remotes/${request.newName}/${suffix}`,
+					};
+				}
+				if (entry.upstream?.startsWith(oldFullPrefix) === true) {
+					return {
+						...entry,
+						upstream: `refs/remotes/${request.newName}/${entry.upstream.slice(oldFullPrefix.length)}`,
+					};
+				}
+				return entry;
+			});
+			if (gitNetworkUpstream?.startsWith(oldShortPrefix) === true) {
+				gitNetworkUpstream = `${request.newName}/${gitNetworkUpstream.slice(oldShortPrefix.length)}`;
+			}
+			if (gitBranch.upstream?.name.startsWith(oldShortPrefix) === true) {
+				gitBranch = {
+					...gitBranch,
+					upstream: {
+						...gitBranch.upstream,
+						name: `${request.newName}/${gitBranch.upstream.name.slice(oldShortPrefix.length)}`,
+					},
+				};
+			}
+		},
+		async gitRemoteSetUrl(name_, kind_, url_, rootId_) {
+			const request = frozenGitRemoteSetUrlRequest(name_, kind_, url_);
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const remote = gitRemote(request.name);
+			if (remote === undefined) {
+				throw gitManagementError(
+					"GIT_REMOTE_NOT_FOUND",
+					"The requested Git remote does not exist.",
+				);
+			}
+			const displayUrl = redactGitRemoteUrlForMock(request.url);
+			gitRemoteEntries = gitRemoteEntries.map((entry) =>
+				entry === remote
+					? {
+							...entry,
+							fetchUrls:
+								request.kind === "fetch" ? [displayUrl] : entry.fetchUrls,
+							pushUrls: request.kind === "push" ? [displayUrl] : entry.pushUrls,
+						}
+					: entry,
+			);
+		},
+		async gitRemoteRemove(name_, rootId_) {
+			const request = frozenGitRemoteRemoveRequest(name_);
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const remote = gitRemote(request.name);
+			if (remote === undefined) {
+				throw gitManagementError(
+					"GIT_REMOTE_NOT_FOUND",
+					"The requested Git remote does not exist.",
+				);
+			}
+			gitRemoteEntries = gitRemoteEntries.filter((entry) => entry !== remote);
+			const shortPrefix = `${request.name}/`;
+			const fullPrefix = `refs/remotes/${request.name}/`;
+			gitRefEntries = gitRefEntries
+				.filter(
+					(entry) =>
+						entry.kind !== "remoteBranch" ||
+						!entry.shortName.startsWith(shortPrefix),
+				)
+				.map((entry) =>
+					entry.upstream?.startsWith(fullPrefix) === true
+						? { ...entry, upstream: null }
+						: entry,
+				);
+			if (gitNetworkUpstream?.startsWith(shortPrefix) === true) {
+				gitNetworkUpstream = null;
+			}
+			if (gitBranch.upstream?.name.startsWith(shortPrefix) === true) {
+				gitBranch = { ...gitBranch, upstream: null };
+			}
+		},
+		async gitUpstreamSet(branch_, upstream_, rootId_) {
+			const request = frozenGitUpstreamSetRequest(branch_, upstream_);
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const branch = gitLocalBranch(request.branch);
+			if (branch === undefined) {
+				throw gitManagementError(
+					"GIT_BRANCH_NOT_FOUND",
+					"The requested Git branch does not exist.",
+				);
+			}
+			const remoteBranch = gitRefEntries.find(
+				(entry) =>
+					entry.kind === "remoteBranch" && entry.shortName === request.upstream,
+			);
+			const remoteName = request.upstream.slice(
+				0,
+				request.upstream.indexOf("/"),
+			);
+			if (remoteBranch === undefined || gitRemote(remoteName) === undefined) {
+				throw gitManagementError(
+					"GIT_UPSTREAM_NOT_FOUND",
+					"The requested remote-tracking branch does not exist.",
+				);
+			}
+			gitRefEntries = gitRefEntries.map((entry) =>
+				entry === branch
+					? { ...entry, upstream: `refs/remotes/${request.upstream}` }
+					: entry,
+			);
+			if (gitBranch.head === request.branch) {
+				gitNetworkUpstream = request.upstream;
+				gitBranch = {
+					...gitBranch,
+					upstream: { name: request.upstream, ahead: 0, behind: 0 },
+				};
+			}
+		},
+		async gitUpstreamUnset(branch_, rootId_) {
+			const request = frozenGitUpstreamUnsetRequest(branch_);
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const branch = gitLocalBranch(request.branch);
+			if (branch === undefined) {
+				throw gitManagementError(
+					"GIT_BRANCH_NOT_FOUND",
+					"The requested Git branch does not exist.",
+				);
+			}
+			if (branch.upstream === null) {
+				throw gitManagementError(
+					"GIT_UPSTREAM_NOT_CONFIGURED",
+					"The requested local branch has no configured upstream.",
+				);
+			}
+			gitRefEntries = gitRefEntries.map((entry) =>
+				entry === branch ? { ...entry, upstream: null } : entry,
+			);
+			if (gitBranch.head === request.branch) {
+				gitNetworkUpstream = null;
+				gitBranch = { ...gitBranch, upstream: null };
+			}
 		},
 		async gitStashList(rootId_) {
 			const unavailable = gitMutateUnavailable(rootId_);

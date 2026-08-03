@@ -94,6 +94,7 @@ pub(crate) mod discovery;
 pub mod dto;
 pub(crate) mod exec;
 pub(crate) mod log;
+pub(crate) mod management;
 pub(crate) mod network;
 pub(crate) mod reflog;
 pub(crate) mod refs;

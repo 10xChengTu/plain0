@@ -1,12 +1,16 @@
 use super::{
-    GitBlobRevWire, GitCommitRequest, GitContributorsListRequest, GitContributorsListResultWire,
-    GitDiffFilesRequest, GitDiffFilesResult, GitDiscardPathsRequest, GitReflogListRequest,
-    GitReflogListResultWire, GitRemotesListRequest, GitRemotesListResultWire, GitShowBlobRequest,
-    GitShowBlobResult, GitStageBlobRequest, GitStagePathsRequest, GitStatusResult,
-    GitUnstagePathsRequest,
+    GitBlobRevWire, GitBranchCreateRequest, GitBranchDeleteOutcomeWire, GitBranchDeleteRequest,
+    GitBranchRenameRequest, GitBranchSwitchRequest, GitCommitRequest, GitContributorsListRequest,
+    GitContributorsListResultWire, GitDiffFilesRequest, GitDiffFilesResult, GitDiscardPathsRequest,
+    GitReflogListRequest, GitReflogListResultWire, GitRemoteAddRequest, GitRemoteRemoveRequest,
+    GitRemoteRenameRequest, GitRemoteSetUrlRequest, GitRemotesListRequest,
+    GitRemotesListResultWire, GitShowBlobRequest, GitShowBlobResult, GitStageBlobRequest,
+    GitStagePathsRequest, GitStatusResult, GitTagCreateRequest, GitTagDeleteRequest,
+    GitUnstagePathsRequest, GitUpstreamSetRequest, GitUpstreamUnsetRequest,
 };
 use crate::git::contributors::{ContributorEntry, ContributorList};
 use crate::git::diff::{DiffFileEntry, DiffStatusKind};
+use crate::git::management::{BranchDeleteOutcome, RemoteUrlKind};
 use crate::git::reflog::{ReflogEntry, ReflogList};
 use crate::git::remote::{RemoteEntry, RemoteList};
 use crate::git::status::{
@@ -426,4 +430,175 @@ fn git_read_model_results_serialize_only_their_audited_camel_case_fields() {
     }))
     .unwrap();
     assert_eq!(contributors["entries"][0]["commits"], 2);
+}
+
+// --- F180 S1B branch/tag/remote/upstream mutation requests ----------------
+
+#[test]
+fn git_management_requests_accept_only_their_audited_fields_and_values() {
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let branch_create: GitBranchCreateRequest = serde_json::from_value(serde_json::json!({
+        "name": "feature/nested",
+        "targetSha": sha
+    }))
+    .unwrap();
+    assert_eq!(
+        branch_create.into_parts().unwrap(),
+        ("feature/nested".to_owned(), sha.to_owned())
+    );
+    let branch_switch: GitBranchSwitchRequest =
+        serde_json::from_value(serde_json::json!({ "name": "main" })).unwrap();
+    assert_eq!(branch_switch.into_parts().unwrap(), "main");
+    let branch_rename: GitBranchRenameRequest = serde_json::from_value(serde_json::json!({
+        "oldName": "old",
+        "newName": "new"
+    }))
+    .unwrap();
+    assert_eq!(
+        branch_rename.into_parts().unwrap(),
+        ("old".to_owned(), "new".to_owned())
+    );
+    let branch_delete: GitBranchDeleteRequest =
+        serde_json::from_value(serde_json::json!({ "name": "old", "force": true })).unwrap();
+    assert_eq!(
+        branch_delete.into_parts().unwrap(),
+        ("old".to_owned(), true)
+    );
+
+    let tag_create: GitTagCreateRequest = serde_json::from_value(serde_json::json!({
+        "name": "v1",
+        "targetSha": sha,
+        "message": "release"
+    }))
+    .unwrap();
+    assert_eq!(
+        tag_create.into_parts().unwrap(),
+        ("v1".to_owned(), sha.to_owned(), Some("release".to_owned()))
+    );
+    let tag_delete: GitTagDeleteRequest =
+        serde_json::from_value(serde_json::json!({ "name": "v1" })).unwrap();
+    assert_eq!(tag_delete.into_parts().unwrap(), "v1");
+
+    let remote_add: GitRemoteAddRequest = serde_json::from_value(serde_json::json!({
+        "name": "origin",
+        "url": "https://example.invalid/repo.git"
+    }))
+    .unwrap();
+    assert_eq!(
+        remote_add.into_parts().unwrap(),
+        (
+            "origin".to_owned(),
+            "https://example.invalid/repo.git".to_owned()
+        )
+    );
+    let remote_rename: GitRemoteRenameRequest = serde_json::from_value(serde_json::json!({
+        "oldName": "origin",
+        "newName": "upstream"
+    }))
+    .unwrap();
+    assert_eq!(
+        remote_rename.into_parts().unwrap(),
+        ("origin".to_owned(), "upstream".to_owned())
+    );
+    let remote_url: GitRemoteSetUrlRequest = serde_json::from_value(serde_json::json!({
+        "name": "origin",
+        "kind": "push",
+        "url": "ssh://example.invalid/repo.git"
+    }))
+    .unwrap();
+    let (name, kind, url) = remote_url.into_parts().unwrap();
+    assert_eq!(name, "origin");
+    assert_eq!(kind, RemoteUrlKind::Push);
+    assert_eq!(url, "ssh://example.invalid/repo.git");
+    let remote_remove: GitRemoteRemoveRequest =
+        serde_json::from_value(serde_json::json!({ "name": "origin" })).unwrap();
+    assert_eq!(remote_remove.into_parts().unwrap(), "origin");
+
+    let upstream_set: GitUpstreamSetRequest = serde_json::from_value(serde_json::json!({
+        "branch": "main",
+        "upstream": "origin/main"
+    }))
+    .unwrap();
+    assert_eq!(
+        upstream_set.into_parts().unwrap(),
+        ("main".to_owned(), "origin/main".to_owned())
+    );
+    let upstream_unset: GitUpstreamUnsetRequest =
+        serde_json::from_value(serde_json::json!({ "branch": "main" })).unwrap();
+    assert_eq!(upstream_unset.into_parts().unwrap(), "main");
+}
+
+#[test]
+fn git_management_requests_reject_hostile_or_extra_values_before_routing() {
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let branch: GitBranchCreateRequest = serde_json::from_value(serde_json::json!({
+        "name": "refs/tags/forged",
+        "targetSha": sha
+    }))
+    .unwrap();
+    assert_eq!(
+        branch.into_parts().unwrap_err().code(),
+        "GIT_BRANCH_MANAGEMENT_INVALID_REQUEST"
+    );
+    let tag: GitTagCreateRequest = serde_json::from_value(serde_json::json!({
+        "name": "v1",
+        "targetSha": sha,
+        "message": "   "
+    }))
+    .unwrap();
+    assert_eq!(
+        tag.into_parts().unwrap_err().code(),
+        "GIT_TAG_MANAGEMENT_INVALID_REQUEST"
+    );
+    let remote: GitRemoteAddRequest = serde_json::from_value(serde_json::json!({
+        "name": "nested/name",
+        "url": "https://example.invalid/repo.git\nsecret"
+    }))
+    .unwrap();
+    assert_eq!(
+        remote.into_parts().unwrap_err().code(),
+        "GIT_REMOTE_MANAGEMENT_INVALID_REQUEST"
+    );
+    let upstream: GitUpstreamSetRequest = serde_json::from_value(serde_json::json!({
+        "branch": "main",
+        "upstream": "refs/remotes/origin/main"
+    }))
+    .unwrap();
+    assert_eq!(
+        upstream.into_parts().unwrap_err().code(),
+        "GIT_UPSTREAM_MANAGEMENT_INVALID_REQUEST"
+    );
+    assert!(
+        serde_json::from_value::<GitBranchSwitchRequest>(serde_json::json!({
+            "name": "main",
+            "extra": true
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<GitRemoteSetUrlRequest>(serde_json::json!({
+            "name": "origin",
+            "kind": "unknown",
+            "url": "https://example.invalid/repo.git"
+        }))
+        .is_err()
+    );
+}
+
+#[test]
+fn git_branch_delete_outcome_serializes_as_the_exact_camel_case_string() {
+    assert_eq!(
+        serde_json::to_value(GitBranchDeleteOutcomeWire::from(
+            BranchDeleteOutcome::Deleted
+        ))
+        .unwrap(),
+        serde_json::json!("deleted")
+    );
+    assert_eq!(
+        serde_json::to_value(GitBranchDeleteOutcomeWire::from(
+            BranchDeleteOutcome::NeedsForce
+        ))
+        .unwrap(),
+        serde_json::json!("needsForce")
+    );
 }

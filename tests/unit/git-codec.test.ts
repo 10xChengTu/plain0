@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
 	decodeGitBlameCommitMessagesResult,
 	decodeGitBlameFileResult,
+	decodeGitBranchDeleteOutcome,
 	decodeGitContributorsListResult,
 	decodeGitDiffFilesResult,
 	decodeGitNetworkPreviewResult,
@@ -13,17 +14,29 @@ import {
 	decodeGitVoid,
 	frozenGitBlameCommitMessagesRequest,
 	frozenGitBlameFileRequest,
+	frozenGitBranchCreateRequest,
+	frozenGitBranchDeleteRequest,
+	frozenGitBranchRenameRequest,
+	frozenGitBranchSwitchRequest,
 	frozenGitCommitRequest,
 	frozenGitDiffFilesRequest,
 	frozenGitDiscardPathsRequest,
 	frozenGitNetworkPreviewRequest,
 	frozenGitPushRequest,
+	frozenGitRemoteAddRequest,
+	frozenGitRemoteRemoveRequest,
+	frozenGitRemoteRenameRequest,
+	frozenGitRemoteSetUrlRequest,
 	frozenGitRootId,
 	frozenGitShowBlobRequest,
 	frozenGitShowBlobResult,
 	frozenGitStageBlobRequest,
 	frozenGitStagePathsRequest,
+	frozenGitTagCreateRequest,
+	frozenGitTagDeleteRequest,
 	frozenGitUnstagePathsRequest,
+	frozenGitUpstreamSetRequest,
+	frozenGitUpstreamUnsetRequest,
 } from "../../app/platform/tauri/git-codec";
 
 const contractError = { code: "IPC_CONTRACT_VIOLATION" };
@@ -917,5 +930,103 @@ describe("F180 Git read-model codecs", () => {
 				truncated: false,
 			}),
 		).toThrowError(expect.objectContaining(contractError));
+	});
+});
+
+describe("F180 Git management request codecs", () => {
+	it("builds and freezes every audited branch/tag/remote/upstream request", () => {
+		const values = [
+			frozenGitBranchCreateRequest("topic", SHA_A),
+			frozenGitBranchSwitchRequest("topic"),
+			frozenGitBranchRenameRequest("topic", "renamed"),
+			frozenGitBranchDeleteRequest("renamed", false),
+			frozenGitTagCreateRequest("v1", SHA_A, null),
+			frozenGitTagCreateRequest("v2", SHA_A, "release"),
+			frozenGitTagDeleteRequest("v1"),
+			frozenGitRemoteAddRequest(
+				"origin",
+				"https://token@example.invalid/repo.git",
+			),
+			frozenGitRemoteRenameRequest("origin", "upstream"),
+			frozenGitRemoteSetUrlRequest(
+				"upstream",
+				"push",
+				"ssh://example.invalid/repo.git",
+			),
+			frozenGitRemoteRemoveRequest("upstream"),
+			frozenGitUpstreamSetRequest("main", "origin/main"),
+			frozenGitUpstreamUnsetRequest("main"),
+		];
+		for (const value of values) {
+			expect(Object.isFrozen(value)).toBe(true);
+		}
+		expect(values[0]).toEqual({ name: "topic", targetSha: SHA_A });
+		expect(values[9]).toEqual({
+			name: "upstream",
+			kind: "push",
+			url: "ssh://example.invalid/repo.git",
+		});
+	});
+
+	it("rejects namespace forgery, controls, invalid targets and invalid URL kinds", () => {
+		for (const invoke of [
+			() => frozenGitBranchCreateRequest("refs/tags/forged", SHA_A),
+			() => frozenGitBranchSwitchRequest("-option"),
+			() => frozenGitBranchRenameRequest("main", "bad\nname"),
+			() => frozenGitBranchDeleteRequest("topic", "yes"),
+		]) {
+			expect(invoke).toThrowError(
+				expect.objectContaining({
+					code: "GIT_BRANCH_MANAGEMENT_INVALID_REQUEST",
+				}),
+			);
+		}
+		expect(() => frozenGitTagCreateRequest("v1", "bad", null)).toThrowError(
+			expect.objectContaining({ code: "GIT_TAG_MANAGEMENT_INVALID_REQUEST" }),
+		);
+		expect(() => frozenGitTagCreateRequest("v1", SHA_A, "   ")).toThrowError(
+			expect.objectContaining({ code: "GIT_TAG_MANAGEMENT_INVALID_REQUEST" }),
+		);
+		for (const invoke of [
+			() =>
+				frozenGitRemoteAddRequest(
+					"nested/name",
+					"https://example.invalid/repo.git",
+				),
+			() =>
+				frozenGitRemoteSetUrlRequest(
+					"origin",
+					"unknown",
+					"https://example.invalid/repo.git",
+				),
+			() =>
+				frozenGitRemoteAddRequest(
+					"origin",
+					"https://example.invalid/repo.git\nsecret",
+				),
+		]) {
+			expect(invoke).toThrowError(
+				expect.objectContaining({
+					code: "GIT_REMOTE_MANAGEMENT_INVALID_REQUEST",
+				}),
+			);
+		}
+		expect(() =>
+			frozenGitUpstreamSetRequest("main", "refs/remotes/origin/main"),
+		).toThrowError(
+			expect.objectContaining({
+				code: "GIT_UPSTREAM_MANAGEMENT_INVALID_REQUEST",
+			}),
+		);
+	});
+
+	it("decodes only the two bare branch-delete outcomes", () => {
+		expect(decodeGitBranchDeleteOutcome("deleted")).toBe("deleted");
+		expect(decodeGitBranchDeleteOutcome("needsForce")).toBe("needsForce");
+		for (const value of ["forced", {}, null]) {
+			expect(() => decodeGitBranchDeleteOutcome(value)).toThrowError(
+				expect.objectContaining(contractError),
+			);
+		}
 	});
 });

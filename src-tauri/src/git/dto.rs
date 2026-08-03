@@ -15,6 +15,7 @@ use super::blame::{BlameCommitHeader, BlameLineRange, BlameResult, BLAME_UNCOMMI
 use super::contributors::{ContributorEntry, ContributorList};
 use super::diff::{DiffFileEntry, DiffStatusKind, GitBlobRev};
 use super::log::{GraphList, GraphNode, HistoryEntry, HistoryList, LineHistoryDetail, LineRange};
+use super::management::{BranchDeleteOutcome, RemoteUrlKind};
 use super::network::NetworkOperation;
 use super::reflog::{ReflogEntry, ReflogList};
 use super::refs::{RefEntry, RefGroupKind, RefList};
@@ -1320,6 +1321,307 @@ impl From<ContributorList> for GitContributorsListResultWire {
                 .collect(),
             truncated: value.truncated,
         }
+    }
+}
+
+// --- F180 S1B branch/tag/remote/upstream mutation authority ---------------
+
+const MAX_GIT_MANAGEMENT_REF_NAME_BYTES: usize = 1_024;
+const MAX_GIT_MANAGEMENT_REMOTE_NAME_BYTES: usize = 255;
+const MAX_GIT_MANAGEMENT_REMOTE_URL_BYTES: usize = 4_096;
+const MAX_GIT_MANAGEMENT_TAG_MESSAGE_BYTES: usize = 100_000;
+
+fn git_branch_management_invalid_request() -> CommandError {
+    CommandError::new(
+        "GIT_BRANCH_MANAGEMENT_INVALID_REQUEST",
+        "The Git branch management request is invalid.",
+    )
+}
+
+fn git_tag_management_invalid_request() -> CommandError {
+    CommandError::new(
+        "GIT_TAG_MANAGEMENT_INVALID_REQUEST",
+        "The Git tag management request is invalid.",
+    )
+}
+
+fn git_remote_management_invalid_request() -> CommandError {
+    CommandError::new(
+        "GIT_REMOTE_MANAGEMENT_INVALID_REQUEST",
+        "The Git remote management request is invalid.",
+    )
+}
+
+fn git_upstream_management_invalid_request() -> CommandError {
+    CommandError::new(
+        "GIT_UPSTREAM_MANAGEMENT_INVALID_REQUEST",
+        "The Git upstream management request is invalid.",
+    )
+}
+
+fn management_name_is_valid(value: &str, max_bytes: usize, allow_slash: bool) -> bool {
+    !value.is_empty()
+        && value.len() <= max_bytes
+        && !value.starts_with('-')
+        && !value.starts_with("refs/")
+        && !value.chars().any(char::is_control)
+        && (allow_slash || !value.contains('/'))
+}
+
+fn management_sha_is_valid(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitBranchCreateRequest {
+    name: String,
+    target_sha: String,
+}
+
+impl GitBranchCreateRequest {
+    pub(crate) fn into_parts(self) -> Result<(String, String), CommandError> {
+        if !management_name_is_valid(&self.name, MAX_GIT_MANAGEMENT_REF_NAME_BYTES, true)
+            || !management_sha_is_valid(&self.target_sha)
+        {
+            return Err(git_branch_management_invalid_request());
+        }
+        Ok((self.name, self.target_sha))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitBranchSwitchRequest {
+    name: String,
+}
+
+impl GitBranchSwitchRequest {
+    pub(crate) fn into_parts(self) -> Result<String, CommandError> {
+        if !management_name_is_valid(&self.name, MAX_GIT_MANAGEMENT_REF_NAME_BYTES, true) {
+            return Err(git_branch_management_invalid_request());
+        }
+        Ok(self.name)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitBranchRenameRequest {
+    old_name: String,
+    new_name: String,
+}
+
+impl GitBranchRenameRequest {
+    pub(crate) fn into_parts(self) -> Result<(String, String), CommandError> {
+        if !management_name_is_valid(&self.old_name, MAX_GIT_MANAGEMENT_REF_NAME_BYTES, true)
+            || !management_name_is_valid(&self.new_name, MAX_GIT_MANAGEMENT_REF_NAME_BYTES, true)
+        {
+            return Err(git_branch_management_invalid_request());
+        }
+        Ok((self.old_name, self.new_name))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitBranchDeleteRequest {
+    name: String,
+    force: bool,
+}
+
+impl GitBranchDeleteRequest {
+    pub(crate) fn into_parts(self) -> Result<(String, bool), CommandError> {
+        if !management_name_is_valid(&self.name, MAX_GIT_MANAGEMENT_REF_NAME_BYTES, true) {
+            return Err(git_branch_management_invalid_request());
+        }
+        Ok((self.name, self.force))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitBranchDeleteOutcomeWire {
+    Deleted,
+    NeedsForce,
+}
+
+impl From<BranchDeleteOutcome> for GitBranchDeleteOutcomeWire {
+    fn from(value: BranchDeleteOutcome) -> Self {
+        match value {
+            BranchDeleteOutcome::Deleted => Self::Deleted,
+            BranchDeleteOutcome::NeedsForce => Self::NeedsForce,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitTagCreateRequest {
+    name: String,
+    target_sha: String,
+    message: Option<String>,
+}
+
+impl GitTagCreateRequest {
+    pub(crate) fn into_parts(self) -> Result<(String, String, Option<String>), CommandError> {
+        if !management_name_is_valid(&self.name, MAX_GIT_MANAGEMENT_REF_NAME_BYTES, true)
+            || !management_sha_is_valid(&self.target_sha)
+            || self.message.as_ref().is_some_and(|message| {
+                message.trim().is_empty() || message.len() > MAX_GIT_MANAGEMENT_TAG_MESSAGE_BYTES
+            })
+        {
+            return Err(git_tag_management_invalid_request());
+        }
+        Ok((self.name, self.target_sha, self.message))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitTagDeleteRequest {
+    name: String,
+}
+
+impl GitTagDeleteRequest {
+    pub(crate) fn into_parts(self) -> Result<String, CommandError> {
+        if !management_name_is_valid(&self.name, MAX_GIT_MANAGEMENT_REF_NAME_BYTES, true) {
+            return Err(git_tag_management_invalid_request());
+        }
+        Ok(self.name)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitRemoteAddRequest {
+    name: String,
+    url: String,
+}
+
+impl GitRemoteAddRequest {
+    pub(crate) fn into_parts(self) -> Result<(String, String), CommandError> {
+        if !management_name_is_valid(&self.name, MAX_GIT_MANAGEMENT_REMOTE_NAME_BYTES, false)
+            || self.url.is_empty()
+            || self.url.len() > MAX_GIT_MANAGEMENT_REMOTE_URL_BYTES
+            || self.url.chars().any(char::is_control)
+        {
+            return Err(git_remote_management_invalid_request());
+        }
+        Ok((self.name, self.url))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitRemoteRenameRequest {
+    old_name: String,
+    new_name: String,
+}
+
+impl GitRemoteRenameRequest {
+    pub(crate) fn into_parts(self) -> Result<(String, String), CommandError> {
+        if !management_name_is_valid(&self.old_name, MAX_GIT_MANAGEMENT_REMOTE_NAME_BYTES, false)
+            || !management_name_is_valid(
+                &self.new_name,
+                MAX_GIT_MANAGEMENT_REMOTE_NAME_BYTES,
+                false,
+            )
+        {
+            return Err(git_remote_management_invalid_request());
+        }
+        Ok((self.old_name, self.new_name))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitRemoteUrlKindRequest {
+    Fetch,
+    Push,
+}
+
+impl From<GitRemoteUrlKindRequest> for RemoteUrlKind {
+    fn from(value: GitRemoteUrlKindRequest) -> Self {
+        match value {
+            GitRemoteUrlKindRequest::Fetch => Self::Fetch,
+            GitRemoteUrlKindRequest::Push => Self::Push,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitRemoteSetUrlRequest {
+    name: String,
+    kind: GitRemoteUrlKindRequest,
+    url: String,
+}
+
+impl GitRemoteSetUrlRequest {
+    pub(crate) fn into_parts(self) -> Result<(String, RemoteUrlKind, String), CommandError> {
+        if !management_name_is_valid(&self.name, MAX_GIT_MANAGEMENT_REMOTE_NAME_BYTES, false)
+            || self.url.is_empty()
+            || self.url.len() > MAX_GIT_MANAGEMENT_REMOTE_URL_BYTES
+            || self.url.chars().any(char::is_control)
+        {
+            return Err(git_remote_management_invalid_request());
+        }
+        Ok((self.name, self.kind.into(), self.url))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitRemoteRemoveRequest {
+    name: String,
+}
+
+impl GitRemoteRemoveRequest {
+    pub(crate) fn into_parts(self) -> Result<String, CommandError> {
+        if !management_name_is_valid(&self.name, MAX_GIT_MANAGEMENT_REMOTE_NAME_BYTES, false) {
+            return Err(git_remote_management_invalid_request());
+        }
+        Ok(self.name)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitUpstreamSetRequest {
+    branch: String,
+    upstream: String,
+}
+
+impl GitUpstreamSetRequest {
+    pub(crate) fn into_parts(self) -> Result<(String, String), CommandError> {
+        if !management_name_is_valid(&self.branch, MAX_GIT_MANAGEMENT_REF_NAME_BYTES, true)
+            || !management_name_is_valid(&self.upstream, MAX_GIT_MANAGEMENT_REF_NAME_BYTES, true)
+            || !self.upstream.contains('/')
+            || self.upstream.starts_with('/')
+            || self.upstream.ends_with('/')
+        {
+            return Err(git_upstream_management_invalid_request());
+        }
+        Ok((self.branch, self.upstream))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitUpstreamUnsetRequest {
+    branch: String,
+}
+
+impl GitUpstreamUnsetRequest {
+    pub(crate) fn into_parts(self) -> Result<String, CommandError> {
+        if !management_name_is_valid(&self.branch, MAX_GIT_MANAGEMENT_REF_NAME_BYTES, true) {
+            return Err(git_upstream_management_invalid_request());
+        }
+        Ok(self.branch)
     }
 }
 

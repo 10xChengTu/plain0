@@ -32,23 +32,27 @@ use super::diff;
 use super::discard;
 use super::dto::{
     GitBlameCommitMessagesRequest, GitBlameCommitMessagesResult, GitBlameFileRequest,
-    GitBlameFileResult, GitCommitRequest, GitContributorsListRequest,
+    GitBlameFileResult, GitBranchCreateRequest, GitBranchDeleteOutcomeWire, GitBranchDeleteRequest,
+    GitBranchRenameRequest, GitBranchSwitchRequest, GitCommitRequest, GitContributorsListRequest,
     GitContributorsListResultWire, GitDiffFilesRequest, GitDiffFilesResult, GitDiscardPathsRequest,
     GitFetchRequest, GitFileHistoryRequest, GitHistoryListResultWire, GitLineHistoryDetailRequest,
     GitLineHistoryDetailResultWire, GitLineHistoryListRequest, GitLogGraphRequest,
     GitLogGraphResultWire, GitNetworkCancelRequest, GitNetworkPreviewRequest,
     GitNetworkPreviewResult, GitPullRequest, GitPushRequest, GitReflogListRequest,
-    GitReflogListResultWire, GitRefsListRequest, GitRefsListResultWire, GitRemotesListRequest,
+    GitReflogListResultWire, GitRefsListRequest, GitRefsListResultWire, GitRemoteAddRequest,
+    GitRemoteRemoveRequest, GitRemoteRenameRequest, GitRemoteSetUrlRequest, GitRemotesListRequest,
     GitRemotesListResultWire, GitShowBlobRequest, GitShowBlobResult, GitShowCommitBlobRequest,
     GitShowCommitRequest, GitShowCommitResult, GitStageBlobRequest, GitStagePathsRequest,
     GitStashApplyOutcomeWire, GitStashApplyRequest, GitStashDropRequest, GitStashListRequest,
     GitStashListResultWire, GitStashPopRequest, GitStashPushOutcomeWire, GitStashPushRequest,
     GitStashShowRequest, GitStashShowResultWire, GitStatusRequest, GitStatusResult,
-    GitUnstagePathsRequest, GitWorktreeAddOutcomeWire, GitWorktreeAddRequest,
+    GitTagCreateRequest, GitTagDeleteRequest, GitUnstagePathsRequest, GitUpstreamSetRequest,
+    GitUpstreamUnsetRequest, GitWorktreeAddOutcomeWire, GitWorktreeAddRequest,
     GitWorktreeListRequest, GitWorktreeListResultWire, GitWorktreeRemoveOutcomeWire,
     GitWorktreeRemoveRequest,
 };
 use super::log;
+use super::management;
 use super::network::{self, GitNetworkService};
 use super::reflog;
 use super::refs;
@@ -434,6 +438,172 @@ pub(crate) async fn git_contributors_list(
     let scope = SelectedGitRoot::new(workspace.inner(), root_id);
     let result = contributors::list_contributors(trust.inner(), &scope, window.label()).await?;
     Ok(GitContributorsListResultWire::from(result))
+}
+
+#[tauri::command]
+pub(crate) async fn git_branch_create(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
+    request: GitBranchCreateRequest,
+) -> Result<(), CommandError> {
+    let (name, target_sha) = request.into_parts()?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    management::create_branch(trust.inner(), &scope, window.label(), &name, &target_sha).await
+}
+
+#[tauri::command]
+pub(crate) async fn git_branch_switch(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
+    request: GitBranchSwitchRequest,
+) -> Result<(), CommandError> {
+    let name = request.into_parts()?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    management::switch_branch(trust.inner(), &scope, window.label(), &name).await
+}
+
+#[tauri::command]
+pub(crate) async fn git_branch_rename(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
+    request: GitBranchRenameRequest,
+) -> Result<(), CommandError> {
+    let (old_name, new_name) = request.into_parts()?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    management::rename_branch(trust.inner(), &scope, window.label(), &old_name, &new_name).await
+}
+
+#[tauri::command]
+pub(crate) async fn git_branch_delete(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
+    request: GitBranchDeleteRequest,
+) -> Result<GitBranchDeleteOutcomeWire, CommandError> {
+    let (name, force) = request.into_parts()?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let outcome =
+        management::delete_branch(trust.inner(), &scope, window.label(), &name, force).await?;
+    Ok(GitBranchDeleteOutcomeWire::from(outcome))
+}
+
+#[tauri::command]
+pub(crate) async fn git_tag_create(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
+    request: GitTagCreateRequest,
+) -> Result<(), CommandError> {
+    let (name, target_sha, message) = request.into_parts()?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    management::create_tag(
+        trust.inner(),
+        &scope,
+        window.label(),
+        &name,
+        &target_sha,
+        message.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn git_tag_delete(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
+    request: GitTagDeleteRequest,
+) -> Result<(), CommandError> {
+    let name = request.into_parts()?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    management::delete_tag(trust.inner(), &scope, window.label(), &name).await
+}
+
+#[tauri::command]
+pub(crate) async fn git_remote_add(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
+    request: GitRemoteAddRequest,
+) -> Result<(), CommandError> {
+    let (name, url) = request.into_parts()?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    management::add_remote(trust.inner(), &scope, window.label(), &name, &url).await
+}
+
+#[tauri::command]
+pub(crate) async fn git_remote_rename(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
+    request: GitRemoteRenameRequest,
+) -> Result<(), CommandError> {
+    let (old_name, new_name) = request.into_parts()?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    management::rename_remote(trust.inner(), &scope, window.label(), &old_name, &new_name).await
+}
+
+#[tauri::command]
+pub(crate) async fn git_remote_set_url(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
+    request: GitRemoteSetUrlRequest,
+) -> Result<(), CommandError> {
+    let (name, kind, url) = request.into_parts()?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    management::set_remote_url(trust.inner(), &scope, window.label(), &name, kind, &url).await
+}
+
+#[tauri::command]
+pub(crate) async fn git_remote_remove(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
+    request: GitRemoteRemoveRequest,
+) -> Result<(), CommandError> {
+    let name = request.into_parts()?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    management::remove_remote(trust.inner(), &scope, window.label(), &name).await
+}
+
+#[tauri::command]
+pub(crate) async fn git_upstream_set(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
+    request: GitUpstreamSetRequest,
+) -> Result<(), CommandError> {
+    let (branch, upstream) = request.into_parts()?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    management::set_upstream(trust.inner(), &scope, window.label(), &branch, &upstream).await
+}
+
+#[tauri::command]
+pub(crate) async fn git_upstream_unset(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
+    request: GitUpstreamUnsetRequest,
+) -> Result<(), CommandError> {
+    let branch = request.into_parts()?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    management::unset_upstream(trust.inner(), &scope, window.label(), &branch).await
 }
 
 #[tauri::command]

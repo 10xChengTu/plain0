@@ -1345,6 +1345,90 @@ describe("native Plain bridge", () => {
 		});
 	});
 
+	it("routes every F180 management mutation through its exact frozen request", async () => {
+		const sha = "a".repeat(40);
+		tauri.invoke.mockImplementation(async (command: string) =>
+			command === "git_branch_delete" ? "needsForce" : null,
+		);
+		const bridge = createNativeBridge();
+
+		await bridge.gitBranchCreate("topic", sha, rootId);
+		await bridge.gitBranchSwitch("topic", rootId);
+		await bridge.gitBranchRename("topic", "renamed", rootId);
+		expect(await bridge.gitBranchDelete("renamed", false, rootId)).toBe(
+			"needsForce",
+		);
+		await bridge.gitTagCreate("v1", sha, "release", rootId);
+		await bridge.gitTagDelete("v1", rootId);
+		await bridge.gitRemoteAdd(
+			"origin",
+			"https://example.invalid/repo.git",
+			rootId,
+		);
+		await bridge.gitRemoteRename("origin", "upstream", rootId);
+		await bridge.gitRemoteSetUrl(
+			"upstream",
+			"push",
+			"ssh://example.invalid/repo.git",
+			rootId,
+		);
+		await bridge.gitRemoteRemove("upstream", rootId);
+		await bridge.gitUpstreamSet("main", "origin/main", rootId);
+		await bridge.gitUpstreamUnset("main", rootId);
+
+		expect(tauri.invoke.mock.calls).toEqual([
+			[
+				"git_branch_create",
+				{ rootId, request: { name: "topic", targetSha: sha } },
+			],
+			["git_branch_switch", { rootId, request: { name: "topic" } }],
+			[
+				"git_branch_rename",
+				{ rootId, request: { oldName: "topic", newName: "renamed" } },
+			],
+			[
+				"git_branch_delete",
+				{ rootId, request: { name: "renamed", force: false } },
+			],
+			[
+				"git_tag_create",
+				{ rootId, request: { name: "v1", targetSha: sha, message: "release" } },
+			],
+			["git_tag_delete", { rootId, request: { name: "v1" } }],
+			[
+				"git_remote_add",
+				{
+					rootId,
+					request: {
+						name: "origin",
+						url: "https://example.invalid/repo.git",
+					},
+				},
+			],
+			[
+				"git_remote_rename",
+				{ rootId, request: { oldName: "origin", newName: "upstream" } },
+			],
+			[
+				"git_remote_set_url",
+				{
+					rootId,
+					request: {
+						name: "upstream",
+						kind: "push",
+						url: "ssh://example.invalid/repo.git",
+					},
+				},
+			],
+			["git_remote_remove", { rootId, request: { name: "upstream" } }],
+			[
+				"git_upstream_set",
+				{ rootId, request: { branch: "main", upstream: "origin/main" } },
+			],
+			["git_upstream_unset", { rootId, request: { branch: "main" } }],
+		]);
+	});
+
 	it("resolves the sole workspace root for a legacy single-root Git caller", async () => {
 		tauri.invoke.mockResolvedValueOnce(validSnapshot()).mockResolvedValueOnce({
 			branch: { oid: "(initial)", head: "(detached)", upstream: null },
