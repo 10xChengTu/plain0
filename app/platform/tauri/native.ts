@@ -145,12 +145,15 @@ import {
 import {
 	decodeGitBlameCommitMessagesResult,
 	decodeGitBlameFileResult,
+	decodeGitContributorsListResult,
 	decodeGitDiffFilesResult,
 	decodeGitHistoryListResult,
 	decodeGitLineHistoryDetailResult,
 	decodeGitLogGraphResult,
 	decodeGitNetworkPreviewResult,
 	decodeGitRefsListResult,
+	decodeGitReflogListResult,
+	decodeGitRemotesListResult,
 	decodeGitShowBlobResult,
 	decodeGitShowCommitResult,
 	decodeGitStashApplyOutcome,
@@ -977,6 +980,30 @@ export function createNativeBridge(): PlainBridge {
 		gitRefsList: async (rootId) => {
 			return decodeGitRefsListResult(
 				await invoke<unknown>("git_refs_list", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request: {},
+				}),
+			);
+		},
+		gitRemotesList: async (rootId) => {
+			return decodeGitRemotesListResult(
+				await invoke<unknown>("git_remotes_list", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request: {},
+				}),
+			);
+		},
+		gitReflogList: async (rootId) => {
+			return decodeGitReflogListResult(
+				await invoke<unknown>("git_reflog_list", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request: {},
+				}),
+			);
+		},
+		gitContributorsList: async (rootId) => {
+			return decodeGitContributorsListResult(
+				await invoke<unknown>("git_contributors_list", {
 					rootId: await resolveNativeGitRootId(rootId),
 					request: {},
 				}),

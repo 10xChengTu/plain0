@@ -75,6 +75,61 @@ describe("browser mock workspace bridge", () => {
 		).rejects.toMatchObject({ code: "ROOT_NOT_AUTHORIZED" });
 	});
 
+	it("returns root-bound F180 remote, reflog and contributor fixtures", async () => {
+		const sha = "a".repeat(40);
+		const bridge = createBrowserMockBridge({
+			gitFixtureForTest: {
+				remotesForTest: {
+					entries: [
+						{
+							name: "origin",
+							fetchUrls: ["https://example.invalid/repo.git"],
+							pushUrls: [],
+						},
+					],
+					truncated: false,
+				},
+				reflogForTest: {
+					entries: [
+						{
+							sha,
+							selector: "HEAD@{0}",
+							committerTime: 1,
+							summary: "commit: sample",
+						},
+					],
+					truncated: false,
+				},
+				contributorsForTest: {
+					entries: [
+						{
+							name: "Plain",
+							email: "plain@example.invalid",
+							commits: 2,
+						},
+					],
+					truncated: false,
+				},
+			},
+		});
+		const selected = await bridge.workspacePickRoots("add");
+		await bridge.workspaceTrustGrant();
+		const rootId = selected.snapshot.roots[0]!.rootId;
+
+		expect(await bridge.gitRemotesList(rootId)).toMatchObject({
+			entries: [{ name: "origin" }],
+		});
+		expect(await bridge.gitReflogList(rootId)).toMatchObject({
+			entries: [{ sha }],
+		});
+		expect(await bridge.gitContributorsList(rootId)).toMatchObject({
+			entries: [{ name: "Plain", commits: 2 }],
+		});
+		await expect(
+			bridge.gitRemotesList("00000000-0000-4000-8000-000000000199"),
+		).rejects.toMatchObject({ code: "ROOT_NOT_AUTHORIZED" });
+	});
+
 	it("isolates each instance and preserves revisions for cancellation and duplicates", async () => {
 		const bridge = createBrowserMockBridge({
 			workspacePicks: ["selected", "cancelled", "selected"],

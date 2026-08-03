@@ -3,8 +3,11 @@ import { describe, expect, it } from "vitest";
 import {
 	decodeGitBlameCommitMessagesResult,
 	decodeGitBlameFileResult,
+	decodeGitContributorsListResult,
 	decodeGitDiffFilesResult,
 	decodeGitNetworkPreviewResult,
+	decodeGitReflogListResult,
+	decodeGitRemotesListResult,
 	decodeGitShowBlobResult,
 	decodeGitStatusResult,
 	decodeGitVoid,
@@ -831,6 +834,87 @@ describe("decodeGitBlameCommitMessagesResult", () => {
 		expect(() =>
 			decodeGitBlameCommitMessagesResult({
 				messages: new Proxy({ [SHA_A]: "x" }, {}),
+			}),
+		).toThrowError(expect.objectContaining(contractError));
+	});
+});
+
+describe("F180 Git read-model codecs", () => {
+	it("decodes and deeply freezes redacted remotes, reflog and contributors", () => {
+		const remotes = decodeGitRemotesListResult({
+			entries: [
+				{
+					name: "origin",
+					fetchUrls: ["https://<redacted>@example.invalid/repo.git"],
+					pushUrls: [],
+				},
+			],
+			truncated: false,
+		});
+		expect(remotes.entries[0]?.name).toBe("origin");
+		expect(Object.isFrozen(remotes)).toBe(true);
+		expect(Object.isFrozen(remotes.entries)).toBe(true);
+		expect(Object.isFrozen(remotes.entries[0]?.fetchUrls)).toBe(true);
+
+		const reflog = decodeGitReflogListResult({
+			entries: [
+				{
+					sha: SHA_A,
+					selector: "HEAD@{0}",
+					committerTime: -1,
+					summary: "commit: sample",
+				},
+			],
+			truncated: false,
+		});
+		expect(reflog.entries[0]?.committerTime).toBe(-1);
+		expect(Object.isFrozen(reflog.entries[0])).toBe(true);
+
+		const contributors = decodeGitContributorsListResult({
+			entries: [
+				{
+					name: "Plain",
+					email: "plain@example.invalid",
+					commits: 2,
+				},
+			],
+			truncated: false,
+		});
+		expect(contributors.entries[0]?.commits).toBe(2);
+		expect(Object.isFrozen(contributors.entries[0])).toBe(true);
+	});
+
+	it("rejects extra keys, malformed identities, zero counts and Proxy arrays", () => {
+		expect(() =>
+			decodeGitRemotesListResult({
+				entries: [],
+				truncated: false,
+				extra: true,
+			}),
+		).toThrowError(expect.objectContaining(contractError));
+		expect(() =>
+			decodeGitReflogListResult({
+				entries: [
+					{
+						sha: "bad",
+						selector: "HEAD@{0}",
+						committerTime: 1,
+						summary: "x",
+					},
+				],
+				truncated: false,
+			}),
+		).toThrowError(expect.objectContaining(contractError));
+		expect(() =>
+			decodeGitContributorsListResult({
+				entries: [{ name: "x", email: "y", commits: 0 }],
+				truncated: false,
+			}),
+		).toThrowError(expect.objectContaining(contractError));
+		expect(() =>
+			decodeGitRemotesListResult({
+				entries: new Proxy([], {}),
+				truncated: false,
 			}),
 		).toThrowError(expect.objectContaining(contractError));
 	});

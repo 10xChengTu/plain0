@@ -483,6 +483,15 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async gitRefsList() {
 			throw new Error("unused");
 		},
+		async gitRemotesList() {
+			throw new Error("unused");
+		},
+		async gitReflogList() {
+			throw new Error("unused");
+		},
+		async gitContributorsList() {
+			throw new Error("unused");
+		},
 		async gitStashList() {
 			throw new Error("unused");
 		},

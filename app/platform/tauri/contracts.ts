@@ -1235,6 +1235,45 @@ export interface GitRefsListResult {
 	readonly truncated: boolean;
 }
 
+// --- F180 S1A read models ---------------------------------------------------
+
+/** One configured remote. URL strings are display-only and already redacted
+ * by Rust: native paths, URL userinfo, query values and fragments never cross
+ * IPC. An empty `pushUrls` means Git falls back to the fetch URL. */
+export interface GitRemoteEntry {
+	readonly name: string;
+	readonly fetchUrls: readonly string[];
+	readonly pushUrls: readonly string[];
+}
+
+export interface GitRemotesListResult {
+	readonly entries: readonly GitRemoteEntry[];
+	readonly truncated: boolean;
+}
+
+export interface GitReflogEntry {
+	readonly sha: string;
+	readonly selector: string;
+	readonly committerTime: number;
+	readonly summary: string;
+}
+
+export interface GitReflogListResult {
+	readonly entries: readonly GitReflogEntry[];
+	readonly truncated: boolean;
+}
+
+export interface GitContributorEntry {
+	readonly name: string;
+	readonly email: string;
+	readonly commits: number;
+}
+
+export interface GitContributorsListResult {
+	readonly entries: readonly GitContributorEntry[];
+	readonly truncated: boolean;
+}
+
 // --- Git stash (F090 S4: `git::stash`) ---------------------------------------
 
 /**
@@ -1858,6 +1897,16 @@ export interface PlainBridge {
 	 * comment). Takes no parameters. Same trust/repository rejections as
 	 * `gitStatus`. */
 	gitRefsList(rootId?: string): Promise<GitRefsListResult>;
+	/** `F180` S1A: bounded read of configured remote names plus redacted
+	 * fetch/push URL displays. Local paths, credentials and URL query values
+	 * never cross IPC. */
+	gitRemotesList(rootId?: string): Promise<GitRemotesListResult>;
+	/** `F180` S1A: bounded HEAD reflog, newest first. Each target is an exact
+	 * lowercase hex40 commit id suitable for later preview-only history flows. */
+	gitReflogList(rootId?: string): Promise<GitReflogListResult>;
+	/** `F180` S1A: aggregates `%aN`/`%aE` across bounded `git log --all`
+	 * output, sorted by descending commit count. */
+	gitContributorsList(rootId?: string): Promise<GitContributorsListResult>;
 	/** `F090` S4: `git stash list -z --format=%gd%x1f%H%x1f%ct%x1f%B` — the
 	 * stash panel's own data source, newest first. Takes no parameters. Same
 	 * trust/repository rejections as `gitStatus`. */

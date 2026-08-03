@@ -10786,6 +10786,18 @@ describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
 		new URL("../../src-tauri/src/git/worktree.rs", import.meta.url),
 		"utf8",
 	);
+	const gitRemoteSourceForRustBoundary = readFileSync(
+		new URL("../../src-tauri/src/git/remote.rs", import.meta.url),
+		"utf8",
+	);
+	const gitReflogSourceForRustBoundary = readFileSync(
+		new URL("../../src-tauri/src/git/reflog.rs", import.meta.url),
+		"utf8",
+	);
+	const gitContributorsSourceForRustBoundary = readFileSync(
+		new URL("../../src-tauri/src/git/contributors.rs", import.meta.url),
+		"utf8",
+	);
 
 	const baselineGitRustSources = Object.freeze([
 		{ relativePath: "src-tauri/src/git/status.rs", source: gitStatusSource },
@@ -10813,6 +10825,18 @@ describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
 		{
 			relativePath: "src-tauri/src/git/worktree.rs",
 			source: gitWorktreeSourceForRustBoundary,
+		},
+		{
+			relativePath: "src-tauri/src/git/remote.rs",
+			source: gitRemoteSourceForRustBoundary,
+		},
+		{
+			relativePath: "src-tauri/src/git/reflog.rs",
+			source: gitReflogSourceForRustBoundary,
+		},
+		{
+			relativePath: "src-tauri/src/git/contributors.rs",
+			source: gitContributorsSourceForRustBoundary,
 		},
 	]);
 
@@ -11340,6 +11364,40 @@ describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
 			"GitRefEntryWire/GitRefsListResultWire must expose only their exact audited fields",
 		);
 	});
+
+	it("fails if the remote inventory loses its NUL config mode", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/remote.rs",
+			(source) => source.replace('    "-z",\n', ""),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"remote.rs must use only the audited remote-name and NUL config inventory commands",
+		);
+	});
+
+	it("fails if reflog parsing widens the final absorbing field split", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/reflog.rs",
+			(source) =>
+				source.replace(
+					"record.splitn(4, |byte| *byte == 0x1f)",
+					"record.split(|byte| *byte == 0x1f)",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"parse_reflog must use bounded splitn(4) so the final free-text summary absorbs embedded separators",
+		);
+	});
+
+	it("fails if contributor output stops using NUL-paired name/email fields", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/contributors.rs",
+			(source) => source.replace("%aN%x00%aE", "%aN%x1f%aE"),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"contributors.rs must use the audited NUL-paired mailmap-aware author format",
+		);
+	});
 });
 
 describe("Plain F090 S0 git blame hardening args Harness", () => {
@@ -11786,7 +11844,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the thirty-four audited git methods, no more and no fewer",
 		);
 	});
 
@@ -11802,7 +11860,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
 		).toContain(
-			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the thirty-four audited git methods, no more and no fewer",
 		);
 	});
 
@@ -11894,7 +11952,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the thirty-four audited git methods, no more and no fewer",
 		);
 	});
 
@@ -11951,7 +12009,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the thirty-four audited git methods, no more and no fewer",
 		);
 	});
 
@@ -11967,7 +12025,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the thirty-four audited git methods, no more and no fewer",
 		);
 	});
 
@@ -12041,7 +12099,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the thirty-four audited git methods, no more and no fewer",
 		);
 	});
 
@@ -12057,7 +12115,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the thirty-four audited git methods, no more and no fewer",
 		);
 	});
 

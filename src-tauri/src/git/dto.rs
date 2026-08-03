@@ -12,10 +12,13 @@ use serde::{Deserialize, Serialize};
 use crate::error::CommandError;
 
 use super::blame::{BlameCommitHeader, BlameLineRange, BlameResult, BLAME_UNCOMMITTED_SHA};
+use super::contributors::{ContributorEntry, ContributorList};
 use super::diff::{DiffFileEntry, DiffStatusKind, GitBlobRev};
 use super::log::{GraphList, GraphNode, HistoryEntry, HistoryList, LineHistoryDetail, LineRange};
 use super::network::NetworkOperation;
+use super::reflog::{ReflogEntry, ReflogList};
 use super::refs::{RefEntry, RefGroupKind, RefList};
+use super::remote::{RemoteEntry, RemoteList};
 use super::show_commit::ShowCommitResult;
 use super::stash::{StashApplyOutcome, StashEntry, StashList, StashPushOutcome, StashShowResult};
 use super::status::{
@@ -1172,6 +1175,148 @@ impl From<RefList> for GitRefsListResultWire {
                 .entries
                 .into_iter()
                 .map(GitRefEntryWire::from)
+                .collect(),
+            truncated: value.truncated,
+        }
+    }
+}
+
+// --- F180 S1A read models: remotes / reflog / contributors -----------------
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitRemotesListRequest {}
+
+impl GitRemotesListRequest {
+    pub const fn validate(self) {}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRemoteEntryWire {
+    name: String,
+    fetch_urls: Vec<String>,
+    push_urls: Vec<String>,
+}
+
+impl From<RemoteEntry> for GitRemoteEntryWire {
+    fn from(value: RemoteEntry) -> Self {
+        Self {
+            name: value.name,
+            fetch_urls: value.fetch_urls,
+            push_urls: value.push_urls,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRemotesListResultWire {
+    entries: Vec<GitRemoteEntryWire>,
+    truncated: bool,
+}
+
+impl From<RemoteList> for GitRemotesListResultWire {
+    fn from(value: RemoteList) -> Self {
+        Self {
+            entries: value
+                .entries
+                .into_iter()
+                .map(GitRemoteEntryWire::from)
+                .collect(),
+            truncated: value.truncated,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitReflogListRequest {}
+
+impl GitReflogListRequest {
+    pub const fn validate(self) {}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitReflogEntryWire {
+    sha: String,
+    selector: String,
+    committer_time: i64,
+    summary: String,
+}
+
+impl From<ReflogEntry> for GitReflogEntryWire {
+    fn from(value: ReflogEntry) -> Self {
+        Self {
+            sha: value.sha,
+            selector: value.selector,
+            committer_time: value.committer_time,
+            summary: value.summary,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitReflogListResultWire {
+    entries: Vec<GitReflogEntryWire>,
+    truncated: bool,
+}
+
+impl From<ReflogList> for GitReflogListResultWire {
+    fn from(value: ReflogList) -> Self {
+        Self {
+            entries: value
+                .entries
+                .into_iter()
+                .map(GitReflogEntryWire::from)
+                .collect(),
+            truncated: value.truncated,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitContributorsListRequest {}
+
+impl GitContributorsListRequest {
+    pub const fn validate(self) {}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitContributorEntryWire {
+    name: String,
+    email: String,
+    commits: u32,
+}
+
+impl From<ContributorEntry> for GitContributorEntryWire {
+    fn from(value: ContributorEntry) -> Self {
+        Self {
+            name: value.name,
+            email: value.email,
+            commits: value.commits,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitContributorsListResultWire {
+    entries: Vec<GitContributorEntryWire>,
+    truncated: bool,
+}
+
+impl From<ContributorList> for GitContributorsListResultWire {
+    fn from(value: ContributorList) -> Self {
+        Self {
+            entries: value
+                .entries
+                .into_iter()
+                .map(GitContributorEntryWire::from)
                 .collect(),
             truncated: value.truncated,
         }

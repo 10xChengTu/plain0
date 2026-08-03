@@ -64,6 +64,9 @@ export function bindPlainGitBridge(bridge: PlainBridge, rootId: string) {
 			bridge.gitShowCommitBlob(sha, path, rootId),
 		gitLogGraph: (maxCount: number) => bridge.gitLogGraph(maxCount, rootId),
 		gitRefsList: () => bridge.gitRefsList(rootId),
+		gitRemotesList: () => bridge.gitRemotesList(rootId),
+		gitReflogList: () => bridge.gitReflogList(rootId),
+		gitContributorsList: () => bridge.gitContributorsList(rootId),
 		gitStashList: () => bridge.gitStashList(rootId),
 		gitStashShow: (sha: string) => bridge.gitStashShow(sha, rootId),
 		gitStashPush: (message: string, includeUntracked: boolean) =>

@@ -14,6 +14,7 @@ import type {
 	GitBlameLineEntry,
 	GitBlobRev,
 	GitBranch,
+	GitContributorsListResult,
 	GitDiffFilesResult,
 	GitHistoryEntry,
 	GitHistoryListResult,
@@ -21,6 +22,8 @@ import type {
 	GitLogGraphResult,
 	GitNetworkPreviewResult,
 	GitRefsListResult,
+	GitReflogListResult,
+	GitRemotesListResult,
 	GitShowCommitResult,
 	GitStashEntry,
 	GitStashListResult,
@@ -1233,6 +1236,12 @@ export interface BrowserMockGitFixtureForTest {
 	 * real Rust parser's thorough fixture coverage lives in
 	 * `src-tauri/src/git/refs/tests.rs`). */
 	readonly refsForTest?: GitRefsListResult;
+	/** `F180` S1A: structurally correct, already-redacted remote inventory. */
+	readonly remotesForTest?: GitRemotesListResult;
+	/** `F180` S1A: bounded HEAD reflog fixture, newest first. */
+	readonly reflogForTest?: GitReflogListResult;
+	/** `F180` S1A: aggregated contributor fixture. */
+	readonly contributorsForTest?: GitContributorsListResult;
 	/** `F090` S4: seeds the initial, mutable `gitStashList` state (defaults to
 	 * `[]`) — `gitStashPush`/`gitStashApply`/`gitStashPop`/`gitStashDrop` all
 	 * mutate this in place (unshift on push, splice on a successful pop/drop),
@@ -6250,6 +6259,15 @@ export function createBrowserMockBridge(
 		truncated: false,
 	});
 	const gitRefsListResult = gitFixture.refsForTest ?? defaultGitRefsListResult;
+	const gitRemotesListResult: GitRemotesListResult =
+		gitFixture.remotesForTest ??
+		Object.freeze({ entries: Object.freeze([]), truncated: false });
+	const gitReflogListResult: GitReflogListResult =
+		gitFixture.reflogForTest ??
+		Object.freeze({ entries: Object.freeze([]), truncated: false });
+	const gitContributorsListResult: GitContributorsListResult =
+		gitFixture.contributorsForTest ??
+		Object.freeze({ entries: Object.freeze([]), truncated: false });
 
 	// --- F090 S4: mutable stash list simulation ----------------------------
 	//
@@ -8064,6 +8082,27 @@ export function createBrowserMockBridge(
 				throw unavailable;
 			}
 			return gitRefsListResult;
+		},
+		async gitRemotesList(rootId_) {
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return gitRemotesListResult;
+		},
+		async gitReflogList(rootId_) {
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return gitReflogListResult;
+		},
+		async gitContributorsList(rootId_) {
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return gitContributorsListResult;
 		},
 		async gitStashList(rootId_) {
 			const unavailable = gitMutateUnavailable(rootId_);

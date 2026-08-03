@@ -147,6 +147,9 @@ describe("bindPlainGitBridge", () => {
 		await rooted.gitShowCommitBlob("a".repeat(40), "a.txt");
 		await rooted.gitLogGraph(10);
 		await rooted.gitRefsList();
+		await rooted.gitRemotesList();
+		await rooted.gitReflogList();
+		await rooted.gitContributorsList();
 		await rooted.gitStashList();
 		await rooted.gitStashShow("a".repeat(40));
 		await rooted.gitStashPush("message", true);
@@ -157,7 +160,7 @@ describe("bindPlainGitBridge", () => {
 		await rooted.gitWorktreeAdd("child", false, null);
 		await rooted.gitWorktreeRemove("/tmp/child", false);
 
-		expect(calls).toHaveLength(31);
+		expect(calls).toHaveLength(34);
 		for (const call of calls) {
 			expect(call.args.at(-1), call.method).toBe(ROOT_A);
 		}

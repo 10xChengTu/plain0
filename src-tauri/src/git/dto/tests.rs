@@ -1,9 +1,14 @@
 use super::{
-    GitBlobRevWire, GitCommitRequest, GitDiffFilesRequest, GitDiffFilesResult,
-    GitDiscardPathsRequest, GitShowBlobRequest, GitShowBlobResult, GitStageBlobRequest,
-    GitStagePathsRequest, GitStatusResult, GitUnstagePathsRequest,
+    GitBlobRevWire, GitCommitRequest, GitContributorsListRequest, GitContributorsListResultWire,
+    GitDiffFilesRequest, GitDiffFilesResult, GitDiscardPathsRequest, GitReflogListRequest,
+    GitReflogListResultWire, GitRemotesListRequest, GitRemotesListResultWire, GitShowBlobRequest,
+    GitShowBlobResult, GitStageBlobRequest, GitStagePathsRequest, GitStatusResult,
+    GitUnstagePathsRequest,
 };
+use crate::git::contributors::{ContributorEntry, ContributorList};
 use crate::git::diff::{DiffFileEntry, DiffStatusKind};
+use crate::git::reflog::{ReflogEntry, ReflogList};
+use crate::git::remote::{RemoteEntry, RemoteList};
 use crate::git::status::{
     BranchHead, BranchInfo, BranchOid, GitStatus, OrdinaryStatusEntry, RenameOrCopyKind,
     RenameOrCopyStatusEntry, StatusEntry, SubmoduleState, UnmergedStatusEntry,
@@ -354,4 +359,71 @@ fn git_commit_request_rejects_unknown_fields() {
         "extra": 1
     }));
     assert!(rejected.is_err());
+}
+
+// --- F180 S1A read models ---------------------------------------------------
+
+#[test]
+fn git_read_model_requests_are_exact_empty_objects() {
+    let remotes: GitRemotesListRequest = serde_json::from_value(serde_json::json!({})).unwrap();
+    remotes.validate();
+    let reflog: GitReflogListRequest = serde_json::from_value(serde_json::json!({})).unwrap();
+    reflog.validate();
+    let contributors: GitContributorsListRequest =
+        serde_json::from_value(serde_json::json!({})).unwrap();
+    contributors.validate();
+
+    assert!(
+        serde_json::from_value::<GitRemotesListRequest>(serde_json::json!({
+            "extra": true
+        }))
+        .is_err()
+    );
+}
+
+#[test]
+fn git_read_model_results_serialize_only_their_audited_camel_case_fields() {
+    let remotes = serde_json::to_value(GitRemotesListResultWire::from(RemoteList {
+        entries: vec![RemoteEntry {
+            name: "origin".to_owned(),
+            fetch_urls: vec!["https://example.invalid/repo.git".to_owned()],
+            push_urls: Vec::new(),
+        }],
+        truncated: false,
+    }))
+    .unwrap();
+    assert_eq!(
+        remotes,
+        serde_json::json!({
+            "entries": [{
+                "name": "origin",
+                "fetchUrls": ["https://example.invalid/repo.git"],
+                "pushUrls": []
+            }],
+            "truncated": false
+        })
+    );
+
+    let reflog = serde_json::to_value(GitReflogListResultWire::from(ReflogList {
+        entries: vec![ReflogEntry {
+            sha: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            selector: "HEAD@{0}".to_owned(),
+            committer_time: 1,
+            summary: "commit: sample".to_owned(),
+        }],
+        truncated: false,
+    }))
+    .unwrap();
+    assert_eq!(reflog["entries"][0]["committerTime"], 1);
+
+    let contributors = serde_json::to_value(GitContributorsListResultWire::from(ContributorList {
+        entries: vec![ContributorEntry {
+            name: "Plain".to_owned(),
+            email: "plain@example.invalid".to_owned(),
+            commits: 2,
+        }],
+        truncated: false,
+    }))
+    .unwrap();
+    assert_eq!(contributors["entries"][0]["commits"], 2);
 }

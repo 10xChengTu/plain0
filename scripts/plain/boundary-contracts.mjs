@@ -7891,6 +7891,30 @@ const GIT_COMMAND_CONTRACTS = Object.freeze([
 	},
 	{
 		file: "src-tauri/src/git/commands.rs",
+		name: "git_remotes_list",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitRemotesListRequest",
+		returnType: "->Result<GitRemotesListResultWire,CommandError>",
+		body: "request.validate();letresult=remote::list_remotes(trust.inner(),workspace.inner(),window.label()).await?;Ok(GitRemotesListResultWire::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_reflog_list",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitReflogListRequest",
+		returnType: "->Result<GitReflogListResultWire,CommandError>",
+		body: "request.validate();letresult=reflog::list_reflog(trust.inner(),workspace.inner(),window.label()).await?;Ok(GitReflogListResultWire::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_contributors_list",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitContributorsListRequest",
+		returnType: "->Result<GitContributorsListResultWire,CommandError>",
+		body: "request.validate();letresult=contributors::list_contributors(trust.inner(),workspace.inner(),window.label()).await?;Ok(GitContributorsListResultWire::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
 		name: "git_stash_list",
 		parameters:
 			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitStashListRequest",
@@ -7964,14 +7988,16 @@ const GIT_COMMAND_CONTRACTS = Object.freeze([
 ]);
 
 /**
- * Locks all thirty-one git commands (`F080` S1's three reads, S3's five
+ * Locks all thirty-four git commands (`F080` S1's three reads, S3's five
  * writes, S4's five network commands, `F090` S0's two read-only blame
  * commands — `git_blame_file`/`git_blame_commit_messages` —, `F090` S1's
  * three read-only file/line-history commands —
  * `git_file_history`/`git_line_history_list`/`git_line_history_detail` —,
  * `F090` S2's two read-only commit-detail commands —
  * `git_show_commit`/`git_show_commit_blob` —, `F090` S3's two read-only
- * graph/refs commands — `git_log_graph`/`git_refs_list` —, `F090` S4's six
+ * graph/refs commands — `git_log_graph`/`git_refs_list` —, `F180` S1A's
+ * three read models — `git_remotes_list`/`git_reflog_list`/
+ * `git_contributors_list` —, `F090` S4's six
  * stash commands (two read-only — `git_stash_list`/`git_stash_show` — and
  * four writes — `git_stash_push`/`git_stash_apply`/`git_stash_pop`/
  * `git_stash_drop`) — and `F090` S5's three worktree commands (one read-only
@@ -8701,6 +8727,109 @@ export function validateGitRustBoundary(rustSources) {
 		);
 	}
 
+	// --- F180 S1A: remote/reflog/contributor read models -------------------
+	const remoteSource = findRustSource(
+		rustSources,
+		"src-tauri/src/git/remote.rs",
+	);
+	const reflogSource = findRustSource(
+		rustSources,
+		"src-tauri/src/git/reflog.rs",
+	);
+	const contributorsSource = findRustSource(
+		rustSources,
+		"src-tauri/src/git/contributors.rs",
+	);
+	if (
+		remoteSource === undefined ||
+		reflogSource === undefined ||
+		contributorsSource === undefined
+	) {
+		failures.push(
+			"git boundary requires remote.rs, reflog.rs and contributors.rs",
+		);
+		return failures;
+	}
+	const executableRemote = stripRustCommentsOnly(remoteSource);
+	const executableReflog = stripRustCommentsOnly(reflogSource);
+	const executableContributors = stripRustCommentsOnly(contributorsSource);
+	if (
+		!sameArray(argsConstant(executableRemote, "GIT_REMOTE_LIST_ARGS"), [
+			"remote",
+		]) ||
+		!sameArray(argsConstant(executableRemote, "GIT_REMOTE_CONFIG_ARGS"), [
+			"config",
+			"-z",
+			"--get-regexp",
+			"^remote\\\\..*\\\\.(url|pushurl)$",
+		])
+	) {
+		failures.push(
+			"remote.rs must use only the audited remote-name and NUL config inventory commands",
+		);
+	}
+	if (
+		!sameArray(argsConstant(executableReflog, "GIT_REFLOG_HEAD_CHECK_ARGS"), [
+			"rev-parse",
+			"--verify",
+			"--quiet",
+			"HEAD",
+		]) ||
+		!sameArray(argsConstant(executableReflog, "GIT_REFLOG_ARGS"), [
+			"reflog",
+			"show",
+			"-z",
+			"--format=%H%x1f%gD%x1f%ct%x1f%gs",
+		])
+	) {
+		failures.push(
+			"reflog.rs must keep the audited HEAD check and sha/selector/time/final-summary format",
+		);
+	}
+	const parseReflogBody = rustFunctionBody(executableReflog, "parse_reflog");
+	if (
+		parseReflogBody === undefined ||
+		!parseReflogBody.body.includes("splitn(4") ||
+		parseReflogBody.body.includes(".split(|byte| *byte == 0x1f)")
+	) {
+		failures.push(
+			"parse_reflog must use bounded splitn(4) so the final free-text summary absorbs embedded separators",
+		);
+	}
+	if (
+		!sameArray(argsConstant(executableContributors, "GIT_CONTRIBUTORS_ARGS"), [
+			"log",
+			"--all",
+			"-z",
+			"--format=%aN%x00%aE",
+		])
+	) {
+		failures.push(
+			"contributors.rs must use the audited NUL-paired mailmap-aware author format",
+		);
+	}
+	if (
+		structBody("GitRemotesListRequest") !== "" ||
+		structBody("GitRemoteEntryWire") !==
+			"name:String,fetch_urls:Vec<String>,push_urls:Vec<String>," ||
+		structBody("GitRemotesListResultWire") !==
+			"entries:Vec<GitRemoteEntryWire>,truncated:bool," ||
+		structBody("GitReflogListRequest") !== "" ||
+		structBody("GitReflogEntryWire") !==
+			"sha:String,selector:String,committer_time:i64,summary:String," ||
+		structBody("GitReflogListResultWire") !==
+			"entries:Vec<GitReflogEntryWire>,truncated:bool," ||
+		structBody("GitContributorsListRequest") !== "" ||
+		structBody("GitContributorEntryWire") !==
+			"name:String,email:String,commits:u32," ||
+		structBody("GitContributorsListResultWire") !==
+			"entries:Vec<GitContributorEntryWire>,truncated:bool,"
+	) {
+		failures.push(
+			"F180 remote/reflog/contributor request and result DTOs must expose only their audited fields",
+		);
+	}
+
 	// --- F090 S4: stash (`git::stash`) --------------------------------------
 	//
 	// `GIT_STASH_LIST_ARGS` itself gets its own *dedicated* lock
@@ -9290,10 +9419,11 @@ export function validateGitStashMessageFieldSafetyBoundary(rustSources) {
  * `gitRefsList`), `F090` S4's six stash methods (`gitStashList`/
  * `gitStashShow`/`gitStashPush`/`gitStashApply`/`gitStashPop`/
  * `gitStashDrop`), and `F090` S5's three worktree methods (`gitWorktreeList`/
- * `gitWorktreeAdd`/`gitWorktreeRemove`) — every slice deliberately shares
+ * `gitWorktreeAdd`/`gitWorktreeRemove`), and `F180` S1A's three read models
+ * (`gitRemotesList`/`gitReflogList`/`gitContributorsList`) — every slice deliberately shares
  * this same closed-list lock rather than getting its own parallel
  * "S_ bridge methods" const, for the same reason `GIT_COMMAND_CONTRACTS`
- * above holds all thirty-one Rust commands in one array: `PlainBridge`'s git
+ * above holds all thirty-four Rust commands in one array: `PlainBridge`'s git
  * surface is one audited whole, not several independently-sized ones.
  */
 const GIT_BRIDGE_METHOD_NAMES = [
@@ -9319,6 +9449,9 @@ const GIT_BRIDGE_METHOD_NAMES = [
 	"gitShowCommitBlob",
 	"gitLogGraph",
 	"gitRefsList",
+	"gitRemotesList",
+	"gitReflogList",
+	"gitContributorsList",
 	"gitStashList",
 	"gitStashShow",
 	"gitStashPush",
@@ -9388,7 +9521,7 @@ const GIT_NO_ARG_COMMAND_CONTRACTS = Object.freeze([
 
 /**
  * Locks `F080` S1+S3+S4 and `F090` S0+S1+S2+S3+S4+S5's TypeScript surface:
- * `PlainBridge` exposes exactly the thirty-one audited git methods,
+ * `PlainBridge` exposes exactly the thirty-four audited git methods,
  * `git-codec.ts`'s read-result decoders validate exact own-data keys/reject
  * Proxy wrapping/freeze their result (same rigor
  * `validateTerminalIpcBridgeBoundary` already locks for the terminal
@@ -9451,7 +9584,7 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 			JSON.stringify([...GIT_BRIDGE_METHOD_NAMES].sort())
 	) {
 		failures.push(
-			"PlainBridge must expose exactly the thirty-one audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the thirty-four audited git methods, no more and no fewer",
 		);
 	}
 
@@ -9475,6 +9608,9 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 		"decodeGitShowCommitResult",
 		"decodeGitLogGraphResult",
 		"decodeGitRefsListResult",
+		"decodeGitRemotesListResult",
+		"decodeGitReflogListResult",
+		"decodeGitContributorsListResult",
 		"decodeGitStashListResult",
 		"decodeGitStashShowResult",
 		"decodeGitStashApplyOutcome",
@@ -9550,6 +9686,25 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 		failures.push(
 			"native.ts must attach one validated explicit rootId to every audited Git invoke",
 		);
+	}
+	for (const [command, decoder] of [
+		["git_remotes_list", "decodeGitRemotesListResult"],
+		["git_reflog_list", "decodeGitReflogListResult"],
+		["git_contributors_list", "decodeGitContributorsListResult"],
+	]) {
+		const invokePattern = new RegExp(
+			`\\binvoke<unknown>\\(\\s*"${command}"`,
+			"g",
+		);
+		if (
+			native === undefined ||
+			[...native.matchAll(invokePattern)].length !== 1 ||
+			!native.includes(`${decoder}(`)
+		) {
+			failures.push(
+				`native.ts must invoke ${command} exactly once, decoded through ${decoder}`,
+			);
+		}
 	}
 	if (
 		native === undefined ||

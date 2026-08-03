@@ -27,16 +27,19 @@ use crate::workspace::RootId;
 
 use super::blame;
 use super::commit;
+use super::contributors;
 use super::diff;
 use super::discard;
 use super::dto::{
     GitBlameCommitMessagesRequest, GitBlameCommitMessagesResult, GitBlameFileRequest,
-    GitBlameFileResult, GitCommitRequest, GitDiffFilesRequest, GitDiffFilesResult,
-    GitDiscardPathsRequest, GitFetchRequest, GitFileHistoryRequest, GitHistoryListResultWire,
-    GitLineHistoryDetailRequest, GitLineHistoryDetailResultWire, GitLineHistoryListRequest,
-    GitLogGraphRequest, GitLogGraphResultWire, GitNetworkCancelRequest, GitNetworkPreviewRequest,
-    GitNetworkPreviewResult, GitPullRequest, GitPushRequest, GitRefsListRequest,
-    GitRefsListResultWire, GitShowBlobRequest, GitShowBlobResult, GitShowCommitBlobRequest,
+    GitBlameFileResult, GitCommitRequest, GitContributorsListRequest,
+    GitContributorsListResultWire, GitDiffFilesRequest, GitDiffFilesResult, GitDiscardPathsRequest,
+    GitFetchRequest, GitFileHistoryRequest, GitHistoryListResultWire, GitLineHistoryDetailRequest,
+    GitLineHistoryDetailResultWire, GitLineHistoryListRequest, GitLogGraphRequest,
+    GitLogGraphResultWire, GitNetworkCancelRequest, GitNetworkPreviewRequest,
+    GitNetworkPreviewResult, GitPullRequest, GitPushRequest, GitReflogListRequest,
+    GitReflogListResultWire, GitRefsListRequest, GitRefsListResultWire, GitRemotesListRequest,
+    GitRemotesListResultWire, GitShowBlobRequest, GitShowBlobResult, GitShowCommitBlobRequest,
     GitShowCommitRequest, GitShowCommitResult, GitStageBlobRequest, GitStagePathsRequest,
     GitStashApplyOutcomeWire, GitStashApplyRequest, GitStashDropRequest, GitStashListRequest,
     GitStashListResultWire, GitStashPopRequest, GitStashPushOutcomeWire, GitStashPushRequest,
@@ -47,7 +50,9 @@ use super::dto::{
 };
 use super::log;
 use super::network::{self, GitNetworkService};
+use super::reflog;
 use super::refs;
+use super::remote;
 use super::repo::SelectedGitRoot;
 use super::show_commit;
 use super::stage;
@@ -387,6 +392,48 @@ pub(crate) async fn git_refs_list(
     let scope = SelectedGitRoot::new(workspace.inner(), root_id);
     let result = refs::list_refs(trust.inner(), &scope, window.label()).await?;
     Ok(GitRefsListResultWire::from(result))
+}
+
+#[tauri::command]
+pub(crate) async fn git_remotes_list(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
+    request: GitRemotesListRequest,
+) -> Result<GitRemotesListResultWire, CommandError> {
+    request.validate();
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let result = remote::list_remotes(trust.inner(), &scope, window.label()).await?;
+    Ok(GitRemotesListResultWire::from(result))
+}
+
+#[tauri::command]
+pub(crate) async fn git_reflog_list(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
+    request: GitReflogListRequest,
+) -> Result<GitReflogListResultWire, CommandError> {
+    request.validate();
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let result = reflog::list_reflog(trust.inner(), &scope, window.label()).await?;
+    Ok(GitReflogListResultWire::from(result))
+}
+
+#[tauri::command]
+pub(crate) async fn git_contributors_list(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
+    request: GitContributorsListRequest,
+) -> Result<GitContributorsListResultWire, CommandError> {
+    request.validate();
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let result = contributors::list_contributors(trust.inner(), &scope, window.label()).await?;
+    Ok(GitContributorsListResultWire::from(result))
 }
 
 #[tauri::command]

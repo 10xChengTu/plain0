@@ -8,6 +8,8 @@ import type {
 	GitBlobRev,
 	GitBranch,
 	GitBranchUpstream,
+	GitContributorEntry,
+	GitContributorsListResult,
 	GitDiffFileEntry,
 	GitDiffFilesResult,
 	GitDiffStatusKind,
@@ -22,6 +24,10 @@ import type {
 	GitRefEntry,
 	GitRefKind,
 	GitRefsListResult,
+	GitReflogEntry,
+	GitReflogListResult,
+	GitRemoteEntry,
+	GitRemotesListResult,
 	GitRenameOrCopyKind,
 	GitShowBlobResult,
 	GitShowCommitResult,
@@ -1657,6 +1663,178 @@ export function decodeGitRefsListResult(value: unknown): GitRefsListResult {
 			decodeGitRefEntry,
 		);
 		const result = { entries, truncated: value.truncated };
+		rejectProxyObject(value);
+		return Object.freeze(result);
+	});
+}
+
+// --- F180 S1A: remotes / reflog / contributors -----------------------------
+
+const MAX_GIT_REMOTE_ENTRIES = 512;
+const MAX_GIT_REMOTE_URLS = 64;
+const MAX_GIT_REMOTE_NAME_CHARS = 4_096;
+const MAX_GIT_REMOTE_DISPLAY_URL_CHARS = 8_192;
+const MAX_GIT_REFLOG_ENTRIES = 1_000;
+const MAX_GIT_REFLOG_TEXT_CHARS = 1_000_000;
+const MAX_GIT_CONTRIBUTOR_ENTRIES = 20_000;
+const MAX_GIT_CONTRIBUTOR_TEXT_CHARS = 1_000_000;
+
+function decodeBoundedString(
+	value: unknown,
+	maxChars: number,
+	allowEmpty: boolean,
+): string {
+	if (
+		typeof value !== "string" ||
+		value.length > maxChars ||
+		(!allowEmpty && value.length === 0)
+	) {
+		return violation();
+	}
+	return value;
+}
+
+function decodeGitRemoteEntry(value: unknown): GitRemoteEntry {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, ["name", "fetchUrls", "pushUrls"])
+	) {
+		return violation();
+	}
+	const entry = {
+		name: decodeBoundedString(value.name, MAX_GIT_REMOTE_NAME_CHARS, false),
+		fetchUrls: ownObjectArraySnapshot(
+			value.fetchUrls,
+			MAX_GIT_REMOTE_URLS,
+			(item) =>
+				decodeBoundedString(item, MAX_GIT_REMOTE_DISPLAY_URL_CHARS, false),
+		),
+		pushUrls: ownObjectArraySnapshot(
+			value.pushUrls,
+			MAX_GIT_REMOTE_URLS,
+			(item) =>
+				decodeBoundedString(item, MAX_GIT_REMOTE_DISPLAY_URL_CHARS, false),
+		),
+	};
+	rejectProxyObject(value);
+	return Object.freeze(entry);
+}
+
+export function decodeGitRemotesListResult(
+	value: unknown,
+): GitRemotesListResult {
+	return sanitizedDecode(() => {
+		if (
+			!isPlainObject(value) ||
+			!hasExactKeys(value, ["entries", "truncated"]) ||
+			typeof value.truncated !== "boolean"
+		) {
+			return violation();
+		}
+		const result = {
+			entries: ownObjectArraySnapshot(
+				value.entries,
+				MAX_GIT_REMOTE_ENTRIES,
+				decodeGitRemoteEntry,
+			),
+			truncated: value.truncated,
+		};
+		rejectProxyObject(value);
+		return Object.freeze(result);
+	});
+}
+
+function decodeGitReflogEntry(value: unknown): GitReflogEntry {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, ["sha", "selector", "committerTime", "summary"]) ||
+		!isGitBlameSha(value.sha) ||
+		typeof value.committerTime !== "number" ||
+		!Number.isSafeInteger(value.committerTime)
+	) {
+		return violation();
+	}
+	const entry = {
+		sha: value.sha,
+		selector: decodeBoundedString(
+			value.selector,
+			MAX_GIT_REFLOG_TEXT_CHARS,
+			false,
+		),
+		committerTime: value.committerTime,
+		summary: decodeBoundedString(
+			value.summary,
+			MAX_GIT_REFLOG_TEXT_CHARS,
+			true,
+		),
+	};
+	rejectProxyObject(value);
+	return Object.freeze(entry);
+}
+
+export function decodeGitReflogListResult(value: unknown): GitReflogListResult {
+	return sanitizedDecode(() => {
+		if (
+			!isPlainObject(value) ||
+			!hasExactKeys(value, ["entries", "truncated"]) ||
+			typeof value.truncated !== "boolean"
+		) {
+			return violation();
+		}
+		const result = {
+			entries: ownObjectArraySnapshot(
+				value.entries,
+				MAX_GIT_REFLOG_ENTRIES,
+				decodeGitReflogEntry,
+			),
+			truncated: value.truncated,
+		};
+		rejectProxyObject(value);
+		return Object.freeze(result);
+	});
+}
+
+function decodeGitContributorEntry(value: unknown): GitContributorEntry {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, ["name", "email", "commits"]) ||
+		!isSafeNonNegativeInteger(value.commits) ||
+		value.commits === 0
+	) {
+		return violation();
+	}
+	const entry = {
+		name: decodeBoundedString(value.name, MAX_GIT_CONTRIBUTOR_TEXT_CHARS, true),
+		email: decodeBoundedString(
+			value.email,
+			MAX_GIT_CONTRIBUTOR_TEXT_CHARS,
+			true,
+		),
+		commits: value.commits,
+	};
+	rejectProxyObject(value);
+	return Object.freeze(entry);
+}
+
+export function decodeGitContributorsListResult(
+	value: unknown,
+): GitContributorsListResult {
+	return sanitizedDecode(() => {
+		if (
+			!isPlainObject(value) ||
+			!hasExactKeys(value, ["entries", "truncated"]) ||
+			typeof value.truncated !== "boolean"
+		) {
+			return violation();
+		}
+		const result = {
+			entries: ownObjectArraySnapshot(
+				value.entries,
+				MAX_GIT_CONTRIBUTOR_ENTRIES,
+				decodeGitContributorEntry,
+			),
+			truncated: value.truncated,
+		};
 		rejectProxyObject(value);
 		return Object.freeze(result);
 	});
