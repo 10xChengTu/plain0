@@ -16,6 +16,15 @@ export class PlainGitRootSelection extends PlainWorkspaceRootSelection {}
 
 export const plainGitRootSelection = new PlainGitRootSelection();
 
+/** `git for-each-ref %(upstream)` reports the full tracking ref while every
+ * user-facing Git convention uses its short `remote/branch` name. Preserve
+ * an unexpected non-remote ref verbatim rather than guessing another
+ * namespace. */
+export function gitUpstreamDisplayName(upstream: string): string {
+	const prefix = "refs/remotes/";
+	return upstream.startsWith(prefix) ? upstream.slice(prefix.length) : upstream;
+}
+
 /** Rootless facade used by the existing narrow Git controllers. Every
  * method closes over one immutable root id and appends it to the actual
  * `PlainBridge` call, so a multi-step controller cannot accidentally change

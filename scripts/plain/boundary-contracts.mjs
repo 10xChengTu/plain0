@@ -1697,6 +1697,7 @@ export function validateWorkspaceProviderBootstrap(source) {
 				parent.expression.text === "configurePlainGitGraphBridge" ||
 				parent.expression.text === "configurePlainGitStashBridge" ||
 				parent.expression.text === "configurePlainGitWorktreeBridge" ||
+				parent.expression.text === "registerPlainScmCommands" ||
 				parent.expression.text === "createPlainGitTextModelContentProvider" ||
 				parent.expression.text === "createPlainGitBlameContribution" ||
 				parent.expression.text === "createPlainGitCommitBlobContentProvider" ||
@@ -23209,4 +23210,688 @@ function validateDebugAdapterLaunchGuardedCall(source) {
 		];
 	}
 	return [];
+}
+
+const GIT_MANAGEMENT_PATH = "app/features/scm/plain-git-management.ts";
+const GIT_INVALIDATION_PATH = "app/features/scm/plain-git-invalidation.ts";
+const GIT_EXCLUDED_POLICY_PATH = "app/excluded-surface-policy.ts";
+const GIT_SCM_COMMANDS_PATH = "app/features/scm/plain-scm-commands.ts";
+const GIT_GRAPH_VIEW_PATH = "app/features/scm/plain-git-graph-view.ts";
+const GIT_HISTORY_VIEW_PATH = "app/features/scm/plain-git-history-view.ts";
+const GIT_HISTORY_CONTROLLER_PATH = "app/features/scm/plain-git-history.ts";
+
+const GIT_MANAGEMENT_COMMANDS = Object.freeze([
+	Object.freeze({
+		constant: "MANAGE_BRANCHES_COMMAND_ID",
+		id: "plain.git.manageBranches",
+		method: "manageBranches",
+		title: "Manage Branches",
+	}),
+	Object.freeze({
+		constant: "MANAGE_TAGS_COMMAND_ID",
+		id: "plain.git.manageTags",
+		method: "manageTags",
+		title: "Manage Tags",
+	}),
+	Object.freeze({
+		constant: "MANAGE_REMOTES_COMMAND_ID",
+		id: "plain.git.manageRemotes",
+		method: "manageRemotes",
+		title: "Manage Remotes",
+	}),
+	Object.freeze({
+		constant: "MANAGE_UPSTREAM_COMMAND_ID",
+		id: "plain.git.manageUpstream",
+		method: "manageUpstream",
+		title: "Manage Upstream",
+	}),
+]);
+
+const GIT_MANAGEMENT_MUTATION_CALLS = Object.freeze([
+	Object.freeze({
+		method: "gitBranchCreate",
+		managementMethod: "manageBranches",
+		managementArgs: Object.freeze([Object.freeze(["name", "target.sha"])]),
+		rootArgs: Object.freeze(["name", "targetSha", "rootId"]),
+	}),
+	Object.freeze({
+		method: "gitBranchSwitch",
+		managementMethod: "manageBranches",
+		managementArgs: Object.freeze([Object.freeze(["branch.shortName"])]),
+		rootArgs: Object.freeze(["name", "rootId"]),
+	}),
+	Object.freeze({
+		method: "gitBranchRename",
+		managementMethod: "manageBranches",
+		managementArgs: Object.freeze([
+			Object.freeze(["branch.shortName", "newName"]),
+		]),
+		rootArgs: Object.freeze(["oldName", "newName", "rootId"]),
+	}),
+	Object.freeze({
+		method: "gitBranchDelete",
+		managementMethod: "manageBranches",
+		managementArgs: Object.freeze([
+			Object.freeze(["branch.shortName", "false"]),
+			Object.freeze(["branch.shortName", "true"]),
+		]),
+		rootArgs: Object.freeze(["name", "force", "rootId"]),
+	}),
+	Object.freeze({
+		method: "gitTagCreate",
+		managementMethod: "manageTags",
+		managementArgs: Object.freeze([
+			Object.freeze(["name", "target.sha", "message"]),
+		]),
+		rootArgs: Object.freeze(["name", "targetSha", "message", "rootId"]),
+	}),
+	Object.freeze({
+		method: "gitTagDelete",
+		managementMethod: "manageTags",
+		managementArgs: Object.freeze([Object.freeze(["choice.entry.shortName"])]),
+		rootArgs: Object.freeze(["name", "rootId"]),
+	}),
+	Object.freeze({
+		method: "gitRemoteAdd",
+		managementMethod: "manageRemotes",
+		managementArgs: Object.freeze([Object.freeze(["name", "url"])]),
+		rootArgs: Object.freeze(["name", "url", "rootId"]),
+	}),
+	Object.freeze({
+		method: "gitRemoteRename",
+		managementMethod: "manageRemotes",
+		managementArgs: Object.freeze([Object.freeze(["remote.name", "newName"])]),
+		rootArgs: Object.freeze(["oldName", "newName", "rootId"]),
+	}),
+	Object.freeze({
+		method: "gitRemoteSetUrl",
+		managementMethod: "manageRemotes",
+		managementArgs: Object.freeze([
+			Object.freeze(["remote.name", "kind", "url"]),
+		]),
+		rootArgs: Object.freeze(["name", "kind", "url", "rootId"]),
+	}),
+	Object.freeze({
+		method: "gitRemoteRemove",
+		managementMethod: "manageRemotes",
+		managementArgs: Object.freeze([Object.freeze(["remote.name"])]),
+		rootArgs: Object.freeze(["name", "rootId"]),
+	}),
+	Object.freeze({
+		method: "gitUpstreamSet",
+		managementMethod: "manageUpstream",
+		managementArgs: Object.freeze([
+			Object.freeze(["branch.entry.shortName", "upstream.entry.shortName"]),
+		]),
+		rootArgs: Object.freeze(["branch", "upstream", "rootId"]),
+	}),
+	Object.freeze({
+		method: "gitUpstreamUnset",
+		managementMethod: "manageUpstream",
+		managementArgs: Object.freeze([Object.freeze(["branch.entry.shortName"])]),
+		rootArgs: Object.freeze(["branch", "rootId"]),
+	}),
+]);
+
+function normalizedTypeScriptText(node, sourceFile) {
+	return node.getText(sourceFile).replaceAll(/\s+/g, "");
+}
+
+function classMethodBody(sourceFile, className, methodName) {
+	const classes = sourceFile.statements.filter(
+		(statement) =>
+			ts.isClassDeclaration(statement) && statement.name?.text === className,
+	);
+	if (classes.length !== 1) {
+		return undefined;
+	}
+	const methods = classes[0].members.filter(
+		(member) =>
+			ts.isMethodDeclaration(member) &&
+			member.name.getText(sourceFile) === methodName,
+	);
+	return methods.length === 1 ? methods[0].body : undefined;
+}
+
+function stringsAppearInOrder(source, snippets) {
+	let cursor = 0;
+	for (const snippet of snippets) {
+		const index = source.indexOf(snippet, cursor);
+		if (index < 0) {
+			return false;
+		}
+		cursor = index + snippet.length;
+	}
+	return true;
+}
+
+function validateGitManagementCommandSurface(normalizedSources, management) {
+	const failures = [];
+	const compact = management.replaceAll(/\s+/g, "");
+	for (const command of GIT_MANAGEMENT_COMMANDS) {
+		const literalCounts = new Map();
+		for (const [relativePath, source] of normalizedSources) {
+			const sourceFile = ts.createSourceFile(
+				relativePath,
+				source,
+				ts.ScriptTarget.Latest,
+				true,
+				relativePath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+			);
+			let count = 0;
+			function visit(node) {
+				if (
+					(ts.isStringLiteral(node) ||
+						ts.isNoSubstitutionTemplateLiteral(node)) &&
+					node.text === command.id
+				) {
+					count += 1;
+				}
+				ts.forEachChild(node, visit);
+			}
+			visit(sourceFile);
+			if (count > 0) {
+				literalCounts.set(relativePath, count);
+			}
+		}
+		const expectedLiteralCounts = new Map([[GIT_MANAGEMENT_PATH, 1]]);
+		if (command.constant === "MANAGE_REMOTES_COMMAND_ID") {
+			expectedLiteralCounts.set(GIT_EXCLUDED_POLICY_PATH, 1);
+		}
+		if (
+			!compact.includes(`exportconst${command.constant}="${command.id}";`) ||
+			literalCounts.size !== expectedLiteralCounts.size ||
+			[...expectedLiteralCounts].some(
+				([relativePath, count]) => literalCounts.get(relativePath) !== count,
+			) ||
+			!compact.includes(`${command.method}:${command.constant}`) ||
+			!compact.includes(`command("${command.method}")`) ||
+			!compact.includes(
+				`[${command.constant},"${command.title.replaceAll(/\s+/g, "")}"]`,
+			)
+		) {
+			failures.push(
+				"Git management must expose exactly the four audited Command Palette commands and titles",
+			);
+			break;
+		}
+	}
+	if (
+		(compact.match(/CommandsRegistry\.registerCommand\(/g) ?? []).length !==
+			1 ||
+		(compact.match(/MenuRegistry\.appendMenuItem\(/g) ?? []).length !== 1 ||
+		(compact.match(/MenuId\.CommandPalette/g) ?? []).length !== 1 ||
+		(compact.match(/category:"Plain"/g) ?? []).length !== 1
+	) {
+		failures.push(
+			"Git management must expose exactly the four audited Command Palette commands and titles",
+		);
+	}
+
+	const scmCommands = normalizedSources.get(GIT_SCM_COMMANDS_PATH) ?? "";
+	const main = normalizedSources.get("app/main.ts") ?? "";
+	if (
+		(scmCommands.match(/registerPlainGitManagementCommands\(bridge\)/g) ?? [])
+			.length !== 1 ||
+		(scmCommands.match(/management\.dispose\(\)/g) ?? []).length !== 1 ||
+		(main.match(/registerPlainScmCommands\(bridge\)/g) ?? []).length !== 1
+	) {
+		failures.push(
+			"Git management command registration must have one bridge-bound, disposable bootstrap route",
+		);
+	}
+	return failures;
+}
+
+function validateGitManagementMutationAuthority(normalizedSources) {
+	const failures = [];
+	const callsByMethod = new Map(
+		GIT_MANAGEMENT_MUTATION_CALLS.map(({ method }) => [method, []]),
+	);
+	for (const [relativePath, source] of normalizedSources) {
+		if (!relativePath.endsWith(".ts") && !relativePath.endsWith(".tsx")) {
+			continue;
+		}
+		const sourceFile = ts.createSourceFile(
+			relativePath,
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			relativePath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+		);
+		function visit(node) {
+			if (ts.isCallExpression(node)) {
+				const expression = unwrapTypeScriptExpression(node.expression);
+				let method;
+				let receiver;
+				let computed = false;
+				if (ts.isPropertyAccessExpression(expression)) {
+					method = expression.name.text;
+					receiver = normalizedTypeScriptText(
+						expression.expression,
+						sourceFile,
+					);
+				} else if (
+					ts.isElementAccessExpression(expression) &&
+					expression.argumentExpression !== undefined &&
+					(ts.isStringLiteral(expression.argumentExpression) ||
+						ts.isNoSubstitutionTemplateLiteral(expression.argumentExpression))
+				) {
+					method = expression.argumentExpression.text;
+					receiver = normalizedTypeScriptText(
+						expression.expression,
+						sourceFile,
+					);
+					computed = true;
+				}
+				if (method !== undefined && callsByMethod.has(method)) {
+					callsByMethod.get(method).push({
+						relativePath,
+						receiver,
+						computed,
+						containingMethod: containingTypeScriptCallableName(node),
+						args: node.arguments.map((argument) =>
+							normalizedTypeScriptText(argument, sourceFile),
+						),
+					});
+				}
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(sourceFile);
+	}
+
+	for (const audit of GIT_MANAGEMENT_MUTATION_CALLS) {
+		const actual = callsByMethod.get(audit.method);
+		const expected = [
+			...audit.managementArgs.map((args) => ({
+				relativePath: GIT_MANAGEMENT_PATH,
+				receiver: "session.bridge",
+				computed: false,
+				containingMethod: audit.managementMethod,
+				args,
+			})),
+			{
+				relativePath: GIT_ROOT_BINDER_PATH,
+				receiver: "bridge",
+				computed: false,
+				containingMethod: GIT_ROOT_BINDER_FUNCTION,
+				args: audit.rootArgs,
+			},
+		];
+		const signature = ({
+			relativePath,
+			receiver,
+			computed,
+			containingMethod,
+			args,
+		}) =>
+			`${relativePath}|${receiver}|${computed}|${containingMethod}|${args.join(",")}`;
+		if (
+			actual.length !== expected.length ||
+			!sameArray(actual.map(signature).sort(), expected.map(signature).sort())
+		) {
+			failures.push(
+				`Git management mutation ${audit.method} must remain confined to its audited controller route and immutable root facade`,
+			);
+		}
+	}
+	return failures;
+}
+
+function validateGitManagementGuardedWorkflows(management) {
+	const sourceFile = ts.createSourceFile(
+		GIT_MANAGEMENT_PATH,
+		management,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["plain-git-management.ts must remain valid TypeScript"];
+	}
+	const failures = [];
+	const body = (name) => {
+		const node = classMethodBody(
+			sourceFile,
+			"PlainGitManagementController",
+			name,
+		);
+		return node === undefined ? "" : normalizedTypeScriptText(node, sourceFile);
+	};
+	const branches = body("manageBranches");
+	if (
+		!stringsAppearInOrder(branches, [
+			"constoutcome=awaitsession.bridge.gitBranchDelete(branch.shortName,false,);",
+			'if(outcome==="deleted"){this.#didMutate(session,',
+			'constconfirmation=awaitthis.services.dialog.confirm({message:`Forcedeleteunmergedbranch"${branch.shortName}"?`,',
+			'primaryButton:"ForceDeleteBranch"',
+			"if(!confirmation.confirmed){return;}",
+			"constforced=awaitsession.bridge.gitBranchDelete(branch.shortName,true,);",
+			'if(forced!=="deleted")',
+			"this.#didMutate(session,",
+		])
+	) {
+		failures.push(
+			"Unmerged branch force deletion must remain safe-delete then DOM-confirm then force-delete",
+		);
+	}
+
+	const tags = body("manageTags");
+	if (
+		!stringsAppearInOrder(tags, [
+			'if(choice.action==="delete"){constconfirmation=awaitthis.services.dialog.confirm({',
+			"detail:`Target:${targetSha(choice.entry)}",
+			'primaryButton:"DeleteTag"',
+			"if(!confirmation.confirmed){return;}",
+			"awaitsession.bridge.gitTagDelete(choice.entry.shortName);",
+			"this.#didMutate(session,",
+		]) ||
+		!tags.includes("consttarget=awaitthis.#pickTarget(refResult.entries,status")
+	) {
+		failures.push(
+			"Tag deletion must remain preview-confirmed and tag creation must target the current refs snapshot",
+		);
+	}
+
+	const remotes = body("manageRemotes");
+	if (
+		!stringsAppearInOrder(remotes, [
+			'if(action.action==="remove"){constconfirmation=awaitthis.services.dialog.confirm({',
+			"Removingaremotealsoremovesitsremote-trackingrefs.",
+			'primaryButton:"RemoveRemote"',
+			"if(!confirmation.confirmed){return;}",
+			"awaitsession.bridge.gitRemoteRemove(remote.name);",
+		]) ||
+		!stringsAppearInOrder(remotes, [
+			"consturl=awaitthis.services.quickInput.input({",
+			"constconfirmation=awaitthis.services.dialog.confirm({",
+			"New:${redactRemoteLocationForDisplay(url)}",
+			"if(!confirmation.confirmed){return;}",
+			"awaitsession.bridge.gitRemoteSetUrl(remote.name,kind,url);",
+		])
+	) {
+		failures.push(
+			"Remote removal and URL replacement must remain DOM-confirmed, with the new URL redacted before display",
+		);
+	}
+
+	const upstream = body("manageUpstream");
+	if (
+		!upstream.includes("constresult=awaitsession.bridge.gitRefsList();") ||
+		!upstream.includes(
+			'constbranches=result.entries.filter((entry)=>entry.kind==="branch"',
+		) ||
+		!upstream.includes(
+			'constremoteBranches=result.entries.filter((entry)=>entry.kind==="remoteBranch"',
+		) ||
+		upstream.includes("quickInput.input(")
+	) {
+		failures.push(
+			"Upstream choices must remain local and remote-tracking refs from one authoritative refs snapshot",
+		);
+	}
+
+	const didMutateBody = classMethodBody(
+		sourceFile,
+		"PlainGitManagementController",
+		"#didMutate",
+	);
+	if (
+		didMutateBody === undefined ||
+		normalizedTypeScriptText(didMutateBody, sourceFile) !==
+			"{plainGitInvalidation.invalidate(session.root.rootId);this.services.notifications.info(message);}" ||
+		(management.match(/this\.#didMutate\(/g) ?? []).length !== 13
+	) {
+		failures.push(
+			"Every successful Git management mutation must publish one root-only invalidation before its notification",
+		);
+	}
+	return failures;
+}
+
+function validateGitInvalidationModule(source) {
+	if (typeof source !== "string") {
+		return false;
+	}
+	const sourceFile = ts.createSourceFile(
+		GIT_INVALIDATION_PATH,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return false;
+	}
+	const imports = sourceFile.statements.filter(ts.isImportDeclaration);
+	const interfaces = sourceFile.statements.filter(
+		(statement) =>
+			ts.isInterfaceDeclaration(statement) &&
+			statement.name.text === "PlainGitInvalidationEvent",
+	);
+	const classes = sourceFile.statements.filter(
+		(statement) =>
+			ts.isClassDeclaration(statement) &&
+			statement.name?.text === "PlainGitInvalidationBus",
+	);
+	const exportedSingletons = sourceFile.statements.filter(
+		(statement) =>
+			ts.isVariableStatement(statement) &&
+			statement.modifiers?.some(
+				(modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
+			) &&
+			statement.declarationList.declarations.some(
+				(declaration) =>
+					ts.isIdentifier(declaration.name) &&
+					declaration.name.text === "plainGitInvalidation" &&
+					declaration.initializer !== undefined &&
+					normalizedTypeScriptText(declaration.initializer, sourceFile) ===
+						"newPlainGitInvalidationBus()",
+			),
+	);
+	if (
+		imports.length !== 1 ||
+		!ts.isStringLiteralLike(imports[0].moduleSpecifier) ||
+		imports[0].moduleSpecifier.text !==
+			"@codingame/monaco-vscode-api/vscode/vs/base/common/event" ||
+		interfaces.length !== 1 ||
+		classes.length !== 1 ||
+		exportedSingletons.length !== 1 ||
+		sourceFile.statements.length !== 4
+	) {
+		return false;
+	}
+	const eventMembers = interfaces[0].members;
+	if (
+		eventMembers.length !== 1 ||
+		!ts.isPropertySignature(eventMembers[0]) ||
+		eventMembers[0].name.getText(sourceFile) !== "rootId" ||
+		eventMembers[0].type?.kind !== ts.SyntaxKind.StringKeyword ||
+		!eventMembers[0].modifiers?.some(
+			(modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword,
+		)
+	) {
+		return false;
+	}
+	const memberNames = classes[0].members.map((member) =>
+		member.name?.getText(sourceFile),
+	);
+	const invalidateBody = classMethodBody(
+		sourceFile,
+		"PlainGitInvalidationBus",
+		"invalidate",
+	);
+	return (
+		sameArray(memberNames, ["#emitter", "onDidInvalidate", "invalidate"]) &&
+		invalidateBody !== undefined &&
+		normalizedTypeScriptText(invalidateBody, sourceFile) ===
+			"{this.#emitter.fire(Object.freeze({rootId}));}"
+	);
+}
+
+function validateGitInvalidationRoutes(normalizedSources) {
+	const failures = [];
+	const expectedSubscribers = new Map([
+		[
+			GIT_DISCARD_VIEW_PATH,
+			"if(this.#rootId===rootId&&!this.#mutationInFlight){voidthis.refresh();}",
+		],
+		[
+			GIT_GRAPH_VIEW_PATH,
+			"if(this.#controllerRootId===rootId){voidthis.refresh();}",
+		],
+		[
+			GIT_HISTORY_VIEW_PATH,
+			"if(this.#controllerRootId===rootId){voidthis.#refreshInvalidatedHistory();}",
+		],
+		[
+			GIT_STASH_VIEW_PATH,
+			"if(this.#controllerRootId===rootId&&!this.#mutationInFlight){voidthis.refresh();}",
+		],
+		[
+			GIT_WORKTREE_VIEW_PATH,
+			"if(this.#controllerRootId===rootId&&!this.#mutationInFlight){voidthis.refresh();}",
+		],
+	]);
+	const actualSubscriberPaths = [];
+	const actualInvalidatorCounts = new Map();
+	for (const [relativePath, source] of normalizedSources) {
+		const subscriberCount = (
+			source.match(/plainGitInvalidation\.onDidInvalidate\s*\(/g) ?? []
+		).length;
+		actualSubscriberPaths.push(...Array(subscriberCount).fill(relativePath));
+		const invalidatorCount = (
+			source.match(/plainGitInvalidation\.invalidate\s*\(/g) ?? []
+		).length;
+		if (invalidatorCount > 0) {
+			actualInvalidatorCounts.set(relativePath, invalidatorCount);
+		}
+	}
+	if (
+		!sameArray(
+			actualSubscriberPaths.sort(),
+			[...expectedSubscribers.keys()].sort(),
+		)
+	) {
+		failures.push(
+			"Source Control, Graph, History, Stash and Worktree must each subscribe once to root-scoped Git invalidation",
+		);
+	}
+	for (const [relativePath, guardedRefresh] of expectedSubscribers) {
+		const compact = (normalizedSources.get(relativePath) ?? "").replaceAll(
+			/\s+/g,
+			"",
+		);
+		if (!compact.includes(guardedRefresh)) {
+			failures.push(
+				"Source Control, Graph, History, Stash and Worktree must each subscribe once to root-scoped Git invalidation",
+			);
+			break;
+		}
+	}
+	const expectedInvalidatorCounts = new Map([
+		[GIT_MANAGEMENT_PATH, 1],
+		[GIT_SCM_COMMANDS_PATH, 1],
+		[GIT_DISCARD_VIEW_PATH, 2],
+		[GIT_STASH_VIEW_PATH, 1],
+		[GIT_WORKTREE_VIEW_PATH, 1],
+	]);
+	if (
+		actualInvalidatorCounts.size !== expectedInvalidatorCounts.size ||
+		[...expectedInvalidatorCounts].some(
+			([relativePath, count]) =>
+				actualInvalidatorCounts.get(relativePath) !== count,
+		)
+	) {
+		failures.push(
+			"Only audited successful Git mutation runners may publish root-scoped invalidation",
+		);
+	}
+	const scm = (normalizedSources.get(GIT_DISCARD_VIEW_PATH) ?? "").replaceAll(
+		/\s+/g,
+		"",
+	);
+	const stash = (normalizedSources.get(GIT_STASH_VIEW_PATH) ?? "").replaceAll(
+		/\s+/g,
+		"",
+	);
+	const worktree = (
+		normalizedSources.get(GIT_WORKTREE_VIEW_PATH) ?? ""
+	).replaceAll(/\s+/g, "");
+	const history = (
+		normalizedSources.get(GIT_HISTORY_CONTROLLER_PATH) ?? ""
+	).replaceAll(/\s+/g, "");
+	if (
+		(scm.match(/constrootId=this\.#rootId;/g) ?? []).length !== 2 ||
+		(scm.match(/plainGitInvalidation\.invalidate\(rootId\);/g) ?? []).length !==
+			2 ||
+		!stash.includes("constrootId=this.#controllerRootId;") ||
+		!stash.includes("plainGitInvalidation.invalidate(rootId);") ||
+		!worktree.includes("constrootId=this.#controllerRootId;") ||
+		!worktree.includes("plainGitInvalidation.invalidate(rootId);") ||
+		!history.includes("asyncrefreshLoadedHistory():Promise<void>")
+	) {
+		failures.push(
+			"Git mutation runners must retain the bridge-matched root id and History must re-read its loaded queries",
+		);
+	}
+	return failures;
+}
+
+/**
+ * `F180` S2 turns the S1A/S1B Git authority into user-reachable workflows.
+ * This lock keeps the four command entries, the twelve write methods' only
+ * business caller, destructive confirmation order, URL redaction, snapshot-
+ * only upstream selection, and the root-only invalidation fan-out together.
+ * It intentionally fails closed when a future Git slice adds another writer
+ * or subscriber: that slice must extend this audit and its hostile tests at
+ * the same time it expands the product surface.
+ */
+export function validateGitManagementUiBoundary(appSources) {
+	const failures = [];
+	const normalizedSources = new Map(
+		appSources.map(({ relativePath, source }) => [
+			relativePath.replaceAll("\\", "/"),
+			source,
+		]),
+	);
+	const requiredPaths = [
+		"app/main.ts",
+		GIT_EXCLUDED_POLICY_PATH,
+		GIT_MANAGEMENT_PATH,
+		GIT_INVALIDATION_PATH,
+		GIT_SCM_COMMANDS_PATH,
+		GIT_ROOT_BINDER_PATH,
+		GIT_DISCARD_VIEW_PATH,
+		GIT_GRAPH_VIEW_PATH,
+		GIT_HISTORY_VIEW_PATH,
+		GIT_HISTORY_CONTROLLER_PATH,
+		GIT_STASH_VIEW_PATH,
+		GIT_WORKTREE_VIEW_PATH,
+	];
+	for (const relativePath of requiredPaths) {
+		if (!normalizedSources.has(relativePath)) {
+			failures.push(`git management UI boundary requires ${relativePath}`);
+		}
+	}
+	const management = normalizedSources.get(GIT_MANAGEMENT_PATH);
+	if (management !== undefined) {
+		failures.push(
+			...validateGitManagementCommandSurface(normalizedSources, management),
+			...validateGitManagementGuardedWorkflows(management),
+		);
+	}
+	if (
+		!validateGitInvalidationModule(normalizedSources.get(GIT_INVALIDATION_PATH))
+	) {
+		failures.push(
+			"Git invalidation must remain an exact rootId-only frozen event singleton",
+		);
+	}
+	failures.push(
+		...validateGitManagementMutationAuthority(normalizedSources),
+		...validateGitInvalidationRoutes(normalizedSources),
+	);
+	return [...new Set(failures)];
 }

@@ -46,6 +46,7 @@ import {
 	validateGitDiscardConfirmationBoundary,
 	validateGitIpcBridgeBoundary,
 	validateGitLogGraphFormatStringBoundary,
+	validateGitManagementUiBoundary,
 	validateGitNetworkConfirmationBoundary,
 	validateGitRefsFieldSafetyBoundary,
 	validateGitRustBoundary,
@@ -12647,6 +12648,151 @@ export async function bypassFetch(bridge: PlainBridge): Promise<void> {
 		);
 		expect(validateGitNetworkConfirmationBoundary(hostile)).toContain(
 			"resolveNetworkConfirmation must unconditionally show the confirm dialog and never call a bridge method itself — its body must match the exact audited shape",
+		);
+	});
+});
+
+const gitManagementUiAppPaths = [
+	"app/main.ts",
+	"app/excluded-surface-policy.ts",
+	"app/features/scm/plain-git-management.ts",
+	"app/features/scm/plain-git-invalidation.ts",
+	"app/features/scm/plain-scm-commands.ts",
+	"app/features/scm/plain-git-root.ts",
+	"app/features/scm/plain-scm-view.ts",
+	"app/features/scm/plain-git-graph-view.ts",
+	"app/features/scm/plain-git-history-view.ts",
+	"app/features/scm/plain-git-history.ts",
+	"app/features/scm/plain-git-stash-view.ts",
+	"app/features/scm/plain-git-worktree-view.ts",
+];
+const gitManagementUiAppSources = gitManagementUiAppPaths.map(
+	(relativePath) => ({
+		relativePath,
+		source: readFileSync(
+			new URL(`../../${relativePath}`, import.meta.url),
+			"utf8",
+		),
+	}),
+);
+
+function replaceGitManagementUiSource(relativePath, from, to) {
+	return mutateWorkspaceSource(
+		gitManagementUiAppSources,
+		relativePath,
+		(source) => {
+			if (!source.includes(from)) {
+				throw new Error(
+					`${relativePath} git management UI mutation fixture no longer matches production`,
+				);
+			}
+			return source.replace(from, to);
+		},
+	);
+}
+
+describe("Plain F180 S2 git management UI boundary Harness", () => {
+	it("accepts the production command, confirmation and invalidation routes", () => {
+		expect(validateGitManagementUiBoundary(gitManagementUiAppSources)).toEqual(
+			[],
+		);
+	});
+
+	it("requires every audited management and refresh file", () => {
+		expect(validateGitManagementUiBoundary([])).toContain(
+			"git management UI boundary requires app/features/scm/plain-git-management.ts",
+		);
+	});
+
+	it("rejects a second business caller for a management write", () => {
+		const hostile = [
+			...gitManagementUiAppSources,
+			{
+				relativePath: "app/features/scm/plain-git-management-bypass.ts",
+				source: `export async function bypass(bridge) {
+	await bridge.gitRemoteRemove("origin");
+}`,
+			},
+		];
+		expect(validateGitManagementUiBoundary(hostile)).toContain(
+			"Git management mutation gitRemoteRemove must remain confined to its audited controller route and immutable root facade",
+		);
+	});
+
+	it("rejects force branch deletion before a positive DOM confirmation", () => {
+		const hostile = replaceGitManagementUiSource(
+			"app/features/scm/plain-git-management.ts",
+			"if (!confirmation.confirmed) {",
+			"if (confirmation.confirmed) {",
+		);
+		expect(validateGitManagementUiBoundary(hostile)).toContain(
+			"Unmerged branch force deletion must remain safe-delete then DOM-confirm then force-delete",
+		);
+	});
+
+	it("rejects displaying a raw replacement remote URL", () => {
+		const hostile = replaceGitManagementUiSource(
+			"app/features/scm/plain-git-management.ts",
+			"New: ${redactRemoteLocationForDisplay(url)}",
+			"New: ${url}",
+		);
+		expect(validateGitManagementUiBoundary(hostile)).toContain(
+			"Remote removal and URL replacement must remain DOM-confirmed, with the new URL redacted before display",
+		);
+	});
+
+	it("rejects replacing snapshot-only upstream selection with free text", () => {
+		const hostile = replaceGitManagementUiSource(
+			"app/features/scm/plain-git-management.ts",
+			"const upstream = await this.services.quickInput.pick(",
+			'const upstreamText = await this.services.quickInput.input({ title: "Upstream" });\n\t\t\tconst upstream = await this.services.quickInput.pick(',
+		);
+		expect(validateGitManagementUiBoundary(hostile)).toContain(
+			"Upstream choices must remain local and remote-tracking refs from one authoritative refs snapshot",
+		);
+	});
+
+	it("rejects widening the invalidation event beyond rootId", () => {
+		const hostile = replaceGitManagementUiSource(
+			"app/features/scm/plain-git-invalidation.ts",
+			"readonly rootId: string;",
+			"readonly rootId: string;\n\treadonly path: string;",
+		);
+		expect(validateGitManagementUiBoundary(hostile)).toContain(
+			"Git invalidation must remain an exact rootId-only frozen event singleton",
+		);
+	});
+
+	it("rejects a view refresh that ignores the invalidated repository", () => {
+		const hostile = replaceGitManagementUiSource(
+			"app/features/scm/plain-git-graph-view.ts",
+			"if (this.#controllerRootId === rootId) {",
+			"if (this.#controllerRootId !== rootId) {",
+		);
+		expect(validateGitManagementUiBoundary(hostile)).toContain(
+			"Source Control, Graph, History, Stash and Worktree must each subscribe once to root-scoped Git invalidation",
+		);
+	});
+
+	it("rejects publishing a mutable current root after an awaited write", () => {
+		const hostile = replaceGitManagementUiSource(
+			"app/features/scm/plain-git-stash-view.ts",
+			"plainGitInvalidation.invalidate(rootId);",
+			"plainGitInvalidation.invalidate(this.#controllerRootId!);",
+		);
+		expect(validateGitManagementUiBoundary(hostile)).toContain(
+			"Git mutation runners must retain the bridge-matched root id and History must re-read its loaded queries",
+		);
+	});
+
+	it("rejects dropping one of the four Command Palette entries", () => {
+		const hostile = replaceGitManagementUiSource(
+			"app/features/scm/plain-git-management.ts",
+			'command("manageUpstream"),',
+			"",
+		);
+		expect(validateGitManagementUiBoundary(hostile)).toContain(
+			"Git management must expose exactly the four audited Command Palette commands and titles",
 		);
 	});
 });

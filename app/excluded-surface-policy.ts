@@ -164,10 +164,25 @@ const excludedIdPatterns: ReadonlyArray<ExcludedIdPattern> = [
 	},
 ];
 
+/** Exact, kind-scoped semantic collisions with the deliberately broad deny
+ * spellings above. `plain.git.manageRemotes` manages ordinary Git remotes in
+ * the currently opened local repository; it cannot open a remote workspace,
+ * start a tunnel, or reach any Remote Development service. Its command id is
+ * locked independently by the F180 Git-management architecture contract.
+ * Close spellings and the same id in a view/container remain denied. */
+const allowedExcludedIdCollisions: Readonly<
+	Partial<Record<keyof WorkbenchSurfaceSnapshot, ReadonlySet<string>>>
+> = Object.freeze({
+	commandIds: new Set(["plain.git.manageRemotes"]),
+});
+
 function matchExcludedId(
 	id: string,
 	kind: keyof WorkbenchSurfaceSnapshot,
 ): string | undefined {
+	if (allowedExcludedIdCollisions[kind]?.has(id) === true) {
+		return undefined;
+	}
 	return excludedIdPatterns.find(
 		({ pattern, appliesToContributions }) =>
 			(kind !== "contributionIds" || appliesToContributions) &&

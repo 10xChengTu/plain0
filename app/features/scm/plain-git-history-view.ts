@@ -18,6 +18,7 @@ import { IEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench
 import type { PlainBridge } from "../../platform/tauri/contracts";
 import { normalizeCommandError } from "../../platform/tauri/errors";
 import { encodeGitCommitSourceUri } from "./plain-git-commit-detail";
+import { plainGitInvalidation } from "./plain-git-invalidation";
 import {
 	bindPlainGitBridge,
 	plainGitRootSelection,
@@ -189,6 +190,36 @@ export class PlainGitHistoryView extends ViewPane {
 			lineHistoryList,
 			detail,
 		);
+		this._register(
+			plainGitInvalidation.onDidInvalidate(({ rootId }) => {
+				if (this.#controllerRootId === rootId) {
+					void this.#refreshInvalidatedHistory();
+				}
+			}),
+		);
+	}
+
+	async #refreshInvalidatedHistory(): Promise<void> {
+		const controller = this.#controller;
+		if (controller === undefined) {
+			return;
+		}
+		try {
+			await controller.refreshLoadedHistory();
+			if (this.#controller !== controller) {
+				return;
+			}
+			this.#setMessage(undefined);
+		} catch (error) {
+			if (this.#controller !== controller) {
+				return;
+			}
+			this.#setMessage(normalizeCommandError(error).message);
+		}
+		this.#expandedFileHistoryIndex = undefined;
+		this.#detailElement?.replaceChildren();
+		this.#renderFileHistory();
+		this.#renderLineHistory();
 	}
 
 	#getController(): PlainGitHistoryController | undefined {

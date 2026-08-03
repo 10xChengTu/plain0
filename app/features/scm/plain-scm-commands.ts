@@ -9,6 +9,7 @@ import { IEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench
 import { IViewsService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/views/common/viewsService.service";
 
 import { normalizeCommandError } from "../../platform/tauri/errors";
+import type { PlainBridge } from "../../platform/tauri/contracts";
 import {
 	computeContentAfterApplyingHunk,
 	decodeLosslessUtf8,
@@ -19,6 +20,8 @@ import {
 	plainGitRootSelection,
 	plainGitRootsFromWorkspaceFolders,
 } from "./plain-git-root";
+import { registerPlainGitManagementCommands } from "./plain-git-management";
+import { plainGitInvalidation } from "./plain-git-invalidation";
 import { getConfiguredPlainScmBridge, PlainScmView } from "./plain-scm-view";
 import { SCM_VIEW_ID } from "./scm-contribution";
 
@@ -133,6 +136,7 @@ async function runStageActiveFileFirstHunk(
 			return;
 		}
 		await git.gitStageBlob(relativePath, new TextEncoder().encode(hunkContent));
+		plainGitInvalidation.invalidate(rootId);
 		notificationService.info(
 			`Plain: staged the first change in "${relativePath}".`,
 		);
@@ -159,7 +163,10 @@ export interface PlainScmCommandsRegistration {
  * for trust itself) or after a `.git` operation performed outside Plain
  * entirely (a separate terminal, another app).
  */
-export function registerPlainScmCommands(): PlainScmCommandsRegistration {
+export function registerPlainScmCommands(
+	bridge: PlainBridge,
+): PlainScmCommandsRegistration {
+	const management = registerPlainGitManagementCommands(bridge);
 	const disposables = [
 		CommandsRegistry.registerCommand(
 			REFRESH_SCM_COMMAND_ID,
@@ -200,6 +207,7 @@ export function registerPlainScmCommands(): PlainScmCommandsRegistration {
 	];
 	return {
 		dispose() {
+			management.dispose();
 			for (const disposable of disposables) {
 				disposable.dispose();
 			}

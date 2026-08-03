@@ -300,7 +300,7 @@ async function bootstrap(): Promise<void> {
 	);
 	preferenceCommandsRegistration = registerPlainPreferenceCommands();
 	terminalCommandsRegistration = registerPlainTerminalCommands();
-	scmCommandsRegistration = registerPlainScmCommands();
+	scmCommandsRegistration = registerPlainScmCommands(bridge);
 	// `F090` S0: inline blame decoration + hover + age heatmap — see
 	// `plain-git-blame-contribution.ts`'s own module doc comment.
 	gitBlameContributionRegistration = createPlainGitBlameContribution(

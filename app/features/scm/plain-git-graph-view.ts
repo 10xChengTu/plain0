@@ -17,8 +17,10 @@ import { IViewDescriptorService } from "@codingame/monaco-vscode-api/vscode/vs/w
 import type { GitRefEntry, PlainBridge } from "../../platform/tauri/contracts";
 import { normalizeCommandError } from "../../platform/tauri/errors";
 import { PlainGitGraphController } from "./plain-git-graph";
+import { plainGitInvalidation } from "./plain-git-invalidation";
 import {
 	bindPlainGitBridge,
+	gitUpstreamDisplayName,
 	plainGitRootSelection,
 	plainGitRootsFromWorkspaceFolders,
 } from "./plain-git-root";
@@ -192,6 +194,13 @@ export class PlainGitGraphView extends ViewPane {
 				});
 			}),
 		);
+		this._register(
+			plainGitInvalidation.onDidInvalidate(({ rootId }) => {
+				if (this.#controllerRootId === rootId) {
+					void this.refresh();
+				}
+			}),
+		);
 	}
 
 	#getController(): PlainGitGraphController | undefined {
@@ -266,7 +275,9 @@ export class PlainGitGraphView extends ViewPane {
 			item.className = "plain-git-graph-view-ref-item";
 			const headMarker = entry.isHead ? "* " : "";
 			const upstreamSuffix =
-				entry.upstream !== null ? ` -> ${entry.upstream}` : "";
+				entry.upstream !== null
+					? ` -> ${gitUpstreamDisplayName(entry.upstream)}`
+					: "";
 			item.textContent = `${headMarker}${entry.shortName}${upstreamSuffix}`;
 			list.append(item);
 		}

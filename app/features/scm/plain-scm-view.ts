@@ -44,6 +44,7 @@ import {
 	plainGitRootsFromWorkspaceFolders,
 	type PlainRootedGitBridge,
 } from "./plain-git-root";
+import { plainGitInvalidation } from "./plain-git-invalidation";
 
 const PLAIN_GIT_PROVIDER_ID = "plain-git";
 
@@ -156,6 +157,7 @@ export class PlainScmView extends ViewPane {
 	#generation = 0;
 	#lastBranch: GitStatusResult["branch"] | undefined;
 	#rootedBridge: PlainRootedGitBridge | undefined;
+	#rootId: string | undefined;
 
 	#rootSelectorElement: HTMLSelectElement | undefined;
 	#messageElement: HTMLElement | undefined;
@@ -254,6 +256,13 @@ export class PlainScmView extends ViewPane {
 					this.teardownRepository();
 					void this.refresh();
 				});
+			}),
+		);
+		this._register(
+			plainGitInvalidation.onDidInvalidate(({ rootId }) => {
+				if (this.#rootId === rootId && !this.#mutationInFlight) {
+					void this.refresh();
+				}
 			}),
 		);
 
@@ -520,6 +529,7 @@ export class PlainScmView extends ViewPane {
 				this.#repository = this.scmService.registerSCMProvider(provider);
 			}
 			this.#rootedBridge = rootedBridge;
+			this.#rootId = selectedRoot.rootId;
 			this.#provider.applyStatus(status);
 			this.#lastBranch = status.branch;
 			this.#disabledReason = undefined;
@@ -546,6 +556,7 @@ export class PlainScmView extends ViewPane {
 		this.#provider = undefined;
 		this.#lastBranch = undefined;
 		this.#rootedBridge = undefined;
+		this.#rootId = undefined;
 	}
 
 	private renderRootSelector(): void {
@@ -675,13 +686,19 @@ export class PlainScmView extends ViewPane {
 		mutation: (bridge: PlainRootedGitBridge) => Promise<void>,
 	): Promise<void> {
 		const bridge = this.#rootedBridge;
-		if (bridge === undefined || this.#mutationInFlight) {
+		const rootId = this.#rootId;
+		if (
+			bridge === undefined ||
+			rootId === undefined ||
+			this.#mutationInFlight
+		) {
 			return;
 		}
 		this.#mutationInFlight = true;
 		this.renderState();
 		try {
 			await mutation(bridge);
+			plainGitInvalidation.invalidate(rootId);
 		} catch (error) {
 			this.notificationService.error(normalizeCommandError(error).message);
 		} finally {
@@ -773,7 +790,12 @@ export class PlainScmView extends ViewPane {
 		mutation: (bridge: PlainRootedGitBridge) => Promise<void>,
 	): Promise<void> {
 		const bridge = this.#rootedBridge;
-		if (bridge === undefined || this.#mutationInFlight) {
+		const rootId = this.#rootId;
+		if (
+			bridge === undefined ||
+			rootId === undefined ||
+			this.#mutationInFlight
+		) {
 			return;
 		}
 		this.#mutationInFlight = true;
@@ -781,6 +803,7 @@ export class PlainScmView extends ViewPane {
 		this.renderState();
 		try {
 			await mutation(bridge);
+			plainGitInvalidation.invalidate(rootId);
 		} catch (error) {
 			this.notificationService.error(normalizeCommandError(error).message);
 		} finally {

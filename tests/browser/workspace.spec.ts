@@ -167,6 +167,8 @@ interface TestGitFixture {
 	>;
 	readonly graphForTest?: TestGitLogGraphResult;
 	readonly refsForTest?: TestGitRefsListResult;
+	readonly remotesForTest?: TestGitRemotesListResult;
+	readonly branchUnmergedForTest?: readonly string[];
 	readonly stashForTest?: readonly TestGitStashEntry[];
 	readonly stashShowForTest?: Readonly<Record<string, TestGitShowCommitResult>>;
 	readonly stashConflictForTest?: Readonly<Record<string, readonly string[]>>;
@@ -255,6 +257,15 @@ interface TestGitRefEntry {
 }
 interface TestGitRefsListResult {
 	readonly entries: readonly TestGitRefEntry[];
+	readonly truncated: boolean;
+}
+interface TestGitRemoteEntry {
+	readonly name: string;
+	readonly fetchUrls: readonly string[];
+	readonly pushUrls: readonly string[];
+}
+interface TestGitRemotesListResult {
+	readonly entries: readonly TestGitRemoteEntry[];
 	readonly truncated: boolean;
 }
 interface TestGitStashEntry {
@@ -2130,8 +2141,117 @@ async function installNativeIpcMock(
 			>(Object.entries(gitFixtureForTest.commitBlobs ?? {}));
 			const mockGitGraph: TestGitLogGraphResult =
 				gitFixtureForTest.graphForTest ?? { nodes: [], truncated: false };
-			const mockGitRefs: TestGitRefsListResult =
-				gitFixtureForTest.refsForTest ?? { entries: [], truncated: false };
+			const seededGitRefs = gitFixtureForTest.refsForTest ?? {
+				entries: [],
+				truncated: false,
+			};
+			let mockGitRefEntries: TestGitRefEntry[] = seededGitRefs.entries.map(
+				(entry) => ({ ...entry }),
+			);
+			const seededGitRemotes = gitFixtureForTest.remotesForTest ?? {
+				entries: [],
+				truncated: false,
+			};
+			let mockGitRemoteEntries: TestGitRemoteEntry[] =
+				seededGitRemotes.entries.map((entry) => ({
+					...entry,
+					fetchUrls: [...entry.fetchUrls],
+					pushUrls: [...entry.pushUrls],
+				}));
+			const mockGitUnmergedBranches = new Set(
+				gitFixtureForTest.branchUnmergedForTest ?? [],
+			);
+
+			function mockGitRefsSnapshot(): TestGitRefsListResult {
+				return {
+					entries: mockGitRefEntries.map((entry) => ({ ...entry })),
+					truncated: seededGitRefs.truncated,
+				};
+			}
+
+			function mockGitRemotesSnapshot(): TestGitRemotesListResult {
+				return {
+					entries: mockGitRemoteEntries.map((entry) => ({
+						...entry,
+						fetchUrls: [...entry.fetchUrls],
+						pushUrls: [...entry.pushUrls],
+					})),
+					truncated: seededGitRemotes.truncated,
+				};
+			}
+
+			function mockGitLocalBranch(name: string): TestGitRefEntry | undefined {
+				return mockGitRefEntries.find(
+					(entry) => entry.kind === "branch" && entry.shortName === name,
+				);
+			}
+
+			function mockGitTag(name: string): TestGitRefEntry | undefined {
+				return mockGitRefEntries.find(
+					(entry) => entry.kind === "tag" && entry.shortName === name,
+				);
+			}
+
+			function mockGitRemote(name: string): TestGitRemoteEntry | undefined {
+				return mockGitRemoteEntries.find((entry) => entry.name === name);
+			}
+
+			function mockGitManagementError(code: string, message: string) {
+				return { code, message };
+			}
+
+			function ensureMockGitManagementAvailable(
+				candidateRootId: unknown,
+			): void {
+				if (!terminalTrusted) {
+					throw terminalNotTrusted();
+				}
+				if (candidateRootId !== rootId) {
+					throw {
+						code: "ROOT_NOT_AUTHORIZED",
+						message:
+							"The requested workspace root is not authorized for this window.",
+					};
+				}
+				if (gitFixtureForTest.noRepositoryForTest === true) {
+					throw gitNoRepository();
+				}
+			}
+
+			function redactMockGitRemoteUrl(raw: string): string {
+				if (raw.startsWith("file://")) {
+					return "file://<local-path>";
+				}
+				if (
+					raw.startsWith("/") ||
+					raw.startsWith("./") ||
+					raw.startsWith("../") ||
+					raw.startsWith("\\\\") ||
+					/^[A-Za-z]:[\\/]/.test(raw)
+				) {
+					return "<local-path>";
+				}
+				const suffix = raw.search(/[?#]/);
+				const base = suffix < 0 ? raw : raw.slice(0, suffix);
+				let display = base;
+				const scheme = base.indexOf("://");
+				if (scheme >= 0) {
+					const authorityStart = scheme + 3;
+					const slash = base.indexOf("/", authorityStart);
+					const authorityEnd = slash < 0 ? base.length : slash;
+					const authority = base.slice(authorityStart, authorityEnd);
+					const at = authority.lastIndexOf("@");
+					if (at >= 0) {
+						display = `${base.slice(0, authorityStart)}<redacted>@${authority.slice(at + 1)}${base.slice(authorityEnd)}`;
+					}
+				} else {
+					const at = base.indexOf("@");
+					if (at >= 0 && base.slice(at + 1).includes(":")) {
+						display = `<redacted>@${base.slice(at + 1)}`;
+					}
+				}
+				return suffix < 0 ? display : `${display}?<redacted>`;
+			}
 			let mockGitStashEntries: TestGitStashEntry[] = (
 				gitFixtureForTest.stashForTest ?? []
 			).map((entry) => ({ ...entry }));
@@ -4059,13 +4179,358 @@ async function installNativeIpcMock(
 							return mockGitGraph;
 						}
 						case "git_refs_list": {
-							if (!terminalTrusted) {
-								throw terminalNotTrusted();
+							ensureMockGitManagementAvailable(args.rootId);
+							return mockGitRefsSnapshot();
+						}
+						case "git_remotes_list": {
+							ensureMockGitManagementAvailable(args.rootId);
+							return mockGitRemotesSnapshot();
+						}
+						case "git_branch_create": {
+							ensureMockGitManagementAvailable(args.rootId);
+							const request = args.request as
+								{ name?: string; targetSha?: string } | undefined;
+							if (mockGitLocalBranch(request?.name ?? "") !== undefined) {
+								throw mockGitManagementError(
+									"GIT_BRANCH_ALREADY_EXISTS",
+									"A Git branch with that name already exists.",
+								);
 							}
-							if (gitFixtureForTest.noRepositoryForTest === true) {
-								throw gitNoRepository();
+							mockGitRefEntries.push({
+								kind: "branch",
+								fullName: `refs/heads/${request?.name ?? ""}`,
+								shortName: request?.name ?? "",
+								targetSha: request?.targetSha ?? "",
+								isAnnotatedTag: false,
+								peeledSha: null,
+								upstream: null,
+								isHead: false,
+							});
+							return null;
+						}
+						case "git_branch_switch": {
+							ensureMockGitManagementAvailable(args.rootId);
+							const request = args.request as { name?: string } | undefined;
+							const branch = mockGitLocalBranch(request?.name ?? "");
+							if (branch === undefined) {
+								throw mockGitManagementError(
+									"GIT_BRANCH_NOT_FOUND",
+									"The requested Git branch does not exist.",
+								);
 							}
-							return mockGitRefs;
+							mockGitRefEntries = mockGitRefEntries.map((entry) =>
+								entry.kind === "branch"
+									? { ...entry, isHead: entry.shortName === branch.shortName }
+									: entry,
+							);
+							const upstream = branch.upstream?.startsWith("refs/remotes/")
+								? branch.upstream.slice("refs/remotes/".length)
+								: null;
+							mockGitBranch = {
+								oid: branch.targetSha,
+								head: branch.shortName,
+								upstream:
+									upstream === null
+										? null
+										: { name: upstream, ahead: 0, behind: 0 },
+							};
+							mockGitNetworkUpstream = upstream;
+							return null;
+						}
+						case "git_branch_rename": {
+							ensureMockGitManagementAvailable(args.rootId);
+							const request = args.request as
+								{ oldName?: string; newName?: string } | undefined;
+							const branch = mockGitLocalBranch(request?.oldName ?? "");
+							if (branch === undefined) {
+								throw mockGitManagementError(
+									"GIT_BRANCH_NOT_FOUND",
+									"The requested Git branch does not exist.",
+								);
+							}
+							if (mockGitLocalBranch(request?.newName ?? "") !== undefined) {
+								throw mockGitManagementError(
+									"GIT_BRANCH_ALREADY_EXISTS",
+									"A Git branch with that name already exists.",
+								);
+							}
+							mockGitRefEntries = mockGitRefEntries.map((entry) =>
+								entry === branch
+									? {
+											...entry,
+											fullName: `refs/heads/${request?.newName ?? ""}`,
+											shortName: request?.newName ?? "",
+										}
+									: entry,
+							);
+							if (mockGitBranch.head === request?.oldName) {
+								mockGitBranch = {
+									...mockGitBranch,
+									head: request?.newName ?? "",
+								};
+							}
+							if (mockGitUnmergedBranches.delete(request?.oldName ?? "")) {
+								mockGitUnmergedBranches.add(request?.newName ?? "");
+							}
+							return null;
+						}
+						case "git_branch_delete": {
+							ensureMockGitManagementAvailable(args.rootId);
+							const request = args.request as
+								{ name?: string; force?: boolean } | undefined;
+							const branch = mockGitLocalBranch(request?.name ?? "");
+							if (branch === undefined) {
+								throw mockGitManagementError(
+									"GIT_BRANCH_NOT_FOUND",
+									"The requested Git branch does not exist.",
+								);
+							}
+							if (branch.isHead || mockGitBranch.head === branch.shortName) {
+								throw mockGitManagementError(
+									"GIT_BRANCH_IS_CURRENT",
+									"The currently checked-out Git branch cannot be deleted.",
+								);
+							}
+							if (
+								request?.force !== true &&
+								mockGitUnmergedBranches.has(branch.shortName)
+							) {
+								return "needsForce";
+							}
+							mockGitRefEntries = mockGitRefEntries.filter(
+								(entry) => entry !== branch,
+							);
+							mockGitUnmergedBranches.delete(branch.shortName);
+							return "deleted";
+						}
+						case "git_tag_create": {
+							ensureMockGitManagementAvailable(args.rootId);
+							const request = args.request as
+								| { name?: string; targetSha?: string; message?: string | null }
+								| undefined;
+							if (mockGitTag(request?.name ?? "") !== undefined) {
+								throw mockGitManagementError(
+									"GIT_TAG_ALREADY_EXISTS",
+									"A Git tag with that name already exists.",
+								);
+							}
+							const targetSha = request?.targetSha ?? "";
+							const annotated = request?.message != null;
+							mockGitRefEntries.push({
+								kind: "tag",
+								fullName: `refs/tags/${request?.name ?? ""}`,
+								shortName: request?.name ?? "",
+								targetSha,
+								isAnnotatedTag: annotated,
+								peeledSha: annotated ? targetSha : null,
+								upstream: null,
+								isHead: false,
+							});
+							return null;
+						}
+						case "git_tag_delete": {
+							ensureMockGitManagementAvailable(args.rootId);
+							const request = args.request as { name?: string } | undefined;
+							const tag = mockGitTag(request?.name ?? "");
+							if (tag === undefined) {
+								throw mockGitManagementError(
+									"GIT_TAG_NOT_FOUND",
+									"The requested Git tag does not exist.",
+								);
+							}
+							mockGitRefEntries = mockGitRefEntries.filter(
+								(entry) => entry !== tag,
+							);
+							return null;
+						}
+						case "git_remote_add": {
+							ensureMockGitManagementAvailable(args.rootId);
+							const request = args.request as
+								{ name?: string; url?: string } | undefined;
+							if (mockGitRemote(request?.name ?? "") !== undefined) {
+								throw mockGitManagementError(
+									"GIT_REMOTE_ALREADY_EXISTS",
+									"A Git remote with that name already exists.",
+								);
+							}
+							mockGitRemoteEntries.push({
+								name: request?.name ?? "",
+								fetchUrls: [redactMockGitRemoteUrl(request?.url ?? "")],
+								pushUrls: [],
+							});
+							return null;
+						}
+						case "git_remote_rename": {
+							ensureMockGitManagementAvailable(args.rootId);
+							const request = args.request as
+								{ oldName?: string; newName?: string } | undefined;
+							const remote = mockGitRemote(request?.oldName ?? "");
+							if (remote === undefined) {
+								throw mockGitManagementError(
+									"GIT_REMOTE_NOT_FOUND",
+									"The requested Git remote does not exist.",
+								);
+							}
+							if (mockGitRemote(request?.newName ?? "") !== undefined) {
+								throw mockGitManagementError(
+									"GIT_REMOTE_ALREADY_EXISTS",
+									"A Git remote with that name already exists.",
+								);
+							}
+							const oldName = remote.name;
+							const newName = request?.newName ?? "";
+							mockGitRemoteEntries = mockGitRemoteEntries.map((entry) =>
+								entry === remote ? { ...entry, name: newName } : entry,
+							);
+							const oldShortPrefix = `${oldName}/`;
+							const oldFullPrefix = `refs/remotes/${oldName}/`;
+							mockGitRefEntries = mockGitRefEntries.map((entry) => {
+								if (
+									entry.kind === "remoteBranch" &&
+									entry.shortName.startsWith(oldShortPrefix)
+								) {
+									const suffix = entry.shortName.slice(oldShortPrefix.length);
+									return {
+										...entry,
+										shortName: `${newName}/${suffix}`,
+										fullName: `refs/remotes/${newName}/${suffix}`,
+									};
+								}
+								return entry.upstream?.startsWith(oldFullPrefix) === true
+									? {
+											...entry,
+											upstream: `refs/remotes/${newName}/${entry.upstream.slice(oldFullPrefix.length)}`,
+										}
+									: entry;
+							});
+							if (mockGitNetworkUpstream?.startsWith(oldShortPrefix)) {
+								mockGitNetworkUpstream = `${newName}/${mockGitNetworkUpstream.slice(oldShortPrefix.length)}`;
+							}
+							if (mockGitBranch.upstream?.name.startsWith(oldShortPrefix)) {
+								mockGitBranch = {
+									...mockGitBranch,
+									upstream: {
+										...mockGitBranch.upstream,
+										name: `${newName}/${mockGitBranch.upstream.name.slice(oldShortPrefix.length)}`,
+									},
+								};
+							}
+							return null;
+						}
+						case "git_remote_set_url": {
+							ensureMockGitManagementAvailable(args.rootId);
+							const request = args.request as
+								| { name?: string; kind?: "fetch" | "push"; url?: string }
+								| undefined;
+							const remote = mockGitRemote(request?.name ?? "");
+							if (remote === undefined) {
+								throw mockGitManagementError(
+									"GIT_REMOTE_NOT_FOUND",
+									"The requested Git remote does not exist.",
+								);
+							}
+							const display = redactMockGitRemoteUrl(request?.url ?? "");
+							mockGitRemoteEntries = mockGitRemoteEntries.map((entry) =>
+								entry === remote
+									? {
+											...entry,
+											fetchUrls:
+												request?.kind === "fetch" ? [display] : entry.fetchUrls,
+											pushUrls:
+												request?.kind === "push" ? [display] : entry.pushUrls,
+										}
+									: entry,
+							);
+							return null;
+						}
+						case "git_remote_remove": {
+							ensureMockGitManagementAvailable(args.rootId);
+							const request = args.request as { name?: string } | undefined;
+							const remote = mockGitRemote(request?.name ?? "");
+							if (remote === undefined) {
+								throw mockGitManagementError(
+									"GIT_REMOTE_NOT_FOUND",
+									"The requested Git remote does not exist.",
+								);
+							}
+							mockGitRemoteEntries = mockGitRemoteEntries.filter(
+								(entry) => entry !== remote,
+							);
+							const shortPrefix = `${remote.name}/`;
+							const fullPrefix = `refs/remotes/${remote.name}/`;
+							mockGitRefEntries = mockGitRefEntries
+								.filter(
+									(entry) =>
+										entry.kind !== "remoteBranch" ||
+										!entry.shortName.startsWith(shortPrefix),
+								)
+								.map((entry) =>
+									entry.upstream?.startsWith(fullPrefix) === true
+										? { ...entry, upstream: null }
+										: entry,
+								);
+							if (mockGitNetworkUpstream?.startsWith(shortPrefix)) {
+								mockGitNetworkUpstream = null;
+							}
+							if (mockGitBranch.upstream?.name.startsWith(shortPrefix)) {
+								mockGitBranch = { ...mockGitBranch, upstream: null };
+							}
+							return null;
+						}
+						case "git_upstream_set": {
+							ensureMockGitManagementAvailable(args.rootId);
+							const request = args.request as
+								{ branch?: string; upstream?: string } | undefined;
+							const branch = mockGitLocalBranch(request?.branch ?? "");
+							const remoteBranch = mockGitRefEntries.find(
+								(entry) =>
+									entry.kind === "remoteBranch" &&
+									entry.shortName === request?.upstream,
+							);
+							const upstream = request?.upstream ?? "";
+							const remoteName = upstream.slice(0, upstream.indexOf("/"));
+							if (
+								branch === undefined ||
+								remoteBranch === undefined ||
+								mockGitRemote(remoteName) === undefined
+							) {
+								throw mockGitManagementError(
+									"GIT_UPSTREAM_NOT_FOUND",
+									"The requested upstream does not exist.",
+								);
+							}
+							mockGitRefEntries = mockGitRefEntries.map((entry) =>
+								entry === branch
+									? { ...entry, upstream: `refs/remotes/${upstream}` }
+									: entry,
+							);
+							if (mockGitBranch.head === branch.shortName) {
+								mockGitNetworkUpstream = upstream;
+								mockGitBranch = {
+									...mockGitBranch,
+									upstream: { name: upstream, ahead: 0, behind: 0 },
+								};
+							}
+							return null;
+						}
+						case "git_upstream_unset": {
+							ensureMockGitManagementAvailable(args.rootId);
+							const request = args.request as { branch?: string } | undefined;
+							const branch = mockGitLocalBranch(request?.branch ?? "");
+							if (branch === undefined || branch.upstream === null) {
+								throw mockGitManagementError(
+									"GIT_UPSTREAM_NOT_CONFIGURED",
+									"The requested local branch has no configured upstream.",
+								);
+							}
+							mockGitRefEntries = mockGitRefEntries.map((entry) =>
+								entry === branch ? { ...entry, upstream: null } : entry,
+							);
+							if (mockGitBranch.head === branch.shortName) {
+								mockGitNetworkUpstream = null;
+								mockGitBranch = { ...mockGitBranch, upstream: null };
+							}
+							return null;
 						}
 						case "git_stash_list": {
 							if (!terminalTrusted) {
@@ -4436,6 +4901,23 @@ async function installMultiRootNativeIpcMock(
 				[primaryRootId, [gitOrdinaryEntry("primary-only.txt", ".", "M")]],
 				[secondaryRootId, [{ type: "untracked", path: "secondary-only.txt" }]],
 			]);
+			const gitRefsByRoot = new Map<string, TestGitRefEntry[]>(
+				[...gitBranchesByRoot].map(([rootId, branch]) => [
+					rootId,
+					[
+						{
+							kind: "branch",
+							fullName: `refs/heads/${branch.head}`,
+							shortName: branch.head,
+							targetSha: branch.oid,
+							isAnnotatedTag: false,
+							peeledSha: null,
+							upstream: null,
+							isHead: true,
+						},
+					],
+				]),
+			);
 			function selectedGitRootId(args: Record<string, unknown>): string {
 				const selectedRootId = args.rootId;
 				if (
@@ -5651,9 +6133,31 @@ async function installMultiRootNativeIpcMock(
 						case "git_log_graph":
 							selectedGitRootId(args);
 							return { nodes: [], truncated: false };
-						case "git_refs_list":
-							selectedGitRootId(args);
-							return { entries: [], truncated: false };
+						case "git_refs_list": {
+							const selectedRootId = selectedGitRootId(args);
+							return {
+								entries: structuredClone(
+									gitRefsByRoot.get(selectedRootId) ?? [],
+								),
+								truncated: false,
+							};
+						}
+						case "git_branch_create": {
+							const selectedRootId = selectedGitRootId(args);
+							const request = args.request as
+								{ name?: string; targetSha?: string } | undefined;
+							gitRefsByRoot.get(selectedRootId)?.push({
+								kind: "branch",
+								fullName: `refs/heads/${request?.name ?? ""}`,
+								shortName: request?.name ?? "",
+								targetSha: request?.targetSha ?? "",
+								isAnnotatedTag: false,
+								peeledSha: null,
+								upstream: null,
+								isHead: false,
+							});
+							return null;
+						}
 						case "git_stash_list":
 							selectedGitRootId(args);
 							return { entries: [], truncated: false };
@@ -16509,6 +17013,492 @@ test("lists worktrees, adds a new one, and force-removes a dirty one after confi
 	]);
 
 	expect(pageErrors).toEqual([]);
+});
+
+// --- F180 S2: ref/config management + product-owned Git invalidation ------
+
+async function openGitManagementCommand(
+	page: Page,
+	query: string,
+	label: string,
+): Promise<Locator> {
+	// The `>` Quick Open prefix selects the real CommandsQuickAccessProvider
+	// deterministically without relying on host keyboard-layout translation of
+	// Cmd/Ctrl+Shift+P.
+	await page.keyboard.press("ControlOrMeta+P");
+	const palette = page.locator(".quick-input-widget");
+	await expect(palette).toBeVisible();
+	await palette.locator("input").fill(`>${query}`);
+	const command = palette.getByText(label, { exact: true });
+	await expect(command).toHaveCount(1);
+	await command.click();
+	await expect(palette).toBeVisible();
+	return palette;
+}
+
+async function pickGitManagementItem(
+	palette: Locator,
+	text: string,
+): Promise<void> {
+	const item = palette
+		.locator(".quick-input-list .monaco-list-row")
+		.filter({ hasText: text })
+		.first();
+	await expect(item).toBeVisible();
+	await item.click();
+}
+
+async function submitGitManagementInput(
+	palette: Locator,
+	title: string,
+	value: string,
+): Promise<void> {
+	await expect(palette).toContainText(title);
+	const input = palette.locator("input");
+	await input.fill(value);
+	await input.press("Enter");
+}
+
+test("manages branches, tags, remotes and upstream through authoritative picks, confirmations and cross-view invalidation", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			errors.push(message.text());
+		}
+	});
+
+	const headSha = "a".repeat(40);
+	const sideSha = "b".repeat(40);
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{ "src/history.ts": "first line\n" },
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{
+			branch: { oid: headSha, head: "main", upstream: null },
+			fileHistory: {
+				"src/history.ts": {
+					entries: [{ sha: headSha, message: "initial history" }],
+					truncated: false,
+				},
+			},
+			refsForTest: {
+				entries: [
+					{
+						kind: "branch",
+						fullName: "refs/heads/main",
+						shortName: "main",
+						targetSha: headSha,
+						isAnnotatedTag: false,
+						peeledSha: null,
+						upstream: null,
+						isHead: true,
+					},
+					{
+						kind: "branch",
+						fullName: "refs/heads/unmerged",
+						shortName: "unmerged",
+						targetSha: sideSha,
+						isAnnotatedTag: false,
+						peeledSha: null,
+						upstream: null,
+						isHead: false,
+					},
+					{
+						kind: "remoteBranch",
+						fullName: "refs/remotes/origin/main",
+						shortName: "origin/main",
+						targetSha: headSha,
+						isAnnotatedTag: false,
+						peeledSha: null,
+						upstream: null,
+						isHead: false,
+					},
+					{
+						kind: "tag",
+						fullName: "refs/tags/existing",
+						shortName: "existing",
+						targetSha: headSha,
+						isAnnotatedTag: false,
+						peeledSha: null,
+						upstream: null,
+						isHead: false,
+					},
+				],
+				truncated: false,
+			},
+			remotesForTest: {
+				entries: [
+					{
+						name: "origin",
+						fetchUrls: ["https://example.invalid/repo.git"],
+						pushUrls: [],
+					},
+				],
+				truncated: false,
+			},
+			branchUnmergedForTest: ["unmerged"],
+		},
+	);
+
+	const explorer = await openNativeWorkspaceExplorer(page);
+	const src = explorer.getByRole("treeitem", { name: "src", exact: true });
+	await src.click();
+	await page.keyboard.press("ArrowRight");
+	await explorer
+		.getByRole("treeitem", { name: "history.ts", exact: true })
+		.dblclick();
+	const scm = await openScmView(page);
+	await page
+		.getByRole("button", { name: "Show File History", exact: true })
+		.click();
+	await page
+		.getByRole("button", { name: "Refresh Graph", exact: true })
+		.click();
+	const refLists = page.locator(".plain-git-graph-view-ref-list");
+	await expect(refLists.nth(0)).toContainText("main");
+
+	const callsBeforeInvalidation = Object.fromEntries(
+		await Promise.all(
+			[
+				"git_status",
+				"git_log_graph",
+				"git_file_history",
+				"git_stash_list",
+				"git_worktree_list",
+			].map(async (command) => [
+				command,
+				(await terminalCallsFor(page, command)).length,
+			]),
+		),
+	) as Record<string, number>;
+
+	let palette = await openGitManagementCommand(
+		page,
+		"Manage Branches",
+		"Plain: Manage Branches",
+	);
+	await pickGitManagementItem(palette, "Create Branch…");
+	await pickGitManagementItem(palette, "HEAD");
+	await submitGitManagementInput(palette, "Create Branch", "feature");
+	await expect(palette).toBeHidden();
+	await expect
+		.poll(
+			async () => (await terminalCallsFor(page, "git_branch_create")).length,
+		)
+		.toBe(1);
+	const branchCreate = (await terminalCallsFor(page, "git_branch_create"))[0]!;
+	expect(branchCreate.args).toEqual({
+		rootId: nativeRootId,
+		request: { name: "feature", targetSha: headSha },
+	});
+	await expect(refLists.nth(0)).toContainText("feature");
+	for (const [command, before] of Object.entries(callsBeforeInvalidation)) {
+		await expect
+			.poll(async () => (await terminalCallsFor(page, command)).length)
+			.toBeGreaterThan(before);
+	}
+
+	palette = await openGitManagementCommand(
+		page,
+		"Manage Branches",
+		"Plain: Manage Branches",
+	);
+	await pickGitManagementItem(palette, "feature");
+	await pickGitManagementItem(palette, "Switch to Branch");
+	await expect(scm.locator(".plain-scm-view-branch")).toHaveText("feature");
+
+	palette = await openGitManagementCommand(
+		page,
+		"Manage Branches",
+		"Plain: Manage Branches",
+	);
+	await pickGitManagementItem(palette, "* feature");
+	await pickGitManagementItem(palette, "Rename Branch…");
+	await submitGitManagementInput(
+		palette,
+		"Rename Branch: feature",
+		"feature-renamed",
+	);
+	await expect(scm.locator(".plain-scm-view-branch")).toHaveText(
+		"feature-renamed",
+	);
+
+	palette = await openGitManagementCommand(
+		page,
+		"Manage Branches",
+		"Plain: Manage Branches",
+	);
+	await pickGitManagementItem(palette, "unmerged");
+	await pickGitManagementItem(palette, "Delete Branch");
+	let dialog = page.locator(".monaco-dialog-box");
+	await expect(dialog).toContainText(
+		'Force delete unmerged branch "unmerged"?',
+	);
+	expect(await terminalCallsFor(page, "git_branch_delete")).toHaveLength(1);
+	expect(
+		(await terminalCallsFor(page, "git_branch_delete"))[0]!.args.request,
+	).toEqual({ name: "unmerged", force: false });
+	await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+	await expect(refLists.nth(0)).toContainText("unmerged");
+
+	palette = await openGitManagementCommand(
+		page,
+		"Manage Branches",
+		"Plain: Manage Branches",
+	);
+	await pickGitManagementItem(palette, "unmerged");
+	await pickGitManagementItem(palette, "Delete Branch");
+	dialog = page.locator(".monaco-dialog-box");
+	await dialog
+		.getByRole("button", { name: "Force Delete Branch", exact: true })
+		.click();
+	await expect
+		.poll(
+			async () => (await terminalCallsFor(page, "git_branch_delete")).length,
+		)
+		.toBe(3);
+	const deleteCalls = await terminalCallsFor(page, "git_branch_delete");
+	expect(deleteCalls.map((call) => call.args.request)).toEqual([
+		{ name: "unmerged", force: false },
+		{ name: "unmerged", force: false },
+		{ name: "unmerged", force: true },
+	]);
+	await expect(refLists.nth(0)).not.toContainText("unmerged");
+
+	palette = await openGitManagementCommand(
+		page,
+		"Manage Tags",
+		"Plain: Manage Tags",
+	);
+	await pickGitManagementItem(palette, "Create Lightweight Tag…");
+	await pickGitManagementItem(palette, "HEAD");
+	await submitGitManagementInput(palette, "Create Tag", "v-light");
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_tag_create")).length)
+		.toBe(1);
+	expect(
+		(await terminalCallsFor(page, "git_tag_create"))[0]!.args.request,
+	).toEqual({ name: "v-light", targetSha: headSha, message: null });
+
+	palette = await openGitManagementCommand(
+		page,
+		"Manage Tags",
+		"Plain: Manage Tags",
+	);
+	await pickGitManagementItem(palette, "Create Annotated Tag…");
+	await pickGitManagementItem(palette, "HEAD");
+	await submitGitManagementInput(palette, "Create Tag", "v2");
+	await submitGitManagementInput(palette, "Annotated Tag: v2", "release two");
+	await expect(refLists.nth(2)).toContainText("v2");
+	expect(
+		(await terminalCallsFor(page, "git_tag_create"))[1]!.args.request,
+	).toEqual({ name: "v2", targetSha: headSha, message: "release two" });
+
+	palette = await openGitManagementCommand(
+		page,
+		"Manage Tags",
+		"Plain: Manage Tags",
+	);
+	await pickGitManagementItem(palette, "Delete v2");
+	dialog = page.locator(".monaco-dialog-box");
+	await expect(dialog).toContainText(`Target: ${headSha}`);
+	expect(await terminalCallsFor(page, "git_tag_delete")).toHaveLength(0);
+	await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+	palette = await openGitManagementCommand(
+		page,
+		"Manage Tags",
+		"Plain: Manage Tags",
+	);
+	await pickGitManagementItem(palette, "Delete v2");
+	dialog = page.locator(".monaco-dialog-box");
+	await dialog.getByRole("button", { name: "Delete Tag", exact: true }).click();
+	await expect(refLists.nth(2)).not.toContainText("v2");
+
+	palette = await openGitManagementCommand(
+		page,
+		"Manage Remotes",
+		"Plain: Manage Remotes",
+	);
+	await pickGitManagementItem(palette, "Add Remote…");
+	await submitGitManagementInput(palette, "Add Remote", "mirror");
+	await submitGitManagementInput(
+		palette,
+		"Remote URL: mirror",
+		"ssh://mirror.invalid/repo.git",
+	);
+	palette = await openGitManagementCommand(
+		page,
+		"Manage Remotes",
+		"Plain: Manage Remotes",
+	);
+	await pickGitManagementItem(palette, "mirror");
+	await pickGitManagementItem(palette, "Rename Remote…");
+	await submitGitManagementInput(
+		palette,
+		"Rename Remote: mirror",
+		"mirror-renamed",
+	);
+	expect(
+		(await terminalCallsFor(page, "git_remote_rename"))[0]!.args.request,
+	).toEqual({ oldName: "mirror", newName: "mirror-renamed" });
+
+	const rawRemoteUrl =
+		"https://token:secret@example.invalid/new.git?access_token=private";
+	palette = await openGitManagementCommand(
+		page,
+		"Manage Remotes",
+		"Plain: Manage Remotes",
+	);
+	await pickGitManagementItem(palette, "origin");
+	await pickGitManagementItem(palette, "Change Fetch URL…");
+	await submitGitManagementInput(
+		palette,
+		"Change Fetch URL: origin",
+		rawRemoteUrl,
+	);
+	dialog = page.locator(".monaco-dialog-box");
+	await expect(dialog).toContainText(
+		"https://<redacted>@example.invalid/new.git?<redacted>",
+	);
+	await expect(dialog).not.toContainText("secret");
+	await expect(dialog).not.toContainText("private");
+	expect(await terminalCallsFor(page, "git_remote_set_url")).toHaveLength(0);
+	await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+
+	palette = await openGitManagementCommand(
+		page,
+		"Manage Remotes",
+		"Plain: Manage Remotes",
+	);
+	await pickGitManagementItem(palette, "origin");
+	await pickGitManagementItem(palette, "Change Fetch URL…");
+	await submitGitManagementInput(
+		palette,
+		"Change Fetch URL: origin",
+		rawRemoteUrl,
+	);
+	dialog = page.locator(".monaco-dialog-box");
+	await dialog.getByRole("button", { name: "Change URL", exact: true }).click();
+	await expect
+		.poll(
+			async () => (await terminalCallsFor(page, "git_remote_set_url")).length,
+		)
+		.toBe(1);
+	expect(
+		(await terminalCallsFor(page, "git_remote_set_url"))[0]!.args.request,
+	).toEqual({ name: "origin", kind: "fetch", url: rawRemoteUrl });
+
+	palette = await openGitManagementCommand(
+		page,
+		"Manage Remotes",
+		"Plain: Manage Remotes",
+	);
+	await pickGitManagementItem(palette, "mirror-renamed");
+	await pickGitManagementItem(palette, "Remove Remote");
+	dialog = page.locator(".monaco-dialog-box");
+	await expect(dialog).toContainText("remote-tracking refs");
+	expect(await terminalCallsFor(page, "git_remote_remove")).toHaveLength(0);
+	await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+	palette = await openGitManagementCommand(
+		page,
+		"Manage Remotes",
+		"Plain: Manage Remotes",
+	);
+	await pickGitManagementItem(palette, "mirror-renamed");
+	await pickGitManagementItem(palette, "Remove Remote");
+	dialog = page.locator(".monaco-dialog-box");
+	await dialog
+		.getByRole("button", { name: "Remove Remote", exact: true })
+		.click();
+	await expect
+		.poll(
+			async () => (await terminalCallsFor(page, "git_remote_remove")).length,
+		)
+		.toBe(1);
+
+	palette = await openGitManagementCommand(
+		page,
+		"Manage Upstream",
+		"Plain: Manage Upstream",
+	);
+	await pickGitManagementItem(palette, "feature-renamed");
+	await pickGitManagementItem(palette, "Set Upstream…");
+	await pickGitManagementItem(palette, "origin/main");
+	await expect(refLists.nth(0)).toContainText(
+		"* feature-renamed -> origin/main",
+	);
+	expect(
+		(await terminalCallsFor(page, "git_upstream_set"))[0]!.args.request,
+	).toEqual({ branch: "feature-renamed", upstream: "origin/main" });
+
+	palette = await openGitManagementCommand(
+		page,
+		"Manage Upstream",
+		"Plain: Manage Upstream",
+	);
+	await pickGitManagementItem(palette, "feature-renamed");
+	await pickGitManagementItem(palette, "Unset Upstream");
+	await expect(refLists.nth(0)).not.toContainText("-> origin/main");
+	expect(
+		(await terminalCallsFor(page, "git_upstream_unset"))[0]!.args.request,
+	).toEqual({ branch: "feature-renamed" });
+
+	expect(errors).toEqual([]);
+});
+
+test("requires an explicit repository for Git management in a multi-root workspace and binds the mutation to that root", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") errors.push(message.text());
+	});
+
+	await installMultiRootNativeIpcMock(page);
+	await openNativeWorkspaceExplorer(page);
+	await executePaletteCommand(
+		page,
+		"Add Folder to Workspace",
+		"Workspaces: Add Folder to Workspace...",
+	);
+
+	const palette = await openGitManagementCommand(
+		page,
+		"Manage Branches",
+		"Plain: Manage Branches",
+	);
+	await pickGitManagementItem(palette, "plain-library");
+	await pickGitManagementItem(palette, "Create Branch…");
+	await pickGitManagementItem(palette, "HEAD");
+	await submitGitManagementInput(palette, "Create Branch", "secondary-feature");
+
+	await expect
+		.poll(
+			async () => (await terminalCallsFor(page, "git_branch_create")).length,
+		)
+		.toBe(1);
+	const call = (await terminalCallsFor(page, "git_branch_create"))[0]!;
+	expect(call.args).toEqual({
+		rootId: nativeSecondaryRootId,
+		request: {
+			name: "secondary-feature",
+			targetSha: "2".repeat(40),
+		},
+	});
+	expect(errors).toEqual([]);
 });
 
 // --- `F100` S3 "断点 + 调用栈 + 变量/Watch" ----------------------------------

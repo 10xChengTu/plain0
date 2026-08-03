@@ -167,6 +167,41 @@ describe("excluded Workbench surfaces", () => {
 		).toEqual([]);
 	});
 
+	it("allows only the exact local Git remote-management command collision", () => {
+		expect(
+			findExcludedWorkbenchSurfaces(
+				snapshot({ commandIds: ["plain.git.manageRemotes"] }),
+			),
+		).toEqual([]);
+		expect(
+			findExcludedWorkbenchSurfaces(
+				snapshot({
+					commandIds: [
+						"plain.git.manageRemotes.tunnel",
+						"plain.git.remote.fetch",
+					],
+					viewIds: ["plain.git.manageRemotes"],
+				}),
+			),
+		).toEqual([
+			{
+				kind: "commandIds",
+				id: "plain.git.manageRemotes.tunnel",
+				category: "remote development or tunnels",
+			},
+			{
+				kind: "commandIds",
+				id: "plain.git.remote.fetch",
+				category: "remote development or tunnels",
+			},
+			{
+				kind: "viewIds",
+				id: "plain.git.manageRemotes",
+				category: "remote development or tunnels",
+			},
+		]);
+	});
+
 	it("rejects excluded view containers and views", () => {
 		expect(
 			findExcludedWorkbenchSurfaces(

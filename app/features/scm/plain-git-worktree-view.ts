@@ -21,6 +21,7 @@ import type {
 	PlainBridge,
 } from "../../platform/tauri/contracts";
 import { normalizeCommandError } from "../../platform/tauri/errors";
+import { plainGitInvalidation } from "./plain-git-invalidation";
 import {
 	PlainGitWorktreeController,
 	worktreeEntryLabel,
@@ -211,6 +212,13 @@ export class PlainGitWorktreeView extends ViewPane {
 				});
 			}),
 		);
+		this._register(
+			plainGitInvalidation.onDidInvalidate(({ rootId }) => {
+				if (this.#controllerRootId === rootId && !this.#mutationInFlight) {
+					void this.refresh();
+				}
+			}),
+		);
 
 		void this.refresh();
 	}
@@ -322,13 +330,20 @@ export class PlainGitWorktreeView extends ViewPane {
 	): Promise<T | undefined> {
 		this.#getController();
 		const bridge = this.#rootedBridge;
-		if (bridge === undefined || this.#mutationInFlight) {
+		const rootId = this.#controllerRootId;
+		if (
+			bridge === undefined ||
+			rootId === undefined ||
+			this.#mutationInFlight
+		) {
 			return undefined;
 		}
 		this.#mutationInFlight = true;
 		this.#renderEntries();
 		try {
-			return await mutation(bridge);
+			const result = await mutation(bridge);
+			plainGitInvalidation.invalidate(rootId);
+			return result;
 		} catch (error) {
 			this.notificationService.error(normalizeCommandError(error).message);
 			return undefined;

@@ -215,3 +215,42 @@ describe("PlainGitHistoryController.clearLineHistory", () => {
 		);
 	});
 });
+
+describe("PlainGitHistoryController.refreshLoadedHistory", () => {
+	it("does not issue IPC before either history pane has been loaded", async () => {
+		const gitFileHistory = vi.fn().mockResolvedValue(historyList([]));
+		const gitLineHistoryList = vi.fn().mockResolvedValue(historyList([]));
+		const controller = new PlainGitHistoryController(
+			fakeBridge({ gitFileHistory, gitLineHistoryList }),
+		);
+
+		await controller.refreshLoadedHistory();
+
+		expect(gitFileHistory).not.toHaveBeenCalled();
+		expect(gitLineHistoryList).not.toHaveBeenCalled();
+	});
+
+	it("repeats only the currently loaded file and line queries", async () => {
+		const gitFileHistory = vi.fn().mockResolvedValue(historyList([entry()]));
+		const gitLineHistoryList = vi
+			.fn()
+			.mockResolvedValue(historyList([entry({ sha: SHA_B })]));
+		const controller = new PlainGitHistoryController(
+			fakeBridge({ gitFileHistory, gitLineHistoryList }),
+		);
+		await controller.loadFileHistory("src/visible.ts");
+		await controller.loadLineHistory("src/visible.ts", { start: 7, end: 9 });
+		gitFileHistory.mockClear();
+		gitLineHistoryList.mockClear();
+
+		await controller.refreshLoadedHistory();
+
+		expect(gitFileHistory).toHaveBeenCalledOnce();
+		expect(gitFileHistory).toHaveBeenCalledWith("src/visible.ts");
+		expect(gitLineHistoryList).toHaveBeenCalledOnce();
+		expect(gitLineHistoryList).toHaveBeenCalledWith("src/visible.ts", {
+			start: 7,
+			end: 9,
+		});
+	});
+});

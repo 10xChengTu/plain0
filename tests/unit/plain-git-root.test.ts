@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
 	bindPlainGitBridge,
+	gitUpstreamDisplayName,
 	PlainGitRootSelection,
 	plainGitRootsFromWorkspaceFolders,
 	type PlainGitWorkspaceRoot,
@@ -67,6 +68,15 @@ describe("plainGitRootsFromWorkspaceFolders", () => {
 				folder("duplicate", ROOT_A),
 			]),
 		).toEqual([]);
+	});
+});
+
+describe("gitUpstreamDisplayName", () => {
+	it("shortens a remote-tracking ref without rewriting another namespace", () => {
+		expect(gitUpstreamDisplayName("refs/remotes/origin/main")).toBe(
+			"origin/main",
+		);
+		expect(gitUpstreamDisplayName("refs/heads/main")).toBe("refs/heads/main");
 	});
 });
 

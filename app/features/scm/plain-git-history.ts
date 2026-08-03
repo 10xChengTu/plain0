@@ -142,6 +142,19 @@ export class PlainGitHistoryController {
 		this.#lineHistory = EMPTY_HISTORY_LIST;
 	}
 
+	/** Re-reads whichever file/line queries are currently visible after a
+	 * product-level Git invalidation. Empty panes stay empty and cause no IPC. */
+	async refreshLoadedHistory(): Promise<void> {
+		const requests: Promise<unknown>[] = [];
+		if (this.#fileHistoryPath !== undefined) {
+			requests.push(this.loadFileHistory(this.#fileHistoryPath));
+		}
+		if (this.#linePath !== undefined && this.#lineRange !== undefined) {
+			requests.push(this.loadLineHistory(this.#linePath, this.#lineRange));
+		}
+		await Promise.all(requests);
+	}
+
 	async openLineHistoryDetail(index: number): Promise<GitLineHistoryDetail> {
 		if (this.#linePath === undefined || this.#lineRange === undefined) {
 			throw new Error(
