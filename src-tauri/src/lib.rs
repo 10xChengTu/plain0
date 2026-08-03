@@ -7,6 +7,7 @@ pub mod git;
 pub mod lifecycle;
 pub mod path_policy;
 pub mod recent;
+pub mod scratch;
 pub mod search;
 pub mod terminal;
 pub mod theme;
@@ -21,6 +22,7 @@ use error::CommandError;
 use git::network::GitNetworkService;
 use lifecycle::service::{CloseCoordinator, ExitDecision, WindowCloseDecision};
 use recent::service::WorkspaceHistoryService;
+use scratch::service::ScratchService;
 use terminal::service::TerminalService;
 use theme::service::ThemeService;
 use trust::service::TrustService;
@@ -66,6 +68,7 @@ pub fn run() {
             app.manage(WorkspaceService::new());
             app.manage(WorkspaceHistoryService::new(base_path.clone()));
             app.manage(BackupService::new(base_path.clone()));
+            app.manage(ScratchService::new(base_path.clone()));
             app.manage(ThemeService::new(base_path.clone()));
             app.manage(TrustService::new(base_path.clone()));
             app.manage(ConfirmationService::new(base_path.clone()));
@@ -98,6 +101,9 @@ pub fn run() {
                     .state::<WorkspaceService>()
                     .close_window(window.label());
                 window.state::<BackupService>().close_window(window.label());
+                window
+                    .state::<ScratchService>()
+                    .close_window(window.label());
                 window
                     .state::<TerminalService>()
                     .close_window(window.label());
@@ -173,6 +179,11 @@ pub fn run() {
             backup::commands::backup_read_all,
             backup::commands::backup_discard,
             backup::commands::backup_discard_all,
+            scratch::commands::scratch_create,
+            scratch::commands::scratch_write,
+            scratch::commands::scratch_read_all,
+            scratch::commands::scratch_discard,
+            scratch::commands::scratch_discard_all,
             lifecycle::commands::lifecycle_complete_close,
             lifecycle::commands::lifecycle_request_close,
             user_data::commands::user_data_read,

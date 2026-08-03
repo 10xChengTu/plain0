@@ -7,7 +7,7 @@ pub(crate) mod commands;
 pub mod dto;
 pub(crate) mod frame;
 pub(crate) mod service;
-mod store;
+pub(crate) mod store;
 
 /// Maximum byte length of a backup key's wire representation.
 pub(crate) const MAX_BACKUP_KEY_BYTES: usize = 128;

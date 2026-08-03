@@ -733,6 +733,16 @@ export interface BackupEntry {
 	readonly bytes: Uint8Array;
 }
 
+export interface ScratchCreateResult {
+	readonly scratchId: string;
+}
+
+/** One Rust-owned Untitled recovery entry. */
+export interface ScratchEntry {
+	readonly scratchId: string;
+	readonly bytes: Uint8Array;
+}
+
 /** The four upstream `ThemeTypeSelector` values a `contributes.themes[]`
  * entry's `uiTheme` may name — see `src-tauri/src/theme/manifest.rs`'s
  * `UiTheme` enum, whose `serde` renames these exact wire strings. */
@@ -1421,6 +1431,11 @@ export interface PlainBridge {
 	backupReadAll(): Promise<readonly BackupEntry[]>;
 	backupDiscard(rootId: string, key: string): Promise<void>;
 	backupDiscardAll(): Promise<void>;
+	scratchCreate(): Promise<ScratchCreateResult>;
+	scratchWrite(scratchId: string, bytes: Uint8Array): Promise<void>;
+	scratchReadAll(): Promise<readonly ScratchEntry[]>;
+	scratchDiscard(scratchId: string): Promise<void>;
+	scratchDiscardAll(): Promise<void>;
 	/** Prompts for a `.vsix` file via a native dialog and imports it. The
 	 * file dialog only ever opens from this explicit, user-triggered call —
 	 * never from startup or any implicit path. */

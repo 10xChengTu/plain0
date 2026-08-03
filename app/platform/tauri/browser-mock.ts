@@ -94,6 +94,10 @@ import {
 	frozenBackupWriteInputs,
 } from "./backup-codec";
 import {
+	frozenScratchDiscardRequest,
+	frozenScratchWriteInputs,
+} from "./scratch-codec";
+import {
 	decodeWorkspaceSearchTextStartResult,
 	frozenWorkspaceSearchFilesRequest,
 	frozenWorkspaceSearchFilesResult,
@@ -2469,6 +2473,8 @@ export function createBrowserMockBridge(
 		string,
 		Readonly<{ rootId: string; key: string; bytes: Uint8Array }>
 	>();
+	const scratchEntries = new Map<string, Uint8Array>();
+	let nextScratchOrdinal = 1;
 	const backupMapKey = (rootId: string, key: string): string =>
 		`${rootId}\0${key}`;
 	for (const seed of options.backupFixtureForTest ?? []) {
@@ -7060,6 +7066,32 @@ export function createBrowserMockBridge(
 					backupEntries.delete(mapKey);
 				}
 			}
+		},
+		async scratchCreate() {
+			const tail = nextScratchOrdinal.toString(16).padStart(12, "0");
+			nextScratchOrdinal += 1;
+			const scratchId = `00000000-0000-4000-8000-${tail}`;
+			return Object.freeze({ scratchId });
+		},
+		async scratchWrite(scratchId, bytes) {
+			const validated = frozenScratchWriteInputs(scratchId, bytes);
+			scratchEntries.set(validated.scratchId, validated.content);
+		},
+		async scratchReadAll() {
+			return Object.freeze(
+				[...scratchEntries]
+					.sort(([left], [right]) => left.localeCompare(right))
+					.map(([scratchId, bytes]) =>
+						Object.freeze({ scratchId, bytes: bytes.slice() }),
+					),
+			);
+		},
+		async scratchDiscard(scratchId) {
+			const request = frozenScratchDiscardRequest(scratchId);
+			scratchEntries.delete(request.scratchId);
+		},
+		async scratchDiscardAll() {
+			scratchEntries.clear();
 		},
 		async themeImportVsix() {
 			return themeImportFromScript();

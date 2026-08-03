@@ -103,6 +103,11 @@ function createFakeBridge(overrides: Partial<PlainBridge> = {}): {
 			state.discardAllCalls += 1;
 			state.entries.clear();
 		},
+		scratchCreate: notImplemented,
+		scratchWrite: notImplemented,
+		scratchReadAll: notImplemented,
+		scratchDiscard: notImplemented,
+		scratchDiscardAll: notImplemented,
 		themeImportVsix: notImplemented,
 		themeImportDirectory: notImplemented,
 		themeList: notImplemented,

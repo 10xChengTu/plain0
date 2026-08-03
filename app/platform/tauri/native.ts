@@ -30,6 +30,13 @@ import {
 	frozenBackupDiscardRequest,
 } from "./backup-codec";
 import {
+	decodeScratchCreateResult,
+	decodeScratchReadAllResult,
+	decodeScratchVoid,
+	encodeScratchWriteRequest,
+	frozenScratchDiscardRequest,
+} from "./scratch-codec";
+import {
 	decodeRuntimeInfo,
 	decodeWorkspaceCapabilities,
 	decodeWorkspaceEntryStat,
@@ -521,6 +528,31 @@ export function createNativeBridge(): PlainBridge {
 		backupDiscardAll: async () => {
 			decodeBackupVoid(
 				await invoke<unknown>("backup_discard_all", { request: {} }),
+			);
+		},
+		scratchCreate: async () =>
+			decodeScratchCreateResult(
+				await invoke<unknown>("scratch_create", { request: Object.freeze({}) }),
+			),
+		scratchWrite: async (scratchId, bytes) => {
+			const frame = encodeScratchWriteRequest(scratchId, bytes);
+			decodeScratchVoid(await invoke<unknown>("scratch_write", frame));
+		},
+		scratchReadAll: async () =>
+			decodeScratchReadAllResult(
+				await invoke<ArrayBuffer | number[]>("scratch_read_all", {
+					request: Object.freeze({}),
+				}),
+			),
+		scratchDiscard: async (scratchId) => {
+			const request = frozenScratchDiscardRequest(scratchId);
+			decodeScratchVoid(await invoke<unknown>("scratch_discard", { request }));
+		},
+		scratchDiscardAll: async () => {
+			decodeScratchVoid(
+				await invoke<unknown>("scratch_discard_all", {
+					request: Object.freeze({}),
+				}),
 			);
 		},
 		themeImportVsix: async () =>

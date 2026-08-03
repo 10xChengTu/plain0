@@ -313,6 +313,21 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async backupDiscardAll() {
 			throw new Error("unused");
 		},
+		async scratchCreate() {
+			throw new Error("unused");
+		},
+		async scratchWrite() {
+			throw new Error("unused");
+		},
+		async scratchReadAll() {
+			throw new Error("unused");
+		},
+		async scratchDiscard() {
+			throw new Error("unused");
+		},
+		async scratchDiscardAll() {
+			throw new Error("unused");
+		},
 		async themeImportVsix() {
 			throw new Error("unused");
 		},
