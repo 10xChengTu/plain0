@@ -149,6 +149,9 @@ import {
 	decodeGitContributorsListResult,
 	decodeGitDiffFilesResult,
 	decodeGitHistoryListResult,
+	decodeGitHistoryMutationOutcome,
+	decodeGitHistoryPreview,
+	decodeGitHistoryState,
 	decodeGitLineHistoryDetailResult,
 	decodeGitLogGraphResult,
 	decodeGitNetworkPreviewResult,
@@ -172,19 +175,27 @@ import {
 	frozenGitBranchDeleteRequest,
 	frozenGitBranchRenameRequest,
 	frozenGitBranchSwitchRequest,
+	frozenGitCherryPickRequest,
 	frozenGitCommitRequest,
 	frozenGitDiffFilesRequest,
 	frozenGitDiscardPathsRequest,
 	frozenGitFileHistoryRequest,
+	frozenGitHistoryAbortRequest,
+	frozenGitHistoryContinueRequest,
+	frozenGitHistoryPreviewRequest,
 	frozenGitLineHistoryDetailRequest,
 	frozenGitLineHistoryListRequest,
 	frozenGitLogGraphRequest,
+	frozenGitMergeRequest,
 	frozenGitNetworkPreviewRequest,
 	frozenGitPushRequest,
+	frozenGitRebaseRequest,
 	frozenGitRemoteAddRequest,
 	frozenGitRemoteRemoveRequest,
 	frozenGitRemoteRenameRequest,
 	frozenGitRemoteSetUrlRequest,
+	frozenGitResetRequest,
+	frozenGitRevertRequest,
 	frozenGitRootId,
 	frozenGitShowBlobRequest,
 	frozenGitShowCommitBlobRequest,
@@ -1127,6 +1138,94 @@ export function createNativeBridge(): PlainBridge {
 				await invoke<unknown>("git_upstream_unset", {
 					rootId: await resolveNativeGitRootId(rootId),
 					request,
+				}),
+			);
+		},
+		gitHistoryState: async (rootId) => {
+			return decodeGitHistoryState(
+				await invoke<unknown>("git_history_state", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request: {},
+				}),
+			);
+		},
+		gitHistoryPreview: async (operation, targetSha, rootId) => {
+			const request = frozenGitHistoryPreviewRequest(operation, targetSha);
+			return decodeGitHistoryPreview(
+				await invoke<unknown>("git_history_preview", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
+		},
+		gitMerge: async (targetSha, previewToken, rootId) => {
+			const request = frozenGitMergeRequest(targetSha, previewToken);
+			return decodeGitHistoryMutationOutcome(
+				await invoke<unknown>("git_merge", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
+		},
+		gitRebase: async (targetSha, previewToken, rootId) => {
+			const request = frozenGitRebaseRequest(targetSha, previewToken);
+			return decodeGitHistoryMutationOutcome(
+				await invoke<unknown>("git_rebase", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
+		},
+		gitCherryPick: async (targetSha, previewToken, rootId) => {
+			const request = frozenGitCherryPickRequest(targetSha, previewToken);
+			return decodeGitHistoryMutationOutcome(
+				await invoke<unknown>("git_cherry_pick", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
+		},
+		gitRevert: async (targetSha, previewToken, rootId) => {
+			const request = frozenGitRevertRequest(targetSha, previewToken);
+			return decodeGitHistoryMutationOutcome(
+				await invoke<unknown>("git_revert", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
+		},
+		gitReset: async (targetSha, mode, previewToken, rootId) => {
+			const request = frozenGitResetRequest(targetSha, mode, previewToken);
+			return decodeGitHistoryMutationOutcome(
+				await invoke<unknown>("git_reset", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
+		},
+		gitHistoryContinue: async (kind, rootId) => {
+			const request = frozenGitHistoryContinueRequest(kind);
+			return decodeGitHistoryMutationOutcome(
+				await invoke<unknown>("git_history_continue", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
+		},
+		gitHistoryAbort: async (kind, rootId) => {
+			const request = frozenGitHistoryAbortRequest(kind);
+			return decodeGitHistoryMutationOutcome(
+				await invoke<unknown>("git_history_abort", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
+		},
+		gitHistoryCancel: async (rootId) => {
+			decodeGitVoid(
+				await invoke<unknown>("git_history_cancel", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request: {},
 				}),
 			);
 		},

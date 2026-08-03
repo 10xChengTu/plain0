@@ -10671,6 +10671,31 @@ describe("Plain F080 S1 git command registration Harness", () => {
 		);
 	});
 
+	it("fails if the history cancel command is missing from generate_handler", () => {
+		const missingRegistration = withMutatedGitCommandSource(
+			"src-tauri/src/lib.rs",
+			(source) =>
+				source.replace("            git::commands::git_history_cancel,\n", ""),
+		);
+		expect(validateGitCommandRegistration(missingRegistration)).toContain(
+			"generate_handler! must register git::commands::git_history_cancel exactly once",
+		);
+	});
+
+	it("fails if git_reset ignores the DTO-selected reset mode", () => {
+		const rewired = withMutatedGitCommandSource(
+			"src-tauri/src/git/commands.rs",
+			(source) =>
+				source.replace(
+					"        window.label(),\n        operation,\n        &target_sha,\n        &preview_token,",
+					"        window.label(),\n        HistoryOperation::ResetHard,\n        &target_sha,\n        &preview_token,",
+				),
+		);
+		expect(validateGitCommandRegistration(rewired)).toContain(
+			"git_reset must contain only its audited DTO decode and single service route",
+		);
+	});
+
 	it("fails if a git command file is missing entirely", () => {
 		const missingFile = baselineGitCommandRustSources.filter(
 			(entry) => entry.relativePath !== "src-tauri/src/git/commands.rs",
@@ -10803,6 +10828,10 @@ describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
 		new URL("../../src-tauri/src/git/management.rs", import.meta.url),
 		"utf8",
 	);
+	const gitHistoryOperationSourceForRustBoundary = readFileSync(
+		new URL("../../src-tauri/src/git/history_operation.rs", import.meta.url),
+		"utf8",
+	);
 
 	const baselineGitRustSources = Object.freeze([
 		{ relativePath: "src-tauri/src/git/status.rs", source: gitStatusSource },
@@ -10846,6 +10875,10 @@ describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
 		{
 			relativePath: "src-tauri/src/git/management.rs",
 			source: gitManagementSourceForRustBoundary,
+		},
+		{
+			relativePath: "src-tauri/src/git/history_operation.rs",
+			source: gitHistoryOperationSourceForRustBoundary,
 		},
 	]);
 
@@ -11456,6 +11489,62 @@ describe("Plain F080 S1+S3 git Rust args/DTO boundary Harness", () => {
 			"F180 management request/outcome DTOs must expose only their exact audited fields and variants",
 		);
 	});
+
+	it("fails if history preview stops hashing the tracked worktree diff", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/history_operation.rs",
+			(source) =>
+				source.replace(
+					"    digest.update(worktree_diff);\n",
+					"    let _ = worktree_diff;\n",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"history operations must consume a full-diff preview token, serialize per root/window, bind cancellation, reread outcome state, and verify Continue/Abort kind",
+		);
+	});
+
+	it("fails if history mutation no longer consumes the recomputed preview token", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/history_operation.rs",
+			(source) =>
+				source.replace(
+					"        if current.preview_token != expected_preview_token {",
+					"        if false {",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"history operations must consume a full-diff preview token, serialize per root/window, bind cancellation, reread outcome state, and verify Continue/Abort kind",
+		);
+	});
+
+	it("fails if history Continue stops verifying the current sequencer kind", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/history_operation.rs",
+			(source) =>
+				source.replace(
+					"        if actual != expected_kind {",
+					"        if false {",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"history operations must consume a full-diff preview token, serialize per root/window, bind cancellation, reread outcome state, and verify Continue/Abort kind",
+		);
+	});
+
+	it("fails if a history request DTO gains a generic argv field", () => {
+		const mutated = withMutatedGitRustSource(
+			"src-tauri/src/git/dto.rs",
+			(source) =>
+				source.replace(
+					"pub struct GitResetRequest {\n    target_sha: String,\n    mode: GitResetModeRequest,\n    preview_token: String,\n}",
+					"pub struct GitResetRequest {\n    target_sha: String,\n    mode: GitResetModeRequest,\n    preview_token: String,\n    args: Vec<String>,\n}",
+				),
+		);
+		expect(validateGitRustBoundary(mutated)).toContain(
+			"F180 history operation request/state/preview/outcome DTOs must expose only their exact audited fields and variants",
+		);
+	});
 });
 
 describe("Plain F090 S0 git blame hardening args Harness", () => {
@@ -11902,7 +11991,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the forty-six audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifty-six audited git methods, no more and no fewer",
 		);
 	});
 
@@ -11918,7 +12007,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
 		).toContain(
-			"PlainBridge must expose exactly the forty-six audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifty-six audited git methods, no more and no fewer",
 		);
 	});
 
@@ -12010,7 +12099,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the forty-six audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifty-six audited git methods, no more and no fewer",
 		);
 	});
 
@@ -12067,7 +12156,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the forty-six audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifty-six audited git methods, no more and no fewer",
 		);
 	});
 
@@ -12083,7 +12172,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the forty-six audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifty-six audited git methods, no more and no fewer",
 		);
 	});
 
@@ -12116,6 +12205,54 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
 		).toContain(
 			"native.ts must invoke git_network_preview exactly once, routed through frozenGitNetworkPreviewRequest and decoded through decodeGitNetworkPreviewResult",
+		);
+	});
+
+	it("fails if PlainBridge loses the F180 history preview method", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/contracts.ts",
+			(source) =>
+				source.replace(
+					/\tgitHistoryPreview\([\s\S]*?\n\t\): Promise<GitHistoryPreview>;\n/,
+					"",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"PlainBridge must expose exactly the fifty-six audited git methods, no more and no fewer",
+		);
+	});
+
+	it("fails if native history reset bypasses its frozen request", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					"const request = frozenGitResetRequest(targetSha, mode, previewToken);",
+					"const request = { targetSha, mode, previewToken };",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"native.ts must invoke git_reset exactly once through its audited request and decodeGitHistoryMutationOutcome",
+		);
+	});
+
+	it("fails if history outcomes stop passing through their strict decoder", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/git-codec.ts",
+			(source) =>
+				source.replace(
+					/export function decodeGitHistoryMutationOutcome\([\s\S]*?\n\}\n\n\/\/ --- F090 S4:/,
+					"export function decodeGitHistoryMutationOutcome(value) { return value; }\n\n// --- F090 S4:",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"git-codec.ts's decodeGitHistoryMutationOutcome must validate exact own-data keys, reject Proxy wrapping, and freeze its result",
 		);
 	});
 
@@ -12157,7 +12294,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the forty-six audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifty-six audited git methods, no more and no fewer",
 		);
 	});
 
@@ -12173,7 +12310,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the forty-six audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifty-six audited git methods, no more and no fewer",
 		);
 	});
 

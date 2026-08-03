@@ -97,6 +97,36 @@ export function bindPlainGitBridge(bridge: PlainBridge, rootId: string) {
 			bridge.gitUpstreamSet(branch, upstream, rootId),
 		gitUpstreamUnset: (branch: string) =>
 			bridge.gitUpstreamUnset(branch, rootId),
+		gitHistoryState: () => bridge.gitHistoryState(rootId),
+		gitHistoryPreview: (
+			operation:
+				| "merge"
+				| "rebase"
+				| "cherryPick"
+				| "revert"
+				| "resetSoft"
+				| "resetMixed"
+				| "resetHard",
+			targetSha: string,
+		) => bridge.gitHistoryPreview(operation, targetSha, rootId),
+		gitMerge: (targetSha: string, previewToken: string) =>
+			bridge.gitMerge(targetSha, previewToken, rootId),
+		gitRebase: (targetSha: string, previewToken: string) =>
+			bridge.gitRebase(targetSha, previewToken, rootId),
+		gitCherryPick: (targetSha: string, previewToken: string) =>
+			bridge.gitCherryPick(targetSha, previewToken, rootId),
+		gitRevert: (targetSha: string, previewToken: string) =>
+			bridge.gitRevert(targetSha, previewToken, rootId),
+		gitReset: (
+			targetSha: string,
+			mode: "soft" | "mixed" | "hard",
+			previewToken: string,
+		) => bridge.gitReset(targetSha, mode, previewToken, rootId),
+		gitHistoryContinue: (kind: "merge" | "rebase" | "cherryPick" | "revert") =>
+			bridge.gitHistoryContinue(kind, rootId),
+		gitHistoryAbort: (kind: "merge" | "rebase" | "cherryPick" | "revert") =>
+			bridge.gitHistoryAbort(kind, rootId),
+		gitHistoryCancel: () => bridge.gitHistoryCancel(rootId),
 		gitStashList: () => bridge.gitStashList(rootId),
 		gitStashShow: (sha: string) => bridge.gitStashShow(sha, rootId),
 		gitStashPush: (message: string, includeUntracked: boolean) =>

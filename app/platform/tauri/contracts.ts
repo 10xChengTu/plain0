@@ -1284,6 +1284,57 @@ export type GitRemoteUrlKind = "fetch" | "push";
  * confirmation. */
 export type GitBranchDeleteOutcome = "deleted" | "needsForce";
 
+// --- F180 S3 history mutation authority -----------------------------------
+
+export type GitHistoryOperation =
+	| "merge"
+	| "rebase"
+	| "cherryPick"
+	| "revert"
+	| "resetSoft"
+	| "resetMixed"
+	| "resetHard";
+
+export type GitResetMode = "soft" | "mixed" | "hard";
+export type GitSequencerKind = "merge" | "rebase" | "cherryPick" | "revert";
+
+export interface GitSequencerState {
+	readonly kind: GitSequencerKind;
+	readonly conflictedPaths: readonly string[];
+	readonly pathsTruncated: boolean;
+}
+
+export interface GitHistoryState {
+	readonly headSha: string;
+	readonly sequencer: GitSequencerState | null;
+}
+
+/** A Rust-authoritative, bounded preview. `previewToken` binds the operation,
+ * target, HEAD, porcelain status, tracked worktree diff, staged diff and
+ * current sequencer state; every mutation recomputes and consumes it before
+ * invoking Git, so a changed repository fails closed as stale. */
+export interface GitHistoryPreview {
+	readonly operation: GitHistoryOperation;
+	readonly targetSha: string;
+	readonly headSha: string;
+	readonly ahead: number;
+	readonly behind: number;
+	readonly workingTreePaths: readonly string[];
+	readonly stagedPaths: readonly string[];
+	readonly conflictedPaths: readonly string[];
+	readonly pathsTruncated: boolean;
+	readonly sequencer: GitSequencerState | null;
+	readonly previewToken: string;
+}
+
+export type GitHistoryMutationOutcomeKind =
+	"completed" | "conflicts" | "stopped" | "cancelled";
+
+export interface GitHistoryMutationOutcome {
+	readonly kind: GitHistoryMutationOutcomeKind;
+	readonly state: GitHistoryState;
+}
+
 // --- Git stash (F090 S4: `git::stash`) ---------------------------------------
 
 /**
@@ -1970,6 +2021,56 @@ export interface PlainBridge {
 		rootId?: string,
 	): Promise<void>;
 	gitUpstreamUnset(branch: string, rootId?: string): Promise<void>;
+	/** Reads the exact current HEAD and merge/rebase/cherry-pick/revert
+	 * sequencer state. No native repository path crosses the bridge. */
+	gitHistoryState(rootId?: string): Promise<GitHistoryState>;
+	/** Computes the mandatory pre-write state and opaque state-binding token
+	 * for one exact lowercase hex40 target commit. */
+	gitHistoryPreview(
+		operation: GitHistoryOperation,
+		targetSha: string,
+		rootId?: string,
+	): Promise<GitHistoryPreview>;
+	gitMerge(
+		targetSha: string,
+		previewToken: string,
+		rootId?: string,
+	): Promise<GitHistoryMutationOutcome>;
+	gitRebase(
+		targetSha: string,
+		previewToken: string,
+		rootId?: string,
+	): Promise<GitHistoryMutationOutcome>;
+	gitCherryPick(
+		targetSha: string,
+		previewToken: string,
+		rootId?: string,
+	): Promise<GitHistoryMutationOutcome>;
+	gitRevert(
+		targetSha: string,
+		previewToken: string,
+		rootId?: string,
+	): Promise<GitHistoryMutationOutcome>;
+	gitReset(
+		targetSha: string,
+		mode: GitResetMode,
+		previewToken: string,
+		rootId?: string,
+	): Promise<GitHistoryMutationOutcome>;
+	/** Continue/Abort accept the caller's observed kind, but Rust re-reads and
+	 * requires that exact current kind before spawning a fixed command. */
+	gitHistoryContinue(
+		kind: GitSequencerKind,
+		rootId?: string,
+	): Promise<GitHistoryMutationOutcome>;
+	gitHistoryAbort(
+		kind: GitSequencerKind,
+		rootId?: string,
+	): Promise<GitHistoryMutationOutcome>;
+	/** Cooperative cancellation only terminates the current process. The
+	 * mutation promise returns a fresh authoritative state and never claims
+	 * cancellation rolled the repository back. */
+	gitHistoryCancel(rootId?: string): Promise<void>;
 	/** `F090` S4: `git stash list -z --format=%gd%x1f%H%x1f%ct%x1f%B` — the
 	 * stash panel's own data source, newest first. Takes no parameters. Same
 	 * trust/repository rejections as `gitStatus`. */

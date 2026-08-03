@@ -2,14 +2,20 @@ use super::{
     GitBlobRevWire, GitBranchCreateRequest, GitBranchDeleteOutcomeWire, GitBranchDeleteRequest,
     GitBranchRenameRequest, GitBranchSwitchRequest, GitCommitRequest, GitContributorsListRequest,
     GitContributorsListResultWire, GitDiffFilesRequest, GitDiffFilesResult, GitDiscardPathsRequest,
-    GitReflogListRequest, GitReflogListResultWire, GitRemoteAddRequest, GitRemoteRemoveRequest,
-    GitRemoteRenameRequest, GitRemoteSetUrlRequest, GitRemotesListRequest,
-    GitRemotesListResultWire, GitShowBlobRequest, GitShowBlobResult, GitStageBlobRequest,
-    GitStagePathsRequest, GitStatusResult, GitTagCreateRequest, GitTagDeleteRequest,
-    GitUnstagePathsRequest, GitUpstreamSetRequest, GitUpstreamUnsetRequest,
+    GitHistoryAbortRequest, GitHistoryContinueRequest, GitHistoryMutationOutcomeWire,
+    GitHistoryPreviewRequest, GitHistoryPreviewResultWire, GitMergeRequest, GitReflogListRequest,
+    GitReflogListResultWire, GitRemoteAddRequest, GitRemoteRemoveRequest, GitRemoteRenameRequest,
+    GitRemoteSetUrlRequest, GitRemotesListRequest, GitRemotesListResultWire, GitResetRequest,
+    GitShowBlobRequest, GitShowBlobResult, GitStageBlobRequest, GitStagePathsRequest,
+    GitStatusResult, GitTagCreateRequest, GitTagDeleteRequest, GitUnstagePathsRequest,
+    GitUpstreamSetRequest, GitUpstreamUnsetRequest,
 };
 use crate::git::contributors::{ContributorEntry, ContributorList};
 use crate::git::diff::{DiffFileEntry, DiffStatusKind};
+use crate::git::history_operation::{
+    HistoryMutationOutcome, HistoryMutationOutcomeKind, HistoryOperation, HistoryPreview,
+    HistoryState, SequencerKind, SequencerState,
+};
 use crate::git::management::{BranchDeleteOutcome, RemoteUrlKind};
 use crate::git::reflog::{ReflogEntry, ReflogList};
 use crate::git::remote::{RemoteEntry, RemoteList};
@@ -600,5 +606,116 @@ fn git_branch_delete_outcome_serializes_as_the_exact_camel_case_string() {
         ))
         .unwrap(),
         serde_json::json!("needsForce")
+    );
+}
+
+#[test]
+fn git_history_requests_are_exact_bounded_and_convert_to_domain_enums() {
+    let sha = "a".repeat(40);
+    let token = "b".repeat(64);
+    let preview: GitHistoryPreviewRequest = serde_json::from_value(serde_json::json!({
+        "operation": "resetHard",
+        "targetSha": sha
+    }))
+    .unwrap();
+    assert_eq!(
+        preview.into_parts().unwrap(),
+        (HistoryOperation::ResetHard, "a".repeat(40))
+    );
+    let merge: GitMergeRequest = serde_json::from_value(serde_json::json!({
+        "targetSha": "a".repeat(40),
+        "previewToken": token
+    }))
+    .unwrap();
+    assert_eq!(
+        merge.into_parts().unwrap(),
+        ("a".repeat(40), "b".repeat(64))
+    );
+    let reset: GitResetRequest = serde_json::from_value(serde_json::json!({
+        "targetSha": "a".repeat(40),
+        "mode": "mixed",
+        "previewToken": "b".repeat(64)
+    }))
+    .unwrap();
+    assert_eq!(
+        reset.into_parts().unwrap(),
+        (HistoryOperation::ResetMixed, "a".repeat(40), "b".repeat(64))
+    );
+    let continuation: GitHistoryContinueRequest =
+        serde_json::from_value(serde_json::json!({ "kind": "cherryPick" })).unwrap();
+    assert_eq!(continuation.into_parts(), SequencerKind::CherryPick);
+    let abort: GitHistoryAbortRequest =
+        serde_json::from_value(serde_json::json!({ "kind": "rebase" })).unwrap();
+    assert_eq!(abort.into_parts(), SequencerKind::Rebase);
+
+    let bad_token: GitMergeRequest = serde_json::from_value(serde_json::json!({
+        "targetSha": "a".repeat(40),
+        "previewToken": "B".repeat(64)
+    }))
+    .unwrap();
+    assert_eq!(
+        bad_token.into_parts().unwrap_err().code(),
+        "GIT_HISTORY_MUTATION_INVALID_REQUEST"
+    );
+    assert!(
+        serde_json::from_value::<GitHistoryPreviewRequest>(serde_json::json!({
+            "operation": "merge",
+            "targetSha": "a".repeat(40),
+            "extra": true
+        }))
+        .is_err()
+    );
+}
+
+#[test]
+fn git_history_preview_and_outcome_serialize_with_exact_camel_case_shapes() {
+    let sequencer = SequencerState {
+        kind: SequencerKind::Merge,
+        conflicted_paths: vec![GitPathBuf::from_bytes(b"conflict.txt".to_vec())],
+        paths_truncated: false,
+    };
+    let preview = GitHistoryPreviewResultWire::from(HistoryPreview {
+        operation: HistoryOperation::Merge,
+        target_sha: "a".repeat(40),
+        head_sha: "b".repeat(40),
+        ahead: 2,
+        behind: 1,
+        working_tree_paths: vec![GitPathBuf::from_bytes(b"working.txt".to_vec())],
+        staged_paths: vec![GitPathBuf::from_bytes(b"staged.txt".to_vec())],
+        conflicted_paths: vec![GitPathBuf::from_bytes(b"conflict.txt".to_vec())],
+        paths_truncated: false,
+        sequencer: Some(sequencer.clone()),
+        preview_token: "c".repeat(64),
+    });
+    let value = serde_json::to_value(preview).unwrap();
+    assert_eq!(value["operation"], "merge");
+    assert_eq!(
+        value["workingTreePaths"],
+        serde_json::json!(["working.txt"])
+    );
+    assert_eq!(value["sequencer"]["kind"], "merge");
+    assert_eq!(value["previewToken"], "c".repeat(64));
+    assert!(value.get("preview_token").is_none());
+
+    let outcome = GitHistoryMutationOutcomeWire::from(HistoryMutationOutcome {
+        kind: HistoryMutationOutcomeKind::Conflicts,
+        state: HistoryState {
+            head_sha: "b".repeat(40),
+            sequencer: Some(sequencer),
+        },
+    });
+    assert_eq!(
+        serde_json::to_value(outcome).unwrap(),
+        serde_json::json!({
+            "kind": "conflicts",
+            "state": {
+                "headSha": "b".repeat(40),
+                "sequencer": {
+                    "kind": "merge",
+                    "conflictedPaths": ["conflict.txt"],
+                    "pathsTruncated": false
+                }
+            }
+        })
     );
 }

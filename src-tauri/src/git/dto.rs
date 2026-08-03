@@ -14,6 +14,10 @@ use crate::error::CommandError;
 use super::blame::{BlameCommitHeader, BlameLineRange, BlameResult, BLAME_UNCOMMITTED_SHA};
 use super::contributors::{ContributorEntry, ContributorList};
 use super::diff::{DiffFileEntry, DiffStatusKind, GitBlobRev};
+use super::history_operation::{
+    HistoryMutationOutcome, HistoryMutationOutcomeKind, HistoryOperation, HistoryPreview,
+    HistoryState, SequencerKind, SequencerState,
+};
 use super::log::{GraphList, GraphNode, HistoryEntry, HistoryList, LineHistoryDetail, LineRange};
 use super::management::{BranchDeleteOutcome, RemoteUrlKind};
 use super::network::NetworkOperation;
@@ -1622,6 +1626,375 @@ impl GitUpstreamUnsetRequest {
             return Err(git_upstream_management_invalid_request());
         }
         Ok(self.branch)
+    }
+}
+
+// --- F180 S3 history mutation authority -----------------------------------
+
+fn git_history_preview_invalid_request() -> CommandError {
+    CommandError::new(
+        "GIT_HISTORY_PREVIEW_INVALID_REQUEST",
+        "The Git history preview request is invalid.",
+    )
+}
+
+fn git_history_mutation_invalid_request() -> CommandError {
+    CommandError::new(
+        "GIT_HISTORY_MUTATION_INVALID_REQUEST",
+        "The Git history mutation request is invalid.",
+    )
+}
+
+fn history_preview_token_is_valid(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitHistoryOperationWire {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+    ResetSoft,
+    ResetMixed,
+    ResetHard,
+}
+
+impl From<GitHistoryOperationWire> for HistoryOperation {
+    fn from(value: GitHistoryOperationWire) -> Self {
+        match value {
+            GitHistoryOperationWire::Merge => Self::Merge,
+            GitHistoryOperationWire::Rebase => Self::Rebase,
+            GitHistoryOperationWire::CherryPick => Self::CherryPick,
+            GitHistoryOperationWire::Revert => Self::Revert,
+            GitHistoryOperationWire::ResetSoft => Self::ResetSoft,
+            GitHistoryOperationWire::ResetMixed => Self::ResetMixed,
+            GitHistoryOperationWire::ResetHard => Self::ResetHard,
+        }
+    }
+}
+
+impl From<HistoryOperation> for GitHistoryOperationWire {
+    fn from(value: HistoryOperation) -> Self {
+        match value {
+            HistoryOperation::Merge => Self::Merge,
+            HistoryOperation::Rebase => Self::Rebase,
+            HistoryOperation::CherryPick => Self::CherryPick,
+            HistoryOperation::Revert => Self::Revert,
+            HistoryOperation::ResetSoft => Self::ResetSoft,
+            HistoryOperation::ResetMixed => Self::ResetMixed,
+            HistoryOperation::ResetHard => Self::ResetHard,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitSequencerKindWire {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+}
+
+impl From<GitSequencerKindWire> for SequencerKind {
+    fn from(value: GitSequencerKindWire) -> Self {
+        match value {
+            GitSequencerKindWire::Merge => Self::Merge,
+            GitSequencerKindWire::Rebase => Self::Rebase,
+            GitSequencerKindWire::CherryPick => Self::CherryPick,
+            GitSequencerKindWire::Revert => Self::Revert,
+        }
+    }
+}
+
+impl From<SequencerKind> for GitSequencerKindWire {
+    fn from(value: SequencerKind) -> Self {
+        match value {
+            SequencerKind::Merge => Self::Merge,
+            SequencerKind::Rebase => Self::Rebase,
+            SequencerKind::CherryPick => Self::CherryPick,
+            SequencerKind::Revert => Self::Revert,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum GitResetModeRequest {
+    Soft,
+    Mixed,
+    Hard,
+}
+
+impl From<GitResetModeRequest> for HistoryOperation {
+    fn from(value: GitResetModeRequest) -> Self {
+        match value {
+            GitResetModeRequest::Soft => Self::ResetSoft,
+            GitResetModeRequest::Mixed => Self::ResetMixed,
+            GitResetModeRequest::Hard => Self::ResetHard,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHistoryStateRequest {}
+
+impl GitHistoryStateRequest {
+    pub const fn validate(self) {}
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitHistoryPreviewRequest {
+    operation: GitHistoryOperationWire,
+    target_sha: String,
+}
+
+impl GitHistoryPreviewRequest {
+    pub(crate) fn into_parts(self) -> Result<(HistoryOperation, String), CommandError> {
+        if !management_sha_is_valid(&self.target_sha) {
+            return Err(git_history_preview_invalid_request());
+        }
+        Ok((self.operation.into(), self.target_sha))
+    }
+}
+
+fn history_target_parts(
+    target_sha: String,
+    preview_token: String,
+) -> Result<(String, String), CommandError> {
+    if !management_sha_is_valid(&target_sha) || !history_preview_token_is_valid(&preview_token) {
+        return Err(git_history_mutation_invalid_request());
+    }
+    Ok((target_sha, preview_token))
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitMergeRequest {
+    target_sha: String,
+    preview_token: String,
+}
+
+impl GitMergeRequest {
+    pub(crate) fn into_parts(self) -> Result<(String, String), CommandError> {
+        history_target_parts(self.target_sha, self.preview_token)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitRebaseRequest {
+    target_sha: String,
+    preview_token: String,
+}
+
+impl GitRebaseRequest {
+    pub(crate) fn into_parts(self) -> Result<(String, String), CommandError> {
+        history_target_parts(self.target_sha, self.preview_token)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitCherryPickRequest {
+    target_sha: String,
+    preview_token: String,
+}
+
+impl GitCherryPickRequest {
+    pub(crate) fn into_parts(self) -> Result<(String, String), CommandError> {
+        history_target_parts(self.target_sha, self.preview_token)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitRevertRequest {
+    target_sha: String,
+    preview_token: String,
+}
+
+impl GitRevertRequest {
+    pub(crate) fn into_parts(self) -> Result<(String, String), CommandError> {
+        history_target_parts(self.target_sha, self.preview_token)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitResetRequest {
+    target_sha: String,
+    mode: GitResetModeRequest,
+    preview_token: String,
+}
+
+impl GitResetRequest {
+    pub(crate) fn into_parts(self) -> Result<(HistoryOperation, String, String), CommandError> {
+        if !management_sha_is_valid(&self.target_sha)
+            || !history_preview_token_is_valid(&self.preview_token)
+        {
+            return Err(git_history_mutation_invalid_request());
+        }
+        Ok((self.mode.into(), self.target_sha, self.preview_token))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHistoryContinueRequest {
+    kind: GitSequencerKindWire,
+}
+
+impl GitHistoryContinueRequest {
+    pub(crate) fn into_parts(self) -> SequencerKind {
+        self.kind.into()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHistoryAbortRequest {
+    kind: GitSequencerKindWire,
+}
+
+impl GitHistoryAbortRequest {
+    pub(crate) fn into_parts(self) -> SequencerKind {
+        self.kind.into()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHistoryCancelRequest {}
+
+impl GitHistoryCancelRequest {
+    pub const fn validate(self) {}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitSequencerStateWire {
+    kind: GitSequencerKindWire,
+    conflicted_paths: Vec<String>,
+    paths_truncated: bool,
+}
+
+impl From<SequencerState> for GitSequencerStateWire {
+    fn from(value: SequencerState) -> Self {
+        Self {
+            kind: value.kind.into(),
+            conflicted_paths: value
+                .conflicted_paths
+                .into_iter()
+                .map(|path| path.to_wire_lossy())
+                .collect(),
+            paths_truncated: value.paths_truncated,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHistoryStateResultWire {
+    head_sha: String,
+    sequencer: Option<GitSequencerStateWire>,
+}
+
+impl From<HistoryState> for GitHistoryStateResultWire {
+    fn from(value: HistoryState) -> Self {
+        Self {
+            head_sha: value.head_sha,
+            sequencer: value.sequencer.map(GitSequencerStateWire::from),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHistoryPreviewResultWire {
+    operation: GitHistoryOperationWire,
+    target_sha: String,
+    head_sha: String,
+    ahead: u64,
+    behind: u64,
+    working_tree_paths: Vec<String>,
+    staged_paths: Vec<String>,
+    conflicted_paths: Vec<String>,
+    paths_truncated: bool,
+    sequencer: Option<GitSequencerStateWire>,
+    preview_token: String,
+}
+
+impl From<HistoryPreview> for GitHistoryPreviewResultWire {
+    fn from(value: HistoryPreview) -> Self {
+        Self {
+            operation: value.operation.into(),
+            target_sha: value.target_sha,
+            head_sha: value.head_sha,
+            ahead: value.ahead,
+            behind: value.behind,
+            working_tree_paths: value
+                .working_tree_paths
+                .into_iter()
+                .map(|path| path.to_wire_lossy())
+                .collect(),
+            staged_paths: value
+                .staged_paths
+                .into_iter()
+                .map(|path| path.to_wire_lossy())
+                .collect(),
+            conflicted_paths: value
+                .conflicted_paths
+                .into_iter()
+                .map(|path| path.to_wire_lossy())
+                .collect(),
+            paths_truncated: value.paths_truncated,
+            sequencer: value.sequencer.map(GitSequencerStateWire::from),
+            preview_token: value.preview_token,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitHistoryMutationOutcomeKindWire {
+    Completed,
+    Conflicts,
+    Stopped,
+    Cancelled,
+}
+
+impl From<HistoryMutationOutcomeKind> for GitHistoryMutationOutcomeKindWire {
+    fn from(value: HistoryMutationOutcomeKind) -> Self {
+        match value {
+            HistoryMutationOutcomeKind::Completed => Self::Completed,
+            HistoryMutationOutcomeKind::Conflicts => Self::Conflicts,
+            HistoryMutationOutcomeKind::Stopped => Self::Stopped,
+            HistoryMutationOutcomeKind::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHistoryMutationOutcomeWire {
+    kind: GitHistoryMutationOutcomeKindWire,
+    state: GitHistoryStateResultWire,
+}
+
+impl From<HistoryMutationOutcome> for GitHistoryMutationOutcomeWire {
+    fn from(value: HistoryMutationOutcome) -> Self {
+        Self {
+            kind: value.kind.into(),
+            state: value.state.into(),
+        }
     }
 }
 

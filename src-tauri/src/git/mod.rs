@@ -93,6 +93,7 @@ pub(crate) mod discard;
 pub(crate) mod discovery;
 pub mod dto;
 pub(crate) mod exec;
+pub(crate) mod history_operation;
 pub(crate) mod log;
 pub(crate) mod management;
 pub(crate) mod network;

@@ -528,6 +528,36 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async gitUpstreamUnset() {
 			throw new Error("unused");
 		},
+		async gitHistoryState() {
+			throw new Error("unused");
+		},
+		async gitHistoryPreview() {
+			throw new Error("unused");
+		},
+		async gitMerge() {
+			throw new Error("unused");
+		},
+		async gitRebase() {
+			throw new Error("unused");
+		},
+		async gitCherryPick() {
+			throw new Error("unused");
+		},
+		async gitRevert() {
+			throw new Error("unused");
+		},
+		async gitReset() {
+			throw new Error("unused");
+		},
+		async gitHistoryContinue() {
+			throw new Error("unused");
+		},
+		async gitHistoryAbort() {
+			throw new Error("unused");
+		},
+		async gitHistoryCancel() {
+			throw new Error("unused");
+		},
 		async gitStashList() {
 			throw new Error("unused");
 		},

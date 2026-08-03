@@ -17,6 +17,11 @@ import type {
 	GitGraphNode,
 	GitHistoryEntry,
 	GitHistoryListResult,
+	GitHistoryMutationOutcome,
+	GitHistoryMutationOutcomeKind,
+	GitHistoryOperation,
+	GitHistoryPreview,
+	GitHistoryState,
 	GitLineHistoryDetail,
 	GitLogGraphResult,
 	GitLogLineRange,
@@ -31,6 +36,9 @@ import type {
 	GitRemotesListResult,
 	GitRemoteUrlKind,
 	GitRenameOrCopyKind,
+	GitResetMode,
+	GitSequencerKind,
+	GitSequencerState,
 	GitShowBlobResult,
 	GitShowCommitResult,
 	GitStashApplyOutcome,
@@ -2083,6 +2091,298 @@ export function frozenGitUpstreamUnsetRequest(
 		return gitUpstreamManagementRequestInvalid();
 	}
 	return Object.freeze({ branch });
+}
+
+// --- F180 S3: history mutation authority ----------------------------------
+
+const GIT_HISTORY_OPERATIONS = new Set<GitHistoryOperation>([
+	"merge",
+	"rebase",
+	"cherryPick",
+	"revert",
+	"resetSoft",
+	"resetMixed",
+	"resetHard",
+]);
+const GIT_RESET_MODES = new Set<GitResetMode>(["soft", "mixed", "hard"]);
+const GIT_SEQUENCER_KINDS = new Set<GitSequencerKind>([
+	"merge",
+	"rebase",
+	"cherryPick",
+	"revert",
+]);
+const GIT_HISTORY_OUTCOME_KINDS = new Set<GitHistoryMutationOutcomeKind>([
+	"completed",
+	"conflicts",
+	"stopped",
+	"cancelled",
+]);
+const GIT_HISTORY_PREVIEW_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
+const MAX_GIT_HISTORY_PATHS = 256;
+
+function gitHistoryPreviewRequestInvalid(): never {
+	return requestViolation(
+		"GIT_HISTORY_PREVIEW_INVALID_REQUEST",
+		"The Git history preview request is invalid.",
+	);
+}
+
+function gitHistoryMutationRequestInvalid(): never {
+	return requestViolation(
+		"GIT_HISTORY_MUTATION_INVALID_REQUEST",
+		"The Git history mutation request is invalid.",
+	);
+}
+
+function validHistoryTargetRequest(
+	targetSha: unknown,
+	previewToken: unknown,
+): targetSha is string {
+	return (
+		isGitBlameSha(targetSha) &&
+		typeof previewToken === "string" &&
+		GIT_HISTORY_PREVIEW_TOKEN_PATTERN.test(previewToken)
+	);
+}
+
+export function frozenGitHistoryPreviewRequest(
+	operation: unknown,
+	targetSha: unknown,
+): Readonly<{ operation: GitHistoryOperation; targetSha: string }> {
+	if (
+		typeof operation !== "string" ||
+		!GIT_HISTORY_OPERATIONS.has(operation as GitHistoryOperation) ||
+		!isGitBlameSha(targetSha)
+	) {
+		return gitHistoryPreviewRequestInvalid();
+	}
+	return Object.freeze({
+		operation: operation as GitHistoryOperation,
+		targetSha,
+	});
+}
+
+function frozenHistoryTargetRequest(
+	targetSha: unknown,
+	previewToken: unknown,
+): Readonly<{ targetSha: string; previewToken: string }> {
+	if (!validHistoryTargetRequest(targetSha, previewToken)) {
+		return gitHistoryMutationRequestInvalid();
+	}
+	return Object.freeze({ targetSha, previewToken: previewToken as string });
+}
+
+export function frozenGitMergeRequest(
+	targetSha: unknown,
+	previewToken: unknown,
+): Readonly<{ targetSha: string; previewToken: string }> {
+	return frozenHistoryTargetRequest(targetSha, previewToken);
+}
+
+export function frozenGitRebaseRequest(
+	targetSha: unknown,
+	previewToken: unknown,
+): Readonly<{ targetSha: string; previewToken: string }> {
+	return frozenHistoryTargetRequest(targetSha, previewToken);
+}
+
+export function frozenGitCherryPickRequest(
+	targetSha: unknown,
+	previewToken: unknown,
+): Readonly<{ targetSha: string; previewToken: string }> {
+	return frozenHistoryTargetRequest(targetSha, previewToken);
+}
+
+export function frozenGitRevertRequest(
+	targetSha: unknown,
+	previewToken: unknown,
+): Readonly<{ targetSha: string; previewToken: string }> {
+	return frozenHistoryTargetRequest(targetSha, previewToken);
+}
+
+export function frozenGitResetRequest(
+	targetSha: unknown,
+	mode: unknown,
+	previewToken: unknown,
+): Readonly<{
+	targetSha: string;
+	mode: GitResetMode;
+	previewToken: string;
+}> {
+	if (
+		!validHistoryTargetRequest(targetSha, previewToken) ||
+		typeof mode !== "string" ||
+		!GIT_RESET_MODES.has(mode as GitResetMode)
+	) {
+		return gitHistoryMutationRequestInvalid();
+	}
+	return Object.freeze({
+		targetSha,
+		mode: mode as GitResetMode,
+		previewToken: previewToken as string,
+	});
+}
+
+function frozenHistorySequencerRequest(
+	kind: unknown,
+): Readonly<{ kind: GitSequencerKind }> {
+	if (
+		typeof kind !== "string" ||
+		!GIT_SEQUENCER_KINDS.has(kind as GitSequencerKind)
+	) {
+		return gitHistoryMutationRequestInvalid();
+	}
+	return Object.freeze({ kind: kind as GitSequencerKind });
+}
+
+export function frozenGitHistoryContinueRequest(
+	kind: unknown,
+): Readonly<{ kind: GitSequencerKind }> {
+	return frozenHistorySequencerRequest(kind);
+}
+
+export function frozenGitHistoryAbortRequest(
+	kind: unknown,
+): Readonly<{ kind: GitSequencerKind }> {
+	return frozenHistorySequencerRequest(kind);
+}
+
+function decodeGitHistoryPaths(value: unknown): readonly string[] {
+	return ownObjectArraySnapshot(value, MAX_GIT_HISTORY_PATHS, (path) => {
+		if (
+			typeof path !== "string" ||
+			path.length === 0 ||
+			path.length > MAX_GIT_PATH_CHARS
+		) {
+			return violation();
+		}
+		return path;
+	});
+}
+
+function decodeGitSequencerState(value: unknown): GitSequencerState {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, ["kind", "conflictedPaths", "pathsTruncated"]) ||
+		typeof value.kind !== "string" ||
+		!GIT_SEQUENCER_KINDS.has(value.kind as GitSequencerKind) ||
+		typeof value.pathsTruncated !== "boolean"
+	) {
+		return violation();
+	}
+	const result = {
+		kind: value.kind as GitSequencerKind,
+		conflictedPaths: decodeGitHistoryPaths(value.conflictedPaths),
+		pathsTruncated: value.pathsTruncated,
+	};
+	rejectProxyObject(value);
+	return Object.freeze(result);
+}
+
+function decodeGitHistoryStateValue(value: unknown): GitHistoryState {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, ["headSha", "sequencer"]) ||
+		!isGitBlameSha(value.headSha) ||
+		(value.sequencer !== null && !isPlainObject(value.sequencer))
+	) {
+		return violation();
+	}
+	const result = {
+		headSha: value.headSha,
+		sequencer:
+			value.sequencer === null
+				? null
+				: decodeGitSequencerState(value.sequencer),
+	};
+	rejectProxyObject(value);
+	return Object.freeze(result);
+}
+
+export function decodeGitHistoryState(value: unknown): GitHistoryState {
+	return sanitizedDecode(() => decodeGitHistoryStateValue(value));
+}
+
+export function decodeGitHistoryPreview(value: unknown): GitHistoryPreview {
+	return sanitizedDecode(() => {
+		if (
+			!isPlainObject(value) ||
+			!hasExactKeys(value, [
+				"operation",
+				"targetSha",
+				"headSha",
+				"ahead",
+				"behind",
+				"workingTreePaths",
+				"stagedPaths",
+				"conflictedPaths",
+				"pathsTruncated",
+				"sequencer",
+				"previewToken",
+			]) ||
+			typeof value.operation !== "string" ||
+			!GIT_HISTORY_OPERATIONS.has(value.operation as GitHistoryOperation) ||
+			!isGitBlameSha(value.targetSha) ||
+			!isGitBlameSha(value.headSha) ||
+			!isSafeNonNegativeInteger(value.ahead) ||
+			!isSafeNonNegativeInteger(value.behind) ||
+			typeof value.pathsTruncated !== "boolean" ||
+			(value.sequencer !== null && !isPlainObject(value.sequencer)) ||
+			typeof value.previewToken !== "string" ||
+			!GIT_HISTORY_PREVIEW_TOKEN_PATTERN.test(value.previewToken)
+		) {
+			return violation();
+		}
+		const result = {
+			operation: value.operation as GitHistoryOperation,
+			targetSha: value.targetSha,
+			headSha: value.headSha,
+			ahead: value.ahead,
+			behind: value.behind,
+			workingTreePaths: decodeGitHistoryPaths(value.workingTreePaths),
+			stagedPaths: decodeGitHistoryPaths(value.stagedPaths),
+			conflictedPaths: decodeGitHistoryPaths(value.conflictedPaths),
+			pathsTruncated: value.pathsTruncated,
+			sequencer:
+				value.sequencer === null
+					? null
+					: decodeGitSequencerState(value.sequencer),
+			previewToken: value.previewToken,
+		};
+		rejectProxyObject(value);
+		return Object.freeze(result);
+	});
+}
+
+export function decodeGitHistoryMutationOutcome(
+	value: unknown,
+): GitHistoryMutationOutcome {
+	return sanitizedDecode(() => {
+		if (
+			!isPlainObject(value) ||
+			!hasExactKeys(value, ["kind", "state"]) ||
+			typeof value.kind !== "string" ||
+			!GIT_HISTORY_OUTCOME_KINDS.has(
+				value.kind as GitHistoryMutationOutcomeKind,
+			)
+		) {
+			return violation();
+		}
+		const state = decodeGitHistoryStateValue(value.state);
+		const kind = value.kind as GitHistoryMutationOutcomeKind;
+		if (
+			(kind === "completed" && state.sequencer !== null) ||
+			(kind === "conflicts" &&
+				(state.sequencer === null ||
+					state.sequencer.conflictedPaths.length === 0)) ||
+			(kind === "stopped" && state.sequencer === null)
+		) {
+			return violation();
+		}
+		const result = { kind, state };
+		rejectProxyObject(value);
+		return Object.freeze(result);
+	});
 }
 
 // --- F090 S4: stash (`git::stash`) -------------------------------------------

@@ -52,7 +52,8 @@ pub(crate) enum GitExecMode {
     /// credential/SSH prompt are all disabled — see [`harden_background_read`].
     BackgroundRead,
     /// User-initiated writes (`F080` S3: stage/unstage/hunk-stage/commit/
-    /// discard). Unlike [`GitExecMode::BackgroundRead`], hooks and fsmonitor
+    /// discard; `F180` S3: merge/rebase/cherry-pick/revert/reset and
+    /// sequencer recovery). Unlike [`GitExecMode::BackgroundRead`], hooks and fsmonitor
     /// are deliberately **not** overridden — a user-initiated write should
     /// respect the repository's own configuration (ADR 0003, a product
     /// decision, not an oversight). See [`harden_write`] for the precise
@@ -587,8 +588,11 @@ fn harden_background_read(command: &mut Command, repo_dir: &Path) -> Result<(), 
 ///   `exec/tests.rs`) that real git 2.50.1 does not let `alias.<name>`
 ///   shadow an *already-existing builtin* of the same name — every literal
 ///   first argument this domain ever passes (`status`, `diff`, `rev-parse`,
-///   `ls-files`, `show`, `config`, `add`, `reset`, `hash-object`,
-///   `update-index`, `commit`, `checkout`, `fetch`, `pull`, `push`) still
+///   `rev-list`, `ls-files`, `show`, `show-ref`, `symbolic-ref`, `cat-file`,
+///   `for-each-ref`, `config`, `add`, `reset`, `hash-object`, `update-index`,
+///   `commit`, `checkout`, `branch`, `tag`, `remote`, `merge`, `rebase`,
+///   `cherry-pick`, `revert`, `reflog`, `stash`, `worktree`, `fetch`, `pull`,
+///   `push`) still
 ///   runs the real builtin even with a same-named `alias.*` configured; a
 ///   genuinely non-builtin alias name fires normally (a positive control
 ///   proving the fixture itself is valid). No neutralization needed.
@@ -597,25 +601,25 @@ fn harden_background_read(command: &mut Command, repo_dir: &Path) -> Result<(), 
 ///   `--paginate`/`-p`; git's own pager only activates for an isatty
 ///   stdout or an explicit paginate flag, confirmed empirically even with
 ///   `core.pager`/`pager.status`/`pager.diff` all hostilely configured.
-/// - **`core.editor`**: not reachable. Only fires for a commit missing
-///   `-m`/`-F`/`--file`; `commit::commit` always supplies `--file -`
-///   (confirmed empirically: a hostile `core.editor` never fires against
-///   this domain's exact invocation).
-/// - **`gpg.program`**: reachable, **intentionally**, only via
-///   `commit::commit`'s `git commit --file -` under `GitExecMode::Write`
-///   when the repository's own `commit.gpgsign` is true (confirmed
-///   empirically) — the same ADR 0003 asymmetry as hooks: a user-initiated
-///   commit must be able to use the repository's own real signing setup.
-///   Not neutralized, by design.
+/// - **`core.editor`**: not reachable. `commit::commit` always supplies
+///   `--file -`; every F180 history command that could otherwise ask for an
+///   editor carries the fixed global option `-c core.editor=true` before its
+///   subcommand. A repository-provided editor can therefore never create an
+///   invisible GUI-process prompt during Merge/Continue/Rebase/Cherry-Pick/
+///   Revert.
+/// - **`gpg.program`**: reachable, **intentionally**, through user-initiated
+///   commit-producing writes (`commit::commit` and the F180 history commands)
+///   when the repository's signing configuration requests it. This is the
+///   same ADR 0003 asymmetry as hooks: explicit writes retain the user's real
+///   signing setup. Not neutralized, by design.
 /// - **`trailer.<t>.command`**: not reachable — structural: no code path in
 ///   this domain ever constructs args containing `interpret-trailers` or
 ///   `--trailer` (confirmed by grep across the whole domain).
-/// - **`merge.<n>.driver`**: reachable, **intentionally**, only via
-///   `network::pull`'s `git pull --quiet` under `GitExecMode::Network`, when
-///   the repository's own `.gitattributes`/config define a custom merge
-///   driver and an actual merge (not just a fast-forward) occurs (confirmed
-///   empirically with a real divergent-history fixture). Same ADR 0003
-///   asymmetry as hooks/gpg above. Not neutralized, by design.
+/// - **`merge.<n>.driver`**: reachable, **intentionally**, through
+///   `network::pull` and F180's explicit merge/rebase/cherry-pick/revert
+///   commands when `.gitattributes`/config select a custom driver and a
+///   three-way content merge is required. Same ADR 0003 asymmetry as hooks/
+///   gpg above. Not neutralized, by design.
 /// - **`diff.<n>.command`** (a `.gitattributes`-scoped external diff driver,
 ///   distinct from the global `diff.external` `caller_supplied_no_ext_diff_*`
 ///   already covers): confirmed empirically that the same caller-supplied

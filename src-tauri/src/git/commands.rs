@@ -33,15 +33,19 @@ use super::discard;
 use super::dto::{
     GitBlameCommitMessagesRequest, GitBlameCommitMessagesResult, GitBlameFileRequest,
     GitBlameFileResult, GitBranchCreateRequest, GitBranchDeleteOutcomeWire, GitBranchDeleteRequest,
-    GitBranchRenameRequest, GitBranchSwitchRequest, GitCommitRequest, GitContributorsListRequest,
-    GitContributorsListResultWire, GitDiffFilesRequest, GitDiffFilesResult, GitDiscardPathsRequest,
-    GitFetchRequest, GitFileHistoryRequest, GitHistoryListResultWire, GitLineHistoryDetailRequest,
-    GitLineHistoryDetailResultWire, GitLineHistoryListRequest, GitLogGraphRequest,
-    GitLogGraphResultWire, GitNetworkCancelRequest, GitNetworkPreviewRequest,
-    GitNetworkPreviewResult, GitPullRequest, GitPushRequest, GitReflogListRequest,
-    GitReflogListResultWire, GitRefsListRequest, GitRefsListResultWire, GitRemoteAddRequest,
-    GitRemoteRemoveRequest, GitRemoteRenameRequest, GitRemoteSetUrlRequest, GitRemotesListRequest,
-    GitRemotesListResultWire, GitShowBlobRequest, GitShowBlobResult, GitShowCommitBlobRequest,
+    GitBranchRenameRequest, GitBranchSwitchRequest, GitCherryPickRequest, GitCommitRequest,
+    GitContributorsListRequest, GitContributorsListResultWire, GitDiffFilesRequest,
+    GitDiffFilesResult, GitDiscardPathsRequest, GitFetchRequest, GitFileHistoryRequest,
+    GitHistoryAbortRequest, GitHistoryCancelRequest, GitHistoryContinueRequest,
+    GitHistoryListResultWire, GitHistoryMutationOutcomeWire, GitHistoryPreviewRequest,
+    GitHistoryPreviewResultWire, GitHistoryStateRequest, GitHistoryStateResultWire,
+    GitLineHistoryDetailRequest, GitLineHistoryDetailResultWire, GitLineHistoryListRequest,
+    GitLogGraphRequest, GitLogGraphResultWire, GitMergeRequest, GitNetworkCancelRequest,
+    GitNetworkPreviewRequest, GitNetworkPreviewResult, GitPullRequest, GitPushRequest,
+    GitRebaseRequest, GitReflogListRequest, GitReflogListResultWire, GitRefsListRequest,
+    GitRefsListResultWire, GitRemoteAddRequest, GitRemoteRemoveRequest, GitRemoteRenameRequest,
+    GitRemoteSetUrlRequest, GitRemotesListRequest, GitRemotesListResultWire, GitResetRequest,
+    GitRevertRequest, GitShowBlobRequest, GitShowBlobResult, GitShowCommitBlobRequest,
     GitShowCommitRequest, GitShowCommitResult, GitStageBlobRequest, GitStagePathsRequest,
     GitStashApplyOutcomeWire, GitStashApplyRequest, GitStashDropRequest, GitStashListRequest,
     GitStashListResultWire, GitStashPopRequest, GitStashPushOutcomeWire, GitStashPushRequest,
@@ -51,6 +55,7 @@ use super::dto::{
     GitWorktreeListRequest, GitWorktreeListResultWire, GitWorktreeRemoveOutcomeWire,
     GitWorktreeRemoveRequest,
 };
+use super::history_operation::{self, GitHistoryOperationService};
 use super::log;
 use super::management;
 use super::network::{self, GitNetworkService};
@@ -604,6 +609,213 @@ pub(crate) async fn git_upstream_unset(
     let branch = request.into_parts()?;
     let scope = SelectedGitRoot::new(workspace.inner(), root_id);
     management::unset_upstream(trust.inner(), &scope, window.label(), &branch).await
+}
+
+#[tauri::command]
+pub(crate) async fn git_history_state(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
+    request: GitHistoryStateRequest,
+) -> Result<GitHistoryStateResultWire, CommandError> {
+    request.validate();
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let state = history_operation::state(trust.inner(), &scope, window.label()).await?;
+    Ok(GitHistoryStateResultWire::from(state))
+}
+
+#[tauri::command]
+pub(crate) async fn git_history_preview(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
+    request: GitHistoryPreviewRequest,
+) -> Result<GitHistoryPreviewResultWire, CommandError> {
+    let (operation, target_sha) = request.into_parts()?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let preview = history_operation::preview(
+        trust.inner(),
+        &scope,
+        window.label(),
+        operation,
+        &target_sha,
+    )
+    .await?;
+    Ok(GitHistoryPreviewResultWire::from(preview))
+}
+
+#[tauri::command]
+pub(crate) async fn git_merge(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    service: State<'_, GitHistoryOperationService>,
+    root_id: RootId,
+    request: GitMergeRequest,
+) -> Result<GitHistoryMutationOutcomeWire, CommandError> {
+    let (target_sha, preview_token) = request.into_parts()?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let outcome = history_operation::merge(
+        trust.inner(),
+        &scope,
+        service.inner(),
+        window.label(),
+        &target_sha,
+        &preview_token,
+    )
+    .await?;
+    Ok(GitHistoryMutationOutcomeWire::from(outcome))
+}
+
+#[tauri::command]
+pub(crate) async fn git_rebase(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    service: State<'_, GitHistoryOperationService>,
+    root_id: RootId,
+    request: GitRebaseRequest,
+) -> Result<GitHistoryMutationOutcomeWire, CommandError> {
+    let (target_sha, preview_token) = request.into_parts()?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let outcome = history_operation::rebase(
+        trust.inner(),
+        &scope,
+        service.inner(),
+        window.label(),
+        &target_sha,
+        &preview_token,
+    )
+    .await?;
+    Ok(GitHistoryMutationOutcomeWire::from(outcome))
+}
+
+#[tauri::command]
+pub(crate) async fn git_cherry_pick(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    service: State<'_, GitHistoryOperationService>,
+    root_id: RootId,
+    request: GitCherryPickRequest,
+) -> Result<GitHistoryMutationOutcomeWire, CommandError> {
+    let (target_sha, preview_token) = request.into_parts()?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let outcome = history_operation::cherry_pick(
+        trust.inner(),
+        &scope,
+        service.inner(),
+        window.label(),
+        &target_sha,
+        &preview_token,
+    )
+    .await?;
+    Ok(GitHistoryMutationOutcomeWire::from(outcome))
+}
+
+#[tauri::command]
+pub(crate) async fn git_revert(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    service: State<'_, GitHistoryOperationService>,
+    root_id: RootId,
+    request: GitRevertRequest,
+) -> Result<GitHistoryMutationOutcomeWire, CommandError> {
+    let (target_sha, preview_token) = request.into_parts()?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let outcome = history_operation::revert(
+        trust.inner(),
+        &scope,
+        service.inner(),
+        window.label(),
+        &target_sha,
+        &preview_token,
+    )
+    .await?;
+    Ok(GitHistoryMutationOutcomeWire::from(outcome))
+}
+
+#[tauri::command]
+pub(crate) async fn git_reset(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    service: State<'_, GitHistoryOperationService>,
+    root_id: RootId,
+    request: GitResetRequest,
+) -> Result<GitHistoryMutationOutcomeWire, CommandError> {
+    let (operation, target_sha, preview_token) = request.into_parts()?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let outcome = history_operation::reset(
+        trust.inner(),
+        &scope,
+        service.inner(),
+        window.label(),
+        operation,
+        &target_sha,
+        &preview_token,
+    )
+    .await?;
+    Ok(GitHistoryMutationOutcomeWire::from(outcome))
+}
+
+#[tauri::command]
+pub(crate) async fn git_history_continue(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    service: State<'_, GitHistoryOperationService>,
+    root_id: RootId,
+    request: GitHistoryContinueRequest,
+) -> Result<GitHistoryMutationOutcomeWire, CommandError> {
+    let kind = request.into_parts();
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let outcome = history_operation::continue_operation(
+        trust.inner(),
+        &scope,
+        service.inner(),
+        window.label(),
+        kind,
+    )
+    .await?;
+    Ok(GitHistoryMutationOutcomeWire::from(outcome))
+}
+
+#[tauri::command]
+pub(crate) async fn git_history_abort(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    service: State<'_, GitHistoryOperationService>,
+    root_id: RootId,
+    request: GitHistoryAbortRequest,
+) -> Result<GitHistoryMutationOutcomeWire, CommandError> {
+    let kind = request.into_parts();
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let outcome = history_operation::abort_operation(
+        trust.inner(),
+        &scope,
+        service.inner(),
+        window.label(),
+        kind,
+    )
+    .await?;
+    Ok(GitHistoryMutationOutcomeWire::from(outcome))
+}
+
+#[tauri::command]
+pub(crate) async fn git_history_cancel(
+    window: WebviewWindow,
+    service: State<'_, GitHistoryOperationService>,
+    root_id: RootId,
+    request: GitHistoryCancelRequest,
+) -> Result<(), CommandError> {
+    request.validate();
+    service.request_cancel_for_root(window.label(), root_id);
+    Ok(())
 }
 
 #[tauri::command]

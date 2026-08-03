@@ -19,6 +19,10 @@ import type {
 	GitDiffFilesResult,
 	GitHistoryEntry,
 	GitHistoryListResult,
+	GitHistoryMutationOutcome,
+	GitHistoryOperation,
+	GitHistoryPreview,
+	GitHistoryState,
 	GitLineHistoryDetail,
 	GitLogGraphResult,
 	GitNetworkPreviewResult,
@@ -27,6 +31,7 @@ import type {
 	GitReflogListResult,
 	GitRemoteEntry,
 	GitRemotesListResult,
+	GitSequencerKind,
 	GitShowCommitResult,
 	GitStashEntry,
 	GitStashListResult,
@@ -78,19 +83,27 @@ import {
 	frozenGitBranchDeleteRequest,
 	frozenGitBranchRenameRequest,
 	frozenGitBranchSwitchRequest,
+	frozenGitCherryPickRequest,
 	frozenGitCommitRequest,
 	frozenGitDiffFilesRequest,
 	frozenGitDiscardPathsRequest,
 	frozenGitFileHistoryRequest,
+	frozenGitHistoryAbortRequest,
+	frozenGitHistoryContinueRequest,
+	frozenGitHistoryPreviewRequest,
 	frozenGitLineHistoryDetailRequest,
 	frozenGitLineHistoryListRequest,
 	frozenGitLogGraphRequest,
+	frozenGitMergeRequest,
 	frozenGitNetworkPreviewRequest,
 	frozenGitPushRequest,
+	frozenGitRebaseRequest,
 	frozenGitRemoteAddRequest,
 	frozenGitRemoteRemoveRequest,
 	frozenGitRemoteRenameRequest,
 	frozenGitRemoteSetUrlRequest,
+	frozenGitResetRequest,
+	frozenGitRevertRequest,
 	frozenGitRootId,
 	frozenGitShowBlobRequest,
 	frozenGitShowBlobResult,
@@ -1260,6 +1273,12 @@ export interface BrowserMockGitFixtureForTest {
 	/** `F180` S1B: local branch short names whose first safe deletion probe
 	 * reports `needsForce`; a confirmed `force: true` retry removes them. */
 	readonly branchUnmergedForTest?: readonly string[];
+	/** `F180` S3: optional deterministic conflict paths for one history
+	 * operation. Rust real-Git fixtures remain authoritative; this only lets
+	 * a later frontend workflow exercise Continue/Abort rendering. */
+	readonly historyConflictForTest?: Partial<
+		Readonly<Record<GitHistoryOperation, readonly string[]>>
+	>;
 	/** `F090` S4: seeds the initial, mutable `gitStashList` state (defaults to
 	 * `[]`) — `gitStashPush`/`gitStashApply`/`gitStashPop`/`gitStashDrop` all
 	 * mutate this in place (unshift on push, splice on a successful pop/drop),
@@ -6467,6 +6486,160 @@ export function createBrowserMockBridge(
 		gitFixture.status ?? defaultGitStatus
 	).entries.map((entry) => ({ ...entry }));
 	let gitCommitCounter = 0;
+	let gitHistoryPreviewCounter = 0;
+	let gitHistorySequencer: GitHistoryState["sequencer"] = null;
+	let lastGitHistoryPreview:
+		| Readonly<{
+				operation: GitHistoryOperation;
+				targetSha: string;
+				previewToken: string;
+		  }>
+		| undefined;
+
+	function gitHistoryStateSnapshot(): GitHistoryState {
+		return Object.freeze({
+			headSha: gitBranch.oid,
+			sequencer:
+				gitHistorySequencer === null
+					? null
+					: Object.freeze({
+							kind: gitHistorySequencer.kind,
+							conflictedPaths: Object.freeze([
+								...gitHistorySequencer.conflictedPaths,
+							]),
+							pathsTruncated: gitHistorySequencer.pathsTruncated,
+						}),
+		});
+	}
+
+	function gitHistoryPathProjection(): Readonly<{
+		workingTreePaths: readonly string[];
+		stagedPaths: readonly string[];
+		conflictedPaths: readonly string[];
+		pathsTruncated: boolean;
+	}> {
+		const workingTreePaths: string[] = [];
+		const stagedPaths: string[] = [];
+		const conflictedPaths: string[] = [];
+		let pathsTruncated = false;
+		const push = (target: string[], path: string) => {
+			if (target.includes(path)) {
+				return;
+			}
+			if (target.length === 256) {
+				pathsTruncated = true;
+				return;
+			}
+			target.push(path);
+		};
+		for (const entry of gitEntries) {
+			if (entry.type === "ordinary" || entry.type === "renameOrCopy") {
+				if (entry.indexStatus !== ".") {
+					push(stagedPaths, entry.path);
+				}
+				if (entry.worktreeStatus !== ".") {
+					push(workingTreePaths, entry.path);
+				}
+			}
+			if (entry.type === "unmerged") {
+				push(conflictedPaths, entry.path);
+			}
+		}
+		return Object.freeze({
+			workingTreePaths: Object.freeze(workingTreePaths),
+			stagedPaths: Object.freeze(stagedPaths),
+			conflictedPaths: Object.freeze(conflictedPaths),
+			pathsTruncated,
+		});
+	}
+
+	function gitHistoryPreviewSnapshot(
+		operation: GitHistoryOperation,
+		targetSha: string,
+	): GitHistoryPreview {
+		gitHistoryPreviewCounter += 1;
+		const previewToken = gitHistoryPreviewCounter
+			.toString(16)
+			.padStart(64, "0");
+		const paths = gitHistoryPathProjection();
+		lastGitHistoryPreview = Object.freeze({
+			operation,
+			targetSha,
+			previewToken,
+		});
+		return Object.freeze({
+			operation,
+			targetSha,
+			headSha: gitBranch.oid,
+			ahead: 0,
+			behind: 0,
+			...paths,
+			sequencer: gitHistoryStateSnapshot().sequencer,
+			previewToken,
+		});
+	}
+
+	function gitHistoryOperationSequencer(
+		operation: GitHistoryOperation,
+	): GitSequencerKind | undefined {
+		switch (operation) {
+			case "merge":
+			case "rebase":
+			case "cherryPick":
+			case "revert":
+				return operation;
+			case "resetSoft":
+			case "resetMixed":
+			case "resetHard":
+				return undefined;
+		}
+	}
+
+	function gitHistoryExecute(
+		operation: GitHistoryOperation,
+		targetSha: string,
+		previewToken: string,
+	): GitHistoryMutationOutcome {
+		if (
+			lastGitHistoryPreview?.operation !== operation ||
+			lastGitHistoryPreview.targetSha !== targetSha ||
+			lastGitHistoryPreview.previewToken !== previewToken
+		) {
+			throw commandError(
+				"GIT_HISTORY_PREVIEW_STALE",
+				"The Git repository changed after the operation preview. Review it again before continuing.",
+			);
+		}
+		lastGitHistoryPreview = undefined;
+		const conflictPaths = gitFixture.historyConflictForTest?.[operation];
+		const sequencerKind = gitHistoryOperationSequencer(operation);
+		if (
+			sequencerKind !== undefined &&
+			conflictPaths !== undefined &&
+			conflictPaths.length > 0
+		) {
+			gitHistorySequencer = Object.freeze({
+				kind: sequencerKind,
+				conflictedPaths: Object.freeze(conflictPaths.slice(0, 256)),
+				pathsTruncated: conflictPaths.length > 256,
+			});
+			return Object.freeze({
+				kind: "conflicts",
+				state: gitHistoryStateSnapshot(),
+			});
+		}
+		gitHistorySequencer = null;
+		gitCommitCounter += 1;
+		const nextHead =
+			operation.startsWith("reset") || operation === "merge"
+				? targetSha
+				: gitCommitCounter.toString(16).padStart(40, "0");
+		gitBranch = { ...gitBranch, oid: nextHead };
+		return Object.freeze({
+			kind: "completed",
+			state: gitHistoryStateSnapshot(),
+		});
+	}
 
 	const ZERO_GIT_HASH = "0".repeat(40);
 	const ZERO_GIT_SUBMODULE = Object.freeze({
@@ -8568,6 +8741,133 @@ export function createBrowserMockBridge(
 			if (gitBranch.head === request.branch) {
 				gitNetworkUpstream = null;
 				gitBranch = { ...gitBranch, upstream: null };
+			}
+		},
+		async gitHistoryState(rootId_) {
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return gitHistoryStateSnapshot();
+		},
+		async gitHistoryPreview(operation_, targetSha_, rootId_) {
+			const request = frozenGitHistoryPreviewRequest(operation_, targetSha_);
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return gitHistoryPreviewSnapshot(request.operation, request.targetSha);
+		},
+		async gitMerge(targetSha_, previewToken_, rootId_) {
+			const request = frozenGitMergeRequest(targetSha_, previewToken_);
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return gitHistoryExecute(
+				"merge",
+				request.targetSha,
+				request.previewToken,
+			);
+		},
+		async gitRebase(targetSha_, previewToken_, rootId_) {
+			const request = frozenGitRebaseRequest(targetSha_, previewToken_);
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return gitHistoryExecute(
+				"rebase",
+				request.targetSha,
+				request.previewToken,
+			);
+		},
+		async gitCherryPick(targetSha_, previewToken_, rootId_) {
+			const request = frozenGitCherryPickRequest(targetSha_, previewToken_);
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return gitHistoryExecute(
+				"cherryPick",
+				request.targetSha,
+				request.previewToken,
+			);
+		},
+		async gitRevert(targetSha_, previewToken_, rootId_) {
+			const request = frozenGitRevertRequest(targetSha_, previewToken_);
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return gitHistoryExecute(
+				"revert",
+				request.targetSha,
+				request.previewToken,
+			);
+		},
+		async gitReset(targetSha_, mode_, previewToken_, rootId_) {
+			const request = frozenGitResetRequest(targetSha_, mode_, previewToken_);
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			const operation = {
+				soft: "resetSoft",
+				mixed: "resetMixed",
+				hard: "resetHard",
+			}[request.mode] as GitHistoryOperation;
+			return gitHistoryExecute(
+				operation,
+				request.targetSha,
+				request.previewToken,
+			);
+		},
+		async gitHistoryContinue(kind_, rootId_) {
+			const request = frozenGitHistoryContinueRequest(kind_);
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			if (gitHistorySequencer?.kind !== request.kind) {
+				throw commandError(
+					"GIT_HISTORY_OPERATION_KIND_CHANGED",
+					"The in-progress Git operation changed. Refresh its state before continuing.",
+				);
+			}
+			gitHistorySequencer = null;
+			gitCommitCounter += 1;
+			gitBranch = {
+				...gitBranch,
+				oid: gitCommitCounter.toString(16).padStart(40, "0"),
+			};
+			return Object.freeze({
+				kind: "completed",
+				state: gitHistoryStateSnapshot(),
+			});
+		},
+		async gitHistoryAbort(kind_, rootId_) {
+			const request = frozenGitHistoryAbortRequest(kind_);
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			if (gitHistorySequencer?.kind !== request.kind) {
+				throw commandError(
+					"GIT_HISTORY_OPERATION_KIND_CHANGED",
+					"The in-progress Git operation changed. Refresh its state before continuing.",
+				);
+			}
+			gitHistorySequencer = null;
+			return Object.freeze({
+				kind: "completed",
+				state: gitHistoryStateSnapshot(),
+			});
+		},
+		async gitHistoryCancel(rootId_) {
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
 			}
 		},
 		async gitStashList(rootId_) {

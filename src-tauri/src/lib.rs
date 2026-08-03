@@ -20,6 +20,7 @@ use backup::service::BackupService;
 use debug::confirm::ConfirmationService;
 use debug::service::DebugSessionService;
 use error::CommandError;
+use git::history_operation::GitHistoryOperationService;
 use git::network::GitNetworkService;
 use lifecycle::service::{CloseCoordinator, ExitDecision, WindowCloseDecision};
 use recent::service::WorkspaceHistoryService;
@@ -61,6 +62,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(TerminalService::new())
         .manage(GitNetworkService::new())
+        .manage(GitHistoryOperationService::new())
         .manage(DebugSessionService::new())
         .manage(CloseCoordinator::new())
         .plugin(tauri_plugin_dialog::init())
@@ -186,6 +188,16 @@ pub fn run() {
             git::commands::git_remote_remove,
             git::commands::git_upstream_set,
             git::commands::git_upstream_unset,
+            git::commands::git_history_state,
+            git::commands::git_history_preview,
+            git::commands::git_merge,
+            git::commands::git_rebase,
+            git::commands::git_cherry_pick,
+            git::commands::git_revert,
+            git::commands::git_reset,
+            git::commands::git_history_continue,
+            git::commands::git_history_abort,
+            git::commands::git_history_cancel,
             git::commands::git_stash_list,
             git::commands::git_stash_show,
             git::commands::git_stash_push,

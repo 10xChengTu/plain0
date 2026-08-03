@@ -176,6 +176,16 @@ describe("bindPlainGitBridge", () => {
 		await rooted.gitRemoteRemove("upstream");
 		await rooted.gitUpstreamSet("main", "origin/main");
 		await rooted.gitUpstreamUnset("main");
+		await rooted.gitHistoryState();
+		await rooted.gitHistoryPreview("merge", "a".repeat(40));
+		await rooted.gitMerge("a".repeat(40), "b".repeat(64));
+		await rooted.gitRebase("a".repeat(40), "b".repeat(64));
+		await rooted.gitCherryPick("a".repeat(40), "b".repeat(64));
+		await rooted.gitRevert("a".repeat(40), "b".repeat(64));
+		await rooted.gitReset("a".repeat(40), "hard", "b".repeat(64));
+		await rooted.gitHistoryContinue("rebase");
+		await rooted.gitHistoryAbort("rebase");
+		await rooted.gitHistoryCancel();
 		await rooted.gitStashList();
 		await rooted.gitStashShow("a".repeat(40));
 		await rooted.gitStashPush("message", true);
@@ -186,7 +196,7 @@ describe("bindPlainGitBridge", () => {
 		await rooted.gitWorktreeAdd("child", false, null);
 		await rooted.gitWorktreeRemove("/tmp/child", false);
 
-		expect(calls).toHaveLength(46);
+		expect(calls).toHaveLength(56);
 		for (const call of calls) {
 			expect(call.args.at(-1), call.method).toBe(ROOT_A);
 		}

@@ -8012,6 +8012,86 @@ const GIT_COMMAND_CONTRACTS = Object.freeze([
 	},
 	{
 		file: "src-tauri/src/git/commands.rs",
+		name: "git_history_state",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitHistoryStateRequest",
+		returnType: "->Result<GitHistoryStateResultWire,CommandError>",
+		body: "request.validate();letstate=history_operation::state(trust.inner(),workspace.inner(),window.label()).await?;Ok(GitHistoryStateResultWire::from(state))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_history_preview",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitHistoryPreviewRequest",
+		returnType: "->Result<GitHistoryPreviewResultWire,CommandError>",
+		body: "let(operation,target_sha)=request.into_parts()?;letpreview=history_operation::preview(trust.inner(),workspace.inner(),window.label(),operation,&target_sha).await?;Ok(GitHistoryPreviewResultWire::from(preview))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_merge",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,service:State<'_,GitHistoryOperationService>,request:GitMergeRequest",
+		returnType: "->Result<GitHistoryMutationOutcomeWire,CommandError>",
+		body: "let(target_sha,preview_token)=request.into_parts()?;letoutcome=history_operation::merge(trust.inner(),workspace.inner(),service.inner(),window.label(),&target_sha,&preview_token).await?;Ok(GitHistoryMutationOutcomeWire::from(outcome))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_rebase",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,service:State<'_,GitHistoryOperationService>,request:GitRebaseRequest",
+		returnType: "->Result<GitHistoryMutationOutcomeWire,CommandError>",
+		body: "let(target_sha,preview_token)=request.into_parts()?;letoutcome=history_operation::rebase(trust.inner(),workspace.inner(),service.inner(),window.label(),&target_sha,&preview_token).await?;Ok(GitHistoryMutationOutcomeWire::from(outcome))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_cherry_pick",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,service:State<'_,GitHistoryOperationService>,request:GitCherryPickRequest",
+		returnType: "->Result<GitHistoryMutationOutcomeWire,CommandError>",
+		body: "let(target_sha,preview_token)=request.into_parts()?;letoutcome=history_operation::cherry_pick(trust.inner(),workspace.inner(),service.inner(),window.label(),&target_sha,&preview_token).await?;Ok(GitHistoryMutationOutcomeWire::from(outcome))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_revert",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,service:State<'_,GitHistoryOperationService>,request:GitRevertRequest",
+		returnType: "->Result<GitHistoryMutationOutcomeWire,CommandError>",
+		body: "let(target_sha,preview_token)=request.into_parts()?;letoutcome=history_operation::revert(trust.inner(),workspace.inner(),service.inner(),window.label(),&target_sha,&preview_token).await?;Ok(GitHistoryMutationOutcomeWire::from(outcome))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_reset",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,service:State<'_,GitHistoryOperationService>,request:GitResetRequest",
+		returnType: "->Result<GitHistoryMutationOutcomeWire,CommandError>",
+		body: "let(operation,target_sha,preview_token)=request.into_parts()?;letoutcome=history_operation::reset(trust.inner(),workspace.inner(),service.inner(),window.label(),operation,&target_sha,&preview_token).await?;Ok(GitHistoryMutationOutcomeWire::from(outcome))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_history_continue",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,service:State<'_,GitHistoryOperationService>,request:GitHistoryContinueRequest",
+		returnType: "->Result<GitHistoryMutationOutcomeWire,CommandError>",
+		body: "letkind=request.into_parts();letoutcome=history_operation::continue_operation(trust.inner(),workspace.inner(),service.inner(),window.label(),kind).await?;Ok(GitHistoryMutationOutcomeWire::from(outcome))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_history_abort",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,service:State<'_,GitHistoryOperationService>,request:GitHistoryAbortRequest",
+		returnType: "->Result<GitHistoryMutationOutcomeWire,CommandError>",
+		body: "letkind=request.into_parts();letoutcome=history_operation::abort_operation(trust.inner(),workspace.inner(),service.inner(),window.label(),kind).await?;Ok(GitHistoryMutationOutcomeWire::from(outcome))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
+		name: "git_history_cancel",
+		parameters:
+			"window:WebviewWindow,service:State<'_,GitHistoryOperationService>,root_id:RootId,request:GitHistoryCancelRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "request.validate();service.request_cancel_for_root(window.label(),root_id);Ok(())",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
 		name: "git_stash_list",
 		parameters:
 			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitStashListRequest",
@@ -8085,7 +8165,7 @@ const GIT_COMMAND_CONTRACTS = Object.freeze([
 ]);
 
 /**
- * Locks all forty-six git commands (`F080` S1's three reads, S3's five
+ * Locks all fifty-six git commands (`F080` S1's three reads, S3's five
  * writes, S4's five network commands, `F090` S0's two read-only blame
  * commands — `git_blame_file`/`git_blame_commit_messages` —, `F090` S1's
  * three read-only file/line-history commands —
@@ -8095,7 +8175,8 @@ const GIT_COMMAND_CONTRACTS = Object.freeze([
  * graph/refs commands — `git_log_graph`/`git_refs_list` —, `F180` S1A's
  * three read models — `git_remotes_list`/`git_reflog_list`/
  * `git_contributors_list` —, S1B's twelve branch/tag/remote/upstream
- * mutations, `F090` S4's six
+ * mutations, `F180` S3's ten preview/state/history-operation commands,
+ * `F090` S4's six
  * stash commands (two read-only — `git_stash_list`/`git_stash_show` — and
  * four writes — `git_stash_push`/`git_stash_apply`/`git_stash_pop`/
  * `git_stash_drop`) — and `F090` S5's three worktree commands (one read-only
@@ -8133,10 +8214,13 @@ export function validateGitCommandRegistration(rustSources) {
 		const normalizedParameters = command.parameters
 			.replaceAll(/\s+/g, "")
 			.replace(/,$/, "");
-		const expectedParameters =
-			contract.name === "git_network_cancel"
-				? contract.parameters
-				: contract.parameters.replace(",request:", ",root_id:RootId,request:");
+		const rootlessCancellationCommands = new Set([
+			"git_network_cancel",
+			"git_history_cancel",
+		]);
+		const expectedParameters = rootlessCancellationCommands.has(contract.name)
+			? contract.parameters
+			: contract.parameters.replace(",request:", ",root_id:RootId,request:");
 		if (
 			normalizedParameters !== expectedParameters ||
 			command.returnType.replaceAll(/\s+/g, "") !== contract.returnType
@@ -8146,7 +8230,7 @@ export function validateGitCommandRegistration(rustSources) {
 			);
 		}
 		let normalizedBody = command.body.replaceAll(/\s+/g, "").replace(/;$/, "");
-		if (contract.name !== "git_network_cancel") {
+		if (!rootlessCancellationCommands.has(contract.name)) {
 			const scopeStatement =
 				"letscope=SelectedGitRoot::new(workspace.inner(),root_id);";
 			if (normalizedBody.split(scopeStatement).length !== 2) {
@@ -9015,6 +9099,175 @@ export function validateGitRustBoundary(rustSources) {
 		);
 	}
 
+	// --- F180 S3: history preview, sequencer and mutation authority --------
+	const historyOperationSource = findRustSource(
+		rustSources,
+		"src-tauri/src/git/history_operation.rs",
+	);
+	if (historyOperationSource === undefined) {
+		failures.push("git boundary requires history_operation.rs");
+		return failures;
+	}
+	const executableHistoryOperation = stripRustCommentsOnly(
+		historyOperationSource,
+	);
+	const historyArgContracts = [
+		[
+			"GIT_HISTORY_STATUS_ARGS",
+			["status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all"],
+		],
+		[
+			"GIT_HISTORY_WORKTREE_DIFF_ARGS",
+			[
+				"diff",
+				"--binary",
+				"--no-color",
+				"--no-ext-diff",
+				"--no-textconv",
+				"--",
+			],
+		],
+		[
+			"GIT_HISTORY_STAGED_DIFF_ARGS",
+			[
+				"diff",
+				"--cached",
+				"--binary",
+				"--no-color",
+				"--no-ext-diff",
+				"--no-textconv",
+				"--",
+			],
+		],
+		[
+			"GIT_MERGE_ARGS",
+			["-c", "core.editor=true", "merge", "--no-edit", "--no-autostash", "--"],
+		],
+		[
+			"GIT_REBASE_ARGS",
+			[
+				"-c",
+				"core.editor=true",
+				"rebase",
+				"--no-autostash",
+				"--no-rebase-merges",
+				"--no-update-refs",
+				"--",
+			],
+		],
+		[
+			"GIT_CHERRY_PICK_ARGS",
+			["-c", "core.editor=true", "cherry-pick", "--no-edit", "--"],
+		],
+		[
+			"GIT_REVERT_ARGS",
+			["-c", "core.editor=true", "revert", "--no-edit", "--"],
+		],
+		["GIT_RESET_SOFT_ARGS", ["reset", "--soft"]],
+		["GIT_RESET_MIXED_ARGS", ["reset", "--mixed"]],
+		["GIT_RESET_HARD_ARGS", ["reset", "--hard"]],
+		[
+			"GIT_MERGE_CONTINUE_ARGS",
+			["-c", "core.editor=true", "merge", "--continue"],
+		],
+		[
+			"GIT_REBASE_CONTINUE_ARGS",
+			["-c", "core.editor=true", "rebase", "--continue"],
+		],
+		[
+			"GIT_CHERRY_PICK_CONTINUE_ARGS",
+			["-c", "core.editor=true", "cherry-pick", "--continue"],
+		],
+		[
+			"GIT_REVERT_CONTINUE_ARGS",
+			["-c", "core.editor=true", "revert", "--continue"],
+		],
+		["GIT_MERGE_ABORT_ARGS", ["merge", "--abort"]],
+		["GIT_REBASE_ABORT_ARGS", ["rebase", "--abort"]],
+		["GIT_CHERRY_PICK_ABORT_ARGS", ["cherry-pick", "--abort"]],
+		["GIT_REVERT_ABORT_ARGS", ["revert", "--abort"]],
+	];
+	if (
+		historyArgContracts.some(
+			([name, expected]) =>
+				!sameArray(argsConstant(executableHistoryOperation, name), expected),
+		)
+	) {
+		failures.push(
+			"history_operation.rs must retain every audited non-interactive preview/mutation/Continue/Abort argv constant",
+		);
+	}
+	if (
+		!executableHistoryOperation.includes("plain-git-history-preview-v1") ||
+		!executableHistoryOperation.includes("GIT_HISTORY_WORKTREE_DIFF_ARGS") ||
+		!executableHistoryOperation.includes("GIT_HISTORY_STAGED_DIFF_ARGS") ||
+		!executableHistoryOperation.includes("Sha256::new()") ||
+		!executableHistoryOperation.includes("digest.update(worktree_diff)") ||
+		!executableHistoryOperation.includes("digest.update(staged_diff)") ||
+		!executableHistoryOperation.includes(
+			"current.preview_token != expected_preview_token",
+		) ||
+		!executableHistoryOperation.includes(
+			"service.begin(window_label, workspace.selected_root_id())?",
+		) ||
+		!executableHistoryOperation.includes("HistoryOperationKey") ||
+		!executableHistoryOperation.includes("Arc<AtomicBool>") ||
+		!executableHistoryOperation.includes("read_state_sync(repo_dir)?") ||
+		!executableHistoryOperation.includes("actual != expected_kind") ||
+		executableHistoryOperation.includes('"--force"')
+	) {
+		failures.push(
+			"history operations must consume a full-diff preview token, serialize per root/window, bind cancellation, reread outcome state, and verify Continue/Abort kind",
+		);
+	}
+	const historyOperationWireBody = enumBody("GitHistoryOperationWire");
+	const sequencerKindWireBody = enumBody("GitSequencerKindWire");
+	const resetModeBody = enumBody("GitResetModeRequest");
+	const historyOutcomeKindBody = enumBody("GitHistoryMutationOutcomeKindWire");
+	if (
+		![
+			"Merge,Rebase,CherryPick,Revert,ResetSoft,ResetMixed,ResetHard,",
+			"Merge,Rebase,CherryPick,Revert,ResetSoft,ResetMixed,ResetHard",
+		].includes(historyOperationWireBody) ||
+		![
+			"Merge,Rebase,CherryPick,Revert,",
+			"Merge,Rebase,CherryPick,Revert",
+		].includes(sequencerKindWireBody) ||
+		!["Soft,Mixed,Hard,", "Soft,Mixed,Hard"].includes(resetModeBody) ||
+		![
+			"Completed,Conflicts,Stopped,Cancelled,",
+			"Completed,Conflicts,Stopped,Cancelled",
+		].includes(historyOutcomeKindBody) ||
+		structBody("GitHistoryStateRequest") !== "" ||
+		structBody("GitHistoryPreviewRequest") !==
+			"operation:GitHistoryOperationWire,target_sha:String," ||
+		structBody("GitMergeRequest") !==
+			"target_sha:String,preview_token:String," ||
+		structBody("GitRebaseRequest") !==
+			"target_sha:String,preview_token:String," ||
+		structBody("GitCherryPickRequest") !==
+			"target_sha:String,preview_token:String," ||
+		structBody("GitRevertRequest") !==
+			"target_sha:String,preview_token:String," ||
+		structBody("GitResetRequest") !==
+			"target_sha:String,mode:GitResetModeRequest,preview_token:String," ||
+		structBody("GitHistoryContinueRequest") !== "kind:GitSequencerKindWire," ||
+		structBody("GitHistoryAbortRequest") !== "kind:GitSequencerKindWire," ||
+		structBody("GitHistoryCancelRequest") !== "" ||
+		structBody("GitSequencerStateWire") !==
+			"kind:GitSequencerKindWire,conflicted_paths:Vec<String>,paths_truncated:bool," ||
+		structBody("GitHistoryStateResultWire") !==
+			"head_sha:String,sequencer:Option<GitSequencerStateWire>," ||
+		structBody("GitHistoryPreviewResultWire") !==
+			"operation:GitHistoryOperationWire,target_sha:String,head_sha:String,ahead:u64,behind:u64,working_tree_paths:Vec<String>,staged_paths:Vec<String>,conflicted_paths:Vec<String>,paths_truncated:bool,sequencer:Option<GitSequencerStateWire>,preview_token:String," ||
+		structBody("GitHistoryMutationOutcomeWire") !==
+			"kind:GitHistoryMutationOutcomeKindWire,state:GitHistoryStateResultWire,"
+	) {
+		failures.push(
+			"F180 history operation request/state/preview/outcome DTOs must expose only their exact audited fields and variants",
+		);
+	}
+
 	// --- F090 S4: stash (`git::stash`) --------------------------------------
 	//
 	// `GIT_STASH_LIST_ARGS` itself gets its own *dedicated* lock
@@ -9604,11 +9857,12 @@ export function validateGitStashMessageFieldSafetyBoundary(rustSources) {
  * `gitRefsList`), `F090` S4's six stash methods (`gitStashList`/
  * `gitStashShow`/`gitStashPush`/`gitStashApply`/`gitStashPop`/
  * `gitStashDrop`), and `F090` S5's three worktree methods (`gitWorktreeList`/
- * `gitWorktreeAdd`/`gitWorktreeRemove`), and `F180` S1A's three read models
- * (`gitRemotesList`/`gitReflogList`/`gitContributorsList`) — every slice deliberately shares
- * this same closed-list lock rather than getting its own parallel
+ * `gitWorktreeAdd`/`gitWorktreeRemove`), `F180` S1A's three read models
+ * (`gitRemotesList`/`gitReflogList`/`gitContributorsList`), S1B's twelve
+ * management methods and S3's ten state/preview/history-operation methods.
+ * Every slice deliberately shares this same closed-list lock instead of a parallel
  * "S_ bridge methods" const, for the same reason `GIT_COMMAND_CONTRACTS`
- * above holds all forty-six Rust commands in one array: `PlainBridge`'s git
+ * above holds all fifty-six Rust commands in one array: `PlainBridge`'s git
  * surface is one audited whole, not several independently-sized ones.
  */
 const GIT_BRIDGE_METHOD_NAMES = [
@@ -9649,6 +9903,16 @@ const GIT_BRIDGE_METHOD_NAMES = [
 	"gitRemoteRemove",
 	"gitUpstreamSet",
 	"gitUpstreamUnset",
+	"gitHistoryState",
+	"gitHistoryPreview",
+	"gitMerge",
+	"gitRebase",
+	"gitCherryPick",
+	"gitRevert",
+	"gitReset",
+	"gitHistoryContinue",
+	"gitHistoryAbort",
+	"gitHistoryCancel",
 	"gitStashList",
 	"gitStashShow",
 	"gitStashPush",
@@ -9764,9 +10028,62 @@ const GIT_NO_ARG_COMMAND_CONTRACTS = Object.freeze([
 	"git_network_cancel",
 ]);
 
+const GIT_HISTORY_NATIVE_CONTRACTS = Object.freeze([
+	Object.freeze({
+		command: "git_history_state",
+		requestBuilder: undefined,
+		decoder: "decodeGitHistoryState",
+	}),
+	Object.freeze({
+		command: "git_history_preview",
+		requestBuilder: "frozenGitHistoryPreviewRequest",
+		decoder: "decodeGitHistoryPreview",
+	}),
+	Object.freeze({
+		command: "git_merge",
+		requestBuilder: "frozenGitMergeRequest",
+		decoder: "decodeGitHistoryMutationOutcome",
+	}),
+	Object.freeze({
+		command: "git_rebase",
+		requestBuilder: "frozenGitRebaseRequest",
+		decoder: "decodeGitHistoryMutationOutcome",
+	}),
+	Object.freeze({
+		command: "git_cherry_pick",
+		requestBuilder: "frozenGitCherryPickRequest",
+		decoder: "decodeGitHistoryMutationOutcome",
+	}),
+	Object.freeze({
+		command: "git_revert",
+		requestBuilder: "frozenGitRevertRequest",
+		decoder: "decodeGitHistoryMutationOutcome",
+	}),
+	Object.freeze({
+		command: "git_reset",
+		requestBuilder: "frozenGitResetRequest",
+		decoder: "decodeGitHistoryMutationOutcome",
+	}),
+	Object.freeze({
+		command: "git_history_continue",
+		requestBuilder: "frozenGitHistoryContinueRequest",
+		decoder: "decodeGitHistoryMutationOutcome",
+	}),
+	Object.freeze({
+		command: "git_history_abort",
+		requestBuilder: "frozenGitHistoryAbortRequest",
+		decoder: "decodeGitHistoryMutationOutcome",
+	}),
+	Object.freeze({
+		command: "git_history_cancel",
+		requestBuilder: undefined,
+		decoder: "decodeGitVoid",
+	}),
+]);
+
 /**
  * Locks `F080` S1+S3+S4 and `F090` S0+S1+S2+S3+S4+S5's TypeScript surface:
- * `PlainBridge` exposes exactly the forty-six audited git methods,
+ * `PlainBridge` exposes exactly the fifty-six audited git methods,
  * `git-codec.ts`'s read-result decoders validate exact own-data keys/reject
  * Proxy wrapping/freeze their result (same rigor
  * `validateTerminalIpcBridgeBoundary` already locks for the terminal
@@ -9830,7 +10147,7 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 			JSON.stringify([...GIT_BRIDGE_METHOD_NAMES].sort())
 	) {
 		failures.push(
-			"PlainBridge must expose exactly the forty-six audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifty-six audited git methods, no more and no fewer",
 		);
 	}
 
@@ -9857,6 +10174,8 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 		"decodeGitRemotesListResult",
 		"decodeGitReflogListResult",
 		"decodeGitContributorsListResult",
+		"decodeGitHistoryPreview",
+		"decodeGitHistoryMutationOutcome",
 		"decodeGitStashListResult",
 		"decodeGitStashShowResult",
 		"decodeGitStashApplyOutcome",
@@ -9872,6 +10191,23 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 		) {
 			failures.push(
 				`git-codec.ts's ${name} must validate exact own-data keys, reject Proxy wrapping, and freeze its result`,
+			);
+		}
+	}
+	{
+		const publicBody = decoderBody("decodeGitHistoryState");
+		const valueBody = decoderBody("decodeGitHistoryStateValue");
+		if (
+			publicBody === undefined ||
+			!publicBody.includes("sanitizedDecode(") ||
+			!publicBody.includes("decodeGitHistoryStateValue(") ||
+			valueBody === undefined ||
+			!valueBody.includes("hasExactKeys(") ||
+			!valueBody.includes("rejectProxyObject(") ||
+			!valueBody.includes("Object.freeze(")
+		) {
+			failures.push(
+				"git-codec.ts's history state decoder must sanitize an exact own-data, Proxy-rejected and frozen state value",
 			);
 		}
 	}
@@ -10229,6 +10565,27 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 			[...native.matchAll(invokePattern)].length !== 1
 		) {
 			failures.push(`native.ts must invoke ${command} exactly once`);
+		}
+	}
+	for (const {
+		command,
+		requestBuilder,
+		decoder,
+	} of GIT_HISTORY_NATIVE_CONTRACTS) {
+		const invokePattern = new RegExp(
+			`\\binvoke<unknown>\\(\\s*"${command}"`,
+			"g",
+		);
+		if (
+			native === undefined ||
+			[...native.matchAll(invokePattern)].length !== 1 ||
+			(requestBuilder !== undefined &&
+				!native.includes(`${requestBuilder}(`)) ||
+			!native.includes(`${decoder}(`)
+		) {
+			failures.push(
+				`native.ts must invoke ${command} exactly once through its audited request and ${decoder}`,
+			);
 		}
 	}
 	if (native === undefined || !native.includes("decodeGitVoid(")) {

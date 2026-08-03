@@ -1429,6 +1429,77 @@ describe("native Plain bridge", () => {
 		]);
 	});
 
+	it("routes every F180 history operation through its exact root-bound request and decoder", async () => {
+		const targetSha = "a".repeat(40);
+		const headSha = "b".repeat(40);
+		const previewToken = "c".repeat(64);
+		const state = { headSha, sequencer: null };
+		const preview = {
+			operation: "merge",
+			targetSha,
+			headSha,
+			ahead: 1,
+			behind: 2,
+			workingTreePaths: [],
+			stagedPaths: [],
+			conflictedPaths: [],
+			pathsTruncated: false,
+			sequencer: null,
+			previewToken,
+		};
+		const outcome = { kind: "completed", state };
+		tauri.invoke.mockImplementation(async (command: string) => {
+			if (command === "git_history_state") {
+				return state;
+			}
+			if (command === "git_history_preview") {
+				return preview;
+			}
+			if (command === "git_history_cancel") {
+				return null;
+			}
+			return outcome;
+		});
+		const bridge = createNativeBridge();
+
+		expect(await bridge.gitHistoryState(rootId)).toEqual(state);
+		expect(await bridge.gitHistoryPreview("merge", targetSha, rootId)).toEqual(
+			preview,
+		);
+		await bridge.gitMerge(targetSha, previewToken, rootId);
+		await bridge.gitRebase(targetSha, previewToken, rootId);
+		await bridge.gitCherryPick(targetSha, previewToken, rootId);
+		await bridge.gitRevert(targetSha, previewToken, rootId);
+		await bridge.gitReset(targetSha, "hard", previewToken, rootId);
+		await bridge.gitHistoryContinue("rebase", rootId);
+		await bridge.gitHistoryAbort("rebase", rootId);
+		await bridge.gitHistoryCancel(rootId);
+
+		expect(tauri.invoke.mock.calls).toEqual([
+			["git_history_state", { rootId, request: {} }],
+			[
+				"git_history_preview",
+				{ rootId, request: { operation: "merge", targetSha } },
+			],
+			["git_merge", { rootId, request: { targetSha, previewToken } }],
+			["git_rebase", { rootId, request: { targetSha, previewToken } }],
+			["git_cherry_pick", { rootId, request: { targetSha, previewToken } }],
+			["git_revert", { rootId, request: { targetSha, previewToken } }],
+			[
+				"git_reset",
+				{ rootId, request: { targetSha, mode: "hard", previewToken } },
+			],
+			["git_history_continue", { rootId, request: { kind: "rebase" } }],
+			["git_history_abort", { rootId, request: { kind: "rebase" } }],
+			["git_history_cancel", { rootId, request: {} }],
+		]);
+		for (const [, args] of tauri.invoke.mock.calls) {
+			expect(Object.isFrozen(args?.request)).toBe(
+				Object.keys(args?.request ?? {}).length > 0,
+			);
+		}
+	});
+
 	it("resolves the sole workspace root for a legacy single-root Git caller", async () => {
 		tauri.invoke.mockResolvedValueOnce(validSnapshot()).mockResolvedValueOnce({
 			branch: { oid: "(initial)", head: "(detached)", upstream: null },
