@@ -1685,6 +1685,8 @@ export function validateWorkspaceProviderBootstrap(source) {
 				parent.expression.text === "createPlainWorkspaceFileSystemProvider" ||
 				parent.expression.text === "registerWorkspaceDeleteCoordinator" ||
 				parent.expression.text === "registerWorkspaceCommands" ||
+				parent.expression.text === "registerLocalWorkspaceCommands" ||
+				parent.expression.text === "reportInitialWorkspaceRestoreStatus" ||
 				parent.expression.text === "configurePlainWorkingCopyBackupBridge" ||
 				parent.expression.text === "configurePlainLifecycleBridge" ||
 				parent.expression.text === "configurePlainSearchBridge" ||
@@ -17893,6 +17895,7 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 		scenarioParameter,
 		deleteScenarioParameter,
 		persistBackupsParameter,
+		workspaceFilePicksParameter,
 	] = installer.parameters;
 	const scenarioArrayType =
 		scenarioParameter?.type !== undefined &&
@@ -17914,7 +17917,7 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 	const signatureIsExact =
 		installer.modifiers?.length === 1 &&
 		installer.modifiers[0].kind === ts.SyntaxKind.AsyncKeyword &&
-		installer.parameters.length === 5 &&
+		installer.parameters.length === 6 &&
 		pageParameter !== undefined &&
 		ts.isIdentifier(pageParameter.name) &&
 		pageParameter.name.text === "page" &&
@@ -17954,6 +17957,14 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 		persistBackupsParameter.name.text === "persistBackupsForTest" &&
 		normalizedText(persistBackupsParameter.type) === "boolean" &&
 		persistBackupsParameter.initializer?.kind === ts.SyntaxKind.FalseKeyword &&
+		workspaceFilePicksParameter !== undefined &&
+		ts.isIdentifier(workspaceFilePicksParameter.name) &&
+		workspaceFilePicksParameter.name.text === "workspaceFilePicks" &&
+		normalizedText(workspaceFilePicksParameter.type) ===
+			'readonly("selected"|"cancelled")[]' &&
+		workspaceFilePicksParameter.initializer !== undefined &&
+		ts.isArrayLiteralExpression(workspaceFilePicksParameter.initializer) &&
+		workspaceFilePicksParameter.initializer.elements.length === 0 &&
 		returnType !== undefined &&
 		ts.isTypeReferenceNode(returnType) &&
 		ts.isIdentifier(returnType.typeName) &&
@@ -18016,13 +18027,14 @@ export function validateWorkspaceMoveFailureBrowserFixture(source) {
 			name: "persistBackupsForTest",
 			property: "persistBackupsForTest",
 		},
+		{ name: "workspaceFilePicks", property: "workspaceFilePicks" },
 	]);
 	const initData = addInitScriptCall?.arguments[1];
 	const initDataIsExact =
 		initData !== undefined &&
 		ts.isObjectLiteralExpression(initData) &&
 		normalizedText(initData) ===
-			"{mode,moveIncompleteScenarios,deleteIncompleteScenarios,workspaceId:nativeWorkspaceId,primaryRootId:nativeRootId,secondaryRootId:nativeSecondaryRootId,persistBackupsForTest,}";
+			"{mode,moveIncompleteScenarios,deleteIncompleteScenarios,workspaceId:nativeWorkspaceId,primaryRootId:nativeRootId,secondaryRootId:nativeSecondaryRootId,persistBackupsForTest,workspaceFilePicks,}";
 	const scenarioReferenceCount = countIdentifier(
 		installer,
 		"moveIncompleteScenarios",
@@ -18326,8 +18338,14 @@ export function validateWorkspaceDeleteFailureBrowserFixture(source) {
 		];
 	}
 	const [installer] = installers;
-	const [, , , deleteScenarioParameter, persistBackupsParameter] =
-		installer.parameters;
+	const [
+		,
+		,
+		,
+		deleteScenarioParameter,
+		persistBackupsParameter,
+		workspaceFilePicksParameter,
+	] = installer.parameters;
 	const deleteScenarioArrayType =
 		deleteScenarioParameter?.type !== undefined &&
 		ts.isTypeOperatorNode(deleteScenarioParameter.type) &&
@@ -18337,7 +18355,7 @@ export function validateWorkspaceDeleteFailureBrowserFixture(source) {
 			: undefined;
 	const deleteScenarioElementType = deleteScenarioArrayType?.elementType;
 	const signatureIsExact =
-		installer.parameters.length === 5 &&
+		installer.parameters.length === 6 &&
 		deleteScenarioParameter !== undefined &&
 		ts.isIdentifier(deleteScenarioParameter.name) &&
 		deleteScenarioParameter.name.text === "deleteIncompleteScenarios" &&
@@ -18354,7 +18372,15 @@ export function validateWorkspaceDeleteFailureBrowserFixture(source) {
 		ts.isIdentifier(persistBackupsParameter.name) &&
 		persistBackupsParameter.name.text === "persistBackupsForTest" &&
 		normalizedText(persistBackupsParameter.type) === "boolean" &&
-		persistBackupsParameter.initializer?.kind === ts.SyntaxKind.FalseKeyword;
+		persistBackupsParameter.initializer?.kind === ts.SyntaxKind.FalseKeyword &&
+		workspaceFilePicksParameter !== undefined &&
+		ts.isIdentifier(workspaceFilePicksParameter.name) &&
+		workspaceFilePicksParameter.name.text === "workspaceFilePicks" &&
+		normalizedText(workspaceFilePicksParameter.type) ===
+			'readonly("selected"|"cancelled")[]' &&
+		workspaceFilePicksParameter.initializer !== undefined &&
+		ts.isArrayLiteralExpression(workspaceFilePicksParameter.initializer) &&
+		workspaceFilePicksParameter.initializer.elements.length === 0;
 	if (!signatureIsExact) {
 		failures.push(
 			"browser delete-failure fixture fourth argument must remain the closed deleteRetained/deletePartial scenario set",
@@ -18411,13 +18437,14 @@ export function validateWorkspaceDeleteFailureBrowserFixture(source) {
 			name: "persistBackupsForTest",
 			property: "persistBackupsForTest",
 		},
+		{ name: "workspaceFilePicks", property: "workspaceFilePicks" },
 	]);
 	const initData = addInitScriptCall?.arguments[1];
 	const initDataIsExact =
 		initData !== undefined &&
 		ts.isObjectLiteralExpression(initData) &&
 		normalizedText(initData) ===
-			"{mode,moveIncompleteScenarios,deleteIncompleteScenarios,workspaceId:nativeWorkspaceId,primaryRootId:nativeRootId,secondaryRootId:nativeSecondaryRootId,persistBackupsForTest,}";
+			"{mode,moveIncompleteScenarios,deleteIncompleteScenarios,workspaceId:nativeWorkspaceId,primaryRootId:nativeRootId,secondaryRootId:nativeSecondaryRootId,persistBackupsForTest,workspaceFilePicks,}";
 	const scenarioReferenceCount = countIdentifier(
 		installer,
 		"deleteIncompleteScenarios",

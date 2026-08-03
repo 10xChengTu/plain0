@@ -2378,6 +2378,8 @@ async function installNativeIpcMock(
 							};
 						case "workspace_snapshot":
 							return currentSnapshot;
+						case "workspace_recent_list":
+							return { revision: 1, restoreStatus: "none", entries: [] };
 						case "workspace_pick_roots":
 							currentSnapshot = selectedSnapshot;
 							return { status: "selected", snapshot: selectedSnapshot };
@@ -3898,6 +3900,7 @@ async function installMultiRootNativeIpcMock(
 	moveIncompleteScenarios: readonly TestMultiRootMoveIncompleteScenario[] = [],
 	deleteIncompleteScenarios: readonly TestMultiRootDeleteIncompleteScenario[] = [],
 	persistBackupsForTest: boolean = false,
+	workspaceFilePicks: readonly ("selected" | "cancelled")[] = [],
 ): Promise<void> {
 	await page.addInitScript(
 		({
@@ -3908,6 +3911,7 @@ async function installMultiRootNativeIpcMock(
 			primaryRootId,
 			secondaryRootId,
 			persistBackupsForTest,
+			workspaceFilePicks,
 		}) => {
 			type MockFile = {
 				kind: "file";
@@ -4262,6 +4266,17 @@ async function installMultiRootNativeIpcMock(
 				[secondaryRootId, directory(secondaryEntries)],
 			]);
 			const activeRoots = new Map<string, MockWorkspaceRoot>();
+			const scriptedFilePicks = [...workspaceFilePicks];
+			let recentEntries: {
+				entry: Readonly<{
+					recentId: string;
+					label: string;
+					rootLabels: readonly string[];
+				}>;
+				roots: readonly MockWorkspaceRoot[];
+			}[] = [];
+			let recentRevision = 1;
+			let nextRecentId = 1;
 			const watchStates = new Map<string, WatchState>();
 			const terminalSessions = new Set<string>();
 			let terminalSessionSerial = 1;
@@ -4340,6 +4355,35 @@ async function installMultiRootNativeIpcMock(
 				revision,
 				roots: [...activeRoots.values()],
 			});
+			const recordRecent = (): void => {
+				const currentRoots = [...activeRoots.values()];
+				recentRevision += 1;
+				if (currentRoots.length === 0) return;
+				const existingIndex = recentEntries.findIndex(
+					(candidate) =>
+						candidate.roots.length === currentRoots.length &&
+						candidate.roots.every(
+							(root, index) => root.rootId === currentRoots[index]?.rootId,
+						),
+				);
+				const recentId =
+					existingIndex >= 0
+						? recentEntries.splice(existingIndex, 1)[0]!.entry.recentId
+						: `00000000-0000-4000-8000-${(nextRecentId++).toString(16).padStart(12, "0")}`;
+				const rootLabels = currentRoots.map(({ displayName }) => displayName);
+				recentEntries.unshift({
+					entry: {
+						recentId,
+						label:
+							rootLabels.length === 1
+								? rootLabels[0]!
+								: `${rootLabels[0]} + ${rootLabels.length - 1} folders`,
+						rootLabels,
+					},
+					roots: [...currentRoots],
+				});
+				recentEntries = recentEntries.slice(0, 20);
+			};
 			const resolveNode = (rootId: string, relativePath: string): MockNode => {
 				if (!activeRoots.has(rootId)) {
 					throw rootNotAuthorized();
@@ -5205,6 +5249,75 @@ async function installMultiRootNativeIpcMock(
 							return { entries: [], truncated: false };
 						case "workspace_snapshot":
 							return snapshot();
+						case "workspace_recent_list":
+							return {
+								revision: recentRevision,
+								restoreStatus: "none",
+								entries: recentEntries.map(({ entry }) => entry),
+							};
+						case "workspace_open_files": {
+							const status = scriptedFilePicks.shift() ?? "selected";
+							if (status === "cancelled") {
+								return { status, snapshot: snapshot(), files: [] };
+							}
+							if (!activeRoots.has(primaryRootId)) {
+								activeRoots.set(primaryRootId, primaryRoot);
+								invalidateRoot(primaryRootId);
+								revision += 1;
+							}
+							recordRecent();
+							return {
+								status,
+								snapshot: snapshot(),
+								files: [{ rootId: primaryRootId, relativePath: "README.md" }],
+							};
+						}
+						case "workspace_open_recent": {
+							const recentId = (
+								args.request as { recentId?: unknown } | undefined
+							)?.recentId;
+							const index = recentEntries.findIndex(
+								(candidate) => candidate.entry.recentId === recentId,
+							);
+							if (index < 0) {
+								throw {
+									code: "WORKSPACE_RECENT_NOT_FOUND",
+									message:
+										"The selected recent workspace is no longer available.",
+								};
+							}
+							const selected = recentEntries[index]!;
+							activeRoots.clear();
+							for (const root of selected.roots) {
+								activeRoots.set(root.rootId, root);
+								invalidateRoot(root.rootId);
+							}
+							revision += 1;
+							recordRecent();
+							return snapshot();
+						}
+						case "workspace_remove_recent": {
+							const recentId = (
+								args.request as { recentId?: unknown } | undefined
+							)?.recentId;
+							const before = recentEntries.length;
+							recentEntries = recentEntries.filter(
+								(candidate) => candidate.entry.recentId !== recentId,
+							);
+							if (recentEntries.length === before) {
+								throw {
+									code: "WORKSPACE_RECENT_NOT_FOUND",
+									message:
+										"The selected recent workspace is no longer available.",
+								};
+							}
+							recentRevision += 1;
+							return null;
+						}
+						case "workspace_clear_recent":
+							recentEntries = [];
+							recentRevision += 1;
+							return null;
 						case "workspace_pick_roots": {
 							const request = args.request as { mode?: unknown } | undefined;
 							if (request?.mode === "replace") {
@@ -5216,6 +5329,7 @@ async function installMultiRootNativeIpcMock(
 								activeRoots.set(primaryRootId, primaryRoot);
 								invalidateRoot(primaryRootId);
 								revision += 1;
+								recordRecent();
 								return { status: "selected", snapshot: snapshot() };
 							}
 							if (request?.mode === "add") {
@@ -5225,6 +5339,7 @@ async function installMultiRootNativeIpcMock(
 								activeRoots.set(secondaryRootId, secondaryRoot);
 								invalidateRoot(secondaryRootId);
 								revision += 1;
+								recordRecent();
 								return { status: "selected", snapshot: snapshot() };
 							}
 							throw new Error("Unexpected workspace picker mode.");
@@ -5242,6 +5357,7 @@ async function installMultiRootNativeIpcMock(
 								activeDelete = undefined;
 							}
 							revision += 1;
+							recordRecent();
 							return snapshot();
 						}
 						case "workspace_watch_sync": {
@@ -5910,6 +6026,7 @@ async function installMultiRootNativeIpcMock(
 			primaryRootId: nativeRootId,
 			secondaryRootId: nativeSecondaryRootId,
 			persistBackupsForTest,
+			workspaceFilePicks,
 		},
 	);
 }
@@ -6325,6 +6442,214 @@ test("adds a second workspace root and replaces it through Workbench actions", a
 	await expect(
 		page.locator(".notifications-toasts .notification-toast"),
 	).toHaveCount(0);
+	expect(errors).toEqual([]);
+});
+
+test("opens a file with parent-root adoption and manages path-free recent workspaces", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	const nativeDialogs: string[] = [];
+	await installMultiRootNativeIpcMock(page, "readonly", [], [], false, [
+		"cancelled",
+		"selected",
+	]);
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") errors.push(message.text());
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	await executePaletteCommand(page, "Open File", "File: Open File...");
+	await expect(
+		page.getByRole("tab", { name: /^README\.md(?:,.*)?$/ }),
+	).toHaveCount(0);
+	let openFileCalls = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+		};
+		return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+			({ command }) => command === "workspace_open_files",
+		);
+	});
+	expect(openFileCalls).toEqual([
+		{ command: "workspace_open_files", args: { request: {} } },
+	]);
+
+	await executePaletteCommand(page, "Open File", "File: Open File...");
+	await expect(
+		page.getByRole("tab", { name: /^README\.md(?:,.*)?$/ }),
+	).toBeVisible();
+	await expect(
+		page.getByRole("code").filter({ hasText: "Primary workspace" }),
+	).toBeVisible();
+	openFileCalls = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+		};
+		return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+			({ command }) => command === "workspace_open_files",
+		);
+	});
+	expect(openFileCalls).toEqual([
+		{ command: "workspace_open_files", args: { request: {} } },
+		{ command: "workspace_open_files", args: { request: {} } },
+	]);
+
+	await page.getByRole("tab", { name: /^Explorer / }).click();
+	const explorer = page.getByRole("tree", { name: "Files Explorer" });
+	await expect(explorer).toBeVisible();
+	const primaryRoot = explorer.getByRole("treeitem", {
+		name: "plain-workspace",
+		exact: true,
+	});
+	const secondaryRoot = explorer.getByRole("treeitem", {
+		name: "plain-library",
+		exact: true,
+	});
+	await expect(primaryRoot).toHaveCount(1);
+	await expect(secondaryRoot).toHaveCount(0);
+	await executePaletteCommand(
+		page,
+		"Add Folder to Workspace",
+		"Workspaces: Add Folder to Workspace...",
+	);
+	await expect(secondaryRoot).toHaveCount(1);
+
+	const openRecentPicker = async (): Promise<Locator> => {
+		await page.keyboard.press("ControlOrMeta+Shift+P");
+		const palette = page.locator(".quick-input-widget");
+		await expect(palette).toBeVisible();
+		await palette.locator("input").pressSequentially("Open Recent");
+		const command = palette.getByText("File: Open Recent...", { exact: true });
+		await expect(command).toHaveCount(1);
+		await command.click();
+		await expect(palette.locator("input")).toHaveAttribute(
+			"placeholder",
+			"Select a recent workspace to open",
+		);
+		return palette;
+	};
+
+	let recentPicker = await openRecentPicker();
+	let recentRows = recentPicker.locator(".quick-input-list .monaco-list-row");
+	await expect(recentRows).toHaveCount(2);
+	await expect(recentPicker).not.toContainText("/Users/");
+	await expect(recentPicker).not.toContainText("plain-workspace://");
+	await recentRows.filter({ hasNotText: "+ 1 folders" }).click();
+	await expect(recentPicker).toBeHidden();
+	await expect(primaryRoot).toHaveCount(1);
+	await expect(secondaryRoot).toHaveCount(0);
+
+	recentPicker = await openRecentPicker();
+	recentRows = recentPicker.locator(".quick-input-list .monaco-list-row");
+	const multiRootRecent = recentRows.filter({ hasText: "+ 1 folders" });
+	await expect(multiRootRecent).toHaveCount(1);
+	await multiRootRecent.click();
+	await expect(recentPicker).toBeHidden();
+	await expect(primaryRoot).toHaveCount(1);
+	await expect(secondaryRoot).toHaveCount(1);
+
+	recentPicker = await openRecentPicker();
+	recentRows = recentPicker.locator(".quick-input-list .monaco-list-row");
+	const removableMultiRoot = recentRows.filter({ hasText: "+ 1 folders" });
+	await removableMultiRoot.hover();
+	const removeRecentButton = removableMultiRoot.locator(
+		".quick-input-list-entry-action-bar .action-label",
+	);
+	await expect(removeRecentButton).toHaveCount(1);
+	await expect(removeRecentButton).toHaveAttribute(
+		"aria-label",
+		"Remove from Recently Opened",
+	);
+	await removeRecentButton.click();
+	await expect(removableMultiRoot).toHaveCount(0);
+	await expect(recentRows).toHaveCount(1);
+	await page.keyboard.press("Escape");
+	await expect(recentPicker).toBeHidden();
+
+	await executePaletteCommand(
+		page,
+		"Clear Recently Opened",
+		"File: Clear Recently Opened...",
+	);
+	let clearDialog = page.locator(".monaco-dialog-box");
+	await expect(clearDialog).toContainText("Clear all recent workspaces?");
+	await expect(clearDialog).toContainText(
+		"does not delete any files or folders",
+	);
+	await clearDialog
+		.getByRole("button", { name: "Cancel", exact: true })
+		.click();
+	await expect(clearDialog).toHaveCount(0);
+
+	recentPicker = await openRecentPicker();
+	await expect(
+		recentPicker.locator(".quick-input-list .monaco-list-row"),
+	).toHaveCount(1);
+	await page.keyboard.press("Escape");
+	await expect(recentPicker).toBeHidden();
+
+	await executePaletteCommand(
+		page,
+		"Clear Recently Opened",
+		"File: Clear Recently Opened...",
+	);
+	clearDialog = page.locator(".monaco-dialog-box");
+	await clearDialog.getByRole("button", { name: "Clear", exact: true }).click();
+	await expect(clearDialog).toHaveCount(0);
+	await expect(
+		page.locator(".notifications-toasts .notification-toast").filter({
+			hasText: "cleared recent workspaces",
+		}),
+	).toHaveCount(1);
+	await executePaletteCommand(page, "Open Recent", "File: Open Recent...");
+	await expect(
+		page.locator(".notifications-toasts .notification-toast").filter({
+			hasText: "there are no recent workspaces",
+		}),
+	).toHaveCount(1);
+
+	const workflowCalls = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+		};
+		return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(({ command }) =>
+			[
+				"workspace_open_files",
+				"workspace_recent_list",
+				"workspace_open_recent",
+				"workspace_remove_recent",
+				"workspace_clear_recent",
+			].includes(command),
+		);
+	});
+	expect(
+		workflowCalls.filter(({ command }) => command === "workspace_open_recent"),
+	).toHaveLength(2);
+	expect(
+		workflowCalls.filter(
+			({ command }) => command === "workspace_remove_recent",
+		),
+	).toHaveLength(1);
+	expect(
+		workflowCalls.filter(({ command }) => command === "workspace_clear_recent"),
+	).toEqual([{ command: "workspace_clear_recent", args: { request: {} } }]);
+	for (const call of workflowCalls) {
+		expect(JSON.stringify(call.args)).not.toContain("/Users/");
+		expect(JSON.stringify(call.args)).not.toContain("plain-workspace://");
+	}
+	expect(nativeDialogs).toEqual([]);
 	expect(errors).toEqual([]);
 });
 

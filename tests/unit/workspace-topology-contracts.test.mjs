@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import {
 	validateAppHtmlAuthority,
+	validateLocalWorkspaceWorkflowCommands,
 	validateViteResolverAuthority,
 	validateWorkspaceTopologyContracts,
 	WORKSPACE_TOPOLOGY_CONTRACT_FAILURES,
@@ -269,6 +270,66 @@ describe("workspace topology source contracts", () => {
 		expect(
 			validateWorkspaceTopologyContracts(withAppSources(currentSources())),
 		).toEqual([]);
+	});
+
+	it("locks Open File and Recent to serialized capability-relative, path-free local workflows", () => {
+		const relativePath = "app/features/workspace/local-workflow-commands.ts";
+		const production = productionAppSourceByPath.get(relativePath);
+		expect(production).toBeTypeOf("string");
+		expect(validateLocalWorkspaceWorkflowCommands(production)).toBe(true);
+
+		for (const mutate of [
+			(source) =>
+				replaceOnce(
+					source,
+					"scheme: PLAIN_WORKSPACE_SCHEME,",
+					'scheme: "file",',
+				),
+			(source) =>
+				replaceOnce(source, "authority: target.rootId,", 'authority: "",'),
+			(source) =>
+				replaceOnce(
+					source,
+					"snapshot: await bridge.workspaceOpenRecent(picked.recentId),",
+					"snapshot: undefined,",
+				),
+			(source) =>
+				replaceOnce(
+					source,
+					"await bridge.workspaceRemoveRecent(context.item.recentId);",
+					"await bridge.workspaceRemoveRecent(context.item.label);",
+				),
+			(source) =>
+				replaceOnce(
+					source,
+					"export function registerLocalWorkspaceCommands(",
+					'localStorage.setItem("recent", "/Users/example/private");\n\nexport function registerLocalWorkspaceCommands(',
+				),
+		]) {
+			const mutatedSource = mutate(production);
+			expect(validateLocalWorkspaceWorkflowCommands(mutatedSource)).toBe(false);
+			expect(
+				validateWorkspaceTopologyContracts(
+					mutatedProductionAppSource(relativePath, () => mutatedSource),
+				),
+			).toContain(WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.localWorkflow);
+		}
+	});
+
+	it("requires startup registration, disposal, and failed-restore reporting", () => {
+		const sources = mutatedProductionAppSource("app/main.ts", (source) =>
+			replaceOnce(
+				source,
+				`\tawait reportInitialWorkspaceRestoreStatus(
+		bridge,
+		await getService(INotificationService),
+	);\n`,
+				"",
+			),
+		);
+		expect(validateWorkspaceTopologyContracts(sources)).toContain(
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.localWorkflow,
+		);
 	});
 
 	it("requires the root provider producer in complete app authority", () => {

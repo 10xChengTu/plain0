@@ -54,6 +54,10 @@ import "./features/scm/scm-contribution";
 import { registerWorkspaceCommands } from "./features/workspace/commands";
 import { registerWorkspaceDeleteCoordinator } from "./features/workspace/delete-coordinator";
 import {
+	registerLocalWorkspaceCommands,
+	reportInitialWorkspaceRestoreStatus,
+} from "./features/workspace/local-workflow-commands";
+import {
 	createPlainWorkspaceConfigurationProvider,
 	PLAIN_WORKSPACE_CONFIGURATION_SCHEME,
 } from "./features/workspace/workspace-configuration-provider";
@@ -150,6 +154,8 @@ async function bootstrap(): Promise<void> {
 	});
 	let workspaceCommands:
 		ReturnType<typeof registerWorkspaceCommands> | undefined;
+	let localWorkspaceCommands:
+		ReturnType<typeof registerLocalWorkspaceCommands> | undefined;
 	let preferenceCommandsRegistration:
 		ReturnType<typeof registerPlainPreferenceCommands> | undefined;
 	let themeCommandsRegistration:
@@ -180,6 +186,7 @@ async function bootstrap(): Promise<void> {
 		() => {
 			void stopListening();
 			workspaceCommands?.dispose();
+			localWorkspaceCommands?.dispose();
 			preferenceCommandsRegistration?.dispose();
 			workspaceDeleteCoordinator.dispose();
 			themeCommandsRegistration?.dispose();
@@ -260,6 +267,14 @@ async function bootstrap(): Promise<void> {
 		bridge,
 		await getService(IContextKeyService),
 		workspaceTopologyCoordinator,
+	);
+	localWorkspaceCommands = registerLocalWorkspaceCommands(
+		bridge,
+		workspaceTopologyCoordinator,
+	);
+	await reportInitialWorkspaceRestoreStatus(
+		bridge,
+		await getService(INotificationService),
 	);
 	preferenceCommandsRegistration = registerPlainPreferenceCommands();
 	terminalCommandsRegistration = registerPlainTerminalCommands();

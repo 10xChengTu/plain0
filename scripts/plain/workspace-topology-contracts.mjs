@@ -17,6 +17,8 @@ export const WORKSPACE_TOPOLOGY_CONTRACT_FAILURES = Object.freeze({
 		"Plain workspace service descriptors must override editing and recent-workspace defaults with fail-closed implementations",
 	commands:
 		"GUARDED_WORKSPACE_COMMAND_IDS must remain the exact closed set registered as stable rejections",
+	localWorkflow:
+		"local Open File and Recent commands must preserve opaque ids, serialized topology projection, DOM confirmation, and path-free UI",
 });
 
 export const EXPECTED_GUARDED_WORKSPACE_COMMAND_IDS = Object.freeze([
@@ -26,7 +28,6 @@ export const EXPECTED_GUARDED_WORKSPACE_COMMAND_IDS = Object.freeze([
 	"workbench.action.openWorkspaceInNewWindow",
 	"workbench.action.saveWorkspaceAs",
 	"workbench.action.duplicateWorkspaceInNewWindow",
-	"workbench.action.files.openFile",
 	"workbench.action.files.openFileFolder",
 	"workbench.action.files.openFileInNewWindow",
 	"workbench.action.files.newUntitledFile",
@@ -224,6 +225,10 @@ const DIRECT_COMMAND_REGISTRATION_MANIFEST = Object.freeze([
 	Object.freeze({
 		relativePath: "app/features/workspace/commands.ts",
 		count: productContracts.length + 1,
+	}),
+	Object.freeze({
+		relativePath: "app/features/workspace/local-workflow-commands.ts",
+		count: 4,
 	}),
 	Object.freeze({
 		relativePath: "app/features/themes/plain-theme-picker.ts",
@@ -509,6 +514,16 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/features/workspace/file-system-provider.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
 	"app/features/workspace/file-system-provider.ts:@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files",
 	"app/features/workspace/file-system-provider.ts:@codingame/monaco-vscode-api/vscode/vs/platform/files/common/plainWorkspaceDelete",
+	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/codicons",
+	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/themables",
+	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
+	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions",
+	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands",
+	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service",
+	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service",
+	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput",
+	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service",
+	"app/features/workspace/local-workflow-commands.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service",
 	"app/features/workspace/workspace-configuration-provider.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/event",
 	"app/features/workspace/workspace-configuration-provider.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle",
 	"app/features/workspace/workspace-configuration-provider.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
@@ -5616,6 +5631,277 @@ function validateDirectCommandRegistrationManifest(authority, registrations) {
 	);
 }
 
+export function validateLocalWorkspaceWorkflowCommands(source) {
+	if (typeof source !== "string") {
+		return false;
+	}
+	const sourceFile = parse(
+		"app/features/workspace/local-workflow-commands.ts",
+		source,
+	);
+	if (sourceFile.parseDiagnostics.length !== 0) {
+		return false;
+	}
+	const compact = source.replace(/\s+/gu, "");
+	const includesTokens = (expected) =>
+		compact.includes(expected.replace(/\s+/gu, ""));
+	const commandIdDeclarations = variableDeclarations(
+		sourceFile,
+		"LOCAL_WORKSPACE_COMMAND_IDS",
+	);
+	const commandIdFreeze =
+		commandIdDeclarations.length === 1
+			? unwrapExpression(commandIdDeclarations[0].initializer)
+			: undefined;
+	const commandIdObject =
+		ts.isCallExpression(commandIdFreeze) &&
+		commandIdFreeze.arguments.length === 1
+			? unwrapExpression(commandIdFreeze.arguments[0])
+			: undefined;
+	const commandIdReceiver = directMethodReceiver(
+		commandIdFreeze,
+		"Object",
+		"freeze",
+	);
+	const commandIdsAreExact =
+		commandIdDeclarations.length === 1 &&
+		isConstVariableDeclaration(commandIdDeclarations[0]) &&
+		commandIdReceiver !== undefined &&
+		hasExactObjectShape(commandIdObject, [
+			[
+				"openFile",
+				(value) =>
+					isExactStringLiteral(value, "workbench.action.files.openFile"),
+			],
+			[
+				"openRecent",
+				(value) => isExactStringLiteral(value, "workbench.action.openRecent"),
+			],
+			[
+				"quickOpenRecent",
+				(value) =>
+					isExactStringLiteral(value, "workbench.action.quickOpenRecent"),
+			],
+			[
+				"clearRecent",
+				(value) =>
+					isExactStringLiteral(value, "workbench.action.clearRecentFiles"),
+			],
+		]);
+
+	const registerDeclarations = sourceFile.statements.filter(
+		(statement) =>
+			ts.isFunctionDeclaration(statement) &&
+			statement.name?.text === "registerLocalWorkspaceCommands" &&
+			statement.body !== undefined,
+	);
+	const registerDeclaration = registerDeclarations[0];
+	const registerParameters = registerDeclaration?.parameters ?? [];
+	const bridgeParameter = registerParameters[0];
+	const topologyParameter = registerParameters[1];
+	const registerShapeIsExact =
+		registerDeclarations.length === 1 &&
+		registerParameters.length === 2 &&
+		isExactTypedParameter(bridgeParameter, "bridge", "PlainBridge") &&
+		isExactTypedParameter(
+			topologyParameter,
+			"topologyCoordinator",
+			"WorkspaceTopologyCoordinator",
+		);
+	const functionInitializer = (name) => {
+		const declarations = variableDeclarations(sourceFile, name);
+		return declarations.length === 1
+			? unwrapExpression(declarations[0].initializer)
+			: undefined;
+	};
+	const openFiles = functionInitializer("openFiles");
+	const openRecent = functionInitializer("openRecent");
+	const clearRecent = functionInitializer("clearRecent");
+	const openFileTopologyCalls = callWithChain(openFiles, [
+		"topologyCoordinator",
+		"runMutation",
+	]);
+	const openRecentTopologyCalls = callWithChain(openRecent, [
+		"topologyCoordinator",
+		"runMutation",
+	]);
+	const allTopologyCalls = callWithChain(sourceFile, [
+		"topologyCoordinator",
+		"runMutation",
+	]);
+	const openFileNativeCalls = callWithChain(sourceFile, [
+		"bridge",
+		"workspaceOpenFiles",
+	]);
+	const openRecentNativeCalls = callWithChain(sourceFile, [
+		"bridge",
+		"workspaceOpenRecent",
+	]);
+	const recentListCalls = callWithChain(sourceFile, [
+		"bridge",
+		"workspaceRecentList",
+	]);
+	const removeRecentCalls = callWithChain(sourceFile, [
+		"bridge",
+		"workspaceRemoveRecent",
+	]);
+	const clearRecentCalls = callWithChain(sourceFile, [
+		"bridge",
+		"workspaceClearRecent",
+	]);
+	const topologyIsSerialized =
+		allTopologyCalls.length === 2 &&
+		openFileTopologyCalls.length === 1 &&
+		openRecentTopologyCalls.length === 1 &&
+		openFileNativeCalls.length === 1 &&
+		openRecentNativeCalls.length === 1 &&
+		containsNode(openFileTopologyCalls[0], openFileNativeCalls[0]) &&
+		containsNode(openRecentTopologyCalls[0], openRecentNativeCalls[0]) &&
+		recentListCalls.length === 2 &&
+		removeRecentCalls.length === 1 &&
+		clearRecentCalls.length === 1 &&
+		callWithChain(clearRecent, ["topologyCoordinator", "runMutation"])
+			.length === 0;
+
+	const uriCalls = callWithChain(sourceFile, ["URI", "from"]);
+	const uriArgument =
+		uriCalls.length === 1 && uriCalls[0].arguments.length === 1
+			? unwrapExpression(uriCalls[0].arguments[0])
+			: undefined;
+	const pathProperty = objectProperty(uriArgument, "path");
+	const pathInitializer = ts.isPropertyAssignment(pathProperty)
+		? unwrapExpression(pathProperty.initializer)
+		: undefined;
+	const uriIsCapabilityRelative =
+		hasExactObjectShape(uriArgument, [
+			["scheme", (value) => sameChain(value, ["PLAIN_WORKSPACE_SCHEME"])],
+			["authority", (value) => sameChain(value, ["target", "rootId"])],
+			[
+				"path",
+				(value) =>
+					ts.isTemplateExpression(value) &&
+					value.head.text === "/" &&
+					value.templateSpans.length === 1 &&
+					sameChain(value.templateSpans[0].expression, [
+						"target",
+						"relativePath",
+					]) &&
+					value.templateSpans[0].literal.text === "",
+			],
+		]) && ts.isTemplateExpression(pathInitializer);
+
+	const commandRegistrations = callWithChain(sourceFile, [
+		"CommandsRegistry",
+		"registerCommand",
+	]);
+	const registeredIds = commandRegistrations.map((call) =>
+		call.arguments.length === 2
+			? unwrapExpression(call.arguments[0])
+			: undefined,
+	);
+	const registrationsAreExact =
+		commandRegistrations.length === 4 &&
+		["openFile", "openRecent", "quickOpenRecent", "clearRecent"].every(
+			(name, index) =>
+				sameChain(registeredIds[index], ["LOCAL_WORKSPACE_COMMAND_IDS", name]),
+		) &&
+		callWithChain(sourceFile, ["MenuRegistry", "appendMenuItem"]).length ===
+			1 &&
+		callWithChain(sourceFile, ["dialogService", "confirm"]).length === 1;
+
+	const forbiddenIdentifiers = new Set([
+		"window",
+		"document",
+		"globalThis",
+		"localStorage",
+		"sessionStorage",
+		"fetch",
+		"XMLHttpRequest",
+	]);
+	const forbiddenPropertyNames = new Set([
+		"fsPath",
+		"nativePath",
+		"absolutePath",
+		"pathname",
+	]);
+	const hasForbiddenIdentifier = descendants(
+		sourceFile,
+		(node) => ts.isIdentifier(node) && forbiddenIdentifiers.has(node.text),
+	).length;
+	const hasForbiddenProperty = descendants(
+		sourceFile,
+		(node) =>
+			ts.isPropertyAccessExpression(node) &&
+			forbiddenPropertyNames.has(node.name.text),
+	).length;
+	const hasForbiddenString = descendants(
+		sourceFile,
+		(node) =>
+			ts.isStringLiteralLike(node) &&
+			(node.text.startsWith("file:") ||
+				node.text.includes("/Users/") ||
+				node.text.includes("\\Users\\")),
+	).length;
+
+	const semanticFragments = [
+		'if (result.status === "cancelled") return;',
+		'opened.status === "selected" ? opened.snapshot : undefined',
+		"await openSelectedFiles(result, editorService);",
+		"history.entries.map(recentQuickPickItem)",
+		"await bridge.workspaceRemoveRecent(context.item.recentId);",
+		"await bridge.workspaceOpenRecent(picked.recentId)",
+		'entry.rootLabels.join(" · ")',
+		"entry.recentId",
+		'history.restoreStatus === "failed"',
+		'"This only clears Plain\'s local history. It does not delete any files or folders."',
+	];
+	const requiredSemantics = semanticFragments.every((fragment) =>
+		includesTokens(fragment),
+	);
+
+	return (
+		commandIdsAreExact &&
+		registerShapeIsExact &&
+		topologyIsSerialized &&
+		uriIsCapabilityRelative &&
+		registrationsAreExact &&
+		hasForbiddenIdentifier === 0 &&
+		hasForbiddenProperty === 0 &&
+		hasForbiddenString === 0 &&
+		requiredSemantics
+	);
+}
+
+function validateLocalWorkspaceWorkflowBootstrap(sourceFile) {
+	if (sourceFile?.parseDiagnostics.length !== 0) {
+		return false;
+	}
+	const compact = sourceFile.getFullText().replace(/\s+/gu, "");
+	const includesTokens = (expected) =>
+		compact.includes(expected.replace(/\s+/gu, ""));
+	const checks = [
+		hasExactNamedImport(
+			sourceFile,
+			"./features/workspace/local-workflow-commands",
+			["registerLocalWorkspaceCommands", "reportInitialWorkspaceRestoreStatus"],
+		),
+		directCallsNamed(sourceFile, "registerLocalWorkspaceCommands").length === 1,
+		directCallsNamed(sourceFile, "reportInitialWorkspaceRestoreStatus")
+			.length === 1,
+		includesTokens(
+			"let localWorkspaceCommands: ReturnType<typeof registerLocalWorkspaceCommands> | undefined;",
+		),
+		includesTokens("localWorkspaceCommands?.dispose();"),
+		includesTokens(
+			"localWorkspaceCommands = registerLocalWorkspaceCommands(bridge, workspaceTopologyCoordinator",
+		),
+		includesTokens(
+			"await reportInitialWorkspaceRestoreStatus(bridge, await getService(INotificationService)",
+		),
+	];
+	return checks.every(Boolean);
+}
+
 function validateTopologyAuthority(authority) {
 	if (
 		!authority.valid ||
@@ -6101,6 +6387,9 @@ export function validateWorkspaceTopologyContracts(sources) {
 	const main = sourceFile("app/main.ts");
 	const services = sourceFile("app/services.ts");
 	const commands = sourceFile("app/features/workspace/commands.ts");
+	const localWorkflowCommands = sourceFile(
+		"app/features/workspace/local-workflow-commands.ts",
+	);
 	const projection = sourceFile(
 		"app/features/workspace/workspace-projection.ts",
 	);
@@ -6147,6 +6436,16 @@ export function validateWorkspaceTopologyContracts(sources) {
 	}
 	if (!safelyValidate(validateGuardedCommands, commands)) {
 		failures.push(WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.commands);
+	}
+	if (
+		hasAppSources &&
+		(!safelyValidate(
+			validateLocalWorkspaceWorkflowCommands,
+			localWorkflowCommands?.getFullText(),
+		) ||
+			!safelyValidate(validateLocalWorkspaceWorkflowBootstrap, main))
+	) {
+		failures.push(WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.localWorkflow);
 	}
 	return failures;
 }

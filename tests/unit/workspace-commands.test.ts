@@ -2,6 +2,14 @@ import { CommandsRegistry } from "@codingame/monaco-vscode-api/vscode/vs/platfor
 import { ICommandService } from "@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands.service";
 import type { IContextKeyService } from "@codingame/monaco-vscode-api/vscode/vs/platform/contextkey/common/contextkey.service";
 import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
+import {
+	MenuId,
+	MenuRegistry,
+} from "@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions";
+import { IDialogService } from "@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service";
+import { INotificationService } from "@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service";
+import { IQuickInputService } from "@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service";
+import { IEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -10,6 +18,11 @@ import {
 	registerWorkspaceCommands,
 	WORKSPACE_COMMAND_IDS,
 } from "../../app/features/workspace/commands";
+import {
+	LOCAL_WORKSPACE_COMMAND_IDS,
+	registerLocalWorkspaceCommands,
+	reportInitialWorkspaceRestoreStatus,
+} from "../../app/features/workspace/local-workflow-commands";
 import type { WorkspaceTopologyCoordinator } from "../../app/features/workspace/workspace-projection";
 import type { PlainBridge, WorkspaceSnapshot } from "../../app/platform/tauri";
 import { PLAIN_WORKSPACE_OPERATION_UNSUPPORTED } from "../../app/services/plain-workspace-services";
@@ -187,6 +200,21 @@ function testCommandAccessor(executeCommand = vi.fn()) {
 		commandService,
 		executeCommand,
 	});
+}
+
+function testServiceAccessor(services: ReadonlyMap<unknown, unknown>) {
+	return {
+		get(service: unknown) {
+			if (!services.has(service)) {
+				throw new Error("unexpected service token requested");
+			}
+			return services.get(service);
+		},
+	};
+}
+
+function testNotificationService() {
+	return { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 }
 
 describe("workspace Workbench command overrides", () => {
@@ -835,5 +863,344 @@ describe("workspace Workbench command overrides", () => {
 		} finally {
 			registration.dispose();
 		}
+	});
+
+	it("opens selected files only after their adopted workspace snapshot is projected and treats cancellation as a no-op", async () => {
+		const snapshot = Object.freeze({
+			workspaceId: "00000000-0000-4000-8000-000000000010",
+			revision: 4,
+			roots: Object.freeze([]),
+		}) satisfies WorkspaceSnapshot;
+		const calls: string[] = [];
+		const workspaceOpenFiles = vi
+			.fn()
+			.mockImplementationOnce(async () => {
+				calls.push("native-selected");
+				return Object.freeze({
+					status: "selected" as const,
+					snapshot,
+					files: Object.freeze([
+						Object.freeze({ rootId, relativePath: "docs/README.md" }),
+					]),
+				});
+			})
+			.mockImplementationOnce(async () => {
+				calls.push("native-cancelled");
+				return Object.freeze({
+					status: "cancelled" as const,
+					snapshot,
+					files: Object.freeze([]),
+				});
+			});
+		const topologyCoordinator = {
+			runMutation: vi.fn(async (mutation: TestTopologyMutation) => {
+				const result = await mutation();
+				if (result.snapshot !== undefined) calls.push("projected");
+				return result.result;
+			}),
+		} as unknown as WorkspaceTopologyCoordinator;
+		const editorService = {
+			openEditors: vi.fn(async (_editors: readonly { resource: URI }[]) => {
+				calls.push("editors-opened");
+			}),
+		};
+		const notificationService = testNotificationService();
+		const bridge = testBridge({ workspaceOpenFiles });
+		const registration = registerLocalWorkspaceCommands(
+			bridge,
+			topologyCoordinator,
+		);
+		const accessor = testServiceAccessor(
+			new Map<unknown, unknown>([
+				[IEditorService, editorService],
+				[INotificationService, notificationService],
+			]),
+		);
+
+		try {
+			expect(
+				MenuRegistry.getMenuItems(MenuId.CommandPalette).some(
+					(item) =>
+						"command" in item &&
+						item.command.id === LOCAL_WORKSPACE_COMMAND_IDS.openFile,
+				),
+			).toBe(true);
+			await CommandsRegistry.getCommand(
+				LOCAL_WORKSPACE_COMMAND_IDS.openFile,
+			)?.handler(accessor as never);
+			expect(calls).toEqual(["native-selected", "projected", "editors-opened"]);
+			const resource =
+				editorService.openEditors.mock.calls[0]?.[0][0]?.resource;
+			expect(resource).toMatchObject({
+				scheme: "plain-workspace",
+				authority: rootId,
+				path: "/docs/README.md",
+			});
+
+			await CommandsRegistry.getCommand(
+				LOCAL_WORKSPACE_COMMAND_IDS.openFile,
+			)?.handler(accessor as never);
+			expect(editorService.openEditors).toHaveBeenCalledOnce();
+			expect(topologyCoordinator.runMutation).toHaveBeenCalledTimes(2);
+			expect(calls).toEqual([
+				"native-selected",
+				"projected",
+				"editors-opened",
+				"native-cancelled",
+			]);
+			expect(notificationService.error).not.toHaveBeenCalled();
+		} finally {
+			registration.dispose();
+		}
+	});
+
+	it("opens a recent workspace by opaque id and removes an entry only after native success", async () => {
+		const snapshot = Object.freeze({
+			workspaceId: "00000000-0000-4000-8000-000000000011",
+			revision: 8,
+			roots: Object.freeze([]),
+		}) satisfies WorkspaceSnapshot;
+		const entry = Object.freeze({
+			recentId: "00000000-0000-4000-8000-000000000099",
+			label: "alpha + 1 folders",
+			rootLabels: Object.freeze(["alpha", "beta"]),
+		});
+		const workspaceRecentList = vi.fn(async () =>
+			Object.freeze({
+				revision: 3,
+				restoreStatus: "restored" as const,
+				entries: Object.freeze([entry]),
+			}),
+		);
+		const workspaceOpenRecent = vi.fn(async () => snapshot);
+		const workspaceRemoveRecent = vi.fn(async () => undefined);
+		let lastItems: readonly (typeof entry & {
+			readonly buttons: readonly unknown[];
+		})[] = [];
+		let lastOptions: {
+			onDidTriggerItemButton?: (context: {
+				button: unknown;
+				item: (typeof lastItems)[number];
+				removeItem(): void;
+			}) => Promise<void>;
+		} = {};
+		const quickInputService = {
+			pick: vi.fn(async (items, options) => {
+				lastItems = items;
+				lastOptions = options;
+				return items[0];
+			}),
+		};
+		const projected: WorkspaceSnapshot[] = [];
+		const topologyCoordinator = {
+			runMutation: vi.fn(async (mutation: TestTopologyMutation) => {
+				const result = await mutation();
+				if (result.snapshot !== undefined) projected.push(result.snapshot);
+				return result.result;
+			}),
+		} as unknown as WorkspaceTopologyCoordinator;
+		const notificationService = testNotificationService();
+		const registration = registerLocalWorkspaceCommands(
+			testBridge({
+				workspaceRecentList,
+				workspaceOpenRecent,
+				workspaceRemoveRecent,
+			}),
+			topologyCoordinator,
+		);
+		const accessor = testServiceAccessor(
+			new Map<unknown, unknown>([
+				[IQuickInputService, quickInputService],
+				[INotificationService, notificationService],
+			]),
+		);
+
+		try {
+			await CommandsRegistry.getCommand(
+				LOCAL_WORKSPACE_COMMAND_IDS.openRecent,
+			)?.handler(accessor as never);
+			expect(workspaceOpenRecent).toHaveBeenCalledWith(entry.recentId);
+			expect(projected).toEqual([snapshot]);
+			expect(lastItems).toHaveLength(1);
+			expect(lastItems[0]).toMatchObject({
+				label: entry.label,
+				description: "alpha · beta",
+				recentId: entry.recentId,
+			});
+			expect(JSON.stringify(lastItems)).not.toContain("/Users/");
+
+			const removeItem = vi.fn();
+			await lastOptions.onDidTriggerItemButton?.({
+				button: lastItems[0]!.buttons[0],
+				item: lastItems[0]!,
+				removeItem,
+			});
+			expect(workspaceRemoveRecent).toHaveBeenCalledWith(entry.recentId);
+			expect(removeItem).toHaveBeenCalledOnce();
+			expect(notificationService.error).not.toHaveBeenCalled();
+		} finally {
+			registration.dispose();
+		}
+	});
+
+	it("keeps empty, dismissed, failed-remove and clear-history branches side-effect safe", async () => {
+		const entry = Object.freeze({
+			recentId: "00000000-0000-4000-8000-000000000098",
+			label: "alpha",
+			rootLabels: Object.freeze(["alpha"]),
+		});
+		const workspaceRecentList = vi
+			.fn()
+			.mockResolvedValueOnce({
+				revision: 0,
+				restoreStatus: "none",
+				entries: [],
+			})
+			.mockResolvedValueOnce({
+				revision: 1,
+				restoreStatus: "none",
+				entries: [entry],
+			})
+			.mockResolvedValueOnce({
+				revision: 1,
+				restoreStatus: "none",
+				entries: [entry],
+			});
+		let buttonContext:
+			| {
+					onDidTriggerItemButton?: (context: {
+						button: unknown;
+						item: { recentId: string; buttons: readonly unknown[] };
+						removeItem(): void;
+					}) => Promise<void>;
+			  }
+			| undefined;
+		let items: readonly {
+			recentId: string;
+			buttons: readonly unknown[];
+		}[] = [];
+		const quickInputService = {
+			pick: vi.fn(async (nextItems, options) => {
+				items = nextItems;
+				buttonContext = options;
+				return undefined;
+			}),
+		};
+		const removeFailure = new Error("remove failed");
+		const workspaceRemoveRecent = vi.fn(async () =>
+			Promise.reject(removeFailure),
+		);
+		const workspaceOpenRecent = vi.fn();
+		const workspaceClearRecent = vi.fn(async () => undefined);
+		const notificationService = testNotificationService();
+		const dialogService = {
+			confirm: vi
+				.fn()
+				.mockResolvedValueOnce({ confirmed: false })
+				.mockResolvedValueOnce({ confirmed: true }),
+		};
+		const topologyCoordinator = {
+			runMutation: vi.fn(async (mutation: TestTopologyMutation) => {
+				const result = await mutation();
+				return result.result;
+			}),
+		} as unknown as WorkspaceTopologyCoordinator;
+		const registration = registerLocalWorkspaceCommands(
+			testBridge({
+				workspaceRecentList,
+				workspaceOpenRecent,
+				workspaceRemoveRecent,
+				workspaceClearRecent,
+			}),
+			topologyCoordinator,
+		);
+		const recentAccessor = testServiceAccessor(
+			new Map<unknown, unknown>([
+				[IQuickInputService, quickInputService],
+				[INotificationService, notificationService],
+			]),
+		);
+		const clearAccessor = testServiceAccessor(
+			new Map<unknown, unknown>([
+				[IDialogService, dialogService],
+				[INotificationService, notificationService],
+			]),
+		);
+
+		try {
+			await CommandsRegistry.getCommand(
+				LOCAL_WORKSPACE_COMMAND_IDS.openRecent,
+			)?.handler(recentAccessor as never);
+			expect(notificationService.info).toHaveBeenCalledWith(
+				"Plain: there are no recent workspaces.",
+			);
+			expect(quickInputService.pick).not.toHaveBeenCalled();
+
+			await CommandsRegistry.getCommand(
+				LOCAL_WORKSPACE_COMMAND_IDS.quickOpenRecent,
+			)?.handler(recentAccessor as never);
+			expect(workspaceOpenRecent).not.toHaveBeenCalled();
+			expect(topologyCoordinator.runMutation).not.toHaveBeenCalled();
+
+			await CommandsRegistry.getCommand(
+				LOCAL_WORKSPACE_COMMAND_IDS.openRecent,
+			)?.handler(recentAccessor as never);
+			const removeItem = vi.fn();
+			await buttonContext?.onDidTriggerItemButton?.({
+				button: items[0]!.buttons[0],
+				item: items[0]!,
+				removeItem,
+			});
+			expect(removeItem).not.toHaveBeenCalled();
+			expect(notificationService.error).toHaveBeenCalledWith("remove failed");
+
+			await CommandsRegistry.getCommand(
+				LOCAL_WORKSPACE_COMMAND_IDS.clearRecent,
+			)?.handler(clearAccessor as never);
+			expect(workspaceClearRecent).not.toHaveBeenCalled();
+			await CommandsRegistry.getCommand(
+				LOCAL_WORKSPACE_COMMAND_IDS.clearRecent,
+			)?.handler(clearAccessor as never);
+			expect(workspaceClearRecent).toHaveBeenCalledOnce();
+			expect(dialogService.confirm).toHaveBeenLastCalledWith(
+				expect.objectContaining({
+					detail: expect.stringContaining(
+						"does not delete any files or folders",
+					),
+				}),
+			);
+		} finally {
+			registration.dispose();
+		}
+	});
+
+	it("reports only failed initial restore state while normal states stay quiet", async () => {
+		const notificationService = testNotificationService();
+		await reportInitialWorkspaceRestoreStatus(
+			testBridge({
+				workspaceRecentList: vi.fn(async () => ({
+					revision: 1,
+					restoreStatus: "restored" as const,
+					entries: [],
+				})),
+			}),
+			notificationService as unknown as INotificationService,
+		);
+		expect(notificationService.warn).not.toHaveBeenCalled();
+
+		await reportInitialWorkspaceRestoreStatus(
+			testBridge({
+				workspaceRecentList: vi.fn(async () => ({
+					revision: 2,
+					restoreStatus: "failed" as const,
+					entries: [],
+				})),
+			}),
+			notificationService as unknown as INotificationService,
+		);
+		expect(notificationService.warn).toHaveBeenCalledOnce();
+		expect(notificationService.warn).toHaveBeenCalledWith(
+			"Plain could not restore the last workspace. Use Open Recent to retry.",
+		);
 	});
 });

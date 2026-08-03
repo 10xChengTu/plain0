@@ -27,7 +27,6 @@ export const GUARDED_WORKSPACE_COMMAND_IDS = Object.freeze([
 	"workbench.action.openWorkspaceInNewWindow",
 	"workbench.action.saveWorkspaceAs",
 	"workbench.action.duplicateWorkspaceInNewWindow",
-	"workbench.action.files.openFile",
 	"workbench.action.files.openFileFolder",
 	"workbench.action.files.openFileInNewWindow",
 	"workbench.action.files.newUntitledFile",
