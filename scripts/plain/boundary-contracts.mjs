@@ -6662,6 +6662,21 @@ const GIT_EXEC_WRAPPER_PATH = "src-tauri/src/git/exec.rs";
 const DEBUG_EXEC_WRAPPER_PATH = "src-tauri/src/debug/exec.rs";
 
 /**
+ * The terminal domain's own third audited `std::process::Command` wrapper
+ * (F190 S4 "Ghostty metadata and links",
+ * `docs/research/2026-08-03-complete-terminal.md` §3) — exists for exactly
+ * one narrow purpose distinct from every other spawn in this domain: handing
+ * an already-scheme-restricted `http(s)` URL off to the OS's own default
+ * handler on an explicit user Cmd/Ctrl+Click on a terminal cell's OSC 8
+ * hyperlink, never attached to a pty. Separately and more precisely locked
+ * down by [`validateTerminalRustBoundary`] (fixed `open`/`xdg-open` program
+ * names only, no shell interpreter, an explicit `http://`/`https://`-only
+ * scheme check present in the source) exactly like [`GIT_EXEC_WRAPPER_PATH`]/
+ * [`DEBUG_EXEC_WRAPPER_PATH`] are for their own domains.
+ */
+const TERMINAL_OPENER_WRAPPER_PATH = "src-tauri/src/terminal/opener.rs";
+
+/**
  * `F100` S1's own staged-atomic-write persistence file for the first-run
  * confirmation gate (`src-tauri/src/debug/confirm_store.rs`) — added to
  * [`stageCleanupCallsAreExact`]'s per-file allowlist alongside
@@ -6884,9 +6899,12 @@ export function validateTerminalRustBoundary(
 		}
 		const isGitDomain = GIT_DOMAIN_SOURCE_PATTERN.test(normalizedPath);
 		const isAuditedGitExecWrapper = normalizedPath === GIT_EXEC_WRAPPER_PATH;
+		const isAuditedTerminalOpenerWrapper =
+			normalizedPath === TERMINAL_OPENER_WRAPPER_PATH;
 		const executableSource = stripRustCommentsAndLiterals(source);
 		if (
 			!isAuditedGitExecWrapper &&
+			!isAuditedTerminalOpenerWrapper &&
 			/\bprocess\s*::\s*Command\b/.test(executableSource)
 		) {
 			const guidance = isGitDomain
@@ -6901,7 +6919,8 @@ export function validateTerminalRustBoundary(
 		// like the pre-existing "-c" check, need to see actual string
 		// literal *contents* — `stripRustCommentsAndLiterals` blanks those
 		// out too (it only leaves code structure intact), which would make
-		// `"git"`/`"sh"` invisible to a naive check against its output.
+		// `"git"`/`"sh"`/`"open"`/scheme literals invisible to a naive check
+		// against its output.
 		const commentsOnlySource = stripRustCommentsOnly(source);
 		if (isAuditedGitExecWrapper) {
 			if (GIT_EXEC_SHELL_INTERPRETER_PATTERN.test(commentsOnlySource)) {
@@ -6912,6 +6931,37 @@ export function validateTerminalRustBoundary(
 			if (!/Command::new\s*\(\s*"git"\s*\)/.test(commentsOnlySource)) {
 				failures.push(
 					`${GIT_EXEC_WRAPPER_PATH} must invoke Command::new("git") literally`,
+				);
+			}
+		}
+		if (isAuditedTerminalOpenerWrapper) {
+			if (GIT_EXEC_SHELL_INTERPRETER_PATTERN.test(commentsOnlySource)) {
+				failures.push(
+					`${TERMINAL_OPENER_WRAPPER_PATH} must not spawn a shell interpreter — it may only invoke the fixed OS opener programs directly`,
+				);
+			}
+			if (
+				!/Command::new\s*\(\s*"open"\s*\)/.test(commentsOnlySource) ||
+				!/Command::new\s*\(\s*"xdg-open"\s*\)/.test(commentsOnlySource)
+			) {
+				failures.push(
+					`${TERMINAL_OPENER_WRAPPER_PATH} must invoke only the fixed Command::new("open")/Command::new("xdg-open") programs`,
+				);
+			}
+			// Raw `source` (not `commentsOnlySource`): the `//` inside the
+			// `"http://"`/`"https://"` string literals themselves would
+			// otherwise be misread as a line-comment start by
+			// `stripRustCommentsOnly` — which, per its own doc, has no
+			// string-literal awareness at all — corrupting everything after
+			// it on the same line. A raw substring check is exactly as
+			// meaningful here (this is a best-effort content check, not a
+			// strict parse) and sidesteps that pitfall entirely.
+			if (
+				!source.includes('starts_with("http://")') ||
+				!source.includes('starts_with("https://")')
+			) {
+				failures.push(
+					`${TERMINAL_OPENER_WRAPPER_PATH} must restrict every URL to an explicit http/https scheme check`,
 				);
 			}
 		}
@@ -7074,7 +7124,7 @@ const TERMINAL_COMMAND_CONTRACTS = Object.freeze([
 		parameters:
 			"window:WebviewWindow,terminal:State<'_,TerminalService>,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:TerminalStartRequest",
 		returnType: "->Result<TerminalStartResult,CommandError>",
-		body: "letquery=request.into_parts()?;letsink:Arc<dynTerminalOutputSink>=Arc::new(WindowEmitSink{app:window.app_handle().clone(),window_label:window.label().to_owned(),});letsession_id=terminal.inner().start(trust.inner(),workspace.inner(),window.label(),query.root_id,query.profile_id,query.cwd,query.cols,query.rows,sink,).await?;Ok(TerminalStartResult::new(session_id))",
+		body: "letquery=request.into_parts()?;letsink:Arc<dynTerminalOutputSink>=Arc::new(WindowEmitSink{app:window.app_handle().clone(),window_label:window.label().to_owned(),});let(session_id,shell_integration)=terminal.inner().start(trust.inner(),workspace.inner(),window.label(),query.root_id,query.profile_id,query.cwd,query.cols,query.rows,sink,).await?;Ok(TerminalStartResult::new(session_id,shell_integration))",
 	},
 	{
 		file: "src-tauri/src/terminal/commands.rs",
@@ -7131,6 +7181,13 @@ const TERMINAL_COMMAND_CONTRACTS = Object.freeze([
 			"window:WebviewWindow,terminal:State<'_,TerminalService>,request:TerminalKillRequest",
 		returnType: "->Result<(),CommandError>",
 		body: "let(session_id,immediate)=request.into_parts();terminal.inner().kill(window.label(),session_id,immediate).await",
+	},
+	{
+		file: "src-tauri/src/terminal/commands.rs",
+		name: "terminal_open_external_link",
+		parameters: "request:TerminalOpenExternalLinkRequest",
+		returnType: "->Result<(),CommandError>",
+		body: "leturl=request.into_parts()?;tauri::async_runtime::spawn_blocking(move||opener::open_external_link(&url)).await.map_err(|_|super::terminal_unavailable())?",
 	},
 ]);
 
@@ -7255,9 +7312,10 @@ export function validateLifecycleCommandRegistration(rustSources) {
 }
 
 /**
- * Locks the trust (3) and terminal (6, since F070's "IPC 改造" slice split
+ * Locks the trust (3) and terminal (10, since F070's "IPC 改造" slice split
  * `terminal_input` into `terminal_input_text`/`terminal_input_key` and added
- * `terminal_focus`/`terminal_scrollback`) commands to their audited exact
+ * `terminal_focus`/`terminal_scrollback`, and F190 S4 added
+ * `terminal_open_external_link`) commands to their audited exact
  * signatures, bodies and single `generate_handler!` registration —
  * the same exact-body-pinning technique `validateSearchCommandRegistration`/
  * `validateSearchTextCommandRegistration` already use, extended to a closed
@@ -7359,7 +7417,7 @@ export function validateTrustTerminalCommandRegistration(rustSources) {
  * `WorkspaceWatchWakeEvent`'s own `structBody(...)`/wake-event-const
  * precedent in `validateWorkspaceWatcherBoundary`), `WindowEmitSink`'s two
  * methods each emitting exactly once through the audited event/constructor,
- * the frozen `PlainBridge` terminal/trust method surface (a fixed 13-method
+ * the frozen `PlainBridge` terminal/trust method surface (a fixed 15-method
  * count so a silently added/removed/renamed bridge method fails this
  * check), and the TypeScript event/result decoders' own-data/Proxy-
  * rejection/freeze shape plus native's exactly-once `listen` wiring for
@@ -7508,6 +7566,7 @@ export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 		"terminalAck",
 		"terminalScrollback",
 		"terminalKill",
+		"terminalOpenExternalLink",
 		"terminalWatchData",
 		"terminalWatchExit",
 		"workspaceTrustState",
@@ -7529,7 +7588,7 @@ export function validateTerminalIpcBridgeBoundary(rustSources, appSources) {
 			JSON.stringify([...TERMINAL_BRIDGE_METHOD_NAMES].sort())
 	) {
 		failures.push(
-			"PlainBridge must expose exactly the fourteen audited terminal/trust methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifteen audited terminal/trust methods, no more and no fewer",
 		);
 	}
 
@@ -13463,26 +13522,31 @@ export function validateWorkspaceMoveBoundary(rustSources) {
 				`${normalizedPath} must not use broad, open-directory or direct unlink deletion`,
 			);
 		}
-		// `src-tauri/src/git/exec.rs` and `src-tauri/src/debug/exec.rs` are
-		// exempt from this specific check only: they are the git and `debug`
-		// domains' own sole audited `std::process::Command` wrappers
-		// (`F080` S0 / `F100` S0 respectively), separately and more precisely
-		// locked down by `validateTerminalRustBoundary` (git: literal
+		// `src-tauri/src/git/exec.rs`, `src-tauri/src/debug/exec.rs` and
+		// `src-tauri/src/terminal/opener.rs` are exempt from this specific
+		// check only: they are the git, `debug` and terminal domains' own
+		// sole audited `std::process::Command` wrappers (`F080` S0 / `F100`
+		// S0 / `F190` S4 respectively), separately and more precisely locked
+		// down by `validateTerminalRustBoundary` (git: literal
 		// `Command::new("git")` only, no other program, no shell interpreter
-		// — see `GIT_EXEC_WRAPPER_PATH`'s doc) and
+		// — see `GIT_EXEC_WRAPPER_PATH`'s doc; terminal opener: fixed
+		// `open`/`xdg-open` program names only, no shell interpreter, an
+		// explicit http(s)-only scheme check — see
+		// `TERMINAL_OPENER_WRAPPER_PATH`'s doc) and
 		// `validateDebugAdapterSpawnBoundary`/`validateDebugSpawnConstructionShape`
 		// (debug: trust gate first, fixed `Command::new(&descriptor.command)
 		// .args(&descriptor.args)` shape — see `DEBUG_EXEC_WRAPPER_PATH`'s
 		// doc). This check's actual purpose — preventing the
 		// *workspace/theme/backup* domains' capability-based deletion from
 		// being bypassed via a raw process/shell spawn — does not apply to
-		// either file: neither spawns anything but its own domain's audited
-		// program, and neither calls `remove_file`/`remove_dir` at all
-		// (confirmed immediately below by this same loop's UFCS/broad-
-		// deletion checks, which still run for both unexempted).
+		// any of the three: none spawns anything but its own domain's
+		// audited program(s), and none calls `remove_file`/`remove_dir` at
+		// all (confirmed immediately below by this same loop's UFCS/broad-
+		// deletion checks, which still run for all three unexempted).
 		if (
 			normalizedPath !== GIT_EXEC_WRAPPER_PATH &&
 			normalizedPath !== DEBUG_EXEC_WRAPPER_PATH &&
+			normalizedPath !== TERMINAL_OPENER_WRAPPER_PATH &&
 			(/\b(?:std|tokio|async_process)\s*::\s*(?:\{[^;}]*\bprocess\b|process\b)|\btauri_plugin_shell\b|\b(?:Command|Shell)\s*::\s*new\s*\(/s.test(
 				executableSource,
 			) ||

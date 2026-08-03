@@ -18,6 +18,7 @@ use uuid::{Uuid, Variant};
 
 use libghostty_vt::key;
 use libghostty_vt::render::{Colors, CursorViewport, CursorVisualStyle, Dirty};
+use libghostty_vt::screen::{CellSemanticContent, RowSemanticPrompt};
 use libghostty_vt::style::{RgbColor, Style, Underline};
 
 use crate::error::CommandError;
@@ -48,6 +49,11 @@ const MAX_TERMINAL_KEY_UTF8_BYTES: usize = 64;
 const MAX_TERMINAL_SCROLLBACK_REQUEST_ROWS: u32 = 10_000;
 const MAX_TERMINAL_PROFILE_ID_BYTES: usize = 64;
 const MAX_TERMINAL_CWD_BYTES: usize = 4_096;
+/// Matches `terminal::opener::MAX_EXTERNAL_LINK_BYTES` — kept as this
+/// module's own independent constant since `into_parts` and `opener::open_external_link`
+/// are two deliberately-independent validations of the same request (see
+/// that function's own doc comment).
+const MAX_TERMINAL_EXTERNAL_LINK_BYTES: usize = 8_192;
 
 /// An opaque, window-bound identity for one terminal session. Validated the
 /// same strict way `search::dto::SearchId` is (exact-length, version-4,
@@ -185,15 +191,42 @@ impl TerminalProfilesResult {
     }
 }
 
+/// Wire projection of `terminal::shell_integration::ShellIntegrationStatus`
+/// (F190 S4 "Ghostty metadata and links" — shell-integration injection's own
+/// observable outcome, never silently pretended to have succeeded). See that
+/// type's doc comment for what each variant means and how it is decided.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TerminalShellIntegrationStatus {
+    Injected,
+    UnsupportedShell,
+}
+
+impl From<super::shell_integration::ShellIntegrationStatus> for TerminalShellIntegrationStatus {
+    fn from(value: super::shell_integration::ShellIntegrationStatus) -> Self {
+        match value {
+            super::shell_integration::ShellIntegrationStatus::Injected => Self::Injected,
+            super::shell_integration::ShellIntegrationStatus::Unsupported => Self::UnsupportedShell,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalStartResult {
     session_id: TerminalSessionId,
+    shell_integration: TerminalShellIntegrationStatus,
 }
 
 impl TerminalStartResult {
-    pub(crate) fn new(session_id: TerminalSessionId) -> Self {
-        Self { session_id }
+    pub(crate) fn new(
+        session_id: TerminalSessionId,
+        shell_integration: super::shell_integration::ShellIntegrationStatus,
+    ) -> Self {
+        Self {
+            session_id,
+            shell_integration: shell_integration.into(),
+        }
     }
 }
 
@@ -431,12 +464,58 @@ impl From<Style> for TerminalStyle {
     }
 }
 
+/// Wire projection of [`libghostty_vt::screen::CellSemanticContent`] (OSC
+/// 133) — see that type's own doc comment. Consumed by the renderer only
+/// for CSS classification (e.g. dimming output vs highlighting a typed
+/// command) and prompt-navigation commands; never widens process capability.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TerminalSemanticContent {
+    Output,
+    Input,
+    Prompt,
+}
+
+impl From<CellSemanticContent> for TerminalSemanticContent {
+    fn from(value: CellSemanticContent) -> Self {
+        match value {
+            CellSemanticContent::Output => Self::Output,
+            CellSemanticContent::Input => Self::Input,
+            CellSemanticContent::Prompt => Self::Prompt,
+        }
+    }
+}
+
+/// Wire projection of [`libghostty_vt::screen::RowSemanticPrompt`] (OSC 133)
+/// — see that type's own doc comment. Drives "jump to previous/next prompt"
+/// command navigation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TerminalRowSemanticPrompt {
+    None,
+    Prompt,
+    Continuation,
+}
+
+impl From<RowSemanticPrompt> for TerminalRowSemanticPrompt {
+    fn from(value: RowSemanticPrompt) -> Self {
+        match value {
+            RowSemanticPrompt::None => Self::None,
+            RowSemanticPrompt::Prompt => Self::Prompt,
+            RowSemanticPrompt::Continuation => Self::Continuation,
+        }
+    }
+}
+
 /// Wire projection of one [`terminal::vt::DirtyCell`]. `graphemes` is the
 /// cell's base codepoint plus any combining marks, joined into a single
 /// `String` (a JSON string already carries UTF-16/UTF-8 text losslessly, so
 /// there is no reason to wire-project this as a `char` array). Deliberately
 /// omits `DirtyCell::selected` — viewport selection rendering is not part of
-/// this slice.
+/// this slice. `hyperlink` is already capped/validated by
+/// `terminal::vt::read_hyperlink_uri` before this ever runs — see that
+/// function's doc comment for the strict-byte-cap-then-drop policy; this
+/// type does not re-validate it (an outgoing-only field, never parsed back).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalCell {
@@ -444,6 +523,8 @@ pub struct TerminalCell {
     fg: Option<TerminalRgb>,
     bg: Option<TerminalRgb>,
     style: TerminalStyle,
+    hyperlink: Option<String>,
+    semantic: TerminalSemanticContent,
 }
 
 impl From<vt::DirtyCell> for TerminalCell {
@@ -453,6 +534,8 @@ impl From<vt::DirtyCell> for TerminalCell {
             fg: value.fg_rgb.map(TerminalRgb::from),
             bg: value.bg_rgb.map(TerminalRgb::from),
             style: value.style.into(),
+            hyperlink: value.hyperlink,
+            semantic: value.semantic.into(),
         }
     }
 }
@@ -462,6 +545,7 @@ impl From<vt::DirtyCell> for TerminalCell {
 #[serde(rename_all = "camelCase")]
 pub struct TerminalRow {
     row_index: u32,
+    semantic_prompt: TerminalRowSemanticPrompt,
     cells: Vec<TerminalCell>,
 }
 
@@ -469,6 +553,7 @@ impl From<vt::DirtyRow> for TerminalRow {
     fn from(value: vt::DirtyRow) -> Self {
         Self {
             row_index: value.row_index as u32,
+            semantic_prompt: value.semantic_prompt.into(),
             cells: value.cells.into_iter().map(TerminalCell::from).collect(),
         }
     }
@@ -607,6 +692,16 @@ pub struct TerminalFrame {
     cursor: TerminalCursor,
     colors: TerminalColors,
     rows_data: Vec<TerminalRow>,
+    /// The session's current OSC 7/9/1337 working directory, root-relative
+    /// to whichever workspace root this session was started in — `None` if
+    /// no shell-integration cwd has been reported yet, or the shell's
+    /// current directory is not (or no longer) inside that root. See
+    /// `terminal::service::relativize_pwd`'s doc comment: this is never an
+    /// absolute filesystem path, and is used only for (a) UI display and (b)
+    /// as a candidate for the *next* split's cwd — which Rust re-validates
+    /// via the exact same `resolve_cwd` containment check any other cwd
+    /// goes through, exactly as any other `TerminalStartRequest::cwd` would.
+    pwd: Option<String>,
 }
 
 impl From<vt::DirtyFrame> for TerminalFrame {
@@ -618,6 +713,7 @@ impl From<vt::DirtyFrame> for TerminalFrame {
             cursor: value.cursor.into(),
             colors: value.colors.into(),
             rows_data: value.rows_data.into_iter().map(TerminalRow::from).collect(),
+            pwd: value.pwd,
         }
     }
 }
@@ -724,6 +820,33 @@ impl TerminalScrollbackResult {
     }
 }
 
+/// `terminal_open_external_link` request: hands a terminal cell's OSC 8
+/// hyperlink URI off to `terminal::opener::open_external_link` — see that
+/// function's doc comment for the full "audited external opener" contract
+/// this is the IPC-facing half of. Rejects anything but a well-formed,
+/// size-bounded `http://`/`https://` URL *before* it ever reaches the
+/// opener, exactly mirroring every other request-side validation in this
+/// file (the opener itself re-validates independently regardless — belt
+/// and suspenders, not "the frontend is trusted").
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TerminalOpenExternalLinkRequest {
+    url: String,
+}
+
+impl TerminalOpenExternalLinkRequest {
+    pub(crate) fn into_parts(self) -> Result<String, CommandError> {
+        if self.url.is_empty()
+            || self.url.len() > MAX_TERMINAL_EXTERNAL_LINK_BYTES
+            || self.url.contains('\0')
+            || !(self.url.starts_with("http://") || self.url.starts_with("https://"))
+        {
+            return Err(invalid_terminal_request());
+        }
+        Ok(self.url)
+    }
+}
+
 fn validate_dimensions(cols: u16, rows: u16) -> Result<(), CommandError> {
     if cols == 0 || rows == 0 || cols > MAX_TERMINAL_DIMENSION || rows > MAX_TERMINAL_DIMENSION {
         return Err(invalid_terminal_request());
@@ -742,13 +865,15 @@ fn invalid_terminal_request() -> CommandError {
 mod tests {
     use libghostty_vt::key;
     use libghostty_vt::render::{CursorVisualStyle, Dirty};
+    use libghostty_vt::screen::{CellSemanticContent, RowSemanticPrompt};
     use libghostty_vt::style::{RgbColor, Style};
 
     use super::{
         TerminalAckRequest, TerminalFocusRequest, TerminalInputKeyRequest,
-        TerminalInputTextRequest, TerminalKillRequest, TerminalProfilesRequest,
-        TerminalProfilesResult, TerminalResizeRequest, TerminalScrollbackRequest,
-        TerminalStartRequest, MAX_TERMINAL_INPUT_BYTES, MAX_TERMINAL_KEY_UTF8_BYTES,
+        TerminalInputTextRequest, TerminalKillRequest, TerminalOpenExternalLinkRequest,
+        TerminalProfilesRequest, TerminalProfilesResult, TerminalResizeRequest,
+        TerminalScrollbackRequest, TerminalStartRequest, MAX_TERMINAL_EXTERNAL_LINK_BYTES,
+        MAX_TERMINAL_INPUT_BYTES, MAX_TERMINAL_KEY_UTF8_BYTES,
         MAX_TERMINAL_SCROLLBACK_REQUEST_ROWS,
     };
     use crate::terminal::vt::{self, DirtyCell, DirtyFrame, DirtyRow};
@@ -814,6 +939,47 @@ mod tests {
                 "sessionId": VALID_ID, "start": 0, "count": 10, "extra": true
             }))
             .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TerminalOpenExternalLinkRequest>(serde_json::json!({
+                "url": "https://example.com", "extra": true
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn open_external_link_request_accepts_http_and_https_and_rejects_every_hostile_shape() {
+        for url in ["https://example.com/path?q=1", "http://example.com"] {
+            let request: TerminalOpenExternalLinkRequest =
+                serde_json::from_value(serde_json::json!({ "url": url })).unwrap();
+            assert_eq!(request.into_parts().unwrap(), url);
+        }
+
+        for url in [
+            "",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "ftp://example.com",
+            "HTTPS://example.com",
+        ] {
+            let request: TerminalOpenExternalLinkRequest =
+                serde_json::from_value(serde_json::json!({ "url": url })).unwrap();
+            assert_eq!(
+                request.into_parts().unwrap_err().code(),
+                "INVALID_TERMINAL_REQUEST"
+            );
+        }
+
+        let oversized = format!(
+            "https://example.com/{}",
+            "a".repeat(MAX_TERMINAL_EXTERNAL_LINK_BYTES)
+        );
+        let request: TerminalOpenExternalLinkRequest =
+            serde_json::from_value(serde_json::json!({ "url": oversized })).unwrap();
+        assert_eq!(
+            request.into_parts().unwrap_err().code(),
+            "INVALID_TERMINAL_REQUEST"
         );
     }
 
@@ -1111,6 +1277,7 @@ mod tests {
             },
             rows_data: vec![DirtyRow {
                 row_index: 0,
+                semantic_prompt: RowSemanticPrompt::Prompt,
                 cells: vec![DirtyCell {
                     graphemes: vec!['h', 'i'],
                     style: Style::default(),
@@ -1121,8 +1288,11 @@ mod tests {
                     }),
                     bg_rgb: None,
                     selected: false,
+                    hyperlink: Some("https://example.com".to_owned()),
+                    semantic: CellSemanticContent::Prompt,
                 }],
             }],
+            pwd: Some("nested/project".to_owned()),
         }
     }
 
@@ -1144,8 +1314,10 @@ mod tests {
             serde_json::json!({"r":0,"g":0,"b":0})
         );
         assert_eq!(frame["colors"]["cursor"], serde_json::Value::Null);
+        assert_eq!(frame["pwd"], "nested/project");
         let row0 = &frame["rowsData"][0];
         assert_eq!(row0["rowIndex"], 0);
+        assert_eq!(row0["semanticPrompt"], "prompt");
         assert_eq!(row0["cells"][0]["graphemes"], "hi");
         assert_eq!(
             row0["cells"][0]["fg"],
@@ -1154,6 +1326,8 @@ mod tests {
         assert_eq!(row0["cells"][0]["bg"], serde_json::Value::Null);
         assert_eq!(row0["cells"][0]["style"]["bold"], false);
         assert_eq!(row0["cells"][0]["style"]["underline"], "none");
+        assert_eq!(row0["cells"][0]["hyperlink"], "https://example.com");
+        assert_eq!(row0["cells"][0]["semantic"], "prompt");
         // Every field name is exactly what `hasExactKeys`-style TypeScript
         // decoding expects — no extraneous, e.g. no raw `Colors::palette`.
         assert_eq!(
@@ -1163,11 +1337,80 @@ mod tests {
                 .keys()
                 .cloned()
                 .collect::<std::collections::BTreeSet<_>>(),
-            ["dirty", "cols", "rows", "cursor", "colors", "rowsData"]
+            ["dirty", "cols", "rows", "cursor", "colors", "rowsData", "pwd"]
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
         );
+        assert_eq!(
+            row0.as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["rowIndex", "semanticPrompt", "cells"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        );
+        assert_eq!(
+            row0["cells"][0]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["graphemes", "fg", "bg", "style", "hyperlink", "semantic"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        );
+    }
+
+    #[test]
+    fn a_missing_pwd_and_hyperlink_serialize_as_null_and_semantic_defaults_project_exactly() {
+        let mut frame = sample_dirty_frame();
+        frame.pwd = None;
+        frame.rows_data[0].semantic_prompt = RowSemanticPrompt::None;
+        frame.rows_data[0].cells[0].hyperlink = None;
+        frame.rows_data[0].cells[0].semantic = CellSemanticContent::Output;
+        let event = super::TerminalDataEvent::new(valid_session_id(), 1, frame);
+        let value = serde_json::to_value(event).unwrap();
+        let row0 = &value["frame"]["rowsData"][0];
+        assert_eq!(value["frame"]["pwd"], serde_json::Value::Null);
+        assert_eq!(row0["semanticPrompt"], "none");
+        assert_eq!(row0["cells"][0]["hyperlink"], serde_json::Value::Null);
+        assert_eq!(row0["cells"][0]["semantic"], "output");
+    }
+
+    #[test]
+    fn shell_integration_status_projects_exactly() {
+        for (status, expected) in [
+            (
+                super::super::shell_integration::ShellIntegrationStatus::Injected,
+                "injected",
+            ),
+            (
+                super::super::shell_integration::ShellIntegrationStatus::Unsupported,
+                "unsupportedShell",
+            ),
+        ] {
+            let result = super::TerminalStartResult::new(valid_session_id(), status);
+            let value = serde_json::to_value(result).unwrap();
+            assert_eq!(value["shellIntegration"], expected);
+            assert_eq!(
+                value
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                ["sessionId", "shellIntegration"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            );
+        }
     }
 
     #[test]

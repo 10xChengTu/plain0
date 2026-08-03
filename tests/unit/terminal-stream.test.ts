@@ -47,14 +47,18 @@ function frame(text: string): TerminalFrame {
 		rowsData: [
 			{
 				rowIndex: 0,
+				semanticPrompt: "none",
 				cells: [...text].map((character) => ({
 					graphemes: character,
 					fg: null,
 					bg: null,
 					style: DEFAULT_STYLE,
+					hyperlink: null,
+					semantic: "output",
 				})),
 			},
 		],
+		pwd: null,
 	};
 }
 
@@ -155,7 +159,7 @@ function createFakeTransport(sessionId = SESSION_ID): FakeTransportHandle {
 					startError = undefined;
 					throw error;
 				}
-				return { sessionId };
+				return { sessionId, shellIntegration: "injected" };
 			},
 			async terminalInputText(id, text) {
 				inputTextCalls.push({ sessionId: id, text });

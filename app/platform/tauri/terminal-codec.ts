@@ -12,9 +12,12 @@ import type {
 	TerminalProfilesResult,
 	TerminalRgb,
 	TerminalRow,
+	TerminalRowSemanticPrompt,
 	TerminalScrollbackCell,
 	TerminalScrollbackResult,
 	TerminalScrollbackRow,
+	TerminalSemanticContent,
+	TerminalShellIntegrationStatus,
 	TerminalStartResult,
 	TerminalStyle,
 	TerminalUnderline,
@@ -402,6 +405,35 @@ export function frozenTerminalKillRequest(
 	});
 }
 
+function frozenExternalLinkUrl(value: unknown): string {
+	if (
+		typeof value !== "string" ||
+		value.length === 0 ||
+		utf8ByteLength(value) > MAX_TERMINAL_EXTERNAL_LINK_BYTES ||
+		value.includes("\0") ||
+		!(value.startsWith("http://") || value.startsWith("https://"))
+	) {
+		return invalidTerminalRequest();
+	}
+	return value;
+}
+
+/**
+ * Validates a `terminal_open_external_link` request — mirrors
+ * `src-tauri/src/terminal/dto.rs`'s `TerminalOpenExternalLinkRequest::into_parts`
+ * exactly (non-empty, size-bounded, no NUL, `http://`/`https://` only).
+ * This is the request-encode-side check; the renderer's own click policy
+ * (only `http:`/`https:` cells are ever clickable in the first place) is a
+ * separate, earlier gate — this one exists so native/mock transports reject
+ * the same hostile input identically even if that renderer gate were ever
+ * bypassed.
+ */
+export function frozenTerminalOpenExternalLinkRequest(
+	url: unknown,
+): Readonly<{ url: string }> {
+	return Object.freeze({ url: frozenExternalLinkUrl(url) });
+}
+
 /** Validates a `terminal_scrollback` request. */
 export function frozenTerminalScrollbackRequest(
 	sessionId: unknown,
@@ -424,14 +456,20 @@ export function frozenTerminalScrollbackRequest(
 }
 
 /**
- * Decodes a `terminal_start` response: an own-data, exactly `{ sessionId }`
- * object.
+ * Decodes a `terminal_start` response: an own-data, exactly
+ * `{ sessionId, shellIntegration }` object.
  */
 export function decodeTerminalStartResult(value: unknown): TerminalStartResult {
-	if (!isPlainObject(value) || !hasExactKeys(value, ["sessionId"])) {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, ["sessionId", "shellIntegration"])
+	) {
 		return violation();
 	}
 	if (!isUuidV4(value.sessionId)) {
+		return violation();
+	}
+	if (!isOneOf(value.shellIntegration, SHELL_INTEGRATION_STATUS_VALUES)) {
 		return violation();
 	}
 	try {
@@ -439,7 +477,10 @@ export function decodeTerminalStartResult(value: unknown): TerminalStartResult {
 	} catch {
 		return violation();
 	}
-	return Object.freeze({ sessionId: value.sessionId });
+	return Object.freeze({
+		sessionId: value.sessionId,
+		shellIntegration: value.shellIntegration,
+	});
 }
 
 function decodeTerminalProfile(value: unknown): TerminalProfile {
@@ -534,6 +575,14 @@ const DIRTY_VALUES: readonly TerminalDirty[] = Object.freeze([
 	"partial",
 	"full",
 ]);
+const SEMANTIC_CONTENT_VALUES: readonly TerminalSemanticContent[] =
+	Object.freeze(["output", "input", "prompt"]);
+const ROW_SEMANTIC_PROMPT_VALUES: readonly TerminalRowSemanticPrompt[] =
+	Object.freeze(["none", "prompt", "continuation"]);
+const SHELL_INTEGRATION_STATUS_VALUES: readonly TerminalShellIntegrationStatus[] =
+	Object.freeze(["injected", "unsupportedShell"]);
+/** Mirrors `terminal::dto::MAX_TERMINAL_EXTERNAL_LINK_BYTES`. */
+const MAX_TERMINAL_EXTERNAL_LINK_BYTES = 8_192;
 
 function isOneOf<T extends string>(
 	value: unknown,
@@ -624,10 +673,27 @@ function decodeStyle(value: unknown): TerminalStyle {
 	});
 }
 
+function decodeNullableHyperlink(value: unknown): string | null {
+	if (value === null) {
+		return null;
+	}
+	if (typeof value !== "string") {
+		return violation();
+	}
+	return value;
+}
+
 function decodeCell(value: unknown): TerminalCell {
 	if (
 		!isPlainObject(value) ||
-		!hasExactKeys(value, ["graphemes", "fg", "bg", "style"])
+		!hasExactKeys(value, [
+			"graphemes",
+			"fg",
+			"bg",
+			"style",
+			"hyperlink",
+			"semantic",
+		])
 	) {
 		return violation();
 	}
@@ -637,19 +703,36 @@ function decodeCell(value: unknown): TerminalCell {
 	const fg = decodeNullableRgb(value.fg);
 	const bg = decodeNullableRgb(value.bg);
 	const style = decodeStyle(value.style);
+	const hyperlink = decodeNullableHyperlink(value.hyperlink);
+	if (!isOneOf(value.semantic, SEMANTIC_CONTENT_VALUES)) {
+		return violation();
+	}
 	try {
 		rejectProxyObject(value);
 	} catch {
 		return violation();
 	}
-	return Object.freeze({ graphemes: value.graphemes, fg, bg, style });
+	return Object.freeze({
+		graphemes: value.graphemes,
+		fg,
+		bg,
+		style,
+		hyperlink,
+		semantic: value.semantic,
+	});
 }
 
 function decodeRow(value: unknown): TerminalRow {
-	if (!isPlainObject(value) || !hasExactKeys(value, ["rowIndex", "cells"])) {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, ["rowIndex", "semanticPrompt", "cells"])
+	) {
 		return violation();
 	}
 	if (!isSafeNonNegativeInteger(value.rowIndex)) {
+		return violation();
+	}
+	if (!isOneOf(value.semanticPrompt, ROW_SEMANTIC_PROMPT_VALUES)) {
 		return violation();
 	}
 	const cells = ownObjectArraySnapshot(
@@ -662,7 +745,11 @@ function decodeRow(value: unknown): TerminalRow {
 	} catch {
 		return violation();
 	}
-	return Object.freeze({ rowIndex: value.rowIndex, cells });
+	return Object.freeze({
+		rowIndex: value.rowIndex,
+		semanticPrompt: value.semanticPrompt,
+		cells,
+	});
 }
 
 function decodeCursorViewport(value: unknown): TerminalCursorViewport {
@@ -739,6 +826,16 @@ function decodeColors(value: unknown): TerminalColors {
 	return Object.freeze({ background, foreground, cursor });
 }
 
+function decodeNullablePwd(value: unknown): string | null {
+	if (value === null) {
+		return null;
+	}
+	if (typeof value !== "string") {
+		return violation();
+	}
+	return value;
+}
+
 function decodeFrame(value: unknown): TerminalFrame {
 	if (
 		!isPlainObject(value) ||
@@ -749,6 +846,7 @@ function decodeFrame(value: unknown): TerminalFrame {
 			"cursor",
 			"colors",
 			"rowsData",
+			"pwd",
 		])
 	) {
 		return violation();
@@ -765,6 +863,7 @@ function decodeFrame(value: unknown): TerminalFrame {
 		MAX_TERMINAL_ROWS_PER_FRAME,
 		decodeRow,
 	);
+	const pwd = decodeNullablePwd(value.pwd);
 	try {
 		rejectProxyObject(value);
 	} catch {
@@ -777,6 +876,7 @@ function decodeFrame(value: unknown): TerminalFrame {
 		cursor,
 		colors,
 		rowsData,
+		pwd,
 	});
 }
 

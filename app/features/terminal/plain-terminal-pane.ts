@@ -185,6 +185,15 @@ export class TerminalPaneController {
 	 * `#ensureScrollbackCache`'s own doc comment. */
 	#scrollbackFetch:
 		Promise<readonly TerminalScrollbackRow[] | undefined> | undefined;
+	/** F190 S4 "Ghostty metadata and links": this pane's most recently
+	 * reported OSC 7 working directory, already root-relative (see
+	 * `TerminalFrame.pwd`'s own doc comment) — `undefined` until at least one
+	 * frame carrying a non-`null` `pwd` has arrived. Read by
+	 * `PlainTerminalView`'s split flow as the *live* cwd candidate for the
+	 * new pane (see that method's own doc comment) — Rust still re-validates
+	 * it via the exact same `resolve_cwd` containment check any other `cwd`
+	 * goes through. */
+	#pwd: string | undefined;
 
 	constructor(options: TerminalPaneOptions) {
 		this.#container = options.container;
@@ -226,6 +235,20 @@ export class TerminalPaneController {
 			onFramePainted: (sequence) => {
 				void this.#stream?.ack(sequence);
 			},
+			// F190 S4 "Ghostty metadata and links": the renderer already
+			// restricted this to a cell whose OSC 8 hyperlink is `http:`/
+			// `https:` and to an explicit Cmd/Ctrl+Click (see
+			// `PlainTerminalRendererOptions.onExternalLinkClick`'s own doc) —
+			// this is the sole place that turns that into the one audited IPC
+			// call that ever opens something outside a pty session. Errors
+			// (a malformed URL somehow past the renderer's own check, or the
+			// OS opener failing) are swallowed here exactly like every other
+			// fire-and-forget bridge call in this class (`stream.focus`,
+			// `stream.kill`) — there is no dedicated status surface for a
+			// failed link open in this slice.
+			onExternalLinkClick: (url) => {
+				void this.#bridge.terminalOpenExternalLink(url).catch(() => {});
+			},
 		});
 
 		this.#registerListeners(surface, input);
@@ -265,6 +288,22 @@ export class TerminalPaneController {
 
 	focus(): void {
 		this.#inputElement.focus();
+	}
+
+	/** F190 S4 "Ghostty metadata and links": this pane's current live,
+	 * root-relative OSC 7 cwd candidate — see `#pwd`'s own doc comment. */
+	get livePwd(): string | undefined {
+		return this.#pwd;
+	}
+
+	/** F190 S4: jumps this pane's view to the nearest prompt row in the
+	 * given direction (relative to whichever row the last jump landed on, or
+	 * the bottom-most retained row on the first call) — see
+	 * `PlainTerminalRenderer.jumpToAdjacentPrompt`'s own doc comment for the
+	 * exact search/highlight behavior and its live-viewport-only scope.
+	 * Returns whether a target row was actually found. */
+	jumpToAdjacentPrompt(direction: "previous" | "next"): boolean {
+		return this.#renderer.jumpToAdjacentPrompt(direction) !== undefined;
 	}
 
 	/** Kills this pane's session (fire-and-forget, `immediate: false` —
@@ -312,6 +351,21 @@ export class TerminalPaneController {
 			onFrame: (frame: TerminalFrame, sequence: number) => {
 				if (generation !== this.#generation) {
 					return;
+				}
+				// `null` is itself meaningful (no OSC 7 pwd yet, or the shell's
+				// current directory is no longer inside this pane's root — see
+				// `TerminalFrame.pwd`'s doc comment) — this pane's cached
+				// candidate must track that, not keep offering a stale one.
+				this.#pwd = frame.pwd ?? undefined;
+				// UI display half of "OSC 7 pwd 反映到 UI 展示并成为下一次 split
+				// 的 cwd 候选" (`docs/research/2026-08-03-complete-terminal.md`
+				// §3) — no dedicated tooltip/breadcrumb exists yet in this
+				// slice; the attribute itself is the observable surface (and
+				// what a later slice's richer display would read).
+				if (this.#pwd === undefined) {
+					delete this.#container.dataset.terminalPwd;
+				} else {
+					this.#container.dataset.terminalPwd = this.#pwd;
 				}
 				this.#renderer.applyFrame(frame, sequence);
 			},
@@ -382,6 +436,13 @@ export class TerminalPaneController {
 			return;
 		}
 		this.#stream = stream;
+		// F190 S4 "Ghostty metadata and links": makes shell-integration
+		// injection's own outcome observable on the pane itself (not just
+		// internal state) — "降级必须可观察（准确状态），不得静默假装已注入"
+		// (`docs/research/2026-08-03-complete-terminal.md` §3). No further UI
+		// surfacing (tooltip/banner) exists yet in this slice; the attribute
+		// is what a test (and, later, a richer status affordance) reads.
+		this.#container.dataset.terminalShellIntegration = stream.shellIntegration;
 		if (this.#existingSessionId !== undefined) {
 			// The Rust side created this session with a fixed default geometry
 			// (`RUN_IN_TERMINAL_DEFAULT_COLS`/`ROWS` — DAP's own

@@ -22,8 +22,10 @@ use crate::error::CommandError;
 pub(crate) mod commands;
 pub(crate) mod dto;
 mod flow;
+mod opener;
 pub(crate) mod service;
 mod shell;
+pub(crate) mod shell_integration;
 // `F100` S4: `pub(crate)` (rather than private) since
 // `debug::service::tests`'s own real-`TerminalService` `runInTerminal`
 // integration test needs to name `vt::DirtyFrame` to implement
@@ -82,10 +84,22 @@ pub(crate) fn terminal_io_failed() -> CommandError {
     CommandError::new("IO_FAILED", "The terminal session could not be used.")
 }
 
+/// F190 S4 "Ghostty metadata and links": returned when a
+/// `terminal_open_external_link` request names anything other than a
+/// well-formed, size-bounded `http://`/`https://` URL — see
+/// `terminal::opener::open_external_link`'s doc comment for the full
+/// fail-closed contract.
+pub(crate) fn terminal_link_invalid() -> CommandError {
+    CommandError::new(
+        "TERMINAL_LINK_INVALID",
+        "The requested link is not a valid http(s) URL.",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        terminal_cwd_invalid, terminal_io_failed, terminal_profile_invalid,
+        terminal_cwd_invalid, terminal_io_failed, terminal_link_invalid, terminal_profile_invalid,
         terminal_session_limit_exceeded, terminal_session_not_found, terminal_unavailable,
         MAX_TERMINAL_SESSIONS_PER_WINDOW,
     };
@@ -107,6 +121,7 @@ mod tests {
         );
         assert_eq!(terminal_unavailable().code(), "TERMINAL_UNAVAILABLE");
         assert_eq!(terminal_io_failed().code(), "IO_FAILED");
+        assert_eq!(terminal_link_invalid().code(), "TERMINAL_LINK_INVALID");
     }
 
     #[test]

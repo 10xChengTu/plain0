@@ -9,10 +9,11 @@ use crate::workspace::service::WorkspaceService;
 use super::dto::{
     TerminalAckRequest, TerminalDataEvent, TerminalExitEvent, TerminalFocusRequest,
     TerminalInputKeyRequest, TerminalInputTextRequest, TerminalKillRequest,
-    TerminalProfilesRequest, TerminalProfilesResult, TerminalResizeRequest,
-    TerminalScrollbackRequest, TerminalScrollbackResult, TerminalSessionId, TerminalStartRequest,
-    TerminalStartResult,
+    TerminalOpenExternalLinkRequest, TerminalProfilesRequest, TerminalProfilesResult,
+    TerminalResizeRequest, TerminalScrollbackRequest, TerminalScrollbackResult, TerminalSessionId,
+    TerminalStartRequest, TerminalStartResult,
 };
+use super::opener;
 use super::service::{TerminalExitStatus, TerminalOutputSink, TerminalService};
 use super::vt;
 
@@ -96,7 +97,7 @@ pub(crate) async fn terminal_start(
         app: window.app_handle().clone(),
         window_label: window.label().to_owned(),
     });
-    let session_id = terminal
+    let (session_id, shell_integration) = terminal
         .inner()
         .start(
             trust.inner(),
@@ -110,7 +111,7 @@ pub(crate) async fn terminal_start(
             sink,
         )
         .await?;
-    Ok(TerminalStartResult::new(session_id))
+    Ok(TerminalStartResult::new(session_id, shell_integration))
 }
 
 #[tauri::command]
@@ -187,6 +188,24 @@ pub(crate) async fn terminal_scrollback(
         .scrollback(window.label(), session_id, start, count)
         .await?;
     Ok(TerminalScrollbackResult::new(rows))
+}
+
+/// F190 S4 "Ghostty metadata and links": the sole IPC entry point that ever
+/// launches an external program from this domain outside a pty session —
+/// see `terminal::opener::open_external_link`'s doc comment for the full
+/// audited-opener contract. The renderer only ever calls this for an
+/// explicit user Cmd/Ctrl+Click on a cell whose OSC 8 hyperlink URI it
+/// already restricted to `http:`/`https:` client-side; this command
+/// re-validates that independently (`request.into_parts()`, then
+/// `opener::open_external_link` again) rather than trusting that check.
+#[tauri::command]
+pub(crate) async fn terminal_open_external_link(
+    request: TerminalOpenExternalLinkRequest,
+) -> Result<(), CommandError> {
+    let url = request.into_parts()?;
+    tauri::async_runtime::spawn_blocking(move || opener::open_external_link(&url))
+        .await
+        .map_err(|_| super::terminal_unavailable())?
 }
 
 #[tauri::command]

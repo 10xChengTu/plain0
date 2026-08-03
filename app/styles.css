@@ -311,6 +311,31 @@ body[data-plain-ready="error"] #plain-bootstrap-status {
 	animation: plain-terminal-blink 1s steps(1) infinite;
 }
 
+/* `F190` S4 "Ghostty metadata and links": OSC 133 semantic classification
+ * (CSS only — never widens process capability) and OSC 8 hyperlink
+ * affordance (only ever set for an `http:`/`https:` cell — see
+ * `isClickableHyperlinkUrl`). */
+.plain-terminal-cell--semantic-prompt {
+	font-weight: 600;
+}
+
+.plain-terminal-cell--semantic-input {
+	color: var(--plain-terminal-cell-fg, var(--plain-terminal-fg, inherit));
+}
+
+.plain-terminal-cell--link {
+	text-decoration: underline;
+	text-decoration-style: dotted;
+	cursor: pointer;
+}
+
+/* Briefly marks the row `jumpToAdjacentPrompt` (`Plain: Jump to Previous/Next
+ * Prompt`) just landed on. */
+.plain-terminal-row--prompt-target {
+	outline: 1px solid rgba(255, 204, 0, 0.8);
+	outline-offset: -1px;
+}
+
 .plain-terminal-cursor {
 	position: absolute;
 	top: 0;

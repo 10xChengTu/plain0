@@ -1,10 +1,13 @@
 use libghostty_vt::key::{Action, Key, Mods};
 use libghostty_vt::mouse;
+use libghostty_vt::screen::{CellSemanticContent, RowSemanticPrompt};
 use libghostty_vt::style::StyleColor;
 
 use super::{
-    encode_focus_event, encode_key_event, encode_mouse_event, KeyEncodeModes, KeyInput,
-    MouseEncodeModes, MouseInput, VtError, VtSession, TERMINAL_VT_MAX_SCROLLBACK_LINES,
+    encode_focus_event, encode_key_event, encode_mouse_event, parse_osc7_pwd_uri,
+    percent_decode_ascii, KeyEncodeModes, KeyInput, MouseEncodeModes, MouseInput, VtError,
+    VtSession, TERMINAL_VT_MAX_HYPERLINK_URI_BYTES, TERMINAL_VT_MAX_PWD_URI_BYTES,
+    TERMINAL_VT_MAX_SCROLLBACK_LINES,
 };
 
 // ---------------------------------------------------------------------
@@ -525,4 +528,196 @@ fn feeding_a_multi_byte_utf8_character_split_across_two_feed_calls_still_decodes
         "a UTF-8 character split across two feed() calls must still decode to the complete \
          character rather than mojibake or a dropped cell: got {text:?}"
     );
+}
+
+// ---------------------------------------------------------------------
+// F190 S4 "Ghostty metadata and links": pwd (OSC 7), hyperlink (OSC 8) and
+// semantic content (OSC 133) projection.
+// ---------------------------------------------------------------------
+
+#[test]
+fn an_osc7_sequence_updates_the_projected_pwd_and_a_second_one_replaces_it() {
+    let mut session = VtSession::new(10, 3).unwrap();
+    session.feed(b"\x1b]7;file://localhost/tmp/project\x1b\\");
+    assert_eq!(
+        session.dirty_frame().unwrap().pwd.as_deref(),
+        Some("/tmp/project")
+    );
+
+    session.feed(b"\x1b]7;file://localhost/tmp/other\x1b\\");
+    assert_eq!(
+        session.dirty_frame().unwrap().pwd.as_deref(),
+        Some("/tmp/other")
+    );
+}
+
+#[test]
+fn no_osc7_ever_reported_projects_a_none_pwd() {
+    let mut session = VtSession::new(10, 3).unwrap();
+    session.feed(b"hello");
+    assert_eq!(session.dirty_frame().unwrap().pwd, None);
+}
+
+#[test]
+fn parse_osc7_pwd_uri_percent_decodes_a_well_formed_path() {
+    assert_eq!(
+        parse_osc7_pwd_uri("file://localhost/tmp/my%20project", 4096),
+        Some("/tmp/my project".to_owned())
+    );
+    // An empty host is equally valid.
+    assert_eq!(
+        parse_osc7_pwd_uri("file:///tmp/project", 4096),
+        Some("/tmp/project".to_owned())
+    );
+}
+
+#[test]
+fn parse_osc7_pwd_uri_fails_closed_on_every_hostile_shape() {
+    let cap = 32;
+    // Oversized (over the caller's own cap).
+    assert_eq!(parse_osc7_pwd_uri(&"a".repeat(cap + 1), cap), None);
+    // Empty payload.
+    assert_eq!(parse_osc7_pwd_uri("", cap), None);
+    // Not a `file://` scheme at all.
+    assert_eq!(parse_osc7_pwd_uri("http://example.com/x", cap), None);
+    // `file://` with no path component whatsoever.
+    assert_eq!(parse_osc7_pwd_uri("file://localhost", cap), None);
+    // Truncated percent-escape.
+    assert_eq!(parse_osc7_pwd_uri("file://localhost/tmp/%2", cap), None);
+    // Non-hex percent-escape.
+    assert_eq!(parse_osc7_pwd_uri("file://localhost/tmp/%zz", cap), None);
+    // Decodes to a NUL byte.
+    assert_eq!(parse_osc7_pwd_uri("file://localhost/tmp/%00", cap), None);
+}
+
+#[test]
+fn percent_decode_ascii_round_trips_and_rejects_invalid_utf8_bytes() {
+    assert_eq!(
+        percent_decode_ascii("/a%2Fb%20c"),
+        Some("/a/b c".to_owned())
+    );
+    // 0xFF is never valid as a lone UTF-8 byte.
+    assert_eq!(percent_decode_ascii("%FF"), None);
+}
+
+#[test]
+fn max_hyperlink_and_pwd_byte_caps_are_frozen() {
+    assert_eq!(TERMINAL_VT_MAX_HYPERLINK_URI_BYTES, 2_048);
+    assert_eq!(TERMINAL_VT_MAX_PWD_URI_BYTES, 4_096);
+}
+
+#[test]
+fn an_osc8_hyperlink_is_projected_onto_every_cell_it_covers_and_ends_at_the_closing_sequence() {
+    let mut session = VtSession::new(20, 3).unwrap();
+    session.feed(b"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\plain");
+    let frame = session.dirty_frame().unwrap();
+    let row0 = frame
+        .rows_data
+        .iter()
+        .find(|row| row.row_index == 0)
+        .unwrap();
+    for cell in &row0.cells[0..4] {
+        assert_eq!(cell.hyperlink.as_deref(), Some("https://example.com"));
+    }
+    for cell in &row0.cells[4..9] {
+        assert_eq!(
+            cell.hyperlink, None,
+            "text after the closing OSC 8 must not carry a link"
+        );
+    }
+}
+
+#[test]
+fn a_hyperlink_uri_exceeding_the_strict_byte_cap_is_dropped_entirely_not_truncated() {
+    let long_uri = format!(
+        "https://example.com/{}",
+        "a".repeat(TERMINAL_VT_MAX_HYPERLINK_URI_BYTES + 1)
+    );
+    let mut session = VtSession::new(10, 3).unwrap();
+    session.feed(format!("\x1b]8;;{long_uri}\x1b\\x\x1b]8;;\x1b\\").as_bytes());
+    let frame = session.dirty_frame().unwrap();
+    let row0 = frame
+        .rows_data
+        .iter()
+        .find(|row| row.row_index == 0)
+        .unwrap();
+    assert_eq!(
+        row0.cells[0].hyperlink, None,
+        "an oversized URI must be dropped (None), never truncated into a shorter, wrong URI"
+    );
+}
+
+#[test]
+fn osc_133_markers_project_semantic_content_per_cell_and_semantic_prompt_per_row() {
+    let mut session = VtSession::new(20, 3).unwrap();
+    // A (prompt start) → "$ ", B (prompt end / input start) → "ls", C
+    // (command output start, after the shell echoes the newline) →
+    // "file.txt" on the next row.
+    session.feed(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\ls\x1b]133;C\x1b\\\r\nfile.txt");
+    let frame = session.dirty_frame().unwrap();
+
+    let row0 = frame
+        .rows_data
+        .iter()
+        .find(|row| row.row_index == 0)
+        .unwrap();
+    assert_eq!(row0.semantic_prompt, RowSemanticPrompt::Prompt);
+    assert_eq!(row0.cells[0].semantic, CellSemanticContent::Prompt); // '$'
+    assert_eq!(row0.cells[1].semantic, CellSemanticContent::Prompt); // ' '
+    assert_eq!(row0.cells[2].semantic, CellSemanticContent::Input); // 'l'
+    assert_eq!(row0.cells[3].semantic, CellSemanticContent::Input); // 's'
+
+    let row1 = frame
+        .rows_data
+        .iter()
+        .find(|row| row.row_index == 1)
+        .unwrap();
+    assert_eq!(row1.cells[0].semantic, CellSemanticContent::Output); // 'f'
+}
+
+#[test]
+fn a_row_with_no_semantic_prompt_marker_at_all_defaults_to_none() {
+    let mut session = VtSession::new(10, 3).unwrap();
+    session.feed(b"hello");
+    let frame = session.dirty_frame().unwrap();
+    let row0 = frame
+        .rows_data
+        .iter()
+        .find(|row| row.row_index == 0)
+        .unwrap();
+    assert_eq!(row0.semantic_prompt, RowSemanticPrompt::None);
+    assert_eq!(row0.cells[0].semantic, CellSemanticContent::Output);
+}
+
+#[test]
+fn hostile_or_malformed_osc_sequences_never_panic_and_leave_projection_in_a_sane_state() {
+    // Wide enough that nothing below auto-wraps — this test is about
+    // surviving hostile OSC/control bytes without panicking, not about
+    // exercising line-wrap arithmetic (see `feeding_sgr_and_newlines_*`
+    // and the dedicated multi-byte-UTF-8 test for that).
+    let mut session = VtSession::new(80, 3).unwrap();
+    // Unterminated OSC 7/8/133, a bare ESC, a lone `]`, and interleaved
+    // garbage bytes — `libghostty-vt`'s own `vt_write` contract is "never
+    // fails, malformed input only logged" (see this module's own doc); this
+    // asserts the *projection layer built on top of that* upholds the same
+    // guarantee end-to-end (no panic, and a well-defined, decodable frame).
+    session.feed(b"\x1b]7;file://localhost/tmp/unterminated");
+    session.feed(b"\x1b]8;;https://example.com");
+    session.feed(b"\x1b]133;A");
+    // A proper terminator closes whatever OSC sequence is still pending
+    // (an *unterminated* OSC would otherwise keep swallowing every
+    // subsequent byte, including "still here" below, as more of its
+    // command string — exactly as any real OSC parser behaves, not a bug
+    // this projection layer introduces) — then a run of control/invalid
+    // bytes fed as if they were plain content.
+    session.feed(b"\x1b\\\x00\x00garbage\xff\xfe");
+    session.feed(b"still here");
+    let frame = session.dirty_frame().unwrap();
+    let text: String = frame
+        .rows_data
+        .iter()
+        .flat_map(|row| row.cells.iter())
+        .flat_map(|cell| cell.graphemes.iter())
+        .collect();
+    assert!(text.contains("still here"));
 }

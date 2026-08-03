@@ -427,8 +427,19 @@ export interface WorkspaceSearchTextWakeEvent {
 
 // --- Terminal (F070 "IPC 改造": render-state frames + structured input) -----
 
+/** Wire projection of `terminal::shell_integration::ShellIntegrationStatus`
+ * (F190 S4 "Ghostty metadata and links") — whether this session's shell
+ * startup was actually augmented to emit OSC 7/133 on its own.
+ * `unsupportedShell` covers both "not one of the audited shell families"
+ * and "the injected files could not be written" — either way, the session
+ * still started normally, it just never emits OSC 7/133 on its own (an
+ * external program run inside it can still emit them directly). This is
+ * never silently reported as `injected` when it is not. */
+export type TerminalShellIntegrationStatus = "injected" | "unsupportedShell";
+
 export interface TerminalStartResult {
 	readonly sessionId: string;
+	readonly shellIntegration: TerminalShellIntegrationStatus;
 }
 
 export interface TerminalProfile {
@@ -470,23 +481,43 @@ export interface TerminalStyle {
 	readonly underline: TerminalUnderline;
 }
 
+/** Wire projection of `libghostty_vt::screen::CellSemanticContent` (OSC
+ * 133) — see `src-tauri/src/terminal/dto.rs`'s `TerminalSemanticContent` doc
+ * comment. Used only for CSS classification (dimming output, highlighting a
+ * typed command) and prompt-navigation commands — never widens process
+ * capability. */
+export type TerminalSemanticContent = "output" | "input" | "prompt";
+
+/** Wire projection of `libghostty_vt::screen::RowSemanticPrompt` (OSC 133)
+ * — drives "jump to previous/next prompt" command navigation. */
+export type TerminalRowSemanticPrompt = "none" | "prompt" | "continuation";
+
 /**
  * Wire projection of one `terminal::vt::DirtyCell`. `graphemes` is the
  * cell's base codepoint plus any combining marks, already joined into a
  * single string by Rust. `fg`/`bg` are already-resolved RGB (`null` means
  * "use the frame's `colors.foreground`/`background` default", not "no
  * color") — never a palette index a decoder here would need to resolve.
+ * `hyperlink` is this cell's OSC 8 URI (already strictly byte-capped by
+ * Rust — see `terminal::vt::read_hyperlink_uri`'s doc comment — `null`
+ * covers both "no link" and "link dropped for exceeding the cap", which are
+ * deliberately indistinguishable on the wire) — a renderer must still only
+ * ever treat an `http:`/`https:` URI as clickable; every other scheme
+ * (including this field being non-null) renders as plain text.
  */
 export interface TerminalCell {
 	readonly graphemes: string;
 	readonly fg: TerminalRgb | null;
 	readonly bg: TerminalRgb | null;
 	readonly style: TerminalStyle;
+	readonly hyperlink: string | null;
+	readonly semantic: TerminalSemanticContent;
 }
 
 /** Wire projection of one `terminal::vt::DirtyRow`. */
 export interface TerminalRow {
 	readonly rowIndex: number;
+	readonly semanticPrompt: TerminalRowSemanticPrompt;
 	readonly cells: readonly TerminalCell[];
 }
 
@@ -540,6 +571,15 @@ export interface TerminalFrame {
 	readonly cursor: TerminalCursor;
 	readonly colors: TerminalColors;
 	readonly rowsData: readonly TerminalRow[];
+	/** The session's current OSC 7/9/1337 working directory, already
+	 * root-relative — `null` if no shell-integration cwd has been reported
+	 * yet, or the shell's current directory is not (or no longer) inside
+	 * the workspace root this session was started in. See
+	 * `src-tauri/src/terminal/service.rs`'s `relativize_pwd` doc comment:
+	 * this is never an absolute filesystem path. Used for (a) UI display and
+	 * (b) as a candidate for the *next* split's `cwd` — Rust re-validates it
+	 * via the exact same containment check any other `cwd` goes through. */
+	readonly pwd: string | null;
 }
 
 /**
@@ -1732,6 +1772,15 @@ export interface PlainBridge {
 	 * `immediate: false` still signals the kill immediately but does not
 	 * wait — see `TerminalService::kill`'s doc comment. */
 	terminalKill(sessionId: string, immediate: boolean): Promise<void>;
+	/** Hands `url` off to the OS's own default handler for it — the sole
+	 * IPC path that ever opens something outside a pty session in this
+	 * domain (F190 S4 "Ghostty metadata and links"). Rejects with
+	 * `INVALID_TERMINAL_REQUEST`/`TERMINAL_LINK_INVALID` for anything but a
+	 * well-formed `http://`/`https://` URL. Callers must only ever invoke
+	 * this for an explicit user Cmd/Ctrl+Click on a rendered cell hyperlink
+	 * already restricted to that same scheme — never automatically from
+	 * terminal output alone. */
+	terminalOpenExternalLink(url: string): Promise<void>;
 	/** Registers a listener for every terminal session's streamed
 	 * render-state frames in this window. The listener receives the full
 	 * decoded event (including `sessionId`) and must filter for the

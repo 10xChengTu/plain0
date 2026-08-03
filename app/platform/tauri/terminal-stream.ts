@@ -4,6 +4,7 @@ import type {
 	TerminalExitEvent,
 	TerminalFrame,
 	TerminalScrollbackResult,
+	TerminalShellIntegrationStatus,
 } from "./contracts";
 
 /**
@@ -53,6 +54,14 @@ export interface TerminalStreamHandlers {
 
 export interface TerminalStream {
 	readonly sessionId: string;
+	/** F190 S4 "Ghostty metadata and links": whether this session's shell
+	 * startup was actually augmented to emit OSC 7/133 on its own — see
+	 * `TerminalShellIntegrationStatus`'s own doc comment. Always
+	 * `"unsupportedShell"` for a session `attachTerminalStream` attached to
+	 * (a `runInTerminal`-launched debuggee never goes through shell
+	 * resolution/injection at all — it runs the named program directly, not
+	 * a shell). */
+	readonly shellIntegration: TerminalShellIntegrationStatus;
 	/** Writes `text` (an IME composition commit, or a pasted block) to the
 	 * session's pty as its own UTF-8 bytes — no key encoding involved. */
 	writeText(text: string): Promise<void>;
@@ -141,12 +150,14 @@ export interface TerminalStream {
 function buildStreamHandle(
 	transport: Omit<TerminalStreamTransport, "terminalStart">,
 	sessionId: string,
+	shellIntegration: TerminalShellIntegrationStatus,
 	unlistenData: () => void,
 	unlistenExit: () => void,
 	disposedRef: { value: boolean },
 ): TerminalStream {
 	return {
 		sessionId,
+		shellIntegration,
 		async writeText(text) {
 			if (disposedRef.value) {
 				return;
@@ -200,6 +211,7 @@ export async function openTerminalStream(
 	handlers: TerminalStreamHandlers,
 ): Promise<TerminalStream> {
 	let sessionId: string | undefined;
+	let shellIntegration: TerminalShellIntegrationStatus = "unsupportedShell";
 	let nextExpectedSequence = 0;
 	const disposedRef = { value: false };
 	const pendingData: TerminalDataEvent[] = [];
@@ -242,6 +254,7 @@ export async function openTerminalStream(
 			request.rows,
 		);
 		sessionId = result.sessionId;
+		shellIntegration = result.shellIntegration;
 	} catch (error) {
 		unlistenData();
 		unlistenExit();
@@ -264,6 +277,7 @@ export async function openTerminalStream(
 	return buildStreamHandle(
 		transport,
 		sessionId,
+		shellIntegration,
 		unlistenData,
 		unlistenExit,
 		disposedRef,
@@ -323,6 +337,7 @@ export async function attachTerminalStream(
 	const stream = buildStreamHandle(
 		transport,
 		sessionId,
+		"unsupportedShell",
 		unlistenData,
 		unlistenExit,
 		disposedRef,

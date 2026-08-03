@@ -8,7 +8,10 @@ import type {
 	TerminalRow,
 	TerminalStyle,
 } from "../../app/platform/tauri/contracts";
-import { TerminalGridModel } from "../../app/features/terminal/plain-terminal-renderer";
+import {
+	isClickableHyperlinkUrl,
+	TerminalGridModel,
+} from "../../app/features/terminal/plain-terminal-renderer";
 
 const DEFAULT_STYLE: TerminalStyle = Object.freeze({
 	bold: false,
@@ -37,12 +40,23 @@ function cell(
 		fg: null,
 		bg: null,
 		style: DEFAULT_STYLE,
+		hyperlink: null,
+		semantic: "output",
 		...overrides,
 	});
 }
 
-function row(rowIndex: number, cells: readonly TerminalCell[]): TerminalRow {
-	return Object.freeze({ rowIndex, cells });
+function row(
+	rowIndex: number,
+	cells: readonly TerminalCell[],
+	overrides: Partial<TerminalRow> = {},
+): TerminalRow {
+	return Object.freeze({
+		rowIndex,
+		semanticPrompt: "none",
+		cells,
+		...overrides,
+	});
 }
 
 function cursorAt(x: number, y: number): TerminalCursor {
@@ -62,6 +76,7 @@ function frame(overrides: Partial<TerminalFrame> = {}): TerminalFrame {
 		cursor: cursorAt(0, 0),
 		colors: DEFAULT_COLORS,
 		rowsData: [],
+		pwd: null,
 		...overrides,
 	});
 }
@@ -219,5 +234,59 @@ describe("TerminalGridModel", () => {
 		expect(model.cursor).toBeUndefined();
 		expect(model.colors).toBeUndefined();
 		expect(model.cellAt(0, 0)).toBeUndefined();
+	});
+
+	it("retains each cell's hyperlink and semantic classification, and each row's semantic prompt flag", () => {
+		const model = new TerminalGridModel();
+		model.applyFrame(
+			frame({
+				cols: 3,
+				rows: 2,
+				dirty: "full",
+				rowsData: [
+					row(
+						0,
+						[
+							cell("$", { semantic: "prompt" }),
+							cell("l", { semantic: "input" }),
+							cell("s", { semantic: "input" }),
+						],
+						{ semanticPrompt: "prompt" },
+					),
+					row(1, [
+						cell("h", { hyperlink: "https://example.com" }),
+						cell("i", { hyperlink: "https://example.com" }),
+						cell("", {}),
+					]),
+				],
+			}),
+		);
+
+		expect(model.cellAt(0, 0)?.semantic).toBe("prompt");
+		expect(model.cellAt(0, 1)?.semantic).toBe("input");
+		expect(model.rowCells(0)?.[0]).toBeDefined();
+		expect(model.cellAt(1, 0)?.hyperlink).toBe("https://example.com");
+		expect(model.cellAt(1, 2)?.hyperlink).toBeNull();
+	});
+});
+
+describe("isClickableHyperlinkUrl", () => {
+	it("accepts only http:// and https:// URIs", () => {
+		expect(isClickableHyperlinkUrl("https://example.com")).toBe(true);
+		expect(isClickableHyperlinkUrl("http://example.com")).toBe(true);
+	});
+
+	it("rejects null and every other scheme, never treating them as clickable", () => {
+		for (const url of [
+			null,
+			"file:///etc/passwd",
+			"javascript:alert(1)",
+			"ftp://example.com",
+			"mailto:someone@example.com",
+			"HTTPS://example.com",
+			"",
+		]) {
+			expect(isClickableHyperlinkUrl(url)).toBe(false);
+		}
 	});
 });

@@ -139,6 +139,7 @@ import {
 	frozenTerminalInputKeyRequest,
 	frozenTerminalInputTextRequest,
 	frozenTerminalKillRequest,
+	frozenTerminalOpenExternalLinkRequest,
 	frozenTerminalProfilesRequest,
 	frozenTerminalResizeRequest,
 	frozenTerminalScrollbackRequest,
@@ -778,6 +779,12 @@ export function createNativeBridge(): PlainBridge {
 		terminalKill: async (sessionId, immediate) => {
 			const request = frozenTerminalKillRequest(sessionId, immediate);
 			decodeTerminalVoid(await invoke<unknown>("terminal_kill", { request }));
+		},
+		terminalOpenExternalLink: async (url) => {
+			const request = frozenTerminalOpenExternalLinkRequest(url);
+			decodeTerminalVoid(
+				await invoke<unknown>("terminal_open_external_link", { request }),
+			);
 		},
 		terminalWatchData: (listener) => {
 			let unlisten: (() => void) | undefined;

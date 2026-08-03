@@ -302,6 +302,9 @@ function testBridge(
 		async terminalKill() {
 			throw new Error("unused");
 		},
+		async terminalOpenExternalLink() {
+			throw new Error("unused");
+		},
 		terminalWatchData() {
 			throw new Error("unused");
 		},

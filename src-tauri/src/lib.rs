@@ -236,6 +236,7 @@ pub fn run() {
             terminal::commands::terminal_ack,
             terminal::commands::terminal_scrollback,
             terminal::commands::terminal_kill,
+            terminal::commands::terminal_open_external_link,
             theme::commands::theme_import_vsix,
             theme::commands::theme_import_directory,
             theme::commands::theme_list,

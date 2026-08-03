@@ -1768,6 +1768,18 @@ async function installNativeIpcMock(
 				nextSequence: number;
 				awaitingAck: boolean;
 				pendingEmit: boolean;
+				// `F190` S4 "Ghostty metadata and links": the session's current
+				// OSC 7 pwd (already root-relative — mirrors
+				// `TerminalFrame.pwd`'s own doc comment), per-cell OSC 8
+				// hyperlink/OSC 133 semantic classification (keyed
+				// `"<row>:<col>"`), and per-row OSC 133 semantic prompt
+				// classification — all scripted only via
+				// `__PLAIN_TEST_TERMINAL_SET_METADATA__` below; this fixture
+				// never derives them from typed/pushed text itself.
+				pwd: string | null;
+				hyperlinks: Map<string, string>;
+				semantics: Map<string, "output" | "input" | "prompt">;
+				rowSemanticPrompts: Map<number, "none" | "prompt" | "continuation">;
 			}
 			const terminalSessions = new Map<string, FakeTerminalSession>();
 			let terminalSessionSerial = 401;
@@ -1809,13 +1821,17 @@ async function installNativeIpcMock(
 					},
 					rowsData: session.lines.map((line, rowIndex) => ({
 						rowIndex,
+						semanticPrompt: session.rowSemanticPrompts.get(rowIndex) ?? "none",
 						cells: Array.from({ length: session.cols }, (_unused, col) => ({
 							graphemes: line[col] ?? "",
 							fg: null,
 							bg: null,
 							style: DEFAULT_TERMINAL_STYLE,
+							hyperlink: session.hyperlinks.get(`${rowIndex}:${col}`) ?? null,
+							semantic: session.semantics.get(`${rowIndex}:${col}`) ?? "output",
 						})),
 					})),
+					pwd: session.pwd,
 				};
 			}
 			function emitTerminalFrame(session: FakeTerminalSession): void {
@@ -2671,6 +2687,75 @@ async function installNativeIpcMock(
 			).__PLAIN_TEST_TERMINAL_SESSION_IDS__ = () => [
 				...terminalSessions.keys(),
 			];
+			// `F190` S4 "Ghostty metadata and links": scripts a session's OSC
+			// 7 pwd / OSC 8 per-cell hyperlink / OSC 133 per-cell semantic /
+			// OSC 133 per-row semantic-prompt metadata directly (this fixture
+			// never derives any of the four from typed/pushed text — see
+			// `FakeTerminalSession`'s own doc comment) and immediately
+			// requests a frame emission, exactly like
+			// `__PLAIN_TEST_TERMINAL_PUSH__` does for text.
+			(
+				window as unknown as Window & {
+					__PLAIN_TEST_TERMINAL_SET_METADATA__(
+						patch: {
+							pwd?: string | null;
+							hyperlink?: {
+								row: number;
+								colStart: number;
+								colEnd: number;
+								uri: string | null;
+							};
+							semantic?: {
+								row: number;
+								colStart: number;
+								colEnd: number;
+								kind: "output" | "input" | "prompt";
+							};
+							rowSemanticPrompt?: {
+								row: number;
+								kind: "none" | "prompt" | "continuation";
+							};
+						},
+						sessionId?: string,
+					): void;
+				}
+			).__PLAIN_TEST_TERMINAL_SET_METADATA__ = (patch, sessionId) => {
+				const targetId = sessionId ?? lastStartedTerminalSessionId;
+				if (targetId === undefined) {
+					throw new Error("No terminal session has been started yet.");
+				}
+				const session = terminalSessions.get(targetId);
+				if (session === undefined) {
+					throw new Error(`Terminal session ${targetId} no longer exists.`);
+				}
+				if (patch.pwd !== undefined) {
+					session.pwd = patch.pwd;
+				}
+				if (patch.hyperlink !== undefined) {
+					const { row, colStart, colEnd, uri } = patch.hyperlink;
+					for (let col = colStart; col < colEnd; col += 1) {
+						const key = `${row}:${col}`;
+						if (uri === null) {
+							session.hyperlinks.delete(key);
+						} else {
+							session.hyperlinks.set(key, uri);
+						}
+					}
+				}
+				if (patch.semantic !== undefined) {
+					const { row, colStart, colEnd, kind } = patch.semantic;
+					for (let col = colStart; col < colEnd; col += 1) {
+						session.semantics.set(`${row}:${col}`, kind);
+					}
+				}
+				if (patch.rowSemanticPrompt !== undefined) {
+					session.rowSemanticPrompts.set(
+						patch.rowSemanticPrompt.row,
+						patch.rowSemanticPrompt.kind,
+					);
+				}
+				requestTerminalEmit(session);
+			};
 			(
 				window as unknown as Window & {
 					__PLAIN_TEST_CREATE_EXTERNAL_TERMINAL_SESSION__(
@@ -2702,6 +2787,10 @@ async function installNativeIpcMock(
 					nextSequence: 0,
 					awaitingAck: false,
 					pendingEmit: false,
+					pwd: null,
+					hyperlinks: new Map(),
+					semantics: new Map(),
+					rowSemanticPrompts: new Map(),
 				});
 			};
 
@@ -3853,6 +3942,7 @@ async function installNativeIpcMock(
 										label: "zsh (System Default)",
 									},
 									{ id: "zsh", label: "zsh" },
+									{ id: "sh", label: "sh" },
 								],
 								defaultProfileId: "systemDefault",
 							};
@@ -3879,13 +3969,14 @@ async function installNativeIpcMock(
 								);
 							}
 							// `F190` S2: this fixture's `terminal_profiles` snapshot (see
-							// that case below) only ever issues `systemDefault`/`zsh` — the
-							// same bounded set a real `terminal_start` would accept.
+							// that case below) only ever issues `systemDefault`/`zsh`/`sh`
+							// — the same bounded set a real `terminal_start` would accept.
 							// `cwd` mirrors Rust's own `resolve_cwd`: `null`, or a relative
 							// path that does not try to leave the root.
 							if (
 								startRequest.profileId !== "systemDefault" &&
-								startRequest.profileId !== "zsh"
+								startRequest.profileId !== "zsh" &&
+								startRequest.profileId !== "sh"
 							) {
 								throw terminalProfileInvalid();
 							}
@@ -3908,10 +3999,26 @@ async function installNativeIpcMock(
 								nextSequence: 0,
 								awaitingAck: false,
 								pendingEmit: false,
+								pwd: null,
+								hyperlinks: new Map(),
+								semantics: new Map(),
+								rowSemanticPrompts: new Map(),
 							};
 							terminalSessions.set(sessionId, session);
 							lastStartedTerminalSessionId = sessionId;
-							return { sessionId };
+							// `F190` S4: mirrors `terminal::shell_integration::plan_for_shell`'s
+							// own family split — `systemDefault`/`zsh` are audited families
+							// (`injected`); `sh` is deliberately not, exactly like the real
+							// `SHELL_PROFILE_SPECS` entry of the same name, so a test can
+							// exercise the accurate `unsupportedShell` degrade status without
+							// this fixture needing to model every real shell family.
+							return {
+								sessionId,
+								shellIntegration:
+									startRequest.profileId === "sh"
+										? "unsupportedShell"
+										: "injected",
+							};
 						}
 						case "terminal_input_text": {
 							const inputRequest = args.request as
@@ -4025,6 +4132,27 @@ async function installNativeIpcMock(
 							const session = getFakeTerminalSession(killRequest?.sessionId);
 							terminalSessions.delete(session.sessionId);
 							emitTerminalExit(session, 137);
+							return null;
+						}
+						// `F190` S4 "Ghostty metadata and links": mirrors
+						// `terminal::opener::open_external_link`'s own fail-closed
+						// http(s)-only scheme check — see
+						// `TerminalOpenExternalLinkRequest::into_parts`'s doc comment.
+						// This fixture never actually launches a real OS opener; the
+						// test itself observes the call via `terminalCallsFor(page,
+						// "terminal_open_external_link")`.
+						case "terminal_open_external_link": {
+							const linkRequest = args.request as { url?: unknown } | undefined;
+							if (
+								typeof linkRequest?.url !== "string" ||
+								linkRequest.url.length === 0 ||
+								!/^https?:\/\//.test(linkRequest.url)
+							) {
+								throw Object.freeze({
+									code: "TERMINAL_LINK_INVALID",
+									message: "The requested link is not a valid http(s) URL.",
+								});
+							}
 							return null;
 						}
 						case "git_status": {
@@ -6412,7 +6540,7 @@ async function installMultiRootNativeIpcMock(
 							}
 							const sessionId = nextTerminalSessionId();
 							terminalSessions.add(sessionId);
-							return { sessionId };
+							return { sessionId, shellIntegration: "injected" };
 						}
 						case "terminal_input_text":
 						case "terminal_input_key":
@@ -6425,6 +6553,19 @@ async function installMultiRootNativeIpcMock(
 						}
 						case "terminal_kill": {
 							terminalSessions.delete(terminalSessionFrom(args));
+							return null;
+						}
+						case "terminal_open_external_link": {
+							const request = args.request as { url?: unknown } | undefined;
+							if (
+								typeof request?.url !== "string" ||
+								!/^https?:\/\//.test(request.url)
+							) {
+								throw Object.freeze({
+									code: "TERMINAL_LINK_INVALID",
+									message: "The requested link is not a valid http(s) URL.",
+								});
+							}
 							return null;
 						}
 						case "git_status": {
@@ -14697,6 +14838,52 @@ async function pushTerminalOutputBurst(
 	);
 }
 
+/** `F190` S4 "Ghostty metadata and links": mirrors
+ * `__PLAIN_TEST_TERMINAL_SET_METADATA__`'s own patch shape (see
+ * `installNativeIpcMock`'s definition of that hook). */
+interface TestTerminalMetadataPatch {
+	pwd?: string | null;
+	hyperlink?: {
+		row: number;
+		colStart: number;
+		colEnd: number;
+		uri: string | null;
+	};
+	semantic?: {
+		row: number;
+		colStart: number;
+		colEnd: number;
+		kind: "output" | "input" | "prompt";
+	};
+	rowSemanticPrompt?: {
+		row: number;
+		kind: "none" | "prompt" | "continuation";
+	};
+}
+
+/** `F190` S4 "Ghostty metadata and links": scripts one session's OSC
+ * 7 pwd / OSC 8 hyperlink / OSC 133 semantic / OSC 133 row-semantic-prompt
+ * metadata via `__PLAIN_TEST_TERMINAL_SET_METADATA__` and waits for the
+ * resulting frame to actually paint. */
+async function setTerminalMetadata(
+	page: Page,
+	patch: TestTerminalMetadataPatch,
+	sessionId?: string,
+): Promise<void> {
+	await page.evaluate(
+		({ patch, sessionId }) => {
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_TERMINAL_SET_METADATA__(
+					patch: TestTerminalMetadataPatch,
+					sessionId?: string,
+				): void;
+			};
+			testWindow.__PLAIN_TEST_TERMINAL_SET_METADATA__(patch, sessionId);
+		},
+		{ patch, sessionId },
+	);
+}
+
 /** Every currently-live fake session id, in the order `terminal_start`
  * created them — lets a multi-tab/split test target a specific tab/pane's
  * session without guessing at IPC-call ordering. */
@@ -16319,6 +16506,285 @@ test("a hand-edited invalid persisted cwd default is rejected with an accurate, 
 	const bodyText = await page.locator(".plain-terminal-view-body").innerText();
 	expect(bodyText).not.toContain(secretPath);
 	expect(bodyText).not.toContain("/Users/someone");
+
+	expect(pageErrors).toEqual([]);
+});
+
+// --- `F190` S4 "Ghostty metadata and links" ------------------------------
+
+test("Cmd/Ctrl+Click opens an http(s) OSC 8 hyperlink through the audited opener, a plain click does not, and a non-http(s) scheme never becomes clickable", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+
+	// Row 0: "link ftp text" — "link" (cols 0-3) gets an http(s) link, "ftp"
+	// (cols 5-7) gets a non-audited scheme that must never render clickable.
+	await pushTerminalOutput(page, "link ftp text");
+	await setTerminalMetadata(page, {
+		hyperlink: { row: 0, colStart: 0, colEnd: 4, uri: "https://example.com" },
+	});
+	await setTerminalMetadata(page, {
+		hyperlink: { row: 0, colStart: 5, colEnd: 8, uri: "ftp://example.com" },
+	});
+
+	const grid = page.locator(".plain-terminal-grid");
+	const httpLink = grid.locator(
+		'[data-plain-terminal-link="https://example.com"]',
+	);
+	await expect(httpLink).toHaveCount(1);
+	await expect(httpLink).toHaveClass(/plain-terminal-cell--link/);
+	// The ftp-scheme cell is rendered as ordinary text: no clickable-link
+	// data attribute anywhere else on the row.
+	await expect(grid.locator("[data-plain-terminal-link]")).toHaveCount(1);
+
+	// A plain click (no modifier) never opens anything.
+	await httpLink.click();
+	expect(await terminalCallsFor(page, "terminal_open_external_link")).toEqual(
+		[],
+	);
+
+	// Cmd/Ctrl+Click does — the renderer checks `metaKey || ctrlKey` (either
+	// satisfies it). "Meta" here, not "Control": on macOS a *physical*
+	// Control+click is reinterpreted by the OS/Chromium input pipeline as a
+	// secondary (context-menu) click and never reaches the page as an
+	// ordinary "click" event at all — real Mac users use Cmd+Click for
+	// exactly this reason, so "Meta" is the gesture that actually exercises
+	// this renderer's own `metaKey || ctrlKey` branch on this runner's OS.
+	await httpLink.click({ modifiers: ["Meta"] });
+	await expect
+		.poll(
+			async () =>
+				(await terminalCallsFor(page, "terminal_open_external_link")).length,
+		)
+		.toBe(1);
+	const [openCall] = await terminalCallsFor(
+		page,
+		"terminal_open_external_link",
+	);
+	expect(openCall?.args.request).toMatchObject({ url: "https://example.com" });
+
+	// The ftp span never carries `data-plain-terminal-link` at all, so even
+	// a Cmd/Ctrl+Click on it triggers nothing further.
+	const ftpSpan = grid.locator(".plain-terminal-cell", { hasText: "ftp" });
+	await ftpSpan.click({ modifiers: ["Meta"] });
+	expect(
+		await terminalCallsFor(page, "terminal_open_external_link"),
+	).toHaveLength(1);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("OSC 133 semantic classification reflects in DOM classes and the prompt-navigation commands jump to and highlight the right row", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+
+	// Row 0 = "$ ls" (a prompt line: "$ " is prompt text, "ls" is the typed
+	// command), row 1 = "file.txt" (plain command output — the default
+	// `"output"` classification, so it gets no extra semantic class).
+	await pushTerminalOutput(page, "$ ls\n");
+	await pushTerminalOutput(page, "file.txt\n");
+	await setTerminalMetadata(page, {
+		rowSemanticPrompt: { row: 0, kind: "prompt" },
+	});
+	await setTerminalMetadata(page, {
+		semantic: { row: 0, colStart: 0, colEnd: 2, kind: "prompt" },
+	});
+	await setTerminalMetadata(page, {
+		semantic: { row: 0, colStart: 2, colEnd: 4, kind: "input" },
+	});
+
+	const grid = page.locator(".plain-terminal-grid");
+	// One span each: `groupRowRuns` merges adjacent same-styled cells into a
+	// single `<span>` (see that function's own doc comment) — "$ " (cols 0-1,
+	// both `"prompt"`) and "ls" (cols 2-3, both `"input"`) are each one
+	// contiguous run.
+	await expect(
+		grid.locator(".plain-terminal-cell--semantic-prompt"),
+	).toHaveCount(1);
+	await expect(
+		grid.locator(".plain-terminal-cell--semantic-input"),
+	).toHaveCount(1);
+	await expect(
+		grid.locator(".plain-terminal-cell--semantic-prompt"),
+	).toHaveText("$ ");
+	await expect(grid.locator(".plain-terminal-cell--semantic-input")).toHaveText(
+		"ls",
+	);
+
+	const promptRow = grid.locator(".plain-terminal-row").nth(0);
+	await expect(promptRow).not.toHaveClass(/prompt-target/);
+
+	await executePaletteCommand(
+		page,
+		"Jump to Previous Prompt",
+		"Plain: Jump to Previous Prompt",
+	);
+	await expect(promptRow).toHaveClass(/plain-terminal-row--prompt-target/);
+
+	// "Jump to Next Prompt" walks back toward the bottom — with only one
+	// prompt row retained, there is nothing further "next" of it, so this
+	// must not throw or move the highlight anywhere new.
+	await executePaletteCommand(
+		page,
+		"Jump to Next Prompt",
+		"Plain: Jump to Next Prompt",
+	);
+	await expect(promptRow).toHaveClass(/plain-terminal-row--prompt-target/);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("OSC 7 pwd is reflected on the pane and becomes the next split's cwd candidate, re-validated by the mock", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+
+	const activePane = page.locator(
+		'.plain-terminal-panecontainer[data-active="true"] .plain-terminal-pane[data-active="true"]',
+	);
+	await setTerminalMetadata(page, { pwd: "nested/project" });
+	await expect(activePane).toHaveAttribute(
+		"data-terminal-pwd",
+		"nested/project",
+	);
+
+	await page.getByRole("button", { name: "Split Terminal Right" }).click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(2);
+	const starts = await terminalCallsFor(page, "terminal_start");
+	// The mock's own `terminal_start` handler re-validates `cwd` exactly like
+	// every other request (rejects an absolute path or a `..` escape — see
+	// that case's own comment) — this call succeeding at all is that
+	// re-validation, not merely a value being echoed back unchecked.
+	expect(starts[1]?.args.request).toMatchObject({ cwd: "nested/project" });
+
+	// A pwd that later moves outside the workspace root projects to `null`
+	// (see `TerminalFrame.pwd`'s doc comment) — the pane's own display must
+	// track that, not keep showing a stale candidate.
+	await setTerminalMetadata(page, { pwd: null });
+	await expect(activePane).not.toHaveAttribute("data-terminal-pwd");
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("shell-integration injection status is accurately observable: injected for the audited zsh/systemDefault families, degraded for an unsupported shell profile", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+
+	const firstPane = page.locator(
+		'.plain-terminal-panecontainer[data-active="true"] .plain-terminal-pane[data-active="true"]',
+	);
+	await expect(firstPane).toHaveAttribute(
+		"data-terminal-shell-integration",
+		"injected",
+	);
+
+	// `"sh"` is deliberately not one of the audited shell-integration
+	// families (mirrors the real `shell_integration::ShellFamily` split —
+	// see this fixture's own `terminal_start` case comment).
+	const profileSelect = page.getByRole("combobox", {
+		name: "Default Terminal Profile",
+	});
+	await profileSelect.selectOption("sh");
+	await page.getByRole("button", { name: "New Terminal" }).click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(2);
+
+	const secondPane = page.locator(
+		'.plain-terminal-panecontainer[data-active="true"] .plain-terminal-pane[data-active="true"]',
+	);
+	await expect(secondPane).toHaveAttribute(
+		"data-terminal-shell-integration",
+		"unsupportedShell",
+	);
 
 	expect(pageErrors).toEqual([]);
 });

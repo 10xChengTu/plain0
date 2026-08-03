@@ -209,6 +209,7 @@ import {
 	frozenTerminalInputKeyRequest,
 	frozenTerminalInputTextRequest,
 	frozenTerminalKillRequest,
+	frozenTerminalOpenExternalLinkRequest,
 	frozenTerminalProfilesRequest,
 	frozenTerminalResizeRequest,
 	frozenTerminalScrollbackRequest,
@@ -1135,6 +1136,12 @@ export interface BrowserMockBridgeOptions {
 	readonly onTerminalSessionForTest?: (
 		controller: BrowserMockTerminalSessionController,
 	) => void;
+	/** F190 S4 "Ghostty metadata and links": invoked once per accepted
+	 * `terminalOpenExternalLink` call with the exact URL it validated — lets
+	 * a test assert *which* URL a Cmd/Ctrl+Click on a rendered hyperlink
+	 * actually requested opening, without this mock needing to simulate a
+	 * real OS opener process. */
+	readonly onTerminalOpenExternalLinkForTest?: (url: string) => void;
 	/** `F080` S1: seeds the deterministic `gitStatus`/`gitDiffFiles`/
 	 * `gitShowBlob` responses — see `BrowserMockGitFixtureForTest`. */
 	readonly gitFixtureForTest?: BrowserMockGitFixtureForTest;
@@ -6927,11 +6934,25 @@ export function createBrowserMockBridge(
 		session: MockTerminalSession,
 		dirty: "full" | "partial",
 	): unknown {
+		// F190 S4 "Ghostty metadata and links": this mock's single-echo-row
+		// fake PTY (see `BrowserMockTerminalSessionController`'s own doc
+		// comment for why it is deliberately not a real VT emulator) never
+		// itself produces a hyperlink/semantic-tagged cell or a live OSC 7
+		// pwd — every cell/row below carries the fixed "no metadata" values
+		// (`hyperlink: null`, `semantic: "output"`, `semanticPrompt: "none"`),
+		// and the frame's own `pwd` is always `null`. Renderer/codec unit
+		// tests that need a *specific* hyperlink/semantic/pwd shape build a
+		// `TerminalFrame` fixture object directly instead of routing through
+		// this mock; the richer Playwright-only fixture in
+		// `tests/browser/workspace.spec.ts` covers the full Browser E2E
+		// scenarios for this metadata (see that file's own `FakeTerminalSession`).
 		const cells = [...session.line].map((character) => ({
 			graphemes: character,
 			fg: null,
 			bg: null,
 			style: MOCK_TERMINAL_DEFAULT_STYLE,
+			hyperlink: null,
+			semantic: "output",
 		}));
 		return {
 			dirty,
@@ -6948,7 +6969,8 @@ export function createBrowserMockBridge(
 				foreground: MOCK_TERMINAL_FOREGROUND,
 				cursor: null,
 			},
-			rowsData: [{ rowIndex: 0, cells }],
+			rowsData: [{ rowIndex: 0, semanticPrompt: "none", cells }],
+			pwd: null,
 		};
 	}
 
@@ -7989,7 +8011,9 @@ export function createBrowserMockBridge(
 			if (!roots.has(request.rootId)) {
 				throw rootNotAuthorized();
 			}
-			if (!new Set(["systemDefault", "zsh", "bash"]).has(request.profileId)) {
+			if (
+				!new Set(["systemDefault", "zsh", "bash", "sh"]).has(request.profileId)
+			) {
 				throw Object.freeze({
 					code: "TERMINAL_PROFILE_INVALID",
 					message:
@@ -7997,7 +8021,21 @@ export function createBrowserMockBridge(
 				});
 			}
 			const session = startMockTerminalSession(request.cols, request.rows);
-			return decodeTerminalStartResult({ sessionId: session.sessionId });
+			// Mirrors `terminal::shell_integration::plan_for_shell`'s own
+			// family split closely enough for frontend-only tests: zsh/bash
+			// (and `systemDefault`, standing in for whichever real shell it
+			// would resolve to) are audited families → `injected`; every
+			// other accepted profile id degrades to `unsupportedShell` —
+			// never silently reported as `injected`.
+			const shellIntegration = new Set(["systemDefault", "zsh", "bash"]).has(
+				request.profileId,
+			)
+				? "injected"
+				: "unsupportedShell";
+			return decodeTerminalStartResult({
+				sessionId: session.sessionId,
+				shellIntegration,
+			});
 		},
 		async terminalInputText(sessionId, text) {
 			const request = frozenTerminalInputTextRequest(sessionId, text);
@@ -8060,6 +8098,10 @@ export function createBrowserMockBridge(
 			const session = getMockTerminalSession(request.sessionId);
 			finishMockTerminalSession(session, MOCK_TERMINAL_KILLED_EXIT_CODE);
 			terminalSessions.delete(request.sessionId);
+		},
+		async terminalOpenExternalLink(url) {
+			const request = frozenTerminalOpenExternalLinkRequest(url);
+			options.onTerminalOpenExternalLinkForTest?.(request.url);
 		},
 		terminalWatchData(listener) {
 			terminalDataListeners.add(listener);

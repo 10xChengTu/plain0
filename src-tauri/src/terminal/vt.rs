@@ -107,7 +107,7 @@
 use libghostty_vt::render::{
     CellIterator, Colors, CursorViewport, CursorVisualStyle, Dirty, RowIterator, Snapshot,
 };
-use libghostty_vt::screen::GridRef;
+use libghostty_vt::screen::{CellSemanticContent, GridRef, RowSemanticPrompt};
 use libghostty_vt::style::{RgbColor, Style};
 use libghostty_vt::terminal::{Mode, Options as TerminalOptions, Point, PointCoordinate};
 use libghostty_vt::{focus, key, mouse};
@@ -120,6 +120,23 @@ use libghostty_vt::{Error as VtFfiError, RenderState, Terminal};
 /// change to it is a deliberate, reviewed edit rather than an accidental
 /// one.
 pub(crate) const TERMINAL_VT_MAX_SCROLLBACK_LINES: usize = 10_000;
+
+/// Strict byte ceiling on one cell's projected OSC 8 hyperlink URI (F190 S4's
+/// "Ghostty metadata and links" slice, `docs/research/2026-08-03-complete-terminal.md`
+/// §3). A real URI is nowhere near this size; this exists purely so a
+/// hostile/broken program cannot balloon a frame's wire size by writing an
+/// enormous OSC 8 payload. [`read_hyperlink_uri`] drops (returns `None` for)
+/// any link whose real length exceeds this cap rather than truncating it
+/// into a malformed URI — a dropped link renders as plain, non-clickable
+/// text, never a corrupted address a click could misdirect to.
+pub(crate) const TERMINAL_VT_MAX_HYPERLINK_URI_BYTES: usize = 2_048;
+
+/// Strict byte ceiling on the raw OSC 7/9/1337 payload [`VtSession::dirty_frame`]
+/// reads via `Terminal::pwd()` before attempting to parse it into a
+/// filesystem path (see [`parse_osc7_pwd_uri`]). An oversized or malformed
+/// payload simply yields `DirtyFrame::pwd == None` — pwd projection fails
+/// closed, it never panics or reports a truncated/garbled path.
+pub(crate) const TERMINAL_VT_MAX_PWD_URI_BYTES: usize = 4_096;
 
 /// A `vt.rs`-internal error, deliberately distinct from the
 /// `tauri`-facing `CommandError` the rest of this domain returns: nothing in
@@ -252,12 +269,28 @@ impl VtSession {
     pub(crate) fn dirty_frame(&mut self) -> Result<DirtyFrame, VtError> {
         let snapshot = self.render_state.update(&self.terminal)?;
         let force_full = std::mem::take(&mut self.force_full_dirty_next);
-        frame_from_snapshot(
+        let mut frame = frame_from_snapshot(
             &snapshot,
+            &self.terminal,
             &mut self.row_iter,
             &mut self.cell_iter,
             force_full,
-        )
+        )?;
+        // Read *after* the snapshot/row/cell borrows above have all ended —
+        // see the module doc's "Thread safety" section: nothing here holds
+        // `self.terminal` borrowed across this call, so this is just one
+        // more independent immutable read of it. Projected regardless of
+        // `frame.dirty` (a pure OSC 7 write with no accompanying cell writes
+        // would otherwise never surface a pwd change) — see
+        // `service::FrameEmitGate`'s own pwd-change bypass for the other
+        // half of that guarantee.
+        frame.pwd = self
+            .terminal
+            .pwd()
+            .ok()
+            .filter(|raw| !raw.is_empty())
+            .and_then(|raw| parse_osc7_pwd_uri(raw, TERMINAL_VT_MAX_PWD_URI_BYTES));
+        Ok(frame)
     }
 
     /// Reads up to `count` scrollback rows starting at history row `start`
@@ -359,12 +392,26 @@ pub(crate) struct DirtyCell {
     pub(crate) fg_rgb: Option<RgbColor>,
     pub(crate) bg_rgb: Option<RgbColor>,
     pub(crate) selected: bool,
+    /// This cell's OSC 8 hyperlink URI, or `None` if the cell carries no
+    /// hyperlink *or* its real URI exceeded [`TERMINAL_VT_MAX_HYPERLINK_URI_BYTES`]
+    /// (see [`read_hyperlink_uri`] — a dropped link is indistinguishable from
+    /// "no link" on the wire, which is fine: both render as plain text).
+    pub(crate) hyperlink: Option<String>,
+    /// This cell's OSC 133 semantic classification (prompt/input/output) —
+    /// see `libghostty_vt::screen::CellSemanticContent`'s own doc. Used only
+    /// for CSS styling by the consuming renderer; never widens what the
+    /// underlying process can do.
+    pub(crate) semantic: CellSemanticContent,
 }
 
 /// One dirty (or, on a full redraw, every) row's cells, in column order.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct DirtyRow {
     pub(crate) row_index: usize,
+    /// Whether OSC 133 marked this row (or any part of it) as a shell
+    /// prompt line — see `libghostty_vt::screen::RowSemanticPrompt`'s own
+    /// doc. Used only for "jump to previous/next prompt" command navigation.
+    pub(crate) semantic_prompt: RowSemanticPrompt,
     pub(crate) cells: Vec<DirtyCell>,
 }
 
@@ -389,6 +436,17 @@ pub(crate) struct DirtyFrame {
     pub(crate) cursor: CursorState,
     pub(crate) colors: Colors,
     pub(crate) rows_data: Vec<DirtyRow>,
+    /// The current OSC 7/9/1337 working directory, already parsed out of its
+    /// `file://` URI form into a plain absolute filesystem path — `None` if
+    /// no shell-integration cwd has been reported yet, or if the raw payload
+    /// was empty, oversized, or failed to parse (see [`parse_osc7_pwd_uri`]).
+    /// This is a *raw* absolute path with no workspace-root awareness at
+    /// all — `vt.rs` deliberately knows nothing about workspace roots (see
+    /// the module doc's "owns exactly three things" framing). `service.rs`'s
+    /// vt thread is what turns this into the root-relative value the
+    /// frontend actually receives (see `service::relativize_pwd`), so this
+    /// absolute path itself never crosses the IPC boundary.
+    pub(crate) pwd: Option<String>,
 }
 
 /// One scrollback row read via [`VtSession::scrollback_rows`]. See that
@@ -409,6 +467,7 @@ pub(crate) struct ScrollbackCell {
 
 fn frame_from_snapshot<'alloc>(
     snapshot: &Snapshot<'alloc, '_>,
+    terminal: &Terminal<'_, '_>,
     row_iter: &mut RowIterator<'alloc>,
     cell_iter: &mut CellIterator<'alloc>,
     force_full: bool,
@@ -435,18 +494,50 @@ fn frame_from_snapshot<'alloc>(
         let row_is_dirty = row.dirty()?;
         let include_row = dirty == Dirty::Full || row_is_dirty;
         if include_row {
+            let semantic_prompt = row
+                .raw_row()
+                .and_then(libghostty_vt::screen::Row::semantic_prompt)
+                .unwrap_or(RowSemanticPrompt::None);
             let mut cells = Vec::with_capacity(cols as usize);
             let mut cell_iteration = cell_iter.update(row)?;
+            let mut col_index: u16 = 0;
             while let Some(cell) = cell_iteration.next() {
+                let raw_cell = cell.raw_cell()?;
+                let hyperlink = if raw_cell.has_hyperlink()? {
+                    read_hyperlink_uri(
+                        terminal,
+                        Point::Viewport(PointCoordinate {
+                            x: col_index,
+                            y: row_index as u32,
+                        }),
+                        TERMINAL_VT_MAX_HYPERLINK_URI_BYTES,
+                    )
+                } else {
+                    None
+                };
                 cells.push(DirtyCell {
                     graphemes: cell.graphemes()?,
                     style: cell.style()?,
                     fg_rgb: cell.fg_color()?,
                     bg_rgb: cell.bg_color()?,
                     selected: cell.is_selected()?,
+                    hyperlink,
+                    // Fails closed to `Output` (plain text, no special
+                    // styling) rather than propagating — see this module's
+                    // own hostile-input test: an out-of-range/unrecognized
+                    // semantic tag must never fail the whole frame, only
+                    // that one cell's classification.
+                    semantic: raw_cell
+                        .semantic_content()
+                        .unwrap_or(CellSemanticContent::Output),
                 });
+                col_index = col_index.saturating_add(1);
             }
-            rows_data.push(DirtyRow { row_index, cells });
+            rows_data.push(DirtyRow {
+                row_index,
+                semantic_prompt,
+                cells,
+            });
         }
         // Drain the per-row dirty flag regardless of whether this row was
         // included above (a clean row's flag is already `false`, so this is
@@ -464,7 +555,88 @@ fn frame_from_snapshot<'alloc>(
         cursor,
         colors,
         rows_data,
+        // Filled in by `VtSession::dirty_frame` (needs a fresh, non-conflicting
+        // borrow of `terminal` taken *after* this function returns).
+        pwd: None,
     })
+}
+
+/// Reads the real hyperlink URI at `point`, bounded by `cap` bytes — the
+/// hyperlink counterpart to [`read_grid_ref_graphemes`], except a URI whose
+/// real length exceeds `cap` is dropped entirely (`None`) rather than grown
+/// into arbitrarily (see [`TERMINAL_VT_MAX_HYPERLINK_URI_BYTES`]'s doc for
+/// why: a strict cap only protects against a hostile/broken program if
+/// exceeding it always fails closed, never truncates into a differently-
+/// meaning URI). Also fails closed (`None`) if the URI's bytes are not valid
+/// UTF-8, or if resolving `point` itself fails.
+fn read_hyperlink_uri(terminal: &Terminal<'_, '_>, point: Point, cap: usize) -> Option<String> {
+    let grid_ref = terminal.grid_ref(point).ok()?;
+    let mut buf = vec![0_u8; cap.clamp(1, 256)];
+    loop {
+        match grid_ref.hyperlink_uri(&mut buf) {
+            Ok(0) => return None,
+            Ok(len) => {
+                buf.truncate(len);
+                return String::from_utf8(buf).ok();
+            }
+            Err(VtFfiError::OutOfSpace { required }) => {
+                if required > cap {
+                    return None;
+                }
+                buf.resize(required, 0);
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Parses `Terminal::pwd()`'s raw OSC 7 payload (a `file://<host>/<path>`
+/// URI, verbatim from whatever the shell sent — see `libghostty-vt`'s own
+/// `pwd()` doctest) into a plain absolute filesystem path, ignoring the host
+/// component entirely (this domain never trusts hostname matching for
+/// anything security-relevant — the resulting path is re-validated by
+/// `service::relativize_pwd`'s canonicalize + containment check exactly
+/// like any other candidate cwd). Fails closed (`None`, never a truncated or
+/// mis-decoded path) for: an oversized payload, a non-`file://` scheme, a
+/// missing path component, invalid percent-encoding, or a decoded path
+/// containing a NUL byte.
+fn parse_osc7_pwd_uri(raw: &str, cap: usize) -> Option<String> {
+    if raw.is_empty() || raw.len() > cap {
+        return None;
+    }
+    let after_scheme = raw.strip_prefix("file://")?;
+    let path_start = after_scheme.find('/')?;
+    let encoded_path = &after_scheme[path_start..];
+    let decoded = percent_decode_ascii(encoded_path)?;
+    if decoded.is_empty() || decoded.contains('\0') {
+        return None;
+    }
+    Some(decoded)
+}
+
+/// Minimal, dependency-free percent-decoder for the path component of an
+/// OSC 7 `file://` URI. Fails closed (`None`) on a truncated or non-hex
+/// `%`-escape, or on a decoded byte sequence that is not valid UTF-8 —
+/// never substitutes a placeholder or best-effort guess.
+fn percent_decode_ascii(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' => {
+                let high = char::from(*bytes.get(index + 1)?).to_digit(16)?;
+                let low = char::from(*bytes.get(index + 2)?).to_digit(16)?;
+                out.push(((high << 4) | low) as u8);
+                index += 3;
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// Reads the full grapheme cluster for a grid reference, growing the buffer

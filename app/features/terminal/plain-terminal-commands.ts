@@ -16,6 +16,10 @@ export const CREATE_TERMINAL_COMMAND_ID = "plain.terminal.create";
 export const KILL_TERMINAL_COMMAND_ID = "plain.terminal.kill";
 export const SPLIT_TERMINAL_RIGHT_COMMAND_ID = "plain.terminal.splitRight";
 export const SPLIT_TERMINAL_DOWN_COMMAND_ID = "plain.terminal.splitDown";
+/** `F190` S4 "Ghostty metadata and links". */
+export const JUMP_TO_PREVIOUS_PROMPT_COMMAND_ID =
+	"plain.terminal.jumpToPreviousPrompt";
+export const JUMP_TO_NEXT_PROMPT_COMMAND_ID = "plain.terminal.jumpToNextPrompt";
 
 export interface PlainTerminalCommandsRegistration {
 	dispose(): void;
@@ -46,8 +50,13 @@ export interface PlainTerminalCommandsRegistration {
  *   active tab's active pane (same `getViewWithId` lookup — see
  *   `TerminalTabsModel`'s own doc for the recursive-split-tree/8-pane cap and
  *   the row/column orientation meaning).
+ * - `Plain: Jump to Previous/Next Prompt` (`F190` S4 "Ghostty metadata and
+ *   links") moves the active pane's prompt-navigation anchor to the nearest
+ *   OSC 133 prompt row in that direction and briefly highlights it — see
+ *   `PlainTerminalRenderer.jumpToAdjacentPrompt`'s own doc comment for the
+ *   exact (live-viewport-only) search scope.
  *
- * None of these four commands have any IPC side effect of their own — the
+ * None of these six commands have any IPC side effect of their own — the
  * actual trust check / session start (or kill) happens inside the view/pane
  * itself, exactly as the prior slice's single `Create Terminal` command
  * already established.
@@ -89,6 +98,24 @@ export function registerPlainTerminalCommands(): PlainTerminalCommandsRegistrati
 				view?.splitActiveTab("column");
 			},
 		),
+		CommandsRegistry.registerCommand(
+			JUMP_TO_PREVIOUS_PROMPT_COMMAND_ID,
+			(accessor) => {
+				const viewsService = accessor.get(IViewsService);
+				const view =
+					viewsService.getViewWithId<PlainTerminalView>(TERMINAL_VIEW_ID);
+				view?.jumpToAdjacentPrompt("previous");
+			},
+		),
+		CommandsRegistry.registerCommand(
+			JUMP_TO_NEXT_PROMPT_COMMAND_ID,
+			(accessor) => {
+				const viewsService = accessor.get(IViewsService);
+				const view =
+					viewsService.getViewWithId<PlainTerminalView>(TERMINAL_VIEW_ID);
+				view?.jumpToAdjacentPrompt("next");
+			},
+		),
 		MenuRegistry.appendMenuItem(MenuId.CommandPalette, {
 			command: {
 				id: CREATE_TERMINAL_COMMAND_ID,
@@ -114,6 +141,20 @@ export function registerPlainTerminalCommands(): PlainTerminalCommandsRegistrati
 			command: {
 				id: SPLIT_TERMINAL_DOWN_COMMAND_ID,
 				title: "Split Terminal Down",
+				category: "Plain",
+			},
+		}),
+		MenuRegistry.appendMenuItem(MenuId.CommandPalette, {
+			command: {
+				id: JUMP_TO_PREVIOUS_PROMPT_COMMAND_ID,
+				title: "Jump to Previous Prompt",
+				category: "Plain",
+			},
+		}),
+		MenuRegistry.appendMenuItem(MenuId.CommandPalette, {
+			command: {
+				id: JUMP_TO_NEXT_PROMPT_COMMAND_ID,
+				title: "Jump to Next Prompt",
 				category: "Plain",
 			},
 		}),

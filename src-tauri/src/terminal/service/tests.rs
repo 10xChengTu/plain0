@@ -1055,6 +1055,148 @@ fn a_relative_cwd_symlink_that_resolves_outside_the_selected_root_is_rejected() 
     assert_eq!(result.unwrap_err().code(), "TERMINAL_CWD_INVALID");
 }
 
+// -----------------------------------------------------------------------
+// F190 S4 "Ghostty metadata and links": OSC 7 pwd → root-relative
+// projection (`relativize_pwd`/`PwdCache`). Uses a deterministic `sh -c`
+// fixture that emits exactly one OSC 7 sequence itself (rather than
+// depending on the real shell-integration scripts, which are covered
+// separately by `shell_integration::tests` — this is purely about
+// `VtSession`/`TerminalService`'s own projection of whatever OSC 7 payload
+// a real shell integration would have produced).
+// -----------------------------------------------------------------------
+
+#[test]
+fn an_osc7_pwd_inside_the_selected_root_is_relativized_and_reaches_the_live_frame() {
+    let root = TempDir::new().unwrap();
+    let nested = root.path().join("nested").join("project");
+    std::fs::create_dir_all(&nested).unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
+    let terminal = TerminalService::new();
+    let sink = RecordingSink::new();
+
+    let session_id = block_on(terminal.start_with_command_for_test(
+        &trust,
+        &workspace,
+        "main",
+        root_id_at(&workspace, "main", 0),
+        Some("nested/project".to_owned()),
+        80,
+        24,
+        sh_c("printf '\\033]7;file://localhost%s\\033\\\\' \"$(pwd)\"; sleep 5"),
+        sink,
+    ))
+    .unwrap();
+
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            terminal
+                .latest_vt_frame_for_test("main", session_id)
+                .ok()
+                .flatten()
+                .and_then(|frame| frame.pwd)
+                .as_deref()
+                == Some("nested/project")
+        }),
+        "expected the live frame's pwd to become the root-relative \"nested/project\""
+    );
+    block_on(terminal.kill("main", session_id, true)).unwrap();
+}
+
+#[test]
+fn an_osc7_pwd_at_exactly_the_selected_root_relativizes_to_an_empty_string() {
+    let root = TempDir::new().unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
+    let terminal = TerminalService::new();
+    let sink = RecordingSink::new();
+
+    let session_id = block_on(terminal.start_with_command_for_test(
+        &trust,
+        &workspace,
+        "main",
+        root_id_at(&workspace, "main", 0),
+        None,
+        80,
+        24,
+        sh_c("printf '\\033]7;file://localhost%s\\033\\\\' \"$(pwd)\"; sleep 5"),
+        sink,
+    ))
+    .unwrap();
+
+    assert!(wait_until(Duration::from_secs(10), || {
+        terminal
+            .latest_vt_frame_for_test("main", session_id)
+            .ok()
+            .flatten()
+            .and_then(|frame| frame.pwd)
+            .as_deref()
+            == Some("")
+    }));
+    block_on(terminal.kill("main", session_id, true)).unwrap();
+}
+
+#[test]
+fn an_osc7_pwd_outside_the_selected_root_never_reaches_the_frame_as_an_absolute_path() {
+    let root = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let outside_canonical = std::fs::canonicalize(outside.path()).unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
+    let terminal = TerminalService::new();
+    let sink = RecordingSink::new();
+
+    let session_id = block_on(terminal.start_with_command_for_test(
+        &trust,
+        &workspace,
+        "main",
+        root_id_at(&workspace, "main", 0),
+        None,
+        80,
+        24,
+        sh_c(&format!(
+            "printf '\\033]7;file://localhost%s\\033\\\\' {}; printf done; sleep 5",
+            shell_quote(&outside_canonical.to_string_lossy())
+        )),
+        sink.clone(),
+    ))
+    .unwrap();
+
+    // Waits for the literal "done" marker to actually render — proof the
+    // OSC 7 sequence (immediately before it in the same byte stream) has
+    // already been fully processed — rather than asserting on `pwd.is_some()`
+    // directly, which this scenario expects to stay `false` throughout (a
+    // session whose frame simply never set `pwd` at all would otherwise
+    // trivially, and wrongly, satisfy that same assertion).
+    assert!(wait_for_rendered_text(
+        &terminal,
+        "main",
+        session_id,
+        &sink,
+        Duration::from_secs(10),
+        |text| text.contains("done"),
+    ));
+    let frame = terminal
+        .latest_vt_frame_for_test("main", session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        frame.pwd, None,
+        "a pwd outside the authorized root must project to None, never an absolute path"
+    );
+    block_on(terminal.kill("main", session_id, true)).unwrap();
+}
+
+/// Minimal POSIX single-quote wrapping for a fixture-only shell argument —
+/// this domain never builds a shell command string in production code (see
+/// this file's own module doc); this exists purely so a `TempDir`'s real
+/// path (which can never itself contain a `'`) is passed to `printf`
+/// unambiguously regardless of what characters a temp path happens to
+/// contain.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 #[test]
 fn an_unknown_profile_id_is_rejected_before_spawn() {
     let root = TempDir::new().unwrap();

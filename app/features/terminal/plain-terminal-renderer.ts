@@ -5,9 +5,25 @@ import type {
 	TerminalCursorStyle,
 	TerminalFrame,
 	TerminalRgb,
+	TerminalRow,
 	TerminalScrollbackRow,
 	TerminalStyle,
 } from "../../platform/tauri/contracts";
+
+/**
+ * F190 S4 "Ghostty metadata and links": whether `url` (a cell's OSC 8
+ * hyperlink, or `null` for none) is ever eligible to become a clickable
+ * link at all — `http:`/`https:` only, exactly mirroring
+ * `src-tauri/src/terminal/opener.rs`'s own scheme restriction so the
+ * renderer never *looks* clickable for a scheme the backend would reject
+ * anyway (a `file:`/`javascript:`/anything-else URI always renders as
+ * plain, inert text, no matter what OSC 8 payload a program writes).
+ */
+export function isClickableHyperlinkUrl(url: string | null): url is string {
+	return (
+		url !== null && (url.startsWith("http://") || url.startsWith("https://"))
+	);
+}
 
 /**
  * F070 "WebView DOM 渲染": a wterm-style DOM terminal grid — one real DOM
@@ -71,6 +87,8 @@ const BLANK_CELL: TerminalCell = Object.freeze({
 	fg: null,
 	bg: null,
 	style: BLANK_STYLE,
+	hyperlink: null,
+	semantic: "output",
 });
 
 function blankRow(cols: number): TerminalCell[] {
@@ -104,7 +122,12 @@ function normalizedRowCells(
  * per-cell scrollback color fidelity would need a `src-tauri` DTO change
  * (resolving `libghostty_vt::style::StyleColor` against a captured palette)
  * this slice does not make — see the F070 "多 tab/split/scrollback" slice
- * report for the reasoning.
+ * report for the reasoning. `hyperlink`/`semantic` are likewise always
+ * `null`/`"output"` — F190 S4's own scope decision: `terminal::vt::ScrollbackCell`
+ * (deliberately lighter than the live `DirtyCell`, see that type's doc
+ * comment) does not carry either, so a scrollback link never renders as
+ * clickable and scrollback text never carries semantic CSS classes; only
+ * the live viewport does.
  */
 function scrollbackCellAsTerminalCell(cell: {
 	readonly graphemes: string;
@@ -115,6 +138,8 @@ function scrollbackCellAsTerminalCell(cell: {
 		fg: null,
 		bg: null,
 		style: cell.style,
+		hyperlink: null,
+		semantic: "output",
 	});
 }
 
@@ -140,6 +165,12 @@ export class TerminalGridModel {
 	#cols = 0;
 	#rows = 0;
 	#cellRows: TerminalCell[][] = [];
+	/** F190 S4 "Ghostty metadata and links": each row's OSC 133 semantic
+	 * prompt classification — a parallel array to `#cellRows`, kept in sync
+	 * the same way (rebuilt to `"none"` on a full redraw/resize, replaced per
+	 * row on a partial update). Drives `PlainTerminalRenderer.jumpToAdjacentPrompt`'s
+	 * command-navigation search. */
+	#rowSemanticPrompts: TerminalRow["semanticPrompt"][] = [];
 	#cursor: TerminalCursor | undefined;
 	#colors: TerminalColors | undefined;
 
@@ -167,6 +198,14 @@ export class TerminalGridModel {
 		return this.#cellRows[rowIndex];
 	}
 
+	/** F190 S4: this retained row's OSC 133 semantic prompt classification,
+	 * or `undefined` for a row index outside the current grid. */
+	rowSemanticPrompt(
+		rowIndex: number,
+	): TerminalRow["semanticPrompt"] | undefined {
+		return this.#rowSemanticPrompts[rowIndex];
+	}
+
 	/**
 	 * Applies one frame, in the order this session's `TerminalStream`
 	 * delivered it. `colors`/`cursor` are always replaced (a frame carries
@@ -188,6 +227,10 @@ export class TerminalGridModel {
 			this.#cellRows = Array.from({ length: frame.rows }, () =>
 				blankRow(frame.cols),
 			);
+			this.#rowSemanticPrompts = Array.from(
+				{ length: frame.rows },
+				() => "none",
+			);
 		}
 
 		const changed = new Set<number>();
@@ -199,6 +242,7 @@ export class TerminalGridModel {
 				continue;
 			}
 			this.#cellRows[row.rowIndex] = normalizedRowCells(row.cells, this.#cols);
+			this.#rowSemanticPrompts[row.rowIndex] = row.semanticPrompt;
 			changed.add(row.rowIndex);
 		}
 
@@ -235,10 +279,19 @@ interface CellRun {
 	readonly fg: TerminalRgb | null;
 	readonly bg: TerminalRgb | null;
 	readonly style: TerminalStyle;
+	/** Only ever non-`null` when [`isClickableHyperlinkUrl`] already
+	 * accepted it — a run never merges a clickable and non-clickable (or
+	 * differently-linked) cell together, so this field alone is enough for
+	 * paint code to decide link affordance without re-checking scheme. */
+	readonly clickableLink: string | null;
+	readonly semantic: TerminalCell["semantic"];
 }
 
 function runKey(cell: TerminalCell): string {
 	const { style } = cell;
+	const clickableLink = isClickableHyperlinkUrl(cell.hyperlink)
+		? cell.hyperlink
+		: null;
 	return [
 		cell.fg === null ? "-" : `${cell.fg.r},${cell.fg.g},${cell.fg.b}`,
 		cell.bg === null ? "-" : `${cell.bg.r},${cell.bg.g},${cell.bg.b}`,
@@ -251,6 +304,8 @@ function runKey(cell: TerminalCell): string {
 		style.strikethrough ? "s" : "",
 		style.overline ? "o" : "",
 		style.underline,
+		clickableLink ?? "-",
+		cell.semantic,
 	].join("|");
 }
 
@@ -268,7 +323,16 @@ function groupRowRuns(cells: readonly TerminalCell[]): CellRun[] {
 			});
 		} else {
 			runs.push(
-				Object.freeze({ text, fg: cell.fg, bg: cell.bg, style: cell.style }),
+				Object.freeze({
+					text,
+					fg: cell.fg,
+					bg: cell.bg,
+					style: cell.style,
+					clickableLink: isClickableHyperlinkUrl(cell.hyperlink)
+						? cell.hyperlink
+						: null,
+					semantic: cell.semantic,
+				}),
 			);
 			currentKey = key;
 		}
@@ -305,6 +369,17 @@ function applyRunToSpan(
 	if (style.faint) classes.push("plain-terminal-cell--faint");
 	if (style.blink) classes.push("plain-terminal-cell--blink");
 	if (style.invisible) classes.push("plain-terminal-cell--invisible");
+	if (run.semantic !== "output") {
+		classes.push(`plain-terminal-cell--semantic-${run.semantic}`);
+	}
+	if (run.clickableLink !== null) {
+		classes.push("plain-terminal-cell--link");
+		span.dataset.plainTerminalLink = run.clickableLink;
+		span.title = `Cmd/Ctrl+Click to open ${run.clickableLink}`;
+	} else {
+		delete span.dataset.plainTerminalLink;
+		span.removeAttribute("title");
+	}
 	span.className = classes.join(" ");
 
 	const decorations: string[] = [];
@@ -361,6 +436,18 @@ export interface PlainTerminalRendererOptions {
 	 * harness with a real DOM can drive painting deterministically without
 	 * waiting on a real animation frame. */
 	readonly scheduleRepaint?: (callback: () => void) => void;
+	/**
+	 * Invoked when the user Cmd/Ctrl+Clicks a cell carrying a clickable
+	 * (`http:`/`https:`) OSC 8 hyperlink (F190 S4 "Ghostty metadata and
+	 * links") — a *plain* click (no modifier) never invokes this, and a
+	 * click on a cell with no hyperlink, or one whose scheme
+	 * [`isClickableHyperlinkUrl`] rejected, never invokes this either. The
+	 * only side effect this renderer itself performs is calling this
+	 * callback with the exact URL text the cell carried — actually opening
+	 * it (through the audited `terminalOpenExternalLink` bridge call) is the
+	 * caller's job, not this DOM-only paint layer's.
+	 */
+	readonly onExternalLinkClick?: (url: string) => void;
 }
 
 /**
@@ -387,6 +474,10 @@ export class PlainTerminalRenderer {
 	#paintScheduled = false;
 	/** See the module doc's "Scrollback view mode" section. */
 	#viewMode: "live" | "history" = "live";
+	/** F190 S4: the row `jumpToAdjacentPrompt` last landed on — the anchor
+	 * the *next* call searches relative to, so repeated "previous"/"next"
+	 * invocations walk further rather than re-finding the same row. */
+	#promptAnchorRow: number | undefined;
 
 	constructor(options: PlainTerminalRendererOptions) {
 		this.#container = options.container;
@@ -416,6 +507,30 @@ export class PlainTerminalRenderer {
 		this.#measureProbe.textContent = "X".repeat(50);
 
 		this.#container.append(this.#grid, this.#cursorElement, this.#measureProbe);
+
+		const onExternalLinkClick = options.onExternalLinkClick;
+		if (onExternalLinkClick !== undefined) {
+			this.#grid.addEventListener("click", (event) => {
+				if (!(event.metaKey || event.ctrlKey)) {
+					// A plain click (no modifier) is ordinary text
+					// selection/cursor placement — never a link activation. See
+					// `PlainTerminalRendererOptions.onExternalLinkClick`'s doc.
+					return;
+				}
+				const target = event.target;
+				if (!(target instanceof HTMLElement)) {
+					return;
+				}
+				const linkSpan = target.closest<HTMLElement>(
+					"[data-plain-terminal-link]",
+				);
+				const url = linkSpan?.dataset.plainTerminalLink;
+				if (url === undefined) {
+					return;
+				}
+				onExternalLinkClick(url);
+			});
+		}
 	}
 
 	/** One monospace cell's pixel size, measured once per call against the
@@ -504,6 +619,68 @@ export class PlainTerminalRenderer {
 			this.#paintRow(rowIndex);
 		}
 		this.#paintCursor();
+	}
+
+	/**
+	 * F190 S4 "Ghostty metadata and links": finds the nearest retained
+	 * *live-viewport* row (see the module doc — scrollback rows carry no
+	 * semantic tagging in this slice, so this never searches into history)
+	 * whose OSC 133 classification is a primary prompt line (`"prompt"`, not
+	 * `"continuation"` or `"none"`), relative to `#promptAnchorRow` (or the
+	 * bottom-most row on the very first call), and briefly highlights it
+	 * (`plain-terminal-row--prompt-target`, cleared after ~1.2s) so the
+	 * caller has something to actually see happen. Returns the found row
+	 * index, or `undefined` if there is no such row in the search direction
+	 * (the anchor is left unchanged in that case — a "previous"/"next" that
+	 * finds nothing is a no-op, not a wrap-around).
+	 */
+	jumpToAdjacentPrompt(direction: "previous" | "next"): number | undefined {
+		const promptRows: number[] = [];
+		for (let rowIndex = 0; rowIndex < this.#model.rows; rowIndex += 1) {
+			if (this.#model.rowSemanticPrompt(rowIndex) === "prompt") {
+				promptRows.push(rowIndex);
+			}
+		}
+		const anchor = this.#promptAnchorRow ?? this.#model.rows;
+		let target: number | undefined;
+		if (direction === "previous") {
+			for (let index = promptRows.length - 1; index >= 0; index -= 1) {
+				if (promptRows[index]! < anchor) {
+					target = promptRows[index];
+					break;
+				}
+			}
+		} else {
+			for (const rowIndex of promptRows) {
+				if (rowIndex > anchor) {
+					target = rowIndex;
+					break;
+				}
+			}
+		}
+		if (target === undefined) {
+			return undefined;
+		}
+		this.#promptAnchorRow = target;
+		this.#flashRow(target);
+		return target;
+	}
+
+	#flashRow(rowIndex: number): void {
+		const rowElement = this.#rowElements[rowIndex];
+		if (rowElement === undefined) {
+			return;
+		}
+		rowElement.classList.add("plain-terminal-row--prompt-target");
+		const view = this.#container.ownerDocument.defaultView;
+		const clear = () => {
+			rowElement.classList.remove("plain-terminal-row--prompt-target");
+		};
+		if (view === null || view === undefined) {
+			clear();
+			return;
+		}
+		view.setTimeout(clear, 1_200);
 	}
 
 	/** Applies one frame onto the retained model, then schedules (but does

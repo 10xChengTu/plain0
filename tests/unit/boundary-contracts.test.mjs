@@ -10513,11 +10513,11 @@ describe("Plain F070 S2 terminal IPC bridge Harness", () => {
 		expect(
 			validateTerminalIpcBridgeBoundary(baselineBridgeRustSources, mutated),
 		).toContain(
-			"PlainBridge must expose exactly the fourteen audited terminal/trust methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifteen audited terminal/trust methods, no more and no fewer",
 		);
 	});
 
-	it("fails if PlainBridge gains an extra terminal-shaped method beyond the audited thirteen", () => {
+	it("fails if PlainBridge gains an extra terminal-shaped method beyond the audited fifteen", () => {
 		const mutated = withMutatedApp(
 			"app/platform/tauri/contracts.ts",
 			(source) =>
@@ -10527,7 +10527,7 @@ describe("Plain F070 S2 terminal IPC bridge Harness", () => {
 				),
 		);
 		// `terminalDestroy` is outside the audited name list, so the filtered
-		// member count still equals thirteen — this mutation is only observable
+		// member count still equals fifteen — this mutation is only observable
 		// because it does not change any *audited* name's presence, proving
 		// the check keys on the fixed name list rather than merely counting
 		// terminal-prefixed members. Assert the passing baseline is
@@ -10548,7 +10548,7 @@ describe("Plain F070 S2 terminal IPC bridge Harness", () => {
 		expect(
 			validateTerminalIpcBridgeBoundary(baselineBridgeRustSources, renamed),
 		).toContain(
-			"PlainBridge must expose exactly the fourteen audited terminal/trust methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifteen audited terminal/trust methods, no more and no fewer",
 		);
 	});
 

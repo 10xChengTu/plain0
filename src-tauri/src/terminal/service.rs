@@ -125,7 +125,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -142,6 +142,7 @@ use crate::workspace::RootId;
 use super::dto::TerminalSessionId;
 use super::flow::FlowControl;
 use super::shell;
+use super::shell_integration::{self, ShellIntegrationStatus};
 use super::vt;
 use super::{
     terminal_cwd_invalid, terminal_io_failed, terminal_session_limit_exceeded,
@@ -224,6 +225,13 @@ struct FrameEmitGate {
     next_sequence: u64,
     last_emitted_sequence: Option<u64>,
     awaiting_ack: bool,
+    /// The raw (pre-relativization — see [`relativize_pwd`]) `pwd` of the
+    /// last frame this gate actually emitted. Compared against each new
+    /// snapshot's `pwd` so a pure OSC 7 write (metadata only, no cell
+    /// writes at all) still gets emitted even though `libghostty-vt`'s own
+    /// `Dirty` tracking would otherwise report `Clean` for it — without
+    /// this, `pwd` could go stale until the next unrelated screen update.
+    last_pwd: Option<String>,
 }
 
 impl FrameEmitGate {
@@ -232,22 +240,26 @@ impl FrameEmitGate {
             next_sequence: 0,
             last_emitted_sequence: None,
             awaiting_ack: false,
+            last_pwd: None,
         }
     }
 
     /// Attempts to claim the next sequence number and snapshot a frame.
     /// Returns `None` — without touching `session`'s dirty state at all —
     /// when a previously emitted frame is still unacknowledged, or when the
-    /// snapshot turns out clean (nothing changed since the last successful
-    /// drain, so there is nothing worth spending the credit on).
+    /// snapshot turns out clean *and* `pwd` did not change (nothing changed
+    /// since the last successful drain, so there is nothing worth spending
+    /// the credit on).
     fn try_take_frame(&mut self, session: &mut vt::VtSession) -> Option<(u64, vt::DirtyFrame)> {
         if self.awaiting_ack {
             return None;
         }
         let frame = session.dirty_frame().ok()?;
-        if frame.dirty == Dirty::Clean {
+        let pwd_changed = frame.pwd != self.last_pwd;
+        if frame.dirty == Dirty::Clean && !pwd_changed {
             return None;
         }
+        self.last_pwd = frame.pwd.clone();
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.wrapping_add(1);
         self.last_emitted_sequence = Some(sequence);
@@ -332,6 +344,15 @@ impl TerminalService {
     /// tests: recording) output destination for this one session — see
     /// [`TerminalOutputSink`]'s doc for why the command layer, not this
     /// method, is what constructs it.
+    /// Also decides and applies this session's shell-integration injection
+    /// plan (F190 S4, `terminal::shell_integration`) — the returned
+    /// [`ShellIntegrationStatus`] is what `terminal_start` hands back to the
+    /// frontend as `TerminalStartResult::shell_integration`, so a degraded
+    /// (unsupported shell, or the injected files could not be written)
+    /// outcome is always observable rather than silently reported as
+    /// success. `root_id`'s canonical path is threaded through to the vt
+    /// thread purely for OSC 7 pwd projection (see [`relativize_pwd`]) — it
+    /// is never itself exposed to the frontend.
     #[allow(clippy::too_many_arguments)]
     pub async fn start(
         &self,
@@ -344,20 +365,49 @@ impl TerminalService {
         cols: u16,
         rows: u16,
         sink: Arc<dyn TerminalOutputSink>,
-    ) -> Result<TerminalSessionId, CommandError> {
+    ) -> Result<(TerminalSessionId, ShellIntegrationStatus), CommandError> {
         trust.require_trusted(workspace, window_label).await?;
+        let root_canonical = workspace.root_canonical_path(window_label, root_id)?;
         let resolved_cwd = resolve_cwd(workspace, window_label, root_id, cwd)?;
         let shell_path =
             shell::resolve_profile(&profile_id, std::env::var("SHELL").ok().as_deref())?;
-        let command = CommandBuilder::new(&shell_path);
-        let shell_env = [(
+
+        let integration_base = shell_integration::integration_base_dir();
+        let files_ready = shell_integration::ensure_integration_files(&integration_base).is_ok();
+        let plan = shell_integration::plan_for_shell(
+            &shell_path,
+            std::env::var("ZDOTDIR").ok().as_deref(),
+            std::env::var("XDG_DATA_DIRS").ok().as_deref(),
+            &integration_base,
+            files_ready,
+        );
+
+        // Applies only `plan`'s *args* immediately (harmless w.r.t. env
+        // timing); its *env* additions are folded into `shell_env` below
+        // instead of applied directly here, because `spawn_session` calls
+        // `shell::apply_env_allowlist` — which starts with `env_clear()` —
+        // *after* this point. Env set before that call would simply be
+        // wiped out again; env_allowlist's own `extra_env` parameter is the
+        // seam meant for exactly this ("applied after the fixed allowlist"
+        // — see `spawn_session`'s own comment).
+        let mut command = CommandBuilder::new(&shell_path);
+        if !plan.args().is_empty() {
+            command.args(plan.args());
+        }
+        let mut shell_env = vec![(
             "SHELL".to_owned(),
             Some(shell_path.to_string_lossy().into_owned()),
         )];
+        shell_env.extend(
+            plan.env()
+                .iter()
+                .map(|(key, value)| (key.clone(), Some(value.clone()))),
+        );
         let (session_id, _pid) = self
             .spawn_session(
                 window_label,
                 resolved_cwd,
+                Some(root_canonical),
                 command,
                 &shell_env,
                 cols,
@@ -365,7 +415,7 @@ impl TerminalService {
                 sink,
             )
             .await?;
-        Ok(session_id)
+        Ok((session_id, plan.status))
     }
 
     /// Test-only seam: identical to [`Self::start`] except the caller
@@ -392,9 +442,19 @@ impl TerminalService {
         sink: Arc<dyn TerminalOutputSink>,
     ) -> Result<TerminalSessionId, CommandError> {
         trust.require_trusted(workspace, window_label).await?;
+        let root_canonical = workspace.root_canonical_path(window_label, root_id)?;
         let resolved_cwd = resolve_cwd(workspace, window_label, root_id, cwd)?;
         let (session_id, _pid) = self
-            .spawn_session(window_label, resolved_cwd, command, &[], cols, rows, sink)
+            .spawn_session(
+                window_label,
+                resolved_cwd,
+                Some(root_canonical),
+                command,
+                &[],
+                cols,
+                rows,
+                sink,
+            )
             .await?;
         Ok(session_id)
     }
@@ -464,6 +524,12 @@ impl TerminalService {
         self.spawn_session(
             window_label,
             resolved_cwd,
+            // No workspace-root concept for a `runInTerminal`-launched
+            // session (see this method's own doc comment) — pwd projection
+            // for it is therefore always `None` (display-only info that
+            // never crosses the IPC boundary for it either, since there is
+            // no possible split-cwd-candidate use of it here).
+            None,
             command,
             &env_overrides,
             cols,
@@ -478,6 +544,7 @@ impl TerminalService {
         &self,
         window_label: &str,
         cwd: PathBuf,
+        root_canonical: Option<PathBuf>,
         mut command: CommandBuilder,
         extra_env: &[(String, Option<String>)],
         cols: u16,
@@ -605,6 +672,7 @@ impl TerminalService {
                         &vt_flow,
                         &vt_frame,
                         session_id,
+                        root_canonical,
                         sink.as_ref(),
                     )
                 })
@@ -998,6 +1066,11 @@ fn run_reader(mut reader: Box<dyn Read + Send>, flow: &FlowControl, vt_sender: &
 /// own thread. Ends when a [`VtCommand::Shutdown`] is received (sent
 /// exactly once, by [`terminate_session`]) — see that function's doc for
 /// why relying on channel disconnection alone is not enough here.
+///
+/// `root_canonical` is `Some` for an ordinary `terminal_start`-issued
+/// session (the workspace root it was bound to) and `None` for a
+/// `start_program`-issued (`runInTerminal`) session, which has no workspace
+/// root concept at all — see [`relativize_pwd`]'s doc for what that governs.
 #[allow(clippy::too_many_arguments)]
 fn run_vt(
     cols: u16,
@@ -1006,12 +1079,14 @@ fn run_vt(
     flow: &FlowControl,
     vt_frame: &Mutex<Option<vt::DirtyFrame>>,
     session_id: TerminalSessionId,
+    root_canonical: Option<PathBuf>,
     sink: &dyn TerminalOutputSink,
 ) {
     let Ok(mut session) = vt::VtSession::new(cols, rows) else {
         return;
     };
     let mut gate = FrameEmitGate::new();
+    let mut pwd_cache = PwdCache::new(root_canonical);
     while let Ok(command) = receiver.recv() {
         match command {
             VtCommand::Shutdown => return,
@@ -1021,16 +1096,37 @@ fn run_vt(
                 // byte backpressure" section for why the vt thread (rather
                 // than the frontend) is what acks here now.
                 flow.ack(bytes.len());
-                attempt_emit(&mut session, &mut gate, vt_frame, session_id, sink);
+                attempt_emit(
+                    &mut session,
+                    &mut gate,
+                    &mut pwd_cache,
+                    vt_frame,
+                    session_id,
+                    sink,
+                );
             }
             VtCommand::Resize { cols, rows } => {
                 if session.resize(cols, rows).is_ok() {
-                    attempt_emit(&mut session, &mut gate, vt_frame, session_id, sink);
+                    attempt_emit(
+                        &mut session,
+                        &mut gate,
+                        &mut pwd_cache,
+                        vt_frame,
+                        session_id,
+                        sink,
+                    );
                 }
             }
             VtCommand::Ack(sequence) => {
                 gate.ack(sequence);
-                attempt_emit(&mut session, &mut gate, vt_frame, session_id, sink);
+                attempt_emit(
+                    &mut session,
+                    &mut gate,
+                    &mut pwd_cache,
+                    vt_frame,
+                    session_id,
+                    sink,
+                );
             }
             VtCommand::ModesRequest(reply) => {
                 let _ = reply.send(session.modes_snapshot());
@@ -1054,14 +1150,72 @@ fn run_vt(
 fn attempt_emit(
     session: &mut vt::VtSession,
     gate: &mut FrameEmitGate,
+    pwd_cache: &mut PwdCache,
     vt_frame: &Mutex<Option<vt::DirtyFrame>>,
     session_id: TerminalSessionId,
     sink: &dyn TerminalOutputSink,
 ) {
-    if let Some((sequence, frame)) = gate.try_take_frame(session) {
+    if let Some((sequence, mut frame)) = gate.try_take_frame(session) {
+        frame.pwd = pwd_cache.relativize(frame.pwd.as_deref());
         *lock(vt_frame) = Some(frame.clone());
         sink.emit_frame(session_id, sequence, frame);
     }
+}
+
+/// Caches the last raw→root-relative `pwd` translation so a high-throughput
+/// session (many emitted frames while `pwd` itself never changes) does not
+/// pay a `std::fs::canonicalize` syscall on every single frame — only when
+/// the *raw* pwd string actually changes (an OSC 7 write, far rarer than a
+/// `feed`/emit cycle) is [`relativize_pwd`] actually called again.
+struct PwdCache {
+    root_canonical: Option<PathBuf>,
+    last_raw: Option<String>,
+    last_relative: Option<String>,
+}
+
+impl PwdCache {
+    fn new(root_canonical: Option<PathBuf>) -> Self {
+        Self {
+            root_canonical,
+            last_raw: None,
+            last_relative: None,
+        }
+    }
+
+    fn relativize(&mut self, raw_pwd: Option<&str>) -> Option<String> {
+        if raw_pwd == self.last_raw.as_deref() {
+            return self.last_relative.clone();
+        }
+        self.last_raw = raw_pwd.map(str::to_owned);
+        self.last_relative = relativize_pwd(self.root_canonical.as_deref(), raw_pwd);
+        self.last_relative.clone()
+    }
+}
+
+/// Turns `vt::DirtyFrame::pwd`'s raw absolute path (see that field's doc)
+/// into the root-relative value `TerminalFrame::pwd` actually carries over
+/// IPC — `None` unless the session has a workspace root at all, a pwd has
+/// actually been reported, *and* that pwd canonicalizes to somewhere inside
+/// (or exactly at) that root. This is the exact same canonicalize +
+/// containment check [`resolve_cwd`] performs the other way around (a
+/// candidate cwd string → an authorized absolute path); here it runs in the
+/// read direction (a live absolute path → a value safe to hand back to the
+/// frontend), which is why a value coming out of this function is safe to
+/// feed straight back into a future `TerminalStartRequest::cwd` — `resolve_cwd`
+/// re-validates it again at that point regardless (defense in depth against
+/// a TOCTOU: the directory could be deleted/replaced between this read and
+/// that future start). Never exposes the absolute root path itself to the
+/// frontend, mirroring `workspace::dto::WorkspaceRootSnapshot` only ever
+/// exposing a `display_name`, never a canonical path.
+fn relativize_pwd(root_canonical: Option<&Path>, raw_pwd: Option<&str>) -> Option<String> {
+    let root = root_canonical?;
+    let raw_pwd = raw_pwd?;
+    let canonical = std::fs::canonicalize(raw_pwd).ok()?;
+    if canonical == root {
+        return Some(String::new());
+    }
+    let relative = canonical.strip_prefix(root).ok()?;
+    Some(relative.to_string_lossy().into_owned())
 }
 
 fn run_waiter(session_id: TerminalSessionId, child: &mut dyn Child, sink: &dyn TerminalOutputSink) {

@@ -15,6 +15,7 @@ import {
 	frozenTerminalInputKeyRequest,
 	frozenTerminalInputTextRequest,
 	frozenTerminalKillRequest,
+	frozenTerminalOpenExternalLinkRequest,
 	frozenTerminalProfilesRequest,
 	frozenTerminalResizeRequest,
 	frozenTerminalScrollbackRequest,
@@ -54,17 +55,28 @@ function sampleFrame(): unknown {
 		rowsData: [
 			{
 				rowIndex: 0,
+				semanticPrompt: "none",
 				cells: [
-					{ graphemes: "h", fg: null, bg: null, style: DEFAULT_STYLE },
+					{
+						graphemes: "h",
+						fg: null,
+						bg: null,
+						style: DEFAULT_STYLE,
+						hyperlink: null,
+						semantic: "output",
+					},
 					{
 						graphemes: "i",
 						fg: { r: 0xcc, g: 0x66, b: 0x66 },
 						bg: null,
 						style: DEFAULT_STYLE,
+						hyperlink: "https://example.com",
+						semantic: "prompt",
 					},
 				],
 			},
 		],
+		pwd: "nested/project",
 	};
 }
 
@@ -150,22 +162,51 @@ describe("terminal_start request/result codec", () => {
 		).toThrow();
 	});
 
-	it("decodes a well-formed start result and rejects a non-UUID or extra field", () => {
-		expect(decodeTerminalStartResult({ sessionId: VALID_ID })).toEqual({
+	it("decodes a well-formed start result and rejects a non-UUID, extra, or missing field", () => {
+		expect(
+			decodeTerminalStartResult({
+				sessionId: VALID_ID,
+				shellIntegration: "injected",
+			}),
+		).toEqual({
 			sessionId: VALID_ID,
+			shellIntegration: "injected",
+		});
+		expect(
+			decodeTerminalStartResult({
+				sessionId: VALID_ID,
+				shellIntegration: "unsupportedShell",
+			}),
+		).toEqual({
+			sessionId: VALID_ID,
+			shellIntegration: "unsupportedShell",
 		});
 		expect(() =>
-			decodeTerminalStartResult({ sessionId: "not-a-uuid" }),
+			decodeTerminalStartResult({
+				sessionId: "not-a-uuid",
+				shellIntegration: "injected",
+			}),
 		).toThrow();
 		expect(() =>
-			decodeTerminalStartResult({ sessionId: VALID_ID, extra: true }),
+			decodeTerminalStartResult({
+				sessionId: VALID_ID,
+				shellIntegration: "injected",
+				extra: true,
+			}),
+		).toThrow();
+		expect(() => decodeTerminalStartResult({ sessionId: VALID_ID })).toThrow();
+		expect(() =>
+			decodeTerminalStartResult({
+				sessionId: VALID_ID,
+				shellIntegration: "unknown",
+			}),
 		).toThrow();
 		expect(() => decodeTerminalStartResult(null)).toThrow();
 	});
 
 	it("rejects a Proxy-wrapped start result", () => {
 		const proxied = new Proxy(
-			{ sessionId: VALID_ID },
+			{ sessionId: VALID_ID, shellIntegration: "injected" },
 			{ get: (target, key) => Reflect.get(target, key) },
 		);
 		expect(() => decodeTerminalStartResult(proxied)).toThrow();
@@ -428,19 +469,27 @@ describe("plain://terminal-data event codec", () => {
 			style: "block",
 		});
 		expect(event.frame.colors.cursor).toBeNull();
+		expect(event.frame.pwd).toBe("nested/project");
 		expect(event.frame.rowsData).toHaveLength(1);
+		expect(event.frame.rowsData[0]!.semanticPrompt).toBe("none");
 		expect(event.frame.rowsData[0]!.cells).toHaveLength(2);
 		expect(event.frame.rowsData[0]!.cells[0]).toEqual({
 			graphemes: "h",
 			fg: null,
 			bg: null,
 			style: DEFAULT_STYLE,
+			hyperlink: null,
+			semantic: "output",
 		});
 		expect(event.frame.rowsData[0]!.cells[1]!.fg).toEqual({
 			r: 0xcc,
 			g: 0x66,
 			b: 0x66,
 		});
+		expect(event.frame.rowsData[0]!.cells[1]!.hyperlink).toBe(
+			"https://example.com",
+		);
+		expect(event.frame.rowsData[0]!.cells[1]!.semantic).toBe("prompt");
 		expect(Object.isFrozen(event)).toBe(true);
 		expect(Object.isFrozen(event.frame)).toBe(true);
 		expect(Object.isFrozen(event.frame.rowsData)).toBe(true);
@@ -656,6 +705,145 @@ describe("plain://terminal-data event codec", () => {
 				frame: proxiedFrame,
 			}),
 		).toThrow();
+	});
+});
+
+describe("F190 S4 'Ghostty metadata and links': pwd/hyperlink/semantic decode strictness", () => {
+	function decodeSampleFrame(mutate: (frame: Record<string, unknown>) => void) {
+		const frame = sampleFrame() as Record<string, unknown>;
+		mutate(frame);
+		return decodeTerminalDataEvent({
+			sessionId: VALID_ID,
+			sequence: 0,
+			frame,
+		});
+	}
+
+	it("accepts a null pwd and every audited semantic/semanticPrompt value", () => {
+		const event = decodeSampleFrame((frame) => {
+			frame.pwd = null;
+		});
+		expect(event.frame.pwd).toBeNull();
+
+		for (const semanticPrompt of ["none", "prompt", "continuation"] as const) {
+			const withPrompt = decodeSampleFrame((frame) => {
+				(frame.rowsData as Array<Record<string, unknown>>)[0]!.semanticPrompt =
+					semanticPrompt;
+			});
+			expect(withPrompt.frame.rowsData[0]!.semanticPrompt).toBe(semanticPrompt);
+		}
+
+		for (const semantic of ["output", "input", "prompt"] as const) {
+			const withSemantic = decodeSampleFrame((frame) => {
+				const cells = (frame.rowsData as Array<{ cells: unknown[] }>)[0]!
+					.cells as Array<Record<string, unknown>>;
+				cells[0]!.semantic = semantic;
+			});
+			expect(withSemantic.frame.rowsData[0]!.cells[0]!.semantic).toBe(semantic);
+		}
+	});
+
+	it("accepts a null hyperlink and any string hyperlink, without validating scheme (decode is not a click-policy gate)", () => {
+		const withNullLink = decodeSampleFrame((frame) => {
+			const cells = (frame.rowsData as Array<{ cells: unknown[] }>)[0]!
+				.cells as Array<Record<string, unknown>>;
+			cells[1]!.hyperlink = null;
+		});
+		expect(withNullLink.frame.rowsData[0]!.cells[1]!.hyperlink).toBeNull();
+
+		const withOtherScheme = decodeSampleFrame((frame) => {
+			const cells = (frame.rowsData as Array<{ cells: unknown[] }>)[0]!
+				.cells as Array<Record<string, unknown>>;
+			cells[1]!.hyperlink = "ftp://example.com/file";
+		});
+		expect(withOtherScheme.frame.rowsData[0]!.cells[1]!.hyperlink).toBe(
+			"ftp://example.com/file",
+		);
+	});
+
+	it("rejects a frame missing pwd, a row missing semanticPrompt, and a cell missing hyperlink or semantic", () => {
+		expect(() =>
+			decodeSampleFrame((frame) => {
+				delete frame.pwd;
+			}),
+		).toThrow();
+		expect(() =>
+			decodeSampleFrame((frame) => {
+				delete (frame.rowsData as Array<Record<string, unknown>>)[0]!
+					.semanticPrompt;
+			}),
+		).toThrow();
+		expect(() =>
+			decodeSampleFrame((frame) => {
+				const cells = (frame.rowsData as Array<{ cells: unknown[] }>)[0]!
+					.cells as Array<Record<string, unknown>>;
+				delete cells[0]!.hyperlink;
+			}),
+		).toThrow();
+		expect(() =>
+			decodeSampleFrame((frame) => {
+				const cells = (frame.rowsData as Array<{ cells: unknown[] }>)[0]!
+					.cells as Array<Record<string, unknown>>;
+				delete cells[0]!.semantic;
+			}),
+		).toThrow();
+	});
+
+	it("rejects an invalid pwd type, semanticPrompt value, and semantic value", () => {
+		expect(() =>
+			decodeSampleFrame((frame) => {
+				frame.pwd = 123;
+			}),
+		).toThrow();
+		expect(() =>
+			decodeSampleFrame((frame) => {
+				(frame.rowsData as Array<Record<string, unknown>>)[0]!.semanticPrompt =
+					"maybe";
+			}),
+		).toThrow();
+		expect(() =>
+			decodeSampleFrame((frame) => {
+				const cells = (frame.rowsData as Array<{ cells: unknown[] }>)[0]!
+					.cells as Array<Record<string, unknown>>;
+				cells[0]!.semantic = "unknown";
+			}),
+		).toThrow();
+		expect(() =>
+			decodeSampleFrame((frame) => {
+				const cells = (frame.rowsData as Array<{ cells: unknown[] }>)[0]!
+					.cells as Array<Record<string, unknown>>;
+				cells[0]!.hyperlink = 123;
+			}),
+		).toThrow();
+	});
+});
+
+describe("terminal_open_external_link request codec", () => {
+	it("builds a frozen own-data request from a valid http(s) URL", () => {
+		const request = frozenTerminalOpenExternalLinkRequest(
+			"https://example.com/path",
+		);
+		expect(request).toEqual({ url: "https://example.com/path" });
+		expect(Object.isFrozen(request)).toBe(true);
+		expect(frozenTerminalOpenExternalLinkRequest("http://example.com")).toEqual(
+			{ url: "http://example.com" },
+		);
+	});
+
+	it("rejects every non-http(s) scheme, non-string, empty, NUL-containing, and oversized url", () => {
+		for (const url of [
+			undefined,
+			123,
+			"",
+			"file:///etc/passwd",
+			"javascript:alert(1)",
+			"ftp://example.com",
+			"http://example.com/\0",
+			"a".repeat(10),
+			`https://example.com/${"a".repeat(8_192)}`,
+		]) {
+			expect(() => frozenTerminalOpenExternalLinkRequest(url)).toThrow();
+		}
 	});
 });
 

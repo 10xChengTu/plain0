@@ -460,6 +460,22 @@ export class PlainTerminalView extends ViewPane {
 		this.#closePane(activeTabId, activePaneId);
 	}
 
+	/** `F190` S4 "Ghostty metadata and links": jumps the active tab's active
+	 * pane to the nearest OSC 133 prompt row in `direction` — see
+	 * `TerminalPaneController.jumpToAdjacentPrompt`'s own doc comment for the
+	 * exact search/highlight behavior. A no-op if there is no active pane. */
+	jumpToAdjacentPrompt(direction: "previous" | "next"): void {
+		const activeTabId = this.#tabsModel.activeTabId;
+		if (activeTabId === undefined) {
+			return;
+		}
+		const activePaneId = this.#tabsModel.getTab(activeTabId)?.activePaneId;
+		if (activePaneId === undefined) {
+			return;
+		}
+		this.#panes.get(activePaneId)?.jumpToAdjacentPrompt(direction);
+	}
+
 	/** `F190` S3: splits the active tab's **active pane** along `orientation`
 	 * — never an arbitrary one (see `TerminalTabsModel.splitActivePane`'s own
 	 * doc comment) — up to `MAX_PANES_PER_TAB` panes per tab. A no-op if
@@ -481,6 +497,15 @@ export class PlainTerminalView extends ViewPane {
 			this.#rootSelectorElement?.focus();
 			return;
 		}
+		// `F190` S4: captured *before* `splitActivePane` below (which moves
+		// `activePaneId` to the new pane) — this is the pane being split
+		// *from*, whose live OSC 7 pwd (if any) becomes the new pane's cwd
+		// candidate.
+		const sourcePaneId = tab?.activePaneId;
+		const sourcePwd =
+			sourcePaneId === undefined
+				? undefined
+				: this.#panes.get(sourcePaneId)?.livePwd;
 		const result = this.#tabsModel.splitActivePane(activeTabId, orientation);
 		if (result === undefined) {
 			return;
@@ -496,7 +521,20 @@ export class PlainTerminalView extends ViewPane {
 		// externally-adopted (`F100` S4) tab, which owns no defaults of its
 		// own to inherit; falling back to a fresh resolve there mirrors what
 		// this method already did for `rootId` in that same edge case.
-		const defaults = tab?.defaults ?? this.#resolveFutureTabDefaults();
+		//
+		// `F190` S4: if the pane being split from has reported a *live*
+		// OSC 7 pwd (already root-relative and re-validated by Rust — see
+		// `TerminalPaneController.livePwd`'s own doc comment), that overrides
+		// the frozen defaults' `cwd` for just this one new pane — "split
+		// where I currently am", not "split back to whatever the settings
+		// panel said before this tab even started". Never applied to an
+		// already-`invalidCwd` defaults value (that pane never spawns at all
+		// regardless of what `cwd` would say).
+		const inheritedDefaults = tab?.defaults ?? this.#resolveFutureTabDefaults();
+		const defaults =
+			sourcePwd !== undefined && inheritedDefaults.kind === "ok"
+				? { ...inheritedDefaults, cwd: sourcePwd }
+				: inheritedDefaults;
 		this.#createPane(result.paneId, activeTabId, undefined, rootId, defaults);
 		this.#rebuildPaneLayout(activeTabId);
 		this.#layoutActivePanes();
