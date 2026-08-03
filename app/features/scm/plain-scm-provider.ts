@@ -398,8 +398,8 @@ export class PlainScmProvider implements ISCMProvider {
  * if `uri` is not (a descendant of) `rootUri` at all — mirrors `IUri
  * IdentityService.extUri.relativePath`'s contract without pulling that
  * service in for what is, here, a same-scheme same-authority prefix check.
- * Exported (`F080` S3) so `plain-scm-commands.ts`'s
- * `plain.scm.stageActiveFileFirstHunk` command can map the active editor's
+ * Exported (`F080` S3, expanded by `F180` S5) so
+ * `plain-scm-commands.ts`'s `plain.scm.stageActiveFileHunks` command can map the active editor's
  * `URI` to the same repository-relative path string `PlainBridge`'s git
  * methods expect, without a second URI-math implementation. */
 export function relativePathUnder(rootUri: URI, uri: URI): string | undefined {

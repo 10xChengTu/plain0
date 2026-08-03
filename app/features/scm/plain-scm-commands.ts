@@ -4,16 +4,14 @@ import {
 } from "@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions";
 import { CommandsRegistry } from "@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands";
 import { INotificationService } from "@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service";
+import { IQuickInputService } from "@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service";
 import { IWorkspaceContextService } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace.service";
 import { IEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service";
 import { IViewsService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/views/common/viewsService.service";
 
 import { normalizeCommandError } from "../../platform/tauri/errors";
 import type { PlainBridge } from "../../platform/tauri/contracts";
-import {
-	computeContentAfterApplyingHunk,
-	decodeLosslessUtf8,
-} from "./hunk-stage";
+import { stageExplicitHunks } from "./hunk-stage";
 import { relativePathUnder } from "./plain-scm-provider";
 import {
 	bindPlainGitBridge,
@@ -32,36 +30,17 @@ import { SCM_VIEW_ID } from "./scm-contribution";
  * is never imported — see `plain-scm-view.ts`'s module doc comment). */
 export const REFRESH_SCM_COMMAND_ID = "plain.scm.refresh";
 
-/**
- * `F080` S3's one testable hunk-level stage path (see
- * `docs/research/2026-07-25-core-git.md`'s hunk-stage architecture note and
- * this slice's own report for the recorded scope decision): a real gutter/
- * diff-editor "Stage Selected Ranges" action is real Workbench UI
- * (`IQuickDiffService` + editor gutter decorations) this slice does not
- * build. What *is* real here is the full upstream-mirrored pipeline —
- * Monaco's own diff engine (`hunk-stage.ts`'s
- * `computeContentAfterApplyingHunk`) computes "the active file's content
- * after applying its first changed hunk", and that computed content is sent
- * to `PlainBridge.gitStageBlob`, which Rust turns into a real
- * `hash-object`+`update-index` pair (`src-tauri/src/git/stage.rs`) — exactly
- * the same write path a full hunk UI would eventually call, just triggered
- * from the Command Palette against the currently active editor instead of a
- * clicked gutter range.
- *
- * Diffs the **index** version (`gitShowBlob("index", …)`) against the
- * **working-tree** (on-disk, via `workspaceReadFile`) version — matching
- * real `git add -p`'s own quick-diff semantics: staging is always relative
- * to what is currently in the index, never `HEAD`. Always targets hunk index
- * `0` (the first changed range) — selecting an arbitrary hunk is exactly the
- * gutter-UI scope this command does not build.
- */
-export const STAGE_ACTIVE_FILE_FIRST_HUNK_COMMAND_ID =
-	"plain.scm.stageActiveFileFirstHunk";
+/** `F180` S5 replaces the old fixed-index-0 entry rather than retaining it
+ * as a second, bypassable product route. The user must explicitly select one
+ * or more bounded Monaco change ranges before any Git write is attempted. */
+export const STAGE_ACTIVE_FILE_HUNKS_COMMAND_ID =
+	"plain.scm.stageActiveFileHunks";
 
-async function runStageActiveFileFirstHunk(
+async function runStageActiveFileHunks(
 	editorService: IEditorService,
 	workspaceContextService: IWorkspaceContextService,
 	notificationService: INotificationService,
+	quickInputService: IQuickInputService,
 	viewsService: IViewsService,
 ): Promise<void> {
 	const bridge = getConfiguredPlainScmBridge();
@@ -110,36 +89,31 @@ async function runStageActiveFileFirstHunk(
 	const git = bindPlainGitBridge(bridge, rootId);
 
 	try {
-		const [originalResult, modifiedFile] = await Promise.all([
-			git.gitShowBlob("index", relativePath),
-			bridge.workspaceReadFile(rootId, relativePath),
-		]);
-		const originalText =
-			originalResult.content === null
-				? ""
-				: decodeLosslessUtf8(originalResult.content);
-		const modifiedText = decodeLosslessUtf8(modifiedFile.value.copy());
-		if (originalText === undefined || modifiedText === undefined) {
-			notificationService.error(
-				`Plain: cannot stage a hunk in "${relativePath}" — its content cannot be losslessly represented as text (byte-order mark, non-UTF-8 encoding, or invalid UTF-8 bytes). Stage the whole file instead.`,
-			);
+		const outcome = await stageExplicitHunks(relativePath, {
+			readSnapshot: async () => {
+				const [index, worktree] = await Promise.all([
+					git.gitShowBlob("index", relativePath),
+					bridge.workspaceReadFile(rootId, relativePath),
+				]);
+				return Object.freeze({
+					indexBytes:
+						index.content === null ? null : new Uint8Array(index.content),
+					worktreeBytes: worktree.value.copy(),
+				});
+			},
+			quickInput: {
+				pick: async (items, options) =>
+					quickInputService.pick([...items], options),
+			},
+			notifications: notificationService,
+			stage: async (content) => git.gitStageBlob(relativePath, content),
+		});
+		if (outcome !== "staged") {
 			return;
 		}
-		const hunkContent = computeContentAfterApplyingHunk(
-			originalText,
-			modifiedText,
-			0,
-		);
-		if (hunkContent === undefined) {
-			notificationService.info(
-				`Plain: no changes to stage in "${relativePath}".`,
-			);
-			return;
-		}
-		await git.gitStageBlob(relativePath, new TextEncoder().encode(hunkContent));
 		plainGitInvalidation.invalidate(rootId);
 		notificationService.info(
-			`Plain: staged the first change in "${relativePath}".`,
+			`Plain: staged the selected changes in "${relativePath}".`,
 		);
 	} catch (error) {
 		notificationService.error(normalizeCommandError(error).message);
@@ -189,20 +163,21 @@ export function registerPlainScmCommands(
 			},
 		}),
 		CommandsRegistry.registerCommand(
-			STAGE_ACTIVE_FILE_FIRST_HUNK_COMMAND_ID,
+			STAGE_ACTIVE_FILE_HUNKS_COMMAND_ID,
 			async (accessor) => {
-				await runStageActiveFileFirstHunk(
+				await runStageActiveFileHunks(
 					accessor.get(IEditorService),
 					accessor.get(IWorkspaceContextService),
 					accessor.get(INotificationService),
+					accessor.get(IQuickInputService),
 					accessor.get(IViewsService),
 				);
 			},
 		),
 		MenuRegistry.appendMenuItem(MenuId.CommandPalette, {
 			command: {
-				id: STAGE_ACTIVE_FILE_FIRST_HUNK_COMMAND_ID,
-				title: "Stage First Change in Active File (Hunk)",
+				id: STAGE_ACTIVE_FILE_HUNKS_COMMAND_ID,
+				title: "Stage Selected Changes in Active File (Hunks)",
 				category: "Plain",
 			},
 		}),

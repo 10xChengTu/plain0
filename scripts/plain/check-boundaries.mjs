@@ -27,6 +27,7 @@ import {
 	validateGitIpcBridgeBoundary,
 	validateGitLogGraphFormatStringBoundary,
 	validateGitHistoryActionsUiBoundary,
+	validateGitHunkStageUiBoundary,
 	validateGitManagementUiBoundary,
 	validateGitNetworkConfirmationBoundary,
 	validateGitRefsFieldSafetyBoundary,
@@ -916,6 +917,9 @@ for (const failure of validateGitManagementUiBoundary(appSources)) {
 	fail(failure);
 }
 for (const failure of validateGitHistoryActionsUiBoundary(appSources)) {
+	fail(failure);
+}
+for (const failure of validateGitHunkStageUiBoundary(appSources)) {
 	fail(failure);
 }
 for (const failure of validateGitStashMessageFieldSafetyBoundary(rustSources)) {

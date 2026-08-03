@@ -281,6 +281,7 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/features/scm/git-uri.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
 	"app/features/workspace/plain-workspace-roots.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
 	"app/features/scm/hunk-stage.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/diff/linesDiffComputers",
+	"app/features/scm/plain-scm-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service",
 	"app/features/scm/plain-git-blame-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
 	"app/features/scm/plain-git-blame-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/editor/browser/services/codeEditorService.service",
 	"app/features/scm/plain-git-blame-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/model",

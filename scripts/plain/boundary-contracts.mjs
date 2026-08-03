@@ -23578,6 +23578,7 @@ const GIT_SCM_COMMANDS_PATH = "app/features/scm/plain-scm-commands.ts";
 const GIT_GRAPH_VIEW_PATH = "app/features/scm/plain-git-graph-view.ts";
 const GIT_HISTORY_VIEW_PATH = "app/features/scm/plain-git-history-view.ts";
 const GIT_HISTORY_CONTROLLER_PATH = "app/features/scm/plain-git-history.ts";
+const GIT_HUNK_STAGE_PATH = "app/features/scm/hunk-stage.ts";
 
 const GIT_MANAGEMENT_COMMANDS = Object.freeze([
 	Object.freeze({
@@ -24654,5 +24655,198 @@ export function validateGitHistoryActionsUiBoundary(appSources) {
 	failures.push(
 		...validateGitHistoryActionMutationAuthority(normalizedSources),
 	);
+	return [...new Set(failures)];
+}
+
+/**
+ * `F180` S5 replaces the legacy fixed-index-0 hunk entry with one bounded,
+ * explicit multi-selection route. This guard couples the one product command
+ * to Monaco's diff helper, its conservative text gate, a second byte snapshot
+ * immediately before the only stage call, and root-scoped invalidation only
+ * after that call succeeds. It fails closed if the old command is restored or
+ * a future caller bypasses the explicit-selection controller.
+ */
+export function validateGitHunkStageUiBoundary(appSources) {
+	const failures = [];
+	const normalizedSources = new Map(
+		appSources.map(({ relativePath, source }) => [
+			relativePath.replaceAll("\\", "/"),
+			source,
+		]),
+	);
+	const commandSource = normalizedSources.get(GIT_SCM_COMMANDS_PATH);
+	const helperSource = normalizedSources.get(GIT_HUNK_STAGE_PATH);
+	if (commandSource === undefined || helperSource === undefined) {
+		return [
+			"explicit hunk staging boundary requires plain-scm-commands.ts and hunk-stage.ts",
+		];
+	}
+
+	const allAppSource = [...normalizedSources.values()].join("\n");
+	if (
+		allAppSource.includes("plain.scm.stageActiveFileFirstHunk") ||
+		allAppSource.includes("Stage First Change in Active File") ||
+		allAppSource.includes("runStageActiveFileFirstHunk") ||
+		allAppSource.includes("computeContentAfterApplyingHunk(")
+	) {
+		failures.push(
+			"the fixed-index-0 hunk command and helper must remain absent from every app source",
+		);
+	}
+
+	const commandCompact = commandSource.replaceAll(/\s+/g, "");
+	let commandLiteralCount = 0;
+	for (const [relativePath, source] of normalizedSources) {
+		const sourceFile = ts.createSourceFile(
+			relativePath,
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			relativePath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+		);
+		function visit(node) {
+			if (
+				(ts.isStringLiteral(node) ||
+					ts.isNoSubstitutionTemplateLiteral(node)) &&
+				node.text === "plain.scm.stageActiveFileHunks"
+			) {
+				commandLiteralCount += 1;
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(sourceFile);
+	}
+	if (
+		commandLiteralCount !== 1 ||
+		!commandCompact.includes(
+			'exportconstSTAGE_ACTIVE_FILE_HUNKS_COMMAND_ID="plain.scm.stageActiveFileHunks";',
+		) ||
+		!commandCompact.includes(
+			'id:STAGE_ACTIVE_FILE_HUNKS_COMMAND_ID,title:"StageSelectedChangesinActiveFile(Hunks)",category:"Plain"',
+		)
+	) {
+		failures.push(
+			"explicit hunk staging must expose exactly one audited Command Palette id and title",
+		);
+	}
+
+	const commandFile = ts.createSourceFile(
+		GIT_SCM_COMMANDS_PATH,
+		commandSource,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	const helperFile = ts.createSourceFile(
+		GIT_HUNK_STAGE_PATH,
+		helperSource,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (
+		commandFile.parseDiagnostics.length > 0 ||
+		helperFile.parseDiagnostics.length > 0
+	) {
+		return [
+			...failures,
+			"explicit hunk staging sources must remain valid TypeScript",
+		];
+	}
+
+	const runner = findTypeScriptFunction(commandFile, "runStageActiveFileHunks");
+	const runnerBody =
+		runner?.body === undefined
+			? ""
+			: normalizedTypeScriptText(runner.body, commandFile);
+	if (
+		!stringsAppearInOrder(runnerBody, [
+			"constoutcome=awaitstageExplicitHunks(relativePath,{",
+			'git.gitShowBlob("index",relativePath)',
+			"bridge.workspaceReadFile(rootId,relativePath)",
+			"quickInputService.pick([...items],options)",
+			"stage:async(content)=>git.gitStageBlob(relativePath,content)",
+			'if(outcome!=="staged"){return;}',
+			"plainGitInvalidation.invalidate(rootId);",
+		]) ||
+		(runnerBody.match(/git\.gitStageBlob\(/g) ?? []).length !== 1 ||
+		runnerBody.includes("getValue(") ||
+		runnerBody.includes("activeTextEditorControl")
+	) {
+		failures.push(
+			"the active-file hunk command must route one index/worktree snapshot controller result to one root-bound stage call, then invalidate only after success",
+		);
+	}
+
+	const stage = findTypeScriptFunction(helperFile, "stageExplicitHunks");
+	const stageBody =
+		stage?.body === undefined
+			? ""
+			: normalizedTypeScriptText(stage.body, helperFile);
+	if (
+		(stageBody.match(/services\.readSnapshot\(\)/g) ?? []).length !== 2 ||
+		(stageBody.match(/services\.stage\(/g) ?? []).length !== 1 ||
+		!stringsAppearInOrder(stageBody, [
+			"constinitial=awaitservices.readSnapshot();",
+			"constoriginalText=decodeHunkStageText(",
+			"constmodifiedText=decodeHunkStageText(initial.worktreeBytes);",
+			"constplan=createHunkSelectionPlan(originalText,modifiedText);",
+			"if(plan.hitTimeout)",
+			"if(plan.hunks.length===0)",
+			"constselectedItems=awaitservices.quickInput.pick(items,{",
+			"canPickMany:true",
+			"if(selectedItems===undefined||selectedItems.length===0)",
+			"constcontent=computeContentAfterApplyingSelectedHunks(",
+			"if(content===undefined)",
+			"constcurrent=awaitservices.readSnapshot();",
+			"if(!sameSnapshot(initial,current))",
+			"awaitservices.stage(newTextEncoder().encode(content));",
+		])
+	) {
+		failures.push(
+			"explicit hunk staging must require a non-empty multi-selection and a matching second byte snapshot before its only write",
+		);
+	}
+
+	const apply = findTypeScriptFunction(
+		helperFile,
+		"computeContentAfterApplyingSelectedHunks",
+	);
+	const applyBody =
+		apply?.body === undefined
+			? ""
+			: normalizedTypeScriptText(apply.body, helperFile);
+	if (
+		!applyBody.includes("selectedIndices.length===0") ||
+		!applyBody.includes("selectedIndices.length>MAX_SELECTABLE_HUNKS") ||
+		!applyBody.includes("if(diff.hitTimeout){returnundefined;}") ||
+		!applyBody.includes("!Number.isInteger(index)") ||
+		!applyBody.includes("index>=diff.changes.length") ||
+		!applyBody.includes("index>=MAX_SELECTABLE_HUNKS") ||
+		!applyBody.includes("selected.has(index)") ||
+		!applyBody.includes("if(selected.has(index))")
+	) {
+		failures.push(
+			"the selected-hunk applicator must reject empty duplicate non-integer timed-out and out-of-range selections before composing the full blob",
+		);
+	}
+
+	const decode = findTypeScriptFunction(helperFile, "decodeHunkStageText");
+	const decodeBody =
+		decode?.body === undefined
+			? ""
+			: normalizedTypeScriptText(decode.body, helperFile);
+	if (
+		!helperSource.includes("export const MAX_SELECTABLE_HUNKS = 256;") ||
+		!helperSource.includes("const MAX_HUNK_STAGE_DIFF_TIME_MS = 5_000;") ||
+		!decodeBody.includes("bytes[0]===0xef&&bytes[1]===0xbb&&bytes[2]===0xbf") ||
+		!decodeBody.includes("bytes.includes(0)") ||
+		!decodeBody.includes('newTextDecoder("utf-8",{fatal:true})')
+	) {
+		failures.push(
+			"hunk summaries and decoding must retain their 256-item/5-second bounds and reject BOM binary and invalid UTF-8 content",
+		);
+	}
+
 	return [...new Set(failures)];
 }

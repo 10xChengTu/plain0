@@ -16451,7 +16451,7 @@ test("Network Cancel becomes enabled during an in-flight fetch and triggers git_
 	expect(pageErrors).toEqual([]);
 });
 
-test("Plain: Stage First Change in Active File (Hunk) computes the hunk-applied content via Monaco's diff engine and calls git_stage_blob", async ({
+test("Plain: Stage Selected Changes in Active File (Hunks) requires an explicit multi-pick and stages only the chosen hunk", async ({
 	page,
 }) => {
 	const pageErrors: string[] = [];
@@ -16462,7 +16462,7 @@ test("Plain: Stage First Change in Active File (Hunk) computes the hunk-applied 
 		"arrayBuffer",
 		"readonly",
 		// The working-tree (on-disk) content `workspaceReadFile` serves.
-		{ "src/hunk.ts": "ONE\ntwo\nTHREE\n" },
+		{ "hunk.ts": "ONE\ntwo\nTHREE\n" },
 		20_000,
 		0,
 		[],
@@ -16472,10 +16472,10 @@ test("Plain: Stage First Change in Active File (Hunk) computes the hunk-applied 
 		null,
 		true,
 		{
-			entries: [{ type: "ordinary", worktreeStatus: "M", path: "src/hunk.ts" }],
+			entries: [{ type: "ordinary", worktreeStatus: "M", path: "hunk.ts" }],
 			// The index version `gitShowBlob("index", …)` serves — two
 			// independent hunks against the working-tree content above.
-			blobs: { "src/hunk.ts": { index: "one\ntwo\nthree\n" } },
+			blobs: { "hunk.ts": { index: "one\ntwo\nthree\n" } },
 		},
 	);
 	await openNativeWorkspaceExplorer(page);
@@ -16483,28 +16483,105 @@ test("Plain: Stage First Change in Active File (Hunk) computes the hunk-applied 
 
 	await body
 		.locator(".plain-scm-view-changes .plain-scm-view-resource")
-		.getByText("src/hunk.ts")
+		.getByText("hunk.ts")
 		.click();
 	const editorTab = page.getByRole("tab", { name: /^hunk\.ts(?:,.*)?$/ });
 	await expect(editorTab).toBeVisible();
 
-	await executePaletteCommand(
+	let picker = await openGitManagementCommand(
 		page,
-		"Stage First Change",
-		"Plain: Stage First Change in Active File (Hunk)",
+		"Stage Selected Changes",
+		"Plain: Stage Selected Changes in Active File (Hunks)",
 	);
+	let hunkRows = picker.locator(".quick-input-list .monaco-list-row");
+	await expect(hunkRows).toHaveCount(2);
+	await expect(hunkRows.nth(0)).toContainText("Change 1");
+	await expect(hunkRows.nth(0)).toContainText("one");
+	await expect(hunkRows.nth(1)).toContainText("Change 2");
+	await expect(hunkRows.nth(1)).toContainText("three");
+
+	// Cancelling an untouched multi-picker must be strictly write-free.
+	await page.keyboard.press("Escape");
+	await expect(picker).toBeHidden();
+	expect(await terminalCallsFor(page, "git_stage_blob")).toEqual([]);
+
+	// A real workspace-byte change while the picker is open must make the
+	// second snapshot stale and therefore remain write-free.
+	picker = await openGitManagementCommand(
+		page,
+		"Stage Selected Changes",
+		"Plain: Stage Selected Changes in Active File (Hunks)",
+	);
+	hunkRows = picker.locator(".quick-input-list .monaco-list-row");
+	await expect(hunkRows).toHaveCount(2);
+	const secondHunk = hunkRows.nth(1);
+	const secondCheckbox = secondHunk.locator('[role="checkbox"]');
+	await expect(secondCheckbox).toHaveCount(1);
+	await secondCheckbox.click();
+	await expect(secondCheckbox).toHaveAttribute("aria-checked", "true");
+	await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_EXTERNAL_WRITE__(
+				name: string,
+				content: string,
+				emitWake: boolean,
+			): void;
+		};
+		testWindow.__PLAIN_TEST_EXTERNAL_WRITE__(
+			"hunk.ts",
+			"ONE\ntwo\nCHANGED WHILE SELECTING\n",
+			false,
+		);
+	});
+	await picker.getByRole("button", { name: "OK", exact: true }).click();
+	await expect(picker).toBeHidden();
+	await expect(
+		page.locator(".notifications-toasts .notification-toast").filter({
+			hasText: "changed while changes were being selected",
+		}),
+	).toHaveCount(1);
+	expect(await terminalCallsFor(page, "git_stage_blob")).toEqual([]);
+
+	// Restore the disk fixture, reopen, explicitly select only the second hunk,
+	// and accept through the picker's real OK action.
+	await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_EXTERNAL_WRITE__(
+				name: string,
+				content: string,
+				emitWake: boolean,
+			): void;
+		};
+		testWindow.__PLAIN_TEST_EXTERNAL_WRITE__(
+			"hunk.ts",
+			"ONE\ntwo\nTHREE\n",
+			false,
+		);
+	});
+	picker = await openGitManagementCommand(
+		page,
+		"Stage Selected Changes",
+		"Plain: Stage Selected Changes in Active File (Hunks)",
+	);
+	hunkRows = picker.locator(".quick-input-list .monaco-list-row");
+	await expect(hunkRows).toHaveCount(2);
+	const finalSecondCheckbox = hunkRows.nth(1).locator('[role="checkbox"]');
+	await finalSecondCheckbox.click();
+	await expect(finalSecondCheckbox).toHaveAttribute("aria-checked", "true");
+	await picker.getByRole("button", { name: "OK", exact: true }).click();
+	await expect(picker).toBeHidden();
 
 	await expect
 		.poll(async () => (await terminalCallsFor(page, "git_stage_blob")).length)
 		.toBe(1);
 	const call = (await terminalCallsFor(page, "git_stage_blob"))[0]!;
 	const request = call.args.request as { path: string; content: number[] };
-	expect(request.path).toBe("src/hunk.ts");
-	// Only the first hunk ("one" -> "ONE") applied; the second ("three" ->
-	// "THREE") left as the original index content — proves this used
-	// Monaco's real per-hunk diff, not a whole-file copy.
+	expect(request.path).toBe("hunk.ts");
+	// Only the explicitly selected second hunk ("three" -> "THREE") applied;
+	// the first remains at the index version. This proves the product did not
+	// copy the whole working-tree file or silently retain the old index-0 path.
 	expect(new TextDecoder().decode(new Uint8Array(request.content))).toBe(
-		"ONE\ntwo\nthree\n",
+		"one\ntwo\nTHREE\n",
 	);
 
 	expect(pageErrors).toEqual([]);

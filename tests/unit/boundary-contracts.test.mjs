@@ -47,6 +47,7 @@ import {
 	validateGitIpcBridgeBoundary,
 	validateGitLogGraphFormatStringBoundary,
 	validateGitHistoryActionsUiBoundary,
+	validateGitHunkStageUiBoundary,
 	validateGitManagementUiBoundary,
 	validateGitNetworkConfirmationBoundary,
 	validateGitRefsFieldSafetyBoundary,
@@ -13034,6 +13035,113 @@ describe("Plain F180 S4 git history actions UI boundary Harness", () => {
 		);
 		expect(validateGitHistoryActionsUiBoundary(hostile)).toContain(
 			"Git history actions must expose exactly the ten audited Command Palette commands and titles",
+		);
+	});
+});
+
+const gitHunkStageUiPaths = [
+	"app/features/scm/hunk-stage.ts",
+	"app/features/scm/plain-scm-commands.ts",
+];
+const gitHunkStageUiSources = gitHunkStageUiPaths.map((relativePath) => ({
+	relativePath,
+	source: readFileSync(
+		new URL(`../../${relativePath}`, import.meta.url),
+		"utf8",
+	),
+}));
+
+function replaceGitHunkStageUiSource(relativePath, from, to) {
+	return mutateWorkspaceSource(
+		gitHunkStageUiSources,
+		relativePath,
+		(source) => {
+			if (!source.includes(from)) {
+				throw new Error(
+					`${relativePath} explicit hunk mutation fixture no longer matches production`,
+				);
+			}
+			return source.replace(from, to);
+		},
+	);
+}
+
+describe("Plain F180 S5 explicit hunk staging UI boundary Harness", () => {
+	it("accepts the production bounded selection, stale check and stage route", () => {
+		expect(validateGitHunkStageUiBoundary(gitHunkStageUiSources)).toEqual([]);
+	});
+
+	it("requires both the command adapter and pure hunk controller", () => {
+		expect(validateGitHunkStageUiBoundary([])).toContain(
+			"explicit hunk staging boundary requires plain-scm-commands.ts and hunk-stage.ts",
+		);
+	});
+
+	it("rejects resurrecting the legacy fixed-index-0 command", () => {
+		const hostile = [
+			...gitHunkStageUiSources,
+			{
+				relativePath: "app/features/scm/legacy-hunk-bypass.ts",
+				source: 'export const id = "plain.scm.stageActiveFileFirstHunk";',
+			},
+		];
+		expect(validateGitHunkStageUiBoundary(hostile)).toContain(
+			"the fixed-index-0 hunk command and helper must remain absent from every app source",
+		);
+	});
+
+	it("rejects changing the hunk picker from explicit multi-select", () => {
+		const hostile = replaceGitHunkStageUiSource(
+			"app/features/scm/hunk-stage.ts",
+			"canPickMany: true,",
+			"canPickMany: false,",
+		);
+		expect(validateGitHunkStageUiBoundary(hostile)).toContain(
+			"explicit hunk staging must require a non-empty multi-selection and a matching second byte snapshot before its only write",
+		);
+	});
+
+	it("rejects removing the fresh snapshot read before staging", () => {
+		const hostile = replaceGitHunkStageUiSource(
+			"app/features/scm/hunk-stage.ts",
+			"const current = await services.readSnapshot();",
+			"const current = initial;",
+		);
+		expect(validateGitHunkStageUiBoundary(hostile)).toContain(
+			"explicit hunk staging must require a non-empty multi-selection and a matching second byte snapshot before its only write",
+		);
+	});
+
+	it("rejects bypassing the byte-for-byte stale snapshot comparison", () => {
+		const hostile = replaceGitHunkStageUiSource(
+			"app/features/scm/hunk-stage.ts",
+			"if (!sameSnapshot(initial, current)) {",
+			"if (false) {",
+		);
+		expect(validateGitHunkStageUiBoundary(hostile)).toContain(
+			"explicit hunk staging must require a non-empty multi-selection and a matching second byte snapshot before its only write",
+		);
+	});
+
+	it("rejects accepting NUL-bearing binary content", () => {
+		const hostile = replaceGitHunkStageUiSource(
+			"app/features/scm/hunk-stage.ts",
+			"bytes.includes(0)",
+			"false",
+		);
+		expect(validateGitHunkStageUiBoundary(hostile)).toContain(
+			"hunk summaries and decoding must retain their 256-item/5-second bounds and reject BOM binary and invalid UTF-8 content",
+		);
+	});
+
+	it("rejects invalidating Git views before a successful stage outcome", () => {
+		const hostile = replaceGitHunkStageUiSource(
+			"app/features/scm/plain-scm-commands.ts",
+			'if (outcome !== "staged") {',
+			"if (false) {",
+		);
+		expect(validateGitHunkStageUiBoundary(hostile)).toContain(
+			"the active-file hunk command must route one index/worktree snapshot controller result to one root-bound stage call, then invalidate only after success",
 		);
 	});
 });

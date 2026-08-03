@@ -92,8 +92,8 @@ export function configurePlainScmBridge(bridge: PlainBridge): void {
 	configuredBridge = bridge;
 }
 
-/** `F080` S3: lets `plain-scm-commands.ts`'s
- * `plain.scm.stageActiveFileFirstHunk` command reach the same configured
+/** `F080` S3/F180 S5: lets `plain-scm-commands.ts`'s
+ * `plain.scm.stageActiveFileHunks` command reach the same configured
  * bridge this view uses, without a second module-level bridge slot. Returns
  * `undefined` before `configurePlainScmBridge` has ever been called, exactly
  * like `configuredBridge` itself. */
