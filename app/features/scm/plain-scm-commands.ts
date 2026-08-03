@@ -20,6 +20,7 @@ import {
 	plainGitRootSelection,
 	plainGitRootsFromWorkspaceFolders,
 } from "./plain-git-root";
+import { registerPlainGitHistoryActionCommands } from "./plain-git-history-actions";
 import { registerPlainGitManagementCommands } from "./plain-git-management";
 import { plainGitInvalidation } from "./plain-git-invalidation";
 import { getConfiguredPlainScmBridge, PlainScmView } from "./plain-scm-view";
@@ -167,6 +168,7 @@ export function registerPlainScmCommands(
 	bridge: PlainBridge,
 ): PlainScmCommandsRegistration {
 	const management = registerPlainGitManagementCommands(bridge);
+	const historyActions = registerPlainGitHistoryActionCommands(bridge);
 	const disposables = [
 		CommandsRegistry.registerCommand(
 			REFRESH_SCM_COMMAND_ID,
@@ -208,6 +210,7 @@ export function registerPlainScmCommands(
 	return {
 		dispose() {
 			management.dispose();
+			historyActions.dispose();
 			for (const disposable of disposables) {
 				disposable.dispose();
 			}

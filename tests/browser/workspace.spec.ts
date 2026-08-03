@@ -168,7 +168,14 @@ interface TestGitFixture {
 	readonly graphForTest?: TestGitLogGraphResult;
 	readonly refsForTest?: TestGitRefsListResult;
 	readonly remotesForTest?: TestGitRemotesListResult;
+	readonly reflogForTest?: TestGitReflogListResult;
+	readonly contributorsForTest?: TestGitContributorsListResult;
 	readonly branchUnmergedForTest?: readonly string[];
+	readonly historyConflictForTest?: Partial<
+		Readonly<Record<TestGitHistoryOperation, readonly string[]>>
+	>;
+	/** Playwright-only deterministic in-flight window for Cancel coverage. */
+	readonly historyDelayMsForTest?: number;
 	readonly stashForTest?: readonly TestGitStashEntry[];
 	readonly stashShowForTest?: Readonly<Record<string, TestGitShowCommitResult>>;
 	readonly stashConflictForTest?: Readonly<Record<string, readonly string[]>>;
@@ -268,6 +275,34 @@ interface TestGitRemotesListResult {
 	readonly entries: readonly TestGitRemoteEntry[];
 	readonly truncated: boolean;
 }
+interface TestGitReflogEntry {
+	readonly sha: string;
+	readonly selector: string;
+	readonly committerTime: number;
+	readonly summary: string;
+}
+interface TestGitReflogListResult {
+	readonly entries: readonly TestGitReflogEntry[];
+	readonly truncated: boolean;
+}
+interface TestGitContributorEntry {
+	readonly name: string;
+	readonly email: string;
+	readonly commits: number;
+}
+interface TestGitContributorsListResult {
+	readonly entries: readonly TestGitContributorEntry[];
+	readonly truncated: boolean;
+}
+type TestGitHistoryOperation =
+	| "merge"
+	| "rebase"
+	| "cherryPick"
+	| "revert"
+	| "resetSoft"
+	| "resetMixed"
+	| "resetHard";
+type TestGitSequencerKind = "merge" | "rebase" | "cherryPick" | "revert";
 interface TestGitStashEntry {
 	readonly index: number;
 	readonly sha: string;
@@ -2161,6 +2196,141 @@ async function installNativeIpcMock(
 			const mockGitUnmergedBranches = new Set(
 				gitFixtureForTest.branchUnmergedForTest ?? [],
 			);
+			const mockGitReflog: TestGitReflogListResult =
+				gitFixtureForTest.reflogForTest ?? {
+					entries: [],
+					truncated: false,
+				};
+			const mockGitContributors: TestGitContributorsListResult =
+				gitFixtureForTest.contributorsForTest ?? {
+					entries: [],
+					truncated: false,
+				};
+			let mockGitHistoryPreviewCounter = 0;
+			let mockGitHistoryCommitCounter = 0;
+			let mockGitHistorySequencer: Readonly<{
+				kind: TestGitSequencerKind;
+				conflictedPaths: readonly string[];
+				pathsTruncated: boolean;
+			}> | null = null;
+			let mockGitHistoryPreview:
+				| Readonly<{
+						operation: TestGitHistoryOperation;
+						targetSha: string;
+						previewToken: string;
+				  }>
+				| undefined;
+			let mockGitHistoryInFlight:
+				{ cancelled: boolean; operation: TestGitHistoryOperation } | undefined;
+
+			function mockGitHistoryState() {
+				return {
+					headSha: mockGitBranch.oid,
+					sequencer:
+						mockGitHistorySequencer === null
+							? null
+							: {
+									kind: mockGitHistorySequencer.kind,
+									conflictedPaths: [...mockGitHistorySequencer.conflictedPaths],
+									pathsTruncated: mockGitHistorySequencer.pathsTruncated,
+								},
+				};
+			}
+
+			function mockGitHistoryPaths() {
+				const workingTreePaths: string[] = [];
+				const stagedPaths: string[] = [];
+				const conflictedPaths: string[] = [];
+				for (const entry of mockGitEntries) {
+					if (entry.type === "ordinary" || entry.type === "renameOrCopy") {
+						if (entry.indexStatus !== ".") stagedPaths.push(entry.path);
+						if (entry.worktreeStatus !== ".") workingTreePaths.push(entry.path);
+					} else if (entry.type === "unmerged") {
+						conflictedPaths.push(entry.path);
+					}
+				}
+				return {
+					workingTreePaths,
+					stagedPaths,
+					conflictedPaths,
+					pathsTruncated: false,
+				};
+			}
+
+			function mockGitSequencerKind(
+				operation: TestGitHistoryOperation,
+			): TestGitSequencerKind | undefined {
+				switch (operation) {
+					case "merge":
+					case "rebase":
+					case "cherryPick":
+					case "revert":
+						return operation;
+					case "resetSoft":
+					case "resetMixed":
+					case "resetHard":
+						return undefined;
+				}
+			}
+
+			async function executeMockGitHistoryOperation(
+				operation: TestGitHistoryOperation,
+				targetSha: string,
+				previewToken: string,
+			) {
+				if (
+					mockGitHistoryPreview?.operation !== operation ||
+					mockGitHistoryPreview.targetSha !== targetSha ||
+					mockGitHistoryPreview.previewToken !== previewToken
+				) {
+					throw {
+						code: "GIT_HISTORY_PREVIEW_STALE",
+						message:
+							"The Git repository changed after the operation preview. Review it again before continuing.",
+					};
+				}
+				if (mockGitHistorySequencer !== null || mockGitHistoryInFlight) {
+					throw {
+						code: "GIT_HISTORY_OPERATION_IN_PROGRESS",
+						message:
+							"Finish or abort the current Git operation before starting another one.",
+					};
+				}
+				mockGitHistoryPreview = undefined;
+				const inFlight = { cancelled: false, operation };
+				mockGitHistoryInFlight = inFlight;
+				const delay = gitFixtureForTest.historyDelayMsForTest ?? 0;
+				if (delay > 0) {
+					await new Promise((resolve) => setTimeout(resolve, delay));
+				}
+				if (mockGitHistoryInFlight === inFlight) {
+					mockGitHistoryInFlight = undefined;
+				}
+				if (inFlight.cancelled) {
+					return { kind: "cancelled", state: mockGitHistoryState() };
+				}
+				const conflicts =
+					gitFixtureForTest.historyConflictForTest?.[operation] ?? [];
+				const kind = mockGitSequencerKind(operation);
+				if (kind !== undefined && conflicts.length > 0) {
+					mockGitHistorySequencer = {
+						kind,
+						conflictedPaths: conflicts.slice(0, 256),
+						pathsTruncated: conflicts.length > 256,
+					};
+					return { kind: "conflicts", state: mockGitHistoryState() };
+				}
+				mockGitHistorySequencer = null;
+				mockGitHistoryCommitCounter += 1;
+				mockGitBranch = {
+					...mockGitBranch,
+					oid:
+						operation.startsWith("reset") || operation === "merge"
+							? targetSha
+							: mockGitHistoryCommitCounter.toString(16).padStart(40, "0"),
+				};
+				return { kind: "completed", state: mockGitHistoryState() };
+			}
 
 			function mockGitRefsSnapshot(): TestGitRefsListResult {
 				return {
@@ -4529,6 +4699,137 @@ async function installNativeIpcMock(
 							if (mockGitBranch.head === branch.shortName) {
 								mockGitNetworkUpstream = null;
 								mockGitBranch = { ...mockGitBranch, upstream: null };
+							}
+							return null;
+						}
+						case "git_reflog_list": {
+							ensureMockGitManagementAvailable(args.rootId);
+							return {
+								entries: mockGitReflog.entries.map((entry) => ({ ...entry })),
+								truncated: mockGitReflog.truncated,
+							};
+						}
+						case "git_contributors_list": {
+							ensureMockGitManagementAvailable(args.rootId);
+							return {
+								entries: mockGitContributors.entries.map((entry) => ({
+									...entry,
+								})),
+								truncated: mockGitContributors.truncated,
+							};
+						}
+						case "git_history_state": {
+							ensureMockGitManagementAvailable(args.rootId);
+							return mockGitHistoryState();
+						}
+						case "git_history_preview": {
+							ensureMockGitManagementAvailable(args.rootId);
+							const historyRequest = args.request as
+								| {
+										operation?: TestGitHistoryOperation;
+										targetSha?: string;
+								  }
+								| undefined;
+							const operation = historyRequest?.operation ?? "merge";
+							const targetSha = historyRequest?.targetSha ?? "";
+							mockGitHistoryPreviewCounter += 1;
+							const previewToken = mockGitHistoryPreviewCounter
+								.toString(16)
+								.padStart(64, "0");
+							mockGitHistoryPreview = { operation, targetSha, previewToken };
+							return {
+								operation,
+								targetSha,
+								headSha: mockGitBranch.oid,
+								ahead: 0,
+								behind: 0,
+								...mockGitHistoryPaths(),
+								sequencer: mockGitHistoryState().sequencer,
+								previewToken,
+							};
+						}
+						case "git_merge":
+						case "git_rebase":
+						case "git_cherry_pick":
+						case "git_revert": {
+							ensureMockGitManagementAvailable(args.rootId);
+							const targetedRequest = args.request as
+								{ targetSha?: string; previewToken?: string } | undefined;
+							const operation = {
+								git_merge: "merge",
+								git_rebase: "rebase",
+								git_cherry_pick: "cherryPick",
+								git_revert: "revert",
+							}[command] as TestGitHistoryOperation;
+							return executeMockGitHistoryOperation(
+								operation,
+								targetedRequest?.targetSha ?? "",
+								targetedRequest?.previewToken ?? "",
+							);
+						}
+						case "git_reset": {
+							ensureMockGitManagementAvailable(args.rootId);
+							const resetRequest = args.request as
+								| {
+										targetSha?: string;
+										mode?: "soft" | "mixed" | "hard";
+										previewToken?: string;
+								  }
+								| undefined;
+							const operation = {
+								soft: "resetSoft",
+								mixed: "resetMixed",
+								hard: "resetHard",
+							}[resetRequest?.mode ?? "hard"] as TestGitHistoryOperation;
+							return executeMockGitHistoryOperation(
+								operation,
+								resetRequest?.targetSha ?? "",
+								resetRequest?.previewToken ?? "",
+							);
+						}
+						case "git_history_continue": {
+							ensureMockGitManagementAvailable(args.rootId);
+							const continueRequest = args.request as
+								{ kind?: TestGitSequencerKind } | undefined;
+							if (
+								mockGitHistorySequencer === null ||
+								mockGitHistorySequencer.kind !== continueRequest?.kind
+							) {
+								throw {
+									code: "GIT_HISTORY_OPERATION_KIND_CHANGED",
+									message:
+										"The in-progress Git operation changed. Refresh its state before continuing.",
+								};
+							}
+							mockGitHistorySequencer = null;
+							mockGitHistoryCommitCounter += 1;
+							mockGitBranch = {
+								...mockGitBranch,
+								oid: mockGitHistoryCommitCounter.toString(16).padStart(40, "0"),
+							};
+							return { kind: "completed", state: mockGitHistoryState() };
+						}
+						case "git_history_abort": {
+							ensureMockGitManagementAvailable(args.rootId);
+							const abortRequest = args.request as
+								{ kind?: TestGitSequencerKind } | undefined;
+							if (
+								mockGitHistorySequencer === null ||
+								mockGitHistorySequencer.kind !== abortRequest?.kind
+							) {
+								throw {
+									code: "GIT_HISTORY_OPERATION_KIND_CHANGED",
+									message:
+										"The in-progress Git operation changed. Refresh its state before continuing.",
+								};
+							}
+							mockGitHistorySequencer = null;
+							return { kind: "completed", state: mockGitHistoryState() };
+						}
+						case "git_history_cancel": {
+							ensureMockGitManagementAvailable(args.rootId);
+							if (mockGitHistoryInFlight !== undefined) {
+								mockGitHistoryInFlight.cancelled = true;
 							}
 							return null;
 						}
@@ -17499,6 +17800,262 @@ test("requires an explicit repository for Git management in a multi-root workspa
 		},
 	});
 	expect(errors).toEqual([]);
+});
+
+// --- F180 S4: history actions, recovery and cancellation ------------------
+
+test("runs preview-confirmed history actions, reflog/contributors, conflict recovery and in-flight cancellation", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") errors.push(message.text());
+	});
+
+	const headSha = "a".repeat(40);
+	const featureSha = "b".repeat(40);
+	const reflogSha = "c".repeat(40);
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{
+			branch: { oid: headSha, head: "main", upstream: null },
+			entries: [
+				{
+					type: "ordinary",
+					indexStatus: "M",
+					worktreeStatus: "M",
+					path: "tracked-change.txt",
+				},
+			],
+			graphForTest: {
+				nodes: [
+					{ sha: headSha, parents: [featureSha], subject: "current" },
+					{ sha: featureSha, parents: [], subject: "feature commit" },
+				],
+				truncated: false,
+			},
+			refsForTest: {
+				entries: [
+					{
+						kind: "branch",
+						fullName: "refs/heads/main",
+						shortName: "main",
+						targetSha: headSha,
+						isAnnotatedTag: false,
+						peeledSha: null,
+						upstream: null,
+						isHead: true,
+					},
+					{
+						kind: "branch",
+						fullName: "refs/heads/feature",
+						shortName: "feature",
+						targetSha: featureSha,
+						isAnnotatedTag: false,
+						peeledSha: null,
+						upstream: null,
+						isHead: false,
+					},
+				],
+				truncated: false,
+			},
+			reflogForTest: {
+				entries: [
+					{
+						sha: reflogSha,
+						selector: "HEAD@{1}",
+						committerTime: 1_700_000_000,
+						summary: "orphaned work",
+					},
+				],
+				truncated: false,
+			},
+			contributorsForTest: {
+				entries: [{ name: "Ada", email: "ada@example.invalid", commits: 3 }],
+				truncated: false,
+			},
+			historyConflictForTest: {
+				cherryPick: ["conflicted.txt"],
+				rebase: ["conflicted.txt"],
+			},
+			historyDelayMsForTest: 800,
+		},
+	);
+	await openNativeWorkspaceExplorer(page);
+
+	let palette = await openGitManagementCommand(
+		page,
+		"Show Reflog",
+		"Plain: Show Reflog",
+	);
+	await expect(palette).toContainText("HEAD@{1} orphaned work");
+	await expect(palette).toContainText("ccccccc");
+	await page.keyboard.press("Escape");
+
+	palette = await openGitManagementCommand(
+		page,
+		"Show Contributors",
+		"Plain: Show Contributors",
+	);
+	await expect(palette).toContainText("Ada");
+	await expect(palette).toContainText("ada@example.invalid");
+	await expect(palette).toContainText("3 commits");
+	await page.keyboard.press("Escape");
+
+	// Hard Reset gets the distinct destructive preview; Cancel remains write-free.
+	palette = await openGitManagementCommand(page, "Reset", "Plain: Reset");
+	await pickGitManagementItem(palette, "Hard Reset");
+	await pickGitManagementItem(palette, "feature");
+	let dialog = page.locator(".monaco-dialog-box");
+	await expect(dialog).toContainText(
+		"Tracked local paths that will be discarded (1):",
+	);
+	await expect(dialog).toContainText("tracked-change.txt");
+	await expect(dialog).toContainText("Untracked files are not deleted");
+	await expect(
+		dialog.getByRole("button", {
+			name: "Hard Reset and Discard Tracked Changes",
+			exact: true,
+		}),
+	).toBeVisible();
+	await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+	expect(await terminalCallsFor(page, "git_reset")).toHaveLength(0);
+
+	// A structured cherry-pick conflict publishes invalidation and Continue is
+	// bound to the freshly-read `cherryPick` sequencer kind.
+	palette = await openGitManagementCommand(
+		page,
+		"Cherry-Pick",
+		"Plain: Cherry-Pick",
+	);
+	await pickGitManagementItem(palette, "feature");
+	dialog = page.locator(".monaco-dialog-box");
+	await expect(dialog).toContainText(`Target: ${featureSha}`);
+	await dialog
+		.getByRole("button", { name: "Cherry-Pick", exact: true })
+		.click();
+	const conflictToast = page
+		.locator(".notifications-toasts .notification-toast")
+		.filter({ hasText: "stopped with conflicts" });
+	await expect(conflictToast).toContainText("conflicted.txt");
+	await executePaletteCommand(
+		page,
+		"Continue Git Operation",
+		"Plain: Continue Git Operation",
+	);
+	await expect
+		.poll(
+			async () => (await terminalCallsFor(page, "git_history_continue")).length,
+		)
+		.toBe(1);
+	expect(
+		(await terminalCallsFor(page, "git_history_continue"))[0]!.args.request,
+	).toEqual({ kind: "cherryPick" });
+
+	// Rebase conflict recovery has a separate Abort confirmation. Cancelling
+	// that dialog performs no abort; confirming a second attempt does.
+	palette = await openGitManagementCommand(page, "Rebase", "Plain: Rebase");
+	await pickGitManagementItem(palette, "feature");
+	dialog = page.locator(".monaco-dialog-box");
+	await dialog.getByRole("button", { name: "Rebase", exact: true }).click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_rebase")).length)
+		.toBe(1);
+	await expect(
+		page
+			.locator(".notifications-toasts .notification-toast")
+			.filter({ hasText: "Rebase stopped with conflicts" }),
+	).toHaveCount(1);
+	await executePaletteCommand(
+		page,
+		"Abort Git Operation",
+		"Plain: Abort Git Operation",
+	);
+	dialog = page.locator(".monaco-dialog-box");
+	await expect(dialog).toContainText("Abort the current rebase?");
+	await expect(dialog).toContainText("conflicted.txt");
+	await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+	expect(await terminalCallsFor(page, "git_history_abort")).toHaveLength(0);
+	await executePaletteCommand(
+		page,
+		"Abort Git Operation",
+		"Plain: Abort Git Operation",
+	);
+	dialog = page.locator(".monaco-dialog-box");
+	await dialog
+		.getByRole("button", { name: "Abort Git Operation", exact: true })
+		.click();
+	await expect
+		.poll(
+			async () => (await terminalCallsFor(page, "git_history_abort")).length,
+		)
+		.toBe(1);
+	expect(
+		(await terminalCallsFor(page, "git_history_abort"))[0]!.args.request,
+	).toEqual({ kind: "rebase" });
+
+	// Start a genuinely delayed merge, then invoke the distinct Cancel command
+	// while its native promise remains unresolved. The eventual outcome must say
+	// cancelled without claiming rollback.
+	palette = await openGitManagementCommand(page, "Merge", "Plain: Merge");
+	await pickGitManagementItem(palette, "feature");
+	dialog = page.locator(".monaco-dialog-box");
+	await dialog.getByRole("button", { name: "Merge", exact: true }).click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_merge")).length)
+		.toBe(1);
+	await executePaletteCommand(
+		page,
+		"Cancel Git Operation",
+		"Plain: Cancel Git Operation",
+	);
+	await expect
+		.poll(
+			async () => (await terminalCallsFor(page, "git_history_cancel")).length,
+		)
+		.toBe(1);
+	await expect(
+		page
+			.locator(".notifications-toasts .notification-toast")
+			.filter({ hasText: "Merge was cancelled" }),
+	).toContainText("cancellation did not imply rollback");
+
+	const historyCalls = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+		};
+		return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+			({ command }) =>
+				command.startsWith("git_history_") ||
+				["git_merge", "git_rebase", "git_cherry_pick", "git_reset"].includes(
+					command,
+				),
+		);
+	});
+	expect(
+		historyCalls.filter(({ command }) => command === "git_history_preview")
+			.length,
+	).toBe(4);
+	expect(
+		historyCalls.filter(({ command }) => command === "git_history_cancel")[0]!
+			.args,
+	).toEqual({ rootId: nativeRootId, request: {} });
+	expect(errors).toEqual([
+		"Plain: Cherry-Pick stopped with conflicts. Resolve: conflicted.txt. Use Continue or Abort Git Operation after reviewing the repository.",
+		"Plain: Rebase stopped with conflicts. Resolve: conflicted.txt. Use Continue or Abort Git Operation after reviewing the repository.",
+	]);
 });
 
 // --- `F100` S3 "断点 + 调用栈 + 变量/Watch" ----------------------------------

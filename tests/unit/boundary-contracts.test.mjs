@@ -46,6 +46,7 @@ import {
 	validateGitDiscardConfirmationBoundary,
 	validateGitIpcBridgeBoundary,
 	validateGitLogGraphFormatStringBoundary,
+	validateGitHistoryActionsUiBoundary,
 	validateGitManagementUiBoundary,
 	validateGitNetworkConfirmationBoundary,
 	validateGitRefsFieldSafetyBoundary,
@@ -12793,6 +12794,7 @@ const gitManagementUiAppPaths = [
 	"app/main.ts",
 	"app/excluded-surface-policy.ts",
 	"app/features/scm/plain-git-management.ts",
+	"app/features/scm/plain-git-history-actions.ts",
 	"app/features/scm/plain-git-invalidation.ts",
 	"app/features/scm/plain-scm-commands.ts",
 	"app/features/scm/plain-git-root.ts",
@@ -12930,6 +12932,108 @@ describe("Plain F180 S2 git management UI boundary Harness", () => {
 		);
 		expect(validateGitManagementUiBoundary(hostile)).toContain(
 			"Git management must expose exactly the four audited Command Palette commands and titles",
+		);
+	});
+});
+
+describe("Plain F180 S4 git history actions UI boundary Harness", () => {
+	it("accepts the production target, preview, confirmation and recovery routes", () => {
+		expect(
+			validateGitHistoryActionsUiBoundary(gitManagementUiAppSources),
+		).toEqual([]);
+	});
+
+	it("requires the dedicated history action controller", () => {
+		expect(validateGitHistoryActionsUiBoundary([])).toContain(
+			"git history actions UI boundary requires app/features/scm/plain-git-history-actions.ts",
+		);
+	});
+
+	it("rejects a second business caller for a history mutation", () => {
+		const hostile = [
+			...gitManagementUiAppSources,
+			{
+				relativePath: "app/features/scm/plain-git-history-bypass.ts",
+				source: `export async function bypass(bridge) {
+	await bridge.gitReset("a".repeat(40), "hard", "b".repeat(64));
+}`,
+			},
+		];
+		expect(validateGitHistoryActionsUiBoundary(hostile)).toContain(
+			"Git history mutation gitReset must remain confined to its preview/state-gated controller and immutable root facade",
+		);
+	});
+
+	it("rejects free-text revision input replacing strict target snapshots", () => {
+		const hostile = replaceGitManagementUiSource(
+			"app/features/scm/plain-git-history-actions.ts",
+			"const [state, refs, graph, reflog] = await Promise.all([",
+			'await this.services.quickInput.input({ title: "Revision" });\n\t\tconst [state, refs, graph, reflog] = await Promise.all([',
+		);
+		expect(validateGitHistoryActionsUiBoundary(hostile)).toContain(
+			"Git history targets must come only from one strict HEAD, refs, graph and reflog snapshot set with no free-text revision input",
+		);
+	});
+
+	it("rejects turning confirmation cancellation into mutation authorization", () => {
+		const hostile = replaceGitManagementUiSource(
+			"app/features/scm/plain-git-history-actions.ts",
+			"if (!confirmation.confirmed) {",
+			"if (confirmation.confirmed) {",
+		);
+		expect(validateGitHistoryActionsUiBoundary(hostile)).toContain(
+			"Every targeted Git history mutation must consume its strict target preview only after a positive DOM confirmation, with a distinct hard-reset danger contract",
+		);
+	});
+
+	it("rejects removing the distinct hard-reset danger button", () => {
+		const hostile = replaceGitManagementUiSource(
+			"app/features/scm/plain-git-history-actions.ts",
+			'"Hard Reset and Discard Tracked Changes"',
+			'"Reset"',
+		);
+		expect(validateGitHistoryActionsUiBoundary(hostile)).toContain(
+			"Every targeted Git history mutation must consume its strict target preview only after a positive DOM confirmation, with a distinct hard-reset danger contract",
+		);
+	});
+
+	it("rejects aborting a caller-chosen kind instead of the fresh sequencer kind", () => {
+		const hostile = replaceGitManagementUiSource(
+			"app/features/scm/plain-git-history-actions.ts",
+			"session.bridge.gitHistoryAbort(sequencer.kind)",
+			'session.bridge.gitHistoryAbort("merge")',
+		);
+		expect(validateGitHistoryActionsUiBoundary(hostile)).toEqual(
+			expect.arrayContaining([
+				"Continue and Abort must bind the freshly-read sequencer kind, with Abort gated by a positive DOM confirmation",
+				"Git history mutation gitHistoryAbort must remain confined to its preview/state-gated controller and immutable root facade",
+			]),
+		);
+	});
+
+	it("rejects a cancel request that skips authoritative refresh", () => {
+		const hostile = replaceGitManagementUiSource(
+			"app/features/scm/plain-git-history-actions.ts",
+			"await session.bridge.gitHistoryCancel();\n\t\t\tplainGitInvalidation.invalidate(session.root.rootId);\n\t\t\tthis.services.notifications.info(",
+			"await session.bridge.gitHistoryCancel();\n\t\t\tthis.services.notifications.info(",
+		);
+		expect(validateGitHistoryActionsUiBoundary(hostile)).toContain(
+			"Every structured history outcome and cancel request must invalidate the immutable root without claiming cancellation rolled Git back",
+		);
+	});
+
+	it("rejects dropping one of the ten Command Palette entries", () => {
+		const hostile = replaceGitManagementUiSource(
+			"app/features/scm/plain-git-history-actions.ts",
+			`Object.freeze({
+		id: CANCEL_OPERATION_COMMAND_ID,
+		title: "Cancel Git Operation",
+		method: "cancelOperation",
+	}),`,
+			"",
+		);
+		expect(validateGitHistoryActionsUiBoundary(hostile)).toContain(
+			"Git history actions must expose exactly the ten audited Command Palette commands and titles",
 		);
 	});
 });

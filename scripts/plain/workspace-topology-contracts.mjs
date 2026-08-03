@@ -255,6 +255,10 @@ const DIRECT_COMMAND_REGISTRATION_MANIFEST = Object.freeze([
 		count: 1,
 	}),
 	Object.freeze({
+		relativePath: "app/features/scm/plain-git-history-actions.ts",
+		count: 1,
+	}),
+	Object.freeze({
 		relativePath: "app/features/debug/plain-debug-commands.ts",
 		count: 3,
 	}),
@@ -297,6 +301,12 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/features/scm/plain-git-content-provider.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/model",
 	"app/features/scm/plain-git-content-provider.ts:@codingame/monaco-vscode-model-service-override/vscode/vs/editor/common/services/resolverService",
 	"app/features/scm/plain-git-invalidation.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/event",
+	"app/features/scm/plain-git-history-actions.ts:@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions",
+	"app/features/scm/plain-git-history-actions.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands",
+	"app/features/scm/plain-git-history-actions.ts:@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service",
+	"app/features/scm/plain-git-history-actions.ts:@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service",
+	"app/features/scm/plain-git-history-actions.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service",
+	"app/features/scm/plain-git-history-actions.ts:@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace.service",
 	"app/features/scm/plain-git-management.ts:@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions",
 	"app/features/scm/plain-git-management.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands",
 	"app/features/scm/plain-git-management.ts:@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service",

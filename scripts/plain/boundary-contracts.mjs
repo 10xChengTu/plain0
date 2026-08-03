@@ -23570,6 +23570,8 @@ function validateDebugAdapterLaunchGuardedCall(source) {
 }
 
 const GIT_MANAGEMENT_PATH = "app/features/scm/plain-git-management.ts";
+const GIT_HISTORY_ACTIONS_PATH =
+	"app/features/scm/plain-git-history-actions.ts";
 const GIT_INVALIDATION_PATH = "app/features/scm/plain-git-invalidation.ts";
 const GIT_EXCLUDED_POLICY_PATH = "app/excluded-surface-policy.ts";
 const GIT_SCM_COMMANDS_PATH = "app/features/scm/plain-scm-commands.ts";
@@ -23601,6 +23603,69 @@ const GIT_MANAGEMENT_COMMANDS = Object.freeze([
 		id: "plain.git.manageUpstream",
 		method: "manageUpstream",
 		title: "Manage Upstream",
+	}),
+]);
+
+const GIT_HISTORY_ACTION_COMMANDS = Object.freeze([
+	Object.freeze({
+		constant: "MERGE_COMMAND_ID",
+		id: "plain.git.merge",
+		method: "merge",
+		title: "Merge",
+	}),
+	Object.freeze({
+		constant: "REBASE_COMMAND_ID",
+		id: "plain.git.rebase",
+		method: "rebase",
+		title: "Rebase",
+	}),
+	Object.freeze({
+		constant: "CHERRY_PICK_COMMAND_ID",
+		id: "plain.git.cherryPick",
+		method: "cherryPick",
+		title: "Cherry-Pick",
+	}),
+	Object.freeze({
+		constant: "REVERT_COMMAND_ID",
+		id: "plain.git.revert",
+		method: "revert",
+		title: "Revert",
+	}),
+	Object.freeze({
+		constant: "RESET_COMMAND_ID",
+		id: "plain.git.reset",
+		method: "reset",
+		title: "Reset",
+	}),
+	Object.freeze({
+		constant: "SHOW_REFLOG_COMMAND_ID",
+		id: "plain.git.showReflog",
+		method: "showReflog",
+		title: "Show Reflog",
+	}),
+	Object.freeze({
+		constant: "SHOW_CONTRIBUTORS_COMMAND_ID",
+		id: "plain.git.showContributors",
+		method: "showContributors",
+		title: "Show Contributors",
+	}),
+	Object.freeze({
+		constant: "CONTINUE_OPERATION_COMMAND_ID",
+		id: "plain.git.continueOperation",
+		method: "continueOperation",
+		title: "Continue Git Operation",
+	}),
+	Object.freeze({
+		constant: "ABORT_OPERATION_COMMAND_ID",
+		id: "plain.git.abortOperation",
+		method: "abortOperation",
+		title: "Abort Git Operation",
+	}),
+	Object.freeze({
+		constant: "CANCEL_OPERATION_COMMAND_ID",
+		id: "plain.git.cancelOperation",
+		method: "cancelOperation",
+		title: "Cancel Git Operation",
 	}),
 ]);
 
@@ -24149,6 +24214,7 @@ function validateGitInvalidationRoutes(normalizedSources) {
 	}
 	const expectedInvalidatorCounts = new Map([
 		[GIT_MANAGEMENT_PATH, 1],
+		[GIT_HISTORY_ACTIONS_PATH, 2],
 		[GIT_SCM_COMMANDS_PATH, 1],
 		[GIT_DISCARD_VIEW_PATH, 2],
 		[GIT_STASH_VIEW_PATH, 1],
@@ -24217,6 +24283,7 @@ export function validateGitManagementUiBoundary(appSources) {
 		"app/main.ts",
 		GIT_EXCLUDED_POLICY_PATH,
 		GIT_MANAGEMENT_PATH,
+		GIT_HISTORY_ACTIONS_PATH,
 		GIT_INVALIDATION_PATH,
 		GIT_SCM_COMMANDS_PATH,
 		GIT_ROOT_BINDER_PATH,
@@ -24249,6 +24316,343 @@ export function validateGitManagementUiBoundary(appSources) {
 	failures.push(
 		...validateGitManagementMutationAuthority(normalizedSources),
 		...validateGitInvalidationRoutes(normalizedSources),
+	);
+	return [...new Set(failures)];
+}
+
+const GIT_HISTORY_ACTION_MUTATION_CALLS = Object.freeze([
+	Object.freeze({
+		method: "gitMerge",
+		controllerArgs: Object.freeze(["target.sha", "preview.previewToken"]),
+		rootArgs: Object.freeze(["targetSha", "previewToken", "rootId"]),
+	}),
+	Object.freeze({
+		method: "gitRebase",
+		controllerArgs: Object.freeze(["target.sha", "preview.previewToken"]),
+		rootArgs: Object.freeze(["targetSha", "previewToken", "rootId"]),
+	}),
+	Object.freeze({
+		method: "gitCherryPick",
+		controllerArgs: Object.freeze(["target.sha", "preview.previewToken"]),
+		rootArgs: Object.freeze(["targetSha", "previewToken", "rootId"]),
+	}),
+	Object.freeze({
+		method: "gitRevert",
+		controllerArgs: Object.freeze(["target.sha", "preview.previewToken"]),
+		rootArgs: Object.freeze(["targetSha", "previewToken", "rootId"]),
+	}),
+	Object.freeze({
+		method: "gitReset",
+		controllerArgs: Object.freeze([
+			"target.sha",
+			"resetModeForOperation(operation)",
+			"preview.previewToken",
+		]),
+		rootArgs: Object.freeze(["targetSha", "mode", "previewToken", "rootId"]),
+	}),
+	Object.freeze({
+		method: "gitHistoryContinue",
+		controllerArgs: Object.freeze(["sequencer.kind"]),
+		rootArgs: Object.freeze(["kind", "rootId"]),
+	}),
+	Object.freeze({
+		method: "gitHistoryAbort",
+		controllerArgs: Object.freeze(["sequencer.kind"]),
+		rootArgs: Object.freeze(["kind", "rootId"]),
+	}),
+	Object.freeze({
+		method: "gitHistoryCancel",
+		controllerArgs: Object.freeze([]),
+		rootArgs: Object.freeze(["rootId"]),
+	}),
+]);
+
+function validateGitHistoryActionCommandSurface(normalizedSources, source) {
+	const failures = [];
+	const compact = source.replaceAll(/\s+/g, "");
+	for (const command of GIT_HISTORY_ACTION_COMMANDS) {
+		const literalCounts = new Map();
+		for (const [relativePath, candidate] of normalizedSources) {
+			const sourceFile = ts.createSourceFile(
+				relativePath,
+				candidate,
+				ts.ScriptTarget.Latest,
+				true,
+				relativePath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+			);
+			let count = 0;
+			function visit(node) {
+				if (
+					(ts.isStringLiteral(node) ||
+						ts.isNoSubstitutionTemplateLiteral(node)) &&
+					node.text === command.id
+				) {
+					count += 1;
+				}
+				ts.forEachChild(node, visit);
+			}
+			visit(sourceFile);
+			if (count > 0) {
+				literalCounts.set(relativePath, count);
+			}
+		}
+		if (
+			!compact.includes(`exportconst${command.constant}="${command.id}";`) ||
+			literalCounts.size !== 1 ||
+			literalCounts.get(GIT_HISTORY_ACTIONS_PATH) !== 1 ||
+			!compact.includes(
+				`id:${command.constant},title:"${command.title.replaceAll(/\s+/g, "")}",method:"${command.method}"`,
+			)
+		) {
+			failures.push(
+				"Git history actions must expose exactly the ten audited Command Palette commands and titles",
+			);
+			break;
+		}
+	}
+	if (
+		(compact.match(/CommandsRegistry\.registerCommand\(/g) ?? []).length !==
+			1 ||
+		(compact.match(/MenuRegistry\.appendMenuItem\(/g) ?? []).length !== 1 ||
+		(compact.match(/MenuId\.CommandPalette/g) ?? []).length !== 1 ||
+		(compact.match(/category:"Plain"/g) ?? []).length !== 1
+	) {
+		failures.push(
+			"Git history actions must expose exactly the ten audited Command Palette commands and titles",
+		);
+	}
+	const scmCommands = normalizedSources.get(GIT_SCM_COMMANDS_PATH) ?? "";
+	if (
+		(
+			scmCommands.match(/registerPlainGitHistoryActionCommands\(bridge\)/g) ??
+			[]
+		).length !== 1 ||
+		(scmCommands.match(/historyActions\.dispose\(\)/g) ?? []).length !== 1
+	) {
+		failures.push(
+			"Git history action registration must have one bridge-bound disposable SCM bootstrap route",
+		);
+	}
+	return failures;
+}
+
+function validateGitHistoryActionMutationAuthority(normalizedSources) {
+	const failures = [];
+	const callsByMethod = new Map(
+		GIT_HISTORY_ACTION_MUTATION_CALLS.map(({ method }) => [method, []]),
+	);
+	for (const [relativePath, source] of normalizedSources) {
+		if (!relativePath.endsWith(".ts") && !relativePath.endsWith(".tsx")) {
+			continue;
+		}
+		const sourceFile = ts.createSourceFile(
+			relativePath,
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			relativePath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+		);
+		function visit(node) {
+			if (ts.isCallExpression(node)) {
+				const expression = unwrapTypeScriptExpression(node.expression);
+				let method;
+				let receiver;
+				let computed = false;
+				if (ts.isPropertyAccessExpression(expression)) {
+					method = expression.name.text;
+					receiver = normalizedTypeScriptText(
+						expression.expression,
+						sourceFile,
+					);
+				} else if (
+					ts.isElementAccessExpression(expression) &&
+					expression.argumentExpression !== undefined &&
+					(ts.isStringLiteral(expression.argumentExpression) ||
+						ts.isNoSubstitutionTemplateLiteral(expression.argumentExpression))
+				) {
+					method = expression.argumentExpression.text;
+					receiver = normalizedTypeScriptText(
+						expression.expression,
+						sourceFile,
+					);
+					computed = true;
+				}
+				if (method !== undefined && callsByMethod.has(method)) {
+					callsByMethod.get(method).push({
+						relativePath,
+						receiver,
+						computed,
+						args: node.arguments.map((argument) =>
+							normalizedTypeScriptText(argument, sourceFile),
+						),
+					});
+				}
+			}
+			ts.forEachChild(node, visit);
+		}
+		visit(sourceFile);
+	}
+	for (const audit of GIT_HISTORY_ACTION_MUTATION_CALLS) {
+		const signature = ({ relativePath, receiver, computed, args }) =>
+			`${relativePath}|${receiver}|${computed}|${args.join(",")}`;
+		const expected = [
+			{
+				relativePath: GIT_HISTORY_ACTIONS_PATH,
+				receiver: "session.bridge",
+				computed: false,
+				args: audit.controllerArgs,
+			},
+			{
+				relativePath: GIT_ROOT_BINDER_PATH,
+				receiver: "bridge",
+				computed: false,
+				args: audit.rootArgs,
+			},
+		];
+		const actual = callsByMethod.get(audit.method);
+		if (
+			actual.length !== expected.length ||
+			!sameArray(actual.map(signature).sort(), expected.map(signature).sort())
+		) {
+			failures.push(
+				`Git history mutation ${audit.method} must remain confined to its preview/state-gated controller and immutable root facade`,
+			);
+		}
+	}
+	return failures;
+}
+
+function validateGitHistoryActionGuardedWorkflows(source) {
+	const sourceFile = ts.createSourceFile(
+		GIT_HISTORY_ACTIONS_PATH,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	if (sourceFile.parseDiagnostics.length > 0) {
+		return ["plain-git-history-actions.ts must remain valid TypeScript"];
+	}
+	const failures = [];
+	const body = (name) => {
+		const node = classMethodBody(
+			sourceFile,
+			"PlainGitHistoryActionsController",
+			name,
+		);
+		return node === undefined ? "" : normalizedTypeScriptText(node, sourceFile);
+	};
+	const target = body("#pickTarget");
+	if (
+		!target.includes(
+			"const[state,refs,graph,reflog]=awaitPromise.all([session.bridge.gitHistoryState(),session.bridge.gitRefsList(),session.bridge.gitLogGraph(500),session.bridge.gitReflogList(),]);",
+		) ||
+		!target.includes("add(state.headSha);") ||
+		!target.includes("for(constrefofrefs.entries)") ||
+		!target.includes("for(constnodeofgraph.nodes)") ||
+		!target.includes("for(constentryofreflog.entries)") ||
+		source.includes("quickInput.input(")
+	) {
+		failures.push(
+			"Git history targets must come only from one strict HEAD, refs, graph and reflog snapshot set with no free-text revision input",
+		);
+	}
+
+	const targeted = body("#runTargeted");
+	if (
+		!stringsAppearInOrder(targeted, [
+			"consttarget=awaitthis.#pickTarget(session,`${label}:SelectTarget`);",
+			"constpreview=awaitsession.bridge.gitHistoryPreview(operation,target.sha,);",
+			"if(preview.sequencer!==null){",
+			"return;",
+			"constconfirmation=awaitthis.services.dialog.confirm({",
+			"detail:historyPreviewDetail(preview)",
+			'operation==="resetHard"?"HardResetandDiscardTrackedChanges":label',
+			"if(!confirmation.confirmed){return;}",
+			"switch(operation)",
+			"this.#publishOutcome(session,label,outcome);",
+		]) ||
+		!source
+			.replaceAll(/\s+/g, "")
+			.includes(
+				"HardresetmovesHEADandtheindexanddiscardsthetrackedlocalchangeslistedbelow.Untrackedfilesarenotdeleted.",
+			)
+	) {
+		failures.push(
+			"Every targeted Git history mutation must consume its strict target preview only after a positive DOM confirmation, with a distinct hard-reset danger contract",
+		);
+	}
+
+	const sequencer = body("#runSequencer");
+	if (
+		!stringsAppearInOrder(sequencer, [
+			"conststate=awaitsession.bridge.gitHistoryState();",
+			"constsequencer=state.sequencer;",
+			"if(sequencer===null){",
+			'if(action==="abort"){constconfirmation=awaitthis.services.dialog.confirm({',
+			'primaryButton:"AbortGitOperation"',
+			"if(!confirmation.confirmed){return;}",
+			'constoutcome=action==="continue"?awaitsession.bridge.gitHistoryContinue(sequencer.kind):awaitsession.bridge.gitHistoryAbort(sequencer.kind);',
+			"this.#publishOutcome(",
+		])
+	) {
+		failures.push(
+			"Continue and Abort must bind the freshly-read sequencer kind, with Abort gated by a positive DOM confirmation",
+		);
+	}
+
+	const publish = body("#publishOutcome");
+	const cancel = body("cancelOperation");
+	if (
+		!publish.startsWith(
+			"{plainGitInvalidation.invalidate(session.root.rootId);",
+		) ||
+		!publish.includes('if(outcome.kind==="cancelled")') ||
+		!publish.includes("cancellationdidnotimplyrollback") ||
+		!stringsAppearInOrder(cancel, [
+			"awaitsession.bridge.gitHistoryCancel();",
+			"plainGitInvalidation.invalidate(session.root.rootId);",
+			"cancellationrequested",
+		])
+	) {
+		failures.push(
+			"Every structured history outcome and cancel request must invalidate the immutable root without claiming cancellation rolled Git back",
+		);
+	}
+	return failures;
+}
+
+/** `F180` S4 exposes S3's authority without reopening a general revision or
+ * argv surface. This lock couples the ten Palette commands, strict target
+ * snapshots, preview-before-confirm order, hard-reset danger copy,
+ * sequencer-kind binding, cancel semantics and root-only invalidation. */
+export function validateGitHistoryActionsUiBoundary(appSources) {
+	const normalizedSources = new Map(
+		appSources.map(({ relativePath, source }) => [
+			relativePath.replaceAll("\\", "/"),
+			source,
+		]),
+	);
+	const failures = [];
+	for (const relativePath of [
+		GIT_HISTORY_ACTIONS_PATH,
+		GIT_INVALIDATION_PATH,
+		GIT_SCM_COMMANDS_PATH,
+		GIT_ROOT_BINDER_PATH,
+	]) {
+		if (!normalizedSources.has(relativePath)) {
+			failures.push(`git history actions UI boundary requires ${relativePath}`);
+		}
+	}
+	const source = normalizedSources.get(GIT_HISTORY_ACTIONS_PATH);
+	if (source !== undefined) {
+		failures.push(
+			...validateGitHistoryActionCommandSurface(normalizedSources, source),
+			...validateGitHistoryActionGuardedWorkflows(source),
+		);
+	}
+	failures.push(
+		...validateGitHistoryActionMutationAuthority(normalizedSources),
 	);
 	return [...new Set(failures)];
 }
