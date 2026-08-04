@@ -67,7 +67,7 @@ Plain 是一个无 AI、无账号、无同步、无通用扩展生态的轻量�
 - 登录、注册、账号权益、云同步、云工作区、遥测和个性化服务。
 - 通用 VS Code 扩展运行时、Extension Host、Marketplace 代码执行。
 - 语言服务器、LSP、IntelliSense 项目语义、重构、格式化器、编译器、SDK、包管理器、任务和测试运行器。
-- Notebook、远程开发、Tunnel、容器/SSH 工作区、Live Share、Settings Sync。
+- Notebook、Tunnel、容器工作区、Live Share、Settings Sync、Remote extension host 与上游 Remote Development 栈。SSH 远程工作区自 F220 起为范围内能力：由 Plain 自有的 Rust SSH 实现拥有认证（仅 ssh-agent）、host-key 显式确认、远程文件系统/PTY/Git/DAP 传输，WebView 只见不透明 capability（ADR 0006/0007）；端口转发、agent 转发与远程常驻组件仍明确不做。
 - GitKraken/GitLens 账号、品牌、Plus/Pro/Cloud/Launchpad/PR provider/AI 功能。
 
 ## 兼容声明
