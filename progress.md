@@ -6,7 +6,7 @@
 
 - 阶段：6 — 非发布遗留功能补全。
 - WIP：`F210` Complete generic debug workflows。
-- 当前最小工作项：`F210` S0 方案冻结：按 docs/research 惯例产出完整调试工作流冻结文档后再实现。
+- 当前最小工作项：`F210` S1 launch 配置选择器。按 `docs/research/2026-08-04-complete-debug.md`：多配置时以 `IQuickInputService.pick` 显式选择（模式照抄 `selectPlainDebugRoot`），单配置直通不弹框，取消零副作用；选中 name 传入既有 `prepareDebugAdapterLaunch`；Browser 覆盖。
 - 后续已规划：终端、搜索、通用调试完整度，独立 Rust SSH 远程工作区，以及最终非发布全量 E2E 审计。WIP 上限仍为 1，逐项验证并提交。
 - [x] `F140` S0 实现与 Browser 证据：Rust 文件搜索 entry/文本搜索 batch 均新增产生结果的 `rootId`；TypeScript 严格 codec 拒绝畸形 UUID、缺失/额外字段、accessor/Proxy，`PlainSearchService` 还以 query roots 集合二次 fail closed；Quick Open 与 Search 对两个 root 下同名 `shared.txt` 保留不同 authority，Replace Browser E2E 实际只向 secondary root 发出 versioned write，primary 内容保持不变。定向 Rust search 47/47、前端搜索单元 66/66、类型检查、lint、features/architecture guard 与聚焦 Chromium E2E 均通过。真实 Tauri 矩阵已登记为 `E2E-014`，完成后再关闭 `F140`。
 - [x] `F140` S1 真实 Tauri 收口：`E2E-014` 用 macOS 系统目录选择器分别授权两个仓库内 APFS fixture root，Explorer 双根正确；Cmd+P 同名 `shared.txt` 返回两条带 root label 的结果，secondary 打开内容/面包屑正确；真实 Search 为 secondary 返回 `1 result in 1 file`，Replace All 后磁盘仅 secondary 从 22 字节输入变为精确 24 字节 `F140 replaced secondary\n`（SHA-256 `2d0dfffb5e40b815be15cef2011cbc82e303e33b7efd429863502d3a860ab775`），primary 保持精确 20 字节 `F140 shared primary\n`（SHA-256 `2fd92e8289c8d2d3f15245d0afda61983970fcd1c16c3f24263cebc69eddb8d8`）；反向 Search/打开 primary 与再次 Cmd+P 双结果/重开 secondary 均通过，Cmd+Q 后无 Plain 残留进程。默认 linker-signed debug bundle 的白 WebView 属既有 F120 签名/资源封装边界，本条改用仓库已验证的本地 ad-hoc 完整签名（`flags=0x10002(adhoc,runtime)`、唯一 `allow-jit` entitlement）完成真实 WKWebView 验收，不把发布签名混入 F140。F140 已转 `complete`，唯一 WIP 切到 F150。
