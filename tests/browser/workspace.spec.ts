@@ -22167,6 +22167,298 @@ test("Watch view evaluates added expressions via debug_evaluate under context wa
 	expect(pageErrors).toEqual([]);
 });
 
+// `F210` S2 — nested Watch results reuse the exact same
+// `DebugVariablesTree`/`renderVariablesTreeNode` engine the Variables tree
+// test above exercises: real expand/pagination against the live adapter for
+// a watch expression's own `variablesReference`, and expand/collapse state
+// that survives a re-evaluate.
+test("Watch results with a variablesReference expand through the shared variables tree, page past 100 children, and keep expanded paths across a re-evaluate", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	const bigVariables = Array.from({ length: 150 }, (_unused, index) => ({
+		name: `item_${index}`,
+		value: String(index),
+		type: null,
+		variablesReference: 0,
+		namedVariables: null,
+		indexedVariables: null,
+	}));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{ "main.py": DEBUG_MAIN_PY, ".vscode/launch.json": DEBUG_LAUNCH_JSON },
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{},
+		{},
+		{
+			stackFramesByThread: {
+				1: [
+					{
+						id: 1,
+						name: "main",
+						line: 6,
+						column: 5,
+						sourcePath: "main.py",
+						sourceName: "main.py",
+					},
+				],
+			},
+			evaluateByExpression: {
+				obj: {
+					result: "<Point>",
+					type: "Point",
+					variablesReference: 400,
+					namedVariables: 2,
+					indexedVariables: null,
+				},
+				big: {
+					result: "<Big>",
+					type: null,
+					variablesReference: 500,
+					namedVariables: null,
+					indexedVariables: 150,
+				},
+			},
+			variablesByReference: {
+				400: [
+					{
+						name: "x",
+						value: "1",
+						type: "int",
+						variablesReference: 0,
+						namedVariables: null,
+						indexedVariables: null,
+					},
+					{
+						name: "nested",
+						value: "<Nested>",
+						type: "Nested",
+						variablesReference: 401,
+						namedVariables: 1,
+						indexedVariables: null,
+					},
+				],
+				401: [
+					{
+						name: "y",
+						value: "2",
+						type: "int",
+						variablesReference: 0,
+						namedVariables: null,
+						indexedVariables: null,
+					},
+				],
+				500: bigVariables,
+			},
+		},
+	);
+	await openNativeWorkspaceExplorer(page);
+	await openRunAndDebugView(page);
+	await executePaletteCommand(
+		page,
+		"Start Debugging",
+		"Plain: Start Debugging",
+	);
+	const adapterDialog = page.getByRole("dialog");
+	await expect(adapterDialog).toBeVisible();
+	await adapterDialog
+		.getByRole("button", { name: "Run Adapter", exact: true })
+		.click();
+	await expect(adapterDialog).toHaveCount(0);
+	const sessionId = await currentDebugSessionId(page);
+
+	// A real `stopped` event drives the call stack, whose sole frame
+	// auto-selects — this is what feeds the Watch view's own `frameId`, same
+	// as the Variables tree test above.
+	await emitDebugTestEvent(page, sessionId, "stopped", {
+		threadId: 1,
+		reason: "breakpoint",
+	});
+	await expect(
+		page.locator(".plain-debug-call-stack-view-frame-button"),
+	).toHaveText(["main (main.py:6)"]);
+
+	// Both expressions are added up front, before either is ever expanded:
+	// `#addExpression` re-evaluates *every* existing entry (not just the new
+	// one), so expanding "obj" before "big" exists would let "big"'s own
+	// `#addExpression` call silently re-evaluate "obj" a second time —
+	// muddying the exact `debug_variables` call counts the assertions below
+	// depend on. Adding both while both are still collapsed sidesteps that
+	// entirely (a collapsed entry's re-evaluate issues no `debug_variables`
+	// call at all).
+	const input = page.locator(".plain-debug-watch-view-input");
+	const addButton = page.locator(".plain-debug-watch-view-add-button");
+	await input.fill("obj");
+	await addButton.click();
+	await input.fill("big");
+	await addButton.click();
+	const objEntry = page
+		.locator(".plain-debug-watch-view-entry")
+		.filter({ hasText: "obj" });
+	const bigEntry = page
+		.locator(".plain-debug-watch-view-entry")
+		.filter({ hasText: "big" });
+	await expect(objEntry).toHaveCount(1);
+	await expect(bigEntry).toHaveCount(1);
+
+	// Meaningful interaction 1: a watch result whose own `variablesReference`
+	// is non-zero renders through the shared tree — collapsed by default,
+	// with the composed `result (type)` text as the root node's own label
+	// (not a flat, non-interactive span, which only the
+	// `variablesReference === 0` case above still uses).
+	const objRoot = objEntry.locator(".plain-debug-variables-node").first();
+	await expect(objRoot).toHaveCount(1);
+	await expect(objEntry.locator(".plain-debug-watch-view-value")).toHaveCount(
+		0,
+	);
+	const objToggle = objRoot.locator(
+		":scope > .plain-debug-variables-row > .plain-debug-variables-toggle",
+	);
+	await expect(objToggle).toHaveText("▸");
+	await expect(
+		objRoot.locator(":scope > .plain-debug-variables-row"),
+	).toHaveText("▸<Point> (Point)");
+
+	// Meaningful interaction 2: expanding the root issues a real
+	// `debug_variables` call for its own `variablesReference` and renders
+	// the real children — one level deep.
+	await objToggle.click();
+	const objChildren = objRoot.locator(
+		":scope > .plain-debug-variables-children > .plain-debug-variables-node",
+	);
+	await expect(objChildren).toHaveCount(2);
+	await expect(objChildren.filter({ hasText: "x: 1 (int)" })).toHaveCount(1);
+	const nestedNode = objChildren.filter({
+		hasText: "nested: <Nested> (Nested)",
+	});
+	await expect(nestedNode).toHaveCount(1);
+
+	// Meaningful interaction 3: expanding "nested" goes two levels deep from
+	// the watch expression's own root — proving this is real recursive
+	// expansion, not a single hard-coded level.
+	const nestedToggle = nestedNode.locator(
+		":scope > .plain-debug-variables-row > .plain-debug-variables-toggle",
+	);
+	await nestedToggle.click();
+	const nestedChildren = nestedNode.locator(
+		":scope > .plain-debug-variables-children > .plain-debug-variables-node",
+	);
+	await expect(nestedChildren).toHaveText(["y: 2 (int)"]);
+
+	const variablesCallsAfterExpand = await terminalCallsFor(
+		page,
+		"debug_variables",
+	);
+	expect(
+		variablesCallsAfterExpand
+			.filter(
+				(call) =>
+					(call.args.request as { variablesReference?: number })
+						.variablesReference === 400,
+			)
+			.map((call) => call.args.request),
+	).toEqual([
+		{ sessionId, variablesReference: 400, start: 0, count: 100, filter: null },
+	]);
+	expect(
+		variablesCallsAfterExpand
+			.filter(
+				(call) =>
+					(call.args.request as { variablesReference?: number })
+						.variablesReference === 401,
+			)
+			.map((call) => call.args.request),
+	).toEqual([
+		{ sessionId, variablesReference: 401, start: 0, count: 100, filter: null },
+	]);
+
+	// Meaningful interaction 4: "big"'s result has more than 100 children —
+	// real pagination against the live adapter, same "Load N more"
+	// affordance the Variables tree uses.
+	const bigRoot = bigEntry.locator(".plain-debug-variables-node").first();
+	await expect(bigRoot).toHaveCount(1);
+	await bigRoot
+		.locator(
+			":scope > .plain-debug-variables-row > .plain-debug-variables-toggle",
+		)
+		.click();
+	const bigChildren = bigRoot.locator(
+		":scope > .plain-debug-variables-children > .plain-debug-variables-node",
+	);
+	await expect(bigChildren).toHaveCount(100);
+	const bigLoadMoreButton = bigRoot.locator(
+		":scope > .plain-debug-variables-children .plain-debug-variables-load-more",
+	);
+	await expect(bigLoadMoreButton).toHaveText("Load 50 more…");
+	await bigLoadMoreButton.click();
+	await expect(bigChildren).toHaveCount(150);
+	await expect(bigLoadMoreButton).toHaveCount(0);
+	const bigReferenceCalls = (
+		await terminalCallsFor(page, "debug_variables")
+	).filter(
+		(call) =>
+			(call.args.request as { variablesReference?: number })
+				.variablesReference === 500,
+	);
+	expect(bigReferenceCalls.map((call) => call.args.request)).toEqual([
+		{ sessionId, variablesReference: 500, start: 0, count: 100, filter: null },
+		{
+			sessionId,
+			variablesReference: 500,
+			start: 100,
+			count: 100,
+			filter: null,
+		},
+	]);
+
+	// Meaningful interaction 5: a real re-evaluate (a second `stopped` event,
+	// the same trigger a real "hit the breakpoint again" produces) keeps
+	// "obj"'s own two-level expansion — real fresh `debug_variables` calls
+	// for both references fire again (proving this is a genuine re-fetch,
+	// not stale leftover DOM), and the same children render without the user
+	// re-clicking anything.
+	await emitDebugTestEvent(page, sessionId, "stopped", {
+		threadId: 1,
+		reason: "breakpoint",
+	});
+	await expect(objChildren).toHaveCount(2);
+	await expect(objChildren.filter({ hasText: "x: 1 (int)" })).toHaveCount(1);
+	await expect(nestedNode).toHaveCount(1);
+	await expect(nestedChildren).toHaveText(["y: 2 (int)"]);
+	const variablesCallsAfterReevaluate = await terminalCallsFor(
+		page,
+		"debug_variables",
+	);
+	expect(
+		variablesCallsAfterReevaluate.filter(
+			(call) =>
+				(call.args.request as { variablesReference?: number })
+					.variablesReference === 400,
+		),
+	).toHaveLength(2);
+	expect(
+		variablesCallsAfterReevaluate.filter(
+			(call) =>
+				(call.args.request as { variablesReference?: number })
+					.variablesReference === 401,
+		),
+	).toHaveLength(2);
+
+	expect(pageErrors).toEqual([]);
+});
+
 test("breakpoint popup disables condition/log-point inputs when the adapter's capabilities do not advertise support, and a rejected breakpoint renders distinctly", async ({
 	page,
 }) => {

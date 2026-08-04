@@ -732,7 +732,15 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/features/debug/plain-debug-session-alerts.ts:@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service",
 	"app/features/debug/plain-debug-terminal-integration.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/contributions",
 	"app/features/debug/plain-debug-terminal-integration.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/views/common/viewsService.service",
-	"app/features/debug/plain-debug-variables-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/dom",
+	// `F210` S2 — the shared recursive variables-tree rendering both
+	// `plain-debug-variables-view.ts` and `plain-debug-watch-view.ts` compose
+	// (never a second copy of the tree-rendering logic); it owns the toggle/
+	// load-more click wiring, so it is the one that now imports `dom` for
+	// `addDisposableListener`, not the two view files directly. Kept apart
+	// from the pure `plain-debug-variables-tree.ts` engine module (which
+	// imports nothing from `@codingame/monaco-vscode-api` at all) so that
+	// module stays importable from a DOM-free vitest run.
+	"app/features/debug/plain-debug-variables-tree-render.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/dom",
 	"app/features/debug/plain-debug-variables-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration.service",
 	"app/features/debug/plain-debug-variables-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextkey/common/contextkey.service",
 	"app/features/debug/plain-debug-variables-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/contextview/browser/contextView.service",

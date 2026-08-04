@@ -1,4 +1,3 @@
-import { addDisposableListener } from "@codingame/monaco-vscode-api/vscode/vs/base/browser/dom";
 import { IConfigurationService } from "@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration.service";
 import { IContextKeyService } from "@codingame/monaco-vscode-api/vscode/vs/platform/contextkey/common/contextkey.service";
 import { IContextMenuService } from "@codingame/monaco-vscode-api/vscode/vs/platform/contextview/browser/contextView.service";
@@ -13,33 +12,17 @@ import {
 } from "@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/views/viewPane";
 import { IViewDescriptorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/common/views.service";
 
-import type { DebugScope, DebugVariable } from "../../platform/tauri/contracts";
+import type { DebugScope } from "../../platform/tauri/contracts";
 import { normalizeCommandError } from "../../platform/tauri/errors";
 import { getPlainDebugRuntime } from "./plain-debug-runtime";
-
-/** How many entries one `debugVariables` page requests — an arbitrary but
- * reasonable UI page size (not a protocol constant); the adapter itself
- * still decides how it actually slices its own children by `start`/`count`
- * (see `PlainBridge.debugVariables`'s own doc comment). */
-const VARIABLES_PAGE_SIZE = 100;
-
-interface ExpandedVariablesNode {
-	variables: DebugVariable[];
-	/** The declared child count from the *parent* (`indexedVariables`/
-	 * `namedVariables`), or `null` when the adapter never reported one — in
-	 * which case this view treats the first page as the complete result
-	 * (no "Load more" affordance), rather than guessing. */
-	total: number | null;
-}
-
-function declaredCount(
-	entity: Pick<
-		DebugScope | DebugVariable,
-		"indexedVariables" | "namedVariables"
-	>,
-): number | null {
-	return entity.indexedVariables ?? entity.namedVariables ?? null;
-}
+import {
+	DebugVariablesTree,
+	declaredCount,
+} from "./plain-debug-variables-tree";
+import {
+	renderVariablesTreeNode,
+	type VariablesTreeRenderHost,
+} from "./plain-debug-variables-tree-render";
 
 /**
  * `F100` S3's Variables view — the **lazy expansion and pagination**
@@ -63,7 +46,11 @@ export class PlainDebugVariablesView extends ViewPane {
 	#messageElement: HTMLElement | undefined;
 	#treeElement: HTMLElement | undefined;
 	#scopes: readonly DebugScope[] = [];
-	readonly #expanded = new Map<number, ExpandedVariablesNode>();
+	#tree: DebugVariablesTree | undefined;
+	readonly #treeHost: VariablesTreeRenderHost = {
+		register: (disposable) => this._register(disposable),
+		onChange: () => this.#render(),
+	};
 	#frameSubscription: { dispose(): void } | undefined;
 	#refreshToken = 0;
 
@@ -113,6 +100,9 @@ export class PlainDebugVariablesView extends ViewPane {
 		if (runtime === undefined) {
 			return;
 		}
+		this.#tree = new DebugVariablesTree((reference, start, count) =>
+			runtime.session.variables(reference, start, count, null),
+		);
 		this.#frameSubscription = runtime.frameSelection.onDidChange((frameId) => {
 			void this.#refresh(frameId);
 		});
@@ -121,7 +111,7 @@ export class PlainDebugVariablesView extends ViewPane {
 
 	async #refresh(frameId: number | null): Promise<void> {
 		const token = (this.#refreshToken += 1);
-		this.#expanded.clear();
+		this.#tree?.clear();
 		if (frameId === null) {
 			this.#scopes = [];
 			this.#setMessage("No frame selected.");
@@ -149,53 +139,6 @@ export class PlainDebugVariablesView extends ViewPane {
 		this.#render();
 	}
 
-	async #toggle(reference: number, countHint: number | null): Promise<void> {
-		if (this.#expanded.has(reference)) {
-			this.#expanded.delete(reference);
-			this.#render();
-			return;
-		}
-		const runtime = getPlainDebugRuntime();
-		if (runtime === undefined) {
-			return;
-		}
-		try {
-			const result = await runtime.session.variables(
-				reference,
-				0,
-				VARIABLES_PAGE_SIZE,
-				null,
-			);
-			this.#expanded.set(reference, {
-				variables: [...(result?.variables ?? [])],
-				total: countHint,
-			});
-		} catch {
-			return;
-		}
-		this.#render();
-	}
-
-	async #loadMore(reference: number): Promise<void> {
-		const node = this.#expanded.get(reference);
-		const runtime = getPlainDebugRuntime();
-		if (node === undefined || runtime === undefined) {
-			return;
-		}
-		try {
-			const result = await runtime.session.variables(
-				reference,
-				node.variables.length,
-				VARIABLES_PAGE_SIZE,
-				null,
-			);
-			node.variables = [...node.variables, ...(result?.variables ?? [])];
-		} catch {
-			return;
-		}
-		this.#render();
-	}
-
 	#setMessage(text: string | undefined): void {
 		if (this.#messageElement !== undefined) {
 			this.#messageElement.textContent = text ?? "";
@@ -204,12 +147,14 @@ export class PlainDebugVariablesView extends ViewPane {
 
 	#render(): void {
 		const tree = this.#treeElement;
-		if (tree === undefined) {
+		if (tree === undefined || this.#tree === undefined) {
 			return;
 		}
 		tree.textContent = "";
 		for (const scope of this.#scopes) {
-			this.#renderNode(
+			renderVariablesTreeNode(
+				this.#tree,
+				this.#treeHost,
 				tree,
 				scope.variablesReference,
 				scope.name,
@@ -217,76 +162,6 @@ export class PlainDebugVariablesView extends ViewPane {
 				0,
 			);
 		}
-	}
-
-	#renderNode(
-		container: HTMLElement,
-		reference: number,
-		label: string,
-		countHint: number | null,
-		depth: number,
-	): void {
-		const item = document.createElement("li");
-		item.className = "plain-debug-variables-node";
-		item.style.paddingLeft = `${depth * 12}px`;
-
-		const row = document.createElement("div");
-		row.className = "plain-debug-variables-row";
-		const isLeaf = reference === 0;
-		const isExpanded = this.#expanded.has(reference);
-		if (!isLeaf) {
-			const toggle = document.createElement("button");
-			toggle.type = "button";
-			toggle.className = "plain-debug-variables-toggle";
-			toggle.textContent = isExpanded ? "▾" : "▸";
-			toggle.setAttribute("aria-label", `Toggle ${label}`);
-			toggle.setAttribute("aria-expanded", String(isExpanded));
-			this._register(
-				addDisposableListener(toggle, "click", () => {
-					void this.#toggle(reference, countHint);
-				}),
-			);
-			row.append(toggle);
-		}
-		const text = document.createElement("span");
-		text.className = "plain-debug-variables-label";
-		text.textContent = label;
-		row.append(text);
-		item.append(row);
-
-		if (!isLeaf && isExpanded) {
-			const node = this.#expanded.get(reference)!;
-			const childList = document.createElement("ul");
-			childList.className = "plain-debug-variables-children";
-			for (const variable of node.variables) {
-				const typeSuffix = variable.type !== null ? ` (${variable.type})` : "";
-				this.#renderNode(
-					childList,
-					variable.variablesReference,
-					`${variable.name}: ${variable.value}${typeSuffix}`,
-					declaredCount(variable),
-					depth + 1,
-				);
-			}
-			if (node.total !== null && node.variables.length < node.total) {
-				const loadMoreItem = document.createElement("li");
-				loadMoreItem.style.paddingLeft = `${(depth + 1) * 12}px`;
-				const loadMoreButton = document.createElement("button");
-				loadMoreButton.type = "button";
-				loadMoreButton.className = "plain-debug-variables-load-more";
-				const remaining = node.total - node.variables.length;
-				loadMoreButton.textContent = `Load ${Math.min(VARIABLES_PAGE_SIZE, remaining)} more…`;
-				this._register(
-					addDisposableListener(loadMoreButton, "click", () => {
-						void this.#loadMore(reference);
-					}),
-				);
-				loadMoreItem.append(loadMoreButton);
-				childList.append(loadMoreItem);
-			}
-			item.append(childList);
-		}
-		container.append(item);
 	}
 
 	override dispose(): void {
