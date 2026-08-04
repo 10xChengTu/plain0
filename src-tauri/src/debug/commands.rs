@@ -10,14 +10,17 @@
 //! is not a new `#[tauri::command]` at all (see below). `F100` S5 adds
 //! exactly one more — `debug_output_ack` — the frontend's own acknowledgement
 //! of a gated `output` event (see `super::output_gate`'s own module doc).
-//! `F210` S4 (this slice) adds one final command — `debug_step_in_targets`,
-//! the `stepInTargets` target picker's own data source (see its own doc
-//! comment below) — and gives `debug_step_in` an optional `targetId` on its
-//! existing request DTO (see [`super::dto::DebugStepInRequest`]'s own doc
-//! comment for why that is a dedicated DTO, not a field grown onto the
-//! shared [`super::dto::DebugThreadRequest`] the other four step-control
-//! commands still use); this brings the total to eighteen real commands
-//! (3 + 3 + 5 + 5 + 1 + 1). Read this comment before adding a nineteenth.
+//! `F210` S4 added one command — `debug_step_in_targets`, the
+//! `stepInTargets` target picker's own data source (see its own doc comment
+//! below) — and gave `debug_step_in` an optional `targetId` on its existing
+//! request DTO (see [`super::dto::DebugStepInRequest`]'s own doc comment for
+//! why that is a dedicated DTO, not a field grown onto the shared
+//! [`super::dto::DebugThreadRequest`] the other four step-control commands
+//! still use). `F210` S5 (this slice) adds one final command —
+//! `debug_disassemble`, the read-only bounded Disassembly view's own sole
+//! data source (see its own doc comment below) — bringing the total to
+//! nineteen real commands (3 + 3 + 5 + 5 + 1 + 1 + 1). Read this comment
+//! before adding a twentieth.
 //!
 //! # `F100` S3's five commands (unchanged this slice)
 //!
@@ -72,6 +75,24 @@
 //! issuing the call) — matching every other `supportsXxx`-gated affordance
 //! in this codebase.
 //!
+//! # `F210` S5's read-only `disassemble` view
+//!
+//! `debug_disassemble` is a thin wrapper exactly like `debug_step_in_targets`
+//! above: convert [`super::dto::DebugDisassembleRequest`] into a
+//! `(session_id, arguments)` pair via its own `into_parts`, call
+//! [`super::service::DebugSessionService::send_request`] with the literal
+//! `"disassemble"` DAP command name, then parse the response via
+//! [`dto::parse_disassemble_response`] (which additionally needs the
+//! validated `instruction_count` the request sent, to fail closed on a
+//! response naming more instructions than were ever requested — see that
+//! function's own doc comment). Real DAP gates `disassemble` behind
+//! `Capabilities.supportsDisassembleRequest`; this domain does not enforce
+//! that gate in Rust (the frontend does, before ever issuing the call) —
+//! same as `stepInTargets` above. This command, and the read-only
+//! Disassembly `ViewPane` it feeds, never touch instruction breakpoints,
+//! inline source, or any execution/write capability — see
+//! `docs/research/2026-08-04-complete-debug.md`'s "架构裁定 §5".
+//!
 //! # `runInTerminal` is not a new Tauri command
 //!
 //! Real `runInTerminal` handling (this slice's other major addition) is a
@@ -117,12 +138,13 @@ use crate::workspace::RootId;
 use super::confirm::ConfirmationService;
 use super::debug_run_in_terminal_arguments_invalid;
 use super::dto::{
-    self, AdapterConfirmationSubject, DebugContinueResult, DebugEvaluateRequest,
-    DebugEvaluateResult, DebugEventPayload, DebugOutputAckRequest, DebugScopesRequest,
-    DebugScopesResult, DebugSessionId, DebugSessionIdRequest, DebugSessionStartRequest,
-    DebugSessionStartResult, DebugSetBreakpointsRequest, DebugSetBreakpointsResult,
-    DebugStackTraceRequest, DebugStackTraceResult, DebugStepInRequest, DebugStepInTargetsRequest,
-    DebugStepInTargetsResult, DebugThreadRequest, DebugVariablesRequest, DebugVariablesResult,
+    self, AdapterConfirmationSubject, DebugContinueResult, DebugDisassembleRequest,
+    DebugDisassembleResult, DebugEvaluateRequest, DebugEvaluateResult, DebugEventPayload,
+    DebugOutputAckRequest, DebugScopesRequest, DebugScopesResult, DebugSessionId,
+    DebugSessionIdRequest, DebugSessionStartRequest, DebugSessionStartResult,
+    DebugSetBreakpointsRequest, DebugSetBreakpointsResult, DebugStackTraceRequest,
+    DebugStackTraceResult, DebugStepInRequest, DebugStepInTargetsRequest, DebugStepInTargetsResult,
+    DebugThreadRequest, DebugVariablesRequest, DebugVariablesResult,
 };
 use super::service::DebugSessionService;
 use super::session::{
@@ -566,6 +588,42 @@ pub(crate) async fn debug_pause(
         .send_request(window.label(), query.session_id, "pause", query.arguments)
         .await?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------
+// `F210` S5 — the read-only, bounded `disassemble` view. See
+// [`super::dto::DebugDisassembleRequest`]'s own doc comment for the request
+// shape and [`super::dto::parse_disassemble_response`]'s own for the
+// fail-closed-on-oversized-response decode discipline.
+// ---------------------------------------------------------------------
+
+/// Fetches a bounded window of disassembled instructions anchored at
+/// `request.memory_reference` — per this domain's own contract, always the
+/// current stopped frame's own `instructionPointerReference` (see
+/// [`super::dto::DebugStackFrame`]'s own doc comment). Gated by the frontend
+/// on `Capabilities.supportsDisassembleRequest` before ever being called,
+/// like [`debug_step_in_targets`] above — this domain does not enforce that
+/// gate in Rust. Read-only: see
+/// `docs/research/2026-08-04-complete-debug.md`'s "架构裁定 §5" for why this
+/// command (and the view it feeds) never touches instruction breakpoints,
+/// inline source, or any execution/write capability.
+#[tauri::command]
+pub(crate) async fn debug_disassemble(
+    window: WebviewWindow,
+    debug_sessions: State<'_, DebugSessionService>,
+    request: DebugDisassembleRequest,
+) -> Result<DebugDisassembleResult, CommandError> {
+    let query = request.into_parts()?;
+    let body = debug_sessions
+        .inner()
+        .send_request(
+            window.label(),
+            query.session_id,
+            "disassemble",
+            query.arguments,
+        )
+        .await?;
+    dto::parse_disassemble_response(&body, query.instruction_count)
 }
 
 // ---------------------------------------------------------------------

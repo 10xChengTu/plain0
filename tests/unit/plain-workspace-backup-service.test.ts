@@ -241,6 +241,7 @@ function createFakeBridge(overrides: Partial<PlainBridge> = {}): {
 		debugStepInTargets: notImplemented,
 		debugStepOut: notImplemented,
 		debugPause: notImplemented,
+		debugDisassemble: notImplemented,
 		debugOutputAck: notImplemented,
 		debugWatchEvent: notImplemented,
 		...overrides,

@@ -545,6 +545,9 @@ function testBridge(
 		async debugPause() {
 			throw new Error("unused");
 		},
+		async debugDisassemble() {
+			throw new Error("unused");
+		},
 		async debugOutputAck() {
 			throw new Error("unused");
 		},

@@ -11,6 +11,7 @@ import {
 
 import { PlainDebugCallStackView } from "./plain-debug-call-stack-view";
 import { PlainDebugConsoleView } from "./plain-debug-console-view";
+import { PlainDebugDisassemblyView } from "./plain-debug-disassembly-view";
 import { PlainDebugVariablesView } from "./plain-debug-variables-view";
 import { PlainDebugWatchView } from "./plain-debug-watch-view";
 
@@ -18,6 +19,14 @@ export const DEBUG_VIEW_CONTAINER_ID = "plain.workbench.viewContainer.debug";
 export const DEBUG_CALL_STACK_VIEW_ID = PlainDebugCallStackView.ID;
 export const DEBUG_VARIABLES_VIEW_ID = PlainDebugVariablesView.ID;
 export const DEBUG_WATCH_VIEW_ID = PlainDebugWatchView.ID;
+/** `F210` S5: the read-only Disassembly view — lives in the same Sidebar
+ * "Run and Debug" container as the three views above (unlike the Debug
+ * Console below, it is frame/call-stack-adjacent, not output-console-like),
+ * revealed on demand by its own "Plain: Open Disassembly" command
+ * (`plain-debug-commands.ts`) rather than shown expanded by default — see
+ * `PlainDebugDisassemblyView`'s own class doc comment for its
+ * only-populates-while-stopped-and-supported contract. */
+export const DEBUG_DISASSEMBLY_VIEW_ID = PlainDebugDisassemblyView.ID;
 /** `F100` S4: the Debug Console lives in its own Panel-location container
  * (mirroring `TERMINAL_VIEW_CONTAINER_ID`'s own Panel placement) rather than
  * inside `DEBUG_VIEW_CONTAINER_ID`'s Sidebar container — this matches the
@@ -87,6 +96,14 @@ Registry.as<IViewsRegistry>(Extensions.ViewsRegistry).registerViews(
 			containerIcon: Codicon.eye,
 			name: { value: "Watch", original: "Watch" },
 			ctorDescriptor: new SyncDescriptor(PlainDebugWatchView),
+			canToggleVisibility: true,
+			canMoveView: true,
+		},
+		{
+			id: DEBUG_DISASSEMBLY_VIEW_ID,
+			containerIcon: Codicon.chip,
+			name: { value: "Disassembly", original: "Disassembly" },
+			ctorDescriptor: new SyncDescriptor(PlainDebugDisassemblyView),
 			canToggleVisibility: true,
 			canMoveView: true,
 		},

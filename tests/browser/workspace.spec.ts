@@ -365,6 +365,8 @@ interface TestDebugStackFrame {
 	readonly column: number;
 	readonly sourcePath: string | null;
 	readonly sourceName: string | null;
+	/** `F210` S5 — the read-only Disassembly view's own sole anchor source. */
+	readonly instructionPointerReference: string | null;
 }
 interface TestDebugScope {
 	readonly name: string;
@@ -392,6 +394,13 @@ interface TestDebugEvaluateResult {
 	readonly variablesReference: number;
 	readonly namedVariables: number | null;
 	readonly indexedVariables: number | null;
+}
+/** `F210` S5 — one `disassemble` instruction entry. */
+interface TestDebugDisassembledInstruction {
+	readonly address: string;
+	readonly instructionBytes: string | null;
+	readonly instruction: string;
+	readonly symbol: string | null;
 }
 
 /**
@@ -466,6 +475,24 @@ interface TestDebugFixture {
 	readonly stepInTargetsByFrame?: Readonly<
 		Record<number, readonly TestDebugStepInTarget[]>
 	>;
+	/** `F210` S5 — keyed by `memoryReference`, then by the *requested*
+	 * `instructionOffset` — lets a test script a full disassembly window per
+	 * page (the initial load's `0` offset, an Up page's negative offset, a
+	 * Down page's positive offset). A missing key defaults to an empty
+	 * `instructions` array, not an error. */
+	readonly disassemblyByMemoryReference?: Readonly<
+		Record<
+			string,
+			Readonly<Record<number, readonly TestDebugDisassembledInstruction[]>>
+		>
+	>;
+	/** `F210` S5 — artificially delays each `debug_disassemble` response by
+	 * this many milliseconds, mirroring `textSearchPollDelayMsForTest`'s own
+	 * "deterministically observe a request still in flight" purpose — lets
+	 * the paging single-in-flight test assert the Up/Down buttons are really
+	 * disabled for the request's whole duration instead of racing a same-tick
+	 * mock response. Defaults to `0` (no delay). */
+	readonly disassembleDelayMsForTest?: number;
 }
 
 interface TestUntitledFixture {
@@ -4218,6 +4245,32 @@ async function installNativeIpcMock(
 									stepInTargetsRequest?.frameId ?? -1
 								] ?? [];
 							return { targets, truncated: false };
+						}
+						case "debug_disassemble": {
+							const disassembleRequest = args.request as
+								| {
+										sessionId?: string;
+										memoryReference?: string;
+										instructionOffset?: number;
+										instructionCount?: number;
+								  }
+								| undefined;
+							if (!liveDebugSessions.has(disassembleRequest?.sessionId ?? "")) {
+								throw debugSessionNotFound();
+							}
+							if ((debugFixtureForTest.disassembleDelayMsForTest ?? 0) > 0) {
+								await new Promise((resolve) =>
+									setTimeout(
+										resolve,
+										debugFixtureForTest.disassembleDelayMsForTest,
+									),
+								);
+							}
+							const instructions =
+								debugFixtureForTest.disassemblyByMemoryReference?.[
+									disassembleRequest?.memoryReference ?? ""
+								]?.[disassembleRequest?.instructionOffset ?? Number.NaN] ?? [];
+							return { instructions };
 						}
 						case "debug_next":
 						case "debug_step_in":
@@ -21902,6 +21955,7 @@ test("places a breakpoint the adapter moves to another line, starts a session th
 						column: 5,
 						sourcePath: "main.py",
 						sourceName: "main.py",
+						instructionPointerReference: null,
 					},
 					{
 						id: 2,
@@ -21910,6 +21964,7 @@ test("places a breakpoint the adapter moves to another line, starts a session th
 						column: 1,
 						sourcePath: "main.py",
 						sourceName: "main.py",
+						instructionPointerReference: null,
 					},
 				],
 			},
@@ -22278,6 +22333,7 @@ test("Watch results with a variablesReference expand through the shared variable
 						column: 5,
 						sourcePath: "main.py",
 						sourceName: "main.py",
+						instructionPointerReference: null,
 					},
 				],
 			},
@@ -23288,6 +23344,7 @@ const STEP_IN_TARGET_STACK_FRAMES_FIXTURE = Object.freeze({
 			column: 0,
 			sourcePath: null,
 			sourceName: "main.py",
+			instructionPointerReference: null,
 		}),
 	],
 });
@@ -23491,6 +23548,436 @@ test("cancelling the step-into target picker sends no debug_step_in and leaves n
 	expect(await terminalCallsFor(page, "debug_step_in")).toEqual([]);
 	await expect(
 		page.locator(".notifications-toasts .notification-toast"),
+	).toHaveCount(0);
+
+	expect(pageErrors).toEqual([]);
+});
+
+// --- `F210` S5 "read-only disassembly view" ---------------------------------
+
+const DISASSEMBLY_STACK_FRAMES_FIXTURE = Object.freeze({
+	1: [
+		Object.freeze({
+			id: 10,
+			name: "main",
+			line: 6,
+			column: 0,
+			sourcePath: "main.py",
+			sourceName: "main.py",
+			instructionPointerReference: "0x1000",
+		}),
+	],
+});
+
+const DISASSEMBLY_INSTRUCTIONS_FIXTURE = Object.freeze({
+	"0x1000": {
+		0: [
+			Object.freeze({
+				address: "0x1000",
+				instructionBytes: "55",
+				instruction: "push rbp",
+				symbol: "main",
+			}),
+			Object.freeze({
+				address: "0x1001",
+				instructionBytes: "48 89 e5",
+				instruction: "mov rbp, rsp",
+				symbol: null,
+			}),
+			Object.freeze({
+				address: "0x1004",
+				instructionBytes: null,
+				instruction: "nop",
+				symbol: null,
+			}),
+		],
+		"-100": [
+			Object.freeze({
+				address: "0x0f9c",
+				instructionBytes: "90",
+				instruction: "nop",
+				symbol: null,
+			}),
+		],
+	},
+});
+
+test("Plain: Open Disassembly shows the real instruction window with address/bytes/instruction columns, highlights the anchor row, and requests the correct bounded window", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{ "main.py": DEBUG_MAIN_PY, ".vscode/launch.json": DEBUG_LAUNCH_JSON },
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{
+			capabilities: { supportsDisassembleRequest: true },
+			stackFramesByThread: DISASSEMBLY_STACK_FRAMES_FIXTURE,
+			disassemblyByMemoryReference: DISASSEMBLY_INSTRUCTIONS_FIXTURE,
+		},
+	);
+
+	const sessionId = await launchDebugSessionThroughBothDialogs(page);
+	await emitDebugTestEvent(page, sessionId, "stopped", {
+		threadId: 1,
+		reason: "breakpoint",
+	});
+	await expect(page.locator(".plain-debug-call-stack-view-frame")).toHaveCount(
+		1,
+	);
+
+	await executePaletteCommand(
+		page,
+		"Open Disassembly",
+		"Plain: Open Disassembly",
+	);
+
+	await expect
+		.poll(
+			async () => (await terminalCallsFor(page, "debug_disassemble")).length,
+		)
+		.toBe(1);
+	expect(
+		(await terminalCallsFor(page, "debug_disassemble"))[0]!.args.request,
+	).toEqual({
+		sessionId,
+		memoryReference: "0x1000",
+		instructionOffset: 0,
+		instructionCount: 100,
+	});
+
+	const rows = page.locator(".plain-debug-disassembly-view-instruction");
+	await expect(rows).toHaveCount(3);
+	await expect(rows.nth(0)).toHaveClass(
+		/plain-debug-disassembly-view-instruction-current/,
+	);
+	await expect(
+		rows.nth(0).locator(".plain-debug-disassembly-view-address"),
+	).toHaveText("0x1000");
+	await expect(
+		rows.nth(0).locator(".plain-debug-disassembly-view-bytes"),
+	).toHaveText("55");
+	await expect(
+		rows.nth(0).locator(".plain-debug-disassembly-view-instruction-text"),
+	).toHaveText("push rbp (main)");
+	await expect(rows.nth(1)).not.toHaveClass(
+		/plain-debug-disassembly-view-instruction-current/,
+	);
+	await expect(
+		rows.nth(1).locator(".plain-debug-disassembly-view-instruction-text"),
+	).toHaveText("mov rbp, rsp");
+	await expect(
+		rows.nth(2).locator(".plain-debug-disassembly-view-bytes"),
+	).toHaveText("");
+	await expect(
+		rows.nth(2).locator(".plain-debug-disassembly-view-instruction-text"),
+	).toHaveText("nop");
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("Plain: Open Disassembly paging sends the correct bounded instructionOffset each step and keeps a single request in flight", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{ "main.py": DEBUG_MAIN_PY, ".vscode/launch.json": DEBUG_LAUNCH_JSON },
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{
+			capabilities: { supportsDisassembleRequest: true },
+			stackFramesByThread: DISASSEMBLY_STACK_FRAMES_FIXTURE,
+			disassemblyByMemoryReference: DISASSEMBLY_INSTRUCTIONS_FIXTURE,
+			// Keeps each `debug_disassemble` response genuinely in flight long
+			// enough for this test to observe the Up/Down buttons really
+			// disabled for its whole duration, instead of racing a same-tick
+			// mock response.
+			disassembleDelayMsForTest: 200,
+		},
+	);
+
+	const sessionId = await launchDebugSessionThroughBothDialogs(page);
+	await emitDebugTestEvent(page, sessionId, "stopped", {
+		threadId: 1,
+		reason: "breakpoint",
+	});
+	await expect(page.locator(".plain-debug-call-stack-view-frame")).toHaveCount(
+		1,
+	);
+	await executePaletteCommand(
+		page,
+		"Open Disassembly",
+		"Plain: Open Disassembly",
+	);
+	await expect
+		.poll(
+			async () => (await terminalCallsFor(page, "debug_disassemble")).length,
+		)
+		.toBe(1);
+
+	const upButton = page.locator(".plain-debug-disassembly-view-up");
+	const downButton = page.locator(".plain-debug-disassembly-view-down");
+	await expect(upButton).toBeEnabled();
+	await expect(downButton).toBeEnabled();
+
+	await upButton.click();
+	// Single in-flight: both paging buttons are disabled for the whole
+	// duration of the request the click just started.
+	await expect(upButton).toBeDisabled();
+	await expect(downButton).toBeDisabled();
+	await expect
+		.poll(
+			async () => (await terminalCallsFor(page, "debug_disassemble")).length,
+		)
+		.toBe(2);
+	expect(
+		(await terminalCallsFor(page, "debug_disassemble"))[1]!.args.request,
+	).toEqual({
+		sessionId,
+		memoryReference: "0x1000",
+		instructionOffset: -100,
+		instructionCount: 100,
+	});
+	await expect(upButton).toBeEnabled();
+	await expect(downButton).toBeEnabled();
+	await expect(
+		page.locator(".plain-debug-disassembly-view-instruction"),
+	).toHaveCount(1);
+	// No row is the anchor while paged away from offset zero.
+	await expect(
+		page.locator(".plain-debug-disassembly-view-instruction-current"),
+	).toHaveCount(0);
+
+	await downButton.click();
+	await expect
+		.poll(
+			async () => (await terminalCallsFor(page, "debug_disassemble")).length,
+		)
+		.toBe(3);
+	expect(
+		(await terminalCallsFor(page, "debug_disassemble"))[2]!.args.request,
+	).toEqual({
+		sessionId,
+		memoryReference: "0x1000",
+		instructionOffset: 0,
+		instructionCount: 100,
+	});
+	await expect(
+		page.locator(".plain-debug-disassembly-view-instruction"),
+	).toHaveCount(3);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("Plain: Open Disassembly shows accurate placeholders and issues zero debug_disassemble calls while not debugging, running, or the adapter lacks support", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(page, "arrayBuffer", "readonly", {
+		"main.py": DEBUG_MAIN_PY,
+		".vscode/launch.json": DEBUG_LAUNCH_JSON,
+	});
+	await openMainPy(page);
+
+	// No live session at all.
+	await executePaletteCommand(
+		page,
+		"Open Disassembly",
+		"Plain: Open Disassembly",
+	);
+	const message = page.locator(".plain-debug-disassembly-view-message");
+	await expect(message).toHaveText("Not debugging.");
+	expect(await terminalCallsFor(page, "debug_disassemble")).toEqual([]);
+
+	// A live session that has not stopped yet.
+	const sessionId = await launchDebugSessionThroughBothDialogs(page);
+	await expect(message).toHaveText("Running…");
+	expect(await terminalCallsFor(page, "debug_disassemble")).toEqual([]);
+
+	// Stopped, but the fixture's default `capabilities` (`{}`) never
+	// advertises `supportsDisassembleRequest`.
+	await emitDebugTestEvent(page, sessionId, "stopped", {
+		threadId: 1,
+		reason: "breakpoint",
+	});
+	await expect(message).toHaveText(
+		"The current debug adapter does not support disassembly.",
+	);
+	expect(await terminalCallsFor(page, "debug_disassemble")).toEqual([]);
+	await expect(
+		page.locator(".plain-debug-disassembly-view-instruction"),
+	).toHaveCount(0);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("Plain: Open Disassembly shows an accurate placeholder when the stopped top frame reports no instructionPointerReference", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{ "main.py": DEBUG_MAIN_PY, ".vscode/launch.json": DEBUG_LAUNCH_JSON },
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{
+			capabilities: { supportsDisassembleRequest: true },
+			// The one frame this fixture reports has no
+			// `instructionPointerReference` at all (`null`, matching
+			// `TestDebugStackFrame`'s own contract for a frame with no
+			// resolvable address).
+			stackFramesByThread: {
+				1: [
+					{
+						id: 10,
+						name: "main",
+						line: 6,
+						column: 0,
+						sourcePath: "main.py",
+						sourceName: "main.py",
+						instructionPointerReference: null,
+					},
+				],
+			},
+		},
+	);
+
+	const sessionId = await launchDebugSessionThroughBothDialogs(page);
+	await emitDebugTestEvent(page, sessionId, "stopped", {
+		threadId: 1,
+		reason: "breakpoint",
+	});
+	await expect(page.locator(".plain-debug-call-stack-view-frame")).toHaveCount(
+		1,
+	);
+	await executePaletteCommand(
+		page,
+		"Open Disassembly",
+		"Plain: Open Disassembly",
+	);
+
+	await expect(
+		page.locator(".plain-debug-disassembly-view-message"),
+	).toHaveText("No instruction pointer is available for the current frame.");
+	expect(await terminalCallsFor(page, "debug_disassemble")).toEqual([]);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("Plain: Open Disassembly clears back to a placeholder once stopped ends, whether by continuing or the session terminating", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{ "main.py": DEBUG_MAIN_PY, ".vscode/launch.json": DEBUG_LAUNCH_JSON },
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{
+			capabilities: { supportsDisassembleRequest: true },
+			stackFramesByThread: DISASSEMBLY_STACK_FRAMES_FIXTURE,
+			disassemblyByMemoryReference: DISASSEMBLY_INSTRUCTIONS_FIXTURE,
+		},
+	);
+
+	const sessionId = await launchDebugSessionThroughBothDialogs(page);
+	await emitDebugTestEvent(page, sessionId, "stopped", {
+		threadId: 1,
+		reason: "breakpoint",
+	});
+	await expect(page.locator(".plain-debug-call-stack-view-frame")).toHaveCount(
+		1,
+	);
+	await executePaletteCommand(
+		page,
+		"Open Disassembly",
+		"Plain: Open Disassembly",
+	);
+	await expect(
+		page.locator(".plain-debug-disassembly-view-instruction"),
+	).toHaveCount(3);
+
+	// `continue`/step ends the stopped state: the view clears and reports
+	// "Running…", zero residual rows.
+	await emitDebugTestEvent(page, sessionId, "continued", null);
+	await expect(
+		page.locator(".plain-debug-disassembly-view-message"),
+	).toHaveText("Running…");
+	await expect(
+		page.locator(".plain-debug-disassembly-view-instruction"),
+	).toHaveCount(0);
+
+	// A real `stopped` event re-populates it...
+	await emitDebugTestEvent(page, sessionId, "stopped", {
+		threadId: 1,
+		reason: "step",
+	});
+	await expect(
+		page.locator(".plain-debug-disassembly-view-instruction"),
+	).toHaveCount(3);
+
+	// ...and session termination clears it back to "Not debugging.", not just
+	// "Running…".
+	await emitDebugTestEvent(page, sessionId, "plain/sessionEnded", {
+		reason: "transportClosed",
+	});
+	await expect(
+		page.locator(".plain-debug-disassembly-view-message"),
+	).toHaveText("Not debugging.");
+	await expect(
+		page.locator(".plain-debug-disassembly-view-instruction"),
 	).toHaveCount(0);
 
 	expect(pageErrors).toEqual([]);

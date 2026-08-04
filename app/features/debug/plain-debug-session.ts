@@ -43,6 +43,7 @@ import type {
 	DebugAdapterTarget,
 	DebugBreakpointRequest,
 	DebugContinueResult,
+	DebugDisassembleResult,
 	DebugEvaluateContext,
 	DebugEvaluateResult,
 	DebugEventPayload,
@@ -79,6 +80,7 @@ export type DebugSessionBridge = Pick<
 	| "debugStepInTargets"
 	| "debugStepOut"
 	| "debugPause"
+	| "debugDisassemble"
 	| "debugWatchEvent"
 >;
 
@@ -492,6 +494,26 @@ export class DebugSessionController {
 			return;
 		}
 		await this.#bridge.debugPause(this.#state.sessionId, threadId);
+	}
+
+	/** `F210` S5: fetches a bounded window of disassembled instructions
+	 * anchored at `memoryReference` — the read-only Disassembly view's own
+	 * sole data source. A no-op returning `undefined` if there is no live
+	 * session, mirroring every other command method above. */
+	async disassemble(
+		memoryReference: string,
+		instructionOffset: number,
+		instructionCount: number,
+	): Promise<DebugDisassembleResult | undefined> {
+		if (this.#state === null) {
+			return undefined;
+		}
+		return this.#bridge.debugDisassemble(
+			this.#state.sessionId,
+			memoryReference,
+			instructionOffset,
+			instructionCount,
+		);
 	}
 
 	dispose(): void {

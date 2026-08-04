@@ -82,6 +82,7 @@ import {
 	decodeDebugAdapterConfirmationState,
 	decodeDebugAdapterConfirmationVoid,
 	decodeDebugContinueResult,
+	decodeDebugDisassembleResult,
 	decodeDebugEvaluateResult,
 	decodeDebugEventPayload,
 	decodeDebugOutputAckVoid,
@@ -94,6 +95,7 @@ import {
 	decodeDebugVariablesResult,
 	decodeDebugVoid,
 	frozenDebugAdapterConfirmationRequest,
+	frozenDebugDisassembleRequest,
 	frozenDebugEvaluateRequest,
 	frozenDebugOutputAckRequest,
 	frozenDebugScopesRequest,
@@ -1494,6 +1496,22 @@ export function createNativeBridge(): PlainBridge {
 		debugPause: async (sessionId, threadId) => {
 			const request = frozenDebugThreadRequest(sessionId, threadId);
 			decodeDebugStepVoid(await invoke<unknown>("debug_pause", { request }));
+		},
+		debugDisassemble: async (
+			sessionId,
+			memoryReference,
+			instructionOffset,
+			instructionCount,
+		) => {
+			const request = frozenDebugDisassembleRequest(
+				sessionId,
+				memoryReference,
+				instructionOffset,
+				instructionCount,
+			);
+			return decodeDebugDisassembleResult(
+				await invoke<unknown>("debug_disassemble", { request }),
+			);
 		},
 		debugOutputAck: async (sessionId, sequence) => {
 			const request = frozenDebugOutputAckRequest(sessionId, sequence);

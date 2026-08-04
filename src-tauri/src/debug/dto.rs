@@ -630,6 +630,15 @@ impl DebugStackTraceRequest {
 /// omit them for such a frame (per-spec `line` is technically required, but
 /// this domain would rather show a frame with a placeholder line than reject
 /// an otherwise-useful stack trace over one adapter's leniency).
+///
+/// `instruction_pointer_reference` (`F210` S5) is DAP's own optional
+/// `StackFrame.instructionPointerReference` — a real adapter reports it only
+/// for a frame it can resolve to a concrete address (deep native frames may
+/// omit it just like `source`), so this is `None`-tolerant exactly like
+/// `source_path`/`source_name` above, never a reason to reject the whole
+/// response. This is the read-only Disassembly view's own sole anchor
+/// source — see `super::commands::debug_disassemble`'s own doc comment for
+/// how a caller turns this into a bounded instruction window.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DebugStackFrame {
@@ -639,6 +648,7 @@ pub struct DebugStackFrame {
     pub column: u32,
     pub source_path: Option<String>,
     pub source_name: Option<String>,
+    pub instruction_pointer_reference: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -685,6 +695,10 @@ pub(crate) fn parse_stack_trace_response(
             .and_then(|source| source.get("name"))
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let instruction_pointer_reference = entry
+            .get("instructionPointerReference")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         stack_frames.push(DebugStackFrame {
             id,
             name,
@@ -692,6 +706,7 @@ pub(crate) fn parse_stack_trace_response(
             column,
             source_path,
             source_name,
+            instruction_pointer_reference,
         });
     }
     let total_frames = body
@@ -1265,6 +1280,194 @@ impl DebugStepInRequest {
     }
 }
 
+// ---------------------------------------------------------------------
+// `F210` S5 — the read-only, bounded `disassemble` view. See
+// `super::commands::debug_disassemble`'s own doc comment for the thin-
+// wrapper shape and `docs/research/2026-08-04-complete-debug.md`'s "架构裁定
+// §5" for why this is deliberately read-only (no instruction breakpoints, no
+// inline source, no execution/write capability).
+// ---------------------------------------------------------------------
+
+/// Defensive ceiling, in UTF-8 bytes, on `DebugDisassembleRequest.memory_reference`
+/// — DAP's own `memoryReference` is normally a short hex address string
+/// (e.g. `"0x0000000100003f9c"`), never anywhere near this large; purely a
+/// hostile-input backstop like every other `MAX_DEBUG_*` ceiling in this
+/// file.
+const MAX_DEBUG_DISASSEMBLE_MEMORY_REFERENCE_BYTES: usize = 256;
+
+/// Hard cap on `DebugDisassembleRequest.instruction_count` — the read-only
+/// disassembly view's own bounded-window contract
+/// (`docs/research/2026-08-04-complete-debug.md`'s "架构裁定 §5": "一次请求
+/// 固定窗口（≤200 条指令...)"). A request naming more than this many
+/// instructions is rejected outright (`debug_session_request_invalid`), not
+/// silently clamped — the frontend's own request window is fixed well under
+/// this cap (`DISASSEMBLY_WINDOW_SIZE` in
+/// `app/features/debug/plain-debug-disassembly-model.ts`), so a request
+/// exceeding it can only be a bug or hostile input, never a legitimate
+/// paging step.
+const MAX_DEBUG_DISASSEMBLE_INSTRUCTION_COUNT: u32 = 200;
+
+/// `debug_disassemble`'s request — `memory_reference` is the anchor address
+/// (per this domain's own contract, always the current stopped frame's own
+/// `instructionPointerReference` — see [`DebugStackFrame`]'s own doc comment
+/// for where that string comes from); `instruction_offset` is DAP's own
+/// signed instruction-count offset from that anchor (negative pages
+/// backward, positive forward); `instruction_count` is how many instructions
+/// to return, capped at [`MAX_DEBUG_DISASSEMBLE_INSTRUCTION_COUNT`]. Gated by
+/// the frontend on `Capabilities.supportsDisassembleRequest` before ever
+/// being called, like every other `supportsXxx`-gated affordance in this
+/// codebase — this domain does not enforce that gate in Rust (see
+/// [`DebugStepInTargetsRequest`]'s own doc comment for the identical
+/// precedent).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct DebugDisassembleRequest {
+    pub session_id: DebugSessionId,
+    pub memory_reference: String,
+    pub instruction_offset: i64,
+    pub instruction_count: u32,
+}
+
+pub(crate) struct DebugDisassembleQuery {
+    pub(crate) session_id: DebugSessionId,
+    pub(crate) arguments: Value,
+    pub(crate) instruction_count: u32,
+}
+
+impl DebugDisassembleRequest {
+    pub(crate) fn into_parts(self) -> Result<DebugDisassembleQuery, CommandError> {
+        if self.memory_reference.is_empty()
+            || self.memory_reference.len() > MAX_DEBUG_DISASSEMBLE_MEMORY_REFERENCE_BYTES
+        {
+            return Err(debug_session_request_invalid());
+        }
+        if self.instruction_count == 0
+            || self.instruction_count > MAX_DEBUG_DISASSEMBLE_INSTRUCTION_COUNT
+        {
+            return Err(debug_session_request_invalid());
+        }
+        let arguments = serde_json::json!({
+            "memoryReference": self.memory_reference,
+            "instructionOffset": self.instruction_offset,
+            "instructionCount": self.instruction_count,
+            // Always requested — this domain's own response shape
+            // (`DebugDisassembledInstruction.symbol`) surfaces whatever the
+            // adapter resolves; an adapter that cannot resolve symbols at
+            // all simply omits `symbol` from each instruction (handled as
+            // `None` in `parse_disassemble_response`), so there is no
+            // per-call reason to ever send `false` here.
+            "resolveSymbols": true,
+        });
+        Ok(DebugDisassembleQuery {
+            session_id: self.session_id,
+            arguments,
+            instruction_count: self.instruction_count,
+        })
+    }
+}
+
+/// Defensive ceilings, in UTF-8 bytes, on one decoded
+/// [`DebugDisassembledInstruction`]'s string fields — mirrors
+/// [`MAX_DEBUG_STEP_IN_TARGET_LABEL_BYTES`]'s own "too long is a genuinely
+/// malformed response, not silently truncated" discipline: an
+/// address/instruction-bytes/instruction-text/symbol this long would corrupt
+/// this view's fixed three-column rendering with no visible indication
+/// anything was cut, unlike the list-length bound this domain instead
+/// chooses to fail closed on entirely rather than truncate (see
+/// [`parse_disassemble_response`]'s own doc comment).
+const MAX_DEBUG_DISASSEMBLE_ADDRESS_BYTES: usize = 256;
+const MAX_DEBUG_DISASSEMBLE_INSTRUCTION_HEX_BYTES: usize = 512;
+const MAX_DEBUG_DISASSEMBLE_INSTRUCTION_TEXT_BYTES: usize = 4_096;
+const MAX_DEBUG_DISASSEMBLE_SYMBOL_BYTES: usize = 4_096;
+
+/// One DAP `DisassembledInstruction` — only `address`/`instructionBytes`/
+/// `instruction`/`symbol` are modeled, the four fields this view's own
+/// read-only three-column-plus-symbol-annotation rendering needs. DAP's own
+/// `location`/`line`/`column`/`endLine`/`endColumn` fields (inline source
+/// mapping) are read by nothing here and simply ignored —
+/// `docs/research/2026-08-04-complete-debug.md`'s "架构裁定 §5" explicitly
+/// excludes inline source mixing from this view's scope.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugDisassembledInstruction {
+    pub address: String,
+    pub instruction_bytes: Option<String>,
+    pub instruction: String,
+    pub symbol: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugDisassembleResult {
+    pub instructions: Vec<DebugDisassembledInstruction>,
+}
+
+/// Parses a `disassemble` response's `body`. `requested_count` is the exact
+/// `instructionCount` this domain's own request sent — per spec an adapter
+/// answers with exactly that many entries (padding an unreadable range with
+/// an adapter-chosen placeholder instruction rather than shortening the
+/// list), so a response reporting *more* than that can only be malformed and
+/// is rejected outright (fail-closed, not truncated — matching this
+/// function's own per-field byte-length discipline above, and deliberately
+/// unlike [`parse_step_in_targets_response`]'s own list-level truncation: an
+/// oversized `stepInTargets` list is a plausible, harmless "the adapter had
+/// more targets than usual" case, while a `disassemble` response naming more
+/// instructions than were ever requested indicates the response itself
+/// cannot be trusted to describe the window this domain actually asked
+/// for). A response reporting *fewer* is tolerated (a real adapter may
+/// legitimately stop short at a genuine memory boundary); this view's own
+/// frontend index arithmetic (`requestedInstructionOffset + index`) already
+/// only ever highlights a row that is actually present.
+pub(crate) fn parse_disassemble_response(
+    body: &Value,
+    requested_count: u32,
+) -> Result<DebugDisassembleResult, CommandError> {
+    let entries = body
+        .get("instructions")
+        .and_then(Value::as_array)
+        .ok_or_else(debug_adapter_response_malformed)?;
+    if entries.len() as u64 > u64::from(requested_count) {
+        return Err(debug_adapter_response_malformed());
+    }
+    let mut instructions = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let address = entry
+            .get("address")
+            .and_then(Value::as_str)
+            .ok_or_else(debug_adapter_response_malformed)?;
+        if address.len() > MAX_DEBUG_DISASSEMBLE_ADDRESS_BYTES {
+            return Err(debug_adapter_response_malformed());
+        }
+        let instruction_bytes = entry.get("instructionBytes").and_then(Value::as_str);
+        if let Some(text) = instruction_bytes {
+            if text.len() > MAX_DEBUG_DISASSEMBLE_INSTRUCTION_HEX_BYTES {
+                return Err(debug_adapter_response_malformed());
+            }
+        }
+        let instruction = entry
+            .get("instruction")
+            .and_then(Value::as_str)
+            .ok_or_else(debug_adapter_response_malformed)?;
+        if instruction.len() > MAX_DEBUG_DISASSEMBLE_INSTRUCTION_TEXT_BYTES {
+            return Err(debug_adapter_response_malformed());
+        }
+        let symbol = entry.get("symbol").and_then(Value::as_str);
+        if let Some(text) = symbol {
+            if text.len() > MAX_DEBUG_DISASSEMBLE_SYMBOL_BYTES {
+                return Err(debug_adapter_response_malformed());
+            }
+        }
+        instructions.push(DebugDisassembledInstruction {
+            address: address.to_owned(),
+            instruction_bytes: instruction_bytes.map(str::to_owned),
+            instruction: instruction.to_owned(),
+            symbol: symbol.map(str::to_owned),
+        });
+    }
+    Ok(DebugDisassembleResult { instructions })
+}
+
 /// Defensive ceilings on a `runInTerminal` reverse request's own `args`/`env`
 /// — mirrors [`MAX_DEBUG_SESSION_ARGS`]'s "hostile-input backstop, not an
 /// expected value" intent. Unlike every other ceiling in this file, this data
@@ -1396,14 +1599,15 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        parse_continue_response, parse_evaluate_response, parse_run_in_terminal_arguments,
-        parse_scopes_response, parse_set_breakpoints_response, parse_stack_trace_response,
-        parse_step_in_targets_response, parse_variables_response, AdapterTransportKind,
-        DebugEvaluateContext, DebugEvaluateRequest, DebugOutputAckRequest, DebugScopesRequest,
-        DebugSessionId, DebugSessionStartRequest, DebugSetBreakpointsRequest,
-        DebugStackTraceRequest, DebugStepInRequest, DebugStepInTargetsRequest, DebugThreadRequest,
-        DebugVariablesFilter, DebugVariablesRequest, LineBreakpointRequest,
-        SessionTransportRequest, SourceBreakpointsRequest, MAX_RUN_IN_TERMINAL_ARGS,
+        parse_continue_response, parse_disassemble_response, parse_evaluate_response,
+        parse_run_in_terminal_arguments, parse_scopes_response, parse_set_breakpoints_response,
+        parse_stack_trace_response, parse_step_in_targets_response, parse_variables_response,
+        AdapterTransportKind, DebugDisassembleRequest, DebugEvaluateContext, DebugEvaluateRequest,
+        DebugOutputAckRequest, DebugScopesRequest, DebugSessionId, DebugSessionStartRequest,
+        DebugSetBreakpointsRequest, DebugStackTraceRequest, DebugStepInRequest,
+        DebugStepInTargetsRequest, DebugThreadRequest, DebugVariablesFilter, DebugVariablesRequest,
+        LineBreakpointRequest, SessionTransportRequest, SourceBreakpointsRequest,
+        MAX_RUN_IN_TERMINAL_ARGS,
     };
     use crate::debug::session::LaunchRequestKind;
     use crate::workspace::RootId;
@@ -1854,7 +2058,7 @@ mod tests {
     {
         let body = json!({
             "stackFrames": [
-                {"id": 1, "name": "add", "line": 3, "column": 5, "source": {"path": "/tmp/a.py", "name": "a.py"}},
+                {"id": 1, "name": "add", "line": 3, "column": 5, "source": {"path": "/tmp/a.py", "name": "a.py"}, "instructionPointerReference": "0x1000"},
                 {"id": 2, "name": "<native>"},
             ],
             "totalFrames": 42,
@@ -1867,6 +2071,14 @@ mod tests {
             Some("/tmp/a.py")
         );
         assert_eq!(result.stack_frames[0].line, 3);
+        // `F210` S5: `instructionPointerReference` — the Disassembly view's
+        // own sole anchor source — decodes when present...
+        assert_eq!(
+            result.stack_frames[0]
+                .instruction_pointer_reference
+                .as_deref(),
+            Some("0x1000")
+        );
         // A frame with no `source` at all, and no `line`/`column`, still
         // parses — defaults to line/column 0 rather than rejecting the whole
         // response over one adapter's leniency (see the DTO's own doc
@@ -1874,6 +2086,10 @@ mod tests {
         assert_eq!(result.stack_frames[1].source_path, None);
         assert_eq!(result.stack_frames[1].line, 0);
         assert_eq!(result.stack_frames[1].column, 0);
+        // ...and is `None`, not a rejection, for a frame that omits it
+        // entirely (deep native frames may not resolve to a concrete
+        // address, just like `source` above).
+        assert_eq!(result.stack_frames[1].instruction_pointer_reference, None);
     }
 
     #[test]
@@ -2362,5 +2578,209 @@ mod tests {
         let mut value = json!({"sessionId": VALID_ID, "threadId": 1});
         value["singleThread"] = json!(true);
         assert!(serde_json::from_value::<DebugStepInRequest>(value).is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // `F210` S5 — the read-only, bounded `disassemble` view.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn debug_disassemble_request_builds_the_arguments_shape_and_always_requests_symbols() {
+        let request = DebugDisassembleRequest {
+            session_id: session_id(),
+            memory_reference: "0x1000".to_owned(),
+            instruction_offset: -50,
+            instruction_count: 100,
+        };
+        let query = request.into_parts().expect("well-formed request accepts");
+        assert_eq!(
+            query.arguments,
+            json!({
+                "memoryReference": "0x1000",
+                "instructionOffset": -50,
+                "instructionCount": 100,
+                "resolveSymbols": true,
+            })
+        );
+        assert_eq!(query.instruction_count, 100);
+    }
+
+    #[test]
+    fn debug_disassemble_request_rejects_an_empty_or_oversized_memory_reference() {
+        let empty = DebugDisassembleRequest {
+            session_id: session_id(),
+            memory_reference: String::new(),
+            instruction_offset: 0,
+            instruction_count: 1,
+        };
+        assert!(empty.into_parts().is_err());
+
+        let oversized = DebugDisassembleRequest {
+            session_id: session_id(),
+            memory_reference: "x".repeat(257),
+            instruction_offset: 0,
+            instruction_count: 1,
+        };
+        assert!(oversized.into_parts().is_err());
+    }
+
+    #[test]
+    fn debug_disassemble_request_rejects_an_instruction_count_of_zero_or_above_the_hard_cap() {
+        let zero = DebugDisassembleRequest {
+            session_id: session_id(),
+            memory_reference: "0x1000".to_owned(),
+            instruction_offset: 0,
+            instruction_count: 0,
+        };
+        assert!(zero.into_parts().is_err());
+
+        let over_cap = DebugDisassembleRequest {
+            session_id: session_id(),
+            memory_reference: "0x1000".to_owned(),
+            instruction_offset: 0,
+            instruction_count: 201,
+        };
+        assert!(over_cap.into_parts().is_err());
+
+        let at_cap = DebugDisassembleRequest {
+            session_id: session_id(),
+            memory_reference: "0x1000".to_owned(),
+            instruction_offset: 0,
+            instruction_count: 200,
+        };
+        assert!(at_cap.into_parts().is_ok());
+    }
+
+    #[test]
+    fn debug_disassemble_request_deserializes_camel_case_and_rejects_unknown_fields() {
+        let value = json!({
+            "sessionId": VALID_ID,
+            "memoryReference": "0x2000",
+            "instructionOffset": 10,
+            "instructionCount": 50,
+        });
+        let request: DebugDisassembleRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(request.memory_reference, "0x2000");
+        assert_eq!(request.instruction_offset, 10);
+        assert_eq!(request.instruction_count, 50);
+
+        let mut with_unknown_field = json!({
+            "sessionId": VALID_ID,
+            "memoryReference": "0x2000",
+            "instructionOffset": 10,
+            "instructionCount": 50,
+        });
+        with_unknown_field["offset"] = json!(0);
+        assert!(serde_json::from_value::<DebugDisassembleRequest>(with_unknown_field).is_err());
+    }
+
+    #[test]
+    fn parse_disassemble_response_parses_well_formed_instructions_and_ignores_location_fields() {
+        let body = json!({
+            "instructions": [
+                {
+                    "address": "0x1000",
+                    "instructionBytes": "55 48 89 e5",
+                    "instruction": "push rbp",
+                    "symbol": "main",
+                    "location": {"path": "/tmp/a.c"},
+                    "line": 3,
+                    "column": 1,
+                    "endLine": 3,
+                    "endColumn": 5,
+                },
+                {
+                    "address": "0x1001",
+                    "instruction": "mov rbp, rsp",
+                },
+            ]
+        });
+        let result = parse_disassemble_response(&body, 2).expect("well-formed response parses");
+        assert_eq!(result.instructions.len(), 2);
+        assert_eq!(result.instructions[0].address, "0x1000");
+        assert_eq!(
+            result.instructions[0].instruction_bytes.as_deref(),
+            Some("55 48 89 e5")
+        );
+        assert_eq!(result.instructions[0].instruction, "push rbp");
+        assert_eq!(result.instructions[0].symbol.as_deref(), Some("main"));
+        // The second entry omits `instructionBytes`/`symbol` entirely —
+        // tolerated as `None`, not a rejection.
+        assert_eq!(result.instructions[1].instruction_bytes, None);
+        assert_eq!(result.instructions[1].symbol, None);
+    }
+
+    #[test]
+    fn parse_disassemble_response_accepts_fewer_instructions_than_requested() {
+        let body = json!({"instructions": [{"address": "0x1000", "instruction": "nop"}]});
+        let result = parse_disassemble_response(&body, 100)
+            .expect("fewer instructions than requested is tolerated");
+        assert_eq!(result.instructions.len(), 1);
+    }
+
+    #[test]
+    fn parse_disassemble_response_rejects_a_response_reporting_more_instructions_than_requested() {
+        let body = json!({
+            "instructions": [
+                {"address": "0x1000", "instruction": "nop"},
+                {"address": "0x1001", "instruction": "nop"},
+                {"address": "0x1002", "instruction": "nop"},
+            ]
+        });
+        assert!(parse_disassemble_response(&body, 2).is_err());
+        // Exactly matching the requested count is fine.
+        assert!(parse_disassemble_response(&body, 3).is_ok());
+    }
+
+    #[test]
+    fn parse_disassemble_response_rejects_malformed_shapes() {
+        // Missing `instructions` array entirely.
+        assert!(parse_disassemble_response(&json!({}), 10).is_err());
+        // An instruction missing its required `address`.
+        assert!(
+            parse_disassemble_response(&json!({"instructions": [{"instruction": "nop"}]}), 10)
+                .is_err()
+        );
+        // An instruction missing its required `instruction`.
+        assert!(
+            parse_disassemble_response(&json!({"instructions": [{"address": "0x1000"}]}), 10)
+                .is_err()
+        );
+        // An `address` exceeding the byte-length ceiling.
+        let oversized_address = "x".repeat(257);
+        assert!(parse_disassemble_response(
+            &json!({"instructions": [{"address": oversized_address, "instruction": "nop"}]}),
+            10
+        )
+        .is_err());
+        // An `instruction` exceeding the byte-length ceiling.
+        let oversized_instruction = "x".repeat(4_097);
+        assert!(parse_disassemble_response(
+            &json!({"instructions": [{"address": "0x1000", "instruction": oversized_instruction}]}),
+            10
+        )
+        .is_err());
+        // An `instructionBytes` exceeding the byte-length ceiling.
+        let oversized_bytes = "x".repeat(513);
+        assert!(parse_disassemble_response(
+            &json!({"instructions": [{
+                "address": "0x1000",
+                "instruction": "nop",
+                "instructionBytes": oversized_bytes,
+            }]}),
+            10
+        )
+        .is_err());
+        // A `symbol` exceeding the byte-length ceiling.
+        let oversized_symbol = "x".repeat(4_097);
+        assert!(parse_disassemble_response(
+            &json!({"instructions": [{
+                "address": "0x1000",
+                "instruction": "nop",
+                "symbol": oversized_symbol,
+            }]}),
+            10
+        )
+        .is_err());
     }
 }

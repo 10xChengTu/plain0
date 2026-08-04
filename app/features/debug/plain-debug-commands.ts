@@ -18,7 +18,10 @@ import {
 } from "./plain-debug-adapter-config";
 import { prepareDebugAdapterLaunch } from "./plain-debug-adapter-launch";
 import { selectPlainLaunchConfiguration } from "./plain-debug-configuration-pick";
-import { DEBUG_CONSOLE_VIEW_ID } from "./debug-contribution";
+import {
+	DEBUG_CONSOLE_VIEW_ID,
+	DEBUG_DISASSEMBLY_VIEW_ID,
+} from "./debug-contribution";
 import { getPlainDebugRuntime } from "./plain-debug-runtime";
 import { selectPlainDebugRoot } from "./plain-debug-root";
 import { selectPlainStepInTarget } from "./plain-debug-step-in-target-pick";
@@ -42,6 +45,12 @@ export const OPEN_DEBUG_CONSOLE_COMMAND_ID = "plain.debug.openConsole";
  * `runStepIntoTarget`'s own doc comment for the full availability/failure
  * contract. */
 export const STEP_INTO_TARGET_COMMAND_ID = "plain.debug.stepIntoTarget";
+/** `F210` S5: reveals the read-only Disassembly view — mirrors
+ * `OPEN_DEBUG_CONSOLE_COMMAND_ID`'s identical "just an `IViewsService.openView`
+ * shape" (the view itself, not this command, decides whether it can
+ * actually populate — see `PlainDebugDisassemblyView`'s own class doc
+ * comment). */
+export const OPEN_DISASSEMBLY_COMMAND_ID = "plain.debug.openDisassembly";
 
 const LAUNCH_CONFIG_PATH = ".vscode/launch.json";
 const ADAPTER_REGISTRY_PATH = ".plain/debug-adapters.json";
@@ -374,6 +383,14 @@ export function registerPlainDebugCommands(): { dispose(): void } {
 				);
 			},
 		),
+		CommandsRegistry.registerCommand(
+			OPEN_DISASSEMBLY_COMMAND_ID,
+			(accessor) => {
+				void accessor
+					.get(IViewsService)
+					.openView(DEBUG_DISASSEMBLY_VIEW_ID, true);
+			},
+		),
 		MenuRegistry.appendMenuItem(MenuId.CommandPalette, {
 			command: {
 				id: START_DEBUGGING_COMMAND_ID,
@@ -399,6 +416,13 @@ export function registerPlainDebugCommands(): { dispose(): void } {
 			command: {
 				id: STEP_INTO_TARGET_COMMAND_ID,
 				title: "Step Into Target…",
+				category: "Plain",
+			},
+		}),
+		MenuRegistry.appendMenuItem(MenuId.CommandPalette, {
+			command: {
+				id: OPEN_DISASSEMBLY_COMMAND_ID,
+				title: "Open Disassembly",
 				category: "Plain",
 			},
 		}),

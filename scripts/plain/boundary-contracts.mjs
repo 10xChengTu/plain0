@@ -23112,6 +23112,17 @@ const DEBUG_COMMAND_CONTRACTS = Object.freeze([
 		returnType: "->Result<(),CommandError>",
 		body: "letquery=request.into_parts();debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments).await?;Ok(())",
 	},
+	// `F210` S5 — the read-only, bounded `disassemble` view's own sole data
+	// source (`debug/commands.rs`'s own module doc, "`F210` S5's read-only
+	// `disassemble` view" section).
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_disassemble",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugDisassembleRequest",
+		returnType: "->Result<DebugDisassembleResult,CommandError>",
+		body: "letquery=request.into_parts()?;letbody=debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments,).await?;dto::parse_disassemble_response(&body,query.instruction_count)",
+	},
 	// `F100` S5 — the `output`-event backpressure ack (`debug/commands.rs`'s
 	// own module doc, "`F100` S5" section).
 	{

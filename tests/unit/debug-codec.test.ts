@@ -4,9 +4,11 @@ import {
 	decodeDebugAdapterConfirmationState,
 	decodeDebugAdapterConfirmationVoid,
 	decodeDebugContinueResult,
+	decodeDebugDisassembleResult,
 	decodeDebugStepInTargetsResult,
 	decodeDebugStepVoid,
 	frozenDebugAdapterConfirmationRequest,
+	frozenDebugDisassembleRequest,
 	frozenDebugSessionStartRequest,
 	frozenDebugSetBreakpointsRequest,
 	frozenDebugStepInRequest,
@@ -426,5 +428,156 @@ describe("decodeDebugStepInTargetsResult", () => {
 	it("rejects a Proxy-wrapped response", () => {
 		const proxied = new Proxy({ targets: [], truncated: false }, {});
 		expect(() => decodeDebugStepInTargetsResult(proxied)).toThrow();
+	});
+});
+
+describe("frozenDebugDisassembleRequest", () => {
+	it("encodes a well-formed sessionId/memoryReference/instructionOffset/instructionCount tuple", () => {
+		expect(
+			frozenDebugDisassembleRequest(VALID_SESSION_ID, "0x1000", -50, 100),
+		).toEqual({
+			sessionId: VALID_SESSION_ID,
+			memoryReference: "0x1000",
+			instructionOffset: -50,
+			instructionCount: 100,
+		});
+	});
+
+	it("rejects an empty or oversized memoryReference", () => {
+		expect(() =>
+			frozenDebugDisassembleRequest(VALID_SESSION_ID, "", 0, 100),
+		).toThrow();
+		expect(() =>
+			frozenDebugDisassembleRequest(VALID_SESSION_ID, "x".repeat(257), 0, 100),
+		).toThrow();
+	});
+
+	it("rejects a non-integer instructionOffset", () => {
+		expect(() =>
+			frozenDebugDisassembleRequest(VALID_SESSION_ID, "0x1000", 1.5, 100),
+		).toThrow();
+	});
+
+	it("rejects an instructionCount of zero, a non-integer, or above the hard cap", () => {
+		expect(() =>
+			frozenDebugDisassembleRequest(VALID_SESSION_ID, "0x1000", 0, 0),
+		).toThrow();
+		expect(() =>
+			frozenDebugDisassembleRequest(VALID_SESSION_ID, "0x1000", 0, 1.5),
+		).toThrow();
+		expect(() =>
+			frozenDebugDisassembleRequest(VALID_SESSION_ID, "0x1000", 0, 201),
+		).toThrow();
+		expect(
+			frozenDebugDisassembleRequest(VALID_SESSION_ID, "0x1000", 0, 200),
+		).toEqual({
+			sessionId: VALID_SESSION_ID,
+			memoryReference: "0x1000",
+			instructionOffset: 0,
+			instructionCount: 200,
+		});
+	});
+
+	it("rejects a malformed sessionId", () => {
+		expect(() =>
+			frozenDebugDisassembleRequest("not-a-uuid", "0x1000", 0, 100),
+		).toThrow();
+	});
+});
+
+describe("decodeDebugDisassembleResult", () => {
+	it("accepts a genuinely empty instructions array", () => {
+		expect(decodeDebugDisassembleResult({ instructions: [] })).toEqual({
+			instructions: [],
+		});
+	});
+
+	it("accepts well-formed instructions, including null instructionBytes/symbol", () => {
+		expect(
+			decodeDebugDisassembleResult({
+				instructions: [
+					{
+						address: "0x1000",
+						instructionBytes: "55 48 89 e5",
+						instruction: "push rbp",
+						symbol: "main",
+					},
+					{
+						address: "0x1001",
+						instructionBytes: null,
+						instruction: "mov rbp, rsp",
+						symbol: null,
+					},
+				],
+			}),
+		).toEqual({
+			instructions: [
+				{
+					address: "0x1000",
+					instructionBytes: "55 48 89 e5",
+					instruction: "push rbp",
+					symbol: "main",
+				},
+				{
+					address: "0x1001",
+					instructionBytes: null,
+					instruction: "mov rbp, rsp",
+					symbol: null,
+				},
+			],
+		});
+	});
+
+	it("rejects extra or mistyped top-level fields", () => {
+		expect(() =>
+			decodeDebugDisassembleResult({ instructions: [], extra: 1 }),
+		).toThrow();
+		expect(() =>
+			decodeDebugDisassembleResult({ instructions: "nope" }),
+		).toThrow();
+	});
+
+	it("rejects an instruction missing required fields or with a mistyped field", () => {
+		expect(() =>
+			decodeDebugDisassembleResult({
+				instructions: [
+					{ instructionBytes: null, instruction: "nop", symbol: null },
+				],
+			}),
+		).toThrow();
+		expect(() =>
+			decodeDebugDisassembleResult({
+				instructions: [
+					{ address: "0x1000", instructionBytes: null, symbol: null },
+				],
+			}),
+		).toThrow();
+		expect(() =>
+			decodeDebugDisassembleResult({
+				instructions: [
+					{
+						address: 5,
+						instructionBytes: null,
+						instruction: "nop",
+						symbol: null,
+					},
+				],
+			}),
+		).toThrow();
+	});
+
+	it("rejects more instructions than the defensive ceiling", () => {
+		const instructions = Array.from({ length: 201 }, (_unused, index) => ({
+			address: `0x${index}`,
+			instructionBytes: null,
+			instruction: "nop",
+			symbol: null,
+		}));
+		expect(() => decodeDebugDisassembleResult({ instructions })).toThrow();
+	});
+
+	it("rejects a Proxy-wrapped response", () => {
+		const proxied = new Proxy({ instructions: [] }, {});
+		expect(() => decodeDebugDisassembleResult(proxied)).toThrow();
 	});
 });

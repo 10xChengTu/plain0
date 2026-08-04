@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type {
+	DebugDisassembleResult,
 	DebugEventPayload,
 	DebugSetBreakpointsResult,
 	DebugStepInTargetsResult,
@@ -92,6 +93,9 @@ function fakeBridge(
 		})),
 		debugStepOut: vi.fn(async () => {}),
 		debugPause: vi.fn(async () => {}),
+		debugDisassemble: vi.fn(async (): Promise<DebugDisassembleResult> => ({
+			instructions: [],
+		})),
 		debugWatchEvent: vi.fn((listener) => {
 			listeners.add(listener);
 			return () => {
@@ -432,7 +436,7 @@ describe("DebugSessionController", () => {
 		);
 	});
 
-	it("continue_/next/stepIn/stepInTargets/stepOut/pause resolve to undefined/no-op with no live session, without calling the bridge", async () => {
+	it("continue_/next/stepIn/stepInTargets/stepOut/pause/disassemble resolve to undefined/no-op with no live session, without calling the bridge", async () => {
 		const { bridge } = fakeBridge();
 		const controller = new DebugSessionController(
 			bridge,
@@ -445,12 +449,16 @@ describe("DebugSessionController", () => {
 		await expect(controller.stepInTargets(7)).resolves.toBeUndefined();
 		await controller.stepOut(1);
 		await controller.pause(1);
+		await expect(
+			controller.disassemble("0x1000", 0, 100),
+		).resolves.toBeUndefined();
 		expect(bridge.debugContinue).not.toHaveBeenCalled();
 		expect(bridge.debugNext).not.toHaveBeenCalled();
 		expect(bridge.debugStepIn).not.toHaveBeenCalled();
 		expect(bridge.debugStepInTargets).not.toHaveBeenCalled();
 		expect(bridge.debugStepOut).not.toHaveBeenCalled();
 		expect(bridge.debugPause).not.toHaveBeenCalled();
+		expect(bridge.debugDisassemble).not.toHaveBeenCalled();
 	});
 
 	it("continue_/next/stepIn/stepOut/pause delegate to the bridge scoped to the live session id", async () => {
@@ -501,6 +509,44 @@ describe("DebugSessionController", () => {
 		expect(result).toEqual({
 			targets: [{ id: 3, label: "helper()" }],
 			truncated: false,
+		});
+	});
+
+	it("disassemble delegates to the bridge scoped to the live session id", async () => {
+		const { bridge } = fakeBridge({
+			debugDisassemble: vi.fn(async (): Promise<DebugDisassembleResult> => ({
+				instructions: [
+					{
+						address: "0x1000",
+						instructionBytes: "90",
+						instruction: "nop",
+						symbol: null,
+					},
+				],
+			})),
+		});
+		const controller = new DebugSessionController(
+			bridge,
+			new DebugBreakpointStore(),
+		);
+		await controller.start(ROOT_ID, "launch", STDIO_TARGET, "debugpy", {});
+
+		const result = await controller.disassemble("0x1000", -50, 100);
+		expect(bridge.debugDisassemble).toHaveBeenCalledWith(
+			"session-1",
+			"0x1000",
+			-50,
+			100,
+		);
+		expect(result).toEqual({
+			instructions: [
+				{
+					address: "0x1000",
+					instructionBytes: "90",
+					instruction: "nop",
+					symbol: null,
+				},
+			],
 		});
 	});
 

@@ -769,7 +769,11 @@ export interface DebugSetBreakpointsResult {
 }
 
 /** One DAP `StackFrame` — `sourcePath`/`sourceName` are both `null` for a
- * frame with no resolvable source (e.g. deep in a native/library call). */
+ * frame with no resolvable source (e.g. deep in a native/library call).
+ * `instructionPointerReference` (`F210` S5) is `null` under the identical
+ * condition — a real adapter reports it only for a frame it can resolve to a
+ * concrete address; this is the read-only Disassembly view's own sole
+ * anchor source (`debugDisassemble`'s `memoryReference` argument). */
 export interface DebugStackFrame {
 	readonly id: number;
 	readonly name: string;
@@ -777,6 +781,7 @@ export interface DebugStackFrame {
 	readonly column: number;
 	readonly sourcePath: string | null;
 	readonly sourceName: string | null;
+	readonly instructionPointerReference: string | null;
 }
 
 /** `debug_stack_trace`'s response — `totalFrames` (when the adapter reports
@@ -867,6 +872,32 @@ export interface DebugStepInTarget {
 export interface DebugStepInTargetsResult {
 	readonly targets: readonly DebugStepInTarget[];
 	readonly truncated: boolean;
+}
+
+/** `F210` S5: one DAP `DisassembledInstruction` — only `address`/
+ * `instructionBytes`/`instruction`/`symbol` are modeled, the four fields the
+ * read-only Disassembly view's three-column-plus-symbol-annotation rendering
+ * needs. DAP's own `location`/`line`/`column`/`endLine`/`endColumn` fields
+ * (inline source mapping) are never surfaced here at all —
+ * `docs/research/2026-08-04-complete-debug.md`'s "架构裁定 §5" explicitly
+ * excludes inline source mixing from this view's scope. `instructionBytes`/
+ * `symbol` are `null` whenever the adapter omitted them (a real adapter may
+ * not resolve either for every instruction). */
+export interface DebugDisassembledInstruction {
+	readonly address: string;
+	readonly instructionBytes: string | null;
+	readonly instruction: string;
+	readonly symbol: string | null;
+}
+
+/** `debugDisassemble`'s response — a bounded window of instructions anchored
+ * at the request's own `memoryReference`/`instructionOffset`. Never more
+ * than the request's own `instructionCount` entries (a response naming more
+ * is rejected server-side as malformed — see
+ * `debug::dto::parse_disassemble_response`'s own doc comment); may report
+ * fewer at a genuine memory boundary. */
+export interface DebugDisassembleResult {
+	readonly instructions: readonly DebugDisassembledInstruction[];
 }
 
 /** `plain://debug-event`'s decoded payload — covers both real DAP events
@@ -2503,6 +2534,25 @@ export interface PlainBridge {
 	debugStepOut(sessionId: string, threadId: number): Promise<void>;
 	/** Interrupts a running thread. */
 	debugPause(sessionId: string, threadId: number): Promise<void>;
+	/** `F210` S5: fetches a bounded window of disassembled instructions (DAP's
+	 * `disassemble` request) anchored at `memoryReference` — per this domain's
+	 * own contract, always the current stopped frame's own
+	 * `instructionPointerReference` (`DebugStackFrame`'s own field).
+	 * `instructionOffset` is DAP's own signed instruction-count offset from
+	 * that anchor; `instructionCount` is how many instructions to return,
+	 * capped server-side at `debug::dto::MAX_DEBUG_DISASSEMBLE_INSTRUCTION_COUNT`
+	 * (200). Gated by the caller on `Capabilities.supportsDisassembleRequest`
+	 * before ever being called, like `debugStepInTargets` above. Read-only:
+	 * see `DebugDisassembledInstruction`'s own doc comment for why inline
+	 * source/location fields are never surfaced, and this domain's own
+	 * exclusion of instruction breakpoints and any execution/write
+	 * capability from this affordance entirely. */
+	debugDisassemble(
+		sessionId: string,
+		memoryReference: string,
+		instructionOffset: number,
+		instructionCount: number,
+	): Promise<DebugDisassembleResult>;
 	/** `F100` S5 — acknowledges a gated `output` event through `sequence`,
 	 * freeing emission credit in `src-tauri/src/debug/output_gate.rs`'s
 	 * backpressure gate — see `DebugEventPayload`'s own doc comment for the

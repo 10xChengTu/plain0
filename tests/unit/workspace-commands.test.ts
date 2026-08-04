@@ -225,6 +225,7 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		debugStepInTargets: vi.fn(),
 		debugStepOut: vi.fn(),
 		debugPause: vi.fn(),
+		debugDisassemble: vi.fn(),
 		debugOutputAck: vi.fn(),
 		debugWatchEvent: vi.fn(),
 		...overrides,
@@ -424,6 +425,7 @@ describe("workspace Workbench command overrides", () => {
 			debugStepInTargets: vi.fn(),
 			debugStepOut: vi.fn(),
 			debugPause: vi.fn(),
+			debugDisassemble: vi.fn(),
 			debugOutputAck: vi.fn(),
 			debugWatchEvent: vi.fn(),
 		};

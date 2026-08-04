@@ -3,6 +3,7 @@ import type {
 	CommandError,
 	DebugAdapterConfirmationSubject,
 	DebugAdapterTarget,
+	DebugDisassembledInstruction,
 	DebugEvaluateResult,
 	DebugEventPayload,
 	DebugScope,
@@ -191,6 +192,7 @@ import {
 	decodeDebugAdapterConfirmationState,
 	decodeDebugAdapterConfirmationVoid,
 	frozenDebugAdapterConfirmationRequest,
+	frozenDebugDisassembleRequest,
 	frozenDebugEvaluateRequest,
 	frozenDebugOutputAckRequest,
 	frozenDebugScopesRequest,
@@ -1476,6 +1478,27 @@ export interface BrowserMockDebugFixtureForTest {
 	 * rather than a faithful re-simulation of every server-side limit. */
 	readonly stepInTargetsByFrame?: Readonly<
 		Record<number, readonly DebugStepInTarget[]>
+	>;
+	/** `F210` S5 — keyed by `memoryReference`, then by the *requested*
+	 * `instructionOffset` — lets a test script a full disassembly window per
+	 * page (the initial load's `0` offset, an Up page's negative offset, a
+	 * Down page's positive offset) exactly like a real adapter's own bounded
+	 * `disassemble` response. A missing `memoryReference` or
+	 * `instructionOffset` key defaults to an empty `instructions` array, not
+	 * an error — mirrors this mock's other "genuinely empty result" fixtures
+	 * (`scopesByFrame`, `stepInTargetsByFrame`). This mock never simulates the
+	 * real `MAX_DEBUG_DISASSEMBLE_INSTRUCTION_COUNT` request-side rejection or
+	 * the "adapter reported more than requested" fail-closed response
+	 * rejection — both are covered end to end against
+	 * `debug::dto::parse_disassemble_response` directly in
+	 * `src-tauri/src/debug/dto.rs`'s own tests, matching this mock's stated
+	 * scope of structurally correct, scriptable responses rather than a
+	 * faithful re-simulation of every server-side limit. */
+	readonly disassemblyByMemoryReference?: Readonly<
+		Record<
+			string,
+			Readonly<Record<number, readonly DebugDisassembledInstruction[]>>
+		>
 	>;
 }
 
@@ -9527,6 +9550,35 @@ export function createBrowserMockBridge(
 		async debugPause(sessionId, threadId) {
 			const request = frozenDebugThreadRequest(sessionId, threadId);
 			requireLiveMockDebugSession(request.sessionId as string);
+		},
+		// `F210` S5 — `debugDisassemble`'s response is a direct fixture lookup
+		// (like `debugStepInTargets` above), not a real `disassemble`
+		// simulation; see `disassemblyByMemoryReference`'s own doc comment for
+		// why this mock does not additionally reproduce the real
+		// `MAX_DEBUG_DISASSEMBLE_INSTRUCTION_COUNT`/oversized-response boundary
+		// behavior.
+		async debugDisassemble(
+			sessionId,
+			memoryReference,
+			instructionOffset,
+			instructionCount,
+		) {
+			const request = frozenDebugDisassembleRequest(
+				sessionId,
+				memoryReference,
+				instructionOffset,
+				instructionCount,
+			);
+			requireLiveMockDebugSession(request.sessionId as string);
+			const instructions =
+				options.debugFixtureForTest?.disassemblyByMemoryReference?.[
+					request.memoryReference as string
+				]?.[request.instructionOffset as number] ?? [];
+			return Object.freeze({
+				instructions: Object.freeze(
+					instructions.map((instruction) => ({ ...instruction })),
+				),
+			});
 		},
 		async debugOutputAck(sessionId, sequence) {
 			const request = frozenDebugOutputAckRequest(sessionId, sequence);

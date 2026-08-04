@@ -5,6 +5,8 @@ import type {
 	DebugBreakpointRequest,
 	DebugBreakpointResult,
 	DebugContinueResult,
+	DebugDisassembledInstruction,
+	DebugDisassembleResult,
 	DebugEvaluateContext,
 	DebugEvaluateResult,
 	DebugEventPayload,
@@ -99,6 +101,17 @@ const MAX_DEBUG_EVALUATE_EXPRESSION_BYTES = 8_192;
  * "hostile/pathological adapter response" backstop `MAX_DEBUG_SCOPES` etc.
  * apply, here on `debugStepInTargets`'s own `targets` array. */
 const MAX_DEBUG_STEP_IN_TARGETS = 256;
+/** `F210` S5 — mirrors `debug::dto::MAX_DEBUG_DISASSEMBLE_MEMORY_REFERENCE_BYTES`. */
+const MAX_DEBUG_DISASSEMBLE_MEMORY_REFERENCE_CHARS = 256;
+/** Mirrors `debug::dto::MAX_DEBUG_DISASSEMBLE_INSTRUCTION_COUNT` — the same
+ * bounded-window hard cap Rust enforces request-side, checked here too so a
+ * malformed request fails fast before ever reaching `invoke`. This domain's
+ * own request window (`DISASSEMBLY_WINDOW_SIZE` in
+ * `app/features/debug/plain-debug-disassembly-model.ts`) never legitimately
+ * approaches this cap; also reused as the decode-side ceiling on a
+ * response's own `instructions` array, mirroring every other `MAX_DEBUG_*`
+ * pair in this file that bounds both directions of the same list. */
+const MAX_DEBUG_DISASSEMBLE_INSTRUCTION_COUNT = 200;
 
 const textEncoder = new TextEncoder();
 
@@ -549,6 +562,7 @@ function decodeDebugStackFrame(entry: unknown): DebugStackFrame {
 			"column",
 			"sourcePath",
 			"sourceName",
+			"instructionPointerReference",
 		])
 	) {
 		return violation();
@@ -559,7 +573,9 @@ function decodeDebugStackFrame(entry: unknown): DebugStackFrame {
 		!isSafeNonNegativeInteger(entry.line) ||
 		!isSafeNonNegativeInteger(entry.column) ||
 		(entry.sourcePath !== null && typeof entry.sourcePath !== "string") ||
-		(entry.sourceName !== null && typeof entry.sourceName !== "string")
+		(entry.sourceName !== null && typeof entry.sourceName !== "string") ||
+		(entry.instructionPointerReference !== null &&
+			typeof entry.instructionPointerReference !== "string")
 	) {
 		return violation();
 	}
@@ -570,6 +586,7 @@ function decodeDebugStackFrame(entry: unknown): DebugStackFrame {
 		column: entry.column,
 		sourcePath: entry.sourcePath,
 		sourceName: entry.sourceName,
+		instructionPointerReference: entry.instructionPointerReference,
 	};
 	rejectProxyObject(entry);
 	return Object.freeze(frame);
@@ -928,6 +945,95 @@ export function decodeDebugStepInTargetsResult(
 	);
 	rejectProxyObject(value);
 	return Object.freeze({ targets, truncated: value.truncated });
+}
+
+// ---------------------------------------------------------------------
+// `F210` S5 — the read-only, bounded `disassemble` view.
+// ---------------------------------------------------------------------
+
+/** Encodes `debug_disassemble`'s request. `memoryReference` must be a
+ * non-empty string within `MAX_DEBUG_DISASSEMBLE_MEMORY_REFERENCE_CHARS`;
+ * `instructionCount` must be a positive integer within
+ * `MAX_DEBUG_DISASSEMBLE_INSTRUCTION_COUNT` — both mirror the identical
+ * ceilings `debug::dto::DebugDisassembleRequest::into_parts` enforces
+ * server-side, checked here too so a malformed request fails fast before
+ * ever reaching `invoke`. */
+export function frozenDebugDisassembleRequest(
+	sessionId: unknown,
+	memoryReference: string,
+	instructionOffset: number,
+	instructionCount: number,
+): Readonly<Record<string, unknown>> {
+	if (
+		memoryReference.length === 0 ||
+		memoryReference.length > MAX_DEBUG_DISASSEMBLE_MEMORY_REFERENCE_CHARS
+	) {
+		return debugSessionRequestInvalid();
+	}
+	if (!isSafeInteger(instructionOffset)) {
+		return debugSessionRequestInvalid();
+	}
+	if (
+		!isSafeInteger(instructionCount) ||
+		instructionCount < 1 ||
+		instructionCount > MAX_DEBUG_DISASSEMBLE_INSTRUCTION_COUNT
+	) {
+		return debugSessionRequestInvalid();
+	}
+	return Object.freeze({
+		sessionId: frozenSessionId(sessionId),
+		memoryReference,
+		instructionOffset,
+		instructionCount,
+	});
+}
+
+function decodeDebugDisassembledInstruction(
+	entry: unknown,
+): DebugDisassembledInstruction {
+	if (
+		!isPlainObject(entry) ||
+		!hasExactKeys(entry, [
+			"address",
+			"instructionBytes",
+			"instruction",
+			"symbol",
+		])
+	) {
+		return violation();
+	}
+	if (
+		typeof entry.address !== "string" ||
+		(entry.instructionBytes !== null &&
+			typeof entry.instructionBytes !== "string") ||
+		typeof entry.instruction !== "string" ||
+		(entry.symbol !== null && typeof entry.symbol !== "string")
+	) {
+		return violation();
+	}
+	const instruction = {
+		address: entry.address,
+		instructionBytes: entry.instructionBytes,
+		instruction: entry.instruction,
+		symbol: entry.symbol,
+	};
+	rejectProxyObject(entry);
+	return Object.freeze(instruction);
+}
+
+export function decodeDebugDisassembleResult(
+	value: unknown,
+): DebugDisassembleResult {
+	if (!isPlainObject(value) || !hasExactKeys(value, ["instructions"])) {
+		return violation();
+	}
+	const instructions = ownObjectArraySnapshot(
+		value.instructions,
+		MAX_DEBUG_DISASSEMBLE_INSTRUCTION_COUNT,
+		decodeDebugDisassembledInstruction,
+	);
+	rejectProxyObject(value);
+	return Object.freeze({ instructions });
 }
 
 // ---------------------------------------------------------------------
