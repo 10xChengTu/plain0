@@ -17,6 +17,7 @@ import {
 	type AdapterDescriptor,
 } from "./plain-debug-adapter-config";
 import { prepareDebugAdapterLaunch } from "./plain-debug-adapter-launch";
+import { selectPlainLaunchConfiguration } from "./plain-debug-configuration-pick";
 import { DEBUG_CONSOLE_VIEW_ID } from "./debug-contribution";
 import { getPlainDebugRuntime } from "./plain-debug-runtime";
 import { selectPlainDebugRoot } from "./plain-debug-root";
@@ -79,14 +80,16 @@ function toDebugAdapterTarget(
  * gated preparation pipeline S1 already built and this slice finally gives a
  * real caller.
  *
- * Scope note (disclosed, not an oversight): always runs the *first*
- * configuration in `launch.json`'s `configurations` array — a real
- * `IQuickPickService` picker for "which configuration" when there is more
- * than one is not built in this slice. This feature's own acceptance
- * criteria are about breakpoints/call-stack/variables/watch, not the launch-
- * configuration-selection UX; `prepareDebugAdapterLaunch` itself already
- * looks up *by name*, so adding a picker later is a small, additive change
- * to this one function, not a redesign.
+ * `F210` S1: when `launch.json` has more than one configuration, this
+ * command hands the parsed array to `selectPlainLaunchConfiguration`
+ * (`plain-debug-configuration-pick.ts`), which shows a real
+ * `IQuickInputService.pick` picker — cancelling it returns from this
+ * function with zero further side effects (no registry read, no
+ * confirmation dialog, no `debug_launch`). A sole configuration is used
+ * automatically, with no picker shown at all. Either way, the resolved
+ * configuration's `name` is handed to `prepareDebugAdapterLaunch`, which
+ * already looks up a configuration *by name* — this command only decides
+ * which name.
  *
  * Resolves workspace execution trust (`resolveDebugTrust`) before ever
  * reading a configuration file or resolving an adapter — without this, a
@@ -152,11 +155,21 @@ async function runStartDebugging(
 		);
 		return;
 	}
-	const configuration = parsedLaunch.value[0];
-	if (configuration === undefined) {
+	if (parsedLaunch.value.length === 0) {
 		notificationService.error(
 			`Plain: ${LAUNCH_CONFIG_PATH} has no configurations.`,
 		);
+		return;
+	}
+	const configuration = await selectPlainLaunchConfiguration(
+		parsedLaunch.value,
+		(items) =>
+			quickInputService.pick([...items], {
+				placeHolder: "Select a launch configuration",
+				canPickMany: false,
+			}),
+	);
+	if (configuration === undefined) {
 		return;
 	}
 

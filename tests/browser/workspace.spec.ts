@@ -21329,6 +21329,40 @@ const DEBUG_LAUNCH_JSON = JSON.stringify({
 	],
 });
 
+// `F210` S1: a second launch.json fixture carrying two configurations of
+// distinct `type`/command/args (and a distinct `launchArguments` field, only
+// the second configuration's `stopOnEntry`) — proves the configuration picker
+// forwards the exact user-selected configuration through to `debug_launch`,
+// never silently `configurations[0]`.
+const TWO_LAUNCH_CONFIGURATIONS_JSON = JSON.stringify({
+	version: "0.2.0",
+	configurations: [
+		{
+			type: "python",
+			request: "launch",
+			name: "Debug main.py",
+			plainAdapter: {
+				transport: "stdio",
+				command: "/usr/bin/python3",
+				args: ["-m", "debugpy.adapter"],
+			},
+			program: "main.py",
+		},
+		{
+			type: "node",
+			request: "launch",
+			name: "Debug server.js",
+			plainAdapter: {
+				transport: "stdio",
+				command: "/usr/bin/node-debug-adapter",
+				args: ["--inspect-brk"],
+			},
+			program: "server.js",
+			stopOnEntry: true,
+		},
+	],
+});
+
 // Line 6 is `    total = add(3, 4)` — the line every breakpoint test below
 // places its breakpoint on.
 const DEBUG_MAIN_PY =
@@ -21554,6 +21588,135 @@ test("Debug requires an explicit multi-root choice and keeps launch plus same-pa
 	expect(errors).toEqual([]);
 });
 
+// --- `F210` S1 "launch 配置选择器" -------------------------------------------
+
+test("Start Debugging with two launch.json configurations shows a picker and launches the exact selected configuration", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(page, "arrayBuffer", "readonly", {
+		"main.py": DEBUG_MAIN_PY,
+		".vscode/launch.json": TWO_LAUNCH_CONFIGURATIONS_JSON,
+	});
+
+	await openMainPy(page);
+	await openRunAndDebugView(page);
+	await executePaletteCommand(
+		page,
+		"Start Debugging",
+		"Plain: Start Debugging",
+	);
+
+	// A single root means no root picker; the workspace trust gate still
+	// fires first, exactly like the single-configuration flow.
+	const dialog = page.getByRole("dialog");
+	await expect(dialog).toBeVisible();
+	await expect(dialog).toContainText(
+		"Trust this workspace to run a debug adapter?",
+	);
+	await dialog
+		.getByRole("button", { name: "Trust & Continue", exact: true })
+		.click();
+	await expect(dialog).toHaveCount(0);
+
+	// Two configurations means a real configuration picker appears — never a
+	// silent `configurations[0]`.
+	const picker = page.locator(".quick-input-widget");
+	await expect(picker).toBeVisible();
+	await expect(picker.locator("input")).toHaveAttribute(
+		"placeholder",
+		"Select a launch configuration",
+	);
+	const rows = picker.locator(".quick-input-list .monaco-list-row");
+	await expect(rows).toHaveCount(2);
+	await expect(rows.filter({ hasText: "Debug main.py" })).toHaveCount(1);
+	const secondRow = rows.filter({ hasText: "Debug server.js" });
+	await expect(secondRow).toHaveCount(1);
+	await secondRow.click();
+	await expect(picker).toBeHidden();
+
+	// The adapter confirmation dialog names the *second* configuration's own
+	// command — proof the picker's selection, not the first configuration,
+	// drove the rest of this launch.
+	await expect(dialog).toBeVisible();
+	await expect(dialog).toContainText('Run "/usr/bin/node-debug-adapter"?');
+	await dialog
+		.getByRole("button", { name: "Run Adapter", exact: true })
+		.click();
+	await expect(dialog).toHaveCount(0);
+
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "debug_launch")).length)
+		.toBe(1);
+	const launches = await terminalCallsFor(page, "debug_launch");
+	expect(launches[0]?.args.request).toMatchObject({
+		rootId: nativeRootId,
+		command: "/usr/bin/node-debug-adapter",
+		args: ["--inspect-brk"],
+		adapterId: "node",
+		arguments: { program: "server.js", stopOnEntry: true },
+	});
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("cancelling the launch configuration picker starts no session and reads no adapter registry", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(page, "arrayBuffer", "readonly", {
+		"main.py": DEBUG_MAIN_PY,
+		".vscode/launch.json": TWO_LAUNCH_CONFIGURATIONS_JSON,
+	});
+
+	await openMainPy(page);
+	await openRunAndDebugView(page);
+	await executePaletteCommand(
+		page,
+		"Start Debugging",
+		"Plain: Start Debugging",
+	);
+
+	const dialog = page.getByRole("dialog");
+	await expect(dialog).toBeVisible();
+	await expect(dialog).toContainText(
+		"Trust this workspace to run a debug adapter?",
+	);
+	await dialog
+		.getByRole("button", { name: "Trust & Continue", exact: true })
+		.click();
+	await expect(dialog).toHaveCount(0);
+
+	const picker = page.locator(".quick-input-widget");
+	await expect(picker).toBeVisible();
+	await expect(picker.locator("input")).toHaveAttribute(
+		"placeholder",
+		"Select a launch configuration",
+	);
+	await page.keyboard.press("Escape");
+	await expect(picker).toBeHidden();
+
+	// Cancellation is zero further side effects: no confirmation dialog ever
+	// appears, no session is created, and — this fixture uses only inline
+	// `plainAdapter` overrides, so a real launch never needs it either — no
+	// `.plain/debug-adapters.json` registry read happens.
+	await expect(page.getByRole("dialog")).toHaveCount(0);
+	expect(await terminalCallsFor(page, "debug_launch")).toEqual([]);
+	expect(
+		(await terminalCallsFor(page, "workspace_read_file")).filter(
+			(call) =>
+				(call.args.request as { relativePath?: string }).relativePath ===
+				".plain/debug-adapters.json",
+		),
+	).toEqual([]);
+
+	expect(pageErrors).toEqual([]);
+});
+
 async function emitDebugTestEvent(
 	page: Page,
 	sessionId: string,
@@ -21756,6 +21919,16 @@ test("places a breakpoint the adapter moves to another line, starts a session th
 	await dialog
 		.getByRole("button", { name: "Trust & Continue", exact: true })
 		.click();
+	// `F210` S1 regression evidence: `DEBUG_LAUNCH_JSON` has exactly one
+	// configuration, so no configuration picker ever appears between the
+	// trust dialog closing and the adapter confirmation dialog appearing —
+	// the sole configuration is used automatically, mirroring
+	// `selectPlainDebugRoot`'s identical single-root auto-select.
+	await expect(
+		page.locator(
+			'.quick-input-widget input[placeholder="Select a launch configuration"]',
+		),
+	).toHaveCount(0);
 	await expect(dialog).toContainText('Run "/usr/bin/python3"?');
 	await dialog
 		.getByRole("button", { name: "Run Adapter", exact: true })
