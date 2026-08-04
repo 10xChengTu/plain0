@@ -21,6 +21,7 @@ import { selectPlainLaunchConfiguration } from "./plain-debug-configuration-pick
 import { DEBUG_CONSOLE_VIEW_ID } from "./debug-contribution";
 import { getPlainDebugRuntime } from "./plain-debug-runtime";
 import { selectPlainDebugRoot } from "./plain-debug-root";
+import { selectPlainStepInTarget } from "./plain-debug-step-in-target-pick";
 import { resolveDebugTrust } from "./plain-debug-trust";
 
 /** Plain's own commands — never a vendor `workbench.action.debug.*` id
@@ -37,6 +38,10 @@ export const STOP_DEBUGGING_COMMAND_ID = "plain.debug.stop";
  * Debug Console view would exist in the registry but have no way for a user
  * to ever actually open it. */
 export const OPEN_DEBUG_CONSOLE_COMMAND_ID = "plain.debug.openConsole";
+/** `F210` S4: the `stepInTargets` target picker's own command — see
+ * `runStepIntoTarget`'s own doc comment for the full availability/failure
+ * contract. */
+export const STEP_INTO_TARGET_COMMAND_ID = "plain.debug.stepIntoTarget";
 
 const LAUNCH_CONFIG_PATH = ".vscode/launch.json";
 const ADAPTER_REGISTRY_PATH = ".plain/debug-adapters.json";
@@ -255,6 +260,92 @@ async function runStopDebugging(
 	}
 }
 
+/**
+ * `F210` S4's "Plain: Step Into Target…" command — the `stepInTargets`
+ * target picker's only entry point. Visible in the command palette
+ * unconditionally (mirroring every other command this file registers), but
+ * only actually executes while stopped and while the live session's own
+ * `Capabilities.supportsStepInTargetsRequest` is `true`; every other case
+ * (no live session, running rather than stopped, capability not reported, an
+ * empty target list) reports an accurate `notificationService.error` instead
+ * of attempting a doomed `stepIn` call — the same "report why, do not
+ * silently no-op" pattern `runStartDebugging`/`runStopDebugging` above
+ * already use for a failed bridge call. The existing Step Into *button*
+ * (`plain-debug-call-stack-view.ts`) is entirely unchanged by this command:
+ * it still never selects a target.
+ *
+ * Frame selection: uses whichever frame `DebugFrameSelection` currently
+ * names — the call-stack view already selects the top stopped frame the
+ * instant the call stack refreshes (see that view's own `#refresh`), so this
+ * is "the selected frame, defaulting to the top one" without this command
+ * needing its own frame-resolution logic. `undefined` (no frame selected at
+ * all — only reachable if the call stack came back empty) is its own
+ * reported error rather than a silent no-op.
+ *
+ * Cancelling the picker (`selectPlainStepInTarget` returning `undefined`)
+ * returns from this function with zero further side effects — no `stepIn`
+ * call follows a cancelled pick, exactly like `runStartDebugging`'s own
+ * launch-configuration picker.
+ */
+async function runStepIntoTarget(
+	notificationService: INotificationService,
+	quickInputService: IQuickInputService,
+): Promise<void> {
+	const runtime = getPlainDebugRuntime();
+	if (runtime === undefined) {
+		return;
+	}
+	const state = runtime.session.state;
+	if (state === null || state.stoppedThreadId === null) {
+		notificationService.error(
+			"Plain: Step Into Target… requires the debuggee to be stopped.",
+		);
+		return;
+	}
+	if (state.capabilities.supportsStepInTargetsRequest !== true) {
+		notificationService.error(
+			"Plain: the current debug adapter does not support step-into targets.",
+		);
+		return;
+	}
+	const frameId = runtime.frameSelection.frameId;
+	if (frameId === null) {
+		notificationService.error("Plain: no stack frame is selected.");
+		return;
+	}
+	const threadId = state.stoppedThreadId;
+	let result;
+	try {
+		result = await runtime.session.stepInTargets(frameId);
+	} catch (error) {
+		notificationService.error(normalizeCommandError(error).message);
+		return;
+	}
+	if (result === undefined || result.targets.length === 0) {
+		notificationService.error("Plain: no step-into targets are available.");
+		return;
+	}
+	const target = await selectPlainStepInTarget(
+		result.targets,
+		result.truncated,
+		(items, context) =>
+			quickInputService.pick([...items], {
+				placeHolder: context.truncated
+					? "Select a step-into target (showing the first 256; more were available)"
+					: "Select a step-into target",
+				canPickMany: false,
+			}),
+	);
+	if (target === undefined) {
+		return;
+	}
+	try {
+		await runtime.session.stepIn(threadId, target.id);
+	} catch (error) {
+		notificationService.error(normalizeCommandError(error).message);
+	}
+}
+
 export function registerPlainDebugCommands(): { dispose(): void } {
 	const disposables = [
 		CommandsRegistry.registerCommand(START_DEBUGGING_COMMAND_ID, (accessor) => {
@@ -272,6 +363,15 @@ export function registerPlainDebugCommands(): { dispose(): void } {
 			OPEN_DEBUG_CONSOLE_COMMAND_ID,
 			(accessor) => {
 				void accessor.get(IViewsService).openView(DEBUG_CONSOLE_VIEW_ID, true);
+			},
+		),
+		CommandsRegistry.registerCommand(
+			STEP_INTO_TARGET_COMMAND_ID,
+			(accessor) => {
+				void runStepIntoTarget(
+					accessor.get(INotificationService),
+					accessor.get(IQuickInputService),
+				);
 			},
 		),
 		MenuRegistry.appendMenuItem(MenuId.CommandPalette, {
@@ -292,6 +392,13 @@ export function registerPlainDebugCommands(): { dispose(): void } {
 			command: {
 				id: OPEN_DEBUG_CONSOLE_COMMAND_ID,
 				title: "Debug Console",
+				category: "Plain",
+			},
+		}),
+		MenuRegistry.appendMenuItem(MenuId.CommandPalette, {
+			command: {
+				id: STEP_INTO_TARGET_COMMAND_ID,
+				title: "Step Into Target…",
 				category: "Plain",
 			},
 		}),

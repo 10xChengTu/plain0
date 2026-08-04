@@ -89,6 +89,7 @@ import {
 	decodeDebugSessionStartResult,
 	decodeDebugSetBreakpointsResult,
 	decodeDebugStackTraceResult,
+	decodeDebugStepInTargetsResult,
 	decodeDebugStepVoid,
 	decodeDebugVariablesResult,
 	decodeDebugVoid,
@@ -100,6 +101,8 @@ import {
 	frozenDebugSessionStartRequest,
 	frozenDebugSetBreakpointsRequest,
 	frozenDebugStackTraceRequest,
+	frozenDebugStepInRequest,
+	frozenDebugStepInTargetsRequest,
 	frozenDebugThreadRequest,
 	frozenDebugVariablesRequest,
 } from "./debug-codec";
@@ -1474,9 +1477,15 @@ export function createNativeBridge(): PlainBridge {
 			const request = frozenDebugThreadRequest(sessionId, threadId);
 			decodeDebugStepVoid(await invoke<unknown>("debug_next", { request }));
 		},
-		debugStepIn: async (sessionId, threadId) => {
-			const request = frozenDebugThreadRequest(sessionId, threadId);
+		debugStepIn: async (sessionId, threadId, targetId) => {
+			const request = frozenDebugStepInRequest(sessionId, threadId, targetId);
 			decodeDebugStepVoid(await invoke<unknown>("debug_step_in", { request }));
+		},
+		debugStepInTargets: async (sessionId, frameId) => {
+			const request = frozenDebugStepInTargetsRequest(sessionId, frameId);
+			return decodeDebugStepInTargetsResult(
+				await invoke<unknown>("debug_step_in_targets", { request }),
+			);
 		},
 		debugStepOut: async (sessionId, threadId) => {
 			const request = frozenDebugThreadRequest(sessionId, threadId);

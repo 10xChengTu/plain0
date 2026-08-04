@@ -14,6 +14,8 @@ import type {
 	DebugSetBreakpointsResult,
 	DebugStackFrame,
 	DebugStackTraceResult,
+	DebugStepInTarget,
+	DebugStepInTargetsResult,
 	DebugVariable,
 	DebugVariablesFilter,
 	DebugVariablesResult,
@@ -93,6 +95,10 @@ const MAX_DEBUG_VARIABLES = 1_000_000;
 /** Mirrors `debug::dto::MAX_DEBUG_EVALUATE_EXPRESSION_BYTES` — a UTF-8
  * byte-length ceiling, like `terminal-codec.ts`'s own `MAX_TERMINAL_INPUT_BYTES`. */
 const MAX_DEBUG_EVALUATE_EXPRESSION_BYTES = 8_192;
+/** `F210` S4 — mirrors `debug::dto::MAX_DEBUG_STEP_IN_TARGETS`, the same
+ * "hostile/pathological adapter response" backstop `MAX_DEBUG_SCOPES` etc.
+ * apply, here on `debugStepInTargets`'s own `targets` array. */
+const MAX_DEBUG_STEP_IN_TARGETS = 256;
 
 const textEncoder = new TextEncoder();
 
@@ -844,6 +850,84 @@ export function decodeDebugStepVoid(value: unknown): void {
 	if (value !== null) {
 		violation();
 	}
+}
+
+// ---------------------------------------------------------------------
+// `F210` S4 — the `stepInTargets` target picker and `stepIn`'s own
+// `targetId` field. `debug_step_in` deliberately does not share
+// `frozenDebugThreadRequest` above — see `frozenDebugStepInRequest`'s own
+// doc comment for why.
+// ---------------------------------------------------------------------
+
+/** Encodes `debug_step_in`'s own request — like `frozenDebugThreadRequest`
+ * above but with one addition: an optional `targetId` (DAP's own
+ * `StepInArguments.targetId`, the target chosen from a prior
+ * `debug_step_in_targets` response). A separate encoder from
+ * `frozenDebugThreadRequest` rather than an optional fourth parameter bolted
+ * onto it — that one is also `continue`/`next`/`stepOut`/`pause`'s own
+ * encoder, none of which define a `targetId` field in DAP at all. The wire
+ * shape always includes the `targetId` key (`null` when absent), mirroring
+ * this file's own `DebugBreakpointRequest`/`hitCondition` precedent: the
+ * *Rust* DTO layer is where "omit the key entirely when absent" actually
+ * happens (`debug::dto::DebugStepInRequest::into_parts`), not this IPC
+ * envelope. */
+export function frozenDebugStepInRequest(
+	sessionId: unknown,
+	threadId: number,
+	targetId: number | null,
+): Readonly<Record<string, unknown>> {
+	if (!isSafeInteger(threadId)) {
+		return debugSessionRequestInvalid();
+	}
+	if (targetId !== null && !isSafeInteger(targetId)) {
+		return debugSessionRequestInvalid();
+	}
+	return Object.freeze({
+		sessionId: frozenSessionId(sessionId),
+		threadId,
+		targetId,
+	});
+}
+
+/** Encodes `debug_step_in_targets`'s request. */
+export function frozenDebugStepInTargetsRequest(
+	sessionId: unknown,
+	frameId: number,
+): Readonly<Record<string, unknown>> {
+	if (!isSafeInteger(frameId)) {
+		return debugSessionRequestInvalid();
+	}
+	return Object.freeze({ sessionId: frozenSessionId(sessionId), frameId });
+}
+
+function decodeDebugStepInTarget(entry: unknown): DebugStepInTarget {
+	if (!isPlainObject(entry) || !hasExactKeys(entry, ["id", "label"])) {
+		return violation();
+	}
+	if (!isSafeInteger(entry.id) || typeof entry.label !== "string") {
+		return violation();
+	}
+	const target = { id: entry.id, label: entry.label };
+	rejectProxyObject(entry);
+	return Object.freeze(target);
+}
+
+export function decodeDebugStepInTargetsResult(
+	value: unknown,
+): DebugStepInTargetsResult {
+	if (!isPlainObject(value) || !hasExactKeys(value, ["targets", "truncated"])) {
+		return violation();
+	}
+	if (typeof value.truncated !== "boolean") {
+		return violation();
+	}
+	const targets = ownObjectArraySnapshot(
+		value.targets,
+		MAX_DEBUG_STEP_IN_TARGETS,
+		decodeDebugStepInTarget,
+	);
+	rejectProxyObject(value);
+	return Object.freeze({ targets, truncated: value.truncated });
 }
 
 // ---------------------------------------------------------------------

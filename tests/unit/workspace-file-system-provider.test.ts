@@ -639,6 +639,9 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async debugStepIn() {
 			throw new Error("unused");
 		},
+		async debugStepInTargets() {
+			throw new Error("unused");
+		},
 		async debugStepOut() {
 			throw new Error("unused");
 		},

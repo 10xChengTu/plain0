@@ -7,11 +7,17 @@
 //! `F100` S4 added five more: execution/step control
 //! (`debug_continue`/`debug_next`/`debug_step_in`/`debug_step_out`/
 //! `debug_pause`) — plus real `runInTerminal` reverse-request handling, which
-//! is not a new `#[tauri::command]` at all (see below). `F100` S5 (this
-//! slice) adds exactly one more — `debug_output_ack` — the frontend's own
-//! acknowledgement of a gated `output` event (see `super::output_gate`'s own
-//! module doc); this brings the total to seventeen real commands (3 + 3 + 5 +
-//! 5 + 1). Read this comment before adding an eighteenth.
+//! is not a new `#[tauri::command]` at all (see below). `F100` S5 adds
+//! exactly one more — `debug_output_ack` — the frontend's own acknowledgement
+//! of a gated `output` event (see `super::output_gate`'s own module doc).
+//! `F210` S4 (this slice) adds one final command — `debug_step_in_targets`,
+//! the `stepInTargets` target picker's own data source (see its own doc
+//! comment below) — and gives `debug_step_in` an optional `targetId` on its
+//! existing request DTO (see [`super::dto::DebugStepInRequest`]'s own doc
+//! comment for why that is a dedicated DTO, not a field grown onto the
+//! shared [`super::dto::DebugThreadRequest`] the other four step-control
+//! commands still use); this brings the total to eighteen real commands
+//! (3 + 3 + 5 + 5 + 1 + 1). Read this comment before adding a nineteenth.
 //!
 //! # `F100` S3's five commands (unchanged this slice)
 //!
@@ -37,16 +43,34 @@
 //! # `F100` S4's five step-control commands
 //!
 //! `debug_continue`/`debug_next`/`debug_step_in`/`debug_step_out`/
-//! `debug_pause` share one request DTO ([`super::dto::DebugThreadRequest`] —
-//! see its own doc comment for why: real DAP defines no `supportsXxx`
-//! capability gating these five basic requests themselves, only optional
-//! *enhancements* this slice does not implement — `stepInTargets`'s target
-//! picker, gated by `supportsStepInTargetsRequest`, and the optional
-//! `granularity` field, gated by `supportsSteppingGranularity`). Only
-//! `debug_continue` has a meaningful response body
-//! ([`super::dto::DebugContinueResult`]); the other four discard the
-//! adapter's response body entirely (a bare `Ok(())` — DAP defines no useful
-//! fields on their own responses).
+//! `debug_pause` all send, per spec, `arguments` that are exactly
+//! `{threadId: number, ...fields this domain does not send}` — real DAP
+//! defines no `supportsXxx` capability gating these five basic requests
+//! themselves (they are mandatory baseline requests every adapter must
+//! implement), only optional *enhancements*. `debug_continue`/`debug_next`/
+//! `debug_step_out`/`debug_pause` still share one request DTO
+//! ([`super::dto::DebugThreadRequest`]); `debug_step_in` moved to its own
+//! dedicated DTO in `F210` S4 (see below). Only `debug_continue` has a
+//! meaningful response body ([`super::dto::DebugContinueResult`]); the other
+//! four discard the adapter's response body entirely (a bare `Ok(())` — DAP
+//! defines no useful fields on their own responses).
+//!
+//! # `F210` S4's `stepInTargets` target picker
+//!
+//! `debug_step_in_targets` is a thin wrapper exactly like `F100` S3's five
+//! (see above): convert [`super::dto::DebugStepInTargetsRequest`] into a
+//! `(session_id, arguments)` pair via its own `into_parts`, call
+//! [`super::service::DebugSessionService::send_request`] with the literal
+//! `"stepInTargets"` DAP command name, then parse the response via
+//! [`dto::parse_step_in_targets_response`]. `debug_step_in` itself now takes
+//! [`super::dto::DebugStepInRequest`] instead of the shared
+//! `DebugThreadRequest` — its own doc comment explains why an optional
+//! `targetId` warranted a dedicated DTO rather than growing the one
+//! `continue`/`next`/`stepOut`/`pause` still share. Real DAP gates
+//! `stepInTargets` behind `Capabilities.supportsStepInTargetsRequest`; this
+//! domain does not enforce that gate in Rust (the frontend does, before ever
+//! issuing the call) — matching every other `supportsXxx`-gated affordance
+//! in this codebase.
 //!
 //! # `runInTerminal` is not a new Tauri command
 //!
@@ -97,8 +121,8 @@ use super::dto::{
     DebugEvaluateResult, DebugEventPayload, DebugOutputAckRequest, DebugScopesRequest,
     DebugScopesResult, DebugSessionId, DebugSessionIdRequest, DebugSessionStartRequest,
     DebugSessionStartResult, DebugSetBreakpointsRequest, DebugSetBreakpointsResult,
-    DebugStackTraceRequest, DebugStackTraceResult, DebugThreadRequest, DebugVariablesRequest,
-    DebugVariablesResult,
+    DebugStackTraceRequest, DebugStackTraceResult, DebugStepInRequest, DebugStepInTargetsRequest,
+    DebugStepInTargetsResult, DebugThreadRequest, DebugVariablesRequest, DebugVariablesResult,
 };
 use super::service::DebugSessionService;
 use super::session::{
@@ -470,13 +494,16 @@ pub(crate) async fn debug_next(
 }
 
 /// Steps into the current line's call ("step into"/`stepIn` in DAP terms).
-/// Never sends `targetId` — see the module doc's own step-control section for
-/// why `stepInTargets`' target picker is out of scope this slice.
+/// `request.target_id` (`F210` S4) is `None` for the existing Step Into
+/// *button* call path, which never sends `targetId` at all; a caller that
+/// resolved one via [`debug_step_in_targets`] passes it through instead. See
+/// [`super::dto::DebugStepInRequest`]'s own doc comment for the exact
+/// `arguments` shape either way.
 #[tauri::command]
 pub(crate) async fn debug_step_in(
     window: WebviewWindow,
     debug_sessions: State<'_, DebugSessionService>,
-    request: DebugThreadRequest,
+    request: DebugStepInRequest,
 ) -> Result<(), CommandError> {
     let query = request.into_parts();
     debug_sessions
@@ -484,6 +511,31 @@ pub(crate) async fn debug_step_in(
         .send_request(window.label(), query.session_id, "stepIn", query.arguments)
         .await?;
     Ok(())
+}
+
+/// Fetches the step-into targets available at one stack frame (DAP's
+/// `stepInTargets` request), gated by the frontend on
+/// `Capabilities.supportsStepInTargetsRequest` before ever being called. See
+/// [`super::dto::DebugStepInTargetsRequest`]'s own doc comment for the
+/// `frameId` contract and [`super::dto::DebugStepInTargetsResult`]'s own for
+/// the bounded-list/truncation-flag response shape.
+#[tauri::command]
+pub(crate) async fn debug_step_in_targets(
+    window: WebviewWindow,
+    debug_sessions: State<'_, DebugSessionService>,
+    request: DebugStepInTargetsRequest,
+) -> Result<DebugStepInTargetsResult, CommandError> {
+    let query = request.into_parts();
+    let body = debug_sessions
+        .inner()
+        .send_request(
+            window.label(),
+            query.session_id,
+            "stepInTargets",
+            query.arguments,
+        )
+        .await?;
+    dto::parse_step_in_targets_response(&body)
 }
 
 /// Steps out of the current function ("step out"/`stepOut` in DAP terms).

@@ -8,6 +8,7 @@ import type {
 	DebugScope,
 	DebugSessionStartResult,
 	DebugStackFrame,
+	DebugStepInTarget,
 	DebugVariable,
 	GitBlameCommitHeader,
 	GitBlameFileResult,
@@ -197,6 +198,8 @@ import {
 	frozenDebugSessionStartRequest,
 	frozenDebugSetBreakpointsRequest,
 	frozenDebugStackTraceRequest,
+	frozenDebugStepInRequest,
+	frozenDebugStepInTargetsRequest,
 	frozenDebugThreadRequest,
 	frozenDebugVariablesRequest,
 } from "./debug-codec";
@@ -1460,6 +1463,19 @@ export interface BrowserMockDebugFixtureForTest {
 				>
 			>
 		>
+	>;
+	/** `F210` S4 — keyed by `frameId`; a missing key defaults to an empty
+	 * `targets` array (the "genuinely no step-in targets" scenario, e.g. a
+	 * line with no call), not an error. This mock never simulates the
+	 * `MAX_DEBUG_STEP_IN_TARGETS` truncation Rust enforces (a test seeding
+	 * more than 256 synthetic targets here would just get all of them back,
+	 * with `truncated: false`) — that real, considered boundary behavior is
+	 * covered end to end against `debug::dto::parse_step_in_targets_response`
+	 * directly in `src-tauri/src/debug/dto.rs`'s own tests, matching this
+	 * mock's stated scope of structurally correct, scriptable responses
+	 * rather than a faithful re-simulation of every server-side limit. */
+	readonly stepInTargetsByFrame?: Readonly<
+		Record<number, readonly DebugStepInTarget[]>
 	>;
 }
 
@@ -9483,9 +9499,26 @@ export function createBrowserMockBridge(
 			const request = frozenDebugThreadRequest(sessionId, threadId);
 			requireLiveMockDebugSession(request.sessionId as string);
 		},
-		async debugStepIn(sessionId, threadId) {
-			const request = frozenDebugThreadRequest(sessionId, threadId);
+		async debugStepIn(sessionId, threadId, targetId) {
+			const request = frozenDebugStepInRequest(sessionId, threadId, targetId);
 			requireLiveMockDebugSession(request.sessionId as string);
+		},
+		// `F210` S4 — `debugStepInTargets`'s response is a direct fixture
+		// lookup (like `debugScopes` above), not a real `stepInTargets`
+		// simulation; see `stepInTargetsByFrame`'s own doc comment for why
+		// this mock does not additionally reproduce the real
+		// `MAX_DEBUG_STEP_IN_TARGETS` truncation boundary.
+		async debugStepInTargets(sessionId, frameId) {
+			const request = frozenDebugStepInTargetsRequest(sessionId, frameId);
+			requireLiveMockDebugSession(request.sessionId as string);
+			const targets =
+				options.debugFixtureForTest?.stepInTargetsByFrame?.[
+					request.frameId as number
+				] ?? [];
+			return Object.freeze({
+				targets: Object.freeze(targets.map((target) => ({ ...target }))),
+				truncated: false,
+			});
 		},
 		async debugStepOut(sessionId, threadId) {
 			const request = frozenDebugThreadRequest(sessionId, threadId);

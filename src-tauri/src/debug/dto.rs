@@ -706,7 +706,8 @@ pub(crate) fn parse_stack_trace_response(
 
 /// `debug_scopes`'s request — `frame_id` is a `StackFrame.id` a prior
 /// `debug_stack_trace` response returned; DAP does not define any other way
-/// to obtain one.
+/// to obtain one. (See [`DebugStepInTargetsRequest`] below for the identical
+/// `frame_id` contract `debug_step_in_targets` shares with this request.)
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
@@ -1043,25 +1044,28 @@ pub(crate) fn parse_evaluate_response(body: &Value) -> Result<DebugEvaluateResul
 
 // ---------------------------------------------------------------------
 // `F100` S4 — execution/step control (`continue`/`next`/`stepIn`/`stepOut`/
-// `pause`) and `runInTerminal` reverse-request handling.
+// `pause`) and `runInTerminal` reverse-request handling. `F210` S4 (below,
+// after `DebugContinueResult`) adds `stepIn`'s own dedicated `targetId`
+// field and the `stepInTargets` request/response it comes from.
 // ---------------------------------------------------------------------
 
 /// Shared `{sessionId, threadId}` request shape for every step/execution-
-/// control DAP request this domain sends — `continue`/`next`/`stepIn`/
-/// `stepOut`/`pause` all take, per spec, `arguments` that are exactly
+/// control DAP request this domain sends **except** `stepIn` — `continue`/
+/// `next`/`stepOut`/`pause` all take, per spec, `arguments` that are exactly
 /// `{threadId: number, ...fields this domain does not send}`
-/// (`ContinueArguments`/`NextArguments`/`StepInArguments`/`StepOutArguments`/
-/// `PauseArguments`). One request DTO for all five keeps this file from
-/// repeating the identical shape four more times — see
-/// `super::commands`'s own module doc for why `stepIn`'s `targetId` (the
-/// "step into target" picker gated by `supportsStepInTargetsRequest`) and
-/// every request's optional `singleThread`/`granularity` fields are
-/// deliberately not exposed in this slice (a disclosed scope narrowing, not
-/// an oversight — real DAP defines no `supportsXxx` capability gating the
+/// (`ContinueArguments`/`NextArguments`/`StepOutArguments`/
+/// `PauseArguments`). One request DTO for all four keeps this file from
+/// repeating the identical shape three more times. `stepIn` deliberately
+/// does *not* share this DTO — see [`DebugStepInRequest`] below (defined
+/// alongside [`DebugStepInTargetsRequest`], the `F210` S4 addition that
+/// gives it a real, non-`None` `target_id` to send) for why it needs its own.
+/// Every request's optional `singleThread`/`granularity` fields remain
+/// unexposed by any of these five — a disclosed scope narrowing, not an
+/// oversight — real DAP defines no `supportsXxx` capability gating the
 /// *basic* five commands themselves; they are mandatory baseline requests
 /// every adapter must implement, confirmed by both real capability captures
 /// `docs/research/2026-07-28-generic-dap.md` recorded, neither of which
-/// contains any such field).
+/// contains any such field.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
@@ -1105,6 +1109,160 @@ pub(crate) fn parse_continue_response(body: &Value) -> Result<DebugContinueResul
     Ok(DebugContinueResult {
         all_threads_continued,
     })
+}
+
+// ---------------------------------------------------------------------
+// `F210` S4 — the `stepInTargets` target picker and `stepIn`'s own
+// `targetId` field.
+// ---------------------------------------------------------------------
+
+/// `debug_step_in_targets`'s request — `frame_id` is a `StackFrame.id` a
+/// prior `debug_stack_trace` response returned (identical contract to
+/// [`DebugScopesRequest`]'s own `frame_id`). Gated by
+/// `Capabilities.supportsStepInTargetsRequest` — like every other
+/// `supportsXxx`-gated affordance in this codebase (e.g.
+/// `supportsHitConditionalBreakpoints`), this domain does not enforce that
+/// gate in Rust; the frontend does, and an adapter that does not actually
+/// support this request simply answers with its own DAP-level error, which
+/// `DebugSessionService::send_request` already surfaces as
+/// `super::debug_request_failed`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct DebugStepInTargetsRequest {
+    pub session_id: DebugSessionId,
+    pub frame_id: i64,
+}
+
+pub(crate) struct DebugStepInTargetsQuery {
+    pub(crate) session_id: DebugSessionId,
+    pub(crate) arguments: Value,
+}
+
+impl DebugStepInTargetsRequest {
+    pub(crate) fn into_parts(self) -> DebugStepInTargetsQuery {
+        DebugStepInTargetsQuery {
+            session_id: self.session_id,
+            arguments: serde_json::json!({ "frameId": self.frame_id }),
+        }
+    }
+}
+
+/// Hard cap on how many `stepInTargets` entries this domain will ever hand
+/// back to the frontend in one response — a real target list is a handful of
+/// call sites on one source line; this exists purely so a pathological (or
+/// hostile) adapter cannot make Rust allocate and serialize an unbounded
+/// `Vec` across the Tauri IPC boundary. A response reporting more than this
+/// many targets is *truncated*, not rejected outright — see
+/// [`DebugStepInTargetsResult`]'s own `truncated` field.
+const MAX_DEBUG_STEP_IN_TARGETS: usize = 256;
+
+/// Hard cap, in UTF-8 bytes, on one target's `label` — mirrors this file's
+/// own `MAX_DEBUG_EVALUATE_EXPRESSION_BYTES` shape for the same reason: a
+/// length bound on adapter-supplied text this domain holds in memory and
+/// hands to the frontend. Unlike the list-length cap above, a label this
+/// long is treated as a genuinely malformed response
+/// (`debug_adapter_response_malformed`), not silently truncated — cutting
+/// label *text* short mid-string would show the user a corrupted-looking
+/// call description with no visible indication anything was cut, unlike the
+/// list-level truncation flag above, which the frontend surfaces explicitly.
+const MAX_DEBUG_STEP_IN_TARGET_LABEL_BYTES: usize = 4_096;
+
+/// One DAP `StepInTarget` — only `id`/`label` are modeled, the two fields
+/// `debug_step_in`'s own `target_id` and this domain's own step-into-target
+/// QuickPick actually need. DAP's optional `line`/`column`/`endLine`/
+/// `endColumn` fields are read by nothing here and simply ignored, per this
+/// file's usual "known fields strict, unused fields ignored" decode
+/// discipline.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugStepInTarget {
+    pub id: i64,
+    pub label: String,
+}
+
+/// `debug_step_in_targets`'s response — `truncated` is `true` exactly when
+/// the adapter reported more than [`MAX_DEBUG_STEP_IN_TARGETS`] entries and
+/// this domain kept only the first that many, so the frontend can show a
+/// visible "not every target is listed" notice rather than silently
+/// presenting a truncated list with no indication anything is missing. An
+/// empty `targets` array (an adapter reporting no step-in targets at all,
+/// e.g. a line with no call) is a normal, successful result, not an error.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugStepInTargetsResult {
+    pub targets: Vec<DebugStepInTarget>,
+    pub truncated: bool,
+}
+
+pub(crate) fn parse_step_in_targets_response(
+    body: &Value,
+) -> Result<DebugStepInTargetsResult, CommandError> {
+    let entries = body
+        .get("targets")
+        .and_then(Value::as_array)
+        .ok_or_else(debug_adapter_response_malformed)?;
+    let truncated = entries.len() > MAX_DEBUG_STEP_IN_TARGETS;
+    let mut targets = Vec::with_capacity(entries.len().min(MAX_DEBUG_STEP_IN_TARGETS));
+    for entry in entries.iter().take(MAX_DEBUG_STEP_IN_TARGETS) {
+        let id = entry
+            .get("id")
+            .and_then(Value::as_i64)
+            .ok_or_else(debug_adapter_response_malformed)?;
+        let label = entry
+            .get("label")
+            .and_then(Value::as_str)
+            .ok_or_else(debug_adapter_response_malformed)?;
+        if label.len() > MAX_DEBUG_STEP_IN_TARGET_LABEL_BYTES {
+            return Err(debug_adapter_response_malformed());
+        }
+        targets.push(DebugStepInTarget {
+            id,
+            label: label.to_owned(),
+        });
+    }
+    Ok(DebugStepInTargetsResult { targets, truncated })
+}
+
+/// `debug_step_in`'s own request — like [`DebugThreadRequest`] above but with
+/// one addition: an optional `target_id`, DAP's own `StepInArguments.targetId`
+/// (the target chosen from a prior [`DebugStepInTargetsRequest`] response).
+/// Deliberately its own dedicated DTO rather than a field grown onto the
+/// shared `DebugThreadRequest` — that struct is also `continue`/`next`/
+/// `stepOut`/`pause`'s own request, none of which define a `targetId` field
+/// in DAP at all; adding it there would let a caller send a meaningless
+/// `targetId` on those other four requests. `target_id` is omitted from
+/// `arguments` entirely when absent — the existing "no target" call path
+/// (the Step Into *button*, which has never selected a target) still sends
+/// byte-for-byte the same `{"threadId": ...}` arguments object it always
+/// has; DAP defines `targetId` as fully optional.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct DebugStepInRequest {
+    pub session_id: DebugSessionId,
+    pub thread_id: i64,
+    #[serde(default)]
+    pub target_id: Option<i64>,
+}
+
+pub(crate) struct DebugStepInQuery {
+    pub(crate) session_id: DebugSessionId,
+    pub(crate) arguments: Value,
+}
+
+impl DebugStepInRequest {
+    pub(crate) fn into_parts(self) -> DebugStepInQuery {
+        let mut arguments = serde_json::Map::new();
+        arguments.insert("threadId".to_owned(), Value::from(self.thread_id));
+        if let Some(target_id) = self.target_id {
+            arguments.insert("targetId".to_owned(), Value::from(target_id));
+        }
+        DebugStepInQuery {
+            session_id: self.session_id,
+            arguments: Value::Object(arguments),
+        }
+    }
 }
 
 /// Defensive ceilings on a `runInTerminal` reverse request's own `args`/`env`
@@ -1240,9 +1398,10 @@ mod tests {
     use super::{
         parse_continue_response, parse_evaluate_response, parse_run_in_terminal_arguments,
         parse_scopes_response, parse_set_breakpoints_response, parse_stack_trace_response,
-        parse_variables_response, AdapterTransportKind, DebugEvaluateContext, DebugEvaluateRequest,
-        DebugOutputAckRequest, DebugScopesRequest, DebugSessionId, DebugSessionStartRequest,
-        DebugSetBreakpointsRequest, DebugStackTraceRequest, DebugThreadRequest,
+        parse_step_in_targets_response, parse_variables_response, AdapterTransportKind,
+        DebugEvaluateContext, DebugEvaluateRequest, DebugOutputAckRequest, DebugScopesRequest,
+        DebugSessionId, DebugSessionStartRequest, DebugSetBreakpointsRequest,
+        DebugStackTraceRequest, DebugStepInRequest, DebugStepInTargetsRequest, DebugThreadRequest,
         DebugVariablesFilter, DebugVariablesRequest, LineBreakpointRequest,
         SessionTransportRequest, SourceBreakpointsRequest, MAX_RUN_IN_TERMINAL_ARGS,
     };
@@ -2070,5 +2229,138 @@ mod tests {
     fn debug_output_ack_request_rejects_a_negative_sequence() {
         let value = json!({"sessionId": VALID_ID, "sequence": -1});
         assert!(serde_json::from_value::<DebugOutputAckRequest>(value).is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // `F210` S4 — `stepInTargets` request/response and `stepIn`'s own
+    // `targetId` field.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn debug_step_in_targets_request_builds_the_frame_id_arguments_shape() {
+        let request = DebugStepInTargetsRequest {
+            session_id: session_id(),
+            frame_id: 9,
+        };
+        assert_eq!(request.into_parts().arguments, json!({"frameId": 9}));
+    }
+
+    #[test]
+    fn debug_step_in_targets_request_deserializes_camel_case_and_rejects_unknown_fields() {
+        let value = json!({"sessionId": VALID_ID, "frameId": 3});
+        let request: DebugStepInTargetsRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(request.frame_id, 3);
+
+        let mut with_unknown_field = json!({"sessionId": VALID_ID, "frameId": 3});
+        with_unknown_field["unexpected"] = json!(true);
+        assert!(serde_json::from_value::<DebugStepInTargetsRequest>(with_unknown_field).is_err());
+    }
+
+    #[test]
+    fn parse_step_in_targets_response_accepts_a_genuinely_empty_targets_array() {
+        let result = parse_step_in_targets_response(&json!({"targets": []}))
+            .expect("empty targets array parses");
+        assert!(result.targets.is_empty());
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn parse_step_in_targets_response_parses_well_formed_targets_and_ignores_optional_fields() {
+        let body = json!({
+            "targets": [
+                {"id": 1, "label": "quicksort(arr, lo, hi)"},
+                {"id": 2, "label": "partition(arr, lo, hi)", "line": 7, "column": 2},
+            ]
+        });
+        let result = parse_step_in_targets_response(&body).expect("well-formed response parses");
+        assert_eq!(result.targets.len(), 2);
+        assert_eq!(result.targets[0].id, 1);
+        assert_eq!(result.targets[0].label, "quicksort(arr, lo, hi)");
+        assert_eq!(result.targets[1].id, 2);
+        assert_eq!(result.targets[1].label, "partition(arr, lo, hi)");
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn parse_step_in_targets_response_truncates_beyond_the_hard_cap_and_flags_it() {
+        let targets: Vec<Value> = (0..300)
+            .map(|index| json!({"id": index, "label": format!("target{index}")}))
+            .collect();
+        let result = parse_step_in_targets_response(&json!({"targets": targets}))
+            .expect("an oversized list is truncated, not rejected");
+        assert_eq!(result.targets.len(), 256);
+        assert!(result.truncated);
+        // The kept targets are the first 256, in order — not an arbitrary subset.
+        assert_eq!(result.targets[0].id, 0);
+        assert_eq!(result.targets[255].id, 255);
+    }
+
+    #[test]
+    fn parse_step_in_targets_response_rejects_malformed_shapes() {
+        // Missing `targets` array entirely.
+        assert!(parse_step_in_targets_response(&json!({})).is_err());
+        // A target missing its required `id`.
+        assert!(parse_step_in_targets_response(&json!({
+            "targets": [{"label": "x"}]
+        }))
+        .is_err());
+        // A target missing its required `label`.
+        assert!(parse_step_in_targets_response(&json!({
+            "targets": [{"id": 1}]
+        }))
+        .is_err());
+        // A target whose `label` is not a string.
+        assert!(parse_step_in_targets_response(&json!({
+            "targets": [{"id": 1, "label": 5}]
+        }))
+        .is_err());
+        // A target whose `label` exceeds the byte-length ceiling.
+        let oversized_label = "x".repeat(4_097);
+        assert!(parse_step_in_targets_response(&json!({
+            "targets": [{"id": 1, "label": oversized_label}]
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn debug_step_in_request_omits_target_id_when_absent_and_includes_it_when_present() {
+        let bare = DebugStepInRequest {
+            session_id: session_id(),
+            thread_id: 4,
+            target_id: None,
+        };
+        assert_eq!(bare.into_parts().arguments, json!({"threadId": 4}));
+
+        let targeted = DebugStepInRequest {
+            session_id: session_id(),
+            thread_id: 4,
+            target_id: Some(11),
+        };
+        assert_eq!(
+            targeted.into_parts().arguments,
+            json!({"threadId": 4, "targetId": 11})
+        );
+    }
+
+    #[test]
+    fn debug_step_in_request_deserializes_target_id_camel_case_and_defaults_to_none() {
+        let with_target = json!({"sessionId": VALID_ID, "threadId": 1, "targetId": 7});
+        let request: DebugStepInRequest = serde_json::from_value(with_target).unwrap();
+        assert_eq!(request.target_id, Some(7));
+
+        let without_target = json!({"sessionId": VALID_ID, "threadId": 1});
+        let request: DebugStepInRequest = serde_json::from_value(without_target).unwrap();
+        assert_eq!(request.target_id, None);
+
+        let with_null_target = json!({"sessionId": VALID_ID, "threadId": 1, "targetId": null});
+        let request: DebugStepInRequest = serde_json::from_value(with_null_target).unwrap();
+        assert_eq!(request.target_id, None);
+    }
+
+    #[test]
+    fn debug_step_in_request_rejects_unknown_fields() {
+        let mut value = json!({"sessionId": VALID_ID, "threadId": 1});
+        value["singleThread"] = json!(true);
+        assert!(serde_json::from_value::<DebugStepInRequest>(value).is_err());
     }
 }

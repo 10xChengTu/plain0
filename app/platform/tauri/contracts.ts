@@ -848,6 +848,27 @@ export interface DebugContinueResult {
 	readonly allThreadsContinued: boolean;
 }
 
+/** `F210` S4: one DAP `StepInTarget` — only `id`/`label` are modeled, the two
+ * fields `debugStepIn`'s own `targetId` and the step-into-target QuickPick
+ * actually need. `id` is the opaque handle a follow-up `debugStepIn` call
+ * passes back as `targetId`; `label` is the human-readable description a
+ * QuickPick item shows (e.g. a call site's own text). */
+export interface DebugStepInTarget {
+	readonly id: number;
+	readonly label: string;
+}
+
+/** `debugStepInTargets`'s response — `truncated` is `true` when the adapter
+ * reported more targets than `src-tauri/src/debug/dto.rs`'s
+ * `MAX_DEBUG_STEP_IN_TARGETS` (256) allows through; a caller should show a
+ * visible "not every target is listed" notice rather than silently
+ * presenting a truncated list. An empty `targets` array (a line with no call
+ * to step into) is a normal, successful result, not an error. */
+export interface DebugStepInTargetsResult {
+	readonly targets: readonly DebugStepInTarget[];
+	readonly truncated: boolean;
+}
+
 /** `plain://debug-event`'s decoded payload — covers both real DAP events
  * (`event` is the bare DAP event name, e.g. `"stopped"`) and Plain's own
  * `plain/`-prefixed synthetic notifications (`"plain/sessionEnded"`,
@@ -2456,11 +2477,27 @@ export interface PlainBridge {
 	/** Steps over the current line ("step over"/`next` in DAP terms). */
 	debugNext(sessionId: string, threadId: number): Promise<void>;
 	/** Steps into the current line's call ("step into"/`stepIn` in DAP
-	 * terms). Never sends a `targetId` — the `stepInTargets` target picker
-	 * (gated by `Capabilities.supportsStepInTargetsRequest`) is out of scope;
-	 * see `plain-debug-call-stack-view.ts`'s own module doc for the full
-	 * reasoning. */
-	debugStepIn(sessionId: string, threadId: number): Promise<void>;
+	 * terms). `targetId` (`F210` S4) is `null` for the existing Step Into
+	 * *button* call path (`plain-debug-call-stack-view.ts`), which never
+	 * selects a target; a caller that resolved one via `debugStepInTargets`
+	 * (the "Plain: Step Into Target…" command, gated on
+	 * `Capabilities.supportsStepInTargetsRequest`) passes it through
+	 * instead. */
+	debugStepIn(
+		sessionId: string,
+		threadId: number,
+		targetId: number | null,
+	): Promise<void>;
+	/** `F210` S4: fetches the step-into targets available at stack frame
+	 * `frameId` (DAP's `stepInTargets` request) — the "Plain: Step Into
+	 * Target…" command's own data source, gated by the caller on
+	 * `Capabilities.supportsStepInTargetsRequest` before ever being called.
+	 * See `DebugStepInTargetsResult`'s own doc comment for the bounded-list/
+	 * truncation-flag response shape. */
+	debugStepInTargets(
+		sessionId: string,
+		frameId: number,
+	): Promise<DebugStepInTargetsResult>;
 	/** Steps out of the current function ("step out"/`stepOut` in DAP
 	 * terms). */
 	debugStepOut(sessionId: string, threadId: number): Promise<void>;

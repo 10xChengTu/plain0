@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type {
 	DebugEventPayload,
 	DebugSetBreakpointsResult,
+	DebugStepInTargetsResult,
 } from "../../app/platform/tauri/contracts";
 import { DebugBreakpointStore } from "../../app/features/debug/plain-debug-breakpoints";
 import {
@@ -85,6 +86,10 @@ function fakeBridge(
 		debugContinue: vi.fn(async () => ({ allThreadsContinued: true })),
 		debugNext: vi.fn(async () => {}),
 		debugStepIn: vi.fn(async () => {}),
+		debugStepInTargets: vi.fn(async (): Promise<DebugStepInTargetsResult> => ({
+			targets: [],
+			truncated: false,
+		})),
 		debugStepOut: vi.fn(async () => {}),
 		debugPause: vi.fn(async () => {}),
 		debugWatchEvent: vi.fn((listener) => {
@@ -427,7 +432,7 @@ describe("DebugSessionController", () => {
 		);
 	});
 
-	it("continue_/next/stepIn/stepOut/pause resolve to undefined/no-op with no live session, without calling the bridge", async () => {
+	it("continue_/next/stepIn/stepInTargets/stepOut/pause resolve to undefined/no-op with no live session, without calling the bridge", async () => {
 		const { bridge } = fakeBridge();
 		const controller = new DebugSessionController(
 			bridge,
@@ -437,11 +442,13 @@ describe("DebugSessionController", () => {
 		await expect(controller.continue_(1)).resolves.toBeUndefined();
 		await controller.next(1);
 		await controller.stepIn(1);
+		await expect(controller.stepInTargets(7)).resolves.toBeUndefined();
 		await controller.stepOut(1);
 		await controller.pause(1);
 		expect(bridge.debugContinue).not.toHaveBeenCalled();
 		expect(bridge.debugNext).not.toHaveBeenCalled();
 		expect(bridge.debugStepIn).not.toHaveBeenCalled();
+		expect(bridge.debugStepInTargets).not.toHaveBeenCalled();
 		expect(bridge.debugStepOut).not.toHaveBeenCalled();
 		expect(bridge.debugPause).not.toHaveBeenCalled();
 	});
@@ -462,13 +469,39 @@ describe("DebugSessionController", () => {
 		expect(bridge.debugNext).toHaveBeenCalledWith("session-1", 1);
 
 		await controller.stepIn(1);
-		expect(bridge.debugStepIn).toHaveBeenCalledWith("session-1", 1);
+		expect(bridge.debugStepIn).toHaveBeenCalledWith("session-1", 1, null);
 
 		await controller.stepOut(1);
 		expect(bridge.debugStepOut).toHaveBeenCalledWith("session-1", 1);
 
 		await controller.pause(1);
 		expect(bridge.debugPause).toHaveBeenCalledWith("session-1", 1);
+	});
+
+	it("stepIn forwards an explicit targetId, and stepInTargets delegates to the bridge scoped to the live session id", async () => {
+		const { bridge } = fakeBridge({
+			debugStepInTargets: vi.fn(
+				async (): Promise<DebugStepInTargetsResult> => ({
+					targets: [{ id: 3, label: "helper()" }],
+					truncated: false,
+				}),
+			),
+		});
+		const controller = new DebugSessionController(
+			bridge,
+			new DebugBreakpointStore(),
+		);
+		await controller.start(ROOT_ID, "launch", STDIO_TARGET, "debugpy", {});
+
+		await controller.stepIn(1, 3);
+		expect(bridge.debugStepIn).toHaveBeenCalledWith("session-1", 1, 3);
+
+		const result = await controller.stepInTargets(7);
+		expect(bridge.debugStepInTargets).toHaveBeenCalledWith("session-1", 7);
+		expect(result).toEqual({
+			targets: [{ id: 3, label: "helper()" }],
+			truncated: false,
+		});
 	});
 
 	it("disconnect clears state before awaiting the bridge call, and is a no-op with no live session", async () => {

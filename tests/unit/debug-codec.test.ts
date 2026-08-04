@@ -4,10 +4,13 @@ import {
 	decodeDebugAdapterConfirmationState,
 	decodeDebugAdapterConfirmationVoid,
 	decodeDebugContinueResult,
+	decodeDebugStepInTargetsResult,
 	decodeDebugStepVoid,
 	frozenDebugAdapterConfirmationRequest,
 	frozenDebugSessionStartRequest,
 	frozenDebugSetBreakpointsRequest,
+	frozenDebugStepInRequest,
+	frozenDebugStepInTargetsRequest,
 	frozenDebugThreadRequest,
 } from "../../app/platform/tauri/debug-codec";
 
@@ -294,5 +297,134 @@ describe("decodeDebugStepVoid", () => {
 		expect(() => decodeDebugStepVoid(null)).not.toThrow();
 		expect(() => decodeDebugStepVoid(undefined)).toThrow();
 		expect(() => decodeDebugStepVoid({})).toThrow();
+	});
+});
+
+// ---------------------------------------------------------------------
+// `F210` S4 — the `stepInTargets` target picker and `stepIn`'s own
+// `targetId` field.
+// ---------------------------------------------------------------------
+
+describe("frozenDebugStepInRequest", () => {
+	it("always includes the targetId key, null when absent", () => {
+		expect(frozenDebugStepInRequest(VALID_SESSION_ID, 7, null)).toEqual({
+			sessionId: VALID_SESSION_ID,
+			threadId: 7,
+			targetId: null,
+		});
+	});
+
+	it("encodes a well-formed non-null targetId", () => {
+		expect(frozenDebugStepInRequest(VALID_SESSION_ID, 7, 3)).toEqual({
+			sessionId: VALID_SESSION_ID,
+			threadId: 7,
+			targetId: 3,
+		});
+	});
+
+	it("rejects a non-integer threadId or targetId", () => {
+		expect(() =>
+			frozenDebugStepInRequest(VALID_SESSION_ID, 1.5, null),
+		).toThrow();
+		expect(() => frozenDebugStepInRequest(VALID_SESSION_ID, 1, 2.5)).toThrow();
+	});
+
+	it("rejects a malformed sessionId", () => {
+		expect(() => frozenDebugStepInRequest("not-a-uuid", 1, null)).toThrow();
+	});
+});
+
+describe("frozenDebugStepInTargetsRequest", () => {
+	it("encodes a well-formed sessionId/frameId pair", () => {
+		expect(frozenDebugStepInTargetsRequest(VALID_SESSION_ID, 9)).toEqual({
+			sessionId: VALID_SESSION_ID,
+			frameId: 9,
+		});
+	});
+
+	it("rejects a non-integer frameId", () => {
+		expect(() =>
+			frozenDebugStepInTargetsRequest(VALID_SESSION_ID, 1.5),
+		).toThrow();
+	});
+
+	it("rejects a malformed sessionId", () => {
+		expect(() => frozenDebugStepInTargetsRequest("not-a-uuid", 1)).toThrow();
+	});
+});
+
+describe("decodeDebugStepInTargetsResult", () => {
+	it("accepts a genuinely empty targets array", () => {
+		expect(
+			decodeDebugStepInTargetsResult({ targets: [], truncated: false }),
+		).toEqual({ targets: [], truncated: false });
+	});
+
+	it("accepts well-formed targets and preserves the truncated flag", () => {
+		expect(
+			decodeDebugStepInTargetsResult({
+				targets: [
+					{ id: 1, label: "quicksort(arr, lo, hi)" },
+					{ id: 2, label: "partition(arr, lo, hi)" },
+				],
+				truncated: true,
+			}),
+		).toEqual({
+			targets: [
+				{ id: 1, label: "quicksort(arr, lo, hi)" },
+				{ id: 2, label: "partition(arr, lo, hi)" },
+			],
+			truncated: true,
+		});
+	});
+
+	it("rejects extra or mistyped top-level fields", () => {
+		expect(() =>
+			decodeDebugStepInTargetsResult({
+				targets: [],
+				truncated: false,
+				extra: 1,
+			}),
+		).toThrow();
+		expect(() =>
+			decodeDebugStepInTargetsResult({ targets: [], truncated: "yes" }),
+		).toThrow();
+		expect(() => decodeDebugStepInTargetsResult(null)).toThrow();
+	});
+
+	it("rejects a target missing id/label or with a mistyped field", () => {
+		expect(() =>
+			decodeDebugStepInTargetsResult({
+				targets: [{ label: "x" }],
+				truncated: false,
+			}),
+		).toThrow();
+		expect(() =>
+			decodeDebugStepInTargetsResult({
+				targets: [{ id: 1 }],
+				truncated: false,
+			}),
+		).toThrow();
+		expect(() =>
+			decodeDebugStepInTargetsResult({
+				targets: [{ id: 1, label: 5 }],
+				truncated: false,
+			}),
+		).toThrow();
+	});
+
+	it("rejects more targets than the defensive ceiling", () => {
+		const targets = Array.from({ length: 257 }, (_unused, index) => ({
+			id: index,
+			label: `target${index}`,
+		}));
+		expect(() =>
+			decodeDebugStepInTargetsResult({ targets, truncated: true }),
+		).toThrow();
+	});
+
+	it("rejects a Proxy-wrapped response", () => {
+		const proxied = new Proxy({ targets: [], truncated: false }, {});
+		expect(() => decodeDebugStepInTargetsResult(proxied)).toThrow();
 	});
 });

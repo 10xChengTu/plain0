@@ -49,6 +49,7 @@ import type {
 	DebugScopesResult,
 	DebugSetBreakpointsResult,
 	DebugStackTraceResult,
+	DebugStepInTargetsResult,
 	DebugVariablesFilter,
 	DebugVariablesResult,
 	PlainBridge,
@@ -75,6 +76,7 @@ export type DebugSessionBridge = Pick<
 	| "debugContinue"
 	| "debugNext"
 	| "debugStepIn"
+	| "debugStepInTargets"
 	| "debugStepOut"
 	| "debugPause"
 	| "debugWatchEvent"
@@ -449,12 +451,30 @@ export class DebugSessionController {
 	}
 
 	/** Steps into the current line's call ("step into"/`stepIn` in DAP
-	 * terms). */
-	async stepIn(threadId: number): Promise<void> {
+	 * terms). `targetId` (`F210` S4) defaults to `null` — the existing Step
+	 * Into *button* (`plain-debug-call-stack-view.ts`) calls this with just
+	 * `threadId`, unchanged from before this slice; only the "Plain: Step
+	 * Into Target…" command (`plain-debug-commands.ts`) passes a real one,
+	 * resolved via {@link stepInTargets}. */
+	async stepIn(
+		threadId: number,
+		targetId: number | null = null,
+	): Promise<void> {
 		if (this.#state === null) {
 			return;
 		}
-		await this.#bridge.debugStepIn(this.#state.sessionId, threadId);
+		await this.#bridge.debugStepIn(this.#state.sessionId, threadId, targetId);
+	}
+
+	/** `F210` S4: fetches the step-into targets available at stack frame
+	 * `frameId` — the "Plain: Step Into Target…" command's own data source. */
+	async stepInTargets(
+		frameId: number,
+	): Promise<DebugStepInTargetsResult | undefined> {
+		if (this.#state === null) {
+			return undefined;
+		}
+		return this.#bridge.debugStepInTargets(this.#state.sessionId, frameId);
 	}
 
 	/** Steps out of the current function ("step out"/`stepOut` in DAP

@@ -260,7 +260,7 @@ const DIRECT_COMMAND_REGISTRATION_MANIFEST = Object.freeze([
 	}),
 	Object.freeze({
 		relativePath: "app/features/debug/plain-debug-commands.ts",
-		count: 3,
+		count: 4,
 	}),
 	Object.freeze({
 		relativePath: "app/features/search/plain-search-commands.ts",

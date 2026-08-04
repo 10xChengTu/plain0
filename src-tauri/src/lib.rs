@@ -265,6 +265,7 @@ pub fn run() {
             debug::commands::debug_continue,
             debug::commands::debug_next,
             debug::commands::debug_step_in,
+            debug::commands::debug_step_in_targets,
             debug::commands::debug_step_out,
             debug::commands::debug_pause,
             debug::commands::debug_output_ack,

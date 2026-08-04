@@ -373,6 +373,11 @@ interface TestDebugScope {
 	readonly indexedVariables: number | null;
 	readonly expensive: boolean;
 }
+/** `F210` S4 — one `stepInTargets` entry. */
+interface TestDebugStepInTarget {
+	readonly id: number;
+	readonly label: string;
+}
 interface TestDebugVariable {
 	readonly name: string;
 	readonly value: string;
@@ -449,6 +454,18 @@ interface TestDebugFixture {
 	 * feature's own acceptance criteria call out by name. Defaults to
 	 * `false` (every step command succeeds). */
 	readonly stepRequestsRejectedForTest?: boolean;
+	/** `F210` S4 — keyed by `frameId`; a missing key defaults to an empty
+	 * `targets` array (a line with no call to step into), not an error. This
+	 * fixture never simulates the real `MAX_DEBUG_STEP_IN_TARGETS`
+	 * truncation Rust enforces — `debug_step_in_targets` always reports
+	 * `truncated: false` here, mirroring `app/platform/tauri/browser-mock.ts`'s
+	 * own documented scope for the same reason (that real, considered
+	 * boundary is covered end to end against
+	 * `debug::dto::parse_step_in_targets_response` directly in
+	 * `src-tauri/src/debug/dto.rs`'s own tests). */
+	readonly stepInTargetsByFrame?: Readonly<
+		Record<number, readonly TestDebugStepInTarget[]>
+	>;
 }
 
 interface TestUntitledFixture {
@@ -4188,6 +4205,20 @@ async function installNativeIpcMock(
 							}
 							return { allThreadsContinued: true };
 						}
+						case "debug_step_in_targets": {
+							const stepInTargetsRequest = args.request as
+								{ sessionId?: string; frameId?: number } | undefined;
+							if (
+								!liveDebugSessions.has(stepInTargetsRequest?.sessionId ?? "")
+							) {
+								throw debugSessionNotFound();
+							}
+							const targets =
+								debugFixtureForTest.stepInTargetsByFrame?.[
+									stepInTargetsRequest?.frameId ?? -1
+								] ?? [];
+							return { targets, truncated: false };
+						}
 						case "debug_next":
 						case "debug_step_in":
 						case "debug_step_out":
@@ -7842,6 +7873,37 @@ async function executePaletteCommand(
 	await expect(command).toHaveCount(1);
 	await command.click();
 	await expect(palette).toBeHidden();
+}
+
+/**
+ * `F210` S4: identical to {@link executePaletteCommand} except it does *not*
+ * assert the command palette itself becomes hidden after invocation — for a
+ * command whose own async continuation immediately opens a *different*
+ * `IQuickInputService.pick` (this domain's own "Plain: Step Into Target…",
+ * once its `debugStepInTargets` fetch resolves), the follow-up picker reuses
+ * the exact same `.quick-input-widget` CSS class the command palette itself
+ * used, and — since the mock's fetch resolves same-tick, with no real
+ * network delay to separate the two — can already be showing again before
+ * `executePaletteCommand`'s own `toBeHidden()` assertion's polling window
+ * ever observes a truly-hidden state, an intermittent race that would
+ * otherwise fail this class of test. Every caller of this variant must
+ * assert its own specific follow-up UI state itself (a picker's own
+ * `placeholder`, a specific notification toast) rather than relying on this
+ * function for that.
+ */
+async function executePaletteCommandThatMayReopenAQuickInput(
+	page: Page,
+	query: string,
+	label: string,
+): Promise<void> {
+	await page.keyboard.press("ControlOrMeta+Shift+P");
+	const palette = page.locator(".quick-input-widget");
+	await expect(palette).toBeVisible();
+	await palette.locator("input").pressSequentially(query);
+
+	const command = palette.getByText(label, { exact: true });
+	await expect(command).toHaveCount(1);
+	await command.click();
 }
 
 async function installUntitledNativeIpcMock(
@@ -22843,13 +22905,16 @@ test("step control toolbar enables Continue/Step buttons only while stopped and 
 
 	// Meaningful interaction 2: Step Into/Step Out each send their own,
 	// distinct real request too — not just `next`.
+	// `F210` S4: the existing Step Into button's behavior is entirely
+	// unchanged — it still never selects a target, so `targetId` is `null`
+	// even though the wire request now always carries the key.
 	await stepInButton.click();
 	await expect
 		.poll(async () => (await terminalCallsFor(page, "debug_step_in")).length)
 		.toBe(1);
 	expect(
 		(await terminalCallsFor(page, "debug_step_in"))[0]!.args.request,
-	).toEqual({ sessionId, threadId: 1 });
+	).toEqual({ sessionId, threadId: 1, targetId: null });
 	await stepOutButton.click();
 	await expect
 		.poll(async () => (await terminalCallsFor(page, "debug_step_out")).length)
@@ -23208,6 +23273,225 @@ test("Debug Console acks every real output event it renders and shows an honest 
 	expect(
 		(await terminalCallsFor(page, "debug_output_ack"))[1]!.args.request,
 	).toEqual({ sessionId, sequence: 2 });
+
+	expect(pageErrors).toEqual([]);
+});
+
+// --- `F210` S4 "step-into target picker" ------------------------------------
+
+const STEP_IN_TARGET_STACK_FRAMES_FIXTURE = Object.freeze({
+	1: [
+		Object.freeze({
+			id: 10,
+			name: "main",
+			line: 6,
+			column: 0,
+			sourcePath: null,
+			sourceName: "main.py",
+		}),
+	],
+});
+
+test("Plain: Step Into Target… fetches real stepInTargets for the selected frame, shows a picker, and sends the chosen id to debug_step_in", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{ "main.py": DEBUG_MAIN_PY, ".vscode/launch.json": DEBUG_LAUNCH_JSON },
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{
+			capabilities: { supportsStepInTargetsRequest: true },
+			stackFramesByThread: STEP_IN_TARGET_STACK_FRAMES_FIXTURE,
+			stepInTargetsByFrame: {
+				10: [
+					{ id: 100, label: "add(3, 4)" },
+					{ id: 101, label: "helper()" },
+				],
+			},
+		},
+	);
+
+	const sessionId = await launchDebugSessionThroughBothDialogs(page);
+	await emitDebugTestEvent(page, sessionId, "stopped", {
+		threadId: 1,
+		reason: "breakpoint",
+	});
+	// Synchronizes on the call stack view's own real `debug_stack_trace`
+	// fetch/render completing (see `PlainDebugCallStackView#refresh`) — this
+	// is also what selects frame id 10, the frame this command must query
+	// `debug_step_in_targets` for below.
+	await expect(page.locator(".plain-debug-call-stack-view-frame")).toHaveCount(
+		1,
+	);
+
+	await executePaletteCommandThatMayReopenAQuickInput(
+		page,
+		"Step Into Target",
+		"Plain: Step Into Target…",
+	);
+
+	const picker = page.locator(".quick-input-widget");
+	await expect(picker.locator("input")).toHaveAttribute(
+		"placeholder",
+		"Select a step-into target",
+	);
+	const rows = picker.locator(".quick-input-list .monaco-list-row");
+	await expect(rows).toHaveCount(2);
+	const secondRow = rows.filter({ hasText: "helper()" });
+	await expect(secondRow).toHaveCount(1);
+	await secondRow.click();
+	await expect(picker).toBeHidden();
+
+	// The real `debug_step_in_targets` call was scoped to the selected frame
+	// (10), and the picker's own selection — the *second* target, not the
+	// first — drove the real `targetId` this domain sent.
+	expect(
+		(await terminalCallsFor(page, "debug_step_in_targets"))[0]!.args.request,
+	).toEqual({ sessionId, frameId: 10 });
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "debug_step_in")).length)
+		.toBe(1);
+	expect(
+		(await terminalCallsFor(page, "debug_step_in"))[0]!.args.request,
+	).toEqual({ sessionId, threadId: 1, targetId: 101 });
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("Plain: Step Into Target… reports an accurate message and issues zero IPC when the adapter's capabilities do not advertise support", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{ "main.py": DEBUG_MAIN_PY, ".vscode/launch.json": DEBUG_LAUNCH_JSON },
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{
+			// No `capabilities` override — defaults to `{}`, so
+			// `supportsStepInTargetsRequest` is not `true`.
+			stackFramesByThread: STEP_IN_TARGET_STACK_FRAMES_FIXTURE,
+		},
+	);
+
+	const sessionId = await launchDebugSessionThroughBothDialogs(page);
+	await emitDebugTestEvent(page, sessionId, "stopped", {
+		threadId: 1,
+		reason: "breakpoint",
+	});
+	await expect(page.locator(".plain-debug-call-stack-view-frame")).toHaveCount(
+		1,
+	);
+
+	await executePaletteCommand(
+		page,
+		"Step Into Target",
+		"Plain: Step Into Target…",
+	);
+
+	await expect(
+		page.locator(".notifications-toasts .notification-toast").filter({
+			hasText: "does not support step-into targets",
+		}),
+	).toHaveCount(1);
+	expect(await terminalCallsFor(page, "debug_step_in_targets")).toEqual([]);
+	expect(await terminalCallsFor(page, "debug_step_in")).toEqual([]);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("cancelling the step-into target picker sends no debug_step_in and leaves no other trace", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{ "main.py": DEBUG_MAIN_PY, ".vscode/launch.json": DEBUG_LAUNCH_JSON },
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{
+			capabilities: { supportsStepInTargetsRequest: true },
+			stackFramesByThread: STEP_IN_TARGET_STACK_FRAMES_FIXTURE,
+			stepInTargetsByFrame: {
+				10: [
+					{ id: 100, label: "add(3, 4)" },
+					{ id: 101, label: "helper()" },
+				],
+			},
+		},
+	);
+
+	const sessionId = await launchDebugSessionThroughBothDialogs(page);
+	await emitDebugTestEvent(page, sessionId, "stopped", {
+		threadId: 1,
+		reason: "breakpoint",
+	});
+	await expect(page.locator(".plain-debug-call-stack-view-frame")).toHaveCount(
+		1,
+	);
+
+	await executePaletteCommandThatMayReopenAQuickInput(
+		page,
+		"Step Into Target",
+		"Plain: Step Into Target…",
+	);
+	const picker = page.locator(".quick-input-widget");
+	await expect(picker.locator("input")).toHaveAttribute(
+		"placeholder",
+		"Select a step-into target",
+	);
+	await page.keyboard.press("Escape");
+	await expect(picker).toBeHidden();
+
+	// Fetching the real target list to populate the picker (a read) already
+	// happened by the time the picker appeared — cancellation's own "zero
+	// side effects" claim is about the mutating `stepIn` call it prevents,
+	// exactly like the launch-configuration picker's own cancellation test
+	// above (which likewise still reads `.vscode/launch.json` before its own
+	// picker appears).
+	expect(await terminalCallsFor(page, "debug_step_in_targets")).toHaveLength(1);
+	expect(await terminalCallsFor(page, "debug_step_in")).toEqual([]);
+	await expect(
+		page.locator(".notifications-toasts .notification-toast"),
+	).toHaveCount(0);
 
 	expect(pageErrors).toEqual([]);
 });

@@ -48,6 +48,14 @@ import type { DebugSessionState } from "./plain-debug-session";
  * the exact same `#onStateChanged` path a real `stopped` already drives
  * (see the module's own "复用 S3 的 stopped 事件联动" instruction).
  *
+ * `F210` S4 adds the `stepInTargets` target picker as its own separate
+ * command ("Plain: Step Into Target…", `plain-debug-commands.ts`) rather
+ * than a feature of this toolbar's Step Into *button* — that button's own
+ * `#stepIn` handler below is entirely unchanged by that slice and still
+ * never selects a target, matching every other baseline step-control button
+ * here (none of the five take a caller-chosen argument beyond the implicit
+ * thread).
+ *
  * No constructor parameter beyond `ViewPane`'s own base nine — this view
  * reports every error as inline status text (no `INotificationService`/
  * `IDialogService` needed), so it takes the same "zero own DI declarations,
@@ -189,10 +197,12 @@ export class PlainDebugCallStackView extends ViewPane {
 	 * real DAP defines `continue`/`next`/`stepIn`/`stepOut`/`pause` as
 	 * mandatory baseline requests every adapter must implement (unlike the
 	 * genuinely optional `stepInTargets` target picker, gated by
-	 * `supportsStepInTargetsRequest`, which this view does not build) — both
-	 * real adapters this project captured (`lldb-dap`/`debugpy`) confirm this:
-	 * neither reports any `supportsStepIn`/`supportsContinue`/etc. field at
-	 * all in its `initialize` response.
+	 * `supportsStepInTargetsRequest` — `F210` S4 builds that as its own
+	 * separate "Plain: Step Into Target…" command, not a feature of this
+	 * toolbar) — both real adapters this project captured
+	 * (`lldb-dap`/`debugpy`) confirm this: neither reports any
+	 * `supportsStepIn`/`supportsContinue`/etc. field at all in its
+	 * `initialize` response.
 	 */
 	#updateToolbar(state: DebugSessionState | null): void {
 		const stopped = state?.stoppedThreadId ?? null;

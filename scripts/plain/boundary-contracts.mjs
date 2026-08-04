@@ -23081,9 +23081,20 @@ const DEBUG_COMMAND_CONTRACTS = Object.freeze([
 		file: "src-tauri/src/debug/commands.rs",
 		name: "debug_step_in",
 		parameters:
-			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugThreadRequest",
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugStepInRequest",
 		returnType: "->Result<(),CommandError>",
 		body: "letquery=request.into_parts();debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments).await?;Ok(())",
+	},
+	// `F210` S4 — the `stepInTargets` target picker's own data source
+	// (`debug/commands.rs`'s own module doc, "`F210` S4's `stepInTargets`
+	// target picker" section).
+	{
+		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_step_in_targets",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugStepInTargetsRequest",
+		returnType: "->Result<DebugStepInTargetsResult,CommandError>",
+		body: "letquery=request.into_parts();letbody=debug_sessions.inner().send_request(window.label(),query.session_id,,query.arguments,).await?;dto::parse_step_in_targets_response(&body)",
 	},
 	{
 		file: "src-tauri/src/debug/commands.rs",
