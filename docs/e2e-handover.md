@@ -1,6 +1,6 @@
 # 端到端桌面验收交接清单（Codex 执行）
 
-更新时间：2026-08-04（E2E-025 已登记待执行；既有条目的完成或阻塞状态以各自小节为准）
+更新时间：2026-08-04（E2E-026 已登记待执行；既有条目的完成或阻塞状态以各自小节为准）
 
 ## 分工模式
 
@@ -659,6 +659,39 @@ fixture（本条专用临时目录，不使用真实开发仓库或用户密钥�
 
 完成后：将真实结果写入 `features.json` F190 的 `evidence`（`nativeScenarios`/`platformGaps`），并把 F190 状态改为 `complete`；随后 `progress.md`「当前最小工作项」切到 F200。
 
+### E2E-026 · F200 完整搜索工作流真实桌面矩阵（Cmd/Ctrl+Shift+F/H 真实键位、Aa/全字真实请求、捕获组模板 Replace All 真实落盘、越界组 fail-closed 零写入、大文件/二进制跳过提示、20,000 截断提示、真实 undo 回滚、进程清理）
+
+状态：**待执行**（按用户 2026-08-04 指示暂缓，与 `E2E-025` 攒批统一执行）。本条覆盖 `F200` S1–S3 全部三个切片累计的真实桌面面——Browser mock 已逐切片验证协议/状态机与 UI 文案正确性，但真实 OS 键位分发、真实磁盘字节级落盘/SHA 校验、真实 >8 MiB 文件与真实二进制文件判定、真实达到 20,000 条结果的截断路径与真实进程退出清理只能在真实 Tauri 桌面上验证。`F200` 已按用户指示例外收账转 `complete`（同 `F190` 模式）：不代表桌面验收已通过，本条通过后再回写 `features.json` F200 的 `evidence`（`nativeScenarios`/`platformGaps`/`acceptanceResults`）补齐桌面证据。
+
+前置条件：
+
+- 同 E2E-025：以系统工具优先 PATH 与 `APPLE_SIGNING_IDENTITY=-` 从当前工作树执行 `pnpm tauri:build:e2e`，只按仓库绝对路径启动新生成的 `src-tauri/target/debug/bundle/macos/Plain.app`；`codesign --verify --deep --strict` 通过后再取样。
+- 执行前确认真实空闲窗口（合成键盘遇真人键鼠活动即让位中止）。
+
+fixture（本条专用临时目录，不使用真实开发仓库）：
+
+- `tmp-f200-e2e/` 内一个已授权 workspace 根，预置若干带明显 pattern 的文本文件（用于普通匹配、大小写/全字场景）与一个含 `(\w+)-(\d+)` 可捕获组样式行的文件（用于捕获组模板验证）。
+- 一个真实 >8 MiB 的文本文件（如用 `dd`/脚本生成，内容含可搜索 pattern 若干行，确保不被判定为二进制）。
+- 一个真实二进制文件（如含 NUL 字节的专门生成文件，或仓库内已有的 PNG）。
+- 20,000 截断 fixture 策略：Rust `MAX_TEXT_SEARCH_RESULTS_HARD_CAP=20_000` 与前端 `MAX_TEXT_SEARCH_RESULTS=20_000` 均为硬编码常量，生产路径无运行时开关可调低。优先策略：脚本批量生成足量文件/行使真实命中数 ≥20,001（如数百个文件各含数十行同一 pattern），验证真实截断文案与结果集恰好停在 20,000 条；若生成开销过大导致验收不可行，退化策略为构建一个仅用于本条验收、临时把 `MAX_TEXT_SEARCH_RESULTS_HARD_CAP` 常量调低（如 20）的一次性 debug 版本单独复核截断文案语义本身（该构建不得复用为默认构建、不得混入常规 `tauri:build:e2e` 产物，验收后连同其 `target` 一并丢弃），但仍须在未修改阈值的正式构建上确认至少一次真实大规模 fixture 命中截断（退化策略只能补充证据、不能替代真实 20,000 场景）。执行者按实际开销二选一并在验收记录中写明采用哪种。
+
+步骤与断言：
+
+1. **真实键位打开聚焦**：从 Explorer 聚焦状态按下 `Cmd/Ctrl+Shift+F`，确认 Search 视图打开且搜索输入框获得真实系统焦点（键入字符立即出现在该输入框）；再次按下确认既有查询文本被全选（键入即替换而非追加）。切到其他视图后按 `Cmd/Ctrl+Shift+H`，确认 Search 视图打开且替换输入框获得真实焦点。
+2. **Aa/全字开关真实请求**：切换 Aa（大小写敏感）后输入一个大小写混合 pattern，确认结果集准确收窄为大小写完全匹配项；关闭 Aa 恢复不敏感匹配结果。切换 `ab|`（全字匹配）后输入一个是其他词子串的 pattern，确认结果集只保留独立单词匹配、排除子串匹配。
+3. **捕获组模板 Replace All 真实落盘**：正则模式输入 `(\w+)-(\d+)`，替换模板 `$2-$1`，对 fixture 中已打开与未打开的文件分别执行 Replace All；用真实 `shasum -a 256`/`wc -c` 核对磁盘文件替换后的精确字节数与 SHA-256，同时确认已打开编辑器的 buffer 内容与磁盘一致（不留未保存 dirty 状态）。
+4. **越界组 fail-closed 零写入**：替换模板改为引用不存在的捕获组（如 `$9`），执行 Replace All，确认目标文件磁盘内容/mtime/SHA 与替换前完全一致（真实核对，不只信 UI），且 UI 展示既有冲突提示。
+5. **真实大文件与二进制文件跳过**：对 fixture 中真实 >8 MiB 文件与二进制文件所在目录执行搜索，确认结果不包含二者内部命中，且 UI 准确展示「Skipped N binary and M oversized file(s)」（真实计数）。
+6. **20,000 结果截断提示**：按上方 fixture 策略产生真实达到或超过 20,000 条命中的搜索，确认 UI 展示结果已截断的准确提示且结果集条数恰好停在 20,000。
+7. **真实 undo 逐文件回滚**：字面量模式对两个已打开文件执行 Replace All 后，仅对其中一个文件执行 `Cmd/Ctrl+Z`，确认该文件内容精确回滚到替换前、变回 dirty，另一文件不受影响；正则捕获组模板替换同样验证一次 undo 精确回滚到展开前原文。
+8. **退出后零残留进程**：完成以上全部步骤后 `Cmd+Q`，用 `ps`/`pgrep` 精确核对没有残留的 Plain 进程或本条产生的任何后台/构建进程。
+
+证据要求：除 UI 观察外，步骤 3/4/5/6 需要至少一项文件系统层可核验证据（真实字节数/SHA-256/mtime/`ps` 计数），不得仅凭 UI 文案判定通过；发现的任何真实缺陷需按既有条目先修复代码、补自动化回归，再重跑受影响步骤，不得带着已知缺陷标记通过。
+
+清理：删除 `tmp-f200-e2e/` fixture（含生成的大文件/二进制文件/批量截断 fixture）、若采用退化调低阈值构建则额外删除该临时 debug 构建及其 `target`、`dist`、`test-results` 与 `src-tauri/target`；`git status --short` 确认工作树干净。
+
+完成后：将真实结果写入 `features.json` F200 的 `evidence`（`nativeScenarios`/`platformGaps`/`acceptanceResults`），补齐桌面证据（F200 已按例外收账处于 `complete`，无需再次改动状态）。
+
 ## 后续条目（随切片追加）
 
 - F030 遗留：真实 `CloseRequested` 关窗握手协议实现后，补「正常关窗 → 重开恢复」的桌面验收变体。
@@ -678,4 +711,5 @@ fixture（本条专用临时目录，不使用真实开发仓库或用户密钥�
 - F170 S4 New Window/Close Folder、双窗口 capability/dirty 隔离、稳定 backup 先于撤权、跨进程逐根恢复矩阵 E2E-022 已完成；F170 继续进入系统 Trash。
 - F170 S5 系统 Trash DOM 确认/取消、确认期间 identity 竞态、真实 Finder 废纸篓与“放回原处”恢复矩阵 E2E-023 已完成；F170 已整体关闭，唯一 WIP 切到 F180。
 - F180 remote/upstream、branch/tag、冲突/abort、真实 in-flight cancel、history rewrite、reflog/contributors、selected hunk 与进程/Recent 清理矩阵 E2E-024 已完成；F180 已整体关闭，唯一 WIP 切到 F190。
-- F190 S1–S6（profile/cwd、future-tab defaults、递归 split、OSC 7/8/133 与链接、终端查找、live scrollback、真实 exit banner 与不可恢复 marker）自动化两层已闭合；真实桌面 profile/cwd 冷启动持久化、OSC 真实注入与降级、链接 opener、split 上限、查找、live scrollback、真实 shell 退出/信号 banner、异常 kill 重启不可恢复说明、`SSH_AUTH_SOCK` 继承与零残留进程矩阵已登记为 E2E-025（**待执行**）；F190 保持 `in_progress`，唯一 WIP 待 E2E-025 通过后关闭并转入 F200。
+- F190 S1–S6（profile/cwd、future-tab defaults、递归 split、OSC 7/8/133 与链接、终端查找、live scrollback、真实 exit banner 与不可恢复 marker）自动化两层已闭合；真实桌面 profile/cwd 冷启动持久化、OSC 真实注入与降级、链接 opener、split 上限、查找、live scrollback、真实 shell 退出/信号 banner、异常 kill 重启不可恢复说明、`SSH_AUTH_SOCK` 继承与零残留进程矩阵已登记为 E2E-025（**待执行**）；按用户 2026-08-04 指示例外收账，F190 已转 `complete`，E2E-025 保持登记待执行、与后续 feature 的桌面矩阵攒批统一跑，唯一 WIP 切到 F200。
+- F200 S1–S3（搜索入口命令/快捷键与 case/word 开关、Rust 捕获组替换展开、正则能力背书与跳过/截断可见状态）自动化两层已闭合；真实桌面 `Cmd/Ctrl+Shift+F`/`Cmd/Ctrl+Shift+H` 键位打开聚焦、Aa/全字开关真实请求、正则捕获组模板 Replace All 真实落盘与越界组 fail-closed 零写入、真实 >8 MiB 大文件与二进制文件跳过提示、20,000 结果截断提示、真实 undo 逐文件回滚与退出后零残留进程矩阵已登记为 E2E-026（**待执行**）；按用户 2026-08-04 指示，E2E-026 与 E2E-025 一并暂缓、攒批统一执行，F200 同样按例外收账模式转 `complete`，唯一 WIP 切到 F210。

@@ -1096,19 +1096,55 @@
 			"id": "F200",
 			"name": "Complete search workflows",
 			"phase": 6,
-			"status": "in_progress",
+			"status": "complete",
 			"acceptance": [
 				"Search UI actions menus keybindings and quick-access entry points cover the promised local workflow",
 				"Replacement supports capture groups with version-safe multi-file coordination and undo semantics",
 				"Regex capability and unsupported constructs are explicit and test-backed",
 				"Large ignored binary oversized cancellation and conflict scenarios pass Browser and real Tauri E2E"
-			]
+			],
+			"evidence": {
+				"commands": ["pnpm check", "pnpm test:e2e:browser"],
+				"results": [
+					"S1 through S3 added Plain-owned Search: Find in Files / Replace in Files commands with Cmd/Ctrl+Shift+F and Cmd/Ctrl+Shift+H keybindings and session-scoped case-sensitive and whole-word toggles, a bounded Rust workspace_search_expand_replacements command that is the single regex authority for capture-group template expansion with fail-closed out-of-range-group and oversized-expansion handling, and directed Rust plus Browser coverage for the three PCRE2-only constructs alongside the already-wired skipped/truncation UI states and per-file undo semantics. Every slice passed its focused gates and was committed independently (8b2b7231, e269f02c, e9871ab2), following the plan frozen in docs/research/2026-08-04-complete-search.md (3b7ea8ba).",
+					"The final automated baseline passed 108 frontend test files and 2098 tests, a 2193-module production build, architecture over 112 app and 187 Rust sources with 17 pinned runtime dependencies, the 2008-source bundle audit with 53 tracked transitional sources, all-target Clippy and 1365/1365 Rust tests. The full Chromium matrix passed 151/151 including the scenarios added across F200's three slices."
+				],
+				"nativeScenarios": [
+					"E2E-004 and E2E-014 remain the completed real-desktop evidence for the underlying streaming text search, cancellation, layered ignore and versioned Replace All behaviours that F200 builds on.",
+					"E2E-026 is registered in docs/e2e-handover.md as the pending real Tauri matrix for the new F200 surfaces (Cmd/Ctrl+Shift+F and Cmd/Ctrl+Shift+H real keybinding dispatch and focus, Aa/whole-word toggles driving real requests, capture-group template Replace All real disk writes with byte and SHA verification, out-of-range group fail-closed zero writes, a real over-8-MiB file and a real binary file skip prompt, the real 20,000-result truncation prompt, real per-file undo rollback, and zero residual processes after quit). By explicit user decision on 2026-08-04 it is deferred and will be executed together with E2E-025 in a batched run; this completion is an exception-close and the desktop evidence will be backfilled."
+				],
+				"platformGaps": [
+					"The E2E-026 real desktop matrix is deferred by user decision and has not run yet; feature closure rests on the two automated tiers plus previously completed E2E-004/E2E-014 desktop evidence.",
+					"Per-file undo remains an intentional design choice with no cross-file undo grouping; it now has real Browser test backing but the semantics themselves are unchanged from before F200.",
+					"The % prefix TextSearchQuickAccess entry point is explicitly not registered, matching the F040 exclusion reaffirmed by the frozen F200 plan.",
+					"Out-of-range capture-group failures during Replace All surface the same generic file-changed-on-disk conflict messaging as a real version conflict, per the frozen plan's explicit reuse of the existing conflict UI rather than a distinct message.",
+					"Windows and Linux packaging, release signing and notarization remain outside this non-release completion phase."
+				],
+				"acceptanceResults": [
+					{
+						"acceptance": "Search UI actions menus keybindings and quick-access entry points cover the promised local workflow",
+						"result": "Achieved in the automated tiers. S1 registered plain.search.findInFiles and plain.search.replaceInFiles with Cmd/Ctrl+Shift+F and Cmd/Ctrl+Shift+H keybindings that open and focus the Search view's search or replace input without resetting an existing query or results, plus session-scoped Aa case-sensitive and whole-word toggle buttons wired into the existing debounced search path; the explicit % TextSearchQuickAccess exclusion from F040 is preserved by design. Real OS-level keybinding dispatch and toggle-driven native requests are part of the deferred E2E-026."
+					},
+					{
+						"acceptance": "Replacement supports capture groups with version-safe multi-file coordination and undo semantics",
+						"result": "Achieved in the automated tiers. S2 added the bounded, Rust-authoritative workspace_search_expand_replacements command that anchors each expectedText against the same compiled regex matcher used for search and expands $0/$1/.../$name templates through a from-scratch bounded tokenizer, failing closed per item on out-of-range or unparsable group references and on oversized expansions, while literal-mode replacement stays byte-for-byte verbatim. S3 added real Browser coverage proving that undoing a replaced file restores its exact prior content and dirty state without touching any other file's result. Real disk byte and SHA verification of capture-group writes, out-of-range fail-closed zero-write confirmation, and real undo rollback are part of the deferred E2E-026."
+					},
+					{
+						"acceptance": "Regex capability and unsupported constructs are explicit and test-backed",
+						"result": "Achieved. S3 added a directed Rust test asserting the three PCRE2-only constructs (lookahead, lookbehind, backreference) each return INVALID_SEARCH_REGEX with a non-empty, path-free message, and aligned both the Browser mock matcher and the Playwright regex compiler with the same pre-check so mock behaviour cannot silently diverge from the real grep-regex engine; the UI surfaces the resulting error message unchanged."
+					},
+					{
+						"acceptance": "Large ignored binary oversized cancellation and conflict scenarios pass Browser and real Tauri E2E",
+						"result": "Partially achieved pending E2E-026. Skipped-file and truncation counters were already wired end-to-end before F200, and S3 added Browser fixtures proving a binary file and an oversized file are both excluded from results while the view shows an accurate skipped-count message; capture-group and literal replace-conflict scenarios, including out-of-range groups and on-disk version conflicts, are covered with zero-write assertions in Browser. The real over-8-MiB file, real binary file, real 20,000-result truncation, and the real Tauri Replace All, undo and process-cleanup matrix are registered in the deferred E2E-026 per the explicit user decision and will be backfilled."
+					}
+				]
+			}
 		},
 		{
 			"id": "F210",
 			"name": "Complete generic debug workflows",
 			"phase": 6,
-			"status": "planned",
+			"status": "in_progress",
 			"acceptance": [
 				"Users can choose among launch configurations and route them to the correct root",
 				"Nested Watch hit-count breakpoints disassembly and supported step-in targets are implemented",
