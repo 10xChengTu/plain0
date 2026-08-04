@@ -1144,19 +1144,55 @@
 			"id": "F210",
 			"name": "Complete generic debug workflows",
 			"phase": 6,
-			"status": "in_progress",
+			"status": "complete",
 			"acceptance": [
 				"Users can choose among launch configurations and route them to the correct root",
 				"Nested Watch hit-count breakpoints disassembly and supported step-in targets are implemented",
 				"Spawn-then-connect TCP adapters have bounded readiness and lifecycle handling",
 				"Real debugpy and runnable native-adapter desktop matrices pass without process leaks"
-			]
+			],
+			"evidence": {
+				"commands": ["pnpm check", "pnpm test:e2e:browser"],
+				"results": [
+					"S1 through S6 delivered a launch-configuration QuickPick selector reusing the existing root-picker pattern with zero-effort cancellation, a shared variables-tree engine extracted from the Variables view and reused by Watch with per-expression expansion-path replay across re-evaluates, a hitCondition field threaded through the breakpoint descriptor, store, popup and the Rust LineBreakpointRequest DAP argument builder gated by supportsHitConditionalBreakpoints, a new debug_step_in_targets Rust command plus an optional targetId on debug_step_in surfaced through a capability-gated Plain: Step Into Target... command, a new debug_disassemble Rust command powering a read-only bounded ViewPane with address, bytes and instruction columns plus paging, and a third tcpSpawn transport variant with a bounded retry-with-backoff connect-after-spawn loop and dual-channel process-plus-stream teardown. Every slice passed its focused gates and was committed independently (111a2ae8, 5f6907c4, 8a75bc6d, 9638b4f1, 82fda181, b53de4ce), following the plan frozen in docs/research/2026-08-04-complete-debug.md (44c6a0c6).",
+					"The final automated baseline passed 113 frontend test files and 2172 tests, a 2200-module production build, architecture over 119 app and 187 Rust sources with 17 pinned runtime dependencies, the 2015-source bundle audit with 53 tracked transitional sources, all-target Clippy and 1398/1398 Rust tests. The full Chromium matrix passed 166/166 including every scenario added across F210's six slices."
+				],
+				"nativeScenarios": [
+					"E2E-010 and E2E-017 remain the completed real-desktop evidence for the underlying DAP client lifecycle, real debugpy breakpoint, stepping, stack, variables, Watch, Debug Console and runInTerminal flows, multi-root debug session routing and process cleanup that F210 builds on.",
+					"E2E-027 is registered in docs/e2e-handover.md as the pending real Tauri matrix for the six new F210 surfaces (multi-config launch QuickPick selection, real hitCondition hit-count breakpoint semantics, real nested Watch variablesReference expansion and pagination, a real capability check for step-in targets support, real debugpy spawn-then-connect via the tcpSpawn transport covering delayed port readiness and early process exit, and zero residual processes after quit), with its native lldb-dap half separately and doubly blocked. By explicit user decision on 2026-08-04 it is deferred and will be executed together with E2E-025 and E2E-026 in a batched run; this completion is an exception-close and the desktop evidence will be backfilled."
+				],
+				"platformGaps": [
+					"The E2E-027 real desktop matrix is deferred by user decision and has not run yet; feature closure rests on the two automated tiers plus previously completed E2E-010/E2E-017 desktop evidence.",
+					"The native lldb-dap half (disassembly and native step-in targets) is doubly blocked: batching-deferred like the rest of E2E-027, and independently blocked by the same com.apple.security.cs.debugger signing entitlement gap already recorded by E2E-010 step 3, since F120 explicitly decided not to add that entitlement; resolving the batching deferral alone will not unblock this half.",
+					"Whether debugpy itself advertises supportsStepInTargetsRequest is unconfirmed pending E2E-027; that matrix's step 4 records whichever real outcome is observed rather than assuming support either way.",
+					"The disassembly view is intentionally read-only and bounded (at most 200 instructions per request, no instruction breakpoints, no inline source interleaving) and the step-in target list is hard-capped with visible truncation; these are frozen design scope exclusions, not implementation gaps.",
+					"Windows and Linux packaging, release signing and notarization remain outside this non-release completion phase."
+				],
+				"acceptanceResults": [
+					{
+						"acceptance": "Users can choose among launch configurations and route them to the correct root",
+						"result": "Achieved in the automated tiers. S1's selectPlainLaunchConfiguration mirrors the existing selectPlainDebugRoot QuickPick pattern: zero configurations return undefined without invoking the picker, a single configuration auto-selects without a prompt, two or more require an explicit pick, and cancellation returns undefined with zero registry reads, zero confirmation dialogs and zero debug_launch IPC; the selected configuration's name is forwarded unchanged to the existing name-keyed prepareDebugAdapterLaunch. E2E-017's real multi-root debug routing evidence continues to cover root selection itself. Real multi-configuration QuickPick interaction on a real desktop is part of the deferred E2E-027."
+					},
+					{
+						"acceptance": "Nested Watch hit-count breakpoints disassembly and supported step-in targets are implemented",
+						"result": "Achieved in the automated tiers. S2 extracted the Variables view's recursive expand and paginate engine into a shared DebugVariablesTree reused by Watch with expansion-path capture, prune and restore across re-evaluates; S3 threaded hitCondition through the breakpoint descriptor, store, popup and the Rust LineBreakpointRequest DAP argument builder gated by supportsHitConditionalBreakpoints; S4 added the debug_step_in_targets Rust command and an optional targetId on debug_step_in behind a capability-gated QuickPick command with a hard cap on target list length; S5 added the bounded, read-only debug_disassemble command and ViewPane gated by supportsDisassembleRequest. Real debugpy hit-count semantics, real nested-object Watch expansion, and a real capability check for step-in targets support are part of the deferred E2E-027; real disassembly and native step-in target selection remain additionally blocked by the lldb-dap signing entitlement gap covered under acceptance 4."
+					},
+					{
+						"acceptance": "Spawn-then-connect TCP adapters have bounded readiness and lifecycle handling",
+						"result": "Achieved in the automated tiers. S6 added a third tcpSpawn AdapterTransportKind variant reusing the existing 200ms early-crash grace period from spawn_adapter_as_tcp_companion, followed by a bounded retry-with-backoff connect loop sharing the existing DEBUG_ADAPTER_TCP_CONNECT_TIMEOUT budget with immediate failure on early process exit; sessions hold both the process handle and the TCP stream, and every termination path shuts the stream down before killing and joining the process so neither channel leaks. Rust tests cover successful connect-after-delay, connect-timeout-with-kill and process-exited-before-listening with heartbeat-file proof of real process and port teardown; Browser E2E covers the confirm-dialog text, request shape and both failure notifications end-to-end. Real debugpy spawn-then-connect via its adapter --listen mode, covering genuine port-readiness delay and genuine early process exit, is part of the deferred E2E-027."
+					},
+					{
+						"acceptance": "Real debugpy and runnable native-adapter desktop matrices pass without process leaks",
+						"result": "Partially achieved pending E2E-027. E2E-010's real Python 3.12/debugpy 1.8.21 desktop matrix (breakpoints, stepping, stack, variables, Watch, Debug Console, runInTerminal, deep-stack and large-variable scenarios, output flood, and zero-residual-process shutdown) and E2E-017's real multi-root debug session routing, adapter cwd and process cleanup remain valid completed evidence that F210 builds on and are not being re-run. E2E-027 is registered in docs/e2e-handover.md as the pending real desktop matrix for the six new F210 surfaces (multi-config selection, real hitCondition hit counting, real nested Watch expansion, a real step-in-targets capability check, real debugpy tcpSpawn spawn-then-connect, and zero residual processes). Its native lldb-dap half (disassembly and native step-in targets) is doubly blocked: deferred with the rest of the batch, and independently blocked by the same com.apple.security.cs.debugger signing entitlement gap E2E-010 step 3 already recorded, since F120 explicitly decided not to add that entitlement; resolving the batching deferral alone will not unblock this half. Per the explicit user decision on 2026-08-04, this is an exception-close and the desktop evidence will be backfilled once E2E-027 executes."
+					}
+				]
+			}
 		},
 		{
 			"id": "F220",
 			"name": "Rust SSH remote workspace",
 			"phase": 6,
-			"status": "planned",
+			"status": "in_progress",
 			"acceptance": [
 				"Product scope architecture and ADRs explicitly define the Remote SSH trust and threat model",
 				"Rust owns SSH authentication host-key verification remote filesystem PTY Git and DAP transports",

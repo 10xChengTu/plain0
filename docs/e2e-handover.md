@@ -1,6 +1,6 @@
 # 端到端桌面验收交接清单（Codex 执行）
 
-更新时间：2026-08-04（E2E-026 已登记待执行；既有条目的完成或阻塞状态以各自小节为准）
+更新时间：2026-08-05（E2E-027 已登记待执行；既有条目的完成或阻塞状态以各自小节为准）
 
 ## 分工模式
 
@@ -692,6 +692,48 @@ fixture（本条专用临时目录，不使用真实开发仓库）：
 
 完成后：将真实结果写入 `features.json` F200 的 `evidence`（`nativeScenarios`/`platformGaps`/`acceptanceResults`），补齐桌面证据（F200 已按例外收账处于 `complete`，无需再次改动状态）。
 
+### E2E-027 · F210 完整通用调试工作流真实桌面矩阵（多配置选择器、hit-count 真实命中计数、嵌套 Watch 真实对象展开、step-in targets 能力核实、debugpy spawn-then-connect、退出零残留；lldb-dap 原生半边双重阻塞如实登记）
+
+状态：**待执行**（按用户 2026-08-04 指示暂缓，与 `E2E-025`/`E2E-026` 攒批统一执行）。本条覆盖 `F210` S1–S6 全部六个切片累计的真实桌面面——Browser mock 已逐切片验证协议/状态机与 UI 文案正确性（含 `debug_launch`/`debug_step_in_targets`/`debug_disassemble`/`tcpSpawn` 请求形状与能力门控），但真实多配置 `launch.json` 选择、真实 adapter 命中次数语义、真实嵌套对象引用展开、真实 stepInTargets 能力广播（或缺失）、真实 TCP spawn-then-connect 端口就绪竞态与进程早退、以及真实进程退出清理，只能在真实 Tauri 桌面上用真实 debugpy 验证。`F210` 已按用户指示例外收账转 `complete`（同 `F190`/`F200` 模式）：不代表桌面验收已通过，本条通过后再回写 `features.json` F210 的 `evidence`（`nativeScenarios`/`platformGaps`/`acceptanceResults`）补齐桌面证据。
+
+前置条件：
+
+- 同 E2E-025/E2E-026：以系统工具优先 PATH 与 `APPLE_SIGNING_IDENTITY=-` 从当前工作树执行 `pnpm tauri:build:e2e`，只按仓库绝对路径启动新生成的 `src-tauri/target/debug/bundle/macos/Plain.app`；`codesign --verify --deep --strict` 通过后再取样。
+- 执行前确认真实空闲窗口（合成键盘遇真人键鼠活动即让位中止）。
+- 执行机已安装真实 Python 3 与 `debugpy`（`python3 -m pip show debugpy` 可确认版本；`E2E-010` 已用 Python 3.12/debugpy 1.8.21 验证过同一路径，本条复用同一或更新版本，不重新采购）。
+- 原生 `lldb-dap` 半边（本条步骤 7 涉及的能力）继续受 `E2E-010` 步骤 3 已记录的同一签名前提阻塞（详见下方「已知边界」），执行前不需要额外准备原生 fixture。
+
+fixture（本条专用临时目录，不使用真实开发仓库或用户密钥；可部分复用 `E2E-010` 已验证过的 debugpy 目标程序构造方式）：
+
+- `tmp-f210-e2e/` 内一个真实 Python 调试目标，配套 `.vscode/launch.json` 含**两条**配置（如 `run-main`/`run-alt`，`type: "debugpy"`，`args`/`stopOnEntry` 等至少一个字段不同）与 `.plain/debug-adapters.json`（`type: "debugpy"`，`command` 指向真实 `python3` 绝对路径，`args: ["-m", "debugpy.adapter"]`），用于步骤 1。
+- 一个真实、含可预测循环的 Python 程序（如一个执行 5 次的循环，循环体内一行可断点语句），用于步骤 2 的 hit-count 验证（设置 `hitCondition: ">= 3"`，真实断言只在第 3 次循环命中）。
+- 一个真实、构造出至少两层嵌套且顶层含超过 100 个子元素的 Python 对象/字典（作为某函数局部变量或表达式），用于步骤 3 的嵌套 Watch 真实展开与分页验证。
+- 一份独立的 `.plain/debug-adapters.json` 条目，`transport` 使用 F210 S6 新增的 spawn-then-connect（`tcpSpawn`）变体，`command`/`args` 指向真实 `python3 -m debugpy.adapter --host 127.0.0.1 --port <port>`（端口用 Plain 自身既有的 TCP 传输配置字段填写，不使用 debugpy 打印的随机端口）；另准备一份用 `sh -c "sleep 2 && python3 -m debugpy.adapter --host 127.0.0.1 --port <port>"` 包一层、人为延迟绑定的变体（覆盖端口延迟就绪，延迟需小于 `DEBUG_ADAPTER_TCP_CONNECT_TIMEOUT` 即 5 秒），以及一份指向真实存在但会在绑定端口前立即报错退出的命令（如 `python3 -c "import sys; sys.exit(1)"`，覆盖进程早退）。
+
+步骤与断言：
+
+1. **多配置真实选择**：对上述两配置 fixture 执行 `Plain: Start Debugging`，经真实信任确认后断言真实弹出配置 QuickPick（恰好两行，展示 name/type），点选第二条后断言随即出现 adapter 确认弹框且其展示的命令行/参数与第二条配置一致，确认后真实 debugpy 会话按第二条配置的 `args`/`stopOnEntry` 启动（真实断点行为或立即停在入口，与配置内容核对而非假设）。
+2. **hit-count 真实命中计数**：对循环 fixture 的可断点行设置断点并通过 popup 填入 `hitCondition: ">= 3"`（真实 debugpy 支持的 DAP hit-condition 语义），Continue 运行，断言真实只在第 3 次循环命中断点停下（前两次不停），调用栈/变量视图显示的循环变量值与第 3 次迭代一致。
+3. **嵌套 Watch 真实展开**：对嵌套对象 fixture 添加 Watch 表达式，断言真实 `variablesReference` 驱动的树形展开能下钻到第二层，且顶层 100+ 子元素触发真实分页（`Load more…` 之后子元素数量与 fixture 构造的真实总数吻合），此后触发一次真实再次命中断点，确认展开路径无需用户重新点击即按名路径重放（与 S2 Browser 证据同源验证，但驱动源是真实 debugpy 而非 mock）。
+4. **step-in targets 能力核实**：对任意 fixture 触发一次真实 stopped 事件，执行 `Plain: Step Into Target…` 命令。**已知依赖，执行前必读**：debugpy 在本 feature 调研与实现阶段从未被确认是否广播 `supportsStepInTargetsRequest`；执行方应先如实核实真实 debugpy 会话上报的 capabilities（可临时在 Rust 侧加一行调试日志读取 `initialize` 响应，或通过已有开发者工具网络面板核对往返），据实际结果二选一记录：若 debugpy 确实不广播该能力，验证 S4 已实现的“能力缺失时准确提示且零 IPC”分支在真实 adapter 下同样成立（这本身就是对该代码路径的真实验证，只是不能覆盖“目标列表选择”这条 happy path），并如实记录“本机可用的真实 adapter 均不支持 stepInTargets，happy path 待原生 adapter 解除签名阻塞后补充”；若执行方能找到本机另一个真实支持该能力且不受 lldb-dap 签名阻塞的 DAP adapter，则额外用它验证 happy path 并作为正向新证据记录，但这不是本条目的强制要求。
+5. **debugpy spawn-then-connect：正常路径**：对 `tcpSpawn` 变体（无延迟版本）fixture 执行 `Plain: Start Debugging`，断言确认弹框文案准确展示“spawn 命令 + connect 到 host:port”（与 S6 Browser 证据的文案模式一致），确认后用 `ps` 核对真实 `python3 -m debugpy.adapter` 进程已被 spawn，且真实 DAP 会话通过 TCP（非 stdio）建立——设一个真实断点验证会话确实可用而非只是连上端口。
+6. **debugpy spawn-then-connect：延迟就绪与进程早退**：对延迟绑定变体，断言 Plain 不会在首次 `ECONNREFUSED` 时立即失败，而是在延迟期结束、端口真正监听后成功建立会话（`ps` 核对期间进程持续存活，之后真实连接成功）；对早退变体，断言弹出准确的 `processExitedBeforeListening`-类错误通知，`ps` 核对进程已退出且无残留会话（应用内 Debug 视图确认无活跃会话列出）。
+7. **lldb-dap 原生半边：如实记录双重阻塞，不强行跑通**：对一个原生编译目标尝试 `Plain: Start Debugging`（复用 `E2E-010` 步骤 3 已验证过的构造方式与已知挂起行为）。**本步骤预期不可完整验证**：即使执行机具备真实、非沙箱桌面环境，`lldb-dap` 的 `launch` 阶段会因为 Plain.app 当前构建缺少 `com.apple.security.cs.debugger` 签名 entitlement（`F120` 已裁定不加）而挂起或被系统拒绝——这直接导致 disassembly（`supportsDisassembleRequest`）和原生 step-in targets 两个 F210 新增能力完全无法触及 happy path，属于打包/签名层面的结构性阻塞，不是 F210 或本条目的回归。如实记录“阻塞于签名前提，未能验证”并停止本步骤，不得采取任何绕开系统安全边界的手段。
+8. **退出后零残留进程**：完成以上全部步骤后 `Cmd+Q`，用 `ps`/`pgrep` 精确核对没有残留的 Plain 进程、debugpy adapter/debuggee 子进程（含步骤 6 早退场景理论上不应残留、但仍需实测确认）或本条产生的任何后台进程。
+
+证据要求：每一步除 UI 观察外，需要至少一项 shell 层可核验证据（真实 `ps`、真实断点命中位置/变量值、真实 TCP 连接状态等），不得仅凭 UI 文案判定通过；发现的任何真实缺陷需按既有条目先修复代码、补自动化回归，再重跑受影响步骤，不得带着已知缺陷标记通过。
+
+已知边界（执行方须知）：
+
+- 步骤 7（`lldb-dap` 原生半边：disassembly、原生 step-in targets）是**双重阻塞**：其一，本条目整体按用户 2026-08-04 指示与 `E2E-025`/`E2E-026` 攒批暂缓，尚待执行；其二，即便执行方已经拿到批准去执行本条目，`lldb-dap` 这一半仍会独立受 `E2E-010` 步骤 3 已记录的同一签名 entitlement 前提阻塞（`F120` 明确裁定不加 `com.apple.security.cs.debugger`）——两层阻塞相互独立，解除第一层（用户批准执行）不会自动解除第二层（签名前提），执行方不应因为拿到批准就假设 lldb-dap 半边也能跑通。
+- disassembly（S5）的真实验收依赖同一个支持 `supportsDisassembleRequest` 的原生 adapter（`lldb-dap`），因此同样受上述双重阻塞约束，不单独设步骤——步骤 7 的记录同时覆盖 disassembly 与原生 step-in targets 两个缺口。
+- debugpy 是否广播 `supportsStepInTargetsRequest` 在本条目执行前不确定；步骤 4 的记录方式已考虑两种真实结果，执行方不应预设 debugpy 一定支持或一定不支持。
+- `spawn_adapter_as_tcp_companion`（F210 S6 新增的第三传输变体）目前只有 debugpy 是本项目验证过的真实 spawn-then-connect 目标；步骤 5/6 不需要额外验证 lldb-dap 或其他 adapter 的 TCP 变体。
+
+清理：删除 `tmp-f210-e2e/` fixture、真实编译出的原生调试目标产物（若步骤 7 生成过任何编译产物）、`dist`、`test-results` 与 `src-tauri/target`；`git status --short` 确认工作树干净。
+
+完成后：将真实结果写入 `features.json` F210 的 `evidence`（`nativeScenarios`/`platformGaps`/`acceptanceResults`），补齐桌面证据（F210 已按例外收账处于 `complete`，无需再次改动状态）。
+
 ## 后续条目（随切片追加）
 
 - F030 遗留：真实 `CloseRequested` 关窗握手协议实现后，补「正常关窗 → 重开恢复」的桌面验收变体。
@@ -713,3 +755,4 @@ fixture（本条专用临时目录，不使用真实开发仓库）：
 - F180 remote/upstream、branch/tag、冲突/abort、真实 in-flight cancel、history rewrite、reflog/contributors、selected hunk 与进程/Recent 清理矩阵 E2E-024 已完成；F180 已整体关闭，唯一 WIP 切到 F190。
 - F190 S1–S6（profile/cwd、future-tab defaults、递归 split、OSC 7/8/133 与链接、终端查找、live scrollback、真实 exit banner 与不可恢复 marker）自动化两层已闭合；真实桌面 profile/cwd 冷启动持久化、OSC 真实注入与降级、链接 opener、split 上限、查找、live scrollback、真实 shell 退出/信号 banner、异常 kill 重启不可恢复说明、`SSH_AUTH_SOCK` 继承与零残留进程矩阵已登记为 E2E-025（**待执行**）；按用户 2026-08-04 指示例外收账，F190 已转 `complete`，E2E-025 保持登记待执行、与后续 feature 的桌面矩阵攒批统一跑，唯一 WIP 切到 F200。
 - F200 S1–S3（搜索入口命令/快捷键与 case/word 开关、Rust 捕获组替换展开、正则能力背书与跳过/截断可见状态）自动化两层已闭合；真实桌面 `Cmd/Ctrl+Shift+F`/`Cmd/Ctrl+Shift+H` 键位打开聚焦、Aa/全字开关真实请求、正则捕获组模板 Replace All 真实落盘与越界组 fail-closed 零写入、真实 >8 MiB 大文件与二进制文件跳过提示、20,000 结果截断提示、真实 undo 逐文件回滚与退出后零残留进程矩阵已登记为 E2E-026（**待执行**）；按用户 2026-08-04 指示，E2E-026 与 E2E-025 一并暂缓、攒批统一执行，F200 同样按例外收账模式转 `complete`，唯一 WIP 切到 F210。
+- F210 S1–S6（launch 配置 QuickPick 选择器、共享 Watch/Variables 树展开、hit-count 断点、step-in targets、只读 disassembly 视图、tcpSpawn spawn-then-connect 编排）自动化两层已闭合；真实桌面多配置选择、真实 debugpy hit-count 命中计数、真实嵌套 Watch 对象展开、step-in targets 能力核实、真实 debugpy spawn-then-connect（覆盖端口延迟就绪与进程早退）与退出后零残留进程矩阵已登记为 E2E-027（**待执行**）；`lldb-dap` 原生半边（disassembly、原生 step-in targets）如实登记双重阻塞（攒批暂缓 + F120 签名 entitlement 前提，两者相互独立）。按用户 2026-08-04 指示，E2E-027 与 E2E-025/E2E-026 一并暂缓、攒批统一执行，F210 同样按例外收账模式转 `complete`，唯一 WIP 切到 F220。
