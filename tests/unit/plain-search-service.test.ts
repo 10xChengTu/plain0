@@ -93,6 +93,7 @@ function fakeBridge(
 		workspaceSearchTextPoll: notImplemented,
 		workspaceSearchTextCancel: notImplemented,
 		workspaceSearchTextWatch: notImplemented,
+		workspaceSearchExpandReplacements: notImplemented,
 		backupWrite: notImplemented,
 		backupReadAll: notImplemented,
 		backupDiscard: notImplemented,
@@ -309,6 +310,7 @@ function fakeTextSearchBridge(
 				wakeListener = undefined;
 			};
 		},
+		workspaceSearchExpandReplacements: notImplemented,
 		backupWrite: notImplemented,
 		backupReadAll: notImplemented,
 		backupDiscard: notImplemented,

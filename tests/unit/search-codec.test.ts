@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+	decodeWorkspaceSearchExpandReplacementsResult,
 	decodeWorkspaceSearchFilesResult,
 	decodeWorkspaceSearchTextPollResult,
 	decodeWorkspaceSearchTextStartResult,
 	decodeWorkspaceSearchTextWakeEvent,
+	frozenWorkspaceSearchExpandReplacementsRequest,
+	frozenWorkspaceSearchExpandReplacementsResult,
 	frozenWorkspaceSearchFilesRequest,
 	frozenWorkspaceSearchFilesResult,
 	frozenWorkspaceSearchTextCancelRequest,
@@ -473,5 +476,157 @@ describe("streaming text search codec (F040 S3)", () => {
 				expect.objectContaining(contractError),
 			);
 		}
+	});
+});
+
+// --- Capture-group replacement expansion (F200 S2) --------------------------
+
+describe("workspace_search_expand_replacements codec", () => {
+	it("builds a frozen own-data request with isRegExp hard-coded true", () => {
+		const request = frozenWorkspaceSearchExpandReplacementsRequest(
+			String.raw`(\w+)-(\d+)`,
+			false,
+			false,
+			"$2-$1",
+			["item-42"],
+		);
+		expect(request).toEqual({
+			pattern: String.raw`(\w+)-(\d+)`,
+			isRegExp: true,
+			isCaseSensitive: false,
+			isWordMatch: false,
+			replacementTemplate: "$2-$1",
+			expectedTexts: ["item-42"],
+		});
+		expect(Object.isFrozen(request)).toBe(true);
+	});
+
+	it("rejects an empty pattern or an oversized pattern/template", () => {
+		expect(() =>
+			frozenWorkspaceSearchExpandReplacementsRequest("", false, false, "$1", [
+				"x",
+			]),
+		).toThrowError(expect.objectContaining({ code: "INVALID_SEARCH_REQUEST" }));
+		expect(() =>
+			frozenWorkspaceSearchExpandReplacementsRequest(
+				"a".repeat(4_097),
+				false,
+				false,
+				"$1",
+				["x"],
+			),
+		).toThrowError(expect.objectContaining({ code: "INVALID_SEARCH_REQUEST" }));
+		expect(() =>
+			frozenWorkspaceSearchExpandReplacementsRequest(
+				"a",
+				false,
+				false,
+				"$".repeat(4_097),
+				["x"],
+			),
+		).toThrowError(expect.objectContaining({ code: "INVALID_SEARCH_REQUEST" }));
+	});
+
+	it("rejects an empty or oversized expectedTexts list as a shape violation", () => {
+		expect(() =>
+			frozenWorkspaceSearchExpandReplacementsRequest(
+				"a",
+				false,
+				false,
+				"$0",
+				[],
+			),
+		).toThrowError(expect.objectContaining({ code: "INVALID_SEARCH_REQUEST" }));
+		expect(() =>
+			frozenWorkspaceSearchExpandReplacementsRequest(
+				"a",
+				false,
+				false,
+				"$0",
+				Array.from({ length: 20_001 }, () => "x"),
+			),
+		).toThrowError(expect.objectContaining(contractError));
+	});
+
+	it("rejects a non-boolean isCaseSensitive/isWordMatch as a shape violation", () => {
+		for (const value of [
+			frozenWorkspaceSearchExpandReplacementsRequest.bind(
+				null,
+				"a",
+				"true",
+				false,
+				"$0",
+				["x"],
+			),
+			frozenWorkspaceSearchExpandReplacementsRequest.bind(
+				null,
+				"a",
+				false,
+				"true",
+				"$0",
+				["x"],
+			),
+		]) {
+			expect(value).toThrowError(
+				expect.objectContaining({ code: "INVALID_SEARCH_REQUEST" }),
+			);
+		}
+	});
+
+	it("decodes a well-formed ok/error item mix and rejects malformed shapes", () => {
+		const decoded = decodeWorkspaceSearchExpandReplacementsResult({
+			items: [
+				{ status: "ok", replacement: "42-item" },
+				{
+					status: "error",
+					code: "SEARCH_REPLACE_EXPAND_NO_MATCH",
+					message: "no match",
+				},
+			],
+		});
+		expect(decoded).toEqual({
+			items: [
+				{ status: "ok", replacement: "42-item" },
+				{
+					status: "error",
+					code: "SEARCH_REPLACE_EXPAND_NO_MATCH",
+					message: "no match",
+				},
+			],
+		});
+		expect(Object.isFrozen(decoded)).toBe(true);
+
+		for (const malformed of [
+			{ items: [{ status: "ok" }] },
+			{ items: [{ status: "ok", replacement: "x", extra: 1 }] },
+			{ items: [{ status: "error", code: "X" }] },
+			{ items: [{ status: "error", code: "", message: "x" }] },
+			{ items: [{ status: "unknown" }] },
+			{ items: [{ status: "ok", replacement: "x" }], extra: 1 },
+		]) {
+			expect(() =>
+				decodeWorkspaceSearchExpandReplacementsResult(malformed),
+			).toThrowError(expect.objectContaining(contractError));
+		}
+	});
+
+	it("frozenWorkspaceSearchExpandReplacementsResult round-trips ok/error items through the same decoder", () => {
+		const result = frozenWorkspaceSearchExpandReplacementsResult([
+			{ status: "ok", replacement: "42-item" },
+			{
+				status: "error",
+				code: "SEARCH_REPLACE_EXPAND_INVALID_GROUP",
+				message: "no such group",
+			},
+		]);
+		expect(result.items).toEqual([
+			{ status: "ok", replacement: "42-item" },
+			{
+				status: "error",
+				code: "SEARCH_REPLACE_EXPAND_INVALID_GROUP",
+				message: "no such group",
+			},
+		]);
+		expect(Object.isFrozen(result)).toBe(true);
 	});
 });

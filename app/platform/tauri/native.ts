@@ -104,10 +104,12 @@ import {
 	frozenDebugVariablesRequest,
 } from "./debug-codec";
 import {
+	decodeWorkspaceSearchExpandReplacementsResult,
 	decodeWorkspaceSearchFilesResult,
 	decodeWorkspaceSearchTextPollResult,
 	decodeWorkspaceSearchTextStartResult,
 	decodeWorkspaceSearchTextWakeEvent,
+	frozenWorkspaceSearchExpandReplacementsRequest,
 	frozenWorkspaceSearchFilesRequest,
 	frozenWorkspaceSearchTextCancelRequest,
 	frozenWorkspaceSearchTextPollRequest,
@@ -630,6 +632,26 @@ export function createNativeBridge(): PlainBridge {
 				disposed = true;
 				unlisten?.();
 			};
+		},
+		workspaceSearchExpandReplacements: async (
+			pattern,
+			isCaseSensitive,
+			isWordMatch,
+			replacementTemplate,
+			expectedTexts,
+		) => {
+			const request = frozenWorkspaceSearchExpandReplacementsRequest(
+				pattern,
+				isCaseSensitive,
+				isWordMatch,
+				replacementTemplate,
+				expectedTexts,
+			);
+			return decodeWorkspaceSearchExpandReplacementsResult(
+				await invoke<unknown>("workspace_search_expand_replacements", {
+					request,
+				}),
+			);
 		},
 		backupWrite: async (rootId, key, bytes) => {
 			const frame = encodeBackupWriteRequest(rootId, key, bytes);

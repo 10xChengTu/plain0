@@ -1,4 +1,6 @@
 import type {
+	WorkspaceSearchExpandReplacementItem,
+	WorkspaceSearchExpandReplacementsResult,
 	WorkspaceSearchFilesResult,
 	WorkspaceSearchFileEntry,
 	WorkspaceSearchTextBatch,
@@ -26,6 +28,15 @@ const TEXT_SEARCH_PREVIEW_MAX_UTF16_UNITS = 256;
  * batches a single poll response can ever contain (the channel itself never
  * buffers more than this many unconsumed). */
 const MAX_TEXT_SEARCH_BATCHES_PER_POLL = 512;
+// --- Capture-group replacement expansion (F200 S2) — mirrors
+// search::dto's exact wire constants; see src-tauri/src/search/dto.rs for
+// the authoritative values.
+const MAX_REPLACE_EXPAND_TEMPLATE_BYTES = 4_096;
+const MAX_REPLACE_EXPAND_EXPECTED_TEXT_BYTES = 4_096;
+const MAX_REPLACE_EXPAND_ENTRIES = 20_000;
+const MAX_REPLACE_EXPAND_OUTPUT_UNITS = 8_192;
+const MAX_REPLACE_EXPAND_ERROR_CODE_LENGTH = 128;
+const MAX_REPLACE_EXPAND_ERROR_MESSAGE_LENGTH = 512;
 const CONTRACT_ERROR_MESSAGE =
 	"Native IPC returned a payload that violates the Plain search contract.";
 
@@ -671,5 +682,156 @@ export function frozenWorkspaceSearchTextPollResult(
 		done,
 		limitHit,
 		skipped: { ...skipped },
+	});
+}
+
+// --- Capture-group replacement expansion (F200 S2) --------------------------
+
+function frozenReplacementTemplate(replacementTemplate: unknown): string {
+	if (
+		typeof replacementTemplate !== "string" ||
+		replacementTemplate.length > MAX_REPLACE_EXPAND_TEMPLATE_BYTES
+	) {
+		return requestViolation(
+			"INVALID_SEARCH_REQUEST",
+			"The workspace search replace expansion request is invalid.",
+		);
+	}
+	return replacementTemplate;
+}
+
+function frozenExpandReplaceExpectedTexts(
+	expectedTexts: unknown,
+): readonly string[] {
+	const snapshot = ownStringArraySnapshot(
+		expectedTexts,
+		MAX_REPLACE_EXPAND_ENTRIES,
+		MAX_REPLACE_EXPAND_EXPECTED_TEXT_BYTES,
+	);
+	if (snapshot.length === 0) {
+		return requestViolation(
+			"INVALID_SEARCH_REQUEST",
+			"The workspace search replace expansion request is invalid.",
+		);
+	}
+	return snapshot;
+}
+
+/**
+ * Validates and freezes a `workspace_search_expand_replacements` request's
+ * own-data fields, independent of transport — `isRegExp` is always `true`
+ * (this command only ever makes sense for a regex-mode search; see
+ * `WorkspaceBridge.workspaceSearchExpandReplacements`'s own doc comment), so
+ * it is a literal here rather than a caller-supplied argument.
+ */
+export function frozenWorkspaceSearchExpandReplacementsRequest(
+	pattern: unknown,
+	isCaseSensitive: unknown,
+	isWordMatch: unknown,
+	replacementTemplate: unknown,
+	expectedTexts: unknown,
+): Readonly<{
+	pattern: string;
+	isRegExp: true;
+	isCaseSensitive: boolean;
+	isWordMatch: boolean;
+	replacementTemplate: string;
+	expectedTexts: readonly string[];
+}> {
+	return Object.freeze({
+		pattern: frozenTextSearchPattern(pattern),
+		isRegExp: true as const,
+		isCaseSensitive: frozenStrictBoolean(isCaseSensitive),
+		isWordMatch: frozenStrictBoolean(isWordMatch),
+		replacementTemplate: frozenReplacementTemplate(replacementTemplate),
+		expectedTexts: frozenExpandReplaceExpectedTexts(expectedTexts),
+	});
+}
+
+function decodeExpandReplacementItem(
+	value: unknown,
+): WorkspaceSearchExpandReplacementItem {
+	if (!isPlainObject(value) || typeof value.status !== "string") {
+		return violation();
+	}
+	if (value.status === "ok") {
+		if (
+			!hasExactKeys(value, ["status", "replacement"]) ||
+			typeof value.replacement !== "string" ||
+			value.replacement.length > MAX_REPLACE_EXPAND_OUTPUT_UNITS
+		) {
+			return violation();
+		}
+		try {
+			rejectProxyObject(value);
+		} catch {
+			return violation();
+		}
+		return Object.freeze({
+			status: "ok" as const,
+			replacement: value.replacement,
+		});
+	}
+	if (
+		value.status !== "error" ||
+		!hasExactKeys(value, ["status", "code", "message"]) ||
+		typeof value.code !== "string" ||
+		value.code.length === 0 ||
+		value.code.length > MAX_REPLACE_EXPAND_ERROR_CODE_LENGTH ||
+		typeof value.message !== "string" ||
+		value.message.length === 0 ||
+		value.message.length > MAX_REPLACE_EXPAND_ERROR_MESSAGE_LENGTH
+	) {
+		return violation();
+	}
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze({
+		status: "error" as const,
+		code: value.code,
+		message: value.message,
+	});
+}
+
+/**
+ * Decodes a `workspace_search_expand_replacements` response: an own-data,
+ * exactly `{ items }` object whose every element is one own-data,
+ * status-tagged `WorkspaceSearchExpandReplacementItem`.
+ */
+export function decodeWorkspaceSearchExpandReplacementsResult(
+	value: unknown,
+): WorkspaceSearchExpandReplacementsResult {
+	if (!isPlainObject(value) || !hasExactKeys(value, ["items"])) {
+		return violation();
+	}
+	const items = ownObjectArraySnapshot(
+		value.items,
+		MAX_REPLACE_EXPAND_ENTRIES,
+		decodeExpandReplacementItem,
+	);
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze({ items });
+}
+
+/**
+ * Builds a frozen `workspace_search_expand_replacements` response directly,
+ * for the browser mock (which has no wire boundary to round-trip through).
+ */
+export function frozenWorkspaceSearchExpandReplacementsResult(
+	items: readonly WorkspaceSearchExpandReplacementItem[],
+): WorkspaceSearchExpandReplacementsResult {
+	return decodeWorkspaceSearchExpandReplacementsResult({
+		items: items.map((item) =>
+			item.status === "ok"
+				? { status: "ok", replacement: item.replacement }
+				: { status: "error", code: item.code, message: item.message },
+		),
 	});
 }

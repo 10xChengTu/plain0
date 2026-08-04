@@ -425,6 +425,27 @@ export interface WorkspaceSearchTextWakeEvent {
 	readonly searchId: string;
 }
 
+/**
+ * One `expectedTexts` entry's capture-group expansion outcome (F200 S2).
+ * `status: "ok"` carries the fully-expanded replacement text for that
+ * entry's template (`$1`…`$n`, `$0` for the whole match, `$$` for a literal
+ * `$`, `$name` for a named group). `status: "error"` means Rust could not
+ * anchor-rematch that entry's recorded match text against `pattern`, or the
+ * template referenced a capture group the pattern does not have, or the
+ * expanded text exceeded Rust's own per-entry size bound — the caller must
+ * treat that one entry's owning resource as a save conflict and write
+ * nothing to it (see `docs/research/2026-08-04-complete-search.md`'s "架构裁定
+ * 2"; `plain-replace-coordinator.ts`'s template-mode branch is the one
+ * consumer of this).
+ */
+export type WorkspaceSearchExpandReplacementItem =
+	| Readonly<{ status: "ok"; replacement: string }>
+	| Readonly<{ status: "error"; code: string; message: string }>;
+
+export interface WorkspaceSearchExpandReplacementsResult {
+	readonly items: readonly WorkspaceSearchExpandReplacementItem[];
+}
+
 // --- Terminal (F070 "IPC 改造": render-state frames + structured input) -----
 
 /** Wire projection of `terminal::shell_integration::ShellIntegrationStatus`
@@ -1664,6 +1685,23 @@ export interface PlainBridge {
 	 * arrive after the fact).
 	 */
 	workspaceSearchTextWatch(listener: (searchId: string) => void): Unlisten;
+	/**
+	 * Expands `replacementTemplate`'s `$1`…`$n`/`$0`/`$$`/`$name` capture-group
+	 * references against each of `expectedTexts` (F200 S2) by anchored
+	 * re-matching every entry with the exact same regex pipeline
+	 * `workspaceSearchTextStart` uses — `pattern` is always treated as a
+	 * regex here (only a regex-mode search ever produces capture groups to
+	 * expand; a literal-mode search never calls this). One entry's
+	 * `status: "error"` never fails the whole call; the caller must not
+	 * write that entry's owning resource.
+	 */
+	workspaceSearchExpandReplacements(
+		pattern: string,
+		isCaseSensitive: boolean,
+		isWordMatch: boolean,
+		replacementTemplate: string,
+		expectedTexts: readonly string[],
+	): Promise<WorkspaceSearchExpandReplacementsResult>;
 	workspaceWriteFile(
 		rootId: string,
 		relativePath: string,

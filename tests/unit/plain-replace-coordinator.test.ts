@@ -1,11 +1,13 @@
 import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
 	replaceSearchMatches,
+	type ExpandedReplacement,
 	type ReplaceBulkEditService,
 	type ReplaceFileModels,
 	type ReplaceModelHandle,
+	type ReplacementInput,
 	type ReplaceTarget,
 } from "../../app/features/search/plain-replace-coordinator";
 
@@ -24,6 +26,14 @@ function target(path: string, startColumn = 1, endColumn = 7): ReplaceTarget {
 		},
 		expectedText: "needle",
 	};
+}
+
+/** Wraps a bare replacement string as literal-mode input — the exact
+ * pre-`F200`-S2 call shape, now spelled explicitly since
+ * `replaceSearchMatches`'s fourth parameter also has to carry the
+ * regex-mode `ReplaceExpander` branch. */
+function literal(text: string): ReplacementInput {
+	return { kind: "literal", text };
 }
 
 interface FakeEnvironment {
@@ -113,14 +123,14 @@ function createFakeEnvironment(): FakeEnvironment {
 	};
 }
 
-describe("replaceSearchMatches", () => {
+describe("replaceSearchMatches (literal mode)", () => {
 	it("returns an empty outcome for no targets, without calling apply or save", async () => {
 		const env = createFakeEnvironment();
 		const outcome = await replaceSearchMatches(
 			env.bulkEditService,
 			env.fileModels,
 			[],
-			"replacement",
+			literal("replacement"),
 		);
 		expect(outcome.perResource.size).toBe(0);
 		expect(env.applyCalls).toHaveLength(0);
@@ -135,7 +145,7 @@ describe("replaceSearchMatches", () => {
 			env.bulkEditService,
 			env.fileModels,
 			[target("/a.ts")],
-			"replacement",
+			literal("replacement"),
 		);
 
 		expect(outcome.perResource.get(resource("/a.ts").toString())).toEqual({
@@ -158,7 +168,7 @@ describe("replaceSearchMatches", () => {
 			env.bulkEditService,
 			env.fileModels,
 			[target("/a.ts", 1, 7), target("/a.ts", 20, 26)],
-			"x",
+			literal("x"),
 		);
 
 		expect(env.applyCalls).toHaveLength(1);
@@ -166,7 +176,7 @@ describe("replaceSearchMatches", () => {
 		expect(env.saveCalls).toHaveLength(1);
 	});
 
-	it("uses the provided replacement text verbatim in every edit", async () => {
+	it("uses the provided replacement text verbatim in every edit — including a literal $1 that a template branch would otherwise expand", async () => {
 		const env = createFakeEnvironment();
 		env.registerModel("/a.ts");
 
@@ -174,13 +184,13 @@ describe("replaceSearchMatches", () => {
 			env.bulkEditService,
 			env.fileModels,
 			[target("/a.ts")],
-			"needle -> reed",
+			literal("needle -> $1 reed"),
 		);
 
 		const edits = env.applyCalls[0] as Array<{
 			textEdit: { text: string; range: unknown };
 		}>;
-		expect(edits[0]?.textEdit.text).toBe("needle -> reed");
+		expect(edits[0]?.textEdit.text).toBe("needle -> $1 reed");
 		expect(edits[0]?.textEdit.range).toEqual({
 			startLineNumber: 1,
 			startColumn: 1,
@@ -197,7 +207,7 @@ describe("replaceSearchMatches", () => {
 			env.bulkEditService,
 			env.fileModels,
 			[target("/a.ts")],
-			"x",
+			literal("x"),
 		);
 
 		expect(outcome.perResource.get(resource("/a.ts").toString())).toEqual({
@@ -213,7 +223,7 @@ describe("replaceSearchMatches", () => {
 			env.bulkEditService,
 			env.fileModels,
 			[target("/a.ts")],
-			"x",
+			literal("x"),
 		);
 
 		expect(outcome.perResource.get(resource("/a.ts").toString())).toEqual({
@@ -230,7 +240,7 @@ describe("replaceSearchMatches", () => {
 			env.bulkEditService,
 			env.fileModels,
 			[target("/never-registered.ts")],
-			"x",
+			literal("x"),
 		);
 
 		expect(
@@ -246,7 +256,7 @@ describe("replaceSearchMatches", () => {
 			env.bulkEditService,
 			env.fileModels,
 			[target("/changed.ts")],
-			"replacement",
+			literal("replacement"),
 		);
 
 		expect(outcome.perResource.get(resource("/changed.ts").toString())).toEqual(
@@ -266,7 +276,7 @@ describe("replaceSearchMatches", () => {
 			env.bulkEditService,
 			env.fileModels,
 			[target("/ok.ts"), target("/conflict.ts"), target("/broken.ts")],
-			"x",
+			literal("x"),
 		);
 
 		expect(outcome.perResource.get(resource("/ok.ts").toString())).toEqual({
@@ -297,8 +307,182 @@ describe("replaceSearchMatches", () => {
 			env.bulkEditService,
 			env.fileModels,
 			[target("/a.ts")],
-			"x",
+			literal("x"),
 		);
 		expect(Object.isFrozen(outcome)).toBe(true);
+	});
+});
+
+describe("replaceSearchMatches (template mode, F200 S2)", () => {
+	function expanderReturning(results: readonly ExpandedReplacement[]): {
+		expand: ReplacementInput & { kind: "template" };
+		calls: string[][];
+	} {
+		const calls: string[][] = [];
+		const expand: ReplacementInput & { kind: "template" } = {
+			kind: "template",
+			async expand(expectedTexts) {
+				calls.push([...expectedTexts]);
+				return results;
+			},
+		};
+		return { expand, calls };
+	}
+
+	it("does not call expand at all for zero targets", async () => {
+		const env = createFakeEnvironment();
+		const expand = vi.fn();
+		const outcome = await replaceSearchMatches(
+			env.bulkEditService,
+			env.fileModels,
+			[],
+			{ kind: "template", expand },
+		);
+		expect(outcome.perResource.size).toBe(0);
+		expect(expand).not.toHaveBeenCalled();
+	});
+
+	it("calls expand exactly once with every target's expectedText in order, and applies each target's own expanded text", async () => {
+		const env = createFakeEnvironment();
+		env.registerModel("/a.ts");
+		const { expand, calls } = expanderReturning([
+			{ status: "ok", replacement: "42-item" },
+		]);
+
+		const outcome = await replaceSearchMatches(
+			env.bulkEditService,
+			env.fileModels,
+			[target("/a.ts")],
+			expand,
+		);
+
+		expect(calls).toEqual([["needle"]]);
+		expect(outcome.perResource.get(resource("/a.ts").toString())).toEqual({
+			status: "replaced",
+		});
+		const edits = env.applyCalls[0] as Array<{
+			textEdit: { text: string };
+		}>;
+		expect(edits[0]?.textEdit.text).toBe("42-item");
+	});
+
+	it("applies a distinct expanded replacement per target when a resource has multiple matches", async () => {
+		const env = createFakeEnvironment();
+		env.registerModel("/a.ts");
+		const { expand } = expanderReturning([
+			{ status: "ok", replacement: "first" },
+			{ status: "ok", replacement: "second" },
+		]);
+
+		await replaceSearchMatches(
+			env.bulkEditService,
+			env.fileModels,
+			[target("/a.ts", 1, 7), target("/a.ts", 20, 26)],
+			expand,
+		);
+
+		expect(env.applyCalls).toHaveLength(1);
+		const edits = env.applyCalls[0] as Array<{
+			textEdit: { text: string };
+		}>;
+		expect(edits.map((edit) => edit.textEdit.text)).toEqual([
+			"first",
+			"second",
+		]);
+	});
+
+	it("degrades a resource with any failing expansion entry to a zero-write conflict, reusing the existing conflict outcome", async () => {
+		const env = createFakeEnvironment();
+		env.registerModel("/a.ts");
+		const { expand } = expanderReturning([
+			{
+				status: "error",
+				code: "SEARCH_REPLACE_EXPAND_INVALID_GROUP",
+				message: "no such group",
+			},
+		]);
+
+		const outcome = await replaceSearchMatches(
+			env.bulkEditService,
+			env.fileModels,
+			[target("/a.ts")],
+			expand,
+		);
+
+		expect(outcome.perResource.get(resource("/a.ts").toString())).toEqual({
+			status: "conflict",
+		});
+		expect(env.applyCalls).toHaveLength(0);
+		expect(env.saveCalls).toHaveLength(0);
+	});
+
+	it("degrades the whole resource even when only one of several targets in it fails to expand", async () => {
+		const env = createFakeEnvironment();
+		env.registerModel("/a.ts");
+		const { expand } = expanderReturning([
+			{ status: "ok", replacement: "first" },
+			{
+				status: "error",
+				code: "SEARCH_REPLACE_EXPAND_NO_MATCH",
+				message: "no match",
+			},
+		]);
+
+		const outcome = await replaceSearchMatches(
+			env.bulkEditService,
+			env.fileModels,
+			[target("/a.ts", 1, 7), target("/a.ts", 20, 26)],
+			expand,
+		);
+
+		expect(outcome.perResource.get(resource("/a.ts").toString())).toEqual({
+			status: "conflict",
+		});
+		expect(env.applyCalls).toHaveLength(0);
+	});
+
+	it("isolates a failing resource's expansion from a sibling resource that expands and replaces successfully", async () => {
+		const env = createFakeEnvironment();
+		env.registerModel("/ok.ts");
+		env.registerModel("/broken.ts");
+		const { expand } = expanderReturning([
+			{ status: "ok", replacement: "fine" },
+			{
+				status: "error",
+				code: "SEARCH_REPLACE_EXPAND_NO_MATCH",
+				message: "no match",
+			},
+		]);
+
+		const outcome = await replaceSearchMatches(
+			env.bulkEditService,
+			env.fileModels,
+			[target("/ok.ts"), target("/broken.ts")],
+			expand,
+		);
+
+		expect(outcome.perResource.get(resource("/ok.ts").toString())).toEqual({
+			status: "replaced",
+		});
+		expect(outcome.perResource.get(resource("/broken.ts").toString())).toEqual({
+			status: "conflict",
+		});
+		expect(env.applyCalls).toHaveLength(1);
+	});
+
+	it("throws if the expander returns a different number of results than targets requested (contract violation, not a normal failure)", async () => {
+		const env = createFakeEnvironment();
+		env.registerModel("/a.ts");
+		const { expand } = expanderReturning([]);
+
+		await expect(
+			replaceSearchMatches(
+				env.bulkEditService,
+				env.fileModels,
+				[target("/a.ts")],
+				expand,
+			),
+		).rejects.toThrow();
+		expect(env.applyCalls).toHaveLength(0);
 	});
 });

@@ -6508,6 +6508,100 @@ export function validateSearchTextCommandRegistration(rustSources) {
 }
 
 /**
+ * Locks F200 S2's capture-group replacement expansion command
+ * (`workspace_search_expand_replacements`) to its audited exact signature,
+ * body and single `generate_handler!` registration — the third search
+ * command added to the closed set `validateSearchCommandRegistration`/
+ * `validateSearchTextCommandRegistration` already exact-body-pin one/three
+ * commands of, respectively; a new, unaudited search command (or a silent
+ * edit to this one bypassing its DTO decode or its single
+ * `replace::expand_replacements` route) fails this check rather than only
+ * being caught by chance in review.
+ */
+export function validateSearchExpandReplacementsCommandRegistration(
+	rustSources,
+) {
+	const failures = [];
+	const commandsSource = findRustSource(
+		rustSources,
+		"src-tauri/src/search/commands.rs",
+	);
+	const libSource = findRustSource(rustSources, "src-tauri/src/lib.rs");
+
+	if (commandsSource === undefined) {
+		return [
+			"search expand-replacements command boundary requires search/commands.rs",
+		];
+	}
+	const executableCommands = stripRustCommentsAndLiterals(commandsSource);
+	const commands = extractAuditedTauriCommands(
+		executableCommands,
+		"workspace_search_expand_replacements",
+	);
+	if (commands.length !== 1) {
+		failures.push(
+			"search/commands.rs must define exactly one audited workspace_search_expand_replacements Tauri command",
+		);
+	} else {
+		const [command] = commands;
+		const normalizedParameters = command.parameters
+			.replaceAll(/\s+/g, "")
+			.replace(/,$/, "");
+		const expectedParameters =
+			"request:WorkspaceSearchExpandReplacementsRequest";
+		const expectedReturn =
+			"->Result<WorkspaceSearchExpandReplacementsResult,CommandError>";
+		if (
+			normalizedParameters !== expectedParameters ||
+			command.returnType.replaceAll(/\s+/g, "") !== expectedReturn
+		) {
+			failures.push(
+				"workspace_search_expand_replacements must accept request: WorkspaceSearchExpandReplacementsRequest and return Result<WorkspaceSearchExpandReplacementsResult, CommandError>",
+			);
+		}
+		const normalizedBody = command.body
+			.replaceAll(/\s+/g, "")
+			.replace(/;$/, "");
+		if (
+			normalizedBody !==
+			"letquery=request.into_parts()?;replace::expand_replacements(query)"
+		) {
+			failures.push(
+				"workspace_search_expand_replacements must contain only its DTO decode and a single replace::expand_replacements route",
+			);
+		}
+	}
+
+	if (libSource === undefined) {
+		failures.push(
+			"search expand-replacements command boundary requires src-tauri/src/lib.rs",
+		);
+		return failures;
+	}
+	const executableLib = stripRustCommentsAndLiterals(libSource);
+	const handlerBodies = [
+		...executableLib.matchAll(
+			/\.invoke_handler\s*\(\s*tauri\s*::\s*generate_handler\s*!\s*\[([\s\S]*?)\]\s*\)/g,
+		),
+	];
+	const commandPath =
+		/\bsearch\s*::\s*commands\s*::\s*workspace_search_expand_replacements\b/g;
+	const registrations = [...executableLib.matchAll(commandPath)];
+	const registeredInHandler =
+		handlerBodies.length === 1 &&
+		/\bsearch\s*::\s*commands\s*::\s*workspace_search_expand_replacements\b/.test(
+			handlerBodies[0][1],
+		);
+	if (registrations.length !== 1 || !registeredInHandler) {
+		failures.push(
+			"src-tauri/src/lib.rs must register search::commands::workspace_search_expand_replacements exactly once in generate_handler",
+		);
+	}
+
+	return failures;
+}
+
+/**
  * Locks `search/file_search.rs`'s traversal budget constants to their
  * audited exact values, mirroring `WORKSPACE_COPY_LIMITS`/
  * `WORKSPACE_DELETE_LIMITS`: a silent widening of either constant must fail

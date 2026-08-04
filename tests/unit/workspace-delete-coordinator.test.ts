@@ -221,6 +221,9 @@ function testBridge(
 		workspaceSearchTextWatch() {
 			return () => {};
 		},
+		async workspaceSearchExpandReplacements() {
+			throw new Error("unused");
+		},
 		async backupWrite() {
 			throw new Error("unused");
 		},

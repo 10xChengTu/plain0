@@ -41,6 +41,7 @@ import {
 	validateMultiDiffEditorOverrideImportBoundary,
 	validateProductConfigurationBoundary,
 	validateSearchCommandRegistration,
+	validateSearchExpandReplacementsCommandRegistration,
 	validateSearchFileBudgetConstants,
 	validateSearchOverrideImportBoundary,
 	validateSearchTextBudgetConstants,
@@ -862,6 +863,11 @@ for (const failure of validateSearchFileBudgetConstants(rustSources)) {
 	fail(failure);
 }
 for (const failure of validateSearchTextCommandRegistration(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateSearchExpandReplacementsCommandRegistration(
+	rustSources,
+)) {
 	fail(failure);
 }
 for (const failure of validateSearchTextBudgetConstants(rustSources)) {

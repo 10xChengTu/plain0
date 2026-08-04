@@ -6,11 +6,12 @@ use crate::error::CommandError;
 use crate::workspace::service::WorkspaceService;
 
 use super::dto::{
-    SearchId, WorkspaceSearchFilesRequest, WorkspaceSearchFilesResult,
-    WorkspaceSearchTextCancelRequest, WorkspaceSearchTextPollRequest,
-    WorkspaceSearchTextPollResult, WorkspaceSearchTextStartRequest, WorkspaceSearchTextStartResult,
-    WorkspaceSearchTextWakeEvent,
+    SearchId, WorkspaceSearchExpandReplacementsRequest, WorkspaceSearchExpandReplacementsResult,
+    WorkspaceSearchFilesRequest, WorkspaceSearchFilesResult, WorkspaceSearchTextCancelRequest,
+    WorkspaceSearchTextPollRequest, WorkspaceSearchTextPollResult, WorkspaceSearchTextStartRequest,
+    WorkspaceSearchTextStartResult, WorkspaceSearchTextWakeEvent,
 };
+use super::replace;
 
 /// Window-targeted wake hint for the streaming text search protocol (F040
 /// S3). Mirrors `workspace::commands::WORKSPACE_WATCH_WAKE_EVENT`'s own
@@ -74,4 +75,15 @@ pub(crate) async fn workspace_search_text_cancel(
     service
         .inner()
         .search_text_cancel(window.label(), request.search_id())
+}
+
+/// F200 S2: bounded, pure computation — no `WorkspaceService`, no window, no
+/// `rootId`. See `search::replace`'s module doc for the anchored-re-match/
+/// fail-closed-capture-group design this routes to.
+#[tauri::command]
+pub(crate) async fn workspace_search_expand_replacements(
+    request: WorkspaceSearchExpandReplacementsRequest,
+) -> Result<WorkspaceSearchExpandReplacementsResult, CommandError> {
+    let query = request.into_parts()?;
+    replace::expand_replacements(query)
 }

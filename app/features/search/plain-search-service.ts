@@ -27,6 +27,7 @@ import { SearchService } from "@codingame/monaco-vscode-search-service-override/
 
 import type {
 	PlainBridge,
+	WorkspaceSearchExpandReplacementItem,
 	WorkspaceSearchTextBatch,
 } from "../../platform/tauri/contracts";
 import { normalizeCommandError } from "../../platform/tauri/errors";
@@ -66,6 +67,37 @@ function requireBridge(): PlainBridge {
 		);
 	}
 	return configuredBridge;
+}
+
+/**
+ * `F200` S2: expands `replacementTemplate`'s `$1`…`$n`/`$0`/`$$`/`$name`
+ * capture-group references against each of `expectedTexts`, in the same
+ * order, via the Rust `workspace_search_expand_replacements` command — the
+ * single regex authority for this expansion (see
+ * `docs/research/2026-08-04-complete-search.md`'s "架构裁定 2"). A thin
+ * pass-through over `requireBridge()`, kept here (rather than inline in
+ * `plain-search-view.ts`) so every bridge access for the search domain stays
+ * behind this one module's `configurePlainSearchBridge` gate, matching
+ * `fileSearch`/`textSearch`'s own precedent above. `plain-search-view.ts`
+ * passes this (curried with the current pattern/case/word state) as
+ * `plain-replace-coordinator.ts`'s `ReplaceExpander` for a regex-mode
+ * replace.
+ */
+export async function expandReplacementTemplate(
+	pattern: string,
+	isCaseSensitive: boolean,
+	isWordMatch: boolean,
+	replacementTemplate: string,
+	expectedTexts: readonly string[],
+): Promise<readonly WorkspaceSearchExpandReplacementItem[]> {
+	const result = await requireBridge().workspaceSearchExpandReplacements(
+		pattern,
+		isCaseSensitive,
+		isWordMatch,
+		replacementTemplate,
+		expectedTexts,
+	);
+	return result.items;
 }
 
 /**

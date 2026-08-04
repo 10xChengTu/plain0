@@ -216,6 +216,7 @@ pub fn run() {
             search::commands::workspace_search_text_start,
             search::commands::workspace_search_text_poll,
             search::commands::workspace_search_text_cancel,
+            search::commands::workspace_search_expand_replacements,
             backup::commands::backup_write,
             backup::commands::backup_read_all,
             backup::commands::backup_discard,

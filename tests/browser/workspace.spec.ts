@@ -1437,6 +1437,170 @@ async function installNativeIpcMock(
 				}
 				return { pending, limitHit, skippedBinary, skippedOversize };
 			};
+
+			// --- Capture-group replacement expansion (F200 S2) ---------------------
+			//
+			// A from-scratch JS-equivalent of `search::replace::expand_replacements`
+			// (`src-tauri/src/search/replace.rs`) and its browser-mock twin
+			// (`app/platform/tauri/browser-mock.ts`'s `expandWorkspaceSearchReplacements`):
+			// builds the same word/case-wrapped matcher `compileTextSearchMatcher`
+			// uses but with no "g" flag (a single anchored full-string match, never
+			// iteration), tokenizes the template, and resolves each `$`-reference
+			// itself so an out-of-range group reference fails closed instead of
+			// silently becoming an empty string.
+			const compileExpandReplaceMatcher = (
+				pattern: string,
+				isCaseSensitive: boolean,
+				isWordMatch: boolean,
+			): RegExp => {
+				const wrapped = isWordMatch ? `\\b(?:${pattern})\\b` : pattern;
+				try {
+					return new RegExp(wrapped, isCaseSensitive ? "u" : "iu");
+				} catch {
+					throw invalidSearchRegex();
+				}
+			};
+			type ExpandTemplateToken =
+				| { readonly kind: "literal"; readonly text: string }
+				| { readonly kind: "ref"; readonly ref: string };
+			const EXPAND_TEMPLATE_REF_CHAR = /[0-9A-Za-z_]/;
+			const tokenizeExpandTemplate = (
+				template: string,
+			): ExpandTemplateToken[] => {
+				const tokens: ExpandTemplateToken[] = [];
+				let index = 0;
+				let literalStart = 0;
+				while (index < template.length) {
+					if (template[index] !== "$") {
+						index += 1;
+						continue;
+					}
+					if (literalStart < index) {
+						tokens.push({
+							kind: "literal",
+							text: template.slice(literalStart, index),
+						});
+					}
+					if (template[index + 1] === "$") {
+						tokens.push({ kind: "literal", text: "$" });
+						index += 2;
+						literalStart = index;
+						continue;
+					}
+					const braced = template[index + 1] === "{";
+					const nameStart = index + 1 + (braced ? 1 : 0);
+					let cursor = nameStart;
+					while (
+						cursor < template.length &&
+						EXPAND_TEMPLATE_REF_CHAR.test(template[cursor]!)
+					) {
+						cursor += 1;
+					}
+					if (cursor === nameStart || (braced && template[cursor] !== "}")) {
+						tokens.push({ kind: "literal", text: "$" });
+						index += 1;
+						literalStart = index;
+						continue;
+					}
+					tokens.push({ kind: "ref", ref: template.slice(nameStart, cursor) });
+					index = braced ? cursor + 1 : cursor;
+					literalStart = index;
+				}
+				if (literalStart < template.length) {
+					tokens.push({ kind: "literal", text: template.slice(literalStart) });
+				}
+				return tokens;
+			};
+			const MAX_EXPAND_REPLACE_OUTPUT_UNITS = 8_192;
+			const searchReplaceExpandNoMatch = () => ({
+				code: "SEARCH_REPLACE_EXPAND_NO_MATCH",
+				message:
+					"The recorded match text no longer matches the search pattern.",
+			});
+			const searchReplaceExpandInvalidGroup = () => ({
+				code: "SEARCH_REPLACE_EXPAND_INVALID_GROUP",
+				message:
+					"The replacement template references a capture group the pattern does not have.",
+			});
+			const searchReplaceExpandTooLarge = () => ({
+				code: "SEARCH_REPLACE_EXPAND_TOO_LARGE",
+				message: "The expanded replacement text is too large.",
+			});
+			interface ExpandReplacementItem {
+				status: "ok" | "error";
+				replacement?: string;
+				code?: string;
+				message?: string;
+			}
+			const expandSearchReplacements = (request: {
+				pattern?: string;
+				isRegExp?: boolean;
+				isCaseSensitive?: boolean;
+				isWordMatch?: boolean;
+				replacementTemplate?: string;
+				expectedTexts?: readonly string[];
+			}): { items: ExpandReplacementItem[] } => {
+				if (
+					request.isRegExp !== true ||
+					typeof request.pattern !== "string" ||
+					typeof request.replacementTemplate !== "string" ||
+					!Array.isArray(request.expectedTexts)
+				) {
+					throw invalidSearchRequest();
+				}
+				const matcher = compileExpandReplaceMatcher(
+					request.pattern,
+					request.isCaseSensitive ?? false,
+					request.isWordMatch ?? false,
+				);
+				const tokens = tokenizeExpandTemplate(request.replacementTemplate);
+				const items = request.expectedTexts.map(
+					(expectedText): ExpandReplacementItem => {
+						const match = matcher.exec(expectedText);
+						if (
+							match === null ||
+							match.index !== 0 ||
+							match[0].length !== expectedText.length
+						) {
+							return { status: "error", ...searchReplaceExpandNoMatch() };
+						}
+						let output = "";
+						for (const token of tokens) {
+							let addition: string;
+							if (token.kind === "literal") {
+								addition = token.text;
+							} else if (/^\d+$/.test(token.ref)) {
+								const groupIndex = Number(token.ref);
+								if (groupIndex >= match.length) {
+									return {
+										status: "error",
+										...searchReplaceExpandInvalidGroup(),
+									};
+								}
+								addition = match[groupIndex] ?? "";
+							} else {
+								const groups = match.groups ?? {};
+								if (!Object.hasOwn(groups, token.ref)) {
+									return {
+										status: "error",
+										...searchReplaceExpandInvalidGroup(),
+									};
+								}
+								addition = groups[token.ref] ?? "";
+							}
+							if (
+								output.length + addition.length >
+								MAX_EXPAND_REPLACE_OUTPUT_UNITS
+							) {
+								return { status: "error", ...searchReplaceExpandTooLarge() };
+							}
+							output += addition;
+						}
+						return { status: "ok", replacement: output };
+					},
+				);
+				return { items };
+			};
 			const bytesFromHex = (hex: string): Uint8Array => {
 				const bytes = new Uint8Array(hex.length / 2);
 				for (let index = 0; index < bytes.length; index += 1) {
@@ -3610,6 +3774,22 @@ async function installNativeIpcMock(
 							}
 							activeTextSearch = undefined;
 							return null;
+						}
+						case "workspace_search_expand_replacements": {
+							const search = args.request as
+								| {
+										pattern?: string;
+										isRegExp?: boolean;
+										isCaseSensitive?: boolean;
+										isWordMatch?: boolean;
+										replacementTemplate?: string;
+										expectedTexts?: readonly string[];
+								  }
+								| undefined;
+							if (search === undefined) {
+								throw invalidSearchRequest();
+							}
+							return expandSearchReplacements(search);
 						}
 						case "workspace_read_file": {
 							const relativePath = request?.relativePath ?? "";
@@ -13086,6 +13266,24 @@ async function nativeWriteFileCalls(page: Page): Promise<
 	});
 }
 
+/** Every recorded `__PLAIN_TEST_TAURI_CALLS__` invocation of `command`, in
+ * order — a generic counterpart to `nativeWriteFileCalls` for assertions
+ * that need the raw request body of a command other than
+ * `workspace_write_file`. */
+async function nativeCallsFor(
+	page: Page,
+	command: string,
+): Promise<readonly TestTauriInvocation[]> {
+	return page.evaluate((command) => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+		};
+		return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(
+			(call) => call.command === command,
+		);
+	}, command);
+}
+
 test("replaces every match across multiple files (one already open in an editor) and saves through the versioned write chain", async ({
 	page,
 }) => {
@@ -13830,6 +14028,302 @@ test("case-sensitivity and whole-word toggles default off, matching pre-F200 cas
 		expect(call.args.request).toMatchObject({
 			isCaseSensitive: false,
 			isWordMatch: false,
+		});
+	}
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+// --- F200 S2: capture-group replacement expansion (docs/research/2026-08-04-complete-search.md "架构裁定 2") ---
+
+test("Replace All with a capture-group template ($2-$1) transforms every match exactly, for both an already-open and an unopened file", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported", {
+		"swap-open.txt": "item-42 stays put\n",
+		"swap-closed.txt": "value-7 alone\n",
+	});
+	const explorer = await openNativeWorkspaceExplorer(page);
+
+	// One file is already open before the search+replace even starts (proves
+	// the capture-group-expanded edit both reuses an already-resolved, live
+	// editor model *and* resolves a never-opened one for the first time),
+	// mirroring the plain (non-template) replace test's own precedent above.
+	await explorer
+		.getByRole("treeitem", { name: "swap-open.txt", exact: true })
+		.dblclick();
+	await expect(
+		page.getByRole("code").filter({ hasText: "item-42 stays put" }),
+	).toBeVisible();
+
+	await page.getByRole("tab", { name: /^Search/ }).click();
+	const searchInput = page.locator(".plain-search-view-input");
+	const replaceInput = page.locator(".plain-search-view-replace-input");
+	const status = page.locator(".plain-search-view-status");
+	const messages = page.locator(".plain-search-view-messages");
+	const fileGroups = page.locator(".plain-search-view-file");
+
+	await page.locator(".plain-search-view-regex-toggle").check();
+	await searchInput.pressSequentially(String.raw`(\w+)-(\d+)`);
+	await expect(status).toHaveText("2 results in 2 files", { timeout: 5_000 });
+	await expect(fileGroups).toHaveCount(2);
+
+	await replaceInput.fill("$2-$1");
+	await page.locator(".plain-search-view-replace-all").click();
+
+	await expect(fileGroups).toHaveCount(0, { timeout: 5_000 });
+	await expect(messages).toHaveText("Replaced 2 matches.");
+
+	// The already-open editor's live buffer reflects the capture-group swap
+	// and is clean again (saved, not just edited in memory).
+	await expect(
+		page.getByRole("code").filter({ hasText: "42-item stays put" }),
+	).toBeVisible();
+	const activeTab = page.locator(".tabs-container .tab.active");
+	await expect(activeTab).not.toHaveClass(/dirty/);
+
+	const writes = await nativeWriteFileCalls(page);
+	expect(writes).toHaveLength(2);
+	const byPath = new Map(
+		writes.map((write) => [write.request.relativePath, write.contentHex]),
+	);
+	expect(byPath.get("swap-open.txt")).toBe(hexOfText("42-item stays put\n"));
+	expect(byPath.get("swap-closed.txt")).toBe(hexOfText("7-value alone\n"));
+
+	// The expansion itself routed through Rust's single regex authority
+	// (`workspace_search_expand_replacements`), not a parallel JS `RegExp`
+	// implementation in the Workbench.
+	const expandCalls = await nativeCallsFor(
+		page,
+		"workspace_search_expand_replacements",
+	);
+	expect(expandCalls.length).toBeGreaterThanOrEqual(1);
+	for (const call of expandCalls) {
+		expect(call.args.request).toMatchObject({
+			isRegExp: true,
+			replacementTemplate: "$2-$1",
+		});
+	}
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("an out-of-range capture group in the template degrades the whole file to a zero-write conflict with the standard Reload/Save As/Details UI", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported", {
+		"single-group.txt": "uniqueneedle123 stays\n",
+	});
+	await openNativeWorkspaceExplorer(page);
+
+	await page.getByRole("tab", { name: /^Search/ }).click();
+	const searchInput = page.locator(".plain-search-view-input");
+	const replaceInput = page.locator(".plain-search-view-replace-input");
+	const status = page.locator(".plain-search-view-status");
+	const messages = page.locator(".plain-search-view-messages");
+	const fileGroups = page.locator(".plain-search-view-file");
+
+	// The pattern has exactly one capture group; the template references a
+	// second one that does not exist. A distinctive literal keyword (rather
+	// than a broad `\w+`) keeps this match unique across the whole fixture
+	// tree `installNativeIpcMock` already populates.
+	await page.locator(".plain-search-view-regex-toggle").check();
+	await searchInput.pressSequentially("(uniqueneedle123)");
+	await expect(status).toHaveText("1 result in 1 file", { timeout: 5_000 });
+
+	await replaceInput.fill("$1-$2");
+	await page.locator(".plain-search-view-replace-all").click();
+
+	// Zero-write conflict, not a partial rewrite: the file's group and match
+	// both remain, with the exact same pre-flight-conflict UI (never a real
+	// save attempt) the stale-search-coordinates test above already
+	// establishes — reusing that same `{ status: "conflict" }` branch is the
+	// frozen "复用既有冲突分支" decision, so the notification text is
+	// necessarily the generic "file changed on disk" wording even though the
+	// real cause here is an out-of-range capture group, not an actual
+	// on-disk change.
+	await expect(fileGroups).toHaveCount(1, { timeout: 5_000 });
+	await expect(
+		fileGroups
+			.filter({ hasText: "single-group.txt" })
+			.locator(".plain-search-view-file-error"),
+	).toContainText("failed to save");
+	await expect(messages).toHaveText("1 replacement failed to save.");
+
+	const toasts = page.locator(".notifications-toasts .notification-toast");
+	await expect(toasts).toHaveCount(1);
+	await expect(toasts.first()).toContainText(
+		"The file changed on disk after these search results were produced.",
+	);
+	await expect(
+		toasts.first().getByRole("button", { name: "Reload", exact: true }),
+	).toHaveCount(1);
+	await expect(
+		toasts.first().getByRole("button", { name: "Save As...", exact: true }),
+	).toHaveCount(1);
+	await expect(
+		toasts.first().getByRole("button", { name: "Retry", exact: true }),
+	).toHaveCount(0);
+
+	const writes = await nativeWriteFileCalls(page);
+	expect(writes).toHaveLength(0);
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([
+		"Failed to replace 'single-group.txt'. The file changed on disk after these search results were produced.",
+	]);
+});
+
+test("literal (non-regex) mode still applies replacement text containing $1 completely verbatim, byte-for-byte", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported", {
+		"literal-dollar.txt": "needle here\n",
+	});
+	await openNativeWorkspaceExplorer(page);
+
+	await page.getByRole("tab", { name: /^Search/ }).click();
+	const searchInput = page.locator(".plain-search-view-input");
+	const replaceInput = page.locator(".plain-search-view-replace-input");
+	const status = page.locator(".plain-search-view-status");
+	const messages = page.locator(".plain-search-view-messages");
+
+	// The regex checkbox is left unchecked — this is a plain literal search.
+	await searchInput.pressSequentially("needle");
+	await expect(status).toHaveText("1 result in 1 file", { timeout: 5_000 });
+
+	await replaceInput.fill("$1 literal, not a group");
+	await page.locator(".plain-search-view-replace-all").click();
+
+	await expect(messages).toHaveText("Replaced 1 match.");
+
+	const writes = await nativeWriteFileCalls(page);
+	expect(writes).toHaveLength(1);
+	expect(writes[0]!.request.relativePath).toBe("literal-dollar.txt");
+	expect(writes[0]!.contentHex).toBe(
+		hexOfText("$1 literal, not a group here\n"),
+	);
+
+	// Literal mode never calls the capture-group expansion command at all.
+	const expandCalls = await nativeCallsFor(
+		page,
+		"workspace_search_expand_replacements",
+	);
+	expect(expandCalls).toHaveLength(0);
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("Match Case and Match Whole Word toggles combine correctly with capture-group replacement", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported", {
+		"combo.txt": "Cat-1 concatenate-9 cat-2\n",
+	});
+	await openNativeWorkspaceExplorer(page);
+
+	await page.getByRole("tab", { name: /^Search/ }).click();
+	const searchInput = page.locator(".plain-search-view-input");
+	const replaceInput = page.locator(".plain-search-view-replace-input");
+	const status = page.locator(".plain-search-view-status");
+	const messages = page.locator(".plain-search-view-messages");
+
+	await page.locator(".plain-search-view-regex-toggle").check();
+	await page.locator(".plain-search-view-case-toggle").click();
+	await page.locator(".plain-search-view-word-toggle").click();
+	await expect(page.locator(".plain-search-view-case-toggle")).toHaveAttribute(
+		"aria-pressed",
+		"true",
+	);
+	await expect(page.locator(".plain-search-view-word-toggle")).toHaveAttribute(
+		"aria-pressed",
+		"true",
+	);
+
+	// Case-sensitive + whole-word: matches only the standalone lowercase
+	// "cat-2" word — not "Cat-1" (wrong case) and not the "cat" substring
+	// buried inside "concatenate-9" (not a whole word).
+	await searchInput.pressSequentially(String.raw`(cat)-(\d+)`);
+	await expect(status).toHaveText("1 result in 1 file", { timeout: 5_000 });
+
+	await replaceInput.fill("$2-$1");
+	await page.locator(".plain-search-view-replace-all").click();
+	await expect(messages).toHaveText("Replaced 1 match.");
+
+	const writes = await nativeWriteFileCalls(page);
+	expect(writes).toHaveLength(1);
+	expect(writes[0]!.contentHex).toBe(hexOfText("Cat-1 concatenate-9 2-cat\n"));
+
+	// The expand-replacements request carried the same case/word flags the
+	// search itself used, not the defaults.
+	const expandCalls = await nativeCallsFor(
+		page,
+		"workspace_search_expand_replacements",
+	);
+	expect(expandCalls.length).toBeGreaterThanOrEqual(1);
+	for (const call of expandCalls) {
+		expect(call.args.request).toMatchObject({
+			isCaseSensitive: true,
+			isWordMatch: true,
 		});
 	}
 

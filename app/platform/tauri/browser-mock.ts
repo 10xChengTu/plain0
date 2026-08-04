@@ -67,6 +67,7 @@ import type {
 	WorkspacePickSaveTargetResult,
 	WorkspaceRecentEntry,
 	WorkspaceRoot,
+	WorkspaceSearchExpandReplacementItem,
 	WorkspaceSearchFilesResult,
 	WorkspaceTrashBatchPlan,
 	WorkspaceTrashEntryRequest,
@@ -135,6 +136,8 @@ import {
 } from "./scratch-codec";
 import {
 	decodeWorkspaceSearchTextStartResult,
+	frozenWorkspaceSearchExpandReplacementsRequest,
+	frozenWorkspaceSearchExpandReplacementsResult,
 	frozenWorkspaceSearchFilesRequest,
 	frozenWorkspaceSearchFilesResult,
 	frozenWorkspaceSearchTextPollResult,
@@ -7328,6 +7331,162 @@ export function createBrowserMockBridge(
 		return { pending, limitHit, skippedBinary, skippedOversize };
 	};
 
+	// --- Capture-group replacement expansion (F200 S2) ---------------------
+	//
+	// A from-scratch JS-equivalent of `search::replace::expand_replacements`
+	// (`src-tauri/src/search/replace.rs`): builds the same word/case-wrapped
+	// matcher `compileMockTextMatcher` uses (but with no "g" flag — this only
+	// ever needs a single anchored full-string match, never iteration), then
+	// tokenizes the template and resolves each `$`-reference itself rather
+	// than relying on any built-in JS replace-string semantics, so an
+	// out-of-range group reference can fail closed instead of silently
+	// becoming an empty string. See that Rust module's own doc comment for
+	// why anchoring is an explicit post-match bounds check (`match.index`/
+	// match length) rather than `^`/`$` woven into the pattern text.
+	const compileMockReplaceMatcher = (
+		pattern: string,
+		isCaseSensitive: boolean,
+		isWordMatch: boolean,
+	): RegExp => {
+		const wrapped = isWordMatch ? `\\b(?:${pattern})\\b` : pattern;
+		try {
+			return new RegExp(wrapped, isCaseSensitive ? "u" : "iu");
+		} catch {
+			throw invalidSearchRegex();
+		}
+	};
+	type MockTemplateToken =
+		| { readonly kind: "literal"; readonly text: string }
+		| { readonly kind: "ref"; readonly ref: string };
+	const MOCK_TEMPLATE_REF_CHAR = /[0-9A-Za-z_]/;
+	const tokenizeMockReplaceTemplate = (
+		template: string,
+	): MockTemplateToken[] => {
+		const tokens: MockTemplateToken[] = [];
+		let index = 0;
+		let literalStart = 0;
+		while (index < template.length) {
+			if (template[index] !== "$") {
+				index += 1;
+				continue;
+			}
+			if (literalStart < index) {
+				tokens.push({
+					kind: "literal",
+					text: template.slice(literalStart, index),
+				});
+			}
+			if (template[index + 1] === "$") {
+				tokens.push({ kind: "literal", text: "$" });
+				index += 2;
+				literalStart = index;
+				continue;
+			}
+			const braced = template[index + 1] === "{";
+			const nameStart = index + 1 + (braced ? 1 : 0);
+			let cursor = nameStart;
+			while (
+				cursor < template.length &&
+				MOCK_TEMPLATE_REF_CHAR.test(template[cursor]!)
+			) {
+				cursor += 1;
+			}
+			if (cursor === nameStart || (braced && template[cursor] !== "}")) {
+				tokens.push({ kind: "literal", text: "$" });
+				index += 1;
+				literalStart = index;
+				continue;
+			}
+			tokens.push({ kind: "ref", ref: template.slice(nameStart, cursor) });
+			index = braced ? cursor + 1 : cursor;
+			literalStart = index;
+		}
+		if (literalStart < template.length) {
+			tokens.push({ kind: "literal", text: template.slice(literalStart) });
+		}
+		return tokens;
+	};
+	const MAX_MOCK_REPLACE_EXPAND_OUTPUT_UNITS = 8_192;
+	const mockReplaceExpandNoMatch =
+		(): WorkspaceSearchExpandReplacementItem => ({
+			status: "error",
+			code: "SEARCH_REPLACE_EXPAND_NO_MATCH",
+			message: "The recorded match text no longer matches the search pattern.",
+		});
+	const mockReplaceExpandInvalidGroup =
+		(): WorkspaceSearchExpandReplacementItem => ({
+			status: "error",
+			code: "SEARCH_REPLACE_EXPAND_INVALID_GROUP",
+			message:
+				"The replacement template references a capture group the pattern does not have.",
+		});
+	const mockReplaceExpandTooLarge =
+		(): WorkspaceSearchExpandReplacementItem => ({
+			status: "error",
+			code: "SEARCH_REPLACE_EXPAND_TOO_LARGE",
+			message: "The expanded replacement text is too large.",
+		});
+	const expandMockReplacementEntry = (
+		matcher: RegExp,
+		tokens: readonly MockTemplateToken[],
+		expectedText: string,
+	): WorkspaceSearchExpandReplacementItem => {
+		const match = matcher.exec(expectedText);
+		if (
+			match === null ||
+			match.index !== 0 ||
+			match[0].length !== expectedText.length
+		) {
+			return mockReplaceExpandNoMatch();
+		}
+		let output = "";
+		for (const token of tokens) {
+			let addition: string;
+			if (token.kind === "literal") {
+				addition = token.text;
+			} else if (/^\d+$/.test(token.ref)) {
+				const groupIndex = Number(token.ref);
+				if (groupIndex >= match.length) {
+					return mockReplaceExpandInvalidGroup();
+				}
+				addition = match[groupIndex] ?? "";
+			} else {
+				const groups = match.groups ?? {};
+				if (!Object.hasOwn(groups, token.ref)) {
+					return mockReplaceExpandInvalidGroup();
+				}
+				addition = groups[token.ref] ?? "";
+			}
+			if (
+				output.length + addition.length >
+				MAX_MOCK_REPLACE_EXPAND_OUTPUT_UNITS
+			) {
+				return mockReplaceExpandTooLarge();
+			}
+			output += addition;
+		}
+		return { status: "ok", replacement: output };
+	};
+	const expandWorkspaceSearchReplacements = (
+		request: Readonly<{
+			pattern: string;
+			isCaseSensitive: boolean;
+			isWordMatch: boolean;
+			replacementTemplate: string;
+			expectedTexts: readonly string[];
+		}>,
+	): readonly WorkspaceSearchExpandReplacementItem[] => {
+		const matcher = compileMockReplaceMatcher(
+			request.pattern,
+			request.isCaseSensitive,
+			request.isWordMatch,
+		);
+		const tokens = tokenizeMockReplaceTemplate(request.replacementTemplate);
+		return request.expectedTexts.map((expectedText) =>
+			expandMockReplacementEntry(matcher, tokens, expectedText),
+		);
+	};
+
 	return {
 		async runtimeInfo() {
 			queueMicrotask(() => {
@@ -7863,6 +8022,23 @@ export function createBrowserMockBridge(
 			return () => {
 				textSearchWakeListeners.delete(listener);
 			};
+		},
+		async workspaceSearchExpandReplacements(
+			pattern,
+			isCaseSensitive,
+			isWordMatch,
+			replacementTemplate,
+			expectedTexts,
+		) {
+			const request = frozenWorkspaceSearchExpandReplacementsRequest(
+				pattern,
+				isCaseSensitive,
+				isWordMatch,
+				replacementTemplate,
+				expectedTexts,
+			);
+			const items = expandWorkspaceSearchReplacements(request);
+			return frozenWorkspaceSearchExpandReplacementsResult(items);
 		},
 		async backupWrite(rootId, key, bytes) {
 			if (!roots.has(rootId)) {

@@ -30,9 +30,13 @@ import { ISearchService } from "@codingame/monaco-vscode-api/vscode/vs/workbench
 import { IEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service";
 import { ITextFileService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/textfile/common/textfiles.service";
 
-import { getReplaceMatchLocation } from "./plain-search-service";
+import {
+	expandReplacementTemplate,
+	getReplaceMatchLocation,
+} from "./plain-search-service";
 import {
 	replaceSearchMatches,
+	type ReplacementInput,
 	type ReplaceTarget,
 } from "./plain-replace-coordinator";
 import {
@@ -206,6 +210,12 @@ export class PlainSearchView extends ViewPane {
 	#searchInput: HTMLInputElement | undefined;
 	#statusElement: HTMLElement | undefined;
 	#messagesElement: HTMLElement | undefined;
+	/** `F200` S2: read at replace time (not just search time) so a regex-mode
+	 * replace knows whether/how to route through capture-group expansion —
+	 * see `runReplace`'s own use of these. */
+	#regexToggle: HTMLInputElement | undefined;
+	#caseToggle: HTMLButtonElement | undefined;
+	#wordToggle: HTMLButtonElement | undefined;
 
 	constructor(
 		options: IViewPaneOptions,
@@ -260,6 +270,7 @@ export class PlainSearchView extends ViewPane {
 			regexToggle,
 			document.createTextNode("Use Regular Expression"),
 		);
+		this.#regexToggle = regexToggle;
 
 		// `F200` S1: case-sensitivity and whole-word toggles, styled and behaved
 		// like the terminal find widget's own "Aa" button (`plain-terminal-
@@ -277,6 +288,7 @@ export class PlainSearchView extends ViewPane {
 		caseToggle.setAttribute("aria-label", "Match Case");
 		caseToggle.setAttribute("aria-pressed", "false");
 		caseToggle.textContent = "Aa";
+		this.#caseToggle = caseToggle;
 
 		const wordToggle = document.createElement("button");
 		wordToggle.type = "button";
@@ -284,6 +296,7 @@ export class PlainSearchView extends ViewPane {
 		wordToggle.setAttribute("aria-label", "Match Whole Word");
 		wordToggle.setAttribute("aria-pressed", "false");
 		wordToggle.textContent = "ab|";
+		this.#wordToggle = wordToggle;
 
 		const replaceInput = document.createElement("input");
 		replaceInput.type = "text";
@@ -709,6 +722,16 @@ export class PlainSearchView extends ViewPane {
 	 * (asynchronous) replace completes so a replace started against one
 	 * search's results never mutates the DOM of a newer search that has
 	 * since superseded it.
+	 *
+	 * `F200` S2: `#regexToggle` (read fresh here, not snapshotted from the
+	 * search that produced these candidates — the same "read current input
+	 * state at click time" convention `replacementText` below already used
+	 * pre-S2) decides the coordinator's literal-vs-template branch. Regex
+	 * mode passes `expandReplacementTemplate` curried with the current
+	 * pattern/case/word state so the coordinator can batch-expand every
+	 * candidate's capture groups through Rust before building any edit;
+	 * literal mode is untouched — `replacementText` is still applied
+	 * byte-for-byte, `$1` and all.
 	 */
 	private async runReplace(
 		candidates: readonly ReplaceCandidate[],
@@ -718,6 +741,12 @@ export class PlainSearchView extends ViewPane {
 		}
 		const generation = this.#generation;
 		const replacementText = this.#replaceInput?.value ?? "";
+		const isRegExp = this.#regexToggle?.checked ?? false;
+		const isCaseSensitive =
+			this.#caseToggle?.getAttribute("aria-pressed") === "true";
+		const isWordMatch =
+			this.#wordToggle?.getAttribute("aria-pressed") === "true";
+		const pattern = this.#searchInput?.value ?? "";
 
 		const targets: ReplaceTarget[] = candidates.map((candidate) => ({
 			resource: candidate.resource,
@@ -725,11 +754,25 @@ export class PlainSearchView extends ViewPane {
 			expectedText: candidate.location.expectedText,
 		}));
 
+		const replacement: ReplacementInput = isRegExp
+			? {
+					kind: "template",
+					expand: (expectedTexts) =>
+						expandReplacementTemplate(
+							pattern,
+							isCaseSensitive,
+							isWordMatch,
+							replacementText,
+							expectedTexts,
+						),
+				}
+			: { kind: "literal", text: replacementText };
+
 		const outcome = await replaceSearchMatches(
 			this.bulkEditService,
 			this.textFileService.files,
 			targets,
-			replacementText,
+			replacement,
 		);
 		if (generation !== this.#generation) {
 			return;

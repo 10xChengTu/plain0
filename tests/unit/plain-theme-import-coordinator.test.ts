@@ -121,6 +121,7 @@ function fakeBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		workspaceSearchTextPoll: notImplemented,
 		workspaceSearchTextCancel: notImplemented,
 		workspaceSearchTextWatch: notImplemented,
+		workspaceSearchExpandReplacements: notImplemented,
 		backupWrite: notImplemented,
 		backupReadAll: notImplemented,
 		backupDiscard: notImplemented,

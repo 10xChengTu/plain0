@@ -142,23 +142,47 @@ pub(crate) fn compile_query(
     query: &WorkspaceSearchTextQuery,
 ) -> Result<CompiledTextQuery, CommandError> {
     let exclude_set = compile_exclude_globs(&query.exclude_globs)?;
-    let mut builder = RegexMatcherBuilder::new();
-    builder
-        .case_insensitive(!query.is_case_sensitive)
-        .fixed_strings(!query.is_reg_exp)
-        .word(query.is_word_match)
-        .multi_line(false)
-        .line_terminator(Some(b'\n'))
-        .ban_byte(Some(0));
-    let matcher = builder
-        .build(&query.pattern)
-        .map_err(|error| invalid_search_regex(error.to_string()))?;
+    let matcher = build_regex_matcher(
+        &query.pattern,
+        query.is_reg_exp,
+        query.is_case_sensitive,
+        query.is_word_match,
+    )?;
     Ok(CompiledTextQuery {
         matcher,
         exclude_set,
         max_results: query.max_results,
         max_file_size: query.max_file_size,
     })
+}
+
+/// Builds a [`RegexMatcher`] using Plain's single, shared regex
+/// configuration: case-insensitive unless `is_case_sensitive`, literal vs.
+/// regex per `is_reg_exp`, whole-word wrapping per `is_word_match`,
+/// single-line matching with `\n` as the line terminator, and a hard ban on
+/// embedded NUL bytes. Both text search ([`compile_query`], above) and
+/// capture-group replacement expansion
+/// ([`super::replace::expand_replacements`], F200 S2) build their matcher
+/// through this one function so the two pipelines can never silently diverge
+/// in regex semantics — a match `expand_replacements` re-matches must behave
+/// identically to the search that originally produced it.
+pub(crate) fn build_regex_matcher(
+    pattern: &str,
+    is_reg_exp: bool,
+    is_case_sensitive: bool,
+    is_word_match: bool,
+) -> Result<RegexMatcher, CommandError> {
+    let mut builder = RegexMatcherBuilder::new();
+    builder
+        .case_insensitive(!is_case_sensitive)
+        .fixed_strings(!is_reg_exp)
+        .word(is_word_match)
+        .multi_line(false)
+        .line_terminator(Some(b'\n'))
+        .ban_byte(Some(0));
+    builder
+        .build(pattern)
+        .map_err(|error| invalid_search_regex(error.to_string()))
 }
 
 #[derive(Default)]

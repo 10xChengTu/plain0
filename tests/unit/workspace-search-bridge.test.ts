@@ -180,6 +180,69 @@ describe("native streaming text search bridge (F040 S3)", () => {
 	});
 });
 
+describe("native capture-group replacement expansion bridge (F200 S2)", () => {
+	beforeEach(() => {
+		tauri.invoke.mockReset();
+		tauri.listen.mockReset();
+	});
+
+	it("invokes workspace_search_expand_replacements with isRegExp hard-coded true and decodes the response", async () => {
+		tauri.invoke.mockResolvedValueOnce({
+			items: [
+				{ status: "ok", replacement: "42-item" },
+				{
+					status: "error",
+					code: "SEARCH_REPLACE_EXPAND_NO_MATCH",
+					message: "no match",
+				},
+			],
+		});
+		const bridge = createNativeBridge();
+
+		const result = await bridge.workspaceSearchExpandReplacements(
+			String.raw`(\w+)-(\d+)`,
+			false,
+			false,
+			"$2-$1",
+			["item-42", "stale"],
+		);
+
+		expect(tauri.invoke.mock.calls).toEqual([
+			[
+				"workspace_search_expand_replacements",
+				{
+					request: {
+						pattern: String.raw`(\w+)-(\d+)`,
+						isRegExp: true,
+						isCaseSensitive: false,
+						isWordMatch: false,
+						replacementTemplate: "$2-$1",
+						expectedTexts: ["item-42", "stale"],
+					},
+				},
+			],
+		]);
+		expect(result.items).toEqual([
+			{ status: "ok", replacement: "42-item" },
+			{
+				status: "error",
+				code: "SEARCH_REPLACE_EXPAND_NO_MATCH",
+				message: "no match",
+			},
+		]);
+		expect(Object.isFrozen(result)).toBe(true);
+	});
+
+	it("rejects a malformed native response before it reaches the caller", async () => {
+		tauri.invoke.mockResolvedValueOnce({ items: [{ status: "unknown" }] });
+		const bridge = createNativeBridge();
+
+		await expect(
+			bridge.workspaceSearchExpandReplacements("a", false, false, "$0", ["x"]),
+		).rejects.toMatchObject({ code: "IPC_CONTRACT_VIOLATION" });
+	});
+});
+
 describe("browser mock workspace search bridge", () => {
 	it("honors a nested .gitignore, exclude globs, and returns unignored files", async () => {
 		const bridge = createBrowserMockBridge();
@@ -561,5 +624,103 @@ describe("browser mock streaming text search bridge (F040 S3)", () => {
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(wakes).toContain(startedId);
 		stop();
+	});
+});
+
+describe("browser mock capture-group replacement expansion bridge (F200 S2)", () => {
+	it("expands $0/$1/$$ and named groups against each expectedText independently, needing no authorized root", async () => {
+		const bridge = createBrowserMockBridge();
+
+		const result = await bridge.workspaceSearchExpandReplacements(
+			String.raw`(?<word>\w+)-(\d+)`,
+			false,
+			false,
+			"$2-$word ($0) $$literal",
+			["item-42", "unrelated"],
+		);
+
+		expect(result.items).toEqual([
+			{ status: "ok", replacement: "42-item (item-42) $literal" },
+			{
+				status: "error",
+				code: "SEARCH_REPLACE_EXPAND_NO_MATCH",
+				message: expect.any(String),
+			},
+		]);
+	});
+
+	it("fails closed on a numbered group past the pattern's own capture count", async () => {
+		const bridge = createBrowserMockBridge();
+
+		const result = await bridge.workspaceSearchExpandReplacements(
+			String.raw`(\w+)`,
+			false,
+			false,
+			"$1-$2",
+			["needle"],
+		);
+
+		expect(result.items).toEqual([
+			{
+				status: "error",
+				code: "SEARCH_REPLACE_EXPAND_INVALID_GROUP",
+				message: expect.any(String),
+			},
+		]);
+	});
+
+	it("honors isCaseSensitive and isWordMatch exactly like the search that produced the match", async () => {
+		const bridge = createBrowserMockBridge();
+
+		const caseSensitive = await bridge.workspaceSearchExpandReplacements(
+			"needle",
+			true,
+			false,
+			"$0",
+			["NEEDLE"],
+		);
+		expect(caseSensitive.items[0]?.status).toBe("error");
+
+		const caseInsensitive = await bridge.workspaceSearchExpandReplacements(
+			"needle",
+			false,
+			false,
+			"$0",
+			["NEEDLE"],
+		);
+		expect(caseInsensitive.items).toEqual([
+			{ status: "ok", replacement: "NEEDLE" },
+		]);
+
+		const wordMatched = await bridge.workspaceSearchExpandReplacements(
+			"cat",
+			false,
+			true,
+			"$0",
+			["cats"],
+		);
+		expect(wordMatched.items[0]?.status).toBe("error");
+	});
+
+	it("routes through the same shared request validator as the native bridge, rejecting an empty expectedTexts list", async () => {
+		const bridge = createBrowserMockBridge();
+
+		await expect(
+			bridge.workspaceSearchExpandReplacements("a", false, false, "$0", []),
+		).rejects.toMatchObject({ code: "INVALID_SEARCH_REQUEST" });
+	});
+
+	it("needs no workspacePickRoots/authorized root at all — this command never touches the filesystem", async () => {
+		const bridge = createBrowserMockBridge();
+
+		const result = await bridge.workspaceSearchExpandReplacements(
+			"needle",
+			false,
+			false,
+			"$0!",
+			["needle"],
+		);
+
+		expect(result.items).toEqual([{ status: "ok", replacement: "needle!" }]);
 	});
 });

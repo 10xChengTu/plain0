@@ -104,6 +104,7 @@ function createFakeBridge(overrides: Partial<PlainBridge> = {}): {
 		workspaceSearchTextPoll: notImplemented,
 		workspaceSearchTextCancel: notImplemented,
 		workspaceSearchTextWatch: notImplemented,
+		workspaceSearchExpandReplacements: notImplemented,
 		async backupWrite(rootId, key, bytes) {
 			state.writes.push({ rootId, key, bytes });
 			state.entries.set(backupMapKey(rootId, key), { rootId, key, bytes });

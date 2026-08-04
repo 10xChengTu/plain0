@@ -552,5 +552,172 @@ pub(crate) fn invalid_search_regex(message: impl Into<String>) -> CommandError {
     CommandError::new("INVALID_SEARCH_REGEX", message)
 }
 
+// --- Capture-group replacement expansion (F200 S2) --------------------------
+
+/// Reuses `MAX_TEXT_SEARCH_PATTERN_BYTES` for `pattern`: it is the exact same
+/// field, produced by the exact same search this batch's `expectedTexts`
+/// came from.
+///
+/// `replacementTemplate` gets its own, separate bound (rather than also
+/// reusing `MAX_TEXT_SEARCH_PATTERN_BYTES`) because it is a conceptually
+/// different field the caller types into a different input box; the two
+/// happening to share a numeric value today is coincidence, not a promise.
+const MAX_REPLACE_EXPAND_TEMPLATE_BYTES: usize = 4_096;
+/// Real usage bounds one `expectedText` far below this: it is always a slice
+/// of a Rust-produced `previewText`
+/// ([`TEXT_SEARCH_PREVIEW_MAX_UTF16_UNITS`], 256 UTF-16 units), or, for the
+/// vendor open-editor-substitution fallback documented on
+/// `plain-search-view.ts`'s `ResolvedMatchLocation`, one match's slice of a
+/// live Monaco model's own bounded preview text. This ceiling is generous
+/// headroom over both, not a real-world limit.
+const MAX_REPLACE_EXPAND_EXPECTED_TEXT_BYTES: usize = 4_096;
+/// Aligns with [`MAX_TEXT_SEARCH_RESULTS_HARD_CAP`]: a "Replace All" can
+/// legitimately name as many entries as one text search can ever return.
+const MAX_REPLACE_EXPAND_ENTRIES: usize = 20_000;
+/// Per-entry cap on the fully-expanded replacement text's byte length —
+/// independent of, and much smaller than, the three "reject the whole
+/// command" ceilings above. A template that repeats `$1` many times over
+/// (e.g. `"$1$1$1...$1"`) can multiply one `expectedText` far past its own
+/// length; without this bound that multiplication is checked incrementally
+/// while [`super::replace::expand_replacements`] builds the output (so an
+/// adversarial entry's CPU/memory cost is also capped at this value, not the
+/// full unbounded product), and the entry fails closed as one more
+/// [`WorkspaceSearchExpandReplacementItem::Error`] rather than growing an
+/// unbounded `String`.
+pub(crate) const MAX_REPLACE_EXPAND_OUTPUT_BYTES: usize = 8_192;
+
+/// Wire request for `workspace_search_expand_replacements` (F200 S2): expands
+/// `replacementTemplate`'s `$1`…`$n`/`$0`/`$$`/`$name` capture-group
+/// references against each entry of `expectedTexts` by anchored re-matching
+/// with the exact same regex pipeline `workspace_search_text_start` uses
+/// (via [`super::text_search::build_regex_matcher`], not a second, drifting
+/// implementation). `isRegExp` must be `true` — this command only ever makes
+/// sense for a regex-mode search (see this module's own architecture note in
+/// `docs/research/2026-08-04-complete-search.md`'s "架构裁定 2"); the
+/// frontend never issues it for a literal-mode search, and a request
+/// claiming otherwise is rejected outright by [`Self::into_parts`] rather
+/// than silently honored.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceSearchExpandReplacementsRequest {
+    pattern: String,
+    is_reg_exp: bool,
+    is_case_sensitive: bool,
+    is_word_match: bool,
+    replacement_template: String,
+    expected_texts: Vec<String>,
+}
+
+/// A [`WorkspaceSearchExpandReplacementsRequest`] after wire-shape
+/// validation: every field is still exactly what the caller sent (`isRegExp`
+/// itself is dropped since [`Self`] only ever exists once it is known to be
+/// `true`).
+#[derive(Debug)]
+pub struct WorkspaceSearchExpandReplacementsQuery {
+    pub(crate) pattern: String,
+    pub(crate) is_case_sensitive: bool,
+    pub(crate) is_word_match: bool,
+    pub(crate) replacement_template: String,
+    pub(crate) expected_texts: Vec<String>,
+}
+
+impl WorkspaceSearchExpandReplacementsRequest {
+    pub fn into_parts(self) -> Result<WorkspaceSearchExpandReplacementsQuery, CommandError> {
+        if !self.is_reg_exp {
+            return Err(invalid_search_replace_request());
+        }
+        if self.pattern.is_empty() || self.pattern.len() > MAX_TEXT_SEARCH_PATTERN_BYTES {
+            return Err(invalid_search_replace_request());
+        }
+        if self.replacement_template.len() > MAX_REPLACE_EXPAND_TEMPLATE_BYTES {
+            return Err(invalid_search_replace_request());
+        }
+        if self.expected_texts.is_empty() || self.expected_texts.len() > MAX_REPLACE_EXPAND_ENTRIES
+        {
+            return Err(invalid_search_replace_request());
+        }
+        for text in &self.expected_texts {
+            if text.len() > MAX_REPLACE_EXPAND_EXPECTED_TEXT_BYTES {
+                return Err(invalid_search_replace_request());
+            }
+        }
+        Ok(WorkspaceSearchExpandReplacementsQuery {
+            pattern: self.pattern,
+            is_case_sensitive: self.is_case_sensitive,
+            is_word_match: self.is_word_match,
+            replacement_template: self.replacement_template,
+            expected_texts: self.expected_texts,
+        })
+    }
+}
+
+/// One `expectedTexts` entry's expansion outcome. `Error` never fails the
+/// whole command — see [`WorkspaceSearchExpandReplacementsResult`] — the
+/// frontend coordinator treats that one entry's owning resource as a save
+/// conflict and writes nothing to it (frozen decision, not a stopgap: see
+/// `docs/research/2026-08-04-complete-search.md`'s "架构裁定 2").
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum WorkspaceSearchExpandReplacementItem {
+    Ok { replacement: String },
+    Error { code: String, message: String },
+}
+
+impl WorkspaceSearchExpandReplacementItem {
+    pub(crate) fn ok(replacement: String) -> Self {
+        Self::Ok { replacement }
+    }
+
+    pub(crate) fn error(code: &'static str, message: impl Into<String>) -> Self {
+        Self::Error {
+            code: code.to_owned(),
+            message: message.into(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn as_ok(&self) -> Option<&str> {
+        match self {
+            Self::Ok { replacement } => Some(replacement.as_str()),
+            Self::Error { .. } => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn as_error_code(&self) -> Option<&str> {
+        match self {
+            Self::Error { code, .. } => Some(code.as_str()),
+            Self::Ok { .. } => None,
+        }
+    }
+}
+
+/// Response for `workspace_search_expand_replacements`: exactly one
+/// [`WorkspaceSearchExpandReplacementItem`] per entry of the request's
+/// `expectedTexts`, in the same order.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSearchExpandReplacementsResult {
+    items: Vec<WorkspaceSearchExpandReplacementItem>,
+}
+
+impl WorkspaceSearchExpandReplacementsResult {
+    pub(crate) fn new(items: Vec<WorkspaceSearchExpandReplacementItem>) -> Self {
+        Self { items }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn items(&self) -> &[WorkspaceSearchExpandReplacementItem] {
+        &self.items
+    }
+}
+
+pub(crate) fn invalid_search_replace_request() -> CommandError {
+    CommandError::new(
+        "INVALID_SEARCH_REQUEST",
+        "The workspace search replace expansion request is invalid.",
+    )
+}
+
 #[cfg(test)]
 mod tests;

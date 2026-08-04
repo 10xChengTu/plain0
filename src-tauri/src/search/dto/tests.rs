@@ -1,9 +1,10 @@
 use super::{
-    SearchId, WorkspaceSearchFileEntry, WorkspaceSearchFilesRequest, WorkspaceSearchFilesResult,
-    WorkspaceSearchTextBatch, WorkspaceSearchTextCancelRequest, WorkspaceSearchTextMatch,
-    WorkspaceSearchTextPollRequest, WorkspaceSearchTextPollResult, WorkspaceSearchTextSkipped,
-    WorkspaceSearchTextStartRequest, WorkspaceSearchTextStartResult, WorkspaceSearchTextWakeEvent,
-    MAX_SEARCH_RESULTS_HARD_CAP, MAX_TEXT_SEARCH_RESULTS_HARD_CAP,
+    SearchId, WorkspaceSearchExpandReplacementsRequest, WorkspaceSearchFileEntry,
+    WorkspaceSearchFilesRequest, WorkspaceSearchFilesResult, WorkspaceSearchTextBatch,
+    WorkspaceSearchTextCancelRequest, WorkspaceSearchTextMatch, WorkspaceSearchTextPollRequest,
+    WorkspaceSearchTextPollResult, WorkspaceSearchTextSkipped, WorkspaceSearchTextStartRequest,
+    WorkspaceSearchTextStartResult, WorkspaceSearchTextWakeEvent, MAX_SEARCH_RESULTS_HARD_CAP,
+    MAX_TEXT_SEARCH_RESULTS_HARD_CAP,
 };
 use crate::workspace::RootId;
 
@@ -449,4 +450,154 @@ fn text_wake_event_serializes_as_a_single_search_id_field() {
     let value = serde_json::to_value(event).unwrap();
     let object = value.as_object().unwrap();
     assert_eq!(object.keys().collect::<Vec<_>>(), ["searchId"]);
+}
+
+// --- Capture-group replacement expansion (F200 S2) --------------------------
+
+fn expand_request(
+    value: serde_json::Value,
+) -> Result<WorkspaceSearchExpandReplacementsRequest, ()> {
+    serde_json::from_value(value).map_err(|_| ())
+}
+
+fn valid_expand_request_json() -> serde_json::Value {
+    serde_json::json!({
+        "pattern": r"(\w+)-(\d+)",
+        "isRegExp": true,
+        "isCaseSensitive": false,
+        "isWordMatch": false,
+        "replacementTemplate": "$2-$1",
+        "expectedTexts": ["item-42"],
+    })
+}
+
+#[test]
+fn valid_expand_request_round_trips() {
+    let query = expand_request(valid_expand_request_json())
+        .unwrap()
+        .into_parts()
+        .unwrap();
+    assert_eq!(query.pattern, r"(\w+)-(\d+)");
+    assert!(!query.is_case_sensitive);
+    assert!(!query.is_word_match);
+    assert_eq!(query.replacement_template, "$2-$1");
+    assert_eq!(query.expected_texts, vec!["item-42".to_owned()]);
+}
+
+#[test]
+fn expand_request_rejects_unknown_fields() {
+    let mut json = valid_expand_request_json();
+    json["extra"] = serde_json::json!(1);
+    assert!(expand_request(json).is_err());
+}
+
+#[test]
+fn expand_request_rejects_literal_mode_is_reg_exp_false() {
+    let mut json = valid_expand_request_json();
+    json["isRegExp"] = serde_json::json!(false);
+    let request = expand_request(json).unwrap();
+    assert_eq!(
+        request.into_parts().unwrap_err().code(),
+        "INVALID_SEARCH_REQUEST"
+    );
+}
+
+#[test]
+fn expand_request_rejects_empty_or_oversized_pattern() {
+    let mut empty = valid_expand_request_json();
+    empty["pattern"] = serde_json::json!("");
+    assert_eq!(
+        expand_request(empty)
+            .unwrap()
+            .into_parts()
+            .unwrap_err()
+            .code(),
+        "INVALID_SEARCH_REQUEST"
+    );
+
+    let mut oversized = valid_expand_request_json();
+    oversized["pattern"] = serde_json::json!("a".repeat(4_097));
+    assert_eq!(
+        expand_request(oversized)
+            .unwrap()
+            .into_parts()
+            .unwrap_err()
+            .code(),
+        "INVALID_SEARCH_REQUEST"
+    );
+}
+
+#[test]
+fn expand_request_rejects_oversized_replacement_template() {
+    let mut json = valid_expand_request_json();
+    json["replacementTemplate"] = serde_json::json!("$".repeat(4_097));
+    assert_eq!(
+        expand_request(json)
+            .unwrap()
+            .into_parts()
+            .unwrap_err()
+            .code(),
+        "INVALID_SEARCH_REQUEST"
+    );
+}
+
+#[test]
+fn expand_request_rejects_empty_or_oversized_expected_texts_list() {
+    let mut empty = valid_expand_request_json();
+    empty["expectedTexts"] = serde_json::json!([]);
+    assert_eq!(
+        expand_request(empty)
+            .unwrap()
+            .into_parts()
+            .unwrap_err()
+            .code(),
+        "INVALID_SEARCH_REQUEST"
+    );
+
+    let mut oversized = valid_expand_request_json();
+    oversized["expectedTexts"] = serde_json::Value::Array(vec![serde_json::json!("x"); 20_001]);
+    assert_eq!(
+        expand_request(oversized)
+            .unwrap()
+            .into_parts()
+            .unwrap_err()
+            .code(),
+        "INVALID_SEARCH_REQUEST"
+    );
+
+    // The hard cap itself is satisfiable.
+    let mut at_cap = valid_expand_request_json();
+    at_cap["expectedTexts"] = serde_json::Value::Array(vec![serde_json::json!("x"); 20_000]);
+    assert!(expand_request(at_cap).unwrap().into_parts().is_ok());
+}
+
+#[test]
+fn expand_request_rejects_an_oversized_individual_expected_text() {
+    let mut json = valid_expand_request_json();
+    json["expectedTexts"] = serde_json::json!(["a".repeat(4_097)]);
+    assert_eq!(
+        expand_request(json)
+            .unwrap()
+            .into_parts()
+            .unwrap_err()
+            .code(),
+        "INVALID_SEARCH_REQUEST"
+    );
+}
+
+#[test]
+fn expand_replacement_item_serializes_with_a_status_tag() {
+    let ok = super::WorkspaceSearchExpandReplacementItem::ok("42-item".to_owned());
+    let ok_value = serde_json::to_value(&ok).unwrap();
+    assert_eq!(ok_value["status"], "ok");
+    assert_eq!(ok_value["replacement"], "42-item");
+
+    let error = super::WorkspaceSearchExpandReplacementItem::error(
+        "SEARCH_REPLACE_EXPAND_NO_MATCH",
+        "no match",
+    );
+    let error_value = serde_json::to_value(&error).unwrap();
+    assert_eq!(error_value["status"], "error");
+    assert_eq!(error_value["code"], "SEARCH_REPLACE_EXPAND_NO_MATCH");
+    assert_eq!(error_value["message"], "no match");
 }

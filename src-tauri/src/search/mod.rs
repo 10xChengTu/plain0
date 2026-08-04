@@ -22,4 +22,5 @@
 pub(crate) mod commands;
 pub mod dto;
 pub(crate) mod file_search;
+pub(crate) mod replace;
 pub(crate) mod text_search;
